@@ -1,0 +1,27 @@
+server:
+  port: 8080
+  max_body_size_mb: 100
+  request_timeout: 30s
+  debug: false
+
+fail2ban:
+  max_attempts: 3
+  ban_duration: permanent
+  error_codes: [401, 403, 429, 500, 502, 503, 504]
+
+credentials:
+  - name: "openai_main"
+    type: "openai"
+    api_key: "sk-proj-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+    base_url: "https://api.openai.com"
+    rpm: 60
+
+  - name: "openai_backup"
+    type: "openai"
+    api_key: "sk-proj-yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"
+    base_url: "https://api.openai.com"
+    rpm: 60
+
+monitoring:
+  prometheus_enabled: true
+  health_check_path: "/health"
