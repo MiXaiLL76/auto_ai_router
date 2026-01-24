@@ -5,16 +5,21 @@ Tests round-robin balancing and rate limiting
 """
 
 from openai import OpenAI
+import os
 import time
 from dotenv import load_dotenv
 
 # Load environment variables
 load_dotenv()
 
+# Get master key from environment or use default
+master_key = os.getenv("ROUTER_MASTER_KEY", "sk-your-master-key-here")
+base_url = os.getenv("ROUTER_BASE_URL", "http://localhost:8080/v1")
+
 # Configure OpenAI client to use the router
 client = OpenAI(
-    api_key="dummy-key-will-be-replaced-by-router",
-    base_url="http://localhost:8080/v1"
+    api_key=master_key,
+    base_url=base_url
 )
 
 def make_request(question_num):

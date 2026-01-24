@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bytes"
+	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
@@ -19,15 +20,17 @@ type Proxy struct {
 	maxBodySizeMB  int
 	requestTimeout time.Duration
 	metrics        *monitoring.Metrics
+	masterKey      string
 }
 
-func New(bal *balancer.RoundRobin, logger *slog.Logger, maxBodySizeMB int, requestTimeout time.Duration, metrics *monitoring.Metrics) *Proxy {
+func New(bal *balancer.RoundRobin, logger *slog.Logger, maxBodySizeMB int, requestTimeout time.Duration, metrics *monitoring.Metrics, masterKey string) *Proxy {
 	return &Proxy{
 		balancer:       bal,
 		logger:         logger,
 		maxBodySizeMB:  maxBodySizeMB,
 		requestTimeout: requestTimeout,
 		metrics:        metrics,
+		masterKey:      masterKey,
 		client: &http.Client{
 			Timeout: requestTimeout,
 			CheckRedirect: func(req *http.Request, via []*http.Request) error {
@@ -40,18 +43,29 @@ func New(bal *balancer.RoundRobin, logger *slog.Logger, maxBodySizeMB int, reque
 func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 
-	cred, err := p.balancer.Next()
-	if err != nil {
-		p.logger.Error("Failed to get credential", "error", err)
-		http.Error(w, "Service Unavailable", http.StatusServiceUnavailable)
+	// Verify master_key from Authorization header
+	authHeader := r.Header.Get("Authorization")
+	if authHeader == "" {
+		p.logger.Error("Missing Authorization header")
+		http.Error(w, "Unauthorized: Missing Authorization header", http.StatusUnauthorized)
 		return
 	}
 
-	p.logger.Info("Selected credential",
-		"credential", cred.Name,
-		"method", r.Method,
-		"path", r.URL.Path,
-	)
+	// Extract token from "Bearer <token>"
+	token := strings.TrimPrefix(authHeader, "Bearer ")
+	if token == authHeader {
+		// No "Bearer " prefix found
+		p.logger.Error("Invalid Authorization header format")
+		http.Error(w, "Unauthorized: Invalid Authorization header format", http.StatusUnauthorized)
+		return
+	}
+
+	// Check if token matches master_key
+	if token != p.masterKey {
+		p.logger.Error("Invalid master key", "provided_key_prefix", maskKey(token))
+		http.Error(w, "Unauthorized: Invalid master key", http.StatusUnauthorized)
+		return
+	}
 
 	body, err := io.ReadAll(io.LimitReader(r.Body, int64(p.maxBodySizeMB)*1024*1024))
 	if err != nil {
@@ -60,6 +74,31 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer r.Body.Close()
+
+	// Extract model from request body if present
+	modelID := extractModelFromBody(body)
+
+	// Select credential based on model availability
+	var cred *balancer.Credential
+	if modelID != "" {
+		cred, err = p.balancer.NextForModel(modelID)
+	} else {
+		cred, err = p.balancer.Next()
+	}
+
+	if err != nil {
+		p.logger.Error("Failed to get credential", "error", err, "model", modelID)
+		http.Error(w, "Service Unavailable", http.StatusServiceUnavailable)
+		return
+	}
+
+	// Log request details at DEBUG level
+	p.logger.Debug("Processing request",
+		"credential", cred.Name,
+		"method", r.Method,
+		"path", r.URL.Path,
+		"model", modelID,
+	)
 
 	targetURL := strings.TrimSuffix(cred.BaseURL, "/") + r.URL.Path
 	if r.URL.RawQuery != "" {
@@ -122,10 +161,12 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 func (p *Proxy) handleStreaming(w http.ResponseWriter, resp *http.Response, credName string) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
-		p.logger.Error("Streaming not supported")
+		p.logger.Error("Streaming not supported", "credential", credName)
 		http.Error(w, "Streaming Not Supported", http.StatusInternalServerError)
 		return
 	}
+
+	p.logger.Debug("Starting streaming response", "credential", credName)
 
 	buf := make([]byte, 8192)
 	for {
@@ -150,6 +191,8 @@ func (p *Proxy) handleStreaming(w http.ResponseWriter, resp *http.Response, cred
 			break
 		}
 	}
+
+	p.logger.Debug("Streaming response completed", "credential", credName)
 }
 
 func isStreamingResponse(resp *http.Response) bool {
@@ -177,4 +220,29 @@ func (p *Proxy) HealthCheck() (bool, map[string]interface{}) {
 	}
 
 	return healthy, status
+}
+
+// extractModelFromBody extracts the model ID from the request body
+func extractModelFromBody(body []byte) string {
+	if len(body) == 0 {
+		return ""
+	}
+
+	var reqBody struct {
+		Model string `json:"model"`
+	}
+
+	if err := json.Unmarshal(body, &reqBody); err != nil {
+		return ""
+	}
+
+	return reqBody.Model
+}
+
+// maskKey masks the API key for logging (shows only first 7 chars)
+func maskKey(key string) string {
+	if len(key) <= 7 {
+		return "***"
+	}
+	return key[:7] + "..."
 }

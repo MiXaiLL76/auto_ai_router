@@ -15,6 +15,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/fail2ban"
 	"github.com/mixaill76/auto_ai_router/internal/logger"
+	"github.com/mixaill76/auto_ai_router/internal/models"
 	"github.com/mixaill76/auto_ai_router/internal/monitoring"
 	"github.com/mixaill76/auto_ai_router/internal/proxy"
 	"github.com/mixaill76/auto_ai_router/internal/ratelimit"
@@ -32,16 +33,42 @@ func main() {
 		os.Exit(1)
 	}
 
-	log := logger.New(cfg.Server.Debug)
-	if cfg.Server.Debug {
-		log.Info("Debug mode enabled")
+	log := logger.New(cfg.Server.LoggingLevel)
+
+	// Startup info (INFO level)
+	log.Info("Starting auto_ai_router",
+		"logging_level", cfg.Server.LoggingLevel,
+		"port", cfg.Server.Port,
+		"replace_v1_models", cfg.Server.ReplaceV1Models,
+	)
+
+	// Log loaded credentials (INFO level)
+	log.Info("Loaded credentials", "count", len(cfg.Credentials))
+	for i, cred := range cfg.Credentials {
+		log.Info("Credential configured",
+			"index", i+1,
+			"name", cred.Name,
+			"type", cred.Type,
+			"base_url", cred.BaseURL,
+			"rpm", cred.RPM,
+		)
 	}
 
 	f2b := fail2ban.New(cfg.Fail2Ban.MaxAttempts, cfg.Fail2Ban.BanDuration, cfg.Fail2Ban.ErrorCodes)
 	rateLimiter := ratelimit.New()
 	bal := balancer.New(cfg.Credentials, f2b, rateLimiter)
+
+	// Initialize model manager and fetch models from credentials
+	modelManager := models.New(log, cfg.Server.ReplaceV1Models)
+	if cfg.Server.ReplaceV1Models {
+		modelManager.FetchModels(cfg.Credentials, cfg.Server.RequestTimeout)
+	}
+
+	// Set model checker in balancer for model-aware routing
+	bal.SetModelChecker(modelManager)
+
 	metrics := monitoring.New(cfg.Monitoring.PrometheusEnabled)
-	prx := proxy.New(bal, log, cfg.Server.MaxBodySizeMB, cfg.Server.RequestTimeout, metrics)
+	prx := proxy.New(bal, log, cfg.Server.MaxBodySizeMB, cfg.Server.RequestTimeout, metrics, cfg.Server.MasterKey)
 
 	// Start background metrics updater
 	if cfg.Monitoring.PrometheusEnabled {
@@ -58,21 +85,17 @@ func main() {
 				}
 			}
 		}()
-		if cfg.Server.Debug {
-			log.Info("Metrics updater started (updates every 10 seconds)")
-		}
+		log.Info("Metrics updater started (updates every 10 seconds)")
 	}
 
-	rtr := router.New(prx, cfg.Monitoring.HealthCheckPath)
+	rtr := router.New(prx, cfg.Monitoring.HealthCheckPath, modelManager)
 
 	mux := http.NewServeMux()
 	mux.Handle("/", rtr)
 
 	if cfg.Monitoring.PrometheusEnabled {
 		mux.Handle("/metrics", promhttp.Handler())
-		if cfg.Server.Debug {
-			log.Info("Prometheus metrics enabled at /metrics")
-		}
+		log.Info("Prometheus metrics enabled", "path", "/metrics")
 	}
 
 	server := &http.Server{
@@ -81,11 +104,9 @@ func main() {
 	}
 
 	go func() {
-		if cfg.Server.Debug {
-			log.Info("Starting server", "port", cfg.Server.Port)
-		}
+		log.Info("Server starting", "port", cfg.Server.Port)
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			slog.Error("Server failed", "error", err)
+			log.Error("Server failed", "error", err)
 			os.Exit(1)
 		}
 	}()

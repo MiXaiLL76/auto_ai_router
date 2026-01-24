@@ -9,6 +9,13 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/ratelimit"
 )
 
+// ModelChecker interface for checking model availability
+type ModelChecker interface {
+	HasModel(credentialName, modelID string) bool
+	GetCredentialsForModel(modelID string) []string
+	IsEnabled() bool
+}
+
 var (
 	ErrNoCredentialsAvailable = errors.New("no credentials available")
 )
@@ -21,11 +28,12 @@ type Credential struct {
 }
 
 type RoundRobin struct {
-	mu          sync.Mutex
-	credentials []Credential
-	current     int
-	fail2ban    *fail2ban.Fail2Ban
-	rateLimiter *ratelimit.RPMLimiter
+	mu           sync.Mutex
+	credentials  []Credential
+	current      int
+	fail2ban     *fail2ban.Fail2Ban
+	rateLimiter  *ratelimit.RPMLimiter
+	modelChecker ModelChecker
 }
 
 func New(credentials []config.CredentialConfig, f2b *fail2ban.Fail2Ban, rl *ratelimit.RPMLimiter) *RoundRobin {
@@ -41,14 +49,31 @@ func New(credentials []config.CredentialConfig, f2b *fail2ban.Fail2Ban, rl *rate
 	}
 
 	return &RoundRobin{
-		credentials: creds,
-		current:     0,
-		fail2ban:    f2b,
-		rateLimiter: rl,
+		credentials:  creds,
+		current:      0,
+		fail2ban:     f2b,
+		rateLimiter:  rl,
+		modelChecker: nil,
 	}
 }
 
+// SetModelChecker sets the model checker for filtering credentials by model
+func (r *RoundRobin) SetModelChecker(mc ModelChecker) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.modelChecker = mc
+}
+
 func (r *RoundRobin) Next() (*Credential, error) {
+	return r.next("")
+}
+
+// NextForModel returns the next available credential that supports the specified model
+func (r *RoundRobin) NextForModel(modelID string) (*Credential, error) {
+	return r.next(modelID)
+}
+
+func (r *RoundRobin) next(modelID string) (*Credential, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -63,12 +88,21 @@ func (r *RoundRobin) Next() (*Credential, error) {
 		r.current = (r.current + 1) % len(r.credentials)
 		attempts++
 
+		// Check if credential is banned
 		if r.fail2ban.IsBanned(cred.Name) {
 			continue
 		}
 
+		// Check RPM limit
 		if !r.rateLimiter.Allow(cred.Name) {
 			continue
+		}
+
+		// Check if credential supports the requested model
+		if modelID != "" && r.modelChecker != nil && r.modelChecker.IsEnabled() {
+			if !r.modelChecker.HasModel(cred.Name, modelID) {
+				continue
+			}
 		}
 
 		return cred, nil

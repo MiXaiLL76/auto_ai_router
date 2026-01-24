@@ -2,7 +2,9 @@ server:
   port: 8080
   max_body_size_mb: 100
   request_timeout: 30s
-  debug: false
+  logging_level: debug  # Options: info, debug, error
+  replace_v1_models: true
+  master_key: "sk-your-master-key-here"  # Required: Master key for client authentication
 
 fail2ban:
   max_attempts: 3

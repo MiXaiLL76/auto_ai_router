@@ -17,10 +17,12 @@ type Config struct {
 }
 
 type ServerConfig struct {
-	Port           int           `yaml:"port"`
-	MaxBodySizeMB  int           `yaml:"max_body_size_mb"`
-	RequestTimeout time.Duration `yaml:"request_timeout"`
-	Debug          bool          `yaml:"debug"`
+	Port             int           `yaml:"port"`
+	MaxBodySizeMB    int           `yaml:"max_body_size_mb"`
+	RequestTimeout   time.Duration `yaml:"request_timeout"`
+	LoggingLevel     string        `yaml:"logging_level"`
+	ReplaceV1Models  bool          `yaml:"replace_v1_models"`
+	MasterKey        string        `yaml:"master_key"`
 }
 
 type Fail2BanConfig struct {
@@ -84,11 +86,24 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("failed to parse config file: %w", err)
 	}
 
+	// Normalize credentials
+	cfg.Normalize()
+
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("config validation failed: %w", err)
 	}
 
 	return &cfg, nil
+}
+
+// Normalize cleans up configuration values
+func (c *Config) Normalize() {
+	// Remove /v1 suffix from base_url to avoid duplication
+	for i := range c.Credentials {
+		if len(c.Credentials[i].BaseURL) > 3 && c.Credentials[i].BaseURL[len(c.Credentials[i].BaseURL)-3:] == "/v1" {
+			c.Credentials[i].BaseURL = c.Credentials[i].BaseURL[:len(c.Credentials[i].BaseURL)-3]
+		}
+	}
 }
 
 func (c *Config) Validate() error {
@@ -102,6 +117,21 @@ func (c *Config) Validate() error {
 
 	if c.Server.RequestTimeout <= 0 {
 		return fmt.Errorf("invalid request_timeout: %v", c.Server.RequestTimeout)
+	}
+
+	// Validate logging level
+	if c.Server.LoggingLevel != "" {
+		validLevels := map[string]bool{"info": true, "debug": true, "error": true}
+		if !validLevels[c.Server.LoggingLevel] {
+			return fmt.Errorf("invalid logging_level: %s (must be info, debug, or error)", c.Server.LoggingLevel)
+		}
+	} else {
+		c.Server.LoggingLevel = "info" // Default to info
+	}
+
+	// Validate master_key
+	if c.Server.MasterKey == "" {
+		return fmt.Errorf("master_key is required")
 	}
 
 	if c.Fail2Ban.MaxAttempts <= 0 {
