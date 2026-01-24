@@ -59,9 +59,17 @@ func main() {
 	bal := balancer.New(cfg.Credentials, f2b, rateLimiter)
 
 	// Initialize model manager and fetch models from credentials
-	modelManager := models.New(log, cfg.Server.ReplaceV1Models)
+	modelManager := models.New(log, cfg.Server.ReplaceV1Models, cfg.Server.DefaultModelsRPM, "models.yaml")
 	if cfg.Server.ReplaceV1Models {
 		modelManager.FetchModels(cfg.Credentials, cfg.Server.RequestTimeout)
+
+		// Initialize model RPM limiters
+		modelsResp := modelManager.GetAllModels()
+		for _, model := range modelsResp.Data {
+			modelRPM := modelManager.GetModelRPM(model.ID)
+			rateLimiter.AddModel(model.ID, modelRPM)
+			log.Debug("Initialized model RPM limiter", "model", model.ID, "rpm", modelRPM)
+		}
 	}
 
 	// Set model checker in balancer for model-aware routing
@@ -76,12 +84,22 @@ func main() {
 			ticker := time.NewTicker(10 * time.Second)
 			defer ticker.Stop()
 			for range ticker.C {
+				// Update credential metrics
 				for _, cred := range bal.GetCredentials() {
 					rpm := rateLimiter.GetCurrentRPM(cred.Name)
 					metrics.UpdateCredentialRPM(cred.Name, rpm)
 
 					banned := f2b.IsBanned(cred.Name)
 					metrics.UpdateCredentialBanStatus(cred.Name, banned)
+				}
+
+				// Update model RPM metrics (if enabled)
+				if cfg.Server.ReplaceV1Models {
+					for _, modelName := range rateLimiter.GetAllModels() {
+						modelRPM := rateLimiter.GetCurrentModelRPM(modelName)
+						// TODO: Add metric for model RPM if needed
+						_ = modelRPM
+					}
 				}
 			}
 		}()

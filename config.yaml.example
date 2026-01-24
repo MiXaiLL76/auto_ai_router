@@ -5,6 +5,7 @@ server:
   logging_level: debug  # Options: info, debug, error
   replace_v1_models: true
   master_key: "sk-your-master-key-here"  # Required: Master key for client authentication
+  default_models_rpm: 50  # Default RPM limit for models (used if not specified in models.yaml)
 
 fail2ban:
   max_attempts: 3

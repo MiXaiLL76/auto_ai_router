@@ -1,0 +1,22 @@
+# Model-level RPM configuration
+# This file is auto-generated when the router starts and fetches models from credentials
+# You can manually edit RPM values for specific models
+
+models:
+  - name: gpt-4o
+    rpm: 50  # Requests per minute limit for this model
+
+  - name: gpt-4o-mini
+    rpm: 100  # Higher limit for cheaper model
+
+  - name: gpt-3.5-turbo
+    rpm: 150  # Even higher for fastest model
+
+  - name: text-embedding-3-small
+    rpm: 200  # High limit for embeddings
+
+# Notes:
+# - If a model is not listed here, default_models_rpm from config.yaml will be used
+# - RPM limits are checked AFTER credential RPM limits
+# - New models discovered during startup will be automatically added with default_models_rpm
+# - You can edit this file and restart the router to apply changes

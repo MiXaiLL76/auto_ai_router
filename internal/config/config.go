@@ -23,6 +23,7 @@ type ServerConfig struct {
 	LoggingLevel     string        `yaml:"logging_level"`
 	ReplaceV1Models  bool          `yaml:"replace_v1_models"`
 	MasterKey        string        `yaml:"master_key"`
+	DefaultModelsRPM int           `yaml:"default_models_rpm"`
 }
 
 type Fail2BanConfig struct {
@@ -132,6 +133,11 @@ func (c *Config) Validate() error {
 	// Validate master_key
 	if c.Server.MasterKey == "" {
 		return fmt.Errorf("master_key is required")
+	}
+
+	// Set default for default_models_rpm if not specified
+	if c.Server.DefaultModelsRPM <= 0 {
+		c.Server.DefaultModelsRPM = 50 // Default value
 	}
 
 	if c.Fail2Ban.MaxAttempts <= 0 {

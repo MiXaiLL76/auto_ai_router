@@ -93,9 +93,17 @@ func (r *RoundRobin) next(modelID string) (*Credential, error) {
 			continue
 		}
 
-		// Check RPM limit
+		// Check credential RPM limit
 		if !r.rateLimiter.Allow(cred.Name) {
 			continue
+		}
+
+		// Check model RPM limit if model is specified
+		if modelID != "" {
+			if !r.rateLimiter.AllowModel(modelID) {
+				// Model RPM exceeded, cannot use any credential for this model
+				return nil, ErrNoCredentialsAvailable
+			}
 		}
 
 		// Check if credential supports the requested model

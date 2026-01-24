@@ -29,20 +29,35 @@ type ModelsResponse struct {
 
 // Manager handles model discovery and mapping
 type Manager struct {
-	mu                sync.RWMutex
-	credentialModels  map[string][]string // credential name -> list of model IDs
-	allModels         []Model             // deduplicated list of all models
-	modelToCredentials map[string][]string // model ID -> list of credential names
-	logger            *slog.Logger
-	enabled           bool
+	mu                 sync.RWMutex
+	credentialModels   map[string][]string      // credential name -> list of model IDs
+	allModels          []Model                  // deduplicated list of all models
+	modelToCredentials map[string][]string      // model ID -> list of credential names
+	modelsConfig       *config.ModelsConfig     // models.yaml config
+	modelsConfigPath   string                   // path to models.yaml
+	defaultModelsRPM   int                      // default RPM for models
+	logger             *slog.Logger
+	enabled            bool
 }
 
 // New creates a new model manager
-func New(logger *slog.Logger, enabled bool) *Manager {
+func New(logger *slog.Logger, enabled bool, defaultModelsRPM int, modelsConfigPath string) *Manager {
+	// Load models.yaml if it exists
+	modelsConfig, err := config.LoadModelsConfig(modelsConfigPath)
+	if err != nil {
+		logger.Error("Failed to load models config", "error", err, "path", modelsConfigPath)
+		modelsConfig = &config.ModelsConfig{Models: []config.ModelRPMConfig{}}
+	} else if len(modelsConfig.Models) > 0 {
+		logger.Info("Loaded models config", "path", modelsConfigPath, "models_count", len(modelsConfig.Models))
+	}
+
 	return &Manager{
 		credentialModels:   make(map[string][]string),
 		allModels:          make([]Model, 0),
 		modelToCredentials: make(map[string][]string),
+		modelsConfig:       modelsConfig,
+		modelsConfigPath:   modelsConfigPath,
+		defaultModelsRPM:   defaultModelsRPM,
 		logger:             logger,
 		enabled:            enabled,
 	}
@@ -131,6 +146,9 @@ func (m *Manager) FetchModels(credentials []config.CredentialConfig, timeout tim
 		"total_unique_models", len(m.allModels),
 		"credentials_with_models", len(m.credentialModels),
 	)
+
+	// Update models.yaml with newly discovered models
+	m.updateModelsConfig()
 }
 
 // fetchModelsFromCredential fetches models from a single credential
@@ -220,4 +238,55 @@ func (m *Manager) HasModel(credentialName, modelID string) bool {
 // IsEnabled returns whether model filtering is enabled
 func (m *Manager) IsEnabled() bool {
 	return m.enabled
+}
+
+// GetModelRPM returns RPM limit for a specific model
+func (m *Manager) GetModelRPM(modelID string) int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	if m.modelsConfig == nil {
+		return m.defaultModelsRPM
+	}
+
+	return m.modelsConfig.GetModelRPM(modelID, m.defaultModelsRPM)
+}
+
+// updateModelsConfig updates models.yaml with newly discovered models
+func (m *Manager) updateModelsConfig() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.modelsConfig == nil {
+		m.modelsConfig = &config.ModelsConfig{Models: []config.ModelRPMConfig{}}
+	}
+
+	// Add all discovered models that don't exist in config yet
+	updated := false
+	for _, model := range m.allModels {
+		// Check if model already exists in config
+		exists := false
+		for _, existingModel := range m.modelsConfig.Models {
+			if existingModel.Name == model.ID {
+				exists = true
+				break
+			}
+		}
+
+		// Add new model with default RPM
+		if !exists {
+			m.modelsConfig.UpdateOrAddModel(model.ID, m.defaultModelsRPM)
+			updated = true
+			m.logger.Debug("Added model to config", "model", model.ID, "rpm", m.defaultModelsRPM)
+		}
+	}
+
+	// Save updated config if changes were made
+	if updated {
+		if err := config.SaveModelsConfig(m.modelsConfigPath, m.modelsConfig); err != nil {
+			m.logger.Error("Failed to save models config", "error", err, "path", m.modelsConfigPath)
+		} else {
+			m.logger.Info("Updated models config", "path", m.modelsConfigPath, "total_models", len(m.modelsConfig.Models))
+		}
+	}
 }
