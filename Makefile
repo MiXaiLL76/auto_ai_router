@@ -1,4 +1,4 @@
-.PHONY: build run clean test fmt vet lint help install-deps docker-build docker-run docker-push docker-clean
+.PHONY: build run clean test fmt vet lint format help install-deps docker-build
 
 # Build variables
 BINARY_NAME=auto_ai_router
@@ -27,6 +27,7 @@ help:
 	@echo "  fmt           - Format code"
 	@echo "  vet           - Run go vet"
 	@echo "  lint          - Run golangci-lint (requires installation)"
+	@echo "  format        - Format code and run pre-commit checks"
 	@echo "  install-deps  - Install/update dependencies"
 	@echo "  mod-tidy      - Tidy go.mod"
 	@echo ""
@@ -77,9 +78,20 @@ vet:
 ## lint: Run golangci-lint
 lint:
 	@echo "Running golangci-lint..."
-	@which golangci-lint > /dev/null || (echo "golangci-lint not installed. Install from https://golangci-lint.run/usage/install/" && exit 1)
-	golangci-lint run ./...
+	@export PATH=/usr/local/go/bin:$$(go env GOPATH)/bin:$$PATH && which golangci-lint > /dev/null || (echo "golangci-lint not installed. Install from https://golangci-lint.run/usage/install/" && exit 1)
+	export PATH=/usr/local/go/bin:$$(go env GOPATH)/bin:$$PATH && golangci-lint run ./...
 	@echo "Lint complete"
+
+## format: Format code and run pre-commit checks
+format:
+	@echo "Running formatters..."
+	export PATH=/usr/local/go/bin:$$PATH && $(GO) fmt ./...
+	@echo "Running go vet..."
+	export PATH=/usr/local/go/bin:$$PATH && $(GO) vet ./...
+	@echo "Running pre-commit hooks..."
+	@which pre-commit > /dev/null || (echo "pre-commit not installed. Install with: pip install pre-commit" && exit 1)
+	pre-commit run --all-files
+	@echo "Format complete"
 
 ## install-deps: Install/update dependencies
 install-deps:

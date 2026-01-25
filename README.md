@@ -18,6 +18,7 @@
 ### 1. Сборка
 
 #### Локальная сборка
+
 ```bash
 make build
 # или
@@ -25,6 +26,7 @@ go build -o auto_ai_router ./cmd/server/
 ```
 
 #### Docker
+
 ```bash
 # Сборка образа
 make docker-build
@@ -36,6 +38,7 @@ docker build -t auto-ai-router:latest .
 ### 2. Настройка конфигурации
 
 **config.yaml:**
+
 ```yaml
 server:
   port: 8080
@@ -63,6 +66,7 @@ fail2ban:
 ```
 
 **models.yaml** (создается автоматически):
+
 ```yaml
 models:
   - name: gpt-4o
@@ -77,19 +81,21 @@ models:
 
 **Отключение лимитов:**
 Для параметров `request_timeout`, `default_models_rpm`, `rpm` (для credentials и models) можно указать значение `-1`, чтобы отключить соответствующий лимит:
+
 - `request_timeout: -1` - бесконечный таймаут запроса
 - `default_models_rpm: -1` - без лимита RPM по умолчанию для моделей
 - `rpm: -1` - без лимита RPM для конкретного провайдера или модели
 
-
 ### 3. Запуск
 
 #### Локальный запуск
+
 ```bash
 ./auto_ai_router -config config.yaml
 ```
 
 #### Docker Compose
+
 ```bash
 # Запуск в фоне
 make docker-run
@@ -110,13 +116,12 @@ make docker-stop
 from openai import OpenAI
 
 client = OpenAI(
-    api_key="sk-your-secret-key",      # master_key из config.yaml
-    base_url="http://localhost:8080/v1"
+    api_key="sk-your-secret-key",  # master_key из config.yaml
+    base_url="http://localhost:8080/v1",
 )
 
 response = client.chat.completions.create(
-    model="gpt-4o-mini",
-    messages=[{"role": "user", "content": "Hello!"}]
+    model="gpt-4o-mini", messages=[{"role": "user", "content": "Hello!"}]
 )
 ```
 

@@ -74,7 +74,11 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Bad Request", http.StatusBadRequest)
 		return
 	}
-	defer r.Body.Close()
+	defer func() {
+		if closeErr := r.Body.Close(); closeErr != nil {
+			p.logger.Error("Failed to close request body", "error", closeErr)
+		}
+	}()
 
 	// Extract model from request body if present
 	modelID := extractModelFromBody(body)
@@ -155,7 +159,11 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Bad Gateway", statusCode)
 		return
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			p.logger.Error("Failed to close response body", "error", closeErr)
+		}
+	}()
 
 	p.balancer.RecordResponse(cred.Name, resp.StatusCode)
 	p.metrics.RecordRequest(cred.Name, r.URL.Path, resp.StatusCode, time.Since(start))
@@ -302,7 +310,9 @@ func decodeResponseBody(body []byte, encoding string) string {
 		if err != nil {
 			return string(body) // Return as-is if can't decode
 		}
-		defer reader.Close()
+		defer func() {
+			_ = reader.Close()
+		}()
 
 		decoded, err := io.ReadAll(reader)
 		if err != nil {
