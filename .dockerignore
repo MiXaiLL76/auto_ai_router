@@ -1,0 +1,44 @@
+# Git
+.git
+.gitignore
+.github
+
+# Documentation
+README.md
+*.md
+
+# Build artifacts
+auto_ai_router
+*.exe
+*.test
+*.out
+coverage.out
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+*~
+
+# Dependencies
+vendor/
+
+# Testing
+.test
+testdata/
+
+# CI/CD
+.travis.yml
+.gitlab-ci.yml
+
+# Docker
+Dockerfile
+.dockerignore
+docker-compose.yml
+
+# Misc
+.env
+.DS_Store
+*.log
+tmp/

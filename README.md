@@ -16,8 +16,21 @@
 ## Быстрый старт
 
 ### 1. Сборка
+
+#### Локальная сборка
 ```bash
+make build
+# или
 go build -o auto_ai_router ./cmd/server/
+```
+
+#### Docker
+```bash
+# Сборка образа
+make docker-build
+
+# Или напрямую
+docker build -t auto-ai-router:latest .
 ```
 
 ### 2. Настройка конфигурации
@@ -29,18 +42,19 @@ server:
   master_key: "sk-your-secret-key"  # Ключ для клиентов
   logging_level: info                # info, debug, error
   replace_v1_models: true            # Включить model-aware routing
-  default_models_rpm: 50             # RPM по умолчанию для моделей
+  request_timeout: 5m                # Таймаут запроса (или -1 для отключения)
+  default_models_rpm: 50             # RPM по умолчанию для моделей (или -1 для отключения)
 
 credentials:
   - name: "openai_main"
     api_key: "sk-proj-..."
     base_url: "https://api.openai.com"
-    rpm: 60                          # Лимит провайдера
+    rpm: 60                          # Лимит провайдера (или -1 для отключения)
 
   - name: "openai_backup"
     api_key: "sk-proj-..."
     base_url: "https://api.another.com"
-    rpm: 100
+    rpm: -1                          # Без лимитов
 
 fail2ban:
   max_attempts: 3
@@ -52,18 +66,42 @@ fail2ban:
 ```yaml
 models:
   - name: gpt-4o
-    rpm: 50                          # Индивидуальный лимит модели
+    rpm: 50                          # Индивидуальный лимит модели (или -1 для отключения)
 
   - name: gpt-4o-mini
     rpm: 100
 
   - name: gpt-3.5-turbo
-    rpm: 150
+    rpm: -1                          # Без лимитов
 ```
 
+**Отключение лимитов:**
+Для параметров `request_timeout`, `default_models_rpm`, `rpm` (для credentials и models) можно указать значение `-1`, чтобы отключить соответствующий лимит:
+- `request_timeout: -1` - бесконечный таймаут запроса
+- `default_models_rpm: -1` - без лимита RPM по умолчанию для моделей
+- `rpm: -1` - без лимита RPM для конкретного провайдера или модели
+
+
 ### 3. Запуск
+
+#### Локальный запуск
 ```bash
 ./auto_ai_router -config config.yaml
+```
+
+#### Docker Compose
+```bash
+# Запуск в фоне
+make docker-run
+
+# Или напрямую
+docker-compose up -d
+
+# Просмотр логов
+docker-compose logs -f
+
+# Остановка
+make docker-stop
 ```
 
 ### 4. Использование

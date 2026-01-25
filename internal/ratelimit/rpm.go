@@ -6,15 +6,15 @@ import (
 )
 
 type RPMLimiter struct {
-	mu             sync.RWMutex
-	limiters       map[string]*limiter // credential limiters
-	modelLimiters  map[string]*limiter // model limiters
+	mu            sync.RWMutex
+	limiters      map[string]*limiter // credential limiters
+	modelLimiters map[string]*limiter // model limiters
 }
 
 type limiter struct {
-	rpm       int
-	requests  []time.Time
-	mu        sync.Mutex
+	rpm      int
+	requests []time.Time
+	mu       sync.Mutex
 }
 
 func New() *RPMLimiter {
@@ -56,6 +56,11 @@ func (r *RPMLimiter) Allow(credentialName string) bool {
 
 	limiter.mu.Lock()
 	defer limiter.mu.Unlock()
+
+	// -1 means unlimited RPM
+	if limiter.rpm == -1 {
+		return true
+	}
 
 	now := time.Now()
 	oneMinuteAgo := now.Add(-time.Minute)
@@ -114,6 +119,11 @@ func (r *RPMLimiter) AllowModel(modelName string) bool {
 
 	modelLimiter.mu.Lock()
 	defer modelLimiter.mu.Unlock()
+
+	// -1 means unlimited RPM
+	if modelLimiter.rpm == -1 {
+		return true
+	}
 
 	now := time.Now()
 	oneMinuteAgo := now.Add(-time.Minute)

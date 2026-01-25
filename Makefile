@@ -1,4 +1,4 @@
-.PHONY: build run clean test fmt vet lint help install-deps
+.PHONY: build run clean test fmt vet lint help install-deps docker-build docker-run docker-push docker-clean
 
 # Build variables
 BINARY_NAME=auto_ai_router
@@ -7,6 +7,11 @@ CMD_DIR=./cmd/server
 GO=go
 GOFLAGS=-v
 LDFLAGS=-ldflags="-s -w"
+
+# Docker variables
+DOCKER_IMAGE=auto-ai-router
+DOCKER_TAG?=latest
+DOCKER_REGISTRY?=ghcr.io/mixaill76
 
 # Default target
 all: build
@@ -24,6 +29,9 @@ help:
 	@echo "  lint          - Run golangci-lint (requires installation)"
 	@echo "  install-deps  - Install/update dependencies"
 	@echo "  mod-tidy      - Tidy go.mod"
+	@echo ""
+	@echo "Docker targets:"
+	@echo "  docker-build  - Build Docker image"
 
 ## build: Build the application
 build:
@@ -84,3 +92,9 @@ mod-tidy:
 	@echo "Tidying go.mod..."
 	export PATH=/usr/local/go/bin:$$PATH && $(GO) mod tidy
 	@echo "go.mod tidied"
+
+## docker-build: Build Docker image
+docker-build:
+	@echo "Building Docker image $(DOCKER_IMAGE):$(DOCKER_TAG)..."
+	docker build -t $(DOCKER_IMAGE):$(DOCKER_TAG) .
+	@echo "Docker image built successfully"

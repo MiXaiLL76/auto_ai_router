@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bytes"
+	"compress/gzip"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -123,6 +124,24 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 
 	proxyReq.Header.Set("Authorization", "Bearer "+cred.APIKey)
 
+	// Detailed debug logging
+	p.logger.Debug("Proxy request details",
+		"target_url", targetURL,
+		"credential", cred.Name,
+		"request_body", string(body),
+	)
+
+	// Log headers (mask Authorization for security)
+	debugHeaders := make(map[string]string)
+	for key, values := range proxyReq.Header {
+		if key == "Authorization" {
+			debugHeaders[key] = "Bearer " + maskKey(cred.APIKey)
+		} else {
+			debugHeaders[key] = strings.Join(values, ", ")
+		}
+	}
+	p.logger.Debug("Proxy request headers", "headers", debugHeaders)
+
 	resp, err := p.client.Do(proxyReq)
 	if err != nil {
 		p.logger.Error("Upstream request failed",
@@ -140,6 +159,42 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 
 	p.balancer.RecordResponse(cred.Name, resp.StatusCode)
 	p.metrics.RecordRequest(cred.Name, r.URL.Path, resp.StatusCode, time.Since(start))
+
+	// Log response headers
+	debugRespHeaders := make(map[string]string)
+	for key, values := range resp.Header {
+		debugRespHeaders[key] = strings.Join(values, ", ")
+	}
+	p.logger.Debug("Proxy response received",
+		"status_code", resp.StatusCode,
+		"credential", cred.Name,
+		"headers", debugRespHeaders,
+	)
+
+	// Read and log response body for non-streaming responses
+	var responseBody []byte
+	if isStreamingResponse(resp) {
+		p.logger.Debug("Response is streaming", "credential", cred.Name)
+	} else {
+		responseBody, err = io.ReadAll(resp.Body)
+		if err != nil {
+			p.logger.Error("Failed to read response body", "error", err)
+			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+			return
+		}
+
+		// Decode the response body for logging (handles gzip, etc.)
+		contentEncoding := resp.Header.Get("Content-Encoding")
+		decodedBody := decodeResponseBody(responseBody, contentEncoding)
+
+		p.logger.Debug("Proxy response body",
+			"credential", cred.Name,
+			"content_encoding", contentEncoding,
+			"body", decodedBody,
+		)
+		// Replace resp.Body with a new reader for subsequent processing
+		resp.Body = io.NopCloser(bytes.NewReader(responseBody))
+	}
 
 	for key, values := range resp.Header {
 		for _, value := range values {
@@ -237,6 +292,27 @@ func extractModelFromBody(body []byte) string {
 	}
 
 	return reqBody.Model
+}
+
+// decodeResponseBody decodes the response body based on Content-Encoding
+func decodeResponseBody(body []byte, encoding string) string {
+	// Check if response is gzip-encoded
+	if strings.Contains(strings.ToLower(encoding), "gzip") {
+		reader, err := gzip.NewReader(bytes.NewReader(body))
+		if err != nil {
+			return string(body) // Return as-is if can't decode
+		}
+		defer reader.Close()
+
+		decoded, err := io.ReadAll(reader)
+		if err != nil {
+			return string(body) // Return as-is if can't read
+		}
+		return string(decoded)
+	}
+
+	// Return as plain text
+	return string(body)
 }
 
 // maskKey masks the API key for logging (shows only first 7 chars)

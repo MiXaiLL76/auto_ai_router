@@ -10,10 +10,10 @@ import (
 )
 
 type Config struct {
-	Server      ServerConfig      `yaml:"server"`
-	Fail2Ban    Fail2BanConfig    `yaml:"fail2ban"`
+	Server      ServerConfig       `yaml:"server"`
+	Fail2Ban    Fail2BanConfig     `yaml:"fail2ban"`
 	Credentials []CredentialConfig `yaml:"credentials"`
-	Monitoring  MonitoringConfig  `yaml:"monitoring"`
+	Monitoring  MonitoringConfig   `yaml:"monitoring"`
 }
 
 type ServerConfig struct {
@@ -116,7 +116,8 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("invalid max_body_size_mb: %d", c.Server.MaxBodySizeMB)
 	}
 
-	if c.Server.RequestTimeout <= 0 {
+	// -1 means unlimited timeout
+	if c.Server.RequestTimeout <= 0 && c.Server.RequestTimeout != -1 {
 		return fmt.Errorf("invalid request_timeout: %v", c.Server.RequestTimeout)
 	}
 
@@ -136,8 +137,11 @@ func (c *Config) Validate() error {
 	}
 
 	// Set default for default_models_rpm if not specified
-	if c.Server.DefaultModelsRPM <= 0 {
+	// -1 means unlimited RPM
+	if c.Server.DefaultModelsRPM == 0 {
 		c.Server.DefaultModelsRPM = 50 // Default value
+	} else if c.Server.DefaultModelsRPM < -1 {
+		return fmt.Errorf("invalid default_models_rpm: %d (must be -1 for unlimited or positive number)", c.Server.DefaultModelsRPM)
 	}
 
 	if c.Fail2Ban.MaxAttempts <= 0 {
@@ -169,8 +173,9 @@ func (c *Config) Validate() error {
 		if parsedURL.Host == "" {
 			return fmt.Errorf("credential %s: base_url must have a host", cred.Name)
 		}
-		if cred.RPM <= 0 {
-			return fmt.Errorf("credential %s: invalid rpm: %d", cred.Name, cred.RPM)
+		// -1 means unlimited RPM
+		if cred.RPM <= 0 && cred.RPM != -1 {
+			return fmt.Errorf("credential %s: invalid rpm: %d (must be -1 for unlimited or positive number)", cred.Name, cred.RPM)
 		}
 	}
 

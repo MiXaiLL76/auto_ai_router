@@ -30,12 +30,12 @@ type ModelsResponse struct {
 // Manager handles model discovery and mapping
 type Manager struct {
 	mu                 sync.RWMutex
-	credentialModels   map[string][]string      // credential name -> list of model IDs
-	allModels          []Model                  // deduplicated list of all models
-	modelToCredentials map[string][]string      // model ID -> list of credential names
-	modelsConfig       *config.ModelsConfig     // models.yaml config
-	modelsConfigPath   string                   // path to models.yaml
-	defaultModelsRPM   int                      // default RPM for models
+	credentialModels   map[string][]string  // credential name -> list of model IDs
+	allModels          []Model              // deduplicated list of all models
+	modelToCredentials map[string][]string  // model ID -> list of credential names
+	modelsConfig       *config.ModelsConfig // models.yaml config
+	modelsConfigPath   string               // path to models.yaml
+	defaultModelsRPM   int                  // default RPM for models
 	logger             *slog.Logger
 	enabled            bool
 }
