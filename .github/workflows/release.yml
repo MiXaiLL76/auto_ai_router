@@ -78,6 +78,10 @@ jobs:
       with:
         path: artifacts
 
+    - name: Lowercase repository name
+      id: repo
+      run: echo "repository=${GITHUB_REPOSITORY,,}" >> $GITHUB_OUTPUT
+
     - name: Generate changelog
       id: changelog
       run: |
@@ -110,13 +114,13 @@ jobs:
           ./auto_ai_router-* -config config.yaml
 
           # Or use Docker
-          docker pull ghcr.io/${{ github.repository }}:${{ github.ref_name }}
+          docker pull ghcr.io/${{ steps.repo.outputs.repository }}:${{ github.ref_name }}
           ```
 
           ## Docker Images
 
-          - `ghcr.io/${{ github.repository }}:${{ github.ref_name }}`
-          - `ghcr.io/${{ github.repository }}:latest`
+          - `ghcr.io/${{ steps.repo.outputs.repository }}:${{ github.ref_name }}`
+          - `ghcr.io/${{ steps.repo.outputs.repository }}:latest`
         draft: false
         prerelease: false
       env:
