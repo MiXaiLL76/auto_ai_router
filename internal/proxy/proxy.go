@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -93,7 +94,11 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 
 	if err != nil {
 		p.logger.Error("Failed to get credential", "error", err, "model", modelID)
-		http.Error(w, "Service Unavailable", http.StatusServiceUnavailable)
+		if errors.Is(err, balancer.ErrRateLimitExceeded) {
+			http.Error(w, "Too Many Requests", http.StatusTooManyRequests)
+		} else {
+			http.Error(w, "Service Unavailable", http.StatusServiceUnavailable)
+		}
 		return
 	}
 

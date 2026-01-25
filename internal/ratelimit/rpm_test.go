@@ -1,0 +1,358 @@
+package ratelimit
+
+import (
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+)
+
+func TestNew(t *testing.T) {
+	rl := New()
+
+	assert.NotNil(t, rl)
+	assert.NotNil(t, rl.limiters)
+	assert.NotNil(t, rl.modelLimiters)
+}
+
+func TestAddCredential(t *testing.T) {
+	rl := New()
+
+	rl.AddCredential("cred1", 100)
+	rl.AddCredential("cred2", 200)
+
+	// Verify limiters were created
+	assert.True(t, rl.Allow("cred1"))
+	assert.True(t, rl.Allow("cred2"))
+}
+
+func TestAddModel(t *testing.T) {
+	rl := New()
+
+	rl.AddModel("gpt-4o", 50)
+	rl.AddModel("gpt-4o-mini", 100)
+
+	// Verify model limiters were created
+	assert.True(t, rl.AllowModel("gpt-4o"))
+	assert.True(t, rl.AllowModel("gpt-4o-mini"))
+}
+
+func TestAllow_UnderLimit(t *testing.T) {
+	rl := New()
+	rl.AddCredential("cred1", 5)
+
+	// Make requests under limit
+	for i := 0; i < 5; i++ {
+		assert.True(t, rl.Allow("cred1"), "Request %d should be allowed", i+1)
+	}
+
+	// 6th request should be denied
+	assert.False(t, rl.Allow("cred1"))
+}
+
+func TestAllow_AtLimit(t *testing.T) {
+	rl := New()
+	rl.AddCredential("cred1", 3)
+
+	// Make exactly 3 requests (at limit)
+	assert.True(t, rl.Allow("cred1"))
+	assert.True(t, rl.Allow("cred1"))
+	assert.True(t, rl.Allow("cred1"))
+
+	// 4th request should be denied
+	assert.False(t, rl.Allow("cred1"))
+}
+
+func TestAllow_OverLimit(t *testing.T) {
+	rl := New()
+	rl.AddCredential("cred1", 2)
+
+	// Make 2 requests (at limit)
+	assert.True(t, rl.Allow("cred1"))
+	assert.True(t, rl.Allow("cred1"))
+
+	// Next requests should be denied
+	assert.False(t, rl.Allow("cred1"))
+	assert.False(t, rl.Allow("cred1"))
+}
+
+func TestAllow_UnlimitedRPM(t *testing.T) {
+	rl := New()
+	rl.AddCredential("cred1", -1) // -1 means unlimited
+
+	// Make many requests - all should be allowed
+	for i := 0; i < 1000; i++ {
+		assert.True(t, rl.Allow("cred1"), "Request %d should be allowed for unlimited RPM", i+1)
+	}
+}
+
+func TestAllow_NonExistentCredential(t *testing.T) {
+	rl := New()
+
+	// Should return false for non-existent credential
+	assert.False(t, rl.Allow("non_existent"))
+}
+
+func TestAllowModel_UnderLimit(t *testing.T) {
+	rl := New()
+	rl.AddModel("gpt-4o", 3)
+
+	// Make requests under limit
+	assert.True(t, rl.AllowModel("gpt-4o"))
+	assert.True(t, rl.AllowModel("gpt-4o"))
+	assert.True(t, rl.AllowModel("gpt-4o"))
+
+	// 4th request should be denied
+	assert.False(t, rl.AllowModel("gpt-4o"))
+}
+
+func TestAllowModel_UnlimitedRPM(t *testing.T) {
+	rl := New()
+	rl.AddModel("gpt-4o", -1) // Unlimited
+
+	// Make many requests - all should be allowed
+	for i := 0; i < 500; i++ {
+		assert.True(t, rl.AllowModel("gpt-4o"))
+	}
+}
+
+func TestAllowModel_NonTrackedModel(t *testing.T) {
+	rl := New()
+
+	// Model not in limiters - should allow (default behavior)
+	assert.True(t, rl.AllowModel("unknown-model"))
+}
+
+func TestGetCurrentRPM(t *testing.T) {
+	rl := New()
+	rl.AddCredential("cred1", 100)
+
+	// Initial RPM should be 0
+	assert.Equal(t, 0, rl.GetCurrentRPM("cred1"))
+
+	// Make 3 requests
+	rl.Allow("cred1")
+	rl.Allow("cred1")
+	rl.Allow("cred1")
+
+	// Current RPM should be 3
+	assert.Equal(t, 3, rl.GetCurrentRPM("cred1"))
+}
+
+func TestGetCurrentRPM_NonExistentCredential(t *testing.T) {
+	rl := New()
+
+	// Should return 0 for non-existent credential
+	assert.Equal(t, 0, rl.GetCurrentRPM("non_existent"))
+}
+
+func TestGetCurrentModelRPM(t *testing.T) {
+	rl := New()
+	rl.AddModel("gpt-4o", 100)
+
+	// Initial RPM should be 0
+	assert.Equal(t, 0, rl.GetCurrentModelRPM("gpt-4o"))
+
+	// Make 5 requests
+	for i := 0; i < 5; i++ {
+		rl.AllowModel("gpt-4o")
+	}
+
+	// Current RPM should be 5
+	assert.Equal(t, 5, rl.GetCurrentModelRPM("gpt-4o"))
+}
+
+func TestGetAllModels(t *testing.T) {
+	rl := New()
+
+	// Initially empty
+	models := rl.GetAllModels()
+	assert.Len(t, models, 0)
+
+	// Add models
+	rl.AddModel("gpt-4o", 50)
+	rl.AddModel("gpt-4o-mini", 100)
+	rl.AddModel("gpt-3.5-turbo", 150)
+
+	models = rl.GetAllModels()
+	assert.Len(t, models, 3)
+	assert.Contains(t, models, "gpt-4o")
+	assert.Contains(t, models, "gpt-4o-mini")
+	assert.Contains(t, models, "gpt-3.5-turbo")
+}
+
+func TestSlidingWindow_Cleanup(t *testing.T) {
+	rl := New()
+	rl.AddCredential("cred1", 100)
+
+	// Make some requests
+	rl.Allow("cred1")
+	rl.Allow("cred1")
+	rl.Allow("cred1")
+
+	assert.Equal(t, 3, rl.GetCurrentRPM("cred1"))
+
+	// Manually manipulate request times to simulate old requests
+	rl.mu.Lock()
+	limiter := rl.limiters["cred1"]
+	limiter.mu.Lock()
+	// Set all requests to 2 minutes ago
+	oldTime := time.Now().Add(-2 * time.Minute)
+	for i := range limiter.requests {
+		limiter.requests[i] = oldTime
+	}
+	limiter.mu.Unlock()
+	rl.mu.Unlock()
+
+	// Make a new request - should clean up old ones
+	rl.Allow("cred1")
+
+	// Current RPM should be 1 (only the new request)
+	assert.Equal(t, 1, rl.GetCurrentRPM("cred1"))
+}
+
+func TestConcurrency_Credential(t *testing.T) {
+	rl := New()
+	rl.AddCredential("cred1", 1000)
+
+	var wg sync.WaitGroup
+	numGoroutines := 50
+	requestsPerGoroutine := 20
+
+	// Concurrent Allow calls
+	for i := 0; i < numGoroutines; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < requestsPerGoroutine; j++ {
+				rl.Allow("cred1")
+			}
+		}()
+	}
+
+	// Concurrent GetCurrentRPM calls
+	for i := 0; i < numGoroutines; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < requestsPerGoroutine; j++ {
+				_ = rl.GetCurrentRPM("cred1")
+			}
+		}()
+	}
+
+	wg.Wait()
+
+	// Verify total requests recorded (should be exactly numGoroutines * requestsPerGoroutine)
+	totalRequests := numGoroutines * requestsPerGoroutine
+	currentRPM := rl.GetCurrentRPM("cred1")
+	assert.Equal(t, totalRequests, currentRPM)
+}
+
+func TestConcurrency_Model(t *testing.T) {
+	rl := New()
+	rl.AddModel("gpt-4o", 1000)
+
+	var wg sync.WaitGroup
+	numGoroutines := 30
+	requestsPerGoroutine := 10
+
+	// Concurrent AllowModel calls
+	for i := 0; i < numGoroutines; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < requestsPerGoroutine; j++ {
+				rl.AllowModel("gpt-4o")
+			}
+		}()
+	}
+
+	// Concurrent GetCurrentModelRPM calls
+	for i := 0; i < numGoroutines; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < requestsPerGoroutine; j++ {
+				_ = rl.GetCurrentModelRPM("gpt-4o")
+			}
+		}()
+	}
+
+	wg.Wait()
+
+	// Verify total requests
+	totalRequests := numGoroutines * requestsPerGoroutine
+	currentRPM := rl.GetCurrentModelRPM("gpt-4o")
+	assert.Equal(t, totalRequests, currentRPM)
+}
+
+func TestMultipleCredentials(t *testing.T) {
+	rl := New()
+	rl.AddCredential("cred1", 5)
+	rl.AddCredential("cred2", 3)
+	rl.AddCredential("cred3", 10)
+
+	// Make requests to different credentials
+	rl.Allow("cred1")
+	rl.Allow("cred1")
+	rl.Allow("cred2")
+	rl.Allow("cred3")
+	rl.Allow("cred3")
+	rl.Allow("cred3")
+
+	// Verify independent counters
+	assert.Equal(t, 2, rl.GetCurrentRPM("cred1"))
+	assert.Equal(t, 1, rl.GetCurrentRPM("cred2"))
+	assert.Equal(t, 3, rl.GetCurrentRPM("cred3"))
+
+	// Each credential should enforce its own limit
+	for i := 0; i < 3; i++ {
+		rl.Allow("cred1") // Total 5
+	}
+	assert.False(t, rl.Allow("cred1")) // Should be denied (over limit)
+	assert.True(t, rl.Allow("cred2"))  // Should still work (under limit)
+}
+
+func TestMultipleModels(t *testing.T) {
+	rl := New()
+	rl.AddModel("gpt-4o", 2)
+	rl.AddModel("gpt-4o-mini", 5)
+
+	// Make requests to different models
+	rl.AllowModel("gpt-4o")
+	rl.AllowModel("gpt-4o")
+	rl.AllowModel("gpt-4o-mini")
+
+	// Verify independent counters
+	assert.Equal(t, 2, rl.GetCurrentModelRPM("gpt-4o"))
+	assert.Equal(t, 1, rl.GetCurrentModelRPM("gpt-4o-mini"))
+
+	// gpt-4o should be at limit
+	assert.False(t, rl.AllowModel("gpt-4o"))
+	// gpt-4o-mini should still allow
+	assert.True(t, rl.AllowModel("gpt-4o-mini"))
+}
+
+func TestAllow_RapidRequests(t *testing.T) {
+	rl := New()
+	rl.AddCredential("cred1", 10)
+
+	allowed := 0
+	denied := 0
+
+	// Make 20 rapid requests (twice the limit)
+	for i := 0; i < 20; i++ {
+		if rl.Allow("cred1") {
+			allowed++
+		} else {
+			denied++
+		}
+	}
+
+	// Exactly 10 should be allowed, 10 denied
+	assert.Equal(t, 10, allowed)
+	assert.Equal(t, 10, denied)
+	assert.Equal(t, 10, rl.GetCurrentRPM("cred1"))
+}

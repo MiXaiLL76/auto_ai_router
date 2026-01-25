@@ -19,17 +19,22 @@ all: build
 ## help: Display this help message
 help:
 	@echo "Available targets:"
-	@echo "  build         - Build the binary"
-	@echo "  build-opt     - Build optimized binary (smaller size)"
-	@echo "  run           - Build and run the application"
-	@echo "  clean         - Remove build artifacts"
-	@echo "  test          - Run tests"
-	@echo "  fmt           - Format code"
-	@echo "  vet           - Run go vet"
-	@echo "  lint          - Run golangci-lint (requires installation)"
-	@echo "  format        - Format code and run pre-commit checks"
-	@echo "  install-deps  - Install/update dependencies"
-	@echo "  mod-tidy      - Tidy go.mod"
+	@echo "  build                - Build the binary"
+	@echo "  build-opt            - Build optimized binary (smaller size)"
+	@echo "  run                  - Build and run the application"
+	@echo "  clean                - Remove build artifacts"
+	@echo "  test                 - Run all tests"
+	@echo "  test-coverage        - Run tests with coverage report"
+	@echo "  test-coverage-html   - Generate HTML coverage report"
+	@echo "  test-race            - Run tests with race detector"
+	@echo "  test-pkg PKG=<name>  - Run tests for specific package"
+	@echo "  test-check-coverage  - Check if coverage meets 80% threshold"
+	@echo "  fmt                  - Format code"
+	@echo "  vet                  - Run go vet"
+	@echo "  lint                 - Run golangci-lint (requires installation)"
+	@echo "  format               - Format code and run pre-commit checks"
+	@echo "  install-deps         - Install/update dependencies"
+	@echo "  mod-tidy             - Tidy go.mod"
 	@echo ""
 	@echo "Docker targets:"
 	@echo "  docker-build  - Build Docker image"
@@ -57,11 +62,48 @@ clean:
 	@rm -f $(BUILD_DIR)/$(BINARY_NAME)
 	@echo "Clean complete"
 
-## test: Run tests
+## test: Run all tests
 test:
 	@echo "Running tests..."
-	export PATH=/usr/local/go/bin:$$PATH && $(GO) test -v -race -coverprofile=coverage.out ./...
+	export PATH=/usr/local/go/bin:$$PATH && $(GO) test -v ./internal/...
 	@echo "Tests complete"
+
+## test-coverage: Run tests with coverage report
+test-coverage:
+	@echo "Running tests with coverage..."
+	export PATH=/usr/local/go/bin:$$PATH && $(GO) test -coverprofile=coverage.out ./internal/...
+	@echo ""
+	@echo "Coverage by package:"
+	export PATH=/usr/local/go/bin:$$PATH && $(GO) tool cover -func=coverage.out | grep -E "github.com"
+	@echo ""
+	@echo "Total coverage:"
+	export PATH=/usr/local/go/bin:$$PATH && $(GO) tool cover -func=coverage.out | grep total
+	@echo ""
+	@echo "To view HTML coverage report, run: make test-coverage-html"
+
+## test-coverage-html: Generate HTML coverage report
+test-coverage-html: test-coverage
+	@echo "Generating HTML coverage report..."
+	export PATH=/usr/local/go/bin:$$PATH && $(GO) tool cover -html=coverage.out -o coverage.html
+	@echo "Coverage report generated: coverage.html"
+
+## test-race: Run tests with race detector
+test-race:
+	@echo "Running tests with race detector..."
+	export PATH=/usr/local/go/bin:$$PATH && $(GO) test -race ./internal/...
+	@echo "Race detection tests complete"
+
+## test-pkg: Run tests for specific package (usage: make test-pkg PKG=config)
+test-pkg:
+	@echo "Running tests for package $(PKG)..."
+	export PATH=/usr/local/go/bin:$$PATH && $(GO) test -v -cover ./internal/$(PKG)/...
+
+## test-check-coverage: Check if coverage meets threshold
+test-check-coverage:
+	@echo "Checking coverage threshold..."
+	@export PATH=/usr/local/go/bin:$$PATH && $(GO) test -coverprofile=coverage.out ./internal/... > /dev/null
+	@export PATH=/usr/local/go/bin:$$PATH && $(GO) tool cover -func=coverage.out | grep total | awk '{print "Total coverage: " $$3}'
+	@export PATH=/usr/local/go/bin:$$PATH && $(GO) tool cover -func=coverage.out | grep total | awk '{gsub(/%/,"",$$3); if ($$3+0 < 80) {print "❌ Coverage is below 80%"; exit 1} else {print "✅ Coverage is above 80%"}}'
 
 ## fmt: Format code
 fmt:

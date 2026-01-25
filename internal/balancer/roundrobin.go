@@ -18,6 +18,7 @@ type ModelChecker interface {
 
 var (
 	ErrNoCredentialsAvailable = errors.New("no credentials available")
+	ErrRateLimitExceeded      = errors.New("rate limit exceeded")
 )
 
 type Credential struct {
@@ -78,9 +79,16 @@ func (r *RoundRobin) next(modelID string) (*Credential, error) {
 	defer r.mu.Unlock()
 
 	attempts := 0
+	rateLimitHit := false
+	otherReasonsHit := false
 
 	for {
 		if attempts >= len(r.credentials) {
+			// If all credentials were blocked due to rate limit, return rate limit error
+			if rateLimitHit && !otherReasonsHit {
+				return nil, ErrRateLimitExceeded
+			}
+			// Otherwise return generic error
 			return nil, ErrNoCredentialsAvailable
 		}
 
@@ -90,11 +98,13 @@ func (r *RoundRobin) next(modelID string) (*Credential, error) {
 
 		// Check if credential is banned
 		if r.fail2ban.IsBanned(cred.Name) {
+			otherReasonsHit = true
 			continue
 		}
 
 		// Check credential RPM limit
 		if !r.rateLimiter.Allow(cred.Name) {
+			rateLimitHit = true
 			continue
 		}
 
@@ -102,13 +112,14 @@ func (r *RoundRobin) next(modelID string) (*Credential, error) {
 		if modelID != "" {
 			if !r.rateLimiter.AllowModel(modelID) {
 				// Model RPM exceeded, cannot use any credential for this model
-				return nil, ErrNoCredentialsAvailable
+				return nil, ErrRateLimitExceeded
 			}
 		}
 
 		// Check if credential supports the requested model
 		if modelID != "" && r.modelChecker != nil && r.modelChecker.IsEnabled() {
 			if !r.modelChecker.HasModel(cred.Name, modelID) {
+				otherReasonsHit = true
 				continue
 			}
 		}
