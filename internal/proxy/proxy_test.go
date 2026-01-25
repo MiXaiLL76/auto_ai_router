@@ -20,7 +20,7 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func createTestBalancer(mockServerURL string) *balancer.RoundRobin {
+func createTestBalancer(mockServerURL string) (*balancer.RoundRobin, *ratelimit.RPMLimiter) {
 	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
 	rl := ratelimit.New()
 
@@ -34,15 +34,15 @@ func createTestBalancer(mockServerURL string) *balancer.RoundRobin {
 	}
 
 	bal := balancer.New(credentials, f2b, rl)
-	return bal
+	return bal, rl
 }
 
 func TestNew(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-	bal := createTestBalancer("http://test.com")
+	bal, rl := createTestBalancer("http://test.com")
 	metrics := monitoring.New(false)
 
-	prx := New(bal, logger, 10, 30*time.Second, metrics, "test-master-key")
+	prx := New(bal, logger, 10, 30*time.Second, metrics, "test-master-key", rl)
 
 	assert.NotNil(t, prx)
 	assert.Equal(t, "test-master-key", prx.masterKey)
@@ -53,9 +53,9 @@ func TestNew(t *testing.T) {
 
 func TestProxyRequest_MissingAuthorization(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-	bal := createTestBalancer("http://test.com")
+	bal, rl := createTestBalancer("http://test.com")
 	metrics := monitoring.New(false)
-	prx := New(bal, logger, 10, 30*time.Second, metrics, "test-key")
+	prx := New(bal, logger, 10, 30*time.Second, metrics, "test-key", rl)
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
 	w := httptest.NewRecorder()
@@ -68,9 +68,9 @@ func TestProxyRequest_MissingAuthorization(t *testing.T) {
 
 func TestProxyRequest_InvalidAuthorizationFormat(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-	bal := createTestBalancer("http://test.com")
+	bal, rl := createTestBalancer("http://test.com")
 	metrics := monitoring.New(false)
-	prx := New(bal, logger, 10, 30*time.Second, metrics, "test-key")
+	prx := New(bal, logger, 10, 30*time.Second, metrics, "test-key", rl)
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
 	req.Header.Set("Authorization", "InvalidFormat")
@@ -84,9 +84,9 @@ func TestProxyRequest_InvalidAuthorizationFormat(t *testing.T) {
 
 func TestProxyRequest_InvalidMasterKey(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-	bal := createTestBalancer("http://test.com")
+	bal, rl := createTestBalancer("http://test.com")
 	metrics := monitoring.New(false)
-	prx := New(bal, logger, 10, 30*time.Second, metrics, "correct-key")
+	prx := New(bal, logger, 10, 30*time.Second, metrics, "correct-key", rl)
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
 	req.Header.Set("Authorization", "Bearer wrong-key")
@@ -111,9 +111,9 @@ func TestProxyRequest_ValidRequest(t *testing.T) {
 	defer mockServer.Close()
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-	bal := createTestBalancer(mockServer.URL)
+	bal, rl := createTestBalancer(mockServer.URL)
 	metrics := monitoring.New(false)
-	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key")
+	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key", rl)
 
 	reqBody := `{"model": "gpt-4", "messages": [{"role": "user", "content": "Hello"}]}`
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(reqBody))
@@ -136,9 +136,9 @@ func TestProxyRequest_WithModel(t *testing.T) {
 	defer mockServer.Close()
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-	bal := createTestBalancer(mockServer.URL)
+	bal, rl := createTestBalancer(mockServer.URL)
 	metrics := monitoring.New(false)
-	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key")
+	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key", rl)
 
 	reqBody := `{"model": "gpt-4", "messages": [{"role": "user", "content": "Test"}]}`
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(reqBody))
@@ -170,7 +170,7 @@ func TestProxyRequest_NoCredentialsAvailable(t *testing.T) {
 	f2b.RecordResponse("test1", 500)
 
 	metrics := monitoring.New(false)
-	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key")
+	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key", rl)
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
 	req.Header.Set("Authorization", "Bearer master-key")
@@ -197,7 +197,7 @@ func TestProxyRequest_RateLimitExceeded(t *testing.T) {
 
 	bal := balancer.New(credentials, f2b, rl)
 	metrics := monitoring.New(false)
-	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key")
+	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key", rl)
 
 	// Manually trigger rate limiter to exhaust the limit
 	rl.Allow("test1")
@@ -221,9 +221,9 @@ func TestProxyRequest_UpstreamError(t *testing.T) {
 	defer mockServer.Close()
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-	bal := createTestBalancer(mockServer.URL)
+	bal, rl := createTestBalancer(mockServer.URL)
 	metrics := monitoring.New(false)
-	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key")
+	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key", rl)
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
 	req.Header.Set("Authorization", "Bearer master-key")
@@ -251,9 +251,9 @@ func TestProxyRequest_Streaming(t *testing.T) {
 	defer mockServer.Close()
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-	bal := createTestBalancer(mockServer.URL)
+	bal, rl := createTestBalancer(mockServer.URL)
 	metrics := monitoring.New(false)
-	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key")
+	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key", rl)
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"stream": true}`))
 	req.Header.Set("Authorization", "Bearer master-key")
@@ -268,9 +268,9 @@ func TestProxyRequest_Streaming(t *testing.T) {
 
 func TestHealthCheck_Healthy(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-	bal := createTestBalancer("http://test.com")
+	bal, rl := createTestBalancer("http://test.com")
 	metrics := monitoring.New(false)
-	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key")
+	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key", rl)
 
 	healthy, status := prx.HealthCheck()
 
@@ -302,7 +302,7 @@ func TestHealthCheck_Unhealthy(t *testing.T) {
 	f2b.RecordResponse("test2", 500)
 
 	metrics := monitoring.New(false)
-	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key")
+	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key", rl)
 
 	healthy, status := prx.HealthCheck()
 
@@ -511,9 +511,9 @@ func TestProxyRequest_HeadersForwarding(t *testing.T) {
 	defer mockServer.Close()
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-	bal := createTestBalancer(mockServer.URL)
+	bal, rl := createTestBalancer(mockServer.URL)
 	metrics := monitoring.New(false)
-	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key")
+	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key", rl)
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
 	req.Header.Set("Authorization", "Bearer master-key")
@@ -537,9 +537,9 @@ func TestProxyRequest_QueryParameters(t *testing.T) {
 	defer mockServer.Close()
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-	bal := createTestBalancer(mockServer.URL)
+	bal, rl := createTestBalancer(mockServer.URL)
 	metrics := monitoring.New(false)
-	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key")
+	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key", rl)
 
 	req := httptest.NewRequest("GET", "/v1/models?param1=value1&param2=value2", nil)
 	req.Header.Set("Authorization", "Bearer master-key")

@@ -5,6 +5,7 @@ import (
 	"compress/gzip"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/mixaill76/auto_ai_router/internal/balancer"
 	"github.com/mixaill76/auto_ai_router/internal/monitoring"
+	"github.com/mixaill76/auto_ai_router/internal/ratelimit"
 )
 
 type Proxy struct {
@@ -23,9 +25,10 @@ type Proxy struct {
 	requestTimeout time.Duration
 	metrics        *monitoring.Metrics
 	masterKey      string
+	rateLimiter    *ratelimit.RPMLimiter
 }
 
-func New(bal *balancer.RoundRobin, logger *slog.Logger, maxBodySizeMB int, requestTimeout time.Duration, metrics *monitoring.Metrics, masterKey string) *Proxy {
+func New(bal *balancer.RoundRobin, logger *slog.Logger, maxBodySizeMB int, requestTimeout time.Duration, metrics *monitoring.Metrics, masterKey string, rateLimiter *ratelimit.RPMLimiter) *Proxy {
 	return &Proxy{
 		balancer:       bal,
 		logger:         logger,
@@ -33,6 +36,7 @@ func New(bal *balancer.RoundRobin, logger *slog.Logger, maxBodySizeMB int, reque
 		requestTimeout: requestTimeout,
 		metrics:        metrics,
 		masterKey:      masterKey,
+		rateLimiter:    rateLimiter,
 		client: &http.Client{
 			Timeout: requestTimeout,
 			CheckRedirect: func(req *http.Request, via []*http.Request) error {
@@ -133,11 +137,11 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 
 	proxyReq.Header.Set("Authorization", "Bearer "+cred.APIKey)
 
-	// Detailed debug logging
+	// Detailed debug logging (truncate long fields for readability)
 	p.logger.Debug("Proxy request details",
 		"target_url", targetURL,
 		"credential", cred.Name,
-		"request_body", string(body),
+		"request_body", truncateLongFields(string(body), 500),
 	)
 
 	// Log headers (mask Authorization for security)
@@ -200,10 +204,24 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		contentEncoding := resp.Header.Get("Content-Encoding")
 		decodedBody := decodeResponseBody(responseBody, contentEncoding)
 
+		// Extract and record token usage
+		tokens := extractTokensFromResponse(decodedBody)
+		if tokens > 0 {
+			p.rateLimiter.ConsumeTokens(cred.Name, tokens)
+			if modelID != "" {
+				p.rateLimiter.ConsumeModelTokens(cred.Name, modelID, tokens)
+			}
+			p.logger.Debug("Token usage recorded",
+				"credential", cred.Name,
+				"model", modelID,
+				"tokens", tokens,
+			)
+		}
+
 		p.logger.Debug("Proxy response body",
 			"credential", cred.Name,
 			"content_encoding", contentEncoding,
-			"body", decodedBody,
+			"body", truncateLongFields(decodedBody, 500),
 		)
 		// Replace resp.Body with a new reader for subsequent processing
 		resp.Body = io.NopCloser(bytes.NewReader(responseBody))
@@ -328,6 +346,77 @@ func decodeResponseBody(body []byte, encoding string) string {
 
 	// Return as plain text
 	return string(body)
+}
+
+// extractTokensFromResponse extracts total_tokens from the response body
+func extractTokensFromResponse(body string) int {
+	if body == "" {
+		return 0
+	}
+
+	var respBody struct {
+		Usage struct {
+			TotalTokens int `json:"total_tokens"`
+		} `json:"usage"`
+	}
+
+	if err := json.Unmarshal([]byte(body), &respBody); err != nil {
+		return 0
+	}
+
+	return respBody.Usage.TotalTokens
+}
+
+// truncateLongFields truncates long fields in JSON for logging purposes
+// This prevents extremely long base64 strings, embeddings, etc. from cluttering logs
+func truncateLongFields(body string, maxFieldLength int) string {
+	var data map[string]interface{}
+	if err := json.Unmarshal([]byte(body), &data); err != nil {
+		return body // Return as-is if not valid JSON
+	}
+
+	truncateValue(data, maxFieldLength)
+
+	truncated, err := json.Marshal(data)
+	if err != nil {
+		return body // Return original if marshaling fails
+	}
+
+	return string(truncated)
+}
+
+// truncateValue recursively truncates long string values in a map or slice
+func truncateValue(v interface{}, maxLength int) {
+	switch val := v.(type) {
+	case map[string]interface{}:
+		for key, value := range val {
+			switch key {
+			case "embedding", "b64_json", "content":
+				// Truncate known long fields more aggressively
+				if str, ok := value.(string); ok && len(str) > 50 {
+					val[key] = fmt.Sprintf("%s... [truncated %d chars]", str[:50], len(str)-50)
+				}
+			case "messages":
+				// For messages array, truncate each message content
+				if arr, ok := value.([]interface{}); ok {
+					for i := range arr {
+						truncateValue(arr[i], maxLength)
+					}
+				}
+			default:
+				// For other fields, use standard truncation or recurse
+				if str, ok := value.(string); ok && len(str) > maxLength {
+					val[key] = str[:maxLength] + "... [truncated]"
+				} else {
+					truncateValue(value, maxLength)
+				}
+			}
+		}
+	case []interface{}:
+		for _, item := range val {
+			truncateValue(item, maxLength)
+		}
+	}
 }
 
 // maskKey masks the API key for logging (shows only first 7 chars)

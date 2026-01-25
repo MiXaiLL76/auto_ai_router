@@ -275,7 +275,6 @@ func TestNextForModel_NoModelSupport(t *testing.T) {
 func TestNextForModel_ModelRPMExceeded(t *testing.T) {
 	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
 	rl := ratelimit.New()
-	rl.AddModel("gpt-4o", 1) // Very low model RPM limit
 
 	credentials := []config.CredentialConfig{
 		{Name: "cred1", APIKey: "key1", BaseURL: "http://test1.com", RPM: 100},
@@ -284,18 +283,27 @@ func TestNextForModel_ModelRPMExceeded(t *testing.T) {
 
 	bal := New(credentials, f2b, rl)
 
+	// Set very low model RPM limit for each credential
+	rl.AddModel("cred1", "gpt-4o", 1)
+	rl.AddModel("cred2", "gpt-4o", 1)
+
 	mc := NewMockModelChecker(true)
 	mc.AddModel("cred1", "gpt-4o")
 	mc.AddModel("cred2", "gpt-4o")
 
 	bal.SetModelChecker(mc)
 
-	// First request should succeed
+	// First request should succeed (uses cred1)
 	cred, err := bal.NextForModel("gpt-4o")
 	require.NoError(t, err)
 	assert.NotNil(t, cred)
 
-	// Second request should fail (model RPM exceeded)
+	// Second request should succeed (uses cred2)
+	cred, err = bal.NextForModel("gpt-4o")
+	require.NoError(t, err)
+	assert.NotNil(t, cred)
+
+	// Third request should fail (both credentials exhausted their model RPM)
 	_, err = bal.NextForModel("gpt-4o")
 	assert.Error(t, err)
 	assert.Equal(t, ErrRateLimitExceeded, err)

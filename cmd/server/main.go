@@ -63,12 +63,20 @@ func main() {
 	if cfg.Server.ReplaceV1Models {
 		modelManager.FetchModels(cfg.Credentials, cfg.Server.RequestTimeout)
 
-		// Initialize model RPM limiters
+		// Initialize model RPM and TPM limiters for each (credential, model) pair
 		modelsResp := modelManager.GetAllModels()
-		for _, model := range modelsResp.Data {
-			modelRPM := modelManager.GetModelRPM(model.ID)
-			rateLimiter.AddModel(model.ID, modelRPM)
-			log.Debug("Initialized model RPM limiter", "model", model.ID, "rpm", modelRPM)
+		for _, cred := range cfg.Credentials {
+			for _, model := range modelsResp.Data {
+				modelRPM := modelManager.GetModelRPM(model.ID)
+				modelTPM := modelManager.GetModelTPM(model.ID)
+				rateLimiter.AddModelWithTPM(cred.Name, model.ID, modelRPM, modelTPM)
+				log.Debug("Initialized model rate limiters",
+					"credential", cred.Name,
+					"model", model.ID,
+					"rpm", modelRPM,
+					"tpm", modelTPM,
+				)
+			}
 		}
 	}
 
@@ -76,7 +84,7 @@ func main() {
 	bal.SetModelChecker(modelManager)
 
 	metrics := monitoring.New(cfg.Monitoring.PrometheusEnabled)
-	prx := proxy.New(bal, log, cfg.Server.MaxBodySizeMB, cfg.Server.RequestTimeout, metrics, cfg.Server.MasterKey)
+	prx := proxy.New(bal, log, cfg.Server.MaxBodySizeMB, cfg.Server.RequestTimeout, metrics, cfg.Server.MasterKey, rateLimiter)
 
 	// Start background metrics updater
 	if cfg.Monitoring.PrometheusEnabled {
@@ -89,18 +97,17 @@ func main() {
 					rpm := rateLimiter.GetCurrentRPM(cred.Name)
 					metrics.UpdateCredentialRPM(cred.Name, rpm)
 
+					tpm := rateLimiter.GetCurrentTPM(cred.Name)
+					metrics.UpdateCredentialTPM(cred.Name, tpm)
+
 					banned := f2b.IsBanned(cred.Name)
 					metrics.UpdateCredentialBanStatus(cred.Name, banned)
 				}
 
-				// Update model RPM metrics (if enabled)
-				if cfg.Server.ReplaceV1Models {
-					for _, modelName := range rateLimiter.GetAllModels() {
-						modelRPM := rateLimiter.GetCurrentModelRPM(modelName)
-						// TODO: Add metric for model RPM if needed
-						_ = modelRPM
-					}
-				}
+				// Update model RPM/TPM metrics (if enabled)
+				// Note: GetAllModels() returns keys in format "credential:model"
+				// Metrics for individual (credential, model) pairs are not currently exported
+				// Only credential-level metrics are tracked
 			}
 		}()
 		log.Info("Metrics updater started (updates every 10 seconds)")

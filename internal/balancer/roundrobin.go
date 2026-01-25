@@ -26,6 +26,7 @@ type Credential struct {
 	APIKey  string
 	BaseURL string
 	RPM     int
+	TPM     int
 }
 
 type RoundRobin struct {
@@ -45,8 +46,14 @@ func New(credentials []config.CredentialConfig, f2b *fail2ban.Fail2Ban, rl *rate
 			APIKey:  c.APIKey,
 			BaseURL: c.BaseURL,
 			RPM:     c.RPM,
+			TPM:     c.TPM,
 		}
-		rl.AddCredential(c.Name, c.RPM)
+		// Use -1 as default for unlimited TPM if not specified
+		tpm := c.TPM
+		if tpm == 0 {
+			tpm = -1
+		}
+		rl.AddCredentialWithTPM(c.Name, c.RPM, tpm)
 	}
 
 	return &RoundRobin{
@@ -108,11 +115,27 @@ func (r *RoundRobin) next(modelID string) (*Credential, error) {
 			continue
 		}
 
+		// Check credential TPM limit
+		if !r.rateLimiter.AllowTokens(cred.Name) {
+			rateLimitHit = true
+			continue
+		}
+
 		// Check model RPM limit if model is specified
 		if modelID != "" {
-			if !r.rateLimiter.AllowModel(modelID) {
-				// Model RPM exceeded, cannot use any credential for this model
-				return nil, ErrRateLimitExceeded
+			if !r.rateLimiter.AllowModel(cred.Name, modelID) {
+				// Model RPM exceeded for this credential+model combination
+				rateLimitHit = true
+				continue
+			}
+		}
+
+		// Check model TPM limit if model is specified
+		if modelID != "" {
+			if !r.rateLimiter.AllowModelTokens(cred.Name, modelID) {
+				// Model TPM exceeded for this credential+model combination
+				rateLimitHit = true
+				continue
 			}
 		}
 

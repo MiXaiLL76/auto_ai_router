@@ -25,6 +25,7 @@ def main():
     print("Sending basic chat completion request...")
 
     try:
+        # client.images.generate(prompt="cat", model="vertex_ai/imagen-3.0-fast-generate-001")
         response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[

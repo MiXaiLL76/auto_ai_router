@@ -5,13 +5,17 @@
 ## Основные возможности
 
 - **Round-robin балансировка** с учетом доступности credentials
-- **Двухуровневый RPM контроль**: на уровне провайдеров и моделей
+- **Комбинированный контроль лимитов**:
+  - **RPM** (Requests Per Minute) - на уровне credentials и моделей
+  - **TPM** (Tokens Per Minute) - на уровне credentials и моделей
+  - Независимые лимиты для каждой пары (credential, model)
 - **Model-aware routing**: автоматический выбор провайдера по доступности модели
 - **Fail2ban механизм**: автоматический бан неработающих провайдеров
 - **Master key авторизация**: единый ключ для всех клиентов
 - **Streaming поддержка**: Server-Sent Events (SSE)
-- **Prometheus метрики**: мониторинг нагрузки и статуса
+- **Prometheus метрики**: мониторинг нагрузки, статуса и использования токенов
 - **Автоматический сбор моделей**: от всех провайдеров с объединением списков
+- **Оптимизированное логирование**: автоматическое сокращение длинных полей (embeddings, base64)
 
 ## Быстрый старт
 
@@ -52,12 +56,14 @@ credentials:
   - name: "openai_main"
     api_key: "sk-proj-..."
     base_url: "https://api.openai.com"
-    rpm: 60                          # Лимит провайдера (или -1 для отключения)
+    rpm: 100                         # Requests per minute для credential (или -1 для отключения)
+    tpm: 50000                       # Tokens per minute для credential (или 0/-1 для отключения)
 
   - name: "openai_backup"
     api_key: "sk-proj-..."
     base_url: "https://api.another.com"
-    rpm: -1                          # Без лимитов
+    rpm: 50
+    tpm: 0                           # Без лимита токенов
 
 fail2ban:
   max_attempts: 3
@@ -69,22 +75,47 @@ fail2ban:
 
 ```yaml
 models:
-  - name: gpt-4o
-    rpm: 50                          # Индивидуальный лимит модели (или -1 для отключения)
-
   - name: gpt-4o-mini
+    rpm: 60                          # Дополнительное ограничение для модели (применяется к каждому credential)
+    tpm: 30000                       # Ограничение токенов для модели (применяется к каждому credential)
+
+  - name: text-embedding-3-small
     rpm: 100
+    tpm: -1                          # Без лимита токенов для embeddings
 
   - name: gpt-3.5-turbo
-    rpm: -1                          # Без лимитов
+    rpm: -1                          # Без лимитов RPM
+    tpm: 0                           # Без лимитов TPM
 ```
 
+### Логика работы лимитов (Комбинированный подход)
+
+**Уровень 1: Credential (обязательные общие лимиты)**
+
+- Каждый credential имеет общий RPM/TPM лимит для ВСЕХ моделей вместе
+- Например: `openai_main` с `rpm: 100, tpm: 50000` - не более 100 запросов и 50000 токенов в минуту суммарно
+
+**Уровень 2: Model (опциональные ограничения)**
+
+- Лимиты из `models.yaml` применяются к КАЖДОМУ credential независимо
+- Например: `gpt-4o-mini` с `rpm: 60` означает не более 60 RPM для этой модели через КАЖДЫЙ credential
+
+**Итоговый лимит = MIN(credential_limit, model_limit)**
+
+Пример:
+
+- `openai_main`: rpm=100, tpm=50000
+- `gpt-4o-mini` в models.yaml: rpm=60, tpm=30000
+- Итог для `(openai_main, gpt-4o-mini)`: **60 RPM, 30000 TPM**
+- Итог для `(openai_main, text-embedding-3-small)` без лимитов в models.yaml: **100 RPM, 50000 TPM**
+
 **Отключение лимитов:**
-Для параметров `request_timeout`, `default_models_rpm`, `rpm` (для credentials и models) можно указать значение `-1`, чтобы отключить соответствующий лимит:
+Для отключения лимита используйте значение `-1` или `0` (для TPM):
 
 - `request_timeout: -1` - бесконечный таймаут запроса
 - `default_models_rpm: -1` - без лимита RPM по умолчанию для моделей
-- `rpm: -1` - без лимита RPM для конкретного провайдера или модели
+- `rpm: -1` - без лимита RPM для credential или модели
+- `tpm: 0` или `tpm: -1` - без лимита TPM для credential или модели
 
 ### 3. Запуск
 
@@ -132,11 +163,15 @@ response = client.chat.completions.create(
 3. **Round-robin выбирает credential** с учетом:
    - Доступности модели у провайдера
    - Credential RPM лимита
-   - Model RPM лимита
+   - Credential TPM лимита (проверка текущего использования)
+   - Model RPM лимита для пары (credential, model)
+   - Model TPM лимита для пары (credential, model)
    - Fail2ban статуса
 4. **Подменяет master_key** на реальный API ключ провайдера
 5. **Проксирует запрос** к upstream API
-6. **Возвращает ответ** клиенту (с поддержкой streaming)
+6. **Получает ответ** и извлекает `usage.total_tokens`
+7. **Обновляет счетчики TPM** для credential и модели
+8. **Возвращает ответ** клиенту (с поддержкой streaming)
 
 ## Endpoints
 

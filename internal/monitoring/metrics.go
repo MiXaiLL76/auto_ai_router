@@ -34,6 +34,14 @@ var (
 		[]string{"credential"},
 	)
 
+	CredentialTPMCurrent = promauto.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name: "auto_ai_router_credential_tpm_current",
+			Help: "Current TPM (tokens per minute) for each credential",
+		},
+		[]string{"credential"},
+	)
+
 	CredentialBanned = promauto.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Name: "auto_ai_router_credential_banned",
@@ -80,6 +88,13 @@ func (m *Metrics) UpdateCredentialRPM(credential string, rpm int) {
 		return
 	}
 	CredentialRPMCurrent.WithLabelValues(credential).Set(float64(rpm))
+}
+
+func (m *Metrics) UpdateCredentialTPM(credential string, tpm int) {
+	if !m.enabled {
+		return
+	}
+	CredentialTPMCurrent.WithLabelValues(credential).Set(float64(tpm))
 }
 
 func (m *Metrics) UpdateCredentialBanStatus(credential string, banned bool) {

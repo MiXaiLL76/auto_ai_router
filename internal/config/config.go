@@ -38,6 +38,7 @@ type CredentialConfig struct {
 	APIKey  string `yaml:"api_key"`
 	BaseURL string `yaml:"base_url"`
 	RPM     int    `yaml:"rpm"`
+	TPM     int    `yaml:"tpm"`
 }
 
 type MonitoringConfig struct {
@@ -176,6 +177,10 @@ func (c *Config) Validate() error {
 		// -1 means unlimited RPM
 		if cred.RPM <= 0 && cred.RPM != -1 {
 			return fmt.Errorf("credential %s: invalid rpm: %d (must be -1 for unlimited or positive number)", cred.Name, cred.RPM)
+		}
+		// TPM: 0 or -1 means unlimited, positive means limited
+		if cred.TPM < -1 {
+			return fmt.Errorf("credential %s: invalid tpm: %d (must be -1 or 0 for unlimited, or positive number)", cred.Name, cred.TPM)
 		}
 	}
 

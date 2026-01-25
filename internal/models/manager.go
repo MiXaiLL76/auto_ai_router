@@ -256,6 +256,18 @@ func (m *Manager) GetModelRPM(modelID string) int {
 	return m.modelsConfig.GetModelRPM(modelID, m.defaultModelsRPM)
 }
 
+// GetModelTPM returns TPM limit for a specific model
+func (m *Manager) GetModelTPM(modelID string) int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	if m.modelsConfig == nil {
+		return -1 // Unlimited by default
+	}
+
+	return m.modelsConfig.GetModelTPM(modelID, -1)
+}
+
 // updateModelsConfig updates models.yaml with newly discovered models
 func (m *Manager) updateModelsConfig() {
 	m.mu.Lock()

@@ -17,13 +17,15 @@ credentials:
     type: "openai"
     api_key: "sk-proj-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
     base_url: "https://api.openai.com"
-    rpm: 60
+    rpm: 100   # Requests per minute limit for this credential (use -1 for unlimited)
+    tpm: 50000 # Tokens per minute limit for this credential (use 0 or -1 for unlimited)
 
   - name: "openai_backup"
     type: "openai"
     api_key: "sk-proj-yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"
     base_url: "https://api.openai.com"
-    rpm: 60
+    rpm: 50
+    tpm: 25000
 
 monitoring:
   prometheus_enabled: true

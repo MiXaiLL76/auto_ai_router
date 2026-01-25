@@ -30,12 +30,12 @@ func TestAddCredential(t *testing.T) {
 func TestAddModel(t *testing.T) {
 	rl := New()
 
-	rl.AddModel("gpt-4o", 50)
-	rl.AddModel("gpt-4o-mini", 100)
+	rl.AddModel("cred1", "gpt-4o", 50)
+	rl.AddModel("cred1", "gpt-4o-mini", 100)
 
-	// Verify model limiters were created
-	assert.True(t, rl.AllowModel("gpt-4o"))
-	assert.True(t, rl.AllowModel("gpt-4o-mini"))
+	// Verify model limiters were created for cred1
+	assert.True(t, rl.AllowModel("cred1", "gpt-4o"))
+	assert.True(t, rl.AllowModel("cred1", "gpt-4o-mini"))
 }
 
 func TestAllow_UnderLimit(t *testing.T) {
@@ -96,32 +96,32 @@ func TestAllow_NonExistentCredential(t *testing.T) {
 
 func TestAllowModel_UnderLimit(t *testing.T) {
 	rl := New()
-	rl.AddModel("gpt-4o", 3)
+	rl.AddModel("cred1", "gpt-4o", 3)
 
-	// Make requests under limit
-	assert.True(t, rl.AllowModel("gpt-4o"))
-	assert.True(t, rl.AllowModel("gpt-4o"))
-	assert.True(t, rl.AllowModel("gpt-4o"))
+	// Make requests under limit for cred1
+	assert.True(t, rl.AllowModel("cred1", "gpt-4o"))
+	assert.True(t, rl.AllowModel("cred1", "gpt-4o"))
+	assert.True(t, rl.AllowModel("cred1", "gpt-4o"))
 
 	// 4th request should be denied
-	assert.False(t, rl.AllowModel("gpt-4o"))
+	assert.False(t, rl.AllowModel("cred1", "gpt-4o"))
 }
 
 func TestAllowModel_UnlimitedRPM(t *testing.T) {
 	rl := New()
-	rl.AddModel("gpt-4o", -1) // Unlimited
+	rl.AddModel("cred1", "gpt-4o", -1) // Unlimited
 
 	// Make many requests - all should be allowed
 	for i := 0; i < 500; i++ {
-		assert.True(t, rl.AllowModel("gpt-4o"))
+		assert.True(t, rl.AllowModel("cred1", "gpt-4o"))
 	}
 }
 
 func TestAllowModel_NonTrackedModel(t *testing.T) {
 	rl := New()
 
-	// Model not in limiters - should allow (default behavior)
-	assert.True(t, rl.AllowModel("unknown-model"))
+	// Model not tracked for cred1 - should allow (default behavior)
+	assert.True(t, rl.AllowModel("cred1", "unknown-model"))
 }
 
 func TestGetCurrentRPM(t *testing.T) {
@@ -149,18 +149,18 @@ func TestGetCurrentRPM_NonExistentCredential(t *testing.T) {
 
 func TestGetCurrentModelRPM(t *testing.T) {
 	rl := New()
-	rl.AddModel("gpt-4o", 100)
+	rl.AddModel("cred1", "gpt-4o", 100)
 
 	// Initial RPM should be 0
-	assert.Equal(t, 0, rl.GetCurrentModelRPM("gpt-4o"))
+	assert.Equal(t, 0, rl.GetCurrentModelRPM("cred1", "gpt-4o"))
 
-	// Make 5 requests
+	// Make 5 requests for cred1:gpt-4o
 	for i := 0; i < 5; i++ {
-		rl.AllowModel("gpt-4o")
+		rl.AllowModel("cred1", "gpt-4o")
 	}
 
 	// Current RPM should be 5
-	assert.Equal(t, 5, rl.GetCurrentModelRPM("gpt-4o"))
+	assert.Equal(t, 5, rl.GetCurrentModelRPM("cred1", "gpt-4o"))
 }
 
 func TestGetAllModels(t *testing.T) {
@@ -170,16 +170,17 @@ func TestGetAllModels(t *testing.T) {
 	models := rl.GetAllModels()
 	assert.Len(t, models, 0)
 
-	// Add models
-	rl.AddModel("gpt-4o", 50)
-	rl.AddModel("gpt-4o-mini", 100)
-	rl.AddModel("gpt-3.5-turbo", 150)
+	// Add models for cred1
+	rl.AddModel("cred1", "gpt-4o", 50)
+	rl.AddModel("cred1", "gpt-4o-mini", 100)
+	rl.AddModel("cred2", "gpt-3.5-turbo", 150)
 
 	models = rl.GetAllModels()
 	assert.Len(t, models, 3)
-	assert.Contains(t, models, "gpt-4o")
-	assert.Contains(t, models, "gpt-4o-mini")
-	assert.Contains(t, models, "gpt-3.5-turbo")
+	// Now models are returned as "credential:model" keys
+	assert.Contains(t, models, "cred1:gpt-4o")
+	assert.Contains(t, models, "cred1:gpt-4o-mini")
+	assert.Contains(t, models, "cred2:gpt-3.5-turbo")
 }
 
 func TestSlidingWindow_Cleanup(t *testing.T) {
@@ -252,7 +253,7 @@ func TestConcurrency_Credential(t *testing.T) {
 
 func TestConcurrency_Model(t *testing.T) {
 	rl := New()
-	rl.AddModel("gpt-4o", 1000)
+	rl.AddModel("cred1", "gpt-4o", 1000)
 
 	var wg sync.WaitGroup
 	numGoroutines := 30
@@ -264,7 +265,7 @@ func TestConcurrency_Model(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for j := 0; j < requestsPerGoroutine; j++ {
-				rl.AllowModel("gpt-4o")
+				rl.AllowModel("cred1", "gpt-4o")
 			}
 		}()
 	}
@@ -275,7 +276,7 @@ func TestConcurrency_Model(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for j := 0; j < requestsPerGoroutine; j++ {
-				_ = rl.GetCurrentModelRPM("gpt-4o")
+				_ = rl.GetCurrentModelRPM("cred1", "gpt-4o")
 			}
 		}()
 	}
@@ -284,7 +285,7 @@ func TestConcurrency_Model(t *testing.T) {
 
 	// Verify total requests
 	totalRequests := numGoroutines * requestsPerGoroutine
-	currentRPM := rl.GetCurrentModelRPM("gpt-4o")
+	currentRPM := rl.GetCurrentModelRPM("cred1", "gpt-4o")
 	assert.Equal(t, totalRequests, currentRPM)
 }
 
@@ -317,22 +318,22 @@ func TestMultipleCredentials(t *testing.T) {
 
 func TestMultipleModels(t *testing.T) {
 	rl := New()
-	rl.AddModel("gpt-4o", 2)
-	rl.AddModel("gpt-4o-mini", 5)
+	rl.AddModel("cred1", "gpt-4o", 2)
+	rl.AddModel("cred1", "gpt-4o-mini", 5)
 
-	// Make requests to different models
-	rl.AllowModel("gpt-4o")
-	rl.AllowModel("gpt-4o")
-	rl.AllowModel("gpt-4o-mini")
+	// Make requests to different models for cred1
+	rl.AllowModel("cred1", "gpt-4o")
+	rl.AllowModel("cred1", "gpt-4o")
+	rl.AllowModel("cred1", "gpt-4o-mini")
 
-	// Verify independent counters
-	assert.Equal(t, 2, rl.GetCurrentModelRPM("gpt-4o"))
-	assert.Equal(t, 1, rl.GetCurrentModelRPM("gpt-4o-mini"))
+	// Verify independent counters per (credential, model)
+	assert.Equal(t, 2, rl.GetCurrentModelRPM("cred1", "gpt-4o"))
+	assert.Equal(t, 1, rl.GetCurrentModelRPM("cred1", "gpt-4o-mini"))
 
-	// gpt-4o should be at limit
-	assert.False(t, rl.AllowModel("gpt-4o"))
-	// gpt-4o-mini should still allow
-	assert.True(t, rl.AllowModel("gpt-4o-mini"))
+	// cred1:gpt-4o should be at limit
+	assert.False(t, rl.AllowModel("cred1", "gpt-4o"))
+	// cred1:gpt-4o-mini should still allow
+	assert.True(t, rl.AllowModel("cred1", "gpt-4o-mini"))
 }
 
 func TestAllow_RapidRequests(t *testing.T) {
