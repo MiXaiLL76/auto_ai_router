@@ -388,3 +388,37 @@ func (r *RPMLimiter) GetCurrentModelTPM(credentialName, modelName string) int {
 
 	return count
 }
+
+// GetModelLimitRPM returns the RPM limit for a model within a credential
+func (r *RPMLimiter) GetModelLimitRPM(credentialName, modelName string) int {
+	r.mu.RLock()
+	key := makeModelKey(credentialName, modelName)
+	modelLimiter, exists := r.modelLimiters[key]
+	r.mu.RUnlock()
+
+	if !exists {
+		return -1 // Not tracked
+	}
+
+	modelLimiter.mu.Lock()
+	defer modelLimiter.mu.Unlock()
+
+	return modelLimiter.rpm
+}
+
+// GetModelLimitTPM returns the TPM limit for a model within a credential
+func (r *RPMLimiter) GetModelLimitTPM(credentialName, modelName string) int {
+	r.mu.RLock()
+	key := makeModelKey(credentialName, modelName)
+	modelLimiter, exists := r.modelLimiters[key]
+	r.mu.RUnlock()
+
+	if !exists {
+		return -1 // Not tracked
+	}
+
+	modelLimiter.mu.Lock()
+	defer modelLimiter.mu.Unlock()
+
+	return modelLimiter.tpm
+}

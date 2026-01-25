@@ -3,9 +3,11 @@ package proxy
 import (
 	"bytes"
 	"compress/gzip"
+	_ "embed"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html/template"
 	"io"
 	"log/slog"
 	"net/http"
@@ -16,6 +18,9 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/monitoring"
 	"github.com/mixaill76/auto_ai_router/internal/ratelimit"
 )
+
+//go:embed health.html
+var healthHTML string
 
 type Proxy struct {
 	balancer       *balancer.RoundRobin
@@ -294,11 +299,46 @@ func (p *Proxy) HealthCheck() (bool, map[string]interface{}) {
 
 	healthy := availableCreds > 0
 
+	// Collect credentials info
+	credentialsInfo := make(map[string]interface{})
+	for _, cred := range p.balancer.GetCredentials() {
+		credentialsInfo[cred.Name] = map[string]interface{}{
+			"current_rpm": p.rateLimiter.GetCurrentRPM(cred.Name),
+			"current_tpm": p.rateLimiter.GetCurrentTPM(cred.Name),
+			"limit_rpm":   cred.RPM,
+			"limit_tpm":   cred.TPM,
+		}
+	}
+
+	// Collect models info
+	modelsInfo := make(map[string]interface{})
+	for _, modelKey := range p.rateLimiter.GetAllModels() {
+		// Parse "credential:model" format
+		parts := strings.Split(modelKey, ":")
+		if len(parts) != 2 {
+			continue
+		}
+		credentialName := parts[0]
+		modelName := parts[1]
+
+		// Use "credential:model" as key to handle same model across different credentials
+		modelsInfo[modelKey] = map[string]interface{}{
+			"credential":  credentialName,
+			"model":       modelName,
+			"current_rpm": p.rateLimiter.GetCurrentModelRPM(credentialName, modelName),
+			"current_tpm": p.rateLimiter.GetCurrentModelTPM(credentialName, modelName),
+			"limit_rpm":   p.rateLimiter.GetModelLimitRPM(credentialName, modelName),
+			"limit_tpm":   p.rateLimiter.GetModelLimitTPM(credentialName, modelName),
+		}
+	}
+
 	status := map[string]interface{}{
 		"status":                "healthy",
 		"credentials_available": availableCreds,
 		"credentials_banned":    bannedCreds,
 		"total_credentials":     totalCreds,
+		"credentials":           credentialsInfo,
+		"models":                modelsInfo,
 	}
 
 	if !healthy {
@@ -425,4 +465,35 @@ func maskKey(key string) string {
 		return "***"
 	}
 	return key[:7] + "..."
+}
+
+// VisualHealthCheck renders an HTML dashboard with health check information
+func (p *Proxy) VisualHealthCheck(w http.ResponseWriter, r *http.Request) {
+	_, status := p.HealthCheck()
+
+	// Parse template with custom functions
+	tmpl, err := template.New("health").Funcs(template.FuncMap{
+		"div": func(a, b int) int {
+			if b == 0 {
+				return 0
+			}
+			return a / b
+		},
+		"mul": func(a, b int) int {
+			return a * b
+		},
+	}).Parse(healthHTML)
+
+	if err != nil {
+		p.logger.Error("Failed to parse health template", "error", err)
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+
+	if err := tmpl.Execute(w, status); err != nil {
+		p.logger.Error("Failed to execute health template", "error", err)
+	}
 }

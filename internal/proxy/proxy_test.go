@@ -279,6 +279,18 @@ func TestHealthCheck_Healthy(t *testing.T) {
 	assert.Equal(t, 2, status["total_credentials"])
 	assert.Equal(t, 2, status["credentials_available"])
 	assert.Equal(t, 0, status["credentials_banned"])
+
+	// Check credentials info is present
+	assert.Contains(t, status, "credentials")
+	credentialsInfo, ok := status["credentials"].(map[string]interface{})
+	assert.True(t, ok)
+	assert.Len(t, credentialsInfo, 2)
+
+	// Check models info is present (even if empty)
+	assert.Contains(t, status, "models")
+	modelsInfo, ok := status["models"].(map[string]interface{})
+	assert.True(t, ok)
+	assert.NotNil(t, modelsInfo)
 }
 
 func TestHealthCheck_Unhealthy(t *testing.T) {
@@ -311,6 +323,86 @@ func TestHealthCheck_Unhealthy(t *testing.T) {
 	assert.Equal(t, 2, status["total_credentials"])
 	assert.Equal(t, 0, status["credentials_available"])
 	assert.Equal(t, 2, status["credentials_banned"])
+
+	// Check credentials info is present even when unhealthy
+	assert.Contains(t, status, "credentials")
+	credentialsInfo, ok := status["credentials"].(map[string]interface{})
+	assert.True(t, ok)
+	assert.Len(t, credentialsInfo, 2)
+
+	// Check models info is present
+	assert.Contains(t, status, "models")
+}
+
+func TestHealthCheck_WithModels(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+	f2b := fail2ban.New(3, 0, []int{500})
+	rl := ratelimit.New()
+
+	credentials := []config.CredentialConfig{
+		{Name: "test1", APIKey: "key1", BaseURL: "http://test.com", RPM: 100, TPM: 100000},
+		{Name: "test2", APIKey: "key2", BaseURL: "http://test.com", RPM: 50, TPM: 50000},
+	}
+
+	// Create balancer (it will add credentials to rate limiter)
+	bal := balancer.New(credentials, f2b, rl)
+
+	// Add some models with limits
+	rl.AddModelWithTPM("test1", "gpt-4", 10, 30000)
+	rl.AddModelWithTPM("test1", "gpt-3.5-turbo", 20, 40000)
+	rl.AddModelWithTPM("test2", "gpt-4", 5, 15000)
+
+	// Simulate some usage
+	rl.Allow("test1")
+	rl.Allow("test1")
+	rl.ConsumeTokens("test1", 5000)
+
+	rl.AllowModel("test1", "gpt-4")
+	rl.ConsumeModelTokens("test1", "gpt-4", 2000)
+
+	metrics := monitoring.New(false)
+	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key", rl)
+
+	healthy, status := prx.HealthCheck()
+
+	assert.True(t, healthy)
+	assert.Equal(t, "healthy", status["status"])
+
+	// Check credentials info
+	credentialsInfo, ok := status["credentials"].(map[string]interface{})
+	assert.True(t, ok)
+	assert.Len(t, credentialsInfo, 2)
+
+	// Check test1 credential details
+	test1Info, ok := credentialsInfo["test1"].(map[string]interface{})
+	assert.True(t, ok)
+	assert.Equal(t, 2, test1Info["current_rpm"])
+	assert.Equal(t, 5000, test1Info["current_tpm"])
+	assert.Equal(t, 100, test1Info["limit_rpm"])
+	assert.Equal(t, 100000, test1Info["limit_tpm"])
+
+	// Check models info
+	modelsInfo, ok := status["models"].(map[string]interface{})
+	assert.True(t, ok)
+	assert.Len(t, modelsInfo, 3) // 3 models added
+
+	// Check test1:gpt-4 model details
+	gpt4Info, ok := modelsInfo["test1:gpt-4"].(map[string]interface{})
+	assert.True(t, ok)
+	assert.Equal(t, "test1", gpt4Info["credential"])
+	assert.Equal(t, "gpt-4", gpt4Info["model"])
+	assert.Equal(t, 1, gpt4Info["current_rpm"])    // 1 request made
+	assert.Equal(t, 2000, gpt4Info["current_tpm"]) // 2000 tokens consumed
+	assert.Equal(t, 10, gpt4Info["limit_rpm"])     // RPM limit
+	assert.Equal(t, 30000, gpt4Info["limit_tpm"])  // TPM limit
+
+	// Check test1:gpt-3.5-turbo model details
+	gpt35Info, ok := modelsInfo["test1:gpt-3.5-turbo"].(map[string]interface{})
+	assert.True(t, ok)
+	assert.Equal(t, "test1", gpt35Info["credential"])
+	assert.Equal(t, "gpt-3.5-turbo", gpt35Info["model"])
+	assert.Equal(t, 20, gpt35Info["limit_rpm"])    // RPM limit
+	assert.Equal(t, 40000, gpt35Info["limit_tpm"]) // TPM limit
 }
 
 func TestExtractModelFromBody(t *testing.T) {

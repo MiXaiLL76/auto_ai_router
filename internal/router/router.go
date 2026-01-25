@@ -29,6 +29,12 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
+	// Visual health dashboard
+	if req.URL.Path == "/vhealth" {
+		r.handleVisualHealth(w, req)
+		return
+	}
+
 	// Handle GET /v1/models if model manager is enabled
 	if req.URL.Path == "/v1/models" && req.Method == "GET" && r.modelManager != nil && r.modelManager.IsEnabled() {
 		r.handleModels(w, req)
@@ -67,4 +73,8 @@ func (r *Router) handleModels(w http.ResponseWriter, req *http.Request) {
 	if err := json.NewEncoder(w).Encode(modelsResp); err != nil {
 		http.Error(w, "Failed to encode response", http.StatusInternalServerError)
 	}
+}
+
+func (r *Router) handleVisualHealth(w http.ResponseWriter, req *http.Request) {
+	r.proxy.VisualHealthCheck(w, req)
 }

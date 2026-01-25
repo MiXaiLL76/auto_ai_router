@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>System Health Status</title>
+    <style>
+        :root {
+            --bg: #f4f7f6; --card: #ffffff; --text: #2d3436;
+            --accent: #00b894; --accent-error: #d63031; --border: #dfe6e9;
+        }
+        body { font-family: -apple-system, system-ui, sans-serif; background: var(--bg); color: var(--text); margin: 0; padding: 2rem; }
+        .container { max-width: 1200px; margin: 0 auto; }
+        header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 2rem; }
+        .status-badge { padding: 0.5rem 1rem; border-radius: 20px; background: var(--accent); color: white; font-weight: bold; font-size: 0.9rem; }
+        .status-badge.unhealthy { background: var(--accent-error); }
+        .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 1.5rem; }
+        .card { background: var(--card); padding: 1.5rem; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); border: 1px solid var(--border); }
+        .card h3 { margin: 0 0 1rem 0; font-size: 1.1rem; color: #636e72; border-bottom: 1px solid var(--border); padding-bottom: 0.5rem; }
+        .stat { display: flex; justify-content: space-between; margin-bottom: 0.5rem; font-size: 0.95rem; }
+        .stat span:last-child { font-weight: 600; color: var(--accent); }
+        .progress-bar { height: 8px; background: var(--border); border-radius: 4px; overflow: hidden; margin-top: 0.3rem; }
+        .progress-fill { height: 100%; background: var(--accent); transition: width 0.3s ease; }
+        .progress-fill.high { background: #fdcb6e; }
+        .progress-fill.critical { background: var(--accent-error); }
+        .model-list { margin-top: 2rem; font-size: 0.85rem; max-height: 400px; overflow-y: auto; padding-right: 10px; }
+        .model-item { padding: 0.8rem; border-bottom: 1px solid var(--border); display: grid; grid-template-columns: 2fr 3fr; gap: 1rem; align-items: center; }
+        .model-name { font-weight: 600; color: var(--text); }
+        .model-cred { color: #b2bec3; font-size: 0.9em; }
+        .model-stats { display: grid; grid-template-columns: repeat(2, 1fr); gap: 1rem; font-size: 0.85em; }
+        .model-stat { display: flex; flex-direction: column; }
+        .model-stat-label { color: #b2bec3; font-size: 0.85em; }
+        .model-stat-value { font-weight: 600; color: var(--accent); }
+        .model-stat-usage { display: flex; align-items: center; gap: 0.5rem; }
+        .model-usage-bar { flex: 1; height: 6px; background: var(--border); border-radius: 3px; overflow: hidden; }
+        .model-usage-fill { height: 100%; background: var(--accent); transition: width 0.3s ease; }
+        .model-usage-fill.high { background: #fdcb6e; }
+        .model-usage-fill.critical { background: var(--accent-error); }
+        .sort-controls { display: flex; gap: 0.5rem; margin-bottom: 1rem; flex-wrap: wrap; }
+        .sort-btn { padding: 0.5rem 1rem; border: 1px solid var(--border); background: white; border-radius: 6px; cursor: pointer; font-size: 0.85rem; transition: all 0.2s; }
+        .sort-btn:hover { background: var(--bg); }
+        .sort-btn.active { background: var(--accent); color: white; border-color: var(--accent); }
+        ::-webkit-scrollbar { width: 5px; }
+        ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 10px; }
+        .summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 1rem; margin-bottom: 2rem; }
+        .summary-item { background: var(--card); padding: 1rem; border-radius: 8px; text-align: center; border: 1px solid var(--border); }
+        .summary-value { font-size: 2rem; font-weight: bold; color: var(--accent); }
+        .summary-label { font-size: 0.85rem; color: #b2bec3; margin-top: 0.5rem; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>🚀 System Health Dashboard</h1>
+            <div class="status-badge{{ if ne .status "healthy" }} unhealthy{{ end }}">{{ .status }}</div>
+        </header>
+
+        <div class="summary">
+            <div class="summary-item">
+                <div class="summary-value">{{ .total_credentials }}</div>
+                <div class="summary-label">Total Credentials</div>
+            </div>
+            <div class="summary-item">
+                <div class="summary-value">{{ .credentials_available }}</div>
+                <div class="summary-label">Available</div>
+            </div>
+            <div class="summary-item">
+                <div class="summary-value">{{ .credentials_banned }}</div>
+                <div class="summary-label">Banned</div>
+            </div>
+            <div class="summary-item">
+                <div class="summary-value">{{ len .models }}</div>
+                <div class="summary-label">Active Models</div>
+            </div>
+        </div>
+
+        <h2 style="margin-bottom: 1rem; color: #636e72;">Credentials</h2>
+        <div class="grid">
+            {{ range $name, $cred := .credentials }}
+            <div class="card">
+                <h3>{{ $name }}</h3>
+                <div class="stat">
+                    <span>RPM Usage:</span>
+                    <span>{{ $cred.current_rpm }} / {{ $cred.limit_rpm }}</span>
+                </div>
+                <div class="progress-bar">
+                    {{ $rpmPercent := 0 }}
+                    {{ if gt $cred.limit_rpm 0 }}
+                        {{ $rpmPercent = div (mul $cred.current_rpm 100) $cred.limit_rpm }}
+                    {{ end }}
+                    <div class="progress-fill{{ if gt $rpmPercent 80 }} critical{{ else if gt $rpmPercent 60 }} high{{ end }}" style="width: {{ $rpmPercent }}%"></div>
+                </div>
+
+                <div class="stat" style="margin-top: 1rem;">
+                    <span>TPM Usage:</span>
+                    <span>{{ $cred.current_tpm }} / {{ $cred.limit_tpm }}</span>
+                </div>
+                <div class="progress-bar">
+                    {{ $tpmPercent := 0 }}
+                    {{ if gt $cred.limit_tpm 0 }}
+                        {{ $tpmPercent = div (mul $cred.current_tpm 100) $cred.limit_tpm }}
+                    {{ end }}
+                    <div class="progress-fill{{ if gt $tpmPercent 80 }} critical{{ else if gt $tpmPercent 60 }} high{{ end }}" style="width: {{ $tpmPercent }}%"></div>
+                </div>
+            </div>
+            {{ end }}
+        </div>
+
+        <section class="card" style="margin-top: 2rem;">
+            <h3>📊 Active Models ({{ len .models }})</h3>
+            <div class="sort-controls">
+                <button class="sort-btn active" onclick="sortModels('name')">Sort by Name</button>
+                <button class="sort-btn" onclick="sortModels('rpm')">Sort by RPM Usage</button>
+                <button class="sort-btn" onclick="sortModels('tpm')">Sort by TPM Usage</button>
+                <button class="sort-btn" onclick="sortModels('credential')">Sort by Credential</button>
+            </div>
+            <div class="model-list" id="modelList">
+                {{ range $id, $model := .models }}
+                <div class="model-item"
+                     data-name="{{ $model.model }}"
+                     data-credential="{{ $model.credential }}"
+                     data-rpm="{{ $model.current_rpm }}"
+                     data-rpm-limit="{{ $model.limit_rpm }}"
+                     data-tpm="{{ $model.current_tpm }}"
+                     data-tpm-limit="{{ $model.limit_tpm }}">
+                    <div>
+                        <div class="model-name">{{ $model.model }}</div>
+                        <div class="model-cred">Credential: {{ $model.credential }}</div>
+                    </div>
+                    <div class="model-stats">
+                        <div class="model-stat">
+                            <span class="model-stat-label">RPM Usage</span>
+                            <div class="model-stat-usage">
+                                <span class="model-stat-value">{{ $model.current_rpm }}/{{ $model.limit_rpm }}</span>
+                                <div class="model-usage-bar">
+                                    {{ $rpmPercent := 0 }}
+                                    {{ if gt $model.limit_rpm 0 }}
+                                        {{ $rpmPercent = div (mul $model.current_rpm 100) $model.limit_rpm }}
+                                    {{ end }}
+                                    <div class="model-usage-fill{{ if gt $rpmPercent 80 }} critical{{ else if gt $rpmPercent 60 }} high{{ end }}" style="width: {{ $rpmPercent }}%"></div>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="model-stat">
+                            <span class="model-stat-label">TPM Usage</span>
+                            <div class="model-stat-usage">
+                                <span class="model-stat-value">{{ $model.current_tpm }}/{{ $model.limit_tpm }}</span>
+                                <div class="model-usage-bar">
+                                    {{ $tpmPercent := 0 }}
+                                    {{ if gt $model.limit_tpm 0 }}
+                                        {{ $tpmPercent = div (mul $model.current_tpm 100) $model.limit_tpm }}
+                                    {{ end }}
+                                    <div class="model-usage-fill{{ if gt $tpmPercent 80 }} critical{{ else if gt $tpmPercent 60 }} high{{ end }}" style="width: {{ $tpmPercent }}%"></div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                {{ end }}
+            </div>
+        </section>
+    </div>
+
+    <script>
+        let currentSort = 'name';
+        let sortAscending = true;
+
+        function sortModels(type) {
+            const container = document.getElementById('modelList');
+            const items = Array.from(container.getElementsByClassName('model-item'));
+
+            // Toggle sort direction if clicking the same button
+            if (currentSort === type) {
+                sortAscending = !sortAscending;
+            } else {
+                sortAscending = type === 'name' || type === 'credential';
+                currentSort = type;
+            }
+
+            // Update active button
+            document.querySelectorAll('.sort-btn').forEach(btn => btn.classList.remove('active'));
+            event.target.classList.add('active');
+
+            items.sort((a, b) => {
+                let aVal, bVal;
+
+                switch(type) {
+                    case 'name':
+                        aVal = a.dataset.name.toLowerCase();
+                        bVal = b.dataset.name.toLowerCase();
+                        break;
+                    case 'credential':
+                        aVal = a.dataset.credential.toLowerCase();
+                        bVal = b.dataset.credential.toLowerCase();
+                        break;
+                    case 'rpm':
+                        const aRpmPercent = parseInt(a.dataset.rpm) / parseInt(a.dataset.rpmLimit) * 100;
+                        const bRpmPercent = parseInt(b.dataset.rpm) / parseInt(b.dataset.rpmLimit) * 100;
+                        aVal = aRpmPercent;
+                        bVal = bRpmPercent;
+                        break;
+                    case 'tpm':
+                        const aTpmPercent = parseInt(a.dataset.tpm) / parseInt(a.dataset.tpmLimit) * 100;
+                        const bTpmPercent = parseInt(b.dataset.tpm) / parseInt(b.dataset.tpmLimit) * 100;
+                        aVal = aTpmPercent;
+                        bVal = bTpmPercent;
+                        break;
+                }
+
+                if (aVal < bVal) return sortAscending ? -1 : 1;
+                if (aVal > bVal) return sortAscending ? 1 : -1;
+                return 0;
+            });
+
+            // Re-append sorted items
+            items.forEach(item => container.appendChild(item));
+        }
+    </script>
+</body>
+</html>
+    </div>
+</body>
+</html>

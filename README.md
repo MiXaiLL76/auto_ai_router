@@ -177,5 +177,6 @@ response = client.chat.completions.create(
 
 - `POST /v1/chat/completions` - Chat completions (с model-aware routing)
 - `GET /v1/models` - Объединенный список моделей от всех провайдеров
-- `GET /health` - Health check
+- `GET /health` - Health check (JSON)
+- `GET /vhealth` - Визуальный дашборд здоровья системы с метриками по credentials и моделям
 - `GET /metrics` - Prometheus метрики
