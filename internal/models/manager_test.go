@@ -16,7 +16,7 @@ import (
 func TestNew(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
 
-	manager := New(logger, true, 100, "/tmp/models_test.yaml")
+	manager := New(logger, true, 100, "/tmp/models_test.yaml", []config.ModelRPMConfig{})
 
 	assert.NotNil(t, manager)
 	assert.True(t, manager.enabled)
@@ -29,7 +29,7 @@ func TestNew(t *testing.T) {
 func TestNew_Disabled(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
 
-	manager := New(logger, false, 50, "/tmp/models_test.yaml")
+	manager := New(logger, false, 50, "/tmp/models_test.yaml", []config.ModelRPMConfig{})
 
 	assert.NotNil(t, manager)
 	assert.False(t, manager.enabled)
@@ -58,7 +58,7 @@ func TestFetchModels_Success(t *testing.T) {
 	defer mockServer.Close()
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-	manager := New(logger, true, 100, "/tmp/models_test_fetch.yaml")
+	manager := New(logger, true, 100, "/tmp/models_test_fetch.yaml", []config.ModelRPMConfig{})
 
 	credentials := []config.CredentialConfig{
 		{Name: "test1", APIKey: "key1", BaseURL: mockServer.URL, RPM: 100},
@@ -103,7 +103,7 @@ func TestFetchModels_MultipleCredentials(t *testing.T) {
 	defer mockServer2.Close()
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-	manager := New(logger, true, 100, "/tmp/models_test_multi.yaml")
+	manager := New(logger, true, 100, "/tmp/models_test_multi.yaml", []config.ModelRPMConfig{})
 
 	credentials := []config.CredentialConfig{
 		{Name: "test1", APIKey: "key1", BaseURL: mockServer1.URL, RPM: 100},
@@ -142,7 +142,7 @@ func TestFetchModels_PartialFailure(t *testing.T) {
 	defer mockServer.Close()
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-	manager := New(logger, true, 100, "/tmp/models_test_partial.yaml")
+	manager := New(logger, true, 100, "/tmp/models_test_partial.yaml", []config.ModelRPMConfig{})
 
 	credentials := []config.CredentialConfig{
 		{Name: "working", APIKey: "key1", BaseURL: mockServer.URL, RPM: 100},
@@ -159,7 +159,7 @@ func TestFetchModels_PartialFailure(t *testing.T) {
 
 func TestFetchModels_Disabled(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-	manager := New(logger, false, 100, "/tmp/models_test_disabled.yaml")
+	manager := New(logger, false, 100, "/tmp/models_test_disabled.yaml", []config.ModelRPMConfig{})
 
 	credentials := []config.CredentialConfig{
 		{Name: "test1", APIKey: "key1", BaseURL: "http://test.com", RPM: 100},
@@ -181,7 +181,7 @@ func TestFetchModels_ErrorResponse(t *testing.T) {
 	defer mockServer.Close()
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-	manager := New(logger, true, 100, "/tmp/models_test_error.yaml")
+	manager := New(logger, true, 100, "/tmp/models_test_error.yaml", []config.ModelRPMConfig{})
 
 	credentials := []config.CredentialConfig{
 		{Name: "test1", APIKey: "invalid", BaseURL: mockServer.URL, RPM: 100},
@@ -196,7 +196,7 @@ func TestFetchModels_ErrorResponse(t *testing.T) {
 
 func TestGetAllModels(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-	manager := New(logger, true, 100, "/tmp/models_test_getall.yaml")
+	manager := New(logger, true, 100, "/tmp/models_test_getall.yaml", []config.ModelRPMConfig{})
 
 	// Manually add some models
 	manager.allModels = []Model{
@@ -214,7 +214,7 @@ func TestGetAllModels(t *testing.T) {
 
 func TestGetAllModels_Empty(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-	manager := New(logger, true, 100, "/tmp/models_test_empty.yaml")
+	manager := New(logger, true, 100, "/tmp/models_test_empty.yaml", []config.ModelRPMConfig{})
 
 	result := manager.GetAllModels()
 
@@ -224,7 +224,7 @@ func TestGetAllModels_Empty(t *testing.T) {
 
 func TestGetCredentialsForModel(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-	manager := New(logger, true, 100, "/tmp/models_test_getcreds.yaml")
+	manager := New(logger, true, 100, "/tmp/models_test_getcreds.yaml", []config.ModelRPMConfig{})
 
 	manager.modelToCredentials["gpt-4"] = []string{"test1", "test2"}
 	manager.modelToCredentials["gpt-3.5-turbo"] = []string{"test1"}
@@ -247,7 +247,7 @@ func TestGetCredentialsForModel(t *testing.T) {
 
 func TestGetCredentialsForModel_Disabled(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-	manager := New(logger, false, 100, "/tmp/models_test_disabled2.yaml")
+	manager := New(logger, false, 100, "/tmp/models_test_disabled2.yaml", []config.ModelRPMConfig{})
 
 	manager.modelToCredentials["gpt-4"] = []string{"test1"}
 
@@ -258,7 +258,7 @@ func TestGetCredentialsForModel_Disabled(t *testing.T) {
 
 func TestHasModel(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-	manager := New(logger, true, 100, "/tmp/models_test_hasmodel.yaml")
+	manager := New(logger, true, 100, "/tmp/models_test_hasmodel.yaml", []config.ModelRPMConfig{})
 
 	manager.credentialModels["test1"] = []string{"gpt-4", "gpt-3.5-turbo"}
 	manager.credentialModels["test2"] = []string{"claude-3"}
@@ -280,7 +280,7 @@ func TestHasModel(t *testing.T) {
 
 func TestHasModel_Disabled(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-	manager := New(logger, false, 100, "/tmp/models_test_disabled3.yaml")
+	manager := New(logger, false, 100, "/tmp/models_test_disabled3.yaml", []config.ModelRPMConfig{})
 
 	manager.credentialModels["test1"] = []string{"gpt-4"}
 
@@ -292,16 +292,16 @@ func TestHasModel_Disabled(t *testing.T) {
 func TestIsEnabled(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
 
-	manager1 := New(logger, true, 100, "/tmp/test.yaml")
+	manager1 := New(logger, true, 100, "/tmp/test.yaml", []config.ModelRPMConfig{})
 	assert.True(t, manager1.IsEnabled())
 
-	manager2 := New(logger, false, 100, "/tmp/test.yaml")
+	manager2 := New(logger, false, 100, "/tmp/test.yaml", []config.ModelRPMConfig{})
 	assert.False(t, manager2.IsEnabled())
 }
 
 func TestGetModelRPM(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-	manager := New(logger, true, 50, "/tmp/models_test_getrpm.yaml")
+	manager := New(logger, true, 50, "/tmp/models_test_getrpm.yaml", []config.ModelRPMConfig{})
 
 	// Mock models config
 	manager.modelsConfig = &config.ModelsConfig{
@@ -325,7 +325,7 @@ func TestGetModelRPM(t *testing.T) {
 
 func TestGetModelRPM_NilConfig(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-	manager := New(logger, true, 75, "/tmp/models_test_nilconfig.yaml")
+	manager := New(logger, true, 75, "/tmp/models_test_nilconfig.yaml", []config.ModelRPMConfig{})
 
 	manager.modelsConfig = nil
 
@@ -344,7 +344,7 @@ func TestFetchModelsFromCredential_InvalidJSON(t *testing.T) {
 	defer mockServer.Close()
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-	manager := New(logger, true, 100, "/tmp/test.yaml")
+	manager := New(logger, true, 100, "/tmp/test.yaml", []config.ModelRPMConfig{})
 
 	client := &http.Client{Timeout: 5 * time.Second}
 	cred := config.CredentialConfig{
@@ -369,7 +369,7 @@ func TestFetchModelsFromCredential_Timeout(t *testing.T) {
 	defer mockServer.Close()
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-	manager := New(logger, true, 100, "/tmp/test.yaml")
+	manager := New(logger, true, 100, "/tmp/test.yaml", []config.ModelRPMConfig{})
 
 	client := &http.Client{Timeout: 100 * time.Millisecond} // Short timeout
 	cred := config.CredentialConfig{
@@ -399,7 +399,7 @@ func TestFetchModelsFromCredential_BaseURLWithSlash(t *testing.T) {
 	defer mockServer.Close()
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-	manager := New(logger, true, 100, "/tmp/test.yaml")
+	manager := New(logger, true, 100, "/tmp/test.yaml", []config.ModelRPMConfig{})
 
 	client := &http.Client{Timeout: 5 * time.Second}
 	cred := config.CredentialConfig{
@@ -418,7 +418,7 @@ func TestFetchModelsFromCredential_BaseURLWithSlash(t *testing.T) {
 
 func TestGetModelTPM(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-	manager := New(logger, true, 50, "/tmp/models_test_gettpm.yaml")
+	manager := New(logger, true, 50, "/tmp/models_test_gettpm.yaml", []config.ModelRPMConfig{})
 
 	// Mock models config with TPM values
 	manager.modelsConfig = &config.ModelsConfig{
@@ -442,7 +442,7 @@ func TestGetModelTPM(t *testing.T) {
 
 func TestGetModelTPM_NilConfig(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-	manager := New(logger, true, 75, "/tmp/models_test_tpm_nilconfig.yaml")
+	manager := New(logger, true, 75, "/tmp/models_test_tpm_nilconfig.yaml", []config.ModelRPMConfig{})
 
 	manager.modelsConfig = nil
 
@@ -453,7 +453,7 @@ func TestGetModelTPM_NilConfig(t *testing.T) {
 
 func TestGetModelTPM_ZeroValue(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-	manager := New(logger, true, 50, "/tmp/models_test_tpm_zero.yaml")
+	manager := New(logger, true, 50, "/tmp/models_test_tpm_zero.yaml", []config.ModelRPMConfig{})
 
 	// Mock models config with TPM = 0 (not set)
 	manager.modelsConfig = &config.ModelsConfig{
@@ -469,7 +469,7 @@ func TestGetModelTPM_ZeroValue(t *testing.T) {
 
 func TestGetAllModels_DisabledWithConfig(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-	manager := New(logger, false, 100, "/tmp/models_test_disabled_config.yaml")
+	manager := New(logger, false, 100, "/tmp/models_test_disabled_config.yaml", []config.ModelRPMConfig{})
 
 	// Set models config even though fetching is disabled
 	manager.modelsConfig = &config.ModelsConfig{
@@ -491,7 +491,7 @@ func TestGetAllModels_DisabledWithConfig(t *testing.T) {
 
 func TestHasModel_DisabledWithConfig(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-	manager := New(logger, false, 100, "/tmp/models_test_hasmodel_disabled.yaml")
+	manager := New(logger, false, 100, "/tmp/models_test_hasmodel_disabled.yaml", []config.ModelRPMConfig{})
 
 	// Set models config even though fetching is disabled
 	manager.modelsConfig = &config.ModelsConfig{
@@ -509,7 +509,7 @@ func TestHasModel_DisabledWithConfig(t *testing.T) {
 
 func TestHasModel_DisabledWithoutConfig(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-	manager := New(logger, false, 100, "/tmp/models_test_hasmodel_noconfig.yaml")
+	manager := New(logger, false, 100, "/tmp/models_test_hasmodel_noconfig.yaml", []config.ModelRPMConfig{})
 
 	// Empty config (no models)
 	manager.modelsConfig = &config.ModelsConfig{

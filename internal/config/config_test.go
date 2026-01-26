@@ -446,3 +446,155 @@ func TestConfig_Validate_DefaultModelsRPM(t *testing.T) {
 		})
 	}
 }
+
+func TestLoad_EnvVariables(t *testing.T) {
+	// Set environment variables for testing
+	os.Setenv("TEST_PORT", "9090")
+	os.Setenv("TEST_MAX_BODY_SIZE", "200")
+	os.Setenv("TEST_REQUEST_TIMEOUT", "60s")
+	os.Setenv("TEST_LOGGING_LEVEL", "error")
+	os.Setenv("TEST_REPLACE_V1_MODELS", "false")
+	os.Setenv("TEST_MASTER_KEY", "sk-env-master-key")
+	os.Setenv("TEST_DEFAULT_MODELS_RPM", "100")
+	os.Setenv("TEST_CRED_NAME", "env_credential")
+	os.Setenv("TEST_CRED_TYPE", "azure")
+	os.Setenv("TEST_CRED_API_KEY", "sk-env-api-key")
+	os.Setenv("TEST_CRED_BASE_URL", "https://env.example.com")
+	os.Setenv("TEST_CRED_RPM", "150")
+	os.Setenv("TEST_CRED_TPM", "50000")
+	os.Setenv("TEST_PROMETHEUS_ENABLED", "false")
+	os.Setenv("TEST_HEALTH_CHECK_PATH", "/status")
+
+	defer func() {
+		// Cleanup
+		os.Unsetenv("TEST_PORT")
+		os.Unsetenv("TEST_MAX_BODY_SIZE")
+		os.Unsetenv("TEST_REQUEST_TIMEOUT")
+		os.Unsetenv("TEST_LOGGING_LEVEL")
+		os.Unsetenv("TEST_REPLACE_V1_MODELS")
+		os.Unsetenv("TEST_MASTER_KEY")
+		os.Unsetenv("TEST_DEFAULT_MODELS_RPM")
+		os.Unsetenv("TEST_CRED_NAME")
+		os.Unsetenv("TEST_CRED_TYPE")
+		os.Unsetenv("TEST_CRED_API_KEY")
+		os.Unsetenv("TEST_CRED_BASE_URL")
+		os.Unsetenv("TEST_CRED_RPM")
+		os.Unsetenv("TEST_CRED_TPM")
+		os.Unsetenv("TEST_PROMETHEUS_ENABLED")
+		os.Unsetenv("TEST_HEALTH_CHECK_PATH")
+	}()
+
+	// Create temporary config file with env variables
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.yaml")
+
+	configContent := `
+server:
+  port: os.environ/TEST_PORT
+  max_body_size_mb: os.environ/TEST_MAX_BODY_SIZE
+  request_timeout: os.environ/TEST_REQUEST_TIMEOUT
+  logging_level: os.environ/TEST_LOGGING_LEVEL
+  replace_v1_models: os.environ/TEST_REPLACE_V1_MODELS
+  master_key: os.environ/TEST_MASTER_KEY
+  default_models_rpm: os.environ/TEST_DEFAULT_MODELS_RPM
+
+fail2ban:
+  max_attempts: 3
+  ban_duration: permanent
+  error_codes: [401, 403, 500]
+
+credentials:
+  - name: os.environ/TEST_CRED_NAME
+    type: os.environ/TEST_CRED_TYPE
+    api_key: os.environ/TEST_CRED_API_KEY
+    base_url: os.environ/TEST_CRED_BASE_URL
+    rpm: os.environ/TEST_CRED_RPM
+    tpm: os.environ/TEST_CRED_TPM
+
+monitoring:
+  prometheus_enabled: os.environ/TEST_PROMETHEUS_ENABLED
+  health_check_path: os.environ/TEST_HEALTH_CHECK_PATH
+`
+	err := os.WriteFile(configPath, []byte(configContent), 0644)
+	require.NoError(t, err)
+
+	// Load config
+	cfg, err := Load(configPath)
+	require.NoError(t, err)
+
+	// Verify server config
+	assert.Equal(t, 9090, cfg.Server.Port)
+	assert.Equal(t, 200, cfg.Server.MaxBodySizeMB)
+	assert.Equal(t, 60*time.Second, cfg.Server.RequestTimeout)
+	assert.Equal(t, "error", cfg.Server.LoggingLevel)
+	assert.Equal(t, false, cfg.Server.ReplaceV1Models)
+	assert.Equal(t, "sk-env-master-key", cfg.Server.MasterKey)
+	assert.Equal(t, 100, cfg.Server.DefaultModelsRPM)
+
+	// Verify credential config
+	require.Len(t, cfg.Credentials, 1)
+	assert.Equal(t, "env_credential", cfg.Credentials[0].Name)
+	assert.Equal(t, "azure", cfg.Credentials[0].Type)
+	assert.Equal(t, "sk-env-api-key", cfg.Credentials[0].APIKey)
+	assert.Equal(t, "https://env.example.com", cfg.Credentials[0].BaseURL)
+	assert.Equal(t, 150, cfg.Credentials[0].RPM)
+	assert.Equal(t, 50000, cfg.Credentials[0].TPM)
+
+	// Verify monitoring config
+	assert.Equal(t, false, cfg.Monitoring.PrometheusEnabled)
+	assert.Equal(t, "/status", cfg.Monitoring.HealthCheckPath)
+}
+
+func TestLoad_EnvVariables_Mixed(t *testing.T) {
+	// Set only some environment variables
+	os.Setenv("TEST_MASTER_KEY", "sk-from-env")
+	os.Setenv("TEST_CRED_API_KEY", "sk-cred-from-env")
+
+	defer func() {
+		os.Unsetenv("TEST_MASTER_KEY")
+		os.Unsetenv("TEST_CRED_API_KEY")
+	}()
+
+	// Create temporary config file mixing env variables and direct values
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.yaml")
+
+	configContent := `
+server:
+  port: 8080
+  max_body_size_mb: 100
+  request_timeout: 30s
+  logging_level: info
+  replace_v1_models: true
+  master_key: os.environ/TEST_MASTER_KEY
+  default_models_rpm: 50
+
+fail2ban:
+  max_attempts: 3
+  ban_duration: permanent
+  error_codes: [401, 403, 500]
+
+credentials:
+  - name: "static_provider"
+    type: "openai"
+    api_key: os.environ/TEST_CRED_API_KEY
+    base_url: "https://api.openai.com"
+    rpm: 60
+
+monitoring:
+  prometheus_enabled: true
+  health_check_path: "/health"
+`
+	err := os.WriteFile(configPath, []byte(configContent), 0644)
+	require.NoError(t, err)
+
+	// Load config
+	cfg, err := Load(configPath)
+	require.NoError(t, err)
+
+	// Verify mixed config
+	assert.Equal(t, 8080, cfg.Server.Port)
+	assert.Equal(t, "sk-from-env", cfg.Server.MasterKey)
+	assert.Equal(t, "sk-cred-from-env", cfg.Credentials[0].APIKey)
+	assert.Equal(t, "static_provider", cfg.Credentials[0].Name)
+}

@@ -289,3 +289,143 @@ func TestUpdateCredentialTPM_MultipleCredentials(t *testing.T) {
 	assert.Equal(t, 2000.0, testutil.ToFloat64(CredentialTPMCurrent.WithLabelValues("cred2")))
 	assert.Equal(t, 3000.0, testutil.ToFloat64(CredentialTPMCurrent.WithLabelValues("cred3")))
 }
+
+func TestUpdateModelRPM(t *testing.T) {
+	ModelRPMCurrent.Reset()
+
+	m := New(true)
+
+	// Update RPM for models
+	m.UpdateModelRPM("cred1", "gpt-4o", 25)
+	m.UpdateModelRPM("cred1", "gpt-4o-mini", 50)
+	m.UpdateModelRPM("cred2", "gpt-4o", 30)
+
+	// Verify metrics were set
+	count := testutil.CollectAndCount(ModelRPMCurrent)
+	assert.Greater(t, count, 0)
+
+	// Verify individual values
+	assert.Equal(t, 25.0, testutil.ToFloat64(ModelRPMCurrent.WithLabelValues("cred1", "gpt-4o")))
+	assert.Equal(t, 50.0, testutil.ToFloat64(ModelRPMCurrent.WithLabelValues("cred1", "gpt-4o-mini")))
+	assert.Equal(t, 30.0, testutil.ToFloat64(ModelRPMCurrent.WithLabelValues("cred2", "gpt-4o")))
+}
+
+func TestUpdateModelRPM_Disabled(t *testing.T) {
+	m := New(false)
+
+	// Should not panic when disabled
+	m.UpdateModelRPM("cred1", "gpt-4o", 25)
+	m.UpdateModelRPM("cred2", "gpt-4o-mini", 50)
+}
+
+func TestUpdateModelRPM_UpdateExisting(t *testing.T) {
+	ModelRPMCurrent.Reset()
+
+	m := New(true)
+
+	// Set initial value
+	m.UpdateModelRPM("cred1", "gpt-4o", 10)
+	assert.Equal(t, 10.0, testutil.ToFloat64(ModelRPMCurrent.WithLabelValues("cred1", "gpt-4o")))
+
+	// Update the same model
+	m.UpdateModelRPM("cred1", "gpt-4o", 20)
+	assert.Equal(t, 20.0, testutil.ToFloat64(ModelRPMCurrent.WithLabelValues("cred1", "gpt-4o")))
+
+	// Update again
+	m.UpdateModelRPM("cred1", "gpt-4o", 15)
+	assert.Equal(t, 15.0, testutil.ToFloat64(ModelRPMCurrent.WithLabelValues("cred1", "gpt-4o")))
+}
+
+func TestUpdateModelTPM(t *testing.T) {
+	ModelTPMCurrent.Reset()
+
+	m := New(true)
+
+	// Update TPM for models
+	m.UpdateModelTPM("cred1", "gpt-4o", 5000)
+	m.UpdateModelTPM("cred1", "gpt-4o-mini", 10000)
+	m.UpdateModelTPM("cred2", "gpt-4o", 7500)
+
+	// Verify metrics were set
+	count := testutil.CollectAndCount(ModelTPMCurrent)
+	assert.Greater(t, count, 0)
+
+	// Verify individual values
+	assert.Equal(t, 5000.0, testutil.ToFloat64(ModelTPMCurrent.WithLabelValues("cred1", "gpt-4o")))
+	assert.Equal(t, 10000.0, testutil.ToFloat64(ModelTPMCurrent.WithLabelValues("cred1", "gpt-4o-mini")))
+	assert.Equal(t, 7500.0, testutil.ToFloat64(ModelTPMCurrent.WithLabelValues("cred2", "gpt-4o")))
+}
+
+func TestUpdateModelTPM_Disabled(t *testing.T) {
+	m := New(false)
+
+	// Should not panic when disabled
+	m.UpdateModelTPM("cred1", "gpt-4o", 5000)
+	m.UpdateModelTPM("cred2", "gpt-4o-mini", 10000)
+}
+
+func TestUpdateModelTPM_UpdateExisting(t *testing.T) {
+	ModelTPMCurrent.Reset()
+
+	m := New(true)
+
+	// Set initial value
+	m.UpdateModelTPM("cred1", "gpt-4o", 3000)
+	assert.Equal(t, 3000.0, testutil.ToFloat64(ModelTPMCurrent.WithLabelValues("cred1", "gpt-4o")))
+
+	// Update the same model
+	m.UpdateModelTPM("cred1", "gpt-4o", 6000)
+	assert.Equal(t, 6000.0, testutil.ToFloat64(ModelTPMCurrent.WithLabelValues("cred1", "gpt-4o")))
+
+	// Update again
+	m.UpdateModelTPM("cred1", "gpt-4o", 4500)
+	assert.Equal(t, 4500.0, testutil.ToFloat64(ModelTPMCurrent.WithLabelValues("cred1", "gpt-4o")))
+}
+
+func TestModelMetrics_MultipleModelsAndCredentials(t *testing.T) {
+	ModelRPMCurrent.Reset()
+	ModelTPMCurrent.Reset()
+
+	m := New(true)
+
+	// Update metrics for multiple models and credentials
+	m.UpdateModelRPM("cred1", "gpt-4o", 20)
+	m.UpdateModelRPM("cred1", "gpt-4o-mini", 40)
+	m.UpdateModelRPM("cred2", "gpt-4o", 25)
+	m.UpdateModelRPM("cred2", "claude-3", 30)
+
+	m.UpdateModelTPM("cred1", "gpt-4o", 4000)
+	m.UpdateModelTPM("cred1", "gpt-4o-mini", 8000)
+	m.UpdateModelTPM("cred2", "gpt-4o", 5000)
+	m.UpdateModelTPM("cred2", "claude-3", 6000)
+
+	// Verify RPM metrics
+	assert.Equal(t, 20.0, testutil.ToFloat64(ModelRPMCurrent.WithLabelValues("cred1", "gpt-4o")))
+	assert.Equal(t, 40.0, testutil.ToFloat64(ModelRPMCurrent.WithLabelValues("cred1", "gpt-4o-mini")))
+	assert.Equal(t, 25.0, testutil.ToFloat64(ModelRPMCurrent.WithLabelValues("cred2", "gpt-4o")))
+	assert.Equal(t, 30.0, testutil.ToFloat64(ModelRPMCurrent.WithLabelValues("cred2", "claude-3")))
+
+	// Verify TPM metrics
+	assert.Equal(t, 4000.0, testutil.ToFloat64(ModelTPMCurrent.WithLabelValues("cred1", "gpt-4o")))
+	assert.Equal(t, 8000.0, testutil.ToFloat64(ModelTPMCurrent.WithLabelValues("cred1", "gpt-4o-mini")))
+	assert.Equal(t, 5000.0, testutil.ToFloat64(ModelTPMCurrent.WithLabelValues("cred2", "gpt-4o")))
+	assert.Equal(t, 6000.0, testutil.ToFloat64(ModelTPMCurrent.WithLabelValues("cred2", "claude-3")))
+}
+
+func TestMetrics_AllPrometheusRegistration(t *testing.T) {
+	// Verify that all metrics are registered with Prometheus
+	metrics := []prometheus.Collector{
+		RequestsTotal,
+		RequestDuration,
+		CredentialRPMCurrent,
+		CredentialTPMCurrent,
+		CredentialBanned,
+		CredentialErrorsTotal,
+		ModelRPMCurrent,
+		ModelTPMCurrent,
+	}
+
+	for _, metric := range metrics {
+		assert.NotNil(t, metric)
+	}
+}

@@ -33,7 +33,7 @@ type Manager struct {
 	credentialModels   map[string][]string  // credential name -> list of model IDs
 	allModels          []Model              // deduplicated list of all models
 	modelToCredentials map[string][]string  // model ID -> list of credential names
-	modelsConfig       *config.ModelsConfig // models.yaml config
+	modelsConfig       *config.ModelsConfig // models.yaml config (merged with static models from config.yaml)
 	modelsConfigPath   string               // path to models.yaml
 	defaultModelsRPM   int                  // default RPM for models
 	logger             *slog.Logger
@@ -41,7 +41,7 @@ type Manager struct {
 }
 
 // New creates a new model manager
-func New(logger *slog.Logger, enabled bool, defaultModelsRPM int, modelsConfigPath string) *Manager {
+func New(logger *slog.Logger, enabled bool, defaultModelsRPM int, modelsConfigPath string, staticModels []config.ModelRPMConfig) *Manager {
 	// Load models.yaml if it exists
 	modelsConfig, err := config.LoadModelsConfig(modelsConfigPath)
 	if err != nil {
@@ -49,6 +49,29 @@ func New(logger *slog.Logger, enabled bool, defaultModelsRPM int, modelsConfigPa
 		modelsConfig = &config.ModelsConfig{Models: []config.ModelRPMConfig{}}
 	} else if len(modelsConfig.Models) > 0 {
 		logger.Info("Loaded models config", "path", modelsConfigPath, "models_count", len(modelsConfig.Models))
+	}
+
+	// Merge static models from config.yaml into modelsConfig (they have priority)
+	if len(staticModels) > 0 {
+		logger.Info("Merging static models from config.yaml", "models_count", len(staticModels))
+		for _, staticModel := range staticModels {
+			// Check if model already exists in models.yaml
+			exists := false
+			for i, existingModel := range modelsConfig.Models {
+				if existingModel.Name == staticModel.Name {
+					// Update with values from config.yaml (static has priority)
+					modelsConfig.Models[i] = staticModel
+					exists = true
+					logger.Debug("Updated model from config.yaml", "model", staticModel.Name, "rpm", staticModel.RPM, "tpm", staticModel.TPM)
+					break
+				}
+			}
+			// Add new model if it doesn't exist
+			if !exists {
+				modelsConfig.Models = append(modelsConfig.Models, staticModel)
+				logger.Debug("Added static model from config.yaml", "model", staticModel.Name, "rpm", staticModel.RPM, "tpm", staticModel.TPM)
+			}
+		}
 	}
 
 	return &Manager{

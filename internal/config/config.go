@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -14,6 +16,7 @@ type Config struct {
 	Fail2Ban    Fail2BanConfig     `yaml:"fail2ban"`
 	Credentials []CredentialConfig `yaml:"credentials"`
 	Monitoring  MonitoringConfig   `yaml:"monitoring"`
+	Models      []ModelRPMConfig   `yaml:"models,omitempty"`
 }
 
 type ServerConfig struct {
@@ -32,6 +35,76 @@ type Fail2BanConfig struct {
 	ErrorCodes  []int         `yaml:"error_codes"`
 }
 
+// UnmarshalYAML implements custom unmarshaling for ServerConfig with env variable support
+func (s *ServerConfig) UnmarshalYAML(value *yaml.Node) error {
+	// Create a temporary struct with all string fields
+	type tempConfig struct {
+		Port             string `yaml:"port"`
+		MaxBodySizeMB    string `yaml:"max_body_size_mb"`
+		RequestTimeout   string `yaml:"request_timeout"`
+		LoggingLevel     string `yaml:"logging_level"`
+		ReplaceV1Models  string `yaml:"replace_v1_models"`
+		MasterKey        string `yaml:"master_key"`
+		DefaultModelsRPM string `yaml:"default_models_rpm"`
+	}
+
+	var temp tempConfig
+	if err := value.Decode(&temp); err != nil {
+		return err
+	}
+
+	// Resolve and parse each field
+	var err error
+
+	// Port
+	if temp.Port != "" {
+		s.Port, err = resolveEnvInt(temp.Port, 8080)
+		if err != nil {
+			return fmt.Errorf("invalid port: %w", err)
+		}
+	}
+
+	// MaxBodySizeMB
+	if temp.MaxBodySizeMB != "" {
+		s.MaxBodySizeMB, err = resolveEnvInt(temp.MaxBodySizeMB, 10)
+		if err != nil {
+			return fmt.Errorf("invalid max_body_size_mb: %w", err)
+		}
+	}
+
+	// RequestTimeout
+	if temp.RequestTimeout != "" {
+		s.RequestTimeout, err = resolveEnvDuration(temp.RequestTimeout, 30*time.Second)
+		if err != nil {
+			return fmt.Errorf("invalid request_timeout: %w", err)
+		}
+	}
+
+	// LoggingLevel
+	s.LoggingLevel = resolveEnvString(temp.LoggingLevel)
+
+	// ReplaceV1Models
+	if temp.ReplaceV1Models != "" {
+		s.ReplaceV1Models, err = resolveEnvBool(temp.ReplaceV1Models, false)
+		if err != nil {
+			return fmt.Errorf("invalid replace_v1_models: %w", err)
+		}
+	}
+
+	// MasterKey
+	s.MasterKey = resolveEnvString(temp.MasterKey)
+
+	// DefaultModelsRPM
+	if temp.DefaultModelsRPM != "" {
+		s.DefaultModelsRPM, err = resolveEnvInt(temp.DefaultModelsRPM, 50)
+		if err != nil {
+			return fmt.Errorf("invalid default_models_rpm: %w", err)
+		}
+	}
+
+	return nil
+}
+
 type CredentialConfig struct {
 	Name    string `yaml:"name"`
 	Type    string `yaml:"type"`
@@ -41,9 +114,138 @@ type CredentialConfig struct {
 	TPM     int    `yaml:"tpm"`
 }
 
+// UnmarshalYAML implements custom unmarshaling for CredentialConfig with env variable support
+func (c *CredentialConfig) UnmarshalYAML(value *yaml.Node) error {
+	// Create a temporary struct with all string fields
+	type tempConfig struct {
+		Name    string `yaml:"name"`
+		Type    string `yaml:"type"`
+		APIKey  string `yaml:"api_key"`
+		BaseURL string `yaml:"base_url"`
+		RPM     string `yaml:"rpm"`
+		TPM     string `yaml:"tpm"`
+	}
+
+	var temp tempConfig
+	if err := value.Decode(&temp); err != nil {
+		return err
+	}
+
+	// Resolve string fields
+	c.Name = resolveEnvString(temp.Name)
+	c.Type = resolveEnvString(temp.Type)
+	c.APIKey = resolveEnvString(temp.APIKey)
+	c.BaseURL = resolveEnvString(temp.BaseURL)
+
+	// Resolve and parse RPM
+	var err error
+	if temp.RPM != "" {
+		c.RPM, err = resolveEnvInt(temp.RPM, -1)
+		if err != nil {
+			return fmt.Errorf("invalid rpm for credential '%s': %w", c.Name, err)
+		}
+	} else {
+		c.RPM = -1 // Default to unlimited
+	}
+
+	// Resolve and parse TPM
+	if temp.TPM != "" {
+		c.TPM, err = resolveEnvInt(temp.TPM, -1)
+		if err != nil {
+			return fmt.Errorf("invalid tpm for credential '%s': %w", c.Name, err)
+		}
+	} else {
+		c.TPM = -1 // Default to unlimited
+	}
+
+	return nil
+}
+
 type MonitoringConfig struct {
 	PrometheusEnabled bool   `yaml:"prometheus_enabled"`
 	HealthCheckPath   string `yaml:"health_check_path"`
+}
+
+// UnmarshalYAML implements custom unmarshaling for MonitoringConfig with env variable support
+func (m *MonitoringConfig) UnmarshalYAML(value *yaml.Node) error {
+	// Create a temporary struct with all string fields
+	type tempConfig struct {
+		PrometheusEnabled string `yaml:"prometheus_enabled"`
+		HealthCheckPath   string `yaml:"health_check_path"`
+	}
+
+	var temp tempConfig
+	if err := value.Decode(&temp); err != nil {
+		return err
+	}
+
+	// Resolve and parse PrometheusEnabled
+	var err error
+	if temp.PrometheusEnabled != "" {
+		m.PrometheusEnabled, err = resolveEnvBool(temp.PrometheusEnabled, false)
+		if err != nil {
+			return fmt.Errorf("invalid prometheus_enabled: %w", err)
+		}
+	}
+
+	// Resolve HealthCheckPath
+	m.HealthCheckPath = resolveEnvString(temp.HealthCheckPath)
+
+	return nil
+}
+
+// resolveEnvString resolves environment variable if value is in format "os.environ/VAR_NAME"
+func resolveEnvString(value string) string {
+	const prefix = "os.environ/"
+	if strings.HasPrefix(value, prefix) {
+		envVar := strings.TrimPrefix(value, prefix)
+		if envValue := os.Getenv(envVar); envValue != "" {
+			return envValue
+		}
+	}
+	return value
+}
+
+// resolveEnvInt resolves environment variable and converts to int
+func resolveEnvInt(value string, defaultValue int) (int, error) {
+	resolved := resolveEnvString(value)
+	if resolved == value && value == "" {
+		return defaultValue, nil
+	}
+
+	intValue, err := strconv.Atoi(resolved)
+	if err != nil {
+		return defaultValue, fmt.Errorf("failed to parse int from '%s': %w", resolved, err)
+	}
+	return intValue, nil
+}
+
+// resolveEnvBool resolves environment variable and converts to bool
+func resolveEnvBool(value string, defaultValue bool) (bool, error) {
+	resolved := resolveEnvString(value)
+	if resolved == value && value == "" {
+		return defaultValue, nil
+	}
+
+	boolValue, err := strconv.ParseBool(resolved)
+	if err != nil {
+		return defaultValue, fmt.Errorf("failed to parse bool from '%s': %w", resolved, err)
+	}
+	return boolValue, nil
+}
+
+// resolveEnvDuration resolves environment variable and converts to duration
+func resolveEnvDuration(value string, defaultValue time.Duration) (time.Duration, error) {
+	resolved := resolveEnvString(value)
+	if resolved == value && value == "" {
+		return defaultValue, nil
+	}
+
+	duration, err := time.ParseDuration(resolved)
+	if err != nil {
+		return defaultValue, fmt.Errorf("failed to parse duration from '%s': %w", resolved, err)
+	}
+	return duration, nil
 }
 
 // UnmarshalYAML implements custom unmarshaling for Fail2BanConfig

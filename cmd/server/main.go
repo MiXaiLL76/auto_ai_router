@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -59,7 +60,8 @@ func main() {
 	bal := balancer.New(cfg.Credentials, f2b, rateLimiter)
 
 	// Initialize model manager and fetch models from credentials
-	modelManager := models.New(log, cfg.Server.ReplaceV1Models, cfg.Server.DefaultModelsRPM, "models.yaml")
+	// Pass static models from config.yaml (if any) - they will be merged into models.yaml config
+	modelManager := models.New(log, cfg.Server.ReplaceV1Models, cfg.Server.DefaultModelsRPM, "models.yaml", cfg.Models)
 	if cfg.Server.ReplaceV1Models {
 		modelManager.FetchModels(cfg.Credentials, cfg.Server.RequestTimeout)
 	}
@@ -107,10 +109,22 @@ func main() {
 					metrics.UpdateCredentialBanStatus(cred.Name, banned)
 				}
 
-				// Update model RPM/TPM metrics (if enabled)
-				// Note: GetAllModels() returns keys in format "credential:model"
-				// Metrics for individual (credential, model) pairs are not currently exported
-				// Only credential-level metrics are tracked
+				// Update model RPM/TPM metrics
+				// GetAllModels() returns keys in format "credential:model"
+				for _, key := range rateLimiter.GetAllModels() {
+					// Parse credential:model format
+					parts := splitCredentialModel(key)
+					if len(parts) == 2 {
+						credentialName := parts[0]
+						modelName := parts[1]
+
+						modelRPM := rateLimiter.GetCurrentModelRPM(credentialName, modelName)
+						metrics.UpdateModelRPM(credentialName, modelName, modelRPM)
+
+						modelTPM := rateLimiter.GetCurrentModelTPM(credentialName, modelName)
+						metrics.UpdateModelTPM(credentialName, modelName, modelTPM)
+					}
+				}
 			}
 		}()
 		log.Info("Metrics updater started (updates every 10 seconds)")
@@ -156,4 +170,9 @@ func main() {
 	}
 
 	log.Info("Server shutdown complete")
+}
+
+// splitCredentialModel splits "credential:model" format into [credential, model]
+func splitCredentialModel(key string) []string {
+	return strings.SplitN(key, ":", 2)
 }

@@ -43,7 +43,7 @@ func createTestProxy() *proxy.Proxy {
 // createTestModelManager creates a test model manager instance
 func createTestModelManager(enabled bool) *models.Manager {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-	return models.New(logger, enabled, 100, "/tmp/models_test.yaml")
+	return models.New(logger, enabled, 100, "/tmp/models_test.yaml", []config.ModelRPMConfig{})
 }
 
 func TestNew(t *testing.T) {
