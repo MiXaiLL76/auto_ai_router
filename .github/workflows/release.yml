@@ -14,8 +14,14 @@ permissions:
   packages: write
 
 jobs:
+  # 0. Проверка качества кода (fmt, lint, tests)
+  quality-check:
+    name: Quality Check
+    uses: ./.github/workflows/lint.yml
+
   # 1. Сборка бинарников (только для тегов)
   build-binaries:
+    needs: quality-check
     if: startsWith(github.ref, 'refs/tags/')
     name: Build Release Binaries
     runs-on: ubuntu-latest
@@ -52,6 +58,7 @@ jobs:
 
   # 2. Сборка Docker (для веток и для тегов)
   build-docker:
+    needs: quality-check
     name: Build and Push Docker Image
     runs-on: ubuntu-latest
     steps:
