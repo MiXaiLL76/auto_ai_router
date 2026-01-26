@@ -119,7 +119,17 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		"model", modelID,
 	)
 
-	targetURL := strings.TrimSuffix(cred.BaseURL, "/") + r.URL.Path
+	baseURL := strings.TrimSuffix(cred.BaseURL, "/")
+	path := r.URL.Path
+
+	// If baseURL already ends with /v1 and path starts with /v1, remove /v1 from path to avoid duplication
+	// Example: baseURL="https://api.openai.azure.com/openai/v1" + path="/v1/chat/completions"
+	// Should become: "https://api.openai.azure.com/openai/v1/chat/completions" (not /v1/v1/...)
+	if strings.HasSuffix(baseURL, "/v1") && strings.HasPrefix(path, "/v1") {
+		path = strings.TrimPrefix(path, "/v1")
+	}
+
+	targetURL := baseURL + path
 	if r.URL.RawQuery != "" {
 		targetURL += "?" + r.URL.RawQuery
 	}

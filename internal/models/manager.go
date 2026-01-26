@@ -153,7 +153,15 @@ func (m *Manager) FetchModels(credentials []config.CredentialConfig, timeout tim
 
 // fetchModelsFromCredential fetches models from a single credential
 func (m *Manager) fetchModelsFromCredential(client *http.Client, cred config.CredentialConfig) ([]Model, error) {
-	url := strings.TrimSuffix(cred.BaseURL, "/") + "/v1/models"
+	baseURL := strings.TrimSuffix(cred.BaseURL, "/")
+
+	// Check if baseURL already ends with /v1 to avoid /v1/v1/models
+	var url string
+	if strings.HasSuffix(baseURL, "/v1") {
+		url = baseURL + "/models"
+	} else {
+		url = baseURL + "/v1/models"
+	}
 
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
@@ -191,6 +199,23 @@ func (m *Manager) GetAllModels() ModelsResponse {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
+	// If model fetching is disabled but models.yaml exists, return models from config
+	if !m.enabled && m.modelsConfig != nil && len(m.modelsConfig.Models) > 0 {
+		models := make([]Model, 0, len(m.modelsConfig.Models))
+		for _, modelConfig := range m.modelsConfig.Models {
+			models = append(models, Model{
+				ID:      modelConfig.Name,
+				Object:  "model",
+				Created: time.Now().Unix(),
+				OwnedBy: "system",
+			})
+		}
+		return ModelsResponse{
+			Object: "list",
+			Data:   models,
+		}
+	}
+
 	return ModelsResponse{
 		Object: "list",
 		Data:   m.allModels,
@@ -223,7 +248,18 @@ func (m *Manager) HasModel(credentialName, modelID string) bool {
 	defer m.mu.RUnlock()
 
 	if !m.enabled {
-		return true // If disabled, allow all models
+		// If model fetching is disabled but models.yaml exists with models, check against it
+		if m.modelsConfig != nil && len(m.modelsConfig.Models) > 0 {
+			for _, modelConfig := range m.modelsConfig.Models {
+				if modelConfig.Name == modelID {
+					return true
+				}
+			}
+			// Model not found in models.yaml
+			return false
+		}
+		// If no models.yaml, allow all models
+		return true
 	}
 
 	models, ok := m.credentialModels[credentialName]
