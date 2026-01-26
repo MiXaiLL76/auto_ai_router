@@ -9,6 +9,7 @@
   - **RPM** (Requests Per Minute) - на уровне credentials и моделей
   - **TPM** (Tokens Per Minute) - на уровне credentials и моделей
   - Независимые лимиты для каждой пары (credential, model)
+  - Метрики RPM/TPM для каждой пары (credential, model) в Prometheus
 - **Model-aware routing**: автоматический выбор провайдера по доступности модели
 - **Fail2ban механизм**: автоматический бан неработающих провайдеров
 - **Master key авторизация**: единый ключ для всех клиентов
@@ -16,6 +17,9 @@
 - **Prometheus метрики**: мониторинг нагрузки, статуса и использования токенов
 - **Автоматический сбор моделей**: от всех провайдеров с объединением списков
 - **Оптимизированное логирование**: автоматическое сокращение длинных полей (embeddings, base64)
+- **Переменные окружения**: поддержка `os.environ/VAR_NAME` в config.yaml
+- **Статические модели**: возможность задать модели и лимиты прямо в config.yaml
+- **CI/CD проверки**: автоматические тесты, lint и проверка качества кода
 
 ## Быстрый старт
 
@@ -54,13 +58,13 @@ server:
 
 credentials:
   - name: "openai_main"
-    api_key: "sk-proj-..."
+    api_key: "sk-proj-..."           # Или os.environ/OPENAI_API_KEY
     base_url: "https://api.openai.com"
     rpm: 100                         # Requests per minute для credential (или -1 для отключения)
     tpm: 50000                       # Tokens per minute для credential (или 0/-1 для отключения)
 
   - name: "openai_backup"
-    api_key: "sk-proj-..."
+    api_key: "os.environ/BACKUP_KEY" # Поддержка переменных окружения
     base_url: "https://api.another.com"
     rpm: 50
     tpm: 0                           # Без лимита токенов
@@ -69,9 +73,15 @@ fail2ban:
   max_attempts: 3
   ban_duration: permanent            # или "5m", "1h"
   error_codes: [401, 403, 429, 500, 502, 503, 504]
+
+# Опционально: статические модели (объединяются с models.yaml)
+models:
+  - name: gpt-4o-mini
+    rpm: 60
+    tpm: 30000
 ```
 
-**models.yaml** (создается автоматически):
+**models.yaml** (создается автоматически или вручную):
 
 ```yaml
 models:
@@ -87,6 +97,11 @@ models:
     rpm: -1                          # Без лимитов RPM
     tpm: 0                           # Без лимитов TPM
 ```
+
+**Примечания:**
+
+- Модели из config.yaml имеют приоритет над models.yaml
+- При `replace_v1_models: false` модели берутся из models.yaml (если файл существует) или из config.yaml
 
 ### Логика работы лимитов (Комбинированный подход)
 
@@ -178,5 +193,15 @@ response = client.chat.completions.create(
 - `POST /v1/chat/completions` - Chat completions (с model-aware routing)
 - `GET /v1/models` - Объединенный список моделей от всех провайдеров
 - `GET /health` - Health check (JSON)
-- `GET /vhealth` - Визуальный дашборд здоровья системы с метриками по credentials и моделям
+- `GET /vhealth` - Визуальный дашборд здоровья системы с метриками по credentials и моделям (сортировка по TPM по умолчанию)
 - `GET /metrics` - Prometheus метрики
+
+## Метрики Prometheus
+
+Доступные метрики:
+
+- `auto_ai_router_credential_rpm_current` - текущий RPM для credential
+- `auto_ai_router_credential_tpm_current` - текущий TPM для credential
+- `auto_ai_router_credential_banned` - статус бана credential (0/1)
+- `auto_ai_router_model_rpm_current` - текущий RPM для пары (credential, model)
+- `auto_ai_router_model_tpm_current` - текущий TPM для пары (credential, model)
