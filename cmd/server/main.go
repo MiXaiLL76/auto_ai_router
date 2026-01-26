@@ -62,9 +62,12 @@ func main() {
 	modelManager := models.New(log, cfg.Server.ReplaceV1Models, cfg.Server.DefaultModelsRPM, "models.yaml")
 	if cfg.Server.ReplaceV1Models {
 		modelManager.FetchModels(cfg.Credentials, cfg.Server.RequestTimeout)
+	}
 
-		// Initialize model RPM and TPM limiters for each (credential, model) pair
-		modelsResp := modelManager.GetAllModels()
+	// Initialize model RPM and TPM limiters for each (credential, model) pair
+	// This should happen regardless of ReplaceV1Models setting to populate Active Models
+	modelsResp := modelManager.GetAllModels()
+	if len(modelsResp.Data) > 0 {
 		for _, cred := range cfg.Credentials {
 			for _, model := range modelsResp.Data {
 				modelRPM := modelManager.GetModelRPM(model.ID)

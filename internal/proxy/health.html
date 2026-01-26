@@ -109,9 +109,9 @@
         <section class="card" style="margin-top: 2rem;">
             <h3>📊 Active Models ({{ len .models }})</h3>
             <div class="sort-controls">
-                <button class="sort-btn active" onclick="sortModels('name')">Sort by Name</button>
+                <button class="sort-btn" onclick="sortModels('name')">Sort by Name</button>
                 <button class="sort-btn" onclick="sortModels('rpm')">Sort by RPM Usage</button>
-                <button class="sort-btn" onclick="sortModels('tpm')">Sort by TPM Usage</button>
+                <button class="sort-btn active" onclick="sortModels('tpm')">Sort by TPM Usage</button>
                 <button class="sort-btn" onclick="sortModels('credential')">Sort by Credential</button>
             </div>
             <div class="model-list" id="modelList">
@@ -162,8 +162,8 @@
     </div>
 
     <script>
-        let currentSort = 'name';
-        let sortAscending = true;
+        let currentSort = 'tpm';
+        let sortAscending = false;
 
         function sortModels(type) {
             const container = document.getElementById('modelList');
@@ -215,6 +215,11 @@
             // Re-append sorted items
             items.forEach(item => container.appendChild(item));
         }
+
+        // Apply default sorting on page load
+        document.addEventListener('DOMContentLoaded', function() {
+            sortModels('tpm');
+        });
     </script>
 </body>
 </html>

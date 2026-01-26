@@ -160,3 +160,165 @@ func TestModelsConfig_GetModelRPM_EmptyConfig(t *testing.T) {
 	rpm := cfg.GetModelRPM("any-model", 150)
 	assert.Equal(t, 150, rpm) // Should return default
 }
+
+func TestModelsConfig_GetModelTPM_Exists(t *testing.T) {
+	cfg := &ModelsConfig{
+		Models: []ModelRPMConfig{
+			{Name: "gpt-4o", RPM: 50, TPM: 10000},
+			{Name: "gpt-4o-mini", RPM: 100, TPM: 20000},
+		},
+	}
+
+	tpm := cfg.GetModelTPM("gpt-4o", -1)
+	assert.Equal(t, 10000, tpm)
+
+	tpm = cfg.GetModelTPM("gpt-4o-mini", -1)
+	assert.Equal(t, 20000, tpm)
+}
+
+func TestModelsConfig_GetModelTPM_NotExists(t *testing.T) {
+	cfg := &ModelsConfig{
+		Models: []ModelRPMConfig{
+			{Name: "gpt-4o", RPM: 50, TPM: 10000},
+		},
+	}
+
+	tpm := cfg.GetModelTPM("non-existent-model", -1)
+	assert.Equal(t, -1, tpm) // Should return default
+}
+
+func TestModelsConfig_GetModelTPM_ZeroValue(t *testing.T) {
+	cfg := &ModelsConfig{
+		Models: []ModelRPMConfig{
+			{Name: "gpt-4o", RPM: 50, TPM: 0}, // TPM not set (0 value)
+		},
+	}
+
+	// When TPM is 0, should return default
+	tpm := cfg.GetModelTPM("gpt-4o", 5000)
+	assert.Equal(t, 5000, tpm)
+}
+
+func TestModelsConfig_GetModelTPM_EmptyConfig(t *testing.T) {
+	cfg := &ModelsConfig{
+		Models: []ModelRPMConfig{},
+	}
+
+	tpm := cfg.GetModelTPM("any-model", -1)
+	assert.Equal(t, -1, tpm) // Should return default
+}
+
+func TestModelsConfig_UpdateOrAddModelWithTPM_Update(t *testing.T) {
+	cfg := &ModelsConfig{
+		Models: []ModelRPMConfig{
+			{Name: "gpt-4o", RPM: 50, TPM: 10000},
+			{Name: "gpt-4o-mini", RPM: 100, TPM: 20000},
+		},
+	}
+
+	// Update existing model with both RPM and TPM
+	cfg.UpdateOrAddModelWithTPM("gpt-4o", 75, 15000)
+
+	assert.Len(t, cfg.Models, 2)
+	assert.Equal(t, "gpt-4o", cfg.Models[0].Name)
+	assert.Equal(t, 75, cfg.Models[0].RPM)    // Updated
+	assert.Equal(t, 15000, cfg.Models[0].TPM) // Updated
+	assert.Equal(t, "gpt-4o-mini", cfg.Models[1].Name)
+	assert.Equal(t, 100, cfg.Models[1].RPM)   // Unchanged
+	assert.Equal(t, 20000, cfg.Models[1].TPM) // Unchanged
+}
+
+func TestModelsConfig_UpdateOrAddModelWithTPM_Add(t *testing.T) {
+	cfg := &ModelsConfig{
+		Models: []ModelRPMConfig{
+			{Name: "gpt-4o", RPM: 50, TPM: 10000},
+		},
+	}
+
+	// Add new model with both RPM and TPM
+	cfg.UpdateOrAddModelWithTPM("gpt-4o-mini", 100, 20000)
+
+	assert.Len(t, cfg.Models, 2)
+	assert.Equal(t, "gpt-4o", cfg.Models[0].Name)
+	assert.Equal(t, 50, cfg.Models[0].RPM)
+	assert.Equal(t, 10000, cfg.Models[0].TPM)
+	assert.Equal(t, "gpt-4o-mini", cfg.Models[1].Name)
+	assert.Equal(t, 100, cfg.Models[1].RPM)   // New model
+	assert.Equal(t, 20000, cfg.Models[1].TPM) // New model
+}
+
+func TestLoadModelsConfig_WithTPM(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "models_with_tpm.yaml")
+
+	configContent := `
+models:
+  - name: gpt-4o
+    rpm: 50
+    tpm: 10000
+  - name: gpt-4o-mini
+    rpm: 100
+    tpm: 20000
+  - name: gpt-3.5-turbo
+    rpm: 150
+    tpm: 0
+`
+	err := os.WriteFile(configPath, []byte(configContent), 0644)
+	require.NoError(t, err)
+
+	cfg, err := LoadModelsConfig(configPath)
+	require.NoError(t, err)
+	assert.NotNil(t, cfg)
+	assert.Len(t, cfg.Models, 3)
+
+	assert.Equal(t, "gpt-4o", cfg.Models[0].Name)
+	assert.Equal(t, 50, cfg.Models[0].RPM)
+	assert.Equal(t, 10000, cfg.Models[0].TPM)
+
+	assert.Equal(t, "gpt-4o-mini", cfg.Models[1].Name)
+	assert.Equal(t, 100, cfg.Models[1].RPM)
+	assert.Equal(t, 20000, cfg.Models[1].TPM)
+
+	assert.Equal(t, "gpt-3.5-turbo", cfg.Models[2].Name)
+	assert.Equal(t, 150, cfg.Models[2].RPM)
+	assert.Equal(t, 0, cfg.Models[2].TPM)
+}
+
+func TestSaveModelsConfig_WithTPM(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "models_save_tpm.yaml")
+
+	cfg := &ModelsConfig{
+		Models: []ModelRPMConfig{
+			{Name: "gpt-4o", RPM: 50, TPM: 10000},
+			{Name: "gpt-4o-mini", RPM: 100, TPM: 20000},
+		},
+	}
+
+	err := SaveModelsConfig(configPath, cfg)
+	require.NoError(t, err)
+
+	// Load and verify content
+	loadedCfg, err := LoadModelsConfig(configPath)
+	require.NoError(t, err)
+	assert.Len(t, loadedCfg.Models, 2)
+	assert.Equal(t, "gpt-4o", loadedCfg.Models[0].Name)
+	assert.Equal(t, 50, loadedCfg.Models[0].RPM)
+	assert.Equal(t, 10000, loadedCfg.Models[0].TPM)
+	assert.Equal(t, "gpt-4o-mini", loadedCfg.Models[1].Name)
+	assert.Equal(t, 100, loadedCfg.Models[1].RPM)
+	assert.Equal(t, 20000, loadedCfg.Models[1].TPM)
+}
+
+func TestSaveModelsConfig_InvalidPath(t *testing.T) {
+	cfg := &ModelsConfig{
+		Models: []ModelRPMConfig{
+			{Name: "gpt-4o", RPM: 50, TPM: 10000},
+		},
+	}
+
+	// Try to save to invalid path (non-existent directory)
+	err := SaveModelsConfig("/non/existent/directory/models.yaml", cfg)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to write models config file")
+}

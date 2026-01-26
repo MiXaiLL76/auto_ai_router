@@ -417,3 +417,32 @@ func TestHandleModels(t *testing.T) {
 	assert.Equal(t, "list", response.Object)
 	// Models list might be empty if not fetched, which is OK
 }
+
+func TestHandleVisualHealth(t *testing.T) {
+	prx := createTestProxy()
+	router := New(prx, "/health", nil)
+
+	req := httptest.NewRequest("GET", "/vhealth", nil)
+	w := httptest.NewRecorder()
+
+	router.handleVisualHealth(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "text/html; charset=utf-8", w.Header().Get("Content-Type"))
+	assert.NotEmpty(t, w.Body.String())
+	// Should return HTML content
+	assert.Contains(t, w.Body.String(), "html")
+}
+
+func TestServeHTTP_VisualHealth(t *testing.T) {
+	prx := createTestProxy()
+	router := New(prx, "/health", nil)
+
+	req := httptest.NewRequest("GET", "/vhealth", nil)
+	w := httptest.NewRecorder()
+
+	router.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "text/html; charset=utf-8", w.Header().Get("Content-Type"))
+}

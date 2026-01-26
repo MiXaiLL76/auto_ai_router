@@ -642,6 +642,28 @@ func TestProxyRequest_QueryParameters(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w.Code)
 }
 
+func TestVisualHealthCheck(t *testing.T) {
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer mockServer.Close()
+
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+	bal, rl := createTestBalancer(mockServer.URL)
+	metrics := monitoring.New(false)
+	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key", rl)
+
+	req := httptest.NewRequest("GET", "/vhealth", nil)
+	w := httptest.NewRecorder()
+
+	prx.VisualHealthCheck(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "text/html; charset=utf-8", w.Header().Get("Content-Type"))
+	assert.NotEmpty(t, w.Body.String())
+	assert.Contains(t, w.Body.String(), "html")
+}
+
 // Helper function to create gzip-compressed body
 func createGzipBody(content string) []byte {
 	var buf bytes.Buffer

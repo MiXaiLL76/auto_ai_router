@@ -415,3 +415,107 @@ func TestFetchModelsFromCredential_BaseURLWithSlash(t *testing.T) {
 	assert.Equal(t, 1, len(models))
 	assert.Equal(t, "test-model", models[0].ID)
 }
+
+func TestGetModelTPM(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+	manager := New(logger, true, 50, "/tmp/models_test_gettpm.yaml")
+
+	// Mock models config with TPM values
+	manager.modelsConfig = &config.ModelsConfig{
+		Models: []config.ModelRPMConfig{
+			{Name: "gpt-4", RPM: 100, TPM: 10000},
+			{Name: "gpt-3.5-turbo", RPM: 200, TPM: 20000},
+		},
+	}
+
+	// Test existing model in config
+	tpm1 := manager.GetModelTPM("gpt-4")
+	assert.Equal(t, 10000, tpm1)
+
+	tpm2 := manager.GetModelTPM("gpt-3.5-turbo")
+	assert.Equal(t, 20000, tpm2)
+
+	// Test non-existing model (should return default -1)
+	tpm3 := manager.GetModelTPM("non-existing-model")
+	assert.Equal(t, -1, tpm3)
+}
+
+func TestGetModelTPM_NilConfig(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+	manager := New(logger, true, 75, "/tmp/models_test_tpm_nilconfig.yaml")
+
+	manager.modelsConfig = nil
+
+	// Should return -1 (unlimited) when config is nil
+	tpm := manager.GetModelTPM("any-model")
+	assert.Equal(t, -1, tpm)
+}
+
+func TestGetModelTPM_ZeroValue(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+	manager := New(logger, true, 50, "/tmp/models_test_tpm_zero.yaml")
+
+	// Mock models config with TPM = 0 (not set)
+	manager.modelsConfig = &config.ModelsConfig{
+		Models: []config.ModelRPMConfig{
+			{Name: "gpt-4", RPM: 100, TPM: 0}, // TPM not set
+		},
+	}
+
+	// Should return -1 (default) when TPM is 0
+	tpm := manager.GetModelTPM("gpt-4")
+	assert.Equal(t, -1, tpm)
+}
+
+func TestGetAllModels_DisabledWithConfig(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+	manager := New(logger, false, 100, "/tmp/models_test_disabled_config.yaml")
+
+	// Set models config even though fetching is disabled
+	manager.modelsConfig = &config.ModelsConfig{
+		Models: []config.ModelRPMConfig{
+			{Name: "gpt-4", RPM: 100, TPM: 10000},
+			{Name: "gpt-3.5-turbo", RPM: 200, TPM: 20000},
+		},
+	}
+
+	result := manager.GetAllModels()
+
+	// Should return models from config when disabled but config exists
+	assert.Equal(t, "list", result.Object)
+	assert.Equal(t, 2, len(result.Data))
+	assert.Equal(t, "gpt-4", result.Data[0].ID)
+	assert.Equal(t, "model", result.Data[0].Object)
+	assert.Equal(t, "gpt-3.5-turbo", result.Data[1].ID)
+}
+
+func TestHasModel_DisabledWithConfig(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+	manager := New(logger, false, 100, "/tmp/models_test_hasmodel_disabled.yaml")
+
+	// Set models config even though fetching is disabled
+	manager.modelsConfig = &config.ModelsConfig{
+		Models: []config.ModelRPMConfig{
+			{Name: "gpt-4", RPM: 100, TPM: 10000},
+			{Name: "gpt-3.5-turbo", RPM: 200, TPM: 20000},
+		},
+	}
+
+	// Should check against models.yaml when disabled with config
+	assert.True(t, manager.HasModel("any-cred", "gpt-4"))
+	assert.True(t, manager.HasModel("any-cred", "gpt-3.5-turbo"))
+	assert.False(t, manager.HasModel("any-cred", "non-existent-model"))
+}
+
+func TestHasModel_DisabledWithoutConfig(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+	manager := New(logger, false, 100, "/tmp/models_test_hasmodel_noconfig.yaml")
+
+	// Empty config (no models)
+	manager.modelsConfig = &config.ModelsConfig{
+		Models: []config.ModelRPMConfig{},
+	}
+
+	// Should allow all models when disabled and no models in config
+	assert.True(t, manager.HasModel("any-cred", "any-model"))
+}

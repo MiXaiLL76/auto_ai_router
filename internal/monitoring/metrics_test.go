@@ -238,3 +238,54 @@ func TestMultipleEndpoints(t *testing.T) {
 	count := testutil.CollectAndCount(RequestsTotal)
 	assert.Greater(t, count, 0)
 }
+
+func TestUpdateCredentialTPM(t *testing.T) {
+	CredentialTPMCurrent.Reset()
+
+	m := New(true)
+
+	// Update TPM for credentials
+	m.UpdateCredentialTPM("cred1", 5000)
+	m.UpdateCredentialTPM("cred2", 10000)
+	m.UpdateCredentialTPM("cred1", 7500) // Update again
+
+	// Verify metrics were set
+	count := testutil.CollectAndCount(CredentialTPMCurrent)
+	assert.Greater(t, count, 0)
+
+	// Verify the last value for cred1
+	tpm := testutil.ToFloat64(CredentialTPMCurrent.WithLabelValues("cred1"))
+	assert.Equal(t, 7500.0, tpm)
+
+	// Verify cred2 value
+	tpm2 := testutil.ToFloat64(CredentialTPMCurrent.WithLabelValues("cred2"))
+	assert.Equal(t, 10000.0, tpm2)
+}
+
+func TestUpdateCredentialTPM_Disabled(t *testing.T) {
+	m := New(false)
+
+	// Should not panic when disabled
+	m.UpdateCredentialTPM("cred1", 5000)
+	m.UpdateCredentialTPM("cred2", 10000)
+}
+
+func TestUpdateCredentialTPM_MultipleCredentials(t *testing.T) {
+	CredentialTPMCurrent.Reset()
+
+	m := New(true)
+
+	// Update TPM for multiple credentials
+	m.UpdateCredentialTPM("cred1", 1000)
+	m.UpdateCredentialTPM("cred2", 2000)
+	m.UpdateCredentialTPM("cred3", 3000)
+
+	// Verify metrics were set for all credentials
+	count := testutil.CollectAndCount(CredentialTPMCurrent)
+	assert.Greater(t, count, 0)
+
+	// Verify individual values
+	assert.Equal(t, 1000.0, testutil.ToFloat64(CredentialTPMCurrent.WithLabelValues("cred1")))
+	assert.Equal(t, 2000.0, testutil.ToFloat64(CredentialTPMCurrent.WithLabelValues("cred2")))
+	assert.Equal(t, 3000.0, testutil.ToFloat64(CredentialTPMCurrent.WithLabelValues("cred3")))
+}
