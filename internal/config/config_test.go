@@ -449,39 +449,39 @@ func TestConfig_Validate_DefaultModelsRPM(t *testing.T) {
 
 func TestLoad_EnvVariables(t *testing.T) {
 	// Set environment variables for testing
-	os.Setenv("TEST_PORT", "9090")
-	os.Setenv("TEST_MAX_BODY_SIZE", "200")
-	os.Setenv("TEST_REQUEST_TIMEOUT", "60s")
-	os.Setenv("TEST_LOGGING_LEVEL", "error")
-	os.Setenv("TEST_REPLACE_V1_MODELS", "false")
-	os.Setenv("TEST_MASTER_KEY", "sk-env-master-key")
-	os.Setenv("TEST_DEFAULT_MODELS_RPM", "100")
-	os.Setenv("TEST_CRED_NAME", "env_credential")
-	os.Setenv("TEST_CRED_TYPE", "azure")
-	os.Setenv("TEST_CRED_API_KEY", "sk-env-api-key")
-	os.Setenv("TEST_CRED_BASE_URL", "https://env.example.com")
-	os.Setenv("TEST_CRED_RPM", "150")
-	os.Setenv("TEST_CRED_TPM", "50000")
-	os.Setenv("TEST_PROMETHEUS_ENABLED", "false")
-	os.Setenv("TEST_HEALTH_CHECK_PATH", "/status")
+	require.NoError(t, os.Setenv("TEST_PORT", "9090"))
+	require.NoError(t, os.Setenv("TEST_MAX_BODY_SIZE", "200"))
+	require.NoError(t, os.Setenv("TEST_REQUEST_TIMEOUT", "60s"))
+	require.NoError(t, os.Setenv("TEST_LOGGING_LEVEL", "error"))
+	require.NoError(t, os.Setenv("TEST_REPLACE_V1_MODELS", "false"))
+	require.NoError(t, os.Setenv("TEST_MASTER_KEY", "sk-env-master-key"))
+	require.NoError(t, os.Setenv("TEST_DEFAULT_MODELS_RPM", "100"))
+	require.NoError(t, os.Setenv("TEST_CRED_NAME", "env_credential"))
+	require.NoError(t, os.Setenv("TEST_CRED_TYPE", "azure"))
+	require.NoError(t, os.Setenv("TEST_CRED_API_KEY", "sk-env-api-key"))
+	require.NoError(t, os.Setenv("TEST_CRED_BASE_URL", "https://env.example.com"))
+	require.NoError(t, os.Setenv("TEST_CRED_RPM", "150"))
+	require.NoError(t, os.Setenv("TEST_CRED_TPM", "50000"))
+	require.NoError(t, os.Setenv("TEST_PROMETHEUS_ENABLED", "false"))
+	require.NoError(t, os.Setenv("TEST_HEALTH_CHECK_PATH", "/status"))
 
 	defer func() {
 		// Cleanup
-		os.Unsetenv("TEST_PORT")
-		os.Unsetenv("TEST_MAX_BODY_SIZE")
-		os.Unsetenv("TEST_REQUEST_TIMEOUT")
-		os.Unsetenv("TEST_LOGGING_LEVEL")
-		os.Unsetenv("TEST_REPLACE_V1_MODELS")
-		os.Unsetenv("TEST_MASTER_KEY")
-		os.Unsetenv("TEST_DEFAULT_MODELS_RPM")
-		os.Unsetenv("TEST_CRED_NAME")
-		os.Unsetenv("TEST_CRED_TYPE")
-		os.Unsetenv("TEST_CRED_API_KEY")
-		os.Unsetenv("TEST_CRED_BASE_URL")
-		os.Unsetenv("TEST_CRED_RPM")
-		os.Unsetenv("TEST_CRED_TPM")
-		os.Unsetenv("TEST_PROMETHEUS_ENABLED")
-		os.Unsetenv("TEST_HEALTH_CHECK_PATH")
+		_ = os.Unsetenv("TEST_PORT")
+		_ = os.Unsetenv("TEST_MAX_BODY_SIZE")
+		_ = os.Unsetenv("TEST_REQUEST_TIMEOUT")
+		_ = os.Unsetenv("TEST_LOGGING_LEVEL")
+		_ = os.Unsetenv("TEST_REPLACE_V1_MODELS")
+		_ = os.Unsetenv("TEST_MASTER_KEY")
+		_ = os.Unsetenv("TEST_DEFAULT_MODELS_RPM")
+		_ = os.Unsetenv("TEST_CRED_NAME")
+		_ = os.Unsetenv("TEST_CRED_TYPE")
+		_ = os.Unsetenv("TEST_CRED_API_KEY")
+		_ = os.Unsetenv("TEST_CRED_BASE_URL")
+		_ = os.Unsetenv("TEST_CRED_RPM")
+		_ = os.Unsetenv("TEST_CRED_TPM")
+		_ = os.Unsetenv("TEST_PROMETHEUS_ENABLED")
+		_ = os.Unsetenv("TEST_HEALTH_CHECK_PATH")
 	}()
 
 	// Create temporary config file with env variables
@@ -547,12 +547,12 @@ monitoring:
 
 func TestLoad_EnvVariables_Mixed(t *testing.T) {
 	// Set only some environment variables
-	os.Setenv("TEST_MASTER_KEY", "sk-from-env")
-	os.Setenv("TEST_CRED_API_KEY", "sk-cred-from-env")
+	require.NoError(t, os.Setenv("TEST_MASTER_KEY", "sk-from-env"))
+	require.NoError(t, os.Setenv("TEST_CRED_API_KEY", "sk-cred-from-env"))
 
 	defer func() {
-		os.Unsetenv("TEST_MASTER_KEY")
-		os.Unsetenv("TEST_CRED_API_KEY")
+		_ = os.Unsetenv("TEST_MASTER_KEY")
+		_ = os.Unsetenv("TEST_CRED_API_KEY")
 	}()
 
 	// Create temporary config file mixing env variables and direct values
