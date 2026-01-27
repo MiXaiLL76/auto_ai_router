@@ -33,9 +33,27 @@ type Proxy struct {
 	masterKey      string
 	rateLimiter    *ratelimit.RPMLimiter
 	tokenManager   *auth.VertexTokenManager
+	healthTemplate *template.Template // Cached template
 }
 
 func New(bal *balancer.RoundRobin, logger *slog.Logger, maxBodySizeMB int, requestTimeout time.Duration, metrics *monitoring.Metrics, masterKey string, rateLimiter *ratelimit.RPMLimiter, tokenManager *auth.VertexTokenManager) *Proxy {
+	// Parse template once at startup
+	tmpl, err := template.New("health").Funcs(template.FuncMap{
+		"div": func(a, b int) int {
+			if b == 0 {
+				return 0
+			}
+			return a / b
+		},
+		"mul": func(a, b int) int {
+			return a * b
+		},
+	}).Parse(healthHTML)
+	if err != nil {
+		logger.Error("Failed to parse health template at startup", "error", err)
+		// Continue without template - will cause error on /vhealth requests
+	}
+
 	return &Proxy{
 		balancer:       bal,
 		logger:         logger,
@@ -45,8 +63,16 @@ func New(bal *balancer.RoundRobin, logger *slog.Logger, maxBodySizeMB int, reque
 		masterKey:      masterKey,
 		rateLimiter:    rateLimiter,
 		tokenManager:   tokenManager,
+		healthTemplate: tmpl,
 		client: &http.Client{
 			Timeout: requestTimeout,
+			Transport: &http.Transport{
+				Proxy:               http.ProxyFromEnvironment, // Support HTTP_PROXY, HTTPS_PROXY, NO_PROXY
+				MaxIdleConns:        100,
+				MaxIdleConnsPerHost: 10,
+				IdleConnTimeout:     90 * time.Second,
+				DisableKeepAlives:   false,
+			},
 			CheckRedirect: func(req *http.Request, via []*http.Request) error {
 				return http.ErrUseLastResponse
 			},
@@ -588,29 +614,16 @@ func isStreamingRequest(body []byte) bool {
 func (p *Proxy) VisualHealthCheck(w http.ResponseWriter, r *http.Request) {
 	_, status := p.HealthCheck()
 
-	// Parse template with custom functions
-	tmpl, err := template.New("health").Funcs(template.FuncMap{
-		"div": func(a, b int) int {
-			if b == 0 {
-				return 0
-			}
-			return a / b
-		},
-		"mul": func(a, b int) int {
-			return a * b
-		},
-	}).Parse(healthHTML)
-
-	if err != nil {
-		p.logger.Error("Failed to parse health template", "error", err)
-		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+	if p.healthTemplate == nil {
+		p.logger.Error("Health template not available")
+		http.Error(w, "Internal Server Error: Template not available", http.StatusInternalServerError)
 		return
 	}
 
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 
-	if err := tmpl.Execute(w, status); err != nil {
+	if err := p.healthTemplate.Execute(w, status); err != nil {
 		p.logger.Error("Failed to execute health template", "error", err)
 	}
 }

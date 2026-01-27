@@ -21,7 +21,7 @@ var (
 		prometheus.HistogramOpts{
 			Name:    "auto_ai_router_requests_duration_seconds",
 			Help:    "Request duration in seconds",
-			Buckets: prometheus.DefBuckets,
+			Buckets: []float64{1, 10, 30, 60, 120, 240, 600},
 		},
 		[]string{"credential", "endpoint"},
 	)

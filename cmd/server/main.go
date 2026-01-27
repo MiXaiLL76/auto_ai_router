@@ -102,37 +102,45 @@ func main() {
 	prx := proxy.New(bal, log, cfg.Server.MaxBodySizeMB, cfg.Server.RequestTimeout, metrics, cfg.Server.MasterKey, rateLimiter, tokenManager)
 
 	// Start background metrics updater
+	var metricsCancel context.CancelFunc
 	if cfg.Monitoring.PrometheusEnabled {
+		metricsCtx, cancel := context.WithCancel(context.Background())
+		metricsCancel = cancel
 		go func() {
 			ticker := time.NewTicker(10 * time.Second)
 			defer ticker.Stop()
-			for range ticker.C {
-				// Update credential metrics
-				for _, cred := range bal.GetCredentials() {
-					rpm := rateLimiter.GetCurrentRPM(cred.Name)
-					metrics.UpdateCredentialRPM(cred.Name, rpm)
+			for {
+				select {
+				case <-metricsCtx.Done():
+					return
+				case <-ticker.C:
+					// Update credential metrics
+					for _, cred := range bal.GetCredentials() {
+						rpm := rateLimiter.GetCurrentRPM(cred.Name)
+						metrics.UpdateCredentialRPM(cred.Name, rpm)
 
-					tpm := rateLimiter.GetCurrentTPM(cred.Name)
-					metrics.UpdateCredentialTPM(cred.Name, tpm)
+						tpm := rateLimiter.GetCurrentTPM(cred.Name)
+						metrics.UpdateCredentialTPM(cred.Name, tpm)
 
-					banned := f2b.IsBanned(cred.Name)
-					metrics.UpdateCredentialBanStatus(cred.Name, banned)
-				}
+						banned := f2b.IsBanned(cred.Name)
+						metrics.UpdateCredentialBanStatus(cred.Name, banned)
+					}
 
-				// Update model RPM/TPM metrics
-				// GetAllModels() returns keys in format "credential:model"
-				for _, key := range rateLimiter.GetAllModels() {
-					// Parse credential:model format
-					parts := splitCredentialModel(key)
-					if len(parts) == 2 {
-						credentialName := parts[0]
-						modelName := parts[1]
+					// Update model RPM/TPM metrics
+					// GetAllModels() returns keys in format "credential:model"
+					for _, key := range rateLimiter.GetAllModels() {
+						// Parse credential:model format
+						parts := splitCredentialModel(key)
+						if len(parts) == 2 {
+							credentialName := parts[0]
+							modelName := parts[1]
 
-						modelRPM := rateLimiter.GetCurrentModelRPM(credentialName, modelName)
-						metrics.UpdateModelRPM(credentialName, modelName, modelRPM)
+							modelRPM := rateLimiter.GetCurrentModelRPM(credentialName, modelName)
+							metrics.UpdateModelRPM(credentialName, modelName, modelRPM)
 
-						modelTPM := rateLimiter.GetCurrentModelTPM(credentialName, modelName)
-						metrics.UpdateModelTPM(credentialName, modelName, modelTPM)
+							modelTPM := rateLimiter.GetCurrentModelTPM(credentialName, modelName)
+							metrics.UpdateModelTPM(credentialName, modelName, modelTPM)
+						}
 					}
 				}
 			}
@@ -150,9 +158,29 @@ func main() {
 		log.Info("Prometheus metrics enabled", "path", "/metrics")
 	}
 
+	// Calculate server timeouts based on request timeout
+	var readTimeout, writeTimeout, idleTimeout time.Duration
+
+	if cfg.Server.RequestTimeout > 0 {
+		// ReadTimeout: для чтения запроса от клиента (обычно быстро)
+		readTimeout = 60 * time.Second
+		// WriteTimeout: request_timeout + 50% буфер для записи ответа
+		writeTimeout = time.Duration(float64(cfg.Server.RequestTimeout) * 1.5)
+		// IdleTimeout: в 2 раза больше WriteTimeout для keep-alive соединений
+		idleTimeout = writeTimeout * 2
+	} else {
+		// If request timeout is disabled (-1), use reasonable defaults
+		readTimeout = 60 * time.Second
+		writeTimeout = 10 * time.Minute
+		idleTimeout = 20 * time.Minute
+	}
+
 	server := &http.Server{
-		Addr:    fmt.Sprintf(":%d", cfg.Server.Port),
-		Handler: mux,
+		Addr:         fmt.Sprintf(":%d", cfg.Server.Port),
+		Handler:      mux,
+		ReadTimeout:  readTimeout,
+		WriteTimeout: writeTimeout,
+		IdleTimeout:  idleTimeout,
 	}
 
 	go func() {
@@ -168,6 +196,12 @@ func main() {
 	<-sigChan
 
 	log.Info("Shutting down server...")
+
+	// Cancel metrics updater goroutine
+	if metricsCancel != nil {
+		metricsCancel()
+		log.Info("Metrics updater stopped")
+	}
 
 	// Create context with timeout for graceful shutdown
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

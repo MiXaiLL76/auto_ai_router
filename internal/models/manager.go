@@ -98,7 +98,15 @@ func (m *Manager) FetchModels(credentials []config.CredentialConfig, timeout tim
 
 	client := &http.Client{
 		Timeout: timeout,
+		Transport: &http.Transport{
+			Proxy:               http.ProxyFromEnvironment, // Support HTTP_PROXY, HTTPS_PROXY, NO_PROXY
+			MaxIdleConns:        50,
+			MaxIdleConnsPerHost: 5,
+			IdleConnTimeout:     30 * time.Second,
+			DisableKeepAlives:   false,
+		},
 	}
+	defer client.CloseIdleConnections()
 
 	var wg sync.WaitGroup
 	modelsChan := make(chan struct {

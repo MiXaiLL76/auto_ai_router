@@ -17,6 +17,7 @@ import (
 type VertexTokenManager struct {
 	mu           sync.RWMutex
 	tokens       map[string]*cachedToken
+	credentials  map[string][]byte // Cache for credentials
 	logger       *slog.Logger
 	tokenRefresh time.Duration
 }
@@ -32,6 +33,7 @@ type cachedToken struct {
 func NewVertexTokenManager(logger *slog.Logger) *VertexTokenManager {
 	return &VertexTokenManager{
 		tokens:       make(map[string]*cachedToken),
+		credentials:  make(map[string][]byte),
 		logger:       logger,
 		tokenRefresh: 5 * time.Minute, // Refresh 5 minutes before expiry
 	}
@@ -83,21 +85,29 @@ func (tm *VertexTokenManager) GetToken(credentialName, credentialsFile, credenti
 	var credBytes []byte
 	var err error
 
-	// Load credentials from file or JSON string
-	if credentialsFile != "" {
-		credBytes, err = os.ReadFile(credentialsFile)
-		if err != nil {
-			return "", fmt.Errorf("failed to read credentials file %s: %w", credentialsFile, err)
-		}
-		tm.logger.Debug("Loaded credentials from file",
-			"credential", credentialName,
-			"file", credentialsFile,
-		)
-	} else if credentialsJSON != "" {
-		credBytes = []byte(credentialsJSON)
-		tm.logger.Debug("Using credentials from config", "credential", credentialName)
+	// Check if credentials are cached
+	if cached, exists := tm.credentials[credentialName]; exists {
+		credBytes = cached
+		tm.logger.Debug("Using cached credentials", "credential", credentialName)
 	} else {
-		return "", fmt.Errorf("no credentials provided for %s", credentialName)
+		// Load credentials from file or JSON string
+		if credentialsFile != "" {
+			credBytes, err = os.ReadFile(credentialsFile)
+			if err != nil {
+				return "", fmt.Errorf("failed to read credentials file %s: %w", credentialsFile, err)
+			}
+			tm.logger.Debug("Loaded credentials from file",
+				"credential", credentialName,
+				"file", credentialsFile,
+			)
+		} else if credentialsJSON != "" {
+			credBytes = []byte(credentialsJSON)
+			tm.logger.Debug("Using credentials from config", "credential", credentialName)
+		} else {
+			return "", fmt.Errorf("no credentials provided for %s", credentialName)
+		}
+		// Cache the credentials
+		tm.credentials[credentialName] = credBytes
 	}
 
 	// Parse and validate service account JSON
