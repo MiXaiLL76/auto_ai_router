@@ -23,10 +23,17 @@ var (
 
 type Credential struct {
 	Name    string
+	Type    string
 	APIKey  string
 	BaseURL string
 	RPM     int
 	TPM     int
+
+	// Vertex AI specific fields
+	ProjectID       string
+	Location        string
+	CredentialsFile string
+	CredentialsJSON string
 }
 
 type RoundRobin struct {
@@ -42,11 +49,16 @@ func New(credentials []config.CredentialConfig, f2b *fail2ban.Fail2Ban, rl *rate
 	creds := make([]Credential, len(credentials))
 	for i, c := range credentials {
 		creds[i] = Credential{
-			Name:    c.Name,
-			APIKey:  c.APIKey,
-			BaseURL: c.BaseURL,
-			RPM:     c.RPM,
-			TPM:     c.TPM,
+			Name:            c.Name,
+			Type:            c.Type,
+			APIKey:          c.APIKey,
+			BaseURL:         c.BaseURL,
+			RPM:             c.RPM,
+			TPM:             c.TPM,
+			ProjectID:       c.ProjectID,
+			Location:        c.Location,
+			CredentialsFile: c.CredentialsFile,
+			CredentialsJSON: c.CredentialsJSON,
 		}
 		// Use -1 as default for unlimited TPM if not specified
 		tpm := c.TPM

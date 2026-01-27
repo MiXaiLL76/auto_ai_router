@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mixaill76/auto_ai_router/internal/auth"
 	"github.com/mixaill76/auto_ai_router/internal/balancer"
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/fail2ban"
@@ -36,8 +37,9 @@ func createTestProxy() *proxy.Proxy {
 
 	bal := balancer.New(credentials, f2b, rl)
 	metrics := monitoring.New(false)
+	tokenManager := auth.NewVertexTokenManager(logger)
 
-	return proxy.New(bal, logger, 10, 30*time.Second, metrics, "test-master-key", rl)
+	return proxy.New(bal, logger, 10, 30*time.Second, metrics, "test-master-key", rl, tokenManager)
 }
 
 // createTestModelManager creates a test model manager instance
@@ -98,7 +100,8 @@ func TestServeHTTP_HealthCheck_Unhealthy(t *testing.T) {
 	f2b.RecordResponse("test1", 500)
 
 	metrics := monitoring.New(false)
-	prx := proxy.New(bal, logger, 10, 30*time.Second, metrics, "test-key", rl)
+	tm := auth.NewVertexTokenManager(logger)
+	prx := proxy.New(bal, logger, 10, 30*time.Second, metrics, "test-key", rl, tm)
 
 	router := New(prx, "/health", nil)
 
@@ -161,7 +164,8 @@ func TestServeHTTP_V1Models_Disabled(t *testing.T) {
 
 	bal := balancer.New(credentials, f2b, rl)
 	metrics := monitoring.New(false)
-	prx := proxy.New(bal, logger, 10, 30*time.Second, metrics, "test-key", rl)
+	tm := auth.NewVertexTokenManager(logger)
+	prx := proxy.New(bal, logger, 10, 30*time.Second, metrics, "test-key", rl, tm)
 
 	modelManager := createTestModelManager(false) // disabled
 	router := New(prx, "/health", modelManager)
@@ -199,7 +203,8 @@ func TestServeHTTP_V1Models_NilManager(t *testing.T) {
 
 	bal := balancer.New(credentials, f2b, rl)
 	metrics := monitoring.New(false)
-	prx := proxy.New(bal, logger, 10, 30*time.Second, metrics, "test-key", rl)
+	tm := auth.NewVertexTokenManager(logger)
+	prx := proxy.New(bal, logger, 10, 30*time.Second, metrics, "test-key", rl, tm)
 
 	router := New(prx, "/health", nil)
 
@@ -235,7 +240,8 @@ func TestServeHTTP_V1Models_PostMethod(t *testing.T) {
 
 	bal := balancer.New(credentials, f2b, rl)
 	metrics := monitoring.New(false)
-	prx := proxy.New(bal, logger, 10, 30*time.Second, metrics, "test-key", rl)
+	tm := auth.NewVertexTokenManager(logger)
+	prx := proxy.New(bal, logger, 10, 30*time.Second, metrics, "test-key", rl, tm)
 
 	modelManager := createTestModelManager(true)
 	router := New(prx, "/health", modelManager)
@@ -273,7 +279,8 @@ func TestServeHTTP_ProxyRequest(t *testing.T) {
 
 	bal := balancer.New(credentials, f2b, rl)
 	metrics := monitoring.New(false)
-	prx := proxy.New(bal, logger, 10, 30*time.Second, metrics, "test-key", rl)
+	tm := auth.NewVertexTokenManager(logger)
+	prx := proxy.New(bal, logger, 10, 30*time.Second, metrics, "test-key", rl, tm)
 
 	router := New(prx, "/health", nil)
 
@@ -372,7 +379,8 @@ func TestHandleHealth(t *testing.T) {
 			}
 
 			metrics := monitoring.New(false)
-			prx := proxy.New(bal, logger, 10, 30*time.Second, metrics, "test-key", rl)
+			tm := auth.NewVertexTokenManager(logger)
+			prx := proxy.New(bal, logger, 10, 30*time.Second, metrics, "test-key", rl, tm)
 
 			router := New(prx, "/health", nil)
 

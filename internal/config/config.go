@@ -112,18 +112,28 @@ type CredentialConfig struct {
 	BaseURL string `yaml:"base_url"`
 	RPM     int    `yaml:"rpm"`
 	TPM     int    `yaml:"tpm"`
+
+	// Vertex AI specific fields
+	ProjectID       string `yaml:"project_id,omitempty"`
+	Location        string `yaml:"location,omitempty"`
+	CredentialsFile string `yaml:"credentials_file,omitempty"`
+	CredentialsJSON string `yaml:"credentials_json,omitempty"`
 }
 
 // UnmarshalYAML implements custom unmarshaling for CredentialConfig with env variable support
 func (c *CredentialConfig) UnmarshalYAML(value *yaml.Node) error {
 	// Create a temporary struct with all string fields
 	type tempConfig struct {
-		Name    string `yaml:"name"`
-		Type    string `yaml:"type"`
-		APIKey  string `yaml:"api_key"`
-		BaseURL string `yaml:"base_url"`
-		RPM     string `yaml:"rpm"`
-		TPM     string `yaml:"tpm"`
+		Name            string `yaml:"name"`
+		Type            string `yaml:"type"`
+		APIKey          string `yaml:"api_key"`
+		BaseURL         string `yaml:"base_url"`
+		RPM             string `yaml:"rpm"`
+		TPM             string `yaml:"tpm"`
+		ProjectID       string `yaml:"project_id,omitempty"`
+		Location        string `yaml:"location,omitempty"`
+		CredentialsFile string `yaml:"credentials_file,omitempty"`
+		CredentialsJSON string `yaml:"credentials_json,omitempty"`
 	}
 
 	var temp tempConfig
@@ -136,6 +146,12 @@ func (c *CredentialConfig) UnmarshalYAML(value *yaml.Node) error {
 	c.Type = resolveEnvString(temp.Type)
 	c.APIKey = resolveEnvString(temp.APIKey)
 	c.BaseURL = resolveEnvString(temp.BaseURL)
+
+	// Resolve Vertex AI specific fields
+	c.ProjectID = resolveEnvString(temp.ProjectID)
+	c.Location = resolveEnvString(temp.Location)
+	c.CredentialsFile = resolveEnvString(temp.CredentialsFile)
+	c.CredentialsJSON = resolveEnvString(temp.CredentialsJSON)
 
 	// Resolve and parse RPM
 	var err error
@@ -359,23 +375,42 @@ func (c *Config) Validate() error {
 		if cred.Name == "" {
 			return fmt.Errorf("credential %d: name is required", i)
 		}
-		if cred.APIKey == "" {
-			return fmt.Errorf("credential %s: api_key is required", cred.Name)
+
+		// Vertex AI specific validation
+		if cred.Type == "vertex-ai" {
+			// For Vertex AI, project_id and location are required
+			if cred.ProjectID == "" {
+				return fmt.Errorf("credential %s: project_id is required for vertex-ai type", cred.Name)
+			}
+			if cred.Location == "" {
+				return fmt.Errorf("credential %s: location is required for vertex-ai type", cred.Name)
+			}
+			// API Key is required for Vertex AI (Express Mode)
+			if cred.APIKey == "" && cred.CredentialsFile == "" && cred.CredentialsJSON == "" {
+				return fmt.Errorf("credential %s: api_key, credentials_file, or credentials_json is required for vertex-ai type", cred.Name)
+			}
+			// base_url is optional for Vertex AI (will be constructed dynamically)
+		} else {
+			// For non-Vertex AI credentials, require APIKey and BaseURL
+			if cred.APIKey == "" {
+				return fmt.Errorf("credential %s: api_key is required", cred.Name)
+			}
+			if cred.BaseURL == "" {
+				return fmt.Errorf("credential %s: base_url is required", cred.Name)
+			}
+			// Validate base_url is a valid URL
+			parsedURL, err := url.Parse(cred.BaseURL)
+			if err != nil {
+				return fmt.Errorf("credential %s: invalid base_url: %w", cred.Name, err)
+			}
+			if parsedURL.Scheme != "http" && parsedURL.Scheme != "https" {
+				return fmt.Errorf("credential %s: base_url must use http or https scheme, got: %s", cred.Name, parsedURL.Scheme)
+			}
+			if parsedURL.Host == "" {
+				return fmt.Errorf("credential %s: base_url must have a host", cred.Name)
+			}
 		}
-		if cred.BaseURL == "" {
-			return fmt.Errorf("credential %s: base_url is required", cred.Name)
-		}
-		// Validate base_url is a valid URL
-		parsedURL, err := url.Parse(cred.BaseURL)
-		if err != nil {
-			return fmt.Errorf("credential %s: invalid base_url: %w", cred.Name, err)
-		}
-		if parsedURL.Scheme != "http" && parsedURL.Scheme != "https" {
-			return fmt.Errorf("credential %s: base_url must use http or https scheme, got: %s", cred.Name, parsedURL.Scheme)
-		}
-		if parsedURL.Host == "" {
-			return fmt.Errorf("credential %s: base_url must have a host", cred.Name)
-		}
+
 		// -1 means unlimited RPM
 		if cred.RPM <= 0 && cred.RPM != -1 {
 			return fmt.Errorf("credential %s: invalid rpm: %d (must be -1 for unlimited or positive number)", cred.Name, cred.RPM)

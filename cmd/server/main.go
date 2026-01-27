@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/mixaill76/auto_ai_router/internal/auth"
 	"github.com/mixaill76/auto_ai_router/internal/balancer"
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/fail2ban"
@@ -62,6 +63,11 @@ func main() {
 	// Initialize model manager and fetch models from credentials
 	// Pass static models from config.yaml (if any) - they will be merged into models.yaml config
 	modelManager := models.New(log, cfg.Server.ReplaceV1Models, cfg.Server.DefaultModelsRPM, "models.yaml", cfg.Models)
+
+	// Load credential-specific models from config
+	modelManager.LoadModelsFromConfig(cfg.Credentials)
+
+	// Fetch models from API if enabled
 	if cfg.Server.ReplaceV1Models {
 		modelManager.FetchModels(cfg.Credentials, cfg.Server.RequestTimeout)
 	}
@@ -88,8 +94,12 @@ func main() {
 	// Set model checker in balancer for model-aware routing
 	bal.SetModelChecker(modelManager)
 
+	// Create Vertex AI token manager
+	tokenManager := auth.NewVertexTokenManager(log)
+	log.Info("Vertex AI token manager initialized")
+
 	metrics := monitoring.New(cfg.Monitoring.PrometheusEnabled)
-	prx := proxy.New(bal, log, cfg.Server.MaxBodySizeMB, cfg.Server.RequestTimeout, metrics, cfg.Server.MasterKey, rateLimiter)
+	prx := proxy.New(bal, log, cfg.Server.MaxBodySizeMB, cfg.Server.RequestTimeout, metrics, cfg.Server.MasterKey, rateLimiter, tokenManager)
 
 	// Start background metrics updater
 	if cfg.Monitoring.PrometheusEnabled {

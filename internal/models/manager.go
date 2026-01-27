@@ -87,13 +87,14 @@ func New(logger *slog.Logger, enabled bool, defaultModelsRPM int, modelsConfigPa
 }
 
 // FetchModels fetches models from all credentials at startup
+// Note: LoadModelsFromConfig should be called before this method
 func (m *Manager) FetchModels(credentials []config.CredentialConfig, timeout time.Duration) {
 	if !m.enabled {
-		m.logger.Info("Model fetching disabled", "replace_v1_models", false)
+		m.logger.Info("Model API fetching disabled", "replace_v1_models", false)
 		return
 	}
 
-	m.logger.Info("Fetching models from credentials", "count", len(credentials))
+	m.logger.Info("Fetching models from credentials via API", "count", len(credentials))
 
 	client := &http.Client{
 		Timeout: timeout,
@@ -148,8 +149,10 @@ func (m *Manager) FetchModels(credentials []config.CredentialConfig, timeout tim
 			modelIDs[i] = model.ID
 			// Add to unique models set
 			uniqueModels[model.ID] = model
-			// Map model to credential
-			m.modelToCredentials[model.ID] = append(m.modelToCredentials[model.ID], result.credName)
+			// Map model to credential (avoid duplicates)
+			if !contains(m.modelToCredentials[model.ID], result.credName) {
+				m.modelToCredentials[model.ID] = append(m.modelToCredentials[model.ID], result.credName)
+			}
 		}
 
 		m.credentialModels[result.credName] = modelIDs
@@ -172,6 +175,93 @@ func (m *Manager) FetchModels(credentials []config.CredentialConfig, timeout tim
 
 	// Update models.yaml with newly discovered models
 	m.updateModelsConfig()
+}
+
+// LoadModelsFromConfig loads credential-specific models from config
+// This should be called once during initialization before FetchModels
+func (m *Manager) LoadModelsFromConfig(credentials []config.CredentialConfig) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.modelsConfig == nil || len(m.modelsConfig.Models) == 0 {
+		m.logger.Debug("No models in config to load")
+		return
+	}
+
+	// Create map of credential names for validation
+	credNames := make(map[string]bool)
+	for _, cred := range credentials {
+		credNames[cred.Name] = true
+	}
+
+	credentialSpecificCount := 0
+
+	// Process each model in config
+	for _, modelConfig := range m.modelsConfig.Models {
+		if modelConfig.Credential != "" {
+			// Model is specific to a credential
+			if !credNames[modelConfig.Credential] {
+				m.logger.Warn("Model references non-existent credential",
+					"model", modelConfig.Name,
+					"credential", modelConfig.Credential,
+				)
+				continue
+			}
+
+			// Add to credentialModels map (avoid duplicates)
+			if !contains(m.credentialModels[modelConfig.Credential], modelConfig.Name) {
+				m.credentialModels[modelConfig.Credential] = append(
+					m.credentialModels[modelConfig.Credential],
+					modelConfig.Name,
+				)
+			}
+
+			// Add to modelToCredentials map (avoid duplicates)
+			if !contains(m.modelToCredentials[modelConfig.Name], modelConfig.Credential) {
+				m.modelToCredentials[modelConfig.Name] = append(
+					m.modelToCredentials[modelConfig.Name],
+					modelConfig.Credential,
+				)
+			}
+
+			credentialSpecificCount++
+
+			m.logger.Debug("Registered credential-specific model",
+				"model", modelConfig.Name,
+				"credential", modelConfig.Credential,
+			)
+		} else {
+			// Model is global (no credential specified)
+			// Just map to all credentials, but don't add to allModels yet
+			// (will be added by FetchModels if enabled, or by GetAllModels if disabled)
+			for credName := range credNames {
+				if !contains(m.modelToCredentials[modelConfig.Name], credName) {
+					m.modelToCredentials[modelConfig.Name] = append(
+						m.modelToCredentials[modelConfig.Name],
+						credName,
+					)
+				}
+			}
+
+			m.logger.Debug("Registered global model mapping",
+				"model", modelConfig.Name,
+			)
+		}
+	}
+
+	m.logger.Info("Loaded models from config",
+		"credential_specific", credentialSpecificCount,
+	)
+}
+
+// contains checks if a string slice contains a specific value
+func contains(slice []string, val string) bool {
+	for _, item := range slice {
+		if item == val {
+			return true
+		}
+	}
+	return false
 }
 
 // fetchModelsFromCredential fetches models from a single credential
@@ -246,14 +336,12 @@ func (m *Manager) GetAllModels() ModelsResponse {
 }
 
 // GetCredentialsForModel returns list of credential names that support the given model
+// Works with both fetched models (when enabled=true) and config-loaded models (when enabled=false)
 func (m *Manager) GetCredentialsForModel(modelID string) []string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	if !m.enabled {
-		return nil
-	}
-
+	// Check modelToCredentials map (populated by both loadModelsFromConfig and FetchModels)
 	creds, ok := m.modelToCredentials[modelID]
 	if !ok {
 		return nil
@@ -270,37 +358,83 @@ func (m *Manager) HasModel(credentialName, modelID string) bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	if !m.enabled {
-		// If model fetching is disabled but models.yaml exists with models, check against it
-		if m.modelsConfig != nil && len(m.modelsConfig.Models) > 0 {
-			for _, modelConfig := range m.modelsConfig.Models {
-				if modelConfig.Name == modelID {
-					return true
+	hasConfig := m.modelsConfig != nil && len(m.modelsConfig.Models) > 0
+
+	// If we have models config, check it first
+	if hasConfig {
+		for _, modelConfig := range m.modelsConfig.Models {
+			if modelConfig.Name == modelID {
+				// Model found in config
+				if modelConfig.Credential != "" {
+					// Model is credential-specific - check if it matches
+					return modelConfig.Credential == credentialName
 				}
+				// Model is global - available for all credentials
+				return true
 			}
-			// Model not found in models.yaml
+		}
+		// Model not in config
+		if !m.enabled {
+			// If fetching disabled and model not in config - deny
 			return false
 		}
-		// If no models.yaml, allow all models
+		// If fetching enabled, continue to check fetched models
+	} else {
+		// No config at all
+		if !m.enabled {
+			// No config and fetching disabled - allow all
+			return true
+		}
+		// No config but fetching enabled - check fetched models
+	}
+
+	// Check if we have fetched models for this credential
+	if creds, ok := m.modelToCredentials[modelID]; ok {
+		// Check if this credential is in the list
+		for _, cred := range creds {
+			if cred == credentialName {
+				return true
+			}
+		}
+		// Model exists but not for this credential
+		return false
+	}
+
+	// Check credentialModels (old approach for backwards compatibility with tests)
+	if models, ok := m.credentialModels[credentialName]; ok {
+		for _, model := range models {
+			if model == modelID {
+				return true
+			}
+		}
+		// Credential has models list but this model is not in it
+		return false
+	}
+
+	// Model not found in fetched data - allow it (fallback)
+	return true
+}
+
+// IsEnabled returns whether model filtering should be used
+// Returns true if:
+// 1. API fetching is enabled (replace_v1_models=true), OR
+// 2. There are models defined in config (models.yaml or config.yaml)
+func (m *Manager) IsEnabled() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	// If API fetching is enabled, filtering is enabled
+	if m.enabled {
 		return true
 	}
 
-	models, ok := m.credentialModels[credentialName]
-	if !ok {
-		return true // If we don't have data, allow it
+	// If API fetching is disabled, check if we have models in config
+	if m.modelsConfig != nil && len(m.modelsConfig.Models) > 0 {
+		return true
 	}
 
-	for _, m := range models {
-		if m == modelID {
-			return true
-		}
-	}
+	// No API fetching and no config - filtering is disabled
 	return false
-}
-
-// IsEnabled returns whether model filtering is enabled
-func (m *Manager) IsEnabled() bool {
-	return m.enabled
 }
 
 // GetModelRPM returns RPM limit for a specific model

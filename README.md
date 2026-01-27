@@ -77,6 +77,7 @@ fail2ban:
 # Опционально: статические модели (объединяются с models.yaml)
 models:
   - name: gpt-4o-mini
+    credential: openai_backup # Опционально можно указать, что эта модель именно только к этим credentials
     rpm: 60
     tpm: 30000
 ```

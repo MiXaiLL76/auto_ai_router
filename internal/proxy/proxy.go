@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mixaill76/auto_ai_router/internal/auth"
 	"github.com/mixaill76/auto_ai_router/internal/balancer"
 	"github.com/mixaill76/auto_ai_router/internal/monitoring"
 	"github.com/mixaill76/auto_ai_router/internal/ratelimit"
@@ -31,9 +32,10 @@ type Proxy struct {
 	metrics        *monitoring.Metrics
 	masterKey      string
 	rateLimiter    *ratelimit.RPMLimiter
+	tokenManager   *auth.VertexTokenManager
 }
 
-func New(bal *balancer.RoundRobin, logger *slog.Logger, maxBodySizeMB int, requestTimeout time.Duration, metrics *monitoring.Metrics, masterKey string, rateLimiter *ratelimit.RPMLimiter) *Proxy {
+func New(bal *balancer.RoundRobin, logger *slog.Logger, maxBodySizeMB int, requestTimeout time.Duration, metrics *monitoring.Metrics, masterKey string, rateLimiter *ratelimit.RPMLimiter, tokenManager *auth.VertexTokenManager) *Proxy {
 	return &Proxy{
 		balancer:       bal,
 		logger:         logger,
@@ -42,6 +44,7 @@ func New(bal *balancer.RoundRobin, logger *slog.Logger, maxBodySizeMB int, reque
 		metrics:        metrics,
 		masterKey:      masterKey,
 		rateLimiter:    rateLimiter,
+		tokenManager:   tokenManager,
 		client: &http.Client{
 			Timeout: requestTimeout,
 			CheckRedirect: func(req *http.Request, via []*http.Request) error {
@@ -117,21 +120,49 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		"method", r.Method,
 		"path", r.URL.Path,
 		"model", modelID,
+		"type", cred.Type,
 	)
 
-	baseURL := strings.TrimSuffix(cred.BaseURL, "/")
-	path := r.URL.Path
+	// Build target URL based on credential type
+	var targetURL string
+	var vertexToken string
+	if cred.Type == "vertex-ai" {
+		// For Vertex AI, build URL dynamically
+		if modelID == "" {
+			p.logger.Error("Model ID is required for Vertex AI requests", "credential", cred.Name)
+			http.Error(w, "Bad Request: model field is required for Vertex AI", http.StatusBadRequest)
+			return
+		}
+		streaming := isStreamingRequest(body)
+		targetURL = buildVertexURL(cred, modelID, streaming)
 
-	// If baseURL already ends with /v1 and path starts with /v1, remove /v1 from path to avoid duplication
-	// Example: baseURL="https://api.openai.azure.com/openai/v1" + path="/v1/chat/completions"
-	// Should become: "https://api.openai.azure.com/openai/v1/chat/completions" (not /v1/v1/...)
-	if strings.HasSuffix(baseURL, "/v1") && strings.HasPrefix(path, "/v1") {
-		path = strings.TrimPrefix(path, "/v1")
-	}
+		// Get OAuth2 token for Vertex AI
+		var err error
+		vertexToken, err = p.tokenManager.GetToken(cred.Name, cred.CredentialsFile, cred.CredentialsJSON)
+		if err != nil {
+			p.logger.Error("Failed to get Vertex AI token",
+				"credential", cred.Name,
+				"error", err,
+			)
+			http.Error(w, "Internal Server Error: Failed to authenticate with Vertex AI", http.StatusInternalServerError)
+			return
+		}
+	} else {
+		// For OpenAI and other providers, use baseURL + path
+		baseURL := strings.TrimSuffix(cred.BaseURL, "/")
+		path := r.URL.Path
 
-	targetURL := baseURL + path
-	if r.URL.RawQuery != "" {
-		targetURL += "?" + r.URL.RawQuery
+		// If baseURL already ends with /v1 and path starts with /v1, remove /v1 from path to avoid duplication
+		// Example: baseURL="https://api.openai.azure.com/openai/v1" + path="/v1/chat/completions"
+		// Should become: "https://api.openai.azure.com/openai/v1/chat/completions" (not /v1/v1/...)
+		if strings.HasSuffix(baseURL, "/v1") && strings.HasPrefix(path, "/v1") {
+			path = strings.TrimPrefix(path, "/v1")
+		}
+
+		targetURL = baseURL + path
+		if r.URL.RawQuery != "" {
+			targetURL += "?" + r.URL.RawQuery
+		}
 	}
 
 	proxyReq, err := http.NewRequest(r.Method, targetURL, bytes.NewReader(body))
@@ -150,7 +181,14 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	proxyReq.Header.Set("Authorization", "Bearer "+cred.APIKey)
+	// Set Authorization header based on credential type
+	if cred.Type == "vertex-ai" {
+		// For Vertex AI, use OAuth2 token
+		proxyReq.Header.Set("Authorization", "Bearer "+vertexToken)
+	} else {
+		// For OpenAI and other providers, use API key
+		proxyReq.Header.Set("Authorization", "Bearer "+cred.APIKey)
+	}
 
 	// Detailed debug logging (truncate long fields for readability)
 	p.logger.Debug("Proxy request details",
@@ -220,7 +258,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		decodedBody := decodeResponseBody(responseBody, contentEncoding)
 
 		// Extract and record token usage
-		tokens := extractTokensFromResponse(decodedBody)
+		tokens := extractTokensFromResponse(decodedBody, cred.Type)
 		if tokens > 0 {
 			p.rateLimiter.ConsumeTokens(cred.Name, tokens)
 			if modelID != "" {
@@ -399,22 +437,39 @@ func decodeResponseBody(body []byte, encoding string) string {
 }
 
 // extractTokensFromResponse extracts total_tokens from the response body
-func extractTokensFromResponse(body string) int {
+// Supports both OpenAI format (usage.total_tokens) and Vertex AI format (usageMetadata.totalTokenCount)
+func extractTokensFromResponse(body string, credType string) int {
 	if body == "" {
 		return 0
 	}
 
-	var respBody struct {
+	// For Vertex AI, use usageMetadata format
+	if credType == "vertex-ai" {
+		var vertexResp struct {
+			UsageMetadata struct {
+				TotalTokenCount int `json:"totalTokenCount"`
+			} `json:"usageMetadata"`
+		}
+
+		if err := json.Unmarshal([]byte(body), &vertexResp); err != nil {
+			return 0
+		}
+
+		return vertexResp.UsageMetadata.TotalTokenCount
+	}
+
+	// For OpenAI and other providers, use standard format
+	var openAIResp struct {
 		Usage struct {
 			TotalTokens int `json:"total_tokens"`
 		} `json:"usage"`
 	}
 
-	if err := json.Unmarshal([]byte(body), &respBody); err != nil {
+	if err := json.Unmarshal([]byte(body), &openAIResp); err != nil {
 		return 0
 	}
 
-	return respBody.Usage.TotalTokens
+	return openAIResp.Usage.TotalTokens
 }
 
 // truncateLongFields truncates long fields in JSON for logging purposes
@@ -475,6 +530,58 @@ func maskKey(key string) string {
 		return "***"
 	}
 	return key[:7] + "..."
+}
+
+// determineVertexPublisher determines the Vertex AI publisher based on the model ID
+func determineVertexPublisher(modelID string) string {
+	modelLower := strings.ToLower(modelID)
+	if strings.Contains(modelLower, "claude") {
+		return "anthropic"
+	}
+	// Default to Google for Gemini and other models
+	return "google"
+}
+
+// buildVertexURL constructs the Vertex AI URL dynamically
+// Format: https://{location}-aiplatform.googleapis.com/v1/projects/{project}/locations/{location}/publishers/{publisher}/models/{model}:{endpoint}
+func buildVertexURL(cred *balancer.Credential, modelID string, streaming bool) string {
+	publisher := determineVertexPublisher(modelID)
+
+	endpoint := "generateContent"
+	if streaming {
+		endpoint = "streamGenerateContent?alt=sse"
+	}
+
+	// For global location (no regional prefix)
+	if cred.Location == "global" {
+		return fmt.Sprintf(
+			"https://aiplatform.googleapis.com/v1/projects/%s/locations/global/publishers/%s/models/%s:%s",
+			cred.ProjectID, publisher, modelID, endpoint,
+		)
+	}
+
+	// For regional locations
+	return fmt.Sprintf(
+		"https://%s-aiplatform.googleapis.com/v1/projects/%s/locations/%s/publishers/%s/models/%s:%s",
+		cred.Location, cred.ProjectID, cred.Location, publisher, modelID, endpoint,
+	)
+}
+
+// isStreamingRequest determines if the request is for streaming based on the request body
+func isStreamingRequest(body []byte) bool {
+	if len(body) == 0 {
+		return false
+	}
+
+	var reqBody struct {
+		Stream bool `json:"stream"`
+	}
+
+	if err := json.Unmarshal(body, &reqBody); err != nil {
+		return false
+	}
+
+	return reqBody.Stream
 }
 
 // VisualHealthCheck renders an HTML dashboard with health check information
