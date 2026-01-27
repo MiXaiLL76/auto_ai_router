@@ -165,7 +165,7 @@
         let currentSort = 'tpm';
         let sortAscending = false;
 
-        function sortModels(type) {
+        function sortModels(type, clickedButton) {
             const container = document.getElementById('modelList');
             const items = Array.from(container.getElementsByClassName('model-item'));
 
@@ -179,7 +179,12 @@
 
             // Update active button
             document.querySelectorAll('.sort-btn').forEach(btn => btn.classList.remove('active'));
-            event.target.classList.add('active');
+            if (clickedButton) {
+                clickedButton.classList.add('active');
+            } else {
+                const targetBtn = document.querySelector(`.sort-btn[onclick*="'${type}'"]`);
+                if (targetBtn) targetBtn.classList.add('active');
+            }
 
             items.sort((a, b) => {
                 let aVal, bVal;
@@ -216,13 +221,19 @@
             items.forEach(item => container.appendChild(item));
         }
 
-        // Apply default sorting on page load
+        // Update onclick handlers to pass button reference
         document.addEventListener('DOMContentLoaded', function() {
+            document.querySelectorAll('.sort-btn').forEach(btn => {
+                const originalOnclick = btn.getAttribute('onclick');
+                const type = originalOnclick.match(/'([^']+)'/)[1];
+                btn.onclick = function() { sortModels(type, this); };
+            });
+
+            // Apply default TPM sorting
+            currentSort = 'tpm';
+            sortAscending = false;
             sortModels('tpm');
         });
     </script>
-</body>
-</html>
-    </div>
 </body>
 </html>
