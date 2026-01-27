@@ -58,12 +58,15 @@ func TestFetchModels_Success(t *testing.T) {
 	defer mockServer.Close()
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-	manager := New(logger, true, 100, "/tmp/models_test_fetch.yaml", []config.ModelRPMConfig{})
+	yamlPath := "/tmp/models_test_fetch.yaml"
+	defer func() { _ = os.Remove(yamlPath) }()
+	manager := New(logger, true, 100, yamlPath, []config.ModelRPMConfig{})
 
 	credentials := []config.CredentialConfig{
 		{Name: "test1", APIKey: "key1", BaseURL: mockServer.URL, RPM: 100},
 	}
 
+	manager.LoadModelsFromConfig(credentials)
 	manager.FetchModels(credentials, 5*time.Second)
 
 	// Verify models were fetched
@@ -103,13 +106,16 @@ func TestFetchModels_MultipleCredentials(t *testing.T) {
 	defer mockServer2.Close()
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-	manager := New(logger, true, 100, "/tmp/models_test_multi.yaml", []config.ModelRPMConfig{})
+	yamlPath := "/tmp/models_test_multi.yaml"
+	defer func() { _ = os.Remove(yamlPath) }()
+	manager := New(logger, true, 100, yamlPath, []config.ModelRPMConfig{})
 
 	credentials := []config.CredentialConfig{
 		{Name: "test1", APIKey: "key1", BaseURL: mockServer1.URL, RPM: 100},
 		{Name: "test2", APIKey: "key2", BaseURL: mockServer2.URL, RPM: 100},
 	}
 
+	manager.LoadModelsFromConfig(credentials)
 	manager.FetchModels(credentials, 5*time.Second)
 
 	// Should have 3 unique models
@@ -142,13 +148,16 @@ func TestFetchModels_PartialFailure(t *testing.T) {
 	defer mockServer.Close()
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-	manager := New(logger, true, 100, "/tmp/models_test_partial.yaml", []config.ModelRPMConfig{})
+	yamlPath := "/tmp/models_test_partial.yaml"
+	defer func() { _ = os.Remove(yamlPath) }()
+	manager := New(logger, true, 100, yamlPath, []config.ModelRPMConfig{})
 
 	credentials := []config.CredentialConfig{
 		{Name: "working", APIKey: "key1", BaseURL: mockServer.URL, RPM: 100},
 		{Name: "failing", APIKey: "key2", BaseURL: "http://invalid-url-that-does-not-exist.com", RPM: 100},
 	}
 
+	manager.LoadModelsFromConfig(credentials)
 	manager.FetchModels(credentials, 2*time.Second)
 
 	// Should still have models from working credential
@@ -165,6 +174,7 @@ func TestFetchModels_Disabled(t *testing.T) {
 		{Name: "test1", APIKey: "key1", BaseURL: "http://test.com", RPM: 100},
 	}
 
+	manager.LoadModelsFromConfig(credentials)
 	manager.FetchModels(credentials, 5*time.Second)
 
 	// Should not fetch when disabled
@@ -181,12 +191,15 @@ func TestFetchModels_ErrorResponse(t *testing.T) {
 	defer mockServer.Close()
 
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-	manager := New(logger, true, 100, "/tmp/models_test_error.yaml", []config.ModelRPMConfig{})
+	yamlPath := "/tmp/models_test_error.yaml"
+	defer func() { _ = os.Remove(yamlPath) }()
+	manager := New(logger, true, 100, yamlPath, []config.ModelRPMConfig{})
 
 	credentials := []config.CredentialConfig{
 		{Name: "test1", APIKey: "invalid", BaseURL: mockServer.URL, RPM: 100},
 	}
 
+	manager.LoadModelsFromConfig(credentials)
 	manager.FetchModels(credentials, 5*time.Second)
 
 	// Should not have any models
@@ -251,9 +264,11 @@ func TestGetCredentialsForModel_Disabled(t *testing.T) {
 
 	manager.modelToCredentials["gpt-4"] = []string{"test1"}
 
-	// Should return nil when disabled
+	// Should return credentials even when API fetching is disabled
+	// (because models can be loaded from config)
 	creds := manager.GetCredentialsForModel("gpt-4")
-	assert.Nil(t, creds)
+	assert.NotNil(t, creds)
+	assert.Equal(t, []string{"test1"}, creds)
 }
 
 func TestHasModel(t *testing.T) {
@@ -292,11 +307,23 @@ func TestHasModel_Disabled(t *testing.T) {
 func TestIsEnabled(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
 
-	manager1 := New(logger, true, 100, "/tmp/test.yaml", []config.ModelRPMConfig{})
-	assert.True(t, manager1.IsEnabled())
+	// Test 1: enabled=true -> IsEnabled=true
+	manager1 := New(logger, true, 100, "/tmp/test_isenabled1.yaml", []config.ModelRPMConfig{})
+	assert.True(t, manager1.IsEnabled(), "Should be enabled when API fetching is enabled")
 
-	manager2 := New(logger, false, 100, "/tmp/test.yaml", []config.ModelRPMConfig{})
-	assert.False(t, manager2.IsEnabled())
+	// Test 2: enabled=false, no config -> IsEnabled=false
+	manager2 := New(logger, false, 100, "/tmp/test_isenabled2.yaml", []config.ModelRPMConfig{})
+	manager2.modelsConfig = &config.ModelsConfig{Models: []config.ModelRPMConfig{}}
+	assert.False(t, manager2.IsEnabled(), "Should be disabled when API fetching disabled and no models in config")
+
+	// Test 3: enabled=false, but has models in config -> IsEnabled=true
+	manager3 := New(logger, false, 100, "/tmp/test_isenabled3.yaml", []config.ModelRPMConfig{})
+	manager3.modelsConfig = &config.ModelsConfig{
+		Models: []config.ModelRPMConfig{
+			{Name: "gpt-4", RPM: 100},
+		},
+	}
+	assert.True(t, manager3.IsEnabled(), "Should be enabled when models exist in config even if API fetching disabled")
 }
 
 func TestGetModelRPM(t *testing.T) {

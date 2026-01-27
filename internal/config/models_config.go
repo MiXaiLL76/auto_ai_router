@@ -9,9 +9,10 @@ import (
 
 // ModelRPMConfig represents RPM and TPM limits for a specific model
 type ModelRPMConfig struct {
-	Name string `yaml:"name"`
-	RPM  int    `yaml:"rpm"`
-	TPM  int    `yaml:"tpm"`
+	Name       string `yaml:"name"`
+	RPM        int    `yaml:"rpm"`
+	TPM        int    `yaml:"tpm"`
+	Credential string `yaml:"credential,omitempty"` // If set, model is only available for this credential
 }
 
 // ModelsConfig represents the models.yaml file structure

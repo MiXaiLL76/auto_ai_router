@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mixaill76/auto_ai_router/internal/auth"
 	"github.com/mixaill76/auto_ai_router/internal/balancer"
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/fail2ban"
@@ -37,12 +38,18 @@ func createTestBalancer(mockServerURL string) (*balancer.RoundRobin, *ratelimit.
 	return bal, rl
 }
 
+func createTestTokenManager() *auth.VertexTokenManager {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+	return auth.NewVertexTokenManager(logger)
+}
+
 func TestNew(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
 	bal, rl := createTestBalancer("http://test.com")
 	metrics := monitoring.New(false)
 
-	prx := New(bal, logger, 10, 30*time.Second, metrics, "test-master-key", rl)
+	tm := createTestTokenManager()
+	prx := New(bal, logger, 10, 30*time.Second, metrics, "test-master-key", rl, tm)
 
 	assert.NotNil(t, prx)
 	assert.Equal(t, "test-master-key", prx.masterKey)
@@ -55,7 +62,8 @@ func TestProxyRequest_MissingAuthorization(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
 	bal, rl := createTestBalancer("http://test.com")
 	metrics := monitoring.New(false)
-	prx := New(bal, logger, 10, 30*time.Second, metrics, "test-key", rl)
+	tm := createTestTokenManager()
+	prx := New(bal, logger, 10, 30*time.Second, metrics, "test-key", rl, tm)
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
 	w := httptest.NewRecorder()
@@ -70,7 +78,8 @@ func TestProxyRequest_InvalidAuthorizationFormat(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
 	bal, rl := createTestBalancer("http://test.com")
 	metrics := monitoring.New(false)
-	prx := New(bal, logger, 10, 30*time.Second, metrics, "test-key", rl)
+	tm := createTestTokenManager()
+	prx := New(bal, logger, 10, 30*time.Second, metrics, "test-key", rl, tm)
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
 	req.Header.Set("Authorization", "InvalidFormat")
@@ -86,7 +95,8 @@ func TestProxyRequest_InvalidMasterKey(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
 	bal, rl := createTestBalancer("http://test.com")
 	metrics := monitoring.New(false)
-	prx := New(bal, logger, 10, 30*time.Second, metrics, "correct-key", rl)
+	tm := createTestTokenManager()
+	prx := New(bal, logger, 10, 30*time.Second, metrics, "correct-key", rl, tm)
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
 	req.Header.Set("Authorization", "Bearer wrong-key")
@@ -113,7 +123,8 @@ func TestProxyRequest_ValidRequest(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
 	bal, rl := createTestBalancer(mockServer.URL)
 	metrics := monitoring.New(false)
-	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key", rl)
+	tm := createTestTokenManager()
+	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key", rl, tm)
 
 	reqBody := `{"model": "gpt-4", "messages": [{"role": "user", "content": "Hello"}]}`
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(reqBody))
@@ -138,7 +149,8 @@ func TestProxyRequest_WithModel(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
 	bal, rl := createTestBalancer(mockServer.URL)
 	metrics := monitoring.New(false)
-	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key", rl)
+	tm := createTestTokenManager()
+	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key", rl, tm)
 
 	reqBody := `{"model": "gpt-4", "messages": [{"role": "user", "content": "Test"}]}`
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(reqBody))
@@ -170,7 +182,8 @@ func TestProxyRequest_NoCredentialsAvailable(t *testing.T) {
 	f2b.RecordResponse("test1", 500)
 
 	metrics := monitoring.New(false)
-	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key", rl)
+	tm := createTestTokenManager()
+	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key", rl, tm)
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
 	req.Header.Set("Authorization", "Bearer master-key")
@@ -197,7 +210,8 @@ func TestProxyRequest_RateLimitExceeded(t *testing.T) {
 
 	bal := balancer.New(credentials, f2b, rl)
 	metrics := monitoring.New(false)
-	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key", rl)
+	tm := createTestTokenManager()
+	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key", rl, tm)
 
 	// Manually trigger rate limiter to exhaust the limit
 	rl.Allow("test1")
@@ -223,7 +237,8 @@ func TestProxyRequest_UpstreamError(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
 	bal, rl := createTestBalancer(mockServer.URL)
 	metrics := monitoring.New(false)
-	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key", rl)
+	tm := createTestTokenManager()
+	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key", rl, tm)
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
 	req.Header.Set("Authorization", "Bearer master-key")
@@ -253,7 +268,8 @@ func TestProxyRequest_Streaming(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
 	bal, rl := createTestBalancer(mockServer.URL)
 	metrics := monitoring.New(false)
-	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key", rl)
+	tm := createTestTokenManager()
+	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key", rl, tm)
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"stream": true}`))
 	req.Header.Set("Authorization", "Bearer master-key")
@@ -270,7 +286,8 @@ func TestHealthCheck_Healthy(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
 	bal, rl := createTestBalancer("http://test.com")
 	metrics := monitoring.New(false)
-	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key", rl)
+	tm := createTestTokenManager()
+	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key", rl, tm)
 
 	healthy, status := prx.HealthCheck()
 
@@ -314,7 +331,8 @@ func TestHealthCheck_Unhealthy(t *testing.T) {
 	f2b.RecordResponse("test2", 500)
 
 	metrics := monitoring.New(false)
-	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key", rl)
+	tm := createTestTokenManager()
+	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key", rl, tm)
 
 	healthy, status := prx.HealthCheck()
 
@@ -361,7 +379,8 @@ func TestHealthCheck_WithModels(t *testing.T) {
 	rl.ConsumeModelTokens("test1", "gpt-4", 2000)
 
 	metrics := monitoring.New(false)
-	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key", rl)
+	tm := createTestTokenManager()
+	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key", rl, tm)
 
 	healthy, status := prx.HealthCheck()
 
@@ -605,7 +624,8 @@ func TestProxyRequest_HeadersForwarding(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
 	bal, rl := createTestBalancer(mockServer.URL)
 	metrics := monitoring.New(false)
-	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key", rl)
+	tm := createTestTokenManager()
+	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key", rl, tm)
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
 	req.Header.Set("Authorization", "Bearer master-key")
@@ -631,7 +651,8 @@ func TestProxyRequest_QueryParameters(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
 	bal, rl := createTestBalancer(mockServer.URL)
 	metrics := monitoring.New(false)
-	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key", rl)
+	tm := createTestTokenManager()
+	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key", rl, tm)
 
 	req := httptest.NewRequest("GET", "/v1/models?param1=value1&param2=value2", nil)
 	req.Header.Set("Authorization", "Bearer master-key")
@@ -651,7 +672,8 @@ func TestVisualHealthCheck(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
 	bal, rl := createTestBalancer(mockServer.URL)
 	metrics := monitoring.New(false)
-	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key", rl)
+	tm := createTestTokenManager()
+	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key", rl, tm)
 
 	req := httptest.NewRequest("GET", "/vhealth", nil)
 	w := httptest.NewRecorder()
