@@ -25,6 +25,11 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
+var (
+	Version = "dev"
+	Commit  = "unknown"
+)
+
 func main() {
 	configPath := flag.String("config", "config.yaml", "Path to configuration file")
 	flag.Parse()
@@ -39,6 +44,8 @@ func main() {
 
 	// Startup info (INFO level)
 	log.Info("Starting auto_ai_router",
+		"version", Version,
+		"commit", Commit,
 		"logging_level", cfg.Server.LoggingLevel,
 		"port", cfg.Server.Port,
 		"replace_v1_models", cfg.Server.ReplaceV1Models,
@@ -99,7 +106,7 @@ func main() {
 	log.Info("Vertex AI token manager initialized")
 
 	metrics := monitoring.New(cfg.Monitoring.PrometheusEnabled)
-	prx := proxy.New(bal, log, cfg.Server.MaxBodySizeMB, cfg.Server.RequestTimeout, metrics, cfg.Server.MasterKey, rateLimiter, tokenManager)
+	prx := proxy.New(bal, log, cfg.Server.MaxBodySizeMB, cfg.Server.RequestTimeout, metrics, cfg.Server.MasterKey, rateLimiter, tokenManager, Version, Commit)
 
 	// Start background metrics updater
 	var metricsCancel context.CancelFunc

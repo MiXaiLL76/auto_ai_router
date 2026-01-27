@@ -49,7 +49,7 @@ func TestNew(t *testing.T) {
 	metrics := monitoring.New(false)
 
 	tm := createTestTokenManager()
-	prx := New(bal, logger, 10, 30*time.Second, metrics, "test-master-key", rl, tm)
+	prx := New(bal, logger, 10, 30*time.Second, metrics, "test-master-key", rl, tm, "test-version", "test-commit")
 
 	assert.NotNil(t, prx)
 	assert.Equal(t, "test-master-key", prx.masterKey)
@@ -63,7 +63,7 @@ func TestProxyRequest_MissingAuthorization(t *testing.T) {
 	bal, rl := createTestBalancer("http://test.com")
 	metrics := monitoring.New(false)
 	tm := createTestTokenManager()
-	prx := New(bal, logger, 10, 30*time.Second, metrics, "test-key", rl, tm)
+	prx := New(bal, logger, 10, 30*time.Second, metrics, "test-key", rl, tm, "test-version", "test-commit")
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
 	w := httptest.NewRecorder()
@@ -79,7 +79,7 @@ func TestProxyRequest_InvalidAuthorizationFormat(t *testing.T) {
 	bal, rl := createTestBalancer("http://test.com")
 	metrics := monitoring.New(false)
 	tm := createTestTokenManager()
-	prx := New(bal, logger, 10, 30*time.Second, metrics, "test-key", rl, tm)
+	prx := New(bal, logger, 10, 30*time.Second, metrics, "test-key", rl, tm, "test-version", "test-commit")
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
 	req.Header.Set("Authorization", "InvalidFormat")
@@ -96,7 +96,7 @@ func TestProxyRequest_InvalidMasterKey(t *testing.T) {
 	bal, rl := createTestBalancer("http://test.com")
 	metrics := monitoring.New(false)
 	tm := createTestTokenManager()
-	prx := New(bal, logger, 10, 30*time.Second, metrics, "correct-key", rl, tm)
+	prx := New(bal, logger, 10, 30*time.Second, metrics, "correct-key", rl, tm, "test-version", "test-commit")
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
 	req.Header.Set("Authorization", "Bearer wrong-key")
@@ -124,7 +124,7 @@ func TestProxyRequest_ValidRequest(t *testing.T) {
 	bal, rl := createTestBalancer(mockServer.URL)
 	metrics := monitoring.New(false)
 	tm := createTestTokenManager()
-	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key", rl, tm)
+	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key", rl, tm, "test-version", "test-commit")
 
 	reqBody := `{"model": "gpt-4", "messages": [{"role": "user", "content": "Hello"}]}`
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(reqBody))
@@ -150,7 +150,7 @@ func TestProxyRequest_WithModel(t *testing.T) {
 	bal, rl := createTestBalancer(mockServer.URL)
 	metrics := monitoring.New(false)
 	tm := createTestTokenManager()
-	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key", rl, tm)
+	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key", rl, tm, "test-version", "test-commit")
 
 	reqBody := `{"model": "gpt-4", "messages": [{"role": "user", "content": "Test"}]}`
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(reqBody))
@@ -183,7 +183,7 @@ func TestProxyRequest_NoCredentialsAvailable(t *testing.T) {
 
 	metrics := monitoring.New(false)
 	tm := createTestTokenManager()
-	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key", rl, tm)
+	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key", rl, tm, "test-version", "test-commit")
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
 	req.Header.Set("Authorization", "Bearer master-key")
@@ -211,7 +211,7 @@ func TestProxyRequest_RateLimitExceeded(t *testing.T) {
 	bal := balancer.New(credentials, f2b, rl)
 	metrics := monitoring.New(false)
 	tm := createTestTokenManager()
-	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key", rl, tm)
+	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key", rl, tm, "test-version", "test-commit")
 
 	// Manually trigger rate limiter to exhaust the limit
 	rl.Allow("test1")
@@ -238,7 +238,7 @@ func TestProxyRequest_UpstreamError(t *testing.T) {
 	bal, rl := createTestBalancer(mockServer.URL)
 	metrics := monitoring.New(false)
 	tm := createTestTokenManager()
-	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key", rl, tm)
+	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key", rl, tm, "test-version", "test-commit")
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
 	req.Header.Set("Authorization", "Bearer master-key")
@@ -269,7 +269,7 @@ func TestProxyRequest_Streaming(t *testing.T) {
 	bal, rl := createTestBalancer(mockServer.URL)
 	metrics := monitoring.New(false)
 	tm := createTestTokenManager()
-	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key", rl, tm)
+	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key", rl, tm, "test-version", "test-commit")
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"stream": true}`))
 	req.Header.Set("Authorization", "Bearer master-key")
@@ -287,7 +287,7 @@ func TestHealthCheck_Healthy(t *testing.T) {
 	bal, rl := createTestBalancer("http://test.com")
 	metrics := monitoring.New(false)
 	tm := createTestTokenManager()
-	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key", rl, tm)
+	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key", rl, tm, "test-version", "test-commit")
 
 	healthy, status := prx.HealthCheck()
 
@@ -332,7 +332,7 @@ func TestHealthCheck_Unhealthy(t *testing.T) {
 
 	metrics := monitoring.New(false)
 	tm := createTestTokenManager()
-	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key", rl, tm)
+	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key", rl, tm, "test-version", "test-commit")
 
 	healthy, status := prx.HealthCheck()
 
@@ -380,7 +380,7 @@ func TestHealthCheck_WithModels(t *testing.T) {
 
 	metrics := monitoring.New(false)
 	tm := createTestTokenManager()
-	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key", rl, tm)
+	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key", rl, tm, "test-version", "test-commit")
 
 	healthy, status := prx.HealthCheck()
 
@@ -625,7 +625,7 @@ func TestProxyRequest_HeadersForwarding(t *testing.T) {
 	bal, rl := createTestBalancer(mockServer.URL)
 	metrics := monitoring.New(false)
 	tm := createTestTokenManager()
-	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key", rl, tm)
+	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key", rl, tm, "test-version", "test-commit")
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
 	req.Header.Set("Authorization", "Bearer master-key")
@@ -652,7 +652,7 @@ func TestProxyRequest_QueryParameters(t *testing.T) {
 	bal, rl := createTestBalancer(mockServer.URL)
 	metrics := monitoring.New(false)
 	tm := createTestTokenManager()
-	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key", rl, tm)
+	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key", rl, tm, "test-version", "test-commit")
 
 	req := httptest.NewRequest("GET", "/v1/models?param1=value1&param2=value2", nil)
 	req.Header.Set("Authorization", "Bearer master-key")
@@ -673,7 +673,7 @@ func TestVisualHealthCheck(t *testing.T) {
 	bal, rl := createTestBalancer(mockServer.URL)
 	metrics := monitoring.New(false)
 	tm := createTestTokenManager()
-	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key", rl, tm)
+	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key", rl, tm, "test-version", "test-commit")
 
 	req := httptest.NewRequest("GET", "/vhealth", nil)
 	w := httptest.NewRecorder()

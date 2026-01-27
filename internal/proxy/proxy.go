@@ -36,7 +36,12 @@ type Proxy struct {
 	healthTemplate *template.Template // Cached template
 }
 
-func New(bal *balancer.RoundRobin, logger *slog.Logger, maxBodySizeMB int, requestTimeout time.Duration, metrics *monitoring.Metrics, masterKey string, rateLimiter *ratelimit.RPMLimiter, tokenManager *auth.VertexTokenManager) *Proxy {
+var (
+	Version = "dev"
+	Commit  = "unknown"
+)
+
+func New(bal *balancer.RoundRobin, logger *slog.Logger, maxBodySizeMB int, requestTimeout time.Duration, metrics *monitoring.Metrics, masterKey string, rateLimiter *ratelimit.RPMLimiter, tokenManager *auth.VertexTokenManager, version, commit string) *Proxy {
 	// Parse template once at startup
 	tmpl, err := template.New("health").Funcs(template.FuncMap{
 		"div": func(a, b int) int {
@@ -47,6 +52,12 @@ func New(bal *balancer.RoundRobin, logger *slog.Logger, maxBodySizeMB int, reque
 		},
 		"mul": func(a, b int) int {
 			return a * b
+		},
+		"version": func() string {
+			return version
+		},
+		"commit": func() string {
+			return commit
 		},
 	}).Parse(healthHTML)
 	if err != nil {

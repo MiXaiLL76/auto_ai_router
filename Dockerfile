@@ -17,7 +17,9 @@ RUN go mod download
 COPY . .
 
 # Build the application
-RUN go build -ldflags="-s -w" -o auto_ai_router ./cmd/server
+ARG VERSION=dev
+ARG COMMIT=unknown
+RUN go build -ldflags="-s -w -X main.Version=${VERSION} -X main.Commit=${COMMIT}" -o auto_ai_router ./cmd/server
 
 # Final stage
 FROM alpine:latest

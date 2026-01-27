@@ -43,7 +43,7 @@ jobs:
           BINARY_NAME="auto_ai_router-${{ steps.version.outputs.VERSION }}-${{ matrix.goos }}-${{ matrix.goarch }}"
           [ "${{ matrix.goos }}" = "windows" ] && BINARY_NAME="${BINARY_NAME}.exe"
           GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} CGO_ENABLED=0 \
-          go build -ldflags="-s -w -X main.version=${{ steps.version.outputs.VERSION }}" -o "${BINARY_NAME}" ./cmd/server
+          go build -ldflags="-s -w -X main.Version=${{ steps.version.outputs.VERSION }} -X main.Commit=${{ github.sha }}" -o "${BINARY_NAME}" ./cmd/server
           if [ "${{ matrix.goos }}" = "windows" ]; then zip "${BINARY_NAME}.zip" "${BINARY_NAME}"; else tar czf "${BINARY_NAME}.tar.gz" "${BINARY_NAME}"; fi
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -90,6 +90,9 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
           platforms: linux/amd64
+          build-args: |
+            VERSION=${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'dev' }}
+            COMMIT=${{ github.sha }}
 
   # 3. Создание релиза (только для тегов)
   create-release:

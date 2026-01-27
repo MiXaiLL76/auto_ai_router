@@ -52,7 +52,10 @@
     <div class="container">
         <header>
             <h1>🚀 System Health Dashboard</h1>
-            <div class="status-badge{{ if ne .status "healthy" }} unhealthy{{ end }}">{{ .status }}</div>
+            <div style="display: flex; align-items: center; gap: 1.2rem;">
+                <div style="font-size: 1rem; color: #636e72;">{{ version }} ({{ commit }})</div>
+                <div class="status-badge{{ if ne .status "healthy" }} unhealthy{{ end }}">{{ .status }}</div>
+            </div>
         </header>
 
         <div class="summary">

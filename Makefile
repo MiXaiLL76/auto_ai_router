@@ -6,7 +6,9 @@ BUILD_DIR=.
 CMD_DIR=./cmd/server
 GO=go
 GOFLAGS=-v
-LDFLAGS=-ldflags="-s -w"
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
+COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+LDFLAGS=-ldflags="-s -w -X main.Version=$(VERSION) -X main.Commit=$(COMMIT)"
 
 # Docker variables
 DOCKER_IMAGE=auto-ai-router
@@ -42,7 +44,7 @@ help:
 ## build: Build the application
 build:
 	@echo "Building $(BINARY_NAME)..."
-	export PATH=/usr/local/go/bin:$$PATH && $(GO) build $(GOFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME) $(CMD_DIR)
+	export PATH=/usr/local/go/bin:$$PATH && $(GO) build $(GOFLAGS) $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME) $(CMD_DIR)
 	@echo "Build complete: $(BUILD_DIR)/$(BINARY_NAME)"
 
 ## build-opt: Build optimized binary
