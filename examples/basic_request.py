@@ -18,7 +18,8 @@ base_url = os.getenv("ROUTER_BASE_URL", "http://localhost:8080/v1")
 # Configure OpenAI client to use the router
 client = OpenAI(
     api_key=master_key,
-    base_url=base_url
+    base_url=base_url,
+    max_retries=0  # Disable retries to avoid multiple requests
 )
 
 def main():

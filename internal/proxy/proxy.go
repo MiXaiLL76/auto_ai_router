@@ -18,6 +18,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/balancer"
 	"github.com/mixaill76/auto_ai_router/internal/monitoring"
 	"github.com/mixaill76/auto_ai_router/internal/ratelimit"
+	"github.com/mixaill76/auto_ai_router/internal/vertex_transform"
 )
 
 //go:embed health.html
@@ -163,6 +164,9 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 	// Build target URL based on credential type
 	var targetURL string
 	var vertexToken string
+	var requestBody = body // Default to original body
+	var isImageGeneration = strings.Contains(r.URL.Path, "/images/generations")
+
 	if cred.Type == "vertex-ai" {
 		// For Vertex AI, build URL dynamically
 		if modelID == "" {
@@ -170,11 +174,39 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Bad Request: model field is required for Vertex AI", http.StatusBadRequest)
 			return
 		}
-		streaming := isStreamingRequest(body)
-		targetURL = buildVertexURL(cred, modelID, streaming)
+
+		if isImageGeneration {
+			// For image generation, use different endpoint
+			targetURL = buildVertexImageURL(cred, modelID)
+			// Transform OpenAI image request to Vertex AI format
+			vertexBody, err := vertex_transform.OpenAIImageToVertex(body)
+			if err != nil {
+				p.logger.Error("Failed to vertex_transform image request to Vertex AI format",
+					"credential", cred.Name,
+					"error", err,
+				)
+				http.Error(w, "Internal Server Error: Failed to vertex_transform image request", http.StatusInternalServerError)
+				return
+			}
+			requestBody = vertexBody
+		} else {
+			// For text generation
+			streaming := isStreamingRequest(body)
+			targetURL = buildVertexURL(cred, modelID, streaming)
+			// Transform OpenAI request to Vertex AI format
+			vertexBody, err := vertex_transform.OpenAIToVertex(body)
+			if err != nil {
+				p.logger.Error("Failed to vertex_transform request to Vertex AI format",
+					"credential", cred.Name,
+					"error", err,
+				)
+				http.Error(w, "Internal Server Error: Failed to vertex_transform request", http.StatusInternalServerError)
+				return
+			}
+			requestBody = vertexBody
+		}
 
 		// Get OAuth2 token for Vertex AI
-		var err error
 		vertexToken, err = p.tokenManager.GetToken(cred.Name, cred.CredentialsFile, cred.CredentialsJSON)
 		if err != nil {
 			p.logger.Error("Failed to get Vertex AI token",
@@ -202,7 +234,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	proxyReq, err := http.NewRequest(r.Method, targetURL, bytes.NewReader(body))
+	proxyReq, err := http.NewRequest(r.Method, targetURL, bytes.NewReader(requestBody))
 	if err != nil {
 		p.logger.Error("Failed to create proxy request", "error", err, "url", targetURL)
 		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
@@ -231,7 +263,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 	p.logger.Debug("Proxy request details",
 		"target_url", targetURL,
 		"credential", cred.Name,
-		"request_body", truncateLongFields(string(body), 500),
+		"request_body", truncateLongFields(string(requestBody), 500),
 	)
 
 	// Log headers (mask Authorization for security)
@@ -280,6 +312,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 
 	// Read and log response body for non-streaming responses
 	var responseBody []byte
+	var finalResponseBody []byte // Define here for broader scope
 	if isStreamingResponse(resp) {
 		p.logger.Debug("Response is streaming", "credential", cred.Name)
 	} else {
@@ -308,25 +341,84 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			)
 		}
 
+		// Transform Vertex AI response back to OpenAI format
+		if cred.Type == "vertex-ai" {
+			if isImageGeneration {
+				// Transform image response
+				vertex_transformedBody, err := vertex_transform.VertexImageToOpenAI([]byte(decodedBody))
+				if err != nil {
+					p.logger.Error("Failed to vertex_transform Vertex AI image response",
+						"credential", cred.Name,
+						"error", err,
+					)
+					finalResponseBody = responseBody
+				} else {
+					finalResponseBody = vertex_transformedBody
+					p.logger.Debug("Transformed Vertex AI image response to OpenAI format",
+						"credential", cred.Name,
+						"vertex_transformed_body", truncateLongFields(string(vertex_transformedBody), 200),
+					)
+				}
+			} else {
+				// Transform text response
+				vertex_transformedBody, err := vertex_transform.VertexToOpenAI([]byte(decodedBody), modelID)
+				if err != nil {
+					p.logger.Error("Failed to vertex_transform Vertex AI response",
+						"credential", cred.Name,
+						"error", err,
+					)
+					finalResponseBody = responseBody
+				} else {
+					finalResponseBody = vertex_transformedBody
+					p.logger.Debug("Transformed Vertex AI response to OpenAI format",
+						"credential", cred.Name,
+						"vertex_transformed_body", truncateLongFields(string(vertex_transformedBody), 500),
+					)
+				}
+			}
+		} else {
+			finalResponseBody = responseBody
+		}
+
 		p.logger.Debug("Proxy response body",
 			"credential", cred.Name,
 			"content_encoding", contentEncoding,
 			"body", truncateLongFields(decodedBody, 500),
 		)
 		// Replace resp.Body with a new reader for subsequent processing
-		resp.Body = io.NopCloser(bytes.NewReader(responseBody))
+		resp.Body = io.NopCloser(bytes.NewReader(finalResponseBody))
 	}
 
 	for key, values := range resp.Header {
+		// Skip Content-Length and Content-Encoding as we may have vertex_transformed the response
+		if key == "Content-Length" && cred.Type == "vertex-ai" {
+			continue
+		}
+		if key == "Content-Encoding" && cred.Type == "vertex-ai" {
+			continue
+		}
 		for _, value := range values {
 			w.Header().Add(key, value)
 		}
 	}
 
+	// Set correct Content-Length for vertex_transformed responses
+	if cred.Type == "vertex-ai" && len(finalResponseBody) > 0 {
+		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(finalResponseBody)))
+	}
+
 	w.WriteHeader(resp.StatusCode)
 
 	if isStreamingResponse(resp) {
-		p.handleStreaming(w, resp, cred.Name)
+		if cred.Type == "vertex-ai" {
+			// Transform Vertex AI streaming to OpenAI format
+			err := vertex_transform.TransformVertexStreamToOpenAI(resp.Body, modelID, w)
+			if err != nil {
+				p.logger.Error("Failed to vertex_transform streaming response", "error", err)
+			}
+		} else {
+			p.handleStreaming(w, resp, cred.Name)
+		}
 	} else {
 		if _, err := io.Copy(w, resp.Body); err != nil {
 			p.logger.Error("Failed to copy response body", "error", err)
@@ -577,6 +669,24 @@ func determineVertexPublisher(modelID string) string {
 	}
 	// Default to Google for Gemini and other models
 	return "google"
+}
+
+// buildVertexImageURL constructs the Vertex AI URL for image generation
+// Format: https://{location}-aiplatform.googleapis.com/v1/projects/{project}/locations/{location}/publishers/google/models/{model}:predict
+func buildVertexImageURL(cred *balancer.Credential, modelID string) string {
+	// For global location (no regional prefix)
+	if cred.Location == "global" {
+		return fmt.Sprintf(
+			"https://aiplatform.googleapis.com/v1/projects/%s/locations/global/publishers/google/models/%s:predict",
+			cred.ProjectID, modelID,
+		)
+	}
+
+	// For regional locations
+	return fmt.Sprintf(
+		"https://%s-aiplatform.googleapis.com/v1/projects/%s/locations/%s/publishers/google/models/%s:predict",
+		cred.Location, cred.ProjectID, cred.Location, modelID,
+	)
 }
 
 // buildVertexURL constructs the Vertex AI URL dynamically

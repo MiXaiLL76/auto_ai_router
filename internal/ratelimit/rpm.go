@@ -123,14 +123,16 @@ func (r *RPMLimiter) GetCurrentRPM(credentialName string) int {
 	now := time.Now()
 	oneMinuteAgo := now.Add(-time.Minute)
 
-	count := 0
+	// Clean old requests and count valid ones
+	validRequests := make([]time.Time, 0)
 	for _, reqTime := range limiter.requests {
 		if reqTime.After(oneMinuteAgo) {
-			count++
+			validRequests = append(validRequests, reqTime)
 		}
 	}
+	limiter.requests = validRequests
 
-	return count
+	return len(validRequests)
 }
 
 // AllowModel checks if request to a specific model for a credential is allowed based on RPM limit
@@ -192,14 +194,16 @@ func (r *RPMLimiter) GetCurrentModelRPM(credentialName, modelName string) int {
 	now := time.Now()
 	oneMinuteAgo := now.Add(-time.Minute)
 
-	count := 0
+	// Clean old requests and count valid ones
+	validRequests := make([]time.Time, 0)
 	for _, reqTime := range modelLimiter.requests {
 		if reqTime.After(oneMinuteAgo) {
-			count++
+			validRequests = append(validRequests, reqTime)
 		}
 	}
+	modelLimiter.requests = validRequests
 
-	return count
+	return len(validRequests)
 }
 
 // GetAllModels returns list of all tracked (credential:model) keys
@@ -290,12 +294,16 @@ func (r *RPMLimiter) GetCurrentTPM(credentialName string) int {
 	now := time.Now()
 	oneMinuteAgo := now.Add(-time.Minute)
 
+	// Clean old token usages and count valid ones
+	validTokens := make([]tokenUsage, 0)
 	count := 0
 	for _, tu := range limiter.tokens {
 		if tu.timestamp.After(oneMinuteAgo) {
+			validTokens = append(validTokens, tu)
 			count += tu.count
 		}
 	}
+	limiter.tokens = validTokens
 
 	return count
 }
@@ -379,12 +387,16 @@ func (r *RPMLimiter) GetCurrentModelTPM(credentialName, modelName string) int {
 	now := time.Now()
 	oneMinuteAgo := now.Add(-time.Minute)
 
+	// Clean old token usages and count valid ones
+	validTokens := make([]tokenUsage, 0)
 	count := 0
 	for _, tu := range modelLimiter.tokens {
 		if tu.timestamp.After(oneMinuteAgo) {
+			validTokens = append(validTokens, tu)
 			count += tu.count
 		}
 	}
+	modelLimiter.tokens = validTokens
 
 	return count
 }

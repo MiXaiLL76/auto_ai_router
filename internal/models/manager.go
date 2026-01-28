@@ -203,6 +203,7 @@ func (m *Manager) LoadModelsFromConfig(credentials []config.CredentialConfig) {
 	}
 
 	credentialSpecificCount := 0
+	globalModelsCount := 0
 
 	// Process each model in config
 	for _, modelConfig := range m.modelsConfig.Models {
@@ -224,7 +225,7 @@ func (m *Manager) LoadModelsFromConfig(credentials []config.CredentialConfig) {
 				)
 			}
 
-			// Add to modelToCredentials map (avoid duplicates)
+			// Add to modelToCredentials map ONLY for the specified credential
 			if !contains(m.modelToCredentials[modelConfig.Name], modelConfig.Credential) {
 				m.modelToCredentials[modelConfig.Name] = append(
 					m.modelToCredentials[modelConfig.Name],
@@ -240,9 +241,17 @@ func (m *Manager) LoadModelsFromConfig(credentials []config.CredentialConfig) {
 			)
 		} else {
 			// Model is global (no credential specified)
-			// Just map to all credentials, but don't add to allModels yet
-			// (will be added by FetchModels if enabled, or by GetAllModels if disabled)
+			// Map to all credentials
 			for credName := range credNames {
+				// Add to credentialModels map (avoid duplicates)
+				if !contains(m.credentialModels[credName], modelConfig.Name) {
+					m.credentialModels[credName] = append(
+						m.credentialModels[credName],
+						modelConfig.Name,
+					)
+				}
+
+				// Add to modelToCredentials map (avoid duplicates)
 				if !contains(m.modelToCredentials[modelConfig.Name], credName) {
 					m.modelToCredentials[modelConfig.Name] = append(
 						m.modelToCredentials[modelConfig.Name],
@@ -251,6 +260,7 @@ func (m *Manager) LoadModelsFromConfig(credentials []config.CredentialConfig) {
 				}
 			}
 
+			globalModelsCount++
 			m.logger.Debug("Registered global model mapping",
 				"model", modelConfig.Name,
 			)
@@ -259,6 +269,7 @@ func (m *Manager) LoadModelsFromConfig(credentials []config.CredentialConfig) {
 
 	m.logger.Info("Loaded models from config",
 		"credential_specific", credentialSpecificCount,
+		"global_models", globalModelsCount,
 	)
 }
 
@@ -366,39 +377,45 @@ func (m *Manager) HasModel(credentialName, modelID string) bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	hasConfig := m.modelsConfig != nil && len(m.modelsConfig.Models) > 0
-
-	// If we have models config, check it first
-	if hasConfig {
-		for _, modelConfig := range m.modelsConfig.Models {
-			if modelConfig.Name == modelID {
-				// Model found in config
-				if modelConfig.Credential != "" {
-					// Model is credential-specific - check if it matches
-					return modelConfig.Credential == credentialName
+	// If API fetching is disabled
+	if !m.enabled {
+		// If we have models in config, check credential-specific mappings first
+		if m.modelsConfig != nil && len(m.modelsConfig.Models) > 0 {
+			// Check modelToCredentials map (populated by LoadModelsFromConfig)
+			if creds, ok := m.modelToCredentials[modelID]; ok {
+				for _, cred := range creds {
+					if cred == credentialName {
+						return true
+					}
 				}
-				// Model is global - available for all credentials
-				return true
+				// Model exists but not for this credential
+				return false
 			}
-		}
-		// Model not in config
-		if !m.enabled {
-			// If fetching disabled and model not in config - deny
-			return false
-		}
-		// If fetching enabled, continue to check fetched models
-	} else {
-		// No config at all
-		if !m.enabled {
-			// No config and fetching disabled - allow all
+			// Model not found in modelToCredentials
+			// Check if this credential exists in our system
+			if _, credExists := m.credentialModels[credentialName]; credExists {
+				// Credential exists but model not found - deny
+				return false
+			}
+			// If modelToCredentials is empty (LoadModelsFromConfig not called),
+			// check if model exists in config directly
+			if len(m.modelToCredentials) == 0 {
+				for _, modelConfig := range m.modelsConfig.Models {
+					if modelConfig.Name == modelID {
+						return true // Model exists in config
+					}
+				}
+				return false
+			}
+			// Credential doesn't exist - allow (fallback behavior)
 			return true
 		}
-		// No config but fetching enabled - check fetched models
+		// No config available - allow all (fallback behavior)
+		return true
 	}
 
-	// Check if we have fetched models for this credential
+	// API fetching is enabled - check modelToCredentials map first
 	if creds, ok := m.modelToCredentials[modelID]; ok {
-		// Check if this credential is in the list
 		for _, cred := range creds {
 			if cred == credentialName {
 				return true
@@ -408,18 +425,18 @@ func (m *Manager) HasModel(credentialName, modelID string) bool {
 		return false
 	}
 
-	// Check credentialModels (old approach for backwards compatibility with tests)
+	// Check credentialModels map (for fetched models)
 	if models, ok := m.credentialModels[credentialName]; ok {
 		for _, model := range models {
 			if model == modelID {
 				return true
 			}
 		}
-		// Credential has models list but this model is not in it
+		// Credential exists but doesn't have this model
 		return false
 	}
 
-	// Model not found in fetched data - allow it (fallback)
+	// Credential not found - allow (fallback behavior for unknown credentials)
 	return true
 }
 

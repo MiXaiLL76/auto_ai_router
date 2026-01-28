@@ -85,15 +85,18 @@ func main() {
 	if len(modelsResp.Data) > 0 {
 		for _, cred := range cfg.Credentials {
 			for _, model := range modelsResp.Data {
-				modelRPM := modelManager.GetModelRPM(model.ID)
-				modelTPM := modelManager.GetModelTPM(model.ID)
-				rateLimiter.AddModelWithTPM(cred.Name, model.ID, modelRPM, modelTPM)
-				log.Debug("Initialized model rate limiters",
-					"credential", cred.Name,
-					"model", model.ID,
-					"rpm", modelRPM,
-					"tpm", modelTPM,
-				)
+				// Only add model if it's available for this credential
+				if modelManager.HasModel(cred.Name, model.ID) {
+					modelRPM := modelManager.GetModelRPM(model.ID)
+					modelTPM := modelManager.GetModelTPM(model.ID)
+					rateLimiter.AddModelWithTPM(cred.Name, model.ID, modelRPM, modelTPM)
+					log.Debug("Initialized model rate limiters",
+						"credential", cred.Name,
+						"model", model.ID,
+						"rpm", modelRPM,
+						"tpm", modelTPM,
+					)
+				}
 			}
 		}
 	}
