@@ -1,11 +1,11 @@
 server:
   port: 8080
   max_body_size_mb: 100
-  request_timeout: 30s
-  logging_level: debug  # Options: info, debug, error
-  replace_v1_models: true
+  request_timeout: 90s
+  logging_level: info  # Options: info, debug, error
+  replace_v1_models: false
   master_key: "sk-your-master-key-here"  # Required: Master key for client authentication
-  default_models_rpm: 50  # Default RPM limit for models (used if not specified in models.yaml)
+  default_models_rpm: 50  # Default RPM limit for models (use -1 for unlimited)
 
 fail2ban:
   max_attempts: 3
@@ -20,13 +20,36 @@ credentials:
     rpm: 100   # Requests per minute limit for this credential (use -1 for unlimited)
     tpm: 50000 # Tokens per minute limit for this credential (use 0 or -1 for unlimited)
 
-  - name: "openai_backup"
+  - name: "azure_openai"
     type: "openai"
-    api_key: "sk-proj-yyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"
-    base_url: "https://api.openai.com"
-    rpm: 50
-    tpm: 25000
+    api_key: "your-azure-api-key"
+    base_url: "https://your-resource.openai.azure.com/openai/v1"
+    rpm: 200
+    tpm: 100000
+
+  - name: "vertex_ai"
+    type: "vertex-ai"
+    project_id: "your-project-id"
+    location: "global"
+    credentials_file: "path/to/service-account.json"
+    rpm: 100
+    tpm: 50000
 
 monitoring:
   prometheus_enabled: true
   health_check_path: "/health"
+
+# Models with specific credential binding
+models:
+  - name: "gpt-4o-mini"
+    credential: openai_main
+    rpm: 100
+    tpm: 50000
+  - name: "gpt-4o"
+    credential: azure_openai
+    rpm: 50
+    tpm: 25000
+  - name: "gemini-2.5-pro"
+    credential: vertex_ai
+    rpm: 100
+    tpm: 50000

@@ -15,10 +15,10 @@
 - **Master key авторизация**: единый ключ для всех клиентов
 - **Streaming поддержка**: Server-Sent Events (SSE)
 - **Prometheus метрики**: мониторинг нагрузки, статуса и использования токенов
-- **Автоматический сбор моделей**: от всех провайдеров с объединением списков
+- **Статические модели**: модели и лимиты задаются прямо в config.yaml
+- **Поддержка разных провайдеров**: OpenAI, Azure OpenAI, Vertex AI
 - **Оптимизированное логирование**: автоматическое сокращение длинных полей (embeddings, base64)
 - **Переменные окружения**: поддержка `os.environ/VAR_NAME` в config.yaml
-- **Статические модели**: возможность задать модели и лимиты прямо в config.yaml
 - **CI/CD проверки**: автоматические тесты, lint и проверка качества кода
 
 ## Быстрый старт
@@ -50,80 +50,80 @@ docker build -t auto-ai-router:latest .
 ```yaml
 server:
   port: 8080
-  master_key: "sk-your-secret-key"  # Ключ для клиентов
-  logging_level: info                # info, debug, error
-  replace_v1_models: true            # Включить model-aware routing
-  request_timeout: 5m                # Таймаут запроса (или -1 для отключения)
-  default_models_rpm: 50             # RPM по умолчанию для моделей (или -1 для отключения)
+  max_body_size_mb: 100              # Максимальный размер тела запроса в MB
+  master_key: "sk-your-secret-key"   # Ключ для клиентов
+  logging_level: info                 # info, debug, error
+  replace_v1_models: false            # Включить model-aware routing
+  request_timeout: 90s                # Таймаут запроса (или -1 для отключения)
+  default_models_rpm: 50              # RPM по умолчанию для моделей (или -1 для отключения)
 
 credentials:
   - name: "openai_main"
-    api_key: "sk-proj-..."           # Или os.environ/OPENAI_API_KEY
+    type: "openai"                    # Тип провайдера: openai, vertex-ai
+    api_key: "sk-proj-..."            # Или os.environ/OPENAI_API_KEY
     base_url: "https://api.openai.com"
-    rpm: 100                         # Requests per minute для credential (или -1 для отключения)
-    tpm: 50000                       # Tokens per minute для credential (или 0/-1 для отключения)
+    rpm: 100                          # Requests per minute для credential (или -1 для отключения)
+    tpm: 50000                        # Tokens per minute для credential (или 0/-1 для отключения)
 
-  - name: "openai_backup"
-    api_key: "os.environ/BACKUP_KEY" # Поддержка переменных окружения
-    base_url: "https://api.another.com"
-    rpm: 50
-    tpm: 0                           # Без лимита токенов
+  - name: "vertex_ai"
+    type: "vertex-ai"
+    project_id: "your-project-id"
+    location: "global"
+    credentials_file: "path/to/service-account.json"
+    rpm: 100
+    tpm: 50000
 
 fail2ban:
   max_attempts: 3
-  ban_duration: permanent            # или "5m", "1h"
+  ban_duration: permanent             # или "5m", "1h"
   error_codes: [401, 403, 429, 500, 502, 503, 504]
 
-# Опционально: статические модели (объединяются с models.yaml)
+monitoring:
+  prometheus_enabled: true
+  health_check_path: "/health"
+
+# Модели с привязкой к конкретным credentials
 models:
   - name: gpt-4o-mini
-    credential: openai_backup # Опционально можно указать, что эта модель именно только к этим credentials
+    credential: openai_main           # Обязательно указать credential
     rpm: 60
     tpm: 30000
-```
-
-**models.yaml** (создается автоматически или вручную):
-
-```yaml
-models:
-  - name: gpt-4o-mini
-    rpm: 60                          # Дополнительное ограничение для модели (применяется к каждому credential)
-    tpm: 30000                       # Ограничение токенов для модели (применяется к каждому credential)
-
-  - name: text-embedding-3-small
+  - name: gemini-2.5-pro
+    credential: vertex_ai
     rpm: 100
-    tpm: -1                          # Без лимита токенов для embeddings
-
-  - name: gpt-3.5-turbo
-    rpm: -1                          # Без лимитов RPM
-    tpm: 0                           # Без лимитов TPM
+    tpm: 50000
 ```
+
+**Поддерживаемые типы провайдеров:**
+
+- `openai` - OpenAI API и Azure OpenAI
+- `vertex-ai` - Google Vertex AI
 
 **Примечания:**
 
-- Модели из config.yaml имеют приоритет над models.yaml
-- При `replace_v1_models: false` модели берутся из models.yaml (если файл существует) или из config.yaml
+- Все модели задаются в секции `models` в config.yaml
+- Каждая модель должна быть привязана к конкретному credential
+- При `replace_v1_models: false` используется статический список моделей из конфига
 
-### Логика работы лимитов (Комбинированный подход)
+### Логика работы лимитов
 
-**Уровень 1: Credential (обязательные общие лимиты)**
+**Уровень 1: Credential (общие лимиты)**
 
 - Каждый credential имеет общий RPM/TPM лимит для ВСЕХ моделей вместе
 - Например: `openai_main` с `rpm: 100, tpm: 50000` - не более 100 запросов и 50000 токенов в минуту суммарно
 
-**Уровень 2: Model (опциональные ограничения)**
+**Уровень 2: Model (индивидуальные лимиты)**
 
-- Лимиты из `models.yaml` применяются к КАЖДОМУ credential независимо
-- Например: `gpt-4o-mini` с `rpm: 60` означает не более 60 RPM для этой модели через КАЖДЫЙ credential
+- Каждая модель имеет свои RPM/TPM лимиты, привязанные к конкретному credential
+- Например: `gpt-4o-mini` с `credential: openai_main, rpm: 60` - не более 60 RPM для этой модели через указанный credential
 
 **Итоговый лимит = MIN(credential_limit, model_limit)**
 
 Пример:
 
 - `openai_main`: rpm=100, tpm=50000
-- `gpt-4o-mini` в models.yaml: rpm=60, tpm=30000
+- `gpt-4o-mini` с credential=openai_main: rpm=60, tpm=30000
 - Итог для `(openai_main, gpt-4o-mini)`: **60 RPM, 30000 TPM**
-- Итог для `(openai_main, text-embedding-3-small)` без лимитов в models.yaml: **100 RPM, 50000 TPM**
 
 **Отключение лимитов:**
 Для отключения лимита используйте значение `-1` или `0` (для TPM):
@@ -192,7 +192,7 @@ response = client.chat.completions.create(
 ## Endpoints
 
 - `POST /v1/chat/completions` - Chat completions (с model-aware routing)
-- `GET /v1/models` - Объединенный список моделей от всех провайдеров
+- `GET /v1/models` - Список моделей из конфигурации
 - `GET /health` - Health check (JSON)
 - `GET /vhealth` - Визуальный дашборд здоровья системы с метриками по credentials и моделям (сортировка по TPM по умолчанию)
 - `GET /metrics` - Prometheus метрики
