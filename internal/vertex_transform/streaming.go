@@ -78,9 +78,14 @@ func TransformVertexStreamToOpenAI(vertexStream io.Reader, model string, output 
 			}
 
 			// Extract content from parts
-			if len(candidate.Content.Parts) > 0 {
-				choice.Delta.Content = candidate.Content.Parts[0].Text
+			var content string
+			for _, part := range candidate.Content.Parts {
+				if part.Text != "" {
+					content += part.Text
+				}
+				// Note: streaming doesn't support images in delta, only text
 			}
+			choice.Delta.Content = content
 
 			// Handle finish reason
 			if candidate.FinishReason != "" {

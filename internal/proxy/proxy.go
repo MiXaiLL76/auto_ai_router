@@ -143,12 +143,19 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err != nil {
-		p.logger.Error("Failed to get credential", "error", err, "model", modelID)
+		err_code := http.StatusServiceUnavailable
+		err_line := "Service Unavailable"
 		if errors.Is(err, balancer.ErrRateLimitExceeded) {
-			http.Error(w, "Too Many Requests", http.StatusTooManyRequests)
-		} else {
-			http.Error(w, "Service Unavailable", http.StatusServiceUnavailable)
+			err_code = http.StatusTooManyRequests
+			err_line = "Too Many Requests"
 		}
+
+		credName := "<nil>"
+		if cred != nil {
+			credName = cred.Name
+		}
+		p.logger.Error("Failed to get credential", "error", err, "code", err_code, "cred", credName, "model", modelID)
+		http.Error(w, err_line, err_code)
 		return
 	}
 

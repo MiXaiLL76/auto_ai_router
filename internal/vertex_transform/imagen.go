@@ -14,6 +14,7 @@ type OpenAIImageRequest struct {
 	Quality        string `json:"quality,omitempty"`
 	ResponseFormat string `json:"response_format,omitempty"`
 	Style          string `json:"style,omitempty"`
+	User           string `json:"user,omitempty"`
 }
 
 // VertexImageRequest represents Vertex AI Imagen request
@@ -79,6 +80,13 @@ func OpenAIImageToVertex(openAIBody []byte) ([]byte, error) {
 		sampleCount = *openAIReq.N
 	}
 
+	// Handle quality and style (basic mapping)
+	safetyLevel := "block_some"
+	if openAIReq.Quality == "hd" {
+		// For HD quality, we might want stricter safety
+		safetyLevel = "block_few"
+	}
+
 	vertexReq := VertexImageRequest{
 		Instances: []VertexImageInstance{
 			{Prompt: openAIReq.Prompt},
@@ -86,7 +94,7 @@ func OpenAIImageToVertex(openAIBody []byte) ([]byte, error) {
 		Parameters: VertexImageParameters{
 			SampleCount:       sampleCount,
 			AspectRatio:       aspectRatio,
-			SafetyFilterLevel: "block_some",
+			SafetyFilterLevel: safetyLevel,
 			PersonGeneration:  "allow_adult",
 		},
 	}

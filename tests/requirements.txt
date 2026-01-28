@@ -1,0 +1,8 @@
+# Test dependencies for auto_ai_router
+pytest>=7.0.0
+pytest-asyncio>=0.21.0
+requests>=2.28.0
+openai>=1.0.0
+python-dotenv>=1.0.0
+numpy>=1.21.0
+Pillow>=9.0.0  # For image creation in tests
