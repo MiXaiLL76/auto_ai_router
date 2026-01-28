@@ -226,16 +226,21 @@
 
         // Update onclick handlers to pass button reference
         document.addEventListener('DOMContentLoaded', function() {
+            // 1. Сначала настраиваем обработчики
             document.querySelectorAll('.sort-btn').forEach(btn => {
                 const originalOnclick = btn.getAttribute('onclick');
                 const type = originalOnclick.match(/'([^']+)'/)[1];
                 btn.onclick = function() { sortModels(type, this); };
             });
 
-            // Apply default TPM sorting
-            currentSort = 'tpm';
+            // 2. Сбрасываем текущую сортировку в null, чтобы первый вызов
+            // функции установил правильное направление
+            currentSort = null;
             sortAscending = false;
-            sortModels('tpm');
+
+            // 3. Находим кнопку TPM и имитируем клик по ней
+            const defaultBtn = document.querySelector('.sort-btn.active');
+            sortModels('tpm', defaultBtn);
         });
     </script>
 </body>

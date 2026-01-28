@@ -86,7 +86,13 @@ func main() {
 		for _, cred := range cfg.Credentials {
 			for _, model := range modelsResp.Data {
 				// Only add model if it's available for this credential
-				if modelManager.HasModel(cred.Name, model.ID) {
+				hasModel := modelManager.HasModel(cred.Name, model.ID)
+				log.Debug("Checking model availability",
+					"credential", cred.Name,
+					"model", model.ID,
+					"has_model", hasModel,
+				)
+				if hasModel {
 					modelRPM := modelManager.GetModelRPM(model.ID)
 					modelTPM := modelManager.GetModelTPM(model.ID)
 					rateLimiter.AddModelWithTPM(cred.Name, model.ID, modelRPM, modelTPM)
@@ -109,7 +115,7 @@ func main() {
 	log.Info("Vertex AI token manager initialized")
 
 	metrics := monitoring.New(cfg.Monitoring.PrometheusEnabled)
-	prx := proxy.New(bal, log, cfg.Server.MaxBodySizeMB, cfg.Server.RequestTimeout, metrics, cfg.Server.MasterKey, rateLimiter, tokenManager, Version, Commit)
+	prx := proxy.New(bal, log, cfg.Server.MaxBodySizeMB, cfg.Server.RequestTimeout, metrics, cfg.Server.MasterKey, rateLimiter, tokenManager, modelManager, Version, Commit)
 
 	// Start background metrics updater
 	var metricsCancel context.CancelFunc

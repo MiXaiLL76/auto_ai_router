@@ -16,6 +16,7 @@ import (
 
 	"github.com/mixaill76/auto_ai_router/internal/auth"
 	"github.com/mixaill76/auto_ai_router/internal/balancer"
+	"github.com/mixaill76/auto_ai_router/internal/models"
 	"github.com/mixaill76/auto_ai_router/internal/monitoring"
 	"github.com/mixaill76/auto_ai_router/internal/ratelimit"
 	"github.com/mixaill76/auto_ai_router/internal/vertex_transform"
@@ -35,6 +36,7 @@ type Proxy struct {
 	rateLimiter    *ratelimit.RPMLimiter
 	tokenManager   *auth.VertexTokenManager
 	healthTemplate *template.Template // Cached template
+	modelManager   *models.Manager    // Model manager for getting configured models
 }
 
 var (
@@ -42,7 +44,7 @@ var (
 	Commit  = "unknown"
 )
 
-func New(bal *balancer.RoundRobin, logger *slog.Logger, maxBodySizeMB int, requestTimeout time.Duration, metrics *monitoring.Metrics, masterKey string, rateLimiter *ratelimit.RPMLimiter, tokenManager *auth.VertexTokenManager, version, commit string) *Proxy {
+func New(bal *balancer.RoundRobin, logger *slog.Logger, maxBodySizeMB int, requestTimeout time.Duration, metrics *monitoring.Metrics, masterKey string, rateLimiter *ratelimit.RPMLimiter, tokenManager *auth.VertexTokenManager, modelManager *models.Manager, version, commit string) *Proxy {
 	// Parse template once at startup
 	tmpl, err := template.New("health").Funcs(template.FuncMap{
 		"div": func(a, b int) int {
@@ -76,6 +78,7 @@ func New(bal *balancer.RoundRobin, logger *slog.Logger, maxBodySizeMB int, reque
 		rateLimiter:    rateLimiter,
 		tokenManager:   tokenManager,
 		healthTemplate: tmpl,
+		modelManager:   modelManager,
 		client: &http.Client{
 			Timeout: requestTimeout,
 			Transport: &http.Transport{
@@ -494,25 +497,40 @@ func (p *Proxy) HealthCheck() (bool, map[string]interface{}) {
 		}
 	}
 
-	// Collect models info
+	// Collect models info from all configured models
 	modelsInfo := make(map[string]interface{})
-	for _, modelKey := range p.rateLimiter.GetAllModels() {
-		// Parse "credential:model" format
-		parts := strings.Split(modelKey, ":")
-		if len(parts) != 2 {
-			continue
-		}
-		credentialName := parts[0]
-		modelName := parts[1]
 
-		// Use "credential:model" as key to handle same model across different credentials
-		modelsInfo[modelKey] = map[string]interface{}{
-			"credential":  credentialName,
-			"model":       modelName,
-			"current_rpm": p.rateLimiter.GetCurrentModelRPM(credentialName, modelName),
-			"current_tpm": p.rateLimiter.GetCurrentModelTPM(credentialName, modelName),
-			"limit_rpm":   p.rateLimiter.GetModelLimitRPM(credentialName, modelName),
-			"limit_tpm":   p.rateLimiter.GetModelLimitTPM(credentialName, modelName),
+	// Get all models from config (both credential-specific and global)
+	allConfigModels := p.modelManager.GetAllModels()
+	for _, model := range allConfigModels.Data {
+		// For each model, check which credentials support it
+		credentials := p.modelManager.GetCredentialsForModel(model.ID)
+		if len(credentials) == 0 {
+			// If no specific credentials, add for all credentials
+			for _, cred := range p.balancer.GetCredentials() {
+				modelKey := fmt.Sprintf("%s:%s", cred.Name, model.ID)
+				modelsInfo[modelKey] = map[string]interface{}{
+					"credential":  cred.Name,
+					"model":       model.ID,
+					"current_rpm": p.rateLimiter.GetCurrentModelRPM(cred.Name, model.ID),
+					"current_tpm": p.rateLimiter.GetCurrentModelTPM(cred.Name, model.ID),
+					"limit_rpm":   p.rateLimiter.GetModelLimitRPM(cred.Name, model.ID),
+					"limit_tpm":   p.rateLimiter.GetModelLimitTPM(cred.Name, model.ID),
+				}
+			}
+		} else {
+			// Add for specific credentials only
+			for _, credName := range credentials {
+				modelKey := fmt.Sprintf("%s:%s", credName, model.ID)
+				modelsInfo[modelKey] = map[string]interface{}{
+					"credential":  credName,
+					"model":       model.ID,
+					"current_rpm": p.rateLimiter.GetCurrentModelRPM(credName, model.ID),
+					"current_tpm": p.rateLimiter.GetCurrentModelTPM(credName, model.ID),
+					"limit_rpm":   p.rateLimiter.GetModelLimitRPM(credName, model.ID),
+					"limit_tpm":   p.rateLimiter.GetModelLimitTPM(credName, model.ID),
+				}
+			}
 		}
 	}
 

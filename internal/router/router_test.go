@@ -39,18 +39,18 @@ func createTestProxy() *proxy.Proxy {
 	metrics := monitoring.New(false)
 	tokenManager := auth.NewVertexTokenManager(logger)
 
-	return proxy.New(bal, logger, 10, 30*time.Second, metrics, "test-master-key", rl, tokenManager, "test-version", "test-commit")
+	return proxy.New(bal, logger, 10, 30*time.Second, metrics, "test-master-key", rl, tokenManager, createTestModelManager(), "test-version", "test-commit")
 }
 
 // createTestModelManager creates a test model manager instance
-func createTestModelManager(enabled bool) *models.Manager {
+func createTestModelManager() *models.Manager {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-	return models.New(logger, enabled, 100, "/tmp/models_test.yaml", []config.ModelRPMConfig{})
+	return models.New(logger, false, 100, "/tmp/models_test.yaml", []config.ModelRPMConfig{})
 }
 
 func TestNew(t *testing.T) {
 	prx := createTestProxy()
-	modelManager := createTestModelManager(false)
+	modelManager := models.New(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError})), false, 100, "/tmp/models_test.yaml", []config.ModelRPMConfig{})
 
 	r := New(nil, "/health", modelManager)
 
@@ -101,7 +101,7 @@ func TestServeHTTP_HealthCheck_Unhealthy(t *testing.T) {
 
 	metrics := monitoring.New(false)
 	tm := auth.NewVertexTokenManager(logger)
-	prx := proxy.New(bal, logger, 10, 30*time.Second, metrics, "test-key", rl, tm, "test-version", "test-commit")
+	prx := proxy.New(bal, logger, 10, 30*time.Second, metrics, "test-key", rl, tm, createTestModelManager(), "test-version", "test-commit")
 
 	router := New(prx, "/health", nil)
 
@@ -121,7 +121,7 @@ func TestServeHTTP_HealthCheck_Unhealthy(t *testing.T) {
 
 func TestServeHTTP_V1Models_Enabled(t *testing.T) {
 	// Create a model manager with enabled=true and manually add models
-	modelManager := createTestModelManager(true)
+	modelManager := models.New(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError})), true, 100, "/tmp/models_test.yaml", []config.ModelRPMConfig{})
 
 	prx := createTestProxy()
 	router := New(prx, "/health", modelManager)
@@ -165,9 +165,9 @@ func TestServeHTTP_V1Models_Disabled(t *testing.T) {
 	bal := balancer.New(credentials, f2b, rl)
 	metrics := monitoring.New(false)
 	tm := auth.NewVertexTokenManager(logger)
-	prx := proxy.New(bal, logger, 10, 30*time.Second, metrics, "test-key", rl, tm, "test-version", "test-commit")
+	prx := proxy.New(bal, logger, 10, 30*time.Second, metrics, "test-key", rl, tm, createTestModelManager(), "test-version", "test-commit")
 
-	modelManager := createTestModelManager(false) // disabled
+	modelManager := models.New(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError})), false, 100, "/tmp/models_test.yaml", []config.ModelRPMConfig{}) // disabled
 	router := New(prx, "/health", modelManager)
 
 	req := httptest.NewRequest("GET", "/v1/models", nil)
@@ -204,7 +204,7 @@ func TestServeHTTP_V1Models_NilManager(t *testing.T) {
 	bal := balancer.New(credentials, f2b, rl)
 	metrics := monitoring.New(false)
 	tm := auth.NewVertexTokenManager(logger)
-	prx := proxy.New(bal, logger, 10, 30*time.Second, metrics, "test-key", rl, tm, "test-version", "test-commit")
+	prx := proxy.New(bal, logger, 10, 30*time.Second, metrics, "test-key", rl, tm, createTestModelManager(), "test-version", "test-commit")
 
 	router := New(prx, "/health", nil)
 
@@ -241,9 +241,9 @@ func TestServeHTTP_V1Models_PostMethod(t *testing.T) {
 	bal := balancer.New(credentials, f2b, rl)
 	metrics := monitoring.New(false)
 	tm := auth.NewVertexTokenManager(logger)
-	prx := proxy.New(bal, logger, 10, 30*time.Second, metrics, "test-key", rl, tm, "test-version", "test-commit")
+	prx := proxy.New(bal, logger, 10, 30*time.Second, metrics, "test-key", rl, tm, createTestModelManager(), "test-version", "test-commit")
 
-	modelManager := createTestModelManager(true)
+	modelManager := models.New(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError})), true, 100, "/tmp/models_test.yaml", []config.ModelRPMConfig{})
 	router := New(prx, "/health", modelManager)
 
 	req := httptest.NewRequest("POST", "/v1/models", nil)
@@ -280,7 +280,7 @@ func TestServeHTTP_ProxyRequest(t *testing.T) {
 	bal := balancer.New(credentials, f2b, rl)
 	metrics := monitoring.New(false)
 	tm := auth.NewVertexTokenManager(logger)
-	prx := proxy.New(bal, logger, 10, 30*time.Second, metrics, "test-key", rl, tm, "test-version", "test-commit")
+	prx := proxy.New(bal, logger, 10, 30*time.Second, metrics, "test-key", rl, tm, createTestModelManager(), "test-version", "test-commit")
 
 	router := New(prx, "/health", nil)
 
@@ -380,7 +380,7 @@ func TestHandleHealth(t *testing.T) {
 
 			metrics := monitoring.New(false)
 			tm := auth.NewVertexTokenManager(logger)
-			prx := proxy.New(bal, logger, 10, 30*time.Second, metrics, "test-key", rl, tm, "test-version", "test-commit")
+			prx := proxy.New(bal, logger, 10, 30*time.Second, metrics, "test-key", rl, tm, createTestModelManager(), "test-version", "test-commit")
 
 			router := New(prx, "/health", nil)
 
@@ -406,7 +406,7 @@ func TestHandleHealth(t *testing.T) {
 }
 
 func TestHandleModels(t *testing.T) {
-	modelManager := createTestModelManager(true)
+	modelManager := models.New(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError})), true, 100, "/tmp/models_test.yaml", []config.ModelRPMConfig{})
 	prx := createTestProxy()
 
 	router := New(prx, "/health", modelManager)

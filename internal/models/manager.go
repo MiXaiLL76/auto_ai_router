@@ -58,11 +58,11 @@ func New(logger *slog.Logger, enabled bool, defaultModelsRPM int, modelsConfigPa
 			// Check if model already exists in models.yaml
 			exists := false
 			for i, existingModel := range modelsConfig.Models {
-				if existingModel.Name == staticModel.Name {
+				if existingModel.Name == staticModel.Name && existingModel.Credential == staticModel.Credential {
 					// Update with values from config.yaml (static has priority)
 					modelsConfig.Models[i] = staticModel
 					exists = true
-					logger.Debug("Updated model from config.yaml", "model", staticModel.Name, "rpm", staticModel.RPM, "tpm", staticModel.TPM)
+					logger.Debug("Updated model from config.yaml", "model", staticModel.Name, "credential", staticModel.Credential, "rpm", staticModel.RPM, "tpm", staticModel.TPM)
 					break
 				}
 			}
@@ -225,7 +225,7 @@ func (m *Manager) LoadModelsFromConfig(credentials []config.CredentialConfig) {
 				)
 			}
 
-			// Add to modelToCredentials map ONLY for the specified credential
+			// Add to modelToCredentials map (avoid duplicates)
 			if !contains(m.modelToCredentials[modelConfig.Name], modelConfig.Credential) {
 				m.modelToCredentials[modelConfig.Name] = append(
 					m.modelToCredentials[modelConfig.Name],
@@ -484,6 +484,45 @@ func (m *Manager) GetModelTPM(modelID string) int {
 	}
 
 	return m.modelsConfig.GetModelTPM(modelID, -1)
+}
+
+// GetModelsForCredential returns all models available for a specific credential
+func (m *Manager) GetModelsForCredential(credentialName string) []Model {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	var result []Model
+
+	// If we have models in config, use them
+	if m.modelsConfig != nil && len(m.modelsConfig.Models) > 0 {
+		for _, modelConfig := range m.modelsConfig.Models {
+			// Check if model is available for this credential
+			if modelConfig.Credential == "" || modelConfig.Credential == credentialName {
+				result = append(result, Model{
+					ID:      modelConfig.Name,
+					Object:  "model",
+					Created: time.Now().Unix(),
+					OwnedBy: "system",
+				})
+			}
+		}
+		return result
+	}
+
+	// If no config, check credentialModels map (from API fetching)
+	if modelIDs, ok := m.credentialModels[credentialName]; ok {
+		for _, modelID := range modelIDs {
+			// Find the model in allModels
+			for _, model := range m.allModels {
+				if model.ID == modelID {
+					result = append(result, model)
+					break
+				}
+			}
+		}
+	}
+
+	return result
 }
 
 // updateModelsConfig updates models.yaml with newly discovered models
