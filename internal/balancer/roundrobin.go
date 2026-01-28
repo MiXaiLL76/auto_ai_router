@@ -121,6 +121,14 @@ func (r *RoundRobin) next(modelID string) (*Credential, error) {
 			continue
 		}
 
+		// Check if credential supports the requested model BEFORE rate limiting
+		if modelID != "" && r.modelChecker != nil && r.modelChecker.IsEnabled() {
+			if !r.modelChecker.HasModel(cred.Name, modelID) {
+				otherReasonsHit = true
+				continue
+			}
+		}
+
 		// Check credential RPM limit
 		if !r.rateLimiter.Allow(cred.Name) {
 			rateLimitHit = true
@@ -147,14 +155,6 @@ func (r *RoundRobin) next(modelID string) (*Credential, error) {
 			if !r.rateLimiter.AllowModelTokens(cred.Name, modelID) {
 				// Model TPM exceeded for this credential+model combination
 				rateLimitHit = true
-				continue
-			}
-		}
-
-		// Check if credential supports the requested model
-		if modelID != "" && r.modelChecker != nil && r.modelChecker.IsEnabled() {
-			if !r.modelChecker.HasModel(cred.Name, modelID) {
-				otherReasonsHit = true
 				continue
 			}
 		}

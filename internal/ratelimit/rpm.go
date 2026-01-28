@@ -84,14 +84,10 @@ func (r *RPMLimiter) Allow(credentialName string) bool {
 	limiter.mu.Lock()
 	defer limiter.mu.Unlock()
 
-	// -1 means unlimited RPM
-	if limiter.rpm == -1 {
-		return true
-	}
-
 	now := time.Now()
 	oneMinuteAgo := now.Add(-time.Minute)
 
+	// Clean old requests first
 	validRequests := make([]time.Time, 0)
 	for _, reqTime := range limiter.requests {
 		if reqTime.After(oneMinuteAgo) {
@@ -100,10 +96,12 @@ func (r *RPMLimiter) Allow(credentialName string) bool {
 	}
 	limiter.requests = validRequests
 
-	if len(limiter.requests) >= limiter.rpm {
+	// Check limit only if RPM is not unlimited (-1)
+	if limiter.rpm != -1 && len(limiter.requests) >= limiter.rpm {
 		return false
 	}
 
+	// Always record the request for metrics
 	limiter.requests = append(limiter.requests, now)
 	return true
 }
@@ -150,15 +148,10 @@ func (r *RPMLimiter) AllowModel(credentialName, modelName string) bool {
 	modelLimiter.mu.Lock()
 	defer modelLimiter.mu.Unlock()
 
-	// -1 means unlimited RPM
-	if modelLimiter.rpm == -1 {
-		return true
-	}
-
 	now := time.Now()
 	oneMinuteAgo := now.Add(-time.Minute)
 
-	// Clean old requests
+	// Clean old requests first
 	validRequests := make([]time.Time, 0)
 	for _, reqTime := range modelLimiter.requests {
 		if reqTime.After(oneMinuteAgo) {
@@ -167,12 +160,12 @@ func (r *RPMLimiter) AllowModel(credentialName, modelName string) bool {
 	}
 	modelLimiter.requests = validRequests
 
-	// Check limit
-	if len(modelLimiter.requests) >= modelLimiter.rpm {
+	// Check limit only if RPM is not unlimited (-1)
+	if modelLimiter.rpm != -1 && len(modelLimiter.requests) >= modelLimiter.rpm {
 		return false
 	}
 
-	// Record request
+	// Always record the request for metrics
 	modelLimiter.requests = append(modelLimiter.requests, now)
 	return true
 }
