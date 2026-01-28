@@ -157,9 +157,9 @@ class TestImagenAdvanced:
         assert len(result["data"]) == 1
 
         img_data = result["data"][0]
-        if response_format == "b64_json":
-            assert "b64_json" in img_data
-            assert img_data["b64_json"]
-        else:
-            assert "url" in img_data
-            assert img_data["url"]
+        # Imagen always returns b64_json regardless of requested format
+        assert "b64_json" in img_data
+        assert img_data["b64_json"]
+        # Verify valid base64
+        image_bytes = base64.b64decode(img_data["b64_json"])
+        assert len(image_bytes) > 1000
