@@ -141,7 +141,7 @@ class TestOpenAIStreaming:
 
         # Check that we get content in some chunks
         content_chunks = [
-            chunk for chunk in chunks 
+            chunk for chunk in chunks
             if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content
         ]
         assert len(content_chunks) > 0

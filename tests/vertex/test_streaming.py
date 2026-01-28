@@ -50,7 +50,7 @@ class TestVertexStreaming:
         full_content = ""
         chunk_count = 0
         content_chunks = 0
-        
+
         for chunk in stream:
             chunk_count += 1
             if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content:
@@ -59,7 +59,7 @@ class TestVertexStreaming:
 
         # Debug info for troubleshooting
         print(f"Total chunks: {chunk_count}, Content chunks: {content_chunks}, Content: '{full_content}'")
-        
+
         # More lenient assertion - either we get chunks or content
         assert chunk_count > 0 or len(full_content) > 0, f"No chunks ({chunk_count}) and no content ('{full_content}')"
 
@@ -96,7 +96,7 @@ class TestVertexStreaming:
 
         full_content = ""
         chunk_count = 0
-        
+
         for chunk in stream:
             chunk_count += 1
             if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content:
@@ -104,10 +104,10 @@ class TestVertexStreaming:
 
         # Debug info
         print(f"Code generation - Chunks: {chunk_count}, Content: '{full_content}'")
-        
+
         # More lenient checks
         assert chunk_count > 0 or len(full_content) > 0, f"No response received"
-        
+
         # If we got content, check for code-related keywords
         if len(full_content) > 0:
             content_lower = full_content.lower()
