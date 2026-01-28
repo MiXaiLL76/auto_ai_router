@@ -10,7 +10,8 @@ import (
 
 // VertexStreamingChunk represents a single chunk from Vertex AI streaming response
 type VertexStreamingChunk struct {
-	Candidates []VertexCandidate `json:"candidates,omitempty"`
+	Candidates    []VertexCandidate    `json:"candidates,omitempty"`
+	UsageMetadata *VertexUsageMetadata `json:"usageMetadata,omitempty"`
 }
 
 // OpenAIStreamingChunk represents OpenAI streaming response format
@@ -20,6 +21,7 @@ type OpenAIStreamingChunk struct {
 	Created int64                   `json:"created"`
 	Model   string                  `json:"model"`
 	Choices []OpenAIStreamingChoice `json:"choices"`
+	Usage   *OpenAIUsage            `json:"usage,omitempty"`
 }
 
 type OpenAIStreamingChoice struct {
@@ -94,6 +96,15 @@ func TransformVertexStreamToOpenAI(vertexStream io.Reader, model string, output 
 			}
 
 			openAIChunk.Choices = append(openAIChunk.Choices, choice)
+		}
+
+		// Convert usage metadata if present
+		if vertexChunk.UsageMetadata != nil {
+			openAIChunk.Usage = &OpenAIUsage{
+				PromptTokens:     vertexChunk.UsageMetadata.PromptTokenCount,
+				CompletionTokens: vertexChunk.UsageMetadata.CandidatesTokenCount,
+				TotalTokens:      vertexChunk.UsageMetadata.TotalTokenCount,
+			}
 		}
 
 		// Write OpenAI formatted chunk

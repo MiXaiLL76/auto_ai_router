@@ -137,6 +137,9 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 	// Extract model from request body if present
 	modelID := extractModelFromBody(body)
 
+	// Ensure stream_options.include_usage is set for streaming requests
+	body = ensureStreamUsageEnabled(body)
+
 	// Select credential based on model availability
 	var cred *balancer.Credential
 	if modelID != "" {
@@ -421,13 +424,13 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 
 	if isStreamingResponse(resp) {
 		if cred.Type == "vertex-ai" {
-			// Transform Vertex AI streaming to OpenAI format
-			err := vertex_transform.TransformVertexStreamToOpenAI(resp.Body, modelID, w)
+			// Transform Vertex AI streaming to OpenAI format with token tracking
+			err := p.handleVertexStreaming(w, resp, cred.Name, modelID)
 			if err != nil {
 				p.logger.Error("Failed to vertex_transform streaming response", "error", err)
 			}
 		} else {
-			p.handleStreaming(w, resp, cred.Name)
+			p.handleStreamingWithTokens(w, resp, cred.Name, modelID)
 		}
 	} else {
 		if _, err := io.Copy(w, resp.Body); err != nil {
@@ -436,7 +439,68 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (p *Proxy) handleStreaming(w http.ResponseWriter, resp *http.Response, credName string) {
+func (p *Proxy) handleVertexStreaming(w http.ResponseWriter, resp *http.Response, credName, modelID string) error {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		p.logger.Error("Streaming not supported", "credential", credName)
+		http.Error(w, "Streaming Not Supported", http.StatusInternalServerError)
+		return fmt.Errorf("streaming not supported")
+	}
+
+	p.logger.Debug("Starting Vertex AI streaming response", "credential", credName)
+
+	// Create a pipe to capture the streaming data
+	pr, pw := io.Pipe()
+	var totalTokens int
+
+	// Start goroutine to transform and capture tokens
+	go func() {
+		defer func() {
+			_ = pw.Close()
+		}()
+		err := vertex_transform.TransformVertexStreamToOpenAI(resp.Body, modelID, &tokenCapturingWriter{
+			writer: pw,
+			tokens: &totalTokens,
+			logger: p.logger,
+		})
+		if err != nil {
+			p.logger.Error("Failed to transform Vertex streaming", "error", err)
+		}
+	}()
+
+	// Copy transformed data to response
+	buf := make([]byte, 8192)
+	for {
+		n, err := pr.Read(buf)
+		if n > 0 {
+			if _, writeErr := w.Write(buf[:n]); writeErr != nil {
+				p.logger.Error("Failed to write streaming chunk", "error", writeErr, "credential", credName)
+				return writeErr
+			}
+			flusher.Flush()
+		}
+		if err != nil {
+			if err != io.EOF {
+				p.logger.Error("Streaming read error", "error", err, "credential", credName)
+			}
+			break
+		}
+	}
+
+	// Record token usage after streaming completes
+	if totalTokens > 0 {
+		p.rateLimiter.ConsumeTokens(credName, totalTokens)
+		if modelID != "" {
+			p.rateLimiter.ConsumeModelTokens(credName, modelID, totalTokens)
+		}
+		p.logger.Debug("Streaming token usage recorded", "credential", credName, "model", modelID, "tokens", totalTokens)
+	}
+
+	p.logger.Debug("Vertex AI streaming response completed", "credential", credName)
+	return nil
+}
+
+func (p *Proxy) handleStreamingWithTokens(w http.ResponseWriter, resp *http.Response, credName, modelID string) {
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		p.logger.Error("Streaming not supported", "credential", credName)
@@ -444,33 +508,85 @@ func (p *Proxy) handleStreaming(w http.ResponseWriter, resp *http.Response, cred
 		return
 	}
 
-	p.logger.Debug("Starting streaming response", "credential", credName)
+	p.logger.Debug("Starting streaming response with token tracking", "credential", credName)
 
+	var totalTokens int
 	buf := make([]byte, 8192)
 	for {
 		n, err := resp.Body.Read(buf)
 		if n > 0 {
+			// Extract tokens from streaming chunks
+			chunkData := string(buf[:n])
+			tokens := extractTokensFromStreamingChunk(chunkData)
+			if tokens > 0 {
+				totalTokens += tokens
+			}
+
 			if _, writeErr := w.Write(buf[:n]); writeErr != nil {
-				p.logger.Error("Failed to write streaming chunk",
-					"error", writeErr,
-					"credential", credName,
-				)
+				p.logger.Error("Failed to write streaming chunk", "error", writeErr, "credential", credName)
 				return
 			}
 			flusher.Flush()
 		}
 		if err != nil {
 			if err != io.EOF {
-				p.logger.Error("Streaming read error",
-					"error", err,
-					"credential", credName,
-				)
+				p.logger.Error("Streaming read error", "error", err, "credential", credName)
 			}
 			break
 		}
 	}
 
+	// Record token usage after streaming completes
+	if totalTokens > 0 {
+		p.rateLimiter.ConsumeTokens(credName, totalTokens)
+		if modelID != "" {
+			p.rateLimiter.ConsumeModelTokens(credName, modelID, totalTokens)
+		}
+		p.logger.Debug("Streaming token usage recorded", "credential", credName, "model", modelID, "tokens", totalTokens)
+	}
+
 	p.logger.Debug("Streaming response completed", "credential", credName)
+}
+
+type tokenCapturingWriter struct {
+	writer io.Writer
+	tokens *int
+	logger *slog.Logger
+}
+
+func (tcw *tokenCapturingWriter) Write(p []byte) (n int, err error) {
+	// Extract tokens from the data being written
+	tokens := extractTokensFromStreamingChunk(string(p))
+	if tokens > 0 {
+		*tcw.tokens += tokens
+	}
+	return tcw.writer.Write(p)
+}
+
+func extractTokensFromStreamingChunk(chunk string) int {
+	// Look for usage information in streaming chunks
+	lines := strings.Split(chunk, "\n")
+	for _, line := range lines {
+		if strings.HasPrefix(line, "data: ") {
+			jsonData := strings.TrimPrefix(line, "data: ")
+			if jsonData == "[DONE]" {
+				continue
+			}
+
+			var chunkData map[string]interface{}
+			if err := json.Unmarshal([]byte(jsonData), &chunkData); err != nil {
+				continue
+			}
+
+			// Check for usage field in OpenAI format
+			if usage, ok := chunkData["usage"].(map[string]interface{}); ok {
+				if totalTokens, ok := usage["total_tokens"].(float64); ok {
+					return int(totalTokens)
+				}
+			}
+		}
+	}
+	return 0
 }
 
 func isStreamingResponse(resp *http.Response) bool {
@@ -754,6 +870,49 @@ func isStreamingRequest(body []byte) bool {
 	}
 
 	return reqBody.Stream
+}
+
+// ensureStreamUsageEnabled ensures that stream_options.include_usage is set to true for streaming requests
+func ensureStreamUsageEnabled(body []byte) []byte {
+	if len(body) == 0 {
+		return body
+	}
+
+	var reqBody map[string]interface{}
+	if err := json.Unmarshal(body, &reqBody); err != nil {
+		return body // Return original if parsing fails
+	}
+
+	// Check if this is a streaming request
+	stream, ok := reqBody["stream"].(bool)
+	if !ok || !stream {
+		return body // Not a streaming request, return as-is
+	}
+
+	// Ensure stream_options exists and include_usage is true
+	streamOptions, exists := reqBody["stream_options"]
+	if !exists {
+		// Create stream_options if it doesn't exist
+		reqBody["stream_options"] = map[string]interface{}{
+			"include_usage": true,
+		}
+	} else if streamOptionsMap, ok := streamOptions.(map[string]interface{}); ok {
+		// Update existing stream_options to ensure include_usage is true
+		streamOptionsMap["include_usage"] = true
+	} else {
+		// stream_options exists but is not a map, replace it
+		reqBody["stream_options"] = map[string]interface{}{
+			"include_usage": true,
+		}
+	}
+
+	// Marshal back to JSON
+	modifiedBody, err := json.Marshal(reqBody)
+	if err != nil {
+		return body // Return original if marshaling fails
+	}
+
+	return modifiedBody
 }
 
 // VisualHealthCheck renders an HTML dashboard with health check information
