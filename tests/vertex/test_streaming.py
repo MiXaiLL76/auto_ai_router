@@ -20,19 +20,27 @@ class TestVertexStreaming:
                 {"role": "user", "content": "Count from 1 to 5"}
             ],
             max_tokens=150,
-            stream=True
+            stream=True,
+            stream_options={"include_usage": True},
         )
 
         full_content = ""
         chunk_count = 0
+        usage_found = False
+
         for chunk in stream:
             chunk_count += 1
             if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content:
                 full_content += chunk.choices[0].delta.content
+            # Check for usage in final chunk
+            if hasattr(chunk, 'usage') and chunk.usage:
+                usage_found = True
+                assert chunk.usage.total_tokens > 0
 
         assert chunk_count > 0
         assert len(full_content) > 0
         assert any(str(i) in full_content for i in range(1, 6))
+        assert usage_found, "Usage information not found in streaming response"
 
     @pytest.mark.parametrize("temperature", [0.3, 0.7])
     def test_streaming_with_temperature(self, openai_client, temperature):
@@ -44,7 +52,8 @@ class TestVertexStreaming:
             ],
             temperature=temperature,
             max_tokens=150,
-            stream=True
+            stream=True,
+            stream_options={"include_usage": True}
         )
 
         full_content = ""
@@ -71,7 +80,8 @@ class TestVertexStreaming:
                 {"role": "user", "content": "Напиши короткое приветствие на русском языке"}
             ],
             max_tokens=130,
-            stream=True
+            stream=True,
+            stream_options={"include_usage": True}
         )
 
         full_content = ""
@@ -91,7 +101,8 @@ class TestVertexStreaming:
                 {"role": "user", "content": "Write a Python function that adds two numbers. Just the function code."}
             ],
             max_tokens=180,
-            stream=True
+            stream=True,
+            stream_options={"include_usage": True}
         )
 
         full_content = ""
@@ -123,7 +134,8 @@ class TestVertexStreaming:
                 {"role": "user", "content": "What is AI? Answer in one sentence."}
             ],
             max_tokens=150,
-            stream=True
+            stream=True,
+            stream_options={"include_usage": True}
         )
 
         full_content = ""
@@ -146,7 +158,8 @@ class TestVertexStreaming:
                 {"role": "user", "content": "What color did I mention?"}
             ],
             max_tokens=130,
-            stream=True
+            stream=True,
+            stream_options={"include_usage": True}
         )
 
         full_content = ""
@@ -167,7 +180,8 @@ class TestVertexStreaming:
                 {"role": "user", "content": "Say hello"}
             ],
             max_tokens=120,
-            stream=True
+            stream=True,
+            stream_options={"include_usage": True}
         )
 
         chunks = list(stream)
@@ -201,7 +215,8 @@ class TestVertexStreaming:
                     "top_k": 40,
                     "top_p": 0.8
                 }
-            }
+            },
+            stream_options={"include_usage": True}
         )
 
         full_content = ""
@@ -222,7 +237,8 @@ class TestVertexStreaming:
                 {"role": "user", "content": "Explain quantum physics in detail"}
             ],
             max_tokens=3,  # Very restrictive
-            stream=True
+            stream=True,
+            stream_options={"include_usage": True}
         )
 
         full_content = ""

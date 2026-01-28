@@ -44,6 +44,8 @@ class TestGeminiText:
             max_tokens=50
         )
 
+        assert response.usage.completion_tokens > 0
+        assert response.usage.prompt_tokens > 0
         assert response.usage.total_tokens > 0
         assert len(response.choices[0].message.content) > 0
 
@@ -152,5 +154,7 @@ class TestGeminiAdvanced:
             max_tokens=250
         )
 
+        assert response.usage.completion_tokens > 0
+        assert response.usage.prompt_tokens > 0
         assert response.usage.total_tokens > 0
         assert response.choices[0].message.content

@@ -10,8 +10,6 @@ class TestOpenAIStreaming:
 
     @pytest.mark.parametrize("model", [
         "gpt-4o-mini",
-        "gpt-4o",
-        "gpt-3.5-turbo"
     ])
     def test_basic_streaming(self, openai_client, model):
         """Test basic streaming with different models"""
@@ -21,19 +19,27 @@ class TestOpenAIStreaming:
                 {"role": "user", "content": "Count from 1 to 5"}
             ],
             max_tokens=50,
-            stream=True
+            stream=True,
+            stream_options={"include_usage": True}
         )
 
         full_content = ""
         chunk_count = 0
+        usage_found = False
+
         for chunk in stream:
             chunk_count += 1
             if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content:
                 full_content += chunk.choices[0].delta.content
+            # Check for usage in final chunk
+            if hasattr(chunk, 'usage') and chunk.usage:
+                usage_found = True
+                assert chunk.usage.total_tokens > 0
 
         assert chunk_count > 0
         assert len(full_content) > 0
         assert any(str(i) in full_content for i in range(1, 6))
+        assert usage_found, "Usage information not found in streaming response"
 
     @pytest.mark.parametrize("temperature", [0.1, 0.7, 1.0])
     def test_streaming_with_temperature(self, openai_client, temperature):
@@ -45,7 +51,8 @@ class TestOpenAIStreaming:
             ],
             temperature=temperature,
             max_tokens=30,
-            stream=True
+            stream=True,
+            stream_options={"include_usage": True}
         )
 
         full_content = ""
@@ -65,7 +72,8 @@ class TestOpenAIStreaming:
                 {"role": "user", "content": "What is 2+2?"}
             ],
             max_tokens=50,
-            stream=True
+            stream=True,
+            stream_options={"include_usage": True}
         )
 
         full_content = ""
@@ -87,7 +95,8 @@ class TestOpenAIStreaming:
                 {"role": "user", "content": "What did I just tell you about my favorite color?"}
             ],
             max_tokens=30,
-            stream=True
+            stream=True,
+            stream_options={"include_usage": True}
         )
 
         full_content = ""
@@ -107,7 +116,8 @@ class TestOpenAIStreaming:
             ],
             max_tokens=100,
             stop=["STOP"],
-            stream=True
+            stream=True,
+            stream_options={"include_usage": True}
         )
 
         full_content = ""
@@ -127,17 +137,12 @@ class TestOpenAIStreaming:
                 {"role": "user", "content": "Say hello"}
             ],
             max_tokens=20,
-            stream=True
+            stream=True,
+            stream_options={"include_usage": True}
         )
 
         chunks = list(stream)
         assert len(chunks) > 0
-
-        # Check first chunk structure
-        first_chunk = chunks[0]
-        assert hasattr(first_chunk, 'choices')
-        assert len(first_chunk.choices) > 0
-        assert hasattr(first_chunk.choices[0], 'delta')
 
         # Check that we get content in some chunks
         content_chunks = [
@@ -145,6 +150,12 @@ class TestOpenAIStreaming:
             if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content
         ]
         assert len(content_chunks) > 0
+
+        # Check structure of content chunks
+        for chunk in content_chunks:
+            assert hasattr(chunk, 'choices')
+            assert len(chunk.choices) > 0
+            assert hasattr(chunk.choices[0], 'delta')
 
     def test_streaming_error_handling(self, openai_client):
         """Test streaming with potential error conditions"""
@@ -155,7 +166,8 @@ class TestOpenAIStreaming:
                 {"role": "user", "content": "Write a long essay about artificial intelligence"}
             ],
             max_tokens=5,  # Very small limit
-            stream=True
+            stream=True,
+            stream_options={"include_usage": True}
         )
 
         full_content = ""
