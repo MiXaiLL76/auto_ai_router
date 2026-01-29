@@ -107,7 +107,7 @@ func OpenAIToVertex(openAIBody []byte) ([]byte, error) {
 			PresencePenalty:  openAIReq.PresencePenalty,
 		}
 
-		// Handle extra_body generation_config
+		// Handle extra_body generation_config (takes precedence)
 		if openAIReq.ExtraBody != nil {
 			if genConfig, ok := openAIReq.ExtraBody["generation_config"].(map[string]interface{}); ok {
 				// Only set response_mime_type for non-image models
@@ -128,6 +128,7 @@ func OpenAIToVertex(openAIBody []byte) ([]byte, error) {
 					topKInt := int(topK)
 					vertexReq.GenerationConfig.TopK = &topKInt
 				}
+				// extra_body values override direct params
 				if seed, ok := genConfig["seed"].(float64); ok {
 					seedInt := int(seed)
 					vertexReq.GenerationConfig.Seed = &seedInt
@@ -374,11 +375,13 @@ func convertContentToParts(content interface{}) []VertexPart {
 
 									// Extract mime type
 									mimeType := "image/png" // default
-									if strings.Contains(header, "image/") {
-										start := strings.Index(header, "image/")
-										end := strings.Index(header[start:], ";")
-										if end > 0 {
+									if start := strings.Index(header, "image/"); start >= 0 {
+										// Look for semicolon or end of string
+										if end := strings.Index(header[start:], ";"); end > 0 {
 											mimeType = header[start : start+end]
+										} else {
+											// No semicolon, take from image/ to end
+											mimeType = header[start:]
 										}
 									}
 

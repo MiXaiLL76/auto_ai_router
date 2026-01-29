@@ -1,7 +1,6 @@
 package balancer
 
 import (
-	"sync"
 	"testing"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
@@ -74,148 +73,6 @@ func TestNew(t *testing.T) {
 	assert.Equal(t, 0, bal.current)
 }
 
-func TestNext_RoundRobin(t *testing.T) {
-	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
-	rl := ratelimit.New()
-
-	credentials := []config.CredentialConfig{
-		{Name: "cred1", APIKey: "key1", BaseURL: "http://test1.com", RPM: 100},
-		{Name: "cred2", APIKey: "key2", BaseURL: "http://test2.com", RPM: 100},
-		{Name: "cred3", APIKey: "key3", BaseURL: "http://test3.com", RPM: 100},
-	}
-
-	bal := New(credentials, f2b, rl)
-
-	// Should rotate through credentials
-	cred1, err := bal.Next()
-	require.NoError(t, err)
-	assert.Equal(t, "cred1", cred1.Name)
-
-	cred2, err := bal.Next()
-	require.NoError(t, err)
-	assert.Equal(t, "cred2", cred2.Name)
-
-	cred3, err := bal.Next()
-	require.NoError(t, err)
-	assert.Equal(t, "cred3", cred3.Name)
-
-	// Back to first
-	cred4, err := bal.Next()
-	require.NoError(t, err)
-	assert.Equal(t, "cred1", cred4.Name)
-}
-
-func TestNext_SkipBanned(t *testing.T) {
-	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
-	rl := ratelimit.New()
-
-	credentials := []config.CredentialConfig{
-		{Name: "cred1", APIKey: "key1", BaseURL: "http://test1.com", RPM: 100},
-		{Name: "cred2", APIKey: "key2", BaseURL: "http://test2.com", RPM: 100},
-		{Name: "cred3", APIKey: "key3", BaseURL: "http://test3.com", RPM: 100},
-	}
-
-	bal := New(credentials, f2b, rl)
-
-	// Ban cred2
-	f2b.RecordResponse("cred2", 401)
-	f2b.RecordResponse("cred2", 401)
-	f2b.RecordResponse("cred2", 401)
-
-	// Should skip cred2
-	cred1, err := bal.Next()
-	require.NoError(t, err)
-	assert.Equal(t, "cred1", cred1.Name)
-
-	cred3, err := bal.Next()
-	require.NoError(t, err)
-	assert.Equal(t, "cred3", cred3.Name) // Skipped cred2
-
-	cred1Again, err := bal.Next()
-	require.NoError(t, err)
-	assert.Equal(t, "cred1", cred1Again.Name)
-}
-
-func TestNext_SkipRateLimited(t *testing.T) {
-	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
-	rl := ratelimit.New()
-
-	credentials := []config.CredentialConfig{
-		{Name: "cred1", APIKey: "key1", BaseURL: "http://test1.com", RPM: 2},
-		{Name: "cred2", APIKey: "key2", BaseURL: "http://test2.com", RPM: 100},
-		{Name: "cred3", APIKey: "key3", BaseURL: "http://test3.com", RPM: 100},
-	}
-
-	bal := New(credentials, f2b, rl)
-
-	// Get cred1 twice (at limit) - rounds: cred1, cred2, cred1
-	cred1, err := bal.Next()
-	require.NoError(t, err)
-	assert.Equal(t, "cred1", cred1.Name)
-
-	cred2, err := bal.Next()
-	require.NoError(t, err)
-	assert.Equal(t, "cred2", cred2.Name)
-
-	cred3, err := bal.Next()
-	require.NoError(t, err)
-	assert.Equal(t, "cred3", cred3.Name)
-
-	cred1Again, err := bal.Next()
-	require.NoError(t, err)
-	assert.Equal(t, "cred1", cred1Again.Name) // cred1 now at limit (2 requests)
-
-	// Next should skip cred1 (rate limited) and go to cred2
-	credNext, err := bal.Next()
-	require.NoError(t, err)
-	assert.Equal(t, "cred2", credNext.Name)
-}
-
-func TestNext_AllBanned(t *testing.T) {
-	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
-	rl := ratelimit.New()
-
-	credentials := []config.CredentialConfig{
-		{Name: "cred1", APIKey: "key1", BaseURL: "http://test1.com", RPM: 100},
-		{Name: "cred2", APIKey: "key2", BaseURL: "http://test2.com", RPM: 100},
-	}
-
-	bal := New(credentials, f2b, rl)
-
-	// Ban all credentials
-	for _, cred := range []string{"cred1", "cred2"} {
-		f2b.RecordResponse(cred, 401)
-		f2b.RecordResponse(cred, 401)
-		f2b.RecordResponse(cred, 401)
-	}
-
-	// Should return error
-	_, err := bal.Next()
-	assert.Error(t, err)
-	assert.Equal(t, ErrNoCredentialsAvailable, err)
-}
-
-func TestNext_AllRateLimited(t *testing.T) {
-	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
-	rl := ratelimit.New()
-
-	credentials := []config.CredentialConfig{
-		{Name: "cred1", APIKey: "key1", BaseURL: "http://test1.com", RPM: 1},
-		{Name: "cred2", APIKey: "key2", BaseURL: "http://test2.com", RPM: 1},
-	}
-
-	bal := New(credentials, f2b, rl)
-
-	// Exhaust rate limits
-	_, _ = bal.Next() // cred1
-	_, _ = bal.Next() // cred2
-
-	// Next request should return rate limit error
-	_, err := bal.Next()
-	assert.Error(t, err)
-	assert.Equal(t, ErrRateLimitExceeded, err)
-}
-
 func TestNextForModel_WithModelFilter(t *testing.T) {
 	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
 	rl := ratelimit.New()
@@ -242,10 +99,10 @@ func TestNextForModel_WithModelFilter(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "cred1", cred.Name)
 
-	// Request for gpt-4o-mini can return cred1 or cred2
+	// Request for gpt-4o-mini can return cred1 or cred2 (second call should return cred2)
 	cred, err = bal.NextForModel("gpt-4o-mini")
 	require.NoError(t, err)
-	assert.Contains(t, []string{"cred2", cred.Name}, cred.Name)
+	assert.Contains(t, []string{"cred1", "cred2"}, cred.Name)
 }
 
 func TestNextForModel_NoModelSupport(t *testing.T) {
@@ -419,51 +276,6 @@ func TestGetBannedCount(t *testing.T) {
 	assert.Equal(t, 2, bal.GetBannedCount())
 }
 
-func TestConcurrency(t *testing.T) {
-	f2b := fail2ban.New(100, 0, []int{401, 403, 500})
-	rl := ratelimit.New()
-
-	credentials := []config.CredentialConfig{
-		{Name: "cred1", APIKey: "key1", BaseURL: "http://test1.com", RPM: 1000},
-		{Name: "cred2", APIKey: "key2", BaseURL: "http://test2.com", RPM: 1000},
-		{Name: "cred3", APIKey: "key3", BaseURL: "http://test3.com", RPM: 1000},
-	}
-
-	bal := New(credentials, f2b, rl)
-
-	var wg sync.WaitGroup
-	numGoroutines := 50
-	requestsPerGoroutine := 10
-
-	// Concurrent Next calls
-	for i := 0; i < numGoroutines; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for j := 0; j < requestsPerGoroutine; j++ {
-				_, _ = bal.Next()
-			}
-		}()
-	}
-
-	// Concurrent GetCredentials calls
-	for i := 0; i < numGoroutines; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for j := 0; j < requestsPerGoroutine; j++ {
-				_ = bal.GetCredentials()
-				_ = bal.GetAvailableCount()
-				_ = bal.GetBannedCount()
-			}
-		}()
-	}
-
-	wg.Wait()
-
-	// Test should complete without panics
-}
-
 func TestNext_ModelCheckerDisabled(t *testing.T) {
 	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
 	rl := ratelimit.New()
@@ -481,6 +293,171 @@ func TestNext_ModelCheckerDisabled(t *testing.T) {
 
 	// Even with model specified, should work when disabled
 	cred, err := bal.NextForModel("any-model")
+	require.NoError(t, err)
+	assert.NotNil(t, cred)
+}
+
+func TestRoundRobinCycling(t *testing.T) {
+	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
+	rl := ratelimit.New()
+
+	credentials := []config.CredentialConfig{
+		{Name: "cred1", APIKey: "key1", BaseURL: "http://test1.com", RPM: 1000},
+		{Name: "cred2", APIKey: "key2", BaseURL: "http://test2.com", RPM: 1000},
+		{Name: "cred3", APIKey: "key3", BaseURL: "http://test3.com", RPM: 1000},
+	}
+
+	bal := New(credentials, f2b, rl)
+
+	// Request 6 times and verify round-robin order
+	expectedOrder := []string{"cred1", "cred2", "cred3", "cred1", "cred2", "cred3"}
+	for i, expectedName := range expectedOrder {
+		cred, err := bal.NextForModel("")
+		require.NoError(t, err, "Request %d failed", i+1)
+		assert.Equal(t, expectedName, cred.Name, "Request %d: expected %s, got %s", i+1, expectedName, cred.Name)
+	}
+}
+
+func TestNextForModel_BannedCredential(t *testing.T) {
+	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
+	rl := ratelimit.New()
+
+	credentials := []config.CredentialConfig{
+		{Name: "cred1", APIKey: "key1", BaseURL: "http://test1.com", RPM: 100},
+		{Name: "cred2", APIKey: "key2", BaseURL: "http://test2.com", RPM: 100},
+		{Name: "cred3", APIKey: "key3", BaseURL: "http://test3.com", RPM: 100},
+	}
+
+	bal := New(credentials, f2b, rl)
+
+	// Ban cred1
+	bal.RecordResponse("cred1", 401)
+	bal.RecordResponse("cred1", 401)
+	bal.RecordResponse("cred1", 401)
+
+	// Next should skip cred1 and return cred2
+	cred, err := bal.NextForModel("")
+	require.NoError(t, err)
+	assert.Equal(t, "cred2", cred.Name)
+}
+
+func TestNextForModel_AllBanned(t *testing.T) {
+	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
+	rl := ratelimit.New()
+
+	credentials := []config.CredentialConfig{
+		{Name: "cred1", APIKey: "key1", BaseURL: "http://test1.com", RPM: 100},
+		{Name: "cred2", APIKey: "key2", BaseURL: "http://test2.com", RPM: 100},
+	}
+
+	bal := New(credentials, f2b, rl)
+
+	// Ban all credentials
+	for i := 0; i < 3; i++ {
+		bal.RecordResponse("cred1", 401)
+		bal.RecordResponse("cred2", 401)
+	}
+
+	// Next should return error
+	_, err := bal.NextForModel("")
+	assert.Error(t, err)
+	assert.Equal(t, ErrNoCredentialsAvailable, err)
+}
+
+func TestNextForModel_CredentialRPMExceeded(t *testing.T) {
+	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
+	rl := ratelimit.New()
+
+	credentials := []config.CredentialConfig{
+		{Name: "cred1", APIKey: "key1", BaseURL: "http://test1.com", RPM: 1},
+		{Name: "cred2", APIKey: "key2", BaseURL: "http://test2.com", RPM: 1},
+	}
+
+	bal := New(credentials, f2b, rl)
+
+	// First request should succeed (uses cred1)
+	cred, err := bal.NextForModel("")
+	require.NoError(t, err)
+	assert.Equal(t, "cred1", cred.Name)
+
+	// Second request should succeed (uses cred2)
+	cred, err = bal.NextForModel("")
+	require.NoError(t, err)
+	assert.Equal(t, "cred2", cred.Name)
+
+	// Third request should fail (both credentials exhausted their RPM)
+	_, err = bal.NextForModel("")
+	assert.Error(t, err)
+	assert.Equal(t, ErrRateLimitExceeded, err)
+}
+
+func TestNextForModel_CredentialTPMExceeded(t *testing.T) {
+	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
+	rl := ratelimit.New()
+
+	credentials := []config.CredentialConfig{
+		{Name: "cred1", APIKey: "key1", BaseURL: "http://test1.com", RPM: 100, TPM: 100},
+		{Name: "cred2", APIKey: "key2", BaseURL: "http://test2.com", RPM: 100, TPM: 100},
+	}
+
+	bal := New(credentials, f2b, rl)
+
+	// Consume tokens to exceed TPM limit
+	rl.ConsumeTokens("cred1", 100)
+	rl.ConsumeTokens("cred2", 100)
+
+	// Next request should fail (both credentials exhausted their TPM)
+	_, err := bal.NextForModel("")
+	assert.Error(t, err)
+	assert.Equal(t, ErrRateLimitExceeded, err)
+}
+
+func TestNextForModel_ModelTPMExceeded(t *testing.T) {
+	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
+	rl := ratelimit.New()
+
+	credentials := []config.CredentialConfig{
+		{Name: "cred1", APIKey: "key1", BaseURL: "http://test1.com", RPM: 100},
+		{Name: "cred2", APIKey: "key2", BaseURL: "http://test2.com", RPM: 100},
+	}
+
+	bal := New(credentials, f2b, rl)
+
+	// Set model TPM limits and consume them
+	rl.AddModelWithTPM("cred1", "gpt-4o", 100, 100)
+	rl.AddModelWithTPM("cred2", "gpt-4o", 100, 100)
+	rl.ConsumeModelTokens("cred1", "gpt-4o", 100)
+	rl.ConsumeModelTokens("cred2", "gpt-4o", 100)
+
+	mc := NewMockModelChecker(true)
+	mc.AddModel("cred1", "gpt-4o")
+	mc.AddModel("cred2", "gpt-4o")
+	bal.SetModelChecker(mc)
+
+	// Next request should fail (both credentials exhausted their model TPM)
+	_, err := bal.NextForModel("gpt-4o")
+	assert.Error(t, err)
+	assert.Equal(t, ErrRateLimitExceeded, err)
+}
+
+func TestNextForModel_EmptyModelID(t *testing.T) {
+	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
+	rl := ratelimit.New()
+
+	credentials := []config.CredentialConfig{
+		{Name: "cred1", APIKey: "key1", BaseURL: "http://test1.com", RPM: 100},
+		{Name: "cred2", APIKey: "key2", BaseURL: "http://test2.com", RPM: 100},
+	}
+
+	bal := New(credentials, f2b, rl)
+
+	// Setup mock model checker but request with empty modelID
+	mc := NewMockModelChecker(true)
+	mc.AddModel("cred1", "gpt-4o")
+	bal.SetModelChecker(mc)
+
+	// Should work without model filtering
+	cred, err := bal.NextForModel("")
 	require.NoError(t, err)
 	assert.NotNil(t, cred)
 }

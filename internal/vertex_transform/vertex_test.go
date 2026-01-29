@@ -2,6 +2,7 @@ package vertex_transform
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -547,6 +548,42 @@ func TestConvertContentToParts(t *testing.T) {
 			input:    123,
 			expected: 1, // fallback to string conversion
 		},
+		{
+			name: "data url without base64 encoding",
+			input: []interface{}{
+				map[string]interface{}{
+					"type": "image_url",
+					"image_url": map[string]interface{}{
+						"url": "data:image/png;,iVBORw0KGgoAAAA", // no base64 prefix
+					},
+				},
+			},
+			expected: 1, // should handle gracefully
+		},
+		{
+			name: "data url without semicolon",
+			input: []interface{}{
+				map[string]interface{}{
+					"type": "image_url",
+					"image_url": map[string]interface{}{
+						"url": "data:image/jpeg,/9j/4AAQSkZJRg==", // no semicolon before comma
+					},
+				},
+			},
+			expected: 1,
+		},
+		{
+			name: "data url with different mime types",
+			input: []interface{}{
+				map[string]interface{}{
+					"type": "image_url",
+					"image_url": map[string]interface{}{
+						"url": "data:image/webp;base64,UklGRiYA",
+					},
+				},
+			},
+			expected: 1,
+		},
 	}
 
 	for _, tt := range tests {
@@ -572,6 +609,86 @@ func TestConvertContentToParts(t *testing.T) {
 					t.Errorf("Expected text 'Hello world', got %s", result[0].Text)
 				}
 			}
+
+			if tt.name == "data url with different mime types" && len(result) > 0 {
+				if result[0].InlineData.MimeType != "image/webp" {
+					t.Errorf("Expected mime type 'image/webp', got %s", result[0].InlineData.MimeType)
+				}
+			}
+
+			if tt.name == "data url without semicolon" && len(result) > 0 {
+				if result[0].InlineData.MimeType != "image/jpeg" {
+					t.Errorf("Expected mime type 'image/jpeg', got %s", result[0].InlineData.MimeType)
+				}
+			}
 		})
+	}
+}
+
+func TestGetCurrentTimestamp(t *testing.T) {
+	ts1 := getCurrentTimestamp()
+	ts2 := getCurrentTimestamp()
+
+	// Should be unix timestamp (seconds since epoch, 1970)
+	if ts1 < 1700000000 { // Current time should be after year 2023
+		t.Errorf("getCurrentTimestamp() = %d, expected value > 1700000000", ts1)
+	}
+
+	// Timestamps should be monotonic (roughly)
+	if ts2 < ts1 {
+		t.Errorf("getCurrentTimestamp() not monotonic: ts1=%d, ts2=%d", ts1, ts2)
+	}
+}
+
+func TestVertexToOpenAIWithMixedContent(t *testing.T) {
+	input := `{
+		"candidates": [{
+			"content": {
+				"parts": [
+					{"text": "Here is text:"},
+					{"inlineData": {"mimeType": "image/png", "data": "iVBORw0KGgo="}},
+					{"text": "And more text"}
+				],
+				"role": "model"
+			},
+			"finishReason": "STOP"
+		}]
+	}`
+
+	result, err := VertexToOpenAI([]byte(input), "test-model")
+	if err != nil {
+		t.Errorf("VertexToOpenAI() error = %v", err)
+		return
+	}
+
+	var respMap map[string]interface{}
+	if err := json.Unmarshal(result, &respMap); err != nil {
+		t.Errorf("Failed to unmarshal result: %v", err)
+		return
+	}
+
+	// Check that text content is concatenated
+	if choices, ok := respMap["choices"].([]interface{}); ok && len(choices) > 0 {
+		if choice, ok := choices[0].(map[string]interface{}); ok {
+			if msg, ok := choice["message"].(map[string]interface{}); ok {
+				content := msg["content"].(string)
+				if !strings.Contains(content, "Here is text:") || !strings.Contains(content, "And more text") {
+					t.Errorf("Expected concatenated text, got: %s", content)
+				}
+			}
+		}
+	}
+
+	// Check that images are captured
+	if choices, ok := respMap["choices"].([]interface{}); ok && len(choices) > 0 {
+		if choice, ok := choices[0].(map[string]interface{}); ok {
+			if msg, ok := choice["message"].(map[string]interface{}); ok {
+				if images, ok := msg["images"].([]interface{}); ok {
+					if len(images) != 1 {
+						t.Errorf("Expected 1 image, got %d", len(images))
+					}
+				}
+			}
+		}
 	}
 }

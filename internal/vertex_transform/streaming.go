@@ -40,6 +40,7 @@ func TransformVertexStreamToOpenAI(vertexStream io.Reader, model string, output 
 	scanner := bufio.NewScanner(vertexStream)
 	chatID := generateID()
 	timestamp := getCurrentTimestamp()
+	isFirstChunk := true
 
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -63,6 +64,11 @@ func TransformVertexStreamToOpenAI(vertexStream io.Reader, model string, output 
 			continue // Skip malformed chunks
 		}
 
+		// Skip chunks with no candidates
+		if len(vertexChunk.Candidates) == 0 {
+			continue
+		}
+
 		// Convert to OpenAI format
 		openAIChunk := OpenAIStreamingChunk{
 			ID:      chatID,
@@ -77,6 +83,11 @@ func TransformVertexStreamToOpenAI(vertexStream io.Reader, model string, output 
 			choice := OpenAIStreamingChoice{
 				Index: i,
 				Delta: OpenAIStreamingDelta{},
+			}
+
+			// Set role only for first chunk (OpenAI convention)
+			if isFirstChunk {
+				choice.Delta.Role = "assistant"
 			}
 
 			// Extract content from parts
@@ -114,6 +125,7 @@ func TransformVertexStreamToOpenAI(vertexStream io.Reader, model string, output 
 		}
 
 		_, _ = fmt.Fprintf(output, "data: %s\n\n", chunkJSON)
+		isFirstChunk = false
 	}
 
 	return scanner.Err()

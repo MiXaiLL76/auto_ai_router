@@ -21,7 +21,6 @@ server:
   max_body_size_mb: 100
   request_timeout: 30s
   logging_level: info
-  replace_v1_models: true
   master_key: "sk-test-master-key"
   default_models_rpm: 50
 
@@ -59,7 +58,6 @@ monitoring:
 	assert.Equal(t, 100, cfg.Server.MaxBodySizeMB)
 	assert.Equal(t, 30*time.Second, cfg.Server.RequestTimeout)
 	assert.Equal(t, "info", cfg.Server.LoggingLevel)
-	assert.True(t, cfg.Server.ReplaceV1Models)
 	assert.Equal(t, "sk-test-master-key", cfg.Server.MasterKey)
 	assert.Equal(t, 50, cfg.Server.DefaultModelsRPM)
 
@@ -125,7 +123,7 @@ func TestConfig_Validate_InvalidPort(t *testing.T) {
 					RequestTimeout: 30 * time.Second,
 				},
 				Credentials: []CredentialConfig{
-					{Name: "test", APIKey: "key", BaseURL: "http://test.com", RPM: 10},
+					{Name: "test", Type: "openai", APIKey: "key", BaseURL: "http://test.com", RPM: 10},
 				},
 				Fail2Ban: Fail2BanConfig{MaxAttempts: 3},
 			}
@@ -199,7 +197,7 @@ func TestConfig_Validate_InvalidBaseURL(t *testing.T) {
 					RequestTimeout: 30 * time.Second,
 				},
 				Credentials: []CredentialConfig{
-					{Name: "test", APIKey: "key", BaseURL: tt.baseURL, RPM: 10},
+					{Name: "test", Type: "openai", APIKey: "key", BaseURL: tt.baseURL, RPM: 10},
 				},
 				Fail2Ban: Fail2BanConfig{MaxAttempts: 3},
 			}
@@ -235,7 +233,7 @@ func TestConfig_Validate_InvalidRPM(t *testing.T) {
 					RequestTimeout: 30 * time.Second,
 				},
 				Credentials: []CredentialConfig{
-					{Name: "test", APIKey: "key", BaseURL: "http://test.com", RPM: tt.rpm},
+					{Name: "test", Type: "openai", APIKey: "key", BaseURL: "http://test.com", RPM: tt.rpm},
 				},
 				Fail2Ban: Fail2BanConfig{MaxAttempts: 3},
 			}
@@ -258,8 +256,8 @@ func TestConfig_Normalize_RemovesV1Suffix(t *testing.T) {
 			RequestTimeout: 30 * time.Second,
 		},
 		Credentials: []CredentialConfig{
-			{Name: "test1", APIKey: "key1", BaseURL: "https://api.openai.com/v1", RPM: 10},
-			{Name: "test2", APIKey: "key2", BaseURL: "https://api.custom.com", RPM: 10},
+			{Name: "test1", Type: "openai", APIKey: "key1", BaseURL: "https://api.openai.com/v1", RPM: 10},
+			{Name: "test2", Type: "openai", APIKey: "key2", BaseURL: "https://api.custom.com", RPM: 10},
 		},
 		Fail2Ban: Fail2BanConfig{MaxAttempts: 3},
 	}
@@ -288,6 +286,7 @@ fail2ban:
 
 credentials:
   - name: "test"
+    type: "openai"
     api_key: "key"
     base_url: "http://test.com"
     rpm: 10
@@ -321,6 +320,7 @@ fail2ban:
 
 credentials:
   - name: "test"
+    type: "openai"
     api_key: "key"
     base_url: "http://test.com"
     rpm: 10
@@ -393,7 +393,7 @@ func TestConfig_Validate_LoggingLevel(t *testing.T) {
 					RequestTimeout: 30 * time.Second,
 				},
 				Credentials: []CredentialConfig{
-					{Name: "test", APIKey: "key", BaseURL: "http://test.com", RPM: 10},
+					{Name: "test", Type: "openai", APIKey: "key", BaseURL: "http://test.com", RPM: 10},
 				},
 				Fail2Ban: Fail2BanConfig{MaxAttempts: 3},
 			}
@@ -432,7 +432,7 @@ func TestConfig_Validate_DefaultModelsRPM(t *testing.T) {
 					RequestTimeout:   30 * time.Second,
 				},
 				Credentials: []CredentialConfig{
-					{Name: "test", APIKey: "key", BaseURL: "http://test.com", RPM: 10},
+					{Name: "test", Type: "openai", APIKey: "key", BaseURL: "http://test.com", RPM: 10},
 				},
 				Fail2Ban: Fail2BanConfig{MaxAttempts: 3},
 			}
@@ -453,11 +453,10 @@ func TestLoad_EnvVariables(t *testing.T) {
 	require.NoError(t, os.Setenv("TEST_MAX_BODY_SIZE", "200"))
 	require.NoError(t, os.Setenv("TEST_REQUEST_TIMEOUT", "60s"))
 	require.NoError(t, os.Setenv("TEST_LOGGING_LEVEL", "error"))
-	require.NoError(t, os.Setenv("TEST_REPLACE_V1_MODELS", "false"))
 	require.NoError(t, os.Setenv("TEST_MASTER_KEY", "sk-env-master-key"))
 	require.NoError(t, os.Setenv("TEST_DEFAULT_MODELS_RPM", "100"))
 	require.NoError(t, os.Setenv("TEST_CRED_NAME", "env_credential"))
-	require.NoError(t, os.Setenv("TEST_CRED_TYPE", "azure"))
+	require.NoError(t, os.Setenv("TEST_CRED_TYPE", "openai"))
 	require.NoError(t, os.Setenv("TEST_CRED_API_KEY", "sk-env-api-key"))
 	require.NoError(t, os.Setenv("TEST_CRED_BASE_URL", "https://env.example.com"))
 	require.NoError(t, os.Setenv("TEST_CRED_RPM", "150"))
@@ -471,7 +470,6 @@ func TestLoad_EnvVariables(t *testing.T) {
 		_ = os.Unsetenv("TEST_MAX_BODY_SIZE")
 		_ = os.Unsetenv("TEST_REQUEST_TIMEOUT")
 		_ = os.Unsetenv("TEST_LOGGING_LEVEL")
-		_ = os.Unsetenv("TEST_REPLACE_V1_MODELS")
 		_ = os.Unsetenv("TEST_MASTER_KEY")
 		_ = os.Unsetenv("TEST_DEFAULT_MODELS_RPM")
 		_ = os.Unsetenv("TEST_CRED_NAME")
@@ -494,7 +492,6 @@ server:
   max_body_size_mb: os.environ/TEST_MAX_BODY_SIZE
   request_timeout: os.environ/TEST_REQUEST_TIMEOUT
   logging_level: os.environ/TEST_LOGGING_LEVEL
-  replace_v1_models: os.environ/TEST_REPLACE_V1_MODELS
   master_key: os.environ/TEST_MASTER_KEY
   default_models_rpm: os.environ/TEST_DEFAULT_MODELS_RPM
 
@@ -527,14 +524,13 @@ monitoring:
 	assert.Equal(t, 200, cfg.Server.MaxBodySizeMB)
 	assert.Equal(t, 60*time.Second, cfg.Server.RequestTimeout)
 	assert.Equal(t, "error", cfg.Server.LoggingLevel)
-	assert.Equal(t, false, cfg.Server.ReplaceV1Models)
 	assert.Equal(t, "sk-env-master-key", cfg.Server.MasterKey)
 	assert.Equal(t, 100, cfg.Server.DefaultModelsRPM)
 
 	// Verify credential config
 	require.Len(t, cfg.Credentials, 1)
 	assert.Equal(t, "env_credential", cfg.Credentials[0].Name)
-	assert.Equal(t, "azure", cfg.Credentials[0].Type)
+	assert.Equal(t, ProviderType("openai"), cfg.Credentials[0].Type)
 	assert.Equal(t, "sk-env-api-key", cfg.Credentials[0].APIKey)
 	assert.Equal(t, "https://env.example.com", cfg.Credentials[0].BaseURL)
 	assert.Equal(t, 150, cfg.Credentials[0].RPM)
@@ -565,7 +561,6 @@ server:
   max_body_size_mb: 100
   request_timeout: 30s
   logging_level: info
-  replace_v1_models: true
   master_key: os.environ/TEST_MASTER_KEY
   default_models_rpm: 50
 
@@ -597,4 +592,133 @@ monitoring:
 	assert.Equal(t, "sk-from-env", cfg.Server.MasterKey)
 	assert.Equal(t, "sk-cred-from-env", cfg.Credentials[0].APIKey)
 	assert.Equal(t, "static_provider", cfg.Credentials[0].Name)
+}
+
+func TestProviderType_IsValid(t *testing.T) {
+	tests := []struct {
+		name     string
+		provider ProviderType
+		valid    bool
+	}{
+		{"openai", ProviderTypeOpenAI, true},
+		{"vertex-ai", ProviderTypeVertexAI, true},
+		{"invalid", ProviderType("azure"), false},
+		{"empty", ProviderType(""), false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.valid, tt.provider.IsValid())
+		})
+	}
+}
+
+func TestConfig_Validate_VertexAI(t *testing.T) {
+	tests := []struct {
+		name      string
+		projectID string
+		location  string
+		apiKey    string
+		wantErr   bool
+		errMsg    string
+	}{
+		{
+			name:      "valid with api_key",
+			projectID: "proj-123",
+			location:  "us-central1",
+			apiKey:    "sk-vertex-key",
+			wantErr:   false,
+		},
+		{
+			name:      "missing project_id",
+			projectID: "",
+			location:  "us-central1",
+			apiKey:    "sk-vertex-key",
+			wantErr:   true,
+			errMsg:    "project_id is required",
+		},
+		{
+			name:      "missing location",
+			projectID: "proj-123",
+			location:  "",
+			apiKey:    "sk-vertex-key",
+			wantErr:   true,
+			errMsg:    "location is required",
+		},
+		{
+			name:      "missing all credentials",
+			projectID: "proj-123",
+			location:  "us-central1",
+			apiKey:    "",
+			wantErr:   true,
+			errMsg:    "api_key, credentials_file, or credentials_json is required",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &Config{
+				Server: ServerConfig{
+					Port:           8080,
+					MaxBodySizeMB:  10,
+					MasterKey:      "test-key",
+					RequestTimeout: 30 * time.Second,
+				},
+				Credentials: []CredentialConfig{
+					{
+						Name:      "vertex",
+						Type:      ProviderTypeVertexAI,
+						ProjectID: tt.projectID,
+						Location:  tt.location,
+						APIKey:    tt.apiKey,
+						RPM:       10,
+					},
+				},
+				Fail2Ban: Fail2BanConfig{MaxAttempts: 3},
+			}
+			err := cfg.Validate()
+			if tt.wantErr {
+				assert.Error(t, err)
+				assert.Contains(t, err.Error(), tt.errMsg)
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestConfig_Validate_TPM(t *testing.T) {
+	tests := []struct {
+		name    string
+		tpm     int
+		wantErr bool
+	}{
+		{"valid tpm", 1000, false},
+		{"zero (unlimited)", 0, false},
+		{"unlimited", -1, false},
+		{"negative invalid", -5, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &Config{
+				Server: ServerConfig{
+					Port:           8080,
+					MaxBodySizeMB:  10,
+					MasterKey:      "test-key",
+					RequestTimeout: 30 * time.Second,
+				},
+				Credentials: []CredentialConfig{
+					{Name: "test", Type: "openai", APIKey: "key", BaseURL: "http://test.com", RPM: 10, TPM: tt.tpm},
+				},
+				Fail2Ban: Fail2BanConfig{MaxAttempts: 3},
+			}
+			err := cfg.Validate()
+			if tt.wantErr {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
 }

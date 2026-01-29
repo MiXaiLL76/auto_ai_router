@@ -60,33 +60,46 @@ func (f *Fail2Ban) RecordResponse(credentialName string, statusCode int) {
 }
 
 func (f *Fail2Ban) IsBanned(credentialName string) bool {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-
+	// First check with read lock
+	f.mu.RLock()
 	if !f.banned[credentialName] {
+		f.mu.RUnlock()
 		return false
 	}
 
 	// Permanent ban (banDuration = 0)
 	if f.banDuration == 0 {
+		f.mu.RUnlock()
 		return true
 	}
 
 	// Check if ban has expired
 	banTime, exists := f.banTime[credentialName]
 	if !exists {
+		f.mu.RUnlock()
 		return false
 	}
 
-	if time.Since(banTime) >= f.banDuration {
-		// Auto-unban
-		delete(f.banned, credentialName)
-		delete(f.banTime, credentialName)
-		f.failures[credentialName] = 0
-		return false
+	expired := time.Since(banTime) >= f.banDuration
+	f.mu.RUnlock()
+
+	// If ban expired, upgrade to write lock and unban
+	if expired {
+		f.mu.Lock()
+		defer f.mu.Unlock()
+		// Double-check after acquiring write lock
+		if f.banned[credentialName] {
+			banTime, exists := f.banTime[credentialName]
+			if exists && time.Since(banTime) >= f.banDuration {
+				delete(f.banned, credentialName)
+				delete(f.banTime, credentialName)
+				f.failures[credentialName] = 0
+				return false
+			}
+		}
 	}
 
-	return true
+	return !expired
 }
 
 func (f *Fail2Ban) GetFailureCount(credentialName string) int {

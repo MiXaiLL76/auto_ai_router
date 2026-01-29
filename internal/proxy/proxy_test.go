@@ -46,7 +46,7 @@ func createTestTokenManager() *auth.VertexTokenManager {
 
 func createTestModelManager() *models.Manager {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-	return models.New(logger, false, 50, "models.yaml", []config.ModelRPMConfig{})
+	return models.New(logger, 50, []config.ModelRPMConfig{})
 }
 
 func TestNew(t *testing.T) {
@@ -192,7 +192,7 @@ func TestProxyRequest_NoCredentialsAvailable(t *testing.T) {
 	tm := createTestTokenManager()
 	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key", rl, tm, createTestModelManager(), "test-version", "test-commit")
 
-	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model": "gpt-4"}`))
 	req.Header.Set("Authorization", "Bearer master-key")
 	w := httptest.NewRecorder()
 
@@ -224,7 +224,7 @@ func TestProxyRequest_RateLimitExceeded(t *testing.T) {
 	rl.Allow("test1")
 
 	// Next request should fail due to rate limit
-	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model": "gpt-4"}`))
 	req.Header.Set("Authorization", "Bearer master-key")
 	w := httptest.NewRecorder()
 
@@ -247,7 +247,7 @@ func TestProxyRequest_UpstreamError(t *testing.T) {
 	tm := createTestTokenManager()
 	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key", rl, tm, createTestModelManager(), "test-version", "test-commit")
 
-	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model": "gpt-4"}`))
 	req.Header.Set("Authorization", "Bearer master-key")
 	w := httptest.NewRecorder()
 
@@ -278,7 +278,7 @@ func TestProxyRequest_Streaming(t *testing.T) {
 	tm := createTestTokenManager()
 	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key", rl, tm, createTestModelManager(), "test-version", "test-commit")
 
-	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"stream": true}`))
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model": "gpt-4", "stream": true}`))
 	req.Header.Set("Authorization", "Bearer master-key")
 	w := httptest.NewRecorder()
 
@@ -377,7 +377,7 @@ func TestHealthCheck_WithModels(t *testing.T) {
 		{Name: "gpt-4", RPM: 10, TPM: 30000},
 		{Name: "gpt-3.5-turbo", RPM: 20, TPM: 40000},
 	}
-	mm := models.New(logger, false, 50, "/tmp/test_models.yaml", testModels)
+	mm := models.New(logger, 50, testModels)
 	mm.LoadModelsFromConfig(credentials)
 
 	// Add models to rate limiter
@@ -441,41 +441,93 @@ func TestHealthCheck_WithModels(t *testing.T) {
 
 func TestExtractModelFromBody(t *testing.T) {
 	tests := []struct {
-		name     string
-		body     string
-		expected string
+		name              string
+		body              string
+		expectedModel     string
+		expectedStream    bool
+		checkModifiedBody bool
 	}{
 		{
-			name:     "valid json with model",
-			body:     `{"model": "gpt-4", "messages": []}`,
-			expected: "gpt-4",
+			name:              "valid json with model",
+			body:              `{"model": "gpt-4", "messages": []}`,
+			expectedModel:     "gpt-4",
+			expectedStream:    false,
+			checkModifiedBody: false,
 		},
 		{
-			name:     "valid json without model",
-			body:     `{"messages": []}`,
-			expected: "",
+			name:              "valid json without model",
+			body:              `{"messages": []}`,
+			expectedModel:     "",
+			expectedStream:    false,
+			checkModifiedBody: false,
 		},
 		{
-			name:     "empty body",
-			body:     "",
-			expected: "",
+			name:              "empty body",
+			body:              "",
+			expectedModel:     "",
+			expectedStream:    false,
+			checkModifiedBody: false,
 		},
 		{
-			name:     "invalid json",
-			body:     `{invalid json}`,
-			expected: "",
+			name:              "invalid json",
+			body:              `{invalid json}`,
+			expectedModel:     "",
+			expectedStream:    false,
+			checkModifiedBody: false,
 		},
 		{
-			name:     "model is empty string",
-			body:     `{"model": "", "messages": []}`,
-			expected: "",
+			name:              "model is empty string",
+			body:              `{"model": "", "messages": []}`,
+			expectedModel:     "",
+			expectedStream:    false,
+			checkModifiedBody: false,
+		},
+		{
+			name:              "streaming request without stream_options",
+			body:              `{"model": "gpt-4", "stream": true, "messages": []}`,
+			expectedModel:     "gpt-4",
+			expectedStream:    true,
+			checkModifiedBody: true,
+		},
+		{
+			name:              "streaming request with empty stream_options",
+			body:              `{"model": "gpt-4", "stream": true, "stream_options": {}, "messages": []}`,
+			expectedModel:     "gpt-4",
+			expectedStream:    true,
+			checkModifiedBody: true,
+		},
+		{
+			name:              "streaming request with include_usage false",
+			body:              `{"model": "gpt-4", "stream": true, "stream_options": {"include_usage": false}, "messages": []}`,
+			expectedModel:     "gpt-4",
+			expectedStream:    true,
+			checkModifiedBody: true,
+		},
+		{
+			name:              "non-streaming request",
+			body:              `{"model": "gpt-4", "stream": false, "messages": []}`,
+			expectedModel:     "gpt-4",
+			expectedStream:    false,
+			checkModifiedBody: false,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := extractModelFromBody([]byte(tt.body))
-			assert.Equal(t, tt.expected, result)
+			model, stream, modifiedBody := extractModelFromBody([]byte(tt.body))
+			assert.Equal(t, tt.expectedModel, model)
+			assert.Equal(t, tt.expectedStream, stream)
+
+			if tt.checkModifiedBody && stream {
+				// For streaming requests, verify stream_options.include_usage is set to true
+				var bodyMap map[string]interface{}
+				err := json.Unmarshal(modifiedBody, &bodyMap)
+				assert.NoError(t, err)
+
+				streamOptions, ok := bodyMap["stream_options"].(map[string]interface{})
+				assert.True(t, ok, "stream_options should be present")
+				assert.Equal(t, true, streamOptions["include_usage"], "include_usage should be true")
+			}
 		})
 	}
 }
@@ -642,7 +694,7 @@ func TestProxyRequest_HeadersForwarding(t *testing.T) {
 	tm := createTestTokenManager()
 	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key", rl, tm, createTestModelManager(), "test-version", "test-commit")
 
-	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model": "gpt-4"}`))
 	req.Header.Set("Authorization", "Bearer master-key")
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Custom-Header", "custom-value")
@@ -669,7 +721,7 @@ func TestProxyRequest_QueryParameters(t *testing.T) {
 	tm := createTestTokenManager()
 	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key", rl, tm, createTestModelManager(), "test-version", "test-commit")
 
-	req := httptest.NewRequest("GET", "/v1/models?param1=value1&param2=value2", nil)
+	req := httptest.NewRequest("POST", "/v1/chat/completions?param1=value1&param2=value2", strings.NewReader(`{"model": "gpt-4"}`))
 	req.Header.Set("Authorization", "Bearer master-key")
 	w := httptest.NewRecorder()
 
@@ -708,4 +760,226 @@ func createGzipBody(content string) []byte {
 	_, _ = gzipWriter.Write([]byte(content))
 	_ = gzipWriter.Close()
 	return buf.Bytes()
+}
+
+func TestExtractTokensFromResponse(t *testing.T) {
+	tests := []struct {
+		name     string
+		body     string
+		credType config.ProviderType
+		expected int
+	}{
+		{
+			name:     "OpenAI format with tokens",
+			body:     `{"usage": {"total_tokens": 150}}`,
+			credType: config.ProviderTypeOpenAI,
+			expected: 150,
+		},
+		{
+			name:     "Vertex AI format with tokens",
+			body:     `{"usageMetadata": {"totalTokenCount": 200}}`,
+			credType: config.ProviderTypeVertexAI,
+			expected: 200,
+		},
+		{
+			name:     "empty body",
+			body:     "",
+			credType: config.ProviderTypeOpenAI,
+			expected: 0,
+		},
+		{
+			name:     "invalid json",
+			body:     `{invalid}`,
+			credType: config.ProviderTypeOpenAI,
+			expected: 0,
+		},
+		{
+			name:     "no usage field",
+			body:     `{"result": "ok"}`,
+			credType: config.ProviderTypeOpenAI,
+			expected: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tokens := extractTokensFromResponse(tt.body, tt.credType)
+			assert.Equal(t, tt.expected, tokens)
+		})
+	}
+}
+
+func TestExtractTokensFromStreamingChunk(t *testing.T) {
+	tests := []struct {
+		name     string
+		chunk    string
+		expected int
+	}{
+		{
+			name:     "chunk with usage",
+			chunk:    "data: {\"usage\": {\"total_tokens\": 100}}\n\n",
+			expected: 100,
+		},
+		{
+			name:     "chunk without usage",
+			chunk:    "data: {\"choices\": [{\"delta\": {\"content\": \"test\"}}]}\n\n",
+			expected: 0,
+		},
+		{
+			name:     "done chunk",
+			chunk:    "data: [DONE]\n\n",
+			expected: 0,
+		},
+		{
+			name:     "multiple chunks",
+			chunk:    "data: {\"choices\": []}\n\ndata: {\"usage\": {\"total_tokens\": 50}}\n\n",
+			expected: 50,
+		},
+		{
+			name:     "invalid json",
+			chunk:    "data: {invalid}\n\n",
+			expected: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tokens := extractTokensFromStreamingChunk(tt.chunk)
+			assert.Equal(t, tt.expected, tokens)
+		})
+	}
+}
+
+func TestDetermineVertexPublisher(t *testing.T) {
+	tests := []struct {
+		name     string
+		modelID  string
+		expected string
+	}{
+		{
+			name:     "claude model lowercase",
+			modelID:  "claude-3-opus",
+			expected: "anthropic",
+		},
+		{
+			name:     "claude model uppercase",
+			modelID:  "CLAUDE-3-SONNET",
+			expected: "anthropic",
+		},
+		{
+			name:     "claude model mixed case",
+			modelID:  "Claude-3-Haiku",
+			expected: "anthropic",
+		},
+		{
+			name:     "gemini model",
+			modelID:  "gemini-pro",
+			expected: "google",
+		},
+		{
+			name:     "other model",
+			modelID:  "gpt-4",
+			expected: "google",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			publisher := determineVertexPublisher(tt.modelID)
+			assert.Equal(t, tt.expected, publisher)
+		})
+	}
+}
+
+func TestBuildVertexURL(t *testing.T) {
+	tests := []struct {
+		name      string
+		cred      *config.CredentialConfig
+		modelID   string
+		streaming bool
+		expected  string
+	}{
+		{
+			name: "global location non-streaming claude",
+			cred: &config.CredentialConfig{
+				ProjectID: "test-project",
+				Location:  "global",
+			},
+			modelID:   "claude-3-opus",
+			streaming: false,
+			expected:  "https://aiplatform.googleapis.com/v1/projects/test-project/locations/global/publishers/anthropic/models/claude-3-opus:generateContent",
+		},
+		{
+			name: "global location streaming claude",
+			cred: &config.CredentialConfig{
+				ProjectID: "test-project",
+				Location:  "global",
+			},
+			modelID:   "claude-3-sonnet",
+			streaming: true,
+			expected:  "https://aiplatform.googleapis.com/v1/projects/test-project/locations/global/publishers/anthropic/models/claude-3-sonnet:streamGenerateContent?alt=sse",
+		},
+		{
+			name: "regional location non-streaming gemini",
+			cred: &config.CredentialConfig{
+				ProjectID: "test-project",
+				Location:  "us-central1",
+			},
+			modelID:   "gemini-pro",
+			streaming: false,
+			expected:  "https://us-central1-aiplatform.googleapis.com/v1/projects/test-project/locations/us-central1/publishers/google/models/gemini-pro:generateContent",
+		},
+		{
+			name: "regional location streaming gemini",
+			cred: &config.CredentialConfig{
+				ProjectID: "test-project",
+				Location:  "europe-west1",
+			},
+			modelID:   "gemini-pro",
+			streaming: true,
+			expected:  "https://europe-west1-aiplatform.googleapis.com/v1/projects/test-project/locations/europe-west1/publishers/google/models/gemini-pro:streamGenerateContent?alt=sse",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			url := buildVertexURL(tt.cred, tt.modelID, tt.streaming)
+			assert.Equal(t, tt.expected, url)
+		})
+	}
+}
+
+func TestBuildVertexImageURL(t *testing.T) {
+	tests := []struct {
+		name     string
+		cred     *config.CredentialConfig
+		modelID  string
+		expected string
+	}{
+		{
+			name: "global location",
+			cred: &config.CredentialConfig{
+				ProjectID: "test-project",
+				Location:  "global",
+			},
+			modelID:  "imagegeneration",
+			expected: "https://aiplatform.googleapis.com/v1/projects/test-project/locations/global/publishers/google/models/imagegeneration:predict",
+		},
+		{
+			name: "regional location",
+			cred: &config.CredentialConfig{
+				ProjectID: "test-project",
+				Location:  "us-central1",
+			},
+			modelID:  "imagen-3.0-generate-001",
+			expected: "https://us-central1-aiplatform.googleapis.com/v1/projects/test-project/locations/us-central1/publishers/google/models/imagen-3.0-generate-001:predict",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			url := buildVertexImageURL(tt.cred, tt.modelID)
+			assert.Equal(t, tt.expected, url)
+		})
+	}
 }

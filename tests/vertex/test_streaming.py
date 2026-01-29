@@ -19,7 +19,7 @@ class TestVertexStreaming:
             messages=[
                 {"role": "user", "content": "Count from 1 to 5"}
             ],
-            max_tokens=150,
+            max_tokens=250,
             stream=True,
             stream_options={"include_usage": True},
         )

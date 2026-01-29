@@ -718,3 +718,147 @@ func TestCanAllowModel(t *testing.T) {
 	assert.False(t, rl.CanAllowModel("cred1", "gpt-4o"))
 	assert.Equal(t, 2, rl.GetCurrentModelRPM("cred1", "gpt-4o")) // Still only 2 recorded
 }
+
+func TestCanAllow_NonExistentCredential(t *testing.T) {
+	rl := New()
+
+	// Should return false for non-existent credential
+	assert.False(t, rl.CanAllow("non_existent"))
+}
+
+func TestCanAllowModel_NonTrackedModel(t *testing.T) {
+	rl := New()
+
+	// Model not tracked - should allow (default behavior)
+	assert.True(t, rl.CanAllowModel("cred1", "unknown-model"))
+}
+
+func TestRPMLimit_Zero(t *testing.T) {
+	rl := New()
+	rl.AddCredential("cred1", 0)
+
+	// With RPM limit 0, no requests should be allowed
+	assert.False(t, rl.Allow("cred1"))
+	assert.False(t, rl.CanAllow("cred1"))
+	assert.Equal(t, 0, rl.GetCurrentRPM("cred1"))
+}
+
+func TestModelRPMLimit_Zero(t *testing.T) {
+	rl := New()
+	rl.AddModel("cred1", "gpt-4o", 0)
+
+	// With RPM limit 0, no requests should be allowed
+	assert.False(t, rl.AllowModel("cred1", "gpt-4o"))
+	assert.False(t, rl.CanAllowModel("cred1", "gpt-4o"))
+	assert.Equal(t, 0, rl.GetCurrentModelRPM("cred1", "gpt-4o"))
+}
+
+func TestTPMLimit_Zero(t *testing.T) {
+	rl := New()
+	rl.AddCredentialWithTPM("cred1", 100, 0)
+
+	// With TPM limit 0, no tokens should be allowed
+	assert.False(t, rl.AllowTokens("cred1"))
+	assert.Equal(t, 0, rl.GetCurrentTPM("cred1"))
+}
+
+func TestModelTPMLimit_Zero(t *testing.T) {
+	rl := New()
+	rl.AddModelWithTPM("cred1", "gpt-4o", 50, 0)
+
+	// With TPM limit 0, no tokens should be allowed
+	assert.False(t, rl.AllowModelTokens("cred1", "gpt-4o"))
+	assert.Equal(t, 0, rl.GetCurrentModelTPM("cred1", "gpt-4o"))
+}
+
+func TestConsumeTokens_TokenCleanup(t *testing.T) {
+	rl := New()
+	rl.AddCredentialWithTPM("cred1", 100, 10000)
+
+	// Consume tokens
+	rl.ConsumeTokens("cred1", 5000)
+	assert.Equal(t, 5000, rl.GetCurrentTPM("cred1"))
+
+	// Manually set old timestamps
+	rl.mu.Lock()
+	limiter := rl.limiters["cred1"]
+	limiter.mu.Lock()
+	oldTime := time.Now().Add(-2 * time.Minute)
+	for i := range limiter.tokens {
+		limiter.tokens[i].timestamp = oldTime
+	}
+	limiter.mu.Unlock()
+	rl.mu.Unlock()
+
+	// After cleanup, should be 0
+	assert.Equal(t, 0, rl.GetCurrentTPM("cred1"))
+
+	// New tokens should work
+	rl.ConsumeTokens("cred1", 3000)
+	assert.Equal(t, 3000, rl.GetCurrentTPM("cred1"))
+}
+
+func TestConsumeModelTokens_TokenCleanup(t *testing.T) {
+	rl := New()
+	rl.AddModelWithTPM("cred1", "gpt-4o", 50, 10000)
+
+	// Consume tokens
+	rl.ConsumeModelTokens("cred1", "gpt-4o", 5000)
+	assert.Equal(t, 5000, rl.GetCurrentModelTPM("cred1", "gpt-4o"))
+
+	// Manually set old timestamps
+	rl.mu.Lock()
+	key := "cred1:gpt-4o"
+	limiter := rl.modelLimiters[key]
+	limiter.mu.Lock()
+	oldTime := time.Now().Add(-2 * time.Minute)
+	for i := range limiter.tokens {
+		limiter.tokens[i].timestamp = oldTime
+	}
+	limiter.mu.Unlock()
+	rl.mu.Unlock()
+
+	// After cleanup, should be 0
+	assert.Equal(t, 0, rl.GetCurrentModelTPM("cred1", "gpt-4o"))
+}
+
+func TestMultipleTokenConsumptions_Accumulate(t *testing.T) {
+	rl := New()
+	rl.AddCredentialWithTPM("cred1", 100, 10000)
+
+	// Multiple consumption should accumulate
+	rl.ConsumeTokens("cred1", 1000)
+	rl.ConsumeTokens("cred1", 2000)
+	rl.ConsumeTokens("cred1", 3000)
+
+	assert.Equal(t, 6000, rl.GetCurrentTPM("cred1"))
+}
+
+func TestAllowRPM_ExactlyAtLimit(t *testing.T) {
+	rl := New()
+	rl.AddCredential("cred1", 5)
+
+	// Fill up to exactly the limit
+	for i := 0; i < 5; i++ {
+		assert.True(t, rl.Allow("cred1"))
+	}
+
+	// 6th should fail
+	assert.False(t, rl.Allow("cred1"))
+
+	// CanAllow should also return false
+	assert.False(t, rl.CanAllow("cred1"))
+}
+
+func TestAllowTokens_ExactlyAtLimit(t *testing.T) {
+	rl := New()
+	rl.AddCredentialWithTPM("cred1", 100, 1000)
+
+	// Consume exactly at limit
+	rl.ConsumeTokens("cred1", 1000)
+	assert.False(t, rl.AllowTokens("cred1"))
+
+	// Consume one more
+	rl.ConsumeTokens("cred1", 1)
+	assert.False(t, rl.AllowTokens("cred1"))
+}

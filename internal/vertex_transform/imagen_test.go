@@ -233,3 +233,84 @@ func TestVertexImageToOpenAI(t *testing.T) {
 		})
 	}
 }
+
+func TestOpenAIImageToVertex_SampleCountLimit(t *testing.T) {
+	tests := []struct {
+		name          string
+		n             int
+		expectedCount int
+	}{
+		{"n below limit", 5, 5},
+		{"n at limit", 10, 10},
+		{"n exceeds limit", 15, 10},
+		{"n way over limit", 100, 10},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			input := map[string]interface{}{
+				"model":  "imagen-3.0-fast-generate-001",
+				"prompt": "Test",
+				"n":      tt.n,
+			}
+			inputJSON, _ := json.Marshal(input)
+			result, err := OpenAIImageToVertex(inputJSON)
+
+			if err != nil {
+				t.Fatalf("OpenAIImageToVertex() error = %v", err)
+			}
+
+			var resultMap map[string]interface{}
+			if err := json.Unmarshal(result, &resultMap); err != nil {
+				t.Fatalf("Failed to unmarshal result: %v", err)
+			}
+			params := resultMap["parameters"].(map[string]interface{})
+			count := int(params["sampleCount"].(float64))
+
+			if count != tt.expectedCount {
+				t.Errorf("Expected sampleCount %d, got %d", tt.expectedCount, count)
+			}
+		})
+	}
+}
+
+func TestOpenAIImageToVertex_Quality(t *testing.T) {
+	tests := []struct {
+		name           string
+		quality        string
+		expectedFilter string
+	}{
+		{"standard quality", "standard", "block_some"},
+		{"hd quality", "hd", "block_few"},
+		{"no quality specified", "", "block_some"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			input := map[string]interface{}{
+				"model":  "imagen-3.0-fast-generate-001",
+				"prompt": "Test",
+			}
+			if tt.quality != "" {
+				input["quality"] = tt.quality
+			}
+			inputJSON, _ := json.Marshal(input)
+			result, err := OpenAIImageToVertex(inputJSON)
+
+			if err != nil {
+				t.Fatalf("OpenAIImageToVertex() error = %v", err)
+			}
+
+			var resultMap map[string]interface{}
+			if err := json.Unmarshal(result, &resultMap); err != nil {
+				t.Fatalf("Failed to unmarshal result: %v", err)
+			}
+			params := resultMap["parameters"].(map[string]interface{})
+			filter := params["safetyFilterLevel"].(string)
+
+			if filter != tt.expectedFilter {
+				t.Errorf("Expected safetyFilterLevel %s, got %s", tt.expectedFilter, filter)
+			}
+		})
+	}
+}

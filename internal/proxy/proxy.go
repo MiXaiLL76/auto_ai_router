@@ -16,6 +16,8 @@ import (
 
 	"github.com/mixaill76/auto_ai_router/internal/auth"
 	"github.com/mixaill76/auto_ai_router/internal/balancer"
+	"github.com/mixaill76/auto_ai_router/internal/config"
+	"github.com/mixaill76/auto_ai_router/internal/logger"
 	"github.com/mixaill76/auto_ai_router/internal/models"
 	"github.com/mixaill76/auto_ai_router/internal/monitoring"
 	"github.com/mixaill76/auto_ai_router/internal/ratelimit"
@@ -135,19 +137,16 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	// Extract model from request body if present
-	modelID := extractModelFromBody(body)
-
-	// Ensure stream_options.include_usage is set for streaming requests
-	body = ensureStreamUsageEnabled(body)
+	modelID, streaming, body := extractModelFromBody(body)
 
 	// Select credential based on model availability
-	var cred *balancer.Credential
-	if modelID != "" {
-		cred, err = p.balancer.NextForModel(modelID)
-	} else {
-		cred, err = p.balancer.Next()
+	if modelID == "" {
+		p.logger.Error("Model not specified in request body")
+		http.Error(w, "Bad Request: model field is required", http.StatusBadRequest)
+		return
 	}
 
+	cred, err := p.balancer.NextForModel(modelID)
 	if err != nil {
 		err_code := http.StatusServiceUnavailable
 		err_line := "Service Unavailable"
@@ -180,14 +179,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 	var requestBody = body // Default to original body
 	var isImageGeneration = strings.Contains(r.URL.Path, "/images/generations")
 
-	if cred.Type == "vertex-ai" {
-		// For Vertex AI, build URL dynamically
-		if modelID == "" {
-			p.logger.Error("Model ID is required for Vertex AI requests", "credential", cred.Name)
-			http.Error(w, "Bad Request: model field is required for Vertex AI", http.StatusBadRequest)
-			return
-		}
-
+	if cred.Type == config.ProviderTypeVertexAI {
 		if isImageGeneration {
 			// For image generation, use different endpoint
 			targetURL = buildVertexImageURL(cred, modelID)
@@ -204,7 +196,6 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			requestBody = vertexBody
 		} else {
 			// For text generation
-			streaming := isStreamingRequest(body)
 			targetURL = buildVertexURL(cred, modelID, streaming)
 			// Transform OpenAI request to Vertex AI format
 			vertexBody, err := vertex_transform.OpenAIToVertex(body)
@@ -264,7 +255,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Set Authorization header based on credential type
-	if cred.Type == "vertex-ai" {
+	if cred.Type == config.ProviderTypeVertexAI {
 		// For Vertex AI, use OAuth2 token
 		proxyReq.Header.Set("Authorization", "Bearer "+vertexToken)
 	} else {
@@ -276,7 +267,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 	p.logger.Debug("Proxy request details",
 		"target_url", targetURL,
 		"credential", cred.Name,
-		"request_body", truncateLongFields(string(requestBody), 500),
+		"request_body", logger.TruncateLongFields(string(requestBody), 500),
 	)
 
 	// Log headers (mask Authorization for security)
@@ -355,7 +346,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Transform Vertex AI response back to OpenAI format
-		if cred.Type == "vertex-ai" {
+		if cred.Type == config.ProviderTypeVertexAI {
 			if isImageGeneration {
 				// Transform image response
 				vertex_transformedBody, err := vertex_transform.VertexImageToOpenAI([]byte(decodedBody))
@@ -369,7 +360,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 					finalResponseBody = vertex_transformedBody
 					p.logger.Debug("Transformed Vertex AI image response to OpenAI format",
 						"credential", cred.Name,
-						"vertex_transformed_body", truncateLongFields(string(vertex_transformedBody), 200),
+						"vertex_transformed_body", logger.TruncateLongFields(string(vertex_transformedBody), 200),
 					)
 				}
 			} else {
@@ -385,7 +376,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 					finalResponseBody = vertex_transformedBody
 					p.logger.Debug("Transformed Vertex AI response to OpenAI format",
 						"credential", cred.Name,
-						"vertex_transformed_body", truncateLongFields(string(vertex_transformedBody), 500),
+						"vertex_transformed_body", logger.TruncateLongFields(string(vertex_transformedBody), 500),
 					)
 				}
 			}
@@ -396,7 +387,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		p.logger.Debug("Proxy response body",
 			"credential", cred.Name,
 			"content_encoding", contentEncoding,
-			"body", truncateLongFields(decodedBody, 500),
+			"body", logger.TruncateLongFields(decodedBody, 500),
 		)
 		// Replace resp.Body with a new reader for subsequent processing
 		resp.Body = io.NopCloser(bytes.NewReader(finalResponseBody))
@@ -404,10 +395,10 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 
 	for key, values := range resp.Header {
 		// Skip Content-Length and Content-Encoding as we may have vertex_transformed the response
-		if key == "Content-Length" && cred.Type == "vertex-ai" {
+		if key == "Content-Length" && cred.Type == config.ProviderTypeVertexAI {
 			continue
 		}
-		if key == "Content-Encoding" && cred.Type == "vertex-ai" {
+		if key == "Content-Encoding" && cred.Type == config.ProviderTypeVertexAI {
 			continue
 		}
 		for _, value := range values {
@@ -416,14 +407,14 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Set correct Content-Length for vertex_transformed responses
-	if cred.Type == "vertex-ai" && len(finalResponseBody) > 0 {
+	if cred.Type == config.ProviderTypeVertexAI && len(finalResponseBody) > 0 {
 		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(finalResponseBody)))
 	}
 
 	w.WriteHeader(resp.StatusCode)
 
 	if isStreamingResponse(resp) {
-		if cred.Type == "vertex-ai" {
+		if cred.Type == config.ProviderTypeVertexAI {
 			// Transform Vertex AI streaming to OpenAI format with token tracking
 			err := p.handleVertexStreaming(w, resp, cred.Name, modelID)
 			if err != nil {
@@ -667,20 +658,56 @@ func (p *Proxy) HealthCheck() (bool, map[string]interface{}) {
 }
 
 // extractModelFromBody extracts the model ID from the request body
-func extractModelFromBody(body []byte) string {
+func extractModelFromBody(body []byte) (string, bool, []byte) {
 	if len(body) == 0 {
-		return ""
+		return "", false, body
 	}
 
-	var reqBody struct {
-		Model string `json:"model"`
-	}
-
+	// var reqBody struct {
+	// 	Model string `json:"model"`
+	// 	Stream bool `json:"stream,omitempty"`
+	// 	StreamOptions map[string]interface{} `json:"stream_options,omitempty"`
+	// }
+	var reqBody map[string]interface{}
 	if err := json.Unmarshal(body, &reqBody); err != nil {
-		return ""
+		return "", false, body // Return original if parsing fails
 	}
 
-	return reqBody.Model
+	model, ok := reqBody["model"].(string)
+	if !ok {
+		return "", false, body // Return original if model is missing or not streaming
+	}
+
+	// Check if this is a streaming request
+	stream, ok := reqBody["stream"].(bool)
+	if !ok || !stream {
+		return model, false, body // Not a streaming request, return as-is
+	}
+
+	// Ensure stream_options exists and include_usage is true
+	streamOptions, exists := reqBody["stream_options"]
+	if !exists {
+		// Create stream_options if it doesn't exist
+		reqBody["stream_options"] = map[string]interface{}{
+			"include_usage": true,
+		}
+	} else if streamOptionsMap, ok := streamOptions.(map[string]interface{}); ok {
+		// Update existing stream_options to ensure include_usage is true
+		streamOptionsMap["include_usage"] = true
+	} else {
+		// stream_options exists but is not a map, replace it
+		reqBody["stream_options"] = map[string]interface{}{
+			"include_usage": true,
+		}
+	}
+
+	// Marshal back to JSON
+	modifiedBody, err := json.Marshal(reqBody)
+	if err != nil {
+		return model, stream, body // Return original if marshaling fails
+	}
+
+	return model, stream, modifiedBody
 }
 
 // decodeResponseBody decodes the response body based on Content-Encoding
@@ -708,13 +735,13 @@ func decodeResponseBody(body []byte, encoding string) string {
 
 // extractTokensFromResponse extracts total_tokens from the response body
 // Supports both OpenAI format (usage.total_tokens) and Vertex AI format (usageMetadata.totalTokenCount)
-func extractTokensFromResponse(body string, credType string) int {
+func extractTokensFromResponse(body string, credType config.ProviderType) int {
 	if body == "" {
 		return 0
 	}
 
 	// For Vertex AI, use usageMetadata format
-	if credType == "vertex-ai" {
+	if credType == config.ProviderTypeVertexAI {
 		var vertexResp struct {
 			UsageMetadata struct {
 				TotalTokenCount int `json:"totalTokenCount"`
@@ -742,58 +769,6 @@ func extractTokensFromResponse(body string, credType string) int {
 	return openAIResp.Usage.TotalTokens
 }
 
-// truncateLongFields truncates long fields in JSON for logging purposes
-// This prevents extremely long base64 strings, embeddings, etc. from cluttering logs
-func truncateLongFields(body string, maxFieldLength int) string {
-	var data map[string]interface{}
-	if err := json.Unmarshal([]byte(body), &data); err != nil {
-		return body // Return as-is if not valid JSON
-	}
-
-	truncateValue(data, maxFieldLength)
-
-	truncated, err := json.Marshal(data)
-	if err != nil {
-		return body // Return original if marshaling fails
-	}
-
-	return string(truncated)
-}
-
-// truncateValue recursively truncates long string values in a map or slice
-func truncateValue(v interface{}, maxLength int) {
-	switch val := v.(type) {
-	case map[string]interface{}:
-		for key, value := range val {
-			switch key {
-			case "embedding", "b64_json", "content":
-				// Truncate known long fields more aggressively
-				if str, ok := value.(string); ok && len(str) > 50 {
-					val[key] = fmt.Sprintf("%s... [truncated %d chars]", str[:50], len(str)-50)
-				}
-			case "messages":
-				// For messages array, truncate each message content
-				if arr, ok := value.([]interface{}); ok {
-					for i := range arr {
-						truncateValue(arr[i], maxLength)
-					}
-				}
-			default:
-				// For other fields, use standard truncation or recurse
-				if str, ok := value.(string); ok && len(str) > maxLength {
-					val[key] = str[:maxLength] + "... [truncated]"
-				} else {
-					truncateValue(value, maxLength)
-				}
-			}
-		}
-	case []interface{}:
-		for _, item := range val {
-			truncateValue(item, maxLength)
-		}
-	}
-}
-
 // maskKey masks the API key for logging (shows only first 7 chars)
 func maskKey(key string) string {
 	if len(key) <= 7 {
@@ -814,7 +789,7 @@ func determineVertexPublisher(modelID string) string {
 
 // buildVertexImageURL constructs the Vertex AI URL for image generation
 // Format: https://{location}-aiplatform.googleapis.com/v1/projects/{project}/locations/{location}/publishers/google/models/{model}:predict
-func buildVertexImageURL(cred *balancer.Credential, modelID string) string {
+func buildVertexImageURL(cred *config.CredentialConfig, modelID string) string {
 	// For global location (no regional prefix)
 	if cred.Location == "global" {
 		return fmt.Sprintf(
@@ -832,7 +807,7 @@ func buildVertexImageURL(cred *balancer.Credential, modelID string) string {
 
 // buildVertexURL constructs the Vertex AI URL dynamically
 // Format: https://{location}-aiplatform.googleapis.com/v1/projects/{project}/locations/{location}/publishers/{publisher}/models/{model}:{endpoint}
-func buildVertexURL(cred *balancer.Credential, modelID string, streaming bool) string {
+func buildVertexURL(cred *config.CredentialConfig, modelID string, streaming bool) string {
 	publisher := determineVertexPublisher(modelID)
 
 	endpoint := "generateContent"
@@ -853,66 +828,6 @@ func buildVertexURL(cred *balancer.Credential, modelID string, streaming bool) s
 		"https://%s-aiplatform.googleapis.com/v1/projects/%s/locations/%s/publishers/%s/models/%s:%s",
 		cred.Location, cred.ProjectID, cred.Location, publisher, modelID, endpoint,
 	)
-}
-
-// isStreamingRequest determines if the request is for streaming based on the request body
-func isStreamingRequest(body []byte) bool {
-	if len(body) == 0 {
-		return false
-	}
-
-	var reqBody struct {
-		Stream bool `json:"stream"`
-	}
-
-	if err := json.Unmarshal(body, &reqBody); err != nil {
-		return false
-	}
-
-	return reqBody.Stream
-}
-
-// ensureStreamUsageEnabled ensures that stream_options.include_usage is set to true for streaming requests
-func ensureStreamUsageEnabled(body []byte) []byte {
-	if len(body) == 0 {
-		return body
-	}
-
-	var reqBody map[string]interface{}
-	if err := json.Unmarshal(body, &reqBody); err != nil {
-		return body // Return original if parsing fails
-	}
-
-	// Check if this is a streaming request
-	stream, ok := reqBody["stream"].(bool)
-	if !ok || !stream {
-		return body // Not a streaming request, return as-is
-	}
-
-	// Ensure stream_options exists and include_usage is true
-	streamOptions, exists := reqBody["stream_options"]
-	if !exists {
-		// Create stream_options if it doesn't exist
-		reqBody["stream_options"] = map[string]interface{}{
-			"include_usage": true,
-		}
-	} else if streamOptionsMap, ok := streamOptions.(map[string]interface{}); ok {
-		// Update existing stream_options to ensure include_usage is true
-		streamOptionsMap["include_usage"] = true
-	} else {
-		// stream_options exists but is not a map, replace it
-		reqBody["stream_options"] = map[string]interface{}{
-			"include_usage": true,
-		}
-	}
-
-	// Marshal back to JSON
-	modifiedBody, err := json.Marshal(reqBody)
-	if err != nil {
-		return body // Return original if marshaling fails
-	}
-
-	return modifiedBody
 }
 
 // VisualHealthCheck renders an HTML dashboard with health check information
