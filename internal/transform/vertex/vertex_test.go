@@ -1,4 +1,4 @@
-package vertex_transform
+package vertex
 
 import (
 	"encoding/json"
@@ -396,25 +396,6 @@ func TestMapFinishReason(t *testing.T) {
 	}
 }
 
-func TestGenerateID(t *testing.T) {
-	id1 := generateID()
-	id2 := generateID()
-
-	// Check format
-	if len(id1) != 29 { // "chatcmpl-" + 20 hex chars
-		t.Errorf("Expected ID length 29, got %d", len(id1))
-	}
-
-	if id1[:9] != "chatcmpl-" {
-		t.Errorf("Expected ID to start with 'chatcmpl-', got %s", id1[:9])
-	}
-
-	// Check uniqueness
-	if id1 == id2 {
-		t.Errorf("Expected unique IDs, got same: %s", id1)
-	}
-}
-
 func TestExtractTextContent(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -622,21 +603,6 @@ func TestConvertContentToParts(t *testing.T) {
 				}
 			}
 		})
-	}
-}
-
-func TestGetCurrentTimestamp(t *testing.T) {
-	ts1 := getCurrentTimestamp()
-	ts2 := getCurrentTimestamp()
-
-	// Should be unix timestamp (seconds since epoch, 1970)
-	if ts1 < 1700000000 { // Current time should be after year 2023
-		t.Errorf("getCurrentTimestamp() = %d, expected value > 1700000000", ts1)
-	}
-
-	// Timestamps should be monotonic (roughly)
-	if ts2 < ts1 {
-		t.Errorf("getCurrentTimestamp() not monotonic: ts1=%d, ts2=%d", ts1, ts2)
 	}
 }
 

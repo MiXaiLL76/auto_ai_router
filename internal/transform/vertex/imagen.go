@@ -1,8 +1,10 @@
-package vertex_transform
+package vertex
 
 import (
 	"encoding/json"
 	"fmt"
+
+	"github.com/mixaill76/auto_ai_router/internal/transform/openai"
 )
 
 // OpenAIImageRequest represents OpenAI image generation request
@@ -113,7 +115,7 @@ func VertexImageToOpenAI(vertexBody []byte) ([]byte, error) {
 	}
 
 	openAIResp := OpenAIImageResponse{
-		Created: getCurrentTimestamp(),
+		Created: openai.GetCurrentTimestamp(),
 		Data:    make([]OpenAIImageData, 0),
 	}
 

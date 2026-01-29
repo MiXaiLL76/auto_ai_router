@@ -1,4 +1,4 @@
-package vertex_transform
+package vertex
 
 import (
 	"bufio"
@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"strings"
+
+	"github.com/mixaill76/auto_ai_router/internal/transform/openai"
 )
 
 // VertexStreamingChunk represents a single chunk from Vertex AI streaming response
@@ -14,32 +16,11 @@ type VertexStreamingChunk struct {
 	UsageMetadata *VertexUsageMetadata `json:"usageMetadata,omitempty"`
 }
 
-// OpenAIStreamingChunk represents OpenAI streaming response format
-type OpenAIStreamingChunk struct {
-	ID      string                  `json:"id"`
-	Object  string                  `json:"object"`
-	Created int64                   `json:"created"`
-	Model   string                  `json:"model"`
-	Choices []OpenAIStreamingChoice `json:"choices"`
-	Usage   *OpenAIUsage            `json:"usage,omitempty"`
-}
-
-type OpenAIStreamingChoice struct {
-	Index        int                  `json:"index"`
-	Delta        OpenAIStreamingDelta `json:"delta"`
-	FinishReason *string              `json:"finish_reason"`
-}
-
-type OpenAIStreamingDelta struct {
-	Role    string `json:"role,omitempty"`
-	Content string `json:"content,omitempty"`
-}
-
 // TransformVertexStreamToOpenAI converts Vertex AI SSE stream to OpenAI SSE format
 func TransformVertexStreamToOpenAI(vertexStream io.Reader, model string, output io.Writer) error {
 	scanner := bufio.NewScanner(vertexStream)
-	chatID := generateID()
-	timestamp := getCurrentTimestamp()
+	chatID := openai.GenerateID()
+	timestamp := openai.GetCurrentTimestamp()
 	isFirstChunk := true
 
 	for scanner.Scan() {
@@ -70,19 +51,19 @@ func TransformVertexStreamToOpenAI(vertexStream io.Reader, model string, output 
 		}
 
 		// Convert to OpenAI format
-		openAIChunk := OpenAIStreamingChunk{
+		openAIChunk := openai.OpenAIStreamingChunk{
 			ID:      chatID,
 			Object:  "chat.completion.chunk",
 			Created: timestamp,
 			Model:   model,
-			Choices: make([]OpenAIStreamingChoice, 0),
+			Choices: make([]openai.OpenAIStreamingChoice, 0),
 		}
 
 		// Process candidates
 		for i, candidate := range vertexChunk.Candidates {
-			choice := OpenAIStreamingChoice{
+			choice := openai.OpenAIStreamingChoice{
 				Index: i,
-				Delta: OpenAIStreamingDelta{},
+				Delta: openai.OpenAIStreamingDelta{},
 			}
 
 			// Set role only for first chunk (OpenAI convention)
@@ -111,7 +92,7 @@ func TransformVertexStreamToOpenAI(vertexStream io.Reader, model string, output 
 
 		// Convert usage metadata if present
 		if vertexChunk.UsageMetadata != nil {
-			openAIChunk.Usage = &OpenAIUsage{
+			openAIChunk.Usage = &openai.OpenAIUsage{
 				PromptTokens:     vertexChunk.UsageMetadata.PromptTokenCount,
 				CompletionTokens: vertexChunk.UsageMetadata.CandidatesTokenCount,
 				TotalTokens:      vertexChunk.UsageMetadata.TotalTokenCount,

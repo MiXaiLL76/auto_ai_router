@@ -21,7 +21,8 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/models"
 	"github.com/mixaill76/auto_ai_router/internal/monitoring"
 	"github.com/mixaill76/auto_ai_router/internal/ratelimit"
-	"github.com/mixaill76/auto_ai_router/internal/vertex_transform"
+	"github.com/mixaill76/auto_ai_router/internal/transform/anthropic"
+	"github.com/mixaill76/auto_ai_router/internal/transform/vertex"
 )
 
 //go:embed health.html
@@ -184,13 +185,13 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			// For image generation, use different endpoint
 			targetURL = buildVertexImageURL(cred, modelID)
 			// Transform OpenAI image request to Vertex AI format
-			vertexBody, err := vertex_transform.OpenAIImageToVertex(body)
+			vertexBody, err := vertex.OpenAIImageToVertex(body)
 			if err != nil {
-				p.logger.Error("Failed to vertex_transform image request to Vertex AI format",
+				p.logger.Error("Failed to vertex image request to Vertex AI format",
 					"credential", cred.Name,
 					"error", err,
 				)
-				http.Error(w, "Internal Server Error: Failed to vertex_transform image request", http.StatusInternalServerError)
+				http.Error(w, "Internal Server Error: Failed to vertex image request", http.StatusInternalServerError)
 				return
 			}
 			requestBody = vertexBody
@@ -198,13 +199,13 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			// For text generation
 			targetURL = buildVertexURL(cred, modelID, streaming)
 			// Transform OpenAI request to Vertex AI format
-			vertexBody, err := vertex_transform.OpenAIToVertex(body)
+			vertexBody, err := vertex.OpenAIToVertex(body)
 			if err != nil {
-				p.logger.Error("Failed to vertex_transform request to Vertex AI format",
+				p.logger.Error("Failed to vertex request to Vertex AI format",
 					"credential", cred.Name,
 					"error", err,
 				)
-				http.Error(w, "Internal Server Error: Failed to vertex_transform request", http.StatusInternalServerError)
+				http.Error(w, "Internal Server Error: Failed to vertex request", http.StatusInternalServerError)
 				return
 			}
 			requestBody = vertexBody
@@ -219,6 +220,34 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			)
 			http.Error(w, "Internal Server Error: Failed to authenticate with Vertex AI", http.StatusInternalServerError)
 			return
+		}
+	} else if cred.Type == config.ProviderTypeAnthropic {
+		if isImageGeneration {
+			p.logger.Error("Failed to Anthropic image request",
+				"credential", cred.Name,
+				"error", err,
+			)
+			http.Error(w, "Internal Server Error: Failed to Anthropic image request", http.StatusInternalServerError)
+			return
+		} else {
+			baseURL := strings.TrimSuffix(cred.BaseURL, "/")
+			path := r.URL.Path
+			if strings.HasSuffix(baseURL, "/v1") && strings.HasPrefix(path, "/v1") {
+				path = strings.TrimPrefix(path, "/v1")
+			}
+
+			targetURL = baseURL + "/v1/messages"
+
+			anthropicBody, err := anthropic.OpenAIToAnthropic(body)
+			if err != nil {
+				p.logger.Error("Failed to vertex request to Anthropic format",
+					"credential", cred.Name,
+					"error", err,
+				)
+				http.Error(w, "Internal Server Error: Failed to vertex request", http.StatusInternalServerError)
+				return
+			}
+			requestBody = anthropicBody
 		}
 	} else {
 		// For OpenAI and other providers, use baseURL + path
@@ -255,10 +284,15 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Set Authorization header based on credential type
-	if cred.Type == config.ProviderTypeVertexAI {
+	switch cred.Type {
+	case config.ProviderTypeVertexAI:
 		// For Vertex AI, use OAuth2 token
 		proxyReq.Header.Set("Authorization", "Bearer "+vertexToken)
-	} else {
+	case config.ProviderTypeAnthropic:
+		// For Anthropic, use X-Api-Key and required version header
+		proxyReq.Header.Set("X-Api-Key", cred.APIKey)
+		proxyReq.Header.Set("anthropic-version", "2023-06-01")
+	default:
 		// For OpenAI and other providers, use API key
 		proxyReq.Header.Set("Authorization", "Bearer "+cred.APIKey)
 	}
@@ -273,12 +307,16 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 	// Log headers (mask Authorization for security)
 	debugHeaders := make(map[string]string)
 	for key, values := range proxyReq.Header {
-		if key == "Authorization" {
+		switch key {
+		case "Authorization":
 			debugHeaders[key] = "Bearer " + maskKey(cred.APIKey)
-		} else {
+		case "X-Api-Key":
+			debugHeaders[key] = maskKey(cred.APIKey)
+		default:
 			debugHeaders[key] = strings.Join(values, ", ")
 		}
 	}
+
 	p.logger.Debug("Proxy request headers", "headers", debugHeaders)
 
 	resp, err := p.client.Do(proxyReq)
@@ -346,41 +384,58 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Transform Vertex AI response back to OpenAI format
-		if cred.Type == config.ProviderTypeVertexAI {
+		switch cred.Type {
+		case config.ProviderTypeVertexAI:
 			if isImageGeneration {
 				// Transform image response
-				vertex_transformedBody, err := vertex_transform.VertexImageToOpenAI([]byte(decodedBody))
+				vertexedBody, err := vertex.VertexImageToOpenAI([]byte(decodedBody))
 				if err != nil {
-					p.logger.Error("Failed to vertex_transform Vertex AI image response",
+					p.logger.Error("Failed to vertex Vertex AI image response",
 						"credential", cred.Name,
 						"error", err,
 					)
 					finalResponseBody = responseBody
 				} else {
-					finalResponseBody = vertex_transformedBody
+					finalResponseBody = vertexedBody
 					p.logger.Debug("Transformed Vertex AI image response to OpenAI format",
 						"credential", cred.Name,
-						"vertex_transformed_body", logger.TruncateLongFields(string(vertex_transformedBody), 200),
+						"vertexed_body", logger.TruncateLongFields(string(vertexedBody), 200),
 					)
 				}
 			} else {
 				// Transform text response
-				vertex_transformedBody, err := vertex_transform.VertexToOpenAI([]byte(decodedBody), modelID)
+				vertexedBody, err := vertex.VertexToOpenAI([]byte(decodedBody), modelID)
 				if err != nil {
-					p.logger.Error("Failed to vertex_transform Vertex AI response",
+					p.logger.Error("Failed to vertex Vertex AI response",
 						"credential", cred.Name,
 						"error", err,
 					)
 					finalResponseBody = responseBody
 				} else {
-					finalResponseBody = vertex_transformedBody
+					finalResponseBody = vertexedBody
 					p.logger.Debug("Transformed Vertex AI response to OpenAI format",
 						"credential", cred.Name,
-						"vertex_transformed_body", logger.TruncateLongFields(string(vertex_transformedBody), 500),
+						"vertexed_body", logger.TruncateLongFields(string(vertexedBody), 500),
 					)
 				}
 			}
-		} else {
+		case config.ProviderTypeAnthropic:
+			// Transform text response
+			anthropicBody, err := anthropic.AnthropicToOpenAI([]byte(decodedBody), modelID)
+			if err != nil {
+				p.logger.Error("Failed to vertex Anthropic response",
+					"credential", cred.Name,
+					"error", err,
+				)
+				finalResponseBody = responseBody
+			} else {
+				finalResponseBody = anthropicBody
+				p.logger.Debug("Transformed Anthropic response to OpenAI format",
+					"credential", cred.Name,
+					"vertexed_body", logger.TruncateLongFields(string(anthropicBody), 500),
+				)
+			}
+		default:
 			finalResponseBody = responseBody
 		}
 
@@ -394,35 +449,43 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	for key, values := range resp.Header {
-		// Skip Content-Length and Content-Encoding as we may have vertex_transformed the response
-		if key == "Content-Length" && cred.Type == config.ProviderTypeVertexAI {
-			continue
-		}
-		if key == "Content-Encoding" && cred.Type == config.ProviderTypeVertexAI {
-			continue
+		// Skip Content-Length and Content-Encoding as we may have vertexed the response
+		switch cred.Type {
+		case config.ProviderTypeVertexAI, config.ProviderTypeAnthropic:
+			if key == "Content-Length" || key == "Content-Encoding" {
+				continue
+			}
 		}
 		for _, value := range values {
 			w.Header().Add(key, value)
 		}
 	}
 
-	// Set correct Content-Length for vertex_transformed responses
-	if cred.Type == config.ProviderTypeVertexAI && len(finalResponseBody) > 0 {
-		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(finalResponseBody)))
+	// Set correct Content-Length for vertexed responses
+	switch cred.Type {
+	case config.ProviderTypeVertexAI, config.ProviderTypeAnthropic:
+		if len(finalResponseBody) > 0 {
+			w.Header().Set("Content-Length", fmt.Sprintf("%d", len(finalResponseBody)))
+		}
 	}
 
 	w.WriteHeader(resp.StatusCode)
 
 	if isStreamingResponse(resp) {
-		if cred.Type == config.ProviderTypeVertexAI {
-			// Transform Vertex AI streaming to OpenAI format with token tracking
+		switch cred.Type {
+		case config.ProviderTypeVertexAI:
+			// Handle Vertex AI streaming with token tracking
 			err := p.handleVertexStreaming(w, resp, cred.Name, modelID)
 			if err != nil {
-				p.logger.Error("Failed to vertex_transform streaming response", "error", err)
+				p.logger.Error("Failed to vertex streaming response", "error", err)
 			}
-		} else {
+		case config.ProviderTypeAnthropic:
+			// Handle Anthropic streaming with token tracking
+			p.handleAnthropicStreaming(w, resp, cred.Name, modelID)
+		default:
 			p.handleStreamingWithTokens(w, resp, cred.Name, modelID)
 		}
+
 	} else {
 		if _, err := io.Copy(w, resp.Body); err != nil {
 			p.logger.Error("Failed to copy response body", "error", err)
@@ -449,7 +512,7 @@ func (p *Proxy) handleVertexStreaming(w http.ResponseWriter, resp *http.Response
 		defer func() {
 			_ = pw.Close()
 		}()
-		err := vertex_transform.TransformVertexStreamToOpenAI(resp.Body, modelID, &tokenCapturingWriter{
+		err := vertex.TransformVertexStreamToOpenAI(resp.Body, modelID, &tokenCapturingWriter{
 			writer: pw,
 			tokens: &totalTokens,
 			logger: p.logger,
@@ -488,6 +551,67 @@ func (p *Proxy) handleVertexStreaming(w http.ResponseWriter, resp *http.Response
 	}
 
 	p.logger.Debug("Vertex AI streaming response completed", "credential", credName)
+	return nil
+}
+
+func (p *Proxy) handleAnthropicStreaming(w http.ResponseWriter, resp *http.Response, credName, modelID string) error {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		p.logger.Error("Streaming not supported", "credential", credName)
+		http.Error(w, "Streaming Not Supported", http.StatusInternalServerError)
+		return fmt.Errorf("streaming not supported")
+	}
+
+	p.logger.Debug("Starting Anthropic streaming response", "credential", credName)
+
+	// Create a pipe to capture the streaming data
+	pr, pw := io.Pipe()
+	var totalTokens int
+
+	// Start goroutine to transform and capture tokens
+	go func() {
+		defer func() {
+			_ = pw.Close()
+		}()
+		err := anthropic.TransformAnthropicStreamToOpenAI(resp.Body, modelID, &tokenCapturingWriter{
+			writer: pw,
+			tokens: &totalTokens,
+			logger: p.logger,
+		})
+		if err != nil {
+			p.logger.Error("Failed to transform Anthropic streaming", "error", err)
+		}
+	}()
+
+	// Copy transformed data to response
+	buf := make([]byte, 8192)
+	for {
+		n, err := pr.Read(buf)
+		if n > 0 {
+			if _, writeErr := w.Write(buf[:n]); writeErr != nil {
+				p.logger.Error("Failed to write streaming chunk", "error", writeErr, "credential", credName)
+				return writeErr
+			}
+			flusher.Flush()
+		}
+		if err != nil {
+			if err != io.EOF {
+				p.logger.Error("Streaming read error", "error", err, "credential", credName)
+			}
+			break
+		}
+	}
+
+	// Record token usage after streaming completes
+	if totalTokens > 0 {
+		p.rateLimiter.ConsumeTokens(credName, totalTokens)
+		if modelID != "" {
+			p.rateLimiter.ConsumeModelTokens(credName, modelID, totalTokens)
+		}
+		p.logger.Debug("Streaming token usage recorded", "credential", credName, "model", modelID, "tokens", totalTokens)
+	}
+
+	p.logger.Debug("Anthropic streaming response completed", "credential", credName)
 	return nil
 }
 

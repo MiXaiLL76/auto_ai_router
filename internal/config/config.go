@@ -15,14 +15,15 @@ import (
 type ProviderType string
 
 const (
-	ProviderTypeOpenAI   ProviderType = "openai"
-	ProviderTypeVertexAI ProviderType = "vertex-ai"
+	ProviderTypeOpenAI    ProviderType = "openai"
+	ProviderTypeVertexAI  ProviderType = "vertex-ai"
+	ProviderTypeAnthropic ProviderType = "anthropic"
 )
 
 // IsValid checks if the provider type is valid
 func (p ProviderType) IsValid() bool {
 	switch p {
-	case ProviderTypeOpenAI, ProviderTypeVertexAI:
+	case ProviderTypeOpenAI, ProviderTypeVertexAI, ProviderTypeAnthropic:
 		return true
 	}
 	return false

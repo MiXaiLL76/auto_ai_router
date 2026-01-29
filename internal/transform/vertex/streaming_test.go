@@ -1,4 +1,4 @@
-package vertex_transform
+package vertex
 
 import (
 	"bytes"
