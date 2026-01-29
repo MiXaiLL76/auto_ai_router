@@ -129,8 +129,8 @@ func (r *RoundRobin) next(modelID string) (*Credential, error) {
 			}
 		}
 
-		// Check credential RPM limit
-		if !r.rateLimiter.Allow(cred.Name) {
+		// Check credential RPM limit (without recording)
+		if !r.rateLimiter.CanAllow(cred.Name) {
 			rateLimitHit = true
 			continue
 		}
@@ -141,9 +141,9 @@ func (r *RoundRobin) next(modelID string) (*Credential, error) {
 			continue
 		}
 
-		// Check model RPM limit if model is specified
+		// Check model RPM limit if model is specified (without recording)
 		if modelID != "" {
-			if !r.rateLimiter.AllowModel(cred.Name, modelID) {
+			if !r.rateLimiter.CanAllowModel(cred.Name, modelID) {
 				// Model RPM exceeded for this credential+model combination
 				rateLimitHit = true
 				continue
@@ -157,6 +157,12 @@ func (r *RoundRobin) next(modelID string) (*Credential, error) {
 				rateLimitHit = true
 				continue
 			}
+		}
+
+		// All checks passed - now record the requests
+		r.rateLimiter.Allow(cred.Name) // Record credential RPM
+		if modelID != "" {
+			r.rateLimiter.AllowModel(cred.Name, modelID) // Record model RPM
 		}
 
 		return cred, nil

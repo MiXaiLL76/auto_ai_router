@@ -546,3 +546,89 @@ func TestHasModel_DisabledWithoutConfig(t *testing.T) {
 	// Should allow all models when disabled and no models in config
 	assert.True(t, manager.HasModel("any-cred", "any-model"))
 }
+
+func TestGetModelRPMForCredential(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+	manager := New(logger, true, 50, "/tmp/models_test_rpm_cred.yaml", []config.ModelRPMConfig{})
+
+	// Mock models config with credential-specific models
+	manager.modelsConfig = &config.ModelsConfig{
+		Models: []config.ModelRPMConfig{
+			{Name: "gpt-4", Credential: "cred1", RPM: 100},
+			{Name: "gpt-4", Credential: "cred2", RPM: 200},
+			{Name: "gpt-3.5-turbo", Credential: "cred1", RPM: 150},
+		},
+	}
+
+	// Test existing model with specific credential
+	rpm1 := manager.GetModelRPMForCredential("gpt-4", "cred1")
+	assert.Equal(t, 100, rpm1)
+
+	// Test same model with different credential
+	rpm2 := manager.GetModelRPMForCredential("gpt-4", "cred2")
+	assert.Equal(t, 200, rpm2)
+
+	// Test model with non-existent credential (should return default)
+	rpm3 := manager.GetModelRPMForCredential("gpt-4", "cred3")
+	assert.Equal(t, 50, rpm3)
+
+	// Test non-existent model (should return default)
+	rpm4 := manager.GetModelRPMForCredential("non-existing", "cred1")
+	assert.Equal(t, 50, rpm4)
+}
+
+func TestGetModelRPMForCredential_NilConfig(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+	manager := New(logger, true, 75, "/tmp/models_test_rpm_cred_nil.yaml", []config.ModelRPMConfig{})
+
+	manager.modelsConfig = nil
+
+	// Should return default RPM when config is nil
+	rpm := manager.GetModelRPMForCredential("any-model", "any-cred")
+	assert.Equal(t, 75, rpm)
+}
+
+func TestGetModelTPMForCredential(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+	manager := New(logger, true, 50, "/tmp/models_test_tpm_cred.yaml", []config.ModelRPMConfig{})
+
+	// Mock models config with credential-specific models
+	manager.modelsConfig = &config.ModelsConfig{
+		Models: []config.ModelRPMConfig{
+			{Name: "gpt-4", Credential: "cred1", TPM: 10000},
+			{Name: "gpt-4", Credential: "cred2", TPM: 20000},
+			{Name: "gpt-3.5-turbo", Credential: "cred1", TPM: 0}, // 0 means use default
+		},
+	}
+
+	// Test existing model with specific credential
+	tpm1 := manager.GetModelTPMForCredential("gpt-4", "cred1")
+	assert.Equal(t, 10000, tpm1)
+
+	// Test same model with different credential
+	tpm2 := manager.GetModelTPMForCredential("gpt-4", "cred2")
+	assert.Equal(t, 20000, tpm2)
+
+	// Test model with TPM = 0 (should return default)
+	tpm3 := manager.GetModelTPMForCredential("gpt-3.5-turbo", "cred1")
+	assert.Equal(t, -1, tpm3)
+
+	// Test model with non-existent credential (should return default)
+	tpm4 := manager.GetModelTPMForCredential("gpt-4", "cred3")
+	assert.Equal(t, -1, tpm4)
+
+	// Test non-existent model (should return default)
+	tpm5 := manager.GetModelTPMForCredential("non-existing", "cred1")
+	assert.Equal(t, -1, tpm5)
+}
+
+func TestGetModelTPMForCredential_NilConfig(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+	manager := New(logger, true, 75, "/tmp/models_test_tpm_cred_nil.yaml", []config.ModelRPMConfig{})
+
+	manager.modelsConfig = nil
+
+	// Should return -1 (unlimited) when config is nil
+	tpm := manager.GetModelTPMForCredential("any-model", "any-cred")
+	assert.Equal(t, -1, tpm)
+}

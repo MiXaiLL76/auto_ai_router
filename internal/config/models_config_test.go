@@ -228,6 +228,62 @@ func TestModelsConfig_UpdateOrAddModelWithTPM_Update(t *testing.T) {
 	assert.Equal(t, 20000, cfg.Models[1].TPM) // Unchanged
 }
 
+func TestModelsConfig_GetModelRPMForCredential(t *testing.T) {
+	cfg := &ModelsConfig{
+		Models: []ModelRPMConfig{
+			{Name: "gpt-4o", Credential: "cred1", RPM: 100},
+			{Name: "gpt-4o", Credential: "cred2", RPM: 200},
+			{Name: "gpt-4o-mini", Credential: "cred1", RPM: 150},
+		},
+	}
+
+	// Test existing model with specific credential
+	rpm := cfg.GetModelRPMForCredential("gpt-4o", "cred1", 50)
+	assert.Equal(t, 100, rpm)
+
+	// Test same model with different credential
+	rpm = cfg.GetModelRPMForCredential("gpt-4o", "cred2", 50)
+	assert.Equal(t, 200, rpm)
+
+	// Test model with non-existent credential
+	rpm = cfg.GetModelRPMForCredential("gpt-4o", "cred3", 50)
+	assert.Equal(t, 50, rpm) // Should return default
+
+	// Test non-existent model
+	rpm = cfg.GetModelRPMForCredential("gpt-5", "cred1", 75)
+	assert.Equal(t, 75, rpm) // Should return default
+}
+
+func TestModelsConfig_GetModelTPMForCredential(t *testing.T) {
+	cfg := &ModelsConfig{
+		Models: []ModelRPMConfig{
+			{Name: "gpt-4o", Credential: "cred1", TPM: 10000},
+			{Name: "gpt-4o", Credential: "cred2", TPM: 20000},
+			{Name: "gpt-4o-mini", Credential: "cred1", TPM: 0}, // 0 means use default
+		},
+	}
+
+	// Test existing model with specific credential
+	tpm := cfg.GetModelTPMForCredential("gpt-4o", "cred1", -1)
+	assert.Equal(t, 10000, tpm)
+
+	// Test same model with different credential
+	tpm = cfg.GetModelTPMForCredential("gpt-4o", "cred2", -1)
+	assert.Equal(t, 20000, tpm)
+
+	// Test model with TPM = 0 (should return default)
+	tpm = cfg.GetModelTPMForCredential("gpt-4o-mini", "cred1", 5000)
+	assert.Equal(t, 5000, tpm)
+
+	// Test model with non-existent credential
+	tpm = cfg.GetModelTPMForCredential("gpt-4o", "cred3", -1)
+	assert.Equal(t, -1, tpm) // Should return default
+
+	// Test non-existent model
+	tpm = cfg.GetModelTPMForCredential("gpt-5", "cred1", 15000)
+	assert.Equal(t, 15000, tpm) // Should return default
+}
+
 func TestModelsConfig_UpdateOrAddModelWithTPM_Add(t *testing.T) {
 	cfg := &ModelsConfig{
 		Models: []ModelRPMConfig{

@@ -669,3 +669,52 @@ func TestMultipleModelsTokens(t *testing.T) {
 	// gpt-4o-mini should still allow
 	assert.True(t, rl.AllowModelTokens("cred1", "gpt-4o-mini"))
 }
+func TestCanAllow(t *testing.T) {
+	rl := New()
+	rl.AddCredential("cred1", 2)
+
+	// Should allow first request without recording
+	assert.True(t, rl.CanAllow("cred1"))
+	assert.Equal(t, 0, rl.GetCurrentRPM("cred1")) // No requests recorded
+
+	// Record one request
+	assert.True(t, rl.Allow("cred1"))
+	assert.Equal(t, 1, rl.GetCurrentRPM("cred1"))
+
+	// Should still allow second request without recording
+	assert.True(t, rl.CanAllow("cred1"))
+	assert.Equal(t, 1, rl.GetCurrentRPM("cred1")) // Still only 1 recorded
+
+	// Record second request
+	assert.True(t, rl.Allow("cred1"))
+	assert.Equal(t, 2, rl.GetCurrentRPM("cred1"))
+
+	// Should not allow third request (at limit)
+	assert.False(t, rl.CanAllow("cred1"))
+	assert.Equal(t, 2, rl.GetCurrentRPM("cred1")) // Still only 2 recorded
+}
+
+func TestCanAllowModel(t *testing.T) {
+	rl := New()
+	rl.AddModel("cred1", "gpt-4o", 2)
+
+	// Should allow first request without recording
+	assert.True(t, rl.CanAllowModel("cred1", "gpt-4o"))
+	assert.Equal(t, 0, rl.GetCurrentModelRPM("cred1", "gpt-4o")) // No requests recorded
+
+	// Record one request
+	assert.True(t, rl.AllowModel("cred1", "gpt-4o"))
+	assert.Equal(t, 1, rl.GetCurrentModelRPM("cred1", "gpt-4o"))
+
+	// Should still allow second request without recording
+	assert.True(t, rl.CanAllowModel("cred1", "gpt-4o"))
+	assert.Equal(t, 1, rl.GetCurrentModelRPM("cred1", "gpt-4o")) // Still only 1 recorded
+
+	// Record second request
+	assert.True(t, rl.AllowModel("cred1", "gpt-4o"))
+	assert.Equal(t, 2, rl.GetCurrentModelRPM("cred1", "gpt-4o"))
+
+	// Should not allow third request (at limit)
+	assert.False(t, rl.CanAllowModel("cred1", "gpt-4o"))
+	assert.Equal(t, 2, rl.GetCurrentModelRPM("cred1", "gpt-4o")) // Still only 2 recorded
+}

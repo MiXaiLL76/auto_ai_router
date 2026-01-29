@@ -93,8 +93,8 @@ func main() {
 					"has_model", hasModel,
 				)
 				if hasModel {
-					modelRPM := modelManager.GetModelRPM(model.ID)
-					modelTPM := modelManager.GetModelTPM(model.ID)
+					modelRPM := modelManager.GetModelRPMForCredential(model.ID, cred.Name)
+					modelTPM := modelManager.GetModelTPMForCredential(model.ID, cred.Name)
 					rateLimiter.AddModelWithTPM(cred.Name, model.ID, modelRPM, modelTPM)
 					log.Debug("Initialized model rate limiters",
 						"credential", cred.Name,

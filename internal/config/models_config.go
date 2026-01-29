@@ -64,10 +64,34 @@ func (c *ModelsConfig) GetModelRPM(modelName string, defaultRPM int) int {
 	return defaultRPM
 }
 
+// GetModelRPMForCredential returns RPM limit for a specific model and credential, or defaultRPM if not found
+func (c *ModelsConfig) GetModelRPMForCredential(modelName, credentialName string, defaultRPM int) int {
+	for _, model := range c.Models {
+		if model.Name == modelName && model.Credential == credentialName {
+			return model.RPM
+		}
+	}
+	return defaultRPM
+}
+
 // GetModelTPM returns TPM limit for a specific model, or defaultTPM if not found
 func (c *ModelsConfig) GetModelTPM(modelName string, defaultTPM int) int {
 	for _, model := range c.Models {
 		if model.Name == modelName {
+			// If TPM is 0 (not set), return default
+			if model.TPM == 0 {
+				return defaultTPM
+			}
+			return model.TPM
+		}
+	}
+	return defaultTPM
+}
+
+// GetModelTPMForCredential returns TPM limit for a specific model and credential, or defaultTPM if not found
+func (c *ModelsConfig) GetModelTPMForCredential(modelName, credentialName string, defaultTPM int) int {
+	for _, model := range c.Models {
+		if model.Name == modelName && model.Credential == credentialName {
 			// If TPM is 0 (not set), return default
 			if model.TPM == 0 {
 				return defaultTPM

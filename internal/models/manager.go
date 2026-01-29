@@ -474,6 +474,18 @@ func (m *Manager) GetModelRPM(modelID string) int {
 	return m.modelsConfig.GetModelRPM(modelID, m.defaultModelsRPM)
 }
 
+// GetModelRPMForCredential returns RPM limit for a specific model and credential
+func (m *Manager) GetModelRPMForCredential(modelID, credentialName string) int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	if m.modelsConfig == nil {
+		return m.defaultModelsRPM
+	}
+
+	return m.modelsConfig.GetModelRPMForCredential(modelID, credentialName, m.defaultModelsRPM)
+}
+
 // GetModelTPM returns TPM limit for a specific model
 func (m *Manager) GetModelTPM(modelID string) int {
 	m.mu.RLock()
@@ -484,6 +496,18 @@ func (m *Manager) GetModelTPM(modelID string) int {
 	}
 
 	return m.modelsConfig.GetModelTPM(modelID, -1)
+}
+
+// GetModelTPMForCredential returns TPM limit for a specific model and credential
+func (m *Manager) GetModelTPMForCredential(modelID, credentialName string) int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	if m.modelsConfig == nil {
+		return -1 // Unlimited by default
+	}
+
+	return m.modelsConfig.GetModelTPMForCredential(modelID, credentialName, -1)
 }
 
 // GetModelsForCredential returns all models available for a specific credential

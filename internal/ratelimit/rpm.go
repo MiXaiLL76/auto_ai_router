@@ -106,6 +106,39 @@ func (r *RPMLimiter) Allow(credentialName string) bool {
 	return true
 }
 
+// CanAllow checks if a request would be allowed without recording it
+func (r *RPMLimiter) CanAllow(credentialName string) bool {
+	r.mu.RLock()
+	limiter, exists := r.limiters[credentialName]
+	r.mu.RUnlock()
+
+	if !exists {
+		return false
+	}
+
+	limiter.mu.Lock()
+	defer limiter.mu.Unlock()
+
+	now := time.Now()
+	oneMinuteAgo := now.Add(-time.Minute)
+
+	// Clean old requests first
+	validRequests := make([]time.Time, 0)
+	for _, reqTime := range limiter.requests {
+		if reqTime.After(oneMinuteAgo) {
+			validRequests = append(validRequests, reqTime)
+		}
+	}
+	limiter.requests = validRequests
+
+	// Check limit only if RPM is not unlimited (-1)
+	if limiter.rpm != -1 && len(limiter.requests) >= limiter.rpm {
+		return false
+	}
+
+	return true
+}
+
 func (r *RPMLimiter) GetCurrentRPM(credentialName string) int {
 	r.mu.RLock()
 	limiter, exists := r.limiters[credentialName]
@@ -167,6 +200,41 @@ func (r *RPMLimiter) AllowModel(credentialName, modelName string) bool {
 
 	// Always record the request for metrics
 	modelLimiter.requests = append(modelLimiter.requests, now)
+	return true
+}
+
+// CanAllowModel checks if a model request would be allowed without recording it
+func (r *RPMLimiter) CanAllowModel(credentialName, modelName string) bool {
+	r.mu.RLock()
+	key := makeModelKey(credentialName, modelName)
+	modelLimiter, exists := r.modelLimiters[key]
+	r.mu.RUnlock()
+
+	if !exists {
+		// Model not tracked for this credential, allow request
+		return true
+	}
+
+	modelLimiter.mu.Lock()
+	defer modelLimiter.mu.Unlock()
+
+	now := time.Now()
+	oneMinuteAgo := now.Add(-time.Minute)
+
+	// Clean old requests first
+	validRequests := make([]time.Time, 0)
+	for _, reqTime := range modelLimiter.requests {
+		if reqTime.After(oneMinuteAgo) {
+			validRequests = append(validRequests, reqTime)
+		}
+	}
+	modelLimiter.requests = validRequests
+
+	// Check limit only if RPM is not unlimited (-1)
+	if modelLimiter.rpm != -1 && len(modelLimiter.requests) >= modelLimiter.rpm {
+		return false
+	}
+
 	return true
 }
 
