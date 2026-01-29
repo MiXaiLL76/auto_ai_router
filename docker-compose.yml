@@ -10,7 +10,6 @@ services:
       - "8080:8080"
     volumes:
       - ./config.yaml:/app/config.yaml:ro
-      - ./models.yaml:/app/models.yaml
     environment:
       - LOG_LEVEL=debug
     restart: unless-stopped

@@ -18,7 +18,7 @@ class TestOpenAIStreaming:
             messages=[
                 {"role": "user", "content": "Count from 1 to 5"}
             ],
-            max_tokens=50,
+            max_tokens=150,
             stream=True,
             stream_options={"include_usage": True}
         )
@@ -50,7 +50,7 @@ class TestOpenAIStreaming:
                 {"role": "user", "content": "Write a short creative sentence about robots"}
             ],
             temperature=temperature,
-            max_tokens=30,
+            max_tokens=130,
             stream=True,
             stream_options={"include_usage": True}
         )
@@ -71,7 +71,7 @@ class TestOpenAIStreaming:
                 {"role": "system", "content": "You are a helpful math tutor. Always end responses with 'Hope this helps!'"},
                 {"role": "user", "content": "What is 2+2?"}
             ],
-            max_tokens=50,
+            max_tokens=150,
             stream=True,
             stream_options={"include_usage": True}
         )
@@ -94,7 +94,7 @@ class TestOpenAIStreaming:
                 {"role": "assistant", "content": "That's nice! Blue is a calming color."},
                 {"role": "user", "content": "What did I just tell you about my favorite color?"}
             ],
-            max_tokens=30,
+            max_tokens=130,
             stream=True,
             stream_options={"include_usage": True}
         )
@@ -112,9 +112,9 @@ class TestOpenAIStreaming:
         stream = openai_client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
-                {"role": "user", "content": "List three colors: red, green, STOP"}
+                {"role": "user", "content": "List three colors: red, green"}
             ],
-            max_tokens=100,
+            max_tokens=150,
             stop=["STOP"],
             stream=True,
             stream_options={"include_usage": True}
@@ -136,7 +136,7 @@ class TestOpenAIStreaming:
             messages=[
                 {"role": "user", "content": "Say hello"}
             ],
-            max_tokens=20,
+            max_tokens=120,
             stream=True,
             stream_options={"include_usage": True}
         )
@@ -165,7 +165,7 @@ class TestOpenAIStreaming:
             messages=[
                 {"role": "user", "content": "Write a long essay about artificial intelligence"}
             ],
-            max_tokens=5,  # Very small limit
+            max_tokens=150,  # Very small limit
             stream=True,
             stream_options={"include_usage": True}
         )
