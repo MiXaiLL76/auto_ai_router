@@ -367,21 +367,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		contentEncoding := resp.Header.Get("Content-Encoding")
 		decodedBody := decodeResponseBody(responseBody, contentEncoding)
 
-		// Extract and record token usage
-		tokens := extractTokensFromResponse(decodedBody, cred.Type)
-		if tokens > 0 {
-			p.rateLimiter.ConsumeTokens(cred.Name, tokens)
-			if modelID != "" {
-				p.rateLimiter.ConsumeModelTokens(cred.Name, modelID, tokens)
-			}
-			p.logger.Debug("Token usage recorded",
-				"credential", cred.Name,
-				"model", modelID,
-				"tokens", tokens,
-			)
-		}
-
-		// Transform Vertex AI response back to OpenAI format
+		// Transform response back to OpenAI format
 		switch cred.Type {
 		case config.ProviderTypeVertexAI:
 			if isImageGeneration {
@@ -435,6 +421,25 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			}
 		default:
 			finalResponseBody = responseBody
+		}
+
+		// Extract and record token usage (after transformation to OpenAI format)
+		bodyForTokenExtraction := finalResponseBody
+		if len(bodyForTokenExtraction) == 0 {
+			// For direct OpenAI responses (no transformation), use decoded body
+			bodyForTokenExtraction = []byte(decodedBody)
+		}
+		tokens := extractTokensFromResponse(string(bodyForTokenExtraction), config.ProviderTypeOpenAI)
+		if tokens > 0 {
+			p.rateLimiter.ConsumeTokens(cred.Name, tokens)
+			if modelID != "" {
+				p.rateLimiter.ConsumeModelTokens(cred.Name, modelID, tokens)
+			}
+			p.logger.Debug("Token usage recorded",
+				"credential", cred.Name,
+				"model", modelID,
+				"tokens", tokens,
+			)
 		}
 
 		p.logger.Debug("Proxy response body",
