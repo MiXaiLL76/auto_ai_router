@@ -180,7 +180,8 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 	var requestBody = body // Default to original body
 	var isImageGeneration = strings.Contains(r.URL.Path, "/images/generations")
 
-	if cred.Type == config.ProviderTypeVertexAI {
+	switch cred.Type {
+	case config.ProviderTypeVertexAI:
 		if isImageGeneration {
 			// For image generation, use different endpoint
 			targetURL = buildVertexImageURL(cred, modelID)
@@ -221,7 +222,8 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Internal Server Error: Failed to authenticate with Vertex AI", http.StatusInternalServerError)
 			return
 		}
-	} else if cred.Type == config.ProviderTypeAnthropic {
+
+	case config.ProviderTypeAnthropic:
 		if isImageGeneration {
 			p.logger.Error("Failed to Anthropic image request",
 				"credential", cred.Name,
@@ -229,27 +231,23 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			)
 			http.Error(w, "Internal Server Error: Failed to Anthropic image request", http.StatusInternalServerError)
 			return
-		} else {
-			baseURL := strings.TrimSuffix(cred.BaseURL, "/")
-			path := r.URL.Path
-			if strings.HasSuffix(baseURL, "/v1") && strings.HasPrefix(path, "/v1") {
-				path = strings.TrimPrefix(path, "/v1")
-			}
-
-			targetURL = baseURL + "/v1/messages"
-
-			anthropicBody, err := anthropic.OpenAIToAnthropic(body)
-			if err != nil {
-				p.logger.Error("Failed to vertex request to Anthropic format",
-					"credential", cred.Name,
-					"error", err,
-				)
-				http.Error(w, "Internal Server Error: Failed to vertex request", http.StatusInternalServerError)
-				return
-			}
-			requestBody = anthropicBody
 		}
-	} else {
+
+		baseURL := strings.TrimSuffix(cred.BaseURL, "/")
+		targetURL = baseURL + "/v1/messages"
+
+		anthropicBody, err := anthropic.OpenAIToAnthropic(body)
+		if err != nil {
+			p.logger.Error("Failed to vertex request to Anthropic format",
+				"credential", cred.Name,
+				"error", err,
+			)
+			http.Error(w, "Internal Server Error: Failed to vertex request", http.StatusInternalServerError)
+			return
+		}
+		requestBody = anthropicBody
+
+	default:
 		// For OpenAI and other providers, use baseURL + path
 		baseURL := strings.TrimSuffix(cred.BaseURL, "/")
 		path := r.URL.Path
@@ -481,7 +479,10 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			}
 		case config.ProviderTypeAnthropic:
 			// Handle Anthropic streaming with token tracking
-			p.handleAnthropicStreaming(w, resp, cred.Name, modelID)
+			err := p.handleAnthropicStreaming(w, resp, cred.Name, modelID)
+			if err != nil {
+				p.logger.Error("Failed to vertex streaming response", "error", err)
+			}
 		default:
 			p.handleStreamingWithTokens(w, resp, cred.Name, modelID)
 		}
