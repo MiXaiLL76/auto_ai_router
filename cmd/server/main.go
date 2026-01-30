@@ -48,7 +48,6 @@ func main() {
 		"commit", Commit,
 		"logging_level", cfg.Server.LoggingLevel,
 		"port", cfg.Server.Port,
-		"replace_v1_models", cfg.Server.ReplaceV1Models,
 	)
 
 	// Log loaded credentials (INFO level)
@@ -67,20 +66,13 @@ func main() {
 	rateLimiter := ratelimit.New()
 	bal := balancer.New(cfg.Credentials, f2b, rateLimiter)
 
-	// Initialize model manager and fetch models from credentials
-	// Pass static models from config.yaml (if any) - they will be merged into models.yaml config
-	modelManager := models.New(log, cfg.Server.ReplaceV1Models, cfg.Server.DefaultModelsRPM, "models.yaml", cfg.Models)
+	// Initialize model manager with static models from config.yaml
+	modelManager := models.New(log, cfg.Server.DefaultModelsRPM, cfg.Models)
 
 	// Load credential-specific models from config
 	modelManager.LoadModelsFromConfig(cfg.Credentials)
 
-	// Fetch models from API if enabled
-	if cfg.Server.ReplaceV1Models {
-		modelManager.FetchModels(cfg.Credentials, cfg.Server.RequestTimeout)
-	}
-
 	// Initialize model RPM and TPM limiters for each (credential, model) pair
-	// This should happen regardless of ReplaceV1Models setting to populate Active Models
 	modelsResp := modelManager.GetAllModels()
 	if len(modelsResp.Data) > 0 {
 		for _, cred := range cfg.Credentials {

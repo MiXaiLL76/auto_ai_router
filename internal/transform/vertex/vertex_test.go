@@ -1,8 +1,12 @@
-package vertex_transform
+package vertex
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
+
+	"github.com/mixaill76/auto_ai_router/internal/config"
+	"github.com/stretchr/testify/assert"
 )
 
 func TestOpenAIToVertex(t *testing.T) {
@@ -395,25 +399,6 @@ func TestMapFinishReason(t *testing.T) {
 	}
 }
 
-func TestGenerateID(t *testing.T) {
-	id1 := generateID()
-	id2 := generateID()
-
-	// Check format
-	if len(id1) != 29 { // "chatcmpl-" + 20 hex chars
-		t.Errorf("Expected ID length 29, got %d", len(id1))
-	}
-
-	if id1[:9] != "chatcmpl-" {
-		t.Errorf("Expected ID to start with 'chatcmpl-', got %s", id1[:9])
-	}
-
-	// Check uniqueness
-	if id1 == id2 {
-		t.Errorf("Expected unique IDs, got same: %s", id1)
-	}
-}
-
 func TestExtractTextContent(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -547,6 +532,42 @@ func TestConvertContentToParts(t *testing.T) {
 			input:    123,
 			expected: 1, // fallback to string conversion
 		},
+		{
+			name: "data url without base64 encoding",
+			input: []interface{}{
+				map[string]interface{}{
+					"type": "image_url",
+					"image_url": map[string]interface{}{
+						"url": "data:image/png;,iVBORw0KGgoAAAA", // no base64 prefix
+					},
+				},
+			},
+			expected: 1, // should handle gracefully
+		},
+		{
+			name: "data url without semicolon",
+			input: []interface{}{
+				map[string]interface{}{
+					"type": "image_url",
+					"image_url": map[string]interface{}{
+						"url": "data:image/jpeg,/9j/4AAQSkZJRg==", // no semicolon before comma
+					},
+				},
+			},
+			expected: 1,
+		},
+		{
+			name: "data url with different mime types",
+			input: []interface{}{
+				map[string]interface{}{
+					"type": "image_url",
+					"image_url": map[string]interface{}{
+						"url": "data:image/webp;base64,UklGRiYA",
+					},
+				},
+			},
+			expected: 1,
+		},
 	}
 
 	for _, tt := range tests {
@@ -572,6 +593,205 @@ func TestConvertContentToParts(t *testing.T) {
 					t.Errorf("Expected text 'Hello world', got %s", result[0].Text)
 				}
 			}
+
+			if tt.name == "data url with different mime types" && len(result) > 0 {
+				if result[0].InlineData.MimeType != "image/webp" {
+					t.Errorf("Expected mime type 'image/webp', got %s", result[0].InlineData.MimeType)
+				}
+			}
+
+			if tt.name == "data url without semicolon" && len(result) > 0 {
+				if result[0].InlineData.MimeType != "image/jpeg" {
+					t.Errorf("Expected mime type 'image/jpeg', got %s", result[0].InlineData.MimeType)
+				}
+			}
+		})
+	}
+}
+
+func TestVertexToOpenAIWithMixedContent(t *testing.T) {
+	input := `{
+		"candidates": [{
+			"content": {
+				"parts": [
+					{"text": "Here is text:"},
+					{"inlineData": {"mimeType": "image/png", "data": "iVBORw0KGgo="}},
+					{"text": "And more text"}
+				],
+				"role": "model"
+			},
+			"finishReason": "STOP"
+		}]
+	}`
+
+	result, err := VertexToOpenAI([]byte(input), "test-model")
+	if err != nil {
+		t.Errorf("VertexToOpenAI() error = %v", err)
+		return
+	}
+
+	var respMap map[string]interface{}
+	if err := json.Unmarshal(result, &respMap); err != nil {
+		t.Errorf("Failed to unmarshal result: %v", err)
+		return
+	}
+
+	// Check that text content is concatenated
+	if choices, ok := respMap["choices"].([]interface{}); ok && len(choices) > 0 {
+		if choice, ok := choices[0].(map[string]interface{}); ok {
+			if msg, ok := choice["message"].(map[string]interface{}); ok {
+				content := msg["content"].(string)
+				if !strings.Contains(content, "Here is text:") || !strings.Contains(content, "And more text") {
+					t.Errorf("Expected concatenated text, got: %s", content)
+				}
+			}
+		}
+	}
+
+	// Check that images are captured
+	if choices, ok := respMap["choices"].([]interface{}); ok && len(choices) > 0 {
+		if choice, ok := choices[0].(map[string]interface{}); ok {
+			if msg, ok := choice["message"].(map[string]interface{}); ok {
+				if images, ok := msg["images"].([]interface{}); ok {
+					if len(images) != 1 {
+						t.Errorf("Expected 1 image, got %d", len(images))
+					}
+				}
+			}
+		}
+	}
+}
+
+func TestDetermineVertexPublisher(t *testing.T) {
+	tests := []struct {
+		name     string
+		modelID  string
+		expected string
+	}{
+		{
+			name:     "claude model lowercase",
+			modelID:  "claude-3-opus",
+			expected: "anthropic",
+		},
+		{
+			name:     "claude model uppercase",
+			modelID:  "CLAUDE-3-SONNET",
+			expected: "anthropic",
+		},
+		{
+			name:     "claude model mixed case",
+			modelID:  "Claude-3-Haiku",
+			expected: "anthropic",
+		},
+		{
+			name:     "gemini model",
+			modelID:  "gemini-pro",
+			expected: "google",
+		},
+		{
+			name:     "other model",
+			modelID:  "gpt-4",
+			expected: "google",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			publisher := determineVertexPublisher(tt.modelID)
+			assert.Equal(t, tt.expected, publisher)
+		})
+	}
+}
+
+func TestBuildVertexURL(t *testing.T) {
+	tests := []struct {
+		name      string
+		cred      *config.CredentialConfig
+		modelID   string
+		streaming bool
+		expected  string
+	}{
+		{
+			name: "global location non-streaming claude",
+			cred: &config.CredentialConfig{
+				ProjectID: "test-project",
+				Location:  "global",
+			},
+			modelID:   "claude-3-opus",
+			streaming: false,
+			expected:  "https://aiplatform.googleapis.com/v1/projects/test-project/locations/global/publishers/anthropic/models/claude-3-opus:generateContent",
+		},
+		{
+			name: "global location streaming claude",
+			cred: &config.CredentialConfig{
+				ProjectID: "test-project",
+				Location:  "global",
+			},
+			modelID:   "claude-3-sonnet",
+			streaming: true,
+			expected:  "https://aiplatform.googleapis.com/v1/projects/test-project/locations/global/publishers/anthropic/models/claude-3-sonnet:streamGenerateContent?alt=sse",
+		},
+		{
+			name: "regional location non-streaming gemini",
+			cred: &config.CredentialConfig{
+				ProjectID: "test-project",
+				Location:  "us-central1",
+			},
+			modelID:   "gemini-pro",
+			streaming: false,
+			expected:  "https://us-central1-aiplatform.googleapis.com/v1/projects/test-project/locations/us-central1/publishers/google/models/gemini-pro:generateContent",
+		},
+		{
+			name: "regional location streaming gemini",
+			cred: &config.CredentialConfig{
+				ProjectID: "test-project",
+				Location:  "europe-west1",
+			},
+			modelID:   "gemini-pro",
+			streaming: true,
+			expected:  "https://europe-west1-aiplatform.googleapis.com/v1/projects/test-project/locations/europe-west1/publishers/google/models/gemini-pro:streamGenerateContent?alt=sse",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			url := BuildVertexURL(tt.cred, tt.modelID, tt.streaming)
+			assert.Equal(t, tt.expected, url)
+		})
+	}
+}
+
+func TestBuildVertexImageURL(t *testing.T) {
+	tests := []struct {
+		name     string
+		cred     *config.CredentialConfig
+		modelID  string
+		expected string
+	}{
+		{
+			name: "global location",
+			cred: &config.CredentialConfig{
+				ProjectID: "test-project",
+				Location:  "global",
+			},
+			modelID:  "imagegeneration",
+			expected: "https://aiplatform.googleapis.com/v1/projects/test-project/locations/global/publishers/google/models/imagegeneration:predict",
+		},
+		{
+			name: "regional location",
+			cred: &config.CredentialConfig{
+				ProjectID: "test-project",
+				Location:  "us-central1",
+			},
+			modelID:  "imagen-3.0-generate-001",
+			expected: "https://us-central1-aiplatform.googleapis.com/v1/projects/test-project/locations/us-central1/publishers/google/models/imagen-3.0-generate-001:predict",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			url := BuildVertexImageURL(tt.cred, tt.modelID)
+			assert.Equal(t, tt.expected, url)
 		})
 	}
 }

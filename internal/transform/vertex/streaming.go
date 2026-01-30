@@ -1,4 +1,4 @@
-package vertex_transform
+package vertex
 
 import (
 	"bufio"
@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"strings"
+
+	"github.com/mixaill76/auto_ai_router/internal/transform/openai"
 )
 
 // VertexStreamingChunk represents a single chunk from Vertex AI streaming response
@@ -14,32 +16,12 @@ type VertexStreamingChunk struct {
 	UsageMetadata *VertexUsageMetadata `json:"usageMetadata,omitempty"`
 }
 
-// OpenAIStreamingChunk represents OpenAI streaming response format
-type OpenAIStreamingChunk struct {
-	ID      string                  `json:"id"`
-	Object  string                  `json:"object"`
-	Created int64                   `json:"created"`
-	Model   string                  `json:"model"`
-	Choices []OpenAIStreamingChoice `json:"choices"`
-	Usage   *OpenAIUsage            `json:"usage,omitempty"`
-}
-
-type OpenAIStreamingChoice struct {
-	Index        int                  `json:"index"`
-	Delta        OpenAIStreamingDelta `json:"delta"`
-	FinishReason *string              `json:"finish_reason"`
-}
-
-type OpenAIStreamingDelta struct {
-	Role    string `json:"role,omitempty"`
-	Content string `json:"content,omitempty"`
-}
-
 // TransformVertexStreamToOpenAI converts Vertex AI SSE stream to OpenAI SSE format
 func TransformVertexStreamToOpenAI(vertexStream io.Reader, model string, output io.Writer) error {
 	scanner := bufio.NewScanner(vertexStream)
-	chatID := generateID()
-	timestamp := getCurrentTimestamp()
+	chatID := openai.GenerateID()
+	timestamp := openai.GetCurrentTimestamp()
+	isFirstChunk := true
 
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -63,31 +45,54 @@ func TransformVertexStreamToOpenAI(vertexStream io.Reader, model string, output 
 			continue // Skip malformed chunks
 		}
 
+		// Skip chunks with no candidates
+		if len(vertexChunk.Candidates) == 0 {
+			continue
+		}
+
 		// Convert to OpenAI format
-		openAIChunk := OpenAIStreamingChunk{
+		openAIChunk := openai.OpenAIStreamingChunk{
 			ID:      chatID,
 			Object:  "chat.completion.chunk",
 			Created: timestamp,
 			Model:   model,
-			Choices: make([]OpenAIStreamingChoice, 0),
+			Choices: make([]openai.OpenAIStreamingChoice, 0),
 		}
 
 		// Process candidates
 		for i, candidate := range vertexChunk.Candidates {
-			choice := OpenAIStreamingChoice{
+			choice := openai.OpenAIStreamingChoice{
 				Index: i,
-				Delta: OpenAIStreamingDelta{},
+				Delta: openai.OpenAIStreamingDelta{},
 			}
 
-			// Extract content from parts
+			// Set role only for first chunk (OpenAI convention)
+			if isFirstChunk {
+				choice.Delta.Role = "assistant"
+			}
+
+			// Extract content and function calls from parts
 			var content string
+			var toolCalls []openai.OpenAIStreamingToolCall
+			toolCallIdx := 0
+
 			for _, part := range candidate.Content.Parts {
 				if part.Text != "" {
 					content += part.Text
 				}
+				// Handle function calls
+				if part.FunctionCall != nil {
+					toolCall := convertVertexFunctionCallToStreamingOpenAI(part.FunctionCall, toolCallIdx)
+					toolCalls = append(toolCalls, toolCall)
+					toolCallIdx++
+				}
 				// Note: streaming doesn't support images in delta, only text
 			}
+
 			choice.Delta.Content = content
+			if len(toolCalls) > 0 {
+				choice.Delta.ToolCalls = toolCalls
+			}
 
 			// Handle finish reason
 			if candidate.FinishReason != "" {
@@ -100,7 +105,7 @@ func TransformVertexStreamToOpenAI(vertexStream io.Reader, model string, output 
 
 		// Convert usage metadata if present
 		if vertexChunk.UsageMetadata != nil {
-			openAIChunk.Usage = &OpenAIUsage{
+			openAIChunk.Usage = &openai.OpenAIUsage{
 				PromptTokens:     vertexChunk.UsageMetadata.PromptTokenCount,
 				CompletionTokens: vertexChunk.UsageMetadata.CandidatesTokenCount,
 				TotalTokens:      vertexChunk.UsageMetadata.TotalTokenCount,
@@ -114,7 +119,29 @@ func TransformVertexStreamToOpenAI(vertexStream io.Reader, model string, output 
 		}
 
 		_, _ = fmt.Fprintf(output, "data: %s\n\n", chunkJSON)
+		isFirstChunk = false
 	}
 
 	return scanner.Err()
+}
+
+// convertVertexFunctionCallToStreamingOpenAI converts Vertex function call to OpenAI streaming tool call format
+func convertVertexFunctionCallToStreamingOpenAI(vertexCall *VertexFunctionCall, index int) openai.OpenAIStreamingToolCall {
+	// Convert args to JSON string
+	argsJSON := "{}"
+	if vertexCall.Args != nil {
+		if data, err := json.Marshal(vertexCall.Args); err == nil {
+			argsJSON = string(data)
+		}
+	}
+
+	return openai.OpenAIStreamingToolCall{
+		Index: index,
+		ID:    openai.GenerateID(),
+		Type:  "function",
+		Function: &openai.OpenAIStreamingToolFunction{
+			Name:      vertexCall.Name,
+			Arguments: argsJSON,
+		},
+	}
 }

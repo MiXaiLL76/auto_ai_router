@@ -14,19 +14,14 @@ func TestHasModel_CredentialSpecific(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
 
 	// Create manager with credential-specific models in config
-	modelsConfig := &config.ModelsConfig{
-		Models: []config.ModelRPMConfig{
-			{Name: "gpt-4", RPM: 100, Credential: "openai-1"},         // Only for openai-1
-			{Name: "gpt-3.5-turbo", RPM: 200, Credential: "openai-2"}, // Only for openai-2
-			{Name: "gemini-pro", RPM: 60, Credential: "vertex-1"},     // Only for vertex-1
-			{Name: "claude-3", RPM: 50},                               // Global - for all credentials
-		},
+	staticModels := []config.ModelRPMConfig{
+		{Name: "gpt-4", RPM: 100, Credential: "openai-1"},         // Only for openai-1
+		{Name: "gpt-3.5-turbo", RPM: 200, Credential: "openai-2"}, // Only for openai-2
+		{Name: "gemini-pro", RPM: 60, Credential: "vertex-1"},     // Only for vertex-1
+		{Name: "claude-3", RPM: 50},                               // Global - for all credentials
 	}
 
-	yamlPath := "/tmp/test_credential_specific.yaml"
-	defer func() { _ = os.Remove(yamlPath) }()
-	manager := New(logger, false, 100, yamlPath, []config.ModelRPMConfig{})
-	manager.modelsConfig = modelsConfig
+	manager := New(logger, 100, staticModels)
 
 	credentials := []config.CredentialConfig{
 		{Name: "openai-1"},
@@ -69,21 +64,16 @@ func TestHasModel_MixedCredentialModels(t *testing.T) {
 	// - anthropic-1: has claude-3-opus (specific) + global models
 	// - All have: gpt-4-turbo (global)
 
-	modelsConfig := &config.ModelsConfig{
-		Models: []config.ModelRPMConfig{
-			{Name: "gpt-4", RPM: 100, Credential: "openai-1"},
-			{Name: "gpt-3.5-turbo", RPM: 200, Credential: "openai-1"},
-			{Name: "gemini-pro", RPM: 60, Credential: "vertex-1"},
-			{Name: "gemini-flash", RPM: 100, Credential: "vertex-1"},
-			{Name: "claude-3-opus", RPM: 50, Credential: "anthropic-1"},
-			{Name: "gpt-4-turbo", RPM: 80}, // Global
-		},
+	staticModels := []config.ModelRPMConfig{
+		{Name: "gpt-4", RPM: 100, Credential: "openai-1"},
+		{Name: "gpt-3.5-turbo", RPM: 200, Credential: "openai-1"},
+		{Name: "gemini-pro", RPM: 60, Credential: "vertex-1"},
+		{Name: "gemini-flash", RPM: 100, Credential: "vertex-1"},
+		{Name: "claude-3-opus", RPM: 50, Credential: "anthropic-1"},
+		{Name: "gpt-4-turbo", RPM: 80}, // Global
 	}
 
-	yamlPath := "/tmp/test_mixed_models.yaml"
-	defer func() { _ = os.Remove(yamlPath) }()
-	manager := New(logger, false, 100, yamlPath, []config.ModelRPMConfig{})
-	manager.modelsConfig = modelsConfig
+	manager := New(logger, 100, staticModels)
 
 	credentials := []config.CredentialConfig{
 		{Name: "openai-1"},
@@ -118,17 +108,12 @@ func TestHasModel_MixedCredentialModels(t *testing.T) {
 func TestHasModel_InvalidCredentialInConfig(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
 
-	modelsConfig := &config.ModelsConfig{
-		Models: []config.ModelRPMConfig{
-			{Name: "gpt-4", RPM: 100, Credential: "openai-1"},
-			{Name: "invalid-model", RPM: 50, Credential: "non-existent-cred"}, // Invalid credential
-		},
+	staticModels := []config.ModelRPMConfig{
+		{Name: "gpt-4", RPM: 100, Credential: "openai-1"},
+		{Name: "invalid-model", RPM: 50, Credential: "non-existent-cred"}, // Invalid credential
 	}
 
-	yamlPath := "/tmp/test_invalid_cred.yaml"
-	defer func() { _ = os.Remove(yamlPath) }()
-	manager := New(logger, false, 100, yamlPath, []config.ModelRPMConfig{})
-	manager.modelsConfig = modelsConfig
+	manager := New(logger, 100, staticModels)
 
 	credentials := []config.CredentialConfig{
 		{Name: "openai-1"},
@@ -151,18 +136,13 @@ func TestHasModel_InvalidCredentialInConfig(t *testing.T) {
 func TestHasModel_EmptyCredentialField(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
 
-	modelsConfig := &config.ModelsConfig{
-		Models: []config.ModelRPMConfig{
-			{Name: "global-model-1", RPM: 100},                      // No credential = global
-			{Name: "global-model-2", RPM: 200, Credential: ""},      // Empty string = global
-			{Name: "specific-model", RPM: 50, Credential: "cred-1"}, // Credential-specific
-		},
+	staticModels := []config.ModelRPMConfig{
+		{Name: "global-model-1", RPM: 100},                      // No credential = global
+		{Name: "global-model-2", RPM: 200, Credential: ""},      // Empty string = global
+		{Name: "specific-model", RPM: 50, Credential: "cred-1"}, // Credential-specific
 	}
 
-	yamlPath := "/tmp/test_empty_credential.yaml"
-	defer func() { _ = os.Remove(yamlPath) }()
-	manager := New(logger, false, 100, yamlPath, []config.ModelRPMConfig{})
-	manager.modelsConfig = modelsConfig
+	manager := New(logger, 100, staticModels)
 
 	credentials := []config.CredentialConfig{
 		{Name: "cred-1"},
@@ -194,29 +174,24 @@ func TestRealWorldScenario(t *testing.T) {
 	// - vertex-claude: Claude 3.5 Sonnet, Claude 3 Opus (via Vertex AI)
 	// - All providers: text-embedding-ada-002 (global embedding model)
 
-	modelsConfig := &config.ModelsConfig{
-		Models: []config.ModelRPMConfig{
-			// OpenAI models
-			{Name: "gpt-4", RPM: 100, TPM: 50000, Credential: "openai-prod"},
-			{Name: "gpt-3.5-turbo", RPM: 500, TPM: 200000, Credential: "openai-prod"},
+	staticModels := []config.ModelRPMConfig{
+		// OpenAI models
+		{Name: "gpt-4", RPM: 100, TPM: 50000, Credential: "openai-prod"},
+		{Name: "gpt-3.5-turbo", RPM: 500, TPM: 200000, Credential: "openai-prod"},
 
-			// Vertex AI - Gemini models
-			{Name: "gemini-2.0-flash-exp", RPM: 60, TPM: 30000, Credential: "vertex-gemini"},
-			{Name: "gemini-1.5-pro", RPM: 30, TPM: 15000, Credential: "vertex-gemini"},
+		// Vertex AI - Gemini models
+		{Name: "gemini-2.0-flash-exp", RPM: 60, TPM: 30000, Credential: "vertex-gemini"},
+		{Name: "gemini-1.5-pro", RPM: 30, TPM: 15000, Credential: "vertex-gemini"},
 
-			// Vertex AI - Claude models
-			{Name: "claude-3-5-sonnet@20240620", RPM: 50, TPM: 25000, Credential: "vertex-claude"},
-			{Name: "claude-3-opus@20240229", RPM: 20, TPM: 10000, Credential: "vertex-claude"},
+		// Vertex AI - Claude models
+		{Name: "claude-3-5-sonnet@20240620", RPM: 50, TPM: 25000, Credential: "vertex-claude"},
+		{Name: "claude-3-opus@20240229", RPM: 20, TPM: 10000, Credential: "vertex-claude"},
 
-			// Global embedding model
-			{Name: "text-embedding-ada-002", RPM: 1000, TPM: 500000},
-		},
+		// Global embedding model
+		{Name: "text-embedding-ada-002", RPM: 1000, TPM: 500000},
 	}
 
-	yamlPath := "/tmp/test_real_world.yaml"
-	defer func() { _ = os.Remove(yamlPath) }()
-	manager := New(logger, false, 100, yamlPath, []config.ModelRPMConfig{})
-	manager.modelsConfig = modelsConfig
+	manager := New(logger, 100, staticModels)
 
 	credentials := []config.CredentialConfig{
 		{Name: "openai-prod"},

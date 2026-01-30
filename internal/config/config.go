@@ -11,6 +11,32 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+// ProviderType represents the type of AI provider
+type ProviderType string
+
+const (
+	ProviderTypeOpenAI    ProviderType = "openai"
+	ProviderTypeVertexAI  ProviderType = "vertex-ai"
+	ProviderTypeAnthropic ProviderType = "anthropic"
+)
+
+// IsValid checks if the provider type is valid
+func (p ProviderType) IsValid() bool {
+	switch p {
+	case ProviderTypeOpenAI, ProviderTypeVertexAI, ProviderTypeAnthropic:
+		return true
+	}
+	return false
+}
+
+// ModelRPMConfig represents RPM and TPM limits for a specific model
+type ModelRPMConfig struct {
+	Name       string `yaml:"name"`
+	RPM        int    `yaml:"rpm"`
+	TPM        int    `yaml:"tpm"`
+	Credential string `yaml:"credential,omitempty"` // If set, model is only available for this credential
+}
+
 type Config struct {
 	Server      ServerConfig       `yaml:"server"`
 	Fail2Ban    Fail2BanConfig     `yaml:"fail2ban"`
@@ -24,7 +50,6 @@ type ServerConfig struct {
 	MaxBodySizeMB    int           `yaml:"max_body_size_mb"`
 	RequestTimeout   time.Duration `yaml:"request_timeout"`
 	LoggingLevel     string        `yaml:"logging_level"`
-	ReplaceV1Models  bool          `yaml:"replace_v1_models"`
 	MasterKey        string        `yaml:"master_key"`
 	DefaultModelsRPM int           `yaml:"default_models_rpm"`
 }
@@ -43,7 +68,6 @@ func (s *ServerConfig) UnmarshalYAML(value *yaml.Node) error {
 		MaxBodySizeMB    string `yaml:"max_body_size_mb"`
 		RequestTimeout   string `yaml:"request_timeout"`
 		LoggingLevel     string `yaml:"logging_level"`
-		ReplaceV1Models  string `yaml:"replace_v1_models"`
 		MasterKey        string `yaml:"master_key"`
 		DefaultModelsRPM string `yaml:"default_models_rpm"`
 	}
@@ -83,14 +107,6 @@ func (s *ServerConfig) UnmarshalYAML(value *yaml.Node) error {
 	// LoggingLevel
 	s.LoggingLevel = resolveEnvString(temp.LoggingLevel)
 
-	// ReplaceV1Models
-	if temp.ReplaceV1Models != "" {
-		s.ReplaceV1Models, err = resolveEnvBool(temp.ReplaceV1Models, false)
-		if err != nil {
-			return fmt.Errorf("invalid replace_v1_models: %w", err)
-		}
-	}
-
 	// MasterKey
 	s.MasterKey = resolveEnvString(temp.MasterKey)
 
@@ -106,12 +122,12 @@ func (s *ServerConfig) UnmarshalYAML(value *yaml.Node) error {
 }
 
 type CredentialConfig struct {
-	Name    string `yaml:"name"`
-	Type    string `yaml:"type"`
-	APIKey  string `yaml:"api_key"`
-	BaseURL string `yaml:"base_url"`
-	RPM     int    `yaml:"rpm"`
-	TPM     int    `yaml:"tpm"`
+	Name    string       `yaml:"name"`
+	Type    ProviderType `yaml:"type"`
+	APIKey  string       `yaml:"api_key"`
+	BaseURL string       `yaml:"base_url"`
+	RPM     int          `yaml:"rpm"`
+	TPM     int          `yaml:"tpm"`
 
 	// Vertex AI specific fields
 	ProjectID       string `yaml:"project_id,omitempty"`
@@ -143,7 +159,7 @@ func (c *CredentialConfig) UnmarshalYAML(value *yaml.Node) error {
 
 	// Resolve string fields
 	c.Name = resolveEnvString(temp.Name)
-	c.Type = resolveEnvString(temp.Type)
+	c.Type = ProviderType(resolveEnvString(temp.Type))
 	c.APIKey = resolveEnvString(temp.APIKey)
 	c.BaseURL = resolveEnvString(temp.BaseURL)
 
@@ -376,8 +392,13 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("credential %d: name is required", i)
 		}
 
+		// Validate provider type
+		if !cred.Type.IsValid() {
+			return fmt.Errorf("credential %s: invalid type: %s (must be 'openai' or 'vertex-ai')", cred.Name, cred.Type)
+		}
+
 		// Vertex AI specific validation
-		if cred.Type == "vertex-ai" {
+		if cred.Type == ProviderTypeVertexAI {
 			// For Vertex AI, project_id and location are required
 			if cred.ProjectID == "" {
 				return fmt.Errorf("credential %s: project_id is required for vertex-ai type", cred.Name)

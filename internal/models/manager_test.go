@@ -1,13 +1,9 @@
 package models
 
 import (
-	"encoding/json"
 	"log/slog"
-	"net/http"
-	"net/http/httptest"
 	"os"
 	"testing"
-	"time"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/stretchr/testify/assert"
@@ -16,218 +12,50 @@ import (
 func TestNew(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
 
-	manager := New(logger, true, 100, "/tmp/models_test.yaml", []config.ModelRPMConfig{})
+	manager := New(logger, 100, []config.ModelRPMConfig{})
 
 	assert.NotNil(t, manager)
-	assert.True(t, manager.enabled)
-	assert.Equal(t, 100, manager.defaultModelsRPM)
 	assert.NotNil(t, manager.credentialModels)
 	assert.NotNil(t, manager.allModels)
 	assert.NotNil(t, manager.modelToCredentials)
 }
 
-func TestNew_Disabled(t *testing.T) {
+func TestNew_WithStaticModels(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
 
-	manager := New(logger, false, 50, "/tmp/models_test.yaml", []config.ModelRPMConfig{})
+	staticModels := []config.ModelRPMConfig{
+		{Name: "gpt-4", RPM: 100, TPM: 10000},
+		{Name: "gpt-3.5-turbo", RPM: 200, TPM: 20000},
+	}
+
+	manager := New(logger, 50, staticModels)
 
 	assert.NotNil(t, manager)
-	assert.False(t, manager.enabled)
-	assert.Equal(t, 50, manager.defaultModelsRPM)
+	assert.True(t, manager.IsEnabled())
+
+	// Check that static models are loaded
+	models := manager.GetAllModels()
+	assert.Equal(t, 2, len(models.Data))
 }
 
-func TestFetchModels_Success(t *testing.T) {
-	// Create mock server that returns models
-	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		assert.Equal(t, "/v1/models", r.URL.Path)
-		assert.Equal(t, "GET", r.Method)
-		assert.Contains(t, r.Header.Get("Authorization"), "Bearer")
-
-		response := ModelsResponse{
-			Object: "list",
-			Data: []Model{
-				{ID: "gpt-4", Object: "model", Created: 1234567890},
-				{ID: "gpt-3.5-turbo", Object: "model", Created: 1234567891},
-			},
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(response)
-	}))
-	defer mockServer.Close()
-
+func TestGetAllModels_WithStaticModels(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-	yamlPath := "/tmp/models_test_fetch.yaml"
-	defer func() { _ = os.Remove(yamlPath) }()
-	manager := New(logger, true, 100, yamlPath, []config.ModelRPMConfig{})
 
-	credentials := []config.CredentialConfig{
-		{Name: "test1", APIKey: "key1", BaseURL: mockServer.URL, RPM: 100},
+	staticModels := []config.ModelRPMConfig{
+		{Name: "gpt-4", RPM: 100},
+		{Name: "gpt-3.5-turbo", RPM: 200},
 	}
-
-	manager.LoadModelsFromConfig(credentials)
-	manager.FetchModels(credentials, 5*time.Second)
-
-	// Verify models were fetched
-	assert.Equal(t, 2, len(manager.allModels))
-	assert.Equal(t, 2, len(manager.credentialModels["test1"]))
-	assert.Contains(t, manager.modelToCredentials["gpt-4"], "test1")
-	assert.Contains(t, manager.modelToCredentials["gpt-3.5-turbo"], "test1")
-}
-
-func TestFetchModels_MultipleCredentials(t *testing.T) {
-	// Create mock server 1
-	mockServer1 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		response := ModelsResponse{
-			Object: "list",
-			Data: []Model{
-				{ID: "gpt-4", Object: "model"},
-				{ID: "gpt-3.5-turbo", Object: "model"},
-			},
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(response)
-	}))
-	defer mockServer1.Close()
-
-	// Create mock server 2
-	mockServer2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		response := ModelsResponse{
-			Object: "list",
-			Data: []Model{
-				{ID: "gpt-4", Object: "model"}, // Duplicate
-				{ID: "claude-3", Object: "model"},
-			},
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(response)
-	}))
-	defer mockServer2.Close()
-
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-	yamlPath := "/tmp/models_test_multi.yaml"
-	defer func() { _ = os.Remove(yamlPath) }()
-	manager := New(logger, true, 100, yamlPath, []config.ModelRPMConfig{})
-
-	credentials := []config.CredentialConfig{
-		{Name: "test1", APIKey: "key1", BaseURL: mockServer1.URL, RPM: 100},
-		{Name: "test2", APIKey: "key2", BaseURL: mockServer2.URL, RPM: 100},
-	}
-
-	manager.LoadModelsFromConfig(credentials)
-	manager.FetchModels(credentials, 5*time.Second)
-
-	// Should have 3 unique models
-	assert.Equal(t, 3, len(manager.allModels))
-
-	// gpt-4 should be available from both credentials
-	assert.Contains(t, manager.modelToCredentials["gpt-4"], "test1")
-	assert.Contains(t, manager.modelToCredentials["gpt-4"], "test2")
-	assert.Equal(t, 2, len(manager.modelToCredentials["gpt-4"]))
-
-	// gpt-3.5-turbo should only be from test1
-	assert.Contains(t, manager.modelToCredentials["gpt-3.5-turbo"], "test1")
-	assert.Equal(t, 1, len(manager.modelToCredentials["gpt-3.5-turbo"]))
-
-	// claude-3 should only be from test2
-	assert.Contains(t, manager.modelToCredentials["claude-3"], "test2")
-	assert.Equal(t, 1, len(manager.modelToCredentials["claude-3"]))
-}
-
-func TestFetchModels_PartialFailure(t *testing.T) {
-	// Create a working server
-	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		response := ModelsResponse{
-			Object: "list",
-			Data:   []Model{{ID: "gpt-4", Object: "model"}},
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(response)
-	}))
-	defer mockServer.Close()
-
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-	yamlPath := "/tmp/models_test_partial.yaml"
-	defer func() { _ = os.Remove(yamlPath) }()
-	manager := New(logger, true, 100, yamlPath, []config.ModelRPMConfig{})
-
-	credentials := []config.CredentialConfig{
-		{Name: "working", APIKey: "key1", BaseURL: mockServer.URL, RPM: 100},
-		{Name: "failing", APIKey: "key2", BaseURL: "http://invalid-url-that-does-not-exist.com", RPM: 100},
-	}
-
-	manager.LoadModelsFromConfig(credentials)
-	manager.FetchModels(credentials, 2*time.Second)
-
-	// Should still have models from working credential
-	assert.Equal(t, 1, len(manager.allModels))
-	assert.Equal(t, 1, len(manager.credentialModels["working"]))
-	assert.Equal(t, 0, len(manager.credentialModels["failing"]))
-}
-
-func TestFetchModels_Disabled(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-	manager := New(logger, false, 100, "/tmp/models_test_disabled.yaml", []config.ModelRPMConfig{})
-
-	credentials := []config.CredentialConfig{
-		{Name: "test1", APIKey: "key1", BaseURL: "http://test.com", RPM: 100},
-	}
-
-	manager.LoadModelsFromConfig(credentials)
-	manager.FetchModels(credentials, 5*time.Second)
-
-	// Should not fetch when disabled
-	assert.Equal(t, 0, len(manager.allModels))
-	assert.Equal(t, 0, len(manager.credentialModels))
-}
-
-func TestFetchModels_ErrorResponse(t *testing.T) {
-	// Create server that returns error
-	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusUnauthorized)
-		_, _ = w.Write([]byte(`{"error": "invalid API key"}`))
-	}))
-	defer mockServer.Close()
-
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-	yamlPath := "/tmp/models_test_error.yaml"
-	defer func() { _ = os.Remove(yamlPath) }()
-	manager := New(logger, true, 100, yamlPath, []config.ModelRPMConfig{})
-
-	credentials := []config.CredentialConfig{
-		{Name: "test1", APIKey: "invalid", BaseURL: mockServer.URL, RPM: 100},
-	}
-
-	manager.LoadModelsFromConfig(credentials)
-	manager.FetchModels(credentials, 5*time.Second)
-
-	// Should not have any models
-	assert.Equal(t, 0, len(manager.allModels))
-	assert.Equal(t, 0, len(manager.credentialModels["test1"]))
-}
-
-func TestGetAllModels(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-	manager := New(logger, true, 100, "/tmp/models_test_getall.yaml", []config.ModelRPMConfig{})
-
-	// Manually add some models
-	manager.allModels = []Model{
-		{ID: "gpt-4", Object: "model"},
-		{ID: "gpt-3.5-turbo", Object: "model"},
-	}
+	manager := New(logger, 100, staticModels)
 
 	result := manager.GetAllModels()
 
 	assert.Equal(t, "list", result.Object)
 	assert.Equal(t, 2, len(result.Data))
-	assert.Equal(t, "gpt-4", result.Data[0].ID)
-	assert.Equal(t, "gpt-3.5-turbo", result.Data[1].ID)
 }
 
 func TestGetAllModels_Empty(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-	manager := New(logger, true, 100, "/tmp/models_test_empty.yaml", []config.ModelRPMConfig{})
+	manager := New(logger, 100, []config.ModelRPMConfig{})
 
 	result := manager.GetAllModels()
 
@@ -237,12 +65,21 @@ func TestGetAllModels_Empty(t *testing.T) {
 
 func TestGetCredentialsForModel(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-	manager := New(logger, true, 100, "/tmp/models_test_getcreds.yaml", []config.ModelRPMConfig{})
 
-	manager.modelToCredentials["gpt-4"] = []string{"test1", "test2"}
-	manager.modelToCredentials["gpt-3.5-turbo"] = []string{"test1"}
+	staticModels := []config.ModelRPMConfig{
+		{Name: "gpt-4", RPM: 100, Credential: "test1"},
+		{Name: "gpt-4", RPM: 100, Credential: "test2"},
+		{Name: "gpt-3.5-turbo", RPM: 200, Credential: "test1"},
+	}
+	manager := New(logger, 100, staticModels)
 
-	// Test existing model
+	credentials := []config.CredentialConfig{
+		{Name: "test1"},
+		{Name: "test2"},
+	}
+	manager.LoadModelsFromConfig(credentials)
+
+	// Test existing model with multiple credentials
 	creds := manager.GetCredentialsForModel("gpt-4")
 	assert.Equal(t, 2, len(creds))
 	assert.Contains(t, creds, "test1")
@@ -258,25 +95,21 @@ func TestGetCredentialsForModel(t *testing.T) {
 	assert.Nil(t, creds3)
 }
 
-func TestGetCredentialsForModel_Disabled(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-	manager := New(logger, false, 100, "/tmp/models_test_disabled2.yaml", []config.ModelRPMConfig{})
-
-	manager.modelToCredentials["gpt-4"] = []string{"test1"}
-
-	// Should return credentials even when API fetching is disabled
-	// (because models can be loaded from config)
-	creds := manager.GetCredentialsForModel("gpt-4")
-	assert.NotNil(t, creds)
-	assert.Equal(t, []string{"test1"}, creds)
-}
-
 func TestHasModel(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-	manager := New(logger, true, 100, "/tmp/models_test_hasmodel.yaml", []config.ModelRPMConfig{})
 
-	manager.credentialModels["test1"] = []string{"gpt-4", "gpt-3.5-turbo"}
-	manager.credentialModels["test2"] = []string{"claude-3"}
+	staticModels := []config.ModelRPMConfig{
+		{Name: "gpt-4", RPM: 100, Credential: "test1"},
+		{Name: "gpt-3.5-turbo", RPM: 200, Credential: "test1"},
+		{Name: "claude-3", RPM: 150, Credential: "test2"},
+	}
+	manager := New(logger, 100, staticModels)
+
+	credentials := []config.CredentialConfig{
+		{Name: "test1"},
+		{Name: "test2"},
+	}
+	manager.LoadModelsFromConfig(credentials)
 
 	// Test credential has model
 	assert.True(t, manager.HasModel("test1", "gpt-4"))
@@ -289,17 +122,18 @@ func TestHasModel(t *testing.T) {
 	assert.True(t, manager.HasModel("test2", "claude-3"))
 	assert.False(t, manager.HasModel("test2", "gpt-4"))
 
-	// Test non-existing credential (should return true - allow when no data)
-	assert.True(t, manager.HasModel("non-existing", "gpt-4"))
+	// Test non-existing credential with configured model (should return false - model exists but not for this cred)
+	assert.False(t, manager.HasModel("non-existing", "gpt-4"))
+
+	// Test non-existing credential with non-configured model (fallback - allow)
+	assert.True(t, manager.HasModel("non-existing", "some-unknown-model"))
 }
 
-func TestHasModel_Disabled(t *testing.T) {
+func TestHasModel_NoStaticModels(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-	manager := New(logger, false, 100, "/tmp/models_test_disabled3.yaml", []config.ModelRPMConfig{})
+	manager := New(logger, 100, []config.ModelRPMConfig{})
 
-	manager.credentialModels["test1"] = []string{"gpt-4"}
-
-	// Should return true when disabled (allow all)
+	// Should return true when no models configured (allow all)
 	assert.True(t, manager.HasModel("test1", "gpt-4"))
 	assert.True(t, manager.HasModel("test1", "any-model"))
 }
@@ -307,36 +141,25 @@ func TestHasModel_Disabled(t *testing.T) {
 func TestIsEnabled(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
 
-	// Test 1: enabled=true -> IsEnabled=true
-	manager1 := New(logger, true, 100, "/tmp/test_isenabled1.yaml", []config.ModelRPMConfig{})
-	assert.True(t, manager1.IsEnabled(), "Should be enabled when API fetching is enabled")
+	// Test 1: No static models -> IsEnabled=false
+	manager1 := New(logger, 100, []config.ModelRPMConfig{})
+	assert.False(t, manager1.IsEnabled(), "Should be disabled when no static models configured")
 
-	// Test 2: enabled=false, no config -> IsEnabled=false
-	manager2 := New(logger, false, 100, "/tmp/test_isenabled2.yaml", []config.ModelRPMConfig{})
-	manager2.modelsConfig = &config.ModelsConfig{Models: []config.ModelRPMConfig{}}
-	assert.False(t, manager2.IsEnabled(), "Should be disabled when API fetching disabled and no models in config")
-
-	// Test 3: enabled=false, but has models in config -> IsEnabled=true
-	manager3 := New(logger, false, 100, "/tmp/test_isenabled3.yaml", []config.ModelRPMConfig{})
-	manager3.modelsConfig = &config.ModelsConfig{
-		Models: []config.ModelRPMConfig{
-			{Name: "gpt-4", RPM: 100},
-		},
-	}
-	assert.True(t, manager3.IsEnabled(), "Should be enabled when models exist in config even if API fetching disabled")
+	// Test 2: With static models -> IsEnabled=true
+	manager2 := New(logger, 100, []config.ModelRPMConfig{
+		{Name: "gpt-4", RPM: 100},
+	})
+	assert.True(t, manager2.IsEnabled(), "Should be enabled when static models are configured")
 }
 
 func TestGetModelRPM(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-	manager := New(logger, true, 50, "/tmp/models_test_getrpm.yaml", []config.ModelRPMConfig{})
 
-	// Mock models config
-	manager.modelsConfig = &config.ModelsConfig{
-		Models: []config.ModelRPMConfig{
-			{Name: "gpt-4", RPM: 100},
-			{Name: "gpt-3.5-turbo", RPM: 200},
-		},
+	staticModels := []config.ModelRPMConfig{
+		{Name: "gpt-4", RPM: 100},
+		{Name: "gpt-3.5-turbo", RPM: 200},
 	}
+	manager := New(logger, 50, staticModels)
 
 	// Test existing model in config
 	rpm1 := manager.GetModelRPM("gpt-4")
@@ -350,110 +173,23 @@ func TestGetModelRPM(t *testing.T) {
 	assert.Equal(t, 50, rpm3)
 }
 
-func TestGetModelRPM_NilConfig(t *testing.T) {
+func TestGetModelRPM_NoStaticModels(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-	manager := New(logger, true, 75, "/tmp/models_test_nilconfig.yaml", []config.ModelRPMConfig{})
+	manager := New(logger, 75, []config.ModelRPMConfig{})
 
-	manager.modelsConfig = nil
-
-	// Should return default RPM when config is nil
+	// Should return default RPM when no models configured
 	rpm := manager.GetModelRPM("any-model")
 	assert.Equal(t, 75, rpm)
 }
 
-func TestFetchModelsFromCredential_InvalidJSON(t *testing.T) {
-	// Create server that returns invalid JSON
-	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`invalid json`))
-	}))
-	defer mockServer.Close()
-
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-	manager := New(logger, true, 100, "/tmp/test.yaml", []config.ModelRPMConfig{})
-
-	client := &http.Client{Timeout: 5 * time.Second}
-	cred := config.CredentialConfig{
-		Name:    "test",
-		APIKey:  "key",
-		BaseURL: mockServer.URL,
-		RPM:     100,
-	}
-
-	models, err := manager.fetchModelsFromCredential(client, cred)
-
-	assert.Error(t, err)
-	assert.Nil(t, models)
-	assert.Contains(t, err.Error(), "failed to decode response")
-}
-
-func TestFetchModelsFromCredential_Timeout(t *testing.T) {
-	// Create server that never responds
-	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		time.Sleep(10 * time.Second) // Sleep longer than timeout
-	}))
-	defer mockServer.Close()
-
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-	manager := New(logger, true, 100, "/tmp/test.yaml", []config.ModelRPMConfig{})
-
-	client := &http.Client{Timeout: 100 * time.Millisecond} // Short timeout
-	cred := config.CredentialConfig{
-		Name:    "test",
-		APIKey:  "key",
-		BaseURL: mockServer.URL,
-		RPM:     100,
-	}
-
-	models, err := manager.fetchModelsFromCredential(client, cred)
-
-	assert.Error(t, err)
-	assert.Nil(t, models)
-}
-
-func TestFetchModelsFromCredential_BaseURLWithSlash(t *testing.T) {
-	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		assert.Equal(t, "/v1/models", r.URL.Path)
-
-		response := ModelsResponse{
-			Object: "list",
-			Data:   []Model{{ID: "test-model", Object: "model"}},
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(response)
-	}))
-	defer mockServer.Close()
-
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-	manager := New(logger, true, 100, "/tmp/test.yaml", []config.ModelRPMConfig{})
-
-	client := &http.Client{Timeout: 5 * time.Second}
-	cred := config.CredentialConfig{
-		Name:    "test",
-		APIKey:  "key",
-		BaseURL: mockServer.URL + "/", // With trailing slash
-		RPM:     100,
-	}
-
-	models, err := manager.fetchModelsFromCredential(client, cred)
-
-	assert.NoError(t, err)
-	assert.Equal(t, 1, len(models))
-	assert.Equal(t, "test-model", models[0].ID)
-}
-
 func TestGetModelTPM(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-	manager := New(logger, true, 50, "/tmp/models_test_gettpm.yaml", []config.ModelRPMConfig{})
 
-	// Mock models config with TPM values
-	manager.modelsConfig = &config.ModelsConfig{
-		Models: []config.ModelRPMConfig{
-			{Name: "gpt-4", RPM: 100, TPM: 10000},
-			{Name: "gpt-3.5-turbo", RPM: 200, TPM: 20000},
-		},
+	staticModels := []config.ModelRPMConfig{
+		{Name: "gpt-4", RPM: 100, TPM: 10000},
+		{Name: "gpt-3.5-turbo", RPM: 200, TPM: 20000},
 	}
+	manager := New(logger, 50, staticModels)
 
 	// Test existing model in config
 	tpm1 := manager.GetModelTPM("gpt-4")
@@ -467,98 +203,37 @@ func TestGetModelTPM(t *testing.T) {
 	assert.Equal(t, -1, tpm3)
 }
 
-func TestGetModelTPM_NilConfig(t *testing.T) {
+func TestGetModelTPM_NoStaticModels(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-	manager := New(logger, true, 75, "/tmp/models_test_tpm_nilconfig.yaml", []config.ModelRPMConfig{})
+	manager := New(logger, 75, []config.ModelRPMConfig{})
 
-	manager.modelsConfig = nil
-
-	// Should return -1 (unlimited) when config is nil
+	// Should return -1 (unlimited) when no models configured
 	tpm := manager.GetModelTPM("any-model")
 	assert.Equal(t, -1, tpm)
 }
 
 func TestGetModelTPM_ZeroValue(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-	manager := New(logger, true, 50, "/tmp/models_test_tpm_zero.yaml", []config.ModelRPMConfig{})
 
-	// Mock models config with TPM = 0 (not set)
-	manager.modelsConfig = &config.ModelsConfig{
-		Models: []config.ModelRPMConfig{
-			{Name: "gpt-4", RPM: 100, TPM: 0}, // TPM not set
-		},
+	staticModels := []config.ModelRPMConfig{
+		{Name: "gpt-4", RPM: 100, TPM: 0}, // TPM not set
 	}
+	manager := New(logger, 50, staticModels)
 
-	// Should return -1 (default) when TPM is 0
+	// Should return -1 (unlimited) when TPM is 0
 	tpm := manager.GetModelTPM("gpt-4")
 	assert.Equal(t, -1, tpm)
 }
 
-func TestGetAllModels_DisabledWithConfig(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-	manager := New(logger, false, 100, "/tmp/models_test_disabled_config.yaml", []config.ModelRPMConfig{})
-
-	// Set models config even though fetching is disabled
-	manager.modelsConfig = &config.ModelsConfig{
-		Models: []config.ModelRPMConfig{
-			{Name: "gpt-4", RPM: 100, TPM: 10000},
-			{Name: "gpt-3.5-turbo", RPM: 200, TPM: 20000},
-		},
-	}
-
-	result := manager.GetAllModels()
-
-	// Should return models from config when disabled but config exists
-	assert.Equal(t, "list", result.Object)
-	assert.Equal(t, 2, len(result.Data))
-	assert.Equal(t, "gpt-4", result.Data[0].ID)
-	assert.Equal(t, "model", result.Data[0].Object)
-	assert.Equal(t, "gpt-3.5-turbo", result.Data[1].ID)
-}
-
-func TestHasModel_DisabledWithConfig(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-	manager := New(logger, false, 100, "/tmp/models_test_hasmodel_disabled.yaml", []config.ModelRPMConfig{})
-
-	// Set models config even though fetching is disabled
-	manager.modelsConfig = &config.ModelsConfig{
-		Models: []config.ModelRPMConfig{
-			{Name: "gpt-4", RPM: 100, TPM: 10000},
-			{Name: "gpt-3.5-turbo", RPM: 200, TPM: 20000},
-		},
-	}
-
-	// Should check against models.yaml when disabled with config
-	assert.True(t, manager.HasModel("any-cred", "gpt-4"))
-	assert.True(t, manager.HasModel("any-cred", "gpt-3.5-turbo"))
-	assert.False(t, manager.HasModel("any-cred", "non-existent-model"))
-}
-
-func TestHasModel_DisabledWithoutConfig(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-	manager := New(logger, false, 100, "/tmp/models_test_hasmodel_noconfig.yaml", []config.ModelRPMConfig{})
-
-	// Empty config (no models)
-	manager.modelsConfig = &config.ModelsConfig{
-		Models: []config.ModelRPMConfig{},
-	}
-
-	// Should allow all models when disabled and no models in config
-	assert.True(t, manager.HasModel("any-cred", "any-model"))
-}
-
 func TestGetModelRPMForCredential(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-	manager := New(logger, true, 50, "/tmp/models_test_rpm_cred.yaml", []config.ModelRPMConfig{})
 
-	// Mock models config with credential-specific models
-	manager.modelsConfig = &config.ModelsConfig{
-		Models: []config.ModelRPMConfig{
-			{Name: "gpt-4", Credential: "cred1", RPM: 100},
-			{Name: "gpt-4", Credential: "cred2", RPM: 200},
-			{Name: "gpt-3.5-turbo", Credential: "cred1", RPM: 150},
-		},
+	staticModels := []config.ModelRPMConfig{
+		{Name: "gpt-4", Credential: "cred1", RPM: 100},
+		{Name: "gpt-4", Credential: "cred2", RPM: 200},
+		{Name: "gpt-3.5-turbo", Credential: "cred1", RPM: 150},
 	}
+	manager := New(logger, 50, staticModels)
 
 	// Test existing model with specific credential
 	rpm1 := manager.GetModelRPMForCredential("gpt-4", "cred1")
@@ -577,29 +252,24 @@ func TestGetModelRPMForCredential(t *testing.T) {
 	assert.Equal(t, 50, rpm4)
 }
 
-func TestGetModelRPMForCredential_NilConfig(t *testing.T) {
+func TestGetModelRPMForCredential_NoStaticModels(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-	manager := New(logger, true, 75, "/tmp/models_test_rpm_cred_nil.yaml", []config.ModelRPMConfig{})
+	manager := New(logger, 75, []config.ModelRPMConfig{})
 
-	manager.modelsConfig = nil
-
-	// Should return default RPM when config is nil
+	// Should return default RPM when no models configured
 	rpm := manager.GetModelRPMForCredential("any-model", "any-cred")
 	assert.Equal(t, 75, rpm)
 }
 
 func TestGetModelTPMForCredential(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-	manager := New(logger, true, 50, "/tmp/models_test_tpm_cred.yaml", []config.ModelRPMConfig{})
 
-	// Mock models config with credential-specific models
-	manager.modelsConfig = &config.ModelsConfig{
-		Models: []config.ModelRPMConfig{
-			{Name: "gpt-4", Credential: "cred1", TPM: 10000},
-			{Name: "gpt-4", Credential: "cred2", TPM: 20000},
-			{Name: "gpt-3.5-turbo", Credential: "cred1", TPM: 0}, // 0 means use default
-		},
+	staticModels := []config.ModelRPMConfig{
+		{Name: "gpt-4", Credential: "cred1", TPM: 10000},
+		{Name: "gpt-4", Credential: "cred2", TPM: 20000},
+		{Name: "gpt-3.5-turbo", Credential: "cred1", TPM: 0}, // 0 means unlimited
 	}
+	manager := New(logger, 50, staticModels)
 
 	// Test existing model with specific credential
 	tpm1 := manager.GetModelTPMForCredential("gpt-4", "cred1")
@@ -609,7 +279,7 @@ func TestGetModelTPMForCredential(t *testing.T) {
 	tpm2 := manager.GetModelTPMForCredential("gpt-4", "cred2")
 	assert.Equal(t, 20000, tpm2)
 
-	// Test model with TPM = 0 (should return default)
+	// Test model with TPM = 0 (should return -1 for unlimited)
 	tpm3 := manager.GetModelTPMForCredential("gpt-3.5-turbo", "cred1")
 	assert.Equal(t, -1, tpm3)
 
@@ -622,13 +292,89 @@ func TestGetModelTPMForCredential(t *testing.T) {
 	assert.Equal(t, -1, tpm5)
 }
 
-func TestGetModelTPMForCredential_NilConfig(t *testing.T) {
+func TestGetModelTPMForCredential_NoStaticModels(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-	manager := New(logger, true, 75, "/tmp/models_test_tpm_cred_nil.yaml", []config.ModelRPMConfig{})
+	manager := New(logger, 75, []config.ModelRPMConfig{})
 
-	manager.modelsConfig = nil
-
-	// Should return -1 (unlimited) when config is nil
+	// Should return -1 (unlimited) when no models configured
 	tpm := manager.GetModelTPMForCredential("any-model", "any-cred")
 	assert.Equal(t, -1, tpm)
+}
+
+func TestGetModelsForCredential(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+
+	staticModels := []config.ModelRPMConfig{
+		{Name: "gpt-4", RPM: 100, Credential: "test1"},
+		{Name: "gpt-3.5-turbo", RPM: 200, Credential: "test1"},
+		{Name: "claude-3", RPM: 150, Credential: "test2"},
+		{Name: "gemini-pro", RPM: 80}, // Global model
+	}
+	manager := New(logger, 100, staticModels)
+
+	credentials := []config.CredentialConfig{
+		{Name: "test1"},
+		{Name: "test2"},
+	}
+	manager.LoadModelsFromConfig(credentials)
+
+	// Test credential with multiple models
+	models1 := manager.GetModelsForCredential("test1")
+	assert.Equal(t, 3, len(models1), "test1 should have 3 models (2 specific + 1 global)")
+
+	modelIDs1 := make(map[string]bool)
+	for _, model := range models1 {
+		modelIDs1[model.ID] = true
+	}
+	assert.True(t, modelIDs1["gpt-4"], "test1 should have gpt-4")
+	assert.True(t, modelIDs1["gpt-3.5-turbo"], "test1 should have gpt-3.5-turbo")
+	assert.True(t, modelIDs1["gemini-pro"], "test1 should have gemini-pro (global)")
+
+	// Test credential with one specific model + global
+	models2 := manager.GetModelsForCredential("test2")
+	assert.Equal(t, 2, len(models2), "test2 should have 2 models (1 specific + 1 global)")
+
+	modelIDs2 := make(map[string]bool)
+	for _, model := range models2 {
+		modelIDs2[model.ID] = true
+	}
+	assert.True(t, modelIDs2["claude-3"], "test2 should have claude-3")
+	assert.True(t, modelIDs2["gemini-pro"], "test2 should have gemini-pro (global)")
+
+	// Test non-existent credential - should still get global models
+	models3 := manager.GetModelsForCredential("non-existent")
+	assert.Equal(t, 1, len(models3), "non-existent credential should have 1 global model")
+	assert.Equal(t, "gemini-pro", models3[0].ID, "should have gemini-pro (global)")
+}
+
+func TestGetModelsForCredential_NoStaticModels(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+	manager := New(logger, 100, []config.ModelRPMConfig{})
+
+	// Should return empty list when no models configured
+	models := manager.GetModelsForCredential("any-cred")
+	assert.Equal(t, 0, len(models))
+}
+
+func TestGetModelsForCredential_GlobalModelsOnly(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+
+	staticModels := []config.ModelRPMConfig{
+		{Name: "global-1", RPM: 100},
+		{Name: "global-2", RPM: 200},
+	}
+	manager := New(logger, 100, staticModels)
+
+	credentials := []config.CredentialConfig{
+		{Name: "test1"},
+		{Name: "test2"},
+	}
+	manager.LoadModelsFromConfig(credentials)
+
+	// Both credentials should have all global models
+	models1 := manager.GetModelsForCredential("test1")
+	assert.Equal(t, 2, len(models1))
+
+	models2 := manager.GetModelsForCredential("test2")
+	assert.Equal(t, 2, len(models2))
 }

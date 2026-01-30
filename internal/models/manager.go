@@ -1,16 +1,11 @@
 package models
 
 import (
-	"encoding/json"
-	"fmt"
-	"io"
 	"log/slog"
-	"net/http"
-	"strings"
 	"sync"
-	"time"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
+	"github.com/mixaill76/auto_ai_router/internal/transform/openai"
 )
 
 // Model represents a single model from OpenAI API
@@ -27,171 +22,91 @@ type ModelsResponse struct {
 	Data   []Model `json:"data"`
 }
 
+// ModelLimits stores RPM and TPM limits for a model
+type ModelLimits struct {
+	RPM        int
+	TPM        int
+	Credential string // If set, limits apply only to this credential
+}
+
 // Manager handles model discovery and mapping
 type Manager struct {
 	mu                 sync.RWMutex
-	credentialModels   map[string][]string  // credential name -> list of model IDs
-	allModels          []Model              // deduplicated list of all models
-	modelToCredentials map[string][]string  // model ID -> list of credential names
-	modelsConfig       *config.ModelsConfig // models.yaml config (merged with static models from config.yaml)
-	modelsConfigPath   string               // path to models.yaml
-	defaultModelsRPM   int                  // default RPM for models
+	credentialModels   map[string][]string      // credential name -> list of model IDs
+	allModels          []Model                  // deduplicated list of all models
+	modelToCredentials map[string][]string      // model ID -> list of credential names
+	modelLimits        map[string][]ModelLimits // model ID -> limits (may have multiple entries for different credentials)
+	defaultModelsRPM   int                      // default RPM for models
 	logger             *slog.Logger
-	enabled            bool
 }
 
 // New creates a new model manager
-func New(logger *slog.Logger, enabled bool, defaultModelsRPM int, modelsConfigPath string, staticModels []config.ModelRPMConfig) *Manager {
-	// Load models.yaml if it exists
-	modelsConfig, err := config.LoadModelsConfig(modelsConfigPath)
-	if err != nil {
-		logger.Error("Failed to load models config", "error", err, "path", modelsConfigPath)
-		modelsConfig = &config.ModelsConfig{Models: []config.ModelRPMConfig{}}
-	} else if len(modelsConfig.Models) > 0 {
-		logger.Info("Loaded models config", "path", modelsConfigPath, "models_count", len(modelsConfig.Models))
-	}
-
-	// Merge static models from config.yaml into modelsConfig (they have priority)
-	if len(staticModels) > 0 {
-		logger.Info("Merging static models from config.yaml", "models_count", len(staticModels))
-		for _, staticModel := range staticModels {
-			// Check if model already exists in models.yaml
-			exists := false
-			for i, existingModel := range modelsConfig.Models {
-				if existingModel.Name == staticModel.Name && existingModel.Credential == staticModel.Credential {
-					// Update with values from config.yaml (static has priority)
-					modelsConfig.Models[i] = staticModel
-					exists = true
-					logger.Debug("Updated model from config.yaml", "model", staticModel.Name, "credential", staticModel.Credential, "rpm", staticModel.RPM, "tpm", staticModel.TPM)
-					break
-				}
-			}
-			// Add new model if it doesn't exist
-			if !exists {
-				modelsConfig.Models = append(modelsConfig.Models, staticModel)
-				logger.Debug("Added static model from config.yaml", "model", staticModel.Name, "rpm", staticModel.RPM, "tpm", staticModel.TPM)
-			}
-		}
-	}
-
-	return &Manager{
+func New(logger *slog.Logger, defaultModelsRPM int, staticModels []config.ModelRPMConfig) *Manager {
+	m := &Manager{
 		credentialModels:   make(map[string][]string),
 		allModels:          make([]Model, 0),
 		modelToCredentials: make(map[string][]string),
-		modelsConfig:       modelsConfig,
-		modelsConfigPath:   modelsConfigPath,
+		modelLimits:        make(map[string][]ModelLimits),
 		defaultModelsRPM:   defaultModelsRPM,
 		logger:             logger,
-		enabled:            enabled,
+	}
+
+	// Load static models from config.yaml
+	if len(staticModels) > 0 {
+		logger.Info("Loading static models from config.yaml", "models_count", len(staticModels))
+		for _, staticModel := range staticModels {
+			m.modelLimits[staticModel.Name] = append(m.modelLimits[staticModel.Name], ModelLimits{
+				RPM:        staticModel.RPM,
+				TPM:        staticModel.TPM,
+				Credential: staticModel.Credential,
+			})
+			logger.Debug("Added static model from config.yaml",
+				"model", staticModel.Name,
+				"credential", staticModel.Credential,
+				"rpm", staticModel.RPM,
+				"tpm", staticModel.TPM)
+		}
+	}
+
+	return m
+}
+
+// addModelToMaps adds model to credential mapping, avoiding duplicates using sets
+func addModelToMaps(
+	credentialModels map[string][]string,
+	modelToCredentials map[string][]string,
+	credentialModelsSet map[string]map[string]bool,
+	modelToCredentialsSet map[string]map[string]bool,
+	credName, modelName string,
+) {
+	// Initialize sets if needed
+	if credentialModelsSet[credName] == nil {
+		credentialModelsSet[credName] = make(map[string]bool)
+	}
+	if modelToCredentialsSet[modelName] == nil {
+		modelToCredentialsSet[modelName] = make(map[string]bool)
+	}
+
+	// Add to credentialModels if not present
+	if !credentialModelsSet[credName][modelName] {
+		credentialModels[credName] = append(credentialModels[credName], modelName)
+		credentialModelsSet[credName][modelName] = true
+	}
+
+	// Add to modelToCredentials if not present
+	if !modelToCredentialsSet[modelName][credName] {
+		modelToCredentials[modelName] = append(modelToCredentials[modelName], credName)
+		modelToCredentialsSet[modelName][credName] = true
 	}
 }
 
-// FetchModels fetches models from all credentials at startup
-// Note: LoadModelsFromConfig should be called before this method
-func (m *Manager) FetchModels(credentials []config.CredentialConfig, timeout time.Duration) {
-	if !m.enabled {
-		m.logger.Info("Model API fetching disabled", "replace_v1_models", false)
-		return
-	}
-
-	m.logger.Info("Fetching models from credentials via API", "count", len(credentials))
-
-	client := &http.Client{
-		Timeout: timeout,
-		Transport: &http.Transport{
-			Proxy:               http.ProxyFromEnvironment, // Support HTTP_PROXY, HTTPS_PROXY, NO_PROXY
-			MaxIdleConns:        50,
-			MaxIdleConnsPerHost: 5,
-			IdleConnTimeout:     30 * time.Second,
-			DisableKeepAlives:   false,
-		},
-	}
-	defer client.CloseIdleConnections()
-
-	var wg sync.WaitGroup
-	modelsChan := make(chan struct {
-		credName string
-		models   []Model
-		err      error
-	}, len(credentials))
-
-	// Fetch models from all credentials in parallel
-	for _, cred := range credentials {
-		wg.Add(1)
-		go func(c config.CredentialConfig) {
-			defer wg.Done()
-
-			models, err := m.fetchModelsFromCredential(client, c)
-			modelsChan <- struct {
-				credName string
-				models   []Model
-				err      error
-			}{
-				credName: c.Name,
-				models:   models,
-				err:      err,
-			}
-		}(cred)
-	}
-
-	// Wait for all fetches to complete
-	go func() {
-		wg.Wait()
-		close(modelsChan)
-	}()
-
-	// Collect results
-	uniqueModels := make(map[string]Model)
-	for result := range modelsChan {
-		if result.err != nil {
-			m.logger.Error("Failed to fetch models from credential",
-				"credential", result.credName,
-				"error", result.err,
-			)
-			continue
-		}
-
-		// Store models for this credential
-		modelIDs := make([]string, len(result.models))
-		for i, model := range result.models {
-			modelIDs[i] = model.ID
-			// Add to unique models set
-			uniqueModels[model.ID] = model
-			// Map model to credential (avoid duplicates)
-			if !contains(m.modelToCredentials[model.ID], result.credName) {
-				m.modelToCredentials[model.ID] = append(m.modelToCredentials[model.ID], result.credName)
-			}
-		}
-
-		m.credentialModels[result.credName] = modelIDs
-		m.logger.Debug("Fetched models from credential",
-			"credential", result.credName,
-			"models_count", len(modelIDs),
-		)
-	}
-
-	// Convert unique models to slice
-	m.allModels = make([]Model, 0, len(uniqueModels))
-	for _, model := range uniqueModels {
-		m.allModels = append(m.allModels, model)
-	}
-
-	m.logger.Info("Model fetching complete",
-		"total_unique_models", len(m.allModels),
-		"credentials_with_models", len(m.credentialModels),
-	)
-
-	// Update models.yaml with newly discovered models
-	m.updateModelsConfig()
-}
-
-// LoadModelsFromConfig loads credential-specific models from config
-// This should be called once during initialization before FetchModels
+// LoadModelsFromConfig loads credential-specific models from static config
+// This should be called once during initialization
 func (m *Manager) LoadModelsFromConfig(credentials []config.CredentialConfig) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	if m.modelsConfig == nil || len(m.modelsConfig.Models) == 0 {
+	if len(m.modelLimits) == 0 {
 		m.logger.Debug("No models in config to load")
 		return
 	}
@@ -202,68 +117,60 @@ func (m *Manager) LoadModelsFromConfig(credentials []config.CredentialConfig) {
 		credNames[cred.Name] = true
 	}
 
+	// Create sets for efficient duplicate checking
+	credentialModelsSet := make(map[string]map[string]bool)
+	modelToCredentialsSet := make(map[string]map[string]bool)
+
 	credentialSpecificCount := 0
 	globalModelsCount := 0
 
-	// Process each model in config
-	for _, modelConfig := range m.modelsConfig.Models {
-		if modelConfig.Credential != "" {
-			// Model is specific to a credential
-			if !credNames[modelConfig.Credential] {
-				m.logger.Warn("Model references non-existent credential",
-					"model", modelConfig.Name,
-					"credential", modelConfig.Credential,
-				)
-				continue
-			}
-
-			// Add to credentialModels map (avoid duplicates)
-			if !contains(m.credentialModels[modelConfig.Credential], modelConfig.Name) {
-				m.credentialModels[modelConfig.Credential] = append(
-					m.credentialModels[modelConfig.Credential],
-					modelConfig.Name,
-				)
-			}
-
-			// Add to modelToCredentials map (avoid duplicates)
-			if !contains(m.modelToCredentials[modelConfig.Name], modelConfig.Credential) {
-				m.modelToCredentials[modelConfig.Name] = append(
-					m.modelToCredentials[modelConfig.Name],
-					modelConfig.Credential,
-				)
-			}
-
-			credentialSpecificCount++
-
-			m.logger.Debug("Registered credential-specific model",
-				"model", modelConfig.Name,
-				"credential", modelConfig.Credential,
-			)
-		} else {
-			// Model is global (no credential specified)
-			// Map to all credentials
-			for credName := range credNames {
-				// Add to credentialModels map (avoid duplicates)
-				if !contains(m.credentialModels[credName], modelConfig.Name) {
-					m.credentialModels[credName] = append(
-						m.credentialModels[credName],
-						modelConfig.Name,
+	// Process each model from static config
+	for modelName, limits := range m.modelLimits {
+		for _, limit := range limits {
+			if limit.Credential != "" {
+				// Model is specific to a credential
+				if !credNames[limit.Credential] {
+					m.logger.Warn("Model references non-existent credential",
+						"model", modelName,
+						"credential", limit.Credential,
 					)
+					continue
 				}
 
-				// Add to modelToCredentials map (avoid duplicates)
-				if !contains(m.modelToCredentials[modelConfig.Name], credName) {
-					m.modelToCredentials[modelConfig.Name] = append(
-						m.modelToCredentials[modelConfig.Name],
+				addModelToMaps(
+					m.credentialModels,
+					m.modelToCredentials,
+					credentialModelsSet,
+					modelToCredentialsSet,
+					limit.Credential,
+					modelName,
+				)
+
+				credentialSpecificCount++
+
+				m.logger.Debug("Registered credential-specific model",
+					"model", modelName,
+					"credential", limit.Credential,
+				)
+			} else {
+				// Model is global (no credential specified)
+				// Map to all credentials
+				for credName := range credNames {
+					addModelToMaps(
+						m.credentialModels,
+						m.modelToCredentials,
+						credentialModelsSet,
+						modelToCredentialsSet,
 						credName,
+						modelName,
 					)
 				}
-			}
 
-			globalModelsCount++
-			m.logger.Debug("Registered global model mapping",
-				"model", modelConfig.Name,
-			)
+				globalModelsCount++
+				m.logger.Debug("Registered global model mapping",
+					"model", modelName,
+				)
+			}
 		}
 	}
 
@@ -273,72 +180,19 @@ func (m *Manager) LoadModelsFromConfig(credentials []config.CredentialConfig) {
 	)
 }
 
-// contains checks if a string slice contains a specific value
-func contains(slice []string, val string) bool {
-	for _, item := range slice {
-		if item == val {
-			return true
-		}
-	}
-	return false
-}
-
-// fetchModelsFromCredential fetches models from a single credential
-func (m *Manager) fetchModelsFromCredential(client *http.Client, cred config.CredentialConfig) ([]Model, error) {
-	baseURL := strings.TrimSuffix(cred.BaseURL, "/")
-
-	// Check if baseURL already ends with /v1 to avoid /v1/v1/models
-	var url string
-	if strings.HasSuffix(baseURL, "/v1") {
-		url = baseURL + "/models"
-	} else {
-		url = baseURL + "/v1/models"
-	}
-
-	req, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create request: %w", err)
-	}
-
-	req.Header.Set("Authorization", "Bearer "+cred.APIKey)
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("failed to fetch models: %w", err)
-	}
-	defer func() {
-		if closeErr := resp.Body.Close(); closeErr != nil {
-			m.logger.Error("Failed to close response body", "error", closeErr)
-		}
-	}()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("unexpected status code %d: %s", resp.StatusCode, string(body))
-	}
-
-	var modelsResp ModelsResponse
-	if err := json.NewDecoder(resp.Body).Decode(&modelsResp); err != nil {
-		return nil, fmt.Errorf("failed to decode response: %w", err)
-	}
-
-	return modelsResp.Data, nil
-}
-
 // GetAllModels returns all unique models across all credentials
 func (m *Manager) GetAllModels() ModelsResponse {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	// If model fetching is disabled but models.yaml exists, return models from config
-	if !m.enabled && m.modelsConfig != nil && len(m.modelsConfig.Models) > 0 {
-		models := make([]Model, 0, len(m.modelsConfig.Models))
-		for _, modelConfig := range m.modelsConfig.Models {
+	// If static models are configured, return them
+	if len(m.modelLimits) > 0 {
+		models := make([]Model, 0, len(m.modelLimits))
+		for modelName := range m.modelLimits {
 			models = append(models, Model{
-				ID:      modelConfig.Name,
+				ID:      modelName,
 				Object:  "model",
-				Created: time.Now().Unix(),
+				Created: openai.GetCurrentTimestamp(),
 				OwnedBy: "system",
 			})
 		}
@@ -372,94 +226,97 @@ func (m *Manager) GetCredentialsForModel(modelID string) []string {
 	return result
 }
 
+// hasModelInCredentials checks if modelID is assigned to credentialName in modelToCredentials map
+func hasModelInCredentials(modelToCredentials map[string][]string, modelID, credentialName string) (bool, bool) {
+	creds, modelExists := modelToCredentials[modelID]
+	if !modelExists {
+		return false, false // Model doesn't exist in map
+	}
+
+	for _, cred := range creds {
+		if cred == credentialName {
+			return true, true // Model exists and credential matches
+		}
+	}
+
+	return false, true // Model exists but credential doesn't match
+}
+
 // HasModel checks if a credential supports a specific model
 func (m *Manager) HasModel(credentialName, modelID string) bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	// If API fetching is disabled
-	if !m.enabled {
-		// If we have models in config, check credential-specific mappings first
-		if m.modelsConfig != nil && len(m.modelsConfig.Models) > 0 {
-			// Check modelToCredentials map (populated by LoadModelsFromConfig)
-			if creds, ok := m.modelToCredentials[modelID]; ok {
-				for _, cred := range creds {
-					if cred == credentialName {
-						return true
-					}
-				}
-				// Model exists but not for this credential
-				return false
-			}
-			// Model not found in modelToCredentials
-			// Check if this credential exists in our system
-			if _, credExists := m.credentialModels[credentialName]; credExists {
-				// Credential exists but model not found - deny
-				return false
-			}
-			// If modelToCredentials is empty (LoadModelsFromConfig not called),
-			// check if model exists in config directly
-			if len(m.modelToCredentials) == 0 {
-				for _, modelConfig := range m.modelsConfig.Models {
-					if modelConfig.Name == modelID {
-						return true // Model exists in config
-					}
-				}
-				return false
-			}
-			// Credential doesn't exist - allow (fallback behavior)
-			return true
-		}
-		// No config available - allow all (fallback behavior)
+	// Check modelToCredentials map
+	hasModel, modelExists := hasModelInCredentials(m.modelToCredentials, modelID, credentialName)
+	if hasModel {
 		return true
 	}
-
-	// API fetching is enabled - check modelToCredentials map first
-	if creds, ok := m.modelToCredentials[modelID]; ok {
-		for _, cred := range creds {
-			if cred == credentialName {
-				return true
-			}
-		}
+	if modelExists {
 		// Model exists but not for this credential
 		return false
 	}
 
-	// Check credentialModels map (for fetched models)
+	// Model not found in modelToCredentials
+	// Check if we have any models configured
+	hasStaticModels := len(m.modelLimits) > 0
+	credentialExists := false
+
+	// Check credentialModels map
 	if models, ok := m.credentialModels[credentialName]; ok {
+		credentialExists = true
+		// If credential exists, check if it has the model
 		for _, model := range models {
 			if model == modelID {
 				return true
 			}
 		}
-		// Credential exists but doesn't have this model
+	}
+
+	// If we have static models configured and credential exists but model not found - deny
+	if hasStaticModels && credentialExists {
 		return false
 	}
 
-	// Credential not found - allow (fallback behavior for unknown credentials)
+	// If credential doesn't exist, allow (fallback behavior)
+	// If no models configured, allow all (fallback behavior)
 	return true
 }
 
 // IsEnabled returns whether model filtering should be used
-// Returns true if:
-// 1. API fetching is enabled (replace_v1_models=true), OR
-// 2. There are models defined in config (models.yaml or config.yaml)
+// Returns true if there are models defined in static config
 func (m *Manager) IsEnabled() bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	// If API fetching is enabled, filtering is enabled
-	if m.enabled {
-		return true
+	// Filtering is enabled if we have static models configured
+	return len(m.modelLimits) > 0
+}
+
+// findRPMLimit searches for RPM limit with optional credential filtering
+func findRPMLimit(limits []ModelLimits, credentialName string) (int, bool) {
+	if credentialName != "" {
+		// Look for credential-specific limit first
+		for _, limit := range limits {
+			if limit.Credential == credentialName {
+				return limit.RPM, true
+			}
+		}
 	}
 
-	// If API fetching is disabled, check if we have models in config
-	if m.modelsConfig != nil && len(m.modelsConfig.Models) > 0 {
-		return true
+	// Fall back to global limit (no credential specified)
+	for _, limit := range limits {
+		if limit.Credential == "" {
+			return limit.RPM, true
+		}
 	}
 
-	// No API fetching and no config - filtering is disabled
-	return false
+	// If only credential-specific limits exist and no credential specified, return first one
+	if credentialName == "" && len(limits) > 0 {
+		return limits[0].RPM, true
+	}
+
+	return 0, false
 }
 
 // GetModelRPM returns RPM limit for a specific model
@@ -467,11 +324,16 @@ func (m *Manager) GetModelRPM(modelID string) int {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	if m.modelsConfig == nil {
+	limits, ok := m.modelLimits[modelID]
+	if !ok {
 		return m.defaultModelsRPM
 	}
 
-	return m.modelsConfig.GetModelRPM(modelID, m.defaultModelsRPM)
+	if rpm, found := findRPMLimit(limits, ""); found {
+		return rpm
+	}
+
+	return m.defaultModelsRPM
 }
 
 // GetModelRPMForCredential returns RPM limit for a specific model and credential
@@ -479,11 +341,52 @@ func (m *Manager) GetModelRPMForCredential(modelID, credentialName string) int {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	if m.modelsConfig == nil {
+	limits, ok := m.modelLimits[modelID]
+	if !ok {
 		return m.defaultModelsRPM
 	}
 
-	return m.modelsConfig.GetModelRPMForCredential(modelID, credentialName, m.defaultModelsRPM)
+	if rpm, found := findRPMLimit(limits, credentialName); found {
+		return rpm
+	}
+
+	return m.defaultModelsRPM
+}
+
+// findTPMLimit searches for TPM limit with optional credential filtering
+// Returns -1 for unlimited (when TPM is 0 or not set)
+func findTPMLimit(limits []ModelLimits, credentialName string) (int, bool) {
+	if credentialName != "" {
+		// Look for credential-specific limit first
+		for _, limit := range limits {
+			if limit.Credential == credentialName {
+				if limit.TPM == 0 {
+					return -1, true // 0 means unlimited
+				}
+				return limit.TPM, true
+			}
+		}
+	}
+
+	// Fall back to global limit (no credential specified)
+	for _, limit := range limits {
+		if limit.Credential == "" {
+			if limit.TPM == 0 {
+				return -1, true // 0 means unlimited
+			}
+			return limit.TPM, true
+		}
+	}
+
+	// If only credential-specific limits exist and no credential specified, return first one
+	if credentialName == "" && len(limits) > 0 {
+		if limits[0].TPM == 0 {
+			return -1, true
+		}
+		return limits[0].TPM, true
+	}
+
+	return 0, false
 }
 
 // GetModelTPM returns TPM limit for a specific model
@@ -491,11 +394,16 @@ func (m *Manager) GetModelTPM(modelID string) int {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	if m.modelsConfig == nil {
+	limits, ok := m.modelLimits[modelID]
+	if !ok {
 		return -1 // Unlimited by default
 	}
 
-	return m.modelsConfig.GetModelTPM(modelID, -1)
+	if tpm, found := findTPMLimit(limits, ""); found {
+		return tpm
+	}
+
+	return -1
 }
 
 // GetModelTPMForCredential returns TPM limit for a specific model and credential
@@ -503,11 +411,16 @@ func (m *Manager) GetModelTPMForCredential(modelID, credentialName string) int {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
-	if m.modelsConfig == nil {
+	limits, ok := m.modelLimits[modelID]
+	if !ok {
 		return -1 // Unlimited by default
 	}
 
-	return m.modelsConfig.GetModelTPMForCredential(modelID, credentialName, -1)
+	if tpm, found := findTPMLimit(limits, credentialName); found {
+		return tpm
+	}
+
+	return -1
 }
 
 // GetModelsForCredential returns all models available for a specific credential
@@ -517,15 +430,22 @@ func (m *Manager) GetModelsForCredential(credentialName string) []Model {
 
 	var result []Model
 
-	// If we have models in config, use them
-	if m.modelsConfig != nil && len(m.modelsConfig.Models) > 0 {
-		for _, modelConfig := range m.modelsConfig.Models {
+	// If we have static models configured, use them
+	if len(m.modelLimits) > 0 {
+		for modelName, limits := range m.modelLimits {
 			// Check if model is available for this credential
-			if modelConfig.Credential == "" || modelConfig.Credential == credentialName {
+			available := false
+			for _, limit := range limits {
+				if limit.Credential == "" || limit.Credential == credentialName {
+					available = true
+					break
+				}
+			}
+			if available {
 				result = append(result, Model{
-					ID:      modelConfig.Name,
+					ID:      modelName,
 					Object:  "model",
-					Created: time.Now().Unix(),
+					Created: openai.GetCurrentTimestamp(),
 					OwnedBy: "system",
 				})
 			}
@@ -533,7 +453,7 @@ func (m *Manager) GetModelsForCredential(credentialName string) []Model {
 		return result
 	}
 
-	// If no config, check credentialModels map (from API fetching)
+	// If no static config, check credentialModels map
 	if modelIDs, ok := m.credentialModels[credentialName]; ok {
 		for _, modelID := range modelIDs {
 			// Find the model in allModels
@@ -547,43 +467,4 @@ func (m *Manager) GetModelsForCredential(credentialName string) []Model {
 	}
 
 	return result
-}
-
-// updateModelsConfig updates models.yaml with newly discovered models
-func (m *Manager) updateModelsConfig() {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	if m.modelsConfig == nil {
-		m.modelsConfig = &config.ModelsConfig{Models: []config.ModelRPMConfig{}}
-	}
-
-	// Add all discovered models that don't exist in config yet
-	updated := false
-	for _, model := range m.allModels {
-		// Check if model already exists in config
-		exists := false
-		for _, existingModel := range m.modelsConfig.Models {
-			if existingModel.Name == model.ID {
-				exists = true
-				break
-			}
-		}
-
-		// Add new model with default RPM
-		if !exists {
-			m.modelsConfig.UpdateOrAddModel(model.ID, m.defaultModelsRPM)
-			updated = true
-			m.logger.Debug("Added model to config", "model", model.ID, "rpm", m.defaultModelsRPM)
-		}
-	}
-
-	// Save updated config if changes were made
-	if updated {
-		if err := config.SaveModelsConfig(m.modelsConfigPath, m.modelsConfig); err != nil {
-			m.logger.Error("Failed to save models config", "error", err, "path", m.modelsConfigPath)
-		} else {
-			m.logger.Info("Updated models config", "path", m.modelsConfigPath, "total_models", len(m.modelsConfig.Models))
-		}
-	}
 }

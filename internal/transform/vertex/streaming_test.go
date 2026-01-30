@@ -1,7 +1,8 @@
-package vertex_transform
+package vertex
 
 import (
 	"bytes"
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -158,5 +159,95 @@ data: [DONE]
 
 	if strings.Contains(result, ": comment") {
 		t.Errorf("Output should not contain comment lines")
+	}
+}
+
+func TestTransformVertexStreamToOpenAI_RoleInFirstChunk(t *testing.T) {
+	input := strings.NewReader(`data: {"candidates":[{"content":{"parts":[{"text":"Hello"}],"role":"model"}}]}
+
+data: {"candidates":[{"content":{"parts":[{"text":" world"}],"role":"model"}}]}
+
+data: [DONE]
+
+`)
+	var output bytes.Buffer
+
+	err := TransformVertexStreamToOpenAI(input, "test-model", &output)
+
+	if err != nil {
+		t.Errorf("TransformVertexStreamToOpenAI() error = %v", err)
+	}
+
+	result := output.String()
+
+	// Parse each chunk to verify role handling
+	lines := strings.Split(result, "\n")
+	chunkCount := 0
+	for _, line := range lines {
+		if strings.HasPrefix(line, "data: {") {
+			var chunk map[string]interface{}
+			if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &chunk); err != nil {
+				continue
+			}
+
+			if chunkCount == 0 {
+				// First chunk should have role
+				if choices, ok := chunk["choices"].([]interface{}); ok && len(choices) > 0 {
+					if choice, ok := choices[0].(map[string]interface{}); ok {
+						if delta, ok := choice["delta"].(map[string]interface{}); ok {
+							if role, ok := delta["role"].(string); !ok || role != "assistant" {
+								t.Errorf("First chunk should have role='assistant', got: %v", delta["role"])
+							}
+						}
+					}
+				}
+			} else if chunkCount < 2 {
+				// Second chunk should not have role
+				if choices, ok := chunk["choices"].([]interface{}); ok && len(choices) > 0 {
+					if choice, ok := choices[0].(map[string]interface{}); ok {
+						if delta, ok := choice["delta"].(map[string]interface{}); ok {
+							if role, ok := delta["role"]; ok && role != "" {
+								t.Errorf("Subsequent chunks should not have role, got: %v", role)
+							}
+						}
+					}
+				}
+			}
+			chunkCount++
+		}
+	}
+
+	if chunkCount < 2 {
+		t.Errorf("Expected at least 2 data chunks, got %d", chunkCount)
+	}
+}
+
+func TestTransformVertexStreamToOpenAI_EmptyCandidates(t *testing.T) {
+	input := strings.NewReader(`data: {"candidates":[]}
+
+data: {"candidates":[{"content":{"parts":[{"text":"Valid"}],"role":"model"}}]}
+
+data: [DONE]
+
+`)
+	var output bytes.Buffer
+
+	err := TransformVertexStreamToOpenAI(input, "test-model", &output)
+
+	if err != nil {
+		t.Errorf("TransformVertexStreamToOpenAI() error = %v", err)
+	}
+
+	result := output.String()
+
+	// Should skip empty candidates and only contain valid data
+	if !strings.Contains(result, "Valid") {
+		t.Errorf("Expected output to contain 'Valid', got: %s", result)
+	}
+
+	// Count data chunks - should skip the empty candidates chunk
+	count := strings.Count(result, "data: {")
+	if count < 1 {
+		t.Errorf("Expected at least 1 valid data chunk, got %d", count)
 	}
 }

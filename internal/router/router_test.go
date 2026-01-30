@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -42,15 +43,64 @@ func createTestProxy() *proxy.Proxy {
 	return proxy.New(bal, logger, 10, 30*time.Second, metrics, "test-master-key", rl, tokenManager, createTestModelManager(), "test-version", "test-commit")
 }
 
-// createTestModelManager creates a test model manager instance
+// createTestModelManager creates a test model manager instance (disabled - no static models)
 func createTestModelManager() *models.Manager {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-	return models.New(logger, false, 100, "/tmp/models_test.yaml", []config.ModelRPMConfig{})
+	return models.New(logger, 100, []config.ModelRPMConfig{})
+}
+
+// createEnabledTestModelManager creates an enabled model manager with static models
+func createEnabledTestModelManager() *models.Manager {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+	staticModels := []config.ModelRPMConfig{{Name: "test-model", RPM: 100, TPM: 100000}}
+	return models.New(logger, 100, staticModels)
+}
+
+// createProxyWithConfig creates a test proxy with custom credentials
+func createProxyWithConfig(credentials []config.CredentialConfig, bannedCreds []string) *proxy.Proxy {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+	f2b := fail2ban.New(1, 0, []int{500})
+	rl := ratelimit.New()
+
+	for _, cred := range credentials {
+		rl.AddCredential(cred.Name, cred.RPM)
+	}
+
+	bal := balancer.New(credentials, f2b, rl)
+
+	// Ban specified credentials
+	for _, credName := range bannedCreds {
+		f2b.RecordResponse(credName, 500)
+	}
+
+	metrics := monitoring.New(false)
+	tm := auth.NewVertexTokenManager(logger)
+	return proxy.New(bal, logger, 10, 30*time.Second, metrics, "test-key", rl, tm, createTestModelManager(), "test-version", "test-commit")
+}
+
+// createProxyWithMockServer creates a proxy configured with a mock server URL
+func createProxyWithMockServer(mockServerURL string) *proxy.Proxy {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+	f2b := fail2ban.New(3, 0, []int{500})
+	rl := ratelimit.New()
+
+	credentials := []config.CredentialConfig{
+		{Name: "test1", APIKey: "key1", BaseURL: mockServerURL, RPM: 100},
+	}
+
+	for _, cred := range credentials {
+		rl.AddCredential(cred.Name, cred.RPM)
+	}
+
+	bal := balancer.New(credentials, f2b, rl)
+	metrics := monitoring.New(false)
+	tm := auth.NewVertexTokenManager(logger)
+	return proxy.New(bal, logger, 10, 30*time.Second, metrics, "test-key", rl, tm, createTestModelManager(), "test-version", "test-commit")
 }
 
 func TestNew(t *testing.T) {
 	prx := createTestProxy()
-	modelManager := models.New(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError})), false, 100, "/tmp/models_test.yaml", []config.ModelRPMConfig{})
+	modelManager := createTestModelManager()
 
 	r := New(nil, "/health", modelManager)
 
@@ -82,27 +132,10 @@ func TestServeHTTP_HealthCheck(t *testing.T) {
 }
 
 func TestServeHTTP_HealthCheck_Unhealthy(t *testing.T) {
-	// Create a proxy with all credentials banned
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-	f2b := fail2ban.New(1, 0, []int{500})
-	rl := ratelimit.New()
-
 	credentials := []config.CredentialConfig{
 		{Name: "test1", APIKey: "key1", BaseURL: "http://test1.com", RPM: 100},
 	}
-
-	for _, cred := range credentials {
-		rl.AddCredential(cred.Name, cred.RPM)
-	}
-
-	bal := balancer.New(credentials, f2b, rl)
-	// Ban the credential
-	f2b.RecordResponse("test1", 500)
-
-	metrics := monitoring.New(false)
-	tm := auth.NewVertexTokenManager(logger)
-	prx := proxy.New(bal, logger, 10, 30*time.Second, metrics, "test-key", rl, tm, createTestModelManager(), "test-version", "test-commit")
-
+	prx := createProxyWithConfig(credentials, []string{"test1"})
 	router := New(prx, "/health", nil)
 
 	req := httptest.NewRequest("GET", "/health", nil)
@@ -120,8 +153,7 @@ func TestServeHTTP_HealthCheck_Unhealthy(t *testing.T) {
 }
 
 func TestServeHTTP_V1Models_Enabled(t *testing.T) {
-	// Create a model manager with enabled=true and manually add models
-	modelManager := models.New(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError})), true, 100, "/tmp/models_test.yaml", []config.ModelRPMConfig{})
+	modelManager := createEnabledTestModelManager()
 
 	prx := createTestProxy()
 	router := New(prx, "/health", modelManager)
@@ -142,7 +174,6 @@ func TestServeHTTP_V1Models_Enabled(t *testing.T) {
 }
 
 func TestServeHTTP_V1Models_Disabled(t *testing.T) {
-	// Create mock server to verify proxy behavior
 	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
@@ -150,24 +181,8 @@ func TestServeHTTP_V1Models_Disabled(t *testing.T) {
 	}))
 	defer mockServer.Close()
 
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-	f2b := fail2ban.New(3, 0, []int{500})
-	rl := ratelimit.New()
-
-	credentials := []config.CredentialConfig{
-		{Name: "test1", APIKey: "key1", BaseURL: mockServer.URL, RPM: 100},
-	}
-
-	for _, cred := range credentials {
-		rl.AddCredential(cred.Name, cred.RPM)
-	}
-
-	bal := balancer.New(credentials, f2b, rl)
-	metrics := monitoring.New(false)
-	tm := auth.NewVertexTokenManager(logger)
-	prx := proxy.New(bal, logger, 10, 30*time.Second, metrics, "test-key", rl, tm, createTestModelManager(), "test-version", "test-commit")
-
-	modelManager := models.New(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError})), false, 100, "/tmp/models_test.yaml", []config.ModelRPMConfig{}) // disabled
+	prx := createProxyWithMockServer(mockServer.URL)
+	modelManager := createTestModelManager() // disabled (no static models)
 	router := New(prx, "/health", modelManager)
 
 	req := httptest.NewRequest("GET", "/v1/models", nil)
@@ -181,7 +196,6 @@ func TestServeHTTP_V1Models_Disabled(t *testing.T) {
 }
 
 func TestServeHTTP_V1Models_NilManager(t *testing.T) {
-	// Create mock server to verify proxy behavior
 	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
@@ -189,23 +203,7 @@ func TestServeHTTP_V1Models_NilManager(t *testing.T) {
 	}))
 	defer mockServer.Close()
 
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-	f2b := fail2ban.New(3, 0, []int{500})
-	rl := ratelimit.New()
-
-	credentials := []config.CredentialConfig{
-		{Name: "test1", APIKey: "key1", BaseURL: mockServer.URL, RPM: 100},
-	}
-
-	for _, cred := range credentials {
-		rl.AddCredential(cred.Name, cred.RPM)
-	}
-
-	bal := balancer.New(credentials, f2b, rl)
-	metrics := monitoring.New(false)
-	tm := auth.NewVertexTokenManager(logger)
-	prx := proxy.New(bal, logger, 10, 30*time.Second, metrics, "test-key", rl, tm, createTestModelManager(), "test-version", "test-commit")
-
+	prx := createProxyWithMockServer(mockServer.URL)
 	router := New(prx, "/health", nil)
 
 	req := httptest.NewRequest("GET", "/v1/models", nil)
@@ -219,35 +217,22 @@ func TestServeHTTP_V1Models_NilManager(t *testing.T) {
 }
 
 func TestServeHTTP_V1Models_PostMethod(t *testing.T) {
-	// Create mock server
 	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, "POST", r.Method)
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer mockServer.Close()
 
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-	f2b := fail2ban.New(3, 0, []int{500})
-	rl := ratelimit.New()
-
-	credentials := []config.CredentialConfig{
-		{Name: "test1", APIKey: "key1", BaseURL: mockServer.URL, RPM: 100},
-	}
-
-	for _, cred := range credentials {
-		rl.AddCredential(cred.Name, cred.RPM)
-	}
-
-	bal := balancer.New(credentials, f2b, rl)
-	metrics := monitoring.New(false)
-	tm := auth.NewVertexTokenManager(logger)
-	prx := proxy.New(bal, logger, 10, 30*time.Second, metrics, "test-key", rl, tm, createTestModelManager(), "test-version", "test-commit")
-
-	modelManager := models.New(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError})), true, 100, "/tmp/models_test.yaml", []config.ModelRPMConfig{})
+	prx := createProxyWithMockServer(mockServer.URL)
+	modelManager := createEnabledTestModelManager()
 	router := New(prx, "/health", modelManager)
 
-	req := httptest.NewRequest("POST", "/v1/models", nil)
+	// POST /v1/models should be proxied even if model manager is enabled
+	// Include a model field in the body as required by proxy
+	body := []byte(`{"model": "test-model"}`)
+	req := httptest.NewRequest("POST", "/v1/models", strings.NewReader(string(body)))
 	req.Header.Set("Authorization", "Bearer test-key")
+	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 
 	router.ServeHTTP(w, req)
@@ -257,7 +242,6 @@ func TestServeHTTP_V1Models_PostMethod(t *testing.T) {
 }
 
 func TestServeHTTP_ProxyRequest(t *testing.T) {
-	// Create mock server
 	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
@@ -265,23 +249,7 @@ func TestServeHTTP_ProxyRequest(t *testing.T) {
 	}))
 	defer mockServer.Close()
 
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-	f2b := fail2ban.New(3, 0, []int{500})
-	rl := ratelimit.New()
-
-	credentials := []config.CredentialConfig{
-		{Name: "test1", APIKey: "key1", BaseURL: mockServer.URL, RPM: 100},
-	}
-
-	for _, cred := range credentials {
-		rl.AddCredential(cred.Name, cred.RPM)
-	}
-
-	bal := balancer.New(credentials, f2b, rl)
-	metrics := monitoring.New(false)
-	tm := auth.NewVertexTokenManager(logger)
-	prx := proxy.New(bal, logger, 10, 30*time.Second, metrics, "test-key", rl, tm, createTestModelManager(), "test-version", "test-commit")
-
+	prx := createProxyWithMockServer(mockServer.URL)
 	router := New(prx, "/health", nil)
 
 	tests := []struct {
@@ -296,8 +264,10 @@ func TestServeHTTP_ProxyRequest(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			req := httptest.NewRequest("POST", tt.path, nil)
+			body := []byte(`{"model": "test-model"}`)
+			req := httptest.NewRequest("POST", tt.path, strings.NewReader(string(body)))
 			req.Header.Set("Authorization", "Bearer test-key")
+			req.Header.Set("Content-Type", "application/json")
 			w := httptest.NewRecorder()
 
 			router.ServeHTTP(w, req)
@@ -358,30 +328,11 @@ func TestHandleHealth(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-			f2b := fail2ban.New(1, 0, []int{500})
-			rl := ratelimit.New()
-
 			credentials := []config.CredentialConfig{
 				{Name: "test1", APIKey: "key1", BaseURL: "http://test1.com", RPM: 100},
 				{Name: "test2", APIKey: "key2", BaseURL: "http://test2.com", RPM: 100},
 			}
-
-			for _, cred := range credentials {
-				rl.AddCredential(cred.Name, cred.RPM)
-			}
-
-			bal := balancer.New(credentials, f2b, rl)
-
-			// Ban specified credentials
-			for _, credName := range tt.bannedCreds {
-				f2b.RecordResponse(credName, 500)
-			}
-
-			metrics := monitoring.New(false)
-			tm := auth.NewVertexTokenManager(logger)
-			prx := proxy.New(bal, logger, 10, 30*time.Second, metrics, "test-key", rl, tm, createTestModelManager(), "test-version", "test-commit")
-
+			prx := createProxyWithConfig(credentials, tt.bannedCreds)
 			router := New(prx, "/health", nil)
 
 			req := httptest.NewRequest("GET", "/health", nil)
@@ -406,7 +357,7 @@ func TestHandleHealth(t *testing.T) {
 }
 
 func TestHandleModels(t *testing.T) {
-	modelManager := models.New(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError})), true, 100, "/tmp/models_test.yaml", []config.ModelRPMConfig{})
+	modelManager := createEnabledTestModelManager()
 	prx := createTestProxy()
 
 	router := New(prx, "/health", modelManager)

@@ -35,8 +35,8 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	// Handle GET /v1/models if model manager is enabled
-	if req.URL.Path == "/v1/models" && req.Method == "GET" && r.modelManager != nil && r.modelManager.IsEnabled() {
+	// Handle GET /v1/models
+	if req.URL.Path == "/v1/models" && req.Method == "GET" {
 		r.handleModels(w, req)
 		return
 	}
@@ -65,7 +65,12 @@ func (r *Router) handleHealth(w http.ResponseWriter, req *http.Request) {
 }
 
 func (r *Router) handleModels(w http.ResponseWriter, req *http.Request) {
-	modelsResp := r.modelManager.GetAllModels()
+	var modelsResp models.ModelsResponse
+	if r.modelManager != nil {
+		modelsResp = r.modelManager.GetAllModels()
+	} else {
+		modelsResp = models.ModelsResponse{Object: "list", Data: []models.Model{}}
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)

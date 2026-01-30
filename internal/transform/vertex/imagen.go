@@ -1,8 +1,10 @@
-package vertex_transform
+package vertex
 
 import (
 	"encoding/json"
 	"fmt"
+
+	"github.com/mixaill76/auto_ai_router/internal/transform/openai"
 )
 
 // OpenAIImageRequest represents OpenAI image generation request
@@ -74,10 +76,13 @@ func OpenAIImageToVertex(openAIBody []byte) ([]byte, error) {
 		aspectRatio = "9:16"
 	}
 
-	// Set sample count
+	// Set sample count (max 10 for image generation)
 	sampleCount := 1
 	if openAIReq.N != nil && *openAIReq.N > 0 {
 		sampleCount = *openAIReq.N
+		if sampleCount > 10 {
+			sampleCount = 10
+		}
 	}
 
 	// Handle quality and style (basic mapping)
@@ -110,7 +115,7 @@ func VertexImageToOpenAI(vertexBody []byte) ([]byte, error) {
 	}
 
 	openAIResp := OpenAIImageResponse{
-		Created: getCurrentTimestamp(),
+		Created: openai.GetCurrentTimestamp(),
 		Data:    make([]OpenAIImageData, 0),
 	}
 

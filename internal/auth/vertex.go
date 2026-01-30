@@ -53,61 +53,46 @@ func (tm *VertexTokenManager) GetToken(credentialName, credentialsFile, credenti
 		}
 
 		// Token is expired or about to expire, refresh it
-		tm.logger.Debug("Refreshing Vertex AI token",
-			"credential", credentialName,
-			"expires_at", cached.expiresAt,
-		)
-
-		newToken, err := cached.tokenSource.Token()
-		if err != nil {
-			tm.logger.Error("Failed to refresh Vertex AI token",
-				"credential", credentialName,
-				"error", err,
-			)
-			// Remove invalid token from cache
-			delete(tm.tokens, credentialName)
-			return "", fmt.Errorf("failed to refresh token: %w", err)
-		}
-
-		// Update cached token
-		cached.token = newToken
-		cached.expiresAt = newToken.Expiry
-		tm.logger.Info("Vertex AI token refreshed",
-			"credential", credentialName,
-			"expires_at", newToken.Expiry,
-		)
-		return newToken.AccessToken, nil
+		return tm.refreshToken(credentialName, cached)
 	}
 
 	// No cached token, create a new one
+	return tm.createNewToken(credentialName, credentialsFile, credentialsJSON)
+}
+
+func (tm *VertexTokenManager) refreshToken(credentialName string, cached *cachedToken) (string, error) {
+	tm.logger.Debug("Refreshing Vertex AI token",
+		"credential", credentialName,
+		"expires_at", cached.expiresAt,
+	)
+
+	newToken, err := cached.tokenSource.Token()
+	if err != nil {
+		tm.logger.Error("Failed to refresh Vertex AI token",
+			"credential", credentialName,
+			"error", err,
+		)
+		// Remove invalid token from cache
+		delete(tm.tokens, credentialName)
+		return "", fmt.Errorf("failed to refresh token: %w", err)
+	}
+
+	// Update cached token
+	cached.token = newToken
+	cached.expiresAt = newToken.Expiry
+	tm.logger.Info("Vertex AI token refreshed",
+		"credential", credentialName,
+		"expires_at", newToken.Expiry,
+	)
+	return newToken.AccessToken, nil
+}
+
+func (tm *VertexTokenManager) createNewToken(credentialName, credentialsFile, credentialsJSON string) (string, error) {
 	tm.logger.Debug("Creating new Vertex AI token", "credential", credentialName)
 
-	var credBytes []byte
-	var err error
-
-	// Check if credentials are cached
-	if cached, exists := tm.credentials[credentialName]; exists {
-		credBytes = cached
-		tm.logger.Debug("Using cached credentials", "credential", credentialName)
-	} else {
-		// Load credentials from file or JSON string
-		if credentialsFile != "" {
-			credBytes, err = os.ReadFile(credentialsFile)
-			if err != nil {
-				return "", fmt.Errorf("failed to read credentials file %s: %w", credentialsFile, err)
-			}
-			tm.logger.Debug("Loaded credentials from file",
-				"credential", credentialName,
-				"file", credentialsFile,
-			)
-		} else if credentialsJSON != "" {
-			credBytes = []byte(credentialsJSON)
-			tm.logger.Debug("Using credentials from config", "credential", credentialName)
-		} else {
-			return "", fmt.Errorf("no credentials provided for %s", credentialName)
-		}
-		// Cache the credentials
-		tm.credentials[credentialName] = credBytes
+	credBytes, err := tm.loadCredentials(credentialName, credentialsFile, credentialsJSON)
+	if err != nil {
+		return "", err
 	}
 
 	// Parse and validate service account JSON
@@ -150,6 +135,38 @@ func (tm *VertexTokenManager) GetToken(credentialName, credentialsFile, credenti
 	)
 
 	return token.AccessToken, nil
+}
+
+func (tm *VertexTokenManager) loadCredentials(credentialName, credentialsFile, credentialsJSON string) ([]byte, error) {
+	// Check if credentials are cached
+	if cached, exists := tm.credentials[credentialName]; exists {
+		tm.logger.Debug("Using cached credentials", "credential", credentialName)
+		return cached, nil
+	}
+
+	var credBytes []byte
+	var err error
+
+	// Load credentials from file or JSON string
+	if credentialsFile != "" {
+		credBytes, err = os.ReadFile(credentialsFile)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read credentials file %s: %w", credentialsFile, err)
+		}
+		tm.logger.Debug("Loaded credentials from file",
+			"credential", credentialName,
+			"file", credentialsFile,
+		)
+	} else if credentialsJSON != "" {
+		credBytes = []byte(credentialsJSON)
+		tm.logger.Debug("Using credentials from config", "credential", credentialName)
+	} else {
+		return nil, fmt.Errorf("no credentials provided for %s", credentialName)
+	}
+
+	// Cache the credentials
+	tm.credentials[credentialName] = credBytes
+	return credBytes, nil
 }
 
 // ClearToken removes a token from the cache (useful for testing or manual refresh)
