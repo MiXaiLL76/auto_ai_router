@@ -1,6 +1,7 @@
 package vertex
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -19,8 +20,24 @@ type VertexRequest struct {
 }
 
 // OpenAIToVertex converts OpenAI format request to Vertex AI format
-func OpenAIToVertex(openAIBody []byte) ([]byte, error) {
+func OpenAIToVertex(openAIBody []byte, isImageGeneration bool, model string) ([]byte, error) {
 	var openAIReq openai.OpenAIRequest
+
+	if isImageGeneration {
+		if strings.Contains(model, "gemini") {
+			// For Gemini models, convert imagen request to chat request first
+			chatBody, err := ImageRequestToOpenAIChatRequest(openAIBody)
+			if err != nil {
+				return nil, err
+			}
+			// Now process as normal chat request (no longer isImageGeneration, just normal chat)
+			openAIBody = chatBody
+		} else {
+			// For non-Gemini models (like Imagen), use standard image conversion
+			return OpenAIImageToVertex(openAIBody)
+		}
+	}
+
 	if err := json.Unmarshal(openAIBody, &openAIReq); err != nil {
 		return nil, fmt.Errorf("failed to parse OpenAI request: %w", err)
 	}
@@ -101,6 +118,8 @@ func OpenAIToVertex(openAIBody []byte) ([]byte, error) {
 					tempVal := float32(temp)
 					genConfig.Temperature = &tempVal
 				}
+				// Note: image_config parameters are passed through extra_body
+				// and will be included in the final request JSON by the SDK
 			}
 			// Handle modalities at top level
 			if modalities, ok := openAIReq.ExtraBody["modalities"].([]interface{}); ok {
@@ -242,8 +261,9 @@ func VertexToOpenAI(vertexBody []byte, model string) ([]byte, error) {
 				}
 				// Handle inline data (images) from Vertex response
 				if part.InlineData != nil {
+					b64Data := base64.StdEncoding.EncodeToString(part.InlineData.Data)
 					images = append(images, openai.ImageData{
-						B64JSON: string(part.InlineData.Data),
+						B64JSON: b64Data,
 					})
 				}
 				// Handle function calls from Vertex response

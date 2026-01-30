@@ -221,7 +221,7 @@ func TestOpenAIToolsConversion(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result, err := OpenAIToVertex([]byte(tt.input))
+			result, err := OpenAIToVertex([]byte(tt.input), false, "")
 
 			if tt.wantErr {
 				assert.Error(t, err, "Expected error but got none")
@@ -540,7 +540,7 @@ func TestToolsWithOtherParameters(t *testing.T) {
 		}]
 	}`
 
-	result, err := OpenAIToVertex([]byte(input))
+	result, err := OpenAIToVertex([]byte(input), false, "")
 	assert.NoError(t, err)
 
 	var resultMap map[string]interface{}
@@ -813,7 +813,7 @@ func TestToolMessageConversion(t *testing.T) {
 		}]
 	}`
 
-	result, err := OpenAIToVertex([]byte(input))
+	result, err := OpenAIToVertex([]byte(input), false, "")
 	assert.NoError(t, err)
 
 	var resultMap map[string]interface{}
@@ -859,7 +859,7 @@ func TestToolMessageWithoutToolCallId(t *testing.T) {
 		]
 	}`
 
-	result, err := OpenAIToVertex([]byte(input))
+	result, err := OpenAIToVertex([]byte(input), false, "")
 	assert.NoError(t, err)
 
 	var resultMap map[string]interface{}

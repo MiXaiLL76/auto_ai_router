@@ -254,7 +254,7 @@ func TestOpenAIToVertex(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result, err := OpenAIToVertex([]byte(tt.input))
+			result, err := OpenAIToVertex([]byte(tt.input), false, "")
 
 			if tt.wantErr {
 				if err == nil {

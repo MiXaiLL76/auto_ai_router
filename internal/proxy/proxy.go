@@ -182,34 +182,23 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 
 	switch cred.Type {
 	case config.ProviderTypeVertexAI:
-		if isImageGeneration {
-			// For image generation, use different endpoint
+		vertexBody, err := vertex.OpenAIToVertex(body, isImageGeneration, modelID)
+		if err != nil {
+			p.logger.Error("Failed to vertex request to Vertex AI format",
+				"credential", cred.Name,
+				"error", err,
+			)
+			http.Error(w, "Internal Server Error: Failed to vertex request", http.StatusInternalServerError)
+			return
+		}
+		requestBody = vertexBody
+
+		if isImageGeneration && !strings.Contains(modelID, "gemini") {
+			// For non-Gemini image generation (e.g., Imagen), use different endpoint
 			targetURL = vertex.BuildVertexImageURL(cred, modelID)
-			// Transform OpenAI image request to Vertex AI format
-			vertexBody, err := vertex.OpenAIImageToVertex(body)
-			if err != nil {
-				p.logger.Error("Failed to vertex image request to Vertex AI format",
-					"credential", cred.Name,
-					"error", err,
-				)
-				http.Error(w, "Internal Server Error: Failed to vertex image request", http.StatusInternalServerError)
-				return
-			}
-			requestBody = vertexBody
 		} else {
-			// For text generation
+			// For text generation or Gemini image generation (which uses chat API)
 			targetURL = vertex.BuildVertexURL(cred, modelID, streaming)
-			// Transform OpenAI request to Vertex AI format
-			vertexBody, err := vertex.OpenAIToVertex(body)
-			if err != nil {
-				p.logger.Error("Failed to vertex request to Vertex AI format",
-					"credential", cred.Name,
-					"error", err,
-				)
-				http.Error(w, "Internal Server Error: Failed to vertex request", http.StatusInternalServerError)
-				return
-			}
-			requestBody = vertexBody
 		}
 
 		// Get OAuth2 token for Vertex AI
@@ -372,9 +361,19 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		case config.ProviderTypeVertexAI:
 			if isImageGeneration {
 				// Transform image response
-				vertexedBody, err := vertex.VertexImageToOpenAI([]byte(decodedBody))
+				var vertexedBody []byte
+				var err error
+
+				if !strings.Contains(modelID, "gemini") {
+					// Non-Gemini image generation response (e.g., Imagen)
+					vertexedBody, err = vertex.VertexImageToOpenAI([]byte(decodedBody))
+				} else {
+					// Gemini image generation response (from chat API)
+					vertexedBody, err = vertex.VertexChatResponseToOpenAIImage([]byte(decodedBody))
+				}
+
 				if err != nil {
-					p.logger.Error("Failed to vertex Vertex AI image response",
+					p.logger.Error("Failed to transform Vertex AI image response to OpenAI format",
 						"credential", cred.Name,
 						"error", err,
 					)
