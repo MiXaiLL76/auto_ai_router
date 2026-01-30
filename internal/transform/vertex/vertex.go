@@ -30,8 +30,9 @@ func OpenAIToVertex(openAIBody []byte) ([]byte, error) {
 	}
 
 	// Handle generation config from extra_body or direct params
-	if openAIReq.Temperature != nil || openAIReq.MaxTokens != nil || openAIReq.TopP != nil || openAIReq.ExtraBody != nil ||
-		openAIReq.N != nil || openAIReq.Seed != nil || openAIReq.FrequencyPenalty != nil || openAIReq.PresencePenalty != nil || openAIReq.Stop != nil {
+	if openAIReq.Temperature != nil || openAIReq.MaxTokens != nil || openAIReq.MaxCompletionTokens != nil || openAIReq.TopP != nil || openAIReq.ExtraBody != nil ||
+		openAIReq.N != nil || openAIReq.Seed != nil || openAIReq.FrequencyPenalty != nil || openAIReq.PresencePenalty != nil || openAIReq.Stop != nil ||
+		len(openAIReq.Modalities) > 0 || openAIReq.ReasoningEffort != "" {
 
 		genConfig := &genai.GenerationConfig{}
 
@@ -42,6 +43,11 @@ func OpenAIToVertex(openAIBody []byte) ([]byte, error) {
 		}
 		if openAIReq.MaxTokens != nil {
 			maxTokens := int32(*openAIReq.MaxTokens)
+			genConfig.MaxOutputTokens = maxTokens
+		}
+		// max_completion_tokens takes precedence over max_tokens
+		if openAIReq.MaxCompletionTokens != nil {
+			maxTokens := int32(*openAIReq.MaxCompletionTokens)
 			genConfig.MaxOutputTokens = maxTokens
 		}
 		if openAIReq.TopP != nil {
@@ -119,6 +125,25 @@ func OpenAIToVertex(openAIBody []byte) ([]byte, error) {
 					}
 				}
 				genConfig.StopSequences = stopSeqs
+			}
+		}
+
+		// Handle modalities
+		if len(openAIReq.Modalities) > 0 {
+			for _, mod := range openAIReq.Modalities {
+				genConfig.ResponseModalities = append(genConfig.ResponseModalities, genai.Modality(strings.ToUpper(mod)))
+			}
+		}
+
+		// Handle reasoning_effort (for reasoning models)
+		if openAIReq.ReasoningEffort != "" {
+			// Vertex uses thinking_config for reasoning models
+			// Pass it through extra_body if explicitly set
+			if openAIReq.ExtraBody == nil {
+				openAIReq.ExtraBody = make(map[string]interface{})
+			}
+			if _, exists := openAIReq.ExtraBody["thinking_config"]; !exists {
+				openAIReq.ExtraBody["reasoning_effort"] = openAIReq.ReasoningEffort
 			}
 		}
 

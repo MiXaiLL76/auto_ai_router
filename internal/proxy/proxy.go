@@ -238,11 +238,11 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 
 		anthropicBody, err := anthropic.OpenAIToAnthropic(body)
 		if err != nil {
-			p.logger.Error("Failed to vertex request to Anthropic format",
+			p.logger.Error("Failed to Anthropic request transformation",
 				"credential", cred.Name,
 				"error", err,
 			)
-			http.Error(w, "Internal Server Error: Failed to vertex request", http.StatusInternalServerError)
+			http.Error(w, "Internal Server Error: Failed to transform request", http.StatusInternalServerError)
 			return
 		}
 		requestBody = anthropicBody
