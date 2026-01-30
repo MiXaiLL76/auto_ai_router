@@ -159,19 +159,20 @@ func OpenAIToVertex(openAIBody []byte) ([]byte, error) {
 
 	// Convert messages
 	for _, msg := range openAIReq.Messages {
-		if msg.Role == "system" {
+		switch msg.Role {
+		case "system":
 			// System messages become systemInstruction
 			content := extractTextContent(msg.Content)
 			vertexReq.SystemInstruction = &VertexContent{
 				Parts: []VertexPart{{Text: content}},
 			}
-		} else if msg.Role == "developer" {
+		case "developer":
 			// Developer messages are treated as system instruction
 			content := extractTextContent(msg.Content)
 			vertexReq.SystemInstruction = &VertexContent{
 				Parts: []VertexPart{{Text: content}},
 			}
-		} else if msg.Role == "tool" {
+		case "tool":
 			// Tool messages are sent as user messages with tool results
 			// In Vertex, tool results are just text content from the user perspective
 			content := extractTextContent(msg.Content)
@@ -179,7 +180,7 @@ func OpenAIToVertex(openAIBody []byte) ([]byte, error) {
 				Role:  "user",
 				Parts: []VertexPart{{Text: content}},
 			})
-		} else {
+		default:
 			// Convert role mapping
 			role := msg.Role
 			if role == "assistant" {

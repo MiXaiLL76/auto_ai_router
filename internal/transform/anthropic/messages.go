@@ -132,10 +132,11 @@ func OpenAIToAnthropic(openAIBody []byte) ([]byte, error) {
 
 	// Process messages
 	for _, msg := range openAIReq.Messages {
-		if msg.Role == "system" {
+		switch msg.Role {
+		case "system":
 			// System messages go to the top-level system field
 			anthropicReq.System = extractTextContent(msg.Content)
-		} else if msg.Role == "developer" {
+		case "developer":
 			// Developer messages are treated as system instruction
 			textContent := extractTextContent(msg.Content)
 			if existingSystem, ok := anthropicReq.System.(string); ok && existingSystem != "" {
@@ -144,7 +145,7 @@ func OpenAIToAnthropic(openAIBody []byte) ([]byte, error) {
 			} else {
 				anthropicReq.System = textContent
 			}
-		} else {
+		default:
 			// Convert message content
 			content := convertOpenAIContentToAnthropic(msg.Content)
 
@@ -269,9 +270,7 @@ func convertOpenAIToolCallsToAnthropic(content interface{}, toolCalls []interfac
 		// Extract function information
 		var funcName string
 		var argsStr string
-		var toolID string
-
-		toolID = openai.GetString(toolCallMap, "id")
+		toolID := openai.GetString(toolCallMap, "id")
 
 		// Try to get from function field first (standard OpenAI format)
 		if funcObj, ok := toolCallMap["function"].(map[string]interface{}); ok {
