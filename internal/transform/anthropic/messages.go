@@ -374,8 +374,8 @@ func convertOpenAIToolsToAnthropic(openAITools []interface{}) []interface{} {
 		// Extract function definition
 		if functionObj, ok := toolMap["function"].(map[string]interface{}); ok {
 			anthropicTool := map[string]interface{}{
-				"name":        getString(functionObj, "name"),
-				"description": getString(functionObj, "description"),
+				"name":        openai.GetString(functionObj, "name"),
+				"description": openai.GetString(functionObj, "description"),
 			}
 
 			// Convert parameters to input_schema
@@ -395,14 +395,6 @@ func convertOpenAIToolsToAnthropic(openAITools []interface{}) []interface{} {
 	}
 
 	return anthropicTools
-}
-
-// getString safely retrieves a string value from a map
-func getString(m map[string]interface{}, key string) string {
-	if val, ok := m[key].(string); ok {
-		return val
-	}
-	return ""
 }
 
 func mapAnthropicStopReason(reason string) string {

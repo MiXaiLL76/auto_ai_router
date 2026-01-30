@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/mixaill76/auto_ai_router/internal/transform/openai"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -505,7 +506,7 @@ func TestGetString(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := getString(tt.input, tt.key)
+			result := openai.GetString(tt.input, tt.key)
 			assert.Equal(t, tt.expected, result, "Unexpected result")
 		})
 	}

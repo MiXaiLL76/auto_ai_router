@@ -364,8 +364,8 @@ func convertOpenAIToolsToVertex(openAITools []interface{}) []VertexTool {
 		// Extract function definition
 		if functionObj, ok := toolMap["function"].(map[string]interface{}); ok {
 			funcDecl := VertexFunctionDeclaration{
-				Name:        getString(functionObj, "name"),
-				Description: getString(functionObj, "description"),
+				Name:        openai.GetString(functionObj, "name"),
+				Description: openai.GetString(functionObj, "description"),
 			}
 
 			// Convert parameters
@@ -419,8 +419,8 @@ func convertOpenAIParamsToVertex(params map[string]interface{}) *VertexFunctionS
 		for propName, propDef := range properties {
 			if propMap, ok := propDef.(map[string]interface{}); ok {
 				prop := VertexPropertyDefinition{
-					Type:        strings.ToUpper(getString(propMap, "type")),
-					Description: getString(propMap, "description"),
+					Type:        strings.ToUpper(openai.GetString(propMap, "type")),
+					Description: openai.GetString(propMap, "description"),
 				}
 
 				// Handle enum values
@@ -439,14 +439,6 @@ func convertOpenAIParamsToVertex(params map[string]interface{}) *VertexFunctionS
 	}
 
 	return schema
-}
-
-// getString safely retrieves a string value from a map
-func getString(m map[string]interface{}, key string) string {
-	if val, ok := m[key].(string); ok {
-		return val
-	}
-	return ""
 }
 
 func convertContentToParts(content interface{}) []VertexPart {

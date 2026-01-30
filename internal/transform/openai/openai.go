@@ -142,3 +142,11 @@ func GenerateID() string {
 func GetCurrentTimestamp() int64 {
 	return time.Now().Unix()
 }
+
+// GetString safely retrieves a string value from a map
+func GetString(m map[string]interface{}, key string) string {
+	if val, ok := m[key].(string); ok {
+		return val
+	}
+	return ""
+}
