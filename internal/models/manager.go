@@ -3,9 +3,9 @@ package models
 import (
 	"log/slog"
 	"sync"
-	"time"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
+	"github.com/mixaill76/auto_ai_router/internal/transform/openai"
 )
 
 // Model represents a single model from OpenAI API
@@ -192,7 +192,7 @@ func (m *Manager) GetAllModels() ModelsResponse {
 			models = append(models, Model{
 				ID:      modelName,
 				Object:  "model",
-				Created: time.Now().Unix(),
+				Created: openai.GetCurrentTimestamp(),
 				OwnedBy: "system",
 			})
 		}
@@ -445,7 +445,7 @@ func (m *Manager) GetModelsForCredential(credentialName string) []Model {
 				result = append(result, Model{
 					ID:      modelName,
 					Object:  "model",
-					Created: time.Now().Unix(),
+					Created: openai.GetCurrentTimestamp(),
 					OwnedBy: "system",
 				})
 			}

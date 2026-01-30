@@ -138,7 +138,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	// Extract model from request body if present
-	modelID, streaming, body := extractModelFromBody(body)
+	modelID, streaming, body := extractMetadataFromBody(body)
 
 	// Select credential based on model availability
 	if modelID == "" {
@@ -184,7 +184,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 	case config.ProviderTypeVertexAI:
 		if isImageGeneration {
 			// For image generation, use different endpoint
-			targetURL = buildVertexImageURL(cred, modelID)
+			targetURL = vertex.BuildVertexImageURL(cred, modelID)
 			// Transform OpenAI image request to Vertex AI format
 			vertexBody, err := vertex.OpenAIImageToVertex(body)
 			if err != nil {
@@ -198,7 +198,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			requestBody = vertexBody
 		} else {
 			// For text generation
-			targetURL = buildVertexURL(cred, modelID, streaming)
+			targetURL = vertex.BuildVertexURL(cred, modelID, streaming)
 			// Transform OpenAI request to Vertex AI format
 			vertexBody, err := vertex.OpenAIToVertex(body)
 			if err != nil {
@@ -353,7 +353,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 	// Read and log response body for non-streaming responses
 	var responseBody []byte
 	var finalResponseBody []byte // Define here for broader scope
-	if isStreamingResponse(resp) {
+	if IsStreamingResponse(resp) {
 		p.logger.Debug("Response is streaming", "credential", cred.Name)
 	} else {
 		responseBody, err = io.ReadAll(resp.Body)
@@ -474,7 +474,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 
 	w.WriteHeader(resp.StatusCode)
 
-	if isStreamingResponse(resp) {
+	if IsStreamingResponse(resp) {
 		switch cred.Type {
 		case config.ProviderTypeVertexAI:
 			// Handle Vertex AI streaming with token tracking
@@ -497,176 +497,6 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			p.logger.Error("Failed to copy response body", "error", err)
 		}
 	}
-}
-
-func (p *Proxy) handleVertexStreaming(w http.ResponseWriter, resp *http.Response, credName, modelID string) error {
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		p.logger.Error("Streaming not supported", "credential", credName)
-		http.Error(w, "Streaming Not Supported", http.StatusInternalServerError)
-		return fmt.Errorf("streaming not supported")
-	}
-
-	p.logger.Debug("Starting Vertex AI streaming response", "credential", credName)
-
-	// Create a pipe to capture the streaming data
-	pr, pw := io.Pipe()
-	var totalTokens int
-
-	// Start goroutine to transform and capture tokens
-	go func() {
-		defer func() {
-			_ = pw.Close()
-		}()
-		err := vertex.TransformVertexStreamToOpenAI(resp.Body, modelID, &tokenCapturingWriter{
-			writer: pw,
-			tokens: &totalTokens,
-			logger: p.logger,
-		})
-		if err != nil {
-			p.logger.Error("Failed to transform Vertex streaming", "error", err)
-		}
-	}()
-
-	// Copy transformed data to response
-	buf := make([]byte, 8192)
-	for {
-		n, err := pr.Read(buf)
-		if n > 0 {
-			if _, writeErr := w.Write(buf[:n]); writeErr != nil {
-				p.logger.Error("Failed to write streaming chunk", "error", writeErr, "credential", credName)
-				return writeErr
-			}
-			flusher.Flush()
-		}
-		if err != nil {
-			if err != io.EOF {
-				p.logger.Error("Streaming read error", "error", err, "credential", credName)
-			}
-			break
-		}
-	}
-
-	// Record token usage after streaming completes
-	if totalTokens > 0 {
-		p.rateLimiter.ConsumeTokens(credName, totalTokens)
-		if modelID != "" {
-			p.rateLimiter.ConsumeModelTokens(credName, modelID, totalTokens)
-		}
-		p.logger.Debug("Streaming token usage recorded", "credential", credName, "model", modelID, "tokens", totalTokens)
-	}
-
-	p.logger.Debug("Vertex AI streaming response completed", "credential", credName)
-	return nil
-}
-
-func (p *Proxy) handleAnthropicStreaming(w http.ResponseWriter, resp *http.Response, credName, modelID string) error {
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		p.logger.Error("Streaming not supported", "credential", credName)
-		http.Error(w, "Streaming Not Supported", http.StatusInternalServerError)
-		return fmt.Errorf("streaming not supported")
-	}
-
-	p.logger.Debug("Starting Anthropic streaming response", "credential", credName)
-
-	// Create a pipe to capture the streaming data
-	pr, pw := io.Pipe()
-	var totalTokens int
-
-	// Start goroutine to transform and capture tokens
-	go func() {
-		defer func() {
-			_ = pw.Close()
-		}()
-		err := anthropic.TransformAnthropicStreamToOpenAI(resp.Body, modelID, &tokenCapturingWriter{
-			writer: pw,
-			tokens: &totalTokens,
-			logger: p.logger,
-		})
-		if err != nil {
-			p.logger.Error("Failed to transform Anthropic streaming", "error", err)
-		}
-	}()
-
-	// Copy transformed data to response
-	buf := make([]byte, 8192)
-	for {
-		n, err := pr.Read(buf)
-		if n > 0 {
-			if _, writeErr := w.Write(buf[:n]); writeErr != nil {
-				p.logger.Error("Failed to write streaming chunk", "error", writeErr, "credential", credName)
-				return writeErr
-			}
-			flusher.Flush()
-		}
-		if err != nil {
-			if err != io.EOF {
-				p.logger.Error("Streaming read error", "error", err, "credential", credName)
-			}
-			break
-		}
-	}
-
-	// Record token usage after streaming completes
-	if totalTokens > 0 {
-		p.rateLimiter.ConsumeTokens(credName, totalTokens)
-		if modelID != "" {
-			p.rateLimiter.ConsumeModelTokens(credName, modelID, totalTokens)
-		}
-		p.logger.Debug("Streaming token usage recorded", "credential", credName, "model", modelID, "tokens", totalTokens)
-	}
-
-	p.logger.Debug("Anthropic streaming response completed", "credential", credName)
-	return nil
-}
-
-func (p *Proxy) handleStreamingWithTokens(w http.ResponseWriter, resp *http.Response, credName, modelID string) {
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		p.logger.Error("Streaming not supported", "credential", credName)
-		http.Error(w, "Streaming Not Supported", http.StatusInternalServerError)
-		return
-	}
-
-	p.logger.Debug("Starting streaming response with token tracking", "credential", credName)
-
-	var totalTokens int
-	buf := make([]byte, 8192)
-	for {
-		n, err := resp.Body.Read(buf)
-		if n > 0 {
-			// Extract tokens from streaming chunks
-			chunkData := string(buf[:n])
-			tokens := extractTokensFromStreamingChunk(chunkData)
-			if tokens > 0 {
-				totalTokens += tokens
-			}
-
-			if _, writeErr := w.Write(buf[:n]); writeErr != nil {
-				p.logger.Error("Failed to write streaming chunk", "error", writeErr, "credential", credName)
-				return
-			}
-			flusher.Flush()
-		}
-		if err != nil {
-			if err != io.EOF {
-				p.logger.Error("Streaming read error", "error", err, "credential", credName)
-			}
-			break
-		}
-	}
-
-	// Record token usage after streaming completes
-	if totalTokens > 0 {
-		p.rateLimiter.ConsumeTokens(credName, totalTokens)
-		if modelID != "" {
-			p.rateLimiter.ConsumeModelTokens(credName, modelID, totalTokens)
-		}
-		p.logger.Debug("Streaming token usage recorded", "credential", credName, "model", modelID, "tokens", totalTokens)
-	}
-
-	p.logger.Debug("Streaming response completed", "credential", credName)
 }
 
 type tokenCapturingWriter struct {
@@ -710,85 +540,8 @@ func extractTokensFromStreamingChunk(chunk string) int {
 	return 0
 }
 
-func isStreamingResponse(resp *http.Response) bool {
-	contentType := resp.Header.Get("Content-Type")
-	return strings.Contains(contentType, "text/event-stream") ||
-		strings.Contains(contentType, "application/stream+json")
-}
-
-func (p *Proxy) HealthCheck() (bool, map[string]interface{}) {
-	totalCreds := len(p.balancer.GetCredentials())
-	availableCreds := p.balancer.GetAvailableCount()
-	bannedCreds := p.balancer.GetBannedCount()
-
-	healthy := availableCreds > 0
-
-	// Collect credentials info
-	credentialsInfo := make(map[string]interface{})
-	for _, cred := range p.balancer.GetCredentials() {
-		credentialsInfo[cred.Name] = map[string]interface{}{
-			"current_rpm": p.rateLimiter.GetCurrentRPM(cred.Name),
-			"current_tpm": p.rateLimiter.GetCurrentTPM(cred.Name),
-			"limit_rpm":   cred.RPM,
-			"limit_tpm":   cred.TPM,
-		}
-	}
-
-	// Collect models info from all configured models
-	modelsInfo := make(map[string]interface{})
-
-	// Get all models from config (both credential-specific and global)
-	allConfigModels := p.modelManager.GetAllModels()
-	for _, model := range allConfigModels.Data {
-		// For each model, check which credentials support it
-		credentials := p.modelManager.GetCredentialsForModel(model.ID)
-		if len(credentials) == 0 {
-			// If no specific credentials, add for all credentials
-			for _, cred := range p.balancer.GetCredentials() {
-				modelKey := fmt.Sprintf("%s:%s", cred.Name, model.ID)
-				modelsInfo[modelKey] = map[string]interface{}{
-					"credential":  cred.Name,
-					"model":       model.ID,
-					"current_rpm": p.rateLimiter.GetCurrentModelRPM(cred.Name, model.ID),
-					"current_tpm": p.rateLimiter.GetCurrentModelTPM(cred.Name, model.ID),
-					"limit_rpm":   p.rateLimiter.GetModelLimitRPM(cred.Name, model.ID),
-					"limit_tpm":   p.rateLimiter.GetModelLimitTPM(cred.Name, model.ID),
-				}
-			}
-		} else {
-			// Add for specific credentials only
-			for _, credName := range credentials {
-				modelKey := fmt.Sprintf("%s:%s", credName, model.ID)
-				modelsInfo[modelKey] = map[string]interface{}{
-					"credential":  credName,
-					"model":       model.ID,
-					"current_rpm": p.rateLimiter.GetCurrentModelRPM(credName, model.ID),
-					"current_tpm": p.rateLimiter.GetCurrentModelTPM(credName, model.ID),
-					"limit_rpm":   p.rateLimiter.GetModelLimitRPM(credName, model.ID),
-					"limit_tpm":   p.rateLimiter.GetModelLimitTPM(credName, model.ID),
-				}
-			}
-		}
-	}
-
-	status := map[string]interface{}{
-		"status":                "healthy",
-		"credentials_available": availableCreds,
-		"credentials_banned":    bannedCreds,
-		"total_credentials":     totalCreds,
-		"credentials":           credentialsInfo,
-		"models":                modelsInfo,
-	}
-
-	if !healthy {
-		status["status"] = "unhealthy"
-	}
-
-	return healthy, status
-}
-
-// extractModelFromBody extracts the model ID from the request body
-func extractModelFromBody(body []byte) (string, bool, []byte) {
+// extractMetadataFromBody extracts the model ID from the request body
+func extractMetadataFromBody(body []byte) (string, bool, []byte) {
 	if len(body) == 0 {
 		return "", false, body
 	}
@@ -905,75 +658,4 @@ func maskKey(key string) string {
 		return "***"
 	}
 	return key[:7] + "..."
-}
-
-// determineVertexPublisher determines the Vertex AI publisher based on the model ID
-func determineVertexPublisher(modelID string) string {
-	modelLower := strings.ToLower(modelID)
-	if strings.Contains(modelLower, "claude") {
-		return "anthropic"
-	}
-	// Default to Google for Gemini and other models
-	return "google"
-}
-
-// buildVertexImageURL constructs the Vertex AI URL for image generation
-// Format: https://{location}-aiplatform.googleapis.com/v1/projects/{project}/locations/{location}/publishers/google/models/{model}:predict
-func buildVertexImageURL(cred *config.CredentialConfig, modelID string) string {
-	// For global location (no regional prefix)
-	if cred.Location == "global" {
-		return fmt.Sprintf(
-			"https://aiplatform.googleapis.com/v1/projects/%s/locations/global/publishers/google/models/%s:predict",
-			cred.ProjectID, modelID,
-		)
-	}
-
-	// For regional locations
-	return fmt.Sprintf(
-		"https://%s-aiplatform.googleapis.com/v1/projects/%s/locations/%s/publishers/google/models/%s:predict",
-		cred.Location, cred.ProjectID, cred.Location, modelID,
-	)
-}
-
-// buildVertexURL constructs the Vertex AI URL dynamically
-// Format: https://{location}-aiplatform.googleapis.com/v1/projects/{project}/locations/{location}/publishers/{publisher}/models/{model}:{endpoint}
-func buildVertexURL(cred *config.CredentialConfig, modelID string, streaming bool) string {
-	publisher := determineVertexPublisher(modelID)
-
-	endpoint := "generateContent"
-	if streaming {
-		endpoint = "streamGenerateContent?alt=sse"
-	}
-
-	// For global location (no regional prefix)
-	if cred.Location == "global" {
-		return fmt.Sprintf(
-			"https://aiplatform.googleapis.com/v1/projects/%s/locations/global/publishers/%s/models/%s:%s",
-			cred.ProjectID, publisher, modelID, endpoint,
-		)
-	}
-
-	// For regional locations
-	return fmt.Sprintf(
-		"https://%s-aiplatform.googleapis.com/v1/projects/%s/locations/%s/publishers/%s/models/%s:%s",
-		cred.Location, cred.ProjectID, cred.Location, publisher, modelID, endpoint,
-	)
-}
-
-// VisualHealthCheck renders an HTML dashboard with health check information
-func (p *Proxy) VisualHealthCheck(w http.ResponseWriter, r *http.Request) {
-	_, status := p.HealthCheck()
-
-	if p.healthTemplate == nil {
-		p.logger.Error("Health template not available")
-		http.Error(w, "Internal Server Error: Template not available", http.StatusInternalServerError)
-		return
-	}
-
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-
-	if err := p.healthTemplate.Execute(w, status); err != nil {
-		p.logger.Error("Failed to execute health template", "error", err)
-	}
 }

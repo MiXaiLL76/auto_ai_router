@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/mixaill76/auto_ai_router/internal/transform/openai"
 )
@@ -153,7 +152,7 @@ func AnthropicToOpenAI(anthropicBody []byte, model string) ([]byte, error) {
 	openAIResp := openai.OpenAIResponse{
 		ID:      anthropicResp.ID,
 		Object:  "chat.completion",
-		Created: time.Now().Unix(),
+		Created: openai.GetCurrentTimestamp(),
 		Model:   model,
 		Choices: []openai.OpenAIChoice{
 			{

@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"strings"
-	"time"
 
 	"github.com/mixaill76/auto_ai_router/internal/transform/openai"
 )
@@ -38,7 +37,7 @@ type AnthropicMsg struct {
 func TransformAnthropicStreamToOpenAI(anthropicStream io.Reader, model string, output io.Writer) error {
 	scanner := bufio.NewScanner(anthropicStream)
 	chatID := ""
-	timestamp := time.Now().Unix()
+	timestamp := openai.GetCurrentTimestamp()
 	isFirstChunk := true
 
 	for scanner.Scan() {

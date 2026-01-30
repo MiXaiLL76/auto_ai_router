@@ -4,6 +4,9 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/mixaill76/auto_ai_router/internal/config"
+	"github.com/stretchr/testify/assert"
 )
 
 func TestOpenAIToVertex(t *testing.T) {
@@ -656,5 +659,139 @@ func TestVertexToOpenAIWithMixedContent(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+func TestDetermineVertexPublisher(t *testing.T) {
+	tests := []struct {
+		name     string
+		modelID  string
+		expected string
+	}{
+		{
+			name:     "claude model lowercase",
+			modelID:  "claude-3-opus",
+			expected: "anthropic",
+		},
+		{
+			name:     "claude model uppercase",
+			modelID:  "CLAUDE-3-SONNET",
+			expected: "anthropic",
+		},
+		{
+			name:     "claude model mixed case",
+			modelID:  "Claude-3-Haiku",
+			expected: "anthropic",
+		},
+		{
+			name:     "gemini model",
+			modelID:  "gemini-pro",
+			expected: "google",
+		},
+		{
+			name:     "other model",
+			modelID:  "gpt-4",
+			expected: "google",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			publisher := determineVertexPublisher(tt.modelID)
+			assert.Equal(t, tt.expected, publisher)
+		})
+	}
+}
+
+func TestBuildVertexURL(t *testing.T) {
+	tests := []struct {
+		name      string
+		cred      *config.CredentialConfig
+		modelID   string
+		streaming bool
+		expected  string
+	}{
+		{
+			name: "global location non-streaming claude",
+			cred: &config.CredentialConfig{
+				ProjectID: "test-project",
+				Location:  "global",
+			},
+			modelID:   "claude-3-opus",
+			streaming: false,
+			expected:  "https://aiplatform.googleapis.com/v1/projects/test-project/locations/global/publishers/anthropic/models/claude-3-opus:generateContent",
+		},
+		{
+			name: "global location streaming claude",
+			cred: &config.CredentialConfig{
+				ProjectID: "test-project",
+				Location:  "global",
+			},
+			modelID:   "claude-3-sonnet",
+			streaming: true,
+			expected:  "https://aiplatform.googleapis.com/v1/projects/test-project/locations/global/publishers/anthropic/models/claude-3-sonnet:streamGenerateContent?alt=sse",
+		},
+		{
+			name: "regional location non-streaming gemini",
+			cred: &config.CredentialConfig{
+				ProjectID: "test-project",
+				Location:  "us-central1",
+			},
+			modelID:   "gemini-pro",
+			streaming: false,
+			expected:  "https://us-central1-aiplatform.googleapis.com/v1/projects/test-project/locations/us-central1/publishers/google/models/gemini-pro:generateContent",
+		},
+		{
+			name: "regional location streaming gemini",
+			cred: &config.CredentialConfig{
+				ProjectID: "test-project",
+				Location:  "europe-west1",
+			},
+			modelID:   "gemini-pro",
+			streaming: true,
+			expected:  "https://europe-west1-aiplatform.googleapis.com/v1/projects/test-project/locations/europe-west1/publishers/google/models/gemini-pro:streamGenerateContent?alt=sse",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			url := BuildVertexURL(tt.cred, tt.modelID, tt.streaming)
+			assert.Equal(t, tt.expected, url)
+		})
+	}
+}
+
+func TestBuildVertexImageURL(t *testing.T) {
+	tests := []struct {
+		name     string
+		cred     *config.CredentialConfig
+		modelID  string
+		expected string
+	}{
+		{
+			name: "global location",
+			cred: &config.CredentialConfig{
+				ProjectID: "test-project",
+				Location:  "global",
+			},
+			modelID:  "imagegeneration",
+			expected: "https://aiplatform.googleapis.com/v1/projects/test-project/locations/global/publishers/google/models/imagegeneration:predict",
+		},
+		{
+			name: "regional location",
+			cred: &config.CredentialConfig{
+				ProjectID: "test-project",
+				Location:  "us-central1",
+			},
+			modelID:  "imagen-3.0-generate-001",
+			expected: "https://us-central1-aiplatform.googleapis.com/v1/projects/test-project/locations/us-central1/publishers/google/models/imagen-3.0-generate-001:predict",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			url := BuildVertexImageURL(tt.cred, tt.modelID)
+			assert.Equal(t, tt.expected, url)
+		})
 	}
 }
