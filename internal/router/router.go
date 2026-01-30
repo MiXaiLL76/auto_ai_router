@@ -5,26 +5,27 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/models"
 	"github.com/mixaill76/auto_ai_router/internal/proxy"
 )
 
 type Router struct {
-	proxy           *proxy.Proxy
-	healthCheckPath string
-	modelManager    *models.Manager
+	proxy            *proxy.Proxy
+	modelManager     *models.Manager
+	monitoringConfig *config.MonitoringConfig
 }
 
-func New(p *proxy.Proxy, healthCheckPath string, modelManager *models.Manager) *Router {
+func New(p *proxy.Proxy, modelManager *models.Manager, monitoringConfig *config.MonitoringConfig) *Router {
 	return &Router{
-		proxy:           p,
-		healthCheckPath: healthCheckPath,
-		modelManager:    modelManager,
+		proxy:            p,
+		modelManager:     modelManager,
+		monitoringConfig: monitoringConfig,
 	}
 }
 
 func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
-	if req.URL.Path == r.healthCheckPath {
+	if req.URL.Path == r.monitoringConfig.HealthCheckPath {
 		r.handleHealth(w, req)
 		return
 	}
@@ -42,7 +43,29 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	}
 
 	if strings.HasPrefix(req.URL.Path, "/v1/") {
-		r.proxy.ProxyRequest(w, req)
+		if r.monitoringConfig.LogErrors {
+			// Capture request body for logging
+			reqBody, err := captureRequestBody(req)
+			if err != nil {
+				r.proxy.ProxyRequest(w, req)
+				return
+			}
+
+			// Create response capture wrapper
+			rc := newResponseCapture(w)
+
+			// Proxy the request through captured response
+			r.proxy.ProxyRequest(rc, req)
+
+			// Log error responses if logging is enabled and status is 4xx or 5xx
+			if r.monitoringConfig.ErrorsLogPath != "" && isErrorStatus(rc.statusCode) {
+				_ = logErrorResponse(r.monitoringConfig.ErrorsLogPath, req, rc, reqBody)
+				// Log error internally but don't fail the response
+				// (error logging shouldn't break the API response)
+			}
+		} else {
+			r.proxy.ProxyRequest(w, req)
+		}
 		return
 	}
 

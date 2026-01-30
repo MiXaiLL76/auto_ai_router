@@ -98,24 +98,36 @@ func createProxyWithMockServer(mockServerURL string) *proxy.Proxy {
 	return proxy.New(bal, logger, 10, 30*time.Second, metrics, "test-key", rl, tm, createTestModelManager(), "test-version", "test-commit")
 }
 
+// createTestMonitoringConfig creates a test monitoring config
+func createTestMonitoringConfig(healthPath string, logErrors bool, errorsLogPath string) *config.MonitoringConfig {
+	return &config.MonitoringConfig{
+		PrometheusEnabled: false,
+		HealthCheckPath:   healthPath,
+		LogErrors:         logErrors,
+		ErrorsLogPath:     errorsLogPath,
+	}
+}
+
 func TestNew(t *testing.T) {
 	prx := createTestProxy()
 	modelManager := createTestModelManager()
+	monConfig := createTestMonitoringConfig("/health", false, "")
 
-	r := New(nil, "/health", modelManager)
+	r := New(nil, modelManager, monConfig)
 
 	assert.NotNil(t, r)
-	assert.Equal(t, "/health", r.healthCheckPath)
+	assert.Equal(t, "/health", r.monitoringConfig.HealthCheckPath)
 	assert.Equal(t, modelManager, r.modelManager)
 
-	r2 := New(prx, "/status", nil)
+	monConfig2 := createTestMonitoringConfig("/status", false, "")
+	r2 := New(prx, nil, monConfig2)
 	assert.NotNil(t, r2)
-	assert.Equal(t, "/status", r2.healthCheckPath)
+	assert.Equal(t, "/status", r2.monitoringConfig.HealthCheckPath)
 }
 
 func TestServeHTTP_HealthCheck(t *testing.T) {
 	prx := createTestProxy()
-	router := New(prx, "/health", nil)
+	router := New(prx, nil, createTestMonitoringConfig("/health", false, ""))
 
 	req := httptest.NewRequest("GET", "/health", nil)
 	w := httptest.NewRecorder()
@@ -136,7 +148,7 @@ func TestServeHTTP_HealthCheck_Unhealthy(t *testing.T) {
 		{Name: "test1", APIKey: "key1", BaseURL: "http://test1.com", RPM: 100},
 	}
 	prx := createProxyWithConfig(credentials, []string{"test1"})
-	router := New(prx, "/health", nil)
+	router := New(prx, nil, createTestMonitoringConfig("/health", false, ""))
 
 	req := httptest.NewRequest("GET", "/health", nil)
 	w := httptest.NewRecorder()
@@ -156,7 +168,7 @@ func TestServeHTTP_V1Models_Enabled(t *testing.T) {
 	modelManager := createEnabledTestModelManager()
 
 	prx := createTestProxy()
-	router := New(prx, "/health", modelManager)
+	router := New(prx, modelManager, createTestMonitoringConfig("/health", false, ""))
 
 	req := httptest.NewRequest("GET", "/v1/models", nil)
 	w := httptest.NewRecorder()
@@ -183,7 +195,7 @@ func TestServeHTTP_V1Models_Disabled(t *testing.T) {
 
 	prx := createProxyWithMockServer(mockServer.URL)
 	modelManager := createTestModelManager() // disabled (no static models)
-	router := New(prx, "/health", modelManager)
+	router := New(prx, modelManager, createTestMonitoringConfig("/health", false, ""))
 
 	req := httptest.NewRequest("GET", "/v1/models", nil)
 	req.Header.Set("Authorization", "Bearer test-key")
@@ -204,7 +216,7 @@ func TestServeHTTP_V1Models_NilManager(t *testing.T) {
 	defer mockServer.Close()
 
 	prx := createProxyWithMockServer(mockServer.URL)
-	router := New(prx, "/health", nil)
+	router := New(prx, nil, createTestMonitoringConfig("/health", false, ""))
 
 	req := httptest.NewRequest("GET", "/v1/models", nil)
 	req.Header.Set("Authorization", "Bearer test-key")
@@ -225,7 +237,7 @@ func TestServeHTTP_V1Models_PostMethod(t *testing.T) {
 
 	prx := createProxyWithMockServer(mockServer.URL)
 	modelManager := createEnabledTestModelManager()
-	router := New(prx, "/health", modelManager)
+	router := New(prx, modelManager, createTestMonitoringConfig("/health", false, ""))
 
 	// POST /v1/models should be proxied even if model manager is enabled
 	// Include a model field in the body as required by proxy
@@ -250,7 +262,7 @@ func TestServeHTTP_ProxyRequest(t *testing.T) {
 	defer mockServer.Close()
 
 	prx := createProxyWithMockServer(mockServer.URL)
-	router := New(prx, "/health", nil)
+	router := New(prx, nil, createTestMonitoringConfig("/health", false, ""))
 
 	tests := []struct {
 		name string
@@ -279,7 +291,7 @@ func TestServeHTTP_ProxyRequest(t *testing.T) {
 
 func TestServeHTTP_NotFound(t *testing.T) {
 	prx := createTestProxy()
-	router := New(prx, "/health", nil)
+	router := New(prx, nil, createTestMonitoringConfig("/health", false, ""))
 
 	tests := []struct {
 		name string
@@ -333,7 +345,7 @@ func TestHandleHealth(t *testing.T) {
 				{Name: "test2", APIKey: "key2", BaseURL: "http://test2.com", RPM: 100},
 			}
 			prx := createProxyWithConfig(credentials, tt.bannedCreds)
-			router := New(prx, "/health", nil)
+			router := New(prx, nil, createTestMonitoringConfig("/health", false, ""))
 
 			req := httptest.NewRequest("GET", "/health", nil)
 			w := httptest.NewRecorder()
@@ -360,7 +372,7 @@ func TestHandleModels(t *testing.T) {
 	modelManager := createEnabledTestModelManager()
 	prx := createTestProxy()
 
-	router := New(prx, "/health", modelManager)
+	router := New(prx, modelManager, createTestMonitoringConfig("/health", false, ""))
 
 	req := httptest.NewRequest("GET", "/v1/models", nil)
 	w := httptest.NewRecorder()
@@ -379,7 +391,7 @@ func TestHandleModels(t *testing.T) {
 
 func TestHandleVisualHealth(t *testing.T) {
 	prx := createTestProxy()
-	router := New(prx, "/health", nil)
+	router := New(prx, nil, createTestMonitoringConfig("/health", false, ""))
 
 	req := httptest.NewRequest("GET", "/vhealth", nil)
 	w := httptest.NewRecorder()
@@ -395,7 +407,7 @@ func TestHandleVisualHealth(t *testing.T) {
 
 func TestServeHTTP_VisualHealth(t *testing.T) {
 	prx := createTestProxy()
-	router := New(prx, "/health", nil)
+	router := New(prx, nil, createTestMonitoringConfig("/health", false, ""))
 
 	req := httptest.NewRequest("GET", "/vhealth", nil)
 	w := httptest.NewRecorder()

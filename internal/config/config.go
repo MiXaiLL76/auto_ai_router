@@ -196,6 +196,8 @@ func (c *CredentialConfig) UnmarshalYAML(value *yaml.Node) error {
 type MonitoringConfig struct {
 	PrometheusEnabled bool   `yaml:"prometheus_enabled"`
 	HealthCheckPath   string `yaml:"health_check_path"`
+	LogErrors         bool   `yaml:"log_errors,omitempty"`
+	ErrorsLogPath     string `yaml:"errors_log_path,omitempty"`
 }
 
 // UnmarshalYAML implements custom unmarshaling for MonitoringConfig with env variable support
@@ -204,6 +206,8 @@ func (m *MonitoringConfig) UnmarshalYAML(value *yaml.Node) error {
 	type tempConfig struct {
 		PrometheusEnabled string `yaml:"prometheus_enabled"`
 		HealthCheckPath   string `yaml:"health_check_path"`
+		LogErrors         string `yaml:"log_errors,omitempty"`
+		ErrorsLogPath     string `yaml:"errors_log_path,omitempty"`
 	}
 
 	var temp tempConfig
@@ -222,6 +226,14 @@ func (m *MonitoringConfig) UnmarshalYAML(value *yaml.Node) error {
 
 	// Resolve HealthCheckPath
 	m.HealthCheckPath = resolveEnvString(temp.HealthCheckPath)
+
+	if temp.LogErrors != "" {
+		m.LogErrors, err = resolveEnvBool(temp.LogErrors, false)
+		if err != nil {
+			return fmt.Errorf("invalid log_errors: %w", err)
+		}
+	}
+	m.ErrorsLogPath = resolveEnvString(temp.ErrorsLogPath)
 
 	return nil
 }

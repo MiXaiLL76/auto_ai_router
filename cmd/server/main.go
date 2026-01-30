@@ -156,7 +156,7 @@ func main() {
 		log.Info("Metrics updater started (updates every 10 seconds)")
 	}
 
-	rtr := router.New(prx, cfg.Monitoring.HealthCheckPath, modelManager)
+	rtr := router.New(prx, modelManager, &cfg.Monitoring)
 
 	mux := http.NewServeMux()
 	mux.Handle("/", rtr)

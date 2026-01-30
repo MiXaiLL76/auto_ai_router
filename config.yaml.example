@@ -12,6 +12,12 @@ fail2ban:
   ban_duration: permanent
   error_codes: [401, 403, 429, 500, 502, 503, 504]
 
+monitoring:
+  prometheus_enabled: true
+  health_check_path: "/health"
+  log_errors: false
+  errors_log_path: "logs.jsonl"
+
 credentials:
   - name: "openai_main"
     type: "openai"
@@ -34,10 +40,6 @@ credentials:
     credentials_file: "path/to/service-account.json"
     rpm: 100
     tpm: 50000
-
-monitoring:
-  prometheus_enabled: true
-  health_check_path: "/health"
 
 # Models with specific credential binding
 models:
