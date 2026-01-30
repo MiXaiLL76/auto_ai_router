@@ -71,15 +71,28 @@ func TransformVertexStreamToOpenAI(vertexStream io.Reader, model string, output 
 				choice.Delta.Role = "assistant"
 			}
 
-			// Extract content from parts
+			// Extract content and function calls from parts
 			var content string
+			var toolCalls []openai.OpenAIStreamingToolCall
+			toolCallIdx := 0
+
 			for _, part := range candidate.Content.Parts {
 				if part.Text != "" {
 					content += part.Text
 				}
+				// Handle function calls
+				if part.FunctionCall != nil {
+					toolCall := convertVertexFunctionCallToStreamingOpenAI(part.FunctionCall, toolCallIdx)
+					toolCalls = append(toolCalls, toolCall)
+					toolCallIdx++
+				}
 				// Note: streaming doesn't support images in delta, only text
 			}
+
 			choice.Delta.Content = content
+			if len(toolCalls) > 0 {
+				choice.Delta.ToolCalls = toolCalls
+			}
 
 			// Handle finish reason
 			if candidate.FinishReason != "" {
@@ -110,4 +123,25 @@ func TransformVertexStreamToOpenAI(vertexStream io.Reader, model string, output 
 	}
 
 	return scanner.Err()
+}
+
+// convertVertexFunctionCallToStreamingOpenAI converts Vertex function call to OpenAI streaming tool call format
+func convertVertexFunctionCallToStreamingOpenAI(vertexCall *VertexFunctionCall, index int) openai.OpenAIStreamingToolCall {
+	// Convert args to JSON string
+	argsJSON := "{}"
+	if vertexCall.Args != nil {
+		if data, err := json.Marshal(vertexCall.Args); err == nil {
+			argsJSON = string(data)
+		}
+	}
+
+	return openai.OpenAIStreamingToolCall{
+		Index: index,
+		ID:    openai.GenerateID(),
+		Type:  "function",
+		Function: &openai.OpenAIStreamingToolFunction{
+			Name:      vertexCall.Name,
+			Arguments: argsJSON,
+		},
+	}
 }

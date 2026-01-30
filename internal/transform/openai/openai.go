@@ -65,9 +65,21 @@ type OpenAIChoice struct {
 }
 
 type OpenAIResponseMessage struct {
-	Role    string      `json:"role"`
-	Content string      `json:"content"`
-	Images  []ImageData `json:"images,omitempty"`
+	Role      string           `json:"role"`
+	Content   string           `json:"content"`
+	ToolCalls []OpenAIToolCall `json:"tool_calls,omitempty"`
+	Images    []ImageData      `json:"images,omitempty"`
+}
+
+type OpenAIToolCall struct {
+	ID       string             `json:"id"`
+	Type     string             `json:"type"`
+	Function OpenAIToolFunction `json:"function"`
+}
+
+type OpenAIToolFunction struct {
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"`
 }
 
 type ImageData struct {
@@ -100,8 +112,21 @@ type OpenAIStreamingChoice struct {
 }
 
 type OpenAIStreamingDelta struct {
-	Role    string `json:"role,omitempty"`
-	Content string `json:"content,omitempty"`
+	Role      string                    `json:"role,omitempty"`
+	Content   string                    `json:"content,omitempty"`
+	ToolCalls []OpenAIStreamingToolCall `json:"tool_calls,omitempty"`
+}
+
+type OpenAIStreamingToolCall struct {
+	Index    int                          `json:"index"`
+	ID       string                       `json:"id,omitempty"`
+	Type     string                       `json:"type,omitempty"`
+	Function *OpenAIStreamingToolFunction `json:"function,omitempty"`
+}
+
+type OpenAIStreamingToolFunction struct {
+	Name      string `json:"name,omitempty"`
+	Arguments string `json:"arguments,omitempty"`
 }
 
 // Helper functions

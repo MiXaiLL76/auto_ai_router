@@ -58,8 +58,11 @@ type AnthropicResponse struct {
 }
 
 type AnthropicContentBlock struct {
-	Type string `json:"type"`
-	Text string `json:"text,omitempty"`
+	Type  string      `json:"type"`
+	Text  string      `json:"text,omitempty"`
+	ID    string      `json:"id,omitempty"`
+	Name  string      `json:"name,omitempty"`
+	Input interface{} `json:"input,omitempty"`
 }
 
 type AnthropicUsage struct {
@@ -111,7 +114,10 @@ func OpenAIToAnthropic(openAIBody []byte) ([]byte, error) {
 
 	// Convert tools if present
 	if len(openAIReq.Tools) > 0 {
-		anthropicReq.Tools = openAIReq.Tools
+		anthropicTools := convertOpenAIToolsToAnthropic(openAIReq.Tools)
+		if len(anthropicTools) > 0 {
+			anthropicReq.Tools = anthropicTools
+		}
 	}
 	if openAIReq.ToolChoice != nil {
 		anthropicReq.ToolChoice = openAIReq.ToolChoice
@@ -141,12 +147,28 @@ func AnthropicToOpenAI(anthropicBody []byte, model string) ([]byte, error) {
 		return nil, fmt.Errorf("failed to parse Anthropic response: %w", err)
 	}
 
-	// Extract text content from Anthropic response
+	// Extract text content and tool calls from Anthropic response
 	var content string
+	var toolCalls []openai.OpenAIToolCall
+
 	for _, block := range anthropicResp.Content {
-		if block.Type == "text" {
+		switch block.Type {
+		case "text":
 			content += block.Text
+		case "tool_use":
+			toolCall := convertAnthropicToolUseToOpenAI(block)
+			toolCalls = append(toolCalls, toolCall)
 		}
+	}
+
+	message := openai.OpenAIResponseMessage{
+		Role:    "assistant",
+		Content: content,
+	}
+
+	// Only include tool_calls if there are any
+	if len(toolCalls) > 0 {
+		message.ToolCalls = toolCalls
 	}
 
 	openAIResp := openai.OpenAIResponse{
@@ -156,11 +178,8 @@ func AnthropicToOpenAI(anthropicBody []byte, model string) ([]byte, error) {
 		Model:   model,
 		Choices: []openai.OpenAIChoice{
 			{
-				Index: 0,
-				Message: openai.OpenAIResponseMessage{
-					Role:    "assistant",
-					Content: content,
-				},
+				Index:        0,
+				Message:      message,
 				FinishReason: mapAnthropicStopReason(anthropicResp.StopReason),
 			},
 		},
@@ -175,6 +194,32 @@ func AnthropicToOpenAI(anthropicBody []byte, model string) ([]byte, error) {
 }
 
 // Helper functions
+
+func convertAnthropicToolUseToOpenAI(block AnthropicContentBlock) openai.OpenAIToolCall {
+	// Convert input (which can be map or any interface) to JSON string
+	var argsJSON string
+	switch v := block.Input.(type) {
+	case string:
+		argsJSON = v
+	case map[string]interface{}:
+		if data, err := json.Marshal(v); err == nil {
+			argsJSON = string(data)
+		}
+	default:
+		if data, err := json.Marshal(block.Input); err == nil {
+			argsJSON = string(data)
+		}
+	}
+
+	return openai.OpenAIToolCall{
+		ID:   block.ID,
+		Type: "function",
+		Function: openai.OpenAIToolFunction{
+			Name:      block.Name,
+			Arguments: argsJSON,
+		},
+	}
+}
 
 func extractTextContent(content interface{}) string {
 	switch c := content.(type) {
@@ -303,6 +348,61 @@ func parseMediaType(header string) string {
 		}
 	}
 	return "image/jpeg" // default
+}
+
+// convertOpenAIToolsToAnthropic converts OpenAI tools format to Anthropic format
+// OpenAI format: {"type": "function", "function": {"name": "...", "description": "...", "parameters": {...}}}
+// Anthropic format: {"name": "...", "description": "...", "input_schema": {...}}
+func convertOpenAIToolsToAnthropic(openAITools []interface{}) []interface{} {
+	if len(openAITools) == 0 {
+		return nil
+	}
+
+	var anthropicTools []interface{}
+
+	for _, toolInterface := range openAITools {
+		toolMap, ok := toolInterface.(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		// Check if it's a function type tool
+		if toolType, ok := toolMap["type"].(string); !ok || toolType != "function" {
+			continue
+		}
+
+		// Extract function definition
+		if functionObj, ok := toolMap["function"].(map[string]interface{}); ok {
+			anthropicTool := map[string]interface{}{
+				"name":        getString(functionObj, "name"),
+				"description": getString(functionObj, "description"),
+			}
+
+			// Convert parameters to input_schema
+			if params, ok := functionObj["parameters"].(map[string]interface{}); ok {
+				anthropicTool["input_schema"] = params
+			}
+
+			// Only add if name is not empty
+			if anthropicTool["name"] != "" {
+				anthropicTools = append(anthropicTools, anthropicTool)
+			}
+		}
+	}
+
+	if len(anthropicTools) == 0 {
+		return nil
+	}
+
+	return anthropicTools
+}
+
+// getString safely retrieves a string value from a map
+func getString(m map[string]interface{}, key string) string {
+	if val, ok := m[key].(string); ok {
+		return val
+	}
+	return ""
 }
 
 func mapAnthropicStopReason(reason string) string {

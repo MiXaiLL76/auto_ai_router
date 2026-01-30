@@ -14,6 +14,7 @@ type VertexRequest struct {
 	Contents          []VertexContent         `json:"contents"`
 	GenerationConfig  *VertexGenerationConfig `json:"generationConfig,omitempty"`
 	SystemInstruction *VertexContent          `json:"systemInstruction,omitempty"`
+	Tools             []VertexTool            `json:"tools,omitempty"`
 }
 
 type VertexContent struct {
@@ -22,8 +23,14 @@ type VertexContent struct {
 }
 
 type VertexPart struct {
-	Text       string      `json:"text,omitempty"`
-	InlineData *InlineData `json:"inlineData,omitempty"`
+	Text         string              `json:"text,omitempty"`
+	InlineData   *InlineData         `json:"inlineData,omitempty"`
+	FunctionCall *VertexFunctionCall `json:"functionCall,omitempty"`
+}
+
+type VertexFunctionCall struct {
+	Name string                 `json:"name"`
+	Args map[string]interface{} `json:"args"`
 }
 
 type InlineData struct {
@@ -43,6 +50,30 @@ type VertexGenerationConfig struct {
 	Seed               *int     `json:"seed,omitempty"`
 	FrequencyPenalty   *float64 `json:"frequencyPenalty,omitempty"`
 	PresencePenalty    *float64 `json:"presencePenalty,omitempty"`
+}
+
+// Tool-related types for function calling
+type VertexTool struct {
+	FunctionDeclarations []VertexFunctionDeclaration `json:"functionDeclarations,omitempty"`
+}
+
+type VertexFunctionDeclaration struct {
+	Name        string                `json:"name"`
+	Description string                `json:"description,omitempty"`
+	Parameters  *VertexFunctionSchema `json:"parameters,omitempty"`
+}
+
+type VertexFunctionSchema struct {
+	Type       string                              `json:"type,omitempty"`
+	Properties map[string]VertexPropertyDefinition `json:"properties,omitempty"`
+	Required   []string                            `json:"required,omitempty"`
+}
+
+type VertexPropertyDefinition struct {
+	Type        string        `json:"type,omitempty"`
+	Description string        `json:"description,omitempty"`
+	Items       interface{}   `json:"items,omitempty"`
+	Enum        []interface{} `json:"enum,omitempty"`
 }
 
 // OpenAIToVertex converts OpenAI format request to Vertex AI format
@@ -149,6 +180,14 @@ func OpenAIToVertex(openAIBody []byte) ([]byte, error) {
 		}
 	}
 
+	// Convert tools/function_calling if present
+	if len(openAIReq.Tools) > 0 {
+		vertexTools := convertOpenAIToolsToVertex(openAIReq.Tools)
+		if len(vertexTools) > 0 {
+			vertexReq.Tools = vertexTools
+		}
+	}
+
 	return json.Marshal(vertexReq)
 }
 
@@ -171,6 +210,7 @@ func VertexToOpenAI(vertexBody []byte, model string) ([]byte, error) {
 	for i, candidate := range vertexResp.Candidates {
 		var content string
 		var images []openai.ImageData
+		var toolCalls []openai.OpenAIToolCall
 
 		for _, part := range candidate.Content.Parts {
 			if part.Text != "" {
@@ -182,9 +222,14 @@ func VertexToOpenAI(vertexBody []byte, model string) ([]byte, error) {
 					B64JSON: part.InlineData.Data,
 				})
 			}
+			// Handle function calls from Vertex response
+			if part.FunctionCall != nil {
+				toolCall := convertVertexFunctionCallToOpenAI(part.FunctionCall)
+				toolCalls = append(toolCalls, toolCall)
+			}
 		}
 
-		if content == "" && len(images) == 0 {
+		if content == "" && len(images) == 0 && len(toolCalls) == 0 {
 			// Handle case where parts is empty but we have a finish reason
 			if candidate.FinishReason == "MAX_TOKENS" {
 				content = "[Response truncated due to max tokens limit]"
@@ -193,13 +238,20 @@ func VertexToOpenAI(vertexBody []byte, model string) ([]byte, error) {
 			}
 		}
 
+		message := openai.OpenAIResponseMessage{
+			Role:    "assistant",
+			Content: content,
+			Images:  images,
+		}
+
+		// Only include tool_calls if there are any
+		if len(toolCalls) > 0 {
+			message.ToolCalls = toolCalls
+		}
+
 		choice := openai.OpenAIChoice{
-			Index: i,
-			Message: openai.OpenAIResponseMessage{
-				Role:    "assistant",
-				Content: content,
-				Images:  images,
-			},
+			Index:        i,
+			Message:      message,
 			FinishReason: mapFinishReason(candidate.FinishReason),
 		}
 		openAIResp.Choices = append(openAIResp.Choices, choice)
@@ -244,8 +296,30 @@ func mapFinishReason(vertexReason string) string {
 		return "content_filter"
 	case "RECITATION":
 		return "content_filter"
+	case "TOOL_CALL":
+		return "tool_calls"
 	default:
 		return "stop"
+	}
+}
+
+// convertVertexFunctionCallToOpenAI converts Vertex function call to OpenAI tool call format
+func convertVertexFunctionCallToOpenAI(vertexCall *VertexFunctionCall) openai.OpenAIToolCall {
+	// Convert args to JSON string
+	argsJSON := "{}"
+	if vertexCall.Args != nil {
+		if data, err := json.Marshal(vertexCall.Args); err == nil {
+			argsJSON = string(data)
+		}
+	}
+
+	return openai.OpenAIToolCall{
+		ID:   openai.GenerateID(),
+		Type: "function",
+		Function: openai.OpenAIToolFunction{
+			Name:      vertexCall.Name,
+			Arguments: argsJSON,
+		},
 	}
 }
 
@@ -264,6 +338,113 @@ func extractTextContent(content interface{}) string {
 				}
 			}
 		}
+	}
+	return ""
+}
+
+// convertOpenAIToolsToVertex converts OpenAI tools format to Vertex tool format
+func convertOpenAIToolsToVertex(openAITools []interface{}) []VertexTool {
+	if len(openAITools) == 0 {
+		return nil
+	}
+
+	var functionDeclarations []VertexFunctionDeclaration
+
+	for _, toolInterface := range openAITools {
+		toolMap, ok := toolInterface.(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		// Check if it's a function type tool
+		if toolType, ok := toolMap["type"].(string); !ok || toolType != "function" {
+			continue
+		}
+
+		// Extract function definition
+		if functionObj, ok := toolMap["function"].(map[string]interface{}); ok {
+			funcDecl := VertexFunctionDeclaration{
+				Name:        getString(functionObj, "name"),
+				Description: getString(functionObj, "description"),
+			}
+
+			// Convert parameters
+			if params, ok := functionObj["parameters"].(map[string]interface{}); ok {
+				funcDecl.Parameters = convertOpenAIParamsToVertex(params)
+			}
+
+			if funcDecl.Name != "" {
+				functionDeclarations = append(functionDeclarations, funcDecl)
+			}
+		}
+	}
+
+	if len(functionDeclarations) == 0 {
+		return nil
+	}
+
+	return []VertexTool{
+		{
+			FunctionDeclarations: functionDeclarations,
+		},
+	}
+}
+
+// convertOpenAIParamsToVertex converts OpenAI parameter schema to Vertex format
+func convertOpenAIParamsToVertex(params map[string]interface{}) *VertexFunctionSchema {
+	schema := &VertexFunctionSchema{
+		Type:       "OBJECT",
+		Properties: make(map[string]VertexPropertyDefinition),
+	}
+
+	if paramType, ok := params["type"].(string); ok {
+		schema.Type = strings.ToUpper(paramType)
+	}
+
+	// Convert required fields
+	if required, ok := params["required"].([]interface{}); ok {
+		requiredFields := make([]string, 0, len(required))
+		for _, req := range required {
+			if field, ok := req.(string); ok {
+				requiredFields = append(requiredFields, field)
+			}
+		}
+		if len(requiredFields) > 0 {
+			schema.Required = requiredFields
+		}
+	}
+
+	// Convert properties
+	if properties, ok := params["properties"].(map[string]interface{}); ok {
+		for propName, propDef := range properties {
+			if propMap, ok := propDef.(map[string]interface{}); ok {
+				prop := VertexPropertyDefinition{
+					Type:        strings.ToUpper(getString(propMap, "type")),
+					Description: getString(propMap, "description"),
+				}
+
+				// Handle enum values
+				if enumVals, ok := propMap["enum"].([]interface{}); ok {
+					prop.Enum = enumVals
+				}
+
+				// Handle items for array types
+				if items, ok := propMap["items"]; ok {
+					prop.Items = items
+				}
+
+				schema.Properties[propName] = prop
+			}
+		}
+	}
+
+	return schema
+}
+
+// getString safely retrieves a string value from a map
+func getString(m map[string]interface{}, key string) string {
+	if val, ok := m[key].(string); ok {
+		return val
 	}
 	return ""
 }

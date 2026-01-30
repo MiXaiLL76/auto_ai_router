@@ -12,16 +12,24 @@ import (
 
 // AnthropicStreamEvent represents a single event from Anthropic streaming response
 type AnthropicStreamEvent struct {
-	Type    string          `json:"type"`
-	Index   *int            `json:"index,omitempty"`
-	Delta   *AnthropicDelta `json:"delta,omitempty"`
-	Message *AnthropicMsg   `json:"message,omitempty"`
-	Usage   *AnthropicUsage `json:"usage,omitempty"`
+	Type         string                      `json:"type"`
+	Index        *int                        `json:"index,omitempty"`
+	ContentBlock *AnthropicContentBlockStart `json:"content_block,omitempty"`
+	Delta        *AnthropicDelta             `json:"delta,omitempty"`
+	Message      *AnthropicMsg               `json:"message,omitempty"`
+	Usage        *AnthropicUsage             `json:"usage,omitempty"`
+}
+
+type AnthropicContentBlockStart struct {
+	Type string `json:"type"`
+	ID   string `json:"id,omitempty"`
+	Name string `json:"name,omitempty"`
 }
 
 type AnthropicDelta struct {
 	Type         string  `json:"type"`
 	Text         string  `json:"text,omitempty"`
+	PartialJSON  string  `json:"partial_json,omitempty"`
 	StopReason   *string `json:"stop_reason,omitempty"`
 	StopSequence *string `json:"stop_sequence,omitempty"`
 }
@@ -39,6 +47,17 @@ func TransformAnthropicStreamToOpenAI(anthropicStream io.Reader, model string, o
 	chatID := ""
 	timestamp := openai.GetCurrentTimestamp()
 	isFirstChunk := true
+
+	// Track tool_use state during streaming
+	currentToolUse := &struct {
+		id          string
+		name        string
+		inputBuffer strings.Builder
+		isActive    bool
+		toolCallIdx int
+	}{
+		toolCallIdx: 0,
+	}
 
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -61,26 +80,64 @@ func TransformAnthropicStreamToOpenAI(anthropicStream io.Reader, model string, o
 		}
 
 		// Only process events that have content
-		content := ""
+		var content string
+		var toolCalls []openai.OpenAIStreamingToolCall
 		var finishReason *string
 
 		switch event.Type {
+		case "content_block_start":
+			// Handle tool_use block start
+			if event.ContentBlock != nil && event.ContentBlock.Type == "tool_use" {
+				currentToolUse.isActive = true
+				currentToolUse.id = event.ContentBlock.ID
+				currentToolUse.name = event.ContentBlock.Name
+				currentToolUse.inputBuffer.Reset()
+			}
+
 		case "content_block_delta":
 			if event.Delta != nil {
-				content = event.Delta.Text
+				if event.Delta.Type == "text_delta" && event.Delta.Text != "" {
+					// Text content
+					content = event.Delta.Text
+				} else if event.Delta.Type == "input_json_delta" && event.Delta.PartialJSON != "" {
+					// Accumulate tool_use input JSON
+					if currentToolUse.isActive {
+						currentToolUse.inputBuffer.WriteString(event.Delta.PartialJSON)
+					}
+				}
 			}
+
+		case "content_block_stop":
+			// Handle tool_use block end
+			if currentToolUse.isActive {
+				toolCall := openai.OpenAIStreamingToolCall{
+					Index: currentToolUse.toolCallIdx,
+					ID:    currentToolUse.id,
+					Type:  "function",
+					Function: &openai.OpenAIStreamingToolFunction{
+						Name:      currentToolUse.name,
+						Arguments: currentToolUse.inputBuffer.String(),
+					},
+				}
+				toolCalls = append(toolCalls, toolCall)
+				currentToolUse.isActive = false
+				currentToolUse.toolCallIdx++
+			}
+
 		case "message_delta":
 			if event.Delta != nil && event.Delta.StopReason != nil {
 				reason := mapAnthropicStopReason(*event.Delta.StopReason)
 				finishReason = &reason
 			}
+
 		case "message_stop":
 			// End of stream
 			continue
+
 		default:
-			// Skip other event types (message_start, content_block_start, content_block_stop)
+			// Skip other event types
 			if isFirstChunk && event.Type == "message_start" {
-				// Don't continue, send initial chunk with role
+				// Allow message_start on first chunk
 			} else {
 				continue
 			}
@@ -96,7 +153,8 @@ func TransformAnthropicStreamToOpenAI(anthropicStream io.Reader, model string, o
 				{
 					Index: 0,
 					Delta: openai.OpenAIStreamingDelta{
-						Content: content,
+						Content:   content,
+						ToolCalls: toolCalls,
 					},
 					FinishReason: finishReason,
 				},
