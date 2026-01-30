@@ -3,8 +3,14 @@ Shared pytest fixtures and configuration for auto_ai_router tests
 """
 
 import os
+import sys
 import pytest
 from openai import OpenAI
+
+# Add tests directory to path for imports
+sys.path.insert(0, os.path.dirname(__file__))
+
+from test_helpers import TestModels, ResponseValidator, ContentValidator
 
 
 @pytest.fixture
@@ -39,3 +45,21 @@ def timeout_short():
 def timeout_long():
     """Long timeout for image generation tests"""
     return 180
+
+
+@pytest.fixture
+def test_models():
+    """Get standard test models"""
+    return TestModels()
+
+
+@pytest.fixture
+def response_validator():
+    """Get response validator"""
+    return ResponseValidator()
+
+
+@pytest.fixture
+def content_validator():
+    """Get content validator"""
+    return ContentValidator()

@@ -1,38 +1,24 @@
 """
-Tool/Function calling tests for OpenAI -> Anthropic bridge
+Anthropic Claude tool/function calling tests
+Tests OpenAI -> Anthropic tool definition conversion and handling
 """
 
-import json
 import pytest
+from test_helpers import (
+    TestModels, ResponseValidator, ToolDefinitions
+)
 
 
-class TestToolCalling:
-    """Test tool/function calling capabilities"""
+class TestAnthropicBasicToolCalling:
+    """Test basic tool calling functionality"""
 
-    def test_simple_tool_definition(self, openai_client):
-        """Test sending tool definitions to the API"""
-        tools = [
-            {
-                "type": "function",
-                "function": {
-                    "name": "get_weather",
-                    "description": "Get the current weather in a location",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "location": {
-                                "type": "string",
-                                "description": "City name"
-                            }
-                        },
-                        "required": ["location"]
-                    }
-                }
-            }
-        ]
+    @pytest.mark.parametrize("model", TestModels.ANTHROPIC_MODELS)
+    def test_simple_tool_definition(self, openai_client, model):
+        """Test sending simple tool definition"""
+        tools = [ToolDefinitions.get_weather_tool()]
 
         response = openai_client.chat.completions.create(
-            model="claude-opus-4-1",
+            model=model,
             messages=[
                 {"role": "user", "content": "What's the weather in Paris?"}
             ],
@@ -41,112 +27,51 @@ class TestToolCalling:
             max_tokens=200
         )
 
-        assert response.choices[0].message is not None
-        assert response.usage.prompt_tokens > 0
+        ResponseValidator.validate_chat_response(response)
+        ResponseValidator.validate_usage(response)
 
-    def test_tool_with_multiple_parameters(self, openai_client):
-        """Test tool with multiple required and optional parameters"""
-        tools = [
-            {
-                "type": "function",
-                "function": {
-                    "name": "search_flights",
-                    "description": "Search for flights between two cities",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "from_city": {
-                                "type": "string",
-                                "description": "Departure city"
-                            },
-                            "to_city": {
-                                "type": "string",
-                                "description": "Arrival city"
-                            },
-                            "date": {
-                                "type": "string",
-                                "description": "Travel date (YYYY-MM-DD)"
-                            },
-                            "passengers": {
-                                "type": "integer",
-                                "description": "Number of passengers",
-                                "default": 1
-                            }
-                        },
-                        "required": ["from_city", "to_city", "date"]
-                    }
-                }
-            }
-        ]
-
-        response = openai_client.chat.completions.create(
-            model="claude-opus-4-1",
-            messages=[
-                {"role": "user", "content": "Find flights from New York to London for 3 people on 2024-06-15"}
-            ],
-            tools=tools,
-            tool_choice="auto",
-            max_tokens=200
-        )
-
-        assert response.choices[0].message is not None
-
-    def test_multiple_tools(self, openai_client):
+    @pytest.mark.parametrize("model", TestModels.ANTHROPIC_MODELS)
+    def test_multiple_tools(self, openai_client, model):
         """Test API with multiple tool definitions"""
         tools = [
-            {
-                "type": "function",
-                "function": {
-                    "name": "get_weather",
-                    "description": "Get weather",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {"location": {"type": "string"}},
-                        "required": ["location"]
-                    }
-                }
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "get_time",
-                    "description": "Get current time in a timezone",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {"timezone": {"type": "string"}},
-                        "required": ["timezone"]
-                    }
-                }
-            },
-            {
-                "type": "function",
-                "function": {
-                    "name": "calculate",
-                    "description": "Perform mathematical calculation",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "expression": {"type": "string", "description": "Math expression"}
-                        },
-                        "required": ["expression"]
-                    }
-                }
-            }
+            ToolDefinitions.get_weather_tool(),
+            ToolDefinitions.get_calculation_tool(),
         ]
 
         response = openai_client.chat.completions.create(
-            model="claude-opus-4-1",
+            model=model,
             messages=[
-                {"role": "user", "content": "What's the weather like and what time is it in Tokyo?"}
+                {"role": "user", "content": "What's the weather like and what is 5+3?"}
             ],
             tools=tools,
             tool_choice="auto",
             max_tokens=200
         )
 
-        assert response.choices[0].message is not None
+        ResponseValidator.validate_chat_response(response)
 
-    def test_tool_choice_required(self, openai_client):
+    @pytest.mark.parametrize("model", TestModels.ANTHROPIC_MODELS)
+    def test_tool_with_multiple_parameters(self, openai_client, model):
+        """Test tool with multiple required and optional parameters"""
+        tools = [ToolDefinitions.get_search_flights_tool()]
+
+        response = openai_client.chat.completions.create(
+            model=model,
+            messages=[
+                {
+                    "role": "user",
+                    "content": "Find flights from New York to London for 3 people on 2024-06-15"
+                }
+            ],
+            tools=tools,
+            tool_choice="auto",
+            max_tokens=200
+        )
+
+        ResponseValidator.validate_chat_response(response)
+
+    @pytest.mark.parametrize("model", TestModels.ANTHROPIC_MODELS)
+    def test_tool_choice_required(self, openai_client, model):
         """Test forcing tool usage with tool_choice='required'"""
         tools = [
             {
@@ -167,7 +92,7 @@ class TestToolCalling:
         ]
 
         response = openai_client.chat.completions.create(
-            model="claude-opus-4-1",
+            model=model,
             messages=[
                 {"role": "user", "content": "Please add 5 and 3"}
             ],
@@ -176,55 +101,51 @@ class TestToolCalling:
             max_tokens=100
         )
 
-        assert response.choices[0].message is not None
+        ResponseValidator.validate_chat_response(response)
 
-    def test_nested_object_parameters(self, openai_client):
-        """Test tool with nested object parameters"""
-        tools = [
-            {
-                "type": "function",
-                "function": {
-                    "name": "book_hotel",
-                    "description": "Book a hotel room",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "location": {"type": "string"},
-                            "dates": {
-                                "type": "object",
-                                "properties": {
-                                    "check_in": {"type": "string"},
-                                    "check_out": {"type": "string"}
-                                },
-                                "required": ["check_in", "check_out"]
-                            },
-                            "room_preferences": {
-                                "type": "object",
-                                "properties": {
-                                    "beds": {"type": "integer"},
-                                    "smoking": {"type": "boolean"}
-                                }
-                            }
-                        },
-                        "required": ["location", "dates"]
-                    }
-                }
-            }
-        ]
+    @pytest.mark.parametrize("model", TestModels.ANTHROPIC_MODELS)
+    def test_tool_choice_auto(self, openai_client, model):
+        """Test tool_choice='auto' (default behavior)"""
+        tools = [ToolDefinitions.get_weather_tool()]
 
         response = openai_client.chat.completions.create(
-            model="claude-opus-4-1",
+            model=model,
             messages=[
-                {"role": "user", "content": "Book me a hotel in Paris from 2024-06-01 to 2024-06-05"}
+                {"role": "user", "content": "Just say hello"}
+            ],
+            tools=tools,
+            tool_choice="auto",
+            max_tokens=100
+        )
+
+        ResponseValidator.validate_chat_response(response)
+
+
+class TestAnthropicComplexToolDefinitions:
+    """Test complex tool parameter structures"""
+
+    @pytest.mark.parametrize("model", TestModels.ANTHROPIC_MODELS)
+    def test_nested_object_parameters(self, openai_client, model):
+        """Test tool with nested object parameters"""
+        tools = [ToolDefinitions.get_complex_tool_with_nested_params()]
+
+        response = openai_client.chat.completions.create(
+            model=model,
+            messages=[
+                {
+                    "role": "user",
+                    "content": "Book me a hotel in Paris from 2024-06-01 to 2024-06-05"
+                }
             ],
             tools=tools,
             tool_choice="auto",
             max_tokens=200
         )
 
-        assert response.choices[0].message is not None
+        ResponseValidator.validate_chat_response(response)
 
-    def test_tool_with_enum_values(self, openai_client):
+    @pytest.mark.parametrize("model", TestModels.ANTHROPIC_MODELS)
+    def test_tool_with_enum_values(self, openai_client, model):
         """Test tool parameter with enum values"""
         tools = [
             {
@@ -248,7 +169,7 @@ class TestToolCalling:
         ]
 
         response = openai_client.chat.completions.create(
-            model="claude-opus-4-1",
+            model=model,
             messages=[
                 {"role": "user", "content": "Set a daily alarm for 7:30 AM"}
             ],
@@ -257,9 +178,10 @@ class TestToolCalling:
             max_tokens=150
         )
 
-        assert response.choices[0].message is not None
+        ResponseValidator.validate_chat_response(response)
 
-    def test_tool_with_array_parameters(self, openai_client):
+    @pytest.mark.parametrize("model", TestModels.ANTHROPIC_MODELS)
+    def test_tool_with_array_parameters(self, openai_client, model):
         """Test tool with array parameters"""
         tools = [
             {
@@ -285,13 +207,247 @@ class TestToolCalling:
         ]
 
         response = openai_client.chat.completions.create(
-            model="claude-opus-4-1",
+            model=model,
             messages=[
-                {"role": "user", "content": "Send an email to alice@example.com and bob@example.com with subject 'Meeting' and body 'Let's meet tomorrow'"}
+                {
+                    "role": "user",
+                    "content": "Send an email to alice@example.com and bob@example.com with subject 'Meeting' and body 'Let's meet tomorrow'"
+                }
             ],
             tools=tools,
             tool_choice="auto",
             max_tokens=200
         )
 
-        assert response.choices[0].message is not None
+        ResponseValidator.validate_chat_response(response)
+
+
+class TestAnthropicToolsAdvanced:
+    """Test advanced tool calling scenarios"""
+
+    @pytest.mark.parametrize("model", TestModels.ANTHROPIC_MODELS)
+    def test_tool_with_default_values(self, openai_client, model):
+        """Test tool parameters with default values"""
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "search",
+                    "description": "Search for information",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "query": {"type": "string"},
+                            "limit": {"type": "integer", "default": 10}
+                        },
+                        "required": ["query"]
+                    }
+                }
+            }
+        ]
+
+        response = openai_client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "user", "content": "Search for artificial intelligence"}
+            ],
+            tools=tools,
+            tool_choice="auto",
+            max_tokens=150
+        )
+
+        ResponseValidator.validate_chat_response(response)
+
+    @pytest.mark.parametrize("model", TestModels.ANTHROPIC_MODELS)
+    def test_tool_with_description_details(self, openai_client, model):
+        """Test tool with detailed descriptions and examples"""
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "calculate_discount",
+                    "description": "Calculate discount amount based on original price and discount percentage. Example: price=100, discount=10 returns 10",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "original_price": {
+                                "type": "number",
+                                "description": "The original price before discount"
+                            },
+                            "discount_percent": {
+                                "type": "number",
+                                "description": "The discount percentage (0-100)"
+                            }
+                        },
+                        "required": ["original_price", "discount_percent"]
+                    }
+                }
+            }
+        ]
+
+        response = openai_client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "user", "content": "Calculate 20% discount on $50"}
+            ],
+            tools=tools,
+            tool_choice="auto",
+            max_tokens=150
+        )
+
+        ResponseValidator.validate_chat_response(response)
+
+    @pytest.mark.parametrize("model", TestModels.ANTHROPIC_MODELS)
+    def test_tool_with_optional_parameters(self, openai_client, model):
+        """Test tool where only some parameters are required"""
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "book_table",
+                    "description": "Book a restaurant table",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "restaurant": {"type": "string"},
+                            "date": {"type": "string"},
+                            "time": {"type": "string"},
+                            "party_size": {"type": "integer"},
+                            "special_requests": {"type": "string"}
+                        },
+                        "required": ["restaurant", "date", "time", "party_size"]
+                    }
+                }
+            }
+        ]
+
+        response = openai_client.chat.completions.create(
+            model=model,
+            messages=[
+                {
+                    "role": "user",
+                    "content": "Book a table at Mario's for 4 people on 2024-06-15 at 19:00 with special dietary needs"
+                }
+            ],
+            tools=tools,
+            tool_choice="auto",
+            max_tokens=200
+        )
+
+        ResponseValidator.validate_chat_response(response)
+
+    @pytest.mark.parametrize("model", TestModels.ANTHROPIC_MODELS)
+    def test_multiple_tools_different_categories(self, openai_client, model):
+        """Test with multiple tools from different categories"""
+        tools = [
+            ToolDefinitions.get_weather_tool(),
+            ToolDefinitions.get_search_flights_tool(),
+            ToolDefinitions.get_calculation_tool(),
+        ]
+
+        response = openai_client.chat.completions.create(
+            model=model,
+            messages=[
+                {
+                    "role": "user",
+                    "content": "What's the weather in Paris, find flights to London, and calculate 15% of 1000"
+                }
+            ],
+            tools=tools,
+            tool_choice="auto",
+            max_tokens=300
+        )
+
+        ResponseValidator.validate_chat_response(response)
+
+
+class TestAnthropicToolsEdgeCases:
+    """Test edge cases in tool calling"""
+
+    @pytest.mark.parametrize("model", TestModels.ANTHROPIC_MODELS)
+    def test_tool_with_very_long_description(self, openai_client, model):
+        """Test tool with lengthy description"""
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "complex_task",
+                    "description": "This is a very detailed tool that performs complex analysis. "
+                                  "It takes multiple parameters and returns comprehensive results. "
+                                  "The tool is designed to handle edge cases and provide accurate "
+                                  "information based on the input parameters provided by the user. "
+                                  "It supports multiple data types and formats.",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "input": {"type": "string"}
+                        },
+                        "required": ["input"]
+                    }
+                }
+            }
+        ]
+
+        response = openai_client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "user", "content": "Use the tool with input 'test'"}
+            ],
+            tools=tools,
+            tool_choice="auto",
+            max_tokens=200
+        )
+
+        ResponseValidator.validate_chat_response(response)
+
+    @pytest.mark.parametrize("model", TestModels.ANTHROPIC_MODELS)
+    def test_single_tool_in_list(self, openai_client, model):
+        """Test with single tool in tools list"""
+        tools = [ToolDefinitions.get_weather_tool()]
+
+        response = openai_client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "user", "content": "What's the weather?"}
+            ],
+            tools=tools,
+            tool_choice="auto",
+            max_tokens=100
+        )
+
+        ResponseValidator.validate_chat_response(response)
+
+    @pytest.mark.parametrize("model", TestModels.ANTHROPIC_MODELS)
+    def test_tool_with_no_required_parameters(self, openai_client, model):
+        """Test tool where no parameters are required"""
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_current_time",
+                    "description": "Get the current time",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "timezone": {
+                                "type": "string",
+                                "description": "Timezone (optional)"
+                            }
+                        },
+                        "required": []
+                    }
+                }
+            }
+        ]
+
+        response = openai_client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "user", "content": "What's the current time?"}
+            ],
+            tools=tools,
+            tool_choice="auto",
+            max_tokens=100
+        )
+
+        ResponseValidator.validate_chat_response(response)

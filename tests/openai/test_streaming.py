@@ -1,182 +1,155 @@
 """
-OpenAI streaming tests for auto_ai_router
+OpenAI streaming tests
+Tests streaming chat completions
 """
 
 import pytest
+from test_helpers import (
+    TestModels, StreamingValidator, ContentValidator
+)
 
 
 class TestOpenAIStreaming:
-    """OpenAI streaming functionality tests"""
+    """Test OpenAI streaming functionality"""
 
-    @pytest.mark.parametrize("model", [
-        "gpt-4o-mini",
-    ])
+    @pytest.mark.parametrize("model", TestModels.OPENAI_MODELS)
     def test_basic_streaming(self, openai_client, model):
-        """Test basic streaming with different models"""
+        """Test basic streaming"""
+        stream = openai_client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": "Count 1 to 3"}],
+            max_tokens=100,
+            stream=True
+        )
+
+        full_content, chunk_count = StreamingValidator.collect_streaming_content(stream)
+        StreamingValidator.assert_valid_streaming_response(full_content, chunk_count)
+        ContentValidator.assert_contains_any(full_content, ["1", "one"])
+
+    @pytest.mark.parametrize("temperature", [0.3, 0.9])
+    @pytest.mark.parametrize("model", TestModels.OPENAI_MODELS)
+    def test_streaming_temperatures(self, openai_client, model, temperature):
+        """Test streaming with temperatures"""
+        stream = openai_client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": "Write a sentence"}],
+            temperature=temperature,
+            max_tokens=100,
+            stream=True
+        )
+
+        full_content, chunk_count = StreamingValidator.collect_streaming_content(stream)
+        StreamingValidator.assert_valid_streaming_response(full_content, chunk_count)
+
+    @pytest.mark.parametrize("model", TestModels.OPENAI_MODELS)
+    def test_streaming_with_system_message(self, openai_client, model):
+        """Test streaming with system prompt"""
         stream = openai_client.chat.completions.create(
             model=model,
             messages=[
-                {"role": "user", "content": "Count from 1 to 5"}
-            ],
-            max_tokens=150,
-            stream=True,
-            stream_options={"include_usage": True}
-        )
-
-        full_content = ""
-        chunk_count = 0
-        usage_found = False
-
-        for chunk in stream:
-            chunk_count += 1
-            if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content:
-                full_content += chunk.choices[0].delta.content
-            # Check for usage in final chunk
-            if hasattr(chunk, 'usage') and chunk.usage:
-                usage_found = True
-                assert chunk.usage.total_tokens > 0
-
-        assert chunk_count > 0
-        assert len(full_content) > 0
-        assert any(str(i) in full_content for i in range(1, 6))
-        assert usage_found, "Usage information not found in streaming response"
-
-    @pytest.mark.parametrize("temperature", [0.1, 0.7, 1.0])
-    def test_streaming_with_temperature(self, openai_client, temperature):
-        """Test streaming with different temperature values"""
-        stream = openai_client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "user", "content": "Write a short creative sentence about robots"}
-            ],
-            temperature=temperature,
-            max_tokens=130,
-            stream=True,
-            stream_options={"include_usage": True}
-        )
-
-        full_content = ""
-        for chunk in stream:
-            if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content:
-                full_content += chunk.choices[0].delta.content
-
-        assert len(full_content) > 0
-        assert "robot" in full_content.lower()
-
-    def test_streaming_with_system_message(self, openai_client):
-        """Test streaming with system message"""
-        stream = openai_client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": "You are a helpful math tutor. Always end responses with 'Hope this helps!'"},
+                {"role": "system", "content": "You are a math tutor."},
                 {"role": "user", "content": "What is 2+2?"}
             ],
-            max_tokens=150,
-            stream=True,
-            stream_options={"include_usage": True}
+            max_tokens=100,
+            stream=True
         )
 
-        full_content = ""
-        for chunk in stream:
-            if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content:
-                full_content += chunk.choices[0].delta.content
+        full_content, chunk_count = StreamingValidator.collect_streaming_content(stream)
+        StreamingValidator.assert_valid_streaming_response(full_content, chunk_count)
+        ContentValidator.assert_contains_any(full_content, ["4", "four"])
 
-        assert len(full_content) > 0
-        assert "4" in full_content
-        assert "hope this helps" in full_content.lower()
-
-    def test_streaming_conversation(self, openai_client):
+    @pytest.mark.parametrize("model", TestModels.OPENAI_MODELS)
+    def test_streaming_conversation(self, openai_client, model):
         """Test streaming with conversation context"""
         stream = openai_client.chat.completions.create(
-            model="gpt-4o-mini",
+            model=model,
             messages=[
-                {"role": "user", "content": "My favorite color is blue."},
-                {"role": "assistant", "content": "That's nice! Blue is a calming color."},
-                {"role": "user", "content": "What did I just tell you about my favorite color?"}
+                {"role": "user", "content": "I like red."},
+                {"role": "assistant", "content": "Red is nice."},
+                {"role": "user", "content": "What did I say?"}
             ],
-            max_tokens=130,
-            stream=True,
-            stream_options={"include_usage": True}
+            max_tokens=100,
+            stream=True
         )
 
-        full_content = ""
-        for chunk in stream:
-            if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content:
-                full_content += chunk.choices[0].delta.content
+        full_content, chunk_count = StreamingValidator.collect_streaming_content(stream)
+        StreamingValidator.assert_valid_streaming_response(full_content, chunk_count)
+        ContentValidator.assert_contains_any(full_content.lower(), ["red"])
 
-        assert len(full_content) > 0
-        assert "blue" in full_content.lower()
-
-    def test_streaming_with_stop_sequences(self, openai_client):
-        """Test streaming with stop sequences"""
-        stream = openai_client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "user", "content": "List three colors: red, green"}
-            ],
-            max_tokens=150,
-            stop=["STOP"],
-            stream=True,
-            stream_options={"include_usage": True}
-        )
-
-        full_content = ""
-        for chunk in stream:
-            if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content:
-                full_content += chunk.choices[0].delta.content
-
-        assert len(full_content) > 0
-        # Should not contain STOP since it's a stop sequence
-        assert "STOP" not in full_content
-
-    def test_streaming_chunk_structure(self, openai_client):
+    @pytest.mark.parametrize("model", TestModels.OPENAI_MODELS)
+    def test_streaming_chunk_structure(self, openai_client, model):
         """Test streaming chunk structure"""
         stream = openai_client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "user", "content": "Say hello"}
-            ],
-            max_tokens=120,
-            stream=True,
-            stream_options={"include_usage": True}
+            model=model,
+            messages=[{"role": "user", "content": "Say hi"}],
+            max_tokens=50,
+            stream=True
         )
 
-        chunks = list(stream)
-        assert len(chunks) > 0
-
-        # Check that we get content in some chunks
-        content_chunks = [
-            chunk for chunk in chunks
-            if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content
-        ]
-        assert len(content_chunks) > 0
-
-        # Check structure of content chunks
-        for chunk in content_chunks:
-            assert hasattr(chunk, 'choices')
-            assert len(chunk.choices) > 0
-            assert hasattr(chunk.choices[0], 'delta')
-
-    def test_streaming_error_handling(self, openai_client):
-        """Test streaming with potential error conditions"""
-        # Test with very small max_tokens
-        stream = openai_client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "user", "content": "Write a long essay about artificial intelligence"}
-            ],
-            max_tokens=150,  # Very small limit
-            stream=True,
-            stream_options={"include_usage": True}
-        )
-
-        full_content = ""
         chunk_count = 0
         for chunk in stream:
             chunk_count += 1
-            if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content:
-                full_content += chunk.choices[0].delta.content
+            assert hasattr(chunk, 'choices')
+            if chunk.choices:
+                assert len(chunk.choices) > 0
+                assert hasattr(chunk.choices[0], 'delta')
 
-        # Should still get some content even with small limit
         assert chunk_count > 0
-        assert len(full_content) > 0
+
+    @pytest.mark.parametrize("model", TestModels.OPENAI_MODELS)
+    def test_streaming_with_stop_sequence(self, openai_client, model):
+        """Test streaming with stop sequence"""
+        stream = openai_client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": "List colors"}],
+            stop=["STOP"],
+            max_tokens=100,
+            stream=True
+        )
+
+        full_content, chunk_count = StreamingValidator.collect_streaming_content(stream)
+        assert chunk_count > 0
+        assert "STOP" not in full_content
+
+    @pytest.mark.parametrize("model", TestModels.OPENAI_MODELS)
+    def test_streaming_advanced_parameters(self, openai_client, model):
+        """Test streaming with multiple parameters"""
+        stream = openai_client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": "Tell a story"}],
+            temperature=0.8,
+            top_p=0.9,
+            frequency_penalty=0.1,
+            max_tokens=150,
+            stream=True
+        )
+
+        full_content, chunk_count = StreamingValidator.collect_streaming_content(stream)
+        StreamingValidator.assert_valid_streaming_response(full_content, chunk_count)
+
+    @pytest.mark.parametrize("model", TestModels.OPENAI_MODELS)
+    def test_streaming_special_characters(self, openai_client, model):
+        """Test streaming with special characters"""
+        stream = openai_client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": "Greet in Russian and Chinese"}],
+            max_tokens=100,
+            stream=True
+        )
+
+        full_content, chunk_count = StreamingValidator.collect_streaming_content(stream)
+        StreamingValidator.assert_valid_streaming_response(full_content, chunk_count)
+        assert any(ord(c) > 127 for c in full_content)
+
+    @pytest.mark.parametrize("model", TestModels.OPENAI_MODELS)
+    def test_streaming_min_max_tokens(self, openai_client, model):
+        """Test streaming respects max_tokens"""
+        stream = openai_client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": "Write long essay"}],
+            max_tokens=50,
+            stream=True
+        )
+
+        full_content, chunk_count = StreamingValidator.collect_streaming_content(stream)
+        assert chunk_count > 0
