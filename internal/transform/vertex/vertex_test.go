@@ -656,8 +656,8 @@ func TestConvertContentToParts(t *testing.T) {
 				if result[0].InlineData == nil {
 					t.Errorf("Expected InlineData to be set for image block")
 				} else {
-					if result[0].InlineData.MimeType != "image/png" {
-						t.Errorf("Expected mime type 'image/png', got %s", result[0].InlineData.MimeType)
+					if result[0].InlineData.MIMEType != "image/png" {
+						t.Errorf("Expected mime type 'image/png', got %s", result[0].InlineData.MIMEType)
 					}
 				}
 			}
@@ -669,14 +669,14 @@ func TestConvertContentToParts(t *testing.T) {
 			}
 
 			if tt.name == "data url with different mime types" && len(result) > 0 {
-				if result[0].InlineData.MimeType != "image/webp" {
-					t.Errorf("Expected mime type 'image/webp', got %s", result[0].InlineData.MimeType)
+				if result[0].InlineData.MIMEType != "image/webp" {
+					t.Errorf("Expected mime type 'image/webp', got %s", result[0].InlineData.MIMEType)
 				}
 			}
 
 			if tt.name == "data url without semicolon" && len(result) > 0 {
-				if result[0].InlineData.MimeType != "image/jpeg" {
-					t.Errorf("Expected mime type 'image/jpeg', got %s", result[0].InlineData.MimeType)
+				if result[0].InlineData.MIMEType != "image/jpeg" {
+					t.Errorf("Expected mime type 'image/jpeg', got %s", result[0].InlineData.MIMEType)
 				}
 			}
 		})

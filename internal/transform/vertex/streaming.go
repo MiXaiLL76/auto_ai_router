@@ -8,12 +8,13 @@ import (
 	"strings"
 
 	"github.com/mixaill76/auto_ai_router/internal/transform/openai"
+	"google.golang.org/genai"
 )
 
-// VertexStreamingChunk represents a single chunk from Vertex AI streaming response
+// VertexStreamingChunk wraps genai types for streaming response
 type VertexStreamingChunk struct {
-	Candidates    []VertexCandidate    `json:"candidates,omitempty"`
-	UsageMetadata *VertexUsageMetadata `json:"usageMetadata,omitempty"`
+	Candidates    []*genai.Candidate                          `json:"candidates,omitempty"`
+	UsageMetadata *genai.GenerateContentResponseUsageMetadata `json:"usageMetadata,omitempty"`
 }
 
 // TransformVertexStreamToOpenAI converts Vertex AI SSE stream to OpenAI SSE format
@@ -76,17 +77,19 @@ func TransformVertexStreamToOpenAI(vertexStream io.Reader, model string, output 
 			var toolCalls []openai.OpenAIStreamingToolCall
 			toolCallIdx := 0
 
-			for _, part := range candidate.Content.Parts {
-				if part.Text != "" {
-					content += part.Text
+			if candidate.Content != nil && candidate.Content.Parts != nil {
+				for _, part := range candidate.Content.Parts {
+					if part.Text != "" {
+						content += part.Text
+					}
+					// Handle function calls
+					if part.FunctionCall != nil {
+						toolCall := convertVertexFunctionCallToStreamingOpenAI(part.FunctionCall, toolCallIdx)
+						toolCalls = append(toolCalls, toolCall)
+						toolCallIdx++
+					}
+					// Note: streaming doesn't support images in delta, only text
 				}
-				// Handle function calls
-				if part.FunctionCall != nil {
-					toolCall := convertVertexFunctionCallToStreamingOpenAI(part.FunctionCall, toolCallIdx)
-					toolCalls = append(toolCalls, toolCall)
-					toolCallIdx++
-				}
-				// Note: streaming doesn't support images in delta, only text
 			}
 
 			choice.Delta.Content = content
@@ -95,8 +98,8 @@ func TransformVertexStreamToOpenAI(vertexStream io.Reader, model string, output 
 			}
 
 			// Handle finish reason
-			if candidate.FinishReason != "" {
-				finishReason := mapFinishReason(candidate.FinishReason)
+			if candidate.FinishReason != genai.FinishReasonUnspecified {
+				finishReason := mapFinishReason(string(candidate.FinishReason))
 				choice.FinishReason = &finishReason
 			}
 
@@ -106,9 +109,9 @@ func TransformVertexStreamToOpenAI(vertexStream io.Reader, model string, output 
 		// Convert usage metadata if present
 		if vertexChunk.UsageMetadata != nil {
 			openAIChunk.Usage = &openai.OpenAIUsage{
-				PromptTokens:     vertexChunk.UsageMetadata.PromptTokenCount,
-				CompletionTokens: vertexChunk.UsageMetadata.CandidatesTokenCount,
-				TotalTokens:      vertexChunk.UsageMetadata.TotalTokenCount,
+				PromptTokens:     int(vertexChunk.UsageMetadata.PromptTokenCount),
+				CompletionTokens: int(vertexChunk.UsageMetadata.CandidatesTokenCount),
+				TotalTokens:      int(vertexChunk.UsageMetadata.TotalTokenCount),
 			}
 		}
 
@@ -126,11 +129,11 @@ func TransformVertexStreamToOpenAI(vertexStream io.Reader, model string, output 
 }
 
 // convertVertexFunctionCallToStreamingOpenAI converts Vertex function call to OpenAI streaming tool call format
-func convertVertexFunctionCallToStreamingOpenAI(vertexCall *VertexFunctionCall, index int) openai.OpenAIStreamingToolCall {
+func convertVertexFunctionCallToStreamingOpenAI(genaiCall *genai.FunctionCall, index int) openai.OpenAIStreamingToolCall {
 	// Convert args to JSON string
 	argsJSON := "{}"
-	if vertexCall.Args != nil {
-		if data, err := json.Marshal(vertexCall.Args); err == nil {
+	if genaiCall.Args != nil {
+		if data, err := json.Marshal(genaiCall.Args); err == nil {
 			argsJSON = string(data)
 		}
 	}
@@ -140,7 +143,7 @@ func convertVertexFunctionCallToStreamingOpenAI(vertexCall *VertexFunctionCall, 
 		ID:    openai.GenerateID(),
 		Type:  "function",
 		Function: &openai.OpenAIStreamingToolFunction{
-			Name:      vertexCall.Name,
+			Name:      genaiCall.Name,
 			Arguments: argsJSON,
 		},
 	}

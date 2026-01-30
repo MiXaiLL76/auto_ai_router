@@ -6,6 +6,7 @@ import (
 
 	"github.com/mixaill76/auto_ai_router/internal/transform/openai"
 	"github.com/stretchr/testify/assert"
+	"google.golang.org/genai"
 )
 
 func TestOpenAIToolsConversion(t *testing.T) {
@@ -452,10 +453,10 @@ func TestConvertOpenAIParamsToVertex(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := convertOpenAIParamsToVertex(tt.input)
+			result := convertOpenAIParamsToGenaiSchema(tt.input)
 
 			assert.NotNil(t, result, "Expected non-nil schema")
-			assert.Equal(t, tt.expectedType, result.Type, "Type mismatch")
+			assert.Equal(t, genai.Type(tt.expectedType), result.Type, "Type mismatch")
 			assert.Equal(t, tt.expectedPropsCount, len(result.Properties), "Properties count mismatch")
 
 			if len(tt.expectedRequired) > 0 {

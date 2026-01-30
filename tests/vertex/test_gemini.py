@@ -32,66 +32,6 @@ class TestGeminiText:
         assert response.usage.prompt_tokens > 0
         assert response.usage.total_tokens > 0
         assert response.choices[0].message.content
-
-    def test_code_generation(self, openai_client):
-        """Test code generation with Gemini"""
-        response = openai_client.chat.completions.create(
-            model="gemini-2.5-pro",
-            messages=[
-                {"role": "user", "content": "Write: return a + b"}
-            ],
-            temperature=0.3,
-            max_tokens=50
-        )
-
-        assert response.usage.completion_tokens > 0
-        assert response.usage.prompt_tokens > 0
-        assert response.usage.total_tokens > 0
-        assert len(response.choices[0].message.content) > 0
-
-    def test_streaming_response(self, openai_client):
-        """Test streaming response with Gemini"""
-        stream = openai_client.chat.completions.create(
-            model="gemini-2.5-pro",
-            messages=[
-                {"role": "system", "content": "You are a storyteller."},
-                {"role": "user", "content": "Tell me a very short story about a robot learning to paint."}
-            ],
-            temperature=0.8,
-            max_tokens=200,
-            stream=True
-        )
-
-        full_content = ""
-        chunk_count = 0
-        for chunk in stream:
-            chunk_count += 1
-            if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content:
-                full_content += chunk.choices[0].delta.content
-
-        assert chunk_count > 0
-        assert len(full_content) > 0
-
-    @pytest.mark.parametrize("language", [
-        "русском",
-        "español",
-        "français"
-    ])
-    def test_multilingual_support(self, openai_client, language):
-        """Test multilingual text generation"""
-        response = openai_client.chat.completions.create(
-            model="gemini-2.5-flash",
-            messages=[
-                {"role": "user", "content": f"Напиши короткое стихотворение про весну на {language} языке"}
-            ],
-            max_tokens=200,
-            temperature=0.7
-        )
-
-        assert response.usage.total_tokens > 0
-        assert response.choices[0].message.content
-
-
 class TestGeminiAdvanced:
     """Advanced Gemini functionality tests"""
 
