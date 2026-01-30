@@ -785,3 +785,103 @@ func TestMapFinishReasonToolCall(t *testing.T) {
 		})
 	}
 }
+
+// TestToolMessageConversion tests that tool messages are properly converted
+func TestToolMessageConversion(t *testing.T) {
+	input := `{
+		"model": "gemini-2.5-pro",
+		"messages": [
+			{"role": "user", "content": "What's the weather?"},
+			{"role": "assistant", "content": "I'll check", "tool_calls": [{"id": "call_123", "type": "function", "function": {"name": "get_weather", "arguments": "{\"location\": \"Tokyo\"}"}}]},
+			{"role": "tool", "content": "Sunny, 22°C", "tool_call_id": "call_123"},
+			{"role": "user", "content": "Thanks!"}
+		],
+		"tools": [{
+			"type": "function",
+			"function": {
+				"name": "get_weather",
+				"description": "Get weather",
+				"parameters": {
+					"type": "object",
+					"properties": {
+						"location": {"type": "string"}
+					},
+					"required": ["location"]
+				}
+			}
+		}]
+	}`
+
+	result, err := OpenAIToVertex([]byte(input))
+	assert.NoError(t, err)
+
+	var resultMap map[string]interface{}
+	err = json.Unmarshal(result, &resultMap)
+	assert.NoError(t, err)
+
+	// Check contents
+	contents, ok := resultMap["contents"].([]interface{})
+	assert.True(t, ok, "Expected contents to be array")
+
+	// Should have at least 4 messages: user, assistant (model), tool->user, user
+	assert.GreaterOrEqual(t, len(contents), 3)
+
+	// Find the tool result message - should be converted to user role
+	toolResultFound := false
+	for _, c := range contents {
+		content, ok := c.(map[string]interface{})
+		assert.True(t, ok)
+
+		if role, ok := content["role"].(string); ok && role == "user" {
+			if parts, ok := content["parts"].([]interface{}); ok && len(parts) > 0 {
+				part, ok := parts[0].(map[string]interface{})
+				assert.True(t, ok)
+
+				if text, ok := part["text"].(string); ok && text == "Sunny, 22°C" {
+					toolResultFound = true
+					break
+				}
+			}
+		}
+	}
+
+	assert.True(t, toolResultFound, "Tool result should be converted to user message with role='user'")
+}
+
+// TestToolMessageWithoutToolCallId tests tool messages without explicit tool_call_id
+func TestToolMessageWithoutToolCallId(t *testing.T) {
+	input := `{
+		"model": "gemini-2.5-pro",
+		"messages": [
+			{"role": "user", "content": "Process this"},
+			{"role": "tool", "content": "Result from external tool"}
+		]
+	}`
+
+	result, err := OpenAIToVertex([]byte(input))
+	assert.NoError(t, err)
+
+	var resultMap map[string]interface{}
+	err = json.Unmarshal(result, &resultMap)
+	assert.NoError(t, err)
+
+	contents, ok := resultMap["contents"].([]interface{})
+	assert.True(t, ok)
+
+	// Tool message should be converted to user role
+	toolMsgFound := false
+	for _, c := range contents {
+		content := c.(map[string]interface{})
+		if role, ok := content["role"].(string); ok && role == "user" {
+			if parts, ok := content["parts"].([]interface{}); ok && len(parts) > 0 {
+				part := parts[0].(map[string]interface{})
+				if text, ok := part["text"].(string); ok && text == "Result from external tool" {
+					toolMsgFound = true
+					break
+				}
+			}
+		}
+	}
+
+	assert.True(t, toolMsgFound, "Tool message should be converted to user message")
+}

@@ -594,3 +594,171 @@ class TestStreamingToolSupport:
             assert len(chunks) > 0
         except Exception as e:
             pytest.skip(f"Google streaming with tools: {str(e)}")
+
+
+class TestVertexToolCallsWithHistory:
+    """Test Vertex AI tool calling with conversation history"""
+
+    def test_vertex_tool_calls_with_developer_role(self, openai_client):
+        """Test Vertex tool calling with developer role messages and tool_calls in history"""
+        from langchain_core.messages import (
+            HumanMessage,
+            AIMessage,
+            SystemMessage,
+            ToolMessage,
+        )
+
+        model = ChatOpenAI(
+            model="gemini-2.5-flash",
+            openai_api_base="http://localhost:8080/v1",
+            openai_api_key=openai_client.api_key,
+            temperature=1,
+        )
+
+        tools = [get_weather, calculate_distance]
+        model_with_tools = model.bind_tools(tools)
+
+        # Build conversation history with tool calls
+        # Using LangChain's ToolCall format instead of OpenAI format
+        messages = [
+            SystemMessage("You are a helpful assistant with access to weather and distance calculation tools."),
+            HumanMessage("What's the weather in Tokyo?"),
+            AIMessage(
+                "I'll check the weather for Tokyo.",
+                tool_calls=[
+                    {
+                        "id": "call_weather_001",
+                        "name": "get_weather",
+                        "args": {"location": "Tokyo"},
+                    }
+                ],
+            ),
+            ToolMessage(
+                "Sunny, 22°C",
+                tool_call_id="call_weather_001",
+            ),
+            HumanMessage("How far is Tokyo from London?"),
+        ]
+
+        response = model_with_tools.invoke(messages)
+        assert response is not None
+        assert hasattr(response, "content") or hasattr(response, "tool_calls")
+
+    def test_vertex_multiple_function_calls_in_sequence(self, openai_client):
+        """Test Vertex handling multiple function calls with proper sequence"""
+        from langchain_core.messages import (
+            HumanMessage,
+            AIMessage,
+            ToolMessage,
+        )
+
+        model = ChatOpenAI(
+            model="gemini-2.5-pro",
+            openai_api_base="http://localhost:8080/v1",
+            openai_api_key=openai_client.api_key,
+            temperature=0.7,
+            seed=42,
+        )
+
+        tools = [get_weather, calculate_distance, list_cities]
+        model_with_tools = model.bind_tools(tools)
+
+        # Simulate conversation with multiple tool calls
+        # Using LangChain's ToolCall format (id, name, args)
+        messages = [
+            HumanMessage("Get weather for Tokyo and London, then calculate distance between them"),
+            AIMessage(
+                content="I'll get the weather for both cities and calculate the distance.",
+                tool_calls=[
+                    {
+                        "id": "call_weather_tokyo",
+                        "name": "get_weather",
+                        "args": {"location": "Tokyo"},
+                    },
+                    {
+                        "id": "call_weather_london",
+                        "name": "get_weather",
+                        "args": {"location": "London"},
+                    },
+                    {
+                        "id": "call_distance",
+                        "name": "calculate_distance",
+                        "args": {"location1": "Tokyo", "location2": "London"},
+                    },
+                ],
+            ),
+            ToolMessage("Sunny, 22°C", tool_call_id="call_weather_tokyo"),
+            ToolMessage("Rainy, 10°C", tool_call_id="call_weather_london"),
+            ToolMessage("9570", tool_call_id="call_distance"),
+            HumanMessage("What should I pack for a trip to both cities?"),
+        ]
+
+        response = model_with_tools.invoke(messages)
+        assert response is not None
+        # Response should include content about packing recommendations
+        if hasattr(response, "content"):
+            assert len(response.content) > 0
+
+    def test_vertex_tool_calls_with_all_parameters(self, openai_client):
+        """Test Vertex tool calling with all OpenAI-compatible parameters"""
+        model = ChatOpenAI(
+            model="gemini-2.5-pro",
+            openai_api_base="http://localhost:8080/v1",
+            openai_api_key=openai_client.api_key,
+            temperature=1,
+            seed=42,
+            top_p=0.9,
+            frequency_penalty=0.1,
+            presence_penalty=0.1,
+            max_tokens=500,
+        )
+
+        tools = [get_weather, calculate_distance]
+        model_with_tools = model.bind_tools(tools)
+
+        response = model_with_tools.invoke(
+            "What's the weather in Tokyo and how far is it from London?"
+        )
+        assert response is not None
+
+    def test_vertex_tool_calls_response_format(self, openai_client):
+        """Test that Vertex returns proper tool_calls format"""
+        model = ChatOpenAI(
+            model="gemini-2.5-flash",
+            openai_api_base="http://localhost:8080/v1",
+            openai_api_key=openai_client.api_key,
+        )
+
+        tools = [get_weather]
+        model_with_tools = model.bind_tools(tools)
+
+        response = model_with_tools.invoke("What's the weather in Tokyo?")
+        assert response is not None
+
+        # If tool_calls are present, verify LangChain format
+        # LangChain transforms OpenAI format to its own format
+        if hasattr(response, "tool_calls") and response.tool_calls:
+            for tool_call in response.tool_calls:
+                # LangChain format: {"id": "...", "name": "...", "args": {...}, "type": "tool_call"}
+                assert "id" in tool_call
+                assert "name" in tool_call
+                assert "args" in tool_call or "arguments" in tool_call
+                # Type can be either "function" (OpenAI format) or "tool_call" (LangChain format)
+                if "type" in tool_call:
+                    assert tool_call["type"] in ["function", "tool_call"]
+
+    def test_vertex_tool_choice_auto(self, openai_client):
+        """Test Vertex with tool_choice='auto' parameter"""
+        model = ChatOpenAI(
+            model="gemini-2.5-pro",
+            openai_api_base="http://localhost:8080/v1",
+            openai_api_key=openai_client.api_key,
+        )
+
+        tools = [get_weather, calculate_distance]
+        model_with_tools = model.bind_tools(tools, tool_choice="auto")
+
+        response = model_with_tools.invoke(
+            "Get weather for London and compare with Paris distance"
+        )
+        assert response is not None

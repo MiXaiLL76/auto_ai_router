@@ -158,6 +158,32 @@ func TestOpenAIToVertex(t *testing.T) {
 			wantErr: false,
 		},
 		{
+			name: "developer role as system instruction",
+			input: `{
+				"model": "gemini-2.5-pro",
+				"messages": [
+					{"role": "developer", "content": "You are a helpful assistant"},
+					{"role": "user", "content": "Hello"}
+				]
+			}`,
+			expected: map[string]interface{}{
+				"systemInstruction": map[string]interface{}{
+					"parts": []interface{}{
+						map[string]interface{}{"text": "You are a helpful assistant"},
+					},
+				},
+				"contents": []interface{}{
+					map[string]interface{}{
+						"role": "user",
+						"parts": []interface{}{
+							map[string]interface{}{"text": "Hello"},
+						},
+					},
+				},
+			},
+			wantErr: false,
+		},
+		{
 			name: "single stop string",
 			input: `{
 				"model": "gemini-2.5-pro",
@@ -175,6 +201,54 @@ func TestOpenAIToVertex(t *testing.T) {
 			name:    "invalid json",
 			input:   `{"invalid": json}`,
 			wantErr: true,
+		},
+		{
+			name: "assistant with tool_calls",
+			input: `{
+				"model": "gemini-2.5-pro",
+				"messages": [
+					{"role": "user", "content": "Call a function"},
+					{
+						"role": "assistant",
+						"content": null,
+						"tool_calls": [
+							{
+								"id": "call_abc123",
+								"type": "function",
+								"function": {
+									"name": "test_function",
+									"arguments": "{\"param1\": 123, \"param2\": \"value\"}"
+								}
+							}
+						]
+					}
+				]
+			}`,
+			expected: map[string]interface{}{
+				"contents": []interface{}{
+					map[string]interface{}{
+						"role": "user",
+						"parts": []interface{}{
+							map[string]interface{}{"text": "Call a function"},
+						},
+					},
+					map[string]interface{}{
+						"role": "model",
+						"parts": []interface{}{
+							map[string]interface{}{
+								"functionCall": map[string]interface{}{
+									"name": "test_function",
+									"args": map[string]interface{}{
+										"param1": float64(123),
+										"param2": "value",
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			wantErr: false,
 		},
 	}
 

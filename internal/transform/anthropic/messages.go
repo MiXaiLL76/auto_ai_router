@@ -45,6 +45,13 @@ type ImageSource struct {
 	URL       string `json:"url,omitempty"`
 }
 
+type ToolUseBlock struct {
+	Type  string                 `json:"type"`
+	ID    string                 `json:"id"`
+	Name  string                 `json:"name"`
+	Input map[string]interface{} `json:"input"`
+}
+
 // AnthropicResponse represents Anthropic Messages API response format
 type AnthropicResponse struct {
 	ID           string                  `json:"id"`
@@ -128,11 +135,27 @@ func OpenAIToAnthropic(openAIBody []byte) ([]byte, error) {
 		if msg.Role == "system" {
 			// System messages go to the top-level system field
 			anthropicReq.System = extractTextContent(msg.Content)
+		} else if msg.Role == "developer" {
+			// Developer messages are treated as system instruction
+			textContent := extractTextContent(msg.Content)
+			if existingSystem, ok := anthropicReq.System.(string); ok && existingSystem != "" {
+				// Combine with existing system instruction
+				anthropicReq.System = existingSystem + "\n\n" + textContent
+			} else {
+				anthropicReq.System = textContent
+			}
 		} else {
 			// Convert message content
+			content := convertOpenAIContentToAnthropic(msg.Content)
+
+			// Handle tool_calls for assistant messages
+			if len(msg.ToolCalls) > 0 && msg.Role == "assistant" {
+				content = convertOpenAIToolCallsToAnthropic(content, msg.ToolCalls)
+			}
+
 			anthropicReq.Messages = append(anthropicReq.Messages, AnthropicMessage{
 				Role:    msg.Role,
-				Content: convertOpenAIContentToAnthropic(msg.Content),
+				Content: content,
 			})
 		}
 	}
@@ -219,6 +242,66 @@ func convertAnthropicToolUseToOpenAI(block AnthropicContentBlock) openai.OpenAIT
 			Arguments: argsJSON,
 		},
 	}
+}
+
+// convertOpenAIToolCallsToAnthropic converts OpenAI tool_calls to Anthropic tool_use blocks
+// and integrates them into the content array
+func convertOpenAIToolCallsToAnthropic(content interface{}, toolCalls []interface{}) interface{} {
+	var contentBlocks []interface{}
+
+	// Convert existing content to content blocks
+	if str, ok := content.(string); ok && str != "" {
+		contentBlocks = append(contentBlocks, map[string]interface{}{
+			"type": "text",
+			"text": str,
+		})
+	} else if blocks, ok := content.([]interface{}); ok {
+		contentBlocks = append(contentBlocks, blocks...)
+	}
+
+	// Convert tool_calls to tool_use blocks
+	for _, toolCallInterface := range toolCalls {
+		toolCallMap, ok := toolCallInterface.(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		// Extract function information
+		var funcName string
+		var argsStr string
+		var toolID string
+
+		toolID = openai.GetString(toolCallMap, "id")
+
+		// Try to get from function field first (standard OpenAI format)
+		if funcObj, ok := toolCallMap["function"].(map[string]interface{}); ok {
+			funcName = openai.GetString(funcObj, "name")
+			argsStr = openai.GetString(funcObj, "arguments")
+		}
+
+		if funcName != "" && argsStr != "" {
+			// Parse arguments from JSON string to map
+			var args map[string]interface{}
+			if err := json.Unmarshal([]byte(argsStr), &args); err != nil {
+				args = map[string]interface{}{"_error": "failed to parse arguments"}
+			}
+
+			toolUseBlock := map[string]interface{}{
+				"type":  "tool_use",
+				"id":    toolID,
+				"name":  funcName,
+				"input": args,
+			}
+
+			contentBlocks = append(contentBlocks, toolUseBlock)
+		}
+	}
+
+	// Return as array if we have blocks, otherwise return original content
+	if len(contentBlocks) > 0 {
+		return contentBlocks
+	}
+	return content
 }
 
 func extractTextContent(content interface{}) string {

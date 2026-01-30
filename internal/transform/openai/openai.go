@@ -32,8 +32,9 @@ type OpenAIRequest struct {
 }
 
 type OpenAIMessage struct {
-	Role    string      `json:"role"`
-	Content interface{} `json:"content"`
+	Role      string        `json:"role"`
+	Content   interface{}   `json:"content"`
+	ToolCalls []interface{} `json:"tool_calls,omitempty"`
 }
 
 type ContentBlock struct {

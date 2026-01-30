@@ -165,6 +165,20 @@ func OpenAIToVertex(openAIBody []byte) ([]byte, error) {
 			vertexReq.SystemInstruction = &VertexContent{
 				Parts: []VertexPart{{Text: content}},
 			}
+		} else if msg.Role == "developer" {
+			// Developer messages are treated as system instruction
+			content := extractTextContent(msg.Content)
+			vertexReq.SystemInstruction = &VertexContent{
+				Parts: []VertexPart{{Text: content}},
+			}
+		} else if msg.Role == "tool" {
+			// Tool messages are sent as user messages with tool results
+			// In Vertex, tool results are just text content from the user perspective
+			content := extractTextContent(msg.Content)
+			vertexReq.Contents = append(vertexReq.Contents, VertexContent{
+				Role:  "user",
+				Parts: []VertexPart{{Text: content}},
+			})
 		} else {
 			// Convert role mapping
 			role := msg.Role
@@ -173,6 +187,13 @@ func OpenAIToVertex(openAIBody []byte) ([]byte, error) {
 			}
 
 			parts := convertContentToParts(msg.Content)
+
+			// Handle tool_calls for assistant messages
+			if len(msg.ToolCalls) > 0 && role == "model" {
+				toolCallParts := convertToolCallsToVertexParts(msg.ToolCalls)
+				parts = append(parts, toolCallParts...)
+			}
+
 			vertexReq.Contents = append(vertexReq.Contents, VertexContent{
 				Role:  role,
 				Parts: parts,
@@ -340,6 +361,49 @@ func extractTextContent(content interface{}) string {
 		}
 	}
 	return ""
+}
+
+// convertToolCallsToVertexParts converts OpenAI tool_calls to Vertex FunctionCall parts
+func convertToolCallsToVertexParts(toolCalls []interface{}) []VertexPart {
+	if len(toolCalls) == 0 {
+		return nil
+	}
+
+	var parts []VertexPart
+
+	for _, toolCallInterface := range toolCalls {
+		toolCallMap, ok := toolCallInterface.(map[string]interface{})
+		if !ok {
+			continue
+		}
+
+		// Extract function information
+		funcName := openai.GetString(toolCallMap, "name")
+		if funcName == "" {
+			if funcObj, ok := toolCallMap["function"].(map[string]interface{}); ok {
+				funcName = openai.GetString(funcObj, "name")
+				if funcName != "" {
+					// Parse arguments
+					argsStr := openai.GetString(funcObj, "arguments")
+					var args map[string]interface{}
+					if argsStr != "" {
+						if err := json.Unmarshal([]byte(argsStr), &args); err != nil {
+							args = map[string]interface{}{"_error": "failed to parse arguments"}
+						}
+					}
+
+					parts = append(parts, VertexPart{
+						FunctionCall: &VertexFunctionCall{
+							Name: funcName,
+							Args: args,
+						},
+					})
+				}
+			}
+		}
+	}
+
+	return parts
 }
 
 // convertOpenAIToolsToVertex converts OpenAI tools format to Vertex tool format

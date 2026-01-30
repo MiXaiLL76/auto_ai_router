@@ -16,6 +16,135 @@ func TestAnthropicToolRequest(t *testing.T) {
 		checkFn func(t *testing.T, req *AnthropicRequest)
 	}{
 		{
+			name: "developer role as system instruction",
+			input: `{
+				"model": "claude-3-opus-20240229",
+				"messages": [
+					{"role": "developer", "content": "You are a helpful assistant"},
+					{"role": "user", "content": "Hello"}
+				]
+			}`,
+			wantErr: false,
+			checkFn: func(t *testing.T, req *AnthropicRequest) {
+				assert.Equal(t, "You are a helpful assistant", req.System)
+				assert.Len(t, req.Messages, 1)
+				assert.Equal(t, "user", req.Messages[0].Role)
+			},
+		},
+		{
+			name: "developer role combined with system",
+			input: `{
+				"model": "claude-3-opus-20240229",
+				"messages": [
+					{"role": "system", "content": "Base system prompt"},
+					{"role": "developer", "content": "Developer instructions"},
+					{"role": "user", "content": "Hello"}
+				]
+			}`,
+			wantErr: false,
+			checkFn: func(t *testing.T, req *AnthropicRequest) {
+				systemStr, ok := req.System.(string)
+				assert.True(t, ok)
+				assert.Contains(t, systemStr, "Base system prompt")
+				assert.Contains(t, systemStr, "Developer instructions")
+				assert.Len(t, req.Messages, 1)
+			},
+		},
+		{
+			name: "assistant with tool_calls",
+			input: `{
+				"model": "claude-3-opus-20240229",
+				"messages": [
+					{"role": "user", "content": "Call a function"},
+					{
+						"role": "assistant",
+						"content": "I'll call the function",
+						"tool_calls": [
+							{
+								"id": "call_123",
+								"type": "function",
+								"function": {
+									"name": "test_function",
+									"arguments": "{\"param1\": 123, \"param2\": \"value\"}"
+								}
+							}
+						]
+					}
+				]
+			}`,
+			wantErr: false,
+			checkFn: func(t *testing.T, req *AnthropicRequest) {
+				assert.Len(t, req.Messages, 2)
+
+				// Check assistant message with tool_calls
+				assistantMsg := req.Messages[1]
+				assert.Equal(t, "assistant", assistantMsg.Role)
+
+				// Content should be array with text and tool_use blocks
+				contentBlocks, ok := assistantMsg.Content.([]interface{})
+				assert.True(t, ok, "Content should be array for tool_calls")
+				assert.Len(t, contentBlocks, 2)
+
+				// First block should be text
+				textBlock, ok := contentBlocks[0].(map[string]interface{})
+				assert.True(t, ok)
+				assert.Equal(t, "text", textBlock["type"])
+				assert.Equal(t, "I'll call the function", textBlock["text"])
+
+				// Second block should be tool_use
+				toolBlock, ok := contentBlocks[1].(map[string]interface{})
+				assert.True(t, ok)
+				assert.Equal(t, "tool_use", toolBlock["type"])
+				assert.Equal(t, "call_123", toolBlock["id"])
+				assert.Equal(t, "test_function", toolBlock["name"])
+
+				// Check input is parsed map, not string
+				input, ok := toolBlock["input"].(map[string]interface{})
+				assert.True(t, ok, "Input should be parsed map")
+				assert.Equal(t, float64(123), input["param1"])
+				assert.Equal(t, "value", input["param2"])
+			},
+		},
+		{
+			name: "assistant with null content and tool_calls",
+			input: `{
+				"model": "claude-3-opus-20240229",
+				"messages": [
+					{"role": "user", "content": "Call function"},
+					{
+						"role": "assistant",
+						"content": null,
+						"tool_calls": [
+							{
+								"id": "call_456",
+								"type": "function",
+								"function": {
+									"name": "get_weather",
+									"arguments": "{\"location\": \"London\"}"
+								}
+							}
+						]
+					}
+				]
+			}`,
+			wantErr: false,
+			checkFn: func(t *testing.T, req *AnthropicRequest) {
+				assert.Len(t, req.Messages, 2)
+
+				assistantMsg := req.Messages[1]
+				contentBlocks, ok := assistantMsg.Content.([]interface{})
+				assert.True(t, ok)
+
+				// Should have only tool_use block (no text)
+				assert.Len(t, contentBlocks, 1)
+
+				toolBlock, ok := contentBlocks[0].(map[string]interface{})
+				assert.True(t, ok)
+				assert.Equal(t, "tool_use", toolBlock["type"])
+				assert.Equal(t, "get_weather", toolBlock["name"])
+			},
+		},
+		{
 			name: "tool request conversion",
 			input: `{
 				"model": "claude-3-opus-20240229",
