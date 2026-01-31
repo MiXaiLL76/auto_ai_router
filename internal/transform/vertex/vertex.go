@@ -423,8 +423,8 @@ func parseDataURLToPart(dataURL string) *genai.Part {
 		return nil
 	}
 
-	header := parts[0] // data:image/jpeg;base64
-	data := parts[1]   // base64 data
+	header := parts[0]  // data:image/jpeg;base64
+	b64Data := parts[1] // base64 data
 
 	// Extract mime type from header
 	mimeType := extractMimeType(header)
@@ -432,10 +432,16 @@ func parseDataURLToPart(dataURL string) *genai.Part {
 		return nil
 	}
 
+	// Decode base64 data to binary
+	decodedData, err := base64.StdEncoding.DecodeString(b64Data)
+	if err != nil {
+		return nil
+	}
+
 	return &genai.Part{
 		InlineData: &genai.Blob{
 			MIMEType: mimeType,
-			Data:     []byte(data),
+			Data:     decodedData,
 		},
 	}
 }

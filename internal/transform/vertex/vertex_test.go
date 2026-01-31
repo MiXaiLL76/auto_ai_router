@@ -612,11 +612,11 @@ func TestConvertContentToParts(t *testing.T) {
 				map[string]interface{}{
 					"type": "image_url",
 					"image_url": map[string]interface{}{
-						"url": "data:image/png;,iVBORw0KGgoAAAA", // no base64 prefix
+						"url": "data:image/png;,iVBORw0KGgoAAAA", // no base64 prefix - invalid base64
 					},
 				},
 			},
-			expected: 1, // should handle gracefully
+			expected: 0, // invalid base64 should be skipped
 		},
 		{
 			name: "data url without semicolon",
