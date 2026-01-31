@@ -6,6 +6,7 @@ import (
 
 	"github.com/mixaill76/auto_ai_router/internal/transform/openai"
 	"github.com/stretchr/testify/assert"
+	"google.golang.org/genai"
 )
 
 func TestOpenAIToolsConversion(t *testing.T) {
@@ -220,7 +221,7 @@ func TestOpenAIToolsConversion(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result, err := OpenAIToVertex([]byte(tt.input))
+			result, err := OpenAIToVertex([]byte(tt.input), false, "")
 
 			if tt.wantErr {
 				assert.Error(t, err, "Expected error but got none")
@@ -452,10 +453,10 @@ func TestConvertOpenAIParamsToVertex(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := convertOpenAIParamsToVertex(tt.input)
+			result := convertOpenAIParamsToGenaiSchema(tt.input)
 
 			assert.NotNil(t, result, "Expected non-nil schema")
-			assert.Equal(t, tt.expectedType, result.Type, "Type mismatch")
+			assert.Equal(t, genai.Type(tt.expectedType), result.Type, "Type mismatch")
 			assert.Equal(t, tt.expectedPropsCount, len(result.Properties), "Properties count mismatch")
 
 			if len(tt.expectedRequired) > 0 {
@@ -539,7 +540,7 @@ func TestToolsWithOtherParameters(t *testing.T) {
 		}]
 	}`
 
-	result, err := OpenAIToVertex([]byte(input))
+	result, err := OpenAIToVertex([]byte(input), false, "")
 	assert.NoError(t, err)
 
 	var resultMap map[string]interface{}
@@ -812,7 +813,7 @@ func TestToolMessageConversion(t *testing.T) {
 		}]
 	}`
 
-	result, err := OpenAIToVertex([]byte(input))
+	result, err := OpenAIToVertex([]byte(input), false, "")
 	assert.NoError(t, err)
 
 	var resultMap map[string]interface{}
@@ -858,7 +859,7 @@ func TestToolMessageWithoutToolCallId(t *testing.T) {
 		]
 	}`
 
-	result, err := OpenAIToVertex([]byte(input))
+	result, err := OpenAIToVertex([]byte(input), false, "")
 	assert.NoError(t, err)
 
 	var resultMap map[string]interface{}

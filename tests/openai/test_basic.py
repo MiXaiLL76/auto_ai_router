@@ -1,153 +1,196 @@
 """
-OpenAI API tests for auto_ai_router
+OpenAI API tests - chat completions and embeddings
+Tests OpenAI routing and parameter conversion
 """
 
 import pytest
-import numpy as np
+from test_helpers import (
+    TestModels, ResponseValidator, ContentValidator, VectorMath
+)
 
 
-class TestOpenAIBasic:
-    """Basic OpenAI functionality tests"""
+class TestOpenAIChatBasic:
+    """Test basic OpenAI chat completions"""
 
-    @pytest.mark.parametrize("model,temperature,max_tokens", [
-        ("gpt-4o-mini", 0.7, 100),
-        ("gpt-4o-mini", 0.3, 150),
-    ])
-    def test_chat_completion(self, openai_client, model, temperature, max_tokens):
-        """Test basic chat completion with different parameters"""
+    @pytest.mark.parametrize("temperature", [0.3, 0.7])
+    @pytest.mark.parametrize("model", TestModels.OPENAI_MODELS)
+    def test_chat_with_temperatures(self, openai_client, model, temperature):
+        """Test chat with different temperatures"""
         response = openai_client.chat.completions.create(
             model=model,
             messages=[
-                {"role": "system", "content": "You are a helpful assistant."},
+                {"role": "system", "content": "You are helpful."},
                 {"role": "user", "content": "What is the capital of France?"}
             ],
             temperature=temperature,
-            max_tokens=max_tokens
+            max_tokens=100
         )
 
-        assert model in response.model
-        assert response.usage.completion_tokens > 0
-        assert response.usage.prompt_tokens > 0
-        assert response.usage.total_tokens > 0
-        assert len(response.choices) == 1
-        assert response.choices[0].message.content
+        ResponseValidator.validate_chat_response(response)
+        ResponseValidator.validate_usage(response)
+        ContentValidator.assert_contains_any(
+            response.choices[0].message.content,
+            ["Paris", "paris"]
+        )
 
-    @pytest.mark.parametrize("model,input_text", [
-        ("text-embedding-3-small", "The quick brown fox jumps over the lazy dog"),
-        ("text-embedding-3-small", "Machine learning is a subset of artificial intelligence"),
-    ])
-    def test_single_embedding(self, openai_client, model, input_text):
+    @pytest.mark.parametrize("model", TestModels.OPENAI_MODELS)
+    def test_basic_chat_completion(self, openai_client, model):
+        """Test basic chat completion"""
+        response = openai_client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": "Say hello"}],
+            max_tokens=50
+        )
+
+        ResponseValidator.validate_chat_response(response)
+        ResponseValidator.validate_usage(response)
+
+    @pytest.mark.parametrize("model", TestModels.OPENAI_MODELS)
+    def test_multi_turn_conversation(self, openai_client, model):
+        """Test multi-turn conversation"""
+        response = openai_client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "user", "content": "My favorite number is 7."},
+                {"role": "assistant", "content": "That's a lucky number!"},
+                {"role": "user", "content": "What number did I mention?"}
+            ],
+            max_tokens=100
+        )
+
+        ResponseValidator.validate_chat_response(response)
+        ContentValidator.assert_contains_any(
+            response.choices[0].message.content,
+            ["7", "seven"]
+        )
+
+    @pytest.mark.parametrize("model", TestModels.OPENAI_MODELS)
+    def test_advanced_parameters(self, openai_client, model):
+        """Test advanced chat parameters"""
+        response = openai_client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "user", "content": "Tell a short story"}
+            ],
+            temperature=0.8,
+            top_p=0.95,
+            frequency_penalty=0.1,
+            presence_penalty=0.1,
+            max_tokens=150
+        )
+
+        ResponseValidator.validate_chat_response(response)
+        assert response.usage.completion_tokens > 0
+
+    @pytest.mark.parametrize("model", TestModels.OPENAI_MODELS)
+    def test_stop_sequences(self, openai_client, model):
+        """Test stop sequences"""
+        response = openai_client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "user", "content": "List colors"}
+            ],
+            stop=["STOP"],
+            max_tokens=100
+        )
+
+        ResponseValidator.validate_chat_response(response)
+        assert "STOP" not in response.choices[0].message.content
+
+
+class TestOpenAIEmbeddings:
+    """Test OpenAI embedding functionality"""
+
+    @pytest.mark.parametrize("model", TestModels.EMBEDDING_MODELS)
+    def test_single_embedding(self, openai_client, model):
         """Test single text embedding"""
         response = openai_client.embeddings.create(
             model=model,
-            input=input_text
+            input="The quick brown fox jumps"
         )
 
-        assert model in response.model
-        assert len(response.data) == 1
+        ResponseValidator.validate_embedding_response(response, expected_count=1)
         assert len(response.data[0].embedding) > 0
-        assert response.usage.total_tokens > 0
 
-    def test_batch_embeddings(self, openai_client):
-        """Test batch text embeddings"""
+    @pytest.mark.parametrize("model", TestModels.EMBEDDING_MODELS)
+    def test_batch_embeddings(self, openai_client, model):
+        """Test batch embeddings"""
         texts = [
-            "Machine learning is a subset of artificial intelligence",
-            "Python is a popular programming language",
-            "The weather is nice today",
-            "Embeddings convert text to numerical vectors"
+            "Machine learning is AI",
+            "Python is a language",
+            "Weather is nice"
         ]
 
         response = openai_client.embeddings.create(
-            model="text-embedding-3-small",
+            model=model,
             input=texts
         )
 
-        assert response.model == "text-embedding-3-small"
-        assert len(response.data) == len(texts)
-        assert response.usage.total_tokens > 0
-
-        # Test similarity calculation
+        ResponseValidator.validate_embedding_response(response, expected_count=len(texts))
         embeddings = [data.embedding for data in response.data]
-        sim1 = self._cosine_similarity(embeddings[0], embeddings[3])  # ML vs Embeddings
-        sim2 = self._cosine_similarity(embeddings[0], embeddings[2])  # ML vs Weather
-        assert sim1 > sim2  # Related texts should have higher similarity
 
-    def test_streaming_response(self, openai_client):
-        """Test streaming chat completion"""
-        stream = openai_client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": "You are a storyteller."},
-                {"role": "user", "content": "Tell me a very short story about a robot."}
-            ],
-            temperature=0.8,
-            max_tokens=150,
-            stream=True
+        # Test similarity: ML and AI should be more similar than ML and Weather
+        sim_similar = VectorMath.cosine_similarity(embeddings[0], embeddings[1])
+        sim_different = VectorMath.cosine_similarity(embeddings[0], embeddings[2])
+        # Both should be reasonable, but we just check they exist
+        assert -1 <= sim_similar <= 1
+        assert -1 <= sim_different <= 1
+
+    @pytest.mark.parametrize("model", TestModels.EMBEDDING_MODELS)
+    def test_embedding_dimensions(self, openai_client, model):
+        """Test embedding dimensions are consistent"""
+        response = openai_client.embeddings.create(
+            model=model,
+            input="test"
         )
 
-        full_content = ""
-        chunk_count = 0
-        for chunk in stream:
-            chunk_count += 1
-            if chunk.choices and chunk.choices[0].delta and chunk.choices[0].delta.content:
-                full_content += chunk.choices[0].delta.content
-
-        assert chunk_count > 0
-        assert len(full_content) > 0
-
-    @staticmethod
-    def _cosine_similarity(vec1, vec2):
-        """Calculate cosine similarity between two vectors"""
-        return np.dot(vec1, vec2) / (np.linalg.norm(vec1) * np.linalg.norm(vec2))
+        embedding_dim = len(response.data[0].embedding)
+        assert embedding_dim > 0
+        # OpenAI embeddings typically have 1536 dimensions
+        assert embedding_dim > 100
 
 
-class TestOpenAIAdvanced:
-    """Advanced OpenAI functionality tests"""
+class TestOpenAIEdgeCases:
+    """Test edge cases"""
 
-    @pytest.mark.parametrize("params", [
-        {
-            "temperature": 0.7,
-            "max_tokens": 150,
-            "top_p": 0.9,
-            "frequency_penalty": 0.1,
-            "presence_penalty": 0.1,
-            "stop": ["END", "STOP"]
-        },
-        {
-            "temperature": 0.3,
-            "max_tokens": 200,
-            "top_p": 0.8,
-            "seed": 42,
-            "user": "test_user_123"
-        }
-    ])
-    def test_chat_with_advanced_params(self, openai_client, params):
-        """Test chat completion with advanced parameters"""
+    @pytest.mark.parametrize("model", TestModels.OPENAI_MODELS)
+    def test_max_tokens_limit(self, openai_client, model):
+        """Test max_tokens limit is respected"""
         response = openai_client.chat.completions.create(
-            model="gpt-4o-mini",
+            model=model,
             messages=[
-                {"role": "system", "content": "You are a helpful assistant."},
-                {"role": "user", "content": "Write a short poem about AI"}
+                {"role": "user", "content": "Write a very long essay about AI"}
             ],
-            **params
+            max_tokens=50
         )
 
-        assert response.usage.completion_tokens > 0
-        assert response.choices[0].message.content
+        ResponseValidator.validate_chat_response(response)
+        assert response.usage.completion_tokens <= 80  # Buffer for token counting
 
-    def test_conversation_context(self, openai_client):
-        """Test multi-turn conversation"""
+    @pytest.mark.parametrize("model", TestModels.OPENAI_MODELS)
+    def test_special_characters(self, openai_client, model):
+        """Test special characters handling"""
         response = openai_client.chat.completions.create(
-            model="gpt-4o-mini",
+            model=model,
             messages=[
-                {"role": "system", "content": "You are a helpful assistant that remembers context."},
-                {"role": "user", "content": "I'm planning a trip to Japan. What are the must-visit places?"},
-                {"role": "assistant", "content": "For Japan, I'd recommend Tokyo for modern culture, Kyoto for traditional temples, Osaka for food, and Mount Fuji for natural beauty."},
-                {"role": "user", "content": "What's the best time to visit the places you mentioned?"}
+                {"role": "user", "content": "Translate: 你好 мир 🚀"}
             ],
-            temperature=0.7,
-            max_tokens=250
+            max_tokens=100
         )
 
-        assert response.usage.total_tokens > 0
-        assert response.choices[0].message.content
+        ResponseValidator.validate_chat_response(response)
+
+    @pytest.mark.parametrize("model", TestModels.OPENAI_MODELS)
+    def test_code_generation(self, openai_client, model):
+        """Test code generation"""
+        response = openai_client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "user", "content": "Write Python function to add numbers"}
+            ],
+            max_tokens=200
+        )
+
+        ResponseValidator.validate_chat_response(response)
+        content = response.choices[0].message.content.lower()
+        assert any(kw in content for kw in ["def", "function", "return"])

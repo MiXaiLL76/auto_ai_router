@@ -1,140 +1,131 @@
 package vertex
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"strings"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/transform/openai"
+	"google.golang.org/genai"
 )
 
 // VertexRequest represents the Vertex AI API request format
 type VertexRequest struct {
-	Contents          []VertexContent         `json:"contents"`
-	GenerationConfig  *VertexGenerationConfig `json:"generationConfig,omitempty"`
-	SystemInstruction *VertexContent          `json:"systemInstruction,omitempty"`
-	Tools             []VertexTool            `json:"tools,omitempty"`
-}
-
-type VertexContent struct {
-	Role  string       `json:"role,omitempty"`
-	Parts []VertexPart `json:"parts"`
-}
-
-type VertexPart struct {
-	Text         string              `json:"text,omitempty"`
-	InlineData   *InlineData         `json:"inlineData,omitempty"`
-	FunctionCall *VertexFunctionCall `json:"functionCall,omitempty"`
-}
-
-type VertexFunctionCall struct {
-	Name string                 `json:"name"`
-	Args map[string]interface{} `json:"args"`
-}
-
-type InlineData struct {
-	MimeType string `json:"mimeType"`
-	Data     string `json:"data"`
-}
-
-type VertexGenerationConfig struct {
-	Temperature        *float64 `json:"temperature,omitempty"`
-	MaxOutputTokens    *int     `json:"maxOutputTokens,omitempty"`
-	TopP               *float64 `json:"topP,omitempty"`
-	TopK               *int     `json:"topK,omitempty"`
-	StopSequences      []string `json:"stopSequences,omitempty"`
-	ResponseMimeType   string   `json:"responseMimeType,omitempty"`
-	ResponseModalities []string `json:"responseModalities,omitempty"`
-	CandidateCount     *int     `json:"candidateCount,omitempty"`
-	Seed               *int     `json:"seed,omitempty"`
-	FrequencyPenalty   *float64 `json:"frequencyPenalty,omitempty"`
-	PresencePenalty    *float64 `json:"presencePenalty,omitempty"`
-}
-
-// Tool-related types for function calling
-type VertexTool struct {
-	FunctionDeclarations []VertexFunctionDeclaration `json:"functionDeclarations,omitempty"`
-}
-
-type VertexFunctionDeclaration struct {
-	Name        string                `json:"name"`
-	Description string                `json:"description,omitempty"`
-	Parameters  *VertexFunctionSchema `json:"parameters,omitempty"`
-}
-
-type VertexFunctionSchema struct {
-	Type       string                              `json:"type,omitempty"`
-	Properties map[string]VertexPropertyDefinition `json:"properties,omitempty"`
-	Required   []string                            `json:"required,omitempty"`
-}
-
-type VertexPropertyDefinition struct {
-	Type        string        `json:"type,omitempty"`
-	Description string        `json:"description,omitempty"`
-	Items       interface{}   `json:"items,omitempty"`
-	Enum        []interface{} `json:"enum,omitempty"`
+	Contents          []*genai.Content        `json:"contents"`
+	GenerationConfig  *genai.GenerationConfig `json:"generationConfig,omitempty"`
+	SystemInstruction *genai.Content          `json:"systemInstruction,omitempty"`
+	Tools             []*genai.Tool           `json:"tools,omitempty"`
 }
 
 // OpenAIToVertex converts OpenAI format request to Vertex AI format
-func OpenAIToVertex(openAIBody []byte) ([]byte, error) {
+func OpenAIToVertex(openAIBody []byte, isImageGeneration bool, model string) ([]byte, error) {
 	var openAIReq openai.OpenAIRequest
+
+	if isImageGeneration {
+		if strings.Contains(model, "gemini") {
+			// For Gemini models, convert imagen request to chat request first
+			chatBody, err := ImageRequestToOpenAIChatRequest(openAIBody)
+			if err != nil {
+				return nil, err
+			}
+			// Now process as normal chat request (no longer isImageGeneration, just normal chat)
+			openAIBody = chatBody
+		} else {
+			// For non-Gemini models (like Imagen), use standard image conversion
+			return OpenAIImageToVertex(openAIBody)
+		}
+	}
+
 	if err := json.Unmarshal(openAIBody, &openAIReq); err != nil {
 		return nil, fmt.Errorf("failed to parse OpenAI request: %w", err)
 	}
 
 	vertexReq := VertexRequest{
-		Contents: make([]VertexContent, 0),
+		Contents: make([]*genai.Content, 0),
 	}
 
 	// Handle generation config from extra_body or direct params
-	if openAIReq.Temperature != nil || openAIReq.MaxTokens != nil || openAIReq.TopP != nil || openAIReq.ExtraBody != nil ||
-		openAIReq.N != nil || openAIReq.Seed != nil || openAIReq.FrequencyPenalty != nil || openAIReq.PresencePenalty != nil || openAIReq.Stop != nil {
-		vertexReq.GenerationConfig = &VertexGenerationConfig{
-			Temperature:      openAIReq.Temperature,
-			MaxOutputTokens:  openAIReq.MaxTokens,
-			TopP:             openAIReq.TopP,
-			CandidateCount:   openAIReq.N,
-			Seed:             openAIReq.Seed,
-			FrequencyPenalty: openAIReq.FrequencyPenalty,
-			PresencePenalty:  openAIReq.PresencePenalty,
+	if openAIReq.Temperature != nil || openAIReq.MaxTokens != nil || openAIReq.MaxCompletionTokens != nil || openAIReq.TopP != nil || openAIReq.ExtraBody != nil ||
+		openAIReq.N != nil || openAIReq.Seed != nil || openAIReq.FrequencyPenalty != nil || openAIReq.PresencePenalty != nil || openAIReq.Stop != nil ||
+		len(openAIReq.Modalities) > 0 || openAIReq.ReasoningEffort != "" {
+
+		genConfig := &genai.GenerationConfig{}
+
+		// Convert direct parameters
+		if openAIReq.Temperature != nil {
+			temp := float32(*openAIReq.Temperature)
+			genConfig.Temperature = &temp
+		}
+		if openAIReq.MaxTokens != nil {
+			maxTokens := int32(*openAIReq.MaxTokens)
+			genConfig.MaxOutputTokens = maxTokens
+		}
+		// max_completion_tokens takes precedence over max_tokens
+		if openAIReq.MaxCompletionTokens != nil {
+			maxTokens := int32(*openAIReq.MaxCompletionTokens)
+			genConfig.MaxOutputTokens = maxTokens
+		}
+		if openAIReq.TopP != nil {
+			topP := float32(*openAIReq.TopP)
+			genConfig.TopP = &topP
+		}
+		if openAIReq.N != nil {
+			candidates := int32(*openAIReq.N)
+			genConfig.CandidateCount = candidates
+		}
+		if openAIReq.Seed != nil {
+			seed := int32(*openAIReq.Seed)
+			genConfig.Seed = &seed
+		}
+		if openAIReq.FrequencyPenalty != nil {
+			freq := float32(*openAIReq.FrequencyPenalty)
+			genConfig.FrequencyPenalty = &freq
+		}
+		if openAIReq.PresencePenalty != nil {
+			pres := float32(*openAIReq.PresencePenalty)
+			genConfig.PresencePenalty = &pres
 		}
 
 		// Handle extra_body generation_config (takes precedence)
 		if openAIReq.ExtraBody != nil {
-			if genConfig, ok := openAIReq.ExtraBody["generation_config"].(map[string]interface{}); ok {
+			if genConfigMap, ok := openAIReq.ExtraBody["generation_config"].(map[string]interface{}); ok {
 				// Only set response_mime_type for non-image models
-				if mimeType, ok := genConfig["response_mime_type"].(string); ok {
+				if mimeType, ok := genConfigMap["response_mime_type"].(string); ok {
 					// Skip response_mime_type for image generation models
 					if !strings.Contains(strings.ToLower(openAIReq.Model), "image") {
-						vertexReq.GenerationConfig.ResponseMimeType = mimeType
+						genConfig.ResponseMIMEType = mimeType
 					}
 				}
-				if modalities, ok := genConfig["response_modalities"].([]interface{}); ok {
+				if modalities, ok := genConfigMap["response_modalities"].([]interface{}); ok {
 					for _, m := range modalities {
 						if mod, ok := m.(string); ok {
-							vertexReq.GenerationConfig.ResponseModalities = append(vertexReq.GenerationConfig.ResponseModalities, mod)
+							genConfig.ResponseModalities = append(genConfig.ResponseModalities, genai.Modality(mod))
 						}
 					}
 				}
-				if topK, ok := genConfig["top_k"].(float64); ok {
-					topKInt := int(topK)
-					vertexReq.GenerationConfig.TopK = &topKInt
+				if topK, ok := genConfigMap["top_k"].(float64); ok {
+					topKVal := float32(topK)
+					genConfig.TopK = &topKVal
 				}
 				// extra_body values override direct params
-				if seed, ok := genConfig["seed"].(float64); ok {
-					seedInt := int(seed)
-					vertexReq.GenerationConfig.Seed = &seedInt
+				if seed, ok := genConfigMap["seed"].(float64); ok {
+					seedVal := int32(seed)
+					genConfig.Seed = &seedVal
 				}
-				if temp, ok := genConfig["temperature"].(float64); ok {
-					vertexReq.GenerationConfig.Temperature = &temp
+				if temp, ok := genConfigMap["temperature"].(float64); ok {
+					tempVal := float32(temp)
+					genConfig.Temperature = &tempVal
 				}
+				// Note: image_config parameters are passed through extra_body
+				// and will be included in the final request JSON by the SDK
 			}
 			// Handle modalities at top level
 			if modalities, ok := openAIReq.ExtraBody["modalities"].([]interface{}); ok {
 				for _, m := range modalities {
 					if mod, ok := m.(string); ok {
-						vertexReq.GenerationConfig.ResponseModalities = append(vertexReq.GenerationConfig.ResponseModalities, strings.ToUpper(mod))
+						genConfig.ResponseModalities = append(genConfig.ResponseModalities, genai.Modality(strings.ToUpper(mod)))
 					}
 				}
 			}
@@ -144,7 +135,7 @@ func OpenAIToVertex(openAIBody []byte) ([]byte, error) {
 		if openAIReq.Stop != nil {
 			switch stop := openAIReq.Stop.(type) {
 			case string:
-				vertexReq.GenerationConfig.StopSequences = []string{stop}
+				genConfig.StopSequences = []string{stop}
 			case []interface{}:
 				stopSeqs := make([]string, 0, len(stop))
 				for _, s := range stop {
@@ -152,9 +143,30 @@ func OpenAIToVertex(openAIBody []byte) ([]byte, error) {
 						stopSeqs = append(stopSeqs, str)
 					}
 				}
-				vertexReq.GenerationConfig.StopSequences = stopSeqs
+				genConfig.StopSequences = stopSeqs
 			}
 		}
+
+		// Handle modalities
+		if len(openAIReq.Modalities) > 0 {
+			for _, mod := range openAIReq.Modalities {
+				genConfig.ResponseModalities = append(genConfig.ResponseModalities, genai.Modality(strings.ToUpper(mod)))
+			}
+		}
+
+		// Handle reasoning_effort (for reasoning models)
+		if openAIReq.ReasoningEffort != "" {
+			// Vertex uses thinking_config for reasoning models
+			// Pass it through extra_body if explicitly set
+			if openAIReq.ExtraBody == nil {
+				openAIReq.ExtraBody = make(map[string]interface{})
+			}
+			if _, exists := openAIReq.ExtraBody["thinking_config"]; !exists {
+				openAIReq.ExtraBody["reasoning_effort"] = openAIReq.ReasoningEffort
+			}
+		}
+
+		vertexReq.GenerationConfig = genConfig
 	}
 
 	// Convert messages
@@ -163,22 +175,30 @@ func OpenAIToVertex(openAIBody []byte) ([]byte, error) {
 		case "system":
 			// System messages become systemInstruction
 			content := extractTextContent(msg.Content)
-			vertexReq.SystemInstruction = &VertexContent{
-				Parts: []VertexPart{{Text: content}},
+			vertexReq.SystemInstruction = &genai.Content{
+				Role: "user",
+				Parts: []*genai.Part{
+					{Text: content},
+				},
 			}
 		case "developer":
 			// Developer messages are treated as system instruction
 			content := extractTextContent(msg.Content)
-			vertexReq.SystemInstruction = &VertexContent{
-				Parts: []VertexPart{{Text: content}},
+			vertexReq.SystemInstruction = &genai.Content{
+				Role: "user",
+				Parts: []*genai.Part{
+					{Text: content},
+				},
 			}
 		case "tool":
 			// Tool messages are sent as user messages with tool results
 			// In Vertex, tool results are just text content from the user perspective
 			content := extractTextContent(msg.Content)
-			vertexReq.Contents = append(vertexReq.Contents, VertexContent{
-				Role:  "user",
-				Parts: []VertexPart{{Text: content}},
+			vertexReq.Contents = append(vertexReq.Contents, &genai.Content{
+				Role: "user",
+				Parts: []*genai.Part{
+					{Text: content},
+				},
 			})
 		default:
 			// Convert role mapping
@@ -191,11 +211,11 @@ func OpenAIToVertex(openAIBody []byte) ([]byte, error) {
 
 			// Handle tool_calls for assistant messages
 			if len(msg.ToolCalls) > 0 && role == "model" {
-				toolCallParts := convertToolCallsToVertexParts(msg.ToolCalls)
+				toolCallParts := convertToolCallsToGenaiParts(msg.ToolCalls)
 				parts = append(parts, toolCallParts...)
 			}
 
-			vertexReq.Contents = append(vertexReq.Contents, VertexContent{
+			vertexReq.Contents = append(vertexReq.Contents, &genai.Content{
 				Role:  role,
 				Parts: parts,
 			})
@@ -215,7 +235,7 @@ func OpenAIToVertex(openAIBody []byte) ([]byte, error) {
 
 // VertexToOpenAI converts Vertex AI response to OpenAI format
 func VertexToOpenAI(vertexBody []byte, model string) ([]byte, error) {
-	var vertexResp VertexResponse
+	var vertexResp genai.GenerateContentResponse
 	if err := json.Unmarshal(vertexBody, &vertexResp); err != nil {
 		return nil, fmt.Errorf("failed to parse Vertex response: %w", err)
 	}
@@ -229,31 +249,34 @@ func VertexToOpenAI(vertexBody []byte, model string) ([]byte, error) {
 	}
 
 	// Convert candidates to choices
-	for i, candidate := range vertexResp.Candidates {
+	for _, candidate := range vertexResp.Candidates {
 		var content string
 		var images []openai.ImageData
 		var toolCalls []openai.OpenAIToolCall
 
-		for _, part := range candidate.Content.Parts {
-			if part.Text != "" {
-				content += part.Text
-			}
-			// Handle inline data (images) from Vertex response
-			if part.InlineData != nil {
-				images = append(images, openai.ImageData{
-					B64JSON: part.InlineData.Data,
-				})
-			}
-			// Handle function calls from Vertex response
-			if part.FunctionCall != nil {
-				toolCall := convertVertexFunctionCallToOpenAI(part.FunctionCall)
-				toolCalls = append(toolCalls, toolCall)
+		if candidate.Content != nil && candidate.Content.Parts != nil {
+			for _, part := range candidate.Content.Parts {
+				if part.Text != "" {
+					content += part.Text
+				}
+				// Handle inline data (images) from Vertex response
+				if part.InlineData != nil {
+					b64Data := base64.StdEncoding.EncodeToString(part.InlineData.Data)
+					images = append(images, openai.ImageData{
+						B64JSON: b64Data,
+					})
+				}
+				// Handle function calls from Vertex response
+				if part.FunctionCall != nil {
+					toolCall := convertGenaiToOpenAIFunctionCall(part.FunctionCall)
+					toolCalls = append(toolCalls, toolCall)
+				}
 			}
 		}
 
 		if content == "" && len(images) == 0 && len(toolCalls) == 0 {
 			// Handle case where parts is empty but we have a finish reason
-			if candidate.FinishReason == "MAX_TOKENS" {
+			if candidate.FinishReason == genai.FinishReasonMaxTokens {
 				content = "[Response truncated due to max tokens limit]"
 			} else {
 				content = "[No content generated]"
@@ -272,9 +295,9 @@ func VertexToOpenAI(vertexBody []byte, model string) ([]byte, error) {
 		}
 
 		choice := openai.OpenAIChoice{
-			Index:        i,
+			Index:        int(candidate.Index),
 			Message:      message,
-			FinishReason: mapFinishReason(candidate.FinishReason),
+			FinishReason: mapFinishReason(string(candidate.FinishReason)),
 		}
 		openAIResp.Choices = append(openAIResp.Choices, choice)
 	}
@@ -282,30 +305,13 @@ func VertexToOpenAI(vertexBody []byte, model string) ([]byte, error) {
 	// Convert usage metadata
 	if vertexResp.UsageMetadata != nil {
 		openAIResp.Usage = &openai.OpenAIUsage{
-			PromptTokens:     vertexResp.UsageMetadata.PromptTokenCount,
-			CompletionTokens: vertexResp.UsageMetadata.CandidatesTokenCount,
-			TotalTokens:      vertexResp.UsageMetadata.TotalTokenCount,
+			PromptTokens:     int(vertexResp.UsageMetadata.PromptTokenCount),
+			CompletionTokens: int(vertexResp.UsageMetadata.CandidatesTokenCount),
+			TotalTokens:      int(vertexResp.UsageMetadata.TotalTokenCount),
 		}
 	}
 
 	return json.Marshal(openAIResp)
-}
-
-// VertexResponse represents Vertex AI response format
-type VertexResponse struct {
-	Candidates    []VertexCandidate    `json:"candidates"`
-	UsageMetadata *VertexUsageMetadata `json:"usageMetadata,omitempty"`
-}
-
-type VertexCandidate struct {
-	Content      VertexContent `json:"content"`
-	FinishReason string        `json:"finishReason,omitempty"`
-}
-
-type VertexUsageMetadata struct {
-	PromptTokenCount     int `json:"promptTokenCount"`
-	CandidatesTokenCount int `json:"candidatesTokenCount"`
-	TotalTokenCount      int `json:"totalTokenCount"`
 }
 
 func mapFinishReason(vertexReason string) string {
@@ -325,12 +331,12 @@ func mapFinishReason(vertexReason string) string {
 	}
 }
 
-// convertVertexFunctionCallToOpenAI converts Vertex function call to OpenAI tool call format
-func convertVertexFunctionCallToOpenAI(vertexCall *VertexFunctionCall) openai.OpenAIToolCall {
+// convertGenaiToOpenAIFunctionCall converts genai.FunctionCall to OpenAI tool call format
+func convertGenaiToOpenAIFunctionCall(genaiCall *genai.FunctionCall) openai.OpenAIToolCall {
 	// Convert args to JSON string
 	argsJSON := "{}"
-	if vertexCall.Args != nil {
-		if data, err := json.Marshal(vertexCall.Args); err == nil {
+	if genaiCall.Args != nil {
+		if data, err := json.Marshal(genaiCall.Args); err == nil {
 			argsJSON = string(data)
 		}
 	}
@@ -339,7 +345,7 @@ func convertVertexFunctionCallToOpenAI(vertexCall *VertexFunctionCall) openai.Op
 		ID:   openai.GenerateID(),
 		Type: "function",
 		Function: openai.OpenAIToolFunction{
-			Name:      vertexCall.Name,
+			Name:      genaiCall.Name,
 			Arguments: argsJSON,
 		},
 	}
@@ -364,13 +370,109 @@ func extractTextContent(content interface{}) string {
 	return ""
 }
 
-// convertToolCallsToVertexParts converts OpenAI tool_calls to Vertex FunctionCall parts
-func convertToolCallsToVertexParts(toolCalls []interface{}) []VertexPart {
+// convertContentToParts converts OpenAI content format to genai.Part slice
+func convertContentToParts(content interface{}) []*genai.Part {
+	switch c := content.(type) {
+	case string:
+		return []*genai.Part{{Text: c}}
+	case []interface{}:
+		var parts []*genai.Part
+		for _, block := range c {
+			if blockMap, ok := block.(map[string]interface{}); ok {
+				switch blockMap["type"] {
+				case "text":
+					if text, ok := blockMap["text"].(string); ok {
+						parts = append(parts, &genai.Part{Text: text})
+					}
+				case "image_url":
+					if imageURL, ok := blockMap["image_url"].(map[string]interface{}); ok {
+						if url, ok := imageURL["url"].(string); ok {
+							part := parseDataURLToPart(url)
+							if part != nil {
+								parts = append(parts, part)
+							}
+						}
+					}
+				case "file":
+					if fileObj, ok := blockMap["file"].(map[string]interface{}); ok {
+						if fileID, ok := fileObj["file_id"].(string); ok {
+							part := parseDataURLToPart(fileID)
+							if part != nil {
+								parts = append(parts, part)
+							}
+						}
+					}
+				}
+			}
+		}
+		return parts
+	}
+	return []*genai.Part{{Text: fmt.Sprintf("%v", content)}}
+}
+
+// parseDataURLToPart converts a data URL string to a genai.Part with inline data
+// Handles formats like: data:image/jpeg;base64,/9j/4AAQ...
+func parseDataURLToPart(dataURL string) *genai.Part {
+	if !strings.HasPrefix(dataURL, "data:") {
+		return nil
+	}
+
+	// Split: data:image/jpeg;base64,<data>
+	parts := strings.Split(dataURL, ",")
+	if len(parts) != 2 {
+		return nil
+	}
+
+	header := parts[0]  // data:image/jpeg;base64
+	b64Data := parts[1] // base64 data
+
+	// Extract mime type from header
+	mimeType := extractMimeType(header)
+	if mimeType == "" {
+		return nil
+	}
+
+	// Decode base64 data to binary
+	decodedData, err := base64.StdEncoding.DecodeString(b64Data)
+	if err != nil {
+		return nil
+	}
+
+	return &genai.Part{
+		InlineData: &genai.Blob{
+			MIMEType: mimeType,
+			Data:     decodedData,
+		},
+	}
+}
+
+// extractMimeType extracts MIME type from data URL header
+// Example: "data:image/jpeg;base64" -> "image/jpeg"
+func extractMimeType(header string) string {
+	// Find start of mime type (after "data:")
+	start := strings.Index(header, "data:")
+	if start < 0 {
+		return ""
+	}
+	start += 5 // len("data:")
+
+	// Find end of mime type (at ";" or end of string)
+	end := strings.Index(header[start:], ";")
+	if end > 0 {
+		return header[start : start+end]
+	}
+
+	// No semicolon, take from start to end
+	return header[start:]
+}
+
+// convertToolCallsToGenaiParts converts OpenAI tool_calls to genai.Part with FunctionCall
+func convertToolCallsToGenaiParts(toolCalls []interface{}) []*genai.Part {
 	if len(toolCalls) == 0 {
 		return nil
 	}
 
-	var parts []VertexPart
+	var parts []*genai.Part
 
 	for _, toolCallInterface := range toolCalls {
 		toolCallMap, ok := toolCallInterface.(map[string]interface{})
@@ -393,8 +495,8 @@ func convertToolCallsToVertexParts(toolCalls []interface{}) []VertexPart {
 						}
 					}
 
-					parts = append(parts, VertexPart{
-						FunctionCall: &VertexFunctionCall{
+					parts = append(parts, &genai.Part{
+						FunctionCall: &genai.FunctionCall{
 							Name: funcName,
 							Args: args,
 						},
@@ -407,13 +509,13 @@ func convertToolCallsToVertexParts(toolCalls []interface{}) []VertexPart {
 	return parts
 }
 
-// convertOpenAIToolsToVertex converts OpenAI tools format to Vertex tool format
-func convertOpenAIToolsToVertex(openAITools []interface{}) []VertexTool {
+// convertOpenAIToolsToVertex converts OpenAI tools format to genai.Tool slice
+func convertOpenAIToolsToVertex(openAITools []interface{}) []*genai.Tool {
 	if len(openAITools) == 0 {
 		return nil
 	}
 
-	var functionDeclarations []VertexFunctionDeclaration
+	var functionDeclarations []*genai.FunctionDeclaration
 
 	for _, toolInterface := range openAITools {
 		toolMap, ok := toolInterface.(map[string]interface{})
@@ -428,14 +530,14 @@ func convertOpenAIToolsToVertex(openAITools []interface{}) []VertexTool {
 
 		// Extract function definition
 		if functionObj, ok := toolMap["function"].(map[string]interface{}); ok {
-			funcDecl := VertexFunctionDeclaration{
+			funcDecl := &genai.FunctionDeclaration{
 				Name:        openai.GetString(functionObj, "name"),
 				Description: openai.GetString(functionObj, "description"),
 			}
 
 			// Convert parameters
 			if params, ok := functionObj["parameters"].(map[string]interface{}); ok {
-				funcDecl.Parameters = convertOpenAIParamsToVertex(params)
+				funcDecl.Parameters = convertOpenAIParamsToGenaiSchema(params)
 			}
 
 			if funcDecl.Name != "" {
@@ -448,22 +550,22 @@ func convertOpenAIToolsToVertex(openAITools []interface{}) []VertexTool {
 		return nil
 	}
 
-	return []VertexTool{
+	return []*genai.Tool{
 		{
 			FunctionDeclarations: functionDeclarations,
 		},
 	}
 }
 
-// convertOpenAIParamsToVertex converts OpenAI parameter schema to Vertex format
-func convertOpenAIParamsToVertex(params map[string]interface{}) *VertexFunctionSchema {
-	schema := &VertexFunctionSchema{
-		Type:       "OBJECT",
-		Properties: make(map[string]VertexPropertyDefinition),
+// convertOpenAIParamsToGenaiSchema converts OpenAI parameter schema to genai.Schema format
+func convertOpenAIParamsToGenaiSchema(params map[string]interface{}) *genai.Schema {
+	schema := &genai.Schema{
+		Type:       genai.TypeObject,
+		Properties: make(map[string]*genai.Schema),
 	}
 
 	if paramType, ok := params["type"].(string); ok {
-		schema.Type = strings.ToUpper(paramType)
+		schema.Type = genai.Type(strings.ToUpper(paramType))
 	}
 
 	// Convert required fields
@@ -483,19 +585,31 @@ func convertOpenAIParamsToVertex(params map[string]interface{}) *VertexFunctionS
 	if properties, ok := params["properties"].(map[string]interface{}); ok {
 		for propName, propDef := range properties {
 			if propMap, ok := propDef.(map[string]interface{}); ok {
-				prop := VertexPropertyDefinition{
-					Type:        strings.ToUpper(openai.GetString(propMap, "type")),
+				prop := &genai.Schema{
+					Type:        genai.Type(strings.ToUpper(openai.GetString(propMap, "type"))),
 					Description: openai.GetString(propMap, "description"),
 				}
 
 				// Handle enum values
 				if enumVals, ok := propMap["enum"].([]interface{}); ok {
-					prop.Enum = enumVals
+					enumStrs := make([]string, 0, len(enumVals))
+					for _, e := range enumVals {
+						if str, ok := e.(string); ok {
+							enumStrs = append(enumStrs, str)
+						}
+					}
+					if len(enumStrs) > 0 {
+						prop.Enum = enumStrs
+					}
 				}
 
 				// Handle items for array types
 				if items, ok := propMap["items"]; ok {
-					prop.Items = items
+					if itemsMap, ok := items.(map[string]interface{}); ok {
+						prop.Items = &genai.Schema{
+							Type: genai.Type(strings.ToUpper(openai.GetString(itemsMap, "type"))),
+						}
+					}
 				}
 
 				schema.Properties[propName] = prop
@@ -504,59 +618,6 @@ func convertOpenAIParamsToVertex(params map[string]interface{}) *VertexFunctionS
 	}
 
 	return schema
-}
-
-func convertContentToParts(content interface{}) []VertexPart {
-	switch c := content.(type) {
-	case string:
-		return []VertexPart{{Text: c}}
-	case []interface{}:
-		var parts []VertexPart
-		for _, block := range c {
-			if blockMap, ok := block.(map[string]interface{}); ok {
-				switch blockMap["type"] {
-				case "text":
-					if text, ok := blockMap["text"].(string); ok {
-						parts = append(parts, VertexPart{Text: text})
-					}
-				case "image_url":
-					if imageURL, ok := blockMap["image_url"].(map[string]interface{}); ok {
-						if url, ok := imageURL["url"].(string); ok {
-							if strings.HasPrefix(url, "data:") {
-								// Parse data URL: data:image/jpeg;base64,/9j/4AAQ...
-								parts_split := strings.Split(url, ",")
-								if len(parts_split) == 2 {
-									header := parts_split[0] // data:image/jpeg;base64
-									data := parts_split[1]   // base64 data
-
-									// Extract mime type
-									mimeType := "image/png" // default
-									if start := strings.Index(header, "image/"); start >= 0 {
-										// Look for semicolon or end of string
-										if end := strings.Index(header[start:], ";"); end > 0 {
-											mimeType = header[start : start+end]
-										} else {
-											// No semicolon, take from image/ to end
-											mimeType = header[start:]
-										}
-									}
-
-									parts = append(parts, VertexPart{
-										InlineData: &InlineData{
-											MimeType: mimeType,
-											Data:     data,
-										},
-									})
-								}
-							}
-						}
-					}
-				}
-			}
-		}
-		return parts
-	}
-	return []VertexPart{{Text: fmt.Sprintf("%v", content)}}
 }
 
 // determineVertexPublisher determines the Vertex AI publisher based on the model ID
@@ -569,7 +630,7 @@ func determineVertexPublisher(modelID string) string {
 	return "google"
 }
 
-// buildVertexImageURL constructs the Vertex AI URL for image generation
+// BuildVertexImageURL constructs the Vertex AI URL for image generation
 // Format: https://{location}-aiplatform.googleapis.com/v1/projects/{project}/locations/{location}/publishers/google/models/{model}:predict
 func BuildVertexImageURL(cred *config.CredentialConfig, modelID string) string {
 	// For global location (no regional prefix)
@@ -587,7 +648,7 @@ func BuildVertexImageURL(cred *config.CredentialConfig, modelID string) string {
 	)
 }
 
-// buildVertexURL constructs the Vertex AI URL dynamically
+// BuildVertexURL constructs the Vertex AI URL dynamically
 // Format: https://{location}-aiplatform.googleapis.com/v1/projects/{project}/locations/{location}/publishers/{publisher}/models/{model}:{endpoint}
 func BuildVertexURL(cred *config.CredentialConfig, modelID string, streaming bool) string {
 	publisher := determineVertexPublisher(modelID)
