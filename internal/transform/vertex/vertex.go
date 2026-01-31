@@ -49,7 +49,7 @@ func OpenAIToVertex(openAIBody []byte, isImageGeneration bool, model string) ([]
 	// Handle generation config from extra_body or direct params
 	if openAIReq.Temperature != nil || openAIReq.MaxTokens != nil || openAIReq.MaxCompletionTokens != nil || openAIReq.TopP != nil || openAIReq.ExtraBody != nil ||
 		openAIReq.N != nil || openAIReq.Seed != nil || openAIReq.FrequencyPenalty != nil || openAIReq.PresencePenalty != nil || openAIReq.Stop != nil ||
-		len(openAIReq.Modalities) > 0 || openAIReq.ReasoningEffort != "" {
+		len(openAIReq.Modalities) > 0 || openAIReq.ReasoningEffort != "" || openAIReq.ResponseFormat != nil {
 
 		genConfig := &genai.GenerationConfig{}
 
@@ -163,6 +163,20 @@ func OpenAIToVertex(openAIBody []byte, isImageGeneration bool, model string) ([]
 			}
 			if _, exists := openAIReq.ExtraBody["thinking_config"]; !exists {
 				openAIReq.ExtraBody["reasoning_effort"] = openAIReq.ReasoningEffort
+			}
+		}
+
+		// Handle response_format (JSON schema)
+		if openAIReq.ResponseFormat != nil {
+			jsonSchema := convertOpenAIResponseFormatToJsonSchema(openAIReq.ResponseFormat)
+			if jsonSchema != nil {
+				genConfig.ResponseJsonSchema = jsonSchema
+			}
+			// Also set ResponseMIMEType to application/json for JSON output
+			if rfMap, ok := openAIReq.ResponseFormat.(map[string]interface{}); ok {
+				if rfType, ok := rfMap["type"].(string); ok && (rfType == "json_schema" || rfType == "json_object") {
+					genConfig.ResponseMIMEType = "application/json"
+				}
 			}
 		}
 
@@ -671,4 +685,41 @@ func BuildVertexURL(cred *config.CredentialConfig, modelID string, streaming boo
 		"https://%s-aiplatform.googleapis.com/v1/projects/%s/locations/%s/publishers/%s/models/%s:%s",
 		cred.Location, cred.ProjectID, cred.Location, publisher, modelID, endpoint,
 	)
+}
+
+// convertOpenAIResponseFormatToJsonSchema converts OpenAI response_format to Vertex AI JSON schema
+func convertOpenAIResponseFormatToJsonSchema(responseFormat interface{}) interface{} {
+	// response_format can be:
+	// 1. {"type": "json_object"} or {"type": "json_schema", "json_schema": {...}}
+	// 2. {"type": "text"}
+	// 3. nil
+
+	if responseFormat == nil {
+		return nil
+	}
+
+	switch rf := responseFormat.(type) {
+	case map[string]interface{}:
+		// Check if it's json_schema type
+		if rfType, ok := rf["type"].(string); ok {
+			switch rfType {
+			case "json_schema":
+				// Extract the json_schema field
+				if jsonSchema, ok := rf["json_schema"].(map[string]interface{}); ok {
+					if schema, ok := jsonSchema["schema"].(map[string]interface{}); ok {
+						// Return the schema directly for Vertex to use as ResponseJsonSchema
+						return schema
+					}
+					// If no nested schema, return the whole json_schema object
+					return jsonSchema
+				}
+			case "json_object":
+				// For simple json_object type, Vertex doesn't need additional schema
+				// But we can set ResponseMIMEType to application/json instead
+				return nil
+			}
+		}
+	}
+
+	return nil
 }

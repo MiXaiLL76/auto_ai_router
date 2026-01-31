@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/anthropics/anthropic-sdk-go"
+	"github.com/anthropics/anthropic-sdk-go/shared/constant"
 	"github.com/mixaill76/auto_ai_router/internal/transform/openai"
 )
 
@@ -128,6 +129,15 @@ func OpenAIToAnthropic(openAIBody []byte) ([]byte, error) {
 
 	if openAIReq.ServiceTier != "" {
 		params.ServiceTier = anthropic.MessageNewParamsServiceTier(openAIReq.ServiceTier)
+	}
+
+	// Handle response_format (JSON schema)
+	if openAIReq.ResponseFormat != nil {
+		if jsonSchema := convertOpenAIResponseFormatToAnthropic(openAIReq.ResponseFormat); jsonSchema != nil {
+			params.OutputConfig = anthropic.OutputConfigParam{
+				Format: *jsonSchema,
+			}
+		}
 	}
 
 	// Marshal to JSON
@@ -506,4 +516,52 @@ func mapAnthropicStopReason(reason string) string {
 	default:
 		return "stop"
 	}
+}
+
+// convertOpenAIResponseFormatToAnthropic converts OpenAI response_format to Anthropic JSON schema format
+func convertOpenAIResponseFormatToAnthropic(responseFormat interface{}) *anthropic.JSONOutputFormatParam {
+	// response_format can be:
+	// 1. {"type": "json_object"} or {"type": "json_schema", "json_schema": {...}}
+	// 2. {"type": "text"}
+	// 3. nil
+
+	if responseFormat == nil {
+		return nil
+	}
+
+	switch rf := responseFormat.(type) {
+	case map[string]interface{}:
+		// Check if it's json_schema type
+		if rfType, ok := rf["type"].(string); ok {
+			switch rfType {
+			case "json_schema":
+				// Extract the json_schema field
+				if jsonSchema, ok := rf["json_schema"].(map[string]interface{}); ok {
+					if schema, ok := jsonSchema["schema"].(map[string]interface{}); ok {
+						// Return Anthropic JSONOutputFormatParam with schema
+						return &anthropic.JSONOutputFormatParam{
+							Schema: schema,
+							Type:   constant.JSONSchema("json_schema"),
+						}
+					}
+					// If no nested schema, return the whole json_schema object as schema
+					return &anthropic.JSONOutputFormatParam{
+						Schema: jsonSchema,
+						Type:   constant.JSONSchema("json_schema"),
+					}
+				}
+			case "json_object":
+				// For simple json_object type without specific schema,
+				// return a minimal schema
+				return &anthropic.JSONOutputFormatParam{
+					Schema: map[string]any{
+						"type": "object",
+					},
+					Type: constant.JSONSchema("json_schema"),
+				}
+			}
+		}
+	}
+
+	return nil
 }
