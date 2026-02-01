@@ -404,6 +404,11 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("invalid default_models_rpm: %d (must be -1 for unlimited or positive number)", c.Server.DefaultModelsRPM)
 	}
 
+	// Set default for health_check_path if not specified
+	if c.Monitoring.HealthCheckPath == "" {
+		c.Monitoring.HealthCheckPath = "/health"
+	}
+
 	if c.Fail2Ban.MaxAttempts <= 0 {
 		return fmt.Errorf("invalid max_attempts: %d", c.Fail2Ban.MaxAttempts)
 	}
