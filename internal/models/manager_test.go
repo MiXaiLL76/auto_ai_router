@@ -378,3 +378,24 @@ func TestGetModelsForCredential_GlobalModelsOnly(t *testing.T) {
 	models2 := manager.GetModelsForCredential("test2")
 	assert.Equal(t, 2, len(models2))
 }
+
+func TestAddModel(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+	manager := New(logger, 100, []config.ModelRPMConfig{})
+
+	// Test adding a new model for a credential
+	manager.AddModel("gateway02", "gpt-oss-120b")
+
+	// Verify the model appears in credentialModels
+	models := manager.GetModelsForCredential("gateway02")
+	assert.Len(t, models, 1)
+	assert.Equal(t, "gpt-oss-120b", models[0].ID)
+
+	// Verify HasModel returns true
+	assert.True(t, manager.HasModel("gateway02", "gpt-oss-120b"))
+
+	// Test adding the same model again (should not duplicate)
+	manager.AddModel("gateway02", "gpt-oss-120b")
+	models = manager.GetModelsForCredential("gateway02")
+	assert.Len(t, models, 1, "Should not create duplicate model entry")
+}

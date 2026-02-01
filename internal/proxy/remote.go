@@ -9,12 +9,18 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/ratelimit"
 )
 
+// ModelManagerInterface for adding dynamically loaded models
+type ModelManagerInterface interface {
+	AddModel(credentialName, modelID string)
+}
+
 // UpdateStatsFromRemoteProxy fetches and updates RPM/TPM limits from remote /health endpoint
 func UpdateStatsFromRemoteProxy(
 	ctx context.Context,
 	cred *config.CredentialConfig,
 	rateLimiter *ratelimit.RPMLimiter,
 	logger *slog.Logger,
+	modelManager ModelManagerInterface,
 ) {
 	// Fetch health data from remote proxy
 	var health httputil.ProxyHealthResponse
@@ -30,7 +36,7 @@ func UpdateStatsFromRemoteProxy(
 	updateCredentialLimits(&health, cred, rateLimiter, logger)
 
 	// Update model limits from remote models
-	updateModelLimits(&health, cred, rateLimiter, logger)
+	updateModelLimits(&health, cred, rateLimiter, logger, modelManager)
 }
 
 // updateCredentialLimits updates credential limits from remote credentials data
@@ -104,6 +110,7 @@ func updateModelLimits(
 	cred *config.CredentialConfig,
 	rateLimiter *ratelimit.RPMLimiter,
 	logger *slog.Logger,
+	modelManager ModelManagerInterface,
 ) {
 	if len(health.Models) == 0 {
 		return
@@ -169,6 +176,12 @@ func updateModelLimits(
 		if stats.currentRPM > 0 || stats.currentTPM > 0 {
 			rateLimiter.SetModelCurrentUsage(cred.Name, modelID, stats.currentRPM, stats.currentTPM)
 		}
+
+		// Add model to modelManager for dynamic model filtering
+		if modelManager != nil {
+			modelManager.AddModel(cred.Name, modelID)
+		}
+
 		modelsUpdated++
 	}
 

@@ -22,12 +22,12 @@ func ShouldRetryWithFallback(statusCode int, respBody []byte) (bool, RetryReason
 	// Determine if status code is retryable
 	var retryReason RetryReason
 	switch {
+	case statusCode == http.StatusUnauthorized || statusCode == http.StatusForbidden:
+		retryReason = RetryReasonAuthErr
 	case statusCode == http.StatusTooManyRequests:
 		retryReason = RetryReasonRateLimit
 	case statusCode >= 500 && statusCode < 600:
 		retryReason = RetryReasonServerErr
-	case statusCode == http.StatusUnauthorized || statusCode == http.StatusForbidden:
-		retryReason = RetryReasonAuthErr
 	default:
 		return false, ""
 	}

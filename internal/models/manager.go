@@ -397,6 +397,36 @@ func (m *Manager) HasModel(credentialName, modelID string) bool {
 	return true
 }
 
+// AddModel adds a model to the credential mapping (used for dynamically loaded models from proxy)
+func (m *Manager) AddModel(credentialName, modelID string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	// Add to credentialModels
+	found := false
+	for _, model := range m.credentialModels[credentialName] {
+		if model == modelID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		m.credentialModels[credentialName] = append(m.credentialModels[credentialName], modelID)
+	}
+
+	// Add to modelToCredentials
+	found = false
+	for _, cred := range m.modelToCredentials[modelID] {
+		if cred == credentialName {
+			found = true
+			break
+		}
+	}
+	if !found {
+		m.modelToCredentials[modelID] = append(m.modelToCredentials[modelID], credentialName)
+	}
+}
+
 // IsEnabled returns whether model filtering should be used
 // Returns true if there are models defined in static config
 func (m *Manager) IsEnabled() bool {
@@ -543,6 +573,7 @@ func (m *Manager) GetModelsForCredential(credentialName string) []Model {
 	defer m.mu.RUnlock()
 
 	var result []Model
+	seenModels := make(map[string]bool) // Track already added models to avoid duplicates
 
 	// If we have static models configured, use them
 	if len(m.modelLimits) > 0 {
@@ -562,20 +593,34 @@ func (m *Manager) GetModelsForCredential(credentialName string) []Model {
 					Created: openai.GetCurrentTimestamp(),
 					OwnedBy: "system",
 				})
+				seenModels[modelName] = true
 			}
 		}
-		return result
 	}
 
-	// If no static config, check credentialModels map
+	// Also include dynamically added models from credentialModels
 	if modelIDs, ok := m.credentialModels[credentialName]; ok {
 		for _, modelID := range modelIDs {
+			if seenModels[modelID] {
+				continue // Skip if already added from static config
+			}
 			// Find the model in allModels
+			found := false
 			for _, model := range m.allModels {
 				if model.ID == modelID {
 					result = append(result, model)
+					found = true
 					break
 				}
+			}
+			// If not in allModels, create a basic model entry
+			if !found {
+				result = append(result, Model{
+					ID:      modelID,
+					Object:  "model",
+					Created: openai.GetCurrentTimestamp(),
+					OwnedBy: "system",
+				})
 			}
 		}
 	}

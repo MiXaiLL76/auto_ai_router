@@ -123,7 +123,7 @@ func TestUpdateModelLimits_EmptyModels(t *testing.T) {
 	logger := createTestLogger()
 
 	// Should handle empty models gracefully
-	updateModelLimits(health, cred, rateLimiter, logger)
+	updateModelLimits(health, cred, rateLimiter, logger, nil)
 }
 
 func TestUpdateModelLimits_SingleModel(t *testing.T) {
@@ -144,7 +144,7 @@ func TestUpdateModelLimits_SingleModel(t *testing.T) {
 	logger := createTestLogger()
 
 	// Should add model without error
-	updateModelLimits(health, cred, rateLimiter, logger)
+	updateModelLimits(health, cred, rateLimiter, logger, nil)
 
 	// Should have model limits set
 	assert.NotNil(t, rateLimiter)
@@ -175,7 +175,7 @@ func TestUpdateModelLimits_MultipleModels_Aggregation(t *testing.T) {
 	logger := createTestLogger()
 
 	// Should aggregate multiple model instances
-	updateModelLimits(health, cred, rateLimiter, logger)
+	updateModelLimits(health, cred, rateLimiter, logger, nil)
 
 	// Verify aggregation happened without error
 	assert.NotNil(t, rateLimiter)
@@ -198,7 +198,7 @@ func TestUpdateModelLimits_ZeroValues_ConvertedToUnlimited(t *testing.T) {
 	cred := &config.CredentialConfig{Name: "test_proxy"}
 	logger := createTestLogger()
 
-	updateModelLimits(health, cred, rateLimiter, logger)
+	updateModelLimits(health, cred, rateLimiter, logger, nil)
 
 	// 0 should be converted to -1 (unlimited)
 	limitRPM := rateLimiter.GetModelLimitRPM("test_proxy", "claude-3-opus")
@@ -224,7 +224,7 @@ func TestUpdateModelLimits_NoCurrentUsage(t *testing.T) {
 	cred := &config.CredentialConfig{Name: "test_proxy"}
 	logger := createTestLogger()
 
-	updateModelLimits(health, cred, rateLimiter, logger)
+	updateModelLimits(health, cred, rateLimiter, logger, nil)
 
 	// Should still add model with 0 current usage
 	assert.Equal(t, 0, rateLimiter.GetCurrentModelRPM("test_proxy", "gpt-4-turbo"))
@@ -244,7 +244,7 @@ func TestUpdateStatsFromRemoteProxy_FetchError(t *testing.T) {
 	ctx := context.Background()
 
 	// Should handle fetch error gracefully
-	UpdateStatsFromRemoteProxy(ctx, cred, rateLimiter, logger)
+	UpdateStatsFromRemoteProxy(ctx, cred, rateLimiter, logger, nil)
 
 	// Verify no stats were updated
 }
@@ -274,7 +274,7 @@ func TestUpdateModelLimits_MixedZeroAndNonZeroRPM(t *testing.T) {
 	logger := createTestLogger()
 
 	// Should handle mixed zero and non-zero values
-	updateModelLimits(health, cred, rateLimiter, logger)
+	updateModelLimits(health, cred, rateLimiter, logger, nil)
 
 	// Should process without error
 	assert.NotNil(t, rateLimiter)
@@ -297,7 +297,7 @@ func TestUpdateModelLimits_AllZeroInOne(t *testing.T) {
 	cred := &config.CredentialConfig{Name: "test_proxy"}
 	logger := createTestLogger()
 
-	updateModelLimits(health, cred, rateLimiter, logger)
+	updateModelLimits(health, cred, rateLimiter, logger, nil)
 
 	// Should not add model if all values are 0
 }

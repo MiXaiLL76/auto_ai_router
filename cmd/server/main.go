@@ -65,6 +65,7 @@ func main() {
 	f2b := fail2ban.New(cfg.Fail2Ban.MaxAttempts, cfg.Fail2Ban.BanDuration, cfg.Fail2Ban.ErrorCodes)
 	rateLimiter := ratelimit.New()
 	bal := balancer.New(cfg.Credentials, f2b, rateLimiter)
+	bal.SetLogger(log)
 
 	// Initialize model manager with static models from config.yaml
 	modelManager := models.New(log, cfg.Server.DefaultModelsRPM, cfg.Models)
@@ -180,7 +181,7 @@ func main() {
 			for _, cred := range bal.GetCredentials() {
 				if cred.Type == config.ProviderTypeProxy {
 					ctx := context.Background()
-					proxy.UpdateStatsFromRemoteProxy(ctx, &cred, rateLimiter, log)
+					proxy.UpdateStatsFromRemoteProxy(ctx, &cred, rateLimiter, log, modelManager)
 				}
 			}
 		}
