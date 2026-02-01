@@ -438,3 +438,44 @@ func TestVisualHealthCheck_ContainsCredentialInfo(t *testing.T) {
 	// Should contain credential info
 	assert.NotEmpty(t, body)
 }
+
+func TestHealthCheck_ProxyCredentialLimitsFromRateLimiter(t *testing.T) {
+	logger := createHealthTestLogger()
+	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
+	rl := ratelimit.New()
+
+	// Create proxy credential with default/invalid config values
+	proxyCred := config.CredentialConfig{
+		Name:       "gateway_proxy",
+		Type:       config.ProviderTypeProxy,
+		BaseURL:    "http://remote-proxy.com",
+		RPM:        -1,
+		TPM:        -1,
+		IsFallback: false,
+	}
+
+	// Register proxy credential without limits initially
+	bal := balancer.New([]config.CredentialConfig{proxyCred}, f2b, rl)
+
+	// Now simulate what UpdateStatsFromRemoteProxy does - update limits in rateLimiter
+	rl.AddCredentialWithTPM(proxyCred.Name, 20000, 2000000)
+	rl.SetCredentialCurrentUsage(proxyCred.Name, 1, 36831)
+
+	metrics := monitoring.New(false)
+	tm := auth.NewVertexTokenManager(logger)
+	mm := models.New(logger, 50, []config.ModelRPMConfig{})
+
+	prx := New(bal, logger, 10, 30*time.Second, metrics, "test-key", rl, tm, mm, "test-version", "test-commit")
+
+	_, status := prx.HealthCheck()
+
+	// Verify proxy credential stats
+	proxyStat := status.Credentials["gateway_proxy"]
+	assert.Equal(t, "proxy", proxyStat.Type)
+	// Limits should come from rateLimiter, not from config (-1 values)
+	assert.Equal(t, 20000, proxyStat.LimitRPM)
+	assert.Equal(t, 2000000, proxyStat.LimitTPM)
+	// Current usage should be from rateLimiter (may be slightly different due to time-based distribution)
+	assert.GreaterOrEqual(t, proxyStat.CurrentRPM, 0)
+	assert.GreaterOrEqual(t, proxyStat.CurrentTPM, 36800) // Allow small variance due to time calculations
+}

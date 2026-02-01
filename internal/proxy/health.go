@@ -18,13 +18,28 @@ func (p *Proxy) HealthCheck() (bool, *httputil.ProxyHealthResponse) {
 	// Collect credentials info
 	credentialsInfo := make(map[string]httputil.CredentialHealthStats)
 	for _, cred := range p.balancer.GetCredentials() {
+		// For proxy credentials, get limits from rateLimiter (updated by UpdateStatsFromRemoteProxy)
+		// For other credentials, use config values
+		limitRPM := cred.RPM
+		limitTPM := cred.TPM
+		if cred.Type == "proxy" {
+			rateLimiterRPM := p.rateLimiter.GetLimitRPM(cred.Name)
+			rateLimiterTPM := p.rateLimiter.GetLimitTPM(cred.Name)
+			if rateLimiterRPM != -1 {
+				limitRPM = rateLimiterRPM
+			}
+			if rateLimiterTPM != -1 {
+				limitTPM = rateLimiterTPM
+			}
+		}
+
 		credentialsInfo[cred.Name] = httputil.CredentialHealthStats{
 			Type:       string(cred.Type),
 			IsFallback: cred.IsFallback,
 			CurrentRPM: p.rateLimiter.GetCurrentRPM(cred.Name),
 			CurrentTPM: p.rateLimiter.GetCurrentTPM(cred.Name),
-			LimitRPM:   cred.RPM,
-			LimitTPM:   cred.TPM,
+			LimitRPM:   limitRPM,
+			LimitTPM:   limitTPM,
 		}
 	}
 

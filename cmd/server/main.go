@@ -172,18 +172,27 @@ func main() {
 		log.Info("Metrics updater started (updates every 10 seconds)")
 	}
 
-	// Start background proxy stats updater (optional)
+	// Start background proxy stats updater
 	// Fetches RPM/TPM limits from remote proxy /health endpoint
 	go func() {
-		ticker := time.NewTicker(30 * time.Second)
-		defer ticker.Stop()
-		for range ticker.C {
+		// Helper function to update all proxy credentials
+		updateProxyCredentials := func() {
 			for _, cred := range bal.GetCredentials() {
 				if cred.Type == config.ProviderTypeProxy {
 					ctx := context.Background()
 					proxy.UpdateStatsFromRemoteProxy(ctx, &cred, rateLimiter, log)
 				}
 			}
+		}
+
+		// Update immediately on startup
+		updateProxyCredentials()
+
+		// Then update periodically
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			updateProxyCredentials()
 		}
 	}()
 	log.Info("Proxy stats updater started (updates every 30 seconds)")

@@ -41,6 +41,9 @@ func updateCredentialLimits(
 	logger *slog.Logger,
 ) {
 	if len(health.Credentials) == 0 {
+		logger.Debug("No credentials in remote health response",
+			"proxy", cred.Name,
+		)
 		return
 	}
 
@@ -65,19 +68,34 @@ func updateCredentialLimits(
 		totalCurrentTPM += credStats.CurrentTPM
 	}
 
-	// Update our proxy credential with aggregated limits
-	if maxRPM > 0 || maxTPM > 0 {
-		rateLimiter.AddCredentialWithTPM(cred.Name, maxRPM, maxTPM)
-		// Sync current usage from remote
-		rateLimiter.SetCredentialCurrentUsage(cred.Name, totalCurrentRPM, totalCurrentTPM)
-		logger.Debug("Updated proxy credential limits from remote",
-			"proxy", cred.Name,
-			"rpm_limit", maxRPM,
-			"tpm_limit", maxTPM,
-			"current_rpm", totalCurrentRPM,
-			"current_tpm", totalCurrentTPM,
-		)
+	logger.Debug("Aggregated credential limits from remote",
+		"proxy", cred.Name,
+		"credentials_count", len(health.Credentials),
+		"max_rpm", maxRPM,
+		"max_tpm", maxTPM,
+		"total_current_rpm", totalCurrentRPM,
+		"total_current_tpm", totalCurrentTPM,
+	)
+
+	// Convert 0 (unlimited) to -1 for consistency
+	if maxRPM == 0 {
+		maxRPM = -1
 	}
+	if maxTPM == 0 {
+		maxTPM = -1
+	}
+
+	// Update our proxy credential with aggregated limits (even if both are -1, we still need to sync usage)
+	rateLimiter.AddCredentialWithTPM(cred.Name, maxRPM, maxTPM)
+	// Sync current usage from remote
+	rateLimiter.SetCredentialCurrentUsage(cred.Name, totalCurrentRPM, totalCurrentTPM)
+	logger.Debug("Updated proxy credential limits from remote",
+		"proxy", cred.Name,
+		"rpm_limit", maxRPM,
+		"tpm_limit", maxTPM,
+		"current_rpm", totalCurrentRPM,
+		"current_tpm", totalCurrentTPM,
+	)
 }
 
 // updateModelLimits updates model limits from remote models data
