@@ -91,6 +91,67 @@ func (r *RPMLimiter) AddModelWithTPM(credentialName, modelName string, rpm int, 
 	}
 }
 
+// setCurrentUsage fills request and token arrays to simulate current usage
+// Must be called with limiter.mu locked
+func setCurrentUsage(limiter *limiter, currentRPM, currentTPM int) {
+	now := time.Now()
+	oneMinuteAgo := now.Add(-time.Minute)
+
+	// Fill requests array with dummy timestamps distributed over the minute
+	if currentRPM > 0 {
+		limiter.requests = make([]time.Time, currentRPM)
+		for i := 0; i < currentRPM; i++ {
+			// Distribute requests evenly over the last minute
+			offset := time.Duration(i*60000) / time.Duration(currentRPM) * time.Millisecond
+			limiter.requests[i] = oneMinuteAgo.Add(offset)
+		}
+	} else {
+		limiter.requests = make([]time.Time, 0)
+	}
+
+	// Fill tokens array similarly for TPM
+	if currentTPM > 0 {
+		limiter.tokens = make([]tokenUsage, currentTPM)
+		for i := 0; i < currentTPM; i++ {
+			offset := time.Duration(i*60000) / time.Duration(currentTPM) * time.Millisecond
+			limiter.tokens[i] = tokenUsage{
+				timestamp: oneMinuteAgo.Add(offset),
+				count:     1,
+			}
+		}
+	} else {
+		limiter.tokens = make([]tokenUsage, 0)
+	}
+}
+
+// SetCredentialCurrentUsage sets the current RPM/TPM usage for a credential
+// Used to synchronize usage from remote proxies
+func (r *RPMLimiter) SetCredentialCurrentUsage(credentialName string, currentRPM, currentTPM int) {
+	limiter := r.getCredentialLimiter(credentialName)
+	if limiter == nil {
+		return
+	}
+
+	limiter.mu.Lock()
+	defer limiter.mu.Unlock()
+
+	setCurrentUsage(limiter, currentRPM, currentTPM)
+}
+
+// SetModelCurrentUsage sets the current RPM/TPM usage for a model
+// Used to synchronize usage from remote proxies
+func (r *RPMLimiter) SetModelCurrentUsage(credentialName, modelName string, currentRPM, currentTPM int) {
+	modelLimiter := r.getModelLimiter(credentialName, modelName)
+	if modelLimiter == nil {
+		return
+	}
+
+	modelLimiter.mu.Lock()
+	defer modelLimiter.mu.Unlock()
+
+	setCurrentUsage(modelLimiter, currentRPM, currentTPM)
+}
+
 // checkRPMLimit checks if RPM limit allows request and optionally records it
 // Must be called with limiter.mu locked
 func checkRPMLimit(l *limiter, record bool) bool {

@@ -98,6 +98,81 @@ func New(bal *balancer.RoundRobin, logger *slog.Logger, maxBodySizeMB int, reque
 	}
 }
 
+func (p *Proxy) forwardToProxy(w http.ResponseWriter, r *http.Request, cred *config.CredentialConfig, body []byte) {
+	start := time.Now()
+
+	// Build target URL
+	proxyBaseURL := strings.TrimSuffix(cred.BaseURL, "/")
+	targetURL := proxyBaseURL + r.URL.Path
+	if r.URL.RawQuery != "" {
+		targetURL += "?" + r.URL.RawQuery
+	}
+
+	// Create proxy request
+	proxyReq, err := http.NewRequest(r.Method, targetURL, bytes.NewReader(body))
+	if err != nil {
+		p.logger.Error("Failed to create proxy request", "error", err, "url", targetURL)
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		return
+	}
+
+	// Copy headers
+	for key, values := range r.Header {
+		if key == "Authorization" {
+			// If proxy has api_key, use it for Authorization
+			if cred.APIKey != "" {
+				proxyReq.Header.Set("Authorization", "Bearer "+cred.APIKey)
+			}
+		} else {
+			for _, value := range values {
+				proxyReq.Header.Add(key, value)
+			}
+		}
+	}
+
+	// Send request
+	resp, err := p.client.Do(proxyReq)
+	if err != nil {
+		p.logger.Error("Failed to proxy request",
+			"credential", cred.Name,
+			"error", err,
+			"url", targetURL,
+		)
+		p.balancer.RecordResponse(cred.Name, http.StatusBadGateway)
+		p.metrics.RecordRequest(cred.Name, r.URL.Path, http.StatusBadGateway, time.Since(start))
+		http.Error(w, "Bad Gateway", http.StatusBadGateway)
+		return
+	}
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			p.logger.Error("Failed to close proxy response body", "error", closeErr)
+		}
+	}()
+
+	// Record response
+	p.balancer.RecordResponse(cred.Name, resp.StatusCode)
+	p.metrics.RecordRequest(cred.Name, r.URL.Path, resp.StatusCode, time.Since(start))
+
+	p.logger.Debug("Proxy request forwarded",
+		"credential", cred.Name,
+		"target_url", targetURL,
+		"status_code", resp.StatusCode,
+		"duration", time.Since(start),
+	)
+
+	// Write response
+	for key, values := range resp.Header {
+		for _, value := range values {
+			w.Header().Add(key, value)
+		}
+	}
+	w.WriteHeader(resp.StatusCode)
+
+	if _, err := io.Copy(w, resp.Body); err != nil {
+		p.logger.Error("Failed to copy proxy response body", "error", err)
+	}
+}
+
 func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 
@@ -147,22 +222,31 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Two-stage credential selection
 	cred, err := p.balancer.NextForModel(modelID)
 	if err != nil {
-		err_code := http.StatusServiceUnavailable
-		err_line := "Service Unavailable"
-		if errors.Is(err, balancer.ErrRateLimitExceeded) {
-			err_code = http.StatusTooManyRequests
-			err_line = "Too Many Requests"
+		// First stage failed, try fallback proxy
+		if !errors.Is(err, balancer.ErrRateLimitExceeded) {
+			// Not rate limit - try fallback
+			cred, err = p.balancer.NextFallbackForModel(modelID)
 		}
 
-		credName := "<nil>"
-		if cred != nil {
-			credName = cred.Name
+		if err != nil {
+			// Both stages failed
+			err_code := http.StatusServiceUnavailable
+			err_line := "Service Unavailable"
+			if errors.Is(err, balancer.ErrRateLimitExceeded) {
+				err_code = http.StatusTooManyRequests
+				err_line = "Too Many Requests"
+			}
+
+			p.logger.Error("No credentials available (regular and fallback)",
+				"model", modelID,
+				"error", err,
+			)
+			http.Error(w, err_line, err_code)
+			return
 		}
-		p.logger.Error("Failed to get credential", "error", err, "code", err_code, "cred", credName, "model", modelID)
-		http.Error(w, err_line, err_code)
-		return
 	}
 
 	// Log request details at DEBUG level
@@ -173,6 +257,12 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		"model", modelID,
 		"type", cred.Type,
 	)
+
+	// Handle proxy credential type - forward as-is without transformation
+	if cred.Type == config.ProviderTypeProxy {
+		p.forwardToProxy(w, r, cred, body)
+		return
+	}
 
 	// Build target URL based on credential type
 	var targetURL string
@@ -350,6 +440,28 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			p.logger.Error("Failed to read response body", "error", err)
 			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 			return
+		}
+
+		// Check if we should retry with fallback proxy
+		shouldRetry, retryReason := ShouldRetryWithFallback(resp.StatusCode, responseBody)
+		if shouldRetry {
+			p.logger.Info("Attempting fallback retry",
+				"credential", cred.Name,
+				"status", resp.StatusCode,
+				"reason", retryReason,
+				"model", modelID,
+			)
+			// Try fallback - it will write response directly if successful
+			success, fallbackReason := p.TryFallbackProxy(w, r, modelID, cred.Name, resp.StatusCode, retryReason, body, start)
+			if success {
+				return
+			}
+			// If fallback didn't work, continue with original response
+			p.logger.Debug("Fallback retry failed, using original response",
+				"credential", cred.Name,
+				"status", resp.StatusCode,
+				"fallback_reason", fallbackReason,
+			)
 		}
 
 		// Decode the response body for logging (handles gzip, etc.)

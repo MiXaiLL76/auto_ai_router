@@ -1,10 +1,13 @@
 package models
 
 import (
+	"context"
 	"log/slog"
 	"sync"
+	"time"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
+	"github.com/mixaill76/auto_ai_router/internal/httputil"
 	"github.com/mixaill76/auto_ai_router/internal/transform/openai"
 )
 
@@ -29,6 +32,18 @@ type ModelLimits struct {
 	Credential string // If set, limits apply only to this credential
 }
 
+// remoteModelCache stores cached remote models with expiration time
+type remoteModelCache struct {
+	models    []Model
+	expiresAt time.Time
+}
+
+// allModelsCache stores cached result of GetAllModels
+type allModelsCache struct {
+	response  ModelsResponse
+	expiresAt time.Time
+}
+
 // Manager handles model discovery and mapping
 type Manager struct {
 	mu                 sync.RWMutex
@@ -38,6 +53,10 @@ type Manager struct {
 	modelLimits        map[string][]ModelLimits // model ID -> limits (may have multiple entries for different credentials)
 	defaultModelsRPM   int                      // default RPM for models
 	logger             *slog.Logger
+	credentials        []config.CredentialConfig   // credentials for fetching remote models
+	remoteModelsCache  map[string]remoteModelCache // cache for remote models per credential (credentialName -> cache)
+	cacheExpiration    time.Duration               // how long to cache remote models (default 5 minutes)
+	allModelsCache     allModelsCache              // cached result of GetAllModels (3 second TTL)
 }
 
 // New creates a new model manager
@@ -49,6 +68,9 @@ func New(logger *slog.Logger, defaultModelsRPM int, staticModels []config.ModelR
 		modelLimits:        make(map[string][]ModelLimits),
 		defaultModelsRPM:   defaultModelsRPM,
 		logger:             logger,
+		credentials:        make([]config.CredentialConfig, 0),
+		remoteModelsCache:  make(map[string]remoteModelCache),
+		cacheExpiration:    5 * time.Minute, // Default cache TTL: 5 minutes
 	}
 
 	// Load static models from config.yaml
@@ -69,6 +91,13 @@ func New(logger *slog.Logger, defaultModelsRPM int, staticModels []config.ModelR
 	}
 
 	return m
+}
+
+// SetCredentials sets the credentials for fetching remote models from proxies
+func (m *Manager) SetCredentials(credentials []config.CredentialConfig) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.credentials = credentials
 }
 
 // addModelToMaps adds model to credential mapping, avoiding duplicates using sets
@@ -180,14 +209,25 @@ func (m *Manager) LoadModelsFromConfig(credentials []config.CredentialConfig) {
 	)
 }
 
-// GetAllModels returns all unique models across all credentials
+// GetAllModels returns all unique models across all credentials with caching
 func (m *Manager) GetAllModels() ModelsResponse {
 	m.mu.RLock()
-	defer m.mu.RUnlock()
 
-	// If static models are configured, return them
+	// Check cache first (only return if cache is not empty and not expired)
+	if !m.allModelsCache.expiresAt.IsZero() && time.Now().Before(m.allModelsCache.expiresAt) {
+		defer m.mu.RUnlock()
+		m.logger.Debug("Returning cached all models",
+			"models_count", len(m.allModelsCache.response.Data),
+		)
+		return m.allModelsCache.response
+	}
+
+	var models []Model
+	modelMap := make(map[string]bool)
+
+	// If static models are configured, add them first
 	if len(m.modelLimits) > 0 {
-		models := make([]Model, 0, len(m.modelLimits))
+		models = make([]Model, 0, len(m.modelLimits))
 		for modelName := range m.modelLimits {
 			models = append(models, Model{
 				ID:      modelName,
@@ -195,17 +235,91 @@ func (m *Manager) GetAllModels() ModelsResponse {
 				Created: openai.GetCurrentTimestamp(),
 				OwnedBy: "system",
 			})
+			modelMap[modelName] = true
 		}
-		return ModelsResponse{
-			Object: "list",
-			Data:   models,
+	} else {
+		// Otherwise use allModels
+		models = make([]Model, len(m.allModels))
+		copy(models, m.allModels)
+		for _, model := range m.allModels {
+			modelMap[model.ID] = true
 		}
 	}
 
-	return ModelsResponse{
-		Object: "list",
-		Data:   m.allModels,
+	// Make a copy of credentials for fetching remote models
+	credentials := make([]config.CredentialConfig, len(m.credentials))
+	copy(credentials, m.credentials)
+
+	m.mu.RUnlock()
+
+	// Add models from proxy credentials only (not from other provider types)
+	for _, cred := range credentials {
+		// Skip non-proxy credentials - we only fetch models from proxy credentials
+		if cred.Type != config.ProviderTypeProxy {
+			m.logger.Debug("Skipping model fetch for non-proxy credential",
+				"credential", cred.Name,
+				"type", cred.Type,
+			)
+			continue
+		}
+
+		m.logger.Debug("Fetching models from proxy credential",
+			"credential", cred.Name,
+		)
+		remoteModels := m.GetRemoteModels(&cred)
+		m.logger.Debug("Got models from proxy",
+			"credential", cred.Name,
+			"remote_models_count", len(remoteModels),
+			"current_total", len(models),
+		)
+		added := 0
+		for _, model := range remoteModels {
+			if !modelMap[model.ID] {
+				models = append(models, model)
+				modelMap[model.ID] = true
+				added++
+
+				// Mark this model as available for this proxy credential
+				m.mu.Lock()
+				if m.modelToCredentials[model.ID] == nil {
+					m.modelToCredentials[model.ID] = []string{}
+				}
+				// Only add if not already in list
+				found := false
+				for _, existingCred := range m.modelToCredentials[model.ID] {
+					if existingCred == cred.Name {
+						found = true
+						break
+					}
+				}
+				if !found {
+					m.modelToCredentials[model.ID] = append(m.modelToCredentials[model.ID], cred.Name)
+				}
+				m.mu.Unlock()
+			}
+		}
+		m.logger.Debug("Processed proxy models",
+			"credential", cred.Name,
+			"added", added,
+			"duplicates", len(remoteModels)-added,
+			"total_now", len(models),
+		)
 	}
+
+	response := ModelsResponse{
+		Object: "list",
+		Data:   models,
+	}
+
+	// Cache the result for 3 seconds
+	m.mu.Lock()
+	m.allModelsCache = allModelsCache{
+		response:  response,
+		expiresAt: time.Now().Add(3 * time.Second),
+	}
+	m.mu.Unlock()
+
+	return response
 }
 
 // GetCredentialsForModel returns list of credential names that support the given model
@@ -467,4 +581,56 @@ func (m *Manager) GetModelsForCredential(credentialName string) []Model {
 	}
 
 	return result
+}
+
+// GetRemoteModels fetches models from a remote proxy credential with caching
+func (m *Manager) GetRemoteModels(cred *config.CredentialConfig) []Model {
+	if cred.Type != config.ProviderTypeProxy {
+		return nil
+	}
+
+	// Check cache first
+	m.mu.RLock()
+	if cached, ok := m.remoteModelsCache[cred.Name]; ok && !cached.expiresAt.IsZero() && time.Now().Before(cached.expiresAt) {
+		m.mu.RUnlock()
+		m.logger.Debug("Using cached remote models",
+			"credential", cred.Name,
+			"models_count", len(cached.models),
+			"expires_in", time.Until(cached.expiresAt).Seconds(),
+		)
+		return cached.models
+	}
+	m.mu.RUnlock()
+
+	m.logger.Debug("Fetching remote models from proxy",
+		"credential", cred.Name,
+		"base_url", cred.BaseURL,
+	)
+
+	// Fetch models using httputil helper
+	ctx := context.Background()
+	var modelsResp ModelsResponse
+	if err := httputil.FetchJSONFromProxy(ctx, cred, "/v1/models", m.logger, &modelsResp); err != nil {
+		m.logger.Error("Failed to fetch remote models",
+			"credential", cred.Name,
+			"error", err,
+		)
+		return nil
+	}
+
+	// Cache the result
+	m.mu.Lock()
+	m.remoteModelsCache[cred.Name] = remoteModelCache{
+		models:    modelsResp.Data,
+		expiresAt: time.Now().Add(m.cacheExpiration),
+	}
+	m.mu.Unlock()
+
+	m.logger.Debug("Cached remote models",
+		"credential", cred.Name,
+		"models_count", len(modelsResp.Data),
+		"expires_in", m.cacheExpiration.Seconds(),
+	)
+
+	return modelsResp.Data
 }

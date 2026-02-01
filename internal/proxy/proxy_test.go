@@ -299,22 +299,17 @@ func TestHealthCheck_Healthy(t *testing.T) {
 	healthy, status := prx.HealthCheck()
 
 	assert.True(t, healthy)
-	assert.Equal(t, "healthy", status["status"])
-	assert.Equal(t, 2, status["total_credentials"])
-	assert.Equal(t, 2, status["credentials_available"])
-	assert.Equal(t, 0, status["credentials_banned"])
+	assert.Equal(t, "healthy", status.Status)
+	assert.Equal(t, 2, status.TotalCredentials)
+	assert.Equal(t, 2, status.CredentialsAvailable)
+	assert.Equal(t, 0, status.CredentialsBanned)
 
 	// Check credentials info is present
-	assert.Contains(t, status, "credentials")
-	credentialsInfo, ok := status["credentials"].(map[string]interface{})
-	assert.True(t, ok)
-	assert.Len(t, credentialsInfo, 2)
+	assert.NotNil(t, status.Credentials)
+	assert.Len(t, status.Credentials, 2)
 
 	// Check models info is present (even if empty)
-	assert.Contains(t, status, "models")
-	modelsInfo, ok := status["models"].(map[string]interface{})
-	assert.True(t, ok)
-	assert.NotNil(t, modelsInfo)
+	assert.NotNil(t, status.Models)
 }
 
 func TestHealthCheck_Unhealthy(t *testing.T) {
@@ -344,19 +339,17 @@ func TestHealthCheck_Unhealthy(t *testing.T) {
 	healthy, status := prx.HealthCheck()
 
 	assert.False(t, healthy)
-	assert.Equal(t, "unhealthy", status["status"])
-	assert.Equal(t, 2, status["total_credentials"])
-	assert.Equal(t, 0, status["credentials_available"])
-	assert.Equal(t, 2, status["credentials_banned"])
+	assert.Equal(t, "unhealthy", status.Status)
+	assert.Equal(t, 2, status.TotalCredentials)
+	assert.Equal(t, 0, status.CredentialsAvailable)
+	assert.Equal(t, 2, status.CredentialsBanned)
 
 	// Check credentials info is present even when unhealthy
-	assert.Contains(t, status, "credentials")
-	credentialsInfo, ok := status["credentials"].(map[string]interface{})
-	assert.True(t, ok)
-	assert.Len(t, credentialsInfo, 2)
+	assert.NotNil(t, status.Credentials)
+	assert.Len(t, status.Credentials, 2)
 
 	// Check models info is present
-	assert.Contains(t, status, "models")
+	assert.NotNil(t, status.Models)
 }
 
 func TestHealthCheck_WithModels(t *testing.T) {
@@ -400,43 +393,41 @@ func TestHealthCheck_WithModels(t *testing.T) {
 	healthy, status := prx.HealthCheck()
 
 	assert.True(t, healthy)
-	assert.Equal(t, "healthy", status["status"])
+	assert.Equal(t, "healthy", status.Status)
 
 	// Check credentials info
-	credentialsInfo, ok := status["credentials"].(map[string]interface{})
-	assert.True(t, ok)
-	assert.Len(t, credentialsInfo, 2)
+	assert.NotNil(t, status.Credentials)
+	assert.Len(t, status.Credentials, 2)
 
 	// Check test1 credential details
-	test1Info, ok := credentialsInfo["test1"].(map[string]interface{})
+	test1Info, ok := status.Credentials["test1"]
 	assert.True(t, ok)
-	assert.Equal(t, 2, test1Info["current_rpm"])
-	assert.Equal(t, 5000, test1Info["current_tpm"])
-	assert.Equal(t, 100, test1Info["limit_rpm"])
-	assert.Equal(t, 100000, test1Info["limit_tpm"])
+	assert.Equal(t, 2, test1Info.CurrentRPM)
+	assert.Equal(t, 5000, test1Info.CurrentTPM)
+	assert.Equal(t, 100, test1Info.LimitRPM)
+	assert.Equal(t, 100000, test1Info.LimitTPM)
 
 	// Check models info
-	modelsInfo, ok := status["models"].(map[string]interface{})
-	assert.True(t, ok)
-	assert.Len(t, modelsInfo, 4) // 2 models × 2 credentials = 4 entries
+	assert.NotNil(t, status.Models)
+	assert.Len(t, status.Models, 4) // 2 models × 2 credentials = 4 entries
 
 	// Check test1:gpt-4 model details
-	gpt4Info, ok := modelsInfo["test1:gpt-4"].(map[string]interface{})
+	gpt4Info, ok := status.Models["test1:gpt-4"]
 	assert.True(t, ok)
-	assert.Equal(t, "test1", gpt4Info["credential"])
-	assert.Equal(t, "gpt-4", gpt4Info["model"])
-	assert.Equal(t, 1, gpt4Info["current_rpm"])    // 1 request made
-	assert.Equal(t, 2000, gpt4Info["current_tpm"]) // 2000 tokens consumed
-	assert.Equal(t, 10, gpt4Info["limit_rpm"])     // RPM limit
-	assert.Equal(t, 30000, gpt4Info["limit_tpm"])  // TPM limit
+	assert.Equal(t, "test1", gpt4Info.Credential)
+	assert.Equal(t, "gpt-4", gpt4Info.Model)
+	assert.Equal(t, 1, gpt4Info.CurrentRPM)    // 1 request made
+	assert.Equal(t, 2000, gpt4Info.CurrentTPM) // 2000 tokens consumed
+	assert.Equal(t, 10, gpt4Info.LimitRPM)     // RPM limit
+	assert.Equal(t, 30000, gpt4Info.LimitTPM)  // TPM limit
 
 	// Check test1:gpt-3.5-turbo model details
-	gpt35Info, ok := modelsInfo["test1:gpt-3.5-turbo"].(map[string]interface{})
+	gpt35Info, ok := status.Models["test1:gpt-3.5-turbo"]
 	assert.True(t, ok)
-	assert.Equal(t, "test1", gpt35Info["credential"])
-	assert.Equal(t, "gpt-3.5-turbo", gpt35Info["model"])
-	assert.Equal(t, 20, gpt35Info["limit_rpm"])    // RPM limit
-	assert.Equal(t, 40000, gpt35Info["limit_tpm"]) // TPM limit
+	assert.Equal(t, "test1", gpt35Info.Credential)
+	assert.Equal(t, "gpt-3.5-turbo", gpt35Info.Model)
+	assert.Equal(t, 20, gpt35Info.LimitRPM)    // RPM limit
+	assert.Equal(t, 40000, gpt35Info.LimitTPM) // TPM limit
 }
 
 func TestExtractModelFromBody(t *testing.T) {

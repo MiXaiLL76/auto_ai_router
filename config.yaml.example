@@ -3,8 +3,7 @@ server:
   max_body_size_mb: 100
   request_timeout: 90s
   logging_level: info  # Options: info, debug, error
-  replace_v1_models: false
-  master_key: "sk-your-master-key-here"  # Required: Master key for client authentication
+  master_key: "sk-your-master-key-here"  # Required: Master key for authentication
   default_models_rpm: 50  # Default RPM limit for models (use -1 for unlimited)
 
 fail2ban:
@@ -16,22 +15,16 @@ monitoring:
   prometheus_enabled: true
   health_check_path: "/health"
   log_errors: false
-  errors_log_path: "logs.jsonl"
+  errors_log_path: "logs/logs.jsonl"
 
 credentials:
+  # Direct provider credentials
   - name: "openai_main"
     type: "openai"
     api_key: "sk-proj-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
     base_url: "https://api.openai.com"
-    rpm: 100   # Requests per minute limit for this credential (use -1 for unlimited)
-    tpm: 50000 # Tokens per minute limit for this credential (use 0 or -1 for unlimited)
-
-  - name: "azure_openai"
-    type: "openai"
-    api_key: "your-azure-api-key"
-    base_url: "https://your-resource.openai.azure.com/openai/v1"
-    rpm: 200
-    tpm: 100000
+    rpm: 100
+    tpm: 50000
 
   - name: "vertex_ai"
     type: "vertex-ai"
@@ -41,16 +34,21 @@ credentials:
     rpm: 100
     tpm: 50000
 
-# Models with specific credential binding
+  # Proxy credential (forwards requests to another auto_ai_router instance)
+  - name: "proxy_fallback"
+    type: "proxy"
+    base_url: "http://backup-router.local:8080"  # URL of remote auto_ai_router
+    api_key: "sk-remote-master-key"  # Optional: remote master key
+    rpm: 200
+    tpm: 100000
+    is_fallback: true  # Use as fallback when primary credentials are exhausted
+
+# Optional: Models with specific credential binding
 models:
-  - name: "gpt-4o-mini"
+  - name: "gpt-4o"
     credential: openai_main
     rpm: 100
     tpm: 50000
-  - name: "gpt-4o"
-    credential: azure_openai
-    rpm: 50
-    tpm: 25000
   - name: "gemini-2.5-pro"
     credential: vertex_ai
     rpm: 100

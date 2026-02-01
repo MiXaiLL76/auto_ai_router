@@ -58,10 +58,15 @@ func (r *RoundRobin) SetModelChecker(mc ModelChecker) {
 
 // NextForModel returns the next available credential that supports the specified model
 func (r *RoundRobin) NextForModel(modelID string) (*config.CredentialConfig, error) {
-	return r.next(modelID)
+	return r.next(modelID, false)
 }
 
-func (r *RoundRobin) next(modelID string) (*config.CredentialConfig, error) {
+// NextFallbackForModel returns the next available fallback proxy credential
+func (r *RoundRobin) NextFallbackForModel(modelID string) (*config.CredentialConfig, error) {
+	return r.next(modelID, true)
+}
+
+func (r *RoundRobin) next(modelID string, allowOnlyFallback bool) (*config.CredentialConfig, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -82,6 +87,21 @@ func (r *RoundRobin) next(modelID string) (*config.CredentialConfig, error) {
 		cred := &r.credentials[r.current]
 		r.current = (r.current + 1) % len(r.credentials)
 		attempts++
+
+		// Filter by is_fallback flag
+		if allowOnlyFallback {
+			// Looking for fallback proxy only
+			if cred.Type != config.ProviderTypeProxy || !cred.IsFallback {
+				otherReasonsHit = true
+				continue
+			}
+		} else {
+			// Looking for non-fallback credentials
+			// Proxy type should NEVER be selected directly - must always be fallback or not used at all
+			if cred.IsFallback || cred.Type == config.ProviderTypeProxy {
+				continue
+			}
+		}
 
 		// Check if credential is banned
 		if r.fail2ban.IsBanned(cred.Name) {
