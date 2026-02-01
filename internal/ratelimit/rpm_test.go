@@ -862,3 +862,142 @@ func TestAllowTokens_ExactlyAtLimit(t *testing.T) {
 	rl.ConsumeTokens("cred1", 1)
 	assert.False(t, rl.AllowTokens("cred1"))
 }
+
+func TestSetCredentialCurrentUsage_NoLimiter(t *testing.T) {
+	rl := New()
+
+	// Set usage for non-existent credential - should not panic
+	rl.SetCredentialCurrentUsage("non-existent", 50, 5000)
+}
+
+func TestSetCredentialCurrentUsage_WithRPM(t *testing.T) {
+	rl := New()
+	rl.AddCredential("cred1", 100)
+
+	// Set current usage to 50 RPM
+	rl.SetCredentialCurrentUsage("cred1", 50, 0)
+
+	// GetCurrentRPM should return updated value (after cleanup of old requests)
+	currentRPM := rl.GetCurrentRPM("cred1")
+	assert.Greater(t, currentRPM, 0, "Should have some RPM after setting usage")
+}
+
+func TestSetCredentialCurrentUsage_WithTPM(t *testing.T) {
+	rl := New()
+	rl.AddCredentialWithTPM("cred1", 100, 10000)
+
+	// Set current usage to 5000 TPM
+	rl.SetCredentialCurrentUsage("cred1", 0, 5000)
+
+	// GetCurrentTPM should return updated value (after cleanup of old tokens)
+	currentTPM := rl.GetCurrentTPM("cred1")
+	assert.Greater(t, currentTPM, 0, "Should have some TPM after setting usage")
+}
+
+func TestSetCredentialCurrentUsage_WithBoth(t *testing.T) {
+	rl := New()
+	rl.AddCredentialWithTPM("cred1", 100, 10000)
+
+	// Set current usage to 50 RPM and 5000 TPM
+	rl.SetCredentialCurrentUsage("cred1", 50, 5000)
+
+	// Both should be updated
+	currentRPM := rl.GetCurrentRPM("cred1")
+	currentTPM := rl.GetCurrentTPM("cred1")
+	assert.Greater(t, currentRPM, 0, "Should have some RPM after setting usage")
+	assert.Greater(t, currentTPM, 0, "Should have some TPM after setting usage")
+}
+
+func TestSetCredentialCurrentUsage_ZeroValues(t *testing.T) {
+	rl := New()
+	rl.AddCredentialWithTPM("cred1", 100, 10000)
+
+	// First set some usage
+	rl.SetCredentialCurrentUsage("cred1", 50, 5000)
+	assert.Greater(t, rl.GetCurrentRPM("cred1"), 0)
+
+	// Then reset to zero
+	rl.SetCredentialCurrentUsage("cred1", 0, 0)
+	assert.Equal(t, 0, rl.GetCurrentRPM("cred1"))
+	assert.Equal(t, 0, rl.GetCurrentTPM("cred1"))
+}
+
+func TestSetModelCurrentUsage_NoLimiter(t *testing.T) {
+	rl := New()
+
+	// Set usage for non-existent model - should not panic
+	rl.SetModelCurrentUsage("non-existent", "gpt-4", 50, 5000)
+}
+
+func TestSetModelCurrentUsage_WithRPM(t *testing.T) {
+	rl := New()
+	rl.AddCredential("cred1", 100)
+	rl.AddModel("cred1", "gpt-4", 50)
+
+	// Set current usage to 25 RPM
+	rl.SetModelCurrentUsage("cred1", "gpt-4", 25, 0)
+
+	// GetCurrentModelRPM should return updated value
+	currentRPM := rl.GetCurrentModelRPM("cred1", "gpt-4")
+	assert.Greater(t, currentRPM, 0, "Should have some model RPM after setting usage")
+}
+
+func TestSetModelCurrentUsage_WithTPM(t *testing.T) {
+	rl := New()
+	rl.AddCredential("cred1", 100)
+	rl.AddModelWithTPM("cred1", "gpt-4", 50, 5000)
+
+	// Set current usage to 2500 TPM
+	rl.SetModelCurrentUsage("cred1", "gpt-4", 0, 2500)
+
+	// GetCurrentModelTPM should return updated value
+	currentTPM := rl.GetCurrentModelTPM("cred1", "gpt-4")
+	assert.Greater(t, currentTPM, 0, "Should have some model TPM after setting usage")
+}
+
+func TestSetModelCurrentUsage_WithBoth(t *testing.T) {
+	rl := New()
+	rl.AddCredential("cred1", 100)
+	rl.AddModelWithTPM("cred1", "gpt-4", 50, 5000)
+
+	// Set current usage to 25 RPM and 2500 TPM
+	rl.SetModelCurrentUsage("cred1", "gpt-4", 25, 2500)
+
+	// Both should be updated
+	currentRPM := rl.GetCurrentModelRPM("cred1", "gpt-4")
+	currentTPM := rl.GetCurrentModelTPM("cred1", "gpt-4")
+	assert.Greater(t, currentRPM, 0, "Should have some model RPM after setting usage")
+	assert.Greater(t, currentTPM, 0, "Should have some model TPM after setting usage")
+}
+
+func TestSetModelCurrentUsage_ZeroValues(t *testing.T) {
+	rl := New()
+	rl.AddCredential("cred1", 100)
+	rl.AddModelWithTPM("cred1", "gpt-4", 50, 5000)
+
+	// First set some usage
+	rl.SetModelCurrentUsage("cred1", "gpt-4", 25, 2500)
+	assert.Greater(t, rl.GetCurrentModelRPM("cred1", "gpt-4"), 0)
+
+	// Then reset to zero
+	rl.SetModelCurrentUsage("cred1", "gpt-4", 0, 0)
+	assert.Equal(t, 0, rl.GetCurrentModelRPM("cred1", "gpt-4"))
+	assert.Equal(t, 0, rl.GetCurrentModelTPM("cred1", "gpt-4"))
+}
+
+func TestSetCredentialCurrentUsage_MultipleModels(t *testing.T) {
+	rl := New()
+	rl.AddCredential("cred1", 100)
+	rl.AddModel("cred1", "gpt-4", 50)
+	rl.AddModel("cred1", "gpt-3.5", 60)
+
+	// Set credential usage
+	rl.SetCredentialCurrentUsage("cred1", 40, 4000)
+
+	// Credential level should be updated
+	assert.Greater(t, rl.GetCurrentRPM("cred1"), 0)
+
+	// Model levels should not be affected
+	assert.Equal(t, 0, rl.GetCurrentModelRPM("cred1", "gpt-4"))
+	assert.Equal(t, 0, rl.GetCurrentModelRPM("cred1", "gpt-3.5"))
+}
