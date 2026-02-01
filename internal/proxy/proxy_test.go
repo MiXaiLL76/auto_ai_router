@@ -377,6 +377,7 @@ func TestHealthCheck_WithModels(t *testing.T) {
 	rl.AddModelWithTPM("test1", "gpt-4", 10, 30000)
 	rl.AddModelWithTPM("test1", "gpt-3.5-turbo", 20, 40000)
 	rl.AddModelWithTPM("test2", "gpt-4", 5, 15000)
+	rl.AddModelWithTPM("test2", "gpt-3.5-turbo", 15, 35000)
 
 	// Simulate some usage
 	rl.Allow("test1")
