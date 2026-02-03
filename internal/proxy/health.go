@@ -2,11 +2,14 @@ package proxy
 
 import (
 	_ "embed"
-	"fmt"
 	"net/http"
+	"strings"
+
+	"github.com/mixaill76/auto_ai_router/internal/config"
+	"github.com/mixaill76/auto_ai_router/internal/httputil"
 )
 
-func (p *Proxy) HealthCheck() (bool, map[string]interface{}) {
+func (p *Proxy) HealthCheck() (bool, *httputil.ProxyHealthResponse) {
 	totalCreds := len(p.balancer.GetCredentials())
 	availableCreds := p.balancer.GetAvailableCount()
 	bannedCreds := p.balancer.GetBannedCount()
@@ -14,64 +17,69 @@ func (p *Proxy) HealthCheck() (bool, map[string]interface{}) {
 	healthy := availableCreds > 0
 
 	// Collect credentials info
-	credentialsInfo := make(map[string]interface{})
+	credentialsInfo := make(map[string]httputil.CredentialHealthStats)
 	for _, cred := range p.balancer.GetCredentials() {
-		credentialsInfo[cred.Name] = map[string]interface{}{
-			"current_rpm": p.rateLimiter.GetCurrentRPM(cred.Name),
-			"current_tpm": p.rateLimiter.GetCurrentTPM(cred.Name),
-			"limit_rpm":   cred.RPM,
-			"limit_tpm":   cred.TPM,
+		// For proxy credentials, get limits from rateLimiter (updated by UpdateStatsFromRemoteProxy)
+		// For other credentials, use config values
+		limitRPM := cred.RPM
+		limitTPM := cred.TPM
+		if cred.Type == config.ProviderTypeProxy {
+			rateLimiterRPM := p.rateLimiter.GetLimitRPM(cred.Name)
+			rateLimiterTPM := p.rateLimiter.GetLimitTPM(cred.Name)
+			if rateLimiterRPM != -1 {
+				limitRPM = rateLimiterRPM
+			}
+			if rateLimiterTPM != -1 {
+				limitTPM = rateLimiterTPM
+			}
+		}
+
+		credentialsInfo[cred.Name] = httputil.CredentialHealthStats{
+			Type:       string(cred.Type),
+			IsFallback: cred.IsFallback,
+			CurrentRPM: p.rateLimiter.GetCurrentRPM(cred.Name),
+			CurrentTPM: p.rateLimiter.GetCurrentTPM(cred.Name),
+			LimitRPM:   limitRPM,
+			LimitTPM:   limitTPM,
 		}
 	}
 
-	// Collect models info from all configured models
-	modelsInfo := make(map[string]interface{})
+	// Collect models info from rateLimiter (which tracks all credential:model pairs)
+	modelsInfo := make(map[string]httputil.ModelHealthStats)
 
-	// Get all models from config (both credential-specific and global)
-	allConfigModels := p.modelManager.GetAllModels()
-	for _, model := range allConfigModels.Data {
-		// For each model, check which credentials support it
-		credentials := p.modelManager.GetCredentialsForModel(model.ID)
-		if len(credentials) == 0 {
-			// If no specific credentials, add for all credentials
-			for _, cred := range p.balancer.GetCredentials() {
-				modelKey := fmt.Sprintf("%s:%s", cred.Name, model.ID)
-				modelsInfo[modelKey] = map[string]interface{}{
-					"credential":  cred.Name,
-					"model":       model.ID,
-					"current_rpm": p.rateLimiter.GetCurrentModelRPM(cred.Name, model.ID),
-					"current_tpm": p.rateLimiter.GetCurrentModelTPM(cred.Name, model.ID),
-					"limit_rpm":   p.rateLimiter.GetModelLimitRPM(cred.Name, model.ID),
-					"limit_tpm":   p.rateLimiter.GetModelLimitTPM(cred.Name, model.ID),
-				}
-			}
-		} else {
-			// Add for specific credentials only
-			for _, credName := range credentials {
-				modelKey := fmt.Sprintf("%s:%s", credName, model.ID)
-				modelsInfo[modelKey] = map[string]interface{}{
-					"credential":  credName,
-					"model":       model.ID,
-					"current_rpm": p.rateLimiter.GetCurrentModelRPM(credName, model.ID),
-					"current_tpm": p.rateLimiter.GetCurrentModelTPM(credName, model.ID),
-					"limit_rpm":   p.rateLimiter.GetModelLimitRPM(credName, model.ID),
-					"limit_tpm":   p.rateLimiter.GetModelLimitTPM(credName, model.ID),
-				}
-			}
+	// Get all tracked credential:model pairs from rateLimiter
+	// This includes duplicates when same model is available from different credentials
+	allTrackedModels := p.rateLimiter.GetAllModels()
+	for _, modelKey := range allTrackedModels {
+		// Parse credential:model format
+		parts := strings.Split(modelKey, ":")
+		if len(parts) != 2 {
+			continue
+		}
+		credName := parts[0]
+		modelID := parts[1]
+
+		modelsInfo[modelKey] = httputil.ModelHealthStats{
+			Credential: credName,
+			Model:      modelID,
+			CurrentRPM: p.rateLimiter.GetCurrentModelRPM(credName, modelID),
+			CurrentTPM: p.rateLimiter.GetCurrentModelTPM(credName, modelID),
+			LimitRPM:   p.rateLimiter.GetModelLimitRPM(credName, modelID),
+			LimitTPM:   p.rateLimiter.GetModelLimitTPM(credName, modelID),
 		}
 	}
 
-	status := map[string]interface{}{
-		"status":                "healthy",
-		"credentials_available": availableCreds,
-		"credentials_banned":    bannedCreds,
-		"total_credentials":     totalCreds,
-		"credentials":           credentialsInfo,
-		"models":                modelsInfo,
+	status := &httputil.ProxyHealthResponse{
+		Status:               "healthy",
+		CredentialsAvailable: availableCreds,
+		CredentialsBanned:    bannedCreds,
+		TotalCredentials:     totalCreds,
+		Credentials:          credentialsInfo,
+		Models:               modelsInfo,
 	}
 
 	if !healthy {
-		status["status"] = "unhealthy"
+		status.Status = "unhealthy"
 	}
 
 	return healthy, status
@@ -90,7 +98,17 @@ func (p *Proxy) VisualHealthCheck(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 
-	if err := p.healthTemplate.Execute(w, status); err != nil {
+	// Convert to map[string]interface{} for template compatibility
+	statusMap := map[string]interface{}{
+		"status":                status.Status,
+		"credentials_available": status.CredentialsAvailable,
+		"credentials_banned":    status.CredentialsBanned,
+		"total_credentials":     status.TotalCredentials,
+		"credentials":           status.Credentials,
+		"models":                status.Models,
+	}
+
+	if err := p.healthTemplate.Execute(w, statusMap); err != nil {
 		p.logger.Error("Failed to execute health template", "error", err)
 	}
 }

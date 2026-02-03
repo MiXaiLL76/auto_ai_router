@@ -65,12 +65,16 @@ func main() {
 	f2b := fail2ban.New(cfg.Fail2Ban.MaxAttempts, cfg.Fail2Ban.BanDuration, cfg.Fail2Ban.ErrorCodes)
 	rateLimiter := ratelimit.New()
 	bal := balancer.New(cfg.Credentials, f2b, rateLimiter)
+	bal.SetLogger(log)
 
 	// Initialize model manager with static models from config.yaml
 	modelManager := models.New(log, cfg.Server.DefaultModelsRPM, cfg.Models)
 
 	// Load credential-specific models from config
 	modelManager.LoadModelsFromConfig(cfg.Credentials)
+
+	// Set credentials for fetching remote models from proxies
+	modelManager.SetCredentials(cfg.Credentials)
 
 	// Initialize model RPM and TPM limiters for each (credential, model) pair
 	modelsResp := modelManager.GetAllModels()
@@ -122,8 +126,16 @@ func main() {
 				case <-metricsCtx.Done():
 					return
 				case <-ticker.C:
-					// Update credential metrics
-					for _, cred := range bal.GetCredentials() {
+					credentials := bal.GetCredentials()
+
+					// Update credential metrics (exclude proxy type credentials)
+					// Proxy credentials are internal forwarding nodes, not real providers
+					for _, cred := range credentials {
+						// Skip proxy credentials - they are monitored via remote /health endpoint
+						if cred.Type == config.ProviderTypeProxy {
+							continue
+						}
+
 						rpm := rateLimiter.GetCurrentRPM(cred.Name)
 						metrics.UpdateCredentialRPM(cred.Name, rpm)
 
@@ -134,7 +146,7 @@ func main() {
 						metrics.UpdateCredentialBanStatus(cred.Name, banned)
 					}
 
-					// Update model RPM/TPM metrics
+					// Update model RPM/TPM metrics (exclude proxy credentials)
 					// GetAllModels() returns keys in format "credential:model"
 					for _, key := range rateLimiter.GetAllModels() {
 						// Parse credential:model format
@@ -142,6 +154,11 @@ func main() {
 						if len(parts) == 2 {
 							credentialName := parts[0]
 							modelName := parts[1]
+
+							// Skip models for proxy credentials
+							if isProxyCredential(credentialName, credentials) {
+								continue
+							}
 
 							modelRPM := rateLimiter.GetCurrentModelRPM(credentialName, modelName)
 							metrics.UpdateModelRPM(credentialName, modelName, modelRPM)
@@ -155,6 +172,21 @@ func main() {
 		}()
 		log.Info("Metrics updater started (updates every 10 seconds)")
 	}
+
+	// Start background proxy stats updater
+	// Fetches RPM/TPM limits from remote proxy /health endpoint
+	go func() {
+		// Update immediately on startup
+		updateAllProxyCredentials(bal, rateLimiter, log, modelManager)
+
+		// Then update periodically with staggered timing
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			updateAllProxyCredentials(bal, rateLimiter, log, modelManager)
+		}
+	}()
+	log.Info("Proxy stats updater started (updates every 30 seconds)")
 
 	rtr := router.New(prx, modelManager, &cfg.Monitoring)
 
@@ -224,7 +256,59 @@ func main() {
 	log.Info("Server shutdown complete")
 }
 
+// updateAllProxyCredentials updates all proxy credentials with staggered timing
+// to avoid thundering herd problem when multiple proxies are updated simultaneously
+func updateAllProxyCredentials(bal *balancer.RoundRobin, rateLimiter *ratelimit.RPMLimiter, log *slog.Logger, modelManager *models.Manager) {
+	credentials := bal.GetCredentials()
+	proxyCount := 0
+
+	// Count proxy credentials
+	for _, cred := range credentials {
+		if cred.Type == config.ProviderTypeProxy {
+			proxyCount++
+		}
+	}
+
+	if proxyCount == 0 {
+		return
+	}
+
+	// Stagger updates: distribute them evenly across the update interval
+	// For each proxy, calculate a small delay to spread requests
+	staggerDelay := 100 * time.Millisecond // Small delay between each proxy update
+	proxyIndex := 0
+
+	for _, cred := range credentials {
+		if cred.Type == config.ProviderTypeProxy {
+			// Create a copy of credential for closure (avoid loop variable capture)
+			credCopy := cred
+
+			// Use a small staggered delay to spread the requests
+			if proxyIndex > 0 {
+				time.Sleep(staggerDelay)
+			}
+
+			// Create context with timeout for this update
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			proxy.UpdateStatsFromRemoteProxy(ctx, &credCopy, rateLimiter, log, modelManager)
+			cancel()
+
+			proxyIndex++
+		}
+	}
+}
+
 // splitCredentialModel splits "credential:model" format into [credential, model]
 func splitCredentialModel(key string) []string {
 	return strings.SplitN(key, ":", 2)
+}
+
+// isProxyCredential checks if a credential is a proxy type
+func isProxyCredential(credentialName string, credentials []config.CredentialConfig) bool {
+	for _, cred := range credentials {
+		if cred.Name == credentialName && cred.Type == config.ProviderTypeProxy {
+			return true
+		}
+	}
+	return false
 }

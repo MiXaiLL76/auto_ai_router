@@ -7,6 +7,7 @@ import (
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/stretchr/testify/assert"
+	"google.golang.org/genai"
 )
 
 func TestOpenAIToVertex(t *testing.T) {
@@ -866,6 +867,314 @@ func TestBuildVertexImageURL(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			url := BuildVertexImageURL(tt.cred, tt.modelID)
 			assert.Equal(t, tt.expected, url)
+		})
+	}
+}
+
+func TestGetMimeTypeFromURL(t *testing.T) {
+	tests := []struct {
+		name     string
+		url      string
+		expected string
+	}{
+		{
+			name:     "video mp4",
+			url:      "https://example.com/video.mp4",
+			expected: "video/mp4",
+		},
+		{
+			name:     "video with query params",
+			url:      "https://example.com/video.mp4?token=abc123&version=2",
+			expected: "video/mp4",
+		},
+		{
+			name:     "image png",
+			url:      "https://storage.example.com/image.png",
+			expected: "image/png",
+		},
+		{
+			name:     "image jpeg",
+			url:      "https://example.com/photos/pic.jpeg",
+			expected: "image/jpeg",
+		},
+		{
+			name:     "image jpg",
+			url:      "https://example.com/photo.jpg",
+			expected: "image/jpeg",
+		},
+		{
+			name:     "image gif",
+			url:      "https://example.com/animation.gif",
+			expected: "image/gif",
+		},
+		{
+			name:     "image webp",
+			url:      "https://example.com/modern.webp",
+			expected: "image/webp",
+		},
+		{
+			name:     "video mov",
+			url:      "https://example.com/movie.mov",
+			expected: "video/quicktime",
+		},
+		{
+			name:     "video avi",
+			url:      "https://example.com/old_video.avi",
+			expected: "video/x-msvideo",
+		},
+		{
+			name:     "video mkv",
+			url:      "https://example.com/film.mkv",
+			expected: "video/x-matroska",
+		},
+		{
+			name:     "video webm",
+			url:      "https://example.com/stream.webm",
+			expected: "video/webm",
+		},
+		{
+			name:     "pdf file",
+			url:      "https://example.com/document.pdf",
+			expected: "application/pdf",
+		},
+		{
+			name:     "text file",
+			url:      "https://example.com/readme.txt",
+			expected: "text/plain",
+		},
+		{
+			name:     "unknown extension",
+			url:      "https://example.com/file.xyz",
+			expected: "",
+		},
+		{
+			name:     "no extension",
+			url:      "https://example.com/file",
+			expected: "",
+		},
+		{
+			name:     "file url scheme",
+			url:      "file:///home/user/video.mp4",
+			expected: "video/mp4",
+		},
+		{
+			name:     "uppercase extension",
+			url:      "https://example.com/VIDEO.MP4",
+			expected: "video/mp4",
+		},
+		{
+			name:     "mixed case extension",
+			url:      "https://example.com/Movie.MoV",
+			expected: "video/quicktime",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := getMimeTypeFromURL(tt.url)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+func TestParseURLToPart(t *testing.T) {
+	tests := []struct {
+		name        string
+		url         string
+		fileObj     map[string]interface{}
+		expectNil   bool
+		expectedMT  string // expected MIME type
+		expectedURI string // expected file URI
+	}{
+		{
+			name:        "https video url with format",
+			url:         "https://storage.yandexcloud.net/ai-roman/1.mp4",
+			fileObj:     map[string]interface{}{"format": "video/mp4"},
+			expectNil:   false,
+			expectedMT:  "video/mp4",
+			expectedURI: "https://storage.yandexcloud.net/ai-roman/1.mp4",
+		},
+		{
+			name:        "https video url without format",
+			url:         "https://example.com/video.mp4",
+			fileObj:     map[string]interface{}{},
+			expectNil:   false,
+			expectedMT:  "video/mp4",
+			expectedURI: "https://example.com/video.mp4",
+		},
+		{
+			name:        "https image url",
+			url:         "https://example.com/image.png",
+			fileObj:     map[string]interface{}{},
+			expectNil:   false,
+			expectedMT:  "image/png",
+			expectedURI: "https://example.com/image.png",
+		},
+		{
+			name:        "http url",
+			url:         "http://example.com/file.jpg",
+			fileObj:     map[string]interface{}{},
+			expectNil:   false,
+			expectedMT:  "image/jpeg",
+			expectedURI: "http://example.com/file.jpg",
+		},
+		{
+			name:        "file:// scheme",
+			url:         "file:///home/user/document.pdf",
+			fileObj:     map[string]interface{}{},
+			expectNil:   false,
+			expectedMT:  "application/pdf",
+			expectedURI: "file:///home/user/document.pdf",
+		},
+		{
+			name:      "invalid data url",
+			url:       "data:image/png;base64,abc123",
+			fileObj:   map[string]interface{}{},
+			expectNil: true,
+		},
+		{
+			name:      "relative path",
+			url:       "/path/to/file.mp4",
+			fileObj:   map[string]interface{}{},
+			expectNil: true,
+		},
+		{
+			name:      "empty url",
+			url:       "",
+			fileObj:   map[string]interface{}{},
+			expectNil: true,
+		},
+		{
+			name:        "url with query params",
+			url:         "https://example.com/video.mp4?token=abc123",
+			fileObj:     map[string]interface{}{},
+			expectNil:   false,
+			expectedMT:  "video/mp4",
+			expectedURI: "https://example.com/video.mp4?token=abc123",
+		},
+		{
+			name:        "format overrides extension detection",
+			url:         "https://example.com/file.bin",
+			fileObj:     map[string]interface{}{"format": "video/webm"},
+			expectNil:   false,
+			expectedMT:  "video/webm",
+			expectedURI: "https://example.com/file.bin",
+		},
+		{
+			name:        "unknown extension defaults to octet-stream",
+			url:         "https://example.com/file.xyz",
+			fileObj:     map[string]interface{}{},
+			expectNil:   false,
+			expectedMT:  "application/octet-stream",
+			expectedURI: "https://example.com/file.xyz",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := parseURLToPart(tt.url, tt.fileObj)
+
+			if tt.expectNil {
+				assert.Nil(t, result)
+				return
+			}
+
+			assert.NotNil(t, result)
+			assert.NotNil(t, result.FileData)
+			assert.Equal(t, tt.expectedMT, result.FileData.MIMEType)
+			assert.Equal(t, tt.expectedURI, result.FileData.FileURI)
+		})
+	}
+}
+
+func TestConvertContentToPartsWithFiles(t *testing.T) {
+	tests := []struct {
+		name        string
+		input       interface{}
+		expectedLen int
+		checkFunc   func(t *testing.T, parts []*genai.Part)
+	}{
+		{
+			name: "file with video",
+			input: []interface{}{
+				map[string]interface{}{
+					"type": "text",
+					"text": "Analyze this video",
+				},
+				map[string]interface{}{
+					"type": "file",
+					"file": map[string]interface{}{
+						"file_id": "https://example.com/video.mp4",
+						"format":  "video/mp4",
+					},
+				},
+			},
+			expectedLen: 2,
+			checkFunc: func(t *testing.T, parts []*genai.Part) {
+				// Check text part
+				assert.Equal(t, "Analyze this video", parts[0].Text)
+
+				// Check file part
+				assert.NotNil(t, parts[1].FileData)
+				assert.Equal(t, "video/mp4", parts[1].FileData.MIMEType)
+				assert.Equal(t, "https://example.com/video.mp4", parts[1].FileData.FileURI)
+			},
+		},
+		{
+			name: "data url and file url mixed",
+			input: []interface{}{
+				map[string]interface{}{
+					"type": "image_url",
+					"image_url": map[string]interface{}{
+						"url": "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg==",
+					},
+				},
+				map[string]interface{}{
+					"type": "file",
+					"file": map[string]interface{}{
+						"file_id": "https://example.com/image.jpg",
+					},
+				},
+			},
+			expectedLen: 2,
+			checkFunc: func(t *testing.T, parts []*genai.Part) {
+				// First part should be inline data
+				assert.NotNil(t, parts[0].InlineData)
+				assert.Equal(t, "image/png", parts[0].InlineData.MIMEType)
+
+				// Second part should be file data
+				assert.NotNil(t, parts[1].FileData)
+				assert.Equal(t, "image/jpeg", parts[1].FileData.MIMEType)
+				assert.Equal(t, "https://example.com/image.jpg", parts[1].FileData.FileURI)
+			},
+		},
+		{
+			name: "file without format field",
+			input: []interface{}{
+				map[string]interface{}{
+					"type": "file",
+					"file": map[string]interface{}{
+						"file_id": "https://storage.yandexcloud.net/ai-roman/1.mp4",
+					},
+				},
+			},
+			expectedLen: 1,
+			checkFunc: func(t *testing.T, parts []*genai.Part) {
+				assert.NotNil(t, parts[0].FileData)
+				assert.Equal(t, "video/mp4", parts[0].FileData.MIMEType)
+				assert.Equal(t, "https://storage.yandexcloud.net/ai-roman/1.mp4", parts[0].FileData.FileURI)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := convertContentToParts(tt.input)
+			assert.Equal(t, tt.expectedLen, len(result))
+
+			if tt.checkFunc != nil {
+				tt.checkFunc(t, result)
+			}
 		})
 	}
 }

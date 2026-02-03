@@ -12,7 +12,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/mixaill76/auto_ai_router/internal/auth"
 	"github.com/mixaill76/auto_ai_router/internal/balancer"
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/fail2ban"
@@ -22,40 +21,13 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func createTestBalancer(mockServerURL string) (*balancer.RoundRobin, *ratelimit.RPMLimiter) {
-	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
-	rl := ratelimit.New()
-
-	credentials := []config.CredentialConfig{
-		{Name: "test1", APIKey: "upstream-key-1", BaseURL: mockServerURL, RPM: 100},
-		{Name: "test2", APIKey: "upstream-key-2", BaseURL: mockServerURL, RPM: 100},
-	}
-
-	for _, cred := range credentials {
-		rl.AddCredential(cred.Name, cred.RPM)
-	}
-
-	bal := balancer.New(credentials, f2b, rl)
-	return bal, rl
-}
-
-func createTestTokenManager() *auth.VertexTokenManager {
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-	return auth.NewVertexTokenManager(logger)
-}
-
-func createTestModelManager() *models.Manager {
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-	return models.New(logger, 50, []config.ModelRPMConfig{})
-}
-
 func TestNew(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+	logger := createTestLogger()
 	bal, rl := createTestBalancer("http://test.com")
-	metrics := monitoring.New(false)
+	metrics := createTestProxyMetrics()
 
-	tm := createTestTokenManager()
-	mm := createTestModelManager()
+	tm := createTestTokenManager(logger)
+	mm := createTestModelManager(logger)
 	prx := New(bal, logger, 10, 30*time.Second, metrics, "test-master-key", rl, tm, mm, "test-version", "test-commit")
 
 	assert.NotNil(t, prx)
@@ -66,11 +38,11 @@ func TestNew(t *testing.T) {
 }
 
 func TestProxyRequest_MissingAuthorization(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+	logger := createTestLogger()
 	bal, rl := createTestBalancer("http://test.com")
-	metrics := monitoring.New(false)
-	tm := createTestTokenManager()
-	prx := New(bal, logger, 10, 30*time.Second, metrics, "test-key", rl, tm, createTestModelManager(), "test-version", "test-commit")
+	metrics := createTestProxyMetrics()
+	tm := createTestTokenManager(logger)
+	prx := New(bal, logger, 10, 30*time.Second, metrics, "test-key", rl, tm, createTestModelManager(logger), "test-version", "test-commit")
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
 	w := httptest.NewRecorder()
@@ -82,11 +54,11 @@ func TestProxyRequest_MissingAuthorization(t *testing.T) {
 }
 
 func TestProxyRequest_InvalidAuthorizationFormat(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+	logger := createTestLogger()
 	bal, rl := createTestBalancer("http://test.com")
-	metrics := monitoring.New(false)
-	tm := createTestTokenManager()
-	prx := New(bal, logger, 10, 30*time.Second, metrics, "test-key", rl, tm, createTestModelManager(), "test-version", "test-commit")
+	metrics := createTestProxyMetrics()
+	tm := createTestTokenManager(logger)
+	prx := New(bal, logger, 10, 30*time.Second, metrics, "test-key", rl, tm, createTestModelManager(logger), "test-version", "test-commit")
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
 	req.Header.Set("Authorization", "InvalidFormat")
@@ -99,11 +71,11 @@ func TestProxyRequest_InvalidAuthorizationFormat(t *testing.T) {
 }
 
 func TestProxyRequest_InvalidMasterKey(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+	logger := createTestLogger()
 	bal, rl := createTestBalancer("http://test.com")
-	metrics := monitoring.New(false)
-	tm := createTestTokenManager()
-	prx := New(bal, logger, 10, 30*time.Second, metrics, "correct-key", rl, tm, createTestModelManager(), "test-version", "test-commit")
+	metrics := createTestProxyMetrics()
+	tm := createTestTokenManager(logger)
+	prx := New(bal, logger, 10, 30*time.Second, metrics, "correct-key", rl, tm, createTestModelManager(logger), "test-version", "test-commit")
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
 	req.Header.Set("Authorization", "Bearer wrong-key")
@@ -127,11 +99,11 @@ func TestProxyRequest_ValidRequest(t *testing.T) {
 	}))
 	defer mockServer.Close()
 
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+	logger := createTestLogger()
 	bal, rl := createTestBalancer(mockServer.URL)
-	metrics := monitoring.New(false)
-	tm := createTestTokenManager()
-	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key", rl, tm, createTestModelManager(), "test-version", "test-commit")
+	metrics := createTestProxyMetrics()
+	tm := createTestTokenManager(logger)
+	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key", rl, tm, createTestModelManager(logger), "test-version", "test-commit")
 
 	reqBody := `{"model": "gpt-4", "messages": [{"role": "user", "content": "Hello"}]}`
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(reqBody))
@@ -153,11 +125,11 @@ func TestProxyRequest_WithModel(t *testing.T) {
 	}))
 	defer mockServer.Close()
 
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+	logger := createTestLogger()
 	bal, rl := createTestBalancer(mockServer.URL)
-	metrics := monitoring.New(false)
-	tm := createTestTokenManager()
-	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key", rl, tm, createTestModelManager(), "test-version", "test-commit")
+	metrics := createTestProxyMetrics()
+	tm := createTestTokenManager(logger)
+	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key", rl, tm, createTestModelManager(logger), "test-version", "test-commit")
 
 	reqBody := `{"model": "gpt-4", "messages": [{"role": "user", "content": "Test"}]}`
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(reqBody))
@@ -189,8 +161,8 @@ func TestProxyRequest_NoCredentialsAvailable(t *testing.T) {
 	f2b.RecordResponse("test1", 500)
 
 	metrics := monitoring.New(false)
-	tm := createTestTokenManager()
-	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key", rl, tm, createTestModelManager(), "test-version", "test-commit")
+	tm := createTestTokenManager(logger)
+	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key", rl, tm, createTestModelManager(logger), "test-version", "test-commit")
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model": "gpt-4"}`))
 	req.Header.Set("Authorization", "Bearer master-key")
@@ -217,8 +189,8 @@ func TestProxyRequest_RateLimitExceeded(t *testing.T) {
 
 	bal := balancer.New(credentials, f2b, rl)
 	metrics := monitoring.New(false)
-	tm := createTestTokenManager()
-	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key", rl, tm, createTestModelManager(), "test-version", "test-commit")
+	tm := createTestTokenManager(logger)
+	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key", rl, tm, createTestModelManager(logger), "test-version", "test-commit")
 
 	// Manually trigger rate limiter to exhaust the limit
 	rl.Allow("test1")
@@ -241,11 +213,11 @@ func TestProxyRequest_UpstreamError(t *testing.T) {
 	}))
 	defer mockServer.Close()
 
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+	logger := createTestLogger()
 	bal, rl := createTestBalancer(mockServer.URL)
-	metrics := monitoring.New(false)
-	tm := createTestTokenManager()
-	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key", rl, tm, createTestModelManager(), "test-version", "test-commit")
+	metrics := createTestProxyMetrics()
+	tm := createTestTokenManager(logger)
+	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key", rl, tm, createTestModelManager(logger), "test-version", "test-commit")
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model": "gpt-4"}`))
 	req.Header.Set("Authorization", "Bearer master-key")
@@ -272,11 +244,11 @@ func TestProxyRequest_Streaming(t *testing.T) {
 	}))
 	defer mockServer.Close()
 
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+	logger := createTestLogger()
 	bal, rl := createTestBalancer(mockServer.URL)
-	metrics := monitoring.New(false)
-	tm := createTestTokenManager()
-	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key", rl, tm, createTestModelManager(), "test-version", "test-commit")
+	metrics := createTestProxyMetrics()
+	tm := createTestTokenManager(logger)
+	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key", rl, tm, createTestModelManager(logger), "test-version", "test-commit")
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model": "gpt-4", "stream": true}`))
 	req.Header.Set("Authorization", "Bearer master-key")
@@ -293,28 +265,23 @@ func TestHealthCheck_Healthy(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
 	bal, rl := createTestBalancer("http://test.com")
 	metrics := monitoring.New(false)
-	tm := createTestTokenManager()
-	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key", rl, tm, createTestModelManager(), "test-version", "test-commit")
+	tm := createTestTokenManager(logger)
+	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key", rl, tm, createTestModelManager(logger), "test-version", "test-commit")
 
 	healthy, status := prx.HealthCheck()
 
 	assert.True(t, healthy)
-	assert.Equal(t, "healthy", status["status"])
-	assert.Equal(t, 2, status["total_credentials"])
-	assert.Equal(t, 2, status["credentials_available"])
-	assert.Equal(t, 0, status["credentials_banned"])
+	assert.Equal(t, "healthy", status.Status)
+	assert.Equal(t, 2, status.TotalCredentials)
+	assert.Equal(t, 2, status.CredentialsAvailable)
+	assert.Equal(t, 0, status.CredentialsBanned)
 
 	// Check credentials info is present
-	assert.Contains(t, status, "credentials")
-	credentialsInfo, ok := status["credentials"].(map[string]interface{})
-	assert.True(t, ok)
-	assert.Len(t, credentialsInfo, 2)
+	assert.NotNil(t, status.Credentials)
+	assert.Len(t, status.Credentials, 2)
 
 	// Check models info is present (even if empty)
-	assert.Contains(t, status, "models")
-	modelsInfo, ok := status["models"].(map[string]interface{})
-	assert.True(t, ok)
-	assert.NotNil(t, modelsInfo)
+	assert.NotNil(t, status.Models)
 }
 
 func TestHealthCheck_Unhealthy(t *testing.T) {
@@ -338,25 +305,23 @@ func TestHealthCheck_Unhealthy(t *testing.T) {
 	f2b.RecordResponse("test2", 500)
 
 	metrics := monitoring.New(false)
-	tm := createTestTokenManager()
-	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key", rl, tm, createTestModelManager(), "test-version", "test-commit")
+	tm := createTestTokenManager(logger)
+	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key", rl, tm, createTestModelManager(logger), "test-version", "test-commit")
 
 	healthy, status := prx.HealthCheck()
 
 	assert.False(t, healthy)
-	assert.Equal(t, "unhealthy", status["status"])
-	assert.Equal(t, 2, status["total_credentials"])
-	assert.Equal(t, 0, status["credentials_available"])
-	assert.Equal(t, 2, status["credentials_banned"])
+	assert.Equal(t, "unhealthy", status.Status)
+	assert.Equal(t, 2, status.TotalCredentials)
+	assert.Equal(t, 0, status.CredentialsAvailable)
+	assert.Equal(t, 2, status.CredentialsBanned)
 
 	// Check credentials info is present even when unhealthy
-	assert.Contains(t, status, "credentials")
-	credentialsInfo, ok := status["credentials"].(map[string]interface{})
-	assert.True(t, ok)
-	assert.Len(t, credentialsInfo, 2)
+	assert.NotNil(t, status.Credentials)
+	assert.Len(t, status.Credentials, 2)
 
 	// Check models info is present
-	assert.Contains(t, status, "models")
+	assert.NotNil(t, status.Models)
 }
 
 func TestHealthCheck_WithModels(t *testing.T) {
@@ -384,6 +349,7 @@ func TestHealthCheck_WithModels(t *testing.T) {
 	rl.AddModelWithTPM("test1", "gpt-4", 10, 30000)
 	rl.AddModelWithTPM("test1", "gpt-3.5-turbo", 20, 40000)
 	rl.AddModelWithTPM("test2", "gpt-4", 5, 15000)
+	rl.AddModelWithTPM("test2", "gpt-3.5-turbo", 15, 35000)
 
 	// Simulate some usage
 	rl.Allow("test1")
@@ -394,49 +360,47 @@ func TestHealthCheck_WithModels(t *testing.T) {
 	rl.ConsumeModelTokens("test1", "gpt-4", 2000)
 
 	metrics := monitoring.New(false)
-	tm := createTestTokenManager()
+	tm := createTestTokenManager(logger)
 	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key", rl, tm, mm, "test-version", "test-commit")
 
 	healthy, status := prx.HealthCheck()
 
 	assert.True(t, healthy)
-	assert.Equal(t, "healthy", status["status"])
+	assert.Equal(t, "healthy", status.Status)
 
 	// Check credentials info
-	credentialsInfo, ok := status["credentials"].(map[string]interface{})
-	assert.True(t, ok)
-	assert.Len(t, credentialsInfo, 2)
+	assert.NotNil(t, status.Credentials)
+	assert.Len(t, status.Credentials, 2)
 
 	// Check test1 credential details
-	test1Info, ok := credentialsInfo["test1"].(map[string]interface{})
+	test1Info, ok := status.Credentials["test1"]
 	assert.True(t, ok)
-	assert.Equal(t, 2, test1Info["current_rpm"])
-	assert.Equal(t, 5000, test1Info["current_tpm"])
-	assert.Equal(t, 100, test1Info["limit_rpm"])
-	assert.Equal(t, 100000, test1Info["limit_tpm"])
+	assert.Equal(t, 2, test1Info.CurrentRPM)
+	assert.Equal(t, 5000, test1Info.CurrentTPM)
+	assert.Equal(t, 100, test1Info.LimitRPM)
+	assert.Equal(t, 100000, test1Info.LimitTPM)
 
 	// Check models info
-	modelsInfo, ok := status["models"].(map[string]interface{})
-	assert.True(t, ok)
-	assert.Len(t, modelsInfo, 4) // 2 models × 2 credentials = 4 entries
+	assert.NotNil(t, status.Models)
+	assert.Len(t, status.Models, 4) // 2 models × 2 credentials = 4 entries
 
 	// Check test1:gpt-4 model details
-	gpt4Info, ok := modelsInfo["test1:gpt-4"].(map[string]interface{})
+	gpt4Info, ok := status.Models["test1:gpt-4"]
 	assert.True(t, ok)
-	assert.Equal(t, "test1", gpt4Info["credential"])
-	assert.Equal(t, "gpt-4", gpt4Info["model"])
-	assert.Equal(t, 1, gpt4Info["current_rpm"])    // 1 request made
-	assert.Equal(t, 2000, gpt4Info["current_tpm"]) // 2000 tokens consumed
-	assert.Equal(t, 10, gpt4Info["limit_rpm"])     // RPM limit
-	assert.Equal(t, 30000, gpt4Info["limit_tpm"])  // TPM limit
+	assert.Equal(t, "test1", gpt4Info.Credential)
+	assert.Equal(t, "gpt-4", gpt4Info.Model)
+	assert.Equal(t, 1, gpt4Info.CurrentRPM)    // 1 request made
+	assert.Equal(t, 2000, gpt4Info.CurrentTPM) // 2000 tokens consumed
+	assert.Equal(t, 10, gpt4Info.LimitRPM)     // RPM limit
+	assert.Equal(t, 30000, gpt4Info.LimitTPM)  // TPM limit
 
 	// Check test1:gpt-3.5-turbo model details
-	gpt35Info, ok := modelsInfo["test1:gpt-3.5-turbo"].(map[string]interface{})
+	gpt35Info, ok := status.Models["test1:gpt-3.5-turbo"]
 	assert.True(t, ok)
-	assert.Equal(t, "test1", gpt35Info["credential"])
-	assert.Equal(t, "gpt-3.5-turbo", gpt35Info["model"])
-	assert.Equal(t, 20, gpt35Info["limit_rpm"])    // RPM limit
-	assert.Equal(t, 40000, gpt35Info["limit_tpm"]) // TPM limit
+	assert.Equal(t, "test1", gpt35Info.Credential)
+	assert.Equal(t, "gpt-3.5-turbo", gpt35Info.Model)
+	assert.Equal(t, 20, gpt35Info.LimitRPM)    // RPM limit
+	assert.Equal(t, 40000, gpt35Info.LimitTPM) // TPM limit
 }
 
 func TestExtractModelFromBody(t *testing.T) {
@@ -688,11 +652,11 @@ func TestProxyRequest_HeadersForwarding(t *testing.T) {
 	}))
 	defer mockServer.Close()
 
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+	logger := createTestLogger()
 	bal, rl := createTestBalancer(mockServer.URL)
-	metrics := monitoring.New(false)
-	tm := createTestTokenManager()
-	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key", rl, tm, createTestModelManager(), "test-version", "test-commit")
+	metrics := createTestProxyMetrics()
+	tm := createTestTokenManager(logger)
+	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key", rl, tm, createTestModelManager(logger), "test-version", "test-commit")
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model": "gpt-4"}`))
 	req.Header.Set("Authorization", "Bearer master-key")
@@ -715,11 +679,11 @@ func TestProxyRequest_QueryParameters(t *testing.T) {
 	}))
 	defer mockServer.Close()
 
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+	logger := createTestLogger()
 	bal, rl := createTestBalancer(mockServer.URL)
-	metrics := monitoring.New(false)
-	tm := createTestTokenManager()
-	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key", rl, tm, createTestModelManager(), "test-version", "test-commit")
+	metrics := createTestProxyMetrics()
+	tm := createTestTokenManager(logger)
+	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key", rl, tm, createTestModelManager(logger), "test-version", "test-commit")
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions?param1=value1&param2=value2", strings.NewReader(`{"model": "gpt-4"}`))
 	req.Header.Set("Authorization", "Bearer master-key")
@@ -736,11 +700,11 @@ func TestVisualHealthCheck(t *testing.T) {
 	}))
 	defer mockServer.Close()
 
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+	logger := createTestLogger()
 	bal, rl := createTestBalancer(mockServer.URL)
-	metrics := monitoring.New(false)
-	tm := createTestTokenManager()
-	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key", rl, tm, createTestModelManager(), "test-version", "test-commit")
+	metrics := createTestProxyMetrics()
+	tm := createTestTokenManager(logger)
+	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key", rl, tm, createTestModelManager(logger), "test-version", "test-commit")
 
 	req := httptest.NewRequest("GET", "/vhealth", nil)
 	w := httptest.NewRecorder()

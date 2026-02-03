@@ -461,3 +461,189 @@ func TestNextForModel_EmptyModelID(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotNil(t, cred)
 }
+
+func TestNextFallbackForModel_Success(t *testing.T) {
+	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
+	rl := ratelimit.New()
+
+	credentials := []config.CredentialConfig{
+		{Name: "proxy1", Type: config.ProviderTypeProxy, IsFallback: true, RPM: 100, TPM: 10000},
+	}
+
+	bal := New(credentials, f2b, rl)
+
+	cred, err := bal.NextFallbackForModel("gpt-4o")
+
+	assert.NoError(t, err)
+	assert.NotNil(t, cred)
+	assert.Equal(t, "proxy1", cred.Name)
+	assert.True(t, cred.IsFallback)
+}
+
+func TestNextFallbackForModel_SkipsNonFallback(t *testing.T) {
+	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
+	rl := ratelimit.New()
+
+	credentials := []config.CredentialConfig{
+		{Name: "proxy1", Type: config.ProviderTypeProxy, IsFallback: false, RPM: 100, TPM: 10000},
+		{Name: "proxy2", Type: config.ProviderTypeProxy, IsFallback: true, RPM: 100, TPM: 10000},
+	}
+
+	bal := New(credentials, f2b, rl)
+
+	cred, err := bal.NextFallbackForModel("gpt-4o")
+
+	assert.NoError(t, err)
+	assert.Equal(t, "proxy2", cred.Name)
+	assert.True(t, cred.IsFallback)
+}
+
+func TestNextFallbackForModel_SkipsNonProxyTypes(t *testing.T) {
+	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
+	rl := ratelimit.New()
+
+	credentials := []config.CredentialConfig{
+		{Name: "openai1", Type: config.ProviderTypeOpenAI, IsFallback: true, RPM: 100, TPM: 10000},
+		{Name: "proxy1", Type: config.ProviderTypeProxy, IsFallback: true, RPM: 100, TPM: 10000},
+	}
+
+	bal := New(credentials, f2b, rl)
+
+	cred, err := bal.NextFallbackForModel("gpt-4o")
+
+	assert.NoError(t, err)
+	assert.Equal(t, "proxy1", cred.Name)
+	assert.Equal(t, config.ProviderTypeProxy, cred.Type)
+}
+
+func TestNextFallbackForModel_NoFallbacksAvailable(t *testing.T) {
+	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
+	rl := ratelimit.New()
+
+	credentials := []config.CredentialConfig{
+		{Name: "cred1", Type: config.ProviderTypeOpenAI, RPM: 100, TPM: 10000},
+	}
+
+	bal := New(credentials, f2b, rl)
+
+	cred, err := bal.NextFallbackForModel("gpt-4o")
+
+	assert.Error(t, err)
+	assert.Nil(t, cred)
+	assert.Equal(t, ErrNoCredentialsAvailable, err)
+}
+
+func TestNextFallbackForModel_SkipsBannedFallback(t *testing.T) {
+	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
+	rl := ratelimit.New()
+
+	credentials := []config.CredentialConfig{
+		{Name: "proxy1", Type: config.ProviderTypeProxy, IsFallback: true, RPM: 100, TPM: 10000},
+		{Name: "proxy2", Type: config.ProviderTypeProxy, IsFallback: true, RPM: 100, TPM: 10000},
+	}
+
+	bal := New(credentials, f2b, rl)
+
+	// Ban first proxy
+	bal.RecordResponse("proxy1", 500)
+	bal.RecordResponse("proxy1", 500)
+	bal.RecordResponse("proxy1", 500)
+
+	cred, err := bal.NextFallbackForModel("gpt-4o")
+
+	assert.NoError(t, err)
+	assert.Equal(t, "proxy2", cred.Name)
+}
+
+func TestNextFallbackForModel_RoundRobinFallbacks(t *testing.T) {
+	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
+	rl := ratelimit.New()
+
+	credentials := []config.CredentialConfig{
+		{Name: "proxy1", Type: config.ProviderTypeProxy, IsFallback: true, RPM: 100, TPM: 10000},
+		{Name: "proxy2", Type: config.ProviderTypeProxy, IsFallback: true, RPM: 100, TPM: 10000},
+		{Name: "openai1", Type: config.ProviderTypeOpenAI, RPM: 100, TPM: 10000},
+	}
+
+	bal := New(credentials, f2b, rl)
+
+	// First call should return proxy1
+	cred, err := bal.NextFallbackForModel("gpt-4o")
+	require.NoError(t, err)
+	assert.Equal(t, "proxy1", cred.Name)
+
+	// Second call should return proxy2
+	cred, err = bal.NextFallbackForModel("gpt-4o")
+	require.NoError(t, err)
+	assert.Equal(t, "proxy2", cred.Name)
+
+	// Third call should return proxy1 again (round robin)
+	cred, err = bal.NextFallbackForModel("gpt-4o")
+	require.NoError(t, err)
+	assert.Equal(t, "proxy1", cred.Name)
+}
+
+func TestNextFallbackForModel_RPMLimitExceeded(t *testing.T) {
+	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
+	rl := ratelimit.New()
+
+	credentials := []config.CredentialConfig{
+		{Name: "proxy1", Type: config.ProviderTypeProxy, IsFallback: true, RPM: 1, TPM: 10000},
+	}
+
+	bal := New(credentials, f2b, rl)
+
+	// First call succeeds
+	cred, err := bal.NextFallbackForModel("gpt-4o")
+	require.NoError(t, err)
+	assert.Equal(t, "proxy1", cred.Name)
+
+	// Second call should fail with rate limit exceeded
+	cred, err = bal.NextFallbackForModel("gpt-4o")
+	assert.Error(t, err)
+	assert.Nil(t, cred)
+	assert.Equal(t, ErrRateLimitExceeded, err)
+}
+
+func TestNextFallbackForModel_TPMLimitExceeded(t *testing.T) {
+	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
+	rl := ratelimit.New()
+
+	credentials := []config.CredentialConfig{
+		{Name: "proxy1", Type: config.ProviderTypeProxy, IsFallback: true, RPM: 100, TPM: 100},
+		{Name: "proxy2", Type: config.ProviderTypeProxy, IsFallback: true, RPM: 100, TPM: 100},
+	}
+
+	bal := New(credentials, f2b, rl)
+
+	// Consume TPM tokens to exceed the limit
+	rl.ConsumeTokens("proxy1", 100)
+	rl.ConsumeTokens("proxy2", 100)
+
+	// Both proxies should be exhausted
+	cred, err := bal.NextFallbackForModel("gpt-4o")
+	assert.Error(t, err)
+	assert.Nil(t, cred)
+	assert.Equal(t, ErrRateLimitExceeded, err)
+}
+
+func TestNextFallbackForModel_WithModelChecker(t *testing.T) {
+	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
+	rl := ratelimit.New()
+
+	credentials := []config.CredentialConfig{
+		{Name: "proxy1", Type: config.ProviderTypeProxy, IsFallback: true, RPM: 100, TPM: 10000},
+	}
+
+	bal := New(credentials, f2b, rl)
+
+	// Set model checker - should still return proxy (proxies ignore model checker)
+	mc := NewMockModelChecker(true)
+	mc.AddModel("proxy1", "gpt-4o")
+	bal.SetModelChecker(mc)
+
+	cred, err := bal.NextFallbackForModel("gpt-4o")
+
+	assert.NoError(t, err)
+	assert.Equal(t, "proxy1", cred.Name)
+}

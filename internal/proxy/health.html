@@ -46,6 +46,12 @@
         .summary-item { background: var(--card); padding: 1rem; border-radius: 8px; text-align: center; border: 1px solid var(--border); }
         .summary-value { font-size: 2rem; font-weight: bold; color: var(--accent); }
         .summary-label { font-size: 0.85rem; color: #b2bec3; margin-top: 0.5rem; }
+        .credential-badge { display: inline-block; padding: 0.3rem 0.6rem; border-radius: 4px; font-size: 0.75rem; font-weight: 600; margin-right: 0.5rem; margin-bottom: 0.5rem; }
+        .badge-proxy { background: #6c5ce7; color: white; }
+        .badge-openai { background: #00b894; color: white; }
+        .badge-vertex { background: #0984e3; color: white; }
+        .badge-anthropic { background: #fdcb6e; color: #2d3436; }
+        .badge-fallback { background: #ff7675; color: white; }
     </style>
 </head>
 <body>
@@ -81,27 +87,41 @@
         <div class="grid">
             {{ range $name, $cred := .credentials }}
             <div class="card">
-                <h3>{{ $name }}</h3>
+                <h3>
+                    {{ $name }}
+                    {{ if eq $cred.Type "proxy" }}
+                        <span class="credential-badge badge-proxy">PROXY</span>
+                        {{ if $cred.IsFallback }}
+                            <span class="credential-badge badge-fallback">FALLBACK</span>
+                        {{ end }}
+                    {{ else if eq $cred.Type "openai" }}
+                        <span class="credential-badge badge-openai">OPENAI</span>
+                    {{ else if eq $cred.Type "vertex-ai" }}
+                        <span class="credential-badge badge-vertex">VERTEX AI</span>
+                    {{ else if eq $cred.Type "anthropic" }}
+                        <span class="credential-badge badge-anthropic">ANTHROPIC</span>
+                    {{ end }}
+                </h3>
                 <div class="stat">
                     <span>RPM Usage:</span>
-                    <span>{{ $cred.current_rpm }} / {{ $cred.limit_rpm }}</span>
+                    <span>{{ $cred.CurrentRPM }} / {{ $cred.LimitRPM }}</span>
                 </div>
                 <div class="progress-bar">
                     {{ $rpmPercent := 0 }}
-                    {{ if gt $cred.limit_rpm 0 }}
-                        {{ $rpmPercent = div (mul $cred.current_rpm 100) $cred.limit_rpm }}
+                    {{ if gt $cred.LimitRPM 0 }}
+                        {{ $rpmPercent = div (mul $cred.CurrentRPM 100) $cred.LimitRPM }}
                     {{ end }}
                     <div class="progress-fill{{ if gt $rpmPercent 80 }} critical{{ else if gt $rpmPercent 60 }} high{{ end }}" style="width: {{ $rpmPercent }}%"></div>
                 </div>
 
                 <div class="stat" style="margin-top: 1rem;">
                     <span>TPM Usage:</span>
-                    <span>{{ $cred.current_tpm }} / {{ $cred.limit_tpm }}</span>
+                    <span>{{ $cred.CurrentTPM }} / {{ $cred.LimitTPM }}</span>
                 </div>
                 <div class="progress-bar">
                     {{ $tpmPercent := 0 }}
-                    {{ if gt $cred.limit_tpm 0 }}
-                        {{ $tpmPercent = div (mul $cred.current_tpm 100) $cred.limit_tpm }}
+                    {{ if gt $cred.LimitTPM 0 }}
+                        {{ $tpmPercent = div (mul $cred.CurrentTPM 100) $cred.LimitTPM }}
                     {{ end }}
                     <div class="progress-fill{{ if gt $tpmPercent 80 }} critical{{ else if gt $tpmPercent 60 }} high{{ end }}" style="width: {{ $tpmPercent }}%"></div>
                 </div>
@@ -120,25 +140,25 @@
             <div class="model-list" id="modelList">
                 {{ range $id, $model := .models }}
                 <div class="model-item"
-                     data-name="{{ $model.model }}"
-                     data-credential="{{ $model.credential }}"
-                     data-rpm="{{ $model.current_rpm }}"
-                     data-rpm-limit="{{ $model.limit_rpm }}"
-                     data-tpm="{{ $model.current_tpm }}"
-                     data-tpm-limit="{{ $model.limit_tpm }}">
+                     data-name="{{ $model.Model }}"
+                     data-credential="{{ $model.Credential }}"
+                     data-rpm="{{ $model.CurrentRPM }}"
+                     data-rpm-limit="{{ $model.LimitRPM }}"
+                     data-tpm="{{ $model.CurrentTPM }}"
+                     data-tpm-limit="{{ $model.LimitTPM }}">
                     <div>
-                        <div class="model-name">{{ $model.model }}</div>
-                        <div class="model-cred">Credential: {{ $model.credential }}</div>
+                        <div class="model-name">{{ $model.Model }}</div>
+                        <div class="model-cred">Credential: {{ $model.Credential }}</div>
                     </div>
                     <div class="model-stats">
                         <div class="model-stat">
                             <span class="model-stat-label">RPM Usage</span>
                             <div class="model-stat-usage">
-                                <span class="model-stat-value">{{ $model.current_rpm }}/{{ $model.limit_rpm }}</span>
+                                <span class="model-stat-value">{{ $model.CurrentRPM }}/{{ $model.LimitRPM }}</span>
                                 <div class="model-usage-bar">
                                     {{ $rpmPercent := 0 }}
-                                    {{ if gt $model.limit_rpm 0 }}
-                                        {{ $rpmPercent = div (mul $model.current_rpm 100) $model.limit_rpm }}
+                                    {{ if gt $model.LimitRPM 0 }}
+                                        {{ $rpmPercent = div (mul $model.CurrentRPM 100) $model.LimitRPM }}
                                     {{ end }}
                                     <div class="model-usage-fill{{ if gt $rpmPercent 80 }} critical{{ else if gt $rpmPercent 60 }} high{{ end }}" style="width: {{ $rpmPercent }}%"></div>
                                 </div>
@@ -147,11 +167,11 @@
                         <div class="model-stat">
                             <span class="model-stat-label">TPM Usage</span>
                             <div class="model-stat-usage">
-                                <span class="model-stat-value">{{ $model.current_tpm }}/{{ $model.limit_tpm }}</span>
+                                <span class="model-stat-value">{{ $model.CurrentTPM }}/{{ $model.LimitTPM }}</span>
                                 <div class="model-usage-bar">
                                     {{ $tpmPercent := 0 }}
-                                    {{ if gt $model.limit_tpm 0 }}
-                                        {{ $tpmPercent = div (mul $model.current_tpm 100) $model.limit_tpm }}
+                                    {{ if gt $model.LimitTPM 0 }}
+                                        {{ $tpmPercent = div (mul $model.CurrentTPM 100) $model.LimitTPM }}
                                     {{ end }}
                                     <div class="model-usage-fill{{ if gt $tpmPercent 80 }} critical{{ else if gt $tpmPercent 60 }} high{{ end }}" style="width: {{ $tpmPercent }}%"></div>
                                 </div>

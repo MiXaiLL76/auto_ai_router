@@ -235,3 +235,112 @@ func TestRealWorldScenario(t *testing.T) {
 		assert.False(t, manager.HasModel("vertex-claude", "non-existent-model"))
 	})
 }
+
+// TestSetCredentials tests setting credentials for remote model fetching
+func TestSetCredentials(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+	manager := New(logger, 100, []config.ModelRPMConfig{})
+
+	credentials := []config.CredentialConfig{
+		{Name: "cred1", Type: config.ProviderTypeOpenAI},
+		{Name: "cred2", Type: config.ProviderTypeProxy},
+		{Name: "cred3", Type: config.ProviderTypeVertexAI},
+	}
+
+	manager.SetCredentials(credentials)
+
+	// Verify credentials are stored
+	assert.Equal(t, credentials, manager.credentials)
+}
+
+// TestSetCredentials_Empty tests setting empty credentials
+func TestSetCredentials_Empty(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+	manager := New(logger, 100, []config.ModelRPMConfig{})
+
+	manager.SetCredentials([]config.CredentialConfig{})
+
+	// Verify empty credentials are set
+	assert.Equal(t, []config.CredentialConfig{}, manager.credentials)
+}
+
+// TestSetCredentials_Overwrite tests that SetCredentials overwrites previous credentials
+func TestSetCredentials_Overwrite(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+	manager := New(logger, 100, []config.ModelRPMConfig{})
+
+	// Set first batch
+	creds1 := []config.CredentialConfig{
+		{Name: "cred1", Type: config.ProviderTypeOpenAI},
+	}
+	manager.SetCredentials(creds1)
+	assert.Equal(t, creds1, manager.credentials)
+
+	// Overwrite with second batch
+	creds2 := []config.CredentialConfig{
+		{Name: "cred2", Type: config.ProviderTypeProxy},
+		{Name: "cred3", Type: config.ProviderTypeVertexAI},
+	}
+	manager.SetCredentials(creds2)
+	assert.Equal(t, creds2, manager.credentials)
+}
+
+// TestGetRemoteModels_NonProxyCredential returns nil for non-proxy credentials
+func TestGetRemoteModels_NonProxyCredential(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+	manager := New(logger, 100, []config.ModelRPMConfig{})
+
+	cred := &config.CredentialConfig{
+		Name: "openai-1",
+		Type: config.ProviderTypeOpenAI,
+	}
+
+	models := manager.GetRemoteModels(cred)
+
+	assert.Nil(t, models)
+}
+
+// TestGetRemoteModels_ProxyCredentialFail returns nil on fetch error
+func TestGetRemoteModels_ProxyCredentialFail(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+	manager := New(logger, 100, []config.ModelRPMConfig{})
+
+	cred := &config.CredentialConfig{
+		Name:    "proxy-1",
+		Type:    config.ProviderTypeProxy,
+		BaseURL: "http://invalid-url-that-does-not-exist.local",
+		APIKey:  "test-key",
+	}
+
+	models := manager.GetRemoteModels(cred)
+
+	// Should return nil on fetch error
+	assert.Nil(t, models)
+}
+
+// TestGetRemoteModels_ProxyCredentialWrongType returns nil for non-proxy types
+func TestGetRemoteModels_ProxyCredentialWrongType(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+	manager := New(logger, 100, []config.ModelRPMConfig{})
+
+	tests := []struct {
+		name string
+		typ  config.ProviderType
+	}{
+		{"OpenAI", config.ProviderTypeOpenAI},
+		{"VertexAI", config.ProviderTypeVertexAI},
+		{"Anthropic", config.ProviderTypeAnthropic},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cred := &config.CredentialConfig{
+				Name: "test",
+				Type: tt.typ,
+			}
+
+			models := manager.GetRemoteModels(cred)
+			assert.Nil(t, models)
+		})
+	}
+}

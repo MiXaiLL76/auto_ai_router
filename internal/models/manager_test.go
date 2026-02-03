@@ -378,3 +378,146 @@ func TestGetModelsForCredential_GlobalModelsOnly(t *testing.T) {
 	models2 := manager.GetModelsForCredential("test2")
 	assert.Equal(t, 2, len(models2))
 }
+
+func TestAddModel(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+	manager := New(logger, 100, []config.ModelRPMConfig{})
+
+	// Test adding a new model for a credential
+	manager.AddModel("gateway02", "gpt-oss-120b")
+
+	// Verify the model appears in credentialModels
+	models := manager.GetModelsForCredential("gateway02")
+	assert.Len(t, models, 1)
+	assert.Equal(t, "gpt-oss-120b", models[0].ID)
+
+	// Verify HasModel returns true
+	assert.True(t, manager.HasModel("gateway02", "gpt-oss-120b"))
+
+	// Test adding the same model again (should not duplicate)
+	manager.AddModel("gateway02", "gpt-oss-120b")
+	models = manager.GetModelsForCredential("gateway02")
+	assert.Len(t, models, 1, "Should not create duplicate model entry")
+}
+
+// TestConcurrentGetAllModels tests concurrent access to GetAllModels
+func TestConcurrentGetAllModels(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+
+	staticModels := []config.ModelRPMConfig{
+		{Name: "gpt-4", RPM: 100},
+		{Name: "gpt-3.5-turbo", RPM: 200},
+	}
+	manager := New(logger, 50, staticModels)
+
+	// Run concurrent reads
+	done := make(chan bool, 10)
+	for i := 0; i < 10; i++ {
+		go func() {
+			result := manager.GetAllModels()
+			assert.Equal(t, "list", result.Object)
+			assert.Equal(t, 2, len(result.Data))
+			done <- true
+		}()
+	}
+
+	// Wait for all goroutines
+	for i := 0; i < 10; i++ {
+		<-done
+	}
+}
+
+// TestConcurrentAddModelAndGetCredentialsForModel tests concurrent AddModel and GetCredentialsForModel
+func TestConcurrentAddModelAndGetCredentialsForModel(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+	manager := New(logger, 100, []config.ModelRPMConfig{})
+
+	done := make(chan bool, 20)
+
+	// 10 goroutines adding models
+	for i := 0; i < 10; i++ {
+		go func(idx int) {
+			modelName := "model-" + string(rune(idx+'0'))
+			manager.AddModel("cred1", modelName)
+			done <- true
+		}(i)
+	}
+
+	// 10 goroutines reading models
+	for i := 0; i < 10; i++ {
+		go func() {
+			creds := manager.GetCredentialsForModel("model-0")
+			_ = creds // Just check it doesn't panic
+			done <- true
+		}()
+	}
+
+	// Wait for all goroutines
+	for i := 0; i < 20; i++ {
+		<-done
+	}
+}
+
+// TestConcurrentSetCredentialsAndGetAllModels tests SetCredentials concurrent with GetAllModels
+func TestConcurrentSetCredentialsAndGetAllModels(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+	manager := New(logger, 100, []config.ModelRPMConfig{})
+
+	done := make(chan bool, 20)
+
+	// 10 goroutines setting credentials
+	for i := 0; i < 10; i++ {
+		go func() {
+			creds := []config.CredentialConfig{
+				{Name: "cred1"},
+				{Name: "cred2"},
+			}
+			manager.SetCredentials(creds)
+			done <- true
+		}()
+	}
+
+	// 10 goroutines calling GetAllModels
+	for i := 0; i < 10; i++ {
+		go func() {
+			_ = manager.GetAllModels()
+			done <- true
+		}()
+	}
+
+	// Wait for all goroutines
+	for i := 0; i < 20; i++ {
+		<-done
+	}
+}
+
+// TestConcurrentHasModelAndAddModel tests HasModel concurrent with AddModel
+func TestConcurrentHasModelAndAddModel(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+	manager := New(logger, 100, []config.ModelRPMConfig{})
+
+	done := make(chan bool, 20)
+
+	// 10 goroutines adding models
+	for i := 0; i < 10; i++ {
+		go func(idx int) {
+			modelName := "model-" + string(rune(idx+'0'))
+			manager.AddModel("cred1", modelName)
+			done <- true
+		}(i)
+	}
+
+	// 10 goroutines checking if models exist
+	for i := 0; i < 10; i++ {
+		go func(idx int) {
+			modelName := "model-" + string(rune(idx+'0'))
+			_ = manager.HasModel("cred1", modelName)
+			done <- true
+		}(i)
+	}
+
+	// Wait for all goroutines
+	for i := 0; i < 20; i++ {
+		<-done
+	}
+}

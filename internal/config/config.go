@@ -18,12 +18,13 @@ const (
 	ProviderTypeOpenAI    ProviderType = "openai"
 	ProviderTypeVertexAI  ProviderType = "vertex-ai"
 	ProviderTypeAnthropic ProviderType = "anthropic"
+	ProviderTypeProxy     ProviderType = "proxy"
 )
 
 // IsValid checks if the provider type is valid
 func (p ProviderType) IsValid() bool {
 	switch p {
-	case ProviderTypeOpenAI, ProviderTypeVertexAI, ProviderTypeAnthropic:
+	case ProviderTypeOpenAI, ProviderTypeVertexAI, ProviderTypeAnthropic, ProviderTypeProxy:
 		return true
 	}
 	return false
@@ -134,6 +135,9 @@ type CredentialConfig struct {
 	Location        string `yaml:"location,omitempty"`
 	CredentialsFile string `yaml:"credentials_file,omitempty"`
 	CredentialsJSON string `yaml:"credentials_json,omitempty"`
+
+	// Proxy specific field
+	IsFallback bool `yaml:"is_fallback,omitempty"`
 }
 
 // UnmarshalYAML implements custom unmarshaling for CredentialConfig with env variable support
@@ -150,6 +154,7 @@ func (c *CredentialConfig) UnmarshalYAML(value *yaml.Node) error {
 		Location        string `yaml:"location,omitempty"`
 		CredentialsFile string `yaml:"credentials_file,omitempty"`
 		CredentialsJSON string `yaml:"credentials_json,omitempty"`
+		IsFallback      string `yaml:"is_fallback,omitempty"`
 	}
 
 	var temp tempConfig
@@ -188,6 +193,14 @@ func (c *CredentialConfig) UnmarshalYAML(value *yaml.Node) error {
 		}
 	} else {
 		c.TPM = -1 // Default to unlimited
+	}
+
+	// Resolve and parse IsFallback
+	if temp.IsFallback != "" {
+		c.IsFallback, err = resolveEnvBool(temp.IsFallback, false)
+		if err != nil {
+			return fmt.Errorf("invalid is_fallback for credential '%s': %w", c.Name, err)
+		}
 	}
 
 	return nil
@@ -391,6 +404,11 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("invalid default_models_rpm: %d (must be -1 for unlimited or positive number)", c.Server.DefaultModelsRPM)
 	}
 
+	// Set default for health_check_path if not specified
+	if c.Monitoring.HealthCheckPath == "" {
+		c.Monitoring.HealthCheckPath = "/health"
+	}
+
 	if c.Fail2Ban.MaxAttempts <= 0 {
 		return fmt.Errorf("invalid max_attempts: %d", c.Fail2Ban.MaxAttempts)
 	}
@@ -406,11 +424,35 @@ func (c *Config) Validate() error {
 
 		// Validate provider type
 		if !cred.Type.IsValid() {
-			return fmt.Errorf("credential %s: invalid type: %s (must be 'openai' or 'vertex-ai')", cred.Name, cred.Type)
+			return fmt.Errorf("credential %s: invalid type: %s (must be 'openai', 'vertex-ai', 'anthropic', or 'proxy')", cred.Name, cred.Type)
 		}
 
-		// Vertex AI specific validation
-		if cred.Type == ProviderTypeVertexAI {
+		// IsFallback should only be true for proxy type
+		if cred.IsFallback && cred.Type != ProviderTypeProxy {
+			return fmt.Errorf("credential %s: is_fallback can only be true for proxy type", cred.Name)
+		}
+
+		// Validate by provider type
+		switch cred.Type {
+		case ProviderTypeProxy:
+			// base_url is required for proxy
+			if cred.BaseURL == "" {
+				return fmt.Errorf("credential %s: base_url is required for proxy type", cred.Name)
+			}
+			// Validate base_url is a valid URL
+			parsedURL, err := url.Parse(cred.BaseURL)
+			if err != nil {
+				return fmt.Errorf("credential %s: invalid base_url: %w", cred.Name, err)
+			}
+			if parsedURL.Scheme != "http" && parsedURL.Scheme != "https" {
+				return fmt.Errorf("credential %s: base_url must use http or https scheme, got: %s", cred.Name, parsedURL.Scheme)
+			}
+			if parsedURL.Host == "" {
+				return fmt.Errorf("credential %s: base_url must have a host", cred.Name)
+			}
+			// api_key is optional for proxy
+
+		case ProviderTypeVertexAI:
 			// For Vertex AI, project_id and location are required
 			if cred.ProjectID == "" {
 				return fmt.Errorf("credential %s: project_id is required for vertex-ai type", cred.Name)
@@ -423,8 +465,9 @@ func (c *Config) Validate() error {
 				return fmt.Errorf("credential %s: api_key, credentials_file, or credentials_json is required for vertex-ai type", cred.Name)
 			}
 			// base_url is optional for Vertex AI (will be constructed dynamically)
-		} else {
-			// For non-Vertex AI credentials, require APIKey and BaseURL
+
+		default:
+			// For OpenAI and Anthropic, require APIKey and BaseURL
 			if cred.APIKey == "" {
 				return fmt.Errorf("credential %s: api_key is required", cred.Name)
 			}

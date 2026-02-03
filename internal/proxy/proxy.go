@@ -25,6 +25,23 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/transform/vertex"
 )
 
+// hopByHopHeaders are headers that should not be proxied
+// See RFC 7230 Section 6.1
+var hopByHopHeaders = map[string]bool{
+	"Connection":          true,
+	"Keep-Alive":          true,
+	"Proxy-Authenticate":  true,
+	"Proxy-Authorization": true,
+	"TE":                  true,
+	"Trailers":            true,
+	"Transfer-Encoding":   true,
+	"Upgrade":             true,
+}
+
+// ResponseBodyMultiplier scales maxBodySizeMB for proxy response bodies.
+// Allows responses to be significantly larger than request bodies (e.g., large files, exports).
+const ResponseBodyMultiplier = 20
+
 //go:embed health.html
 var healthHTML string
 
@@ -98,6 +115,126 @@ func New(bal *balancer.RoundRobin, logger *slog.Logger, maxBodySizeMB int, reque
 	}
 }
 
+// isHopByHopHeader checks if a header should not be proxied
+func isHopByHopHeader(key string) bool {
+	return hopByHopHeaders[key]
+}
+
+// ProxyResponse holds response details from a proxy credential
+type ProxyResponse struct {
+	StatusCode int
+	Headers    http.Header
+	Body       []byte
+}
+
+// executeProxyRequest executes a request to a proxy credential and returns response details.
+// This is a private helper method to avoid code duplication between forwardToProxy and related functions.
+func (p *Proxy) executeProxyRequest(
+	r *http.Request,
+	cred *config.CredentialConfig,
+	body []byte,
+	start time.Time,
+) (*ProxyResponse, error) {
+	// Build target URL
+	proxyBaseURL := strings.TrimSuffix(cred.BaseURL, "/")
+	targetURL := proxyBaseURL + r.URL.Path
+	if r.URL.RawQuery != "" {
+		targetURL += "?" + r.URL.RawQuery
+	}
+
+	// Create proxy request
+	proxyReq, err := http.NewRequest(r.Method, targetURL, bytes.NewReader(body))
+	if err != nil {
+		p.logger.Error("Failed to create proxy request", "error", err, "url", targetURL)
+		return nil, err
+	}
+
+	// Copy headers (skip hop-by-hop headers)
+	for key, values := range r.Header {
+		if isHopByHopHeader(key) {
+			continue
+		}
+		if key == "Authorization" {
+			// Handle Authorization header: use credential API key if available, otherwise copy original
+			if cred.APIKey != "" {
+				proxyReq.Header.Set("Authorization", "Bearer "+cred.APIKey)
+			} else {
+				// Copy original Authorization header if no API key configured
+				for _, value := range values {
+					proxyReq.Header.Add(key, value)
+				}
+			}
+		} else {
+			for _, value := range values {
+				proxyReq.Header.Add(key, value)
+			}
+		}
+	}
+
+	// Send request
+	resp, err := p.client.Do(proxyReq)
+	if err != nil {
+		p.logger.Error("Failed to proxy request",
+			"credential", cred.Name,
+			"error", err,
+			"url", targetURL,
+		)
+		p.balancer.RecordResponse(cred.Name, http.StatusBadGateway)
+		p.metrics.RecordRequest(cred.Name, r.URL.Path, http.StatusBadGateway, time.Since(start))
+		return nil, err
+	}
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			p.logger.Error("Failed to close proxy response body", "error", closeErr)
+		}
+	}()
+
+	// Record response
+	p.balancer.RecordResponse(cred.Name, resp.StatusCode)
+	p.metrics.RecordRequest(cred.Name, r.URL.Path, resp.StatusCode, time.Since(start))
+
+	p.logger.Debug("Proxy request forwarded",
+		"credential", cred.Name,
+		"target_url", targetURL,
+		"status_code", resp.StatusCode,
+		"duration", time.Since(start),
+	)
+
+	// Read response body to set correct Content-Length
+	// Limit response body size: allow ResponseBodyMultiplier larger than request limit
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, int64(p.maxBodySizeMB)*ResponseBodyMultiplier*1024*1024))
+	if err != nil {
+		p.logger.Error("Failed to read proxy response body", "error", err)
+		return nil, err
+	}
+
+	// Return complete response information
+	return &ProxyResponse{
+		StatusCode: resp.StatusCode,
+		Headers:    resp.Header,
+		Body:       respBody,
+	}, nil
+}
+
+// forwardToProxy forwards a request to a proxy credential and returns response details.
+// This enables fallback retry logic at the caller level.
+//
+// Protection against infinite fallback recursion:
+// - The caller (main proxy handler or TryFallbackProxy) decides if fallback retry should be attempted
+// - This function does NOT perform fallback retry
+// - This ensures each credential (fallback or not) is tried only once per request chain
+// - Streaming responses are not retried (architectural limitation)
+func (p *Proxy) forwardToProxy(
+	w http.ResponseWriter,
+	r *http.Request,
+	modelID string,
+	cred *config.CredentialConfig,
+	body []byte,
+	start time.Time,
+) (*ProxyResponse, error) {
+	return p.executeProxyRequest(r, cred, body, start)
+}
+
 func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 
@@ -147,22 +284,32 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Two-stage credential selection
 	cred, err := p.balancer.NextForModel(modelID)
 	if err != nil {
-		err_code := http.StatusServiceUnavailable
-		err_line := "Service Unavailable"
-		if errors.Is(err, balancer.ErrRateLimitExceeded) {
-			err_code = http.StatusTooManyRequests
-			err_line = "Too Many Requests"
-		}
+		// First stage failed, attempt fallback proxy
+		// This includes rate limit errors - if primary credentials are exhausted,
+		// fallback credentials should be tried
+		fallbackErr := error(nil)
+		cred, fallbackErr = p.balancer.NextFallbackForModel(modelID)
 
-		credName := "<nil>"
-		if cred != nil {
-			credName = cred.Name
+		if fallbackErr != nil {
+			// Both stages failed
+			err_code := http.StatusServiceUnavailable
+			err_line := "Service Unavailable"
+			if errors.Is(err, balancer.ErrRateLimitExceeded) {
+				err_code = http.StatusTooManyRequests
+				err_line = "Too Many Requests"
+			}
+
+			p.logger.Error("No credentials available (regular and fallback)",
+				"model", modelID,
+				"primary_error", err,
+				"fallback_error", fallbackErr,
+			)
+			http.Error(w, err_line, err_code)
+			return
 		}
-		p.logger.Error("Failed to get credential", "error", err, "code", err_code, "cred", credName, "model", modelID)
-		http.Error(w, err_line, err_code)
-		return
 	}
 
 	// Log request details at DEBUG level
@@ -173,6 +320,81 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		"model", modelID,
 		"type", cred.Type,
 	)
+
+	// Handle proxy credential type with fallback retry support
+	if cred.Type == config.ProviderTypeProxy {
+		proxyResp, err := p.forwardToProxy(w, r, modelID, cred, body, start)
+		if err != nil {
+			// Network error
+			http.Error(w, "Bad Gateway", http.StatusBadGateway)
+			return
+		}
+
+		// Check if response is streaming (streaming responses don't support fallback retry)
+		isStreaming := IsStreamingResponse(&http.Response{
+			StatusCode: proxyResp.StatusCode,
+			Header:     proxyResp.Headers,
+		})
+
+		if isStreaming {
+			p.logger.Debug("Response is streaming (no fallback retry for streaming)",
+				"credential", cred.Name,
+				"status", proxyResp.StatusCode,
+			)
+		}
+
+		// Check if we should retry with fallback proxy
+		// - Only if credential is NOT already a fallback
+		// - Only if response is NOT streaming
+		var shouldRetry bool
+		var retryReason RetryReason
+		if !cred.IsFallback && !isStreaming {
+			shouldRetry, retryReason = ShouldRetryWithFallback(proxyResp.StatusCode, proxyResp.Body)
+		}
+
+		if shouldRetry {
+			p.logger.Info("Attempting fallback retry for proxy credential",
+				"credential", cred.Name,
+				"status", proxyResp.StatusCode,
+				"reason", retryReason,
+				"model", modelID,
+			)
+			// Try fallback - it will write response directly if successful
+			success, fallbackReason := p.TryFallbackProxy(w, r, modelID, cred.Name, proxyResp.StatusCode, retryReason, body, start)
+			if success {
+				return
+			}
+			// If fallback didn't work, continue with original response
+			p.logger.Debug("Fallback retry failed, using original response",
+				"credential", cred.Name,
+				"status", proxyResp.StatusCode,
+				"fallback_reason", fallbackReason,
+			)
+		}
+
+		// Write response headers
+		for key, values := range proxyResp.Headers {
+			if isHopByHopHeader(key) {
+				continue
+			}
+			// Skip Content-Length and Transfer-Encoding - we'll set them correctly
+			if key == "Content-Length" || key == "Transfer-Encoding" {
+				continue
+			}
+			for _, value := range values {
+				w.Header().Add(key, value)
+			}
+		}
+
+		// Set correct Content-Length for the actual response body
+		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(proxyResp.Body)))
+
+		w.WriteHeader(proxyResp.StatusCode)
+		if _, err := w.Write(proxyResp.Body); err != nil {
+			p.logger.Error("Failed to write proxy response body", "error", err)
+		}
+		return
+	}
 
 	// Build target URL based on credential type
 	var targetURL string
@@ -261,8 +483,9 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Copy headers (skip hop-by-hop headers and Authorization)
 	for key, values := range r.Header {
-		if key == "Authorization" {
+		if isHopByHopHeader(key) || key == "Authorization" {
 			continue
 		}
 		for _, value := range values {
@@ -350,6 +573,28 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			p.logger.Error("Failed to read response body", "error", err)
 			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 			return
+		}
+
+		// Check if we should retry with fallback proxy
+		shouldRetry, retryReason := ShouldRetryWithFallback(resp.StatusCode, responseBody)
+		if shouldRetry {
+			p.logger.Info("Attempting fallback retry",
+				"credential", cred.Name,
+				"status", resp.StatusCode,
+				"reason", retryReason,
+				"model", modelID,
+			)
+			// Try fallback - it will write response directly if successful
+			success, fallbackReason := p.TryFallbackProxy(w, r, modelID, cred.Name, resp.StatusCode, retryReason, body, start)
+			if success {
+				return
+			}
+			// If fallback didn't work, continue with original response
+			p.logger.Debug("Fallback retry failed, using original response",
+				"credential", cred.Name,
+				"status", resp.StatusCode,
+				"fallback_reason", fallbackReason,
+			)
 		}
 
 		// Decode the response body for logging (handles gzip, etc.)
@@ -450,8 +695,13 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		resp.Body = io.NopCloser(bytes.NewReader(finalResponseBody))
 	}
 
+	// Copy response headers (skip hop-by-hop headers and transformation-related headers)
 	for key, values := range resp.Header {
-		// Skip Content-Length and Content-Encoding as we may have vertexed the response
+		// Skip hop-by-hop headers
+		if isHopByHopHeader(key) {
+			continue
+		}
+		// Skip Content-Length and Content-Encoding as we may have transformed the response
 		switch cred.Type {
 		case config.ProviderTypeVertexAI, config.ProviderTypeAnthropic:
 			if key == "Content-Length" || key == "Content-Encoding" {
