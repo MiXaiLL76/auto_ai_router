@@ -1001,3 +1001,141 @@ func TestSetCredentialCurrentUsage_MultipleModels(t *testing.T) {
 	assert.Equal(t, 0, rl.GetCurrentModelRPM("cred1", "gpt-4"))
 	assert.Equal(t, 0, rl.GetCurrentModelRPM("cred1", "gpt-3.5"))
 }
+
+// TestConcurrentSetCredentialUsageAndAllow tests concurrent SetCredentialCurrentUsage and Allow
+func TestConcurrentSetCredentialUsageAndAllow(t *testing.T) {
+	rl := New()
+	rl.AddCredential("cred1", 1000)
+
+	done := make(chan bool, 20)
+
+	// 10 goroutines setting credential usage (from remote proxy updates)
+	for i := 0; i < 10; i++ {
+		go func() {
+			rl.SetCredentialCurrentUsage("cred1", 50, 5000)
+			done <- true
+		}()
+	}
+
+	// 10 goroutines making requests
+	for i := 0; i < 10; i++ {
+		go func() {
+			_ = rl.Allow("cred1")
+			done <- true
+		}()
+	}
+
+	// Wait for all goroutines
+	for i := 0; i < 20; i++ {
+		<-done
+	}
+
+	// Should not panic and system should be consistent
+	_ = rl.GetCurrentRPM("cred1")
+}
+
+// TestConcurrentSetModelUsageAndAllow tests concurrent SetModelCurrentUsage and AllowModel
+func TestConcurrentSetModelUsageAndAllow(t *testing.T) {
+	rl := New()
+	rl.AddModel("cred1", "gpt-4", 500)
+
+	done := make(chan bool, 20)
+
+	// 10 goroutines setting model usage
+	for i := 0; i < 10; i++ {
+		go func() {
+			rl.SetModelCurrentUsage("cred1", "gpt-4", 100, 10000)
+			done <- true
+		}()
+	}
+
+	// 10 goroutines making requests
+	for i := 0; i < 10; i++ {
+		go func() {
+			_ = rl.AllowModel("cred1", "gpt-4")
+			done <- true
+		}()
+	}
+
+	// Wait for all goroutines
+	for i := 0; i < 20; i++ {
+		<-done
+	}
+
+	// Should not panic and system should be consistent
+	_ = rl.GetCurrentModelRPM("cred1", "gpt-4")
+}
+
+// TestConcurrentMultipleCredentials tests concurrent operations on multiple credentials
+func TestConcurrentMultipleCredentials(t *testing.T) {
+	rl := New()
+
+	// Add multiple credentials
+	for i := 0; i < 5; i++ {
+		credName := "cred" + string(rune(i+'0'))
+		rl.AddCredential(credName, 100)
+	}
+
+	done := make(chan bool, 50)
+
+	// Concurrent operations on different credentials
+	for i := 0; i < 10; i++ {
+		for j := 0; j < 5; j++ {
+			credName := "cred" + string(rune(j+'0'))
+
+			// Allow request
+			go func(cred string) {
+				_ = rl.Allow(cred)
+				done <- true
+			}(credName)
+
+			// Get current RPM
+			go func(cred string) {
+				_ = rl.GetCurrentRPM(cred)
+				done <- true
+			}(credName)
+		}
+	}
+
+	// Wait for all goroutines
+	for i := 0; i < 100; i++ {
+		<-done
+	}
+}
+
+// TestConcurrentMultipleModels tests concurrent operations on multiple models for same credential
+func TestConcurrentMultipleModels(t *testing.T) {
+	rl := New()
+
+	// Add multiple models for same credential
+	for i := 0; i < 5; i++ {
+		modelName := "model-" + string(rune(i+'0'))
+		rl.AddModel("cred1", modelName, 100)
+	}
+
+	done := make(chan bool, 50)
+
+	// Concurrent operations on different models
+	for i := 0; i < 10; i++ {
+		for j := 0; j < 5; j++ {
+			modelName := "model-" + string(rune(j+'0'))
+
+			// Allow model request
+			go func(model string) {
+				_ = rl.AllowModel("cred1", model)
+				done <- true
+			}(modelName)
+
+			// Set model usage
+			go func(model string) {
+				rl.SetModelCurrentUsage("cred1", model, 50, 5000)
+				done <- true
+			}(modelName)
+		}
+	}
+
+	// Wait for all goroutines
+	for i := 0; i < 100; i++ {
+		<-done
+	}
+}

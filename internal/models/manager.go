@@ -211,9 +211,8 @@ func (m *Manager) LoadModelsFromConfig(credentials []config.CredentialConfig) {
 
 // GetAllModels returns all unique models across all credentials with caching
 func (m *Manager) GetAllModels() ModelsResponse {
+	// Check cache first (fast path without holding full lock)
 	m.mu.RLock()
-
-	// Check cache first (only return if cache is not empty and not expired)
 	if !m.allModelsCache.expiresAt.IsZero() && time.Now().Before(m.allModelsCache.expiresAt) {
 		defer m.mu.RUnlock()
 		m.logger.Debug("Returning cached all models",
@@ -253,6 +252,7 @@ func (m *Manager) GetAllModels() ModelsResponse {
 	m.mu.RUnlock()
 
 	// Add models from proxy credentials only (not from other provider types)
+	modelUpdates := make(map[string][]string) // model -> credentials to add
 	for _, cred := range credentials {
 		// Skip non-proxy credentials - we only fetch models from proxy credentials
 		if cred.Type != config.ProviderTypeProxy {
@@ -278,24 +278,7 @@ func (m *Manager) GetAllModels() ModelsResponse {
 				models = append(models, model)
 				modelMap[model.ID] = true
 				added++
-
-				// Mark this model as available for this proxy credential
-				m.mu.Lock()
-				if m.modelToCredentials[model.ID] == nil {
-					m.modelToCredentials[model.ID] = []string{}
-				}
-				// Only add if not already in list
-				found := false
-				for _, existingCred := range m.modelToCredentials[model.ID] {
-					if existingCred == cred.Name {
-						found = true
-						break
-					}
-				}
-				if !found {
-					m.modelToCredentials[model.ID] = append(m.modelToCredentials[model.ID], cred.Name)
-				}
-				m.mu.Unlock()
+				modelUpdates[model.ID] = append(modelUpdates[model.ID], cred.Name)
 			}
 		}
 		m.logger.Debug("Processed proxy models",
@@ -311,13 +294,35 @@ func (m *Manager) GetAllModels() ModelsResponse {
 		Data:   models,
 	}
 
-	// Cache the result for 3 seconds
+	// Update cache and modelToCredentials atomically
 	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	// Update modelToCredentials with new models
+	for modelID, creds := range modelUpdates {
+		if m.modelToCredentials[modelID] == nil {
+			m.modelToCredentials[modelID] = []string{}
+		}
+		// Add credentials that aren't already in the list
+		for _, cred := range creds {
+			found := false
+			for _, existing := range m.modelToCredentials[modelID] {
+				if existing == cred {
+					found = true
+					break
+				}
+			}
+			if !found {
+				m.modelToCredentials[modelID] = append(m.modelToCredentials[modelID], cred)
+			}
+		}
+	}
+
+	// Cache the result for 3 seconds
 	m.allModelsCache = allModelsCache{
 		response:  response,
 		expiresAt: time.Now().Add(3 * time.Second),
 	}
-	m.mu.Unlock()
 
 	return response
 }

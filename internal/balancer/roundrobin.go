@@ -2,6 +2,7 @@ package balancer
 
 import (
 	"errors"
+	"io"
 	"log/slog"
 	"sync"
 
@@ -48,7 +49,7 @@ func New(credentials []config.CredentialConfig, f2b *fail2ban.Fail2Ban, rl *rate
 		fail2ban:     f2b,
 		rateLimiter:  rl,
 		modelChecker: nil,
-		logger:       slog.New(slog.NewTextHandler(nil, nil)), // Default no-op logger
+		logger:       slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelInfo})),
 	}
 }
 

@@ -176,24 +176,14 @@ func main() {
 	// Start background proxy stats updater
 	// Fetches RPM/TPM limits from remote proxy /health endpoint
 	go func() {
-		// Helper function to update all proxy credentials
-		updateProxyCredentials := func() {
-			for _, cred := range bal.GetCredentials() {
-				if cred.Type == config.ProviderTypeProxy {
-					ctx := context.Background()
-					proxy.UpdateStatsFromRemoteProxy(ctx, &cred, rateLimiter, log, modelManager)
-				}
-			}
-		}
-
 		// Update immediately on startup
-		updateProxyCredentials()
+		updateAllProxyCredentials(bal, rateLimiter, log, modelManager)
 
-		// Then update periodically
+		// Then update periodically with staggered timing
 		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
 		for range ticker.C {
-			updateProxyCredentials()
+			updateAllProxyCredentials(bal, rateLimiter, log, modelManager)
 		}
 	}()
 	log.Info("Proxy stats updater started (updates every 30 seconds)")
@@ -264,6 +254,48 @@ func main() {
 	}
 
 	log.Info("Server shutdown complete")
+}
+
+// updateAllProxyCredentials updates all proxy credentials with staggered timing
+// to avoid thundering herd problem when multiple proxies are updated simultaneously
+func updateAllProxyCredentials(bal *balancer.RoundRobin, rateLimiter *ratelimit.RPMLimiter, log *slog.Logger, modelManager *models.Manager) {
+	credentials := bal.GetCredentials()
+	proxyCount := 0
+
+	// Count proxy credentials
+	for _, cred := range credentials {
+		if cred.Type == config.ProviderTypeProxy {
+			proxyCount++
+		}
+	}
+
+	if proxyCount == 0 {
+		return
+	}
+
+	// Stagger updates: distribute them evenly across the update interval
+	// For each proxy, calculate a small delay to spread requests
+	staggerDelay := 100 * time.Millisecond // Small delay between each proxy update
+	proxyIndex := 0
+
+	for _, cred := range credentials {
+		if cred.Type == config.ProviderTypeProxy {
+			// Create a copy of credential for closure (avoid loop variable capture)
+			credCopy := cred
+
+			// Use a small staggered delay to spread the requests
+			if proxyIndex > 0 {
+				time.Sleep(staggerDelay)
+			}
+
+			// Create context with timeout for this update
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			proxy.UpdateStatsFromRemoteProxy(ctx, &credCopy, rateLimiter, log, modelManager)
+			cancel()
+
+			proxyIndex++
+		}
+	}
 }
 
 // splitCredentialModel splits "credential:model" format into [credential, model]

@@ -25,6 +25,23 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/transform/vertex"
 )
 
+// hopByHopHeaders are headers that should not be proxied
+// See RFC 7230 Section 6.1
+var hopByHopHeaders = map[string]bool{
+	"Connection":          true,
+	"Keep-Alive":          true,
+	"Proxy-Authenticate":  true,
+	"Proxy-Authorization": true,
+	"TE":                  true,
+	"Trailers":            true,
+	"Transfer-Encoding":   true,
+	"Upgrade":             true,
+}
+
+// ResponseBodyMultiplier scales maxBodySizeMB for proxy response bodies.
+// Allows responses to be significantly larger than request bodies (e.g., large files, exports).
+const ResponseBodyMultiplier = 20
+
 //go:embed health.html
 var healthHTML string
 
@@ -98,6 +115,11 @@ func New(bal *balancer.RoundRobin, logger *slog.Logger, maxBodySizeMB int, reque
 	}
 }
 
+// isHopByHopHeader checks if a header should not be proxied
+func isHopByHopHeader(key string) bool {
+	return hopByHopHeaders[key]
+}
+
 func (p *Proxy) forwardToProxy(w http.ResponseWriter, r *http.Request, cred *config.CredentialConfig, body []byte) {
 	start := time.Now()
 
@@ -116,8 +138,11 @@ func (p *Proxy) forwardToProxy(w http.ResponseWriter, r *http.Request, cred *con
 		return
 	}
 
-	// Copy headers
+	// Copy headers (skip hop-by-hop headers and Authorization)
 	for key, values := range r.Header {
+		if isHopByHopHeader(key) {
+			continue
+		}
 		if key == "Authorization" {
 			// If proxy has api_key, use it for Authorization
 			if cred.APIKey != "" {
@@ -160,16 +185,37 @@ func (p *Proxy) forwardToProxy(w http.ResponseWriter, r *http.Request, cred *con
 		"duration", time.Since(start),
 	)
 
-	// Write response
+	// Write response headers (skip hop-by-hop headers)
+	// Remove Content-Length and Transfer-Encoding as we'll handle them explicitly
 	for key, values := range resp.Header {
+		if isHopByHopHeader(key) {
+			continue
+		}
+		// Skip Content-Length and Transfer-Encoding - we'll set them correctly
+		if key == "Content-Length" || key == "Transfer-Encoding" {
+			continue
+		}
 		for _, value := range values {
 			w.Header().Add(key, value)
 		}
 	}
+
+	// Read response body to set correct Content-Length
+	// Limit response body size: allow ResponseBodyMultiplier larger than request limit
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, int64(p.maxBodySizeMB)*ResponseBodyMultiplier*1024*1024))
+	if err != nil {
+		p.logger.Error("Failed to read proxy response body", "error", err)
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		return
+	}
+
+	// Set correct Content-Length for the actual response body
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(respBody)))
+
 	w.WriteHeader(resp.StatusCode)
 
-	if _, err := io.Copy(w, resp.Body); err != nil {
-		p.logger.Error("Failed to copy proxy response body", "error", err)
+	if _, err := w.Write(respBody); err != nil {
+		p.logger.Error("Failed to write proxy response body", "error", err)
 	}
 }
 
@@ -225,13 +271,13 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 	// Two-stage credential selection
 	cred, err := p.balancer.NextForModel(modelID)
 	if err != nil {
-		// First stage failed, try fallback proxy
-		if !errors.Is(err, balancer.ErrRateLimitExceeded) {
-			// Not rate limit - try fallback
-			cred, err = p.balancer.NextFallbackForModel(modelID)
-		}
+		// First stage failed, attempt fallback proxy
+		// This includes rate limit errors - if primary credentials are exhausted,
+		// fallback credentials should be tried
+		fallbackErr := error(nil)
+		cred, fallbackErr = p.balancer.NextFallbackForModel(modelID)
 
-		if err != nil {
+		if fallbackErr != nil {
 			// Both stages failed
 			err_code := http.StatusServiceUnavailable
 			err_line := "Service Unavailable"
@@ -242,7 +288,8 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 
 			p.logger.Error("No credentials available (regular and fallback)",
 				"model", modelID,
-				"error", err,
+				"primary_error", err,
+				"fallback_error", fallbackErr,
 			)
 			http.Error(w, err_line, err_code)
 			return
@@ -351,8 +398,9 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Copy headers (skip hop-by-hop headers and Authorization)
 	for key, values := range r.Header {
-		if key == "Authorization" {
+		if isHopByHopHeader(key) || key == "Authorization" {
 			continue
 		}
 		for _, value := range values {
@@ -562,8 +610,13 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		resp.Body = io.NopCloser(bytes.NewReader(finalResponseBody))
 	}
 
+	// Copy response headers (skip hop-by-hop headers and transformation-related headers)
 	for key, values := range resp.Header {
-		// Skip Content-Length and Content-Encoding as we may have vertexed the response
+		// Skip hop-by-hop headers
+		if isHopByHopHeader(key) {
+			continue
+		}
+		// Skip Content-Length and Content-Encoding as we may have transformed the response
 		switch cred.Type {
 		case config.ProviderTypeVertexAI, config.ProviderTypeAnthropic:
 			if key == "Content-Length" || key == "Content-Encoding" {

@@ -17,6 +17,7 @@ const defaultTimeout = 5 * time.Second
 
 // FetchFromProxy makes an HTTP GET request to a proxy credential
 // and returns the response body. Handles timeouts, auth headers, and error logging.
+// Note: caller should provide ctx with timeout if defaultTimeout is insufficient
 func FetchFromProxy(
 	ctx context.Context,
 	cred *config.CredentialConfig,
@@ -69,10 +70,11 @@ func FetchFromProxy(
 	// Check status code
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
+		preview := safeStringPreview(body, 200)
 		logger.Error("Proxy returned non-200 status",
 			"credential", cred.Name,
 			"status", resp.StatusCode,
-			"response_preview", string(body[:min(len(body), 200)]),
+			"response_preview", preview,
 		)
 		return nil, fmt.Errorf("proxy returned status %d", resp.StatusCode)
 	}
@@ -96,7 +98,7 @@ func FetchJSONFromProxy(
 	cred *config.CredentialConfig,
 	path string,
 	logger *slog.Logger,
-	v interface{},
+	v any,
 ) error {
 	body, err := FetchFromProxy(ctx, cred, path, logger)
 	if err != nil {
@@ -114,9 +116,22 @@ func FetchJSONFromProxy(
 	return nil
 }
 
-func min(a, b int) int {
-	if a < b {
-		return a
+// safeStringPreview safely converts bytes to string, handling non-UTF-8 data
+// Returns a safe preview of the data, replacing invalid UTF-8 sequences
+func safeStringPreview(data []byte, maxLen int) string {
+	if len(data) == 0 {
+		return ""
 	}
-	return b
+
+	if len(data) > maxLen {
+		data = data[:maxLen]
+	}
+
+	// Use fmt.Sprintf with %q to safely escape invalid UTF-8 sequences
+	// Then remove the surrounding quotes
+	escaped := fmt.Sprintf("%q", data)
+	if len(escaped) > 2 {
+		return escaped[1 : len(escaped)-1]
+	}
+	return escaped
 }
