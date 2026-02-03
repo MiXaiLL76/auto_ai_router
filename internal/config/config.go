@@ -55,10 +55,18 @@ type ServerConfig struct {
 	DefaultModelsRPM int           `yaml:"default_models_rpm"`
 }
 
+// ErrorCodeRuleConfig defines per-error-code ban rules
+type ErrorCodeRuleConfig struct {
+	Code        int    `yaml:"code"`
+	MaxAttempts int    `yaml:"max_attempts"`
+	BanDuration string `yaml:"ban_duration"`
+}
+
 type Fail2BanConfig struct {
-	MaxAttempts int           `yaml:"max_attempts"`
-	BanDuration time.Duration `yaml:"ban_duration"`
-	ErrorCodes  []int         `yaml:"error_codes"`
+	MaxAttempts    int                   `yaml:"max_attempts"`
+	BanDuration    time.Duration         `yaml:"ban_duration"`
+	ErrorCodes     []int                 `yaml:"error_codes"`
+	ErrorCodeRules []ErrorCodeRuleConfig `yaml:"error_code_rules,omitempty"`
 }
 
 // UnmarshalYAML implements custom unmarshaling for ServerConfig with env variable support
@@ -263,46 +271,55 @@ func resolveEnvString(value string) string {
 	return value
 }
 
-// resolveEnvInt resolves environment variable and converts to int
-func resolveEnvInt(value string, defaultValue int) (int, error) {
+// parseFunc is a function type that parses a string value into the desired type
+type parseFunc[T any] func(string) (T, error)
+
+// resolveEnvValue resolves environment variable and parses it using the provided parser
+func resolveEnvValue[T any](value string, defaultValue T, parser parseFunc[T], typeName string) (T, error) {
+	if value == "" {
+		return defaultValue, nil
+	}
+
 	resolved := resolveEnvString(value)
 	if resolved == value && value == "" {
 		return defaultValue, nil
 	}
 
-	intValue, err := strconv.Atoi(resolved)
+	parsed, err := parser(resolved)
 	if err != nil {
-		return defaultValue, fmt.Errorf("failed to parse int from '%s': %w", resolved, err)
+		return defaultValue, fmt.Errorf("failed to parse %s from '%s': %w", typeName, resolved, err)
 	}
-	return intValue, nil
+	return parsed, nil
+}
+
+// resolveEnvInt resolves environment variable and converts to int
+func resolveEnvInt(value string, defaultValue int) (int, error) {
+	return resolveEnvValue(value, defaultValue, strconv.Atoi, "int")
 }
 
 // resolveEnvBool resolves environment variable and converts to bool
 func resolveEnvBool(value string, defaultValue bool) (bool, error) {
-	resolved := resolveEnvString(value)
-	if resolved == value && value == "" {
-		return defaultValue, nil
-	}
-
-	boolValue, err := strconv.ParseBool(resolved)
-	if err != nil {
-		return defaultValue, fmt.Errorf("failed to parse bool from '%s': %w", resolved, err)
-	}
-	return boolValue, nil
+	return resolveEnvValue(value, defaultValue, strconv.ParseBool, "bool")
 }
 
 // resolveEnvDuration resolves environment variable and converts to duration
 func resolveEnvDuration(value string, defaultValue time.Duration) (time.Duration, error) {
-	resolved := resolveEnvString(value)
-	if resolved == value && value == "" {
-		return defaultValue, nil
-	}
+	return resolveEnvValue(value, defaultValue, time.ParseDuration, "duration")
+}
 
-	duration, err := time.ParseDuration(resolved)
+// validateBaseURL validates that a URL is properly formed with http/https scheme
+func validateBaseURL(credentialName, baseURL string) error {
+	parsedURL, err := url.Parse(baseURL)
 	if err != nil {
-		return defaultValue, fmt.Errorf("failed to parse duration from '%s': %w", resolved, err)
+		return fmt.Errorf("credential %s: invalid base_url: %w", credentialName, err)
 	}
-	return duration, nil
+	if parsedURL.Scheme != "http" && parsedURL.Scheme != "https" {
+		return fmt.Errorf("credential %s: base_url must use http or https scheme, got: %s", credentialName, parsedURL.Scheme)
+	}
+	if parsedURL.Host == "" {
+		return fmt.Errorf("credential %s: base_url must have a host", credentialName)
+	}
+	return nil
 }
 
 // UnmarshalYAML implements custom unmarshaling for Fail2BanConfig
@@ -377,7 +394,7 @@ func (c *Config) Validate() error {
 	}
 
 	// -1 means unlimited timeout
-	if c.Server.RequestTimeout <= 0 && c.Server.RequestTimeout != -1 {
+	if c.Server.RequestTimeout < 0 && c.Server.RequestTimeout != -1 {
 		return fmt.Errorf("invalid request_timeout: %v", c.Server.RequestTimeout)
 	}
 
@@ -417,6 +434,15 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("no credentials configured")
 	}
 
+	// Validate Fail2Ban error code rules for duplicates
+	seenErrorCodes := make(map[int]bool)
+	for _, rule := range c.Fail2Ban.ErrorCodeRules {
+		if seenErrorCodes[rule.Code] {
+			return fmt.Errorf("fail2ban: duplicate error_code_rules for code %d", rule.Code)
+		}
+		seenErrorCodes[rule.Code] = true
+	}
+
 	for i, cred := range c.Credentials {
 		if cred.Name == "" {
 			return fmt.Errorf("credential %d: name is required", i)
@@ -440,15 +466,8 @@ func (c *Config) Validate() error {
 				return fmt.Errorf("credential %s: base_url is required for proxy type", cred.Name)
 			}
 			// Validate base_url is a valid URL
-			parsedURL, err := url.Parse(cred.BaseURL)
-			if err != nil {
-				return fmt.Errorf("credential %s: invalid base_url: %w", cred.Name, err)
-			}
-			if parsedURL.Scheme != "http" && parsedURL.Scheme != "https" {
-				return fmt.Errorf("credential %s: base_url must use http or https scheme, got: %s", cred.Name, parsedURL.Scheme)
-			}
-			if parsedURL.Host == "" {
-				return fmt.Errorf("credential %s: base_url must have a host", cred.Name)
+			if err := validateBaseURL(cred.Name, cred.BaseURL); err != nil {
+				return err
 			}
 			// api_key is optional for proxy
 
@@ -464,6 +483,12 @@ func (c *Config) Validate() error {
 			if cred.APIKey == "" && cred.CredentialsFile == "" && cred.CredentialsJSON == "" {
 				return fmt.Errorf("credential %s: api_key, credentials_file, or credentials_json is required for vertex-ai type", cred.Name)
 			}
+			// Validate credentials_file exists if provided
+			if cred.CredentialsFile != "" {
+				if _, err := os.Stat(cred.CredentialsFile); err != nil {
+					return fmt.Errorf("credential %s: credentials_file does not exist or is not accessible: %w", cred.Name, err)
+				}
+			}
 			// base_url is optional for Vertex AI (will be constructed dynamically)
 
 		default:
@@ -475,20 +500,13 @@ func (c *Config) Validate() error {
 				return fmt.Errorf("credential %s: base_url is required", cred.Name)
 			}
 			// Validate base_url is a valid URL
-			parsedURL, err := url.Parse(cred.BaseURL)
-			if err != nil {
-				return fmt.Errorf("credential %s: invalid base_url: %w", cred.Name, err)
-			}
-			if parsedURL.Scheme != "http" && parsedURL.Scheme != "https" {
-				return fmt.Errorf("credential %s: base_url must use http or https scheme, got: %s", cred.Name, parsedURL.Scheme)
-			}
-			if parsedURL.Host == "" {
-				return fmt.Errorf("credential %s: base_url must have a host", cred.Name)
+			if err := validateBaseURL(cred.Name, cred.BaseURL); err != nil {
+				return err
 			}
 		}
 
 		// -1 means unlimited RPM
-		if cred.RPM <= 0 && cred.RPM != -1 {
+		if cred.RPM <= 0 && !isUnlimited(cred.RPM) {
 			return fmt.Errorf("credential %s: invalid rpm: %d (must be -1 for unlimited or positive number)", cred.Name, cred.RPM)
 		}
 		// TPM: 0 or -1 means unlimited, positive means limited
@@ -498,4 +516,9 @@ func (c *Config) Validate() error {
 	}
 
 	return nil
+}
+
+// isUnlimited checks if a value represents unlimited (-1)
+func isUnlimited(value int) bool {
+	return value == -1
 }

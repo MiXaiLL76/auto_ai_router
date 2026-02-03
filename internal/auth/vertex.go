@@ -7,19 +7,42 @@ import (
 	"log/slog"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
 )
 
+// tokenRefreshRequest represents a request to refresh a token
+type tokenRefreshRequest struct {
+	credentialName  string
+	credentialsFile string
+	credentialsJSON string
+	responseChan    chan tokenRefreshResponse
+}
+
+// tokenRefreshResponse represents a response to a refresh request
+type tokenRefreshResponse struct {
+	token string
+	err   error
+}
+
 // VertexTokenManager manages OAuth2 tokens for Vertex AI credentials
 type VertexTokenManager struct {
-	mu           sync.RWMutex
-	tokens       map[string]*cachedToken
-	credentials  map[string][]byte // Cache for credentials
-	logger       *slog.Logger
-	tokenRefresh time.Duration
+	mu                  sync.RWMutex
+	tokens              map[string]*cachedToken
+	credentials         map[string][]byte // Cache for credentials
+	logger              *slog.Logger
+	tokenRefresh        time.Duration
+	tokenRefreshTimeout time.Duration // Timeout for token refresh operations
+	refreshRequests     chan tokenRefreshRequest
+	stopChan            chan struct{}
+	stopOnce            sync.Once
+	stopped             atomic.Bool
+	refreshing          map[string][]chan tokenRefreshResponse // Coalescing waiting requests
+	refreshingMu        sync.Mutex
+	wg                  sync.WaitGroup // Track active refresh operations
 }
 
 // cachedToken represents a cached OAuth2 token with expiry
@@ -31,33 +54,188 @@ type cachedToken struct {
 
 // NewVertexTokenManager creates a new token manager
 func NewVertexTokenManager(logger *slog.Logger) *VertexTokenManager {
-	return &VertexTokenManager{
-		tokens:       make(map[string]*cachedToken),
-		credentials:  make(map[string][]byte),
-		logger:       logger,
-		tokenRefresh: 5 * time.Minute, // Refresh 5 minutes before expiry
+	tm := &VertexTokenManager{
+		tokens:              make(map[string]*cachedToken),
+		credentials:         make(map[string][]byte),
+		logger:              logger,
+		tokenRefresh:        5 * time.Minute,  // Refresh 5 minutes before expiry
+		tokenRefreshTimeout: 30 * time.Second, // Default timeout for refresh operations
+		refreshRequests:     make(chan tokenRefreshRequest, 100),
+		stopChan:            make(chan struct{}),
+		refreshing:          make(map[string][]chan tokenRefreshResponse),
+	}
+	tm.wg.Add(1)
+	go tm.refreshWorker()
+	return tm
+}
+
+// GetToken returns a valid OAuth2 token for the given credential.
+// It loads credentials from file or JSON string and caches the token.
+//
+// Token acquisition uses a two-path strategy:
+//   - Fast path: Returns cached token if still valid (not expiring within tokenRefresh window)
+//   - Slow path: If refresh needed, coalesces concurrent requests to avoid redundant API calls
+//
+// Coalescing strategy:
+// Multiple concurrent callers requesting the same credential will be grouped together.
+// The first caller sends the refresh request to the worker goroutine via refreshRequests channel.
+// Subsequent callers within the same refresh window are added to refreshing[credentialName] slice
+// and their response channels are batched together. When the worker completes the refresh,
+// it sends the same response to all waiting channels in the batch.
+// This avoids thundering herd scenarios where hundreds of goroutines would independently
+// attempt to refresh the same token.
+//
+// Response channel buffering: Each response channel has a buffer size of 1, which allows
+// the worker to send responses non-blocking. If a waiter has already given up due to timeout,
+// the response will still be sent but go unread.
+func (tm *VertexTokenManager) GetToken(credentialName, credentialsFile, credentialsJSON string) (string, error) {
+	if tm.stopped.Load() {
+		return "", fmt.Errorf("token manager is stopped")
+	}
+
+	// Fast path: check if we have a valid cached token (read-only)
+	tm.mu.RLock()
+	if cached, exists := tm.tokens[credentialName]; exists {
+		if time.Now().Before(cached.expiresAt.Add(-tm.tokenRefresh)) {
+			token := cached.token.AccessToken
+			tm.mu.RUnlock()
+			return token, nil
+		}
+	}
+	tm.mu.RUnlock()
+
+	// Slow path: need to refresh or create token
+	// Coalesce concurrent refresh requests
+	// IMPORTANT: Lock ordering is critical to avoid deadlock:
+	// Always acquire mu lock BEFORE refreshingMu lock
+	tm.mu.RLock()
+
+	// Double-check cache to prevent race condition: cache may have been updated
+	// after our first check and before acquiring this lock
+	if cached, exists := tm.tokens[credentialName]; exists {
+		if time.Now().Before(cached.expiresAt.Add(-tm.tokenRefresh)) {
+			token := cached.token.AccessToken
+			tm.mu.RUnlock()
+			return token, nil
+		}
+	}
+	tm.mu.RUnlock()
+
+	// Only allocate channel if we actually need to refresh (avoids allocation pressure)
+	responseChan := make(chan tokenRefreshResponse, 1)
+
+	ctx, cancel := context.WithTimeout(context.Background(), tm.tokenRefreshTimeout)
+	defer cancel()
+
+	tm.refreshingMu.Lock()
+	waitingChans, isRefreshing := tm.refreshing[credentialName]
+	if !isRefreshing {
+		// First request - send to worker
+		tm.refreshing[credentialName] = []chan tokenRefreshResponse{responseChan}
+		tm.refreshingMu.Unlock()
+
+		req := tokenRefreshRequest{
+			credentialName:  credentialName,
+			credentialsFile: credentialsFile,
+			credentialsJSON: credentialsJSON,
+			responseChan:    responseChan,
+		}
+		select {
+		case tm.refreshRequests <- req:
+		case <-ctx.Done():
+			tm.removeWaitingChan(credentialName, responseChan)
+			return "", fmt.Errorf("token refresh timeout")
+		}
+	} else {
+		// Coalesce with existing refresh
+		tm.refreshing[credentialName] = append(waitingChans, responseChan)
+		tm.refreshingMu.Unlock()
+	}
+
+	// Wait for response with timeout
+	select {
+	case resp := <-responseChan:
+		return resp.token, resp.err
+	case <-ctx.Done():
+		return "", fmt.Errorf("token refresh timeout")
 	}
 }
 
-// GetToken returns a valid OAuth2 token for the given credential
-// It loads credentials from file or JSON string and caches the token
-func (tm *VertexTokenManager) GetToken(credentialName, credentialsFile, credentialsJSON string) (string, error) {
-	tm.mu.Lock()
-	defer tm.mu.Unlock()
-
-	// Check if we have a valid cached token
-	if cached, exists := tm.tokens[credentialName]; exists {
-		// If token is still valid (not expired and has buffer time), return it
-		if time.Now().Before(cached.expiresAt.Add(-tm.tokenRefresh)) {
-			return cached.token.AccessToken, nil
+// refreshWorker is a background goroutine that handles token refresh requests
+// It spawns a goroutine per request to allow parallel refresh of different credentials
+// Coalescing ensures only one refresh per credential at a time
+func (tm *VertexTokenManager) refreshWorker() {
+	defer tm.wg.Done()
+	for {
+		select {
+		case <-tm.stopChan:
+			return
+		case req, ok := <-tm.refreshRequests:
+			if !ok {
+				return
+			}
+			tm.wg.Add(1)
+			// Process each request in a separate goroutine to allow parallel refresh
+			// of different credentials while coalescing maintains single refresh per credential
+			go func(r tokenRefreshRequest) {
+				defer tm.wg.Done()
+				tm.processRefreshRequest(r)
+			}(req)
 		}
+	}
+}
 
-		// Token is expired or about to expire, refresh it
-		return tm.refreshToken(credentialName, cached)
+// processRefreshRequest handles a single refresh request and notifies all coalesced waiters
+func (tm *VertexTokenManager) processRefreshRequest(req tokenRefreshRequest) {
+	var token string
+	var err error
+
+	// Check if token exists and needs refresh
+	tm.mu.RLock()
+	cached, exists := tm.tokens[req.credentialName]
+	tm.mu.RUnlock()
+	if exists {
+		// Token exists, refresh it
+		token, err = tm.refreshToken(req.credentialName, cached)
+		// If refresh fails, try to create a new token immediately instead of returning error
+		if err != nil {
+			tm.mu.Lock()
+			delete(tm.tokens, req.credentialName)
+			tm.mu.Unlock()
+			token, err = tm.createNewToken(req.credentialName, req.credentialsFile, req.credentialsJSON)
+		}
+	} else {
+		// No cached token, create a new one
+		token, err = tm.createNewToken(req.credentialName, req.credentialsFile, req.credentialsJSON)
 	}
 
-	// No cached token, create a new one
-	return tm.createNewToken(credentialName, credentialsFile, credentialsJSON)
+	// Send response to all waiting goroutines
+	tm.refreshingMu.Lock()
+	waitingChans, exists := tm.refreshing[req.credentialName]
+	delete(tm.refreshing, req.credentialName)
+	tm.refreshingMu.Unlock()
+
+	if exists {
+		resp := tokenRefreshResponse{token: token, err: err}
+		failedCount := 0
+		for _, ch := range waitingChans {
+			select {
+			case ch <- resp:
+			default:
+				// Channel send failed - this can happen if the waiter gave up after timeout
+				// before this response was ready. With a buffered channel of size 1, the
+				// only way this occurs is if the receiver has already closed or abandoned the channel.
+				failedCount++
+			}
+		}
+		if failedCount > 0 {
+			tm.logger.Debug("Failed to send token refresh responses",
+				"credential", req.credentialName,
+				"failed_count", failedCount,
+				"total_waiters", len(waitingChans),
+			)
+		}
+	}
 }
 
 func (tm *VertexTokenManager) refreshToken(credentialName string, cached *cachedToken) (string, error) {
@@ -66,20 +244,16 @@ func (tm *VertexTokenManager) refreshToken(credentialName string, cached *cached
 		"expires_at", cached.expiresAt,
 	)
 
-	newToken, err := cached.tokenSource.Token()
+	newToken, err := tm.tokenFromSource(credentialName, "refresh", cached.tokenSource)
 	if err != nil {
-		tm.logger.Error("Failed to refresh Vertex AI token",
-			"credential", credentialName,
-			"error", err,
-		)
-		// Remove invalid token from cache
-		delete(tm.tokens, credentialName)
-		return "", fmt.Errorf("failed to refresh token: %w", err)
+		return "", err
 	}
 
 	// Update cached token
+	tm.mu.Lock()
 	cached.token = newToken
 	cached.expiresAt = newToken.Expiry
+	tm.mu.Unlock()
 	tm.logger.Info("Vertex AI token refreshed",
 		"credential", credentialName,
 		"expires_at", newToken.Expiry,
@@ -117,17 +291,19 @@ func (tm *VertexTokenManager) createNewToken(credentialName, credentialsFile, cr
 	}
 
 	// Get initial token
-	token, err := creds.TokenSource.Token()
+	token, err := tm.tokenFromSource(credentialName, "get initial", creds.TokenSource)
 	if err != nil {
-		return "", fmt.Errorf("failed to get initial token: %w", err)
+		return "", err
 	}
 
 	// Cache the token
+	tm.mu.Lock()
 	tm.tokens[credentialName] = &cachedToken{
 		token:       token,
 		tokenSource: creds.TokenSource,
 		expiresAt:   token.Expiry,
 	}
+	tm.mu.Unlock()
 
 	tm.logger.Info("Vertex AI token created",
 		"credential", credentialName,
@@ -137,12 +313,28 @@ func (tm *VertexTokenManager) createNewToken(credentialName, credentialsFile, cr
 	return token.AccessToken, nil
 }
 
+func (tm *VertexTokenManager) tokenFromSource(credentialName, action string, source oauth2.TokenSource) (*oauth2.Token, error) {
+	token, err := source.Token()
+	if err != nil {
+		tm.logger.Error("Failed to "+action+" Vertex AI token",
+			"credential", credentialName,
+			"error", err,
+		)
+		return nil, fmt.Errorf("failed to %s token: %w", action, err)
+	}
+
+	return token, nil
+}
+
 func (tm *VertexTokenManager) loadCredentials(credentialName, credentialsFile, credentialsJSON string) ([]byte, error) {
 	// Check if credentials are cached
+	tm.mu.RLock()
 	if cached, exists := tm.credentials[credentialName]; exists {
+		tm.mu.RUnlock()
 		tm.logger.Debug("Using cached credentials", "credential", credentialName)
 		return cached, nil
 	}
+	tm.mu.RUnlock()
 
 	var credBytes []byte
 	var err error
@@ -165,7 +357,13 @@ func (tm *VertexTokenManager) loadCredentials(credentialName, credentialsFile, c
 	}
 
 	// Cache the credentials
+	tm.mu.Lock()
+	if cached, exists := tm.credentials[credentialName]; exists {
+		tm.mu.Unlock()
+		return cached, nil
+	}
 	tm.credentials[credentialName] = credBytes
+	tm.mu.Unlock()
 	return credBytes, nil
 }
 
@@ -185,4 +383,68 @@ func (tm *VertexTokenManager) GetTokenExpiry(credentialName string) (time.Time, 
 		return cached.expiresAt, true
 	}
 	return time.Time{}, false
+}
+
+// Stop gracefully stops the token manager and its worker goroutine
+func (tm *VertexTokenManager) Stop() {
+	tm.stopOnce.Do(func() {
+		tm.stopped.Store(true)
+		close(tm.stopChan)
+		tm.failAllWaiters(fmt.Errorf("token manager is stopped"))
+	})
+	tm.wg.Wait() // Wait for all active refresh operations to complete
+}
+
+func (tm *VertexTokenManager) failAllWaiters(err error) {
+	tm.refreshingMu.Lock()
+	waiting := tm.refreshing
+	tm.refreshing = make(map[string][]chan tokenRefreshResponse)
+	tm.refreshingMu.Unlock()
+
+	if len(waiting) == 0 {
+		return
+	}
+
+	resp := tokenRefreshResponse{token: "", err: err}
+	failedCount := 0
+	totalWaiters := 0
+	for _, chans := range waiting {
+		for _, ch := range chans {
+			totalWaiters++
+			select {
+			case ch <- resp:
+			default:
+				failedCount++
+			}
+		}
+	}
+	if failedCount > 0 {
+		tm.logger.Debug("Failed to send stop responses to token waiters",
+			"failed_count", failedCount,
+			"total_waiters", totalWaiters,
+		)
+	}
+}
+
+func (tm *VertexTokenManager) removeWaitingChan(credentialName string, responseChan chan tokenRefreshResponse) {
+	tm.refreshingMu.Lock()
+	defer tm.refreshingMu.Unlock()
+
+	waitingChans, exists := tm.refreshing[credentialName]
+	if !exists {
+		return
+	}
+
+	for i := range waitingChans {
+		if waitingChans[i] == responseChan {
+			waitingChans = append(waitingChans[:i], waitingChans[i+1:]...)
+			break
+		}
+	}
+
+	if len(waitingChans) == 0 {
+		delete(tm.refreshing, credentialName)
+		return
+	}
+	tm.refreshing[credentialName] = waitingChans
 }

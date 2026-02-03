@@ -7,6 +7,7 @@ import (
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/anthropics/anthropic-sdk-go/shared/constant"
+	"github.com/mixaill76/auto_ai_router/internal/transform/common"
 	"github.com/mixaill76/auto_ai_router/internal/transform/openai"
 )
 
@@ -289,24 +290,11 @@ func convertOpenAIToolCallsToAnthropic(contentBlocks []anthropic.ContentBlockPar
 }
 
 func extractTextContent(content interface{}) string {
-	switch c := content.(type) {
-	case string:
-		return c
-	case []interface{}:
-		var parts []string
-		for _, block := range c {
-			if blockMap, ok := block.(map[string]interface{}); ok {
-				if blockMap["type"] == "text" {
-					if text, ok := blockMap["text"].(string); ok {
-						parts = append(parts, text)
-					}
-				}
-			}
-		}
-		return strings.Join(parts, "\n")
-	default:
+	parts := common.ExtractTextBlocks(content)
+	if len(parts) == 0 {
 		return ""
 	}
+	return strings.Join(parts, "\n")
 }
 
 func convertOpenAIContentToAnthropic(content interface{}) []anthropic.ContentBlockParamUnion {
@@ -343,8 +331,10 @@ func convertOpenAIContentToAnthropic(content interface{}) []anthropic.ContentBlo
 					})
 				}
 			case "image_url":
-				if imageBlock, ok := convertImageURLToSDK(part); ok {
-					blocks = append(blocks, imageBlock)
+				if url, ok := extractImageURLFromPart(part); ok {
+					if imageBlock, ok := convertImageURLToSDK(url); ok {
+						blocks = append(blocks, imageBlock)
+					}
 				}
 			}
 		}
@@ -353,17 +343,21 @@ func convertOpenAIContentToAnthropic(content interface{}) []anthropic.ContentBlo
 	return blocks
 }
 
-func convertImageURLToSDK(part map[string]interface{}) (anthropic.ContentBlockParamUnion, bool) {
+func extractImageURLFromPart(part map[string]interface{}) (string, bool) {
 	urlObj, ok := part["image_url"].(map[string]interface{})
 	if !ok {
-		return anthropic.ContentBlockParamUnion{}, false
+		return "", false
 	}
 
 	url, _ := urlObj["url"].(string)
 	if url == "" {
-		return anthropic.ContentBlockParamUnion{}, false
+		return "", false
 	}
 
+	return url, true
+}
+
+func convertImageURLToSDK(url string) (anthropic.ContentBlockParamUnion, bool) {
 	if strings.HasPrefix(url, "data:") {
 		return convertDataURLToSDK(url)
 	}
@@ -411,13 +405,13 @@ func convertDataURLToSDK(dataURL string) (anthropic.ContentBlockParamUnion, bool
 
 func parseMediaType(header string) string {
 	// Extract media type from header like "data:image/jpeg;base64"
-	if strings.Contains(header, "image/png") {
-		return "image/png"
-	} else if strings.Contains(header, "image/gif") {
-		return "image/gif"
-	} else if strings.Contains(header, "image/webp") {
-		return "image/webp"
-	} else if strings.Contains(header, "image/") {
+	known := []string{"image/png", "image/gif", "image/webp"}
+	for _, mt := range known {
+		if strings.Contains(header, mt) {
+			return mt
+		}
+	}
+	if strings.Contains(header, "image/") {
 		start := strings.Index(header, "image/")
 		if start >= 0 {
 			end := strings.IndexAny(header[start:], ";")

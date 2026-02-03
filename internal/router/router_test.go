@@ -40,7 +40,19 @@ func createTestProxy() *proxy.Proxy {
 	metrics := monitoring.New(false)
 	tokenManager := auth.NewVertexTokenManager(logger)
 
-	return proxy.New(bal, logger, 10, 30*time.Second, metrics, "test-master-key", rl, tokenManager, createTestModelManager(), "test-version", "test-commit")
+	return proxy.New(&proxy.Config{
+		Balancer:       bal,
+		Logger:         logger,
+		MaxBodySizeMB:  10,
+		RequestTimeout: 30 * time.Second,
+		Metrics:        metrics,
+		MasterKey:      "test-master-key",
+		RateLimiter:    rl,
+		TokenManager:   tokenManager,
+		ModelManager:   createTestModelManager(),
+		Version:        "test-version",
+		Commit:         "test-commit",
+	})
 }
 
 // createTestModelManager creates a test model manager instance (disabled - no static models)
@@ -75,7 +87,19 @@ func createProxyWithConfig(credentials []config.CredentialConfig, bannedCreds []
 
 	metrics := monitoring.New(false)
 	tm := auth.NewVertexTokenManager(logger)
-	return proxy.New(bal, logger, 10, 30*time.Second, metrics, "test-key", rl, tm, createTestModelManager(), "test-version", "test-commit")
+	return proxy.New(&proxy.Config{
+		Balancer:       bal,
+		Logger:         logger,
+		MaxBodySizeMB:  10,
+		RequestTimeout: 30 * time.Second,
+		Metrics:        metrics,
+		MasterKey:      "test-key",
+		RateLimiter:    rl,
+		TokenManager:   tm,
+		ModelManager:   createTestModelManager(),
+		Version:        "test-version",
+		Commit:         "test-commit",
+	})
 }
 
 // createProxyWithMockServer creates a proxy configured with a mock server URL
@@ -95,7 +119,19 @@ func createProxyWithMockServer(mockServerURL string) *proxy.Proxy {
 	bal := balancer.New(credentials, f2b, rl)
 	metrics := monitoring.New(false)
 	tm := auth.NewVertexTokenManager(logger)
-	return proxy.New(bal, logger, 10, 30*time.Second, metrics, "test-key", rl, tm, createTestModelManager(), "test-version", "test-commit")
+	return proxy.New(&proxy.Config{
+		Balancer:       bal,
+		Logger:         logger,
+		MaxBodySizeMB:  10,
+		RequestTimeout: 30 * time.Second,
+		Metrics:        metrics,
+		MasterKey:      "test-key",
+		RateLimiter:    rl,
+		TokenManager:   tm,
+		ModelManager:   createTestModelManager(),
+		Version:        "test-version",
+		Commit:         "test-commit",
+	})
 }
 
 // createTestMonitoringConfig creates a test monitoring config

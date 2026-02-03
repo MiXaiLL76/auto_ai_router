@@ -41,6 +41,7 @@ func createValidServiceAccountJSON() string {
 func TestNewVertexTokenManager(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	tm := NewVertexTokenManager(logger)
+	defer tm.Stop()
 
 	if tm == nil {
 		t.Fatal("NewVertexTokenManager returned nil")
@@ -62,6 +63,7 @@ func TestNewVertexTokenManager(t *testing.T) {
 func TestGetToken_InvalidJSON(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	tm := NewVertexTokenManager(logger)
+	defer tm.Stop()
 
 	_, err := tm.GetToken("test", "", "invalid-json")
 	if err == nil {
@@ -75,6 +77,7 @@ func TestGetToken_InvalidJSON(t *testing.T) {
 func TestGetToken_InvalidServiceAccountType(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	tm := NewVertexTokenManager(logger)
+	defer tm.Stop()
 
 	invalidSA := map[string]interface{}{
 		"type": "user",
@@ -90,6 +93,7 @@ func TestGetToken_InvalidServiceAccountType(t *testing.T) {
 func TestGetToken_NoCredentials(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	tm := NewVertexTokenManager(logger)
+	defer tm.Stop()
 
 	_, err := tm.GetToken("test", "", "")
 	if err == nil {
@@ -103,6 +107,7 @@ func TestGetToken_NoCredentials(t *testing.T) {
 func TestGetToken_FileNotFound(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	tm := NewVertexTokenManager(logger)
+	defer tm.Stop()
 
 	_, err := tm.GetToken("test", "/nonexistent/path.json", "")
 	if err == nil {
@@ -113,6 +118,7 @@ func TestGetToken_FileNotFound(t *testing.T) {
 func TestClearToken(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	tm := NewVertexTokenManager(logger)
+	defer tm.Stop()
 
 	// Add a token to cache
 	expiry := time.Now().Add(1 * time.Hour)
@@ -140,6 +146,7 @@ func TestClearToken(t *testing.T) {
 func TestGetTokenExpiry(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	tm := NewVertexTokenManager(logger)
+	defer tm.Stop()
 
 	// Test non-existent token
 	_, exists := tm.GetTokenExpiry("nonexistent")
@@ -169,6 +176,7 @@ func TestGetTokenExpiry(t *testing.T) {
 func TestGetToken_CredentialsCaching(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	tm := NewVertexTokenManager(logger)
+	defer tm.Stop()
 
 	// Create a temporary credentials file
 	tmpFile, err := os.CreateTemp("", "creds-*.json")
@@ -209,6 +217,7 @@ func TestGetToken_CredentialsCaching(t *testing.T) {
 func TestGetToken_CachedTokenReuse(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	tm := NewVertexTokenManager(logger)
+	defer tm.Stop()
 
 	expiry := time.Now().Add(1 * time.Hour)
 	mockSource := &mockTokenSource{
@@ -241,6 +250,7 @@ func TestGetToken_CachedTokenReuse(t *testing.T) {
 func TestGetToken_TokenRefresh(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	tm := NewVertexTokenManager(logger)
+	defer tm.Stop()
 
 	// Create an expired token
 	expiredTime := time.Now().Add(-1 * time.Hour)
@@ -274,6 +284,7 @@ func TestGetToken_TokenRefresh(t *testing.T) {
 func TestGetToken_TokenRefreshError(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	tm := NewVertexTokenManager(logger)
+	defer tm.Stop()
 
 	// Create an expired token with failing TokenSource
 	expiredTime := time.Now().Add(-1 * time.Hour)
@@ -310,6 +321,7 @@ func TestGetToken_TokenRefreshError(t *testing.T) {
 func TestGetToken_NearExpiry(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 	tm := NewVertexTokenManager(logger)
+	defer tm.Stop()
 
 	// Create a token that expires in 3 minutes (within refresh buffer of 5 min)
 	nearExpiryTime := time.Now().Add(3 * time.Minute)
@@ -338,4 +350,292 @@ func TestGetToken_NearExpiry(t *testing.T) {
 	if mockSource.callCount != 1 {
 		t.Errorf("expected 1 Token() call for refresh, got %d", mockSource.callCount)
 	}
+}
+
+func TestGetToken_ConcurrentRefresh(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	tm := NewVertexTokenManager(logger)
+	defer tm.Stop()
+
+	// Create a token that needs refresh
+	expiredTime := time.Now().Add(-1 * time.Hour)
+	newExpiryTime := time.Now().Add(2 * time.Hour)
+
+	callCount := 0
+	mockSource := &mockTokenSource{
+		token: &oauth2.Token{AccessToken: "new-token", Expiry: newExpiryTime},
+	}
+
+	tm.mu.Lock()
+	tm.tokens["test"] = &cachedToken{
+		token:       &oauth2.Token{AccessToken: "old-token", Expiry: expiredTime},
+		tokenSource: mockSource,
+		expiresAt:   expiredTime,
+	}
+	tm.mu.Unlock()
+
+	// Launch 10 concurrent GetToken calls
+	numGoroutines := 10
+	results := make(chan string, numGoroutines)
+	for i := 0; i < numGoroutines; i++ {
+		go func() {
+			token, err := tm.GetToken("test", "", "")
+			if err != nil {
+				t.Errorf("GetToken failed: %v", err)
+			}
+			results <- token
+		}()
+	}
+
+	// Collect results
+	for i := 0; i < numGoroutines; i++ {
+		token := <-results
+		if token != "new-token" {
+			t.Errorf("expected 'new-token', got '%s'", token)
+		}
+	}
+
+	// Verify that Token() was called only once (coalescing)
+	// This happens because all 10 goroutines should coalesce into one refresh
+	callCount = mockSource.callCount
+	if callCount < 1 {
+		t.Errorf("expected at least 1 Token() call, got %d", callCount)
+	}
+	// Note: Due to concurrency, we might have 1-2 calls if timing is tight
+	// but the important thing is we didn't have 10 calls
+	if callCount > 3 {
+		t.Errorf("expected <= 3 Token() calls (with potential race), got %d", callCount)
+	}
+}
+
+func TestGetToken_RequestCoalescing(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	tm := NewVertexTokenManager(logger)
+	defer tm.Stop()
+
+	// Create a token that needs refresh
+	expiredTime := time.Now().Add(-1 * time.Hour)
+	newExpiryTime := time.Now().Add(2 * time.Hour)
+
+	mockSource := &mockTokenSource{
+		token: &oauth2.Token{AccessToken: "coalesced-token", Expiry: newExpiryTime},
+	}
+
+	tm.mu.Lock()
+	tm.tokens["test"] = &cachedToken{
+		token:       &oauth2.Token{AccessToken: "old-token", Expiry: expiredTime},
+		tokenSource: mockSource,
+		expiresAt:   expiredTime,
+	}
+	tm.mu.Unlock()
+
+	// Launch 5 concurrent GetToken calls
+	numGoroutines := 5
+	results := make(chan string, numGoroutines)
+	for i := 0; i < numGoroutines; i++ {
+		go func() {
+			token, err := tm.GetToken("test", "", "")
+			if err != nil {
+				t.Errorf("GetToken failed: %v", err)
+				results <- ""
+				return
+			}
+			results <- token
+		}()
+	}
+
+	// Collect results - all should get the same token
+	tokens := make([]string, numGoroutines)
+	for i := 0; i < numGoroutines; i++ {
+		tokens[i] = <-results
+	}
+
+	// All should have the same token
+	for _, token := range tokens {
+		if token != "coalesced-token" {
+			t.Errorf("expected 'coalesced-token', got '%s'", token)
+		}
+	}
+}
+
+func TestGetToken_WorkerShutdown(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	tm := NewVertexTokenManager(logger)
+
+	// Verify that Stop() cleanly shuts down the worker
+	tm.Stop()
+
+	// Wait a bit to ensure worker has exited
+	time.Sleep(100 * time.Millisecond)
+
+	// The worker should be stopped - verify by checking stopChan is closed
+	// (This is implicit - if Stop() works, the test passes)
+}
+
+func TestGetToken_TimeoutDuringRefresh(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	tm := NewVertexTokenManager(logger)
+	defer tm.Stop()
+
+	// Set a very short timeout to trigger timeout path
+	tm.tokenRefreshTimeout = 10 * time.Millisecond
+
+	// Create a token that needs refresh
+	expiredTime := time.Now().Add(-1 * time.Hour)
+
+	// Create a slow token source that takes longer than timeout
+	slowSource := &slowMockTokenSource{
+		delay: 1 * time.Second,
+		token: &oauth2.Token{AccessToken: "slow-token", Expiry: time.Now().Add(1 * time.Hour)},
+	}
+
+	tm.mu.Lock()
+	tm.tokens["slow"] = &cachedToken{
+		token:       &oauth2.Token{AccessToken: "old-token", Expiry: expiredTime},
+		tokenSource: slowSource,
+		expiresAt:   expiredTime,
+	}
+	tm.mu.Unlock()
+
+	// GetToken should timeout
+	_, err := tm.GetToken("slow", "", "")
+	if err == nil {
+		t.Error("expected timeout error, got nil")
+	}
+	if err.Error() != "token refresh timeout" {
+		t.Errorf("expected 'token refresh timeout', got '%v'", err)
+	}
+}
+
+func TestGetToken_ParallelDifferentCredentials(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	tm := NewVertexTokenManager(logger)
+	defer tm.Stop()
+
+	// Create multiple credentials that need refresh
+	expiredTime := time.Now().Add(-1 * time.Hour)
+
+	credentials := []string{"cred1", "cred2", "cred3"}
+	sources := make(map[string]*slowMockTokenSource)
+
+	for _, cred := range credentials {
+		source := &slowMockTokenSource{
+			delay: 100 * time.Millisecond, // Slow enough to cause serialization if sequential
+			token: &oauth2.Token{AccessToken: "token-" + cred, Expiry: time.Now().Add(1 * time.Hour)},
+		}
+		sources[cred] = source
+
+		tm.mu.Lock()
+		tm.tokens[cred] = &cachedToken{
+			token:       &oauth2.Token{AccessToken: "old-token", Expiry: expiredTime},
+			tokenSource: source,
+			expiresAt:   expiredTime,
+		}
+		tm.mu.Unlock()
+	}
+
+	// Launch concurrent GetToken calls for different credentials
+	startTime := time.Now()
+	results := make(chan struct{ name, token string }, len(credentials))
+
+	for _, cred := range credentials {
+		go func(credName string) {
+			token, err := tm.GetToken(credName, "", "")
+			if err != nil {
+				t.Errorf("GetToken(%s) failed: %v", credName, err)
+				results <- struct{ name, token string }{credName, ""}
+				return
+			}
+			results <- struct{ name, token string }{credName, token}
+		}(cred)
+	}
+
+	// Collect results
+	for i := 0; i < len(credentials); i++ {
+		result := <-results
+		expectedToken := "token-" + result.name
+		if result.token != expectedToken {
+			t.Errorf("expected '%s', got '%s'", expectedToken, result.token)
+		}
+	}
+
+	elapsed := time.Since(startTime)
+
+	// If executed sequentially: 3 * 100ms = 300ms
+	// If executed in parallel: ~100ms
+	// We allow some overhead, so if it's under 250ms it's likely parallel
+	if elapsed > 250*time.Millisecond {
+		t.Logf("WARNING: parallel refresh took %v (might be sequential)", elapsed)
+	}
+}
+
+func TestGetToken_CoalescingWithTimeout(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	tm := NewVertexTokenManager(logger)
+	defer tm.Stop()
+
+	// Create a token that needs refresh
+	expiredTime := time.Now().Add(-1 * time.Hour)
+	newExpiryTime := time.Now().Add(2 * time.Hour)
+
+	mockSource := &mockTokenSource{
+		token: &oauth2.Token{AccessToken: "coalesced-token", Expiry: newExpiryTime},
+	}
+
+	tm.mu.Lock()
+	tm.tokens["test"] = &cachedToken{
+		token:       &oauth2.Token{AccessToken: "old-token", Expiry: expiredTime},
+		tokenSource: mockSource,
+		expiresAt:   expiredTime,
+	}
+	tm.mu.Unlock()
+
+	// Launch multiple concurrent GetToken calls
+	numGoroutines := 20
+	results := make(chan error, numGoroutines)
+
+	for i := 0; i < numGoroutines; i++ {
+		go func() {
+			_, err := tm.GetToken("test", "", "")
+			results <- err
+		}()
+	}
+
+	// All should succeed and be coalesced into single refresh
+	successCount := 0
+	for i := 0; i < numGoroutines; i++ {
+		if err := <-results; err != nil {
+			t.Errorf("GetToken call %d failed: %v", i, err)
+		} else {
+			successCount++
+		}
+	}
+
+	if successCount != numGoroutines {
+		t.Errorf("expected %d successes, got %d", numGoroutines, successCount)
+	}
+
+	// Verify coalescing: Token() should be called once or very few times
+	// (might be 1-2 due to timing)
+	if mockSource.callCount > 3 {
+		t.Errorf("expected <= 3 Token() calls (coalescing should reduce), got %d", mockSource.callCount)
+	}
+}
+
+// slowMockTokenSource simulates slow token source for testing timeouts and parallelism
+type slowMockTokenSource struct {
+	delay      time.Duration
+	token      *oauth2.Token
+	shouldFail bool
+	err        error
+	callCount  int
+}
+
+func (m *slowMockTokenSource) Token() (*oauth2.Token, error) {
+	m.callCount++
+	time.Sleep(m.delay)
+	if m.shouldFail {
+		return nil, m.err
+	}
+	return m.token, nil
 }

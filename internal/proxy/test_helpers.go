@@ -35,6 +35,24 @@ func createTestLogger() *slog.Logger {
 // Infrastructure Helpers (Metrics, TokenManager, ModelManager)
 // ============================================================================
 
+// createProxyWithParams is a helper to create a proxy with parameters for testing.
+// Used in tests that directly call New() instead of using TestProxyBuilder.
+func createProxyWithParams(bal *balancer.RoundRobin, logger *slog.Logger, maxBodySizeMB int, requestTimeout time.Duration, metrics *monitoring.Metrics, masterKey string, rl *ratelimit.RPMLimiter, tm *auth.VertexTokenManager, mm *models.Manager, version, commit string) *Proxy {
+	return New(&Config{
+		Balancer:       bal,
+		Logger:         logger,
+		MaxBodySizeMB:  maxBodySizeMB,
+		RequestTimeout: requestTimeout,
+		Metrics:        metrics,
+		MasterKey:      masterKey,
+		RateLimiter:    rl,
+		TokenManager:   tm,
+		ModelManager:   mm,
+		Version:        version,
+		Commit:         commit,
+	})
+}
+
 // createTestProxyMetrics creates a metrics instance for testing.
 func createTestProxyMetrics() *monitoring.Metrics {
 	return monitoring.New(false)
@@ -224,19 +242,19 @@ func (b *TestProxyBuilder) Build() *Proxy {
 		b.config.Balancer = balancer.New(b.config.Credentials, f2b, b.config.RateLimiter)
 	}
 
-	return New(
-		b.config.Balancer,
-		b.config.Logger,
-		b.config.MaxBodySizeMB,
-		b.config.RequestTimeout,
-		b.config.Metrics,
-		b.config.MasterKey,
-		b.config.RateLimiter,
-		b.config.TokenManager,
-		b.config.ModelManager,
-		b.config.Version,
-		b.config.Commit,
-	)
+	return New(&Config{
+		Balancer:       b.config.Balancer,
+		Logger:         b.config.Logger,
+		MaxBodySizeMB:  b.config.MaxBodySizeMB,
+		RequestTimeout: b.config.RequestTimeout,
+		Metrics:        b.config.Metrics,
+		MasterKey:      b.config.MasterKey,
+		RateLimiter:    b.config.RateLimiter,
+		TokenManager:   b.config.TokenManager,
+		ModelManager:   b.config.ModelManager,
+		Version:        b.config.Version,
+		Commit:         b.config.Commit,
+	})
 }
 
 // ============================================================================

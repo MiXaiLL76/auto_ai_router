@@ -6,9 +6,60 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"strings"
+	"sync"
 	"time"
 )
+
+// errorLogFileCache holds a cached file handle for error logging
+type errorLogFileCache struct {
+	mu      sync.Mutex
+	handles map[string]*logFileHandle
+}
+
+var logFileCache = &errorLogFileCache{
+	handles: make(map[string]*logFileHandle),
+}
+
+type logFileHandle struct {
+	file *os.File
+	mu   sync.Mutex
+}
+
+// getOrCreateLogFile returns a cached file handle or creates a new one
+func (c *errorLogFileCache) getOrCreate(path string) (*logFileHandle, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if file, exists := c.handles[path]; exists {
+		return file, nil
+	}
+
+	file, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return nil, err
+	}
+	handle := &logFileHandle{file: file}
+	c.handles[path] = handle
+	return handle, nil
+}
+
+func (c *errorLogFileCache) closeAll() error {
+	c.mu.Lock()
+	handles := c.handles
+	c.handles = make(map[string]*logFileHandle)
+	c.mu.Unlock()
+
+	var firstErr error
+	for _, handle := range handles {
+		handle.mu.Lock()
+		err := handle.file.Close()
+		handle.mu.Unlock()
+		if err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
 
 // responseCapture captures response status and body for logging
 type responseCapture struct {
@@ -117,17 +168,21 @@ func logErrorResponse(errorsLogPath string, req *http.Request, rc *responseCaptu
 		return err
 	}
 
-	// Append to log file with newline
-	file, err := os.OpenFile(errorsLogPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	// Get or create cached file handle
+	file, err := logFileCache.getOrCreate(errorsLogPath)
 	if err != nil {
 		return err
 	}
-	defer func() {
-		_ = file.Close()
-	}()
 
-	_, err = file.Write(append(entryJSON, '\n'))
+	file.mu.Lock()
+	_, err = file.file.Write(append(entryJSON, '\n'))
+	file.mu.Unlock()
 	return err
+}
+
+// CloseErrorLogFiles closes any cached error log file handles.
+func CloseErrorLogFiles() error {
+	return logFileCache.closeAll()
 }
 
 // isErrorStatus checks if status code is an error (4xx or 5xx)
@@ -146,14 +201,34 @@ func captureRequestBody(req *http.Request) ([]byte, error) {
 		return nil, err
 	}
 
-	// Check if body contains "stream" substring
-	if strings.Contains(string(body), "stream") {
+	// Check if this is a streaming request by parsing "stream": true in JSON
+	if isStreamingRequestBody(body) {
 		// Restore body before returning error so original request can be proxied
 		req.Body = io.NopCloser(bytes.NewReader(body))
-		return nil, http.ErrBodyNotAllowed
+		// Return io.EOF instead of ErrBodyNotAllowed for streaming requests
+		return body, nil
 	}
 
 	// Restore body for further processing
 	req.Body = io.NopCloser(bytes.NewReader(body))
 	return body, nil
+}
+
+func isStreamingRequestBody(body []byte) bool {
+	var payload map[string]json.RawMessage
+	if err := json.Unmarshal(body, &payload); err != nil {
+		return false
+	}
+
+	streamRaw, ok := payload["stream"]
+	if !ok {
+		return false
+	}
+
+	var stream bool
+	if err := json.Unmarshal(streamRaw, &stream); err != nil {
+		return false
+	}
+
+	return stream
 }

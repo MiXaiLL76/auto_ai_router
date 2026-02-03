@@ -122,7 +122,7 @@ func TestFallbackPath_PrimaryReturns429(t *testing.T) {
 	metrics := monitoring.New(false)
 	tm := auth.NewVertexTokenManager(logger)
 	mm := models.New(logger, 50, []config.ModelRPMConfig{})
-	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key", rl, tm, mm, "test-version", "test-commit")
+	prx := createProxyWithParams(bal, logger, 10, 30*time.Second, metrics, "master-key", rl, tm, mm, "test-version", "test-commit")
 
 	// Make request
 	reqBody := `{"model": "gpt-4", "messages": [{"role": "user", "content": "Hello"}]}`
@@ -202,7 +202,7 @@ func TestFallbackPath_PrimaryReturns500(t *testing.T) {
 	metrics := monitoring.New(false)
 	tm := auth.NewVertexTokenManager(logger)
 	mm := models.New(logger, 50, []config.ModelRPMConfig{})
-	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key", rl, tm, mm, "test-version", "test-commit")
+	prx := createProxyWithParams(bal, logger, 10, 30*time.Second, metrics, "master-key", rl, tm, mm, "test-version", "test-commit")
 
 	reqBody := `{"model": "gpt-4", "messages": [{"role": "user", "content": "Test"}]}`
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(reqBody))
@@ -256,7 +256,7 @@ func TestFallbackPath_NoFallbackAvailable(t *testing.T) {
 	metrics := monitoring.New(false)
 	tm := auth.NewVertexTokenManager(logger)
 	mm := models.New(logger, 50, []config.ModelRPMConfig{})
-	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key", rl, tm, mm, "test-version", "test-commit")
+	prx := createProxyWithParams(bal, logger, 10, 30*time.Second, metrics, "master-key", rl, tm, mm, "test-version", "test-commit")
 
 	reqBody := `{"model": "gpt-4", "messages": [{"role": "user", "content": "Test"}]}`
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(reqBody))
@@ -324,7 +324,7 @@ func TestFallbackPath_FallbackAlsoFails(t *testing.T) {
 	metrics := monitoring.New(false)
 	tm := auth.NewVertexTokenManager(logger)
 	mm := models.New(logger, 50, []config.ModelRPMConfig{})
-	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key", rl, tm, mm, "test-version", "test-commit")
+	prx := createProxyWithParams(bal, logger, 10, 30*time.Second, metrics, "master-key", rl, tm, mm, "test-version", "test-commit")
 
 	reqBody := `{"model": "gpt-4", "messages": [{"role": "user", "content": "Test"}]}`
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(reqBody))
@@ -392,7 +392,7 @@ func TestFallbackPath_NonRetryableError(t *testing.T) {
 	metrics := monitoring.New(false)
 	tm := auth.NewVertexTokenManager(logger)
 	mm := models.New(logger, 50, []config.ModelRPMConfig{})
-	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key", rl, tm, mm, "test-version", "test-commit")
+	prx := createProxyWithParams(bal, logger, 10, 30*time.Second, metrics, "master-key", rl, tm, mm, "test-version", "test-commit")
 
 	reqBody := `{"model": "gpt-4", "messages": [{"role": "user", "content": "Test"}]}`
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(reqBody))
@@ -468,7 +468,7 @@ func TestFallbackPath_Streaming_NotSupported(t *testing.T) {
 	metrics := monitoring.New(false)
 	tm := auth.NewVertexTokenManager(logger)
 	mm := models.New(logger, 50, []config.ModelRPMConfig{})
-	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key", rl, tm, mm, "test-version", "test-commit")
+	prx := createProxyWithParams(bal, logger, 10, 30*time.Second, metrics, "master-key", rl, tm, mm, "test-version", "test-commit")
 
 	reqBody := `{"model": "gpt-4", "messages": [{"role": "user", "content": "Test"}], "stream": true}`
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(reqBody))
@@ -551,7 +551,7 @@ func TestFallbackPath_RequestBodyIntegrity(t *testing.T) {
 	metrics := monitoring.New(false)
 	tm := auth.NewVertexTokenManager(logger)
 	mm := models.New(logger, 50, []config.ModelRPMConfig{})
-	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key", rl, tm, mm, "test-version", "test-commit")
+	prx := createProxyWithParams(bal, logger, 10, 30*time.Second, metrics, "master-key", rl, tm, mm, "test-version", "test-commit")
 
 	testBody := `{"model": "gpt-4", "messages": [{"role": "user", "content": "Hello"}], "temperature": 0.7}`
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(testBody))
@@ -623,7 +623,7 @@ func TestFallbackPath_HeadersPreserved(t *testing.T) {
 	metrics := monitoring.New(false)
 	tm := auth.NewVertexTokenManager(logger)
 	mm := models.New(logger, 50, []config.ModelRPMConfig{})
-	prx := New(bal, logger, 10, 30*time.Second, metrics, "master-key", rl, tm, mm, "test-version", "test-commit")
+	prx := createProxyWithParams(bal, logger, 10, 30*time.Second, metrics, "master-key", rl, tm, mm, "test-version", "test-commit")
 
 	reqBody := `{"model": "gpt-4", "messages": []}`
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(reqBody))

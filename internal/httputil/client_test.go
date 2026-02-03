@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -194,7 +195,12 @@ func TestFetchFromProxy_Timeout(t *testing.T) {
 
 	assert.Error(t, err)
 	assert.Nil(t, body)
-	assert.Contains(t, err.Error(), "failed to fetch")
+	// Error can be either "context deadline exceeded" (rate limiter timeout)
+	// or "failed to fetch" (HTTP request timeout)
+	errMsg := err.Error()
+	isTimeoutError := strings.Contains(errMsg, "context deadline exceeded") ||
+		strings.Contains(errMsg, "failed to fetch")
+	assert.True(t, isTimeoutError, "error should contain timeout-related message, got: %s", errMsg)
 }
 
 func TestFetchFromProxy_ContextAlreadyHasDeadline(t *testing.T) {

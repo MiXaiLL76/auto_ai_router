@@ -110,9 +110,8 @@ func TestCaptureRequestBody_WithStreamKeyword(t *testing.T) {
 
 	body, err := captureRequestBody(req)
 
-	assert.Nil(t, body)
-	assert.Error(t, err)
-	assert.Equal(t, http.ErrBodyNotAllowed, err)
+	assert.Equal(t, data, body)
+	assert.NoError(t, err)
 	// Body should be restored
 	restoredBody, _ := io.ReadAll(req.Body)
 	assert.Equal(t, data, restoredBody)

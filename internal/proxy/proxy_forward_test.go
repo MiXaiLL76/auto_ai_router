@@ -63,7 +63,7 @@ func TestForwardToProxy_Headers(t *testing.T) {
 		APIKey:  "remote-key",
 	}
 
-	prx := New(
+	prx := createProxyWithParams(
 		bal, logger, 10, 5*time.Second, metrics,
 		"master-key", rl, tm, mm,
 		"test-version", "test-commit",
@@ -156,7 +156,7 @@ func TestForwardToProxy_HeadersWithoutAPIKey(t *testing.T) {
 		APIKey:  "", // Пусто!
 	}
 
-	prx := New(
+	prx := createProxyWithParams(
 		bal, logger, 10, 5*time.Second, metrics,
 		"master-key", rl, tm, mm,
 		"test-version", "test-commit",
@@ -204,7 +204,7 @@ func TestForwardToProxy_MultipleHopByHopHeaders(t *testing.T) {
 	tm := createTestTokenManager(logger)
 	mm := createTestModelManager(logger)
 
-	prx := New(
+	prx := createProxyWithParams(
 		bal, logger, 10, 5*time.Second, metrics,
 		"master-key", rl, tm, mm,
 		"test-version", "test-commit",
@@ -216,7 +216,7 @@ func TestForwardToProxy_MultipleHopByHopHeaders(t *testing.T) {
 	upstreamReq.Header.Set("Keep-Alive", "5")
 	upstreamReq.Header.Set("Proxy-Authenticate", "Basic realm=test")
 	upstreamReq.Header.Set("Proxy-Authorization", "Bearer token")
-	upstreamReq.Header.Set("Trailers", "X-Custom")
+	upstreamReq.Header.Set("Trailer", "X-Custom")
 	upstreamReq.Header.Set("Transfer-Encoding", "chunked")
 	upstreamReq.Header.Set("Upgrade", "websocket")
 
@@ -231,7 +231,7 @@ func TestForwardToProxy_MultipleHopByHopHeaders(t *testing.T) {
 	assert.Empty(t, receivedHeaders.Get("Keep-Alive"), "Keep-Alive не должен быть проксирован")
 	assert.Empty(t, receivedHeaders.Get("Proxy-Authenticate"), "Proxy-Authenticate не должен быть проксирован")
 	assert.Empty(t, receivedHeaders.Get("Proxy-Authorization"), "Proxy-Authorization не должен быть проксирован")
-	assert.Empty(t, receivedHeaders.Get("Trailers"), "Trailers не должен быть проксирован")
+	assert.Empty(t, receivedHeaders.Get("Trailer"), "Trailer не должен быть проксирован")
 	assert.Empty(t, receivedHeaders.Get("Upgrade"), "Upgrade не должен быть проксирован")
 }
 
@@ -262,7 +262,7 @@ func TestForwardToProxy_ContentLengthCorrect(t *testing.T) {
 	tm := createTestTokenManager(logger)
 	mm := createTestModelManager(logger)
 
-	prx := New(
+	prx := createProxyWithParams(
 		bal, logger, 10, 5*time.Second, metrics,
 		"master-key", rl, tm, mm,
 		"test-version", "test-commit",
@@ -316,7 +316,7 @@ func TestForwardToProxy_QueryParameters(t *testing.T) {
 	tm := createTestTokenManager(logger)
 	mm := createTestModelManager(logger)
 
-	prx := New(
+	prx := createProxyWithParams(
 		bal, logger, 10, 5*time.Second, metrics,
 		"master-key", rl, tm, mm,
 		"test-version", "test-commit",
@@ -365,7 +365,7 @@ func TestForwardToProxy_LargeResponseBody(t *testing.T) {
 	tm := createTestTokenManager(logger)
 	mm := createTestModelManager(logger)
 
-	prx := New(
+	prx := createProxyWithParams(
 		bal, logger, 10, 5*time.Second, metrics,
 		"master-key", rl, tm, mm,
 		"test-version", "test-commit",
@@ -413,7 +413,7 @@ func TestForwardToProxy_UpstreamError(t *testing.T) {
 	tm := createTestTokenManager(logger)
 	mm := createTestModelManager(logger)
 
-	prx := New(
+	prx := createProxyWithParams(
 		bal, logger, 10, 5*time.Second, metrics,
 		"master-key", rl, tm, mm,
 		"test-version", "test-commit",

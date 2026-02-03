@@ -45,7 +45,7 @@ func createHealthTestProxy(credentialsCount int) *Proxy {
 	tm := auth.NewVertexTokenManager(logger)
 	mm := models.New(logger, 50, []config.ModelRPMConfig{})
 
-	prx := New(bal, logger, 10, 30*time.Second, metrics, "test-key", rl, tm, mm, "test-version", "test-commit")
+	prx := createProxyWithParams(bal, logger, 10, 30*time.Second, metrics, "test-key", rl, tm, mm, "test-version", "test-commit")
 	return prx
 }
 
@@ -110,7 +110,7 @@ func TestHealthCheck_CredentialsInfo(t *testing.T) {
 	tm := auth.NewVertexTokenManager(logger)
 	mm := models.New(logger, 50, []config.ModelRPMConfig{})
 
-	prx := New(bal, logger, 10, 30*time.Second, metrics, "test-key", rl, tm, mm, "test-version", "test-commit")
+	prx := createProxyWithParams(bal, logger, 10, 30*time.Second, metrics, "test-key", rl, tm, mm, "test-version", "test-commit")
 
 	_, status := prx.HealthCheck()
 
@@ -149,7 +149,7 @@ func TestHealthCheck_CredentialRateLimit(t *testing.T) {
 	tm := auth.NewVertexTokenManager(logger)
 	mm := models.New(logger, 50, []config.ModelRPMConfig{})
 
-	prx := New(bal, logger, 10, 30*time.Second, metrics, "test-key", rl, tm, mm, "test-version", "test-commit")
+	prx := createProxyWithParams(bal, logger, 10, 30*time.Second, metrics, "test-key", rl, tm, mm, "test-version", "test-commit")
 
 	_, status := prx.HealthCheck()
 
@@ -185,7 +185,7 @@ func TestHealthCheck_ModelInfo(t *testing.T) {
 	tm := auth.NewVertexTokenManager(logger)
 	mm := models.New(logger, 50, []config.ModelRPMConfig{})
 
-	prx := New(bal, logger, 10, 30*time.Second, metrics, "test-key", rl, tm, mm, "test-version", "test-commit")
+	prx := createProxyWithParams(bal, logger, 10, 30*time.Second, metrics, "test-key", rl, tm, mm, "test-version", "test-commit")
 
 	_, status := prx.HealthCheck()
 
@@ -225,7 +225,7 @@ func TestVisualHealthCheck_NoTemplate(t *testing.T) {
 	tm := auth.NewVertexTokenManager(logger)
 	mm := models.New(logger, 50, []config.ModelRPMConfig{})
 
-	prx := New(bal, logger, 10, 30*time.Second, metrics, "test-key", rl, tm, mm, "test-version", "test-commit")
+	prx := createProxyWithParams(bal, logger, 10, 30*time.Second, metrics, "test-key", rl, tm, mm, "test-version", "test-commit")
 
 	// Explicitly set template to nil to simulate template parsing error
 	prx.healthTemplate = nil
@@ -280,7 +280,7 @@ func TestHealthCheck_MultipleModelsPerCredential(t *testing.T) {
 	tm := auth.NewVertexTokenManager(logger)
 	mm := models.New(logger, 50, []config.ModelRPMConfig{})
 
-	prx := New(bal, logger, 10, 30*time.Second, metrics, "test-key", rl, tm, mm, "test-version", "test-commit")
+	prx := createProxyWithParams(bal, logger, 10, 30*time.Second, metrics, "test-key", rl, tm, mm, "test-version", "test-commit")
 
 	_, status := prx.HealthCheck()
 
@@ -318,7 +318,7 @@ func TestHealthCheck_BannedCredentials(t *testing.T) {
 	tm := auth.NewVertexTokenManager(logger)
 	mm := models.New(logger, 50, []config.ModelRPMConfig{})
 
-	prx := New(bal, logger, 10, 30*time.Second, metrics, "test-key", rl, tm, mm, "test-version", "test-commit")
+	prx := createProxyWithParams(bal, logger, 10, 30*time.Second, metrics, "test-key", rl, tm, mm, "test-version", "test-commit")
 
 	healthy, status := prx.HealthCheck()
 
@@ -360,7 +360,7 @@ func TestHealthCheck_AllBanned(t *testing.T) {
 	tm := auth.NewVertexTokenManager(logger)
 	mm := models.New(logger, 50, []config.ModelRPMConfig{})
 
-	prx := New(bal, logger, 10, 30*time.Second, metrics, "test-key", rl, tm, mm, "test-version", "test-commit")
+	prx := createProxyWithParams(bal, logger, 10, 30*time.Second, metrics, "test-key", rl, tm, mm, "test-version", "test-commit")
 
 	healthy, status := prx.HealthCheck()
 
@@ -397,7 +397,7 @@ func TestHealthCheck_CredentialsWithoutSpecificModels(t *testing.T) {
 	}
 	mm := models.New(logger, 50, modelConfig)
 
-	prx := New(bal, logger, 10, 30*time.Second, metrics, "test-key", rl, tm, mm, "test-version", "test-commit")
+	prx := createProxyWithParams(bal, logger, 10, 30*time.Second, metrics, "test-key", rl, tm, mm, "test-version", "test-commit")
 
 	_, status := prx.HealthCheck()
 
@@ -426,7 +426,7 @@ func TestVisualHealthCheck_ContainsCredentialInfo(t *testing.T) {
 	tm := auth.NewVertexTokenManager(logger)
 	mm := models.New(logger, 50, []config.ModelRPMConfig{})
 
-	prx := New(bal, logger, 10, 30*time.Second, metrics, "test-key", rl, tm, mm, "test-version", "test-commit")
+	prx := createProxyWithParams(bal, logger, 10, 30*time.Second, metrics, "test-key", rl, tm, mm, "test-version", "test-commit")
 
 	req := httptest.NewRequest("GET", "/health/visual", nil)
 	w := httptest.NewRecorder()
@@ -465,7 +465,7 @@ func TestHealthCheck_ProxyCredentialLimitsFromRateLimiter(t *testing.T) {
 	tm := auth.NewVertexTokenManager(logger)
 	mm := models.New(logger, 50, []config.ModelRPMConfig{})
 
-	prx := New(bal, logger, 10, 30*time.Second, metrics, "test-key", rl, tm, mm, "test-version", "test-commit")
+	prx := createProxyWithParams(bal, logger, 10, 30*time.Second, metrics, "test-key", rl, tm, mm, "test-version", "test-commit")
 
 	_, status := prx.HealthCheck()
 

@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
+	"github.com/mixaill76/auto_ai_router/internal/transform/common"
 	"github.com/mixaill76/auto_ai_router/internal/transform/openai"
 	"google.golang.org/genai"
 )
@@ -367,21 +368,11 @@ func convertGenaiToOpenAIFunctionCall(genaiCall *genai.FunctionCall) openai.Open
 
 // Helper functions for multimodal content
 func extractTextContent(content interface{}) string {
-	switch c := content.(type) {
-	case string:
-		return c
-	case []interface{}:
-		for _, block := range c {
-			if blockMap, ok := block.(map[string]interface{}); ok {
-				if blockMap["type"] == "text" {
-					if text, ok := blockMap["text"].(string); ok {
-						return text
-					}
-				}
-			}
-		}
+	parts := common.ExtractTextBlocks(content)
+	if len(parts) == 0 {
+		return ""
 	}
-	return ""
+	return parts[0]
 }
 
 // convertContentToParts converts OpenAI content format to genai.Part slice
@@ -391,36 +382,56 @@ func convertContentToParts(content interface{}) []*genai.Part {
 		return []*genai.Part{{Text: c}}
 	case []interface{}:
 		var parts []*genai.Part
+		type partHandler func(map[string]interface{}) *genai.Part
+
+		handlers := map[string]partHandler{
+			"text": func(block map[string]interface{}) *genai.Part {
+				text, ok := block["text"].(string)
+				if !ok {
+					return nil
+				}
+				return &genai.Part{Text: text}
+			},
+			"image_url": func(block map[string]interface{}) *genai.Part {
+				imageURL, ok := block["image_url"].(map[string]interface{})
+				if !ok {
+					return nil
+				}
+				url, ok := imageURL["url"].(string)
+				if !ok {
+					return nil
+				}
+				return parseDataURLToPart(url)
+			},
+			"file": func(block map[string]interface{}) *genai.Part {
+				fileObj, ok := block["file"].(map[string]interface{})
+				if !ok {
+					return nil
+				}
+				fileID, ok := fileObj["file_id"].(string)
+				if !ok {
+					return nil
+				}
+
+				// Try to parse as data URL first, then as regular URL
+				part := parseDataURLToPart(fileID)
+				if part == nil {
+					// If not a data URL, treat as regular URL (http/https)
+					part = parseURLToPart(fileID, fileObj)
+				}
+				return part
+			},
+		}
+
 		for _, block := range c {
-			if blockMap, ok := block.(map[string]interface{}); ok {
-				switch blockMap["type"] {
-				case "text":
-					if text, ok := blockMap["text"].(string); ok {
-						parts = append(parts, &genai.Part{Text: text})
-					}
-				case "image_url":
-					if imageURL, ok := blockMap["image_url"].(map[string]interface{}); ok {
-						if url, ok := imageURL["url"].(string); ok {
-							part := parseDataURLToPart(url)
-							if part != nil {
-								parts = append(parts, part)
-							}
-						}
-					}
-				case "file":
-					if fileObj, ok := blockMap["file"].(map[string]interface{}); ok {
-						if fileID, ok := fileObj["file_id"].(string); ok {
-							// Try to parse as data URL first, then as regular URL
-							part := parseDataURLToPart(fileID)
-							if part == nil {
-								// If not a data URL, treat as regular URL (http/https)
-								part = parseURLToPart(fileID, fileObj)
-							}
-							if part != nil {
-								parts = append(parts, part)
-							}
-						}
-					}
+			blockMap, ok := block.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			contentType, _ := blockMap["type"].(string)
+			if handler, ok := handlers[contentType]; ok {
+				if part := handler(blockMap); part != nil {
+					parts = append(parts, part)
 				}
 			}
 		}

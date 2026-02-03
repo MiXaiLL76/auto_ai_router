@@ -8,12 +8,57 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
 )
 
-const defaultTimeout = 5 * time.Second
+const (
+	defaultTimeout        = 5 * time.Second
+	maxResponseSizeBytes  = 10 * 1024 * 1024 // 10MB limit for proxy responses
+	minProxyFetchInterval = 100 * time.Millisecond
+)
+
+type proxyFetchLimiter struct {
+	mu   sync.Mutex
+	last map[string]time.Time
+}
+
+func newProxyFetchLimiter() *proxyFetchLimiter {
+	return &proxyFetchLimiter{
+		last: make(map[string]time.Time),
+	}
+}
+
+func (l *proxyFetchLimiter) wait(ctx context.Context, key string, minInterval time.Duration) error {
+	if minInterval <= 0 {
+		return nil
+	}
+
+	l.mu.Lock()
+	now := time.Now()
+	last := l.last[key]
+	waitFor := minInterval - now.Sub(last)
+	if waitFor <= 0 {
+		l.last[key] = now
+		l.mu.Unlock()
+		return nil
+	}
+	l.last[key] = now.Add(waitFor)
+	l.mu.Unlock()
+
+	timer := time.NewTimer(waitFor)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+var proxyFetchRateLimiter = newProxyFetchLimiter()
 
 // FetchFromProxy makes an HTTP GET request to a proxy credential
 // and returns the response body. Handles timeouts, auth headers, and error logging.
@@ -29,6 +74,15 @@ func FetchFromProxy(
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, defaultTimeout)
 		defer cancel()
+	}
+
+	if err := proxyFetchRateLimiter.wait(ctx, cred.Name, minProxyFetchInterval); err != nil {
+		logger.Debug("Proxy fetch rate limited",
+			"credential", cred.Name,
+			"path", path,
+			"error", err,
+		)
+		return nil, fmt.Errorf("proxy fetch rate limited: %w", err)
 	}
 
 	// Build URL
@@ -69,7 +123,7 @@ func FetchFromProxy(
 
 	// Check status code
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, maxResponseSizeBytes))
 		preview := safeStringPreview(body, 200)
 		logger.Error("Proxy returned non-200 status",
 			"credential", cred.Name,
@@ -79,8 +133,8 @@ func FetchFromProxy(
 		return nil, fmt.Errorf("proxy returned status %d", resp.StatusCode)
 	}
 
-	// Read body
-	body, err := io.ReadAll(resp.Body)
+	// Read body with size limit
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseSizeBytes))
 	if err != nil {
 		logger.Error("Failed to read response body",
 			"credential", cred.Name,
