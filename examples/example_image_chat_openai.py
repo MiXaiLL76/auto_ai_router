@@ -5,7 +5,6 @@ Tests generating images using chat API with tools: [{"image_generation": {}}]
 """
 
 import base64
-import json
 import sys
 import time
 from pathlib import Path
@@ -44,8 +43,8 @@ try:
         },
     )
 
-    print(f"Response received!")
-    print(f"Status: 200")
+    print("Response received!")
+    print("Status: 200")
     print()
 
     for msg in response.choices:
