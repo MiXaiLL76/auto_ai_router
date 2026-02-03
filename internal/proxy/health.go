@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/httputil"
 )
 
@@ -22,7 +23,7 @@ func (p *Proxy) HealthCheck() (bool, *httputil.ProxyHealthResponse) {
 		// For other credentials, use config values
 		limitRPM := cred.RPM
 		limitTPM := cred.TPM
-		if cred.Type == "proxy" {
+		if cred.Type == config.ProviderTypeProxy {
 			rateLimiterRPM := p.rateLimiter.GetLimitRPM(cred.Name)
 			rateLimiterTPM := p.rateLimiter.GetLimitTPM(cred.Name)
 			if rateLimiterRPM != -1 {
