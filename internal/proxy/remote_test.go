@@ -2,8 +2,10 @@ package proxy
 
 import (
 	"context"
-	"log/slog"
-	"os"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"sync"
 	"testing"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
@@ -11,10 +13,6 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/ratelimit"
 	"github.com/stretchr/testify/assert"
 )
-
-func createTestLogger() *slog.Logger {
-	return slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-}
 
 func TestUpdateCredentialLimits_EmptyCredentials(t *testing.T) {
 	health := &httputil.ProxyHealthResponse{
@@ -338,4 +336,137 @@ func TestUpdateCredentialLimits_LargeNumbers(t *testing.T) {
 
 	// Should complete successfully
 	assert.NotNil(t, rateLimiter)
+}
+
+// MockModelManager implements ModelManagerInterface for testing
+type MockModelManager struct {
+	mu    sync.Mutex
+	added []struct {
+		credential string
+		model      string
+	}
+}
+
+func NewMockModelManager() *MockModelManager {
+	return &MockModelManager{
+		added: make([]struct {
+			credential string
+			model      string
+		}, 0),
+	}
+}
+
+func (m *MockModelManager) AddModel(credentialName, modelID string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.added = append(m.added, struct {
+		credential string
+		model      string
+	}{credentialName, modelID})
+}
+
+func (m *MockModelManager) GetAddedModels() []struct {
+	credential string
+	model      string
+} {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	// Return a copy to avoid race conditions
+	result := make([]struct {
+		credential string
+		model      string
+	}, len(m.added))
+	copy(result, m.added)
+	return result
+}
+
+func TestUpdateStatsFromRemoteProxy_Success(t *testing.T) {
+	// Create mock model manager
+	mockMM := NewMockModelManager()
+
+	// Create test HTTP server that returns health response
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/health" {
+			http.NotFound(w, r)
+			return
+		}
+
+		health := createMockProxyHealthResponse()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(health)
+	}))
+	defer server.Close()
+
+	// Create credential pointing to test server
+	cred := &config.CredentialConfig{
+		Name:    "proxy-remote",
+		Type:    config.ProviderTypeProxy,
+		BaseURL: server.URL,
+		APIKey:  "unused",
+	}
+
+	// Create rate limiter
+	rateLimiter := ratelimit.New()
+	logger := createTestLogger()
+	ctx := context.Background()
+
+	// Call the function being tested
+	UpdateStatsFromRemoteProxy(ctx, cred, rateLimiter, logger, mockMM)
+
+	// Verify credential limits were aggregated correctly
+	// Max RPM should be 200 (from remote_cred_2)
+	assert.Equal(t, 200, rateLimiter.GetLimitRPM("proxy-remote"),
+		"RPM limit should be max of remote credentials")
+
+	// Max TPM should be 2000 (from remote_cred_2)
+	assert.Equal(t, 2000, rateLimiter.GetLimitTPM("proxy-remote"),
+		"TPM limit should be max of remote credentials")
+
+	// Current RPM should be sum of all current RPMs (25 + 20 = 45)
+	// Use GreaterThanOrEqual because some timestamps might age out if test execution takes time
+	assert.GreaterOrEqual(t, rateLimiter.GetCurrentRPM("proxy-remote"), 44,
+		"Current RPM should be at least sum of remote credential usage")
+
+	// Current TPM should be sum of all current TPMs (250 + 200 = 450)
+	assert.GreaterOrEqual(t, rateLimiter.GetCurrentTPM("proxy-remote"), 449,
+		"Current TPM should be at least sum of remote credential usage")
+
+	// Verify models were added with correct aggregated limits
+	// gpt-4: LimitRPM = 50 + 100 = 150, LimitTPM = 500 + 1000 = 1500
+	assert.Equal(t, 150, rateLimiter.GetModelLimitRPM("proxy-remote", "gpt-4"),
+		"Model RPM limit should be sum of all credential limits for that model")
+	assert.Equal(t, 1500, rateLimiter.GetModelLimitTPM("proxy-remote", "gpt-4"),
+		"Model TPM limit should be sum of all credential limits for that model")
+
+	// Current usage for gpt-4: CurrentRPM = 10 + 15 = 25, CurrentTPM = 100 + 150 = 250
+	assert.GreaterOrEqual(t, rateLimiter.GetCurrentModelRPM("proxy-remote", "gpt-4"), 24,
+		"Current model RPM should be at least sum of usage")
+	assert.GreaterOrEqual(t, rateLimiter.GetCurrentModelTPM("proxy-remote", "gpt-4"), 249,
+		"Current model TPM should be at least sum of usage")
+
+	// claude-3-opus: LimitRPM = 75, LimitTPM = 1500
+	assert.Equal(t, 75, rateLimiter.GetModelLimitRPM("proxy-remote", "claude-3-opus"),
+		"Claude model RPM limit should match remote limit")
+	assert.Equal(t, 1500, rateLimiter.GetModelLimitTPM("proxy-remote", "claude-3-opus"),
+		"Claude model TPM limit should match remote limit")
+
+	// Current usage for claude-3-opus
+	assert.GreaterOrEqual(t, rateLimiter.GetCurrentModelRPM("proxy-remote", "claude-3-opus"), 4)
+	assert.GreaterOrEqual(t, rateLimiter.GetCurrentModelTPM("proxy-remote", "claude-3-opus"), 49)
+
+	// Verify ModelManager.AddModel was called for each model
+	addedModels := mockMM.GetAddedModels()
+	assert.Greater(t, len(addedModels), 0,
+		"ModelManager.AddModel should be called for at least one model")
+
+	// Check that expected models were added
+	modelSet := make(map[string]bool)
+	for _, m := range addedModels {
+		assert.Equal(t, "proxy-remote", m.credential, "All models should be added for proxy-remote credential")
+		modelSet[m.model] = true
+	}
+
+	// Both gpt-4 and claude-3-opus should be present (they have non-zero limits/usage)
+	assert.True(t, modelSet["gpt-4"], "gpt-4 model should be added (aggregated from multiple credentials)")
+	assert.True(t, modelSet["claude-3-opus"], "claude-3-opus model should be added")
 }

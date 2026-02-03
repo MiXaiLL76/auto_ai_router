@@ -1,10 +1,17 @@
 package proxy
 
 import (
+	"encoding/json"
 	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestShouldRetryWithFallback_RateLimitError(t *testing.T) {
@@ -233,4 +240,169 @@ func TestRetryReasonConstants(t *testing.T) {
 	assert.Equal(t, RetryReason("server_error"), RetryReasonServerErr)
 	assert.Equal(t, RetryReason("auth_error"), RetryReasonAuthErr)
 	assert.Equal(t, RetryReason("network_error"), RetryReasonNetErr)
+}
+
+func TestTryFallbackProxy_Success(t *testing.T) {
+	// Track number of calls to fallback server
+	var fallbackCalls int32
+
+	// Create fallback server mock that returns 200 OK
+	fallbackServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&fallbackCalls, 1)
+		_ = NewResponseBuilder().
+			WithStatus(http.StatusOK).
+			WithJSONBody(createMockChatCompletionResponse(
+				"chatcmpl-test-fallback",
+				"gpt-4",
+				"fallback ok",
+			)).
+			Write(w)
+	}))
+	defer fallbackServer.Close()
+
+	// Build proxy with primary + fallback credentials
+	prx := NewTestProxyBuilder().
+		WithPrimaryAndFallback("http://primary.local", fallbackServer.URL).
+		Build()
+
+	// Prepare request body
+	requestBody := map[string]interface{}{
+		"model": "gpt-4",
+		"messages": []map[string]string{
+			{
+				"role":    "user",
+				"content": "Test message for fallback",
+			},
+		},
+	}
+	bodyBytes, err := json.Marshal(requestBody)
+	require.NoError(t, err, "Failed to marshal request body")
+
+	// Create HTTP request to proxy endpoint
+	req := httptest.NewRequest(
+		"POST",
+		"/v1/chat/completions",
+		strings.NewReader(string(bodyBytes)),
+	)
+
+	// Set required headers
+	req.Header.Set("Authorization", "Bearer sk-master")
+	req.Header.Set("Content-Type", "application/json")
+
+	// Create response recorder
+	w := httptest.NewRecorder()
+
+	// Call TryFallbackProxy
+	success, reason := prx.TryFallbackProxy(
+		w,
+		req,
+		"gpt-4",              // modelID
+		"primary",            // originalCredName
+		http.StatusOK,        // originalStatus
+		RetryReasonRateLimit, // originalReason
+		bodyBytes,            // body
+		time.Now(),           // start
+	)
+
+	// Assertions
+	assert.True(t, success, "TryFallbackProxy should return success=true")
+	assert.Empty(t, reason, "TryFallbackProxy should return empty reason on success")
+
+	// Verify fallback server was called
+	assert.Equal(t, int32(1), atomic.LoadInt32(&fallbackCalls), "Fallback server should be called exactly once")
+
+	// Check response recorder
+	assert.Equal(t, http.StatusOK, w.Code, "Response status code should be 200 OK")
+	assert.NotEmpty(t, w.Body.String(), "Response body should not be empty")
+
+	// Verify response contains expected data
+	var respData map[string]interface{}
+	err = json.Unmarshal(w.Body.Bytes(), &respData)
+	require.NoError(t, err, "Failed to unmarshal response")
+	assert.Equal(t, "chatcmpl-test-fallback", respData["id"])
+	assert.Equal(t, "gpt-4", respData["model"])
+}
+
+func TestTryFallbackProxy_NoFallbackAvailable(t *testing.T) {
+	// Build proxy with only primary credential (no fallback)
+	prx := NewTestProxyBuilder().
+		WithSingleCredential(
+			"primary",
+			config.ProviderTypeProxy,
+			"http://primary.local",
+			"pkey",
+		).
+		Build()
+
+	// Prepare request body
+	requestBody := map[string]interface{}{
+		"model": "gpt-4",
+	}
+	bodyBytes, _ := json.Marshal(requestBody)
+
+	// Create HTTP request
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(string(bodyBytes)))
+	req.Header.Set("Authorization", "Bearer sk-master")
+
+	// Create response recorder
+	w := httptest.NewRecorder()
+
+	// Call TryFallbackProxy (should fail to find fallback)
+	success, reason := prx.TryFallbackProxy(
+		w,
+		req,
+		"gpt-4",
+		"primary",
+		http.StatusOK,
+		RetryReasonRateLimit,
+		bodyBytes,
+		time.Now(),
+	)
+
+	// Assertions
+	assert.False(t, success, "TryFallbackProxy should return success=false when no fallback available")
+	assert.Equal(t, "no_fallback_available", reason, "Should return no_fallback_available reason")
+}
+
+func TestTryFallbackProxy_SameCredentialAsOriginal(t *testing.T) {
+	// Build proxy with single credential marked as both primary and fallback (edge case)
+	prx := NewTestProxyBuilder().
+		WithCredentials(
+			config.CredentialConfig{
+				Name:       "primary",
+				Type:       config.ProviderTypeProxy,
+				APIKey:     "pkey",
+				BaseURL:    "http://primary.local",
+				RPM:        100,
+				TPM:        10000,
+				IsFallback: true, // Edge case: marked as fallback
+			},
+		).
+		Build()
+
+	// Prepare request body
+	requestBody := map[string]interface{}{"model": "gpt-4"}
+	bodyBytes, _ := json.Marshal(requestBody)
+
+	// Create HTTP request
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(string(bodyBytes)))
+
+	// Create response recorder
+	w := httptest.NewRecorder()
+
+	// Call TryFallbackProxy (should detect same credential)
+	success, reason := prx.TryFallbackProxy(
+		w,
+		req,
+		"gpt-4",
+		"primary",
+		http.StatusOK,
+		RetryReasonRateLimit,
+		bodyBytes,
+		time.Now(),
+	)
+
+	// Assertions
+	assert.False(t, success, "TryFallbackProxy should return success=false when fallback is same credential")
+	assert.Equal(t, "fallback_is_same_credential", reason, "Should return fallback_is_same_credential reason")
 }
