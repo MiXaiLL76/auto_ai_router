@@ -410,7 +410,12 @@ func convertContentToParts(content interface{}) []*genai.Part {
 				case "file":
 					if fileObj, ok := blockMap["file"].(map[string]interface{}); ok {
 						if fileID, ok := fileObj["file_id"].(string); ok {
+							// Try to parse as data URL first, then as regular URL
 							part := parseDataURLToPart(fileID)
+							if part == nil {
+								// If not a data URL, treat as regular URL (http/https)
+								part = parseURLToPart(fileID, fileObj)
+							}
 							if part != nil {
 								parts = append(parts, part)
 							}
@@ -478,6 +483,82 @@ func extractMimeType(header string) string {
 
 	// No semicolon, take from start to end
 	return header[start:]
+}
+
+// mimeTypeMap maps file extensions to MIME types
+var mimeTypeMap = map[string]string{
+	"jpg":  "image/jpeg",
+	"jpeg": "image/jpeg",
+	"png":  "image/png",
+	"gif":  "image/gif",
+	"webp": "image/webp",
+	"mp4":  "video/mp4",
+	"mpeg": "video/mpeg",
+	"mov":  "video/quicktime",
+	"avi":  "video/x-msvideo",
+	"mkv":  "video/x-matroska",
+	"webm": "video/webm",
+	"flv":  "video/x-flv",
+	"pdf":  "application/pdf",
+	"txt":  "text/plain",
+}
+
+// parseURLToPart converts a regular URL or file reference to a genai.Part
+// Supports http/https URLs and determines MIME type from format or file extension
+func parseURLToPart(url string, fileObj map[string]interface{}) *genai.Part {
+	if url == "" {
+		return nil
+	}
+
+	// Check if it's a valid HTTP(S) URL or a file URI
+	if !strings.HasPrefix(url, "http://") && !strings.HasPrefix(url, "https://") && !strings.HasPrefix(url, "file://") {
+		return nil
+	}
+
+	// Determine MIME type from format field or file extension
+	mimeType := ""
+
+	// Check for explicit format field
+	if format, ok := fileObj["format"].(string); ok && format != "" {
+		mimeType = format
+	} else {
+		// Try to determine from URL extension
+		mimeType = getMimeTypeFromURL(url)
+	}
+
+	if mimeType == "" {
+		// Default to application/octet-stream if we can't determine
+		mimeType = "application/octet-stream"
+	}
+
+	// Return FileData with FileURI for external URLs
+	return &genai.Part{
+		FileData: &genai.FileData{
+			MIMEType: mimeType,
+			FileURI:  url,
+		},
+	}
+}
+
+// getMimeTypeFromURL determines MIME type from URL extension
+func getMimeTypeFromURL(url string) string {
+	// Extract extension from URL (before query parameters)
+	urlPath := url
+	if idx := strings.Index(urlPath, "?"); idx > 0 {
+		urlPath = urlPath[:idx]
+	}
+
+	// Get extension
+	ext := ""
+	if idx := strings.LastIndex(urlPath, "."); idx > 0 {
+		ext = strings.ToLower(urlPath[idx+1:])
+	}
+
+	if mimeType, ok := mimeTypeMap[ext]; ok {
+		return mimeType
+	}
+
+	return ""
 }
 
 // convertToolCallsToGenaiParts converts OpenAI tool_calls to genai.Part with FunctionCall
