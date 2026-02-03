@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -105,7 +106,36 @@ func (p *Proxy) TryFallbackProxy(
 	)
 
 	// Forward request to fallback proxy
-	p.forwardToProxy(w, r, fallbackCred, body)
+	proxyResp, err := p.forwardToProxy(w, r, modelID, fallbackCred, body, start)
+	if err != nil {
+		p.logger.Error("Fallback proxy request failed",
+			"fallback_credential", fallbackCred.Name,
+			"error", err,
+		)
+		return false, "fallback_request_failed"
+	}
+
+	// Write response headers (skip hop-by-hop headers)
+	for key, values := range proxyResp.Headers {
+		if isHopByHopHeader(key) {
+			continue
+		}
+		// Skip Content-Length and Transfer-Encoding - we'll set them correctly
+		if key == "Content-Length" || key == "Transfer-Encoding" {
+			continue
+		}
+		for _, value := range values {
+			w.Header().Add(key, value)
+		}
+	}
+
+	// Set correct Content-Length for the actual response body
+	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(proxyResp.Body)))
+
+	w.WriteHeader(proxyResp.StatusCode)
+	if _, err := w.Write(proxyResp.Body); err != nil {
+		p.logger.Error("Failed to write fallback proxy response body", "error", err)
+	}
 
 	// Log that retry was completed
 	p.logger.Debug("Fallback proxy retry completed",
