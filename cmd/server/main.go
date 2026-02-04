@@ -165,7 +165,7 @@ func main() {
 					return
 				case <-ticker.C:
 					updateMutex.Lock()
-					credentials := bal.GetCredentials()
+					credentials := bal.GetCredentialsSnapshot()
 
 					// Update credential metrics (exclude proxy type credentials)
 					// Proxy credentials are internal forwarding nodes, not real providers
@@ -303,7 +303,7 @@ func main() {
 // updateAllProxyCredentials updates all proxy credentials with staggered timing
 // to avoid thundering herd problem when multiple proxies are updated simultaneously
 func updateAllProxyCredentials(bal *balancer.RoundRobin, rateLimiter *ratelimit.RPMLimiter, log *slog.Logger, modelManager *models.Manager, updateMutex *sync.Mutex) {
-	credentials := bal.GetCredentials()
+	credentials := bal.GetCredentialsSnapshot()
 	proxyCredentials := make([]config.CredentialConfig, 0, len(credentials))
 	for _, cred := range credentials {
 		if cred.Type == config.ProviderTypeProxy {

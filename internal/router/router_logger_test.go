@@ -343,3 +343,77 @@ func TestLogErrorResponse_NoRequestBody(t *testing.T) {
 
 	assert.Equal(t, "", entry.Request.Body)
 }
+
+func TestCloseErrorLogFiles_NoFDLeak(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Create multiple log files to test file handle caching
+	logFiles := []string{
+		filepath.Join(tmpDir, "errors1.log"),
+		filepath.Join(tmpDir, "errors2.log"),
+		filepath.Join(tmpDir, "errors3.log"),
+		filepath.Join(tmpDir, "errors4.log"),
+		filepath.Join(tmpDir, "errors5.log"),
+	}
+
+	// Log errors to different files to populate the cache
+	for i, logFile := range logFiles {
+		path := "/api/test" + string('0'+byte(i))
+		req := httptest.NewRequest("GET", path, nil)
+		w := httptest.NewRecorder()
+		rc := newResponseCapture(w)
+		rc.WriteHeader(http.StatusBadRequest)
+
+		err := logErrorResponse(logFile, req, rc, []byte{})
+		assert.NoError(t, err)
+	}
+
+	// Verify files were created and cached
+	for _, logFile := range logFiles {
+		_, err := os.Stat(logFile)
+		assert.NoError(t, err, "Log file should exist: %s", logFile)
+	}
+
+	// Close all cached file handles
+	err := CloseErrorLogFiles()
+	assert.NoError(t, err, "CloseErrorLogFiles should succeed")
+
+	// Verify we can still read the files (they were properly closed)
+	for _, logFile := range logFiles {
+		content, err := os.ReadFile(logFile)
+		assert.NoError(t, err, "Should be able to read file after closing: %s", logFile)
+
+		// Verify content is valid JSON
+		var entry ErrorLogEntry
+		err = json.Unmarshal(content, &entry)
+		assert.NoError(t, err, "File should contain valid JSON: %s", logFile)
+	}
+}
+
+func TestCloseErrorLogFiles_MultipleCalls(t *testing.T) {
+	tmpDir := t.TempDir()
+	logFile := filepath.Join(tmpDir, "errors.log")
+
+	// Create a log entry
+	req := httptest.NewRequest("POST", "/api/test", nil)
+	w := httptest.NewRecorder()
+	rc := newResponseCapture(w)
+	rc.WriteHeader(http.StatusInternalServerError)
+
+	err := logErrorResponse(logFile, req, rc, []byte{})
+	assert.NoError(t, err)
+
+	// First close should succeed
+	err = CloseErrorLogFiles()
+	assert.NoError(t, err)
+
+	// Second close should also succeed (idempotent)
+	err = CloseErrorLogFiles()
+	assert.NoError(t, err)
+
+	// File should still be readable
+	content, _ := os.ReadFile(logFile)
+	var entry ErrorLogEntry
+	err = json.Unmarshal(content, &entry)
+	assert.NoError(t, err)
+}

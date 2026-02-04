@@ -25,7 +25,7 @@ var (
 )
 
 type RoundRobin struct {
-	mu              sync.Mutex
+	mu              sync.RWMutex
 	credentials     []config.CredentialConfig
 	credentialIndex map[string]int // O(1) lookup by name instead of O(n) search
 	current         int
@@ -89,6 +89,11 @@ func (r *RoundRobin) IsProxyCredential(credentialName string) bool {
 
 	cred := r.getCredentialByName(credentialName)
 	return cred != nil && cred.Type == config.ProviderTypeProxy
+}
+
+// IsBanned checks if a credential is currently banned
+func (r *RoundRobin) IsBanned(credentialName string) bool {
+	return r.fail2ban.IsBanned(credentialName)
 }
 
 // GetProxyCredentials returns all proxy type credentials
@@ -210,6 +215,16 @@ func (r *RoundRobin) GetCredentials() []config.CredentialConfig {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.credentials
+}
+
+// GetCredentialsSnapshot returns a copy of the credentials slice to avoid data races
+// when the credentials list is being read from multiple goroutines
+func (r *RoundRobin) GetCredentialsSnapshot() []config.CredentialConfig {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	creds := make([]config.CredentialConfig, len(r.credentials))
+	copy(creds, r.credentials)
+	return creds
 }
 
 func (r *RoundRobin) GetAvailableCount() int {

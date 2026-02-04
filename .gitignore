@@ -12,3 +12,4 @@ formal-folder-482319-k9-c09bc20da8ba.json
 *.pyc
 logs.jsonl
 vertex-api-keys
+examples/output/*

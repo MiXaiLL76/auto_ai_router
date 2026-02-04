@@ -698,10 +698,18 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		}
 
 	} else {
-		if _, err := io.Copy(w, resp.Body); err != nil {
+		if _, err := p.streamResponseBody(w, resp.Body); err != nil {
 			p.logger.Error("Failed to copy response body", "error", err)
 		}
 	}
+}
+
+// streamResponseBody streams a response body to the client using a pooled buffer
+// to minimize memory allocations for large responses
+func (p *Proxy) streamResponseBody(w io.Writer, reader io.Reader) (int64, error) {
+	buf := streamBufPool.Get().(*[]byte)
+	defer streamBufPool.Put(buf)
+	return io.CopyBuffer(w, reader, *buf)
 }
 
 // logTransformedResponse logs a transformed response at debug level

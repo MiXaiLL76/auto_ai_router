@@ -15,7 +15,8 @@ import (
 
 var streamBufPool = sync.Pool{
 	New: func() any {
-		return make([]byte, 8192)
+		buf := make([]byte, 8192)
+		return &buf
 	},
 }
 
@@ -123,15 +124,15 @@ func (p *Proxy) streamToClient(
 	}
 	controller := http.NewResponseController(w)
 
-	buf := streamBufPool.Get().([]byte)
+	buf := streamBufPool.Get().(*[]byte)
 	defer streamBufPool.Put(buf)
 	for {
-		n, err := reader.Read(buf)
+		n, err := reader.Read(*buf)
 		if n > 0 {
 			if onChunk != nil {
-				onChunk(buf[:n])
+				onChunk((*buf)[:n])
 			}
-			if _, writeErr := w.Write(buf[:n]); writeErr != nil {
+			if _, writeErr := w.Write((*buf)[:n]); writeErr != nil {
 				p.logger.Error("Failed to write streaming chunk", "error", writeErr, "credential", credName)
 				if onWriteErr != nil {
 					onWriteErr()

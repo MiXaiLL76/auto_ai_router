@@ -647,3 +647,61 @@ func TestNextFallbackForModel_WithModelChecker(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, "proxy1", cred.Name)
 }
+
+func TestRoundRobin_GetCredentialsSnapshot_NoRace(t *testing.T) {
+	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
+	rl := ratelimit.New()
+
+	credentials := []config.CredentialConfig{
+		{Name: "cred1", APIKey: "key1", BaseURL: "http://test1.com", RPM: 100},
+		{Name: "cred2", APIKey: "key2", BaseURL: "http://test2.com", RPM: 200},
+		{Name: "cred3", APIKey: "key3", BaseURL: "http://test3.com", RPM: 300},
+	}
+
+	bal := New(credentials, f2b, rl)
+
+	// Run concurrent reads and writes
+	numReaders := 10
+	numWriteOps := 100
+	done := make(chan bool, numReaders)
+
+	// Start multiple concurrent readers
+	for i := 0; i < numReaders; i++ {
+		go func() {
+			for j := 0; j < 1000; j++ {
+				snap := bal.GetCredentialsSnapshot()
+				assert.Len(t, snap, 3)
+				// Verify snapshot is a copy (modifying it shouldn't affect balancer)
+				if len(snap) > 0 {
+					snap[0].APIKey = "modified"
+				}
+			}
+			done <- true
+		}()
+	}
+
+	// Start a writer that performs operations that acquire the lock
+	go func() {
+		for j := 0; j < numWriteOps; j++ {
+			// These operations acquire locks internally
+			bal.GetAvailableCount()
+			bal.GetBannedCount()
+			if j%3 == 0 {
+				f2b.RecordResponse("cred1", 401)
+			}
+		}
+		done <- true
+	}()
+
+	// Wait for all goroutines
+	for i := 0; i <= numReaders; i++ {
+		<-done
+	}
+
+	// Verify the snapshot still returns unmodified data
+	finalSnapshot := bal.GetCredentialsSnapshot()
+	assert.Len(t, finalSnapshot, 3)
+	assert.Equal(t, "key1", finalSnapshot[0].APIKey)
+	assert.Equal(t, "key2", finalSnapshot[1].APIKey)
+	assert.Equal(t, "key3", finalSnapshot[2].APIKey)
+}

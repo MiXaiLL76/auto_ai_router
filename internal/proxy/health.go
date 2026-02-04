@@ -9,7 +9,8 @@ import (
 )
 
 func (p *Proxy) HealthCheck() (bool, *httputil.ProxyHealthResponse) {
-	totalCreds := len(p.balancer.GetCredentials())
+	creds := p.balancer.GetCredentialsSnapshot()
+	totalCreds := len(creds)
 	availableCreds := p.balancer.GetAvailableCount()
 	bannedCreds := p.balancer.GetBannedCount()
 
@@ -17,7 +18,6 @@ func (p *Proxy) HealthCheck() (bool, *httputil.ProxyHealthResponse) {
 
 	// Collect credentials info
 	credentialsInfo := make(map[string]httputil.CredentialHealthStats)
-	creds := p.balancer.GetCredentials()
 	if creds == nil {
 		creds = []config.CredentialConfig{}
 	}
@@ -37,9 +37,13 @@ func (p *Proxy) HealthCheck() (bool, *httputil.ProxyHealthResponse) {
 			}
 		}
 
+		// Check if credential is banned from balancer
+		isBanned := p.balancer.IsBanned(cred.Name)
+
 		credentialsInfo[cred.Name] = httputil.CredentialHealthStats{
 			Type:       string(cred.Type),
 			IsFallback: cred.IsFallback,
+			IsBanned:   isBanned,
 			CurrentRPM: p.rateLimiter.GetCurrentRPM(cred.Name),
 			CurrentTPM: p.rateLimiter.GetCurrentTPM(cred.Name),
 			LimitRPM:   limitRPM,
