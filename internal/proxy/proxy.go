@@ -2,9 +2,8 @@ package proxy
 
 import (
 	"bytes"
-	"compress/gzip"
+	"context"
 	_ "embed"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"html/template"
@@ -25,25 +24,27 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/transform/vertex"
 )
 
-// hopByHopHeaders are headers that should not be proxied
-// See RFC 7230 Section 6.1
-var hopByHopHeaders = map[string]bool{
-	"Connection":          true,
-	"Keep-Alive":          true,
-	"Proxy-Authenticate":  true,
-	"Proxy-Authorization": true,
-	"TE":                  true,
-	"Trailers":            true,
-	"Transfer-Encoding":   true,
-	"Upgrade":             true,
-}
-
 // ResponseBodyMultiplier scales maxBodySizeMB for proxy response bodies.
 // Allows responses to be significantly larger than request bodies (e.g., large files, exports).
 const ResponseBodyMultiplier = 20
 
 //go:embed health.html
 var healthHTML string
+
+// Config holds all configuration needed to create a Proxy
+type Config struct {
+	Balancer       *balancer.RoundRobin
+	Logger         *slog.Logger
+	MaxBodySizeMB  int
+	RequestTimeout time.Duration
+	Metrics        *monitoring.Metrics
+	MasterKey      string
+	RateLimiter    *ratelimit.RPMLimiter
+	TokenManager   *auth.VertexTokenManager
+	ModelManager   *models.Manager
+	Version        string
+	Commit         string
+}
 
 type Proxy struct {
 	balancer       *balancer.RoundRobin
@@ -64,7 +65,7 @@ var (
 	Commit  = "unknown"
 )
 
-func New(bal *balancer.RoundRobin, logger *slog.Logger, maxBodySizeMB int, requestTimeout time.Duration, metrics *monitoring.Metrics, masterKey string, rateLimiter *ratelimit.RPMLimiter, tokenManager *auth.VertexTokenManager, modelManager *models.Manager, version, commit string) *Proxy {
+func New(cfg *Config) *Proxy {
 	// Parse template once at startup
 	tmpl, err := template.New("health").Funcs(template.FuncMap{
 		"div": func(a, b int) int {
@@ -77,30 +78,30 @@ func New(bal *balancer.RoundRobin, logger *slog.Logger, maxBodySizeMB int, reque
 			return a * b
 		},
 		"version": func() string {
-			return version
+			return cfg.Version
 		},
 		"commit": func() string {
-			return commit
+			return cfg.Commit
 		},
 	}).Parse(healthHTML)
 	if err != nil {
-		logger.Error("Failed to parse health template at startup", "error", err)
+		cfg.Logger.Error("Failed to parse health template at startup", "error", err)
 		// Continue without template - will cause error on /vhealth requests
 	}
 
 	return &Proxy{
-		balancer:       bal,
-		logger:         logger,
-		maxBodySizeMB:  maxBodySizeMB,
-		requestTimeout: requestTimeout,
-		metrics:        metrics,
-		masterKey:      masterKey,
-		rateLimiter:    rateLimiter,
-		tokenManager:   tokenManager,
+		balancer:       cfg.Balancer,
+		logger:         cfg.Logger,
+		maxBodySizeMB:  cfg.MaxBodySizeMB,
+		requestTimeout: cfg.RequestTimeout,
+		metrics:        cfg.Metrics,
+		masterKey:      cfg.MasterKey,
+		rateLimiter:    cfg.RateLimiter,
+		tokenManager:   cfg.TokenManager,
 		healthTemplate: tmpl,
-		modelManager:   modelManager,
+		modelManager:   cfg.ModelManager,
 		client: &http.Client{
-			Timeout: requestTimeout,
+			Timeout: cfg.RequestTimeout,
 			Transport: &http.Transport{
 				Proxy:               http.ProxyFromEnvironment, // Support HTTP_PROXY, HTTPS_PROXY, NO_PROXY
 				MaxIdleConns:        100,
@@ -113,11 +114,6 @@ func New(bal *balancer.RoundRobin, logger *slog.Logger, maxBodySizeMB int, reque
 			},
 		},
 	}
-}
-
-// isHopByHopHeader checks if a header should not be proxied
-func isHopByHopHeader(key string) bool {
-	return hopByHopHeaders[key]
 }
 
 // ProxyResponse holds response details from a proxy credential
@@ -150,26 +146,7 @@ func (p *Proxy) executeProxyRequest(
 	}
 
 	// Copy headers (skip hop-by-hop headers)
-	for key, values := range r.Header {
-		if isHopByHopHeader(key) {
-			continue
-		}
-		if key == "Authorization" {
-			// Handle Authorization header: use credential API key if available, otherwise copy original
-			if cred.APIKey != "" {
-				proxyReq.Header.Set("Authorization", "Bearer "+cred.APIKey)
-			} else {
-				// Copy original Authorization header if no API key configured
-				for _, value := range values {
-					proxyReq.Header.Add(key, value)
-				}
-			}
-		} else {
-			for _, value := range values {
-				proxyReq.Header.Add(key, value)
-			}
-		}
-	}
+	copyRequestHeaders(proxyReq, r, cred.APIKey)
 
 	// Send request
 	resp, err := p.client.Do(proxyReq)
@@ -330,11 +307,10 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// Check if response is streaming (streaming responses don't support fallback retry)
-		isStreaming := IsStreamingResponse(&http.Response{
-			StatusCode: proxyResp.StatusCode,
-			Header:     proxyResp.Headers,
-		})
+		// Check if response is streaming by examining Content-Type header directly
+		// (avoid creating temporary http.Response object)
+		contentType := strings.ToLower(proxyResp.Headers.Get("Content-Type"))
+		isStreaming := strings.Contains(contentType, "text/event-stream")
 
 		if isStreaming {
 			p.logger.Debug("Response is streaming (no fallback retry for streaming)",
@@ -406,11 +382,11 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 	case config.ProviderTypeVertexAI:
 		vertexBody, err := vertex.OpenAIToVertex(body, isImageGeneration, modelID)
 		if err != nil {
-			p.logger.Error("Failed to vertex request to Vertex AI format",
+			p.logger.Error("Failed to convert request to Vertex AI format",
 				"credential", cred.Name,
 				"error", err,
 			)
-			http.Error(w, "Internal Server Error: Failed to vertex request", http.StatusInternalServerError)
+			http.Error(w, "Internal Server Error: Failed to convert request to Vertex AI format", http.StatusInternalServerError)
 			return
 		}
 		requestBody = vertexBody
@@ -484,14 +460,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Copy headers (skip hop-by-hop headers and Authorization)
-	for key, values := range r.Header {
-		if isHopByHopHeader(key) || key == "Authorization" {
-			continue
-		}
-		for _, value := range values {
-			proxyReq.Header.Add(key, value)
-		}
-	}
+	copyHeadersSkipAuth(proxyReq, r)
 
 	// Set Authorization header based on credential type
 	switch cred.Type {
@@ -508,20 +477,22 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Detailed debug logging (truncate long fields for readability)
-	p.logger.Debug("Proxy request details",
-		"target_url", targetURL,
-		"credential", cred.Name,
-		"request_body", logger.TruncateLongFields(string(requestBody), 500),
-	)
+	if p.logger.Enabled(context.Background(), slog.LevelDebug) {
+		p.logger.Debug("Proxy request details",
+			"target_url", targetURL,
+			"credential", cred.Name,
+			"request_body", logger.TruncateLongFields(string(requestBody), 500),
+		)
+	}
 
-	// Log headers (mask Authorization for security)
+	// Log headers (omit auth headers for security)
 	debugHeaders := make(map[string]string)
 	for key, values := range proxyReq.Header {
 		switch key {
 		case "Authorization":
-			debugHeaders[key] = "Bearer " + maskKey(cred.APIKey)
+			continue
 		case "X-Api-Key":
-			debugHeaders[key] = maskKey(cred.APIKey)
+			continue
 		default:
 			debugHeaders[key] = strings.Join(values, ", ")
 		}
@@ -562,10 +533,13 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		"headers", debugRespHeaders,
 	)
 
+	// Check if response is streaming once and cache the result
+	isStreamingResp := IsStreamingResponse(resp)
+
 	// Read and log response body for non-streaming responses
 	var responseBody []byte
-	var finalResponseBody []byte // Define here for broader scope
-	if IsStreamingResponse(resp) {
+	finalResponseBody := make([]byte, 0) // Initialize to empty slice to avoid nil panics
+	if isStreamingResp {
 		p.logger.Debug("Response is streaming", "credential", cred.Name)
 	} else {
 		responseBody, err = io.ReadAll(resp.Body)
@@ -625,10 +599,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 					finalResponseBody = responseBody
 				} else {
 					finalResponseBody = vertexedBody
-					p.logger.Debug("Transformed Vertex AI image response to OpenAI format",
-						"credential", cred.Name,
-						"vertexed_body", logger.TruncateLongFields(string(vertexedBody), 200),
-					)
+					p.logTransformedResponse(cred.Name, "Vertex AI image", vertexedBody)
 				}
 			} else {
 				// Transform text response
@@ -641,10 +612,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 					finalResponseBody = responseBody
 				} else {
 					finalResponseBody = vertexedBody
-					p.logger.Debug("Transformed Vertex AI response to OpenAI format",
-						"credential", cred.Name,
-						"vertexed_body", logger.TruncateLongFields(string(vertexedBody), 500),
-					)
+					p.logTransformedResponse(cred.Name, "Vertex AI", vertexedBody)
 				}
 			}
 		case config.ProviderTypeAnthropic:
@@ -658,10 +626,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 				finalResponseBody = responseBody
 			} else {
 				finalResponseBody = anthropicBody
-				p.logger.Debug("Transformed Anthropic response to OpenAI format",
-					"credential", cred.Name,
-					"vertexed_body", logger.TruncateLongFields(string(anthropicBody), 500),
-				)
+				p.logTransformedResponse(cred.Name, "Anthropic", anthropicBody)
 			}
 		default:
 			finalResponseBody = responseBody
@@ -686,32 +651,20 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			)
 		}
 
-		p.logger.Debug("Proxy response body",
-			"credential", cred.Name,
-			"content_encoding", contentEncoding,
-			"body", logger.TruncateLongFields(decodedBody, 500),
-		)
-		// Replace resp.Body with a new reader for subsequent processing
+		if p.logger.Enabled(context.Background(), slog.LevelDebug) {
+			p.logger.Debug("Proxy response body",
+				"credential", cred.Name,
+				"content_encoding", contentEncoding,
+				"body", logger.TruncateLongFields(decodedBody, 500),
+			)
+		}
+		// Replace resp.Body with a new reader for subsequent processing.
+		// NopCloser is required because http.Response.Body must be an io.ReadCloser.
 		resp.Body = io.NopCloser(bytes.NewReader(finalResponseBody))
 	}
 
 	// Copy response headers (skip hop-by-hop headers and transformation-related headers)
-	for key, values := range resp.Header {
-		// Skip hop-by-hop headers
-		if isHopByHopHeader(key) {
-			continue
-		}
-		// Skip Content-Length and Content-Encoding as we may have transformed the response
-		switch cred.Type {
-		case config.ProviderTypeVertexAI, config.ProviderTypeAnthropic:
-			if key == "Content-Length" || key == "Content-Encoding" {
-				continue
-			}
-		}
-		for _, value := range values {
-			w.Header().Add(key, value)
-		}
-	}
+	copyResponseHeaders(w, resp.Header, cred.Type)
 
 	// Set correct Content-Length for vertexed responses
 	switch cred.Type {
@@ -723,7 +676,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 
 	w.WriteHeader(resp.StatusCode)
 
-	if IsStreamingResponse(resp) {
+	if isStreamingResp {
 		switch cred.Type {
 		case config.ProviderTypeVertexAI:
 			// Handle Vertex AI streaming with token tracking
@@ -738,13 +691,35 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 				p.logger.Error("Failed to vertex streaming response", "error", err)
 			}
 		default:
-			p.handleStreamingWithTokens(w, resp, cred.Name, modelID)
+			err := p.handleStreamingWithTokens(w, resp, cred.Name, modelID)
+			if err != nil {
+				p.logger.Error("Failed to handle streaming response", "error", err)
+			}
 		}
 
 	} else {
-		if _, err := io.Copy(w, resp.Body); err != nil {
+		if _, err := p.streamResponseBody(w, resp.Body); err != nil {
 			p.logger.Error("Failed to copy response body", "error", err)
 		}
+	}
+}
+
+// streamResponseBody streams a response body to the client using a pooled buffer
+// to minimize memory allocations for large responses
+func (p *Proxy) streamResponseBody(w io.Writer, reader io.Reader) (int64, error) {
+	buf := streamBufPool.Get().(*[]byte)
+	defer streamBufPool.Put(buf)
+	return io.CopyBuffer(w, reader, *buf)
+}
+
+// logTransformedResponse logs a transformed response at debug level
+func (p *Proxy) logTransformedResponse(credName, providerName string, body []byte) {
+	if p.logger.Enabled(context.Background(), slog.LevelDebug) {
+		p.logger.Debug("Transformed response to OpenAI format",
+			"credential", credName,
+			"provider", providerName,
+			"body", logger.TruncateLongFields(string(body), 500),
+		)
 	}
 }
 
@@ -761,150 +736,4 @@ func (tcw *tokenCapturingWriter) Write(p []byte) (n int, err error) {
 		*tcw.tokens += tokens
 	}
 	return tcw.writer.Write(p)
-}
-
-func extractTokensFromStreamingChunk(chunk string) int {
-	// Look for usage information in streaming chunks
-	lines := strings.Split(chunk, "\n")
-	for _, line := range lines {
-		if strings.HasPrefix(line, "data: ") {
-			jsonData := strings.TrimPrefix(line, "data: ")
-			if jsonData == "[DONE]" {
-				continue
-			}
-
-			var chunkData map[string]interface{}
-			if err := json.Unmarshal([]byte(jsonData), &chunkData); err != nil {
-				continue
-			}
-
-			// Check for usage field in OpenAI format
-			if usage, ok := chunkData["usage"].(map[string]interface{}); ok {
-				if totalTokens, ok := usage["total_tokens"].(float64); ok {
-					return int(totalTokens)
-				}
-			}
-		}
-	}
-	return 0
-}
-
-// extractMetadataFromBody extracts the model ID from the request body
-func extractMetadataFromBody(body []byte) (string, bool, []byte) {
-	if len(body) == 0 {
-		return "", false, body
-	}
-
-	// var reqBody struct {
-	// 	Model string `json:"model"`
-	// 	Stream bool `json:"stream,omitempty"`
-	// 	StreamOptions map[string]interface{} `json:"stream_options,omitempty"`
-	// }
-	var reqBody map[string]interface{}
-	if err := json.Unmarshal(body, &reqBody); err != nil {
-		return "", false, body // Return original if parsing fails
-	}
-
-	model, ok := reqBody["model"].(string)
-	if !ok {
-		return "", false, body // Return original if model is missing or not streaming
-	}
-
-	// Check if this is a streaming request
-	stream, ok := reqBody["stream"].(bool)
-	if !ok || !stream {
-		return model, false, body // Not a streaming request, return as-is
-	}
-
-	// Ensure stream_options exists and include_usage is true
-	streamOptions, exists := reqBody["stream_options"]
-	if !exists {
-		// Create stream_options if it doesn't exist
-		reqBody["stream_options"] = map[string]interface{}{
-			"include_usage": true,
-		}
-	} else if streamOptionsMap, ok := streamOptions.(map[string]interface{}); ok {
-		// Update existing stream_options to ensure include_usage is true
-		streamOptionsMap["include_usage"] = true
-	} else {
-		// stream_options exists but is not a map, replace it
-		reqBody["stream_options"] = map[string]interface{}{
-			"include_usage": true,
-		}
-	}
-
-	// Marshal back to JSON
-	modifiedBody, err := json.Marshal(reqBody)
-	if err != nil {
-		return model, stream, body // Return original if marshaling fails
-	}
-
-	return model, stream, modifiedBody
-}
-
-// decodeResponseBody decodes the response body based on Content-Encoding
-func decodeResponseBody(body []byte, encoding string) string {
-	// Check if response is gzip-encoded
-	if strings.Contains(strings.ToLower(encoding), "gzip") {
-		reader, err := gzip.NewReader(bytes.NewReader(body))
-		if err != nil {
-			return string(body) // Return as-is if can't decode
-		}
-		defer func() {
-			_ = reader.Close()
-		}()
-
-		decoded, err := io.ReadAll(reader)
-		if err != nil {
-			return string(body) // Return as-is if can't read
-		}
-		return string(decoded)
-	}
-
-	// Return as plain text
-	return string(body)
-}
-
-// extractTokensFromResponse extracts total_tokens from the response body
-// Supports both OpenAI format (usage.total_tokens) and Vertex AI format (usageMetadata.totalTokenCount)
-func extractTokensFromResponse(body string, credType config.ProviderType) int {
-	if body == "" {
-		return 0
-	}
-
-	// For Vertex AI, use usageMetadata format
-	if credType == config.ProviderTypeVertexAI {
-		var vertexResp struct {
-			UsageMetadata struct {
-				TotalTokenCount int `json:"totalTokenCount"`
-			} `json:"usageMetadata"`
-		}
-
-		if err := json.Unmarshal([]byte(body), &vertexResp); err != nil {
-			return 0
-		}
-
-		return vertexResp.UsageMetadata.TotalTokenCount
-	}
-
-	// For OpenAI and other providers, use standard format
-	var openAIResp struct {
-		Usage struct {
-			TotalTokens int `json:"total_tokens"`
-		} `json:"usage"`
-	}
-
-	if err := json.Unmarshal([]byte(body), &openAIResp); err != nil {
-		return 0
-	}
-
-	return openAIResp.Usage.TotalTokens
-}
-
-// maskKey masks the API key for logging (shows only first 7 chars)
-func maskKey(key string) string {
-	if len(key) <= 7 {
-		return "***"
-	}
-	return key[:7] + "..."
 }

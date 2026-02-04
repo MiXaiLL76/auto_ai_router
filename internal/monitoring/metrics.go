@@ -73,6 +73,30 @@ var (
 		},
 		[]string{"credential", "model"},
 	)
+
+	CredentialSelectionRejected = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "auto_ai_router_credential_selection_rejected_total",
+			Help: "Total number of times a credential was rejected during selection",
+		},
+		[]string{"reason"},
+	)
+
+	CredentialBanEvents = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "auto_ai_router_credential_ban_events_total",
+			Help: "Total number of ban events for credentials",
+		},
+		[]string{"credential", "error_code"},
+	)
+
+	CredentialUnbanEvents = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "auto_ai_router_credential_unban_events_total",
+			Help: "Total number of unban events for credentials",
+		},
+		[]string{"credential"},
+	)
 )
 
 type Metrics struct {
@@ -85,8 +109,28 @@ func New(enabled bool) *Metrics {
 	}
 }
 
+func (m *Metrics) isEnabled() bool {
+	return m.enabled
+}
+
+// updateCredentialMetric updates a credential-level gauge metric
+func (m *Metrics) updateCredentialMetric(gauge *prometheus.GaugeVec, credential string, value int) {
+	if !m.isEnabled() {
+		return
+	}
+	gauge.WithLabelValues(credential).Set(float64(value))
+}
+
+// updateModelMetric updates a model-level gauge metric
+func (m *Metrics) updateModelMetric(gauge *prometheus.GaugeVec, credential, model string, value int) {
+	if !m.isEnabled() {
+		return
+	}
+	gauge.WithLabelValues(credential, model).Set(float64(value))
+}
+
 func (m *Metrics) RecordRequest(credential, endpoint string, statusCode int, duration time.Duration) {
-	if !m.enabled {
+	if !m.isEnabled() {
 		return
 	}
 
@@ -100,21 +144,15 @@ func (m *Metrics) RecordRequest(credential, endpoint string, statusCode int, dur
 }
 
 func (m *Metrics) UpdateCredentialRPM(credential string, rpm int) {
-	if !m.enabled {
-		return
-	}
-	CredentialRPMCurrent.WithLabelValues(credential).Set(float64(rpm))
+	m.updateCredentialMetric(CredentialRPMCurrent, credential, rpm)
 }
 
 func (m *Metrics) UpdateCredentialTPM(credential string, tpm int) {
-	if !m.enabled {
-		return
-	}
-	CredentialTPMCurrent.WithLabelValues(credential).Set(float64(tpm))
+	m.updateCredentialMetric(CredentialTPMCurrent, credential, tpm)
 }
 
 func (m *Metrics) UpdateCredentialBanStatus(credential string, banned bool) {
-	if !m.enabled {
+	if !m.isEnabled() {
 		return
 	}
 	value := 0.0
@@ -125,15 +163,9 @@ func (m *Metrics) UpdateCredentialBanStatus(credential string, banned bool) {
 }
 
 func (m *Metrics) UpdateModelRPM(credential, model string, rpm int) {
-	if !m.enabled {
-		return
-	}
-	ModelRPMCurrent.WithLabelValues(credential, model).Set(float64(rpm))
+	m.updateModelMetric(ModelRPMCurrent, credential, model, rpm)
 }
 
 func (m *Metrics) UpdateModelTPM(credential, model string, tpm int) {
-	if !m.enabled {
-		return
-	}
-	ModelTPMCurrent.WithLabelValues(credential, model).Set(float64(tpm))
+	m.updateModelMetric(ModelTPMCurrent, credential, model, tpm)
 }

@@ -20,8 +20,11 @@ try:
     print("Sending chat request to gpt-oss-120b...")
     print(f"Question: {question}")
     print()
+    print("Answer:")
+    print("-" * 50)
 
-    response = client.chat.completions.create(
+    # Create streaming response
+    stream = client.chat.completions.create(
         model="gpt-oss-120b",
         messages=[
             {
@@ -31,21 +34,17 @@ try:
         ],
         max_tokens=512,
         temperature=0.7,
+        stream=True,
     )
 
-    print("Response received!")
-    print(f"Model: {response.model}")
-    print(f"Usage: {response.usage.prompt_tokens} prompt tokens, {response.usage.completion_tokens} completion tokens")
+    # Stream the response chunks
+    for chunk in stream:
+        if chunk.choices and len(chunk.choices) > 0:
+            delta = chunk.choices[0].delta
+            if hasattr(delta, 'content') and delta.content:
+                print(delta.content, end="", flush=True)
+
     print()
-    print("Answer:")
-    print("-" * 50)
-
-    if response.choices and len(response.choices) > 0:
-        print(response.choices[0].message.content)
-    else:
-        print("No response received")
-        sys.exit(1)
-
     print("-" * 50)
 
 except Exception as e:

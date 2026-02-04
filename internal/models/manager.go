@@ -223,10 +223,11 @@ func (m *Manager) GetAllModels() ModelsResponse {
 
 	var models []Model
 	modelMap := make(map[string]bool)
+	allModelsSnapshot := append([]Model(nil), m.allModels...)
 
-	// If static models are configured, add them first
+	// Add static models first (configured in model_limits)
 	if len(m.modelLimits) > 0 {
-		models = make([]Model, 0, len(m.modelLimits))
+		models = make([]Model, 0, len(m.modelLimits)+len(allModelsSnapshot))
 		for modelName := range m.modelLimits {
 			models = append(models, Model{
 				ID:      modelName,
@@ -237,10 +238,13 @@ func (m *Manager) GetAllModels() ModelsResponse {
 			modelMap[modelName] = true
 		}
 	} else {
-		// Otherwise use allModels
-		models = make([]Model, len(m.allModels))
-		copy(models, m.allModels)
-		for _, model := range m.allModels {
+		models = make([]Model, 0, len(allModelsSnapshot))
+	}
+
+	// Also add models from credential config (allModels)
+	for _, model := range allModelsSnapshot {
+		if !modelMap[model.ID] {
+			models = append(models, model)
 			modelMap[model.ID] = true
 		}
 	}
@@ -323,6 +327,7 @@ func (m *Manager) GetAllModels() ModelsResponse {
 		response:  response,
 		expiresAt: time.Now().Add(3 * time.Second),
 	}
+	m.allModels = append([]Model(nil), models...)
 
 	return response
 }
@@ -408,28 +413,24 @@ func (m *Manager) AddModel(credentialName, modelID string) {
 	defer m.mu.Unlock()
 
 	// Add to credentialModels
-	found := false
-	for _, model := range m.credentialModels[credentialName] {
-		if model == modelID {
-			found = true
-			break
-		}
-	}
-	if !found {
+	if !m.contains(m.credentialModels[credentialName], modelID) {
 		m.credentialModels[credentialName] = append(m.credentialModels[credentialName], modelID)
 	}
 
 	// Add to modelToCredentials
-	found = false
-	for _, cred := range m.modelToCredentials[modelID] {
-		if cred == credentialName {
-			found = true
-			break
-		}
-	}
-	if !found {
+	if !m.contains(m.modelToCredentials[modelID], credentialName) {
 		m.modelToCredentials[modelID] = append(m.modelToCredentials[modelID], credentialName)
 	}
+}
+
+// contains checks if a string slice contains a value
+func (m *Manager) contains(slice []string, value string) bool {
+	for _, item := range slice {
+		if item == value {
+			return true
+		}
+	}
+	return false
 }
 
 // IsEnabled returns whether model filtering should be used
@@ -442,30 +443,40 @@ func (m *Manager) IsEnabled() bool {
 	return len(m.modelLimits) > 0
 }
 
-// findRPMLimit searches for RPM limit with optional credential filtering
-func findRPMLimit(limits []ModelLimits, credentialName string) (int, bool) {
+// findLimit searches for a limit value with optional credential filtering
+// The fieldFunc extracts the value from ModelLimits (e.g., func(ml) ml.RPM)
+// The convertFunc optionally transforms the value (e.g., convert 0 to -1 for TPM)
+func findLimit(limits []ModelLimits, credentialName string, fieldFunc func(*ModelLimits) int, convertFunc func(int) int) (int, bool) {
 	if credentialName != "" {
 		// Look for credential-specific limit first
-		for _, limit := range limits {
-			if limit.Credential == credentialName {
-				return limit.RPM, true
+		for i := range limits {
+			if limits[i].Credential == credentialName {
+				value := fieldFunc(&limits[i])
+				return convertFunc(value), true
 			}
 		}
 	}
 
 	// Fall back to global limit (no credential specified)
-	for _, limit := range limits {
-		if limit.Credential == "" {
-			return limit.RPM, true
+	for i := range limits {
+		if limits[i].Credential == "" {
+			value := fieldFunc(&limits[i])
+			return convertFunc(value), true
 		}
 	}
 
 	// If only credential-specific limits exist and no credential specified, return first one
 	if credentialName == "" && len(limits) > 0 {
-		return limits[0].RPM, true
+		value := fieldFunc(&limits[0])
+		return convertFunc(value), true
 	}
 
 	return 0, false
+}
+
+// findRPMLimit searches for RPM limit with optional credential filtering
+func findRPMLimit(limits []ModelLimits, credentialName string) (int, bool) {
+	return findLimit(limits, credentialName, func(ml *ModelLimits) int { return ml.RPM }, func(v int) int { return v })
 }
 
 // GetModelRPM returns RPM limit for a specific model
@@ -505,37 +516,13 @@ func (m *Manager) GetModelRPMForCredential(modelID, credentialName string) int {
 // findTPMLimit searches for TPM limit with optional credential filtering
 // Returns -1 for unlimited (when TPM is 0 or not set)
 func findTPMLimit(limits []ModelLimits, credentialName string) (int, bool) {
-	if credentialName != "" {
-		// Look for credential-specific limit first
-		for _, limit := range limits {
-			if limit.Credential == credentialName {
-				if limit.TPM == 0 {
-					return -1, true // 0 means unlimited
-				}
-				return limit.TPM, true
-			}
+	convertTPM := func(v int) int {
+		if v == 0 {
+			return -1 // 0 means unlimited
 		}
+		return v
 	}
-
-	// Fall back to global limit (no credential specified)
-	for _, limit := range limits {
-		if limit.Credential == "" {
-			if limit.TPM == 0 {
-				return -1, true // 0 means unlimited
-			}
-			return limit.TPM, true
-		}
-	}
-
-	// If only credential-specific limits exist and no credential specified, return first one
-	if credentialName == "" && len(limits) > 0 {
-		if limits[0].TPM == 0 {
-			return -1, true
-		}
-		return limits[0].TPM, true
-	}
-
-	return 0, false
+	return findLimit(limits, credentialName, func(ml *ModelLimits) int { return ml.TPM }, convertTPM)
 }
 
 // GetModelTPM returns TPM limit for a specific model
@@ -575,59 +562,60 @@ func (m *Manager) GetModelTPMForCredential(modelID, credentialName string) int {
 // GetModelsForCredential returns all models available for a specific credential
 func (m *Manager) GetModelsForCredential(credentialName string) []Model {
 	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	var result []Model
-	seenModels := make(map[string]bool) // Track already added models to avoid duplicates
-
-	// If we have static models configured, use them
-	if len(m.modelLimits) > 0 {
-		for modelName, limits := range m.modelLimits {
-			// Check if model is available for this credential
-			available := false
-			for _, limit := range limits {
-				if limit.Credential == "" || limit.Credential == credentialName {
-					available = true
-					break
+	modelIDs := make([]string, 0)
+	seen := make(map[string]bool)
+	for modelID, creds := range m.modelToCredentials {
+		for _, cred := range creds {
+			if cred == credentialName {
+				if !seen[modelID] {
+					modelIDs = append(modelIDs, modelID)
+					seen[modelID] = true
 				}
-			}
-			if available {
-				result = append(result, Model{
-					ID:      modelName,
-					Object:  "model",
-					Created: openai.GetCurrentTimestamp(),
-					OwnedBy: "system",
-				})
-				seenModels[modelName] = true
+				break
 			}
 		}
 	}
 
-	// Also include dynamically added models from credentialModels
-	if modelIDs, ok := m.credentialModels[credentialName]; ok {
-		for _, modelID := range modelIDs {
-			if seenModels[modelID] {
-				continue // Skip if already added from static config
-			}
-			// Find the model in allModels
-			found := false
-			for _, model := range m.allModels {
-				if model.ID == modelID {
-					result = append(result, model)
-					found = true
+	// Preserve legacy behavior: unknown credentials still get global models
+	if len(modelIDs) == 0 && len(m.modelLimits) > 0 {
+		for modelName, limits := range m.modelLimits {
+			for _, limit := range limits {
+				if limit.Credential == "" {
+					if !seen[modelName] {
+						modelIDs = append(modelIDs, modelName)
+						seen[modelName] = true
+					}
 					break
 				}
 			}
-			// If not in allModels, create a basic model entry
-			if !found {
-				result = append(result, Model{
-					ID:      modelID,
-					Object:  "model",
-					Created: openai.GetCurrentTimestamp(),
-					OwnedBy: "system",
-				})
-			}
 		}
+	}
+
+	if len(modelIDs) == 0 {
+		m.mu.RUnlock()
+		return nil
+	}
+
+	allModelsSnapshot := append([]Model(nil), m.allModels...)
+	m.mu.RUnlock()
+
+	modelLookup := make(map[string]Model, len(allModelsSnapshot))
+	for _, model := range allModelsSnapshot {
+		modelLookup[model.ID] = model
+	}
+
+	result := make([]Model, 0, len(modelIDs))
+	for _, modelID := range modelIDs {
+		if model, ok := modelLookup[modelID]; ok {
+			result = append(result, model)
+			continue
+		}
+		result = append(result, Model{
+			ID:      modelID,
+			Object:  "model",
+			Created: openai.GetCurrentTimestamp(),
+			OwnedBy: "system",
+		})
 	}
 
 	return result

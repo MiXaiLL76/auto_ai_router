@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -62,7 +63,30 @@ func main() {
 		)
 	}
 
-	f2b := fail2ban.New(cfg.Fail2Ban.MaxAttempts, cfg.Fail2Ban.BanDuration, cfg.Fail2Ban.ErrorCodes)
+	// Convert config rules to fail2ban rules
+	var rules []fail2ban.ErrorCodeRule
+	for _, rule := range cfg.Fail2Ban.ErrorCodeRules {
+		// Parse ban_duration from string
+		var banDuration time.Duration
+		if rule.BanDuration == "permanent" || rule.BanDuration == "" {
+			banDuration = 0 // permanent
+		} else {
+			var err error
+			banDuration, err = time.ParseDuration(rule.BanDuration)
+			if err != nil {
+				log.Error("Invalid ban_duration in error_code_rules", "error_code", rule.Code, "error", err)
+				banDuration = cfg.Fail2Ban.BanDuration
+			}
+		}
+
+		rules = append(rules, fail2ban.ErrorCodeRule{
+			Code:        rule.Code,
+			MaxAttempts: rule.MaxAttempts,
+			BanDuration: banDuration,
+		})
+	}
+
+	f2b := fail2ban.NewWithRules(cfg.Fail2Ban.MaxAttempts, cfg.Fail2Ban.BanDuration, cfg.Fail2Ban.ErrorCodes, rules)
 	rateLimiter := ratelimit.New()
 	bal := balancer.New(cfg.Credentials, f2b, rateLimiter)
 	bal.SetLogger(log)
@@ -109,12 +133,26 @@ func main() {
 	// Create Vertex AI token manager
 	tokenManager := auth.NewVertexTokenManager(log)
 	log.Info("Vertex AI token manager initialized")
+	defer tokenManager.Stop()
 
 	metrics := monitoring.New(cfg.Monitoring.PrometheusEnabled)
-	prx := proxy.New(bal, log, cfg.Server.MaxBodySizeMB, cfg.Server.RequestTimeout, metrics, cfg.Server.MasterKey, rateLimiter, tokenManager, modelManager, Version, Commit)
+	prx := proxy.New(&proxy.Config{
+		Balancer:       bal,
+		Logger:         log,
+		MaxBodySizeMB:  cfg.Server.MaxBodySizeMB,
+		RequestTimeout: cfg.Server.RequestTimeout,
+		Metrics:        metrics,
+		MasterKey:      cfg.Server.MasterKey,
+		RateLimiter:    rateLimiter,
+		TokenManager:   tokenManager,
+		ModelManager:   modelManager,
+		Version:        Version,
+		Commit:         Commit,
+	})
 
 	// Start background metrics updater
 	var metricsCancel context.CancelFunc
+	var updateMutex sync.Mutex // Synchronize metrics and proxy stats updates
 	if cfg.Monitoring.PrometheusEnabled {
 		metricsCtx, cancel := context.WithCancel(context.Background())
 		metricsCancel = cancel
@@ -126,13 +164,14 @@ func main() {
 				case <-metricsCtx.Done():
 					return
 				case <-ticker.C:
-					credentials := bal.GetCredentials()
+					updateMutex.Lock()
+					credentials := bal.GetCredentialsSnapshot()
 
 					// Update credential metrics (exclude proxy type credentials)
 					// Proxy credentials are internal forwarding nodes, not real providers
 					for _, cred := range credentials {
 						// Skip proxy credentials - they are monitored via remote /health endpoint
-						if cred.Type == config.ProviderTypeProxy {
+						if bal.IsProxyCredential(cred.Name) {
 							continue
 						}
 
@@ -156,7 +195,7 @@ func main() {
 							modelName := parts[1]
 
 							// Skip models for proxy credentials
-							if isProxyCredential(credentialName, credentials) {
+							if bal.IsProxyCredential(credentialName) {
 								continue
 							}
 
@@ -167,6 +206,7 @@ func main() {
 							metrics.UpdateModelTPM(credentialName, modelName, modelTPM)
 						}
 					}
+					updateMutex.Unlock()
 				}
 			}
 		}()
@@ -177,13 +217,13 @@ func main() {
 	// Fetches RPM/TPM limits from remote proxy /health endpoint
 	go func() {
 		// Update immediately on startup
-		updateAllProxyCredentials(bal, rateLimiter, log, modelManager)
+		updateAllProxyCredentials(bal, rateLimiter, log, modelManager, &updateMutex)
 
 		// Then update periodically with staggered timing
 		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
 		for range ticker.C {
-			updateAllProxyCredentials(bal, rateLimiter, log, modelManager)
+			updateAllProxyCredentials(bal, rateLimiter, log, modelManager, &updateMutex)
 		}
 	}()
 	log.Info("Proxy stats updater started (updates every 30 seconds)")
@@ -202,11 +242,11 @@ func main() {
 	var readTimeout, writeTimeout, idleTimeout time.Duration
 
 	if cfg.Server.RequestTimeout > 0 {
-		// ReadTimeout: для чтения запроса от клиента (обычно быстро)
+		// ReadTimeout: time to read request from client (usually fast)
 		readTimeout = 60 * time.Second
-		// WriteTimeout: request_timeout + 50% буфер для записи ответа
+		// WriteTimeout: request_timeout + 50% buffer for response writing
 		writeTimeout = time.Duration(float64(cfg.Server.RequestTimeout) * 1.5)
-		// IdleTimeout: в 2 раза больше WriteTimeout для keep-alive соединений
+		// IdleTimeout: 2x WriteTimeout for keep-alive connections
 		idleTimeout = writeTimeout * 2
 	} else {
 		// If request timeout is disabled (-1), use reasonable defaults
@@ -253,62 +293,54 @@ func main() {
 		os.Exit(1)
 	}
 
+	if err := router.CloseErrorLogFiles(); err != nil {
+		log.Error("Failed to close error log files", "error", err)
+	}
+
 	log.Info("Server shutdown complete")
 }
 
 // updateAllProxyCredentials updates all proxy credentials with staggered timing
 // to avoid thundering herd problem when multiple proxies are updated simultaneously
-func updateAllProxyCredentials(bal *balancer.RoundRobin, rateLimiter *ratelimit.RPMLimiter, log *slog.Logger, modelManager *models.Manager) {
-	credentials := bal.GetCredentials()
-	proxyCount := 0
-
-	// Count proxy credentials
+func updateAllProxyCredentials(bal *balancer.RoundRobin, rateLimiter *ratelimit.RPMLimiter, log *slog.Logger, modelManager *models.Manager, updateMutex *sync.Mutex) {
+	credentials := bal.GetCredentialsSnapshot()
+	proxyCredentials := make([]config.CredentialConfig, 0, len(credentials))
 	for _, cred := range credentials {
 		if cred.Type == config.ProviderTypeProxy {
-			proxyCount++
+			proxyCredentials = append(proxyCredentials, cred)
 		}
 	}
 
-	if proxyCount == 0 {
+	if len(proxyCredentials) == 0 {
 		return
 	}
 
 	// Stagger updates: distribute them evenly across the update interval
 	// For each proxy, calculate a small delay to spread requests
 	staggerDelay := 100 * time.Millisecond // Small delay between each proxy update
-	proxyIndex := 0
+	updateTimeout := 5 * time.Second
+	for index, cred := range proxyCredentials {
+		// Create a copy of credential for closure (avoid loop variable capture)
+		credCopy := cred
 
-	for _, cred := range credentials {
-		if cred.Type == config.ProviderTypeProxy {
-			// Create a copy of credential for closure (avoid loop variable capture)
-			credCopy := cred
-
-			// Use a small staggered delay to spread the requests
-			if proxyIndex > 0 {
-				time.Sleep(staggerDelay)
-			}
-
-			// Create context with timeout for this update
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			proxy.UpdateStatsFromRemoteProxy(ctx, &credCopy, rateLimiter, log, modelManager)
-			cancel()
-
-			proxyIndex++
+		if index > 0 {
+			time.Sleep(staggerDelay * time.Duration(index))
 		}
+
+		ctx, cancel := context.WithTimeout(context.Background(), updateTimeout)
+		health, err := proxy.FetchHealthFromRemoteProxy(ctx, &credCopy, log)
+		cancel()
+		if err != nil {
+			continue
+		}
+
+		updateMutex.Lock()
+		proxy.UpdateStatsFromHealth(health, &credCopy, rateLimiter, log, modelManager)
+		updateMutex.Unlock()
 	}
 }
 
 // splitCredentialModel splits "credential:model" format into [credential, model]
 func splitCredentialModel(key string) []string {
 	return strings.SplitN(key, ":", 2)
-}
-
-// isProxyCredential checks if a credential is a proxy type
-func isProxyCredential(credentialName string, credentials []config.CredentialConfig) bool {
-	for _, cred := range credentials {
-		if cred.Name == credentialName && cred.Type == config.ProviderTypeProxy {
-			return true
-		}
-	}
-	return false
 }

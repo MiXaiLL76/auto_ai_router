@@ -54,7 +54,7 @@ func TestHandleStreamingWithTokens(t *testing.T) {
 	mm := createTestModelManager(logger)
 
 	// Создаем Proxy
-	prx := New(
+	prx := createProxyWithParams(
 		bal, logger, 10, 5*time.Second, metrics,
 		"master-key", rl, tm, mm,
 		"test-version", "test-commit",
@@ -78,7 +78,8 @@ func TestHandleStreamingWithTokens(t *testing.T) {
 	w := httptest.NewRecorder()
 
 	// Вызываем handleStreamingWithTokens напрямую
-	prx.handleStreamingWithTokens(w, resp, credName, modelID)
+	err = prx.handleStreamingWithTokens(w, resp, credName, modelID)
+	require.NoError(t, err, "handleStreamingWithTokens не должен возвращать ошибку")
 
 	// Проверяем результат в ResponseRecorder
 	result := w.Result()
@@ -142,7 +143,7 @@ func TestHandleStreamingWithTokens_NoTokens(t *testing.T) {
 	tm := createTestTokenManager(logger)
 	mm := createTestModelManager(logger)
 
-	prx := New(
+	prx := createProxyWithParams(
 		bal, logger, 10, 5*time.Second, metrics,
 		"master-key", rl, tm, mm,
 		"test-version", "test-commit",
@@ -157,7 +158,8 @@ func TestHandleStreamingWithTokens_NoTokens(t *testing.T) {
 	defer func() { _ = resp.Body.Close() }()
 
 	w := httptest.NewRecorder()
-	prx.handleStreamingWithTokens(w, resp, credName, modelID)
+	err = prx.handleStreamingWithTokens(w, resp, credName, modelID)
+	require.NoError(t, err, "handleStreamingWithTokens не должен возвращать ошибку")
 
 	// Проверяем что токены НЕ были добавлены
 	credentialTPM := rl.GetCurrentTPM(credName)
@@ -208,7 +210,7 @@ func TestHandleStreamingWithTokens_MultipleChunks(t *testing.T) {
 	tm := createTestTokenManager(logger)
 	mm := createTestModelManager(logger)
 
-	prx := New(
+	prx := createProxyWithParams(
 		bal, logger, 10, 5*time.Second, metrics,
 		"master-key", rl, tm, mm,
 		"test-version", "test-commit",
@@ -222,7 +224,8 @@ func TestHandleStreamingWithTokens_MultipleChunks(t *testing.T) {
 	defer func() { _ = resp.Body.Close() }()
 
 	w := httptest.NewRecorder()
-	prx.handleStreamingWithTokens(w, resp, credName, modelID)
+	err = prx.handleStreamingWithTokens(w, resp, credName, modelID)
+	require.NoError(t, err, "handleStreamingWithTokens не должен возвращать ошибку")
 
 	// Проверяем что токены были просуммированы: 10 + 5 = 15
 	// (total_tokens появляется в 1-м и 3-м чанках)
@@ -266,7 +269,7 @@ func TestHandleStreamingWithTokens_WithoutModelID(t *testing.T) {
 	tm := createTestTokenManager(logger)
 	mm := createTestModelManager(logger)
 
-	prx := New(
+	prx := createProxyWithParams(
 		bal, logger, 10, 5*time.Second, metrics,
 		"master-key", rl, tm, mm,
 		"test-version", "test-commit",
@@ -282,7 +285,8 @@ func TestHandleStreamingWithTokens_WithoutModelID(t *testing.T) {
 	w := httptest.NewRecorder()
 
 	// Это не должно упасть даже с пустым modelID
-	prx.handleStreamingWithTokens(w, resp, credName, modelID)
+	err = prx.handleStreamingWithTokens(w, resp, credName, modelID)
+	require.NoError(t, err, "handleStreamingWithTokens не должен возвращать ошибку")
 
 	// Проверяем что credential-level tokens были добавлены
 	credentialTPM := rl.GetCurrentTPM(credName)

@@ -3,14 +3,14 @@ package proxy
 import (
 	_ "embed"
 	"net/http"
-	"strings"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/httputil"
 )
 
 func (p *Proxy) HealthCheck() (bool, *httputil.ProxyHealthResponse) {
-	totalCreds := len(p.balancer.GetCredentials())
+	creds := p.balancer.GetCredentialsSnapshot()
+	totalCreds := len(creds)
 	availableCreds := p.balancer.GetAvailableCount()
 	bannedCreds := p.balancer.GetBannedCount()
 
@@ -18,7 +18,10 @@ func (p *Proxy) HealthCheck() (bool, *httputil.ProxyHealthResponse) {
 
 	// Collect credentials info
 	credentialsInfo := make(map[string]httputil.CredentialHealthStats)
-	for _, cred := range p.balancer.GetCredentials() {
+	if creds == nil {
+		creds = []config.CredentialConfig{}
+	}
+	for _, cred := range creds {
 		// For proxy credentials, get limits from rateLimiter (updated by UpdateStatsFromRemoteProxy)
 		// For other credentials, use config values
 		limitRPM := cred.RPM
@@ -34,9 +37,13 @@ func (p *Proxy) HealthCheck() (bool, *httputil.ProxyHealthResponse) {
 			}
 		}
 
+		// Check if credential is banned from balancer
+		isBanned := p.balancer.IsBanned(cred.Name)
+
 		credentialsInfo[cred.Name] = httputil.CredentialHealthStats{
 			Type:       string(cred.Type),
 			IsFallback: cred.IsFallback,
+			IsBanned:   isBanned,
 			CurrentRPM: p.rateLimiter.GetCurrentRPM(cred.Name),
 			CurrentTPM: p.rateLimiter.GetCurrentTPM(cred.Name),
 			LimitRPM:   limitRPM,
@@ -47,25 +54,18 @@ func (p *Proxy) HealthCheck() (bool, *httputil.ProxyHealthResponse) {
 	// Collect models info from rateLimiter (which tracks all credential:model pairs)
 	modelsInfo := make(map[string]httputil.ModelHealthStats)
 
-	// Get all tracked credential:model pairs from rateLimiter
+	// Get all tracked credential:model pairs from rateLimiter (pre-parsed)
 	// This includes duplicates when same model is available from different credentials
-	allTrackedModels := p.rateLimiter.GetAllModels()
-	for _, modelKey := range allTrackedModels {
-		// Parse credential:model format
-		parts := strings.Split(modelKey, ":")
-		if len(parts) != 2 {
-			continue
-		}
-		credName := parts[0]
-		modelID := parts[1]
-
+	allTrackedModels := p.rateLimiter.GetAllModelPairs()
+	for _, pair := range allTrackedModels {
+		modelKey := pair.Credential + ":" + pair.Model
 		modelsInfo[modelKey] = httputil.ModelHealthStats{
-			Credential: credName,
-			Model:      modelID,
-			CurrentRPM: p.rateLimiter.GetCurrentModelRPM(credName, modelID),
-			CurrentTPM: p.rateLimiter.GetCurrentModelTPM(credName, modelID),
-			LimitRPM:   p.rateLimiter.GetModelLimitRPM(credName, modelID),
-			LimitTPM:   p.rateLimiter.GetModelLimitTPM(credName, modelID),
+			Credential: pair.Credential,
+			Model:      pair.Model,
+			CurrentRPM: p.rateLimiter.GetCurrentModelRPM(pair.Credential, pair.Model),
+			CurrentTPM: p.rateLimiter.GetCurrentModelTPM(pair.Credential, pair.Model),
+			LimitRPM:   p.rateLimiter.GetModelLimitRPM(pair.Credential, pair.Model),
+			LimitTPM:   p.rateLimiter.GetModelLimitTPM(pair.Credential, pair.Model),
 		}
 	}
 

@@ -1,9 +1,10 @@
 package proxy
 
 import (
+	"bytes"
 	"fmt"
+	"math/rand"
 	"net/http"
-	"strings"
 	"time"
 )
 
@@ -44,19 +45,23 @@ func ShouldRetryWithFallback(statusCode int, respBody []byte) (bool, RetryReason
 // isRetryableContent checks if response body contains errors that shouldn't be retried.
 // This is a helper function extracted for DRY compliance.
 func isRetryableContent(respBody []byte) bool {
-	bodyLower := strings.ToLower(string(respBody))
+	const maxRetryBodyScan = 8 * 1024
+	if len(respBody) > maxRetryBodyScan {
+		respBody = respBody[:maxRetryBodyScan]
+	}
+	bodyLower := bytes.ToLower(respBody)
 
 	// Don't retry if content policy violation (provider-specific business logic error)
-	if strings.Contains(bodyLower, "content policy") ||
-		strings.Contains(bodyLower, "content management policy") ||
-		strings.Contains(bodyLower, "policy violation") {
+	if bytes.Contains(bodyLower, []byte("content policy")) ||
+		bytes.Contains(bodyLower, []byte("content management policy")) ||
+		bytes.Contains(bodyLower, []byte("policy violation")) {
 		return false
 	}
 
 	// Don't retry if it's a model-specific error that won't be fixed by retrying
-	if strings.Contains(bodyLower, "model not found") ||
-		strings.Contains(bodyLower, "model does not exist") ||
-		strings.Contains(bodyLower, "unsupported model") {
+	if bytes.Contains(bodyLower, []byte("model not found")) ||
+		bytes.Contains(bodyLower, []byte("model does not exist")) ||
+		bytes.Contains(bodyLower, []byte("unsupported model")) {
 		return false
 	}
 
@@ -104,6 +109,10 @@ func (p *Proxy) TryFallbackProxy(
 		"original_status", originalStatus,
 		"retry_reason", originalReason,
 	)
+
+	// Add jitter (0-50ms) to prevent thundering herd when multiple requests fail simultaneously
+	jitter := time.Duration(rand.Intn(50)) * time.Millisecond
+	time.Sleep(jitter)
 
 	// Forward request to fallback proxy
 	proxyResp, err := p.forwardToProxy(w, r, modelID, fallbackCred, body, start)

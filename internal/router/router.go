@@ -83,7 +83,7 @@ func (r *Router) handleHealth(w http.ResponseWriter, req *http.Request) {
 	}
 
 	if err := json.NewEncoder(w).Encode(status); err != nil {
-		http.Error(w, "Failed to encode response", http.StatusInternalServerError)
+		return
 	}
 }
 
@@ -99,7 +99,7 @@ func (r *Router) handleModels(w http.ResponseWriter, req *http.Request) {
 	w.WriteHeader(http.StatusOK)
 
 	if err := json.NewEncoder(w).Encode(modelsResp); err != nil {
-		http.Error(w, "Failed to encode response", http.StatusInternalServerError)
+		return
 	}
 }
 

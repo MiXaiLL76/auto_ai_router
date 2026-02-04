@@ -22,21 +22,117 @@ func UpdateStatsFromRemoteProxy(
 	logger *slog.Logger,
 	modelManager ModelManagerInterface,
 ) {
-	// Fetch health data from remote proxy
+	health, err := FetchHealthFromRemoteProxy(ctx, cred, logger)
+	if err != nil {
+		return
+	}
+
+	UpdateStatsFromHealth(health, cred, rateLimiter, logger, modelManager)
+}
+
+// FetchHealthFromRemoteProxy retrieves proxy health data from the /health endpoint.
+func FetchHealthFromRemoteProxy(
+	ctx context.Context,
+	cred *config.CredentialConfig,
+	logger *slog.Logger,
+) (*httputil.ProxyHealthResponse, error) {
 	var health httputil.ProxyHealthResponse
 	if err := httputil.FetchJSONFromProxy(ctx, cred, "/health", logger, &health); err != nil {
 		logger.Debug("Failed to fetch remote proxy stats",
 			"credential", cred.Name,
 			"error", err,
 		)
-		return
+		return nil, err
 	}
 
+	return &health, nil
+}
+
+// UpdateStatsFromHealth updates RPM/TPM limits from already-fetched health data.
+func UpdateStatsFromHealth(
+	health *httputil.ProxyHealthResponse,
+	cred *config.CredentialConfig,
+	rateLimiter *ratelimit.RPMLimiter,
+	logger *slog.Logger,
+	modelManager ModelManagerInterface,
+) {
 	// Update credential limits from remote credentials
-	updateCredentialLimits(&health, cred, rateLimiter, logger)
+	updateCredentialLimits(health, cred, rateLimiter, logger)
 
 	// Update model limits from remote models
-	updateModelLimits(&health, cred, rateLimiter, logger, modelManager)
+	updateModelLimits(health, cred, rateLimiter, logger, modelManager)
+}
+
+type limitAggregation struct {
+	rpm             int
+	tpm             int
+	currentRPM      int
+	currentTPM      int
+	hasUnlimitedRPM bool
+	hasUnlimitedTPM bool
+}
+
+func newMaxLimitAggregation() *limitAggregation {
+	return &limitAggregation{
+		rpm: -1,
+		tpm: -1,
+	}
+}
+
+func newSumLimitAggregation() *limitAggregation {
+	return &limitAggregation{}
+}
+
+func (agg *limitAggregation) applyMax(rpm, tpm, currentRPM, currentTPM int) {
+	if rpm == 0 {
+		agg.hasUnlimitedRPM = true
+	} else if rpm > 0 {
+		if agg.rpm == -1 || rpm > agg.rpm {
+			agg.rpm = rpm
+		}
+	}
+
+	if tpm == 0 {
+		agg.hasUnlimitedTPM = true
+	} else if tpm > 0 {
+		if agg.tpm == -1 || tpm > agg.tpm {
+			agg.tpm = tpm
+		}
+	}
+
+	agg.currentRPM += currentRPM
+	agg.currentTPM += currentTPM
+}
+
+func (agg *limitAggregation) applySum(rpm, tpm, currentRPM, currentTPM int) {
+	if rpm == 0 {
+		agg.hasUnlimitedRPM = true
+	} else if rpm > 0 {
+		agg.rpm += rpm
+	}
+
+	if tpm == 0 {
+		agg.hasUnlimitedTPM = true
+	} else if tpm > 0 {
+		agg.tpm += tpm
+	}
+
+	agg.currentRPM += currentRPM
+	agg.currentTPM += currentTPM
+}
+
+func (agg *limitAggregation) finalizeLimits() (int, int) {
+	rpm := agg.rpm
+	tpm := agg.tpm
+
+	if agg.hasUnlimitedRPM || rpm == 0 {
+		rpm = -1
+	}
+	if agg.hasUnlimitedTPM || tpm == 0 {
+		tpm = -1
+	}
+
+	return rpm, tpm
 }
 
 // updateCredentialLimits updates credential limits from remote credentials data
@@ -54,25 +150,20 @@ func updateCredentialLimits(
 	}
 
 	// Aggregate limits and current usage from remote credentials
-	maxRPM := -1
-	maxTPM := -1
-	totalCurrentRPM := 0
-	totalCurrentTPM := 0
+	aggregation := newMaxLimitAggregation()
 
 	for _, credStats := range health.Credentials {
-		if credStats.LimitRPM > 0 {
-			if maxRPM == -1 || credStats.LimitRPM > maxRPM {
-				maxRPM = credStats.LimitRPM
-			}
-		}
-		if credStats.LimitTPM > 0 {
-			if maxTPM == -1 || credStats.LimitTPM > maxTPM {
-				maxTPM = credStats.LimitTPM
-			}
-		}
-		totalCurrentRPM += credStats.CurrentRPM
-		totalCurrentTPM += credStats.CurrentTPM
+		aggregation.applyMax(
+			credStats.LimitRPM,
+			credStats.LimitTPM,
+			credStats.CurrentRPM,
+			credStats.CurrentTPM,
+		)
 	}
+
+	maxRPM, maxTPM := aggregation.finalizeLimits()
+	totalCurrentRPM := aggregation.currentRPM
+	totalCurrentTPM := aggregation.currentTPM
 
 	logger.Debug("Aggregated credential limits from remote",
 		"proxy", cred.Name,
@@ -82,14 +173,6 @@ func updateCredentialLimits(
 		"total_current_rpm", totalCurrentRPM,
 		"total_current_tpm", totalCurrentTPM,
 	)
-
-	// Convert 0 (unlimited) to -1 for consistency
-	if maxRPM == 0 {
-		maxRPM = -1
-	}
-	if maxTPM == 0 {
-		maxTPM = -1
-	}
 
 	// Update our proxy credential with aggregated limits (even if both are -1, we still need to sync usage)
 	rateLimiter.AddCredentialWithTPM(cred.Name, maxRPM, maxTPM)
@@ -117,13 +200,7 @@ func updateModelLimits(
 	}
 
 	// Aggregate limits per model from multiple credentials in remote proxy
-	type ModelStats struct {
-		limitRPM   int
-		limitTPM   int
-		currentRPM int
-		currentTPM int
-	}
-	modelStats := make(map[string]ModelStats)
+	modelStats := make(map[string]*limitAggregation)
 
 	for _, modelStats_data := range health.Models {
 		modelID := modelStats_data.Model
@@ -135,41 +212,19 @@ func updateModelLimits(
 		curTPM := modelStats_data.CurrentTPM
 
 		if rpm > 0 || tpm > 0 || curRPM > 0 || curTPM > 0 {
-			if existing, ok := modelStats[modelID]; ok {
-				// Sum the limits and usage
-				if rpm > 0 {
-					existing.limitRPM += rpm
-				}
-				if tpm > 0 {
-					existing.limitTPM += tpm
-				}
-				existing.currentRPM += curRPM
-				existing.currentTPM += curTPM
-				modelStats[modelID] = existing
-			} else {
-				modelStats[modelID] = ModelStats{
-					limitRPM:   rpm,
-					limitTPM:   tpm,
-					currentRPM: curRPM,
-					currentTPM: curTPM,
-				}
+			aggregation, ok := modelStats[modelID]
+			if !ok {
+				aggregation = newSumLimitAggregation()
+				modelStats[modelID] = aggregation
 			}
+			aggregation.applySum(rpm, tpm, curRPM, curTPM)
 		}
 	}
 
 	// Update rate limiter with aggregated model limits
 	modelsUpdated := 0
 	for modelID, stats := range modelStats {
-		rpm := stats.limitRPM
-		tpm := stats.limitTPM
-
-		// Set -1 if not limited (0 in remote means unlimited)
-		if rpm == 0 {
-			rpm = -1
-		}
-		if tpm == 0 {
-			tpm = -1
-		}
+		rpm, tpm := stats.finalizeLimits()
 
 		rateLimiter.AddModelWithTPM(cred.Name, modelID, rpm, tpm)
 		// Sync current usage for this model
