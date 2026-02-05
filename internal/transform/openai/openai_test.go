@@ -27,9 +27,9 @@ func TestGenerateID_Uniqueness(t *testing.T) {
 }
 
 func TestGetCurrentTimestamp(t *testing.T) {
-	before := time.Now().Unix()
+	before := time.Now().UTC().Unix()
 	timestamp := GetCurrentTimestamp()
-	after := time.Now().Unix()
+	after := time.Now().UTC().Unix()
 
 	assert.GreaterOrEqual(t, timestamp, before)
 	assert.LessOrEqual(t, timestamp, after)

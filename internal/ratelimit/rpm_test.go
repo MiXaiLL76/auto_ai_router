@@ -199,7 +199,7 @@ func TestSlidingWindow_Cleanup(t *testing.T) {
 	limiter := rl.limiters["cred1"]
 	limiter.mu.Lock()
 	// Set all requests to 2 minutes ago
-	oldTime := time.Now().Add(-2 * time.Minute)
+	oldTime := time.Now().UTC().Add(-2 * time.Minute)
 	for i := range limiter.requests {
 		limiter.requests[i] = oldTime
 	}
@@ -490,7 +490,7 @@ func TestGetCurrentTPM_Cleanup(t *testing.T) {
 	rl.mu.Lock()
 	limiter := rl.limiters["cred1"]
 	limiter.mu.Lock()
-	oldTime := time.Now().Add(-2 * time.Minute)
+	oldTime := time.Now().UTC().Add(-2 * time.Minute)
 	for i := range limiter.tokens {
 		limiter.tokens[i].timestamp = oldTime
 	}
@@ -783,7 +783,7 @@ func TestConsumeTokens_TokenCleanup(t *testing.T) {
 	rl.mu.Lock()
 	limiter := rl.limiters["cred1"]
 	limiter.mu.Lock()
-	oldTime := time.Now().Add(-2 * time.Minute)
+	oldTime := time.Now().UTC().Add(-2 * time.Minute)
 	for i := range limiter.tokens {
 		limiter.tokens[i].timestamp = oldTime
 	}
@@ -811,7 +811,7 @@ func TestConsumeModelTokens_TokenCleanup(t *testing.T) {
 	key := "cred1:gpt-4o"
 	limiter := rl.modelLimiters[key]
 	limiter.mu.Lock()
-	oldTime := time.Now().Add(-2 * time.Minute)
+	oldTime := time.Now().UTC().Add(-2 * time.Minute)
 	for i := range limiter.tokens {
 		limiter.tokens[i].timestamp = oldTime
 	}

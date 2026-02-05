@@ -213,7 +213,7 @@ func (m *Manager) LoadModelsFromConfig(credentials []config.CredentialConfig) {
 func (m *Manager) GetAllModels() ModelsResponse {
 	// Check cache first (fast path without holding full lock)
 	m.mu.RLock()
-	if !m.allModelsCache.expiresAt.IsZero() && time.Now().Before(m.allModelsCache.expiresAt) {
+	if !m.allModelsCache.expiresAt.IsZero() && time.Now().UTC().Before(m.allModelsCache.expiresAt) {
 		defer m.mu.RUnlock()
 		m.logger.Debug("Returning cached all models",
 			"models_count", len(m.allModelsCache.response.Data),
@@ -325,7 +325,7 @@ func (m *Manager) GetAllModels() ModelsResponse {
 	// Cache the result for 3 seconds
 	m.allModelsCache = allModelsCache{
 		response:  response,
-		expiresAt: time.Now().Add(3 * time.Second),
+		expiresAt: time.Now().UTC().Add(3 * time.Second),
 	}
 	m.allModels = append([]Model(nil), models...)
 
@@ -629,7 +629,7 @@ func (m *Manager) GetRemoteModels(cred *config.CredentialConfig) []Model {
 
 	// Check cache first
 	m.mu.RLock()
-	if cached, ok := m.remoteModelsCache[cred.Name]; ok && !cached.expiresAt.IsZero() && time.Now().Before(cached.expiresAt) {
+	if cached, ok := m.remoteModelsCache[cred.Name]; ok && !cached.expiresAt.IsZero() && time.Now().UTC().Before(cached.expiresAt) {
 		m.mu.RUnlock()
 		m.logger.Debug("Using cached remote models",
 			"credential", cred.Name,
@@ -660,7 +660,7 @@ func (m *Manager) GetRemoteModels(cred *config.CredentialConfig) []Model {
 	m.mu.Lock()
 	m.remoteModelsCache[cred.Name] = remoteModelCache{
 		models:    modelsResp.Data,
-		expiresAt: time.Now().Add(m.cacheExpiration),
+		expiresAt: time.Now().UTC().Add(m.cacheExpiration),
 	}
 	m.mu.Unlock()
 

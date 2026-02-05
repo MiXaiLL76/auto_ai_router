@@ -148,7 +148,7 @@ func logErrorResponse(errorsLogPath string, req *http.Request, rc *responseCaptu
 
 	// Create log entry
 	entry := ErrorLogEntry{
-		Timestamp: time.Now().Format(time.RFC3339),
+		Timestamp: time.Now().UTC().Format(time.RFC3339),
 		Path:      req.URL.Path,
 		Method:    req.Method,
 		Status:    rc.statusCode,

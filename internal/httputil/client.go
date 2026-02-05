@@ -37,7 +37,7 @@ func (l *proxyFetchLimiter) wait(ctx context.Context, key string, minInterval ti
 	}
 
 	l.mu.Lock()
-	now := time.Now()
+	now := time.Now().UTC()
 	last := l.last[key]
 	waitFor := minInterval - now.Sub(last)
 	if waitFor <= 0 {

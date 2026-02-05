@@ -117,12 +117,12 @@ func (f *Fail2Ban) RecordResponse(credentialName string, statusCode int) {
 
 	// Increment failure count for this specific error code
 	f.failures[credentialName][statusCode]++
-	f.lastError[credentialName] = time.Now()
+	f.lastError[credentialName] = time.Now().UTC()
 
 	// Check if we've hit the max attempts for this error code
 	if f.failures[credentialName][statusCode] >= rule.MaxAttempts {
 		f.banned[credentialName] = &banInfo{
-			banTime:     time.Now(),
+			banTime:     time.Now().UTC(),
 			banDuration: rule.BanDuration,
 			errorCode:   statusCode,
 		}

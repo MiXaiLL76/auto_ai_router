@@ -301,7 +301,7 @@ func TestTryFallbackProxy_Success(t *testing.T) {
 		http.StatusOK,        // originalStatus
 		RetryReasonRateLimit, // originalReason
 		bodyBytes,            // body
-		time.Now(),           // start
+		time.Now().UTC(),     // start
 	)
 
 	// Assertions
@@ -356,7 +356,7 @@ func TestTryFallbackProxy_NoFallbackAvailable(t *testing.T) {
 		http.StatusOK,
 		RetryReasonRateLimit,
 		bodyBytes,
-		time.Now(),
+		time.Now().UTC(),
 	)
 
 	// Assertions
@@ -399,7 +399,7 @@ func TestTryFallbackProxy_SameCredentialAsOriginal(t *testing.T) {
 		http.StatusOK,
 		RetryReasonRateLimit,
 		bodyBytes,
-		time.Now(),
+		time.Now().UTC(),
 	)
 
 	// Assertions

@@ -121,7 +121,7 @@ func TestClearToken(t *testing.T) {
 	defer tm.Stop()
 
 	// Add a token to cache
-	expiry := time.Now().Add(1 * time.Hour)
+	expiry := time.Now().UTC().Add(1 * time.Hour)
 	tm.mu.Lock()
 	tm.tokens["test"] = &cachedToken{
 		token:     &oauth2.Token{AccessToken: "test-token"},
@@ -155,7 +155,7 @@ func TestGetTokenExpiry(t *testing.T) {
 	}
 
 	// Add a token
-	expiry := time.Now().Add(1 * time.Hour)
+	expiry := time.Now().UTC().Add(1 * time.Hour)
 	tm.mu.Lock()
 	tm.tokens["test"] = &cachedToken{
 		token:     &oauth2.Token{AccessToken: "test-token"},
@@ -219,7 +219,7 @@ func TestGetToken_CachedTokenReuse(t *testing.T) {
 	tm := NewVertexTokenManager(logger)
 	defer tm.Stop()
 
-	expiry := time.Now().Add(1 * time.Hour)
+	expiry := time.Now().UTC().Add(1 * time.Hour)
 	mockSource := &mockTokenSource{
 		token: &oauth2.Token{AccessToken: "test-token", Expiry: expiry},
 	}
@@ -253,8 +253,8 @@ func TestGetToken_TokenRefresh(t *testing.T) {
 	defer tm.Stop()
 
 	// Create an expired token
-	expiredTime := time.Now().Add(-1 * time.Hour)
-	newExpiryTime := time.Now().Add(2 * time.Hour)
+	expiredTime := time.Now().UTC().Add(-1 * time.Hour)
+	newExpiryTime := time.Now().UTC().Add(2 * time.Hour)
 
 	mockSource := &mockTokenSource{
 		token: &oauth2.Token{AccessToken: "new-token", Expiry: newExpiryTime},
@@ -276,7 +276,7 @@ func TestGetToken_TokenRefresh(t *testing.T) {
 	if !ok {
 		t.Error("cached token should exist")
 	}
-	if !cached.expiresAt.Before(time.Now()) {
+	if !cached.expiresAt.Before(time.Now().UTC()) {
 		t.Error("token should be expired for this test")
 	}
 }
@@ -287,7 +287,7 @@ func TestGetToken_TokenRefreshError(t *testing.T) {
 	defer tm.Stop()
 
 	// Create an expired token with failing TokenSource
-	expiredTime := time.Now().Add(-1 * time.Hour)
+	expiredTime := time.Now().UTC().Add(-1 * time.Hour)
 
 	mockSource := &mockTokenSource{
 		shouldFail: true,
@@ -324,8 +324,8 @@ func TestGetToken_NearExpiry(t *testing.T) {
 	defer tm.Stop()
 
 	// Create a token that expires in 3 minutes (within refresh buffer of 5 min)
-	nearExpiryTime := time.Now().Add(3 * time.Minute)
-	newExpiryTime := time.Now().Add(2 * time.Hour)
+	nearExpiryTime := time.Now().UTC().Add(3 * time.Minute)
+	newExpiryTime := time.Now().UTC().Add(2 * time.Hour)
 
 	mockSource := &mockTokenSource{
 		token: &oauth2.Token{AccessToken: "new-token", Expiry: newExpiryTime},
@@ -358,8 +358,8 @@ func TestGetToken_ConcurrentRefresh(t *testing.T) {
 	defer tm.Stop()
 
 	// Create a token that needs refresh
-	expiredTime := time.Now().Add(-1 * time.Hour)
-	newExpiryTime := time.Now().Add(2 * time.Hour)
+	expiredTime := time.Now().UTC().Add(-1 * time.Hour)
+	newExpiryTime := time.Now().UTC().Add(2 * time.Hour)
 
 	callCount := 0
 	mockSource := &mockTokenSource{
@@ -414,8 +414,8 @@ func TestGetToken_RequestCoalescing(t *testing.T) {
 	defer tm.Stop()
 
 	// Create a token that needs refresh
-	expiredTime := time.Now().Add(-1 * time.Hour)
-	newExpiryTime := time.Now().Add(2 * time.Hour)
+	expiredTime := time.Now().UTC().Add(-1 * time.Hour)
+	newExpiryTime := time.Now().UTC().Add(2 * time.Hour)
 
 	mockSource := &mockTokenSource{
 		token: &oauth2.Token{AccessToken: "coalesced-token", Expiry: newExpiryTime},
@@ -481,12 +481,12 @@ func TestGetToken_TimeoutDuringRefresh(t *testing.T) {
 	tm.tokenRefreshTimeout = 10 * time.Millisecond
 
 	// Create a token that needs refresh
-	expiredTime := time.Now().Add(-1 * time.Hour)
+	expiredTime := time.Now().UTC().Add(-1 * time.Hour)
 
 	// Create a slow token source that takes longer than timeout
 	slowSource := &slowMockTokenSource{
 		delay: 1 * time.Second,
-		token: &oauth2.Token{AccessToken: "slow-token", Expiry: time.Now().Add(1 * time.Hour)},
+		token: &oauth2.Token{AccessToken: "slow-token", Expiry: time.Now().UTC().Add(1 * time.Hour)},
 	}
 
 	tm.mu.Lock()
@@ -513,7 +513,7 @@ func TestGetToken_ParallelDifferentCredentials(t *testing.T) {
 	defer tm.Stop()
 
 	// Create multiple credentials that need refresh
-	expiredTime := time.Now().Add(-1 * time.Hour)
+	expiredTime := time.Now().UTC().Add(-1 * time.Hour)
 
 	credentials := []string{"cred1", "cred2", "cred3"}
 	sources := make(map[string]*slowMockTokenSource)
@@ -521,7 +521,7 @@ func TestGetToken_ParallelDifferentCredentials(t *testing.T) {
 	for _, cred := range credentials {
 		source := &slowMockTokenSource{
 			delay: 100 * time.Millisecond, // Slow enough to cause serialization if sequential
-			token: &oauth2.Token{AccessToken: "token-" + cred, Expiry: time.Now().Add(1 * time.Hour)},
+			token: &oauth2.Token{AccessToken: "token-" + cred, Expiry: time.Now().UTC().Add(1 * time.Hour)},
 		}
 		sources[cred] = source
 
@@ -535,7 +535,7 @@ func TestGetToken_ParallelDifferentCredentials(t *testing.T) {
 	}
 
 	// Launch concurrent GetToken calls for different credentials
-	startTime := time.Now()
+	startTime := time.Now().UTC()
 	results := make(chan struct{ name, token string }, len(credentials))
 
 	for _, cred := range credentials {
@@ -575,8 +575,8 @@ func TestGetToken_CoalescingWithTimeout(t *testing.T) {
 	defer tm.Stop()
 
 	// Create a token that needs refresh
-	expiredTime := time.Now().Add(-1 * time.Hour)
-	newExpiryTime := time.Now().Add(2 * time.Hour)
+	expiredTime := time.Now().UTC().Add(-1 * time.Hour)
+	newExpiryTime := time.Now().UTC().Add(2 * time.Hour)
 
 	mockSource := &mockTokenSource{
 		token: &oauth2.Token{AccessToken: "coalesced-token", Expiry: newExpiryTime},

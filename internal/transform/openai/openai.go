@@ -155,7 +155,7 @@ func GenerateID() string {
 
 // GetCurrentTimestamp returns the current Unix timestamp
 func GetCurrentTimestamp() int64 {
-	return time.Now().Unix()
+	return time.Now().UTC().Unix()
 }
 
 // GetString safely retrieves a string value from a map

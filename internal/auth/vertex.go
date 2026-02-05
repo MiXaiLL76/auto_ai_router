@@ -96,7 +96,7 @@ func (tm *VertexTokenManager) GetToken(credentialName, credentialsFile, credenti
 	// Fast path: check if we have a valid cached token (read-only)
 	tm.mu.RLock()
 	if cached, exists := tm.tokens[credentialName]; exists {
-		if time.Now().Before(cached.expiresAt.Add(-tm.tokenRefresh)) {
+		if time.Now().UTC().Before(cached.expiresAt.Add(-tm.tokenRefresh)) {
 			token := cached.token.AccessToken
 			tm.mu.RUnlock()
 			return token, nil
@@ -113,7 +113,7 @@ func (tm *VertexTokenManager) GetToken(credentialName, credentialsFile, credenti
 	// Double-check cache to prevent race condition: cache may have been updated
 	// after our first check and before acquiring this lock
 	if cached, exists := tm.tokens[credentialName]; exists {
-		if time.Now().Before(cached.expiresAt.Add(-tm.tokenRefresh)) {
+		if time.Now().UTC().Before(cached.expiresAt.Add(-tm.tokenRefresh)) {
 			token := cached.token.AccessToken
 			tm.mu.RUnlock()
 			return token, nil
