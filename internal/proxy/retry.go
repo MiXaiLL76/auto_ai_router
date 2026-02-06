@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"math/rand"
 	"net/http"
@@ -17,6 +18,18 @@ const (
 	RetryReasonAuthErr   RetryReason = "auth_error"
 	RetryReasonNetErr    RetryReason = "network_error"
 )
+
+// TriedCredentialsKey is the context key for tracking attempted credentials
+// Prevents circular retries (proxy-a -> proxy-b -> proxy-a)
+// Exported for use in other proxy package functions
+type TriedCredentialsKey struct{}
+
+// AttemptCountKey is the context key for tracking the number of credential attempts
+type AttemptCountKey struct{}
+
+// MaxRetryAttempts defines the maximum number of credential attempts per request
+// Value: 2 = primary credential + 1 fallback
+const MaxRetryAttempts = 2
 
 // ShouldRetryWithFallback determines if request should be retried based on status code and response body.
 // Returns (shouldRetry, reason)
@@ -69,8 +82,51 @@ func isRetryableContent(respBody []byte) bool {
 	return true
 }
 
+// GetTried gets the set of tried credentials from context.
+// Returns an empty map if not found (new request without context).
+func GetTried(ctx context.Context) map[string]bool {
+	if tried, ok := ctx.Value(TriedCredentialsKey{}).(map[string]bool); ok {
+		return tried
+	}
+	return make(map[string]bool)
+}
+
+// SetTried stores the set of tried credentials in context.
+func SetTried(ctx context.Context, tried map[string]bool) context.Context {
+	return context.WithValue(ctx, TriedCredentialsKey{}, tried)
+}
+
+// getTried is the internal version (lowercase) used within this package
+func getTried(ctx context.Context) map[string]bool {
+	return GetTried(ctx)
+}
+
+// setTried is the internal version (lowercase) used within this package
+func setTried(ctx context.Context, tried map[string]bool) context.Context {
+	return SetTried(ctx, tried)
+}
+
+// incrementAttempts safely increments the attempt counter in context.
+// Returns the updated attempt count.
+func incrementAttempts(ctx context.Context) (int, context.Context) {
+	// Get current count (key: "__attempt_count")
+	currentCount := 0
+	if count, ok := ctx.Value(AttemptCountKey{}).(int); ok {
+		currentCount = count
+	}
+	newCount := currentCount + 1
+	newCtx := context.WithValue(ctx, AttemptCountKey{}, newCount)
+	return newCount, newCtx
+}
+
 // TryFallbackProxy attempts to retry the request on a fallback proxy credential.
 // Returns (success, fallbackReason) where fallbackReason explains why fallback wasn't attempted.
+//
+// Protection against infinite loops:
+// - Tracks attempted credentials in request context
+// - Prevents circular retries (proxy-a -> proxy-b -> proxy-a)
+// - Enforces max retry limit of 2 total attempts (primary + 1 fallback)
+// - Validates that fallback differs from already-tried credentials
 func (p *Proxy) TryFallbackProxy(
 	w http.ResponseWriter,
 	r *http.Request,
@@ -81,6 +137,23 @@ func (p *Proxy) TryFallbackProxy(
 	body []byte,
 	start time.Time,
 ) (bool, string) {
+	ctx := r.Context()
+
+	// Check attempt count - max 2 total attempts (primary + 1 fallback)
+	attemptCount, ctx := incrementAttempts(ctx)
+	if attemptCount >= MaxRetryAttempts {
+		p.logger.Warn("Max retry attempts reached, not attempting additional fallback",
+			"original_credential", originalCredName,
+			"model", modelID,
+			"attempt_count", attemptCount,
+			"max_attempts", MaxRetryAttempts,
+		)
+		return false, "max_retry_attempts_exceeded"
+	}
+
+	// Get set of already-tried credentials from context
+	triedCreds := getTried(ctx)
+
 	// Try to find a fallback proxy credential
 	fallbackCred, err := p.balancer.NextFallbackForModel(modelID)
 	if err != nil {
@@ -102,13 +175,32 @@ func (p *Proxy) TryFallbackProxy(
 		return false, "fallback_is_same_credential"
 	}
 
+	// Check if fallback credential has already been tried in this request chain
+	if triedCreds[fallbackCred.Name] {
+		p.logger.Warn("Fallback credential already attempted, skipping to prevent circular retry",
+			"fallback_credential", fallbackCred.Name,
+			"tried_credentials", formatTriedCreds(triedCreds),
+			"model", modelID,
+		)
+		return false, "credential_already_tried"
+	}
+
 	p.logger.Info("Retrying request on fallback proxy",
 		"original_credential", originalCredName,
 		"fallback_credential", fallbackCred.Name,
 		"model", modelID,
 		"original_status", originalStatus,
 		"retry_reason", originalReason,
+		"attempt_number", attemptCount+1,
+		"max_attempts", MaxRetryAttempts,
 	)
+
+	// Add fallback credential to tried set
+	triedCreds[fallbackCred.Name] = true
+	ctx = setTried(ctx, triedCreds)
+
+	// Create new request with updated context for fallback attempt
+	r = r.WithContext(ctx)
 
 	// Add jitter (0-50ms) to prevent thundering herd when multiple requests fail simultaneously
 	jitter := time.Duration(rand.Intn(50)) * time.Millisecond
@@ -153,4 +245,18 @@ func (p *Proxy) TryFallbackProxy(
 	)
 
 	return true, ""
+}
+
+// formatTriedCreds converts the tried credentials map to a readable string
+func formatTriedCreds(tried map[string]bool) string {
+	var creds []string
+	for cred := range tried {
+		if tried[cred] {
+			creds = append(creds, cred)
+		}
+	}
+	if len(creds) == 0 {
+		return "none"
+	}
+	return fmt.Sprintf("[%v]", creds)
 }

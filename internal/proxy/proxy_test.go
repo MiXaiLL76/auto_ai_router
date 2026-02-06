@@ -478,7 +478,7 @@ func TestExtractModelFromBody(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			model, stream, modifiedBody := extractMetadataFromBody([]byte(tt.body))
+			model, stream, _, modifiedBody := extractMetadataFromBody([]byte(tt.body))
 			assert.Equal(t, tt.expectedModel, model)
 			assert.Equal(t, tt.expectedStream, stream)
 
@@ -591,47 +591,6 @@ func TestDecodeResponseBody(t *testing.T) {
 			if tt.shouldMatch {
 				assert.Equal(t, tt.expected, result)
 			}
-		})
-	}
-}
-
-func TestMaskKey(t *testing.T) {
-	tests := []struct {
-		name     string
-		key      string
-		expected string
-	}{
-		{
-			name:     "long key",
-			key:      "sk-proj-1234567890abcdef",
-			expected: "sk-proj...",
-		},
-		{
-			name:     "short key",
-			key:      "short",
-			expected: "***",
-		},
-		{
-			name:     "exactly 7 chars",
-			key:      "1234567",
-			expected: "***",
-		},
-		{
-			name:     "8 chars",
-			key:      "12345678",
-			expected: "1234567...",
-		},
-		{
-			name:     "empty key",
-			key:      "",
-			expected: "***",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := maskKey(tt.key)
-			assert.Equal(t, tt.expected, result)
 		})
 	}
 }

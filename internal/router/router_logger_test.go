@@ -168,7 +168,7 @@ func TestLogErrorResponse_Success(t *testing.T) {
 	assert.Equal(t, "/api/test", entry.Path)
 	assert.Equal(t, "POST", entry.Method)
 	assert.Equal(t, http.StatusBadRequest, entry.Status)
-	assert.Equal(t, "Bearer ***", entry.Request.Headers["Authorization"])
+	assert.Equal(t, "Bearer secr...", entry.Request.Headers["Authorization"])
 	assert.Equal(t, string(requestBody), entry.Request.Body)
 	assert.Equal(t, "error message", entry.Response.Body)
 }
@@ -231,7 +231,7 @@ func TestLogErrorResponse_MasksAuthorizationHeader(t *testing.T) {
 	_ = json.Unmarshal(content, &entry)
 
 	// Authorization should be masked
-	assert.Equal(t, "Bearer ***", entry.Request.Headers["Authorization"])
+	assert.Equal(t, "Bearer very...", entry.Request.Headers["Authorization"])
 	assert.NotContains(t, entry.Request.Headers["Authorization"], "secret-token")
 }
 

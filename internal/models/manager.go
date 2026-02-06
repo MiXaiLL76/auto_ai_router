@@ -214,11 +214,14 @@ func (m *Manager) GetAllModels() ModelsResponse {
 	// Check cache first (fast path without holding full lock)
 	m.mu.RLock()
 	if !m.allModelsCache.expiresAt.IsZero() && time.Now().UTC().Before(m.allModelsCache.expiresAt) {
-		defer m.mu.RUnlock()
+		// Copy response while holding lock to prevent TOCTOU
+		cachedResponse := m.allModelsCache.response
+		cachedCount := len(cachedResponse.Data)
+		m.mu.RUnlock()
 		m.logger.Debug("Returning cached all models",
-			"models_count", len(m.allModelsCache.response.Data),
+			"models_count", cachedCount,
 		)
-		return m.allModelsCache.response
+		return cachedResponse
 	}
 
 	var models []Model
@@ -630,13 +633,17 @@ func (m *Manager) GetRemoteModels(cred *config.CredentialConfig) []Model {
 	// Check cache first
 	m.mu.RLock()
 	if cached, ok := m.remoteModelsCache[cred.Name]; ok && !cached.expiresAt.IsZero() && time.Now().UTC().Before(cached.expiresAt) {
+		// Copy models slice reference while holding lock to prevent TOCTOU
+		cachedModels := cached.models
+		cachedCount := len(cachedModels)
+		expiresIn := time.Until(cached.expiresAt).Seconds()
 		m.mu.RUnlock()
 		m.logger.Debug("Using cached remote models",
 			"credential", cred.Name,
-			"models_count", len(cached.models),
-			"expires_in", time.Until(cached.expiresAt).Seconds(),
+			"models_count", cachedCount,
+			"expires_in", expiresIn,
 		)
-		return cached.models
+		return cachedModels
 	}
 	m.mu.RUnlock()
 

@@ -44,15 +44,19 @@ type Config struct {
 	Credentials []CredentialConfig `yaml:"credentials"`
 	Monitoring  MonitoringConfig   `yaml:"monitoring"`
 	Models      []ModelRPMConfig   `yaml:"models,omitempty"`
+	LiteLLMDB   LiteLLMDBConfig    `yaml:"litellm_db,omitempty"`
 }
 
 type ServerConfig struct {
-	Port             int           `yaml:"port"`
-	MaxBodySizeMB    int           `yaml:"max_body_size_mb"`
-	RequestTimeout   time.Duration `yaml:"request_timeout"`
-	LoggingLevel     string        `yaml:"logging_level"`
-	MasterKey        string        `yaml:"master_key"`
-	DefaultModelsRPM int           `yaml:"default_models_rpm"`
+	Port                int           `yaml:"port"`
+	MaxBodySizeMB       int           `yaml:"max_body_size_mb"`
+	RequestTimeout      time.Duration `yaml:"request_timeout"`
+	LoggingLevel        string        `yaml:"logging_level"`
+	MasterKey           string        `yaml:"master_key"`
+	DefaultModelsRPM    int           `yaml:"default_models_rpm"`
+	MaxIdleConns        int           `yaml:"max_idle_conns"`
+	MaxIdleConnsPerHost int           `yaml:"max_idle_conns_per_host"`
+	IdleConnTimeout     time.Duration `yaml:"idle_conn_timeout"`
 }
 
 // ErrorCodeRuleConfig defines per-error-code ban rules
@@ -73,12 +77,15 @@ type Fail2BanConfig struct {
 func (s *ServerConfig) UnmarshalYAML(value *yaml.Node) error {
 	// Create a temporary struct with all string fields
 	type tempConfig struct {
-		Port             string `yaml:"port"`
-		MaxBodySizeMB    string `yaml:"max_body_size_mb"`
-		RequestTimeout   string `yaml:"request_timeout"`
-		LoggingLevel     string `yaml:"logging_level"`
-		MasterKey        string `yaml:"master_key"`
-		DefaultModelsRPM string `yaml:"default_models_rpm"`
+		Port                string `yaml:"port"`
+		MaxBodySizeMB       string `yaml:"max_body_size_mb"`
+		RequestTimeout      string `yaml:"request_timeout"`
+		LoggingLevel        string `yaml:"logging_level"`
+		MasterKey           string `yaml:"master_key"`
+		DefaultModelsRPM    string `yaml:"default_models_rpm"`
+		MaxIdleConns        string `yaml:"max_idle_conns"`
+		MaxIdleConnsPerHost string `yaml:"max_idle_conns_per_host"`
+		IdleConnTimeout     string `yaml:"idle_conn_timeout"`
 	}
 
 	var temp tempConfig
@@ -127,6 +134,36 @@ func (s *ServerConfig) UnmarshalYAML(value *yaml.Node) error {
 		}
 	}
 
+	// MaxIdleConns
+	if temp.MaxIdleConns != "" {
+		s.MaxIdleConns, err = resolveEnvInt(temp.MaxIdleConns, 200)
+		if err != nil {
+			return fmt.Errorf("invalid max_idle_conns: %w", err)
+		}
+	} else {
+		s.MaxIdleConns = 200 // Default value
+	}
+
+	// MaxIdleConnsPerHost
+	if temp.MaxIdleConnsPerHost != "" {
+		s.MaxIdleConnsPerHost, err = resolveEnvInt(temp.MaxIdleConnsPerHost, 20)
+		if err != nil {
+			return fmt.Errorf("invalid max_idle_conns_per_host: %w", err)
+		}
+	} else {
+		s.MaxIdleConnsPerHost = 20 // Default value
+	}
+
+	// IdleConnTimeout
+	if temp.IdleConnTimeout != "" {
+		s.IdleConnTimeout, err = resolveEnvDuration(temp.IdleConnTimeout, 120*time.Second)
+		if err != nil {
+			return fmt.Errorf("invalid idle_conn_timeout: %w", err)
+		}
+	} else {
+		s.IdleConnTimeout = 120 * time.Second // Default value
+	}
+
 	return nil
 }
 
@@ -144,8 +181,9 @@ type CredentialConfig struct {
 	CredentialsFile string `yaml:"credentials_file,omitempty"`
 	CredentialsJSON string `yaml:"credentials_json,omitempty"`
 
-	// Proxy specific field
-	IsFallback bool `yaml:"is_fallback,omitempty"`
+	// Proxy specific fields
+	IsFallback bool   `yaml:"is_fallback,omitempty"`
+	FallbackTo string `yaml:"fallback_to,omitempty"` // Credential to fall back to (only used when is_fallback=true)
 }
 
 // UnmarshalYAML implements custom unmarshaling for CredentialConfig with env variable support
@@ -163,6 +201,7 @@ func (c *CredentialConfig) UnmarshalYAML(value *yaml.Node) error {
 		CredentialsFile string `yaml:"credentials_file,omitempty"`
 		CredentialsJSON string `yaml:"credentials_json,omitempty"`
 		IsFallback      string `yaml:"is_fallback,omitempty"`
+		FallbackTo      string `yaml:"fallback_to,omitempty"`
 	}
 
 	var temp tempConfig
@@ -211,6 +250,16 @@ func (c *CredentialConfig) UnmarshalYAML(value *yaml.Node) error {
 		}
 	}
 
+	// Resolve FallbackTo
+	c.FallbackTo = resolveEnvString(temp.FallbackTo)
+
+	// Validate base_url for proxy and other provider types that require it
+	if c.BaseURL != "" {
+		if err := validateBaseURL(c.Name, c.BaseURL); err != nil {
+			return err
+		}
+	}
+
 	return nil
 }
 
@@ -219,6 +268,36 @@ type MonitoringConfig struct {
 	HealthCheckPath   string `yaml:"health_check_path"`
 	LogErrors         bool   `yaml:"log_errors,omitempty"`
 	ErrorsLogPath     string `yaml:"errors_log_path,omitempty"`
+}
+
+// LiteLLMDBConfig holds configuration for LiteLLM database integration
+type LiteLLMDBConfig struct {
+	// Enable/disable module
+	Enabled bool `yaml:"enabled"`
+
+	// IsRequired specifies whether LiteLLM DB is mandatory (fail startup on error)
+	// or optional (degrade to NoopManager with warning on error)
+	IsRequired bool `yaml:"is_required"` // default: false
+
+	// Database connection postgresql://[user[:password]@][netloc][:port][/dbname][?param1=value1&...]
+	DatabaseURL string `yaml:"database_url"` // os.environ/LITELLM_DATABASE_URL
+	MaxConns    int    `yaml:"max_conns"`    // default: 10
+	MinConns    int    `yaml:"min_conns"`    // default: 2
+
+	// Health check
+	HealthCheckInterval time.Duration `yaml:"health_check_interval"` // default: 10s
+	ConnectTimeout      time.Duration `yaml:"connect_timeout"`       // default: 5s
+
+	// Auth cache
+	AuthCacheTTL  time.Duration `yaml:"auth_cache_ttl"`  // default: 60s
+	AuthCacheSize int           `yaml:"auth_cache_size"` // default: 10000
+
+	// Spend logging
+	LogQueueSize     int           `yaml:"log_queue_size"`     // default: 10000
+	LogBatchSize     int           `yaml:"log_batch_size"`     // default: 100
+	LogFlushInterval time.Duration `yaml:"log_flush_interval"` // default: 5s
+	LogRetryAttempts int           `yaml:"log_retry_attempts"` // default: 3
+	LogRetryDelay    time.Duration `yaml:"log_retry_delay"`    // default: 1s
 }
 
 // UnmarshalYAML implements custom unmarshaling for MonitoringConfig with env variable support
@@ -257,6 +336,167 @@ func (m *MonitoringConfig) UnmarshalYAML(value *yaml.Node) error {
 	m.ErrorsLogPath = resolveEnvString(temp.ErrorsLogPath)
 
 	return nil
+}
+
+// UnmarshalYAML implements custom unmarshaling for LiteLLMDBConfig with env variable support
+func (l *LiteLLMDBConfig) UnmarshalYAML(value *yaml.Node) error {
+	type tempConfig struct {
+		Enabled             string `yaml:"enabled"`
+		IsRequired          string `yaml:"is_required"`
+		DatabaseURL         string `yaml:"database_url"`
+		MaxConns            string `yaml:"max_conns"`
+		MinConns            string `yaml:"min_conns"`
+		HealthCheckInterval string `yaml:"health_check_interval"`
+		ConnectTimeout      string `yaml:"connect_timeout"`
+		AuthCacheTTL        string `yaml:"auth_cache_ttl"`
+		AuthCacheSize       string `yaml:"auth_cache_size"`
+		LogQueueSize        string `yaml:"log_queue_size"`
+		LogBatchSize        string `yaml:"log_batch_size"`
+		LogFlushInterval    string `yaml:"log_flush_interval"`
+		LogRetryAttempts    string `yaml:"log_retry_attempts"`
+		LogRetryDelay       string `yaml:"log_retry_delay"`
+	}
+
+	var temp tempConfig
+	if err := value.Decode(&temp); err != nil {
+		return err
+	}
+
+	// Helper function to parse integer fields
+	parseIntField := func(value string, defaultVal int, fieldName string) (int, error) {
+		if value == "" {
+			return defaultVal, nil
+		}
+		v, err := resolveEnvInt(value, defaultVal)
+		if err != nil {
+			return 0, fmt.Errorf("invalid litellm_db.%s: %w", fieldName, err)
+		}
+		return v, nil
+	}
+
+	// Helper function to parse duration fields
+	parseDurationField := func(value string, defaultVal time.Duration, fieldName string) (time.Duration, error) {
+		if value == "" {
+			return defaultVal, nil
+		}
+		v, err := resolveEnvDuration(value, defaultVal)
+		if err != nil {
+			return 0, fmt.Errorf("invalid litellm_db.%s: %w", fieldName, err)
+		}
+		return v, nil
+	}
+
+	var err error
+
+	l.DatabaseURL = resolveEnvString(temp.DatabaseURL)
+
+	if temp.Enabled != "" {
+		l.Enabled, err = resolveEnvBool(temp.Enabled, false)
+		if err != nil {
+			return fmt.Errorf("invalid litellm_db.enabled: %w", err)
+		}
+	}
+
+	if temp.IsRequired != "" {
+		l.IsRequired, err = resolveEnvBool(temp.IsRequired, false)
+		if err != nil {
+			return fmt.Errorf("invalid litellm_db.is_required: %w", err)
+		}
+	}
+
+	l.MaxConns, err = parseIntField(temp.MaxConns, 10, "max_conns")
+	if err != nil {
+		return err
+	}
+
+	l.MinConns, err = parseIntField(temp.MinConns, 2, "min_conns")
+	if err != nil {
+		return err
+	}
+
+	l.AuthCacheSize, err = parseIntField(temp.AuthCacheSize, 10000, "auth_cache_size")
+	if err != nil {
+		return err
+	}
+
+	l.LogQueueSize, err = parseIntField(temp.LogQueueSize, 10000, "log_queue_size")
+	if err != nil {
+		return err
+	}
+
+	l.LogBatchSize, err = parseIntField(temp.LogBatchSize, 100, "log_batch_size")
+	if err != nil {
+		return err
+	}
+
+	l.LogRetryAttempts, err = parseIntField(temp.LogRetryAttempts, 3, "log_retry_attempts")
+	if err != nil {
+		return err
+	}
+
+	l.HealthCheckInterval, err = parseDurationField(temp.HealthCheckInterval, 10*time.Second, "health_check_interval")
+	if err != nil {
+		return err
+	}
+
+	l.ConnectTimeout, err = parseDurationField(temp.ConnectTimeout, 5*time.Second, "connect_timeout")
+	if err != nil {
+		return err
+	}
+
+	l.AuthCacheTTL, err = parseDurationField(temp.AuthCacheTTL, 60*time.Second, "auth_cache_ttl")
+	if err != nil {
+		return err
+	}
+
+	l.LogFlushInterval, err = parseDurationField(temp.LogFlushInterval, 5*time.Second, "log_flush_interval")
+	if err != nil {
+		return err
+	}
+
+	l.LogRetryDelay, err = parseDurationField(temp.LogRetryDelay, time.Second, "log_retry_delay")
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// ApplyDefaults sets default values for all LiteLLMDBConfig fields
+func (c *LiteLLMDBConfig) ApplyDefaults() {
+	if c.MaxConns == 0 {
+		c.MaxConns = 10
+	}
+	if c.MinConns == 0 {
+		c.MinConns = 2
+	}
+	if c.HealthCheckInterval == 0 {
+		c.HealthCheckInterval = 10 * time.Second
+	}
+	if c.ConnectTimeout == 0 {
+		c.ConnectTimeout = 5 * time.Second
+	}
+	if c.AuthCacheTTL == 0 {
+		c.AuthCacheTTL = 60 * time.Second
+	}
+	if c.AuthCacheSize == 0 {
+		c.AuthCacheSize = 10000
+	}
+	if c.LogQueueSize == 0 {
+		c.LogQueueSize = 10000
+	}
+	if c.LogBatchSize == 0 {
+		c.LogBatchSize = 100
+	}
+	if c.LogFlushInterval == 0 {
+		c.LogFlushInterval = 5 * time.Second
+	}
+	if c.LogRetryAttempts == 0 {
+		c.LogRetryAttempts = 3
+	}
+	if c.LogRetryDelay == 0 {
+		c.LogRetryDelay = time.Second
+	}
 }
 
 // resolveEnvString resolves environment variable if value is in format "os.environ/VAR_NAME"
@@ -385,6 +625,9 @@ func (c *Config) Normalize() {
 }
 
 func (c *Config) Validate() error {
+	// Apply defaults for LiteLLMDB config before validation
+	c.LiteLLMDB.ApplyDefaults()
+
 	if c.Server.Port <= 0 || c.Server.Port > 65535 {
 		return fmt.Errorf("invalid port: %d", c.Server.Port)
 	}
@@ -515,10 +758,79 @@ func (c *Config) Validate() error {
 		}
 	}
 
+	// Validate LiteLLM DB config
+	if c.LiteLLMDB.Enabled {
+		if c.LiteLLMDB.DatabaseURL == "" {
+			return fmt.Errorf("litellm_db.database_url is required when enabled")
+		}
+	}
+
+	// Validate fallback credential configuration
+	if err := c.validateFallbackConfig(); err != nil {
+		return err
+	}
+
 	return nil
 }
 
 // isUnlimited checks if a value represents unlimited (-1)
 func isUnlimited(value int) bool {
 	return value == -1
+}
+
+// validateFallbackConfig validates fallback credential configuration
+// Checks:
+// 1. Each credential with is_fallback=true has a valid fallback_to reference
+// 2. fallback_to points to an existing credential
+// 3. No circular dependencies (A -> B -> A) - validated at balancer initialization
+func (c *Config) validateFallbackConfig() error {
+	// Build a map of credential names for quick lookup
+	credentialNames := make(map[string]bool)
+	for _, cred := range c.Credentials {
+		credentialNames[cred.Name] = true
+	}
+
+	var validationErrors []string
+
+	// Validate each credential's fallback configuration
+	for _, cred := range c.Credentials {
+		// If is_fallback is true, fallback_to must be specified and valid
+		if cred.IsFallback {
+			// IsFallback should only be true for proxy type
+			if cred.Type != ProviderTypeProxy {
+				validationErrors = append(validationErrors,
+					fmt.Sprintf("credential '%s': is_fallback can only be true for proxy type", cred.Name))
+				continue
+			}
+
+			// fallback_to must be specified when is_fallback=true
+			if cred.FallbackTo == "" {
+				validationErrors = append(validationErrors,
+					fmt.Sprintf("credential '%s': fallback_to is required when is_fallback=true", cred.Name))
+				continue
+			}
+
+			// fallback_to must reference an existing credential
+			if !credentialNames[cred.FallbackTo] {
+				validationErrors = append(validationErrors,
+					fmt.Sprintf("credential '%s': invalid fallback_to value '%s' (credential not found)", cred.Name, cred.FallbackTo))
+				continue
+			}
+
+			// Prevent self-reference (A -> A)
+			if cred.FallbackTo == cred.Name {
+				validationErrors = append(validationErrors,
+					fmt.Sprintf("credential '%s': fallback_to cannot reference itself", cred.Name))
+				continue
+			}
+		}
+	}
+
+	// If there are any validation errors, report them all at once
+	if len(validationErrors) > 0 {
+		errorMsg := "fallback configuration validation failed:\n  " + strings.Join(validationErrors, "\n  ")
+		return fmt.Errorf("%s", errorMsg)
+	}
+
+	return nil
 }

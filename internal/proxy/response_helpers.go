@@ -44,29 +44,56 @@ func extractTokensFromStreamingChunk(chunk string) int {
 	return 0
 }
 
-// extractMetadataFromBody extracts the model ID from the request body
+// extractMetadataFromBody extracts the model ID and session ID from the request body
 // and ensures stream_options.include_usage is true for streaming requests
-func extractMetadataFromBody(body []byte) (string, bool, []byte) {
+// Returns: model, streaming, sessionID, body
+func extractMetadataFromBody(body []byte) (string, bool, string, []byte) {
 	// Check for empty body
 	if len(body) == 0 {
-		return "", false, body
+		return "", false, "", body
 	}
 
 	// Parse JSON body
 	var reqBody map[string]interface{}
 	if err := json.Unmarshal(body, &reqBody); err != nil {
-		return "", false, body // Return original if parsing fails
+		return "", false, "", body // Return original if parsing fails
 	}
 
 	model, ok := reqBody["model"].(string)
 	if !ok {
-		return "", false, body // Return original if model is missing or not streaming
+		return "", false, "", body // Return original if model is missing
+	}
+
+	// Extract session ID (check extra_body first, then root level)
+	// Priority: litellm_session_id > chat_id > session_id > user > safety_identifier > prompt_cache_key
+	sessionID := ""
+	if extraBody, ok := reqBody["extra_body"].(map[string]interface{}); ok {
+		// Check litellm_session_id
+		if sid, ok := extraBody["litellm_session_id"].(string); ok && sid != "" {
+			sessionID = sid
+		} else if cid, ok := extraBody["chat_id"].(string); ok && cid != "" {
+			sessionID = cid
+		} else if sid, ok := extraBody["session_id"].(string); ok && sid != "" {
+			sessionID = sid
+		}
+	}
+	// Check at root level if not found in extra_body
+	if sessionID == "" {
+		if sid, ok := reqBody["session_id"].(string); ok && sid != "" {
+			sessionID = sid
+		} else if uid, ok := reqBody["user"].(string); ok && uid != "" {
+			sessionID = uid
+		} else if sid, ok := reqBody["safety_identifier"].(string); ok && sid != "" {
+			sessionID = sid
+		} else if pck, ok := reqBody["prompt_cache_key"].(string); ok && pck != "" {
+			sessionID = pck
+		}
 	}
 
 	// Check if this is a streaming request
 	stream, ok := reqBody["stream"].(bool)
 	if !ok || !stream {
-		return model, false, body // Not a streaming request, return as-is
+		return model, false, sessionID, body // Not a streaming request, return as-is
 	}
 
 	// Ensure stream_options exists and include_usage is true
@@ -89,10 +116,10 @@ func extractMetadataFromBody(body []byte) (string, bool, []byte) {
 	// Marshal back to JSON
 	modifiedBody, err := json.Marshal(reqBody)
 	if err != nil {
-		return model, stream, body // Return original if marshaling fails
+		return model, stream, sessionID, body // Return original if marshaling fails
 	}
 
-	return model, stream, modifiedBody
+	return model, stream, sessionID, modifiedBody
 }
 
 // decodeResponseBody decodes the response body based on Content-Encoding
@@ -141,11 +168,4 @@ func extractTokensFromResponse(body string, credType config.ProviderType) int {
 
 	// For OpenAI and other providers, use standard format
 	return extractOpenAITotalTokens([]byte(body))
-}
-
-func maskKey(key string) string {
-	if len(key) <= 7 {
-		return "***"
-	}
-	return key[:7] + "..."
 }

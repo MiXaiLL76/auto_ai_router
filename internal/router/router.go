@@ -2,6 +2,7 @@ package router
 
 import (
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"strings"
 
@@ -14,13 +15,15 @@ type Router struct {
 	proxy            *proxy.Proxy
 	modelManager     *models.Manager
 	monitoringConfig *config.MonitoringConfig
+	logger           *slog.Logger
 }
 
-func New(p *proxy.Proxy, modelManager *models.Manager, monitoringConfig *config.MonitoringConfig) *Router {
+func New(p *proxy.Proxy, modelManager *models.Manager, monitoringConfig *config.MonitoringConfig, logger *slog.Logger) *Router {
 	return &Router{
 		proxy:            p,
 		modelManager:     modelManager,
 		monitoringConfig: monitoringConfig,
+		logger:           logger,
 	}
 }
 
@@ -83,6 +86,13 @@ func (r *Router) handleHealth(w http.ResponseWriter, req *http.Request) {
 	}
 
 	if err := json.NewEncoder(w).Encode(status); err != nil {
+		if r.logger != nil {
+			r.logger.Error("Failed to encode health response",
+				"endpoint", "/health",
+				"error", err.Error(),
+			)
+		}
+		// Headers already sent, cannot send http.Error
 		return
 	}
 }
@@ -99,6 +109,13 @@ func (r *Router) handleModels(w http.ResponseWriter, req *http.Request) {
 	w.WriteHeader(http.StatusOK)
 
 	if err := json.NewEncoder(w).Encode(modelsResp); err != nil {
+		if r.logger != nil {
+			r.logger.Error("Failed to encode models response",
+				"endpoint", "/v1/models",
+				"error", err.Error(),
+			)
+		}
+		// Headers already sent, cannot send http.Error
 		return
 	}
 }

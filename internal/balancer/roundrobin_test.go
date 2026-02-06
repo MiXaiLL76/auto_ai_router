@@ -705,3 +705,268 @@ func TestRoundRobin_GetCredentialsSnapshot_NoRace(t *testing.T) {
 	assert.Equal(t, "key2", finalSnapshot[1].APIKey)
 	assert.Equal(t, "key3", finalSnapshot[2].APIKey)
 }
+
+// Fallback Configuration Validation Tests
+
+func TestValidateFallbackConfiguration_ValidChain(t *testing.T) {
+	// Test valid fallback chain: proxy-a -> proxy-b
+	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
+	rl := ratelimit.New()
+
+	credentials := []config.CredentialConfig{
+		{
+			Name:       "proxy-a",
+			Type:       config.ProviderTypeProxy,
+			BaseURL:    "http://a.com",
+			RPM:        100,
+			IsFallback: true,
+			FallbackTo: "proxy-b",
+		},
+		{
+			Name:    "proxy-b",
+			Type:    config.ProviderTypeProxy,
+			BaseURL: "http://b.com",
+			RPM:     100,
+		},
+	}
+
+	// Should not panic or log errors for valid chain
+	bal := New(credentials, f2b, rl)
+	require.NotNil(t, bal)
+	assert.Equal(t, 2, len(bal.credentials))
+}
+
+func TestValidateFallbackConfiguration_CircularDependency_DirectCycle(t *testing.T) {
+	// Test circular dependency: proxy-a -> proxy-b -> proxy-a
+	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
+	rl := ratelimit.New()
+
+	credentials := []config.CredentialConfig{
+		{
+			Name:       "proxy-a",
+			Type:       config.ProviderTypeProxy,
+			BaseURL:    "http://a.com",
+			RPM:        100,
+			IsFallback: true,
+			FallbackTo: "proxy-b",
+		},
+		{
+			Name:       "proxy-b",
+			Type:       config.ProviderTypeProxy,
+			BaseURL:    "http://b.com",
+			RPM:        100,
+			IsFallback: true,
+			FallbackTo: "proxy-a", // Cycle: b -> a, and a -> b
+		},
+	}
+
+	// Initialize balancer - should detect and disable cycle
+	bal := New(credentials, f2b, rl)
+	require.NotNil(t, bal)
+
+	// After initialization, the problematic fallback should be disabled
+	// (at least one of the credentials should have IsFallback=false)
+	fallbackCount := 0
+	for _, cred := range bal.credentials {
+		if cred.IsFallback {
+			fallbackCount++
+		}
+	}
+	// At most one fallback should remain (the cycle should be broken)
+	assert.LessOrEqual(t, fallbackCount, 1,
+		"Circular dependency should be detected and at least one fallback link disabled")
+}
+
+func TestValidateFallbackConfiguration_CircularDependency_SelfReference(t *testing.T) {
+	// Test self-reference: proxy-a -> proxy-a
+	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
+	rl := ratelimit.New()
+
+	credentials := []config.CredentialConfig{
+		{
+			Name:       "proxy-a",
+			Type:       config.ProviderTypeProxy,
+			BaseURL:    "http://a.com",
+			RPM:        100,
+			IsFallback: true,
+			FallbackTo: "proxy-a", // Self-reference
+		},
+	}
+
+	// Initialize balancer - should detect and disable self-reference
+	bal := New(credentials, f2b, rl)
+	require.NotNil(t, bal)
+
+	// The credential's fallback should be disabled due to self-reference
+	assert.False(t, bal.credentials[0].IsFallback,
+		"Self-referencing fallback should be disabled")
+}
+
+func TestValidateFallbackConfiguration_CircularDependency_LongCycle(t *testing.T) {
+	// Test longer circular dependency: proxy-a -> proxy-b -> proxy-c -> proxy-a
+	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
+	rl := ratelimit.New()
+
+	credentials := []config.CredentialConfig{
+		{
+			Name:       "proxy-a",
+			Type:       config.ProviderTypeProxy,
+			BaseURL:    "http://a.com",
+			RPM:        100,
+			IsFallback: true,
+			FallbackTo: "proxy-b",
+		},
+		{
+			Name:       "proxy-b",
+			Type:       config.ProviderTypeProxy,
+			BaseURL:    "http://b.com",
+			RPM:        100,
+			IsFallback: true,
+			FallbackTo: "proxy-c",
+		},
+		{
+			Name:       "proxy-c",
+			Type:       config.ProviderTypeProxy,
+			BaseURL:    "http://c.com",
+			RPM:        100,
+			IsFallback: true,
+			FallbackTo: "proxy-a", // Cycle: c -> a, and a -> b -> c
+		},
+	}
+
+	// Initialize balancer - should detect and disable cycle
+	bal := New(credentials, f2b, rl)
+	require.NotNil(t, bal)
+
+	// At least one fallback should be disabled to break the cycle
+	fallbackCount := 0
+	for _, cred := range bal.credentials {
+		if cred.IsFallback {
+			fallbackCount++
+		}
+	}
+	assert.LessOrEqual(t, fallbackCount, 2,
+		"Circular dependency in 3-node chain should be detected")
+}
+
+func TestValidateFallbackConfiguration_UnusedFallback(t *testing.T) {
+	// Test unused fallback: proxy-a is marked as fallback but no one references it
+	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
+	rl := ratelimit.New()
+
+	credentials := []config.CredentialConfig{
+		{
+			Name:       "proxy-a",
+			Type:       config.ProviderTypeProxy,
+			BaseURL:    "http://a.com",
+			RPM:        100,
+			IsFallback: true,
+			FallbackTo: "proxy-b",
+		},
+		{
+			Name:       "proxy-b",
+			Type:       config.ProviderTypeProxy,
+			BaseURL:    "http://b.com",
+			RPM:        100,
+			IsFallback: true, // Marked as fallback but no one falls back to proxy-b
+			FallbackTo: "proxy-c",
+		},
+		{
+			Name:    "proxy-c",
+			Type:    config.ProviderTypeProxy,
+			BaseURL: "http://c.com",
+			RPM:     100,
+		},
+	}
+
+	// Initialize balancer - should detect unused fallback (proxy-b)
+	bal := New(credentials, f2b, rl)
+	require.NotNil(t, bal)
+
+	// The configuration should complete without errors
+	// Unused fallback is just a warning, not an error
+	assert.Equal(t, 3, len(bal.credentials))
+}
+
+func TestValidateFallbackConfiguration_MultipleSeparateChains(t *testing.T) {
+	// Test multiple separate fallback chains (no cycles):
+	// Chain 1: proxy-a1 -> proxy-a2
+	// Chain 2: proxy-b1 -> proxy-b2
+	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
+	rl := ratelimit.New()
+
+	credentials := []config.CredentialConfig{
+		{
+			Name:       "proxy-a1",
+			Type:       config.ProviderTypeProxy,
+			BaseURL:    "http://a1.com",
+			RPM:        100,
+			IsFallback: true,
+			FallbackTo: "proxy-a2",
+		},
+		{
+			Name:    "proxy-a2",
+			Type:    config.ProviderTypeProxy,
+			BaseURL: "http://a2.com",
+			RPM:     100,
+		},
+		{
+			Name:       "proxy-b1",
+			Type:       config.ProviderTypeProxy,
+			BaseURL:    "http://b1.com",
+			RPM:        100,
+			IsFallback: true,
+			FallbackTo: "proxy-b2",
+		},
+		{
+			Name:    "proxy-b2",
+			Type:    config.ProviderTypeProxy,
+			BaseURL: "http://b2.com",
+			RPM:     100,
+		},
+	}
+
+	// Initialize balancer - both chains are valid
+	bal := New(credentials, f2b, rl)
+	require.NotNil(t, bal)
+
+	// Both fallback credentials should remain enabled
+	fallbackCount := 0
+	for _, cred := range bal.credentials {
+		if cred.IsFallback {
+			fallbackCount++
+		}
+	}
+	assert.Equal(t, 2, fallbackCount,
+		"Both separate fallback chains should remain valid")
+}
+
+func TestValidateFallbackConfiguration_NoFallbacks(t *testing.T) {
+	// Test configuration with no fallbacks (normal case)
+	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
+	rl := ratelimit.New()
+
+	credentials := []config.CredentialConfig{
+		{
+			Name:    "proxy-a",
+			Type:    config.ProviderTypeProxy,
+			BaseURL: "http://a.com",
+			RPM:     100,
+		},
+		{
+			Name:    "proxy-b",
+			Type:    config.ProviderTypeProxy,
+			BaseURL: "http://b.com",
+			RPM:     100,
+		},
+	}
+
+	// Initialize balancer - no fallbacks to validate
+	bal := New(credentials, f2b, rl)
+	require.NotNil(t, bal)
+
+	// No credentials should have IsFallback set
+	for _, cred := range bal.credentials {
+		assert.False(t, cred.IsFallback, "No credentials should be marked as fallback")
+	}
+}

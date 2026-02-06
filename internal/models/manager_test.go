@@ -521,3 +521,60 @@ func TestConcurrentHasModelAndAddModel(t *testing.T) {
 		<-done
 	}
 }
+
+// TestGetAllModels_CacheExpiryRace tests concurrent access to GetAllModels with cache expiry
+// This test is designed to catch TOCTOU race conditions when cache expires
+func TestGetAllModels_CacheExpiryRace(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+
+	staticModels := []config.ModelRPMConfig{
+		{Name: "gpt-4", RPM: 100},
+		{Name: "gpt-3.5-turbo", RPM: 200},
+	}
+	manager := New(logger, 50, staticModels)
+
+	// Run concurrent reads to populate cache
+	done := make(chan bool, 100)
+	for i := 0; i < 100; i++ {
+		go func() {
+			resp := manager.GetAllModels()
+			if len(resp.Data) != 2 {
+				t.Errorf("Expected 2 models, got %d", len(resp.Data))
+			}
+			done <- true
+		}()
+	}
+
+	for i := 0; i < 100; i++ {
+		<-done
+	}
+}
+
+// TestGetRemoteModels_CacheExpiryRace tests concurrent access to GetRemoteModels with cache expiry
+// This test is designed to catch TOCTOU race conditions when cache expires
+func TestGetRemoteModels_CacheExpiryRace(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+	manager := New(logger, 100, []config.ModelRPMConfig{})
+
+	cred := &config.CredentialConfig{
+		Name:    "test-proxy",
+		Type:    config.ProviderTypeProxy,
+		BaseURL: "http://localhost:8000",
+		APIKey:  "test-key",
+	}
+
+	// Run concurrent reads
+	// Note: This will fail to actually fetch models since the endpoint doesn't exist,
+	// but it will still exercise the cache logic and potentially expose race conditions
+	done := make(chan bool, 100)
+	for i := 0; i < 100; i++ {
+		go func() {
+			_ = manager.GetRemoteModels(cred)
+			done <- true
+		}()
+	}
+
+	for i := 0; i < 100; i++ {
+		<-done
+	}
+}

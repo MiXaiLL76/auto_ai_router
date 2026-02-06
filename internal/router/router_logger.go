@@ -6,8 +6,11 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strings"
 	"sync"
 	"time"
+
+	"github.com/mixaill76/auto_ai_router/internal/security"
 )
 
 // errorLogFileCache holds a cached file handle for error logging
@@ -131,7 +134,13 @@ func logErrorResponse(errorsLogPath string, req *http.Request, rc *responseCaptu
 		if len(values) > 0 {
 			// Mask Authorization header for security
 			if key == "Authorization" {
-				reqHeaders[key] = "Bearer ***"
+				authValue := values[0]
+				if strings.HasPrefix(authValue, "Bearer ") {
+					token := strings.TrimPrefix(authValue, "Bearer ")
+					reqHeaders[key] = "Bearer " + security.MaskToken(token)
+				} else {
+					reqHeaders[key] = security.MaskSecret(authValue, 4)
+				}
 			} else {
 				reqHeaders[key] = values[0]
 			}

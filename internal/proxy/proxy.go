@@ -4,22 +4,28 @@ import (
 	"bytes"
 	"context"
 	_ "embed"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"html/template"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/mixaill76/auto_ai_router/internal/auth"
 	"github.com/mixaill76/auto_ai_router/internal/balancer"
 	"github.com/mixaill76/auto_ai_router/internal/config"
+	"github.com/mixaill76/auto_ai_router/internal/litellmdb"
 	"github.com/mixaill76/auto_ai_router/internal/logger"
 	"github.com/mixaill76/auto_ai_router/internal/models"
 	"github.com/mixaill76/auto_ai_router/internal/monitoring"
 	"github.com/mixaill76/auto_ai_router/internal/ratelimit"
+	"github.com/mixaill76/auto_ai_router/internal/security"
 	"github.com/mixaill76/auto_ai_router/internal/transform/anthropic"
 	"github.com/mixaill76/auto_ai_router/internal/transform/vertex"
 )
@@ -31,19 +37,29 @@ const ResponseBodyMultiplier = 20
 //go:embed health.html
 var healthHTML string
 
+// HealthChecker provides cached database health status
+type HealthChecker interface {
+	IsDBHealthy() bool
+}
+
 // Config holds all configuration needed to create a Proxy
 type Config struct {
-	Balancer       *balancer.RoundRobin
-	Logger         *slog.Logger
-	MaxBodySizeMB  int
-	RequestTimeout time.Duration
-	Metrics        *monitoring.Metrics
-	MasterKey      string
-	RateLimiter    *ratelimit.RPMLimiter
-	TokenManager   *auth.VertexTokenManager
-	ModelManager   *models.Manager
-	Version        string
-	Commit         string
+	Balancer            *balancer.RoundRobin
+	Logger              *slog.Logger
+	MaxBodySizeMB       int
+	RequestTimeout      time.Duration
+	MaxIdleConns        int
+	MaxIdleConnsPerHost int
+	IdleConnTimeout     time.Duration
+	Metrics             *monitoring.Metrics
+	MasterKey           string
+	RateLimiter         *ratelimit.RPMLimiter
+	TokenManager        *auth.VertexTokenManager
+	ModelManager        *models.Manager
+	Version             string
+	Commit              string
+	LiteLLMDB           litellmdb.Manager // LiteLLM database integration (optional)
+	HealthChecker       HealthChecker     // Optional: cached DB health status (updated by health monitor)
 }
 
 type Proxy struct {
@@ -58,12 +74,34 @@ type Proxy struct {
 	tokenManager   *auth.VertexTokenManager
 	healthTemplate *template.Template // Cached template
 	modelManager   *models.Manager    // Model manager for getting configured models
+	litellmDB      litellmdb.Manager  // LiteLLM database integration
+	healthChecker  HealthChecker      // Cached DB health status (optional)
 }
 
 var (
 	Version = "dev"
 	Commit  = "unknown"
 )
+
+// isTimeoutError checks if an error is a timeout error
+func isTimeoutError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	// Check for context deadline exceeded
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+
+	// Check for net.Error timeout
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return true
+	}
+
+	return false
+}
 
 func New(cfg *Config) *Proxy {
 	// Parse template once at startup
@@ -100,13 +138,15 @@ func New(cfg *Config) *Proxy {
 		tokenManager:   cfg.TokenManager,
 		healthTemplate: tmpl,
 		modelManager:   cfg.ModelManager,
+		litellmDB:      cfg.LiteLLMDB,
+		healthChecker:  cfg.HealthChecker,
 		client: &http.Client{
 			Timeout: cfg.RequestTimeout,
 			Transport: &http.Transport{
 				Proxy:               http.ProxyFromEnvironment, // Support HTTP_PROXY, HTTPS_PROXY, NO_PROXY
-				MaxIdleConns:        100,
-				MaxIdleConnsPerHost: 10,
-				IdleConnTimeout:     90 * time.Second,
+				MaxIdleConns:        cfg.MaxIdleConns,
+				MaxIdleConnsPerHost: cfg.MaxIdleConnsPerHost,
+				IdleConnTimeout:     cfg.IdleConnTimeout,
 				DisableKeepAlives:   false,
 			},
 			CheckRedirect: func(req *http.Request, via []*http.Request) error {
@@ -151,13 +191,23 @@ func (p *Proxy) executeProxyRequest(
 	// Send request
 	resp, err := p.client.Do(proxyReq)
 	if err != nil {
-		p.logger.Error("Failed to proxy request",
-			"credential", cred.Name,
-			"error", err,
-			"url", targetURL,
-		)
-		p.balancer.RecordResponse(cred.Name, http.StatusBadGateway)
-		p.metrics.RecordRequest(cred.Name, r.URL.Path, http.StatusBadGateway, time.Since(start))
+		statusCode := http.StatusBadGateway
+		if isTimeoutError(err) {
+			statusCode = http.StatusRequestTimeout
+			p.logger.Error("Proxy request timeout",
+				"credential", cred.Name,
+				"error", err,
+				"url", targetURL,
+			)
+		} else {
+			p.logger.Error("Failed to proxy request",
+				"credential", cred.Name,
+				"error", err,
+				"url", targetURL,
+			)
+		}
+		p.balancer.RecordResponse(cred.Name, statusCode)
+		p.metrics.RecordRequest(cred.Name, r.URL.Path, statusCode, time.Since(start))
 		return nil, err
 	}
 	defer func() {
@@ -213,9 +263,32 @@ func (p *Proxy) forwardToProxy(
 }
 
 func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
-	start := time.Now()
+	start := time.Now().UTC()
+	requestID := uuid.New().String()
 
-	// Verify master_key from Authorization header
+	// Initialize request context with fallback retry tracking
+	// This prevents infinite loops by tracking which credentials have been attempted
+	ctx := r.Context()
+	triedCreds := make(map[string]bool)
+	ctx = SetTried(ctx, triedCreds)
+	// Initialize attempt counter to 0 (incremented before first attempt)
+	ctx = context.WithValue(ctx, AttemptCountKey{}, 0)
+	r = r.WithContext(ctx)
+
+	// Cache LiteLLM DB health check once per request to reduce concurrent calls
+	// Use cached health status from health monitor if available, otherwise call IsHealthy()
+	var isLiteLLMHealthy bool
+	if p.litellmDB != nil && p.litellmDB.IsEnabled() {
+		if p.healthChecker != nil {
+			// Use cached health status from health monitor
+			isLiteLLMHealthy = p.healthChecker.IsDBHealthy()
+		} else {
+			// Fallback to direct health check if no health checker provided
+			isLiteLLMHealthy = p.litellmDB.IsHealthy()
+		}
+	}
+
+	// Verify Authorization header
 	authHeader := r.Header.Get("Authorization")
 	if authHeader == "" {
 		p.logger.Error("Missing Authorization header")
@@ -232,11 +305,35 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check if token matches master_key
-	if token != p.masterKey {
-		p.logger.Error("Invalid master key", "provided_key_prefix", maskKey(token))
-		http.Error(w, "Unauthorized: Invalid master key", http.StatusUnauthorized)
-		return
+	// Auth variables for logging
+	var tokenInfo *litellmdb.TokenInfo
+
+	// Try LiteLLM DB authentication first if enabled and healthy
+	if isLiteLLMHealthy {
+		var err error
+		tokenInfo, err = p.litellmDB.ValidateToken(r.Context(), token)
+		if err != nil {
+			// Handle specific auth errors
+			if p.handleLiteLLMAuthError(w, err, token) {
+				return
+			}
+			// Connection failed - fallback to master_key
+			p.logger.Warn("LiteLLM DB unavailable, falling back to master_key")
+			if !p.validateMasterKeyOrError(w, token) {
+				return
+			}
+		} else if tokenInfo != nil {
+			// Successfully authenticated via LiteLLM DB
+			p.logger.Debug("Token validated via LiteLLM DB",
+				"user_id", tokenInfo.UserID,
+				"team_id", tokenInfo.TeamID,
+			)
+		}
+	} else {
+		// LiteLLM DB disabled - use master_key only
+		if !p.validateMasterKeyOrError(w, token) {
+			return
+		}
 	}
 
 	body, err := io.ReadAll(io.LimitReader(r.Body, int64(p.maxBodySizeMB)*1024*1024))
@@ -251,8 +348,8 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	// Extract model from request body if present
-	modelID, streaming, body := extractMetadataFromBody(body)
+	// Extract model and session ID from request body if present
+	modelID, streaming, sessionID, body := extractMetadataFromBody(body)
 
 	// Select credential based on model availability
 	if modelID == "" {
@@ -289,6 +386,13 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Add primary credential to tried set (for fallback retry tracking)
+	ctx = r.Context()
+	currentTriedCreds := GetTried(ctx)
+	currentTriedCreds[cred.Name] = true
+	ctx = SetTried(ctx, currentTriedCreds)
+	r = r.WithContext(ctx)
+
 	// Log request details at DEBUG level
 	p.logger.Debug("Processing request",
 		"credential", cred.Name,
@@ -303,7 +407,13 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		proxyResp, err := p.forwardToProxy(w, r, modelID, cred, body, start)
 		if err != nil {
 			// Network error
-			http.Error(w, "Bad Gateway", http.StatusBadGateway)
+			statusCode := http.StatusBadGateway
+			statusMessage := "Bad Gateway"
+			if isTimeoutError(err) {
+				statusCode = http.StatusRequestTimeout
+				statusMessage = "Request Timeout"
+			}
+			http.Error(w, statusMessage, statusCode)
 			return
 		}
 
@@ -502,15 +612,28 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 
 	resp, err := p.client.Do(proxyReq)
 	if err != nil {
-		p.logger.Error("Upstream request failed",
-			"credential", cred.Name,
-			"error", err,
-			"url", targetURL,
-		)
 		statusCode := http.StatusBadGateway
+		statusMessage := "Bad Gateway"
+
+		if isTimeoutError(err) {
+			statusCode = http.StatusRequestTimeout
+			statusMessage = "Request Timeout"
+			p.logger.Error("Upstream request timeout",
+				"credential", cred.Name,
+				"error", err,
+				"url", targetURL,
+			)
+		} else {
+			p.logger.Error("Upstream request failed",
+				"credential", cred.Name,
+				"error", err,
+				"url", targetURL,
+			)
+		}
+
 		p.balancer.RecordResponse(cred.Name, statusCode)
 		p.metrics.RecordRequest(cred.Name, r.URL.Path, statusCode, time.Since(start))
-		http.Error(w, "Bad Gateway", statusCode)
+		http.Error(w, statusMessage, statusCode)
 		return
 	}
 	defer func() {
@@ -661,6 +784,19 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		// Replace resp.Body with a new reader for subsequent processing.
 		// NopCloser is required because http.Response.Body must be an io.ReadCloser.
 		resp.Body = io.NopCloser(bytes.NewReader(finalResponseBody))
+
+		// Log to LiteLLM DB (non-streaming)
+		promptTokens, completionTokens := extractTokenCounts(bodyForTokenExtraction)
+		status := "success"
+		if resp.StatusCode >= 400 {
+			status = "failure"
+		}
+		if err := p.logSpendToLiteLLMDB(requestID, start, r, token, modelID, promptTokens, completionTokens, status, cred, sessionID, targetURL, tokenInfo); err != nil {
+			p.logger.Warn("Failed to queue spend log",
+				"error", err,
+				"request_id", requestID,
+			)
+		}
 	}
 
 	// Copy response headers (skip hop-by-hop headers and transformation-related headers)
@@ -736,4 +872,217 @@ func (tcw *tokenCapturingWriter) Write(p []byte) (n int, err error) {
 		*tcw.tokens += tokens
 	}
 	return tcw.writer.Write(p)
+}
+
+// ==================== LiteLLM DB Integration ====================
+
+// validateMasterKeyOrError validates the master key token and writes HTTP error if invalid
+// Returns true if token is valid, false otherwise
+func (p *Proxy) validateMasterKeyOrError(w http.ResponseWriter, token string) bool {
+	if token != p.masterKey {
+		p.logger.Error("Invalid master key", "provided_key_prefix", security.MaskAPIKey(token))
+		http.Error(w, "Unauthorized: Invalid master key", http.StatusUnauthorized)
+		return false
+	}
+	return true
+}
+
+// handleLiteLLMAuthError handles LiteLLM authentication errors
+// Returns true if error was handled and response was written
+func (p *Proxy) handleLiteLLMAuthError(w http.ResponseWriter, err error, token string) bool {
+	// Map error types to HTTP status and message
+	errorMap := map[error]struct {
+		status  int
+		message string
+		logMsg  string
+	}{
+		litellmdb.ErrTokenNotFound:  {http.StatusUnauthorized, "Invalid token", "Token not found"},
+		litellmdb.ErrTokenBlocked:   {http.StatusForbidden, "Token blocked", "Token blocked"},
+		litellmdb.ErrTokenExpired:   {http.StatusUnauthorized, "Token expired", "Token expired"},
+		litellmdb.ErrBudgetExceeded: {http.StatusPaymentRequired, "Budget exceeded", "Budget exceeded"},
+	}
+
+	// Check for connection failure first (requires fallback, not an error response)
+	if errors.Is(err, litellmdb.ErrConnectionFailed) {
+		return false
+	}
+
+	// Check for known auth errors
+	for errType, info := range errorMap {
+		if errors.Is(err, errType) {
+			p.logger.Error(info.logMsg, "token_prefix", security.MaskAPIKey(token))
+			http.Error(w, "Unauthorized: "+info.message, info.status)
+			return true
+		}
+	}
+
+	// Unknown error
+	p.logger.Error("Auth error", "error", err, "token_prefix", security.MaskAPIKey(token))
+	http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+	return true
+}
+
+// logSpendToLiteLLMDB logs request to LiteLLM_SpendLogs table
+// Returns error if the log entry cannot be queued (e.g., queue full)
+func (p *Proxy) logSpendToLiteLLMDB(
+	requestID string,
+	start time.Time,
+	r *http.Request,
+	token string,
+	modelID string,
+	promptTokens, completionTokens int,
+	status string,
+	cred *config.CredentialConfig,
+	sessionID string,
+	targetURL string,
+	tokenInfo *litellmdb.TokenInfo,
+) error {
+	if p.litellmDB == nil || !p.litellmDB.IsEnabled() {
+		return nil
+	}
+
+	// Fallback to request ID if session ID not provided
+	if sessionID == "" {
+		sessionID = requestID
+	}
+
+	// Build model_id as credential.name:model_name
+	modelIDFormatted := cred.Name + ":" + modelID
+	hashedToken := litellmdb.HashToken(token)
+
+	// Extract user info from tokenInfo (or use empty strings as fallback)
+	var userID, teamID, organizationID string
+	if tokenInfo != nil {
+		userID = tokenInfo.UserID
+		teamID = tokenInfo.TeamID
+		organizationID = tokenInfo.OrganizationID
+	}
+
+	// Build metadata with optional alias fields from tokenInfo
+	metadata := buildMetadata(hashedToken, tokenInfo)
+
+	// Determine end user - prefer user email from tokenInfo
+	endUser := extractEndUser(r)
+	if tokenInfo != nil && tokenInfo.UserEmail != "" {
+		endUser = tokenInfo.UserEmail
+	}
+
+	// Extract domain from targetURL for APIBase (e.g., "https://api.openai.com/..." -> "api.openai.com")
+	apiBase := "auto_ai_router"
+	if targetURL != "" {
+		if u, err := url.Parse(targetURL); err == nil && u.Host != "" {
+			apiBase = u.Host
+		}
+	}
+
+	return p.litellmDB.LogSpend(&litellmdb.SpendLogEntry{
+		RequestID:         requestID,
+		StartTime:         start,
+		EndTime:           time.Now().UTC(),
+		CallType:          r.URL.Path,
+		APIBase:           apiBase,
+		Model:             modelID,           // Model name
+		ModelID:           modelIDFormatted,  // credential.name:model_name
+		ModelGroup:        "",                // Empty for now
+		CustomLLMProvider: string(cred.Type), // Provider type as string
+		PromptTokens:      promptTokens,
+		CompletionTokens:  completionTokens,
+		TotalTokens:       promptTokens + completionTokens,
+		Metadata:          metadata,
+		Spend:             1, // TODO: implement cost calculation
+		APIKey:            hashedToken,
+		UserID:            userID,
+		TeamID:            teamID,
+		OrganizationID:    organizationID,
+		EndUser:           endUser,
+		RequesterIP:       getClientIP(r),
+		Status:            status,
+		SessionID:         sessionID,
+	})
+}
+
+// buildMetadata builds metadata JSON with user and team alias information
+func buildMetadata(hashedToken string, tokenInfo *litellmdb.TokenInfo) string {
+	// Extract user info from tokenInfo (or use empty strings as fallback)
+	var userID, teamID, organizationID string
+	if tokenInfo != nil {
+		userID = tokenInfo.UserID
+		teamID = tokenInfo.TeamID
+		organizationID = tokenInfo.OrganizationID
+	}
+
+	// Base metadata always includes additional_usage_values
+	metadata := map[string]interface{}{
+		"additional_usage_values": map[string]interface{}{
+			"prompt_tokens_details":     nil,
+			"completion_tokens_details": nil,
+		},
+		"user_api_key":         hashedToken,
+		"user_api_key_org_id":  organizationID,
+		"user_api_key_team_id": teamID,
+		"user_api_key_user_id": userID,
+	}
+
+	// Add aliases from tokenInfo if available
+	if tokenInfo != nil {
+		if tokenInfo.KeyAlias != "" {
+			metadata["user_api_key_alias"] = tokenInfo.KeyAlias
+		}
+		if tokenInfo.UserAlias != "" {
+			metadata["user_api_key_user_alias"] = tokenInfo.UserAlias
+		}
+		if tokenInfo.TeamAlias != "" {
+			metadata["user_api_key_team_alias"] = tokenInfo.TeamAlias
+		}
+	}
+
+	// Convert to JSON
+	jsonBytes, err := json.Marshal(metadata)
+	if err != nil {
+		// Fallback to simple format if marshaling fails
+		return fmt.Sprintf(`{"user_api_key":"%s","user_api_key_org_id":"%s","user_api_key_team_id":"%s","user_api_key_user_id":"%s"}`, hashedToken, organizationID, teamID, userID)
+	}
+	return string(jsonBytes)
+}
+
+// extractEndUser extracts end_user from request headers or body
+func extractEndUser(r *http.Request) string {
+	// Check X-End-User header first
+	if endUser := r.Header.Get("X-End-User"); endUser != "" {
+		return endUser
+	}
+	return ""
+}
+
+// getClientIP gets the client IP address
+func getClientIP(r *http.Request) string {
+	// X-Forwarded-For header (first IP)
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		parts := strings.Split(xff, ",")
+		return strings.TrimSpace(parts[0])
+	}
+	// X-Real-IP header
+	if xri := r.Header.Get("X-Real-IP"); xri != "" {
+		return xri
+	}
+	// RemoteAddr
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
+}
+
+// extractTokenCounts extracts token counts from response body
+func extractTokenCounts(body []byte) (promptTokens, completionTokens int) {
+	var resp struct {
+		Usage struct {
+			PromptTokens     int `json:"prompt_tokens"`
+			CompletionTokens int `json:"completion_tokens"`
+		} `json:"usage"`
+	}
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return 0, 0
+	}
+	return resp.Usage.PromptTokens, resp.Usage.CompletionTokens
 }
