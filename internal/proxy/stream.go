@@ -28,12 +28,12 @@ func IsStreamingResponse(resp *http.Response) bool {
 
 type streamTransformer func(io.Reader, string, io.Writer) error
 
-func (p *Proxy) handleVertexStreaming(w http.ResponseWriter, resp *http.Response, credName, modelID string) error {
-	return p.handleTransformedStreaming(w, resp, credName, modelID, "Vertex AI", vertex.TransformVertexStreamToOpenAI)
+func (p *Proxy) handleVertexStreaming(w http.ResponseWriter, resp *http.Response, credName, modelID string, logCtx *RequestLogContext) error {
+	return p.handleTransformedStreaming(w, resp, credName, modelID, "Vertex AI", vertex.TransformVertexStreamToOpenAI, logCtx)
 }
 
-func (p *Proxy) handleAnthropicStreaming(w http.ResponseWriter, resp *http.Response, credName, modelID string) error {
-	return p.handleTransformedStreaming(w, resp, credName, modelID, "Anthropic", anthropic.TransformAnthropicStreamToOpenAI)
+func (p *Proxy) handleAnthropicStreaming(w http.ResponseWriter, resp *http.Response, credName, modelID string, logCtx *RequestLogContext) error {
+	return p.handleTransformedStreaming(w, resp, credName, modelID, "Anthropic", anthropic.TransformAnthropicStreamToOpenAI, logCtx)
 }
 
 func (p *Proxy) handleTransformedStreaming(
@@ -43,6 +43,7 @@ func (p *Proxy) handleTransformedStreaming(
 	modelID string,
 	providerName string,
 	transform streamTransformer,
+	logCtx *RequestLogContext,
 ) error {
 	p.logger.Debug("Starting streaming response", "provider", providerName, "credential", credName)
 
@@ -78,11 +79,25 @@ func (p *Proxy) handleTransformedStreaming(
 		p.logger.Debug("Streaming token usage recorded", "credential", credName, "model", modelID, "tokens", totalTokens)
 	}
 
+	// Log streaming response to LiteLLM DB if logCtx provided
+	if logCtx != nil && !logCtx.Logged {
+		logCtx.CompletionTokens = totalTokens
+		logCtx.Status = "success"
+		logCtx.HTTPStatus = 200
+		logCtx.Logged = true
+		if err := p.logSpendToLiteLLMDB(logCtx); err != nil {
+			p.logger.Warn("Failed to queue streaming spend log",
+				"error", err,
+				"request_id", logCtx.RequestID,
+			)
+		}
+	}
+
 	p.logger.Debug("Streaming response completed", "provider", providerName, "credential", credName)
 	return nil
 }
 
-func (p *Proxy) handleStreamingWithTokens(w http.ResponseWriter, resp *http.Response, credName, modelID string) error {
+func (p *Proxy) handleStreamingWithTokens(w http.ResponseWriter, resp *http.Response, credName, modelID string, logCtx *RequestLogContext) error {
 	p.logger.Debug("Starting streaming response with token tracking", "credential", credName)
 
 	var totalTokens int
@@ -103,6 +118,20 @@ func (p *Proxy) handleStreamingWithTokens(w http.ResponseWriter, resp *http.Resp
 			p.rateLimiter.ConsumeModelTokens(credName, modelID, totalTokens)
 		}
 		p.logger.Debug("Streaming token usage recorded", "credential", credName, "model", modelID, "tokens", totalTokens)
+	}
+
+	// Log streaming response to LiteLLM DB if logCtx provided
+	if logCtx != nil && !logCtx.Logged {
+		logCtx.CompletionTokens = totalTokens
+		logCtx.Status = "success"
+		logCtx.HTTPStatus = 200
+		logCtx.Logged = true
+		if err := p.logSpendToLiteLLMDB(logCtx); err != nil {
+			p.logger.Warn("Failed to queue streaming spend log",
+				"error", err,
+				"request_id", logCtx.RequestID,
+			)
+		}
 	}
 
 	p.logger.Debug("Streaming response completed", "credential", credName)

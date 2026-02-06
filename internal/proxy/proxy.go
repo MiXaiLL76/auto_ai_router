@@ -37,6 +37,26 @@ const ResponseBodyMultiplier = 20
 //go:embed health.html
 var healthHTML string
 
+// RequestLogContext holds all data needed for logging a request to LiteLLM DB
+// Filled throughout request processing and logged at the end via defer
+type RequestLogContext struct {
+	RequestID        string                   // Request ID (UUID)
+	StartTime        time.Time                // Request start time
+	Request          *http.Request            // HTTP request
+	Token            string                   // Auth token (raw, will be hashed)
+	ModelID          string                   // Model name
+	Status           string                   // "success" or "failure"
+	HTTPStatus       int                      // HTTP response status code
+	ErrorMsg         string                   // Error message (added to metadata on failure)
+	PromptTokens     int                      // Input tokens
+	CompletionTokens int                      // Output tokens
+	Credential       *config.CredentialConfig // Credential used
+	SessionID        string                   // Session ID
+	TargetURL        string                   // Target URL (for APIBase extraction)
+	TokenInfo        *litellmdb.TokenInfo     // User/team/org info
+	Logged           bool                     // True if already logged (prevents duplicate logging)
+}
+
 // HealthChecker provides cached database health status
 type HealthChecker interface {
 	IsDBHealthy() bool
@@ -266,6 +286,28 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 	start := time.Now().UTC()
 	requestID := uuid.New().String()
 
+	// Create logging context that will be filled throughout request processing
+	// and logged at the end via defer to ensure all requests are logged
+	logCtx := &RequestLogContext{
+		RequestID: requestID,
+		StartTime: start,
+		Request:   r,
+		Status:    "unknown",
+	}
+
+	// Ensure request is logged at the end regardless of which path is taken
+	defer func() {
+		if !logCtx.Logged && logCtx.Token != "" && logCtx.Credential != nil {
+			if err := p.logSpendToLiteLLMDB(logCtx); err != nil {
+				p.logger.Warn("Failed to queue spend log",
+					"error", err,
+					"request_id", requestID,
+				)
+			}
+			logCtx.Logged = true
+		}
+	}()
+
 	// Initialize request context with fallback retry tracking
 	// This prevents infinite loops by tracking which credentials have been attempted
 	ctx := r.Context()
@@ -292,15 +334,22 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 	authHeader := r.Header.Get("Authorization")
 	if authHeader == "" {
 		p.logger.Error("Missing Authorization header")
+		logCtx.Status = "failure"
+		logCtx.HTTPStatus = http.StatusUnauthorized
+		logCtx.ErrorMsg = "Missing Authorization header"
 		http.Error(w, "Unauthorized: Missing Authorization header", http.StatusUnauthorized)
 		return
 	}
 
 	// Extract token from "Bearer <token>"
 	token := strings.TrimPrefix(authHeader, "Bearer ")
+	logCtx.Token = token // Store token for logging
 	if token == authHeader {
 		// No "Bearer " prefix found
 		p.logger.Error("Invalid Authorization header format")
+		logCtx.Status = "failure"
+		logCtx.HTTPStatus = http.StatusUnauthorized
+		logCtx.ErrorMsg = "Invalid Authorization header format"
 		http.Error(w, "Unauthorized: Invalid Authorization header format", http.StatusUnauthorized)
 		return
 	}
@@ -312,14 +361,21 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 	if isLiteLLMHealthy {
 		var err error
 		tokenInfo, err = p.litellmDB.ValidateToken(r.Context(), token)
+		logCtx.TokenInfo = tokenInfo // Store for logging
 		if err != nil {
 			// Handle specific auth errors
 			if p.handleLiteLLMAuthError(w, err, token) {
+				logCtx.Status = "failure"
+				logCtx.HTTPStatus = http.StatusUnauthorized
+				logCtx.ErrorMsg = "LiteLLM auth validation failed"
 				return
 			}
 			// Connection failed - fallback to master_key
 			p.logger.Warn("LiteLLM DB unavailable, falling back to master_key")
 			if !p.validateMasterKeyOrError(w, token) {
+				logCtx.Status = "failure"
+				logCtx.HTTPStatus = http.StatusUnauthorized
+				logCtx.ErrorMsg = "Master key validation failed"
 				return
 			}
 		} else if tokenInfo != nil {
@@ -332,6 +388,9 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 	} else {
 		// LiteLLM DB disabled - use master_key only
 		if !p.validateMasterKeyOrError(w, token) {
+			logCtx.Status = "failure"
+			logCtx.HTTPStatus = http.StatusUnauthorized
+			logCtx.ErrorMsg = "Master key validation failed"
 			return
 		}
 	}
@@ -339,6 +398,9 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(io.LimitReader(r.Body, int64(p.maxBodySizeMB)*1024*1024))
 	if err != nil {
 		p.logger.Error("Failed to read request body", "error", err)
+		logCtx.Status = "failure"
+		logCtx.HTTPStatus = http.StatusBadRequest
+		logCtx.ErrorMsg = "Failed to read request body: " + err.Error()
 		http.Error(w, "Bad Request", http.StatusBadRequest)
 		return
 	}
@@ -350,10 +412,15 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 
 	// Extract model and session ID from request body if present
 	modelID, streaming, sessionID, body := extractMetadataFromBody(body)
+	logCtx.ModelID = modelID     // Store model for logging
+	logCtx.SessionID = sessionID // Store session for logging
 
 	// Select credential based on model availability
 	if modelID == "" {
 		p.logger.Error("Model not specified in request body")
+		logCtx.Status = "failure"
+		logCtx.HTTPStatus = http.StatusBadRequest
+		logCtx.ErrorMsg = "Model not specified in request body"
 		http.Error(w, "Bad Request: model field is required", http.StatusBadRequest)
 		return
 	}
@@ -371,9 +438,11 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			// Both stages failed
 			err_code := http.StatusServiceUnavailable
 			err_line := "Service Unavailable"
+			errorMsg := fmt.Sprintf("No credentials available: %v", err)
 			if errors.Is(err, balancer.ErrRateLimitExceeded) {
 				err_code = http.StatusTooManyRequests
 				err_line = "Too Many Requests"
+				errorMsg = "Rate limit exceeded"
 			}
 
 			p.logger.Error("No credentials available (regular and fallback)",
@@ -381,10 +450,16 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 				"primary_error", err,
 				"fallback_error", fallbackErr,
 			)
+			logCtx.Status = "failure"
+			logCtx.HTTPStatus = err_code
+			logCtx.ErrorMsg = errorMsg
 			http.Error(w, err_line, err_code)
 			return
 		}
 	}
+
+	// Store credential and set up for logging
+	logCtx.Credential = cred
 
 	// Add primary credential to tried set (for fallback retry tracking)
 	ctx = r.Context()
@@ -409,10 +484,16 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			// Network error
 			statusCode := http.StatusBadGateway
 			statusMessage := "Bad Gateway"
+			errorMsg := fmt.Sprintf("Proxy forward error: %v", err)
 			if isTimeoutError(err) {
 				statusCode = http.StatusRequestTimeout
 				statusMessage = "Request Timeout"
+				errorMsg = "Request timeout"
 			}
+			logCtx.Status = "failure"
+			logCtx.HTTPStatus = statusCode
+			logCtx.ErrorMsg = errorMsg
+			logCtx.TargetURL = cred.BaseURL
 			http.Error(w, statusMessage, statusCode)
 			return
 		}
@@ -446,8 +527,9 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 				"model", modelID,
 			)
 			// Try fallback - it will write response directly if successful
-			success, fallbackReason := p.TryFallbackProxy(w, r, modelID, cred.Name, proxyResp.StatusCode, retryReason, body, start)
+			success, fallbackReason := p.TryFallbackProxy(w, r, modelID, cred.Name, proxyResp.StatusCode, retryReason, body, start, logCtx)
 			if success {
+				// Fallback succeeded - TryFallbackProxy handles logging
 				return
 			}
 			// If fallback didn't work, continue with original response
@@ -479,6 +561,15 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		if _, err := w.Write(proxyResp.Body); err != nil {
 			p.logger.Error("Failed to write proxy response body", "error", err)
 		}
+
+		// Log proxy response
+		logCtx.Status = "success"
+		if proxyResp.StatusCode >= 400 {
+			logCtx.Status = "failure"
+		}
+		logCtx.HTTPStatus = proxyResp.StatusCode
+		logCtx.TargetURL = cred.BaseURL
+		// Proxy responses typically don't have token counts, so leave at 0
 		return
 	}
 
@@ -496,6 +587,10 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 				"credential", cred.Name,
 				"error", err,
 			)
+			logCtx.Status = "failure"
+			logCtx.HTTPStatus = http.StatusInternalServerError
+			logCtx.ErrorMsg = fmt.Sprintf("Vertex AI transformation failed: %v", err)
+			logCtx.TargetURL = cred.BaseURL
 			http.Error(w, "Internal Server Error: Failed to convert request to Vertex AI format", http.StatusInternalServerError)
 			return
 		}
@@ -516,6 +611,10 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 				"credential", cred.Name,
 				"error", err,
 			)
+			logCtx.Status = "failure"
+			logCtx.HTTPStatus = http.StatusInternalServerError
+			logCtx.ErrorMsg = fmt.Sprintf("Vertex AI token error: %v", err)
+			logCtx.TargetURL = targetURL
 			http.Error(w, "Internal Server Error: Failed to authenticate with Vertex AI", http.StatusInternalServerError)
 			return
 		}
@@ -526,6 +625,10 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 				"credential", cred.Name,
 				"error", err,
 			)
+			logCtx.Status = "failure"
+			logCtx.HTTPStatus = http.StatusInternalServerError
+			logCtx.ErrorMsg = "Anthropic does not support image generation"
+			logCtx.TargetURL = cred.BaseURL
 			http.Error(w, "Internal Server Error: Failed to Anthropic image request", http.StatusInternalServerError)
 			return
 		}
@@ -539,6 +642,10 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 				"credential", cred.Name,
 				"error", err,
 			)
+			logCtx.Status = "failure"
+			logCtx.HTTPStatus = http.StatusInternalServerError
+			logCtx.ErrorMsg = fmt.Sprintf("Anthropic transformation failed: %v", err)
+			logCtx.TargetURL = targetURL
 			http.Error(w, "Internal Server Error: Failed to transform request", http.StatusInternalServerError)
 			return
 		}
@@ -565,6 +672,10 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 	proxyReq, err := http.NewRequest(r.Method, targetURL, bytes.NewReader(requestBody))
 	if err != nil {
 		p.logger.Error("Failed to create proxy request", "error", err, "url", targetURL)
+		logCtx.Status = "failure"
+		logCtx.HTTPStatus = http.StatusInternalServerError
+		logCtx.ErrorMsg = fmt.Sprintf("Failed to create request: %v", err)
+		logCtx.TargetURL = targetURL
 		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 		return
 	}
@@ -664,10 +775,15 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 	finalResponseBody := make([]byte, 0) // Initialize to empty slice to avoid nil panics
 	if isStreamingResp {
 		p.logger.Debug("Response is streaming", "credential", cred.Name)
+		logCtx.TargetURL = targetURL // Store target URL for logging
 	} else {
 		responseBody, err = io.ReadAll(resp.Body)
 		if err != nil {
 			p.logger.Error("Failed to read response body", "error", err)
+			logCtx.Status = "failure"
+			logCtx.HTTPStatus = http.StatusInternalServerError
+			logCtx.ErrorMsg = fmt.Sprintf("Failed to read response body: %v", err)
+			logCtx.TargetURL = targetURL
 			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 			return
 		}
@@ -682,8 +798,9 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 				"model", modelID,
 			)
 			// Try fallback - it will write response directly if successful
-			success, fallbackReason := p.TryFallbackProxy(w, r, modelID, cred.Name, resp.StatusCode, retryReason, body, start)
+			success, fallbackReason := p.TryFallbackProxy(w, r, modelID, cred.Name, resp.StatusCode, retryReason, body, start, logCtx)
 			if success {
+				// Fallback succeeded - TryFallbackProxy handles logging
 				return
 			}
 			// If fallback didn't work, continue with original response
@@ -787,16 +904,15 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 
 		// Log to LiteLLM DB (non-streaming)
 		promptTokens, completionTokens := extractTokenCounts(bodyForTokenExtraction)
-		status := "success"
+		logCtx.PromptTokens = promptTokens
+		logCtx.CompletionTokens = completionTokens
+		logCtx.Status = "success"
 		if resp.StatusCode >= 400 {
-			status = "failure"
+			logCtx.Status = "failure"
 		}
-		if err := p.logSpendToLiteLLMDB(requestID, start, r, token, modelID, promptTokens, completionTokens, status, cred, sessionID, targetURL, tokenInfo); err != nil {
-			p.logger.Warn("Failed to queue spend log",
-				"error", err,
-				"request_id", requestID,
-			)
-		}
+		logCtx.HTTPStatus = resp.StatusCode
+		logCtx.TargetURL = targetURL
+		logCtx.Logged = true // Mark as logged
 	}
 
 	// Copy response headers (skip hop-by-hop headers and transformation-related headers)
@@ -813,23 +929,35 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(resp.StatusCode)
 
 	if isStreamingResp {
+		// Ensure logCtx is marked as logged to prevent defer from logging again
+		logCtx.Logged = true
+
 		switch cred.Type {
 		case config.ProviderTypeVertexAI:
 			// Handle Vertex AI streaming with token tracking
-			err := p.handleVertexStreaming(w, resp, cred.Name, modelID)
+			err := p.handleVertexStreaming(w, resp, cred.Name, modelID, logCtx)
 			if err != nil {
 				p.logger.Error("Failed to vertex streaming response", "error", err)
+				logCtx.Status = "failure"
+				logCtx.ErrorMsg = fmt.Sprintf("Vertex streaming error: %v", err)
+				logCtx.Logged = false // Allow defer to log error
 			}
 		case config.ProviderTypeAnthropic:
 			// Handle Anthropic streaming with token tracking
-			err := p.handleAnthropicStreaming(w, resp, cred.Name, modelID)
+			err := p.handleAnthropicStreaming(w, resp, cred.Name, modelID, logCtx)
 			if err != nil {
 				p.logger.Error("Failed to vertex streaming response", "error", err)
+				logCtx.Status = "failure"
+				logCtx.ErrorMsg = fmt.Sprintf("Anthropic streaming error: %v", err)
+				logCtx.Logged = false // Allow defer to log error
 			}
 		default:
-			err := p.handleStreamingWithTokens(w, resp, cred.Name, modelID)
+			err := p.handleStreamingWithTokens(w, resp, cred.Name, modelID, logCtx)
 			if err != nil {
 				p.logger.Error("Failed to handle streaming response", "error", err)
+				logCtx.Status = "failure"
+				logCtx.ErrorMsg = fmt.Sprintf("Streaming error: %v", err)
+				logCtx.Logged = false // Allow defer to log error
 			}
 		}
 
@@ -924,70 +1052,73 @@ func (p *Proxy) handleLiteLLMAuthError(w http.ResponseWriter, err error, token s
 
 // logSpendToLiteLLMDB logs request to LiteLLM_SpendLogs table
 // Returns error if the log entry cannot be queued (e.g., queue full)
-func (p *Proxy) logSpendToLiteLLMDB(
-	requestID string,
-	start time.Time,
-	r *http.Request,
-	token string,
-	modelID string,
-	promptTokens, completionTokens int,
-	status string,
-	cred *config.CredentialConfig,
-	sessionID string,
-	targetURL string,
-	tokenInfo *litellmdb.TokenInfo,
-) error {
+func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
 	if p.litellmDB == nil || !p.litellmDB.IsEnabled() {
 		return nil
 	}
 
+	if logCtx == nil || logCtx.Credential == nil || logCtx.Request == nil {
+		return nil
+	}
+
 	// Fallback to request ID if session ID not provided
-	if sessionID == "" {
-		sessionID = requestID
+	if logCtx.SessionID == "" {
+		logCtx.SessionID = logCtx.RequestID
 	}
 
 	// Build model_id as credential.name:model_name
-	modelIDFormatted := cred.Name + ":" + modelID
-	hashedToken := litellmdb.HashToken(token)
+	modelIDFormatted := logCtx.Credential.Name + ":" + logCtx.ModelID
+	hashedToken := litellmdb.HashToken(logCtx.Token)
 
 	// Extract user info from tokenInfo (or use empty strings as fallback)
 	var userID, teamID, organizationID string
-	if tokenInfo != nil {
-		userID = tokenInfo.UserID
-		teamID = tokenInfo.TeamID
-		organizationID = tokenInfo.OrganizationID
+	if logCtx.TokenInfo != nil {
+		userID = logCtx.TokenInfo.UserID
+		teamID = logCtx.TokenInfo.TeamID
+		organizationID = logCtx.TokenInfo.OrganizationID
 	}
 
 	// Build metadata with optional alias fields from tokenInfo
-	metadata := buildMetadata(hashedToken, tokenInfo)
+	// Add error field if request failed
+	metadata := buildMetadata(hashedToken, logCtx.TokenInfo, logCtx.ErrorMsg)
 
 	// Determine end user - prefer user email from tokenInfo
-	endUser := extractEndUser(r)
-	if tokenInfo != nil && tokenInfo.UserEmail != "" {
-		endUser = tokenInfo.UserEmail
+	endUser := extractEndUser(logCtx.Request)
+	if logCtx.TokenInfo != nil && logCtx.TokenInfo.UserEmail != "" {
+		endUser = logCtx.TokenInfo.UserEmail
 	}
 
 	// Extract domain from targetURL for APIBase (e.g., "https://api.openai.com/..." -> "api.openai.com")
 	apiBase := "auto_ai_router"
-	if targetURL != "" {
-		if u, err := url.Parse(targetURL); err == nil && u.Host != "" {
+	if logCtx.TargetURL != "" {
+		if u, err := url.Parse(logCtx.TargetURL); err == nil && u.Host != "" {
 			apiBase = u.Host
 		}
 	}
 
+	// Determine final status if not explicitly set
+	status := logCtx.Status
+	if status == "" {
+		if logCtx.HTTPStatus >= 400 {
+			status = "failure"
+		} else {
+			status = "success"
+		}
+	}
+
 	return p.litellmDB.LogSpend(&litellmdb.SpendLogEntry{
-		RequestID:         requestID,
-		StartTime:         start,
+		RequestID:         logCtx.RequestID,
+		StartTime:         logCtx.StartTime,
 		EndTime:           time.Now().UTC(),
-		CallType:          r.URL.Path,
+		CallType:          logCtx.Request.URL.Path,
 		APIBase:           apiBase,
-		Model:             modelID,           // Model name
-		ModelID:           modelIDFormatted,  // credential.name:model_name
-		ModelGroup:        "",                // Empty for now
-		CustomLLMProvider: string(cred.Type), // Provider type as string
-		PromptTokens:      promptTokens,
-		CompletionTokens:  completionTokens,
-		TotalTokens:       promptTokens + completionTokens,
+		Model:             logCtx.ModelID,                 // Model name
+		ModelID:           modelIDFormatted,               // credential.name:model_name
+		ModelGroup:        "",                             // Empty for now
+		CustomLLMProvider: string(logCtx.Credential.Type), // Provider type as string
+		PromptTokens:      logCtx.PromptTokens,
+		CompletionTokens:  logCtx.CompletionTokens,
+		TotalTokens:       logCtx.PromptTokens + logCtx.CompletionTokens,
 		Metadata:          metadata,
 		Spend:             1, // TODO: implement cost calculation
 		APIKey:            hashedToken,
@@ -995,14 +1126,14 @@ func (p *Proxy) logSpendToLiteLLMDB(
 		TeamID:            teamID,
 		OrganizationID:    organizationID,
 		EndUser:           endUser,
-		RequesterIP:       getClientIP(r),
+		RequesterIP:       getClientIP(logCtx.Request),
 		Status:            status,
-		SessionID:         sessionID,
+		SessionID:         logCtx.SessionID,
 	})
 }
 
-// buildMetadata builds metadata JSON with user and team alias information
-func buildMetadata(hashedToken string, tokenInfo *litellmdb.TokenInfo) string {
+// buildMetadata builds metadata JSON with user/team alias and optional error info
+func buildMetadata(hashedToken string, tokenInfo *litellmdb.TokenInfo, errorMsg string) string {
 	// Extract user info from tokenInfo (or use empty strings as fallback)
 	var userID, teamID, organizationID string
 	if tokenInfo != nil {
@@ -1034,6 +1165,11 @@ func buildMetadata(hashedToken string, tokenInfo *litellmdb.TokenInfo) string {
 		if tokenInfo.TeamAlias != "" {
 			metadata["user_api_key_team_alias"] = tokenInfo.TeamAlias
 		}
+	}
+
+	// Add error field if request failed
+	if errorMsg != "" {
+		metadata["error"] = errorMsg
 	}
 
 	// Convert to JSON

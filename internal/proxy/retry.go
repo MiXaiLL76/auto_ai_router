@@ -136,6 +136,7 @@ func (p *Proxy) TryFallbackProxy(
 	originalReason RetryReason,
 	body []byte,
 	start time.Time,
+	logCtx *RequestLogContext,
 ) (bool, string) {
 	ctx := r.Context()
 
@@ -243,6 +244,27 @@ func (p *Proxy) TryFallbackProxy(
 		"fallback_credential", fallbackCred.Name,
 		"duration", time.Since(start),
 	)
+
+	// Log fallback response to LiteLLM DB
+	if logCtx != nil && !logCtx.Logged {
+		// Update logCtx with fallback credential info
+		logCtx.Credential = fallbackCred
+		logCtx.TargetURL = fallbackCred.BaseURL
+		logCtx.Status = "success"
+		if proxyResp.StatusCode >= 400 {
+			logCtx.Status = "failure"
+		}
+		logCtx.HTTPStatus = proxyResp.StatusCode
+		logCtx.Logged = true
+
+		if err := p.logSpendToLiteLLMDB(logCtx); err != nil {
+			p.logger.Warn("Failed to queue fallback spend log",
+				"error", err,
+				"request_id", logCtx.RequestID,
+				"fallback_credential", fallbackCred.Name,
+			)
+		}
+	}
 
 	return true, ""
 }

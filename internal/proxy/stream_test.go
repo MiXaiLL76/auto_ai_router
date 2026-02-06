@@ -78,7 +78,7 @@ func TestHandleStreamingWithTokens(t *testing.T) {
 	w := httptest.NewRecorder()
 
 	// Вызываем handleStreamingWithTokens напрямую
-	err = prx.handleStreamingWithTokens(w, resp, credName, modelID)
+	err = prx.handleStreamingWithTokens(w, resp, credName, modelID, nil)
 	require.NoError(t, err, "handleStreamingWithTokens не должен возвращать ошибку")
 
 	// Проверяем результат в ResponseRecorder
@@ -158,7 +158,7 @@ func TestHandleStreamingWithTokens_NoTokens(t *testing.T) {
 	defer func() { _ = resp.Body.Close() }()
 
 	w := httptest.NewRecorder()
-	err = prx.handleStreamingWithTokens(w, resp, credName, modelID)
+	err = prx.handleStreamingWithTokens(w, resp, credName, modelID, nil)
 	require.NoError(t, err, "handleStreamingWithTokens не должен возвращать ошибку")
 
 	// Проверяем что токены НЕ были добавлены
@@ -224,7 +224,7 @@ func TestHandleStreamingWithTokens_MultipleChunks(t *testing.T) {
 	defer func() { _ = resp.Body.Close() }()
 
 	w := httptest.NewRecorder()
-	err = prx.handleStreamingWithTokens(w, resp, credName, modelID)
+	err = prx.handleStreamingWithTokens(w, resp, credName, modelID, nil)
 	require.NoError(t, err, "handleStreamingWithTokens не должен возвращать ошибку")
 
 	// Проверяем что токены были просуммированы: 10 + 5 = 15
@@ -285,7 +285,7 @@ func TestHandleStreamingWithTokens_WithoutModelID(t *testing.T) {
 	w := httptest.NewRecorder()
 
 	// Это не должно упасть даже с пустым modelID
-	err = prx.handleStreamingWithTokens(w, resp, credName, modelID)
+	err = prx.handleStreamingWithTokens(w, resp, credName, modelID, nil)
 	require.NoError(t, err, "handleStreamingWithTokens не должен возвращать ошибку")
 
 	// Проверяем что credential-level tokens были добавлены

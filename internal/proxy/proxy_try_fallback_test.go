@@ -73,6 +73,7 @@ func TestTryFallbackProxy_NoFallback(t *testing.T) {
 		RetryReasonRateLimit,       // originalReason
 		bodyBytes,                  // request body to retry
 		time.Now().UTC(),           // start time
+		nil,                        // logCtx
 	)
 
 	// === ASSERTIONS
@@ -160,6 +161,7 @@ func TestTryFallbackProxy_SameCredential(t *testing.T) {
 		RetryReasonRateLimit,       // originalReason
 		bodyBytes,                  // request body to retry
 		time.Now().UTC(),           // start time
+		nil,                        // logCtx
 	)
 
 	// === ASSERTIONS
