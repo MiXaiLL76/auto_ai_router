@@ -138,9 +138,9 @@ func main() {
 	server := &http.Server{
 		Addr:         fmt.Sprintf(":%d", cfg.Server.Port),
 		Handler:      mux,
-		ReadTimeout:  getReadTimeout(cfg),
-		WriteTimeout: getWriteTimeout(cfg),
-		IdleTimeout:  getIdleTimeout(cfg),
+		ReadTimeout:  cfg.Server.ReadTimeout,
+		WriteTimeout: cfg.Server.WriteTimeout,
+		IdleTimeout:  cfg.Server.IdleTimeout,
 	}
 
 	// Start server in background
@@ -517,18 +517,3 @@ func startDBHealthMonitor(
 	log.Info("LiteLLM DB health monitor started (checks every 30 seconds)")
 }
 
-func getReadTimeout(cfg *config.Config) time.Duration {
-	return 60 * time.Second
-}
-
-func getWriteTimeout(cfg *config.Config) time.Duration {
-	if cfg.Server.RequestTimeout > 0 {
-		return time.Duration(float64(cfg.Server.RequestTimeout) * 1.5)
-	}
-	return 10 * time.Minute
-}
-
-func getIdleTimeout(cfg *config.Config) time.Duration {
-	writeTimeout := getWriteTimeout(cfg)
-	return writeTimeout * 2
-}

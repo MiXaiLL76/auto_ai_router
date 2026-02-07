@@ -57,6 +57,9 @@ type ServerConfig struct {
 	MaxIdleConns        int           `yaml:"max_idle_conns"`
 	MaxIdleConnsPerHost int           `yaml:"max_idle_conns_per_host"`
 	IdleConnTimeout     time.Duration `yaml:"idle_conn_timeout"`
+	ReadTimeout         time.Duration `yaml:"read_timeout"`  // HTTP server read timeout (default: 60s)
+	WriteTimeout        time.Duration `yaml:"write_timeout"` // HTTP server write timeout (default: 10m or 1.5*request_timeout if set)
+	IdleTimeout         time.Duration `yaml:"idle_timeout"`  // HTTP server idle timeout (default: 20m or 2*write_timeout)
 	ModelPricesLink     string        `yaml:"model_prices_link,omitempty"` // URL or file path to model prices JSON - supports os.environ/VAR_NAME
 }
 
@@ -87,6 +90,9 @@ func (s *ServerConfig) UnmarshalYAML(value *yaml.Node) error {
 		MaxIdleConns        string `yaml:"max_idle_conns"`
 		MaxIdleConnsPerHost string `yaml:"max_idle_conns_per_host"`
 		IdleConnTimeout     string `yaml:"idle_conn_timeout"`
+		ReadTimeout         string `yaml:"read_timeout"`
+		WriteTimeout        string `yaml:"write_timeout"`
+		IdleTimeout         string `yaml:"idle_timeout"`
 		ModelPricesLink     string `yaml:"model_prices_link,omitempty"`
 	}
 
@@ -164,6 +170,30 @@ func (s *ServerConfig) UnmarshalYAML(value *yaml.Node) error {
 		}
 	} else {
 		s.IdleConnTimeout = 120 * time.Second // Default value
+	}
+
+	// ReadTimeout
+	if temp.ReadTimeout != "" {
+		s.ReadTimeout, err = resolveEnvDuration(temp.ReadTimeout, 60*time.Second)
+		if err != nil {
+			return fmt.Errorf("invalid read_timeout: %w", err)
+		}
+	}
+
+	// WriteTimeout
+	if temp.WriteTimeout != "" {
+		s.WriteTimeout, err = resolveEnvDuration(temp.WriteTimeout, 10*time.Minute)
+		if err != nil {
+			return fmt.Errorf("invalid write_timeout: %w", err)
+		}
+	}
+
+	// IdleTimeout
+	if temp.IdleTimeout != "" {
+		s.IdleTimeout, err = resolveEnvDuration(temp.IdleTimeout, 20*time.Minute)
+		if err != nil {
+			return fmt.Errorf("invalid idle_timeout: %w", err)
+		}
 	}
 
 	s.ModelPricesLink = resolveEnvString(temp.ModelPricesLink)
@@ -661,6 +691,25 @@ func (c *Config) Validate() error {
 		c.Server.DefaultModelsRPM = 50 // Default value
 	} else if c.Server.DefaultModelsRPM < -1 {
 		return fmt.Errorf("invalid default_models_rpm: %d (must be -1 for unlimited or positive number)", c.Server.DefaultModelsRPM)
+	}
+
+	// Set default for read_timeout if not specified
+	if c.Server.ReadTimeout == 0 {
+		c.Server.ReadTimeout = 60 * time.Second
+	}
+
+	// Set default for write_timeout if not specified
+	if c.Server.WriteTimeout == 0 {
+		if c.Server.RequestTimeout > 0 {
+			c.Server.WriteTimeout = time.Duration(float64(c.Server.RequestTimeout) * 1.5)
+		} else {
+			c.Server.WriteTimeout = 10 * time.Minute
+		}
+	}
+
+	// Set default for idle_timeout if not specified
+	if c.Server.IdleTimeout == 0 {
+		c.Server.IdleTimeout = c.Server.WriteTimeout * 2
 	}
 
 	// Set default for health_check_path if not specified
