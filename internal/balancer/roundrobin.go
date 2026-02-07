@@ -4,7 +4,6 @@ import (
 	"errors"
 	"io"
 	"log/slog"
-	"strings"
 	"sync"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
@@ -251,152 +250,21 @@ func (r *RoundRobin) GetBannedCount() int {
 }
 
 // validateFallbackConfiguration validates fallback credential configuration
-// Performs:
-// 1. Circular dependency detection (DFS-based cycle detection)
-// 2. Unused fallback credential detection
-// 3. Disables problematic fallback links and logs warnings
+// Logs count of fallback credentials
 func (r *RoundRobin) validateFallbackConfiguration() {
-	// Build fallback dependency graph: credentialName -> fallbackTo
-	fallbackGraph := make(map[string]string)
-	fallbackCredentials := make(map[string]bool)
-
+	fallbackCount := 0
 	for _, cred := range r.credentials {
-		if cred.IsFallback && cred.FallbackTo != "" {
-			fallbackGraph[cred.Name] = cred.FallbackTo
-			fallbackCredentials[cred.Name] = true
+		if cred.IsFallback {
+			fallbackCount++
 		}
 	}
 
-	if len(fallbackGraph) == 0 {
+	if fallbackCount == 0 {
 		r.logger.Info("No fallback credentials configured")
-		return
-	}
-
-	// Track which credentials are referenced as fallbacks
-	referencedCredentials := make(map[string]bool)
-	for _, target := range fallbackGraph {
-		referencedCredentials[target] = true
-	}
-
-	// Detect circular dependencies using DFS
-	r.detectFallbackCycles(fallbackGraph)
-
-	// Detect unused fallback credentials
-	r.detectUnusedFallbacks(fallbackCredentials, referencedCredentials)
-
-	// Log summary
-	fallbackCount := len(fallbackGraph)
-	r.logger.Info("Fallback credential validation completed",
-		"total_credentials", len(r.credentials),
-		"fallback_credentials", fallbackCount,
-	)
-}
-
-// detectFallbackCycles detects circular references in fallback configuration using DFS
-// A cycle is detected when we encounter a node that's already in the current DFS path
-// If a cycle is detected, it's logged as a WARNING and the problematic fallback link is disabled
-func (r *RoundRobin) detectFallbackCycles(fallbackGraph map[string]string) {
-	visited := make(map[string]bool)        // Global visited set (for cycle detection)
-	recursionStack := make(map[string]bool) // Current DFS path (for cycle detection)
-
-	for credName := range fallbackGraph {
-		if !visited[credName] {
-			r.dfsCycleDetection(credName, fallbackGraph, visited, recursionStack)
-		}
-	}
-}
-
-// dfsCycleDetection performs depth-first search to detect cycles in fallback chain
-// Updates the credentials slice to disable fallback links that form cycles
-func (r *RoundRobin) dfsCycleDetection(
-	credName string,
-	fallbackGraph map[string]string,
-	visited map[string]bool,
-	recursionStack map[string]bool,
-) {
-	visited[credName] = true
-	recursionStack[credName] = true
-
-	// Check if this credential has a fallback
-	if fallbackTo, exists := fallbackGraph[credName]; exists {
-		// If fallback target is in current recursion stack, we have a cycle
-		if recursionStack[fallbackTo] {
-			// Build cycle path for logging
-			cyclePath := r.buildCyclePath(credName, fallbackTo, fallbackGraph, recursionStack)
-			r.logger.Warn("Circular fallback detected",
-				"cycle", cyclePath,
-				"source", credName,
-				"target", fallbackTo,
-			)
-
-			// Disable the fallback link by clearing is_fallback flag for the source credential
-			for i := range r.credentials {
-				if r.credentials[i].Name == credName {
-					r.credentials[i].IsFallback = false
-					r.logger.Warn("Disabled fallback link to prevent circular reference",
-						"credential", credName,
-						"was_fallback_to", fallbackTo,
-					)
-					break
-				}
-			}
-			// Remove this edge from graph to prevent further recursion
-			delete(fallbackGraph, credName)
-		} else if !visited[fallbackTo] {
-			// Continue DFS on unvisited fallback target
-			r.dfsCycleDetection(fallbackTo, fallbackGraph, visited, recursionStack)
-		}
-	}
-
-	// Backtrack: remove from recursion stack
-	delete(recursionStack, credName)
-}
-
-// buildCyclePath constructs a readable string representation of the cycle
-// Example: "proxy-a -> proxy-b -> proxy-a"
-func (r *RoundRobin) buildCyclePath(
-	startCred, backEdgeTo string,
-	fallbackGraph map[string]string,
-	recursionStack map[string]bool,
-) string {
-	path := []string{startCred}
-	current := fallbackGraph[startCred]
-
-	// Traverse back through the cycle
-	for current != startCred && current != backEdgeTo {
-		path = append(path, current)
-		if next, exists := fallbackGraph[current]; exists {
-			current = next
-		} else {
-			break
-		}
-	}
-
-	// Complete the cycle path
-	path = append(path, backEdgeTo)
-	if len(path) > 1 && path[len(path)-1] == path[0] {
-		// Already complete, good
 	} else {
-		// Add back to start to show it's a cycle
-		path = append(path, startCred)
-	}
-
-	// Format as "a -> b -> c -> a"
-	return strings.Join(path, " -> ")
-}
-
-// detectUnusedFallbacks identifies fallback credentials that are not referenced
-// Logs a WARNING for each unused fallback (informational only, not an error)
-func (r *RoundRobin) detectUnusedFallbacks(
-	fallbackCredentials map[string]bool,
-	referencedCredentials map[string]bool,
-) {
-	for fallbackCred := range fallbackCredentials {
-		if !referencedCredentials[fallbackCred] {
-			r.logger.Warn("Unused fallback credential",
-				"credential", fallbackCred,
-				"reason", "configured as fallback but not referenced by any credential",
-			)
-		}
+		r.logger.Info("Fallback credential validation completed",
+			"total_credentials", len(r.credentials),
+			"fallback_credentials", fallbackCount,
+		)
 	}
 }

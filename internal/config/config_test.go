@@ -725,8 +725,8 @@ func TestConfig_Validate_TPM(t *testing.T) {
 
 // Fallback Configuration Tests
 
-func TestConfig_ValidateFallback_ValidChain(t *testing.T) {
-	// Valid fallback chain: proxy-a -> proxy-b
+func TestConfig_ValidateFallback_AllowsFallbackOnAnyType(t *testing.T) {
+	// Valid: is_fallback can be set on any credential type
 	cfg := &Config{
 		Server: ServerConfig{
 			Port:           8080,
@@ -735,141 +735,14 @@ func TestConfig_ValidateFallback_ValidChain(t *testing.T) {
 			RequestTimeout: 30 * time.Second,
 		},
 		Credentials: []CredentialConfig{
-			{Name: "proxy-a", Type: "proxy", BaseURL: "http://a.com", RPM: 10, IsFallback: true, FallbackTo: "proxy-b"},
-			{Name: "proxy-b", Type: "proxy", BaseURL: "http://b.com", RPM: 10},
+			{Name: "openai-primary", Type: "openai", BaseURL: "http://a.com", APIKey: "key", RPM: 10, IsFallback: false},
+			{Name: "openai-fallback", Type: "openai", BaseURL: "http://b.com", APIKey: "key", RPM: 10, IsFallback: true},
 		},
 		Fail2Ban: Fail2BanConfig{MaxAttempts: 3},
 	}
 
 	err := cfg.Validate()
-	assert.NoError(t, err, "Valid fallback chain should pass validation")
-}
-
-func TestConfig_ValidateFallback_InvalidTarget(t *testing.T) {
-	// Invalid: fallback_to references non-existent credential
-	cfg := &Config{
-		Server: ServerConfig{
-			Port:           8080,
-			MaxBodySizeMB:  10,
-			MasterKey:      "test-key",
-			RequestTimeout: 30 * time.Second,
-		},
-		Credentials: []CredentialConfig{
-			{Name: "proxy-a", Type: "proxy", BaseURL: "http://a.com", RPM: 10, IsFallback: true, FallbackTo: "proxy-nonexistent"},
-		},
-		Fail2Ban: Fail2BanConfig{MaxAttempts: 3},
-	}
-
-	err := cfg.Validate()
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "invalid fallback_to")
-	assert.Contains(t, err.Error(), "proxy-nonexistent")
-}
-
-func TestConfig_ValidateFallback_SelfReference(t *testing.T) {
-	// Invalid: credential falls back to itself
-	cfg := &Config{
-		Server: ServerConfig{
-			Port:           8080,
-			MaxBodySizeMB:  10,
-			MasterKey:      "test-key",
-			RequestTimeout: 30 * time.Second,
-		},
-		Credentials: []CredentialConfig{
-			{Name: "proxy-a", Type: "proxy", BaseURL: "http://a.com", RPM: 10, IsFallback: true, FallbackTo: "proxy-a"},
-		},
-		Fail2Ban: Fail2BanConfig{MaxAttempts: 3},
-	}
-
-	err := cfg.Validate()
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "cannot reference itself")
-}
-
-func TestConfig_ValidateFallback_MissingFallbackTo(t *testing.T) {
-	// Invalid: is_fallback=true but fallback_to is empty
-	cfg := &Config{
-		Server: ServerConfig{
-			Port:           8080,
-			MaxBodySizeMB:  10,
-			MasterKey:      "test-key",
-			RequestTimeout: 30 * time.Second,
-		},
-		Credentials: []CredentialConfig{
-			{Name: "proxy-a", Type: "proxy", BaseURL: "http://a.com", RPM: 10, IsFallback: true, FallbackTo: ""},
-		},
-		Fail2Ban: Fail2BanConfig{MaxAttempts: 3},
-	}
-
-	err := cfg.Validate()
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "fallback_to is required")
-}
-
-func TestConfig_ValidateFallback_FallbackOnNonProxy(t *testing.T) {
-	// Invalid: is_fallback=true on non-proxy type
-	cfg := &Config{
-		Server: ServerConfig{
-			Port:           8080,
-			MaxBodySizeMB:  10,
-			MasterKey:      "test-key",
-			RequestTimeout: 30 * time.Second,
-		},
-		Credentials: []CredentialConfig{
-			{Name: "openai-a", Type: "openai", BaseURL: "http://a.com", APIKey: "key", RPM: 10, IsFallback: true, FallbackTo: "openai-b"},
-		},
-		Fail2Ban: Fail2BanConfig{MaxAttempts: 3},
-	}
-
-	err := cfg.Validate()
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "is_fallback can only be true for proxy type")
-}
-
-func TestConfig_ValidateFallback_MultipleFallbacks(t *testing.T) {
-	// Valid: Multiple separate fallback chains
-	cfg := &Config{
-		Server: ServerConfig{
-			Port:           8080,
-			MaxBodySizeMB:  10,
-			MasterKey:      "test-key",
-			RequestTimeout: 30 * time.Second,
-		},
-		Credentials: []CredentialConfig{
-			{Name: "proxy-a1", Type: "proxy", BaseURL: "http://a1.com", RPM: 10, IsFallback: true, FallbackTo: "proxy-a2"},
-			{Name: "proxy-a2", Type: "proxy", BaseURL: "http://a2.com", RPM: 10},
-			{Name: "proxy-b1", Type: "proxy", BaseURL: "http://b1.com", RPM: 10, IsFallback: true, FallbackTo: "proxy-b2"},
-			{Name: "proxy-b2", Type: "proxy", BaseURL: "http://b2.com", RPM: 10},
-		},
-		Fail2Ban: Fail2BanConfig{MaxAttempts: 3},
-	}
-
-	err := cfg.Validate()
-	assert.NoError(t, err, "Multiple separate fallback chains should pass validation")
-}
-
-func TestConfig_ValidateFallback_MultipleErrors(t *testing.T) {
-	// Multiple fallback validation errors in one config
-	cfg := &Config{
-		Server: ServerConfig{
-			Port:           8080,
-			MaxBodySizeMB:  10,
-			MasterKey:      "test-key",
-			RequestTimeout: 30 * time.Second,
-		},
-		Credentials: []CredentialConfig{
-			{Name: "proxy-a", Type: "proxy", BaseURL: "http://a.com", RPM: 10, IsFallback: true, FallbackTo: ""},
-			{Name: "proxy-b", Type: "proxy", BaseURL: "http://b.com", RPM: 10, IsFallback: true, FallbackTo: "proxy-nonexistent"},
-			{Name: "proxy-c", Type: "proxy", BaseURL: "http://c.com", RPM: 10, IsFallback: true, FallbackTo: "proxy-c"},
-		},
-		Fail2Ban: Fail2BanConfig{MaxAttempts: 3},
-	}
-
-	err := cfg.Validate()
-	assert.Error(t, err)
-	// Error message should contain information about all three issues
-	errMsg := err.Error()
-	assert.Contains(t, errMsg, "fallback configuration validation failed")
+	assert.NoError(t, err, "is_fallback should be allowed on any credential type")
 }
 
 func TestConfig_UnmarshalYAML_ModelPricesLink(t *testing.T) {

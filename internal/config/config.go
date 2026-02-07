@@ -186,8 +186,7 @@ type CredentialConfig struct {
 	CredentialsJSON string `yaml:"credentials_json,omitempty"`
 
 	// Proxy specific fields
-	IsFallback bool   `yaml:"is_fallback,omitempty"`
-	FallbackTo string `yaml:"fallback_to,omitempty"` // Credential to fall back to (only used when is_fallback=true)
+	IsFallback bool `yaml:"is_fallback,omitempty"`
 }
 
 // UnmarshalYAML implements custom unmarshaling for CredentialConfig with env variable support
@@ -205,7 +204,6 @@ func (c *CredentialConfig) UnmarshalYAML(value *yaml.Node) error {
 		CredentialsFile string `yaml:"credentials_file,omitempty"`
 		CredentialsJSON string `yaml:"credentials_json,omitempty"`
 		IsFallback      string `yaml:"is_fallback,omitempty"`
-		FallbackTo      string `yaml:"fallback_to,omitempty"`
 	}
 
 	var temp tempConfig
@@ -253,9 +251,6 @@ func (c *CredentialConfig) UnmarshalYAML(value *yaml.Node) error {
 			return fmt.Errorf("invalid is_fallback for credential '%s': %w", c.Name, err)
 		}
 	}
-
-	// Resolve FallbackTo
-	c.FallbackTo = resolveEnvString(temp.FallbackTo)
 
 	// Validate base_url for proxy and other provider types that require it
 	if c.BaseURL != "" {
@@ -700,11 +695,6 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("credential %s: invalid type: %s (must be 'openai', 'vertex-ai', 'anthropic', or 'proxy')", cred.Name, cred.Type)
 		}
 
-		// IsFallback should only be true for proxy type
-		if cred.IsFallback && cred.Type != ProviderTypeProxy {
-			return fmt.Errorf("credential %s: is_fallback can only be true for proxy type", cred.Name)
-		}
-
 		// Validate by provider type
 		switch cred.Type {
 		case ProviderTypeProxy:
@@ -769,72 +759,10 @@ func (c *Config) Validate() error {
 		}
 	}
 
-	// Validate fallback credential configuration
-	if err := c.validateFallbackConfig(); err != nil {
-		return err
-	}
-
 	return nil
 }
 
 // isUnlimited checks if a value represents unlimited (-1)
 func isUnlimited(value int) bool {
 	return value == -1
-}
-
-// validateFallbackConfig validates fallback credential configuration
-// Checks:
-// 1. Each credential with is_fallback=true has a valid fallback_to reference
-// 2. fallback_to points to an existing credential
-// 3. No circular dependencies (A -> B -> A) - validated at balancer initialization
-func (c *Config) validateFallbackConfig() error {
-	// Build a map of credential names for quick lookup
-	credentialNames := make(map[string]bool)
-	for _, cred := range c.Credentials {
-		credentialNames[cred.Name] = true
-	}
-
-	var validationErrors []string
-
-	// Validate each credential's fallback configuration
-	for _, cred := range c.Credentials {
-		// If is_fallback is true, fallback_to must be specified and valid
-		if cred.IsFallback {
-			// IsFallback should only be true for proxy type
-			if cred.Type != ProviderTypeProxy {
-				validationErrors = append(validationErrors,
-					fmt.Sprintf("credential '%s': is_fallback can only be true for proxy type", cred.Name))
-				continue
-			}
-
-			// fallback_to must be specified when is_fallback=true
-			if cred.FallbackTo == "" {
-				validationErrors = append(validationErrors,
-					fmt.Sprintf("credential '%s': fallback_to is required when is_fallback=true", cred.Name))
-				continue
-			}
-
-			// fallback_to must reference an existing credential
-			if !credentialNames[cred.FallbackTo] {
-				validationErrors = append(validationErrors,
-					fmt.Sprintf("credential '%s': invalid fallback_to value '%s' (credential not found)", cred.Name, cred.FallbackTo))
-				continue
-			}
-
-			// Prevent self-reference (A -> A)
-			if cred.FallbackTo == cred.Name {
-				validationErrors = append(validationErrors,
-					fmt.Sprintf("credential '%s': fallback_to cannot reference itself", cred.Name))
-				continue
-			}
-		}
-	}
-
-	// If there are any validation errors, report them all at once
-	if len(validationErrors) > 0 {
-		errorMsg := "fallback configuration validation failed:\n  " + strings.Join(validationErrors, "\n  ")
-		return fmt.Errorf("%s", errorMsg)
-	}
-
-	return nil
 }
