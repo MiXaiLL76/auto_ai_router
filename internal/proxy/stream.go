@@ -2,6 +2,7 @@ package proxy
 
 import (
 	_ "embed"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -9,6 +10,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/mixaill76/auto_ai_router/internal/transform"
 	"github.com/mixaill76/auto_ai_router/internal/transform/anthropic"
 	"github.com/mixaill76/auto_ai_router/internal/transform/vertex"
 )
@@ -18,6 +20,126 @@ var streamBufPool = sync.Pool{
 		buf := make([]byte, 8192)
 		return &buf
 	},
+}
+
+// StreamUsageInfo holds extracted usage information from streaming responses.
+// It provides a unified structure for token counts across all providers.
+// Not all fields will be populated; some providers don't report certain metrics.
+type StreamUsageInfo struct {
+	PromptTokens        int // May be 0 if not provided in streaming response
+	CompletionTokens    int
+	CachedTokens        int // Tokens from cached prompt content (prompt_caching feature)
+	AudioInputTokens    int // Audio tokens in the request
+	AudioOutputTokens   int // Audio tokens in the response
+	CacheCreationTokens int // Anthropic: tokens created for cache (billed at different rate)
+	CacheReadTokens     int // Anthropic: tokens read from cache (billed at cheaper rate)
+}
+
+// StreamUsageExtractor provides a provider-agnostic interface for extracting
+// usage information from streaming response chunks.
+// Each provider may use different JSON structures and field names,
+// so implementations handle provider-specific parsing.
+type StreamUsageExtractor interface {
+	// ExtractUsage attempts to extract usage information from the given chunk.
+	// Returns nil if the chunk doesn't contain usage information.
+	// Errors are logged internally; the function never returns error.
+	ExtractUsage(chunk []byte) *StreamUsageInfo
+}
+
+// openAIStreamUsageExtractor implements StreamUsageExtractor for OpenAI format
+type openAIStreamUsageExtractor struct{}
+
+func (o *openAIStreamUsageExtractor) ExtractUsage(chunk []byte) *StreamUsageInfo {
+	// OpenAI streaming format:
+	// {"choices":[...],"usage":{"prompt_tokens":100,"completion_tokens":50}}
+	// Usage may appear in any chunk but typically in the final chunk
+
+	var data struct {
+		Usage struct {
+			PromptTokens        int `json:"prompt_tokens"`
+			CompletionTokens    int `json:"completion_tokens"`
+			PromptTokensDetails struct {
+				CachedTokens int `json:"cached_tokens,omitempty"`
+				AudioTokens  int `json:"audio_tokens,omitempty"`
+			} `json:"prompt_tokens_details,omitempty"`
+			CompletionTokensDetails struct {
+				AudioTokens int `json:"audio_tokens,omitempty"`
+			} `json:"completion_tokens_details,omitempty"`
+		} `json:"usage"`
+	}
+
+	if err := json.Unmarshal(chunk, &data); err != nil {
+		return nil
+	}
+
+	// Check if usage info is present (both fields can't be 0 for valid usage)
+	if data.Usage.PromptTokens == 0 && data.Usage.CompletionTokens == 0 {
+		return nil
+	}
+
+	return &StreamUsageInfo{
+		PromptTokens:      data.Usage.PromptTokens,
+		CompletionTokens:  data.Usage.CompletionTokens,
+		CachedTokens:      data.Usage.PromptTokensDetails.CachedTokens,
+		AudioInputTokens:  data.Usage.PromptTokensDetails.AudioTokens,
+		AudioOutputTokens: data.Usage.CompletionTokensDetails.AudioTokens,
+	}
+}
+
+// anthropicStreamUsageExtractor implements StreamUsageExtractor for Anthropic format
+type anthropicStreamUsageExtractor struct{}
+
+func (a *anthropicStreamUsageExtractor) ExtractUsage(chunk []byte) *StreamUsageInfo {
+	// Anthropic streaming format (message_delta event):
+	// {"type":"message_delta","delta":{...},"usage":{"input_tokens":100,"output_tokens":50}}
+	// Usage appears in the message_delta event at the end of streaming
+
+	var data struct {
+		Usage struct {
+			InputTokens              int `json:"input_tokens"`
+			OutputTokens             int `json:"output_tokens"`
+			CacheCreationInputTokens int `json:"cache_creation_input_tokens,omitempty"`
+			CacheReadInputTokens     int `json:"cache_read_input_tokens,omitempty"`
+		} `json:"usage"`
+	}
+
+	if err := json.Unmarshal(chunk, &data); err != nil {
+		return nil
+	}
+
+	// Check if usage info is present
+	if data.Usage.InputTokens == 0 && data.Usage.OutputTokens == 0 {
+		return nil
+	}
+
+	return &StreamUsageInfo{
+		PromptTokens:        data.Usage.InputTokens,
+		CompletionTokens:    data.Usage.OutputTokens,
+		CacheCreationTokens: data.Usage.CacheCreationInputTokens,
+		CacheReadTokens:     data.Usage.CacheReadInputTokens,
+		// Anthropic separates cache_creation (cached prompt tokens)
+		// For logging purposes, we combine under CachedTokens
+		CachedTokens: data.Usage.CacheReadInputTokens,
+	}
+}
+
+// getStreamUsageExtractor returns the appropriate usage extractor for a provider.
+// This factory method ensures all providers use the correct parsing logic.
+// If the provider is unknown, defaults to OpenAI extractor (most compatible fallback).
+func getStreamUsageExtractor(providerName string) StreamUsageExtractor {
+	switch strings.ToLower(strings.TrimSpace(providerName)) {
+	case "openai":
+		return &openAIStreamUsageExtractor{}
+	case "anthropic":
+		return &anthropicStreamUsageExtractor{}
+	case "vertex ai":
+		// Vertex AI transforms to OpenAI format during streaming,
+		// so we use OpenAI extractor for the transformed response
+		return &openAIStreamUsageExtractor{}
+	default:
+		// Fallback: try OpenAI format first (most common)
+		return &openAIStreamUsageExtractor{}
+	}
 }
 
 func IsStreamingResponse(resp *http.Response) bool {
@@ -42,7 +164,7 @@ func (p *Proxy) handleTransformedStreaming(
 	credName string,
 	modelID string,
 	providerName string,
-	transform streamTransformer,
+	transformFunc streamTransformer,
 	logCtx *RequestLogContext,
 ) error {
 	p.logger.Debug("Starting streaming response", "provider", providerName, "credential", credName)
@@ -53,14 +175,23 @@ func (p *Proxy) handleTransformedStreaming(
 	}()
 	var totalTokens int
 
+	// Capture last chunk for usage extraction (Solution 3: Hybrid approach)
+	var lastChunk []byte
+
 	go func() {
 		defer func() {
 			_ = pw.Close()
 		}()
-		err := transform(resp.Body, modelID, &tokenCapturingWriter{
+		err := transformFunc(resp.Body, modelID, &tokenCapturingWriter{
 			writer: pw,
 			tokens: &totalTokens,
 			logger: p.logger,
+			onChunk: func(chunk []byte) {
+				// Store each chunk, keeping only the last one
+				// This allows us to extract usage info that typically appears in final chunks
+				lastChunk = make([]byte, len(chunk))
+				copy(lastChunk, chunk)
+			},
 		})
 		if err != nil {
 			p.logger.Error("Failed to transform streaming response", "provider", providerName, "error", err)
@@ -81,9 +212,58 @@ func (p *Proxy) handleTransformedStreaming(
 
 	// Log streaming response to LiteLLM DB if logCtx provided
 	if logCtx != nil && !logCtx.Logged {
-		logCtx.CompletionTokens = totalTokens
-		logCtx.Status = "success"
-		logCtx.HTTPStatus = 200
+		if logCtx.TokenUsage == nil {
+			logCtx.TokenUsage = &transform.TokenUsage{}
+		}
+
+		// Solution 3: Hybrid approach - combine estimated and actual token counts
+		// 1. Use estimate for prompt tokens (always available)
+		logCtx.TokenUsage.PromptTokens = logCtx.PromptTokensEstimate
+
+		// 2. Use counted tokens for completion (from streaming chunks)
+		logCtx.TokenUsage.CompletionTokens = totalTokens
+
+		// 3. Extract cached/audio tokens from last chunk if available
+		if len(lastChunk) > 0 {
+			extractor := getStreamUsageExtractor(providerName)
+			if usageInfo := extractor.ExtractUsage(lastChunk); usageInfo != nil {
+				// Override with actual values from response metadata if available
+				if usageInfo.PromptTokens > 0 {
+					logCtx.TokenUsage.PromptTokens = usageInfo.PromptTokens
+				}
+				if usageInfo.CompletionTokens > 0 {
+					logCtx.TokenUsage.CompletionTokens = usageInfo.CompletionTokens
+				}
+
+				// Set cached and audio tokens from extracted usage
+				// These are rarely counted in the main token stream
+				logCtx.TokenUsage.CachedInputTokens = usageInfo.CachedTokens
+				logCtx.TokenUsage.AudioInputTokens = usageInfo.AudioInputTokens
+				logCtx.TokenUsage.AudioOutputTokens = usageInfo.AudioOutputTokens
+
+				// Anthropic-specific: cache creation/read tokens
+				if usageInfo.CacheCreationTokens > 0 {
+					// For logging purposes, track cache creation as part of cached tokens
+					logCtx.TokenUsage.CachedInputTokens = usageInfo.CacheCreationTokens
+				}
+
+				p.logger.Debug("Extracted usage from streaming response",
+					"provider", providerName,
+					"prompt_tokens", usageInfo.PromptTokens,
+					"completion_tokens", usageInfo.CompletionTokens,
+					"cached_tokens", usageInfo.CachedTokens,
+					"audio_input_tokens", usageInfo.AudioInputTokens,
+					"audio_output_tokens", usageInfo.AudioOutputTokens,
+				)
+			}
+		}
+
+		logCtx.HTTPStatus = resp.StatusCode
+		if resp.StatusCode >= 400 {
+			logCtx.Status = "failure"
+		} else {
+			logCtx.Status = "success"
+		}
 		logCtx.Logged = true
 		if err := p.logSpendToLiteLLMDB(logCtx); err != nil {
 			p.logger.Warn("Failed to queue streaming spend log",
@@ -101,11 +281,20 @@ func (p *Proxy) handleStreamingWithTokens(w http.ResponseWriter, resp *http.Resp
 	p.logger.Debug("Starting streaming response with token tracking", "credential", credName)
 
 	var totalTokens int
+
+	// Capture last chunk for usage extraction (Solution 3: Hybrid approach)
+	var lastChunk []byte
+
 	onChunk := func(chunk []byte) {
 		tokens := extractTokensFromStreamingChunk(string(chunk))
 		if tokens > 0 {
 			totalTokens += tokens
 		}
+
+		// Store each chunk, keeping only the last one
+		// This allows us to extract usage info that typically appears in final chunks
+		lastChunk = make([]byte, len(chunk))
+		copy(lastChunk, chunk)
 	}
 
 	if err := p.streamToClient(w, resp.Body, credName, onChunk, nil); err != nil {
@@ -122,9 +311,52 @@ func (p *Proxy) handleStreamingWithTokens(w http.ResponseWriter, resp *http.Resp
 
 	// Log streaming response to LiteLLM DB if logCtx provided
 	if logCtx != nil && !logCtx.Logged {
-		logCtx.CompletionTokens = totalTokens
-		logCtx.Status = "success"
-		logCtx.HTTPStatus = 200
+		if logCtx.TokenUsage == nil {
+			logCtx.TokenUsage = &transform.TokenUsage{}
+		}
+
+		// Solution 3: Hybrid approach - combine estimated and actual token counts
+		// 1. Use estimate for prompt tokens (always available)
+		logCtx.TokenUsage.PromptTokens = logCtx.PromptTokensEstimate
+
+		// 2. Use counted tokens for completion (from streaming chunks)
+		logCtx.TokenUsage.CompletionTokens = totalTokens
+
+		// 3. Extract cached/audio tokens from last chunk if available
+		if len(lastChunk) > 0 {
+			extractor := getStreamUsageExtractor("openai")
+			if usageInfo := extractor.ExtractUsage(lastChunk); usageInfo != nil {
+				// Override with actual values from response metadata if available
+				if usageInfo.PromptTokens > 0 {
+					logCtx.TokenUsage.PromptTokens = usageInfo.PromptTokens
+				}
+				if usageInfo.CompletionTokens > 0 {
+					logCtx.TokenUsage.CompletionTokens = usageInfo.CompletionTokens
+				}
+
+				// Set cached and audio tokens from extracted usage
+				// These are rarely counted in the main token stream
+				logCtx.TokenUsage.CachedInputTokens = usageInfo.CachedTokens
+				logCtx.TokenUsage.AudioInputTokens = usageInfo.AudioInputTokens
+				logCtx.TokenUsage.AudioOutputTokens = usageInfo.AudioOutputTokens
+
+				p.logger.Debug("Extracted usage from streaming response",
+					"credential", credName,
+					"prompt_tokens", usageInfo.PromptTokens,
+					"completion_tokens", usageInfo.CompletionTokens,
+					"cached_tokens", usageInfo.CachedTokens,
+					"audio_input_tokens", usageInfo.AudioInputTokens,
+					"audio_output_tokens", usageInfo.AudioOutputTokens,
+				)
+			}
+		}
+
+		logCtx.HTTPStatus = resp.StatusCode
+		if resp.StatusCode >= 400 {
+			logCtx.Status = "failure"
+		} else {
+			logCtx.Status = "success"
+		}
 		logCtx.Logged = true
 		if err := p.logSpendToLiteLLMDB(logCtx); err != nil {
 			p.logger.Warn("Failed to queue streaming spend log",

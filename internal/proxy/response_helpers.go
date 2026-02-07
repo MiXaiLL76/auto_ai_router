@@ -169,3 +169,68 @@ func extractTokensFromResponse(body string, credType config.ProviderType) int {
 	// For OpenAI and other providers, use standard format
 	return extractOpenAITotalTokens([]byte(body))
 }
+
+// estimatePromptTokens estimates the number of prompt tokens from the request body.
+// This is used for streaming responses where prompt token counts are not provided in the response headers.
+// The estimation uses a simple character-based heuristic: approximately 4 characters per token.
+// This aligns with OpenAI's tokenizer behavior for most text.
+//
+// The function:
+// 1. Parses the JSON request body
+// 2. Extracts all text content from messages (handles both string and array formats)
+// 3. Counts characters in text content
+// 4. Applies the 4:1 character-to-token ratio
+// 5. Returns a minimum of 1 token (representing the API call overhead)
+//
+// For multimodal requests with images/audio, this only counts text tokens.
+// Image and audio token costs should be extracted from streaming response metadata.
+func estimatePromptTokens(body []byte) int {
+	if len(body) == 0 {
+		return 0
+	}
+
+	// Parse JSON body
+	var reqBody struct {
+		Messages []struct {
+			Content interface{} `json:"content"` // string or []object (multimodal)
+		} `json:"messages"`
+	}
+
+	if err := json.Unmarshal(body, &reqBody); err != nil {
+		// If we can't parse, return 0 estimate
+		return 0
+	}
+
+	totalChars := 0
+
+	// Process each message
+	for _, msg := range reqBody.Messages {
+		switch v := msg.Content.(type) {
+		case string:
+			// Simple text message
+			totalChars += len(v)
+
+		case []interface{}:
+			// Multimodal message (array of content blocks)
+			for _, part := range v {
+				if partMap, ok := part.(map[string]interface{}); ok {
+					// Extract text from text blocks
+					if textVal, ok := partMap["text"].(string); ok {
+						totalChars += len(textVal)
+					}
+				}
+			}
+		}
+	}
+
+	// Estimate tokens using 4 characters per token heuristic
+	// This is consistent with OpenAI's tokenizer for English text
+	estimatedTokens := (totalChars + 3) / 4 // Round up: (chars + 3) / 4
+
+	// Minimum 1 token for API call overhead
+	if estimatedTokens < 1 {
+		estimatedTokens = 1
+	}
+
+	return estimatedTokens
+}

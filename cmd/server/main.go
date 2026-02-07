@@ -68,6 +68,14 @@ func main() {
 	litellmDBManager := initializeLiteLLMDB(cfg, log)
 	metrics := monitoring.New(cfg.Monitoring.PrometheusEnabled)
 
+	// ==================== Initialize Model Pricing ====================
+	priceRegistry := models.NewModelPriceRegistry()
+	if cfg.Server.ModelPricesLink != "" {
+		log.Info("Using model prices from", "link", cfg.Server.ModelPricesLink)
+	} else {
+		log.Debug("Model prices not configured (model_prices_link empty)")
+	}
+
 	// ==================== Create Health Checker ====================
 	healthChecker := health.NewDBHealthChecker()
 	if litellmDBManager.IsEnabled() && !litellmDBManager.IsHealthy() {
@@ -95,6 +103,7 @@ func main() {
 		Commit:              Commit,
 		LiteLLMDB:           litellmDBManager,
 		HealthChecker:       healthChecker,
+		PriceRegistry:       priceRegistry,
 	})
 
 	// ==================== Background Goroutines ====================
@@ -109,6 +118,11 @@ func main() {
 
 	if litellmDBManager.IsEnabled() {
 		startDBHealthMonitor(log, bgCtx, litellmDBManager, healthChecker, &wg)
+	}
+
+	// Start model price sync loop (only if configured)
+	if cfg.Server.ModelPricesLink != "" {
+		startPriceSyncLoop(cfg.Server.ModelPricesLink, priceRegistry, log, bgCtx, &wg)
 	}
 
 	// ==================== HTTP Server Setup ====================
@@ -319,6 +333,68 @@ func initializeLiteLLMDB(cfg *config.Config, log *slog.Logger) litellmdb.Manager
 
 	log.Info("LiteLLM DB integration initialized successfully")
 	return manager
+}
+
+// loadAndUpdateModelPrices loads model prices and updates the registry
+func loadAndUpdateModelPrices(
+	link string,
+	registry *models.ModelPriceRegistry,
+	log *slog.Logger,
+	context string, // "startup" or "update" for logging
+) error {
+	prices, err := models.LoadModelPrices(link)
+	if err != nil {
+		logMessage := "Failed to load model prices"
+		if context != "" {
+			logMessage += " during " + context
+		}
+		log.Warn(logMessage, "error", err)
+		return err
+	}
+	registry.Update(prices)
+	if context == "startup" {
+		log.Info("Model prices loaded on startup", "count", len(prices), "link", link)
+	} else {
+		log.Debug("Model prices updated", "count", len(prices))
+	}
+	return nil
+}
+
+// startPriceSyncLoop starts a background goroutine that periodically syncs model prices
+func startPriceSyncLoop(
+	modelPricesLink string,
+	registry *models.ModelPriceRegistry,
+	log *slog.Logger,
+	bgCtx context.Context,
+	wg *sync.WaitGroup,
+) {
+	if modelPricesLink == "" {
+		return
+	}
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+
+		// Load prices immediately on startup
+		loadAndUpdateModelPrices(modelPricesLink, registry, log, "startup")
+
+		// Periodic update loop (every 5 minutes)
+		ticker := time.NewTicker(5 * time.Minute)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-bgCtx.Done():
+				log.Debug("Model prices sync loop stopped")
+				return
+			case <-ticker.C:
+				loadAndUpdateModelPrices(modelPricesLink, registry, log, "update")
+			}
+		}
+	}()
+
+	log.Debug("Model price sync loop started", "interval", "5 minutes", "link", modelPricesLink)
 }
 
 func startMetricsUpdater(

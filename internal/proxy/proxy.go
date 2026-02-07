@@ -26,6 +26,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/monitoring"
 	"github.com/mixaill76/auto_ai_router/internal/ratelimit"
 	"github.com/mixaill76/auto_ai_router/internal/security"
+	"github.com/mixaill76/auto_ai_router/internal/transform"
 	"github.com/mixaill76/auto_ai_router/internal/transform/anthropic"
 	"github.com/mixaill76/auto_ai_router/internal/transform/vertex"
 )
@@ -40,21 +41,23 @@ var healthHTML string
 // RequestLogContext holds all data needed for logging a request to LiteLLM DB
 // Filled throughout request processing and logged at the end via defer
 type RequestLogContext struct {
-	RequestID        string                   // Request ID (UUID)
-	StartTime        time.Time                // Request start time
-	Request          *http.Request            // HTTP request
-	Token            string                   // Auth token (raw, will be hashed)
-	ModelID          string                   // Model name
-	Status           string                   // "success" or "failure"
-	HTTPStatus       int                      // HTTP response status code
-	ErrorMsg         string                   // Error message (added to metadata on failure)
-	PromptTokens     int                      // Input tokens
-	CompletionTokens int                      // Output tokens
-	Credential       *config.CredentialConfig // Credential used
-	SessionID        string                   // Session ID
-	TargetURL        string                   // Target URL (for APIBase extraction)
-	TokenInfo        *litellmdb.TokenInfo     // User/team/org info
-	Logged           bool                     // True if already logged (prevents duplicate logging)
+	RequestID            string                   // Request ID (UUID)
+	StartTime            time.Time                // Request start time
+	Request              *http.Request            // HTTP request
+	Token                string                   // Auth token (raw, will be hashed)
+	ModelID              string                   // Model name
+	Status               string                   // "success" or "failure"
+	HTTPStatus           int                      // HTTP response status code
+	ErrorMsg             string                   // Error message (added to metadata on failure)
+	TokenUsage           *transform.TokenUsage    // Token usage with detailed breakdown
+	Credential           *config.CredentialConfig // Credential used
+	SessionID            string                   // Session ID
+	TargetURL            string                   // Target URL (for APIBase extraction)
+	TokenInfo            *litellmdb.TokenInfo     // User/team/org info
+	IsImageGeneration    bool                     // True if this is an image generation request
+	ImageCount           int                      // Number of images to generate (from 'n' param)
+	Logged               bool                     // True if already logged (prevents duplicate logging)
+	PromptTokensEstimate int                      // Estimated prompt tokens for streaming responses (since streaming doesn't provide prompt tokens in headers)
 }
 
 // HealthChecker provides cached database health status
@@ -78,8 +81,9 @@ type Config struct {
 	ModelManager        *models.Manager
 	Version             string
 	Commit              string
-	LiteLLMDB           litellmdb.Manager // LiteLLM database integration (optional)
-	HealthChecker       HealthChecker     // Optional: cached DB health status (updated by health monitor)
+	LiteLLMDB           litellmdb.Manager          // LiteLLM database integration (optional)
+	HealthChecker       HealthChecker              // Optional: cached DB health status (updated by health monitor)
+	PriceRegistry       *models.ModelPriceRegistry // Model pricing information (optional)
 }
 
 type Proxy struct {
@@ -92,10 +96,11 @@ type Proxy struct {
 	masterKey      string
 	rateLimiter    *ratelimit.RPMLimiter
 	tokenManager   *auth.VertexTokenManager
-	healthTemplate *template.Template // Cached template
-	modelManager   *models.Manager    // Model manager for getting configured models
-	litellmDB      litellmdb.Manager  // LiteLLM database integration
-	healthChecker  HealthChecker      // Cached DB health status (optional)
+	healthTemplate *template.Template         // Cached template
+	modelManager   *models.Manager            // Model manager for getting configured models
+	litellmDB      litellmdb.Manager          // LiteLLM database integration
+	healthChecker  HealthChecker              // Cached DB health status (optional)
+	priceRegistry  *models.ModelPriceRegistry // Model pricing information (optional)
 }
 
 var (
@@ -160,6 +165,7 @@ func New(cfg *Config) *Proxy {
 		modelManager:   cfg.ModelManager,
 		litellmDB:      cfg.LiteLLMDB,
 		healthChecker:  cfg.HealthChecker,
+		priceRegistry:  cfg.PriceRegistry,
 		client: &http.Client{
 			Timeout: cfg.RequestTimeout,
 			Transport: &http.Transport{
@@ -297,12 +303,16 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 
 	// Ensure request is logged at the end regardless of which path is taken
 	defer func() {
-		if !logCtx.Logged && logCtx.Token != "" && logCtx.Credential != nil {
-			if err := p.logSpendToLiteLLMDB(logCtx); err != nil {
-				p.logger.Warn("Failed to queue spend log",
-					"error", err,
-					"request_id", requestID,
-				)
+		if !logCtx.Logged && logCtx.Token != "" {
+			// Log request only if we have a credential (successful auth path)
+			// For auth/credential selection errors, log directly at the error point instead
+			if logCtx.Credential != nil {
+				if err := p.logSpendToLiteLLMDB(logCtx); err != nil {
+					p.logger.Warn("Failed to queue spend log",
+						"error", err,
+						"request_id", requestID,
+					)
+				}
 			}
 			logCtx.Logged = true
 		}
@@ -453,6 +463,21 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			logCtx.Status = "failure"
 			logCtx.HTTPStatus = err_code
 			logCtx.ErrorMsg = errorMsg
+
+			// Log this error to LiteLLM DB even without credential
+			// Use a placeholder credential for logging purposes
+			logCtx.Credential = &config.CredentialConfig{
+				Name: "system",
+				Type: config.ProviderTypeProxy,
+			}
+			if err := p.logSpendToLiteLLMDB(logCtx); err != nil {
+				p.logger.Warn("Failed to queue error log for no credentials",
+					"error", err,
+					"request_id", requestID,
+				)
+			}
+			logCtx.Logged = true
+
 			http.Error(w, err_line, err_code)
 			return
 		}
@@ -577,11 +602,24 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 	var targetURL string
 	var vertexToken string
 	var requestBody = body // Default to original body
-	var isImageGeneration = strings.Contains(r.URL.Path, "/images/generations")
+
+	// Track image generation request and extract image count
+	logCtx.IsImageGeneration = strings.Contains(r.URL.Path, "/images/generations")
+	if logCtx.IsImageGeneration {
+		// Extract 'n' parameter (number of images) from request body
+		var imgReq struct {
+			N *int `json:"n"`
+		}
+		if err := json.Unmarshal(body, &imgReq); err == nil && imgReq.N != nil {
+			logCtx.ImageCount = *imgReq.N
+		} else {
+			logCtx.ImageCount = 1 // Default to 1 image if not specified
+		}
+	}
 
 	switch cred.Type {
 	case config.ProviderTypeVertexAI:
-		vertexBody, err := vertex.OpenAIToVertex(body, isImageGeneration, modelID)
+		vertexBody, err := vertex.OpenAIToVertex(body, logCtx.IsImageGeneration, modelID)
 		if err != nil {
 			p.logger.Error("Failed to convert request to Vertex AI format",
 				"credential", cred.Name,
@@ -596,7 +634,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		}
 		requestBody = vertexBody
 
-		if isImageGeneration && !strings.Contains(modelID, "gemini") {
+		if logCtx.IsImageGeneration && !strings.Contains(modelID, "gemini") {
 			// For non-Gemini image generation (e.g., Imagen), use different endpoint
 			targetURL = vertex.BuildVertexImageURL(cred, modelID)
 		} else {
@@ -620,7 +658,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		}
 
 	case config.ProviderTypeAnthropic:
-		if isImageGeneration {
+		if logCtx.IsImageGeneration {
 			p.logger.Error("Failed to Anthropic image request",
 				"credential", cred.Name,
 				"error", err,
@@ -818,7 +856,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		// Transform response back to OpenAI format
 		switch cred.Type {
 		case config.ProviderTypeVertexAI:
-			if isImageGeneration {
+			if logCtx.IsImageGeneration {
 				// Transform image response
 				var vertexedBody []byte
 				var err error
@@ -903,16 +941,32 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		resp.Body = io.NopCloser(bytes.NewReader(finalResponseBody))
 
 		// Log to LiteLLM DB (non-streaming)
-		promptTokens, completionTokens := extractTokenCounts(bodyForTokenExtraction)
-		logCtx.PromptTokens = promptTokens
-		logCtx.CompletionTokens = completionTokens
+		logCtx.TokenUsage = extractTokenUsage(bodyForTokenExtraction)
 		logCtx.Status = "success"
-		if resp.StatusCode >= 400 {
-			logCtx.Status = "failure"
-		}
 		logCtx.HTTPStatus = resp.StatusCode
 		logCtx.TargetURL = targetURL
-		logCtx.Logged = true // Mark as logged
+
+		// For image generation requests, use the image count from request
+		if logCtx.IsImageGeneration && logCtx.TokenUsage != nil {
+			logCtx.TokenUsage.ImageCount = logCtx.ImageCount
+		}
+
+		// Extract error message if status code indicates error
+		if resp.StatusCode >= 400 {
+			logCtx.Status = "failure"
+			logCtx.ErrorMsg = extractErrorMessage(finalResponseBody)
+		}
+
+		// Log the request to LiteLLM DB before marking as logged
+		if logCtx.Token != "" && logCtx.Credential != nil {
+			if err := p.logSpendToLiteLLMDB(logCtx); err != nil {
+				p.logger.Warn("Failed to queue spend log",
+					"error", err,
+					"request_id", logCtx.RequestID,
+				)
+			}
+		}
+		logCtx.Logged = true // Mark as logged to prevent defer from logging again
 	}
 
 	// Copy response headers (skip hop-by-hop headers and transformation-related headers)
@@ -929,8 +983,16 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(resp.StatusCode)
 
 	if isStreamingResp {
-		// Ensure logCtx is marked as logged to prevent defer from logging again
-		logCtx.Logged = true
+		// Estimate prompt tokens before streaming for logging
+		// Streaming responses don't provide prompt token counts in headers,
+		// so we estimate based on request body content before streaming begins
+		if logCtx != nil {
+			logCtx.PromptTokensEstimate = estimatePromptTokens(body)
+			p.logger.Debug("Estimated prompt tokens for streaming response",
+				"estimate", logCtx.PromptTokensEstimate,
+				"request_id", logCtx.RequestID,
+			)
+		}
 
 		switch cred.Type {
 		case config.ProviderTypeVertexAI:
@@ -988,9 +1050,10 @@ func (p *Proxy) logTransformedResponse(credName, providerName string, body []byt
 }
 
 type tokenCapturingWriter struct {
-	writer io.Writer
-	tokens *int
-	logger *slog.Logger
+	writer  io.Writer
+	tokens  *int
+	logger  *slog.Logger
+	onChunk func([]byte) // Callback invoked for each chunk (optional, for capturing last chunk)
 }
 
 func (tcw *tokenCapturingWriter) Write(p []byte) (n int, err error) {
@@ -999,6 +1062,12 @@ func (tcw *tokenCapturingWriter) Write(p []byte) (n int, err error) {
 	if tokens > 0 {
 		*tcw.tokens += tokens
 	}
+
+	// Invoke callback if provided (used to capture last chunk for usage extraction)
+	if tcw.onChunk != nil {
+		tcw.onChunk(p)
+	}
+
 	return tcw.writer.Write(p)
 }
 
@@ -1080,7 +1149,7 @@ func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
 
 	// Build metadata with optional alias fields from tokenInfo
 	// Add error field if request failed
-	metadata := buildMetadata(hashedToken, logCtx.TokenInfo, logCtx.ErrorMsg)
+	metadata := buildMetadata(hashedToken, logCtx.TokenInfo, logCtx.ErrorMsg, logCtx.HTTPStatus)
 
 	// Determine end user - prefer user email from tokenInfo
 	endUser := extractEndUser(logCtx.Request)
@@ -1106,6 +1175,35 @@ func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
 		}
 	}
 
+	// Calculate cost based on model pricing and token usage
+	var cost float64
+	if p.priceRegistry == nil {
+		p.logger.Warn("Price registry not available, using 0 cost for spend log")
+		cost = 0.0
+	} else {
+		// Try to get price for the model
+		modelPrice := p.priceRegistry.GetPrice(logCtx.ModelID)
+		if modelPrice == nil {
+			p.logger.Warn("Model price not found in registry, using 0 cost",
+				"model_name", logCtx.ModelID)
+			cost = 0.0
+		} else {
+			// Calculate cost using token usage
+			if logCtx.TokenUsage != nil {
+				cost = modelPrice.CalculateCost(logCtx.TokenUsage)
+				p.logger.Debug("Calculated cost for model",
+					"model_name", logCtx.ModelID,
+					"cost", cost,
+					"prompt_tokens", logCtx.TokenUsage.PromptTokens,
+					"completion_tokens", logCtx.TokenUsage.CompletionTokens)
+			} else {
+				p.logger.Debug("No token usage available for cost calculation, using 0 cost",
+					"model_name", logCtx.ModelID)
+				cost = 0.0
+			}
+		}
+	}
+
 	return p.litellmDB.LogSpend(&litellmdb.SpendLogEntry{
 		RequestID:         logCtx.RequestID,
 		StartTime:         logCtx.StartTime,
@@ -1116,11 +1214,11 @@ func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
 		ModelID:           modelIDFormatted,               // credential.name:model_name
 		ModelGroup:        "",                             // Empty for now
 		CustomLLMProvider: string(logCtx.Credential.Type), // Provider type as string
-		PromptTokens:      logCtx.PromptTokens,
-		CompletionTokens:  logCtx.CompletionTokens,
-		TotalTokens:       logCtx.PromptTokens + logCtx.CompletionTokens,
+		PromptTokens:      logCtx.TokenUsage.PromptTokens,
+		CompletionTokens:  logCtx.TokenUsage.CompletionTokens,
+		TotalTokens:       logCtx.TokenUsage.Total(),
 		Metadata:          metadata,
-		Spend:             1, // TODO: implement cost calculation
+		Spend:             cost, // Calculated cost based on model pricing and token usage
 		APIKey:            hashedToken,
 		UserID:            userID,
 		TeamID:            teamID,
@@ -1132,8 +1230,55 @@ func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
 	})
 }
 
+// extractErrorMessage returns the raw error response body as a string
+// The HTTP status code is captured separately in error_code
+func extractErrorMessage(body []byte) string {
+	if len(body) == 0 {
+		return ""
+	}
+
+	// Return raw body (truncate if too large)
+	const maxLen = 512
+	if len(body) > maxLen {
+		return string(body[:maxLen]) + "..."
+	}
+	return string(body)
+}
+
+// mapHTTPStatusToErrorClass maps HTTP status codes to LiteLLM exception class names
+// Reference: https://docs.litellm.ai/docs/exception_mapping
+func mapHTTPStatusToErrorClass(statusCode int) string {
+	switch statusCode {
+	case http.StatusBadRequest:
+		return "BadRequestError"
+	case http.StatusUnauthorized:
+		return "AuthenticationError"
+	case http.StatusForbidden:
+		return "PermissionDeniedError"
+	case http.StatusNotFound:
+		return "NotFoundError"
+	case http.StatusRequestTimeout:
+		return "Timeout"
+	case http.StatusUnprocessableEntity:
+		return "UnprocessableEntityError"
+	case http.StatusTooManyRequests:
+		return "RateLimitError"
+	case http.StatusServiceUnavailable:
+		return "ServiceUnavailableError"
+	case http.StatusInternalServerError:
+		return "InternalServerError"
+	default:
+		if statusCode >= 400 && statusCode < 500 {
+			return "BadRequestError"
+		} else if statusCode >= 500 {
+			return "APIConnectionError"
+		}
+		return "APIError"
+	}
+}
+
 // buildMetadata builds metadata JSON with user/team alias and optional error info
-func buildMetadata(hashedToken string, tokenInfo *litellmdb.TokenInfo, errorMsg string) string {
+func buildMetadata(hashedToken string, tokenInfo *litellmdb.TokenInfo, errorMsg string, httpStatus int) string {
 	// Extract user info from tokenInfo (or use empty strings as fallback)
 	var userID, teamID, organizationID string
 	if tokenInfo != nil {
@@ -1152,6 +1297,7 @@ func buildMetadata(hashedToken string, tokenInfo *litellmdb.TokenInfo, errorMsg 
 		"user_api_key_org_id":  organizationID,
 		"user_api_key_team_id": teamID,
 		"user_api_key_user_id": userID,
+		"status":               "success",
 	}
 
 	// Add aliases from tokenInfo if available
@@ -1169,7 +1315,15 @@ func buildMetadata(hashedToken string, tokenInfo *litellmdb.TokenInfo, errorMsg 
 
 	// Add error field if request failed
 	if errorMsg != "" {
-		metadata["error"] = errorMsg
+		// Determine error class based on HTTP status code (using LiteLLM exception types)
+		errorClass := mapHTTPStatusToErrorClass(httpStatus)
+
+		metadata["error_information"] = map[string]interface{}{
+			"error_message": errorMsg,
+			"error_code":    httpStatus,
+			"error_class":   errorClass,
+		}
+		metadata["status"] = "failure"
 	}
 
 	// Convert to JSON
@@ -1209,16 +1363,63 @@ func getClientIP(r *http.Request) string {
 	return host
 }
 
-// extractTokenCounts extracts token counts from response body
-func extractTokenCounts(body []byte) (promptTokens, completionTokens int) {
+// extractTokenUsage extracts detailed token usage from response body
+// Handles both chat completion format (prompt_tokens/completion_tokens)
+// and image generation format (input_tokens/output_tokens)
+func extractTokenUsage(body []byte) *transform.TokenUsage {
 	var resp struct {
 		Usage struct {
-			PromptTokens     int `json:"prompt_tokens"`
-			CompletionTokens int `json:"completion_tokens"`
+			// Chat completion format
+			PromptTokens        int `json:"prompt_tokens"`
+			CompletionTokens    int `json:"completion_tokens"`
+			PromptTokensDetails struct {
+				CachedTokens int `json:"cached_tokens,omitempty"`
+				AudioTokens  int `json:"audio_tokens,omitempty"`
+				TextTokens   int `json:"text_tokens,omitempty"`
+			} `json:"prompt_tokens_details,omitempty"`
+			CompletionTokensDetails struct {
+				AcceptedPredictionTokens int `json:"accepted_prediction_tokens,omitempty"`
+				RejectedPredictionTokens int `json:"rejected_prediction_tokens,omitempty"`
+				AudioTokens              int `json:"audio_tokens,omitempty"`
+				ReasoningTokens          int `json:"reasoning_tokens,omitempty"`
+			} `json:"completion_tokens_details,omitempty"`
+
+			// Image generation format
+			InputTokens        int `json:"input_tokens"`
+			OutputTokens       int `json:"output_tokens"`
+			InputTokensDetails struct {
+				ImageTokens int `json:"image_tokens,omitempty"`
+				TextTokens  int `json:"text_tokens,omitempty"`
+			} `json:"input_tokens_details,omitempty"`
 		} `json:"usage"`
 	}
+
 	if err := json.Unmarshal(body, &resp); err != nil {
-		return 0, 0
+		return nil
 	}
-	return resp.Usage.PromptTokens, resp.Usage.CompletionTokens
+
+	// Use chat completion tokens if available, otherwise use input/output tokens (image generation)
+	promptTokens := resp.Usage.PromptTokens
+	if promptTokens == 0 {
+		promptTokens = resp.Usage.InputTokens
+	}
+
+	completionTokens := resp.Usage.CompletionTokens
+	if completionTokens == 0 {
+		completionTokens = resp.Usage.OutputTokens
+	}
+
+	usage := &transform.TokenUsage{
+		PromptTokens:             promptTokens,
+		CompletionTokens:         completionTokens,
+		CachedInputTokens:        resp.Usage.PromptTokensDetails.CachedTokens,
+		AudioInputTokens:         resp.Usage.PromptTokensDetails.AudioTokens,
+		ImageTokens:              resp.Usage.InputTokensDetails.ImageTokens, // Token count for image processing
+		AcceptedPredictionTokens: resp.Usage.CompletionTokensDetails.AcceptedPredictionTokens,
+		RejectedPredictionTokens: resp.Usage.CompletionTokensDetails.RejectedPredictionTokens,
+		AudioOutputTokens:        resp.Usage.CompletionTokensDetails.AudioTokens,
+		ReasoningTokens:          resp.Usage.CompletionTokensDetails.ReasoningTokens,
+	}
+
+	return usage
 }

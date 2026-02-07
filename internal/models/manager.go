@@ -11,6 +11,78 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/transform/openai"
 )
 
+// ModelPrice contains pricing information for a single model
+type ModelPrice struct {
+	// Regular tokens (input/output)
+	InputCostPerToken  float64 `json:"input_cost_per_token"`
+	OutputCostPerToken float64 `json:"output_cost_per_token"`
+
+	// Audio tokens (can be more specific than regular tokens)
+	InputCostPerAudioToken  float64 `json:"input_cost_per_audio_token,omitempty"`
+	OutputCostPerAudioToken float64 `json:"output_cost_per_audio_token,omitempty"`
+
+	// Image tokens (can be more specific than regular tokens)
+	InputCostPerImageToken  float64 `json:"input_cost_per_image_token,omitempty"`
+	OutputCostPerImageToken float64 `json:"output_cost_per_image_token,omitempty"`
+
+	// Reasoning tokens (deep thinking models)
+	OutputCostPerReasoningToken float64 `json:"output_cost_per_reasoning_token,omitempty"`
+
+	// Cached/Prediction tokens
+	OutputCostPerCachedToken     float64 `json:"output_cost_per_cached_token,omitempty"`
+	InputCostPerCachedToken      float64 `json:"input_cost_per_cached_token,omitempty"`
+	OutputCostPerPredictionToken float64 `json:"output_cost_per_prediction_token,omitempty"`
+
+	// Vision/Images cost per image (not per token)
+	OutputCostPerImage float64 `json:"output_cost_per_image,omitempty"`
+}
+
+// ModelPriceRegistry stores and manages cached model prices
+type ModelPriceRegistry struct {
+	mu         sync.RWMutex
+	prices     map[string]*ModelPrice // key: normalized model name
+	lastUpdate time.Time
+}
+
+// NewModelPriceRegistry creates a new price registry
+func NewModelPriceRegistry() *ModelPriceRegistry {
+	return &ModelPriceRegistry{
+		prices: make(map[string]*ModelPrice),
+	}
+}
+
+// GetPrice returns the price for a model, or nil if not found
+func (r *ModelPriceRegistry) GetPrice(modelName string) *ModelPrice {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.prices[modelName]
+}
+
+// Update safely updates the registry with new prices
+func (r *ModelPriceRegistry) Update(prices map[string]*ModelPrice) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.prices = make(map[string]*ModelPrice)
+	for k, v := range prices {
+		r.prices[k] = v
+	}
+	r.lastUpdate = time.Now().UTC()
+}
+
+// LastUpdate returns the time of last successful update
+func (r *ModelPriceRegistry) LastUpdate() time.Time {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.lastUpdate
+}
+
+// Count returns the number of models in the registry
+func (r *ModelPriceRegistry) Count() int {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return len(r.prices)
+}
+
 // Model represents a single model from OpenAI API
 type Model struct {
 	ID      string `json:"id"`
@@ -562,7 +634,17 @@ func (m *Manager) GetModelTPMForCredential(modelID, credentialName string) int {
 	return -1
 }
 
-// GetModelsForCredential returns all models available for a specific credential
+// GetModelsForCredential returns all models available for a specific credential.
+//
+// Behavior:
+// - If the credential has explicitly configured models, returns those models
+// - If the credential is unknown but global models exist (with empty Credential field),
+//   returns global models as a fallback for backward compatibility
+// - Returns empty slice if no models are found for the credential
+//
+// Note: This fallback behavior (returning global models for unknown credentials)
+// differs from HasModel() which does not have this fallback behavior.
+// For new code, prefer using HasModel() for stricter credential validation.
 func (m *Manager) GetModelsForCredential(credentialName string) []Model {
 	m.mu.RLock()
 	modelIDs := make([]string, 0)

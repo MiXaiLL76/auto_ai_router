@@ -871,3 +871,89 @@ func TestConfig_ValidateFallback_MultipleErrors(t *testing.T) {
 	errMsg := err.Error()
 	assert.Contains(t, errMsg, "fallback configuration validation failed")
 }
+
+func TestConfig_UnmarshalYAML_ModelPricesLink(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.yaml")
+
+	// Set environment variable
+	if err := os.Setenv("MODEL_PRICES_URL", "https://example.com/prices.json"); err != nil {
+		t.Fatalf("Failed to set env var: %v", err)
+	}
+	defer func() {
+		_ = os.Unsetenv("MODEL_PRICES_URL")
+	}()
+
+	configContent := `
+server:
+  port: 8080
+  max_body_size_mb: 10
+  request_timeout: 30s
+  logging_level: info
+  master_key: "sk-test"
+  model_prices_link: os.environ/MODEL_PRICES_URL
+
+fail2ban:
+  max_attempts: 3
+  ban_duration: permanent
+  error_codes: [401]
+
+credentials:
+  - name: "test"
+    type: "openai"
+    api_key: "sk-test"
+    base_url: "https://api.openai.com"
+
+monitoring:
+  prometheus_enabled: false
+  health_check_path: "/health"
+`
+	err := os.WriteFile(configPath, []byte(configContent), 0644)
+	require.NoError(t, err)
+
+	cfg, err := Load(configPath)
+	require.NoError(t, err)
+	assert.NotNil(t, cfg)
+
+	// Verify that ModelPricesLink was properly resolved from environment variable
+	assert.Equal(t, "https://example.com/prices.json", cfg.Server.ModelPricesLink)
+}
+
+func TestConfig_UnmarshalYAML_ModelPricesLink_Direct(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.yaml")
+
+	configContent := `
+server:
+  port: 8080
+  max_body_size_mb: 10
+  request_timeout: 30s
+  logging_level: info
+  master_key: "sk-test"
+  model_prices_link: "/path/to/prices.json"
+
+fail2ban:
+  max_attempts: 3
+  ban_duration: permanent
+  error_codes: [401]
+
+credentials:
+  - name: "test"
+    type: "openai"
+    api_key: "sk-test"
+    base_url: "https://api.openai.com"
+
+monitoring:
+  prometheus_enabled: false
+  health_check_path: "/health"
+`
+	err := os.WriteFile(configPath, []byte(configContent), 0644)
+	require.NoError(t, err)
+
+	cfg, err := Load(configPath)
+	require.NoError(t, err)
+	assert.NotNil(t, cfg)
+
+	// Verify that ModelPricesLink was set directly
+	assert.Equal(t, "/path/to/prices.json", cfg.Server.ModelPricesLink)
+}

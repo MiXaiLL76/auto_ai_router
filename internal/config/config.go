@@ -57,6 +57,7 @@ type ServerConfig struct {
 	MaxIdleConns        int           `yaml:"max_idle_conns"`
 	MaxIdleConnsPerHost int           `yaml:"max_idle_conns_per_host"`
 	IdleConnTimeout     time.Duration `yaml:"idle_conn_timeout"`
+	ModelPricesLink     string        `yaml:"model_prices_link,omitempty"` // URL or file path to model prices JSON - supports os.environ/VAR_NAME
 }
 
 // ErrorCodeRuleConfig defines per-error-code ban rules
@@ -86,6 +87,7 @@ func (s *ServerConfig) UnmarshalYAML(value *yaml.Node) error {
 		MaxIdleConns        string `yaml:"max_idle_conns"`
 		MaxIdleConnsPerHost string `yaml:"max_idle_conns_per_host"`
 		IdleConnTimeout     string `yaml:"idle_conn_timeout"`
+		ModelPricesLink     string `yaml:"model_prices_link,omitempty"`
 	}
 
 	var temp tempConfig
@@ -163,6 +165,8 @@ func (s *ServerConfig) UnmarshalYAML(value *yaml.Node) error {
 	} else {
 		s.IdleConnTimeout = 120 * time.Second // Default value
 	}
+
+	s.ModelPricesLink = resolveEnvString(temp.ModelPricesLink)
 
 	return nil
 }

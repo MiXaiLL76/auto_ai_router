@@ -319,11 +319,57 @@ func VertexToOpenAI(vertexBody []byte, model string) ([]byte, error) {
 
 	// Convert usage metadata
 	if vertexResp.UsageMetadata != nil {
-		openAIResp.Usage = &openai.OpenAIUsage{
+		usage := &openai.OpenAIUsage{
 			PromptTokens:     int(vertexResp.UsageMetadata.PromptTokenCount),
 			CompletionTokens: int(vertexResp.UsageMetadata.CandidatesTokenCount),
 			TotalTokens:      int(vertexResp.UsageMetadata.TotalTokenCount),
 		}
+
+		// Extract cached content tokens
+		if vertexResp.UsageMetadata.CachedContentTokenCount > 0 {
+			if usage.PromptTokensDetails == nil {
+				usage.PromptTokensDetails = &openai.TokenDetails{}
+			}
+			usage.PromptTokensDetails.CachedTokens = int(vertexResp.UsageMetadata.CachedContentTokenCount)
+		}
+
+		// Extract modality tokens from candidates (output)
+		if len(vertexResp.UsageMetadata.CandidatesTokensDetails) > 0 {
+			if usage.CompletionTokensDetails == nil {
+				usage.CompletionTokensDetails = &openai.CompletionTokenDetails{}
+			}
+			for _, detail := range vertexResp.UsageMetadata.CandidatesTokensDetails {
+				if detail == nil {
+					continue
+				}
+				switch genai.MediaModality(detail.Modality) {
+				case genai.MediaModalityAudio:
+					usage.CompletionTokensDetails.AudioTokens = int(detail.TokenCount)
+				case genai.MediaModalityImage:
+					usage.CompletionTokensDetails.AudioTokens += int(detail.TokenCount) // Could track separately if needed
+				case genai.MediaModalityVideo:
+					// Video tokens count as completion tokens
+				}
+			}
+		}
+
+		// Extract modality tokens from prompt details for more granular tracking if needed
+		if len(vertexResp.UsageMetadata.PromptTokensDetails) > 0 {
+			if usage.PromptTokensDetails == nil {
+				usage.PromptTokensDetails = &openai.TokenDetails{}
+			}
+			for _, detail := range vertexResp.UsageMetadata.PromptTokensDetails {
+				if detail == nil {
+					continue
+				}
+				switch genai.MediaModality(detail.Modality) {
+				case genai.MediaModalityAudio:
+					usage.PromptTokensDetails.AudioTokens = int(detail.TokenCount)
+				}
+			}
+		}
+
+		openAIResp.Usage = usage
 	}
 
 	return json.Marshal(openAIResp)

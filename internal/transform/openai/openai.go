@@ -4,6 +4,8 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"time"
+
+	"github.com/mixaill76/auto_ai_router/internal/transform"
 )
 
 // Request types
@@ -102,10 +104,24 @@ type ImageData struct {
 	ImageURL *ImageURL `json:"image_url,omitempty"`
 }
 
+type TokenDetails struct {
+	CachedTokens int `json:"cached_tokens,omitempty"`
+	AudioTokens  int `json:"audio_tokens,omitempty"`
+}
+
+type CompletionTokenDetails struct {
+	AcceptedPredictionTokens int `json:"accepted_prediction_tokens,omitempty"`
+	RejectedPredictionTokens int `json:"rejected_prediction_tokens,omitempty"`
+	AudioTokens              int `json:"audio_tokens,omitempty"`
+	ReasoningTokens          int `json:"reasoning_tokens,omitempty"`
+}
+
 type OpenAIUsage struct {
-	PromptTokens     int `json:"prompt_tokens"`
-	CompletionTokens int `json:"completion_tokens"`
-	TotalTokens      int `json:"total_tokens"`
+	PromptTokens            int                     `json:"prompt_tokens"`
+	CompletionTokens        int                     `json:"completion_tokens"`
+	TotalTokens             int                     `json:"total_tokens"`
+	PromptTokensDetails     *TokenDetails           `json:"prompt_tokens_details,omitempty"`
+	CompletionTokensDetails *CompletionTokenDetails `json:"completion_tokens_details,omitempty"`
 }
 
 // Streaming types
@@ -164,4 +180,32 @@ func GetString(m map[string]interface{}, key string) string {
 		return val
 	}
 	return ""
+}
+
+// ToTokenUsage converts OpenAI usage to universal TokenUsage format
+func (u *OpenAIUsage) ToTokenUsage() *transform.TokenUsage {
+	if u == nil {
+		return nil
+	}
+
+	usage := &transform.TokenUsage{
+		PromptTokens:     u.PromptTokens,
+		CompletionTokens: u.CompletionTokens,
+	}
+
+	// Extract details from PromptTokensDetails
+	if u.PromptTokensDetails != nil {
+		usage.CachedInputTokens = u.PromptTokensDetails.CachedTokens
+		usage.AudioInputTokens = u.PromptTokensDetails.AudioTokens
+	}
+
+	// Extract details from CompletionTokensDetails
+	if u.CompletionTokensDetails != nil {
+		usage.AcceptedPredictionTokens = u.CompletionTokensDetails.AcceptedPredictionTokens
+		usage.RejectedPredictionTokens = u.CompletionTokensDetails.RejectedPredictionTokens
+		usage.AudioOutputTokens = u.CompletionTokensDetails.AudioTokens
+		usage.ReasoningTokens = u.CompletionTokensDetails.ReasoningTokens
+	}
+
+	return usage
 }
