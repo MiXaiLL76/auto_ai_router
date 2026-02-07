@@ -637,10 +637,10 @@ func (m *Manager) GetModelTPMForCredential(modelID, credentialName string) int {
 // GetModelsForCredential returns all models available for a specific credential.
 //
 // Behavior:
-// - If the credential has explicitly configured models, returns those models
-// - If the credential is unknown but global models exist (with empty Credential field),
-//   returns global models as a fallback for backward compatibility
-// - Returns empty slice if no models are found for the credential
+//   - If the credential has explicitly configured models, returns those models
+//   - If the credential is unknown but global models exist (with empty Credential field),
+//     returns global models as a fallback for backward compatibility
+//   - Returns empty slice if no models are found for the credential
 //
 // Note: This fallback behavior (returning global models for unknown credentials)
 // differs from HasModel() which does not have this fallback behavior.

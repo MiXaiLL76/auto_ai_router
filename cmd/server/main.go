@@ -377,7 +377,7 @@ func startPriceSyncLoop(
 		defer wg.Done()
 
 		// Load prices immediately on startup
-		loadAndUpdateModelPrices(modelPricesLink, registry, log, "startup")
+		_ = loadAndUpdateModelPrices(modelPricesLink, registry, log, "startup")
 
 		// Periodic update loop (every 5 minutes)
 		ticker := time.NewTicker(5 * time.Minute)
@@ -389,7 +389,7 @@ func startPriceSyncLoop(
 				log.Debug("Model prices sync loop stopped")
 				return
 			case <-ticker.C:
-				loadAndUpdateModelPrices(modelPricesLink, registry, log, "update")
+				_ = loadAndUpdateModelPrices(modelPricesLink, registry, log, "update")
 			}
 		}
 	}()
