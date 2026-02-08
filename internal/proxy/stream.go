@@ -210,68 +210,7 @@ func (p *Proxy) handleTransformedStreaming(
 		p.logger.Debug("Streaming token usage recorded", "credential", credName, "model", modelID, "tokens", totalTokens)
 	}
 
-	// Log streaming response to LiteLLM DB if logCtx provided
-	if logCtx != nil && !logCtx.Logged {
-		if logCtx.TokenUsage == nil {
-			logCtx.TokenUsage = &transform.TokenUsage{}
-		}
-
-		// Solution 3: Hybrid approach - combine estimated and actual token counts
-		// 1. Use estimate for prompt tokens (always available)
-		logCtx.TokenUsage.PromptTokens = logCtx.PromptTokensEstimate
-
-		// 2. Use counted tokens for completion (from streaming chunks)
-		logCtx.TokenUsage.CompletionTokens = totalTokens
-
-		// 3. Extract cached/audio tokens from last chunk if available
-		if len(lastChunk) > 0 {
-			extractor := getStreamUsageExtractor(providerName)
-			if usageInfo := extractor.ExtractUsage(lastChunk); usageInfo != nil {
-				// Override with actual values from response metadata if available
-				if usageInfo.PromptTokens > 0 {
-					logCtx.TokenUsage.PromptTokens = usageInfo.PromptTokens
-				}
-				if usageInfo.CompletionTokens > 0 {
-					logCtx.TokenUsage.CompletionTokens = usageInfo.CompletionTokens
-				}
-
-				// Set cached and audio tokens from extracted usage
-				// These are rarely counted in the main token stream
-				logCtx.TokenUsage.CachedInputTokens = usageInfo.CachedTokens
-				logCtx.TokenUsage.AudioInputTokens = usageInfo.AudioInputTokens
-				logCtx.TokenUsage.AudioOutputTokens = usageInfo.AudioOutputTokens
-
-				// Anthropic-specific: cache creation/read tokens
-				if usageInfo.CacheCreationTokens > 0 {
-					// For logging purposes, track cache creation as part of cached tokens
-					logCtx.TokenUsage.CachedInputTokens = usageInfo.CacheCreationTokens
-				}
-
-				p.logger.Debug("Extracted usage from streaming response",
-					"provider", providerName,
-					"prompt_tokens", usageInfo.PromptTokens,
-					"completion_tokens", usageInfo.CompletionTokens,
-					"cached_tokens", usageInfo.CachedTokens,
-					"audio_input_tokens", usageInfo.AudioInputTokens,
-					"audio_output_tokens", usageInfo.AudioOutputTokens,
-				)
-			}
-		}
-
-		logCtx.HTTPStatus = resp.StatusCode
-		if resp.StatusCode >= 400 {
-			logCtx.Status = "failure"
-		} else {
-			logCtx.Status = "success"
-		}
-		logCtx.Logged = true
-		if err := p.logSpendToLiteLLMDB(logCtx); err != nil {
-			p.logger.Warn("Failed to queue streaming spend log",
-				"error", err,
-				"request_id", logCtx.RequestID,
-			)
-		}
-	}
+	p.finalizeStreamingLog(logCtx, totalTokens, lastChunk, providerName, resp.StatusCode)
 
 	p.logger.Debug("Streaming response completed", "provider", providerName, "credential", credName)
 	return nil
@@ -309,65 +248,67 @@ func (p *Proxy) handleStreamingWithTokens(w http.ResponseWriter, resp *http.Resp
 		p.logger.Debug("Streaming token usage recorded", "credential", credName, "model", modelID, "tokens", totalTokens)
 	}
 
-	// Log streaming response to LiteLLM DB if logCtx provided
-	if logCtx != nil && !logCtx.Logged {
-		if logCtx.TokenUsage == nil {
-			logCtx.TokenUsage = &transform.TokenUsage{}
-		}
+	p.finalizeStreamingLog(logCtx, totalTokens, lastChunk, "openai", resp.StatusCode)
 
-		// Solution 3: Hybrid approach - combine estimated and actual token counts
-		// 1. Use estimate for prompt tokens (always available)
-		logCtx.TokenUsage.PromptTokens = logCtx.PromptTokensEstimate
+	p.logger.Debug("Streaming response completed", "credential", credName)
+	return nil
+}
 
-		// 2. Use counted tokens for completion (from streaming chunks)
-		logCtx.TokenUsage.CompletionTokens = totalTokens
+// finalizeStreamingLog extracts usage info from the last streaming chunk and logs spend to LiteLLM DB.
+func (p *Proxy) finalizeStreamingLog(logCtx *RequestLogContext, totalTokens int, lastChunk []byte, providerName string, statusCode int) {
+	if logCtx == nil || logCtx.Logged {
+		return
+	}
 
-		// 3. Extract cached/audio tokens from last chunk if available
-		if len(lastChunk) > 0 {
-			extractor := getStreamUsageExtractor("openai")
-			if usageInfo := extractor.ExtractUsage(lastChunk); usageInfo != nil {
-				// Override with actual values from response metadata if available
-				if usageInfo.PromptTokens > 0 {
-					logCtx.TokenUsage.PromptTokens = usageInfo.PromptTokens
-				}
-				if usageInfo.CompletionTokens > 0 {
-					logCtx.TokenUsage.CompletionTokens = usageInfo.CompletionTokens
-				}
+	if logCtx.TokenUsage == nil {
+		logCtx.TokenUsage = &transform.TokenUsage{}
+	}
 
-				// Set cached and audio tokens from extracted usage
-				// These are rarely counted in the main token stream
-				logCtx.TokenUsage.CachedInputTokens = usageInfo.CachedTokens
-				logCtx.TokenUsage.AudioInputTokens = usageInfo.AudioInputTokens
-				logCtx.TokenUsage.AudioOutputTokens = usageInfo.AudioOutputTokens
+	logCtx.TokenUsage.PromptTokens = logCtx.PromptTokensEstimate
+	logCtx.TokenUsage.CompletionTokens = totalTokens
 
-				p.logger.Debug("Extracted usage from streaming response",
-					"credential", credName,
-					"prompt_tokens", usageInfo.PromptTokens,
-					"completion_tokens", usageInfo.CompletionTokens,
-					"cached_tokens", usageInfo.CachedTokens,
-					"audio_input_tokens", usageInfo.AudioInputTokens,
-					"audio_output_tokens", usageInfo.AudioOutputTokens,
-				)
+	if len(lastChunk) > 0 {
+		extractor := getStreamUsageExtractor(providerName)
+		if usageInfo := extractor.ExtractUsage(lastChunk); usageInfo != nil {
+			if usageInfo.PromptTokens > 0 {
+				logCtx.TokenUsage.PromptTokens = usageInfo.PromptTokens
 			}
-		}
+			if usageInfo.CompletionTokens > 0 {
+				logCtx.TokenUsage.CompletionTokens = usageInfo.CompletionTokens
+			}
 
-		logCtx.HTTPStatus = resp.StatusCode
-		if resp.StatusCode >= 400 {
-			logCtx.Status = "failure"
-		} else {
-			logCtx.Status = "success"
-		}
-		logCtx.Logged = true
-		if err := p.logSpendToLiteLLMDB(logCtx); err != nil {
-			p.logger.Warn("Failed to queue streaming spend log",
-				"error", err,
-				"request_id", logCtx.RequestID,
+			logCtx.TokenUsage.CachedInputTokens = usageInfo.CachedTokens
+			logCtx.TokenUsage.AudioInputTokens = usageInfo.AudioInputTokens
+			logCtx.TokenUsage.AudioOutputTokens = usageInfo.AudioOutputTokens
+
+			if usageInfo.CacheCreationTokens > 0 {
+				logCtx.TokenUsage.CachedInputTokens = usageInfo.CacheCreationTokens
+			}
+
+			p.logger.Debug("Extracted usage from streaming response",
+				"provider", providerName,
+				"prompt_tokens", usageInfo.PromptTokens,
+				"completion_tokens", usageInfo.CompletionTokens,
+				"cached_tokens", usageInfo.CachedTokens,
+				"audio_input_tokens", usageInfo.AudioInputTokens,
+				"audio_output_tokens", usageInfo.AudioOutputTokens,
 			)
 		}
 	}
 
-	p.logger.Debug("Streaming response completed", "credential", credName)
-	return nil
+	logCtx.HTTPStatus = statusCode
+	if statusCode >= 400 {
+		logCtx.Status = "failure"
+	} else {
+		logCtx.Status = "success"
+	}
+	logCtx.Logged = true
+	if err := p.logSpendToLiteLLMDB(logCtx); err != nil {
+		p.logger.Warn("Failed to queue streaming spend log",
+			"error", err,
+			"request_id", logCtx.RequestID,
+		)
+	}
 }
 
 func (p *Proxy) streamToClient(

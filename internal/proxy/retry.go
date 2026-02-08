@@ -96,16 +96,6 @@ func SetTried(ctx context.Context, tried map[string]bool) context.Context {
 	return context.WithValue(ctx, TriedCredentialsKey{}, tried)
 }
 
-// getTried is the internal version (lowercase) used within this package
-func getTried(ctx context.Context) map[string]bool {
-	return GetTried(ctx)
-}
-
-// setTried is the internal version (lowercase) used within this package
-func setTried(ctx context.Context, tried map[string]bool) context.Context {
-	return SetTried(ctx, tried)
-}
-
 // incrementAttempts safely increments the attempt counter in context.
 // Returns the updated attempt count.
 func incrementAttempts(ctx context.Context) (int, context.Context) {
@@ -153,7 +143,7 @@ func (p *Proxy) TryFallbackProxy(
 	}
 
 	// Get set of already-tried credentials from context
-	triedCreds := getTried(ctx)
+	triedCreds := GetTried(ctx)
 
 	// Try to find a fallback proxy credential
 	fallbackCred, err := p.balancer.NextFallbackForModel(modelID)
@@ -198,7 +188,7 @@ func (p *Proxy) TryFallbackProxy(
 
 	// Add fallback credential to tried set
 	triedCreds[fallbackCred.Name] = true
-	ctx = setTried(ctx, triedCreds)
+	ctx = SetTried(ctx, triedCreds)
 
 	// Create new request with updated context for fallback attempt
 	r = r.WithContext(ctx)

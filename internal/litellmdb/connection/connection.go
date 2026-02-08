@@ -25,11 +25,10 @@ type ConnectionPool struct {
 	healthy atomic.Bool
 
 	// Lifecycle
-	ctx        context.Context
-	cancel     context.CancelFunc
-	wg         sync.WaitGroup
-	shutdownMu sync.Mutex
-	closed     bool
+	ctx    context.Context
+	cancel context.CancelFunc
+	wg     sync.WaitGroup
+	closed atomic.Bool
 
 	// Reconnection
 	reconnectMu    sync.Mutex
@@ -111,7 +110,7 @@ func NewConnectionPool(cfg *models.Config) (*ConnectionPool, error) {
 
 // Acquire gets a connection from the pool
 func (cp *ConnectionPool) Acquire(ctx context.Context) (*pgxpool.Conn, error) {
-	if cp.closed {
+	if cp.closed.Load() {
 		return nil, models.ErrConnectionFailed
 	}
 	if !cp.healthy.Load() {
@@ -140,13 +139,9 @@ func (cp *ConnectionPool) Stats() *pgxpool.Stat {
 
 // Close closes the connection pool
 func (cp *ConnectionPool) Close() {
-	cp.shutdownMu.Lock()
-	if cp.closed {
-		cp.shutdownMu.Unlock()
-		return
+	if !cp.closed.CompareAndSwap(false, true) {
+		return // Already closed
 	}
-	cp.closed = true
-	cp.shutdownMu.Unlock()
 
 	// Stop background goroutines
 	cp.cancel()

@@ -86,11 +86,13 @@ func NewLogger(pool *connection.ConnectionPool, cfg *models.Config) *Logger {
 // Start starts the background worker and aggregation ticker
 // Must be called once after creation
 func (sl *Logger) Start() {
+	// Initialize ticker BEFORE starting goroutine to prevent nil dereference race
+	sl.dlqRecoveryTicker = time.NewTicker(5 * time.Minute)
+
 	sl.wg.Add(3)
 	go sl.worker()
 	go sl.aggregationWorker()
 	go sl.dlqRecoveryWorker()
-	sl.dlqRecoveryTicker = time.NewTicker(5 * time.Minute)
 	sl.logger.Info("SpendLogger started",
 		"queue_size", sl.config.LogQueueSize,
 		"batch_size", sl.config.LogBatchSize,

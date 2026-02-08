@@ -73,11 +73,6 @@ func loadFromFile(filePath string) ([]byte, error) {
 		return nil, fmt.Errorf("path contains invalid patterns: %s", filePath)
 	}
 
-	// Prevent .. in path (directory traversal)
-	if strings.Contains(cleanPath, "..") {
-		return nil, fmt.Errorf("path traversal not allowed: %s", filePath)
-	}
-
 	// Check file size first
 	stat, err := os.Stat(filePath)
 	if err != nil {
@@ -165,8 +160,8 @@ func NormalizeModelName(fullName string) string {
 	// But keep the model name intact
 	if len(parts) == 1 && strings.Contains(fullName, ".") {
 		// Format like "anthropic.claude/model" was not found, try splitting by dot
-		parts := strings.Split(fullName, ".")
-		modelName = parts[len(parts)-1]
+		dotParts := strings.Split(fullName, ".")
+		modelName = dotParts[len(dotParts)-1]
 	}
 
 	// Convert to lowercase for case-insensitive matching

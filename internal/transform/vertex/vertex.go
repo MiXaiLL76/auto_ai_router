@@ -22,6 +22,11 @@ type VertexRequest struct {
 
 // OpenAIToVertex converts OpenAI format request to Vertex AI format
 func OpenAIToVertex(openAIBody []byte, isImageGeneration bool, model string) ([]byte, error) {
+	//slog.Error("OPENAI_REQUEST_RAW",
+	//	"body", string(openAIBody),
+	//	"model", model,
+	//)
+
 	var openAIReq openai.OpenAIRequest
 
 	if isImageGeneration {
@@ -245,7 +250,16 @@ func OpenAIToVertex(openAIBody []byte, isImageGeneration bool, model string) ([]
 		}
 	}
 
-	return json.Marshal(vertexReq)
+	vertexBody, err := json.Marshal(vertexReq)
+	//if err == nil {
+	//	slog.Error("VERTEX_REQUEST_CONVERTED",
+	//		"body", string(vertexBody),
+	//		"model", model,
+	//		"messages_count", len(openAIReq.Messages),
+	//	)
+	//}
+
+	return vertexBody, err
 }
 
 // VertexToOpenAI converts Vertex AI response to OpenAI format
@@ -319,60 +333,131 @@ func VertexToOpenAI(vertexBody []byte, model string) ([]byte, error) {
 
 	// Convert usage metadata
 	if vertexResp.UsageMetadata != nil {
-		usage := &openai.OpenAIUsage{
-			PromptTokens:     int(vertexResp.UsageMetadata.PromptTokenCount),
-			CompletionTokens: int(vertexResp.UsageMetadata.CandidatesTokenCount),
-			TotalTokens:      int(vertexResp.UsageMetadata.TotalTokenCount),
-		}
-
-		// Extract cached content tokens
-		if vertexResp.UsageMetadata.CachedContentTokenCount > 0 {
-			if usage.PromptTokensDetails == nil {
-				usage.PromptTokensDetails = &openai.TokenDetails{}
-			}
-			usage.PromptTokensDetails.CachedTokens = int(vertexResp.UsageMetadata.CachedContentTokenCount)
-		}
-
-		// Extract modality tokens from candidates (output)
-		if len(vertexResp.UsageMetadata.CandidatesTokensDetails) > 0 {
-			if usage.CompletionTokensDetails == nil {
-				usage.CompletionTokensDetails = &openai.CompletionTokenDetails{}
-			}
-			for _, detail := range vertexResp.UsageMetadata.CandidatesTokensDetails {
-				if detail == nil {
-					continue
-				}
-				switch genai.MediaModality(detail.Modality) {
-				case genai.MediaModalityAudio:
-					usage.CompletionTokensDetails.AudioTokens = int(detail.TokenCount)
-				case genai.MediaModalityImage:
-					usage.CompletionTokensDetails.AudioTokens += int(detail.TokenCount) // Could track separately if needed
-				case genai.MediaModalityVideo:
-					// Video tokens count as completion tokens
-				}
-			}
-		}
-
-		// Extract modality tokens from prompt details for more granular tracking if needed
-		if len(vertexResp.UsageMetadata.PromptTokensDetails) > 0 {
-			if usage.PromptTokensDetails == nil {
-				usage.PromptTokensDetails = &openai.TokenDetails{}
-			}
-			for _, detail := range vertexResp.UsageMetadata.PromptTokensDetails {
-				if detail == nil {
-					continue
-				}
-				switch genai.MediaModality(detail.Modality) {
-				case genai.MediaModalityAudio:
-					usage.PromptTokensDetails.AudioTokens = int(detail.TokenCount)
-				}
-			}
-		}
-
-		openAIResp.Usage = usage
+		//slog.Error("VERTEX_RESPONSE_USAGE",
+		//	"model", model,
+		//	"candidates_count", len(vertexResp.Candidates),
+		//	"prompt_token_count", vertexResp.UsageMetadata.PromptTokenCount,
+		//	"candidates_token_count", vertexResp.UsageMetadata.CandidatesTokenCount,
+		//	"total_token_count", vertexResp.UsageMetadata.TotalTokenCount,
+		//)
+		openAIResp.Usage = convertVertexUsageMetadata(vertexResp.UsageMetadata)
 	}
+	//else {
+	//	slog.Error("VERTEX_RESPONSE_NO_USAGE",
+	//		"model", model,
+	//		"candidates_count", len(vertexResp.Candidates),
+	//	)
+	//}
 
 	return json.Marshal(openAIResp)
+}
+
+// convertVertexUsageMetadata converts Vertex AI usage metadata to OpenAI format.
+func convertVertexUsageMetadata(meta *genai.GenerateContentResponseUsageMetadata) *openai.OpenAIUsage {
+	// Log raw Vertex metadata for debugging
+	//slog.Error("VERTEX_USAGE_RAW",
+	//	"prompt_token_count", meta.PromptTokenCount,
+	//	"candidates_token_count", meta.CandidatesTokenCount,
+	//	"total_token_count", meta.TotalTokenCount,
+	//	"thoughts_token_count", meta.ThoughtsTokenCount,
+	//	"cached_content_token_count", meta.CachedContentTokenCount,
+	//	"candidates_tokens_details_count", len(meta.CandidatesTokensDetails),
+	//	"prompt_tokens_details_count", len(meta.PromptTokensDetails),
+	//)
+
+	// Include thinking/reasoning tokens in completion tokens for accurate conversion
+	// Vertex AI reasoning models include thoughts_token_count which are part of the response
+	completionTokens := int(meta.CandidatesTokenCount)
+	if meta.ThoughtsTokenCount > 0 {
+		completionTokens += int(meta.ThoughtsTokenCount)
+		//slog.Error("VERTEX_REASONING_INCLUDED",
+		//	"candidates_tokens", meta.CandidatesTokenCount,
+		//	"thoughts_tokens", meta.ThoughtsTokenCount,
+		//	"total_completion", completionTokens,
+		//)
+	}
+
+	usage := &openai.OpenAIUsage{
+		PromptTokens:     int(meta.PromptTokenCount),
+		CompletionTokens: completionTokens,
+		TotalTokens:      int(meta.TotalTokenCount),
+	}
+
+	// Map Vertex thinking tokens to OpenAI reasoning_tokens
+	if meta.ThoughtsTokenCount > 0 {
+		if usage.CompletionTokensDetails == nil {
+			usage.CompletionTokensDetails = &openai.CompletionTokenDetails{}
+		}
+		usage.CompletionTokensDetails.ReasoningTokens = int(meta.ThoughtsTokenCount)
+	}
+
+	if meta.CachedContentTokenCount > 0 {
+		if usage.PromptTokensDetails == nil {
+			usage.PromptTokensDetails = &openai.TokenDetails{}
+		}
+		usage.PromptTokensDetails.CachedTokens = int(meta.CachedContentTokenCount)
+	}
+
+	if len(meta.CandidatesTokensDetails) > 0 {
+		if usage.CompletionTokensDetails == nil {
+			usage.CompletionTokensDetails = &openai.CompletionTokenDetails{}
+		}
+		for _, detail := range meta.CandidatesTokensDetails {
+			if detail == nil {
+				continue
+			}
+			//slog.Error("VERTEX_CANDIDATES_TOKENS_DETAIL",
+			//	"index", i,
+			//	"modality", detail.Modality,
+			//	"token_count", detail.TokenCount,
+			//)
+			switch genai.MediaModality(detail.Modality) {
+			case genai.MediaModalityAudio:
+				usage.CompletionTokensDetails.AudioTokens += int(detail.TokenCount)
+			case genai.MediaModalityImage, genai.MediaModalityVideo:
+				//slog.Error("VERTEX_IMAGE_VIDEO_TOKENS_SKIPPED",
+				//	"modality", detail.Modality,
+				//	"token_count", detail.TokenCount,
+				//)
+				// Image/video tokens are already included in CompletionTokens total;
+				// OpenAI format has no dedicated field for these modalities
+			}
+		}
+	}
+
+	if len(meta.PromptTokensDetails) > 0 {
+		if usage.PromptTokensDetails == nil {
+			usage.PromptTokensDetails = &openai.TokenDetails{}
+		}
+		for _, detail := range meta.PromptTokensDetails {
+			if detail == nil {
+				continue
+			}
+			//slog.Error("VERTEX_PROMPT_TOKENS_DETAIL",
+			//	"index", i,
+			//	"modality", detail.Modality,
+			//	"token_count", detail.TokenCount,
+			//)
+			switch genai.MediaModality(detail.Modality) {
+			case genai.MediaModalityAudio:
+				usage.PromptTokensDetails.AudioTokens += int(detail.TokenCount)
+			}
+		}
+	}
+
+	// Validate total tokens calculation
+	//calculatedTotal := usage.PromptTokens + usage.CompletionTokens
+	//slog.Error("OPENAI_USAGE_CONVERTED",
+	//	"prompt_tokens", usage.PromptTokens,
+	//	"completion_tokens", usage.CompletionTokens,
+	//	"total_tokens", usage.TotalTokens,
+	//	"calculated_total", calculatedTotal,
+	//	"mismatch", calculatedTotal != usage.TotalTokens,
+	//	"cached_tokens", usage.PromptTokensDetails.CachedTokens,
+	//	"audio_tokens", usage.CompletionTokensDetails.AudioTokens,
+	//)
+
+	return usage
 }
 
 func mapFinishReason(vertexReason string) string {
@@ -783,25 +868,25 @@ func determineVertexPublisher(modelID string) string {
 }
 
 // BuildVertexImageURL constructs the Vertex AI URL for image generation
-// Format: https://{location}-aiplatform.googleapis.com/v1/projects/{project}/locations/{location}/publishers/google/models/{model}:predict
+// Format: https://{location}-aiplatform.googleapis.com/v1beta1/projects/{project}/locations/{location}/publishers/google/models/{model}:predict
 func BuildVertexImageURL(cred *config.CredentialConfig, modelID string) string {
 	// For global location (no regional prefix)
 	if cred.Location == "global" {
 		return fmt.Sprintf(
-			"https://aiplatform.googleapis.com/v1/projects/%s/locations/global/publishers/google/models/%s:predict",
+			"https://aiplatform.googleapis.com/v1beta1/projects/%s/locations/global/publishers/google/models/%s:predict",
 			cred.ProjectID, modelID,
 		)
 	}
 
 	// For regional locations
 	return fmt.Sprintf(
-		"https://%s-aiplatform.googleapis.com/v1/projects/%s/locations/%s/publishers/google/models/%s:predict",
+		"https://%s-aiplatform.googleapis.com/v1beta1/projects/%s/locations/%s/publishers/google/models/%s:predict",
 		cred.Location, cred.ProjectID, cred.Location, modelID,
 	)
 }
 
 // BuildVertexURL constructs the Vertex AI URL dynamically
-// Format: https://{location}-aiplatform.googleapis.com/v1/projects/{project}/locations/{location}/publishers/{publisher}/models/{model}:{endpoint}
+// Format: https://{location}-aiplatform.googleapis.com/v1beta1/projects/{project}/locations/{location}/publishers/{publisher}/models/{model}:{endpoint}
 func BuildVertexURL(cred *config.CredentialConfig, modelID string, streaming bool) string {
 	publisher := determineVertexPublisher(modelID)
 
@@ -813,14 +898,14 @@ func BuildVertexURL(cred *config.CredentialConfig, modelID string, streaming boo
 	// For global location (no regional prefix)
 	if cred.Location == "global" {
 		return fmt.Sprintf(
-			"https://aiplatform.googleapis.com/v1/projects/%s/locations/global/publishers/%s/models/%s:%s",
+			"https://aiplatform.googleapis.com/v1beta1/projects/%s/locations/global/publishers/%s/models/%s:%s",
 			cred.ProjectID, publisher, modelID, endpoint,
 		)
 	}
 
 	// For regional locations
 	return fmt.Sprintf(
-		"https://%s-aiplatform.googleapis.com/v1/projects/%s/locations/%s/publishers/%s/models/%s:%s",
+		"https://%s-aiplatform.googleapis.com/v1beta1/projects/%s/locations/%s/publishers/%s/models/%s:%s",
 		cred.Location, cred.ProjectID, cred.Location, publisher, modelID, endpoint,
 	)
 }

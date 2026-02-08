@@ -57,9 +57,9 @@ type ServerConfig struct {
 	MaxIdleConns        int           `yaml:"max_idle_conns"`
 	MaxIdleConnsPerHost int           `yaml:"max_idle_conns_per_host"`
 	IdleConnTimeout     time.Duration `yaml:"idle_conn_timeout"`
-	ReadTimeout         time.Duration `yaml:"read_timeout"`  // HTTP server read timeout (default: 60s)
-	WriteTimeout        time.Duration `yaml:"write_timeout"` // HTTP server write timeout (default: 10m or 1.5*request_timeout if set)
-	IdleTimeout         time.Duration `yaml:"idle_timeout"`  // HTTP server idle timeout (default: 20m or 2*write_timeout)
+	ReadTimeout         time.Duration `yaml:"read_timeout"`                // HTTP server read timeout (default: 60s)
+	WriteTimeout        time.Duration `yaml:"write_timeout"`               // HTTP server write timeout (default: 10m or 1.5*request_timeout if set)
+	IdleTimeout         time.Duration `yaml:"idle_timeout"`                // HTTP server idle timeout (default: 20m or 2*write_timeout)
 	ModelPricesLink     string        `yaml:"model_prices_link,omitempty"` // URL or file path to model prices JSON - supports os.environ/VAR_NAME
 }
 
@@ -550,9 +550,6 @@ func resolveEnvValue[T any](value string, defaultValue T, parser parseFunc[T], t
 	}
 
 	resolved := resolveEnvString(value)
-	if resolved == value && value == "" {
-		return defaultValue, nil
-	}
 
 	parsed, err := parser(resolved)
 	if err != nil {
@@ -647,9 +644,7 @@ func Load(path string) (*Config, error) {
 func (c *Config) Normalize() {
 	// Remove /v1 suffix from base_url to avoid duplication
 	for i := range c.Credentials {
-		if len(c.Credentials[i].BaseURL) > 3 && c.Credentials[i].BaseURL[len(c.Credentials[i].BaseURL)-3:] == "/v1" {
-			c.Credentials[i].BaseURL = c.Credentials[i].BaseURL[:len(c.Credentials[i].BaseURL)-3]
-		}
+		c.Credentials[i].BaseURL = strings.TrimSuffix(c.Credentials[i].BaseURL, "/v1")
 	}
 }
 

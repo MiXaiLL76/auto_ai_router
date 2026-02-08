@@ -937,7 +937,7 @@ func TestBuildVertexURL(t *testing.T) {
 			},
 			modelID:   "claude-3-opus",
 			streaming: false,
-			expected:  "https://aiplatform.googleapis.com/v1/projects/test-project/locations/global/publishers/anthropic/models/claude-3-opus:generateContent",
+			expected:  "https://aiplatform.googleapis.com/v1beta1/projects/test-project/locations/global/publishers/anthropic/models/claude-3-opus:generateContent",
 		},
 		{
 			name: "global location streaming claude",
@@ -947,7 +947,7 @@ func TestBuildVertexURL(t *testing.T) {
 			},
 			modelID:   "claude-3-sonnet",
 			streaming: true,
-			expected:  "https://aiplatform.googleapis.com/v1/projects/test-project/locations/global/publishers/anthropic/models/claude-3-sonnet:streamGenerateContent?alt=sse",
+			expected:  "https://aiplatform.googleapis.com/v1beta1/projects/test-project/locations/global/publishers/anthropic/models/claude-3-sonnet:streamGenerateContent?alt=sse",
 		},
 		{
 			name: "regional location non-streaming gemini",
@@ -957,7 +957,7 @@ func TestBuildVertexURL(t *testing.T) {
 			},
 			modelID:   "gemini-pro",
 			streaming: false,
-			expected:  "https://us-central1-aiplatform.googleapis.com/v1/projects/test-project/locations/us-central1/publishers/google/models/gemini-pro:generateContent",
+			expected:  "https://us-central1-aiplatform.googleapis.com/v1beta1/projects/test-project/locations/us-central1/publishers/google/models/gemini-pro:generateContent",
 		},
 		{
 			name: "regional location streaming gemini",
@@ -967,7 +967,7 @@ func TestBuildVertexURL(t *testing.T) {
 			},
 			modelID:   "gemini-pro",
 			streaming: true,
-			expected:  "https://europe-west1-aiplatform.googleapis.com/v1/projects/test-project/locations/europe-west1/publishers/google/models/gemini-pro:streamGenerateContent?alt=sse",
+			expected:  "https://europe-west1-aiplatform.googleapis.com/v1beta1/projects/test-project/locations/europe-west1/publishers/google/models/gemini-pro:streamGenerateContent?alt=sse",
 		},
 	}
 
@@ -993,7 +993,7 @@ func TestBuildVertexImageURL(t *testing.T) {
 				Location:  "global",
 			},
 			modelID:  "imagegeneration",
-			expected: "https://aiplatform.googleapis.com/v1/projects/test-project/locations/global/publishers/google/models/imagegeneration:predict",
+			expected: "https://aiplatform.googleapis.com/v1beta1/projects/test-project/locations/global/publishers/google/models/imagegeneration:predict",
 		},
 		{
 			name: "regional location",
@@ -1002,7 +1002,7 @@ func TestBuildVertexImageURL(t *testing.T) {
 				Location:  "us-central1",
 			},
 			modelID:  "imagen-3.0-generate-001",
-			expected: "https://us-central1-aiplatform.googleapis.com/v1/projects/test-project/locations/us-central1/publishers/google/models/imagen-3.0-generate-001:predict",
+			expected: "https://us-central1-aiplatform.googleapis.com/v1beta1/projects/test-project/locations/us-central1/publishers/google/models/imagen-3.0-generate-001:predict",
 		},
 	}
 

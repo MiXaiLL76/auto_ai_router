@@ -97,7 +97,7 @@ func (f *Fail2Ban) RecordResponse(credentialName string, statusCode int) {
 	}
 
 	// Success resets all counters
-	if statusCode == 200 {
+	if statusCode >= 200 && statusCode < 300 {
 		delete(f.failures, credentialName)
 		return
 	}

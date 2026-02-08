@@ -108,57 +108,13 @@ func TransformVertexStreamToOpenAI(vertexStream io.Reader, model string, output 
 
 		// Convert usage metadata if present
 		if vertexChunk.UsageMetadata != nil {
-			usage := &openai.OpenAIUsage{
-				PromptTokens:     int(vertexChunk.UsageMetadata.PromptTokenCount),
-				CompletionTokens: int(vertexChunk.UsageMetadata.CandidatesTokenCount),
-				TotalTokens:      int(vertexChunk.UsageMetadata.TotalTokenCount),
-			}
-
-			// Extract cached content tokens
-			if vertexChunk.UsageMetadata.CachedContentTokenCount > 0 {
-				if usage.PromptTokensDetails == nil {
-					usage.PromptTokensDetails = &openai.TokenDetails{}
-				}
-				usage.PromptTokensDetails.CachedTokens = int(vertexChunk.UsageMetadata.CachedContentTokenCount)
-			}
-
-			// Extract modality tokens from candidates (output)
-			if len(vertexChunk.UsageMetadata.CandidatesTokensDetails) > 0 {
-				if usage.CompletionTokensDetails == nil {
-					usage.CompletionTokensDetails = &openai.CompletionTokenDetails{}
-				}
-				for _, detail := range vertexChunk.UsageMetadata.CandidatesTokensDetails {
-					if detail == nil {
-						continue
-					}
-					switch genai.MediaModality(detail.Modality) {
-					case genai.MediaModalityAudio:
-						usage.CompletionTokensDetails.AudioTokens = int(detail.TokenCount)
-					case genai.MediaModalityImage:
-						usage.CompletionTokensDetails.AudioTokens += int(detail.TokenCount)
-					case genai.MediaModalityVideo:
-						// Video tokens count as completion tokens
-					}
-				}
-			}
-
-			// Extract modality tokens from prompt details for more granular tracking if needed
-			if len(vertexChunk.UsageMetadata.PromptTokensDetails) > 0 {
-				if usage.PromptTokensDetails == nil {
-					usage.PromptTokensDetails = &openai.TokenDetails{}
-				}
-				for _, detail := range vertexChunk.UsageMetadata.PromptTokensDetails {
-					if detail == nil {
-						continue
-					}
-					switch genai.MediaModality(detail.Modality) {
-					case genai.MediaModalityAudio:
-						usage.PromptTokensDetails.AudioTokens = int(detail.TokenCount)
-					}
-				}
-			}
-
-			openAIChunk.Usage = usage
+			//slog.Error("STREAMING_VERTEX_USAGE_CHUNK",
+			//	"prompt_tokens", vertexChunk.UsageMetadata.PromptTokenCount,
+			//	"candidates_tokens", vertexChunk.UsageMetadata.CandidatesTokenCount,
+			//	"total_tokens", vertexChunk.UsageMetadata.TotalTokenCount,
+			//	"cached_tokens", vertexChunk.UsageMetadata.CachedContentTokenCount,
+			//)
+			openAIChunk.Usage = convertVertexUsageMetadata(vertexChunk.UsageMetadata)
 		}
 
 		// Write OpenAI formatted chunk

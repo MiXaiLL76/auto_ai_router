@@ -189,7 +189,9 @@ func main() {
 	// Shutdown LiteLLM DB
 	if litellmDBManager.IsEnabled() {
 		log.Info("Shutting down LiteLLM DB...")
-		if err := litellmDBManager.Shutdown(ctx); err != nil {
+		dbShutdownCtx, dbShutdownCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer dbShutdownCancel()
+		if err := litellmDBManager.Shutdown(dbShutdownCtx); err != nil {
 			log.Error("LiteLLM DB shutdown error", "error", err)
 		}
 	}
@@ -516,4 +518,3 @@ func startDBHealthMonitor(
 
 	log.Info("LiteLLM DB health monitor started (checks every 30 seconds)")
 }
-

@@ -659,15 +659,14 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 
 	case config.ProviderTypeAnthropic:
 		if logCtx.IsImageGeneration {
-			p.logger.Error("Failed to Anthropic image request",
+			p.logger.Error("Anthropic does not support image generation",
 				"credential", cred.Name,
-				"error", err,
 			)
 			logCtx.Status = "failure"
-			logCtx.HTTPStatus = http.StatusInternalServerError
+			logCtx.HTTPStatus = http.StatusBadRequest
 			logCtx.ErrorMsg = "Anthropic does not support image generation"
 			logCtx.TargetURL = cred.BaseURL
-			http.Error(w, "Internal Server Error: Failed to Anthropic image request", http.StatusInternalServerError)
+			http.Error(w, "Bad Request: Anthropic does not support image generation", http.StatusBadRequest)
 			return
 		}
 
@@ -1175,6 +1174,11 @@ func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
 		}
 	}
 
+	// Ensure TokenUsage is not nil to prevent nil pointer dereference
+	if logCtx.TokenUsage == nil {
+		logCtx.TokenUsage = &transform.TokenUsage{}
+	}
+
 	// Calculate cost based on model pricing and token usage
 	var cost float64
 	if p.priceRegistry == nil {
@@ -1188,19 +1192,12 @@ func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
 				"model_name", logCtx.ModelID)
 			cost = 0.0
 		} else {
-			// Calculate cost using token usage
-			if logCtx.TokenUsage != nil {
-				cost = modelPrice.CalculateCost(logCtx.TokenUsage)
-				p.logger.Debug("Calculated cost for model",
-					"model_name", logCtx.ModelID,
-					"cost", cost,
-					"prompt_tokens", logCtx.TokenUsage.PromptTokens,
-					"completion_tokens", logCtx.TokenUsage.CompletionTokens)
-			} else {
-				p.logger.Debug("No token usage available for cost calculation, using 0 cost",
-					"model_name", logCtx.ModelID)
-				cost = 0.0
-			}
+			cost = modelPrice.CalculateCost(logCtx.TokenUsage)
+			p.logger.Debug("Calculated cost for model",
+				"model_name", logCtx.ModelID,
+				"cost", cost,
+				"prompt_tokens", logCtx.TokenUsage.PromptTokens,
+				"completion_tokens", logCtx.TokenUsage.CompletionTokens)
 		}
 	}
 
