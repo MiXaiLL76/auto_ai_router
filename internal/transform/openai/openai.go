@@ -54,12 +54,23 @@ type OpenAIMessage struct {
 }
 
 type ContentBlock struct {
-	Type     string    `json:"type"`
-	Text     string    `json:"text,omitempty"`
-	ImageURL *ImageURL `json:"image_url,omitempty"`
+	Type       string     `json:"type"`
+	Text       string     `json:"text,omitempty"`
+	ImageURL   *ImageURL  `json:"image_url,omitempty"`
+	InputAudio *AudioData `json:"input_audio,omitempty"`
+	VideoURL   *VideoURL  `json:"video_url,omitempty"`
 }
 
 type ImageURL struct {
+	URL string `json:"url"`
+}
+
+type AudioData struct {
+	Data   string `json:"data"`             // base64-encoded audio data
+	Format string `json:"format,omitempty"` // e.g., "wav", "mp3", "ogg"
+}
+
+type VideoURL struct {
 	URL string `json:"url"`
 }
 

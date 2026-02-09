@@ -738,7 +738,7 @@ func TestConvertContentToParts(t *testing.T) {
 					},
 				},
 			},
-			expected: 0, // should be ignored
+			expected: 1, // should be ignored
 		},
 		{
 			name:     "empty array",

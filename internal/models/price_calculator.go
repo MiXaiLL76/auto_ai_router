@@ -6,6 +6,17 @@ import (
 
 // CalculateTokenCosts computes costs based on token usage and model pricing
 // Returns nil if price is nil (model not found in pricing database)
+//
+// IMPORTANT: Handles two token counting semantics:
+//  1. Vertex/OpenAI: Audio/Cached/Reasoning tokens are INCLUDED in PromptTokens/CompletionTokens
+//     (Example: PromptTokens=100 includes AudioInputTokens=5 and CachedInputTokens=20)
+//  2. Anthropic: Cached tokens are SEPARATE from InputTokens
+//     (Example: InputTokens=100 + CachedInputTokens=20 = 120 total)
+//
+// Solution: Calculate "regular" tokens by subtracting detail breakdowns from totals,
+// then add back specialized token costs. This works for both semantics:
+// - Vertex/OpenAI: 100 - 5 - 20 = 75 regular, then add audio and cached separately
+// - Anthropic: 100 - 0 - 0 = 100 regular (since those tokens are in separate fields)
 func CalculateTokenCosts(usage *transform.TokenUsage, price *ModelPrice) *transform.TokenCosts {
 	if usage == nil || price == nil {
 		return nil
@@ -13,9 +24,22 @@ func CalculateTokenCosts(usage *transform.TokenUsage, price *ModelPrice) *transf
 
 	costs := &transform.TokenCosts{}
 
-	// Regular tokens
-	costs.InputCost = float64(usage.PromptTokens) * price.InputCostPerToken
-	costs.OutputCost = float64(usage.CompletionTokens) * price.OutputCostPerToken
+	// Calculate "regular" input tokens by subtracting specialized token types
+	// This handles both Vertex/OpenAI (where they're included) and Anthropic (where they're separate)
+	regularInputTokens := usage.PromptTokens - usage.AudioInputTokens - usage.CachedInputTokens
+	if regularInputTokens < 0 {
+		// Safety: shouldn't happen, but use 0 if somehow negative
+		regularInputTokens = 0
+	}
+	costs.InputCost = float64(regularInputTokens) * price.InputCostPerToken
+
+	// Calculate "regular" output tokens by subtracting specialized token types
+	regularOutputTokens := usage.CompletionTokens - usage.AudioOutputTokens - usage.ReasoningTokens -
+		usage.AcceptedPredictionTokens - usage.RejectedPredictionTokens
+	if regularOutputTokens < 0 {
+		regularOutputTokens = 0
+	}
+	costs.OutputCost = float64(regularOutputTokens) * price.OutputCostPerToken
 
 	// Audio tokens with fallback to regular tokens
 	audioInputCost := price.InputCostPerAudioToken

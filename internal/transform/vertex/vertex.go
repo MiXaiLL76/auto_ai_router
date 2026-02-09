@@ -22,11 +22,6 @@ type VertexRequest struct {
 
 // OpenAIToVertex converts OpenAI format request to Vertex AI format
 func OpenAIToVertex(openAIBody []byte, isImageGeneration bool, model string) ([]byte, error) {
-	//slog.Error("OPENAI_REQUEST_RAW",
-	//	"body", string(openAIBody),
-	//	"model", model,
-	//)
-
 	var openAIReq openai.OpenAIRequest
 
 	if isImageGeneration {
@@ -174,9 +169,9 @@ func OpenAIToVertex(openAIBody []byte, isImageGeneration bool, model string) ([]
 
 		// Handle response_format (JSON schema)
 		if openAIReq.ResponseFormat != nil {
-			jsonSchema := convertOpenAIResponseFormatToJsonSchema(openAIReq.ResponseFormat)
-			if jsonSchema != nil {
-				genConfig.ResponseJsonSchema = jsonSchema
+			schema := convertOpenAIResponseFormatToGenaiSchema(openAIReq.ResponseFormat)
+			if schema != nil {
+				genConfig.ResponseSchema = schema
 			}
 			// Also set ResponseMIMEType to application/json for JSON output
 			if rfMap, ok := openAIReq.ResponseFormat.(map[string]interface{}); ok {
@@ -251,14 +246,6 @@ func OpenAIToVertex(openAIBody []byte, isImageGeneration bool, model string) ([]
 	}
 
 	vertexBody, err := json.Marshal(vertexReq)
-	//if err == nil {
-	//	slog.Error("VERTEX_REQUEST_CONVERTED",
-	//		"body", string(vertexBody),
-	//		"model", model,
-	//		"messages_count", len(openAIReq.Messages),
-	//	)
-	//}
-
 	return vertexBody, err
 }
 
@@ -333,48 +320,18 @@ func VertexToOpenAI(vertexBody []byte, model string) ([]byte, error) {
 
 	// Convert usage metadata
 	if vertexResp.UsageMetadata != nil {
-		//slog.Error("VERTEX_RESPONSE_USAGE",
-		//	"model", model,
-		//	"candidates_count", len(vertexResp.Candidates),
-		//	"prompt_token_count", vertexResp.UsageMetadata.PromptTokenCount,
-		//	"candidates_token_count", vertexResp.UsageMetadata.CandidatesTokenCount,
-		//	"total_token_count", vertexResp.UsageMetadata.TotalTokenCount,
-		//)
 		openAIResp.Usage = convertVertexUsageMetadata(vertexResp.UsageMetadata)
 	}
-	//else {
-	//	slog.Error("VERTEX_RESPONSE_NO_USAGE",
-	//		"model", model,
-	//		"candidates_count", len(vertexResp.Candidates),
-	//	)
-	//}
-
 	return json.Marshal(openAIResp)
 }
 
 // convertVertexUsageMetadata converts Vertex AI usage metadata to OpenAI format.
 func convertVertexUsageMetadata(meta *genai.GenerateContentResponseUsageMetadata) *openai.OpenAIUsage {
-	// Log raw Vertex metadata for debugging
-	//slog.Error("VERTEX_USAGE_RAW",
-	//	"prompt_token_count", meta.PromptTokenCount,
-	//	"candidates_token_count", meta.CandidatesTokenCount,
-	//	"total_token_count", meta.TotalTokenCount,
-	//	"thoughts_token_count", meta.ThoughtsTokenCount,
-	//	"cached_content_token_count", meta.CachedContentTokenCount,
-	//	"candidates_tokens_details_count", len(meta.CandidatesTokensDetails),
-	//	"prompt_tokens_details_count", len(meta.PromptTokensDetails),
-	//)
-
 	// Include thinking/reasoning tokens in completion tokens for accurate conversion
 	// Vertex AI reasoning models include thoughts_token_count which are part of the response
 	completionTokens := int(meta.CandidatesTokenCount)
 	if meta.ThoughtsTokenCount > 0 {
 		completionTokens += int(meta.ThoughtsTokenCount)
-		//slog.Error("VERTEX_REASONING_INCLUDED",
-		//	"candidates_tokens", meta.CandidatesTokenCount,
-		//	"thoughts_tokens", meta.ThoughtsTokenCount,
-		//	"total_completion", completionTokens,
-		//)
 	}
 
 	usage := &openai.OpenAIUsage{
@@ -406,19 +363,10 @@ func convertVertexUsageMetadata(meta *genai.GenerateContentResponseUsageMetadata
 			if detail == nil {
 				continue
 			}
-			//slog.Error("VERTEX_CANDIDATES_TOKENS_DETAIL",
-			//	"index", i,
-			//	"modality", detail.Modality,
-			//	"token_count", detail.TokenCount,
-			//)
 			switch genai.MediaModality(detail.Modality) {
 			case genai.MediaModalityAudio:
 				usage.CompletionTokensDetails.AudioTokens += int(detail.TokenCount)
 			case genai.MediaModalityImage, genai.MediaModalityVideo:
-				//slog.Error("VERTEX_IMAGE_VIDEO_TOKENS_SKIPPED",
-				//	"modality", detail.Modality,
-				//	"token_count", detail.TokenCount,
-				//)
 				// Image/video tokens are already included in CompletionTokens total;
 				// OpenAI format has no dedicated field for these modalities
 			}
@@ -433,29 +381,12 @@ func convertVertexUsageMetadata(meta *genai.GenerateContentResponseUsageMetadata
 			if detail == nil {
 				continue
 			}
-			//slog.Error("VERTEX_PROMPT_TOKENS_DETAIL",
-			//	"index", i,
-			//	"modality", detail.Modality,
-			//	"token_count", detail.TokenCount,
-			//)
 			switch genai.MediaModality(detail.Modality) {
 			case genai.MediaModalityAudio:
 				usage.PromptTokensDetails.AudioTokens += int(detail.TokenCount)
 			}
 		}
 	}
-
-	// Validate total tokens calculation
-	//calculatedTotal := usage.PromptTokens + usage.CompletionTokens
-	//slog.Error("OPENAI_USAGE_CONVERTED",
-	//	"prompt_tokens", usage.PromptTokens,
-	//	"completion_tokens", usage.CompletionTokens,
-	//	"total_tokens", usage.TotalTokens,
-	//	"calculated_total", calculatedTotal,
-	//	"mismatch", calculatedTotal != usage.TotalTokens,
-	//	"cached_tokens", usage.PromptTokensDetails.CachedTokens,
-	//	"audio_tokens", usage.CompletionTokensDetails.AudioTokens,
-	//)
 
 	return usage
 }
@@ -532,7 +463,72 @@ func convertContentToParts(content interface{}) []*genai.Part {
 				if !ok {
 					return nil
 				}
-				return parseDataURLToPart(url)
+				// Try to parse as data URL first, then as regular URL
+				part := parseDataURLToPart(url)
+				if part == nil {
+					// If not a data URL, treat as regular URL (http/https)
+					part = parseURLToPart(url, imageURL)
+				}
+				return part
+			},
+			"input_audio": func(block map[string]interface{}) *genai.Part {
+				audioData, ok := block["input_audio"].(map[string]interface{})
+				if !ok {
+					return nil
+				}
+				data, ok := audioData["data"].(string)
+				if !ok {
+					return nil
+				}
+
+				// Decode base64 audio data
+				decodedData, err := base64.StdEncoding.DecodeString(data)
+				if err != nil {
+					return nil
+				}
+
+				// Determine MIME type from format field or default to wav
+				mimeType := "audio/wav"
+				if format, ok := audioData["format"].(string); ok && format != "" {
+					mimeType = getAudioMimeType(format)
+				}
+
+				return &genai.Part{
+					InlineData: &genai.Blob{
+						MIMEType: mimeType,
+						Data:     decodedData,
+					},
+				}
+			},
+			"video_url": func(block map[string]interface{}) *genai.Part {
+				videoURL, ok := block["video_url"].(map[string]interface{})
+				if !ok {
+					return nil
+				}
+				url, ok := videoURL["url"].(string)
+				if !ok {
+					return nil
+				}
+
+				// Determine MIME type from format field or URL extension
+				mimeType := ""
+				if format, ok := videoURL["format"].(string); ok && format != "" {
+					mimeType = format
+				} else {
+					mimeType = getMimeTypeFromURL(url)
+				}
+
+				if mimeType == "" {
+					// Default to mp4 if we can't determine
+					mimeType = "video/mp4"
+				}
+
+				return &genai.Part{
+					FileData: &genai.FileData{
+						MIMEType: mimeType,
+						FileURI:  url,
+					},
+				}
 			},
 			"file": func(block map[string]interface{}) *genai.Part {
 				fileObj, ok := block["file"].(map[string]interface{})
@@ -703,6 +699,28 @@ func getMimeTypeFromURL(url string) string {
 	return ""
 }
 
+// getAudioMimeType maps audio format to MIME type
+func getAudioMimeType(format string) string {
+	formatLower := strings.ToLower(format)
+	mimeTypes := map[string]string{
+		"wav":  "audio/wav",
+		"mp3":  "audio/mpeg",
+		"ogg":  "audio/ogg",
+		"opus": "audio/opus",
+		"aac":  "audio/aac",
+		"flac": "audio/flac",
+		"m4a":  "audio/mp4",
+		"weba": "audio/webp",
+	}
+
+	if mimeType, ok := mimeTypes[formatLower]; ok {
+		return mimeType
+	}
+
+	// Default to wav if format is not recognized
+	return "audio/wav"
+}
+
 // convertToolCallsToGenaiParts converts OpenAI tool_calls to genai.Part with FunctionCall
 func convertToolCallsToGenaiParts(toolCalls []interface{}) []*genai.Part {
 	if len(toolCalls) == 0 {
@@ -857,6 +875,146 @@ func convertOpenAIParamsToGenaiSchema(params map[string]interface{}) *genai.Sche
 	return schema
 }
 
+// convertMapToGenaiSchema recursively converts a map[string]interface{} (JSON Schema) to *genai.Schema
+// This is used for response schemas to maintain structured format instead of raw JSON
+func convertMapToGenaiSchema(data map[string]interface{}) *genai.Schema {
+	if data == nil {
+		return nil
+	}
+
+	schema := &genai.Schema{}
+
+	// Convert type field
+	if typeVal, ok := data["type"].(string); ok {
+		schema.Type = genai.Type(strings.ToUpper(typeVal))
+	}
+
+	// Convert title
+	if title, ok := data["title"].(string); ok {
+		schema.Title = title
+	}
+
+	// Convert description
+	if desc, ok := data["description"].(string); ok {
+		schema.Description = desc
+	}
+
+	// Convert enum
+	if enumVals, ok := data["enum"].([]interface{}); ok {
+		enumStrs := make([]string, 0, len(enumVals))
+		for _, e := range enumVals {
+			if str, ok := e.(string); ok {
+				enumStrs = append(enumStrs, str)
+			}
+		}
+		if len(enumStrs) > 0 {
+			schema.Enum = enumStrs
+		}
+	}
+
+	// Convert required array
+	if required, ok := data["required"].([]interface{}); ok {
+		requiredFields := make([]string, 0, len(required))
+		for _, req := range required {
+			if field, ok := req.(string); ok {
+				requiredFields = append(requiredFields, field)
+			}
+		}
+		if len(requiredFields) > 0 {
+			schema.Required = requiredFields
+		}
+	}
+
+	// Convert properties (recursive)
+	if properties, ok := data["properties"].(map[string]interface{}); ok {
+		schema.Properties = make(map[string]*genai.Schema)
+		for propName, propVal := range properties {
+			if propMap, ok := propVal.(map[string]interface{}); ok {
+				schema.Properties[propName] = convertMapToGenaiSchema(propMap)
+			}
+		}
+	}
+
+	// Convert items for array types
+	if items, ok := data["items"].(map[string]interface{}); ok {
+		schema.Items = convertMapToGenaiSchema(items)
+	}
+
+	// Convert anyOf
+	if anyOf, ok := data["anyOf"].([]interface{}); ok {
+		schemas := make([]*genai.Schema, 0, len(anyOf))
+		for _, item := range anyOf {
+			if itemMap, ok := item.(map[string]interface{}); ok {
+				schemas = append(schemas, convertMapToGenaiSchema(itemMap))
+			}
+		}
+		if len(schemas) > 0 {
+			schema.AnyOf = schemas
+		}
+	}
+
+	// Convert format (e.g., "email", "date", etc.)
+	if format, ok := data["format"].(string); ok {
+		schema.Format = format
+	}
+
+	// Convert pattern (regex for string validation)
+	if pattern, ok := data["pattern"].(string); ok {
+		schema.Pattern = pattern
+	}
+
+	// Convert numeric constraints
+	if minimum, ok := data["minimum"].(float64); ok {
+		schema.Minimum = &minimum
+	}
+	if maximum, ok := data["maximum"].(float64); ok {
+		schema.Maximum = &maximum
+	}
+	if minLength, ok := data["minLength"].(float64); ok {
+		minLengthInt := int64(minLength)
+		schema.MinLength = &minLengthInt
+	}
+	if maxLength, ok := data["maxLength"].(float64); ok {
+		maxLengthInt := int64(maxLength)
+		schema.MaxLength = &maxLengthInt
+	}
+
+	// Convert array constraints
+	if minItems, ok := data["minItems"].(float64); ok {
+		minItemsInt := int64(minItems)
+		schema.MinItems = &minItemsInt
+	}
+	if maxItems, ok := data["maxItems"].(float64); ok {
+		maxItemsInt := int64(maxItems)
+		schema.MaxItems = &maxItemsInt
+	}
+
+	// Convert property ordering
+	if propOrdering, ok := data["propertyOrdering"].([]interface{}); ok {
+		propOrderingStrs := make([]string, 0, len(propOrdering))
+		for _, prop := range propOrdering {
+			if str, ok := prop.(string); ok {
+				propOrderingStrs = append(propOrderingStrs, str)
+			}
+		}
+		if len(propOrderingStrs) > 0 {
+			schema.PropertyOrdering = propOrderingStrs
+		}
+	}
+
+	// Convert default value
+	if def, ok := data["default"]; ok {
+		schema.Default = def
+	}
+
+	// Convert example
+	if example, ok := data["example"]; ok {
+		schema.Example = example
+	}
+
+	return schema
+}
+
 // determineVertexPublisher determines the Vertex AI publisher based on the model ID
 func determineVertexPublisher(modelID string) string {
 	modelLower := strings.ToLower(modelID)
@@ -910,8 +1068,10 @@ func BuildVertexURL(cred *config.CredentialConfig, modelID string, streaming boo
 	)
 }
 
-// convertOpenAIResponseFormatToJsonSchema converts OpenAI response_format to Vertex AI JSON schema
-func convertOpenAIResponseFormatToJsonSchema(responseFormat interface{}) interface{} {
+// convertOpenAIResponseFormatToGenaiSchema converts OpenAI response_format to Vertex AI structured schema
+// Using ResponseSchema (structured) instead of ResponseJsonSchema (raw JSON) may produce
+// different output formatting (compact vs pretty-printed JSON)
+func convertOpenAIResponseFormatToGenaiSchema(responseFormat interface{}) *genai.Schema {
 	// response_format can be:
 	// 1. {"type": "json_object"} or {"type": "json_schema", "json_schema": {...}}
 	// 2. {"type": "text"}
@@ -930,15 +1090,19 @@ func convertOpenAIResponseFormatToJsonSchema(responseFormat interface{}) interfa
 				// Extract the json_schema field
 				if jsonSchema, ok := rf["json_schema"].(map[string]interface{}); ok {
 					if schema, ok := jsonSchema["schema"].(map[string]interface{}); ok {
-						// Return the schema directly for Vertex to use as ResponseJsonSchema
-						return schema
+						// Include schema name from OpenAI format if present
+						if schemaName, ok := jsonSchema["name"].(string); ok && schemaName != "" {
+							// Add title field to preserve the schema name for Vertex
+							schema["title"] = schemaName
+						}
+						// Convert map to structured *genai.Schema
+						return convertMapToGenaiSchema(schema)
 					}
-					// If no nested schema, return the whole json_schema object
-					return jsonSchema
+					// If no nested schema, convert the whole json_schema object
+					return convertMapToGenaiSchema(jsonSchema)
 				}
 			case "json_object":
 				// For simple json_object type, Vertex doesn't need additional schema
-				// But we can set ResponseMIMEType to application/json instead
 				return nil
 			}
 		}
