@@ -1209,7 +1209,7 @@ func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
 		APIBase:           apiBase,
 		Model:             logCtx.ModelID,                 // Model name
 		ModelID:           modelIDFormatted,               // credential.name:model_name
-		ModelGroup:        "",                             // Empty for now
+		ModelGroup:        logCtx.ModelID,                 // Model name
 		CustomLLMProvider: string(logCtx.Credential.Type), // Provider type as string
 		PromptTokens:      logCtx.TokenUsage.PromptTokens,
 		CompletionTokens:  logCtx.TokenUsage.CompletionTokens,

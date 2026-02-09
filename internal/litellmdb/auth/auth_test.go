@@ -1,6 +1,8 @@
 package auth
 
 import (
+	"context"
+	"log/slog"
 	"testing"
 	"time"
 
@@ -344,4 +346,282 @@ func TestCache_Stats(t *testing.T) {
 	assert.Equal(t, uint64(1), stats.Hits)
 	assert.Equal(t, uint64(1), stats.Misses)
 	assert.Equal(t, 50.0, stats.HitRate)
+}
+
+// ==================== Authenticator tests ====================
+
+func TestNewAuthenticator(t *testing.T) {
+	cache, err := NewCache(100, time.Minute)
+	require.NoError(t, err)
+
+	logger := slog.Default()
+
+	auth := NewAuthenticator(nil, cache, logger)
+	assert.NotNil(t, auth)
+	assert.Equal(t, cache, auth.cache)
+	assert.Equal(t, logger, auth.logger)
+}
+
+func TestAuthenticator_ValidateToken_EmptyToken(t *testing.T) {
+	cache, err := NewCache(100, time.Minute)
+	require.NoError(t, err)
+
+	auth := NewAuthenticator(nil, cache, slog.Default())
+
+	info, err := auth.ValidateToken(context.Background(), "")
+	assert.Nil(t, info)
+	assert.ErrorIs(t, err, models.ErrTokenNotFound)
+}
+
+func TestAuthenticator_ValidateToken_FromCache(t *testing.T) {
+	cache, err := NewCache(100, time.Minute)
+	require.NoError(t, err)
+
+	auth := NewAuthenticator(nil, cache, slog.Default())
+
+	// Pre-populate cache with valid token
+	tokenInfo := &models.TokenInfo{
+		Token:   "test-token",
+		UserID:  "user1",
+		Blocked: false,
+	}
+	hashedToken := HashToken("sk-test-token-123")
+	cache.Set(hashedToken, tokenInfo)
+
+	// Validate should find it in cache without needing DB
+	info, err := auth.ValidateToken(context.Background(), "sk-test-token-123")
+	assert.NoError(t, err)
+	assert.Equal(t, "user1", info.UserID)
+	assert.Equal(t, "test-token", info.Token)
+
+	// Check cache stats
+	stats := cache.Stats()
+	assert.Equal(t, 1, stats.Size)
+	assert.Greater(t, stats.Hits, uint64(0))
+}
+
+func TestAuthenticator_ValidateToken_CacheBlockedToken(t *testing.T) {
+	cache, err := NewCache(100, time.Minute)
+	require.NoError(t, err)
+
+	auth := NewAuthenticator(nil, cache, slog.Default())
+
+	// Pre-populate cache with blocked token
+	tokenInfo := &models.TokenInfo{
+		Token:   "test-token",
+		UserID:  "user1",
+		Blocked: true,
+	}
+	hashedToken := HashToken("sk-blocked-token")
+	cache.Set(hashedToken, tokenInfo)
+
+	// Validate should fail even if token is cached
+	info, err := auth.ValidateToken(context.Background(), "sk-blocked-token")
+	assert.Nil(t, info)
+	assert.ErrorIs(t, err, models.ErrTokenBlocked)
+}
+
+func TestAuthenticator_ValidateToken_CacheExpiredToken(t *testing.T) {
+	cache, err := NewCache(100, time.Minute)
+	require.NoError(t, err)
+
+	auth := NewAuthenticator(nil, cache, slog.Default())
+
+	// Pre-populate cache with expired token
+	past := time.Now().UTC().Add(-time.Hour)
+	tokenInfo := &models.TokenInfo{
+		Token:   "test-token",
+		UserID:  "user1",
+		Expires: &past,
+	}
+	hashedToken := HashToken("sk-expired-token")
+	cache.Set(hashedToken, tokenInfo)
+
+	// Validate should fail even if token is cached
+	info, err := auth.ValidateToken(context.Background(), "sk-expired-token")
+	assert.Nil(t, info)
+	assert.ErrorIs(t, err, models.ErrTokenExpired)
+}
+
+func TestAuthenticator_ValidateToken_CacheBudgetExceeded(t *testing.T) {
+	cache, err := NewCache(100, time.Minute)
+	require.NoError(t, err)
+
+	auth := NewAuthenticator(nil, cache, slog.Default())
+
+	// Pre-populate cache with budget exceeded token
+	budget := 100.0
+	tokenInfo := &models.TokenInfo{
+		Token:     "test-token",
+		UserID:    "user1",
+		Spend:     150.0,
+		MaxBudget: &budget,
+	}
+	hashedToken := HashToken("sk-over-budget-token")
+	cache.Set(hashedToken, tokenInfo)
+
+	// Validate should fail even if token is cached
+	info, err := auth.ValidateToken(context.Background(), "sk-over-budget-token")
+	assert.Nil(t, info)
+	assert.ErrorIs(t, err, models.ErrBudgetExceeded)
+}
+
+func TestAuthenticator_ValidateTokenForModel_Success(t *testing.T) {
+	cache, err := NewCache(100, time.Minute)
+	require.NoError(t, err)
+
+	auth := NewAuthenticator(nil, cache, slog.Default())
+
+	// Pre-populate cache with token that allows gpt-4
+	tokenInfo := &models.TokenInfo{
+		Token:   "test-token",
+		UserID:  "user1",
+		Blocked: false,
+		Models:  []string{"gpt-4", "gpt-3.5-turbo"},
+	}
+	hashedToken := HashToken("sk-gpt4-token")
+	cache.Set(hashedToken, tokenInfo)
+
+	// Should succeed for allowed model
+	info, err := auth.ValidateTokenForModel(context.Background(), "sk-gpt4-token", "gpt-4")
+	assert.NoError(t, err)
+	assert.Equal(t, "user1", info.UserID)
+}
+
+func TestAuthenticator_ValidateTokenForModel_ModelNotAllowed(t *testing.T) {
+	cache, err := NewCache(100, time.Minute)
+	require.NoError(t, err)
+
+	auth := NewAuthenticator(nil, cache, slog.Default())
+
+	// Pre-populate cache with token that only allows gpt-4
+	tokenInfo := &models.TokenInfo{
+		Token:   "test-token",
+		UserID:  "user1",
+		Blocked: false,
+		Models:  []string{"gpt-4"},
+	}
+	hashedToken := HashToken("sk-gpt4-only-token")
+	cache.Set(hashedToken, tokenInfo)
+
+	// Should fail for disallowed model
+	info, err := auth.ValidateTokenForModel(context.Background(), "sk-gpt4-only-token", "claude-3")
+	assert.Nil(t, info)
+	assert.ErrorIs(t, err, models.ErrModelNotAllowed)
+}
+
+func TestAuthenticator_ValidateTokenForModel_EmptyToken(t *testing.T) {
+	cache, err := NewCache(100, time.Minute)
+	require.NoError(t, err)
+
+	auth := NewAuthenticator(nil, cache, slog.Default())
+
+	// Try to validate with empty token
+	info, err := auth.ValidateTokenForModel(context.Background(), "", "gpt-4")
+	assert.Nil(t, info)
+	assert.ErrorIs(t, err, models.ErrTokenNotFound)
+}
+
+func TestAuthenticator_InvalidateToken(t *testing.T) {
+	cache, err := NewCache(100, time.Minute)
+	require.NoError(t, err)
+
+	auth := NewAuthenticator(nil, cache, slog.Default())
+
+	// Add token to cache
+	tokenInfo := &models.TokenInfo{
+		Token:  "test-token",
+		UserID: "user1",
+	}
+	hashedToken := HashToken("sk-to-invalidate")
+	cache.Set(hashedToken, tokenInfo)
+
+	// Verify it's in cache
+	_, ok := cache.Get(hashedToken)
+	assert.True(t, ok)
+
+	// Invalidate it
+	auth.InvalidateToken(hashedToken)
+
+	// Verify it's no longer in cache
+	_, ok = cache.Get(hashedToken)
+	assert.False(t, ok)
+}
+
+func TestAuthenticator_CacheStats(t *testing.T) {
+	cache, err := NewCache(100, time.Minute)
+	require.NoError(t, err)
+
+	auth := NewAuthenticator(nil, cache, slog.Default())
+
+	// Add token to cache
+	tokenInfo := &models.TokenInfo{
+		Token:  "test-token",
+		UserID: "user1",
+	}
+	hashedToken := HashToken("sk-stats-token")
+	cache.Set(hashedToken, tokenInfo)
+
+	// Access it
+	cache.Get(hashedToken)
+	cache.Get(hashedToken) // Hit again
+
+	// Get stats
+	cache.Get("nonexistent") // Miss
+
+	stats := auth.CacheStats()
+	assert.Equal(t, 1, stats.Size)
+	assert.Greater(t, stats.Hits, uint64(0))
+	assert.Greater(t, stats.Misses, uint64(0))
+}
+
+func TestAuthenticator_ValidateToken_NonSKToken(t *testing.T) {
+	cache, err := NewCache(100, time.Minute)
+	require.NoError(t, err)
+
+	auth := NewAuthenticator(nil, cache, slog.Default())
+
+	// Pre-populate cache with non-sk- token (already hashed)
+	tokenInfo := &models.TokenInfo{
+		Token:   "pre-hashed-token",
+		UserID:  "user1",
+		Blocked: false,
+	}
+	hashedToken := "pre-hashed-token" // Not prefixed with sk-
+	cache.Set(hashedToken, tokenInfo)
+
+	// Validate should find it using the same hashing logic (no-op for non-sk-)
+	info, err := auth.ValidateToken(context.Background(), "pre-hashed-token")
+	assert.NoError(t, err)
+	assert.Equal(t, "user1", info.UserID)
+}
+
+func TestAuthenticator_CacheHitRate(t *testing.T) {
+	cache, err := NewCache(100, time.Minute)
+	require.NoError(t, err)
+
+	auth := NewAuthenticator(nil, cache, slog.Default())
+
+	// Add multiple tokens
+	for i := 1; i <= 5; i++ {
+		tokenInfo := &models.TokenInfo{
+			Token:  "test-token",
+			UserID: string(rune(i + 48)), // "1", "2", etc
+		}
+		hashedToken := HashToken("sk-token-" + string(rune(i+48)))
+		cache.Set(hashedToken, tokenInfo)
+	}
+
+	// Access some tokens multiple times
+	cache.Get(HashToken("sk-token-1"))
+	cache.Get(HashToken("sk-token-1")) // Hit
+	cache.Get(HashToken("sk-token-2"))
+	cache.Get(HashToken("sk-token-2")) // Hit
+
+	// Miss
+	cache.Get("nonexistent")
+
+	stats := auth.CacheStats()
+	assert.Greater(t, stats.HitRate, 0.0)
+	assert.LessOrEqual(t, stats.HitRate, 100.0)
 }
