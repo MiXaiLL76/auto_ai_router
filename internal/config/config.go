@@ -318,7 +318,7 @@ type LiteLLMDBConfig struct {
 	ConnectTimeout      time.Duration `yaml:"connect_timeout"`       // default: 5s
 
 	// Auth cache
-	AuthCacheTTL  time.Duration `yaml:"auth_cache_ttl"`  // default: 60s
+	AuthCacheTTL  time.Duration `yaml:"auth_cache_ttl"`  // default: 20s
 	AuthCacheSize int           `yaml:"auth_cache_size"` // default: 10000
 
 	// Spend logging
@@ -473,7 +473,7 @@ func (l *LiteLLMDBConfig) UnmarshalYAML(value *yaml.Node) error {
 		return err
 	}
 
-	l.AuthCacheTTL, err = parseDurationField(temp.AuthCacheTTL, 60*time.Second, "auth_cache_ttl")
+	l.AuthCacheTTL, err = parseDurationField(temp.AuthCacheTTL, 20*time.Second, "auth_cache_ttl")
 	if err != nil {
 		return err
 	}
@@ -506,7 +506,7 @@ func (c *LiteLLMDBConfig) ApplyDefaults() {
 		c.ConnectTimeout = 5 * time.Second
 	}
 	if c.AuthCacheTTL == 0 {
-		c.AuthCacheTTL = 60 * time.Second
+		c.AuthCacheTTL = 20 * time.Second
 	}
 	if c.AuthCacheSize == 0 {
 		c.AuthCacheSize = 10000

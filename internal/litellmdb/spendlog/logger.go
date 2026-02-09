@@ -93,7 +93,7 @@ func (sl *Logger) Start() {
 	go sl.worker()
 	go sl.aggregationWorker()
 	go sl.dlqRecoveryWorker()
-	sl.logger.Info("SpendLogger started",
+	sl.logger.Info("[DB] SpendLogger started",
 		"queue_size", sl.config.LogQueueSize,
 		"batch_size", sl.config.LogBatchSize,
 		"flush_interval", sl.config.LogFlushInterval,
@@ -128,7 +128,7 @@ func (sl *Logger) Log(entry *models.SpendLogEntry) error {
 	select {
 	case sl.queue <- entry:
 		atomic.AddUint64(&sl.queued, 1)
-		sl.logger.Debug("SpendLog entry queued after backpressure",
+		sl.logger.Debug("[DB] SpendLog entry queued after backpressure",
 			"request_id", entry.RequestID,
 			"queue_len", len(sl.queue),
 		)
@@ -138,7 +138,7 @@ func (sl *Logger) Log(entry *models.SpendLogEntry) error {
 		// Timeout reached - queue still full after 5 seconds
 		atomic.AddUint64(&sl.dropped, 1)
 		atomic.AddUint64(&sl.queueFullCount, 1)
-		sl.logger.Error("SpendLog entry dropped: queue full timeout",
+		sl.logger.Error("[DB] SpendLog entry dropped: queue full timeout",
 			"request_id", entry.RequestID,
 			"queue_len", len(sl.queue),
 			"queue_cap", cap(sl.queue),
@@ -150,7 +150,7 @@ func (sl *Logger) Log(entry *models.SpendLogEntry) error {
 
 // Shutdown stops the logger and waits for all logs to be written
 func (sl *Logger) Shutdown(ctx context.Context) error {
-	sl.logger.Info("SpendLogger shutting down...",
+	sl.logger.Info("[DB] SpendLogger shutting down...",
 		"pending", len(sl.queue),
 	)
 
@@ -172,7 +172,7 @@ func (sl *Logger) Shutdown(ctx context.Context) error {
 	select {
 	case <-done:
 		dlqSize := sl.getDLQSize()
-		sl.logger.Info("SpendLogger shutdown complete",
+		sl.logger.Info("[DB] SpendLogger shutdown complete",
 			"written", atomic.LoadUint64(&sl.written),
 			"dropped", atomic.LoadUint64(&sl.dropped),
 			"errors", atomic.LoadUint64(&sl.errors),
@@ -181,7 +181,7 @@ func (sl *Logger) Shutdown(ctx context.Context) error {
 		)
 		return nil
 	case <-ctx.Done():
-		sl.logger.Warn("SpendLogger shutdown timeout",
+		sl.logger.Warn("[DB] SpendLogger shutdown timeout",
 			"pending", len(sl.queue),
 		)
 		return ctx.Err()
@@ -303,7 +303,7 @@ func (sl *Logger) flushBatch(batch []*models.SpendLogEntry) {
 		// Apply exponential backoff before attempt (except first)
 		if attempt > 0 {
 			backoff := backoffDurations[attempt]
-			sl.logger.Debug("SpendLog batch retry backoff",
+			sl.logger.Debug("[DB] SpendLog batch retry backoff",
 				"attempt", attempt+1,
 				"backoff_ms", backoff.Milliseconds(),
 				"batch_size", len(batch),
@@ -311,11 +311,11 @@ func (sl *Logger) flushBatch(batch []*models.SpendLogEntry) {
 			time.Sleep(backoff)
 		}
 
-		err := sl.insertBatch(batch)
+		err := sl.flushBatchWithSpendUpdate(batch)
 		if err == nil {
 			atomic.AddUint64(&sl.written, uint64(len(batch)))
 			atomic.AddUint64(&sl.batchesOK, 1)
-			sl.logger.Debug("SpendLog batch written",
+			sl.logger.Debug("[DB] SpendLog batch written with spend updates",
 				"count", len(batch),
 				"attempt", attempt+1,
 			)
@@ -323,7 +323,7 @@ func (sl *Logger) flushBatch(batch []*models.SpendLogEntry) {
 		}
 
 		lastErr = err
-		sl.logger.Warn("SpendLog batch insert failed",
+		sl.logger.Warn("[DB] SpendLog batch insert and spend update failed",
 			"attempt", attempt+1,
 			"max_attempts", maxAttempts,
 			"batch_size", len(batch),
@@ -366,6 +366,59 @@ func (sl *Logger) insertBatch(batch []*models.SpendLogEntry) error {
 	return nil
 }
 
+// flushBatchWithSpendUpdate executes batch INSERT and spend updates atomically
+// 1. INSERT batch into SpendLogs
+// 2. Aggregate and UPDATE spend for Token, User, Team, Org, TeamMember, OrgMember
+// All operations executed in a single transaction for atomicity
+func (sl *Logger) flushBatchWithSpendUpdate(batch []*models.SpendLogEntry) error {
+	if !sl.pool.IsHealthy() {
+		return models.ErrConnectionFailed
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	conn, err := sl.pool.Acquire(ctx)
+	if err != nil {
+		return fmt.Errorf("acquire connection: %w", err)
+	}
+	defer conn.Release()
+
+	// Begin transaction
+	tx, err := conn.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("begin transaction: %w", err)
+	}
+
+	defer func() {
+		// Rollback is a no-op if tx is already committed
+		_ = tx.Rollback(ctx)
+	}()
+
+	// 1. INSERT batch into SpendLogs
+	query := queries.BuildBatchInsertQuery(len(batch))
+	params := GetBatchParams(batch)
+	_, err = tx.Exec(ctx, query, params...)
+	if err != nil {
+		return fmt.Errorf("batch insert: %w", err)
+	}
+
+	// 2. Aggregate and UPDATE spend
+	spendUpdates := aggregateSpendUpdates(batch)
+	err = executeSpendUpdates(ctx, tx, spendUpdates)
+	if err != nil {
+		return fmt.Errorf("spend updates: %w", err)
+	}
+
+	// Commit transaction
+	err = tx.Commit(ctx)
+	if err != nil {
+		return fmt.Errorf("commit transaction: %w", err)
+	}
+
+	return nil
+}
+
 // addToDLQ adds a failed batch to the dead letter queue
 // Max queue size: 10 failed batches (~100KB max memory)
 // If DLQ is full, drops the oldest batch and logs error
@@ -387,7 +440,7 @@ func (sl *Logger) addToDLQ(batch []*models.SpendLogEntry, lastErr error, attempt
 		sl.dlq = sl.dlq[1:]
 		atomic.AddUint64(&sl.dlqOverflow, 1)
 
-		sl.logger.Error("SpendLog DLQ overflow - batch dropped",
+		sl.logger.Error("[DB] SpendLog DLQ overflow - batch dropped",
 			"dropped_batch_size", len(dropped.batch),
 			"dropped_at", dropped.failedAt,
 			"dlq_size", len(sl.dlq),
@@ -399,7 +452,7 @@ func (sl *Logger) addToDLQ(batch []*models.SpendLogEntry, lastErr error, attempt
 	atomic.AddUint64(&sl.dlqCount, 1)
 
 	// Log batch details
-	sl.logger.Error("SpendLog batch sent to Dead Letter Queue",
+	sl.logger.Error("[DB] SpendLog batch sent to Dead Letter Queue",
 		"batch_size", len(batch),
 		"dlq_size", len(sl.dlq),
 		"failed_at", dlb.failedAt,
@@ -446,7 +499,7 @@ func (sl *Logger) flushDLQ() {
 
 	// Alert if DLQ is growing too large
 	if len(sl.dlq) >= 5 {
-		sl.logger.Error("SpendLog DLQ size alert",
+		sl.logger.Error("[DB] SpendLog DLQ size alert",
 			"dlq_size", len(sl.dlq),
 			"dlq_max_size", 10,
 			"total_batches_at_risk", countEntriesInDLQ(sl.dlq),
@@ -472,7 +525,7 @@ func (sl *Logger) flushDLQ() {
 			atomic.AddUint64(&sl.dlqRecovered, 1)
 			recovered++
 
-			sl.logger.Warn("SpendLog batch recovered from DLQ",
+			sl.logger.Warn("[DB] SpendLog batch recovered from DLQ",
 				"batch_size", len(dlb.batch),
 				"originally_failed_at", dlb.failedAt,
 				"time_in_dlq", time.Since(dlb.failedAt).String(),
@@ -485,7 +538,7 @@ func (sl *Logger) flushDLQ() {
 			sl.dlqMu.Unlock()
 		} else {
 			failed++
-			sl.logger.Debug("SpendLog batch DLQ retry failed",
+			sl.logger.Debug("[DB] SpendLog batch DLQ retry failed",
 				"batch_size", len(dlb.batch),
 				"in_dlq_since", dlb.failedAt,
 				"error", err,
@@ -499,7 +552,7 @@ func (sl *Logger) flushDLQ() {
 	sl.mu.Unlock()
 
 	if recovered > 0 || failed > 0 {
-		sl.logger.Info("SpendLog DLQ recovery attempt completed",
+		sl.logger.Info("[DB] SpendLog DLQ recovery attempt completed",
 			"recovered", recovered,
 			"failed", failed,
 			"dlq_size", sl.getDLQSize(),
@@ -558,11 +611,15 @@ func (sl *Logger) aggregationWorker() {
 	}
 }
 
-// aggregateSpendLogs aggregates unprocessed spend logs into DailyUserSpend
+// aggregateSpendLogs aggregates unprocessed spend logs into all Daily tables
+// Flow:
+// 1. Fetch unprocessed request_ids (snapshot at aggregation start)
+// 2. Call aggregators for: User, Team, Organization, EndUser, Agent, Tag
+// 3. Mark all request_ids as processed
 func (sl *Logger) aggregateSpendLogs() {
 	if !sl.pool.IsHealthy() {
 		atomic.AddUint64(&sl.aggregationErrors, 1)
-		sl.logger.Warn("Cannot aggregate: database not healthy")
+		sl.logger.Warn("[DB] Cannot aggregate: database not healthy")
 		return
 	}
 
@@ -572,154 +629,104 @@ func (sl *Logger) aggregateSpendLogs() {
 	conn, err := sl.pool.Acquire(ctx)
 	if err != nil {
 		atomic.AddUint64(&sl.aggregationErrors, 1)
-		sl.logger.Error("Aggregation: failed to acquire connection", "error", err)
+		sl.logger.Error("[DB] Aggregation: failed to acquire connection", "error", err)
 		return
 	}
 	defer conn.Release()
 
-	// Fetch unprocessed spend logs
-	rows, err := conn.Query(ctx, queries.QuerySelectUnprocessedSpendLogs)
+	// 1. Fetch unprocessed request_ids (snapshot)
+	rows, err := conn.Query(ctx, queries.QuerySelectUnprocessedRequestIDs)
 	if err != nil {
 		atomic.AddUint64(&sl.aggregationErrors, 1)
-		sl.logger.Error("Aggregation: failed to fetch spend logs", "error", err)
+		sl.logger.Error("[DB] Aggregation: failed to fetch request_ids", "error", err)
 		return
 	}
 	defer rows.Close()
 
-	// Map to aggregate by unique key (user_id, date, api_key, model, custom_llm_provider, mcp_namespaced_tool_name, endpoint)
-	type aggregationKey struct {
-		userID                string
-		date                  string
-		apiKey                string
-		model                 string
-		customLLMProvider     string
-		mcpNamespacedToolName string
-		endpoint              string
-	}
-
-	type aggregationValue struct {
-		promptTokens       int64
-		completionTokens   int64
-		spend              float64
-		apiRequests        int64
-		successfulRequests int64
-		failedRequests     int64
-	}
-
-	aggregations := make(map[aggregationKey]*aggregationValue)
-	processedRequestIDs := make([]string, 0)
-
-	// Aggregate rows
+	var requestIDs []string
 	for rows.Next() {
-		var userID, date, apiKey string
-		var model, customLLMProvider, mcpNamespacedToolName, apiBase *string
-		var promptTokens, completionTokens int
-		var spend float64
-		var status *string
 		var requestID string
-
-		err := rows.Scan(&userID, &date, &apiKey, &model, &customLLMProvider, &mcpNamespacedToolName, &apiBase,
-			&promptTokens, &completionTokens, &spend, &status, &requestID)
-		if err != nil {
-			sl.logger.Error("Aggregation: failed to scan row", "error", err)
-			continue
+		if err := rows.Scan(&requestID); err != nil {
+			sl.logger.Error("[DB] Aggregation: failed to scan request_id", "error", err)
+			atomic.AddUint64(&sl.aggregationErrors, 1)
+			return
 		}
-
-		// Handle nullable fields
-		modelStr := ""
-		if model != nil {
-			modelStr = *model
-		}
-		customProviderStr := ""
-		if customLLMProvider != nil {
-			customProviderStr = *customLLMProvider
-		}
-		mcpToolStr := ""
-		if mcpNamespacedToolName != nil {
-			mcpToolStr = *mcpNamespacedToolName
-		}
-		apiBaseStr := ""
-		if apiBase != nil {
-			apiBaseStr = *apiBase
-		}
-		statusStr := ""
-		if status != nil {
-			statusStr = *status
-		}
-
-		key := aggregationKey{
-			userID:                userID,
-			date:                  date,
-			apiKey:                apiKey,
-			model:                 modelStr,
-			customLLMProvider:     customProviderStr,
-			mcpNamespacedToolName: mcpToolStr,
-			endpoint:              apiBaseStr,
-		}
-
-		if aggregations[key] == nil {
-			aggregations[key] = &aggregationValue{}
-		}
-
-		agg := aggregations[key]
-		agg.promptTokens += int64(promptTokens)
-		agg.completionTokens += int64(completionTokens)
-		agg.spend += spend
-		agg.apiRequests++
-
-		if statusStr == "success" {
-			agg.successfulRequests++
-		} else {
-			agg.failedRequests++
-		}
-
-		processedRequestIDs = append(processedRequestIDs, requestID)
+		requestIDs = append(requestIDs, requestID)
 	}
 
-	if rows.Err() != nil {
+	if err := rows.Err(); err != nil {
 		atomic.AddUint64(&sl.aggregationErrors, 1)
-		sl.logger.Error("Aggregation: failed to iterate rows", "error", rows.Err())
+		sl.logger.Error("[DB] Aggregation: failed to iterate request_ids", "error", err)
 		return
 	}
 
-	if len(aggregations) == 0 {
-		// No unprocessed logs
+	// No unprocessed logs
+	if len(requestIDs) == 0 {
 		return
 	}
 
-	// Insert aggregated data into DailyUserSpend
-	for key, value := range aggregations {
-		_, err := conn.Exec(ctx,
-			queries.QueryUpsertDailyUserSpend,
-			key.userID, key.date, key.apiKey, key.model,
-			key.customLLMProvider, key.mcpNamespacedToolName, key.endpoint,
-			value.promptTokens, value.completionTokens, value.spend,
-			value.apiRequests, value.successfulRequests, value.failedRequests,
-		)
-
-		if err != nil {
-			atomic.AddUint64(&sl.aggregationErrors, 1)
-			sl.logger.Error("Aggregation: failed to upsert daily spend", "error", err, "key", key)
-			return
-		}
-	}
-
-	// Mark processed logs
-	if len(processedRequestIDs) > 0 {
-		_, err := conn.Exec(ctx, queries.QueryMarkSpendLogsAsProcessed, processedRequestIDs)
-		if err != nil {
-			atomic.AddUint64(&sl.aggregationErrors, 1)
-			sl.logger.Error("Aggregation: failed to mark logs as processed", "error", err)
-			return
-		}
-	}
-
-	atomic.AddUint64(&sl.aggregationCount, 1)
-	sl.mu.Lock()
-	sl.lastAggregationTime = time.Now()
-	sl.mu.Unlock()
-	sl.logger.Debug("Aggregation completed",
-		"aggregations", len(aggregations),
-		"processed_logs", len(processedRequestIDs),
+	sl.logger.Debug("[DB] Aggregation: starting aggregators",
+		"request_ids_count", len(requestIDs),
 	)
+
+	// 2. Call all aggregators with the same snapshot of request_ids
+	hasErrors := false
+
+	if err := aggregateDailyUserSpendLogs(ctx, conn, sl.logger, requestIDs); err != nil {
+		hasErrors = true
+		atomic.AddUint64(&sl.aggregationErrors, 1)
+		sl.logger.Error("[DB] Aggregation failed", "aggregator", "User", "error", err)
+	}
+
+	if err := aggregateDailyTeamSpendLogs(ctx, conn, sl.logger, requestIDs); err != nil {
+		hasErrors = true
+		atomic.AddUint64(&sl.aggregationErrors, 1)
+		sl.logger.Error("[DB] Aggregation failed", "aggregator", "Team", "error", err)
+	}
+
+	if err := aggregateDailyOrganizationSpendLogs(ctx, conn, sl.logger, requestIDs); err != nil {
+		hasErrors = true
+		atomic.AddUint64(&sl.aggregationErrors, 1)
+		sl.logger.Error("[DB] Aggregation failed", "aggregator", "Organization", "error", err)
+	}
+
+	if err := aggregateDailyEndUserSpendLogs(ctx, conn, sl.logger, requestIDs); err != nil {
+		hasErrors = true
+		atomic.AddUint64(&sl.aggregationErrors, 1)
+		sl.logger.Error("[DB] Aggregation failed", "aggregator", "EndUser", "error", err)
+	}
+
+	if err := aggregateDailyAgentSpendLogs(ctx, conn, sl.logger, requestIDs); err != nil {
+		hasErrors = true
+		atomic.AddUint64(&sl.aggregationErrors, 1)
+		sl.logger.Error("[DB] Aggregation failed", "aggregator", "Agent", "error", err)
+	}
+
+	if err := aggregateDailyTagSpendLogs(ctx, conn, sl.logger, requestIDs); err != nil {
+		hasErrors = true
+		atomic.AddUint64(&sl.aggregationErrors, 1)
+		sl.logger.Error("[DB] Aggregation failed", "aggregator", "Tag", "error", err)
+	}
+
+	// 3. Mark all request_ids as processed (only if all aggregators succeeded)
+	if !hasErrors {
+		_, err := conn.Exec(ctx, queries.QueryMarkSpendLogsAsProcessed, requestIDs)
+		if err != nil {
+			atomic.AddUint64(&sl.aggregationErrors, 1)
+			sl.logger.Error("[DB] Aggregation: failed to mark request_ids as processed", "error", err)
+			return
+		}
+
+		atomic.AddUint64(&sl.aggregationCount, 1)
+		sl.mu.Lock()
+		sl.lastAggregationTime = time.Now()
+		sl.mu.Unlock()
+		sl.logger.Debug("[DB] All aggregations completed",
+			"request_ids_count", len(requestIDs),
+		)
+	} else {
+		sl.logger.Warn("[DB] Aggregation completed with errors, request_ids NOT marked as processed",
+			"request_ids_count", len(requestIDs),
+		)
+	}
 }

@@ -358,6 +358,11 @@ type SpendLogEntry struct {
 	TeamID         string // Team ID
 	OrganizationID string // Organization ID
 	EndUser        string // End user ID (from metadata)
+	AgentID        string // Agent ID (if called via agent)
+
+	// MCP & Tags
+	MCPNamespacedToolName string // MCP tool name with namespace
+	RequestTags           string // JSON array of request tags
 
 	// Status
 	Status string // "success" | "failure"
