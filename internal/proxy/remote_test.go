@@ -11,6 +11,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/httputil"
 	"github.com/mixaill76/auto_ai_router/internal/ratelimit"
+	"github.com/mixaill76/auto_ai_router/internal/testhelpers"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -21,7 +22,7 @@ func TestUpdateCredentialLimits_EmptyCredentials(t *testing.T) {
 
 	rateLimiter := ratelimit.New()
 	cred := &config.CredentialConfig{Name: "test_proxy"}
-	logger := createTestLogger()
+	logger := testhelpers.NewTestLogger()
 
 	// Should handle empty credentials gracefully
 	updateCredentialLimits(health, cred, rateLimiter, logger)
@@ -45,7 +46,7 @@ func TestUpdateCredentialLimits_SingleCredential(t *testing.T) {
 
 	rateLimiter := ratelimit.New()
 	cred := &config.CredentialConfig{Name: "test_proxy"}
-	logger := createTestLogger()
+	logger := testhelpers.NewTestLogger()
 
 	// Should not panic or error
 	updateCredentialLimits(health, cred, rateLimiter, logger)
@@ -66,7 +67,7 @@ func TestUpdateCredentialLimits_MultipleCredentials_MaxSelection(t *testing.T) {
 
 	rateLimiter := ratelimit.New()
 	cred := &config.CredentialConfig{Name: "test_proxy"}
-	logger := createTestLogger()
+	logger := testhelpers.NewTestLogger()
 
 	// Should aggregate credentials without error
 	updateCredentialLimits(health, cred, rateLimiter, logger)
@@ -84,7 +85,7 @@ func TestUpdateCredentialLimits_ZeroValues(t *testing.T) {
 
 	rateLimiter := ratelimit.New()
 	cred := &config.CredentialConfig{Name: "test_proxy"}
-	logger := createTestLogger()
+	logger := testhelpers.NewTestLogger()
 
 	updateCredentialLimits(health, cred, rateLimiter, logger)
 
@@ -102,7 +103,7 @@ func TestUpdateCredentialLimits_MixedValues(t *testing.T) {
 
 	rateLimiter := ratelimit.New()
 	cred := &config.CredentialConfig{Name: "test_proxy"}
-	logger := createTestLogger()
+	logger := testhelpers.NewTestLogger()
 
 	// Should handle mixed values without error
 	updateCredentialLimits(health, cred, rateLimiter, logger)
@@ -118,7 +119,7 @@ func TestUpdateModelLimits_EmptyModels(t *testing.T) {
 
 	rateLimiter := ratelimit.New()
 	cred := &config.CredentialConfig{Name: "test_proxy"}
-	logger := createTestLogger()
+	logger := testhelpers.NewTestLogger()
 
 	// Should handle empty models gracefully
 	updateModelLimits(health, cred, rateLimiter, logger, nil)
@@ -139,7 +140,7 @@ func TestUpdateModelLimits_SingleModel(t *testing.T) {
 
 	rateLimiter := ratelimit.New()
 	cred := &config.CredentialConfig{Name: "test_proxy"}
-	logger := createTestLogger()
+	logger := testhelpers.NewTestLogger()
 
 	// Should add model without error
 	updateModelLimits(health, cred, rateLimiter, logger, nil)
@@ -170,7 +171,7 @@ func TestUpdateModelLimits_MultipleModels_Aggregation(t *testing.T) {
 
 	rateLimiter := ratelimit.New()
 	cred := &config.CredentialConfig{Name: "test_proxy"}
-	logger := createTestLogger()
+	logger := testhelpers.NewTestLogger()
 
 	// Should aggregate multiple model instances
 	updateModelLimits(health, cred, rateLimiter, logger, nil)
@@ -194,7 +195,7 @@ func TestUpdateModelLimits_ZeroValues_ConvertedToUnlimited(t *testing.T) {
 
 	rateLimiter := ratelimit.New()
 	cred := &config.CredentialConfig{Name: "test_proxy"}
-	logger := createTestLogger()
+	logger := testhelpers.NewTestLogger()
 
 	updateModelLimits(health, cred, rateLimiter, logger, nil)
 
@@ -220,7 +221,7 @@ func TestUpdateModelLimits_NoCurrentUsage(t *testing.T) {
 
 	rateLimiter := ratelimit.New()
 	cred := &config.CredentialConfig{Name: "test_proxy"}
-	logger := createTestLogger()
+	logger := testhelpers.NewTestLogger()
 
 	updateModelLimits(health, cred, rateLimiter, logger, nil)
 
@@ -238,7 +239,7 @@ func TestUpdateStatsFromRemoteProxy_FetchError(t *testing.T) {
 	}
 
 	rateLimiter := ratelimit.New()
-	logger := createTestLogger()
+	logger := testhelpers.NewTestLogger()
 	ctx := context.Background()
 
 	// Should handle fetch error gracefully
@@ -269,7 +270,7 @@ func TestUpdateModelLimits_MixedZeroAndNonZeroRPM(t *testing.T) {
 
 	rateLimiter := ratelimit.New()
 	cred := &config.CredentialConfig{Name: "test_proxy"}
-	logger := createTestLogger()
+	logger := testhelpers.NewTestLogger()
 
 	// Should handle mixed zero and non-zero values
 	updateModelLimits(health, cred, rateLimiter, logger, nil)
@@ -293,7 +294,7 @@ func TestUpdateModelLimits_AllZeroInOne(t *testing.T) {
 
 	rateLimiter := ratelimit.New()
 	cred := &config.CredentialConfig{Name: "test_proxy"}
-	logger := createTestLogger()
+	logger := testhelpers.NewTestLogger()
 
 	updateModelLimits(health, cred, rateLimiter, logger, nil)
 
@@ -311,7 +312,7 @@ func TestUpdateCredentialLimits_NegativeLimitSelection(t *testing.T) {
 
 	rateLimiter := ratelimit.New()
 	cred := &config.CredentialConfig{Name: "test_proxy"}
-	logger := createTestLogger()
+	logger := testhelpers.NewTestLogger()
 
 	updateCredentialLimits(health, cred, rateLimiter, logger)
 
@@ -329,7 +330,7 @@ func TestUpdateCredentialLimits_LargeNumbers(t *testing.T) {
 
 	rateLimiter := ratelimit.New()
 	cred := &config.CredentialConfig{Name: "test_proxy"}
-	logger := createTestLogger()
+	logger := testhelpers.NewTestLogger()
 
 	// Should handle large numbers without overflow or error
 	updateCredentialLimits(health, cred, rateLimiter, logger)
@@ -407,7 +408,7 @@ func TestUpdateStatsFromRemoteProxy_Success(t *testing.T) {
 
 	// Create rate limiter
 	rateLimiter := ratelimit.New()
-	logger := createTestLogger()
+	logger := testhelpers.NewTestLogger()
 	ctx := context.Background()
 
 	// Call the function being tested

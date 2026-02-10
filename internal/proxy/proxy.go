@@ -20,6 +20,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/auth"
 	"github.com/mixaill76/auto_ai_router/internal/balancer"
 	"github.com/mixaill76/auto_ai_router/internal/config"
+	"github.com/mixaill76/auto_ai_router/internal/httputil"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb"
 	"github.com/mixaill76/auto_ai_router/internal/logger"
 	"github.com/mixaill76/auto_ai_router/internal/models"
@@ -29,6 +30,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/transform"
 	"github.com/mixaill76/auto_ai_router/internal/transform/anthropic"
 	"github.com/mixaill76/auto_ai_router/internal/transform/vertex"
+	"github.com/mixaill76/auto_ai_router/internal/utils"
 )
 
 // ResponseBodyMultiplier scales maxBodySizeMB for proxy response bodies.
@@ -152,6 +154,13 @@ func New(cfg *Config) *Proxy {
 		// Continue without template - will cause error on /vhealth requests
 	}
 
+	// Create HTTP client using centralized factory with request-specific timeout
+	httpClientCfg := httputil.DefaultHTTPClientConfig()
+	httpClientCfg.Timeout = cfg.RequestTimeout
+	httpClientCfg.MaxIdleConns = cfg.MaxIdleConns
+	httpClientCfg.MaxIdleConnsPerHost = cfg.MaxIdleConnsPerHost
+	httpClientCfg.IdleConnTimeout = cfg.IdleConnTimeout
+
 	return &Proxy{
 		balancer:       cfg.Balancer,
 		logger:         cfg.Logger,
@@ -166,19 +175,7 @@ func New(cfg *Config) *Proxy {
 		litellmDB:      cfg.LiteLLMDB,
 		healthChecker:  cfg.HealthChecker,
 		priceRegistry:  cfg.PriceRegistry,
-		client: &http.Client{
-			Timeout: cfg.RequestTimeout,
-			Transport: &http.Transport{
-				Proxy:               http.ProxyFromEnvironment, // Support HTTP_PROXY, HTTPS_PROXY, NO_PROXY
-				MaxIdleConns:        cfg.MaxIdleConns,
-				MaxIdleConnsPerHost: cfg.MaxIdleConnsPerHost,
-				IdleConnTimeout:     cfg.IdleConnTimeout,
-				DisableKeepAlives:   false,
-			},
-			CheckRedirect: func(req *http.Request, via []*http.Request) error {
-				return http.ErrUseLastResponse
-			},
-		},
+		client:         httputil.NewHTTPClient(httpClientCfg),
 	}
 }
 
@@ -289,7 +286,7 @@ func (p *Proxy) forwardToProxy(
 }
 
 func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
-	start := time.Now().UTC()
+	start := utils.NowUTC()
 	requestID := uuid.New().String()
 
 	// Create logging context that will be filled throughout request processing
@@ -1204,7 +1201,7 @@ func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
 	return p.litellmDB.LogSpend(&litellmdb.SpendLogEntry{
 		RequestID:         logCtx.RequestID,
 		StartTime:         logCtx.StartTime,
-		EndTime:           time.Now().UTC(),
+		EndTime:           utils.NowUTC(),
 		CallType:          logCtx.Request.URL.Path,
 		APIBase:           apiBase,
 		Model:             logCtx.ModelID,                 // Model name

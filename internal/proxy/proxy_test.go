@@ -18,11 +18,12 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/models"
 	"github.com/mixaill76/auto_ai_router/internal/monitoring"
 	"github.com/mixaill76/auto_ai_router/internal/ratelimit"
+	"github.com/mixaill76/auto_ai_router/internal/testhelpers"
 	"github.com/stretchr/testify/assert"
 )
 
 func TestNew(t *testing.T) {
-	logger := createTestLogger()
+	logger := testhelpers.NewTestLogger()
 	bal, rl := createTestBalancer("http://test.com")
 	metrics := createTestProxyMetrics()
 
@@ -38,7 +39,7 @@ func TestNew(t *testing.T) {
 }
 
 func TestProxyRequest_MissingAuthorization(t *testing.T) {
-	logger := createTestLogger()
+	logger := testhelpers.NewTestLogger()
 	bal, rl := createTestBalancer("http://test.com")
 	metrics := createTestProxyMetrics()
 	tm := createTestTokenManager(logger)
@@ -54,7 +55,7 @@ func TestProxyRequest_MissingAuthorization(t *testing.T) {
 }
 
 func TestProxyRequest_InvalidAuthorizationFormat(t *testing.T) {
-	logger := createTestLogger()
+	logger := testhelpers.NewTestLogger()
 	bal, rl := createTestBalancer("http://test.com")
 	metrics := createTestProxyMetrics()
 	tm := createTestTokenManager(logger)
@@ -71,7 +72,7 @@ func TestProxyRequest_InvalidAuthorizationFormat(t *testing.T) {
 }
 
 func TestProxyRequest_InvalidMasterKey(t *testing.T) {
-	logger := createTestLogger()
+	logger := testhelpers.NewTestLogger()
 	bal, rl := createTestBalancer("http://test.com")
 	metrics := createTestProxyMetrics()
 	tm := createTestTokenManager(logger)
@@ -99,7 +100,7 @@ func TestProxyRequest_ValidRequest(t *testing.T) {
 	}))
 	defer mockServer.Close()
 
-	logger := createTestLogger()
+	logger := testhelpers.NewTestLogger()
 	bal, rl := createTestBalancer(mockServer.URL)
 	metrics := createTestProxyMetrics()
 	tm := createTestTokenManager(logger)
@@ -125,7 +126,7 @@ func TestProxyRequest_WithModel(t *testing.T) {
 	}))
 	defer mockServer.Close()
 
-	logger := createTestLogger()
+	logger := testhelpers.NewTestLogger()
 	bal, rl := createTestBalancer(mockServer.URL)
 	metrics := createTestProxyMetrics()
 	tm := createTestTokenManager(logger)
@@ -213,7 +214,7 @@ func TestProxyRequest_UpstreamError(t *testing.T) {
 	}))
 	defer mockServer.Close()
 
-	logger := createTestLogger()
+	logger := testhelpers.NewTestLogger()
 	bal, rl := createTestBalancer(mockServer.URL)
 	metrics := createTestProxyMetrics()
 	tm := createTestTokenManager(logger)
@@ -244,7 +245,7 @@ func TestProxyRequest_Streaming(t *testing.T) {
 	}))
 	defer mockServer.Close()
 
-	logger := createTestLogger()
+	logger := testhelpers.NewTestLogger()
 	bal, rl := createTestBalancer(mockServer.URL)
 	metrics := createTestProxyMetrics()
 	tm := createTestTokenManager(logger)
@@ -611,7 +612,7 @@ func TestProxyRequest_HeadersForwarding(t *testing.T) {
 	}))
 	defer mockServer.Close()
 
-	logger := createTestLogger()
+	logger := testhelpers.NewTestLogger()
 	bal, rl := createTestBalancer(mockServer.URL)
 	metrics := createTestProxyMetrics()
 	tm := createTestTokenManager(logger)
@@ -638,7 +639,7 @@ func TestProxyRequest_QueryParameters(t *testing.T) {
 	}))
 	defer mockServer.Close()
 
-	logger := createTestLogger()
+	logger := testhelpers.NewTestLogger()
 	bal, rl := createTestBalancer(mockServer.URL)
 	metrics := createTestProxyMetrics()
 	tm := createTestTokenManager(logger)
@@ -659,7 +660,7 @@ func TestVisualHealthCheck(t *testing.T) {
 	}))
 	defer mockServer.Close()
 
-	logger := createTestLogger()
+	logger := testhelpers.NewTestLogger()
 	bal, rl := createTestBalancer(mockServer.URL)
 	metrics := createTestProxyMetrics()
 	tm := createTestTokenManager(logger)

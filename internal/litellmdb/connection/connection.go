@@ -13,6 +13,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb/models"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb/queries"
 	"github.com/mixaill76/auto_ai_router/internal/security"
+	"github.com/mixaill76/auto_ai_router/internal/utils"
 )
 
 // ConnectionPool manages PostgreSQL connections with auto-reconnect
@@ -230,7 +231,7 @@ func (cp *ConnectionPool) tryReconnect() {
 	defer cancel()
 
 	err := cp.pool.Ping(ctx)
-	cp.lastReconnect = time.Now().UTC()
+	cp.lastReconnect = utils.NowUTC()
 
 	if err != nil {
 		// Increase backoff (max 30s)

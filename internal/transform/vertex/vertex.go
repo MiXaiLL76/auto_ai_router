@@ -257,9 +257,9 @@ func VertexToOpenAI(vertexBody []byte, model string) ([]byte, error) {
 	}
 
 	openAIResp := openai.OpenAIResponse{
-		ID:      openai.GenerateID(),
+		ID:      common.GenerateID(),
 		Object:  "chat.completion",
-		Created: openai.GetCurrentTimestamp(),
+		Created: common.GetCurrentTimestamp(),
 		Model:   model,
 		Choices: make([]openai.OpenAIChoice, 0),
 	}
@@ -419,7 +419,7 @@ func convertGenaiToOpenAIFunctionCall(genaiCall *genai.FunctionCall) openai.Open
 	}
 
 	return openai.OpenAIToolCall{
-		ID:   openai.GenerateID(),
+		ID:   common.GenerateID(),
 		Type: "function",
 		Function: openai.OpenAIToolFunction{
 			Name:      genaiCall.Name,
@@ -736,13 +736,13 @@ func convertToolCallsToGenaiParts(toolCalls []interface{}) []*genai.Part {
 		}
 
 		// Extract function information
-		funcName := openai.GetString(toolCallMap, "name")
+		funcName := common.GetString(toolCallMap, "name")
 		if funcName == "" {
 			if funcObj, ok := toolCallMap["function"].(map[string]interface{}); ok {
-				funcName = openai.GetString(funcObj, "name")
+				funcName = common.GetString(funcObj, "name")
 				if funcName != "" {
 					// Parse arguments
-					argsStr := openai.GetString(funcObj, "arguments")
+					argsStr := common.GetString(funcObj, "arguments")
 					var args map[string]interface{}
 					if argsStr != "" {
 						if err := json.Unmarshal([]byte(argsStr), &args); err != nil {
@@ -786,8 +786,8 @@ func convertOpenAIToolsToVertex(openAITools []interface{}) []*genai.Tool {
 		// Extract function definition
 		if functionObj, ok := toolMap["function"].(map[string]interface{}); ok {
 			funcDecl := &genai.FunctionDeclaration{
-				Name:        openai.GetString(functionObj, "name"),
-				Description: openai.GetString(functionObj, "description"),
+				Name:        common.GetString(functionObj, "name"),
+				Description: common.GetString(functionObj, "description"),
 			}
 
 			// Convert parameters
@@ -841,8 +841,8 @@ func convertOpenAIParamsToGenaiSchema(params map[string]interface{}) *genai.Sche
 		for propName, propDef := range properties {
 			if propMap, ok := propDef.(map[string]interface{}); ok {
 				prop := &genai.Schema{
-					Type:        genai.Type(strings.ToUpper(openai.GetString(propMap, "type"))),
-					Description: openai.GetString(propMap, "description"),
+					Type:        genai.Type(strings.ToUpper(common.GetString(propMap, "type"))),
+					Description: common.GetString(propMap, "description"),
 				}
 
 				// Handle enum values
@@ -862,7 +862,7 @@ func convertOpenAIParamsToGenaiSchema(params map[string]interface{}) *genai.Sche
 				if items, ok := propMap["items"]; ok {
 					if itemsMap, ok := items.(map[string]interface{}); ok {
 						prop.Items = &genai.Schema{
-							Type: genai.Type(strings.ToUpper(openai.GetString(itemsMap, "type"))),
+							Type: genai.Type(strings.ToUpper(common.GetString(itemsMap, "type"))),
 						}
 					}
 				}

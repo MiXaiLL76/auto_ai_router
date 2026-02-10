@@ -9,14 +9,13 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
+
+	"github.com/mixaill76/auto_ai_router/internal/httputil"
 )
 
 const (
 	// MaxFileSizeBytes is the maximum size of a model prices file (100MB)
 	MaxFileSizeBytes = 100 * 1024 * 1024
-	// HTTPTimeout is the timeout for HTTP requests
-	HTTPTimeout = 10 * time.Second
 )
 
 // LoadModelPrices loads model prices from a link (file:// or http(s)://)
@@ -104,9 +103,7 @@ func loadFromHTTP(link string) ([]byte, error) {
 	}
 
 	// Create HTTP client with timeout
-	client := &http.Client{
-		Timeout: HTTPTimeout,
-	}
+	client := httputil.NewHTTPClient(nil)
 
 	resp, err := client.Get(link)
 	if err != nil {

@@ -5,6 +5,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/mixaill76/auto_ai_router/internal/utils"
 )
 
 type RPMLimiter struct {
@@ -103,7 +105,7 @@ func (r *RPMLimiter) AddModelWithTPM(credentialName, modelName string, rpm int, 
 // setCurrentUsage fills request and token arrays to simulate current usage
 // Must be called with limiter.mu locked
 func setCurrentUsage(limiter *limiter, currentRPM, currentTPM int) {
-	now := time.Now().UTC()
+	now := utils.NowUTC()
 	oneMinuteAgo := now.Add(-time.Minute)
 
 	// Fill requests array with dummy timestamps distributed over the minute
@@ -181,7 +183,7 @@ func checkRPMLimit(l *limiter, record bool) bool {
 		}
 		// Only skip if still at capacity after cleaning (extremely rare edge case)
 		if len(l.requests) < MaxRequestsBufferSize {
-			l.requests = append(l.requests, time.Now().UTC())
+			l.requests = append(l.requests, utils.NowUTC())
 		}
 	}
 
@@ -216,7 +218,7 @@ func (r *RPMLimiter) CanAllow(credentialName string) bool {
 // cleanOldRequests removes requests older than 1 minute and returns count of valid ones
 // Must be called with limiter.mu locked
 func cleanOldRequests(l *limiter) int {
-	now := time.Now().UTC()
+	now := utils.NowUTC()
 	oneMinuteAgo := now.Add(-time.Minute)
 
 	// Pre-allocate with original capacity to avoid excessive allocations
@@ -234,7 +236,7 @@ func cleanOldRequests(l *limiter) int {
 // cleanOldTokens removes tokens older than 1 minute and returns total count
 // Must be called with limiter.mu locked
 func cleanOldTokens(l *limiter) int {
-	now := time.Now().UTC()
+	now := utils.NowUTC()
 	oneMinuteAgo := now.Add(-time.Minute)
 
 	// Pre-allocate with original capacity to avoid excessive allocations
@@ -355,7 +357,7 @@ func (r *RPMLimiter) ConsumeTokens(credentialName string, tokenCount int) {
 	// Only skip if still at capacity after cleaning (extremely rare edge case)
 	if len(limiter.tokens) < MaxTokensBufferSize {
 		limiter.tokens = append(limiter.tokens, tokenUsage{
-			timestamp: time.Now().UTC(),
+			timestamp: utils.NowUTC(),
 			count:     tokenCount,
 		})
 	}
@@ -419,7 +421,7 @@ func (r *RPMLimiter) ConsumeModelTokens(credentialName, modelName string, tokenC
 	// Only skip if still at capacity after cleaning (extremely rare edge case)
 	if len(modelLimiter.tokens) < MaxTokensBufferSize {
 		modelLimiter.tokens = append(modelLimiter.tokens, tokenUsage{
-			timestamp: time.Now().UTC(),
+			timestamp: utils.NowUTC(),
 			count:     tokenCount,
 		})
 	}

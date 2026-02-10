@@ -6,11 +6,11 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"strings"
 	"sync"
 	"time"
 
 	"github.com/mixaill76/auto_ai_router/internal/security"
+	"github.com/mixaill76/auto_ai_router/internal/utils"
 )
 
 // errorLogFileCache holds a cached file handle for error logging
@@ -128,22 +128,12 @@ func logErrorResponse(errorsLogPath string, req *http.Request, rc *responseCaptu
 		reqBodyStr = string(requestBody)
 	}
 
-	// Create request headers map
+	// Create request headers map with sensitive data masked
+	maskedReqHeaders := security.MaskSensitiveHeaders(req.Header)
 	reqHeaders := make(map[string]string)
-	for key, values := range req.Header {
+	for key, values := range maskedReqHeaders {
 		if len(values) > 0 {
-			// Mask Authorization header for security
-			if key == "Authorization" {
-				authValue := values[0]
-				if strings.HasPrefix(authValue, "Bearer ") {
-					token := strings.TrimPrefix(authValue, "Bearer ")
-					reqHeaders[key] = "Bearer " + security.MaskToken(token)
-				} else {
-					reqHeaders[key] = security.MaskSecret(authValue, 4)
-				}
-			} else {
-				reqHeaders[key] = values[0]
-			}
+			reqHeaders[key] = values[0]
 		}
 	}
 
@@ -157,7 +147,7 @@ func logErrorResponse(errorsLogPath string, req *http.Request, rc *responseCaptu
 
 	// Create log entry
 	entry := ErrorLogEntry{
-		Timestamp: time.Now().UTC().Format(time.RFC3339),
+		Timestamp: utils.NowUTC().Format(time.RFC3339),
 		Path:      req.URL.Path,
 		Method:    req.Method,
 		Status:    rc.statusCode,

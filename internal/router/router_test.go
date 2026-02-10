@@ -18,6 +18,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/monitoring"
 	"github.com/mixaill76/auto_ai_router/internal/proxy"
 	"github.com/mixaill76/auto_ai_router/internal/ratelimit"
+	"github.com/mixaill76/auto_ai_router/internal/testhelpers"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -153,16 +154,11 @@ func createTestMonitoringConfig(healthPath string, logErrors bool, errorsLogPath
 	}
 }
 
-// createTestLogger creates a logger for testing
-func createTestLogger() *slog.Logger {
-	return slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-}
-
 func TestNew(t *testing.T) {
 	prx := createTestProxy()
 	modelManager := createTestModelManager()
 	monConfig := createTestMonitoringConfig("/health", false, "")
-	logger := createTestLogger()
+	logger := testhelpers.NewTestLogger()
 
 	r := New(nil, modelManager, monConfig, logger)
 
@@ -178,7 +174,7 @@ func TestNew(t *testing.T) {
 
 func TestServeHTTP_HealthCheck(t *testing.T) {
 	prx := createTestProxy()
-	router := New(prx, nil, createTestMonitoringConfig("/health", false, ""), createTestLogger())
+	router := New(prx, nil, createTestMonitoringConfig("/health", false, ""), testhelpers.NewTestLogger())
 
 	req := httptest.NewRequest("GET", "/health", nil)
 	w := httptest.NewRecorder()
@@ -199,7 +195,7 @@ func TestServeHTTP_HealthCheck_Unhealthy(t *testing.T) {
 		{Name: "test1", APIKey: "key1", BaseURL: "http://test1.com", RPM: 100},
 	}
 	prx := createProxyWithConfig(credentials, []string{"test1"})
-	router := New(prx, nil, createTestMonitoringConfig("/health", false, ""), createTestLogger())
+	router := New(prx, nil, createTestMonitoringConfig("/health", false, ""), testhelpers.NewTestLogger())
 
 	req := httptest.NewRequest("GET", "/health", nil)
 	w := httptest.NewRecorder()
@@ -219,7 +215,7 @@ func TestServeHTTP_V1Models_Enabled(t *testing.T) {
 	modelManager := createEnabledTestModelManager()
 
 	prx := createTestProxy()
-	router := New(prx, modelManager, createTestMonitoringConfig("/health", false, ""), createTestLogger())
+	router := New(prx, modelManager, createTestMonitoringConfig("/health", false, ""), testhelpers.NewTestLogger())
 
 	req := httptest.NewRequest("GET", "/v1/models", nil)
 	w := httptest.NewRecorder()
@@ -246,7 +242,7 @@ func TestServeHTTP_V1Models_Disabled(t *testing.T) {
 
 	prx := createProxyWithMockServer(mockServer.URL)
 	modelManager := createTestModelManager() // disabled (no static models)
-	router := New(prx, modelManager, createTestMonitoringConfig("/health", false, ""), createTestLogger())
+	router := New(prx, modelManager, createTestMonitoringConfig("/health", false, ""), testhelpers.NewTestLogger())
 
 	req := httptest.NewRequest("GET", "/v1/models", nil)
 	req.Header.Set("Authorization", "Bearer test-key")
@@ -267,7 +263,7 @@ func TestServeHTTP_V1Models_NilManager(t *testing.T) {
 	defer mockServer.Close()
 
 	prx := createProxyWithMockServer(mockServer.URL)
-	router := New(prx, nil, createTestMonitoringConfig("/health", false, ""), createTestLogger())
+	router := New(prx, nil, createTestMonitoringConfig("/health", false, ""), testhelpers.NewTestLogger())
 
 	req := httptest.NewRequest("GET", "/v1/models", nil)
 	req.Header.Set("Authorization", "Bearer test-key")
@@ -288,7 +284,7 @@ func TestServeHTTP_V1Models_PostMethod(t *testing.T) {
 
 	prx := createProxyWithMockServer(mockServer.URL)
 	modelManager := createEnabledTestModelManager()
-	router := New(prx, modelManager, createTestMonitoringConfig("/health", false, ""), createTestLogger())
+	router := New(prx, modelManager, createTestMonitoringConfig("/health", false, ""), testhelpers.NewTestLogger())
 
 	// POST /v1/models should be proxied even if model manager is enabled
 	// Include a model field in the body as required by proxy
@@ -313,7 +309,7 @@ func TestServeHTTP_ProxyRequest(t *testing.T) {
 	defer mockServer.Close()
 
 	prx := createProxyWithMockServer(mockServer.URL)
-	router := New(prx, nil, createTestMonitoringConfig("/health", false, ""), createTestLogger())
+	router := New(prx, nil, createTestMonitoringConfig("/health", false, ""), testhelpers.NewTestLogger())
 
 	tests := []struct {
 		name string
@@ -342,7 +338,7 @@ func TestServeHTTP_ProxyRequest(t *testing.T) {
 
 func TestServeHTTP_NotFound(t *testing.T) {
 	prx := createTestProxy()
-	router := New(prx, nil, createTestMonitoringConfig("/health", false, ""), createTestLogger())
+	router := New(prx, nil, createTestMonitoringConfig("/health", false, ""), testhelpers.NewTestLogger())
 
 	tests := []struct {
 		name string
@@ -396,7 +392,7 @@ func TestHandleHealth(t *testing.T) {
 				{Name: "test2", APIKey: "key2", BaseURL: "http://test2.com", RPM: 100},
 			}
 			prx := createProxyWithConfig(credentials, tt.bannedCreds)
-			router := New(prx, nil, createTestMonitoringConfig("/health", false, ""), createTestLogger())
+			router := New(prx, nil, createTestMonitoringConfig("/health", false, ""), testhelpers.NewTestLogger())
 
 			req := httptest.NewRequest("GET", "/health", nil)
 			w := httptest.NewRecorder()
@@ -423,7 +419,7 @@ func TestHandleModels(t *testing.T) {
 	modelManager := createEnabledTestModelManager()
 	prx := createTestProxy()
 
-	router := New(prx, modelManager, createTestMonitoringConfig("/health", false, ""), createTestLogger())
+	router := New(prx, modelManager, createTestMonitoringConfig("/health", false, ""), testhelpers.NewTestLogger())
 
 	req := httptest.NewRequest("GET", "/v1/models", nil)
 	w := httptest.NewRecorder()
@@ -442,7 +438,7 @@ func TestHandleModels(t *testing.T) {
 
 func TestHandleVisualHealth(t *testing.T) {
 	prx := createTestProxy()
-	router := New(prx, nil, createTestMonitoringConfig("/health", false, ""), createTestLogger())
+	router := New(prx, nil, createTestMonitoringConfig("/health", false, ""), testhelpers.NewTestLogger())
 
 	req := httptest.NewRequest("GET", "/vhealth", nil)
 	w := httptest.NewRecorder()
@@ -458,7 +454,7 @@ func TestHandleVisualHealth(t *testing.T) {
 
 func TestServeHTTP_VisualHealth(t *testing.T) {
 	prx := createTestProxy()
-	router := New(prx, nil, createTestMonitoringConfig("/health", false, ""), createTestLogger())
+	router := New(prx, nil, createTestMonitoringConfig("/health", false, ""), testhelpers.NewTestLogger())
 
 	req := httptest.NewRequest("GET", "/vhealth", nil)
 	w := httptest.NewRecorder()

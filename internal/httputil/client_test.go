@@ -4,21 +4,16 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
+	"github.com/mixaill76/auto_ai_router/internal/testhelpers"
 	"github.com/stretchr/testify/assert"
 )
-
-func createTestLogger() *slog.Logger {
-	return slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-}
 
 func TestFetchFromProxy_Success(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -36,7 +31,7 @@ func TestFetchFromProxy_Success(t *testing.T) {
 		APIKey:  "test-api-key",
 	}
 
-	logger := createTestLogger()
+	logger := testhelpers.NewTestLogger()
 	ctx := context.Background()
 
 	body, err := FetchFromProxy(ctx, cred, "/api/models", logger)
@@ -59,7 +54,7 @@ func TestFetchFromProxy_NoAPIKey(t *testing.T) {
 		APIKey:  "",
 	}
 
-	logger := createTestLogger()
+	logger := testhelpers.NewTestLogger()
 	ctx := context.Background()
 
 	body, err := FetchFromProxy(ctx, cred, "/health", logger)
@@ -82,7 +77,7 @@ func TestFetchFromProxy_BaseURLTrailingSlash(t *testing.T) {
 		APIKey:  "key",
 	}
 
-	logger := createTestLogger()
+	logger := testhelpers.NewTestLogger()
 	ctx := context.Background()
 
 	body, err := FetchFromProxy(ctx, cred, "/api/test", logger)
@@ -138,7 +133,7 @@ func TestFetchFromProxy_NonOKStatus(t *testing.T) {
 				APIKey:  "key",
 			}
 
-			logger := createTestLogger()
+			logger := testhelpers.NewTestLogger()
 			ctx := context.Background()
 
 			body, err := FetchFromProxy(ctx, cred, "/api/test", logger)
@@ -164,7 +159,7 @@ func TestFetchFromProxy_LongResponseBody(t *testing.T) {
 		APIKey:  "key",
 	}
 
-	logger := createTestLogger()
+	logger := testhelpers.NewTestLogger()
 	ctx := context.Background()
 
 	body, err := FetchFromProxy(ctx, cred, "/api/test", logger)
@@ -187,7 +182,7 @@ func TestFetchFromProxy_Timeout(t *testing.T) {
 		APIKey:  "key",
 	}
 
-	logger := createTestLogger()
+	logger := testhelpers.NewTestLogger()
 	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Millisecond)
 	defer cancel()
 
@@ -216,7 +211,7 @@ func TestFetchFromProxy_ContextAlreadyHasDeadline(t *testing.T) {
 		APIKey:  "key",
 	}
 
-	logger := createTestLogger()
+	logger := testhelpers.NewTestLogger()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -233,7 +228,7 @@ func TestFetchFromProxy_InvalidURL(t *testing.T) {
 		APIKey:  "key",
 	}
 
-	logger := createTestLogger()
+	logger := testhelpers.NewTestLogger()
 	ctx := context.Background()
 
 	body, err := FetchFromProxy(ctx, cred, "/api/test", logger)
@@ -265,7 +260,7 @@ func TestFetchJSONFromProxy_Success(t *testing.T) {
 		APIKey:  "key",
 	}
 
-	logger := createTestLogger()
+	logger := testhelpers.NewTestLogger()
 	ctx := context.Background()
 
 	var result TestResponse
@@ -289,7 +284,7 @@ func TestFetchJSONFromProxy_InvalidJSON(t *testing.T) {
 		APIKey:  "key",
 	}
 
-	logger := createTestLogger()
+	logger := testhelpers.NewTestLogger()
 	ctx := context.Background()
 
 	var result map[string]interface{}
@@ -312,7 +307,7 @@ func TestFetchJSONFromProxy_FetchError(t *testing.T) {
 		APIKey:  "key",
 	}
 
-	logger := createTestLogger()
+	logger := testhelpers.NewTestLogger()
 	ctx := context.Background()
 
 	var result map[string]interface{}
@@ -351,7 +346,7 @@ func TestFetchJSONFromProxy_ComplexJSON(t *testing.T) {
 		APIKey:  "key",
 	}
 
-	logger := createTestLogger()
+	logger := testhelpers.NewTestLogger()
 	ctx := context.Background()
 
 	var result ComplexResponse
@@ -399,7 +394,7 @@ func TestFetchFromProxy_ResponseBodyClose(t *testing.T) {
 		APIKey:  "key",
 	}
 
-	logger := createTestLogger()
+	logger := testhelpers.NewTestLogger()
 	ctx := context.Background()
 
 	body, err := FetchFromProxy(ctx, cred, "/api/test", logger)
@@ -422,7 +417,7 @@ func TestFetchFromProxy_LargeResponse(t *testing.T) {
 		APIKey:  "key",
 	}
 
-	logger := createTestLogger()
+	logger := testhelpers.NewTestLogger()
 	ctx := context.Background()
 
 	body, err := FetchFromProxy(ctx, cred, "/api/test", logger)

@@ -3,6 +3,8 @@ package proxyhealth
 import (
 	"sync"
 	"time"
+
+	"github.com/mixaill76/auto_ai_router/internal/utils"
 )
 
 // Tracker monitors the health status of proxy credentials.
@@ -36,7 +38,7 @@ func (t *Tracker) RecordSuccess(proxyName string) {
 
 	// Record status change time if transitioning from unhealthy to healthy
 	if !wasHealthy {
-		t.lastStatusChangeTime[proxyName] = time.Now().UTC()
+		t.lastStatusChangeTime[proxyName] = utils.NowUTC()
 	}
 }
 
@@ -56,7 +58,7 @@ func (t *Tracker) RecordFailure(proxyName string, _ error) {
 
 		// Record status change time if transitioning from healthy to unhealthy
 		if wasHealthy {
-			t.lastStatusChangeTime[proxyName] = time.Now().UTC()
+			t.lastStatusChangeTime[proxyName] = utils.NowUTC()
 		}
 	}
 }

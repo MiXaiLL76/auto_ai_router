@@ -12,6 +12,8 @@ import (
 
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
+
+	"github.com/mixaill76/auto_ai_router/internal/utils"
 )
 
 // tokenRefreshRequest represents a request to refresh a token
@@ -96,7 +98,7 @@ func (tm *VertexTokenManager) GetToken(credentialName, credentialsFile, credenti
 	// Fast path: check if we have a valid cached token (read-only)
 	tm.mu.RLock()
 	if cached, exists := tm.tokens[credentialName]; exists {
-		if time.Now().UTC().Before(cached.expiresAt.Add(-tm.tokenRefresh)) {
+		if utils.NowUTC().Before(cached.expiresAt.Add(-tm.tokenRefresh)) {
 			token := cached.token.AccessToken
 			tm.mu.RUnlock()
 			return token, nil
@@ -113,7 +115,7 @@ func (tm *VertexTokenManager) GetToken(credentialName, credentialsFile, credenti
 	// Double-check cache to prevent race condition: cache may have been updated
 	// after our first check and before acquiring this lock
 	if cached, exists := tm.tokens[credentialName]; exists {
-		if time.Now().UTC().Before(cached.expiresAt.Add(-tm.tokenRefresh)) {
+		if utils.NowUTC().Before(cached.expiresAt.Add(-tm.tokenRefresh)) {
 			token := cached.token.AccessToken
 			tm.mu.RUnlock()
 			return token, nil

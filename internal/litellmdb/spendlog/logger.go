@@ -11,6 +11,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb/connection"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb/models"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb/queries"
+	"github.com/mixaill76/auto_ai_router/internal/utils"
 )
 
 // deadLetterBatch represents a batch that failed to insert after all retries
@@ -428,7 +429,7 @@ func (sl *Logger) addToDLQ(batch []*models.SpendLogEntry, lastErr error, attempt
 
 	dlb := &deadLetterBatch{
 		batch:     batch,
-		failedAt:  time.Now(),
+		failedAt:  utils.NowUTC(),
 		lastError: lastErr,
 		attempts:  attempts,
 	}
@@ -548,7 +549,7 @@ func (sl *Logger) flushDLQ() {
 
 	// Update recovery time
 	sl.mu.Lock()
-	sl.lastDLQRecoveryTime = time.Now()
+	sl.lastDLQRecoveryTime = utils.NowUTC()
 	sl.mu.Unlock()
 
 	if recovered > 0 || failed > 0 {
@@ -719,7 +720,7 @@ func (sl *Logger) aggregateSpendLogs() {
 
 		atomic.AddUint64(&sl.aggregationCount, 1)
 		sl.mu.Lock()
-		sl.lastAggregationTime = time.Now()
+		sl.lastAggregationTime = utils.NowUTC()
 		sl.mu.Unlock()
 		sl.logger.Debug("[DB] All aggregations completed",
 			"request_ids_count", len(requestIDs),

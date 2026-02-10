@@ -12,13 +12,78 @@ import (
 	"time"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
+	"github.com/mixaill76/auto_ai_router/internal/utils"
 )
 
 const (
-	defaultTimeout        = 5 * time.Second
-	maxResponseSizeBytes  = 10 * 1024 * 1024 // 10MB limit for proxy responses
-	minProxyFetchInterval = 100 * time.Millisecond
+	defaultTimeout             = 5 * time.Second
+	maxResponseSizeBytes       = 10 * 1024 * 1024 // 10MB limit for proxy responses
+	minProxyFetchInterval      = 100 * time.Millisecond
+	defaultMaxIdleConns        = 100
+	defaultMaxIdleConnsPerHost = 10
+	defaultIdleConnTimeout     = 90 * time.Second
 )
+
+// HTTPClientConfig holds configuration for HTTP client creation
+type HTTPClientConfig struct {
+	Timeout             time.Duration
+	MaxIdleConns        int
+	MaxIdleConnsPerHost int
+	IdleConnTimeout     time.Duration
+}
+
+// DefaultHTTPClientConfig returns HTTP client configuration with sensible defaults
+// Used for consistent HTTP client configuration across the application
+func DefaultHTTPClientConfig() *HTTPClientConfig {
+	return &HTTPClientConfig{
+		Timeout:             defaultTimeout,
+		MaxIdleConns:        defaultMaxIdleConns,
+		MaxIdleConnsPerHost: defaultMaxIdleConnsPerHost,
+		IdleConnTimeout:     defaultIdleConnTimeout,
+	}
+}
+
+// NewHTTPClient creates a new HTTP client with the given configuration
+// This centralized factory ensures consistent HTTP client behavior throughout the application
+func NewHTTPClient(cfg *HTTPClientConfig) *http.Client {
+	if cfg == nil {
+		cfg = DefaultHTTPClientConfig()
+	}
+
+	timeout := cfg.Timeout
+	if timeout == 0 {
+		timeout = defaultTimeout
+	}
+
+	maxIdleConns := cfg.MaxIdleConns
+	if maxIdleConns == 0 {
+		maxIdleConns = defaultMaxIdleConns
+	}
+
+	maxIdleConnsPerHost := cfg.MaxIdleConnsPerHost
+	if maxIdleConnsPerHost == 0 {
+		maxIdleConnsPerHost = defaultMaxIdleConnsPerHost
+	}
+
+	idleConnTimeout := cfg.IdleConnTimeout
+	if idleConnTimeout == 0 {
+		idleConnTimeout = defaultIdleConnTimeout
+	}
+
+	return &http.Client{
+		Timeout: timeout,
+		Transport: &http.Transport{
+			Proxy:               http.ProxyFromEnvironment, // Support HTTP_PROXY, HTTPS_PROXY, NO_PROXY
+			MaxIdleConns:        maxIdleConns,
+			MaxIdleConnsPerHost: maxIdleConnsPerHost,
+			IdleConnTimeout:     idleConnTimeout,
+			DisableKeepAlives:   false,
+		},
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+}
 
 type proxyFetchLimiter struct {
 	mu   sync.Mutex
@@ -37,7 +102,7 @@ func (l *proxyFetchLimiter) wait(ctx context.Context, key string, minInterval ti
 	}
 
 	l.mu.Lock()
-	now := time.Now().UTC()
+	now := utils.NowUTC()
 	last := l.last[key]
 	waitFor := minInterval - now.Sub(last)
 	if waitFor <= 0 {
@@ -59,6 +124,15 @@ func (l *proxyFetchLimiter) wait(ctx context.Context, key string, minInterval ti
 }
 
 var proxyFetchRateLimiter = newProxyFetchLimiter()
+
+// proxyHTTPClient is the shared HTTP client for proxy fetch operations
+// Uses the centralized configuration for consistent behavior
+var proxyHTTPClient = NewHTTPClient(&HTTPClientConfig{
+	Timeout:             defaultTimeout,
+	MaxIdleConns:        defaultMaxIdleConns,
+	MaxIdleConnsPerHost: defaultMaxIdleConnsPerHost,
+	IdleConnTimeout:     defaultIdleConnTimeout,
+})
 
 // FetchFromProxy makes an HTTP GET request to a proxy credential
 // and returns the response body. Handles timeouts, auth headers, and error logging.
@@ -105,8 +179,8 @@ func FetchFromProxy(
 		req.Header.Set("Authorization", "Bearer "+cred.APIKey)
 	}
 
-	// Send request
-	resp, err := http.DefaultClient.Do(req)
+	// Send request using centralized HTTP client
+	resp, err := proxyHTTPClient.Do(req)
 	if err != nil {
 		logger.Error("Failed to fetch from proxy",
 			"credential", cred.Name,

@@ -4,6 +4,8 @@ import (
 	"errors"
 	"log/slog"
 	"time"
+
+	"github.com/mixaill76/auto_ai_router/internal/utils"
 )
 
 // ==================== Errors ====================
@@ -202,7 +204,7 @@ func (t *TokenInfo) IsExpired() bool {
 	if t.Expires == nil {
 		return false
 	}
-	return time.Now().UTC().After(*t.Expires)
+	return utils.NowUTC().After(*t.Expires)
 }
 
 // IsBudgetExceeded checks if token budget is exceeded (embedded, use >)

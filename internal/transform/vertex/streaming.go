@@ -7,6 +7,7 @@ import (
 	"io"
 	"strings"
 
+	"github.com/mixaill76/auto_ai_router/internal/transform/common"
 	"github.com/mixaill76/auto_ai_router/internal/transform/openai"
 	"google.golang.org/genai"
 )
@@ -20,8 +21,8 @@ type VertexStreamingChunk struct {
 // TransformVertexStreamToOpenAI converts Vertex AI SSE stream to OpenAI SSE format
 func TransformVertexStreamToOpenAI(vertexStream io.Reader, model string, output io.Writer) error {
 	scanner := bufio.NewScanner(vertexStream)
-	chatID := openai.GenerateID()
-	timestamp := openai.GetCurrentTimestamp()
+	chatID := common.GenerateID()
+	timestamp := common.GetCurrentTimestamp()
 	isFirstChunk := true
 
 	for scanner.Scan() {
@@ -142,7 +143,7 @@ func convertVertexFunctionCallToStreamingOpenAI(genaiCall *genai.FunctionCall, i
 
 	return openai.OpenAIStreamingToolCall{
 		Index: index,
-		ID:    openai.GenerateID(),
+		ID:    common.GenerateID(),
 		Type:  "function",
 		Function: &openai.OpenAIStreamingToolFunction{
 			Name:      genaiCall.Name,

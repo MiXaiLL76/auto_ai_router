@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb"
+	"github.com/mixaill76/auto_ai_router/internal/utils"
 )
 
 // MonitorConfig contains configuration for the database health monitor.
@@ -67,7 +68,7 @@ func NewMonitor(
 		config:        cfg,
 		healthChecker: healthChecker,
 		dbManager:     dbManager,
-		lastCheckTime: time.Now().UTC(),
+		lastCheckTime: utils.NowUTC(),
 	}
 }
 
@@ -97,7 +98,7 @@ func (m *Monitor) Start(ctx context.Context) {
 
 // checkHealth performs a single health check and updates the health checker.
 func (m *Monitor) checkHealth() {
-	now := time.Now().UTC()
+	now := utils.NowUTC()
 	isHealthy := m.dbManager.IsHealthy()
 
 	// Load current cached state (thread-safe)

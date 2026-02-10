@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
+	"github.com/mixaill76/auto_ai_router/internal/testhelpers"
 	"github.com/mixaill76/auto_ai_router/internal/transform"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -49,7 +50,7 @@ func TestHandleStreamingWithTokens(t *testing.T) {
 	defer upstreamServer.Close()
 
 	// Создаем infrastructure
-	logger := createTestLogger()
+	logger := testhelpers.NewTestLogger()
 	bal, rl := createTestBalancer(upstreamServer.URL)
 	metrics := createTestProxyMetrics()
 	tm := createTestTokenManager(logger)
@@ -139,7 +140,7 @@ func TestHandleStreamingWithTokens_NoTokens(t *testing.T) {
 	}))
 	defer upstreamServer.Close()
 
-	logger := createTestLogger()
+	logger := testhelpers.NewTestLogger()
 	bal, rl := createTestBalancer(upstreamServer.URL)
 	metrics := createTestProxyMetrics()
 	tm := createTestTokenManager(logger)
@@ -206,7 +207,7 @@ func TestHandleStreamingWithTokens_MultipleChunks(t *testing.T) {
 	}))
 	defer upstreamServer.Close()
 
-	logger := createTestLogger()
+	logger := testhelpers.NewTestLogger()
 	bal, rl := createTestBalancer(upstreamServer.URL)
 	metrics := createTestProxyMetrics()
 	tm := createTestTokenManager(logger)
@@ -265,7 +266,7 @@ func TestHandleStreamingWithTokens_WithoutModelID(t *testing.T) {
 	}))
 	defer upstreamServer.Close()
 
-	logger := createTestLogger()
+	logger := testhelpers.NewTestLogger()
 	bal, rl := createTestBalancer(upstreamServer.URL)
 	metrics := createTestProxyMetrics()
 	tm := createTestTokenManager(logger)
@@ -323,7 +324,7 @@ func TestHandleStreamingWithTokens_LoggingToLiteLLMDB(t *testing.T) {
 	}))
 	defer upstreamServer.Close()
 
-	logger := createTestLogger()
+	logger := testhelpers.NewTestLogger()
 	bal, rl := createTestBalancer(upstreamServer.URL)
 	metrics := createTestProxyMetrics()
 	tm := createTestTokenManager(logger)
@@ -639,7 +640,7 @@ func TestHandleStreamingWithTokens_HybridApproach(t *testing.T) {
 	}))
 	defer upstreamServer.Close()
 
-	logger := createTestLogger()
+	logger := testhelpers.NewTestLogger()
 	bal, rl := createTestBalancer(upstreamServer.URL)
 	metrics := createTestProxyMetrics()
 	tm := createTestTokenManager(logger)

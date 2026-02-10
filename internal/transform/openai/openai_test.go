@@ -5,11 +5,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mixaill76/auto_ai_router/internal/transform/common"
 	"github.com/stretchr/testify/assert"
 )
 
 func TestGenerateID(t *testing.T) {
-	id := GenerateID()
+	id := common.GenerateID()
 
 	assert.NotEmpty(t, id)
 	assert.True(t, strings.HasPrefix(id, "chatcmpl-"))
@@ -17,9 +18,9 @@ func TestGenerateID(t *testing.T) {
 }
 
 func TestGenerateID_Uniqueness(t *testing.T) {
-	id1 := GenerateID()
-	id2 := GenerateID()
-	id3 := GenerateID()
+	id1 := common.GenerateID()
+	id2 := common.GenerateID()
+	id3 := common.GenerateID()
 
 	assert.NotEqual(t, id1, id2)
 	assert.NotEqual(t, id2, id3)
@@ -28,7 +29,7 @@ func TestGenerateID_Uniqueness(t *testing.T) {
 
 func TestGetCurrentTimestamp(t *testing.T) {
 	before := time.Now().UTC().Unix()
-	timestamp := GetCurrentTimestamp()
+	timestamp := common.GetCurrentTimestamp()
 	after := time.Now().UTC().Unix()
 
 	assert.GreaterOrEqual(t, timestamp, before)
@@ -36,7 +37,7 @@ func TestGetCurrentTimestamp(t *testing.T) {
 }
 
 func TestGetCurrentTimestamp_IsReasonable(t *testing.T) {
-	timestamp := GetCurrentTimestamp()
+	timestamp := common.GetCurrentTimestamp()
 
 	// Timestamp should be after 2020-01-01
 	afterYear2020 := int64(1577836800)
@@ -53,7 +54,7 @@ func TestGetString_ExistingKey(t *testing.T) {
 		"value": "data",
 	}
 
-	result := GetString(m, "name")
+	result := common.GetString(m, "name")
 	assert.Equal(t, "test", result)
 }
 
@@ -62,7 +63,7 @@ func TestGetString_NonExistentKey(t *testing.T) {
 		"name": "test",
 	}
 
-	result := GetString(m, "missing")
+	result := common.GetString(m, "missing")
 	assert.Equal(t, "", result)
 }
 
@@ -73,15 +74,15 @@ func TestGetString_WrongType(t *testing.T) {
 		"slice":  []string{"a", "b"},
 	}
 
-	assert.Equal(t, "", GetString(m, "number"))
-	assert.Equal(t, "", GetString(m, "bool"))
-	assert.Equal(t, "", GetString(m, "slice"))
+	assert.Equal(t, "", common.GetString(m, "number"))
+	assert.Equal(t, "", common.GetString(m, "bool"))
+	assert.Equal(t, "", common.GetString(m, "slice"))
 }
 
 func TestGetString_EmptyMap(t *testing.T) {
 	m := map[string]interface{}{}
 
-	result := GetString(m, "key")
+	result := common.GetString(m, "key")
 	assert.Equal(t, "", result)
 }
 
@@ -89,7 +90,7 @@ func TestGetString_NilMap(t *testing.T) {
 	var m map[string]interface{}
 
 	// Should not panic
-	result := GetString(m, "key")
+	result := common.GetString(m, "key")
 	assert.Equal(t, "", result)
 }
 
@@ -98,7 +99,7 @@ func TestGetString_EmptyStringValue(t *testing.T) {
 		"empty": "",
 	}
 
-	result := GetString(m, "empty")
+	result := common.GetString(m, "empty")
 	assert.Equal(t, "", result)
 }
 
@@ -110,13 +111,13 @@ func TestGetString_NestedStructure(t *testing.T) {
 	}
 
 	// Should return empty string since value is not a string
-	result := GetString(m, "nested")
+	result := common.GetString(m, "nested")
 	assert.Equal(t, "", result)
 }
 
 func TestGenerateID_Format(t *testing.T) {
 	for i := 0; i < 10; i++ {
-		id := GenerateID()
+		id := common.GenerateID()
 
 		// Check prefix
 		assert.True(t, strings.HasPrefix(id, "chatcmpl-"))
@@ -138,9 +139,9 @@ func TestGetString_MultipleStringValues(t *testing.T) {
 		"third":  "value3",
 	}
 
-	assert.Equal(t, "value1", GetString(m, "first"))
-	assert.Equal(t, "value2", GetString(m, "second"))
-	assert.Equal(t, "value3", GetString(m, "third"))
+	assert.Equal(t, "value1", common.GetString(m, "first"))
+	assert.Equal(t, "value2", common.GetString(m, "second"))
+	assert.Equal(t, "value3", common.GetString(m, "third"))
 }
 
 func TestGetString_LongString(t *testing.T) {
@@ -149,6 +150,6 @@ func TestGetString_LongString(t *testing.T) {
 		"long": longString,
 	}
 
-	result := GetString(m, "long")
+	result := common.GetString(m, "long")
 	assert.Equal(t, longString, result)
 }

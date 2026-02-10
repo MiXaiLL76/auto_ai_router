@@ -1,10 +1,6 @@
 package openai
 
 import (
-	"crypto/rand"
-	"encoding/hex"
-	"time"
-
 	"github.com/mixaill76/auto_ai_router/internal/transform"
 )
 
@@ -171,27 +167,7 @@ type OpenAIStreamingToolFunction struct {
 	Arguments string `json:"arguments,omitempty"`
 }
 
-// Helper functions
-
-// GenerateID generates a unique chat completion ID
-func GenerateID() string {
-	bytes := make([]byte, 16)
-	_, _ = rand.Read(bytes)
-	return "chatcmpl-" + hex.EncodeToString(bytes)[:20]
-}
-
-// GetCurrentTimestamp returns the current Unix timestamp
-func GetCurrentTimestamp() int64 {
-	return time.Now().UTC().Unix()
-}
-
-// GetString safely retrieves a string value from a map
-func GetString(m map[string]interface{}, key string) string {
-	if val, ok := m[key].(string); ok {
-		return val
-	}
-	return ""
-}
+// Helper functions (imported from common package for consistency)
 
 // ToTokenUsage converts OpenAI usage to universal TokenUsage format
 func (u *OpenAIUsage) ToTokenUsage() *transform.TokenUsage {

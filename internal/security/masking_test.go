@@ -1,6 +1,7 @@
 package security
 
 import (
+	"net/http"
 	"testing"
 )
 
@@ -132,6 +133,104 @@ func TestMaskDatabaseURL(t *testing.T) {
 			got := MaskDatabaseURL(tt.url)
 			if got != tt.want {
 				t.Errorf("MaskDatabaseURL(%q) = %q, want %q", tt.url, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestMaskSensitiveHeaders(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   http.Header
+		checks  map[string]string // header -> expected masked value
+		verifyV bool              // verify that value starts with expected prefix
+	}{
+		{
+			name: "bearer_token",
+			input: http.Header{
+				"Authorization": {"Bearer sk_test_abc123def456"},
+			},
+			checks: map[string]string{
+				"Authorization": "Bearer sk_t...",
+			},
+		},
+		{
+			name: "api_key_header",
+			input: http.Header{
+				"X-API-Key": {"sk_test_abc123def456"},
+			},
+			checks: map[string]string{
+				"X-API-Key": "sk_t...",
+			},
+		},
+		{
+			name: "non_bearer_auth",
+			input: http.Header{
+				"Authorization": {"Basic dXNlcjpwYXNz"},
+			},
+			checks: map[string]string{
+				"Authorization": "Basi...",
+			},
+		},
+		{
+			name: "cookie_header",
+			input: http.Header{
+				"Cookie": {"session=abc123; user=john"},
+			},
+			checks: map[string]string{
+				"Cookie": "***cookie***",
+			},
+		},
+		{
+			name: "mixed_headers",
+			input: http.Header{
+				"Authorization": {"Bearer token123456789"},
+				"Content-Type":  {"application/json"},
+				"X-API-Key":     {"key123456789"},
+				"User-Agent":    {"test-client"},
+			},
+			checks: map[string]string{
+				"Authorization": "Bearer toke...",
+				"Content-Type":  "application/json", // Not masked
+				"X-API-Key":     "key1...",
+				"User-Agent":    "test-client", // Not masked
+			},
+		},
+		{
+			name:   "empty_headers",
+			input:  http.Header{},
+			checks: map[string]string{},
+		},
+		{
+			name: "proxy_authorization",
+			input: http.Header{
+				"Proxy-Authorization": {"Basic cHJveHl1c2VyOnByb3h5cGFzcw=="},
+			},
+			checks: map[string]string{
+				"Proxy-Authorization": "Basi...",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := MaskSensitiveHeaders(tt.input)
+
+			// Check all expected headers
+			for header, expectedValue := range tt.checks {
+				actual := got.Get(header)
+				if actual != expectedValue {
+					t.Errorf("MaskSensitiveHeaders: %s = %q, want %q", header, actual, expectedValue)
+				}
+			}
+
+			// Check that no unexpected headers are present
+			for header := range got {
+				if _, ok := tt.checks[header]; !ok {
+					if tt.input.Get(header) != "" {
+						t.Errorf("MaskSensitiveHeaders: unexpected header %s = %q", header, got.Get(header))
+					}
+				}
 			}
 		})
 	}

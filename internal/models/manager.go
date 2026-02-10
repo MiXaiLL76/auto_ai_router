@@ -8,7 +8,8 @@ import (
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/httputil"
-	"github.com/mixaill76/auto_ai_router/internal/transform/openai"
+	"github.com/mixaill76/auto_ai_router/internal/transform/common"
+	"github.com/mixaill76/auto_ai_router/internal/utils"
 )
 
 // ModelPrice contains pricing information for a single model
@@ -66,7 +67,7 @@ func (r *ModelPriceRegistry) Update(prices map[string]*ModelPrice) {
 	for k, v := range prices {
 		r.prices[k] = v
 	}
-	r.lastUpdate = time.Now().UTC()
+	r.lastUpdate = utils.NowUTC()
 }
 
 // LastUpdate returns the time of last successful update
@@ -285,7 +286,7 @@ func (m *Manager) LoadModelsFromConfig(credentials []config.CredentialConfig) {
 func (m *Manager) GetAllModels() ModelsResponse {
 	// Check cache first (fast path without holding full lock)
 	m.mu.RLock()
-	if !m.allModelsCache.expiresAt.IsZero() && time.Now().UTC().Before(m.allModelsCache.expiresAt) {
+	if !m.allModelsCache.expiresAt.IsZero() && utils.NowUTC().Before(m.allModelsCache.expiresAt) {
 		// Copy response while holding lock to prevent TOCTOU
 		cachedResponse := m.allModelsCache.response
 		cachedCount := len(cachedResponse.Data)
@@ -307,7 +308,7 @@ func (m *Manager) GetAllModels() ModelsResponse {
 			models = append(models, Model{
 				ID:      modelName,
 				Object:  "model",
-				Created: openai.GetCurrentTimestamp(),
+				Created: common.GetCurrentTimestamp(),
 				OwnedBy: "system",
 			})
 			modelMap[modelName] = true
@@ -400,7 +401,7 @@ func (m *Manager) GetAllModels() ModelsResponse {
 	// Cache the result for 3 seconds
 	m.allModelsCache = allModelsCache{
 		response:  response,
-		expiresAt: time.Now().UTC().Add(3 * time.Second),
+		expiresAt: utils.NowUTC().Add(3 * time.Second),
 	}
 	m.allModels = append([]Model(nil), models...)
 
@@ -698,7 +699,7 @@ func (m *Manager) GetModelsForCredential(credentialName string) []Model {
 		result = append(result, Model{
 			ID:      modelID,
 			Object:  "model",
-			Created: openai.GetCurrentTimestamp(),
+			Created: common.GetCurrentTimestamp(),
 			OwnedBy: "system",
 		})
 	}
@@ -714,7 +715,7 @@ func (m *Manager) GetRemoteModels(cred *config.CredentialConfig) []Model {
 
 	// Check cache first
 	m.mu.RLock()
-	if cached, ok := m.remoteModelsCache[cred.Name]; ok && !cached.expiresAt.IsZero() && time.Now().UTC().Before(cached.expiresAt) {
+	if cached, ok := m.remoteModelsCache[cred.Name]; ok && !cached.expiresAt.IsZero() && utils.NowUTC().Before(cached.expiresAt) {
 		// Copy models slice reference while holding lock to prevent TOCTOU
 		cachedModels := cached.models
 		cachedCount := len(cachedModels)
@@ -749,7 +750,7 @@ func (m *Manager) GetRemoteModels(cred *config.CredentialConfig) []Model {
 	m.mu.Lock()
 	m.remoteModelsCache[cred.Name] = remoteModelCache{
 		models:    modelsResp.Data,
-		expiresAt: time.Now().UTC().Add(m.cacheExpiration),
+		expiresAt: utils.NowUTC().Add(m.cacheExpiration),
 	}
 	m.mu.Unlock()
 

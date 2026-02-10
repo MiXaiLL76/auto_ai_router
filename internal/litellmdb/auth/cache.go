@@ -8,6 +8,7 @@ import (
 
 	lru "github.com/hashicorp/golang-lru/v2"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb/models"
+	"github.com/mixaill76/auto_ai_router/internal/utils"
 )
 
 // cachedToken holds a cached token with timestamp
@@ -81,7 +82,7 @@ func (c *Cache) Set(hashedToken string, info *models.TokenInfo) {
 
 	c.cache.Add(hashedToken, &cachedToken{
 		info:     info,
-		cachedAt: time.Now().UTC(),
+		cachedAt: utils.NowUTC(),
 	})
 }
 

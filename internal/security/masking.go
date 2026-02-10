@@ -2,6 +2,7 @@
 package security
 
 import (
+	"net/http"
 	"strings"
 )
 
@@ -77,4 +78,70 @@ func MaskDatabaseURL(dbURL string) string {
 	user := userPass[:colonIdx]
 	// Reconstruct with masked password
 	return dbURL[:schemeEnd+3] + user + ":***" + dbURL[atIdx:]
+}
+
+// MaskSensitiveHeaders returns a copy of HTTP headers with sensitive headers masked.
+// This is used for logging to prevent secrets from appearing in logs.
+//
+// Sensitive headers that are masked:
+//   - Authorization: Bearer tokens and API keys
+//   - X-API-Key: API keys
+//   - X-Auth-Token: Authentication tokens
+//   - Proxy-Authorization: Proxy credentials
+//   - Cookie: Session cookies (masked, not removed)
+//
+// Other headers are passed through unchanged for debugging purposes.
+//
+// Example:
+//
+//	headers := http.Header{}
+//	headers.Set("Authorization", "Bearer sk_test_abc123...")
+//	headers.Set("Content-Type", "application/json")
+//	masked := MaskSensitiveHeaders(headers)
+//	// Result: Authorization=Bearer sk_t..., Content-Type=application/json
+func MaskSensitiveHeaders(headers http.Header) http.Header {
+	masked := make(http.Header)
+
+	// List of sensitive headers to mask
+	sensitiveHeaders := map[string]bool{
+		"Authorization":       true,
+		"X-API-Key":           true,
+		"X-Auth-Token":        true,
+		"Proxy-Authorization": true,
+		"Cookie":              true,
+	}
+
+	for key, values := range headers {
+		if len(values) == 0 {
+			continue
+		}
+
+		if sensitiveHeaders[key] {
+			// Mask sensitive header values
+			value := values[0]
+			switch key {
+			case "Authorization":
+				// Handle Bearer tokens specially
+				if strings.HasPrefix(value, "Bearer ") {
+					token := strings.TrimPrefix(value, "Bearer ")
+					masked.Set(key, "Bearer "+MaskToken(token))
+				} else {
+					masked.Set(key, MaskSecret(value, 4))
+				}
+			case "Cookie":
+				// Mask cookie value but indicate it was present
+				masked.Set(key, "***cookie***")
+			default:
+				// API keys and tokens
+				masked.Set(key, MaskSecret(value, 4))
+			}
+		} else {
+			// Pass through non-sensitive headers unchanged
+			for _, v := range values {
+				masked.Add(key, v)
+			}
+		}
+	}
+
+	return masked
 }
