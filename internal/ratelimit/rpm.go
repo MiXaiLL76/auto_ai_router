@@ -9,6 +9,17 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/utils"
 )
 
+// RPMLimiter tracks and enforces RPM (Requests Per Minute) and TPM (Tokens Per Minute) limits.
+// Use this for API rate limiting where you need to track usage against configurable limits.
+//
+// Different from TimeBasedRateLimiter:
+// - RPMLimiter: tracks usage against RPM/TPM limits (e.g., allow max 100 requests per minute)
+// - TimeBasedRateLimiter: enforces fixed minimum interval (e.g., wait 100ms between requests)
+//
+// Used for:
+// - Credential selection (balancer): check if credential RPM/TPM limits allow new request
+// - Token consumption tracking (proxy): record actual token usage for metrics
+// - Health checks: report current RPM/TPM usage against configured limits
 type RPMLimiter struct {
 	mu            sync.RWMutex
 	limiters      map[string]*limiter // credential limiters

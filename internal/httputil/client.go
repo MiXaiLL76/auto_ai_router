@@ -8,11 +8,10 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
-	"github.com/mixaill76/auto_ai_router/internal/utils"
+	"github.com/mixaill76/auto_ai_router/internal/ratelimit"
 )
 
 const (
@@ -85,45 +84,10 @@ func NewHTTPClient(cfg *HTTPClientConfig) *http.Client {
 	}
 }
 
-type proxyFetchLimiter struct {
-	mu   sync.Mutex
-	last map[string]time.Time
-}
-
-func newProxyFetchLimiter() *proxyFetchLimiter {
-	return &proxyFetchLimiter{
-		last: make(map[string]time.Time),
-	}
-}
-
-func (l *proxyFetchLimiter) wait(ctx context.Context, key string, minInterval time.Duration) error {
-	if minInterval <= 0 {
-		return nil
-	}
-
-	l.mu.Lock()
-	now := utils.NowUTC()
-	last := l.last[key]
-	waitFor := minInterval - now.Sub(last)
-	if waitFor <= 0 {
-		l.last[key] = now
-		l.mu.Unlock()
-		return nil
-	}
-	l.last[key] = now.Add(waitFor)
-	l.mu.Unlock()
-
-	timer := time.NewTimer(waitFor)
-	defer timer.Stop()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-timer.C:
-		return nil
-	}
-}
-
-var proxyFetchRateLimiter = newProxyFetchLimiter()
+// proxyFetchRateLimiter enforces minimum interval between proxy credential fetches
+// to prevent overwhelming proxy servers with frequent requests.
+// Uses TimeBasedRateLimiter from the ratelimit package for interval-based rate limiting.
+var proxyFetchRateLimiter = ratelimit.NewTimeBasedRateLimiter()
 
 // proxyHTTPClient is the shared HTTP client for proxy fetch operations
 // Uses the centralized configuration for consistent behavior
@@ -150,7 +114,7 @@ func FetchFromProxy(
 		defer cancel()
 	}
 
-	if err := proxyFetchRateLimiter.wait(ctx, cred.Name, minProxyFetchInterval); err != nil {
+	if err := proxyFetchRateLimiter.Wait(ctx, cred.Name, minProxyFetchInterval); err != nil {
 		logger.Debug("Proxy fetch rate limited",
 			"credential", cred.Name,
 			"path", path,
