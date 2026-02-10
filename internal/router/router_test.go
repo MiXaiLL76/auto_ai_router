@@ -464,3 +464,76 @@ func TestServeHTTP_VisualHealth(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w.Code)
 	assert.Equal(t, "text/html; charset=utf-8", w.Header().Get("Content-Type"))
 }
+
+func TestServeHTTP_StreamingRequestNotLogged(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	// Create a mock proxy that returns a 500 error
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("internal error"))
+	}))
+	defer mockServer.Close()
+
+	prx := createProxyWithMockServer(mockServer.URL)
+	router := New(prx, nil, createTestMonitoringConfig("/health", true, tmpDir+"/errors.log"), testhelpers.NewTestLogger())
+
+	// Test: Streaming request should NOT be logged even if status is 500
+	streamingBody := []byte(`{"stream": true, "model": "test-model"}`)
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(string(streamingBody)))
+	req.Header.Set("Authorization", "Bearer test-key")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	router.ServeHTTP(w, req)
+
+	// Streaming request should still be processed (500 from mock)
+	assert.Equal(t, http.StatusInternalServerError, w.Code)
+
+	// But log file should be empty (streaming requests are not logged)
+	logPath := tmpDir + "/errors.log"
+	content, err := os.ReadFile(logPath)
+	if err == nil {
+		// File exists but should be empty
+		assert.Empty(t, content, "Streaming requests should not be logged")
+	}
+	// If file doesn't exist, that's also expected (no logging)
+}
+
+func TestServeHTTP_NonStreamingErrorIsLogged(t *testing.T) {
+	tmpDir := t.TempDir()
+	logPath := tmpDir + "/errors.log"
+
+	// Create a mock proxy that returns a 400 error
+	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte("bad request"))
+	}))
+	defer mockServer.Close()
+
+	prx := createProxyWithMockServer(mockServer.URL)
+	router := New(prx, nil, createTestMonitoringConfig("/health", true, logPath), testhelpers.NewTestLogger())
+
+	// Test: Non-streaming request SHOULD be logged when status is error
+	nonStreamingBody := []byte(`{"stream": false, "model": "test-model"}`)
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(string(nonStreamingBody)))
+	req.Header.Set("Authorization", "Bearer test-key")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	router.ServeHTTP(w, req)
+
+	// Non-streaming request should be processed (400 from mock)
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+
+	// Log file should contain the error
+	content, err := os.ReadFile(logPath)
+	assert.NoError(t, err, "Log file should exist")
+	assert.NotEmpty(t, content, "Non-streaming error should be logged")
+
+	// Verify log format
+	var entry ErrorLogEntry
+	err = json.Unmarshal(content, &entry)
+	assert.NoError(t, err, "Log file should contain valid JSON")
+	assert.Equal(t, http.StatusBadRequest, entry.Status)
+}

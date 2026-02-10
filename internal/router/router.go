@@ -47,8 +47,8 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 
 	if strings.HasPrefix(req.URL.Path, "/v1/") {
 		if r.monitoringConfig.LogErrors {
-			// Capture request body for logging
-			reqBody, err := captureRequestBody(req)
+			// Capture request body for logging (detects streaming requests)
+			reqBody, isStreaming, err := captureRequestBody(req)
 			if err != nil {
 				r.proxy.ProxyRequest(w, req)
 				return
@@ -60,8 +60,9 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 			// Proxy the request through captured response
 			r.proxy.ProxyRequest(rc, req)
 
-			// Log error responses if logging is enabled and status is 4xx or 5xx
-			if r.monitoringConfig.ErrorsLogPath != "" && isErrorStatus(rc.statusCode) {
+			// Log error responses if enabled and status is error (4xx or 5xx).
+			// Skip logging for streaming requests to avoid memory overhead with large responses.
+			if r.monitoringConfig.ErrorsLogPath != "" && isErrorStatus(rc.statusCode) && !isStreaming {
 				_ = logErrorResponse(r.monitoringConfig.ErrorsLogPath, req, rc, reqBody)
 				// Log error internally but don't fail the response
 				// (error logging shouldn't break the API response)
