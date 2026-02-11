@@ -1,7 +1,10 @@
 package models
 
 import (
+	"encoding/json"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"testing"
 
@@ -556,20 +559,42 @@ func TestGetRemoteModels_CacheExpiryRace(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
 	manager := New(logger, 100, []config.ModelRPMConfig{})
 
+	// Create a mock HTTP server that responds with a models list
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/models" {
+			w.Header().Set("Content-Type", "application/json")
+			models := map[string]interface{}{
+				"object": "list",
+				"data": []map[string]string{
+					{"id": "gpt-4", "object": "model", "owned_by": "openai"},
+					{"id": "gpt-3.5-turbo", "object": "model", "owned_by": "openai"},
+				},
+			}
+			err := json.NewEncoder(w).Encode(models)
+			assert.Nil(t, err)
+		} else {
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
 	cred := &config.CredentialConfig{
 		Name:    "test-proxy",
 		Type:    config.ProviderTypeProxy,
-		BaseURL: "http://localhost:8000",
+		BaseURL: server.URL,
 		APIKey:  "test-key",
 	}
 
-	// Run concurrent reads
-	// Note: This will fail to actually fetch models since the endpoint doesn't exist,
-	// but it will still exercise the cache logic and potentially expose race conditions
+	// Run concurrent reads to test cache logic under concurrency
 	done := make(chan bool, 100)
 	for i := 0; i < 100; i++ {
 		go func() {
-			_ = manager.GetRemoteModels(cred)
+			models := manager.GetRemoteModels(cred)
+			if len(models) > 0 {
+				// Successfully fetched models from cache/server
+				assert.Equal(t, 2, len(models))
+				assert.Equal(t, "gpt-4", models[0].ID)
+			}
 			done <- true
 		}()
 	}
