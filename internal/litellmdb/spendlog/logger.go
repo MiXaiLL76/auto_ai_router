@@ -42,9 +42,10 @@ type Logger struct {
 	queue chan *models.SpendLogEntry
 
 	// Lifecycle
-	stopChan chan struct{}
-	wg       sync.WaitGroup
-	shutdown atomic.Bool // Track if shutdown has been called
+	stopChan  chan struct{}
+	wg        sync.WaitGroup
+	shutdown  atomic.Bool // Track if shutdown has been called
+	startOnce sync.Once   // Ensure Start() is called only once
 
 	// Metrics
 	queued            uint64 // Total queued
@@ -86,23 +87,25 @@ func NewLogger(pool *connection.ConnectionPool, cfg *models.Config) *Logger {
 }
 
 // Start starts the background worker and aggregation ticker
-// Must be called once after creation
+// Must be called once after creation. Safe to call multiple times (idempotent).
 func (sl *Logger) Start() {
-	// Initialize tickers BEFORE starting goroutines to prevent nil dereference race
-	sl.dlqRecoveryTicker = time.NewTicker(5 * time.Minute)
-	sl.aggregationTicker = time.NewTicker(10 * time.Second)
+	sl.startOnce.Do(func() {
+		// Initialize tickers BEFORE starting goroutines to prevent nil dereference race
+		sl.dlqRecoveryTicker = time.NewTicker(5 * time.Minute)
+		sl.aggregationTicker = time.NewTicker(10 * time.Second)
 
-	sl.wg.Add(3)
-	go sl.worker()
-	go sl.aggregationWorker()
-	go sl.dlqRecoveryWorker()
-	sl.logger.Info("[DB] SpendLogger started",
-		"queue_size", sl.config.LogQueueSize,
-		"batch_size", sl.config.LogBatchSize,
-		"flush_interval", sl.config.LogFlushInterval,
-		"dlq_max_size", 10,
-		"dlq_recovery_interval", "5m",
-	)
+		sl.wg.Add(3)
+		go sl.worker()
+		go sl.aggregationWorker()
+		go sl.dlqRecoveryWorker()
+		sl.logger.Info("[DB] SpendLogger started",
+			"queue_size", sl.config.LogQueueSize,
+			"batch_size", sl.config.LogBatchSize,
+			"flush_interval", sl.config.LogFlushInterval,
+			"dlq_max_size", 10,
+			"dlq_recovery_interval", "5m",
+		)
+	})
 }
 
 // Log adds an entry to the queue with backpressure handling
