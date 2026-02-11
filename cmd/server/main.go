@@ -47,6 +47,8 @@ func main() {
 
 	log := logger.New(cfg.Server.LoggingLevel)
 
+	config.PrintConfig(log, cfg)
+
 	log.Info("Starting auto_ai_router",
 		"version", Version,
 		"commit", Commit,

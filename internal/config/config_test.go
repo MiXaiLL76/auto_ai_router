@@ -417,7 +417,7 @@ func TestConfig_Validate_DefaultModelsRPM(t *testing.T) {
 	}{
 		{"valid rpm", 100, false, 100},
 		{"unlimited rpm", -1, false, -1},
-		{"zero defaults to 50", 0, false, 50},
+		{"zero defaults to unlimited", 0, false, -1},
 		{"negative (not -1)", -5, true, 0},
 	}
 
@@ -462,7 +462,6 @@ func TestLoad_EnvVariables(t *testing.T) {
 	require.NoError(t, os.Setenv("TEST_CRED_RPM", "150"))
 	require.NoError(t, os.Setenv("TEST_CRED_TPM", "50000"))
 	require.NoError(t, os.Setenv("TEST_PROMETHEUS_ENABLED", "false"))
-	require.NoError(t, os.Setenv("TEST_HEALTH_CHECK_PATH", "/status"))
 
 	defer func() {
 		// Cleanup
@@ -479,7 +478,6 @@ func TestLoad_EnvVariables(t *testing.T) {
 		_ = os.Unsetenv("TEST_CRED_RPM")
 		_ = os.Unsetenv("TEST_CRED_TPM")
 		_ = os.Unsetenv("TEST_PROMETHEUS_ENABLED")
-		_ = os.Unsetenv("TEST_HEALTH_CHECK_PATH")
 	}()
 
 	// Create temporary config file with env variables
@@ -510,7 +508,6 @@ credentials:
 
 monitoring:
   prometheus_enabled: os.environ/TEST_PROMETHEUS_ENABLED
-  health_check_path: os.environ/TEST_HEALTH_CHECK_PATH
 `
 	err := os.WriteFile(configPath, []byte(configContent), 0644)
 	require.NoError(t, err)
@@ -538,7 +535,7 @@ monitoring:
 
 	// Verify monitoring config
 	assert.Equal(t, false, cfg.Monitoring.PrometheusEnabled)
-	assert.Equal(t, "/status", cfg.Monitoring.HealthCheckPath)
+	assert.Equal(t, "/health", cfg.Monitoring.HealthCheckPath)
 }
 
 func TestLoad_EnvVariables_Mixed(t *testing.T) {
