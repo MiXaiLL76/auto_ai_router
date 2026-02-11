@@ -88,9 +88,8 @@ func (h *PrettyHandler) Handle(ctx context.Context, record slog.Record) error {
 	})
 
 	sb.WriteString("\n")
-	fmt.Fprint(os.Stdout, sb.String())
-
-	return nil
+	_, err := fmt.Fprint(os.Stdout, sb.String())
+	return err
 }
 
 // WithAttrs returns a new handler with the given attributes attached
