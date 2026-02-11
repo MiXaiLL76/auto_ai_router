@@ -277,7 +277,7 @@ func TestTokenInfo_Validate(t *testing.T) {
 	})
 }
 
-func TestCache_SetGet(t *testing.T) {
+func TestCache_Auth_SetGet(t *testing.T) {
 	cache, err := NewCache(100, time.Minute)
 	require.NoError(t, err)
 
@@ -289,7 +289,7 @@ func TestCache_SetGet(t *testing.T) {
 	assert.Equal(t, "user1", got.UserID)
 }
 
-func TestCache_NotFound(t *testing.T) {
+func TestCache_Auth_NotFound(t *testing.T) {
 	cache, err := NewCache(100, time.Minute)
 	require.NoError(t, err)
 
@@ -297,7 +297,7 @@ func TestCache_NotFound(t *testing.T) {
 	assert.False(t, ok)
 }
 
-func TestCache_TTLExpired(t *testing.T) {
+func TestCache_Auth_TTLExpired(t *testing.T) {
 	cache, err := NewCache(100, 10*time.Millisecond)
 	require.NoError(t, err)
 
@@ -308,7 +308,7 @@ func TestCache_TTLExpired(t *testing.T) {
 	assert.False(t, ok)
 }
 
-func TestCache_Invalidate(t *testing.T) {
+func TestCache_Auth_Invalidate(t *testing.T) {
 	cache, err := NewCache(100, time.Minute)
 	require.NoError(t, err)
 
@@ -319,7 +319,7 @@ func TestCache_Invalidate(t *testing.T) {
 	assert.False(t, ok)
 }
 
-func TestCache_InvalidateAll(t *testing.T) {
+func TestCache_Auth_InvalidateAll(t *testing.T) {
 	cache, err := NewCache(100, time.Minute)
 	require.NoError(t, err)
 
@@ -330,7 +330,7 @@ func TestCache_InvalidateAll(t *testing.T) {
 	assert.Equal(t, 0, cache.Len())
 }
 
-func TestCache_Stats(t *testing.T) {
+func TestCache_Auth_Stats(t *testing.T) {
 	cache, err := NewCache(100, time.Minute)
 	require.NoError(t, err)
 

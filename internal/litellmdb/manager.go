@@ -106,10 +106,16 @@ func New(cfg *models.Config) (Manager, error) {
 		return nil, err
 	}
 
+	// Ensure pool is cleaned up if any subsequent initialization fails
+	defer func() {
+		if err != nil && pool != nil {
+			pool.Close()
+		}
+	}()
+
 	// Create auth cache
 	cache, err := auth.NewCache(cfg.AuthCacheSize, cfg.AuthCacheTTL)
 	if err != nil {
-		pool.Close()
 		return nil, err
 	}
 
@@ -128,6 +134,9 @@ func New(cfg *models.Config) (Manager, error) {
 		logger:      cfg.Logger,
 	}
 
+	// Clear error so defer doesn't close pool
+	err = nil
+
 	cfg.Logger.Info("LiteLLM DB Manager initialized",
 		"database", maskDatabaseURL(cfg.DatabaseURL),
 		"max_conns", cfg.MaxConns,
@@ -135,7 +144,7 @@ func New(cfg *models.Config) (Manager, error) {
 		"log_queue_size", cfg.LogQueueSize,
 	)
 
-	return m, nil
+	return m, err
 }
 
 // ValidateToken validates a token

@@ -44,6 +44,7 @@ type Logger struct {
 	// Lifecycle
 	stopChan chan struct{}
 	wg       sync.WaitGroup
+	shutdown atomic.Bool // Track if shutdown has been called
 
 	// Metrics
 	queued            uint64 // Total queued
@@ -87,8 +88,9 @@ func NewLogger(pool *connection.ConnectionPool, cfg *models.Config) *Logger {
 // Start starts the background worker and aggregation ticker
 // Must be called once after creation
 func (sl *Logger) Start() {
-	// Initialize ticker BEFORE starting goroutine to prevent nil dereference race
+	// Initialize tickers BEFORE starting goroutines to prevent nil dereference race
 	sl.dlqRecoveryTicker = time.NewTicker(5 * time.Minute)
+	sl.aggregationTicker = time.NewTicker(10 * time.Second)
 
 	sl.wg.Add(3)
 	go sl.worker()
@@ -150,14 +152,23 @@ func (sl *Logger) Log(entry *models.SpendLogEntry) error {
 }
 
 // Shutdown stops the logger and waits for all logs to be written
+// Idempotent: safe to call multiple times
 func (sl *Logger) Shutdown(ctx context.Context) error {
+	// Check if already shut down
+	if !sl.shutdown.CompareAndSwap(false, true) {
+		return nil // Already shut down
+	}
+
 	sl.logger.Info("[DB] SpendLogger shutting down...",
 		"pending", len(sl.queue),
 	)
 
-	// Stop DLQ recovery ticker
+	// Stop tickers
 	if sl.dlqRecoveryTicker != nil {
 		sl.dlqRecoveryTicker.Stop()
+	}
+	if sl.aggregationTicker != nil {
+		sl.aggregationTicker.Stop()
 	}
 
 	// Signal worker to stop
@@ -216,11 +227,15 @@ func (sl *Logger) GetDLQStats() map[string]interface{} {
 	dlqSize := len(sl.dlq)
 	dlqData := make([]map[string]interface{}, 0, dlqSize)
 	for _, dlb := range sl.dlq {
+		errorMsg := ""
+		if dlb.lastError != nil {
+			errorMsg = dlb.lastError.Error()
+		}
 		dlqData = append(dlqData, map[string]interface{}{
 			"batch_size": len(dlb.batch),
 			"failed_at":  dlb.failedAt,
 			"attempts":   dlb.attempts,
-			"last_error": dlb.lastError.Error(),
+			"last_error": errorMsg,
 		})
 	}
 	sl.dlqMu.Unlock()
@@ -372,6 +387,11 @@ func (sl *Logger) insertBatch(batch []*models.SpendLogEntry) error {
 // 2. Aggregate and UPDATE spend for Token, User, Team, Org, TeamMember, OrgMember
 // All operations executed in a single transaction for atomicity
 func (sl *Logger) flushBatchWithSpendUpdate(batch []*models.SpendLogEntry) error {
+	// Skip if pool is not initialized (e.g., in tests)
+	if sl.pool == nil {
+		return models.ErrConnectionFailed
+	}
+
 	if !sl.pool.IsHealthy() {
 		return models.ErrConnectionFailed
 	}
@@ -592,12 +612,10 @@ func getSampleRequestIDs(batch []*models.SpendLogEntry, count int) []string {
 	return result
 }
 
-// aggregationWorker runs the daily spend aggregation every minute
+// aggregationWorker runs the daily spend aggregation every 10 seconds
+// NOTE: aggregationTicker is initialized in Start() to prevent nil race
 func (sl *Logger) aggregationWorker() {
 	defer sl.wg.Done()
-
-	sl.aggregationTicker = time.NewTicker(10 * time.Second)
-	defer sl.aggregationTicker.Stop()
 
 	for {
 		select {
@@ -618,6 +636,11 @@ func (sl *Logger) aggregationWorker() {
 // 2. Call aggregators for: User, Team, Organization, EndUser, Agent, Tag
 // 3. Mark all request_ids as processed
 func (sl *Logger) aggregateSpendLogs() {
+	// Skip if pool is not initialized (e.g., in tests)
+	if sl.pool == nil {
+		return
+	}
+
 	if !sl.pool.IsHealthy() {
 		atomic.AddUint64(&sl.aggregationErrors, 1)
 		sl.logger.Warn("[DB] Cannot aggregate: database not healthy")

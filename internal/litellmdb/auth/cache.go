@@ -50,8 +50,12 @@ func NewCache(maxSize int, ttl time.Duration) (*Cache, error) {
 }
 
 // Get retrieves a token from cache
-// Returns nil, false if token not found or TTL expired
+// Returns nil, false if token not found, TTL expired, or cache is nil
 func (c *Cache) Get(hashedToken string) (*models.TokenInfo, bool) {
+	if c == nil || c.cache == nil {
+		return nil, false
+	}
+
 	c.mu.RLock()
 	cached, ok := c.cache.Get(hashedToken)
 	c.mu.RUnlock()
@@ -77,6 +81,10 @@ func (c *Cache) Get(hashedToken string) (*models.TokenInfo, bool) {
 
 // Set adds a token to cache
 func (c *Cache) Set(hashedToken string, info *models.TokenInfo) {
+	if c == nil || c.cache == nil {
+		return
+	}
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -88,6 +96,10 @@ func (c *Cache) Set(hashedToken string, info *models.TokenInfo) {
 
 // Invalidate removes a token from cache
 func (c *Cache) Invalidate(hashedToken string) {
+	if c == nil || c.cache == nil {
+		return
+	}
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.cache.Remove(hashedToken)
@@ -95,6 +107,10 @@ func (c *Cache) Invalidate(hashedToken string) {
 
 // InvalidateAll clears the entire cache
 func (c *Cache) InvalidateAll() {
+	if c == nil || c.cache == nil {
+		return
+	}
+
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.cache.Purge()
@@ -102,6 +118,10 @@ func (c *Cache) InvalidateAll() {
 
 // Stats returns cache statistics
 func (c *Cache) Stats() models.AuthCacheStats {
+	if c == nil || c.cache == nil {
+		return models.AuthCacheStats{}
+	}
+
 	c.mu.RLock()
 	size := c.cache.Len()
 	c.mu.RUnlock()
@@ -125,6 +145,10 @@ func (c *Cache) Stats() models.AuthCacheStats {
 
 // Len returns current cache size
 func (c *Cache) Len() int {
+	if c == nil || c.cache == nil {
+		return 0
+	}
+
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.cache.Len()
