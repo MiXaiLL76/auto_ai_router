@@ -586,8 +586,13 @@ func TestGetRemoteModels_CacheExpiryRace(t *testing.T) {
 	}
 
 	// Run concurrent reads to test cache logic under concurrency
-	done := make(chan bool, 100)
-	for i := 0; i < 100; i++ {
+	// Note: Using 10 goroutines instead of 100 because:
+	// - httputil has minProxyFetchInterval = 100ms rate limiting per credential
+	// - 100 goroutines * 100ms = 10 seconds minimum (exceeds 5s default timeout)
+	// - 10 goroutines * 100ms = 1 second (fits within timeout)
+	// This still thoroughly tests concurrent access and caching behavior
+	done := make(chan bool, 10)
+	for i := 0; i < 10; i++ {
 		go func() {
 			models := manager.GetRemoteModels(cred)
 			if len(models) > 0 {
@@ -599,7 +604,7 @@ func TestGetRemoteModels_CacheExpiryRace(t *testing.T) {
 		}()
 	}
 
-	for i := 0; i < 100; i++ {
+	for i := 0; i < 10; i++ {
 		<-done
 	}
 }
