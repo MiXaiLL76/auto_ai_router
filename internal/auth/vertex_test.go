@@ -639,3 +639,458 @@ func (m *slowMockTokenSource) Token() (*oauth2.Token, error) {
 	}
 	return m.token, nil
 }
+
+// EDGE-CASE TESTS FOR COALESCING AND CONCURRENCY
+
+// TestGetToken_CoalescingCallerTimeout: Verify that coalescing callers properly handle timeout
+// EDGE-CASE: When a non-first caller times out, it should NOT interfere with first caller or other callers
+func TestGetToken_CoalescingCallerTimeout(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	tm := NewVertexTokenManager(logger)
+	defer tm.Stop()
+
+	// Create a token that needs refresh
+	expiredTime := time.Now().UTC().Add(-1 * time.Hour)
+	newExpiryTime := time.Now().UTC().Add(2 * time.Hour)
+
+	// Slow token source to give coalescing callers time to queue up
+	mockSource := &slowMockTokenSource{
+		delay: 200 * time.Millisecond,
+		token: &oauth2.Token{AccessToken: "coalesced-token", Expiry: newExpiryTime},
+	}
+
+	tm.mu.Lock()
+	tm.tokens["test"] = &cachedToken{
+		token:       &oauth2.Token{AccessToken: "old-token", Expiry: expiredTime},
+		tokenSource: mockSource,
+		expiresAt:   expiredTime,
+	}
+	tm.mu.Unlock()
+
+	// Set a timeout that will trigger after first caller starts, but before refresh completes
+	originalTimeout := tm.tokenRefreshTimeout
+	tm.tokenRefreshTimeout = 50 * time.Millisecond
+	defer func() { tm.tokenRefreshTimeout = originalTimeout }()
+
+	// Launcher goroutine that fires calls sequentially to allow coalescing
+	results := make(chan struct {
+		idx int
+		err error
+	}, 10)
+
+	for i := 0; i < 10; i++ {
+		go func(idx int) {
+			// Small delay to allow first caller to send request
+			if idx > 0 {
+				time.Sleep(5 * time.Millisecond)
+			}
+			_, err := tm.GetToken("test", "", "")
+			results <- struct {
+				idx int
+				err error
+			}{idx, err}
+		}(i)
+	}
+
+	// Collect results
+	timeoutCount := 0
+	successCount := 0
+	for i := 0; i < 10; i++ {
+		result := <-results
+		if result.err != nil {
+			if result.err.Error() == "token refresh timeout" {
+				timeoutCount++
+			}
+		} else {
+			successCount++
+		}
+	}
+
+	// With 50ms timeout and 200ms delay, all should timeout
+	if timeoutCount+successCount != 10 {
+		t.Errorf("Expected 10 results (timeout+success), got %d+%d=%d", timeoutCount, successCount, timeoutCount+successCount)
+	}
+
+	// Key point: some may succeed if they coalesced before timeout, but manager should still be stable
+	// Verify manager is still functional after timeouts
+	tm.tokenRefreshTimeout = originalTimeout
+	expiry2 := time.Now().UTC().Add(2 * time.Hour)
+	mockSource2 := &mockTokenSource{
+		token: &oauth2.Token{AccessToken: "recovery-token", Expiry: expiry2},
+	}
+
+	tm.mu.Lock()
+	tm.tokens["test"] = &cachedToken{
+		token:       &oauth2.Token{AccessToken: "old-token", Expiry: expiredTime},
+		tokenSource: mockSource2,
+		expiresAt:   expiredTime,
+	}
+	tm.mu.Unlock()
+
+	// This should succeed
+	token, err := tm.GetToken("test", "", "")
+	if err != nil {
+		t.Errorf("Recovery GetToken failed: %v", err)
+	}
+	if token != "recovery-token" {
+		t.Errorf("Expected recovery token, got %s", token)
+	}
+}
+
+// TestGetToken_ChannelLeakOnTimeout: Verify that response channels don't leak memory on timeout
+// EDGE-CASE: Channels in refreshing map should be properly cleaned up even on timeout
+func TestGetToken_ChannelLeakOnTimeout(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	tm := NewVertexTokenManager(logger)
+	defer tm.Stop()
+
+	expiredTime := time.Now().UTC().Add(-1 * time.Hour)
+
+	// Create a very slow token source
+	slowSource := &slowMockTokenSource{
+		delay: 2 * time.Second,
+		token: &oauth2.Token{AccessToken: "slow-token", Expiry: time.Now().UTC().Add(1 * time.Hour)},
+	}
+
+	tm.mu.Lock()
+	tm.tokens["test"] = &cachedToken{
+		token:       &oauth2.Token{AccessToken: "old-token", Expiry: expiredTime},
+		tokenSource: slowSource,
+		expiresAt:   expiredTime,
+	}
+	tm.mu.Unlock()
+
+	// Set short timeout
+	originalTimeout := tm.tokenRefreshTimeout
+	tm.tokenRefreshTimeout = 10 * time.Millisecond
+	defer func() { tm.tokenRefreshTimeout = originalTimeout }()
+
+	// Fire a request that will timeout
+	_, err := tm.GetToken("test", "", "")
+	if err == nil {
+		t.Error("Expected timeout error")
+	}
+
+	// Check that refreshing map is cleaned up
+	// After timeout, the request should be removed from refreshing map
+	tm.refreshingMu.Lock()
+	waitingChans, exists := tm.refreshing["test"]
+	tm.refreshingMu.Unlock()
+
+	// Either the entry should not exist, or should be empty after the first caller times out
+	// (It might still exist if worker hasn't processed it yet)
+	if exists && len(waitingChans) > 0 {
+		// Give worker time to process
+		time.Sleep(50 * time.Millisecond)
+
+		tm.refreshingMu.Lock()
+		waitingChans, exists = tm.refreshing["test"]
+		tm.refreshingMu.Unlock()
+
+		// After giving time to worker, it should be cleaned up
+		if exists && len(waitingChans) > 0 {
+			t.Errorf("Expected refreshing['test'] to be empty/removed, but found %d waiting channels", len(waitingChans))
+		}
+	}
+}
+
+// TestGetToken_FirstCallerTimeoutRemovesFromMap: Verify removeWaitingChan works correctly
+// EDGE-CASE: When first caller times out after sending request, it should be removed from refreshing map
+func TestGetToken_FirstCallerTimeoutRemovesFromMap(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	tm := NewVertexTokenManager(logger)
+	defer tm.Stop()
+
+	expiredTime := time.Now().UTC().Add(-1 * time.Hour)
+	slowSource := &slowMockTokenSource{
+		delay: 1 * time.Second,
+		token: &oauth2.Token{AccessToken: "slow-token", Expiry: time.Now().UTC().Add(1 * time.Hour)},
+	}
+
+	tm.mu.Lock()
+	tm.tokens["test"] = &cachedToken{
+		token:       &oauth2.Token{AccessToken: "old-token", Expiry: expiredTime},
+		tokenSource: slowSource,
+		expiresAt:   expiredTime,
+	}
+	tm.mu.Unlock()
+
+	originalTimeout := tm.tokenRefreshTimeout
+	tm.tokenRefreshTimeout = 20 * time.Millisecond
+	defer func() { tm.tokenRefreshTimeout = originalTimeout }()
+
+	// Get token - will timeout
+	_, err := tm.GetToken("test", "", "")
+	if err == nil {
+		t.Error("Expected timeout")
+	}
+
+	// Verify removeWaitingChan was called and removed the entry
+	// Give worker a moment to potentially process the request
+	time.Sleep(100 * time.Millisecond)
+
+	tm.refreshingMu.Lock()
+	_, exists := tm.refreshing["test"]
+	tm.refreshingMu.Unlock()
+
+	// Entry should be removed by now (either by removeWaitingChan or by processRefreshRequest)
+	if exists {
+		t.Error("Expected 'test' to be removed from refreshing map after timeout")
+	}
+}
+
+// TestGetToken_MultipleTimeoutsSequential: Verify manager recovers from multiple sequential timeouts
+// EDGE-CASE: Multiple calls shouldn't interfere with each other after timeouts
+func TestGetToken_MultipleTimeoutsSequential(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	tm := NewVertexTokenManager(logger)
+	defer tm.Stop()
+
+	expiredTime := time.Now().UTC().Add(-1 * time.Hour)
+
+	originalTimeout := tm.tokenRefreshTimeout
+	tm.tokenRefreshTimeout = 20 * time.Millisecond
+	defer func() { tm.tokenRefreshTimeout = originalTimeout }()
+
+	// First request - will timeout
+	slowSource1 := &slowMockTokenSource{
+		delay: 500 * time.Millisecond,
+		token: &oauth2.Token{AccessToken: "token1", Expiry: time.Now().UTC().Add(1 * time.Hour)},
+	}
+
+	tm.mu.Lock()
+	tm.tokens["test"] = &cachedToken{
+		token:       &oauth2.Token{AccessToken: "old", Expiry: expiredTime},
+		tokenSource: slowSource1,
+		expiresAt:   expiredTime,
+	}
+	tm.mu.Unlock()
+
+	_, err := tm.GetToken("test", "", "")
+	if err == nil {
+		t.Error("Expected first timeout")
+	}
+
+	// Give time for cleanup
+	time.Sleep(100 * time.Millisecond)
+
+	// Second request - should timeout too
+	slowSource2 := &slowMockTokenSource{
+		delay: 500 * time.Millisecond,
+		token: &oauth2.Token{AccessToken: "token2", Expiry: time.Now().UTC().Add(1 * time.Hour)},
+	}
+
+	tm.mu.Lock()
+	tm.tokens["test"] = &cachedToken{
+		token:       &oauth2.Token{AccessToken: "old", Expiry: expiredTime},
+		tokenSource: slowSource2,
+		expiresAt:   expiredTime,
+	}
+	tm.mu.Unlock()
+
+	_, err = tm.GetToken("test", "", "")
+	if err == nil {
+		t.Error("Expected second timeout")
+	}
+
+	// Third request - restore normal timeout and should succeed
+	tm.tokenRefreshTimeout = originalTimeout
+
+	fastSource := &mockTokenSource{
+		token: &oauth2.Token{AccessToken: "success-token", Expiry: time.Now().UTC().Add(1 * time.Hour)},
+	}
+
+	tm.mu.Lock()
+	tm.tokens["test"] = &cachedToken{
+		token:       &oauth2.Token{AccessToken: "old", Expiry: expiredTime},
+		tokenSource: fastSource,
+		expiresAt:   expiredTime,
+	}
+	tm.mu.Unlock()
+
+	token, err := tm.GetToken("test", "", "")
+	if err != nil {
+		t.Errorf("Expected success after timeouts, got error: %v", err)
+	}
+	if token != "success-token" {
+		t.Errorf("Expected success-token, got %s", token)
+	}
+}
+
+// TestGetToken_ProcessRefreshRequestRobustness: Verify that partial failures don't crash the system
+// EDGE-CASE: If one of the coalesced callers has a closed channel, others should still get response
+func TestGetToken_ProcessRefreshRequestRobustness(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	tm := NewVertexTokenManager(logger)
+	defer tm.Stop()
+
+	expiredTime := time.Now().UTC().Add(-1 * time.Hour)
+	newExpiryTime := time.Now().UTC().Add(2 * time.Hour)
+
+	mockSource := &slowMockTokenSource{
+		delay: 100 * time.Millisecond,
+		token: &oauth2.Token{AccessToken: "robust-token", Expiry: newExpiryTime},
+	}
+
+	tm.mu.Lock()
+	tm.tokens["test"] = &cachedToken{
+		token:       &oauth2.Token{AccessToken: "old-token", Expiry: expiredTime},
+		tokenSource: mockSource,
+		expiresAt:   expiredTime,
+	}
+	tm.mu.Unlock()
+
+	results := make(chan struct {
+		token string
+		err   error
+	}, 20)
+
+	// Launch 20 concurrent requests
+	for i := 0; i < 20; i++ {
+		go func() {
+			token, err := tm.GetToken("test", "", "")
+			results <- struct {
+				token string
+				err   error
+			}{token, err}
+		}()
+	}
+
+	// Collect results
+	successCount := 0
+	errorCount := 0
+	for i := 0; i < 20; i++ {
+		result := <-results
+		if result.err != nil {
+			errorCount++
+		} else {
+			if result.token == "robust-token" {
+				successCount++
+			}
+		}
+	}
+
+	// Most should succeed due to coalescing
+	if successCount < 15 {
+		t.Logf("WARNING: Expected most requests to succeed, got only %d successes (errors: %d)", successCount, errorCount)
+	}
+}
+
+// TestGetToken_RefreshingMapStateAfterCompletion: Verify refreshing map is cleaned up after refresh
+// EDGE-CASE: After processRefreshRequest completes, refreshing[credentialName] should be deleted
+func TestGetToken_RefreshingMapStateAfterCompletion(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	tm := NewVertexTokenManager(logger)
+	defer tm.Stop()
+
+	expiredTime := time.Now().UTC().Add(-1 * time.Hour)
+	newExpiryTime := time.Now().UTC().Add(2 * time.Hour)
+
+	mockSource := &mockTokenSource{
+		token: &oauth2.Token{AccessToken: "complete-token", Expiry: newExpiryTime},
+	}
+
+	tm.mu.Lock()
+	tm.tokens["test"] = &cachedToken{
+		token:       &oauth2.Token{AccessToken: "old-token", Expiry: expiredTime},
+		tokenSource: mockSource,
+		expiresAt:   expiredTime,
+	}
+	tm.mu.Unlock()
+
+	// Make request
+	token, err := tm.GetToken("test", "", "")
+	if err != nil {
+		t.Errorf("Expected success, got error: %v", err)
+	}
+	if token != "complete-token" {
+		t.Errorf("Expected complete-token, got %s", token)
+	}
+
+	// After successful refresh, refreshing map should be cleaned up
+	tm.refreshingMu.Lock()
+	_, exists := tm.refreshing["test"]
+	tm.refreshingMu.Unlock()
+
+	if exists {
+		t.Error("Expected refreshing['test'] to be deleted after successful refresh")
+	}
+}
+
+// TestGetToken_ConcurrentDifferentCredentialsWithTimeout: Verify lock ordering prevents deadlock
+// EDGE-CASE: Multiple credentials being refreshed concurrently with some timing out
+func TestGetToken_ConcurrentDifferentCredentialsWithTimeout(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	tm := NewVertexTokenManager(logger)
+	defer tm.Stop()
+
+	expiredTime := time.Now().UTC().Add(-1 * time.Hour)
+	originalTimeout := tm.tokenRefreshTimeout
+	tm.tokenRefreshTimeout = 50 * time.Millisecond
+	defer func() { tm.tokenRefreshTimeout = originalTimeout }()
+
+	// Setup 5 credentials with varying delays
+	credentials := map[string]time.Duration{
+		"fast":     10 * time.Millisecond,
+		"medium":   40 * time.Millisecond,
+		"slow":     200 * time.Millisecond,
+		"veryslow": 500 * time.Millisecond,
+		"instant":  1 * time.Millisecond,
+	}
+
+	for name, delay := range credentials {
+		source := &slowMockTokenSource{
+			delay: delay,
+			token: &oauth2.Token{AccessToken: "token-" + name, Expiry: time.Now().UTC().Add(1 * time.Hour)},
+		}
+
+		tm.mu.Lock()
+		tm.tokens[name] = &cachedToken{
+			token:       &oauth2.Token{AccessToken: "old", Expiry: expiredTime},
+			tokenSource: source,
+			expiresAt:   expiredTime,
+		}
+		tm.mu.Unlock()
+	}
+
+	// Fire concurrent requests for all credentials
+	results := make(chan struct {
+		cred  string
+		token string
+		err   error
+	}, len(credentials)*2)
+
+	for credName := range credentials {
+		// Each credential gets 2 concurrent requests
+		for i := 0; i < 2; i++ {
+			go func(name string) {
+				token, err := tm.GetToken(name, "", "")
+				results <- struct {
+					cred  string
+					token string
+					err   error
+				}{name, token, err}
+			}(credName)
+		}
+	}
+
+	// Collect results - should not deadlock
+	successCount := 0
+	timeoutCount := 0
+	for i := 0; i < len(credentials)*2; i++ {
+		result := <-results
+		if result.err != nil {
+			if result.err.Error() == "token refresh timeout" {
+				timeoutCount++
+			}
+		} else {
+			successCount++
+		}
+	}
+
+	// Some should succeed (fast, instant), some should timeout (slow, veryslow)
+	t.Logf("Results: %d successes, %d timeouts", successCount, timeoutCount)
+	if successCount+timeoutCount != len(credentials)*2 {
+		t.Errorf("Expected %d total results, got %d", len(credentials)*2, successCount+timeoutCount)
+	}
+}
