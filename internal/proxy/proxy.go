@@ -33,9 +33,10 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/utils"
 )
 
-// ResponseBodyMultiplier scales maxBodySizeMB for proxy response bodies.
-// Allows responses to be significantly larger than request bodies (e.g., large files, exports).
-const ResponseBodyMultiplier = 20
+// DefaultResponseBodyMultiplier is the default multiplier for response body size limit
+// relative to maxBodySizeMB. Responses can be larger than requests (e.g., base64 images).
+// Can be overridden via Config.ResponseBodyMultiplier.
+const DefaultResponseBodyMultiplier = 10
 
 //go:embed health.html
 var healthHTML string
@@ -69,40 +70,42 @@ type HealthChecker interface {
 
 // Config holds all configuration needed to create a Proxy
 type Config struct {
-	Balancer            *balancer.RoundRobin
-	Logger              *slog.Logger
-	MaxBodySizeMB       int
-	RequestTimeout      time.Duration
-	MaxIdleConns        int
-	MaxIdleConnsPerHost int
-	IdleConnTimeout     time.Duration
-	Metrics             *monitoring.Metrics
-	MasterKey           string
-	RateLimiter         *ratelimit.RPMLimiter
-	TokenManager        *auth.VertexTokenManager
-	ModelManager        *models.Manager
-	Version             string
-	Commit              string
-	LiteLLMDB           litellmdb.Manager          // LiteLLM database integration (optional)
-	HealthChecker       HealthChecker              // Optional: cached DB health status (updated by health monitor)
-	PriceRegistry       *models.ModelPriceRegistry // Model pricing information (optional)
+	Balancer               *balancer.RoundRobin
+	Logger                 *slog.Logger
+	MaxBodySizeMB          int
+	ResponseBodyMultiplier int // Multiplier for response body size limit (default: DefaultResponseBodyMultiplier)
+	RequestTimeout         time.Duration
+	MaxIdleConns           int
+	MaxIdleConnsPerHost    int
+	IdleConnTimeout        time.Duration
+	Metrics                *monitoring.Metrics
+	MasterKey              string
+	RateLimiter            *ratelimit.RPMLimiter
+	TokenManager           *auth.VertexTokenManager
+	ModelManager           *models.Manager
+	Version                string
+	Commit                 string
+	LiteLLMDB              litellmdb.Manager          // LiteLLM database integration (optional)
+	HealthChecker          HealthChecker              // Optional: cached DB health status (updated by health monitor)
+	PriceRegistry          *models.ModelPriceRegistry // Model pricing information (optional)
 }
 
 type Proxy struct {
-	balancer       *balancer.RoundRobin
-	client         *http.Client
-	logger         *slog.Logger
-	maxBodySizeMB  int
-	requestTimeout time.Duration
-	metrics        *monitoring.Metrics
-	masterKey      string
-	rateLimiter    *ratelimit.RPMLimiter
-	tokenManager   *auth.VertexTokenManager
-	healthTemplate *template.Template         // Cached template
-	modelManager   *models.Manager            // Model manager for getting configured models
-	litellmDB      litellmdb.Manager          // LiteLLM database integration
-	healthChecker  HealthChecker              // Cached DB health status (optional)
-	priceRegistry  *models.ModelPriceRegistry // Model pricing information (optional)
+	balancer            *balancer.RoundRobin
+	client              *http.Client
+	logger              *slog.Logger
+	maxBodySizeMB       int
+	maxResponseBodySize int64 // Pre-computed max response body size in bytes
+	requestTimeout      time.Duration
+	metrics             *monitoring.Metrics
+	masterKey           string
+	rateLimiter         *ratelimit.RPMLimiter
+	tokenManager        *auth.VertexTokenManager
+	healthTemplate      *template.Template         // Cached template
+	modelManager        *models.Manager            // Model manager for getting configured models
+	litellmDB           litellmdb.Manager          // LiteLLM database integration
+	healthChecker       HealthChecker              // Cached DB health status (optional)
+	priceRegistry       *models.ModelPriceRegistry // Model pricing information (optional)
 }
 
 var (
@@ -161,21 +164,29 @@ func New(cfg *Config) *Proxy {
 	httpClientCfg.MaxIdleConnsPerHost = cfg.MaxIdleConnsPerHost
 	httpClientCfg.IdleConnTimeout = cfg.IdleConnTimeout
 
+	// Compute max response body size from multiplier
+	multiplier := cfg.ResponseBodyMultiplier
+	if multiplier <= 0 {
+		multiplier = DefaultResponseBodyMultiplier
+	}
+	maxResponseBodySize := int64(cfg.MaxBodySizeMB) * int64(multiplier) * 1024 * 1024
+
 	return &Proxy{
-		balancer:       cfg.Balancer,
-		logger:         cfg.Logger,
-		maxBodySizeMB:  cfg.MaxBodySizeMB,
-		requestTimeout: cfg.RequestTimeout,
-		metrics:        cfg.Metrics,
-		masterKey:      cfg.MasterKey,
-		rateLimiter:    cfg.RateLimiter,
-		tokenManager:   cfg.TokenManager,
-		healthTemplate: tmpl,
-		modelManager:   cfg.ModelManager,
-		litellmDB:      cfg.LiteLLMDB,
-		healthChecker:  cfg.HealthChecker,
-		priceRegistry:  cfg.PriceRegistry,
-		client:         httputil.NewHTTPClient(httpClientCfg),
+		balancer:            cfg.Balancer,
+		logger:              cfg.Logger,
+		maxBodySizeMB:       cfg.MaxBodySizeMB,
+		maxResponseBodySize: maxResponseBodySize,
+		requestTimeout:      cfg.RequestTimeout,
+		metrics:             cfg.Metrics,
+		masterKey:           cfg.MasterKey,
+		rateLimiter:         cfg.RateLimiter,
+		tokenManager:        cfg.TokenManager,
+		healthTemplate:      tmpl,
+		modelManager:        cfg.ModelManager,
+		litellmDB:           cfg.LiteLLMDB,
+		healthChecker:       cfg.HealthChecker,
+		priceRegistry:       cfg.PriceRegistry,
+		client:              httputil.NewHTTPClient(httpClientCfg),
 	}
 }
 
@@ -251,9 +262,8 @@ func (p *Proxy) executeProxyRequest(
 		"duration", time.Since(start),
 	)
 
-	// Read response body to set correct Content-Length
-	// Limit response body size: allow ResponseBodyMultiplier larger than request limit
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, int64(p.maxBodySizeMB)*ResponseBodyMultiplier*1024*1024))
+	// Read response body with size limit protection
+	respBody, err := p.readLimitedResponseBody(resp.Body)
 	if err != nil {
 		p.logger.Error("Failed to read proxy response body", "error", err)
 		return nil, err
@@ -504,7 +514,6 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 	if cred.Type == config.ProviderTypeProxy {
 		proxyResp, err := p.forwardToProxy(w, r, modelID, cred, body, start)
 		if err != nil {
-			// Network error
 			statusCode := http.StatusBadGateway
 			statusMessage := "Bad Gateway"
 			errorMsg := fmt.Sprintf("Proxy forward error: %v", err)
@@ -512,6 +521,9 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 				statusCode = http.StatusRequestTimeout
 				statusMessage = "Request Timeout"
 				errorMsg = "Request timeout"
+			} else if errors.Is(err, ErrResponseBodyTooLarge) {
+				statusMessage = "Bad Gateway: upstream response too large"
+				errorMsg = "Response body too large"
 			}
 			logCtx.Status = "failure"
 			logCtx.HTTPStatus = statusCode
@@ -812,14 +824,20 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		p.logger.Debug("Response is streaming", "credential", cred.Name)
 		logCtx.TargetURL = targetURL // Store target URL for logging
 	} else {
-		responseBody, err = io.ReadAll(resp.Body)
+		responseBody, err = p.readLimitedResponseBody(resp.Body)
 		if err != nil {
+			statusCode := http.StatusInternalServerError
+			statusMsg := "Internal Server Error"
+			if errors.Is(err, ErrResponseBodyTooLarge) {
+				statusCode = http.StatusBadGateway
+				statusMsg = "Bad Gateway: upstream response too large"
+			}
 			p.logger.Error("Failed to read response body", "error", err)
 			logCtx.Status = "failure"
-			logCtx.HTTPStatus = http.StatusInternalServerError
+			logCtx.HTTPStatus = statusCode
 			logCtx.ErrorMsg = fmt.Sprintf("Failed to read response body: %v", err)
 			logCtx.TargetURL = targetURL
-			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+			http.Error(w, statusMsg, statusCode)
 			return
 		}
 
@@ -1025,6 +1043,37 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			p.logger.Error("Failed to copy response body", "error", err)
 		}
 	}
+}
+
+// ErrResponseBodyTooLarge is returned when a response body exceeds the configured size limit.
+var ErrResponseBodyTooLarge = errors.New("response body too large")
+
+// readLimitedResponseBody reads a response body with size limit protection.
+// Returns ErrResponseBodyTooLarge if the response exceeds maxResponseBodySize.
+// Logs a warning when response size exceeds 50% of the limit for observability.
+func (p *Proxy) readLimitedResponseBody(body io.Reader) ([]byte, error) {
+	maxSize := p.maxResponseBodySize
+	// Read one extra byte to detect overflow without allocating the full oversized buffer
+	limitedReader := io.LimitReader(body, maxSize+1)
+	data, err := io.ReadAll(limitedReader)
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > maxSize {
+		p.logger.Error("Response body exceeds size limit",
+			"limit_mb", maxSize/(1024*1024),
+		)
+		return nil, ErrResponseBodyTooLarge
+	}
+	// Warn when response is large (>50% of limit) for observability
+	if int64(len(data)) > maxSize/2 {
+		p.logger.Warn("Large response body detected",
+			"size_bytes", len(data),
+			"limit_bytes", maxSize,
+			"usage_pct", int(float64(len(data))/float64(maxSize)*100),
+		)
+	}
+	return data, nil
 }
 
 // streamResponseBody streams a response body to the client using a pooled buffer

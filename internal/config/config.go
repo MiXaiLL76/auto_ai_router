@@ -48,19 +48,20 @@ type Config struct {
 }
 
 type ServerConfig struct {
-	Port                int           `yaml:"port"`
-	MaxBodySizeMB       int           `yaml:"max_body_size_mb"`
-	RequestTimeout      time.Duration `yaml:"request_timeout"`
-	LoggingLevel        string        `yaml:"logging_level"`
-	MasterKey           string        `yaml:"master_key"`
-	DefaultModelsRPM    int           `yaml:"default_models_rpm"`
-	MaxIdleConns        int           `yaml:"max_idle_conns"`
-	MaxIdleConnsPerHost int           `yaml:"max_idle_conns_per_host"`
-	IdleConnTimeout     time.Duration `yaml:"idle_conn_timeout"`
-	ReadTimeout         time.Duration `yaml:"read_timeout"`                // HTTP server read timeout (default: 60s)
-	WriteTimeout        time.Duration `yaml:"write_timeout"`               // HTTP server write timeout (default: 10m or 1.5*request_timeout if set)
-	IdleTimeout         time.Duration `yaml:"idle_timeout"`                // HTTP server idle timeout (default: 20m or 2*write_timeout)
-	ModelPricesLink     string        `yaml:"model_prices_link,omitempty"` // URL or file path to model prices JSON - supports os.environ/VAR_NAME
+	Port                   int           `yaml:"port"`
+	MaxBodySizeMB          int           `yaml:"max_body_size_mb"`
+	ResponseBodyMultiplier int           `yaml:"response_body_multiplier"` // Multiplier for response body size limit relative to max_body_size_mb (default: 10)
+	RequestTimeout         time.Duration `yaml:"request_timeout"`
+	LoggingLevel           string        `yaml:"logging_level"`
+	MasterKey              string        `yaml:"master_key"`
+	DefaultModelsRPM       int           `yaml:"default_models_rpm"`
+	MaxIdleConns           int           `yaml:"max_idle_conns"`
+	MaxIdleConnsPerHost    int           `yaml:"max_idle_conns_per_host"`
+	IdleConnTimeout        time.Duration `yaml:"idle_conn_timeout"`
+	ReadTimeout            time.Duration `yaml:"read_timeout"`                // HTTP server read timeout (default: 60s)
+	WriteTimeout           time.Duration `yaml:"write_timeout"`               // HTTP server write timeout (default: 10m or 1.5*request_timeout if set)
+	IdleTimeout            time.Duration `yaml:"idle_timeout"`                // HTTP server idle timeout (default: 20m or 2*write_timeout)
+	ModelPricesLink        string        `yaml:"model_prices_link,omitempty"` // URL or file path to model prices JSON - supports os.environ/VAR_NAME
 }
 
 // ErrorCodeRuleConfig defines per-error-code ban rules
@@ -81,19 +82,20 @@ type Fail2BanConfig struct {
 func (s *ServerConfig) UnmarshalYAML(value *yaml.Node) error {
 	// Create a temporary struct with all string fields
 	type tempConfig struct {
-		Port                string `yaml:"port"`
-		MaxBodySizeMB       string `yaml:"max_body_size_mb"`
-		RequestTimeout      string `yaml:"request_timeout"`
-		LoggingLevel        string `yaml:"logging_level"`
-		MasterKey           string `yaml:"master_key"`
-		DefaultModelsRPM    string `yaml:"default_models_rpm"`
-		MaxIdleConns        string `yaml:"max_idle_conns"`
-		MaxIdleConnsPerHost string `yaml:"max_idle_conns_per_host"`
-		IdleConnTimeout     string `yaml:"idle_conn_timeout"`
-		ReadTimeout         string `yaml:"read_timeout"`
-		WriteTimeout        string `yaml:"write_timeout"`
-		IdleTimeout         string `yaml:"idle_timeout"`
-		ModelPricesLink     string `yaml:"model_prices_link,omitempty"`
+		Port                   string `yaml:"port"`
+		MaxBodySizeMB          string `yaml:"max_body_size_mb"`
+		ResponseBodyMultiplier string `yaml:"response_body_multiplier"`
+		RequestTimeout         string `yaml:"request_timeout"`
+		LoggingLevel           string `yaml:"logging_level"`
+		MasterKey              string `yaml:"master_key"`
+		DefaultModelsRPM       string `yaml:"default_models_rpm"`
+		MaxIdleConns           string `yaml:"max_idle_conns"`
+		MaxIdleConnsPerHost    string `yaml:"max_idle_conns_per_host"`
+		IdleConnTimeout        string `yaml:"idle_conn_timeout"`
+		ReadTimeout            string `yaml:"read_timeout"`
+		WriteTimeout           string `yaml:"write_timeout"`
+		IdleTimeout            string `yaml:"idle_timeout"`
+		ModelPricesLink        string `yaml:"model_prices_link,omitempty"`
 	}
 
 	var temp tempConfig
@@ -118,6 +120,16 @@ func (s *ServerConfig) UnmarshalYAML(value *yaml.Node) error {
 		if err != nil {
 			return fmt.Errorf("invalid max_body_size_mb: %w", err)
 		}
+	}
+
+	// ResponseBodyMultiplier
+	if temp.ResponseBodyMultiplier != "" {
+		s.ResponseBodyMultiplier, err = resolveEnvInt(temp.ResponseBodyMultiplier, 10)
+		if err != nil {
+			return fmt.Errorf("invalid response_body_multiplier: %w", err)
+		}
+	} else {
+		s.ResponseBodyMultiplier = 10 // Default value
 	}
 
 	// RequestTimeout
@@ -658,6 +670,10 @@ func (c *Config) Validate() error {
 
 	if c.Server.MaxBodySizeMB <= 0 {
 		return fmt.Errorf("invalid max_body_size_mb: %d", c.Server.MaxBodySizeMB)
+	}
+
+	if c.Server.ResponseBodyMultiplier <= 0 {
+		c.Server.ResponseBodyMultiplier = 10
 	}
 
 	// -1 means unlimited timeout

@@ -158,8 +158,8 @@ func TestProxyRequest_NoCredentialsAvailable(t *testing.T) {
 
 	bal := balancer.New(credentials, f2b, rl)
 
-	// Ban the only credential
-	f2b.RecordResponse("test1", "", 500)
+	// Ban the only credential for the model used in the request
+	f2b.RecordResponse("test1", "gpt-4", 500)
 
 	metrics := monitoring.New(false)
 	tm := createTestTokenManager(logger)
