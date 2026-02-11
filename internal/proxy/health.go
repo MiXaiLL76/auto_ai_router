@@ -37,8 +37,8 @@ func (p *Proxy) HealthCheck() (bool, *httputil.ProxyHealthResponse) {
 			}
 		}
 
-		// Check if credential is banned from balancer
-		isBanned := p.balancer.IsBanned(cred.Name)
+		// Check if credential has any banned models
+		isBanned := p.balancer.HasAnyBan(cred.Name)
 
 		credentialsInfo[cred.Name] = httputil.CredentialHealthStats{
 			Type:       string(cred.Type),
@@ -62,6 +62,7 @@ func (p *Proxy) HealthCheck() (bool, *httputil.ProxyHealthResponse) {
 		modelsInfo[modelKey] = httputil.ModelHealthStats{
 			Credential: pair.Credential,
 			Model:      pair.Model,
+			IsBanned:   p.balancer.IsBanned(pair.Credential, pair.Model),
 			CurrentRPM: p.rateLimiter.GetCurrentModelRPM(pair.Credential, pair.Model),
 			CurrentTPM: p.rateLimiter.GetCurrentModelTPM(pair.Credential, pair.Model),
 			LimitRPM:   p.rateLimiter.GetModelLimitRPM(pair.Credential, pair.Model),

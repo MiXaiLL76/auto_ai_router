@@ -96,9 +96,14 @@ func (r *RoundRobin) IsProxyCredential(credentialName string) bool {
 	return cred != nil && cred.Type == config.ProviderTypeProxy
 }
 
-// IsBanned checks if a credential is currently banned
-func (r *RoundRobin) IsBanned(credentialName string) bool {
-	return r.fail2ban.IsBanned(credentialName)
+// IsBanned checks if a specific credential+model pair is currently banned
+func (r *RoundRobin) IsBanned(credentialName, modelID string) bool {
+	return r.fail2ban.IsBanned(credentialName, modelID)
+}
+
+// HasAnyBan checks if a credential has any banned models
+func (r *RoundRobin) HasAnyBan(credentialName string) bool {
+	return r.fail2ban.HasAnyBan(credentialName)
 }
 
 // GetProxyCredentials returns all proxy type credentials
@@ -154,8 +159,8 @@ func (r *RoundRobin) next(modelID string, allowOnlyFallback bool) (*config.Crede
 			continue
 		}
 
-		// Check if credential is banned
-		if r.fail2ban.IsBanned(cred.Name) {
+		// Check if credential+model pair is banned
+		if r.fail2ban.IsBanned(cred.Name, modelID) {
 			monitoring.CredentialSelectionRejected.WithLabelValues("banned").Inc()
 			otherReasonsHit = true
 			continue
@@ -212,8 +217,8 @@ func (r *RoundRobin) next(modelID string, allowOnlyFallback bool) (*config.Crede
 	}
 }
 
-func (r *RoundRobin) RecordResponse(credentialName string, statusCode int) {
-	r.fail2ban.RecordResponse(credentialName, statusCode)
+func (r *RoundRobin) RecordResponse(credentialName, modelID string, statusCode int) {
+	r.fail2ban.RecordResponse(credentialName, modelID, statusCode)
 }
 
 func (r *RoundRobin) GetCredentials() []config.CredentialConfig {
@@ -238,7 +243,7 @@ func (r *RoundRobin) GetAvailableCount() int {
 
 	count := 0
 	for _, cred := range r.credentials {
-		if !r.fail2ban.IsBanned(cred.Name) {
+		if !r.fail2ban.HasAnyBan(cred.Name) {
 			count++
 		}
 	}

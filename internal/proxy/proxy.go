@@ -191,6 +191,7 @@ type ProxyResponse struct {
 func (p *Proxy) executeProxyRequest(
 	r *http.Request,
 	cred *config.CredentialConfig,
+	modelID string,
 	body []byte,
 	start time.Time,
 ) (*ProxyResponse, error) {
@@ -229,7 +230,7 @@ func (p *Proxy) executeProxyRequest(
 				"url", targetURL,
 			)
 		}
-		p.balancer.RecordResponse(cred.Name, statusCode)
+		p.balancer.RecordResponse(cred.Name, modelID, statusCode)
 		p.metrics.RecordRequest(cred.Name, r.URL.Path, statusCode, time.Since(start))
 		return nil, err
 	}
@@ -240,7 +241,7 @@ func (p *Proxy) executeProxyRequest(
 	}()
 
 	// Record response
-	p.balancer.RecordResponse(cred.Name, resp.StatusCode)
+	p.balancer.RecordResponse(cred.Name, modelID, resp.StatusCode)
 	p.metrics.RecordRequest(cred.Name, r.URL.Path, resp.StatusCode, time.Since(start))
 
 	p.logger.Debug("Proxy request forwarded",
@@ -282,7 +283,7 @@ func (p *Proxy) forwardToProxy(
 	body []byte,
 	start time.Time,
 ) (*ProxyResponse, error) {
-	return p.executeProxyRequest(r, cred, body, start)
+	return p.executeProxyRequest(r, cred, modelID, body, start)
 }
 
 func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
@@ -776,7 +777,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			)
 		}
 
-		p.balancer.RecordResponse(cred.Name, statusCode)
+		p.balancer.RecordResponse(cred.Name, modelID, statusCode)
 		p.metrics.RecordRequest(cred.Name, r.URL.Path, statusCode, time.Since(start))
 		http.Error(w, statusMessage, statusCode)
 		return
@@ -787,7 +788,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	p.balancer.RecordResponse(cred.Name, resp.StatusCode)
+	p.balancer.RecordResponse(cred.Name, modelID, resp.StatusCode)
 	p.metrics.RecordRequest(cred.Name, r.URL.Path, resp.StatusCode, time.Since(start))
 
 	// Log response headers

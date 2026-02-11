@@ -25,6 +25,7 @@ type CredentialHealthStats struct {
 type ModelHealthStats struct {
 	Credential string `json:"credential"`
 	Model      string `json:"model"`
+	IsBanned   bool   `json:"is_banned"`
 	CurrentRPM int    `json:"current_rpm"`
 	CurrentTPM int    `json:"current_tpm"`
 	LimitRPM   int    `json:"limit_rpm"`

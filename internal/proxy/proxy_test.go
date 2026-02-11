@@ -159,7 +159,7 @@ func TestProxyRequest_NoCredentialsAvailable(t *testing.T) {
 	bal := balancer.New(credentials, f2b, rl)
 
 	// Ban the only credential
-	f2b.RecordResponse("test1", 500)
+	f2b.RecordResponse("test1", "", 500)
 
 	metrics := monitoring.New(false)
 	tm := createTestTokenManager(logger)
@@ -302,8 +302,8 @@ func TestHealthCheck_Unhealthy(t *testing.T) {
 	bal := balancer.New(credentials, f2b, rl)
 
 	// Ban all credentials
-	f2b.RecordResponse("test1", 500)
-	f2b.RecordResponse("test2", 500)
+	f2b.RecordResponse("test1", "", 500)
+	f2b.RecordResponse("test2", "", 500)
 
 	metrics := monitoring.New(false)
 	tm := createTestTokenManager(logger)

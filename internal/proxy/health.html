@@ -153,7 +153,12 @@
                      data-tpm="{{ $model.CurrentTPM }}"
                      data-tpm-limit="{{ $model.LimitTPM }}">
                     <div>
-                        <div class="model-name">{{ $model.Model }}</div>
+                        <div class="model-name">
+                            {{ $model.Model }}
+                            {{ if $model.IsBanned }}
+                                <span class="credential-badge badge-banned">BANNED</span>
+                            {{ end }}
+                        </div>
                         <div class="model-cred">Credential: {{ $model.Credential }}</div>
                     </div>
                     <div class="model-stats">

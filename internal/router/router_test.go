@@ -86,7 +86,7 @@ func createProxyWithConfig(credentials []config.CredentialConfig, bannedCreds []
 
 	// Ban specified credentials
 	for _, credName := range bannedCreds {
-		f2b.RecordResponse(credName, 500)
+		f2b.RecordResponse(credName, "", 500)
 	}
 
 	metrics := monitoring.New(false)

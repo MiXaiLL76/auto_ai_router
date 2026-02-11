@@ -196,12 +196,12 @@ func TestRecordResponse(t *testing.T) {
 	bal := New(credentials, f2b, rl)
 
 	// Record error responses
-	bal.RecordResponse("cred1", 401)
-	bal.RecordResponse("cred1", 401)
-	bal.RecordResponse("cred1", 401)
+	bal.RecordResponse("cred1", "gpt-4", 401)
+	bal.RecordResponse("cred1", "gpt-4", 401)
+	bal.RecordResponse("cred1", "gpt-4", 401)
 
 	// Credential should be banned
-	assert.True(t, f2b.IsBanned("cred1"))
+	assert.True(t, f2b.IsBanned("cred1", "gpt-4"))
 }
 
 func TestGetCredentials(t *testing.T) {
@@ -237,9 +237,9 @@ func TestGetAvailableCount(t *testing.T) {
 	assert.Equal(t, 3, bal.GetAvailableCount())
 
 	// Ban one credential
-	f2b.RecordResponse("cred2", 401)
-	f2b.RecordResponse("cred2", 401)
-	f2b.RecordResponse("cred2", 401)
+	f2b.RecordResponse("cred2", "gpt-4", 401)
+	f2b.RecordResponse("cred2", "gpt-4", 401)
+	f2b.RecordResponse("cred2", "gpt-4", 401)
 
 	// Should have 2 available
 	assert.Equal(t, 2, bal.GetAvailableCount())
@@ -260,17 +260,17 @@ func TestGetBannedCount(t *testing.T) {
 	assert.Equal(t, 0, bal.GetBannedCount())
 
 	// Ban one credential
-	f2b.RecordResponse("cred1", 401)
-	f2b.RecordResponse("cred1", 401)
-	f2b.RecordResponse("cred1", 401)
+	f2b.RecordResponse("cred1", "gpt-4", 401)
+	f2b.RecordResponse("cred1", "gpt-4", 401)
+	f2b.RecordResponse("cred1", "gpt-4", 401)
 
 	// Should have 1 banned
 	assert.Equal(t, 1, bal.GetBannedCount())
 
 	// Ban another
-	f2b.RecordResponse("cred2", 500)
-	f2b.RecordResponse("cred2", 500)
-	f2b.RecordResponse("cred2", 500)
+	f2b.RecordResponse("cred2", "gpt-4", 500)
+	f2b.RecordResponse("cred2", "gpt-4", 500)
+	f2b.RecordResponse("cred2", "gpt-4", 500)
 
 	// Should have 2 banned
 	assert.Equal(t, 2, bal.GetBannedCount())
@@ -331,9 +331,9 @@ func TestNextForModel_BannedCredential(t *testing.T) {
 	bal := New(credentials, f2b, rl)
 
 	// Ban cred1
-	bal.RecordResponse("cred1", 401)
-	bal.RecordResponse("cred1", 401)
-	bal.RecordResponse("cred1", 401)
+	bal.RecordResponse("cred1", "", 401)
+	bal.RecordResponse("cred1", "", 401)
+	bal.RecordResponse("cred1", "", 401)
 
 	// Next should skip cred1 and return cred2
 	cred, err := bal.NextForModel("")
@@ -354,8 +354,8 @@ func TestNextForModel_AllBanned(t *testing.T) {
 
 	// Ban all credentials
 	for i := 0; i < 3; i++ {
-		bal.RecordResponse("cred1", 401)
-		bal.RecordResponse("cred2", 401)
+		bal.RecordResponse("cred1", "", 401)
+		bal.RecordResponse("cred2", "", 401)
 	}
 
 	// Next should return error
@@ -545,9 +545,9 @@ func TestNextFallbackForModel_SkipsBannedFallback(t *testing.T) {
 	bal := New(credentials, f2b, rl)
 
 	// Ban first proxy
-	bal.RecordResponse("proxy1", 500)
-	bal.RecordResponse("proxy1", 500)
-	bal.RecordResponse("proxy1", 500)
+	bal.RecordResponse("proxy1", "gpt-4o", 500)
+	bal.RecordResponse("proxy1", "gpt-4o", 500)
+	bal.RecordResponse("proxy1", "gpt-4o", 500)
 
 	cred, err := bal.NextFallbackForModel("gpt-4o")
 
@@ -687,7 +687,7 @@ func TestRoundRobin_GetCredentialsSnapshot_NoRace(t *testing.T) {
 			bal.GetAvailableCount()
 			bal.GetBannedCount()
 			if j%3 == 0 {
-				f2b.RecordResponse("cred1", 401)
+				f2b.RecordResponse("cred1", "gpt-4", 401)
 			}
 		}
 		done <- true
