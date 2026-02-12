@@ -35,74 +35,33 @@ func aggregateDailyOrganizationSpendLogs(
 	logger *slog.Logger,
 	requestIDs []string,
 ) error {
-	// Fetch spend logs for the given request_ids
-	rows, err := conn.Query(ctx, queries.QuerySelectUnprocessedSpendLogs, requestIDs)
+	records, err := loadUnprocessedSpendLogRecords(ctx, conn, logger, "Organization", requestIDs)
 	if err != nil {
-		logger.Error("[DB] Organization aggregation: failed to fetch spend logs", "error", err)
 		return err
 	}
-	defer rows.Close()
 
 	// Map to aggregate by unique key
 	aggregations := make(map[aggregateOrgKey]*aggregationValue)
 	totalRows := 0
 	skippedRows := 0
 
-	// Aggregate rows
-	for rows.Next() {
+	for _, record := range records {
 		totalRows++
-		var userID, date, apiKey string
-		var model, customLLMProvider, mcpNamespacedToolName, apiBase *string
-		var promptTokens, completionTokens int
-		var spend float64
-		var status *string
-		var requestID string
-		var teamID, organizationID, endUser, agentID, requestTags *string
-
-		err := rows.Scan(&userID, &date, &apiKey, &model, &customLLMProvider, &mcpNamespacedToolName, &apiBase,
-			&promptTokens, &completionTokens, &spend, &status, &requestID,
-			&teamID, &organizationID, &endUser, &agentID, &requestTags)
-		if err != nil {
-			logger.Error("[DB] Organization aggregation: failed to scan row", "error", err)
-			continue
-		}
 
 		// Skip if no organization_id
-		if organizationID == nil || *organizationID == "" {
+		if record.OrganizationID == "" {
 			skippedRows++
 			continue
 		}
 
-		// Handle nullable fields
-		modelStr := ""
-		if model != nil {
-			modelStr = *model
-		}
-		customProviderStr := ""
-		if customLLMProvider != nil {
-			customProviderStr = *customLLMProvider
-		}
-		mcpToolStr := ""
-		if mcpNamespacedToolName != nil {
-			mcpToolStr = *mcpNamespacedToolName
-		}
-		apiBaseStr := ""
-		if apiBase != nil {
-			apiBaseStr = *apiBase
-		}
-		statusStr := ""
-		if status != nil {
-			statusStr = *status
-		}
-
 		key := aggregateOrgKey{
-			organizationID:        *organizationID,
-			date:                  date,
-			apiKey:                apiKey,
-			model:                 modelStr,
-			customLLMProvider:     customProviderStr,
-			mcpNamespacedToolName: mcpToolStr,
-			endpoint:              apiBaseStr,
+			organizationID:        record.OrganizationID,
+			date:                  record.Date,
+			apiKey:                record.APIKey,
+			model:                 record.Model,
+			customLLMProvider:     record.CustomLLMProvider,
+			mcpNamespacedToolName: record.MCPNamespacedTool,
+			endpoint:              record.Endpoint,
 		}
 
 		if aggregations[key] == nil {
@@ -110,30 +69,25 @@ func aggregateDailyOrganizationSpendLogs(
 		}
 
 		agg := aggregations[key]
-		agg.promptTokens += int64(promptTokens)
-		agg.completionTokens += int64(completionTokens)
-		agg.spend += spend
+		agg.promptTokens += int64(record.PromptTokens)
+		agg.completionTokens += int64(record.CompletionTokens)
+		agg.spend += record.Spend
 		agg.apiRequests++
 
-		if statusStr == "success" {
+		if record.Status == "success" {
 			agg.successfulRequests++
 		} else {
 			agg.failedRequests++
 		}
 
 		logger.Debug("[DB] Organization aggregation: log accumulated",
-			"org_id", *organizationID,
-			"date", date,
-			"api_key", apiKey,
-			"model", modelStr,
+			"org_id", record.OrganizationID,
+			"date", record.Date,
+			"api_key", record.APIKey,
+			"model", record.Model,
 			"api_requests_total", agg.apiRequests,
 			"spend_total", agg.spend,
 		)
-	}
-
-	if rows.Err() != nil {
-		logger.Error("[DB] Organization aggregation: failed to iterate rows", "error", rows.Err())
-		return rows.Err()
 	}
 
 	logger.Info("[DB] Organization aggregation: scan complete",

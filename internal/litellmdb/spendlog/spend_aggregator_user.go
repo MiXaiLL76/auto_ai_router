@@ -45,78 +45,36 @@ func aggregateDailyUserSpendLogs(
 	logger *slog.Logger,
 	requestIDs []string,
 ) error {
-	// Fetch spend logs for the given request_ids
-	rows, err := conn.Query(ctx, queries.QuerySelectUnprocessedSpendLogs, requestIDs)
+	records, err := loadUnprocessedSpendLogRecords(ctx, conn, logger, "User", requestIDs)
 	if err != nil {
-		logger.Error("[DB] Aggregation: failed to fetch spend logs", "error", err)
 		return err
 	}
-	defer rows.Close()
 
 	// Map to aggregate by unique key (user_id, date, api_key, model, custom_llm_provider, mcp_namespaced_tool_name, endpoint)
 	aggregations := make(map[aggregationKey]*aggregationValue)
 
-	// Aggregate rows
-	for rows.Next() {
-		var userID, date, apiKey string
-		var model, customLLMProvider, mcpNamespacedToolName, apiBase *string
-		var promptTokens, completionTokens int
-		var spend float64
-		var status *string
-		var requestID string
-		var teamID, organizationID, endUser, agentID, requestTags *string
-
-		err := rows.Scan(&userID, &date, &apiKey, &model, &customLLMProvider, &mcpNamespacedToolName, &apiBase,
-			&promptTokens, &completionTokens, &spend, &status, &requestID,
-			&teamID, &organizationID, &endUser, &agentID, &requestTags)
-		if err != nil {
-			logger.Error("[DB] Aggregation: failed to scan row", "error", err)
-			continue
-		}
-
+	for _, record := range records {
 		logger.Debug("[DB] User aggregation: log scanned",
-			"request_id", requestID,
-			"user_id", userID,
-			"date", date,
-			"api_key_prefix", apiKey[:8],
-			"spend", spend,
+			"request_id", record.RequestID,
+			"user_id", record.UserID,
+			"date", record.Date,
+			"api_key_prefix", safeAPIKeyPrefix(record.APIKey),
+			"spend", record.Spend,
 		)
 
 		// Skip if no user_id
-		if userID == "" {
+		if record.UserID == "" {
 			continue
 		}
 
-		// Handle nullable fields
-		modelStr := ""
-		if model != nil {
-			modelStr = *model
-		}
-		customProviderStr := ""
-		if customLLMProvider != nil {
-			customProviderStr = *customLLMProvider
-		}
-		mcpToolStr := ""
-		if mcpNamespacedToolName != nil {
-			mcpToolStr = *mcpNamespacedToolName
-		}
-		apiBaseStr := ""
-		if apiBase != nil {
-			apiBaseStr = *apiBase
-		}
-		statusStr := ""
-		if status != nil {
-			statusStr = *status
-		}
-
 		key := aggregationKey{
-			userID:                userID,
-			date:                  date,
-			apiKey:                apiKey,
-			model:                 modelStr,
-			customLLMProvider:     customProviderStr,
-			mcpNamespacedToolName: mcpToolStr,
-			endpoint:              apiBaseStr,
+			userID:                record.UserID,
+			date:                  record.Date,
+			apiKey:                record.APIKey,
+			model:                 record.Model,
+			customLLMProvider:     record.CustomLLMProvider,
+			mcpNamespacedToolName: record.MCPNamespacedTool,
+			endpoint:              record.Endpoint,
 		}
 
 		if aggregations[key] == nil {
@@ -124,21 +82,16 @@ func aggregateDailyUserSpendLogs(
 		}
 
 		agg := aggregations[key]
-		agg.promptTokens += int64(promptTokens)
-		agg.completionTokens += int64(completionTokens)
-		agg.spend += spend
+		agg.promptTokens += int64(record.PromptTokens)
+		agg.completionTokens += int64(record.CompletionTokens)
+		agg.spend += record.Spend
 		agg.apiRequests++
 
-		if statusStr == "success" {
+		if record.Status == "success" {
 			agg.successfulRequests++
 		} else {
 			agg.failedRequests++
 		}
-	}
-
-	if rows.Err() != nil {
-		logger.Error("[DB] Aggregation: failed to iterate rows", "error", rows.Err())
-		return rows.Err()
 	}
 
 	if len(aggregations) == 0 {
@@ -178,4 +131,11 @@ func aggregateDailyUserSpendLogs(
 	)
 
 	return nil
+}
+
+func safeAPIKeyPrefix(apiKey string) string {
+	if len(apiKey) <= 8 {
+		return apiKey
+	}
+	return apiKey[:8]
 }

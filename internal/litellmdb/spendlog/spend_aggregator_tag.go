@@ -48,76 +48,35 @@ func aggregateDailyTagSpendLogs(
 	logger *slog.Logger,
 	requestIDs []string,
 ) error {
-	// Fetch spend logs for the given request_ids
-	rows, err := conn.Query(ctx, queries.QuerySelectUnprocessedSpendLogs, requestIDs)
+	records, err := loadUnprocessedSpendLogRecords(ctx, conn, logger, "Tag", requestIDs)
 	if err != nil {
-		logger.Error("[DB] Tag aggregation: failed to fetch spend logs", "error", err)
 		return err
 	}
-	defer rows.Close()
 
 	// Map to aggregate by unique key
 	aggregations := make(map[aggregateTagKey]*aggregateTagValue)
 	totalRows := 0
 	skippedRows := 0
 
-	// Aggregate rows
-	for rows.Next() {
+	for _, record := range records {
 		totalRows++
-		var userID, date, apiKey string
-		var model, customLLMProvider, mcpNamespacedToolName, apiBase *string
-		var promptTokens, completionTokens int
-		var spend float64
-		var status *string
-		var requestID string
-		var teamID, organizationID, endUser, agentID, requestTags *string
-
-		err := rows.Scan(&userID, &date, &apiKey, &model, &customLLMProvider, &mcpNamespacedToolName, &apiBase,
-			&promptTokens, &completionTokens, &spend, &status, &requestID,
-			&teamID, &organizationID, &endUser, &agentID, &requestTags)
-		if err != nil {
-			logger.Error("[DB] Tag aggregation: failed to scan row", "error", err)
-			continue
-		}
 
 		// Skip if no tags
-		if requestTags == nil || *requestTags == "" || *requestTags == "[]" {
+		if record.RequestTags == "" || record.RequestTags == "[]" {
 			skippedRows++
 			continue
 		}
 
 		// Parse tags from JSON array
 		var tags []string
-		err = json.Unmarshal([]byte(*requestTags), &tags)
+		err = json.Unmarshal([]byte(record.RequestTags), &tags)
 		if err != nil {
 			logger.Warn("[DB] Tag aggregation: failed to unmarshal request_tags JSON",
-				"request_id", requestID,
-				"request_tags", *requestTags,
+				"request_id", record.RequestID,
+				"request_tags", record.RequestTags,
 				"error", err,
 			)
 			continue
-		}
-
-		// Handle nullable fields
-		modelStr := ""
-		if model != nil {
-			modelStr = *model
-		}
-		customProviderStr := ""
-		if customLLMProvider != nil {
-			customProviderStr = *customLLMProvider
-		}
-		mcpToolStr := ""
-		if mcpNamespacedToolName != nil {
-			mcpToolStr = *mcpNamespacedToolName
-		}
-		apiBaseStr := ""
-		if apiBase != nil {
-			apiBaseStr = *apiBase
-		}
-		statusStr := ""
-		if status != nil {
-			statusStr = *status
 		}
 
 		// For each tag in the array, aggregate
@@ -128,37 +87,32 @@ func aggregateDailyTagSpendLogs(
 
 			key := aggregateTagKey{
 				tag:                   tag,
-				date:                  date,
-				apiKey:                apiKey,
-				model:                 modelStr,
-				customLLMProvider:     customProviderStr,
-				mcpNamespacedToolName: mcpToolStr,
-				endpoint:              apiBaseStr,
+				date:                  record.Date,
+				apiKey:                record.APIKey,
+				model:                 record.Model,
+				customLLMProvider:     record.CustomLLMProvider,
+				mcpNamespacedToolName: record.MCPNamespacedTool,
+				endpoint:              record.Endpoint,
 			}
 
 			if aggregations[key] == nil {
 				aggregations[key] = &aggregateTagValue{
-					requestID: requestID, // Store first request_id
+					requestID: record.RequestID, // Store first request_id
 				}
 			}
 
 			agg := aggregations[key]
-			agg.promptTokens += int64(promptTokens)
-			agg.completionTokens += int64(completionTokens)
-			agg.spend += spend
+			agg.promptTokens += int64(record.PromptTokens)
+			agg.completionTokens += int64(record.CompletionTokens)
+			agg.spend += record.Spend
 			agg.apiRequests++
 
-			if statusStr == "success" {
+			if record.Status == "success" {
 				agg.successfulRequests++
 			} else {
 				agg.failedRequests++
 			}
 		}
-	}
-
-	if rows.Err() != nil {
-		logger.Error("[DB] Tag aggregation: failed to iterate rows", "error", rows.Err())
-		return rows.Err()
 	}
 
 	logger.Debug("[DB] Tag aggregation: scan complete",

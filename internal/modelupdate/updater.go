@@ -61,12 +61,12 @@ func UpdateAllProxyCredentials(
 			defer wg.Done()
 
 			// Fetch models from proxy
-			remoteModels := modelManager.GetRemoteModels(c)
+			remoteModels, err := modelManager.GetRemoteModelsWithError(c)
 
 			resultsChan <- proxyResult{
 				credential: c,
 				models:     remoteModels,
-				err:        nil,
+				err:        err,
 			}
 		}(cred)
 	}

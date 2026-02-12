@@ -334,22 +334,25 @@ func TestLogger_StatsMetricsIncrement(t *testing.T) {
 		Logger:           testhelpers.NewTestLogger(),
 	}
 
-	logger := NewLogger(nil, cfg)
-	logger.Start()
-
-	time.Sleep(50 * time.Millisecond)
+	// Do not start background workers in this test.
+	// Starting workers with nil pool causes shutdown retry backoff path (1s+5s+30s),
+	// which makes this unit test unnecessarily slow.
+	logger := &Logger{
+		pool:     nil,
+		config:   cfg,
+		logger:   cfg.Logger,
+		queue:    make(chan *models.SpendLogEntry, cfg.LogQueueSize),
+		stopChan: make(chan struct{}),
+	}
 
 	// Log some entries
 	for i := 0; i < 3; i++ {
 		_ = logger.Log(&models.SpendLogEntry{RequestID: "test-entry-" + fmt.Sprint(i)})
 	}
 
-	time.Sleep(50 * time.Millisecond)
-
 	stats := logger.Stats()
 	assert.GreaterOrEqual(t, stats.Queued, uint64(3))
-
-	_ = logger.Shutdown(context.Background())
+	assert.Equal(t, 3, stats.QueueLen)
 }
 
 func TestLogger_DrainQueueOnShutdown(t *testing.T) {

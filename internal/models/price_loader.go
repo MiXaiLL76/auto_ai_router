@@ -65,15 +65,14 @@ func LoadModelPrices(link string) (map[string]*ModelPrice, error) {
 // loadFromFile reads model prices from a file
 func loadFromFile(filePath string) ([]byte, error) {
 	// Validate path to prevent directory traversal attacks
-	cleanPath := filepath.Clean(filePath)
-	if cleanPath != filePath {
-		// Path was cleaned (had .. or other suspicious patterns)
-		// This is a security check - relative paths are OK, but directory traversal is not
-		return nil, fmt.Errorf("path contains invalid patterns: %s", filePath)
+	if hasPathTraversal(filePath) {
+		return nil, fmt.Errorf("path contains traversal segments: %s", filePath)
 	}
 
+	cleanPath := filepath.Clean(filePath)
+
 	// Check file size first
-	stat, err := os.Stat(filePath)
+	stat, err := os.Stat(cleanPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to stat file: %w", err)
 	}
@@ -82,12 +81,22 @@ func loadFromFile(filePath string) ([]byte, error) {
 		return nil, fmt.Errorf("model prices file exceeds 100MB: %d bytes", stat.Size())
 	}
 
-	data, err := os.ReadFile(filePath)
+	data, err := os.ReadFile(cleanPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read file: %w", err)
 	}
 
 	return data, nil
+}
+
+// hasPathTraversal checks whether a path contains explicit ".." traversal segments.
+func hasPathTraversal(path string) bool {
+	for _, part := range strings.Split(filepath.ToSlash(path), "/") {
+		if part == ".." {
+			return true
+		}
+	}
+	return false
 }
 
 // loadFromHTTP fetches model prices from HTTP(S) endpoint

@@ -68,22 +68,27 @@ func (o *openAIStreamUsageExtractor) ExtractUsage(chunk []byte) *StreamUsageInfo
 		} `json:"usage"`
 	}
 
-	if err := json.Unmarshal(chunk, &data); err != nil {
-		return nil
+	payloads := extractJSONPayloadsFromStreamChunk(chunk)
+	for i := len(payloads) - 1; i >= 0; i-- {
+		if err := json.Unmarshal(payloads[i], &data); err != nil {
+			continue
+		}
+
+		// Check if usage info is present (both fields can't be 0 for valid usage)
+		if data.Usage.PromptTokens == 0 && data.Usage.CompletionTokens == 0 {
+			continue
+		}
+
+		return &StreamUsageInfo{
+			PromptTokens:      data.Usage.PromptTokens,
+			CompletionTokens:  data.Usage.CompletionTokens,
+			CachedTokens:      data.Usage.PromptTokensDetails.CachedTokens,
+			AudioInputTokens:  data.Usage.PromptTokensDetails.AudioTokens,
+			AudioOutputTokens: data.Usage.CompletionTokensDetails.AudioTokens,
+		}
 	}
 
-	// Check if usage info is present (both fields can't be 0 for valid usage)
-	if data.Usage.PromptTokens == 0 && data.Usage.CompletionTokens == 0 {
-		return nil
-	}
-
-	return &StreamUsageInfo{
-		PromptTokens:      data.Usage.PromptTokens,
-		CompletionTokens:  data.Usage.CompletionTokens,
-		CachedTokens:      data.Usage.PromptTokensDetails.CachedTokens,
-		AudioInputTokens:  data.Usage.PromptTokensDetails.AudioTokens,
-		AudioOutputTokens: data.Usage.CompletionTokensDetails.AudioTokens,
-	}
+	return nil
 }
 
 // anthropicStreamUsageExtractor implements StreamUsageExtractor for Anthropic format
@@ -103,24 +108,59 @@ func (a *anthropicStreamUsageExtractor) ExtractUsage(chunk []byte) *StreamUsageI
 		} `json:"usage"`
 	}
 
-	if err := json.Unmarshal(chunk, &data); err != nil {
+	payloads := extractJSONPayloadsFromStreamChunk(chunk)
+	for i := len(payloads) - 1; i >= 0; i-- {
+		if err := json.Unmarshal(payloads[i], &data); err != nil {
+			continue
+		}
+
+		// Check if usage info is present
+		if data.Usage.InputTokens == 0 && data.Usage.OutputTokens == 0 {
+			continue
+		}
+
+		return &StreamUsageInfo{
+			PromptTokens:        data.Usage.InputTokens,
+			CompletionTokens:    data.Usage.OutputTokens,
+			CacheCreationTokens: data.Usage.CacheCreationInputTokens,
+			CacheReadTokens:     data.Usage.CacheReadInputTokens,
+			// Anthropic separates cache_creation (cached prompt tokens)
+			// For logging purposes, we combine under CachedTokens
+			CachedTokens: data.Usage.CacheReadInputTokens,
+		}
+	}
+
+	return nil
+}
+
+// extractJSONPayloadsFromStreamChunk extracts JSON payload candidates from raw stream chunks.
+// Supports both plain JSON chunks and SSE-formatted chunks (lines prefixed with "data: ").
+func extractJSONPayloadsFromStreamChunk(chunk []byte) [][]byte {
+	trimmed := strings.TrimSpace(string(chunk))
+	if trimmed == "" {
 		return nil
 	}
 
-	// Check if usage info is present
-	if data.Usage.InputTokens == 0 && data.Usage.OutputTokens == 0 {
-		return nil
+	// Fast path: non-SSE plain JSON
+	if !strings.Contains(trimmed, "data:") {
+		return [][]byte{[]byte(trimmed)}
 	}
 
-	return &StreamUsageInfo{
-		PromptTokens:        data.Usage.InputTokens,
-		CompletionTokens:    data.Usage.OutputTokens,
-		CacheCreationTokens: data.Usage.CacheCreationInputTokens,
-		CacheReadTokens:     data.Usage.CacheReadInputTokens,
-		// Anthropic separates cache_creation (cached prompt tokens)
-		// For logging purposes, we combine under CachedTokens
-		CachedTokens: data.Usage.CacheReadInputTokens,
+	lines := strings.Split(trimmed, "\n")
+	payloads := make([][]byte, 0, len(lines))
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if payload == "" || payload == "[DONE]" {
+			continue
+		}
+		payloads = append(payloads, []byte(payload))
 	}
+
+	return payloads
 }
 
 // getStreamUsageExtractor returns the appropriate usage extractor for a provider.

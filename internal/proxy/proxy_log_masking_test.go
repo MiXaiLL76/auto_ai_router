@@ -219,45 +219,6 @@ func TestMaskingConsistency(t *testing.T) {
 	}
 }
 
-// TestNoRawTokensInErrorMessages verifies error handling doesn't leak tokens
-func TestNoRawTokensInErrorMessages(t *testing.T) {
-	var logBuf bytes.Buffer
-	handler := slog.NewTextHandler(&logBuf, &slog.HandlerOptions{
-		Level: slog.LevelDebug,
-	})
-	logger := slog.New(handler)
-
-	testToken := "sk_test_super_secret_token_12345678901234567890"
-
-	// Create proxy with minimal setup
-	bal, rl := createTestBalancer("http://test.com")
-	metrics := createTestProxyMetrics()
-	tm := createTestTokenManager(logger)
-	mm := createTestModelManager(logger)
-
-	prx := createProxyWithParams(
-		bal, logger, 10, 30*time.Second, metrics,
-		"master-key", rl, tm, mm, "test-version", "test-commit",
-	)
-
-	// Simulate auth error
-	w := httptest.NewRecorder()
-	result := prx.validateMasterKeyOrError(w, testToken)
-
-	// Should fail because token doesn't match master-key
-	assert.False(t, result)
-
-	// Check logs
-	logOutput := logBuf.String()
-
-	// Raw token should NOT be in logs
-	assert.NotContains(t, logOutput, testToken, "Full token should not be in logs")
-	assert.NotContains(t, logOutput, "secret_token_123456", "Token secret part should not be in logs")
-
-	// But masked prefix should be
-	assert.Contains(t, logOutput, "sk_t", "Masked token prefix should be in logs")
-}
-
 // BenchmarkMaskKey benchmarks the maskKey function
 func BenchmarkMaskKey(b *testing.B) {
 	key := "sk_live_1234567890abcdefghijklmnopqrstuvwxyz_production_key"

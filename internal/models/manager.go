@@ -346,7 +346,14 @@ func (m *Manager) GetAllModels() ModelsResponse {
 		m.logger.Debug("Fetching models from proxy credential",
 			"credential", cred.Name,
 		)
-		remoteModels := m.GetRemoteModels(&cred)
+		remoteModels, err := m.GetRemoteModelsWithError(&cred)
+		if err != nil {
+			m.logger.Warn("Failed to fetch models from proxy during full model list refresh",
+				"credential", cred.Name,
+				"error", err,
+			)
+			continue
+		}
 		m.logger.Debug("Got models from proxy",
 			"credential", cred.Name,
 			"remote_models_count", len(remoteModels),
@@ -707,10 +714,21 @@ func (m *Manager) GetModelsForCredential(credentialName string) []Model {
 	return result
 }
 
-// GetRemoteModels fetches models from a remote proxy credential with caching
+// GetRemoteModels fetches models from a remote proxy credential with caching.
+// Deprecated: use GetRemoteModelsWithError to handle upstream fetch errors explicitly.
 func (m *Manager) GetRemoteModels(cred *config.CredentialConfig) []Model {
-	if cred.Type != config.ProviderTypeProxy {
+	models, err := m.GetRemoteModelsWithError(cred)
+	if err != nil {
 		return nil
+	}
+	return models
+}
+
+// GetRemoteModelsWithError fetches models from a remote proxy credential with caching.
+// Returns explicit error when remote fetch fails.
+func (m *Manager) GetRemoteModelsWithError(cred *config.CredentialConfig) ([]Model, error) {
+	if cred.Type != config.ProviderTypeProxy {
+		return nil, nil
 	}
 
 	// Check cache first
@@ -726,7 +744,7 @@ func (m *Manager) GetRemoteModels(cred *config.CredentialConfig) []Model {
 			"models_count", cachedCount,
 			"expires_in", expiresIn,
 		)
-		return cachedModels
+		return cachedModels, nil
 	}
 	m.mu.RUnlock()
 
@@ -743,7 +761,7 @@ func (m *Manager) GetRemoteModels(cred *config.CredentialConfig) []Model {
 			"credential", cred.Name,
 			"error", err,
 		)
-		return nil
+		return nil, err
 	}
 
 	// Cache the result
@@ -760,5 +778,5 @@ func (m *Manager) GetRemoteModels(cred *config.CredentialConfig) []Model {
 		"expires_in", m.cacheExpiration.Seconds(),
 	)
 
-	return modelsResp.Data
+	return modelsResp.Data, nil
 }

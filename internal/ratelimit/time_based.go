@@ -46,7 +46,6 @@ func (l *TimeBasedRateLimiter) Wait(ctx context.Context, key string, minInterval
 		l.mu.Unlock()
 		return nil
 	}
-	l.last[key] = now.Add(waitFor)
 	l.mu.Unlock()
 
 	timer := time.NewTimer(waitFor)
@@ -55,6 +54,9 @@ func (l *TimeBasedRateLimiter) Wait(ctx context.Context, key string, minInterval
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-timer.C:
+		l.mu.Lock()
+		l.last[key] = utils.NowUTC()
+		l.mu.Unlock()
 		return nil
 	}
 }

@@ -7,6 +7,8 @@ import (
 	"math/rand"
 	"net/http"
 	"time"
+
+	"github.com/mixaill76/auto_ai_router/internal/config"
 )
 
 // RetryReason describes why a request is being retried
@@ -207,26 +209,40 @@ func (p *Proxy) TryFallbackProxy(
 		return false, "fallback_request_failed"
 	}
 
-	// Write response headers (skip hop-by-hop headers)
-	for key, values := range proxyResp.Headers {
-		if isHopByHopHeader(key) {
-			continue
+	if proxyResp.IsStreaming {
+		totalTokens, err := p.writeProxyStreamingResponseWithTokens(w, proxyResp, fallbackCred.Name)
+		if err != nil {
+			p.logger.Error("Failed to write fallback streaming proxy response",
+				"fallback_credential", fallbackCred.Name,
+				"error", err,
+			)
+			return false, "fallback_stream_write_failed"
 		}
-		// Skip Content-Length and Transfer-Encoding - we'll set them correctly
-		if key == "Content-Length" || key == "Transfer-Encoding" {
-			continue
+		if totalTokens > 0 {
+			p.rateLimiter.ConsumeTokens(fallbackCred.Name, totalTokens)
+			if modelID != "" {
+				p.rateLimiter.ConsumeModelTokens(fallbackCred.Name, modelID, totalTokens)
+			}
+			p.logger.Debug("Fallback proxy streaming token usage recorded",
+				"fallback_credential", fallbackCred.Name,
+				"model", modelID,
+				"tokens", totalTokens,
+			)
 		}
-		for _, value := range values {
-			w.Header().Add(key, value)
+	} else {
+		p.writeProxyResponse(w, proxyResp)
+		tokens := extractTokensFromResponse(string(proxyResp.Body), config.ProviderTypeOpenAI)
+		if tokens > 0 {
+			p.rateLimiter.ConsumeTokens(fallbackCred.Name, tokens)
+			if modelID != "" {
+				p.rateLimiter.ConsumeModelTokens(fallbackCred.Name, modelID, tokens)
+			}
+			p.logger.Debug("Fallback proxy token usage recorded",
+				"fallback_credential", fallbackCred.Name,
+				"model", modelID,
+				"tokens", tokens,
+			)
 		}
-	}
-
-	// Set correct Content-Length for the actual response body
-	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(proxyResp.Body)))
-
-	w.WriteHeader(proxyResp.StatusCode)
-	if _, err := w.Write(proxyResp.Body); err != nil {
-		p.logger.Error("Failed to write fallback proxy response body", "error", err)
 	}
 
 	// Log that retry was completed

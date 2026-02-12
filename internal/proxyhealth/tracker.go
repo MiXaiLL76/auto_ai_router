@@ -15,6 +15,7 @@ type Tracker struct {
 	healthStatus         map[string]bool      // true = healthy, false = unhealthy
 	failureCount         map[string]int       // consecutive failures per proxy
 	lastStatusChangeTime map[string]time.Time // track when status changed
+	recovered            map[string]bool      // one-shot recovered markers
 }
 
 // NewTracker creates a new proxy health tracker with empty state.
@@ -23,6 +24,7 @@ func NewTracker() *Tracker {
 		healthStatus:         make(map[string]bool),
 		failureCount:         make(map[string]int),
 		lastStatusChangeTime: make(map[string]time.Time),
+		recovered:            make(map[string]bool),
 	}
 }
 
@@ -39,6 +41,7 @@ func (t *Tracker) RecordSuccess(proxyName string) {
 	// Record status change time if transitioning from unhealthy to healthy
 	if !wasHealthy {
 		t.lastStatusChangeTime[proxyName] = utils.NowUTC()
+		t.recovered[proxyName] = true
 	}
 }
 
@@ -60,6 +63,7 @@ func (t *Tracker) RecordFailure(proxyName string, _ error) {
 		if wasHealthy {
 			t.lastStatusChangeTime[proxyName] = utils.NowUTC()
 		}
+		delete(t.recovered, proxyName)
 	}
 }
 
@@ -105,18 +109,15 @@ func (t *Tracker) GetFailedNames() []string {
 // A proxy is considered "recovered" if it was previously unhealthy and now is healthy,
 // based on the lastStatusChangeTime tracking.
 func (t *Tracker) GetRecoveredNames() []string {
-	t.mu.RLock()
-	defer t.mu.RUnlock()
+	t.mu.Lock()
+	defer t.mu.Unlock()
 
 	recovered := make([]string, 0)
-
-	// A simple heuristic: if a proxy is healthy and was marked unhealthy recently,
-	// it's considered recovered. More sophisticated logic can be added as needed.
-	for name, isHealthy := range t.healthStatus {
-		if isHealthy && t.failureCount[name] > 0 {
-			// This proxy is healthy but had previous failures - it recovered
+	for name := range t.recovered {
+		if t.healthStatus[name] {
 			recovered = append(recovered, name)
 		}
+		delete(t.recovered, name)
 	}
 
 	return recovered
