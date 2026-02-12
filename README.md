@@ -122,32 +122,33 @@ models:
 
 ### Параметры сервера (server)
 
-| Параметр | Тип | Дефолт | Описание |
-|----------|-----|--------|---------|
-| `port` | int | 8080 | Порт для прослушивания |
-| `max_body_size_mb` | int | 100 | Максимальный размер тела запроса (МБ) |
-| `response_body_multiplier` | int | 10 | Множитель для лимита размера ответа |
-| `request_timeout` | duration | 60s | Таймаут запроса |
-| `write_timeout` | duration | 60s | HTTP таймаут записи ответа |
-| `idle_timeout` | duration | 2m | HTTP таймаут простоя соединения |
-| `idle_conn_timeout` | duration | 120s | Таймаут простоя для переиспользуемых соединений |
-| `max_idle_conns` | int | 200 | Максимальное количество idle соединений |
-| `max_idle_conns_per_host` | int | 20 | Максимум idle соединений на один хост |
-| `logging_level` | string | info | Уровень логирования (info, debug, error) |
-| `master_key` | string | - | **Требуется**: Мастер-ключ авторизации |
-| `default_models_rpm` | int | -1 | RPM лимит по умолчанию (-1 = без лимита) |
-| `model_prices_link` | string | - | Опционально: URL или путь к JSON с ценами моделей |
+| Параметр                   | Тип      | Дефолт | Описание                                          |
+| -------------------------- | -------- | ------ | ------------------------------------------------- |
+| `port`                     | int      | 8080   | Порт для прослушивания                            |
+| `max_body_size_mb`         | int      | 100    | Максимальный размер тела запроса (МБ)             |
+| `response_body_multiplier` | int      | 10     | Множитель для лимита размера ответа               |
+| `request_timeout`          | duration | 60s    | Таймаут запроса                                   |
+| `write_timeout`            | duration | 60s    | HTTP таймаут записи ответа                        |
+| `idle_timeout`             | duration | 2m     | HTTP таймаут простоя соединения                   |
+| `idle_conn_timeout`        | duration | 120s   | Таймаут простоя для переиспользуемых соединений   |
+| `max_idle_conns`           | int      | 200    | Максимальное количество idle соединений           |
+| `max_idle_conns_per_host`  | int      | 20     | Максимум idle соединений на один хост             |
+| `logging_level`            | string   | info   | Уровень логирования (info, debug, error)          |
+| `master_key`               | string   | -      | **Требуется**: Мастер-ключ авторизации            |
+| `default_models_rpm`       | int      | -1     | RPM лимит по умолчанию (-1 = без лимита)          |
+| `model_prices_link`        | string   | -      | Опционально: URL или путь к JSON с ценами моделей |
 
 ### Параметры Fail2Ban (fail2ban)
 
-| Параметр | Описание |
-|----------|---------|
-| `max_attempts` | Максимум попыток до бана |
-| `ban_duration` | Длительность бана ("permanent" для постоянного) |
-| `error_codes` | Список HTTP кодов для срабатывания бана |
+| Параметр           | Описание                                         |
+| ------------------ | ------------------------------------------------ |
+| `max_attempts`     | Максимум попыток до бана                         |
+| `ban_duration`     | Длительность бана ("permanent" для постоянного)  |
+| `error_codes`      | Список HTTP кодов для срабатывания бана          |
 | `error_code_rules` | Опционально: правила для конкретных кодов ошибок |
 
 Пример с правилами:
+
 ```yaml
 fail2ban:
   max_attempts: 3
@@ -161,11 +162,11 @@ fail2ban:
 
 ### Параметры мониторинга (monitoring)
 
-| Параметр | Тип | Описание |
-|----------|-----|---------|
-| `prometheus_enabled` | bool | Включить Prometheus метрики на `/metrics` |
-| `log_errors` | bool | Логировать ошибки в файл |
-| `errors_log_path` | string | Путь к файлу логирования ошибок |
+| Параметр             | Тип    | Описание                                  |
+| -------------------- | ------ | ----------------------------------------- |
+| `prometheus_enabled` | bool   | Включить Prometheus метрики на `/metrics` |
+| `log_errors`         | bool   | Логировать ошибки в файл                  |
+| `errors_log_path`    | string | Путь к файлу логирования ошибок           |
 
 **Примечание**: `/health` endpoint фиксирован на `"/health"` и недоступен для конфигурирования.
 
@@ -173,24 +174,25 @@ fail2ban:
 
 Интеграция с LiteLLM базой для логирования расходов и авторизации:
 
-| Параметр | Тип | Дефолт | Описание |
-|----------|-----|--------|---------|
-| `enabled` | bool | false | Включить интеграцию |
-| `is_required` | bool | false | Необходима ли БД при старте |
-| `database_url` | string | - | PostgreSQL connection string (поддерживает env переменные) |
-| `max_conns` | int | 25 | Максимальное количество соединений |
-| `min_conns` | int | 5 | Минимальное количество соединений |
-| `health_check_interval` | duration | 10s | Интервал проверки здоровья БД |
-| `connect_timeout` | duration | 5s | Таймаут подключения |
-| `auth_cache_ttl` | duration | 20s | TTL кэша авторизации |
-| `auth_cache_size` | int | 10000 | Размер кэша авторизации |
-| `log_queue_size` | int | 5000 | Размер очереди логирования расходов |
-| `log_batch_size` | int | 100 | Размер батча при вставке логов |
-| `log_flush_interval` | duration | 5s | Интервал сброса логов в БД |
-| `log_retry_attempts` | int | 3 | Количество попыток повтора при ошибке |
-| `log_retry_delay` | duration | 1s | Задержка между попытками |
+| Параметр                | Тип      | Дефолт | Описание                                                   |
+| ----------------------- | -------- | ------ | ---------------------------------------------------------- |
+| `enabled`               | bool     | false  | Включить интеграцию                                        |
+| `is_required`           | bool     | false  | Необходима ли БД при старте                                |
+| `database_url`          | string   | -      | PostgreSQL connection string (поддерживает env переменные) |
+| `max_conns`             | int      | 25     | Максимальное количество соединений                         |
+| `min_conns`             | int      | 5      | Минимальное количество соединений                          |
+| `health_check_interval` | duration | 10s    | Интервал проверки здоровья БД                              |
+| `connect_timeout`       | duration | 5s     | Таймаут подключения                                        |
+| `auth_cache_ttl`        | duration | 20s    | TTL кэша авторизации                                       |
+| `auth_cache_size`       | int      | 10000  | Размер кэша авторизации                                    |
+| `log_queue_size`        | int      | 5000   | Размер очереди логирования расходов                        |
+| `log_batch_size`        | int      | 100    | Размер батча при вставке логов                             |
+| `log_flush_interval`    | duration | 5s     | Интервал сброса логов в БД                                 |
+| `log_retry_attempts`    | int      | 3      | Количество попыток повтора при ошибке                      |
+| `log_retry_delay`       | duration | 1s     | Задержка между попытками                                   |
 
 Пример конфигурации:
+
 ```yaml
 litellm_db:
   enabled: true
