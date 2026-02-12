@@ -69,8 +69,11 @@ ______________________________________________________________________
 ```yaml
 server:
   port: 8080
-  master_key: "sk-your-master-key-here"  # Требуется: ключ авторизации
+  max_body_size_mb: 100  # Максимальный размер тела запроса
+  request_timeout: 60s  # Таймаут запроса
   logging_level: info  # info, debug, error
+  master_key: "sk-your-master-key-here"  # Требуется: ключ авторизации
+  default_models_rpm: -1  # -1 = без лимита (default)
 
 fail2ban:
   max_attempts: 3
@@ -115,6 +118,87 @@ models:
     credential: vertex_ai
     rpm: 100
     tpm: 50000
+```
+
+### Параметры сервера (server)
+
+| Параметр | Тип | Дефолт | Описание |
+|----------|-----|--------|---------|
+| `port` | int | 8080 | Порт для прослушивания |
+| `max_body_size_mb` | int | 100 | Максимальный размер тела запроса (МБ) |
+| `response_body_multiplier` | int | 10 | Множитель для лимита размера ответа |
+| `request_timeout` | duration | 60s | Таймаут запроса |
+| `write_timeout` | duration | 60s | HTTP таймаут записи ответа |
+| `idle_timeout` | duration | 2m | HTTP таймаут простоя соединения |
+| `idle_conn_timeout` | duration | 120s | Таймаут простоя для переиспользуемых соединений |
+| `max_idle_conns` | int | 200 | Максимальное количество idle соединений |
+| `max_idle_conns_per_host` | int | 20 | Максимум idle соединений на один хост |
+| `logging_level` | string | info | Уровень логирования (info, debug, error) |
+| `master_key` | string | - | **Требуется**: Мастер-ключ авторизации |
+| `default_models_rpm` | int | -1 | RPM лимит по умолчанию (-1 = без лимита) |
+| `model_prices_link` | string | - | Опционально: URL или путь к JSON с ценами моделей |
+
+### Параметры Fail2Ban (fail2ban)
+
+| Параметр | Описание |
+|----------|---------|
+| `max_attempts` | Максимум попыток до бана |
+| `ban_duration` | Длительность бана ("permanent" для постоянного) |
+| `error_codes` | Список HTTP кодов для срабатывания бана |
+| `error_code_rules` | Опционально: правила для конкретных кодов ошибок |
+
+Пример с правилами:
+```yaml
+fail2ban:
+  max_attempts: 3
+  ban_duration: permanent
+  error_codes: [401, 403, 429, 500, 502, 503, 504]
+  error_code_rules:
+    - code: 429  # Rate limit ошибки
+      max_attempts: 5
+      ban_duration: 5m
+```
+
+### Параметры мониторинга (monitoring)
+
+| Параметр | Тип | Описание |
+|----------|-----|---------|
+| `prometheus_enabled` | bool | Включить Prometheus метрики на `/metrics` |
+| `log_errors` | bool | Логировать ошибки в файл |
+| `errors_log_path` | string | Путь к файлу логирования ошибок |
+
+**Примечание**: `/health` endpoint фиксирован на `"/health"` и недоступен для конфигурирования.
+
+### Параметры LiteLLM DB (litellm_db)
+
+Интеграция с LiteLLM базой для логирования расходов и авторизации:
+
+| Параметр | Тип | Дефолт | Описание |
+|----------|-----|--------|---------|
+| `enabled` | bool | false | Включить интеграцию |
+| `is_required` | bool | false | Необходима ли БД при старте |
+| `database_url` | string | - | PostgreSQL connection string (поддерживает env переменные) |
+| `max_conns` | int | 25 | Максимальное количество соединений |
+| `min_conns` | int | 5 | Минимальное количество соединений |
+| `health_check_interval` | duration | 10s | Интервал проверки здоровья БД |
+| `connect_timeout` | duration | 5s | Таймаут подключения |
+| `auth_cache_ttl` | duration | 20s | TTL кэша авторизации |
+| `auth_cache_size` | int | 10000 | Размер кэша авторизации |
+| `log_queue_size` | int | 5000 | Размер очереди логирования расходов |
+| `log_batch_size` | int | 100 | Размер батча при вставке логов |
+| `log_flush_interval` | duration | 5s | Интервал сброса логов в БД |
+| `log_retry_attempts` | int | 3 | Количество попыток повтора при ошибке |
+| `log_retry_delay` | duration | 1s | Задержка между попытками |
+
+Пример конфигурации:
+```yaml
+litellm_db:
+  enabled: true
+  is_required: false
+  database_url: "postgresql://user:password@localhost:5432/litellm"
+  max_conns: 25
+  min_conns: 5
+  log_queue_size: 5000
 ```
 
 ### Поддерживаемые типы провайдеров
@@ -207,16 +291,35 @@ ______________________________________________________________________
 
 ### Переменные окружения
 
+Конфигурация поддерживает значения из переменных окружения в формате `os.environ/VARIABLE_NAME`:
+
 ```yaml
+server:
+  master_key: "os.environ/MASTER_KEY"
+  model_prices_link: "os.environ/MODEL_PRICES_URL"
+
 credentials:
   - name: "openai"
     type: "openai"
-    api_key: "os.environ/OPENAI_API_KEY"  # Читает из env переменной
+    api_key: "os.environ/OPENAI_API_KEY"
     base_url: "https://api.openai.com"
+
+  - name: "vertex_ai"
+    type: "vertex-ai"
+    project_id: "os.environ/GCP_PROJECT_ID"
+    location: "us-central1"
+    credentials_json: "os.environ/VERTEX_CREDENTIALS"
+
+litellm_db:
+  enabled: true
+  database_url: "os.environ/LITELLM_DATABASE_URL"
 ```
 
 ```bash
+export MASTER_KEY="sk-your-master-key"
 export OPENAI_API_KEY="sk-proj-..."
+export GCP_PROJECT_ID="my-project"
+export LITELLM_DATABASE_URL="postgresql://user:pass@localhost/litellm"
 ./auto_ai_router -config config.yaml
 ```
 
