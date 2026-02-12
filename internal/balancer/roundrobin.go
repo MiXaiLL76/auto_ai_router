@@ -122,15 +122,20 @@ func (r *RoundRobin) GetProxyCredentials() []config.CredentialConfig {
 
 // NextForModel returns the next available credential that supports the specified model
 func (r *RoundRobin) NextForModel(modelID string) (*config.CredentialConfig, error) {
-	return r.next(modelID, false)
+	return r.next(modelID, false, false)
 }
 
-// NextFallbackForModel returns the next available fallback proxy credential
+// NextFallbackForModel returns the next available fallback credential
 func (r *RoundRobin) NextFallbackForModel(modelID string) (*config.CredentialConfig, error) {
-	return r.next(modelID, true)
+	return r.next(modelID, true, false)
 }
 
-func (r *RoundRobin) next(modelID string, allowOnlyFallback bool) (*config.CredentialConfig, error) {
+// NextFallbackProxyForModel returns the next available fallback proxy credential
+func (r *RoundRobin) NextFallbackProxyForModel(modelID string) (*config.CredentialConfig, error) {
+	return r.next(modelID, true, true)
+}
+
+func (r *RoundRobin) next(modelID string, allowOnlyFallback, allowOnlyProxy bool) (*config.CredentialConfig, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -152,9 +157,22 @@ func (r *RoundRobin) next(modelID string, allowOnlyFallback bool) (*config.Crede
 		r.current = (r.current + 1) % len(r.credentials)
 		attempts++
 
+		// Filter by credential type
+		if allowOnlyProxy && cred.Type != config.ProviderTypeProxy {
+			monitoring.CredentialSelectionRejected.WithLabelValues("type_not_allowed").Inc()
+			otherReasonsHit = true
+			continue
+		}
+
 		// Filter by is_fallback flag
-		if allowOnlyFallback && (cred.Type != config.ProviderTypeProxy || !cred.IsFallback) {
-			monitoring.CredentialSelectionRejected.WithLabelValues("fallback_not_available").Inc()
+		if allowOnlyFallback {
+			if !cred.IsFallback {
+				monitoring.CredentialSelectionRejected.WithLabelValues("fallback_not_available").Inc()
+				otherReasonsHit = true
+				continue
+			}
+		} else if cred.IsFallback {
+			monitoring.CredentialSelectionRejected.WithLabelValues("fallback_only").Inc()
 			otherReasonsHit = true
 			continue
 		}

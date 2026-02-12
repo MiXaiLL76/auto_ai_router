@@ -318,6 +318,32 @@ func TestRoundRobinCycling(t *testing.T) {
 	}
 }
 
+func TestNextForModel_SkipsFallback(t *testing.T) {
+	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
+	rl := ratelimit.New()
+
+	credentials := []config.CredentialConfig{
+		{Name: "primary1", Type: config.ProviderTypeOpenAI, IsFallback: false, RPM: 100, TPM: 10000},
+		{Name: "fallback1", Type: config.ProviderTypeOpenAI, IsFallback: true, RPM: 100, TPM: 10000},
+		{Name: "primary2", Type: config.ProviderTypeAnthropic, IsFallback: false, RPM: 100, TPM: 10000},
+	}
+
+	bal := New(credentials, f2b, rl)
+
+	// Should only return non-fallback credentials
+	seen := make(map[string]bool)
+	for i := 0; i < 4; i++ {
+		cred, err := bal.NextForModel("gpt-4o")
+		require.NoError(t, err)
+		assert.False(t, cred.IsFallback)
+		seen[cred.Name] = true
+	}
+
+	assert.True(t, seen["primary1"])
+	assert.True(t, seen["primary2"])
+	assert.False(t, seen["fallback1"])
+}
+
 func TestNextForModel_BannedCredential(t *testing.T) {
 	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
 	rl := ratelimit.New()
@@ -498,7 +524,7 @@ func TestNextFallbackForModel_SkipsNonFallback(t *testing.T) {
 	assert.True(t, cred.IsFallback)
 }
 
-func TestNextFallbackForModel_SkipsNonProxyTypes(t *testing.T) {
+func TestNextFallbackForModel_AllowsNonProxyTypes(t *testing.T) {
 	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
 	rl := ratelimit.New()
 
@@ -512,8 +538,8 @@ func TestNextFallbackForModel_SkipsNonProxyTypes(t *testing.T) {
 	cred, err := bal.NextFallbackForModel("gpt-4o")
 
 	assert.NoError(t, err)
-	assert.Equal(t, "proxy1", cred.Name)
-	assert.Equal(t, config.ProviderTypeProxy, cred.Type)
+	assert.Equal(t, "openai1", cred.Name)
+	assert.Equal(t, config.ProviderTypeOpenAI, cred.Type)
 }
 
 func TestNextFallbackForModel_NoFallbacksAvailable(t *testing.T) {
@@ -531,6 +557,24 @@ func TestNextFallbackForModel_NoFallbacksAvailable(t *testing.T) {
 	assert.Error(t, err)
 	assert.Nil(t, cred)
 	assert.Equal(t, ErrNoCredentialsAvailable, err)
+}
+
+func TestNextFallbackProxyForModel_SkipsNonProxyTypes(t *testing.T) {
+	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
+	rl := ratelimit.New()
+
+	credentials := []config.CredentialConfig{
+		{Name: "openai1", Type: config.ProviderTypeOpenAI, IsFallback: true, RPM: 100, TPM: 10000},
+		{Name: "proxy1", Type: config.ProviderTypeProxy, IsFallback: true, RPM: 100, TPM: 10000},
+	}
+
+	bal := New(credentials, f2b, rl)
+
+	cred, err := bal.NextFallbackProxyForModel("gpt-4o")
+
+	assert.NoError(t, err)
+	assert.Equal(t, "proxy1", cred.Name)
+	assert.Equal(t, config.ProviderTypeProxy, cred.Type)
 }
 
 func TestNextFallbackForModel_SkipsBannedFallback(t *testing.T) {

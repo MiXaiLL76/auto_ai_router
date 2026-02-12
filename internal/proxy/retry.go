@@ -148,7 +148,7 @@ func (p *Proxy) TryFallbackProxy(
 	triedCreds := GetTried(ctx)
 
 	// Try to find a fallback proxy credential
-	fallbackCred, err := p.balancer.NextFallbackForModel(modelID)
+	fallbackCred, err := p.balancer.NextFallbackProxyForModel(modelID)
 	if err != nil {
 		p.logger.Debug("No fallback proxy available for retry",
 			"original_credential", originalCredName,
