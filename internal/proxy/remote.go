@@ -72,36 +72,8 @@ type limitAggregation struct {
 	hasUnlimitedTPM bool
 }
 
-func newMaxLimitAggregation() *limitAggregation {
-	return &limitAggregation{
-		rpm: -1,
-		tpm: -1,
-	}
-}
-
 func newSumLimitAggregation() *limitAggregation {
 	return &limitAggregation{}
-}
-
-func (agg *limitAggregation) applyMax(rpm, tpm, currentRPM, currentTPM int) {
-	if rpm == 0 {
-		agg.hasUnlimitedRPM = true
-	} else if rpm > 0 {
-		if agg.rpm == -1 || rpm > agg.rpm {
-			agg.rpm = rpm
-		}
-	}
-
-	if tpm == 0 {
-		agg.hasUnlimitedTPM = true
-	} else if tpm > 0 {
-		if agg.tpm == -1 || tpm > agg.tpm {
-			agg.tpm = tpm
-		}
-	}
-
-	agg.currentRPM += currentRPM
-	agg.currentTPM += currentTPM
 }
 
 func (agg *limitAggregation) applySum(rpm, tpm, currentRPM, currentTPM int) {
@@ -149,11 +121,15 @@ func updateCredentialLimits(
 		return
 	}
 
-	// Aggregate limits and current usage from remote credentials
-	aggregation := newMaxLimitAggregation()
+	// Aggregate limits and current usage from remote credentials.
+	// Use SUM aggregation: proxy's total capacity is the sum of all upstream credentials'
+	// RPM/TPM limits (requests are distributed across them via round-robin).
+	// Previously used MAX which underestimated capacity, causing false rate limiting
+	// when total usage exceeded the highest single credential's limit.
+	aggregation := newSumLimitAggregation()
 
 	for _, credStats := range health.Credentials {
-		aggregation.applyMax(
+		aggregation.applySum(
 			credStats.LimitRPM,
 			credStats.LimitTPM,
 			credStats.CurrentRPM,
@@ -161,27 +137,27 @@ func updateCredentialLimits(
 		)
 	}
 
-	maxRPM, maxTPM := aggregation.finalizeLimits()
+	totalRPM, totalTPM := aggregation.finalizeLimits()
 	totalCurrentRPM := aggregation.currentRPM
 	totalCurrentTPM := aggregation.currentTPM
 
 	logger.Debug("Aggregated credential limits from remote",
 		"proxy", cred.Name,
 		"credentials_count", len(health.Credentials),
-		"max_rpm", maxRPM,
-		"max_tpm", maxTPM,
+		"total_rpm", totalRPM,
+		"total_tpm", totalTPM,
 		"total_current_rpm", totalCurrentRPM,
 		"total_current_tpm", totalCurrentTPM,
 	)
 
 	// Update our proxy credential with aggregated limits (even if both are -1, we still need to sync usage)
-	rateLimiter.AddCredentialWithTPM(cred.Name, maxRPM, maxTPM)
+	rateLimiter.AddCredentialWithTPM(cred.Name, totalRPM, totalTPM)
 	// Sync current usage from remote
 	rateLimiter.SetCredentialCurrentUsage(cred.Name, totalCurrentRPM, totalCurrentTPM)
 	logger.Debug("Updated proxy credential limits from remote",
 		"proxy", cred.Name,
-		"rpm_limit", maxRPM,
-		"tpm_limit", maxTPM,
+		"rpm_limit", totalRPM,
+		"tpm_limit", totalTPM,
 		"current_rpm", totalCurrentRPM,
 		"current_tpm", totalCurrentTPM,
 	)

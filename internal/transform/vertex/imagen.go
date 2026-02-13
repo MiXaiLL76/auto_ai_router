@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/mixaill76/auto_ai_router/internal/transform/common"
 	"github.com/mixaill76/auto_ai_router/internal/transform/openai"
 	"google.golang.org/genai"
 )
@@ -117,7 +118,7 @@ func VertexImageToOpenAI(vertexBody []byte) ([]byte, error) {
 	}
 
 	openAIResp := OpenAIImageResponse{
-		Created: openai.GetCurrentTimestamp(),
+		Created: common.GetCurrentTimestamp(),
 		Data:    make([]OpenAIImageData, 0),
 	}
 
@@ -242,7 +243,7 @@ func VertexChatResponseToOpenAIImage(vertexBody []byte) ([]byte, error) {
 	}
 
 	openAIResp := OpenAIImageResponse{
-		Created: openai.GetCurrentTimestamp(),
+		Created: common.GetCurrentTimestamp(),
 		Data:    make([]OpenAIImageData, 0),
 	}
 

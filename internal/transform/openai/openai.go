@@ -1,9 +1,7 @@
 package openai
 
 import (
-	"crypto/rand"
-	"encoding/hex"
-	"time"
+	"github.com/mixaill76/auto_ai_router/internal/transform"
 )
 
 // Request types
@@ -52,12 +50,23 @@ type OpenAIMessage struct {
 }
 
 type ContentBlock struct {
-	Type     string    `json:"type"`
-	Text     string    `json:"text,omitempty"`
-	ImageURL *ImageURL `json:"image_url,omitempty"`
+	Type       string     `json:"type"`
+	Text       string     `json:"text,omitempty"`
+	ImageURL   *ImageURL  `json:"image_url,omitempty"`
+	InputAudio *AudioData `json:"input_audio,omitempty"`
+	VideoURL   *VideoURL  `json:"video_url,omitempty"`
 }
 
 type ImageURL struct {
+	URL string `json:"url"`
+}
+
+type AudioData struct {
+	Data   string `json:"data"`             // base64-encoded audio data
+	Format string `json:"format,omitempty"` // e.g., "wav", "mp3", "ogg"
+}
+
+type VideoURL struct {
 	URL string `json:"url"`
 }
 
@@ -102,10 +111,24 @@ type ImageData struct {
 	ImageURL *ImageURL `json:"image_url,omitempty"`
 }
 
+type TokenDetails struct {
+	CachedTokens int `json:"cached_tokens,omitempty"`
+	AudioTokens  int `json:"audio_tokens,omitempty"`
+}
+
+type CompletionTokenDetails struct {
+	AcceptedPredictionTokens int `json:"accepted_prediction_tokens,omitempty"`
+	RejectedPredictionTokens int `json:"rejected_prediction_tokens,omitempty"`
+	AudioTokens              int `json:"audio_tokens,omitempty"`
+	ReasoningTokens          int `json:"reasoning_tokens,omitempty"`
+}
+
 type OpenAIUsage struct {
-	PromptTokens     int `json:"prompt_tokens"`
-	CompletionTokens int `json:"completion_tokens"`
-	TotalTokens      int `json:"total_tokens"`
+	PromptTokens            int                     `json:"prompt_tokens"`
+	CompletionTokens        int                     `json:"completion_tokens"`
+	TotalTokens             int                     `json:"total_tokens"`
+	PromptTokensDetails     *TokenDetails           `json:"prompt_tokens_details,omitempty"`
+	CompletionTokensDetails *CompletionTokenDetails `json:"completion_tokens_details,omitempty"`
 }
 
 // Streaming types
@@ -144,24 +167,32 @@ type OpenAIStreamingToolFunction struct {
 	Arguments string `json:"arguments,omitempty"`
 }
 
-// Helper functions
+// Helper functions (imported from common package for consistency)
 
-// GenerateID generates a unique chat completion ID
-func GenerateID() string {
-	bytes := make([]byte, 16)
-	_, _ = rand.Read(bytes)
-	return "chatcmpl-" + hex.EncodeToString(bytes)[:20]
-}
-
-// GetCurrentTimestamp returns the current Unix timestamp
-func GetCurrentTimestamp() int64 {
-	return time.Now().Unix()
-}
-
-// GetString safely retrieves a string value from a map
-func GetString(m map[string]interface{}, key string) string {
-	if val, ok := m[key].(string); ok {
-		return val
+// ToTokenUsage converts OpenAI usage to universal TokenUsage format
+func (u *OpenAIUsage) ToTokenUsage() *transform.TokenUsage {
+	if u == nil {
+		return nil
 	}
-	return ""
+
+	usage := &transform.TokenUsage{
+		PromptTokens:     u.PromptTokens,
+		CompletionTokens: u.CompletionTokens,
+	}
+
+	// Extract details from PromptTokensDetails
+	if u.PromptTokensDetails != nil {
+		usage.CachedInputTokens = u.PromptTokensDetails.CachedTokens
+		usage.AudioInputTokens = u.PromptTokensDetails.AudioTokens
+	}
+
+	// Extract details from CompletionTokensDetails
+	if u.CompletionTokensDetails != nil {
+		usage.AcceptedPredictionTokens = u.CompletionTokensDetails.AcceptedPredictionTokens
+		usage.RejectedPredictionTokens = u.CompletionTokensDetails.RejectedPredictionTokens
+		usage.AudioOutputTokens = u.CompletionTokensDetails.AudioTokens
+		usage.ReasoningTokens = u.CompletionTokensDetails.ReasoningTokens
+	}
+
+	return usage
 }

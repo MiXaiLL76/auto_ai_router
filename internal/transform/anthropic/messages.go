@@ -199,7 +199,7 @@ func AnthropicToOpenAI(anthropicBody []byte, model string) ([]byte, error) {
 	openAIResp := openai.OpenAIResponse{
 		ID:      anthropicResp.ID,
 		Object:  "chat.completion",
-		Created: openai.GetCurrentTimestamp(),
+		Created: common.GetCurrentTimestamp(),
 		Model:   model,
 		Choices: []openai.OpenAIChoice{
 			{
@@ -258,12 +258,12 @@ func convertOpenAIToolCallsToAnthropic(contentBlocks []anthropic.ContentBlockPar
 		// Extract function information
 		var funcName string
 		var argsStr string
-		toolID := openai.GetString(toolCallMap, "id")
+		toolID := common.GetString(toolCallMap, "id")
 
 		// Try to get from function field first (standard OpenAI format)
 		if funcObj, ok := toolCallMap["function"].(map[string]interface{}); ok {
-			funcName = openai.GetString(funcObj, "name")
-			argsStr = openai.GetString(funcObj, "arguments")
+			funcName = common.GetString(funcObj, "name")
+			argsStr = common.GetString(funcObj, "arguments")
 		}
 
 		if funcName != "" && argsStr != "" {
@@ -447,12 +447,12 @@ func convertOpenAIToolsToAnthropic(openAITools []interface{}) []anthropic.ToolPa
 
 		// Extract function definition
 		if functionObj, ok := toolMap["function"].(map[string]interface{}); ok {
-			name := openai.GetString(functionObj, "name")
+			name := common.GetString(functionObj, "name")
 			if name == "" {
 				continue
 			}
 
-			description := openai.GetString(functionObj, "description")
+			description := common.GetString(functionObj, "description")
 			tool := anthropic.ToolParam{
 				Name: name,
 			}

@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/anthropics/anthropic-sdk-go"
+	"github.com/mixaill76/auto_ai_router/internal/transform/common"
 	"github.com/mixaill76/auto_ai_router/internal/transform/openai"
 )
 
@@ -15,7 +16,7 @@ import (
 func TransformAnthropicStreamToOpenAI(anthropicStream io.Reader, model string, output io.Writer) error {
 	scanner := bufio.NewScanner(anthropicStream)
 	chatID := ""
-	timestamp := openai.GetCurrentTimestamp()
+	timestamp := common.GetCurrentTimestamp()
 	isFirstChunk := true
 
 	// Track tool_use state during streaming

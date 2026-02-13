@@ -417,7 +417,7 @@ func TestConfig_Validate_DefaultModelsRPM(t *testing.T) {
 	}{
 		{"valid rpm", 100, false, 100},
 		{"unlimited rpm", -1, false, -1},
-		{"zero defaults to 50", 0, false, 50},
+		{"zero defaults to unlimited", 0, false, -1},
 		{"negative (not -1)", -5, true, 0},
 	}
 
@@ -462,7 +462,6 @@ func TestLoad_EnvVariables(t *testing.T) {
 	require.NoError(t, os.Setenv("TEST_CRED_RPM", "150"))
 	require.NoError(t, os.Setenv("TEST_CRED_TPM", "50000"))
 	require.NoError(t, os.Setenv("TEST_PROMETHEUS_ENABLED", "false"))
-	require.NoError(t, os.Setenv("TEST_HEALTH_CHECK_PATH", "/status"))
 
 	defer func() {
 		// Cleanup
@@ -479,7 +478,6 @@ func TestLoad_EnvVariables(t *testing.T) {
 		_ = os.Unsetenv("TEST_CRED_RPM")
 		_ = os.Unsetenv("TEST_CRED_TPM")
 		_ = os.Unsetenv("TEST_PROMETHEUS_ENABLED")
-		_ = os.Unsetenv("TEST_HEALTH_CHECK_PATH")
 	}()
 
 	// Create temporary config file with env variables
@@ -510,7 +508,6 @@ credentials:
 
 monitoring:
   prometheus_enabled: os.environ/TEST_PROMETHEUS_ENABLED
-  health_check_path: os.environ/TEST_HEALTH_CHECK_PATH
 `
 	err := os.WriteFile(configPath, []byte(configContent), 0644)
 	require.NoError(t, err)
@@ -538,7 +535,7 @@ monitoring:
 
 	// Verify monitoring config
 	assert.Equal(t, false, cfg.Monitoring.PrometheusEnabled)
-	assert.Equal(t, "/status", cfg.Monitoring.HealthCheckPath)
+	assert.Equal(t, "/health", cfg.Monitoring.HealthCheckPath)
 }
 
 func TestLoad_EnvVariables_Mixed(t *testing.T) {
@@ -721,4 +718,112 @@ func TestConfig_Validate_TPM(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Fallback Configuration Tests
+
+func TestConfig_ValidateFallback_AllowsFallbackOnAnyType(t *testing.T) {
+	// Valid: is_fallback can be set on any credential type
+	cfg := &Config{
+		Server: ServerConfig{
+			Port:           8080,
+			MaxBodySizeMB:  10,
+			MasterKey:      "test-key",
+			RequestTimeout: 30 * time.Second,
+		},
+		Credentials: []CredentialConfig{
+			{Name: "openai-primary", Type: "openai", BaseURL: "http://a.com", APIKey: "key", RPM: 10, IsFallback: false},
+			{Name: "openai-fallback", Type: "openai", BaseURL: "http://b.com", APIKey: "key", RPM: 10, IsFallback: true},
+		},
+		Fail2Ban: Fail2BanConfig{MaxAttempts: 3},
+	}
+
+	err := cfg.Validate()
+	assert.NoError(t, err, "is_fallback should be allowed on any credential type")
+}
+
+func TestConfig_UnmarshalYAML_ModelPricesLink(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.yaml")
+
+	// Set environment variable
+	if err := os.Setenv("MODEL_PRICES_URL", "https://example.com/prices.json"); err != nil {
+		t.Fatalf("Failed to set env var: %v", err)
+	}
+	defer func() {
+		_ = os.Unsetenv("MODEL_PRICES_URL")
+	}()
+
+	configContent := `
+server:
+  port: 8080
+  max_body_size_mb: 10
+  request_timeout: 30s
+  logging_level: info
+  master_key: "sk-test"
+  model_prices_link: os.environ/MODEL_PRICES_URL
+
+fail2ban:
+  max_attempts: 3
+  ban_duration: permanent
+  error_codes: [401]
+
+credentials:
+  - name: "test"
+    type: "openai"
+    api_key: "sk-test"
+    base_url: "https://api.openai.com"
+
+monitoring:
+  prometheus_enabled: false
+  health_check_path: "/health"
+`
+	err := os.WriteFile(configPath, []byte(configContent), 0644)
+	require.NoError(t, err)
+
+	cfg, err := Load(configPath)
+	require.NoError(t, err)
+	assert.NotNil(t, cfg)
+
+	// Verify that ModelPricesLink was properly resolved from environment variable
+	assert.Equal(t, "https://example.com/prices.json", cfg.Server.ModelPricesLink)
+}
+
+func TestConfig_UnmarshalYAML_ModelPricesLink_Direct(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.yaml")
+
+	configContent := `
+server:
+  port: 8080
+  max_body_size_mb: 10
+  request_timeout: 30s
+  logging_level: info
+  master_key: "sk-test"
+  model_prices_link: "/path/to/prices.json"
+
+fail2ban:
+  max_attempts: 3
+  ban_duration: permanent
+  error_codes: [401]
+
+credentials:
+  - name: "test"
+    type: "openai"
+    api_key: "sk-test"
+    base_url: "https://api.openai.com"
+
+monitoring:
+  prometheus_enabled: false
+  health_check_path: "/health"
+`
+	err := os.WriteFile(configPath, []byte(configContent), 0644)
+	require.NoError(t, err)
+
+	cfg, err := Load(configPath)
+	require.NoError(t, err)
+	assert.NotNil(t, cfg)
+
+	// Verify that ModelPricesLink was set directly
+	assert.Equal(t, "/path/to/prices.json", cfg.Server.ModelPricesLink)
 }

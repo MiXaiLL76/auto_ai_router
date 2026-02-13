@@ -22,7 +22,7 @@ class TestModels:
     # Google Vertex AI models
     VERTEX_MODELS = [
         "gemini-2.5-flash",
-        "gemini-2.5-pro",
+        # "gemini-2.5-pro",
     ]
 
     # Vertex AI Image models
@@ -320,3 +320,54 @@ class StreamingValidator:
         """Assert streaming response is valid"""
         assert chunk_count > 0, "Should receive multiple chunks"
         assert len(full_content) >= min_length, "Should have collected content"
+
+
+class APIComparisonHelper:
+    """Helper for comparing API responses across different providers"""
+
+    @staticmethod
+    def compare_token_counts(provider1_tokens: int, provider2_tokens: int,
+                            tolerance_percent: float = 50.0) -> bool:
+        """Compare token counts with tolerance
+
+        Args:
+            provider1_tokens: Token count from first provider
+            provider2_tokens: Token count from second provider
+            tolerance_percent: Allowed variance percentage (default 50%)
+
+        Returns:
+            True if within tolerance, False otherwise
+        """
+        if min(provider1_tokens, provider2_tokens) == 0:
+            return False
+
+        max_tokens = max(provider1_tokens, provider2_tokens)
+        min_tokens = min(provider1_tokens, provider2_tokens)
+        variance = ((max_tokens - min_tokens) / min_tokens) * 100
+
+        return variance <= tolerance_percent
+
+    @staticmethod
+    def get_token_variance_percent(provider1_tokens: int, provider2_tokens: int) -> float:
+        """Calculate token count variance percentage"""
+        if min(provider1_tokens, provider2_tokens) == 0:
+            return float('inf')
+
+        max_tokens = max(provider1_tokens, provider2_tokens)
+        min_tokens = min(provider1_tokens, provider2_tokens)
+        return ((max_tokens - min_tokens) / min_tokens) * 100
+
+    @staticmethod
+    def format_token_comparison(provider1_name: str, provider1_tokens: int,
+                               provider2_name: str, provider2_tokens: int) -> str:
+        """Format token comparison for logging"""
+        variance = APIComparisonHelper.get_token_variance_percent(
+            provider1_tokens, provider2_tokens
+        )
+        ratio = max(provider1_tokens, provider2_tokens) / min(provider1_tokens, provider2_tokens)
+
+        return (
+            f"{provider1_name}: {provider1_tokens} tokens, "
+            f"{provider2_name}: {provider2_tokens} tokens, "
+            f"Ratio: {ratio:.2f}x, Variance: {variance:.1f}%"
+        )

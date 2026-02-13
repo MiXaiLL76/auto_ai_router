@@ -37,8 +37,8 @@ func (p *Proxy) HealthCheck() (bool, *httputil.ProxyHealthResponse) {
 			}
 		}
 
-		// Check if credential is banned from balancer
-		isBanned := p.balancer.IsBanned(cred.Name)
+		// Check if credential has any banned models
+		isBanned := p.balancer.HasAnyBan(cred.Name)
 
 		credentialsInfo[cred.Name] = httputil.CredentialHealthStats{
 			Type:       string(cred.Type),
@@ -62,10 +62,45 @@ func (p *Proxy) HealthCheck() (bool, *httputil.ProxyHealthResponse) {
 		modelsInfo[modelKey] = httputil.ModelHealthStats{
 			Credential: pair.Credential,
 			Model:      pair.Model,
+			IsBanned:   p.balancer.IsBanned(pair.Credential, pair.Model),
 			CurrentRPM: p.rateLimiter.GetCurrentModelRPM(pair.Credential, pair.Model),
 			CurrentTPM: p.rateLimiter.GetCurrentModelTPM(pair.Credential, pair.Model),
 			LimitRPM:   p.rateLimiter.GetModelLimitRPM(pair.Credential, pair.Model),
 			LimitTPM:   p.rateLimiter.GetModelLimitTPM(pair.Credential, pair.Model),
+		}
+	}
+
+	// Enrich models and credentials with error code counts from banned pairs
+	bannedPairs := p.balancer.GetBannedPairs()
+	// credentialErrorCounts accumulates error counts per credential across all its banned models
+	credentialErrorCounts := make(map[string]map[int]int)
+	for _, bp := range bannedPairs {
+		modelKey := bp.Credential + ":" + bp.Model
+		if ms, ok := modelsInfo[modelKey]; ok {
+			if len(bp.ErrorCodeCounts) > 0 {
+				counts := make(map[int]int, len(bp.ErrorCodeCounts))
+				for code, cnt := range bp.ErrorCodeCounts {
+					counts[code] = cnt
+				}
+				ms.ErrorCodeCounts = counts
+				modelsInfo[modelKey] = ms
+			}
+		}
+		// Aggregate into per-credential counts
+		if len(bp.ErrorCodeCounts) > 0 {
+			if credentialErrorCounts[bp.Credential] == nil {
+				credentialErrorCounts[bp.Credential] = make(map[int]int)
+			}
+			for code, cnt := range bp.ErrorCodeCounts {
+				credentialErrorCounts[bp.Credential][code] += cnt
+			}
+		}
+	}
+	// Apply aggregated error counts to credential info
+	for credName, counts := range credentialErrorCounts {
+		if cs, ok := credentialsInfo[credName]; ok {
+			cs.BannedErrorCounts = counts
+			credentialsInfo[credName] = cs
 		}
 	}
 

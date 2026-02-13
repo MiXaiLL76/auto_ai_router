@@ -6,8 +6,9 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/config"
 )
 
-// hopByHopHeaders are headers that should not be proxied
-// See RFC 7230 Section 6.1
+// hopByHopHeaders are headers that should not be proxied.
+// These are hop-by-hop headers as defined in RFC 7230 Section 6.1.
+// They are meant for single HTTP connection and must not be forwarded to the next hop.
 var hopByHopHeaders = map[string]bool{
 	"Connection":          true,
 	"Keep-Alive":          true,
@@ -19,9 +20,22 @@ var hopByHopHeaders = map[string]bool{
 	"Upgrade":             true,
 }
 
-// isHopByHopHeader checks if a header should not be proxied
+// isHopByHopHeader checks if a header should not be proxied.
+// Returns true for hop-by-hop headers that must not be forwarded to upstream.
+// RFC 7230: https://tools.ietf.org/html/rfc7230#section-6.1
 func isHopByHopHeader(key string) bool {
 	return hopByHopHeaders[key]
+}
+
+// GetHopByHopHeaders returns a copy of the hop-by-hop headers map for reference.
+// Use isHopByHopHeader() to check if a specific header should be filtered.
+func GetHopByHopHeaders() map[string]bool {
+	// Return a copy to prevent external modifications
+	headers := make(map[string]bool)
+	for k, v := range hopByHopHeaders {
+		headers[k] = v
+	}
+	return headers
 }
 
 // copyRequestHeaders copies headers from source request to destination request,

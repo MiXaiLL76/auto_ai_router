@@ -77,7 +77,7 @@ func TestGetRemoteModels_Caching(t *testing.T) {
 	m.mu.Lock()
 	if cached, ok := m.remoteModelsCache[cred.Name]; ok {
 		// Set expiration to past time to force cache miss
-		cached.expiresAt = time.Now().Add(-1 * time.Millisecond)
+		cached.expiresAt = time.Now().UTC().Add(-1 * time.Millisecond)
 		m.remoteModelsCache[cred.Name] = cached
 	}
 	m.mu.Unlock()

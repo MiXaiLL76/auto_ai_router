@@ -83,10 +83,11 @@ func TestCaptureRequestBody_NoBody(t *testing.T) {
 	req, err := http.NewRequest("GET", "/test", nil)
 	assert.NoError(t, err)
 
-	body, err := captureRequestBody(req)
+	body, isStreaming, err := captureRequestBody(req)
 
 	assert.NoError(t, err)
 	assert.Equal(t, []byte{}, body)
+	assert.False(t, isStreaming)
 }
 
 func TestCaptureRequestBody_SimpleBody(t *testing.T) {
@@ -94,10 +95,11 @@ func TestCaptureRequestBody_SimpleBody(t *testing.T) {
 	req, err := http.NewRequest("POST", "/test", io.NopCloser(bytes.NewReader(data)))
 	assert.NoError(t, err)
 
-	body, err := captureRequestBody(req)
+	body, isStreaming, err := captureRequestBody(req)
 
 	assert.NoError(t, err)
 	assert.Equal(t, data, body)
+	assert.False(t, isStreaming)
 	// Verify body is restored for further reading
 	restoredBody, _ := io.ReadAll(req.Body)
 	assert.Equal(t, data, restoredBody)
@@ -108,10 +110,11 @@ func TestCaptureRequestBody_WithStreamKeyword(t *testing.T) {
 	req, err := http.NewRequest("POST", "/test", io.NopCloser(bytes.NewReader(data)))
 	assert.NoError(t, err)
 
-	body, err := captureRequestBody(req)
+	body, isStreaming, err := captureRequestBody(req)
 
 	assert.Equal(t, data, body)
 	assert.NoError(t, err)
+	assert.True(t, isStreaming, "Should detect stream: true")
 	// Body should be restored
 	restoredBody, _ := io.ReadAll(req.Body)
 	assert.Equal(t, data, restoredBody)
@@ -122,10 +125,11 @@ func TestCaptureRequestBody_LargeBody(t *testing.T) {
 	req, err := http.NewRequest("POST", "/test", io.NopCloser(bytes.NewReader(data)))
 	assert.NoError(t, err)
 
-	body, err := captureRequestBody(req)
+	body, isStreaming, err := captureRequestBody(req)
 
 	assert.NoError(t, err)
 	assert.Equal(t, data, body)
+	assert.False(t, isStreaming)
 }
 
 func TestLogErrorResponse_EmptyPath(t *testing.T) {
@@ -168,7 +172,7 @@ func TestLogErrorResponse_Success(t *testing.T) {
 	assert.Equal(t, "/api/test", entry.Path)
 	assert.Equal(t, "POST", entry.Method)
 	assert.Equal(t, http.StatusBadRequest, entry.Status)
-	assert.Equal(t, "Bearer ***", entry.Request.Headers["Authorization"])
+	assert.Equal(t, "Bearer secr...", entry.Request.Headers["Authorization"])
 	assert.Equal(t, string(requestBody), entry.Request.Body)
 	assert.Equal(t, "error message", entry.Response.Body)
 }
@@ -231,7 +235,7 @@ func TestLogErrorResponse_MasksAuthorizationHeader(t *testing.T) {
 	_ = json.Unmarshal(content, &entry)
 
 	// Authorization should be masked
-	assert.Equal(t, "Bearer ***", entry.Request.Headers["Authorization"])
+	assert.Equal(t, "Bearer very...", entry.Request.Headers["Authorization"])
 	assert.NotContains(t, entry.Request.Headers["Authorization"], "secret-token")
 }
 
@@ -312,17 +316,29 @@ func TestResponseCapture_WriteMultipleTimes(t *testing.T) {
 }
 
 func TestCaptureRequestBody_StreamKeywordCaseSensitive(t *testing.T) {
-	// "Stream" with capital S should also trigger the check since we're not doing case-sensitive check
+	// "Stream" with capital S should NOT trigger the check (case-sensitive)
 	data := []byte(`{"Stream": true}`)
 	req, err := http.NewRequest("POST", "/test", io.NopCloser(bytes.NewReader(data)))
 	assert.NoError(t, err)
 
-	body, err := captureRequestBody(req)
+	body, isStreaming, err := captureRequestBody(req)
 
-	// This should return error because the check uses strings.Contains which is case-sensitive
-	// So "Stream" won't match "stream", body should be returned successfully
 	assert.NoError(t, err)
 	assert.Equal(t, data, body)
+	assert.False(t, isStreaming, "Should not detect Stream (capital S), only stream")
+}
+
+func TestCaptureRequestBody_WithStreamFalse(t *testing.T) {
+	// Verify that stream: false is NOT treated as streaming
+	data := []byte(`{"stream": false, "messages": []}`)
+	req, err := http.NewRequest("POST", "/test", io.NopCloser(bytes.NewReader(data)))
+	assert.NoError(t, err)
+
+	body, isStreaming, err := captureRequestBody(req)
+
+	assert.Equal(t, data, body)
+	assert.NoError(t, err)
+	assert.False(t, isStreaming, "stream: false should not be treated as streaming")
 }
 
 func TestLogErrorResponse_NoRequestBody(t *testing.T) {

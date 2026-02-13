@@ -2,7 +2,6 @@ package config
 
 import (
 	"fmt"
-	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -44,15 +43,24 @@ type Config struct {
 	Credentials []CredentialConfig `yaml:"credentials"`
 	Monitoring  MonitoringConfig   `yaml:"monitoring"`
 	Models      []ModelRPMConfig   `yaml:"models,omitempty"`
+	LiteLLMDB   LiteLLMDBConfig    `yaml:"litellm_db,omitempty"`
 }
 
 type ServerConfig struct {
-	Port             int           `yaml:"port"`
-	MaxBodySizeMB    int           `yaml:"max_body_size_mb"`
-	RequestTimeout   time.Duration `yaml:"request_timeout"`
-	LoggingLevel     string        `yaml:"logging_level"`
-	MasterKey        string        `yaml:"master_key"`
-	DefaultModelsRPM int           `yaml:"default_models_rpm"`
+	Port                   int           `yaml:"port"`
+	MaxBodySizeMB          int           `yaml:"max_body_size_mb"`
+	ResponseBodyMultiplier int           `yaml:"response_body_multiplier"` // Multiplier for response body size limit relative to max_body_size_mb (default: 10)
+	RequestTimeout         time.Duration `yaml:"request_timeout"`
+	LoggingLevel           string        `yaml:"logging_level"`
+	MasterKey              string        `yaml:"master_key"`
+	DefaultModelsRPM       int           `yaml:"default_models_rpm"`
+	MaxIdleConns           int           `yaml:"max_idle_conns"`
+	MaxIdleConnsPerHost    int           `yaml:"max_idle_conns_per_host"`
+	IdleConnTimeout        time.Duration `yaml:"idle_conn_timeout"`
+	ReadTimeout            time.Duration `yaml:"-"`                           // HTTP server read timeout (equals request_timeout, not configurable via YAML)
+	WriteTimeout           time.Duration `yaml:"write_timeout"`               // HTTP server write timeout (default: 60s)
+	IdleTimeout            time.Duration `yaml:"idle_timeout"`                // HTTP server idle timeout (default: 2*write_timeout)
+	ModelPricesLink        string        `yaml:"model_prices_link,omitempty"` // URL or file path to model prices JSON - supports os.environ/VAR_NAME
 }
 
 // ErrorCodeRuleConfig defines per-error-code ban rules
@@ -73,12 +81,19 @@ type Fail2BanConfig struct {
 func (s *ServerConfig) UnmarshalYAML(value *yaml.Node) error {
 	// Create a temporary struct with all string fields
 	type tempConfig struct {
-		Port             string `yaml:"port"`
-		MaxBodySizeMB    string `yaml:"max_body_size_mb"`
-		RequestTimeout   string `yaml:"request_timeout"`
-		LoggingLevel     string `yaml:"logging_level"`
-		MasterKey        string `yaml:"master_key"`
-		DefaultModelsRPM string `yaml:"default_models_rpm"`
+		Port                   string `yaml:"port"`
+		MaxBodySizeMB          string `yaml:"max_body_size_mb"`
+		ResponseBodyMultiplier string `yaml:"response_body_multiplier"`
+		RequestTimeout         string `yaml:"request_timeout"`
+		LoggingLevel           string `yaml:"logging_level"`
+		MasterKey              string `yaml:"master_key"`
+		DefaultModelsRPM       string `yaml:"default_models_rpm"`
+		MaxIdleConns           string `yaml:"max_idle_conns"`
+		MaxIdleConnsPerHost    string `yaml:"max_idle_conns_per_host"`
+		IdleConnTimeout        string `yaml:"idle_conn_timeout"`
+		WriteTimeout           string `yaml:"write_timeout"`
+		IdleTimeout            string `yaml:"idle_timeout"`
+		ModelPricesLink        string `yaml:"model_prices_link,omitempty"`
 	}
 
 	var temp tempConfig
@@ -89,43 +104,44 @@ func (s *ServerConfig) UnmarshalYAML(value *yaml.Node) error {
 	// Resolve and parse each field
 	var err error
 
-	// Port
-	if temp.Port != "" {
-		s.Port, err = resolveEnvInt(temp.Port, 8080)
-		if err != nil {
-			return fmt.Errorf("invalid port: %w", err)
-		}
+	// Integer fields
+	if s.Port, err = parseField(temp.Port, 8080, strconv.Atoi, "port"); err != nil {
+		return err
+	}
+	if s.MaxBodySizeMB, err = parseField(temp.MaxBodySizeMB, 100, strconv.Atoi, "max_body_size_mb"); err != nil {
+		return err
+	}
+	if s.ResponseBodyMultiplier, err = parseField(temp.ResponseBodyMultiplier, 10, strconv.Atoi, "response_body_multiplier"); err != nil {
+		return err
+	}
+	if s.DefaultModelsRPM, err = parseField(temp.DefaultModelsRPM, -1, strconv.Atoi, "default_models_rpm"); err != nil {
+		return err
+	}
+	if s.MaxIdleConns, err = parseField(temp.MaxIdleConns, 200, strconv.Atoi, "max_idle_conns"); err != nil {
+		return err
+	}
+	if s.MaxIdleConnsPerHost, err = parseField(temp.MaxIdleConnsPerHost, 20, strconv.Atoi, "max_idle_conns_per_host"); err != nil {
+		return err
 	}
 
-	// MaxBodySizeMB
-	if temp.MaxBodySizeMB != "" {
-		s.MaxBodySizeMB, err = resolveEnvInt(temp.MaxBodySizeMB, 10)
-		if err != nil {
-			return fmt.Errorf("invalid max_body_size_mb: %w", err)
-		}
+	// Duration fields
+	if s.RequestTimeout, err = parseField(temp.RequestTimeout, 60*time.Second, time.ParseDuration, "request_timeout"); err != nil {
+		return err
+	}
+	if s.IdleConnTimeout, err = parseField(temp.IdleConnTimeout, 120*time.Second, time.ParseDuration, "idle_conn_timeout"); err != nil {
+		return err
+	}
+	if s.WriteTimeout, err = parseField(temp.WriteTimeout, 60*time.Second, time.ParseDuration, "write_timeout"); err != nil {
+		return err
+	}
+	if s.IdleTimeout, err = parseField(temp.IdleTimeout, 2*time.Minute, time.ParseDuration, "idle_timeout"); err != nil {
+		return err
 	}
 
-	// RequestTimeout
-	if temp.RequestTimeout != "" {
-		s.RequestTimeout, err = resolveEnvDuration(temp.RequestTimeout, 30*time.Second)
-		if err != nil {
-			return fmt.Errorf("invalid request_timeout: %w", err)
-		}
-	}
-
-	// LoggingLevel
+	// String fields
 	s.LoggingLevel = resolveEnvString(temp.LoggingLevel)
-
-	// MasterKey
 	s.MasterKey = resolveEnvString(temp.MasterKey)
-
-	// DefaultModelsRPM
-	if temp.DefaultModelsRPM != "" {
-		s.DefaultModelsRPM, err = resolveEnvInt(temp.DefaultModelsRPM, 50)
-		if err != nil {
-			return fmt.Errorf("invalid default_models_rpm: %w", err)
-		}
-	}
+	s.ModelPricesLink = resolveEnvString(temp.ModelPricesLink)
 
 	return nil
 }
@@ -144,7 +160,7 @@ type CredentialConfig struct {
 	CredentialsFile string `yaml:"credentials_file,omitempty"`
 	CredentialsJSON string `yaml:"credentials_json,omitempty"`
 
-	// Proxy specific field
+	// Proxy specific fields
 	IsFallback bool `yaml:"is_fallback,omitempty"`
 }
 
@@ -182,32 +198,24 @@ func (c *CredentialConfig) UnmarshalYAML(value *yaml.Node) error {
 	c.CredentialsFile = resolveEnvString(temp.CredentialsFile)
 	c.CredentialsJSON = resolveEnvString(temp.CredentialsJSON)
 
-	// Resolve and parse RPM
+	// Resolve and parse integer fields
 	var err error
-	if temp.RPM != "" {
-		c.RPM, err = resolveEnvInt(temp.RPM, -1)
-		if err != nil {
-			return fmt.Errorf("invalid rpm for credential '%s': %w", c.Name, err)
-		}
-	} else {
-		c.RPM = -1 // Default to unlimited
+	if c.RPM, err = parseField(temp.RPM, -1, strconv.Atoi, "rpm for credential '"+c.Name+"'"); err != nil {
+		return err
+	}
+	if c.TPM, err = parseField(temp.TPM, -1, strconv.Atoi, "tpm for credential '"+c.Name+"'"); err != nil {
+		return err
 	}
 
-	// Resolve and parse TPM
-	if temp.TPM != "" {
-		c.TPM, err = resolveEnvInt(temp.TPM, -1)
-		if err != nil {
-			return fmt.Errorf("invalid tpm for credential '%s': %w", c.Name, err)
-		}
-	} else {
-		c.TPM = -1 // Default to unlimited
+	// Resolve and parse boolean field
+	if c.IsFallback, err = parseField(temp.IsFallback, false, strconv.ParseBool, "is_fallback for credential '"+c.Name+"'"); err != nil {
+		return err
 	}
 
-	// Resolve and parse IsFallback
-	if temp.IsFallback != "" {
-		c.IsFallback, err = resolveEnvBool(temp.IsFallback, false)
-		if err != nil {
-			return fmt.Errorf("invalid is_fallback for credential '%s': %w", c.Name, err)
+	// Validate base_url for proxy and other provider types that require it
+	if c.BaseURL != "" {
+		if err := validateBaseURL(c.Name, c.BaseURL); err != nil {
+			return err
 		}
 	}
 
@@ -216,9 +224,39 @@ func (c *CredentialConfig) UnmarshalYAML(value *yaml.Node) error {
 
 type MonitoringConfig struct {
 	PrometheusEnabled bool   `yaml:"prometheus_enabled"`
-	HealthCheckPath   string `yaml:"health_check_path"`
+	HealthCheckPath   string `yaml:"-"` // Fixed to "/health", not configurable via YAML
 	LogErrors         bool   `yaml:"log_errors,omitempty"`
 	ErrorsLogPath     string `yaml:"errors_log_path,omitempty"`
+}
+
+// LiteLLMDBConfig holds configuration for LiteLLM database integration
+type LiteLLMDBConfig struct {
+	// Enable/disable module
+	Enabled bool `yaml:"enabled"`
+
+	// IsRequired specifies whether LiteLLM DB is mandatory (fail startup on error)
+	// or optional (degrade to NoopManager with warning on error)
+	IsRequired bool `yaml:"is_required"` // default: false
+
+	// Database connection postgresql://[user[:password]@][netloc][:port][/dbname][?param1=value1&...]
+	DatabaseURL string `yaml:"database_url"` // os.environ/LITELLM_DATABASE_URL
+	MaxConns    int    `yaml:"max_conns"`    // default: 10
+	MinConns    int    `yaml:"min_conns"`    // default: 2
+
+	// Health check
+	HealthCheckInterval time.Duration `yaml:"health_check_interval"` // default: 10s
+	ConnectTimeout      time.Duration `yaml:"connect_timeout"`       // default: 5s
+
+	// Auth cache
+	AuthCacheTTL  time.Duration `yaml:"auth_cache_ttl"`  // default: 20s
+	AuthCacheSize int           `yaml:"auth_cache_size"` // default: 10000
+
+	// Spend logging
+	LogQueueSize     int           `yaml:"log_queue_size"`     // default: 10000
+	LogBatchSize     int           `yaml:"log_batch_size"`     // default: 100
+	LogFlushInterval time.Duration `yaml:"log_flush_interval"` // default: 5s
+	LogRetryAttempts int           `yaml:"log_retry_attempts"` // default: 3
+	LogRetryDelay    time.Duration `yaml:"log_retry_delay"`    // default: 1s
 }
 
 // UnmarshalYAML implements custom unmarshaling for MonitoringConfig with env variable support
@@ -226,7 +264,6 @@ func (m *MonitoringConfig) UnmarshalYAML(value *yaml.Node) error {
 	// Create a temporary struct with all string fields
 	type tempConfig struct {
 		PrometheusEnabled string `yaml:"prometheus_enabled"`
-		HealthCheckPath   string `yaml:"health_check_path"`
 		LogErrors         string `yaml:"log_errors,omitempty"`
 		ErrorsLogPath     string `yaml:"errors_log_path,omitempty"`
 	}
@@ -236,89 +273,95 @@ func (m *MonitoringConfig) UnmarshalYAML(value *yaml.Node) error {
 		return err
 	}
 
-	// Resolve and parse PrometheusEnabled
+	// Resolve and parse boolean fields
 	var err error
-	if temp.PrometheusEnabled != "" {
-		m.PrometheusEnabled, err = resolveEnvBool(temp.PrometheusEnabled, false)
-		if err != nil {
-			return fmt.Errorf("invalid prometheus_enabled: %w", err)
-		}
+	if m.PrometheusEnabled, err = parseField(temp.PrometheusEnabled, false, strconv.ParseBool, "prometheus_enabled"); err != nil {
+		return err
+	}
+	if m.LogErrors, err = parseField(temp.LogErrors, false, strconv.ParseBool, "log_errors"); err != nil {
+		return err
 	}
 
-	// Resolve HealthCheckPath
-	m.HealthCheckPath = resolveEnvString(temp.HealthCheckPath)
-
-	if temp.LogErrors != "" {
-		m.LogErrors, err = resolveEnvBool(temp.LogErrors, false)
-		if err != nil {
-			return fmt.Errorf("invalid log_errors: %w", err)
-		}
-	}
+	// Resolve string fields
+	m.HealthCheckPath = "/health" // Fixed path, not configurable via YAML
 	m.ErrorsLogPath = resolveEnvString(temp.ErrorsLogPath)
 
 	return nil
 }
 
-// resolveEnvString resolves environment variable if value is in format "os.environ/VAR_NAME"
-func resolveEnvString(value string) string {
-	const prefix = "os.environ/"
-	if strings.HasPrefix(value, prefix) {
-		envVar := strings.TrimPrefix(value, prefix)
-		if envValue := os.Getenv(envVar); envValue != "" {
-			return envValue
-		}
-	}
-	return value
-}
-
-// parseFunc is a function type that parses a string value into the desired type
-type parseFunc[T any] func(string) (T, error)
-
-// resolveEnvValue resolves environment variable and parses it using the provided parser
-func resolveEnvValue[T any](value string, defaultValue T, parser parseFunc[T], typeName string) (T, error) {
-	if value == "" {
-		return defaultValue, nil
+// UnmarshalYAML implements custom unmarshaling for LiteLLMDBConfig with env variable support
+func (l *LiteLLMDBConfig) UnmarshalYAML(value *yaml.Node) error {
+	type tempConfig struct {
+		Enabled             string `yaml:"enabled"`
+		IsRequired          string `yaml:"is_required"`
+		DatabaseURL         string `yaml:"database_url"`
+		MaxConns            string `yaml:"max_conns"`
+		MinConns            string `yaml:"min_conns"`
+		HealthCheckInterval string `yaml:"health_check_interval"`
+		ConnectTimeout      string `yaml:"connect_timeout"`
+		AuthCacheTTL        string `yaml:"auth_cache_ttl"`
+		AuthCacheSize       string `yaml:"auth_cache_size"`
+		LogQueueSize        string `yaml:"log_queue_size"`
+		LogBatchSize        string `yaml:"log_batch_size"`
+		LogFlushInterval    string `yaml:"log_flush_interval"`
+		LogRetryAttempts    string `yaml:"log_retry_attempts"`
+		LogRetryDelay       string `yaml:"log_retry_delay"`
 	}
 
-	resolved := resolveEnvString(value)
-	if resolved == value && value == "" {
-		return defaultValue, nil
+	var temp tempConfig
+	if err := value.Decode(&temp); err != nil {
+		return err
 	}
 
-	parsed, err := parser(resolved)
-	if err != nil {
-		return defaultValue, fmt.Errorf("failed to parse %s from '%s': %w", typeName, resolved, err)
-	}
-	return parsed, nil
-}
+	var err error
 
-// resolveEnvInt resolves environment variable and converts to int
-func resolveEnvInt(value string, defaultValue int) (int, error) {
-	return resolveEnvValue(value, defaultValue, strconv.Atoi, "int")
-}
+	l.DatabaseURL = resolveEnvString(temp.DatabaseURL)
 
-// resolveEnvBool resolves environment variable and converts to bool
-func resolveEnvBool(value string, defaultValue bool) (bool, error) {
-	return resolveEnvValue(value, defaultValue, strconv.ParseBool, "bool")
-}
+	// Boolean fields
+	if l.Enabled, err = parseField(temp.Enabled, false, strconv.ParseBool, "litellm_db.enabled"); err != nil {
+		return err
+	}
+	if l.IsRequired, err = parseField(temp.IsRequired, false, strconv.ParseBool, "litellm_db.is_required"); err != nil {
+		return err
+	}
 
-// resolveEnvDuration resolves environment variable and converts to duration
-func resolveEnvDuration(value string, defaultValue time.Duration) (time.Duration, error) {
-	return resolveEnvValue(value, defaultValue, time.ParseDuration, "duration")
-}
+	// Integer fields (defaults optimized for ~1000 requests/minute)
+	if l.MaxConns, err = parseField(temp.MaxConns, 25, strconv.Atoi, "litellm_db.max_conns"); err != nil {
+		return err
+	}
+	if l.MinConns, err = parseField(temp.MinConns, 5, strconv.Atoi, "litellm_db.min_conns"); err != nil {
+		return err
+	}
+	if l.AuthCacheSize, err = parseField(temp.AuthCacheSize, 10000, strconv.Atoi, "litellm_db.auth_cache_size"); err != nil {
+		return err
+	}
+	if l.LogQueueSize, err = parseField(temp.LogQueueSize, 5000, strconv.Atoi, "litellm_db.log_queue_size"); err != nil {
+		return err
+	}
+	if l.LogBatchSize, err = parseField(temp.LogBatchSize, 100, strconv.Atoi, "litellm_db.log_batch_size"); err != nil {
+		return err
+	}
+	if l.LogRetryAttempts, err = parseField(temp.LogRetryAttempts, 3, strconv.Atoi, "litellm_db.log_retry_attempts"); err != nil {
+		return err
+	}
 
-// validateBaseURL validates that a URL is properly formed with http/https scheme
-func validateBaseURL(credentialName, baseURL string) error {
-	parsedURL, err := url.Parse(baseURL)
-	if err != nil {
-		return fmt.Errorf("credential %s: invalid base_url: %w", credentialName, err)
+	// Duration fields
+	if l.HealthCheckInterval, err = parseField(temp.HealthCheckInterval, 10*time.Second, time.ParseDuration, "litellm_db.health_check_interval"); err != nil {
+		return err
 	}
-	if parsedURL.Scheme != "http" && parsedURL.Scheme != "https" {
-		return fmt.Errorf("credential %s: base_url must use http or https scheme, got: %s", credentialName, parsedURL.Scheme)
+	if l.ConnectTimeout, err = parseField(temp.ConnectTimeout, 5*time.Second, time.ParseDuration, "litellm_db.connect_timeout"); err != nil {
+		return err
 	}
-	if parsedURL.Host == "" {
-		return fmt.Errorf("credential %s: base_url must have a host", credentialName)
+	if l.AuthCacheTTL, err = parseField(temp.AuthCacheTTL, 20*time.Second, time.ParseDuration, "litellm_db.auth_cache_ttl"); err != nil {
+		return err
 	}
+	if l.LogFlushInterval, err = parseField(temp.LogFlushInterval, 5*time.Second, time.ParseDuration, "litellm_db.log_flush_interval"); err != nil {
+		return err
+	}
+	if l.LogRetryDelay, err = parseField(temp.LogRetryDelay, time.Second, time.ParseDuration, "litellm_db.log_retry_delay"); err != nil {
+		return err
+	}
+
 	return nil
 }
 
@@ -378,9 +421,7 @@ func Load(path string) (*Config, error) {
 func (c *Config) Normalize() {
 	// Remove /v1 suffix from base_url to avoid duplication
 	for i := range c.Credentials {
-		if len(c.Credentials[i].BaseURL) > 3 && c.Credentials[i].BaseURL[len(c.Credentials[i].BaseURL)-3:] == "/v1" {
-			c.Credentials[i].BaseURL = c.Credentials[i].BaseURL[:len(c.Credentials[i].BaseURL)-3]
-		}
+		c.Credentials[i].BaseURL = strings.TrimSuffix(c.Credentials[i].BaseURL, "/v1")
 	}
 }
 
@@ -391,6 +432,10 @@ func (c *Config) Validate() error {
 
 	if c.Server.MaxBodySizeMB <= 0 {
 		return fmt.Errorf("invalid max_body_size_mb: %d", c.Server.MaxBodySizeMB)
+	}
+
+	if c.Server.ResponseBodyMultiplier <= 0 {
+		c.Server.ResponseBodyMultiplier = 10
 	}
 
 	// -1 means unlimited timeout
@@ -413,17 +458,20 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("master_key is required")
 	}
 
-	// Set default for default_models_rpm if not specified
-	// -1 means unlimited RPM
+	// Validate and normalize default_models_rpm
+	// -1 means unlimited RPM, 0 is treated as unlimited
 	if c.Server.DefaultModelsRPM == 0 {
-		c.Server.DefaultModelsRPM = 50 // Default value
+		c.Server.DefaultModelsRPM = -1 // Convert 0 to unlimited (-1)
 	} else if c.Server.DefaultModelsRPM < -1 {
 		return fmt.Errorf("invalid default_models_rpm: %d (must be -1 for unlimited or positive number)", c.Server.DefaultModelsRPM)
 	}
 
-	// Set default for health_check_path if not specified
-	if c.Monitoring.HealthCheckPath == "" {
-		c.Monitoring.HealthCheckPath = "/health"
+	// ReadTimeout equals RequestTimeout (not configurable via YAML)
+	c.Server.ReadTimeout = c.Server.RequestTimeout
+
+	// Validate IdleTimeout against WriteTimeout
+	if c.Server.IdleTimeout == 0 {
+		c.Server.IdleTimeout = c.Server.WriteTimeout * 2
 	}
 
 	if c.Fail2Ban.MaxAttempts <= 0 {
@@ -451,11 +499,6 @@ func (c *Config) Validate() error {
 		// Validate provider type
 		if !cred.Type.IsValid() {
 			return fmt.Errorf("credential %s: invalid type: %s (must be 'openai', 'vertex-ai', 'anthropic', or 'proxy')", cred.Name, cred.Type)
-		}
-
-		// IsFallback should only be true for proxy type
-		if cred.IsFallback && cred.Type != ProviderTypeProxy {
-			return fmt.Errorf("credential %s: is_fallback can only be true for proxy type", cred.Name)
 		}
 
 		// Validate by provider type
@@ -515,10 +558,12 @@ func (c *Config) Validate() error {
 		}
 	}
 
-	return nil
-}
+	// Validate LiteLLM DB config
+	if c.LiteLLMDB.Enabled {
+		if c.LiteLLMDB.DatabaseURL == "" {
+			return fmt.Errorf("litellm_db.database_url is required when enabled")
+		}
+	}
 
-// isUnlimited checks if a value represents unlimited (-1)
-func isUnlimited(value int) bool {
-	return value == -1
+	return nil
 }

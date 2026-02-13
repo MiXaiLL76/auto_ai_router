@@ -312,7 +312,7 @@ func TestHealthCheck_BannedCredentials(t *testing.T) {
 	bal := balancer.New([]config.CredentialConfig{cred1, cred2}, f2b, rl)
 
 	// Ban one credential
-	f2b.RecordResponse(cred1.Name, 401) // This will ban it because max_attempts = 1
+	f2b.RecordResponse(cred1.Name, "", 401) // This will ban it because max_attempts = 1
 
 	metrics := monitoring.New(false)
 	tm := auth.NewVertexTokenManager(logger)
@@ -353,8 +353,8 @@ func TestHealthCheck_AllBanned(t *testing.T) {
 	bal := balancer.New([]config.CredentialConfig{cred1, cred2}, f2b, rl)
 
 	// Ban all credentials
-	f2b.RecordResponse(cred1.Name, 401)
-	f2b.RecordResponse(cred2.Name, 401)
+	f2b.RecordResponse(cred1.Name, "", 401)
+	f2b.RecordResponse(cred2.Name, "", 401)
 
 	metrics := monitoring.New(false)
 	tm := auth.NewVertexTokenManager(logger)

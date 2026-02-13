@@ -8,6 +8,9 @@ import (
 	"os"
 	"sync"
 	"time"
+
+	"github.com/mixaill76/auto_ai_router/internal/security"
+	"github.com/mixaill76/auto_ai_router/internal/utils"
 )
 
 // errorLogFileCache holds a cached file handle for error logging
@@ -125,16 +128,12 @@ func logErrorResponse(errorsLogPath string, req *http.Request, rc *responseCaptu
 		reqBodyStr = string(requestBody)
 	}
 
-	// Create request headers map
+	// Create request headers map with sensitive data masked
+	maskedReqHeaders := security.MaskSensitiveHeaders(req.Header)
 	reqHeaders := make(map[string]string)
-	for key, values := range req.Header {
+	for key, values := range maskedReqHeaders {
 		if len(values) > 0 {
-			// Mask Authorization header for security
-			if key == "Authorization" {
-				reqHeaders[key] = "Bearer ***"
-			} else {
-				reqHeaders[key] = values[0]
-			}
+			reqHeaders[key] = values[0]
 		}
 	}
 
@@ -148,7 +147,7 @@ func logErrorResponse(errorsLogPath string, req *http.Request, rc *responseCaptu
 
 	// Create log entry
 	entry := ErrorLogEntry{
-		Timestamp: time.Now().Format(time.RFC3339),
+		Timestamp: utils.NowUTC().Format(time.RFC3339),
 		Path:      req.URL.Path,
 		Method:    req.Method,
 		Status:    rc.statusCode,
@@ -190,43 +189,56 @@ func isErrorStatus(statusCode int) bool {
 	return statusCode >= 400
 }
 
-// captureRequestBody reads and captures the request body for logging
-func captureRequestBody(req *http.Request) ([]byte, error) {
+// captureRequestBody reads and captures the request body for logging.
+// Returns (body, isStreaming, error) where isStreaming indicates if the request
+// has "stream": true in the JSON payload.
+func captureRequestBody(req *http.Request) ([]byte, bool, error) {
 	if req.Body == nil {
-		return []byte{}, nil
+		return []byte{}, false, nil
 	}
 
 	body, err := io.ReadAll(req.Body)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 
 	// Check if this is a streaming request by parsing "stream": true in JSON
-	if isStreamingRequestBody(body) {
-		// Restore body before returning error so original request can be proxied
-		req.Body = io.NopCloser(bytes.NewReader(body))
-		// Return io.EOF instead of ErrBodyNotAllowed for streaming requests
-		return body, nil
-	}
+	isStreaming := isStreamingRequestBody(body)
 
-	// Restore body for further processing
+	// Restore body for further processing (necessary for proxy to read it)
 	req.Body = io.NopCloser(bytes.NewReader(body))
-	return body, nil
+
+	return body, isStreaming, nil
 }
 
+// isStreamingRequestBody checks if the request body contains "stream": true in JSON.
+// Returns true only if:
+// 1. Body is valid JSON
+// 2. Contains "stream" key (case-sensitive)
+// 3. Value is explicitly true
+//
+// Streaming requests should not be logged or retried to avoid memory issues
+// with large real-time responses.
 func isStreamingRequestBody(body []byte) bool {
+	if len(body) == 0 {
+		return false
+	}
+
 	var payload map[string]json.RawMessage
 	if err := json.Unmarshal(body, &payload); err != nil {
+		// Not valid JSON - treat as non-streaming
 		return false
 	}
 
 	streamRaw, ok := payload["stream"]
 	if !ok {
+		// No "stream" key - treat as non-streaming
 		return false
 	}
 
 	var stream bool
 	if err := json.Unmarshal(streamRaw, &stream); err != nil {
+		// Invalid stream value - treat as non-streaming
 		return false
 	}
 

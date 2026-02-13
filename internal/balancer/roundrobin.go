@@ -48,7 +48,7 @@ func New(credentials []config.CredentialConfig, f2b *fail2ban.Fail2Ban, rl *rate
 		credentialIndex[c.Name] = i
 	}
 
-	return &RoundRobin{
+	rr := &RoundRobin{
 		credentials:     credentials,
 		credentialIndex: credentialIndex,
 		current:         0,
@@ -57,6 +57,11 @@ func New(credentials []config.CredentialConfig, f2b *fail2ban.Fail2Ban, rl *rate
 		modelChecker:    nil,
 		logger:          slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelInfo})),
 	}
+
+	// Validate fallback configuration (cycle detection and unused fallback detection)
+	rr.validateFallbackConfiguration()
+
+	return rr
 }
 
 // SetLogger sets the logger for the RoundRobin balancer
@@ -91,9 +96,14 @@ func (r *RoundRobin) IsProxyCredential(credentialName string) bool {
 	return cred != nil && cred.Type == config.ProviderTypeProxy
 }
 
-// IsBanned checks if a credential is currently banned
-func (r *RoundRobin) IsBanned(credentialName string) bool {
-	return r.fail2ban.IsBanned(credentialName)
+// IsBanned checks if a specific credential+model pair is currently banned
+func (r *RoundRobin) IsBanned(credentialName, modelID string) bool {
+	return r.fail2ban.IsBanned(credentialName, modelID)
+}
+
+// HasAnyBan checks if a credential has any banned models
+func (r *RoundRobin) HasAnyBan(credentialName string) bool {
+	return r.fail2ban.HasAnyBan(credentialName)
 }
 
 // GetProxyCredentials returns all proxy type credentials
@@ -112,29 +122,39 @@ func (r *RoundRobin) GetProxyCredentials() []config.CredentialConfig {
 
 // NextForModel returns the next available credential that supports the specified model
 func (r *RoundRobin) NextForModel(modelID string) (*config.CredentialConfig, error) {
-	return r.next(modelID, false)
+	return r.next(modelID, false, false)
 }
 
-// NextFallbackForModel returns the next available fallback proxy credential
+// NextFallbackForModel returns the next available fallback credential
 func (r *RoundRobin) NextFallbackForModel(modelID string) (*config.CredentialConfig, error) {
-	return r.next(modelID, true)
+	return r.next(modelID, true, false)
 }
 
-func (r *RoundRobin) next(modelID string, allowOnlyFallback bool) (*config.CredentialConfig, error) {
+// NextFallbackProxyForModel returns the next available fallback proxy credential
+func (r *RoundRobin) NextFallbackProxyForModel(modelID string) (*config.CredentialConfig, error) {
+	return r.next(modelID, true, true)
+}
+
+func (r *RoundRobin) next(modelID string, allowOnlyFallback, allowOnlyProxy bool) (*config.CredentialConfig, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	attempts := 0
+	candidateCount := 0 // credentials that actually support this model
 	rateLimitHit := false
-	otherReasonsHit := false
+	bannedHit := false
 
 	for {
 		if attempts >= len(r.credentials) {
-			// If all credentials were blocked due to rate limit, return rate limit error
-			if rateLimitHit && !otherReasonsHit {
+			// If no credentials support this model at all, return generic error
+			if candidateCount == 0 {
+				return nil, ErrNoCredentialsAvailable
+			}
+			// If all candidates were rate limited (and none banned), return specific rate limit error
+			if rateLimitHit && !bannedHit {
 				return nil, ErrRateLimitExceeded
 			}
-			// Otherwise return generic error
+			// Candidates exist but all are banned or mix of banned + rate limited
 			return nil, ErrNoCredentialsAvailable
 		}
 
@@ -142,27 +162,42 @@ func (r *RoundRobin) next(modelID string, allowOnlyFallback bool) (*config.Crede
 		r.current = (r.current + 1) % len(r.credentials)
 		attempts++
 
+		// Filter by credential type
+		// These are structural filters, not availability issues
+		if allowOnlyProxy && cred.Type != config.ProviderTypeProxy {
+			monitoring.CredentialSelectionRejected.WithLabelValues("type_not_allowed").Inc()
+			continue
+		}
+
 		// Filter by is_fallback flag
-		if allowOnlyFallback && (cred.Type != config.ProviderTypeProxy || !cred.IsFallback) {
-			monitoring.CredentialSelectionRejected.WithLabelValues("fallback_not_available").Inc()
-			otherReasonsHit = true
+		if allowOnlyFallback {
+			if !cred.IsFallback {
+				monitoring.CredentialSelectionRejected.WithLabelValues("fallback_not_available").Inc()
+				continue
+			}
+		} else if cred.IsFallback {
+			monitoring.CredentialSelectionRejected.WithLabelValues("fallback_only").Inc()
 			continue
 		}
 
-		// Check if credential is banned
-		if r.fail2ban.IsBanned(cred.Name) {
-			monitoring.CredentialSelectionRejected.WithLabelValues("banned").Inc()
-			otherReasonsHit = true
-			continue
-		}
-
-		// Check if credential supports the requested model BEFORE rate limiting
+		// Check if credential supports the requested model BEFORE ban/rate checks.
+		// model_not_available is a structural property (credential type doesn't serve this model),
+		// NOT a temporary availability issue — it should not mask rate limit errors.
 		if modelID != "" && r.modelChecker != nil && r.modelChecker.IsEnabled() {
 			if !r.modelChecker.HasModel(cred.Name, modelID) {
 				monitoring.CredentialSelectionRejected.WithLabelValues("model_not_available").Inc()
-				otherReasonsHit = true
 				continue
 			}
+		}
+
+		// This credential supports the model — it's a real candidate
+		candidateCount++
+
+		// Check if credential+model pair is banned
+		if r.fail2ban.IsBanned(cred.Name, modelID) {
+			monitoring.CredentialSelectionRejected.WithLabelValues("banned").Inc()
+			bannedHit = true
+			continue
 		}
 
 		// Check credential RPM limit (without recording)
@@ -207,8 +242,8 @@ func (r *RoundRobin) next(modelID string, allowOnlyFallback bool) (*config.Crede
 	}
 }
 
-func (r *RoundRobin) RecordResponse(credentialName string, statusCode int) {
-	r.fail2ban.RecordResponse(credentialName, statusCode)
+func (r *RoundRobin) RecordResponse(credentialName, modelID string, statusCode int) {
+	r.fail2ban.RecordResponse(credentialName, modelID, statusCode)
 }
 
 func (r *RoundRobin) GetCredentials() []config.CredentialConfig {
@@ -233,7 +268,7 @@ func (r *RoundRobin) GetAvailableCount() int {
 
 	count := 0
 	for _, cred := range r.credentials {
-		if !r.fail2ban.IsBanned(cred.Name) {
+		if !r.fail2ban.HasAnyBan(cred.Name) {
 			count++
 		}
 	}
@@ -242,4 +277,29 @@ func (r *RoundRobin) GetAvailableCount() int {
 
 func (r *RoundRobin) GetBannedCount() int {
 	return r.fail2ban.GetBannedCount()
+}
+
+// GetBannedPairs returns all currently banned credential+model pairs with error details
+func (r *RoundRobin) GetBannedPairs() []fail2ban.BanPair {
+	return r.fail2ban.GetBannedPairs()
+}
+
+// validateFallbackConfiguration validates fallback credential configuration
+// Logs count of fallback credentials
+func (r *RoundRobin) validateFallbackConfiguration() {
+	fallbackCount := 0
+	for _, cred := range r.credentials {
+		if cred.IsFallback {
+			fallbackCount++
+		}
+	}
+
+	if fallbackCount == 0 {
+		r.logger.Info("No fallback credentials configured")
+	} else {
+		r.logger.Info("Fallback credential validation completed",
+			"total_credentials", len(r.credentials),
+			"fallback_credentials", fallbackCount,
+		)
+	}
 }

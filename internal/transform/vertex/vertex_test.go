@@ -451,6 +451,149 @@ func TestVertexToOpenAI(t *testing.T) {
 	}
 }
 
+func getKeys(m map[string]interface{}) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	return keys
+}
+
+func TestVertexToOpenAI_ModularityTokens(t *testing.T) {
+	tests := []struct {
+		name        string
+		input       string
+		expectedAbs struct {
+			promptAudio     int
+			completionAudio int
+			cachedTokens    int
+		}
+	}{
+		{
+			name: "with audio and cached tokens",
+			input: `{
+				"candidates": [{
+					"content": {
+						"parts": [{"text": "Audio response"}],
+						"role": "model"
+					},
+					"finishReason": "STOP"
+				}],
+				"usageMetadata": {
+					"promptTokenCount": 100,
+					"candidatesTokenCount": 50,
+					"totalTokenCount": 150,
+					"cachedContentTokenCount": 20,
+					"promptTokensDetails": [
+						{"modality": "TEXT", "tokenCount": 95},
+						{"modality": "AUDIO", "tokenCount": 5}
+					],
+					"candidatesTokensDetails": [
+						{"modality": "TEXT", "tokenCount": 48},
+						{"modality": "AUDIO", "tokenCount": 2}
+					]
+				}
+			}`,
+			expectedAbs: struct {
+				promptAudio     int
+				completionAudio int
+				cachedTokens    int
+			}{
+				promptAudio:     5,
+				completionAudio: 2,
+				cachedTokens:    20,
+			},
+		},
+		{
+			name: "with image tokens",
+			input: `{
+				"candidates": [{
+					"content": {
+						"parts": [{"text": "Image description"}],
+						"role": "model"
+					},
+					"finishReason": "STOP"
+				}],
+				"usageMetadata": {
+					"promptTokenCount": 200,
+					"candidatesTokenCount": 100,
+					"totalTokenCount": 300,
+					"promptTokensDetails": [
+						{"modality": "TEXT", "tokenCount": 150},
+						{"modality": "IMAGE", "tokenCount": 50}
+					],
+					"candidatesTokensDetails": [
+						{"modality": "TEXT", "tokenCount": 95},
+						{"modality": "IMAGE", "tokenCount": 5}
+					]
+				}
+			}`,
+			expectedAbs: struct {
+				promptAudio     int
+				completionAudio int
+				cachedTokens    int
+			}{
+				promptAudio:     0,
+				completionAudio: 0,
+				cachedTokens:    0,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := VertexToOpenAI([]byte(tt.input), "gemini-2.5-pro")
+			if err != nil {
+				t.Fatalf("VertexToOpenAI() error = %v", err)
+			}
+
+			var resultMap map[string]interface{}
+			if err := json.Unmarshal(result, &resultMap); err != nil {
+				t.Fatalf("Failed to unmarshal result: %v", err)
+			}
+
+			usage, ok := resultMap["usage"].(map[string]interface{})
+			if !ok {
+				t.Fatalf("Expected 'usage' field in result")
+			}
+
+			// Check prompt_tokens_details
+			promptDetails, ok := usage["prompt_tokens_details"].(map[string]interface{})
+			if ok && tt.expectedAbs.promptAudio > 0 {
+				audioTokens, ok := promptDetails["audio_tokens"].(float64)
+				if !ok {
+					t.Errorf("Expected audio_tokens in prompt_tokens_details, got keys: %v", getKeys(promptDetails))
+				} else if int(audioTokens) != tt.expectedAbs.promptAudio {
+					t.Errorf("Expected prompt audio tokens %d, got %d", tt.expectedAbs.promptAudio, int(audioTokens))
+				}
+			}
+
+			// Check completion_tokens_details
+			completionDetails, ok := usage["completion_tokens_details"].(map[string]interface{})
+			if ok && (tt.expectedAbs.completionAudio > 0 || tt.expectedAbs.cachedTokens > 0) {
+				if tt.expectedAbs.completionAudio > 0 {
+					audioTokens, ok := completionDetails["audio_tokens"].(float64)
+					if !ok {
+						t.Errorf("Expected audio_tokens in completion_tokens_details")
+					} else if int(audioTokens) != tt.expectedAbs.completionAudio {
+						t.Errorf("Expected completion audio tokens %d, got %d", tt.expectedAbs.completionAudio, int(audioTokens))
+					}
+				}
+			}
+
+			// Check cached tokens in prompt_tokens_details
+			if tt.expectedAbs.cachedTokens > 0 && promptDetails != nil {
+				cachedTokens, ok := promptDetails["cached_tokens"].(float64)
+				if !ok {
+					t.Errorf("Expected cached_tokens in prompt_tokens_details")
+				} else if int(cachedTokens) != tt.expectedAbs.cachedTokens {
+					t.Errorf("Expected cached tokens %d, got %d", tt.expectedAbs.cachedTokens, int(cachedTokens))
+				}
+			}
+		})
+	}
+}
+
 func TestMapFinishReason(t *testing.T) {
 	tests := []struct {
 		input    string
@@ -595,7 +738,7 @@ func TestConvertContentToParts(t *testing.T) {
 					},
 				},
 			},
-			expected: 0, // should be ignored
+			expected: 1, // should be ignored
 		},
 		{
 			name:     "empty array",
@@ -794,7 +937,7 @@ func TestBuildVertexURL(t *testing.T) {
 			},
 			modelID:   "claude-3-opus",
 			streaming: false,
-			expected:  "https://aiplatform.googleapis.com/v1/projects/test-project/locations/global/publishers/anthropic/models/claude-3-opus:generateContent",
+			expected:  "https://aiplatform.googleapis.com/v1beta1/projects/test-project/locations/global/publishers/anthropic/models/claude-3-opus:generateContent",
 		},
 		{
 			name: "global location streaming claude",
@@ -804,7 +947,7 @@ func TestBuildVertexURL(t *testing.T) {
 			},
 			modelID:   "claude-3-sonnet",
 			streaming: true,
-			expected:  "https://aiplatform.googleapis.com/v1/projects/test-project/locations/global/publishers/anthropic/models/claude-3-sonnet:streamGenerateContent?alt=sse",
+			expected:  "https://aiplatform.googleapis.com/v1beta1/projects/test-project/locations/global/publishers/anthropic/models/claude-3-sonnet:streamGenerateContent?alt=sse",
 		},
 		{
 			name: "regional location non-streaming gemini",
@@ -814,7 +957,7 @@ func TestBuildVertexURL(t *testing.T) {
 			},
 			modelID:   "gemini-pro",
 			streaming: false,
-			expected:  "https://us-central1-aiplatform.googleapis.com/v1/projects/test-project/locations/us-central1/publishers/google/models/gemini-pro:generateContent",
+			expected:  "https://us-central1-aiplatform.googleapis.com/v1beta1/projects/test-project/locations/us-central1/publishers/google/models/gemini-pro:generateContent",
 		},
 		{
 			name: "regional location streaming gemini",
@@ -824,7 +967,7 @@ func TestBuildVertexURL(t *testing.T) {
 			},
 			modelID:   "gemini-pro",
 			streaming: true,
-			expected:  "https://europe-west1-aiplatform.googleapis.com/v1/projects/test-project/locations/europe-west1/publishers/google/models/gemini-pro:streamGenerateContent?alt=sse",
+			expected:  "https://europe-west1-aiplatform.googleapis.com/v1beta1/projects/test-project/locations/europe-west1/publishers/google/models/gemini-pro:streamGenerateContent?alt=sse",
 		},
 	}
 
@@ -850,7 +993,7 @@ func TestBuildVertexImageURL(t *testing.T) {
 				Location:  "global",
 			},
 			modelID:  "imagegeneration",
-			expected: "https://aiplatform.googleapis.com/v1/projects/test-project/locations/global/publishers/google/models/imagegeneration:predict",
+			expected: "https://aiplatform.googleapis.com/v1beta1/projects/test-project/locations/global/publishers/google/models/imagegeneration:predict",
 		},
 		{
 			name: "regional location",
@@ -859,7 +1002,7 @@ func TestBuildVertexImageURL(t *testing.T) {
 				Location:  "us-central1",
 			},
 			modelID:  "imagen-3.0-generate-001",
-			expected: "https://us-central1-aiplatform.googleapis.com/v1/projects/test-project/locations/us-central1/publishers/google/models/imagen-3.0-generate-001:predict",
+			expected: "https://us-central1-aiplatform.googleapis.com/v1beta1/projects/test-project/locations/us-central1/publishers/google/models/imagen-3.0-generate-001:predict",
 		},
 	}
 
