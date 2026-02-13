@@ -70,13 +70,16 @@ func NewHTTPClient(cfg *HTTPClientConfig) *http.Client {
 	}
 
 	return &http.Client{
-		Timeout: timeout,
+		// No global timeout — streaming responses can run for minutes.
+		// ResponseHeaderTimeout on Transport protects the connect + header phase.
+		Timeout: 0,
 		Transport: &http.Transport{
-			Proxy:               http.ProxyFromEnvironment, // Support HTTP_PROXY, HTTPS_PROXY, NO_PROXY
-			MaxIdleConns:        maxIdleConns,
-			MaxIdleConnsPerHost: maxIdleConnsPerHost,
-			IdleConnTimeout:     idleConnTimeout,
-			DisableKeepAlives:   false,
+			Proxy:                 http.ProxyFromEnvironment, // Support HTTP_PROXY, HTTPS_PROXY, NO_PROXY
+			ResponseHeaderTimeout: timeout,                   // Timeout for connect + response headers only
+			MaxIdleConns:          maxIdleConns,
+			MaxIdleConnsPerHost:   maxIdleConnsPerHost,
+			IdleConnTimeout:       idleConnTimeout,
+			DisableKeepAlives:     false,
 		},
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			return http.ErrUseLastResponse

@@ -28,7 +28,11 @@ func (p *Proxy) writeProxyResponse(w http.ResponseWriter, resp *ProxyResponse) {
 	w.Header().Set("Content-Length", itoa(len(resp.Body)))
 	w.WriteHeader(resp.StatusCode)
 	if _, err := w.Write(resp.Body); err != nil {
-		p.logger.Error("Failed to write proxy response body", "error", err)
+		if isClientDisconnectError(err) {
+			p.logger.Debug("Client disconnected during proxy response write", "error", err)
+		} else {
+			p.logger.Error("Failed to write proxy response body", "error", err)
+		}
 	}
 }
 

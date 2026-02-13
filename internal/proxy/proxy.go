@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/google/uuid"
@@ -131,6 +132,27 @@ func isTimeoutError(err error) bool {
 	}
 
 	return false
+}
+
+// isClientDisconnectError checks if an error indicates the client disconnected
+// (broken pipe, connection reset, context canceled). These are expected during
+// normal operation and should be logged at lower severity.
+func isClientDisconnectError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) {
+		return true
+	}
+	if errors.Is(err, syscall.EPIPE) {
+		return true
+	}
+	if errors.Is(err, syscall.ECONNRESET) {
+		return true
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "write: broken pipe") ||
+		strings.Contains(msg, "connection reset by peer")
 }
 
 func New(cfg *Config) *Proxy {
@@ -683,7 +705,14 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		p.logger.Debug("Response is streaming", "credential", cred.Name)
 		logCtx.TargetURL = targetURL // Store target URL for logging
 	} else {
+		// Set a body read timeout for non-streaming responses to prevent
+		// hanging if upstream stalls mid-body (Client.Timeout was removed
+		// to support streaming, so we need an explicit guard here).
+		bodyReadTimer := time.AfterFunc(p.requestTimeout, func() {
+			_ = resp.Body.Close()
+		})
 		responseBody, err = p.readLimitedResponseBody(resp.Body)
+		bodyReadTimer.Stop()
 		if err != nil {
 			statusCode := http.StatusInternalServerError
 			statusMsg := "Internal Server Error"
@@ -854,9 +883,14 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	w.WriteHeader(resp.StatusCode)
+	rc := http.NewResponseController(w)
 
 	if isStreamingResp {
+		// For streaming: no write deadline on WriteHeader — streamToClient
+		// manages per-chunk deadlines. Setting one here risks killing the
+		// connection if upstream is slow to produce the first chunk.
+		w.WriteHeader(resp.StatusCode)
+
 		// Estimate prompt tokens before streaming for logging
 		// Streaming responses don't provide prompt token counts in headers,
 		// so we estimate based on request body content before streaming begins
@@ -898,8 +932,17 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		}
 
 	} else {
+		// For non-streaming: set write deadline before header + body writes
+		_ = rc.SetWriteDeadline(time.Now().Add(30 * time.Second))
+		w.WriteHeader(resp.StatusCode)
+
+		_ = rc.SetWriteDeadline(time.Now().Add(30 * time.Second))
 		if _, err := p.streamResponseBody(w, resp.Body); err != nil {
-			p.logger.Error("Failed to copy response body", "error", err)
+			if isClientDisconnectError(err) {
+				p.logger.Debug("Client disconnected during response body copy", "error", err)
+			} else {
+				p.logger.Error("Failed to copy response body", "error", err)
+			}
 		}
 	}
 }

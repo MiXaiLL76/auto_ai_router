@@ -9,11 +9,16 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/mixaill76/auto_ai_router/internal/transform"
 	"github.com/mixaill76/auto_ai_router/internal/transform/anthropic"
 	"github.com/mixaill76/auto_ai_router/internal/transform/vertex"
 )
+
+// streamChunkWriteTimeout is the per-chunk write deadline for streaming responses.
+// If no data flows for this duration, the connection is terminated.
+const streamChunkWriteTimeout = 60 * time.Second
 
 var streamBufPool = sync.Pool{
 	New: func() any {
@@ -219,9 +224,6 @@ func (p *Proxy) handleTransformedStreaming(
 	var lastChunk []byte
 
 	go func() {
-		defer func() {
-			_ = pw.Close()
-		}()
 		err := transformFunc(resp.Body, modelID, &tokenCapturingWriter{
 			writer: pw,
 			tokens: &totalTokens,
@@ -234,7 +236,11 @@ func (p *Proxy) handleTransformedStreaming(
 			},
 		})
 		if err != nil {
-			p.logger.Error("Failed to transform streaming response", "provider", providerName, "error", err)
+			// Don't log here — CloseWithError propagates the error to the
+			// reader side where streamToClient logs it as "Streaming read error".
+			_ = pw.CloseWithError(fmt.Errorf("%s transform: %w", providerName, err))
+		} else {
+			_ = pw.Close()
 		}
 	}()
 
@@ -374,8 +380,15 @@ func (p *Proxy) streamToClient(
 			if onChunk != nil {
 				onChunk((*buf)[:n])
 			}
+			// Set write deadline before each write — keeps active streams alive,
+			// terminates if client stops reading for streamChunkWriteTimeout.
+			_ = controller.SetWriteDeadline(time.Now().Add(streamChunkWriteTimeout))
 			if _, writeErr := w.Write((*buf)[:n]); writeErr != nil {
-				p.logger.Error("Failed to write streaming chunk", "error", writeErr, "credential", credName)
+				if isClientDisconnectError(writeErr) {
+					p.logger.Warn("Client disconnected during streaming", "error", writeErr, "credential", credName)
+				} else {
+					p.logger.Error("Failed to write streaming chunk", "error", writeErr, "credential", credName)
+				}
 				if onWriteErr != nil {
 					onWriteErr()
 				}
