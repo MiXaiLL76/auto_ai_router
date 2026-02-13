@@ -70,6 +70,40 @@ func (p *Proxy) HealthCheck() (bool, *httputil.ProxyHealthResponse) {
 		}
 	}
 
+	// Enrich models and credentials with error code counts from banned pairs
+	bannedPairs := p.balancer.GetBannedPairs()
+	// credentialErrorCounts accumulates error counts per credential across all its banned models
+	credentialErrorCounts := make(map[string]map[int]int)
+	for _, bp := range bannedPairs {
+		modelKey := bp.Credential + ":" + bp.Model
+		if ms, ok := modelsInfo[modelKey]; ok {
+			if len(bp.ErrorCodeCounts) > 0 {
+				counts := make(map[int]int, len(bp.ErrorCodeCounts))
+				for code, cnt := range bp.ErrorCodeCounts {
+					counts[code] = cnt
+				}
+				ms.ErrorCodeCounts = counts
+				modelsInfo[modelKey] = ms
+			}
+		}
+		// Aggregate into per-credential counts
+		if len(bp.ErrorCodeCounts) > 0 {
+			if credentialErrorCounts[bp.Credential] == nil {
+				credentialErrorCounts[bp.Credential] = make(map[int]int)
+			}
+			for code, cnt := range bp.ErrorCodeCounts {
+				credentialErrorCounts[bp.Credential][code] += cnt
+			}
+		}
+	}
+	// Apply aggregated error counts to credential info
+	for credName, counts := range credentialErrorCounts {
+		if cs, ok := credentialsInfo[credName]; ok {
+			cs.BannedErrorCounts = counts
+			credentialsInfo[credName] = cs
+		}
+	}
+
 	status := &httputil.ProxyHealthResponse{
 		Status:               "healthy",
 		CredentialsAvailable: availableCreds,

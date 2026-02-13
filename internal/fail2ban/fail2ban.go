@@ -26,11 +26,12 @@ type banInfo struct {
 
 // BanPair represents a banned credential+model pair with ban details
 type BanPair struct {
-	Credential  string
-	Model       string
-	ErrorCode   int
-	BanTime     time.Time
-	BanDuration time.Duration
+	Credential      string
+	Model           string
+	ErrorCode       int
+	ErrorCodeCounts map[int]int
+	BanTime         time.Time
+	BanDuration     time.Duration
 }
 
 type Fail2Ban struct {
@@ -289,12 +290,19 @@ func (f *Fail2Ban) GetBannedPairs() []BanPair {
 	pairs := make([]BanPair, 0, len(f.banned))
 	for key, ban := range f.banned {
 		credential, model := parseBanKey(key)
+		counts := make(map[int]int)
+		if codeCounts, ok := f.failures[key]; ok {
+			for code, count := range codeCounts {
+				counts[code] = count
+			}
+		}
 		pairs = append(pairs, BanPair{
-			Credential:  credential,
-			Model:       model,
-			ErrorCode:   ban.errorCode,
-			BanTime:     ban.banTime,
-			BanDuration: ban.banDuration,
+			Credential:      credential,
+			Model:           model,
+			ErrorCode:       ban.errorCode,
+			ErrorCodeCounts: counts,
+			BanTime:         ban.banTime,
+			BanDuration:     ban.banDuration,
 		})
 	}
 	return pairs

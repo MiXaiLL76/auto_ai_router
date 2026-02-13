@@ -55,6 +55,11 @@
         .badge-fallback { background: #ff7675; color: white; }
         .badge-banned { background: var(--accent-error); color: white; animation: pulse 1.5s infinite; }
         @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.7; } }
+        .error-counts { margin-top: 0.6rem; font-size: 0.82rem; }
+        .error-counts-title { color: #b2bec3; margin-bottom: 0.3rem; }
+        .error-code-row { display: flex; justify-content: space-between; padding: 0.15rem 0; }
+        .error-code-label { color: var(--accent-error); font-weight: 600; }
+        .error-code-count { color: var(--text); font-weight: 600; }
     </style>
 </head>
 <body>
@@ -108,6 +113,19 @@
                         <span class="credential-badge badge-banned">BANNED</span>
                     {{ end }}
                 </h3>
+                {{ if $cred.IsBanned }}
+                {{ if $cred.BannedErrorCounts }}
+                <div class="error-counts">
+                    <div class="error-counts-title">Errors:</div>
+                    {{ range $code, $count := $cred.BannedErrorCounts }}
+                    <div class="error-code-row">
+                        <span class="error-code-label">HTTP {{ $code }}</span>
+                        <span class="error-code-count">{{ $count }}x</span>
+                    </div>
+                    {{ end }}
+                </div>
+                {{ end }}
+                {{ end }}
                 <div class="stat">
                     <span>RPM Usage:</span>
                     <span>{{ $cred.CurrentRPM }} / {{ $cred.LimitRPM }}</span>
@@ -160,6 +178,15 @@
                             {{ end }}
                         </div>
                         <div class="model-cred">Credential: {{ $model.Credential }}</div>
+                        {{ if $model.IsBanned }}
+                        {{ if $model.ErrorCodeCounts }}
+                        <div class="error-counts">
+                            {{ range $code, $count := $model.ErrorCodeCounts }}
+                            <span class="error-code-label">HTTP {{ $code }}: </span><span class="error-code-count">{{ $count }}x</span>&nbsp;
+                            {{ end }}
+                        </div>
+                        {{ end }}
+                        {{ end }}
                     </div>
                     <div class="model-stats">
                         <div class="model-stat">

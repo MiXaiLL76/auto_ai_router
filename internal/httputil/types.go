@@ -12,22 +12,24 @@ type ProxyHealthResponse struct {
 
 // CredentialHealthStats represents health stats for a single credential
 type CredentialHealthStats struct {
-	Type       string `json:"type"`
-	IsFallback bool   `json:"is_fallback"`
-	IsBanned   bool   `json:"is_banned"`
-	CurrentRPM int    `json:"current_rpm"`
-	CurrentTPM int    `json:"current_tpm"`
-	LimitRPM   int    `json:"limit_rpm"`
-	LimitTPM   int    `json:"limit_tpm"`
+	Type              string      `json:"type"`
+	IsFallback        bool        `json:"is_fallback"`
+	IsBanned          bool        `json:"is_banned"`
+	CurrentRPM        int         `json:"current_rpm"`
+	CurrentTPM        int         `json:"current_tpm"`
+	LimitRPM          int         `json:"limit_rpm"`
+	LimitTPM          int         `json:"limit_tpm"`
+	BannedErrorCounts map[int]int `json:"banned_error_counts,omitempty"` // aggregated error counts from banned models
 }
 
 // ModelHealthStats represents health stats for a single model
 type ModelHealthStats struct {
-	Credential string `json:"credential"`
-	Model      string `json:"model"`
-	IsBanned   bool   `json:"is_banned"`
-	CurrentRPM int    `json:"current_rpm"`
-	CurrentTPM int    `json:"current_tpm"`
-	LimitRPM   int    `json:"limit_rpm"`
-	LimitTPM   int    `json:"limit_tpm"`
+	Credential      string      `json:"credential"`
+	Model           string      `json:"model"`
+	IsBanned        bool        `json:"is_banned"`
+	CurrentRPM      int         `json:"current_rpm"`
+	CurrentTPM      int         `json:"current_tpm"`
+	LimitRPM        int         `json:"limit_rpm"`
+	LimitTPM        int         `json:"limit_tpm"`
+	ErrorCodeCounts map[int]int `json:"error_code_counts,omitempty"` // error code -> count when banned
 }

@@ -201,6 +201,7 @@ func TestGetBannedPairs(t *testing.T) {
 	for _, pair := range banned {
 		assert.Equal(t, "gpt-4", pair.Model)
 		assert.NotZero(t, pair.ErrorCode)
+		assert.NotEmpty(t, pair.ErrorCodeCounts)
 		assert.False(t, pair.BanTime.IsZero())
 	}
 }
@@ -555,12 +556,14 @@ func TestGetBannedPairs_MultiplePairs(t *testing.T) {
 	assert.Equal(t, "cred1", pairs[0].Credential)
 	assert.Equal(t, "model-a", pairs[0].Model)
 	assert.Equal(t, 401, pairs[0].ErrorCode)
+	assert.Equal(t, map[int]int{401: 3}, pairs[0].ErrorCodeCounts)
 	assert.False(t, pairs[0].BanTime.IsZero())
 	assert.Equal(t, time.Duration(0), pairs[0].BanDuration)
 
 	assert.Equal(t, "cred2", pairs[1].Credential)
 	assert.Equal(t, "model-b", pairs[1].Model)
 	assert.Equal(t, 500, pairs[1].ErrorCode)
+	assert.Equal(t, map[int]int{500: 3}, pairs[1].ErrorCodeCounts)
 	assert.False(t, pairs[1].BanTime.IsZero())
 	assert.Equal(t, time.Duration(0), pairs[1].BanDuration)
 }

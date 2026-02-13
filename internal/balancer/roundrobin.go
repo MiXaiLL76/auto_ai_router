@@ -272,6 +272,11 @@ func (r *RoundRobin) GetBannedCount() int {
 	return r.fail2ban.GetBannedCount()
 }
 
+// GetBannedPairs returns all currently banned credential+model pairs with error details
+func (r *RoundRobin) GetBannedPairs() []fail2ban.BanPair {
+	return r.fail2ban.GetBannedPairs()
+}
+
 // validateFallbackConfiguration validates fallback credential configuration
 // Logs count of fallback credentials
 func (r *RoundRobin) validateFallbackConfiguration() {
