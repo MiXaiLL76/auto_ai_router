@@ -361,11 +361,13 @@ func (m *Manager) GetAllModels() ModelsResponse {
 		)
 		added := 0
 		for _, model := range remoteModels {
+			// Always record credential→model mapping for ALL credentials that support this model
+			// (not just the first one that returned it)
+			modelUpdates[model.ID] = append(modelUpdates[model.ID], cred.Name)
 			if !modelMap[model.ID] {
 				models = append(models, model)
 				modelMap[model.ID] = true
 				added++
-				modelUpdates[model.ID] = append(modelUpdates[model.ID], cred.Name)
 			}
 		}
 		m.logger.Debug("Processed proxy models",

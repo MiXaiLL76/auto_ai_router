@@ -415,13 +415,13 @@ func TestUpdateStatsFromRemoteProxy_Success(t *testing.T) {
 	UpdateStatsFromRemoteProxy(ctx, cred, rateLimiter, logger, mockMM)
 
 	// Verify credential limits were aggregated correctly
-	// Max RPM should be 200 (from remote_cred_2)
-	assert.Equal(t, 200, rateLimiter.GetLimitRPM("proxy-remote"),
-		"RPM limit should be max of remote credentials")
+	// Total RPM should be sum of remote credentials (100 + 200 = 300)
+	assert.Equal(t, 300, rateLimiter.GetLimitRPM("proxy-remote"),
+		"RPM limit should be sum of remote credentials")
 
-	// Max TPM should be 2000 (from remote_cred_2)
-	assert.Equal(t, 2000, rateLimiter.GetLimitTPM("proxy-remote"),
-		"TPM limit should be max of remote credentials")
+	// Total TPM should be sum of remote credentials (1000 + 2000 = 3000)
+	assert.Equal(t, 3000, rateLimiter.GetLimitTPM("proxy-remote"),
+		"TPM limit should be sum of remote credentials")
 
 	// Current RPM should be sum of all current RPMs (25 + 20 = 45)
 	// Use GreaterThanOrEqual because some timestamps might age out if test execution takes time

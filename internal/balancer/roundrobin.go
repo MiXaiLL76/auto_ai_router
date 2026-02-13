@@ -140,16 +140,21 @@ func (r *RoundRobin) next(modelID string, allowOnlyFallback, allowOnlyProxy bool
 	defer r.mu.Unlock()
 
 	attempts := 0
+	candidateCount := 0 // credentials that actually support this model
 	rateLimitHit := false
-	otherReasonsHit := false
+	bannedHit := false
 
 	for {
 		if attempts >= len(r.credentials) {
-			// If all credentials were blocked due to rate limit, return rate limit error
-			if rateLimitHit && !otherReasonsHit {
+			// If no credentials support this model at all, return generic error
+			if candidateCount == 0 {
+				return nil, ErrNoCredentialsAvailable
+			}
+			// If all candidates were rate limited (and none banned), return specific rate limit error
+			if rateLimitHit && !bannedHit {
 				return nil, ErrRateLimitExceeded
 			}
-			// Otherwise return generic error
+			// Candidates exist but all are banned or mix of banned + rate limited
 			return nil, ErrNoCredentialsAvailable
 		}
 
@@ -158,7 +163,7 @@ func (r *RoundRobin) next(modelID string, allowOnlyFallback, allowOnlyProxy bool
 		attempts++
 
 		// Filter by credential type
-		// These are expected filters, not "other reasons" for failure
+		// These are structural filters, not availability issues
 		if allowOnlyProxy && cred.Type != config.ProviderTypeProxy {
 			monitoring.CredentialSelectionRejected.WithLabelValues("type_not_allowed").Inc()
 			continue
@@ -175,20 +180,24 @@ func (r *RoundRobin) next(modelID string, allowOnlyFallback, allowOnlyProxy bool
 			continue
 		}
 
-		// Check if credential+model pair is banned
-		if r.fail2ban.IsBanned(cred.Name, modelID) {
-			monitoring.CredentialSelectionRejected.WithLabelValues("banned").Inc()
-			otherReasonsHit = true
-			continue
-		}
-
-		// Check if credential supports the requested model BEFORE rate limiting
+		// Check if credential supports the requested model BEFORE ban/rate checks.
+		// model_not_available is a structural property (credential type doesn't serve this model),
+		// NOT a temporary availability issue — it should not mask rate limit errors.
 		if modelID != "" && r.modelChecker != nil && r.modelChecker.IsEnabled() {
 			if !r.modelChecker.HasModel(cred.Name, modelID) {
 				monitoring.CredentialSelectionRejected.WithLabelValues("model_not_available").Inc()
-				otherReasonsHit = true
 				continue
 			}
+		}
+
+		// This credential supports the model — it's a real candidate
+		candidateCount++
+
+		// Check if credential+model pair is banned
+		if r.fail2ban.IsBanned(cred.Name, modelID) {
+			monitoring.CredentialSelectionRejected.WithLabelValues("banned").Inc()
+			bannedHit = true
+			continue
 		}
 
 		// Check credential RPM limit (without recording)
