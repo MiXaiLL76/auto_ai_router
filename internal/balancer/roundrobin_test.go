@@ -671,6 +671,32 @@ func TestNextFallbackForModel_TPMLimitExceeded(t *testing.T) {
 	assert.Equal(t, ErrRateLimitExceeded, err)
 }
 
+// TestNextForModel_MixedPrimaryFallback_RateLimit verifies that when primary credentials
+// are TPM-exhausted and fallback credentials also are TPM-exhausted, ErrRateLimitExceeded
+// is returned (not ErrNoCredentialsAvailable). This was a bug where filtering out fallback
+// credentials set otherReasonsHit=true, masking the actual rate limit error.
+func TestNextForModel_MixedPrimaryFallback_RateLimit(t *testing.T) {
+	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
+	rl := ratelimit.New()
+
+	credentials := []config.CredentialConfig{
+		{Name: "primary1", Type: config.ProviderTypeOpenAI, RPM: 100, TPM: 100},
+		{Name: "fallback1", Type: config.ProviderTypeProxy, IsFallback: true, RPM: 100, TPM: 100},
+	}
+
+	bal := New(credentials, f2b, rl)
+	rl.ConsumeTokens("primary1", 100)
+
+	// Primary is TPM-exhausted, but fallback exists → should get ErrRateLimitExceeded (not ErrNoCredentialsAvailable)
+	_, err := bal.NextForModel("gpt-4o")
+	assert.Equal(t, ErrRateLimitExceeded, err)
+
+	// Fallback path: fallback TPM also exhausted → should still get ErrRateLimitExceeded
+	rl.ConsumeTokens("fallback1", 100)
+	_, err = bal.NextFallbackForModel("gpt-4o")
+	assert.Equal(t, ErrRateLimitExceeded, err)
+}
+
 func TestNextFallbackForModel_WithModelChecker(t *testing.T) {
 	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
 	rl := ratelimit.New()

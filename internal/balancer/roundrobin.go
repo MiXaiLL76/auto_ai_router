@@ -158,9 +158,9 @@ func (r *RoundRobin) next(modelID string, allowOnlyFallback, allowOnlyProxy bool
 		attempts++
 
 		// Filter by credential type
+		// These are expected filters, not "other reasons" for failure
 		if allowOnlyProxy && cred.Type != config.ProviderTypeProxy {
 			monitoring.CredentialSelectionRejected.WithLabelValues("type_not_allowed").Inc()
-			otherReasonsHit = true
 			continue
 		}
 
@@ -168,12 +168,10 @@ func (r *RoundRobin) next(modelID string, allowOnlyFallback, allowOnlyProxy bool
 		if allowOnlyFallback {
 			if !cred.IsFallback {
 				monitoring.CredentialSelectionRejected.WithLabelValues("fallback_not_available").Inc()
-				otherReasonsHit = true
 				continue
 			}
 		} else if cred.IsFallback {
 			monitoring.CredentialSelectionRejected.WithLabelValues("fallback_only").Inc()
-			otherReasonsHit = true
 			continue
 		}
 

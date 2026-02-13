@@ -204,7 +204,7 @@ func (p *Proxy) selectCredentialForModel(
 	errCode := http.StatusServiceUnavailable
 	errLine := "Service Unavailable"
 	errorMsg := fmt.Sprintf("No credentials available: %v", err)
-	if errors.Is(err, balancer.ErrRateLimitExceeded) {
+	if errors.Is(err, balancer.ErrRateLimitExceeded) || errors.Is(fallbackErr, balancer.ErrRateLimitExceeded) {
 		errCode = http.StatusTooManyRequests
 		errLine = "Too Many Requests"
 		errorMsg = "Rate limit exceeded"
