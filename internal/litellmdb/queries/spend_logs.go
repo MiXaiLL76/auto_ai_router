@@ -61,6 +61,7 @@ const (
 			TO_CHAR(DATE("startTime"), 'YYYY-MM-DD') as date,
 			api_key,
 			model,
+			model_group,
 			custom_llm_provider,
 			mcp_namespaced_tool_name,
 			api_base,
@@ -87,6 +88,7 @@ const (
 			date,
 			api_key,
 			model,
+			model_group,
 			custom_llm_provider,
 			mcp_namespaced_tool_name,
 			endpoint,
@@ -98,9 +100,10 @@ const (
 			failed_requests,
 			created_at,
 			updated_at
-		) VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, now(), now())
+		) VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, now(), now())
 		ON CONFLICT (user_id, date, api_key, model, custom_llm_provider, mcp_namespaced_tool_name, endpoint)
 		DO UPDATE SET
+			model_group = EXCLUDED.model_group,
 			prompt_tokens = "LiteLLM_DailyUserSpend".prompt_tokens + EXCLUDED.prompt_tokens,
 			completion_tokens = "LiteLLM_DailyUserSpend".completion_tokens + EXCLUDED.completion_tokens,
 			spend = "LiteLLM_DailyUserSpend".spend + EXCLUDED.spend,
@@ -118,6 +121,7 @@ const (
 			date,
 			api_key,
 			model,
+			model_group,
 			custom_llm_provider,
 			mcp_namespaced_tool_name,
 			endpoint,
@@ -129,9 +133,10 @@ const (
 			failed_requests,
 			created_at,
 			updated_at
-		) VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, now(), now())
+		) VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, now(), now())
 		ON CONFLICT (team_id, date, api_key, model, custom_llm_provider, mcp_namespaced_tool_name, endpoint)
 		DO UPDATE SET
+			model_group = EXCLUDED.model_group,
 			prompt_tokens = "LiteLLM_DailyTeamSpend".prompt_tokens + EXCLUDED.prompt_tokens,
 			completion_tokens = "LiteLLM_DailyTeamSpend".completion_tokens + EXCLUDED.completion_tokens,
 			spend = "LiteLLM_DailyTeamSpend".spend + EXCLUDED.spend,
@@ -149,6 +154,7 @@ const (
 			date,
 			api_key,
 			model,
+			model_group,
 			custom_llm_provider,
 			mcp_namespaced_tool_name,
 			endpoint,
@@ -160,9 +166,10 @@ const (
 			failed_requests,
 			created_at,
 			updated_at
-		) VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, now(), now())
+		) VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, now(), now())
 		ON CONFLICT (organization_id, date, api_key, model, custom_llm_provider, mcp_namespaced_tool_name, endpoint)
 		DO UPDATE SET
+			model_group = EXCLUDED.model_group,
 			prompt_tokens = "LiteLLM_DailyOrganizationSpend".prompt_tokens + EXCLUDED.prompt_tokens,
 			completion_tokens = "LiteLLM_DailyOrganizationSpend".completion_tokens + EXCLUDED.completion_tokens,
 			spend = "LiteLLM_DailyOrganizationSpend".spend + EXCLUDED.spend,
@@ -180,6 +187,7 @@ const (
 			date,
 			api_key,
 			model,
+			model_group,
 			custom_llm_provider,
 			mcp_namespaced_tool_name,
 			endpoint,
@@ -191,9 +199,10 @@ const (
 			failed_requests,
 			created_at,
 			updated_at
-		) VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, now(), now())
+		) VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, now(), now())
 		ON CONFLICT (end_user_id, date, api_key, model, custom_llm_provider, mcp_namespaced_tool_name, endpoint)
 		DO UPDATE SET
+			model_group = EXCLUDED.model_group,
 			prompt_tokens = "LiteLLM_DailyEndUserSpend".prompt_tokens + EXCLUDED.prompt_tokens,
 			completion_tokens = "LiteLLM_DailyEndUserSpend".completion_tokens + EXCLUDED.completion_tokens,
 			spend = "LiteLLM_DailyEndUserSpend".spend + EXCLUDED.spend,
@@ -211,6 +220,7 @@ const (
 			date,
 			api_key,
 			model,
+			model_group,
 			custom_llm_provider,
 			mcp_namespaced_tool_name,
 			endpoint,
@@ -222,9 +232,10 @@ const (
 			failed_requests,
 			created_at,
 			updated_at
-		) VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, now(), now())
+		) VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, now(), now())
 		ON CONFLICT (agent_id, date, api_key, model, custom_llm_provider, mcp_namespaced_tool_name, endpoint)
 		DO UPDATE SET
+			model_group = EXCLUDED.model_group,
 			prompt_tokens = "LiteLLM_DailyAgentSpend".prompt_tokens + EXCLUDED.prompt_tokens,
 			completion_tokens = "LiteLLM_DailyAgentSpend".completion_tokens + EXCLUDED.completion_tokens,
 			spend = "LiteLLM_DailyAgentSpend".spend + EXCLUDED.spend,
@@ -243,6 +254,7 @@ const (
 			date,
 			api_key,
 			model,
+			model_group,
 			custom_llm_provider,
 			mcp_namespaced_tool_name,
 			endpoint,
@@ -254,9 +266,10 @@ const (
 			failed_requests,
 			created_at,
 			updated_at
-		) VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, now(), now())
+		) VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, now(), now())
 		ON CONFLICT (tag, date, api_key, model, custom_llm_provider, mcp_namespaced_tool_name, endpoint)
 		DO UPDATE SET
+			model_group = EXCLUDED.model_group,
 			prompt_tokens = "LiteLLM_DailyTagSpend".prompt_tokens + EXCLUDED.prompt_tokens,
 			completion_tokens = "LiteLLM_DailyTagSpend".completion_tokens + EXCLUDED.completion_tokens,
 			spend = "LiteLLM_DailyTagSpend".spend + EXCLUDED.spend,

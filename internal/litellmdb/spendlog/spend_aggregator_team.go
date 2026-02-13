@@ -14,6 +14,7 @@ type aggregateTeamKey struct {
 	date                  string
 	apiKey                string
 	model                 string
+	modelGroup            string
 	customLLMProvider     string
 	mcpNamespacedToolName string
 	endpoint              string
@@ -59,6 +60,7 @@ func aggregateDailyTeamSpendLogs(
 			date:                  record.Date,
 			apiKey:                record.APIKey,
 			model:                 record.Model,
+			modelGroup:            record.ModelGroup,
 			customLLMProvider:     record.CustomLLMProvider,
 			mcpNamespacedToolName: record.MCPNamespacedTool,
 			endpoint:              record.Endpoint,
@@ -96,7 +98,7 @@ func aggregateDailyTeamSpendLogs(
 	for key, value := range aggregations {
 		_, err := conn.Exec(ctx,
 			queries.QueryUpsertDailyTeamSpend,
-			key.teamID, key.date, key.apiKey, key.model,
+			key.teamID, key.date, key.apiKey, key.model, key.modelGroup,
 			key.customLLMProvider, key.mcpNamespacedToolName, key.endpoint,
 			value.promptTokens, value.completionTokens, value.spend,
 			value.apiRequests, value.successfulRequests, value.failedRequests,

@@ -13,6 +13,7 @@ type spendLogRecord struct {
 	Date              string
 	APIKey            string
 	Model             string
+	ModelGroup        string
 	CustomLLMProvider string
 	MCPNamespacedTool string
 	Endpoint          string
@@ -45,7 +46,7 @@ func loadUnprocessedSpendLogRecords(
 	records := make([]spendLogRecord, 0, len(requestIDs))
 	for rows.Next() {
 		var record spendLogRecord
-		var model, customLLMProvider, mcpNamespacedToolName, apiBase *string
+		var model, modelGroup, customLLMProvider, mcpNamespacedToolName, apiBase *string
 		var status *string
 		var teamID, organizationID, endUser, agentID, requestTags *string
 
@@ -54,6 +55,7 @@ func loadUnprocessedSpendLogRecords(
 			&record.Date,
 			&record.APIKey,
 			&model,
+			&modelGroup,
 			&customLLMProvider,
 			&mcpNamespacedToolName,
 			&apiBase,
@@ -74,6 +76,7 @@ func loadUnprocessedSpendLogRecords(
 		}
 
 		record.Model = derefString(model)
+		record.ModelGroup = derefString(modelGroup)
 		record.CustomLLMProvider = derefString(customLLMProvider)
 		record.MCPNamespacedTool = derefString(mcpNamespacedToolName)
 		record.Endpoint = derefString(apiBase)
