@@ -335,7 +335,7 @@ func convertVertexUsageMetadata(meta *genai.GenerateContentResponseUsageMetadata
 	}
 
 	usage := &openai.OpenAIUsage{
-		PromptTokens:     int(meta.PromptTokenCount),
+		PromptTokens:     int(meta.PromptTokenCount + meta.ToolUsePromptTokenCount),
 		CompletionTokens: completionTokens,
 		TotalTokens:      int(meta.TotalTokenCount),
 	}
@@ -384,6 +384,38 @@ func convertVertexUsageMetadata(meta *genai.GenerateContentResponseUsageMetadata
 			switch genai.MediaModality(detail.Modality) {
 			case genai.MediaModalityAudio:
 				usage.PromptTokensDetails.AudioTokens += int(detail.TokenCount)
+			}
+		}
+	}
+
+	if len(meta.ToolUsePromptTokensDetails) > 0 {
+		if usage.PromptTokensDetails == nil {
+			usage.PromptTokensDetails = &openai.TokenDetails{}
+		}
+		for _, detail := range meta.ToolUsePromptTokensDetails {
+			if detail == nil {
+				continue
+			}
+			switch genai.MediaModality(detail.Modality) {
+			case genai.MediaModalityAudio:
+				usage.PromptTokensDetails.AudioTokens += int(detail.TokenCount)
+			}
+		}
+	}
+
+	// Avoid double-charging cached modality tokens as regular audio.
+	// Cached tokens are billed separately via CachedTokens.
+	if len(meta.CacheTokensDetails) > 0 && usage.PromptTokensDetails != nil {
+		for _, detail := range meta.CacheTokensDetails {
+			if detail == nil {
+				continue
+			}
+			switch genai.MediaModality(detail.Modality) {
+			case genai.MediaModalityAudio:
+				usage.PromptTokensDetails.AudioTokens -= int(detail.TokenCount)
+				if usage.PromptTokensDetails.AudioTokens < 0 {
+					usage.PromptTokensDetails.AudioTokens = 0
+				}
 			}
 		}
 	}

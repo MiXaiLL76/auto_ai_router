@@ -36,6 +36,8 @@ type StreamUsageInfo struct {
 	CachedTokens        int // Tokens from cached prompt content (prompt_caching feature)
 	AudioInputTokens    int // Audio tokens in the request
 	AudioOutputTokens   int // Audio tokens in the response
+	ImageTokens         int // Image/video tokens (if reported)
+	ReasoningTokens     int // Reasoning/thoughts tokens (output)
 	CacheCreationTokens int // Anthropic: tokens created for cache (billed at different rate)
 	CacheReadTokens     int // Anthropic: tokens read from cache (billed at cheaper rate)
 }
@@ -68,7 +70,8 @@ func (o *openAIStreamUsageExtractor) ExtractUsage(chunk []byte) *StreamUsageInfo
 				AudioTokens  int `json:"audio_tokens,omitempty"`
 			} `json:"prompt_tokens_details,omitempty"`
 			CompletionTokensDetails struct {
-				AudioTokens int `json:"audio_tokens,omitempty"`
+				AudioTokens     int `json:"audio_tokens,omitempty"`
+				ReasoningTokens int `json:"reasoning_tokens,omitempty"`
 			} `json:"completion_tokens_details,omitempty"`
 		} `json:"usage"`
 	}
@@ -90,6 +93,7 @@ func (o *openAIStreamUsageExtractor) ExtractUsage(chunk []byte) *StreamUsageInfo
 			CachedTokens:      data.Usage.PromptTokensDetails.CachedTokens,
 			AudioInputTokens:  data.Usage.PromptTokensDetails.AudioTokens,
 			AudioOutputTokens: data.Usage.CompletionTokensDetails.AudioTokens,
+			ReasoningTokens:   data.Usage.CompletionTokensDetails.ReasoningTokens,
 		}
 	}
 
@@ -326,6 +330,8 @@ func (p *Proxy) finalizeStreamingLog(logCtx *RequestLogContext, totalTokens int,
 			logCtx.TokenUsage.CachedInputTokens = usageInfo.CachedTokens
 			logCtx.TokenUsage.AudioInputTokens = usageInfo.AudioInputTokens
 			logCtx.TokenUsage.AudioOutputTokens = usageInfo.AudioOutputTokens
+			logCtx.TokenUsage.ImageTokens = usageInfo.ImageTokens
+			logCtx.TokenUsage.ReasoningTokens = usageInfo.ReasoningTokens
 
 			if usageInfo.CacheCreationTokens > 0 {
 				logCtx.TokenUsage.CachedInputTokens = usageInfo.CacheCreationTokens
@@ -338,6 +344,8 @@ func (p *Proxy) finalizeStreamingLog(logCtx *RequestLogContext, totalTokens int,
 				"cached_tokens", usageInfo.CachedTokens,
 				"audio_input_tokens", usageInfo.AudioInputTokens,
 				"audio_output_tokens", usageInfo.AudioOutputTokens,
+				"image_tokens", usageInfo.ImageTokens,
+				"reasoning_tokens", usageInfo.ReasoningTokens,
 			)
 		}
 	}
