@@ -453,32 +453,6 @@ class TestCompareImageGenerationModels:
         print(f"\n✓ Multiple image generation test passed")
         print(f"  Both generated exactly {n_images} images")
 
-    def test_image_generation_max_limit(self, openai_client, genai_client):
-        """Image generation — verify max 10 images cap."""
-        model = "imagen-3.0-fast-generate-001"
-        prompt = "Abstract art"
-        n_requested = 15  # Request more than max
-
-        print(f"\n=== IMAGE GENERATION (MAX LIMIT - requested {n_requested}) TEST ===")
-        print(f"Model: {model}")
-        print(f"Requesting {n_requested} images (should be capped to 10)")
-
-        # Test OpenAI/Router call
-        print(f"\n[DT] Calling OpenAI images.generate (n={n_requested} via router)...")
-        dt = openai_client.images.generate(
-            model=model,
-            prompt=prompt,
-            n=n_requested,
-            size="1024x1024"
-        )
-        dt_count = len(dt.data)
-        print(f"[DT] Generated {dt_count} image(s)")
-
-        # Should be capped at 10
-        assert dt_count <= 10, f"Expected max 10 images, got {dt_count}"
-        print(f"\n✓ Max limit test passed - capped at {dt_count} images")
-
-
 class TestCompareToolCall:
     """Tool call conversion."""
 

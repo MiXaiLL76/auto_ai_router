@@ -18,6 +18,10 @@ type ModelPrice struct {
 	InputCostPerToken  float64 `json:"input_cost_per_token"`
 	OutputCostPerToken float64 `json:"output_cost_per_token"`
 
+	// Tiered pricing: tokens above 200k threshold billed at a different rate
+	InputCostPerTokenAbove200k  float64 `json:"input_cost_per_token_above_200k_tokens,omitempty"`
+	OutputCostPerTokenAbove200k float64 `json:"output_cost_per_token_above_200k_tokens,omitempty"`
+
 	// Audio tokens (can be more specific than regular tokens)
 	InputCostPerAudioToken  float64 `json:"input_cost_per_audio_token,omitempty"`
 	OutputCostPerAudioToken float64 `json:"output_cost_per_audio_token,omitempty"`

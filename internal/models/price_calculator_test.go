@@ -257,3 +257,131 @@ func TestModelPrice_CalculateCost_NilUsage(t *testing.T) {
 	totalCost := price.CalculateCost(nil)
 	assert.Equal(t, 0.0, totalCost)
 }
+
+func TestCalculateTokenCosts_Above200k_Input(t *testing.T) {
+	// Test 300k input tokens with no specialized tokens
+	// below200k = 200k, above200k = 100k
+	// regularAbove = 100k, regularBelow = 200k
+	usage := &transform.TokenUsage{
+		PromptTokens:     300_000,
+		CompletionTokens: 50,
+	}
+
+	price := &ModelPrice{
+		InputCostPerToken:          0.001,
+		OutputCostPerToken:         0.002,
+		InputCostPerTokenAbove200k: 0.0005, // cheaper for tokens above 200k
+	}
+
+	costs := CalculateTokenCosts(usage, price)
+
+	assert.NotNil(t, costs)
+
+	// below200k cost: 200_000 * 0.001 = 200.0
+	// above200k cost: 100_000 * 0.0005 = 50.0
+	// Total input: 250.0
+	assert.InDelta(t, 250.0, costs.InputCost, 0.0001)
+
+	// output cost: 50 * 0.002 = 0.1
+	assert.InDelta(t, 0.1, costs.OutputCost, 0.0001)
+
+	// Total: 250.1
+	assert.InDelta(t, 250.1, costs.TotalCost, 0.0001)
+}
+
+func TestCalculateTokenCosts_Above200k_WithAudio(t *testing.T) {
+	// Test 300k input tokens with 30k audio tokens
+	// regularInputTokens = 300k - 30k = 270k
+	// proportion above = (300k - 200k) / 300k = 100k / 300k = 1/3
+	// regularAbove = 270k * 1/3 = 90k, regularBelow = 180k
+	usage := &transform.TokenUsage{
+		PromptTokens:     300_000,
+		AudioInputTokens: 30_000,
+		CompletionTokens: 50,
+	}
+
+	price := &ModelPrice{
+		InputCostPerToken:          0.001,
+		OutputCostPerToken:         0.002,
+		InputCostPerTokenAbove200k: 0.0005,
+		InputCostPerAudioToken:     0.0001,
+	}
+
+	costs := CalculateTokenCosts(usage, price)
+
+	assert.NotNil(t, costs)
+
+	// regularBelow cost: 180_000 * 0.001 = 180.0
+	// regularAbove cost: 90_000 * 0.0005 = 45.0
+	// Total regular input: 225.0
+	assert.InDelta(t, 225.0, costs.InputCost, 0.0001)
+
+	// audio input: 30_000 * 0.0001 = 3.0
+	assert.InDelta(t, 3.0, costs.AudioInputCost, 0.0001)
+
+	// output cost: 50 * 0.002 = 0.1
+	assert.InDelta(t, 0.1, costs.OutputCost, 0.0001)
+
+	// Total: 225.0 + 3.0 + 0.1 = 228.1
+	assert.InDelta(t, 228.1, costs.TotalCost, 0.0001)
+}
+
+func TestCalculateTokenCosts_Above200k_Output(t *testing.T) {
+	// Test 250k output tokens with no specialized tokens
+	// below200k = 200k, above200k = 50k
+	usage := &transform.TokenUsage{
+		PromptTokens:     100,
+		CompletionTokens: 250_000,
+	}
+
+	price := &ModelPrice{
+		InputCostPerToken:           0.001,
+		OutputCostPerToken:          0.002,
+		OutputCostPerTokenAbove200k: 0.001, // cheaper for tokens above 200k
+	}
+
+	costs := CalculateTokenCosts(usage, price)
+
+	assert.NotNil(t, costs)
+
+	// input cost: 100 * 0.001 = 0.1
+	assert.InDelta(t, 0.1, costs.InputCost, 0.0001)
+
+	// below200k cost: 200_000 * 0.002 = 400.0
+	// above200k cost: 50_000 * 0.001 = 50.0
+	// Total output: 450.0
+	assert.InDelta(t, 450.0, costs.OutputCost, 0.0001)
+
+	// Total: 0.1 + 450.0 = 450.1
+	assert.InDelta(t, 450.1, costs.TotalCost, 0.0001)
+}
+
+func TestCalculateTokenCosts_Below200k_NoTiering(t *testing.T) {
+	// Test that tiering is NOT applied when tokens are below 200k
+	// Even if InputCostPerTokenAbove200k is set
+	usage := &transform.TokenUsage{
+		PromptTokens:     150_000,
+		CompletionTokens: 50_000,
+	}
+
+	price := &ModelPrice{
+		InputCostPerToken:           0.001,
+		OutputCostPerToken:          0.002,
+		InputCostPerTokenAbove200k:  0.0005,
+		OutputCostPerTokenAbove200k: 0.001,
+	}
+
+	costs := CalculateTokenCosts(usage, price)
+
+	assert.NotNil(t, costs)
+
+	// Tiering should NOT apply since 150k < 200k
+	// input cost: 150_000 * 0.001 = 150.0 (only base price, not tiered)
+	assert.InDelta(t, 150.0, costs.InputCost, 0.0001)
+
+	// output cost: 50_000 * 0.002 = 100.0 (only base price, not tiered)
+	assert.InDelta(t, 100.0, costs.OutputCost, 0.0001)
+
+	// Total: 250.0
+	assert.InDelta(t, 250.0, costs.TotalCost, 0.0001)
+}

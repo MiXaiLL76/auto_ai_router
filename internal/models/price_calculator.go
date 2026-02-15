@@ -4,6 +4,9 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/transform"
 )
 
+// Tiered pricing threshold: tokens above this count are billed at a different rate
+const tokenTiering200kThreshold = 200_000
+
 // CalculateTokenCosts computes costs based on token usage and model pricing
 // Returns nil if price is nil (model not found in pricing database)
 //
@@ -31,7 +34,18 @@ func CalculateTokenCosts(usage *transform.TokenUsage, price *ModelPrice) *transf
 		// Safety: shouldn't happen, but use 0 if somehow negative
 		regularInputTokens = 0
 	}
-	costs.InputCost = float64(regularInputTokens) * price.InputCostPerToken
+
+	// Regular input with 200k tiering
+	if price.InputCostPerTokenAbove200k > 0 && usage.PromptTokens > tokenTiering200kThreshold {
+		above := usage.PromptTokens - tokenTiering200kThreshold
+		// Distribute regular tokens proportionally between below/above threshold
+		regularAbove := int(int64(regularInputTokens) * int64(above) / int64(usage.PromptTokens))
+		regularBelow := regularInputTokens - regularAbove
+		costs.InputCost = float64(regularBelow)*price.InputCostPerToken +
+			float64(regularAbove)*price.InputCostPerTokenAbove200k
+	} else {
+		costs.InputCost = float64(regularInputTokens) * price.InputCostPerToken
+	}
 
 	// Calculate "regular" output tokens by subtracting specialized token types
 	regularOutputTokens := usage.CompletionTokens - usage.AudioOutputTokens - usage.ReasoningTokens -
@@ -39,7 +53,18 @@ func CalculateTokenCosts(usage *transform.TokenUsage, price *ModelPrice) *transf
 	if regularOutputTokens < 0 {
 		regularOutputTokens = 0
 	}
-	costs.OutputCost = float64(regularOutputTokens) * price.OutputCostPerToken
+
+	// Regular output with 200k tiering
+	if price.OutputCostPerTokenAbove200k > 0 && usage.CompletionTokens > tokenTiering200kThreshold {
+		above := usage.CompletionTokens - tokenTiering200kThreshold
+		// Distribute regular tokens proportionally between below/above threshold
+		regularAbove := int(int64(regularOutputTokens) * int64(above) / int64(usage.CompletionTokens))
+		regularBelow := regularOutputTokens - regularAbove
+		costs.OutputCost = float64(regularBelow)*price.OutputCostPerToken +
+			float64(regularAbove)*price.OutputCostPerTokenAbove200k
+	} else {
+		costs.OutputCost = float64(regularOutputTokens) * price.OutputCostPerToken
+	}
 
 	// Audio tokens with fallback to regular tokens
 	audioInputCost := price.InputCostPerAudioToken
