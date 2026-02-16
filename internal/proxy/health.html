@@ -10,13 +10,13 @@
             --accent: #00b894; --accent-error: #d63031; --border: #dfe6e9;
             --text-secondary: #636e72; --text-muted: #b2bec3;
         }
-        
+
         [data-theme="dark"] {
             --bg: #1e1e1e; --card: #2d2d2d; --text: #e0e0e0;
             --accent: #00b894; --accent-error: #ff6b6b; --border: #404040;
             --text-secondary: #a0a0a0; --text-muted: #707070;
         }
-        
+
         body { font-family: -apple-system, system-ui, sans-serif; background: var(--bg); color: var(--text); margin: 0; padding: 2rem; transition: background 0.3s ease, color 0.3s ease; }
         .container { max-width: 1200px; margin: 0 auto; }
         header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 2rem; }
@@ -68,22 +68,22 @@
         .error-code-row { display: flex; justify-content: space-between; padding: 0.15rem 0; }
         .error-code-label { color: var(--accent-error); font-weight: 600; }
         .error-code-count { color: var(--text); font-weight: 600; }
-        
+
         /* Theme toggle button */
-        .theme-toggle { 
-            padding: 0.5rem 1rem; 
-            border-radius: 20px; 
-            background: var(--card); 
-            border: 1px solid var(--border); 
-            cursor: pointer; 
-            font-size: 1.2rem; 
+        .theme-toggle {
+            padding: 0.5rem 1rem;
+            border-radius: 20px;
+            background: var(--card);
+            border: 1px solid var(--border);
+            cursor: pointer;
+            font-size: 1.2rem;
             transition: all 0.3s ease;
             display: flex;
             align-items: center;
             gap: 0.5rem;
         }
-        .theme-toggle:hover { 
-            transform: scale(1.05); 
+        .theme-toggle:hover {
+            transform: scale(1.05);
         }
         .theme-icon { transition: transform 0.3s ease; }
         .theme-toggle:hover .theme-icon { transform: rotate(20deg); }
@@ -262,10 +262,10 @@
             const themeIcon = document.getElementById('themeIcon');
             const currentTheme = body.getAttribute('data-theme');
             const newTheme = currentTheme === 'dark' ? 'light' : 'dark';
-            
+
             body.setAttribute('data-theme', newTheme);
             themeIcon.textContent = newTheme === 'dark' ? '🌙' : '☀️';
-            
+
             // Save theme preference to localStorage
             localStorage.setItem('theme', newTheme);
         }
@@ -275,7 +275,7 @@
             const savedTheme = localStorage.getItem('theme') || 'dark';
             const body = document.body;
             const themeIcon = document.getElementById('themeIcon');
-            
+
             body.setAttribute('data-theme', savedTheme);
             themeIcon.textContent = savedTheme === 'dark' ? '🌙' : '☀️';
         }
@@ -340,7 +340,7 @@
         document.addEventListener('DOMContentLoaded', function() {
             // Load theme first
             loadTheme();
-            
+
             // Setup sort button handlers
             document.querySelectorAll('.sort-btn').forEach(btn => {
                 const originalOnclick = btn.getAttribute('onclick');
