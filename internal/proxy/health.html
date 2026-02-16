@@ -8,16 +8,24 @@
         :root {
             --bg: #f4f7f6; --card: #ffffff; --text: #2d3436;
             --accent: #00b894; --accent-error: #d63031; --border: #dfe6e9;
+            --text-secondary: #636e72; --text-muted: #b2bec3;
         }
-        body { font-family: -apple-system, system-ui, sans-serif; background: var(--bg); color: var(--text); margin: 0; padding: 2rem; }
+        
+        [data-theme="dark"] {
+            --bg: #1e1e1e; --card: #2d2d2d; --text: #e0e0e0;
+            --accent: #00b894; --accent-error: #ff6b6b; --border: #404040;
+            --text-secondary: #a0a0a0; --text-muted: #707070;
+        }
+        
+        body { font-family: -apple-system, system-ui, sans-serif; background: var(--bg); color: var(--text); margin: 0; padding: 2rem; transition: background 0.3s ease, color 0.3s ease; }
         .container { max-width: 1200px; margin: 0 auto; }
         header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 2rem; }
         .status-badge { padding: 0.5rem 1rem; border-radius: 20px; background: var(--accent); color: white; font-weight: bold; font-size: 0.9rem; }
         .status-badge.unhealthy { background: var(--accent-error); }
         .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 1.5rem; }
-        .card { background: var(--card); padding: 1.5rem; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); border: 1px solid var(--border); }
+        .card { background: var(--card); padding: 1.5rem; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); border: 1px solid var(--border); transition: background 0.3s ease, border 0.3s ease; }
         .card.banned { border: 2px solid var(--accent-error); }
-        .card h3 { margin: 0 0 1rem 0; font-size: 1.1rem; color: #636e72; border-bottom: 1px solid var(--border); padding-bottom: 0.5rem; }
+        .card h3 { margin: 0 0 1rem 0; font-size: 1.1rem; color: var(--text-secondary); border-bottom: 1px solid var(--border); padding-bottom: 0.5rem; }
         .stat { display: flex; justify-content: space-between; margin-bottom: 0.5rem; font-size: 0.95rem; }
         .stat span:last-child { font-weight: 600; color: var(--accent); }
         .progress-bar { height: 8px; background: var(--border); border-radius: 4px; overflow: hidden; margin-top: 0.3rem; }
@@ -27,10 +35,10 @@
         .model-list { margin-top: 2rem; font-size: 0.85rem; max-height: 400px; overflow-y: auto; padding-right: 10px; }
         .model-item { padding: 0.8rem; border-bottom: 1px solid var(--border); display: grid; grid-template-columns: 2fr 3fr; gap: 1rem; align-items: center; }
         .model-name { font-weight: 600; color: var(--text); }
-        .model-cred { color: #b2bec3; font-size: 0.9em; }
+        .model-cred { color: var(--text-muted); font-size: 0.9em; }
         .model-stats { display: grid; grid-template-columns: repeat(2, 1fr); gap: 1rem; font-size: 0.85em; }
         .model-stat { display: flex; flex-direction: column; }
-        .model-stat-label { color: #b2bec3; font-size: 0.85em; }
+        .model-stat-label { color: var(--text-muted); font-size: 0.85em; }
         .model-stat-value { font-weight: 600; color: var(--accent); }
         .model-stat-usage { display: flex; align-items: center; gap: 0.5rem; }
         .model-usage-bar { flex: 1; height: 6px; background: var(--border); border-radius: 3px; overflow: hidden; }
@@ -38,7 +46,7 @@
         .model-usage-fill.high { background: #fdcb6e; }
         .model-usage-fill.critical { background: var(--accent-error); }
         .sort-controls { display: flex; gap: 0.5rem; margin-bottom: 1rem; flex-wrap: wrap; }
-        .sort-btn { padding: 0.5rem 1rem; border: 1px solid var(--border); background: white; border-radius: 6px; cursor: pointer; font-size: 0.85rem; transition: all 0.2s; }
+        .sort-btn { padding: 0.5rem 1rem; border: 1px solid var(--border); background: var(--card); color: var(--text); border-radius: 6px; cursor: pointer; font-size: 0.85rem; transition: all 0.2s; }
         .sort-btn:hover { background: var(--bg); }
         .sort-btn.active { background: var(--accent); color: white; border-color: var(--accent); }
         ::-webkit-scrollbar { width: 5px; }
@@ -46,7 +54,7 @@
         .summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 1rem; margin-bottom: 2rem; }
         .summary-item { background: var(--card); padding: 1rem; border-radius: 8px; text-align: center; border: 1px solid var(--border); }
         .summary-value { font-size: 2rem; font-weight: bold; color: var(--accent); }
-        .summary-label { font-size: 0.85rem; color: #b2bec3; margin-top: 0.5rem; }
+        .summary-label { font-size: 0.85rem; color: var(--text-muted); margin-top: 0.5rem; }
         .credential-badge { display: inline-block; padding: 0.3rem 0.6rem; border-radius: 4px; font-size: 0.75rem; font-weight: 600; margin-right: 0.5rem; margin-bottom: 0.5rem; }
         .badge-proxy { background: #6c5ce7; color: white; }
         .badge-openai { background: #00b894; color: white; }
@@ -56,18 +64,40 @@
         .badge-banned { background: var(--accent-error); color: white; animation: pulse 1.5s infinite; }
         @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.7; } }
         .error-counts { margin-top: 0.6rem; font-size: 0.82rem; }
-        .error-counts-title { color: #b2bec3; margin-bottom: 0.3rem; }
+        .error-counts-title { color: var(--text-muted); margin-bottom: 0.3rem; }
         .error-code-row { display: flex; justify-content: space-between; padding: 0.15rem 0; }
         .error-code-label { color: var(--accent-error); font-weight: 600; }
         .error-code-count { color: var(--text); font-weight: 600; }
+        
+        /* Theme toggle button */
+        .theme-toggle { 
+            padding: 0.5rem 1rem; 
+            border-radius: 20px; 
+            background: var(--card); 
+            border: 1px solid var(--border); 
+            cursor: pointer; 
+            font-size: 1.2rem; 
+            transition: all 0.3s ease;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        .theme-toggle:hover { 
+            transform: scale(1.05); 
+        }
+        .theme-icon { transition: transform 0.3s ease; }
+        .theme-toggle:hover .theme-icon { transform: rotate(20deg); }
     </style>
 </head>
-<body>
+<body data-theme="dark">
     <div class="container">
         <header>
             <h1>🚀 System Health Dashboard</h1>
             <div style="display: flex; align-items: center; gap: 1.2rem;">
-                <div style="font-size: 1rem; color: #636e72;">{{ version }} ({{ commit }})</div>
+                <button class="theme-toggle" onclick="toggleTheme()" title="Переключить тему">
+                    <span class="theme-icon" id="themeIcon">🌙</span>
+                </button>
+                <div style="font-size: 1rem; color: var(--text-secondary);">{{ version }} ({{ commit }})</div>
                 <div class="status-badge{{ if ne .status "healthy" }} unhealthy{{ end }}">{{ .status }}</div>
             </div>
         </header>
@@ -91,7 +121,7 @@
             </div>
         </div>
 
-        <h2 style="margin-bottom: 1rem; color: #636e72;">Credentials</h2>
+        <h2 style="margin-bottom: 1rem; color: var(--text-secondary);">Credentials</h2>
         <div class="grid">
             {{ range $name, $cred := .credentials }}
             <div class="card{{ if $cred.IsBanned }} banned{{ end }}">
@@ -226,6 +256,30 @@
         let currentSort = 'tpm';
         let sortAscending = false;
 
+        // Theme toggle functionality
+        function toggleTheme() {
+            const body = document.body;
+            const themeIcon = document.getElementById('themeIcon');
+            const currentTheme = body.getAttribute('data-theme');
+            const newTheme = currentTheme === 'dark' ? 'light' : 'dark';
+            
+            body.setAttribute('data-theme', newTheme);
+            themeIcon.textContent = newTheme === 'dark' ? '🌙' : '☀️';
+            
+            // Save theme preference to localStorage
+            localStorage.setItem('theme', newTheme);
+        }
+
+        // Load saved theme on page load
+        function loadTheme() {
+            const savedTheme = localStorage.getItem('theme') || 'dark';
+            const body = document.body;
+            const themeIcon = document.getElementById('themeIcon');
+            
+            body.setAttribute('data-theme', savedTheme);
+            themeIcon.textContent = savedTheme === 'dark' ? '🌙' : '☀️';
+        }
+
         function sortModels(type, clickedButton) {
             const container = document.getElementById('modelList');
             const items = Array.from(container.getElementsByClassName('model-item'));
@@ -282,21 +336,21 @@
             items.forEach(item => container.appendChild(item));
         }
 
-        // Update onclick handlers to pass button reference
+        // Initialize on page load
         document.addEventListener('DOMContentLoaded', function() {
-            // 1. Сначала настраиваем обработчики
+            // Load theme first
+            loadTheme();
+            
+            // Setup sort button handlers
             document.querySelectorAll('.sort-btn').forEach(btn => {
                 const originalOnclick = btn.getAttribute('onclick');
                 const type = originalOnclick.match(/'([^']+)'/)[1];
                 btn.onclick = function() { sortModels(type, this); };
             });
 
-            // 2. Сбрасываем текущую сортировку в null, чтобы первый вызов
-            // функции установил правильное направление
+            // Reset and apply default sort
             currentSort = null;
             sortAscending = false;
-
-            // 3. Находим кнопку TPM и имитируем клик по ней
             const defaultBtn = document.querySelector('.sort-btn.active');
             sortModels('tpm', defaultBtn);
         });
