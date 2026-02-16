@@ -1,8 +1,7 @@
-package transform
+package converter
 
-// TokenUsage is a universal format for token usage across all providers
-// Used to avoid circular dependencies between transform and models packages
-// Note: This is NOT 'usage.go', it's 'token_usage.go' to match the pattern
+// TokenUsage is a universal format for token usage across all providers.
+// Used by converters to return usage data without circular dependencies.
 type TokenUsage struct {
 	PromptTokens             int
 	CompletionTokens         int
@@ -17,7 +16,7 @@ type TokenUsage struct {
 	ImageTokens              int // Token count for image processing
 }
 
-// Total returns the sum of all token counts
+// Total returns the sum of prompt and completion tokens.
 func (tu *TokenUsage) Total() int {
 	if tu == nil {
 		return 0
@@ -31,14 +30,14 @@ func (tu *TokenUsage) Total() int {
 
 // TokenCosts contains cost breakdown by token type
 type TokenCosts struct {
-	InputCost        float64 // Regular input tokens
-	OutputCost       float64 // Regular output tokens
-	AudioInputCost   float64 // Audio input tokens
-	AudioOutputCost  float64 // Audio output tokens
-	ReasoningCost    float64 // Reasoning tokens (output)
-	CachedInputCost  float64 // Cached input tokens
-	CachedOutputCost float64 // Cached output tokens
-	PredictionCost   float64 // Prediction tokens (accepted)
-	ImageCost        float64 // Image tokens
-	TotalCost        float64 // Sum of all costs
+	InputCost        float64
+	OutputCost       float64
+	AudioInputCost   float64
+	AudioOutputCost  float64
+	ReasoningCost    float64
+	CachedInputCost  float64
+	CachedOutputCost float64
+	PredictionCost   float64
+	ImageCost        float64
+	TotalCost        float64
 }

@@ -1,7 +1,6 @@
 package proxy
 
 import (
-	_ "embed"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,9 +10,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/mixaill76/auto_ai_router/internal/transform"
-	"github.com/mixaill76/auto_ai_router/internal/transform/anthropic"
-	"github.com/mixaill76/auto_ai_router/internal/transform/vertex"
+	"github.com/mixaill76/auto_ai_router/internal/config"
+	"github.com/mixaill76/auto_ai_router/internal/converter"
 )
 
 // streamChunkWriteTimeout is the per-chunk write deadline for streaming responses.
@@ -200,11 +198,19 @@ func IsStreamingResponse(resp *http.Response) bool {
 type streamTransformer func(io.Reader, string, io.Writer) error
 
 func (p *Proxy) handleVertexStreaming(w http.ResponseWriter, resp *http.Response, credName, modelID string, logCtx *RequestLogContext) error {
-	return p.handleTransformedStreaming(w, resp, credName, modelID, "Vertex AI", vertex.TransformVertexStreamToOpenAI, logCtx)
+	conv := converter.New(config.ProviderTypeVertexAI, converter.RequestMode{ModelID: modelID, IsStreaming: true})
+	transformer := func(r io.Reader, id string, w io.Writer) error {
+		return conv.StreamTo(r, w)
+	}
+	return p.handleTransformedStreaming(w, resp, credName, modelID, "Vertex AI", transformer, logCtx)
 }
 
 func (p *Proxy) handleAnthropicStreaming(w http.ResponseWriter, resp *http.Response, credName, modelID string, logCtx *RequestLogContext) error {
-	return p.handleTransformedStreaming(w, resp, credName, modelID, "Anthropic", anthropic.TransformAnthropicStreamToOpenAI, logCtx)
+	conv := converter.New(config.ProviderTypeAnthropic, converter.RequestMode{ModelID: modelID, IsStreaming: true})
+	transformer := func(r io.Reader, id string, w io.Writer) error {
+		return conv.StreamTo(r, w)
+	}
+	return p.handleTransformedStreaming(w, resp, credName, modelID, "Anthropic", transformer, logCtx)
 }
 
 func (p *Proxy) handleTransformedStreaming(
@@ -311,7 +317,7 @@ func (p *Proxy) finalizeStreamingLog(logCtx *RequestLogContext, totalTokens int,
 	}
 
 	if logCtx.TokenUsage == nil {
-		logCtx.TokenUsage = &transform.TokenUsage{}
+		logCtx.TokenUsage = &converter.TokenUsage{}
 	}
 
 	logCtx.TokenUsage.PromptTokens = logCtx.PromptTokensEstimate

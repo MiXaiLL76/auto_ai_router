@@ -9,8 +9,8 @@ import (
 	"time"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
+	"github.com/mixaill76/auto_ai_router/internal/converter"
 	"github.com/mixaill76/auto_ai_router/internal/testhelpers"
-	"github.com/mixaill76/auto_ai_router/internal/transform"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -662,7 +662,7 @@ func TestHandleStreamingWithTokens_HybridApproach(t *testing.T) {
 	logCtx := &RequestLogContext{
 		RequestID:            "test-request-123",
 		PromptTokensEstimate: 95, // Simulating estimated prompt tokens
-		TokenUsage:           &transform.TokenUsage{},
+		TokenUsage:           &converter.TokenUsage{},
 	}
 
 	err = prx.handleStreamingWithTokens(w, resp, "test-cred", "gpt-4o-mini", logCtx)

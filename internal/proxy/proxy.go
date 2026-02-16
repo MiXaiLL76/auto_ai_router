@@ -21,6 +21,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/auth"
 	"github.com/mixaill76/auto_ai_router/internal/balancer"
 	"github.com/mixaill76/auto_ai_router/internal/config"
+	"github.com/mixaill76/auto_ai_router/internal/converter"
 	"github.com/mixaill76/auto_ai_router/internal/httputil"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb"
 	"github.com/mixaill76/auto_ai_router/internal/logger"
@@ -28,9 +29,6 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/monitoring"
 	"github.com/mixaill76/auto_ai_router/internal/ratelimit"
 	"github.com/mixaill76/auto_ai_router/internal/security"
-	"github.com/mixaill76/auto_ai_router/internal/transform"
-	"github.com/mixaill76/auto_ai_router/internal/transform/anthropic"
-	"github.com/mixaill76/auto_ai_router/internal/transform/vertex"
 	"github.com/mixaill76/auto_ai_router/internal/utils"
 )
 
@@ -53,7 +51,7 @@ type RequestLogContext struct {
 	Status               string                   // "success" or "failure"
 	HTTPStatus           int                      // HTTP response status code
 	ErrorMsg             string                   // Error message (added to metadata on failure)
-	TokenUsage           *transform.TokenUsage    // Token usage with detailed breakdown
+	TokenUsage           *converter.TokenUsage    // Token usage with detailed breakdown
 	Credential           *config.CredentialConfig // Credential used
 	SessionID            string                   // Session ID
 	TargetURL            string                   // Target URL (for APIBase extraction)
@@ -492,7 +490,8 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 	// Build target URL based on credential type
 	var targetURL string
 	var vertexToken string
-	var requestBody = body // Default to original body
+	var requestBody []byte // Default to original body
+	var err error
 
 	// Track image generation request and extract image count
 	logCtx.IsImageGeneration = strings.Contains(r.URL.Path, "/images/generations")
@@ -508,32 +507,47 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	switch cred.Type {
-	case config.ProviderTypeVertexAI:
-		vertexBody, err := vertex.OpenAIToVertex(body, logCtx.IsImageGeneration, modelID)
-		if err != nil {
-			p.logger.Error("Failed to convert request to Vertex AI format",
-				"credential", cred.Name,
-				"error", err,
-			)
-			logCtx.Status = "failure"
-			logCtx.HTTPStatus = http.StatusInternalServerError
-			logCtx.ErrorMsg = fmt.Sprintf("Vertex AI transformation failed: %v", err)
-			logCtx.TargetURL = cred.BaseURL
-			http.Error(w, "Internal Server Error: Failed to convert request to Vertex AI format", http.StatusInternalServerError)
-			return
-		}
-		requestBody = vertexBody
+	// Create provider converter for this request
+	conv := converter.New(cred.Type, converter.RequestMode{
+		IsImageGeneration: logCtx.IsImageGeneration,
+		IsStreaming:       streaming,
+		ModelID:           modelID,
+	})
 
-		if logCtx.IsImageGeneration && !strings.Contains(modelID, "gemini") {
-			// For non-Gemini image generation (e.g., Imagen), use different endpoint
-			targetURL = vertex.BuildVertexImageURL(cred, modelID)
-		} else {
-			// For text generation or Gemini image generation (which uses chat API)
-			targetURL = vertex.BuildVertexURL(cred, modelID, streaming)
-		}
+	// Convert request body to provider format
+	requestBody, err = conv.RequestFrom(body)
+	if err != nil {
+		p.logger.Error("Failed to convert request to provider format",
+			"credential", cred.Name,
+			"type", cred.Type,
+			"error", err,
+		)
+		logCtx.Status = "failure"
+		logCtx.HTTPStatus = http.StatusInternalServerError
+		logCtx.ErrorMsg = fmt.Sprintf("Request conversion failed: %v", err)
+		logCtx.TargetURL = cred.BaseURL
+		http.Error(w, "Internal Server Error: Failed to convert request", http.StatusInternalServerError)
+		return
+	}
 
-		// Get OAuth2 token for Vertex AI
+	// Build target URL
+	targetURL = conv.BuildURL(cred)
+	if targetURL == "" {
+		// For OpenAI and other passthrough providers, build URL from baseURL + path
+		baseURL := strings.TrimSuffix(cred.BaseURL, "/")
+		path := r.URL.Path
+		// If baseURL already ends with /v1 and path starts with /v1, remove /v1 from path to avoid duplication
+		if strings.HasSuffix(baseURL, "/v1") && strings.HasPrefix(path, "/v1") {
+			path = strings.TrimPrefix(path, "/v1")
+		}
+		targetURL = baseURL + path
+		if r.URL.RawQuery != "" {
+			targetURL += "?" + r.URL.RawQuery
+		}
+	}
+
+	// For Vertex AI, obtain OAuth2 token
+	if cred.Type == config.ProviderTypeVertexAI {
 		vertexToken, err = p.tokenManager.GetToken(cred.Name, cred.CredentialsFile, cred.CredentialsJSON)
 		if err != nil {
 			p.logger.Error("Failed to get Vertex AI token",
@@ -546,54 +560,6 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			logCtx.TargetURL = targetURL
 			http.Error(w, "Internal Server Error: Failed to authenticate with Vertex AI", http.StatusInternalServerError)
 			return
-		}
-
-	case config.ProviderTypeAnthropic:
-		if logCtx.IsImageGeneration {
-			p.logger.Error("Anthropic does not support image generation",
-				"credential", cred.Name,
-			)
-			logCtx.Status = "failure"
-			logCtx.HTTPStatus = http.StatusBadRequest
-			logCtx.ErrorMsg = "Anthropic does not support image generation"
-			logCtx.TargetURL = cred.BaseURL
-			http.Error(w, "Bad Request: Anthropic does not support image generation", http.StatusBadRequest)
-			return
-		}
-
-		baseURL := strings.TrimSuffix(cred.BaseURL, "/")
-		targetURL = baseURL + "/v1/messages"
-
-		anthropicBody, err := anthropic.OpenAIToAnthropic(body)
-		if err != nil {
-			p.logger.Error("Failed to Anthropic request transformation",
-				"credential", cred.Name,
-				"error", err,
-			)
-			logCtx.Status = "failure"
-			logCtx.HTTPStatus = http.StatusInternalServerError
-			logCtx.ErrorMsg = fmt.Sprintf("Anthropic transformation failed: %v", err)
-			logCtx.TargetURL = targetURL
-			http.Error(w, "Internal Server Error: Failed to transform request", http.StatusInternalServerError)
-			return
-		}
-		requestBody = anthropicBody
-
-	default:
-		// For OpenAI and other providers, use baseURL + path
-		baseURL := strings.TrimSuffix(cred.BaseURL, "/")
-		path := r.URL.Path
-
-		// If baseURL already ends with /v1 and path starts with /v1, remove /v1 from path to avoid duplication
-		// Example: baseURL="https://api.openai.azure.com/openai/v1" + path="/v1/chat/completions"
-		// Should become: "https://api.openai.azure.com/openai/v1/chat/completions" (not /v1/v1/...)
-		if strings.HasSuffix(baseURL, "/v1") && strings.HasPrefix(path, "/v1") {
-			path = strings.TrimPrefix(path, "/v1")
-		}
-
-		targetURL = baseURL + path
-		if r.URL.RawQuery != "" {
-			targetURL += "?" + r.URL.RawQuery
 		}
 	}
 
@@ -756,61 +722,24 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		contentEncoding := resp.Header.Get("Content-Encoding")
 		decodedBody := decodeResponseBody(responseBody, contentEncoding)
 
-		// Transform response back to OpenAI format
-		switch cred.Type {
-		case config.ProviderTypeVertexAI:
-			if logCtx.IsImageGeneration {
-				// Transform image response
-				var vertexedBody []byte
-				var err error
-
-				if !strings.Contains(modelID, "gemini") {
-					// Non-Gemini image generation response (e.g., Imagen)
-					vertexedBody, err = vertex.VertexImageToOpenAI([]byte(decodedBody))
-				} else {
-					// Gemini image generation response (from chat API)
-					vertexedBody, err = vertex.VertexChatResponseToOpenAIImage([]byte(decodedBody))
-				}
-
-				if err != nil {
-					p.logger.Error("Failed to transform Vertex AI image response to OpenAI format",
-						"credential", cred.Name,
-						"error", err,
-					)
-					finalResponseBody = []byte(decodedBody)
-				} else {
-					finalResponseBody = vertexedBody
-					p.logTransformedResponse(cred.Name, "Vertex AI image", vertexedBody)
-				}
-			} else {
-				// Transform text response
-				vertexedBody, err := vertex.VertexToOpenAI([]byte(decodedBody), modelID)
-				if err != nil {
-					p.logger.Error("Failed to vertex Vertex AI response",
-						"credential", cred.Name,
-						"error", err,
-					)
-					finalResponseBody = []byte(decodedBody)
-				} else {
-					finalResponseBody = vertexedBody
-					p.logTransformedResponse(cred.Name, "Vertex AI", vertexedBody)
-				}
-			}
-		case config.ProviderTypeAnthropic:
-			// Transform text response
-			anthropicBody, err := anthropic.AnthropicToOpenAI([]byte(decodedBody), modelID)
-			if err != nil {
-				p.logger.Error("Failed to vertex Anthropic response",
+		// Transform response to OpenAI format (only for successful responses).
+		// For error responses (4xx/5xx) pass the provider body through unchanged —
+		// attempting to parse an error body as a success response produces garbled output.
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 && !conv.IsPassthrough() {
+			convertedBody, convErr := conv.ResponseTo([]byte(decodedBody))
+			if convErr != nil {
+				p.logger.Error("Failed to transform provider response to OpenAI format",
 					"credential", cred.Name,
-					"error", err,
+					"type", cred.Type,
+					"error", convErr,
 				)
 				finalResponseBody = []byte(decodedBody)
 			} else {
-				finalResponseBody = anthropicBody
-				p.logTransformedResponse(cred.Name, "Anthropic", anthropicBody)
+				finalResponseBody = convertedBody
+				p.logTransformedResponse(cred.Name, string(cred.Type), finalResponseBody)
 			}
-		default:
-			finalResponseBody = responseBody
+		} else {
+			finalResponseBody = []byte(decodedBody)
 		}
 
 		// Extract and record token usage (after transformation to OpenAI format)
@@ -844,7 +773,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		resp.Body = io.NopCloser(bytes.NewReader(finalResponseBody))
 
 		// Log to LiteLLM DB (non-streaming)
-		logCtx.TokenUsage = extractTokenUsage(bodyForTokenExtraction)
+		logCtx.TokenUsage = converter.ExtractTokenUsage(bodyForTokenExtraction)
 		logCtx.Status = "success"
 		logCtx.HTTPStatus = resp.StatusCode
 		logCtx.TargetURL = targetURL
@@ -875,12 +804,9 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 	// Copy response headers (skip hop-by-hop headers and transformation-related headers)
 	copyResponseHeaders(w, resp.Header, cred.Type)
 
-	// Set correct Content-Length for vertexed responses
-	switch cred.Type {
-	case config.ProviderTypeVertexAI, config.ProviderTypeAnthropic:
-		if len(finalResponseBody) > 0 {
-			w.Header().Set("Content-Length", fmt.Sprintf("%d", len(finalResponseBody)))
-		}
+	// Set correct Content-Length for transformed responses
+	if !conv.IsPassthrough() && len(finalResponseBody) > 0 {
+		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(finalResponseBody)))
 	}
 
 	rc := http.NewResponseController(w)
@@ -1113,7 +1039,7 @@ func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
 
 	// Ensure TokenUsage is not nil to prevent nil pointer dereference
 	if logCtx.TokenUsage == nil {
-		logCtx.TokenUsage = &transform.TokenUsage{}
+		logCtx.TokenUsage = &converter.TokenUsage{}
 	}
 
 	// Calculate cost based on model pricing and token usage
@@ -1144,10 +1070,10 @@ func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
 		EndTime:           utils.NowUTC(),
 		CallType:          logCtx.Request.URL.Path,
 		APIBase:           apiBase,
-		Model:             logCtx.ModelID,                 // Model name
-		ModelID:           modelIDFormatted,               // credential.name:model_name
-		ModelGroup:        logCtx.ModelID,                 // Model name
-		CustomLLMProvider: string(logCtx.Credential.Type), // Provider type as string
+		Model:             logCtx.ModelID,                                               // Model name
+		ModelID:           modelIDFormatted,                                             // credential.name:model_name
+		ModelGroup:        logCtx.ModelID,                                               // Model name
+		CustomLLMProvider: strings.Replace(string(logCtx.Credential.Type), "-", "_", 1), // Provider type as string
 		PromptTokens:      logCtx.TokenUsage.PromptTokens,
 		CompletionTokens:  logCtx.TokenUsage.CompletionTokens,
 		TotalTokens:       logCtx.TokenUsage.Total(),
@@ -1295,65 +1221,4 @@ func getClientIP(r *http.Request) string {
 		return r.RemoteAddr
 	}
 	return host
-}
-
-// extractTokenUsage extracts detailed token usage from response body
-// Handles both chat completion format (prompt_tokens/completion_tokens)
-// and image generation format (input_tokens/output_tokens)
-func extractTokenUsage(body []byte) *transform.TokenUsage {
-	var resp struct {
-		Usage struct {
-			// Chat completion format
-			PromptTokens        int `json:"prompt_tokens"`
-			CompletionTokens    int `json:"completion_tokens"`
-			PromptTokensDetails struct {
-				CachedTokens int `json:"cached_tokens,omitempty"`
-				AudioTokens  int `json:"audio_tokens,omitempty"`
-				TextTokens   int `json:"text_tokens,omitempty"`
-			} `json:"prompt_tokens_details,omitempty"`
-			CompletionTokensDetails struct {
-				AcceptedPredictionTokens int `json:"accepted_prediction_tokens,omitempty"`
-				RejectedPredictionTokens int `json:"rejected_prediction_tokens,omitempty"`
-				AudioTokens              int `json:"audio_tokens,omitempty"`
-				ReasoningTokens          int `json:"reasoning_tokens,omitempty"`
-			} `json:"completion_tokens_details,omitempty"`
-
-			// Image generation format
-			InputTokens        int `json:"input_tokens"`
-			OutputTokens       int `json:"output_tokens"`
-			InputTokensDetails struct {
-				ImageTokens int `json:"image_tokens,omitempty"`
-				TextTokens  int `json:"text_tokens,omitempty"`
-			} `json:"input_tokens_details,omitempty"`
-		} `json:"usage"`
-	}
-
-	if err := json.Unmarshal(body, &resp); err != nil {
-		return nil
-	}
-
-	// Use chat completion tokens if available, otherwise use input/output tokens (image generation)
-	promptTokens := resp.Usage.PromptTokens
-	if promptTokens == 0 {
-		promptTokens = resp.Usage.InputTokens
-	}
-
-	completionTokens := resp.Usage.CompletionTokens
-	if completionTokens == 0 {
-		completionTokens = resp.Usage.OutputTokens
-	}
-
-	usage := &transform.TokenUsage{
-		PromptTokens:             promptTokens,
-		CompletionTokens:         completionTokens,
-		CachedInputTokens:        resp.Usage.PromptTokensDetails.CachedTokens,
-		AudioInputTokens:         resp.Usage.PromptTokensDetails.AudioTokens,
-		ImageTokens:              resp.Usage.InputTokensDetails.ImageTokens, // Token count for image processing
-		AcceptedPredictionTokens: resp.Usage.CompletionTokensDetails.AcceptedPredictionTokens,
-		RejectedPredictionTokens: resp.Usage.CompletionTokensDetails.RejectedPredictionTokens,
-		AudioOutputTokens:        resp.Usage.CompletionTokensDetails.AudioTokens,
-		ReasoningTokens:          resp.Usage.CompletionTokensDetails.ReasoningTokens,
-	}
-
-	return usage
 }

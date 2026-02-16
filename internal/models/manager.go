@@ -7,8 +7,8 @@ import (
 	"time"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
+	"github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
 	"github.com/mixaill76/auto_ai_router/internal/httputil"
-	"github.com/mixaill76/auto_ai_router/internal/transform/common"
 	"github.com/mixaill76/auto_ai_router/internal/utils"
 )
 
@@ -312,7 +312,7 @@ func (m *Manager) GetAllModels() ModelsResponse {
 			models = append(models, Model{
 				ID:      modelName,
 				Object:  "model",
-				Created: common.GetCurrentTimestamp(),
+				Created: converterutil.GetCurrentTimestamp(),
 				OwnedBy: "system",
 			})
 			modelMap[modelName] = true
@@ -712,7 +712,7 @@ func (m *Manager) GetModelsForCredential(credentialName string) []Model {
 		result = append(result, Model{
 			ID:      modelID,
 			Object:  "model",
-			Created: common.GetCurrentTimestamp(),
+			Created: converterutil.GetCurrentTimestamp(),
 			OwnedBy: "system",
 		})
 	}

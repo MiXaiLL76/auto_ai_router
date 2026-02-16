@@ -3,12 +3,12 @@ package models
 import (
 	"testing"
 
-	"github.com/mixaill76/auto_ai_router/internal/transform"
+	"github.com/mixaill76/auto_ai_router/internal/converter"
 	"github.com/stretchr/testify/assert"
 )
 
 func TestCalculateTokenCosts_RegularTokensOnly(t *testing.T) {
-	usage := &transform.TokenUsage{
+	usage := &converter.TokenUsage{
 		PromptTokens:     100,
 		CompletionTokens: 50,
 	}
@@ -29,7 +29,7 @@ func TestCalculateTokenCosts_RegularTokensOnly(t *testing.T) {
 func TestCalculateTokenCosts_Vertex_WithAudioAndCached(t *testing.T) {
 	// Vertex semantic: audio and cached are INCLUDED in totals
 	// promptTokenCount=100 includes AudioInputTokens=5 and CachedInputTokens=20
-	usage := &transform.TokenUsage{
+	usage := &converter.TokenUsage{
 		PromptTokens:      100, // includes 5 audio + 20 cached
 		CompletionTokens:  50,  // includes 2 audio
 		AudioInputTokens:  5,
@@ -74,7 +74,7 @@ func TestCalculateTokenCosts_Vertex_WithAudioAndCached(t *testing.T) {
 func TestCalculateTokenCosts_WithReasoning(t *testing.T) {
 	// OpenAI semantic: reasoning tokens are INCLUDED in completion tokens
 	// completionTokens=100 includes ReasoningTokens=30
-	usage := &transform.TokenUsage{
+	usage := &converter.TokenUsage{
 		PromptTokens:     50,
 		CompletionTokens: 100, // includes 30 reasoning tokens
 		ReasoningTokens:  30,
@@ -105,7 +105,7 @@ func TestCalculateTokenCosts_WithReasoning(t *testing.T) {
 
 func TestCalculateTokenCosts_WithPrediction(t *testing.T) {
 	// Prediction tokens (accepted and rejected) are included in completion tokens
-	usage := &transform.TokenUsage{
+	usage := &converter.TokenUsage{
 		PromptTokens:             100,
 		CompletionTokens:         100, // includes 20 accepted + 5 rejected prediction
 		AcceptedPredictionTokens: 20,
@@ -139,7 +139,7 @@ func TestCalculateTokenCosts_WithPrediction(t *testing.T) {
 
 func TestCalculateTokenCosts_AudioFallbackToRegularPrice(t *testing.T) {
 	// When audio price not set, should fall back to regular price
-	usage := &transform.TokenUsage{
+	usage := &converter.TokenUsage{
 		PromptTokens:     100,
 		AudioInputTokens: 10,
 	}
@@ -165,7 +165,7 @@ func TestCalculateTokenCosts_AudioFallbackToRegularPrice(t *testing.T) {
 
 func TestCalculateTokenCosts_CachedFallbackToRegularPrice(t *testing.T) {
 	// When cached price not set, should fall back to regular price
-	usage := &transform.TokenUsage{
+	usage := &converter.TokenUsage{
 		PromptTokens:      100,
 		CachedInputTokens: 20,
 	}
@@ -191,7 +191,7 @@ func TestCalculateTokenCosts_CachedFallbackToRegularPrice(t *testing.T) {
 
 func TestCalculateTokenCosts_SafetyNegativeTokens(t *testing.T) {
 	// Edge case: more audio tokens reported than total (shouldn't happen, but be safe)
-	usage := &transform.TokenUsage{
+	usage := &converter.TokenUsage{
 		PromptTokens:      50,
 		AudioInputTokens:  60, // more than total!
 		CachedInputTokens: 10,
@@ -225,7 +225,7 @@ func TestCalculateTokenCosts_NilUsage(t *testing.T) {
 }
 
 func TestCalculateTokenCosts_NilPrice(t *testing.T) {
-	usage := &transform.TokenUsage{
+	usage := &converter.TokenUsage{
 		PromptTokens:     100,
 		CompletionTokens: 50,
 	}
@@ -235,7 +235,7 @@ func TestCalculateTokenCosts_NilPrice(t *testing.T) {
 }
 
 func TestModelPrice_CalculateCost(t *testing.T) {
-	usage := &transform.TokenUsage{
+	usage := &converter.TokenUsage{
 		PromptTokens:     100,
 		CompletionTokens: 50,
 	}
@@ -262,7 +262,7 @@ func TestCalculateTokenCosts_Above200k_Input(t *testing.T) {
 	// Test 300k input tokens with no specialized tokens
 	// below200k = 200k, above200k = 100k
 	// regularAbove = 100k, regularBelow = 200k
-	usage := &transform.TokenUsage{
+	usage := &converter.TokenUsage{
 		PromptTokens:     300_000,
 		CompletionTokens: 50,
 	}
@@ -294,7 +294,7 @@ func TestCalculateTokenCosts_Above200k_WithAudio(t *testing.T) {
 	// regularInputTokens = 300k - 30k = 270k
 	// proportion above = (300k - 200k) / 300k = 100k / 300k = 1/3
 	// regularAbove = 270k * 1/3 = 90k, regularBelow = 180k
-	usage := &transform.TokenUsage{
+	usage := &converter.TokenUsage{
 		PromptTokens:     300_000,
 		AudioInputTokens: 30_000,
 		CompletionTokens: 50,
@@ -329,7 +329,7 @@ func TestCalculateTokenCosts_Above200k_WithAudio(t *testing.T) {
 func TestCalculateTokenCosts_Above200k_Output(t *testing.T) {
 	// Test 250k output tokens with no specialized tokens
 	// below200k = 200k, above200k = 50k
-	usage := &transform.TokenUsage{
+	usage := &converter.TokenUsage{
 		PromptTokens:     100,
 		CompletionTokens: 250_000,
 	}
@@ -359,7 +359,7 @@ func TestCalculateTokenCosts_Above200k_Output(t *testing.T) {
 func TestCalculateTokenCosts_Below200k_NoTiering(t *testing.T) {
 	// Test that tiering is NOT applied when tokens are below 200k
 	// Even if InputCostPerTokenAbove200k is set
-	usage := &transform.TokenUsage{
+	usage := &converter.TokenUsage{
 		PromptTokens:     150_000,
 		CompletionTokens: 50_000,
 	}

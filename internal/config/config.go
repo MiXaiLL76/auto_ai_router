@@ -10,6 +10,11 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+const DefaultMaxAttempts = 3
+const DefaultBanDuration time.Duration = 0
+
+var DefaultErrorCodes = []int{429}
+
 // ProviderType represents the type of AI provider
 type ProviderType string
 
@@ -39,7 +44,7 @@ type ModelRPMConfig struct {
 
 type Config struct {
 	Server      ServerConfig       `yaml:"server"`
-	Fail2Ban    Fail2BanConfig     `yaml:"fail2ban"`
+	Fail2Ban    Fail2BanConfig     `yaml:"fail2ban,omitempty"`
 	Credentials []CredentialConfig `yaml:"credentials"`
 	Monitoring  MonitoringConfig   `yaml:"monitoring"`
 	Models      []ModelRPMConfig   `yaml:"models,omitempty"`
@@ -65,15 +70,15 @@ type ServerConfig struct {
 
 // ErrorCodeRuleConfig defines per-error-code ban rules
 type ErrorCodeRuleConfig struct {
-	Code        int    `yaml:"code"`
-	MaxAttempts int    `yaml:"max_attempts"`
-	BanDuration string `yaml:"ban_duration"`
+	Code        int    `yaml:"code,omitempty"`
+	MaxAttempts int    `yaml:"max_attempts,omitempty"`
+	BanDuration string `yaml:"ban_duration,omitempty"`
 }
 
 type Fail2BanConfig struct {
-	MaxAttempts    int                   `yaml:"max_attempts"`
-	BanDuration    time.Duration         `yaml:"ban_duration"`
-	ErrorCodes     []int                 `yaml:"error_codes"`
+	MaxAttempts    int                   `yaml:"max_attempts,omitempty"`
+	BanDuration    time.Duration         `yaml:"ban_duration,omitempty"`
+	ErrorCodes     []int                 `yaml:"error_codes,omitempty"`
 	ErrorCodeRules []ErrorCodeRuleConfig `yaml:"error_code_rules,omitempty"`
 }
 
@@ -369,28 +374,32 @@ func (l *LiteLLMDBConfig) UnmarshalYAML(value *yaml.Node) error {
 func (f *Fail2BanConfig) UnmarshalYAML(value *yaml.Node) error {
 	// Create a temporary struct with string ban_duration
 	type tempConfig struct {
-		MaxAttempts int    `yaml:"max_attempts"`
-		BanDuration string `yaml:"ban_duration"`
-		ErrorCodes  []int  `yaml:"error_codes"`
+		MaxAttempts string `yaml:"max_attempts,omitempty"`
+		BanDuration string `yaml:"ban_duration,omitempty"`
+		ErrorCodes  []int  `yaml:"error_codes,omitempty"`
 	}
-
+	var err error
 	var temp tempConfig
 	if err := value.Decode(&temp); err != nil {
 		return err
 	}
 
-	f.MaxAttempts = temp.MaxAttempts
-	f.ErrorCodes = temp.ErrorCodes
+	if f.MaxAttempts, err = parseField(temp.MaxAttempts, DefaultMaxAttempts, strconv.Atoi, "fail2ban.max_attempts"); err != nil {
+		return err
+	}
 
-	// Parse ban_duration
-	if temp.BanDuration == "permanent" || temp.BanDuration == "" {
-		f.BanDuration = 0 // 0 means permanent ban
+	if temp.BanDuration == "permanent" {
+		f.BanDuration = DefaultBanDuration
 	} else {
-		duration, err := time.ParseDuration(temp.BanDuration)
-		if err != nil {
-			return fmt.Errorf("invalid ban_duration: %w", err)
+		if f.BanDuration, err = parseField(temp.BanDuration, DefaultBanDuration, time.ParseDuration, "ban_duration"); err != nil {
+			return err
 		}
-		f.BanDuration = duration
+	}
+	if len(temp.ErrorCodes) == 0 {
+		f.ErrorCodes = DefaultErrorCodes
+	} else {
+		f.ErrorCodes = temp.ErrorCodes
+
 	}
 
 	return nil
@@ -402,9 +411,18 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("failed to read config file: %w", err)
 	}
 
+	var root yaml.Node
+	if err := yaml.Unmarshal(data, &root); err != nil {
+		return nil, fmt.Errorf("failed to parse config file: %w", err)
+	}
+
 	var cfg Config
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return nil, fmt.Errorf("failed to parse config file: %w", err)
+	}
+
+	if !hasMappingKey(&root, "fail2ban") {
+		cfg.Fail2Ban = defaultFail2BanConfig()
 	}
 
 	// Normalize credentials
@@ -415,6 +433,32 @@ func Load(path string) (*Config, error) {
 	}
 
 	return &cfg, nil
+}
+
+func defaultFail2BanConfig() Fail2BanConfig {
+	return Fail2BanConfig{
+		MaxAttempts: DefaultMaxAttempts,
+		BanDuration: DefaultBanDuration,
+		ErrorCodes:  append([]int(nil), DefaultErrorCodes...),
+	}
+}
+
+func hasMappingKey(node *yaml.Node, key string) bool {
+	if node == nil {
+		return false
+	}
+	if node.Kind == yaml.DocumentNode && len(node.Content) > 0 {
+		node = node.Content[0]
+	}
+	if node.Kind != yaml.MappingNode {
+		return false
+	}
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		if node.Content[i].Value == key {
+			return true
+		}
+	}
+	return false
 }
 
 // Normalize cleans up configuration values

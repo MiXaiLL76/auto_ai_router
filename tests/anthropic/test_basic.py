@@ -133,7 +133,7 @@ class TestAnthropicAdvancedParameters:
                 {"role": "user", "content": "Write a creative story about robots"}
             ],
             temperature=0.8,
-            top_p=0.9,
+            # top_p=0.9,
             frequency_penalty=0.1,
             presence_penalty=0.1,
             max_tokens=200
@@ -179,7 +179,6 @@ class TestAnthropicAdvancedParameters:
             messages=[
                 {"role": "user", "content": "Write a short creative sentence"}
             ],
-            temperature=0.7,
             top_p=0.5,  # More restrictive
             max_tokens=100
         )

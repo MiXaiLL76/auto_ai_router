@@ -137,7 +137,6 @@ class TestAnthropicStreaming:
             messages=[
                 {"role": "user", "content": "Write a short story"}
             ],
-            temperature=0.7,
             top_p=0.9,
             frequency_penalty=0.1,
             presence_penalty=0.1,

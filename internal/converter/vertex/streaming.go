@@ -7,22 +7,16 @@ import (
 	"io"
 	"strings"
 
-	"github.com/mixaill76/auto_ai_router/internal/transform/common"
-	"github.com/mixaill76/auto_ai_router/internal/transform/openai"
+	converterutil "github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
+	"github.com/mixaill76/auto_ai_router/internal/converter/openai"
 	"google.golang.org/genai"
 )
-
-// VertexStreamingChunk wraps genai types for streaming response
-type VertexStreamingChunk struct {
-	Candidates    []*genai.Candidate                          `json:"candidates,omitempty"`
-	UsageMetadata *genai.GenerateContentResponseUsageMetadata `json:"usageMetadata,omitempty"`
-}
 
 // TransformVertexStreamToOpenAI converts Vertex AI SSE stream to OpenAI SSE format
 func TransformVertexStreamToOpenAI(vertexStream io.Reader, model string, output io.Writer) error {
 	scanner := bufio.NewScanner(vertexStream)
-	chatID := common.GenerateID()
-	timestamp := common.GetCurrentTimestamp()
+	chatID := converterutil.GenerateID()
+	timestamp := converterutil.GetCurrentTimestamp()
 	isFirstChunk := true
 
 	for scanner.Scan() {
@@ -75,11 +69,17 @@ func TransformVertexStreamToOpenAI(vertexStream io.Reader, model string, output 
 
 			// Extract content and function calls from parts
 			var content string
+			var reasoningContent string
 			var toolCalls []openai.OpenAIStreamingToolCall
 			toolCallIdx := 0
 
 			if candidate.Content != nil && candidate.Content.Parts != nil {
 				for _, part := range candidate.Content.Parts {
+					// Handle thinking/reasoning parts (Thought == true means this is a reasoning token)
+					if part.Thought {
+						reasoningContent += part.Text
+						continue
+					}
 					if part.Text != "" {
 						content += part.Text
 					}
@@ -94,6 +94,9 @@ func TransformVertexStreamToOpenAI(vertexStream io.Reader, model string, output 
 			}
 
 			choice.Delta.Content = content
+			if reasoningContent != "" {
+				choice.Delta.ReasoningContent = reasoningContent
+			}
 			if len(toolCalls) > 0 {
 				choice.Delta.ToolCalls = toolCalls
 			}
@@ -143,7 +146,7 @@ func convertVertexFunctionCallToStreamingOpenAI(genaiCall *genai.FunctionCall, i
 
 	return openai.OpenAIStreamingToolCall{
 		Index: index,
-		ID:    common.GenerateID(),
+		ID:    converterutil.GenerateID(),
 		Type:  "function",
 		Function: &openai.OpenAIStreamingToolFunction{
 			Name:      genaiCall.Name,

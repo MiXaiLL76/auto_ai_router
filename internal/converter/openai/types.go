@@ -1,9 +1,5 @@
 package openai
 
-import (
-	"github.com/mixaill76/auto_ai_router/internal/transform"
-)
-
 // Request types
 
 // OpenAIRequest represents the OpenAI API request format
@@ -19,7 +15,7 @@ type OpenAIRequest struct {
 	N                    *int                   `json:"n,omitempty"`
 	FrequencyPenalty     *float64               `json:"frequency_penalty,omitempty"`
 	PresencePenalty      *float64               `json:"presence_penalty,omitempty"`
-	LogitBias            map[string]float64     `json:"logit_bias,omitempty"`
+	LogitBias            map[string]int         `json:"logit_bias,omitempty"`
 	Logprobs             *bool                  `json:"logprobs,omitempty"`
 	TopLogprobs          *int                   `json:"top_logprobs,omitempty"`
 	Seed                 *int64                 `json:"seed,omitempty"`
@@ -35,6 +31,7 @@ type OpenAIRequest struct {
 	Modalities           []string               `json:"modalities,omitempty"`
 	PromptCacheRetention string                 `json:"prompt_cache_retention,omitempty"`
 	ReasoningEffort      string                 `json:"reasoning_effort,omitempty"`
+	Thinking             interface{}            `json:"thinking,omitempty"` // Anthropic-style thinking param: {"type":"enabled","budget_tokens":N}
 	ServiceTier          string                 `json:"service_tier,omitempty"`
 	StreamOptions        interface{}            `json:"stream_options,omitempty"`
 	Verbosity            string                 `json:"verbosity,omitempty"`
@@ -44,9 +41,13 @@ type OpenAIRequest struct {
 }
 
 type OpenAIMessage struct {
-	Role      string        `json:"role"`
-	Content   interface{}   `json:"content"`
-	ToolCalls []interface{} `json:"tool_calls,omitempty"`
+	Role             string        `json:"role"`
+	Content          interface{}   `json:"content"`
+	Name             string        `json:"name,omitempty"`
+	ToolCallID       string        `json:"tool_call_id,omitempty"`
+	ToolCalls        []interface{} `json:"tool_calls,omitempty"`
+	Refusal          string        `json:"refusal,omitempty"`
+	ReasoningContent string        `json:"reasoning_content,omitempty"`
 }
 
 type ContentBlock struct {
@@ -89,10 +90,12 @@ type OpenAIChoice struct {
 }
 
 type OpenAIResponseMessage struct {
-	Role      string           `json:"role"`
-	Content   string           `json:"content"`
-	ToolCalls []OpenAIToolCall `json:"tool_calls,omitempty"`
-	Images    []ImageData      `json:"images,omitempty"`
+	Role             string           `json:"role"`
+	Content          string           `json:"content"`
+	ToolCalls        []OpenAIToolCall `json:"tool_calls,omitempty"`
+	Refusal          string           `json:"refusal,omitempty"`
+	ReasoningContent string           `json:"reasoning_content,omitempty"`
+	Images           []ImageData      `json:"images,omitempty"` // custom extension for Gemini image responses
 }
 
 type OpenAIToolCall struct {
@@ -150,9 +153,11 @@ type OpenAIStreamingChoice struct {
 }
 
 type OpenAIStreamingDelta struct {
-	Role      string                    `json:"role,omitempty"`
-	Content   string                    `json:"content,omitempty"`
-	ToolCalls []OpenAIStreamingToolCall `json:"tool_calls,omitempty"`
+	Role             string                    `json:"role,omitempty"`
+	Content          string                    `json:"content,omitempty"`
+	ToolCalls        []OpenAIStreamingToolCall `json:"tool_calls,omitempty"`
+	Refusal          string                    `json:"refusal,omitempty"`
+	ReasoningContent string                    `json:"reasoning_content,omitempty"`
 }
 
 type OpenAIStreamingToolCall struct {
@@ -167,32 +172,32 @@ type OpenAIStreamingToolFunction struct {
 	Arguments string `json:"arguments,omitempty"`
 }
 
-// Helper functions (imported from common package for consistency)
+// Image generation types
 
-// ToTokenUsage converts OpenAI usage to universal TokenUsage format
-func (u *OpenAIUsage) ToTokenUsage() *transform.TokenUsage {
-	if u == nil {
-		return nil
-	}
+// OpenAIImageRequest represents OpenAI image generation request
+type OpenAIImageRequest struct {
+	Model             string `json:"model"`
+	Prompt            string `json:"prompt"`
+	N                 *int   `json:"n,omitempty"`
+	Size              string `json:"size,omitempty"`
+	Quality           string `json:"quality,omitempty"`
+	ResponseFormat    string `json:"response_format,omitempty"`
+	Style             string `json:"style,omitempty"`
+	User              string `json:"user,omitempty"`
+	Background        string `json:"background,omitempty"`         // gpt-image-1
+	Moderation        string `json:"moderation,omitempty"`         // gpt-image-1
+	OutputCompression int    `json:"output_compression,omitempty"` // gpt-image-1
+	OutputFormat      string `json:"output_format,omitempty"`      // gpt-image-1
+}
 
-	usage := &transform.TokenUsage{
-		PromptTokens:     u.PromptTokens,
-		CompletionTokens: u.CompletionTokens,
-	}
+type OpenAIImageData struct {
+	B64JSON       string `json:"b64_json,omitempty"`
+	URL           string `json:"url,omitempty"`
+	RevisedPrompt string `json:"revised_prompt,omitempty"`
+}
 
-	// Extract details from PromptTokensDetails
-	if u.PromptTokensDetails != nil {
-		usage.CachedInputTokens = u.PromptTokensDetails.CachedTokens
-		usage.AudioInputTokens = u.PromptTokensDetails.AudioTokens
-	}
-
-	// Extract details from CompletionTokensDetails
-	if u.CompletionTokensDetails != nil {
-		usage.AcceptedPredictionTokens = u.CompletionTokensDetails.AcceptedPredictionTokens
-		usage.RejectedPredictionTokens = u.CompletionTokensDetails.RejectedPredictionTokens
-		usage.AudioOutputTokens = u.CompletionTokensDetails.AudioTokens
-		usage.ReasoningTokens = u.CompletionTokensDetails.ReasoningTokens
-	}
-
-	return usage
+// OpenAIImageResponse represents OpenAI image response
+type OpenAIImageResponse struct {
+	Created int64             `json:"created"`
+	Data    []OpenAIImageData `json:"data"`
 }

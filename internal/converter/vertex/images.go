@@ -5,22 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/mixaill76/auto_ai_router/internal/transform/common"
-	"github.com/mixaill76/auto_ai_router/internal/transform/openai"
+	"github.com/mixaill76/auto_ai_router/internal/config"
+	converterutil "github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
+	"github.com/mixaill76/auto_ai_router/internal/converter/openai"
+
 	"google.golang.org/genai"
 )
-
-// OpenAIImageRequest represents OpenAI image generation request
-type OpenAIImageRequest struct {
-	Model          string `json:"model"`
-	Prompt         string `json:"prompt"`
-	N              *int   `json:"n,omitempty"`
-	Size           string `json:"size,omitempty"`
-	Quality        string `json:"quality,omitempty"`
-	ResponseFormat string `json:"response_format,omitempty"`
-	Style          string `json:"style,omitempty"`
-	User           string `json:"user,omitempty"`
-}
 
 // VertexImageRequest represents Vertex AI Imagen request
 type VertexImageRequest struct {
@@ -39,18 +29,6 @@ type VertexImageParameters struct {
 	PersonGeneration  string `json:"personGeneration,omitempty"`
 }
 
-// OpenAIImageResponse represents OpenAI image response
-type OpenAIImageResponse struct {
-	Created int64             `json:"created"`
-	Data    []OpenAIImageData `json:"data"`
-}
-
-type OpenAIImageData struct {
-	B64JSON       string `json:"b64_json,omitempty"`
-	URL           string `json:"url,omitempty"`
-	RevisedPrompt string `json:"revised_prompt,omitempty"`
-}
-
 // VertexImageResponse represents Vertex AI Imagen response
 type VertexImageResponse struct {
 	Predictions []VertexImagePrediction `json:"predictions"`
@@ -61,9 +39,27 @@ type VertexImagePrediction struct {
 	MimeType           string `json:"mimeType"`
 }
 
+// BuildVertexImageURL constructs the Vertex AI URL for image generation
+// Format: https://{location}-aiplatform.googleapis.com/v1beta1/projects/{project}/locations/{location}/publishers/google/models/{model}:predict
+func BuildVertexImageURL(cred *config.CredentialConfig, modelID string) string {
+	// For global location (no regional prefix)
+	if cred.Location == "global" {
+		return fmt.Sprintf(
+			"https://aiplatform.googleapis.com/v1beta1/projects/%s/locations/global/publishers/google/models/%s:predict",
+			cred.ProjectID, modelID,
+		)
+	}
+
+	// For regional locations
+	return fmt.Sprintf(
+		"https://%s-aiplatform.googleapis.com/v1beta1/projects/%s/locations/%s/publishers/google/models/%s:predict",
+		cred.Location, cred.ProjectID, cred.Location, modelID,
+	)
+}
+
 // OpenAIImageToVertex converts OpenAI image request to Vertex AI Imagen format
 func OpenAIImageToVertex(openAIBody []byte) ([]byte, error) {
-	var openAIReq OpenAIImageRequest
+	var openAIReq openai.OpenAIImageRequest
 	if err := json.Unmarshal(openAIBody, &openAIReq); err != nil {
 		return nil, fmt.Errorf("failed to parse OpenAI image request: %w", err)
 	}
@@ -117,14 +113,14 @@ func VertexImageToOpenAI(vertexBody []byte) ([]byte, error) {
 		return nil, fmt.Errorf("failed to parse Vertex image response: %w", err)
 	}
 
-	openAIResp := OpenAIImageResponse{
-		Created: common.GetCurrentTimestamp(),
-		Data:    make([]OpenAIImageData, 0),
+	openAIResp := openai.OpenAIImageResponse{
+		Created: converterutil.GetCurrentTimestamp(),
+		Data:    make([]openai.OpenAIImageData, 0),
 	}
 
 	// Convert predictions to OpenAI format
 	for _, prediction := range vertexResp.Predictions {
-		data := OpenAIImageData{
+		data := openai.OpenAIImageData{
 			B64JSON: prediction.BytesBase64Encoded,
 		}
 		openAIResp.Data = append(openAIResp.Data, data)
@@ -136,7 +132,7 @@ func VertexImageToOpenAI(vertexBody []byte) ([]byte, error) {
 // ImageRequestToOpenAIChatRequest converts OpenAI image generation request to OpenAI chat request format
 // This allows Gemini models to generate images through chat API with response_modalities: ["IMAGE"]
 func ImageRequestToOpenAIChatRequest(openAIBody []byte) ([]byte, error) {
-	var imageReq OpenAIImageRequest
+	var imageReq openai.OpenAIImageRequest
 	if err := json.Unmarshal(openAIBody, &imageReq); err != nil {
 		return nil, fmt.Errorf("failed to parse OpenAI image request: %w", err)
 	}
@@ -242,9 +238,9 @@ func VertexChatResponseToOpenAIImage(vertexBody []byte) ([]byte, error) {
 		return nil, fmt.Errorf("failed to parse Vertex chat response: %w", err)
 	}
 
-	openAIResp := OpenAIImageResponse{
-		Created: common.GetCurrentTimestamp(),
-		Data:    make([]OpenAIImageData, 0),
+	openAIResp := openai.OpenAIImageResponse{
+		Created: converterutil.GetCurrentTimestamp(),
+		Data:    make([]openai.OpenAIImageData, 0),
 	}
 
 	// Extract images from candidates
@@ -255,7 +251,7 @@ func VertexChatResponseToOpenAIImage(vertexBody []byte) ([]byte, error) {
 				if part.InlineData != nil {
 					// Encode binary image data to base64
 					b64Data := base64.StdEncoding.EncodeToString(part.InlineData.Data)
-					imageData := OpenAIImageData{
+					imageData := openai.OpenAIImageData{
 						B64JSON: b64Data,
 					}
 					openAIResp.Data = append(openAIResp.Data, imageData)

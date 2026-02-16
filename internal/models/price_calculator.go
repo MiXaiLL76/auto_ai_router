@@ -1,7 +1,7 @@
 package models
 
 import (
-	"github.com/mixaill76/auto_ai_router/internal/transform"
+	"github.com/mixaill76/auto_ai_router/internal/converter"
 )
 
 // Tiered pricing threshold: tokens above this count are billed at a different rate
@@ -20,12 +20,12 @@ const tokenTiering200kThreshold = 200_000
 // then add back specialized token costs. This works for both semantics:
 // - Vertex/OpenAI: 100 - 5 - 20 = 75 regular, then add audio and cached separately
 // - Anthropic: 100 - 0 - 0 = 100 regular (since those tokens are in separate fields)
-func CalculateTokenCosts(usage *transform.TokenUsage, price *ModelPrice) *transform.TokenCosts {
+func CalculateTokenCosts(usage *converter.TokenUsage, price *ModelPrice) *converter.TokenCosts {
 	if usage == nil || price == nil {
 		return nil
 	}
 
-	costs := &transform.TokenCosts{}
+	costs := &converter.TokenCosts{}
 
 	// Calculate "regular" input tokens by subtracting specialized token types
 	// This handles both Vertex/OpenAI (where they're included) and Anthropic (where they're separate)
@@ -136,7 +136,7 @@ func CalculateTokenCosts(usage *transform.TokenUsage, price *ModelPrice) *transf
 }
 
 // CalculateCost is a convenience method on ModelPrice that calculates total cost
-func (p *ModelPrice) CalculateCost(usage *transform.TokenUsage) float64 {
+func (p *ModelPrice) CalculateCost(usage *converter.TokenUsage) float64 {
 	costs := CalculateTokenCosts(usage, p)
 	if costs == nil {
 		return 0.0
