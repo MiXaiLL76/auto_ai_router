@@ -19,6 +19,7 @@ on:
       - 'go.sum'
       - '.golangci.yml'
       - '.github/workflows/lint.yml'
+  workflow_dispatch:
   workflow_call:
 
 jobs:
