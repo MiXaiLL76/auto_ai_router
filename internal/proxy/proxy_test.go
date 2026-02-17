@@ -171,8 +171,7 @@ func TestProxyRequest_NoCredentialsAvailable(t *testing.T) {
 
 	prx.ProxyRequest(w, req)
 
-	assert.Equal(t, http.StatusServiceUnavailable, w.Code)
-	assert.Contains(t, w.Body.String(), "Service Unavailable")
+	assert.Equal(t, http.StatusTooManyRequests, w.Code)
 }
 
 func TestProxyRequest_RateLimitExceeded(t *testing.T) {

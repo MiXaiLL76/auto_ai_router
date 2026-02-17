@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
-	"strings"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/models"
@@ -45,35 +44,42 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	if strings.HasPrefix(req.URL.Path, "/v1/") {
-		if r.monitoringConfig.LogErrors {
-			// Capture request body for logging (detects streaming requests)
-			reqBody, isStreaming, err := captureRequestBody(req)
-			if err != nil {
-				r.proxy.ProxyRequest(w, req)
-				return
-			}
-
-			// Create response capture wrapper
-			rc := newResponseCapture(w)
-
-			// Proxy the request through captured response
-			r.proxy.ProxyRequest(rc, req)
-
-			// Log error responses if enabled and status is error (4xx or 5xx).
-			// Skip logging for streaming requests to avoid memory overhead with large responses.
-			if r.monitoringConfig.ErrorsLogPath != "" && isErrorStatus(rc.statusCode) && !isStreaming {
-				_ = logErrorResponse(r.monitoringConfig.ErrorsLogPath, req, rc, reqBody)
-				// Log error internally but don't fail the response
-				// (error logging shouldn't break the API response)
-			}
-		} else {
-			r.proxy.ProxyRequest(w, req)
-		}
+	allowedPaths := map[string]bool{
+		"/v1/chat/completions":   true,
+		"/v1/completions":        true,
+		"/v1/embeddings":         true,
+		"/v1/images/generations": true,
+		"/v1/responses":          true,
+	}
+	if !allowedPaths[req.URL.Path] {
+		http.Error(w, "Not Found", http.StatusNotFound)
 		return
 	}
 
-	http.Error(w, "Not Found", http.StatusNotFound)
+	if r.monitoringConfig.LogErrors {
+		// Capture request body for logging (detects streaming requests)
+		reqBody, isStreaming, err := captureRequestBody(req)
+		if err != nil {
+			r.proxy.ProxyRequest(w, req)
+			return
+		}
+
+		// Create response capture wrapper
+		rc := newResponseCapture(w)
+
+		// Proxy the request through captured response
+		r.proxy.ProxyRequest(rc, req)
+
+		// Log error responses if enabled and status is error (4xx or 5xx).
+		// Skip logging for streaming requests to avoid memory overhead with large responses.
+		if r.monitoringConfig.ErrorsLogPath != "" && isErrorStatus(rc.statusCode) && !isStreaming {
+			_ = logErrorResponse(r.monitoringConfig.ErrorsLogPath, req, rc, reqBody)
+			// Log error internally but don't fail the response
+			// (error logging shouldn't break the API response)
+		}
+	} else {
+		r.proxy.ProxyRequest(w, req)
+	}
 }
 
 func (r *Router) handleHealth(w http.ResponseWriter, req *http.Request) {

@@ -275,31 +275,6 @@ func TestServeHTTP_V1Models_NilManager(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w.Code)
 }
 
-func TestServeHTTP_V1Models_PostMethod(t *testing.T) {
-	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		assert.Equal(t, "POST", r.Method)
-		w.WriteHeader(http.StatusOK)
-	}))
-	defer mockServer.Close()
-
-	prx := createProxyWithMockServer(mockServer.URL)
-	modelManager := createEnabledTestModelManager()
-	router := New(prx, modelManager, createTestMonitoringConfig("/health", false, ""), testhelpers.NewTestLogger())
-
-	// POST /v1/models should be proxied even if model manager is enabled
-	// Include a model field in the body as required by proxy
-	body := []byte(`{"model": "test-model"}`)
-	req := httptest.NewRequest("POST", "/v1/models", strings.NewReader(string(body)))
-	req.Header.Set("Authorization", "Bearer test-key")
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-
-	router.ServeHTTP(w, req)
-
-	// Should proxy POST requests even if model manager is enabled
-	assert.Equal(t, http.StatusOK, w.Code)
-}
-
 func TestServeHTTP_ProxyRequest(t *testing.T) {
 	mockServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
