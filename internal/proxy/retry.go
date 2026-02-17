@@ -210,7 +210,7 @@ func (p *Proxy) TryFallbackProxy(
 	}
 
 	if proxyResp.IsStreaming {
-		totalTokens, err := p.writeProxyStreamingResponseWithTokens(w, proxyResp, fallbackCred.Name)
+		totalTokens, err := p.writeProxyStreamingResponseWithTokens(w, proxyResp, r, fallbackCred.Name)
 		if err != nil {
 			p.logger.Error("Failed to write fallback streaming proxy response",
 				"fallback_credential", fallbackCred.Name,
@@ -230,7 +230,7 @@ func (p *Proxy) TryFallbackProxy(
 			)
 		}
 	} else {
-		p.writeProxyResponse(w, proxyResp)
+		p.writeProxyResponse(w, proxyResp, r)
 		tokens := extractTokensFromResponse(string(proxyResp.Body), config.ProviderTypeOpenAI)
 		if tokens > 0 {
 			p.rateLimiter.ConsumeTokens(fallbackCred.Name, tokens)

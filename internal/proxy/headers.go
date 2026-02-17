@@ -77,17 +77,21 @@ func copyHeadersSkipAuth(dst *http.Request, src *http.Request) {
 }
 
 // copyResponseHeaders copies response headers to the response writer,
-// skipping hop-by-hop headers and optionally transformation-related headers
+// skipping hop-by-hop headers and transformation-related headers.
+// Note: Content-Encoding is always skipped because Go's http.Client automatically
+// decompresses gzip/deflate responses, so the body is already decompressed.
+// The caller should compress the body if needed and set Content-Encoding appropriately.
 func copyResponseHeaders(w http.ResponseWriter, src http.Header, credType config.ProviderType) {
 	for key, values := range src {
 		if isHopByHopHeader(key) {
 			continue
 		}
-		// Skip Content-Length and Content-Encoding as we may have transformed the response
-		if credType == config.ProviderTypeVertexAI || credType == config.ProviderTypeAnthropic {
-			if key == "Content-Length" || key == "Content-Encoding" {
-				continue
-			}
+		// Skip Content-Length and Content-Encoding for all response types
+		// - Content-Length will be set based on actual body size
+		// - Content-Encoding: Go's http.Client already decompressed the body,
+		//   so we skip upstream's Content-Encoding header and let caller set it if recompressing
+		if key == "Content-Length" || key == "Content-Encoding" {
+			continue
 		}
 		for _, value := range values {
 			w.Header().Add(key, value)
