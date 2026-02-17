@@ -140,7 +140,8 @@ func convertGoogleSearchRetrieval(toolMap map[string]interface{}) *genai.GoogleS
 	return retrieval
 }
 
-// convertToolCallsToGenaiParts converts OpenAI tool_calls to genai.Part with FunctionCall
+// convertToolCallsToGenaiParts converts OpenAI tool_calls to genai.Part with FunctionCall.
+// Restores thoughtSignature from provider_specific_fields for Gemini 3 multi-turn conversations.
 func convertToolCallsToGenaiParts(toolCalls []interface{}) []*genai.Part {
 	if len(toolCalls) == 0 {
 		return nil
@@ -169,12 +170,34 @@ func convertToolCallsToGenaiParts(toolCalls []interface{}) []*genai.Part {
 						}
 					}
 
-					parts = append(parts, &genai.Part{
+					part := &genai.Part{
 						FunctionCall: &genai.FunctionCall{
 							Name: funcName,
 							Args: args,
 						},
-					})
+					}
+
+					// Restore thoughtSignature from provider_specific_fields if present.
+					// Required for Gemini 3 models to maintain context across multi-turn conversations.
+					foundThoughtSignature := false
+					if providerFields, ok := toolCallMap["provider_specific_fields"].(map[string]interface{}); ok {
+						if thoughtSigStr, ok := providerFields["thought_signature"].(string); ok && thoughtSigStr != "" {
+							// Decode from base64 back to binary
+							if decoded := converterutil.DecodeBase64(thoughtSigStr); decoded != nil {
+								part.ThoughtSignature = decoded
+								foundThoughtSignature = true
+							}
+						}
+					}
+
+					// Fallback: If no thoughtSignature provided, add dummy value.
+					// Per litellm and Google docs, clients (like LangChain) may not preserve provider_specific_fields.
+					// The dummy validator allows Gemini 3 to accept the request without validation errors.
+					if !foundThoughtSignature {
+						part.ThoughtSignature = []byte("skip_thought_signature_validator")
+					}
+
+					parts = append(parts, part)
 				}
 			}
 		}

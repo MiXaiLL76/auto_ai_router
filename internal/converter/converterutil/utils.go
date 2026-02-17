@@ -2,6 +2,7 @@ package converterutil
 
 import (
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 
 	"github.com/mixaill76/auto_ai_router/internal/utils"
@@ -57,4 +58,27 @@ func ExtractTextBlocks(content interface{}) []string {
 	default:
 		return nil
 	}
+}
+
+// EncodeBase64 encodes a byte slice to base64 string.
+// Used for preserving binary data like Gemini 3 thoughtSignature in JSON responses.
+func EncodeBase64(data []byte) string {
+	if len(data) == 0 {
+		return ""
+	}
+	return base64.StdEncoding.EncodeToString(data)
+}
+
+// DecodeBase64 decodes a base64 string to byte slice.
+// Used for restoring binary data like Gemini 3 thoughtSignature from JSON requests.
+// Returns nil if input is empty or invalid base64.
+func DecodeBase64(encoded string) []byte {
+	if encoded == "" {
+		return nil
+	}
+	decoded, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		return nil
+	}
+	return decoded
 }

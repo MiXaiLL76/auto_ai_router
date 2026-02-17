@@ -85,7 +85,7 @@ func TransformVertexStreamToOpenAI(vertexStream io.Reader, model string, output 
 					}
 					// Handle function calls
 					if part.FunctionCall != nil {
-						toolCall := convertVertexFunctionCallToStreamingOpenAI(part.FunctionCall, toolCallIdx)
+						toolCall := convertVertexFunctionCallToStreamingOpenAI(part.FunctionCall, part.ThoughtSignature, toolCallIdx)
 						toolCalls = append(toolCalls, toolCall)
 						toolCallIdx++
 					}
@@ -134,8 +134,9 @@ func TransformVertexStreamToOpenAI(vertexStream io.Reader, model string, output 
 	return scanner.Err()
 }
 
-// convertVertexFunctionCallToStreamingOpenAI converts Vertex function call to OpenAI streaming tool call format
-func convertVertexFunctionCallToStreamingOpenAI(genaiCall *genai.FunctionCall, index int) openai.OpenAIStreamingToolCall {
+// convertVertexFunctionCallToStreamingOpenAI converts Vertex function call to OpenAI streaming tool call format.
+// Preserves thoughtSignature in provider_specific_fields for Gemini 3.x multi-turn streaming.
+func convertVertexFunctionCallToStreamingOpenAI(genaiCall *genai.FunctionCall, thoughtSignature []byte, index int) openai.OpenAIStreamingToolCall {
 	// Convert args to JSON string
 	argsJSON := "{}"
 	if genaiCall.Args != nil {
@@ -144,7 +145,7 @@ func convertVertexFunctionCallToStreamingOpenAI(genaiCall *genai.FunctionCall, i
 		}
 	}
 
-	return openai.OpenAIStreamingToolCall{
+	toolCall := openai.OpenAIStreamingToolCall{
 		Index: index,
 		ID:    converterutil.GenerateID(),
 		Type:  "function",
@@ -153,4 +154,15 @@ func convertVertexFunctionCallToStreamingOpenAI(genaiCall *genai.FunctionCall, i
 			Arguments: argsJSON,
 		},
 	}
+
+	// Preserve thoughtSignature for streaming mode
+	providerFields := make(map[string]interface{})
+	if len(thoughtSignature) > 0 {
+		providerFields["thought_signature"] = converterutil.EncodeBase64(thoughtSignature)
+	} else {
+		providerFields["skip_thought_signature_validator"] = true
+	}
+	toolCall.ProviderSpecificFields = providerFields
+
+	return toolCall
 }

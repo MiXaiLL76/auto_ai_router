@@ -99,9 +99,10 @@ type OpenAIResponseMessage struct {
 }
 
 type OpenAIToolCall struct {
-	ID       string             `json:"id"`
-	Type     string             `json:"type"`
-	Function OpenAIToolFunction `json:"function"`
+	ID                     string                 `json:"id"`
+	Type                   string                 `json:"type"`
+	Function               OpenAIToolFunction     `json:"function"`
+	ProviderSpecificFields map[string]interface{} `json:"provider_specific_fields,omitempty"`
 }
 
 type OpenAIToolFunction struct {
@@ -161,10 +162,11 @@ type OpenAIStreamingDelta struct {
 }
 
 type OpenAIStreamingToolCall struct {
-	Index    int                          `json:"index"`
-	ID       string                       `json:"id,omitempty"`
-	Type     string                       `json:"type,omitempty"`
-	Function *OpenAIStreamingToolFunction `json:"function,omitempty"`
+	Index                  int                          `json:"index"`
+	ID                     string                       `json:"id,omitempty"`
+	Type                   string                       `json:"type,omitempty"`
+	Function               *OpenAIStreamingToolFunction `json:"function,omitempty"`
+	ProviderSpecificFields map[string]interface{}       `json:"provider_specific_fields,omitempty"`
 }
 
 type OpenAIStreamingToolFunction struct {

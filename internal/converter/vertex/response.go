@@ -52,7 +52,7 @@ func VertexToOpenAI(vertexBody []byte, model string) ([]byte, error) {
 				}
 				// Handle function calls from Vertex response
 				if part.FunctionCall != nil {
-					toolCall := convertGenaiToOpenAIFunctionCall(part.FunctionCall)
+					toolCall := convertGenaiToOpenAIFunctionCall(part.FunctionCall, part.ThoughtSignature)
 					toolCalls = append(toolCalls, toolCall)
 				}
 				// Handle code execution results (model executed code and returned output)
@@ -236,8 +236,11 @@ func mapFinishReason(vertexReason string) string {
 	}
 }
 
-// convertGenaiToOpenAIFunctionCall converts genai.FunctionCall to OpenAI tool call format
-func convertGenaiToOpenAIFunctionCall(genaiCall *genai.FunctionCall) openai.OpenAIToolCall {
+// convertGenaiToOpenAIFunctionCall converts genai.FunctionCall to OpenAI tool call format.
+// Preserves thoughtSignature in provider_specific_fields for Gemini 3.x multi-turn conversations.
+// Per litellm >= 1.80.5 and Google Gemini 3 requirements, thoughtSignature must be preserved
+// when sending tool results back to maintain context and avoid 400 errors.
+func convertGenaiToOpenAIFunctionCall(genaiCall *genai.FunctionCall, thoughtSignature []byte) openai.OpenAIToolCall {
 	// Convert args to JSON string
 	argsJSON := "{}"
 	if genaiCall.Args != nil {
@@ -246,7 +249,7 @@ func convertGenaiToOpenAIFunctionCall(genaiCall *genai.FunctionCall) openai.Open
 		}
 	}
 
-	return openai.OpenAIToolCall{
+	toolCall := openai.OpenAIToolCall{
 		ID:   converterutil.GenerateID(),
 		Type: "function",
 		Function: openai.OpenAIToolFunction{
@@ -254,4 +257,20 @@ func convertGenaiToOpenAIFunctionCall(genaiCall *genai.FunctionCall) openai.Open
 			Arguments: argsJSON,
 		},
 	}
+
+	// Preserve thoughtSignature in provider_specific_fields for Gemini 3 function calling.
+	// This is required by Gemini API when sending tool results in subsequent requests.
+	providerFields := make(map[string]interface{})
+
+	if len(thoughtSignature) > 0 {
+		// Store thoughtSignature as base64 string for JSON compatibility
+		providerFields["thought_signature"] = converterutil.EncodeBase64(thoughtSignature)
+	} else {
+		// Per litellm and Google docs: use dummy validator when thought_signature is missing.
+		// This allows seamless model switching (e.g., from gemini-2.5-flash to gemini-3-pro).
+		providerFields["skip_thought_signature_validator"] = true
+	}
+
+	toolCall.ProviderSpecificFields = providerFields
+	return toolCall
 }
