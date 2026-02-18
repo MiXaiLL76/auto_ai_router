@@ -13,3 +13,8 @@ formal-folder-482319-k9-c09bc20da8ba.json
 logs.jsonl
 vertex-api-keys
 examples/output/*
+*_costs.json
+fix_prices_*
+.claude/*
+price.json
+bad_server.yaml
