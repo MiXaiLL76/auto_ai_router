@@ -36,10 +36,17 @@ type RoundRobin struct {
 }
 
 func New(credentials []config.CredentialConfig, f2b *fail2ban.Fail2Ban, rl *ratelimit.RPMLimiter) *RoundRobin {
+	if f2b == nil {
+		panic("balancer.New: fail2ban must not be nil")
+	}
+	if rl == nil {
+		panic("balancer.New: rateLimiter must not be nil")
+	}
+
 	credentialIndex := make(map[string]int, len(credentials))
 	for i, c := range credentials {
-		// Normalize TPM: treat 0 as unlimited (-1) for consistency
-		// Convention: -1 = unlimited, 0 = invalid, positive = limit
+		// Normalize TPM: 0 means "not configured" → treat as unlimited (-1).
+		// Convention: -1 = unlimited, positive = limit.
 		tpm := c.TPM
 		if tpm == 0 {
 			tpm = -1
@@ -89,8 +96,8 @@ func (r *RoundRobin) getCredentialByName(name string) *config.CredentialConfig {
 
 // IsProxyCredential checks if a credential is a proxy type
 func (r *RoundRobin) IsProxyCredential(credentialName string) bool {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 
 	cred := r.getCredentialByName(credentialName)
 	return cred != nil && cred.Type == config.ProviderTypeProxy
@@ -108,8 +115,8 @@ func (r *RoundRobin) HasAnyBan(credentialName string) bool {
 
 // GetProxyCredentials returns all proxy type credentials
 func (r *RoundRobin) GetProxyCredentials() []config.CredentialConfig {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 
 	var proxies []config.CredentialConfig
 	for _, cred := range r.credentials {
@@ -139,28 +146,15 @@ func (r *RoundRobin) next(modelID string, allowOnlyFallback, allowOnlyProxy bool
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	attempts := 0
+	// Start from current position and try each credential in rotation
+	startIndex := r.current
 	candidateCount := 0 // credentials that actually support this model
 	rateLimitHit := false
-	bannedHit := false
 
-	for {
-		if attempts >= len(r.credentials) {
-			// If no credentials support this model at all, return generic error
-			if candidateCount == 0 {
-				return nil, ErrNoCredentialsAvailable
-			}
-			// If all candidates were rate limited (and none banned), return specific rate limit error
-			if rateLimitHit && !bannedHit {
-				return nil, ErrRateLimitExceeded
-			}
-			// Candidates exist but all are banned or mix of banned + rate limited
-			return nil, ErrNoCredentialsAvailable
-		}
-
-		cred := &r.credentials[r.current]
-		r.current = (r.current + 1) % len(r.credentials)
-		attempts++
+	for i := 0; i < len(r.credentials); i++ {
+		// Calculate current index in rotation
+		idx := (startIndex + i) % len(r.credentials)
+		cred := &r.credentials[idx]
 
 		// Filter by credential type
 		// These are structural filters, not availability issues
@@ -196,7 +190,6 @@ func (r *RoundRobin) next(modelID string, allowOnlyFallback, allowOnlyProxy bool
 		// Check if credential+model pair is banned
 		if r.fail2ban.IsBanned(cred.Name, modelID) {
 			monitoring.CredentialSelectionRejected.WithLabelValues("banned").Inc()
-			bannedHit = true
 			continue
 		}
 
@@ -232,28 +225,36 @@ func (r *RoundRobin) next(modelID string, allowOnlyFallback, allowOnlyProxy bool
 			}
 		}
 
-		// All checks passed - now record the requests
+		// All checks passed - record the requests and advance for next call
 		r.rateLimiter.Allow(cred.Name) // Record credential RPM
 		if modelID != "" {
 			r.rateLimiter.AllowModel(cred.Name, modelID) // Record model RPM
 		}
 
+		// Advance r.current to next position for the next call
+		// Move to the position right after this selected credential
+		r.current = (idx + 1) % len(r.credentials)
+
 		return cred, nil
 	}
+
+	// If no credentials support this model at all, return generic error
+	if candidateCount == 0 {
+		return nil, ErrNoCredentialsAvailable
+	}
+	// Prioritize rate limit error: if any candidate hit rate limit, surface it even if
+	// others were banned. This gives callers accurate signal for backoff/retry logic.
+	if rateLimitHit {
+		return nil, ErrRateLimitExceeded
+	}
+	// All candidates are banned
+	return nil, ErrNoCredentialsAvailable
 }
 
 func (r *RoundRobin) RecordResponse(credentialName, modelID string, statusCode int) {
 	r.fail2ban.RecordResponse(credentialName, modelID, statusCode)
 }
 
-func (r *RoundRobin) GetCredentials() []config.CredentialConfig {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.credentials
-}
-
-// GetCredentialsSnapshot returns a copy of the credentials slice to avoid data races
-// when the credentials list is being read from multiple goroutines
 func (r *RoundRobin) GetCredentialsSnapshot() []config.CredentialConfig {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -263,8 +264,8 @@ func (r *RoundRobin) GetCredentialsSnapshot() []config.CredentialConfig {
 }
 
 func (r *RoundRobin) GetAvailableCount() int {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 
 	count := 0
 	for _, cred := range r.credentials {

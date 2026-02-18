@@ -31,7 +31,9 @@ func (m *MockModelChecker) HasModel(credentialName, modelID string) bool {
 	}
 	models, ok := m.credentialModels[credentialName]
 	if !ok {
-		return true
+		// If credentialModels are configured, unknown credentials don't have models
+		// If credentialModels are empty, allow all (backward compatibility)
+		return len(m.credentialModels) == 0
 	}
 	for _, model := range models {
 		if model == modelID {
@@ -204,7 +206,7 @@ func TestRecordResponse(t *testing.T) {
 	assert.True(t, f2b.IsBanned("cred1", "gpt-4"))
 }
 
-func TestGetCredentials(t *testing.T) {
+func TestGetCredentialsSnapshot(t *testing.T) {
 	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
 	rl := ratelimit.New()
 
@@ -215,7 +217,7 @@ func TestGetCredentials(t *testing.T) {
 
 	bal := New(credentials, f2b, rl)
 
-	creds := bal.GetCredentials()
+	creds := bal.GetCredentialsSnapshot()
 	assert.Len(t, creds, 2)
 	assert.Equal(t, "cred1", creds[0].Name)
 	assert.Equal(t, "cred2", creds[1].Name)
@@ -849,5 +851,68 @@ func TestValidateFallbackConfiguration_NoFallbacks(t *testing.T) {
 	// No credentials should have IsFallback set
 	for _, cred := range bal.credentials {
 		assert.False(t, cred.IsFallback, "No credentials should be marked as fallback")
+	}
+}
+
+func TestRoundRobin_MultipleCredentialsSameModel(t *testing.T) {
+	// Test case: 4 credentials with same model should be cycled properly
+	// This reproduces the issue where storied-port-482316-u0 was being used 90% of the time
+	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
+	rl := ratelimit.New()
+
+	credentials := []config.CredentialConfig{
+		{Name: "matvey-01", Type: config.ProviderTypeOpenAI, APIKey: "key1", BaseURL: "http://test1.com", RPM: -1},
+		{Name: "matvey-02", Type: config.ProviderTypeOpenAI, APIKey: "key2", BaseURL: "http://test2.com", RPM: -1},
+		{Name: "matvey-03", Type: config.ProviderTypeOpenAI, APIKey: "key3", BaseURL: "http://test3.com", RPM: -1},
+		{Name: "storied-port-482316-u0", Type: config.ProviderTypeVertexAI, APIKey: "key4", BaseURL: "http://vertex1.com", RPM: -1},
+		{Name: "sunlit-flag-482317-i9", Type: config.ProviderTypeVertexAI, APIKey: "key5", BaseURL: "http://vertex2.com", RPM: -1},
+		{Name: "aqueous-heading-482215-q8", Type: config.ProviderTypeVertexAI, APIKey: "key6", BaseURL: "http://vertex3.com", RPM: -1},
+		{Name: "spatial-shore-482315-p6", Type: config.ProviderTypeVertexAI, APIKey: "key7", BaseURL: "http://vertex4.com", RPM: -1},
+	}
+
+	bal := New(credentials, f2b, rl)
+
+	// Setup model checker: only the 4 vertex credentials support gemini-2.5-flash
+	mc := NewMockModelChecker(true)
+	mc.AddModel("storied-port-482316-u0", "gemini-2.5-flash")
+	mc.AddModel("sunlit-flag-482317-i9", "gemini-2.5-flash")
+	mc.AddModel("aqueous-heading-482215-q8", "gemini-2.5-flash")
+	mc.AddModel("spatial-shore-482315-p6", "gemini-2.5-flash")
+
+	bal.SetModelChecker(mc)
+
+	// Request for gemini-2.5-flash multiple times
+	// Should cycle through all 4 vertex credentials
+	requests := make([]string, 8)
+	expectedCycle := []string{
+		"storied-port-482316-u0",
+		"sunlit-flag-482317-i9",
+		"aqueous-heading-482215-q8",
+		"spatial-shore-482315-p6",
+		"storied-port-482316-u0", // cycle repeats
+		"sunlit-flag-482317-i9",
+		"aqueous-heading-482215-q8",
+		"spatial-shore-482315-p6",
+	}
+
+	for i := 0; i < 8; i++ {
+		cred, err := bal.NextForModel("gemini-2.5-flash")
+		require.NoError(t, err)
+		requests[i] = cred.Name
+	}
+
+	// Verify the cycle
+	for i, expected := range expectedCycle {
+		assert.Equal(t, expected, requests[i], "Request %d should get %s, got %s", i+1, expected, requests[i])
+	}
+
+	// Verify distribution: each vertex credential should appear at least once in first 4 requests
+	firstFourCreds := make(map[string]int)
+	for i := 0; i < 4; i++ {
+		firstFourCreds[requests[i]]++
+	}
+	assert.Equal(t, 4, len(firstFourCreds), "First 4 requests should use 4 different credentials")
+	for cred, count := range firstFourCreds {
+		assert.Equal(t, 1, count, "Each credential in first 4 requests should appear exactly once, %s appeared %d times", cred, count)
 	}
 }

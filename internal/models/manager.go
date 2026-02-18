@@ -291,14 +291,15 @@ func (m *Manager) GetAllModels() ModelsResponse {
 	// Check cache first (fast path without holding full lock)
 	m.mu.RLock()
 	if !m.allModelsCache.expiresAt.IsZero() && utils.NowUTC().Before(m.allModelsCache.expiresAt) {
-		// Copy response while holding lock to prevent TOCTOU
-		cachedResponse := m.allModelsCache.response
-		cachedCount := len(cachedResponse.Data)
+		// Copy response and its Data slice while holding lock to prevent TOCTOU
+		// and to avoid sharing the backing array with callers.
+		cachedData := append([]Model(nil), m.allModelsCache.response.Data...)
+		cachedObject := m.allModelsCache.response.Object
 		m.mu.RUnlock()
 		m.logger.Debug("Returning cached all models",
-			"models_count", cachedCount,
+			"models_count", len(cachedData),
 		)
-		return cachedResponse
+		return ModelsResponse{Object: cachedObject, Data: cachedData}
 	}
 
 	var models []Model
@@ -337,6 +338,7 @@ func (m *Manager) GetAllModels() ModelsResponse {
 
 	// Add models from proxy credentials only (not from other provider types)
 	modelUpdates := make(map[string][]string) // model -> credentials to add
+	successfullyFetched := make(map[string]bool)
 	for _, cred := range credentials {
 		// Skip non-proxy credentials - we only fetch models from proxy credentials
 		if cred.Type != config.ProviderTypeProxy {
@@ -358,6 +360,7 @@ func (m *Manager) GetAllModels() ModelsResponse {
 			)
 			continue
 		}
+		successfullyFetched[cred.Name] = true
 		m.logger.Debug("Got models from proxy",
 			"credential", cred.Name,
 			"remote_models_count", len(remoteModels),
@@ -391,29 +394,36 @@ func (m *Manager) GetAllModels() ModelsResponse {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// Update modelToCredentials with new models
-	for modelID, creds := range modelUpdates {
-		if m.modelToCredentials[modelID] == nil {
-			m.modelToCredentials[modelID] = []string{}
-		}
-		// Add credentials that aren't already in the list
-		for _, cred := range creds {
-			found := false
-			for _, existing := range m.modelToCredentials[modelID] {
-				if existing == cred {
-					found = true
-					break
+	// Remove stale mappings for successfully-fetched proxy credentials before adding fresh ones.
+	// Only touch credentials we actually got a response from — failed fetches are left
+	// unchanged to avoid false negatives on transient errors.
+	if len(successfullyFetched) > 0 {
+		for modelID, creds := range m.modelToCredentials {
+			var kept []string
+			for _, c := range creds {
+				if !successfullyFetched[c] {
+					kept = append(kept, c)
 				}
 			}
-			if !found {
-				m.modelToCredentials[modelID] = append(m.modelToCredentials[modelID], cred)
+			if len(kept) == 0 {
+				delete(m.modelToCredentials, modelID)
+			} else {
+				m.modelToCredentials[modelID] = kept
 			}
 		}
 	}
 
-	// Cache the result for 3 seconds
+	// Add fresh mappings from this refresh cycle.
+	for modelID, creds := range modelUpdates {
+		m.modelToCredentials[modelID] = append(m.modelToCredentials[modelID], creds...)
+	}
+
+	// Cache a copy so the cached backing array is independent from the returned response.
 	m.allModelsCache = allModelsCache{
-		response:  response,
+		response: ModelsResponse{
+			Object: response.Object,
+			Data:   append([]Model(nil), models...),
+		},
 		expiresAt: utils.NowUTC().Add(3 * time.Second),
 	}
 	m.allModels = append([]Model(nil), models...)

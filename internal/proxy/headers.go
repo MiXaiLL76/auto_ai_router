@@ -39,10 +39,15 @@ func GetHopByHopHeaders() map[string]bool {
 }
 
 // copyRequestHeaders copies headers from source request to destination request,
-// skipping hop-by-hop headers and optionally handling the Authorization header
+// skipping hop-by-hop headers and optionally handling the Authorization header.
+// Accept-Encoding is also skipped (see copyHeadersSkipAuth for rationale).
 func copyRequestHeaders(dst *http.Request, src *http.Request, apiKey string) {
 	for key, values := range src.Header {
 		if isHopByHopHeader(key) {
+			continue
+		}
+		// Don't forward Accept-Encoding to upstream (proxy handles per-segment).
+		if key == "Accept-Encoding" {
 			continue
 		}
 		if key == "Authorization" {
@@ -64,10 +69,20 @@ func copyRequestHeaders(dst *http.Request, src *http.Request, apiKey string) {
 }
 
 // copyHeadersSkipAuth copies headers from source request to destination request,
-// skipping hop-by-hop headers and Authorization header (Authorization will be set separately)
+// skipping hop-by-hop headers and Authorization header (Authorization will be set separately).
+// Accept-Encoding is also skipped: the proxy handles encoding negotiation independently
+// for each connection segment (client↔proxy and proxy↔upstream). Forwarding Accept-Encoding
+// to upstream prevents Go's Transport from auto-decompressing responses, causing raw gzip
+// bytes to flow through instead of decoded content.
 func copyHeadersSkipAuth(dst *http.Request, src *http.Request) {
 	for key, values := range src.Header {
 		if isHopByHopHeader(key) || key == "Authorization" {
+			continue
+		}
+		// Don't forward Accept-Encoding: proxy manages compression per connection segment.
+		// If forwarded, Go's Transport won't auto-decompress upstream gzip responses,
+		// leading to raw gzip bytes being passed to converters (gzip parse errors).
+		if key == "Accept-Encoding" {
 			continue
 		}
 		for _, value := range values {

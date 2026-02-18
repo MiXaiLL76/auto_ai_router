@@ -804,37 +804,6 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 	// Copy response headers (skip hop-by-hop headers and transformation-related headers)
 	copyResponseHeaders(w, resp.Header, cred.Type)
 
-	// Determine response encoding based on client's Accept-Encoding header
-	// Go's http.Client automatically decompresses gzip responses, so we may need to recompress
-	acceptEncoding := r.Header.Get("Accept-Encoding")
-	acceptedEncodings := ParseAcceptEncoding(acceptEncoding)
-	targetEncoding := SelectBestEncoding(acceptedEncodings)
-
-	// For non-streaming responses: recompress if client prefers compressed format
-	responseBody = finalResponseBody
-	if targetEncoding != "identity" && len(finalResponseBody) > 0 {
-		compressedBody, usedEncoding, err := CompressBody(finalResponseBody, targetEncoding)
-		if err != nil {
-			p.logger.Warn("Failed to compress response body",
-				"credential", cred.Name,
-				"encoding", targetEncoding,
-				"error", err,
-			)
-		} else {
-			p.logger.Debug("Response body compressed for client",
-				"credential", cred.Name,
-				"encoding", usedEncoding,
-				"original_size", len(finalResponseBody),
-				"compressed_size", len(compressedBody),
-			)
-			responseBody = compressedBody
-			w.Header().Set("Content-Encoding", usedEncoding)
-		}
-	}
-
-	// Set correct Content-Length for actual response body being sent
-	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(responseBody)))
-
 	rc := http.NewResponseController(w)
 
 	if isStreamingResp {
@@ -884,7 +853,36 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		}
 
 	} else {
-		// For non-streaming: set write deadline before header + body writes
+		// For non-streaming: determine response encoding and set Content-Length.
+		// Streaming responses use chunked transfer encoding — no Content-Length needed.
+		acceptEncoding := r.Header.Get("Accept-Encoding")
+		acceptedEncodings := ParseAcceptEncoding(acceptEncoding)
+		targetEncoding := SelectBestEncoding(acceptedEncodings)
+
+		responseBody = finalResponseBody
+		if targetEncoding != "identity" && len(finalResponseBody) > 0 {
+			compressedBody, usedEncoding, err := CompressBody(finalResponseBody, targetEncoding)
+			if err != nil {
+				p.logger.Warn("Failed to compress response body",
+					"credential", cred.Name,
+					"encoding", targetEncoding,
+					"error", err,
+				)
+			} else {
+				p.logger.Debug("Response body compressed for client",
+					"credential", cred.Name,
+					"encoding", usedEncoding,
+					"original_size", len(finalResponseBody),
+					"compressed_size", len(compressedBody),
+				)
+				responseBody = compressedBody
+				w.Header().Set("Content-Encoding", usedEncoding)
+			}
+		}
+
+		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(responseBody)))
+
+		// Set write deadline before header + body writes
 		_ = rc.SetWriteDeadline(time.Now().Add(30 * time.Second))
 		w.WriteHeader(resp.StatusCode)
 
