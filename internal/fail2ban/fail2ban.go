@@ -191,6 +191,7 @@ func (f *Fail2Ban) IsBanned(credentialName, modelID string) bool {
 			if time.Since(ban.banTime) > ban.banDuration {
 				delete(f.banned, key)
 				delete(f.failures, key)
+				monitoring.CredentialUnbanEvents.WithLabelValues(credentialName, modelID).Inc()
 				return false
 			}
 		}

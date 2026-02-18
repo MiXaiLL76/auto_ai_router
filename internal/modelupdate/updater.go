@@ -94,7 +94,7 @@ func UpdateAllProxyCredentials(
 			continue
 		}
 
-		// Update rate limiter with fetched models
+		// Update rate limiter and model manager with fetched models
 		addedCount := 0
 		for _, model := range result.models {
 			// Get default RPM/TPM from model manager
@@ -103,6 +103,11 @@ func UpdateAllProxyCredentials(
 
 			// AddModelWithTPM handles duplicates internally (overwrites existing)
 			rateLimiter.AddModelWithTPM(result.credential.Name, model.ID, modelRPM, modelTPM)
+
+			// Register model in manager so HasModel() returns true for this credential.
+			// Without this the balancer's model checker always rejects proxy credentials
+			// because modelToCredentials is only populated at startup via GetAllModels().
+			modelManager.AddModel(result.credential.Name, model.ID)
 			addedCount++
 		}
 

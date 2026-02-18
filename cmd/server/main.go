@@ -244,7 +244,9 @@ func convertFailBanRules(
 	converted := make([]fail2ban.ErrorCodeRule, 0, len(rules))
 	for _, rule := range rules {
 		banDuration := defaultBanDuration
-		if rule.BanDuration != "" && rule.BanDuration != "permanent" {
+		if rule.BanDuration == "permanent" {
+			banDuration = 0 // 0 = permanent ban in fail2ban
+		} else if rule.BanDuration != "" {
 			if dur, err := time.ParseDuration(rule.BanDuration); err == nil {
 				banDuration = dur
 			} else {
