@@ -104,11 +104,14 @@ func MaskSensitiveHeaders(headers http.Header) http.Header {
 
 	// List of sensitive headers to mask
 	sensitiveHeaders := map[string]bool{
-		"Authorization":       true,
-		"X-API-Key":           true,
-		"X-Auth-Token":        true,
-		"Proxy-Authorization": true,
-		"Cookie":              true,
+		"Authorization":        true,
+		"X-API-Key":            true,
+		"X-Auth-Token":         true,
+		"Proxy-Authorization":  true,
+		"Cookie":               true,
+		"X-Goog-Api-Key":       true,
+		"Api-Key":              true,
+		"Anthropic-Auth-Token": true,
 	}
 
 	for key, values := range headers {

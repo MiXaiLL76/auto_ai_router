@@ -253,7 +253,7 @@ type LiteLLMDBConfig struct {
 	ConnectTimeout      time.Duration `yaml:"connect_timeout"`       // default: 5s
 
 	// Auth cache
-	AuthCacheTTL  time.Duration `yaml:"auth_cache_ttl"`  // default: 20s
+	AuthCacheTTL  time.Duration `yaml:"auth_cache_ttl"`  // default: 5s
 	AuthCacheSize int           `yaml:"auth_cache_size"` // default: 10000
 
 	// Spend logging
@@ -357,7 +357,7 @@ func (l *LiteLLMDBConfig) UnmarshalYAML(value *yaml.Node) error {
 	if l.ConnectTimeout, err = parseField(temp.ConnectTimeout, 5*time.Second, time.ParseDuration, "litellm_db.connect_timeout"); err != nil {
 		return err
 	}
-	if l.AuthCacheTTL, err = parseField(temp.AuthCacheTTL, 20*time.Second, time.ParseDuration, "litellm_db.auth_cache_ttl"); err != nil {
+	if l.AuthCacheTTL, err = parseField(temp.AuthCacheTTL, 5*time.Second, time.ParseDuration, "litellm_db.auth_cache_ttl"); err != nil {
 		return err
 	}
 	if l.LogFlushInterval, err = parseField(temp.LogFlushInterval, 5*time.Second, time.ParseDuration, "litellm_db.log_flush_interval"); err != nil {
@@ -374,9 +374,10 @@ func (l *LiteLLMDBConfig) UnmarshalYAML(value *yaml.Node) error {
 func (f *Fail2BanConfig) UnmarshalYAML(value *yaml.Node) error {
 	// Create a temporary struct with string ban_duration
 	type tempConfig struct {
-		MaxAttempts string `yaml:"max_attempts,omitempty"`
-		BanDuration string `yaml:"ban_duration,omitempty"`
-		ErrorCodes  []int  `yaml:"error_codes,omitempty"`
+		MaxAttempts    string                `yaml:"max_attempts,omitempty"`
+		BanDuration    string                `yaml:"ban_duration,omitempty"`
+		ErrorCodes     []int                 `yaml:"error_codes,omitempty"`
+		ErrorCodeRules []ErrorCodeRuleConfig `yaml:"error_code_rules,omitempty"`
 	}
 	var err error
 	var temp tempConfig
@@ -399,8 +400,9 @@ func (f *Fail2BanConfig) UnmarshalYAML(value *yaml.Node) error {
 		f.ErrorCodes = DefaultErrorCodes
 	} else {
 		f.ErrorCodes = temp.ErrorCodes
-
 	}
+
+	f.ErrorCodeRules = temp.ErrorCodeRules
 
 	return nil
 }
@@ -606,6 +608,9 @@ func (c *Config) Validate() error {
 	if c.LiteLLMDB.Enabled {
 		if c.LiteLLMDB.DatabaseURL == "" {
 			return fmt.Errorf("litellm_db.database_url is required when enabled")
+		}
+		if !strings.HasPrefix(c.LiteLLMDB.DatabaseURL, "postgres://") && !strings.HasPrefix(c.LiteLLMDB.DatabaseURL, "postgresql://") {
+			return fmt.Errorf("litellm_db.database_url must start with postgres:// or postgresql://, got: %s", c.LiteLLMDB.DatabaseURL)
 		}
 	}
 

@@ -827,3 +827,114 @@ monitoring:
 	// Verify that ModelPricesLink was set directly
 	assert.Equal(t, "/path/to/prices.json", cfg.Server.ModelPricesLink)
 }
+
+func TestConfig_Validate_DatabaseURL(t *testing.T) {
+	tests := []struct {
+		name        string
+		databaseURL string
+		wantErr     bool
+		errContains string
+	}{
+		{
+			name:        "postgres:// prefix passes validation",
+			databaseURL: "postgres://user:pass@localhost:5432/litellm",
+			wantErr:     false,
+		},
+		{
+			name:        "postgresql:// prefix passes validation",
+			databaseURL: "postgresql://user:pass@localhost:5432/litellm",
+			wantErr:     false,
+		},
+		{
+			name:        "mysql:// prefix fails validation",
+			databaseURL: "mysql://user:pass@localhost:3306/litellm",
+			wantErr:     true,
+			errContains: "must start with postgres:// or postgresql://",
+		},
+		{
+			name:        "empty string when enabled fails validation",
+			databaseURL: "",
+			wantErr:     true,
+			errContains: "database_url is required when enabled",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &Config{
+				Server: ServerConfig{
+					Port:           8080,
+					MaxBodySizeMB:  10,
+					MasterKey:      "test-key",
+					RequestTimeout: 30 * time.Second,
+				},
+				Credentials: []CredentialConfig{
+					{Name: "test", Type: "openai", APIKey: "key", BaseURL: "http://test.com", RPM: 10},
+				},
+				Fail2Ban: Fail2BanConfig{MaxAttempts: 3},
+				LiteLLMDB: LiteLLMDBConfig{
+					Enabled:     true,
+					DatabaseURL: tt.databaseURL,
+				},
+			}
+			err := cfg.Validate()
+			if tt.wantErr {
+				assert.Error(t, err)
+				assert.Contains(t, err.Error(), tt.errContains)
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestResolveEnvString(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		envKey   string
+		envValue string
+		setEnv   bool
+		expected string
+	}{
+		{
+			name:     "resolves set env var",
+			input:    "os.environ/TEST_RESOLVE_VAR",
+			envKey:   "TEST_RESOLVE_VAR",
+			envValue: "resolved-value",
+			setEnv:   true,
+			expected: "resolved-value",
+		},
+		{
+			name:     "unset env var returns empty string",
+			input:    "os.environ/TEST_RESOLVE_UNSET_VAR",
+			envKey:   "TEST_RESOLVE_UNSET_VAR",
+			envValue: "",
+			setEnv:   false,
+			expected: "",
+		},
+		{
+			name:     "non-env-prefixed value passes through",
+			input:    "plain-string-value",
+			envKey:   "",
+			envValue: "",
+			setEnv:   false,
+			expected: "plain-string-value",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.setEnv {
+				require.NoError(t, os.Setenv(tt.envKey, tt.envValue))
+				defer func() { _ = os.Unsetenv(tt.envKey) }()
+			} else if tt.envKey != "" {
+				// Make sure it is unset
+				_ = os.Unsetenv(tt.envKey)
+			}
+
+			result := resolveEnvString(tt.input)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}

@@ -193,42 +193,13 @@ func (r *RoundRobin) next(modelID string, allowOnlyFallback, allowOnlyProxy bool
 			continue
 		}
 
-		// Check credential RPM limit (without recording)
-		if !r.rateLimiter.CanAllow(cred.Name) {
+		// Atomically check all rate limits (credential RPM/TPM + model RPM/TPM)
+		// and record usage only if all checks pass. This prevents TOCTOU races
+		// where separate check+record calls could allow exceeding limits.
+		if !r.rateLimiter.TryAllowAll(cred.Name, modelID) {
 			monitoring.CredentialSelectionRejected.WithLabelValues("rate_limit").Inc()
 			rateLimitHit = true
 			continue
-		}
-
-		// Check credential TPM limit
-		if !r.rateLimiter.AllowTokens(cred.Name) {
-			monitoring.CredentialSelectionRejected.WithLabelValues("rate_limit").Inc()
-			rateLimitHit = true
-			continue
-		}
-
-		// Check model RPM limit if model is specified (without recording)
-		if modelID != "" {
-			if !r.rateLimiter.CanAllowModel(cred.Name, modelID) {
-				monitoring.CredentialSelectionRejected.WithLabelValues("rate_limit").Inc()
-				rateLimitHit = true
-				continue
-			}
-		}
-
-		// Check model TPM limit if model is specified
-		if modelID != "" {
-			if !r.rateLimiter.AllowModelTokens(cred.Name, modelID) {
-				monitoring.CredentialSelectionRejected.WithLabelValues("rate_limit").Inc()
-				rateLimitHit = true
-				continue
-			}
-		}
-
-		// All checks passed - record the requests and advance for next call
-		r.rateLimiter.Allow(cred.Name) // Record credential RPM
-		if modelID != "" {
-			r.rateLimiter.AllowModel(cred.Name, modelID) // Record model RPM
 		}
 
 		// Advance r.current to next position for the next call

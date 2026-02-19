@@ -25,14 +25,14 @@ func TestNewCache_InvalidSize(t *testing.T) {
 }
 
 func TestNewCache_InvalidTTL(t *testing.T) {
-	// Test with 0 TTL - should default to 60s and not panic
+	// Test with 0 TTL - should default to 5s and not panic
 	cache, err := NewCache(100, 0)
 	require.NoError(t, err)
 	assert.NotNil(t, cache)
-	// TTL defaults to 60s, so tokens should be cached
+	// TTL defaults to 5s, so tokens should be cached
 	assert.Equal(t, 0, cache.Len())
 
-	// Test with negative TTL - should default to 60s and not panic
+	// Test with negative TTL - should default to 5s and not panic
 	cache2, err := NewCache(100, -5*time.Second)
 	require.NoError(t, err)
 	assert.NotNil(t, cache2)
@@ -434,6 +434,54 @@ func TestCache_MixedOperations(t *testing.T) {
 	// 10 hits out of 12 total = 83.33%
 	expectedHitRate := 10.0 / 12.0 * 100
 	assert.InDelta(t, expectedHitRate, stats.HitRate, 0.1)
+}
+
+func TestCache_Get_ExpiredEntry_DoesNotEvictFreshEntry(t *testing.T) {
+	cache, err := NewCache(100, 50*time.Millisecond)
+	require.NoError(t, err)
+
+	hashedToken := HashToken("test-token")
+
+	// Set initial entry
+	staleToken := &models.TokenInfo{KeyName: "stale-key", Token: "test-token"}
+	cache.Set(hashedToken, staleToken)
+
+	// Verify it's cached
+	retrieved, ok := cache.Get(hashedToken)
+	require.True(t, ok)
+	assert.Equal(t, "stale-key", retrieved.KeyName)
+
+	// Wait for TTL to expire
+	time.Sleep(80 * time.Millisecond)
+
+	// Now simulate the race: another goroutine refreshes the entry
+	// right before/during our expired Get.
+	freshToken := &models.TokenInfo{KeyName: "fresh-key", Token: "test-token"}
+
+	var wg sync.WaitGroup
+
+	// Goroutine 1: Set a fresh entry (simulates DB refresh)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		cache.Set(hashedToken, freshToken)
+	}()
+
+	// Goroutine 2: Get the expired entry (should NOT evict the fresh one)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		cache.Get(hashedToken)
+	}()
+
+	wg.Wait()
+
+	// After both goroutines complete, the fresh entry must survive.
+	// The Get() with expired TTL should re-check under write lock
+	// and NOT remove the entry if it was refreshed by Set().
+	retrieved, ok = cache.Get(hashedToken)
+	assert.True(t, ok, "fresh entry should still be in cache")
+	assert.Equal(t, "fresh-key", retrieved.KeyName, "fresh entry should not have been evicted by stale TTL check")
 }
 
 // Compile-time check that HashToken function exists and works

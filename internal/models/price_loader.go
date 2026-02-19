@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
@@ -54,8 +55,17 @@ func LoadModelPrices(link string) (map[string]*ModelPrice, error) {
 
 	// Normalize model names (convert keys to normalized format)
 	normalizedPrices := make(map[string]*ModelPrice)
+	normalizedSources := make(map[string]string) // normalized name -> original full name (for collision detection)
 	for fullName, price := range rawPrices {
 		normalized := NormalizeModelName(fullName)
+		if existingFullName, exists := normalizedSources[normalized]; exists {
+			slog.Warn("normalized model name collision: entry will be overwritten",
+				"normalized_name", normalized,
+				"existing_entry", existingFullName,
+				"new_entry", fullName,
+			)
+		}
+		normalizedSources[normalized] = fullName
 		normalizedPrices[normalized] = price
 	}
 

@@ -44,13 +44,8 @@ func aggregateDailyUserSpendLogs(
 	ctx context.Context,
 	conn *pgxpool.Conn,
 	logger *slog.Logger,
-	requestIDs []string,
+	records []spendLogRecord,
 ) error {
-	records, err := loadUnprocessedSpendLogRecords(ctx, conn, logger, "User", requestIDs)
-	if err != nil {
-		return err
-	}
-
 	// Map to aggregate by unique key (user_id, date, api_key, model, custom_llm_provider, mcp_namespaced_tool_name, endpoint)
 	aggregations := make(map[aggregationKey]*aggregationValue)
 
@@ -121,7 +116,7 @@ func aggregateDailyUserSpendLogs(
 		logger.Debug("[DB] User aggregation: upsert executed",
 			"user_id", key.userID,
 			"date", key.date,
-			"api_key", key.apiKey,
+			"api_key", safeAPIKeyPrefix(key.apiKey),
 			"model", key.model,
 			"api_requests", value.apiRequests,
 			"spend", value.spend,
@@ -136,8 +131,11 @@ func aggregateDailyUserSpendLogs(
 }
 
 func safeAPIKeyPrefix(apiKey string) string {
-	if len(apiKey) <= 8 {
-		return apiKey
+	if apiKey == "" {
+		return "<empty>"
 	}
-	return apiKey[:8]
+	if len(apiKey) <= 8 {
+		return apiKey + "..."
+	}
+	return apiKey[:8] + "..."
 }

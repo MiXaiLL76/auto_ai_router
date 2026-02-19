@@ -1139,3 +1139,171 @@ func TestConcurrentMultipleModels(t *testing.T) {
 		<-done
 	}
 }
+
+func TestTryAllowAll(t *testing.T) {
+	tests := []struct {
+		name           string
+		setup          func() *RPMLimiter
+		credentialName string
+		modelName      string
+		wantAllowed    bool
+		// postCheck runs after TryAllowAll to verify side effects
+		postCheck func(t *testing.T, rl *RPMLimiter)
+	}{
+		{
+			name: "all limits pass — returns true, usage recorded",
+			setup: func() *RPMLimiter {
+				rl := New()
+				rl.AddCredentialWithTPM("cred1", 10, 10000)
+				rl.AddModelWithTPM("cred1", "gpt-4o", 5, 5000)
+				return rl
+			},
+			credentialName: "cred1",
+			modelName:      "gpt-4o",
+			wantAllowed:    true,
+			postCheck: func(t *testing.T, rl *RPMLimiter) {
+				assert.Equal(t, 1, rl.GetCurrentRPM("cred1"), "credential RPM should be recorded")
+				assert.Equal(t, 1, rl.GetCurrentModelRPM("cred1", "gpt-4o"), "model RPM should be recorded")
+			},
+		},
+		{
+			name: "credential RPM exhausted — returns false",
+			setup: func() *RPMLimiter {
+				rl := New()
+				rl.AddCredentialWithTPM("cred1", 2, -1)
+				rl.AddModelWithTPM("cred1", "gpt-4o", 10, -1)
+				// Exhaust credential RPM
+				rl.Allow("cred1")
+				rl.Allow("cred1")
+				return rl
+			},
+			credentialName: "cred1",
+			modelName:      "gpt-4o",
+			wantAllowed:    false,
+			postCheck: func(t *testing.T, rl *RPMLimiter) {
+				assert.Equal(t, 2, rl.GetCurrentRPM("cred1"), "credential RPM should not increase")
+				assert.Equal(t, 0, rl.GetCurrentModelRPM("cred1", "gpt-4o"), "model RPM should not be recorded")
+			},
+		},
+		{
+			name: "credential TPM exhausted — returns false",
+			setup: func() *RPMLimiter {
+				rl := New()
+				rl.AddCredentialWithTPM("cred1", 100, 1000)
+				rl.AddModelWithTPM("cred1", "gpt-4o", 50, 5000)
+				// Exhaust credential TPM
+				rl.ConsumeTokens("cred1", 1000)
+				return rl
+			},
+			credentialName: "cred1",
+			modelName:      "gpt-4o",
+			wantAllowed:    false,
+			postCheck: func(t *testing.T, rl *RPMLimiter) {
+				assert.Equal(t, 0, rl.GetCurrentRPM("cred1"), "credential RPM should not be recorded")
+				assert.Equal(t, 0, rl.GetCurrentModelRPM("cred1", "gpt-4o"), "model RPM should not be recorded")
+			},
+		},
+		{
+			name: "model RPM exhausted — returns false",
+			setup: func() *RPMLimiter {
+				rl := New()
+				rl.AddCredentialWithTPM("cred1", 100, -1)
+				rl.AddModelWithTPM("cred1", "gpt-4o", 2, -1)
+				// Exhaust model RPM
+				rl.AllowModel("cred1", "gpt-4o")
+				rl.AllowModel("cred1", "gpt-4o")
+				return rl
+			},
+			credentialName: "cred1",
+			modelName:      "gpt-4o",
+			wantAllowed:    false,
+			postCheck: func(t *testing.T, rl *RPMLimiter) {
+				assert.Equal(t, 0, rl.GetCurrentRPM("cred1"), "credential RPM should not be recorded on model RPM failure")
+				assert.Equal(t, 2, rl.GetCurrentModelRPM("cred1", "gpt-4o"), "model RPM should not increase")
+			},
+		},
+		{
+			name: "model TPM exhausted — returns false",
+			setup: func() *RPMLimiter {
+				rl := New()
+				rl.AddCredentialWithTPM("cred1", 100, -1)
+				rl.AddModelWithTPM("cred1", "gpt-4o", 50, 1000)
+				// Exhaust model TPM
+				rl.ConsumeModelTokens("cred1", "gpt-4o", 1000)
+				return rl
+			},
+			credentialName: "cred1",
+			modelName:      "gpt-4o",
+			wantAllowed:    false,
+			postCheck: func(t *testing.T, rl *RPMLimiter) {
+				assert.Equal(t, 0, rl.GetCurrentRPM("cred1"), "credential RPM should not be recorded on model TPM failure")
+				assert.Equal(t, 0, rl.GetCurrentModelRPM("cred1", "gpt-4o"), "model RPM should not be recorded")
+			},
+		},
+		{
+			name: "credential RPM passes but model RPM fails — credential RPM NOT recorded (rollback)",
+			setup: func() *RPMLimiter {
+				rl := New()
+				rl.AddCredentialWithTPM("cred1", 10, -1)
+				rl.AddModelWithTPM("cred1", "gpt-4o", 3, -1)
+				// Exhaust model RPM only
+				rl.AllowModel("cred1", "gpt-4o")
+				rl.AllowModel("cred1", "gpt-4o")
+				rl.AllowModel("cred1", "gpt-4o")
+				return rl
+			},
+			credentialName: "cred1",
+			modelName:      "gpt-4o",
+			wantAllowed:    false,
+			postCheck: func(t *testing.T, rl *RPMLimiter) {
+				// Credential RPM should be 0 — the attempt should NOT have recorded it
+				assert.Equal(t, 0, rl.GetCurrentRPM("cred1"), "credential RPM must NOT be recorded when model RPM fails")
+				assert.Equal(t, 3, rl.GetCurrentModelRPM("cred1", "gpt-4o"), "model RPM should remain at limit")
+			},
+		},
+		{
+			name: "unlimited RPM (-1) — always passes",
+			setup: func() *RPMLimiter {
+				rl := New()
+				rl.AddCredentialWithTPM("cred1", -1, -1)
+				rl.AddModelWithTPM("cred1", "gpt-4o", -1, -1)
+				return rl
+			},
+			credentialName: "cred1",
+			modelName:      "gpt-4o",
+			wantAllowed:    true,
+			postCheck: func(t *testing.T, rl *RPMLimiter) {
+				// Even with unlimited, usage should be recorded
+				assert.Equal(t, 1, rl.GetCurrentRPM("cred1"), "credential RPM should be recorded")
+				assert.Equal(t, 1, rl.GetCurrentModelRPM("cred1", "gpt-4o"), "model RPM should be recorded")
+			},
+		},
+		{
+			name: "no model-specific limits — only credential limits checked",
+			setup: func() *RPMLimiter {
+				rl := New()
+				rl.AddCredentialWithTPM("cred1", 10, 10000)
+				// No model limiter added
+				return rl
+			},
+			credentialName: "cred1",
+			modelName:      "gpt-4o",
+			wantAllowed:    true,
+			postCheck: func(t *testing.T, rl *RPMLimiter) {
+				assert.Equal(t, 1, rl.GetCurrentRPM("cred1"), "credential RPM should be recorded")
+				assert.Equal(t, 0, rl.GetCurrentModelRPM("cred1", "gpt-4o"), "model RPM should be 0 (no model limiter)")
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rl := tt.setup()
+			got := rl.TryAllowAll(tt.credentialName, tt.modelName)
+			assert.Equal(t, tt.wantAllowed, got)
+			if tt.postCheck != nil {
+				tt.postCheck(t, rl)
+			}
+		})
+	}
+}

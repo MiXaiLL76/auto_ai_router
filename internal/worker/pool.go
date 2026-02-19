@@ -2,6 +2,7 @@ package worker
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"sync"
 )
@@ -78,10 +79,38 @@ func SpawnWorkerPool(
 				"total_workers", numWorkers,
 			)
 
+			executeJob := func(job Job) {
+				defer func() {
+					if r := recover(); r != nil {
+						logger.Error("Job panicked",
+							"worker_id", workerID,
+							"panic", fmt.Sprintf("%v", r),
+						)
+					}
+				}()
+
+				result := job.Execute(ctx)
+
+				// Log any errors that occurred
+				if result != nil && result.Error() != nil {
+					logger.Error("Job execution failed",
+						"worker_id", workerID,
+						"error", result.Error(),
+					)
+				}
+			}
+
 			for {
 				select {
 				case <-ctx.Done():
-					// Context cancelled, exit worker
+					// Context cancelled, drain remaining buffered jobs before exiting
+					logger.Debug("Worker draining remaining jobs",
+						"worker_id", workerID,
+						"reason", "context_cancelled",
+					)
+					for job := range jobQueue {
+						executeJob(job)
+					}
 					logger.Debug("Worker exiting",
 						"worker_id", workerID,
 						"reason", "context_cancelled",
@@ -98,17 +127,7 @@ func SpawnWorkerPool(
 						return
 					}
 
-					// Execute job
-					// Note: We don't handle panics here - let them propagate
-					result := job.Execute(ctx)
-
-					// Log any errors that occurred
-					if result != nil && result.Error() != nil {
-						logger.Error("Job execution failed",
-							"worker_id", workerID,
-							"error", result.Error(),
-						)
-					}
+					executeJob(job)
 				}
 			}
 		}(i)

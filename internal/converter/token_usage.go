@@ -8,6 +8,7 @@ type TokenUsage struct {
 	AudioInputTokens         int
 	AudioOutputTokens        int
 	CachedInputTokens        int
+	CacheCreationTokens      int
 	CachedOutputTokens       int
 	ReasoningTokens          int
 	AcceptedPredictionTokens int
@@ -21,11 +22,7 @@ func (tu *TokenUsage) Total() int {
 	if tu == nil {
 		return 0
 	}
-	return tu.PromptTokens + tu.CompletionTokens +
-		tu.AudioInputTokens + tu.AudioOutputTokens +
-		tu.CachedInputTokens + tu.CachedOutputTokens +
-		tu.ReasoningTokens + tu.AcceptedPredictionTokens +
-		tu.RejectedPredictionTokens + tu.ImageTokens
+	return tu.PromptTokens + tu.CompletionTokens
 }
 
 // TokenCosts contains cost breakdown by token type

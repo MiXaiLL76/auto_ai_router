@@ -154,6 +154,30 @@ func TestSelectBestEncoding(t *testing.T) {
 			},
 			expected: "identity",
 		},
+		{
+			name: "wildcard with gzip excluded returns deflate",
+			encodings: []AcceptedEncoding{
+				{Encoding: "*", Quality: 1.0},
+				{Encoding: "gzip", Quality: 0.0},
+			},
+			expected: "deflate",
+		},
+		{
+			name: "wildcard with gzip and deflate excluded returns identity",
+			encodings: []AcceptedEncoding{
+				{Encoding: "*", Quality: 1.0},
+				{Encoding: "gzip", Quality: 0.0},
+				{Encoding: "deflate", Quality: 0.0},
+			},
+			expected: "identity",
+		},
+		{
+			name: "wildcard with zero quality returns identity",
+			encodings: []AcceptedEncoding{
+				{Encoding: "*", Quality: 0.0},
+			},
+			expected: "identity",
+		},
 	}
 
 	for _, tt := range tests {

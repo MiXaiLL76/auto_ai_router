@@ -48,12 +48,9 @@ func OpenAIToVertex(openAIBody []byte, isImageGeneration bool, model string) ([]
 		case "tool":
 			// OpenAI tool result: {role: "tool", tool_call_id: "call_xyz", name: "func_name", content: "..."}
 			// Vertex expects: Part.FunctionResponse{Name: funcName, Response: {output: content}}
-			funcName := msg.ToolCallID
+			funcName := msg.Name
 			if funcName == "" {
-				funcName = msg.Name // fallback to Name if ToolCallID not set
-			}
-			if funcName == "" {
-				funcName = "tool_result" // last resort default
+				funcName = "tool_result" // last resort default if Name not set
 			}
 			content := extractTextContent(msg.Content)
 			// Build response map: try to parse JSON first, fallback to string

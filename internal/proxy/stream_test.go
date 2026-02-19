@@ -608,6 +608,57 @@ func TestGetStreamUsageExtractor(t *testing.T) {
 	}
 }
 
+// TestAnthropicStreamUsageExtractor_CacheCreationTokens verifies that
+// anthropicStreamUsageExtractor correctly extracts cache_creation_input_tokens
+// into the CacheCreationTokens field of StreamUsageInfo.
+func TestAnthropicStreamUsageExtractor_CacheCreationTokens(t *testing.T) {
+	extractor := &anthropicStreamUsageExtractor{}
+
+	chunk := []byte(`{"type":"message_delta","usage":{"input_tokens":200,"output_tokens":80,"cache_creation_input_tokens":150,"cache_read_input_tokens":30}}`)
+
+	result := extractor.ExtractUsage(chunk)
+	require.NotNil(t, result, "should extract usage from chunk with cache_creation_input_tokens")
+
+	assert.Equal(t, 200, result.PromptTokens, "PromptTokens should be 200")
+	assert.Equal(t, 80, result.CompletionTokens, "CompletionTokens should be 80")
+	assert.Equal(t, 150, result.CacheCreationTokens, "CacheCreationTokens should be 150")
+	assert.Equal(t, 30, result.CacheReadTokens, "CacheReadTokens should be 30")
+	assert.Equal(t, 30, result.CachedTokens, "CachedTokens should equal CacheReadTokens (30)")
+}
+
+// TestOpenAIStreamUsageExtractor_MultiPayloadNoStaleData verifies that when a single
+// stream chunk contains multiple SSE data payloads (e.g. "data: {...}\ndata: {...}\n"),
+// the extractor does not carry over stale fields from the first payload into the result
+// of the second payload. The extractor iterates from last to first, so if the last
+// payload has fewer fields, earlier payload data must not leak through.
+func TestOpenAIStreamUsageExtractor_MultiPayloadNoStaleData(t *testing.T) {
+	extractor := &openAIStreamUsageExtractor{}
+
+	// Two SSE payloads in one chunk.
+	// First payload has detailed usage with cached_tokens and audio_tokens.
+	// Second (last) payload has only basic prompt/completion tokens, no details.
+	// The extractor reads from last to first, so it should return the second
+	// payload's data without any stale cached_tokens or audio_tokens from the first.
+	chunk := []byte(
+		"data: {\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":50,\"prompt_tokens_details\":{\"cached_tokens\":20,\"audio_tokens\":5},\"completion_tokens_details\":{\"audio_tokens\":10,\"reasoning_tokens\":15}}}\n" +
+			"data: {\"usage\":{\"prompt_tokens\":80,\"completion_tokens\":30}}\n",
+	)
+
+	result := extractor.ExtractUsage(chunk)
+	require.NotNil(t, result, "should extract usage from multi-payload chunk")
+
+	// Should reflect the LAST payload only (prompt=80, completion=30)
+	assert.Equal(t, 80, result.PromptTokens, "PromptTokens should be from last payload (80)")
+	assert.Equal(t, 30, result.CompletionTokens, "CompletionTokens should be from last payload (30)")
+
+	// These fields must be zero because the last payload has no details —
+	// stale data from the first payload must NOT leak through.
+	assert.Equal(t, 0, result.CachedTokens, "CachedTokens should be 0 (no stale data from first payload)")
+	assert.Equal(t, 0, result.AudioInputTokens, "AudioInputTokens should be 0 (no stale data from first payload)")
+	assert.Equal(t, 0, result.AudioOutputTokens, "AudioOutputTokens should be 0 (no stale data from first payload)")
+	assert.Equal(t, 0, result.ReasoningTokens, "ReasoningTokens should be 0 (no stale data from first payload)")
+}
+
 // TestHandleStreamingWithTokens_HybridApproach verifies the hybrid approach implementation
 // Tests that usage info is extracted from the last chunk with cached/audio token details
 func TestHandleStreamingWithTokens_HybridApproach(t *testing.T) {

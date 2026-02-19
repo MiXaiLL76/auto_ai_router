@@ -80,7 +80,11 @@ func (t *Tracker) IsUnhealthy(proxyName string) bool {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
 
-	return !t.healthStatus[proxyName]
+	healthy, exists := t.healthStatus[proxyName]
+	if !exists {
+		return false // unknown proxy is assumed healthy (fail-open)
+	}
+	return !healthy
 }
 
 // IsHealthy returns true if the proxy is marked as healthy.

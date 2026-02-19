@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -641,18 +642,26 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, statusMessage, statusCode)
 		return
 	}
-	defer func() {
-		if closeErr := resp.Body.Close(); closeErr != nil {
-			p.logger.Error("Failed to close response body", "error", closeErr)
-		}
-	}()
+	// Use sync.Once to ensure resp.Body is closed exactly once.
+	// Both the defer and the bodyReadTimer (for non-streaming responses)
+	// may attempt to close the body; without Once they can race.
+	var closeOnce sync.Once
+	closeBody := func() {
+		closeOnce.Do(func() {
+			if closeErr := resp.Body.Close(); closeErr != nil {
+				p.logger.Error("Failed to close response body", "error", closeErr)
+			}
+		})
+	}
+	defer closeBody()
 
 	p.balancer.RecordResponse(cred.Name, modelID, resp.StatusCode)
 	p.metrics.RecordRequest(cred.Name, r.URL.Path, resp.StatusCode, time.Since(start))
 
-	// Log response headers
+	// Log response headers (mask sensitive values to prevent credential leakage)
+	maskedRespHeaders := security.MaskSensitiveHeaders(resp.Header)
 	debugRespHeaders := make(map[string]string)
-	for key, values := range resp.Header {
+	for key, values := range maskedRespHeaders {
 		debugRespHeaders[key] = strings.Join(values, ", ")
 	}
 	p.logger.Debug("Proxy response received",
@@ -675,7 +684,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		// hanging if upstream stalls mid-body (Client.Timeout was removed
 		// to support streaming, so we need an explicit guard here).
 		bodyReadTimer := time.AfterFunc(p.requestTimeout, func() {
-			_ = resp.Body.Close()
+			closeBody()
 		})
 		responseBody, err = p.readLimitedResponseBody(resp.Body)
 		bodyReadTimer.Stop()

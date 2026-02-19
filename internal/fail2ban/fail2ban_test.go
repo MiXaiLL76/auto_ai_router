@@ -568,6 +568,52 @@ func TestGetBannedPairs_MultiplePairs(t *testing.T) {
 	assert.Equal(t, time.Duration(0), pairs[1].BanDuration)
 }
 
+func TestGetBannedCount_ExcludesExpiredBans(t *testing.T) {
+	// Create fail2ban with a very short temporary ban duration
+	f2b := New(1, 50*time.Millisecond, []int{500})
+
+	// Trigger a temporary ban
+	f2b.RecordResponse("cred1", "model-a", 500)
+	assert.True(t, f2b.IsBanned("cred1", "model-a"))
+	assert.Equal(t, 1, f2b.GetBannedCount())
+
+	// Wait for the ban to expire
+	time.Sleep(100 * time.Millisecond)
+
+	// GetBannedCount should exclude the expired ban and return 0
+	assert.Equal(t, 0, f2b.GetBannedCount())
+}
+
+func TestIsBanned_TOCTOU_ReturnsCorrectAfterLockUpgrade(t *testing.T) {
+	// Verify that IsBanned correctly cleans up an expired temporary ban
+	// via the read-lock → write-lock upgrade path and returns false.
+	f2b := New(1, 50*time.Millisecond, []int{401})
+
+	// Trigger a temporary ban
+	f2b.RecordResponse("cred1", "gpt-4", 401)
+	assert.True(t, f2b.IsBanned("cred1", "gpt-4"))
+
+	// Wait for the ban to expire
+	time.Sleep(100 * time.Millisecond)
+
+	// IsBanned should detect the expired ban, upgrade to write lock,
+	// clean up the ban entry, and return false
+	assert.False(t, f2b.IsBanned("cred1", "gpt-4"))
+
+	// After cleanup, the banned map should no longer contain the entry
+	f2b.mu.RLock()
+	_, exists := f2b.banned[banKey("cred1", "gpt-4")]
+	f2b.mu.RUnlock()
+	assert.False(t, exists, "expired ban should be removed from banned map")
+
+	// Failure counters should also be cleaned up
+	assert.Equal(t, 0, f2b.GetFailureCount("cred1", "gpt-4"))
+
+	// Verify that a new ban can be triggered after cleanup
+	f2b.RecordResponse("cred1", "gpt-4", 401)
+	assert.True(t, f2b.IsBanned("cred1", "gpt-4"))
+}
+
 func TestGetBannedModelsForCredential(t *testing.T) {
 	f2b := New(3, 0, []int{401, 403, 500})
 

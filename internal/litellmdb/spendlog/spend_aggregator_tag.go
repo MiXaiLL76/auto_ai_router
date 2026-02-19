@@ -47,13 +47,8 @@ func aggregateDailyTagSpendLogs(
 	ctx context.Context,
 	conn *pgxpool.Conn,
 	logger *slog.Logger,
-	requestIDs []string,
+	records []spendLogRecord,
 ) error {
-	records, err := loadUnprocessedSpendLogRecords(ctx, conn, logger, "Tag", requestIDs)
-	if err != nil {
-		return err
-	}
-
 	// Map to aggregate by unique key
 	aggregations := make(map[aggregateTagKey]*aggregateTagValue)
 	totalRows := 0
@@ -70,7 +65,7 @@ func aggregateDailyTagSpendLogs(
 
 		// Parse tags from JSON array
 		var tags []string
-		err = json.Unmarshal([]byte(record.RequestTags), &tags)
+		err := json.Unmarshal([]byte(record.RequestTags), &tags)
 		if err != nil {
 			logger.Warn("[DB] Tag aggregation: failed to unmarshal request_tags JSON",
 				"request_id", record.RequestID,

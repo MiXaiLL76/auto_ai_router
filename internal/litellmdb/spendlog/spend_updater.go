@@ -128,7 +128,7 @@ func executeSpendUpdates(ctx context.Context, tx pgx.Tx, updates *SpendUpdates) 
 func updateTokens(ctx context.Context, tx pgx.Tx, tokens map[string]float64) error {
 	for apiKey, amount := range tokens {
 		_, err := tx.Exec(ctx,
-			`UPDATE "LiteLLM_VerificationToken" SET spend = spend + $1 WHERE token = $2`,
+			`UPDATE "LiteLLM_VerificationToken" SET spend = spend + $1 WHERE token = $2 AND spend IS NOT NULL`,
 			amount, apiKey)
 		if err != nil {
 			return err
@@ -185,7 +185,7 @@ func updateOrgs(ctx context.Context, tx pgx.Tx, orgs map[string]float64) error {
 func updateTeamMembers(ctx context.Context, tx pgx.Tx, teamMembers map[string]float64) error {
 	for key, amount := range teamMembers {
 		// key формата "teamID:userID"
-		parts := strings.Split(key, ":")
+		parts := strings.SplitN(key, ":", 2)
 		if len(parts) != 2 {
 			return fmt.Errorf("invalid team member key format %q: expected 'teamID:userID'", key)
 		}
@@ -212,7 +212,7 @@ func updateTeamMembers(ctx context.Context, tx pgx.Tx, teamMembers map[string]fl
 func updateOrgMembers(ctx context.Context, tx pgx.Tx, orgMembers map[string]float64) error {
 	for key, amount := range orgMembers {
 		// key формата "orgID:userID"
-		parts := strings.Split(key, ":")
+		parts := strings.SplitN(key, ":", 2)
 		if len(parts) != 2 {
 			return fmt.Errorf("invalid org member key format %q: expected 'orgID:userID'", key)
 		}

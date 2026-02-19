@@ -352,7 +352,7 @@ func (m *Manager) GetAllModels() ModelsResponse {
 		m.logger.Debug("Fetching models from proxy credential",
 			"credential", cred.Name,
 		)
-		remoteModels, err := m.GetRemoteModelsWithError(&cred)
+		remoteModels, err := m.GetRemoteModelsWithError(context.Background(), &cred)
 		if err != nil {
 			m.logger.Warn("Failed to fetch models from proxy during full model list refresh",
 				"credential", cred.Name,
@@ -733,7 +733,7 @@ func (m *Manager) GetModelsForCredential(credentialName string) []Model {
 // GetRemoteModels fetches models from a remote proxy credential with caching.
 // Deprecated: use GetRemoteModelsWithError to handle upstream fetch errors explicitly.
 func (m *Manager) GetRemoteModels(cred *config.CredentialConfig) []Model {
-	models, err := m.GetRemoteModelsWithError(cred)
+	models, err := m.GetRemoteModelsWithError(context.Background(), cred)
 	if err != nil {
 		return nil
 	}
@@ -742,7 +742,7 @@ func (m *Manager) GetRemoteModels(cred *config.CredentialConfig) []Model {
 
 // GetRemoteModelsWithError fetches models from a remote proxy credential with caching.
 // Returns explicit error when remote fetch fails.
-func (m *Manager) GetRemoteModelsWithError(cred *config.CredentialConfig) ([]Model, error) {
+func (m *Manager) GetRemoteModelsWithError(ctx context.Context, cred *config.CredentialConfig) ([]Model, error) {
 	if cred.Type != config.ProviderTypeProxy {
 		return nil, nil
 	}
@@ -750,8 +750,8 @@ func (m *Manager) GetRemoteModelsWithError(cred *config.CredentialConfig) ([]Mod
 	// Check cache first
 	m.mu.RLock()
 	if cached, ok := m.remoteModelsCache[cred.Name]; ok && !cached.expiresAt.IsZero() && utils.NowUTC().Before(cached.expiresAt) {
-		// Copy models slice reference while holding lock to prevent TOCTOU
-		cachedModels := cached.models
+		// Defensive copy to prevent callers from corrupting cached data
+		cachedModels := append([]Model(nil), cached.models...)
 		cachedCount := len(cachedModels)
 		expiresIn := time.Until(cached.expiresAt).Seconds()
 		m.mu.RUnlock()
@@ -770,7 +770,6 @@ func (m *Manager) GetRemoteModelsWithError(cred *config.CredentialConfig) ([]Mod
 	)
 
 	// Fetch models using httputil helper
-	ctx := context.Background()
 	var modelsResp ModelsResponse
 	if err := httputil.FetchJSONFromProxy(ctx, cred, "/v1/models", m.logger, &modelsResp); err != nil {
 		m.logger.Error("Failed to fetch remote models",

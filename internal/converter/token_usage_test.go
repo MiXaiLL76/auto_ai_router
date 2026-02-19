@@ -21,8 +21,23 @@ func TestTokenUsageTotal(t *testing.T) {
 		ImageTokens:              10,
 	}
 
-	want := 1 + 2 + 3 + 4 + 5 + 6 + 7 + 8 + 9 + 10
+	// Total() returns PromptTokens + CompletionTokens only,
+	// because specialty tokens are already included in those totals.
+	want := 1 + 2
 	if got := tu.Total(); got != want {
 		t.Fatalf("expected total %d, got %d", want, got)
+	}
+}
+
+func TestTokenUsageTotal_CacheCreationDoesNotAffect(t *testing.T) {
+	tu := &TokenUsage{
+		PromptTokens:        100,
+		CompletionTokens:    50,
+		CacheCreationTokens: 500,
+	}
+
+	want := 100 + 50
+	if got := tu.Total(); got != want {
+		t.Fatalf("expected CacheCreationTokens not to affect Total(): want %d, got %d", want, got)
 	}
 }

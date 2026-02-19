@@ -72,7 +72,7 @@ func loadUnprocessedSpendLogRecords(
 		)
 		if err != nil {
 			logger.Error("[DB] "+scope+" aggregation: failed to scan row", "error", err)
-			continue
+			return nil, err
 		}
 
 		record.Model = derefString(model)

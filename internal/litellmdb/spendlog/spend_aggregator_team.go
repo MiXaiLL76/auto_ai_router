@@ -34,13 +34,8 @@ func aggregateDailyTeamSpendLogs(
 	ctx context.Context,
 	conn *pgxpool.Conn,
 	logger *slog.Logger,
-	requestIDs []string,
+	records []spendLogRecord,
 ) error {
-	records, err := loadUnprocessedSpendLogRecords(ctx, conn, logger, "Team", requestIDs)
-	if err != nil {
-		return err
-	}
-
 	// Map to aggregate by unique key
 	aggregations := make(map[aggregateTeamKey]*aggregationValue)
 	totalRows := 0

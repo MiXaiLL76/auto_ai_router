@@ -61,7 +61,7 @@ func UpdateAllProxyCredentials(
 			defer wg.Done()
 
 			// Fetch models from proxy
-			remoteModels, err := modelManager.GetRemoteModelsWithError(c)
+			remoteModels, err := modelManager.GetRemoteModelsWithError(ctx, c)
 
 			resultsChan <- proxyResult{
 				credential: c,
@@ -81,9 +81,6 @@ func UpdateAllProxyCredentials(
 	updatedCount := 0
 	failedCount := 0
 
-	updateMutex.Lock()
-	defer updateMutex.Unlock()
-
 	for result := range resultsChan {
 		if result.err != nil {
 			log.Warn("Failed to fetch models from proxy",
@@ -96,6 +93,7 @@ func UpdateAllProxyCredentials(
 
 		// Update rate limiter and model manager with fetched models
 		addedCount := 0
+		updateMutex.Lock()
 		for _, model := range result.models {
 			// Get default RPM/TPM from model manager
 			modelRPM := modelManager.GetModelRPMForCredential(model.ID, result.credential.Name)
@@ -110,6 +108,7 @@ func UpdateAllProxyCredentials(
 			modelManager.AddModel(result.credential.Name, model.ID)
 			addedCount++
 		}
+		updateMutex.Unlock()
 
 		if addedCount > 0 {
 			log.Info("Updated proxy models",

@@ -75,6 +75,7 @@ func NewHTTPClient(cfg *HTTPClientConfig) *http.Client {
 		Timeout: 0,
 		Transport: &http.Transport{
 			Proxy:                 http.ProxyFromEnvironment, // Support HTTP_PROXY, HTTPS_PROXY, NO_PROXY
+			TLSHandshakeTimeout:   timeout,                   // Timeout for TLS handshake phase
 			ResponseHeaderTimeout: timeout,                   // Timeout for connect + response headers only
 			MaxIdleConns:          maxIdleConns,
 			MaxIdleConnsPerHost:   maxIdleConnsPerHost,

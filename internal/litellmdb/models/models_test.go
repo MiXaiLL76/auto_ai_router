@@ -18,7 +18,7 @@ func TestDefaultConfig(t *testing.T) {
 	assert.Equal(t, int32(2), cfg.MinConns)
 	assert.Equal(t, 10*time.Second, cfg.HealthCheckInterval)
 	assert.Equal(t, 5*time.Second, cfg.ConnectTimeout)
-	assert.Equal(t, 60*time.Second, cfg.AuthCacheTTL)
+	assert.Equal(t, 5*time.Second, cfg.AuthCacheTTL)
 	assert.Equal(t, 10000, cfg.AuthCacheSize)
 	assert.Equal(t, 10000, cfg.LogQueueSize)
 	assert.Equal(t, 100, cfg.LogBatchSize)

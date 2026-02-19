@@ -136,7 +136,7 @@ func (p *Proxy) authenticateRequest(
 		http.Error(w, "Unauthorized: Invalid master key", http.StatusUnauthorized)
 	}
 
-	return true
+	return false
 }
 
 func (p *Proxy) readRequestBodyAndSelectModel(
@@ -201,10 +201,9 @@ func (p *Proxy) selectCredentialForModel(
 		return cred, true
 	}
 
-	errCode := http.StatusServiceUnavailable
+	errCode := http.StatusTooManyRequests
 	errorMsg := fmt.Sprintf("No credentials available: %v", err)
 	if errors.Is(err, balancer.ErrRateLimitExceeded) || errors.Is(fallbackErr, balancer.ErrRateLimitExceeded) {
-		errCode = http.StatusTooManyRequests
 		errorMsg = "Rate limit exceeded"
 	}
 
@@ -230,6 +229,6 @@ func (p *Proxy) selectCredentialForModel(
 	}
 	logCtx.Logged = true
 
-	http.Error(w, "Too Many Requests", http.StatusTooManyRequests)
+	http.Error(w, errorMsg, errCode)
 	return nil, false
 }

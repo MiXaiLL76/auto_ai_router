@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bytes"
+	"compress/flate"
 	"compress/gzip"
 	"encoding/json"
 	"io"
@@ -124,12 +125,28 @@ func extractMetadataFromBody(body []byte) (string, bool, string, []byte) {
 
 // decodeResponseBody decodes the response body based on Content-Encoding
 func decodeResponseBody(body []byte, encoding string) string {
+	lowerEncoding := strings.ToLower(encoding)
+
 	// Check if response is gzip-encoded
-	if strings.Contains(strings.ToLower(encoding), "gzip") {
+	if strings.Contains(lowerEncoding, "gzip") {
 		reader, err := gzip.NewReader(bytes.NewReader(body))
 		if err != nil {
 			return string(body) // Return as-is if can't decode
 		}
+		defer func() {
+			_ = reader.Close()
+		}()
+
+		decoded, err := io.ReadAll(reader)
+		if err != nil {
+			return string(body) // Return as-is if can't read
+		}
+		return string(decoded)
+	}
+
+	// Check if response is deflate-encoded
+	if strings.Contains(lowerEncoding, "deflate") {
+		reader := flate.NewReader(bytes.NewReader(body))
 		defer func() {
 			_ = reader.Close()
 		}()

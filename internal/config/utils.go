@@ -17,6 +17,11 @@ func resolveEnvString(value string) string {
 		if envValue := os.Getenv(envVar); envValue != "" {
 			return envValue
 		}
+		slog.Warn("environment variable not set, returning empty string",
+			"env_var", envVar,
+			"pattern", value,
+		)
+		return ""
 	}
 	return value
 }

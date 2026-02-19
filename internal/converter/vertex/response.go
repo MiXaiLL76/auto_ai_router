@@ -132,7 +132,7 @@ func convertVertexUsageMetadata(meta *genai.GenerateContentResponseUsageMetadata
 	usage := &openai.OpenAIUsage{
 		PromptTokens:     int(meta.PromptTokenCount + meta.ToolUsePromptTokenCount),
 		CompletionTokens: completionTokens,
-		TotalTokens:      int(meta.TotalTokenCount),
+		TotalTokens:      int(meta.PromptTokenCount+meta.ToolUsePromptTokenCount) + completionTokens,
 	}
 
 	// Map Vertex thinking tokens to OpenAI reasoning_tokens

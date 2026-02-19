@@ -145,7 +145,24 @@ func (tm *VertexTokenManager) GetToken(credentialName, credentialsFile, credenti
 		select {
 		case tm.refreshRequests <- req:
 		case <-ctx.Done():
-			tm.removeWaitingChan(credentialName, responseChan)
+			// First caller timed out before sending the refresh request.
+			// Other callers may have already appended their channels to
+			// tm.refreshing[credentialName] expecting a refresh to happen.
+			// We must notify them all with an error since no request was sent.
+			tm.refreshingMu.Lock()
+			waitingChans, exists := tm.refreshing[credentialName]
+			delete(tm.refreshing, credentialName)
+			tm.refreshingMu.Unlock()
+
+			if exists {
+				errResp := tokenRefreshResponse{token: "", err: fmt.Errorf("token refresh timeout: initiator cancelled before sending request")}
+				for _, ch := range waitingChans {
+					select {
+					case ch <- errResp:
+					default:
+					}
+				}
+			}
 			return "", fmt.Errorf("token refresh timeout")
 		}
 	} else {

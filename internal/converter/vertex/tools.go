@@ -155,52 +155,64 @@ func convertToolCallsToGenaiParts(toolCalls []interface{}) []*genai.Part {
 			continue
 		}
 
-		// Extract function information
-		funcName := converterutil.GetString(toolCallMap, "name")
+		// Extract function information from either flat or nested structure
+		var funcName string
+		var argsStr string
+
+		if funcObj, ok := toolCallMap["function"].(map[string]interface{}); ok {
+			// Nested structure: {"function": {"name": "...", "arguments": "..."}}
+			funcName = converterutil.GetString(funcObj, "name")
+			argsStr = converterutil.GetString(funcObj, "arguments")
+		}
+
+		// Flat structure: {"name": "...", "arguments": "..."} — overrides if present
+		if topName := converterutil.GetString(toolCallMap, "name"); topName != "" {
+			funcName = topName
+			if topArgs := converterutil.GetString(toolCallMap, "arguments"); topArgs != "" {
+				argsStr = topArgs
+			}
+		}
+
 		if funcName == "" {
-			if funcObj, ok := toolCallMap["function"].(map[string]interface{}); ok {
-				funcName = converterutil.GetString(funcObj, "name")
-				if funcName != "" {
-					// Parse arguments
-					argsStr := converterutil.GetString(funcObj, "arguments")
-					var args map[string]interface{}
-					if argsStr != "" {
-						if err := json.Unmarshal([]byte(argsStr), &args); err != nil {
-							args = map[string]interface{}{"_error": "failed to parse arguments"}
-						}
-					}
+			continue
+		}
 
-					part := &genai.Part{
-						FunctionCall: &genai.FunctionCall{
-							Name: funcName,
-							Args: args,
-						},
-					}
+		// Parse arguments
+		var args map[string]interface{}
+		if argsStr != "" {
+			if err := json.Unmarshal([]byte(argsStr), &args); err != nil {
+				args = map[string]interface{}{"_error": "failed to parse arguments"}
+			}
+		}
 
-					// Restore thoughtSignature from provider_specific_fields if present.
-					// Required for Gemini 3 models to maintain context across multi-turn conversations.
-					foundThoughtSignature := false
-					if providerFields, ok := toolCallMap["provider_specific_fields"].(map[string]interface{}); ok {
-						if thoughtSigStr, ok := providerFields["thought_signature"].(string); ok && thoughtSigStr != "" {
-							// Decode from base64 back to binary
-							if decoded := converterutil.DecodeBase64(thoughtSigStr); decoded != nil {
-								part.ThoughtSignature = decoded
-								foundThoughtSignature = true
-							}
-						}
-					}
+		part := &genai.Part{
+			FunctionCall: &genai.FunctionCall{
+				Name: funcName,
+				Args: args,
+			},
+		}
 
-					// Fallback: If no thoughtSignature provided, add dummy value.
-					// Per litellm and Google docs, clients (like LangChain) may not preserve provider_specific_fields.
-					// The dummy validator allows Gemini 3 to accept the request without validation errors.
-					if !foundThoughtSignature {
-						part.ThoughtSignature = []byte("skip_thought_signature_validator")
-					}
-
-					parts = append(parts, part)
+		// Restore thoughtSignature from provider_specific_fields if present.
+		// Required for Gemini 3 models to maintain context across multi-turn conversations.
+		foundThoughtSignature := false
+		if providerFields, ok := toolCallMap["provider_specific_fields"].(map[string]interface{}); ok {
+			if thoughtSigStr, ok := providerFields["thought_signature"].(string); ok && thoughtSigStr != "" {
+				// Decode from base64 back to binary
+				if decoded := converterutil.DecodeBase64(thoughtSigStr); decoded != nil {
+					part.ThoughtSignature = decoded
+					foundThoughtSignature = true
 				}
 			}
 		}
+
+		// Fallback: If no thoughtSignature provided, add dummy value.
+		// Per litellm and Google docs, clients (like LangChain) may not preserve provider_specific_fields.
+		// The dummy validator allows Gemini 3 to accept the request without validation errors.
+		if !foundThoughtSignature {
+			part.ThoughtSignature = []byte("skip_thought_signature_validator")
+		}
+
+		parts = append(parts, part)
 	}
 
 	return parts

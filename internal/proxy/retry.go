@@ -159,6 +159,15 @@ func (p *Proxy) TryFallbackProxy(
 		return false, "no_fallback_available"
 	}
 
+	// Guard against nil credential (balancer returned no error but also no credential)
+	if fallbackCred == nil {
+		p.logger.Warn("Balancer returned nil credential without error",
+			"model", modelID,
+			"original_credential", originalCredName,
+		)
+		return false, "no_fallback_available"
+	}
+
 	// Safety check: don't retry with the same credential
 	if fallbackCred.Name == originalCredName {
 		p.logger.Warn("Fallback credential is the same as original, skipping retry",

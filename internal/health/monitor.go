@@ -110,10 +110,13 @@ func (m *Monitor) checkHealth() {
 
 		// If transitioning from unhealthy to healthy, log recovery
 		if !wasHealthy {
+			m.mu.RLock()
+			lastCheck := m.lastCheckTime
+			m.mu.RUnlock()
 			m.config.Logger.Warn("Database recovered (state: unhealthy -> healthy)",
 				"timestamp", now.Format(time.RFC3339),
-				"last_check_time", m.lastCheckTime.Format(time.RFC3339),
-				"check_duration", now.Sub(m.lastCheckTime),
+				"last_check_time", lastCheck.Format(time.RFC3339),
+				"check_duration", now.Sub(lastCheck),
 			)
 		}
 

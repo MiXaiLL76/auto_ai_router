@@ -59,23 +59,23 @@ func (o *openAIStreamUsageExtractor) ExtractUsage(chunk []byte) *StreamUsageInfo
 	// {"choices":[...],"usage":{"prompt_tokens":100,"completion_tokens":50}}
 	// Usage may appear in any chunk but typically in the final chunk
 
-	var data struct {
-		Usage struct {
-			PromptTokens        int `json:"prompt_tokens"`
-			CompletionTokens    int `json:"completion_tokens"`
-			PromptTokensDetails struct {
-				CachedTokens int `json:"cached_tokens,omitempty"`
-				AudioTokens  int `json:"audio_tokens,omitempty"`
-			} `json:"prompt_tokens_details,omitempty"`
-			CompletionTokensDetails struct {
-				AudioTokens     int `json:"audio_tokens,omitempty"`
-				ReasoningTokens int `json:"reasoning_tokens,omitempty"`
-			} `json:"completion_tokens_details,omitempty"`
-		} `json:"usage"`
-	}
-
 	payloads := extractJSONPayloadsFromStreamChunk(chunk)
 	for i := len(payloads) - 1; i >= 0; i-- {
+		var data struct {
+			Usage struct {
+				PromptTokens        int `json:"prompt_tokens"`
+				CompletionTokens    int `json:"completion_tokens"`
+				PromptTokensDetails struct {
+					CachedTokens int `json:"cached_tokens,omitempty"`
+					AudioTokens  int `json:"audio_tokens,omitempty"`
+				} `json:"prompt_tokens_details,omitempty"`
+				CompletionTokensDetails struct {
+					AudioTokens     int `json:"audio_tokens,omitempty"`
+					ReasoningTokens int `json:"reasoning_tokens,omitempty"`
+				} `json:"completion_tokens_details,omitempty"`
+			} `json:"usage"`
+		}
+
 		if err := json.Unmarshal(payloads[i], &data); err != nil {
 			continue
 		}
@@ -178,7 +178,9 @@ func getStreamUsageExtractor(providerName string) StreamUsageExtractor {
 	case "openai":
 		return &openAIStreamUsageExtractor{}
 	case "anthropic":
-		return &anthropicStreamUsageExtractor{}
+		// Anthropic streaming goes through handleTransformedStreaming which converts
+		// chunks to OpenAI format, so we use OpenAI extractor for the transformed response
+		return &openAIStreamUsageExtractor{}
 	case "vertex ai":
 		// Vertex AI transforms to OpenAI format during streaming,
 		// so we use OpenAI extractor for the transformed response
@@ -233,7 +235,12 @@ func (p *Proxy) handleTransformedStreaming(
 	// Capture last chunk for usage extraction (Solution 3: Hybrid approach)
 	var lastChunk []byte
 
+	// WaitGroup ensures the transform goroutine completes before we read
+	// lastChunk and totalTokens, preventing a data race.
+	var wg sync.WaitGroup
+	wg.Add(1)
 	go func() {
+		defer wg.Done()
 		err := transformFunc(resp.Body, modelID, &tokenCapturingWriter{
 			writer: pw,
 			tokens: &totalTokens,
@@ -255,8 +262,10 @@ func (p *Proxy) handleTransformedStreaming(
 	}()
 
 	if err := p.streamToClient(w, pr, credName, nil, func() { _ = pr.Close() }); err != nil {
+		wg.Wait()
 		return err
 	}
+	wg.Wait()
 
 	if totalTokens > 0 {
 		p.rateLimiter.ConsumeTokens(credName, totalTokens)
@@ -340,7 +349,7 @@ func (p *Proxy) finalizeStreamingLog(logCtx *RequestLogContext, totalTokens int,
 			logCtx.TokenUsage.ReasoningTokens = usageInfo.ReasoningTokens
 
 			if usageInfo.CacheCreationTokens > 0 {
-				logCtx.TokenUsage.CachedInputTokens = usageInfo.CacheCreationTokens
+				logCtx.TokenUsage.CacheCreationTokens = usageInfo.CacheCreationTokens
 			}
 
 			p.logger.Debug("Extracted usage from streaming response",

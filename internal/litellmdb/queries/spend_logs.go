@@ -52,6 +52,7 @@ const (
 		FROM "LiteLLM_SpendLogs"
 		WHERE cache_hit IS NULL OR cache_hit = ''
 		ORDER BY "startTime" DESC
+		LIMIT 10000
 	`
 
 	// QuerySelectUnprocessedSpendLogs retrieves spend logs not yet aggregated (filtered by request_ids)

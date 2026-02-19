@@ -50,7 +50,7 @@ type Config struct {
 	ConnectTimeout      time.Duration // Connection timeout (default: 5s)
 
 	// Auth cache
-	AuthCacheTTL  time.Duration // Token cache TTL (default: 60s)
+	AuthCacheTTL  time.Duration // Token cache TTL (default: 5s)
 	AuthCacheSize int           // LRU cache size (default: 10000)
 
 	// Spend logging
@@ -71,7 +71,7 @@ func DefaultConfig() *Config {
 		MinConns:            2,
 		HealthCheckInterval: 10 * time.Second,
 		ConnectTimeout:      5 * time.Second,
-		AuthCacheTTL:        60 * time.Second,
+		AuthCacheTTL:        5 * time.Second,
 		AuthCacheSize:       10000,
 		LogQueueSize:        10000,
 		LogBatchSize:        100,

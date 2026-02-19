@@ -117,8 +117,21 @@ func SelectBestEncoding(acceptedEncodings []AcceptedEncoding) string {
 		}
 
 		if enc.Encoding == "*" {
-			// Wildcard - return best supported (prefer gzip)
-			return "gzip"
+			// Wildcard - return best supported, but respect explicit q=0 exclusions (RFC 7231)
+			// Build set of explicitly excluded encodings (q=0)
+			excluded := make(map[string]bool)
+			for _, e := range sortedEncodings {
+				if e.Quality == 0 && e.Encoding != "*" {
+					excluded[e.Encoding] = true
+				}
+			}
+			// Prefer gzip, then deflate, then identity
+			for _, candidate := range []string{"gzip", "deflate", "identity"} {
+				if !excluded[candidate] {
+					return candidate
+				}
+			}
+			return "identity"
 		}
 
 		if supported[enc.Encoding] {

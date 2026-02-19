@@ -34,13 +34,8 @@ func aggregateDailyOrganizationSpendLogs(
 	ctx context.Context,
 	conn *pgxpool.Conn,
 	logger *slog.Logger,
-	requestIDs []string,
+	records []spendLogRecord,
 ) error {
-	records, err := loadUnprocessedSpendLogRecords(ctx, conn, logger, "Organization", requestIDs)
-	if err != nil {
-		return err
-	}
-
 	// Map to aggregate by unique key
 	aggregations := make(map[aggregateOrgKey]*aggregationValue)
 	totalRows := 0
@@ -85,21 +80,21 @@ func aggregateDailyOrganizationSpendLogs(
 		logger.Debug("[DB] Organization aggregation: log accumulated",
 			"org_id", record.OrganizationID,
 			"date", record.Date,
-			"api_key", record.APIKey,
+			"api_key", safeAPIKeyPrefix(record.APIKey),
 			"model", record.Model,
 			"api_requests_total", agg.apiRequests,
 			"spend_total", agg.spend,
 		)
 	}
 
-	logger.Info("[DB] Organization aggregation: scan complete",
+	logger.Debug("[DB] Organization aggregation: scan complete",
 		"total_rows", totalRows,
 		"skipped_rows", skippedRows,
 		"aggregation_groups", len(aggregations),
 	)
 
 	if len(aggregations) == 0 {
-		logger.Info("[DB] Organization aggregation: no aggregations to insert")
+		logger.Debug("[DB] Organization aggregation: no aggregations to insert")
 		return nil
 	}
 
@@ -120,7 +115,7 @@ func aggregateDailyOrganizationSpendLogs(
 		}
 		upsertCount++
 
-		logger.Info("[DB] Organization aggregation: upsert executed",
+		logger.Debug("[DB] Organization aggregation: upsert executed",
 			"org_id", key.organizationID,
 			"date", key.date,
 			"api_requests", value.apiRequests,
@@ -128,7 +123,7 @@ func aggregateDailyOrganizationSpendLogs(
 		)
 	}
 
-	logger.Info("[DB] Organization aggregation: all upserts completed",
+	logger.Debug("[DB] Organization aggregation: all upserts completed",
 		"total_upserts", upsertCount,
 	)
 

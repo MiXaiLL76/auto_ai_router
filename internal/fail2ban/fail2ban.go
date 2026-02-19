@@ -186,18 +186,25 @@ func (f *Fail2Ban) IsBanned(credentialName, modelID string) bool {
 	if expired {
 		f.mu.Lock()
 		defer f.mu.Unlock()
-		// Double-check after acquiring write lock
-		if ban, exists := f.banned[key]; exists && ban.banDuration > 0 {
-			if time.Since(ban.banTime) > ban.banDuration {
-				delete(f.banned, key)
-				delete(f.failures, key)
-				monitoring.CredentialUnbanEvents.WithLabelValues(credentialName, modelID).Inc()
-				return false
-			}
+		// Re-check after acquiring write lock — a new ban may have been added in the gap
+		ban, exists = f.banned[key]
+		if !exists {
+			return false
 		}
+		if ban.banDuration == 0 {
+			return true
+		}
+		if time.Since(ban.banTime) > ban.banDuration {
+			delete(f.banned, key)
+			delete(f.failures, key)
+			monitoring.CredentialUnbanEvents.WithLabelValues(credentialName, modelID).Inc()
+			return false
+		}
+		// Ban is still active (new ban was added during lock upgrade)
+		return true
 	}
 
-	return !expired
+	return true
 }
 
 func (f *Fail2Ban) GetFailureCount(credentialName, modelID string) int {
@@ -309,9 +316,16 @@ func (f *Fail2Ban) GetBannedPairs() []BanPair {
 	return pairs
 }
 
-// GetBannedCount returns the count of banned credential+model pairs without allocating a slice
+// GetBannedCount returns the count of currently active (non-expired) banned credential+model pairs
 func (f *Fail2Ban) GetBannedCount() int {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
-	return len(f.banned)
+
+	count := 0
+	for _, ban := range f.banned {
+		if ban.banDuration == 0 || time.Since(ban.banTime) <= ban.banDuration {
+			count++
+		}
+	}
+	return count
 }

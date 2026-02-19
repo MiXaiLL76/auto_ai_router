@@ -35,7 +35,7 @@ func NewCache(maxSize int, ttl time.Duration) (*Cache, error) {
 		maxSize = 10000
 	}
 	if ttl <= 0 {
-		ttl = 60 * time.Second
+		ttl = 5 * time.Second
 	}
 
 	cache, err := lru.New[string, *cachedToken](maxSize)
@@ -67,9 +67,13 @@ func (c *Cache) Get(hashedToken string) (*models.TokenInfo, bool) {
 
 	// Check TTL
 	if time.Since(cached.cachedAt) > c.ttl {
-		// TTL expired - remove from cache
+		// TTL expired - re-check under write lock to avoid evicting a fresh entry
+		// that another goroutine may have Set() between RUnlock and Lock.
 		c.mu.Lock()
-		c.cache.Remove(hashedToken)
+		current, stillExists := c.cache.Get(hashedToken)
+		if stillExists && time.Since(current.cachedAt) > c.ttl {
+			c.cache.Remove(hashedToken)
+		}
 		c.mu.Unlock()
 		atomic.AddUint64(&c.misses, 1)
 		return nil, false
