@@ -9,8 +9,8 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb/models"
 )
 
-// SpendUpdates - агрегированные обновления spend с явной типизацией
-// Позволяет избежать путаницы со строковыми ключами и повышает читаемость кода
+// SpendUpdates holds aggregated spend updates with explicit typing per entity.
+// Avoids confusion with string keys and improves code readability.
 type SpendUpdates struct {
 	Tokens      map[string]float64 // apiKey -> amount
 	Users       map[string]float64 // userID -> amount
@@ -20,21 +20,21 @@ type SpendUpdates struct {
 	OrgMembers  map[string]float64 // "orgID:userID" -> amount
 }
 
-// aggregateSpendUpdates группирует обновления spend по сущностям
-// Вместо N UPDATE запросов для N SpendLogEntry, агрегирует их в ~5-10 операций
+// aggregateSpendUpdates groups spend updates by entity.
+// Instead of N UPDATE queries for N SpendLogEntry, aggregates them into ~5-10 operations.
 //
-// Пример:
+// Example:
 //
-//	Батч из 100 запросов:
+//	Batch of 100 entries:
 //	  - APIKey: "abc", Spend: 10
-//	  - APIKey: "abc", Spend: 5    ← одна сущность!
+//	  - APIKey: "abc", Spend: 5    ← same entity!
 //	  - UserID: "user1", Spend: 8
-//	  - UserID: "user1", Spend: 7  ← одна сущность!
+//	  - UserID: "user1", Spend: 7  ← same entity!
 //
-//	Результат:
+//	Result:
 //	  SpendUpdates {
-//	    Tokens: {"abc": 15},       ← 1 UPDATE вместо 2
-//	    Users: {"user1": 15},      ← 1 UPDATE вместо 2
+//	    Tokens: {"abc": 15},       ← 1 UPDATE instead of 2
+//	    Users: {"user1": 15},      ← 1 UPDATE instead of 2
 //	  }
 func aggregateSpendUpdates(batch []*models.SpendLogEntry) *SpendUpdates {
 	updates := &SpendUpdates{
@@ -47,31 +47,31 @@ func aggregateSpendUpdates(batch []*models.SpendLogEntry) *SpendUpdates {
 	}
 
 	for _, entry := range batch {
-		// Token (всегда)
+		// Token (always)
 		updates.Tokens[entry.APIKey] += entry.Spend
 
-		// User (если есть)
+		// User (if present)
 		if entry.UserID != "" {
 			updates.Users[entry.UserID] += entry.Spend
 		}
 
-		// Team (если есть)
+		// Team (if present)
 		if entry.TeamID != "" {
 			updates.Teams[entry.TeamID] += entry.Spend
 		}
 
-		// Organization (если есть)
+		// Organization (if present)
 		if entry.OrganizationID != "" {
 			updates.Orgs[entry.OrganizationID] += entry.Spend
 		}
 
-		// TeamMembership (если User + Team)
+		// TeamMembership (if User + Team)
 		if entry.UserID != "" && entry.TeamID != "" {
 			key := fmt.Sprintf("%s:%s", entry.TeamID, entry.UserID)
 			updates.TeamMembers[key] += entry.Spend
 		}
 
-		// OrganizationMembership (если User + Org)
+		// OrganizationMembership (if User + Org)
 		if entry.UserID != "" && entry.OrganizationID != "" {
 			key := fmt.Sprintf("%s:%s", entry.OrganizationID, entry.UserID)
 			updates.OrgMembers[key] += entry.Spend
@@ -81,14 +81,14 @@ func aggregateSpendUpdates(batch []*models.SpendLogEntry) *SpendUpdates {
 	return updates
 }
 
-// executeSpendUpdates выполняет все UPDATE операции в одной транзакции
-// Если какая-то операция упадёт, вся транзакция откатится (atomicity)
+// executeSpendUpdates executes all UPDATE operations within the given transaction.
+// If any operation fails, the entire transaction rolls back (atomicity).
 func executeSpendUpdates(ctx context.Context, tx pgx.Tx, updates *SpendUpdates) error {
 	if updates == nil {
 		return nil
 	}
 
-	// Выполняем каждый тип обновления (пропускаем пустые карты)
+	// Execute each update type (skip empty maps)
 	if len(updates.Tokens) > 0 {
 		if err := updateTokens(ctx, tx, updates.Tokens); err != nil {
 			return fmt.Errorf("update tokens: %w", err)
@@ -123,8 +123,8 @@ func executeSpendUpdates(ctx context.Context, tx pgx.Tx, updates *SpendUpdates) 
 	return nil
 }
 
-// updateTokens - обновить Token.spend в LiteLLM_VerificationToken
-// Группирует обновления по apiKey и выполняет одинарный UPDATE для каждого ключа
+// updateTokens updates Token.spend in LiteLLM_VerificationToken.
+// Executes a single UPDATE per apiKey.
 func updateTokens(ctx context.Context, tx pgx.Tx, tokens map[string]float64) error {
 	for apiKey, amount := range tokens {
 		_, err := tx.Exec(ctx,
@@ -137,8 +137,8 @@ func updateTokens(ctx context.Context, tx pgx.Tx, tokens map[string]float64) err
 	return nil
 }
 
-// updateUsers - обновить LiteLLM_UserTable.spend
-// Проверяет spend IS NOT NULL для избежания случайного обновления null значений
+// updateUsers updates LiteLLM_UserTable.spend.
+// Checks spend IS NOT NULL to avoid accidentally updating null values.
 func updateUsers(ctx context.Context, tx pgx.Tx, users map[string]float64) error {
 	for userID, amount := range users {
 		_, err := tx.Exec(ctx,
@@ -151,8 +151,8 @@ func updateUsers(ctx context.Context, tx pgx.Tx, users map[string]float64) error
 	return nil
 }
 
-// updateTeams - обновить LiteLLM_TeamTable.spend
-// Проверяет spend IS NOT NULL для избежания случайного обновления null значений
+// updateTeams updates LiteLLM_TeamTable.spend.
+// Checks spend IS NOT NULL to avoid accidentally updating null values.
 func updateTeams(ctx context.Context, tx pgx.Tx, teams map[string]float64) error {
 	for teamID, amount := range teams {
 		_, err := tx.Exec(ctx,
@@ -165,8 +165,8 @@ func updateTeams(ctx context.Context, tx pgx.Tx, teams map[string]float64) error
 	return nil
 }
 
-// updateOrgs - обновить LiteLLM_OrganizationTable.spend
-// Проверяет spend IS NOT NULL для избежания случайного обновления null значений
+// updateOrgs updates LiteLLM_OrganizationTable.spend.
+// Checks spend IS NOT NULL to avoid accidentally updating null values.
 func updateOrgs(ctx context.Context, tx pgx.Tx, orgs map[string]float64) error {
 	for orgID, amount := range orgs {
 		_, err := tx.Exec(ctx,
@@ -179,12 +179,12 @@ func updateOrgs(ctx context.Context, tx pgx.Tx, orgs map[string]float64) error {
 	return nil
 }
 
-// updateTeamMembers - обновить LiteLLM_TeamMembership.spend
-// Используется ключ "teamID:userID" для идентификации записи
-// Проверяет spend IS NOT NULL для избежания случайного обновления null значений
+// updateTeamMembers updates LiteLLM_TeamMembership.spend.
+// Uses composite key "teamID:userID" for record identification.
+// Checks spend IS NOT NULL to avoid accidentally updating null values.
 func updateTeamMembers(ctx context.Context, tx pgx.Tx, teamMembers map[string]float64) error {
 	for key, amount := range teamMembers {
-		// key формата "teamID:userID"
+		// key format: "teamID:userID"
 		parts := strings.SplitN(key, ":", 2)
 		if len(parts) != 2 {
 			return fmt.Errorf("invalid team member key format %q: expected 'teamID:userID'", key)
@@ -206,12 +206,12 @@ func updateTeamMembers(ctx context.Context, tx pgx.Tx, teamMembers map[string]fl
 	return nil
 }
 
-// updateOrgMembers - обновить LiteLLM_OrganizationMembership.spend
-// Используется ключ "orgID:userID" для идентификации записи
-// Проверяет spend IS NOT NULL для избежания случайного обновления null значений
+// updateOrgMembers updates LiteLLM_OrganizationMembership.spend.
+// Uses composite key "orgID:userID" for record identification.
+// Checks spend IS NOT NULL to avoid accidentally updating null values.
 func updateOrgMembers(ctx context.Context, tx pgx.Tx, orgMembers map[string]float64) error {
 	for key, amount := range orgMembers {
-		// key формата "orgID:userID"
+		// key format: "orgID:userID"
 		parts := strings.SplitN(key, ":", 2)
 		if len(parts) != 2 {
 			return fmt.Errorf("invalid org member key format %q: expected 'orgID:userID'", key)

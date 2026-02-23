@@ -50,14 +50,6 @@ func aggregateDailyUserSpendLogs(
 	aggregations := make(map[aggregationKey]*aggregationValue)
 
 	for _, record := range records {
-		logger.Debug("[DB] User aggregation: log scanned",
-			"request_id", record.RequestID,
-			"user_id", record.UserID,
-			"date", record.Date,
-			"api_key_prefix", safeAPIKeyPrefix(record.APIKey),
-			"spend", record.Spend,
-		)
-
 		// Skip if no user_id
 		if record.UserID == "" {
 			continue

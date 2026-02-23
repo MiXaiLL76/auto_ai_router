@@ -77,14 +77,6 @@ func aggregateDailyOrganizationSpendLogs(
 			agg.failedRequests++
 		}
 
-		logger.Debug("[DB] Organization aggregation: log accumulated",
-			"org_id", record.OrganizationID,
-			"date", record.Date,
-			"api_key", safeAPIKeyPrefix(record.APIKey),
-			"model", record.Model,
-			"api_requests_total", agg.apiRequests,
-			"spend_total", agg.spend,
-		)
 	}
 
 	logger.Debug("[DB] Organization aggregation: scan complete",
@@ -125,10 +117,6 @@ func aggregateDailyOrganizationSpendLogs(
 
 	logger.Debug("[DB] Organization aggregation: all upserts completed",
 		"total_upserts", upsertCount,
-	)
-
-	logger.Debug("Organization aggregation completed",
-		"aggregations", len(aggregations),
 	)
 
 	return nil

@@ -315,8 +315,6 @@ func initializeLiteLLMDB(cfg *config.Config, log *slog.Logger) litellmdb.Manager
 		LogQueueSize:        cfg.LiteLLMDB.LogQueueSize,
 		LogBatchSize:        cfg.LiteLLMDB.LogBatchSize,
 		LogFlushInterval:    cfg.LiteLLMDB.LogFlushInterval,
-		LogRetryAttempts:    cfg.LiteLLMDB.LogRetryAttempts,
-		LogRetryDelay:       cfg.LiteLLMDB.LogRetryDelay,
 		Logger:              log,
 	}
 

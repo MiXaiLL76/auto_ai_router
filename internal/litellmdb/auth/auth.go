@@ -126,13 +126,14 @@ func (a *Authenticator) fetchTokenFromDB(ctx context.Context, hashedToken string
 	var tokenTPMLimit, tokenRPMLimit *int64
 	var expires *time.Time
 	var blocked *bool
+	var tokenModels []string
 
 	// ============ User fields ============
 	var userIDCheck, userAlias, userEmail *string
 	var userMaxBudget, userSpend *float64
 
 	// ============ Team fields ============
-	var teamIDCheck, teamAlias, teamOrgID *string
+	var teamIDCheck, teamAlias *string
 	var teamMaxBudget, teamSpend *float64
 	var teamBlocked *bool
 	var teamTPMLimit, teamRPMLimit *int64
@@ -167,6 +168,7 @@ func (a *Authenticator) fetchTokenFromDB(ctx context.Context, hashedToken string
 		&tokenRPMLimit,
 		&expires,
 		&blocked,
+		&tokenModels,
 
 		// User
 		&userIDCheck,
@@ -178,7 +180,7 @@ func (a *Authenticator) fetchTokenFromDB(ctx context.Context, hashedToken string
 		// Team
 		&teamIDCheck,
 		&teamAlias,
-		&teamOrgID,
+		new(string), // team_organization_id (positional, not used)
 		&teamMaxBudget,
 		&teamSpend,
 		&teamBlocked,
@@ -238,6 +240,7 @@ func (a *Authenticator) fetchTokenFromDB(ctx context.Context, hashedToken string
 	if blocked != nil {
 		info.Blocked = *blocked
 	}
+	info.Models = tokenModels
 
 	info.MaxBudget = tokenMaxBudget
 	info.Expires = expires

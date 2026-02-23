@@ -5,16 +5,6 @@ package queries
 // Uses PostgreSQL JOINs and COALESCE for organization_id resolution
 
 const QueryValidateTokenWithHierarchy = `
--- CTE to resolve organization_id (from token or team)
-WITH org_id_resolved AS (
-  SELECT
-    t.token,
-    COALESCE(t.organization_id, tm.organization_id) as resolved_org_id
-  FROM "LiteLLM_VerificationToken" t
-  LEFT JOIN "LiteLLM_TeamTable" tm ON t.team_id = tm.team_id
-  WHERE t.token = $1
-)
-
 -- Main query with all JOINs
 SELECT
   -- ============ Token ============
@@ -30,6 +20,7 @@ SELECT
   t.rpm_limit as token_rpm_limit,
   t.expires,
   t.blocked as token_blocked,
+  t.models as token_models,
 
   -- ============ User ============
   u.user_id as user_id_check,

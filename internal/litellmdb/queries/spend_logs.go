@@ -327,6 +327,6 @@ func BuildBatchInsertQuery(count int) string {
 		b.WriteString(", NULL, NULL)") // messages, response = NULL
 	}
 
-	b.WriteString(" ON CONFLICT (request_id) DO NOTHING")
+	b.WriteString(" ON CONFLICT (request_id) DO NOTHING RETURNING request_id")
 	return b.String()
 }

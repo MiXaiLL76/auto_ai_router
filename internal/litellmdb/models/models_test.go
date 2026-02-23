@@ -23,8 +23,6 @@ func TestDefaultConfig(t *testing.T) {
 	assert.Equal(t, 10000, cfg.LogQueueSize)
 	assert.Equal(t, 100, cfg.LogBatchSize)
 	assert.Equal(t, 5*time.Second, cfg.LogFlushInterval)
-	assert.Equal(t, 3, cfg.LogRetryAttempts)
-	assert.Equal(t, 1*time.Second, cfg.LogRetryDelay)
 }
 
 // ==================== Config.ApplyDefaults Tests ====================
@@ -43,8 +41,6 @@ func TestConfig_ApplyDefaults_AllZero(t *testing.T) {
 	assert.Equal(t, defaults.LogQueueSize, cfg.LogQueueSize)
 	assert.Equal(t, defaults.LogBatchSize, cfg.LogBatchSize)
 	assert.Equal(t, defaults.LogFlushInterval, cfg.LogFlushInterval)
-	assert.Equal(t, defaults.LogRetryAttempts, cfg.LogRetryAttempts)
-	assert.Equal(t, defaults.LogRetryDelay, cfg.LogRetryDelay)
 	assert.NotNil(t, cfg.Logger)
 }
 

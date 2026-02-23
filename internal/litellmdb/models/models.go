@@ -57,8 +57,6 @@ type Config struct {
 	LogQueueSize     int           // Queue buffer size (default: 10000)
 	LogBatchSize     int           // Batch size for INSERT (default: 100)
 	LogFlushInterval time.Duration // Flush interval (default: 5s)
-	LogRetryAttempts int           // Retry attempts on error (default: 3)
-	LogRetryDelay    time.Duration // Delay between retries (default: 1s)
 
 	// Logger
 	Logger *slog.Logger
@@ -76,8 +74,6 @@ func DefaultConfig() *Config {
 		LogQueueSize:        10000,
 		LogBatchSize:        100,
 		LogFlushInterval:    5 * time.Second,
-		LogRetryAttempts:    3,
-		LogRetryDelay:       1 * time.Second,
 	}
 }
 
@@ -114,12 +110,6 @@ func (c *Config) ApplyDefaults() {
 	}
 	if c.LogFlushInterval == 0 {
 		c.LogFlushInterval = defaults.LogFlushInterval
-	}
-	if c.LogRetryAttempts == 0 {
-		c.LogRetryAttempts = defaults.LogRetryAttempts
-	}
-	if c.LogRetryDelay == 0 {
-		c.LogRetryDelay = defaults.LogRetryDelay
 	}
 	if c.Logger == nil {
 		c.Logger = slog.Default()

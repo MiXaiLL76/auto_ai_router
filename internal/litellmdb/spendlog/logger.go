@@ -69,6 +69,10 @@ type Logger struct {
 	mu                  sync.RWMutex
 	lastAggregationTime time.Time
 	aggregationTicker   *time.Ticker
+
+	// pendingAggregation receives insertedIDs from flushBatchWithSpendUpdate for immediate aggregation.
+	// Buffered: on overflow, safety-net (QuerySelectUnprocessedRequestIDs) will pick up.
+	pendingAggregation chan []string
 }
 
 // NewLogger creates a new asynchronous logger
@@ -76,11 +80,12 @@ func NewLogger(pool *connection.ConnectionPool, cfg *models.Config) *Logger {
 	cfg.ApplyDefaults()
 
 	sl := &Logger{
-		pool:     pool,
-		config:   cfg,
-		logger:   cfg.Logger,
-		queue:    make(chan *models.SpendLogEntry, cfg.LogQueueSize),
-		stopChan: make(chan struct{}),
+		pool:               pool,
+		config:             cfg,
+		logger:             cfg.Logger,
+		queue:              make(chan *models.SpendLogEntry, cfg.LogQueueSize),
+		stopChan:           make(chan struct{}),
+		pendingAggregation: make(chan []string, 500),
 	}
 
 	return sl
@@ -92,7 +97,7 @@ func (sl *Logger) Start() {
 	sl.startOnce.Do(func() {
 		// Initialize tickers BEFORE starting goroutines to prevent nil dereference race
 		sl.dlqRecoveryTicker = time.NewTicker(5 * time.Minute)
-		sl.aggregationTicker = time.NewTicker(10 * time.Second)
+		sl.aggregationTicker = time.NewTicker(5 * time.Minute)
 
 		sl.wg.Add(3)
 		go sl.worker()
@@ -416,16 +421,31 @@ func (sl *Logger) flushBatchWithSpendUpdate(batch []*models.SpendLogEntry) error
 		_ = tx.Rollback(ctx)
 	}()
 
-	// 1. INSERT batch into SpendLogs
+	// 1. INSERT batch into SpendLogs with RETURNING request_id
 	query := queries.BuildBatchInsertQuery(len(batch))
 	params := GetBatchParams(batch)
-	_, err = tx.Exec(ctx, query, params...)
+	insertRows, err := tx.Query(ctx, query, params...)
 	if err != nil {
 		return fmt.Errorf("batch insert: %w", err)
 	}
 
-	// 2. Aggregate and UPDATE spend
-	spendUpdates := aggregateSpendUpdates(batch)
+	var insertedIDs []string
+	for insertRows.Next() {
+		var id string
+		if err := insertRows.Scan(&id); err != nil {
+			insertRows.Close()
+			return fmt.Errorf("scan returning request_id: %w", err)
+		}
+		insertedIDs = append(insertedIDs, id)
+	}
+	insertRows.Close()
+	if err := insertRows.Err(); err != nil {
+		return fmt.Errorf("iterate returning rows: %w", err)
+	}
+
+	// 2. Aggregate and UPDATE spend (only for actually inserted entries)
+	filteredBatch := filterBatchByInsertedIDs(batch, insertedIDs)
+	spendUpdates := aggregateSpendUpdates(filteredBatch)
 	err = executeSpendUpdates(ctx, tx, spendUpdates)
 	if err != nil {
 		return fmt.Errorf("spend updates: %w", err)
@@ -435,6 +455,18 @@ func (sl *Logger) flushBatchWithSpendUpdate(batch []*models.SpendLogEntry) error
 	err = tx.Commit(ctx)
 	if err != nil {
 		return fmt.Errorf("commit transaction: %w", err)
+	}
+
+	// Send insertedIDs to aggregationWorker (non-blocking)
+	if len(insertedIDs) > 0 {
+		select {
+		case sl.pendingAggregation <- insertedIDs:
+			// sent
+		default:
+			sl.logger.Warn("[DB] pendingAggregation channel full, safety-net will handle",
+				"ids_count", len(insertedIDs),
+			)
+		}
 	}
 
 	return nil
@@ -610,36 +642,81 @@ func getSampleRequestIDs(batch []*models.SpendLogEntry, count int) []string {
 	return result
 }
 
-// aggregationWorker runs the daily spend aggregation every 10 seconds
-// NOTE: aggregationTicker is initialized in Start() to prevent nil race
+// filterBatchByInsertedIDs returns only entries whose RequestID is in insertedIDs.
+// Used after INSERT ... RETURNING to exclude conflicting (already existing) entries.
+func filterBatchByInsertedIDs(batch []*models.SpendLogEntry, insertedIDs []string) []*models.SpendLogEntry {
+	if len(insertedIDs) == 0 {
+		return nil
+	}
+	idSet := make(map[string]struct{}, len(insertedIDs))
+	for _, id := range insertedIDs {
+		idSet[id] = struct{}{}
+	}
+	result := make([]*models.SpendLogEntry, 0, len(insertedIDs))
+	for _, entry := range batch {
+		if _, ok := idSet[entry.RequestID]; ok {
+			result = append(result, entry)
+		}
+	}
+	return result
+}
+
+// aggregationWorker processes push-path aggregation and periodic safety-net
+// Push path: aggregates only IDs inserted by this router (no distributed lock needed)
+// Safety-net: periodic catch-all with pg_try_advisory_lock for crash recovery
 func (sl *Logger) aggregationWorker() {
 	defer sl.wg.Done()
 
 	for {
 		select {
 		case <-sl.stopChan:
-			// Shutdown: do final aggregation
+			// Shutdown: drain pending channel and run final safety-net
+			sl.drainPendingAggregation()
 			sl.aggregateSpendLogs()
 			return
+
+		case ids := <-sl.pendingAggregation:
+			// Main path: aggregate only what this router inserted
+			sl.aggregateByIDs(ids)
 
 		case <-sl.aggregationTicker.C:
 			// Priority check: if stopChan is also ready, prefer shutdown
 			select {
 			case <-sl.stopChan:
+				sl.drainPendingAggregation()
 				sl.aggregateSpendLogs()
 				return
 			default:
 			}
+			// Safety-net: catch "lost" logs (with advisory lock)
 			sl.aggregateSpendLogs()
 		}
 	}
 }
 
-// aggregateSpendLogs aggregates unprocessed spend logs into all Daily tables
+// drainPendingAggregation processes all accumulated IDs during shutdown
+func (sl *Logger) drainPendingAggregation() {
+	for {
+		select {
+		case ids := <-sl.pendingAggregation:
+			sl.aggregateByIDs(ids)
+		default:
+			return
+		}
+	}
+}
+
+// aggregationLockID is a unique constant for pg_advisory_lock (safety-net only)
+const aggregationLockID = int64(7_463_951_234)
+
+// aggregateSpendLogs is the safety-net aggregator for crash recovery.
+// Runs every 5 minutes with pg_try_advisory_lock to prevent multiple routers
+// from aggregating the same logs simultaneously.
 // Flow:
-// 1. Fetch unprocessed request_ids (snapshot at aggregation start)
-// 2. Call aggregators for: User, Team, Organization, EndUser, Agent, Tag
-// 3. Mark all request_ids as processed
+// 1. Acquire advisory lock (skip if another router holds it)
+// 2. Fetch unprocessed request_ids (snapshot at aggregation start)
+// 3. Call aggregators for: User, Team, Organization, EndUser, Agent, Tag
+// 4. Mark all request_ids as processed
 func (sl *Logger) aggregateSpendLogs() {
 	// Skip if pool is not initialized (e.g., in tests)
 	if sl.pool == nil {
@@ -663,7 +740,22 @@ func (sl *Logger) aggregateSpendLogs() {
 		sl.logger.Error("[DB] Aggregation: failed to acquire connection", "error", err)
 		return
 	}
-	defer conn.Release()
+
+	// Try to acquire distributed lock (one router aggregates at a time)
+	var lockAcquired bool
+	if err := conn.QueryRow(aggCtx, "SELECT pg_try_advisory_lock($1)", aggregationLockID).Scan(&lockAcquired); err != nil || !lockAcquired {
+		conn.Release()
+		sl.logger.Debug("[DB] Safety-net aggregation skipped: another router holds lock")
+		return
+	}
+
+	// Guaranteed order: unlock → release
+	defer func() {
+		unlockCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_, _ = conn.Exec(unlockCtx, "SELECT pg_advisory_unlock($1)", aggregationLockID)
+		conn.Release()
+	}()
 
 	// 1. Fetch unprocessed request_ids (snapshot)
 	fetchCtx, fetchCancel := context.WithTimeout(aggCtx, 30*time.Second)
@@ -723,69 +815,8 @@ func (sl *Logger) aggregateSpendLogs() {
 		return
 	}
 
-	// Call all aggregators with the same pre-loaded records
-	// Each aggregator gets its own 30-second timeout context
-	hasErrors := false
-
-	aggregators := []struct {
-		name string
-		fn   func() error
-	}{
-		{"User", func() error {
-			c, cn := context.WithTimeout(aggCtx, 30*time.Second)
-			defer cn()
-			return aggregateDailyUserSpendLogs(c, conn, sl.logger, records)
-		}},
-		{"Team", func() error {
-			c, cn := context.WithTimeout(aggCtx, 30*time.Second)
-			defer cn()
-			return aggregateDailyTeamSpendLogs(c, conn, sl.logger, records)
-		}},
-		{"Organization", func() error {
-			c, cn := context.WithTimeout(aggCtx, 30*time.Second)
-			defer cn()
-			return aggregateDailyOrganizationSpendLogs(c, conn, sl.logger, records)
-		}},
-		{"EndUser", func() error {
-			c, cn := context.WithTimeout(aggCtx, 30*time.Second)
-			defer cn()
-			return aggregateDailyEndUserSpendLogs(c, conn, sl.logger, records)
-		}},
-		{"Agent", func() error {
-			c, cn := context.WithTimeout(aggCtx, 30*time.Second)
-			defer cn()
-			return aggregateDailyAgentSpendLogs(c, conn, sl.logger, records)
-		}},
-		{"Tag", func() error {
-			c, cn := context.WithTimeout(aggCtx, 30*time.Second)
-			defer cn()
-			return aggregateDailyTagSpendLogs(c, conn, sl.logger, records)
-		}},
-	}
-
-	for _, agg := range aggregators {
-		if err := agg.fn(); err != nil {
-			hasErrors = true
-			atomic.AddUint64(&sl.aggregationErrors, 1)
-			sl.logger.Error("[DB] Aggregation failed", "aggregator", agg.name, "error", err)
-		}
-	}
-
-	// 3. Mark all request_ids as processed (only if all aggregators succeeded)
-	if !hasErrors {
-		markCtx, markCancel := context.WithTimeout(aggCtx, 30*time.Second)
-		_, err := conn.Exec(markCtx, queries.QueryMarkSpendLogsAsProcessed, requestIDs)
-		markCancel()
-		if err != nil {
-			atomic.AddUint64(&sl.aggregationErrors, 1)
-			sl.logger.Error("[DB] Aggregation: failed to mark request_ids as processed", "error", err)
-			return
-		}
-
-		atomic.AddUint64(&sl.aggregationCount, 1)
-		sl.mu.Lock()
-		sl.lastAggregationTime = utils.NowUTC()
-		sl.mu.Unlock()
+	// 3. Run all aggregators and mark as processed
+	if ok := sl.runAggregators(aggCtx, conn, "Aggregation", records, requestIDs); ok {
 		sl.logger.Debug("[DB] All aggregations completed",
 			"request_ids_count", len(requestIDs),
 		)

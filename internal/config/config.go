@@ -260,8 +260,6 @@ type LiteLLMDBConfig struct {
 	LogQueueSize     int           `yaml:"log_queue_size"`     // default: 10000
 	LogBatchSize     int           `yaml:"log_batch_size"`     // default: 100
 	LogFlushInterval time.Duration `yaml:"log_flush_interval"` // default: 5s
-	LogRetryAttempts int           `yaml:"log_retry_attempts"` // default: 3
-	LogRetryDelay    time.Duration `yaml:"log_retry_delay"`    // default: 1s
 }
 
 // UnmarshalYAML implements custom unmarshaling for MonitoringConfig with env variable support
@@ -309,8 +307,6 @@ func (l *LiteLLMDBConfig) UnmarshalYAML(value *yaml.Node) error {
 		LogQueueSize        string `yaml:"log_queue_size"`
 		LogBatchSize        string `yaml:"log_batch_size"`
 		LogFlushInterval    string `yaml:"log_flush_interval"`
-		LogRetryAttempts    string `yaml:"log_retry_attempts"`
-		LogRetryDelay       string `yaml:"log_retry_delay"`
 	}
 
 	var temp tempConfig
@@ -346,10 +342,6 @@ func (l *LiteLLMDBConfig) UnmarshalYAML(value *yaml.Node) error {
 	if l.LogBatchSize, err = parseField(temp.LogBatchSize, 100, strconv.Atoi, "litellm_db.log_batch_size"); err != nil {
 		return err
 	}
-	if l.LogRetryAttempts, err = parseField(temp.LogRetryAttempts, 3, strconv.Atoi, "litellm_db.log_retry_attempts"); err != nil {
-		return err
-	}
-
 	// Duration fields
 	if l.HealthCheckInterval, err = parseField(temp.HealthCheckInterval, 10*time.Second, time.ParseDuration, "litellm_db.health_check_interval"); err != nil {
 		return err
@@ -361,9 +353,6 @@ func (l *LiteLLMDBConfig) UnmarshalYAML(value *yaml.Node) error {
 		return err
 	}
 	if l.LogFlushInterval, err = parseField(temp.LogFlushInterval, 5*time.Second, time.ParseDuration, "litellm_db.log_flush_interval"); err != nil {
-		return err
-	}
-	if l.LogRetryDelay, err = parseField(temp.LogRetryDelay, time.Second, time.ParseDuration, "litellm_db.log_retry_delay"); err != nil {
 		return err
 	}
 

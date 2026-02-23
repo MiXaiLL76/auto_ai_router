@@ -144,8 +144,6 @@ func PrintConfig(logger *slog.Logger, cfg *Config) {
 			"log_queue_size", cfg.LiteLLMDB.LogQueueSize,
 			"log_batch_size", cfg.LiteLLMDB.LogBatchSize,
 			"log_flush_interval", cfg.LiteLLMDB.LogFlushInterval.String(),
-			"log_retry_attempts", cfg.LiteLLMDB.LogRetryAttempts,
-			"log_retry_delay", cfg.LiteLLMDB.LogRetryDelay.String(),
 		)
 	} else {
 		logger.Info("litellm_db", "status", "DISABLED")
