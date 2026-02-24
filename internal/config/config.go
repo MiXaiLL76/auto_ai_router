@@ -65,6 +65,7 @@ type ServerConfig struct {
 	ReadTimeout            time.Duration `yaml:"-"`                           // HTTP server read timeout (equals request_timeout, not configurable via YAML)
 	WriteTimeout           time.Duration `yaml:"write_timeout"`               // HTTP server write timeout (default: 60s)
 	IdleTimeout            time.Duration `yaml:"idle_timeout"`                // HTTP server idle timeout (default: 2*write_timeout)
+	MaxProviderRetries     int           `yaml:"max_provider_retries"`        // Max same-type credential retries on provider errors (default: 2, meaning 3 total attempts)
 	ModelPricesLink        string        `yaml:"model_prices_link,omitempty"` // URL or file path to model prices JSON - supports os.environ/VAR_NAME
 }
 
@@ -98,6 +99,7 @@ func (s *ServerConfig) UnmarshalYAML(value *yaml.Node) error {
 		IdleConnTimeout        string `yaml:"idle_conn_timeout"`
 		WriteTimeout           string `yaml:"write_timeout"`
 		IdleTimeout            string `yaml:"idle_timeout"`
+		MaxProviderRetries     string `yaml:"max_provider_retries"`
 		ModelPricesLink        string `yaml:"model_prices_link,omitempty"`
 	}
 
@@ -140,6 +142,11 @@ func (s *ServerConfig) UnmarshalYAML(value *yaml.Node) error {
 		return err
 	}
 	if s.IdleTimeout, err = parseField(temp.IdleTimeout, 2*time.Minute, time.ParseDuration, "idle_timeout"); err != nil {
+		return err
+	}
+
+	// Max provider retries (default: 2 = 3 total attempts)
+	if s.MaxProviderRetries, err = parseField(temp.MaxProviderRetries, 2, strconv.Atoi, "max_provider_retries"); err != nil {
 		return err
 	}
 
@@ -503,6 +510,11 @@ func (c *Config) Validate() error {
 
 	// ReadTimeout equals RequestTimeout (not configurable via YAML)
 	c.Server.ReadTimeout = c.Server.RequestTimeout
+
+	// Validate MaxProviderRetries
+	if c.Server.MaxProviderRetries < 0 {
+		return fmt.Errorf("invalid max_provider_retries: %d (must be >= 0)", c.Server.MaxProviderRetries)
+	}
 
 	// Validate IdleTimeout against WriteTimeout
 	if c.Server.IdleTimeout == 0 {

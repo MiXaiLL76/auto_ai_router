@@ -854,6 +854,136 @@ func TestValidateFallbackConfiguration_NoFallbacks(t *testing.T) {
 	}
 }
 
+func TestNextForModelExcluding_Basic(t *testing.T) {
+	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
+	rl := ratelimit.New()
+
+	credentials := []config.CredentialConfig{
+		{Name: "cred1", APIKey: "key1", BaseURL: "http://test1.com", RPM: 100},
+		{Name: "cred2", APIKey: "key2", BaseURL: "http://test2.com", RPM: 100},
+		{Name: "cred3", APIKey: "key3", BaseURL: "http://test3.com", RPM: 100},
+		{Name: "cred4", APIKey: "key4", BaseURL: "http://test4.com", RPM: 100},
+	}
+
+	bal := New(credentials, f2b, rl)
+
+	// Exclude cred1 and cred3
+	exclude := map[string]bool{"cred1": true, "cred3": true}
+
+	// Should return cred2 first, then cred4
+	cred, err := bal.NextForModelExcluding("", exclude)
+	require.NoError(t, err)
+	assert.Equal(t, "cred2", cred.Name)
+
+	cred, err = bal.NextForModelExcluding("", exclude)
+	require.NoError(t, err)
+	assert.Equal(t, "cred4", cred.Name)
+
+	// Should cycle back to cred2
+	cred, err = bal.NextForModelExcluding("", exclude)
+	require.NoError(t, err)
+	assert.Equal(t, "cred2", cred.Name)
+}
+
+func TestNextForModelExcluding_AllExcluded(t *testing.T) {
+	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
+	rl := ratelimit.New()
+
+	credentials := []config.CredentialConfig{
+		{Name: "cred1", APIKey: "key1", BaseURL: "http://test1.com", RPM: 100},
+		{Name: "cred2", APIKey: "key2", BaseURL: "http://test2.com", RPM: 100},
+	}
+
+	bal := New(credentials, f2b, rl)
+
+	// Exclude all credentials
+	exclude := map[string]bool{"cred1": true, "cred2": true}
+
+	_, err := bal.NextForModelExcluding("", exclude)
+	assert.Error(t, err)
+	assert.Equal(t, ErrNoCredentialsAvailable, err)
+}
+
+func TestNextForModelExcluding_RoundRobin(t *testing.T) {
+	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
+	rl := ratelimit.New()
+
+	credentials := []config.CredentialConfig{
+		{Name: "cred1", Type: config.ProviderTypeOpenAI, APIKey: "key1", BaseURL: "http://test1.com", RPM: 1000},
+		{Name: "cred2", Type: config.ProviderTypeVertexAI, APIKey: "key2", RPM: 1000, ProjectID: "p", Location: "l"},
+		{Name: "cred3", Type: config.ProviderTypeOpenAI, APIKey: "key3", BaseURL: "http://test3.com", RPM: 1000},
+		{Name: "cred4", Type: config.ProviderTypeVertexAI, APIKey: "key4", RPM: 1000, ProjectID: "p", Location: "l"},
+	}
+
+	bal := New(credentials, f2b, rl)
+
+	// First call without exclude gets cred1
+	cred, err := bal.NextForModel("")
+	require.NoError(t, err)
+	assert.Equal(t, "cred1", cred.Name)
+
+	// Now exclude cred1 (already tried), should get cred2
+	exclude := map[string]bool{"cred1": true}
+	cred, err = bal.NextForModelExcluding("", exclude)
+	require.NoError(t, err)
+	assert.Equal(t, "cred2", cred.Name)
+
+	// Exclude cred1 and cred2, should get cred3
+	exclude["cred2"] = true
+	cred, err = bal.NextForModelExcluding("", exclude)
+	require.NoError(t, err)
+	assert.Equal(t, "cred3", cred.Name)
+}
+
+func TestNextForModelExcluding_SkipsFallback(t *testing.T) {
+	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
+	rl := ratelimit.New()
+
+	credentials := []config.CredentialConfig{
+		{Name: "cred1", APIKey: "key1", BaseURL: "http://test1.com", RPM: 100},
+		{Name: "fallback1", Type: config.ProviderTypeProxy, IsFallback: true, RPM: 100, TPM: 10000},
+		{Name: "cred2", APIKey: "key2", BaseURL: "http://test2.com", RPM: 100},
+	}
+
+	bal := New(credentials, f2b, rl)
+
+	// Exclude cred1, should skip fallback1 and return cred2
+	exclude := map[string]bool{"cred1": true}
+	cred, err := bal.NextForModelExcluding("", exclude)
+	require.NoError(t, err)
+	assert.Equal(t, "cred2", cred.Name)
+}
+
+func TestNextForModelExcluding_WithModelChecker(t *testing.T) {
+	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
+	rl := ratelimit.New()
+
+	credentials := []config.CredentialConfig{
+		{Name: "cred1", Type: config.ProviderTypeVertexAI, APIKey: "key1", RPM: 1000, ProjectID: "p", Location: "l"},
+		{Name: "cred2", Type: config.ProviderTypeVertexAI, APIKey: "key2", RPM: 1000, ProjectID: "p", Location: "l"},
+		{Name: "cred3", Type: config.ProviderTypeOpenAI, APIKey: "key3", BaseURL: "http://test3.com", RPM: 1000},
+	}
+
+	bal := New(credentials, f2b, rl)
+
+	mc := NewMockModelChecker(true)
+	mc.AddModel("cred1", "gemini-2.5-flash")
+	mc.AddModel("cred2", "gemini-2.5-flash")
+	// cred3 does NOT support gemini-2.5-flash
+	bal.SetModelChecker(mc)
+
+	// Exclude cred1 for gemini-2.5-flash model
+	exclude := map[string]bool{"cred1": true}
+	cred, err := bal.NextForModelExcluding("gemini-2.5-flash", exclude)
+	require.NoError(t, err)
+	assert.Equal(t, "cred2", cred.Name, "Should return cred2 since cred1 is excluded and cred3 doesn't support the model")
+
+	// Exclude both vertex creds
+	exclude["cred2"] = true
+	_, err = bal.NextForModelExcluding("gemini-2.5-flash", exclude)
+	assert.Error(t, err, "Should error when all model-supporting creds are excluded")
+}
+
 func TestRoundRobin_MultipleCredentialsSameModel(t *testing.T) {
 	// Test case: 4 credentials with same model should be cycled properly
 	// This reproduces the issue where storied-port-482316-u0 was being used 90% of the time

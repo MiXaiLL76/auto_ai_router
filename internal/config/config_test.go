@@ -888,6 +888,113 @@ func TestConfig_Validate_DatabaseURL(t *testing.T) {
 	}
 }
 
+func TestConfig_Validate_MaxProviderRetries(t *testing.T) {
+	tests := []struct {
+		name               string
+		maxProviderRetries int
+		wantErr            bool
+	}{
+		{"default value (2)", 2, false},
+		{"zero retries", 0, false},
+		{"high value", 10, false},
+		{"negative value", -1, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &Config{
+				Server: ServerConfig{
+					Port:               8080,
+					MaxBodySizeMB:      10,
+					MasterKey:          "test-key",
+					RequestTimeout:     30 * time.Second,
+					MaxProviderRetries: tt.maxProviderRetries,
+				},
+				Credentials: []CredentialConfig{
+					{Name: "test", Type: "openai", APIKey: "key", BaseURL: "http://test.com", RPM: 10},
+				},
+				Fail2Ban: Fail2BanConfig{MaxAttempts: 3},
+			}
+			err := cfg.Validate()
+			if tt.wantErr {
+				assert.Error(t, err)
+				assert.Contains(t, err.Error(), "invalid max_provider_retries")
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestLoad_MaxProviderRetries_Default(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.yaml")
+
+	configContent := `
+server:
+  port: 8080
+  max_body_size_mb: 10
+  request_timeout: 30s
+  master_key: "sk-test"
+
+fail2ban:
+  max_attempts: 3
+  ban_duration: permanent
+  error_codes: [401]
+
+credentials:
+  - name: "test"
+    type: "openai"
+    api_key: "sk-test"
+    base_url: "https://api.openai.com"
+    rpm: 10
+
+monitoring:
+  prometheus_enabled: false
+`
+	err := os.WriteFile(configPath, []byte(configContent), 0644)
+	require.NoError(t, err)
+
+	cfg, err := Load(configPath)
+	require.NoError(t, err)
+	assert.Equal(t, 2, cfg.Server.MaxProviderRetries, "Default MaxProviderRetries should be 2")
+}
+
+func TestLoad_MaxProviderRetries_Custom(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.yaml")
+
+	configContent := `
+server:
+  port: 8080
+  max_body_size_mb: 10
+  request_timeout: 30s
+  master_key: "sk-test"
+  max_provider_retries: 5
+
+fail2ban:
+  max_attempts: 3
+  ban_duration: permanent
+  error_codes: [401]
+
+credentials:
+  - name: "test"
+    type: "openai"
+    api_key: "sk-test"
+    base_url: "https://api.openai.com"
+    rpm: 10
+
+monitoring:
+  prometheus_enabled: false
+`
+	err := os.WriteFile(configPath, []byte(configContent), 0644)
+	require.NoError(t, err)
+
+	cfg, err := Load(configPath)
+	require.NoError(t, err)
+	assert.Equal(t, 5, cfg.Server.MaxProviderRetries, "Custom MaxProviderRetries should be 5")
+}
+
 func TestResolveEnvString(t *testing.T) {
 	tests := []struct {
 		name     string

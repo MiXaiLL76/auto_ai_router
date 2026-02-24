@@ -107,6 +107,7 @@ func main() {
 		LiteLLMDB:              litellmDBManager,
 		HealthChecker:          healthChecker,
 		PriceRegistry:          priceRegistry,
+		MaxProviderRetries:     cfg.Server.MaxProviderRetries,
 	})
 
 	// ==================== Background Goroutines ====================

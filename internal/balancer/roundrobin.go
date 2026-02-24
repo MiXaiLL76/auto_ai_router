@@ -143,6 +143,12 @@ func (r *RoundRobin) NextFallbackProxyForModel(modelID string) (*config.Credenti
 }
 
 func (r *RoundRobin) next(modelID string, allowOnlyFallback, allowOnlyProxy bool) (*config.CredentialConfig, error) {
+	return r.nextExcluding(modelID, allowOnlyFallback, allowOnlyProxy, nil)
+}
+
+// nextExcluding is the core credential selection logic with optional exclude set.
+// Excluded credentials are skipped entirely and don't count as candidates.
+func (r *RoundRobin) nextExcluding(modelID string, allowOnlyFallback, allowOnlyProxy bool, exclude map[string]bool) (*config.CredentialConfig, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -155,6 +161,11 @@ func (r *RoundRobin) next(modelID string, allowOnlyFallback, allowOnlyProxy bool
 		// Calculate current index in rotation
 		idx := (startIndex + i) % len(r.credentials)
 		cred := &r.credentials[idx]
+
+		// Skip excluded credentials first (they don't count as candidates)
+		if len(exclude) > 0 && exclude[cred.Name] {
+			continue
+		}
 
 		// Filter by credential type
 		// These are structural filters, not availability issues
@@ -220,6 +231,13 @@ func (r *RoundRobin) next(modelID string, allowOnlyFallback, allowOnlyProxy bool
 	}
 	// All candidates are banned
 	return nil, ErrNoCredentialsAvailable
+}
+
+// NextForModelExcluding returns the next available non-fallback credential that supports
+// the specified model, excluding credentials in the exclude set. Used for same-type
+// credential retry on provider errors (429/5xx/auth errors).
+func (r *RoundRobin) NextForModelExcluding(modelID string, exclude map[string]bool) (*config.CredentialConfig, error) {
+	return r.nextExcluding(modelID, false, false, exclude)
 }
 
 func (r *RoundRobin) RecordResponse(credentialName, modelID string, statusCode int) {
