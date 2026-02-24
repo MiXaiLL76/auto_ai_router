@@ -7,6 +7,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/mixaill76/auto_ai_router/internal/security"
 )
 
 // resolveEnvString resolves environment variable if value is in format "os.environ/VAR_NAME"
@@ -107,13 +109,22 @@ func PrintConfig(logger *slog.Logger, cfg *Config) {
 		"total_count", len(cfg.Credentials),
 	)
 	for i, cred := range cfg.Credentials {
-		logger.Info(fmt.Sprintf("  [%d] credential", i),
-			"name", cred.Name,
-			"type", cred.Type,
-			"rpm", rpmToString(cred.RPM),
-			"tpm", tpmToString(cred.TPM),
-			"is_fallback", cred.IsFallback,
-		)
+		credLog := map[string]any{
+			"name":        cred.Name,
+			"type":        cred.Type,
+			"base_url":    cred.BaseURL,
+			"rpm":         rpmToString(cred.RPM),
+			"tpm":         tpmToString(cred.TPM),
+			"is_fallback": cred.IsFallback,
+		}
+
+		// Add Vertex AI specific fields if present
+		if cred.Type == ProviderTypeVertexAI {
+			credLog["project_id"] = cred.ProjectID
+			credLog["location"] = cred.Location
+		}
+
+		logger.Info(fmt.Sprintf("  [%d] credential", i), convertMapToArgs(credLog)...)
 	}
 
 	// Models
@@ -135,6 +146,7 @@ func PrintConfig(logger *slog.Logger, cfg *Config) {
 	// LiteLLM DB config
 	if cfg.LiteLLMDB.Enabled {
 		logger.Info("litellm_db (ENABLED)",
+			"database_url", security.MaskDatabaseURL(cfg.LiteLLMDB.DatabaseURL),
 			"is_required", cfg.LiteLLMDB.IsRequired,
 			"max_conns", cfg.LiteLLMDB.MaxConns,
 			"min_conns", cfg.LiteLLMDB.MinConns,
@@ -175,4 +187,36 @@ func banDurationToString(d time.Duration) string {
 		return "permanent"
 	}
 	return d.String()
+}
+
+// convertMapToArgs converts a map[string]any to []any for logger.Info
+// Maintains consistent key ordering for deterministic output
+func convertMapToArgs(m map[string]any) []any {
+	// Define preferred order of keys
+	keyOrder := []string{
+		"name", "type", "base_url", "api_key", "project_id", "location",
+		"credentials_file", "credentials_json", "rpm", "tpm", "is_fallback",
+	}
+
+	args := make([]any, 0, len(m)*2)
+
+	// Add keys in preferred order
+	for _, key := range keyOrder {
+		if val, exists := m[key]; exists {
+			args = append(args, key, val)
+		}
+	}
+
+	// Add any remaining keys not in preferred order
+	addedKeys := make(map[string]bool)
+	for _, key := range keyOrder {
+		addedKeys[key] = true
+	}
+	for key, val := range m {
+		if !addedKeys[key] {
+			args = append(args, key, val)
+		}
+	}
+
+	return args
 }
