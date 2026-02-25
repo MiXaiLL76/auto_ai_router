@@ -11,13 +11,13 @@ Metrics are available at `/metrics`.
 
 ## Available Metrics
 
-| Metric | Type | Description |
-|---|---|---|
-| `auto_ai_router_credential_rpm_current` | Gauge | Current RPM usage per credential |
-| `auto_ai_router_credential_tpm_current` | Gauge | Current TPM usage per credential |
-| `auto_ai_router_credential_banned` | Gauge | Ban status per credential (1 = banned) |
-| `auto_ai_router_requests_total` | Counter | Total requests processed |
-| `auto_ai_router_requests_duration_seconds` | Histogram | Request latency distribution |
+| Metric                                     | Type      | Description                            |
+| ------------------------------------------ | --------- | -------------------------------------- |
+| `auto_ai_router_credential_rpm_current`    | Gauge     | Current RPM usage per credential       |
+| `auto_ai_router_credential_tpm_current`    | Gauge     | Current TPM usage per credential       |
+| `auto_ai_router_credential_banned`         | Gauge     | Ban status per credential (1 = banned) |
+| `auto_ai_router_requests_total`            | Counter   | Total requests processed               |
+| `auto_ai_router_requests_duration_seconds` | Histogram | Request latency distribution           |
 
 ## Proxy Credential Exclusion
 

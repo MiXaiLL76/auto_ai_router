@@ -14,7 +14,7 @@ credentials:
 
 ## Required Fields
 
-| Field | Description |
-|---|---|
-| `api_key` | Anthropic API key (supports `os.environ/VAR_NAME`) |
-| `base_url` | API base URL (`https://api.anthropic.com`) |
+| Field      | Description                                        |
+| ---------- | -------------------------------------------------- |
+| `api_key`  | Anthropic API key (supports `os.environ/VAR_NAME`) |
+| `base_url` | API base URL (`https://api.anthropic.com`)         |

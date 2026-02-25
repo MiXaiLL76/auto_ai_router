@@ -14,10 +14,10 @@ credentials:
 
 ## Required Fields
 
-| Field | Description |
-|---|---|
-| `api_key` | OpenAI API key (supports `os.environ/VAR_NAME`) |
-| `base_url` | API base URL (`https://api.openai.com`) |
+| Field      | Description                                     |
+| ---------- | ----------------------------------------------- |
+| `api_key`  | OpenAI API key (supports `os.environ/VAR_NAME`) |
+| `base_url` | API base URL (`https://api.openai.com`)         |
 
 ## Azure OpenAI
 

@@ -96,30 +96,30 @@ litellm_db:
 
 ## Server Parameters
 
-| Parameter | Type | Default | Description |
-|---|---|---|---|
-| `port` | int | 8080 | Listen port |
-| `max_body_size_mb` | int | 100 | Maximum request body size (MB) |
-| `response_body_multiplier` | int | 10 | Response body limit = max_body_size_mb * this value |
-| `request_timeout` | duration | 60s | Request timeout |
-| `write_timeout` | duration | 60s | HTTP server write timeout |
-| `idle_timeout` | duration | 2m | HTTP server idle timeout (default: 2 * write_timeout) |
-| `idle_conn_timeout` | duration | 120s | Idle connection timeout for keep-alive connections |
-| `max_idle_conns` | int | 200 | Maximum idle connections |
-| `max_idle_conns_per_host` | int | 20 | Maximum idle connections per host |
-| `logging_level` | string | info | Logging level: `info`, `debug`, `error` |
-| `master_key` | string | — | **Required.** Master key for client authentication |
-| `default_models_rpm` | int | -1 | Default RPM limit for models (-1 = unlimited) |
-| `model_prices_link` | string | — | URL or file path to model prices JSON |
+| Parameter                  | Type     | Default | Description                                           |
+| -------------------------- | -------- | ------- | ----------------------------------------------------- |
+| `port`                     | int      | 8080    | Listen port                                           |
+| `max_body_size_mb`         | int      | 100     | Maximum request body size (MB)                        |
+| `response_body_multiplier` | int      | 10      | Response body limit = max_body_size_mb * this value   |
+| `request_timeout`          | duration | 60s     | Request timeout                                       |
+| `write_timeout`            | duration | 60s     | HTTP server write timeout                             |
+| `idle_timeout`             | duration | 2m      | HTTP server idle timeout (default: 2 * write_timeout) |
+| `idle_conn_timeout`        | duration | 120s    | Idle connection timeout for keep-alive connections    |
+| `max_idle_conns`           | int      | 200     | Maximum idle connections                              |
+| `max_idle_conns_per_host`  | int      | 20      | Maximum idle connections per host                     |
+| `logging_level`            | string   | info    | Logging level: `info`, `debug`, `error`               |
+| `master_key`               | string   | —       | **Required.** Master key for client authentication    |
+| `default_models_rpm`       | int      | -1      | Default RPM limit for models (-1 = unlimited)         |
+| `model_prices_link`        | string   | —       | URL or file path to model prices JSON                 |
 
 ## Fail2Ban Parameters
 
-| Parameter | Type | Description |
-|---|---|---|
-| `max_attempts` | int | Maximum failed attempts before banning a credential |
-| `ban_duration` | string | Ban duration (`permanent` for permanent, or duration like `5m`, `1h`) |
-| `error_codes` | []int | HTTP status codes that trigger ban counting |
-| `error_code_rules` | []rule | Per-error-code override rules (see example below) |
+| Parameter          | Type   | Description                                                           |
+| ------------------ | ------ | --------------------------------------------------------------------- |
+| `max_attempts`     | int    | Maximum failed attempts before banning a credential                   |
+| `ban_duration`     | string | Ban duration (`permanent` for permanent, or duration like `5m`, `1h`) |
+| `error_codes`      | []int  | HTTP status codes that trigger ban counting                           |
+| `error_code_rules` | []rule | Per-error-code override rules (see example below)                     |
 
 ### Per-Error-Code Rules
 
@@ -138,14 +138,14 @@ fail2ban:
 
 ## Monitoring Parameters
 
-| Parameter | Type | Description |
-|---|---|---|
-| `prometheus_enabled` | bool | Enable Prometheus metrics on `/metrics` |
-| `log_errors` | bool | Enable error logging to file |
-| `errors_log_path` | string | Path to error log file |
+| Parameter            | Type   | Description                             |
+| -------------------- | ------ | --------------------------------------- |
+| `prometheus_enabled` | bool   | Enable Prometheus metrics on `/metrics` |
+| `log_errors`         | bool   | Enable error logging to file            |
+| `errors_log_path`    | string | Path to error log file                  |
 
 !!! note
-    The `/health` endpoint is always available and cannot be disabled or reconfigured.
+The `/health` endpoint is always available and cannot be disabled or reconfigured.
 
 ## Credentials
 
@@ -153,13 +153,13 @@ Each credential defines a connection to an LLM provider. See [Providers](../prov
 
 Common fields for all credentials:
 
-| Field | Type | Description |
-|---|---|---|
-| `name` | string | Unique credential identifier |
-| `type` | string | Provider type: `openai`, `anthropic`, `vertex-ai`, `gemini`, `proxy` |
-| `rpm` | int | Requests per minute limit (-1 = unlimited) |
-| `tpm` | int | Tokens per minute limit (-1 = unlimited) |
-| `is_fallback` | bool | Use as fallback when primary credentials are exhausted |
+| Field         | Type   | Description                                                          |
+| ------------- | ------ | -------------------------------------------------------------------- |
+| `name`        | string | Unique credential identifier                                         |
+| `type`        | string | Provider type: `openai`, `anthropic`, `vertex-ai`, `gemini`, `proxy` |
+| `rpm`         | int    | Requests per minute limit (-1 = unlimited)                           |
+| `tpm`         | int    | Tokens per minute limit (-1 = unlimited)                             |
+| `is_fallback` | bool   | Use as fallback when primary credentials are exhausted               |
 
 ## Models
 

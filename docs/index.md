@@ -9,9 +9,9 @@ Auto AI Router acts as a unified gateway between your applications and multiple 
 ```mermaid
 graph LR
     Client["<b>Client</b><br/>(OpenAI format)"]
-    
+
     Router{{"<b>Auto AI Router</b><br/>- Load balancing<br/>- Rate limiting<br/>- Fail2ban"}}
-    
+
     subgraph Providers ["Backend Providers"]
         OpenAI[OpenAI]
         Vertex[Vertex AI]

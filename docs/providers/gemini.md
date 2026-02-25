@@ -14,9 +14,9 @@ credentials:
 
 ## Required Fields
 
-| Field | Description |
-|---|---|
-| `api_key` | Google AI Studio API key (supports `os.environ/VAR_NAME`) |
+| Field      | Description                                                |
+| ---------- | ---------------------------------------------------------- |
+| `api_key`  | Google AI Studio API key (supports `os.environ/VAR_NAME`)  |
 | `base_url` | API base URL (`https://generativelanguage.googleapis.com`) |
 
 ## API Key Setup

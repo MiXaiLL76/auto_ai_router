@@ -16,22 +16,22 @@ litellm_db:
 
 ## Parameters
 
-| Parameter | Type | Default | Description |
-|---|---|---|---|
-| `enabled` | bool | false | Enable LiteLLM DB integration |
-| `is_required` | bool | false | Fail startup if DB connection fails |
-| `database_url` | string | — | PostgreSQL connection string (supports env variables) |
-| `max_conns` | int | 25 | Maximum database connections |
-| `min_conns` | int | 5 | Minimum database connections |
-| `health_check_interval` | duration | 10s | DB health check interval |
-| `connect_timeout` | duration | 5s | Connection timeout |
-| `auth_cache_ttl` | duration | 20s | Auth cache TTL |
-| `auth_cache_size` | int | 10000 | Auth cache size |
-| `log_queue_size` | int | 5000 | Spend log queue size |
-| `log_batch_size` | int | 100 | Spend log batch size |
-| `log_flush_interval` | duration | 5s | Spend log flush interval |
-| `log_retry_attempts` | int | 3 | Retry attempts on log insert failure |
-| `log_retry_delay` | duration | 1s | Delay between retry attempts |
+| Parameter               | Type     | Default | Description                                           |
+| ----------------------- | -------- | ------- | ----------------------------------------------------- |
+| `enabled`               | bool     | false   | Enable LiteLLM DB integration                         |
+| `is_required`           | bool     | false   | Fail startup if DB connection fails                   |
+| `database_url`          | string   | —       | PostgreSQL connection string (supports env variables) |
+| `max_conns`             | int      | 25      | Maximum database connections                          |
+| `min_conns`             | int      | 5       | Minimum database connections                          |
+| `health_check_interval` | duration | 10s     | DB health check interval                              |
+| `connect_timeout`       | duration | 5s      | Connection timeout                                    |
+| `auth_cache_ttl`        | duration | 20s     | Auth cache TTL                                        |
+| `auth_cache_size`       | int      | 10000   | Auth cache size                                       |
+| `log_queue_size`        | int      | 5000    | Spend log queue size                                  |
+| `log_batch_size`        | int      | 100     | Spend log batch size                                  |
+| `log_flush_interval`    | duration | 5s      | Spend log flush interval                              |
+| `log_retry_attempts`    | int      | 3       | Retry attempts on log insert failure                  |
+| `log_retry_delay`       | duration | 1s      | Delay between retry attempts                          |
 
 ## Features
 

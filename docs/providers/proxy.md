@@ -17,15 +17,15 @@ credentials:
 
 ## Required Fields
 
-| Field | Description |
-|---|---|
+| Field      | Description                                       |
+| ---------- | ------------------------------------------------- |
 | `base_url` | URL of the remote router or OpenAI-compatible API |
 
 ## Optional Fields
 
-| Field | Description |
-|---|---|
-| `api_key` | Remote master key (if the target requires authentication) |
+| Field         | Description                                                                       |
+| ------------- | --------------------------------------------------------------------------------- |
+| `api_key`     | Remote master key (if the target requires authentication)                         |
 | `is_fallback` | When `true`, this credential is only used after primary credentials are exhausted |
 
 ## Fallback Behavior

@@ -30,15 +30,15 @@ credentials:
 
 ## Required Fields
 
-| Field | Description |
-|---|---|
-| `project_id` | GCP project ID |
-| `location` | GCP region (e.g., `global`, `us-central1`, `europe-west1`) |
-| `credentials_file` | Path to service account JSON file |
-| `credentials_json` | **Or** service account JSON content as a string |
+| Field              | Description                                                |
+| ------------------ | ---------------------------------------------------------- |
+| `project_id`       | GCP project ID                                             |
+| `location`         | GCP region (e.g., `global`, `us-central1`, `europe-west1`) |
+| `credentials_file` | Path to service account JSON file                          |
+| `credentials_json` | **Or** service account JSON content as a string            |
 
 !!! note
-    Provide either `credentials_file` or `credentials_json`, not both.
+Provide either `credentials_file` or `credentials_json`, not both.
 
 ## Authentication
 
