@@ -1,4 +1,4 @@
-.PHONY: build run clean test fmt vet lint format help install-deps docker-build
+.PHONY: build run clean test fmt vet lint format help install-deps docker-build docs-install docs-serve docs-build docs-deploy
 
 # Build variables
 BINARY_NAME=auto_ai_router
@@ -41,6 +41,12 @@ help:
 	@echo ""
 	@echo "Docker targets:"
 	@echo "  docker-build  - Build Docker image"
+	@echo ""
+	@echo "Docs targets:"
+	@echo "  docs-install - Install Zensical"
+	@echo "  docs-serve   - Serve docs locally (http://127.0.0.1:8000)"
+	@echo "  docs-build   - Build static site to site/"
+	@echo "  docs-deploy  - Deploy to GitHub Pages"
 
 ## build: Build the application
 build:
@@ -164,3 +170,19 @@ docker-build:
 	@echo "Building Docker image $(DOCKER_IMAGE):$(DOCKER_TAG)..."
 	docker build -t $(DOCKER_IMAGE):$(DOCKER_TAG) .
 	@echo "Docker image built successfully"
+
+## docs-install: Install Zensical
+docs-install:
+	pip install zensical
+
+## docs-serve: Serve docs locally with live reload
+docs-serve:
+	zensical serve
+
+## docs-build: Build static site to site/
+docs-build:
+	zensical build --clean
+
+## docs-deploy: Deploy to GitHub Pages (use GitHub Actions instead)
+docs-deploy:
+	zensical build --clean
