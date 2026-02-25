@@ -19,3 +19,4 @@ fix_prices_*
 price.json
 bad_server.yaml
 logs/*.json
+site/*
