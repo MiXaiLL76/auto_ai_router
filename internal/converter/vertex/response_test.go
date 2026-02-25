@@ -1,8 +1,10 @@
 package vertex
 
 import (
+	"encoding/json"
 	"testing"
 
+	"github.com/mixaill76/auto_ai_router/internal/converter/openai"
 	"google.golang.org/genai"
 )
 
@@ -135,5 +137,113 @@ func TestMapFinishReason(t *testing.T) {
 		if got != tt.want {
 			t.Errorf("mapFinishReason(%q) = %q, want %q", tt.input, got, tt.want)
 		}
+	}
+}
+
+// TestVertexToOpenAI_FinishReasonOverrideWithToolCalls verifies that when Vertex
+// returns finishReason="STOP" but the response contains FunctionCall parts,
+// the finish_reason is overridden to "tool_calls" for OpenAI compatibility.
+// This is a Gemini 3+ behavior where Vertex uses STOP even for tool call responses.
+func TestVertexToOpenAI_FinishReasonOverrideWithToolCalls(t *testing.T) {
+	// Simulate Vertex response with STOP finish reason but containing a FunctionCall
+	vertexResp := genai.GenerateContentResponse{
+		Candidates: []*genai.Candidate{
+			{
+				Content: &genai.Content{
+					Role: "model",
+					Parts: []*genai.Part{
+						{
+							FunctionCall: &genai.FunctionCall{
+								Name: "multisearch",
+								Args: map[string]interface{}{
+									"query": "test",
+								},
+							},
+						},
+					},
+				},
+				FinishReason: genai.FinishReasonStop, // STOP, not TOOL_CALL
+			},
+		},
+		UsageMetadata: &genai.GenerateContentResponseUsageMetadata{
+			PromptTokenCount:     100,
+			CandidatesTokenCount: 20,
+		},
+	}
+
+	vertexBytes, err := json.Marshal(vertexResp)
+	if err != nil {
+		t.Fatalf("marshal vertex response: %v", err)
+	}
+
+	resultBytes, err := VertexToOpenAI(vertexBytes, "gemini-3-flash-preview")
+	if err != nil {
+		t.Fatalf("VertexToOpenAI error: %v", err)
+	}
+
+	var openAIResp openai.OpenAIResponse
+	if err := json.Unmarshal(resultBytes, &openAIResp); err != nil {
+		t.Fatalf("unmarshal OpenAI response: %v", err)
+	}
+
+	if len(openAIResp.Choices) != 1 {
+		t.Fatalf("expected 1 choice, got %d", len(openAIResp.Choices))
+	}
+
+	choice := openAIResp.Choices[0]
+
+	// finish_reason must be "tool_calls", not "stop"
+	if choice.FinishReason != "tool_calls" {
+		t.Fatalf("expected finish_reason = %q, got %q", "tool_calls", choice.FinishReason)
+	}
+
+	// tool_calls must be present
+	if len(choice.Message.ToolCalls) != 1 {
+		t.Fatalf("expected 1 tool_call, got %d", len(choice.Message.ToolCalls))
+	}
+	if choice.Message.ToolCalls[0].Function.Name != "multisearch" {
+		t.Fatalf("expected tool_call function name = %q, got %q", "multisearch", choice.Message.ToolCalls[0].Function.Name)
+	}
+}
+
+// TestVertexToOpenAI_FinishReasonNoOverrideWithoutToolCalls verifies that
+// finish_reason is NOT overridden when there are no tool_calls in the response.
+func TestVertexToOpenAI_FinishReasonNoOverrideWithoutToolCalls(t *testing.T) {
+	vertexResp := genai.GenerateContentResponse{
+		Candidates: []*genai.Candidate{
+			{
+				Content: &genai.Content{
+					Role: "model",
+					Parts: []*genai.Part{
+						{Text: "Hello, world!"},
+					},
+				},
+				FinishReason: genai.FinishReasonStop,
+			},
+		},
+		UsageMetadata: &genai.GenerateContentResponseUsageMetadata{
+			PromptTokenCount:     50,
+			CandidatesTokenCount: 10,
+		},
+	}
+
+	vertexBytes, err := json.Marshal(vertexResp)
+	if err != nil {
+		t.Fatalf("marshal vertex response: %v", err)
+	}
+
+	resultBytes, err := VertexToOpenAI(vertexBytes, "gemini-3-flash-preview")
+	if err != nil {
+		t.Fatalf("VertexToOpenAI error: %v", err)
+	}
+
+	var openAIResp openai.OpenAIResponse
+	if err := json.Unmarshal(resultBytes, &openAIResp); err != nil {
+		t.Fatalf("unmarshal OpenAI response: %v", err)
+	}
+
+	// finish_reason must remain "stop" — no tool_calls to override
+	if openAIResp.Choices[0].FinishReason != "stop" {
+		t.Fatalf("expected finish_reason = %q, got %q", "stop", openAIResp.Choices[0].FinishReason)
 	}
 }

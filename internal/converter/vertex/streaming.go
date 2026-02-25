@@ -104,6 +104,11 @@ func TransformVertexStreamToOpenAI(vertexStream io.Reader, model string, output 
 			// Handle finish reason
 			if candidate.FinishReason != genai.FinishReasonUnspecified {
 				finishReason := mapFinishReason(string(candidate.FinishReason))
+				// Vertex returns "STOP" even with function calls (Gemini 3+).
+				// Override for OpenAI compatibility.
+				if len(toolCalls) > 0 && finishReason != "tool_calls" {
+					finishReason = "tool_calls"
+				}
 				choice.FinishReason = &finishReason
 			}
 

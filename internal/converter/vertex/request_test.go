@@ -119,6 +119,144 @@ func TestOpenAIToVertex_ToolRoleMessage_EmptyName_FallbackToToolResult(t *testin
 	}
 }
 
+// TestOpenAIToVertex_ToolRoleMessage_EmptyName_ResolvesFromToolCalls verifies that
+// when a tool-role message has no Name but has a ToolCallID matching a preceding
+// assistant message's tool_calls, the function name is resolved from the tool_calls.
+// This is the most common real-world case: clients like Google's OpenAI-compatible
+// endpoint don't include "name" in tool result messages.
+func TestOpenAIToVertex_ToolRoleMessage_EmptyName_ResolvesFromToolCalls(t *testing.T) {
+	req := openai.OpenAIRequest{
+		Model: "gemini-3-flash-preview",
+		Messages: []openai.OpenAIMessage{
+			{Role: "user", Content: "Search for something"},
+			{
+				Role: "assistant",
+				ToolCalls: []interface{}{
+					map[string]interface{}{
+						"id":   "call_abc123",
+						"type": "function",
+						"function": map[string]interface{}{
+							"name":      "multisearch",
+							"arguments": `{"query": "test"}`,
+						},
+					},
+				},
+			},
+			{
+				Role:       "tool",
+				Name:       "", // empty — should be resolved from tool_calls above
+				ToolCallID: "call_abc123",
+				Content:    `{"results": []}`,
+			},
+		},
+	}
+
+	body, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+
+	resultBytes, err := OpenAIToVertex(body, false, "gemini-3-flash-preview")
+	if err != nil {
+		t.Fatalf("OpenAIToVertex error: %v", err)
+	}
+
+	var vertexReq VertexRequest
+	if err := json.Unmarshal(resultBytes, &vertexReq); err != nil {
+		t.Fatalf("unmarshal vertex request: %v", err)
+	}
+
+	// Contents: [0] user, [1] assistant (model), [2] tool result
+	if len(vertexReq.Contents) < 3 {
+		t.Fatalf("expected at least 3 contents, got %d", len(vertexReq.Contents))
+	}
+
+	toolContent := vertexReq.Contents[2]
+	fr := toolContent.Parts[0].FunctionResponse
+	if fr == nil {
+		t.Fatalf("expected FunctionResponse, got nil")
+	}
+
+	// Must be "multisearch" (resolved from tool_calls), NOT "tool_result"
+	if fr.Name != "multisearch" {
+		t.Fatalf("expected FunctionResponse.Name = %q (resolved from tool_calls), got %q", "multisearch", fr.Name)
+	}
+}
+
+// TestOpenAIToVertex_ToolRoleMessage_MultipleToolCalls_ResolvesCorrectName verifies
+// that with multiple tool_calls, each tool result resolves to the correct function name.
+func TestOpenAIToVertex_ToolRoleMessage_MultipleToolCalls_ResolvesCorrectName(t *testing.T) {
+	req := openai.OpenAIRequest{
+		Model: "gemini-3-flash-preview",
+		Messages: []openai.OpenAIMessage{
+			{Role: "user", Content: "Do two things"},
+			{
+				Role: "assistant",
+				ToolCalls: []interface{}{
+					map[string]interface{}{
+						"id":   "call_1",
+						"type": "function",
+						"function": map[string]interface{}{
+							"name":      "get_weather",
+							"arguments": `{"city": "Moscow"}`,
+						},
+					},
+					map[string]interface{}{
+						"id":   "call_2",
+						"type": "function",
+						"function": map[string]interface{}{
+							"name":      "get_time",
+							"arguments": `{"timezone": "MSK"}`,
+						},
+					},
+				},
+			},
+			{
+				Role:       "tool",
+				ToolCallID: "call_2", // second tool call
+				Content:    `{"time": "15:00"}`,
+			},
+			{
+				Role:       "tool",
+				ToolCallID: "call_1", // first tool call (order doesn't matter)
+				Content:    `{"temp": 20}`,
+			},
+		},
+	}
+
+	body, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+
+	resultBytes, err := OpenAIToVertex(body, false, "gemini-3-flash-preview")
+	if err != nil {
+		t.Fatalf("OpenAIToVertex error: %v", err)
+	}
+
+	var vertexReq VertexRequest
+	if err := json.Unmarshal(resultBytes, &vertexReq); err != nil {
+		t.Fatalf("unmarshal vertex request: %v", err)
+	}
+
+	// Contents: [0] user, [1] model, [2] tool result (call_2), [3] tool result (call_1)
+	if len(vertexReq.Contents) < 4 {
+		t.Fatalf("expected at least 4 contents, got %d", len(vertexReq.Contents))
+	}
+
+	// First tool result should resolve to "get_time" (call_2)
+	fr1 := vertexReq.Contents[2].Parts[0].FunctionResponse
+	if fr1 == nil || fr1.Name != "get_time" {
+		t.Fatalf("expected first tool result Name = %q, got %q", "get_time", fr1.Name)
+	}
+
+	// Second tool result should resolve to "get_weather" (call_1)
+	fr2 := vertexReq.Contents[3].Parts[0].FunctionResponse
+	if fr2 == nil || fr2.Name != "get_weather" {
+		t.Fatalf("expected second tool result Name = %q, got %q", "get_weather", fr2.Name)
+	}
+}
+
 // TestOpenAIToVertex_BasicMessageConversion verifies that user, assistant, and
 // system messages are correctly converted to Vertex AI format.
 func TestOpenAIToVertex_BasicMessageConversion(t *testing.T) {

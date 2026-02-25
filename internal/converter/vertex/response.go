@@ -105,10 +105,18 @@ func VertexToOpenAI(vertexBody []byte, model string) ([]byte, error) {
 			message.Content = "" // ensure empty
 		}
 
+		finishReason := mapFinishReason(string(candidate.FinishReason))
+		// Vertex API returns "STOP" even when there are function calls (Gemini 3+).
+		// Override to "tool_calls" for OpenAI compatibility — clients rely on this
+		// to detect that tool results need to be sent back.
+		if len(toolCalls) > 0 && finishReason != "tool_calls" {
+			finishReason = "tool_calls"
+		}
+
 		choice := openai.OpenAIChoice{
 			Index:        int(candidate.Index),
 			Message:      message,
-			FinishReason: mapFinishReason(string(candidate.FinishReason)),
+			FinishReason: finishReason,
 		}
 		openAIResp.Choices = append(openAIResp.Choices, choice)
 	}

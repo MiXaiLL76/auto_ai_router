@@ -18,3 +18,4 @@ fix_prices_*
 .claude/*
 price.json
 bad_server.yaml
+logs/*.json

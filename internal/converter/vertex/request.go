@@ -49,6 +49,10 @@ func OpenAIToVertex(openAIBody []byte, isImageGeneration bool, model string) ([]
 			// OpenAI tool result: {role: "tool", tool_call_id: "call_xyz", name: "func_name", content: "..."}
 			// Vertex expects: Part.FunctionResponse{Name: funcName, Response: {output: content}}
 			funcName := msg.Name
+			if funcName == "" && msg.ToolCallID != "" {
+				// Look up function name from preceding assistant message's tool_calls
+				funcName = findFunctionNameByToolCallID(req.Messages, msg.ToolCallID)
+			}
 			if funcName == "" {
 				funcName = "tool_result" // last resort default if Name not set
 			}
@@ -102,4 +106,38 @@ func OpenAIToVertex(openAIBody []byte, isImageGeneration bool, model string) ([]
 	}
 
 	return json.Marshal(vertexReq)
+}
+
+// findFunctionNameByToolCallID searches assistant messages' tool_calls for a matching
+// tool_call_id and returns the function name. This is needed because many OpenAI clients
+// (including Google's own OpenAI-compatible endpoint) don't include the "name" field
+// in tool result messages. Without the correct name, Vertex API receives "tool_result"
+// as FunctionResponse.Name which doesn't match any FunctionDeclaration, causing the model
+// to waste reasoning tokens trying to figure out the context.
+func findFunctionNameByToolCallID(messages []openai.OpenAIMessage, toolCallID string) string {
+	for _, msg := range messages {
+		if msg.Role != "assistant" || len(msg.ToolCalls) == 0 {
+			continue
+		}
+		for _, tc := range msg.ToolCalls {
+			tcMap, ok := tc.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			id, _ := tcMap["id"].(string)
+			if id != toolCallID {
+				continue
+			}
+			// Extract function name from nested or flat structure
+			if funcObj, ok := tcMap["function"].(map[string]interface{}); ok {
+				if name, ok := funcObj["name"].(string); ok && name != "" {
+					return name
+				}
+			}
+			if name, ok := tcMap["name"].(string); ok && name != "" {
+				return name
+			}
+		}
+	}
+	return ""
 }

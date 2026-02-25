@@ -44,7 +44,11 @@ func mapReasoningEffort(effort string, model string) *genai.ThinkingConfig {
 				config.ThinkingLevel = genai.ThinkingLevelLow
 			}
 		case "low":
-			config.ThinkingLevel = genai.ThinkingLevelLow
+			if isFlashModel(model) {
+				config.ThinkingLevel = genai.ThinkingLevelMinimal
+			} else {
+				config.ThinkingLevel = genai.ThinkingLevelLow
+			}
 		case "medium":
 			if isFlashModel(model) {
 				config.ThinkingLevel = genai.ThinkingLevelMedium
