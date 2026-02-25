@@ -59,6 +59,7 @@
         .badge-proxy { background: #6c5ce7; color: white; }
         .badge-openai { background: #00b894; color: white; }
         .badge-vertex { background: #0984e3; color: white; }
+        .badge-gemini { background: #1809e3; color: white; }
         .badge-anthropic { background: #fdcb6e; color: #2d3436; }
         .badge-fallback { background: #ff7675; color: white; }
         .badge-banned { background: var(--accent-error); color: white; animation: pulse 1.5s infinite; }
@@ -136,9 +137,12 @@
                         <span class="credential-badge badge-openai">OPENAI</span>
                     {{ else if eq $cred.Type "vertex-ai" }}
                         <span class="credential-badge badge-vertex">VERTEX AI</span>
+                    {{ else if eq $cred.Type "gemini" }}
+                        <span class="credential-badge badge-gemini">GOOGLE GEMINI</span>
                     {{ else if eq $cred.Type "anthropic" }}
                         <span class="credential-badge badge-anthropic">ANTHROPIC</span>
                     {{ end }}
+
                     {{ if $cred.IsBanned }}
                         <span class="credential-badge badge-banned">BANNED</span>
                     {{ end }}

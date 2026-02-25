@@ -21,6 +21,7 @@ type ProviderType string
 const (
 	ProviderTypeOpenAI    ProviderType = "openai"
 	ProviderTypeVertexAI  ProviderType = "vertex-ai"
+	ProviderTypeGemini    ProviderType = "gemini"
 	ProviderTypeAnthropic ProviderType = "anthropic"
 	ProviderTypeProxy     ProviderType = "proxy"
 )
@@ -28,7 +29,7 @@ const (
 // IsValid checks if the provider type is valid
 func (p ProviderType) IsValid() bool {
 	switch p {
-	case ProviderTypeOpenAI, ProviderTypeVertexAI, ProviderTypeAnthropic, ProviderTypeProxy:
+	case ProviderTypeOpenAI, ProviderTypeVertexAI, ProviderTypeGemini, ProviderTypeAnthropic, ProviderTypeProxy:
 		return true
 	}
 	return false
@@ -545,7 +546,7 @@ func (c *Config) Validate() error {
 
 		// Validate provider type
 		if !cred.Type.IsValid() {
-			return fmt.Errorf("credential %s: invalid type: %s (must be 'openai', 'vertex-ai', 'anthropic', or 'proxy')", cred.Name, cred.Type)
+			return fmt.Errorf("credential %s: invalid type: %s (must be 'openai', 'vertex-ai', 'gemini', 'anthropic', or 'proxy')", cred.Name, cred.Type)
 		}
 
 		// Validate by provider type
@@ -580,6 +581,18 @@ func (c *Config) Validate() error {
 				}
 			}
 			// base_url is optional for Vertex AI (will be constructed dynamically)
+
+		case ProviderTypeGemini:
+			// For Gemini (Google AI Studio), api_key and base_url are required
+			if cred.APIKey == "" {
+				return fmt.Errorf("credential %s: api_key is required for gemini type", cred.Name)
+			}
+			if cred.BaseURL == "" {
+				return fmt.Errorf("credential %s: base_url is required for gemini type", cred.Name)
+			}
+			if err := validateBaseURL(cred.Name, cred.BaseURL); err != nil {
+				return err
+			}
 
 		default:
 			// For OpenAI and Anthropic, require APIKey and BaseURL

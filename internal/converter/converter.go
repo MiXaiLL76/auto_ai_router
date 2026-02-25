@@ -37,7 +37,7 @@ func New(providerType config.ProviderType, mode RequestMode) *ProviderConverter 
 // Returns the original body unchanged for OpenAI-compatible providers (passthrough).
 func (c *ProviderConverter) RequestFrom(body []byte) ([]byte, error) {
 	switch c.providerType {
-	case config.ProviderTypeVertexAI:
+	case config.ProviderTypeVertexAI, config.ProviderTypeGemini:
 		return vertex.OpenAIToVertex(body, c.mode.IsImageGeneration, c.mode.ModelID)
 	case config.ProviderTypeAnthropic:
 		// Anthropic does not support image generation
@@ -55,7 +55,7 @@ func (c *ProviderConverter) RequestFrom(body []byte) ([]byte, error) {
 // Returns the original body unchanged for OpenAI-compatible providers (passthrough).
 func (c *ProviderConverter) ResponseTo(body []byte) ([]byte, error) {
 	switch c.providerType {
-	case config.ProviderTypeVertexAI:
+	case config.ProviderTypeVertexAI, config.ProviderTypeGemini:
 		if c.mode.IsImageGeneration {
 			if strings.Contains(strings.ToLower(c.mode.ModelID), "gemini") {
 				// Gemini image generation goes through chat API
@@ -76,7 +76,7 @@ func (c *ProviderConverter) ResponseTo(body []byte) ([]byte, error) {
 // writing the result to writer. For passthrough providers, bytes are copied directly.
 func (c *ProviderConverter) StreamTo(reader io.Reader, writer io.Writer) error {
 	switch c.providerType {
-	case config.ProviderTypeVertexAI:
+	case config.ProviderTypeVertexAI, config.ProviderTypeGemini:
 		return vertex.TransformVertexStreamToOpenAI(reader, c.mode.ModelID, writer)
 	case config.ProviderTypeAnthropic:
 		return anthropic.TransformAnthropicStreamToOpenAI(reader, c.mode.ModelID, writer)
@@ -95,6 +95,8 @@ func (c *ProviderConverter) BuildURL(cred *config.CredentialConfig) string {
 			return vertex.BuildVertexImageURL(cred, c.mode.ModelID)
 		}
 		return vertex.BuildVertexURL(cred, c.mode.ModelID, c.mode.IsStreaming)
+	case config.ProviderTypeGemini:
+		return vertex.BuildGeminiURL(cred, c.mode.ModelID, c.mode.IsStreaming)
 	case config.ProviderTypeAnthropic:
 		baseURL := strings.TrimSuffix(cred.BaseURL, "/")
 		return baseURL + "/v1/messages"

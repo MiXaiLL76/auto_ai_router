@@ -45,6 +45,13 @@ credentials:
     rpm: 100
     tpm: 50000
 
+  - name: "gemini_studio"
+    type: "gemini"
+    api_key: "os.environ/GEMINI_API_KEY"
+    base_url: "https://generativelanguage.googleapis.com"
+    rpm: 60
+    tpm: -1
+
   # Proxy credential (forwards requests to another auto_ai_router instance)
   - name: "proxy_fallback"
     type: "proxy"

@@ -7,7 +7,8 @@
 ### Поддерживаемые провайдеры
 
 - **OpenAI** (включая Azure OpenAI)
-- **Google Vertex AI**
+- **Google Vertex AI** (OAuth2 / Service Account)
+- **Google AI Studio (Gemini)** (API Key)
 - **Anthropic Claude**
 - **Proxy** - встроенная поддержка цепочек роутеров (автоматическая балансировка между инстансами)
 
@@ -100,6 +101,14 @@ credentials:
     credentials_file: "path/to/service-account.json"
     rpm: 100
     tpm: 50000
+
+  # Google AI Studio (Gemini) credential
+  - name: "gemini_studio"
+    type: "gemini"
+    api_key: "os.environ/GEMINI_API_KEY"
+    base_url: "https://generativelanguage.googleapis.com"
+    rpm: 60
+    tpm: -1
 
   # Proxy credential - fallback при исчерпании основных лимитов
   - name: "proxy_fallback"
@@ -205,12 +214,13 @@ litellm_db:
 
 ### Поддерживаемые типы провайдеров
 
-| Провайдер    | Type        | Обязательные поля                                                   |
-| ------------ | ----------- | ------------------------------------------------------------------- |
-| OpenAI       | `openai`    | `api_key`, `base_url`                                               |
-| Anthropic    | `anthropic` | `api_key`, `base_url`                                               |
-| Vertex AI    | `vertex-ai` | `project_id`, `location`, `credentials_file` или `credentials_json` |
-| Proxy Router | `proxy`     | `base_url`                                                          |
+| Провайдер          | Type        | Обязательные поля                                                   |
+| ------------------ | ----------- | ------------------------------------------------------------------- |
+| OpenAI             | `openai`    | `api_key`, `base_url`                                               |
+| Anthropic          | `anthropic` | `api_key`, `base_url`                                               |
+| Vertex AI          | `vertex-ai` | `project_id`, `location`, `credentials_file` или `credentials_json` |
+| Gemini (AI Studio) | `gemini`    | `api_key`, `base_url`                                               |
+| Proxy Router       | `proxy`     | `base_url`                                                          |
 
 ### Proxy как fallback
 
@@ -312,6 +322,11 @@ credentials:
     location: "us-central1"
     credentials_json: "os.environ/VERTEX_CREDENTIALS"
 
+  - name: "gemini_studio"
+    type: "gemini"
+    api_key: "os.environ/GEMINI_API_KEY"
+    base_url: "https://generativelanguage.googleapis.com"
+
 litellm_db:
   enabled: true
   database_url: "os.environ/LITELLM_DATABASE_URL"
@@ -321,6 +336,7 @@ litellm_db:
 export MASTER_KEY="sk-your-master-key"
 export OPENAI_API_KEY="sk-proj-..."
 export GCP_PROJECT_ID="my-project"
+export GEMINI_API_KEY="AIza..."
 export LITELLM_DATABASE_URL="postgresql://user:pass@localhost/litellm"
 ./auto_ai_router -config config.yaml
 ```

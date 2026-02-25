@@ -82,7 +82,15 @@ func OpenAIToVertex(openAIBody []byte, isImageGeneration bool, model string) ([]
 			if role == "assistant" {
 				role = "model"
 			}
-			parts := convertContentToParts(msg.Content)
+			var parts []*genai.Part
+			// Only add text parts if content is non-nil and non-empty.
+			// Assistant messages with tool_calls often have content: null or content: ""
+			// which would produce a "<nil>" text part via fmt.Sprintf.
+			if msg.Content != nil {
+				if s, ok := msg.Content.(string); !ok || s != "" {
+					parts = convertContentToParts(msg.Content)
+				}
+			}
 			if len(msg.ToolCalls) > 0 && role == "model" {
 				parts = append(parts, convertToolCallsToGenaiParts(msg.ToolCalls)...)
 			}

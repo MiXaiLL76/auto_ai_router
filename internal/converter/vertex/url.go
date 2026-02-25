@@ -17,6 +17,19 @@ func determineVertexPublisher(modelID string) string {
 	return "google"
 }
 
+// BuildGeminiURL constructs the Google AI Studio (Gemini) URL.
+// Format: {base_url}/v1beta/models/{model}:generateContent (or streamGenerateContent?alt=sse)
+func BuildGeminiURL(cred *config.CredentialConfig, modelID string, streaming bool) string {
+	baseURL := strings.TrimSuffix(cred.BaseURL, "/")
+
+	endpoint := "generateContent"
+	if streaming {
+		endpoint = "streamGenerateContent?alt=sse"
+	}
+
+	return fmt.Sprintf("%s/v1beta/models/%s:%s", baseURL, modelID, endpoint)
+}
+
 // BuildVertexURL constructs the Vertex AI URL dynamically
 // Format: https://{location}-aiplatform.googleapis.com/v1beta1/projects/{project}/locations/{location}/publishers/{publisher}/models/{model}:{endpoint}
 func BuildVertexURL(cred *config.CredentialConfig, modelID string, streaming bool) string {

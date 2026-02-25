@@ -170,7 +170,7 @@ func extractTokensFromResponse(body string, credType config.ProviderType) int {
 	}
 
 	// For Vertex AI, use usageMetadata format
-	if credType == config.ProviderTypeVertexAI {
+	if credType == config.ProviderTypeVertexAI || credType == config.ProviderTypeGemini {
 		var vertexResp struct {
 			UsageMetadata struct {
 				TotalTokenCount int `json:"totalTokenCount"`

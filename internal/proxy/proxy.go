@@ -653,6 +653,8 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		switch cred.Type {
 		case config.ProviderTypeVertexAI:
 			proxyReq.Header.Set("Authorization", "Bearer "+vertexToken)
+		case config.ProviderTypeGemini:
+			proxyReq.Header.Set("x-goog-api-key", cred.APIKey)
 		case config.ProviderTypeAnthropic:
 			proxyReq.Header.Set("X-Api-Key", cred.APIKey)
 			proxyReq.Header.Set("anthropic-version", "2023-06-01")
@@ -668,7 +670,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 
 		debugHeaders := make(map[string]string)
 		for key, values := range proxyReq.Header {
-			if key == "Authorization" || key == "X-Api-Key" {
+			if key == "Authorization" || key == "X-Api-Key" || key == "X-Goog-Api-Key" {
 				continue
 			}
 			debugHeaders[key] = strings.Join(values, ", ")
@@ -904,7 +906,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		}
 
 		switch cred.Type {
-		case config.ProviderTypeVertexAI:
+		case config.ProviderTypeVertexAI, config.ProviderTypeGemini:
 			err := p.handleVertexStreaming(w, resp, cred.Name, modelID, logCtx)
 			if err != nil {
 				p.logger.Error("Failed to vertex streaming response", "error", err)
