@@ -6,8 +6,9 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/config"
 )
 
-// hopByHopHeaders are headers that should not be proxied
-// See RFC 7230 Section 6.1
+// hopByHopHeaders are headers that should not be proxied.
+// These are hop-by-hop headers as defined in RFC 7230 Section 6.1.
+// They are meant for single HTTP connection and must not be forwarded to the next hop.
 var hopByHopHeaders = map[string]bool{
 	"Connection":          true,
 	"Keep-Alive":          true,
@@ -19,16 +20,34 @@ var hopByHopHeaders = map[string]bool{
 	"Upgrade":             true,
 }
 
-// isHopByHopHeader checks if a header should not be proxied
+// isHopByHopHeader checks if a header should not be proxied.
+// Returns true for hop-by-hop headers that must not be forwarded to upstream.
+// RFC 7230: https://tools.ietf.org/html/rfc7230#section-6.1
 func isHopByHopHeader(key string) bool {
 	return hopByHopHeaders[key]
 }
 
+// GetHopByHopHeaders returns a copy of the hop-by-hop headers map for reference.
+// Use isHopByHopHeader() to check if a specific header should be filtered.
+func GetHopByHopHeaders() map[string]bool {
+	// Return a copy to prevent external modifications
+	headers := make(map[string]bool)
+	for k, v := range hopByHopHeaders {
+		headers[k] = v
+	}
+	return headers
+}
+
 // copyRequestHeaders copies headers from source request to destination request,
-// skipping hop-by-hop headers and optionally handling the Authorization header
+// skipping hop-by-hop headers and optionally handling the Authorization header.
+// Accept-Encoding is also skipped (see copyHeadersSkipAuth for rationale).
 func copyRequestHeaders(dst *http.Request, src *http.Request, apiKey string) {
 	for key, values := range src.Header {
 		if isHopByHopHeader(key) {
+			continue
+		}
+		// Don't forward Accept-Encoding to upstream (proxy handles per-segment).
+		if key == "Accept-Encoding" {
 			continue
 		}
 		if key == "Authorization" {
@@ -50,10 +69,20 @@ func copyRequestHeaders(dst *http.Request, src *http.Request, apiKey string) {
 }
 
 // copyHeadersSkipAuth copies headers from source request to destination request,
-// skipping hop-by-hop headers and Authorization header (Authorization will be set separately)
+// skipping hop-by-hop headers and Authorization header (Authorization will be set separately).
+// Accept-Encoding is also skipped: the proxy handles encoding negotiation independently
+// for each connection segment (client↔proxy and proxy↔upstream). Forwarding Accept-Encoding
+// to upstream prevents Go's Transport from auto-decompressing responses, causing raw gzip
+// bytes to flow through instead of decoded content.
 func copyHeadersSkipAuth(dst *http.Request, src *http.Request) {
 	for key, values := range src.Header {
 		if isHopByHopHeader(key) || key == "Authorization" {
+			continue
+		}
+		// Don't forward Accept-Encoding: proxy manages compression per connection segment.
+		// If forwarded, Go's Transport won't auto-decompress upstream gzip responses,
+		// leading to raw gzip bytes being passed to converters (gzip parse errors).
+		if key == "Accept-Encoding" {
 			continue
 		}
 		for _, value := range values {
@@ -63,17 +92,21 @@ func copyHeadersSkipAuth(dst *http.Request, src *http.Request) {
 }
 
 // copyResponseHeaders copies response headers to the response writer,
-// skipping hop-by-hop headers and optionally transformation-related headers
+// skipping hop-by-hop headers and transformation-related headers.
+// Note: Content-Encoding is always skipped because Go's http.Client automatically
+// decompresses gzip/deflate responses, so the body is already decompressed.
+// The caller should compress the body if needed and set Content-Encoding appropriately.
 func copyResponseHeaders(w http.ResponseWriter, src http.Header, credType config.ProviderType) {
 	for key, values := range src {
 		if isHopByHopHeader(key) {
 			continue
 		}
-		// Skip Content-Length and Content-Encoding as we may have transformed the response
-		if credType == config.ProviderTypeVertexAI || credType == config.ProviderTypeAnthropic {
-			if key == "Content-Length" || key == "Content-Encoding" {
-				continue
-			}
+		// Skip Content-Length and Content-Encoding for all response types
+		// - Content-Length will be set based on actual body size
+		// - Content-Encoding: Go's http.Client already decompressed the body,
+		//   so we skip upstream's Content-Encoding header and let caller set it if recompressing
+		if key == "Content-Length" || key == "Content-Encoding" {
+			continue
 		}
 		for _, value := range values {
 			w.Header().Add(key, value)

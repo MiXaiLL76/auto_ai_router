@@ -7,9 +7,86 @@ import (
 	"time"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
+	"github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
 	"github.com/mixaill76/auto_ai_router/internal/httputil"
-	"github.com/mixaill76/auto_ai_router/internal/transform/openai"
+	"github.com/mixaill76/auto_ai_router/internal/utils"
 )
+
+// ModelPrice contains pricing information for a single model
+type ModelPrice struct {
+	// Regular tokens (input/output)
+	InputCostPerToken  float64 `json:"input_cost_per_token"`
+	OutputCostPerToken float64 `json:"output_cost_per_token"`
+
+	// Tiered pricing: tokens above 200k threshold billed at a different rate
+	InputCostPerTokenAbove200k  float64 `json:"input_cost_per_token_above_200k_tokens,omitempty"`
+	OutputCostPerTokenAbove200k float64 `json:"output_cost_per_token_above_200k_tokens,omitempty"`
+
+	// Audio tokens (can be more specific than regular tokens)
+	InputCostPerAudioToken  float64 `json:"input_cost_per_audio_token,omitempty"`
+	OutputCostPerAudioToken float64 `json:"output_cost_per_audio_token,omitempty"`
+
+	// Image tokens (can be more specific than regular tokens)
+	InputCostPerImageToken  float64 `json:"input_cost_per_image_token,omitempty"`
+	OutputCostPerImageToken float64 `json:"output_cost_per_image_token,omitempty"`
+
+	// Reasoning tokens (deep thinking models)
+	OutputCostPerReasoningToken float64 `json:"output_cost_per_reasoning_token,omitempty"`
+
+	// Cached/Prediction tokens
+	OutputCostPerCachedToken     float64 `json:"output_cost_per_cached_token,omitempty"`
+	InputCostPerCachedToken      float64 `json:"input_cost_per_cached_token,omitempty"`
+	OutputCostPerPredictionToken float64 `json:"output_cost_per_prediction_token,omitempty"`
+
+	// Vision/Images cost per image (not per token)
+	OutputCostPerImage float64 `json:"output_cost_per_image,omitempty"`
+}
+
+// ModelPriceRegistry stores and manages cached model prices
+type ModelPriceRegistry struct {
+	mu         sync.RWMutex
+	prices     map[string]*ModelPrice // key: normalized model name
+	lastUpdate time.Time
+}
+
+// NewModelPriceRegistry creates a new price registry
+func NewModelPriceRegistry() *ModelPriceRegistry {
+	return &ModelPriceRegistry{
+		prices: make(map[string]*ModelPrice),
+	}
+}
+
+// GetPrice returns the price for a model, or nil if not found
+func (r *ModelPriceRegistry) GetPrice(modelName string) *ModelPrice {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.prices[modelName]
+}
+
+// Update safely updates the registry with new prices
+func (r *ModelPriceRegistry) Update(prices map[string]*ModelPrice) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.prices = make(map[string]*ModelPrice)
+	for k, v := range prices {
+		r.prices[k] = v
+	}
+	r.lastUpdate = utils.NowUTC()
+}
+
+// LastUpdate returns the time of last successful update
+func (r *ModelPriceRegistry) LastUpdate() time.Time {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.lastUpdate
+}
+
+// Count returns the number of models in the registry
+func (r *ModelPriceRegistry) Count() int {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return len(r.prices)
+}
 
 // Model represents a single model from OpenAI API
 type Model struct {
@@ -213,12 +290,16 @@ func (m *Manager) LoadModelsFromConfig(credentials []config.CredentialConfig) {
 func (m *Manager) GetAllModels() ModelsResponse {
 	// Check cache first (fast path without holding full lock)
 	m.mu.RLock()
-	if !m.allModelsCache.expiresAt.IsZero() && time.Now().Before(m.allModelsCache.expiresAt) {
-		defer m.mu.RUnlock()
+	if !m.allModelsCache.expiresAt.IsZero() && utils.NowUTC().Before(m.allModelsCache.expiresAt) {
+		// Copy response and its Data slice while holding lock to prevent TOCTOU
+		// and to avoid sharing the backing array with callers.
+		cachedData := append([]Model(nil), m.allModelsCache.response.Data...)
+		cachedObject := m.allModelsCache.response.Object
+		m.mu.RUnlock()
 		m.logger.Debug("Returning cached all models",
-			"models_count", len(m.allModelsCache.response.Data),
+			"models_count", len(cachedData),
 		)
-		return m.allModelsCache.response
+		return ModelsResponse{Object: cachedObject, Data: cachedData}
 	}
 
 	var models []Model
@@ -232,7 +313,7 @@ func (m *Manager) GetAllModels() ModelsResponse {
 			models = append(models, Model{
 				ID:      modelName,
 				Object:  "model",
-				Created: openai.GetCurrentTimestamp(),
+				Created: converterutil.GetCurrentTimestamp(),
 				OwnedBy: "system",
 			})
 			modelMap[modelName] = true
@@ -257,6 +338,7 @@ func (m *Manager) GetAllModels() ModelsResponse {
 
 	// Add models from proxy credentials only (not from other provider types)
 	modelUpdates := make(map[string][]string) // model -> credentials to add
+	successfullyFetched := make(map[string]bool)
 	for _, cred := range credentials {
 		// Skip non-proxy credentials - we only fetch models from proxy credentials
 		if cred.Type != config.ProviderTypeProxy {
@@ -270,7 +352,15 @@ func (m *Manager) GetAllModels() ModelsResponse {
 		m.logger.Debug("Fetching models from proxy credential",
 			"credential", cred.Name,
 		)
-		remoteModels := m.GetRemoteModels(&cred)
+		remoteModels, err := m.GetRemoteModelsWithError(context.Background(), &cred)
+		if err != nil {
+			m.logger.Warn("Failed to fetch models from proxy during full model list refresh",
+				"credential", cred.Name,
+				"error", err,
+			)
+			continue
+		}
+		successfullyFetched[cred.Name] = true
 		m.logger.Debug("Got models from proxy",
 			"credential", cred.Name,
 			"remote_models_count", len(remoteModels),
@@ -278,11 +368,13 @@ func (m *Manager) GetAllModels() ModelsResponse {
 		)
 		added := 0
 		for _, model := range remoteModels {
+			// Always record credential→model mapping for ALL credentials that support this model
+			// (not just the first one that returned it)
+			modelUpdates[model.ID] = append(modelUpdates[model.ID], cred.Name)
 			if !modelMap[model.ID] {
 				models = append(models, model)
 				modelMap[model.ID] = true
 				added++
-				modelUpdates[model.ID] = append(modelUpdates[model.ID], cred.Name)
 			}
 		}
 		m.logger.Debug("Processed proxy models",
@@ -302,30 +394,37 @@ func (m *Manager) GetAllModels() ModelsResponse {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// Update modelToCredentials with new models
-	for modelID, creds := range modelUpdates {
-		if m.modelToCredentials[modelID] == nil {
-			m.modelToCredentials[modelID] = []string{}
-		}
-		// Add credentials that aren't already in the list
-		for _, cred := range creds {
-			found := false
-			for _, existing := range m.modelToCredentials[modelID] {
-				if existing == cred {
-					found = true
-					break
+	// Remove stale mappings for successfully-fetched proxy credentials before adding fresh ones.
+	// Only touch credentials we actually got a response from — failed fetches are left
+	// unchanged to avoid false negatives on transient errors.
+	if len(successfullyFetched) > 0 {
+		for modelID, creds := range m.modelToCredentials {
+			var kept []string
+			for _, c := range creds {
+				if !successfullyFetched[c] {
+					kept = append(kept, c)
 				}
 			}
-			if !found {
-				m.modelToCredentials[modelID] = append(m.modelToCredentials[modelID], cred)
+			if len(kept) == 0 {
+				delete(m.modelToCredentials, modelID)
+			} else {
+				m.modelToCredentials[modelID] = kept
 			}
 		}
 	}
 
-	// Cache the result for 3 seconds
+	// Add fresh mappings from this refresh cycle.
+	for modelID, creds := range modelUpdates {
+		m.modelToCredentials[modelID] = append(m.modelToCredentials[modelID], creds...)
+	}
+
+	// Cache a copy so the cached backing array is independent from the returned response.
 	m.allModelsCache = allModelsCache{
-		response:  response,
-		expiresAt: time.Now().Add(3 * time.Second),
+		response: ModelsResponse{
+			Object: response.Object,
+			Data:   append([]Model(nil), models...),
+		},
+		expiresAt: utils.NowUTC().Add(3 * time.Second),
 	}
 	m.allModels = append([]Model(nil), models...)
 
@@ -559,7 +658,17 @@ func (m *Manager) GetModelTPMForCredential(modelID, credentialName string) int {
 	return -1
 }
 
-// GetModelsForCredential returns all models available for a specific credential
+// GetModelsForCredential returns all models available for a specific credential.
+//
+// Behavior:
+//   - If the credential has explicitly configured models, returns those models
+//   - If the credential is unknown but global models exist (with empty Credential field),
+//     returns global models as a fallback for backward compatibility
+//   - Returns empty slice if no models are found for the credential
+//
+// Note: This fallback behavior (returning global models for unknown credentials)
+// differs from HasModel() which does not have this fallback behavior.
+// For new code, prefer using HasModel() for stricter credential validation.
 func (m *Manager) GetModelsForCredential(credentialName string) []Model {
 	m.mu.RLock()
 	modelIDs := make([]string, 0)
@@ -613,7 +722,7 @@ func (m *Manager) GetModelsForCredential(credentialName string) []Model {
 		result = append(result, Model{
 			ID:      modelID,
 			Object:  "model",
-			Created: openai.GetCurrentTimestamp(),
+			Created: converterutil.GetCurrentTimestamp(),
 			OwnedBy: "system",
 		})
 	}
@@ -621,22 +730,37 @@ func (m *Manager) GetModelsForCredential(credentialName string) []Model {
 	return result
 }
 
-// GetRemoteModels fetches models from a remote proxy credential with caching
+// GetRemoteModels fetches models from a remote proxy credential with caching.
+// Deprecated: use GetRemoteModelsWithError to handle upstream fetch errors explicitly.
 func (m *Manager) GetRemoteModels(cred *config.CredentialConfig) []Model {
-	if cred.Type != config.ProviderTypeProxy {
+	models, err := m.GetRemoteModelsWithError(context.Background(), cred)
+	if err != nil {
 		return nil
+	}
+	return models
+}
+
+// GetRemoteModelsWithError fetches models from a remote proxy credential with caching.
+// Returns explicit error when remote fetch fails.
+func (m *Manager) GetRemoteModelsWithError(ctx context.Context, cred *config.CredentialConfig) ([]Model, error) {
+	if cred.Type != config.ProviderTypeProxy {
+		return nil, nil
 	}
 
 	// Check cache first
 	m.mu.RLock()
-	if cached, ok := m.remoteModelsCache[cred.Name]; ok && !cached.expiresAt.IsZero() && time.Now().Before(cached.expiresAt) {
+	if cached, ok := m.remoteModelsCache[cred.Name]; ok && !cached.expiresAt.IsZero() && utils.NowUTC().Before(cached.expiresAt) {
+		// Defensive copy to prevent callers from corrupting cached data
+		cachedModels := append([]Model(nil), cached.models...)
+		cachedCount := len(cachedModels)
+		expiresIn := time.Until(cached.expiresAt).Seconds()
 		m.mu.RUnlock()
 		m.logger.Debug("Using cached remote models",
 			"credential", cred.Name,
-			"models_count", len(cached.models),
-			"expires_in", time.Until(cached.expiresAt).Seconds(),
+			"models_count", cachedCount,
+			"expires_in", expiresIn,
 		)
-		return cached.models
+		return cachedModels, nil
 	}
 	m.mu.RUnlock()
 
@@ -646,21 +770,20 @@ func (m *Manager) GetRemoteModels(cred *config.CredentialConfig) []Model {
 	)
 
 	// Fetch models using httputil helper
-	ctx := context.Background()
 	var modelsResp ModelsResponse
 	if err := httputil.FetchJSONFromProxy(ctx, cred, "/v1/models", m.logger, &modelsResp); err != nil {
 		m.logger.Error("Failed to fetch remote models",
 			"credential", cred.Name,
 			"error", err,
 		)
-		return nil
+		return nil, err
 	}
 
 	// Cache the result
 	m.mu.Lock()
 	m.remoteModelsCache[cred.Name] = remoteModelCache{
 		models:    modelsResp.Data,
-		expiresAt: time.Now().Add(m.cacheExpiration),
+		expiresAt: utils.NowUTC().Add(m.cacheExpiration),
 	}
 	m.mu.Unlock()
 
@@ -670,5 +793,5 @@ func (m *Manager) GetRemoteModels(cred *config.CredentialConfig) []Model {
 		"expires_in", m.cacheExpiration.Seconds(),
 	)
 
-	return modelsResp.Data
+	return modelsResp.Data, nil
 }

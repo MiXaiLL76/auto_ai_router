@@ -2,8 +2,8 @@ package router
 
 import (
 	"encoding/json"
+	"log/slog"
 	"net/http"
-	"strings"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/models"
@@ -14,13 +14,15 @@ type Router struct {
 	proxy            *proxy.Proxy
 	modelManager     *models.Manager
 	monitoringConfig *config.MonitoringConfig
+	logger           *slog.Logger
 }
 
-func New(p *proxy.Proxy, modelManager *models.Manager, monitoringConfig *config.MonitoringConfig) *Router {
+func New(p *proxy.Proxy, modelManager *models.Manager, monitoringConfig *config.MonitoringConfig, logger *slog.Logger) *Router {
 	return &Router{
 		proxy:            p,
 		modelManager:     modelManager,
 		monitoringConfig: monitoringConfig,
+		logger:           logger,
 	}
 }
 
@@ -42,34 +44,42 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	if strings.HasPrefix(req.URL.Path, "/v1/") {
-		if r.monitoringConfig.LogErrors {
-			// Capture request body for logging
-			reqBody, err := captureRequestBody(req)
-			if err != nil {
-				r.proxy.ProxyRequest(w, req)
-				return
-			}
-
-			// Create response capture wrapper
-			rc := newResponseCapture(w)
-
-			// Proxy the request through captured response
-			r.proxy.ProxyRequest(rc, req)
-
-			// Log error responses if logging is enabled and status is 4xx or 5xx
-			if r.monitoringConfig.ErrorsLogPath != "" && isErrorStatus(rc.statusCode) {
-				_ = logErrorResponse(r.monitoringConfig.ErrorsLogPath, req, rc, reqBody)
-				// Log error internally but don't fail the response
-				// (error logging shouldn't break the API response)
-			}
-		} else {
-			r.proxy.ProxyRequest(w, req)
-		}
+	allowedPaths := map[string]bool{
+		"/v1/chat/completions":   true,
+		"/v1/completions":        true,
+		"/v1/embeddings":         true,
+		"/v1/images/generations": true,
+		"/v1/responses":          true,
+	}
+	if !allowedPaths[req.URL.Path] {
+		http.Error(w, "Not Found", http.StatusNotFound)
 		return
 	}
 
-	http.Error(w, "Not Found", http.StatusNotFound)
+	if r.monitoringConfig.LogErrors {
+		// Capture request body for logging (detects streaming requests)
+		reqBody, isStreaming, err := captureRequestBody(req)
+		if err != nil {
+			r.proxy.ProxyRequest(w, req)
+			return
+		}
+
+		// Create response capture wrapper
+		rc := newResponseCapture(w)
+
+		// Proxy the request through captured response
+		r.proxy.ProxyRequest(rc, req)
+
+		// Log error responses if enabled and status is error (4xx or 5xx).
+		// Skip logging for streaming requests to avoid memory overhead with large responses.
+		if r.monitoringConfig.ErrorsLogPath != "" && isErrorStatus(rc.statusCode) && !isStreaming {
+			_ = logErrorResponse(r.monitoringConfig.ErrorsLogPath, req, rc, reqBody)
+			// Log error internally but don't fail the response
+			// (error logging shouldn't break the API response)
+		}
+	} else {
+		r.proxy.ProxyRequest(w, req)
+	}
 }
 
 func (r *Router) handleHealth(w http.ResponseWriter, req *http.Request) {
@@ -83,6 +93,13 @@ func (r *Router) handleHealth(w http.ResponseWriter, req *http.Request) {
 	}
 
 	if err := json.NewEncoder(w).Encode(status); err != nil {
+		if r.logger != nil {
+			r.logger.Error("Failed to encode health response",
+				"endpoint", "/health",
+				"error", err.Error(),
+			)
+		}
+		// Headers already sent, cannot send http.Error
 		return
 	}
 }
@@ -99,6 +116,13 @@ func (r *Router) handleModels(w http.ResponseWriter, req *http.Request) {
 	w.WriteHeader(http.StatusOK)
 
 	if err := json.NewEncoder(w).Encode(modelsResp); err != nil {
+		if r.logger != nil {
+			r.logger.Error("Failed to encode models response",
+				"endpoint", "/v1/models",
+				"error", err.Error(),
+			)
+		}
+		// Headers already sent, cannot send http.Error
 		return
 	}
 }

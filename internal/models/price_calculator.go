@@ -1,0 +1,145 @@
+package models
+
+import (
+	"github.com/mixaill76/auto_ai_router/internal/converter"
+)
+
+// Tiered pricing threshold: tokens above this count are billed at a different rate
+const tokenTiering200kThreshold = 200_000
+
+// CalculateTokenCosts computes costs based on token usage and model pricing
+// Returns nil if price is nil (model not found in pricing database)
+//
+// IMPORTANT: Handles two token counting semantics:
+//  1. Vertex/OpenAI: Audio/Cached/Reasoning tokens are INCLUDED in PromptTokens/CompletionTokens
+//     (Example: PromptTokens=100 includes AudioInputTokens=5 and CachedInputTokens=20)
+//  2. Anthropic: Cached tokens are SEPARATE from InputTokens
+//     (Example: InputTokens=100 + CachedInputTokens=20 = 120 total)
+//
+// Solution: Calculate "regular" tokens by subtracting detail breakdowns from totals,
+// then add back specialized token costs. This works for both semantics:
+// - Vertex/OpenAI: 100 - 5 - 20 = 75 regular, then add audio and cached separately
+// - Anthropic: 100 - 0 - 0 = 100 regular (since those tokens are in separate fields)
+func CalculateTokenCosts(usage *converter.TokenUsage, price *ModelPrice) *converter.TokenCosts {
+	if usage == nil || price == nil {
+		return nil
+	}
+
+	costs := &converter.TokenCosts{}
+
+	// Calculate "regular" input tokens by subtracting specialized token types
+	// This handles both Vertex/OpenAI (where they're included) and Anthropic (where they're separate)
+	regularInputTokens := usage.PromptTokens - usage.AudioInputTokens - usage.CachedInputTokens
+	if regularInputTokens < 0 {
+		// Safety: shouldn't happen, but use 0 if somehow negative
+		regularInputTokens = 0
+	}
+
+	// Regular input with 200k tiering
+	if price.InputCostPerTokenAbove200k > 0 && usage.PromptTokens > tokenTiering200kThreshold {
+		above := usage.PromptTokens - tokenTiering200kThreshold
+		// Distribute regular tokens proportionally between below/above threshold
+		regularAbove := int(int64(regularInputTokens) * int64(above) / int64(usage.PromptTokens))
+		regularBelow := regularInputTokens - regularAbove
+		costs.InputCost = float64(regularBelow)*price.InputCostPerToken +
+			float64(regularAbove)*price.InputCostPerTokenAbove200k
+	} else {
+		costs.InputCost = float64(regularInputTokens) * price.InputCostPerToken
+	}
+
+	// Calculate "regular" output tokens by subtracting specialized token types
+	regularOutputTokens := usage.CompletionTokens - usage.AudioOutputTokens - usage.ReasoningTokens -
+		usage.AcceptedPredictionTokens - usage.RejectedPredictionTokens
+	if regularOutputTokens < 0 {
+		regularOutputTokens = 0
+	}
+
+	// Regular output with 200k tiering
+	if price.OutputCostPerTokenAbove200k > 0 && usage.CompletionTokens > tokenTiering200kThreshold {
+		above := usage.CompletionTokens - tokenTiering200kThreshold
+		// Distribute regular tokens proportionally between below/above threshold
+		regularAbove := int(int64(regularOutputTokens) * int64(above) / int64(usage.CompletionTokens))
+		regularBelow := regularOutputTokens - regularAbove
+		costs.OutputCost = float64(regularBelow)*price.OutputCostPerToken +
+			float64(regularAbove)*price.OutputCostPerTokenAbove200k
+	} else {
+		costs.OutputCost = float64(regularOutputTokens) * price.OutputCostPerToken
+	}
+
+	// Audio tokens with fallback to regular tokens
+	audioInputCost := price.InputCostPerAudioToken
+	if audioInputCost == 0 {
+		audioInputCost = price.InputCostPerToken
+	}
+	costs.AudioInputCost = float64(usage.AudioInputTokens) * audioInputCost
+
+	audioOutputCost := price.OutputCostPerAudioToken
+	if audioOutputCost == 0 {
+		audioOutputCost = price.OutputCostPerToken
+	}
+	costs.AudioOutputCost = float64(usage.AudioOutputTokens) * audioOutputCost
+
+	// Cached tokens with fallback
+	cachedInputCost := price.InputCostPerCachedToken
+	if cachedInputCost == 0 {
+		cachedInputCost = price.InputCostPerToken
+	}
+	costs.CachedInputCost = float64(usage.CachedInputTokens) * cachedInputCost
+
+	cachedOutputCost := price.OutputCostPerCachedToken
+	if cachedOutputCost == 0 {
+		cachedOutputCost = price.OutputCostPerToken
+	}
+	costs.CachedOutputCost = float64(usage.CachedOutputTokens) * cachedOutputCost
+
+	// Reasoning tokens with fallback
+	reasoningCost := price.OutputCostPerReasoningToken
+	if reasoningCost == 0 {
+		reasoningCost = price.OutputCostPerToken
+	}
+	costs.ReasoningCost = float64(usage.ReasoningTokens) * reasoningCost
+
+	// Prediction tokens with fallback (accepted tokens)
+	predictionCost := price.OutputCostPerPredictionToken
+	if predictionCost == 0 {
+		predictionCost = price.OutputCostPerToken
+	}
+	costs.PredictionCost = float64(usage.AcceptedPredictionTokens) * predictionCost
+
+	// Rejected prediction tokens count as regular output tokens
+	costs.PredictionCost += float64(usage.RejectedPredictionTokens) * price.OutputCostPerToken
+
+	// Image cost calculation: supports both per-image and per-image-token pricing
+	// Priority: 1) Per-image cost if available (typical for image generation APIs)
+	//           2) Per-image-token cost as fallback (rarely used for image generation)
+	//           3) Default: $0 if neither is configured
+	if usage.ImageCount > 0 && price.OutputCostPerImage > 0 {
+		// Per-image cost (e.g., $0.02 per image)
+		costs.ImageCost = float64(usage.ImageCount) * price.OutputCostPerImage
+	} else if usage.ImageCount > 0 && price.OutputCostPerImageToken > 0 {
+		// Per-image-token cost fallback (rarely used for image generation)
+		costs.ImageCost = float64(usage.ImageCount) * price.OutputCostPerImageToken
+	}
+
+	// Calculate total
+	costs.TotalCost = costs.InputCost +
+		costs.OutputCost +
+		costs.AudioInputCost +
+		costs.AudioOutputCost +
+		costs.ReasoningCost +
+		costs.CachedInputCost +
+		costs.CachedOutputCost +
+		costs.PredictionCost +
+		costs.ImageCost
+
+	return costs
+}
+
+// CalculateCost is a convenience method on ModelPrice that calculates total cost
+func (p *ModelPrice) CalculateCost(usage *converter.TokenUsage) float64 {
+	costs := CalculateTokenCosts(usage, p)
+	if costs == nil {
+		return 0.0
+	}
+	return costs.TotalCost
+}

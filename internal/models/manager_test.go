@@ -1,7 +1,10 @@
 package models
 
 import (
+	"encoding/json"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"testing"
 
@@ -518,6 +521,90 @@ func TestConcurrentHasModelAndAddModel(t *testing.T) {
 
 	// Wait for all goroutines
 	for i := 0; i < 20; i++ {
+		<-done
+	}
+}
+
+// TestGetAllModels_CacheExpiryRace tests concurrent access to GetAllModels with cache expiry
+// This test is designed to catch TOCTOU race conditions when cache expires
+func TestGetAllModels_CacheExpiryRace(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+
+	staticModels := []config.ModelRPMConfig{
+		{Name: "gpt-4", RPM: 100},
+		{Name: "gpt-3.5-turbo", RPM: 200},
+	}
+	manager := New(logger, 50, staticModels)
+
+	// Run concurrent reads to populate cache
+	done := make(chan bool, 100)
+	for i := 0; i < 100; i++ {
+		go func() {
+			resp := manager.GetAllModels()
+			if len(resp.Data) != 2 {
+				t.Errorf("Expected 2 models, got %d", len(resp.Data))
+			}
+			done <- true
+		}()
+	}
+
+	for i := 0; i < 100; i++ {
+		<-done
+	}
+}
+
+// TestGetRemoteModels_CacheExpiryRace tests concurrent access to GetRemoteModels with cache expiry
+// This test is designed to catch TOCTOU race conditions when cache expires
+func TestGetRemoteModels_CacheExpiryRace(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+	manager := New(logger, 100, []config.ModelRPMConfig{})
+
+	// Create a mock HTTP server that responds with a models list
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/models" {
+			w.Header().Set("Content-Type", "application/json")
+			models := map[string]interface{}{
+				"object": "list",
+				"data": []map[string]string{
+					{"id": "gpt-4", "object": "model", "owned_by": "openai"},
+					{"id": "gpt-3.5-turbo", "object": "model", "owned_by": "openai"},
+				},
+			}
+			err := json.NewEncoder(w).Encode(models)
+			assert.Nil(t, err)
+		} else {
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	cred := &config.CredentialConfig{
+		Name:    "test-proxy",
+		Type:    config.ProviderTypeProxy,
+		BaseURL: server.URL,
+		APIKey:  "test-key",
+	}
+
+	// Run concurrent reads to test cache logic under concurrency
+	// Note: Using 10 goroutines instead of 100 because:
+	// - httputil has minProxyFetchInterval = 100ms rate limiting per credential
+	// - 100 goroutines * 100ms = 10 seconds minimum (exceeds 5s default timeout)
+	// - 10 goroutines * 100ms = 1 second (fits within timeout)
+	// This still thoroughly tests concurrent access and caching behavior
+	done := make(chan bool, 10)
+	for i := 0; i < 10; i++ {
+		go func() {
+			models := manager.GetRemoteModels(cred)
+			if len(models) > 0 {
+				// Successfully fetched models from cache/server
+				assert.Equal(t, 2, len(models))
+				assert.Equal(t, "gpt-4", models[0].ID)
+			}
+			done <- true
+		}()
+	}
+
+	for i := 0; i < 10; i++ {
 		<-done
 	}
 }

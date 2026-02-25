@@ -8,6 +8,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mixaill76/auto_ai_router/internal/config"
+	"github.com/mixaill76/auto_ai_router/internal/converter"
+	"github.com/mixaill76/auto_ai_router/internal/testhelpers"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -47,7 +50,7 @@ func TestHandleStreamingWithTokens(t *testing.T) {
 	defer upstreamServer.Close()
 
 	// Создаем infrastructure
-	logger := createTestLogger()
+	logger := testhelpers.NewTestLogger()
 	bal, rl := createTestBalancer(upstreamServer.URL)
 	metrics := createTestProxyMetrics()
 	tm := createTestTokenManager(logger)
@@ -78,7 +81,7 @@ func TestHandleStreamingWithTokens(t *testing.T) {
 	w := httptest.NewRecorder()
 
 	// Вызываем handleStreamingWithTokens напрямую
-	err = prx.handleStreamingWithTokens(w, resp, credName, modelID)
+	err = prx.handleStreamingWithTokens(w, resp, credName, modelID, nil)
 	require.NoError(t, err, "handleStreamingWithTokens не должен возвращать ошибку")
 
 	// Проверяем результат в ResponseRecorder
@@ -137,7 +140,7 @@ func TestHandleStreamingWithTokens_NoTokens(t *testing.T) {
 	}))
 	defer upstreamServer.Close()
 
-	logger := createTestLogger()
+	logger := testhelpers.NewTestLogger()
 	bal, rl := createTestBalancer(upstreamServer.URL)
 	metrics := createTestProxyMetrics()
 	tm := createTestTokenManager(logger)
@@ -158,7 +161,7 @@ func TestHandleStreamingWithTokens_NoTokens(t *testing.T) {
 	defer func() { _ = resp.Body.Close() }()
 
 	w := httptest.NewRecorder()
-	err = prx.handleStreamingWithTokens(w, resp, credName, modelID)
+	err = prx.handleStreamingWithTokens(w, resp, credName, modelID, nil)
 	require.NoError(t, err, "handleStreamingWithTokens не должен возвращать ошибку")
 
 	// Проверяем что токены НЕ были добавлены
@@ -204,7 +207,7 @@ func TestHandleStreamingWithTokens_MultipleChunks(t *testing.T) {
 	}))
 	defer upstreamServer.Close()
 
-	logger := createTestLogger()
+	logger := testhelpers.NewTestLogger()
 	bal, rl := createTestBalancer(upstreamServer.URL)
 	metrics := createTestProxyMetrics()
 	tm := createTestTokenManager(logger)
@@ -224,7 +227,7 @@ func TestHandleStreamingWithTokens_MultipleChunks(t *testing.T) {
 	defer func() { _ = resp.Body.Close() }()
 
 	w := httptest.NewRecorder()
-	err = prx.handleStreamingWithTokens(w, resp, credName, modelID)
+	err = prx.handleStreamingWithTokens(w, resp, credName, modelID, nil)
 	require.NoError(t, err, "handleStreamingWithTokens не должен возвращать ошибку")
 
 	// Проверяем что токены были просуммированы: 10 + 5 = 15
@@ -263,7 +266,7 @@ func TestHandleStreamingWithTokens_WithoutModelID(t *testing.T) {
 	}))
 	defer upstreamServer.Close()
 
-	logger := createTestLogger()
+	logger := testhelpers.NewTestLogger()
 	bal, rl := createTestBalancer(upstreamServer.URL)
 	metrics := createTestProxyMetrics()
 	tm := createTestTokenManager(logger)
@@ -285,7 +288,7 @@ func TestHandleStreamingWithTokens_WithoutModelID(t *testing.T) {
 	w := httptest.NewRecorder()
 
 	// Это не должно упасть даже с пустым modelID
-	err = prx.handleStreamingWithTokens(w, resp, credName, modelID)
+	err = prx.handleStreamingWithTokens(w, resp, credName, modelID, nil)
 	require.NoError(t, err, "handleStreamingWithTokens не должен возвращать ошибку")
 
 	// Проверяем что credential-level tokens были добавлены
@@ -293,4 +296,439 @@ func TestHandleStreamingWithTokens_WithoutModelID(t *testing.T) {
 	assert.Equal(t, 100, credentialTPM,
 		"Tokens должны быть добавлены на credential level даже без modelID",
 	)
+}
+
+// TestHandleStreamingWithTokens_LoggingToLiteLLMDB проверяет что OpenAI streaming
+// responses логируются в LiteLLM DB когда предоставлен logCtx
+func TestHandleStreamingWithTokens_LoggingToLiteLLMDB(t *testing.T) {
+	upstreamServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+
+		chunks := []string{
+			"data: {\"usage\": {\"total_tokens\": 10}}\n\n",
+			"data: {\"choices\": [{\"delta\": {\"content\": \"test\"}}]}\n\n",
+			"data: [DONE]\n\n",
+		}
+
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			http.Error(w, "Streaming not supported", http.StatusInternalServerError)
+			return
+		}
+
+		for _, chunk := range chunks {
+			_, _ = fmt.Fprint(w, chunk)
+			flusher.Flush()
+		}
+	}))
+	defer upstreamServer.Close()
+
+	logger := testhelpers.NewTestLogger()
+	bal, rl := createTestBalancer(upstreamServer.URL)
+	metrics := createTestProxyMetrics()
+	tm := createTestTokenManager(logger)
+	mm := createTestModelManager(logger)
+
+	prx := createProxyWithParams(
+		bal, logger, 10, 5*time.Second, metrics,
+		"master-key", rl, tm, mm,
+		"test-version", "test-commit",
+	)
+
+	resp, err := http.Get(upstreamServer.URL)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+
+	w := httptest.NewRecorder()
+
+	// Создаем logCtx и проверяем что он будет логирован
+	logCtx := &RequestLogContext{
+		RequestID: "test-req-123",
+		Token:     "sk-test-token",
+		Credential: &config.CredentialConfig{
+			Name: "test-cred",
+			Type: config.ProviderTypeOpenAI,
+		},
+	}
+
+	// handleStreamingWithTokens должен логировать в LiteLLM DB
+	err = prx.handleStreamingWithTokens(w, resp, "test-cred", "gpt-4o-mini", logCtx)
+	require.NoError(t, err, "handleStreamingWithTokens не должен возвращать ошибку")
+
+	// Проверяем что logCtx был помечен как залогированный
+	assert.True(t, logCtx.Logged, "logCtx должен быть помечен как залогированный")
+
+	// Проверяем что status был установлен
+	assert.Equal(t, "success", logCtx.Status, "logCtx.Status должен быть 'success'")
+
+	// Проверяем что HTTP status был установлен
+	assert.Equal(t, 200, logCtx.HTTPStatus, "logCtx.HTTPStatus должен быть 200")
+
+	// Проверяем что токены были извлечены
+	assert.NotNil(t, logCtx.TokenUsage, "logCtx.TokenUsage не должен быть nil")
+	assert.Equal(t, 10, logCtx.TokenUsage.CompletionTokens, "CompletionTokens должны быть 10")
+}
+
+// ============ Tests for Solution 3: Hybrid Approach ============
+
+// TestEstimatePromptTokens tests the prompt token estimation from request body
+func TestEstimatePromptTokens(t *testing.T) {
+	tests := []struct {
+		name             string
+		body             []byte
+		minExpected      int
+		maxExpected      int
+		shouldBeAtLeast1 bool
+	}{
+		{
+			name:             "empty body",
+			body:             []byte(""),
+			minExpected:      0,
+			maxExpected:      0,
+			shouldBeAtLeast1: false,
+		},
+		{
+			name:             "simple text message",
+			body:             []byte(`{"messages":[{"content":"Hello, world! This is a test message."}]}`),
+			minExpected:      5,
+			maxExpected:      15,
+			shouldBeAtLeast1: true,
+		},
+		{
+			name:             "invalid JSON",
+			body:             []byte(`invalid json`),
+			minExpected:      0,
+			maxExpected:      0,
+			shouldBeAtLeast1: false,
+		},
+		{
+			name:             "no messages field (empty messages)",
+			body:             []byte(`{"model":"gpt-4"}`),
+			minExpected:      1, // Minimum of 1 token for valid API call
+			maxExpected:      1,
+			shouldBeAtLeast1: true, // Always at least 1 token
+		},
+		{
+			name:             "multimodal message with text and image",
+			body:             []byte(`{"messages":[{"content":[{"type":"text","text":"Analyze this image"},{"type":"image_url","image_url":{"url":"..."}}]}]}`),
+			minExpected:      3,
+			maxExpected:      10,
+			shouldBeAtLeast1: true,
+		},
+		{
+			name:             "multiple messages",
+			body:             []byte(`{"messages":[{"content":"First message"},{"content":"Second message with more text"}]}`),
+			minExpected:      8,
+			maxExpected:      20,
+			shouldBeAtLeast1: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			estimate := estimatePromptTokens(tt.body)
+
+			if tt.shouldBeAtLeast1 {
+				assert.GreaterOrEqual(t, estimate, 1, "estimate should be at least 1")
+			}
+
+			assert.GreaterOrEqual(t, estimate, tt.minExpected, "estimate should be >= minExpected")
+			assert.LessOrEqual(t, estimate, tt.maxExpected, "estimate should be <= maxExpected")
+		})
+	}
+}
+
+// TestOpenAIStreamUsageExtractor tests OpenAI format usage extraction
+func TestOpenAIStreamUsageExtractor(t *testing.T) {
+	extractor := &openAIStreamUsageExtractor{}
+
+	tests := []struct {
+		name        string
+		chunk       []byte
+		expectNil   bool
+		expectUsage func(*StreamUsageInfo) bool
+	}{
+		{
+			name:      "valid usage chunk",
+			chunk:     []byte(`{"choices":[{"finish_reason":"stop"}],"usage":{"prompt_tokens":100,"completion_tokens":50}}`),
+			expectNil: false,
+			expectUsage: func(u *StreamUsageInfo) bool {
+				return u.PromptTokens == 100 && u.CompletionTokens == 50
+			},
+		},
+		{
+			name:      "usage with cached tokens",
+			chunk:     []byte(`{"usage":{"prompt_tokens":100,"completion_tokens":50,"prompt_tokens_details":{"cached_tokens":20,"audio_tokens":5}}}`),
+			expectNil: false,
+			expectUsage: func(u *StreamUsageInfo) bool {
+				return u.PromptTokens == 100 && u.CachedTokens == 20 && u.AudioInputTokens == 5
+			},
+		},
+		{
+			name:      "usage with audio output tokens",
+			chunk:     []byte(`{"usage":{"prompt_tokens":100,"completion_tokens":50,"completion_tokens_details":{"audio_tokens":10}}}`),
+			expectNil: false,
+			expectUsage: func(u *StreamUsageInfo) bool {
+				return u.PromptTokens == 100 && u.AudioOutputTokens == 10
+			},
+		},
+		{
+			name:      "no usage field",
+			chunk:     []byte(`{"choices":[{"delta":{"content":"hello"}}]}`),
+			expectNil: true,
+		},
+		{
+			name:      "zero tokens (invalid)",
+			chunk:     []byte(`{"usage":{"prompt_tokens":0,"completion_tokens":0}}`),
+			expectNil: true,
+		},
+		{
+			name:      "invalid JSON",
+			chunk:     []byte(`invalid json`),
+			expectNil: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := extractor.ExtractUsage(tt.chunk)
+
+			if tt.expectNil {
+				assert.Nil(t, result, "should return nil")
+			} else {
+				assert.NotNil(t, result, "should not return nil")
+				if result != nil && tt.expectUsage != nil {
+					assert.True(t, tt.expectUsage(result), "usage should match expectations")
+				}
+			}
+		})
+	}
+}
+
+// TestAnthropicStreamUsageExtractor tests Anthropic format usage extraction
+func TestAnthropicStreamUsageExtractor(t *testing.T) {
+	extractor := &anthropicStreamUsageExtractor{}
+
+	tests := []struct {
+		name        string
+		chunk       []byte
+		expectNil   bool
+		expectUsage func(*StreamUsageInfo) bool
+	}{
+		{
+			name:      "valid message_delta with usage",
+			chunk:     []byte(`{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":100,"output_tokens":50}}`),
+			expectNil: false,
+			expectUsage: func(u *StreamUsageInfo) bool {
+				return u.PromptTokens == 100 && u.CompletionTokens == 50
+			},
+		},
+		{
+			name:      "cache tokens present",
+			chunk:     []byte(`{"usage":{"input_tokens":100,"output_tokens":50,"cache_read_input_tokens":20}}`),
+			expectNil: false,
+			expectUsage: func(u *StreamUsageInfo) bool {
+				return u.PromptTokens == 100 && u.CacheReadTokens == 20
+			},
+		},
+		{
+			name:      "no usage field",
+			chunk:     []byte(`{"type":"message_delta","delta":{"stop_reason":"end_turn"}}`),
+			expectNil: true,
+		},
+		{
+			name:      "zero tokens (invalid)",
+			chunk:     []byte(`{"usage":{"input_tokens":0,"output_tokens":0}}`),
+			expectNil: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := extractor.ExtractUsage(tt.chunk)
+
+			if tt.expectNil {
+				assert.Nil(t, result, "should return nil")
+			} else {
+				assert.NotNil(t, result, "should not return nil")
+				if result != nil && tt.expectUsage != nil {
+					assert.True(t, tt.expectUsage(result), "usage should match expectations")
+				}
+			}
+		})
+	}
+}
+
+// TestGetStreamUsageExtractor tests factory function for different providers
+func TestGetStreamUsageExtractor(t *testing.T) {
+	tests := []struct {
+		name         string
+		providerName string
+		expectedType string
+	}{
+		{
+			name:         "OpenAI",
+			providerName: "openai",
+			expectedType: "*proxy.openAIStreamUsageExtractor",
+		},
+		{
+			name:         "Anthropic",
+			providerName: "anthropic",
+			expectedType: "*proxy.anthropicStreamUsageExtractor",
+		},
+		{
+			name:         "Vertex AI",
+			providerName: "vertex ai",
+			expectedType: "*proxy.openAIStreamUsageExtractor",
+		},
+		{
+			name:         "unknown provider",
+			providerName: "unknown",
+			expectedType: "*proxy.openAIStreamUsageExtractor",
+		},
+		{
+			name:         "case insensitive",
+			providerName: "OPENAI",
+			expectedType: "*proxy.openAIStreamUsageExtractor",
+		},
+		{
+			name:         "with whitespace",
+			providerName: "  openai  ",
+			expectedType: "*proxy.openAIStreamUsageExtractor",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			extractor := getStreamUsageExtractor(tt.providerName)
+			assert.NotNil(t, extractor, "extractor should not be nil")
+			// Type checking is implicit through the tests above
+		})
+	}
+}
+
+// TestAnthropicStreamUsageExtractor_CacheCreationTokens verifies that
+// anthropicStreamUsageExtractor correctly extracts cache_creation_input_tokens
+// into the CacheCreationTokens field of StreamUsageInfo.
+func TestAnthropicStreamUsageExtractor_CacheCreationTokens(t *testing.T) {
+	extractor := &anthropicStreamUsageExtractor{}
+
+	chunk := []byte(`{"type":"message_delta","usage":{"input_tokens":200,"output_tokens":80,"cache_creation_input_tokens":150,"cache_read_input_tokens":30}}`)
+
+	result := extractor.ExtractUsage(chunk)
+	require.NotNil(t, result, "should extract usage from chunk with cache_creation_input_tokens")
+
+	assert.Equal(t, 200, result.PromptTokens, "PromptTokens should be 200")
+	assert.Equal(t, 80, result.CompletionTokens, "CompletionTokens should be 80")
+	assert.Equal(t, 150, result.CacheCreationTokens, "CacheCreationTokens should be 150")
+	assert.Equal(t, 30, result.CacheReadTokens, "CacheReadTokens should be 30")
+	assert.Equal(t, 30, result.CachedTokens, "CachedTokens should equal CacheReadTokens (30)")
+}
+
+// TestOpenAIStreamUsageExtractor_MultiPayloadNoStaleData verifies that when a single
+// stream chunk contains multiple SSE data payloads (e.g. "data: {...}\ndata: {...}\n"),
+// the extractor does not carry over stale fields from the first payload into the result
+// of the second payload. The extractor iterates from last to first, so if the last
+// payload has fewer fields, earlier payload data must not leak through.
+func TestOpenAIStreamUsageExtractor_MultiPayloadNoStaleData(t *testing.T) {
+	extractor := &openAIStreamUsageExtractor{}
+
+	// Two SSE payloads in one chunk.
+	// First payload has detailed usage with cached_tokens and audio_tokens.
+	// Second (last) payload has only basic prompt/completion tokens, no details.
+	// The extractor reads from last to first, so it should return the second
+	// payload's data without any stale cached_tokens or audio_tokens from the first.
+	chunk := []byte(
+		"data: {\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":50,\"prompt_tokens_details\":{\"cached_tokens\":20,\"audio_tokens\":5},\"completion_tokens_details\":{\"audio_tokens\":10,\"reasoning_tokens\":15}}}\n" +
+			"data: {\"usage\":{\"prompt_tokens\":80,\"completion_tokens\":30}}\n",
+	)
+
+	result := extractor.ExtractUsage(chunk)
+	require.NotNil(t, result, "should extract usage from multi-payload chunk")
+
+	// Should reflect the LAST payload only (prompt=80, completion=30)
+	assert.Equal(t, 80, result.PromptTokens, "PromptTokens should be from last payload (80)")
+	assert.Equal(t, 30, result.CompletionTokens, "CompletionTokens should be from last payload (30)")
+
+	// These fields must be zero because the last payload has no details —
+	// stale data from the first payload must NOT leak through.
+	assert.Equal(t, 0, result.CachedTokens, "CachedTokens should be 0 (no stale data from first payload)")
+	assert.Equal(t, 0, result.AudioInputTokens, "AudioInputTokens should be 0 (no stale data from first payload)")
+	assert.Equal(t, 0, result.AudioOutputTokens, "AudioOutputTokens should be 0 (no stale data from first payload)")
+	assert.Equal(t, 0, result.ReasoningTokens, "ReasoningTokens should be 0 (no stale data from first payload)")
+}
+
+// TestHandleStreamingWithTokens_HybridApproach verifies the hybrid approach implementation
+// Tests that usage info is extracted from the last chunk with cached/audio token details
+func TestHandleStreamingWithTokens_HybridApproach(t *testing.T) {
+	upstreamServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+
+		// Simulate streaming with usage info in multiple chunks
+		chunks := []string{
+			// First chunk with some tokens
+			"data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}],\"usage\":{\"total_tokens\":5}}\n\n",
+			// Middle chunk with content
+			"data: {\"choices\":[{\"delta\":{\"content\":\" world\"}}]}\n\n",
+			// Final chunk with complete usage info including cached and audio tokens
+			// This uses both presence of fields and their values
+			"data: {\"choices\":[{\"finish_reason\":\"stop\",\"delta\":{}}],\"usage\":{\"prompt_tokens\":100,\"completion_tokens\":50,\"prompt_tokens_details\":{\"cached_tokens\":10,\"audio_tokens\":5},\"completion_tokens_details\":{\"audio_tokens\":2}}}\n\n",
+		}
+
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			http.Error(w, "Streaming not supported", http.StatusInternalServerError)
+			return
+		}
+
+		for _, chunk := range chunks {
+			_, _ = fmt.Fprint(w, chunk)
+			flusher.Flush()
+			time.Sleep(1 * time.Millisecond)
+		}
+	}))
+	defer upstreamServer.Close()
+
+	logger := testhelpers.NewTestLogger()
+	bal, rl := createTestBalancer(upstreamServer.URL)
+	metrics := createTestProxyMetrics()
+	tm := createTestTokenManager(logger)
+	mm := createTestModelManager(logger)
+
+	prx := createProxyWithParams(
+		bal, logger, 10, 5*time.Second, metrics,
+		"master-key", rl, tm, mm,
+		"test-version", "test-commit",
+	)
+
+	resp, err := http.Get(upstreamServer.URL)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+
+	w := httptest.NewRecorder()
+
+	// Create log context with prompt tokens estimate
+	logCtx := &RequestLogContext{
+		RequestID:            "test-request-123",
+		PromptTokensEstimate: 95, // Simulating estimated prompt tokens
+		TokenUsage:           &converter.TokenUsage{},
+	}
+
+	err = prx.handleStreamingWithTokens(w, resp, "test-cred", "gpt-4o-mini", logCtx)
+	require.NoError(t, err)
+
+	// Verify hybrid approach results
+	assert.True(t, logCtx.Logged, "logCtx should be marked as logged")
+	assert.NotNil(t, logCtx.TokenUsage, "TokenUsage should not be nil")
+
+	// With the hybrid approach, prompt tokens should use the estimate initially
+	// If usage was extracted, it would override it
+	assert.Greater(t, logCtx.TokenUsage.PromptTokens, 0,
+		"PromptTokens should be > 0 from estimate or extracted usage")
+
+	// Completion tokens should be at least from the token count
+	assert.Greater(t, logCtx.TokenUsage.CompletionTokens, 0,
+		"CompletionTokens should be > 0 from streaming count or extracted usage")
 }

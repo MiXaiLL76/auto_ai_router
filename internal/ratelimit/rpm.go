@@ -5,8 +5,21 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/mixaill76/auto_ai_router/internal/utils"
 )
 
+// RPMLimiter tracks and enforces RPM (Requests Per Minute) and TPM (Tokens Per Minute) limits.
+// Use this for API rate limiting where you need to track usage against configurable limits.
+//
+// Different from TimeBasedRateLimiter:
+// - RPMLimiter: tracks usage against RPM/TPM limits (e.g., allow max 100 requests per minute)
+// - TimeBasedRateLimiter: enforces fixed minimum interval (e.g., wait 100ms between requests)
+//
+// Used for:
+// - Credential selection (balancer): check if credential RPM/TPM limits allow new request
+// - Token consumption tracking (proxy): record actual token usage for metrics
+// - Health checks: report current RPM/TPM usage against configured limits
 type RPMLimiter struct {
 	mu            sync.RWMutex
 	limiters      map[string]*limiter // credential limiters
@@ -103,31 +116,46 @@ func (r *RPMLimiter) AddModelWithTPM(credentialName, modelName string, rpm int, 
 // setCurrentUsage fills request and token arrays to simulate current usage
 // Must be called with limiter.mu locked
 func setCurrentUsage(limiter *limiter, currentRPM, currentTPM int) {
-	now := time.Now()
-	oneMinuteAgo := now.Add(-time.Minute)
+	now := utils.NowUTC()
+	// Use 59s ago (not 60s) as the start time so all entries are strictly
+	// within the 1-minute sliding window. cleanOldRequests/cleanOldTokens use
+	// After(oneMinuteAgo) which excludes entries exactly at the boundary.
+	windowStart := now.Add(-59 * time.Second)
 
-	// Fill requests array with dummy timestamps distributed over the minute
+	// Fill requests array with dummy timestamps distributed over the window
 	if currentRPM > 0 {
 		limiter.requests = make([]time.Time, currentRPM)
 		for i := 0; i < currentRPM; i++ {
-			// Distribute requests evenly over the last minute
+			// Distribute requests evenly over the last 59 seconds
 			// Use int64 to prevent integer overflow for large RPM values
-			offset := time.Duration(int64(i)*60000/int64(currentRPM)) * time.Millisecond
-			limiter.requests[i] = oneMinuteAgo.Add(offset)
+			offset := time.Duration(int64(i)*59000/int64(currentRPM)) * time.Millisecond
+			limiter.requests[i] = windowStart.Add(offset)
 		}
 	} else {
 		limiter.requests = make([]time.Time, 0)
 	}
 
-	// Fill tokens array similarly for TPM
+	// Fill tokens array with a small number of entries that sum to currentTPM.
+	// Instead of allocating one entry per token (which would be millions of entries
+	// for large TPM values), we distribute the total across a fixed number of buckets.
 	if currentTPM > 0 {
-		limiter.tokens = make([]tokenUsage, currentTPM)
-		for i := 0; i < currentTPM; i++ {
-			// Use int64 to prevent integer overflow for large TPM values
-			offset := time.Duration(int64(i)*60000/int64(currentTPM)) * time.Millisecond
+		const maxBuckets = 60 // one bucket per second over the window
+		numBuckets := currentTPM
+		if numBuckets > maxBuckets {
+			numBuckets = maxBuckets
+		}
+		limiter.tokens = make([]tokenUsage, numBuckets)
+		tokensPerBucket := currentTPM / numBuckets
+		remainder := currentTPM % numBuckets
+		for i := 0; i < numBuckets; i++ {
+			offset := time.Duration(int64(i)*59000/int64(numBuckets)) * time.Millisecond
+			count := tokensPerBucket
+			if i < remainder {
+				count++ // distribute remainder across first buckets
+			}
 			limiter.tokens[i] = tokenUsage{
-				timestamp: oneMinuteAgo.Add(offset),
-				count:     1,
+				timestamp: windowStart.Add(offset),
+				count:     count,
 			}
 		}
 	} else {
@@ -181,7 +209,7 @@ func checkRPMLimit(l *limiter, record bool) bool {
 		}
 		// Only skip if still at capacity after cleaning (extremely rare edge case)
 		if len(l.requests) < MaxRequestsBufferSize {
-			l.requests = append(l.requests, time.Now())
+			l.requests = append(l.requests, utils.NowUTC())
 		}
 	}
 
@@ -216,7 +244,7 @@ func (r *RPMLimiter) CanAllow(credentialName string) bool {
 // cleanOldRequests removes requests older than 1 minute and returns count of valid ones
 // Must be called with limiter.mu locked
 func cleanOldRequests(l *limiter) int {
-	now := time.Now()
+	now := utils.NowUTC()
 	oneMinuteAgo := now.Add(-time.Minute)
 
 	// Pre-allocate with original capacity to avoid excessive allocations
@@ -234,7 +262,7 @@ func cleanOldRequests(l *limiter) int {
 // cleanOldTokens removes tokens older than 1 minute and returns total count
 // Must be called with limiter.mu locked
 func cleanOldTokens(l *limiter) int {
-	now := time.Now()
+	now := utils.NowUTC()
 	oneMinuteAgo := now.Add(-time.Minute)
 
 	// Pre-allocate with original capacity to avoid excessive allocations
@@ -330,7 +358,7 @@ func (r *RPMLimiter) GetAllModelPairs() []ModelPair {
 	pairs := make([]ModelPair, 0, len(r.modelLimiters))
 	for key := range r.modelLimiters {
 		// key format is always "credential:model" since we control the key creation
-		parts := strings.Split(key, ":")
+		parts := strings.SplitN(key, ":", 2)
 		if len(parts) == 2 {
 			pairs = append(pairs, ModelPair{Credential: parts[0], Model: parts[1]})
 		}
@@ -355,7 +383,7 @@ func (r *RPMLimiter) ConsumeTokens(credentialName string, tokenCount int) {
 	// Only skip if still at capacity after cleaning (extremely rare edge case)
 	if len(limiter.tokens) < MaxTokensBufferSize {
 		limiter.tokens = append(limiter.tokens, tokenUsage{
-			timestamp: time.Now(),
+			timestamp: utils.NowUTC(),
 			count:     tokenCount,
 		})
 	}
@@ -419,7 +447,7 @@ func (r *RPMLimiter) ConsumeModelTokens(credentialName, modelName string, tokenC
 	// Only skip if still at capacity after cleaning (extremely rare edge case)
 	if len(modelLimiter.tokens) < MaxTokensBufferSize {
 		modelLimiter.tokens = append(modelLimiter.tokens, tokenUsage{
-			timestamp: time.Now(),
+			timestamp: utils.NowUTC(),
 			count:     tokenCount,
 		})
 	}
@@ -489,6 +517,69 @@ func (r *RPMLimiter) GetModelLimitRPM(credentialName, modelName string) int {
 	defer modelLimiter.mu.Unlock()
 
 	return modelLimiter.rpm
+}
+
+// TryAllowAll atomically checks credential RPM, credential TPM, model RPM, and model TPM limits.
+// If all checks pass, it records the credential and model RPM usage. Returns true if allowed.
+// This prevents TOCTOU races where separate CanAllow+Allow calls could exceed limits.
+// modelName can be empty if no model-level limiting is needed.
+func (r *RPMLimiter) TryAllowAll(credentialName, modelName string) bool {
+	credLimiter := r.getCredentialLimiter(credentialName)
+	if credLimiter == nil {
+		return false
+	}
+
+	var modLimiter *limiter
+	if modelName != "" {
+		modLimiter = r.getModelLimiter(credentialName, modelName)
+		// nil modLimiter means model not tracked — no model-level limit to enforce
+	}
+
+	// Lock credential limiter first, then model limiter (consistent ordering)
+	credLimiter.mu.Lock()
+	defer credLimiter.mu.Unlock()
+
+	// Check credential RPM
+	if !checkRPMLimit(credLimiter, false) {
+		return false
+	}
+
+	// Check credential TPM
+	if !checkTPMLimit(credLimiter) {
+		return false
+	}
+
+	// Check model limits if model limiter exists
+	if modLimiter != nil {
+		modLimiter.mu.Lock()
+		defer modLimiter.mu.Unlock()
+
+		if !checkRPMLimit(modLimiter, false) {
+			return false
+		}
+		if !checkTPMLimit(modLimiter) {
+			return false
+		}
+	}
+
+	// All checks passed — now record RPM for both credential and model
+	recordRequest(credLimiter)
+	if modLimiter != nil {
+		recordRequest(modLimiter)
+	}
+
+	return true
+}
+
+// recordRequest appends a request timestamp to the limiter.
+// Must be called with limiter.mu locked.
+func recordRequest(l *limiter) {
+	if len(l.requests) >= MaxRequestsBufferSize {
+		cleanOldRequests(l)
+	}
+	if len(l.requests) < MaxRequestsBufferSize {
+		l.requests = append(l.requests, utils.NowUTC())
+	}
 }
 
 // GetModelLimitTPM returns the TPM limit for a model within a credential

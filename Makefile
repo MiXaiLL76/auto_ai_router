@@ -9,6 +9,7 @@ GOFLAGS=-v
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 LDFLAGS=-ldflags="-s -w -X main.Version=$(VERSION) -X main.Commit=$(COMMIT)"
+INTERNAL_PKGS=./internal/...
 
 # Docker variables
 DOCKER_IMAGE=auto-ai-router
@@ -67,13 +68,16 @@ clean:
 ## test: Run all tests
 test:
 	@echo "Running tests..."
-	export PATH=/usr/local/go/bin:$$PATH && $(GO) test -v ./internal/...
+	export PATH=/usr/local/go/bin:$$PATH && $(GO) test -v $(INTERNAL_PKGS)
 	@echo "Tests complete"
 
 ## test-coverage: Run tests with coverage report
 test-coverage:
 	@echo "Running tests with coverage..."
-	export PATH=/usr/local/go/bin:$$PATH && $(GO) test -coverprofile=coverage.out ./internal/...
+	@export PATH=/usr/local/go/bin:$$PATH; \
+	export GOCACHE=$${GOCACHE:-/tmp/go-build}; \
+	COVERPKG="$$( $(GO) list ./internal/... | paste -sd "," - )"; \
+	$(GO) test -coverpkg="$$COVERPKG" -coverprofile=coverage.out $(INTERNAL_PKGS)
 	@echo ""
 	@echo "Coverage by package:"
 	export PATH=/usr/local/go/bin:$$PATH && $(GO) tool cover -func=coverage.out | grep -E "github.com"
@@ -92,18 +96,24 @@ test-coverage-html: test-coverage
 ## test-race: Run tests with race detector
 test-race:
 	@echo "Running tests with race detector..."
-	export PATH=/usr/local/go/bin:$$PATH && $(GO) test -race ./internal/...
+	export PATH=/usr/local/go/bin:$$PATH && $(GO) test -race $(INTERNAL_PKGS)
 	@echo "Race detection tests complete"
 
 ## test-pkg: Run tests for specific package (usage: make test-pkg PKG=config)
 test-pkg:
 	@echo "Running tests for package $(PKG)..."
-	export PATH=/usr/local/go/bin:$$PATH && $(GO) test -v -cover ./internal/$(PKG)/...
+	@export PATH=/usr/local/go/bin:$$PATH; \
+	export GOCACHE=$${GOCACHE:-/tmp/go-build}; \
+	COVERPKG="$$( $(GO) list ./internal/... | paste -sd "," - )"; \
+	$(GO) test -v -coverpkg="$$COVERPKG" -cover ./internal/$(PKG)/...
 
 ## test-check-coverage: Check if coverage meets threshold
 test-check-coverage:
 	@echo "Checking coverage threshold..."
-	@export PATH=/usr/local/go/bin:$$PATH && $(GO) test -coverprofile=coverage.out ./internal/... > /dev/null
+	@export PATH=/usr/local/go/bin:$$PATH; \
+	export GOCACHE=$${GOCACHE:-/tmp/go-build}; \
+	COVERPKG="$$( $(GO) list ./internal/... | paste -sd "," - )"; \
+	$(GO) test -coverpkg="$$COVERPKG" -coverprofile=coverage.out $(INTERNAL_PKGS) > /dev/null
 	@export PATH=/usr/local/go/bin:$$PATH && $(GO) tool cover -func=coverage.out | grep total | awk '{print "Total coverage: " $$3}'
 	@export PATH=/usr/local/go/bin:$$PATH && $(GO) tool cover -func=coverage.out | grep total | awk '{gsub(/%/,"",$$3); if ($$3+0 < 80) {print "❌ Coverage is below 80%"; exit 1} else {print "✅ Coverage is above 80%"}}'
 

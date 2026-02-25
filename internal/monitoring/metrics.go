@@ -85,17 +85,17 @@ var (
 	CredentialBanEvents = promauto.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "auto_ai_router_credential_ban_events_total",
-			Help: "Total number of ban events for credentials",
+			Help: "Total number of ban events for credential+model pairs",
 		},
-		[]string{"credential", "error_code"},
+		[]string{"credential", "model", "error_code"},
 	)
 
 	CredentialUnbanEvents = promauto.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "auto_ai_router_credential_unban_events_total",
-			Help: "Total number of unban events for credentials",
+			Help: "Total number of unban events for credential+model pairs",
 		},
-		[]string{"credential"},
+		[]string{"credential", "model"},
 	)
 )
 

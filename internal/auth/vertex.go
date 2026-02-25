@@ -12,6 +12,8 @@ import (
 
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
+
+	"github.com/mixaill76/auto_ai_router/internal/utils"
 )
 
 // tokenRefreshRequest represents a request to refresh a token
@@ -96,7 +98,7 @@ func (tm *VertexTokenManager) GetToken(credentialName, credentialsFile, credenti
 	// Fast path: check if we have a valid cached token (read-only)
 	tm.mu.RLock()
 	if cached, exists := tm.tokens[credentialName]; exists {
-		if time.Now().Before(cached.expiresAt.Add(-tm.tokenRefresh)) {
+		if utils.NowUTC().Before(cached.expiresAt.Add(-tm.tokenRefresh)) {
 			token := cached.token.AccessToken
 			tm.mu.RUnlock()
 			return token, nil
@@ -113,7 +115,7 @@ func (tm *VertexTokenManager) GetToken(credentialName, credentialsFile, credenti
 	// Double-check cache to prevent race condition: cache may have been updated
 	// after our first check and before acquiring this lock
 	if cached, exists := tm.tokens[credentialName]; exists {
-		if time.Now().Before(cached.expiresAt.Add(-tm.tokenRefresh)) {
+		if utils.NowUTC().Before(cached.expiresAt.Add(-tm.tokenRefresh)) {
 			token := cached.token.AccessToken
 			tm.mu.RUnlock()
 			return token, nil
@@ -143,7 +145,24 @@ func (tm *VertexTokenManager) GetToken(credentialName, credentialsFile, credenti
 		select {
 		case tm.refreshRequests <- req:
 		case <-ctx.Done():
-			tm.removeWaitingChan(credentialName, responseChan)
+			// First caller timed out before sending the refresh request.
+			// Other callers may have already appended their channels to
+			// tm.refreshing[credentialName] expecting a refresh to happen.
+			// We must notify them all with an error since no request was sent.
+			tm.refreshingMu.Lock()
+			waitingChans, exists := tm.refreshing[credentialName]
+			delete(tm.refreshing, credentialName)
+			tm.refreshingMu.Unlock()
+
+			if exists {
+				errResp := tokenRefreshResponse{token: "", err: fmt.Errorf("token refresh timeout: initiator cancelled before sending request")}
+				for _, ch := range waitingChans {
+					select {
+					case ch <- errResp:
+					default:
+					}
+				}
+			}
 			return "", fmt.Errorf("token refresh timeout")
 		}
 	} else {
@@ -157,6 +176,11 @@ func (tm *VertexTokenManager) GetToken(credentialName, credentialsFile, credenti
 	case resp := <-responseChan:
 		return resp.token, resp.err
 	case <-ctx.Done():
+		// Important: ALL callers (both first and coalescing) must remove their channel
+		// from refreshing map on timeout to prevent channel leak and ensure proper cleanup.
+		// Coalescing callers that timeout must be removed so processRefreshRequest doesn't
+		// attempt to send response to an abandoned channel.
+		tm.removeWaitingChan(credentialName, responseChan)
 		return "", fmt.Errorf("token refresh timeout")
 	}
 }
@@ -186,9 +210,39 @@ func (tm *VertexTokenManager) refreshWorker() {
 }
 
 // processRefreshRequest handles a single refresh request and notifies all coalesced waiters
+// Panic recovery ensures that even if token operations fail catastrophically,
+// all waiting callers are notified so they don't hang on timeout.
 func (tm *VertexTokenManager) processRefreshRequest(req tokenRefreshRequest) {
 	var token string
 	var err error
+
+	// Recover from panic to ensure all waiters are notified
+	defer func() {
+		if r := recover(); r != nil {
+			tm.logger.Error("Panic during token refresh",
+				"credential", req.credentialName,
+				"panic", r,
+			)
+			err = fmt.Errorf("token refresh panicked: %v", r)
+			token = ""
+
+			// Send error to all waiting callers even after panic
+			tm.refreshingMu.Lock()
+			waitingChans, exists := tm.refreshing[req.credentialName]
+			delete(tm.refreshing, req.credentialName)
+			tm.refreshingMu.Unlock()
+
+			if exists {
+				resp := tokenRefreshResponse{token: "", err: err}
+				for _, ch := range waitingChans {
+					select {
+					case ch <- resp:
+					default:
+					}
+				}
+			}
+		}
+	}()
 
 	// Check if token exists and needs refresh
 	tm.mu.RLock()
@@ -426,6 +480,9 @@ func (tm *VertexTokenManager) failAllWaiters(err error) {
 	}
 }
 
+// removeWaitingChan removes a specific response channel from the waiting list.
+// This is called when a caller times out or context is cancelled.
+// It prevents processRefreshRequest from sending responses to abandoned channels.
 func (tm *VertexTokenManager) removeWaitingChan(credentialName string, responseChan chan tokenRefreshResponse) {
 	tm.refreshingMu.Lock()
 	defer tm.refreshingMu.Unlock()
@@ -435,16 +492,18 @@ func (tm *VertexTokenManager) removeWaitingChan(credentialName string, responseC
 		return
 	}
 
-	for i := range waitingChans {
-		if waitingChans[i] == responseChan {
-			waitingChans = append(waitingChans[:i], waitingChans[i+1:]...)
-			break
+	// Find and create new slice without the channel
+	newChans := make([]chan tokenRefreshResponse, 0, len(waitingChans)-1)
+	for _, ch := range waitingChans {
+		if ch != responseChan {
+			newChans = append(newChans, ch)
 		}
 	}
 
-	if len(waitingChans) == 0 {
+	// Update or delete from map based on remaining channels
+	if len(newChans) == 0 {
 		delete(tm.refreshing, credentialName)
-		return
+	} else {
+		tm.refreshing[credentialName] = newChans
 	}
-	tm.refreshing[credentialName] = waitingChans
 }

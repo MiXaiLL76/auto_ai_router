@@ -31,7 +31,9 @@ func (m *MockModelChecker) HasModel(credentialName, modelID string) bool {
 	}
 	models, ok := m.credentialModels[credentialName]
 	if !ok {
-		return true
+		// If credentialModels are configured, unknown credentials don't have models
+		// If credentialModels are empty, allow all (backward compatibility)
+		return len(m.credentialModels) == 0
 	}
 	for _, model := range models {
 		if model == modelID {
@@ -196,15 +198,15 @@ func TestRecordResponse(t *testing.T) {
 	bal := New(credentials, f2b, rl)
 
 	// Record error responses
-	bal.RecordResponse("cred1", 401)
-	bal.RecordResponse("cred1", 401)
-	bal.RecordResponse("cred1", 401)
+	bal.RecordResponse("cred1", "gpt-4", 401)
+	bal.RecordResponse("cred1", "gpt-4", 401)
+	bal.RecordResponse("cred1", "gpt-4", 401)
 
 	// Credential should be banned
-	assert.True(t, f2b.IsBanned("cred1"))
+	assert.True(t, f2b.IsBanned("cred1", "gpt-4"))
 }
 
-func TestGetCredentials(t *testing.T) {
+func TestGetCredentialsSnapshot(t *testing.T) {
 	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
 	rl := ratelimit.New()
 
@@ -215,7 +217,7 @@ func TestGetCredentials(t *testing.T) {
 
 	bal := New(credentials, f2b, rl)
 
-	creds := bal.GetCredentials()
+	creds := bal.GetCredentialsSnapshot()
 	assert.Len(t, creds, 2)
 	assert.Equal(t, "cred1", creds[0].Name)
 	assert.Equal(t, "cred2", creds[1].Name)
@@ -237,9 +239,9 @@ func TestGetAvailableCount(t *testing.T) {
 	assert.Equal(t, 3, bal.GetAvailableCount())
 
 	// Ban one credential
-	f2b.RecordResponse("cred2", 401)
-	f2b.RecordResponse("cred2", 401)
-	f2b.RecordResponse("cred2", 401)
+	f2b.RecordResponse("cred2", "gpt-4", 401)
+	f2b.RecordResponse("cred2", "gpt-4", 401)
+	f2b.RecordResponse("cred2", "gpt-4", 401)
 
 	// Should have 2 available
 	assert.Equal(t, 2, bal.GetAvailableCount())
@@ -260,17 +262,17 @@ func TestGetBannedCount(t *testing.T) {
 	assert.Equal(t, 0, bal.GetBannedCount())
 
 	// Ban one credential
-	f2b.RecordResponse("cred1", 401)
-	f2b.RecordResponse("cred1", 401)
-	f2b.RecordResponse("cred1", 401)
+	f2b.RecordResponse("cred1", "gpt-4", 401)
+	f2b.RecordResponse("cred1", "gpt-4", 401)
+	f2b.RecordResponse("cred1", "gpt-4", 401)
 
 	// Should have 1 banned
 	assert.Equal(t, 1, bal.GetBannedCount())
 
 	// Ban another
-	f2b.RecordResponse("cred2", 500)
-	f2b.RecordResponse("cred2", 500)
-	f2b.RecordResponse("cred2", 500)
+	f2b.RecordResponse("cred2", "gpt-4", 500)
+	f2b.RecordResponse("cred2", "gpt-4", 500)
+	f2b.RecordResponse("cred2", "gpt-4", 500)
 
 	// Should have 2 banned
 	assert.Equal(t, 2, bal.GetBannedCount())
@@ -318,6 +320,32 @@ func TestRoundRobinCycling(t *testing.T) {
 	}
 }
 
+func TestNextForModel_SkipsFallback(t *testing.T) {
+	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
+	rl := ratelimit.New()
+
+	credentials := []config.CredentialConfig{
+		{Name: "primary1", Type: config.ProviderTypeOpenAI, IsFallback: false, RPM: 100, TPM: 10000},
+		{Name: "fallback1", Type: config.ProviderTypeOpenAI, IsFallback: true, RPM: 100, TPM: 10000},
+		{Name: "primary2", Type: config.ProviderTypeAnthropic, IsFallback: false, RPM: 100, TPM: 10000},
+	}
+
+	bal := New(credentials, f2b, rl)
+
+	// Should only return non-fallback credentials
+	seen := make(map[string]bool)
+	for i := 0; i < 4; i++ {
+		cred, err := bal.NextForModel("gpt-4o")
+		require.NoError(t, err)
+		assert.False(t, cred.IsFallback)
+		seen[cred.Name] = true
+	}
+
+	assert.True(t, seen["primary1"])
+	assert.True(t, seen["primary2"])
+	assert.False(t, seen["fallback1"])
+}
+
 func TestNextForModel_BannedCredential(t *testing.T) {
 	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
 	rl := ratelimit.New()
@@ -331,9 +359,9 @@ func TestNextForModel_BannedCredential(t *testing.T) {
 	bal := New(credentials, f2b, rl)
 
 	// Ban cred1
-	bal.RecordResponse("cred1", 401)
-	bal.RecordResponse("cred1", 401)
-	bal.RecordResponse("cred1", 401)
+	bal.RecordResponse("cred1", "", 401)
+	bal.RecordResponse("cred1", "", 401)
+	bal.RecordResponse("cred1", "", 401)
 
 	// Next should skip cred1 and return cred2
 	cred, err := bal.NextForModel("")
@@ -354,8 +382,8 @@ func TestNextForModel_AllBanned(t *testing.T) {
 
 	// Ban all credentials
 	for i := 0; i < 3; i++ {
-		bal.RecordResponse("cred1", 401)
-		bal.RecordResponse("cred2", 401)
+		bal.RecordResponse("cred1", "", 401)
+		bal.RecordResponse("cred2", "", 401)
 	}
 
 	// Next should return error
@@ -498,7 +526,7 @@ func TestNextFallbackForModel_SkipsNonFallback(t *testing.T) {
 	assert.True(t, cred.IsFallback)
 }
 
-func TestNextFallbackForModel_SkipsNonProxyTypes(t *testing.T) {
+func TestNextFallbackForModel_AllowsNonProxyTypes(t *testing.T) {
 	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
 	rl := ratelimit.New()
 
@@ -512,8 +540,8 @@ func TestNextFallbackForModel_SkipsNonProxyTypes(t *testing.T) {
 	cred, err := bal.NextFallbackForModel("gpt-4o")
 
 	assert.NoError(t, err)
-	assert.Equal(t, "proxy1", cred.Name)
-	assert.Equal(t, config.ProviderTypeProxy, cred.Type)
+	assert.Equal(t, "openai1", cred.Name)
+	assert.Equal(t, config.ProviderTypeOpenAI, cred.Type)
 }
 
 func TestNextFallbackForModel_NoFallbacksAvailable(t *testing.T) {
@@ -533,6 +561,24 @@ func TestNextFallbackForModel_NoFallbacksAvailable(t *testing.T) {
 	assert.Equal(t, ErrNoCredentialsAvailable, err)
 }
 
+func TestNextFallbackProxyForModel_SkipsNonProxyTypes(t *testing.T) {
+	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
+	rl := ratelimit.New()
+
+	credentials := []config.CredentialConfig{
+		{Name: "openai1", Type: config.ProviderTypeOpenAI, IsFallback: true, RPM: 100, TPM: 10000},
+		{Name: "proxy1", Type: config.ProviderTypeProxy, IsFallback: true, RPM: 100, TPM: 10000},
+	}
+
+	bal := New(credentials, f2b, rl)
+
+	cred, err := bal.NextFallbackProxyForModel("gpt-4o")
+
+	assert.NoError(t, err)
+	assert.Equal(t, "proxy1", cred.Name)
+	assert.Equal(t, config.ProviderTypeProxy, cred.Type)
+}
+
 func TestNextFallbackForModel_SkipsBannedFallback(t *testing.T) {
 	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
 	rl := ratelimit.New()
@@ -545,9 +591,9 @@ func TestNextFallbackForModel_SkipsBannedFallback(t *testing.T) {
 	bal := New(credentials, f2b, rl)
 
 	// Ban first proxy
-	bal.RecordResponse("proxy1", 500)
-	bal.RecordResponse("proxy1", 500)
-	bal.RecordResponse("proxy1", 500)
+	bal.RecordResponse("proxy1", "gpt-4o", 500)
+	bal.RecordResponse("proxy1", "gpt-4o", 500)
+	bal.RecordResponse("proxy1", "gpt-4o", 500)
 
 	cred, err := bal.NextFallbackForModel("gpt-4o")
 
@@ -627,6 +673,32 @@ func TestNextFallbackForModel_TPMLimitExceeded(t *testing.T) {
 	assert.Equal(t, ErrRateLimitExceeded, err)
 }
 
+// TestNextForModel_MixedPrimaryFallback_RateLimit verifies that when primary credentials
+// are TPM-exhausted and fallback credentials also are TPM-exhausted, ErrRateLimitExceeded
+// is returned (not ErrNoCredentialsAvailable). This was a bug where filtering out fallback
+// credentials set otherReasonsHit=true, masking the actual rate limit error.
+func TestNextForModel_MixedPrimaryFallback_RateLimit(t *testing.T) {
+	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
+	rl := ratelimit.New()
+
+	credentials := []config.CredentialConfig{
+		{Name: "primary1", Type: config.ProviderTypeOpenAI, RPM: 100, TPM: 100},
+		{Name: "fallback1", Type: config.ProviderTypeProxy, IsFallback: true, RPM: 100, TPM: 100},
+	}
+
+	bal := New(credentials, f2b, rl)
+	rl.ConsumeTokens("primary1", 100)
+
+	// Primary is TPM-exhausted, but fallback exists → should get ErrRateLimitExceeded (not ErrNoCredentialsAvailable)
+	_, err := bal.NextForModel("gpt-4o")
+	assert.Equal(t, ErrRateLimitExceeded, err)
+
+	// Fallback path: fallback TPM also exhausted → should still get ErrRateLimitExceeded
+	rl.ConsumeTokens("fallback1", 100)
+	_, err = bal.NextFallbackForModel("gpt-4o")
+	assert.Equal(t, ErrRateLimitExceeded, err)
+}
+
 func TestNextFallbackForModel_WithModelChecker(t *testing.T) {
 	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
 	rl := ratelimit.New()
@@ -687,7 +759,7 @@ func TestRoundRobin_GetCredentialsSnapshot_NoRace(t *testing.T) {
 			bal.GetAvailableCount()
 			bal.GetBannedCount()
 			if j%3 == 0 {
-				f2b.RecordResponse("cred1", 401)
+				f2b.RecordResponse("cred1", "gpt-4", 401)
 			}
 		}
 		done <- true
@@ -704,4 +776,273 @@ func TestRoundRobin_GetCredentialsSnapshot_NoRace(t *testing.T) {
 	assert.Equal(t, "key1", finalSnapshot[0].APIKey)
 	assert.Equal(t, "key2", finalSnapshot[1].APIKey)
 	assert.Equal(t, "key3", finalSnapshot[2].APIKey)
+}
+
+// Fallback Configuration Validation Tests
+
+func TestValidateFallbackConfiguration_WithFallbacks(t *testing.T) {
+	// Test that balancer correctly counts fallback credentials
+	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
+	rl := ratelimit.New()
+
+	credentials := []config.CredentialConfig{
+		{
+			Name:       "proxy-a",
+			Type:       config.ProviderTypeProxy,
+			BaseURL:    "http://a.com",
+			RPM:        100,
+			IsFallback: false,
+		},
+		{
+			Name:       "proxy-b",
+			Type:       config.ProviderTypeProxy,
+			BaseURL:    "http://b.com",
+			RPM:        100,
+			IsFallback: true,
+		},
+		{
+			Name:       "proxy-c",
+			Type:       config.ProviderTypeProxy,
+			BaseURL:    "http://c.com",
+			RPM:        100,
+			IsFallback: true,
+		},
+	}
+
+	// Should initialize successfully with fallback credentials
+	bal := New(credentials, f2b, rl)
+	require.NotNil(t, bal)
+	assert.Equal(t, 3, len(bal.credentials))
+
+	// Verify fallback count
+	fallbackCount := 0
+	for _, cred := range bal.credentials {
+		if cred.IsFallback {
+			fallbackCount++
+		}
+	}
+	assert.Equal(t, 2, fallbackCount, "Should have 2 fallback credentials")
+}
+
+func TestValidateFallbackConfiguration_NoFallbacks(t *testing.T) {
+	// Test configuration with no fallbacks (normal case)
+	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
+	rl := ratelimit.New()
+
+	credentials := []config.CredentialConfig{
+		{
+			Name:    "proxy-a",
+			Type:    config.ProviderTypeProxy,
+			BaseURL: "http://a.com",
+			RPM:     100,
+		},
+		{
+			Name:    "proxy-b",
+			Type:    config.ProviderTypeProxy,
+			BaseURL: "http://b.com",
+			RPM:     100,
+		},
+	}
+
+	// Initialize balancer - no fallbacks to validate
+	bal := New(credentials, f2b, rl)
+	require.NotNil(t, bal)
+
+	// No credentials should have IsFallback set
+	for _, cred := range bal.credentials {
+		assert.False(t, cred.IsFallback, "No credentials should be marked as fallback")
+	}
+}
+
+func TestNextForModelExcluding_Basic(t *testing.T) {
+	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
+	rl := ratelimit.New()
+
+	credentials := []config.CredentialConfig{
+		{Name: "cred1", APIKey: "key1", BaseURL: "http://test1.com", RPM: 100},
+		{Name: "cred2", APIKey: "key2", BaseURL: "http://test2.com", RPM: 100},
+		{Name: "cred3", APIKey: "key3", BaseURL: "http://test3.com", RPM: 100},
+		{Name: "cred4", APIKey: "key4", BaseURL: "http://test4.com", RPM: 100},
+	}
+
+	bal := New(credentials, f2b, rl)
+
+	// Exclude cred1 and cred3
+	exclude := map[string]bool{"cred1": true, "cred3": true}
+
+	// Should return cred2 first, then cred4
+	cred, err := bal.NextForModelExcluding("", exclude)
+	require.NoError(t, err)
+	assert.Equal(t, "cred2", cred.Name)
+
+	cred, err = bal.NextForModelExcluding("", exclude)
+	require.NoError(t, err)
+	assert.Equal(t, "cred4", cred.Name)
+
+	// Should cycle back to cred2
+	cred, err = bal.NextForModelExcluding("", exclude)
+	require.NoError(t, err)
+	assert.Equal(t, "cred2", cred.Name)
+}
+
+func TestNextForModelExcluding_AllExcluded(t *testing.T) {
+	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
+	rl := ratelimit.New()
+
+	credentials := []config.CredentialConfig{
+		{Name: "cred1", APIKey: "key1", BaseURL: "http://test1.com", RPM: 100},
+		{Name: "cred2", APIKey: "key2", BaseURL: "http://test2.com", RPM: 100},
+	}
+
+	bal := New(credentials, f2b, rl)
+
+	// Exclude all credentials
+	exclude := map[string]bool{"cred1": true, "cred2": true}
+
+	_, err := bal.NextForModelExcluding("", exclude)
+	assert.Error(t, err)
+	assert.Equal(t, ErrNoCredentialsAvailable, err)
+}
+
+func TestNextForModelExcluding_RoundRobin(t *testing.T) {
+	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
+	rl := ratelimit.New()
+
+	credentials := []config.CredentialConfig{
+		{Name: "cred1", Type: config.ProviderTypeOpenAI, APIKey: "key1", BaseURL: "http://test1.com", RPM: 1000},
+		{Name: "cred2", Type: config.ProviderTypeVertexAI, APIKey: "key2", RPM: 1000, ProjectID: "p", Location: "l"},
+		{Name: "cred3", Type: config.ProviderTypeOpenAI, APIKey: "key3", BaseURL: "http://test3.com", RPM: 1000},
+		{Name: "cred4", Type: config.ProviderTypeVertexAI, APIKey: "key4", RPM: 1000, ProjectID: "p", Location: "l"},
+	}
+
+	bal := New(credentials, f2b, rl)
+
+	// First call without exclude gets cred1
+	cred, err := bal.NextForModel("")
+	require.NoError(t, err)
+	assert.Equal(t, "cred1", cred.Name)
+
+	// Now exclude cred1 (already tried), should get cred2
+	exclude := map[string]bool{"cred1": true}
+	cred, err = bal.NextForModelExcluding("", exclude)
+	require.NoError(t, err)
+	assert.Equal(t, "cred2", cred.Name)
+
+	// Exclude cred1 and cred2, should get cred3
+	exclude["cred2"] = true
+	cred, err = bal.NextForModelExcluding("", exclude)
+	require.NoError(t, err)
+	assert.Equal(t, "cred3", cred.Name)
+}
+
+func TestNextForModelExcluding_SkipsFallback(t *testing.T) {
+	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
+	rl := ratelimit.New()
+
+	credentials := []config.CredentialConfig{
+		{Name: "cred1", APIKey: "key1", BaseURL: "http://test1.com", RPM: 100},
+		{Name: "fallback1", Type: config.ProviderTypeProxy, IsFallback: true, RPM: 100, TPM: 10000},
+		{Name: "cred2", APIKey: "key2", BaseURL: "http://test2.com", RPM: 100},
+	}
+
+	bal := New(credentials, f2b, rl)
+
+	// Exclude cred1, should skip fallback1 and return cred2
+	exclude := map[string]bool{"cred1": true}
+	cred, err := bal.NextForModelExcluding("", exclude)
+	require.NoError(t, err)
+	assert.Equal(t, "cred2", cred.Name)
+}
+
+func TestNextForModelExcluding_WithModelChecker(t *testing.T) {
+	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
+	rl := ratelimit.New()
+
+	credentials := []config.CredentialConfig{
+		{Name: "cred1", Type: config.ProviderTypeVertexAI, APIKey: "key1", RPM: 1000, ProjectID: "p", Location: "l"},
+		{Name: "cred2", Type: config.ProviderTypeVertexAI, APIKey: "key2", RPM: 1000, ProjectID: "p", Location: "l"},
+		{Name: "cred3", Type: config.ProviderTypeOpenAI, APIKey: "key3", BaseURL: "http://test3.com", RPM: 1000},
+	}
+
+	bal := New(credentials, f2b, rl)
+
+	mc := NewMockModelChecker(true)
+	mc.AddModel("cred1", "gemini-2.5-flash")
+	mc.AddModel("cred2", "gemini-2.5-flash")
+	// cred3 does NOT support gemini-2.5-flash
+	bal.SetModelChecker(mc)
+
+	// Exclude cred1 for gemini-2.5-flash model
+	exclude := map[string]bool{"cred1": true}
+	cred, err := bal.NextForModelExcluding("gemini-2.5-flash", exclude)
+	require.NoError(t, err)
+	assert.Equal(t, "cred2", cred.Name, "Should return cred2 since cred1 is excluded and cred3 doesn't support the model")
+
+	// Exclude both vertex creds
+	exclude["cred2"] = true
+	_, err = bal.NextForModelExcluding("gemini-2.5-flash", exclude)
+	assert.Error(t, err, "Should error when all model-supporting creds are excluded")
+}
+
+func TestRoundRobin_MultipleCredentialsSameModel(t *testing.T) {
+	// Test case: 4 credentials with same model should be cycled properly
+	// This reproduces the issue where storied-port-482316-u0 was being used 90% of the time
+	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
+	rl := ratelimit.New()
+
+	credentials := []config.CredentialConfig{
+		{Name: "matvey-01", Type: config.ProviderTypeOpenAI, APIKey: "key1", BaseURL: "http://test1.com", RPM: -1},
+		{Name: "matvey-02", Type: config.ProviderTypeOpenAI, APIKey: "key2", BaseURL: "http://test2.com", RPM: -1},
+		{Name: "matvey-03", Type: config.ProviderTypeOpenAI, APIKey: "key3", BaseURL: "http://test3.com", RPM: -1},
+		{Name: "storied-port-482316-u0", Type: config.ProviderTypeVertexAI, APIKey: "key4", BaseURL: "http://vertex1.com", RPM: -1},
+		{Name: "sunlit-flag-482317-i9", Type: config.ProviderTypeVertexAI, APIKey: "key5", BaseURL: "http://vertex2.com", RPM: -1},
+		{Name: "aqueous-heading-482215-q8", Type: config.ProviderTypeVertexAI, APIKey: "key6", BaseURL: "http://vertex3.com", RPM: -1},
+		{Name: "spatial-shore-482315-p6", Type: config.ProviderTypeVertexAI, APIKey: "key7", BaseURL: "http://vertex4.com", RPM: -1},
+	}
+
+	bal := New(credentials, f2b, rl)
+
+	// Setup model checker: only the 4 vertex credentials support gemini-2.5-flash
+	mc := NewMockModelChecker(true)
+	mc.AddModel("storied-port-482316-u0", "gemini-2.5-flash")
+	mc.AddModel("sunlit-flag-482317-i9", "gemini-2.5-flash")
+	mc.AddModel("aqueous-heading-482215-q8", "gemini-2.5-flash")
+	mc.AddModel("spatial-shore-482315-p6", "gemini-2.5-flash")
+
+	bal.SetModelChecker(mc)
+
+	// Request for gemini-2.5-flash multiple times
+	// Should cycle through all 4 vertex credentials
+	requests := make([]string, 8)
+	expectedCycle := []string{
+		"storied-port-482316-u0",
+		"sunlit-flag-482317-i9",
+		"aqueous-heading-482215-q8",
+		"spatial-shore-482315-p6",
+		"storied-port-482316-u0", // cycle repeats
+		"sunlit-flag-482317-i9",
+		"aqueous-heading-482215-q8",
+		"spatial-shore-482315-p6",
+	}
+
+	for i := 0; i < 8; i++ {
+		cred, err := bal.NextForModel("gemini-2.5-flash")
+		require.NoError(t, err)
+		requests[i] = cred.Name
+	}
+
+	// Verify the cycle
+	for i, expected := range expectedCycle {
+		assert.Equal(t, expected, requests[i], "Request %d should get %s, got %s", i+1, expected, requests[i])
+	}
+
+	// Verify distribution: each vertex credential should appear at least once in first 4 requests
+	firstFourCreds := make(map[string]int)
+	for i := 0; i < 4; i++ {
+		firstFourCreds[requests[i]]++
+	}
+	assert.Equal(t, 4, len(firstFourCreds), "First 4 requests should use 4 different credentials")
+	for cred, count := range firstFourCreds {
+		assert.Equal(t, 1, count, "Each credential in first 4 requests should appear exactly once, %s appeared %d times", cred, count)
+	}
 }

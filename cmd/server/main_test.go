@@ -3,6 +3,7 @@ package main
 import (
 	"testing"
 
+	"github.com/mixaill76/auto_ai_router/internal/modelupdate"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -36,7 +37,7 @@ func TestSplitCredentialModel(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := splitCredentialModel(tt.input)
+			result := modelupdate.SplitCredentialModel(tt.input)
 			assert.Equal(t, tt.expected, result)
 		})
 	}

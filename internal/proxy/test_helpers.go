@@ -18,18 +18,12 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/models"
 	"github.com/mixaill76/auto_ai_router/internal/monitoring"
 	"github.com/mixaill76/auto_ai_router/internal/ratelimit"
+	"github.com/mixaill76/auto_ai_router/internal/testhelpers"
 )
 
 // ============================================================================
 // Logger Helpers
 // ============================================================================
-
-// createTestLogger creates a logger that discards all output for testing.
-func createTestLogger() *slog.Logger {
-	return slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{
-		Level: slog.LevelError,
-	}))
-}
 
 // ============================================================================
 // Infrastructure Helpers (Metrics, TokenManager, ModelManager)
@@ -119,7 +113,7 @@ type TestProxyConfig struct {
 
 // NewTestProxyBuilder creates a builder with default configuration.
 func NewTestProxyBuilder() *TestProxyBuilder {
-	logger := createTestLogger()
+	logger := testhelpers.NewTestLogger()
 	return &TestProxyBuilder{
 		config: &TestProxyConfig{
 			Logger:         logger,
