@@ -20,3 +20,4 @@ price.json
 bad_server.yaml
 logs/*.json
 site/*
+.vscode/settings.json
