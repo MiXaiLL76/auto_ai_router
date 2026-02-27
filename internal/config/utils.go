@@ -143,6 +143,14 @@ func PrintConfig(logger *slog.Logger, cfg *Config) {
 		}
 	}
 
+	// Model aliases
+	if len(cfg.ModelAlias) > 0 {
+		logger.Info("model_alias", "total_count", len(cfg.ModelAlias))
+		for alias, target := range cfg.ModelAlias {
+			logger.Info("  alias", "from", alias, "to", target)
+		}
+	}
+
 	// LiteLLM DB config
 	if cfg.LiteLLMDB.Enabled {
 		logger.Info("litellm_db (ENABLED)",

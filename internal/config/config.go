@@ -49,6 +49,7 @@ type Config struct {
 	Credentials []CredentialConfig `yaml:"credentials"`
 	Monitoring  MonitoringConfig   `yaml:"monitoring"`
 	Models      []ModelRPMConfig   `yaml:"models,omitempty"`
+	ModelAlias  map[string]string  `yaml:"model_alias,omitempty"`
 	LiteLLMDB   LiteLLMDBConfig    `yaml:"litellm_db,omitempty"`
 }
 
@@ -422,6 +423,15 @@ func Load(path string) (*Config, error) {
 
 	if !hasMappingKey(&root, "fail2ban") {
 		cfg.Fail2Ban = defaultFail2BanConfig()
+	}
+
+	// Resolve env variables in model_alias values
+	if cfg.ModelAlias != nil {
+		resolved := make(map[string]string, len(cfg.ModelAlias))
+		for alias, target := range cfg.ModelAlias {
+			resolved[resolveEnvString(alias)] = resolveEnvString(target)
+		}
+		cfg.ModelAlias = resolved
 	}
 
 	// Normalize credentials

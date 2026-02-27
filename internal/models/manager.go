@@ -128,6 +128,7 @@ type Manager struct {
 	allModels          []Model                  // deduplicated list of all models
 	modelToCredentials map[string][]string      // model ID -> list of credential names
 	modelLimits        map[string][]ModelLimits // model ID -> limits (may have multiple entries for different credentials)
+	modelAliases       map[string]string        // alias -> real model name
 	defaultModelsRPM   int                      // default RPM for models
 	logger             *slog.Logger
 	credentials        []config.CredentialConfig   // credentials for fetching remote models
@@ -143,6 +144,7 @@ func New(logger *slog.Logger, defaultModelsRPM int, staticModels []config.ModelR
 		allModels:          make([]Model, 0),
 		modelToCredentials: make(map[string][]string),
 		modelLimits:        make(map[string][]ModelLimits),
+		modelAliases:       make(map[string]string),
 		defaultModelsRPM:   defaultModelsRPM,
 		logger:             logger,
 		credentials:        make([]config.CredentialConfig, 0),
@@ -175,6 +177,32 @@ func (m *Manager) SetCredentials(credentials []config.CredentialConfig) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.credentials = credentials
+}
+
+// SetModelAliases sets the model alias map (alias -> real model name)
+func (m *Manager) SetModelAliases(aliases map[string]string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.modelAliases = make(map[string]string, len(aliases))
+	for alias, target := range aliases {
+		if alias == target {
+			m.logger.Warn("Model alias points to itself, skipping", "alias", alias)
+			continue
+		}
+		m.modelAliases[alias] = target
+		m.logger.Info("Registered model alias", "alias", alias, "target", target)
+	}
+}
+
+// ResolveAlias resolves a model alias to the real model name.
+// Returns the resolved model name and true if it was an alias, or the original name and false otherwise.
+func (m *Manager) ResolveAlias(modelID string) (string, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if resolved, ok := m.modelAliases[modelID]; ok {
+		return resolved, true
+	}
+	return modelID, false
 }
 
 // addModelToMaps adds model to credential mapping, avoiding duplicates using sets

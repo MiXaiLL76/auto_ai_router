@@ -182,6 +182,14 @@ func (p *Proxy) readRequestBodyAndSelectModel(
 		return nil, "", false, false
 	}
 
+	// Resolve model alias
+	if resolved, isAlias := p.modelManager.ResolveAlias(modelID); isAlias {
+		p.logger.Debug("Resolved model alias", "alias", modelID, "resolved", resolved)
+		body = replaceModelInBody(body, modelID, resolved)
+		modelID = resolved
+		logCtx.ModelID = modelID
+	}
+
 	return body, modelID, streaming, true
 }
 

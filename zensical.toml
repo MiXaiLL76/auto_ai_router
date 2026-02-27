@@ -29,6 +29,7 @@ nav = [
   { "Advanced" = [
     { "Security" = "advanced/security.md" },
     { "Load Balancing" = "advanced/balancing.md" },
+    { "Model Aliases" = "advanced/model_alias.md" },
     { "Troubleshooting" = "advanced/troubleshooting.md" },
   ]},
 ]

@@ -995,6 +995,129 @@ monitoring:
 	assert.Equal(t, 5, cfg.Server.MaxProviderRetries, "Custom MaxProviderRetries should be 5")
 }
 
+func TestLoad_ModelAlias(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.yaml")
+
+	configContent := `
+server:
+  port: 8080
+  max_body_size_mb: 10
+  request_timeout: 30s
+  master_key: "sk-test"
+
+fail2ban:
+  max_attempts: 3
+  ban_duration: permanent
+  error_codes: [401]
+
+credentials:
+  - name: "test"
+    type: "openai"
+    api_key: "sk-test"
+    base_url: "https://api.openai.com"
+    rpm: 10
+
+monitoring:
+  prometheus_enabled: false
+
+model_alias:
+  gpt-4: gpt-4o
+  claude: claude-sonnet-4-20250514
+  gemini: gemini-2.5-flash
+`
+	err := os.WriteFile(configPath, []byte(configContent), 0644)
+	require.NoError(t, err)
+
+	cfg, err := Load(configPath)
+	require.NoError(t, err)
+	assert.NotNil(t, cfg)
+
+	// Verify aliases are loaded
+	assert.Len(t, cfg.ModelAlias, 3)
+	assert.Equal(t, "gpt-4o", cfg.ModelAlias["gpt-4"])
+	assert.Equal(t, "claude-sonnet-4-20250514", cfg.ModelAlias["claude"])
+	assert.Equal(t, "gemini-2.5-flash", cfg.ModelAlias["gemini"])
+}
+
+func TestLoad_ModelAlias_WithEnvVars(t *testing.T) {
+	require.NoError(t, os.Setenv("TEST_ALIAS_TARGET", "gpt-4o-mini"))
+	defer func() { _ = os.Unsetenv("TEST_ALIAS_TARGET") }()
+
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.yaml")
+
+	configContent := `
+server:
+  port: 8080
+  max_body_size_mb: 10
+  request_timeout: 30s
+  master_key: "sk-test"
+
+fail2ban:
+  max_attempts: 3
+  ban_duration: permanent
+  error_codes: [401]
+
+credentials:
+  - name: "test"
+    type: "openai"
+    api_key: "sk-test"
+    base_url: "https://api.openai.com"
+    rpm: 10
+
+monitoring:
+  prometheus_enabled: false
+
+model_alias:
+  gpt-4: os.environ/TEST_ALIAS_TARGET
+`
+	err := os.WriteFile(configPath, []byte(configContent), 0644)
+	require.NoError(t, err)
+
+	cfg, err := Load(configPath)
+	require.NoError(t, err)
+
+	assert.Len(t, cfg.ModelAlias, 1)
+	assert.Equal(t, "gpt-4o-mini", cfg.ModelAlias["gpt-4"])
+}
+
+func TestLoad_ModelAlias_Empty(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.yaml")
+
+	configContent := `
+server:
+  port: 8080
+  max_body_size_mb: 10
+  request_timeout: 30s
+  master_key: "sk-test"
+
+fail2ban:
+  max_attempts: 3
+  ban_duration: permanent
+  error_codes: [401]
+
+credentials:
+  - name: "test"
+    type: "openai"
+    api_key: "sk-test"
+    base_url: "https://api.openai.com"
+    rpm: 10
+
+monitoring:
+  prometheus_enabled: false
+`
+	err := os.WriteFile(configPath, []byte(configContent), 0644)
+	require.NoError(t, err)
+
+	cfg, err := Load(configPath)
+	require.NoError(t, err)
+
+	// No model_alias section → nil map
+	assert.Nil(t, cfg.ModelAlias)
+}
+
 func TestResolveEnvString(t *testing.T) {
 	tests := []struct {
 		name     string
