@@ -732,6 +732,73 @@ func TestExtractTokensFromResponse(t *testing.T) {
 	}
 }
 
+func TestReplaceModelInBody(t *testing.T) {
+	tests := []struct {
+		name     string
+		body     string
+		oldModel string
+		newModel string
+		expected string
+	}{
+		{
+			name:     "simple replacement",
+			body:     `{"model":"gpt-4","messages":[]}`,
+			oldModel: "gpt-4",
+			newModel: "gpt-4o",
+			expected: `{"model":"gpt-4o","messages":[]}`,
+		},
+		{
+			name:     "replacement with space after colon",
+			body:     `{"model": "gpt-4", "messages": []}`,
+			oldModel: "gpt-4",
+			newModel: "gpt-4o",
+			expected: `{"model": "gpt-4o", "messages": []}`,
+		},
+		{
+			name:     "no match (model not found)",
+			body:     `{"model":"gpt-4o","messages":[]}`,
+			oldModel: "gpt-4",
+			newModel: "gpt-4o",
+			expected: `{"model":"gpt-4o","messages":[]}`,
+		},
+		{
+			name:     "longer alias name",
+			body:     `{"model":"claude","messages":[]}`,
+			oldModel: "claude",
+			newModel: "claude-sonnet-4-20250514",
+			expected: `{"model":"claude-sonnet-4-20250514","messages":[]}`,
+		},
+		{
+			name:     "shorter replacement",
+			body:     `{"model":"gemini-2.5-flash","messages":[]}`,
+			oldModel: "gemini-2.5-flash",
+			newModel: "gemini",
+			expected: `{"model":"gemini","messages":[]}`,
+		},
+		{
+			name:     "model with special chars in name",
+			body:     `{"model":"my/custom-model:v1","messages":[]}`,
+			oldModel: "my/custom-model:v1",
+			newModel: "real-model",
+			expected: `{"model":"real-model","messages":[]}`,
+		},
+		{
+			name:     "does not replace model in messages content",
+			body:     `{"model":"gpt-4","messages":[{"content":"use gpt-4 model"}]}`,
+			oldModel: "gpt-4",
+			newModel: "gpt-4o",
+			expected: `{"model":"gpt-4o","messages":[{"content":"use gpt-4 model"}]}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := replaceModelInBody([]byte(tt.body), tt.oldModel, tt.newModel)
+			assert.Equal(t, tt.expected, string(result))
+		})
+	}
+}
+
 func TestExtractTokensFromStreamingChunk(t *testing.T) {
 	tests := []struct {
 		name     string

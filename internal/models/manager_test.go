@@ -553,6 +553,96 @@ func TestGetAllModels_CacheExpiryRace(t *testing.T) {
 	}
 }
 
+func TestSetModelAliases(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+	manager := New(logger, 100, []config.ModelRPMConfig{})
+
+	aliases := map[string]string{
+		"gpt-4":  "gpt-4o",
+		"claude": "claude-sonnet-4-20250514",
+		"gemini": "gemini-2.5-flash",
+	}
+	manager.SetModelAliases(aliases)
+
+	// Verify aliases are set
+	resolved, isAlias := manager.ResolveAlias("gpt-4")
+	assert.True(t, isAlias)
+	assert.Equal(t, "gpt-4o", resolved)
+
+	resolved, isAlias = manager.ResolveAlias("claude")
+	assert.True(t, isAlias)
+	assert.Equal(t, "claude-sonnet-4-20250514", resolved)
+
+	resolved, isAlias = manager.ResolveAlias("gemini")
+	assert.True(t, isAlias)
+	assert.Equal(t, "gemini-2.5-flash", resolved)
+}
+
+func TestResolveAlias_NotAnAlias(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+	manager := New(logger, 100, []config.ModelRPMConfig{})
+
+	aliases := map[string]string{
+		"gpt-4": "gpt-4o",
+	}
+	manager.SetModelAliases(aliases)
+
+	// Non-alias model should return as-is
+	resolved, isAlias := manager.ResolveAlias("gpt-4o")
+	assert.False(t, isAlias)
+	assert.Equal(t, "gpt-4o", resolved)
+
+	resolved, isAlias = manager.ResolveAlias("unknown-model")
+	assert.False(t, isAlias)
+	assert.Equal(t, "unknown-model", resolved)
+}
+
+func TestResolveAlias_EmptyAliases(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+	manager := New(logger, 100, []config.ModelRPMConfig{})
+
+	// No aliases set
+	resolved, isAlias := manager.ResolveAlias("gpt-4")
+	assert.False(t, isAlias)
+	assert.Equal(t, "gpt-4", resolved)
+}
+
+func TestSetModelAliases_SkipsSelfAlias(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+	manager := New(logger, 100, []config.ModelRPMConfig{})
+
+	aliases := map[string]string{
+		"gpt-4":  "gpt-4", // self-reference, should be skipped
+		"claude": "claude-sonnet-4-20250514",
+	}
+	manager.SetModelAliases(aliases)
+
+	// Self-alias should not resolve
+	resolved, isAlias := manager.ResolveAlias("gpt-4")
+	assert.False(t, isAlias)
+	assert.Equal(t, "gpt-4", resolved)
+
+	// Normal alias should work
+	resolved, isAlias = manager.ResolveAlias("claude")
+	assert.True(t, isAlias)
+	assert.Equal(t, "claude-sonnet-4-20250514", resolved)
+}
+
+func TestSetModelAliases_Overwrite(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+	manager := New(logger, 100, []config.ModelRPMConfig{})
+
+	// Set initial aliases
+	manager.SetModelAliases(map[string]string{"gpt-4": "gpt-4o"})
+	resolved, _ := manager.ResolveAlias("gpt-4")
+	assert.Equal(t, "gpt-4o", resolved)
+
+	// Overwrite with new aliases
+	manager.SetModelAliases(map[string]string{"gpt-4": "gpt-4o-mini"})
+	resolved, _ = manager.ResolveAlias("gpt-4")
+	assert.Equal(t, "gpt-4o-mini", resolved)
+}
+
 // TestGetRemoteModels_CacheExpiryRace tests concurrent access to GetRemoteModels with cache expiry
 // This test is designed to catch TOCTOU race conditions when cache expires
 func TestGetRemoteModels_CacheExpiryRace(t *testing.T) {

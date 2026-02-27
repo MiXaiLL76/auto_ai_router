@@ -274,6 +274,9 @@ func initializeModelManager(
 	modelManager := models.New(log, cfg.Server.DefaultModelsRPM, cfg.Models)
 	modelManager.LoadModelsFromConfig(cfg.Credentials)
 	modelManager.SetCredentials(cfg.Credentials)
+	if len(cfg.ModelAlias) > 0 {
+		modelManager.SetModelAliases(cfg.ModelAlias)
+	}
 
 	// Initialize rate limiters for each model
 	modelsResp := modelManager.GetAllModels()
