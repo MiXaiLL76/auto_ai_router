@@ -91,37 +91,20 @@ jobs:
             VERSION=${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'dev' }}
             COMMIT=${{ github.sha }}
 
-  # 3. Создание релиза (только для тегов)
-  create-release:
+  # 3. Загрузка assets в существующий релиз (только для тегов)
+  upload-assets:
     if: startsWith(github.ref, 'refs/tags/')
     needs: [build-binaries, build-docker]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
-      - name: Lowercase repo name
-        id: repo
-        run: echo "repository=${GITHUB_REPOSITORY,,}" >> $GITHUB_OUTPUT
-      - name: Generate changelog
-        id: changelog
+      - name: Upload assets to existing release
         run: |
-          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
-          CHANGELOG=$(git log ${PREV_TAG}..HEAD --pretty=format:"- %s" --no-merges || echo "Initial release")
-          echo "CHANGELOG<<EOF" >> $GITHUB_OUTPUT
-          echo "$CHANGELOG" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
-      - name: Create Release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: artifacts/**/*
-          body: |
-            ## Changes
-            ${{ steps.changelog.outputs.CHANGELOG }}
-            ## Docker
-            `ghcr.io/${{ steps.repo.outputs.repository }}:${{ github.ref_name }}`
-          draft: false
-          prerelease: false
+          for file in artifacts/**/*; do
+            [ -f "$file" ] && gh release upload "${{ github.ref_name }}" "$file" --clobber
+          done
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
