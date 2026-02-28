@@ -439,7 +439,11 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			logCtx.HTTPStatus = statusCode
 			logCtx.ErrorMsg = errorMsg
 			logCtx.TargetURL = cred.BaseURL
-			http.Error(w, statusMessage, statusCode)
+			if statusCode == http.StatusRequestTimeout {
+				WriteErrorTimeout(w, statusMessage)
+			} else {
+				WriteErrorBadGateway(w, statusMessage)
+			}
 			return
 		}
 
@@ -562,7 +566,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			logCtx.HTTPStatus = http.StatusInternalServerError
 			logCtx.ErrorMsg = fmt.Sprintf("Request conversion failed: %v", convErr)
 			logCtx.TargetURL = cred.BaseURL
-			http.Error(w, "Internal Server Error: Failed to convert request", http.StatusInternalServerError)
+			WriteErrorInternal(w, "Failed to convert request")
 			return
 		}
 
@@ -612,7 +616,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			logCtx.HTTPStatus = http.StatusInternalServerError
 			logCtx.ErrorMsg = fmt.Sprintf("Failed to create request: %v", reqErr)
 			logCtx.TargetURL = targetURL
-			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+			WriteErrorInternal(w, "Internal Server Error")
 			return
 		}
 
@@ -711,7 +715,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 				logCtx.HTTPStatus = http.StatusBadGateway
 				logCtx.ErrorMsg = fmt.Sprintf("Failed to read response body: %v", readErr)
 				logCtx.TargetURL = targetURL
-				http.Error(w, "Bad Gateway: upstream response too large", http.StatusBadGateway)
+				WriteErrorBadGateway(w, "upstream response too large")
 				return
 			}
 			// Transport error reading body — retryable with another credential
@@ -776,7 +780,11 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		logCtx.HTTPStatus = statusCode
 		logCtx.ErrorMsg = "All provider attempts failed"
 		logCtx.TargetURL = targetURL
-		http.Error(w, statusMessage, statusCode)
+		if statusCode == http.StatusRequestTimeout {
+			WriteErrorTimeout(w, statusMessage)
+		} else {
+			WriteErrorBadGateway(w, statusMessage)
+		}
 		return
 	}
 

@@ -96,7 +96,7 @@ func (p *Proxy) authenticateRequest(
 		logCtx.Status = "failure"
 		logCtx.HTTPStatus = http.StatusUnauthorized
 		logCtx.ErrorMsg = "Missing Authorization header"
-		http.Error(w, "Unauthorized: Missing Authorization header", http.StatusUnauthorized)
+		WriteErrorUnauthorized(w, "Missing Authorization header")
 		return false
 	}
 
@@ -107,7 +107,7 @@ func (p *Proxy) authenticateRequest(
 		logCtx.Status = "failure"
 		logCtx.HTTPStatus = http.StatusUnauthorized
 		logCtx.ErrorMsg = "Invalid Authorization header format"
-		http.Error(w, "Unauthorized: Invalid Authorization header format", http.StatusUnauthorized)
+		WriteErrorUnauthorized(w, "Invalid Authorization header format")
 		return false
 	}
 
@@ -150,7 +150,7 @@ func (p *Proxy) authenticateRequest(
 		return true
 	} else {
 		p.logger.Error("Invalid master key", "provided_key_prefix", security.MaskAPIKey(token))
-		http.Error(w, "Unauthorized: Invalid master key", http.StatusUnauthorized)
+		WriteErrorUnauthorized(w, "Invalid master key")
 	}
 
 	return false
@@ -168,7 +168,7 @@ func (p *Proxy) readRequestBodyAndSelectModel(
 		logCtx.Status = "failure"
 		logCtx.HTTPStatus = http.StatusBadRequest
 		logCtx.ErrorMsg = "Failed to read request body: " + err.Error()
-		http.Error(w, "Bad Request", http.StatusBadRequest)
+		WriteErrorBadRequest(w, "Failed to read request body")
 		return nil, "", false, false
 	}
 	if closeErr := r.Body.Close(); closeErr != nil {
@@ -182,7 +182,7 @@ func (p *Proxy) readRequestBodyAndSelectModel(
 		logCtx.Status = "failure"
 		logCtx.HTTPStatus = http.StatusRequestEntityTooLarge
 		logCtx.ErrorMsg = "Request body too large"
-		http.Error(w, "Request Entity Too Large", http.StatusRequestEntityTooLarge)
+		WriteErrorTooLarge(w, "Request Entity Too Large")
 		return nil, "", false, false
 	}
 
@@ -195,7 +195,7 @@ func (p *Proxy) readRequestBodyAndSelectModel(
 		logCtx.Status = "failure"
 		logCtx.HTTPStatus = http.StatusBadRequest
 		logCtx.ErrorMsg = "Model not specified in request body"
-		http.Error(w, "Bad Request: model field is required", http.StatusBadRequest)
+		WriteErrorBadRequest(w, "model field is required")
 		return nil, "", false, false
 	}
 
@@ -256,6 +256,6 @@ func (p *Proxy) selectCredentialForModel(
 	}
 	logCtx.Logged = true
 
-	http.Error(w, errorMsg, errCode)
+	WriteErrorRateLimit(w, errorMsg)
 	return nil, false
 }

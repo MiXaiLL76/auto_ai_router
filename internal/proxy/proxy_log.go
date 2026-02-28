@@ -51,14 +51,21 @@ func (p *Proxy) handleLiteLLMAuthError(w http.ResponseWriter, err error, token s
 	for errType, info := range errorMap {
 		if errors.Is(err, errType) {
 			p.logger.Error(info.logMsg, "token_prefix", security.MaskAPIKey(token))
-			http.Error(w, "Unauthorized: "+info.message, info.status)
+			switch info.status {
+			case http.StatusForbidden:
+				WriteErrorForbidden(w, info.message)
+			case http.StatusPaymentRequired:
+				WriteErrorPaymentRequired(w, info.message)
+			default:
+				WriteErrorUnauthorized(w, info.message)
+			}
 			return true
 		}
 	}
 
 	// Unknown error
 	p.logger.Error("Auth error", "error", err, "token_prefix", security.MaskAPIKey(token))
-	http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+	WriteErrorInternal(w, "Internal Server Error")
 	return true
 }
 

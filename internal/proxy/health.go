@@ -126,7 +126,7 @@ func (p *Proxy) VisualHealthCheck(w http.ResponseWriter, r *http.Request) {
 
 	if p.healthTemplate == nil {
 		p.logger.Error("Health template not available")
-		http.Error(w, "Internal Server Error: Template not available", http.StatusInternalServerError)
+		WriteErrorInternal(w, "Template not available")
 		return
 	}
 

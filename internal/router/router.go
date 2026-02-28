@@ -61,7 +61,7 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		"/v1/responses":          true,
 	}
 	if !allowedPaths[req.URL.Path] {
-		http.Error(w, "Not Found", http.StatusNotFound)
+		proxy.WriteErrorNotFound(w, "Not Found")
 		return
 	}
 

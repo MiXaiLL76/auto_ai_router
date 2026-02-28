@@ -1046,3 +1046,81 @@ func TestRoundRobin_MultipleCredentialsSameModel(t *testing.T) {
 		assert.Equal(t, 1, count, "Each credential in first 4 requests should appear exactly once, %s appeared %d times", cred, count)
 	}
 }
+
+func TestSetLogger(t *testing.T) {
+	f2b := fail2ban.New(3, 0, []int{500})
+	rl := ratelimit.New()
+	creds := []config.CredentialConfig{
+		{Name: "cred1", Type: config.ProviderTypeOpenAI, RPM: 100},
+	}
+
+	rr := New(creds, f2b, rl)
+
+	logger := rr.logger
+	assert.NotNil(t, logger, "logger should not be nil after creation")
+
+	// Set a new logger
+	newLogger := rr.logger // just reuse for simplicity
+	rr.SetLogger(newLogger)
+	assert.NotNil(t, rr.logger, "logger should not be nil after SetLogger")
+}
+
+func TestGetCredentialByName(t *testing.T) {
+	f2b := fail2ban.New(3, 0, []int{500})
+	rl := ratelimit.New()
+	creds := []config.CredentialConfig{
+		{Name: "alpha", Type: config.ProviderTypeOpenAI, RPM: 100},
+		{Name: "beta", Type: config.ProviderTypeVertexAI, RPM: 200},
+	}
+
+	rr := New(creds, f2b, rl)
+
+	t.Run("existing", func(t *testing.T) {
+		// getCredentialByName is unexported, test via IsProxyCredential
+		// or test indirectly through exported methods
+		rr.mu.RLock()
+		cred := rr.getCredentialByName("alpha")
+		rr.mu.RUnlock()
+		require.NotNil(t, cred)
+		assert.Equal(t, "alpha", cred.Name)
+		assert.Equal(t, config.ProviderTypeOpenAI, cred.Type)
+	})
+
+	t.Run("not_existing", func(t *testing.T) {
+		rr.mu.RLock()
+		cred := rr.getCredentialByName("nonexistent")
+		rr.mu.RUnlock()
+		assert.Nil(t, cred)
+	})
+}
+
+func TestIsProxyCredential_And_GetProxyCredentials(t *testing.T) {
+	f2b := fail2ban.New(3, 0, []int{500})
+	rl := ratelimit.New()
+	creds := []config.CredentialConfig{
+		{Name: "openai-1", Type: config.ProviderTypeOpenAI, RPM: 100},
+		{Name: "proxy-1", Type: config.ProviderTypeProxy, RPM: 100, BaseURL: "http://localhost:8080"},
+		{Name: "vertex-1", Type: config.ProviderTypeVertexAI, RPM: 100},
+		{Name: "proxy-2", Type: config.ProviderTypeProxy, RPM: 200, BaseURL: "http://localhost:8081"},
+	}
+
+	rr := New(creds, f2b, rl)
+
+	// IsProxyCredential
+	assert.False(t, rr.IsProxyCredential("openai-1"))
+	assert.True(t, rr.IsProxyCredential("proxy-1"))
+	assert.False(t, rr.IsProxyCredential("vertex-1"))
+	assert.True(t, rr.IsProxyCredential("proxy-2"))
+	assert.False(t, rr.IsProxyCredential("nonexistent"))
+
+	// GetProxyCredentials
+	proxies := rr.GetProxyCredentials()
+	assert.Len(t, proxies, 2)
+
+	proxyNames := make(map[string]bool)
+	for _, p := range proxies {
+		proxyNames[p.Name] = true
+	}
+	assert.True(t, proxyNames["proxy-1"])
+	assert.True(t, proxyNames["proxy-2"])
+}

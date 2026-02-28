@@ -246,6 +246,47 @@ func TestTruncateLongFields_EmbeddingLessThan50(t *testing.T) {
 	assert.True(t, strings.Contains(embedding, "truncated"))
 }
 
+func TestGetLevelColor(t *testing.T) {
+	tests := []struct {
+		name     string
+		level    slog.Level
+		expected string
+	}{
+		{
+			name:     "debug level returns cyan",
+			level:    slog.LevelDebug,
+			expected: colorCyan,
+		},
+		{
+			name:     "info level returns green",
+			level:    slog.LevelInfo,
+			expected: colorGreen,
+		},
+		{
+			name:     "warn level returns yellow bold",
+			level:    slog.LevelWarn,
+			expected: colorYellow + colorBold,
+		},
+		{
+			name:     "error level returns red bold",
+			level:    slog.LevelError,
+			expected: colorRed + colorBold,
+		},
+		{
+			name:     "unknown level returns reset",
+			level:    slog.Level(42),
+			expected: colorReset,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := getLevelColor(tt.level)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
 func TestTruncateLongFields_ComplexStructure(t *testing.T) {
 	input := `{
 		"request": {

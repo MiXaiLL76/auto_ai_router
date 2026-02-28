@@ -413,7 +413,7 @@ func (p *Proxy) streamToClient(
 	_, ok := w.(http.Flusher)
 	if !ok {
 		p.logger.Error("Streaming not supported", "credential", credName)
-		http.Error(w, "Streaming Not Supported", http.StatusInternalServerError)
+		WriteErrorInternal(w, "Streaming Not Supported")
 		return fmt.Errorf("streaming not supported")
 	}
 	controller := http.NewResponseController(w)

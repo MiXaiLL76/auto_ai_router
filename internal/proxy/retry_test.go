@@ -366,6 +366,60 @@ func TestTryFallbackProxy_NoFallbackAvailable(t *testing.T) {
 	assert.Equal(t, "no_fallback_available", reason, "Should return no_fallback_available reason")
 }
 
+func TestFormatTriedCreds(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   map[string]bool
+		checkFn func(t *testing.T, result string)
+	}{
+		{
+			name:  "nil slice returns none",
+			input: nil,
+			checkFn: func(t *testing.T, result string) {
+				assert.Equal(t, "none", result)
+			},
+		},
+		{
+			name:  "empty map returns none",
+			input: map[string]bool{},
+			checkFn: func(t *testing.T, result string) {
+				assert.Equal(t, "none", result)
+			},
+		},
+		{
+			name:  "single entry",
+			input: map[string]bool{"cred-a": true},
+			checkFn: func(t *testing.T, result string) {
+				assert.Equal(t, "[[cred-a]]", result)
+			},
+		},
+		{
+			name:  "multiple entries",
+			input: map[string]bool{"cred-a": true, "cred-b": true},
+			checkFn: func(t *testing.T, result string) {
+				// Map iteration order is non-deterministic, so check both possibilities
+				assert.True(t,
+					result == "[[cred-a cred-b]]" || result == "[[cred-b cred-a]]",
+					"unexpected result: %s", result)
+			},
+		},
+		{
+			name:  "entry with false value is excluded",
+			input: map[string]bool{"cred-a": true, "cred-b": false},
+			checkFn: func(t *testing.T, result string) {
+				assert.Equal(t, "[[cred-a]]", result)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := formatTriedCreds(tt.input)
+			tt.checkFn(t, result)
+		})
+	}
+}
+
 func TestTryFallbackProxy_SameCredentialAsOriginal(t *testing.T) {
 	// Build proxy with single credential marked as both primary and fallback (edge case)
 	prx := NewTestProxyBuilder().

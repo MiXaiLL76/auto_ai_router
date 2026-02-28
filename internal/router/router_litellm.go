@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb/users"
+	"github.com/mixaill76/auto_ai_router/internal/proxy"
 )
 
 func (r *Router) handleLitellm(w http.ResponseWriter, req *http.Request) bool {
@@ -17,8 +18,7 @@ func (r *Router) handleLitellm(w http.ResponseWriter, req *http.Request) bool {
 		w.WriteHeader(http.StatusOK)
 
 		if _, err := w.Write([]byte(`{"server_root_path":"/","proxy_base_url":null,"auto_redirect_to_sso":false,"admin_ui_disabled":false}`)); err != nil {
-			r.logger.Error("Failed request", "error", err)
-			http.Error(w, "Bad Request: invalid JSON", http.StatusBadRequest)
+			r.logger.Error("Failed to write litellm-ui-config response", "error", err)
 		}
 		return true
 	case "/v2/login":
@@ -33,14 +33,14 @@ func (r *Router) handleLitellm(w http.ResponseWriter, req *http.Request) bool {
 
 func (r *Router) handleLogin(w http.ResponseWriter, req *http.Request) {
 	if req.Method != http.MethodPost {
-		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
+		proxy.WriteJSONError(w, http.StatusMethodNotAllowed, "Method Not Allowed", "invalid_request_error", nil, nil)
 		return
 	}
 
 	var loginReq users.LoginRequest
 	if err := json.NewDecoder(req.Body).Decode(&loginReq); err != nil {
 		r.logger.Error("Failed to decode login request", "error", err)
-		http.Error(w, "Bad Request: invalid JSON", http.StatusBadRequest)
+		proxy.WriteErrorBadRequest(w, "invalid JSON")
 		return
 	}
 
@@ -53,11 +53,11 @@ func (r *Router) handleLogin(w http.ResponseWriter, req *http.Request) {
 	if err != nil {
 		if err == users.ErrInvalidCredentials {
 			r.logger.Warn("Login failed: invalid credentials", "username", loginReq.Username)
-			http.Error(w, "Unauthorized: invalid credentials", http.StatusUnauthorized)
+			proxy.WriteErrorUnauthorized(w, "invalid credentials")
 			return
 		}
 		r.logger.Error("Login error", "error", err)
-		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		proxy.WriteErrorInternal(w, "Internal Server Error")
 		return
 	}
 
@@ -74,7 +74,7 @@ func (r *Router) handleLogin(w http.ResponseWriter, req *http.Request) {
 	sessionJWT, err := users.GenerateSessionJWT(sessionClaims, masterKey)
 	if err != nil {
 		r.logger.Error("Failed to generate session JWT", "error", err)
-		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+		proxy.WriteErrorInternal(w, "Internal Server Error")
 		return
 	}
 
@@ -109,7 +109,6 @@ func (r *Router) handleLogin(w http.ResponseWriter, req *http.Request) {
 	w.WriteHeader(http.StatusOK)
 
 	if _, err := w.Write([]byte(`{"redirect_url":"/ui/?login=success"}`)); err != nil {
-		r.logger.Error("Failed request", "error", err)
-		http.Error(w, "Bad Request: invalid JSON", http.StatusBadRequest)
+		r.logger.Error("Failed to write login response", "error", err)
 	}
 }
