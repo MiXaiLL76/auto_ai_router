@@ -10,6 +10,8 @@ import (
 
 	"github.com/mixaill76/auto_ai_router/internal/balancer"
 	"github.com/mixaill76/auto_ai_router/internal/config"
+	"github.com/mixaill76/auto_ai_router/internal/converter/openai"
+	"github.com/mixaill76/auto_ai_router/internal/litellmdb/users"
 	"github.com/mixaill76/auto_ai_router/internal/security"
 )
 
@@ -73,13 +75,13 @@ func markCredentialAsTried(r *http.Request, credentialName string) *http.Request
 }
 
 func (p *Proxy) isLiteLLMHealthy() bool {
-	if p.litellmDB == nil || !p.litellmDB.IsEnabled() {
+	if p.LiteLLMDB == nil || !p.LiteLLMDB.IsEnabled() {
 		return false
 	}
 	if p.healthChecker != nil {
 		return p.healthChecker.IsDBHealthy()
 	}
-	return p.litellmDB.IsHealthy()
+	return p.LiteLLMDB.IsHealthy()
 }
 
 func (p *Proxy) authenticateRequest(
@@ -111,8 +113,23 @@ func (p *Proxy) authenticateRequest(
 
 	if token == p.masterKey {
 		return true
-	} else if isLiteLLMHealthy {
-		tokenInfo, err := p.litellmDB.ValidateToken(r.Context(), token)
+	}
+
+	// JWT session token validation (tokens from /v2/login)
+	if strings.HasPrefix(token, "eyJ") {
+		claims, jwtErr := users.ValidateSessionJWT(token, p.masterKey)
+		if jwtErr == nil && claims != nil {
+			p.logger.Debug("Authenticated via session JWT",
+				"user_id", claims.UserID,
+				"user_role", claims.UserRole,
+			)
+			return true
+		}
+		// JWT validation failed — fall through to LiteLLM DB check
+	}
+
+	if isLiteLLMHealthy {
+		tokenInfo, err := p.LiteLLMDB.ValidateToken(r.Context(), token)
 		logCtx.TokenInfo = tokenInfo
 		if err != nil {
 			logCtx.Status = "failure"
@@ -185,10 +202,12 @@ func (p *Proxy) readRequestBodyAndSelectModel(
 	// Resolve model alias
 	if resolved, isAlias := p.modelManager.ResolveAlias(modelID); isAlias {
 		p.logger.Debug("Resolved model alias", "alias", modelID, "resolved", resolved)
-		body = replaceModelInBody(body, modelID, resolved)
+		body = openai.ReplaceModelInBody(body, modelID, resolved)
 		modelID = resolved
 		logCtx.ModelID = modelID
 	}
+
+	body = openai.ReplaceBodyParam(modelID, body)
 
 	return body, modelID, streaming, true
 }

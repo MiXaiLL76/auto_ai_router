@@ -38,6 +38,15 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
+	if req.URL.Path == "/health/readiness" {
+		r.handleReadiness(w, req)
+		return
+	}
+
+	if r.handleLitellm(w, req) {
+		return
+	}
+
 	// Handle GET /v1/models
 	if req.URL.Path == "/v1/models" && req.Method == "GET" {
 		r.handleModels(w, req)
@@ -82,28 +91,6 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	}
 }
 
-func (r *Router) handleHealth(w http.ResponseWriter, req *http.Request) {
-	healthy, status := r.proxy.HealthCheck()
-
-	w.Header().Set("Content-Type", "application/json")
-	if !healthy {
-		w.WriteHeader(http.StatusServiceUnavailable)
-	} else {
-		w.WriteHeader(http.StatusOK)
-	}
-
-	if err := json.NewEncoder(w).Encode(status); err != nil {
-		if r.logger != nil {
-			r.logger.Error("Failed to encode health response",
-				"endpoint", "/health",
-				"error", err.Error(),
-			)
-		}
-		// Headers already sent, cannot send http.Error
-		return
-	}
-}
-
 func (r *Router) handleModels(w http.ResponseWriter, req *http.Request) {
 	var modelsResp models.ModelsResponse
 	if r.modelManager != nil {
@@ -125,8 +112,4 @@ func (r *Router) handleModels(w http.ResponseWriter, req *http.Request) {
 		// Headers already sent, cannot send http.Error
 		return
 	}
-}
-
-func (r *Router) handleVisualHealth(w http.ResponseWriter, req *http.Request) {
-	r.proxy.VisualHealthCheck(w, req)
 }
