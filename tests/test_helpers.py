@@ -32,8 +32,11 @@ class TestModels:
     ]
 
     # Embedding models
-    EMBEDDING_MODELS = [
+    OPENAI_EMBEDDING_MODELS = [
         "text-embedding-3-small",
+    ]
+    VERTEX_EMBEDDING_MODELS = [
+        "gemini-embedding-001",
     ]
 
     # Image generation models
@@ -79,7 +82,8 @@ class ResponseValidator:
         assert len(response.data) == expected_count
         assert len(response.data[0].embedding) > 0
         assert hasattr(response, 'usage')
-        assert response.usage.total_tokens > 0
+        # Some providers (e.g. Gemini API) don't return token counts for embeddings
+        assert response.usage.total_tokens >= 0
 
 
 class ContentValidator:

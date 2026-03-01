@@ -489,7 +489,8 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 
 	// === Direct provider path with same-type credential retry ===
 
-	// Track image generation request and extract image count (once, before retry loop)
+	// Track embeddings and image generation requests (once, before retry loop)
+	isEmbeddings := strings.Contains(r.URL.Path, "/embeddings")
 	logCtx.IsImageGeneration = strings.Contains(r.URL.Path, "/images/generations")
 	if logCtx.IsImageGeneration {
 		var imgReq struct {
@@ -552,6 +553,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		// Create provider converter for this request
 		conv = converter.New(cred.Type, converter.RequestMode{
 			IsImageGeneration: logCtx.IsImageGeneration,
+			IsEmbeddings:      isEmbeddings,
 			IsStreaming:       streaming,
 			ModelID:           modelID,
 		})

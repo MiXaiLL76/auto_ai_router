@@ -14,6 +14,7 @@ import (
 // RequestMode holds context parameters for a conversion session.
 type RequestMode struct {
 	IsImageGeneration bool   // true for /images/generations requests
+	IsEmbeddings      bool   // true for /embeddings requests
 	IsStreaming       bool   // true for streaming (stream: true) requests
 	ModelID           string // e.g. "gemini-2.0-flash", "claude-opus-4-5"
 }
@@ -36,6 +37,20 @@ func New(providerType config.ProviderType, mode RequestMode) *ProviderConverter 
 // RequestFrom converts an OpenAI-format request body to the provider-specific format.
 // Returns the original body unchanged for OpenAI-compatible providers (passthrough).
 func (c *ProviderConverter) RequestFrom(body []byte) ([]byte, error) {
+	// Handle embeddings requests
+	if c.mode.IsEmbeddings {
+		switch c.providerType {
+		case config.ProviderTypeVertexAI:
+			return vertex.OpenAIEmbeddingToVertex(body)
+		case config.ProviderTypeGemini:
+			return vertex.OpenAIEmbeddingToGemini(body, c.mode.ModelID)
+		case config.ProviderTypeAnthropic:
+			return nil, errors.New("anthropic does not support embeddings")
+		default:
+			return body, nil
+		}
+	}
+
 	switch c.providerType {
 	case config.ProviderTypeVertexAI, config.ProviderTypeGemini:
 		return vertex.OpenAIToVertex(body, c.mode.IsImageGeneration, c.mode.ModelID)
@@ -54,6 +69,18 @@ func (c *ProviderConverter) RequestFrom(body []byte) ([]byte, error) {
 // ResponseTo converts a provider-specific response body to OpenAI format.
 // Returns the original body unchanged for OpenAI-compatible providers (passthrough).
 func (c *ProviderConverter) ResponseTo(body []byte) ([]byte, error) {
+	// Handle embeddings responses
+	if c.mode.IsEmbeddings {
+		switch c.providerType {
+		case config.ProviderTypeVertexAI:
+			return vertex.VertexEmbeddingToOpenAI(body, c.mode.ModelID)
+		case config.ProviderTypeGemini:
+			return vertex.GeminiEmbeddingToOpenAI(body, c.mode.ModelID)
+		default:
+			return body, nil
+		}
+	}
+
 	switch c.providerType {
 	case config.ProviderTypeVertexAI, config.ProviderTypeGemini:
 		if c.mode.IsImageGeneration {
@@ -89,6 +116,18 @@ func (c *ProviderConverter) StreamTo(reader io.Reader, writer io.Writer) error {
 // BuildURL constructs the upstream target URL for this provider and credential.
 // Returns empty string for providers where URL construction is handled externally.
 func (c *ProviderConverter) BuildURL(cred *config.CredentialConfig) string {
+	// Handle embeddings URLs
+	if c.mode.IsEmbeddings {
+		switch c.providerType {
+		case config.ProviderTypeVertexAI:
+			return vertex.BuildVertexEmbeddingURL(cred, c.mode.ModelID)
+		case config.ProviderTypeGemini:
+			return vertex.BuildGeminiEmbeddingURL(cred, c.mode.ModelID)
+		default:
+			return ""
+		}
+	}
+
 	switch c.providerType {
 	case config.ProviderTypeVertexAI:
 		if c.mode.IsImageGeneration && !strings.Contains(strings.ToLower(c.mode.ModelID), "gemini") {

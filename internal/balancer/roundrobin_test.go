@@ -1124,3 +1124,56 @@ func TestIsProxyCredential_And_GetProxyCredentials(t *testing.T) {
 	assert.True(t, proxyNames["proxy-1"])
 	assert.True(t, proxyNames["proxy-2"])
 }
+
+// TestRoundRobin_MixedTypeTrafficIndependence verifies that high-frequency OpenAI
+// traffic does not interfere with Vertex AI credential cycling.
+// This is the real-world bug: with a shared r.current counter, 500 RPM of OpenAI
+// requests reset the counter to positions 0-1, causing every Vertex request to
+// start from the same position and always pick the first available Vertex credential.
+func TestRoundRobin_MixedTypeTrafficIndependence(t *testing.T) {
+	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
+	rl := ratelimit.New()
+
+	credentials := []config.CredentialConfig{
+		{Name: "openai-1", Type: config.ProviderTypeOpenAI, APIKey: "key1", BaseURL: "http://openai1.com", RPM: -1},
+		{Name: "openai-2", Type: config.ProviderTypeOpenAI, APIKey: "key2", BaseURL: "http://openai2.com", RPM: -1},
+		{Name: "vertex-1", Type: config.ProviderTypeVertexAI, APIKey: "key3", RPM: -1, ProjectID: "p1", Location: "us-central1"},
+		{Name: "vertex-2", Type: config.ProviderTypeVertexAI, APIKey: "key4", RPM: -1, ProjectID: "p2", Location: "us-central1"},
+		{Name: "vertex-3", Type: config.ProviderTypeVertexAI, APIKey: "key5", RPM: -1, ProjectID: "p3", Location: "us-central1"},
+		{Name: "vertex-4", Type: config.ProviderTypeVertexAI, APIKey: "key6", RPM: -1, ProjectID: "p4", Location: "us-central1"},
+	}
+
+	bal := New(credentials, f2b, rl)
+
+	mc := NewMockModelChecker(true)
+	mc.AddModel("openai-1", "gpt-4o")
+	mc.AddModel("openai-2", "gpt-4o")
+	mc.AddModel("vertex-1", "gemini-2.5-flash")
+	mc.AddModel("vertex-2", "gemini-2.5-flash")
+	mc.AddModel("vertex-3", "gemini-2.5-flash")
+	mc.AddModel("vertex-4", "gemini-2.5-flash")
+	bal.SetModelChecker(mc)
+
+	// Simulate heavy OpenAI traffic interleaved with Vertex requests.
+	// Without per-type counters, OpenAI requests reset r.current to 0-1,
+	// causing every Vertex request to always pick vertex-1.
+	vertexResults := make([]string, 0, 8)
+	for i := 0; i < 8; i++ {
+		// 10 OpenAI requests between each Vertex request (simulates ~500 RPM)
+		for j := 0; j < 10; j++ {
+			_, err := bal.NextForModel("gpt-4o")
+			require.NoError(t, err)
+		}
+		cred, err := bal.NextForModel("gemini-2.5-flash")
+		require.NoError(t, err)
+		vertexResults = append(vertexResults, cred.Name)
+	}
+
+	// Vertex requests must cycle through all 4 credentials in strict round-robin order.
+	expectedOrder := []string{
+		"vertex-1", "vertex-2", "vertex-3", "vertex-4",
+		"vertex-1", "vertex-2", "vertex-3", "vertex-4",
+	}
+	assert.Equal(t, expectedOrder, vertexResults,
+		"Vertex creds should cycle evenly regardless of interleaved OpenAI traffic")
+}
