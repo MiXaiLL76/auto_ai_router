@@ -14,6 +14,7 @@ import (
 
 	"github.com/mixaill76/auto_ai_router/internal/balancer"
 	"github.com/mixaill76/auto_ai_router/internal/config"
+	"github.com/mixaill76/auto_ai_router/internal/converter/openai"
 	"github.com/mixaill76/auto_ai_router/internal/fail2ban"
 	"github.com/mixaill76/auto_ai_router/internal/models"
 	"github.com/mixaill76/auto_ai_router/internal/monitoring"
@@ -793,7 +794,7 @@ func TestReplaceModelInBody(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := replaceModelInBody([]byte(tt.body), tt.oldModel, tt.newModel)
+			result := openai.ReplaceModelInBody([]byte(tt.body), tt.oldModel, tt.newModel)
 			assert.Equal(t, tt.expected, string(result))
 		})
 	}

@@ -29,6 +29,7 @@ type RoundRobin struct {
 	credentials     []config.CredentialConfig
 	credentialIndex map[string]int // O(1) lookup by name instead of O(n) search
 	current         int
+	typeCounters    map[config.ProviderType]int // per-type counters to prevent cross-type interference
 	fail2ban        *fail2ban.Fail2Ban
 	rateLimiter     *ratelimit.RPMLimiter
 	modelChecker    ModelChecker
@@ -59,6 +60,7 @@ func New(credentials []config.CredentialConfig, f2b *fail2ban.Fail2Ban, rl *rate
 		credentials:     credentials,
 		credentialIndex: credentialIndex,
 		current:         0,
+		typeCounters:    make(map[config.ProviderType]int),
 		fail2ban:        f2b,
 		rateLimiter:     rl,
 		modelChecker:    nil,
@@ -148,33 +150,36 @@ func (r *RoundRobin) next(modelID string, allowOnlyFallback, allowOnlyProxy bool
 
 // nextExcluding is the core credential selection logic with optional exclude set.
 // Excluded credentials are skipped entirely and don't count as candidates.
+//
+// The algorithm runs in two phases:
+//  1. Build a candidate list via structural filters (exclude, type/fallback, model availability).
+//     These are time-stable properties — they don't change between requests.
+//  2. Select the next candidate using an independent per-type counter when all candidates
+//     share the same ProviderType. This prevents high-frequency traffic of one provider type
+//     (e.g. OpenAI) from interfering with the round-robin cycling of another (e.g. Vertex AI).
 func (r *RoundRobin) nextExcluding(modelID string, allowOnlyFallback, allowOnlyProxy bool, exclude map[string]bool) (*config.CredentialConfig, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	// Start from current position and try each credential in rotation
-	startIndex := r.current
-	candidateCount := 0 // credentials that actually support this model
-	rateLimitHit := false
+	// Phase 1: Build candidate list using only structural (time-stable) filters.
+	type candidateEntry struct {
+		absIdx int
+		cred   *config.CredentialConfig
+	}
+	var candidates []candidateEntry
 
-	for i := 0; i < len(r.credentials); i++ {
-		// Calculate current index in rotation
-		idx := (startIndex + i) % len(r.credentials)
-		cred := &r.credentials[idx]
+	for i := range r.credentials {
+		cred := &r.credentials[i]
 
-		// Skip excluded credentials first (they don't count as candidates)
 		if len(exclude) > 0 && exclude[cred.Name] {
 			continue
 		}
 
-		// Filter by credential type
-		// These are structural filters, not availability issues
 		if allowOnlyProxy && cred.Type != config.ProviderTypeProxy {
 			monitoring.CredentialSelectionRejected.WithLabelValues("type_not_allowed").Inc()
 			continue
 		}
 
-		// Filter by is_fallback flag
 		if allowOnlyFallback {
 			if !cred.IsFallback {
 				monitoring.CredentialSelectionRejected.WithLabelValues("fallback_not_available").Inc()
@@ -185,9 +190,8 @@ func (r *RoundRobin) nextExcluding(modelID string, allowOnlyFallback, allowOnlyP
 			continue
 		}
 
-		// Check if credential supports the requested model BEFORE ban/rate checks.
-		// model_not_available is a structural property (credential type doesn't serve this model),
-		// NOT a temporary availability issue — it should not mask rate limit errors.
+		// Check model availability before ban/rate checks.
+		// model_not_available is a structural property, not a temporary issue.
 		if modelID != "" && r.modelChecker != nil && r.modelChecker.IsEnabled() {
 			if !r.modelChecker.HasModel(cred.Name, modelID) {
 				monitoring.CredentialSelectionRejected.WithLabelValues("model_not_available").Inc()
@@ -195,11 +199,52 @@ func (r *RoundRobin) nextExcluding(modelID string, allowOnlyFallback, allowOnlyP
 			}
 		}
 
-		// This credential supports the model — it's a real candidate
-		candidateCount++
+		candidates = append(candidates, candidateEntry{absIdx: i, cred: cred})
+	}
 
-		// Check if credential+model pair is banned
-		if r.fail2ban.IsBanned(cred.Name, modelID) {
+	if len(candidates) == 0 {
+		return nil, ErrNoCredentialsAvailable
+	}
+
+	// Phase 2: Determine start offset using a per-type counter when all candidates
+	// share the same ProviderType; otherwise fall back to the global counter.
+	sameType := true
+	candidateType := candidates[0].cred.Type
+	for _, c := range candidates[1:] {
+		if c.cred.Type != candidateType {
+			sameType = false
+			break
+		}
+	}
+
+	startOffset := 0
+	if sameType {
+		typeStart := r.typeCounters[candidateType]
+		for i, c := range candidates {
+			if c.absIdx >= typeStart {
+				startOffset = i
+				break
+			}
+		}
+		// If typeStart is past all candidates, wrap to beginning (startOffset stays 0).
+	} else {
+		globalStart := r.current
+		for i, c := range candidates {
+			if c.absIdx >= globalStart {
+				startOffset = i
+				break
+			}
+		}
+		// If globalStart is past all candidates, wrap to beginning.
+	}
+
+	// Phase 3: Try candidates in round-robin order, applying ban and rate-limit checks.
+	rateLimitHit := false
+	for i := 0; i < len(candidates); i++ {
+		ci := (startOffset + i) % len(candidates)
+		c := candidates[ci]
+
+		if r.fail2ban.IsBanned(c.cred.Name, modelID) {
 			monitoring.CredentialSelectionRejected.WithLabelValues("banned").Inc()
 			continue
 		}
@@ -207,29 +252,29 @@ func (r *RoundRobin) nextExcluding(modelID string, allowOnlyFallback, allowOnlyP
 		// Atomically check all rate limits (credential RPM/TPM + model RPM/TPM)
 		// and record usage only if all checks pass. This prevents TOCTOU races
 		// where separate check+record calls could allow exceeding limits.
-		if !r.rateLimiter.TryAllowAll(cred.Name, modelID) {
+		if !r.rateLimiter.TryAllowAll(c.cred.Name, modelID) {
 			monitoring.CredentialSelectionRejected.WithLabelValues("rate_limit").Inc()
 			rateLimitHit = true
 			continue
 		}
 
-		// Advance r.current to next position for the next call
-		// Move to the position right after this selected credential
-		r.current = (idx + 1) % len(r.credentials)
+		// Advance the appropriate counter past the selected credential.
+		nextIdx := (c.absIdx + 1) % len(r.credentials)
+		if sameType {
+			r.typeCounters[candidateType] = nextIdx
+		} else {
+			r.current = nextIdx
+		}
 
-		return cred, nil
+		return c.cred, nil
 	}
 
-	// If no credentials support this model at all, return generic error
-	if candidateCount == 0 {
-		return nil, ErrNoCredentialsAvailable
-	}
 	// Prioritize rate limit error: if any candidate hit rate limit, surface it even if
 	// others were banned. This gives callers accurate signal for backoff/retry logic.
 	if rateLimitHit {
 		return nil, ErrRateLimitExceeded
 	}
-	// All candidates are banned
+	// All candidates are banned (or none remain after ban + rate-limit filtering).
 	return nil, ErrNoCredentialsAvailable
 }
 

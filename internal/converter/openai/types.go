@@ -203,3 +203,33 @@ type OpenAIImageResponse struct {
 	Created int64             `json:"created"`
 	Data    []OpenAIImageData `json:"data"`
 }
+
+// Embedding types
+
+// OpenAIEmbeddingRequest represents OpenAI embeddings request
+type OpenAIEmbeddingRequest struct {
+	Input          interface{} `json:"input"` // string | []string | []int | [][]int
+	Model          string      `json:"model"`
+	EncodingFormat string      `json:"encoding_format,omitempty"` // "float" | "base64"
+	Dimensions     *int        `json:"dimensions,omitempty"`
+	User           string      `json:"user,omitempty"`
+}
+
+// OpenAIEmbeddingResponse represents OpenAI embeddings response
+type OpenAIEmbeddingResponse struct {
+	Object string                `json:"object"` // "list"
+	Data   []OpenAIEmbeddingData `json:"data"`
+	Model  string                `json:"model"`
+	Usage  OpenAIEmbeddingUsage  `json:"usage"`
+}
+
+type OpenAIEmbeddingData struct {
+	Object    string    `json:"object"` // "embedding"
+	Index     int       `json:"index"`
+	Embedding []float64 `json:"embedding"`
+}
+
+type OpenAIEmbeddingUsage struct {
+	PromptTokens int `json:"prompt_tokens"`
+	TotalTokens  int `json:"total_tokens"`
+}

@@ -10,6 +10,8 @@ import (
 
 	"github.com/mixaill76/auto_ai_router/internal/balancer"
 	"github.com/mixaill76/auto_ai_router/internal/config"
+	"github.com/mixaill76/auto_ai_router/internal/converter/openai"
+	"github.com/mixaill76/auto_ai_router/internal/litellmdb/users"
 	"github.com/mixaill76/auto_ai_router/internal/security"
 )
 
@@ -73,13 +75,13 @@ func markCredentialAsTried(r *http.Request, credentialName string) *http.Request
 }
 
 func (p *Proxy) isLiteLLMHealthy() bool {
-	if p.litellmDB == nil || !p.litellmDB.IsEnabled() {
+	if p.LiteLLMDB == nil || !p.LiteLLMDB.IsEnabled() {
 		return false
 	}
 	if p.healthChecker != nil {
 		return p.healthChecker.IsDBHealthy()
 	}
-	return p.litellmDB.IsHealthy()
+	return p.LiteLLMDB.IsHealthy()
 }
 
 func (p *Proxy) authenticateRequest(
@@ -94,7 +96,7 @@ func (p *Proxy) authenticateRequest(
 		logCtx.Status = "failure"
 		logCtx.HTTPStatus = http.StatusUnauthorized
 		logCtx.ErrorMsg = "Missing Authorization header"
-		http.Error(w, "Unauthorized: Missing Authorization header", http.StatusUnauthorized)
+		WriteErrorUnauthorized(w, "Missing Authorization header")
 		return false
 	}
 
@@ -105,14 +107,29 @@ func (p *Proxy) authenticateRequest(
 		logCtx.Status = "failure"
 		logCtx.HTTPStatus = http.StatusUnauthorized
 		logCtx.ErrorMsg = "Invalid Authorization header format"
-		http.Error(w, "Unauthorized: Invalid Authorization header format", http.StatusUnauthorized)
+		WriteErrorUnauthorized(w, "Invalid Authorization header format")
 		return false
 	}
 
 	if token == p.masterKey {
 		return true
-	} else if isLiteLLMHealthy {
-		tokenInfo, err := p.litellmDB.ValidateToken(r.Context(), token)
+	}
+
+	// JWT session token validation (tokens from /v2/login)
+	if strings.HasPrefix(token, "eyJ") {
+		claims, jwtErr := users.ValidateSessionJWT(token, p.masterKey)
+		if jwtErr == nil && claims != nil {
+			p.logger.Debug("Authenticated via session JWT",
+				"user_id", claims.UserID,
+				"user_role", claims.UserRole,
+			)
+			return true
+		}
+		// JWT validation failed — fall through to LiteLLM DB check
+	}
+
+	if isLiteLLMHealthy {
+		tokenInfo, err := p.LiteLLMDB.ValidateToken(r.Context(), token)
 		logCtx.TokenInfo = tokenInfo
 		if err != nil {
 			logCtx.Status = "failure"
@@ -133,7 +150,7 @@ func (p *Proxy) authenticateRequest(
 		return true
 	} else {
 		p.logger.Error("Invalid master key", "provided_key_prefix", security.MaskAPIKey(token))
-		http.Error(w, "Unauthorized: Invalid master key", http.StatusUnauthorized)
+		WriteErrorUnauthorized(w, "Invalid master key")
 	}
 
 	return false
@@ -151,7 +168,7 @@ func (p *Proxy) readRequestBodyAndSelectModel(
 		logCtx.Status = "failure"
 		logCtx.HTTPStatus = http.StatusBadRequest
 		logCtx.ErrorMsg = "Failed to read request body: " + err.Error()
-		http.Error(w, "Bad Request", http.StatusBadRequest)
+		WriteErrorBadRequest(w, "Failed to read request body")
 		return nil, "", false, false
 	}
 	if closeErr := r.Body.Close(); closeErr != nil {
@@ -165,7 +182,7 @@ func (p *Proxy) readRequestBodyAndSelectModel(
 		logCtx.Status = "failure"
 		logCtx.HTTPStatus = http.StatusRequestEntityTooLarge
 		logCtx.ErrorMsg = "Request body too large"
-		http.Error(w, "Request Entity Too Large", http.StatusRequestEntityTooLarge)
+		WriteErrorTooLarge(w, "Request Entity Too Large")
 		return nil, "", false, false
 	}
 
@@ -178,17 +195,19 @@ func (p *Proxy) readRequestBodyAndSelectModel(
 		logCtx.Status = "failure"
 		logCtx.HTTPStatus = http.StatusBadRequest
 		logCtx.ErrorMsg = "Model not specified in request body"
-		http.Error(w, "Bad Request: model field is required", http.StatusBadRequest)
+		WriteErrorBadRequest(w, "model field is required")
 		return nil, "", false, false
 	}
 
 	// Resolve model alias
 	if resolved, isAlias := p.modelManager.ResolveAlias(modelID); isAlias {
 		p.logger.Debug("Resolved model alias", "alias", modelID, "resolved", resolved)
-		body = replaceModelInBody(body, modelID, resolved)
+		body = openai.ReplaceModelInBody(body, modelID, resolved)
 		modelID = resolved
 		logCtx.ModelID = modelID
 	}
+
+	body = openai.ReplaceBodyParam(modelID, body)
 
 	return body, modelID, streaming, true
 }
@@ -237,6 +256,6 @@ func (p *Proxy) selectCredentialForModel(
 	}
 	logCtx.Logged = true
 
-	http.Error(w, errorMsg, errCode)
+	WriteErrorRateLimit(w, errorMsg)
 	return nil, false
 }

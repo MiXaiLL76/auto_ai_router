@@ -12,7 +12,6 @@ import (
 	"log/slog"
 	"math/rand"
 	"net/http"
-	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -103,7 +102,7 @@ type Proxy struct {
 	tokenManager        *auth.VertexTokenManager
 	healthTemplate      *template.Template         // Cached template
 	modelManager        *models.Manager            // Model manager for getting configured models
-	litellmDB           litellmdb.Manager          // LiteLLM database integration
+	LiteLLMDB           litellmdb.Manager          // LiteLLM database integration
 	healthChecker       HealthChecker              // Cached DB health status (optional)
 	priceRegistry       *models.ModelPriceRegistry // Model pricing information (optional)
 	maxProviderRetries  int                        // Max same-type credential retries on provider errors
@@ -164,12 +163,17 @@ func New(cfg *Config) *Proxy {
 		tokenManager:        cfg.TokenManager,
 		healthTemplate:      tmpl,
 		modelManager:        cfg.ModelManager,
-		litellmDB:           cfg.LiteLLMDB,
+		LiteLLMDB:           cfg.LiteLLMDB,
 		healthChecker:       cfg.HealthChecker,
 		priceRegistry:       cfg.PriceRegistry,
 		maxProviderRetries:  cfg.MaxProviderRetries,
 		client:              httputil.NewHTTPClient(httpClientCfg),
 	}
+}
+
+// GetMasterKey returns the proxy master key.
+func (p *Proxy) GetMasterKey() string {
+	return p.masterKey
 }
 
 // ProxyResponse holds response details from a proxy credential
@@ -435,7 +439,11 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			logCtx.HTTPStatus = statusCode
 			logCtx.ErrorMsg = errorMsg
 			logCtx.TargetURL = cred.BaseURL
-			http.Error(w, statusMessage, statusCode)
+			if statusCode == http.StatusRequestTimeout {
+				WriteErrorTimeout(w, statusMessage)
+			} else {
+				WriteErrorBadGateway(w, statusMessage)
+			}
 			return
 		}
 
@@ -481,7 +489,8 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 
 	// === Direct provider path with same-type credential retry ===
 
-	// Track image generation request and extract image count (once, before retry loop)
+	// Track embeddings and image generation requests (once, before retry loop)
+	isEmbeddings := strings.Contains(r.URL.Path, "/embeddings")
 	logCtx.IsImageGeneration = strings.Contains(r.URL.Path, "/images/generations")
 	if logCtx.IsImageGeneration {
 		var imgReq struct {
@@ -544,6 +553,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		// Create provider converter for this request
 		conv = converter.New(cred.Type, converter.RequestMode{
 			IsImageGeneration: logCtx.IsImageGeneration,
+			IsEmbeddings:      isEmbeddings,
 			IsStreaming:       streaming,
 			ModelID:           modelID,
 		})
@@ -558,7 +568,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			logCtx.HTTPStatus = http.StatusInternalServerError
 			logCtx.ErrorMsg = fmt.Sprintf("Request conversion failed: %v", convErr)
 			logCtx.TargetURL = cred.BaseURL
-			http.Error(w, "Internal Server Error: Failed to convert request", http.StatusInternalServerError)
+			WriteErrorInternal(w, "Failed to convert request")
 			return
 		}
 
@@ -608,7 +618,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			logCtx.HTTPStatus = http.StatusInternalServerError
 			logCtx.ErrorMsg = fmt.Sprintf("Failed to create request: %v", reqErr)
 			logCtx.TargetURL = targetURL
-			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+			WriteErrorInternal(w, "Internal Server Error")
 			return
 		}
 
@@ -707,7 +717,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 				logCtx.HTTPStatus = http.StatusBadGateway
 				logCtx.ErrorMsg = fmt.Sprintf("Failed to read response body: %v", readErr)
 				logCtx.TargetURL = targetURL
-				http.Error(w, "Bad Gateway: upstream response too large", http.StatusBadGateway)
+				WriteErrorBadGateway(w, "upstream response too large")
 				return
 			}
 			// Transport error reading body — retryable with another credential
@@ -772,7 +782,11 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		logCtx.HTTPStatus = statusCode
 		logCtx.ErrorMsg = "All provider attempts failed"
 		logCtx.TargetURL = targetURL
-		http.Error(w, statusMessage, statusCode)
+		if statusCode == http.StatusRequestTimeout {
+			WriteErrorTimeout(w, statusMessage)
+		} else {
+			WriteErrorBadGateway(w, statusMessage)
+		}
 		return
 	}
 
@@ -966,182 +980,4 @@ func (p *Proxy) streamResponseBody(w io.Writer, reader io.Reader) (int64, error)
 	buf := streamBufPool.Get().(*[]byte)
 	defer streamBufPool.Put(buf)
 	return io.CopyBuffer(w, reader, *buf)
-}
-
-// logTransformedResponse logs a transformed response at debug level
-func (p *Proxy) logTransformedResponse(credName, providerName string, body []byte) {
-	if p.logger.Enabled(context.Background(), slog.LevelDebug) {
-		p.logger.Debug("Transformed response to OpenAI format",
-			"credential", credName,
-			"provider", providerName,
-			"body", logger.TruncateLongFields(string(body), 500),
-		)
-	}
-}
-
-type tokenCapturingWriter struct {
-	writer  io.Writer
-	tokens  *int
-	logger  *slog.Logger
-	onChunk func([]byte) // Callback invoked for each chunk (optional, for capturing last chunk)
-}
-
-func (tcw *tokenCapturingWriter) Write(p []byte) (n int, err error) {
-	// Extract tokens from the data being written
-	tokens := extractTokensFromStreamingChunk(string(p))
-	if tokens > 0 {
-		*tcw.tokens += tokens
-	}
-
-	// Invoke callback if provided (used to capture last chunk for usage extraction)
-	if tcw.onChunk != nil {
-		tcw.onChunk(p)
-	}
-
-	return tcw.writer.Write(p)
-}
-
-// ==================== LiteLLM DB Integration ====================
-// handleLiteLLMAuthError handles LiteLLM authentication errors
-// Returns true if error was handled and response was written
-func (p *Proxy) handleLiteLLMAuthError(w http.ResponseWriter, err error, token string) bool {
-	// Map error types to HTTP status and message
-	errorMap := map[error]struct {
-		status  int
-		message string
-		logMsg  string
-	}{
-		litellmdb.ErrTokenNotFound:  {http.StatusUnauthorized, "Invalid token", "Token not found"},
-		litellmdb.ErrTokenBlocked:   {http.StatusForbidden, "Token blocked", "Token blocked"},
-		litellmdb.ErrTokenExpired:   {http.StatusUnauthorized, "Token expired", "Token expired"},
-		litellmdb.ErrBudgetExceeded: {http.StatusPaymentRequired, "Budget exceeded", "Budget exceeded"},
-	}
-
-	// Check for connection failure first (requires fallback, not an error response)
-	if errors.Is(err, litellmdb.ErrConnectionFailed) {
-		return false
-	}
-
-	// Check for known auth errors
-	for errType, info := range errorMap {
-		if errors.Is(err, errType) {
-			p.logger.Error(info.logMsg, "token_prefix", security.MaskAPIKey(token))
-			http.Error(w, "Unauthorized: "+info.message, info.status)
-			return true
-		}
-	}
-
-	// Unknown error
-	p.logger.Error("Auth error", "error", err, "token_prefix", security.MaskAPIKey(token))
-	http.Error(w, "Internal Server Error", http.StatusInternalServerError)
-	return true
-}
-
-// logSpendToLiteLLMDB logs request to LiteLLM_SpendLogs table
-// Returns error if the log entry cannot be queued (e.g., queue full)
-func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
-	if p.litellmDB == nil || !p.litellmDB.IsEnabled() {
-		return nil
-	}
-
-	if logCtx == nil || logCtx.Credential == nil || logCtx.Request == nil {
-		return nil
-	}
-
-	// Fallback to request ID if session ID not provided
-	if logCtx.SessionID == "" {
-		logCtx.SessionID = logCtx.RequestID
-	}
-
-	// Build model_id as credential.name:model_name
-	modelIDFormatted := logCtx.Credential.Name + ":" + logCtx.ModelID
-	hashedToken := litellmdb.HashToken(logCtx.Token)
-
-	// Extract user info from tokenInfo (or use empty strings as fallback)
-	var userID, teamID, organizationID string
-	if logCtx.TokenInfo != nil {
-		userID = logCtx.TokenInfo.UserID
-		teamID = logCtx.TokenInfo.TeamID
-		organizationID = logCtx.TokenInfo.OrganizationID
-	}
-
-	// Build metadata with optional alias fields from tokenInfo
-	// Add error field if request failed
-	metadata := buildMetadata(hashedToken, logCtx.TokenInfo, logCtx.ErrorMsg, logCtx.HTTPStatus)
-
-	// Determine end user - prefer user email from tokenInfo
-	endUser := extractEndUser(logCtx.Request)
-	if logCtx.TokenInfo != nil && logCtx.TokenInfo.UserEmail != "" {
-		endUser = logCtx.TokenInfo.UserEmail
-	}
-
-	// Extract domain from targetURL for APIBase (e.g., "https://api.openai.com/..." -> "api.openai.com")
-	apiBase := "auto_ai_router"
-	if logCtx.TargetURL != "" {
-		if u, err := url.Parse(logCtx.TargetURL); err == nil && u.Host != "" {
-			apiBase = u.Host
-		}
-	}
-
-	// Determine final status if not explicitly set
-	status := logCtx.Status
-	if status == "" {
-		if logCtx.HTTPStatus >= 400 {
-			status = "failure"
-		} else {
-			status = "success"
-		}
-	}
-
-	// Ensure TokenUsage is not nil to prevent nil pointer dereference
-	if logCtx.TokenUsage == nil {
-		logCtx.TokenUsage = &converter.TokenUsage{}
-	}
-
-	// Calculate cost based on model pricing and token usage
-	var cost float64
-	if p.priceRegistry == nil {
-		p.logger.Warn("Price registry not available, using 0 cost for spend log")
-		cost = 0.0
-	} else {
-		// Try to get price for the model
-		modelPrice := p.priceRegistry.GetPrice(logCtx.ModelID)
-		if modelPrice == nil {
-			p.logger.Warn("Model price not found in registry, using 0 cost",
-				"model_name", logCtx.ModelID)
-			cost = 0.0
-		} else {
-			cost = modelPrice.CalculateCost(logCtx.TokenUsage)
-			p.logger.Debug("Calculated cost for model",
-				"model_name", logCtx.ModelID,
-				"cost", cost,
-				"prompt_tokens", logCtx.TokenUsage.PromptTokens,
-				"completion_tokens", logCtx.TokenUsage.CompletionTokens)
-		}
-	}
-
-	return p.litellmDB.LogSpend(&litellmdb.SpendLogEntry{
-		RequestID:         logCtx.RequestID,
-		StartTime:         logCtx.StartTime,
-		EndTime:           utils.NowUTC(),
-		CallType:          logCtx.Request.URL.Path,
-		APIBase:           apiBase,
-		Model:             logCtx.ModelID,                                               // Model name
-		ModelID:           modelIDFormatted,                                             // credential.name:model_name
-		ModelGroup:        logCtx.ModelID,                                               // Model name
-		CustomLLMProvider: strings.Replace(string(logCtx.Credential.Type), "-", "_", 1), // Provider type as string
-		PromptTokens:      logCtx.TokenUsage.PromptTokens,
-		CompletionTokens:  logCtx.TokenUsage.CompletionTokens,
-		TotalTokens:       logCtx.TokenUsage.Total(),
-		Metadata:          metadata,
-		Spend:             cost, // Calculated cost based on model pricing and token usage
-		APIKey:            hashedToken,
-		UserID:            userID,
-		TeamID:            teamID,
-		OrganizationID:    organizationID,
-		EndUser:           endUser,
-		RequesterIP:       getClientIP(logCtx.Request),
-		Status:            status,
-		SessionID:         logCtx.SessionID,
-	})
 }

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"sync"
@@ -215,6 +216,28 @@ func (p *Proxy) handleAnthropicStreaming(w http.ResponseWriter, resp *http.Respo
 	return p.handleTransformedStreaming(w, resp, credName, modelID, "Anthropic", transformer, logCtx)
 }
 
+type tokenCapturingWriter struct {
+	writer  io.Writer
+	tokens  *int
+	logger  *slog.Logger
+	onChunk func([]byte) // Callback invoked for each chunk (optional, for capturing last chunk)
+}
+
+func (tcw *tokenCapturingWriter) Write(p []byte) (n int, err error) {
+	// Extract tokens from the data being written
+	tokens := extractTokensFromStreamingChunk(string(p))
+	if tokens > 0 {
+		*tcw.tokens += tokens
+	}
+
+	// Invoke callback if provided (used to capture last chunk for usage extraction)
+	if tcw.onChunk != nil {
+		tcw.onChunk(p)
+	}
+
+	return tcw.writer.Write(p)
+}
+
 func (p *Proxy) handleTransformedStreaming(
 	w http.ResponseWriter,
 	resp *http.Response,
@@ -390,7 +413,7 @@ func (p *Proxy) streamToClient(
 	_, ok := w.(http.Flusher)
 	if !ok {
 		p.logger.Error("Streaming not supported", "credential", credName)
-		http.Error(w, "Streaming Not Supported", http.StatusInternalServerError)
+		WriteErrorInternal(w, "Streaming Not Supported")
 		return fmt.Errorf("streaming not supported")
 	}
 	controller := http.NewResponseController(w)

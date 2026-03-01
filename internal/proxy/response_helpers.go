@@ -45,32 +45,6 @@ func extractTokensFromStreamingChunk(chunk string) int {
 	return 0
 }
 
-// replaceModelInBody replaces the "model" field value in a JSON body.
-// Uses simple byte-level replacement of `"model":"oldValue"` to avoid full re-serialization.
-func replaceModelInBody(body []byte, oldModel, newModel string) []byte {
-	oldToken, _ := json.Marshal(oldModel)
-	newToken, _ := json.Marshal(newModel)
-
-	// Replace "model":"oldModel" → "model":"newModel"
-	// Handles both with and without spaces after colon
-	patterns := [][]byte{
-		append([]byte(`"model":`), oldToken...),
-		append([]byte(`"model": `), oldToken...),
-	}
-	replacements := [][]byte{
-		append([]byte(`"model":`), newToken...),
-		append([]byte(`"model": `), newToken...),
-	}
-
-	for i, pattern := range patterns {
-		if bytes.Contains(body, pattern) {
-			return bytes.Replace(body, pattern, replacements[i], 1)
-		}
-	}
-
-	return body
-}
-
 // extractMetadataFromBody extracts the model ID and session ID from the request body
 // and ensures stream_options.include_usage is true for streaming requests
 // Returns: model, streaming, sessionID, body

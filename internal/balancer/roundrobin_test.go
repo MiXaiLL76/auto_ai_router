@@ -1046,3 +1046,134 @@ func TestRoundRobin_MultipleCredentialsSameModel(t *testing.T) {
 		assert.Equal(t, 1, count, "Each credential in first 4 requests should appear exactly once, %s appeared %d times", cred, count)
 	}
 }
+
+func TestSetLogger(t *testing.T) {
+	f2b := fail2ban.New(3, 0, []int{500})
+	rl := ratelimit.New()
+	creds := []config.CredentialConfig{
+		{Name: "cred1", Type: config.ProviderTypeOpenAI, RPM: 100},
+	}
+
+	rr := New(creds, f2b, rl)
+
+	logger := rr.logger
+	assert.NotNil(t, logger, "logger should not be nil after creation")
+
+	// Set a new logger
+	newLogger := rr.logger // just reuse for simplicity
+	rr.SetLogger(newLogger)
+	assert.NotNil(t, rr.logger, "logger should not be nil after SetLogger")
+}
+
+func TestGetCredentialByName(t *testing.T) {
+	f2b := fail2ban.New(3, 0, []int{500})
+	rl := ratelimit.New()
+	creds := []config.CredentialConfig{
+		{Name: "alpha", Type: config.ProviderTypeOpenAI, RPM: 100},
+		{Name: "beta", Type: config.ProviderTypeVertexAI, RPM: 200},
+	}
+
+	rr := New(creds, f2b, rl)
+
+	t.Run("existing", func(t *testing.T) {
+		// getCredentialByName is unexported, test via IsProxyCredential
+		// or test indirectly through exported methods
+		rr.mu.RLock()
+		cred := rr.getCredentialByName("alpha")
+		rr.mu.RUnlock()
+		require.NotNil(t, cred)
+		assert.Equal(t, "alpha", cred.Name)
+		assert.Equal(t, config.ProviderTypeOpenAI, cred.Type)
+	})
+
+	t.Run("not_existing", func(t *testing.T) {
+		rr.mu.RLock()
+		cred := rr.getCredentialByName("nonexistent")
+		rr.mu.RUnlock()
+		assert.Nil(t, cred)
+	})
+}
+
+func TestIsProxyCredential_And_GetProxyCredentials(t *testing.T) {
+	f2b := fail2ban.New(3, 0, []int{500})
+	rl := ratelimit.New()
+	creds := []config.CredentialConfig{
+		{Name: "openai-1", Type: config.ProviderTypeOpenAI, RPM: 100},
+		{Name: "proxy-1", Type: config.ProviderTypeProxy, RPM: 100, BaseURL: "http://localhost:8080"},
+		{Name: "vertex-1", Type: config.ProviderTypeVertexAI, RPM: 100},
+		{Name: "proxy-2", Type: config.ProviderTypeProxy, RPM: 200, BaseURL: "http://localhost:8081"},
+	}
+
+	rr := New(creds, f2b, rl)
+
+	// IsProxyCredential
+	assert.False(t, rr.IsProxyCredential("openai-1"))
+	assert.True(t, rr.IsProxyCredential("proxy-1"))
+	assert.False(t, rr.IsProxyCredential("vertex-1"))
+	assert.True(t, rr.IsProxyCredential("proxy-2"))
+	assert.False(t, rr.IsProxyCredential("nonexistent"))
+
+	// GetProxyCredentials
+	proxies := rr.GetProxyCredentials()
+	assert.Len(t, proxies, 2)
+
+	proxyNames := make(map[string]bool)
+	for _, p := range proxies {
+		proxyNames[p.Name] = true
+	}
+	assert.True(t, proxyNames["proxy-1"])
+	assert.True(t, proxyNames["proxy-2"])
+}
+
+// TestRoundRobin_MixedTypeTrafficIndependence verifies that high-frequency OpenAI
+// traffic does not interfere with Vertex AI credential cycling.
+// This is the real-world bug: with a shared r.current counter, 500 RPM of OpenAI
+// requests reset the counter to positions 0-1, causing every Vertex request to
+// start from the same position and always pick the first available Vertex credential.
+func TestRoundRobin_MixedTypeTrafficIndependence(t *testing.T) {
+	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
+	rl := ratelimit.New()
+
+	credentials := []config.CredentialConfig{
+		{Name: "openai-1", Type: config.ProviderTypeOpenAI, APIKey: "key1", BaseURL: "http://openai1.com", RPM: -1},
+		{Name: "openai-2", Type: config.ProviderTypeOpenAI, APIKey: "key2", BaseURL: "http://openai2.com", RPM: -1},
+		{Name: "vertex-1", Type: config.ProviderTypeVertexAI, APIKey: "key3", RPM: -1, ProjectID: "p1", Location: "us-central1"},
+		{Name: "vertex-2", Type: config.ProviderTypeVertexAI, APIKey: "key4", RPM: -1, ProjectID: "p2", Location: "us-central1"},
+		{Name: "vertex-3", Type: config.ProviderTypeVertexAI, APIKey: "key5", RPM: -1, ProjectID: "p3", Location: "us-central1"},
+		{Name: "vertex-4", Type: config.ProviderTypeVertexAI, APIKey: "key6", RPM: -1, ProjectID: "p4", Location: "us-central1"},
+	}
+
+	bal := New(credentials, f2b, rl)
+
+	mc := NewMockModelChecker(true)
+	mc.AddModel("openai-1", "gpt-4o")
+	mc.AddModel("openai-2", "gpt-4o")
+	mc.AddModel("vertex-1", "gemini-2.5-flash")
+	mc.AddModel("vertex-2", "gemini-2.5-flash")
+	mc.AddModel("vertex-3", "gemini-2.5-flash")
+	mc.AddModel("vertex-4", "gemini-2.5-flash")
+	bal.SetModelChecker(mc)
+
+	// Simulate heavy OpenAI traffic interleaved with Vertex requests.
+	// Without per-type counters, OpenAI requests reset r.current to 0-1,
+	// causing every Vertex request to always pick vertex-1.
+	vertexResults := make([]string, 0, 8)
+	for i := 0; i < 8; i++ {
+		// 10 OpenAI requests between each Vertex request (simulates ~500 RPM)
+		for j := 0; j < 10; j++ {
+			_, err := bal.NextForModel("gpt-4o")
+			require.NoError(t, err)
+		}
+		cred, err := bal.NextForModel("gemini-2.5-flash")
+		require.NoError(t, err)
+		vertexResults = append(vertexResults, cred.Name)
+	}
+
+	// Vertex requests must cycle through all 4 credentials in strict round-robin order.
+	expectedOrder := []string{
+		"vertex-1", "vertex-2", "vertex-3", "vertex-4",
+		"vertex-1", "vertex-2", "vertex-3", "vertex-4",
+	}
+	assert.Equal(t, expectedOrder, vertexResults,
+		"Vertex creds should cycle evenly regardless of interleaved OpenAI traffic")
+}

@@ -2,6 +2,9 @@ package vertex
 
 import (
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestConvertToolCallsToGenaiParts_NestedFormat verifies conversion of
@@ -320,5 +323,59 @@ func TestMapToolChoice(t *testing.T) {
 	// unknown string returns nil
 	if got := mapToolChoice("unknown_value"); got != nil {
 		t.Fatalf("expected nil for unknown string, got %+v", got)
+	}
+}
+
+// TestConvertGoogleSearchRetrieval verifies conversion of google_search_retrieval tool.
+func TestConvertGoogleSearchRetrieval(t *testing.T) {
+	tests := []struct {
+		name    string
+		toolMap map[string]interface{}
+		hasDyn  bool
+		thresh  *float32
+	}{
+		{
+			name:    "nil dynamic_retrieval_config returns empty retrieval",
+			toolMap: map[string]interface{}{"type": "google_search_retrieval"},
+			hasDyn:  false,
+		},
+		{
+			name: "with dynamic_retrieval_config and threshold",
+			toolMap: map[string]interface{}{
+				"type": "google_search_retrieval",
+				"dynamic_retrieval_config": map[string]interface{}{
+					"dynamic_threshold": float64(0.5),
+				},
+			},
+			hasDyn: true,
+			thresh: func() *float32 { v := float32(0.5); return &v }(),
+		},
+		{
+			name: "with dynamic_retrieval_config without threshold",
+			toolMap: map[string]interface{}{
+				"type":                     "google_search_retrieval",
+				"dynamic_retrieval_config": map[string]interface{}{},
+			},
+			hasDyn: true,
+			thresh: nil,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := convertGoogleSearchRetrieval(tt.toolMap)
+			require.NotNil(t, result)
+
+			if tt.hasDyn {
+				require.NotNil(t, result.DynamicRetrievalConfig)
+				if tt.thresh != nil {
+					require.NotNil(t, result.DynamicRetrievalConfig.DynamicThreshold)
+					assert.Equal(t, *tt.thresh, *result.DynamicRetrievalConfig.DynamicThreshold)
+				} else {
+					assert.Nil(t, result.DynamicRetrievalConfig.DynamicThreshold)
+				}
+			} else {
+				assert.Nil(t, result.DynamicRetrievalConfig)
+			}
+		})
 	}
 }

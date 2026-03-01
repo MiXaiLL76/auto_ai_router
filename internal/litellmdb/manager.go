@@ -29,6 +29,9 @@ type Manager interface {
 	SpendLoggerStats() models.SpendLoggerStats
 	ConnectionStats() *pgxpool.Stat
 
+	// Pool access (for login queries)
+	GetPool() *pgxpool.Pool
+
 	// Lifecycle
 	Shutdown(ctx context.Context) error
 }
@@ -73,6 +76,10 @@ func (n *NoopManager) SpendLoggerStats() models.SpendLoggerStats {
 }
 
 func (n *NoopManager) ConnectionStats() *pgxpool.Stat {
+	return nil
+}
+
+func (n *NoopManager) GetPool() *pgxpool.Pool {
 	return nil
 }
 
@@ -185,6 +192,11 @@ func (m *DefaultManager) SpendLoggerStats() models.SpendLoggerStats {
 // ConnectionStats returns connection pool statistics
 func (m *DefaultManager) ConnectionStats() *pgxpool.Stat {
 	return m.pool.Stats()
+}
+
+// GetPool returns the underlying pgxpool.Pool for direct queries.
+func (m *DefaultManager) GetPool() *pgxpool.Pool {
+	return m.pool.Pool()
 }
 
 // Shutdown stops all components
