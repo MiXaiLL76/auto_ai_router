@@ -46,6 +46,8 @@ func (c *ProviderConverter) RequestFrom(body []byte) ([]byte, error) {
 			return vertex.OpenAIEmbeddingToGemini(body, c.mode.ModelID)
 		case config.ProviderTypeAnthropic:
 			return nil, errors.New("anthropic does not support embeddings")
+		case config.ProviderTypeBedrock:
+			return nil, errors.New("bedrock does not support embeddings")
 		default:
 			return body, nil
 		}
@@ -60,6 +62,11 @@ func (c *ProviderConverter) RequestFrom(body []byte) ([]byte, error) {
 			return nil, errors.New("anthropic does not support image generation")
 		}
 		return anthropic.OpenAIToAnthropic(body, c.mode.ModelID)
+	case config.ProviderTypeBedrock:
+		if c.mode.IsImageGeneration {
+			return nil, errors.New("bedrock does not support image generation")
+		}
+		return anthropic.OpenAIToBedrock(body, c.mode.ModelID)
 	default:
 		// ProviderTypeOpenAI, ProviderTypeProxy, and others: pass through unchanged
 		return body, nil
@@ -92,7 +99,7 @@ func (c *ProviderConverter) ResponseTo(body []byte) ([]byte, error) {
 			return vertex.VertexImageToOpenAI(body)
 		}
 		return vertex.VertexToOpenAI(body, c.mode.ModelID)
-	case config.ProviderTypeAnthropic:
+	case config.ProviderTypeAnthropic, config.ProviderTypeBedrock:
 		return anthropic.AnthropicToOpenAI(body, c.mode.ModelID)
 	default:
 		return body, nil
@@ -107,6 +114,14 @@ func (c *ProviderConverter) StreamTo(reader io.Reader, writer io.Writer) error {
 		return vertex.TransformVertexStreamToOpenAI(reader, c.mode.ModelID, writer)
 	case config.ProviderTypeAnthropic:
 		return anthropic.TransformAnthropicStreamToOpenAI(reader, c.mode.ModelID, writer)
+	case config.ProviderTypeBedrock:
+		// Bedrock uses AWS Event Stream binary framing instead of SSE.
+		// Decode to SSE first, then pass through the Anthropic converter.
+		pr, pw := io.Pipe()
+		go func() {
+			pw.CloseWithError(DecodeEventStreamToSSE(reader, pw))
+		}()
+		return anthropic.TransformAnthropicStreamToOpenAI(pr, c.mode.ModelID, writer)
 	default:
 		_, err := io.Copy(writer, reader)
 		return err
@@ -139,6 +154,12 @@ func (c *ProviderConverter) BuildURL(cred *config.CredentialConfig) string {
 	case config.ProviderTypeAnthropic:
 		baseURL := strings.TrimSuffix(cred.BaseURL, "/")
 		return baseURL + "/v1/messages"
+	case config.ProviderTypeBedrock:
+		baseURL := strings.TrimSuffix(cred.BaseURL, "/")
+		if c.mode.IsStreaming {
+			return baseURL + "/model/" + c.mode.ModelID + "/invoke-with-response-stream"
+		}
+		return baseURL + "/model/" + c.mode.ModelID + "/invoke"
 	default:
 		// OpenAI and Proxy: URL constructed by proxy based on cred.BaseURL + path
 		return ""

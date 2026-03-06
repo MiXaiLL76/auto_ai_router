@@ -632,6 +632,8 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		case config.ProviderTypeAnthropic:
 			proxyReq.Header.Set("X-Api-Key", cred.APIKey)
 			proxyReq.Header.Set("anthropic-version", "2023-06-01")
+		case config.ProviderTypeBedrock:
+			proxyReq.Header.Set("Authorization", "Bearer "+cred.APIKey)
 		default:
 			proxyReq.Header.Set("Authorization", "Bearer "+cred.APIKey)
 		}
@@ -898,6 +900,14 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 				p.logger.Error("Failed to vertex streaming response", "error", err)
 				logCtx.Status = "failure"
 				logCtx.ErrorMsg = fmt.Sprintf("Anthropic streaming error: %v", err)
+				logCtx.Logged = false
+			}
+		case config.ProviderTypeBedrock:
+			err := p.handleBedrockStreaming(w, resp, cred.Name, modelID, logCtx)
+			if err != nil {
+				p.logger.Error("Failed to handle bedrock streaming response", "error", err)
+				logCtx.Status = "failure"
+				logCtx.ErrorMsg = fmt.Sprintf("Bedrock streaming error: %v", err)
 				logCtx.Logged = false
 			}
 		default:

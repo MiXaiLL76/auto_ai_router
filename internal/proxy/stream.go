@@ -186,6 +186,10 @@ func getStreamUsageExtractor(providerName string) StreamUsageExtractor {
 		// Vertex AI transforms to OpenAI format during streaming,
 		// so we use OpenAI extractor for the transformed response
 		return &openAIStreamUsageExtractor{}
+	case "bedrock":
+		// Bedrock transforms to OpenAI format during streaming (via Anthropic converter),
+		// so we use OpenAI extractor for the transformed response
+		return &openAIStreamUsageExtractor{}
 	default:
 		// Fallback: try OpenAI format first (most common)
 		return &openAIStreamUsageExtractor{}
@@ -195,7 +199,8 @@ func getStreamUsageExtractor(providerName string) StreamUsageExtractor {
 func IsStreamingResponse(resp *http.Response) bool {
 	contentType := resp.Header.Get("Content-Type")
 	return strings.Contains(contentType, "text/event-stream") ||
-		strings.Contains(contentType, "application/stream+json")
+		strings.Contains(contentType, "application/stream+json") ||
+		strings.Contains(contentType, "application/vnd.amazon.eventstream")
 }
 
 type streamTransformer func(io.Reader, string, io.Writer) error
@@ -214,6 +219,14 @@ func (p *Proxy) handleAnthropicStreaming(w http.ResponseWriter, resp *http.Respo
 		return conv.StreamTo(r, w)
 	}
 	return p.handleTransformedStreaming(w, resp, credName, modelID, "Anthropic", transformer, logCtx)
+}
+
+func (p *Proxy) handleBedrockStreaming(w http.ResponseWriter, resp *http.Response, credName, modelID string, logCtx *RequestLogContext) error {
+	conv := converter.New(config.ProviderTypeBedrock, converter.RequestMode{ModelID: modelID, IsStreaming: true})
+	transformer := func(r io.Reader, id string, w io.Writer) error {
+		return conv.StreamTo(r, w)
+	}
+	return p.handleTransformedStreaming(w, resp, credName, modelID, "Bedrock", transformer, logCtx)
 }
 
 type tokenCapturingWriter struct {

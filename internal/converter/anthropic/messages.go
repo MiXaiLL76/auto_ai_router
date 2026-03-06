@@ -191,6 +191,28 @@ func convertOpenAIMessagesToAnthropic(openAIMessages []openai.OpenAIMessage) (in
 	return systemContent, messages
 }
 
+// OpenAIToBedrock converts an OpenAI Chat Completions request body to AWS Bedrock Runtime
+// format. It reuses the Anthropic converter and then:
+//   - Removes the "model" field (Bedrock gets model from the URL path)
+//   - Adds "anthropic_version": "bedrock-2023-05-31"
+func OpenAIToBedrock(openAIBody []byte, model string) ([]byte, error) {
+	anthropicBody, err := OpenAIToAnthropic(openAIBody, model)
+	if err != nil {
+		return nil, err
+	}
+
+	var body map[string]interface{}
+	if err := json.Unmarshal(anthropicBody, &body); err != nil {
+		return nil, fmt.Errorf("failed to parse Anthropic request for Bedrock conversion: %w", err)
+	}
+
+	delete(body, "model")
+	delete(body, "stream")
+	body["anthropic_version"] = "bedrock-2023-05-31"
+
+	return json.Marshal(body)
+}
+
 // extractSystemText extracts all text strings from a system/developer message content.
 func extractSystemText(content interface{}) []string {
 	switch c := content.(type) {
