@@ -21,6 +21,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/balancer"
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/converter"
+	"github.com/mixaill76/auto_ai_router/internal/converter/responses"
 	"github.com/mixaill76/auto_ai_router/internal/httputil"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb"
 	"github.com/mixaill76/auto_ai_router/internal/logger"
@@ -59,6 +60,7 @@ type RequestLogContext struct {
 	ImageCount           int                      // Number of images to generate (from 'n' param)
 	Logged               bool                     // True if already logged (prevents duplicate logging)
 	PromptTokensEstimate int                      // Estimated prompt tokens for streaming responses (since streaming doesn't provide prompt tokens in headers)
+	IsResponsesAPI       bool                     // True if this is a Responses API request (converted to Chat Completions)
 }
 
 // HealthChecker provides cached database health status
@@ -336,6 +338,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 	modelID := prepared.modelID
 	streaming := prepared.streaming
 	cred := prepared.cred
+	logCtx.IsResponsesAPI = prepared.isResponsesAPI
 
 	// Log request details at DEBUG level
 	p.logger.Debug("Processing request",
@@ -451,20 +454,53 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		if proxyResp.IsStreaming {
 			p.logger.Debug("Response is streaming (no retry for streaming)",
 				"credential", cred.Name, "status", proxyResp.StatusCode)
-			totalTokens, err := p.writeProxyStreamingResponseWithTokens(w, proxyResp, r, cred.Name)
-			if err != nil {
-				p.logger.Error("Failed to write streaming proxy response",
-					"credential", cred.Name, "error", err)
-			}
-			if totalTokens > 0 {
-				p.rateLimiter.ConsumeTokens(cred.Name, totalTokens)
-				if modelID != "" {
-					p.rateLimiter.ConsumeModelTokens(cred.Name, modelID, totalTokens)
+
+			if prepared.convertedResp {
+				// Proxy streaming + Responses API: need to convert Chat Completions SSE
+				// to Responses API SSE. Wrap StreamBody in http.Response for handleResponsesAPIStreaming.
+				defer func() {
+					if closeErr := proxyResp.StreamBody.Close(); closeErr != nil {
+						p.logger.Error("Failed to close proxy streaming response body", "error", closeErr)
+					}
+				}()
+				copyResponseHeaders(w, proxyResp.Headers, cred.Type)
+				w.WriteHeader(proxyResp.StatusCode)
+				logCtx.PromptTokensEstimate = estimatePromptTokens(body)
+				fakeResp := &http.Response{
+					StatusCode: proxyResp.StatusCode,
+					Header:     proxyResp.Headers,
+					Body:       proxyResp.StreamBody,
 				}
-				p.logger.Debug("Proxy streaming token usage recorded",
-					"credential", cred.Name, "model", modelID, "tokens", totalTokens)
+				err := p.handleResponsesAPIStreaming(w, fakeResp, cred, modelID, logCtx)
+				if err != nil {
+					p.logger.Error("Failed to handle proxy Responses API streaming", "error", err)
+				}
+			} else {
+				totalTokens, err := p.writeProxyStreamingResponseWithTokens(w, proxyResp, r, cred.Name)
+				if err != nil {
+					p.logger.Error("Failed to write streaming proxy response",
+						"credential", cred.Name, "error", err)
+				}
+				if totalTokens > 0 {
+					p.rateLimiter.ConsumeTokens(cred.Name, totalTokens)
+					if modelID != "" {
+						p.rateLimiter.ConsumeModelTokens(cred.Name, modelID, totalTokens)
+					}
+					p.logger.Debug("Proxy streaming token usage recorded",
+						"credential", cred.Name, "model", modelID, "tokens", totalTokens)
+				}
 			}
 		} else {
+			// Convert proxy response back to Responses API format if needed
+			if prepared.convertedResp && proxyResp.StatusCode >= 200 && proxyResp.StatusCode < 300 {
+				responsesBody, convErr := responses.ChatToResponse(proxyResp.Body)
+				if convErr != nil {
+					p.logger.Error("Failed to convert proxy response to Responses API format", "error", convErr)
+				} else {
+					proxyResp.Body = responsesBody
+				}
+			}
+
 			p.writeProxyResponse(w, proxyResp, r)
 			tokens := extractTokensFromResponse(string(proxyResp.Body), config.ProviderTypeOpenAI)
 			if tokens > 0 {
@@ -823,11 +859,23 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			finalResponseBody = []byte(decodedBody)
 		}
 
-		// Extract and record token usage (after transformation to OpenAI format)
+		// Extract token usage BEFORE Responses API conversion (from Chat Completions format)
 		bodyForTokenExtraction := finalResponseBody
 		if len(bodyForTokenExtraction) == 0 {
 			bodyForTokenExtraction = []byte(decodedBody)
 		}
+
+		// Convert to Responses API format only if the request was converted to Chat Completions
+		if prepared.convertedResp && resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			responsesBody, convErr := responses.ChatToResponse(finalResponseBody)
+			if convErr != nil {
+				p.logger.Error("Failed to convert to Responses API format", "error", convErr)
+				// fallback: use Chat Completions body
+			} else {
+				finalResponseBody = responsesBody
+			}
+		}
+
 		tokens := extractTokensFromResponse(string(bodyForTokenExtraction), config.ProviderTypeOpenAI)
 		if tokens > 0 {
 			p.rateLimiter.ConsumeTokens(cred.Name, tokens)
@@ -885,38 +933,74 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 				"request_id", logCtx.RequestID)
 		}
 
-		switch cred.Type {
-		case config.ProviderTypeVertexAI, config.ProviderTypeGemini:
-			err := p.handleVertexStreaming(w, resp, cred.Name, modelID, logCtx)
-			if err != nil {
-				p.logger.Error("Failed to vertex streaming response", "error", err)
-				logCtx.Status = "failure"
-				logCtx.ErrorMsg = fmt.Sprintf("Vertex streaming error: %v", err)
-				logCtx.Logged = false
+		p.logger.Debug("Streaming handler selection",
+			"is_responses_api", prepared.isResponsesAPI,
+			"converted_resp", prepared.convertedResp,
+			"provider", cred.Type,
+			"model", modelID,
+			"resp_content_type", resp.Header.Get("Content-Type"),
+			"resp_status", resp.StatusCode)
+
+		if prepared.convertedResp {
+			// For Responses API: only transform successful responses (2xx status).
+			// For error responses (4xx/5xx), pass through the provider error as-is.
+			if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+				// Transform to Responses API SSE format
+				err := p.handleResponsesAPIStreaming(w, resp, cred, modelID, logCtx)
+				if err != nil {
+					p.logger.Error("Failed to handle Responses API streaming", "error", err)
+					// Note: finalizeStreamingLog inside handleTransformedStreaming already
+					// logged the spend. We only update error metadata here for the defer
+					// safety net, but don't reset Logged to avoid double logging.
+				}
+			} else {
+				// Error response: stream using provider's native format instead
+				switch cred.Type {
+				case config.ProviderTypeVertexAI, config.ProviderTypeGemini:
+					err := p.handleVertexStreaming(w, resp, cred.Name, modelID, logCtx)
+					if err != nil {
+						p.logger.Error("Failed to handle vertex streaming response", "error", err)
+					}
+				case config.ProviderTypeAnthropic:
+					err := p.handleAnthropicStreaming(w, resp, cred.Name, modelID, logCtx)
+					if err != nil {
+						p.logger.Error("Failed to handle anthropic streaming response", "error", err)
+					}
+				case config.ProviderTypeBedrock:
+					err := p.handleBedrockStreaming(w, resp, cred.Name, modelID, logCtx)
+					if err != nil {
+						p.logger.Error("Failed to handle bedrock streaming response", "error", err)
+					}
+				default:
+					// For passthrough providers, stream error as-is
+					err := p.handleStreamingWithTokens(w, resp, cred.Name, modelID, logCtx)
+					if err != nil {
+						p.logger.Error("Failed to handle streaming response", "error", err)
+					}
+				}
 			}
-		case config.ProviderTypeAnthropic:
-			err := p.handleAnthropicStreaming(w, resp, cred.Name, modelID, logCtx)
-			if err != nil {
-				p.logger.Error("Failed to vertex streaming response", "error", err)
-				logCtx.Status = "failure"
-				logCtx.ErrorMsg = fmt.Sprintf("Anthropic streaming error: %v", err)
-				logCtx.Logged = false
-			}
-		case config.ProviderTypeBedrock:
-			err := p.handleBedrockStreaming(w, resp, cred.Name, modelID, logCtx)
-			if err != nil {
-				p.logger.Error("Failed to handle bedrock streaming response", "error", err)
-				logCtx.Status = "failure"
-				logCtx.ErrorMsg = fmt.Sprintf("Bedrock streaming error: %v", err)
-				logCtx.Logged = false
-			}
-		default:
-			err := p.handleStreamingWithTokens(w, resp, cred.Name, modelID, logCtx)
-			if err != nil {
-				p.logger.Error("Failed to handle streaming response", "error", err)
-				logCtx.Status = "failure"
-				logCtx.ErrorMsg = fmt.Sprintf("Streaming error: %v", err)
-				logCtx.Logged = false
+		} else {
+			switch cred.Type {
+			case config.ProviderTypeVertexAI, config.ProviderTypeGemini:
+				err := p.handleVertexStreaming(w, resp, cred.Name, modelID, logCtx)
+				if err != nil {
+					p.logger.Error("Failed to handle vertex streaming response", "error", err)
+				}
+			case config.ProviderTypeAnthropic:
+				err := p.handleAnthropicStreaming(w, resp, cred.Name, modelID, logCtx)
+				if err != nil {
+					p.logger.Error("Failed to handle anthropic streaming response", "error", err)
+				}
+			case config.ProviderTypeBedrock:
+				err := p.handleBedrockStreaming(w, resp, cred.Name, modelID, logCtx)
+				if err != nil {
+					p.logger.Error("Failed to handle bedrock streaming response", "error", err)
+				}
+			default:
+				err := p.handleStreamingWithTokens(w, resp, cred.Name, modelID, logCtx)
+				if err != nil {
+					p.logger.Error("Failed to handle streaming response", "error", err)
+				}
 			}
 		}
 

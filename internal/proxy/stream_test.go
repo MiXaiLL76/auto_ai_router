@@ -488,6 +488,57 @@ func TestOpenAIStreamUsageExtractor(t *testing.T) {
 			chunk:     []byte(`invalid json`),
 			expectNil: true,
 		},
+		// Responses API format tests (GPT-5, /v1/responses)
+		{
+			name:      "responses API - top level usage",
+			chunk:     []byte(`{"usage":{"input_tokens":120,"output_tokens":60,"total_tokens":180}}`),
+			expectNil: false,
+			expectUsage: func(u *StreamUsageInfo) bool {
+				return u.PromptTokens == 120 && u.CompletionTokens == 60
+			},
+		},
+		{
+			name:      "responses API - response.completed event",
+			chunk:     []byte(`{"type":"response.completed","response":{"id":"resp_123","usage":{"input_tokens":200,"output_tokens":80,"total_tokens":280}}}`),
+			expectNil: false,
+			expectUsage: func(u *StreamUsageInfo) bool {
+				return u.PromptTokens == 200 && u.CompletionTokens == 80
+			},
+		},
+		{
+			name:      "responses API - with output_tokens_details",
+			chunk:     []byte(`{"type":"response.completed","response":{"usage":{"input_tokens":150,"output_tokens":100,"output_tokens_details":{"reasoning_tokens":40}}}}`),
+			expectNil: false,
+			expectUsage: func(u *StreamUsageInfo) bool {
+				return u.PromptTokens == 150 && u.CompletionTokens == 100 && u.ReasoningTokens == 40
+			},
+		},
+		{
+			name:      "responses API - with input_tokens_details cached",
+			chunk:     []byte(`{"usage":{"input_tokens":300,"output_tokens":50,"input_tokens_details":{"cached_tokens":100}}}`),
+			expectNil: false,
+			expectUsage: func(u *StreamUsageInfo) bool {
+				return u.PromptTokens == 300 && u.CompletionTokens == 50 && u.CachedTokens == 100
+			},
+		},
+		{
+			name: "responses API - SSE format response.completed",
+			chunk: []byte("event: response.completed\ndata: " +
+				`{"type":"response.completed","response":{"usage":{"input_tokens":500,"output_tokens":200,"total_tokens":700}}}` +
+				"\n\n"),
+			expectNil: false,
+			expectUsage: func(u *StreamUsageInfo) bool {
+				return u.PromptTokens == 500 && u.CompletionTokens == 200
+			},
+		},
+		{
+			name:      "responses API - cache hit (input_tokens=0, output_tokens>0)",
+			chunk:     []byte(`{"usage":{"input_tokens":0,"output_tokens":75,"input_tokens_details":{"cached_tokens":200}}}`),
+			expectNil: false,
+			expectUsage: func(u *StreamUsageInfo) bool {
+				return u.PromptTokens == 0 && u.CompletionTokens == 75 && u.CachedTokens == 200
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -504,6 +555,64 @@ func TestOpenAIStreamUsageExtractor(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestHandleResponsesAPIStreaming_Passthrough(t *testing.T) {
+	upstreamServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.WriteHeader(http.StatusOK)
+
+		chunks := []string{
+			`data: {"id":"chatcmpl-test","object":"chat.completion.chunk","created":1700000000,"model":"gpt-4o","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}` + "\n\n",
+			`data: {"id":"chatcmpl-test","object":"chat.completion.chunk","created":1700000000,"model":"gpt-4o","choices":[{"index":0,"delta":{"content":"Hello"},"finish_reason":null}]}` + "\n\n",
+			`data: {"id":"chatcmpl-test","object":"chat.completion.chunk","created":1700000000,"model":"gpt-4o","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}` + "\n\n",
+			`data: {"id":"chatcmpl-test","object":"chat.completion.chunk","created":1700000000,"model":"gpt-4o","choices":[],"usage":{"prompt_tokens":1,"completion_tokens":2,"total_tokens":3}}` + "\n\n",
+			"data: [DONE]\n\n",
+		}
+
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			http.Error(w, "Streaming not supported", http.StatusInternalServerError)
+			return
+		}
+
+		for _, chunk := range chunks {
+			_, _ = fmt.Fprint(w, chunk)
+			flusher.Flush()
+		}
+	}))
+	defer upstreamServer.Close()
+
+	logger := testhelpers.NewTestLogger()
+	bal, rl := createTestBalancer(upstreamServer.URL)
+	metrics := createTestProxyMetrics()
+	tm := createTestTokenManager(logger)
+	mm := createTestModelManager(logger)
+	prx := createProxyWithParams(
+		bal, logger, 10, 5*time.Second, metrics,
+		"master-key", rl, tm, mm,
+		"test-version", "test-commit",
+	)
+
+	resp, err := http.Get(upstreamServer.URL)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+
+	w := httptest.NewRecorder()
+	cred := &config.CredentialConfig{
+		Name: "test",
+		Type: config.ProviderTypeOpenAI,
+	}
+
+	err = prx.handleResponsesAPIStreaming(w, resp, cred, "gpt-4o", nil)
+	require.NoError(t, err)
+
+	body := w.Body.String()
+	assert.Contains(t, body, "event: response.created")
+	assert.Contains(t, body, "response.output_text.delta")
+	assert.Contains(t, body, "Hello")
+	assert.Contains(t, body, "event: response.completed")
 }
 
 // TestAnthropicStreamUsageExtractor tests Anthropic format usage extraction

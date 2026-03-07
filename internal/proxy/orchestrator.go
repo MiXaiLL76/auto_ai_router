@@ -11,16 +11,19 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/balancer"
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/converter/openai"
+	"github.com/mixaill76/auto_ai_router/internal/converter/responses"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb/users"
 	"github.com/mixaill76/auto_ai_router/internal/security"
 )
 
 type orchestratedRequest struct {
-	request   *http.Request
-	body      []byte
-	modelID   string
-	streaming bool
-	cred      *config.CredentialConfig
+	request        *http.Request
+	body           []byte
+	modelID        string
+	streaming      bool
+	cred           *config.CredentialConfig
+	isResponsesAPI bool
+	convertedResp  bool
 }
 
 // orchestrateRequest performs auth and credential selection for an incoming request.
@@ -42,20 +45,63 @@ func (p *Proxy) orchestrateRequest(
 		return nil, false
 	}
 
+	// Detect Responses API requests and select credential before conversion.
+	isResponsesAPI := responses.IsResponsesAPI(body) && strings.Contains(r.URL.Path, "/responses")
+
 	cred, ok := p.selectCredentialForModel(w, modelID, logCtx)
 	if !ok {
 		return nil, false
+	}
+
+	p.logger.Debug("Responses API detection",
+		"is_responses_api", isResponsesAPI,
+		"provider", cred.Type,
+		"model", modelID,
+		"streaming", streaming,
+		"url_path", r.URL.Path)
+
+	convertedResp := false
+	// Always convert Responses API requests for ALL providers.
+	// Even "openai"-type credentials may point to Azure OpenAI or other
+	// OpenAI-compatible endpoints that don't support the native /v1/responses
+	// endpoint and return Chat Completions SSE instead of Responses API SSE.
+	// Chat Completions API is universally supported, so converting is always safe.
+	if isResponsesAPI {
+		chatBody, convErr := responses.RequestToChat(body)
+		if convErr != nil {
+			p.logger.Error("Failed to convert Responses API request", "error", convErr)
+			logCtx.Status = "failure"
+			logCtx.HTTPStatus = http.StatusBadRequest
+			logCtx.ErrorMsg = "Failed to convert Responses API request: " + convErr.Error()
+			WriteErrorBadRequest(w, "Failed to convert Responses API request")
+			return nil, false
+		}
+		body = chatBody
+		convertedResp = true
+		// For streaming: inject stream_options.include_usage since extractMetadataFromBody
+		// skipped it for Responses API (the original body had "input" not "messages").
+		// Now that we've converted to Chat Completions format, providers need this.
+		if streaming {
+			body = injectStreamOptions(body)
+		}
+		// Rewrite URL path from /v1/responses to /v1/chat/completions
+		// so passthrough providers (OpenAI, Proxy) send to the correct endpoint.
+		r.URL.Path = strings.Replace(r.URL.Path, "/responses", "/chat/completions", 1)
+		p.logger.Debug("Converted Responses API request to Chat Completions format",
+			"model", modelID, "streaming", streaming)
 	}
 
 	logCtx.Credential = cred
 	r = markCredentialAsTried(r, cred.Name)
 
 	return &orchestratedRequest{
-		request:   r,
-		body:      body,
-		modelID:   modelID,
-		streaming: streaming,
-		cred:      cred,
+		request:        r,
+		body:           body,
+		modelID:        modelID,
+		streaming:      streaming,
+		cred:           cred,
+		isResponsesAPI: isResponsesAPI,
+		convertedResp:  convertedResp,
 	}, true
 }
 

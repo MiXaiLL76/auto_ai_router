@@ -11,10 +11,17 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/config"
 )
 
+type usageTotalTokens struct {
+	TotalTokens int `json:"total_tokens"`
+}
+
 type openAIUsageResponse struct {
-	Usage struct {
-		TotalTokens int `json:"total_tokens"`
-	} `json:"usage"`
+	// Chat Completions: usage at top level
+	Usage usageTotalTokens `json:"usage"`
+	// Responses API: usage nested inside response object (response.completed event)
+	Response struct {
+		Usage usageTotalTokens `json:"usage"`
+	} `json:"response"`
 }
 
 func extractOpenAITotalTokens(payload []byte) int {
@@ -23,7 +30,10 @@ func extractOpenAITotalTokens(payload []byte) int {
 		return 0
 	}
 
-	return openAIResp.Usage.TotalTokens
+	if openAIResp.Usage.TotalTokens > 0 {
+		return openAIResp.Usage.TotalTokens
+	}
+	return openAIResp.Response.Usage.TotalTokens
 }
 
 func extractTokensFromStreamingChunk(chunk string) int {
@@ -97,20 +107,26 @@ func extractMetadataFromBody(body []byte) (string, bool, string, []byte) {
 		return model, false, sessionID, body // Not a streaming request, return as-is
 	}
 
-	// Ensure stream_options exists and include_usage is true
-	streamOptions, exists := reqBody["stream_options"]
-	if !exists {
-		// Create stream_options if it doesn't exist
-		reqBody["stream_options"] = map[string]interface{}{
-			"include_usage": true,
-		}
-	} else if streamOptionsMap, ok := streamOptions.(map[string]interface{}); ok {
-		// Update existing stream_options to ensure include_usage is true
-		streamOptionsMap["include_usage"] = true
-	} else {
-		// stream_options exists but is not a map, replace it
-		reqBody["stream_options"] = map[string]interface{}{
-			"include_usage": true,
+	// Responses API (/v1/responses) uses "input" instead of "messages" and does NOT
+	// support stream_options — it always returns usage in streaming.
+	// Only inject stream_options for Chat Completions API requests.
+	_, hasInput := reqBody["input"]
+	_, hasMessages := reqBody["messages"]
+	isResponsesAPI := hasInput && !hasMessages
+
+	if !isResponsesAPI {
+		// Ensure stream_options exists and include_usage is true (Chat Completions only)
+		streamOptions, exists := reqBody["stream_options"]
+		if !exists {
+			reqBody["stream_options"] = map[string]interface{}{
+				"include_usage": true,
+			}
+		} else if streamOptionsMap, ok := streamOptions.(map[string]interface{}); ok {
+			streamOptionsMap["include_usage"] = true
+		} else {
+			reqBody["stream_options"] = map[string]interface{}{
+				"include_usage": true,
+			}
 		}
 	}
 
@@ -250,4 +266,32 @@ func estimatePromptTokens(body []byte) int {
 	}
 
 	return estimatedTokens
+}
+
+// injectStreamOptions ensures stream_options.include_usage is set in a Chat Completions request body.
+// Used after Responses API conversion where extractMetadataFromBody skipped injection.
+func injectStreamOptions(body []byte) []byte {
+	var raw map[string]interface{}
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return body
+	}
+
+	streamOptions, exists := raw["stream_options"]
+	if !exists {
+		raw["stream_options"] = map[string]interface{}{
+			"include_usage": true,
+		}
+	} else if soMap, ok := streamOptions.(map[string]interface{}); ok {
+		soMap["include_usage"] = true
+	} else {
+		raw["stream_options"] = map[string]interface{}{
+			"include_usage": true,
+		}
+	}
+
+	modified, err := json.Marshal(raw)
+	if err != nil {
+		return body
+	}
+	return modified
 }

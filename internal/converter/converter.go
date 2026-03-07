@@ -204,7 +204,7 @@ func ExtractTokenUsage(body []byte) *TokenUsage {
 
 	var resp struct {
 		Usage struct {
-			// Chat completion format
+			// Chat Completions format
 			PromptTokens        int `json:"prompt_tokens"`
 			CompletionTokens    int `json:"completion_tokens"`
 			PromptTokensDetails struct {
@@ -218,13 +218,19 @@ func ExtractTokenUsage(body []byte) *TokenUsage {
 				AudioTokens              int `json:"audio_tokens,omitempty"`
 				ReasoningTokens          int `json:"reasoning_tokens,omitempty"`
 			} `json:"completion_tokens_details,omitempty"`
-			// Image generation format
+			// Responses API / Image generation format (input_tokens/output_tokens)
 			InputTokens        int `json:"input_tokens"`
 			OutputTokens       int `json:"output_tokens"`
 			InputTokensDetails struct {
-				ImageTokens int `json:"image_tokens,omitempty"`
-				TextTokens  int `json:"text_tokens,omitempty"`
+				CachedTokens int `json:"cached_tokens,omitempty"`
+				ImageTokens  int `json:"image_tokens,omitempty"`
+				TextTokens   int `json:"text_tokens,omitempty"`
+				AudioTokens  int `json:"audio_tokens,omitempty"`
 			} `json:"input_tokens_details,omitempty"`
+			OutputTokensDetails struct {
+				AudioTokens     int `json:"audio_tokens,omitempty"`
+				ReasoningTokens int `json:"reasoning_tokens,omitempty"`
+			} `json:"output_tokens_details,omitempty"`
 		} `json:"usage"`
 	}
 
@@ -232,7 +238,7 @@ func ExtractTokenUsage(body []byte) *TokenUsage {
 		return nil
 	}
 
-	// Prefer chat completion tokens; fall back to image generation tokens
+	// Prefer Chat Completions tokens; fall back to Responses API / image tokens
 	promptTokens := resp.Usage.PromptTokens
 	if promptTokens == 0 {
 		promptTokens = resp.Usage.InputTokens
@@ -246,15 +252,34 @@ func ExtractTokenUsage(body []byte) *TokenUsage {
 		return nil
 	}
 
+	// Merge detail fields: Chat Completions uses completion_tokens_details,
+	// Responses API uses output_tokens_details. Pick whichever is populated.
+	cachedTokens := resp.Usage.PromptTokensDetails.CachedTokens
+	if cachedTokens == 0 {
+		cachedTokens = resp.Usage.InputTokensDetails.CachedTokens
+	}
+	audioIn := resp.Usage.PromptTokensDetails.AudioTokens
+	if audioIn == 0 {
+		audioIn = resp.Usage.InputTokensDetails.AudioTokens
+	}
+	audioOut := resp.Usage.CompletionTokensDetails.AudioTokens
+	if audioOut == 0 {
+		audioOut = resp.Usage.OutputTokensDetails.AudioTokens
+	}
+	reasoning := resp.Usage.CompletionTokensDetails.ReasoningTokens
+	if reasoning == 0 {
+		reasoning = resp.Usage.OutputTokensDetails.ReasoningTokens
+	}
+
 	return &TokenUsage{
 		PromptTokens:             promptTokens,
 		CompletionTokens:         completionTokens,
-		CachedInputTokens:        resp.Usage.PromptTokensDetails.CachedTokens,
-		AudioInputTokens:         resp.Usage.PromptTokensDetails.AudioTokens,
+		CachedInputTokens:        cachedTokens,
+		AudioInputTokens:         audioIn,
 		ImageTokens:              resp.Usage.InputTokensDetails.ImageTokens,
 		AcceptedPredictionTokens: resp.Usage.CompletionTokensDetails.AcceptedPredictionTokens,
 		RejectedPredictionTokens: resp.Usage.CompletionTokensDetails.RejectedPredictionTokens,
-		AudioOutputTokens:        resp.Usage.CompletionTokensDetails.AudioTokens,
-		ReasoningTokens:          resp.Usage.CompletionTokensDetails.ReasoningTokens,
+		AudioOutputTokens:        audioOut,
+		ReasoningTokens:          reasoning,
 	}
 }

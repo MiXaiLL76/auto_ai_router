@@ -11,18 +11,19 @@ class TestModels:
 
     # Anthropic models
     ANTHROPIC_MODELS = [
-        "claude-opus-4-1",
+        # "claude-opus-4-1",
+        "global.anthropic.claude-sonnet-4-6",
     ]
 
     # OpenAI models
     OPENAI_MODELS = [
         "gpt-4o-mini",
+        # "gpt-5-mini",
     ]
 
     # Google Vertex AI models
     VERTEX_MODELS = [
         "gemini-2.5-flash",
-        # "gemini-2.5-pro",
     ]
 
     # Vertex AI Image models

@@ -13,6 +13,7 @@ import (
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/converter"
+	"github.com/mixaill76/auto_ai_router/internal/converter/responses"
 )
 
 // streamChunkWriteTimeout is the per-chunk write deadline for streaming responses.
@@ -56,47 +57,114 @@ type StreamUsageExtractor interface {
 type openAIStreamUsageExtractor struct{}
 
 func (o *openAIStreamUsageExtractor) ExtractUsage(chunk []byte) *StreamUsageInfo {
-	// OpenAI streaming format:
-	// {"choices":[...],"usage":{"prompt_tokens":100,"completion_tokens":50}}
-	// Usage may appear in any chunk but typically in the final chunk
+	// Supports two OpenAI streaming formats:
+	//
+	// 1. Chat Completions API:
+	//    {"choices":[...],"usage":{"prompt_tokens":100,"completion_tokens":50,...}}
+	//
+	// 2. Responses API (GPT-5, /v1/responses):
+	//    {"type":"response.completed","response":{"usage":{"input_tokens":100,"output_tokens":50,...}}}
+	//    Usage fields use input_tokens/output_tokens and output_tokens_details instead of
+	//    prompt_tokens/completion_tokens and completion_tokens_details.
 
 	payloads := extractJSONPayloadsFromStreamChunk(chunk)
 	for i := len(payloads) - 1; i >= 0; i-- {
-		var data struct {
-			Usage struct {
-				PromptTokens        int `json:"prompt_tokens"`
-				CompletionTokens    int `json:"completion_tokens"`
-				PromptTokensDetails struct {
-					CachedTokens int `json:"cached_tokens,omitempty"`
-					AudioTokens  int `json:"audio_tokens,omitempty"`
-				} `json:"prompt_tokens_details,omitempty"`
-				CompletionTokensDetails struct {
-					AudioTokens     int `json:"audio_tokens,omitempty"`
-					ReasoningTokens int `json:"reasoning_tokens,omitempty"`
-				} `json:"completion_tokens_details,omitempty"`
-			} `json:"usage"`
+		if info := o.extractChatCompletionUsage(payloads[i]); info != nil {
+			return info
 		}
-
-		if err := json.Unmarshal(payloads[i], &data); err != nil {
-			continue
-		}
-
-		// Check if usage info is present (both fields can't be 0 for valid usage)
-		if data.Usage.PromptTokens == 0 && data.Usage.CompletionTokens == 0 {
-			continue
-		}
-
-		return &StreamUsageInfo{
-			PromptTokens:      data.Usage.PromptTokens,
-			CompletionTokens:  data.Usage.CompletionTokens,
-			CachedTokens:      data.Usage.PromptTokensDetails.CachedTokens,
-			AudioInputTokens:  data.Usage.PromptTokensDetails.AudioTokens,
-			AudioOutputTokens: data.Usage.CompletionTokensDetails.AudioTokens,
-			ReasoningTokens:   data.Usage.CompletionTokensDetails.ReasoningTokens,
+		if info := o.extractResponsesAPIUsage(payloads[i]); info != nil {
+			return info
 		}
 	}
 
 	return nil
+}
+
+// extractChatCompletionUsage parses usage from Chat Completions streaming format.
+// Format: {"usage":{"prompt_tokens":N,"completion_tokens":N,...}}
+func (o *openAIStreamUsageExtractor) extractChatCompletionUsage(payload []byte) *StreamUsageInfo {
+	var data struct {
+		Usage struct {
+			PromptTokens        int `json:"prompt_tokens"`
+			CompletionTokens    int `json:"completion_tokens"`
+			PromptTokensDetails struct {
+				CachedTokens int `json:"cached_tokens,omitempty"`
+				AudioTokens  int `json:"audio_tokens,omitempty"`
+			} `json:"prompt_tokens_details,omitempty"`
+			CompletionTokensDetails struct {
+				AudioTokens     int `json:"audio_tokens,omitempty"`
+				ReasoningTokens int `json:"reasoning_tokens,omitempty"`
+			} `json:"completion_tokens_details,omitempty"`
+		} `json:"usage"`
+	}
+
+	if err := json.Unmarshal(payload, &data); err != nil {
+		return nil
+	}
+
+	if data.Usage.PromptTokens == 0 && data.Usage.CompletionTokens == 0 {
+		return nil
+	}
+
+	return &StreamUsageInfo{
+		PromptTokens:      data.Usage.PromptTokens,
+		CompletionTokens:  data.Usage.CompletionTokens,
+		CachedTokens:      data.Usage.PromptTokensDetails.CachedTokens,
+		AudioInputTokens:  data.Usage.PromptTokensDetails.AudioTokens,
+		AudioOutputTokens: data.Usage.CompletionTokensDetails.AudioTokens,
+		ReasoningTokens:   data.Usage.CompletionTokensDetails.ReasoningTokens,
+	}
+}
+
+// extractResponsesAPIUsage parses usage from Responses API streaming format.
+// The usage can appear at two levels:
+//   - Top-level: {"usage":{"input_tokens":N,"output_tokens":N,...}}
+//   - Nested in response.completed: {"type":"response.completed","response":{"usage":{...}}}
+func (o *openAIStreamUsageExtractor) extractResponsesAPIUsage(payload []byte) *StreamUsageInfo {
+	var data struct {
+		// Top-level usage (some Responses API events)
+		Usage *responsesAPIUsage `json:"usage,omitempty"`
+		// Nested usage in response.completed event
+		Response struct {
+			Usage *responsesAPIUsage `json:"usage,omitempty"`
+		} `json:"response,omitempty"`
+	}
+
+	if err := json.Unmarshal(payload, &data); err != nil {
+		return nil
+	}
+
+	// Prefer nested response.usage (response.completed event), fall back to top-level
+	usage := data.Response.Usage
+	if usage == nil {
+		usage = data.Usage
+	}
+	if usage == nil || (usage.InputTokens == 0 && usage.OutputTokens == 0) {
+		return nil
+	}
+
+	return &StreamUsageInfo{
+		PromptTokens:      usage.InputTokens,
+		CompletionTokens:  usage.OutputTokens,
+		CachedTokens:      usage.InputTokensDetails.CachedTokens,
+		AudioInputTokens:  usage.InputTokensDetails.AudioTokens,
+		AudioOutputTokens: usage.OutputTokensDetails.AudioTokens,
+		ReasoningTokens:   usage.OutputTokensDetails.ReasoningTokens,
+	}
+}
+
+// responsesAPIUsage represents the usage object in OpenAI Responses API format.
+type responsesAPIUsage struct {
+	InputTokens        int `json:"input_tokens"`
+	OutputTokens       int `json:"output_tokens"`
+	InputTokensDetails struct {
+		CachedTokens int `json:"cached_tokens,omitempty"`
+		AudioTokens  int `json:"audio_tokens,omitempty"`
+	} `json:"input_tokens_details,omitempty"`
+	OutputTokensDetails struct {
+		AudioTokens     int `json:"audio_tokens,omitempty"`
+		ReasoningTokens int `json:"reasoning_tokens,omitempty"`
+	} `json:"output_tokens_details,omitempty"`
 }
 
 // anthropicStreamUsageExtractor implements StreamUsageExtractor for Anthropic format
@@ -275,6 +343,7 @@ func (p *Proxy) handleTransformedStreaming(
 	// lastChunk and totalTokens, preventing a data race.
 	var wg sync.WaitGroup
 	wg.Add(1)
+	chunkCount := 0
 	go func() {
 		defer wg.Done()
 		err := transformFunc(resp.Body, modelID, &tokenCapturingWriter{
@@ -282,6 +351,7 @@ func (p *Proxy) handleTransformedStreaming(
 			tokens: &totalTokens,
 			logger: p.logger,
 			onChunk: func(chunk []byte) {
+				chunkCount++
 				// Store each chunk, keeping only the last one
 				// This allows us to extract usage info that typically appears in final chunks
 				lastChunk = make([]byte, len(chunk))
@@ -289,19 +359,27 @@ func (p *Proxy) handleTransformedStreaming(
 			},
 		})
 		if err != nil {
-			// Don't log here — CloseWithError propagates the error to the
-			// reader side where streamToClient logs it as "Streaming read error".
+			p.logger.Error("Transform goroutine error",
+				"provider", providerName, "error", err, "chunks_written", chunkCount)
 			_ = pw.CloseWithError(fmt.Errorf("%s transform: %w", providerName, err))
 		} else {
+			p.logger.Debug("Transform goroutine completed OK",
+				"provider", providerName, "chunks_written", chunkCount, "total_tokens", totalTokens)
 			_ = pw.Close()
 		}
 	}()
 
 	if err := p.streamToClient(w, pr, credName, nil, func() { _ = pr.Close() }); err != nil {
+		p.logger.Error("streamToClient error in handleTransformedStreaming",
+			"provider", providerName, "error", err)
 		wg.Wait()
 		return err
 	}
 	wg.Wait()
+
+	p.logger.Debug("handleTransformedStreaming completed",
+		"provider", providerName, "total_tokens", totalTokens,
+		"chunks_written", chunkCount, "last_chunk_len", len(lastChunk))
 
 	if totalTokens > 0 {
 		p.rateLimiter.ConsumeTokens(credName, totalTokens)
@@ -318,14 +396,18 @@ func (p *Proxy) handleTransformedStreaming(
 }
 
 func (p *Proxy) handleStreamingWithTokens(w http.ResponseWriter, resp *http.Response, credName, modelID string, logCtx *RequestLogContext) error {
-	p.logger.Debug("Starting streaming response with token tracking", "credential", credName)
+	p.logger.Debug("Starting streaming response with token tracking (passthrough)",
+		"credential", credName, "model", modelID,
+		"content_type", resp.Header.Get("Content-Type"))
 
 	var totalTokens int
+	chunkCount := 0
 
 	// Capture last chunk for usage extraction (Solution 3: Hybrid approach)
 	var lastChunk []byte
 
 	onChunk := func(chunk []byte) {
+		chunkCount++
 		tokens := extractTokensFromStreamingChunk(string(chunk))
 		if tokens > 0 {
 			totalTokens += tokens
@@ -338,8 +420,15 @@ func (p *Proxy) handleStreamingWithTokens(w http.ResponseWriter, resp *http.Resp
 	}
 
 	if err := p.streamToClient(w, resp.Body, credName, onChunk, nil); err != nil {
+		p.logger.Error("streamToClient error in handleStreamingWithTokens",
+			"credential", credName, "error", err, "chunks_received", chunkCount)
 		return err
 	}
+
+	p.logger.Debug("handleStreamingWithTokens completed",
+		"credential", credName, "model", modelID,
+		"chunks_received", chunkCount, "total_tokens", totalTokens,
+		"last_chunk_len", len(lastChunk))
 
 	if totalTokens > 0 {
 		p.rateLimiter.ConsumeTokens(credName, totalTokens)
@@ -478,4 +567,75 @@ func (p *Proxy) flushStreaming(controller *http.ResponseController, credName str
 			p.logger.Error("Flusher error", "error", err, "credential", credName)
 		}
 	}
+}
+
+// handleResponsesAPIStreaming handles streaming for Responses API requests.
+// It first converts the provider stream to OpenAI Chat Completions SSE format,
+// then converts that to Responses API SSE format.
+func (p *Proxy) handleResponsesAPIStreaming(
+	w http.ResponseWriter,
+	resp *http.Response,
+	cred *config.CredentialConfig,
+	modelID string,
+	logCtx *RequestLogContext,
+) error {
+	p.logger.Debug("Starting Responses API streaming", "credential", cred.Name, "provider", cred.Type)
+
+	// For providers that need transformation (Vertex, Anthropic, Bedrock),
+	// first transform to OpenAI Chat Completions SSE, then to Responses API SSE.
+	// For OpenAI (passthrough), the stream is already in Chat Completions SSE format.
+
+	conv := converter.New(cred.Type, converter.RequestMode{
+		ModelID:     modelID,
+		IsStreaming: true,
+	})
+
+	// Create a wrapper transformer that chains:
+	// Provider SSE -> Chat Completions SSE -> Responses API SSE
+	transformer := func(r io.Reader, id string, w io.Writer) error {
+		if conv.IsPassthrough() {
+			p.logger.Debug("Responses API streaming: passthrough mode (Chat Completions SSE → Responses SSE)",
+				"model", modelID, "provider", cred.Type)
+			return responses.TransformChatStreamToResponses(r, w, modelID)
+		}
+
+		p.logger.Debug("Responses API streaming: converted mode (Provider SSE → Chat Completions SSE → Responses SSE)",
+			"model", modelID, "provider", cred.Type)
+
+		// Non-passthrough providers: first convert to Chat Completions SSE via pipe
+		pr, pw := io.Pipe()
+		var transformErr error
+		var wg sync.WaitGroup
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			transformErr = conv.StreamTo(r, pw)
+			if transformErr != nil {
+				p.logger.Error("Responses API streaming: provider→ChatCompletions transform failed",
+					"error", transformErr, "provider", cred.Type)
+				_ = pw.CloseWithError(transformErr)
+			} else {
+				p.logger.Debug("Responses API streaming: provider→ChatCompletions transform completed OK",
+					"provider", cred.Type)
+				_ = pw.Close()
+			}
+		}()
+
+		// Then convert Chat Completions SSE to Responses API SSE
+		err := responses.TransformChatStreamToResponses(pr, w, modelID)
+		_ = pr.Close()
+		wg.Wait() // ensure goroutine completes before reading transformErr
+		if err != nil {
+			p.logger.Error("Responses API streaming: ChatCompletions→Responses transform failed",
+				"error", err, "provider", cred.Type)
+			return err
+		}
+		if transformErr != nil {
+			p.logger.Error("Responses API streaming: provider transform error after Responses transform",
+				"error", transformErr, "provider", cred.Type)
+		}
+		return transformErr
+	}
+
+	return p.handleTransformedStreaming(w, resp, cred.Name, modelID, string(cred.Type), transformer, logCtx)
 }
