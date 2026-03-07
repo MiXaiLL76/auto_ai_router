@@ -130,22 +130,30 @@ func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
 		logCtx.TokenUsage = &converter.TokenUsage{}
 	}
 
-	// Calculate cost based on model pricing and token usage
+	// Calculate cost based on model pricing and token usage.
+	// Try real model name first (from models[].model), then alias name.
 	var cost float64
 	if p.priceRegistry == nil {
 		p.logger.Warn("Price registry not available, using 0 cost for spend log")
 		cost = 0.0
 	} else {
-		// Try to get price for the model
-		modelPrice := p.priceRegistry.GetPrice(logCtx.ModelID)
+		priceModelID := logCtx.ModelID
+		if logCtx.RealModelID != "" && logCtx.RealModelID != logCtx.ModelID {
+			priceModelID = logCtx.RealModelID
+		}
+		modelPrice := p.priceRegistry.GetPrice(priceModelID)
+		if modelPrice == nil && priceModelID != logCtx.ModelID {
+			// Fallback: try alias name
+			modelPrice = p.priceRegistry.GetPrice(logCtx.ModelID)
+		}
 		if modelPrice == nil {
 			p.logger.Warn("Model price not found in registry, using 0 cost",
-				"model_name", logCtx.ModelID)
+				"model_name", priceModelID)
 			cost = 0.0
 		} else {
 			cost = modelPrice.CalculateCost(logCtx.TokenUsage)
 			p.logger.Debug("Calculated cost for model",
-				"model_name", logCtx.ModelID,
+				"model_name", priceModelID,
 				"cost", cost,
 				"prompt_tokens", logCtx.TokenUsage.PromptTokens,
 				"completion_tokens", logCtx.TokenUsage.CompletionTokens)

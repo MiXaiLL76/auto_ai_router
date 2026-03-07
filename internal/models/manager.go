@@ -128,7 +128,8 @@ type Manager struct {
 	allModels          []Model                  // deduplicated list of all models
 	modelToCredentials map[string][]string      // model ID -> list of credential names
 	modelLimits        map[string][]ModelLimits // model ID -> limits (may have multiple entries for different credentials)
-	modelAliases       map[string]string        // alias -> real model name
+	modelAliases       map[string]string        // alias -> real model name (from model_alias config)
+	modelRealNames     map[string]string        // alias name -> real model name (from models[].model field)
 	defaultModelsRPM   int                      // default RPM for models
 	logger             *slog.Logger
 	credentials        []config.CredentialConfig   // credentials for fetching remote models
@@ -145,6 +146,7 @@ func New(logger *slog.Logger, defaultModelsRPM int, staticModels []config.ModelR
 		modelToCredentials: make(map[string][]string),
 		modelLimits:        make(map[string][]ModelLimits),
 		modelAliases:       make(map[string]string),
+		modelRealNames:     make(map[string]string),
 		defaultModelsRPM:   defaultModelsRPM,
 		logger:             logger,
 		credentials:        make([]config.CredentialConfig, 0),
@@ -161,8 +163,14 @@ func New(logger *slog.Logger, defaultModelsRPM int, staticModels []config.ModelR
 				TPM:        staticModel.TPM,
 				Credential: staticModel.Credential,
 			})
+			// Register real model name mapping if Model field differs from Name
+			if staticModel.Model != "" && staticModel.Model != staticModel.Name {
+				m.modelRealNames[staticModel.Name] = staticModel.Model
+				logger.Debug("Registered model real name", "alias", staticModel.Name, "real", staticModel.Model)
+			}
 			logger.Debug("Added static model from config.yaml",
 				"model", staticModel.Name,
+				"real_model", staticModel.Model,
 				"credential", staticModel.Credential,
 				"rpm", staticModel.RPM,
 				"tpm", staticModel.TPM)
@@ -170,6 +178,17 @@ func New(logger *slog.Logger, defaultModelsRPM int, staticModels []config.ModelR
 	}
 
 	return m
+}
+
+// GetRealModelName returns the real model name for a given alias (from models[].model config).
+// Returns (alias, false) if no separate real name is configured.
+func (m *Manager) GetRealModelName(alias string) (string, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if real, ok := m.modelRealNames[alias]; ok {
+		return real, true
+	}
+	return alias, false
 }
 
 // SetCredentials sets the credentials for fetching remote models from proxies

@@ -47,7 +47,8 @@ type RequestLogContext struct {
 	StartTime            time.Time                // Request start time
 	Request              *http.Request            // HTTP request
 	Token                string                   // Auth token (raw, will be hashed)
-	ModelID              string                   // Model name
+	ModelID              string                   // Model alias name (what client requested)
+	RealModelID          string                   // Real model name sent to provider (for price lookup; equals ModelID if no alias)
 	Status               string                   // "success" or "failure"
 	HTTPStatus           int                      // HTTP response status code
 	ErrorMsg             string                   // Error message (added to metadata on failure)
@@ -336,9 +337,11 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 	logCtx.Request = r
 	body := prepared.body
 	modelID := prepared.modelID
+	realModelID := prepared.realModelID
 	streaming := prepared.streaming
 	cred := prepared.cred
 	logCtx.IsResponsesAPI = prepared.isResponsesAPI
+	logCtx.RealModelID = realModelID
 
 	// Log request details at DEBUG level
 	p.logger.Debug("Processing request",
@@ -471,7 +474,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 					Header:     proxyResp.Headers,
 					Body:       proxyResp.StreamBody,
 				}
-				err := p.handleResponsesAPIStreaming(w, fakeResp, cred, modelID, logCtx)
+				err := p.handleResponsesAPIStreaming(w, fakeResp, cred, realModelID, logCtx)
 				if err != nil {
 					p.logger.Error("Failed to handle proxy Responses API streaming", "error", err)
 				}
@@ -587,11 +590,13 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		transportErr = nil
 
 		// Create provider converter for this request
+		// Use realModelID for URL construction and body conversion (provider-facing name).
+		// modelID (alias) is used for credential selection and rate limiting.
 		conv = converter.New(cred.Type, converter.RequestMode{
 			IsImageGeneration: logCtx.IsImageGeneration,
 			IsEmbeddings:      isEmbeddings,
 			IsStreaming:       streaming,
-			ModelID:           modelID,
+			ModelID:           realModelID,
 		})
 
 		// Convert request body to provider format
@@ -946,7 +951,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			// For error responses (4xx/5xx), pass through the provider error as-is.
 			if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 				// Transform to Responses API SSE format
-				err := p.handleResponsesAPIStreaming(w, resp, cred, modelID, logCtx)
+				err := p.handleResponsesAPIStreaming(w, resp, cred, realModelID, logCtx)
 				if err != nil {
 					p.logger.Error("Failed to handle Responses API streaming", "error", err)
 					// Note: finalizeStreamingLog inside handleTransformedStreaming already
@@ -957,17 +962,17 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 				// Error response: stream using provider's native format instead
 				switch cred.Type {
 				case config.ProviderTypeVertexAI, config.ProviderTypeGemini:
-					err := p.handleVertexStreaming(w, resp, cred.Name, modelID, logCtx)
+					err := p.handleVertexStreaming(w, resp, cred.Name, realModelID, logCtx)
 					if err != nil {
 						p.logger.Error("Failed to handle vertex streaming response", "error", err)
 					}
 				case config.ProviderTypeAnthropic:
-					err := p.handleAnthropicStreaming(w, resp, cred.Name, modelID, logCtx)
+					err := p.handleAnthropicStreaming(w, resp, cred.Name, realModelID, logCtx)
 					if err != nil {
 						p.logger.Error("Failed to handle anthropic streaming response", "error", err)
 					}
 				case config.ProviderTypeBedrock:
-					err := p.handleBedrockStreaming(w, resp, cred.Name, modelID, logCtx)
+					err := p.handleBedrockStreaming(w, resp, cred.Name, realModelID, logCtx)
 					if err != nil {
 						p.logger.Error("Failed to handle bedrock streaming response", "error", err)
 					}
@@ -982,17 +987,17 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		} else {
 			switch cred.Type {
 			case config.ProviderTypeVertexAI, config.ProviderTypeGemini:
-				err := p.handleVertexStreaming(w, resp, cred.Name, modelID, logCtx)
+				err := p.handleVertexStreaming(w, resp, cred.Name, realModelID, logCtx)
 				if err != nil {
 					p.logger.Error("Failed to handle vertex streaming response", "error", err)
 				}
 			case config.ProviderTypeAnthropic:
-				err := p.handleAnthropicStreaming(w, resp, cred.Name, modelID, logCtx)
+				err := p.handleAnthropicStreaming(w, resp, cred.Name, realModelID, logCtx)
 				if err != nil {
 					p.logger.Error("Failed to handle anthropic streaming response", "error", err)
 				}
 			case config.ProviderTypeBedrock:
-				err := p.handleBedrockStreaming(w, resp, cred.Name, modelID, logCtx)
+				err := p.handleBedrockStreaming(w, resp, cred.Name, realModelID, logCtx)
 				if err != nil {
 					p.logger.Error("Failed to handle bedrock streaming response", "error", err)
 				}

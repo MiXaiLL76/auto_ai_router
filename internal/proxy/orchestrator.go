@@ -19,7 +19,8 @@ import (
 type orchestratedRequest struct {
 	request        *http.Request
 	body           []byte
-	modelID        string
+	modelID        string // alias name (for rate limiting, credential lookup, logging)
+	realModelID    string // real model name sent to provider (equals modelID if no alias configured)
 	streaming      bool
 	cred           *config.CredentialConfig
 	isResponsesAPI bool
@@ -40,7 +41,7 @@ func (p *Proxy) orchestrateRequest(
 		return nil, false
 	}
 
-	body, modelID, streaming, ok := p.readRequestBodyAndSelectModel(w, r, logCtx)
+	body, modelID, realModelID, streaming, ok := p.readRequestBodyAndSelectModel(w, r, logCtx)
 	if !ok {
 		return nil, false
 	}
@@ -98,6 +99,7 @@ func (p *Proxy) orchestrateRequest(
 		request:        r,
 		body:           body,
 		modelID:        modelID,
+		realModelID:    realModelID,
 		streaming:      streaming,
 		cred:           cred,
 		isResponsesAPI: isResponsesAPI,
@@ -206,7 +208,7 @@ func (p *Proxy) readRequestBodyAndSelectModel(
 	w http.ResponseWriter,
 	r *http.Request,
 	logCtx *RequestLogContext,
-) ([]byte, string, bool, bool) {
+) ([]byte, string, string, bool, bool) {
 	maxBodyBytes := int64(p.maxBodySizeMB) * 1024 * 1024
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxBodyBytes+1))
 	if err != nil {
@@ -215,7 +217,7 @@ func (p *Proxy) readRequestBodyAndSelectModel(
 		logCtx.HTTPStatus = http.StatusBadRequest
 		logCtx.ErrorMsg = "Failed to read request body: " + err.Error()
 		WriteErrorBadRequest(w, "Failed to read request body")
-		return nil, "", false, false
+		return nil, "", "", false, false
 	}
 	if closeErr := r.Body.Close(); closeErr != nil {
 		p.logger.Error("Failed to close request body", "error", closeErr)
@@ -229,7 +231,7 @@ func (p *Proxy) readRequestBodyAndSelectModel(
 		logCtx.HTTPStatus = http.StatusRequestEntityTooLarge
 		logCtx.ErrorMsg = "Request body too large"
 		WriteErrorTooLarge(w, "Request Entity Too Large")
-		return nil, "", false, false
+		return nil, "", "", false, false
 	}
 
 	modelID, streaming, sessionID, body := extractMetadataFromBody(body)
@@ -242,10 +244,10 @@ func (p *Proxy) readRequestBodyAndSelectModel(
 		logCtx.HTTPStatus = http.StatusBadRequest
 		logCtx.ErrorMsg = "Model not specified in request body"
 		WriteErrorBadRequest(w, "model field is required")
-		return nil, "", false, false
+		return nil, "", "", false, false
 	}
 
-	// Resolve model alias
+	// Resolve model_alias entries (changes modelID to real name; credential lookup uses real name)
 	if resolved, isAlias := p.modelManager.ResolveAlias(modelID); isAlias {
 		p.logger.Debug("Resolved model alias", "alias", modelID, "resolved", resolved)
 		body = openai.ReplaceModelInBody(body, modelID, resolved)
@@ -253,9 +255,18 @@ func (p *Proxy) readRequestBodyAndSelectModel(
 		logCtx.ModelID = modelID
 	}
 
+	// Resolve models[].model field: replace model in body for provider but keep alias as modelID
+	// for rate limiting and credential lookup.
+	realModelID := modelID
+	if realName, hasReal := p.modelManager.GetRealModelName(modelID); hasReal {
+		p.logger.Debug("Resolved model real name", "alias", modelID, "real", realName)
+		body = openai.ReplaceModelInBody(body, modelID, realName)
+		realModelID = realName
+	}
+
 	body = openai.ReplaceBodyParam(modelID, body)
 
-	return body, modelID, streaming, true
+	return body, modelID, realModelID, streaming, true
 }
 
 func (p *Proxy) selectCredentialForModel(
