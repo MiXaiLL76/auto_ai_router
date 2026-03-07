@@ -17,6 +17,7 @@ graph LR
         Vertex[Vertex AI]
         Anthropic[Anthropic]
         Gemini[Gemini]
+        Bedrock[Bedrock]
         Proxy[Proxy]
     end
 
@@ -25,6 +26,7 @@ graph LR
     Router --> Vertex
     Router --> Anthropic
     Router --> Gemini
+    Router --> Bedrock
     Router --> Proxy
 ```
 
