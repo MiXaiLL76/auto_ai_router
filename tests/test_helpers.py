@@ -12,7 +12,7 @@ class TestModels:
     # Anthropic models
     ANTHROPIC_MODELS = [
         # "claude-opus-4-1",
-        "global.anthropic.claude-sonnet-4-6",
+        "claude-sonnet-4-6",
     ]
 
     # OpenAI models

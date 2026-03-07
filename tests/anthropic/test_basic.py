@@ -5,7 +5,7 @@ Tests OpenAI -> Anthropic conversion and response handling
 
 import pytest
 from test_helpers import (
-    TestModels, ResponseValidator, ContentValidator, StreamingValidator
+    TestModels, ResponseValidator, ContentValidator
 )
 
 
