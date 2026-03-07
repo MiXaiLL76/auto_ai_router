@@ -60,3 +60,72 @@ func TestRecordSuccess_MarksHealthy(t *testing.T) {
 	assert.False(t, tracker.IsUnhealthy(proxyName), "proxy should not be unhealthy after success")
 	assert.Equal(t, 0, tracker.GetFailureCount(proxyName), "failure count should be reset to 0")
 }
+
+func TestGetFailedNames(t *testing.T) {
+	tracker := NewTracker()
+
+	// Two failed proxies
+	tracker.RecordFailure("proxy-a", errors.New("err"))
+	tracker.RecordFailure("proxy-b", errors.New("err"))
+	// One healthy proxy
+	tracker.RecordSuccess("proxy-c")
+
+	failed := tracker.GetFailedNames()
+	assert.Len(t, failed, 2)
+	assert.Contains(t, failed, "proxy-a")
+	assert.Contains(t, failed, "proxy-b")
+}
+
+func TestGetRecoveredNames(t *testing.T) {
+	tracker := NewTracker()
+
+	// Fail, then succeed → recovered
+	tracker.RecordFailure("proxy-a", errors.New("err"))
+	tracker.RecordSuccess("proxy-a")
+
+	// First call should return the recovered proxy
+	recovered := tracker.GetRecoveredNames()
+	assert.Len(t, recovered, 1)
+	assert.Contains(t, recovered, "proxy-a")
+
+	// Second call should return empty (consumed)
+	recovered2 := tracker.GetRecoveredNames()
+	assert.Empty(t, recovered2, "recovered should be consumed after first call")
+}
+
+func TestGetStatus_And_GetAllStatuses(t *testing.T) {
+	tracker := NewTracker()
+
+	// Setup 3 proxies in different states
+	tracker.RecordSuccess("proxy-healthy")
+	tracker.RecordFailure("proxy-failed", errors.New("err"))
+	tracker.RecordFailure("proxy-failed", errors.New("err")) // 2 failures
+	// proxy-unknown is not recorded at all
+
+	// GetStatus
+	healthy, failCount := tracker.GetStatus("proxy-healthy")
+	assert.True(t, healthy)
+	assert.Equal(t, 0, failCount)
+
+	healthy, failCount = tracker.GetStatus("proxy-failed")
+	assert.False(t, healthy)
+	assert.Equal(t, 2, failCount)
+
+	healthy, failCount = tracker.GetStatus("proxy-unknown")
+	assert.False(t, healthy) // no entry
+	assert.Equal(t, 0, failCount)
+
+	// GetAllStatuses
+	all := tracker.GetAllStatuses()
+	assert.True(t, all["proxy-healthy"])
+	assert.False(t, all["proxy-failed"])
+
+	// Verify it returns a copy (modifying snapshot doesn't affect tracker)
+	all["proxy-healthy"] = false
+	allAgain := tracker.GetAllStatuses()
+	assert.True(t, allAgain["proxy-healthy"], "original tracker should not be affected")
+
+	// ResetFailureCount
+	tracker.ResetFailureCount("proxy-failed")
+	assert.Equal(t, 0, tracker.GetFailureCount("proxy-failed"))
+}

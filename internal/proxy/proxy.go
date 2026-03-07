@@ -12,7 +12,6 @@ import (
 	"log/slog"
 	"math/rand"
 	"net/http"
-	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -22,6 +21,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/balancer"
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/converter"
+	"github.com/mixaill76/auto_ai_router/internal/converter/responses"
 	"github.com/mixaill76/auto_ai_router/internal/httputil"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb"
 	"github.com/mixaill76/auto_ai_router/internal/logger"
@@ -47,7 +47,8 @@ type RequestLogContext struct {
 	StartTime            time.Time                // Request start time
 	Request              *http.Request            // HTTP request
 	Token                string                   // Auth token (raw, will be hashed)
-	ModelID              string                   // Model name
+	ModelID              string                   // Model alias name (what client requested)
+	RealModelID          string                   // Real model name sent to provider (for price lookup; equals ModelID if no alias)
 	Status               string                   // "success" or "failure"
 	HTTPStatus           int                      // HTTP response status code
 	ErrorMsg             string                   // Error message (added to metadata on failure)
@@ -60,6 +61,7 @@ type RequestLogContext struct {
 	ImageCount           int                      // Number of images to generate (from 'n' param)
 	Logged               bool                     // True if already logged (prevents duplicate logging)
 	PromptTokensEstimate int                      // Estimated prompt tokens for streaming responses (since streaming doesn't provide prompt tokens in headers)
+	IsResponsesAPI       bool                     // True if this is a Responses API request (converted to Chat Completions)
 }
 
 // HealthChecker provides cached database health status
@@ -103,7 +105,7 @@ type Proxy struct {
 	tokenManager        *auth.VertexTokenManager
 	healthTemplate      *template.Template         // Cached template
 	modelManager        *models.Manager            // Model manager for getting configured models
-	litellmDB           litellmdb.Manager          // LiteLLM database integration
+	LiteLLMDB           litellmdb.Manager          // LiteLLM database integration
 	healthChecker       HealthChecker              // Cached DB health status (optional)
 	priceRegistry       *models.ModelPriceRegistry // Model pricing information (optional)
 	maxProviderRetries  int                        // Max same-type credential retries on provider errors
@@ -164,12 +166,17 @@ func New(cfg *Config) *Proxy {
 		tokenManager:        cfg.TokenManager,
 		healthTemplate:      tmpl,
 		modelManager:        cfg.ModelManager,
-		litellmDB:           cfg.LiteLLMDB,
+		LiteLLMDB:           cfg.LiteLLMDB,
 		healthChecker:       cfg.HealthChecker,
 		priceRegistry:       cfg.PriceRegistry,
 		maxProviderRetries:  cfg.MaxProviderRetries,
 		client:              httputil.NewHTTPClient(httpClientCfg),
 	}
+}
+
+// GetMasterKey returns the proxy master key.
+func (p *Proxy) GetMasterKey() string {
+	return p.masterKey
 }
 
 // ProxyResponse holds response details from a proxy credential
@@ -330,8 +337,11 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 	logCtx.Request = r
 	body := prepared.body
 	modelID := prepared.modelID
+	realModelID := prepared.realModelID
 	streaming := prepared.streaming
 	cred := prepared.cred
+	logCtx.IsResponsesAPI = prepared.isResponsesAPI
+	logCtx.RealModelID = realModelID
 
 	// Log request details at DEBUG level
 	p.logger.Debug("Processing request",
@@ -435,7 +445,11 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			logCtx.HTTPStatus = statusCode
 			logCtx.ErrorMsg = errorMsg
 			logCtx.TargetURL = cred.BaseURL
-			http.Error(w, statusMessage, statusCode)
+			if statusCode == http.StatusRequestTimeout {
+				WriteErrorTimeout(w, statusMessage)
+			} else {
+				WriteErrorBadGateway(w, statusMessage)
+			}
 			return
 		}
 
@@ -443,20 +457,53 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		if proxyResp.IsStreaming {
 			p.logger.Debug("Response is streaming (no retry for streaming)",
 				"credential", cred.Name, "status", proxyResp.StatusCode)
-			totalTokens, err := p.writeProxyStreamingResponseWithTokens(w, proxyResp, r, cred.Name)
-			if err != nil {
-				p.logger.Error("Failed to write streaming proxy response",
-					"credential", cred.Name, "error", err)
-			}
-			if totalTokens > 0 {
-				p.rateLimiter.ConsumeTokens(cred.Name, totalTokens)
-				if modelID != "" {
-					p.rateLimiter.ConsumeModelTokens(cred.Name, modelID, totalTokens)
+
+			if prepared.convertedResp {
+				// Proxy streaming + Responses API: need to convert Chat Completions SSE
+				// to Responses API SSE. Wrap StreamBody in http.Response for handleResponsesAPIStreaming.
+				defer func() {
+					if closeErr := proxyResp.StreamBody.Close(); closeErr != nil {
+						p.logger.Error("Failed to close proxy streaming response body", "error", closeErr)
+					}
+				}()
+				copyResponseHeaders(w, proxyResp.Headers, cred.Type)
+				w.WriteHeader(proxyResp.StatusCode)
+				logCtx.PromptTokensEstimate = estimatePromptTokens(body)
+				fakeResp := &http.Response{
+					StatusCode: proxyResp.StatusCode,
+					Header:     proxyResp.Headers,
+					Body:       proxyResp.StreamBody,
 				}
-				p.logger.Debug("Proxy streaming token usage recorded",
-					"credential", cred.Name, "model", modelID, "tokens", totalTokens)
+				err := p.handleResponsesAPIStreaming(w, fakeResp, cred, realModelID, logCtx)
+				if err != nil {
+					p.logger.Error("Failed to handle proxy Responses API streaming", "error", err)
+				}
+			} else {
+				totalTokens, err := p.writeProxyStreamingResponseWithTokens(w, proxyResp, r, cred.Name)
+				if err != nil {
+					p.logger.Error("Failed to write streaming proxy response",
+						"credential", cred.Name, "error", err)
+				}
+				if totalTokens > 0 {
+					p.rateLimiter.ConsumeTokens(cred.Name, totalTokens)
+					if modelID != "" {
+						p.rateLimiter.ConsumeModelTokens(cred.Name, modelID, totalTokens)
+					}
+					p.logger.Debug("Proxy streaming token usage recorded",
+						"credential", cred.Name, "model", modelID, "tokens", totalTokens)
+				}
 			}
 		} else {
+			// Convert proxy response back to Responses API format if needed
+			if prepared.convertedResp && proxyResp.StatusCode >= 200 && proxyResp.StatusCode < 300 {
+				responsesBody, convErr := responses.ChatToResponse(proxyResp.Body)
+				if convErr != nil {
+					p.logger.Error("Failed to convert proxy response to Responses API format", "error", convErr)
+				} else {
+					proxyResp.Body = responsesBody
+				}
+			}
+
 			p.writeProxyResponse(w, proxyResp, r)
 			tokens := extractTokensFromResponse(string(proxyResp.Body), config.ProviderTypeOpenAI)
 			if tokens > 0 {
@@ -481,7 +528,8 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 
 	// === Direct provider path with same-type credential retry ===
 
-	// Track image generation request and extract image count (once, before retry loop)
+	// Track embeddings and image generation requests (once, before retry loop)
+	isEmbeddings := strings.Contains(r.URL.Path, "/embeddings")
 	logCtx.IsImageGeneration = strings.Contains(r.URL.Path, "/images/generations")
 	if logCtx.IsImageGeneration {
 		var imgReq struct {
@@ -542,10 +590,13 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		transportErr = nil
 
 		// Create provider converter for this request
+		// Use realModelID for URL construction and body conversion (provider-facing name).
+		// modelID (alias) is used for credential selection and rate limiting.
 		conv = converter.New(cred.Type, converter.RequestMode{
 			IsImageGeneration: logCtx.IsImageGeneration,
+			IsEmbeddings:      isEmbeddings,
 			IsStreaming:       streaming,
-			ModelID:           modelID,
+			ModelID:           realModelID,
 		})
 
 		// Convert request body to provider format
@@ -558,7 +609,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			logCtx.HTTPStatus = http.StatusInternalServerError
 			logCtx.ErrorMsg = fmt.Sprintf("Request conversion failed: %v", convErr)
 			logCtx.TargetURL = cred.BaseURL
-			http.Error(w, "Internal Server Error: Failed to convert request", http.StatusInternalServerError)
+			WriteErrorInternal(w, "Failed to convert request")
 			return
 		}
 
@@ -608,7 +659,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			logCtx.HTTPStatus = http.StatusInternalServerError
 			logCtx.ErrorMsg = fmt.Sprintf("Failed to create request: %v", reqErr)
 			logCtx.TargetURL = targetURL
-			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+			WriteErrorInternal(w, "Internal Server Error")
 			return
 		}
 
@@ -622,6 +673,8 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		case config.ProviderTypeAnthropic:
 			proxyReq.Header.Set("X-Api-Key", cred.APIKey)
 			proxyReq.Header.Set("anthropic-version", "2023-06-01")
+		case config.ProviderTypeBedrock:
+			proxyReq.Header.Set("Authorization", "Bearer "+cred.APIKey)
 		default:
 			proxyReq.Header.Set("Authorization", "Bearer "+cred.APIKey)
 		}
@@ -707,7 +760,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 				logCtx.HTTPStatus = http.StatusBadGateway
 				logCtx.ErrorMsg = fmt.Sprintf("Failed to read response body: %v", readErr)
 				logCtx.TargetURL = targetURL
-				http.Error(w, "Bad Gateway: upstream response too large", http.StatusBadGateway)
+				WriteErrorBadGateway(w, "upstream response too large")
 				return
 			}
 			// Transport error reading body — retryable with another credential
@@ -772,7 +825,11 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		logCtx.HTTPStatus = statusCode
 		logCtx.ErrorMsg = "All provider attempts failed"
 		logCtx.TargetURL = targetURL
-		http.Error(w, statusMessage, statusCode)
+		if statusCode == http.StatusRequestTimeout {
+			WriteErrorTimeout(w, statusMessage)
+		} else {
+			WriteErrorBadGateway(w, statusMessage)
+		}
 		return
 	}
 
@@ -807,11 +864,23 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			finalResponseBody = []byte(decodedBody)
 		}
 
-		// Extract and record token usage (after transformation to OpenAI format)
+		// Extract token usage BEFORE Responses API conversion (from Chat Completions format)
 		bodyForTokenExtraction := finalResponseBody
 		if len(bodyForTokenExtraction) == 0 {
 			bodyForTokenExtraction = []byte(decodedBody)
 		}
+
+		// Convert to Responses API format only if the request was converted to Chat Completions
+		if prepared.convertedResp && resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			responsesBody, convErr := responses.ChatToResponse(finalResponseBody)
+			if convErr != nil {
+				p.logger.Error("Failed to convert to Responses API format", "error", convErr)
+				// fallback: use Chat Completions body
+			} else {
+				finalResponseBody = responsesBody
+			}
+		}
+
 		tokens := extractTokensFromResponse(string(bodyForTokenExtraction), config.ProviderTypeOpenAI)
 		if tokens > 0 {
 			p.rateLimiter.ConsumeTokens(cred.Name, tokens)
@@ -869,30 +938,74 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 				"request_id", logCtx.RequestID)
 		}
 
-		switch cred.Type {
-		case config.ProviderTypeVertexAI, config.ProviderTypeGemini:
-			err := p.handleVertexStreaming(w, resp, cred.Name, modelID, logCtx)
-			if err != nil {
-				p.logger.Error("Failed to vertex streaming response", "error", err)
-				logCtx.Status = "failure"
-				logCtx.ErrorMsg = fmt.Sprintf("Vertex streaming error: %v", err)
-				logCtx.Logged = false
+		p.logger.Debug("Streaming handler selection",
+			"is_responses_api", prepared.isResponsesAPI,
+			"converted_resp", prepared.convertedResp,
+			"provider", cred.Type,
+			"model", modelID,
+			"resp_content_type", resp.Header.Get("Content-Type"),
+			"resp_status", resp.StatusCode)
+
+		if prepared.convertedResp {
+			// For Responses API: only transform successful responses (2xx status).
+			// For error responses (4xx/5xx), pass through the provider error as-is.
+			if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+				// Transform to Responses API SSE format
+				err := p.handleResponsesAPIStreaming(w, resp, cred, realModelID, logCtx)
+				if err != nil {
+					p.logger.Error("Failed to handle Responses API streaming", "error", err)
+					// Note: finalizeStreamingLog inside handleTransformedStreaming already
+					// logged the spend. We only update error metadata here for the defer
+					// safety net, but don't reset Logged to avoid double logging.
+				}
+			} else {
+				// Error response: stream using provider's native format instead
+				switch cred.Type {
+				case config.ProviderTypeVertexAI, config.ProviderTypeGemini:
+					err := p.handleVertexStreaming(w, resp, cred.Name, realModelID, logCtx)
+					if err != nil {
+						p.logger.Error("Failed to handle vertex streaming response", "error", err)
+					}
+				case config.ProviderTypeAnthropic:
+					err := p.handleAnthropicStreaming(w, resp, cred.Name, realModelID, logCtx)
+					if err != nil {
+						p.logger.Error("Failed to handle anthropic streaming response", "error", err)
+					}
+				case config.ProviderTypeBedrock:
+					err := p.handleBedrockStreaming(w, resp, cred.Name, realModelID, logCtx)
+					if err != nil {
+						p.logger.Error("Failed to handle bedrock streaming response", "error", err)
+					}
+				default:
+					// For passthrough providers, stream error as-is
+					err := p.handleStreamingWithTokens(w, resp, cred.Name, modelID, logCtx)
+					if err != nil {
+						p.logger.Error("Failed to handle streaming response", "error", err)
+					}
+				}
 			}
-		case config.ProviderTypeAnthropic:
-			err := p.handleAnthropicStreaming(w, resp, cred.Name, modelID, logCtx)
-			if err != nil {
-				p.logger.Error("Failed to vertex streaming response", "error", err)
-				logCtx.Status = "failure"
-				logCtx.ErrorMsg = fmt.Sprintf("Anthropic streaming error: %v", err)
-				logCtx.Logged = false
-			}
-		default:
-			err := p.handleStreamingWithTokens(w, resp, cred.Name, modelID, logCtx)
-			if err != nil {
-				p.logger.Error("Failed to handle streaming response", "error", err)
-				logCtx.Status = "failure"
-				logCtx.ErrorMsg = fmt.Sprintf("Streaming error: %v", err)
-				logCtx.Logged = false
+		} else {
+			switch cred.Type {
+			case config.ProviderTypeVertexAI, config.ProviderTypeGemini:
+				err := p.handleVertexStreaming(w, resp, cred.Name, realModelID, logCtx)
+				if err != nil {
+					p.logger.Error("Failed to handle vertex streaming response", "error", err)
+				}
+			case config.ProviderTypeAnthropic:
+				err := p.handleAnthropicStreaming(w, resp, cred.Name, realModelID, logCtx)
+				if err != nil {
+					p.logger.Error("Failed to handle anthropic streaming response", "error", err)
+				}
+			case config.ProviderTypeBedrock:
+				err := p.handleBedrockStreaming(w, resp, cred.Name, realModelID, logCtx)
+				if err != nil {
+					p.logger.Error("Failed to handle bedrock streaming response", "error", err)
+				}
+			default:
+				err := p.handleStreamingWithTokens(w, resp, cred.Name, modelID, logCtx)
+				if err != nil {
+					p.logger.Error("Failed to handle streaming response", "error", err)
+				}
 			}
 		}
 
@@ -966,182 +1079,4 @@ func (p *Proxy) streamResponseBody(w io.Writer, reader io.Reader) (int64, error)
 	buf := streamBufPool.Get().(*[]byte)
 	defer streamBufPool.Put(buf)
 	return io.CopyBuffer(w, reader, *buf)
-}
-
-// logTransformedResponse logs a transformed response at debug level
-func (p *Proxy) logTransformedResponse(credName, providerName string, body []byte) {
-	if p.logger.Enabled(context.Background(), slog.LevelDebug) {
-		p.logger.Debug("Transformed response to OpenAI format",
-			"credential", credName,
-			"provider", providerName,
-			"body", logger.TruncateLongFields(string(body), 500),
-		)
-	}
-}
-
-type tokenCapturingWriter struct {
-	writer  io.Writer
-	tokens  *int
-	logger  *slog.Logger
-	onChunk func([]byte) // Callback invoked for each chunk (optional, for capturing last chunk)
-}
-
-func (tcw *tokenCapturingWriter) Write(p []byte) (n int, err error) {
-	// Extract tokens from the data being written
-	tokens := extractTokensFromStreamingChunk(string(p))
-	if tokens > 0 {
-		*tcw.tokens += tokens
-	}
-
-	// Invoke callback if provided (used to capture last chunk for usage extraction)
-	if tcw.onChunk != nil {
-		tcw.onChunk(p)
-	}
-
-	return tcw.writer.Write(p)
-}
-
-// ==================== LiteLLM DB Integration ====================
-// handleLiteLLMAuthError handles LiteLLM authentication errors
-// Returns true if error was handled and response was written
-func (p *Proxy) handleLiteLLMAuthError(w http.ResponseWriter, err error, token string) bool {
-	// Map error types to HTTP status and message
-	errorMap := map[error]struct {
-		status  int
-		message string
-		logMsg  string
-	}{
-		litellmdb.ErrTokenNotFound:  {http.StatusUnauthorized, "Invalid token", "Token not found"},
-		litellmdb.ErrTokenBlocked:   {http.StatusForbidden, "Token blocked", "Token blocked"},
-		litellmdb.ErrTokenExpired:   {http.StatusUnauthorized, "Token expired", "Token expired"},
-		litellmdb.ErrBudgetExceeded: {http.StatusPaymentRequired, "Budget exceeded", "Budget exceeded"},
-	}
-
-	// Check for connection failure first (requires fallback, not an error response)
-	if errors.Is(err, litellmdb.ErrConnectionFailed) {
-		return false
-	}
-
-	// Check for known auth errors
-	for errType, info := range errorMap {
-		if errors.Is(err, errType) {
-			p.logger.Error(info.logMsg, "token_prefix", security.MaskAPIKey(token))
-			http.Error(w, "Unauthorized: "+info.message, info.status)
-			return true
-		}
-	}
-
-	// Unknown error
-	p.logger.Error("Auth error", "error", err, "token_prefix", security.MaskAPIKey(token))
-	http.Error(w, "Internal Server Error", http.StatusInternalServerError)
-	return true
-}
-
-// logSpendToLiteLLMDB logs request to LiteLLM_SpendLogs table
-// Returns error if the log entry cannot be queued (e.g., queue full)
-func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
-	if p.litellmDB == nil || !p.litellmDB.IsEnabled() {
-		return nil
-	}
-
-	if logCtx == nil || logCtx.Credential == nil || logCtx.Request == nil {
-		return nil
-	}
-
-	// Fallback to request ID if session ID not provided
-	if logCtx.SessionID == "" {
-		logCtx.SessionID = logCtx.RequestID
-	}
-
-	// Build model_id as credential.name:model_name
-	modelIDFormatted := logCtx.Credential.Name + ":" + logCtx.ModelID
-	hashedToken := litellmdb.HashToken(logCtx.Token)
-
-	// Extract user info from tokenInfo (or use empty strings as fallback)
-	var userID, teamID, organizationID string
-	if logCtx.TokenInfo != nil {
-		userID = logCtx.TokenInfo.UserID
-		teamID = logCtx.TokenInfo.TeamID
-		organizationID = logCtx.TokenInfo.OrganizationID
-	}
-
-	// Build metadata with optional alias fields from tokenInfo
-	// Add error field if request failed
-	metadata := buildMetadata(hashedToken, logCtx.TokenInfo, logCtx.ErrorMsg, logCtx.HTTPStatus)
-
-	// Determine end user - prefer user email from tokenInfo
-	endUser := extractEndUser(logCtx.Request)
-	if logCtx.TokenInfo != nil && logCtx.TokenInfo.UserEmail != "" {
-		endUser = logCtx.TokenInfo.UserEmail
-	}
-
-	// Extract domain from targetURL for APIBase (e.g., "https://api.openai.com/..." -> "api.openai.com")
-	apiBase := "auto_ai_router"
-	if logCtx.TargetURL != "" {
-		if u, err := url.Parse(logCtx.TargetURL); err == nil && u.Host != "" {
-			apiBase = u.Host
-		}
-	}
-
-	// Determine final status if not explicitly set
-	status := logCtx.Status
-	if status == "" {
-		if logCtx.HTTPStatus >= 400 {
-			status = "failure"
-		} else {
-			status = "success"
-		}
-	}
-
-	// Ensure TokenUsage is not nil to prevent nil pointer dereference
-	if logCtx.TokenUsage == nil {
-		logCtx.TokenUsage = &converter.TokenUsage{}
-	}
-
-	// Calculate cost based on model pricing and token usage
-	var cost float64
-	if p.priceRegistry == nil {
-		p.logger.Warn("Price registry not available, using 0 cost for spend log")
-		cost = 0.0
-	} else {
-		// Try to get price for the model
-		modelPrice := p.priceRegistry.GetPrice(logCtx.ModelID)
-		if modelPrice == nil {
-			p.logger.Warn("Model price not found in registry, using 0 cost",
-				"model_name", logCtx.ModelID)
-			cost = 0.0
-		} else {
-			cost = modelPrice.CalculateCost(logCtx.TokenUsage)
-			p.logger.Debug("Calculated cost for model",
-				"model_name", logCtx.ModelID,
-				"cost", cost,
-				"prompt_tokens", logCtx.TokenUsage.PromptTokens,
-				"completion_tokens", logCtx.TokenUsage.CompletionTokens)
-		}
-	}
-
-	return p.litellmDB.LogSpend(&litellmdb.SpendLogEntry{
-		RequestID:         logCtx.RequestID,
-		StartTime:         logCtx.StartTime,
-		EndTime:           utils.NowUTC(),
-		CallType:          logCtx.Request.URL.Path,
-		APIBase:           apiBase,
-		Model:             logCtx.ModelID,                                               // Model name
-		ModelID:           modelIDFormatted,                                             // credential.name:model_name
-		ModelGroup:        logCtx.ModelID,                                               // Model name
-		CustomLLMProvider: strings.Replace(string(logCtx.Credential.Type), "-", "_", 1), // Provider type as string
-		PromptTokens:      logCtx.TokenUsage.PromptTokens,
-		CompletionTokens:  logCtx.TokenUsage.CompletionTokens,
-		TotalTokens:       logCtx.TokenUsage.Total(),
-		Metadata:          metadata,
-		Spend:             cost, // Calculated cost based on model pricing and token usage
-		APIKey:            hashedToken,
-		UserID:            userID,
-		TeamID:            teamID,
-		OrganizationID:    organizationID,
-		EndUser:           endUser,
-		RequesterIP:       getClientIP(logCtx.Request),
-		Status:            status,
-		SessionID:         logCtx.SessionID,
-	})
 }

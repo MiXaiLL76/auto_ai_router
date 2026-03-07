@@ -23,13 +23,14 @@ const (
 	ProviderTypeVertexAI  ProviderType = "vertex-ai"
 	ProviderTypeGemini    ProviderType = "gemini"
 	ProviderTypeAnthropic ProviderType = "anthropic"
+	ProviderTypeBedrock   ProviderType = "bedrock"
 	ProviderTypeProxy     ProviderType = "proxy"
 )
 
 // IsValid checks if the provider type is valid
 func (p ProviderType) IsValid() bool {
 	switch p {
-	case ProviderTypeOpenAI, ProviderTypeVertexAI, ProviderTypeGemini, ProviderTypeAnthropic, ProviderTypeProxy:
+	case ProviderTypeOpenAI, ProviderTypeVertexAI, ProviderTypeGemini, ProviderTypeAnthropic, ProviderTypeBedrock, ProviderTypeProxy:
 		return true
 	}
 	return false
@@ -38,6 +39,7 @@ func (p ProviderType) IsValid() bool {
 // ModelRPMConfig represents RPM and TPM limits for a specific model
 type ModelRPMConfig struct {
 	Name       string `yaml:"name"`
+	Model      string `yaml:"model,omitempty"` // Real model name sent to provider (alias for Name if different)
 	RPM        int    `yaml:"rpm"`
 	TPM        int    `yaml:"tpm"`
 	Credential string `yaml:"credential,omitempty"` // If set, model is only available for this credential
@@ -556,7 +558,7 @@ func (c *Config) Validate() error {
 
 		// Validate provider type
 		if !cred.Type.IsValid() {
-			return fmt.Errorf("credential %s: invalid type: %s (must be 'openai', 'vertex-ai', 'gemini', 'anthropic', or 'proxy')", cred.Name, cred.Type)
+			return fmt.Errorf("credential %s: invalid type: %s (must be 'openai', 'vertex-ai', 'gemini', 'anthropic', 'bedrock', or 'proxy')", cred.Name, cred.Type)
 		}
 
 		// Validate by provider type

@@ -11,18 +11,19 @@ class TestModels:
 
     # Anthropic models
     ANTHROPIC_MODELS = [
-        "claude-opus-4-1",
+        # "claude-opus-4-1",
+        "claude-sonnet-4-6",
     ]
 
     # OpenAI models
     OPENAI_MODELS = [
         "gpt-4o-mini",
+        # "gpt-5-mini",
     ]
 
     # Google Vertex AI models
     VERTEX_MODELS = [
         "gemini-2.5-flash",
-        # "gemini-2.5-pro",
     ]
 
     # Vertex AI Image models
@@ -32,8 +33,11 @@ class TestModels:
     ]
 
     # Embedding models
-    EMBEDDING_MODELS = [
+    OPENAI_EMBEDDING_MODELS = [
         "text-embedding-3-small",
+    ]
+    VERTEX_EMBEDDING_MODELS = [
+        "gemini-embedding-001",
     ]
 
     # Image generation models
@@ -79,7 +83,8 @@ class ResponseValidator:
         assert len(response.data) == expected_count
         assert len(response.data[0].embedding) > 0
         assert hasattr(response, 'usage')
-        assert response.usage.total_tokens > 0
+        # Some providers (e.g. Gemini API) don't return token counts for embeddings
+        assert response.usage.total_tokens >= 0
 
 
 class ContentValidator:

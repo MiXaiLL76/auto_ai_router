@@ -14,6 +14,7 @@ import (
 // RequestMode holds context parameters for a conversion session.
 type RequestMode struct {
 	IsImageGeneration bool   // true for /images/generations requests
+	IsEmbeddings      bool   // true for /embeddings requests
 	IsStreaming       bool   // true for streaming (stream: true) requests
 	ModelID           string // e.g. "gemini-2.0-flash", "claude-opus-4-5"
 }
@@ -36,6 +37,22 @@ func New(providerType config.ProviderType, mode RequestMode) *ProviderConverter 
 // RequestFrom converts an OpenAI-format request body to the provider-specific format.
 // Returns the original body unchanged for OpenAI-compatible providers (passthrough).
 func (c *ProviderConverter) RequestFrom(body []byte) ([]byte, error) {
+	// Handle embeddings requests
+	if c.mode.IsEmbeddings {
+		switch c.providerType {
+		case config.ProviderTypeVertexAI:
+			return vertex.OpenAIEmbeddingToVertex(body)
+		case config.ProviderTypeGemini:
+			return vertex.OpenAIEmbeddingToGemini(body, c.mode.ModelID)
+		case config.ProviderTypeAnthropic:
+			return nil, errors.New("anthropic does not support embeddings")
+		case config.ProviderTypeBedrock:
+			return nil, errors.New("bedrock does not support embeddings")
+		default:
+			return body, nil
+		}
+	}
+
 	switch c.providerType {
 	case config.ProviderTypeVertexAI, config.ProviderTypeGemini:
 		return vertex.OpenAIToVertex(body, c.mode.IsImageGeneration, c.mode.ModelID)
@@ -45,6 +62,11 @@ func (c *ProviderConverter) RequestFrom(body []byte) ([]byte, error) {
 			return nil, errors.New("anthropic does not support image generation")
 		}
 		return anthropic.OpenAIToAnthropic(body, c.mode.ModelID)
+	case config.ProviderTypeBedrock:
+		if c.mode.IsImageGeneration {
+			return nil, errors.New("bedrock does not support image generation")
+		}
+		return anthropic.OpenAIToBedrock(body, c.mode.ModelID)
 	default:
 		// ProviderTypeOpenAI, ProviderTypeProxy, and others: pass through unchanged
 		return body, nil
@@ -54,6 +76,18 @@ func (c *ProviderConverter) RequestFrom(body []byte) ([]byte, error) {
 // ResponseTo converts a provider-specific response body to OpenAI format.
 // Returns the original body unchanged for OpenAI-compatible providers (passthrough).
 func (c *ProviderConverter) ResponseTo(body []byte) ([]byte, error) {
+	// Handle embeddings responses
+	if c.mode.IsEmbeddings {
+		switch c.providerType {
+		case config.ProviderTypeVertexAI:
+			return vertex.VertexEmbeddingToOpenAI(body, c.mode.ModelID)
+		case config.ProviderTypeGemini:
+			return vertex.GeminiEmbeddingToOpenAI(body, c.mode.ModelID)
+		default:
+			return body, nil
+		}
+	}
+
 	switch c.providerType {
 	case config.ProviderTypeVertexAI, config.ProviderTypeGemini:
 		if c.mode.IsImageGeneration {
@@ -65,7 +99,7 @@ func (c *ProviderConverter) ResponseTo(body []byte) ([]byte, error) {
 			return vertex.VertexImageToOpenAI(body)
 		}
 		return vertex.VertexToOpenAI(body, c.mode.ModelID)
-	case config.ProviderTypeAnthropic:
+	case config.ProviderTypeAnthropic, config.ProviderTypeBedrock:
 		return anthropic.AnthropicToOpenAI(body, c.mode.ModelID)
 	default:
 		return body, nil
@@ -80,6 +114,14 @@ func (c *ProviderConverter) StreamTo(reader io.Reader, writer io.Writer) error {
 		return vertex.TransformVertexStreamToOpenAI(reader, c.mode.ModelID, writer)
 	case config.ProviderTypeAnthropic:
 		return anthropic.TransformAnthropicStreamToOpenAI(reader, c.mode.ModelID, writer)
+	case config.ProviderTypeBedrock:
+		// Bedrock uses AWS Event Stream binary framing instead of SSE.
+		// Decode to SSE first, then pass through the Anthropic converter.
+		pr, pw := io.Pipe()
+		go func() {
+			pw.CloseWithError(DecodeEventStreamToSSE(reader, pw))
+		}()
+		return anthropic.TransformAnthropicStreamToOpenAI(pr, c.mode.ModelID, writer)
 	default:
 		_, err := io.Copy(writer, reader)
 		return err
@@ -89,6 +131,18 @@ func (c *ProviderConverter) StreamTo(reader io.Reader, writer io.Writer) error {
 // BuildURL constructs the upstream target URL for this provider and credential.
 // Returns empty string for providers where URL construction is handled externally.
 func (c *ProviderConverter) BuildURL(cred *config.CredentialConfig) string {
+	// Handle embeddings URLs
+	if c.mode.IsEmbeddings {
+		switch c.providerType {
+		case config.ProviderTypeVertexAI:
+			return vertex.BuildVertexEmbeddingURL(cred, c.mode.ModelID)
+		case config.ProviderTypeGemini:
+			return vertex.BuildGeminiEmbeddingURL(cred, c.mode.ModelID)
+		default:
+			return ""
+		}
+	}
+
 	switch c.providerType {
 	case config.ProviderTypeVertexAI:
 		if c.mode.IsImageGeneration && !strings.Contains(strings.ToLower(c.mode.ModelID), "gemini") {
@@ -100,6 +154,12 @@ func (c *ProviderConverter) BuildURL(cred *config.CredentialConfig) string {
 	case config.ProviderTypeAnthropic:
 		baseURL := strings.TrimSuffix(cred.BaseURL, "/")
 		return baseURL + "/v1/messages"
+	case config.ProviderTypeBedrock:
+		baseURL := strings.TrimSuffix(cred.BaseURL, "/")
+		if c.mode.IsStreaming {
+			return baseURL + "/model/" + c.mode.ModelID + "/invoke-with-response-stream"
+		}
+		return baseURL + "/model/" + c.mode.ModelID + "/invoke"
 	default:
 		// OpenAI and Proxy: URL constructed by proxy based on cred.BaseURL + path
 		return ""
@@ -144,7 +204,7 @@ func ExtractTokenUsage(body []byte) *TokenUsage {
 
 	var resp struct {
 		Usage struct {
-			// Chat completion format
+			// Chat Completions format
 			PromptTokens        int `json:"prompt_tokens"`
 			CompletionTokens    int `json:"completion_tokens"`
 			PromptTokensDetails struct {
@@ -158,13 +218,19 @@ func ExtractTokenUsage(body []byte) *TokenUsage {
 				AudioTokens              int `json:"audio_tokens,omitempty"`
 				ReasoningTokens          int `json:"reasoning_tokens,omitempty"`
 			} `json:"completion_tokens_details,omitempty"`
-			// Image generation format
+			// Responses API / Image generation format (input_tokens/output_tokens)
 			InputTokens        int `json:"input_tokens"`
 			OutputTokens       int `json:"output_tokens"`
 			InputTokensDetails struct {
-				ImageTokens int `json:"image_tokens,omitempty"`
-				TextTokens  int `json:"text_tokens,omitempty"`
+				CachedTokens int `json:"cached_tokens,omitempty"`
+				ImageTokens  int `json:"image_tokens,omitempty"`
+				TextTokens   int `json:"text_tokens,omitempty"`
+				AudioTokens  int `json:"audio_tokens,omitempty"`
 			} `json:"input_tokens_details,omitempty"`
+			OutputTokensDetails struct {
+				AudioTokens     int `json:"audio_tokens,omitempty"`
+				ReasoningTokens int `json:"reasoning_tokens,omitempty"`
+			} `json:"output_tokens_details,omitempty"`
 		} `json:"usage"`
 	}
 
@@ -172,7 +238,7 @@ func ExtractTokenUsage(body []byte) *TokenUsage {
 		return nil
 	}
 
-	// Prefer chat completion tokens; fall back to image generation tokens
+	// Prefer Chat Completions tokens; fall back to Responses API / image tokens
 	promptTokens := resp.Usage.PromptTokens
 	if promptTokens == 0 {
 		promptTokens = resp.Usage.InputTokens
@@ -186,15 +252,34 @@ func ExtractTokenUsage(body []byte) *TokenUsage {
 		return nil
 	}
 
+	// Merge detail fields: Chat Completions uses completion_tokens_details,
+	// Responses API uses output_tokens_details. Pick whichever is populated.
+	cachedTokens := resp.Usage.PromptTokensDetails.CachedTokens
+	if cachedTokens == 0 {
+		cachedTokens = resp.Usage.InputTokensDetails.CachedTokens
+	}
+	audioIn := resp.Usage.PromptTokensDetails.AudioTokens
+	if audioIn == 0 {
+		audioIn = resp.Usage.InputTokensDetails.AudioTokens
+	}
+	audioOut := resp.Usage.CompletionTokensDetails.AudioTokens
+	if audioOut == 0 {
+		audioOut = resp.Usage.OutputTokensDetails.AudioTokens
+	}
+	reasoning := resp.Usage.CompletionTokensDetails.ReasoningTokens
+	if reasoning == 0 {
+		reasoning = resp.Usage.OutputTokensDetails.ReasoningTokens
+	}
+
 	return &TokenUsage{
 		PromptTokens:             promptTokens,
 		CompletionTokens:         completionTokens,
-		CachedInputTokens:        resp.Usage.PromptTokensDetails.CachedTokens,
-		AudioInputTokens:         resp.Usage.PromptTokensDetails.AudioTokens,
+		CachedInputTokens:        cachedTokens,
+		AudioInputTokens:         audioIn,
 		ImageTokens:              resp.Usage.InputTokensDetails.ImageTokens,
 		AcceptedPredictionTokens: resp.Usage.CompletionTokensDetails.AcceptedPredictionTokens,
 		RejectedPredictionTokens: resp.Usage.CompletionTokensDetails.RejectedPredictionTokens,
-		AudioOutputTokens:        resp.Usage.CompletionTokensDetails.AudioTokens,
-		ReasoningTokens:          resp.Usage.CompletionTokensDetails.ReasoningTokens,
+		AudioOutputTokens:        audioOut,
+		ReasoningTokens:          reasoning,
 	}
 }

@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/stretchr/testify/assert"
@@ -645,6 +646,74 @@ func TestSetModelAliases_Overwrite(t *testing.T) {
 
 // TestGetRemoteModels_CacheExpiryRace tests concurrent access to GetRemoteModels with cache expiry
 // This test is designed to catch TOCTOU race conditions when cache expires
+func TestNewModelPriceRegistry(t *testing.T) {
+	registry := NewModelPriceRegistry()
+
+	assert.NotNil(t, registry)
+	assert.Equal(t, 0, registry.Count())
+	assert.True(t, registry.LastUpdate().IsZero(), "LastUpdate should be zero for a new registry")
+}
+
+func TestModelPriceRegistry_UpdateAndGetPrice(t *testing.T) {
+	registry := NewModelPriceRegistry()
+
+	prices := map[string]*ModelPrice{
+		"gpt-4": {
+			InputCostPerToken:  0.00003,
+			OutputCostPerToken: 0.00006,
+		},
+		"claude-3-opus": {
+			InputCostPerToken:  0.000015,
+			OutputCostPerToken: 0.000075,
+		},
+		"gemini-1.5-pro": {
+			InputCostPerToken:           0.0000035,
+			OutputCostPerToken:          0.0000105,
+			OutputCostPerReasoningToken: 0.000014,
+		},
+	}
+
+	registry.Update(prices)
+
+	// Verify Count matches
+	assert.Equal(t, 3, registry.Count())
+
+	// Verify LastUpdate is recent
+	assert.False(t, registry.LastUpdate().IsZero(), "LastUpdate should not be zero after Update")
+	assert.WithinDuration(t, time.Now().UTC(), registry.LastUpdate(), 5*time.Second)
+
+	// Verify GetPrice returns correct values
+	gpt4Price := registry.GetPrice("gpt-4")
+	assert.NotNil(t, gpt4Price)
+	assert.Equal(t, 0.00003, gpt4Price.InputCostPerToken)
+	assert.Equal(t, 0.00006, gpt4Price.OutputCostPerToken)
+
+	claudePrice := registry.GetPrice("claude-3-opus")
+	assert.NotNil(t, claudePrice)
+	assert.Equal(t, 0.000015, claudePrice.InputCostPerToken)
+	assert.Equal(t, 0.000075, claudePrice.OutputCostPerToken)
+
+	geminiPrice := registry.GetPrice("gemini-1.5-pro")
+	assert.NotNil(t, geminiPrice)
+	assert.Equal(t, 0.000014, geminiPrice.OutputCostPerReasoningToken)
+}
+
+func TestModelPriceRegistry_GetPrice_NotFound(t *testing.T) {
+	registry := NewModelPriceRegistry()
+
+	// Empty registry
+	result := registry.GetPrice("nonexistent-model")
+	assert.Nil(t, result)
+
+	// After adding some prices, lookup a model that doesn't exist
+	registry.Update(map[string]*ModelPrice{
+		"gpt-4": {InputCostPerToken: 0.00003},
+	})
+
+	result = registry.GetPrice("claude-3-opus")
+	assert.Nil(t, result, "GetPrice should return nil for a model not in the registry")
+}
+
 func TestGetRemoteModels_CacheExpiryRace(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
 	manager := New(logger, 100, []config.ModelRPMConfig{})

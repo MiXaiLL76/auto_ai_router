@@ -369,6 +369,31 @@ func TestExtractTokenUsage_ImageFallback(t *testing.T) {
 	}
 }
 
+func TestExtractTokenUsage_ResponsesAPI(t *testing.T) {
+	// Responses API format (GPT-5, /v1/responses) uses input_tokens/output_tokens
+	// with output_tokens_details instead of completion_tokens_details
+	body := []byte(`{"usage":{"input_tokens":150,"output_tokens":80,"total_tokens":230,"input_tokens_details":{"cached_tokens":30,"audio_tokens":10},"output_tokens_details":{"reasoning_tokens":25,"audio_tokens":5}}}`)
+	usage := ExtractTokenUsage(body)
+	if usage == nil {
+		t.Fatalf("expected usage for Responses API format")
+	}
+	if usage.PromptTokens != 150 || usage.CompletionTokens != 80 {
+		t.Fatalf("unexpected token counts: prompt=%d completion=%d", usage.PromptTokens, usage.CompletionTokens)
+	}
+	if usage.CachedInputTokens != 30 {
+		t.Fatalf("expected cached_tokens=30, got %d", usage.CachedInputTokens)
+	}
+	if usage.AudioInputTokens != 10 {
+		t.Fatalf("expected audio_input=10, got %d", usage.AudioInputTokens)
+	}
+	if usage.ReasoningTokens != 25 {
+		t.Fatalf("expected reasoning_tokens=25, got %d", usage.ReasoningTokens)
+	}
+	if usage.AudioOutputTokens != 5 {
+		t.Fatalf("expected audio_output=5, got %d", usage.AudioOutputTokens)
+	}
+}
+
 func TestProviderConverter_ResponseTo_VertexImage_Gemini_JSONRoundTrip(t *testing.T) {
 	vertexResp := genai.GenerateContentResponse{
 		Candidates: []*genai.Candidate{

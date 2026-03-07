@@ -10,15 +10,21 @@ import (
 
 	"github.com/mixaill76/auto_ai_router/internal/balancer"
 	"github.com/mixaill76/auto_ai_router/internal/config"
+	"github.com/mixaill76/auto_ai_router/internal/converter/openai"
+	"github.com/mixaill76/auto_ai_router/internal/converter/responses"
+	"github.com/mixaill76/auto_ai_router/internal/litellmdb/users"
 	"github.com/mixaill76/auto_ai_router/internal/security"
 )
 
 type orchestratedRequest struct {
-	request   *http.Request
-	body      []byte
-	modelID   string
-	streaming bool
-	cred      *config.CredentialConfig
+	request        *http.Request
+	body           []byte
+	modelID        string // alias name (for rate limiting, credential lookup, logging)
+	realModelID    string // real model name sent to provider (equals modelID if no alias configured)
+	streaming      bool
+	cred           *config.CredentialConfig
+	isResponsesAPI bool
+	convertedResp  bool
 }
 
 // orchestrateRequest performs auth and credential selection for an incoming request.
@@ -35,25 +41,69 @@ func (p *Proxy) orchestrateRequest(
 		return nil, false
 	}
 
-	body, modelID, streaming, ok := p.readRequestBodyAndSelectModel(w, r, logCtx)
+	body, modelID, realModelID, streaming, ok := p.readRequestBodyAndSelectModel(w, r, logCtx)
 	if !ok {
 		return nil, false
 	}
+
+	// Detect Responses API requests and select credential before conversion.
+	isResponsesAPI := responses.IsResponsesAPI(body) && strings.Contains(r.URL.Path, "/responses")
 
 	cred, ok := p.selectCredentialForModel(w, modelID, logCtx)
 	if !ok {
 		return nil, false
 	}
 
+	p.logger.Debug("Responses API detection",
+		"is_responses_api", isResponsesAPI,
+		"provider", cred.Type,
+		"model", modelID,
+		"streaming", streaming,
+		"url_path", r.URL.Path)
+
+	convertedResp := false
+	// Always convert Responses API requests for ALL providers.
+	// Even "openai"-type credentials may point to Azure OpenAI or other
+	// OpenAI-compatible endpoints that don't support the native /v1/responses
+	// endpoint and return Chat Completions SSE instead of Responses API SSE.
+	// Chat Completions API is universally supported, so converting is always safe.
+	if isResponsesAPI {
+		chatBody, convErr := responses.RequestToChat(body)
+		if convErr != nil {
+			p.logger.Error("Failed to convert Responses API request", "error", convErr)
+			logCtx.Status = "failure"
+			logCtx.HTTPStatus = http.StatusBadRequest
+			logCtx.ErrorMsg = "Failed to convert Responses API request: " + convErr.Error()
+			WriteErrorBadRequest(w, "Failed to convert Responses API request")
+			return nil, false
+		}
+		body = chatBody
+		convertedResp = true
+		// For streaming: inject stream_options.include_usage since extractMetadataFromBody
+		// skipped it for Responses API (the original body had "input" not "messages").
+		// Now that we've converted to Chat Completions format, providers need this.
+		if streaming {
+			body = injectStreamOptions(body)
+		}
+		// Rewrite URL path from /v1/responses to /v1/chat/completions
+		// so passthrough providers (OpenAI, Proxy) send to the correct endpoint.
+		r.URL.Path = strings.Replace(r.URL.Path, "/responses", "/chat/completions", 1)
+		p.logger.Debug("Converted Responses API request to Chat Completions format",
+			"model", modelID, "streaming", streaming)
+	}
+
 	logCtx.Credential = cred
 	r = markCredentialAsTried(r, cred.Name)
 
 	return &orchestratedRequest{
-		request:   r,
-		body:      body,
-		modelID:   modelID,
-		streaming: streaming,
-		cred:      cred,
+		request:        r,
+		body:           body,
+		modelID:        modelID,
+		realModelID:    realModelID,
+		streaming:      streaming,
+		cred:           cred,
+		isResponsesAPI: isResponsesAPI,
+		convertedResp:  convertedResp,
 	}, true
 }
 
@@ -73,13 +123,13 @@ func markCredentialAsTried(r *http.Request, credentialName string) *http.Request
 }
 
 func (p *Proxy) isLiteLLMHealthy() bool {
-	if p.litellmDB == nil || !p.litellmDB.IsEnabled() {
+	if p.LiteLLMDB == nil || !p.LiteLLMDB.IsEnabled() {
 		return false
 	}
 	if p.healthChecker != nil {
 		return p.healthChecker.IsDBHealthy()
 	}
-	return p.litellmDB.IsHealthy()
+	return p.LiteLLMDB.IsHealthy()
 }
 
 func (p *Proxy) authenticateRequest(
@@ -94,7 +144,7 @@ func (p *Proxy) authenticateRequest(
 		logCtx.Status = "failure"
 		logCtx.HTTPStatus = http.StatusUnauthorized
 		logCtx.ErrorMsg = "Missing Authorization header"
-		http.Error(w, "Unauthorized: Missing Authorization header", http.StatusUnauthorized)
+		WriteErrorUnauthorized(w, "Missing Authorization header")
 		return false
 	}
 
@@ -105,14 +155,29 @@ func (p *Proxy) authenticateRequest(
 		logCtx.Status = "failure"
 		logCtx.HTTPStatus = http.StatusUnauthorized
 		logCtx.ErrorMsg = "Invalid Authorization header format"
-		http.Error(w, "Unauthorized: Invalid Authorization header format", http.StatusUnauthorized)
+		WriteErrorUnauthorized(w, "Invalid Authorization header format")
 		return false
 	}
 
 	if token == p.masterKey {
 		return true
-	} else if isLiteLLMHealthy {
-		tokenInfo, err := p.litellmDB.ValidateToken(r.Context(), token)
+	}
+
+	// JWT session token validation (tokens from /v2/login)
+	if strings.HasPrefix(token, "eyJ") {
+		claims, jwtErr := users.ValidateSessionJWT(token, p.masterKey)
+		if jwtErr == nil && claims != nil {
+			p.logger.Debug("Authenticated via session JWT",
+				"user_id", claims.UserID,
+				"user_role", claims.UserRole,
+			)
+			return true
+		}
+		// JWT validation failed — fall through to LiteLLM DB check
+	}
+
+	if isLiteLLMHealthy {
+		tokenInfo, err := p.LiteLLMDB.ValidateToken(r.Context(), token)
 		logCtx.TokenInfo = tokenInfo
 		if err != nil {
 			logCtx.Status = "failure"
@@ -133,7 +198,7 @@ func (p *Proxy) authenticateRequest(
 		return true
 	} else {
 		p.logger.Error("Invalid master key", "provided_key_prefix", security.MaskAPIKey(token))
-		http.Error(w, "Unauthorized: Invalid master key", http.StatusUnauthorized)
+		WriteErrorUnauthorized(w, "Invalid master key")
 	}
 
 	return false
@@ -143,7 +208,7 @@ func (p *Proxy) readRequestBodyAndSelectModel(
 	w http.ResponseWriter,
 	r *http.Request,
 	logCtx *RequestLogContext,
-) ([]byte, string, bool, bool) {
+) ([]byte, string, string, bool, bool) {
 	maxBodyBytes := int64(p.maxBodySizeMB) * 1024 * 1024
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxBodyBytes+1))
 	if err != nil {
@@ -151,8 +216,8 @@ func (p *Proxy) readRequestBodyAndSelectModel(
 		logCtx.Status = "failure"
 		logCtx.HTTPStatus = http.StatusBadRequest
 		logCtx.ErrorMsg = "Failed to read request body: " + err.Error()
-		http.Error(w, "Bad Request", http.StatusBadRequest)
-		return nil, "", false, false
+		WriteErrorBadRequest(w, "Failed to read request body")
+		return nil, "", "", false, false
 	}
 	if closeErr := r.Body.Close(); closeErr != nil {
 		p.logger.Error("Failed to close request body", "error", closeErr)
@@ -165,8 +230,8 @@ func (p *Proxy) readRequestBodyAndSelectModel(
 		logCtx.Status = "failure"
 		logCtx.HTTPStatus = http.StatusRequestEntityTooLarge
 		logCtx.ErrorMsg = "Request body too large"
-		http.Error(w, "Request Entity Too Large", http.StatusRequestEntityTooLarge)
-		return nil, "", false, false
+		WriteErrorTooLarge(w, "Request Entity Too Large")
+		return nil, "", "", false, false
 	}
 
 	modelID, streaming, sessionID, body := extractMetadataFromBody(body)
@@ -178,19 +243,30 @@ func (p *Proxy) readRequestBodyAndSelectModel(
 		logCtx.Status = "failure"
 		logCtx.HTTPStatus = http.StatusBadRequest
 		logCtx.ErrorMsg = "Model not specified in request body"
-		http.Error(w, "Bad Request: model field is required", http.StatusBadRequest)
-		return nil, "", false, false
+		WriteErrorBadRequest(w, "model field is required")
+		return nil, "", "", false, false
 	}
 
-	// Resolve model alias
+	// Resolve model_alias entries (changes modelID to real name; credential lookup uses real name)
 	if resolved, isAlias := p.modelManager.ResolveAlias(modelID); isAlias {
 		p.logger.Debug("Resolved model alias", "alias", modelID, "resolved", resolved)
-		body = replaceModelInBody(body, modelID, resolved)
+		body = openai.ReplaceModelInBody(body, modelID, resolved)
 		modelID = resolved
 		logCtx.ModelID = modelID
 	}
 
-	return body, modelID, streaming, true
+	// Resolve models[].model field: replace model in body for provider but keep alias as modelID
+	// for rate limiting and credential lookup.
+	realModelID := modelID
+	if realName, hasReal := p.modelManager.GetRealModelName(modelID); hasReal {
+		p.logger.Debug("Resolved model real name", "alias", modelID, "real", realName)
+		body = openai.ReplaceModelInBody(body, modelID, realName)
+		realModelID = realName
+	}
+
+	body = openai.ReplaceBodyParam(modelID, body)
+
+	return body, modelID, realModelID, streaming, true
 }
 
 func (p *Proxy) selectCredentialForModel(
@@ -237,6 +313,6 @@ func (p *Proxy) selectCredentialForModel(
 	}
 	logCtx.Logged = true
 
-	http.Error(w, errorMsg, errCode)
+	WriteErrorRateLimit(w, errorMsg)
 	return nil, false
 }

@@ -16,6 +16,7 @@ nav = [
     { "Overview" = "providers/index.md" },
     { "OpenAI" = "providers/openai.md" },
     { "Anthropic" = "providers/anthropic.md" },
+    { "AWS Bedrock" = "providers/bedrock.md" },
     { "Vertex AI" = "providers/vertex.md" },
     { "Gemini AI Studio" = "providers/gemini.md" },
     { "Proxy" = "providers/proxy.md" },

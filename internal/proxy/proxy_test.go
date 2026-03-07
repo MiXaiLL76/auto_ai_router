@@ -14,6 +14,7 @@ import (
 
 	"github.com/mixaill76/auto_ai_router/internal/balancer"
 	"github.com/mixaill76/auto_ai_router/internal/config"
+	"github.com/mixaill76/auto_ai_router/internal/converter/openai"
 	"github.com/mixaill76/auto_ai_router/internal/fail2ban"
 	"github.com/mixaill76/auto_ai_router/internal/models"
 	"github.com/mixaill76/auto_ai_router/internal/monitoring"
@@ -474,7 +475,35 @@ func TestExtractModelFromBody(t *testing.T) {
 			expectedStream:    false,
 			checkModifiedBody: false,
 		},
+		{
+			name:              "responses API streaming - no stream_options injected",
+			body:              `{"model": "gpt-5", "stream": true, "input": "Hello"}`,
+			expectedModel:     "gpt-5",
+			expectedStream:    true,
+			checkModifiedBody: false, // special check below
+		},
+		{
+			name:              "responses API non-streaming",
+			body:              `{"model": "gpt-5", "input": "Hello"}`,
+			expectedModel:     "gpt-5",
+			expectedStream:    false,
+			checkModifiedBody: false,
+		},
 	}
+
+	// Additional check: Responses API streaming must NOT have stream_options
+	t.Run("responses API streaming must not inject stream_options", func(t *testing.T) {
+		body := `{"model": "gpt-5", "stream": true, "input": "Hello"}`
+		_, stream, _, modifiedBody := extractMetadataFromBody([]byte(body))
+		assert.True(t, stream)
+
+		var bodyMap map[string]interface{}
+		err := json.Unmarshal(modifiedBody, &bodyMap)
+		assert.NoError(t, err)
+
+		_, hasStreamOptions := bodyMap["stream_options"]
+		assert.False(t, hasStreamOptions, "Responses API must not have stream_options injected")
+	})
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -722,6 +751,18 @@ func TestExtractTokensFromResponse(t *testing.T) {
 			credType: config.ProviderTypeOpenAI,
 			expected: 0,
 		},
+		{
+			name:     "Responses API format with tokens",
+			body:     `{"id":"resp_123","usage":{"input_tokens":100,"output_tokens":50,"total_tokens":150}}`,
+			credType: config.ProviderTypeOpenAI,
+			expected: 150,
+		},
+		{
+			name:     "Responses API format without total_tokens but with input/output",
+			body:     `{"usage":{"input_tokens":100,"output_tokens":50}}`,
+			credType: config.ProviderTypeOpenAI,
+			expected: 0,
+		},
 	}
 
 	for _, tt := range tests {
@@ -793,7 +834,7 @@ func TestReplaceModelInBody(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := replaceModelInBody([]byte(tt.body), tt.oldModel, tt.newModel)
+			result := openai.ReplaceModelInBody([]byte(tt.body), tt.oldModel, tt.newModel)
 			assert.Equal(t, tt.expected, string(result))
 		})
 	}
@@ -829,6 +870,16 @@ func TestExtractTokensFromStreamingChunk(t *testing.T) {
 			name:     "invalid json",
 			chunk:    "data: {invalid}\n\n",
 			expected: 0,
+		},
+		{
+			name:     "responses API response.completed event",
+			chunk:    "data: {\"type\":\"response.completed\",\"response\":{\"usage\":{\"input_tokens\":200,\"output_tokens\":80,\"total_tokens\":280}}}\n\n",
+			expected: 280,
+		},
+		{
+			name:     "responses API top-level usage with total_tokens",
+			chunk:    "data: {\"usage\":{\"input_tokens\":100,\"output_tokens\":50,\"total_tokens\":150}}\n\n",
+			expected: 150,
 		},
 	}
 

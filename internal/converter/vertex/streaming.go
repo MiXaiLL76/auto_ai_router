@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"strings"
 
 	converterutil "github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
@@ -19,8 +20,11 @@ func TransformVertexStreamToOpenAI(vertexStream io.Reader, model string, output 
 	timestamp := converterutil.GetCurrentTimestamp()
 	isFirstChunk := true
 
+	vertexLineCount := 0
+	vertexChunkCount := 0
 	for scanner.Scan() {
 		line := scanner.Text()
+		vertexLineCount++
 
 		// Skip empty lines and non-data lines
 		if !strings.HasPrefix(line, "data: ") {
@@ -30,6 +34,7 @@ func TransformVertexStreamToOpenAI(vertexStream io.Reader, model string, output 
 		// Extract JSON data
 		jsonData := strings.TrimPrefix(line, "data: ")
 		if jsonData == "[DONE]" {
+			slog.Debug("[vertex/streaming] received [DONE]", "lines_read", vertexLineCount, "chunks_processed", vertexChunkCount)
 			// Write final done message
 			_, _ = fmt.Fprintf(output, "data: [DONE]\n\n")
 			break
@@ -38,13 +43,38 @@ func TransformVertexStreamToOpenAI(vertexStream io.Reader, model string, output 
 		// Parse Vertex AI chunk
 		var vertexChunk VertexStreamingChunk
 		if err := json.Unmarshal([]byte(jsonData), &vertexChunk); err != nil {
+			slog.Debug("[vertex/streaming] failed to parse Vertex chunk",
+				"error", err, "json_prefix", jsonData[:min(len(jsonData), 200)])
 			continue // Skip malformed chunks
 		}
 
 		// Skip chunks with no candidates
 		if len(vertexChunk.Candidates) == 0 {
+			slog.Debug("[vertex/streaming] chunk with no candidates",
+				"has_usage", vertexChunk.UsageMetadata != nil)
+			// Still emit usage-only chunks (they have no candidates but have usage metadata)
+			if vertexChunk.UsageMetadata != nil {
+				openAIChunk := openai.OpenAIStreamingChunk{
+					ID:      chatID,
+					Object:  "chat.completion.chunk",
+					Created: timestamp,
+					Model:   model,
+					Choices: []openai.OpenAIStreamingChoice{},
+					Usage:   convertVertexUsageMetadata(vertexChunk.UsageMetadata),
+				}
+				chunkJSON, err := json.Marshal(openAIChunk)
+				if err == nil {
+					slog.Debug("[vertex/streaming] emitting usage-only chunk",
+						"prompt_tokens", vertexChunk.UsageMetadata.PromptTokenCount,
+						"candidates_tokens", vertexChunk.UsageMetadata.CandidatesTokenCount,
+						"total_tokens", vertexChunk.UsageMetadata.TotalTokenCount)
+					_, _ = fmt.Fprintf(output, "data: %s\n\n", chunkJSON)
+				}
+			}
 			continue
 		}
+
+		vertexChunkCount++
 
 		// Convert to OpenAI format
 		openAIChunk := openai.OpenAIStreamingChunk{
@@ -135,6 +165,10 @@ func TransformVertexStreamToOpenAI(vertexStream io.Reader, model string, output 
 		_, _ = fmt.Fprintf(output, "data: %s\n\n", chunkJSON)
 		isFirstChunk = false
 	}
+
+	slog.Debug("[vertex/streaming] scan finished",
+		"lines_read", vertexLineCount, "chunks_processed", vertexChunkCount,
+		"scanner_err", scanner.Err())
 
 	return scanner.Err()
 }
