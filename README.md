@@ -1,5 +1,9 @@
 # Auto AI Router
 
+<p align="center">
+  <img src="docs/logo.svg" alt="Auto AI Router Logo" width="120"/>
+</p>
+
 [![GitHub Pages](https://img.shields.io/badge/docs-GitHub%20Pages-blue)](https://mixaill76.github.io/auto_ai_router/)
 [![license](https://img.shields.io/github/license/MiXaiLL76/auto_ai_router.svg)](https://github.com/MiXaiLL76/auto_ai_router/blob/main/LICENSE)
 

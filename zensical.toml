@@ -47,6 +47,7 @@ features = [
   "content.code.copy",
   "search.highlight",
 ]
+logo = "logo.svg"
 
 # Markdown extensions
 [project.markdown_extensions.admonition]
