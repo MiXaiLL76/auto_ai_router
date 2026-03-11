@@ -27,7 +27,8 @@ var (
 type RoundRobin struct {
 	mu              sync.RWMutex
 	credentials     []config.CredentialConfig
-	credentialIndex map[string]int // O(1) lookup by name instead of O(n) search
+	staticCreds     []config.CredentialConfig // immutable snapshot of YAML-defined credentials
+	credentialIndex map[string]int            // O(1) lookup by name instead of O(n) search
 	current         int
 	typeCounters    map[config.ProviderType]int // per-type counters to prevent cross-type interference
 	fail2ban        *fail2ban.Fail2Ban
@@ -58,6 +59,7 @@ func New(credentials []config.CredentialConfig, f2b *fail2ban.Fail2Ban, rl *rate
 
 	rr := &RoundRobin{
 		credentials:     credentials,
+		staticCreds:     append([]config.CredentialConfig(nil), credentials...),
 		credentialIndex: credentialIndex,
 		current:         0,
 		typeCounters:    make(map[config.ProviderType]int),
@@ -332,6 +334,53 @@ func (r *RoundRobin) GetBannedCount() int {
 // GetBannedPairs returns all currently banned credential+model pairs with error details
 func (r *RoundRobin) GetBannedPairs() []fail2ban.BanPair {
 	return r.fail2ban.GetBannedPairs()
+}
+
+// UpdateDBCredentials atomically replaces the DB-sourced portion of the credential list.
+// Static (YAML-defined) credentials are always preserved unchanged.
+// New credentials are registered in the rate limiter; stale entries are left in the rate
+// limiter but will never be selected since they are absent from the credential list.
+func (r *RoundRobin) UpdateDBCredentials(dbCreds []config.CredentialConfig) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	// Build name set of static creds so we can skip duplicates from DB.
+	staticNames := make(map[string]bool, len(r.staticCreds))
+	for _, c := range r.staticCreds {
+		staticNames[c.Name] = true
+	}
+
+	// Filter out DB creds that clash with static names.
+	filtered := make([]config.CredentialConfig, 0, len(dbCreds))
+	for _, c := range dbCreds {
+		if !staticNames[c.Name] {
+			filtered = append(filtered, c)
+		}
+	}
+
+	// Merge static + new DB creds.
+	newCreds := append(append([]config.CredentialConfig(nil), r.staticCreds...), filtered...)
+
+	// Upsert rate-limiter limits for all DB creds (not just new ones).
+	// AddCredentialWithTPM overwrites the existing entry, so calling it every sync
+	// guarantees that RPM/TPM changes in DB are picked up immediately.
+	for _, c := range filtered {
+		tpm := c.TPM
+		if tpm == 0 {
+			tpm = -1
+		}
+		r.rateLimiter.AddCredentialWithTPM(c.Name, c.RPM, tpm)
+	}
+
+	// Rebuild the O(1) index.
+	newIndex := make(map[string]int, len(newCreds))
+	for i, c := range newCreds {
+		newIndex[c.Name] = i
+	}
+
+	r.credentials = newCreds
+	r.credentialIndex = newIndex
+	// typeCounters / current may reference stale indices; they self-correct on the next request.
 }
 
 // validateFallbackConfiguration validates fallback credential configuration

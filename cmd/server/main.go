@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -90,17 +91,25 @@ func main() {
 
 	litellmDBManager := initializeLiteLLMDB(cfg, log)
 
-	// ==================== Load Model Table from LiteLLM DB ====================
-	// Fetch credentials, model configs and prices from LiteLLM DB before
-	// initializing the balancer/model-manager so that DB-defined routes are
-	// included from the very first request.
-	priceRegistry := models.NewModelPriceRegistry()
-	if litellmDBManager.IsEnabled() {
-		loadModelTableFromDB(litellmDBManager, cfg, priceRegistry, log)
-	}
+	// ==================== Initialize Balancer & Model Manager (YAML-only) ====================
+	// IMPORTANT: Do NOT modify cfg.Credentials or cfg.Models here.
+	// The balancer and model manager snapshot YAML-only data as their immutable
+	// "static" baseline. DB data is applied AFTER construction via UpdateDBCredentials /
+	// UpdateDBModels so that the sync loop can correctly add/remove DB-sourced entries.
 
+	priceRegistry := models.NewModelPriceRegistry()
 	_, rateLimiter, bal := initializeBalancer(cfg, log, redisBackend)
 	modelManager := initializeModelManager(log, cfg, rateLimiter, bal)
+
+	// ==================== Apply Initial DB Model Table ====================
+	// Fetch DB data and apply it through the same code-path used by the sync loop,
+	// so that staticCreds / staticModelLimits stay YAML-only.
+	// staticCreds is the YAML-only snapshot used by the sync loop to differentiate
+	// static vs. DB-sourced credentials.
+	staticCreds := append([]config.CredentialConfig(nil), cfg.Credentials...)
+	if litellmDBManager.IsEnabled() {
+		applyInitialDBModelTable(context.Background(), litellmDBManager, staticCreds, bal, modelManager, rateLimiter, priceRegistry, cfg, log)
+	}
 	tokenManager := auth.NewVertexTokenManager(log)
 	defer tokenManager.Stop()
 
@@ -185,6 +194,8 @@ func main() {
 	if litellmDBManager.IsEnabled() {
 		startDBHealthMonitor(log, bgCtx, litellmDBManager, healthChecker, &wg)
 		_ = litellmDBManager.FetchMasterKey(bgCtx, cfg.Server.MasterKey)
+		startDBModelTableSyncLoop(log, bgCtx, litellmDBManager, staticCreds,
+			bal, modelManager, rateLimiter, priceRegistry, cfg, 1*time.Minute, &wg)
 	}
 
 	// Start model price sync loop (only if configured)
@@ -371,40 +382,176 @@ func initializeModelManager(
 	return modelManager
 }
 
-// loadModelTableFromDB fetches credentials, model configs and model prices from
-// LiteLLM DB and merges them into cfg and the price registry.
-// Errors are logged as warnings; the server continues with whatever was loaded.
-func loadModelTableFromDB(
-	dbManager litellmdb.Manager,
-	cfg *config.Config,
-	priceRegistry *models.ModelPriceRegistry,
+// startDBModelTableSyncLoop starts a background goroutine that periodically reloads
+// credentials and models from the LiteLLM DB and applies a diff to the live router.
+// - New DB credentials are added to the balancer and rate limiter.
+// - Removed DB credentials are dropped from the balancer (rate limiter entries left stale).
+// - New/changed model limits are reflected immediately in the model manager.
+// - Static (YAML) credentials and models are never modified.
+func startDBModelTableSyncLoop(
 	log *slog.Logger,
+	bgCtx context.Context,
+	dbManager litellmdb.Manager,
+	staticCreds []config.CredentialConfig,
+	bal *balancer.RoundRobin,
+	modelManager *models.Manager,
+	rateLimiter *ratelimit.RPMLimiter,
+	priceRegistry *models.ModelPriceRegistry,
+	cfg *config.Config,
+	interval time.Duration,
+	wg *sync.WaitGroup,
 ) {
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-bgCtx.Done():
+				log.Debug("DB model table sync loop stopped")
+				return
+			case <-ticker.C:
+				syncDBModelTable(bgCtx, log, dbManager, staticCreds, bal, modelManager, rateLimiter, priceRegistry, cfg)
+			}
+		}
+	}()
+
+	log.Info("DB model table sync loop started", "interval", interval)
+}
+
+// syncDBModelTable performs a single sync cycle: fetches fresh DB data and applies diffs.
+func syncDBModelTable(
+	ctx context.Context,
+	log *slog.Logger,
+	dbManager litellmdb.Manager,
+	staticCreds []config.CredentialConfig,
+	bal *balancer.RoundRobin,
+	modelManager *models.Manager,
+	rateLimiter *ratelimit.RPMLimiter,
+	priceRegistry *models.ModelPriceRegistry,
+	cfg *config.Config,
+) {
+	fetchCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	dbCreds, dbModels, dbPrices, err := dbManager.FetchModelsForAIR(ctx, cfg.Server.MasterKey)
+	dbCreds, dbModelCfgs, dbPrices, err := dbManager.FetchModelsForAIR(fetchCtx, cfg.Server.MasterKey)
 	if err != nil {
-		log.Warn("Failed to load model table from LiteLLM DB (continuing without DB models)",
+		log.Warn("DB model table sync: fetch failed", "error", err)
+		return
+	}
+
+	// Apply DB credentials to balancer (diff is computed inside UpdateDBCredentials).
+	bal.UpdateDBCredentials(dbCreds)
+
+	// Build the current complete credential list (static + new DB) for model mapping.
+	allCreds := append(append([]config.CredentialConfig(nil), staticCreds...), dbCreds...)
+
+	// Apply DB models to model manager and update its credential list so that
+	// DB-sourced proxy credentials participate in GetAllModels remote fetches.
+	modelManager.UpdateDBModels(dbModelCfgs, staticCreds, allCreds)
+	modelManager.SetCredentials(allCreds)
+
+	// Upsert rate limiter entries for all DB credential+model pairs.
+	// For models with no specific credential, register only static (YAML) creds —
+	// synthetic DB credentials (db-model-*) must not be cross-mapped to other models.
+	for _, dm := range dbModelCfgs {
+		if dm.Credential != "" {
+			rateLimiter.AddModelWithTPM(dm.Credential, dm.Name, dm.RPM, dm.TPM)
+		} else {
+			credTargets := staticCreds
+			if len(credTargets) == 0 {
+				// DB-only setup: map global models to non-synthetic DB creds.
+				credTargets = dbCreds
+			}
+			for _, cred := range credTargets {
+				if strings.HasPrefix(cred.Name, "db-model-") {
+					continue
+				}
+				rateLimiter.AddModelWithTPM(cred.Name, dm.Name, dm.RPM, dm.TPM)
+			}
+		}
+	}
+
+	// Merge DB prices into the price registry (does not replace file-loaded prices for
+	// models that are absent from the DB).
+	if len(dbPrices) > 0 {
+		priceRegistry.MergeDB(dbPrices)
+	}
+
+	log.Debug("DB model table sync completed",
+		"credentials", len(dbCreds),
+		"models", len(dbModelCfgs),
+		"prices", len(dbPrices),
+	)
+}
+
+// applyInitialDBModelTable fetches DB data and applies it through UpdateDBCredentials /
+// UpdateDBModels (same path as the sync loop). This guarantees that staticCreds and
+// staticModelLimits inside the balancer and model manager are YAML-only, so subsequent
+// sync cycles can correctly add/remove DB-sourced entries.
+func applyInitialDBModelTable(
+	ctx context.Context,
+	dbManager litellmdb.Manager,
+	staticCreds []config.CredentialConfig,
+	bal *balancer.RoundRobin,
+	modelManager *models.Manager,
+	rateLimiter *ratelimit.RPMLimiter,
+	priceRegistry *models.ModelPriceRegistry,
+	cfg *config.Config,
+	log *slog.Logger,
+) {
+	fetchCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	dbCreds, dbModelCfgs, dbPrices, err := dbManager.FetchModelsForAIR(fetchCtx, cfg.Server.MasterKey)
+	if err != nil {
+		log.Warn("Failed to load initial model table from LiteLLM DB (continuing without DB models)",
 			"error", err,
 		)
 		return
 	}
 
-	if len(dbCreds) > 0 {
-		log.Info("Loaded credentials from LiteLLM DB", "count", len(dbCreds))
-		cfg.Credentials = append(cfg.Credentials, dbCreds...)
-	}
+	bal.UpdateDBCredentials(dbCreds)
 
-	if len(dbModels) > 0 {
-		log.Info("Loaded model configs from LiteLLM DB", "count", len(dbModels))
-		cfg.Models = append(cfg.Models, dbModels...)
+	allCreds := append(append([]config.CredentialConfig(nil), staticCreds...), dbCreds...)
+	modelManager.UpdateDBModels(dbModelCfgs, staticCreds, allCreds)
+	// Let the model manager know about all credentials (including DB proxy creds)
+	// so that GetAllModels can fetch remote model lists from DB-sourced proxy credentials.
+	modelManager.SetCredentials(allCreds)
+
+	// For models with no specific credential, register only static (YAML) creds.
+	// Synthetic DB credentials (db-model-*) are model-specific and must not be
+	// cross-mapped to unrelated models.
+	for _, dm := range dbModelCfgs {
+		if dm.Credential != "" {
+			rateLimiter.AddModelWithTPM(dm.Credential, dm.Name, dm.RPM, dm.TPM)
+		} else {
+			credTargets := staticCreds
+			if len(credTargets) == 0 {
+				// DB-only setup: map global models to non-synthetic DB creds.
+				credTargets = dbCreds
+			}
+			for _, cred := range credTargets {
+				if strings.HasPrefix(cred.Name, "db-model-") {
+					continue
+				}
+				rateLimiter.AddModelWithTPM(cred.Name, dm.Name, dm.RPM, dm.TPM)
+			}
+		}
 	}
 
 	if len(dbPrices) > 0 {
-		log.Info("Loaded model prices from LiteLLM DB", "count", len(dbPrices))
-		priceRegistry.Update(dbPrices)
+		priceRegistry.MergeDB(dbPrices)
 	}
+
+	log.Info("Applied initial DB model table",
+		"credentials", len(dbCreds),
+		"models", len(dbModelCfgs),
+		"prices", len(dbPrices),
+	)
 }
 
 func initializeLiteLLMDB(cfg *config.Config, log *slog.Logger) litellmdb.Manager {

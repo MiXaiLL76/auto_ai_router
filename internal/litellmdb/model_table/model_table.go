@@ -143,7 +143,11 @@ func (a *ProxyModelTable) FetchModelsForAIR(ctx context.Context, signingKey stri
 		}
 	}
 
-	// Decrypt inline model credentials
+	// Decrypt inline model credentials.
+	// Note: GenericLiteLLMParams.CustomLLMProvider has the same JSON tag as the embedded
+	// CredentialLiteLLMParams.CustomLLMProviderName. Go JSON picks the outer field, so
+	// CustomLLMProviderName is always nil after unmarshal and DecryptCredentialLiteLLMParams
+	// skips it. We must decrypt the outer CustomLLMProvider separately.
 	for i := range dbModels {
 		if dbModels[i].LlmParams == nil {
 			continue
@@ -153,6 +157,19 @@ func (a *ProxyModelTable) FetchModelsForAIR(ctx context.Context, signingKey stri
 				"model", derefStr(dbModels[i].ModelName, "<nil>"),
 				"error", err,
 			)
+		}
+		// Decrypt outer CustomLLMProvider (shadowed by embedded field in JSON unmarshal).
+		p := dbModels[i].LlmParams
+		if p.CustomLLMProvider != nil && *p.CustomLLMProvider != "" {
+			decrypted, err := cryptoutils.DecryptValueHelper(*p.CustomLLMProvider, "custom_llm_provider", signingKey)
+			if err != nil {
+				a.logger.Warn("Failed to decrypt model custom_llm_provider",
+					"model", derefStr(dbModels[i].ModelName, "<nil>"),
+					"error", err,
+				)
+			} else {
+				p.CustomLLMProvider = &decrypted
+			}
 		}
 	}
 
@@ -165,6 +182,12 @@ func (a *ProxyModelTable) FetchModelsForAIR(ctx context.Context, signingKey stri
 			continue
 		}
 		cfg := convertCredentialTableToConfig(cred)
+		if cfg.Type == "" {
+			a.logger.Warn("Skipping credential with unsupported provider",
+				"credential", derefStr(cred.CredentialName, "<nil>"),
+			)
+			continue
+		}
 		credByName[*cred.CredentialName] = true
 		airCredentials = append(airCredentials, cfg)
 	}
@@ -188,12 +211,19 @@ func (a *ProxyModelTable) FetchModelsForAIR(ctx context.Context, signingKey stri
 					"model", modelName,
 					"credential", credName,
 				)
+				continue
 			}
 		} else if hasInlineCredentials(&model.LlmParams.CredentialLiteLLMParams) {
 			// Create synthetic credential from model inline params
 			syntheticName := fmt.Sprintf("db-model-%s", derefStr(model.ModelId, modelName))
 			if !credByName[syntheticName] {
 				syntheticCred := convertInlineCredToConfig(syntheticName, model.LlmParams)
+				if syntheticCred.Type == "" {
+					a.logger.Warn("Skipping model with unsupported inline provider",
+						"model", modelName,
+					)
+					continue
+				}
 				credByName[syntheticName] = true
 				airCredentials = append(airCredentials, syntheticCred)
 			}
@@ -250,19 +280,19 @@ func derefStr(s *string, fallback string) string {
 
 // mapProviderType converts a LiteLLM custom_llm_provider string to config.ProviderType
 func mapProviderType(provider string) config.ProviderType {
-	switch strings.ToLower(provider) {
-	case "vertex_ai", "vertex-ai", "vertex_ai_beta":
-		return config.ProviderTypeVertexAI
-	case "openai":
+	p := strings.ToLower(provider)
+	switch {
+	case strings.Contains(p, "openai") || strings.Contains(p, "router"):
 		return config.ProviderTypeOpenAI
-	case "anthropic":
-		return config.ProviderTypeAnthropic
-	case "bedrock", "amazon_bedrock":
-		return config.ProviderTypeBedrock
-	case "gemini":
+	case strings.Contains(p, "vertex"):
+		return config.ProviderTypeVertexAI
+	case strings.Contains(p, "google"):
 		return config.ProviderTypeGemini
+	case strings.Contains(p, "xai"):
+		return config.ProviderTypeOpenAI
 	default:
-		return config.ProviderType(provider)
+		// Unknown/unsupported providers are intentionally dropped for now.
+		return ""
 	}
 }
 

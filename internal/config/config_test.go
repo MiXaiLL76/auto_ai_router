@@ -1115,7 +1115,7 @@ monitoring:
 	require.NoError(t, err)
 
 	// No model_alias section → nil map
-	assert.Nil(t, cfg.ModelAlias)
+	assert.Equal(t, 0, len(cfg.ModelAlias))
 }
 
 func TestResolveEnvString(t *testing.T) {

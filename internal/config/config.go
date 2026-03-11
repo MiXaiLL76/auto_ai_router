@@ -553,6 +553,22 @@ func Load(path string) (*Config, error) {
 		cfg.Fail2Ban = defaultFail2BanConfig()
 	}
 
+	if !hasMappingKey(&root, "monitoring") {
+		cfg.Monitoring = defaultMonitoringConfig()
+	}
+
+	if !hasMappingKey(&root, "redis") {
+		cfg.Redis = defaultRedisConfig()
+	}
+
+	if !hasMappingKey(&root, "litellm_db") {
+		cfg.LiteLLMDB = defaultLiteLLMDBConfig()
+	}
+
+	// Ensure HealthCheckPath is always set regardless of whether monitoring section exists.
+	// MonitoringConfig.UnmarshalYAML is only called when a "monitoring:" key is present in YAML.
+	cfg.Monitoring.HealthCheckPath = "/health"
+
 	// Resolve env variables in model_alias values
 	if cfg.ModelAlias != nil {
 		resolved := make(map[string]string, len(cfg.ModelAlias))
@@ -560,6 +576,18 @@ func Load(path string) (*Config, error) {
 			resolved[resolveEnvString(alias)] = resolveEnvString(target)
 		}
 		cfg.ModelAlias = resolved
+	}
+
+	if cfg.Credentials == nil {
+		cfg.Credentials = []CredentialConfig{}
+	}
+
+	if cfg.Models == nil {
+		cfg.Models = []ModelRPMConfig{}
+	}
+
+	if cfg.ModelAlias == nil {
+		cfg.ModelAlias = map[string]string{}
 	}
 
 	// Normalize credentials
@@ -577,6 +605,52 @@ func defaultFail2BanConfig() Fail2BanConfig {
 		MaxAttempts: DefaultMaxAttempts,
 		BanDuration: DefaultBanDuration,
 		ErrorCodes:  append([]int(nil), DefaultErrorCodes...),
+	}
+}
+
+func defaultMonitoringConfig() MonitoringConfig {
+	return MonitoringConfig{
+		PrometheusEnabled: true,
+		HealthCheckPath:   "/health",
+		LogErrors:         false,
+		ErrorsLogPath:     "logs/logs.jsonl",
+	}
+}
+
+func defaultRedisConfig() RedisConfig {
+	return RedisConfig{
+		Enabled:           false,
+		InitAddresses:     nil,
+		Username:          "",
+		Password:          "",
+		SelectDB:          0,
+		KeyPrefix:         "rl:",
+		TLSEnabled:        false,
+		ConnectTimeout:    5 * time.Second,
+		ConnWriteTimeout:  10 * time.Second,
+		ForceSingleClient: false,
+		MinIdleConns:      10,
+		MaxIdleConns:      100,
+		MaxConnLifetime:   30 * time.Minute,
+		KeyTTL:            120,
+		CommandTimeout:    3 * time.Second,
+	}
+}
+
+func defaultLiteLLMDBConfig() LiteLLMDBConfig {
+	return LiteLLMDBConfig{
+		Enabled:             false,
+		IsRequired:          false,
+		DatabaseURL:         "",
+		MaxConns:            25,
+		MinConns:            5,
+		HealthCheckInterval: 10 * time.Second,
+		ConnectTimeout:      5 * time.Second,
+		AuthCacheTTL:        5 * time.Second,
+		AuthCacheSize:       10000,
+		LogQueueSize:        5000,
+		LogBatchSize:        100,
+		LogFlushInterval:    5 * time.Second,
 	}
 }
 

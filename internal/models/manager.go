@@ -3,6 +3,7 @@ package models
 import (
 	"context"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -74,6 +75,18 @@ func (r *ModelPriceRegistry) Update(prices map[string]*ModelPrice) {
 	r.lastUpdate = utils.NowUTC()
 }
 
+// MergeDB applies DB-sourced prices on top of the existing registry without
+// removing prices that came from the file-based price list.
+// DB prices take precedence for models that appear in both sources.
+func (r *ModelPriceRegistry) MergeDB(dbPrices map[string]*ModelPrice) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for k, v := range dbPrices {
+		r.prices[k] = v
+	}
+	r.lastUpdate = utils.NowUTC()
+}
+
 // LastUpdate returns the time of last successful update
 func (r *ModelPriceRegistry) LastUpdate() time.Time {
 	r.mu.RLock()
@@ -123,35 +136,41 @@ type allModelsCache struct {
 
 // Manager handles model discovery and mapping
 type Manager struct {
-	mu                 sync.RWMutex
-	credentialModels   map[string][]string      // credential name -> list of model IDs
-	allModels          []Model                  // deduplicated list of all models
-	modelToCredentials map[string][]string      // model ID -> list of credential names
-	modelLimits        map[string][]ModelLimits // model ID -> limits (may have multiple entries for different credentials)
-	modelAliases       map[string]string        // alias -> real model name (from model_alias config)
-	modelRealNames     map[string]string        // alias name -> real model name (from models[].model field)
-	defaultModelsRPM   int                      // default RPM for models
-	logger             *slog.Logger
-	credentials        []config.CredentialConfig   // credentials for fetching remote models
-	remoteModelsCache  map[string]remoteModelCache // cache for remote models per credential (credentialName -> cache)
-	cacheExpiration    time.Duration               // how long to cache remote models (default 5 minutes)
-	allModelsCache     allModelsCache              // cached result of GetAllModels (3 second TTL)
+	mu                   sync.RWMutex
+	credentialModels     map[string][]string      // credential name -> list of model IDs
+	allModels            []Model                  // deduplicated list of all models
+	modelToCredentials   map[string][]string      // model ID -> list of credential names
+	modelLimits          map[string][]ModelLimits // model ID -> limits (may have multiple entries for different credentials)
+	staticModelLimits    map[string][]ModelLimits // immutable snapshot of limits from config.yaml (never modified after New())
+	staticModelRealNames map[string]string        // immutable snapshot of real names from config.yaml
+	dbModelNames         map[string]bool          // model names that were loaded from LiteLLM DB (for hot-reload diffing)
+	modelAliases         map[string]string        // alias -> real model name (from model_alias config)
+	modelRealNames       map[string]string        // alias name -> real model name (from models[].model field)
+	defaultModelsRPM     int                      // default RPM for models
+	logger               *slog.Logger
+	credentials          []config.CredentialConfig   // credentials for fetching remote models
+	remoteModelsCache    map[string]remoteModelCache // cache for remote models per credential (credentialName -> cache)
+	cacheExpiration      time.Duration               // how long to cache remote models (default 5 minutes)
+	allModelsCache       allModelsCache              // cached result of GetAllModels (3 second TTL)
 }
 
 // New creates a new model manager
 func New(logger *slog.Logger, defaultModelsRPM int, staticModels []config.ModelRPMConfig) *Manager {
 	m := &Manager{
-		credentialModels:   make(map[string][]string),
-		allModels:          make([]Model, 0),
-		modelToCredentials: make(map[string][]string),
-		modelLimits:        make(map[string][]ModelLimits),
-		modelAliases:       make(map[string]string),
-		modelRealNames:     make(map[string]string),
-		defaultModelsRPM:   defaultModelsRPM,
-		logger:             logger,
-		credentials:        make([]config.CredentialConfig, 0),
-		remoteModelsCache:  make(map[string]remoteModelCache),
-		cacheExpiration:    5 * time.Minute, // Default cache TTL: 5 minutes
+		credentialModels:     make(map[string][]string),
+		allModels:            make([]Model, 0),
+		modelToCredentials:   make(map[string][]string),
+		modelLimits:          make(map[string][]ModelLimits),
+		staticModelLimits:    make(map[string][]ModelLimits),
+		staticModelRealNames: make(map[string]string),
+		dbModelNames:         make(map[string]bool),
+		modelAliases:         make(map[string]string),
+		modelRealNames:       make(map[string]string),
+		defaultModelsRPM:     defaultModelsRPM,
+		logger:               logger,
+		credentials:          make([]config.CredentialConfig, 0),
+		remoteModelsCache:    make(map[string]remoteModelCache),
+		cacheExpiration:      5 * time.Minute, // Default cache TTL: 5 minutes
 	}
 
 	// Load static models from config.yaml
@@ -175,6 +194,15 @@ func New(logger *slog.Logger, defaultModelsRPM int, staticModels []config.ModelR
 				"rpm", staticModel.RPM,
 				"tpm", staticModel.TPM)
 		}
+	}
+
+	// Snapshot the static-only model limits so UpdateDBModels can always
+	// restore them when rebuilding after a DB sync cycle.
+	for k, v := range m.modelLimits {
+		m.staticModelLimits[k] = append([]ModelLimits(nil), v...)
+	}
+	for k, v := range m.modelRealNames {
+		m.staticModelRealNames[k] = v
 	}
 
 	return m
@@ -330,6 +358,119 @@ func (m *Manager) LoadModelsFromConfig(credentials []config.CredentialConfig) {
 	m.logger.Info("Loaded models from config",
 		"credential_specific", credentialSpecificCount,
 		"global_models", globalModelsCount,
+	)
+}
+
+// UpdateDBModels atomically replaces DB-sourced model limits and credential mappings.
+// Static models (from config.yaml snapshot) are always preserved.
+//
+// staticCreds is the YAML-only credential list. It is used as the "global" target when a
+// model has no specific credential — ensuring that synthetic DB credentials (db-model-*)
+// are never accidentally assigned to unrelated global models.
+//
+// allCreds is the complete list (static + DB) used solely for validating explicit credential
+// references (checking that a named credential actually exists).
+func (m *Manager) UpdateDBModels(dbModels []config.ModelRPMConfig, staticCreds []config.CredentialConfig, allCreds []config.CredentialConfig) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	// 1. Rebuild modelLimits = static snapshot + new DB entries.
+	//    Starting from the static snapshot guarantees that removing a DB model never
+	//    destroys static limits for a model with the same name.
+	newLimits := make(map[string][]ModelLimits, len(m.staticModelLimits)+len(dbModels))
+	for k, v := range m.staticModelLimits {
+		newLimits[k] = append([]ModelLimits(nil), v...)
+	}
+
+	// 2. Rebuild modelRealNames = static snapshot + new DB real names.
+	newRealNames := make(map[string]string, len(m.staticModelRealNames)+len(dbModels))
+	for k, v := range m.staticModelRealNames {
+		newRealNames[k] = v
+	}
+
+	// 3. Apply DB model data.
+	newDBNames := make(map[string]bool, len(dbModels))
+	for _, dm := range dbModels {
+		newLimits[dm.Name] = append(newLimits[dm.Name], ModelLimits{
+			RPM:        dm.RPM,
+			TPM:        dm.TPM,
+			Credential: dm.Credential,
+		})
+		if dm.Model != "" && dm.Model != dm.Name {
+			newRealNames[dm.Name] = dm.Model
+		}
+		newDBNames[dm.Name] = true
+	}
+
+	m.modelLimits = newLimits
+	m.modelRealNames = newRealNames
+	m.dbModelNames = newDBNames
+
+	// 4. Rebuild ALL credential↔model mappings from the merged modelLimits.
+	//    Proxy-fetched entries (from GetAllModels) are discarded but auto-refresh
+	//    on the next GetAllModels call (3-second cache).
+	//
+	//    allCredNames: full set for validating explicit credential references.
+	//    staticCredNames: YAML-only set used when a model has no specific credential so
+	//    that synthetic DB credentials (db-model-*) are not mapped to unrelated models.
+	allCredNames := make(map[string]bool, len(allCreds))
+	for _, c := range allCreds {
+		allCredNames[c.Name] = true
+	}
+	staticCredNames := make(map[string]bool, len(staticCreds))
+	for _, c := range staticCreds {
+		staticCredNames[c.Name] = true
+	}
+	nonSyntheticCredNames := make(map[string]bool, len(allCreds))
+	for _, c := range allCreds {
+		if !strings.HasPrefix(c.Name, "db-model-") {
+			nonSyntheticCredNames[c.Name] = true
+		}
+	}
+
+	newCredentialModels := make(map[string][]string)
+	newModelToCredentials := make(map[string][]string)
+	credentialModelsSet := make(map[string]map[string]bool)
+	modelToCredentialsSet := make(map[string]map[string]bool)
+
+	for modelName, limits := range m.modelLimits {
+		for _, limit := range limits {
+			if limit.Credential != "" {
+				if !allCredNames[limit.Credential] {
+					m.logger.Warn("Model references unknown credential",
+						"model", modelName, "credential", limit.Credential)
+					continue
+				}
+				addModelToMaps(newCredentialModels, newModelToCredentials,
+					credentialModelsSet, modelToCredentialsSet,
+					limit.Credential, modelName)
+			} else {
+				// No specific credential: map to YAML-only (static) credentials.
+				// If there are no static creds (DB-only setup), map to non-synthetic
+				// DB credentials and still avoid db-model-* synthetic ones.
+				credTargets := staticCredNames
+				if len(credTargets) == 0 {
+					credTargets = nonSyntheticCredNames
+				}
+				for credName := range credTargets {
+					addModelToMaps(newCredentialModels, newModelToCredentials,
+						credentialModelsSet, modelToCredentialsSet,
+						credName, modelName)
+				}
+			}
+		}
+	}
+
+	m.credentialModels = newCredentialModels
+	m.modelToCredentials = newModelToCredentials
+
+	// 5. Invalidate caches so next GetAllModels rebuilds from the updated modelLimits.
+	m.allModels = nil
+	m.allModelsCache = allModelsCache{}
+
+	m.logger.Info("DB model data updated",
+		"db_models", len(m.dbModelNames),
+		"total_model_limits", len(m.modelLimits),
 	)
 }
 
