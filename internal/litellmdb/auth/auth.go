@@ -32,6 +32,48 @@ func NewAuthenticator(pool *connection.ConnectionPool, cache *Cache, logger *slo
 	}
 }
 
+func (a *Authenticator) FetchMasterKey(ctx context.Context, default_key string) error {
+	if !a.pool.IsHealthy() {
+		return models.ErrConnectionFailed
+	}
+
+	conn, err := a.pool.Acquire(ctx)
+	if err != nil {
+		a.logger.Error("Failed to acquire connection for fetch master key from DB",
+			"error", err,
+		)
+		return models.ErrConnectionFailed
+	}
+	defer conn.Release()
+	var info models.TokenInfo
+	var masterKey *string
+	err = conn.QueryRow(ctx, queries.QueryMasterKey).Scan(
+		&masterKey,
+	)
+	var master_key_source string
+	if err != nil {
+		a.logger.Warn("Failed to fetch master key from DB",
+			"error", err,
+		)
+		masterKey = &default_key
+		master_key_source = "config"
+	} else {
+		master_key_source = "DB"
+	}
+	if masterKey == nil {
+		return models.ErrTokenNotFound
+	}
+
+	info.Token = HashToken(*masterKey)
+	info.KeyName = "litellm-master-key"
+	info.UserID = "litellm-master-key"
+	a.cache.Set(info.Token, &info)
+
+	a.logger.Debug("Master key loaded", "source", master_key_source)
+
+	return nil
+}
+
 // ValidateToken validates a token and returns its information
 //
 // Algorithm:

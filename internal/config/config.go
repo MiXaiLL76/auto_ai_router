@@ -664,7 +664,7 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("invalid max_attempts: %d", c.Fail2Ban.MaxAttempts)
 	}
 
-	if len(c.Credentials) == 0 {
+	if len(c.Credentials) == 0 && !c.LiteLLMDB.Enabled {
 		return fmt.Errorf("no credentials configured")
 	}
 

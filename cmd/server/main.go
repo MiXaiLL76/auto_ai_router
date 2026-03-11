@@ -88,16 +88,25 @@ func main() {
 		}
 	}
 
+	litellmDBManager := initializeLiteLLMDB(cfg, log)
+
+	// ==================== Load Model Table from LiteLLM DB ====================
+	// Fetch credentials, model configs and prices from LiteLLM DB before
+	// initializing the balancer/model-manager so that DB-defined routes are
+	// included from the very first request.
+	priceRegistry := models.NewModelPriceRegistry()
+	if litellmDBManager.IsEnabled() {
+		loadModelTableFromDB(litellmDBManager, cfg, priceRegistry, log)
+	}
+
 	_, rateLimiter, bal := initializeBalancer(cfg, log, redisBackend)
 	modelManager := initializeModelManager(log, cfg, rateLimiter, bal)
 	tokenManager := auth.NewVertexTokenManager(log)
 	defer tokenManager.Stop()
 
-	litellmDBManager := initializeLiteLLMDB(cfg, log)
 	metrics := monitoring.New(cfg.Monitoring.PrometheusEnabled)
 
 	// ==================== Initialize Model Pricing ====================
-	priceRegistry := models.NewModelPriceRegistry()
 	if cfg.Server.ModelPricesLink != "" {
 		log.Info("Using model prices from", "link", cfg.Server.ModelPricesLink)
 	} else {
@@ -175,6 +184,7 @@ func main() {
 
 	if litellmDBManager.IsEnabled() {
 		startDBHealthMonitor(log, bgCtx, litellmDBManager, healthChecker, &wg)
+		_ = litellmDBManager.FetchMasterKey(bgCtx, cfg.Server.MasterKey)
 	}
 
 	// Start model price sync loop (only if configured)
@@ -361,6 +371,42 @@ func initializeModelManager(
 	return modelManager
 }
 
+// loadModelTableFromDB fetches credentials, model configs and model prices from
+// LiteLLM DB and merges them into cfg and the price registry.
+// Errors are logged as warnings; the server continues with whatever was loaded.
+func loadModelTableFromDB(
+	dbManager litellmdb.Manager,
+	cfg *config.Config,
+	priceRegistry *models.ModelPriceRegistry,
+	log *slog.Logger,
+) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	dbCreds, dbModels, dbPrices, err := dbManager.FetchModelsForAIR(ctx, cfg.Server.MasterKey)
+	if err != nil {
+		log.Warn("Failed to load model table from LiteLLM DB (continuing without DB models)",
+			"error", err,
+		)
+		return
+	}
+
+	if len(dbCreds) > 0 {
+		log.Info("Loaded credentials from LiteLLM DB", "count", len(dbCreds))
+		cfg.Credentials = append(cfg.Credentials, dbCreds...)
+	}
+
+	if len(dbModels) > 0 {
+		log.Info("Loaded model configs from LiteLLM DB", "count", len(dbModels))
+		cfg.Models = append(cfg.Models, dbModels...)
+	}
+
+	if len(dbPrices) > 0 {
+		log.Info("Loaded model prices from LiteLLM DB", "count", len(dbPrices))
+		priceRegistry.Update(dbPrices)
+	}
+}
+
 func initializeLiteLLMDB(cfg *config.Config, log *slog.Logger) litellmdb.Manager {
 	if !cfg.LiteLLMDB.Enabled {
 		log.Info("LiteLLM DB integration disabled - using NoopManager (no security checks)")
@@ -400,7 +446,6 @@ func initializeLiteLLMDB(cfg *config.Config, log *slog.Logger) litellmdb.Manager
 		)
 		return litellmdb.NewNoopManager()
 	}
-
 	log.Info("LiteLLM DB integration initialized successfully")
 	return manager
 }

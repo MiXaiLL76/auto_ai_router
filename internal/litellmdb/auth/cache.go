@@ -64,21 +64,21 @@ func (c *Cache) Get(hashedToken string) (*models.TokenInfo, bool) {
 		atomic.AddUint64(&c.misses, 1)
 		return nil, false
 	}
-
-	// Check TTL
-	if time.Since(cached.cachedAt) > c.ttl {
-		// TTL expired - re-check under write lock to avoid evicting a fresh entry
-		// that another goroutine may have Set() between RUnlock and Lock.
-		c.mu.Lock()
-		current, stillExists := c.cache.Get(hashedToken)
-		if stillExists && time.Since(current.cachedAt) > c.ttl {
-			c.cache.Remove(hashedToken)
+	if cached.info.UserID != "litellm-master-key" {
+		// Check TTL
+		if time.Since(cached.cachedAt) > c.ttl {
+			// TTL expired - re-check under write lock to avoid evicting a fresh entry
+			// that another goroutine may have Set() between RUnlock and Lock.
+			c.mu.Lock()
+			current, stillExists := c.cache.Get(hashedToken)
+			if stillExists && time.Since(current.cachedAt) > c.ttl {
+				c.cache.Remove(hashedToken)
+			}
+			c.mu.Unlock()
+			atomic.AddUint64(&c.misses, 1)
+			return nil, false
 		}
-		c.mu.Unlock()
-		atomic.AddUint64(&c.misses, 1)
-		return nil, false
 	}
-
 	atomic.AddUint64(&c.hits, 1)
 	return cached.info, true
 }

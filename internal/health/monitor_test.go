@@ -7,11 +7,13 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb/models"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	imodels "github.com/mixaill76/auto_ai_router/internal/models"
 	"github.com/mixaill76/auto_ai_router/internal/testhelpers"
 )
 
@@ -26,14 +28,18 @@ func (m *MockDBManager) ValidateToken(ctx context.Context, rawToken string) (*mo
 func (m *MockDBManager) ValidateTokenForModel(ctx context.Context, rawToken, model string) (*models.TokenInfo, error) {
 	return nil, nil
 }
-func (m *MockDBManager) LogSpend(entry *models.SpendLogEntry) error { return nil }
-func (m *MockDBManager) IsEnabled() bool                            { return true }
-func (m *MockDBManager) IsHealthy() bool                            { return m.healthy }
-func (m *MockDBManager) AuthCacheStats() models.AuthCacheStats      { return models.AuthCacheStats{} }
-func (m *MockDBManager) SpendLoggerStats() models.SpendLoggerStats  { return models.SpendLoggerStats{} }
-func (m *MockDBManager) ConnectionStats() *pgxpool.Stat             { return nil }
-func (m *MockDBManager) GetPool() *pgxpool.Pool                     { return nil }
-func (m *MockDBManager) Shutdown(ctx context.Context) error         { return nil }
+func (m *MockDBManager) LogSpend(entry *models.SpendLogEntry) error                   { return nil }
+func (m *MockDBManager) IsEnabled() bool                                              { return true }
+func (m *MockDBManager) IsHealthy() bool                                              { return m.healthy }
+func (m *MockDBManager) AuthCacheStats() models.AuthCacheStats                        { return models.AuthCacheStats{} }
+func (m *MockDBManager) SpendLoggerStats() models.SpendLoggerStats                    { return models.SpendLoggerStats{} }
+func (m *MockDBManager) ConnectionStats() *pgxpool.Stat                               { return nil }
+func (m *MockDBManager) GetPool() *pgxpool.Pool                                       { return nil }
+func (m *MockDBManager) Shutdown(ctx context.Context) error                           { return nil }
+func (m *MockDBManager) FetchMasterKey(ctx context.Context, default_key string) error { return nil }
+func (m *MockDBManager) FetchModelsForAIR(ctx context.Context, signingKey string) ([]config.CredentialConfig, []config.ModelRPMConfig, map[string]*imodels.ModelPrice, error) {
+	return []config.CredentialConfig{}, []config.ModelRPMConfig{}, make(map[string]*imodels.ModelPrice), nil
+}
 
 // Compile-time check
 var _ litellmdb.Manager = (*MockDBManager)(nil)

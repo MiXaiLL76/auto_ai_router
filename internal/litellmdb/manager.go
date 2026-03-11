@@ -5,20 +5,28 @@ import (
 	"log/slog"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb/auth"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb/connection"
+	modeltable "github.com/mixaill76/auto_ai_router/internal/litellmdb/model_table"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb/models"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb/spendlog"
+	imodels "github.com/mixaill76/auto_ai_router/internal/models"
 )
 
 // Manager is the main interface for the litellmdb module
 type Manager interface {
+	FetchMasterKey(ctx context.Context, default_key string) error
+
 	// Auth - synchronous authentication
 	ValidateToken(ctx context.Context, rawToken string) (*models.TokenInfo, error)
 	ValidateTokenForModel(ctx context.Context, rawToken, model string) (*models.TokenInfo, error)
 
 	// Logging - asynchronous logging
 	LogSpend(entry *models.SpendLogEntry) error
+
+	// Model table - fetch credentials/models/prices from LiteLLM DB for AIR
+	FetchModelsForAIR(ctx context.Context, signingKey string) ([]config.CredentialConfig, []config.ModelRPMConfig, map[string]*imodels.ModelPrice, error)
 
 	// Status
 	IsEnabled() bool
@@ -44,6 +52,15 @@ type NoopManager struct{}
 // NewNoopManager creates a new no-op manager
 func NewNoopManager() *NoopManager {
 	return &NoopManager{}
+}
+
+// FetchMasterKey validates a token
+func (m *NoopManager) FetchMasterKey(ctx context.Context, default_key string) error {
+	return nil
+}
+
+func (n *NoopManager) FetchModelsForAIR(_ context.Context, _ string) ([]config.CredentialConfig, []config.ModelRPMConfig, map[string]*imodels.ModelPrice, error) {
+	return nil, nil, nil, nil
 }
 
 func (n *NoopManager) ValidateToken(ctx context.Context, rawToken string) (*models.TokenInfo, error) {
@@ -94,6 +111,7 @@ type DefaultManager struct {
 	pool        *connection.ConnectionPool
 	auth        *auth.Authenticator
 	spendLogger *spendlog.Logger
+	modelTable  *modeltable.ProxyModelTable
 	config      *models.Config
 	logger      *slog.Logger
 }
@@ -128,7 +146,6 @@ func New(cfg *models.Config) (Manager, error) {
 
 	// Create authenticator
 	authenticator := auth.NewAuthenticator(pool, cache, cfg.Logger)
-
 	// Create spend logger
 	logger := spendlog.NewLogger(pool, cfg)
 	logger.Start()
@@ -137,6 +154,7 @@ func New(cfg *models.Config) (Manager, error) {
 		pool:        pool,
 		auth:        authenticator,
 		spendLogger: logger,
+		modelTable:  modeltable.NewProxyModelTable(pool, cfg.Logger),
 		config:      cfg,
 		logger:      cfg.Logger,
 	}
@@ -152,6 +170,16 @@ func New(cfg *models.Config) (Manager, error) {
 	)
 
 	return m, err
+}
+
+// FetchMasterKey validates a token
+func (m *DefaultManager) FetchMasterKey(ctx context.Context, default_key string) error {
+	return m.auth.FetchMasterKey(ctx, default_key)
+}
+
+// FetchModelsForAIR loads credentials, model RPM configs and prices from LiteLLM DB
+func (m *DefaultManager) FetchModelsForAIR(ctx context.Context, signingKey string) ([]config.CredentialConfig, []config.ModelRPMConfig, map[string]*imodels.ModelPrice, error) {
+	return m.modelTable.FetchModelsForAIR(ctx, signingKey)
 }
 
 // ValidateToken validates a token
