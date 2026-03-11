@@ -698,6 +698,54 @@ func TestModelPriceRegistry_UpdateAndGetPrice(t *testing.T) {
 	assert.Equal(t, 0.000014, geminiPrice.OutputCostPerReasoningToken)
 }
 
+func TestModelPriceRegistry_MergeDB(t *testing.T) {
+	registry := NewModelPriceRegistry()
+
+	initial := map[string]*ModelPrice{
+		"gpt-4": {
+			InputCostPerToken:  0.00003,
+			OutputCostPerToken: 0.00006,
+		},
+		"claude-3-opus": {
+			InputCostPerToken:  0.000015,
+			OutputCostPerToken: 0.000075,
+		},
+	}
+	registry.Update(initial)
+	prevUpdate := registry.LastUpdate()
+
+	dbPrices := map[string]*ModelPrice{
+		"gpt-4": {
+			InputCostPerToken:  0.000031,
+			OutputCostPerToken: 0.000061,
+		},
+		"gemini-1.5-pro": {
+			InputCostPerToken:  0.0000035,
+			OutputCostPerToken: 0.0000105,
+		},
+	}
+	registry.MergeDB(dbPrices)
+
+	assert.Equal(t, 3, registry.Count())
+	assert.WithinDuration(t, time.Now().UTC(), registry.LastUpdate(), 5*time.Second)
+	assert.True(t, registry.LastUpdate().After(prevUpdate) || registry.LastUpdate().Equal(prevUpdate))
+
+	// DB prices should override existing entries.
+	updated := registry.GetPrice("gpt-4")
+	assert.NotNil(t, updated)
+	assert.Equal(t, 0.000031, updated.InputCostPerToken)
+	assert.Equal(t, 0.000061, updated.OutputCostPerToken)
+
+	// Existing non-DB entries should remain.
+	claude := registry.GetPrice("claude-3-opus")
+	assert.NotNil(t, claude)
+	assert.Equal(t, 0.000015, claude.InputCostPerToken)
+
+	// New DB entries should be added.
+	gemini := registry.GetPrice("gemini-1.5-pro")
+	assert.NotNil(t, gemini)
+}
+
 func TestModelPriceRegistry_GetPrice_NotFound(t *testing.T) {
 	registry := NewModelPriceRegistry()
 
@@ -712,6 +760,69 @@ func TestModelPriceRegistry_GetPrice_NotFound(t *testing.T) {
 
 	result = registry.GetPrice("claude-3-opus")
 	assert.Nil(t, result, "GetPrice should return nil for a model not in the registry")
+}
+
+func TestUpdateDBModels_PreservesStaticAndMapsDB(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+
+	staticModels := []config.ModelRPMConfig{
+		{Name: "static-global", RPM: 10},
+		{Name: "static-specific", Credential: "yaml-1", RPM: 20},
+		{Name: "static-real", Model: "real-static", RPM: 30},
+	}
+	manager := New(logger, 100, staticModels)
+
+	staticCreds := []config.CredentialConfig{
+		{Name: "yaml-1"},
+		{Name: "yaml-2"},
+	}
+	manager.LoadModelsFromConfig(staticCreds)
+
+	dbModels := []config.ModelRPMConfig{
+		{Name: "db-global", RPM: 5},
+		{Name: "db-specific", Credential: "db-cred-1", RPM: 7, TPM: 9, Model: "real-db"},
+		{Name: "db-unknown", Credential: "missing", RPM: 11},
+	}
+	dbCreds := []config.CredentialConfig{
+		{Name: "db-cred-1"},
+		{Name: "db-model-foo"},
+	}
+	allCreds := append(append([]config.CredentialConfig(nil), staticCreds...), dbCreds...)
+
+	manager.UpdateDBModels(dbModels, staticCreds, allCreds)
+
+	assert.ElementsMatch(t, []string{"yaml-1", "yaml-2"}, manager.GetCredentialsForModel("static-global"))
+	assert.ElementsMatch(t, []string{"yaml-1", "yaml-2"}, manager.GetCredentialsForModel("db-global"))
+	assert.ElementsMatch(t, []string{"db-cred-1"}, manager.GetCredentialsForModel("db-specific"))
+	assert.Nil(t, manager.GetCredentialsForModel("db-unknown"))
+
+	real, ok := manager.GetRealModelName("db-specific")
+	assert.True(t, ok)
+	assert.Equal(t, "real-db", real)
+
+	real, ok = manager.GetRealModelName("static-real")
+	assert.True(t, ok)
+	assert.Equal(t, "real-static", real)
+}
+
+func TestUpdateDBModels_DBOnlyGlobalMapping(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+
+	manager := New(logger, 100, []config.ModelRPMConfig{})
+
+	staticCreds := []config.CredentialConfig{}
+	dbCreds := []config.CredentialConfig{
+		{Name: "db-cred-1"},
+		{Name: "db-model-foo"},
+	}
+	dbModels := []config.ModelRPMConfig{
+		{Name: "db-global", RPM: 5},
+	}
+
+	manager.UpdateDBModels(dbModels, staticCreds, dbCreds)
+
+	creds := manager.GetCredentialsForModel("db-global")
+	assert.ElementsMatch(t, []string{"db-cred-1"}, creds)
 }
 
 func TestGetRemoteModels_CacheExpiryRace(t *testing.T) {

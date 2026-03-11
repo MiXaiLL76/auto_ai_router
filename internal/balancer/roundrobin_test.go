@@ -1242,3 +1242,38 @@ func TestRoundRobin_MixedTypeTrafficIndependence(t *testing.T) {
 	assert.Equal(t, expectedOrder, vertexResults,
 		"Vertex creds should cycle evenly regardless of interleaved OpenAI traffic")
 }
+
+func TestUpdateDBCredentials(t *testing.T) {
+	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
+	rl := ratelimit.New()
+
+	staticCreds := []config.CredentialConfig{
+		{Name: "yaml-1", APIKey: "key1", BaseURL: "http://test1.com", RPM: 100},
+	}
+	bal := New(staticCreds, f2b, rl)
+
+	dbCreds := []config.CredentialConfig{
+		{Name: "yaml-1", APIKey: "dup", RPM: 10}, // should be ignored (static wins)
+		{Name: "db-1", APIKey: "dbkey1", RPM: 10, TPM: 0},
+		{Name: "db-2", APIKey: "dbkey2", RPM: 20, TPM: 50},
+	}
+
+	bal.UpdateDBCredentials(dbCreds)
+
+	// Static credential must remain, duplicate DB name should be filtered out.
+	assert.Len(t, bal.credentials, 3)
+	assert.Equal(t, []string{"yaml-1", "db-1", "db-2"}, []string{
+		bal.credentials[0].Name,
+		bal.credentials[1].Name,
+		bal.credentials[2].Name,
+	})
+
+	// Credential index must include new DB creds.
+	assert.Equal(t, 0, bal.credentialIndex["yaml-1"])
+	assert.Equal(t, 1, bal.credentialIndex["db-1"])
+	assert.Equal(t, 2, bal.credentialIndex["db-2"])
+
+	// DB credentials should be registered in the rate limiter with TPM defaulting to -1 when 0.
+	assert.True(t, bal.rateLimiter.AllowTokens("db-1"), "TPM=0 should be treated as unlimited")
+	assert.True(t, bal.rateLimiter.AllowTokens("db-2"))
+}
