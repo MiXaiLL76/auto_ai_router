@@ -86,7 +86,6 @@ func aggregateDailyOrganizationSpendLogs(
 	)
 
 	if len(aggregations) == 0 {
-		logger.Debug("[DB] Organization aggregation: no aggregations to insert")
 		return nil
 	}
 

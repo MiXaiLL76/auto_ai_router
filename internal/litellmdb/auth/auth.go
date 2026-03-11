@@ -176,6 +176,7 @@ func (a *Authenticator) fetchTokenFromDB(ctx context.Context, hashedToken string
 
 	// ============ Team fields ============
 	var teamIDCheck, teamAlias *string
+	var teamOrganizationID *string
 	var teamMaxBudget, teamSpend *float64
 	var teamBlocked *bool
 	var teamTPMLimit, teamRPMLimit *int64
@@ -222,7 +223,7 @@ func (a *Authenticator) fetchTokenFromDB(ctx context.Context, hashedToken string
 		// Team
 		&teamIDCheck,
 		&teamAlias,
-		new(string), // team_organization_id (positional, not used)
+		&teamOrganizationID, // team_organization_id (nullable, positional)
 		&teamMaxBudget,
 		&teamSpend,
 		&teamBlocked,

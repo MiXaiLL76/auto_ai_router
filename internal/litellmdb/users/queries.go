@@ -11,10 +11,10 @@ import (
 
 // UserRow represents a user record from LiteLLM_UserTable.
 type UserRow struct {
-	UserID    string
-	UserEmail string
-	Password  string
-	UserRole  string
+	UserID    *string
+	UserEmail *string
+	Password  *string
+	UserRole  *string
 }
 
 // FindUserByEmail looks up a user by email (case-insensitive).

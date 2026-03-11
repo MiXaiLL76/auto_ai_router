@@ -49,12 +49,13 @@ func loadUnprocessedSpendLogRecords(
 	records := make([]spendLogRecord, 0, len(requestIDs))
 	for rows.Next() {
 		var record spendLogRecord
+		var userID *string
 		var model, modelGroup, customLLMProvider, mcpNamespacedToolName, apiBase *string
 		var status *string
 		var teamID, organizationID, endUser, agentID, requestTags *string
 
 		err := rows.Scan(
-			&record.UserID,
+			&userID,
 			&record.Date,
 			&record.APIKey,
 			&model,
@@ -78,6 +79,7 @@ func loadUnprocessedSpendLogRecords(
 			return nil, err
 		}
 
+		record.UserID = derefString(userID)
 		record.Model = derefString(model)
 		record.ModelGroup = derefString(modelGroup)
 		record.CustomLLMProvider = derefString(customLLMProvider)

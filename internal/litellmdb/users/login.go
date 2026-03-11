@@ -74,16 +74,29 @@ func AuthenticateUser(ctx context.Context, req LoginRequest, masterKey string, p
 		return nil, ErrInvalidCredentials
 	}
 
-	if !checkPassword(req.Password, user.Password) {
+	if user.UserID == nil || user.Password == nil {
+		return nil, ErrInvalidCredentials
+	}
+
+	userEmail := ""
+	if user.UserEmail != nil {
+		userEmail = *user.UserEmail
+	}
+	userRole := ""
+	if user.UserRole != nil {
+		userRole = *user.UserRole
+	}
+
+	if !checkPassword(req.Password, *user.Password) {
 		return nil, ErrInvalidCredentials
 	}
 
 	// Generate JWT for DB user
 	now := time.Now()
 	claims := &SessionClaims{
-		UserID:    user.UserID,
-		UserRole:  user.UserRole,
-		UserEmail: user.UserEmail,
+		UserID:    *user.UserID,
+		UserRole:  userRole,
+		UserEmail: userEmail,
 		Exp:       now.Add(SessionJWTDuration).Unix(),
 		Iat:       now.Unix(),
 	}
@@ -97,10 +110,10 @@ func AuthenticateUser(ctx context.Context, req LoginRequest, masterKey string, p
 	claims.Key = jwt
 
 	return &LoginResult{
-		UserID:    user.UserID,
+		UserID:    *user.UserID,
 		Key:       jwt,
-		UserEmail: user.UserEmail,
-		UserRole:  user.UserRole,
+		UserEmail: userEmail,
+		UserRole:  userRole,
 	}, nil
 }
 
