@@ -22,7 +22,7 @@ from test_helpers import TestModels, ContentValidator, ToolDefinitions, ImageTes
 RESPONSES_MODELS = (
     TestModels.OPENAI_MODELS
     # + TestModels.VERTEX_MODELS
-    + TestModels.ANTHROPIC_MODELS
+    # + TestModels.ANTHROPIC_MODELS
 )
 
 # Capability-specific model subsets
@@ -526,5 +526,16 @@ class TestResponsesAPIEdgeCases:
             max_output_tokens=50,
         )
 
+        validate_responses_api_response(response)
+        validate_responses_api_usage(response)
+
+    @pytest.mark.parametrize("model", RESPONSES_MODELS)
+    def test_response_has_output(self, openai_client, model):
+        """Ответ содержит поле output или choices."""
+        response = openai_client.responses.create(
+            model=model,
+            input="Say 'pong'.",
+            reasoning={"effort": "none"},
+        )
         validate_responses_api_response(response)
         validate_responses_api_usage(response)

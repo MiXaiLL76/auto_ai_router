@@ -683,6 +683,23 @@ func TestRequestToChat_Reasoning(t *testing.T) {
 	assert.NotContains(t, parsed, "reasoning")
 }
 
+func TestRequestToChat_ReasoningNone(t *testing.T) {
+	// effort: "none" should NOT be converted to reasoning_effort
+	body := `{
+		"model": "gpt-4o",
+		"input": "Say pong",
+		"reasoning": {"effort": "none"}
+	}`
+	result, err := RequestToChat([]byte(body))
+	require.NoError(t, err)
+
+	var parsed map[string]interface{}
+	require.NoError(t, json.Unmarshal(result, &parsed))
+
+	assert.NotContains(t, parsed, "reasoning_effort", "effort='none' should not be converted")
+	assert.NotContains(t, parsed, "reasoning")
+}
+
 func TestRequestToChat_TextFormat(t *testing.T) {
 	body := `{
 		"model": "gpt-4o",

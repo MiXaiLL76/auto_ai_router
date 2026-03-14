@@ -26,3 +26,11 @@ new_tests
 dashboard
 TODO.md
 coverage.html
+docs/session_feature.md
+redis_todo.md
+price_from_litellm.json
+core.md
+config_from_litellm.yml
+examples/extract_litellm_models_and_creds.py
+anyllm_example.py
+logs/*.txt

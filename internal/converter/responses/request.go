@@ -595,6 +595,7 @@ func convertToolChoice(raw map[string]interface{}) error {
 }
 
 // convertReasoning extracts reasoning.effort and sets it as top-level reasoning_effort.
+// Skips "none" effort (equivalent to no reasoning) and empty values.
 func convertReasoning(raw map[string]interface{}) {
 	reasoning, ok := raw["reasoning"]
 	if !ok {
@@ -604,7 +605,7 @@ func convertReasoning(raw map[string]interface{}) {
 	if !ok {
 		return
 	}
-	if effort, ok := reasoningMap["effort"].(string); ok && effort != "" {
+	if effort, ok := reasoningMap["effort"].(string); ok && effort != "" && effort != "none" {
 		raw["reasoning_effort"] = effort
 	}
 }
