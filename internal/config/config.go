@@ -145,26 +145,27 @@ func collectAnchors(node *yaml.Node, anchors map[string]*yaml.Node) {
 //
 // After flattening the nested sequence items are promoted to the parent level,
 // so the result is a flat list of model mappings.
-func flattenSequences(node *yaml.Node) {
-	if node == nil {
+func flattenSequences(root *yaml.Node) {
+	if root == nil {
 		return
 	}
-
-	if node.Kind == yaml.SequenceNode {
-		var flat []*yaml.Node
-		for _, child := range node.Content {
-			if child.Kind == yaml.SequenceNode {
-				// Expand: add all items of the nested sequence directly.
-				flat = append(flat, child.Content...)
-			} else {
-				flat = append(flat, child)
+	queue := make([]*yaml.Node, 0, 16)
+	queue = append(queue, root)
+	for len(queue) > 0 {
+		node := queue[0]
+		queue = queue[1:]
+		if node.Kind == yaml.SequenceNode {
+			flat := make([]*yaml.Node, 0, len(node.Content))
+			for _, child := range node.Content {
+				if child.Kind == yaml.SequenceNode {
+					flat = append(flat, child.Content...)
+				} else {
+					flat = append(flat, child)
+				}
 			}
+			node.Content = flat
 		}
-		node.Content = flat
-	}
-
-	for _, child := range node.Content {
-		flattenSequences(child)
+		queue = append(queue, node.Content...)
 	}
 }
 
@@ -525,6 +526,10 @@ type LiteLLMDBConfig struct {
 	// IsRequired specifies whether LiteLLM DB is mandatory (fail startup on error)
 	// or optional (degrade to NoopManager with warning on error)
 	IsRequired bool `yaml:"is_required"` // default: false
+	// IsRequired specifies whether LiteLLM DB is mandatory (fail startup on error)
+	// or optional (degrade to NoopManager with warning on error)
+	LoadLitellmDBModels   bool          `yaml:"load_db_models"`         // default: false
+	LitellmDBSyncInterval time.Duration `yaml:"db_model_sync_interval"` // default: 1m
 
 	// Database connection postgresql://[user[:password]@][netloc][:port][/dbname][?param1=value1&...]
 	DatabaseURL string `yaml:"database_url"` // os.environ/LITELLM_DATABASE_URL
@@ -578,18 +583,20 @@ func (m *MonitoringConfig) UnmarshalYAML(value *yaml.Node) error {
 // UnmarshalYAML implements custom unmarshaling for LiteLLMDBConfig with env variable support
 func (l *LiteLLMDBConfig) UnmarshalYAML(value *yaml.Node) error {
 	type tempConfig struct {
-		Enabled             string `yaml:"enabled"`
-		IsRequired          string `yaml:"is_required"`
-		DatabaseURL         string `yaml:"database_url"`
-		MaxConns            string `yaml:"max_conns"`
-		MinConns            string `yaml:"min_conns"`
-		HealthCheckInterval string `yaml:"health_check_interval"`
-		ConnectTimeout      string `yaml:"connect_timeout"`
-		AuthCacheTTL        string `yaml:"auth_cache_ttl"`
-		AuthCacheSize       string `yaml:"auth_cache_size"`
-		LogQueueSize        string `yaml:"log_queue_size"`
-		LogBatchSize        string `yaml:"log_batch_size"`
-		LogFlushInterval    string `yaml:"log_flush_interval"`
+		Enabled               string `yaml:"enabled"`
+		IsRequired            string `yaml:"is_required"`
+		LoadLitellmDBModels   string `yaml:"load_db_models"`
+		LitellmDBSyncInterval string `yaml:"db_model_sync_interval"`
+		DatabaseURL           string `yaml:"database_url"`
+		MaxConns              string `yaml:"max_conns"`
+		MinConns              string `yaml:"min_conns"`
+		HealthCheckInterval   string `yaml:"health_check_interval"`
+		ConnectTimeout        string `yaml:"connect_timeout"`
+		AuthCacheTTL          string `yaml:"auth_cache_ttl"`
+		AuthCacheSize         string `yaml:"auth_cache_size"`
+		LogQueueSize          string `yaml:"log_queue_size"`
+		LogBatchSize          string `yaml:"log_batch_size"`
+		LogFlushInterval      string `yaml:"log_flush_interval"`
 	}
 
 	var temp tempConfig
@@ -606,6 +613,9 @@ func (l *LiteLLMDBConfig) UnmarshalYAML(value *yaml.Node) error {
 		return err
 	}
 	if l.IsRequired, err = parseField(temp.IsRequired, false, strconv.ParseBool, "litellm_db.is_required"); err != nil {
+		return err
+	}
+	if l.LoadLitellmDBModels, err = parseField(temp.LoadLitellmDBModels, false, strconv.ParseBool, "litellm_db.load_db_models"); err != nil {
 		return err
 	}
 
@@ -627,6 +637,9 @@ func (l *LiteLLMDBConfig) UnmarshalYAML(value *yaml.Node) error {
 	}
 	// Duration fields
 	if l.HealthCheckInterval, err = parseField(temp.HealthCheckInterval, 10*time.Second, time.ParseDuration, "litellm_db.health_check_interval"); err != nil {
+		return err
+	}
+	if l.LitellmDBSyncInterval, err = parseField(temp.LitellmDBSyncInterval, 1*time.Minute, time.ParseDuration, "litellm_db.db_model_sync_interval"); err != nil {
 		return err
 	}
 	if l.ConnectTimeout, err = parseField(temp.ConnectTimeout, 5*time.Second, time.ParseDuration, "litellm_db.connect_timeout"); err != nil {
@@ -746,6 +759,9 @@ func Load(path string) (*Config, error) {
 			if expandedModel.Credential == "" {
 				expandedModel.Credential = cred.Name
 			}
+			if expandedModel.Name == "" {
+				continue
+			}
 			cfg.Models = append(cfg.Models, expandedModel)
 		}
 	}
@@ -804,18 +820,20 @@ func defaultRedisConfig() RedisConfig {
 
 func defaultLiteLLMDBConfig() LiteLLMDBConfig {
 	return LiteLLMDBConfig{
-		Enabled:             false,
-		IsRequired:          false,
-		DatabaseURL:         "",
-		MaxConns:            25,
-		MinConns:            5,
-		HealthCheckInterval: 10 * time.Second,
-		ConnectTimeout:      5 * time.Second,
-		AuthCacheTTL:        5 * time.Second,
-		AuthCacheSize:       10000,
-		LogQueueSize:        5000,
-		LogBatchSize:        100,
-		LogFlushInterval:    5 * time.Second,
+		Enabled:               false,
+		IsRequired:            false,
+		LoadLitellmDBModels:   false,
+		LitellmDBSyncInterval: 1 * time.Minute,
+		DatabaseURL:           "",
+		MaxConns:              25,
+		MinConns:              5,
+		HealthCheckInterval:   10 * time.Second,
+		ConnectTimeout:        5 * time.Second,
+		AuthCacheTTL:          5 * time.Second,
+		AuthCacheSize:         10000,
+		LogQueueSize:          5000,
+		LogBatchSize:          100,
+		LogFlushInterval:      5 * time.Second,
 	}
 }
 

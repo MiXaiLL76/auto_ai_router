@@ -360,6 +360,10 @@ func (r *RoundRobin) UpdateDBCredentials(dbCreds []config.CredentialConfig) {
 
 	// Merge static + new DB creds.
 	newCreds := append(append([]config.CredentialConfig(nil), r.staticCreds...), filtered...)
+	if len(newCreds) == 0 {
+		// Nothing to update — keep existing credentials to avoid empty-list panics.
+		return
+	}
 
 	// Upsert rate-limiter limits for all DB creds (not just new ones).
 	// AddCredentialWithTPM overwrites the existing entry, so calling it every sync

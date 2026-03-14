@@ -34,7 +34,6 @@ func DecryptValue(value []byte, signingKey string) (string, error) {
 	if !ok {
 		return "", fmt.Errorf("decryption failed (invalid key or tampered data)")
 	}
-
 	return string(opened), nil
 }
 
@@ -55,9 +54,7 @@ func DecryptValueHelper(value string, key string, signingKey string) (string, er
 	// Вызов основной функции дешифровки
 	decrypted, err := DecryptValue(decoded, signingKey)
 	if err != nil {
-		// Логика обработки ошибок как в вашем Python-коде
-		fmt.Printf("Error decrypting value for key: %s. Error: %v\n", key, err)
-		return "", err
+		return "", fmt.Errorf("decrypting %s: %w", key, err)
 	}
 
 	return decrypted, nil

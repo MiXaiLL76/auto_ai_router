@@ -193,9 +193,13 @@ func main() {
 
 	if litellmDBManager.IsEnabled() {
 		startDBHealthMonitor(log, bgCtx, litellmDBManager, healthChecker, &wg)
-		_ = litellmDBManager.FetchMasterKey(bgCtx, cfg.Server.MasterKey)
-		startDBModelTableSyncLoop(log, bgCtx, litellmDBManager, staticCreds,
-			bal, modelManager, rateLimiter, priceRegistry, cfg, 1*time.Minute, &wg)
+		if err := litellmDBManager.FetchMasterKey(bgCtx, cfg.Server.MasterKey); err != nil {
+			log.Warn("Failed to fetch master key from LiteLLM DB.", "error", err)
+		}
+		if cfg.LiteLLMDB.LoadLitellmDBModels {
+			startDBModelTableSyncLoop(log, bgCtx, litellmDBManager, staticCreds,
+				bal, modelManager, rateLimiter, priceRegistry, cfg, cfg.LiteLLMDB.LitellmDBSyncInterval, &wg)
+		}
 	}
 
 	// Start model price sync loop (only if configured)
@@ -434,6 +438,12 @@ func syncDBModelTable(
 	priceRegistry *models.ModelPriceRegistry,
 	cfg *config.Config,
 ) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Error("Panic in sync loop", "panic", r)
+		}
+	}()
+
 	fetchCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 

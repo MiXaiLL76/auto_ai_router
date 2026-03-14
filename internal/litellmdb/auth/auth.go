@@ -159,7 +159,6 @@ func (a *Authenticator) fetchTokenFromDB(ctx context.Context, hashedToken string
 		return nil, models.ErrConnectionFailed
 	}
 	defer conn.Release()
-
 	var info models.TokenInfo
 
 	// ============ Token fields ============

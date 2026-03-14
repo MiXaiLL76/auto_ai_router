@@ -188,6 +188,12 @@ func (a *ProxyModelTable) FetchModelsForAIR(ctx context.Context, signingKey stri
 			)
 			continue
 		}
+		if credByName[*cred.CredentialName] {
+			a.logger.Warn("Duplicate credential name in DB, skipping",
+				"credential", *cred.CredentialName,
+			)
+			continue
+		}
 		credByName[*cred.CredentialName] = true
 		airCredentials = append(airCredentials, cfg)
 	}
