@@ -175,4 +175,103 @@ models:
 
 By default, all models are available through all credentials. Use the `models` section to restrict which credentials serve which models.
 
+By default, models can also be declared directly inside a credential via the `models:` field — they are automatically extracted and added to the global models list with the credential name pre-filled.
+
 See [Load Balancing](../advanced/balancing.md) for details on multi-credential routing.
+
+## YAML Anchors for Models
+
+When many credentials share the same set of models, YAML anchors eliminate repetition.
+Define a template once with `&anchor-name` and reference it with `*anchor-name`.
+
+### List anchor in `x-model-templates`
+
+The `x-model-templates` top-level key is a dedicated namespace for anchor definitions. It is not processed by the router — its sole purpose is to hold anchors so they can be referenced elsewhere.
+
+```yaml
+x-model-templates:
+  vertex-base-models: &vertex-base-models
+    - name: gemini-2.5-flash
+      rpm: 100
+      tpm: 50000
+    - name: gemini-2.5-pro
+      rpm: 50
+      tpm: 100000
+
+credentials:
+  - name: "vertex_v1"
+    type: "vertex-ai"
+    project_id: "proj-1"
+    location: "global"
+    credentials_file: "keys/proj-1.json"
+    rpm: 100
+    models: *vertex-base-models   # expands to the full list
+
+  - name: "vertex_v2"
+    type: "vertex-ai"
+    project_id: "proj-2"
+    location: "global"
+    credentials_file: "keys/proj-2.json"
+    rpm: 100
+    models: *vertex-base-models   # same list, credential set to "vertex_v2"
+```
+
+Each model copy automatically gets the parent credential name injected, so no manual `credential:` field is needed inside the template.
+
+### Single-model anchor
+
+An anchor can also target a single model mapping and be used as an item in a `models:` list:
+
+```yaml
+x-model-templates:
+  flash: &flash
+    name: gemini-2.5-flash
+    rpm: 100
+    tpm: 50000
+
+credentials:
+  - name: "vertex_v1"
+    type: "vertex-ai"
+    project_id: "proj-1"
+    location: "global"
+    credentials_file: "keys/proj-1.json"
+    rpm: 100
+    models:
+      - *flash               # single model from anchor
+      - name: gemini-2.5-pro # inline model
+        rpm: 50
+        tpm: 100000
+```
+
+### Expanding a list anchor inside the top-level `models:` section
+
+A list anchor can be expanded inline within the top-level `models:` sequence. The router flattens the result so all items end up as a flat list:
+
+```yaml
+x-model-templates:
+  shared-models: &shared-models
+    - name: gemini-2.5-flash
+      credential: vertex_v1
+      rpm: 100
+      tpm: 50000
+    - name: gemini-2.5-pro
+      credential: vertex_v1
+      rpm: 50
+      tpm: 100000
+
+models:
+  - *shared-models        # expands and flattens both items into the list
+  - name: gpt-4o
+    credential: openai_main
+    rpm: 60
+    tpm: 80000
+```
+
+### Supported combinations
+
+| Syntax                   | Location                        | Result                                        |
+| ------------------------ | ------------------------------- | --------------------------------------------- |
+| `models: *list-anchor`   | inside a credential             | list items added with that credential name    |
+| `- *list-anchor`         | inside a credential's `models:` | list items added with that credential name    |
+| `- *single-model-anchor` | inside a credential's `models:` | single model added with that credential name  |
+| `- *list-anchor`         | top-level `models:`             | list expanded and flattened into the sequence |

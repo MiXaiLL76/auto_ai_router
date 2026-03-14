@@ -1118,6 +1118,242 @@ monitoring:
 	assert.Equal(t, 0, len(cfg.ModelAlias))
 }
 
+// ---------------------------------------------------------------------------
+// YAML anchor / alias tests
+// ---------------------------------------------------------------------------
+
+// TestLoad_ModelAnchors_ListInCredentials verifies that a YAML list anchor
+// referenced via *alias inside a credential's models: field is correctly
+// decoded and expanded into cfg.Models after Load.
+func TestLoad_ModelAnchors_ListInCredentials(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.yaml")
+
+	configContent := `
+server:
+  port: 8080
+  max_body_size_mb: 10
+  request_timeout: 30s
+  master_key: "sk-test"
+
+fail2ban:
+  max_attempts: 3
+  ban_duration: permanent
+  error_codes: [401]
+
+x-model-templates:
+  base-models: &base-models
+    - name: gemini-2.5-flash
+      rpm: 100
+      tpm: 50000
+    - name: gemini-2.5-pro
+      rpm: 50
+      tpm: 100000
+
+credentials:
+  - name: "vertex_v1"
+    type: "vertex-ai"
+    project_id: "proj-123"
+    location: "us-central1"
+    credentials_json: '{"type":"service_account"}'
+    rpm: 100
+    models: *base-models
+
+monitoring:
+  prometheus_enabled: false
+`
+	err := os.WriteFile(configPath, []byte(configContent), 0644)
+	require.NoError(t, err)
+
+	cfg, err := Load(configPath)
+	require.NoError(t, err)
+
+	// Both models should be extracted from the credential and added to cfg.Models
+	require.Len(t, cfg.Models, 2)
+	assert.Equal(t, "gemini-2.5-flash", cfg.Models[0].Name)
+	assert.Equal(t, 100, cfg.Models[0].RPM)
+	assert.Equal(t, 50000, cfg.Models[0].TPM)
+	assert.Equal(t, "vertex_v1", cfg.Models[0].Credential)
+
+	assert.Equal(t, "gemini-2.5-pro", cfg.Models[1].Name)
+	assert.Equal(t, 50, cfg.Models[1].RPM)
+	assert.Equal(t, "vertex_v1", cfg.Models[1].Credential)
+}
+
+// TestLoad_ModelAnchors_SameListMultipleCredentials verifies that the same
+// list anchor can be referenced from multiple credentials and each model copy
+// gets the correct credential name.
+func TestLoad_ModelAnchors_SameListMultipleCredentials(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.yaml")
+
+	configContent := `
+server:
+  port: 8080
+  max_body_size_mb: 10
+  request_timeout: 30s
+  master_key: "sk-test"
+
+fail2ban:
+  max_attempts: 3
+  ban_duration: permanent
+  error_codes: [401]
+
+x-model-templates:
+  vertex-models: &vertex-models
+    - name: gemini-2.5-flash
+      rpm: 100
+      tpm: 50000
+
+credentials:
+  - name: "vertex_v1"
+    type: "vertex-ai"
+    project_id: "proj-1"
+    location: "us-central1"
+    credentials_json: '{"type":"service_account"}'
+    rpm: 100
+    models: *vertex-models
+
+  - name: "vertex_v2"
+    type: "vertex-ai"
+    project_id: "proj-2"
+    location: "us-central1"
+    credentials_json: '{"type":"service_account"}'
+    rpm: 100
+    models: *vertex-models
+
+monitoring:
+  prometheus_enabled: false
+`
+	err := os.WriteFile(configPath, []byte(configContent), 0644)
+	require.NoError(t, err)
+
+	cfg, err := Load(configPath)
+	require.NoError(t, err)
+
+	require.Len(t, cfg.Models, 2)
+	assert.Equal(t, "gemini-2.5-flash", cfg.Models[0].Name)
+	assert.Equal(t, "vertex_v1", cfg.Models[0].Credential)
+	assert.Equal(t, "gemini-2.5-flash", cfg.Models[1].Name)
+	assert.Equal(t, "vertex_v2", cfg.Models[1].Credential)
+}
+
+// TestLoad_ModelAnchors_FlattenInTopLevelModels verifies that a list anchor
+// used as an element inside the top-level models: sequence is flattened into
+// the parent sequence (i.e. "- *list-anchor" expands all items).
+func TestLoad_ModelAnchors_FlattenInTopLevelModels(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.yaml")
+
+	configContent := `
+server:
+  port: 8080
+  max_body_size_mb: 10
+  request_timeout: 30s
+  master_key: "sk-test"
+
+fail2ban:
+  max_attempts: 3
+  ban_duration: permanent
+  error_codes: [401]
+
+x-model-templates:
+  shared-models: &shared-models
+    - name: gemini-2.5-flash
+      credential: vertex_v1
+      rpm: 100
+      tpm: 50000
+    - name: gemini-2.5-pro
+      credential: vertex_v1
+      rpm: 50
+      tpm: 100000
+
+credentials:
+  - name: "vertex_v1"
+    type: "vertex-ai"
+    project_id: "proj-1"
+    location: "us-central1"
+    credentials_json: '{"type":"service_account"}'
+    rpm: 100
+
+monitoring:
+  prometheus_enabled: false
+
+models:
+  - *shared-models
+  - name: gpt-4
+    credential: vertex_v1
+    rpm: 60
+    tpm: 80000
+`
+	err := os.WriteFile(configPath, []byte(configContent), 0644)
+	require.NoError(t, err)
+
+	cfg, err := Load(configPath)
+	require.NoError(t, err)
+
+	// 2 from anchor + 1 inline = 3 total
+	require.Len(t, cfg.Models, 3)
+	assert.Equal(t, "gemini-2.5-flash", cfg.Models[0].Name)
+	assert.Equal(t, "gemini-2.5-pro", cfg.Models[1].Name)
+	assert.Equal(t, "gpt-4", cfg.Models[2].Name)
+	assert.Equal(t, 60, cfg.Models[2].RPM)
+}
+
+// TestLoad_ModelAnchors_SingleModelAnchor verifies that an anchor on a single
+// model mapping (not a list) works when referenced in a credential's models list.
+func TestLoad_ModelAnchors_SingleModelAnchor(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.yaml")
+
+	configContent := `
+server:
+  port: 8080
+  max_body_size_mb: 10
+  request_timeout: 30s
+  master_key: "sk-test"
+
+fail2ban:
+  max_attempts: 3
+  ban_duration: permanent
+  error_codes: [401]
+
+x-model-templates:
+  flash: &flash
+    name: gemini-2.5-flash
+    rpm: 100
+    tpm: 50000
+
+credentials:
+  - name: "vertex_v1"
+    type: "vertex-ai"
+    project_id: "proj-1"
+    location: "us-central1"
+    credentials_json: '{"type":"service_account"}'
+    rpm: 100
+    models:
+      - *flash
+      - name: gemini-2.5-pro
+        rpm: 50
+        tpm: 100000
+
+monitoring:
+  prometheus_enabled: false
+`
+	err := os.WriteFile(configPath, []byte(configContent), 0644)
+	require.NoError(t, err)
+
+	cfg, err := Load(configPath)
+	require.NoError(t, err)
+
+	require.Len(t, cfg.Models, 2)
+	assert.Equal(t, "gemini-2.5-flash", cfg.Models[0].Name)
+	assert.Equal(t, 100, cfg.Models[0].RPM)
+	assert.Equal(t, "vertex_v1", cfg.Models[0].Credential)
+	assert.Equal(t, "gemini-2.5-pro", cfg.Models[1].Name)
+	assert.Equal(t, "vertex_v1", cfg.Models[1].Credential)
+}
+
 func TestResolveEnvString(t *testing.T) {
 	tests := []struct {
 		name     string

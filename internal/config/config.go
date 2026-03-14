@@ -54,6 +54,145 @@ type Config struct {
 	ModelAlias  map[string]string  `yaml:"model_alias,omitempty"`
 	LiteLLMDB   LiteLLMDBConfig    `yaml:"litellm_db,omitempty"`
 	Redis       RedisConfig        `yaml:"redis,omitempty"`
+	// ModelTemplates stores x-model-templates entries as raw interface{} so that
+	// both single-model mappings and lists of models can be defined as YAML anchors
+	// without type errors. The actual model data is extracted via anchor expansion.
+	ModelTemplates map[string]interface{} `yaml:"x-model-templates,omitempty"`
+}
+
+// UnmarshalYAML implements custom unmarshaling for Config with YAML anchor/alias support.
+// This allows using YAML anchors (&) and aliases (*) for x-model-templates.
+func (c *Config) UnmarshalYAML(value *yaml.Node) error {
+	// First, resolve all aliases in the YAML document
+	resolvedData, err := resolveYAMLAliases(value)
+	if err != nil {
+		return fmt.Errorf("failed to resolve YAML aliases: %w", err)
+	}
+
+	// Then unmarshal the resolved data into Config
+	type RawConfig struct {
+		Server         ServerConfig           `yaml:"server"`
+		Fail2Ban       Fail2BanConfig         `yaml:"fail2ban,omitempty"`
+		Credentials    []CredentialConfig     `yaml:"credentials"`
+		Monitoring     MonitoringConfig       `yaml:"monitoring"`
+		Models         []ModelRPMConfig       `yaml:"models,omitempty"`
+		ModelAlias     map[string]string      `yaml:"model_alias,omitempty"`
+		LiteLLMDB      LiteLLMDBConfig        `yaml:"litellm_db,omitempty"`
+		Redis          RedisConfig            `yaml:"redis,omitempty"`
+		ModelTemplates map[string]interface{} `yaml:"x-model-templates,omitempty"`
+	}
+
+	var raw RawConfig
+	if err := yaml.Unmarshal(resolvedData, &raw); err != nil {
+		return fmt.Errorf("failed to unmarshal config: %w", err)
+	}
+
+	// Copy values to actual config
+	c.Server = raw.Server
+	c.Fail2Ban = raw.Fail2Ban
+	c.Credentials = raw.Credentials
+	c.Monitoring = raw.Monitoring
+	c.Models = raw.Models
+	c.ModelAlias = raw.ModelAlias
+	c.LiteLLMDB = raw.LiteLLMDB
+	c.Redis = raw.Redis
+	c.ModelTemplates = raw.ModelTemplates
+
+	return nil
+}
+
+// resolveYAMLAliases takes raw YAML data, parses it, resolves aliases, and returns the resolved YAML.
+func resolveYAMLAliases(node *yaml.Node) ([]byte, error) {
+	// Collect all anchors from the document
+	anchors := make(map[string]*yaml.Node)
+	collectAnchors(node, anchors)
+
+	// Replace aliases with their anchor values
+	resolveAliasesInNode(node, anchors)
+
+	// Flatten nested sequences that result from list-anchor expansion.
+	// e.g. "- *list-anchor" in a sequence becomes a nested sequence after alias
+	// resolution; flattenSequences collapses those into the parent sequence so
+	// that model lists behave as expected.
+	flattenSequences(node)
+
+	// Marshal back to YAML
+	return yaml.Marshal(node)
+}
+
+// collectAnchors collects all anchor definitions from the YAML node tree
+func collectAnchors(node *yaml.Node, anchors map[string]*yaml.Node) {
+	if node == nil {
+		return
+	}
+
+	// If this node has an anchor, store it
+	if node.Anchor != "" {
+		anchors[node.Anchor] = node
+	}
+
+	for _, child := range node.Content {
+		collectAnchors(child, anchors)
+	}
+}
+
+// flattenSequences collapses nested sequences that arise when a list anchor is
+// used as an item inside another sequence:
+//
+//	models:
+//	  - *my-model-list   # after alias resolution this becomes a nested sequence
+//	  - name: other      # ordinary mapping item
+//
+// After flattening the nested sequence items are promoted to the parent level,
+// so the result is a flat list of model mappings.
+func flattenSequences(node *yaml.Node) {
+	if node == nil {
+		return
+	}
+
+	if node.Kind == yaml.SequenceNode {
+		var flat []*yaml.Node
+		for _, child := range node.Content {
+			if child.Kind == yaml.SequenceNode {
+				// Expand: add all items of the nested sequence directly.
+				flat = append(flat, child.Content...)
+			} else {
+				flat = append(flat, child)
+			}
+		}
+		node.Content = flat
+	}
+
+	for _, child := range node.Content {
+		flattenSequences(child)
+	}
+}
+
+// resolveAliasesInNode replaces alias nodes with their anchor values
+func resolveAliasesInNode(node *yaml.Node, anchors map[string]*yaml.Node) {
+	if node == nil {
+		return
+	}
+
+	if node.Kind == yaml.AliasNode {
+		// Replace the alias with the anchor's value
+		if anchor, ok := anchors[node.Value]; ok {
+			// Copy all fields from anchor to this node
+			node.Kind = anchor.Kind
+			node.Style = anchor.Style
+			node.Tag = anchor.Tag
+			node.Value = anchor.Value
+			node.Anchor = anchor.Anchor
+			node.Content = anchor.Content
+			node.HeadComment = anchor.HeadComment
+			node.LineComment = anchor.LineComment
+		}
+		return
+	}
+
+	for _, child := range node.Content {
+		resolveAliasesInNode(child, anchors)
+	}
 }
 
 // RedisConfig holds configuration for Redis/Valkey-backed distributed rate limiting.
@@ -296,6 +435,9 @@ type CredentialConfig struct {
 	RPM     int          `yaml:"rpm"`
 	TPM     int          `yaml:"tpm"`
 
+	// Models associated with this credential (used for x-model-templates)
+	Models []ModelRPMConfig `yaml:"models,omitempty"`
+
 	// Vertex AI specific fields
 	ProjectID       string `yaml:"project_id,omitempty"`
 	Location        string `yaml:"location,omitempty"`
@@ -310,17 +452,18 @@ type CredentialConfig struct {
 func (c *CredentialConfig) UnmarshalYAML(value *yaml.Node) error {
 	// Create a temporary struct with all string fields
 	type tempConfig struct {
-		Name            string `yaml:"name"`
-		Type            string `yaml:"type"`
-		APIKey          string `yaml:"api_key"`
-		BaseURL         string `yaml:"base_url"`
-		RPM             string `yaml:"rpm"`
-		TPM             string `yaml:"tpm"`
-		ProjectID       string `yaml:"project_id,omitempty"`
-		Location        string `yaml:"location,omitempty"`
-		CredentialsFile string `yaml:"credentials_file,omitempty"`
-		CredentialsJSON string `yaml:"credentials_json,omitempty"`
-		IsFallback      string `yaml:"is_fallback,omitempty"`
+		Name            string           `yaml:"name"`
+		Type            string           `yaml:"type"`
+		APIKey          string           `yaml:"api_key"`
+		BaseURL         string           `yaml:"base_url"`
+		RPM             string           `yaml:"rpm"`
+		TPM             string           `yaml:"tpm"`
+		ProjectID       string           `yaml:"project_id,omitempty"`
+		Location        string           `yaml:"location,omitempty"`
+		CredentialsFile string           `yaml:"credentials_file,omitempty"`
+		CredentialsJSON string           `yaml:"credentials_json,omitempty"`
+		IsFallback      string           `yaml:"is_fallback,omitempty"`
+		Models          []ModelRPMConfig `yaml:"models,omitempty"`
 	}
 
 	var temp tempConfig
@@ -353,6 +496,9 @@ func (c *CredentialConfig) UnmarshalYAML(value *yaml.Node) error {
 	if c.IsFallback, err = parseField(temp.IsFallback, false, strconv.ParseBool, "is_fallback for credential '"+c.Name+"'"); err != nil {
 		return err
 	}
+
+	// Copy models decoded via YAML anchors / inline definitions
+	c.Models = temp.Models
 
 	// Validate base_url for proxy and other provider types that require it
 	if c.BaseURL != "" {
@@ -539,6 +685,7 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("failed to read config file: %w", err)
 	}
 
+	// Resolve YAML aliases first (for x-model-templates anchors)
 	var root yaml.Node
 	if err := yaml.Unmarshal(data, &root); err != nil {
 		return nil, fmt.Errorf("failed to parse config file: %w", err)
@@ -588,6 +735,24 @@ func Load(path string) (*Config, error) {
 
 	if cfg.ModelAlias == nil {
 		cfg.ModelAlias = map[string]string{}
+	}
+
+	// Extract models from credentials and add to main Models list
+	// Models defined in credentials are "unpacked" to the main models list
+	for _, cred := range cfg.Credentials {
+		for _, model := range cred.Models {
+			// Create a copy of the model with the credential reference set
+			expandedModel := model
+			if expandedModel.Credential == "" {
+				expandedModel.Credential = cred.Name
+			}
+			cfg.Models = append(cfg.Models, expandedModel)
+		}
+	}
+
+	// Clear models from credentials (they have been unpacked to main Models)
+	for i := range cfg.Credentials {
+		cfg.Credentials[i].Models = nil
 	}
 
 	// Normalize credentials
