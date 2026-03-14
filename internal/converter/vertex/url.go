@@ -30,6 +30,13 @@ func BuildGeminiURL(cred *config.CredentialConfig, modelID string, streaming boo
 	return fmt.Sprintf("%s/v1beta/models/%s:%s", baseURL, modelID, endpoint)
 }
 
+// BuildGeminiImageURL constructs the Google AI Studio (Gemini) URL for Imagen models.
+// Format: {base_url}/v1beta/models/{model}:predict
+func BuildGeminiImageURL(cred *config.CredentialConfig, modelID string) string {
+	baseURL := strings.TrimSuffix(cred.BaseURL, "/")
+	return fmt.Sprintf("%s/v1beta/models/%s:predict", baseURL, modelID)
+}
+
 // BuildVertexURL constructs the Vertex AI URL dynamically
 // Format: https://{location}-aiplatform.googleapis.com/v1beta1/projects/{project}/locations/{location}/publishers/{publisher}/models/{model}:{endpoint}
 func BuildVertexURL(cred *config.CredentialConfig, modelID string, streaming bool) string {

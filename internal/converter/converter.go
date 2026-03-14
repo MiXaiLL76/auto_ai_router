@@ -150,6 +150,9 @@ func (c *ProviderConverter) BuildURL(cred *config.CredentialConfig) string {
 		}
 		return vertex.BuildVertexURL(cred, c.mode.ModelID, c.mode.IsStreaming)
 	case config.ProviderTypeGemini:
+		if c.mode.IsImageGeneration && !strings.Contains(strings.ToLower(c.mode.ModelID), "gemini") {
+			return vertex.BuildGeminiImageURL(cred, c.mode.ModelID)
+		}
 		return vertex.BuildGeminiURL(cred, c.mode.ModelID, c.mode.IsStreaming)
 	case config.ProviderTypeAnthropic:
 		baseURL := strings.TrimSuffix(cred.BaseURL, "/")
