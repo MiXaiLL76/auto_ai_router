@@ -5,14 +5,109 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>System Health</title>
   <link rel="stylesheet" href="/webui/style.css">
+  <style>
+    /* ── provider tag в таблице моделей ── */
+    .model-provider {
+      display: inline-block;
+      font-size: 10px;
+      padding: 1px 5px;
+      border: 1px solid var(--line);
+      border-radius: var(--r-sm);
+      color: var(--fg-dim);
+      background: var(--bg-3);
+      white-space: nowrap;
+      flex-shrink: 0;
+      line-height: 16px;
+      vertical-align: middle;
+      margin-right: 6px;
+    }
+
+    /* ── строка-разделитель группы моделей ── */
+    .model-group-row td {
+      padding: 10px var(--sp-3) 4px;
+      font-size: 10px;
+      color: var(--fg-dim);
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      border-bottom: none;
+      background: var(--bg);
+      border-top: 1px solid var(--bg-3);
+      font-weight: 400;
+    }
+    .model-group-row:first-child td { border-top: none; }
+
+    /* ── sort-кнопки: активная через accent border, не через primary ── */
+    .sort-bar {
+      display: flex;
+      gap: var(--sp-1);
+      padding: var(--sp-2) var(--sp-3);
+      border-bottom: 1px solid var(--line);
+      align-items: center;
+    }
+    .sort-label {
+      font-size: var(--fs-xs);
+      color: var(--fg-faint);
+      margin-right: 2px;
+      user-select: none;
+    }
+    .sort-btn {
+      font-family: var(--font-mono);
+      font-size: var(--fs-xs);
+      border: 1px solid var(--line);
+      background: transparent;
+      color: var(--fg-muted);
+      padding: 3px 9px;
+      border-radius: var(--r-sm);
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      white-space: nowrap;
+      transition: border-color 0.15s, color 0.15s, background 0.15s;
+    }
+    .sort-btn:hover { border-color: var(--line-strong); color: var(--fg); }
+    .sort-btn.active {
+      border-color: var(--line-strong);
+      color: var(--fg);
+      background: var(--bg-2);
+    }
+    .sort-btn.active .sort-arrow { color: var(--fg-dim); }
+    .sort-arrow { font-size: 9px; color: var(--fg-faint); }
+
+    /* ── credential card: имя модели не break-all ── */
+    .cred-name {
+      font-size: var(--fs-sm);
+      word-break: break-word;
+      line-height: var(--lh-tight);
+    }
+
+    /* ── stat: banned в красноватом оттенке ── */
+    #statBanned { color: var(--status-err); }
+
+    /* ── model cell flex ── */
+    .model-cell {
+      display: flex;
+      align-items: center;
+    }
+    .model-short {
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 380px;
+    }
+  </style>
 </head>
 <body>
 <div class="wf">
   <div class="wf-logo">
     <span class="dot"></span>
     <span class="name">air</span>
-    <span class="ver" id="verLabel"></span>
+    <div class="ver-wrapper">
+      <span class="ver" id="verLabel"></span>
+      <span class="ver commit-line" id="commitLabel"></span>
+    </div>
   </div>
+
   <div class="wf-topbar">
     <div class="crumbs">
       <span>workspace</span>
@@ -23,12 +118,14 @@
     <span class="pill" id="countdown"></span>
     <button class="pill" onclick="toggleTheme()">theme</button>
   </div>
+
   <nav class="wf-nav">
     <div class="group">workspace</div>
     <a class="item active" href="/vhealth"><span class="glyph">▸</span> system health</a>
     <a class="item" href="/vtrace"><span class="glyph">▸</span> router trace</a>
     <a class="item" href="/vconfig"><span class="glyph">▸</span> server config</a>
   </nav>
+
   <main class="wf-main">
     <div style="display:flex;align-items:flex-end;justify-content:space-between;margin-bottom:var(--sp-4);">
       <div>
@@ -37,7 +134,7 @@
       </div>
       <div style="display:flex;gap:var(--sp-2);align-items:center;">
         <span class="wf-badge" id="statusBadge"><span class="dotS"></span><span id="statusText">—</span></span>
-        <button class="wf-btn" onclick="load(true)">refresh <span class="key">R</span></button>
+        <button class="wf-btn" onclick="load(true)">↺ refresh <span class="key">R</span></button>
       </div>
     </div>
 
@@ -67,11 +164,12 @@
 
     <div class="wf-section-title" id="modelsTitle">active models</div>
     <div class="wf-card" style="padding:0;">
-      <div style="display:flex;gap:var(--sp-1);padding:var(--sp-2);border-bottom:1px solid var(--line);">
-        <button class="wf-btn" id="sortName" onclick="sortModels('name',this)">sort by name</button>
-        <button class="wf-btn" id="sortRpm"  onclick="sortModels('rpm',this)">sort by RPM</button>
-        <button class="wf-btn primary" id="sortTpm" onclick="sortModels('tpm',this)">sort by TPM</button>
-        <button class="wf-btn" id="sortCred" onclick="sortModels('credential',this)">sort by cred</button>
+      <div class="sort-bar">
+        <span class="sort-label">sort</span>
+        <button class="sort-btn" id="sortName"       onclick="sortModels('name',this)">name <span class="sort-arrow" id="arrName"></span></button>
+        <button class="sort-btn" id="sortRpm"        onclick="sortModels('rpm',this)">RPM <span class="sort-arrow" id="arrRpm"></span></button>
+        <button class="sort-btn active" id="sortTpm" onclick="sortModels('tpm',this)">TPM <span class="sort-arrow" id="arrTpm">↓</span></button>
+        <button class="sort-btn" id="sortCred"       onclick="sortModels('credential',this)">cred <span class="sort-arrow" id="arrCred"></span></button>
       </div>
       <table class="wf-table">
         <thead>
@@ -152,6 +250,31 @@ function renderBar(cur, lim) {
   </div>`;
 }
 
+// ── извлечь провайдера из имени модели ────────────────────────────────────
+function extractProvider(modelStr) {
+  // gpt://xxx/provider/model → provider
+  const gptMatch = modelStr.match(/^gpt:\/\/[^/]+\/([^/]+)\//);
+  if (gptMatch) return gptMatch[1].toLowerCase();
+  // anthropic/claude-xxx → anthropic
+  const slashMatch = modelStr.match(/^([^/]+)\//);
+  if (slashMatch) return slashMatch[1].toLowerCase();
+  // DeepSeek-V3 → deepseek
+  const knownPrefixes = ['deepseek', 'kimi', 'gpt', 'claude', 'gemini', 'llama', 'mistral', 'qwen'];
+  for (const p of knownPrefixes) {
+    if (modelStr.toLowerCase().startsWith(p)) return p;
+  }
+  return '';
+}
+
+// сокращённое имя: убрать длинный gpt:// prefix
+function shortModelName(modelStr) {
+  const gptMatch = modelStr.match(/^gpt:\/\/[^/]+\/[^/]+\/(.+)$/);
+  if (gptMatch) return gptMatch[1];
+  const slashMatch = modelStr.match(/^[^/]+\/(.+)$/);
+  if (slashMatch) return slashMatch[1];
+  return modelStr;
+}
+
 // ── credential type → badge class ─────────────────────────────────────────
 const TYPE_CLASS = {
   'proxy':      'info',
@@ -168,8 +291,6 @@ function renderCreds(credentials) {
   document.getElementById('credTitle').textContent = `credentials · ${entries.length}`;
 
   document.getElementById('credsGrid').innerHTML = entries.map(([name, c]) => {
-    const rpmP = pct(c.current_rpm, c.limit_rpm);
-    const tpmP = pct(c.current_tpm, c.limit_tpm);
     const bannedCls = c.is_banned ? ' banned' : '';
 
     let badges = badge(TYPE_CLASS[c.type] || '', c.type);
@@ -179,15 +300,13 @@ function renderCreds(credentials) {
     let errHtml = '';
     const errCounts = c.banned_error_counts || {};
     if (c.is_banned && Object.keys(errCounts).length > 0) {
-      const parts = Object.entries(errCounts)
-        .map(([code, n]) => `${n}×${code}`)
-        .join('  ');
+      const parts = Object.entries(errCounts).map(([code, n]) => `${n}×${code}`).join('  ');
       errHtml = `<div style="font-size:11px;color:var(--status-err);margin-bottom:8px;">${esc(parts)}</div>`;
     }
 
     return `<div class="wf-card${bannedCls}">
-      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;margin-bottom:12px;">
-        <span style="font-size:13px;word-break:break-all;">${esc(name)}</span>
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;margin-bottom:10px;">
+        <span class="cred-name">${esc(name)}</span>
         <div style="display:flex;gap:3px;flex-wrap:wrap;justify-content:flex-end;flex-shrink:0;">${badges}</div>
       </div>
       ${errHtml}
@@ -229,7 +348,24 @@ function applySort() {
     return 0;
   });
 
-  document.getElementById('modelsTbody').innerHTML = entries.map(([, m]) => {
+  // группировка по провайдеру только при сортировке по name или credential
+  const grouped = (currentSort === 'name' || currentSort === 'credential');
+
+  let html = '';
+  let lastGroup = null;
+
+  entries.forEach(([, m]) => {
+    const provider = extractProvider(m.model);
+    const shortName = shortModelName(m.model);
+
+    if (grouped && provider !== lastGroup) {
+      const groupLabel = provider
+        ? `${provider} · ${m.credential}`
+        : m.credential;
+      html += `<tr class="model-group-row"><td colspan="5">${esc(groupLabel)}</td></tr>`;
+      lastGroup = provider;
+    }
+
     const errCounts = m.error_code_counts || {};
     let statusBadge;
     if (m.is_banned) {
@@ -238,14 +374,21 @@ function applySort() {
     } else {
       statusBadge = badge('ok', 'ok');
     }
-    return `<tr>
-      <td>${esc(m.model)}</td>
+
+    const providerTag = provider
+      ? `<span class="model-provider">${esc(provider)}</span>`
+      : '';
+
+    html += `<tr>
+      <td><div class="model-cell">${providerTag}<span class="model-short" title="${esc(m.model)}">${esc(shortName)}</span></div></td>
       <td class="muted">${esc(m.credential)}</td>
       <td>${renderBar(m.current_rpm, m.limit_rpm)}</td>
       <td>${renderBar(m.current_tpm, m.limit_tpm)}</td>
       <td>${statusBadge}</td>
     </tr>`;
-  }).join('');
+  });
+
+  document.getElementById('modelsTbody').innerHTML = html;
 }
 
 function sortModels(type, btn) {
@@ -255,8 +398,16 @@ function sortModels(type, btn) {
     sortAsc = (type === 'name' || type === 'credential');
     currentSort = type;
   }
-  document.querySelectorAll('.wf-btn[id^="sort"]').forEach(b => b.classList.remove('primary'));
-  if (btn) btn.classList.add('primary');
+
+  // обновить состояние кнопок
+  const arrows = { name: 'arrName', rpm: 'arrRpm', tpm: 'arrTpm', credential: 'arrCred' };
+  document.querySelectorAll('.sort-btn').forEach(b => b.classList.remove('active'));
+  Object.values(arrows).forEach(id => { document.getElementById(id).textContent = ''; });
+
+  if (btn) btn.classList.add('active');
+  const arrowEl = document.getElementById(arrows[type]);
+  if (arrowEl) arrowEl.textContent = sortAsc ? '↑' : '↓';
+
   applySort();
 }
 
@@ -269,11 +420,11 @@ async function load() {
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     const data = await resp.json();
 
-    // version from header (added by router)
-    const ver = resp.headers.get('X-Router-Version') || '';
+    // version
+    const ver    = resp.headers.get('X-Router-Version') || '';
     const commit = resp.headers.get('X-Router-Commit') || '';
-    document.getElementById('verLabel').textContent =
-      ver ? `${ver}${commit ? ' / ' + commit.slice(0, 7) : ''}` : '';
+    document.getElementById('verLabel').textContent    = ver || '';
+    document.getElementById('commitLabel').textContent = commit ? commit.slice(0, 7) : '';
 
     // status badge
     const cls = data.status === 'healthy' ? 'ok'
@@ -304,7 +455,7 @@ async function load() {
     document.getElementById('subtitle').textContent = `error: ${e.message}`;
   }
 
-  // restart countdown
+  // countdown
   countdownSecs = 30;
   tickCountdown();
   countdownTimer = setInterval(() => {

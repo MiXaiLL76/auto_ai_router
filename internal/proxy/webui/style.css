@@ -3,383 +3,418 @@
    Terminal / monospace dev-tool aesthetic
    ============================================================ */
 
-:root {
-  --font-mono: "JetBrains Mono", "IBM Plex Mono", ui-monospace, SFMono-Regular,
-    Menlo, Consolas, monospace;
-
-  --fs-xs: 11px;
-  --fs-sm: 12px;
-  --fs-md: 13px;
-  --fs-lg: 15px;
-  --fs-xl: 18px;
-  --fs-2xl: 22px;
-
-  --lh-tight: 1.25;
-  --lh-base: 1.5;
-
-  --sp-1: 4px;
-  --sp-2: 8px;
-  --sp-3: 12px;
-  --sp-4: 16px;
-  --sp-5: 24px;
-  --sp-6: 32px;
-  --sp-7: 48px;
-
-  --r-sm: 2px;
-  --r-md: 4px;
-  --r-lg: 6px;
-
-  /* Dark theme defaults */
-  --bg: #0c0d0e;
-  --bg-1: #131517;
-  --bg-2: #181a1d;
-  --bg-3: #1f2225;
-  --line: #25282c;
-  --line-strong: #34383d;
-
-  --fg: #e7e8ea;
-  --fg-muted: #9ea3aa;
-  --fg-dim: #5f656d;
-  --fg-faint: #3d4147;
-
-  --accent: oklch(0.78 0.04 220);
-  --accent-bg: oklch(0.32 0.03 220 / 0.25);
-
-  --status-ok: oklch(0.78 0.05 150);
-  --status-warn: oklch(0.82 0.08 80);
-  --status-err: oklch(0.72 0.08 25);
-  --status-info: oklch(0.78 0.04 220);
-}
-
-[data-theme="light"] {
-  --bg: #fafaf9;
-  --bg-1: #f4f4f2;
-  --bg-2: #ededeb;
-  --bg-3: #e4e4e1;
-  --line: #d8d8d4;
-  --line-strong: #b8b8b3;
-
-  --fg: #18191b;
-  --fg-muted: #5b6068;
-  --fg-dim: #8b9098;
-  --fg-faint: #b6b9bd;
-
-  --accent: oklch(0.45 0.05 220);
-  --accent-bg: oklch(0.85 0.03 220 / 0.5);
-
-  --status-ok: oklch(0.5 0.08 150);
-  --status-warn: oklch(0.58 0.12 70);
-  --status-err: oklch(0.52 0.13 25);
-  --status-info: oklch(0.5 0.06 220);
-}
-
-/* ============================================================
-   Base
-   ============================================================ */
-*, *::before, *::after { box-sizing: border-box; }
-
-html, body {
-  height: 100%;
-  margin: 0;
-  padding: 0;
-  overflow: hidden;
-}
-
-body {
-  font-family: var(--font-mono);
-  font-size: var(--fs-md);
-  line-height: var(--lh-base);
-  color: var(--fg);
-  background: var(--bg);
-  font-feature-settings: "ss01", "ss02", "calt" 1;
-  -webkit-font-smoothing: antialiased;
-}
-
-/* ============================================================
-   Shell layout
-   ============================================================ */
-.wf {
-  width: 100%;
-  height: 100%;
-  display: grid;
-  grid-template-columns: 200px 1fr;
-  grid-template-rows: 40px 1fr;
-  grid-template-areas:
-    "logo  topbar"
-    "nav   main";
-  background: var(--bg);
-  color: var(--fg);
-  overflow: hidden;
-}
-
-.wf-logo {
-  grid-area: logo;
-  display: flex;
-  align-items: center;
-  padding: 0 var(--sp-4);
-  border-right: 1px solid var(--line);
-  border-bottom: 1px solid var(--line);
-  font-size: var(--fs-md);
-  letter-spacing: 0.02em;
-  gap: var(--sp-2);
-}
-.wf-logo .dot {
-  width: 7px; height: 7px;
-  background: var(--fg);
-  border-radius: var(--r-sm);
-  flex-shrink: 0;
-}
-.wf-logo .name { font-weight: 600; }
-.wf-logo .ver  { color: var(--fg-dim); font-size: var(--fs-xs); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-
-.wf-topbar {
-  grid-area: topbar;
-  display: flex;
-  align-items: center;
-  gap: var(--sp-3);
-  padding: 0 var(--sp-4);
-  border-bottom: 1px solid var(--line);
-  font-size: var(--fs-sm);
-  color: var(--fg-muted);
-}
-.wf-topbar .crumbs { display: flex; gap: var(--sp-2); align-items: center; }
-.wf-topbar .crumbs .sep { color: var(--fg-faint); }
-.wf-topbar .crumbs .here { color: var(--fg); }
-.wf-topbar .spacer { flex: 1; }
-.wf-topbar .pill {
-  border: 1px solid var(--line);
-  padding: 2px var(--sp-2);
-  border-radius: var(--r-sm);
-  font-size: var(--fs-xs);
-  color: var(--fg-muted);
-  background: transparent;
-  font-family: var(--font-mono);
-  cursor: pointer;
-  white-space: nowrap;
-}
-.wf-topbar .pill:hover { border-color: var(--line-strong); color: var(--fg); }
-
-.wf-nav {
-  grid-area: nav;
-  border-right: 1px solid var(--line);
-  padding: var(--sp-3) var(--sp-2);
-  font-size: var(--fs-sm);
-  display: flex;
-  flex-direction: column;
-  gap: var(--sp-1);
-  overflow: auto;
-}
-.wf-nav .group {
-  color: var(--fg-dim);
-  font-size: var(--fs-xs);
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  padding: var(--sp-3) var(--sp-3) var(--sp-1);
-}
-.wf-nav a.item {
-  text-decoration: none;
-  display: flex;
-  align-items: center;
-  gap: var(--sp-2);
-  padding: var(--sp-1) var(--sp-3);
-  color: var(--fg-muted);
-  border-radius: var(--r-sm);
-  font-size: var(--fs-sm);
-}
-.wf-nav a.item:hover { background: var(--bg-2); color: var(--fg); }
-.wf-nav a.item.active { background: var(--bg-2); color: var(--fg); }
-.wf-nav a.item .glyph {
-  width: 14px;
-  color: var(--fg-faint);
-  text-align: center;
-  font-size: var(--fs-xs);
-  flex-shrink: 0;
-}
-.wf-nav a.item.active .glyph { color: var(--fg); }
-.wf-nav a.item .count {
-  margin-left: auto;
-  color: var(--fg-faint);
-  font-size: var(--fs-xs);
-}
-
-.wf-main {
-  grid-area: main;
-  overflow: auto;
-  padding: var(--sp-5);
-}
-
-/* ============================================================
-   Components
-   ============================================================ */
-.wf-h1 {
-  font-size: var(--fs-xl);
-  font-weight: 600;
-  margin: 0 0 var(--sp-1);
-  letter-spacing: -0.01em;
-}
-.wf-sub {
-  font-size: var(--fs-sm);
-  color: var(--fg-muted);
-  margin: 0;
-}
-.wf-section-title {
-  font-size: var(--fs-xs);
-  text-transform: uppercase;
-  letter-spacing: 0.1em;
-  color: var(--fg-dim);
-  margin: var(--sp-6) 0 var(--sp-3);
-  display: flex;
-  align-items: center;
-  gap: var(--sp-2);
-}
-.wf-section-title::after {
-  content: "";
-  flex: 1;
-  height: 1px;
-  background: var(--line);
-}
-
-.wf-card {
-  border: 1px solid var(--line);
-  border-radius: var(--r-md);
-  background: var(--bg-1);
-  padding: var(--sp-4);
-}
-.wf-card.banned {
-  border-color: color-mix(in oklch, var(--status-err) 55%, var(--line));
-}
-
-.wf-stat {
-  border: 1px solid var(--line);
-  border-radius: var(--r-md);
-  background: var(--bg-1);
-  padding: var(--sp-3) var(--sp-4);
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-.wf-stat .label {
-  font-size: var(--fs-xs);
-  color: var(--fg-dim);
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-}
-.wf-stat .val {
-  font-size: var(--fs-2xl);
-  font-weight: 500;
-  line-height: 1.1;
-  color: var(--fg);
-}
-.wf-stat .delta { font-size: var(--fs-xs); color: var(--fg-muted); }
-
-.wf-badge {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  font-size: var(--fs-xs);
-  padding: 1px 6px;
-  border: 1px solid var(--line);
-  border-radius: var(--r-sm);
-  color: var(--fg-muted);
-  background: var(--bg-2);
-  white-space: nowrap;
-}
-.wf-badge .dotS {
-  width: 5px; height: 5px;
-  border-radius: 50%;
-  background: currentColor;
-  flex-shrink: 0;
-}
-.wf-badge.ok   { color: var(--status-ok);   border-color: color-mix(in oklch, var(--status-ok)   35%, var(--line)); }
-.wf-badge.warn { color: var(--status-warn); border-color: color-mix(in oklch, var(--status-warn) 35%, var(--line)); }
-.wf-badge.err  { color: var(--status-err);  border-color: color-mix(in oklch, var(--status-err)  35%, var(--line)); }
-.wf-badge.info { color: var(--status-info); border-color: color-mix(in oklch, var(--status-info) 35%, var(--line)); }
-
-.wf-btn {
-  font-family: var(--font-mono);
-  font-size: var(--fs-sm);
-  border: 1px solid var(--line);
-  background: var(--bg-1);
-  color: var(--fg);
-  padding: 4px var(--sp-3);
-  border-radius: var(--r-sm);
-  cursor: pointer;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  white-space: nowrap;
-}
-.wf-btn:hover { border-color: var(--line-strong); background: var(--bg-2); }
-.wf-btn .key {
-  font-size: var(--fs-xs);
-  color: var(--fg-dim);
-  border: 1px solid var(--line);
-  padding: 0 4px;
-  border-radius: 2px;
-}
-.wf-btn.primary {
-  background: var(--fg);
-  color: var(--bg);
-  border-color: var(--fg);
-}
-.wf-btn.primary:hover { opacity: 0.9; }
-
-.wf-table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: var(--fs-sm);
-}
-.wf-table th, .wf-table td {
-  text-align: left;
-  padding: 6px var(--sp-3);
-  border-bottom: 1px solid var(--line);
-  font-weight: 400;
-}
-.wf-table th {
-  font-size: var(--fs-xs);
-  color: var(--fg-dim);
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  border-bottom: 1px solid var(--line-strong);
-  white-space: nowrap;
-}
-.wf-table td.muted { color: var(--fg-muted); }
-.wf-table td.dim   { color: var(--fg-dim); }
-.wf-table tr:last-child td { border-bottom: none; }
-.wf-table tr:hover td { background: var(--bg-2); }
-
-.wf-bar {
-  height: 5px;
-  background: var(--bg-3);
-  border-radius: 999px;
-  overflow: hidden;
-}
-.wf-bar > i {
-  display: block;
-  height: 100%;
-  background: var(--fg-muted);
-  transition: width 0.3s ease;
-}
-.wf-bar > i.warn { background: var(--status-warn); }
-.wf-bar > i.err  { background: var(--status-err); }
-
-/* details/summary for trace router sections */
-details.wf-card { padding: 0; }
-details.wf-card > summary {
-  display: flex;
-  align-items: center;
-  gap: var(--sp-3);
-  padding: var(--sp-3) var(--sp-4);
-  cursor: pointer;
-  list-style: none;
-  user-select: none;
-}
-details.wf-card > summary::-webkit-details-marker { display: none; }
-details.wf-card > summary:hover { background: var(--bg-2); border-radius: var(--r-md); }
-details.wf-card[open] > summary { border-bottom: 1px solid var(--line); border-radius: var(--r-md) var(--r-md) 0 0; }
-details.wf-card > .detail-body { padding: var(--sp-2) 0; }
-
-/* scrollbar */
-::-webkit-scrollbar { width: 4px; height: 4px; }
-::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: var(--line-strong); border-radius: 999px; }
+   :root {
+    --font-mono: "JetBrains Mono", "IBM Plex Mono", ui-monospace, SFMono-Regular,
+      Menlo, Consolas, monospace;
+  
+    /* ИЗМЕНЕНО: шрифты подняты на 1px для лучшей читаемости при мелком тексте */
+    --fs-xs: 11px;
+    --fs-sm: 13px;   /* было 12px */
+    --fs-md: 14px;   /* было 13px */
+    --fs-lg: 15px;
+    --fs-xl: 19px;   /* было 18px */
+    --fs-2xl: 24px;  /* было 22px */
+  
+    --lh-tight: 1.3;   /* было 1.25 — чуть просторнее */
+    --lh-base: 1.55;   /* было 1.5 */
+  
+    --sp-1: 4px;
+    --sp-2: 8px;
+    --sp-3: 12px;
+    --sp-4: 16px;
+    --sp-5: 24px;
+    --sp-6: 32px;
+    --sp-7: 48px;
+  
+    --r-sm: 3px;   /* было 2px — острые углы сложнее воспринимаются */
+    --r-md: 5px;   /* было 4px */
+    --r-lg: 7px;   /* было 6px */
+  
+    /* Dark theme defaults */
+    --bg: #0c0d0e;
+    --bg-1: #141618;   /* было #131517 — чуть теплее */
+    --bg-2: #1c1f22;   /* было #181a1d — больше отрыв от bg-1 */
+    --bg-3: #232629;   /* было #1f2225 */
+    --line: #2b2f34;   /* было #25282c — чуть светлее, линии заметнее */
+    --line-strong: #3c4148;  /* было #34383d */
+  
+    /* ИЗМЕНЕНО: fg стал чище-белым, muted поднят для лучшего контраста */
+    --fg: #ecedf0;          /* было #e7e8ea */
+    --fg-muted: #b0b6bd;    /* было #9ea3aa — поднят контраст */
+    --fg-dim: #6e757e;      /* было #5f656d — немного светлее */
+    --fg-faint: #454b53;    /* было #3d4147 */
+  
+    --accent: oklch(0.80 0.05 220);      /* чуть ярче */
+    --accent-bg: oklch(0.32 0.03 220 / 0.30);
+  
+    /* ИЗМЕНЕНО: статусы сделаны ярче для лучшей различимости */
+    --status-ok:   oklch(0.80 0.08 150);   /* был 0.78 / 0.05 */
+    --status-warn: oklch(0.84 0.10 75);    /* был 0.82 / 0.08 */
+    --status-err:  oklch(0.75 0.11 25);    /* был 0.72 / 0.08 */
+    --status-info: oklch(0.80 0.06 220);   /* был 0.78 / 0.04 */
+  }
+  
+  [data-theme="light"] {
+    --bg: #f7f7f6;      /* было #fafaf9 — чуть теплее */
+    --bg-1: #f0f0ee;    /* было #f4f4f2 */
+    --bg-2: #e8e8e5;    /* было #ededeb */
+    --bg-3: #dededd;    /* было #e4e4e1 */
+    --line: #ccccc8;    /* было #d8d8d4 — темнее, линии заметнее */
+    --line-strong: #a8a8a2;  /* было #b8b8b3 */
+  
+    /* ИЗМЕНЕНО: текст в light режиме темнее для контраста */
+    --fg: #111213;          /* было #18191b */
+    --fg-muted: #4a5058;    /* было #5b6068 */
+    --fg-dim: #797f88;      /* было #8b9098 */
+    --fg-faint: #a8abb0;    /* было #b6b9bd */
+  
+    --accent: oklch(0.42 0.07 220);       /* было 0.45 / 0.05 */
+    --accent-bg: oklch(0.82 0.04 220 / 0.55);
+  
+    /* Статусы в light режиме тоже темнее */
+    --status-ok:   oklch(0.44 0.10 150);  /* был 0.50 / 0.08 */
+    --status-warn: oklch(0.50 0.14 70);   /* был 0.58 / 0.12 */
+    --status-err:  oklch(0.46 0.16 25);   /* был 0.52 / 0.13 */
+    --status-info: oklch(0.44 0.08 220);  /* был 0.50 / 0.06 */
+  }
+  
+  /* ============================================================
+     Base
+     ============================================================ */
+  *, *::before, *::after { box-sizing: border-box; }
+  
+  html, body {
+    height: 100%;
+    margin: 0;
+    padding: 0;
+    overflow: hidden;
+  }
+  
+  body {
+    font-family: var(--font-mono);
+    font-size: var(--fs-md);
+    line-height: var(--lh-base);
+    color: var(--fg);
+    background: var(--bg);
+    font-feature-settings: "ss01", "ss02", "calt" 1;
+    -webkit-font-smoothing: antialiased;
+  }
+  
+  /* ============================================================
+     Shell layout
+     ============================================================ */
+  .wf {
+    width: 100%;
+    height: 100%;
+    display: grid;
+    grid-template-columns: 210px 1fr;   /* было 200px — чуть просторнее для nav */
+    grid-template-rows: 44px 1fr;       /* было 40px — больше дышит topbar */
+    grid-template-areas:
+      "logo  topbar"
+      "nav   main";
+    background: var(--bg);
+    color: var(--fg);
+    overflow: hidden;
+  }
+  
+  .wf-logo {
+    grid-area: logo;
+    display: flex;
+    align-items: center;
+    padding: 0 var(--sp-4);
+    border-right: 1px solid var(--line);
+    border-bottom: 1px solid var(--line);
+    font-size: var(--fs-md);
+    letter-spacing: 0.02em;
+    gap: var(--sp-2);
+  }
+  
+  .wf-logo .dot {
+    width: 7px; height: 7px;
+    background: var(--fg);
+    border-radius: var(--r-sm);
+    flex-shrink: 0;
+  }
+  .wf-logo .name { font-weight: 600; }
+  .wf-logo .ver  {
+    color: var(--fg-dim);
+    font-size: var(--fs-xs);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  
+  .ver-wrapper {
+    display: flex;
+    flex-direction: column;
+    line-height: 1.15;
+    margin-left: auto;
+    text-align: right;
+  }
+  
+  .commit-line {
+    font-size: 0.8em;
+    opacity: 0.6;   /* было 0.7 — коммит ещё тише */
+  }
+  
+  .wf-topbar {
+    grid-area: topbar;
+    display: flex;
+    align-items: center;
+    gap: var(--sp-3);
+    padding: 0 var(--sp-5);   /* было sp-4 — чуть больше воздуха */
+    border-bottom: 1px solid var(--line);
+    font-size: var(--fs-sm);
+    color: var(--fg-muted);
+  }
+  .wf-topbar .crumbs { display: flex; gap: var(--sp-2); align-items: center; }
+  .wf-topbar .crumbs .sep { color: var(--fg-faint); }
+  .wf-topbar .crumbs .here { color: var(--fg); }
+  .wf-topbar .spacer { flex: 1; }
+  .wf-topbar .pill {
+    border: 1px solid var(--line);
+    padding: 3px var(--sp-2);   /* было 2px — легче попасть */
+    border-radius: var(--r-sm);
+    font-size: var(--fs-xs);
+    color: var(--fg-muted);
+    background: transparent;
+    font-family: var(--font-mono);
+    cursor: pointer;
+    white-space: nowrap;
+    transition: border-color 0.15s, color 0.15s;
+  }
+  .wf-topbar .pill:hover { border-color: var(--line-strong); color: var(--fg); }
+  
+  .wf-nav {
+    grid-area: nav;
+    border-right: 1px solid var(--line);
+    padding: var(--sp-3) var(--sp-2);
+    font-size: var(--fs-sm);
+    display: flex;
+    flex-direction: column;
+    gap: var(--sp-1);
+    overflow: auto;
+  }
+  .wf-nav .group {
+    color: var(--fg-dim);
+    font-size: var(--fs-xs);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    padding: var(--sp-3) var(--sp-3) var(--sp-1);
+  }
+  .wf-nav a.item {
+    text-decoration: none;
+    display: flex;
+    align-items: center;
+    gap: var(--sp-2);
+    padding: 6px var(--sp-3);   /* было sp-1 — пункты nav стали выше и удобнее */
+    color: var(--fg-muted);
+    border-radius: var(--r-sm);
+    font-size: var(--fs-sm);
+    transition: background 0.1s, color 0.1s;
+  }
+  .wf-nav a.item:hover { background: var(--bg-2); color: var(--fg); }
+  .wf-nav a.item.active { background: var(--bg-2); color: var(--fg); }
+  .wf-nav a.item .glyph {
+    width: 14px;
+    color: var(--fg-dim);      /* было fg-faint — иконки заметнее */
+    text-align: center;
+    font-size: var(--fs-xs);
+    flex-shrink: 0;
+  }
+  .wf-nav a.item.active .glyph { color: var(--fg); }
+  .wf-nav a.item .count {
+    margin-left: auto;
+    color: var(--fg-dim);      /* было fg-faint */
+    font-size: var(--fs-xs);
+  }
+  
+  .wf-main {
+    grid-area: main;
+    overflow: auto;
+    padding: var(--sp-5);
+  }
+  
+  /* ============================================================
+     Components
+     ============================================================ */
+  .wf-h1 {
+    font-size: var(--fs-xl);
+    font-weight: 600;
+    margin: 0 0 var(--sp-2);   /* было sp-1 */
+    letter-spacing: -0.01em;
+  }
+  .wf-sub {
+    font-size: var(--fs-sm);
+    color: var(--fg-muted);
+    margin: 0;
+  }
+  .wf-section-title {
+    font-size: var(--fs-xs);
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--fg-dim);
+    margin: var(--sp-6) 0 var(--sp-3);
+    display: flex;
+    align-items: center;
+    gap: var(--sp-2);
+  }
+  .wf-section-title::after {
+    content: "";
+    flex: 1;
+    height: 1px;
+    background: var(--line);
+  }
+  
+  .wf-card {
+    border: 1px solid var(--line);
+    border-radius: var(--r-md);
+    background: var(--bg-1);
+    padding: var(--sp-4);
+  }
+  .wf-card.banned {
+    border-color: color-mix(in oklch, var(--status-err) 60%, var(--line));  /* было 55% */
+  }
+  
+  .wf-stat {
+    border: 1px solid var(--line);
+    border-radius: var(--r-md);
+    background: var(--bg-1);
+    padding: var(--sp-3) var(--sp-4);
+    display: flex;
+    flex-direction: column;
+    gap: 4px;   /* было 2px — label и val не слипаются */
+  }
+  .wf-stat .label {
+    font-size: var(--fs-xs);
+    color: var(--fg-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+  }
+  .wf-stat .val {
+    font-size: var(--fs-2xl);
+    font-weight: 500;
+    line-height: 1.1;
+    color: var(--fg);
+  }
+  .wf-stat .delta { font-size: var(--fs-xs); color: var(--fg-muted); }
+  
+  /* ИЗМЕНЕНО: бейдж — шрифт и dot поднялись для читаемости */
+  .wf-badge {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;      /* было 4px */
+    font-size: var(--fs-xs);
+    padding: 2px 7px;   /* было 1px 6px */
+    border: 1px solid var(--line);
+    border-radius: var(--r-sm);
+    color: var(--fg-muted);
+    background: var(--bg-2);
+    white-space: nowrap;
+  }
+  .wf-badge .dotS {
+    width: 5px; height: 5px;
+    border-radius: 50%;
+    background: currentColor;
+    flex-shrink: 0;
+    opacity: 0.9;
+  }
+  /* Статусные бейджи: border-color стал насыщеннее — 45% вместо 35% */
+  .wf-badge.ok   { color: var(--status-ok);   border-color: color-mix(in oklch, var(--status-ok)   45%, var(--line)); }
+  .wf-badge.warn { color: var(--status-warn); border-color: color-mix(in oklch, var(--status-warn) 45%, var(--line)); }
+  .wf-badge.err  { color: var(--status-err);  border-color: color-mix(in oklch, var(--status-err)  45%, var(--line)); }
+  .wf-badge.info { color: var(--status-info); border-color: color-mix(in oklch, var(--status-info) 45%, var(--line)); }
+  
+  /* ИЗМЕНЕНО: кнопки — padding и transition */
+  .wf-btn {
+    font-family: var(--font-mono);
+    font-size: var(--fs-sm);
+    border: 1px solid var(--line);
+    background: var(--bg-1);
+    color: var(--fg);
+    padding: 5px var(--sp-3);   /* было 4px */
+    border-radius: var(--r-sm);
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    white-space: nowrap;
+    transition: border-color 0.15s, background 0.15s;
+  }
+  .wf-btn:hover { border-color: var(--line-strong); background: var(--bg-2); }
+  .wf-btn .key {
+    font-size: var(--fs-xs);
+    color: var(--fg-dim);
+    border: 1px solid var(--line);
+    padding: 0 4px;
+    border-radius: 2px;
+  }
+  .wf-btn.primary {
+    background: var(--fg);
+    color: var(--bg);
+    border-color: var(--fg);
+  }
+  .wf-btn.primary:hover { opacity: 0.88; }
+  
+  /* ИЗМЕНЕНО: таблица — строки выше, th заметнее */
+  .wf-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: var(--fs-sm);
+  }
+  .wf-table th, .wf-table td {
+    text-align: left;
+    padding: 7px var(--sp-3);   /* было 6px */
+    border-bottom: 1px solid var(--line);
+    font-weight: 400;
+  }
+  .wf-table th {
+    font-size: var(--fs-xs);
+    color: var(--fg-muted);     /* было fg-dim — заголовки колонок заметнее */
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    border-bottom: 1px solid var(--line-strong);
+    white-space: nowrap;
+    padding-bottom: 8px;   /* чуть больше отступ снизу */
+  }
+  .wf-table td.muted { color: var(--fg-muted); }
+  .wf-table td.dim   { color: var(--fg-dim); }
+  .wf-table tr:last-child td { border-bottom: none; }
+  .wf-table tr:hover td { background: var(--bg-2); }
+  
+  .wf-bar {
+    height: 4px;   /* было 5px — тонкие бары выглядят аккуратнее */
+    background: var(--bg-3);
+    border-radius: 999px;
+    overflow: hidden;
+  }
+  .wf-bar > i {
+    display: block;
+    height: 100%;
+    background: var(--fg-dim);   /* было fg-muted — нейтральный бар тише */
+    transition: width 0.3s ease;
+  }
+  .wf-bar > i.warn { background: var(--status-warn); }
+  .wf-bar > i.err  { background: var(--status-err); }
+  
+  /* details/summary */
+  details.wf-card { padding: 0; }
+  details.wf-card > summary {
+    display: flex;
+    align-items: center;
+    gap: var(--sp-3);
+    padding: var(--sp-3) var(--sp-4);
+    cursor: pointer;
+    list-style: none;
+    user-select: none;
+    transition: background 0.1s;
+  }
+  details.wf-card > summary::-webkit-details-marker { display: none; }
+  details.wf-card > summary:hover { background: var(--bg-2); border-radius: var(--r-md); }
+  details.wf-card[open] > summary { border-bottom: 1px solid var(--line); border-radius: var(--r-md) var(--r-md) 0 0; }
+  details.wf-card > .detail-body { padding: var(--sp-2) 0; }
+  
+  /* scrollbar */
+  ::-webkit-scrollbar { width: 4px; height: 4px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--line-strong); border-radius: 999px; }
