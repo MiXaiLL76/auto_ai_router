@@ -38,14 +38,19 @@
       </div>
       <div style="display:flex;gap:var(--sp-2);align-items:center;">
         <span class="wf-badge" id="statusBadge"><span class="dotS"></span><span id="statusText">—</span></span>
-        <button class="wf-btn" onclick="load(true)">refresh <span class="key">R</span></button>
+        <button class="wf-btn" onclick="load()">refresh <span class="key">R</span></button>
       </div>
     </div>
 
-    <div class="wf-section-title">chain diagram</div>
-    <div class="wf-card" style="padding:var(--sp-3);min-height:120px;overflow-x:auto;text-align:center;" id="diagramWrap">
-      <p style="color:var(--fg-muted);padding:var(--sp-4);">Loading…</p>
-    </div>
+    <details class="wf-card" id="diagramSection" open style="margin-bottom:var(--sp-4);">
+      <summary>
+        <span id="diagramArrow">▾</span>
+        <span>chain diagram</span>
+      </summary>
+      <div style="padding:var(--sp-3);min-height:120px;overflow-x:auto;text-align:center;" id="diagramWrap">
+        <p style="color:var(--fg-muted);padding:var(--sp-4);">Loading…</p>
+      </div>
+    </details>
 
     <div class="wf-section-title">router &amp; credential data</div>
     <div id="routerList"></div>
@@ -241,10 +246,10 @@ function buildDetails(trace) {
         <td>—</td>
       </tr>`).join('');
 
-    const openAttr = idx === 0 ? ' open' : '';
-    return `<details class="wf-card" style="margin-bottom:var(--sp-2);"${openAttr}>
+    const isOpen = idx === 0;
+    return `<details class="wf-card" style="margin-bottom:var(--sp-2);"${isOpen ? ' open' : ''}>
       <summary>
-        <span style="color:var(--fg-dim);">${idx === 0 ? '▾' : '▸'}</span>
+        <span style="color:var(--fg-dim);">${isOpen ? '▾' : '▸'}</span>
         <span style="font-size:13px;">${esc(t.router_id || '—')}</span>
         ${badge(cls, t.status || 'unknown')}
         ${viaHtml}
@@ -269,6 +274,25 @@ function buildDetails(trace) {
   }).join('');
 }
 
+// ── helpers ────────────────────────────────────────────────────────
+function countNodes(t, acc = { routers: 0, creds: 0 }) {
+  acc.routers++;
+  acc.creds += Object.keys(t.credentials || {}).length;
+  for (const up of Object.values(t.upstreams || {})) {
+    if (!up.fetch_error) countNodes(up, acc);
+  }
+  return acc;
+}
+
+function wireToggleArrows(root) {
+  root.querySelectorAll('details').forEach(det => {
+    det.addEventListener('toggle', () => {
+      const arrow = det.querySelector('summary > span:first-child');
+      if (arrow) arrow.textContent = det.open ? '▾' : '▸';
+    });
+  });
+}
+
 // ── data loading ───────────────────────────────────────────────────────────
 async function load() {
   clearInterval(countdownTimer);
@@ -285,37 +309,22 @@ async function load() {
     document.getElementById('verLabel').textContent =
       ver ? `${ver}${commit ? ' / ' + commit.slice(0, 7) : ''}` : '';
 
-    // overall status derived from root router
+    // overall status badge
     const rootStatus = trace.status || 'unknown';
-    const cls = statusClass(rootStatus);
     const badgeEl = document.getElementById('statusBadge');
-    badgeEl.className = `wf-badge ${cls}`;
+    badgeEl.className = `wf-badge ${statusClass(rootStatus)}`;
     document.getElementById('statusText').textContent = rootStatus;
 
-    // count routers + creds
-    let routerCount = 0, credCount = 0;
-    function countNodes(t) {
-      routerCount++;
-      credCount += Object.keys(t.credentials || {}).length;
-      for (const up of Object.values(t.upstreams || {})) {
-        if (!up.fetch_error) countNodes(up);
-      }
-    }
-    countNodes(trace);
-
+    // subtitle: router + credential counts
+    const { routers, creds } = countNodes(trace);
     document.getElementById('subtitle').textContent =
-      `${routerCount} router${routerCount !== 1 ? 's' : ''} · ${credCount} credentials · updated ${new Date().toLocaleTimeString()}`;
+      `${routers} router${routers !== 1 ? 's' : ''} · ${creds} credentials · updated ${new Date().toLocaleTimeString()}`;
 
     await renderDiagram(trace);
-    document.getElementById('routerList').innerHTML = buildDetails(trace);
 
-    // wire <details> toggle arrows
-    document.querySelectorAll('#routerList details').forEach(det => {
-      det.addEventListener('toggle', () => {
-        const arrow = det.querySelector('summary > span:first-child');
-        if (arrow) arrow.textContent = det.open ? '▾' : '▸';
-      });
-    });
+    const routerList = document.getElementById('routerList');
+    routerList.innerHTML = buildDetails(trace);
+    wireToggleArrows(routerList);
   } catch (e) {
     document.getElementById('diagramWrap').innerHTML =
       `<p style="color:var(--status-err);padding:var(--sp-4);">Failed to load trace: ${esc(e.message)}</p>`;
@@ -336,6 +345,10 @@ async function load() {
 function tickCountdown() {
   document.getElementById('countdown').textContent = `refresh in ${countdownSecs}s`;
 }
+
+document.getElementById('diagramSection').addEventListener('toggle', function () {
+  document.getElementById('diagramArrow').textContent = this.open ? '▾' : '▸';
+});
 
 document.addEventListener('keydown', e => {
   if ((e.key === 'r' || e.key === 'R') && !e.ctrlKey && !e.metaKey) load();
