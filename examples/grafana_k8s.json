@@ -2535,7 +2535,7 @@
   },
   "timepicker": {},
   "timezone": "",
-  "title": "Auto AI Router",
-  "uid": "auto-ai-router",
+  "title": "Auto AI Router k8s",
+  "uid": "auto-ai-router-k8s",
   "version": 1
 }
