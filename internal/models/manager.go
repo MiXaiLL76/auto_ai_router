@@ -674,6 +674,16 @@ func (m *Manager) GetAllModels() ModelsResponse {
 			)
 			continue
 		}
+		// Skip fallback proxy credentials: registering their model list in
+		// modelToCredentials would cause HasModel to return false for non-fallback
+		// proxies, making them invisible to NextForModel and forcing all traffic
+		// through the fallback credential instead of using it only as a last resort.
+		if cred.IsFallback {
+			m.logger.Debug("Skipping model fetch for fallback proxy credential",
+				"credential", cred.Name,
+			)
+			continue
+		}
 
 		m.logger.Debug("Fetching models from proxy credential",
 			"credential", cred.Name,
