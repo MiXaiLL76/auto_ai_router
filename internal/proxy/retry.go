@@ -144,17 +144,28 @@ func (p *Proxy) TryFallbackProxy(
 		return false, "max_retry_attempts_exceeded"
 	}
 
-	// Get set of already-tried credentials from context
+	// Get set of already-tried credentials from context.
+	// Pass this as the exclude set so NextFallbackProxyForModelExcluding skips any
+	// fallback that was already attempted (prevents circular retries like A→B→A).
 	triedCreds := GetTried(ctx)
 
-	// Try to find a fallback proxy credential
-	fallbackCred, err := p.balancer.NextFallbackProxyForModel(modelID)
+	// Also exclude the original credential by name so we never send back to the
+	// credential that just failed, even if it happens to be marked as fallback.
+	excludeSet := make(map[string]bool, len(triedCreds)+1)
+	for k, v := range triedCreds {
+		excludeSet[k] = v
+	}
+	excludeSet[originalCredName] = true
+
+	// Try to find a fallback proxy credential, excluding already-tried ones.
+	fallbackCred, err := p.balancer.NextFallbackProxyForModelExcluding(modelID, excludeSet)
 	if err != nil {
 		p.logger.Debug("No fallback proxy available for retry",
 			"original_credential", originalCredName,
 			"model", modelID,
 			"original_status", originalStatus,
 			"reason", originalReason,
+			"tried", formatTriedCreds(triedCreds),
 		)
 		return false, "no_fallback_available"
 	}
@@ -166,25 +177,6 @@ func (p *Proxy) TryFallbackProxy(
 			"original_credential", originalCredName,
 		)
 		return false, "no_fallback_available"
-	}
-
-	// Safety check: don't retry with the same credential
-	if fallbackCred.Name == originalCredName {
-		p.logger.Warn("Fallback credential is the same as original, skipping retry",
-			"credential", fallbackCred.Name,
-			"model", modelID,
-		)
-		return false, "fallback_is_same_credential"
-	}
-
-	// Check if fallback credential has already been tried in this request chain
-	if triedCreds[fallbackCred.Name] {
-		p.logger.Warn("Fallback credential already attempted, skipping to prevent circular retry",
-			"fallback_credential", fallbackCred.Name,
-			"tried_credentials", formatTriedCreds(triedCreds),
-			"model", modelID,
-		)
-		return false, "credential_already_tried"
 	}
 
 	p.logger.Info("Retrying request on fallback proxy",

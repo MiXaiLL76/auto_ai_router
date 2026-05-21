@@ -146,6 +146,13 @@ func (r *RoundRobin) NextFallbackProxyForModel(modelID string) (*config.Credenti
 	return r.next(modelID, true, true)
 }
 
+// NextFallbackProxyForModelExcluding returns the next available fallback proxy credential,
+// skipping credentials in the exclude set. Used by TryFallbackProxy to avoid re-trying
+// a fallback that was already attempted in the current request chain.
+func (r *RoundRobin) NextFallbackProxyForModelExcluding(modelID string, exclude map[string]bool) (*config.CredentialConfig, error) {
+	return r.nextExcluding(modelID, true, true, "", exclude)
+}
+
 // NextSpecific tries to return a specific credential by name without advancing the
 // round-robin state. It still applies model availability, ban, and rate-limit checks.
 func (r *RoundRobin) NextSpecific(credentialName, modelID string) (*config.CredentialConfig, error) {

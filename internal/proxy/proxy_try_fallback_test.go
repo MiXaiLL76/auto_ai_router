@@ -97,16 +97,19 @@ func TestTryFallbackProxy_NoFallback(t *testing.T) {
 		"Response body length should be 0 when no fallback available")
 }
 
-// TestTryFallbackProxy_SameCredential tests the scenario where the fallback credential
+// TestTryFallbackProxy_SameCredential tests the scenario where the only fallback credential
 // has the same name as the original credential (circular reference protection).
 //
 // Test Case B: Fallback credential is same as original
-// - Balancer returns a fallback credential with the same Name as originalCredName
-// - Function should return (false, "fallback_is_same_credential") immediately
+// - The original credential is pre-emptively excluded from the fallback candidate pool
+// - NextFallbackProxyForModelExcluding finds no remaining candidates
+// - Function should return (false, "no_fallback_available") immediately
 // - Function should NOT attempt to forward the request to avoid infinite loops
 //
-// This test validates that TryFallbackProxy includes safety checks to prevent
-// retrying with the same credential, which could cause infinite recursion or loops.
+// This test validates that TryFallbackProxy pre-emptively excludes the original credential
+// from the fallback candidate pool, preventing circular retries.
+// Previously the function would return "fallback_is_same_credential" after finding the candidate;
+// now the candidate is never found because it is excluded up front.
 func TestTryFallbackProxy_SameCredential(t *testing.T) {
 	// Build proxy with single credential marked as both primary and fallback (edge case)
 	prx := NewTestProxyBuilder().
@@ -170,9 +173,10 @@ func TestTryFallbackProxy_SameCredential(t *testing.T) {
 	assert.False(t, success,
 		"TryFallbackProxy should return success=false when fallback is same credential")
 
-	// ✓ Assert: Reason should indicate fallback is the same credential
-	assert.Equal(t, "fallback_is_same_credential", reason,
-		"Should return reason='fallback_is_same_credential' when names match")
+	// ✓ Assert: Reason should indicate no fallback available
+	// (original credential is excluded from the candidate pool, leaving no candidates)
+	assert.Equal(t, "no_fallback_available", reason,
+		"Should return reason='no_fallback_available' when original credential is the only fallback")
 
 	// ✓ Assert: Response writer should be empty (request was never forwarded)
 	// Since the function detected the same credential, it returns early without

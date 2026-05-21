@@ -461,6 +461,8 @@ func TestTryFallbackProxy_SameCredentialAsOriginal(t *testing.T) {
 	)
 
 	// Assertions
+	// The original credential is pre-emptively excluded from the fallback candidate pool,
+	// so NextFallbackProxyForModelExcluding finds no candidates — returns "no_fallback_available".
 	assert.False(t, success, "TryFallbackProxy should return success=false when fallback is same credential")
-	assert.Equal(t, "fallback_is_same_credential", reason, "Should return fallback_is_same_credential reason")
+	assert.Equal(t, "no_fallback_available", reason, "Should return no_fallback_available when original credential is the only fallback")
 }

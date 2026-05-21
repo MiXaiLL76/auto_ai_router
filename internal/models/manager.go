@@ -153,6 +153,7 @@ type Manager struct {
 	dbModelNames              map[string]bool          // model names that were loaded from LiteLLM DB (for hot-reload diffing)
 	modelAliases              map[string]string        // alias -> real model name (from model_alias config)
 	modelRealNames            map[string]string        // alias name -> real model name (from models[].model field)
+	knownProxyCredentials     map[string]bool          // set of proxy-type credential names (populated by LoadModelsFromConfig/UpdateDBModels)
 	defaultModelsRPM          int                      // default RPM for models
 	logger                    *slog.Logger
 	credentials               []config.CredentialConfig   // credentials for fetching remote models
@@ -174,6 +175,7 @@ func New(logger *slog.Logger, defaultModelsRPM int, staticModels []config.ModelR
 		modelAliases:              make(map[string]string),
 		modelRealNames:            make(map[string]string),
 		modelPassthroughResponses: make(map[string]*bool),
+		knownProxyCredentials:     make(map[string]bool),
 		defaultModelsRPM:          defaultModelsRPM,
 		logger:                    logger,
 		credentials:               make([]config.CredentialConfig, 0),
@@ -446,8 +448,12 @@ func (m *Manager) LoadModelsFromConfig(credentials []config.CredentialConfig) {
 	// that fallback is intentional for proxy credentials whose model list is fetched dynamically,
 	// but it incorrectly allows non-proxy credentials (e.g. openai_backup with no models:)
 	// to match any model when static models are configured for other credentials.
+	//
+	// Also populate knownProxyCredentials so HasModel can distinguish "proxy not yet fetched"
+	// from "unknown credential", allowing the proxy optimistic-allow to work correctly.
 	for _, cred := range credentials {
 		if cred.Type == config.ProviderTypeProxy {
+			m.knownProxyCredentials[cred.Name] = true
 			continue // proxy models are fetched dynamically via GetAllModels
 		}
 		if _, exists := m.credentialModels[cred.Name]; !exists {
@@ -571,8 +577,10 @@ func (m *Manager) UpdateDBModels(dbModels []config.ModelRPMConfig, staticCreds [
 	}
 
 	// Register non-proxy credentials with no models — same logic as in LoadModelsFromConfig.
+	// Also track proxy credential names for HasModel's optimistic-allow logic.
 	for _, c := range allCreds {
 		if c.Type == config.ProviderTypeProxy {
+			m.knownProxyCredentials[c.Name] = true
 			continue
 		}
 		if _, exists := newCredentialModels[c.Name]; !exists {
@@ -806,7 +814,20 @@ func (m *Manager) HasModel(credentialName, modelID string) bool {
 		return true
 	}
 	if modelExists {
-		// Model exists but not for this credential
+		// Model is registered for other credentials but not for this one.
+		// Before denying: check whether this is a known proxy credential whose model list
+		// has not yet been fetched (i.e. has no entry in credentialModels yet).
+		// Proxy credentials are populated dynamically by UpdateAllProxyCredentials;
+		// if the entry is absent it means the first model fetch hasn't completed yet
+		// (e.g. the proxy was unreachable at startup). Allow optimistically so that
+		// the request is forwarded and the downstream proxy can handle routing.
+		// Once AddModel() has been called at least once, credentialModels will have an
+		// entry and this early-allow is no longer triggered.
+		if m.knownProxyCredentials[credentialName] {
+			if _, credFetched := m.credentialModels[credentialName]; !credFetched {
+				return true
+			}
+		}
 		return false
 	}
 

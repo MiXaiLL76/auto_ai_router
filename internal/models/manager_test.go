@@ -132,6 +132,43 @@ func TestHasModel(t *testing.T) {
 	assert.True(t, manager.HasModel("non-existing", "some-unknown-model"))
 }
 
+func TestHasModel_ProxyCredentialOptimisticAllow(t *testing.T) {
+	// When a proxy credential is registered but its model list has not yet been fetched
+	// (AddModel was never called for it), HasModel should return true (allow optimistically).
+	// This prevents the fallback proxy from being rejected at startup when the model updater
+	// hasn't run yet but other credentials already have models registered.
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+
+	staticModels := []config.ModelRPMConfig{
+		{Name: "gpt-4", RPM: 100, Credential: "primary"},
+	}
+	manager := New(logger, 100, staticModels)
+
+	credentials := []config.CredentialConfig{
+		{Name: "primary", Type: config.ProviderTypeOpenAI},
+		{Name: "fallback-proxy", Type: config.ProviderTypeProxy, IsFallback: true},
+	}
+	manager.LoadModelsFromConfig(credentials)
+
+	// Primary has the model registered
+	assert.True(t, manager.HasModel("primary", "gpt-4"))
+
+	// Fallback proxy: no models fetched yet (AddModel never called) → allow optimistically
+	assert.True(t, manager.HasModel("fallback-proxy", "gpt-4"),
+		"Proxy credential with no fetched models should be allowed optimistically")
+
+	// After models are fetched for the fallback proxy, the exact list is used
+	manager.AddModel("fallback-proxy", "gpt-4")
+	assert.True(t, manager.HasModel("fallback-proxy", "gpt-4"),
+		"Proxy with gpt-4 registered should be allowed")
+	assert.False(t, manager.HasModel("fallback-proxy", "claude-3"),
+		"Proxy with gpt-4 registered should deny claude-3 (not in its model list)")
+
+	// Non-existing (unknown) credential still gets denied when model exists for known creds
+	assert.False(t, manager.HasModel("unknown-cred", "gpt-4"),
+		"Completely unknown credential should be denied when model exists for known credentials")
+}
+
 func TestHasModel_NoStaticModels(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
 	manager := New(logger, 100, []config.ModelRPMConfig{})
