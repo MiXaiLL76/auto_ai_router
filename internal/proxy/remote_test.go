@@ -523,12 +523,15 @@ func TestUpdateStatsFromHealth_FiltersByFallbackParity_Fallback(t *testing.T) {
 		IsFallback: true,
 	}, rateLimiter, logger, mockMM)
 
-	assert.Equal(t, 500, rateLimiter.GetLimitRPM("proxy-fallback"))
-	assert.Equal(t, 5000, rateLimiter.GetLimitTPM("proxy-fallback"))
+	// Fallback gateway includes ALL upstream credentials (primary + fallback),
+	// so limits are the SUM of both: RPM=100+500=600, TPM=1000+5000=6000.
+	assert.Equal(t, 600, rateLimiter.GetLimitRPM("proxy-fallback"))
+	assert.Equal(t, 6000, rateLimiter.GetLimitTPM("proxy-fallback"))
 	assert.Equal(t, 80, rateLimiter.GetModelLimitRPM("proxy-fallback", "fallback-model"))
-	assert.Equal(t, -1, rateLimiter.GetModelLimitRPM("proxy-fallback", "primary-model"))
+	assert.Equal(t, 20, rateLimiter.GetModelLimitRPM("proxy-fallback", "primary-model"))
 
 	addedModels := mockMM.GetAddedModels()
-	assert.Len(t, addedModels, 1)
-	assert.Equal(t, "fallback-model", addedModels[0].model)
+	assert.Len(t, addedModels, 2)
+	addedModelIDs := []string{addedModels[0].model, addedModels[1].model}
+	assert.ElementsMatch(t, []string{"primary-model", "fallback-model"}, addedModelIDs)
 }

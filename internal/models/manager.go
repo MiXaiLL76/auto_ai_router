@@ -1168,13 +1168,20 @@ func (m *Manager) GetRemoteModelsWithError(ctx context.Context, cred *config.Cre
 	)
 
 	models, err := m.fetchRemoteModelsFromHealth(ctx, cred)
-	if err != nil {
-		m.logger.Debug("Failed to fetch remote models from proxy health; falling back to /v1/models",
-			"credential", cred.Name,
-			"error", err,
-		)
+	if err != nil || len(models) == 0 {
+		if err != nil {
+			m.logger.Debug("Failed to fetch remote models from proxy health; falling back to /v1/models",
+				"credential", cred.Name,
+				"error", err,
+			)
+		} else {
+			m.logger.Debug("Health-based model fetch returned empty list; falling back to /v1/models",
+				"credential", cred.Name,
+			)
+		}
 
-		// Fallback for non-AAR proxies that expose /v1/models but not /health.
+		// Fallback for non-AAR proxies that expose /v1/models but not /health,
+		// or for AAR proxies where the health-based IsFallback filter removed all models.
 		var modelsResp ModelsResponse
 		if err := httputil.FetchJSONFromProxy(ctx, cred, "/v1/models", m.logger, &modelsResp); err != nil {
 			m.logger.Error("Failed to fetch remote models",
@@ -1219,7 +1226,11 @@ func (m *Manager) fetchRemoteModelsFromHealth(ctx context.Context, cred *config.
 		if !ok {
 			continue
 		}
-		if credStats.IsFallback != cred.IsFallback {
+		// For a non-fallback connection: skip upstream credentials marked as fallback
+		// (they are reserved for fallback traffic and must not serve primary requests).
+		// For a fallback connection: include ALL upstream credentials regardless of their
+		// fallback status — use whatever the upstream can offer as a last resort.
+		if !cred.IsFallback && credStats.IsFallback {
 			continue
 		}
 		if modelStats.Model == "" {

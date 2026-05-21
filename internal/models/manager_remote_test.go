@@ -241,7 +241,9 @@ func TestGetRemoteModelsWithError_FiltersRemoteHealthByFallbackParity(t *testing
 		IsFallback: true,
 	})
 	require.NoError(t, err)
-	assert.Equal(t, []string{"fallback-only", "shared-model"}, modelIDs(fallbackModels))
+	// Fallback gateway includes ALL upstream credentials (both primary and fallback),
+	// so it sees all models: primary-only, fallback-only, and shared-model (deduplicated).
+	assert.ElementsMatch(t, []string{"fallback-only", "primary-only", "shared-model"}, modelIDs(fallbackModels))
 }
 
 func TestGetRemoteModelsWithError_FallsBackToV1ModelsWhenHealthUnavailable(t *testing.T) {
