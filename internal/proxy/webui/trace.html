@@ -100,7 +100,7 @@
           background: dark ? '#131517' : '#f4f4f2',
           fontSize: '14px',
         },
-        flowchart: { htmlLabels: true, curve: 'basis', nodeSpacing: 30, rankSpacing: 40 },
+        flowchart: { htmlLabels: true, curve: 'basis', nodeSpacing: 60, rankSpacing: 80 },
       };
     }
 
@@ -273,8 +273,10 @@
         if (svgEl && svgEl.getAttribute('viewBox')) {
           svgEl.removeAttribute('width');
           svgEl.removeAttribute('height');
-          svgEl.style.width = '100%';
+          svgEl.style.maxWidth = '100%';
           svgEl.style.height = 'auto';
+          svgEl.style.display = 'block';
+          svgEl.style.margin = '0 auto';
         }
       } catch (e) {
         wrap.innerHTML = `<pre style="color:var(--status-err);font-size:var(--fs-xs);text-align:left;">${esc(e.message)}\n\n${esc(diagram)}</pre>`;
