@@ -651,6 +651,7 @@ func TestProviderType_IsValid(t *testing.T) {
 		{"openai", ProviderTypeOpenAI, true},
 		{"vertex-ai", ProviderTypeVertexAI, true},
 		{"cometapi", ProviderTypeCometAPI, true},
+		{"sosana", ProviderTypeSosana, true},
 		{"invalid", ProviderType("azure"), false},
 		{"empty", ProviderType(""), false},
 	}
@@ -674,6 +675,86 @@ rpm: 60
 
 	require.NoError(t, err)
 	assert.Equal(t, ProviderTypeCometAPI, cred.Type)
+}
+
+func TestCredentialConfig_MaskUpstreamErrors(t *testing.T) {
+	var cred CredentialConfig
+	err := yaml.Unmarshal([]byte(`
+name: sosana
+type: openai
+api_key: key
+base_url: https://api.sosana.example/v1
+mask_upstream_errors: true
+rpm: 60
+`), &cred)
+
+	require.NoError(t, err)
+	assert.True(t, cred.MaskUpstreamErrors)
+}
+
+func TestCredentialConfig_NormalizeSosanaProviderType(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+	}{
+		{"canonical", "sosana"},
+		{"dash alias", "sosana-art"},
+		{"underscore alias", "sosana_art"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var cred CredentialConfig
+			err := yaml.Unmarshal([]byte(`
+name: sosana
+type: `+tt.raw+`
+api_key: key
+base_url: https://sosana.art
+rpm: 60
+`), &cred)
+
+			require.NoError(t, err)
+			assert.Equal(t, ProviderTypeSosana, cred.Type)
+		})
+	}
+}
+
+func TestConfig_Validate_SosanaRequiresAPIKeyAndBaseURL(t *testing.T) {
+	tests := []struct {
+		name    string
+		apiKey  string
+		baseURL string
+		wantErr string
+	}{
+		{name: "valid", apiKey: "key", baseURL: "https://sosana.art"},
+		{name: "missing api key", baseURL: "https://sosana.art", wantErr: "api_key is required"},
+		{name: "missing base url", apiKey: "key", wantErr: "base_url is required"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &Config{
+				Server: ServerConfig{
+					Port:           8080,
+					MaxBodySizeMB:  10,
+					MasterKey:      "test-key",
+					RequestTimeout: 30 * time.Second,
+				},
+				Credentials: []CredentialConfig{
+					{Name: "sosana", Type: ProviderTypeSosana, APIKey: tt.apiKey, BaseURL: tt.baseURL, RPM: 10},
+				},
+				Fail2Ban: Fail2BanConfig{MaxAttempts: 3},
+			}
+
+			err := cfg.Validate()
+			if tt.wantErr == "" {
+				assert.NoError(t, err)
+			} else {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.wantErr)
+			}
+		})
+	}
 }
 
 func TestConfig_Validate_VertexAI(t *testing.T) {

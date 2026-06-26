@@ -297,6 +297,8 @@ func mapProviderType(provider string) config.ProviderType {
 		return config.ProviderTypeGemini
 	case strings.Contains(p, "cometapi") || strings.Contains(p, "comet-api"):
 		return config.ProviderTypeCometAPI
+	case strings.Contains(p, "sosana"):
+		return config.ProviderTypeSosana
 	case strings.Contains(p, "xai"):
 		return config.ProviderTypeOpenAI
 	default:
@@ -388,7 +390,8 @@ func convertPricingToModelPrice(p *queries.CustomPricingLiteLLMParams) *manager.
 	if p == nil {
 		return nil
 	}
-	if p.InputCostPerToken == nil && p.OutputCostPerToken == nil {
+	if p.InputCostPerToken == nil && p.OutputCostPerToken == nil &&
+		p.OutputCostPerImage == nil && p.OutputCostPerImageToken == nil {
 		return nil
 	}
 

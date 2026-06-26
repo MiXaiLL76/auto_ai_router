@@ -510,6 +510,11 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if cred.Type == config.ProviderTypeSosana {
+		p.handleSosanaRequest(w, r, body, cred, modelID, realModelID, isImageGeneration, isImageEdit, logCtx, start)
+		return
+	}
+
 	// Handle proxy credential type with same-type retry + fallback
 	if cred.Type == config.ProviderTypeProxy {
 		logCtx.Credential = cred
@@ -632,9 +637,34 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Write response (streaming or non-streaming)
+		maskProxyError := proxyResp.StatusCode >= 400 && shouldMaskProxyResponseErrors(cred, proxyResp)
 		if proxyResp.IsStreaming {
 			p.logger.DebugContext(r.Context(), "Response is streaming (no retry for streaming)",
 				"credential", cred.Name, "status", proxyResp.StatusCode)
+			if maskProxyError {
+				if proxyResp.StreamBody != nil {
+					_ = proxyResp.StreamBody.Close()
+				}
+				body := maskedUpstreamErrorBody(proxyResp.StatusCode)
+				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set("Content-Length", fmt.Sprintf("%d", len(body)))
+				if logCtx.IsProxyRequest && logCtx.ActualCredentialName != "" {
+					w.Header().Set("X-Credential-Name", logCtx.ActualCredentialName)
+				}
+				w.WriteHeader(proxyResp.StatusCode)
+				_, _ = w.Write(body)
+				logCtx.Status = "failure"
+				logCtx.HTTPStatus = proxyResp.StatusCode
+				logCtx.ErrorMsg = "Upstream provider error"
+				logCtx.TargetURL = cred.BaseURL
+				p.logUpstreamError(r.Context(), "Proxy request completed with masked streaming error status", proxyResp.StatusCode, cred, modelID, nil,
+					"url", cred.BaseURL,
+					"streaming", true,
+					"actual_credential", logCtx.ActualCredentialName,
+					"response_body_masked", true,
+					"request_id", logCtx.RequestID)
+				return
+			}
 			streamCompleted := false
 
 			if prepared.convertedResp {
@@ -733,6 +763,28 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 				p.setSessionBinding(logCtx.SessionID, modelID, cred.Name)
 			}
 		} else {
+			if proxyResp.StatusCode >= 200 && proxyResp.StatusCode < 300 && logCtx.IsImageGeneration && shouldMaskProxyResponseErrors(cred, proxyResp) {
+				normalizedBody, normErr := normalizeOpenAIImageResponseBody(proxyResp.Body)
+				if normErr != nil {
+					p.logger.ErrorContext(r.Context(), "Failed to normalize proxy image response to OpenAI format",
+						"credential", cred.Name, "model", modelID, "error", normErr,
+						"actual_credential", logCtx.ActualCredentialName,
+						"response_body_masked", true,
+						"request_id", logCtx.RequestID)
+					proxyResp.StatusCode = http.StatusBadGateway
+					maskProxyErrorResponse(proxyResp)
+				} else {
+					proxyResp.Body = normalizedBody
+					if proxyResp.Headers == nil {
+						proxyResp.Headers = http.Header{}
+					}
+					proxyResp.Headers.Set("Content-Type", "application/json")
+				}
+			}
+			if proxyResp.StatusCode >= 400 && shouldMaskProxyResponseErrors(cred, proxyResp) {
+				maskProxyErrorResponse(proxyResp)
+			}
+
 			// Save passthrough Responses API response or convert Chat Completions response if needed
 			if prepared.passthroughResponses && proxyResp.StatusCode >= 200 && proxyResp.StatusCode < 300 {
 				// Codex passthrough: body is already in Responses API format — just enrich and save.
@@ -801,11 +853,18 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			// Final error returned to the client — single unified ERROR record.
 			// For streaming responses the body was forwarded to the client and is
 			// not available here (response_body is omitted).
-			p.logUpstreamError(r.Context(), "Proxy request completed with error status", proxyResp.StatusCode, cred, modelID, proxyResp.Body,
+			proxyErrorBody := proxyResp.Body
+			extra := []any{
 				"url", cred.BaseURL,
 				"streaming", proxyResp.IsStreaming,
 				"actual_credential", logCtx.ActualCredentialName,
-				"request_id", logCtx.RequestID)
+				"request_id", logCtx.RequestID,
+			}
+			if shouldMaskProxyResponseErrors(cred, proxyResp) {
+				proxyErrorBody = nil
+				extra = append(extra, "response_body_masked", true)
+			}
+			p.logUpstreamError(r.Context(), "Proxy request completed with error status", proxyResp.StatusCode, cred, modelID, proxyErrorBody, extra...)
 		}
 		logCtx.HTTPStatus = proxyResp.StatusCode
 		logCtx.TargetURL = cred.BaseURL
@@ -1288,7 +1347,13 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 				}
 				args = appendResponseBodyForLogs(args, cred, decodedBody)
 				p.logger.ErrorContext(r.Context(), "Failed to transform provider response to OpenAI format", args...)
-				finalResponseBody = []byte(decodedBody)
+				if shouldMaskUpstreamErrors(cred) {
+					resp.StatusCode = http.StatusBadGateway
+					finalResponseBody = maskedUpstreamErrorBody(resp.StatusCode)
+					resp.Header.Set("Content-Type", "application/json")
+				} else {
+					finalResponseBody = []byte(decodedBody)
+				}
 			} else {
 				finalResponseBody = convertedBody
 				p.logTransformedResponse(r.Context(), cred.Name, string(cred.Type), finalResponseBody)
@@ -1317,7 +1382,12 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 				}
 				args = appendResponseBodyForLogs(args, cred, decodedBody)
 				p.logger.ErrorContext(r.Context(), "Failed to convert native Responses API response", args...)
-				// finalResponseBody already holds decodedBody — return as-is
+				if shouldMaskUpstreamErrors(cred) {
+					resp.StatusCode = http.StatusBadGateway
+					finalResponseBody = maskedUpstreamErrorBody(resp.StatusCode)
+					bodyForTokenExtraction = finalResponseBody
+					resp.Header.Set("Content-Type", "application/json")
+				}
 			} else {
 				applyResponsesMetadata(nativeResp, prepared.responsesMetadata)
 				if enriched, marshalErr := json.Marshal(nativeResp); marshalErr == nil {
@@ -1350,7 +1420,12 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 				p.logger.ErrorContext(r.Context(), "Failed to convert to Responses API format",
 					"credential", cred.Name, "model", modelID, "error", convErr,
 					"request_id", logCtx.RequestID)
-				// fallback: use Chat Completions body
+				if shouldMaskUpstreamErrors(cred) {
+					resp.StatusCode = http.StatusBadGateway
+					finalResponseBody = maskedUpstreamErrorBody(resp.StatusCode)
+					bodyForTokenExtraction = finalResponseBody
+					resp.Header.Set("Content-Type", "application/json")
+				}
 			} else {
 				// Enrich the response with request-echoed fields (store, previous_response_id,
 				// metadata) for both the client payload and the store record.
@@ -1371,6 +1446,25 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 				}
 				finalResponseBody = responsesBody
 			}
+		}
+
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 && logCtx.IsImageGeneration && shouldMaskUpstreamErrors(cred) {
+			normalizedBody, normErr := normalizeOpenAIImageResponseBody(finalResponseBody)
+			if normErr != nil {
+				args := []any{
+					"credential", cred.Name, "provider", string(cred.Type),
+					"model", modelID, "error", normErr,
+					"request_id", logCtx.RequestID,
+				}
+				args = appendResponseBodyForLogs(args, cred, string(finalResponseBody))
+				p.logger.ErrorContext(r.Context(), "Failed to normalize image response to OpenAI format", args...)
+				resp.StatusCode = http.StatusBadGateway
+				finalResponseBody = maskedUpstreamErrorBody(resp.StatusCode)
+			} else {
+				finalResponseBody = normalizedBody
+			}
+			bodyForTokenExtraction = finalResponseBody
+			resp.Header.Set("Content-Type", "application/json")
 		}
 
 		rawErrorBody := finalResponseBody

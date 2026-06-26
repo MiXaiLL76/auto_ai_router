@@ -154,16 +154,16 @@ Each credential defines a connection to an LLM provider. See [Providers](../prov
 
 Common fields for all credentials:
 
-| Field              | Type   | Description                                                                                 |
-| ------------------ | ------ | ------------------------------------------------------------------------------------------- |
-| `name`             | string | Unique credential identifier                                                                |
-| `type`             | string | Provider type: `openai`, `anthropic`, `cometapi`, `vertex-ai`, `gemini`, `bedrock`, `proxy` |
-| `rpm`              | int    | Requests per minute limit (-1 = unlimited)                                                  |
-| `tpm`              | int    | Tokens per minute limit (-1 = unlimited)                                                    |
-| `is_fallback`      | bool   | Use as fallback when primary credentials are exhausted                                      |
-| `scopes`           | list   | Optional client scopes allowed to use and see this credential                               |
-| `denied_scopes`    | list   | Optional client scopes that must not use or see this credential                             |
-| `forbidden_scopes` | list   | Alias for `denied_scopes`                                                                   |
+| Field              | Type   | Description                                                                                           |
+| ------------------ | ------ | ----------------------------------------------------------------------------------------------------- |
+| `name`             | string | Unique credential identifier                                                                          |
+| `type`             | string | Provider type: `openai`, `anthropic`, `cometapi`, `sosana`, `vertex-ai`, `gemini`, `bedrock`, `proxy` |
+| `rpm`              | int    | Requests per minute limit (-1 = unlimited)                                                            |
+| `tpm`              | int    | Tokens per minute limit (-1 = unlimited)                                                              |
+| `is_fallback`      | bool   | Use as fallback when primary credentials are exhausted                                                |
+| `scopes`           | list   | Optional client scopes allowed to use and see this credential                                         |
+| `denied_scopes`    | list   | Optional client scopes that must not use or see this credential                                       |
+| `forbidden_scopes` | list   | Alias for `denied_scopes`                                                                             |
 
 ### Scoped credential visibility
 

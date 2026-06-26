@@ -6,6 +6,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb/queries"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestMapProviderType(t *testing.T) {
@@ -20,6 +21,8 @@ func TestMapProviderType(t *testing.T) {
 		{"google", "GoogleAI", config.ProviderTypeGemini},
 		{"cometapi", "cometapi", config.ProviderTypeCometAPI},
 		{"comet-api", "comet-api", config.ProviderTypeCometAPI},
+		{"sosana", "sosana", config.ProviderTypeSosana},
+		{"sosana-art", "sosana-art", config.ProviderTypeSosana},
 		{"xai", "xAI", config.ProviderTypeOpenAI},
 		{"unknown", "some-other", ""},
 	}
@@ -149,6 +152,19 @@ func TestConvertPricingToModelPrice(t *testing.T) {
 
 	assert.Nil(t, convertPricingToModelPrice(&queries.CustomPricingLiteLLMParams{}))
 	assert.Nil(t, convertPricingToModelPrice(nil))
+}
+
+func TestConvertPricingToModelPrice_ImageOnly(t *testing.T) {
+	outputImage := 0.5
+
+	price := convertPricingToModelPrice(&queries.CustomPricingLiteLLMParams{
+		OutputCostPerImage: &outputImage,
+	})
+
+	require.NotNil(t, price)
+	assert.Equal(t, outputImage, price.OutputCostPerImage)
+	assert.Equal(t, 0.0, price.InputCostPerToken)
+	assert.Equal(t, 0.0, price.OutputCostPerToken)
 }
 
 func TestConvertPricingToModelPrice_AllFields(t *testing.T) {

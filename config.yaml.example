@@ -53,6 +53,7 @@ credentials:
     rpm: 100
     tpm: 50000
     weight: 100  # Optional: weighted round-robin share (default 1). See docs/advanced/balancing.md
+    # mask_upstream_errors: true  # Enable for OpenAI-compatible resellers whose raw errors must not reach clients.
 
   - name: "vertex_ai"
     type: "vertex-ai"
@@ -74,6 +75,14 @@ credentials:
     type: "cometapi"
     api_key: "os.environ/COMET_API_KEY"
     base_url: "https://api.cometapi.com/v1"
+    rpm: 60
+    tpm: -1
+
+  # Sosana.art image generation API (OpenAI Images-compatible through the router)
+  - name: "sosana_images"
+    type: "sosana"
+    api_key: "os.environ/SOSANA_API_KEY"
+    base_url: "https://sosana.art"
     rpm: 60
     tpm: -1
 
@@ -106,6 +115,12 @@ models:
     credential: vertex_ai
     rpm: 100
     tpm: 50000
+
+  # Sosana.art image model exposed through /v1/images/generations and /v1/images/edits.
+  - name: "nano-banana"
+    credential: sosana_images
+    rpm: 60
+    tpm: -1
 
   # Comet API Claude aliases for public model names.
   - name: "anthropic/claude-haiku-4.5"

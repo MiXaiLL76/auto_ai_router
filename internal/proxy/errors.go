@@ -87,6 +87,23 @@ func maskedUpstreamErrorBody(statusCode int) []byte {
 	return append(body, '\n')
 }
 
+func maskedContentPolicyBody() []byte {
+	code := "content_policy_violation"
+	resp := APIErrorResponse{
+		Error: APIError{
+			Message: "Content policy violation",
+			Type:    errorTypeForStatus(http.StatusBadRequest),
+			Param:   nil,
+			Code:    &code,
+		},
+	}
+	body, err := json.Marshal(resp)
+	if err != nil {
+		return []byte(`{"error":{"message":"Content policy violation","type":"invalid_request_error","param":null,"code":"content_policy_violation"}}`)
+	}
+	return append(body, '\n')
+}
+
 // WriteErrorBadRequest writes a 400 Bad Request JSON error.
 func WriteErrorBadRequest(w http.ResponseWriter, message string) {
 	WriteJSONError(w, http.StatusBadRequest, message, errorTypeForStatus(http.StatusBadRequest), nil, nil)

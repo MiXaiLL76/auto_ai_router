@@ -49,7 +49,10 @@ func appendResponseBodyForLogs(args []any, cred *config.CredentialConfig, body s
 }
 
 func shouldMaskUpstreamErrors(cred *config.CredentialConfig) bool {
-	return isCometAPICredential(cred)
+	if cred == nil {
+		return false
+	}
+	return cred.MaskUpstreamErrors || isCometAPICredential(cred) || isSosanaCredential(cred)
 }
 
 func isCometAPICredential(cred *config.CredentialConfig) bool {
@@ -66,19 +69,42 @@ func isCometAPICredential(cred *config.CredentialConfig) bool {
 }
 
 func isCometAPIHost(rawBaseURL string) bool {
+	host := normalizedHost(rawBaseURL)
+	return host == "cometapi.com" || strings.HasSuffix(host, ".cometapi.com")
+}
+
+func normalizedHost(rawBaseURL string) string {
 	baseURL := strings.TrimSpace(rawBaseURL)
 	if baseURL == "" {
-		return false
+		return ""
 	}
 	u, err := url.Parse(baseURL)
 	if err != nil || u.Hostname() == "" {
 		u, err = url.Parse("https://" + baseURL)
 		if err != nil {
-			return false
+			return ""
 		}
 	}
-	host := strings.TrimSuffix(strings.ToLower(u.Hostname()), ".")
-	return host == "cometapi.com" || strings.HasSuffix(host, ".cometapi.com")
+	return strings.TrimSuffix(strings.ToLower(u.Hostname()), ".")
+}
+
+func isSosanaCredential(cred *config.CredentialConfig) bool {
+	if cred == nil {
+		return false
+	}
+	if cred.Type == config.ProviderTypeSosana {
+		return true
+	}
+	name := strings.ToLower(cred.Name)
+	host := normalizedHost(cred.BaseURL)
+	return isSosanaHost(cred.BaseURL) ||
+		containsSosanaMarker(name) ||
+		containsSosanaMarker(host)
+}
+
+func isSosanaHost(rawBaseURL string) bool {
+	host := normalizedHost(rawBaseURL)
+	return host == "sosana.art" || strings.HasSuffix(host, ".sosana.art")
 }
 
 // logStreamHandlerError logs a streaming handler failure. Client disconnects are
