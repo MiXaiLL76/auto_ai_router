@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
 	"github.com/mixaill76/auto_ai_router/internal/converter/openai"
@@ -33,11 +34,13 @@ type BananaCreateRequest struct {
 }
 
 type BananaTaskResponse struct {
-	UID           string  `json:"uid"`
-	Status        string  `json:"status"`
-	Prompt        string  `json:"prompt"`
-	ResultFileURL *string `json:"result_file_url"`
-	Error         *string `json:"error"`
+	UID             string  `json:"uid"`
+	Status          string  `json:"status"`
+	Prompt          string  `json:"prompt"`
+	CreatedAt       string  `json:"created_at"`
+	OptimizedPrompt string  `json:"optimized_prompt"`
+	ResultFileURL   *string `json:"result_file_url"`
+	Error           *string `json:"error"`
 }
 
 func ImageGenerationRequest(openAIBody []byte, modelID string) ([]byte, error) {
@@ -52,13 +55,9 @@ func ImageGenerationRequest(openAIBody []byte, modelID string) ([]byte, error) {
 	if prompt == "" {
 		return nil, fmt.Errorf("image generation request missing prompt")
 	}
-	model := strings.TrimSpace(req.Model)
-	if model == "" {
-		model = modelID
-	}
 	return json.Marshal(BananaCreateRequest{
 		Prompt:      prompt,
-		Model:       model,
+		Model:       providerModel(modelID, req.Model),
 		AspectRatio: SizeToAspectRatio(req.Size),
 	})
 }
@@ -117,17 +116,13 @@ func ImageEditRequest(openAIBody []byte, contentType string, modelID string) ([]
 	if prompt == "" {
 		return nil, fmt.Errorf("image edit request missing prompt field")
 	}
-	model := strings.TrimSpace(fields["model"])
-	if model == "" {
-		model = modelID
-	}
 	if len(imageURLs) == 0 {
 		return nil, fmt.Errorf("image edit request missing image")
 	}
 	return json.Marshal(BananaCreateRequest{
 		Prompt:      prompt,
 		ImageURLs:   imageURLs,
-		Model:       model,
+		Model:       providerModel(modelID, fields["model"]),
 		AspectRatio: SizeToAspectRatio(fields["size"]),
 	})
 }
@@ -137,12 +132,32 @@ func OpenAIImageResponse(task BananaTaskResponse) ([]byte, error) {
 		return nil, fmt.Errorf("sosana task completed without result_file_url")
 	}
 	resp := openai.OpenAIImageResponse{
-		Created: converterutil.GetCurrentTimestamp(),
+		Created: createdAtUnix(task.CreatedAt),
 		Data: []openai.OpenAIImageData{
-			{URL: strings.TrimSpace(*task.ResultFileURL)},
+			{
+				URL:           strings.TrimSpace(*task.ResultFileURL),
+				RevisedPrompt: strings.TrimSpace(task.OptimizedPrompt),
+			},
 		},
 	}
 	return json.Marshal(resp)
+}
+
+func providerModel(modelID, requestModel string) string {
+	if model := strings.TrimSpace(modelID); model != "" {
+		return model
+	}
+	return strings.TrimSpace(requestModel)
+}
+
+func createdAtUnix(value string) int64 {
+	if value == "" {
+		return converterutil.GetCurrentTimestamp()
+	}
+	if ts, err := time.Parse(time.RFC3339Nano, value); err == nil {
+		return ts.Unix()
+	}
+	return converterutil.GetCurrentTimestamp()
 }
 
 func CreateURL(baseURL string) string {

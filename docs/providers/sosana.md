@@ -26,6 +26,10 @@ models:
     tpm: -1
 ```
 
+Sosana Banana tasks are asynchronous and can take longer than short chat
+completion requests. For production Sosana credentials, set the router
+`request_timeout` and HTTP `write_timeout` to at least `2m`.
+
 ## Behavior
 
 - `n` must be `1`.
@@ -41,3 +45,7 @@ Sosana upstream HTTP errors and terminal task errors are masked before they are
 returned to clients or written to structured logs. The router preserves the
 appropriate HTTP status but replaces provider details with neutral
 OpenAI-compatible error bodies.
+
+If Sosana is hidden behind another proxy credential, enable
+`mask_upstream_errors: true` on that proxy unless the upstream router is known to
+propagate the credential marker used by this router.

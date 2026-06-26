@@ -7,6 +7,7 @@ import (
 	"mime/multipart"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mixaill76/auto_ai_router/internal/converter/openai"
 	"github.com/stretchr/testify/assert"
@@ -29,7 +30,7 @@ func TestImageGenerationRequest(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			body := []byte(`{"model":"nano-banana","prompt":"draw a cat","size":"` + tt.size + `","n":1}`)
-			got, err := ImageGenerationRequest(body, "fallback-model")
+			got, err := ImageGenerationRequest(body, "nano-banana")
 			require.NoError(t, err)
 
 			var req BananaCreateRequest
@@ -40,6 +41,15 @@ func TestImageGenerationRequest(t *testing.T) {
 			assert.Empty(t, req.ImageURLs)
 		})
 	}
+}
+
+func TestImageGenerationRequestPrefersProviderModel(t *testing.T) {
+	got, err := ImageGenerationRequest([]byte(`{"model":"public-image","prompt":"draw","n":1}`), "nano-banana")
+	require.NoError(t, err)
+
+	var req BananaCreateRequest
+	require.NoError(t, json.Unmarshal(got, &req))
+	assert.Equal(t, "nano-banana", req.Model)
 }
 
 func TestImageGenerationRequestRejectsMultipleImages(t *testing.T) {
@@ -58,7 +68,7 @@ func TestImageEditRequest(t *testing.T) {
 		"image": pngBytes(),
 	})
 
-	got, err := ImageEditRequest(body, contentType, "fallback-model")
+	got, err := ImageEditRequest(body, contentType, "nano-banana")
 	require.NoError(t, err)
 
 	var req BananaCreateRequest
@@ -69,6 +79,22 @@ func TestImageEditRequest(t *testing.T) {
 	require.Len(t, req.ImageURLs, 1)
 	assert.True(t, strings.HasPrefix(req.ImageURLs[0], "data:image/png;base64,"))
 	assert.Contains(t, req.ImageURLs[0], base64.StdEncoding.EncodeToString(pngBytes()))
+}
+
+func TestImageEditRequestPrefersProviderModel(t *testing.T) {
+	body, contentType := multipartImageEditBody(t, map[string]string{
+		"model":  "public-image",
+		"prompt": "make it blue",
+	}, map[string][]byte{
+		"image": pngBytes(),
+	})
+
+	got, err := ImageEditRequest(body, contentType, "nano-banana")
+	require.NoError(t, err)
+
+	var req BananaCreateRequest
+	require.NoError(t, json.Unmarshal(got, &req))
+	assert.Equal(t, "nano-banana", req.Model)
 }
 
 func TestImageEditRequestRejectsMask(t *testing.T) {
@@ -101,9 +127,12 @@ func TestImageEditRequestRejectsMultipleImagesCount(t *testing.T) {
 
 func TestOpenAIImageResponse(t *testing.T) {
 	url := "https://cdn.sosana.art/result.png"
+	createdAt := "2026-01-01T00:00:00Z"
 	body, err := OpenAIImageResponse(BananaTaskResponse{
-		Status:        StatusCompleted,
-		ResultFileURL: &url,
+		Status:          StatusCompleted,
+		CreatedAt:       createdAt,
+		OptimizedPrompt: "A detailed result prompt",
+		ResultFileURL:   &url,
 	})
 	require.NoError(t, err)
 
@@ -111,8 +140,11 @@ func TestOpenAIImageResponse(t *testing.T) {
 	require.NoError(t, json.Unmarshal(body, &resp))
 	require.Len(t, resp.Data, 1)
 	assert.Equal(t, url, resp.Data[0].URL)
+	assert.Equal(t, "A detailed result prompt", resp.Data[0].RevisedPrompt)
 	assert.Empty(t, resp.Data[0].B64JSON)
-	assert.NotZero(t, resp.Created)
+	ts, err := time.Parse(time.RFC3339, createdAt)
+	require.NoError(t, err)
+	assert.Equal(t, ts.Unix(), resp.Created)
 }
 
 func multipartImageEditBody(t *testing.T, fields map[string]string, files map[string][]byte) ([]byte, string) {

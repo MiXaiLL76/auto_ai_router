@@ -79,6 +79,7 @@ credentials:
     tpm: -1
 
   # Sosana.art image generation API (OpenAI Images-compatible through the router)
+  # Async image tasks can run longer than chat requests; use request_timeout/write_timeout >= 2m in production.
   - name: "sosana_images"
     type: "sosana"
     api_key: "os.environ/SOSANA_API_KEY"

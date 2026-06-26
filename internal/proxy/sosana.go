@@ -146,10 +146,9 @@ func (p *Proxy) createAndPollSosanaTask(
 	if err != nil {
 		body, code := p.sosanaTransportError(ctx, err, cred, modelID, sosana.CreateURL(cred.BaseURL), logCtx)
 		return sosanaAttemptResult{
-			body:        body,
-			statusCode:  code,
-			retryable:   ctx.Err() == nil,
-			retryReason: RetryReasonNetErr,
+			body:       body,
+			statusCode: code,
+			retryable:  false,
 		}
 	}
 	if statusCode >= 400 {
