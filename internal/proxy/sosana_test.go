@@ -2,18 +2,23 @@ package proxy
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/converter/openai"
-	"github.com/mixaill76/auto_ai_router/internal/models"
+	"github.com/mixaill76/auto_ai_router/internal/litellmdb"
+	litellmmodels "github.com/mixaill76/auto_ai_router/internal/litellmdb/models"
+	aimodels "github.com/mixaill76/auto_ai_router/internal/models"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -79,7 +84,7 @@ func TestProxyRequest_SosanaImageEditUsesProviderModelAlias(t *testing.T) {
 	defer upstream.Close()
 
 	prx := newSosanaTestProxy(upstream.URL, nil)
-	prx.modelManager = models.New(prx.logger, 50, []config.ModelRPMConfig{
+	prx.modelManager = aimodels.New(prx.logger, 50, []config.ModelRPMConfig{
 		{Name: "public-image", Model: "nano-banana", Credential: "sosana"},
 	})
 
@@ -99,6 +104,146 @@ func TestProxyRequest_SosanaImageEditUsesProviderModelAlias(t *testing.T) {
 
 	require.Equal(t, http.StatusOK, w.Code)
 	assert.Contains(t, w.Body.String(), "https://cdn.sosana.art/edit.png")
+}
+
+func TestProxyRequest_SosanaImageGenerationLogsLiteLLMImageSpend(t *testing.T) {
+	upstream := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/banana/create-async":
+			_, _ = w.Write([]byte(`{"uid":"task-1","status":"PROCESSING","prompt":"draw"}`))
+		case "/api/banana/task-1":
+			_, _ = w.Write([]byte(`{"uid":"task-1","status":"COMPLETED","prompt":"draw","result_file_url":"https://cdn.sosana.art/spend.png"}`))
+		default:
+			t.Fatalf("unexpected upstream path: %s", r.URL.Path)
+		}
+	}))
+	defer upstream.Close()
+
+	spendManager := newCapturedSpendManager()
+	priceRegistry := aimodels.NewModelPriceRegistry()
+	priceRegistry.Update(map[string]*aimodels.ModelPrice{
+		"nano-banana": {OutputCostPerImage: 0.07},
+	})
+
+	prx := newSosanaTestProxy(upstream.URL, nil)
+	prx.LiteLLMDB = spendManager
+	prx.priceRegistry = priceRegistry
+	prx.modelManager = aimodels.New(prx.logger, 50, []config.ModelRPMConfig{
+		{Name: "public-image", Model: "nano-banana", Credential: "sosana"},
+	})
+
+	req := httptest.NewRequest("POST", "/v1/images/generations", strings.NewReader(`{"model":"public-image","prompt":"draw","n":1}`))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	prx.ProxyRequest(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	require.Len(t, spendManager.entries, 1)
+	entry := spendManager.entries[0]
+	assert.Equal(t, "/v1/images/generations", entry.CallType)
+	assert.Equal(t, "public-image", entry.Model)
+	assert.Equal(t, "sosana:public-image", entry.ModelID)
+	assert.Equal(t, "sosana", entry.CustomLLMProvider)
+	assert.Equal(t, "success", entry.Status)
+	assert.Equal(t, 0, entry.TotalTokens)
+	assert.InDelta(t, 0.07, entry.Spend, 0.0000001)
+	var metadata map[string]any
+	require.NoError(t, json.Unmarshal([]byte(entry.Metadata), &metadata))
+	costBreakdown, ok := metadata["cost_breakdown"].(map[string]any)
+	require.True(t, ok)
+	assert.InDelta(t, 0.07, costBreakdown["total_cost"].(float64), 0.0000001)
+}
+
+func TestProxyRequest_SosanaImageGenerationWritesLiteLLMSpendLogIntegration(t *testing.T) {
+	dbURL := os.Getenv("LITELLM_DATABASE_URL")
+	if dbURL == "" {
+		t.Skip("LITELLM_DATABASE_URL not set, skipping LiteLLM spend-log integration test")
+	}
+
+	upstream := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/banana/create-async":
+			_, _ = w.Write([]byte(`{"uid":"task-1","status":"PROCESSING","prompt":"draw"}`))
+		case "/api/banana/task-1":
+			_, _ = w.Write([]byte(`{"uid":"task-1","status":"COMPLETED","prompt":"draw","result_file_url":"https://cdn.sosana.art/spend.png"}`))
+		default:
+			t.Fatalf("unexpected upstream path: %s", r.URL.Path)
+		}
+	}))
+	defer upstream.Close()
+
+	manager, err := litellmdb.New(&litellmmodels.Config{
+		DatabaseURL:      dbURL,
+		MaxConns:         5,
+		MinConns:         1,
+		AuthCacheSize:    100,
+		AuthCacheTTL:     time.Second,
+		LogQueueSize:     100,
+		LogBatchSize:     1,
+		LogFlushInterval: 100 * time.Millisecond,
+	})
+	require.NoError(t, err)
+	defer func() {
+		_ = manager.Shutdown(context.Background())
+	}()
+
+	alias := fmt.Sprintf("sosana-spend-test-%d", time.Now().UnixNano())
+	priceRegistry := aimodels.NewModelPriceRegistry()
+	priceRegistry.Update(map[string]*aimodels.ModelPrice{
+		"nano-banana": {OutputCostPerImage: 0.07},
+	})
+
+	prx := newSosanaTestProxy(upstream.URL, nil)
+	prx.LiteLLMDB = manager
+	prx.priceRegistry = priceRegistry
+	prx.modelManager = aimodels.New(prx.logger, 50, []config.ModelRPMConfig{
+		{Name: alias, Model: "nano-banana", Credential: "sosana"},
+	})
+
+	req := httptest.NewRequest("POST", "/v1/images/generations", strings.NewReader(`{"model":"`+alias+`","prompt":"draw","n":1}`))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	prx.ProxyRequest(w, req)
+	require.Equal(t, http.StatusOK, w.Code)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var requestID string
+	var spend float64
+	var model string
+	var provider string
+	var status string
+	var totalTokens int
+	for {
+		err = manager.GetPool().QueryRow(ctx, `
+			SELECT request_id, spend, model, custom_llm_provider, status, total_tokens
+			FROM "LiteLLM_SpendLogs"
+			WHERE model = $1 AND custom_llm_provider = 'sosana'
+			ORDER BY "startTime" DESC
+			LIMIT 1
+		`, alias).Scan(&requestID, &spend, &model, &provider, &status, &totalTokens)
+		if err == nil {
+			break
+		}
+		if ctx.Err() != nil {
+			require.NoError(t, err)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	defer func() {
+		_, _ = manager.GetPool().Exec(context.Background(), `DELETE FROM "LiteLLM_SpendLogs" WHERE request_id = $1`, requestID)
+	}()
+
+	assert.Equal(t, alias, model)
+	assert.Equal(t, "sosana", provider)
+	assert.Equal(t, "success", status)
+	assert.Equal(t, 0, totalTokens)
+	assert.InDelta(t, 0.07, spend, 0.0000001)
 }
 
 func TestProxyRequest_SosanaRejectsNonImageEndpoint(t *testing.T) {
@@ -397,4 +542,26 @@ func sosanaMultipartEditBody(t *testing.T, fields map[string]string, files map[s
 	}
 	require.NoError(t, writer.Close())
 	return buf.Bytes(), writer.FormDataContentType()
+}
+
+type capturedSpendManager struct {
+	*litellmdb.NoopManager
+	entries []*litellmmodels.SpendLogEntry
+}
+
+func newCapturedSpendManager() *capturedSpendManager {
+	return &capturedSpendManager{NoopManager: litellmdb.NewNoopManager()}
+}
+
+func (m *capturedSpendManager) IsEnabled() bool {
+	return true
+}
+
+func (m *capturedSpendManager) IsHealthy() bool {
+	return true
+}
+
+func (m *capturedSpendManager) LogSpend(entry *litellmmodels.SpendLogEntry) error {
+	m.entries = append(m.entries, entry)
+	return nil
 }

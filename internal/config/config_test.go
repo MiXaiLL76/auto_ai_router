@@ -1189,6 +1189,42 @@ monitoring:
 	assert.Equal(t, 2, cfg.Server.MaxProviderRetries, "Default MaxProviderRetries should be 2")
 }
 
+func TestLoad_ServerTimeoutDefaults(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.yaml")
+
+	configContent := `
+server:
+  port: 8080
+  max_body_size_mb: 10
+  master_key: "sk-test"
+
+fail2ban:
+  max_attempts: 3
+  ban_duration: permanent
+  error_codes: [401]
+
+credentials:
+  - name: "test"
+    type: "openai"
+    api_key: "sk-test"
+    base_url: "https://api.openai.com"
+    rpm: 10
+
+monitoring:
+  prometheus_enabled: false
+`
+	err := os.WriteFile(configPath, []byte(configContent), 0644)
+	require.NoError(t, err)
+
+	cfg, err := Load(configPath)
+	require.NoError(t, err)
+	assert.Equal(t, 2*time.Minute, cfg.Server.RequestTimeout)
+	assert.Equal(t, 2*time.Minute, cfg.Server.ReadTimeout)
+	assert.Equal(t, 2*time.Minute, cfg.Server.WriteTimeout)
+	assert.Equal(t, 4*time.Minute, cfg.Server.IdleTimeout)
+}
+
 func TestLoad_MaxProviderRetries_Custom(t *testing.T) {
 	tmpDir := t.TempDir()
 	configPath := filepath.Join(tmpDir, "config.yaml")
