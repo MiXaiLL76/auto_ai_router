@@ -287,7 +287,7 @@ func TestProxyRequest_SosanaCreateHTTPErrorMasked(t *testing.T) {
 	assert.Contains(t, w.Body.String(), "Upstream provider error")
 	assert.NotContains(t, w.Body.String(), "balance secret")
 	assert.Contains(t, logBuf.String(), "response_body_masked=true")
-	assert.NotContains(t, logBuf.String(), "balance secret")
+	assert.Contains(t, logBuf.String(), "balance secret")
 }
 
 func TestProxyRequest_SosanaRetriesCreateWithNextCredential(t *testing.T) {
@@ -390,7 +390,7 @@ func TestProxyRequest_SosanaPollHTTPErrorMasked(t *testing.T) {
 	assert.Contains(t, w.Body.String(), "Upstream provider error")
 	assert.NotContains(t, w.Body.String(), "poll secret")
 	assert.Contains(t, logBuf.String(), "response_body_masked=true")
-	assert.NotContains(t, logBuf.String(), "poll secret")
+	assert.Contains(t, logBuf.String(), "poll secret")
 }
 
 func TestProxyRequest_SosanaDoesNotRetryAfterTaskCreated(t *testing.T) {
@@ -456,7 +456,7 @@ func TestProxyRequest_SosanaTaskFailedMasked(t *testing.T) {
 	assert.Contains(t, w.Body.String(), "Upstream provider error")
 	assert.NotContains(t, w.Body.String(), "failed secret")
 	assert.Contains(t, logBuf.String(), "response_body_masked=true")
-	assert.NotContains(t, logBuf.String(), "failed secret")
+	assert.Contains(t, logBuf.String(), "failed secret")
 }
 
 func TestProxyRequest_SosanaTaskModeratedMasked(t *testing.T) {
@@ -483,7 +483,7 @@ func TestProxyRequest_SosanaTaskModeratedMasked(t *testing.T) {
 	assert.Contains(t, w.Body.String(), "content_policy_violation")
 	assert.NotContains(t, w.Body.String(), "moderation secret")
 	assert.Contains(t, logBuf.String(), "response_body_masked=true")
-	assert.NotContains(t, logBuf.String(), "moderation secret")
+	assert.Contains(t, logBuf.String(), "moderation secret")
 }
 
 func TestProxyRequest_SosanaTimeoutMasked(t *testing.T) {

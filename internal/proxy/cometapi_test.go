@@ -61,6 +61,18 @@ func TestIsCometAPICredential(t *testing.T) {
 	}
 }
 
+func TestAppendResponseBodyForLogs_MaskedProviderKeepsMaskedFlagAndLogsBody(t *testing.T) {
+	cred := &config.CredentialConfig{Type: config.ProviderTypeCometAPI}
+	body := `{"error":{"code":"permission_denied","message":"` + strings.Repeat("model access denied ", 50) + `","type":"comet_api_error"}}`
+
+	args := appendResponseBodyForLogs([]any{}, cred, body)
+
+	assert.Contains(t, args, "response_body_masked")
+	assert.Contains(t, args, true)
+	assert.Contains(t, args, "response_body")
+	assert.Contains(t, args, body)
+}
+
 func TestIsSosanaCredential(t *testing.T) {
 	tests := []struct {
 		name       string
