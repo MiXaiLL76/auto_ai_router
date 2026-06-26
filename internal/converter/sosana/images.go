@@ -51,6 +51,9 @@ func ImageGenerationRequest(openAIBody []byte, modelID string) ([]byte, error) {
 	if err := validateImageCount(req.N); err != nil {
 		return nil, err
 	}
+	if err := validateResponseFormat(req.ResponseFormat); err != nil {
+		return nil, err
+	}
 	prompt := strings.TrimSpace(req.Prompt)
 	if prompt == "" {
 		return nil, fmt.Errorf("image generation request missing prompt")
@@ -112,6 +115,9 @@ func ImageEditRequest(openAIBody []byte, contentType string, modelID string) ([]
 	if err := validateImageCountString(fields["n"]); err != nil {
 		return nil, err
 	}
+	if err := validateResponseFormat(fields["response_format"]); err != nil {
+		return nil, err
+	}
 	prompt := strings.TrimSpace(fields["prompt"])
 	if prompt == "" {
 		return nil, fmt.Errorf("image edit request missing prompt field")
@@ -127,15 +133,15 @@ func ImageEditRequest(openAIBody []byte, contentType string, modelID string) ([]
 	})
 }
 
-func OpenAIImageResponse(task BananaTaskResponse) ([]byte, error) {
-	if task.ResultFileURL == nil || strings.TrimSpace(*task.ResultFileURL) == "" {
-		return nil, fmt.Errorf("sosana task completed without result_file_url")
+func OpenAIImageResponse(task BananaTaskResponse, image []byte) ([]byte, error) {
+	if len(image) == 0 {
+		return nil, fmt.Errorf("sosana task completed without image bytes")
 	}
 	resp := openai.OpenAIImageResponse{
 		Created: createdAtUnix(task.CreatedAt),
 		Data: []openai.OpenAIImageData{
 			{
-				URL:           strings.TrimSpace(*task.ResultFileURL),
+				B64JSON:       base64.StdEncoding.EncodeToString(image),
 				RevisedPrompt: strings.TrimSpace(task.OptimizedPrompt),
 			},
 		},
@@ -192,6 +198,13 @@ func validateImageCount(n *int) error {
 		return nil
 	}
 	return fmt.Errorf("sosana supports n=1 only")
+}
+
+func validateResponseFormat(format string) error {
+	if strings.EqualFold(strings.TrimSpace(format), "url") {
+		return fmt.Errorf("response_format=url is unsupported for this image model")
+	}
+	return nil
 }
 
 func validateImageCountString(raw string) error {

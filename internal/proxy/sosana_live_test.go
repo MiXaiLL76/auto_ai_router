@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -59,5 +60,8 @@ func TestProxyRequest_SosanaLiveAcceptance(t *testing.T) {
 	var resp openai.OpenAIImageResponse
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
 	require.Len(t, resp.Data, 1)
-	require.NotEmpty(t, resp.Data[0].URL)
+	require.Empty(t, resp.Data[0].URL)
+	require.NotEmpty(t, resp.Data[0].B64JSON)
+	_, err = base64.StdEncoding.DecodeString(resp.Data[0].B64JSON)
+	require.NoError(t, err)
 }

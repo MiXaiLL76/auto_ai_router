@@ -58,6 +58,12 @@ func TestImageGenerationRequestRejectsMultipleImages(t *testing.T) {
 	assert.Contains(t, err.Error(), "n=1")
 }
 
+func TestImageGenerationRequestRejectsURLResponseFormat(t *testing.T) {
+	_, err := ImageGenerationRequest([]byte(`{"model":"nano-banana","prompt":"draw","response_format":"url"}`), "nano-banana")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "response_format=url")
+}
+
 func TestImageEditRequest(t *testing.T) {
 	body, contentType := multipartImageEditBody(t, map[string]string{
 		"model":  "nano-banana",
@@ -125,23 +131,35 @@ func TestImageEditRequestRejectsMultipleImagesCount(t *testing.T) {
 	assert.Contains(t, err.Error(), "n=1")
 }
 
+func TestImageEditRequestRejectsURLResponseFormat(t *testing.T) {
+	body, contentType := multipartImageEditBody(t, map[string]string{
+		"model":           "nano-banana",
+		"prompt":          "make it blue",
+		"response_format": "url",
+	}, map[string][]byte{
+		"image": pngBytes(),
+	})
+
+	_, err := ImageEditRequest(body, contentType, "fallback-model")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "response_format=url")
+}
+
 func TestOpenAIImageResponse(t *testing.T) {
-	url := "https://cdn.sosana.art/result.png"
 	createdAt := "2026-01-01T00:00:00Z"
 	body, err := OpenAIImageResponse(BananaTaskResponse{
 		Status:          StatusCompleted,
 		CreatedAt:       createdAt,
 		OptimizedPrompt: "A detailed result prompt",
-		ResultFileURL:   &url,
-	})
+	}, pngBytes())
 	require.NoError(t, err)
 
 	var resp openai.OpenAIImageResponse
 	require.NoError(t, json.Unmarshal(body, &resp))
 	require.Len(t, resp.Data, 1)
-	assert.Equal(t, url, resp.Data[0].URL)
+	assert.Empty(t, resp.Data[0].URL)
 	assert.Equal(t, "A detailed result prompt", resp.Data[0].RevisedPrompt)
-	assert.Empty(t, resp.Data[0].B64JSON)
+	assert.Equal(t, base64.StdEncoding.EncodeToString(pngBytes()), resp.Data[0].B64JSON)
 	ts, err := time.Parse(time.RFC3339, createdAt)
 	require.NoError(t, err)
 	assert.Equal(t, ts.Unix(), resp.Created)

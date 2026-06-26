@@ -5,8 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"math/rand"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
@@ -14,7 +17,11 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/converter/sosana"
 )
 
-const sosanaPollInterval = 2 * time.Second
+const (
+	sosanaPollInterval              = 2 * time.Second
+	maxSosanaResultImageBytes int64 = 32 * 1024 * 1024
+	maxSosanaResultErrorBytes int64 = 16 * 1024
+)
 
 type sosanaAttemptResult struct {
 	body        []byte
@@ -209,15 +216,8 @@ func (p *Proxy) sosanaTaskBody(
 ) ([]byte, int, bool) {
 	switch task.Status {
 	case sosana.StatusCompleted:
-		body, err := sosana.OpenAIImageResponse(task)
-		if err != nil {
-			p.logUpstreamError(ctx, "Sosana completed task missing result", http.StatusBadGateway, cred, modelID, rawBody,
-				"url", sosana.PollURL(cred.BaseURL, task.UID),
-				"request_id", logCtx.RequestID,
-				"error", err)
-			return maskedUpstreamErrorBody(http.StatusBadGateway), http.StatusBadGateway, true
-		}
-		return body, http.StatusOK, true
+		body, statusCode := p.sosanaCompletedImageBody(ctx, cred, modelID, task, rawBody, logCtx)
+		return body, statusCode, true
 	case sosana.StatusFailed:
 		p.logUpstreamError(ctx, "Sosana task failed", http.StatusBadGateway, cred, modelID, rawBody,
 			"url", sosana.PollURL(cred.BaseURL, task.UID),
@@ -243,6 +243,190 @@ func (p *Proxy) sosanaTaskBody(
 			"status", task.Status)
 		return maskedUpstreamErrorBody(http.StatusBadGateway), http.StatusBadGateway, true
 	}
+}
+
+func (p *Proxy) sosanaCompletedImageBody(
+	ctx context.Context,
+	cred *config.CredentialConfig,
+	modelID string,
+	task sosana.BananaTaskResponse,
+	rawBody []byte,
+	logCtx *RequestLogContext,
+) ([]byte, int) {
+	image, contentType, statusCode, err := p.downloadSosanaResultImage(ctx, cred, modelID, task, rawBody, logCtx)
+	if err != nil {
+		return maskedUpstreamErrorBody(statusCode), statusCode
+	}
+	body, err := sosana.OpenAIImageResponse(task, image)
+	if err != nil {
+		p.logUpstreamError(ctx, "Sosana completed task could not be converted", http.StatusBadGateway, cred, modelID, nil,
+			"request_id", logCtx.RequestID,
+			"error", err)
+		return maskedUpstreamErrorBody(http.StatusBadGateway), http.StatusBadGateway
+	}
+	p.logger.DebugContext(ctx, "Downloaded Sosana result image",
+		"credential", cred.Name,
+		"model", modelID,
+		"result_host", sosanaResultHost(task),
+		"image_bytes", len(image),
+		"content_type", contentType,
+		"request_id", logCtx.RequestID)
+	return body, http.StatusOK
+}
+
+func (p *Proxy) downloadSosanaResultImage(
+	ctx context.Context,
+	cred *config.CredentialConfig,
+	modelID string,
+	task sosana.BananaTaskResponse,
+	rawTaskBody []byte,
+	logCtx *RequestLogContext,
+) ([]byte, string, int, error) {
+	resultURL := ""
+	if task.ResultFileURL != nil {
+		resultURL = strings.TrimSpace(*task.ResultFileURL)
+	}
+	parsed, err := parseSosanaResultURL(resultURL)
+	if err != nil {
+		p.logUpstreamError(ctx, "Sosana completed task returned invalid result URL", http.StatusBadGateway, cred, modelID, rawTaskBody,
+			"request_id", logCtx.RequestID,
+			"error", err)
+		return nil, "", http.StatusBadGateway, err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, resultURL, nil)
+	if err != nil {
+		p.logUpstreamError(ctx, "Failed to build Sosana result image request", http.StatusBadGateway, cred, modelID, nil,
+			"result_host", parsed.Hostname(),
+			"request_id", logCtx.RequestID,
+			"error", err)
+		return nil, "", http.StatusBadGateway, err
+	}
+	req.Header.Set("Accept", "image/*")
+
+	resp, err := p.client.Do(req)
+	if err != nil {
+		statusCode := http.StatusBadGateway
+		if isTimeoutError(err) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			statusCode = http.StatusRequestTimeout
+		}
+		p.logUpstreamError(context.Background(), "Sosana result image download failed", statusCode, cred, modelID, nil,
+			"result_host", parsed.Hostname(),
+			"request_id", logCtx.RequestID,
+			"error", err)
+		return nil, "", statusCode, err
+	}
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			p.logger.WarnContext(ctx, "Failed to close Sosana result image body", "error", closeErr)
+		}
+	}()
+
+	contentType := strings.TrimSpace(resp.Header.Get("Content-Type"))
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		errorBody := readTextBodyForSosanaResultLog(resp.Body, contentType)
+		p.logUpstreamError(ctx, "Sosana result image download returned error status", http.StatusBadGateway, cred, modelID, errorBody,
+			"upstream_status", resp.StatusCode,
+			"result_host", parsed.Hostname(),
+			"request_id", logCtx.RequestID)
+		return nil, "", http.StatusBadGateway, errors.New("sosana result image download returned error status")
+	}
+
+	image, err := readLimitedSosanaResultImage(resp.Body)
+	if err != nil {
+		p.logUpstreamError(ctx, "Failed to read Sosana result image", http.StatusBadGateway, cred, modelID, nil,
+			"result_host", parsed.Hostname(),
+			"request_id", logCtx.RequestID,
+			"error", err)
+		return nil, "", http.StatusBadGateway, err
+	}
+	sniffedType := http.DetectContentType(image)
+	if !isImageContentType(contentType) && !isImageContentType(sniffedType) {
+		responseBody := textBodyPrefixForSosanaResultLog(image, contentType, sniffedType)
+		p.logUpstreamError(ctx, "Sosana result URL returned non-image content", http.StatusBadGateway, cred, modelID, responseBody,
+			"result_host", parsed.Hostname(),
+			"content_type", contentType,
+			"sniffed_content_type", sniffedType,
+			"request_id", logCtx.RequestID)
+		return nil, "", http.StatusBadGateway, errors.New("sosana result URL returned non-image content")
+	}
+	if !isImageContentType(contentType) {
+		contentType = sniffedType
+	}
+	return image, contentType, http.StatusOK, nil
+}
+
+func parseSosanaResultURL(raw string) (*url.URL, error) {
+	if raw == "" {
+		return nil, errors.New("sosana task completed without result_file_url")
+	}
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		return nil, err
+	}
+	if parsed.Hostname() == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		return nil, errors.New("sosana result_file_url must be an http or https URL")
+	}
+	return parsed, nil
+}
+
+func sosanaResultHost(task sosana.BananaTaskResponse) string {
+	if task.ResultFileURL == nil {
+		return ""
+	}
+	parsed, err := url.Parse(strings.TrimSpace(*task.ResultFileURL))
+	if err != nil {
+		return ""
+	}
+	return parsed.Hostname()
+}
+
+func readLimitedSosanaResultImage(body io.Reader) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(body, maxSosanaResultImageBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > maxSosanaResultImageBytes {
+		return nil, ErrResponseBodyTooLarge
+	}
+	if len(data) == 0 {
+		return nil, errors.New("sosana result image body is empty")
+	}
+	return data, nil
+}
+
+func readTextBodyForSosanaResultLog(body io.Reader, contentType string) []byte {
+	if !isTextContentType(contentType) {
+		return nil
+	}
+	data, err := io.ReadAll(io.LimitReader(body, maxSosanaResultErrorBytes))
+	if err != nil {
+		return nil
+	}
+	return data
+}
+
+func textBodyPrefixForSosanaResultLog(body []byte, contentTypes ...string) []byte {
+	for _, contentType := range contentTypes {
+		if isTextContentType(contentType) {
+			if int64(len(body)) > maxSosanaResultErrorBytes {
+				return body[:maxSosanaResultErrorBytes]
+			}
+			return body
+		}
+	}
+	return nil
+}
+
+func isImageContentType(contentType string) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(contentType)), "image/")
+}
+
+func isTextContentType(contentType string) bool {
+	contentType = strings.ToLower(strings.TrimSpace(contentType))
+	return strings.HasPrefix(contentType, "text/") ||
+		strings.Contains(contentType, "json") ||
+		strings.Contains(contentType, "xml")
 }
 
 func (p *Proxy) doSosanaTaskRequest(ctx context.Context, method, url string, cred *config.CredentialConfig, body []byte) (sosana.BananaTaskResponse, []byte, int, error) {
