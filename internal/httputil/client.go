@@ -108,6 +108,25 @@ var proxyHTTPClient = NewHTTPClient(&HTTPClientConfig{
 	IdleConnTimeout:     defaultIdleConnTimeout,
 })
 
+// proxyFetchTimeout is the timeout applied to proxy health/models fetch requests.
+// Override at startup via SetProxyFetchTimeout.
+var proxyFetchTimeout = defaultTimeout
+
+// SetProxyFetchTimeout reconfigures the shared proxy HTTP client with a new timeout.
+// Must be called before the first proxy fetch (typically right after config load).
+func SetProxyFetchTimeout(d time.Duration) {
+	if d <= 0 {
+		return
+	}
+	proxyFetchTimeout = d
+	proxyHTTPClient = NewHTTPClient(&HTTPClientConfig{
+		Timeout:             d,
+		MaxIdleConns:        defaultMaxIdleConns,
+		MaxIdleConnsPerHost: defaultMaxIdleConnsPerHost,
+		IdleConnTimeout:     defaultIdleConnTimeout,
+	})
+}
+
 // FetchFromProxy makes an HTTP GET request to a proxy credential
 // and returns the response body. Handles timeouts, auth headers, and error logging.
 // Note: caller should provide ctx with timeout if defaultTimeout is insufficient
@@ -120,7 +139,7 @@ func FetchFromProxy(
 	// Create context with timeout if not already set
 	if _, ok := ctx.Deadline(); !ok {
 		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, defaultTimeout)
+		ctx, cancel = context.WithTimeout(ctx, proxyFetchTimeout)
 		defer cancel()
 	}
 

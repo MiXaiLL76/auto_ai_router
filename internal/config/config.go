@@ -420,6 +420,7 @@ type ServerConfig struct {
 	ModelPricesLink            string        `yaml:"model_prices_link,omitempty"`       // URL or file path to model prices JSON - supports os.environ/VAR_NAME
 	ShutdownDelay              time.Duration `yaml:"shutdown_delay"`                    // Delay between readiness=false and server.Shutdown (default: 5s)
 	DrainUpstreamOnAbort       bool          `yaml:"drain_upstream_on_abort"`           // When true, keep reading upstream after client disconnect to capture real usage chunk (default: false — estimate from delta text)
+	ProxyHealthTimeout         time.Duration `yaml:"proxy_health_timeout"`              // Timeout for fetching /health from remote proxy credentials (default: 15s)
 }
 
 // ErrorCodeRuleConfig defines per-error-code ban rules
@@ -461,6 +462,7 @@ func (s *ServerConfig) UnmarshalYAML(value *yaml.Node) error {
 		ModelPricesLink            string `yaml:"model_prices_link,omitempty"`
 		ShutdownDelay              string `yaml:"shutdown_delay"`
 		DrainUpstreamOnAbort       string `yaml:"drain_upstream_on_abort"`
+		ProxyHealthTimeout         string `yaml:"proxy_health_timeout"`
 	}
 
 	var temp tempConfig
@@ -530,6 +532,9 @@ func (s *ServerConfig) UnmarshalYAML(value *yaml.Node) error {
 		return err
 	}
 	if s.DrainUpstreamOnAbort, err = parseField(temp.DrainUpstreamOnAbort, false, strconv.ParseBool, "drain_upstream_on_abort"); err != nil {
+		return err
+	}
+	if s.ProxyHealthTimeout, err = parseField(temp.ProxyHealthTimeout, 15*time.Second, time.ParseDuration, "proxy_health_timeout"); err != nil {
 		return err
 	}
 

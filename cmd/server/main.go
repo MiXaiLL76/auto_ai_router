@@ -19,6 +19,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/fail2ban"
 	"github.com/mixaill76/auto_ai_router/internal/health"
+	"github.com/mixaill76/auto_ai_router/internal/httputil"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb"
 	"github.com/mixaill76/auto_ai_router/internal/logger"
 	"github.com/mixaill76/auto_ai_router/internal/models"
@@ -55,6 +56,8 @@ func main() {
 		slog.Error("Failed to load config", "error", err)
 		os.Exit(1)
 	}
+
+	httputil.SetProxyFetchTimeout(cfg.Server.ProxyHealthTimeout)
 
 	// ==================== Initialize OpenTelemetry ====================
 	// Must happen before logger creation so OTLP log export covers all startup logs.
