@@ -763,24 +763,6 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 				p.setSessionBinding(logCtx.SessionID, modelID, cred.Name)
 			}
 		} else {
-			if proxyResp.StatusCode >= 200 && proxyResp.StatusCode < 300 && logCtx.IsImageGeneration && shouldMaskProxyResponseErrors(cred, proxyResp) {
-				normalizedBody, normErr := normalizeOpenAIImageResponseBody(proxyResp.Body)
-				if normErr != nil {
-					p.logger.ErrorContext(r.Context(), "Failed to normalize proxy image response to OpenAI format",
-						"credential", cred.Name, "model", modelID, "error", normErr,
-						"actual_credential", logCtx.ActualCredentialName,
-						"response_body_masked", true,
-						"request_id", logCtx.RequestID)
-					proxyResp.StatusCode = http.StatusBadGateway
-					maskProxyErrorResponse(proxyResp)
-				} else {
-					proxyResp.Body = normalizedBody
-					if proxyResp.Headers == nil {
-						proxyResp.Headers = http.Header{}
-					}
-					proxyResp.Headers.Set("Content-Type", "application/json")
-				}
-			}
 			if proxyResp.StatusCode >= 400 && shouldMaskProxyResponseErrors(cred, proxyResp) {
 				maskProxyErrorResponse(proxyResp)
 			}
@@ -1446,25 +1428,6 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 				}
 				finalResponseBody = responsesBody
 			}
-		}
-
-		if resp.StatusCode >= 200 && resp.StatusCode < 300 && logCtx.IsImageGeneration && shouldMaskUpstreamErrors(cred) {
-			normalizedBody, normErr := normalizeOpenAIImageResponseBody(finalResponseBody)
-			if normErr != nil {
-				args := []any{
-					"credential", cred.Name, "provider", string(cred.Type),
-					"model", modelID, "error", normErr,
-					"request_id", logCtx.RequestID,
-				}
-				args = appendResponseBodyForLogs(args, cred, string(finalResponseBody))
-				p.logger.ErrorContext(r.Context(), "Failed to normalize image response to OpenAI format", args...)
-				resp.StatusCode = http.StatusBadGateway
-				finalResponseBody = maskedUpstreamErrorBody(resp.StatusCode)
-			} else {
-				finalResponseBody = normalizedBody
-			}
-			bodyForTokenExtraction = finalResponseBody
-			resp.Header.Set("Content-Type", "application/json")
 		}
 
 		rawErrorBody := finalResponseBody

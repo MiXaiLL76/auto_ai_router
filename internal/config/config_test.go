@@ -1219,10 +1219,10 @@ monitoring:
 
 	cfg, err := Load(configPath)
 	require.NoError(t, err)
-	assert.Equal(t, 2*time.Minute, cfg.Server.RequestTimeout)
-	assert.Equal(t, 2*time.Minute, cfg.Server.ReadTimeout)
-	assert.Equal(t, 2*time.Minute, cfg.Server.WriteTimeout)
-	assert.Equal(t, 4*time.Minute, cfg.Server.IdleTimeout)
+	assert.Equal(t, 60*time.Second, cfg.Server.RequestTimeout)
+	assert.Equal(t, 60*time.Second, cfg.Server.ReadTimeout)
+	assert.Equal(t, 60*time.Second, cfg.Server.WriteTimeout)
+	assert.Equal(t, 2*time.Minute, cfg.Server.IdleTimeout)
 }
 
 func TestLoad_MaxProviderRetries_Custom(t *testing.T) {

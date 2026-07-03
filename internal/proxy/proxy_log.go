@@ -42,7 +42,7 @@ func appendResponseBodyForLogs(args []any, cred *config.CredentialConfig, body s
 	if shouldMaskUpstreamErrors(cred) {
 		return append(args,
 			"response_body_masked", true,
-			"response_body", body,
+			"response_body", logger.TruncateLongFields(body, 500),
 		)
 	}
 	return append(args, "response_body", logger.TruncateLongFields(body, 500))

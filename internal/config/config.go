@@ -432,7 +432,7 @@ type ServerConfig struct {
 	MaxIdleConnsPerHost        int           `yaml:"max_idle_conns_per_host"`
 	IdleConnTimeout            time.Duration `yaml:"idle_conn_timeout"`
 	ReadTimeout                time.Duration `yaml:"-"`                                 // HTTP server read timeout (equals request_timeout, not configurable via YAML)
-	WriteTimeout               time.Duration `yaml:"write_timeout"`                     // HTTP server write timeout (default: 2m)
+	WriteTimeout               time.Duration `yaml:"write_timeout"`                     // HTTP server write timeout (default: 60s)
 	IdleTimeout                time.Duration `yaml:"idle_timeout"`                      // HTTP server idle timeout (default: 2*write_timeout)
 	MaxProviderRetries         int           `yaml:"max_provider_retries"`              // Max same-type credential retries on provider errors (default: 2, meaning 3 total attempts)
 	MaxFallbackAttempts        int           `yaml:"max_fallback_attempts"`             // Max fallback proxy hops per request chain (default: 5)
@@ -516,16 +516,16 @@ func (s *ServerConfig) UnmarshalYAML(value *yaml.Node) error {
 	}
 
 	// Duration fields
-	if s.RequestTimeout, err = parseField(temp.RequestTimeout, 2*time.Minute, time.ParseDuration, "request_timeout"); err != nil {
+	if s.RequestTimeout, err = parseField(temp.RequestTimeout, 60*time.Second, time.ParseDuration, "request_timeout"); err != nil {
 		return err
 	}
 	if s.IdleConnTimeout, err = parseField(temp.IdleConnTimeout, 120*time.Second, time.ParseDuration, "idle_conn_timeout"); err != nil {
 		return err
 	}
-	if s.WriteTimeout, err = parseField(temp.WriteTimeout, 2*time.Minute, time.ParseDuration, "write_timeout"); err != nil {
+	if s.WriteTimeout, err = parseField(temp.WriteTimeout, 60*time.Second, time.ParseDuration, "write_timeout"); err != nil {
 		return err
 	}
-	if s.IdleTimeout, err = parseField(temp.IdleTimeout, 4*time.Minute, time.ParseDuration, "idle_timeout"); err != nil {
+	if s.IdleTimeout, err = parseField(temp.IdleTimeout, 2*time.Minute, time.ParseDuration, "idle_timeout"); err != nil {
 		return err
 	}
 

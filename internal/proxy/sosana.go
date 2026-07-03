@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"math/rand"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -22,6 +23,8 @@ const (
 	maxSosanaResultImageBytes int64 = 32 * 1024 * 1024
 	maxSosanaResultErrorBytes int64 = 16 * 1024
 )
+
+var allowPrivateSosanaResultURLForTests func(*url.URL) bool
 
 type sosanaAttemptResult struct {
 	body        []byte
@@ -293,6 +296,13 @@ func (p *Proxy) downloadSosanaResultImage(
 			"error", err)
 		return nil, "", http.StatusBadGateway, err
 	}
+	if err := validateSosanaResultURL(ctx, parsed); err != nil {
+		p.logUpstreamError(ctx, "Sosana completed task returned unsafe result URL", http.StatusBadGateway, cred, modelID, rawTaskBody,
+			"result_host", parsed.Hostname(),
+			"request_id", logCtx.RequestID,
+			"error", err)
+		return nil, "", http.StatusBadGateway, err
+	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, resultURL, nil)
 	if err != nil {
@@ -304,7 +314,7 @@ func (p *Proxy) downloadSosanaResultImage(
 	}
 	req.Header.Set("Accept", "image/*")
 
-	resp, err := p.client.Do(req)
+	resp, err := p.doSosanaResultImageRequest(req)
 	if err != nil {
 		statusCode := http.StatusBadGateway
 		if isTimeoutError(err) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
@@ -341,19 +351,27 @@ func (p *Proxy) downloadSosanaResultImage(
 		return nil, "", http.StatusBadGateway, err
 	}
 	sniffedType := http.DetectContentType(image)
-	if !isImageContentType(contentType) && !isImageContentType(sniffedType) {
+	if !isPNGContentType(contentType) && !isPNGContentType(sniffedType) {
 		responseBody := textBodyPrefixForSosanaResultLog(image, contentType, sniffedType)
-		p.logUpstreamError(ctx, "Sosana result URL returned non-image content", http.StatusBadGateway, cred, modelID, responseBody,
+		p.logUpstreamError(ctx, "Sosana result URL returned non-PNG content", http.StatusBadGateway, cred, modelID, responseBody,
 			"result_host", parsed.Hostname(),
 			"content_type", contentType,
 			"sniffed_content_type", sniffedType,
 			"request_id", logCtx.RequestID)
-		return nil, "", http.StatusBadGateway, errors.New("sosana result URL returned non-image content")
+		return nil, "", http.StatusBadGateway, errors.New("sosana result URL returned non-PNG content")
 	}
-	if !isImageContentType(contentType) {
+	if !isPNGContentType(contentType) {
 		contentType = sniffedType
 	}
 	return image, contentType, http.StatusOK, nil
+}
+
+func (p *Proxy) doSosanaResultImageRequest(req *http.Request) (*http.Response, error) {
+	client := *p.client
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	return client.Do(req)
 }
 
 func parseSosanaResultURL(raw string) (*url.URL, error) {
@@ -368,6 +386,72 @@ func parseSosanaResultURL(raw string) (*url.URL, error) {
 		return nil, errors.New("sosana result_file_url must be an http or https URL")
 	}
 	return parsed, nil
+}
+
+func validateSosanaResultURL(ctx context.Context, parsed *url.URL) error {
+	if allowPrivateSosanaResultURLForTests != nil && allowPrivateSosanaResultURLForTests(parsed) {
+		return nil
+	}
+	if parsed.Scheme != "https" {
+		return errors.New("sosana result_file_url must use https")
+	}
+
+	host := parsed.Hostname()
+	if strings.EqualFold(host, "localhost") {
+		return errors.New("sosana result_file_url host is not allowed")
+	}
+	if !isAllowedSosanaResultHost(host) {
+		return errors.New("sosana result_file_url host is not allowed")
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		if isUnsafeSosanaResultIP(ip) {
+			return errors.New("sosana result_file_url resolves to a private address")
+		}
+		return nil
+	}
+
+	addrs, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		return err
+	}
+	if len(addrs) == 0 {
+		return errors.New("sosana result_file_url host has no addresses")
+	}
+	for _, addr := range addrs {
+		if isUnsafeSosanaResultIP(addr.IP) {
+			return errors.New("sosana result_file_url resolves to a private address")
+		}
+	}
+	return nil
+}
+
+func isAllowedSosanaResultHost(host string) bool {
+	host = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(host)), ".")
+	for _, suffix := range []string{
+		"sosana.blog",
+		"sosana.art",
+		"storage.yandexcloud.net",
+	} {
+		if host == suffix || strings.HasSuffix(host, "."+suffix) {
+			return true
+		}
+	}
+	return false
+}
+
+func isUnsafeSosanaResultIP(ip net.IP) bool {
+	if ip == nil {
+		return true
+	}
+	if v4 := ip.To4(); v4 != nil && v4[0] == 100 && v4[1]&0xc0 == 64 {
+		return true
+	}
+	return ip.IsLoopback() ||
+		ip.IsPrivate() ||
+		ip.IsLinkLocalUnicast() ||
+		ip.IsLinkLocalMulticast() ||
+		ip.IsMulticast() ||
+		ip.IsUnspecified()
 }
 
 func sosanaResultHost(task sosana.BananaTaskResponse) string {
@@ -418,8 +502,9 @@ func textBodyPrefixForSosanaResultLog(body []byte, contentTypes ...string) []byt
 	return nil
 }
 
-func isImageContentType(contentType string) bool {
-	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(contentType)), "image/")
+func isPNGContentType(contentType string) bool {
+	contentType = strings.ToLower(strings.TrimSpace(contentType))
+	return contentType == "image/png" || strings.HasPrefix(contentType, "image/png;")
 }
 
 func isTextContentType(contentType string) bool {

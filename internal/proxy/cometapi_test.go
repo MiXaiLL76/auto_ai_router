@@ -6,6 +6,7 @@ import (
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestIsCometAPICredential(t *testing.T) {
@@ -69,8 +70,11 @@ func TestAppendResponseBodyForLogs_MaskedProviderKeepsMaskedFlagAndLogsBody(t *t
 
 	assert.Contains(t, args, "response_body_masked")
 	assert.Contains(t, args, true)
-	assert.Contains(t, args, "response_body")
-	assert.Contains(t, args, body)
+	loggedBody := responseBodyArg(t, args)
+	assert.Contains(t, loggedBody, "permission_denied")
+	assert.Contains(t, loggedBody, "model access denied")
+	assert.NotEqual(t, body, loggedBody)
+	assert.Less(t, len(loggedBody), len(body))
 }
 
 func TestIsSosanaCredential(t *testing.T) {
@@ -134,6 +138,23 @@ func TestAppendResponseBodyForLogs_CometKeepsMaskedFlagAndLogsBody(t *testing.T)
 
 	assert.Contains(t, args, "response_body_masked")
 	assert.Contains(t, args, true)
-	assert.Contains(t, args, "response_body")
-	assert.Contains(t, args, body)
+	loggedBody := responseBodyArg(t, args)
+	assert.Contains(t, loggedBody, "permission_denied")
+	assert.Contains(t, loggedBody, "model access denied")
+	assert.NotEqual(t, body, loggedBody)
+	assert.Less(t, len(loggedBody), len(body))
+}
+
+func responseBodyArg(t *testing.T, args []any) string {
+	t.Helper()
+
+	for i := 0; i < len(args)-1; i++ {
+		if args[i] == "response_body" {
+			body, ok := args[i+1].(string)
+			require.True(t, ok)
+			return body
+		}
+	}
+	require.FailNow(t, "response_body arg not found")
+	return ""
 }

@@ -8,8 +8,10 @@ import (
 	"fmt"
 	"log/slog"
 	"mime/multipart"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"strings"
 	"testing"
@@ -17,6 +19,7 @@ import (
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/converter/openai"
+	"github.com/mixaill76/auto_ai_router/internal/converter/sosana"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb"
 	litellmmodels "github.com/mixaill76/auto_ai_router/internal/litellmdb/models"
 	aimodels "github.com/mixaill76/auto_ai_router/internal/models"
@@ -40,6 +43,7 @@ func TestProxyRequest_SosanaImageGenerationSuccess(t *testing.T) {
 			assert.Equal(t, "draw a fox", req["prompt"])
 			assert.Equal(t, "nano-banana", req["model"])
 			assert.Equal(t, "1:1", req["aspect_ratio"])
+			assert.Equal(t, false, req["prompt_optimization"])
 			_, _ = w.Write([]byte(`{"uid":"task-1","status":"PROCESSING","created_at":"2026-01-01T00:00:00Z","prompt":"draw a fox"}`))
 		case "/api/banana/task-1":
 			pollSeen = true
@@ -86,6 +90,7 @@ func TestProxyRequest_SosanaImageEditUsesProviderModelAlias(t *testing.T) {
 		require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
 		assert.Equal(t, "make it blue", req["prompt"])
 		assert.Equal(t, "nano-banana", req["model"])
+		assert.Equal(t, false, req["prompt_optimization"])
 		imageURLs, ok := req["image_urls"].([]any)
 		require.True(t, ok)
 		require.Len(t, imageURLs, 1)
@@ -310,6 +315,54 @@ func TestProxyRequest_SosanaRejectsURLResponseFormat(t *testing.T) {
 	assert.False(t, called)
 }
 
+func TestProxyRequest_IncompatibleImageRequestWithSosanaReturnsLocalError(t *testing.T) {
+	called := false
+	upstream := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	prx := newSosanaTestProxy(upstream.URL, nil)
+	req := httptest.NewRequest("POST", "/v1/images/generations", strings.NewReader(`{"model":"nano-banana","prompt":"draw","tools":[{"type":"google_search"}]}`))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	prx.ProxyRequest(w, req)
+
+	require.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Contains(t, w.Body.String(), "tools is unsupported")
+	assert.False(t, called)
+}
+
+func TestProxyRequest_IncompatibleImageEditJPEGWithSosanaReturnsLocalError(t *testing.T) {
+	called := false
+	upstream := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	body, contentType := sosanaMultipartEditBody(t, map[string]string{
+		"model":  "nano-banana",
+		"prompt": "make it blue",
+	}, map[string][]byte{
+		"image": {0xff, 0xd8, 0xff, 0xdb, 0, 0x43},
+	})
+	prx := newSosanaTestProxy(upstream.URL, nil)
+	req := httptest.NewRequest("POST", "/v1/images/edits", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", contentType)
+	w := httptest.NewRecorder()
+
+	prx.ProxyRequest(w, req)
+
+	require.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Contains(t, w.Body.String(), "PNG input")
+	assert.False(t, called)
+}
+
 func TestProxyRequest_SosanaCreateHTTPErrorMasked(t *testing.T) {
 	var logBuf bytes.Buffer
 	upstream := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -503,12 +556,140 @@ func TestProxyRequest_SosanaImageResultNonImageMasked(t *testing.T) {
 	assert.Contains(t, w.Body.String(), "Upstream provider error")
 	assert.NotContains(t, w.Body.String(), "not an image")
 	assert.NotContains(t, w.Body.String(), imageServer.URL)
-	assert.Contains(t, logBuf.String(), "non-image content")
+	assert.Contains(t, logBuf.String(), "non-PNG content")
 	assert.Contains(t, logBuf.String(), "response_body_masked=true")
 	assert.Contains(t, logBuf.String(), "not an image secret marker")
 }
 
+func TestProxyRequest_SosanaImageResultJPEGMasked(t *testing.T) {
+	var logBuf bytes.Buffer
+	imageServer := newSosanaResultImageServer(t, http.StatusOK, "image/jpeg", []byte{0xff, 0xd8, 0xff, 0xdb, 0, 0x43}, nil)
+	defer imageServer.Close()
+
+	upstream := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/banana/create-async":
+			_, _ = w.Write([]byte(`{"uid":"task-1","status":"PROCESSING","prompt":"draw"}`))
+		case "/api/banana/task-1":
+			_, _ = fmt.Fprintf(w, `{"uid":"task-1","status":"COMPLETED","prompt":"draw","result_file_url":%q}`, imageServer.URL+"/image.jpg")
+		default:
+			t.Fatalf("unexpected upstream path: %s", r.URL.Path)
+		}
+	}))
+	defer upstream.Close()
+
+	prx := newSosanaTestProxy(upstream.URL, &logBuf)
+	req := httptest.NewRequest("POST", "/v1/images/generations", strings.NewReader(`{"model":"nano-banana","prompt":"draw","n":1}`))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	prx.ProxyRequest(w, req)
+
+	assert.Equal(t, http.StatusBadGateway, w.Code)
+	assert.Contains(t, w.Body.String(), "Upstream provider error")
+	assert.NotContains(t, w.Body.String(), imageServer.URL)
+	assert.Contains(t, logBuf.String(), "non-PNG content")
+	assert.NotContains(t, logBuf.String(), imageServer.URL)
+}
+
+func TestProxyRequest_SosanaImageResultRedirectMaskedAndNotFollowed(t *testing.T) {
+	allowPrivateSosanaResultURLsForTest(t)
+
+	var logBuf bytes.Buffer
+	targetCalled := false
+	targetServer := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		targetCalled = true
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write(sosanaResultPNG)
+	}))
+	defer targetServer.Close()
+
+	redirectServer := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, targetServer.URL+"/private.png", http.StatusFound)
+	}))
+	defer redirectServer.Close()
+
+	upstream := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/banana/create-async":
+			_, _ = w.Write([]byte(`{"uid":"task-1","status":"PROCESSING","prompt":"draw"}`))
+		case "/api/banana/task-1":
+			_, _ = fmt.Fprintf(w, `{"uid":"task-1","status":"COMPLETED","prompt":"draw","result_file_url":%q}`, redirectServer.URL+"/redirect")
+		default:
+			t.Fatalf("unexpected upstream path: %s", r.URL.Path)
+		}
+	}))
+	defer upstream.Close()
+
+	prx := newSosanaTestProxy(upstream.URL, &logBuf)
+	req := httptest.NewRequest("POST", "/v1/images/generations", strings.NewReader(`{"model":"nano-banana","prompt":"draw","n":1}`))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	prx.ProxyRequest(w, req)
+
+	assert.Equal(t, http.StatusBadGateway, w.Code)
+	assert.Contains(t, w.Body.String(), "Upstream provider error")
+	assert.False(t, targetCalled)
+	assert.NotContains(t, w.Body.String(), targetServer.URL)
+}
+
+func TestDownloadSosanaResultImageRejectsUnsafeProductionURL(t *testing.T) {
+	var logBuf bytes.Buffer
+	called := false
+	imageServer := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+	}))
+	defer imageServer.Close()
+
+	resultURL := imageServer.URL + "/private.png"
+	prx := newSosanaTestProxy("https://sosana.art", &logBuf)
+	cred := &config.CredentialConfig{Name: "sosana", Type: config.ProviderTypeSosana, BaseURL: "https://sosana.art"}
+	image, _, statusCode, err := prx.downloadSosanaResultImage(context.Background(), cred, "nano-banana", sosana.BananaTaskResponse{
+		Status:        sosana.StatusCompleted,
+		ResultFileURL: &resultURL,
+	}, nil, &RequestLogContext{})
+
+	require.Error(t, err)
+	assert.Nil(t, image)
+	assert.Equal(t, http.StatusBadGateway, statusCode)
+	assert.False(t, called)
+	assert.Contains(t, logBuf.String(), "unsafe result URL")
+	assert.Contains(t, logBuf.String(), "result_host=127.0.0.1")
+}
+
+func TestValidateSosanaResultURLBlocksUnsafeHosts(t *testing.T) {
+	tests := []string{
+		"http://main-r2.sosana.blog/image.png",
+		"https://localhost/image.png",
+		"https://127.0.0.1/image.png",
+		"https://169.254.169.254/latest/meta-data",
+		"https://100.64.0.1/image.png",
+		"https://example.com/image.png",
+	}
+
+	for _, rawURL := range tests {
+		t.Run(rawURL, func(t *testing.T) {
+			parsed, err := parseSosanaResultURL(rawURL)
+			require.NoError(t, err)
+			require.Error(t, validateSosanaResultURL(context.Background(), parsed))
+		})
+	}
+}
+
+func TestValidateSosanaResultURLAllowsLocalOnlyWithTestHook(t *testing.T) {
+	allowPrivateSosanaResultURLsForTest(t)
+
+	parsed, err := parseSosanaResultURL("http://127.0.0.1/image.png")
+	require.NoError(t, err)
+	require.NoError(t, validateSosanaResultURL(context.Background(), parsed))
+}
+
 func TestProxyRequest_SosanaImageResultTimeoutMasked(t *testing.T) {
+	allowPrivateSosanaResultURLsForTest(t)
+
 	var logBuf bytes.Buffer
 	imageServer := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(50 * time.Millisecond)
@@ -663,6 +844,7 @@ var sosanaResultPNG = []byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n', 0, 0, 
 
 func newSosanaResultImageServer(t *testing.T, status int, contentType string, body []byte, auths *[]string) *httptest.Server {
 	t.Helper()
+	allowPrivateSosanaResultURLsForTest(t)
 
 	return newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if auths != nil {
@@ -674,6 +856,26 @@ func newSosanaResultImageServer(t *testing.T, status int, contentType string, bo
 		w.WriteHeader(status)
 		_, _ = w.Write(body)
 	}))
+}
+
+func allowPrivateSosanaResultURLsForTest(t *testing.T) {
+	t.Helper()
+
+	previous := allowPrivateSosanaResultURLForTests
+	allowPrivateSosanaResultURLForTests = func(parsed *url.URL) bool {
+		if parsed.Scheme != "http" {
+			return false
+		}
+		host := parsed.Hostname()
+		if strings.EqualFold(host, "localhost") {
+			return true
+		}
+		ip := net.ParseIP(host)
+		return ip != nil && isUnsafeSosanaResultIP(ip)
+	}
+	t.Cleanup(func() {
+		allowPrivateSosanaResultURLForTests = previous
+	})
 }
 
 func newSosanaTestProxy(baseURL string, logBuf *bytes.Buffer) *Proxy {

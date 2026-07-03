@@ -225,13 +225,9 @@ type OpenAIImageUsage struct {
 
 // OpenAIImageResponse represents OpenAI image response
 type OpenAIImageResponse struct {
-	Created      int64             `json:"created"`
-	Background   string            `json:"background,omitempty"`
-	Data         []OpenAIImageData `json:"data"`
-	OutputFormat string            `json:"output_format,omitempty"`
-	Quality      string            `json:"quality,omitempty"`
-	Size         string            `json:"size,omitempty"`
-	Usage        *OpenAIImageUsage `json:"usage,omitempty"`
+	Created int64             `json:"created"`
+	Data    []OpenAIImageData `json:"data"`
+	Usage   *OpenAIImageUsage `json:"usage,omitempty"`
 }
 
 // Embedding types

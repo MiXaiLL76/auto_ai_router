@@ -27,10 +27,11 @@ const (
 )
 
 type BananaCreateRequest struct {
-	Prompt      string   `json:"prompt"`
-	ImageURLs   []string `json:"image_urls,omitempty"`
-	Model       string   `json:"model,omitempty"`
-	AspectRatio string   `json:"aspect_ratio,omitempty"`
+	Prompt             string   `json:"prompt"`
+	ImageURLs          []string `json:"image_urls,omitempty"`
+	Model              string   `json:"model,omitempty"`
+	AspectRatio        string   `json:"aspect_ratio,omitempty"`
+	PromptOptimization bool     `json:"prompt_optimization"`
 }
 
 type BananaTaskResponse struct {
@@ -43,8 +44,17 @@ type BananaTaskResponse struct {
 	Error           *string `json:"error"`
 }
 
+type openAIImageRequest struct {
+	openai.OpenAIImageRequest
+	AspectRatio string `json:"aspect_ratio,omitempty"`
+}
+
 func ImageGenerationRequest(openAIBody []byte, modelID string) ([]byte, error) {
-	var req openai.OpenAIImageRequest
+	if reason := UnsupportedRequest("/v1/images/generations", openAIBody, "application/json"); reason != "" {
+		return nil, fmt.Errorf("%s", reason)
+	}
+
+	var req openAIImageRequest
 	if err := json.Unmarshal(openAIBody, &req); err != nil {
 		return nil, fmt.Errorf("failed to parse OpenAI image request: %w", err)
 	}
@@ -54,18 +64,26 @@ func ImageGenerationRequest(openAIBody []byte, modelID string) ([]byte, error) {
 	if err := validateResponseFormat(req.ResponseFormat); err != nil {
 		return nil, err
 	}
+	if err := validateOutputFormat(req.OutputFormat); err != nil {
+		return nil, err
+	}
 	prompt := strings.TrimSpace(req.Prompt)
 	if prompt == "" {
 		return nil, fmt.Errorf("image generation request missing prompt")
 	}
 	return json.Marshal(BananaCreateRequest{
-		Prompt:      prompt,
-		Model:       providerModel(modelID, req.Model),
-		AspectRatio: SizeToAspectRatio(req.Size),
+		Prompt:             prompt,
+		Model:              providerModel(modelID, req.Model),
+		AspectRatio:        aspectRatio(req.AspectRatio, req.Size),
+		PromptOptimization: false,
 	})
 }
 
 func ImageEditRequest(openAIBody []byte, contentType string, modelID string) ([]byte, error) {
+	if reason := UnsupportedRequest("/v1/images/edits", openAIBody, contentType); reason != "" {
+		return nil, fmt.Errorf("%s", reason)
+	}
+
 	mediaType, params, err := mime.ParseMediaType(contentType)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse image edit content type: %w", err)
@@ -109,13 +127,22 @@ func ImageEditRequest(openAIBody []byte, contentType string, modelID string) ([]
 			continue
 		}
 		mimeType := detectImageMIMEType(part.Header.Get("Content-Type"), data)
+		if mimeType != "image/png" {
+			return nil, fmt.Errorf("sosana image edits support PNG images only")
+		}
 		imageURLs = append(imageURLs, "data:"+mimeType+";base64,"+base64.StdEncoding.EncodeToString(data))
 	}
 
+	if len(imageURLs) > maxInputImages {
+		return nil, fmt.Errorf("sosana supports up to %d input images", maxInputImages)
+	}
 	if err := validateImageCountString(fields["n"]); err != nil {
 		return nil, err
 	}
 	if err := validateResponseFormat(fields["response_format"]); err != nil {
+		return nil, err
+	}
+	if err := validateOutputFormat(fields["output_format"]); err != nil {
 		return nil, err
 	}
 	prompt := strings.TrimSpace(fields["prompt"])
@@ -126,10 +153,11 @@ func ImageEditRequest(openAIBody []byte, contentType string, modelID string) ([]
 		return nil, fmt.Errorf("image edit request missing image")
 	}
 	return json.Marshal(BananaCreateRequest{
-		Prompt:      prompt,
-		ImageURLs:   imageURLs,
-		Model:       providerModel(modelID, fields["model"]),
-		AspectRatio: SizeToAspectRatio(fields["size"]),
+		Prompt:             prompt,
+		ImageURLs:          imageURLs,
+		Model:              providerModel(modelID, fields["model"]),
+		AspectRatio:        aspectRatio(fields["aspect_ratio"], fields["size"]),
+		PromptOptimization: false,
 	})
 }
 
@@ -193,6 +221,13 @@ func SizeToAspectRatio(size string) string {
 	}
 }
 
+func aspectRatio(explicit, size string) string {
+	if value := strings.TrimSpace(explicit); value != "" {
+		return value
+	}
+	return SizeToAspectRatio(size)
+}
+
 func validateImageCount(n *int) error {
 	if n == nil || *n == 1 {
 		return nil
@@ -236,7 +271,11 @@ func readLimited(r io.Reader, limit int64) ([]byte, error) {
 func detectImageMIMEType(header string, data []byte) string {
 	header = strings.ToLower(strings.TrimSpace(header))
 	if strings.HasPrefix(header, "image/") {
-		return header
+		mediaType, _, err := mime.ParseMediaType(header)
+		if err == nil {
+			return mediaType
+		}
+		return strings.TrimSpace(strings.Split(header, ";")[0])
 	}
 	detected := http.DetectContentType(data)
 	if strings.HasPrefix(detected, "image/") {
