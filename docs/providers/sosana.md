@@ -27,6 +27,9 @@ models:
     tpm: -1
 ```
 
+The credential value is configured as `api_key`. The router sends it to Sosana
+as `Authorization: Bearer <api_key>`, matching Sosana's API contract.
+
 The dynamic model template maps `image_size` to Sosana's concrete image models:
 `banana-2-1k-compliant`, `banana-2-2k-compliant`, and
 `banana-2-4k-compliant`. If `image_size` is omitted, the router uses `1K`.
