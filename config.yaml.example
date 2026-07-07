@@ -53,7 +53,6 @@ credentials:
     rpm: 100
     tpm: 50000
     weight: 100  # Optional: weighted round-robin share (default 1). See docs/advanced/balancing.md
-    # mask_upstream_errors: true  # Enable for OpenAI-compatible resellers whose raw errors must not reach clients.
 
   - name: "vertex_ai"
     type: "vertex-ai"

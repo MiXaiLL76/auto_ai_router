@@ -86,6 +86,6 @@ For operator debugging, structured logs may include a truncated textual upstream
 error body with `response_body_masked=true`. Raw image bytes and full result
 URLs are not logged.
 
-If Sosana is hidden behind another proxy credential, enable
-`mask_upstream_errors: true` on that proxy unless the upstream router is known to
-propagate the credential marker used by this router.
+If Sosana is hidden behind another proxy credential, the upstream router should
+propagate the credential marker used by this router so proxy-chain errors can be
+masked as Sosana errors too.

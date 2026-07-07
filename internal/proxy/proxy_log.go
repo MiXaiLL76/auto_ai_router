@@ -52,7 +52,7 @@ func shouldMaskUpstreamErrors(cred *config.CredentialConfig) bool {
 	if cred == nil {
 		return false
 	}
-	return cred.MaskUpstreamErrors || isCometAPICredential(cred) || isSosanaCredential(cred)
+	return isCometAPICredential(cred) || isSosanaCredential(cred)
 }
 
 func isCometAPICredential(cred *config.CredentialConfig) bool {

@@ -677,21 +677,6 @@ rpm: 60
 	assert.Equal(t, ProviderTypeCometAPI, cred.Type)
 }
 
-func TestCredentialConfig_MaskUpstreamErrors(t *testing.T) {
-	var cred CredentialConfig
-	err := yaml.Unmarshal([]byte(`
-name: sosana
-type: openai
-api_key: key
-base_url: https://api.sosana.example/v1
-mask_upstream_errors: true
-rpm: 60
-`), &cred)
-
-	require.NoError(t, err)
-	assert.True(t, cred.MaskUpstreamErrors)
-}
-
 func TestCredentialConfig_NormalizeSosanaProviderType(t *testing.T) {
 	tests := []struct {
 		name string

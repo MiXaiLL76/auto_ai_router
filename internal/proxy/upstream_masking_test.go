@@ -22,13 +22,12 @@ func TestMaskedUpstreamError_DirectImageErrorDoesNotLeakProviderBody(t *testing.
 
 	prx := NewTestProxyBuilder().
 		WithCredentials(config.CredentialConfig{
-			Name:               "sosana-art",
-			Type:               config.ProviderTypeOpenAI,
-			BaseURL:            upstream.URL,
-			APIKey:             "upstream-key",
-			RPM:                100,
-			TPM:                10000,
-			MaskUpstreamErrors: true,
+			Name:    "sosana-art",
+			Type:    config.ProviderTypeOpenAI,
+			BaseURL: upstream.URL,
+			APIKey:  "upstream-key",
+			RPM:     100,
+			TPM:     10000,
 		}).
 		Build()
 
