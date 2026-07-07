@@ -20,25 +20,29 @@ func TestImageGenerationRequest(t *testing.T) {
 		name        string
 		size        string
 		wantAspect  string
+		wantSize    string
 		wantErrPart string
 	}{
-		{name: "square", size: "1024x1024", wantAspect: "1:1"},
-		{name: "wide", size: "1792x1024", wantAspect: "16:9"},
-		{name: "portrait", size: "1024x1792", wantAspect: "9:16"},
-		{name: "unknown", size: "333x777", wantAspect: "auto"},
+		{name: "square", size: "1024x1024", wantAspect: "1:1", wantSize: "1K"},
+		{name: "wide", size: "1792x1024", wantAspect: "16:9", wantSize: "1K"},
+		{name: "portrait", size: "1024x1792", wantAspect: "9:16", wantSize: "1K"},
+		{name: "two k", size: "2048x2048", wantAspect: "1:1", wantSize: "2K"},
+		{name: "four k", size: "4096x4096", wantAspect: "1:1", wantSize: "4K"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			body := []byte(`{"model":"nano-banana","prompt":"draw a cat","size":"` + tt.size + `","n":1}`)
-			got, err := ImageGenerationRequest(body, "nano-banana")
+			body := []byte(`{"model":"banana-2-1k-compliant","prompt":"draw a cat","size":"` + tt.size + `","n":1}`)
+			got, concreteModel, err := ImageGenerationRequest(body, "banana-2-{image_size}-compliant")
 			require.NoError(t, err)
 
 			var req BananaCreateRequest
 			require.NoError(t, json.Unmarshal(got, &req))
 			assert.Equal(t, "draw a cat", req.Prompt)
-			assert.Equal(t, "nano-banana", req.Model)
+			assert.Equal(t, "banana-2-"+strings.ToLower(tt.wantSize)+"-compliant", req.Model)
+			assert.Equal(t, req.Model, concreteModel)
 			assert.Equal(t, tt.wantAspect, req.AspectRatio)
+			assert.Equal(t, tt.wantSize, req.ImageSize)
 			assert.False(t, req.PromptOptimization)
 			assert.Empty(t, req.ImageURLs)
 		})
@@ -46,16 +50,31 @@ func TestImageGenerationRequest(t *testing.T) {
 }
 
 func TestImageGenerationRequestPrefersProviderModel(t *testing.T) {
-	got, err := ImageGenerationRequest([]byte(`{"model":"public-image","prompt":"draw","n":1}`), "nano-banana")
+	got, concreteModel, err := ImageGenerationRequest([]byte(`{"model":"public-image","prompt":"draw","n":1}`), "banana-2-1k-compliant")
 	require.NoError(t, err)
 
 	var req BananaCreateRequest
 	require.NoError(t, json.Unmarshal(got, &req))
-	assert.Equal(t, "nano-banana", req.Model)
+	assert.Equal(t, "banana-2-1k-compliant", req.Model)
+	assert.Equal(t, req.Model, concreteModel)
+}
+
+func TestImageGenerationRequestMapsPublicGeminiModelToSosanaTier(t *testing.T) {
+	got, concreteModel, err := ImageGenerationRequest(
+		[]byte(`{"model":"google/gemini-3.1-flash-image-preview","prompt":"draw","image_size":"2K","n":1}`),
+		"google/gemini-3.1-flash-image-preview",
+	)
+	require.NoError(t, err)
+
+	var req BananaCreateRequest
+	require.NoError(t, json.Unmarshal(got, &req))
+	assert.Equal(t, "banana-2-2k-compliant", req.Model)
+	assert.Equal(t, "banana-2-2k-compliant", concreteModel)
+	assert.Equal(t, "2K", req.ImageSize)
 }
 
 func TestImageGenerationRequestUsesExplicitAspectRatio(t *testing.T) {
-	got, err := ImageGenerationRequest([]byte(`{"model":"nano-banana","prompt":"draw","size":"1024x1024","aspect_ratio":"16:9"}`), "nano-banana")
+	got, _, err := ImageGenerationRequest([]byte(`{"model":"banana-2-1k-compliant","prompt":"draw","size":"1024x1024","aspect_ratio":"16:9"}`), "banana-2-1k-compliant")
 	require.NoError(t, err)
 
 	var req BananaCreateRequest
@@ -64,13 +83,13 @@ func TestImageGenerationRequestUsesExplicitAspectRatio(t *testing.T) {
 }
 
 func TestImageGenerationRequestRejectsMultipleImages(t *testing.T) {
-	_, err := ImageGenerationRequest([]byte(`{"model":"nano-banana","prompt":"draw","n":2}`), "nano-banana")
+	_, _, err := ImageGenerationRequest([]byte(`{"model":"banana-2-1k-compliant","prompt":"draw","n":2}`), "banana-2-1k-compliant")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "n=1")
 }
 
 func TestImageGenerationRequestRejectsURLResponseFormat(t *testing.T) {
-	_, err := ImageGenerationRequest([]byte(`{"model":"nano-banana","prompt":"draw","response_format":"url"}`), "nano-banana")
+	_, _, err := ImageGenerationRequest([]byte(`{"model":"banana-2-1k-compliant","prompt":"draw","response_format":"url"}`), "banana-2-1k-compliant")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "response_format=url")
 }
@@ -81,19 +100,20 @@ func TestImageGenerationRequestRejectsUnsupportedControls(t *testing.T) {
 		body string
 		want string
 	}{
-		{name: "tools", body: `{"model":"nano-banana","prompt":"draw","tools":[{"type":"google_search"}]}`, want: "tools"},
-		{name: "thinking", body: `{"model":"nano-banana","prompt":"draw","thinking_level":"high"}`, want: "thinking_level"},
-		{name: "output format", body: `{"model":"nano-banana","prompt":"draw","output_format":"jpeg"}`, want: "output_format"},
-		{name: "output compression", body: `{"model":"nano-banana","prompt":"draw","output_compression":0}`, want: "output_compression"},
-		{name: "quality auto", body: `{"model":"nano-banana","prompt":"draw","quality":"auto"}`, want: "quality"},
-		{name: "messages", body: `{"model":"nano-banana","prompt":"draw","messages":[{"role":"user","content":"draw"}]}`, want: "messages"},
-		{name: "image size", body: `{"model":"nano-banana","prompt":"draw","image_size":"2K"}`, want: "image_size"},
-		{name: "reference images", body: `{"model":"nano-banana","prompt":"draw","image_urls":["https://example.com/a.png"]}`, want: "image_urls"},
+		{name: "tools", body: `{"model":"banana-2-1k-compliant","prompt":"draw","tools":[{"type":"google_search"}]}`, want: "tools"},
+		{name: "thinking", body: `{"model":"banana-2-1k-compliant","prompt":"draw","thinking_level":"high"}`, want: "thinking_level"},
+		{name: "output format", body: `{"model":"banana-2-1k-compliant","prompt":"draw","output_format":"jpeg"}`, want: "output_format"},
+		{name: "output compression", body: `{"model":"banana-2-1k-compliant","prompt":"draw","output_compression":0}`, want: "output_compression"},
+		{name: "quality auto", body: `{"model":"banana-2-1k-compliant","prompt":"draw","quality":"auto"}`, want: "quality"},
+		{name: "messages", body: `{"model":"banana-2-1k-compliant","prompt":"draw","messages":[{"role":"user","content":"draw"}]}`, want: "messages"},
+		{name: "image size 0.5k", body: `{"model":"banana-2-1k-compliant","prompt":"draw","image_size":"0.5K"}`, want: "image_size"},
+		{name: "unknown size", body: `{"model":"banana-2-1k-compliant","prompt":"draw","size":"333x777"}`, want: "size"},
+		{name: "reference images", body: `{"model":"banana-2-1k-compliant","prompt":"draw","image_urls":["https://example.com/a.png"]}`, want: "image_urls"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := ImageGenerationRequest([]byte(tt.body), "nano-banana")
+			_, _, err := ImageGenerationRequest([]byte(tt.body), "banana-2-1k-compliant")
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tt.want)
 		})
@@ -101,13 +121,13 @@ func TestImageGenerationRequestRejectsUnsupportedControls(t *testing.T) {
 }
 
 func TestImageGenerationRequestAllowsPNGOutputFormat(t *testing.T) {
-	_, err := ImageGenerationRequest([]byte(`{"model":"nano-banana","prompt":"draw","output_format":"png","response_format":"b64_json"}`), "nano-banana")
+	_, _, err := ImageGenerationRequest([]byte(`{"model":"banana-2-1k-compliant","prompt":"draw","output_format":"png","response_format":"b64_json"}`), "banana-2-1k-compliant")
 	require.NoError(t, err)
 }
 
 func TestImageEditRequest(t *testing.T) {
 	body, contentType := multipartImageEditBody(t, map[string]string{
-		"model":  "nano-banana",
+		"model":  "banana-2-1k-compliant",
 		"prompt": "make it blue",
 		"size":   "1024x1024",
 		"n":      "1",
@@ -115,14 +135,16 @@ func TestImageEditRequest(t *testing.T) {
 		"image": pngBytes(),
 	})
 
-	got, err := ImageEditRequest(body, contentType, "nano-banana")
+	got, concreteModel, err := ImageEditRequest(body, contentType, "banana-2-1k-compliant")
 	require.NoError(t, err)
 
 	var req BananaCreateRequest
 	require.NoError(t, json.Unmarshal(got, &req))
 	assert.Equal(t, "make it blue", req.Prompt)
-	assert.Equal(t, "nano-banana", req.Model)
+	assert.Equal(t, "banana-2-1k-compliant", req.Model)
+	assert.Equal(t, req.Model, concreteModel)
 	assert.Equal(t, "1:1", req.AspectRatio)
+	assert.Equal(t, "1K", req.ImageSize)
 	assert.False(t, req.PromptOptimization)
 	require.Len(t, req.ImageURLs, 1)
 	assert.True(t, strings.HasPrefix(req.ImageURLs[0], "data:image/png;base64,"))
@@ -137,65 +159,66 @@ func TestImageEditRequestPrefersProviderModel(t *testing.T) {
 		"image": pngBytes(),
 	})
 
-	got, err := ImageEditRequest(body, contentType, "nano-banana")
+	got, concreteModel, err := ImageEditRequest(body, contentType, "banana-2-1k-compliant")
 	require.NoError(t, err)
 
 	var req BananaCreateRequest
 	require.NoError(t, json.Unmarshal(got, &req))
-	assert.Equal(t, "nano-banana", req.Model)
+	assert.Equal(t, "banana-2-1k-compliant", req.Model)
+	assert.Equal(t, req.Model, concreteModel)
 }
 
 func TestImageEditRequestRejectsMask(t *testing.T) {
 	body, contentType := multipartImageEditBody(t, map[string]string{
-		"model":  "nano-banana",
+		"model":  "banana-2-1k-compliant",
 		"prompt": "make it blue",
 	}, map[string][]byte{
 		"image": pngBytes(),
 		"mask":  pngBytes(),
 	})
 
-	_, err := ImageEditRequest(body, contentType, "fallback-model")
+	_, _, err := ImageEditRequest(body, contentType, "banana-2-1k-compliant")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "mask")
 }
 
 func TestImageEditRequestRejectsMultipleImagesCount(t *testing.T) {
 	body, contentType := multipartImageEditBody(t, map[string]string{
-		"model":  "nano-banana",
+		"model":  "banana-2-1k-compliant",
 		"prompt": "make it blue",
 		"n":      "2",
 	}, map[string][]byte{
 		"image": pngBytes(),
 	})
 
-	_, err := ImageEditRequest(body, contentType, "fallback-model")
+	_, _, err := ImageEditRequest(body, contentType, "banana-2-1k-compliant")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "n=1")
 }
 
 func TestImageEditRequestRejectsURLResponseFormat(t *testing.T) {
 	body, contentType := multipartImageEditBody(t, map[string]string{
-		"model":           "nano-banana",
+		"model":           "banana-2-1k-compliant",
 		"prompt":          "make it blue",
 		"response_format": "url",
 	}, map[string][]byte{
 		"image": pngBytes(),
 	})
 
-	_, err := ImageEditRequest(body, contentType, "fallback-model")
+	_, _, err := ImageEditRequest(body, contentType, "banana-2-1k-compliant")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "response_format=url")
 }
 
 func TestImageEditRequestRejectsJPEGInput(t *testing.T) {
 	body, contentType := multipartImageEditBody(t, map[string]string{
-		"model":  "nano-banana",
+		"model":  "banana-2-1k-compliant",
 		"prompt": "make it blue",
 	}, map[string][]byte{
 		"image": jpegBytes(),
 	})
 
-	_, err := ImageEditRequest(body, contentType, "fallback-model")
+	_, _, err := ImageEditRequest(body, contentType, "banana-2-1k-compliant")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "PNG")
 }
@@ -203,7 +226,7 @@ func TestImageEditRequestRejectsJPEGInput(t *testing.T) {
 func TestImageEditRequestRejectsTooManyImages(t *testing.T) {
 	var buf bytes.Buffer
 	writer := multipart.NewWriter(&buf)
-	require.NoError(t, writer.WriteField("model", "nano-banana"))
+	require.NoError(t, writer.WriteField("model", "banana-2-1k-compliant"))
 	require.NoError(t, writer.WriteField("prompt", "make it blue"))
 	for i := 0; i < maxInputImages+1; i++ {
 		part, err := writer.CreateFormFile("image", fmt.Sprintf("image-%02d.png", i))
@@ -213,7 +236,7 @@ func TestImageEditRequestRejectsTooManyImages(t *testing.T) {
 	}
 	require.NoError(t, writer.Close())
 
-	_, err := ImageEditRequest(buf.Bytes(), writer.FormDataContentType(), "fallback-model")
+	_, _, err := ImageEditRequest(buf.Bytes(), writer.FormDataContentType(), "banana-2-1k-compliant")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "too many")
 }

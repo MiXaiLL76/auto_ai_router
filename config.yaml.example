@@ -118,7 +118,9 @@ models:
     tpm: 50000
 
   # Sosana.art image model exposed through /v1/images/generations and /v1/images/edits.
-  - name: "nano-banana"
+  # image_size selects banana-2-1k/2k/4k-compliant dynamically; default is 1K.
+  - name: "google/gemini-3.1-flash-image-preview"
+    model: "banana-2-{image_size}-compliant"
     credential: sosana_images
     rpm: 60
     tpm: -1

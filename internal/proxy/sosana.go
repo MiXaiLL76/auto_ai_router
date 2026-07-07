@@ -49,7 +49,7 @@ func (p *Proxy) handleSosanaRequest(
 	logCtx.TargetURL = cred.BaseURL
 
 	if !isImageGeneration && !isImageEdit {
-		message := "sosana provider supports only image generation"
+		message := unsupportedProviderEndpointMessage
 		logCtx.Status = "failure"
 		logCtx.HTTPStatus = http.StatusBadRequest
 		logCtx.ErrorMsg = message
@@ -57,14 +57,7 @@ func (p *Proxy) handleSosanaRequest(
 		return
 	}
 
-	createBody, err := p.buildSosanaCreateBody(body, r.Header.Get("Content-Type"), realModelID, isImageEdit)
-	if err != nil {
-		logCtx.Status = "failure"
-		logCtx.HTTPStatus = http.StatusBadRequest
-		logCtx.ErrorMsg = err.Error()
-		WriteErrorBadRequest(w, err.Error())
-		return
-	}
+	baseRealModelID := realModelID
 
 	ctx := r.Context()
 	var cancel context.CancelFunc
@@ -94,6 +87,22 @@ func (p *Proxy) handleSosanaRequest(
 				"retry_reason", result.retryReason)
 			time.Sleep(time.Duration(rand.Intn(50)) * time.Millisecond)
 		}
+
+		attemptRealModelID := p.sosanaRealModelIDForCredential(modelID, baseRealModelID, cred)
+		createBody, concreteModelID, err := p.buildSosanaCreateBody(body, r.Header.Get("Content-Type"), attemptRealModelID, isImageEdit)
+		if err != nil {
+			p.logger.DebugContext(r.Context(), "Failed to prepare provider image request",
+				"credential", cred.Name,
+				"model", modelID,
+				"real_model", attemptRealModelID,
+				"error", err)
+			logCtx.Status = "failure"
+			logCtx.HTTPStatus = http.StatusBadRequest
+			logCtx.ErrorMsg = unsupportedImageProviderRequestMessage
+			WriteErrorBadRequest(w, unsupportedImageProviderRequestMessage)
+			return
+		}
+		logCtx.RealModelID = concreteModelID
 
 		result = p.createAndPollSosanaTask(ctx, cred, modelID, createBody, logCtx)
 		p.balancer.RecordResponse(cred.Name, modelID, result.statusCode)
@@ -138,7 +147,19 @@ func (p *Proxy) handleSosanaRequest(
 	}
 }
 
-func (p *Proxy) buildSosanaCreateBody(body []byte, contentType, realModelID string, isImageEdit bool) ([]byte, error) {
+func (p *Proxy) sosanaRealModelIDForCredential(modelID, fallbackRealModelID string, cred *config.CredentialConfig) string {
+	if p.modelManager != nil && cred != nil {
+		if realModelID, ok := p.modelManager.GetRealModelNameForCredential(modelID, cred.Name); ok {
+			return realModelID
+		}
+	}
+	if strings.TrimSpace(fallbackRealModelID) != "" {
+		return fallbackRealModelID
+	}
+	return modelID
+}
+
+func (p *Proxy) buildSosanaCreateBody(body []byte, contentType, realModelID string, isImageEdit bool) ([]byte, string, error) {
 	if isImageEdit {
 		return sosana.ImageEditRequest(body, contentType, realModelID)
 	}
@@ -368,10 +389,70 @@ func (p *Proxy) downloadSosanaResultImage(
 
 func (p *Proxy) doSosanaResultImageRequest(req *http.Request) (*http.Response, error) {
 	client := *p.client
+	client.Transport = sosanaResultImageTransport()
 	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
 		return http.ErrUseLastResponse
 	}
 	return client.Do(req)
+}
+
+func sosanaResultImageTransport() http.RoundTripper {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = nil
+	transport.DisableKeepAlives = true
+	transport.DialContext = dialSosanaResultAddress
+	return transport
+}
+
+func dialSosanaResultAddress(ctx context.Context, network, address string) (net.Conn, error) {
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return nil, err
+	}
+
+	dialer := &net.Dialer{}
+	if allowPrivateSosanaResultHostForTests(host) {
+		return dialer.DialContext(ctx, network, address)
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		if isUnsafeSosanaResultIP(ip) {
+			return nil, errors.New("sosana result_file_url resolves to a private address")
+		}
+		return dialer.DialContext(ctx, network, address)
+	}
+
+	addrs, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil {
+		return nil, err
+	}
+	if len(addrs) == 0 {
+		return nil, errors.New("sosana result_file_url host has no addresses")
+	}
+	for _, addr := range addrs {
+		if isUnsafeSosanaResultIP(addr.IP) {
+			return nil, errors.New("sosana result_file_url resolves to a private address")
+		}
+	}
+
+	var dialErr error
+	for _, addr := range addrs {
+		conn, err := dialer.DialContext(ctx, network, net.JoinHostPort(addr.IP.String(), port))
+		if err == nil {
+			return conn, nil
+		}
+		dialErr = err
+	}
+	if dialErr != nil {
+		return nil, dialErr
+	}
+	return nil, errors.New("sosana result_file_url host has no dialable addresses")
+}
+
+func allowPrivateSosanaResultHostForTests(host string) bool {
+	if allowPrivateSosanaResultURLForTests == nil {
+		return false
+	}
+	return allowPrivateSosanaResultURLForTests(&url.URL{Scheme: "http", Host: host})
 }
 
 func parseSosanaResultURL(raw string) (*url.URL, error) {

@@ -510,6 +510,10 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if !p.applySosanaCompatibilityRouting(w, r, prepared, modelID, &cred, &body, &proxyBody, &realModelID, isImageGeneration, isImageEdit, logCtx, start) {
+		return
+	}
+
 	if cred.Type == config.ProviderTypeSosana {
 		p.handleSosanaRequest(w, r, body, cred, modelID, realModelID, isImageGeneration, isImageEdit, logCtx, start)
 		return

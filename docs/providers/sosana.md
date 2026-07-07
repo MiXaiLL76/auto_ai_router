@@ -20,11 +20,19 @@ credentials:
     tpm: -1
 
 models:
-  - name: "nano-banana"
+  - name: "google/gemini-3.1-flash-image-preview"
+    model: "banana-2-{image_size}-compliant"
     credential: sosana_images
     rpm: 60
     tpm: -1
 ```
+
+The dynamic model template maps `image_size` to Sosana's concrete image models:
+`banana-2-1k-compliant`, `banana-2-2k-compliant`, and
+`banana-2-4k-compliant`. If `image_size` is omitted, the router uses `1K`.
+This integration maps Sosana only for `google/gemini-3.1-flash-image-preview`;
+other image families should be served by their native providers or fallback
+proxies.
 
 Sosana Banana tasks are asynchronous and can take longer than short chat
 completion requests. For production Sosana credentials, set the router
@@ -33,12 +41,17 @@ completion requests. For production Sosana credentials, set the router
 ## Behavior
 
 - `n` must be `1`.
-- Requests selected to a Sosana credential return a local 400 when they require
-  controls that Sosana does not support.
+- Requests selected to a Sosana credential are skipped when they require
+  controls that Sosana does not support. The router then tries another primary
+  credential for the same model and then the configured fallback proxy cascade.
+  If no compatible provider is available, the router returns a local 400.
 - Default response format and `response_format: "b64_json"` return
   `data[].b64_json`.
-- `response_format: "url"` returns a local 400 because URL responses require
-  VSELLM-owned rehosting before they can hide Sosana storage.
+- `response_format: "url"` is not routed to Sosana because URL responses require
+  VSELLM-owned rehosting before they can hide Sosana storage. Another provider
+  may handle it through normal fallback routing.
+- `image_size` may be omitted or set to `1K`, `2K`, or `4K`; `0.5K` is not
+  routed to Sosana.
 - `/v1/images/edits` accepts PNG input images only, up to 14 files, and sends
   them as `data:image/png;base64,...` values in Sosana `image_urls`.
 - Mask images are not supported.
@@ -53,6 +66,15 @@ redirects, does not forward the Sosana `Authorization` header, keeps the downloa
 bounded to 32 MiB, verifies the body is PNG, and base64-encodes it into the
 OpenAI-compatible JSON response. The upstream object URL is not returned to
 clients.
+
+## Billing
+
+Sosana vendor prices are not used at request time and are not returned to
+clients. Successful image requests log `ImageCount=1`; spend is calculated from
+the internal price registry or LiteLLM model table using `output_cost_per_image`.
+When `image_size` selects a concrete tier, the spend lookup uses the concrete
+model first, for example `banana-2-2k-compliant`, and then falls back to the
+public model name if no concrete price is configured.
 
 ## Error Masking
 

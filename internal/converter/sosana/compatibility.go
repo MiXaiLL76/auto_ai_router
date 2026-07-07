@@ -30,7 +30,6 @@ var unsupportedImageFields = []string{
 	"stream",
 	"messages",
 	"extra_body",
-	"image_size",
 	"image",
 	"images",
 	"image_urls",
@@ -46,8 +45,15 @@ func UnsupportedRequest(path string, body []byte, contentType string) string {
 	case strings.Contains(path, "/images/edits"):
 		return unsupportedEditRequest(body, contentType)
 	default:
-		return "sosana provider supports only image generation"
+		return "endpoint is unsupported"
 	}
+}
+
+func UnsupportedModel(modelID string) string {
+	if supportedSosanaModel(modelID) {
+		return ""
+	}
+	return "model is unsupported"
 }
 
 func unsupportedGenerationRequest(body []byte) string {
@@ -116,6 +122,12 @@ func unsupportedImageFieldsInJSON(raw map[string]json.RawMessage) string {
 	if reason := unsupportedJSONOutputFormat(raw["output_format"]); reason != "" {
 		return reason
 	}
+	if reason := unsupportedJSONImageSize(raw["image_size"]); reason != "" {
+		return reason
+	}
+	if reason := unsupportedJSONExactSize(raw["size"]); reason != "" {
+		return reason
+	}
 	for _, field := range []string{"quality", "style", "background", "moderation"} {
 		if hasJSONValue(raw[field]) {
 			return field + " is unsupported"
@@ -142,6 +154,12 @@ func unsupportedImageFieldsInForm(fields map[string]string) string {
 	if err := validateOutputFormat(fields["output_format"]); err != nil {
 		return err.Error()
 	}
+	if reason := unsupportedFormImageSize(fields["image_size"]); reason != "" {
+		return reason
+	}
+	if reason := unsupportedFormExactSize(fields["size"]); reason != "" {
+		return reason
+	}
 	for _, field := range []string{"quality", "style", "background", "moderation"} {
 		if strings.TrimSpace(fields[field]) != "" {
 			return field + " is unsupported"
@@ -167,14 +185,14 @@ func unsupportedJSONImageCount(raw json.RawMessage) string {
 		if n == 1 {
 			return ""
 		}
-		return "sosana supports n=1 only"
+		return "image requests support n=1 only"
 	}
 	var f float64
 	if err := json.Unmarshal(raw, &f); err == nil {
 		if f == 1 {
 			return ""
 		}
-		return "sosana supports n=1 only"
+		return "image requests support n=1 only"
 	}
 	return "invalid image count"
 }
@@ -208,6 +226,70 @@ func unsupportedJSONOutputFormat(raw json.RawMessage) string {
 		return ""
 	}
 	return "output_format is unsupported"
+}
+
+func unsupportedJSONImageSize(raw json.RawMessage) string {
+	if !hasJSONValue(raw) {
+		return ""
+	}
+	var value string
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return "image_size is unsupported"
+	}
+	if _, ok := normalizeImageSize(value); ok {
+		return ""
+	}
+	return "image_size is unsupported"
+}
+
+func unsupportedJSONExactSize(raw json.RawMessage) string {
+	if !hasJSONValue(raw) {
+		return ""
+	}
+	var value string
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return "size is unsupported"
+	}
+	if _, ok := imageSizeFromExactSize(value); ok {
+		return ""
+	}
+	return "size is unsupported"
+}
+
+func unsupportedFormImageSize(raw string) string {
+	if strings.TrimSpace(raw) == "" {
+		return ""
+	}
+	if _, ok := normalizeImageSize(raw); ok {
+		return ""
+	}
+	return "image_size is unsupported"
+}
+
+func unsupportedFormExactSize(raw string) string {
+	if strings.TrimSpace(raw) == "" {
+		return ""
+	}
+	if _, ok := imageSizeFromExactSize(raw); ok {
+		return ""
+	}
+	return "size is unsupported"
+}
+
+func supportedSosanaModel(modelID string) bool {
+	model := strings.ToLower(strings.TrimSpace(modelID))
+	if model == "" || model == "google/gemini-3.1-flash-image-preview" {
+		return true
+	}
+	if model == "banana-2-{image_size}-compliant" {
+		return true
+	}
+	switch model {
+	case "banana-2-1k-compliant", "banana-2-2k-compliant", "banana-2-4k-compliant":
+		return true
+	default:
+		return false
+	}
 }
 
 func validateOutputFormat(raw string) error {

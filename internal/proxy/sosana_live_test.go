@@ -29,7 +29,7 @@ func TestProxyRequest_SosanaLiveAcceptance(t *testing.T) {
 	}
 	model := os.Getenv("SOSANA_MODEL")
 	if model == "" {
-		model = "nano-banana"
+		model = "banana-2-1k-compliant"
 	}
 	prompt := os.Getenv("SOSANA_PROMPT")
 	if prompt == "" {
