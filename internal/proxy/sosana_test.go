@@ -418,7 +418,7 @@ func TestProxyRequest_IncompatibleImageEditJPEGWithSosanaReturnsLocalError(t *te
 	assert.False(t, called)
 }
 
-func TestProxyRequest_IncompatibleSosanaImageRequestRoutesToNextPrimary(t *testing.T) {
+func TestProxyRequest_SosanaHalfKPixelSizeRoutesToNextPrimary(t *testing.T) {
 	sosanaCalled := false
 	sosanaUpstream := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		sosanaCalled = true
@@ -434,7 +434,7 @@ func TestProxyRequest_IncompatibleSosanaImageRequestRoutesToNextPrimary(t *testi
 		var req map[string]any
 		require.NoError(t, json.NewDecoder(r.Body).Decode(&req))
 		assert.Equal(t, "banana-2-1k-compliant", req["model"])
-		assert.Contains(t, req, "tools")
+		assert.Equal(t, "512x512", req["size"])
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"created":1782478551,"data":[{"b64_json":"fallback-primary-image"}]}`))
 	}))
@@ -446,7 +446,7 @@ func TestProxyRequest_IncompatibleSosanaImageRequestRoutesToNextPrimary(t *testi
 			config.CredentialConfig{Name: "next-primary", Type: config.ProviderTypeProxy, BaseURL: nextPrimary.URL, APIKey: "next-key", RPM: 100, TPM: 10000},
 		).
 		Build()
-	req := httptest.NewRequest("POST", "/v1/images/generations", strings.NewReader(`{"model":"banana-2-1k-compliant","prompt":"draw","tools":[{"type":"google_search"}]}`))
+	req := httptest.NewRequest("POST", "/v1/images/generations", strings.NewReader(`{"model":"banana-2-1k-compliant","prompt":"draw","size":"512x512"}`))
 	req.Header.Set("Authorization", "Bearer master-key")
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()

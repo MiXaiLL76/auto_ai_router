@@ -239,32 +239,10 @@ func PollURL(baseURL, uid string) string {
 }
 
 func SizeToAspectRatio(size string) string {
-	switch strings.TrimSpace(size) {
-	case "", "auto":
-		return "auto"
-	case "256x256", "512x512", "1024x1024", "2048x2048", "4096x4096":
-		return "1:1"
-	case "1024x1536", "2048x3072":
-		return "2:3"
-	case "1536x1024", "3072x2048":
-		return "3:2"
-	case "1024x1792", "1080x1920", "2048x3584", "4096x7168":
-		return "9:16"
-	case "1792x1024", "1920x1080", "3584x2048", "7168x4096":
-		return "16:9"
-	case "1024x768", "2048x1536", "4096x3072":
-		return "4:3"
-	case "768x1024", "1536x2048", "3072x4096":
-		return "3:4"
-	case "1024x819", "2048x1638", "4096x3276":
-		return "5:4"
-	case "819x1024", "1638x2048", "3276x4096":
-		return "4:5"
-	case "2016x864", "4032x1728":
-		return "21:9"
-	default:
-		return "auto"
+	if spec, ok := imageSpecFromExactSize(size); ok {
+		return spec.aspectRatio
 	}
+	return "auto"
 }
 
 func aspectRatio(explicit, ratio, size string) string {
@@ -304,19 +282,110 @@ func normalizeImageSize(raw string) (string, bool) {
 }
 
 func imageSizeFromExactSize(size string) (string, bool) {
+	if spec, ok := imageSpecFromExactSize(size); ok {
+		return spec.imageSize, true
+	}
+	return "", false
+}
+
+type exactImageSpec struct {
+	imageSize   string
+	aspectRatio string
+}
+
+func imageSpecFromExactSize(size string) (exactImageSpec, bool) {
 	switch strings.TrimSpace(size) {
-	case "", "auto",
-		"256x256", "512x512", "1024x1024", "1024x1536", "1536x1024",
-		"1024x1792", "1792x1024", "1080x1920", "1920x1080",
-		"1024x768", "768x1024", "1024x819", "819x1024", "2016x864":
-		return "1K", true
-	case "2048x2048", "2048x3072", "3072x2048", "2048x3584", "3584x2048",
-		"2048x1536", "1536x2048", "2048x1638", "1638x2048", "4032x1728":
-		return "2K", true
-	case "4096x4096", "4096x7168", "7168x4096", "4096x3072", "3072x4096", "4096x3276", "3276x4096":
-		return "4K", true
+	case "", "auto":
+		return exactImageSpec{imageSize: "1K", aspectRatio: "auto"}, true
+
+	case "1024x1024":
+		return exactImageSpec{imageSize: "1K", aspectRatio: "1:1"}, true
+	case "512x2048":
+		return exactImageSpec{imageSize: "1K", aspectRatio: "1:4"}, true
+	case "384x3072":
+		return exactImageSpec{imageSize: "1K", aspectRatio: "1:8"}, true
+	case "848x1264":
+		return exactImageSpec{imageSize: "1K", aspectRatio: "2:3"}, true
+	case "1264x848":
+		return exactImageSpec{imageSize: "1K", aspectRatio: "3:2"}, true
+	case "896x1200":
+		return exactImageSpec{imageSize: "1K", aspectRatio: "3:4"}, true
+	case "2048x512":
+		return exactImageSpec{imageSize: "1K", aspectRatio: "4:1"}, true
+	case "1200x896":
+		return exactImageSpec{imageSize: "1K", aspectRatio: "4:3"}, true
+	case "928x1152":
+		return exactImageSpec{imageSize: "1K", aspectRatio: "4:5"}, true
+	case "1152x928":
+		return exactImageSpec{imageSize: "1K", aspectRatio: "5:4"}, true
+	case "3072x384":
+		return exactImageSpec{imageSize: "1K", aspectRatio: "8:1"}, true
+	case "768x1376":
+		return exactImageSpec{imageSize: "1K", aspectRatio: "9:16"}, true
+	case "1376x768":
+		return exactImageSpec{imageSize: "1K", aspectRatio: "16:9"}, true
+	case "1584x672":
+		return exactImageSpec{imageSize: "1K", aspectRatio: "21:9"}, true
+
+	case "2048x2048":
+		return exactImageSpec{imageSize: "2K", aspectRatio: "1:1"}, true
+	case "1024x4096":
+		return exactImageSpec{imageSize: "2K", aspectRatio: "1:4"}, true
+	case "768x6144":
+		return exactImageSpec{imageSize: "2K", aspectRatio: "1:8"}, true
+	case "1696x2528":
+		return exactImageSpec{imageSize: "2K", aspectRatio: "2:3"}, true
+	case "2528x1696":
+		return exactImageSpec{imageSize: "2K", aspectRatio: "3:2"}, true
+	case "1792x2400":
+		return exactImageSpec{imageSize: "2K", aspectRatio: "3:4"}, true
+	case "4096x1024":
+		return exactImageSpec{imageSize: "2K", aspectRatio: "4:1"}, true
+	case "2400x1792":
+		return exactImageSpec{imageSize: "2K", aspectRatio: "4:3"}, true
+	case "1856x2304":
+		return exactImageSpec{imageSize: "2K", aspectRatio: "4:5"}, true
+	case "2304x1856":
+		return exactImageSpec{imageSize: "2K", aspectRatio: "5:4"}, true
+	case "6144x768":
+		return exactImageSpec{imageSize: "2K", aspectRatio: "8:1"}, true
+	case "1536x2752":
+		return exactImageSpec{imageSize: "2K", aspectRatio: "9:16"}, true
+	case "2752x1536":
+		return exactImageSpec{imageSize: "2K", aspectRatio: "16:9"}, true
+	case "3168x1344":
+		return exactImageSpec{imageSize: "2K", aspectRatio: "21:9"}, true
+
+	case "4096x4096":
+		return exactImageSpec{imageSize: "4K", aspectRatio: "1:1"}, true
+	case "2048x8192":
+		return exactImageSpec{imageSize: "4K", aspectRatio: "1:4"}, true
+	case "1536x12288":
+		return exactImageSpec{imageSize: "4K", aspectRatio: "1:8"}, true
+	case "3392x5056":
+		return exactImageSpec{imageSize: "4K", aspectRatio: "2:3"}, true
+	case "5056x3392":
+		return exactImageSpec{imageSize: "4K", aspectRatio: "3:2"}, true
+	case "3584x4800":
+		return exactImageSpec{imageSize: "4K", aspectRatio: "3:4"}, true
+	case "8192x2048":
+		return exactImageSpec{imageSize: "4K", aspectRatio: "4:1"}, true
+	case "4800x3584":
+		return exactImageSpec{imageSize: "4K", aspectRatio: "4:3"}, true
+	case "3712x4608":
+		return exactImageSpec{imageSize: "4K", aspectRatio: "4:5"}, true
+	case "4608x3712":
+		return exactImageSpec{imageSize: "4K", aspectRatio: "5:4"}, true
+	case "12288x1536":
+		return exactImageSpec{imageSize: "4K", aspectRatio: "8:1"}, true
+	case "3072x5504":
+		return exactImageSpec{imageSize: "4K", aspectRatio: "9:16"}, true
+	case "5504x3072":
+		return exactImageSpec{imageSize: "4K", aspectRatio: "16:9"}, true
+	case "6336x2688":
+		return exactImageSpec{imageSize: "4K", aspectRatio: "21:9"}, true
 	default:
-		return "", false
+		return exactImageSpec{}, false
 	}
 }
 

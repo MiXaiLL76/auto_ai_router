@@ -51,7 +51,9 @@ completion requests. For production Sosana credentials, set the router
   VSELLM-owned rehosting before they can hide Sosana storage. Another provider
   may handle it through normal fallback routing.
 - `image_size` may be omitted or set to `1K`, `2K`, or `4K`; `0.5K` is not
-  routed to Sosana.
+  routed to Sosana. Pixel `size` values are accepted only when they match the
+  documented Gemini `image_size` + `aspect_ratio` table for `1K`, `2K`, or
+  `4K`.
 - `/v1/images/edits` accepts PNG input images only, up to 14 files, and sends
   them as `data:image/png;base64,...` values in Sosana `image_urls`.
 - Mask images are not supported.

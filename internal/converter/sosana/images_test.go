@@ -23,11 +23,14 @@ func TestImageGenerationRequest(t *testing.T) {
 		wantSize    string
 		wantErrPart string
 	}{
-		{name: "square", size: "1024x1024", wantAspect: "1:1", wantSize: "1K"},
-		{name: "wide", size: "1792x1024", wantAspect: "16:9", wantSize: "1K"},
-		{name: "portrait", size: "1024x1792", wantAspect: "9:16", wantSize: "1K"},
-		{name: "two k", size: "2048x2048", wantAspect: "1:1", wantSize: "2K"},
-		{name: "four k", size: "4096x4096", wantAspect: "1:1", wantSize: "4K"},
+		{name: "one k square", size: "1024x1024", wantAspect: "1:1", wantSize: "1K"},
+		{name: "one k wide", size: "1376x768", wantAspect: "16:9", wantSize: "1K"},
+		{name: "one k portrait", size: "768x1376", wantAspect: "9:16", wantSize: "1K"},
+		{name: "one k tall", size: "512x2048", wantAspect: "1:4", wantSize: "1K"},
+		{name: "two k square", size: "2048x2048", wantAspect: "1:1", wantSize: "2K"},
+		{name: "two k wide", size: "2752x1536", wantAspect: "16:9", wantSize: "2K"},
+		{name: "four k square", size: "4096x4096", wantAspect: "1:1", wantSize: "4K"},
+		{name: "four k ultra wide", size: "6336x2688", wantAspect: "21:9", wantSize: "4K"},
 	}
 
 	for _, tt := range tests {
@@ -107,6 +110,8 @@ func TestImageGenerationRequestRejectsUnsupportedControls(t *testing.T) {
 		{name: "quality auto", body: `{"model":"banana-2-1k-compliant","prompt":"draw","quality":"auto"}`, want: "quality"},
 		{name: "messages", body: `{"model":"banana-2-1k-compliant","prompt":"draw","messages":[{"role":"user","content":"draw"}]}`, want: "messages"},
 		{name: "image size 0.5k", body: `{"model":"banana-2-1k-compliant","prompt":"draw","image_size":"0.5K"}`, want: "image_size"},
+		{name: "exact size 0.5k", body: `{"model":"banana-2-1k-compliant","prompt":"draw","size":"512x512"}`, want: "size"},
+		{name: "legacy openai size", body: `{"model":"banana-2-1k-compliant","prompt":"draw","size":"1792x1024"}`, want: "size"},
 		{name: "unknown size", body: `{"model":"banana-2-1k-compliant","prompt":"draw","size":"333x777"}`, want: "size"},
 		{name: "reference images", body: `{"model":"banana-2-1k-compliant","prompt":"draw","image_urls":["https://example.com/a.png"]}`, want: "image_urls"},
 	}
