@@ -391,7 +391,7 @@ func convertPricingToModelPrice(p *queries.CustomPricingLiteLLMParams) *manager.
 		return nil
 	}
 	if p.InputCostPerToken == nil && p.OutputCostPerToken == nil &&
-		p.OutputCostPerImage == nil && p.OutputCostPerImageToken == nil {
+		p.InputCostPerImage == nil && p.OutputCostPerImage == nil && p.OutputCostPerImageToken == nil {
 		return nil
 	}
 
@@ -434,6 +434,9 @@ func convertPricingToModelPrice(p *queries.CustomPricingLiteLLMParams) *manager.
 	}
 	if p.CacheCreationInputTokenCostAbove272kTokens != nil {
 		price.CacheCreationInputTokenCostAbove272k = *p.CacheCreationInputTokenCostAbove272kTokens
+	}
+	if p.InputCostPerImage != nil {
+		price.InputCostPerImage = *p.InputCostPerImage
 	}
 	if p.OutputCostPerImage != nil {
 		price.OutputCostPerImage = *p.OutputCostPerImage

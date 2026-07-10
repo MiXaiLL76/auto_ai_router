@@ -70,7 +70,12 @@ func (p *Proxy) handleSosanaRequest(
 	triedCreds := GetTried(r.Context())
 	for attempt := 0; attempt <= p.maxProviderRetries; attempt++ {
 		if attempt > 0 {
-			nextCred, err := p.balancer.NextSameTypeForModelExcluding(modelID, config.ProviderTypeSosana, triedCreds)
+			nextCred, err := p.balancer.NextSameTypeForModelExcludingScoped(
+				modelID,
+				config.ProviderTypeSosana,
+				triedCreds,
+				logCtx.Scope,
+			)
 			if err != nil {
 				p.logger.DebugContext(r.Context(), "No more Sosana credentials for retry",
 					"model", modelID, "attempt", attempt, "error", err)

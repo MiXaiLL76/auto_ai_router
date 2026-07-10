@@ -6,6 +6,7 @@ import (
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/converter/sosana"
+	"github.com/mixaill76/auto_ai_router/internal/scope"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -39,7 +40,7 @@ func (p *Proxy) applySosanaCompatibilityRouting(
 		return true
 	}
 
-	nextCred, nextReq, routed := p.nextPrimaryAfterUnsupportedSosana(r, prepared, modelID, *cred, reason)
+	nextCred, nextReq, routed := p.nextPrimaryAfterUnsupportedSosana(r, prepared, modelID, *cred, logCtx.Scope, reason)
 	if routed {
 		*cred = nextCred
 		*body = nextReq.body
@@ -97,13 +98,14 @@ func (p *Proxy) nextPrimaryAfterUnsupportedSosana(
 	prepared *orchestratedRequest,
 	modelID string,
 	currentCred *config.CredentialConfig,
+	visibility scope.Context,
 	reason string,
 ) (*config.CredentialConfig, credentialPreparedRequest, bool) {
 	triedCreds := GetTried(r.Context())
 	triedCreds[currentCred.Name] = true
 
 	for attempts := 0; attempts < 128; attempts++ {
-		candidate, err := p.balancer.NextForModelExcluding(modelID, triedCreds)
+		candidate, err := p.balancer.NextForModelExcludingScoped(modelID, triedCreds, visibility)
 		if err != nil {
 			p.logger.DebugContext(r.Context(), "No compatible primary credential available for unsupported image request",
 				"model", modelID,

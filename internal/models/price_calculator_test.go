@@ -5,6 +5,7 @@ import (
 
 	"github.com/mixaill76/auto_ai_router/internal/converter"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestCalculateTokenCosts_RegularTokensOnly(t *testing.T) {
@@ -247,6 +248,31 @@ func TestCalculateTokenCosts_ImageCount(t *testing.T) {
 	assert.NotNil(t, costs)
 	assert.InDelta(t, 0.10, costs.ImageCost, 1e-9)
 	assert.InDelta(t, 0.10, costs.TotalCost, 1e-9)
+}
+
+func TestCalculateTokenCosts_ImageCountUsesInputImageFallback(t *testing.T) {
+	usage := &converter.TokenUsage{ImageCount: 1}
+	price := &ModelPrice{InputCostPerImage: 0.088113}
+
+	costs := CalculateTokenCosts(usage, price)
+
+	require.NotNil(t, costs)
+	assert.InDelta(t, 0.088113, costs.ImageCost, 1e-12)
+	assert.InDelta(t, 0.088113, costs.TotalCost, 1e-12)
+}
+
+func TestCalculateTokenCosts_OutputImagePriceTakesPriority(t *testing.T) {
+	usage := &converter.TokenUsage{ImageCount: 1}
+	price := &ModelPrice{
+		InputCostPerImage:  0.088113,
+		OutputCostPerImage: 0.09,
+	}
+
+	costs := CalculateTokenCosts(usage, price)
+
+	require.NotNil(t, costs)
+	assert.InDelta(t, 0.09, costs.ImageCost, 1e-12)
+	assert.InDelta(t, 0.09, costs.TotalCost, 1e-12)
 }
 
 func TestCalculateTokenCosts_ImageCountUsesImageTokenFallback(t *testing.T) {

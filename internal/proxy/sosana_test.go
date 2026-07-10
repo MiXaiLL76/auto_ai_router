@@ -148,7 +148,7 @@ func TestProxyRequest_SosanaImageGenerationLogsLiteLLMImageSpend(t *testing.T) {
 	spendManager := newCapturedSpendManager()
 	priceRegistry := aimodels.NewModelPriceRegistry()
 	priceRegistry.Update(map[string]*aimodels.ModelPrice{
-		"banana-2-1k-compliant": {OutputCostPerImage: 0.07},
+		"banana-2-1k-compliant": {InputCostPerImage: 0.088113},
 	})
 
 	prx := newSosanaTestProxy(upstream.URL, nil)
@@ -174,12 +174,16 @@ func TestProxyRequest_SosanaImageGenerationLogsLiteLLMImageSpend(t *testing.T) {
 	assert.Equal(t, "sosana", entry.CustomLLMProvider)
 	assert.Equal(t, "success", entry.Status)
 	assert.Equal(t, 0, entry.TotalTokens)
-	assert.InDelta(t, 0.07, entry.Spend, 0.0000001)
+	assert.InDelta(t, 0.088113, entry.Spend, 1e-12)
 	var metadata map[string]any
 	require.NoError(t, json.Unmarshal([]byte(entry.Metadata), &metadata))
+	usageObject, ok := metadata["usage_object"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, float64(1), usageObject["image_count"])
 	costBreakdown, ok := metadata["cost_breakdown"].(map[string]any)
 	require.True(t, ok)
-	assert.InDelta(t, 0.07, costBreakdown["total_cost"].(float64), 0.0000001)
+	assert.InDelta(t, 0.088113, costBreakdown["image_cost"].(float64), 1e-12)
+	assert.InDelta(t, 0.088113, costBreakdown["total_cost"].(float64), 1e-12)
 }
 
 func TestProxyRequest_SosanaImageGenerationUsesConcreteTierPrice(t *testing.T) {
@@ -459,6 +463,48 @@ func TestProxyRequest_SosanaHalfKPixelSizeRoutesToNextPrimary(t *testing.T) {
 	assert.Contains(t, w.Body.String(), "fallback-primary-image")
 }
 
+func TestProxyRequest_IncompatibleSosanaRequestDoesNotCrossCredentialScope(t *testing.T) {
+	sosanaCalled := false
+	sosanaUpstream := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sosanaCalled = true
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer sosanaUpstream.Close()
+
+	hiddenPrimaryCalled := false
+	hiddenPrimary := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hiddenPrimaryCalled = true
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"created":1782478551,"data":[{"b64_json":"hidden-image"}]}`))
+	}))
+	defer hiddenPrimary.Close()
+
+	prx := NewTestProxyBuilder().
+		WithCredentials(
+			config.CredentialConfig{Name: "sosana", Type: config.ProviderTypeSosana, BaseURL: sosanaUpstream.URL, APIKey: "sosana-key", RPM: 100, TPM: 10000, Scopes: []string{"team-a"}},
+			config.CredentialConfig{Name: "hidden-primary", Type: config.ProviderTypeProxy, BaseURL: hiddenPrimary.URL, APIKey: "hidden-key", RPM: 100, TPM: 10000, Scopes: []string{"team-b"}},
+		).
+		Build()
+	prx.LiteLLMDB = scopeTestDB{
+		NoopManager: litellmdb.NewNoopManager(),
+		info: &litellmmodels.TokenInfo{Metadata: map[string]interface{}{
+			"air_scopes": []interface{}{"team-a"},
+		}},
+	}
+
+	req := httptest.NewRequest("POST", "/v1/images/generations", strings.NewReader(`{"model":"banana-2-1k-compliant","prompt":"draw","tools":[{"type":"google_search"}]}`))
+	req.Header.Set("Authorization", "Bearer team-a-key")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	prx.ProxyRequest(w, req)
+
+	require.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Contains(t, w.Body.String(), unsupportedImageProviderRequestMessage)
+	assert.False(t, sosanaCalled)
+	assert.False(t, hiddenPrimaryCalled)
+}
+
 func TestProxyRequest_IncompatibleSosanaImageRequestRoutesToFallbackProxy(t *testing.T) {
 	sosanaCalled := false
 	sosanaUpstream := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -573,6 +619,50 @@ func TestProxyRequest_SosanaRetriesCreateWithNextCredential(t *testing.T) {
 	assert.Equal(t, []string{"banana-2-1k-compliant", "banana-2-2k-compliant"}, createModels)
 	assert.Contains(t, w.Body.String(), base64.StdEncoding.EncodeToString(sosanaResultPNG))
 	assert.NotContains(t, w.Body.String(), imageServer.URL)
+}
+
+func TestProxyRequest_SosanaRetryDoesNotCrossCredentialScope(t *testing.T) {
+	hiddenCredentialCalled := false
+	upstream := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "/api/banana/create-async", r.URL.Path)
+		switch r.Header.Get("Authorization") {
+		case "Bearer sosana-key-a":
+			w.WriteHeader(http.StatusTooManyRequests)
+			_, _ = w.Write([]byte(`{"detail":"rate limited"}`))
+		case "Bearer sosana-key-b":
+			hiddenCredentialCalled = true
+			_, _ = w.Write([]byte(`{"uid":"hidden-task","status":"FAILED","error":"must not be called"}`))
+		default:
+			t.Fatalf("unexpected authorization header: %q", r.Header.Get("Authorization"))
+		}
+	}))
+	defer upstream.Close()
+
+	prx := NewTestProxyBuilder().
+		WithCredentials(
+			config.CredentialConfig{Name: "sosana-a", Type: config.ProviderTypeSosana, BaseURL: upstream.URL, APIKey: "sosana-key-a", RPM: 100, TPM: 10000, Scopes: []string{"team-a"}},
+			config.CredentialConfig{Name: "sosana-b", Type: config.ProviderTypeSosana, BaseURL: upstream.URL, APIKey: "sosana-key-b", RPM: 100, TPM: 10000, Scopes: []string{"team-b"}},
+		).
+		WithMaxProviderRetries(1).
+		Build()
+	prx.LiteLLMDB = scopeTestDB{
+		NoopManager: litellmdb.NewNoopManager(),
+		info: &litellmmodels.TokenInfo{Metadata: map[string]interface{}{
+			"air_scopes": []interface{}{"team-a"},
+		}},
+	}
+
+	req := httptest.NewRequest("POST", "/v1/images/generations", strings.NewReader(`{"model":"banana-2-1k-compliant","prompt":"draw","n":1}`))
+	req.Header.Set("Authorization", "Bearer team-a-key")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	prx.ProxyRequest(w, req)
+
+	require.Equal(t, http.StatusTooManyRequests, w.Code)
+	assert.False(t, hiddenCredentialCalled)
+	assert.Contains(t, w.Body.String(), "Upstream provider error")
+	assert.NotContains(t, w.Body.String(), "rate limited")
 }
 
 func TestProxyRequest_SosanaDoesNotRetryCreateTransportError(t *testing.T) {

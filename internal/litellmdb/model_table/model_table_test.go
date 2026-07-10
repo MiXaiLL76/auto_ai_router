@@ -124,6 +124,7 @@ func TestConvertPricingToModelPrice(t *testing.T) {
 	outputReasoning := 0.03
 	cacheRead := 0.04
 	cacheCreation := 0.05
+	inputImage := 0.4
 	outputImage := 0.5
 	outputImageToken := 0.6
 	inputAbove200k := 0.07
@@ -134,6 +135,7 @@ func TestConvertPricingToModelPrice(t *testing.T) {
 		OutputCostPerReasoningToken:       &outputReasoning,
 		CacheReadInputTokenCost:           &cacheRead,
 		CacheCreationInputTokenCost:       &cacheCreation,
+		InputCostPerImage:                 &inputImage,
 		OutputCostPerImage:                &outputImage,
 		OutputCostPerImageToken:           &outputImageToken,
 		InputCostPerTokenAbove200kTokens:  &inputAbove200k,
@@ -146,6 +148,7 @@ func TestConvertPricingToModelPrice(t *testing.T) {
 	assert.Equal(t, outputReasoning, price.OutputCostPerReasoningToken)
 	assert.Equal(t, cacheRead, price.InputCostPerCachedToken)
 	assert.Equal(t, cacheCreation, price.CacheCreationInputTokenCost)
+	assert.Equal(t, inputImage, price.InputCostPerImage)
 	assert.Equal(t, outputImage, price.OutputCostPerImage)
 	assert.Equal(t, outputImageToken, price.OutputCostPerImageToken)
 	assert.Equal(t, inputAbove200k, price.InputCostPerTokenAbove200k)
@@ -167,6 +170,19 @@ func TestConvertPricingToModelPrice_ImageOnly(t *testing.T) {
 	assert.Equal(t, 0.0, price.OutputCostPerToken)
 }
 
+func TestConvertPricingToModelPrice_InputImageOnly(t *testing.T) {
+	inputImage := 0.088113
+
+	price := convertPricingToModelPrice(&queries.CustomPricingLiteLLMParams{
+		InputCostPerImage: &inputImage,
+	})
+
+	require.NotNil(t, price)
+	assert.Equal(t, inputImage, price.InputCostPerImage)
+	assert.Equal(t, 0.0, price.InputCostPerToken)
+	assert.Equal(t, 0.0, price.OutputCostPerToken)
+}
+
 func TestConvertPricingToModelPrice_AllFields(t *testing.T) {
 	input := 0.01
 	output := 0.02
@@ -181,6 +197,7 @@ func TestConvertPricingToModelPrice_AllFields(t *testing.T) {
 	cacheCreation := 0.085
 	cacheReadAbove272k := 0.086
 	cacheCreationAbove272k := 0.087
+	inputImage := 0.088
 	outputImage := 0.09
 	outputImageToken := 0.10
 
@@ -198,6 +215,7 @@ func TestConvertPricingToModelPrice_AllFields(t *testing.T) {
 		CacheCreationInputTokenCost:                &cacheCreation,
 		CacheReadInputTokenCostAbove272kTokens:     &cacheReadAbove272k,
 		CacheCreationInputTokenCostAbove272kTokens: &cacheCreationAbove272k,
+		InputCostPerImage:                          &inputImage,
 		OutputCostPerImage:                         &outputImage,
 		OutputCostPerImageToken:                    &outputImageToken,
 	})
@@ -216,6 +234,7 @@ func TestConvertPricingToModelPrice_AllFields(t *testing.T) {
 	assert.Equal(t, cacheCreation, price.CacheCreationInputTokenCost)
 	assert.Equal(t, cacheReadAbove272k, price.CacheReadInputTokenCostAbove272k)
 	assert.Equal(t, cacheCreationAbove272k, price.CacheCreationInputTokenCostAbove272k)
+	assert.Equal(t, inputImage, price.InputCostPerImage)
 	assert.Equal(t, outputImage, price.OutputCostPerImage)
 	assert.Equal(t, outputImageToken, price.OutputCostPerImageToken)
 }

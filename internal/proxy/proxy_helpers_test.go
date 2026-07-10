@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/mixaill76/auto_ai_router/internal/converter"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb"
 )
 
@@ -234,6 +235,21 @@ func TestBuildMetadata(t *testing.T) {
 		assert.Equal(t, "rate limit exceeded", errInfo["error_message"])
 		assert.Equal(t, float64(429), errInfo["error_code"])
 		assert.Equal(t, "RateLimitError", errInfo["error_class"])
+	})
+
+	t.Run("with_image_usage_and_cost", func(t *testing.T) {
+		usage := &converter.TokenUsage{ImageCount: 1}
+		costs := &converter.TokenCosts{ImageCost: 0.088113, TotalCost: 0.088113}
+		result := buildMetadata("hashed-image", nil, "", http.StatusOK, usage, "", costs, "image-model", 0)
+
+		var metadata map[string]interface{}
+		require.NoError(t, json.Unmarshal([]byte(result), &metadata))
+		usageObject, ok := metadata["usage_object"].(map[string]interface{})
+		require.True(t, ok)
+		assert.Equal(t, float64(1), usageObject["image_count"])
+		costBreakdown, ok := metadata["cost_breakdown"].(map[string]interface{})
+		require.True(t, ok)
+		assert.InDelta(t, 0.088113, costBreakdown["image_cost"].(float64), 1e-12)
 	})
 }
 

@@ -172,6 +172,7 @@ func buildMetadata(hashedToken string, tokenInfo *litellmdb.TokenInfo, errorMsg 
 			"total_tokens":              usage.Total(),
 			"prompt_tokens":             usage.PromptTokens,
 			"completion_tokens":         usage.CompletionTokens,
+			"image_count":               usage.ImageCount,
 			"prompt_tokens_details":     promptTokensDetails,
 			"completion_tokens_details": completionTokensDetails,
 		}
@@ -197,6 +198,7 @@ func buildMetadata(hashedToken string, tokenInfo *litellmdb.TokenInfo, errorMsg 
 		costBreakdown = map[string]interface{}{
 			"input_cost":          costs.InputCost,
 			"output_cost":         costs.OutputCost,
+			"image_cost":          costs.ImageCost,
 			"cached_input_cost":   costs.CachedInputCost,
 			"cache_creation_cost": costs.CacheCreationCost,
 			"total_cost":          costs.TotalCost,

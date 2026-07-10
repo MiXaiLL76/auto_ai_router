@@ -57,6 +57,7 @@ type ModelPrice struct {
 	OutputCostPerPredictionToken         float64 `json:"output_cost_per_prediction_token,omitempty"`
 
 	// Vision/Images cost per image (not per token)
+	InputCostPerImage  float64 `json:"input_cost_per_image,omitempty"`
 	OutputCostPerImage float64 `json:"output_cost_per_image,omitempty"`
 }
 

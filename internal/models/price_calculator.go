@@ -139,15 +139,13 @@ func CalculateTokenCosts(usage *converter.TokenUsage, price *ModelPrice) *conver
 	// Rejected prediction tokens count as regular output tokens
 	costs.PredictionCost += float64(usage.RejectedPredictionTokens) * outputCostPerToken
 
-	// Image cost calculation: supports both per-image and per-image-token pricing
-	// Priority: 1) Per-image cost if available (typical for image generation APIs)
-	//           2) Per-image-token cost as fallback (rarely used for image generation)
-	//           3) Default: $0 if neither is configured
+	// Image cost calculation: prefer the explicit output price, then LiteLLM's
+	// input_cost_per_image convention for image generation, then token fallback.
 	if usage.ImageCount > 0 && price.OutputCostPerImage > 0 {
-		// Per-image cost (e.g., $0.02 per image)
 		costs.ImageCost = float64(usage.ImageCount) * price.OutputCostPerImage
+	} else if usage.ImageCount > 0 && price.InputCostPerImage > 0 {
+		costs.ImageCost = float64(usage.ImageCount) * price.InputCostPerImage
 	} else if usage.ImageCount > 0 && price.OutputCostPerImageToken > 0 {
-		// Per-image-token cost fallback (rarely used for image generation)
 		costs.ImageCost = float64(usage.ImageCount) * price.OutputCostPerImageToken
 	}
 
