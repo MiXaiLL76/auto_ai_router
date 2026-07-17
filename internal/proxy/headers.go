@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"net/http"
+	"strings"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
 )
@@ -39,14 +40,14 @@ var privacyHeaders = map[string]bool{
 
 // isPrivacyHeader checks if a header reveals client IP or routing information.
 func isPrivacyHeader(key string) bool {
-	return privacyHeaders[key]
+	return privacyHeaders[http.CanonicalHeaderKey(key)]
 }
 
 // isHopByHopHeader checks if a header should not be proxied.
 // Returns true for hop-by-hop headers that must not be forwarded to upstream.
 // RFC 7230: https://tools.ietf.org/html/rfc7230#section-6.1
 func isHopByHopHeader(key string) bool {
-	return hopByHopHeaders[key]
+	return hopByHopHeaders[http.CanonicalHeaderKey(key)]
 }
 
 // GetHopByHopHeaders returns a copy of the hop-by-hop headers map for reference.
@@ -126,21 +127,72 @@ func copyHeadersSkipAuth(dst *http.Request, src *http.Request) {
 // Note: Content-Encoding is always skipped because Go's http.Client automatically
 // decompresses gzip/deflate responses, so the body is already decompressed.
 // The caller should compress the body if needed and set Content-Encoding appropriately.
-func copyResponseHeaders(w http.ResponseWriter, src http.Header, credType config.ProviderType) {
+func copyResponseHeaders(w http.ResponseWriter, src http.Header, cred *config.CredentialConfig) {
 	for key, values := range src {
-		if isHopByHopHeader(key) {
-			continue
-		}
-		// Skip Content-Length and Content-Encoding for all response types
-		// - Content-Length will be set based on actual body size
-		// - Content-Encoding: Go's http.Client already decompressed the body,
-		//   so we skip upstream's Content-Encoding header and let caller set it if recompressing
-		// Skip X-Credential-Name — internal header for proxy-to-proxy routing, not exposed to end clients
-		if key == "Content-Length" || key == "Content-Encoding" || key == "X-Credential-Name" {
+		if shouldSkipResponseHeaderForClient(key, cred) {
 			continue
 		}
 		for _, value := range values {
 			w.Header().Add(key, value)
+		}
+	}
+}
+
+func shouldSkipResponseHeaderForClient(key string, cred *config.CredentialConfig) bool {
+	canonical := http.CanonicalHeaderKey(key)
+	if isHopByHopHeader(canonical) {
+		return true
+	}
+	// Skip Content-Length and Content-Encoding for all response types:
+	// Content-Length is recalculated after conversion/compression, and Go's client
+	// has already decompressed gzip/deflate bodies when Content-Encoding is present.
+	switch canonical {
+	case "Content-Length", "Content-Encoding", "Transfer-Encoding", "X-Credential-Name":
+		return true
+	}
+	if shouldSanitizeUpstreamSurface(cred) && isProviderInternalResponseHeader(canonical) {
+		return true
+	}
+	return false
+}
+
+func isProviderInternalResponseHeader(key string) bool {
+	lower := strings.ToLower(key)
+	switch lower {
+	case "server",
+		"via",
+		"x-powered-by",
+		"request-id",
+		"x-request-id",
+		"anthropic-organization-id",
+		"cf-ray",
+		"cf-cache-status",
+		"traceresponse",
+		"x-robots-tag":
+		return true
+	}
+
+	internalPrefixes := []string{
+		"x-litellm-",
+		"llm_provider-",
+		"x-provider-",
+		"x-ratelimit-",
+		"anthropic-ratelimit-",
+		"x-amz-",
+		"x-amzn-",
+	}
+	for _, prefix := range internalPrefixes {
+		if strings.HasPrefix(lower, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func dropRepresentationIntegrityHeaders(headers http.Header) {
+	for key := range headers {
+		if isRepresentationIntegrityHeader(key) {
+			headers.Del(key)
 		}
 	}
 }

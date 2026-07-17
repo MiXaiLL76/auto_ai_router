@@ -50,7 +50,7 @@ func appendResponseBodyForLogs(args []any, cred *config.CredentialConfig, body s
 }
 
 func shouldMaskUpstreamErrors(cred *config.CredentialConfig) bool {
-	return isCometAPICredential(cred)
+	return isCometAPICredential(cred) || isProManCredential(cred)
 }
 
 func isCometAPICredential(cred *config.CredentialConfig) bool {

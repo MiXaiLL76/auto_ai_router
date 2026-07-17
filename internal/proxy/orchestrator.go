@@ -275,7 +275,7 @@ func (p *Proxy) prepareRequestForCredential(
 
 	if p.stickyAutoCacheCtrl &&
 		stickyCacheEligible &&
-		(cred.Type == config.ProviderTypeAnthropic || cred.Type == config.ProviderTypeCometAPI || cred.Type == config.ProviderTypeBedrock) {
+		(cred.Type == config.ProviderTypeAnthropic || cred.Type == config.ProviderTypeCometAPI || cred.Type == config.ProviderTypeProMan || cred.Type == config.ProviderTypeBedrock) {
 		body = anthropicconv.InjectCacheControl(body)
 	}
 
