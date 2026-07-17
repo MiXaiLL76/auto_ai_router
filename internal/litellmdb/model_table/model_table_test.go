@@ -20,6 +20,8 @@ func TestMapProviderType(t *testing.T) {
 		{"google", "GoogleAI", config.ProviderTypeGemini},
 		{"cometapi", "cometapi", config.ProviderTypeCometAPI},
 		{"comet-api", "comet-api", config.ProviderTypeCometAPI},
+		{"proman", "proman", config.ProviderTypeProMan},
+		{"pro-man", "pro-man", config.ProviderTypeProMan},
 		{"xai", "xAI", config.ProviderTypeOpenAI},
 		{"unknown", "some-other", ""},
 	}

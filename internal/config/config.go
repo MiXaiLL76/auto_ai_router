@@ -26,6 +26,7 @@ const (
 	ProviderTypeGemini    ProviderType = "gemini"
 	ProviderTypeAnthropic ProviderType = "anthropic"
 	ProviderTypeCometAPI  ProviderType = "cometapi"
+	ProviderTypeProMan    ProviderType = "proman"
 	ProviderTypeBedrock   ProviderType = "bedrock"
 	ProviderTypeProxy     ProviderType = "proxy"
 )
@@ -40,7 +41,7 @@ func (p ProviderType) LogValue() slog.Value {
 // IsValid checks if the provider type is valid
 func (p ProviderType) IsValid() bool {
 	switch p {
-	case ProviderTypeOpenAI, ProviderTypeVertexAI, ProviderTypeGemini, ProviderTypeAnthropic, ProviderTypeCometAPI, ProviderTypeBedrock, ProviderTypeProxy:
+	case ProviderTypeOpenAI, ProviderTypeVertexAI, ProviderTypeGemini, ProviderTypeAnthropic, ProviderTypeCometAPI, ProviderTypeProMan, ProviderTypeBedrock, ProviderTypeProxy:
 		return true
 	}
 	return false
@@ -50,6 +51,8 @@ func normalizeProviderType(raw string) ProviderType {
 	switch strings.ToLower(strings.TrimSpace(raw)) {
 	case "comet-api", "comet_api":
 		return ProviderTypeCometAPI
+	case "pro-man", "pro_man":
+		return ProviderTypeProMan
 	default:
 		return ProviderType(strings.ToLower(strings.TrimSpace(raw)))
 	}
@@ -1415,7 +1418,7 @@ func (c *Config) Validate() error {
 
 		// Validate provider type
 		if !cred.Type.IsValid() {
-			return fmt.Errorf("credential %s: invalid type: %s (must be 'openai', 'vertex-ai', 'gemini', 'anthropic', 'cometapi', 'bedrock', or 'proxy')", cred.Name, cred.Type)
+			return fmt.Errorf("credential %s: invalid type: %s (must be 'openai', 'vertex-ai', 'gemini', 'anthropic', 'cometapi', 'proman', 'bedrock', or 'proxy')", cred.Name, cred.Type)
 		}
 		if cred.AuthType != "" && cred.AuthType != "bearer" && cred.AuthType != "x-api-key" {
 			return fmt.Errorf("credential %s: invalid auth_type: %s (must be 'bearer' or 'x-api-key')", cred.Name, cred.AuthType)

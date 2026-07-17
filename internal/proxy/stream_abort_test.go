@@ -466,7 +466,7 @@ func TestWriteProxyStreamingResponseWithTokens_Abort(t *testing.T) {
 	// Client disconnects after 10 bytes
 	w := newFailAfterNBytesWriter(10)
 
-	streamUsage, err := prx.writeProxyStreamingResponseWithTokens(w, proxyResp, &http.Request{Header: make(http.Header)}, "test", "test-model", "gpt-4o-mini", nil)
+	streamUsage, err := prx.writeProxyStreamingResponseWithTokens(w, proxyResp, &http.Request{Header: make(http.Header)}, &config.CredentialConfig{Name: "test"}, "test-model", "gpt-4o-mini", nil)
 	assert.Error(t, err, "should return write error")
 
 	// Even on abort, estimated usage must be returned
@@ -526,7 +526,7 @@ func TestWriteProxyStreamingResponseWithTokens_DrainCapturesUsage(t *testing.T) 
 	// Client disconnects after 10 bytes (before usage chunk)
 	w := newFailAfterNBytesWriter(10)
 
-	streamUsage, err := prx.writeProxyStreamingResponseWithTokens(w, proxyResp, &http.Request{Header: make(http.Header)}, "test", "test-model", "gpt-4o-mini", nil)
+	streamUsage, err := prx.writeProxyStreamingResponseWithTokens(w, proxyResp, &http.Request{Header: make(http.Header)}, &config.CredentialConfig{Name: "test"}, "test-model", "gpt-4o-mini", nil)
 	assert.Error(t, err, "should return write error")
 
 	// Drain must have captured the real usage chunk
@@ -578,7 +578,7 @@ func TestWriteProxyStreamingResponseWithTokens_NoUsageChunk(t *testing.T) {
 	}
 
 	w := httptest.NewRecorder()
-	streamUsage, err := prx.writeProxyStreamingResponseWithTokens(w, proxyResp, &http.Request{Header: make(http.Header)}, "test", "test-model", "gpt-4o-mini", nil)
+	streamUsage, err := prx.writeProxyStreamingResponseWithTokens(w, proxyResp, &http.Request{Header: make(http.Header)}, &config.CredentialConfig{Name: "test"}, "test-model", "gpt-4o-mini", nil)
 	require.NoError(t, err)
 
 	// Should return estimated usage from streamed text when no usage chunk is present.

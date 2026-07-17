@@ -651,6 +651,7 @@ func TestProviderType_IsValid(t *testing.T) {
 		{"openai", ProviderTypeOpenAI, true},
 		{"vertex-ai", ProviderTypeVertexAI, true},
 		{"cometapi", ProviderTypeCometAPI, true},
+		{"proman", ProviderTypeProMan, true},
 		{"invalid", ProviderType("azure"), false},
 		{"empty", ProviderType(""), false},
 	}
@@ -674,6 +675,20 @@ rpm: 60
 
 	require.NoError(t, err)
 	assert.Equal(t, ProviderTypeCometAPI, cred.Type)
+}
+
+func TestCredentialConfig_NormalizeProManProviderType(t *testing.T) {
+	var cred CredentialConfig
+	err := yaml.Unmarshal([]byte(`
+name: proman
+type: pro-man
+api_key: key
+base_url: https://api.proman.ai/v1
+rpm: 60
+`), &cred)
+
+	require.NoError(t, err)
+	assert.Equal(t, ProviderTypeProMan, cred.Type)
 }
 
 func TestConfig_Validate_VertexAI(t *testing.T) {

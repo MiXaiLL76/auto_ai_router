@@ -652,7 +652,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 						p.logger.WarnContext(r.Context(), "Failed to close proxy streaming response body", "error", closeErr)
 					}
 				}()
-				copyResponseHeaders(w, proxyResp.Headers, cred.Type)
+				copyResponseHeaders(w, proxyResp.Headers, cred)
 				if logCtx.IsProxyRequest && logCtx.ActualCredentialName != "" {
 					w.Header().Set("X-Credential-Name", logCtx.ActualCredentialName)
 				}
@@ -677,7 +677,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 						p.logger.WarnContext(r.Context(), "Failed to close proxy streaming response body", "error", closeErr)
 					}
 				}()
-				copyResponseHeaders(w, proxyResp.Headers, cred.Type)
+				copyResponseHeaders(w, proxyResp.Headers, cred)
 				if logCtx.IsProxyRequest && logCtx.ActualCredentialName != "" {
 					w.Header().Set("X-Credential-Name", logCtx.ActualCredentialName)
 				}
@@ -703,7 +703,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 					tokenizerModelID = modelID
 				}
 				logCtx.PromptTokensEstimate = estimatePromptTokensForModel(proxyBody, tokenizerModelID)
-				streamUsage, err := p.writeProxyStreamingResponseWithTokens(w, proxyResp, r, cred.Name, modelID, tokenizerModelID, logCtx)
+				streamUsage, err := p.writeProxyStreamingResponseWithTokens(w, proxyResp, r, cred, modelID, tokenizerModelID, logCtx)
 				if err != nil {
 					p.logStreamHandlerError(r.Context(), "Failed to write streaming proxy response", err,
 						"credential", cred.Name, "model", modelID, "request_id", logCtx.RequestID)
@@ -785,7 +785,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			if logCtx.IsProxyRequest && logCtx.ActualCredentialName != "" {
 				w.Header().Set("X-Credential-Name", logCtx.ActualCredentialName)
 			}
-			p.writeProxyResponse(w, proxyResp, r, cred.Name, modelID)
+			p.writeProxyResponse(w, proxyResp, r, cred, modelID)
 			tokens := extractTokensFromResponse(string(proxyResp.Body), config.ProviderTypeOpenAI)
 			if tokens > 0 {
 				p.rateLimiter.ConsumeTokens(cred.Name, tokens)
@@ -1083,7 +1083,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			proxyReq.Header.Set("Authorization", "Bearer "+vertexToken)
 		case config.ProviderTypeGemini:
 			proxyReq.Header.Set("x-goog-api-key", cred.APIKey)
-		case config.ProviderTypeAnthropic, config.ProviderTypeCometAPI:
+		case config.ProviderTypeAnthropic, config.ProviderTypeCometAPI, config.ProviderTypeProMan:
 			if cred.AuthType == "bearer" {
 				proxyReq.Header.Set("Authorization", "Bearer "+cred.APIKey)
 			} else {
@@ -1388,11 +1388,20 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 && shouldSanitizeUpstreamSurface(cred) {
+			if sanitized, changed := sanitizeUpstreamJSONBody(finalResponseBody, modelID); changed {
+				finalResponseBody = sanitized
+				bodyForTokenExtraction = finalResponseBody
+				dropRepresentationIntegrityHeaders(resp.Header)
+			}
+		}
+
 		rawErrorBody := finalResponseBody
 		if resp.StatusCode >= 400 && shouldMaskUpstreamErrors(cred) {
 			finalResponseBody = maskedUpstreamErrorBody(resp.StatusCode)
 			bodyForTokenExtraction = finalResponseBody
 			resp.Header.Set("Content-Type", "application/json")
+			dropRepresentationIntegrityHeaders(resp.Header)
 		}
 
 		tokens := extractTokensFromResponse(string(bodyForTokenExtraction), config.ProviderTypeOpenAI)
@@ -1457,7 +1466,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Copy response headers (skip hop-by-hop headers and transformation-related headers)
-	copyResponseHeaders(w, resp.Header, cred.Type)
+	copyResponseHeaders(w, resp.Header, cred)
 	// Return credential name only to internal proxy clients, not to end users.
 	if logCtx.IsProxyRequest {
 		w.Header().Set("X-Credential-Name", cred.Name)
@@ -1476,6 +1485,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 				body := maskedUpstreamErrorBody(resp.StatusCode)
 				w.Header().Set("Content-Type", "application/json")
 				w.Header().Set("Content-Length", fmt.Sprintf("%d", len(body)))
+				dropRepresentationIntegrityHeaders(w.Header())
 				w.WriteHeader(resp.StatusCode)
 				_, _ = w.Write(body)
 				logCtx.Status = "failure"

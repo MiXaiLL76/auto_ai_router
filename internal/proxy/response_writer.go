@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/converter"
 	"github.com/mixaill76/auto_ai_router/internal/proxy/modelutils"
 )
@@ -13,13 +14,18 @@ import (
 // writeProxyResponse writes raw upstream proxy response to client.
 // Respects the client's Accept-Encoding header to compress the response appropriately.
 // Used by both primary proxy path and fallback retry path to avoid duplication.
-func (p *Proxy) writeProxyResponse(w http.ResponseWriter, resp *ProxyResponse, clientReq *http.Request, credName, modelID string) {
+func (p *Proxy) writeProxyResponse(w http.ResponseWriter, resp *ProxyResponse, clientReq *http.Request, cred *config.CredentialConfig, modelID string) {
 	if resp == nil {
 		return
 	}
 
-	responseBody := resp.Body
-	responseBodyChanged := false
+	credName := ""
+	if cred != nil {
+		credName = cred.Name
+	}
+
+	responseBody, responseBodyChanged := clientResponseBodyForCredential(resp.StatusCode, resp.Body, cred, modelID)
+	responseBodyMasked := resp.StatusCode >= http.StatusBadRequest && shouldMaskUpstreamErrors(cred)
 	if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
 		if normalizedBody, changed := modelutils.NormalizeCompletionUsage(responseBody, modelID); changed {
 			responseBody = normalizedBody
@@ -63,21 +69,19 @@ func (p *Proxy) writeProxyResponse(w http.ResponseWriter, resp *ProxyResponse, c
 
 	// Copy response headers
 	for key, values := range resp.Headers {
-		if isHopByHopHeader(key) {
+		if shouldSkipResponseHeaderForClient(key, cred) {
 			continue
 		}
 		if responseBodyChanged && isRepresentationIntegrityHeader(key) {
 			continue
 		}
-		// Skip Content-Length, Transfer-Encoding, and Content-Encoding
-		// We'll set Content-Encoding based on our compression, and Content-Length based on actual body size
-		// Skip X-Credential-Name — internal header for proxy-to-proxy routing, not exposed to end clients
-		if key == "Content-Length" || key == "Transfer-Encoding" || key == "Content-Encoding" || key == "X-Credential-Name" {
-			continue
-		}
 		for _, value := range values {
 			w.Header().Add(key, value)
 		}
+	}
+
+	if responseBodyMasked {
+		w.Header().Set("Content-Type", "application/json")
 	}
 
 	// Set Content-Encoding if we compressed the response
@@ -104,13 +108,18 @@ func (p *Proxy) writeProxyStreamingResponseWithTokens(
 	w http.ResponseWriter,
 	resp *ProxyResponse,
 	clientReq *http.Request,
-	credName string,
+	cred *config.CredentialConfig,
 	modelID string,
 	tokenizerModelID string,
 	logCtx *RequestLogContext,
 ) (*converter.TokenUsage, error) {
 	if resp == nil || resp.StreamBody == nil {
 		return nil, nil
+	}
+
+	credName := ""
+	if cred != nil {
+		credName = cred.Name
 	}
 
 	streamBody := resp.StreamBody
@@ -121,6 +130,9 @@ func (p *Proxy) writeProxyStreamingResponseWithTokens(
 			normalizeStream = true
 		}
 	}
+	if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices && shouldSanitizeUpstreamSurface(cred) {
+		streamBody = newSanitizingSSEReadCloser(streamBody, modelID)
+	}
 	defer func() {
 		if closeErr := streamBody.Close(); closeErr != nil {
 			p.logger.WarnContext(clientReq.Context(), "Failed to close proxy streaming response body", "error", closeErr)
@@ -128,17 +140,10 @@ func (p *Proxy) writeProxyStreamingResponseWithTokens(
 	}()
 
 	for key, values := range resp.Headers {
-		if isHopByHopHeader(key) {
+		if shouldSkipResponseHeaderForClient(key, cred) {
 			continue
 		}
 		if normalizeStream && isRepresentationIntegrityHeader(key) {
-			continue
-		}
-		// Skip Content-Length, Transfer-Encoding, and Content-Encoding
-		// For streaming responses, we don't re-compress since it would break the stream protocol.
-		// We remove Content-Encoding from upstream since Go's http.Client already decompressed it.
-		// Skip X-Credential-Name — internal header for proxy-to-proxy routing, not exposed to end clients
-		if key == "Content-Length" || key == "Transfer-Encoding" || key == "Content-Encoding" || key == "X-Credential-Name" {
 			continue
 		}
 		for _, value := range values {
