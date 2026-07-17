@@ -335,13 +335,33 @@ func usageMetadataToUsage(meta *genai.GenerateContentResponseUsageMetadata) *res
 			imageTokens += int(detail.TokenCount)
 		}
 	}
+	cachedAudioTokens := 0
+	audioInputTokens := 0
+	for _, details := range [][]*genai.ModalityTokenCount{meta.PromptTokensDetails, meta.ToolUsePromptTokensDetails} {
+		for _, detail := range details {
+			if detail != nil && genai.MediaModality(detail.Modality) == genai.MediaModalityAudio {
+				audioInputTokens += int(detail.TokenCount)
+			}
+		}
+	}
+	for _, detail := range meta.CacheTokensDetails {
+		if detail != nil && genai.MediaModality(detail.Modality) == genai.MediaModalityAudio {
+			cachedAudioTokens += int(detail.TokenCount)
+		}
+	}
+	audioInputTokens -= cachedAudioTokens
+	if audioInputTokens < 0 {
+		audioInputTokens = 0
+	}
 
 	return &responses.Usage{
 		InputTokens:  int(meta.PromptTokenCount),
 		OutputTokens: int(meta.CandidatesTokenCount),
 		TotalTokens:  int(meta.TotalTokenCount),
 		InputTokensDetails: responses.InputDetails{
-			CachedTokens: cachedTokens,
+			CachedTokens:      cachedTokens,
+			CachedAudioTokens: cachedAudioTokens,
+			AudioTokens:       audioInputTokens,
 		},
 		OutputTokensDetails: responses.OutputDetails{
 			ReasoningTokens: thoughtTokens,

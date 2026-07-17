@@ -271,7 +271,10 @@ func (p *Proxy) writeFallbackResponse(
 		if logCtx != nil && logCtx.IsProxyRequest && logCtx.ActualCredentialName != "" {
 			w.Header().Set("X-Credential-Name", logCtx.ActualCredentialName)
 		}
-		streamUsage, err := p.writeProxyStreamingResponseWithTokens(w, proxyResp, r, fallbackCred.Name, modelID, modelID, logCtx)
+		usageOptions := tokenUsageExtractionOptionsForCredential(fallbackCred)
+		streamUsage, err := p.writeProxyStreamingResponseWithTokens(
+			w, proxyResp, r, fallbackCred.Name, modelID, modelID, logCtx, usageOptions,
+		)
 		if err != nil {
 			p.logStreamHandlerError(r.Context(), "Failed to write fallback streaming proxy response", err,
 				"fallback_credential", fallbackCred.Name,
@@ -321,7 +324,10 @@ func (p *Proxy) writeFallbackResponse(
 		}
 		p.writeProxyResponse(w, proxyResp, r, fallbackCred.Name, modelID)
 		if logCtx != nil {
-			logCtx.TokenUsage = converter.ExtractTokenUsage(proxyResp.Body)
+			logCtx.TokenUsage = converter.ExtractTokenUsageWithOptions(
+				proxyResp.Body,
+				tokenUsageExtractionOptionsForCredential(fallbackCred),
+			)
 		}
 		tokens := extractTokensFromResponse(string(proxyResp.Body), config.ProviderTypeOpenAI)
 		if tokens > 0 {

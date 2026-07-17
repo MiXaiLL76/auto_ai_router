@@ -62,6 +62,21 @@ func extractTokensFromStreamingChunk(chunk string) int {
 // extractTokenUsageFromStreamingChunk parses full TokenUsage (prompt+completion+details)
 // from an SSE chunk. Returns nil if no usage data is found.
 func extractTokenUsageFromStreamingChunk(chunk string) *converter.TokenUsage {
+	return extractTokenUsageFromStreamingChunkWithOptions(chunk, converter.TokenUsageExtractionOptions{AudioInputIncludesCachedAudio: true})
+}
+
+func tokenUsageExtractionOptionsForCredential(cred *config.CredentialConfig) converter.TokenUsageExtractionOptions {
+	includesCachedAudio := true
+	if cred != nil && cred.Type == config.ProviderTypeProxy {
+		// A proxy can be either a raw OpenAI-compatible API or an upstream that
+		// already normalizes audio_tokens. The wire contract must therefore be
+		// configured explicitly instead of inferred from ProviderTypeProxy.
+		includesCachedAudio = cred.EffectiveProxyUsageFormat() != config.ProxyUsageFormatNormalized
+	}
+	return converter.TokenUsageExtractionOptions{AudioInputIncludesCachedAudio: includesCachedAudio}
+}
+
+func extractTokenUsageFromStreamingChunkWithOptions(chunk string, opts converter.TokenUsageExtractionOptions) *converter.TokenUsage {
 	lines := strings.Split(chunk, "\n")
 	for _, line := range lines {
 		if strings.HasPrefix(line, "data: ") {
@@ -69,7 +84,7 @@ func extractTokenUsageFromStreamingChunk(chunk string) *converter.TokenUsage {
 			if jsonData == "[DONE]" {
 				continue
 			}
-			if usage := converter.ExtractTokenUsage([]byte(jsonData)); usage != nil {
+			if usage := converter.ExtractTokenUsageWithOptions([]byte(jsonData), opts); usage != nil {
 				return usage
 			}
 		}

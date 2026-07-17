@@ -426,11 +426,26 @@ func convertPricingToModelPrice(p *queries.CustomPricingLiteLLMParams) *manager.
 	if p.CacheCreationInputTokenCost != nil {
 		price.CacheCreationInputTokenCost = *p.CacheCreationInputTokenCost
 	}
+	if p.CacheReadInputTokenCostAbove200kTokens != nil {
+		price.CacheReadInputTokenCostAbove200k = *p.CacheReadInputTokenCostAbove200kTokens
+	}
+	if p.CacheCreationInputTokenCostAbove200kTokens != nil {
+		price.CacheCreationInputTokenCostAbove200k = *p.CacheCreationInputTokenCostAbove200kTokens
+	}
+	if p.CacheCreationInputTokenCostAbove1hr != nil {
+		price.CacheCreationInputTokenCostAbove1hr = *p.CacheCreationInputTokenCostAbove1hr
+	}
+	if p.CacheCreationInputTokenCostAbove1hrAbove200kTokens != nil {
+		price.CacheCreationInputTokenCostAbove1hrAbove200k = *p.CacheCreationInputTokenCostAbove1hrAbove200kTokens
+	}
 	if p.CacheReadInputTokenCostAbove272kTokens != nil {
 		price.CacheReadInputTokenCostAbove272k = *p.CacheReadInputTokenCostAbove272kTokens
 	}
 	if p.CacheCreationInputTokenCostAbove272kTokens != nil {
 		price.CacheCreationInputTokenCostAbove272k = *p.CacheCreationInputTokenCostAbove272kTokens
+	}
+	if p.CacheReadInputAudioTokenCost != nil {
+		price.CacheReadInputAudioTokenCost = *p.CacheReadInputAudioTokenCost
 	}
 	if p.OutputCostPerImage != nil {
 		price.OutputCostPerImage = *p.OutputCostPerImage

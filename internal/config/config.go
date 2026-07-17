@@ -30,6 +30,17 @@ const (
 	ProviderTypeProxy     ProviderType = "proxy"
 )
 
+// ProxyUsageFormat describes the cached-audio semantics used by an
+// OpenAI-compatible proxy upstream. OpenAI-compatible usage reports
+// audio_tokens including cached audio, while normalized usage reports only
+// non-cached audio and exposes cached_audio_tokens separately.
+type ProxyUsageFormat string
+
+const (
+	ProxyUsageFormatOpenAI     ProxyUsageFormat = "openai"
+	ProxyUsageFormatNormalized ProxyUsageFormat = "normalized"
+)
+
 // LogValue implements slog.LogValuer so structured log backends (e.g. the
 // OTEL bridge) serialize ProviderType as a plain string instead of an
 // unhandled custom type.
@@ -595,7 +606,8 @@ type CredentialConfig struct {
 	CredentialsJSON string `yaml:"credentials_json,omitempty"`
 
 	// Proxy specific fields
-	IsFallback bool `yaml:"is_fallback,omitempty"`
+	IsFallback       bool             `yaml:"is_fallback,omitempty"`
+	ProxyUsageFormat ProxyUsageFormat `yaml:"proxy_usage_format,omitempty"`
 }
 
 func (c CredentialConfig) VisibleTo(visibility scope.Context) bool {
@@ -613,6 +625,18 @@ func (c CredentialConfig) ScopeExpression() *scope.Expression {
 	)
 }
 
+// EffectiveProxyUsageFormat returns the configured proxy usage contract with
+// the backward-compatible default applied.
+func (c CredentialConfig) EffectiveProxyUsageFormat() ProxyUsageFormat {
+	if c.Type != ProviderTypeProxy {
+		return ""
+	}
+	if c.ProxyUsageFormat == "" {
+		return ProxyUsageFormatOpenAI
+	}
+	return c.ProxyUsageFormat
+}
+
 // SameProviderIdentity reports whether learned provider metadata can be reused.
 func (c CredentialConfig) SameProviderIdentity(other CredentialConfig) bool {
 	return c.Name == other.Name &&
@@ -620,7 +644,8 @@ func (c CredentialConfig) SameProviderIdentity(other CredentialConfig) bool {
 		c.BaseURL == other.BaseURL &&
 		c.APIKey == other.APIKey &&
 		c.AuthType == other.AuthType &&
-		c.IsFallback == other.IsFallback
+		c.IsFallback == other.IsFallback &&
+		c.EffectiveProxyUsageFormat() == other.EffectiveProxyUsageFormat()
 }
 
 // UnmarshalYAML implements custom unmarshaling for CredentialConfig with env variable support
@@ -644,6 +669,7 @@ func (c *CredentialConfig) UnmarshalYAML(value *yaml.Node) error {
 		CredentialsFile  string           `yaml:"credentials_file,omitempty"`
 		CredentialsJSON  string           `yaml:"credentials_json,omitempty"`
 		IsFallback       string           `yaml:"is_fallback,omitempty"`
+		ProxyUsageFormat string           `yaml:"proxy_usage_format,omitempty"`
 		Models           []ModelRPMConfig `yaml:"models,omitempty"`
 	}
 
@@ -658,6 +684,7 @@ func (c *CredentialConfig) UnmarshalYAML(value *yaml.Node) error {
 	c.APIKey = resolveEnvString(temp.APIKey)
 	c.BaseURL = resolveEnvString(temp.BaseURL)
 	c.AuthType = strings.ToLower(resolveEnvString(temp.AuthType))
+	c.ProxyUsageFormat = ProxyUsageFormat(strings.ToLower(resolveEnvString(temp.ProxyUsageFormat)))
 	c.Scopes = scope.NormalizeList(temp.Scopes)
 	c.DeniedScopes = scope.NormalizeList(append(temp.DeniedScopes, temp.ForbiddenScopes...))
 
@@ -685,6 +712,9 @@ func (c *CredentialConfig) UnmarshalYAML(value *yaml.Node) error {
 	// Resolve and parse boolean field
 	if c.IsFallback, err = parseField(temp.IsFallback, false, strconv.ParseBool, "is_fallback for credential '"+c.Name+"'"); err != nil {
 		return err
+	}
+	if c.ProxyUsageFormat == "" && c.Type == ProviderTypeProxy {
+		c.ProxyUsageFormat = ProxyUsageFormatOpenAI
 	}
 
 	// Copy models decoded via YAML anchors / inline definitions
@@ -1420,6 +1450,9 @@ func (c *Config) Validate() error {
 		if cred.AuthType != "" && cred.AuthType != "bearer" && cred.AuthType != "x-api-key" {
 			return fmt.Errorf("credential %s: invalid auth_type: %s (must be 'bearer' or 'x-api-key')", cred.Name, cred.AuthType)
 		}
+		if cred.Type != ProviderTypeProxy && cred.ProxyUsageFormat != "" {
+			return fmt.Errorf("credential %s: proxy_usage_format is only valid for proxy type", cred.Name)
+		}
 
 		// Validate by provider type
 		switch cred.Type {
@@ -1427,6 +1460,15 @@ func (c *Config) Validate() error {
 			// base_url is required for proxy
 			if cred.BaseURL == "" {
 				return fmt.Errorf("credential %s: base_url is required for proxy type", cred.Name)
+			}
+			if cred.ProxyUsageFormat != "" &&
+				cred.ProxyUsageFormat != ProxyUsageFormatOpenAI &&
+				cred.ProxyUsageFormat != ProxyUsageFormatNormalized {
+				return fmt.Errorf(
+					"credential %s: invalid proxy_usage_format: %s (must be 'openai' or 'normalized')",
+					cred.Name,
+					cred.ProxyUsageFormat,
+				)
 			}
 			// Validate base_url is a valid URL
 			if err := validateBaseURL(cred.Name, cred.BaseURL); err != nil {

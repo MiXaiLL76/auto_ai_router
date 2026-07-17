@@ -324,6 +324,9 @@ func TestConvertVertexUsageMetadata_CachedAudioSubtraction(t *testing.T) {
 	if usage.PromptTokensDetails.CachedTokens != 80 {
 		t.Fatalf("expected CachedTokens = 80, got %d", usage.PromptTokensDetails.CachedTokens)
 	}
+	if usage.PromptTokensDetails.CachedAudioTokens != 40 {
+		t.Fatalf("expected CachedAudioTokens = 40, got %d", usage.PromptTokensDetails.CachedAudioTokens)
+	}
 
 	// Verify billing math: regularInputTokens = 200 - 60 - 80 = 60 (text tokens)
 	// This is the invariant that CalculateTokenCosts depends on.
@@ -361,6 +364,9 @@ func TestConvertVertexUsageMetadata_AllAudioCached(t *testing.T) {
 	}
 	if usage.PromptTokensDetails.CachedTokens != 60 {
 		t.Fatalf("expected CachedTokens = 60, got %d", usage.PromptTokensDetails.CachedTokens)
+	}
+	if usage.PromptTokensDetails.CachedAudioTokens != 60 {
+		t.Fatalf("expected CachedAudioTokens = 60, got %d", usage.PromptTokensDetails.CachedAudioTokens)
 	}
 }
 

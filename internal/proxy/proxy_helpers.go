@@ -144,11 +144,13 @@ func buildMetadata(hashedToken string, tokenInfo *litellmdb.TokenInfo, errorMsg 
 
 	// Build usage_object and additional_usage_values
 	promptTokensDetails := map[string]interface{}{
-		"text_tokens":           nil,
-		"audio_tokens":          0,
-		"image_tokens":          nil,
-		"cached_tokens":         0,
-		"cache_creation_tokens": 0,
+		"text_tokens":                  nil,
+		"audio_tokens":                 0,
+		"image_tokens":                 nil,
+		"cached_tokens":                0,
+		"cached_audio_tokens":          0,
+		"cache_creation_tokens":        0,
+		"cache_creation_token_details": nil,
 	}
 	completionTokensDetails := map[string]interface{}{
 		"text_tokens":                nil,
@@ -161,10 +163,19 @@ func buildMetadata(hashedToken string, tokenInfo *litellmdb.TokenInfo, errorMsg 
 
 	var usageObject interface{}
 	if usage != nil {
+		normalizedUsage := *usage
+		usage = normalizedUsage.Normalize()
 		promptTokensDetails["audio_tokens"] = usage.AudioInputTokens
 		promptTokensDetails["image_tokens"] = usage.ImageTokens
 		promptTokensDetails["cached_tokens"] = usage.CachedInputTokens
+		promptTokensDetails["cached_audio_tokens"] = usage.CachedAudioInputTokens
 		promptTokensDetails["cache_creation_tokens"] = usage.CacheCreationTokens
+		if usage.CacheCreation5mTokens > 0 || usage.CacheCreation1hTokens > 0 {
+			promptTokensDetails["cache_creation_token_details"] = map[string]interface{}{
+				"ephemeral_5m_input_tokens": usage.CacheCreation5mTokens,
+				"ephemeral_1h_input_tokens": usage.CacheCreation1hTokens,
+			}
+		}
 		completionTokensDetails["audio_tokens"] = usage.AudioOutputTokens
 		completionTokensDetails["image_tokens"] = usage.OutputImageTokens
 		completionTokensDetails["reasoning_tokens"] = usage.ReasoningTokens
@@ -181,10 +192,12 @@ func buildMetadata(hashedToken string, tokenInfo *litellmdb.TokenInfo, errorMsg 
 
 	additionalUsage := map[string]interface{}{
 		"prompt_tokens_details": map[string]interface{}{
-			"audio_tokens":          promptTokensDetails["audio_tokens"],
-			"image_tokens":          promptTokensDetails["image_tokens"],
-			"cached_tokens":         promptTokensDetails["cached_tokens"],
-			"cache_creation_tokens": promptTokensDetails["cache_creation_tokens"],
+			"audio_tokens":                 promptTokensDetails["audio_tokens"],
+			"image_tokens":                 promptTokensDetails["image_tokens"],
+			"cached_tokens":                promptTokensDetails["cached_tokens"],
+			"cached_audio_tokens":          promptTokensDetails["cached_audio_tokens"],
+			"cache_creation_tokens":        promptTokensDetails["cache_creation_tokens"],
+			"cache_creation_token_details": promptTokensDetails["cache_creation_token_details"],
 		},
 		"completion_tokens_details": map[string]interface{}{
 			"audio_tokens":               completionTokensDetails["audio_tokens"],

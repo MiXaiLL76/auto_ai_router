@@ -48,13 +48,18 @@ type ModelPrice struct {
 	OutputCostPerReasoningToken float64 `json:"output_cost_per_reasoning_token,omitempty"`
 
 	// Cached/Prediction tokens
-	OutputCostPerCachedToken             float64 `json:"output_cost_per_cached_token,omitempty"`
-	InputCostPerCachedToken              float64 `json:"input_cost_per_cached_token,omitempty"`
-	CacheReadInputTokenCost              float64 `json:"cache_read_input_token_cost,omitempty"`
-	CacheCreationInputTokenCost          float64 `json:"cache_creation_input_token_cost,omitempty"`
-	CacheReadInputTokenCostAbove272k     float64 `json:"cache_read_input_token_cost_above_272k_tokens,omitempty"`
-	CacheCreationInputTokenCostAbove272k float64 `json:"cache_creation_input_token_cost_above_272k_tokens,omitempty"`
-	OutputCostPerPredictionToken         float64 `json:"output_cost_per_prediction_token,omitempty"`
+	OutputCostPerCachedToken                     float64 `json:"output_cost_per_cached_token,omitempty"`
+	InputCostPerCachedToken                      float64 `json:"input_cost_per_cached_token,omitempty"`
+	CacheReadInputTokenCost                      float64 `json:"cache_read_input_token_cost,omitempty"`
+	CacheCreationInputTokenCost                  float64 `json:"cache_creation_input_token_cost,omitempty"`
+	CacheReadInputTokenCostAbove200k             float64 `json:"cache_read_input_token_cost_above_200k_tokens,omitempty"`
+	CacheCreationInputTokenCostAbove200k         float64 `json:"cache_creation_input_token_cost_above_200k_tokens,omitempty"`
+	CacheCreationInputTokenCostAbove1hr          float64 `json:"cache_creation_input_token_cost_above_1hr,omitempty"`
+	CacheCreationInputTokenCostAbove1hrAbove200k float64 `json:"cache_creation_input_token_cost_above_1hr_above_200k_tokens,omitempty"`
+	CacheReadInputTokenCostAbove272k             float64 `json:"cache_read_input_token_cost_above_272k_tokens,omitempty"`
+	CacheCreationInputTokenCostAbove272k         float64 `json:"cache_creation_input_token_cost_above_272k_tokens,omitempty"`
+	CacheReadInputAudioTokenCost                 float64 `json:"cache_read_input_audio_token_cost,omitempty"`
+	OutputCostPerPredictionToken                 float64 `json:"output_cost_per_prediction_token,omitempty"`
 
 	// Vision/Images cost per image (not per token)
 	OutputCostPerImage float64 `json:"output_cost_per_image,omitempty"`

@@ -68,6 +68,7 @@ func (a *Authenticator) FetchMasterKey(ctx context.Context, default_key string) 
 	info.Token = HashToken(*masterKey)
 	info.KeyName = "litellm-master-key"
 	info.UserID = "litellm-master-key"
+	info.IsMasterKey = true
 	a.cache.Set(info.Token, &info)
 
 	a.logger.Debug("Master key loaded", "source", master_key_source)

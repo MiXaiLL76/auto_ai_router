@@ -114,6 +114,31 @@ func TestBuildKafkaSpendEvent_NilTokenUsage(t *testing.T) {
 	})
 }
 
+func TestBuildKafkaSpendEvent_NormalizesTokenUsage(t *testing.T) {
+	prx := NewTestProxyBuilder().Build()
+	logCtx := testLogCtx(t)
+	logCtx.TokenUsage = &converter.TokenUsage{
+		PromptTokens:           -100,
+		CompletionTokens:       50,
+		AudioInputTokens:       -10,
+		CachedInputTokens:      -80,
+		CachedAudioInputTokens: 40,
+		CacheCreationTokens:    10,
+		CacheCreation5mTokens:  8,
+		CacheCreation1hTokens:  8,
+	}
+
+	event := prx.buildKafkaSpendEvent(logCtx, "cred", "cred:model", "hash",
+		"", "", "", "", "api.openai.com", "success", 0, nil, 0, logCtx.StartTime)
+
+	assert.Equal(t, 0, event.PromptTokens)
+	assert.Equal(t, 50, event.CompletionTokens)
+	assert.Equal(t, 50, event.TotalTokens)
+	assert.Equal(t, 0, event.AudioInputTokens)
+	assert.Equal(t, 0, event.CachedInputTokens)
+	assert.Equal(t, 10, event.CacheCreationTokens)
+}
+
 func TestBuildKafkaSpendEvent_TTFTComputedWhenStreamed(t *testing.T) {
 	prx := NewTestProxyBuilder().Build()
 	logCtx := testLogCtx(t)

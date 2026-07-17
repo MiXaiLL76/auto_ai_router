@@ -154,8 +154,9 @@ type TokenInfo struct {
 	Expires *time.Time // Expiration date (nil = no expiration)
 
 	// Access control
-	Models  []string // Allowed models (empty = all)
-	Blocked bool     // Is token blocked
+	Models      []string // Allowed models (empty = all)
+	Blocked     bool     // Is token blocked
+	IsMasterKey bool     // Internal provenance marker; never populated from a verification-token row
 
 	// ==================== User Level (embedded budget) ====================
 	UserAlias     string   // User alias (optional) - user-friendly name

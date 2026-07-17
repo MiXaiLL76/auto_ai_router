@@ -232,8 +232,17 @@ type Usage struct {
 
 // InputDetails represents a breakdown of input token usage.
 type InputDetails struct {
-	CachedTokens int `json:"cached_tokens"`
-	AudioTokens  int `json:"audio_tokens,omitempty"` // extension: audio input tokens
+	CachedTokens              int                        `json:"cached_tokens"`
+	CachedAudioTokens         int                        `json:"cached_audio_tokens,omitempty"`
+	CacheCreationTokens       int                        `json:"cache_creation_tokens,omitempty"` // extension: prompt cache writes
+	CacheCreationTokenDetails *CacheCreationTokenDetails `json:"cache_creation_token_details,omitempty"`
+	AudioTokens               int                        `json:"audio_tokens,omitempty"` // extension: audio input tokens
+}
+
+// CacheCreationTokenDetails preserves Anthropic's cache-write TTL breakdown.
+type CacheCreationTokenDetails struct {
+	Ephemeral5mInputTokens int `json:"ephemeral_5m_input_tokens,omitempty"`
+	Ephemeral1hInputTokens int `json:"ephemeral_1h_input_tokens,omitempty"`
 }
 
 // OutputDetails represents a breakdown of output token usage.

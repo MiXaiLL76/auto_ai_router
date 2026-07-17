@@ -344,7 +344,12 @@ func (p *Proxy) authenticateRequest(
 	logCtx.Token = token
 
 	if token == p.masterKey {
-		logCtx.TokenInfo = &models.TokenInfo{Token: auth.HashToken(p.masterKey), KeyName: "litellm-master-key", UserID: "litellm-master-key"}
+		logCtx.TokenInfo = &models.TokenInfo{
+			Token:       auth.HashToken(p.masterKey),
+			KeyName:     liteLLMMasterKeyIdentity,
+			UserID:      liteLLMMasterKeyIdentity,
+			IsMasterKey: true,
+		}
 		logCtx.Scope = scope.AdminContext()
 		return true
 	}

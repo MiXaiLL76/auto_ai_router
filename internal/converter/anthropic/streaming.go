@@ -46,6 +46,7 @@ func TransformAnthropicStreamToOpenAI(anthropicStream io.Reader, model string, o
 	// Usage accumulated across message_start / message_delta events.
 	var promptTokens, completionTokens int
 	var cacheReadTokens, cacheCreationTokens int // track cache tokens in streaming
+	var cacheCreation5mTokens, cacheCreation1hTokens int
 
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -72,7 +73,9 @@ func TransformAnthropicStreamToOpenAI(anthropicStream io.Reader, model string, o
 				}
 				promptTokens = event.Message.Usage.InputTokens
 				cacheReadTokens = event.Message.Usage.CacheReadInputTokens
-				cacheCreationTokens = event.Message.Usage.CacheCreationInputTokens
+				cacheCreationTokens, cacheCreation5mTokens, cacheCreation1hTokens = NormalizeCacheCreationUsage(
+					event.Message.Usage.CacheCreationInputTokens, event.Message.Usage.CacheCreation,
+				)
 			}
 			// Emit the first (role-only) chunk so the client knows the stream has started.
 			if isFirstChunk {
@@ -185,6 +188,15 @@ func TransformAnthropicStreamToOpenAI(anthropicStream io.Reader, model string, o
 					}
 					if event.Usage.CacheCreationInputTokens > 0 {
 						cacheCreationTokens = event.Usage.CacheCreationInputTokens
+						if event.Usage.CacheCreation != nil {
+							cacheCreationTokens, cacheCreation5mTokens, cacheCreation1hTokens = NormalizeCacheCreationUsage(
+								event.Usage.CacheCreationInputTokens, event.Usage.CacheCreation,
+							)
+						}
+					} else if event.Usage.CacheCreation != nil {
+						cacheCreationTokens, cacheCreation5mTokens, cacheCreation1hTokens = NormalizeCacheCreationUsage(
+							cacheCreationTokens, event.Usage.CacheCreation,
+						)
 					}
 				}
 				// Anthropic's input_tokens excludes cache tokens; add them back for the real total.
@@ -196,7 +208,14 @@ func TransformAnthropicStreamToOpenAI(anthropicStream io.Reader, model string, o
 				}
 				if cacheReadTokens > 0 || cacheCreationTokens > 0 {
 					usage.PromptTokensDetails = &openai.TokenDetails{
-						CachedTokens: cacheReadTokens,
+						CachedTokens:        cacheReadTokens,
+						CacheCreationTokens: cacheCreationTokens,
+					}
+					if cacheCreation5mTokens > 0 || cacheCreation1hTokens > 0 {
+						usage.PromptTokensDetails.CacheCreationTokenDetails = &openai.CacheCreationTokenDetails{
+							Ephemeral5mInputTokens: cacheCreation5mTokens,
+							Ephemeral1hInputTokens: cacheCreation1hTokens,
+						}
 					}
 				}
 				chunk := buildStreamChunk(chatID, model, timestamp, openai.OpenAIStreamingDelta{}, &reason, usage)

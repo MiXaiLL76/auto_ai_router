@@ -42,6 +42,38 @@ func TestEncodeBase64(t *testing.T) {
 	}
 }
 
+func TestNormalizeCachedAudioBreakdown(t *testing.T) {
+	tests := []struct {
+		name              string
+		cachedTokens      int
+		cachedAudioTokens int
+		wantCached        int
+		wantCachedAudio   int
+	}{
+		{name: "valid", cachedTokens: 80, cachedAudioTokens: 40, wantCached: 80, wantCachedAudio: 40},
+		{name: "negative cached tokens", cachedTokens: -80, cachedAudioTokens: 40, wantCached: 0, wantCachedAudio: 0},
+		{name: "negative cached audio", cachedTokens: 80, cachedAudioTokens: -40, wantCached: 80, wantCachedAudio: 0},
+		{name: "cached audio capped", cachedTokens: 10, cachedAudioTokens: 40, wantCached: 10, wantCachedAudio: 10},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotCached, gotCachedAudio := NormalizeCachedAudioBreakdown(tt.cachedTokens, tt.cachedAudioTokens)
+
+			assert.Equal(t, tt.wantCached, gotCached)
+			assert.Equal(t, tt.wantCachedAudio, gotCachedAudio)
+		})
+	}
+}
+
+func TestNormalizeAudioInputTokens(t *testing.T) {
+	assert.Equal(t, 60, NormalizeAudioInputTokens(100, 80, 40, true))
+	assert.Equal(t, 100, NormalizeAudioInputTokens(100, 80, 40, false))
+	assert.Equal(t, 100, NormalizeAudioInputTokens(100, -80, 40, true))
+	assert.Equal(t, 0, NormalizeAudioInputTokens(-100, 80, 40, true))
+	assert.Equal(t, 0, NormalizeAudioInputTokens(20, 80, 40, true))
+}
+
 func TestDecodeBase64(t *testing.T) {
 	tests := []struct {
 		name  string

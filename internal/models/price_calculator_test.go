@@ -246,6 +246,57 @@ func TestCalculateTokenCosts_SafetyNegativeTokens(t *testing.T) {
 	assert.Equal(t, 0.7, costs.TotalCost)
 }
 
+func TestCalculateTokenCosts_NegativeBreakdownFieldsAreIgnored(t *testing.T) {
+	usage := &converter.TokenUsage{
+		PromptTokens:             10,
+		CompletionTokens:         20,
+		AudioInputTokens:         -10,
+		AudioOutputTokens:        -20,
+		CachedInputTokens:        -30,
+		CachedAudioInputTokens:   -40,
+		CacheCreationTokens:      -50,
+		CacheCreation5mTokens:    -60,
+		CacheCreation1hTokens:    -70,
+		CachedOutputTokens:       -80,
+		ReasoningTokens:          -90,
+		AcceptedPredictionTokens: -100,
+		RejectedPredictionTokens: -110,
+		ImageCount:               -1,
+		ImageTokens:              -120,
+		OutputImageTokens:        -130,
+	}
+	price := &ModelPrice{
+		InputCostPerToken:            1,
+		OutputCostPerToken:           2,
+		InputCostPerAudioToken:       3,
+		OutputCostPerAudioToken:      4,
+		InputCostPerCachedToken:      5,
+		CacheReadInputAudioTokenCost: 6,
+		CacheCreationInputTokenCost:  7,
+		OutputCostPerCachedToken:     8,
+		OutputCostPerReasoningToken:  9,
+		OutputCostPerPredictionToken: 10,
+		InputCostPerImageToken:       11,
+		OutputCostPerImageToken:      12,
+		OutputCostPerImage:           13,
+	}
+
+	costs := CalculateTokenCosts(usage, price)
+
+	require.NotNil(t, costs)
+	assert.Equal(t, 10.0, costs.InputCost)
+	assert.Equal(t, 40.0, costs.OutputCost)
+	assert.Zero(t, costs.AudioInputCost)
+	assert.Zero(t, costs.AudioOutputCost)
+	assert.Zero(t, costs.CachedInputCost)
+	assert.Zero(t, costs.CacheCreationCost)
+	assert.Zero(t, costs.CachedOutputCost)
+	assert.Zero(t, costs.ReasoningCost)
+	assert.Zero(t, costs.PredictionCost)
+	assert.Zero(t, costs.ImageCost)
+	assert.Equal(t, 50.0, costs.TotalCost)
+}
+
 func TestCalculateTokenCosts_NilUsage(t *testing.T) {
 	price := &ModelPrice{
 		InputCostPerToken: 0.01,
@@ -550,4 +601,151 @@ func TestCalculateTokenCosts_GPT56ThresholdIsExclusive(t *testing.T) {
 	assert.NotNil(t, costs)
 	assert.InDelta(t, 1.768, costs.InputCost, 1e-9)
 	assert.InDelta(t, 0.000039, costs.OutputCost, 1e-12)
+}
+
+func TestCalculateTokenCosts_CacheLongContextAbove200kAndTTL(t *testing.T) {
+	usage := &converter.TokenUsage{
+		PromptTokens:          210_000,
+		CachedInputTokens:     100,
+		CacheCreationTokens:   60,
+		CacheCreation5mTokens: 20,
+		CacheCreation1hTokens: 40,
+	}
+	price := &ModelPrice{
+		InputCostPerToken:                            0.01,
+		CacheReadInputTokenCost:                      1,
+		CacheReadInputTokenCostAbove200k:             2,
+		CacheCreationInputTokenCost:                  3,
+		CacheCreationInputTokenCostAbove200k:         4,
+		CacheCreationInputTokenCostAbove1hr:          5,
+		CacheCreationInputTokenCostAbove1hrAbove200k: 6,
+	}
+
+	costs := CalculateTokenCosts(usage, price)
+
+	assert.InDelta(t, 200, costs.CachedInputCost, 1e-9)
+	assert.InDelta(t, 320, costs.CacheCreationCost, 1e-9) // 20*4 (5m) + 40*6 (1h)
+}
+
+func TestCalculateTokenCosts_CacheAbove272kTakesPrecedence(t *testing.T) {
+	usage := &converter.TokenUsage{
+		PromptTokens:        300_000,
+		CachedInputTokens:   100,
+		CacheCreationTokens: 50,
+	}
+	price := &ModelPrice{
+		InputCostPerToken:                    0.01,
+		CacheReadInputTokenCost:              1,
+		CacheReadInputTokenCostAbove200k:     2,
+		CacheReadInputTokenCostAbove272k:     3,
+		CacheCreationInputTokenCost:          4,
+		CacheCreationInputTokenCostAbove200k: 5,
+		CacheCreationInputTokenCostAbove272k: 6,
+	}
+
+	costs := CalculateTokenCosts(usage, price)
+
+	assert.InDelta(t, 300, costs.CachedInputCost, 1e-9)
+	assert.InDelta(t, 300, costs.CacheCreationCost, 1e-9)
+}
+
+func TestCalculateTokenCosts_CacheCreationAbove272kOverrides1hTTLRate(t *testing.T) {
+	usage := &converter.TokenUsage{
+		PromptTokens:          300_000,
+		CacheCreationTokens:   50,
+		CacheCreation5mTokens: 20,
+		CacheCreation1hTokens: 30,
+	}
+	price := &ModelPrice{
+		InputCostPerToken:                            0.01,
+		CacheCreationInputTokenCost:                  4,
+		CacheCreationInputTokenCostAbove200k:         5,
+		CacheCreationInputTokenCostAbove272k:         6,
+		CacheCreationInputTokenCostAbove1hr:          7,
+		CacheCreationInputTokenCostAbove1hrAbove200k: 8,
+	}
+
+	costs := CalculateTokenCosts(usage, price)
+
+	assert.InDelta(t, 300, costs.CacheCreationCost, 1e-9) // 50*6, including 1h tokens
+}
+
+func TestCalculateTokenCosts_CacheThresholdIsExclusive(t *testing.T) {
+	usage := &converter.TokenUsage{
+		PromptTokens:        tokenTiering200kThreshold,
+		CachedInputTokens:   10,
+		CacheCreationTokens: 10,
+	}
+	price := &ModelPrice{
+		InputCostPerToken:                    0.01,
+		CacheReadInputTokenCost:              1,
+		CacheReadInputTokenCostAbove200k:     2,
+		CacheCreationInputTokenCost:          3,
+		CacheCreationInputTokenCostAbove200k: 4,
+	}
+
+	costs := CalculateTokenCosts(usage, price)
+
+	assert.InDelta(t, 10, costs.CachedInputCost, 1e-9)
+	assert.InDelta(t, 30, costs.CacheCreationCost, 1e-9)
+}
+
+func TestCalculateTokenCosts_CacheCreationTTLBreakdownIsCappedAtAggregate(t *testing.T) {
+	usage := &converter.TokenUsage{
+		PromptTokens:          100,
+		CacheCreationTokens:   10,
+		CacheCreation5mTokens: 8,
+		CacheCreation1hTokens: 8,
+	}
+	price := &ModelPrice{
+		InputCostPerToken:                   0.01,
+		CacheCreationInputTokenCost:         2,
+		CacheCreationInputTokenCostAbove1hr: 5,
+	}
+
+	costs := CalculateTokenCosts(usage, price)
+
+	assert.InDelta(t, 26, costs.CacheCreationCost, 1e-9) // 8*2 + capped 2*5
+}
+
+func TestCalculateTokenCosts_CacheCreation1hCostsMoreThan5mForSameVolume(t *testing.T) {
+	price := &ModelPrice{
+		InputCostPerToken:                   0.000003,
+		CacheCreationInputTokenCost:         0.00000375,
+		CacheCreationInputTokenCostAbove1hr: 0.000006,
+	}
+	fiveMinutes := &converter.TokenUsage{
+		PromptTokens:          1_000,
+		CacheCreationTokens:   1_000,
+		CacheCreation5mTokens: 1_000,
+	}
+	oneHour := &converter.TokenUsage{
+		PromptTokens:          1_000,
+		CacheCreationTokens:   1_000,
+		CacheCreation1hTokens: 1_000,
+	}
+
+	fiveMinuteCosts := CalculateTokenCosts(fiveMinutes, price)
+	oneHourCosts := CalculateTokenCosts(oneHour, price)
+
+	assert.InDelta(t, 0.00375, fiveMinuteCosts.TotalCost, 1e-12)
+	assert.InDelta(t, 0.006, oneHourCosts.TotalCost, 1e-12)
+}
+
+func TestCalculateTokenCosts_CachedAudioUsesDedicatedRate(t *testing.T) {
+	usage := &converter.TokenUsage{
+		PromptTokens:           100,
+		CachedInputTokens:      80,
+		CachedAudioInputTokens: 30,
+	}
+	price := &ModelPrice{
+		InputCostPerToken:            1,
+		CacheReadInputTokenCost:      0.1,
+		CacheReadInputAudioTokenCost: 0.3,
+	}
+
+	costs := CalculateTokenCosts(usage, price)
+
+	assert.InDelta(t, 14, costs.CachedInputCost, 1e-9) // 50*0.1 + 30*0.3
+	assert.InDelta(t, 20, costs.InputCost, 1e-9)
 }

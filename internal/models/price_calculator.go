@@ -28,7 +28,19 @@ func CalculateTokenCosts(usage *converter.TokenUsage, price *ModelPrice) *conver
 	}
 
 	costs := &converter.TokenCosts{}
-	longContext272k := usage.PromptTokens > tokenTiering272kThreshold
+	promptTokens := nonNegativeTokenCount(usage.PromptTokens)
+	completionTokens := nonNegativeTokenCount(usage.CompletionTokens)
+	audioInputTokens := nonNegativeTokenCount(usage.AudioInputTokens)
+	audioOutputTokens := nonNegativeTokenCount(usage.AudioOutputTokens)
+	imageTokens := nonNegativeTokenCount(usage.ImageTokens)
+	outputImageTokens := nonNegativeTokenCount(usage.OutputImageTokens)
+	cachedOutputTokens := nonNegativeTokenCount(usage.CachedOutputTokens)
+	reasoningTokens := nonNegativeTokenCount(usage.ReasoningTokens)
+	acceptedPredictionTokens := nonNegativeTokenCount(usage.AcceptedPredictionTokens)
+	rejectedPredictionTokens := nonNegativeTokenCount(usage.RejectedPredictionTokens)
+	imageCount := nonNegativeTokenCount(usage.ImageCount)
+
+	longContext272k := promptTokens > tokenTiering272kThreshold
 	inputCostPerToken := price.InputCostPerToken
 	if longContext272k && price.InputCostPerTokenAbove272k > 0 {
 		inputCostPerToken = price.InputCostPerTokenAbove272k
@@ -38,9 +50,12 @@ func CalculateTokenCosts(usage *converter.TokenUsage, price *ModelPrice) *conver
 		outputCostPerToken = price.OutputCostPerTokenAbove272k
 	}
 
+	cachedInputTokens := nonNegativeTokenCount(usage.CachedInputTokens)
+	cacheCreationTokens := nonNegativeTokenCount(usage.CacheCreationTokens)
+
 	// Calculate "regular" input tokens by subtracting specialized token types.
 	// Vertex/OpenAI: audio/cached tokens are included in PromptTokens; Anthropic: same + cache creation.
-	regularInputTokens := usage.PromptTokens - usage.AudioInputTokens - usage.CachedInputTokens - usage.CacheCreationTokens - usage.ImageTokens
+	regularInputTokens := promptTokens - audioInputTokens - cachedInputTokens - cacheCreationTokens - imageTokens
 	if regularInputTokens < 0 {
 		regularInputTokens = 0
 	}
@@ -48,10 +63,10 @@ func CalculateTokenCosts(usage *converter.TokenUsage, price *ModelPrice) *conver
 	// Regular input with 200k tiering
 	if longContext272k && price.InputCostPerTokenAbove272k > 0 {
 		costs.InputCost = float64(regularInputTokens) * inputCostPerToken
-	} else if price.InputCostPerTokenAbove200k > 0 && usage.PromptTokens > tokenTiering200kThreshold {
-		above := usage.PromptTokens - tokenTiering200kThreshold
+	} else if price.InputCostPerTokenAbove200k > 0 && promptTokens > tokenTiering200kThreshold {
+		above := promptTokens - tokenTiering200kThreshold
 		// Distribute regular tokens proportionally between below/above threshold
-		regularAbove := int(int64(regularInputTokens) * int64(above) / int64(usage.PromptTokens))
+		regularAbove := int(int64(regularInputTokens) * int64(above) / int64(promptTokens))
 		regularBelow := regularInputTokens - regularAbove
 		costs.InputCost = float64(regularBelow)*price.InputCostPerToken +
 			float64(regularAbove)*price.InputCostPerTokenAbove200k
@@ -60,8 +75,8 @@ func CalculateTokenCosts(usage *converter.TokenUsage, price *ModelPrice) *conver
 	}
 
 	// Calculate "regular" output tokens by subtracting specialized token types
-	regularOutputTokens := usage.CompletionTokens - usage.AudioOutputTokens - usage.ReasoningTokens -
-		usage.AcceptedPredictionTokens - usage.RejectedPredictionTokens - usage.OutputImageTokens
+	regularOutputTokens := completionTokens - audioOutputTokens - reasoningTokens -
+		acceptedPredictionTokens - rejectedPredictionTokens - outputImageTokens
 	if regularOutputTokens < 0 {
 		regularOutputTokens = 0
 	}
@@ -69,10 +84,10 @@ func CalculateTokenCosts(usage *converter.TokenUsage, price *ModelPrice) *conver
 	// Regular output with 200k tiering
 	if longContext272k && price.OutputCostPerTokenAbove272k > 0 {
 		costs.OutputCost = float64(regularOutputTokens) * outputCostPerToken
-	} else if price.OutputCostPerTokenAbove200k > 0 && usage.CompletionTokens > tokenTiering200kThreshold {
-		above := usage.CompletionTokens - tokenTiering200kThreshold
+	} else if price.OutputCostPerTokenAbove200k > 0 && completionTokens > tokenTiering200kThreshold {
+		above := completionTokens - tokenTiering200kThreshold
 		// Distribute regular tokens proportionally between below/above threshold
-		regularAbove := int(int64(regularOutputTokens) * int64(above) / int64(usage.CompletionTokens))
+		regularAbove := int(int64(regularOutputTokens) * int64(above) / int64(completionTokens))
 		regularBelow := regularOutputTokens - regularAbove
 		costs.OutputCost = float64(regularBelow)*price.OutputCostPerToken +
 			float64(regularAbove)*price.OutputCostPerTokenAbove200k
@@ -85,13 +100,13 @@ func CalculateTokenCosts(usage *converter.TokenUsage, price *ModelPrice) *conver
 	if audioInputCost == 0 {
 		audioInputCost = inputCostPerToken
 	}
-	costs.AudioInputCost = float64(usage.AudioInputTokens) * audioInputCost
+	costs.AudioInputCost = float64(audioInputTokens) * audioInputCost
 
 	audioOutputCost := price.OutputCostPerAudioToken
 	if audioOutputCost == 0 {
 		audioOutputCost = outputCostPerToken
 	}
-	costs.AudioOutputCost = float64(usage.AudioOutputTokens) * audioOutputCost
+	costs.AudioOutputCost = float64(audioOutputTokens) * audioOutputCost
 
 	// Cached read tokens: prefer explicit cached price, fall back to LiteLLM alias,
 	// then fall back to regular rate (no discount known).
@@ -101,43 +116,82 @@ func CalculateTokenCosts(usage *converter.TokenUsage, price *ModelPrice) *conver
 	}
 	if longContext272k && price.CacheReadInputTokenCostAbove272k > 0 {
 		cachedInputCost = price.CacheReadInputTokenCostAbove272k
+	} else if promptTokens > tokenTiering200kThreshold && price.CacheReadInputTokenCostAbove200k > 0 {
+		cachedInputCost = price.CacheReadInputTokenCostAbove200k
 	}
 	if cachedInputCost == 0 {
 		cachedInputCost = inputCostPerToken
 	}
-	costs.CachedInputCost = float64(usage.CachedInputTokens) * cachedInputCost
+	cachedAudioTokens := nonNegativeTokenCount(usage.CachedAudioInputTokens)
+	if cachedAudioTokens > cachedInputTokens {
+		cachedAudioTokens = cachedInputTokens
+	}
+	regularCachedTokens := cachedInputTokens - cachedAudioTokens
+	cachedAudioCost := price.CacheReadInputAudioTokenCost
+	if cachedAudioCost == 0 {
+		cachedAudioCost = cachedInputCost
+	}
+	costs.CachedInputCost = float64(regularCachedTokens)*cachedInputCost +
+		float64(cachedAudioTokens)*cachedAudioCost
 
 	cacheCreationCost := price.CacheCreationInputTokenCost
+	cacheCreationUses272kRate := false
 	if longContext272k && price.CacheCreationInputTokenCostAbove272k > 0 {
 		cacheCreationCost = price.CacheCreationInputTokenCostAbove272k
+		cacheCreationUses272kRate = true
+	} else if promptTokens > tokenTiering200kThreshold && price.CacheCreationInputTokenCostAbove200k > 0 {
+		cacheCreationCost = price.CacheCreationInputTokenCostAbove200k
 	}
 	if cacheCreationCost == 0 {
 		cacheCreationCost = inputCostPerToken
 	}
-	costs.CacheCreationCost = float64(usage.CacheCreationTokens) * cacheCreationCost
+	cacheCreation1hCost := cacheCreationCost
+	if !cacheCreationUses272kRate {
+		cacheCreation1hCost = price.CacheCreationInputTokenCostAbove1hr
+		if promptTokens > tokenTiering200kThreshold && price.CacheCreationInputTokenCostAbove1hrAbove200k > 0 {
+			cacheCreation1hCost = price.CacheCreationInputTokenCostAbove1hrAbove200k
+		}
+		if cacheCreation1hCost == 0 {
+			cacheCreation1hCost = cacheCreationCost
+		}
+	}
+
+	// The aggregate remains authoritative for compatibility. TTL details split it;
+	// malformed details are capped so they can never bill more than the aggregate.
+	cacheCreation5mTokens := nonNegativeTokenCount(usage.CacheCreation5mTokens)
+	if cacheCreation5mTokens > cacheCreationTokens {
+		cacheCreation5mTokens = cacheCreationTokens
+	}
+	cacheCreation1hTokens := nonNegativeTokenCount(usage.CacheCreation1hTokens)
+	if cacheCreation1hTokens > cacheCreationTokens-cacheCreation5mTokens {
+		cacheCreation1hTokens = cacheCreationTokens - cacheCreation5mTokens
+	}
+	unclassifiedCacheCreationTokens := cacheCreationTokens - cacheCreation5mTokens - cacheCreation1hTokens
+	costs.CacheCreationCost = float64(unclassifiedCacheCreationTokens+cacheCreation5mTokens)*cacheCreationCost +
+		float64(cacheCreation1hTokens)*cacheCreation1hCost
 
 	cachedOutputCost := price.OutputCostPerCachedToken
 	if cachedOutputCost == 0 {
 		cachedOutputCost = outputCostPerToken
 	}
-	costs.CachedOutputCost = float64(usage.CachedOutputTokens) * cachedOutputCost
+	costs.CachedOutputCost = float64(cachedOutputTokens) * cachedOutputCost
 
 	// Reasoning tokens with fallback
 	reasoningCost := price.OutputCostPerReasoningToken
 	if reasoningCost == 0 {
 		reasoningCost = outputCostPerToken
 	}
-	costs.ReasoningCost = float64(usage.ReasoningTokens) * reasoningCost
+	costs.ReasoningCost = float64(reasoningTokens) * reasoningCost
 
 	// Prediction tokens with fallback (accepted tokens)
 	predictionCost := price.OutputCostPerPredictionToken
 	if predictionCost == 0 {
 		predictionCost = outputCostPerToken
 	}
-	costs.PredictionCost = float64(usage.AcceptedPredictionTokens) * predictionCost
+	costs.PredictionCost = float64(acceptedPredictionTokens) * predictionCost
 
 	// Rejected prediction tokens count as regular output tokens
-	costs.PredictionCost += float64(usage.RejectedPredictionTokens) * outputCostPerToken
+	costs.PredictionCost += float64(rejectedPredictionTokens) * outputCostPerToken
 
 	// Input image tokens are part of PromptTokens. Price them separately when a
 	// modality-specific rate exists, otherwise keep the regular input rate.
@@ -145,19 +199,19 @@ func CalculateTokenCosts(usage *converter.TokenUsage, price *ModelPrice) *conver
 	if inputImageCost == 0 {
 		inputImageCost = inputCostPerToken
 	}
-	costs.ImageCost = float64(usage.ImageTokens) * inputImageCost
+	costs.ImageCost = float64(imageTokens) * inputImageCost
 
 	// Generated image tokens are part of CompletionTokens and must not also be
 	// charged as text. Prefer the token-based image rate when the provider reports
 	// a token breakdown; otherwise use the per-image price for Imagen-style APIs.
-	if usage.OutputImageTokens > 0 {
+	if outputImageTokens > 0 {
 		outputImageCost := price.OutputCostPerImageToken
 		if outputImageCost == 0 {
 			outputImageCost = outputCostPerToken
 		}
-		costs.ImageCost += float64(usage.OutputImageTokens) * outputImageCost
-	} else if usage.ImageCount > 0 && price.OutputCostPerImage > 0 {
-		costs.ImageCost += float64(usage.ImageCount) * price.OutputCostPerImage
+		costs.ImageCost += float64(outputImageTokens) * outputImageCost
+	} else if imageCount > 0 && price.OutputCostPerImage > 0 {
+		costs.ImageCost += float64(imageCount) * price.OutputCostPerImage
 	}
 
 	// Calculate total
@@ -187,4 +241,11 @@ func (p *ModelPrice) CalculateCost(usage *converter.TokenUsage) float64 {
 // CalculateCosts returns the full cost breakdown for all token types.
 func (p *ModelPrice) CalculateCosts(usage *converter.TokenUsage) *converter.TokenCosts {
 	return CalculateTokenCosts(usage, p)
+}
+
+func nonNegativeTokenCount(tokens int) int {
+	if tokens < 0 {
+		return 0
+	}
+	return tokens
 }

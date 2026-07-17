@@ -639,6 +639,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Write response (streaming or non-streaming)
+		tokenUsageOptions := tokenUsageExtractionOptionsForCredential(cred)
 		if proxyResp.IsStreaming {
 			p.logger.DebugContext(r.Context(), "Response is streaming (no retry for streaming)",
 				"credential", cred.Name, "status", proxyResp.StatusCode)
@@ -688,7 +689,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 					Header:     proxyResp.Headers,
 					Body:       proxyResp.StreamBody,
 				}
-				if err := p.handlePassthroughResponsesStreaming(w, fakeResp, cred.Name, realModelID, logCtx, saveResponseFn); err != nil {
+				if err := p.handlePassthroughResponsesStreaming(w, fakeResp, cred.Name, realModelID, logCtx, saveResponseFn, tokenUsageOptions); err != nil {
 					p.logStreamHandlerError(r.Context(), "Failed to handle proxy passthrough Responses API streaming", err,
 						"credential", cred.Name, "model", modelID, "request_id", logCtx.RequestID)
 				} else if proxyResp.StatusCode >= 200 && proxyResp.StatusCode < 300 {
@@ -703,7 +704,9 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 					tokenizerModelID = modelID
 				}
 				logCtx.PromptTokensEstimate = estimatePromptTokensForModel(proxyBody, tokenizerModelID)
-				streamUsage, err := p.writeProxyStreamingResponseWithTokens(w, proxyResp, r, cred.Name, modelID, tokenizerModelID, logCtx)
+				streamUsage, err := p.writeProxyStreamingResponseWithTokens(
+					w, proxyResp, r, cred.Name, modelID, tokenizerModelID, logCtx, tokenUsageOptions,
+				)
 				if err != nil {
 					p.logStreamHandlerError(r.Context(), "Failed to write streaming proxy response", err,
 						"credential", cred.Name, "model", modelID, "request_id", logCtx.RequestID)
@@ -754,7 +757,10 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 			} else if prepared.convertedResp && proxyResp.StatusCode >= 200 && proxyResp.StatusCode < 300 {
-				responsesBody, convErr := responses.ChatToResponse(proxyResp.Body)
+				responsesBody, convErr := responses.ChatToResponse(
+					proxyResp.Body,
+					responses.WithAudioInputIncludesCachedAudio(tokenUsageOptions.AudioInputIncludesCachedAudio),
+				)
 				if convErr != nil {
 					p.logger.ErrorContext(r.Context(), "Failed to convert proxy response to Responses API format",
 						"credential", cred.Name, "model", modelID, "error", convErr,
@@ -779,6 +785,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 						}
 					}
 					proxyResp.Body = responsesBody
+					tokenUsageOptions.AudioInputIncludesCachedAudio = false
 				}
 			}
 
@@ -817,7 +824,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		logCtx.HTTPStatus = proxyResp.StatusCode
 		logCtx.TargetURL = cred.BaseURL
 		if !proxyResp.IsStreaming {
-			logCtx.TokenUsage = converter.ExtractTokenUsage(proxyResp.Body)
+			logCtx.TokenUsage = converter.ExtractTokenUsageWithOptions(proxyResp.Body, tokenUsageOptions)
 			if logCtx.TokenUsage != nil && proxyResp.StatusCode < 400 {
 				p.metrics.RecordTokenUsage(cred.Name, modelID,
 					logCtx.TokenUsage.PromptTokens, logCtx.TokenUsage.CompletionTokens,
@@ -1293,6 +1300,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		// For error responses (4xx/5xx) pass the provider body through unchanged.
 		// nativeResponses path skips this step — provider→Responses API conversion
 		// happens further down via provResponses.ResponseTo().
+		tokenUsageOptions := tokenUsageExtractionOptionsForCredential(cred)
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 && !prepared.nativeResponses && conv != nil && !conv.IsPassthrough() {
 			convertedBody, convErr := conv.ResponseTo([]byte(decodedBody))
 			if convErr != nil {
@@ -1306,6 +1314,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 				finalResponseBody = []byte(decodedBody)
 			} else {
 				finalResponseBody = convertedBody
+				tokenUsageOptions.AudioInputIncludesCachedAudio = false
 				p.logTransformedResponse(r.Context(), cred.Name, string(cred.Type), finalResponseBody)
 			}
 		} else {
@@ -1341,6 +1350,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 					// the raw provider body (e.g. Vertex usageMetadata) is not
 					// parseable by ExtractTokenUsage which expects OpenAI-compatible fields.
 					bodyForTokenExtraction = finalResponseBody
+					tokenUsageOptions.AudioInputIncludesCachedAudio = false
 				}
 				if saveResponseFn != nil {
 					saveResponseFn(nativeResp)
@@ -1360,7 +1370,10 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			}
 		} else if prepared.convertedResp && resp.StatusCode >= 200 && resp.StatusCode < 300 {
 			// Non-codex: convert Chat Completions response back to Responses API format.
-			responsesBody, convErr := responses.ChatToResponse(finalResponseBody)
+			responsesBody, convErr := responses.ChatToResponse(
+				finalResponseBody,
+				responses.WithAudioInputIncludesCachedAudio(tokenUsageOptions.AudioInputIncludesCachedAudio),
+			)
 			if convErr != nil {
 				p.logger.ErrorContext(r.Context(), "Failed to convert to Responses API format",
 					"credential", cred.Name, "model", modelID, "error", convErr,
@@ -1421,7 +1434,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		resp.Body = io.NopCloser(bytes.NewReader(finalResponseBody))
 
 		// Log to LiteLLM DB (non-streaming)
-		logCtx.TokenUsage = converter.ExtractTokenUsage(bodyForTokenExtraction)
+		logCtx.TokenUsage = converter.ExtractTokenUsageWithOptions(bodyForTokenExtraction, tokenUsageOptions)
 		logCtx.Status = "success"
 		logCtx.HTTPStatus = resp.StatusCode
 		logCtx.TargetURL = targetURL

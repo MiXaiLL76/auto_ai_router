@@ -10,6 +10,7 @@ credentials:
     type: "proxy"
     base_url: "http://backup-router.local:8080"
     api_key: "sk-remote-master-key"  # Optional
+    proxy_usage_format: "normalized" # Use only when upstream audio_tokens excludes cached audio
     rpm: 200
     tpm: 100000
     is_fallback: true
@@ -23,10 +24,18 @@ credentials:
 
 ## Optional Fields
 
-| Field         | Description                                                                       |
-| ------------- | --------------------------------------------------------------------------------- |
-| `api_key`     | Remote master key (if the target requires authentication)                         |
-| `is_fallback` | When `true`, this credential is only used after primary credentials are exhausted |
+| Field                | Description                                                                       |
+| -------------------- | --------------------------------------------------------------------------------- |
+| `api_key`            | Remote master key (if the target requires authentication)                         |
+| `is_fallback`        | When `true`, this credential is only used after primary credentials are exhausted |
+| `proxy_usage_format` | Usage contract: `openai` (default) or `normalized`                                |
+
+`proxy_usage_format` controls cached-audio accounting:
+
+- `openai` means `audio_tokens` includes `cached_audio_tokens`; the router subtracts cached audio before billing ordinary audio. This is the safe default for generic OpenAI-compatible APIs.
+- `normalized` means `audio_tokens` already contains only non-cached audio and `cached_audio_tokens` is reported separately. Use this only when the upstream explicitly guarantees that contract, including AIR deployments configured to expose normalized usage.
+
+The setting is explicit because `type: proxy` can target either kind of API; the wire payload alone is ambiguous when both fields are present.
 
 ## Fallback Behavior
 

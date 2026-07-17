@@ -104,8 +104,12 @@ func TestCustomPricingLiteLLMParamsFields(t *testing.T) {
 	cacheReadInput := 0.000001
 	cacheCreationInput := 0.00000125
 	cacheReadInputAbove200k := 0.0000008
+	cacheCreationInputAbove200k := 0.0000015
+	cacheCreationInputAbove1hr := 0.000002
+	cacheCreationInputAbove1hrAbove200k := 0.000003
 	cacheReadInputAbove272k := 0.000001
 	cacheCreationInputAbove272k := 0.0000125
+	cacheReadInputAudio := 0.0000009
 
 	inputAudio := 0.000006
 	inputAudioPerSecond := 0.00006
@@ -125,35 +129,39 @@ func TestCustomPricingLiteLLMParamsFields(t *testing.T) {
 	outputReasoningToken := 0.000018
 
 	params := CustomPricingLiteLLMParams{
-		InputCostPerToken:                          &inputCost,
-		OutputCostPerToken:                         &outputCost,
-		InputCostPerTokenAbove128kTokens:           &inputAbove128k,
-		InputCostPerTokenAbove200kTokens:           &inputAbove200k,
-		InputCostPerTokenAbove272kTokens:           &inputAbove272k,
-		OutputCostPerTokenAbove128kTokens:          &outputAbove128k,
-		OutputCostPerTokenAbove200kTokens:          &outputAbove200k,
-		OutputCostPerTokenAbove272kTokens:          &outputAbove272k,
-		InputCostPerSecond:                         &inputCostPerSecond,
-		OutputCostPerSecond:                        &outputCostPerSecond,
-		CacheReadInputTokenCost:                    &cacheReadInput,
-		CacheCreationInputTokenCost:                &cacheCreationInput,
-		CacheReadInputTokenCostAbove200kTokens:     &cacheReadInputAbove200k,
-		CacheReadInputTokenCostAbove272kTokens:     &cacheReadInputAbove272k,
-		CacheCreationInputTokenCostAbove272kTokens: &cacheCreationInputAbove272k,
-		InputCostPerAudioToken:                     &inputAudio,
-		InputCostPerAudioPerSecond:                 &inputAudioPerSecond,
-		InputCostPerAudioPerSecondAbove128kTokens:  &inputAudioAbove128k,
-		OutputCostPerAudioToken:                    &outputAudio,
-		OutputCostPerAudioPerSecond:                &outputAudioPerSecond,
-		InputCostPerVideoPerSecond:                 &inputVideoPerSecond,
-		InputCostPerVideoPerSecondAbove15sInterval: &inputVideoPerSecondAbove15s,
-		InputCostPerVideoPerSecondAbove8sInterval:  &inputVideoPerSecondAbove8s,
-		OutputCostPerVideoPerSecond:                &outputVideoPerSecond,
-		InputCostPerImage:                          &inputImage,
-		InputCostPerImageAbove128kTokens:           &inputImageAbove128k,
-		OutputCostPerImage:                         &outputImage,
-		OutputCostPerImageToken:                    &outputImageToken,
-		OutputCostPerReasoningToken:                &outputReasoningToken,
+		InputCostPerToken:                                  &inputCost,
+		OutputCostPerToken:                                 &outputCost,
+		InputCostPerTokenAbove128kTokens:                   &inputAbove128k,
+		InputCostPerTokenAbove200kTokens:                   &inputAbove200k,
+		InputCostPerTokenAbove272kTokens:                   &inputAbove272k,
+		OutputCostPerTokenAbove128kTokens:                  &outputAbove128k,
+		OutputCostPerTokenAbove200kTokens:                  &outputAbove200k,
+		OutputCostPerTokenAbove272kTokens:                  &outputAbove272k,
+		InputCostPerSecond:                                 &inputCostPerSecond,
+		OutputCostPerSecond:                                &outputCostPerSecond,
+		CacheReadInputTokenCost:                            &cacheReadInput,
+		CacheCreationInputTokenCost:                        &cacheCreationInput,
+		CacheReadInputTokenCostAbove200kTokens:             &cacheReadInputAbove200k,
+		CacheCreationInputTokenCostAbove200kTokens:         &cacheCreationInputAbove200k,
+		CacheCreationInputTokenCostAbove1hr:                &cacheCreationInputAbove1hr,
+		CacheCreationInputTokenCostAbove1hrAbove200kTokens: &cacheCreationInputAbove1hrAbove200k,
+		CacheReadInputTokenCostAbove272kTokens:             &cacheReadInputAbove272k,
+		CacheCreationInputTokenCostAbove272kTokens:         &cacheCreationInputAbove272k,
+		CacheReadInputAudioTokenCost:                       &cacheReadInputAudio,
+		InputCostPerAudioToken:                             &inputAudio,
+		InputCostPerAudioPerSecond:                         &inputAudioPerSecond,
+		InputCostPerAudioPerSecondAbove128kTokens:          &inputAudioAbove128k,
+		OutputCostPerAudioToken:                            &outputAudio,
+		OutputCostPerAudioPerSecond:                        &outputAudioPerSecond,
+		InputCostPerVideoPerSecond:                         &inputVideoPerSecond,
+		InputCostPerVideoPerSecondAbove15sInterval:         &inputVideoPerSecondAbove15s,
+		InputCostPerVideoPerSecondAbove8sInterval:          &inputVideoPerSecondAbove8s,
+		OutputCostPerVideoPerSecond:                        &outputVideoPerSecond,
+		InputCostPerImage:                                  &inputImage,
+		InputCostPerImageAbove128kTokens:                   &inputImageAbove128k,
+		OutputCostPerImage:                                 &outputImage,
+		OutputCostPerImageToken:                            &outputImageToken,
+		OutputCostPerReasoningToken:                        &outputReasoningToken,
 	}
 
 	assert.NotNil(t, params.InputCostPerToken)
@@ -162,6 +170,11 @@ func TestCustomPricingLiteLLMParamsFields(t *testing.T) {
 	assert.Equal(t, 0.00003, *params.OutputCostPerToken)
 	assert.Equal(t, 0.000018, *params.OutputCostPerReasoningToken)
 	assert.Equal(t, 0.00000125, *params.CacheCreationInputTokenCost)
+	assert.Equal(t, 0.0000008, *params.CacheReadInputTokenCostAbove200kTokens)
+	assert.Equal(t, 0.0000015, *params.CacheCreationInputTokenCostAbove200kTokens)
+	assert.Equal(t, 0.000002, *params.CacheCreationInputTokenCostAbove1hr)
+	assert.Equal(t, 0.000003, *params.CacheCreationInputTokenCostAbove1hrAbove200kTokens)
+	assert.Equal(t, 0.0000009, *params.CacheReadInputAudioTokenCost)
 	assert.Equal(t, 0.00001, *params.InputCostPerTokenAbove272kTokens)
 	assert.Equal(t, 0.000045, *params.OutputCostPerTokenAbove272kTokens)
 	assert.Equal(t, 0.000001, *params.CacheReadInputTokenCostAbove272kTokens)

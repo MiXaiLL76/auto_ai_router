@@ -56,6 +56,9 @@ func (p *Proxy) buildKafkaSpendEvent(
 	usage := logCtx.TokenUsage
 	if usage == nil {
 		usage = &converter.TokenUsage{}
+	} else {
+		normalizedUsage := *usage
+		usage = normalizedUsage.Normalize()
 	}
 
 	realModel := logCtx.RealModelID

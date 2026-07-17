@@ -35,9 +35,12 @@ type anthropicStreamAccumulator struct {
 	// reasoningItem *responses.OutputItem
 
 	// Usage
-	inputTokens  int
-	outputTokens int
-	cachedTokens int
+	inputTokens           int
+	outputTokens          int
+	cachedTokens          int
+	cacheCreationTokens   int
+	cacheCreation5mTokens int
+	cacheCreation1hTokens int
 
 	// Stream status
 	stopReason         string
@@ -115,6 +118,9 @@ func processAnthropicEvent(w io.Writer, acc *anthropicStreamAccumulator, event *
 		if event.Message != nil {
 			acc.inputTokens = event.Message.Usage.InputTokens
 			acc.cachedTokens = event.Message.Usage.CacheReadInputTokens
+			acc.cacheCreationTokens, acc.cacheCreation5mTokens, acc.cacheCreation1hTokens = anthropic.NormalizeCacheCreationUsage(
+				event.Message.Usage.CacheCreationInputTokens, event.Message.Usage.CacheCreation,
+			)
 		}
 
 	case "content_block_start":
@@ -218,6 +224,21 @@ func processAnthropicEvent(w io.Writer, acc *anthropicStreamAccumulator, event *
 		}
 		if event.Usage != nil {
 			acc.outputTokens = event.Usage.OutputTokens
+			if event.Usage.CacheReadInputTokens > 0 {
+				acc.cachedTokens = event.Usage.CacheReadInputTokens
+			}
+			if event.Usage.CacheCreationInputTokens > 0 {
+				acc.cacheCreationTokens = event.Usage.CacheCreationInputTokens
+				if event.Usage.CacheCreation != nil {
+					acc.cacheCreationTokens, acc.cacheCreation5mTokens, acc.cacheCreation1hTokens = anthropic.NormalizeCacheCreationUsage(
+						event.Usage.CacheCreationInputTokens, event.Usage.CacheCreation,
+					)
+				}
+			} else if event.Usage.CacheCreation != nil {
+				acc.cacheCreationTokens, acc.cacheCreation5mTokens, acc.cacheCreation1hTokens = anthropic.NormalizeCacheCreationUsage(
+					acc.cacheCreationTokens, event.Usage.CacheCreation,
+				)
+			}
 		}
 
 	case "message_stop":
@@ -462,13 +483,21 @@ func buildAnthropicCompletedResponse(acc *anthropicStreamAccumulator) *responses
 		}}
 	}
 
+	totalInputTokens := acc.inputTokens + acc.cachedTokens + acc.cacheCreationTokens
 	usage := &responses.Usage{
-		InputTokens:  acc.inputTokens,
+		InputTokens:  totalInputTokens,
 		OutputTokens: acc.outputTokens,
-		TotalTokens:  acc.inputTokens + acc.outputTokens,
+		TotalTokens:  totalInputTokens + acc.outputTokens,
 		InputTokensDetails: responses.InputDetails{
-			CachedTokens: acc.cachedTokens,
+			CachedTokens:        acc.cachedTokens,
+			CacheCreationTokens: acc.cacheCreationTokens,
 		},
+	}
+	if acc.cacheCreation5mTokens > 0 || acc.cacheCreation1hTokens > 0 {
+		usage.InputTokensDetails.CacheCreationTokenDetails = &responses.CacheCreationTokenDetails{
+			Ephemeral5mInputTokens: acc.cacheCreation5mTokens,
+			Ephemeral1hInputTokens: acc.cacheCreation1hTokens,
+		}
 	}
 
 	completedAt := acc.createdAt

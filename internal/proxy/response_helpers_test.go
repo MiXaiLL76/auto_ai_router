@@ -3,8 +3,95 @@ package proxy
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"testing"
+
+	"github.com/mixaill76/auto_ai_router/internal/config"
+	"github.com/mixaill76/auto_ai_router/internal/converter"
 )
+
+func TestTokenUsageExtractionOptionsForCredential(t *testing.T) {
+	tests := []struct {
+		name     string
+		cred     *config.CredentialConfig
+		includes bool
+	}{
+		{
+			name:     "generic proxy defaults to OpenAI semantics",
+			cred:     &config.CredentialConfig{Type: config.ProviderTypeProxy},
+			includes: true,
+		},
+		{
+			name: "explicit OpenAI proxy",
+			cred: &config.CredentialConfig{
+				Type:             config.ProviderTypeProxy,
+				ProxyUsageFormat: config.ProxyUsageFormatOpenAI,
+			},
+			includes: true,
+		},
+		{
+			name: "explicit normalized proxy",
+			cred: &config.CredentialConfig{
+				Type:             config.ProviderTypeProxy,
+				ProxyUsageFormat: config.ProxyUsageFormatNormalized,
+			},
+			includes: false,
+		},
+		{
+			name:     "direct OpenAI provider",
+			cred:     &config.CredentialConfig{Type: config.ProviderTypeOpenAI},
+			includes: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := tokenUsageExtractionOptionsForCredential(tt.cred)
+			if got.AudioInputIncludesCachedAudio != tt.includes {
+				t.Fatalf("unexpected usage semantics: got %v, want %v", got.AudioInputIncludesCachedAudio, tt.includes)
+			}
+		})
+	}
+}
+
+func TestProxyUsageContractCachedAudioMatrix(t *testing.T) {
+	tests := []struct {
+		name      string
+		cred      config.CredentialConfig
+		audio     int
+		wantAudio int
+	}{
+		{
+			name:      "raw OpenAI-compatible proxy subtracts cached audio",
+			cred:      config.CredentialConfig{Type: config.ProviderTypeProxy},
+			audio:     100,
+			wantAudio: 60,
+		},
+		{
+			name: "normalized proxy preserves non-cached audio",
+			cred: config.CredentialConfig{
+				Type:             config.ProviderTypeProxy,
+				ProxyUsageFormat: config.ProxyUsageFormatNormalized,
+			},
+			audio:     60,
+			wantAudio: 60,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body := []byte(`{"usage":{"prompt_tokens":200,"completion_tokens":1,"prompt_tokens_details":{"cached_tokens":80,"cached_audio_tokens":40,"audio_tokens":` +
+				fmt.Sprintf("%d", tt.audio) + `}}}`)
+			usage := converter.ExtractTokenUsageWithOptions(
+				body,
+				tokenUsageExtractionOptionsForCredential(&tt.cred),
+			)
+			if usage == nil || usage.AudioInputTokens != tt.wantAudio {
+				t.Fatalf("unexpected usage: %+v; want audio=%d", usage, tt.wantAudio)
+			}
+		})
+	}
+}
 
 func TestInjectStreamOptions_AddsIncludeUsage(t *testing.T) {
 	body := []byte(`{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}`)

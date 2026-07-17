@@ -122,6 +122,27 @@ func TestCandidatesToOutputItems_CodeInterpreter_CodeAndResult(t *testing.T) {
 	assert.Equal(t, "2\n", outputs[0]["text"])
 }
 
+func TestUsageMetadataToUsage_PreservesCachedAudioTokens(t *testing.T) {
+	usage := usageMetadataToUsage(&genai.GenerateContentResponseUsageMetadata{
+		PromptTokenCount:        100,
+		CandidatesTokenCount:    10,
+		TotalTokenCount:         110,
+		CachedContentTokenCount: 60,
+		PromptTokensDetails: []*genai.ModalityTokenCount{
+			{Modality: genai.MediaModalityAudio, TokenCount: 40},
+		},
+		CacheTokensDetails: []*genai.ModalityTokenCount{
+			{Modality: genai.MediaModalityAudio, TokenCount: 25},
+			{Modality: genai.MediaModalityText, TokenCount: 35},
+		},
+	})
+
+	require.NotNil(t, usage)
+	assert.Equal(t, 60, usage.InputTokensDetails.CachedTokens)
+	assert.Equal(t, 25, usage.InputTokensDetails.CachedAudioTokens)
+	assert.Equal(t, 15, usage.InputTokensDetails.AudioTokens)
+}
+
 func TestCandidatesToOutputItems_CodeInterpreter_CodeOnly(t *testing.T) {
 	vertexResp := &genai.GenerateContentResponse{
 		Candidates: []*genai.Candidate{

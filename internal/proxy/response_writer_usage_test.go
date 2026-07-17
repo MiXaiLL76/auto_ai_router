@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
+	"github.com/mixaill76/auto_ai_router/internal/converter"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -133,6 +134,67 @@ func TestWriteProxyStreamingResponseNormalizesQwenUsage(t *testing.T) {
 	assert.Contains(t, w.Body.String(), `"reasoning_tokens":4417`)
 	assert.Contains(t, w.Body.String(), `"provider_detail":"kept"`)
 	assert.Contains(t, w.Body.String(), "data: [DONE]\r\n\r\n")
+}
+
+func TestWriteProxyStreamingResponsePreservesNormalizedCachedAudioUsage(t *testing.T) {
+	stream := `data: {"choices":[],"usage":{"prompt_tokens":200,"completion_tokens":1,"prompt_tokens_details":{"cached_tokens":80,"cached_audio_tokens":40,"audio_tokens":60}}}` + "\n\n" +
+		"data: [DONE]\n\n"
+	resp := &ProxyResponse{
+		StatusCode:  http.StatusOK,
+		Headers:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		StreamBody:  io.NopCloser(strings.NewReader(stream)),
+		IsStreaming: true,
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	w := httptest.NewRecorder()
+
+	usage, err := NewTestProxyBuilder().Build().writeProxyStreamingResponseWithTokens(
+		w,
+		resp,
+		req,
+		"downstream-air",
+		"gpt-4o-audio",
+		"gpt-4o-audio",
+		nil,
+		converter.TokenUsageExtractionOptions{AudioInputIncludesCachedAudio: false},
+	)
+
+	require.NoError(t, err)
+	require.NotNil(t, usage)
+	assert.Equal(t, 200, usage.PromptTokens)
+	assert.Equal(t, 80, usage.CachedInputTokens)
+	assert.Equal(t, 40, usage.CachedAudioInputTokens)
+	assert.Equal(t, 60, usage.AudioInputTokens)
+}
+
+func TestWriteProxyStreamingResponseNormalizesRawOpenAICachedAudioUsage(t *testing.T) {
+	stream := `data: {"choices":[],"usage":{"prompt_tokens":200,"completion_tokens":1,"prompt_tokens_details":{"cached_tokens":80,"cached_audio_tokens":40,"audio_tokens":100}}}` + "\n\n" +
+		"data: [DONE]\n\n"
+	resp := &ProxyResponse{
+		StatusCode:  http.StatusOK,
+		Headers:     http.Header{"Content-Type": []string{"text/event-stream"}},
+		StreamBody:  io.NopCloser(strings.NewReader(stream)),
+		IsStreaming: true,
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	w := httptest.NewRecorder()
+
+	usage, err := NewTestProxyBuilder().Build().writeProxyStreamingResponseWithTokens(
+		w,
+		resp,
+		req,
+		"generic-openai-proxy",
+		"gpt-4o-audio",
+		"gpt-4o-audio",
+		nil,
+	)
+
+	require.NoError(t, err)
+	require.NotNil(t, usage)
+	assert.Equal(t, 200, usage.PromptTokens)
+	assert.Equal(t, 80, usage.CachedInputTokens)
+	assert.Equal(t, 40, usage.CachedAudioInputTokens)
+	assert.Equal(t, 60, usage.AudioInputTokens)
 }
 
 func TestWriteProxyStreamingResponseQwenDrainCapturesUsage(t *testing.T) {

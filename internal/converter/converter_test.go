@@ -511,6 +511,26 @@ func TestProviderConverter_UsageFromResponse(t *testing.T) {
 	}
 }
 
+func TestProviderConverter_UsageFromResponseProxyDefaultsToOpenAISemantics(t *testing.T) {
+	body := []byte(`{"usage":{"input_tokens":200,"output_tokens":1,"input_tokens_details":{"cached_tokens":80,"cached_audio_tokens":40,"audio_tokens":100}}}`)
+
+	proxyUsage := New(config.ProviderTypeProxy, RequestMode{}).UsageFromResponse(body)
+	if proxyUsage == nil {
+		t.Fatal("expected proxy usage")
+	}
+	if proxyUsage.AudioInputTokens != 60 {
+		t.Fatalf("generic proxy should default to raw OpenAI-compatible usage, got %+v", proxyUsage)
+	}
+
+	openAIUsage := New(config.ProviderTypeOpenAI, RequestMode{}).UsageFromResponse(body)
+	if openAIUsage == nil {
+		t.Fatal("expected OpenAI usage")
+	}
+	if openAIUsage.AudioInputTokens != 60 {
+		t.Fatalf("OpenAI-compatible raw usage should subtract cached audio, got %+v", openAIUsage)
+	}
+}
+
 func TestExtractTokenUsage(t *testing.T) {
 	if got := ExtractTokenUsage(nil); got != nil {
 		t.Fatalf("expected nil for empty body")
@@ -519,16 +539,16 @@ func TestExtractTokenUsage(t *testing.T) {
 		t.Fatalf("expected nil for invalid json")
 	}
 
-	chatBody := []byte(`{"usage":{"prompt_tokens":5,"completion_tokens":7,"prompt_tokens_details":{"cached_tokens":2,"cache_creation_tokens":4,"audio_tokens":1},"completion_tokens_details":{"accepted_prediction_tokens":3,"rejected_prediction_tokens":1,"audio_tokens":4,"reasoning_tokens":6,"image_tokens":2}}}`)
+	chatBody := []byte(`{"usage":{"prompt_tokens":15,"completion_tokens":7,"prompt_tokens_details":{"cached_tokens":5,"cached_audio_tokens":2,"cache_creation_tokens":4,"cache_creation_token_details":{"ephemeral_5m_input_tokens":1,"ephemeral_1h_input_tokens":3},"audio_tokens":3},"completion_tokens_details":{"accepted_prediction_tokens":3,"rejected_prediction_tokens":1,"audio_tokens":4,"reasoning_tokens":6,"image_tokens":2}}}`)
 	usage := ExtractTokenUsage(chatBody)
 	if usage == nil {
 		t.Fatalf("expected usage for chat format")
 		return
 	}
-	if usage.PromptTokens != 5 || usage.CompletionTokens != 7 {
+	if usage.PromptTokens != 15 || usage.CompletionTokens != 7 {
 		t.Fatalf("unexpected chat token counts: %+v", usage)
 	}
-	if usage.CachedInputTokens != 2 || usage.CacheCreationTokens != 4 || usage.AudioInputTokens != 1 || usage.AudioOutputTokens != 4 || usage.ReasoningTokens != 6 {
+	if usage.CachedInputTokens != 5 || usage.CachedAudioInputTokens != 2 || usage.CacheCreationTokens != 4 || usage.CacheCreation5mTokens != 1 || usage.CacheCreation1hTokens != 3 || usage.AudioInputTokens != 1 || usage.AudioOutputTokens != 4 || usage.ReasoningTokens != 6 {
 		t.Fatalf("unexpected details: %+v", usage)
 	}
 	if usage.AcceptedPredictionTokens != 3 || usage.RejectedPredictionTokens != 1 {
@@ -551,6 +571,16 @@ func TestExtractTokenUsage(t *testing.T) {
 	zeroBody := []byte(`{"usage":{"prompt_tokens":0,"completion_tokens":0}}`)
 	if got := ExtractTokenUsage(zeroBody); got != nil {
 		t.Fatalf("expected nil for zero usage")
+	}
+}
+
+func TestExtractTokenUsage_CacheCreationDetailsProvideMissingAggregate(t *testing.T) {
+	body := []byte(`{"usage":{"input_tokens":10,"output_tokens":1,"input_tokens_details":{"cache_creation_token_details":{"ephemeral_5m_input_tokens":3,"ephemeral_1h_input_tokens":7}}}}`)
+
+	usage := ExtractTokenUsage(body)
+
+	if usage == nil || usage.CacheCreationTokens != 10 || usage.CacheCreation5mTokens != 3 || usage.CacheCreation1hTokens != 7 {
+		t.Fatalf("unexpected cache creation usage: %+v", usage)
 	}
 }
 
@@ -588,6 +618,91 @@ func TestExtractTokenUsage_ResponsesAPI(t *testing.T) {
 	}
 	if usage.OutputImageTokens != 40 {
 		t.Fatalf("expected output_image_tokens=40, got %d", usage.OutputImageTokens)
+	}
+}
+
+func TestExtractTokenUsage_CachedAudioIsExcludedFromAudioInput(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{
+			name: "chat completions",
+			body: `{"usage":{"prompt_tokens":200,"completion_tokens":1,"prompt_tokens_details":{"cached_tokens":80,"cached_audio_tokens":40,"audio_tokens":100}}}`,
+		},
+		{
+			name: "responses API",
+			body: `{"usage":{"input_tokens":200,"output_tokens":1,"input_tokens_details":{"cached_tokens":80,"cached_audio_tokens":40,"audio_tokens":100}}}`,
+		},
+		{
+			name: "responses streaming event",
+			body: `{"type":"response.completed","response":{"usage":{"input_tokens":200,"output_tokens":1,"input_tokens_details":{"cached_tokens":80,"cached_audio_tokens":40,"audio_tokens":100}}}}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			usage := ExtractTokenUsage([]byte(tt.body))
+
+			if usage == nil {
+				t.Fatal("expected usage")
+			}
+			if usage.CachedAudioInputTokens != 40 {
+				t.Fatalf("expected cached audio=40, got %+v", usage)
+			}
+			if usage.AudioInputTokens != 60 {
+				t.Fatalf("expected non-cached audio=60, got %+v", usage)
+			}
+		})
+	}
+}
+
+func TestExtractTokenUsage_PreservesAlreadyNormalizedAudioInput(t *testing.T) {
+	body := []byte(`{"usage":{"input_tokens":200,"output_tokens":1,"input_tokens_details":{"cached_tokens":80,"cached_audio_tokens":40,"audio_tokens":60}}}`)
+
+	usage := ExtractTokenUsageWithOptions(body, TokenUsageExtractionOptions{})
+
+	if usage == nil {
+		t.Fatal("expected usage")
+	}
+	if usage.AudioInputTokens != 60 {
+		t.Fatalf("expected already-normalized audio=60, got %+v", usage)
+	}
+}
+
+func TestExtractTokenUsage_NegativeCachedTokensDoNotIncreaseAudioInput(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{
+			name: "chat completions",
+			body: `{"usage":{"prompt_tokens":200,"completion_tokens":1,"prompt_tokens_details":{"cached_tokens":-80,"cached_audio_tokens":40,"audio_tokens":100}}}`,
+		},
+		{
+			name: "responses API",
+			body: `{"usage":{"input_tokens":200,"output_tokens":1,"input_tokens_details":{"cached_tokens":-80,"cached_audio_tokens":40,"audio_tokens":100}}}`,
+		},
+		{
+			name: "responses streaming event",
+			body: `{"type":"response.completed","response":{"usage":{"input_tokens":200,"output_tokens":1,"input_tokens_details":{"cached_tokens":-80,"cached_audio_tokens":40,"audio_tokens":100}}}}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			usage := ExtractTokenUsage([]byte(tt.body))
+
+			if usage == nil {
+				t.Fatal("expected usage")
+			}
+			if usage.CachedInputTokens != 0 || usage.CachedAudioInputTokens != 0 {
+				t.Fatalf("expected cached fields to be sanitized, got %+v", usage)
+			}
+			if usage.AudioInputTokens != 100 {
+				t.Fatalf("expected audio input to stay 100, got %+v", usage)
+			}
+		})
 	}
 }
 

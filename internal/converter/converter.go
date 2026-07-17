@@ -309,7 +309,14 @@ func (c *ProviderConverter) IsPassthrough() bool {
 // UsageFromResponse extracts token usage from an OpenAI-format response body.
 // Should be called after ResponseTo() so the body is always in OpenAI format.
 func (c *ProviderConverter) UsageFromResponse(body []byte) *TokenUsage {
-	return ExtractTokenUsage(body)
+	if c.IsPassthrough() {
+		return ExtractTokenUsage(body)
+	}
+	return ExtractTokenUsageWithOptions(body, TokenUsageExtractionOptions{})
+}
+
+type TokenUsageExtractionOptions struct {
+	AudioInputIncludesCachedAudio bool
 }
 
 // ExtractTokenUsage parses token usage from an OpenAI-format JSON response body.
@@ -317,6 +324,12 @@ func (c *ProviderConverter) UsageFromResponse(body []byte) *TokenUsage {
 // and image generation format (input_tokens/output_tokens).
 // Returns nil if body cannot be parsed or contains no usage data.
 func ExtractTokenUsage(body []byte) *TokenUsage {
+	return ExtractTokenUsageWithOptions(body, TokenUsageExtractionOptions{AudioInputIncludesCachedAudio: true})
+}
+
+// ExtractTokenUsageWithOptions is like ExtractTokenUsage, but lets callers
+// preserve provider-converted usage that already reports non-cached audio input.
+func ExtractTokenUsageWithOptions(body []byte, opts TokenUsageExtractionOptions) *TokenUsage {
 	if len(body) == 0 {
 		return nil
 	}
@@ -325,12 +338,17 @@ func ExtractTokenUsage(body []byte) *TokenUsage {
 		InputTokens        int `json:"input_tokens"`
 		OutputTokens       int `json:"output_tokens"`
 		InputTokensDetails struct {
-			CachedTokens        int `json:"cached_tokens,omitempty"`
-			CacheCreationTokens int `json:"cache_creation_tokens,omitempty"`
-			CacheWriteTokens    int `json:"cache_write_tokens,omitempty"`
-			ImageTokens         int `json:"image_tokens,omitempty"`
-			TextTokens          int `json:"text_tokens,omitempty"`
-			AudioTokens         int `json:"audio_tokens,omitempty"`
+			CachedTokens              int `json:"cached_tokens,omitempty"`
+			CachedAudioTokens         int `json:"cached_audio_tokens,omitempty"`
+			CacheCreationTokens       int `json:"cache_creation_tokens,omitempty"`
+			CacheWriteTokens          int `json:"cache_write_tokens,omitempty"`
+			CacheCreationTokenDetails struct {
+				Ephemeral5mInputTokens int `json:"ephemeral_5m_input_tokens,omitempty"`
+				Ephemeral1hInputTokens int `json:"ephemeral_1h_input_tokens,omitempty"`
+			} `json:"cache_creation_token_details,omitempty"`
+			ImageTokens int `json:"image_tokens,omitempty"`
+			TextTokens  int `json:"text_tokens,omitempty"`
+			AudioTokens int `json:"audio_tokens,omitempty"`
 		} `json:"input_tokens_details,omitempty"`
 		OutputTokensDetails struct {
 			AudioTokens     int `json:"audio_tokens,omitempty"`
@@ -345,12 +363,17 @@ func ExtractTokenUsage(body []byte) *TokenUsage {
 			PromptTokens        int `json:"prompt_tokens"`
 			CompletionTokens    int `json:"completion_tokens"`
 			PromptTokensDetails struct {
-				CachedTokens        int `json:"cached_tokens,omitempty"`
-				CacheCreationTokens int `json:"cache_creation_tokens,omitempty"`
-				CacheWriteTokens    int `json:"cache_write_tokens,omitempty"`
-				AudioTokens         int `json:"audio_tokens,omitempty"`
-				TextTokens          int `json:"text_tokens,omitempty"`
-				ImageTokens         int `json:"image_tokens,omitempty"`
+				CachedTokens              int `json:"cached_tokens,omitempty"`
+				CachedAudioTokens         int `json:"cached_audio_tokens,omitempty"`
+				CacheCreationTokens       int `json:"cache_creation_tokens,omitempty"`
+				CacheWriteTokens          int `json:"cache_write_tokens,omitempty"`
+				CacheCreationTokenDetails struct {
+					Ephemeral5mInputTokens int `json:"ephemeral_5m_input_tokens,omitempty"`
+					Ephemeral1hInputTokens int `json:"ephemeral_1h_input_tokens,omitempty"`
+				} `json:"cache_creation_token_details,omitempty"`
+				AudioTokens int `json:"audio_tokens,omitempty"`
+				TextTokens  int `json:"text_tokens,omitempty"`
+				ImageTokens int `json:"image_tokens,omitempty"`
 			} `json:"prompt_tokens_details,omitempty"`
 			CompletionTokensDetails struct {
 				AcceptedPredictionTokens int `json:"accepted_prediction_tokens,omitempty"`
@@ -399,14 +422,22 @@ func ExtractTokenUsage(body []byte) *TokenUsage {
 		cachedTokens = resp.Usage.InputTokensDetails.CachedTokens
 	}
 	cacheCreationTokens := resp.Usage.PromptTokensDetails.CacheCreationTokens
+	cacheCreation5mTokens := resp.Usage.PromptTokensDetails.CacheCreationTokenDetails.Ephemeral5mInputTokens
+	cacheCreation1hTokens := resp.Usage.PromptTokensDetails.CacheCreationTokenDetails.Ephemeral1hInputTokens
+	cachedAudioTokens := resp.Usage.PromptTokensDetails.CachedAudioTokens
 	if cacheCreationTokens == 0 {
 		cacheCreationTokens = resp.Usage.PromptTokensDetails.CacheWriteTokens
 	}
 	if cacheCreationTokens == 0 {
 		cacheCreationTokens = resp.Usage.InputTokensDetails.CacheCreationTokens
+		cacheCreation5mTokens = resp.Usage.InputTokensDetails.CacheCreationTokenDetails.Ephemeral5mInputTokens
+		cacheCreation1hTokens = resp.Usage.InputTokensDetails.CacheCreationTokenDetails.Ephemeral1hInputTokens
 	}
 	if cacheCreationTokens == 0 {
 		cacheCreationTokens = resp.Usage.InputTokensDetails.CacheWriteTokens
+	}
+	if cachedAudioTokens == 0 {
+		cachedAudioTokens = resp.Usage.InputTokensDetails.CachedAudioTokens
 	}
 	audioIn := resp.Usage.PromptTokensDetails.AudioTokens
 	if audioIn == 0 {
@@ -437,6 +468,8 @@ func ExtractTokenUsage(body []byte) *TokenUsage {
 		}
 		if cacheCreationTokens == 0 {
 			cacheCreationTokens = u.InputTokensDetails.CacheCreationTokens
+			cacheCreation5mTokens = u.InputTokensDetails.CacheCreationTokenDetails.Ephemeral5mInputTokens
+			cacheCreation1hTokens = u.InputTokensDetails.CacheCreationTokenDetails.Ephemeral1hInputTokens
 		}
 		if cacheCreationTokens == 0 {
 			cacheCreationTokens = u.InputTokensDetails.CacheWriteTokens
@@ -446,6 +479,9 @@ func ExtractTokenUsage(body []byte) *TokenUsage {
 		}
 		if inputImageTokens == 0 {
 			inputImageTokens = u.InputTokensDetails.ImageTokens
+		}
+		if cachedAudioTokens == 0 {
+			cachedAudioTokens = u.InputTokensDetails.CachedAudioTokens
 		}
 		if audioOut == 0 {
 			audioOut = u.OutputTokensDetails.AudioTokens
@@ -457,12 +493,25 @@ func ExtractTokenUsage(body []byte) *TokenUsage {
 			outputImageTokens = u.OutputTokensDetails.ImageTokens
 		}
 	}
+	if cacheCreationTokens == 0 {
+		cacheCreationTokens = cacheCreation5mTokens + cacheCreation1hTokens
+	}
+	cachedTokens, cachedAudioTokens = converterutil.NormalizeCachedAudioBreakdown(cachedTokens, cachedAudioTokens)
+	audioIn = converterutil.NormalizeAudioInputTokens(
+		audioIn,
+		cachedTokens,
+		cachedAudioTokens,
+		opts.AudioInputIncludesCachedAudio,
+	)
 
-	return &TokenUsage{
+	return (&TokenUsage{
 		PromptTokens:             promptTokens,
 		CompletionTokens:         completionTokens,
 		CachedInputTokens:        cachedTokens,
+		CachedAudioInputTokens:   cachedAudioTokens,
 		CacheCreationTokens:      cacheCreationTokens,
+		CacheCreation5mTokens:    cacheCreation5mTokens,
+		CacheCreation1hTokens:    cacheCreation1hTokens,
 		AudioInputTokens:         audioIn,
 		ImageTokens:              inputImageTokens,
 		OutputImageTokens:        outputImageTokens,
@@ -470,5 +519,5 @@ func ExtractTokenUsage(body []byte) *TokenUsage {
 		RejectedPredictionTokens: resp.Usage.CompletionTokensDetails.RejectedPredictionTokens,
 		AudioOutputTokens:        audioOut,
 		ReasoningTokens:          reasoning,
-	}
+	}).Normalize()
 }

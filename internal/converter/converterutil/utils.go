@@ -84,6 +84,34 @@ func DecodeBase64(encoded string) []byte {
 	return decoded
 }
 
+func NormalizeCachedAudioBreakdown(cachedTokens, cachedAudioTokens int) (int, int) {
+	if cachedTokens < 0 {
+		cachedTokens = 0
+	}
+	if cachedAudioTokens < 0 {
+		cachedAudioTokens = 0
+	}
+	if cachedAudioTokens > cachedTokens {
+		cachedAudioTokens = cachedTokens
+	}
+	return cachedTokens, cachedAudioTokens
+}
+
+func NormalizeAudioInputTokens(audioTokens, cachedTokens, cachedAudioTokens int, includesCachedAudio bool) int {
+	if audioTokens < 0 {
+		return 0
+	}
+	if !includesCachedAudio {
+		return audioTokens
+	}
+	_, cachedAudioTokens = NormalizeCachedAudioBreakdown(cachedTokens, cachedAudioTokens)
+	audioTokens -= cachedAudioTokens
+	if audioTokens < 0 {
+		return 0
+	}
+	return audioTokens
+}
+
 // BuildVersionedURL joins a provider base URL and API path without duplicating
 // a leading version segment such as /v1 when the base URL already includes it.
 func BuildVersionedURL(baseURL, apiPath string) string {
