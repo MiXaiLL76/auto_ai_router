@@ -102,6 +102,8 @@ func PrintConfig(logger *slog.Logger, cfg *Config) {
 		"health_check_path", cfg.Monitoring.HealthCheckPath,
 		"log_errors", cfg.Monitoring.LogErrors,
 		"errors_log_path", cfg.Monitoring.ErrorsLogPath,
+		"pprof_enabled", cfg.Monitoring.PprofEnabled,
+		"pprof_port", cfg.Monitoring.PprofPort,
 	)
 
 	// Fail2Ban config
@@ -184,6 +186,7 @@ func PrintConfig(logger *slog.Logger, cfg *Config) {
 			"log_queue_size", cfg.LiteLLMDB.LogQueueSize,
 			"log_batch_size", cfg.LiteLLMDB.LogBatchSize,
 			"log_flush_interval", cfg.LiteLLMDB.LogFlushInterval.String(),
+			"log_workers", cfg.LiteLLMDB.LogWorkers,
 			"disable_spend_logs_write", cfg.LiteLLMDB.DisableSpendLogsWrite,
 		)
 	} else {
@@ -203,6 +206,7 @@ func PrintConfig(logger *slog.Logger, cfg *Config) {
 			"log_queue_size", cfg.Kafka.LogQueueSize,
 			"log_batch_size", cfg.Kafka.LogBatchSize,
 			"log_flush_interval", cfg.Kafka.LogFlushInterval.String(),
+			"log_workers", cfg.Kafka.LogWorkers,
 			"tls_enabled", cfg.Kafka.TLSEnabled,
 			"sasl_mechanism", cfg.Kafka.SASLMechanism,
 			"sasl_username", cfg.Kafka.SASLUsername,
