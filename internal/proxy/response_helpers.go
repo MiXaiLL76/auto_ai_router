@@ -262,6 +262,44 @@ func extractImageCountFromBody(body []byte, contentType string) int {
 	return 1
 }
 
+func extractWebSearchRequestUsage(body []byte, contentType string) (bool, string) {
+	if len(body) == 0 || strings.HasPrefix(strings.ToLower(contentType), "multipart/form-data") {
+		return false, ""
+	}
+
+	var req struct {
+		WebSearchOptions map[string]interface{}   `json:"web_search_options,omitempty"`
+		Tools            []map[string]interface{} `json:"tools,omitempty"`
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		return false, ""
+	}
+
+	if req.WebSearchOptions != nil {
+		return true, webSearchContextSizeFromMap(req.WebSearchOptions)
+	}
+	for _, tool := range req.Tools {
+		if !isWebSearchTool(tool) {
+			continue
+		}
+		return true, webSearchContextSizeFromMap(tool)
+	}
+	return false, ""
+}
+
+func isWebSearchTool(tool map[string]interface{}) bool {
+	toolType, _ := tool["type"].(string)
+	return toolType == "web_search" || strings.HasPrefix(toolType, "web_search_")
+}
+
+func webSearchContextSizeFromMap(values map[string]interface{}) string {
+	if values == nil {
+		return converter.NormalizeWebSearchContextSize("")
+	}
+	size, _ := values["search_context_size"].(string)
+	return converter.NormalizeWebSearchContextSize(size)
+}
+
 // decodeResponseBody decodes the response body based on Content-Encoding
 func decodeResponseBody(body []byte, encoding string) string {
 	lowerEncoding := strings.ToLower(encoding)

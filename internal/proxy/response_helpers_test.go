@@ -93,6 +93,48 @@ func TestProxyUsageContractCachedAudioMatrix(t *testing.T) {
 	}
 }
 
+func TestExtractWebSearchRequestUsage(t *testing.T) {
+	tests := []struct {
+		name     string
+		body     string
+		wantOn   bool
+		wantSize string
+	}{
+		{
+			name:     "web_search_options high",
+			body:     `{"model":"gpt-4o-search-preview","web_search_options":{"search_context_size":"high"}}`,
+			wantOn:   true,
+			wantSize: "high",
+		},
+		{
+			name:     "web_search tool defaults medium",
+			body:     `{"model":"gpt-4o","tools":[{"type":"web_search"}]}`,
+			wantOn:   true,
+			wantSize: "medium",
+		},
+		{
+			name:     "versioned web_search tool low",
+			body:     `{"model":"gpt-4o","tools":[{"type":"web_search_preview_2025_03_11","search_context_size":"low"}]}`,
+			wantOn:   true,
+			wantSize: "low",
+		},
+		{
+			name:   "no web search",
+			body:   `{"model":"gpt-4o","tools":[{"type":"function","function":{"name":"f"}}]}`,
+			wantOn: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotOn, gotSize := extractWebSearchRequestUsage([]byte(tt.body), "application/json")
+			if gotOn != tt.wantOn || gotSize != tt.wantSize {
+				t.Fatalf("unexpected web search usage: got (%v,%q), want (%v,%q)", gotOn, gotSize, tt.wantOn, tt.wantSize)
+			}
+		})
+	}
+}
+
 func TestInjectStreamOptions_AddsIncludeUsage(t *testing.T) {
 	body := []byte(`{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}`)
 	modified := injectStreamOptions(body)

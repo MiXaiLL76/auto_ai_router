@@ -63,6 +63,10 @@ type ModelPrice struct {
 
 	// Vision/Images cost per image (not per token)
 	OutputCostPerImage float64 `json:"output_cost_per_image,omitempty"`
+
+	// Built-in web search tool pricing. Values are per query/call, keyed by
+	// search_context_size_low|medium|high in LiteLLM's price format.
+	SearchContextCostPerQuery map[string]float64 `json:"search_context_cost_per_query,omitempty"`
 }
 
 // ModelPriceRegistry stores and manages cached model prices

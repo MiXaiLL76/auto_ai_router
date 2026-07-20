@@ -92,6 +92,8 @@ type RequestLogContext struct {
 	TokenInfo            *litellmdb.TokenInfo     // User/team/org info
 	IsImageGeneration    bool                     // True if this is an image generation request
 	ImageCount           int                      // Number of images to generate (from 'n' param)
+	WebSearchRequested   bool                     // True when the request enabled the built-in web search tool
+	WebSearchContextSize string                   // low|medium|high from web_search_options/tool config
 	Logged               bool                     // True if already logged (prevents duplicate logging)
 	PromptTokensEstimate int                      // Estimated prompt tokens for streaming responses (since streaming doesn't provide prompt tokens in headers)
 	IsResponsesAPI       bool                     // True if this is a Responses API request (converted to Chat Completions)
@@ -555,6 +557,10 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		if logCtx.ImageCount <= 0 {
 			logCtx.ImageCount = 1
 		}
+	}
+	if webSearchRequested, webSearchContextSize := extractWebSearchRequestUsage(body, r.Header.Get("Content-Type")); webSearchRequested {
+		logCtx.WebSearchRequested = true
+		logCtx.WebSearchContextSize = webSearchContextSize
 	}
 
 	// Handle proxy credential type with same-type retry + fallback

@@ -214,6 +214,12 @@ func CalculateTokenCosts(usage *converter.TokenUsage, price *ModelPrice) *conver
 		costs.ImageCost += float64(imageCount) * price.OutputCostPerImage
 	}
 
+	webSearchRequests := nonNegativeTokenCount(usage.WebSearchRequests)
+	if webSearchRequests > 0 {
+		costs.WebSearchCost = float64(webSearchRequests) *
+			price.webSearchCostPerQuery(usage.WebSearchContextSize)
+	}
+
 	// Calculate total
 	costs.TotalCost = costs.InputCost +
 		costs.OutputCost +
@@ -224,7 +230,8 @@ func CalculateTokenCosts(usage *converter.TokenUsage, price *ModelPrice) *conver
 		costs.CacheCreationCost +
 		costs.CachedOutputCost +
 		costs.PredictionCost +
-		costs.ImageCost
+		costs.ImageCost +
+		costs.WebSearchCost
 
 	return costs
 }
@@ -248,4 +255,12 @@ func nonNegativeTokenCount(tokens int) int {
 		return 0
 	}
 	return tokens
+}
+
+func (p *ModelPrice) webSearchCostPerQuery(contextSize string) float64 {
+	if p == nil || len(p.SearchContextCostPerQuery) == 0 {
+		return 0
+	}
+	key := "search_context_size_" + converter.NormalizeWebSearchContextSize(contextSize)
+	return p.SearchContextCostPerQuery[key]
 }

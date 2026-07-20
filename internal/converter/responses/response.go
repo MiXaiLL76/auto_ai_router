@@ -88,6 +88,9 @@ func ChatToResponse(body []byte, opts ...ChatToResponseOption) ([]byte, error) {
 				AudioTokens     int `json:"audio_tokens,omitempty"`
 				ImageTokens     int `json:"image_tokens,omitempty"`
 			} `json:"completion_tokens_details,omitempty"`
+			ServerToolUse *struct {
+				WebSearchRequests int `json:"web_search_requests,omitempty"`
+			} `json:"server_tool_use,omitempty"`
 		} `json:"usage,omitempty"`
 	}
 
@@ -220,6 +223,11 @@ func ChatToResponse(body []byte, opts ...ChatToResponseOption) ([]byte, error) {
 			usage.OutputTokensDetails.ReasoningTokens = ccResp.Usage.CompletionTokensDetails.ReasoningTokens
 			usage.OutputTokensDetails.AudioTokens = ccResp.Usage.CompletionTokensDetails.AudioTokens
 			usage.OutputTokensDetails.ImageTokens = ccResp.Usage.CompletionTokensDetails.ImageTokens
+		}
+		if ccResp.Usage.ServerToolUse != nil && ccResp.Usage.ServerToolUse.WebSearchRequests > 0 {
+			usage.ServerToolUse = &ServerToolUseDetails{
+				WebSearchRequests: ccResp.Usage.ServerToolUse.WebSearchRequests,
+			}
 		}
 	}
 

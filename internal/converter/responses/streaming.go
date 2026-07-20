@@ -82,6 +82,7 @@ type chatCompletionsUsage struct {
 	AudioInputTokens      int
 	AudioOutputTokens     int
 	ImageOutputTokens     int
+	WebSearchRequests     int
 }
 
 // chatStreamChunk represents a parsed Chat Completions streaming chunk.
@@ -128,6 +129,9 @@ type chatStreamChunk struct {
 			AudioTokens     int `json:"audio_tokens,omitempty"`
 			ImageTokens     int `json:"image_tokens,omitempty"`
 		} `json:"completion_tokens_details,omitempty"`
+		ServerToolUse *struct {
+			WebSearchRequests int `json:"web_search_requests,omitempty"`
+		} `json:"server_tool_use,omitempty"`
 	} `json:"usage,omitempty"`
 }
 
@@ -280,6 +284,9 @@ func transformChatStreamToResponsesInner(
 				acc.usage.ReasoningTokens = chunk.Usage.CompletionTokensDetails.ReasoningTokens
 				acc.usage.AudioOutputTokens = chunk.Usage.CompletionTokensDetails.AudioTokens
 				acc.usage.ImageOutputTokens = chunk.Usage.CompletionTokensDetails.ImageTokens
+			}
+			if chunk.Usage.ServerToolUse != nil && chunk.Usage.ServerToolUse.WebSearchRequests > 0 {
+				acc.usage.WebSearchRequests = chunk.Usage.ServerToolUse.WebSearchRequests
 			}
 		}
 
@@ -519,6 +526,11 @@ func buildTypedCompletedResponse(acc *streamAccumulator) *Response {
 				AudioTokens:         acc.usage.AudioInputTokens,
 			},
 			OutputTokensDetails: OutputDetails{ReasoningTokens: acc.usage.ReasoningTokens, AudioTokens: acc.usage.AudioOutputTokens, ImageTokens: acc.usage.ImageOutputTokens},
+		}
+		if acc.usage.WebSearchRequests > 0 {
+			usage.ServerToolUse = &ServerToolUseDetails{
+				WebSearchRequests: acc.usage.WebSearchRequests,
+			}
 		}
 		if acc.usage.CacheCreation5mTokens > 0 || acc.usage.CacheCreation1hTokens > 0 {
 			usage.InputTokensDetails.CacheCreationTokenDetails = &CacheCreationTokenDetails{
@@ -786,6 +798,11 @@ func buildCompletedResponse(acc *streamAccumulator) map[string]interface{} {
 				AudioTokens:     acc.usage.AudioOutputTokens,
 				ImageTokens:     acc.usage.ImageOutputTokens,
 			},
+		}
+		if acc.usage.WebSearchRequests > 0 {
+			usageObj.ServerToolUse = &ServerToolUseDetails{
+				WebSearchRequests: acc.usage.WebSearchRequests,
+			}
 		}
 		if acc.usage.CacheCreation5mTokens > 0 || acc.usage.CacheCreation1hTokens > 0 {
 			usageObj.InputTokensDetails.CacheCreationTokenDetails = &CacheCreationTokenDetails{

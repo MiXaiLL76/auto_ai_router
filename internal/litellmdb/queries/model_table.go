@@ -42,11 +42,12 @@ type CustomPricingLiteLLMParams struct {
 	InputCostPerVideoPerSecondAbove8sInterval  *float64 `json:"input_cost_per_video_per_second_above_8s_interval,omitempty"`
 	OutputCostPerVideoPerSecond                *float64 `json:"output_cost_per_video_per_second,omitempty"`
 
-	InputCostPerImage                *float64 `json:"input_cost_per_image,omitempty"`
-	InputCostPerImageAbove128kTokens *float64 `json:"input_cost_per_image_above_128k_tokens,omitempty"`
-	OutputCostPerImage               *float64 `json:"output_cost_per_image,omitempty"`
-	OutputCostPerImageToken          *float64 `json:"output_cost_per_image_token,omitempty"`
-	OutputCostPerReasoningToken      *float64 `json:"output_cost_per_reasoning_token,omitempty"`
+	InputCostPerImage                *float64           `json:"input_cost_per_image,omitempty"`
+	InputCostPerImageAbove128kTokens *float64           `json:"input_cost_per_image_above_128k_tokens,omitempty"`
+	OutputCostPerImage               *float64           `json:"output_cost_per_image,omitempty"`
+	OutputCostPerImageToken          *float64           `json:"output_cost_per_image_token,omitempty"`
+	OutputCostPerReasoningToken      *float64           `json:"output_cost_per_reasoning_token,omitempty"`
+	SearchContextCostPerQuery        map[string]float64 `json:"search_context_cost_per_query,omitempty"`
 }
 
 // GenericLiteLLMParams

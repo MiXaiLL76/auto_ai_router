@@ -220,9 +220,10 @@ type AnthropicError struct {
 
 // AnthropicStreamUsage carries token counts in message_delta events.
 type AnthropicStreamUsage struct {
-	InputTokens              int                   `json:"input_tokens,omitempty"`
-	OutputTokens             int                   `json:"output_tokens,omitempty"`
-	CacheReadInputTokens     int                   `json:"cache_read_input_tokens,omitempty"`
-	CacheCreationInputTokens int                   `json:"cache_creation_input_tokens,omitempty"`
-	CacheCreation            *CacheCreationDetails `json:"cache_creation,omitempty"`
+	InputTokens              int                     `json:"input_tokens,omitempty"`
+	OutputTokens             int                     `json:"output_tokens,omitempty"`
+	CacheReadInputTokens     int                     `json:"cache_read_input_tokens,omitempty"`
+	CacheCreationInputTokens int                     `json:"cache_creation_input_tokens,omitempty"`
+	CacheCreation            *CacheCreationDetails   `json:"cache_creation,omitempty"`
+	ServerToolUse            *ServerToolUsageDetails `json:"server_tool_use,omitempty"`
 }

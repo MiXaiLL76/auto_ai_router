@@ -47,6 +47,7 @@ func TransformAnthropicStreamToOpenAI(anthropicStream io.Reader, model string, o
 	var promptTokens, completionTokens int
 	var cacheReadTokens, cacheCreationTokens int // track cache tokens in streaming
 	var cacheCreation5mTokens, cacheCreation1hTokens int
+	var webSearchRequests int
 
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -76,6 +77,9 @@ func TransformAnthropicStreamToOpenAI(anthropicStream io.Reader, model string, o
 				cacheCreationTokens, cacheCreation5mTokens, cacheCreation1hTokens = NormalizeCacheCreationUsage(
 					event.Message.Usage.CacheCreationInputTokens, event.Message.Usage.CacheCreation,
 				)
+				if event.Message.Usage.ServerToolUse != nil && event.Message.Usage.ServerToolUse.WebSearchRequests > 0 {
+					webSearchRequests = event.Message.Usage.ServerToolUse.WebSearchRequests
+				}
 			}
 			// Emit the first (role-only) chunk so the client knows the stream has started.
 			if isFirstChunk {
@@ -198,6 +202,9 @@ func TransformAnthropicStreamToOpenAI(anthropicStream io.Reader, model string, o
 							cacheCreationTokens, event.Usage.CacheCreation,
 						)
 					}
+					if event.Usage.ServerToolUse != nil && event.Usage.ServerToolUse.WebSearchRequests > 0 {
+						webSearchRequests = event.Usage.ServerToolUse.WebSearchRequests
+					}
 				}
 				// Anthropic's input_tokens excludes cache tokens; add them back for the real total.
 				totalPromptTokens := promptTokens + cacheCreationTokens + cacheReadTokens
@@ -216,6 +223,11 @@ func TransformAnthropicStreamToOpenAI(anthropicStream io.Reader, model string, o
 							Ephemeral5mInputTokens: cacheCreation5mTokens,
 							Ephemeral1hInputTokens: cacheCreation1hTokens,
 						}
+					}
+				}
+				if webSearchRequests > 0 {
+					usage.ServerToolUse = &openai.ServerToolUseDetails{
+						WebSearchRequests: webSearchRequests,
 					}
 				}
 				chunk := buildStreamChunk(chatID, model, timestamp, openai.OpenAIStreamingDelta{}, &reason, usage)

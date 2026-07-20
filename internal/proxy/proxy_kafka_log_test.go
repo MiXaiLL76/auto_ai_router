@@ -50,8 +50,10 @@ func testLogCtx(t *testing.T) *RequestLogContext {
 			BaseURL: "https://api.openai.com/v1",
 		},
 		TokenUsage: &converter.TokenUsage{
-			PromptTokens:     100,
-			CompletionTokens: 50,
+			PromptTokens:         100,
+			CompletionTokens:     50,
+			WebSearchRequests:    2,
+			WebSearchContextSize: "high",
 		},
 		SessionID: "session-1",
 	}
@@ -85,6 +87,8 @@ func TestBuildKafkaSpendEvent_BasicMapping(t *testing.T) {
 	assert.Equal(t, 100, event.PromptTokens)
 	assert.Equal(t, 50, event.CompletionTokens)
 	assert.Equal(t, 150, event.TotalTokens)
+	assert.Equal(t, 2, event.WebSearchRequests)
+	assert.Equal(t, "high", event.WebSearchContextSize)
 	assert.Equal(t, 0.00057, event.TotalCost)
 	assert.Equal(t, "hashed-token", event.APIKeyHash)
 	assert.Equal(t, "user-1", event.UserID)
@@ -158,9 +162,10 @@ func TestBuildKafkaSpendEvent_TokenCostsMapped(t *testing.T) {
 	prx := NewTestProxyBuilder().Build()
 	logCtx := testLogCtx(t)
 	costs := &converter.TokenCosts{
-		InputCost:  0.0003,
-		OutputCost: 0.00027,
-		TotalCost:  0.00057,
+		InputCost:     0.0003,
+		OutputCost:    0.00027,
+		WebSearchCost: 0.00011,
+		TotalCost:     0.00068,
 	}
 
 	event := prx.buildKafkaSpendEvent(logCtx, "cred", "cred:model", "hash",
@@ -168,7 +173,8 @@ func TestBuildKafkaSpendEvent_TokenCostsMapped(t *testing.T) {
 
 	assert.Equal(t, 0.0003, event.InputCost)
 	assert.Equal(t, 0.00027, event.OutputCost)
-	assert.Equal(t, 0.00057, event.TotalCost)
+	assert.Equal(t, 0.00011, event.WebSearchCost)
+	assert.Equal(t, 0.00068, event.TotalCost)
 }
 
 func TestBuildKafkaSpendEvent_ErrorClassOnlyOnFailure(t *testing.T) {

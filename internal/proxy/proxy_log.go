@@ -226,6 +226,7 @@ func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
 	if logCtx.TokenUsage == nil {
 		logCtx.TokenUsage = &converter.TokenUsage{}
 	}
+	logCtx.applyWebSearchUsageDefaults(status)
 	logCtx.TokenUsage.Normalize()
 
 	// Calculate cost based on model pricing and token usage.

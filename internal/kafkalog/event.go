@@ -42,20 +42,22 @@ type SpendEvent struct {
 	ServerVersion  string `json:"server_version"`
 	ServerCommit   string `json:"server_commit"`
 
-	PromptTokens             int `json:"prompt_tokens"`
-	CompletionTokens         int `json:"completion_tokens"`
-	TotalTokens              int `json:"total_tokens"`
-	AudioInputTokens         int `json:"audio_input_tokens"`
-	AudioOutputTokens        int `json:"audio_output_tokens"`
-	CachedInputTokens        int `json:"cached_input_tokens"`
-	CacheCreationTokens      int `json:"cache_creation_tokens"`
-	CachedOutputTokens       int `json:"cached_output_tokens"`
-	ReasoningTokens          int `json:"reasoning_tokens"`
-	AcceptedPredictionTokens int `json:"accepted_prediction_tokens"`
-	RejectedPredictionTokens int `json:"rejected_prediction_tokens"`
-	ImageCount               int `json:"image_count"`
-	ImageTokens              int `json:"image_tokens"`
-	OutputImageTokens        int `json:"output_image_tokens"`
+	PromptTokens             int    `json:"prompt_tokens"`
+	CompletionTokens         int    `json:"completion_tokens"`
+	TotalTokens              int    `json:"total_tokens"`
+	AudioInputTokens         int    `json:"audio_input_tokens"`
+	AudioOutputTokens        int    `json:"audio_output_tokens"`
+	CachedInputTokens        int    `json:"cached_input_tokens"`
+	CacheCreationTokens      int    `json:"cache_creation_tokens"`
+	CachedOutputTokens       int    `json:"cached_output_tokens"`
+	ReasoningTokens          int    `json:"reasoning_tokens"`
+	AcceptedPredictionTokens int    `json:"accepted_prediction_tokens"`
+	RejectedPredictionTokens int    `json:"rejected_prediction_tokens"`
+	ImageCount               int    `json:"image_count"`
+	ImageTokens              int    `json:"image_tokens"`
+	OutputImageTokens        int    `json:"output_image_tokens"`
+	WebSearchRequests        int    `json:"web_search_requests"`
+	WebSearchContextSize     string `json:"web_search_context_size,omitempty"`
 
 	InputCost         float64 `json:"input_cost"`
 	OutputCost        float64 `json:"output_cost"`
@@ -67,6 +69,7 @@ type SpendEvent struct {
 	CachedOutputCost  float64 `json:"cached_output_cost"`
 	PredictionCost    float64 `json:"prediction_cost"`
 	ImageCost         float64 `json:"image_cost"`
+	WebSearchCost     float64 `json:"web_search_cost"`
 	TotalCost         float64 `json:"total_cost"`
 
 	APIKeyHash     string `json:"api_key_hash"`

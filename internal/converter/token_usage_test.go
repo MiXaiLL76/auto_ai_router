@@ -60,6 +60,8 @@ func TestTokenUsageNormalize(t *testing.T) {
 		ImageCount:               -13,
 		ImageTokens:              -14,
 		OutputImageTokens:        -15,
+		WebSearchRequests:        -16,
+		WebSearchContextSize:     "weird",
 	}).Normalize()
 
 	if tu.PromptTokens != 0 || tu.CompletionTokens != 0 {
@@ -76,6 +78,9 @@ func TestTokenUsageNormalize(t *testing.T) {
 	}
 	if tu.AcceptedPredictionTokens != 0 || tu.RejectedPredictionTokens != 0 || tu.ImageCount != 0 || tu.ImageTokens != 0 || tu.OutputImageTokens != 0 {
 		t.Fatalf("expected prediction/image negative fields to be clamped, got %+v", tu)
+	}
+	if tu.WebSearchRequests != 0 || tu.WebSearchContextSize != "medium" {
+		t.Fatalf("expected web search fields to be sanitized, got %+v", tu)
 	}
 }
 

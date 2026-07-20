@@ -125,6 +125,8 @@ func (p *Proxy) buildKafkaSpendEvent(
 		ImageCount:               usage.ImageCount,
 		ImageTokens:              usage.ImageTokens,
 		OutputImageTokens:        usage.OutputImageTokens,
+		WebSearchRequests:        usage.WebSearchRequests,
+		WebSearchContextSize:     usage.WebSearchContextSize,
 
 		TotalCost: cost,
 
@@ -153,6 +155,7 @@ func (p *Proxy) buildKafkaSpendEvent(
 		event.CachedOutputCost = tokenCosts.CachedOutputCost
 		event.PredictionCost = tokenCosts.PredictionCost
 		event.ImageCost = tokenCosts.ImageCost
+		event.WebSearchCost = tokenCosts.WebSearchCost
 	}
 
 	if status == "failure" {

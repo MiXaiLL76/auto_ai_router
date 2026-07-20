@@ -77,7 +77,12 @@ func TestLoadModelPrices_CachePricingExtensions(t *testing.T) {
 			"cache_creation_input_token_cost_above_200k_tokens": 0.0000075,
 			"cache_creation_input_token_cost_above_1hr": 0.000006,
 			"cache_creation_input_token_cost_above_1hr_above_200k_tokens": 0.000012,
-			"cache_read_input_audio_token_cost": 0.0000009
+			"cache_read_input_audio_token_cost": 0.0000009,
+			"search_context_cost_per_query": {
+				"search_context_size_low": 0.01,
+				"search_context_size_medium": 0.02,
+				"search_context_size_high": 0.03
+			}
 		}
 	}`
 	require.NoError(t, os.WriteFile(filePath, []byte(pricesJSON), 0o600))
@@ -91,6 +96,7 @@ func TestLoadModelPrices_CachePricingExtensions(t *testing.T) {
 	assert.InDelta(t, 0.000006, price.CacheCreationInputTokenCostAbove1hr, 1e-12)
 	assert.InDelta(t, 0.000012, price.CacheCreationInputTokenCostAbove1hrAbove200k, 1e-12)
 	assert.InDelta(t, 0.0000009, price.CacheReadInputAudioTokenCost, 1e-12)
+	assert.InDelta(t, 0.02, price.SearchContextCostPerQuery["search_context_size_medium"], 1e-12)
 }
 
 func TestLoadModelPrices_FromFilePath(t *testing.T) {

@@ -758,6 +758,47 @@ func TestExtractTokenUsage_ResponsesAPIStreamingEvent(t *testing.T) {
 	}
 }
 
+func TestExtractTokenUsage_WebSearchRequests(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want int
+	}{
+		{
+			name: "server_tool_use",
+			body: `{"usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12,"server_tool_use":{"web_search_requests":3}}}`,
+			want: 3,
+		},
+		{
+			name: "responses output items",
+			body: `{"usage":{"input_tokens":10,"output_tokens":2,"total_tokens":12},"output":[{"type":"web_search_call","status":"completed"},{"type":"web_search_call","status":"completed"},{"type":"message","status":"completed"}]}`,
+			want: 2,
+		},
+		{
+			name: "nested streaming response output items without token usage",
+			body: `{"type":"response.completed","response":{"output":[{"type":"web_search_call","status":"completed"}]}}`,
+			want: 1,
+		},
+		{
+			name: "chat annotations fallback",
+			body: `{"usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12},"choices":[{"message":{"annotations":[{"type":"url_citation"}]}}]}`,
+			want: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			usage := ExtractTokenUsage([]byte(tt.body))
+			if usage == nil {
+				t.Fatalf("expected usage")
+			}
+			if usage.WebSearchRequests != tt.want {
+				t.Fatalf("expected web_search_requests=%d, got %d", tt.want, usage.WebSearchRequests)
+			}
+		})
+	}
+}
+
 func TestProviderConverter_ResponseTo_VertexImage_Gemini_JSONRoundTrip(t *testing.T) {
 	vertexResp := genai.GenerateContentResponse{
 		Candidates: []*genai.Candidate{

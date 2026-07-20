@@ -749,3 +749,47 @@ func TestCalculateTokenCosts_CachedAudioUsesDedicatedRate(t *testing.T) {
 	assert.InDelta(t, 14, costs.CachedInputCost, 1e-9) // 50*0.1 + 30*0.3
 	assert.InDelta(t, 20, costs.InputCost, 1e-9)
 }
+
+func TestCalculateTokenCosts_WebSearchUsesContextPricing(t *testing.T) {
+	usage := &converter.TokenUsage{
+		PromptTokens:         10,
+		CompletionTokens:     5,
+		WebSearchRequests:    2,
+		WebSearchContextSize: "high",
+	}
+	price := &ModelPrice{
+		InputCostPerToken:  1,
+		OutputCostPerToken: 2,
+		SearchContextCostPerQuery: map[string]float64{
+			"search_context_size_low":    0.10,
+			"search_context_size_medium": 0.20,
+			"search_context_size_high":   0.30,
+		},
+	}
+
+	costs := CalculateTokenCosts(usage, price)
+
+	assert.InDelta(t, 10, costs.InputCost, 1e-9)
+	assert.InDelta(t, 10, costs.OutputCost, 1e-9)
+	assert.InDelta(t, 0.60, costs.WebSearchCost, 1e-9)
+	assert.InDelta(t, 20.60, costs.TotalCost, 1e-9)
+	assert.Equal(t, 15, usage.Total())
+}
+
+func TestCalculateTokenCosts_WebSearchDefaultsToMedium(t *testing.T) {
+	usage := &converter.TokenUsage{
+		WebSearchRequests: 1,
+	}
+	price := &ModelPrice{
+		SearchContextCostPerQuery: map[string]float64{
+			"search_context_size_low":    0.10,
+			"search_context_size_medium": 0.20,
+			"search_context_size_high":   0.30,
+		},
+	}
+
+	costs := CalculateTokenCosts(usage, price)
+
+	assert.InDelta(t, 0.20, costs.WebSearchCost, 1e-9)
+	assert.InDelta(t, 0.20, costs.TotalCost, 1e-9)
+}

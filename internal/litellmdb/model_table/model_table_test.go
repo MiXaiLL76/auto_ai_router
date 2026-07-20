@@ -6,6 +6,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb/queries"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestMapProviderType(t *testing.T) {
@@ -172,6 +173,11 @@ func TestConvertPricingToModelPrice_AllFields(t *testing.T) {
 	cacheReadAudio := 0.088
 	outputImage := 0.09
 	outputImageToken := 0.10
+	searchContextCost := map[string]float64{
+		"search_context_size_low":    0.01,
+		"search_context_size_medium": 0.02,
+		"search_context_size_high":   0.03,
+	}
 
 	price := convertPricingToModelPrice(&queries.CustomPricingLiteLLMParams{
 		InputCostPerToken:                                  &input,
@@ -194,6 +200,7 @@ func TestConvertPricingToModelPrice_AllFields(t *testing.T) {
 		CacheReadInputAudioTokenCost:                       &cacheReadAudio,
 		OutputCostPerImage:                                 &outputImage,
 		OutputCostPerImageToken:                            &outputImageToken,
+		SearchContextCostPerQuery:                          searchContextCost,
 	})
 
 	assert.NotNil(t, price)
@@ -217,4 +224,18 @@ func TestConvertPricingToModelPrice_AllFields(t *testing.T) {
 	assert.Equal(t, cacheReadAudio, price.CacheReadInputAudioTokenCost)
 	assert.Equal(t, outputImage, price.OutputCostPerImage)
 	assert.Equal(t, outputImageToken, price.OutputCostPerImageToken)
+	assert.Equal(t, searchContextCost, price.SearchContextCostPerQuery)
+}
+
+func TestConvertPricingToModelPrice_WebSearchOnly(t *testing.T) {
+	searchContextCost := map[string]float64{
+		"search_context_size_medium": 0.02,
+	}
+
+	price := convertPricingToModelPrice(&queries.CustomPricingLiteLLMParams{
+		SearchContextCostPerQuery: searchContextCost,
+	})
+
+	require.NotNil(t, price)
+	assert.Equal(t, searchContextCost, price.SearchContextCostPerQuery)
 }

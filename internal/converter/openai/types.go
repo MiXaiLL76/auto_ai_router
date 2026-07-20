@@ -151,6 +151,11 @@ type OpenAIUsage struct {
 	TotalTokens             int                     `json:"total_tokens"`
 	PromptTokensDetails     *TokenDetails           `json:"prompt_tokens_details,omitempty"`
 	CompletionTokensDetails *CompletionTokenDetails `json:"completion_tokens_details,omitempty"`
+	ServerToolUse           *ServerToolUseDetails   `json:"server_tool_use,omitempty"`
+}
+
+type ServerToolUseDetails struct {
+	WebSearchRequests int `json:"web_search_requests,omitempty"`
 }
 
 // Streaming types

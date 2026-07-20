@@ -223,11 +223,16 @@ type TextConfig struct {
 
 // Usage represents token usage in a Responses API response.
 type Usage struct {
-	InputTokens         int           `json:"input_tokens"`
-	OutputTokens        int           `json:"output_tokens"`
-	TotalTokens         int           `json:"total_tokens"`
-	InputTokensDetails  InputDetails  `json:"input_tokens_details"`
-	OutputTokensDetails OutputDetails `json:"output_tokens_details"`
+	InputTokens         int                   `json:"input_tokens"`
+	OutputTokens        int                   `json:"output_tokens"`
+	TotalTokens         int                   `json:"total_tokens"`
+	InputTokensDetails  InputDetails          `json:"input_tokens_details"`
+	OutputTokensDetails OutputDetails         `json:"output_tokens_details"`
+	ServerToolUse       *ServerToolUseDetails `json:"server_tool_use,omitempty"`
+}
+
+type ServerToolUseDetails struct {
+	WebSearchRequests int `json:"web_search_requests,omitempty"`
 }
 
 // InputDetails represents a breakdown of input token usage.

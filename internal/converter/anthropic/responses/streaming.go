@@ -41,6 +41,7 @@ type anthropicStreamAccumulator struct {
 	cacheCreationTokens   int
 	cacheCreation5mTokens int
 	cacheCreation1hTokens int
+	webSearchRequests     int
 
 	// Stream status
 	stopReason         string
@@ -121,6 +122,9 @@ func processAnthropicEvent(w io.Writer, acc *anthropicStreamAccumulator, event *
 			acc.cacheCreationTokens, acc.cacheCreation5mTokens, acc.cacheCreation1hTokens = anthropic.NormalizeCacheCreationUsage(
 				event.Message.Usage.CacheCreationInputTokens, event.Message.Usage.CacheCreation,
 			)
+			if event.Message.Usage.ServerToolUse != nil && event.Message.Usage.ServerToolUse.WebSearchRequests > 0 {
+				acc.webSearchRequests = event.Message.Usage.ServerToolUse.WebSearchRequests
+			}
 		}
 
 	case "content_block_start":
@@ -238,6 +242,9 @@ func processAnthropicEvent(w io.Writer, acc *anthropicStreamAccumulator, event *
 				acc.cacheCreationTokens, acc.cacheCreation5mTokens, acc.cacheCreation1hTokens = anthropic.NormalizeCacheCreationUsage(
 					acc.cacheCreationTokens, event.Usage.CacheCreation,
 				)
+			}
+			if event.Usage.ServerToolUse != nil && event.Usage.ServerToolUse.WebSearchRequests > 0 {
+				acc.webSearchRequests = event.Usage.ServerToolUse.WebSearchRequests
 			}
 		}
 
@@ -497,6 +504,11 @@ func buildAnthropicCompletedResponse(acc *anthropicStreamAccumulator) *responses
 		usage.InputTokensDetails.CacheCreationTokenDetails = &responses.CacheCreationTokenDetails{
 			Ephemeral5mInputTokens: acc.cacheCreation5mTokens,
 			Ephemeral1hInputTokens: acc.cacheCreation1hTokens,
+		}
+	}
+	if acc.webSearchRequests > 0 {
+		usage.ServerToolUse = &responses.ServerToolUseDetails{
+			WebSearchRequests: acc.webSearchRequests,
 		}
 	}
 

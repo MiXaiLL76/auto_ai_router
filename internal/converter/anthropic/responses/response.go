@@ -180,11 +180,17 @@ func anthropicUsageToUsage(au anthropic.AnthropicUsage) *responses.Usage {
 			Ephemeral1hInputTokens: cacheCreation1hTokens,
 		}
 	}
-	return &responses.Usage{
+	usage := &responses.Usage{
 		InputTokens:         totalInputTokens,
 		OutputTokens:        au.OutputTokens,
 		TotalTokens:         totalInputTokens + au.OutputTokens,
 		InputTokensDetails:  inputDetails,
 		OutputTokensDetails: responses.OutputDetails{},
 	}
+	if au.ServerToolUse != nil && au.ServerToolUse.WebSearchRequests > 0 {
+		usage.ServerToolUse = &responses.ServerToolUseDetails{
+			WebSearchRequests: au.ServerToolUse.WebSearchRequests,
+		}
+	}
+	return usage
 }

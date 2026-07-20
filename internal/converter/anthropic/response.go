@@ -137,5 +137,10 @@ func convertAnthropicUsageToOpenAI(usage *AnthropicUsage) *openai.OpenAIUsage {
 			}
 		}
 	}
+	if usage.ServerToolUse != nil && usage.ServerToolUse.WebSearchRequests > 0 {
+		result.ServerToolUse = &openai.ServerToolUseDetails{
+			WebSearchRequests: usage.ServerToolUse.WebSearchRequests,
+		}
+	}
 	return result
 }

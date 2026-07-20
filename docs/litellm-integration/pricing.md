@@ -46,6 +46,15 @@ The file is a JSON object where each key is a model name and each value is a pri
   },
   "imagen-4.0-fast-generate-001": {
     "output_cost_per_image": 0.02
+  },
+  "gpt-4o-search-preview": {
+    "input_cost_per_token": 2.5e-06,
+    "output_cost_per_token": 1e-05,
+    "search_context_cost_per_query": {
+      "search_context_size_low": 0.025,
+      "search_context_size_medium": 0.0275,
+      "search_context_size_high": 0.03
+    }
   }
 }
 ```
@@ -87,6 +96,7 @@ For reference:
 | `output_cost_per_cached_token`                                | Cached output tokens (falls back to `output_cost_per_token`)                 |
 | `output_cost_per_prediction_token`                            | Accepted predicted-output tokens (falls back to `output_cost_per_token`)     |
 | `output_cost_per_image`                                       | Cost per generated image (takes priority over `output_cost_per_image_token`) |
+| `search_context_cost_per_query`                               | Web Search cost per request/call, keyed by `search_context_size_*`           |
 
 ## Cost Calculation
 
@@ -116,13 +126,29 @@ total = regular_input  × input_cost_per_token
       + accepted_prediction_tokens  × output_cost_per_prediction_token
       + rejected_prediction_tokens  × output_cost_per_token
       + image_count × output_cost_per_image
+      + web_search_requests × search_context_cost_per_query[search_context_size]
 ```
 
 This means every token is billed **exactly once** regardless of how the provider reported it.
 
-### Known gap: Web Search billing
+### Web Search billing
 
-Web Search request billing is not implemented here. Providers can expose web search usage through fields such as `web_search_requests` or `web_search_call`, but AIR does not yet turn those values into spend. This remains a separate pricing item outside the cache billing changes described in this page.
+Web Search is billed as a separate tool cost, not as tokens. The calculator reads LiteLLM-compatible `search_context_cost_per_query` prices and selects one of:
+
+- `search_context_size_low`
+- `search_context_size_medium`
+- `search_context_size_high`
+
+AIR gets the request size from `web_search_options.search_context_size` or from a `web_search` / `web_search_preview` tool definition. If the request does not specify a size, `medium` is used.
+
+For the count, AIR prefers provider-reported usage:
+
+- `usage.server_tool_use.web_search_requests`
+- `usage.web_search_requests`
+- `response.output[]` or `output[]` items with `type: "web_search_call"`
+- Chat Completions annotations as a one-request fallback
+
+If the provider does not return a count but the original request enabled Web Search, AIR bills one Web Search request. The count and selected context size are written to spend metadata under `usage_object.server_tool_use` and `additional_usage_values.server_tool_use`; the tool cost is written to `cost_breakdown.tool_usage_cost` and `cost_breakdown.web_search_cost`.
 
 ### Regular input tokens
 
@@ -177,6 +203,7 @@ When the prompt exceeds 272 000 tokens, models such as GPT-5.6 apply their `*_ab
 | Accepted prediction | `accepted_prediction_tokens × output_cost_per_prediction_token` (falls back to regular output rate)                                                 |
 | Rejected prediction | `rejected_prediction_tokens × output_cost_per_token` (always at regular output rate)                                                                |
 | Images              | `image_count × output_cost_per_image` OR `output_image_tokens × output_cost_per_image_token`                                                        |
+| Web Search          | `web_search_requests × search_context_cost_per_query[search_context_size]`                                                                          |
 
 ## How Prices Are Loaded
 

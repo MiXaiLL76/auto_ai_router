@@ -127,6 +127,9 @@ func TestCustomPricingLiteLLMParamsFields(t *testing.T) {
 	outputImage := 0.0000425
 	outputImageToken := 0.000001
 	outputReasoningToken := 0.000018
+	searchContextCost := map[string]float64{
+		"search_context_size_medium": 0.02,
+	}
 
 	params := CustomPricingLiteLLMParams{
 		InputCostPerToken:                                  &inputCost,
@@ -162,6 +165,7 @@ func TestCustomPricingLiteLLMParamsFields(t *testing.T) {
 		OutputCostPerImage:                                 &outputImage,
 		OutputCostPerImageToken:                            &outputImageToken,
 		OutputCostPerReasoningToken:                        &outputReasoningToken,
+		SearchContextCostPerQuery:                          searchContextCost,
 	}
 
 	assert.NotNil(t, params.InputCostPerToken)
@@ -179,6 +183,7 @@ func TestCustomPricingLiteLLMParamsFields(t *testing.T) {
 	assert.Equal(t, 0.000045, *params.OutputCostPerTokenAbove272kTokens)
 	assert.Equal(t, 0.000001, *params.CacheReadInputTokenCostAbove272kTokens)
 	assert.Equal(t, 0.0000125, *params.CacheCreationInputTokenCostAbove272kTokens)
+	assert.Equal(t, searchContextCost, params.SearchContextCostPerQuery)
 }
 
 // TestGenericLiteLLMParamsFields verifies GenericLiteLLMParams structure with embedded types

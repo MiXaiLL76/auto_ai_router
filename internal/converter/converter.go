@@ -355,6 +355,10 @@ func ExtractTokenUsageWithOptions(body []byte, opts TokenUsageExtractionOptions)
 			ReasoningTokens int `json:"reasoning_tokens,omitempty"`
 			ImageTokens     int `json:"image_tokens,omitempty"`
 		} `json:"output_tokens_details,omitempty"`
+		ServerToolUse struct {
+			WebSearchRequests int `json:"web_search_requests,omitempty"`
+		} `json:"server_tool_use,omitempty"`
+		WebSearchRequests int `json:"web_search_requests,omitempty"`
 	}
 
 	var resp struct {
@@ -385,9 +389,12 @@ func ExtractTokenUsageWithOptions(body []byte, opts TokenUsageExtractionOptions)
 			// Responses API / Image generation format (input_tokens/output_tokens)
 			responsesUsageDetails
 		} `json:"usage"`
+		Choices []extractedChoiceWithAnnotations `json:"choices,omitempty"`
+		Output  []extractedOutputItem            `json:"output,omitempty"`
 		// Responses API streaming event format: {"type":"response.completed","response":{"usage":{...}}}
 		Response struct {
-			Usage *responsesUsageDetails `json:"usage,omitempty"`
+			Usage  *responsesUsageDetails `json:"usage,omitempty"`
+			Output []extractedOutputItem  `json:"output,omitempty"`
 		} `json:"response,omitempty"`
 	}
 
@@ -411,7 +418,12 @@ func ExtractTokenUsageWithOptions(body []byte, opts TokenUsageExtractionOptions)
 		completionTokens = resp.Response.Usage.OutputTokens
 	}
 
-	if promptTokens == 0 && completionTokens == 0 {
+	webSearchRequests := webSearchRequestsFromExtractedResponse(resp.Usage.ServerToolUse.WebSearchRequests, resp.Usage.WebSearchRequests, resp.Choices, resp.Output, resp.Response.Output)
+	if webSearchRequests == 0 && resp.Response.Usage != nil {
+		webSearchRequests = webSearchRequestsFromUsage(resp.Response.Usage.ServerToolUse.WebSearchRequests, resp.Response.Usage.WebSearchRequests)
+	}
+
+	if promptTokens == 0 && completionTokens == 0 && webSearchRequests == 0 {
 		return nil
 	}
 
@@ -519,5 +531,63 @@ func ExtractTokenUsageWithOptions(body []byte, opts TokenUsageExtractionOptions)
 		RejectedPredictionTokens: resp.Usage.CompletionTokensDetails.RejectedPredictionTokens,
 		AudioOutputTokens:        audioOut,
 		ReasoningTokens:          reasoning,
+		WebSearchRequests:        webSearchRequests,
 	}).Normalize()
+}
+
+type extractedChoiceWithAnnotations struct {
+	Message struct {
+		Annotations []interface{} `json:"annotations,omitempty"`
+	} `json:"message"`
+}
+
+type extractedOutputItem struct {
+	Type   string `json:"type"`
+	Status string `json:"status,omitempty"`
+}
+
+func webSearchRequestsFromUsage(values ...int) int {
+	for _, value := range values {
+		if value > 0 {
+			return value
+		}
+	}
+	return 0
+}
+
+func webSearchRequestsFromExtractedResponse(
+	serverToolUseRequests int,
+	usageRequests int,
+	choices []extractedChoiceWithAnnotations,
+	output []extractedOutputItem,
+	nestedOutput []extractedOutputItem,
+) int {
+	if requests := webSearchRequestsFromUsage(serverToolUseRequests, usageRequests); requests > 0 {
+		return requests
+	}
+	if requests := countCompletedWebSearchOutputItems(output); requests > 0 {
+		return requests
+	}
+	if requests := countCompletedWebSearchOutputItems(nestedOutput); requests > 0 {
+		return requests
+	}
+	for _, choice := range choices {
+		if len(choice.Message.Annotations) > 0 {
+			return 1
+		}
+	}
+	return 0
+}
+
+func countCompletedWebSearchOutputItems(output []extractedOutputItem) int {
+	count := 0
+	for _, item := range output {
+		if item.Type != "web_search_call" {
+			continue
+		}
+		if item.Status == "" || item.Status == "completed" {
+			count++
+		}
+	}
+	return count
 }

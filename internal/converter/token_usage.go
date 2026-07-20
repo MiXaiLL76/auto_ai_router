@@ -21,6 +21,8 @@ type TokenUsage struct {
 	ImageCount               int // Number of images to generate (1-10)
 	ImageTokens              int // Input image/video tokens
 	OutputImageTokens        int // Generated image/video tokens
+	WebSearchRequests        int // Built-in web search tool calls/requests
+	WebSearchContextSize     string
 }
 
 func (tu *TokenUsage) Normalize() *TokenUsage {
@@ -54,6 +56,10 @@ func (tu *TokenUsage) Normalize() *TokenUsage {
 	tu.ImageCount = nonNegativeTokenCount(tu.ImageCount)
 	tu.ImageTokens = nonNegativeTokenCount(tu.ImageTokens)
 	tu.OutputImageTokens = nonNegativeTokenCount(tu.OutputImageTokens)
+	tu.WebSearchRequests = nonNegativeTokenCount(tu.WebSearchRequests)
+	if tu.WebSearchRequests > 0 || tu.WebSearchContextSize != "" {
+		tu.WebSearchContextSize = NormalizeWebSearchContextSize(tu.WebSearchContextSize)
+	}
 	return tu
 }
 
@@ -77,7 +83,17 @@ type TokenCosts struct {
 	CachedOutputCost  float64
 	PredictionCost    float64
 	ImageCost         float64
+	WebSearchCost     float64
 	TotalCost         float64
+}
+
+func NormalizeWebSearchContextSize(size string) string {
+	switch size {
+	case "low", "medium", "high":
+		return size
+	default:
+		return "medium"
+	}
 }
 
 func nonNegativeTokenCount(tokens int) int {
