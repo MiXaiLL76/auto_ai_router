@@ -135,19 +135,6 @@ func (c *Config) Validate() error {
 	return nil
 }
 
-// ==================== Model access sentinels ====================
-
-// LiteLLM stores these special values inside VerificationToken.models instead
-// of (or alongside) real model names:
-//   - "all-proxy-models": key may call every model on the proxy.
-//   - "all-team-models":  key inherits its parent team's model allow-list
-//     (LiteLLM_TeamTable.models). A key with no team has nothing to inherit
-//     from, so it falls back to unrestricted access, same as an empty list.
-const (
-	specialModelAllProxyModels = "all-proxy-models"
-	specialModelAllTeamModels  = "all-team-models"
-)
-
 // ==================== TokenInfo ====================
 
 // TokenInfo holds information about a validated token from LiteLLM_VerificationToken
