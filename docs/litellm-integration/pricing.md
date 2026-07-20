@@ -120,6 +120,10 @@ total = regular_input  × input_cost_per_token
 
 This means every token is billed **exactly once** regardless of how the provider reported it.
 
+### Known gap: Web Search billing
+
+Web Search request billing is not implemented here. Providers can expose web search usage through fields such as `web_search_requests` or `web_search_call`, but AIR does not yet turn those values into spend. This remains a separate pricing item outside the cache billing changes described in this page.
+
 ### Regular input tokens
 
 Vertex AI and OpenAI include audio and cached tokens **inside** `prompt_tokens`. Anthropic reports cache reads and writes separately on the wire, so AIR first normalises Anthropic usage to an inclusive prompt total. The formula then uses the same semantics for every provider:

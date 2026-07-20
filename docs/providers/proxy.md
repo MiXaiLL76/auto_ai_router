@@ -37,6 +37,15 @@ credentials:
 
 The setting is explicit because `type: proxy` can target either kind of API; the wire payload alone is ambiguous when both fields are present.
 
+## Migration / Rollout Note
+
+Before rolling this change out to production, review every existing `type: proxy` credential:
+
+- Use `proxy_usage_format: "normalized"` when the upstream is another Auto AI Router instance.
+- Use `proxy_usage_format: "openai"` or omit the field when the upstream is a generic OpenAI-compatible API.
+
+The default is `openai` for backward compatibility. Existing AIR-to-AIR chains must be updated explicitly, otherwise cached audio can be subtracted twice from `audio_tokens` and audio input spend can be understated.
+
 ## Fallback Behavior
 
 When `is_fallback: true`, the proxy credential activates only after all primary credentials for the requested model are unavailable (rate-limited or banned).
@@ -65,6 +74,7 @@ credentials:
     type: "proxy"
     base_url: "http://10.0.1.50:8080"
     api_key: "sk-remote-key"
+    proxy_usage_format: "normalized"
     is_fallback: true
 ```
 
