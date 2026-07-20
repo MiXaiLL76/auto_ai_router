@@ -126,22 +126,22 @@ type rawSpendRow struct {
 }
 
 type spendMetadata struct {
-	UserAPIKey             string                `json:"user_api_key"`
-	UserAPIKeyAlias        string                `json:"user_api_key_alias"`
-	UserAPIKeyTeamID       string                `json:"user_api_key_team_id"`
-	UserAPIKeyProjectID    string                `json:"user_api_key_project_id"`
-	UserAPIKeyProjectAlias string                `json:"user_api_key_project_alias"`
-	UserAPIKeyOrgID        string                `json:"user_api_key_org_id"`
-	UserAPIKeyUserID       string                `json:"user_api_key_user_id"`
-	UserAPIKeyTeamAlias    string                `json:"user_api_key_team_alias"`
-	RequesterIPAddress     string                `json:"requester_ip_address"`
-	LiteLLMCallID          string                `json:"litellm_call_id"`
-	Status                 string                `json:"status"`
-	AttemptedRetries       int                   `json:"attempted_retries"`
-	MaxRetries             int                   `json:"max_retries"`
-	UsageObject            usageObject           `json:"usage_object"`
-	CostBreakdown          costBreakdown         `json:"cost_breakdown"`
-	ModelMapInformation    modelMapInformation   `json:"model_map_information"`
+	UserAPIKey             string              `json:"user_api_key"`
+	UserAPIKeyAlias        string              `json:"user_api_key_alias"`
+	UserAPIKeyTeamID       string              `json:"user_api_key_team_id"`
+	UserAPIKeyProjectID    string              `json:"user_api_key_project_id"`
+	UserAPIKeyProjectAlias string              `json:"user_api_key_project_alias"`
+	UserAPIKeyOrgID        string              `json:"user_api_key_org_id"`
+	UserAPIKeyUserID       string              `json:"user_api_key_user_id"`
+	UserAPIKeyTeamAlias    string              `json:"user_api_key_team_alias"`
+	RequesterIPAddress     string              `json:"requester_ip_address"`
+	LiteLLMCallID          string              `json:"litellm_call_id"`
+	Status                 string              `json:"status"`
+	AttemptedRetries       int                 `json:"attempted_retries"`
+	MaxRetries             int                 `json:"max_retries"`
+	UsageObject            usageObject         `json:"usage_object"`
+	CostBreakdown          costBreakdown       `json:"cost_breakdown"`
+	ModelMapInformation    modelMapInformation `json:"model_map_information"`
 	SpendLogsMetadata      spendLogsExtensions `json:"spend_logs_metadata"`
 }
 
