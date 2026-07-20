@@ -628,6 +628,10 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if !p.applyProManCompatibilityRouting(w, r, prepared, modelID, &cred, &body, &proxyBody, &realModelID, logCtx, start) {
+		return
+	}
+
 	// Handle proxy credential type with same-type retry + fallback
 	if cred.Type == config.ProviderTypeProxy {
 		logCtx.Credential = cred
