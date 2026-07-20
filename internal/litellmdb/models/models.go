@@ -58,6 +58,7 @@ type Config struct {
 	LogQueueSize     int           // Queue buffer size (default: 10000)
 	LogBatchSize     int           // Batch size for INSERT (default: 100)
 	LogFlushInterval time.Duration // Flush interval (default: 5s)
+	LogWorkers       int           // Number of parallel queue-draining workers (default: 4)
 
 	// DisableSpendLogsWrite disables writing SpendLogEntry/Daily* aggregates to
 	// Postgres while leaving auth (ValidateToken) untouched (default: false).
@@ -79,6 +80,7 @@ func DefaultConfig() *Config {
 		LogQueueSize:        10000,
 		LogBatchSize:        100,
 		LogFlushInterval:    5 * time.Second,
+		LogWorkers:          4,
 	}
 }
 
@@ -115,6 +117,9 @@ func (c *Config) ApplyDefaults() {
 	}
 	if c.LogFlushInterval == 0 {
 		c.LogFlushInterval = defaults.LogFlushInterval
+	}
+	if c.LogWorkers == 0 {
+		c.LogWorkers = defaults.LogWorkers
 	}
 	if c.Logger == nil {
 		c.Logger = slog.Default()

@@ -103,28 +103,36 @@ func NewLogger(pool *connection.ConnectionPool, cfg *models.Config) *Logger {
 	return sl
 }
 
-// Start starts the background worker and aggregation ticker
+// Start starts the background workers and aggregation ticker
 // Must be called once after creation. Safe to call multiple times (idempotent).
 func (sl *Logger) Start() {
 	sl.startOnce.Do(func() {
 		// Initialize tickers BEFORE starting goroutines to prevent nil dereference race
 		sl.dlqRecoveryTicker = time.NewTicker(5 * time.Minute)
 
-		sl.producerWg.Add(2) // worker + dlqRecoveryWorker
+		numWorkers := sl.config.LogWorkers
+		if numWorkers <= 0 {
+			numWorkers = 1
+		}
+
+		sl.producerWg.Add(numWorkers + 1) // workers + dlqRecoveryWorker
 		// Close pendingAggregation once all producers finish so aggregationWorker exits cleanly.
 		go func() {
 			sl.producerWg.Wait()
 			close(sl.pendingAggregation)
 		}()
 
-		sl.wg.Add(3)
-		go sl.worker()
+		sl.wg.Add(numWorkers + 2)
+		for i := 0; i < numWorkers; i++ {
+			go sl.worker()
+		}
 		go sl.aggregationWorker()
 		go sl.dlqRecoveryWorker()
 		sl.logger.Info("[DB] SpendLogger started",
 			"queue_size", sl.config.LogQueueSize,
 			"batch_size", sl.config.LogBatchSize,
 			"flush_interval", sl.config.LogFlushInterval,
+			"workers", numWorkers,
 			"dlq_max_size", 10,
 			"dlq_recovery_interval", "5m",
 		)

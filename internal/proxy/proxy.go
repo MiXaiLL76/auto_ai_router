@@ -311,6 +311,43 @@ type ProxyResponse struct {
 	ActualCredentialName string // Credential name from upstream X-Credential-Name header
 }
 
+// upstreamRequestContext returns the context to use for the outbound provider
+// call, derived from the incoming request r.
+//
+// When drainUpstreamOnAbort is false (the default), it returns r.Context()
+// unchanged: a client disconnect cancels the upstream call immediately, same
+// as always — no extra spend, no phantom token counting.
+//
+// When drainUpstreamOnAbort is true, the returned context keeps r.Context()'s
+// values (so OTEL span/trace propagation still works) but detaches
+// cancellation: a client disconnect no longer tears down the upstream
+// connection outright, giving streamToClient's abort path a real chance to
+// drain the response, capture actual usage, and return the TCP connection to
+// the pool. The detached call is still bounded — it gets canceled
+// streamDrainTimeout after the client goes away, and always via the returned
+// cancel func once the request finishes normally.
+func (p *Proxy) upstreamRequestContext(r *http.Request) (context.Context, context.CancelFunc) {
+	if !p.drainUpstreamOnAbort {
+		return r.Context(), func() {}
+	}
+
+	ctx, cancel := context.WithCancel(context.WithoutCancel(r.Context()))
+	go func() {
+		select {
+		case <-r.Context().Done():
+			timer := time.NewTimer(streamDrainTimeout)
+			defer timer.Stop()
+			select {
+			case <-timer.C:
+				cancel()
+			case <-ctx.Done():
+			}
+		case <-ctx.Done():
+		}
+	}()
+	return ctx, cancel
+}
+
 // executeProxyRequest executes a request to a proxy credential and returns response details.
 // This is a private helper method to avoid code duplication between forwardToProxy and related functions.
 func (p *Proxy) executeProxyRequest(
@@ -328,9 +365,12 @@ func (p *Proxy) executeProxyRequest(
 	}
 
 	// Create proxy request. The incoming request context carries the OTEL span,
-	// so the client span parents correctly and traceparent is propagated, and the
-	// upstream call is canceled if the client disconnects.
-	proxyReq, err := http.NewRequestWithContext(r.Context(), r.Method, targetURL, bytes.NewReader(body))
+	// so the client span parents correctly and traceparent is propagated. By
+	// default the upstream call is also canceled if the client disconnects; see
+	// upstreamRequestContext for the drainUpstreamOnAbort exception.
+	upstreamCtx, cancelUpstream := p.upstreamRequestContext(r)
+	defer cancelUpstream()
+	proxyReq, err := http.NewRequestWithContext(upstreamCtx, r.Method, targetURL, bytes.NewReader(body))
 	if err != nil {
 		p.logger.ErrorContext(r.Context(), "Failed to create proxy request", "error", err, "url", targetURL)
 		return nil, err
@@ -1089,7 +1129,9 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		proxyReq, reqErr := http.NewRequestWithContext(r.Context(), r.Method, targetURL, bytes.NewReader(requestBody))
+		upstreamCtx, cancelUpstream := p.upstreamRequestContext(r)
+		defer cancelUpstream()
+		proxyReq, reqErr := http.NewRequestWithContext(upstreamCtx, r.Method, targetURL, bytes.NewReader(requestBody))
 		if reqErr != nil {
 			// Fatal: request creation error
 			p.logger.ErrorContext(r.Context(), "Failed to create proxy request", "error", reqErr, "url", targetURL)

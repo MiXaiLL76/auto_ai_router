@@ -41,3 +41,6 @@ conf*.json
 *.xlsx
 _LiteLLM_*.sql
 _LiteLLM_*.csv
+*.pb.gz
+Locust_*.html
+air_mock_*.json

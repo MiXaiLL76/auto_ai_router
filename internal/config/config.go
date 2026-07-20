@@ -508,10 +508,14 @@ func (s *ServerConfig) UnmarshalYAML(value *yaml.Node) error {
 	if s.DefaultModelsRPM, err = parseField(temp.DefaultModelsRPM, -1, strconv.Atoi, "default_models_rpm"); err != nil {
 		return err
 	}
-	if s.MaxIdleConns, err = parseField(temp.MaxIdleConns, 200, strconv.Atoi, "max_idle_conns"); err != nil {
+	// Defaults sized for sustained several-hundred-RPS proxy traffic against a
+	// handful of upstream hosts: too low a per-host cap forces the transport to
+	// close and re-dial TCP connections instead of reusing idle ones, which
+	// shows up as a syscall.connect hot path under load.
+	if s.MaxIdleConns, err = parseField(temp.MaxIdleConns, 1024, strconv.Atoi, "max_idle_conns"); err != nil {
 		return err
 	}
-	if s.MaxIdleConnsPerHost, err = parseField(temp.MaxIdleConnsPerHost, 20, strconv.Atoi, "max_idle_conns_per_host"); err != nil {
+	if s.MaxIdleConnsPerHost, err = parseField(temp.MaxIdleConnsPerHost, 256, strconv.Atoi, "max_idle_conns_per_host"); err != nil {
 		return err
 	}
 
@@ -705,6 +709,13 @@ type MonitoringConfig struct {
 	HealthCheckPath   string `yaml:"-"` // Fixed to "/health", not configurable via YAML
 	LogErrors         bool   `yaml:"log_errors,omitempty"`
 	ErrorsLogPath     string `yaml:"errors_log_path,omitempty"`
+	// PprofEnabled turns on net/http/pprof profiling handlers on a separate
+	// internal-only listener (see PprofPort). Opt-in and off by default:
+	// pprof exposes heap contents, goroutine stacks and lets any caller
+	// trigger a 30s CPU profile, so it must never be reachable from outside
+	// the cluster (no Service/Ingress route to PprofPort).
+	PprofEnabled bool `yaml:"pprof_enabled,omitempty"` // default: false
+	PprofPort    int  `yaml:"pprof_port,omitempty"`    // default: 6060
 }
 
 // LiteLLMDBConfig holds configuration for LiteLLM database integration
@@ -737,6 +748,10 @@ type LiteLLMDBConfig struct {
 	LogQueueSize     int           `yaml:"log_queue_size"`     // default: 10000
 	LogBatchSize     int           `yaml:"log_batch_size"`     // default: 100
 	LogFlushInterval time.Duration `yaml:"log_flush_interval"` // default: 5s
+	// LogWorkers is the number of goroutines concurrently draining the spend-log
+	// queue into Postgres. Each worker batches and flushes independently, so a
+	// slow INSERT or retry backoff in one worker doesn't stall the others.
+	LogWorkers int `yaml:"log_workers"` // default: 4
 
 	// DisableSpendLogsWrite disables writing SpendLogEntry/Daily* aggregates to
 	// Postgres while leaving auth (ValidateToken) untouched. Intended for setups
@@ -779,6 +794,9 @@ type KafkaConfig struct {
 	LogQueueSize     int           `yaml:"log_queue_size"`     // default: 5000
 	LogBatchSize     int           `yaml:"log_batch_size"`     // default: 100
 	LogFlushInterval time.Duration `yaml:"log_flush_interval"` // default: 5s
+	// LogWorkers is the number of goroutines concurrently draining the queue
+	// and producing to Kafka (mirrors litellm_db.log_workers).
+	LogWorkers int `yaml:"log_workers"` // default: 4
 
 	// TLS/SASL — optional, for production clusters.
 	TLSEnabled    bool   `yaml:"tls_enabled,omitempty"`
@@ -924,6 +942,8 @@ func (m *MonitoringConfig) UnmarshalYAML(value *yaml.Node) error {
 		PrometheusEnabled string `yaml:"prometheus_enabled"`
 		LogErrors         string `yaml:"log_errors,omitempty"`
 		ErrorsLogPath     string `yaml:"errors_log_path,omitempty"`
+		PprofEnabled      string `yaml:"pprof_enabled,omitempty"`
+		PprofPort         string `yaml:"pprof_port,omitempty"`
 	}
 
 	var temp tempConfig
@@ -937,6 +957,12 @@ func (m *MonitoringConfig) UnmarshalYAML(value *yaml.Node) error {
 		return err
 	}
 	if m.LogErrors, err = parseField(temp.LogErrors, false, strconv.ParseBool, "log_errors"); err != nil {
+		return err
+	}
+	if m.PprofEnabled, err = parseField(temp.PprofEnabled, false, strconv.ParseBool, "pprof_enabled"); err != nil {
+		return err
+	}
+	if m.PprofPort, err = parseField(temp.PprofPort, 6060, strconv.Atoi, "pprof_port"); err != nil {
 		return err
 	}
 
@@ -964,6 +990,7 @@ func (l *LiteLLMDBConfig) UnmarshalYAML(value *yaml.Node) error {
 		LogQueueSize          string `yaml:"log_queue_size"`
 		LogBatchSize          string `yaml:"log_batch_size"`
 		LogFlushInterval      string `yaml:"log_flush_interval"`
+		LogWorkers            string `yaml:"log_workers"`
 		DisableSpendLogsWrite string `yaml:"disable_spend_logs_write"`
 
 		EnforceBudgetReservation         string `yaml:"enforce_budget_reservation"`
@@ -1023,6 +1050,9 @@ func (l *LiteLLMDBConfig) UnmarshalYAML(value *yaml.Node) error {
 	if l.LogBatchSize, err = parseField(temp.LogBatchSize, 100, strconv.Atoi, "litellm_db.log_batch_size"); err != nil {
 		return err
 	}
+	if l.LogWorkers, err = parseField(temp.LogWorkers, 4, strconv.Atoi, "litellm_db.log_workers"); err != nil {
+		return err
+	}
 	// Duration fields
 	if l.HealthCheckInterval, err = parseField(temp.HealthCheckInterval, 10*time.Second, time.ParseDuration, "litellm_db.health_check_interval"); err != nil {
 		return err
@@ -1053,6 +1083,7 @@ func (k *KafkaConfig) UnmarshalYAML(value *yaml.Node) error {
 		LogQueueSize     string   `yaml:"log_queue_size"`
 		LogBatchSize     string   `yaml:"log_batch_size"`
 		LogFlushInterval string   `yaml:"log_flush_interval"`
+		LogWorkers       string   `yaml:"log_workers"`
 		TLSEnabled       string   `yaml:"tls_enabled,omitempty"`
 		SASLMechanism    string   `yaml:"sasl_mechanism,omitempty"`
 		SASLUsername     string   `yaml:"sasl_username,omitempty"`
@@ -1098,6 +1129,9 @@ func (k *KafkaConfig) UnmarshalYAML(value *yaml.Node) error {
 		return err
 	}
 	if k.LogFlushInterval, err = parseField(temp.LogFlushInterval, 5*time.Second, time.ParseDuration, "kafka.log_flush_interval"); err != nil {
+		return err
+	}
+	if k.LogWorkers, err = parseField(temp.LogWorkers, 4, strconv.Atoi, "kafka.log_workers"); err != nil {
 		return err
 	}
 
@@ -1259,6 +1293,8 @@ func defaultMonitoringConfig() MonitoringConfig {
 		HealthCheckPath:   "/health",
 		LogErrors:         false,
 		ErrorsLogPath:     "logs/logs.jsonl",
+		PprofEnabled:      false,
+		PprofPort:         6060,
 	}
 }
 
@@ -1298,6 +1334,7 @@ func defaultLiteLLMDBConfig() LiteLLMDBConfig {
 		LogQueueSize:          5000,
 		LogBatchSize:          100,
 		LogFlushInterval:      5 * time.Second,
+		LogWorkers:            4,
 
 		EnforceBudgetReservation:         false,
 		BudgetReservationTTL:             15 * time.Minute,
@@ -1315,6 +1352,7 @@ func defaultKafkaConfig() KafkaConfig {
 		LogQueueSize:     5000,
 		LogBatchSize:     100,
 		LogFlushInterval: 5 * time.Second,
+		LogWorkers:       4,
 	}
 }
 
@@ -1572,6 +1610,9 @@ func (c *Config) Validate() error {
 		if !strings.HasPrefix(c.LiteLLMDB.DatabaseURL, "postgres://") && !strings.HasPrefix(c.LiteLLMDB.DatabaseURL, "postgresql://") {
 			return fmt.Errorf("litellm_db.database_url must start with postgres:// or postgresql://, got: %s", c.LiteLLMDB.DatabaseURL)
 		}
+		if c.LiteLLMDB.LogWorkers <= 0 {
+			return fmt.Errorf("litellm_db.log_workers must be positive, got: %d", c.LiteLLMDB.LogWorkers)
+		}
 	}
 
 	// Validate Kafka config. Mirrors kafkalog.Config.Validate() so malformed
@@ -1594,6 +1635,9 @@ func (c *Config) Validate() error {
 		}
 		if c.Kafka.LogFlushInterval <= 0 {
 			return fmt.Errorf("kafka.log_flush_interval must be positive, got: %s", c.Kafka.LogFlushInterval)
+		}
+		if c.Kafka.LogWorkers <= 0 {
+			return fmt.Errorf("kafka.log_workers must be positive, got: %d", c.Kafka.LogWorkers)
 		}
 		switch c.Kafka.SASLMechanism {
 		case "", "PLAIN", "SCRAM-SHA-256", "SCRAM-SHA-512":

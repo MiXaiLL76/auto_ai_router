@@ -21,6 +21,7 @@ type Config struct {
 	LogQueueSize     int           // Queue buffer size (default: 5000)
 	LogBatchSize     int           // Batch size per ProduceSync call (default: 100)
 	LogFlushInterval time.Duration // Flush interval (default: 5s)
+	LogWorkers       int           // Number of parallel queue-draining workers (default: 4)
 
 	// TLS / SASL (optional, for production Kafka clusters)
 	TLSEnabled    bool
@@ -47,6 +48,7 @@ func DefaultConfig() *Config {
 		LogQueueSize:     5000,
 		LogBatchSize:     100,
 		LogFlushInterval: 5 * time.Second,
+		LogWorkers:       4,
 	}
 }
 
@@ -69,6 +71,9 @@ func (c *Config) ApplyDefaults() {
 	if c.LogFlushInterval == 0 {
 		c.LogFlushInterval = defaults.LogFlushInterval
 	}
+	if c.LogWorkers == 0 {
+		c.LogWorkers = defaults.LogWorkers
+	}
 	if c.Logger == nil {
 		c.Logger = slog.Default()
 	}
@@ -90,6 +95,9 @@ func (c *Config) Validate() error {
 	}
 	if c.LogFlushInterval <= 0 {
 		return errors.New("kafkalog: log_flush_interval must be positive")
+	}
+	if c.LogWorkers <= 0 {
+		return errors.New("kafkalog: log_workers must be positive")
 	}
 	switch c.SASLMechanism {
 	case "", "PLAIN", "SCRAM-SHA-256", "SCRAM-SHA-512":
