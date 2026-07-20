@@ -146,6 +146,7 @@ type Config struct {
 	SessionStoreTTL            time.Duration
 	RouterID                   string // Human-readable name for this router (shown in /trace); defaults to hostname
 	DrainUpstreamOnAbort       bool   // When true, keep reading upstream after client disconnect to get real usage (default: false)
+	ResponseHeaderMode         config.ResponseHeaderMode
 
 	BudgetReserver                   *budget.Reserver      // Atomic Redis budget reservation (nil if Redis disabled — feature is a no-op)
 	KeyRateLimiter                   *ratelimit.RPMLimiter // Key/user/team/org RPM/TPM enforcement (nil if Redis disabled)
@@ -176,6 +177,7 @@ type Proxy struct {
 	sessionStore                     *SessionStore              // Optional: session-sticky credential routing
 	stickyAutoCacheCtrl              bool                       // Auto-inject Anthropic cache_control when session is active
 	drainUpstreamOnAbort             bool                       // Keep reading upstream after client disconnect to get real usage chunk
+	responseHeaderMode               config.ResponseHeaderMode
 	bedrockDailyQuota                *bedrockDailyQuotaTracker
 	budgetReserver                   *budget.Reserver
 	keyRateLimiter                   *ratelimit.RPMLimiter
@@ -244,6 +246,7 @@ func New(cfg *Config) *Proxy {
 		sessionStore:                     sessionStore,
 		stickyAutoCacheCtrl:              cfg.SessionStickyAutoCacheCtrl,
 		drainUpstreamOnAbort:             cfg.DrainUpstreamOnAbort,
+		responseHeaderMode:               cfg.ResponseHeaderMode,
 		bedrockDailyQuota:                newBedrockDailyQuotaTracker(),
 		budgetReserver:                   cfg.BudgetReserver,
 		keyRateLimiter:                   cfg.KeyRateLimiter,
@@ -692,10 +695,8 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 						p.logger.WarnContext(r.Context(), "Failed to close proxy streaming response body", "error", closeErr)
 					}
 				}()
-				copyResponseHeaders(w, proxyResp.Headers, cred.Type)
-				if logCtx.IsProxyRequest && logCtx.ActualCredentialName != "" {
-					w.Header().Set("X-Credential-Name", logCtx.ActualCredentialName)
-				}
+				p.copyResponseHeaders(w, proxyResp.Headers, false)
+				p.setCredentialResponseHeader(w, logCtx, logCtx.ActualCredentialName)
 				w.WriteHeader(proxyResp.StatusCode)
 				logCtx.PromptTokensEstimate = estimatePromptTokensForModel(body, realModelID)
 				fakeResp := &http.Response{
@@ -717,10 +718,8 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 						p.logger.WarnContext(r.Context(), "Failed to close proxy streaming response body", "error", closeErr)
 					}
 				}()
-				copyResponseHeaders(w, proxyResp.Headers, cred.Type)
-				if logCtx.IsProxyRequest && logCtx.ActualCredentialName != "" {
-					w.Header().Set("X-Credential-Name", logCtx.ActualCredentialName)
-				}
+				p.copyResponseHeaders(w, proxyResp.Headers, false)
+				p.setCredentialResponseHeader(w, logCtx, logCtx.ActualCredentialName)
 				w.WriteHeader(proxyResp.StatusCode)
 				logCtx.PromptTokensEstimate = estimatePromptTokensForModel(body, realModelID)
 				fakeResp := &http.Response{
@@ -735,9 +734,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 					streamCompleted = true
 				}
 			} else {
-				if logCtx.IsProxyRequest && logCtx.ActualCredentialName != "" {
-					w.Header().Set("X-Credential-Name", logCtx.ActualCredentialName)
-				}
+				p.setCredentialResponseHeader(w, logCtx, logCtx.ActualCredentialName)
 				tokenizerModelID := realModelID
 				if tokenizerModelID == "" {
 					tokenizerModelID = modelID
@@ -822,9 +819,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 
-			if logCtx.IsProxyRequest && logCtx.ActualCredentialName != "" {
-				w.Header().Set("X-Credential-Name", logCtx.ActualCredentialName)
-			}
+			p.setCredentialResponseHeader(w, logCtx, logCtx.ActualCredentialName)
 			p.writeProxyResponse(w, proxyResp, r, cred.Name, modelID)
 			tokens := extractTokensFromResponse(string(proxyResp.Body), config.ProviderTypeOpenAI)
 			if tokens > 0 {
@@ -1497,11 +1492,9 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Copy response headers (skip hop-by-hop headers and transformation-related headers)
-	copyResponseHeaders(w, resp.Header, cred.Type)
+	p.copyResponseHeaders(w, resp.Header, false)
 	// Return credential name only to internal proxy clients, not to end users.
-	if logCtx.IsProxyRequest {
-		w.Header().Set("X-Credential-Name", cred.Name)
-	}
+	p.setCredentialResponseHeader(w, logCtx, cred.Name)
 
 	rc := http.NewResponseController(w)
 

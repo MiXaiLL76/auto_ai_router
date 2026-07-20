@@ -420,29 +420,69 @@ func (r *RedisConfig) UnmarshalYAML(value *yaml.Node) error {
 }
 
 type ServerConfig struct {
-	Port                       int           `yaml:"port"`
-	MaxBodySizeMB              int           `yaml:"max_body_size_mb"`
-	ResponseBodyMultiplier     int           `yaml:"response_body_multiplier"` // Multiplier for response body size limit relative to max_body_size_mb (default: 10)
-	RequestTimeout             time.Duration `yaml:"request_timeout"`
-	LoggingLevel               string        `yaml:"logging_level"`
-	StdoutLogsEnabled          bool          `yaml:"stdout_logs_enabled"` // Write logs to stdout (default: true); disable to ship logs only via OTEL
-	MasterKey                  string        `yaml:"master_key"`
-	DefaultModelsRPM           int           `yaml:"default_models_rpm"`
-	MaxIdleConns               int           `yaml:"max_idle_conns"`
-	MaxIdleConnsPerHost        int           `yaml:"max_idle_conns_per_host"`
-	IdleConnTimeout            time.Duration `yaml:"idle_conn_timeout"`
-	ReadTimeout                time.Duration `yaml:"-"`                                 // HTTP server read timeout (equals request_timeout, not configurable via YAML)
-	WriteTimeout               time.Duration `yaml:"write_timeout"`                     // HTTP server write timeout (default: 60s)
-	IdleTimeout                time.Duration `yaml:"idle_timeout"`                      // HTTP server idle timeout (default: 2*write_timeout)
-	MaxProviderRetries         int           `yaml:"max_provider_retries"`              // Max same-type credential retries on provider errors (default: 2, meaning 3 total attempts)
-	MaxFallbackAttempts        int           `yaml:"max_fallback_attempts"`             // Max fallback proxy hops per request chain (default: 5)
-	SessionStickyEnabled       bool          `yaml:"session_sticky_enabled"`            // Enable session-sticky credential routing (default: true)
-	SessionStickyTTL           int           `yaml:"session_sticky_ttl_minutes"`        // Session binding TTL in minutes (0 = default 6)
-	SessionStickyAutoCacheCtrl bool          `yaml:"session_sticky_auto_cache_control"` // Auto-inject Anthropic cache_control when session is active (default: true)
-	ModelPricesLink            string        `yaml:"model_prices_link,omitempty"`       // URL or file path to model prices JSON - supports os.environ/VAR_NAME
-	ShutdownDelay              time.Duration `yaml:"shutdown_delay"`                    // Delay between readiness=false and server.Shutdown (default: 5s)
-	DrainUpstreamOnAbort       bool          `yaml:"drain_upstream_on_abort"`           // When true, keep reading upstream after client disconnect to capture real usage chunk (default: false — estimate from delta text)
-	ProxyHealthTimeout         time.Duration `yaml:"proxy_health_timeout"`              // Timeout for fetching /health from remote proxy credentials (default: 15s)
+	Port                       int                   `yaml:"port"`
+	MaxBodySizeMB              int                   `yaml:"max_body_size_mb"`
+	ResponseBodyMultiplier     int                   `yaml:"response_body_multiplier"` // Multiplier for response body size limit relative to max_body_size_mb (default: 10)
+	RequestTimeout             time.Duration         `yaml:"request_timeout"`
+	LoggingLevel               string                `yaml:"logging_level"`
+	StdoutLogsEnabled          bool                  `yaml:"stdout_logs_enabled"` // Write logs to stdout (default: true); disable to ship logs only via OTEL
+	MasterKey                  string                `yaml:"master_key"`
+	DefaultModelsRPM           int                   `yaml:"default_models_rpm"`
+	MaxIdleConns               int                   `yaml:"max_idle_conns"`
+	MaxIdleConnsPerHost        int                   `yaml:"max_idle_conns_per_host"`
+	IdleConnTimeout            time.Duration         `yaml:"idle_conn_timeout"`
+	ReadTimeout                time.Duration         `yaml:"-"`                                 // HTTP server read timeout (equals request_timeout, not configurable via YAML)
+	WriteTimeout               time.Duration         `yaml:"write_timeout"`                     // HTTP server write timeout (default: 60s)
+	IdleTimeout                time.Duration         `yaml:"idle_timeout"`                      // HTTP server idle timeout (default: 2*write_timeout)
+	MaxProviderRetries         int                   `yaml:"max_provider_retries"`              // Max same-type credential retries on provider errors (default: 2, meaning 3 total attempts)
+	MaxFallbackAttempts        int                   `yaml:"max_fallback_attempts"`             // Max fallback proxy hops per request chain (default: 5)
+	SessionStickyEnabled       bool                  `yaml:"session_sticky_enabled"`            // Enable session-sticky credential routing (default: true)
+	SessionStickyTTL           int                   `yaml:"session_sticky_ttl_minutes"`        // Session binding TTL in minutes (0 = default 6)
+	SessionStickyAutoCacheCtrl bool                  `yaml:"session_sticky_auto_cache_control"` // Auto-inject Anthropic cache_control when session is active (default: true)
+	ModelPricesLink            string                `yaml:"model_prices_link,omitempty"`       // URL or file path to model prices JSON - supports os.environ/VAR_NAME
+	ShutdownDelay              time.Duration         `yaml:"shutdown_delay"`                    // Delay between readiness=false and server.Shutdown (default: 5s)
+	DrainUpstreamOnAbort       bool                  `yaml:"drain_upstream_on_abort"`           // When true, keep reading upstream after client disconnect to capture real usage chunk (default: false — estimate from delta text)
+	ProxyHealthTimeout         time.Duration         `yaml:"proxy_health_timeout"`              // Timeout for fetching /health from remote proxy credentials (default: 15s)
+	ResponseHeaders            ResponseHeadersConfig `yaml:"response_headers"`
+}
+
+type ResponseHeaderMode string
+
+const (
+	ResponseHeaderModePassthrough ResponseHeaderMode = "passthrough"
+	ResponseHeaderModeAllowlist   ResponseHeaderMode = "allowlist"
+)
+
+type ResponseHeadersConfig struct {
+	Mode ResponseHeaderMode `yaml:"mode"`
+}
+
+func (c *ResponseHeadersConfig) UnmarshalYAML(value *yaml.Node) error {
+	type rawConfig struct {
+		Mode string `yaml:"mode"`
+	}
+
+	var raw rawConfig
+	if err := value.Decode(&raw); err != nil {
+		return err
+	}
+
+	rawMode := strings.TrimSpace(raw.Mode)
+	if strings.HasPrefix(rawMode, "os.environ/") {
+		envName := strings.TrimPrefix(rawMode, "os.environ/")
+		envValue, ok := os.LookupEnv(envName)
+		if !ok || strings.TrimSpace(envValue) == "" {
+			return fmt.Errorf("environment variable %q is required for response_headers.mode", envName)
+		}
+		rawMode = envValue
+	}
+
+	mode := strings.ToLower(strings.TrimSpace(rawMode))
+	if mode == "" {
+		mode = string(ResponseHeaderModePassthrough)
+	}
+	c.Mode = ResponseHeaderMode(mode)
+	return nil
 }
 
 // ErrorCodeRuleConfig defines per-error-code ban rules
@@ -463,28 +503,29 @@ type Fail2BanConfig struct {
 func (s *ServerConfig) UnmarshalYAML(value *yaml.Node) error {
 	// Create a temporary struct with all string fields
 	type tempConfig struct {
-		Port                       string `yaml:"port"`
-		MaxBodySizeMB              string `yaml:"max_body_size_mb"`
-		ResponseBodyMultiplier     string `yaml:"response_body_multiplier"`
-		RequestTimeout             string `yaml:"request_timeout"`
-		LoggingLevel               string `yaml:"logging_level"`
-		StdoutLogsEnabled          string `yaml:"stdout_logs_enabled"`
-		MasterKey                  string `yaml:"master_key"`
-		DefaultModelsRPM           string `yaml:"default_models_rpm"`
-		MaxIdleConns               string `yaml:"max_idle_conns"`
-		MaxIdleConnsPerHost        string `yaml:"max_idle_conns_per_host"`
-		IdleConnTimeout            string `yaml:"idle_conn_timeout"`
-		WriteTimeout               string `yaml:"write_timeout"`
-		IdleTimeout                string `yaml:"idle_timeout"`
-		MaxProviderRetries         string `yaml:"max_provider_retries"`
-		MaxFallbackAttempts        string `yaml:"max_fallback_attempts"`
-		SessionStickyEnabled       string `yaml:"session_sticky_enabled"`
-		SessionStickyTTL           string `yaml:"session_sticky_ttl_minutes"`
-		SessionStickyAutoCacheCtrl string `yaml:"session_sticky_auto_cache_control"`
-		ModelPricesLink            string `yaml:"model_prices_link,omitempty"`
-		ShutdownDelay              string `yaml:"shutdown_delay"`
-		DrainUpstreamOnAbort       string `yaml:"drain_upstream_on_abort"`
-		ProxyHealthTimeout         string `yaml:"proxy_health_timeout"`
+		Port                       string                `yaml:"port"`
+		MaxBodySizeMB              string                `yaml:"max_body_size_mb"`
+		ResponseBodyMultiplier     string                `yaml:"response_body_multiplier"`
+		RequestTimeout             string                `yaml:"request_timeout"`
+		LoggingLevel               string                `yaml:"logging_level"`
+		StdoutLogsEnabled          string                `yaml:"stdout_logs_enabled"`
+		MasterKey                  string                `yaml:"master_key"`
+		DefaultModelsRPM           string                `yaml:"default_models_rpm"`
+		MaxIdleConns               string                `yaml:"max_idle_conns"`
+		MaxIdleConnsPerHost        string                `yaml:"max_idle_conns_per_host"`
+		IdleConnTimeout            string                `yaml:"idle_conn_timeout"`
+		WriteTimeout               string                `yaml:"write_timeout"`
+		IdleTimeout                string                `yaml:"idle_timeout"`
+		MaxProviderRetries         string                `yaml:"max_provider_retries"`
+		MaxFallbackAttempts        string                `yaml:"max_fallback_attempts"`
+		SessionStickyEnabled       string                `yaml:"session_sticky_enabled"`
+		SessionStickyTTL           string                `yaml:"session_sticky_ttl_minutes"`
+		SessionStickyAutoCacheCtrl string                `yaml:"session_sticky_auto_cache_control"`
+		ModelPricesLink            string                `yaml:"model_prices_link,omitempty"`
+		ShutdownDelay              string                `yaml:"shutdown_delay"`
+		DrainUpstreamOnAbort       string                `yaml:"drain_upstream_on_abort"`
+		ProxyHealthTimeout         string                `yaml:"proxy_health_timeout"`
+		ResponseHeaders            ResponseHeadersConfig `yaml:"response_headers"`
 	}
 
 	var temp tempConfig
@@ -559,6 +600,7 @@ func (s *ServerConfig) UnmarshalYAML(value *yaml.Node) error {
 	if s.ProxyHealthTimeout, err = parseField(temp.ProxyHealthTimeout, 15*time.Second, time.ParseDuration, "proxy_health_timeout"); err != nil {
 		return err
 	}
+	s.ResponseHeaders = temp.ResponseHeaders
 
 	// String fields
 	s.LoggingLevel = resolveEnvString(temp.LoggingLevel)
@@ -1378,6 +1420,13 @@ func (c *Config) Validate() error {
 
 	if c.Server.ResponseBodyMultiplier <= 0 {
 		c.Server.ResponseBodyMultiplier = 10
+	}
+
+	if c.Server.ResponseHeaders.Mode == "" {
+		c.Server.ResponseHeaders.Mode = ResponseHeaderModePassthrough
+	}
+	if c.Server.ResponseHeaders.Mode != ResponseHeaderModePassthrough && c.Server.ResponseHeaders.Mode != ResponseHeaderModeAllowlist {
+		return fmt.Errorf("response_headers.mode must be passthrough or allowlist, got %q", c.Server.ResponseHeaders.Mode)
 	}
 
 	// -1 means unlimited timeout

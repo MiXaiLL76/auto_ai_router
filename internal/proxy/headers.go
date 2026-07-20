@@ -20,6 +20,16 @@ var hopByHopHeaders = map[string]bool{
 	"Upgrade":             true,
 }
 
+var allowedResponseHeaders = map[string]bool{
+	"Cache-Control":       true,
+	"Content-Disposition": true,
+	"Content-Range":       true,
+	"Content-Type":        true,
+	"Last-Modified":       true,
+	"Location":            true,
+	"Retry-After":         true,
+}
+
 // privacyHeaders are headers that reveal client IP or routing information.
 // These are added by reverse proxies/load balancers and must not be forwarded
 // to upstream AI providers to protect user privacy.
@@ -126,9 +136,16 @@ func copyHeadersSkipAuth(dst *http.Request, src *http.Request) {
 // Note: Content-Encoding is always skipped because Go's http.Client automatically
 // decompresses gzip/deflate responses, so the body is already decompressed.
 // The caller should compress the body if needed and set Content-Encoding appropriately.
-func copyResponseHeaders(w http.ResponseWriter, src http.Header, credType config.ProviderType) {
+func (p *Proxy) copyResponseHeaders(w http.ResponseWriter, src http.Header, stripIntegrityHeaders bool) {
 	for key, values := range src {
-		if isHopByHopHeader(key) {
+		canonicalKey := http.CanonicalHeaderKey(key)
+		if isHopByHopHeader(canonicalKey) {
+			continue
+		}
+		if p.responseHeaderMode == config.ResponseHeaderModeAllowlist && !allowedResponseHeaders[canonicalKey] {
+			continue
+		}
+		if stripIntegrityHeaders && isRepresentationIntegrityHeader(canonicalKey) {
 			continue
 		}
 		// Skip Content-Length and Content-Encoding for all response types
@@ -136,11 +153,22 @@ func copyResponseHeaders(w http.ResponseWriter, src http.Header, credType config
 		// - Content-Encoding: Go's http.Client already decompressed the body,
 		//   so we skip upstream's Content-Encoding header and let caller set it if recompressing
 		// Skip X-Credential-Name — internal header for proxy-to-proxy routing, not exposed to end clients
-		if key == "Content-Length" || key == "Content-Encoding" || key == "X-Credential-Name" {
+		if canonicalKey == "Content-Length" || canonicalKey == "Content-Encoding" || canonicalKey == "X-Credential-Name" {
 			continue
 		}
 		for _, value := range values {
-			w.Header().Add(key, value)
+			w.Header().Add(canonicalKey, value)
 		}
 	}
+}
+
+func (p *Proxy) setCredentialResponseHeader(w http.ResponseWriter, logCtx *RequestLogContext, credentialName string) {
+	if credentialName == "" && logCtx != nil {
+		credentialName = logCtx.ActualCredentialName
+	}
+	if p.responseHeaderMode == config.ResponseHeaderModeAllowlist || logCtx == nil || !logCtx.IsProxyRequest || credentialName == "" {
+		w.Header().Del("X-Credential-Name")
+		return
+	}
+	w.Header().Set("X-Credential-Name", credentialName)
 }

@@ -61,24 +61,7 @@ func (p *Proxy) writeProxyResponse(w http.ResponseWriter, resp *ProxyResponse, c
 		}
 	}
 
-	// Copy response headers
-	for key, values := range resp.Headers {
-		if isHopByHopHeader(key) {
-			continue
-		}
-		if responseBodyChanged && isRepresentationIntegrityHeader(key) {
-			continue
-		}
-		// Skip Content-Length, Transfer-Encoding, and Content-Encoding
-		// We'll set Content-Encoding based on our compression, and Content-Length based on actual body size
-		// Skip X-Credential-Name — internal header for proxy-to-proxy routing, not exposed to end clients
-		if key == "Content-Length" || key == "Transfer-Encoding" || key == "Content-Encoding" || key == "X-Credential-Name" {
-			continue
-		}
-		for _, value := range values {
-			w.Header().Add(key, value)
-		}
-	}
+	p.copyResponseHeaders(w, resp.Headers, responseBodyChanged)
 
 	// Set Content-Encoding if we compressed the response
 	if contentEncoding != "identity" {
@@ -127,24 +110,7 @@ func (p *Proxy) writeProxyStreamingResponseWithTokens(
 		}
 	}()
 
-	for key, values := range resp.Headers {
-		if isHopByHopHeader(key) {
-			continue
-		}
-		if normalizeStream && isRepresentationIntegrityHeader(key) {
-			continue
-		}
-		// Skip Content-Length, Transfer-Encoding, and Content-Encoding
-		// For streaming responses, we don't re-compress since it would break the stream protocol.
-		// We remove Content-Encoding from upstream since Go's http.Client already decompressed it.
-		// Skip X-Credential-Name — internal header for proxy-to-proxy routing, not exposed to end clients
-		if key == "Content-Length" || key == "Transfer-Encoding" || key == "Content-Encoding" || key == "X-Credential-Name" {
-			continue
-		}
-		for _, value := range values {
-			w.Header().Add(key, value)
-		}
-	}
+	p.copyResponseHeaders(w, resp.Headers, normalizeStream)
 
 	w.WriteHeader(resp.StatusCode)
 

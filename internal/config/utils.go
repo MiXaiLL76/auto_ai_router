@@ -92,6 +92,7 @@ func PrintConfig(logger *slog.Logger, cfg *Config) {
 		"model_prices_link", cfg.Server.ModelPricesLink,
 		"max_provider_retries", cfg.Server.MaxProviderRetries,
 		"max_fallback_attempts", cfg.Server.MaxFallbackAttempts,
+		"response_headers_mode", cfg.Server.ResponseHeaders.Mode,
 		"session_sticky_enabled", cfg.Server.SessionStickyEnabled,
 		"session_sticky_ttl_minutes", cfg.Server.SessionStickyTTL,
 	)
