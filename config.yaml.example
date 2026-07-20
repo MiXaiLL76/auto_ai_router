@@ -247,6 +247,8 @@ litellm_db:
   connect_timeout: 5s  # Connection timeout (default: 5s)
   auth_cache_ttl: 20s  # Auth cache TTL (default: 20s)
   auth_cache_size: 10000  # Auth cache size (default: 10000)
+  enforce_budget_reservation: false  # Opt in to Redis-backed atomic budget reservation
+  enforce_key_rate_limits: false  # Opt in to Redis-backed key/user/team/org RPM/TPM enforcement
   log_queue_size: 5000  # Spend log queue size (default: 5000)
   log_batch_size: 100  # Spend log batch size (default: 100)
   log_flush_interval: 5s  # Spend log flush interval (default: 5s)

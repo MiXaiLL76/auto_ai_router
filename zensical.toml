@@ -31,6 +31,7 @@ nav = [
   { "LiteLLM Integration" = [
     { "LiteLLM Database" = "litellm-integration/litellm_db.md" },
     { "Model Pricing" = "litellm-integration/pricing.md" },
+    { "LiteLLM Auth" = "litellm-integration/litellm_auth.md" },
     { "Kafka Spend Log" = "litellm-integration/kafka_spend_log.md" },
   ]},
   { "CLI Integration" = [

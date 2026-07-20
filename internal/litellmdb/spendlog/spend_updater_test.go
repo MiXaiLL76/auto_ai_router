@@ -268,3 +268,41 @@ func TestFilterBatchByInsertedIDs_NoMatch(t *testing.T) {
 
 	assert.Len(t, result, 0)
 }
+
+// TestSortedKeys_DeterministicAcrossRuns pins the fix for the multi-pod
+// deadlock: two concurrent transactions updating the same set of rows (e.g.
+// two teams) must always take their row locks in the same order, regardless
+// of which process built the map or Go's randomized map iteration. If this
+// ever regresses to `for k := range m`, this test becomes flaky (different
+// order per run) instead of failing outright - run with -count=20 to catch
+// that class of regression.
+func TestSortedKeys_DeterministicAcrossRuns(t *testing.T) {
+	m := map[string]float64{
+		"team-zebra": 1,
+		"team-alpha": 2,
+		"team-mike":  3,
+		"team-echo":  4,
+	}
+
+	want := []string{"team-alpha", "team-echo", "team-mike", "team-zebra"}
+
+	for range 20 {
+		assert.Equal(t, want, sortedKeys(m))
+	}
+}
+
+// TestSortedKeys_MatchesAcrossIndependentMaps simulates two "pods" that
+// aggregated overlapping entities from different batches (different Go map
+// instances, different insertion order). Both must still update in the same
+// global order, which is what actually prevents the lock-order deadlock.
+func TestSortedKeys_MatchesAcrossIndependentMaps(t *testing.T) {
+	podA := map[string]float64{"team-b": 10, "team-a": 5, "team-c": 1}
+	podB := map[string]float64{"team-c": 2, "team-a": 7, "team-b": 3}
+
+	assert.Equal(t, sortedKeys(podA), sortedKeys(podB))
+}
+
+func TestSortedKeys_Empty(t *testing.T) {
+	assert.Empty(t, sortedKeys(nil))
+	assert.Empty(t, sortedKeys(map[string]float64{}))
+}

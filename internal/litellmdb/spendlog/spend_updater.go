@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"sync/atomic"
 
@@ -144,11 +145,31 @@ func executeSpendUpdates(ctx context.Context, tx pgx.Tx, updates *SpendUpdates) 
 	return nil
 }
 
+// sortedKeys returns the map's keys in ascending order.
+//
+// Go randomizes map iteration order on every run. Without this, two
+// concurrent batches touching overlapping rows of the same table (e.g. pod A
+// updates team "x" then team "y", pod B updates "y" then "x") acquire their
+// row locks in opposite order and deadlock (Postgres 40P01) — the same class
+// of bug litellm's db_spend_update_writer.py fixes by sorting before each
+// per-row UPDATE loop. Iterating in a fixed, consistent order across all
+// callers (any pod, any batch) makes the two transactions above take their
+// locks in the same order, so they queue instead of deadlocking.
+func sortedKeys(m map[string]float64) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
 // updateTokens updates Token.spend in LiteLLM_VerificationToken.
 // Executes a single UPDATE per apiKey.
 // Falls back to query without last_active if the column doesn't exist (older DB schema).
 func updateTokens(ctx context.Context, tx pgx.Tx, tokens map[string]float64) error {
-	for apiKey, amount := range tokens {
+	for _, apiKey := range sortedKeys(tokens) {
+		amount := tokens[apiKey]
 		var err error
 		if schemaTokenHasLastActive.Load() {
 			_, err = tx.Exec(ctx,
@@ -174,7 +195,8 @@ func updateTokens(ctx context.Context, tx pgx.Tx, tokens map[string]float64) err
 // updateUsers updates LiteLLM_UserTable.spend.
 // Checks spend IS NOT NULL to avoid accidentally updating null values.
 func updateUsers(ctx context.Context, tx pgx.Tx, users map[string]float64) error {
-	for userID, amount := range users {
+	for _, userID := range sortedKeys(users) {
+		amount := users[userID]
 		_, err := tx.Exec(ctx,
 			`UPDATE "LiteLLM_UserTable" SET spend = spend + $1 WHERE user_id = $2 AND spend IS NOT NULL`,
 			amount, userID)
@@ -188,7 +210,8 @@ func updateUsers(ctx context.Context, tx pgx.Tx, users map[string]float64) error
 // updateTeams updates LiteLLM_TeamTable.spend.
 // Checks spend IS NOT NULL to avoid accidentally updating null values.
 func updateTeams(ctx context.Context, tx pgx.Tx, teams map[string]float64) error {
-	for teamID, amount := range teams {
+	for _, teamID := range sortedKeys(teams) {
+		amount := teams[teamID]
 		_, err := tx.Exec(ctx,
 			`UPDATE "LiteLLM_TeamTable" SET spend = spend + $1 WHERE team_id = $2 AND spend IS NOT NULL`,
 			amount, teamID)
@@ -202,7 +225,8 @@ func updateTeams(ctx context.Context, tx pgx.Tx, teams map[string]float64) error
 // updateOrgs updates LiteLLM_OrganizationTable.spend.
 // Checks spend IS NOT NULL to avoid accidentally updating null values.
 func updateOrgs(ctx context.Context, tx pgx.Tx, orgs map[string]float64) error {
-	for orgID, amount := range orgs {
+	for _, orgID := range sortedKeys(orgs) {
+		amount := orgs[orgID]
 		_, err := tx.Exec(ctx,
 			`UPDATE "LiteLLM_OrganizationTable" SET spend = spend + $1 WHERE organization_id = $2 AND spend IS NOT NULL`,
 			amount, orgID)
@@ -217,7 +241,8 @@ func updateOrgs(ctx context.Context, tx pgx.Tx, orgs map[string]float64) error {
 // Uses composite key "teamID:userID" for record identification.
 // Falls back to query without total_spend if the column doesn't exist (older DB schema).
 func updateTeamMembers(ctx context.Context, tx pgx.Tx, teamMembers map[string]float64) error {
-	for key, amount := range teamMembers {
+	for _, key := range sortedKeys(teamMembers) {
+		amount := teamMembers[key]
 		// key format: "teamID:userID"
 		parts := strings.SplitN(key, ":", 2)
 		if len(parts) != 2 {
@@ -256,7 +281,8 @@ func updateTeamMembers(ctx context.Context, tx pgx.Tx, teamMembers map[string]fl
 // Uses composite key "orgID:userID" for record identification.
 // Checks spend IS NOT NULL to avoid accidentally updating null values.
 func updateOrgMembers(ctx context.Context, tx pgx.Tx, orgMembers map[string]float64) error {
-	for key, amount := range orgMembers {
+	for _, key := range sortedKeys(orgMembers) {
+		amount := orgMembers[key]
 		// key format: "orgID:userID"
 		parts := strings.SplitN(key, ":", 2)
 		if len(parts) != 2 {

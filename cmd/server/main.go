@@ -22,6 +22,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/httputil"
 	"github.com/mixaill76/auto_ai_router/internal/kafkalog"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb"
+	"github.com/mixaill76/auto_ai_router/internal/litellmdb/budget"
 	"github.com/mixaill76/auto_ai_router/internal/logger"
 	"github.com/mixaill76/auto_ai_router/internal/models"
 	"github.com/mixaill76/auto_ai_router/internal/modelupdate"
@@ -131,6 +132,32 @@ func main() {
 	litellmDBManager := initializeLiteLLMDB(cfg, log)
 	kafkaLogManager := initializeKafkaLog(cfg, log, litellmDBManager)
 
+	// ==================== Budget reservation & key-level RPM/TPM ====================
+	// Both are Redis-backed and reuse the shared valkey client with isolated key
+	// namespaces. When Redis is disabled they stay nil and the proxy falls back to
+	// snapshot-only budget checks (see todo_auth_billing.md P1.4).
+	var budgetReserver *budget.Reserver
+	var keyRateLimiter *ratelimit.RPMLimiter
+	if redisBackend != nil && cfg.LiteLLMDB.Enabled {
+		if cfg.LiteLLMDB.EnforceBudgetReservation {
+			budgetReserver = budget.New(redisBackend.Client(), cfg.Redis.KeyPrefix+"litellmbudget:", cfg.LiteLLMDB.BudgetReservationTTL, log)
+			log.Info("Budget reservation: enabled (Redis-backed, atomic overspend protection)")
+		}
+		if cfg.LiteLLMDB.EnforceKeyRateLimits {
+			authRedisBackend := ratelimit.NewRedisBackendFromClient(redisBackend.Client(), cfg.Redis.KeyPrefix+"litellmauth:")
+			if cfg.Redis.Hybrid {
+				hybridAuthBackend := ratelimit.NewHybridBackend(authRedisBackend, cfg.Redis.SyncInterval)
+				defer hybridAuthBackend.Close()
+				keyRateLimiter = ratelimit.NewWithHybrid(hybridAuthBackend)
+			} else {
+				keyRateLimiter = ratelimit.NewWithRedis(authRedisBackend)
+			}
+			log.Info("Key-level TPM/RPM enforcement: enabled (Redis-backed, per key/user/team/org)")
+		}
+	} else if cfg.LiteLLMDB.Enabled {
+		log.Warn("Budget reservation and key-level rate limits disabled: Redis is not enabled (redis.enabled=false). Falling back to snapshot-only budget checks (see todo_auth_billing.md P1.4 for the overspend race this leaves open).")
+	}
+
 	// ==================== Initialize Balancer & Model Manager (YAML-only) ====================
 	// IMPORTANT: Do NOT modify cfg.Credentials or cfg.Models here.
 	// The balancer and model manager snapshot YAML-only data as their immutable
@@ -224,6 +251,11 @@ func main() {
 		SessionStickyAutoCacheCtrl: cfg.Server.SessionStickyAutoCacheCtrl,
 		SessionStoreTTL:            time.Duration(cfg.Server.SessionStickyTTL) * time.Minute,
 		DrainUpstreamOnAbort:       cfg.Server.DrainUpstreamOnAbort,
+
+		BudgetReserver:                   budgetReserver,
+		KeyRateLimiter:                   keyRateLimiter,
+		BudgetReservationEnabled:         cfg.LiteLLMDB.EnforceBudgetReservation || cfg.LiteLLMDB.EnforceKeyRateLimits,
+		DefaultEstimatedCompletionTokens: cfg.LiteLLMDB.DefaultEstimatedCompletionTokens,
 	})
 
 	// ==================== Background Goroutines ====================

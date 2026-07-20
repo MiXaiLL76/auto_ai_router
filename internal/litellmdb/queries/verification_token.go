@@ -29,6 +29,8 @@ SELECT
   u.user_email,
   u.max_budget as user_max_budget,
   u.spend as user_spend,
+  u.tpm_limit as user_tpm_limit,
+  u.rpm_limit as user_rpm_limit,
 
   -- ============ Team ============
   tm.team_id as team_id_check,
@@ -39,6 +41,7 @@ SELECT
   tm.blocked as team_blocked,
   tm.tpm_limit as team_tpm_limit,
   tm.rpm_limit as team_rpm_limit,
+  tm.models as team_models,
 
   -- ============ Organization ============
   o.organization_id as org_id_check,

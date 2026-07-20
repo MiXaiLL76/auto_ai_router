@@ -3,6 +3,7 @@ package proxy
 import (
 	"bytes"
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -24,6 +25,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/httputil"
 	"github.com/mixaill76/auto_ai_router/internal/kafkalog"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb"
+	"github.com/mixaill76/auto_ai_router/internal/litellmdb/budget"
 	"github.com/mixaill76/auto_ai_router/internal/logger"
 	"github.com/mixaill76/auto_ai_router/internal/models"
 	"github.com/mixaill76/auto_ai_router/internal/monitoring"
@@ -97,6 +99,17 @@ type RequestLogContext struct {
 	ActualCredentialName string                   // Real credential name from upstream when Credential.Type == ProviderTypeProxy
 	IsProxyRequest       bool                     // True when this request came from another auto_ai_router (X-Aar-Proxy-Client header)
 	Scope                scope.Context
+
+	// ReservedEntities lists budget-hierarchy levels reserved for this request via
+	// enforceBudgetAndRateLimits; reconcileBudgetAndRateLimits settles each one.
+	ReservedEntities []reservedEntity
+	// RateLimitedEntitiesForTPM lists entity keys that had a TPM limit, so the real
+	// token count can be recorded post-call via ConsumeTokensCtx.
+	RateLimitedEntitiesForTPM []string
+	// budgetReconciled guards against double reconciliation: the first call (from
+	// logSpendToLiteLLMDB with the real cost, or the ProxyRequest defer safety-net
+	// with cost 0) wins; later calls are no-ops.
+	budgetReconciled bool
 }
 
 // HealthChecker provides cached database health status
@@ -133,34 +146,43 @@ type Config struct {
 	SessionStoreTTL            time.Duration
 	RouterID                   string // Human-readable name for this router (shown in /trace); defaults to hostname
 	DrainUpstreamOnAbort       bool   // When true, keep reading upstream after client disconnect to get real usage (default: false)
+
+	BudgetReserver                   *budget.Reserver      // Atomic Redis budget reservation (nil if Redis disabled — feature is a no-op)
+	KeyRateLimiter                   *ratelimit.RPMLimiter // Key/user/team/org RPM/TPM enforcement (nil if Redis disabled)
+	BudgetReservationEnabled         bool                  // Config toggle; independent of nil-check for clearer intent
+	DefaultEstimatedCompletionTokens int                   // Completion-token estimate when max_tokens is absent (default: 1000)
 }
 
 type Proxy struct {
-	balancer             *balancer.RoundRobin
-	client               *http.Client
-	logger               *slog.Logger
-	maxBodySizeMB        int
-	maxResponseBodySize  int64 // Pre-computed max response body size in bytes
-	requestTimeout       time.Duration
-	metrics              *monitoring.Metrics
-	masterKey            string
-	rateLimiter          *ratelimit.RPMLimiter
-	tokenManager         *auth.VertexTokenManager
-	routerID             string                     // Identifier for this router used in /trace responses
-	modelManager         *models.Manager            // Model manager for getting configured models
-	LiteLLMDB            litellmdb.Manager          // LiteLLM database integration
-	kafkaLog             kafkalog.Manager           // Kafka spend-log publishing (optional, analytics write-path)
-	healthChecker        HealthChecker              // Cached DB health status (optional)
-	priceRegistry        *models.ModelPriceRegistry // Model pricing information (optional)
-	maxProviderRetries   int                        // Max same-type credential retries on provider errors
-	maxFallbackAttempts  int                        // Max fallback proxy hops per request chain
-	responseStore        responsestore.Store        // Optional: Responses API store (bbolt or Redis)
-	sessionStore         *SessionStore              // Optional: session-sticky credential routing
-	stickyAutoCacheCtrl  bool                       // Auto-inject Anthropic cache_control when session is active
-	drainUpstreamOnAbort bool                       // Keep reading upstream after client disconnect to get real usage chunk
-	bedrockDailyQuota    *bedrockDailyQuotaTracker
-	version              string
-	commit               string
+	balancer                         *balancer.RoundRobin
+	client                           *http.Client
+	logger                           *slog.Logger
+	maxBodySizeMB                    int
+	maxResponseBodySize              int64 // Pre-computed max response body size in bytes
+	requestTimeout                   time.Duration
+	metrics                          *monitoring.Metrics
+	masterKey                        string
+	rateLimiter                      *ratelimit.RPMLimiter
+	tokenManager                     *auth.VertexTokenManager
+	routerID                         string                     // Identifier for this router used in /trace responses
+	modelManager                     *models.Manager            // Model manager for getting configured models
+	LiteLLMDB                        litellmdb.Manager          // LiteLLM database integration
+	kafkaLog                         kafkalog.Manager           // Kafka spend-log publishing (optional, analytics write-path)
+	healthChecker                    HealthChecker              // Cached DB health status (optional)
+	priceRegistry                    *models.ModelPriceRegistry // Model pricing information (optional)
+	maxProviderRetries               int                        // Max same-type credential retries on provider errors
+	maxFallbackAttempts              int                        // Max fallback proxy hops per request chain
+	responseStore                    responsestore.Store        // Optional: Responses API store (bbolt or Redis)
+	sessionStore                     *SessionStore              // Optional: session-sticky credential routing
+	stickyAutoCacheCtrl              bool                       // Auto-inject Anthropic cache_control when session is active
+	drainUpstreamOnAbort             bool                       // Keep reading upstream after client disconnect to get real usage chunk
+	bedrockDailyQuota                *bedrockDailyQuotaTracker
+	budgetReserver                   *budget.Reserver
+	keyRateLimiter                   *ratelimit.RPMLimiter
+	budgetReservationEnabled         bool
+	defaultEstimatedCompletionTokens int
+	version                          string
+	commit                           string
 }
 
 func New(cfg *Config) *Proxy {
@@ -201,31 +223,35 @@ func New(cfg *Config) *Proxy {
 	}
 
 	return &Proxy{
-		routerID:             routerID,
-		balancer:             cfg.Balancer,
-		logger:               cfg.Logger,
-		maxBodySizeMB:        cfg.MaxBodySizeMB,
-		maxResponseBodySize:  maxResponseBodySize,
-		requestTimeout:       cfg.RequestTimeout,
-		metrics:              cfg.Metrics,
-		masterKey:            cfg.MasterKey,
-		rateLimiter:          cfg.RateLimiter,
-		tokenManager:         cfg.TokenManager,
-		modelManager:         cfg.ModelManager,
-		LiteLLMDB:            cfg.LiteLLMDB,
-		kafkaLog:             cfg.KafkaLog,
-		healthChecker:        cfg.HealthChecker,
-		priceRegistry:        cfg.PriceRegistry,
-		maxProviderRetries:   cfg.MaxProviderRetries,
-		maxFallbackAttempts:  cfg.MaxFallbackAttempts,
-		responseStore:        cfg.ResponseStore,
-		sessionStore:         sessionStore,
-		stickyAutoCacheCtrl:  cfg.SessionStickyAutoCacheCtrl,
-		drainUpstreamOnAbort: cfg.DrainUpstreamOnAbort,
-		bedrockDailyQuota:    newBedrockDailyQuotaTracker(),
-		client:               httputil.NewHTTPClient(httpClientCfg),
-		version:              cfg.Version,
-		commit:               cfg.Commit,
+		routerID:                         routerID,
+		balancer:                         cfg.Balancer,
+		logger:                           cfg.Logger,
+		maxBodySizeMB:                    cfg.MaxBodySizeMB,
+		maxResponseBodySize:              maxResponseBodySize,
+		requestTimeout:                   cfg.RequestTimeout,
+		metrics:                          cfg.Metrics,
+		masterKey:                        cfg.MasterKey,
+		rateLimiter:                      cfg.RateLimiter,
+		tokenManager:                     cfg.TokenManager,
+		modelManager:                     cfg.ModelManager,
+		LiteLLMDB:                        cfg.LiteLLMDB,
+		kafkaLog:                         cfg.KafkaLog,
+		healthChecker:                    cfg.HealthChecker,
+		priceRegistry:                    cfg.PriceRegistry,
+		maxProviderRetries:               cfg.MaxProviderRetries,
+		maxFallbackAttempts:              cfg.MaxFallbackAttempts,
+		responseStore:                    cfg.ResponseStore,
+		sessionStore:                     sessionStore,
+		stickyAutoCacheCtrl:              cfg.SessionStickyAutoCacheCtrl,
+		drainUpstreamOnAbort:             cfg.DrainUpstreamOnAbort,
+		bedrockDailyQuota:                newBedrockDailyQuotaTracker(),
+		budgetReserver:                   cfg.BudgetReserver,
+		keyRateLimiter:                   cfg.KeyRateLimiter,
+		budgetReservationEnabled:         cfg.BudgetReservationEnabled,
+		defaultEstimatedCompletionTokens: cfg.DefaultEstimatedCompletionTokens,
+		client:                           httputil.NewHTTPClient(httpClientCfg),
+		version:                          cfg.Version,
+		commit:                           cfg.Commit,
 	}
 }
 
@@ -253,6 +279,16 @@ func (p *Proxy) clearSessionBinding(sessionID, modelID string) {
 // GetMasterKey returns the proxy master key.
 func (p *Proxy) GetMasterKey() string {
 	return p.masterKey
+}
+
+// isMasterKey reports whether token equals the master key using a constant-time
+// comparison (timing-attack safe). An empty master key never matches, so an
+// empty/absent token can never be mistaken for the master key.
+func (p *Proxy) isMasterKey(token string) bool {
+	if p.masterKey == "" {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(token), []byte(p.masterKey)) == 1
 }
 
 // GetVersion returns the build version string.
@@ -440,6 +476,10 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			}
 			logCtx.Logged = true
 		}
+		// Safety net: release any budget reservation that never reached
+		// logSpendToLiteLLMDB (e.g. an early failure before a credential was set).
+		// The guard makes this a no-op when reconciliation already happened.
+		p.reconcileBudgetAndRateLimits(logCtx, 0)
 		if !logCtx.RequestCompleted {
 			p.clearSessionBinding(logCtx.SessionID, logCtx.ModelID)
 		}
@@ -1720,10 +1760,21 @@ func (p *Proxy) HandleGetResponse(w http.ResponseWriter, r *http.Request) {
 	var resp *responses.Response
 	var err error
 
-	if token == p.masterKey {
+	if p.isMasterKey(token) {
 		// Master key: bypass ownership check
 		resp, err = p.responseStore.GetResponseByID(r.Context(), responseID)
 	} else {
+		// Enforce blocked/expired/budget on the token before serving stored
+		// responses, matching the checks other endpoints run via authenticateRequest.
+		// On DB unavailability (handleLiteLLMAuthError returns false) fall back to the
+		// legacy ownership-only path so reads stay available during a DB outage.
+		if p.LiteLLMDB != nil && p.LiteLLMDB.IsEnabled() {
+			if _, valErr := p.LiteLLMDB.ValidateToken(r.Context(), token); valErr != nil {
+				if p.handleLiteLLMAuthError(r.Context(), w, valErr, token) {
+					return
+				}
+			}
+		}
 		apiKeyHash := litellmdb.HashToken(token)
 		resp, err = p.responseStore.GetResponse(r.Context(), responseID, apiKeyHash)
 	}

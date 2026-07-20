@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"math/rand/v2"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -243,6 +244,7 @@ func (sl *Logger) Stats() models.SpendLoggerStats {
 		QueueFullCount:      atomic.LoadUint64(&sl.queueFullCount),
 		AggregationCount:    atomic.LoadUint64(&sl.aggregationCount),
 		AggregationErrors:   atomic.LoadUint64(&sl.aggregationErrors),
+		DLQDropped:          atomic.LoadUint64(&sl.dlqOverflow),
 		LastAggregationTime: lastAgg,
 	}
 }
@@ -349,7 +351,13 @@ func (sl *Logger) flushBatch(batch []*models.SpendLogEntry) {
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		// Apply exponential backoff before attempt (except first)
 		if attempt > 0 {
+			// Jitter (up to +50%): without it, every pod retries on the exact
+			// same fixed schedule, so two batches that just deadlocked on the
+			// same rows (see sortedKeys in spend_updater.go) retry in lockstep
+			// and can deadlock again. litellm's db_spend_update_writer.py hits
+			// the same problem and randomizes retry sleep for this reason.
 			backoff := backoffDurations[attempt]
+			backoff += time.Duration(rand.Int64N(int64(backoff)/2 + 1))
 			sl.logger.Debug("[DB] SpendLog batch retry backoff",
 				"attempt", attempt+1,
 				"backoff_ms", backoff.Milliseconds(),
@@ -516,10 +524,12 @@ func (sl *Logger) addToDLQ(batch []*models.SpendLogEntry, lastErr error, attempt
 		sl.dlq = sl.dlq[1:]
 		atomic.AddUint64(&sl.dlqOverflow, 1)
 
-		sl.logger.Error("[DB] SpendLog DLQ overflow - batch dropped",
-			"dropped_batch_size", len(dropped.batch),
+		sl.logger.Error("[DB] SpendLog DLQ overflow - batch dropped (billing data loss)",
+			"dropped_records", len(dropped.batch),
 			"dropped_at", dropped.failedAt,
 			"dlq_size", len(sl.dlq),
+			"total_dropped", atomic.LoadUint64(&sl.dlqOverflow),
+			"sample_request_ids", getSampleRequestIDs(dropped.batch, 3),
 			"reason", "dlq_full",
 		)
 	}

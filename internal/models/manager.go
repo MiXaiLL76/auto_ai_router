@@ -359,6 +359,29 @@ func (m *Manager) GetAliasesForCredentialRealModel(credential, realModel string)
 	return aliases
 }
 
+// GetAliasesForModel returns every alias — across all credentials that serve
+// modelID — that resolves to the same provider-facing realModelID. Unlike
+// GetAliasesForCredentialRealModel this doesn't require a credential to already
+// be picked, which matters for callers (e.g. key model-allow-list enforcement)
+// that run before credential selection.
+func (m *Manager) GetAliasesForModel(modelID, realModelID string) []string {
+	aliases := []string{modelID}
+	if realModelID == "" {
+		return aliases
+	}
+	seen := map[string]struct{}{modelID: {}}
+	for _, credential := range m.GetCredentialsForModel(modelID) {
+		for _, alias := range m.GetAliasesForCredentialRealModel(credential, realModelID) {
+			if _, ok := seen[alias]; ok {
+				continue
+			}
+			seen[alias] = struct{}{}
+			aliases = append(aliases, alias)
+		}
+	}
+	return aliases
+}
+
 // responsesAPIModelPrefixes lists model name substrings that natively support
 // the /v1/responses endpoint.  Checked case-insensitively via strings.Contains.
 // Source: https://platform.openai.com/docs/api-reference/responses

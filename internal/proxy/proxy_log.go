@@ -260,6 +260,10 @@ func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
 		}
 	}
 
+	// Settle any Redis budget reservation / TPM usage against the real cost.
+	// Guarded so it runs exactly once even though a defer safety-net may also call it.
+	p.reconcileBudgetAndRateLimits(logCtx, cost)
+
 	customLLMProvider := strings.Replace(string(logCtx.Credential.Type), "-", "_", 1)
 	if customLLMProvider == "proxy" {
 		customLLMProvider = string(config.ProviderTypeOpenAI)

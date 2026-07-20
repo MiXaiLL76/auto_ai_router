@@ -3,6 +3,7 @@ package models
 import (
 	"errors"
 	"log/slog"
+	"slices"
 	"time"
 
 	"github.com/mixaill76/auto_ai_router/internal/utils"
@@ -128,6 +129,19 @@ func (c *Config) Validate() error {
 	return nil
 }
 
+// ==================== Model access sentinels ====================
+
+// LiteLLM stores these special values inside VerificationToken.models instead
+// of (or alongside) real model names:
+//   - "all-proxy-models": key may call every model on the proxy.
+//   - "all-team-models":  key inherits its parent team's model allow-list
+//     (LiteLLM_TeamTable.models). A key with no team has nothing to inherit
+//     from, so it falls back to unrestricted access, same as an empty list.
+const (
+	specialModelAllProxyModels = "all-proxy-models"
+	specialModelAllTeamModels  = "all-team-models"
+)
+
 // ==================== TokenInfo ====================
 
 // TokenInfo holds information about a validated token from LiteLLM_VerificationToken
@@ -163,6 +177,8 @@ type TokenInfo struct {
 	UserEmail     string   // User email (optional)
 	UserMaxBudget *float64 // User's personal max budget (nil = unlimited)
 	UserSpend     *float64 // User's current spend
+	UserTPMLimit  *int64   // User's TPM limit
+	UserRPMLimit  *int64   // User's RPM limit
 
 	// ==================== Team Level (embedded budget) ====================
 	TeamAlias     string   // Team alias (optional) - user-friendly name
@@ -171,6 +187,7 @@ type TokenInfo struct {
 	TeamBlocked   *bool    // Team is blocked
 	TeamTPMLimit  *int64   // Team's TPM limit
 	TeamRPMLimit  *int64   // Team's RPM limit
+	TeamModels    []string // Team's allowed models, used to resolve the key's "all-team-models" sentinel (empty = all models)
 
 	// ==================== Organization Level (external budget) ====================
 	OrgSpend     *float64 // Organization's current spend
@@ -210,14 +227,40 @@ func (t *TokenInfo) IsBudgetExceeded() bool {
 	return t.Spend > *t.MaxBudget
 }
 
-// IsModelAllowed checks if model is in allowed list
+// IsModelAllowed checks if model is in allowed list, resolving the
+// "all-team-models" / "all-proxy-models" sentinel values LiteLLM stores in
+// VerificationToken.models (see the sentinel constants above).
 func (t *TokenInfo) IsModelAllowed(model string) bool {
-	// Empty list = all models allowed
-	if len(t.Models) == 0 {
+	return t.IsAnyModelAllowed([]string{model})
+}
+
+// IsAnyModelAllowed reports whether at least one of the given candidate names
+// is allowed. The same underlying provider model is often exposed under several
+// route aliases (e.g. "claude-haiku-4.5" and "anthropic/claude-haiku-4.5" for
+// the same credential+model, see config.yaml.example) — an admin restricting a
+// key to one such alias almost certainly means the underlying model, not that
+// specific spelling. Callers resolve the full alias-equivalence group (see
+// models.Manager.GetAliasesForModel) and pass it here so the check isn't
+// defeated by which alias the client happened to call.
+func (t *TokenInfo) IsAnyModelAllowed(candidates []string) bool {
+	effective := t.Models
+
+	if slices.Contains(effective, specialModelAllTeamModels) {
+		if t.TeamID == "" {
+			// No team to inherit from - unrestricted, same as an empty list.
+			return true
+		}
+		effective = t.TeamModels
+	}
+
+	// Empty list (possibly after resolving "all-team-models" above) or the
+	// "all-proxy-models" sentinel = unrestricted access to every model.
+	if len(effective) == 0 || slices.Contains(effective, specialModelAllProxyModels) {
 		return true
 	}
-	for _, m := range t.Models {
-		if m == model {
+
+	for _, model := range candidates {
+		if slices.Contains(effective, model) {
 			return true
 		}
 	}
@@ -389,5 +432,6 @@ type SpendLoggerStats struct {
 	QueueFullCount      uint64    // Queue full events (timeouts)
 	AggregationCount    uint64    // Completed aggregations
 	AggregationErrors   uint64    // Aggregation errors
+	DLQDropped          uint64    // Batches permanently dropped due to DLQ overflow (billing data loss)
 	LastAggregationTime time.Time // Last successful aggregation
 }
