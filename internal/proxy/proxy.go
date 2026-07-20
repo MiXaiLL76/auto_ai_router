@@ -311,6 +311,20 @@ type ProxyResponse struct {
 	ActualCredentialName string // Credential name from upstream X-Credential-Name header
 }
 
+// cancelOnCloseBody wraps an upstream response body so the context that
+// governs its lifetime is only canceled once the caller is actually done
+// reading — i.e. on Close(), not on the return from executeProxyRequest.
+type cancelOnCloseBody struct {
+	io.ReadCloser
+	cancel context.CancelFunc
+}
+
+func (b *cancelOnCloseBody) Close() error {
+	err := b.ReadCloser.Close()
+	b.cancel()
+	return err
+}
+
 // upstreamRequestContext returns the context to use for the outbound provider
 // call, derived from the incoming request r.
 //
@@ -368,8 +382,20 @@ func (p *Proxy) executeProxyRequest(
 	// so the client span parents correctly and traceparent is propagated. By
 	// default the upstream call is also canceled if the client disconnects; see
 	// upstreamRequestContext for the drainUpstreamOnAbort exception.
+	//
+	// cancelUpstream is owned by this function until a streaming response hands
+	// it off to the returned StreamBody's Close(): the deferred cancel below
+	// covers every other return path (request-build error, transport error,
+	// non-streaming body read), but a streaming caller drains — and closes —
+	// the body well after this function returns, so canceling here would tear
+	// down the connection before a single chunk is read.
 	upstreamCtx, cancelUpstream := p.upstreamRequestContext(r)
-	defer cancelUpstream()
+	cancelOwned := true
+	defer func() {
+		if cancelOwned {
+			cancelUpstream()
+		}
+	}()
 	proxyReq, err := http.NewRequestWithContext(upstreamCtx, r.Method, targetURL, bytes.NewReader(body))
 	if err != nil {
 		p.logger.ErrorContext(r.Context(), "Failed to create proxy request", "error", err, "url", targetURL)
@@ -429,11 +455,16 @@ func (p *Proxy) executeProxyRequest(
 	actualCredName := resp.Header.Get("X-Credential-Name")
 
 	// For streaming responses, return body reader directly to avoid buffering entire stream.
+	// Ownership of cancelUpstream transfers to the wrapped body: the caller
+	// always closes StreamBody once it's done reading (normal completion, or
+	// after the drainUpstreamOnAbort grace period), which is the correct point
+	// to cancel the detached upstream context.
 	if IsStreamingResponse(resp) {
+		cancelOwned = false
 		return &ProxyResponse{
 			StatusCode:           resp.StatusCode,
 			Headers:              resp.Header,
-			StreamBody:           resp.Body,
+			StreamBody:           &cancelOnCloseBody{ReadCloser: resp.Body, cancel: cancelUpstream},
 			IsStreaming:          true,
 			ActualCredentialName: actualCredName,
 		}, nil
