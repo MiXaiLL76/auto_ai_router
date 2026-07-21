@@ -69,23 +69,6 @@ const (
 		    updated_at = NOW()
 		WHERE %s = $3 AND spend IS NOT NULL`
 
-	// QueryUpdateProjectSpend increments the scalar project spend.
-	QueryUpdateProjectSpend = `UPDATE "LiteLLM_ProjectTable" SET spend = COALESCE(spend, 0) + $1, updated_at = NOW() WHERE project_id = $2`
-
-	// QueryUpdateProjectModelSpend increments the scalar project spend and the
-	// matching model's JSON-number counter in one statement.
-	QueryUpdateProjectModelSpend = `
-		UPDATE "LiteLLM_ProjectTable"
-		SET spend = COALESCE(spend, 0) + $1,
-		    model_spend = jsonb_set(
-		        COALESCE(model_spend, '{}'::jsonb),
-		        ARRAY[$2]::text[],
-		        to_jsonb(COALESCE((COALESCE(model_spend, '{}'::jsonb) ->> $2)::double precision, 0) + $1),
-		        true
-		    ),
-		    updated_at = NOW()
-		WHERE project_id = $3`
-
 	// QueryUpdateTeamMemberSpendWithTotal increments both spend and total_spend
 	// (schemas that already have the total_spend column).
 	QueryUpdateTeamMemberSpendWithTotal = `UPDATE "LiteLLM_TeamMembership" SET spend = spend + $1, total_spend = total_spend + $1 WHERE team_id = $2 AND user_id = $3 AND spend IS NOT NULL`

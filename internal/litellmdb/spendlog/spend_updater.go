@@ -39,7 +39,6 @@ type SpendUpdates struct {
 	Users               map[entityModelKey]float64        // userID/model -> amount
 	Teams               map[entityModelKey]float64        // teamID/model -> amount
 	Orgs                map[entityModelKey]float64        // orgID/model -> amount
-	Projects            map[projectModelKey]float64       // project/model -> amount
 	TeamMembers         map[teamMemberKey]float64         // team/user -> amount
 	OrganizationMembers map[organizationMemberKey]float64 // organization/user -> amount
 	EndUsers            map[string]float64                // endUserID -> amount
@@ -48,11 +47,6 @@ type SpendUpdates struct {
 type entityModelKey struct {
 	EntityID string
 	Model    string
-}
-
-type projectModelKey struct {
-	ProjectID string
-	Model     string
 }
 
 type teamMemberKey struct {
@@ -84,13 +78,6 @@ func sortedSpendKeys[K comparable](values map[K]float64, compare func(K, K) int)
 
 func compareEntityModelKey(left, right entityModelKey) int {
 	if order := strings.Compare(left.EntityID, right.EntityID); order != 0 {
-		return order
-	}
-	return strings.Compare(left.Model, right.Model)
-}
-
-func compareProjectModelKey(left, right projectModelKey) int {
-	if order := strings.Compare(left.ProjectID, right.ProjectID); order != 0 {
 		return order
 	}
 	return strings.Compare(left.Model, right.Model)
@@ -132,7 +119,6 @@ func aggregateSpendUpdates(batch []*models.SpendLogEntry) *SpendUpdates {
 		Users:               make(map[entityModelKey]float64),
 		Teams:               make(map[entityModelKey]float64),
 		Orgs:                make(map[entityModelKey]float64),
-		Projects:            make(map[projectModelKey]float64),
 		TeamMembers:         make(map[teamMemberKey]float64),
 		OrganizationMembers: make(map[organizationMemberKey]float64),
 		EndUsers:            make(map[string]float64),
@@ -160,10 +146,6 @@ func aggregateSpendUpdates(batch []*models.SpendLogEntry) *SpendUpdates {
 		// Organization (if present)
 		if entry.OrganizationID != "" {
 			updates.Orgs[entityModelKey{EntityID: entry.OrganizationID, Model: entry.Model}] += entry.Spend
-		}
-
-		if entry.ProjectID != "" {
-			updates.Projects[projectModelKey{ProjectID: entry.ProjectID, Model: entry.Model}] += entry.Spend
 		}
 
 		// TeamMembership (if User + Team)
@@ -222,11 +204,6 @@ func executeSpendUpdates(ctx context.Context, tx pgx.Tx, updates *SpendUpdates) 
 	if len(updates.OrganizationMembers) > 0 {
 		if err := updateOrganizationMembers(ctx, tx, updates.OrganizationMembers); err != nil {
 			return fmt.Errorf("update organization members: %w", err)
-		}
-	}
-	if len(updates.Projects) > 0 {
-		if err := updateProjects(ctx, tx, updates.Projects); err != nil {
-			return fmt.Errorf("update projects: %w", err)
 		}
 	}
 	if len(updates.EndUsers) > 0 {
@@ -335,29 +312,6 @@ func modelSpendUpdate(table, idColumn string, key entityModelKey, amount float64
 
 	return fmt.Sprintf(queries.QueryUpdateEntityModelSpendTemplate, table, idColumn),
 		[]interface{}{amount, key.Model, key.EntityID}
-}
-
-// updateProjects increments the scalar project spend and the matching model's
-// JSON-number counter in one statement. The caller supplies only rows returned
-// by INSERT ... RETURNING, so replayed request IDs cannot increment projects a
-// second time.
-func updateProjects(ctx context.Context, tx spendUpdateExecer, projects map[projectModelKey]float64) error {
-	for _, key := range sortedSpendKeys(projects, compareProjectModelKey) {
-		amount := projects[key]
-		if key.Model == "" {
-			_, err := tx.Exec(ctx, queries.QueryUpdateProjectSpend, amount, key.ProjectID)
-			if err != nil {
-				return err
-			}
-			continue
-		}
-
-		_, err := tx.Exec(ctx, queries.QueryUpdateProjectModelSpend, amount, key.Model, key.ProjectID)
-		if err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 // updateTeamMembers updates LiteLLM_TeamMembership.spend (and total_spend if available).

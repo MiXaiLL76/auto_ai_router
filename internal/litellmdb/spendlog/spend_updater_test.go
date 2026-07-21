@@ -18,7 +18,6 @@ func TestAggregateSpendUpdates_AllEntities(t *testing.T) {
 			UserID:         "user-1",
 			TeamID:         "team-1",
 			OrganizationID: "org-1",
-			ProjectID:      "project-1",
 			Model:          "model-1",
 			EndUser:        "end-user-1",
 			Spend:          10.0,
@@ -28,7 +27,6 @@ func TestAggregateSpendUpdates_AllEntities(t *testing.T) {
 			UserID:         "user-1",
 			TeamID:         "team-1",
 			OrganizationID: "org-1",
-			ProjectID:      "project-1",
 			Model:          "model-1",
 			EndUser:        "end-user-1",
 			Spend:          5.0,
@@ -55,7 +53,6 @@ func TestAggregateSpendUpdates_AllEntities(t *testing.T) {
 
 	// Org aggregation
 	assert.Equal(t, 15.0, result.Orgs[entityModelKey{EntityID: "org-1", Model: "model-1"}])
-	assert.Equal(t, 15.0, result.Projects[projectModelKey{ProjectID: "project-1", Model: "model-1"}])
 
 	// Team membership
 	assert.Equal(t, 15.0, result.TeamMembers[teamMemberKey{TeamID: "team-1", UserID: "user-1"}])
@@ -73,7 +70,6 @@ func TestAggregateSpendUpdates_EmptyBatch(t *testing.T) {
 	assert.Empty(t, result.Users)
 	assert.Empty(t, result.Teams)
 	assert.Empty(t, result.Orgs)
-	assert.Empty(t, result.Projects)
 	assert.Empty(t, result.TeamMembers)
 	assert.Empty(t, result.OrganizationMembers)
 	assert.Empty(t, result.EndUsers)
@@ -183,7 +179,6 @@ func TestSpendUpdates_Fields(t *testing.T) {
 		Users:               map[entityModelKey]float64{{EntityID: "user1", Model: "model1"}: 2.0},
 		Teams:               map[entityModelKey]float64{{EntityID: "team1", Model: "model1"}: 3.0},
 		Orgs:                map[entityModelKey]float64{{EntityID: "org1", Model: "model1"}: 4.0},
-		Projects:            map[projectModelKey]float64{{ProjectID: "project1", Model: "model1"}: 4.5},
 		TeamMembers:         map[teamMemberKey]float64{{TeamID: "team1", UserID: "user1"}: 5.0},
 		OrganizationMembers: map[organizationMemberKey]float64{{OrganizationID: "org1", UserID: "user1"}: 5.5},
 		EndUsers:            map[string]float64{"end-user1": 6.0},
@@ -193,7 +188,6 @@ func TestSpendUpdates_Fields(t *testing.T) {
 	assert.Len(t, updates.Users, 1)
 	assert.Len(t, updates.Teams, 1)
 	assert.Len(t, updates.Orgs, 1)
-	assert.Len(t, updates.Projects, 1)
 	assert.Len(t, updates.TeamMembers, 1)
 	assert.Len(t, updates.OrganizationMembers, 1)
 	assert.Len(t, updates.EndUsers, 1)
@@ -202,7 +196,6 @@ func TestSpendUpdates_Fields(t *testing.T) {
 	assert.Equal(t, 2.0, updates.Users[entityModelKey{EntityID: "user1", Model: "model1"}])
 	assert.Equal(t, 3.0, updates.Teams[entityModelKey{EntityID: "team1", Model: "model1"}])
 	assert.Equal(t, 4.0, updates.Orgs[entityModelKey{EntityID: "org1", Model: "model1"}])
-	assert.Equal(t, 4.5, updates.Projects[projectModelKey{ProjectID: "project1", Model: "model1"}])
 	assert.Equal(t, 5.0, updates.TeamMembers[teamMemberKey{TeamID: "team1", UserID: "user1"}])
 	assert.Equal(t, 5.5, updates.OrganizationMembers[organizationMemberKey{OrganizationID: "org1", UserID: "user1"}])
 	assert.Equal(t, 6.0, updates.EndUsers["end-user1"])
@@ -216,7 +209,6 @@ func TestSpendUpdates_Empty(t *testing.T) {
 	assert.Nil(t, updates.Users)
 	assert.Nil(t, updates.Teams)
 	assert.Nil(t, updates.Orgs)
-	assert.Nil(t, updates.Projects)
 	assert.Nil(t, updates.TeamMembers)
 	assert.Nil(t, updates.OrganizationMembers)
 	assert.Nil(t, updates.EndUsers)
@@ -313,7 +305,6 @@ func TestAggregateSpendUpdatesPreservesZeroSpendModelAndCompositeIDs(t *testing.
 		UserID:         "user:east",
 		TeamID:         "team:blue",
 		OrganizationID: "org:green",
-		ProjectID:      "project:gold",
 		Model:          "provider:model:v1",
 		Spend:          0,
 	}
@@ -328,8 +319,6 @@ func TestAggregateSpendUpdatesPreservesZeroSpendModelAndCompositeIDs(t *testing.
 	} {
 		assert.True(t, present, "zero-spend rows must still create their model counter key")
 	}
-	_, projectPresent := updates.Projects[projectModelKey{ProjectID: entry.ProjectID, Model: entry.Model}]
-	assert.True(t, projectPresent)
 	_, teamMemberPresent := updates.TeamMembers[teamMemberKey{TeamID: entry.TeamID, UserID: entry.UserID}]
 	assert.True(t, teamMemberPresent)
 	_, organizationMemberPresent := updates.OrganizationMembers[organizationMemberKey{
@@ -446,23 +435,6 @@ func TestMembershipUpdatesKeepColonContainingCompositeIDsSeparate(t *testing.T) 
 	assert.Contains(t, call.query, "updated_at = NOW()")
 	assert.Contains(t, call.query, "organization_id = $2 AND user_id = $3")
 	assert.Equal(t, []interface{}{2.5, "org:west", "user:east"}, call.args)
-}
-
-func TestUpdateProjectsPersistsSpendAndNumericModelSpend(t *testing.T) {
-	execer := &recordingSpendUpdateExecer{}
-	err := updateProjects(context.Background(), execer, map[projectModelKey]float64{
-		{ProjectID: "project-1", Model: "gpt-4o-mini"}: 0.125,
-	})
-
-	assert.NoError(t, err)
-	if assert.Len(t, execer.calls, 1) {
-		call := execer.calls[0]
-		assert.Contains(t, call.query, `UPDATE "LiteLLM_ProjectTable"`)
-		assert.Contains(t, call.query, "model_spend = jsonb_set")
-		assert.Contains(t, call.query, "to_jsonb")
-		assert.Contains(t, call.query, "updated_at = NOW()")
-		assert.Equal(t, []interface{}{0.125, "gpt-4o-mini", "project-1"}, call.args)
-	}
 }
 
 // TestFilterBatchByInsertedIDs tests filtering batch by inserted IDs

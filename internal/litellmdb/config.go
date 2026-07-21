@@ -14,7 +14,6 @@ var (
 	ErrTokenNotFound    = models.ErrTokenNotFound
 	ErrTokenBlocked     = models.ErrTokenBlocked
 	ErrTeamBlocked      = models.ErrTeamBlocked
-	ErrProjectBlocked   = models.ErrProjectBlocked
 	ErrTokenExpired     = models.ErrTokenExpired
 	ErrBudgetExceeded   = models.ErrBudgetExceeded
 	ErrModelNotAllowed  = models.ErrModelNotAllowed

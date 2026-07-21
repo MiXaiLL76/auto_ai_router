@@ -71,7 +71,7 @@ func TestBuildKafkaSpendEvent_BasicMapping(t *testing.T) {
 	assert.Equal(t, logCtx.StartTime, event.StartTime)
 	assert.Equal(t, endTime, event.EndTime)
 	assert.Equal(t, int64(1230), event.DurationMs)
-	assert.Equal(t, "/v1/chat/completions", event.CallType)
+	assert.Equal(t, "acompletion", event.CallType)
 	assert.Equal(t, "api.openai.com", event.APIBase)
 	assert.Equal(t, "success", event.Status)
 	assert.Equal(t, "gpt-4o-mini", event.Model)
