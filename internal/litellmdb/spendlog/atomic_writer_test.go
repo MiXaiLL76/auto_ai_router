@@ -55,9 +55,9 @@ func TestAtomicWriterRollsBackAllProjectionsOnPartialDailyFailure(t *testing.T) 
 	assert.Contains(t, err.Error(), "Tag daily aggregation")
 	assert.False(t, tx.committed)
 	assert.True(t, tx.rolledBack)
-	assert.Empty(t, tx.committedSQL, "raw, counters, and the first five daily tables must roll back together")
-	assert.Equal(t, 6, countSQLContaining(tx.attemptedSQL, `INSERT INTO "LiteLLM_Daily`),
-		"the injected tag failure happens after the other five daily projections")
+	assert.Empty(t, tx.committedSQL, "raw, counters, and the first four daily tables must roll back together")
+	assert.Equal(t, 5, countSQLContaining(tx.attemptedSQL, `INSERT INTO "LiteLLM_Daily`),
+		"the injected tag failure happens after the other four daily projections")
 	assert.Zero(t, logger.Stats().AggregationErrors,
 		"a rolled-back projection attempt is recoverable through the exact retained batch")
 }
@@ -85,32 +85,9 @@ func TestAtomicWriterRollbackIgnoresExpiredRequestContext(t *testing.T) {
 	assert.Zero(t, logger.Stats().AggregationErrors)
 }
 
-func TestAtomicWriterRollsBackBeforeAccountingWhenToolRegistryFails(t *testing.T) {
-	logger := newAtomicTestLogger()
-	entry := atomicTestEntry("req-tool-failure")
-	entry.DeclaredToolNames = []string{"weather"}
-	tx := &atomicTestTx{
-		insertedIDs:       []string{entry.RequestID},
-		failExecSubstring: `INSERT INTO "LiteLLM_ToolTable"`,
-	}
-
-	_, err := logger.commitBatchTransaction(context.Background(), tx, []*models.SpendLogEntry{entry})
-
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), `tool registry: upsert tool "weather"`)
-	assert.False(t, tx.committed)
-	assert.True(t, tx.rolledBack)
-	assert.Empty(t, tx.committedSQL, "the raw row and tool upsert must roll back together")
-	assert.Equal(t, 1, countSQLContaining(tx.attemptedSQL, `INSERT INTO "LiteLLM_ToolTable"`))
-	assert.Equal(t, 0, countSQLContaining(tx.attemptedSQL, `UPDATE "LiteLLM_`), "entity counters must not start after a tool failure")
-	assert.Equal(t, 0, countSQLContaining(tx.attemptedSQL, `INSERT INTO "LiteLLM_Daily`), "daily projections must not start after a tool failure")
-}
-
 func TestAtomicWriterRetryAndReplayCannotDoubleCharge(t *testing.T) {
 	logger := newAtomicTestLogger()
 	entry := atomicTestEntry("req-retry")
-	entry.DeclaredToolNames = []string{"weather", "weather"}
-	entry.ToolKeyAlias = "fixture-key"
 	batch := []*models.SpendLogEntry{entry}
 
 	failed := &atomicTestTx{
@@ -121,7 +98,6 @@ func TestAtomicWriterRetryAndReplayCannotDoubleCharge(t *testing.T) {
 	_, err := logger.commitBatchTransaction(context.Background(), failed, batch)
 	require.Error(t, err)
 	assert.Empty(t, failed.committedSQL)
-	assert.Equal(t, 1, countSQLContaining(failed.attemptedSQL, `INSERT INTO "LiteLLM_ToolTable"`))
 
 	retry := &atomicTestTx{
 		insertedIDs: []string{entry.RequestID},
@@ -131,9 +107,7 @@ func TestAtomicWriterRetryAndReplayCannotDoubleCharge(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []string{entry.RequestID}, inserted)
 	assert.True(t, retry.committed)
-	assert.Equal(t, 6, countSQLContaining(retry.committedSQL, `INSERT INTO "LiteLLM_Daily`))
-	assert.Equal(t, 1, countSQLContaining(retry.committedSQL, `INSERT INTO "LiteLLM_ToolTable"`),
-		"duplicates in one successful writer batch increment the tool once")
+	assert.Equal(t, 5, countSQLContaining(retry.committedSQL, `INSERT INTO "LiteLLM_Daily`))
 	require.NotEmpty(t, retry.committedSQL, "the successful retry applies counters and daily projections once")
 
 	replay := &atomicTestTx{}
@@ -142,7 +116,7 @@ func TestAtomicWriterRetryAndReplayCannotDoubleCharge(t *testing.T) {
 	assert.Empty(t, inserted)
 	assert.True(t, replay.committed)
 	assert.Empty(t, replay.attemptedSQL,
-		"a raw-row conflict returns no IDs, so replay cannot update tools, counters, or daily tables")
+		"a raw-row conflict returns no IDs, so replay cannot update counters or daily tables")
 	assert.Len(t, replay.queries, 1, "a conflict-only replay must not reload or aggregate existing rows")
 }
 
@@ -161,7 +135,7 @@ func TestAtomicWriterUsesProviderResponseIDForNormalInsert(t *testing.T) {
 	require.Len(t, tx.queryArgs, 2)
 	assert.Equal(t, "chatcmpl-provider", tx.queryArgs[0][0])
 	assert.Equal(t, 1, countSQLContaining(tx.committedSQL, `UPDATE "LiteLLM_VerificationToken"`))
-	assert.Equal(t, 6, countSQLContaining(tx.committedSQL, `INSERT INTO "LiteLLM_Daily`))
+	assert.Equal(t, 5, countSQLContaining(tx.committedSQL, `INSERT INTO "LiteLLM_Daily`))
 }
 
 func TestAtomicWriterKeepsLegacyFailureRawCallTypeEmptyButProjectsOriginalRoute(t *testing.T) {
@@ -184,10 +158,9 @@ func TestAtomicWriterKeepsLegacyFailureRawCallTypeEmptyButProjectsOriginalRoute(
 	assert.Equal(t, []string{entry.RequestID}, inserted)
 	require.NotEmpty(t, tx.queryArgs)
 	assert.Equal(t, "", tx.queryArgs[0][1], "the writer must not mutate a legacy raw failure row")
-	assert.Equal(t, 6, countSQLContaining(tx.committedSQL, `INSERT INTO "LiteLLM_Daily`),
+	assert.Equal(t, 5, countSQLContaining(tx.committedSQL, `INSERT INTO "LiteLLM_Daily`),
 		"the preserved original route must feed every daily aggregate")
 	assert.Equal(t, 1, countSQLContaining(tx.committedSQL, `UPDATE "LiteLLM_TagTable" SET spend = spend + $1, updated_at = NOW()`))
-	assert.Equal(t, 1, countSQLContaining(tx.committedSQL, `UPDATE "LiteLLM_AgentsTable" SET spend = spend + $1, updated_at = NOW()`))
 }
 
 func TestLegacyFailureOriginalRouteEnablesDailyAggregationWithoutPopulatingEndpoint(t *testing.T) {
@@ -233,7 +206,6 @@ func TestAtomicWriterSameBatchProviderIDCollisionUsesEventFallback(t *testing.T)
 	logger := newAtomicTestLogger()
 	first := atomicProviderIDEntry("chatcmpl-shared", "air-event-1")
 	second := atomicProviderIDEntry("chatcmpl-shared", "air-event-2")
-	second.DeclaredToolNames = []string{"weather"}
 	tx := &atomicTestTx{
 		insertResults: [][]string{{"chatcmpl-shared"}, {"air-event-2"}},
 		spendRows: [][]any{
@@ -251,8 +223,7 @@ func TestAtomicWriterSameBatchProviderIDCollisionUsesEventFallback(t *testing.T)
 	assert.Equal(t, "chatcmpl-shared", tx.queryArgs[0][0])
 	assert.Len(t, tx.queryArgs[1], queries.SpendLogParamCount, "the colliding logical effect uses its event ID")
 	assert.Equal(t, "air-event-2", tx.queryArgs[1][0])
-	assert.Equal(t, 1, countSQLContaining(tx.committedSQL, `INSERT INTO "LiteLLM_ToolTable"`))
-	assert.Equal(t, 6, countSQLContaining(tx.committedSQL, `INSERT INTO "LiteLLM_Daily`))
+	assert.Equal(t, 5, countSQLContaining(tx.committedSQL, `INSERT INTO "LiteLLM_Daily`))
 }
 
 func TestAtomicWriterConcurrentProviderIDWinnerFallsBackToEventID(t *testing.T) {
@@ -273,13 +244,12 @@ func TestAtomicWriterConcurrentProviderIDWinnerFallsBackToEventID(t *testing.T) 
 		"the concurrent owner must be read in a statement after the conflicting INSERT")
 	assert.Equal(t, []string{"chatcmpl-concurrent"}, tx.queryArgs[1][0])
 	assert.Equal(t, "air-event-loser", tx.queryArgs[2][0])
-	assert.Equal(t, 6, countSQLContaining(tx.committedSQL, `INSERT INTO "LiteLLM_Daily`))
+	assert.Equal(t, 5, countSQLContaining(tx.committedSQL, `INSERT INTO "LiteLLM_Daily`))
 }
 
 func TestAtomicWriterProviderIDReplayDoesNotFeedAnyAccounting(t *testing.T) {
 	logger := newAtomicTestLogger()
 	entry := atomicProviderIDEntry("chatcmpl-replay", "air-event-replay")
-	entry.DeclaredToolNames = []string{"must-not-increment"}
 	tx := &atomicTestTx{
 		insertResults: [][]string{{}},
 		ownerRows:     [][]any{{"chatcmpl-replay", "air-event-replay"}},
@@ -290,14 +260,13 @@ func TestAtomicWriterProviderIDReplayDoesNotFeedAnyAccounting(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, inserted)
 	assert.Len(t, tx.queries, 2, "replay needs only preferred INSERT and separate owner lookup")
-	assert.Empty(t, tx.attemptedSQL, "owner matches the event, so tools/counters/daily must not run")
+	assert.Empty(t, tx.attemptedSQL, "owner matches the event, so counters/daily must not run")
 }
 
 func TestAtomicWriterExistingOwnerCanBeLaterEntryInSameBatch(t *testing.T) {
 	logger := newAtomicTestLogger()
 	newEffect := atomicProviderIDEntry("chatcmpl-reordered", "air-event-new")
 	replayedOwner := atomicProviderIDEntry("chatcmpl-reordered", "air-event-owner")
-	replayedOwner.DeclaredToolNames = []string{"must-not-increment"}
 	tx := &atomicTestTx{
 		insertResults: [][]string{{}, {"air-event-new"}},
 		ownerRows:     [][]any{{"chatcmpl-reordered", "air-event-owner"}},
@@ -311,14 +280,11 @@ func TestAtomicWriterExistingOwnerCanBeLaterEntryInSameBatch(t *testing.T) {
 	require.Len(t, tx.queryArgs, 4)
 	assert.Len(t, tx.queryArgs[2], queries.SpendLogParamCount, "only the non-owner effect gets a fallback row")
 	assert.Equal(t, "air-event-new", tx.queryArgs[2][0])
-	assert.Equal(t, 0, countSQLContaining(tx.committedSQL, `INSERT INTO "LiteLLM_ToolTable"`),
-		"the existing owner entry must not feed the tool registry")
 }
 
 func TestAtomicWriterEventFallbackReplayDoesNotFeedAccounting(t *testing.T) {
 	logger := newAtomicTestLogger()
 	entry := atomicProviderIDEntry("chatcmpl-collision-replay", "air-event-already-stored")
-	entry.DeclaredToolNames = []string{"must-not-increment"}
 	tx := &atomicTestTx{
 		insertResults: [][]string{{}, {}},
 		ownerRows:     [][]any{{"chatcmpl-collision-replay", "air-event-original-owner"}},
@@ -358,7 +324,6 @@ func atomicTestEntry(requestID string) *models.SpendLogEntry {
 		OrganizationID:     "org-1",
 		EndUser:            "end-user-1",
 		RequestTags:        `["tag-1"]`,
-		AgentID:            "agent-1",
 		Status:             "success",
 		ComparisonEligible: true,
 	}
@@ -379,7 +344,7 @@ func atomicTestSpendRow(entry *models.SpendLogEntry) []any {
 		entry.Model,
 		entry.ModelGroup,
 		entry.CustomLLMProvider,
-		entry.MCPNamespacedToolName,
+		"", // mcp_namespaced_tool_name (no longer written by the router)
 		entry.CallType,
 		entry.CallType,
 		entry.PromptTokens,
@@ -393,7 +358,7 @@ func atomicTestSpendRow(entry *models.SpendLogEntry) []any {
 		entry.OrganizationID,
 		entry.EndUser,
 		normalizeRequestTags(entry.RequestTags),
-		entry.AgentID,
+		"", // agent_id (no longer written by the router)
 	}
 }
 

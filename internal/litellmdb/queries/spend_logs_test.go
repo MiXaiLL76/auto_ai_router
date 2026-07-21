@@ -34,14 +34,6 @@ func TestSelectSpendLogsKeepsRawCallTypeAndExposesOriginalRouteForFailureAggrega
 	assert.Contains(t, QuerySelectUnprocessedSpendLogs, "AS aggregation_call_type")
 }
 
-func TestDailyAgentUpsertMatchesSchema(t *testing.T) {
-	assert.Contains(t, QueryUpsertDailyAgentSpend, `INSERT INTO "LiteLLM_DailyAgentSpend"`)
-	assert.Contains(t, QueryUpsertDailyAgentSpend, "agent_id")
-	assert.Contains(t, QueryUpsertDailyAgentSpend, "cache_read_input_tokens")
-	assert.Contains(t, QueryUpsertDailyAgentSpend, "cache_creation_input_tokens")
-	assert.Contains(t, QueryUpsertDailyAgentSpend, "ON CONFLICT")
-}
-
 func TestSpendLogInsertPrivacyColumnsAreExplicitEmptyObjects(t *testing.T) {
 	for _, query := range []string{QueryInsertSpendLog, BuildBatchInsertQuery(2)} {
 		assert.Contains(t, query, "messages")
@@ -49,12 +41,6 @@ func TestSpendLogInsertPrivacyColumnsAreExplicitEmptyObjects(t *testing.T) {
 		assert.Contains(t, query, "proxy_server_request")
 		assert.Contains(t, query, "'{}'::jsonb, '{}'::jsonb, '{}'::jsonb")
 	}
-}
-
-func TestSpendLogInsertStoresAbsentMCPToolAsSQLNull(t *testing.T) {
-	assert.Contains(t, QueryInsertSpendLog, "NULLIF($28, '')")
-	assert.Contains(t, BuildBatchInsertQuery(1), "NULLIF($28, '')")
-	assert.Contains(t, BuildBatchInsertQuery(2), "NULLIF($57, '')")
 }
 
 func TestBuildBatchInsertQuery(t *testing.T) {
@@ -91,7 +77,7 @@ func TestBuildBatchInsertQuery(t *testing.T) {
 			expectContains: []string{
 				`INSERT INTO "LiteLLM_SpendLogs"`,
 				"$1", "$2", "$3", // first row
-				"$59", "$60", "$61", // third row starts at $59 (29 params per row)
+				"$55", "$56", "$57", // third row starts at $55 (27 params per row)
 				"ON CONFLICT (request_id) DO NOTHING RETURNING request_id",
 			},
 		},
@@ -102,7 +88,7 @@ func TestBuildBatchInsertQuery(t *testing.T) {
 			expectContains: []string{
 				`INSERT INTO "LiteLLM_SpendLogs"`,
 				"$1",
-				"$145", // 5 rows * 29 params = 145
+				"$135", // 5 rows * 27 params = 135
 				"ON CONFLICT (request_id) DO NOTHING RETURNING request_id",
 			},
 		},

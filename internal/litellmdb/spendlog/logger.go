@@ -681,9 +681,6 @@ func (sl *Logger) writeBatchInTransaction(ctx context.Context, tx pgx.Tx, batch 
 	if len(filteredBatch) != len(insertedIDs) {
 		return nil, fmt.Errorf("map inserted rows to batch: expected %d, mapped %d", len(insertedIDs), len(filteredBatch))
 	}
-	if err := upsertDiscoveredTools(ctx, tx, filteredBatch); err != nil {
-		return nil, fmt.Errorf("tool registry: %w", err)
-	}
 	spendUpdates := aggregateSpendUpdates(filteredBatch)
 	if err := executeSpendUpdates(ctx, tx, spendUpdates); err != nil {
 		return nil, fmt.Errorf("spend updates: %w", err)

@@ -44,7 +44,6 @@ type SpendUpdates struct {
 	OrganizationMembers map[organizationMemberKey]float64 // organization/user -> amount
 	EndUsers            map[string]float64                // endUserID -> amount
 	Tags                map[string]float64                // tagName -> amount
-	Agents              map[string]float64                // agentID -> amount
 }
 
 type entityModelKey struct {
@@ -139,7 +138,6 @@ func aggregateSpendUpdates(batch []*models.SpendLogEntry) *SpendUpdates {
 		OrganizationMembers: make(map[organizationMemberKey]float64),
 		EndUsers:            make(map[string]float64),
 		Tags:                make(map[string]float64),
-		Agents:              make(map[string]float64),
 	}
 
 	for _, entry := range batch {
@@ -188,10 +186,6 @@ func aggregateSpendUpdates(batch []*models.SpendLogEntry) *SpendUpdates {
 
 		for _, tag := range uniqueRequestTags(entry.RequestTags) {
 			updates.Tags[tag] += entry.Spend
-		}
-
-		if entry.AgentID != "" {
-			updates.Agents[entry.AgentID] += entry.Spend
 		}
 	}
 
@@ -277,11 +271,6 @@ func executeSpendUpdates(ctx context.Context, tx pgx.Tx, updates *SpendUpdates) 
 	if len(updates.Tags) > 0 {
 		if err := updateTags(ctx, tx, updates.Tags); err != nil {
 			return fmt.Errorf("update tags: %w", err)
-		}
-	}
-	if len(updates.Agents) > 0 {
-		if err := updateAgents(ctx, tx, updates.Agents); err != nil {
-			return fmt.Errorf("update agents: %w", err)
 		}
 	}
 
@@ -543,19 +532,6 @@ func updateTags(ctx context.Context, tx pgx.Tx, tags map[string]float64) error {
 		_, err := tx.Exec(ctx,
 			`UPDATE "LiteLLM_TagTable" SET spend = spend + $1, updated_at = NOW() WHERE tag_name = $2 AND spend IS NOT NULL`,
 			amount, tagName)
-		if err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func updateAgents(ctx context.Context, tx pgx.Tx, agents map[string]float64) error {
-	for _, agentID := range sortedSpendKeys(agents, strings.Compare) {
-		amount := agents[agentID]
-		_, err := tx.Exec(ctx,
-			`UPDATE "LiteLLM_AgentsTable" SET spend = spend + $1, updated_at = NOW() WHERE agent_id = $2 AND spend IS NOT NULL`,
-			amount, agentID)
 		if err != nil {
 			return err
 		}

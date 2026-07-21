@@ -46,7 +46,6 @@ type spendLogRecord struct {
 	OrganizationID           string
 	EndUser                  string
 	RequestTags              string
-	AgentID                  string
 	SkipDaily                bool
 }
 
@@ -90,7 +89,10 @@ func loadUnprocessedSpendLogRecords(
 		var userID *string
 		var model, modelGroup, customLLMProvider, mcpNamespacedToolName, callType, aggregationCallType *string
 		var status *string
-		var teamID, organizationID, endUser, requestTags, agentID *string
+		var teamID, organizationID, endUser, requestTags *string
+		// The SELECT still returns agent_id (column list is reworked separately);
+		// the value is consumed by Scan but no longer used for aggregation.
+		var agentID *string
 
 		err := rows.Scan(
 			&userID,
@@ -171,7 +173,6 @@ func loadUnprocessedSpendLogRecords(
 		record.OrganizationID = derefString(organizationID)
 		record.EndUser = derefString(endUser)
 		record.RequestTags = derefString(requestTags)
-		record.AgentID = derefString(agentID)
 
 		records = append(records, record)
 	}
@@ -213,7 +214,7 @@ func sortedDailyKeys[K dailyLockOrdered, V any](aggregations map[K]V) []K {
 	return keys
 }
 
-// runAggregators runs all six daily aggregators sequentially on the transaction
+// runAggregators runs all five daily aggregators sequentially on the transaction
 // that inserted the source rows. The first error aborts the pipeline because a
 // PostgreSQL transaction is unusable after a statement error and must roll back.
 func (sl *Logger) runAggregators(aggCtx context.Context, tx dailySpendExecer, scope string, records []spendLogRecord) error {
@@ -246,11 +247,6 @@ func (sl *Logger) runAggregators(aggCtx context.Context, tx dailySpendExecer, sc
 			c, cn := context.WithTimeout(aggCtx, 30*time.Second)
 			defer cn()
 			return aggregateDailyEndUserSpendLogs(c, tx, sl.logger, dailyRecords)
-		}},
-		{"Agent", func() error {
-			c, cn := context.WithTimeout(aggCtx, 30*time.Second)
-			defer cn()
-			return aggregateDailyAgentSpendLogs(c, tx, sl.logger, dailyRecords)
 		}},
 		{"Tag", func() error {
 			c, cn := context.WithTimeout(aggCtx, 30*time.Second)

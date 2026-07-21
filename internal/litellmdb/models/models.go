@@ -151,7 +151,6 @@ type TokenInfo struct {
 	TeamID         string   // Team ID (optional)
 	OrganizationID string   // Organization ID (optional, resolved from token or team)
 	ProjectID      string   // Project ID (optional)
-	AgentID        string   // Agent ID (optional)
 	Tags           []string // Request tags from token metadata
 
 	// Token budget (embedded)
@@ -559,10 +558,8 @@ type SpendLogEntry struct {
 	ProjectID      string // Runtime project attribution (persisted in Metadata)
 	EndUser        string // End user ID (from metadata)
 
-	// MCP & Tags
-	MCPNamespacedToolName string // MCP tool name with namespace
-	RequestTags           string // JSON array of request tags
-	AgentID               string // Agent ID from signed context
+	// Tags
+	RequestTags string // JSON array of request tags
 
 	// Status
 	Status string // "success" | "failure"
@@ -573,12 +570,6 @@ type SpendLogEntry struct {
 	// Runtime-only observability flag; persisted inside Metadata rather than as
 	// a LiteLLM_SpendLogs column.
 	ComparisonEligible bool
-
-	// Runtime-only tool discovery data. These fields feed LiteLLM_ToolTable in
-	// the same transaction as this SpendLog row and are never persisted in the
-	// LiteLLM_SpendLogs row or its metadata.
-	DeclaredToolNames []string
-	ToolKeyAlias      string
 }
 
 // ==================== Stats ====================

@@ -54,11 +54,12 @@ func TestLoadDailyProjectionDimensions(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			entry := atomicTestEntry("req-dimensions")
 			entry.CallType, entry.Model, entry.ModelGroup = tt.rawCallType, tt.model, tt.modelGroup
-			entry.CustomLLMProvider, entry.MCPNamespacedToolName = tt.provider, tt.mcpTool
+			entry.CustomLLMProvider = tt.provider
 			if tt.status != "" {
 				entry.Status = tt.status
 			}
 			row := atomicTestSpendRow(entry)
+			row[6] = tt.mcpTool // mcp_namespaced_tool_name column in the selected row
 			row[8] = tt.effectiveCallType
 			logger := newAtomicTestLogger()
 			records, err := loadUnprocessedSpendLogRecords(

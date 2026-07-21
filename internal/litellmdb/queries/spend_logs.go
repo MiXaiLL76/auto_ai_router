@@ -38,15 +38,13 @@ const (
 			requester_ip_address,
 			session_id,
 			status,
-			mcp_namespaced_tool_name,
-			agent_id,
 			messages,
 			response,
 			proxy_server_request
 		) VALUES (
 			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
 			$11, $12, $13, $14, $15, $16, $17, $18, $19, $20,
-			$21, $22, $23, $24, $25, $26, $27, NULLIF($28, ''), $29,
+			$21, $22, $23, $24, $25, $26, $27,
 			'{}'::jsonb, '{}'::jsonb, '{}'::jsonb
 		)
 		ON CONFLICT (request_id) DO NOTHING
@@ -260,43 +258,6 @@ const (
 			updated_at = now()
 	`
 
-	// QueryUpsertDailyAgentSpend upserts into LiteLLM_DailyAgentSpend.
-	QueryUpsertDailyAgentSpend = `
-		INSERT INTO "LiteLLM_DailyAgentSpend" (
-			id,
-			agent_id,
-			date,
-			api_key,
-			model,
-			model_group,
-			custom_llm_provider,
-			mcp_namespaced_tool_name,
-			endpoint,
-			prompt_tokens,
-			completion_tokens,
-			cache_read_input_tokens,
-			cache_creation_input_tokens,
-			spend,
-			api_requests,
-			successful_requests,
-			failed_requests,
-			created_at,
-			updated_at
-		) VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, now(), now())
-		ON CONFLICT (agent_id, date, api_key, model, custom_llm_provider, mcp_namespaced_tool_name, endpoint)
-		DO UPDATE SET
-			model_group = EXCLUDED.model_group,
-			prompt_tokens = "LiteLLM_DailyAgentSpend".prompt_tokens + EXCLUDED.prompt_tokens,
-			completion_tokens = "LiteLLM_DailyAgentSpend".completion_tokens + EXCLUDED.completion_tokens,
-			cache_read_input_tokens = "LiteLLM_DailyAgentSpend".cache_read_input_tokens + EXCLUDED.cache_read_input_tokens,
-			cache_creation_input_tokens = "LiteLLM_DailyAgentSpend".cache_creation_input_tokens + EXCLUDED.cache_creation_input_tokens,
-			spend = "LiteLLM_DailyAgentSpend".spend + EXCLUDED.spend,
-			api_requests = "LiteLLM_DailyAgentSpend".api_requests + EXCLUDED.api_requests,
-			successful_requests = "LiteLLM_DailyAgentSpend".successful_requests + EXCLUDED.successful_requests,
-			failed_requests = "LiteLLM_DailyAgentSpend".failed_requests + EXCLUDED.failed_requests,
-			updated_at = now()
-	`
-
 	// QueryUpsertDailyTagSpend upserts into LiteLLM_DailyTagSpend
 	QueryUpsertDailyTagSpend = `
 		INSERT INTO "LiteLLM_DailyTagSpend" (
@@ -337,10 +298,9 @@ const (
 )
 
 // Number of parameters per SpendLogEntry in batch insert
-const SpendLogParamCount = 29
+const SpendLogParamCount = 27
 const (
-	spendLogParamCount                      = SpendLogParamCount
-	spendLogMCPNamespacedToolNameParamIndex = 27
+	spendLogParamCount = SpendLogParamCount
 )
 
 // BuildBatchInsertQuery builds a query for batch INSERT
@@ -360,7 +320,7 @@ func BuildBatchInsertQuery(count int) string {
 			model, model_id, model_group, custom_llm_provider, api_base,
 			"user", "metadata", cache_hit, cache_key, request_tags,
 			team_id, organization_id, end_user, requester_ip_address,
-			session_id, status, mcp_namespaced_tool_name, agent_id,
+			session_id, status,
 			messages, response, proxy_server_request
 		) VALUES `)
 
@@ -374,12 +334,7 @@ func BuildBatchInsertQuery(count int) string {
 			if j > 0 {
 				b.WriteString(", ")
 			}
-			if j == spendLogMCPNamespacedToolNameParamIndex {
-				// Optional mcp_namespaced_tool_name is SQL NULL when absent.
-				fmt.Fprintf(&b, "NULLIF($%d, '')", paramIdx)
-			} else {
-				fmt.Fprintf(&b, "$%d", paramIdx)
-			}
+			fmt.Fprintf(&b, "$%d", paramIdx)
 			paramIdx++
 		}
 		// LiteLLM's payload-disabled writer persists empty JSON objects for these

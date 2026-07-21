@@ -45,8 +45,6 @@ func GetSpendLogParams(entry *models.SpendLogEntry) []interface{} {
 		entry.RequesterIP,           // $25
 		entry.SessionID,             // $26
 		entry.Status,                // $27
-		entry.MCPNamespacedToolName, // $28
-		entry.AgentID,               // $29
 	}
 }
 

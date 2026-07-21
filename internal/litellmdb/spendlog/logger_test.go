@@ -162,18 +162,18 @@ func TestBuildBatchInsertQuery(t *testing.T) {
 		query := queries.BuildBatchInsertQuery(1)
 		assert.Contains(t, query, "INSERT INTO")
 		assert.Contains(t, query, "$1")
-		assert.Contains(t, query, "$29")
-		assert.NotContains(t, query, "$30") // 29 params + 3 empty-object constants
+		assert.Contains(t, query, "$27")
+		assert.NotContains(t, query, "$28") // 27 params + 3 empty-object constants
 		assert.Contains(t, query, "ON CONFLICT (request_id) DO NOTHING")
 	})
 
 	t.Run("multiple entries", func(t *testing.T) {
 		query := queries.BuildBatchInsertQuery(3)
 		assert.Contains(t, query, "$1")
-		assert.Contains(t, query, "$29") // First entry
-		assert.Contains(t, query, "$30") // Second entry start
-		assert.Contains(t, query, "$87") // Third entry end (3 * 29)
-		assert.NotContains(t, query, "$88")
+		assert.Contains(t, query, "$27") // First entry
+		assert.Contains(t, query, "$28") // Second entry start
+		assert.Contains(t, query, "$81") // Third entry end (3 * 27)
+		assert.NotContains(t, query, "$82")
 	})
 
 	t.Run("zero entries", func(t *testing.T) {
@@ -588,8 +588,8 @@ func TestLogger_SQLInjectionPrevention(t *testing.T) {
 				query := queries.BuildBatchInsertQuery(2)
 				assert.NotEmpty(t, query)
 				assert.Contains(t, query, "$1")
-				assert.Contains(t, query, "$58") // 2 * 29 parameters
-				assert.NotContains(t, query, "$59")
+				assert.Contains(t, query, "$54") // 2 * 27 parameters
+				assert.NotContains(t, query, "$55")
 
 				// Get batch params
 				params := GetBatchParams(entries)
