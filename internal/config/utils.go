@@ -209,21 +209,6 @@ func PrintConfig(logger *slog.Logger, cfg *Config) {
 		logger.Info("litellm_db", "status", "DISABLED")
 	}
 
-	if cfg.SpendLog.IsEnabled() {
-		logger.Info("spend_log (ENABLED)",
-			"database_url", security.MaskDatabaseURL(cfg.SpendLog.DatabaseURL),
-			"expected_database_name", cfg.SpendLog.ExpectedDatabaseName,
-			"api_base", cfg.SpendLog.APIBase,
-			"max_conns", cfg.SpendLog.MaxConns,
-			"min_conns", cfg.SpendLog.MinConns,
-			"log_queue_size", cfg.SpendLog.LogQueueSize,
-			"log_batch_size", cfg.SpendLog.LogBatchSize,
-			"log_flush_interval", cfg.SpendLog.LogFlushInterval.String(),
-		)
-	} else {
-		logger.Info("spend_log", "status", "DISABLED")
-	}
-
 	// Kafka spend-log config
 	if cfg.Kafka.Enabled {
 		saslPassword := ""

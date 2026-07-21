@@ -201,21 +201,6 @@ var (
 		},
 	)
 
-	SpendSinkHealthy = promauto.NewGauge(
-		prometheus.GaugeOpts{
-			Name: "auto_ai_router_spend_sink_healthy",
-			Help: "Whether the isolated spend sink passed startup guard and is healthy (1=yes)",
-		},
-	)
-
-	SpendSinkStartupFailuresTotal = promauto.NewCounterVec(
-		prometheus.CounterOpts{
-			Name: "auto_ai_router_spend_sink_startup_failures_total",
-			Help: "Critical spend sink startup failures; proxy traffic remains fail-open",
-		},
-		[]string{"reason"},
-	)
-
 	SpendQueueDepth = promauto.NewGauge(
 		prometheus.GaugeOpts{
 			Name: "auto_ai_router_spend_queue_depth",
@@ -427,32 +412,6 @@ func (m *Metrics) RecordAbortedRequest(credential, endpoint, model string) {
 		return
 	}
 	AbortedRequestsTotal.WithLabelValues(credential, model, endpoint).Inc()
-}
-
-func (m *Metrics) SetSpendSinkHealthy(healthy bool) {
-	if !m.isEnabled() {
-		return
-	}
-	SetSpendSinkHealthy(healthy)
-}
-
-// SetSpendSinkHealthy publishes live health transitions from the
-// isolated spend connection pool. Registration/export remains controlled by
-// the configured Prometheus/OTEL sinks.
-func SetSpendSinkHealthy(healthy bool) {
-	if healthy {
-		SpendSinkHealthy.Set(1)
-		return
-	}
-	SpendSinkHealthy.Set(0)
-}
-
-func (m *Metrics) RecordSpendSinkStartupFailure(reason string) {
-	if !m.isEnabled() {
-		return
-	}
-	SetSpendSinkHealthy(false)
-	SpendSinkStartupFailuresTotal.WithLabelValues(reason).Inc()
 }
 
 func (m *Metrics) UpdateCredentialRPM(credential string, rpm int) {
