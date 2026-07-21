@@ -209,14 +209,12 @@ func TestSlidingWindow_Cleanup(t *testing.T) {
 
 	assert.Equal(t, 3, rl.GetCurrentRPM("cred1"))
 
-	// Manually manipulate request times to simulate old requests
+	// Simulate that all recorded requests are now more than a minute old by
+	// rewinding the bucket cursor; the next check should evict everything.
 	lb := rl.backend.(*localBackend)
 	c := lb.getOrCreate(credKey("cred1"))
 	c.mu.Lock()
-	oldTime := time.Now().UTC().Add(-2 * time.Minute)
-	for i := range c.requests {
-		c.requests[i] = oldTime
-	}
+	c.reqLastSec = time.Now().UTC().Add(-2 * time.Minute).Unix()
 	c.mu.Unlock()
 
 	// Make a new request - should clean up old ones
@@ -499,14 +497,11 @@ func TestGetCurrentTPM_Cleanup(t *testing.T) {
 	rl.ConsumeTokens("cred1", 1000)
 	assert.Equal(t, 1000, rl.GetCurrentTPM("cred1"))
 
-	// Manually set old timestamps
+	// Simulate that all recorded tokens are now more than a minute old.
 	lb := rl.backend.(*localBackend)
 	c := lb.getOrCreate(credKey("cred1"))
 	c.mu.Lock()
-	oldTime := time.Now().UTC().Add(-2 * time.Minute)
-	for i := range c.tokens {
-		c.tokens[i].timestamp = oldTime
-	}
+	c.tokLastSec = time.Now().UTC().Add(-2 * time.Minute).Unix()
 	c.mu.Unlock()
 
 	// Current TPM should be 0 (old tokens cleaned up)
@@ -791,14 +786,11 @@ func TestConsumeTokens_TokenCleanup(t *testing.T) {
 	rl.ConsumeTokens("cred1", 5000)
 	assert.Equal(t, 5000, rl.GetCurrentTPM("cred1"))
 
-	// Manually set old timestamps
+	// Simulate that all recorded tokens are now more than a minute old.
 	lb := rl.backend.(*localBackend)
 	c := lb.getOrCreate(credKey("cred1"))
 	c.mu.Lock()
-	oldTime := time.Now().UTC().Add(-2 * time.Minute)
-	for i := range c.tokens {
-		c.tokens[i].timestamp = oldTime
-	}
+	c.tokLastSec = time.Now().UTC().Add(-2 * time.Minute).Unix()
 	c.mu.Unlock()
 
 	// After cleanup, should be 0
@@ -817,14 +809,11 @@ func TestConsumeModelTokens_TokenCleanup(t *testing.T) {
 	rl.ConsumeModelTokens("cred1", "gpt-4o", 5000)
 	assert.Equal(t, 5000, rl.GetCurrentModelTPM("cred1", "gpt-4o"))
 
-	// Manually set old timestamps
+	// Simulate that all recorded tokens are now more than a minute old.
 	lb2 := rl.backend.(*localBackend)
 	c2 := lb2.getOrCreate(modelCounterKey("cred1", "gpt-4o"))
 	c2.mu.Lock()
-	oldTime2 := time.Now().UTC().Add(-2 * time.Minute)
-	for i := range c2.tokens {
-		c2.tokens[i].timestamp = oldTime2
-	}
+	c2.tokLastSec = time.Now().UTC().Add(-2 * time.Minute).Unix()
 	c2.mu.Unlock()
 
 	// After cleanup, should be 0

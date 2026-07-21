@@ -51,20 +51,23 @@ type Logger struct {
 
 	// Lifecycle
 	stopChan     chan struct{}
-	workerDone   chan struct{}
 	shutdownDone chan struct{}
 	wg           sync.WaitGroup
-	lifecycleMu  sync.Mutex
-	started      bool
-	stopping     bool
-	doneOnce     sync.Once
-	startOnce    sync.Once // Ensure Start() is called only once
-	acceptStop   chan struct{}
-	enqueueWG    sync.WaitGroup
-	writeCtx     context.Context
-	writeCancel  context.CancelFunc
-	syncCtx      context.Context
-	syncCancel   context.CancelFunc
+	// writerWg tracks only the queue-draining writer workers so the DLQ
+	// recovery worker (itself part of wg) can wait for their final drain
+	// without deadlocking on its own completion.
+	writerWg    sync.WaitGroup
+	lifecycleMu sync.Mutex
+	started     bool
+	stopping    bool
+	doneOnce    sync.Once
+	startOnce   sync.Once // Ensure Start() is called only once
+	acceptStop  chan struct{}
+	enqueueWG   sync.WaitGroup
+	writeCtx    context.Context
+	writeCancel context.CancelFunc
+	syncCtx     context.Context
+	syncCancel  context.CancelFunc
 
 	// Metrics
 	queued            uint64 // Total queued
@@ -110,7 +113,6 @@ func NewLogger(pool *connection.ConnectionPool, cfg *models.Config) *Logger {
 		logger:       cfg.Logger,
 		queue:        make(chan *models.SpendLogEntry, cfg.LogQueueSize),
 		stopChan:     make(chan struct{}),
-		workerDone:   make(chan struct{}),
 		shutdownDone: make(chan struct{}),
 		acceptStop:   make(chan struct{}),
 		writeCtx:     writeCtx,
@@ -123,7 +125,7 @@ func NewLogger(pool *connection.ConnectionPool, cfg *models.Config) *Logger {
 	return sl
 }
 
-// Start starts the background writer and DLQ recovery worker.
+// Start starts the background writer workers and DLQ recovery worker.
 // Must be called once after creation. Safe to call multiple times (idempotent).
 func (sl *Logger) Start() {
 	sl.startOnce.Do(func() {
@@ -136,9 +138,17 @@ func (sl *Logger) Start() {
 		// Initialize tickers BEFORE starting goroutines to prevent nil dereference race
 		sl.dlqRecoveryTicker = time.NewTicker(5 * time.Minute)
 
-		sl.wg.Add(2)
+		numWorkers := sl.config.LogWorkers
+		if numWorkers <= 0 {
+			numWorkers = 1
+		}
+
+		sl.wg.Add(numWorkers + 1) // workers + dlqRecoveryWorker
+		sl.writerWg.Add(numWorkers)
 		sl.started = true
-		go sl.worker()
+		for i := 0; i < numWorkers; i++ {
+			go sl.worker()
+		}
 		go sl.dlqRecoveryWorker()
 		go func() {
 			sl.wg.Wait()
@@ -148,6 +158,7 @@ func (sl *Logger) Start() {
 			"queue_size", sl.config.LogQueueSize,
 			"batch_size", sl.config.LogBatchSize,
 			"flush_interval", sl.config.LogFlushInterval,
+			"workers", numWorkers,
 			"dlq_max_size", 10,
 			"dlq_recovery_interval", "5m",
 		)
@@ -456,7 +467,7 @@ func (sl *Logger) GetDLQStats() map[string]interface{} {
 // worker is the background goroutine that processes the queue
 func (sl *Logger) worker() {
 	defer sl.wg.Done()
-	defer close(sl.workerDone)
+	defer sl.writerWg.Done()
 
 	batch := make([]*models.SpendLogEntry, 0, sl.config.LogBatchSize)
 	ticker := time.NewTicker(sl.config.LogFlushInterval)
@@ -784,9 +795,9 @@ func (sl *Logger) dlqRecoveryWorker() {
 }
 
 func (sl *Logger) finalizeDLQ() {
-	// The writer is the only producer of new DLQ batches. Wait for its final
-	// queue drain before making the terminal recovery attempt.
-	<-sl.workerDone
+	// The writer workers are the only producers of new DLQ batches. Wait for
+	// their final queue drain before making the terminal recovery attempt.
+	sl.writerWg.Wait()
 	sl.flushDLQ()
 }
 

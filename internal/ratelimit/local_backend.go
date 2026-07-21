@@ -3,16 +3,35 @@ package ratelimit
 import (
 	"context"
 	"sync"
-	"time"
 
 	"github.com/mixaill76/auto_ai_router/internal/utils"
 )
 
+// slidingWindowBuckets is the number of one-second buckets used to approximate
+// the 60-second RPM/TPM sliding window. Using fixed-size per-second counters
+// instead of a per-request timestamp log turns cleanup from O(requests in the
+// last minute) into O(1) amortized (bounded by this constant), independent of
+// how many requests actually happened.
+const slidingWindowBuckets = 60
+
 // localCounter holds the in-process sliding-window state for one rate-limit key.
+// requests/tokens are tracked as circular buffers of per-second counters rather
+// than individual timestamps: bucket i holds the count for the epoch second
+// stored in the matching *Seconds slot, and is lazily reset once that second
+// falls out of the window. *Total always mirrors the sum of live buckets, so
+// reads never need to rescan the buffers.
 type localCounter struct {
-	mu       sync.Mutex
-	requests []time.Time
-	tokens   []tokenUsage
+	mu sync.Mutex
+
+	reqCounts  [slidingWindowBuckets]int64
+	reqSeconds [slidingWindowBuckets]int64
+	reqTotal   int64
+	reqLastSec int64
+
+	tokCounts  [slidingWindowBuckets]int64
+	tokSeconds [slidingWindowBuckets]int64
+	tokTotal   int64
+	tokLastSec int64
 }
 
 // localBackend is the in-process counterBackend implementation.
@@ -43,41 +62,63 @@ func (b *localBackend) getOrCreate(key string) *localCounter {
 	if c = b.counters[key]; c != nil {
 		return c
 	}
-	c = &localCounter{
-		requests: make([]time.Time, 0),
-		tokens:   make([]tokenUsage, 0),
-	}
+	c = &localCounter{}
 	b.counters[key] = c
 	return c
+}
+
+// evictBuckets advances the window to nowSec, zeroing out any buckets whose
+// second has fallen out of the trailing slidingWindowBuckets-second range and
+// subtracting their contribution from total. The loop is bounded by
+// slidingWindowBuckets regardless of request volume, so this is O(1) w.r.t.
+// the number of requests recorded (unlike a full rescan of a timestamp log).
+func evictBuckets(counts, seconds *[slidingWindowBuckets]int64, total, lastSec *int64, nowSec int64) {
+	last := *lastSec
+	if last == 0 {
+		*lastSec = nowSec
+		return
+	}
+	if nowSec <= last {
+		return
+	}
+	if nowSec-last >= slidingWindowBuckets {
+		*counts = [slidingWindowBuckets]int64{}
+		*seconds = [slidingWindowBuckets]int64{}
+		*total = 0
+	} else {
+		for s := last + 1; s <= nowSec; s++ {
+			idx := s % slidingWindowBuckets
+			*total -= counts[idx]
+			counts[idx] = 0
+			seconds[idx] = s
+		}
+	}
+	*lastSec = nowSec
 }
 
 // --- RPM helpers (must be called with c.mu held) ---
 
 func localCleanOldRequests(c *localCounter) int {
-	now := utils.NowUTC()
-	cutoff := now.Add(-time.Minute)
-	valid := c.requests[:0]
-	for _, t := range c.requests {
-		if t.After(cutoff) {
-			valid = append(valid, t)
-		}
-	}
-	c.requests = valid
-	return len(valid)
+	nowSec := utils.NowUTC().Unix()
+	evictBuckets(&c.reqCounts, &c.reqSeconds, &c.reqTotal, &c.reqLastSec, nowSec)
+	return int(c.reqTotal)
 }
 
 func localRecordRequest(c *localCounter) {
-	if len(c.requests) >= MaxRequestsBufferSize {
-		localCleanOldRequests(c)
+	nowSec := utils.NowUTC().Unix()
+	evictBuckets(&c.reqCounts, &c.reqSeconds, &c.reqTotal, &c.reqLastSec, nowSec)
+	idx := nowSec % slidingWindowBuckets
+	if c.reqSeconds[idx] != nowSec {
+		c.reqCounts[idx] = 0
+		c.reqSeconds[idx] = nowSec
 	}
-	if len(c.requests) < MaxRequestsBufferSize {
-		c.requests = append(c.requests, utils.NowUTC())
-	}
+	c.reqCounts[idx]++
+	c.reqTotal++
 }
 
 func localCheckRPM(c *localCounter, limit int, record bool) bool {
-	localCleanOldRequests(c)
-	if limit != -1 && len(c.requests) >= limit {
+	current := localCleanOldRequests(c)
+	if limit != -1 && current >= limit {
 		return false
 	}
 	if record {
@@ -89,18 +130,21 @@ func localCheckRPM(c *localCounter, limit int, record bool) bool {
 // --- TPM helpers (must be called with c.mu held) ---
 
 func localCleanOldTokens(c *localCounter) int {
-	now := utils.NowUTC()
-	cutoff := now.Add(-time.Minute)
-	valid := c.tokens[:0]
-	total := 0
-	for _, tu := range c.tokens {
-		if tu.timestamp.After(cutoff) {
-			valid = append(valid, tu)
-			total += tu.count
-		}
+	nowSec := utils.NowUTC().Unix()
+	evictBuckets(&c.tokCounts, &c.tokSeconds, &c.tokTotal, &c.tokLastSec, nowSec)
+	return int(c.tokTotal)
+}
+
+func localRecordTokens(c *localCounter, tokenCount int) {
+	nowSec := utils.NowUTC().Unix()
+	evictBuckets(&c.tokCounts, &c.tokSeconds, &c.tokTotal, &c.tokLastSec, nowSec)
+	idx := nowSec % slidingWindowBuckets
+	if c.tokSeconds[idx] != nowSec {
+		c.tokCounts[idx] = 0
+		c.tokSeconds[idx] = nowSec
 	}
-	c.tokens = valid
-	return total
+	c.tokCounts[idx] += int64(tokenCount)
+	c.tokTotal += int64(tokenCount)
 }
 
 func localCheckTPM(c *localCounter, limit int) bool {
@@ -108,6 +152,24 @@ func localCheckTPM(c *localCounter, limit int) bool {
 		return true
 	}
 	return localCleanOldTokens(c) < limit
+}
+
+// distributeAcrossBuckets spreads total evenly across all slidingWindowBuckets
+// one-second buckets ending at nowSec, so a synced remote usage value decays
+// gradually over the window instead of expiring all at once.
+func distributeAcrossBuckets(counts, seconds *[slidingWindowBuckets]int64, nowSec, total int64) {
+	base := total / slidingWindowBuckets
+	remainder := total % slidingWindowBuckets
+	for i := int64(0); i < slidingWindowBuckets; i++ {
+		sec := nowSec - slidingWindowBuckets + 1 + i
+		idx := ((sec % slidingWindowBuckets) + slidingWindowBuckets) % slidingWindowBuckets
+		count := base
+		if i < remainder {
+			count++
+		}
+		counts[idx] = count
+		seconds[idx] = sec
+	}
 }
 
 // --- counterBackend implementation ---
@@ -140,12 +202,7 @@ func (b *localBackend) consumeTokens(_ context.Context, key string, tokenCount i
 	c := b.getOrCreate(key)
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if len(c.tokens) >= MaxTokensBufferSize {
-		localCleanOldTokens(c)
-	}
-	if len(c.tokens) < MaxTokensBufferSize {
-		c.tokens = append(c.tokens, tokenUsage{timestamp: utils.NowUTC(), count: tokenCount})
-	}
+	localRecordTokens(c, tokenCount)
 }
 
 func (b *localBackend) currentRPM(_ context.Context, key string) int {
@@ -206,38 +263,24 @@ func (b *localBackend) setCurrentUsage(_ context.Context, key string, currentRPM
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	now := utils.NowUTC()
-	windowStart := now.Add(-59 * time.Second)
+	nowSec := utils.NowUTC().Unix()
 
+	c.reqCounts = [slidingWindowBuckets]int64{}
+	c.reqSeconds = [slidingWindowBuckets]int64{}
+	c.reqTotal = 0
+	c.reqLastSec = nowSec
 	if currentRPM > 0 {
-		c.requests = make([]time.Time, currentRPM)
-		for i := range currentRPM {
-			offset := time.Duration(int64(i)*59000/int64(currentRPM)) * time.Millisecond
-			c.requests[i] = windowStart.Add(offset)
-		}
-	} else {
-		c.requests = make([]time.Time, 0)
+		distributeAcrossBuckets(&c.reqCounts, &c.reqSeconds, nowSec, int64(currentRPM))
+		c.reqTotal = int64(currentRPM)
 	}
 
+	c.tokCounts = [slidingWindowBuckets]int64{}
+	c.tokSeconds = [slidingWindowBuckets]int64{}
+	c.tokTotal = 0
+	c.tokLastSec = nowSec
 	if currentTPM > 0 {
-		const maxBuckets = 60
-		numBuckets := currentTPM
-		if numBuckets > maxBuckets {
-			numBuckets = maxBuckets
-		}
-		c.tokens = make([]tokenUsage, numBuckets)
-		tokensPerBucket := currentTPM / numBuckets
-		remainder := currentTPM % numBuckets
-		for i := range numBuckets {
-			offset := time.Duration(int64(i)*59000/int64(numBuckets)) * time.Millisecond
-			count := tokensPerBucket
-			if i < remainder {
-				count++
-			}
-			c.tokens[i] = tokenUsage{timestamp: windowStart.Add(offset), count: count}
-		}
-	} else {
-		c.tokens = make([]tokenUsage, 0)
+		distributeAcrossBuckets(&c.tokCounts, &c.tokSeconds, nowSec, int64(currentTPM))
+		c.tokTotal = int64(currentTPM)
 	}
 }
 
