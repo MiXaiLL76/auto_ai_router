@@ -2,6 +2,7 @@ package spendlog
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 
@@ -20,10 +21,12 @@ type requestIDGroup struct {
 }
 
 // insertSpendRowsCollisionSafe inserts each logical effect exactly once while
-// preserving LiteLLM's normal request_id shape. The owner lookup deliberately
-// happens in a separate SQL statement: INSERT ... ON CONFLICT may wait for a
-// concurrent transaction that is invisible to the INSERT statement snapshot,
-// while the next READ COMMITTED statement sees the committed winner.
+// preserving LiteLLM's normal request_id shape. Ownership of a conflicting
+// provider-controlled ID is resolved by a targeted claim UPDATE in a separate
+// statement after the INSERT: INSERT ... ON CONFLICT may wait for a concurrent
+// transaction that is invisible to the INSERT statement snapshot, while the
+// next READ COMMITTED statement sees the committed winner. No SpendLogs row is
+// ever read back.
 func insertSpendRowsCollisionSafe(ctx context.Context, tx pgx.Tx, batch []*models.SpendLogEntry) ([]string, error) {
 	groups := groupEntriesByPreferredRequestID(batch)
 	if len(groups) == 0 {
@@ -40,43 +43,47 @@ func insertSpendRowsCollisionSafe(ctx context.Context, tx pgx.Tx, batch []*model
 	}
 	preferredInsertedSet := stringSet(preferredInserted)
 
-	conflictedIDs := make([]string, 0, len(groups))
-	for _, group := range groups {
-		if _, inserted := preferredInsertedSet[group.preferredID]; inserted {
-			continue
-		}
-		if groupHasEventFallback(group) {
-			conflictedIDs = append(conflictedIDs, group.preferredID)
-		}
-	}
-	ownerByPreferredID, err := selectSpendRowEventOwners(ctx, tx, conflictedIDs)
-	if err != nil {
-		return nil, fmt.Errorf("resolve conflicting request ID owners: %w", err)
-	}
-
 	fallbacks := make([]*models.SpendLogEntry, 0)
 	fallbackSeen := make(map[string]struct{})
 	for _, group := range groups {
-		ownerEventID := ownerByPreferredID[group.preferredID]
-		_, preferredWasInserted := preferredInsertedSet[group.preferredID]
-		if preferredWasInserted {
-			ownerEventID = group.representative.AirEventID
+		if _, inserted := preferredInsertedSet[group.preferredID]; inserted {
+			// This transaction owns the preferred row, so the owner is known
+			// in memory: only the other distinct events need a fallback row.
+			ownerEventID := group.representative.AirEventID
+			for _, entry := range group.entries {
+				eventID := entry.AirEventID
+				if eventID == "" || eventID == ownerEventID {
+					continue
+				}
+				if _, duplicateEvent := fallbackSeen[eventID]; duplicateEvent {
+					continue
+				}
+				fallbackSeen[eventID] = struct{}{}
+				fallbacks = append(fallbacks, cloneEntryWithRequestID(entry, eventID))
+			}
+			continue
 		}
 
+		// The preferred row belongs to another transaction. A targeted claim
+		// per event distinguishes a replay of our own event (claim succeeds,
+		// nothing more to write) from a genuine collision (fall back to the
+		// AIR event ID row).
 		for _, entry := range group.entries {
 			eventID := entry.AirEventID
-			if eventID == "" || eventID == ownerEventID {
-				continue
-			}
-			// A legacy representative without an AIR event ID was already
-			// inserted under the preferred ID and has no fallback to add.
-			if preferredWasInserted && entry == group.representative {
+			if eventID == "" {
 				continue
 			}
 			if _, duplicateEvent := fallbackSeen[eventID]; duplicateEvent {
 				continue
 			}
 			fallbackSeen[eventID] = struct{}{}
+			claimed, err := claimSpendRowEventOwner(ctx, tx, group.preferredID, eventID)
+			if err != nil {
+				return nil, fmt.Errorf("claim conflicting request ID owner: %w", err)
+			}
+			if claimed {
+				continue
+			}
 			fallbacks = append(fallbacks, cloneEntryWithRequestID(entry, eventID))
 		}
 	}
@@ -119,15 +126,6 @@ func groupEntriesByPreferredRequestID(batch []*models.SpendLogEntry) []*requestI
 	return groups
 }
 
-func groupHasEventFallback(group *requestIDGroup) bool {
-	for _, entry := range group.entries {
-		if entry.AirEventID != "" {
-			return true
-		}
-	}
-	return false
-}
-
 func cloneEntryWithRequestID(entry *models.SpendLogEntry, requestID string) *models.SpendLogEntry {
 	clone := *entry
 	clone.RequestID = requestID
@@ -158,27 +156,22 @@ func insertSpendRowsReturningIDs(ctx context.Context, tx pgx.Tx, entries []*mode
 	return insertedIDs, nil
 }
 
-func selectSpendRowEventOwners(ctx context.Context, tx pgx.Tx, requestIDs []string) (map[string]string, error) {
-	owners := make(map[string]string, len(requestIDs))
-	if len(requestIDs) == 0 {
-		return owners, nil
+// claimSpendRowEventOwner reports whether the spend row with the given primary
+// key already belongs to the AIR event. The targeted claim UPDATE only matches
+// when the row's metadata attributes the row to this event, so a replay
+// detects its own earlier write, while a genuine provider request_id collision
+// (different owner event) misses and the caller adds the AIR event ID
+// fallback row.
+func claimSpendRowEventOwner(ctx context.Context, tx pgx.Tx, requestID, eventID string) (bool, error) {
+	var claimedID string
+	err := tx.QueryRow(ctx, queries.QueryClaimSpendLogEventOwner, requestID, eventID).Scan(&claimedID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
 	}
-	rows, err := tx.Query(ctx, queries.QuerySelectSpendLogEventOwners, requestIDs)
 	if err != nil {
-		return nil, err
+		return false, err
 	}
-	defer rows.Close()
-	for rows.Next() {
-		var requestID, eventID string
-		if err := rows.Scan(&requestID, &eventID); err != nil {
-			return nil, err
-		}
-		owners[requestID] = eventID
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return owners, nil
+	return true, nil
 }
 
 func stringSet(values []string) map[string]struct{} {

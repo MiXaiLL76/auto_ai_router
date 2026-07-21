@@ -281,7 +281,7 @@ func TestSpendLogQueryConstants(t *testing.T) {
 	// These are imported from spend_logs.go
 	// Verify they are defined (we can't import const from another file directly in test)
 	assert.NotEmpty(t, QueryInsertSpendLog)
-	assert.NotEmpty(t, QuerySelectUnprocessedSpendLogs)
+	assert.NotEmpty(t, QueryClaimSpendLogEventOwner)
 	assert.NotEmpty(t, QueryUpsertDailyUserSpend)
 	assert.NotEmpty(t, QueryUpsertDailyTeamSpend)
 	assert.NotEmpty(t, QueryUpsertDailyOrganizationSpend)
@@ -303,11 +303,10 @@ func TestQueryContainsRequiredFields(t *testing.T) {
 	assert.Contains(t, QueryProxyModelTable, "litellm_params")
 	assert.Contains(t, QueryProxyModelTable, "model_info")
 
-	// Verify spend log queries contain required fields
-	assert.Contains(t, QuerySelectUnprocessedSpendLogs, "request_id")
-	assert.Contains(t, QuerySelectUnprocessedSpendLogs, "prompt_tokens")
-	assert.Contains(t, QuerySelectUnprocessedSpendLogs, "completion_tokens")
-	assert.Contains(t, QuerySelectUnprocessedSpendLogs, "spend")
+	// Verify the event-owner claim is a targeted primary-key write, not a scan
+	assert.Contains(t, QueryClaimSpendLogEventOwner, `UPDATE "LiteLLM_SpendLogs"`)
+	assert.Contains(t, QueryClaimSpendLogEventOwner, "WHERE request_id = $1")
+	assert.Contains(t, QueryClaimSpendLogEventOwner, "RETURNING request_id")
 
 	// Verify upsert queries
 	assert.Contains(t, QueryUpsertDailyUserSpend, "user_id")

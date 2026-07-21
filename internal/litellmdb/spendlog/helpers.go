@@ -18,33 +18,33 @@ func GetSpendLogParams(entry *models.SpendLogEntry) []interface{} {
 	requestTags := normalizeRequestTags(entry.RequestTags)
 
 	return []interface{}{
-		entry.RequestID,             // $1
-		entry.CallType,              // $2
-		entry.APIKey,                // $3
-		entry.Spend,                 // $4
-		entry.TotalTokens,           // $5
-		entry.PromptTokens,          // $6
-		entry.CompletionTokens,      // $7
-		entry.StartTime,             // $8
-		entry.EndTime,               // $9
-		entry.RequestDurationMS,     // $10
-		entry.CompletionStartTime,   // $11
-		entry.Model,                 // $12
-		entry.ModelID,               // $13
-		entry.ModelGroup,            // $14
-		entry.CustomLLMProvider,     // $15
-		entry.APIBase,               // $16
-		entry.UserID,                // $17 ("user" column)
-		metadata,                    // $18 ("metadata" column) - JSON object
-		entry.CacheHit,              // $19
-		entry.CacheKey,              // $20
-		requestTags,                 // $21 (JSON array as string)
-		entry.TeamID,                // $22
-		entry.OrganizationID,        // $23
-		entry.EndUser,               // $24
-		entry.RequesterIP,           // $25
-		entry.SessionID,             // $26
-		entry.Status,                // $27
+		entry.RequestID,           // $1
+		entry.CallType,            // $2
+		entry.APIKey,              // $3
+		entry.Spend,               // $4
+		entry.TotalTokens,         // $5
+		entry.PromptTokens,        // $6
+		entry.CompletionTokens,    // $7
+		entry.StartTime,           // $8
+		entry.EndTime,             // $9
+		entry.RequestDurationMS,   // $10
+		entry.CompletionStartTime, // $11
+		entry.Model,               // $12
+		entry.ModelID,             // $13
+		entry.ModelGroup,          // $14
+		entry.CustomLLMProvider,   // $15
+		entry.APIBase,             // $16
+		entry.UserID,              // $17 ("user" column)
+		metadata,                  // $18 ("metadata" column) - JSON object
+		entry.CacheHit,            // $19
+		entry.CacheKey,            // $20
+		requestTags,               // $21 (JSON array as string)
+		entry.TeamID,              // $22
+		entry.OrganizationID,      // $23
+		entry.EndUser,             // $24
+		entry.RequesterIP,         // $25
+		entry.SessionID,           // $26
+		entry.Status,              // $27
 	}
 }
 

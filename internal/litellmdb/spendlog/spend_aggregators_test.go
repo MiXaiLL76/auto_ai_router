@@ -75,23 +75,6 @@ func TestSpendLogRecordFields(t *testing.T) {
 	assert.Equal(t, "tag1,tag2", record.RequestTags)
 }
 
-// TestSpendLogRecord_NilFields tests that records with nil fields are handled correctly by derefString
-func TestSpendLogRecord_NilFields(t *testing.T) {
-	// Test derefString with nil pointer
-	result := derefString(nil)
-	assert.Equal(t, "", result)
-
-	// Test derefString with empty string
-	empty := ""
-	result = derefString(&empty)
-	assert.Equal(t, "", result)
-
-	// Test derefString with value
-	value := "test-value"
-	result = derefString(&value)
-	assert.Equal(t, "test-value", result)
-}
-
 // TestAggregationValue_Fields verifies the aggregationValue structure
 func TestAggregationValue_Fields(t *testing.T) {
 	agg := &aggregationValue{

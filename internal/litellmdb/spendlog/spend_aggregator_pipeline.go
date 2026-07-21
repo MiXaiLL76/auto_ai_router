@@ -2,22 +2,16 @@ package spendlog
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
-	"github.com/mixaill76/auto_ai_router/internal/litellmdb/queries"
 )
-
-// spendLogQuerier is implemented by pgx.Tx and keeps the raw-row lookup on
-// the same transaction that inserted the rows.
-type spendLogQuerier interface {
-	Query(context.Context, string, ...any) (pgx.Rows, error)
-}
 
 // dailySpendExecer is implemented by pgx.Tx. Daily aggregators deliberately
 // accept this narrow interface so they cannot escape to a pool connection and
@@ -69,127 +63,156 @@ func dailyEndpoint(callType string) string {
 	return dailyEndpointByCallType[callType]
 }
 
-func loadUnprocessedSpendLogRecords(
-	ctx context.Context,
-	conn spendLogQuerier,
+// buildSpendLogRecords projects the just-inserted batch entries into daily
+// aggregation records entirely in memory. Re-reading the inserted rows from
+// LiteLLM_SpendLogs (the old QuerySelectUnprocessedSpendLogs) is a heavy query
+// on the LiteLLM schema, and everything it returned is already known here: the
+// writer owns every column it inserted.
+//
+// The date bucket is the UTC wall-clock date of StartTime, matching
+// TO_CHAR("startTime", 'YYYY-MM-DD') on the UTC wall clock LiteLLM stores in
+// the timestamp-without-time-zone column.
+func buildSpendLogRecords(
+	inserted []insertedSpendEntry,
 	logger *slog.Logger,
 	scope string,
-	requestIDs []string,
 ) ([]spendLogRecord, error) {
-	rows, err := conn.Query(ctx, queries.QuerySelectUnprocessedSpendLogs, requestIDs)
-	if err != nil {
-		logger.Error("[DB] "+scope+" aggregation: failed to fetch spend logs", "error", err)
-		return nil, err
-	}
-	defer rows.Close()
-
-	records := make([]spendLogRecord, 0, len(requestIDs))
-	for rows.Next() {
-		var record spendLogRecord
-		var userID *string
-		var model, modelGroup, customLLMProvider, mcpNamespacedToolName, callType, aggregationCallType *string
-		var status *string
-		var teamID, organizationID, endUser, requestTags *string
-		// The SELECT still returns agent_id (column list is reworked separately);
-		// the value is consumed by Scan but no longer used for aggregation.
-		var agentID *string
-
-		err := rows.Scan(
-			&userID,
-			&record.Date,
-			&record.APIKey,
-			&model,
-			&modelGroup,
-			&customLLMProvider,
-			&mcpNamespacedToolName,
-			&callType,
-			&aggregationCallType,
-			&record.PromptTokens,
-			&record.CompletionTokens,
-			&record.CacheReadInputTokens,
-			&record.CacheCreationInputTokens,
-			&record.Spend,
-			&status,
-			&record.RequestID,
-			&teamID,
-			&organizationID,
-			&endUser,
-			&requestTags,
-			&agentID,
-		)
-		if err != nil {
-			logger.Error("[DB] "+scope+" aggregation: failed to scan row", "error", err)
-			return nil, err
+	records := make([]spendLogRecord, 0, len(inserted))
+	for _, item := range inserted {
+		entry := item.entry
+		if entry == nil {
+			continue
 		}
 
-		record.UserID = derefString(userID)
-		record.Model = derefString(model)
-		record.ModelGroup = derefString(modelGroup)
-		record.CustomLLMProvider = derefString(customLLMProvider)
-		record.MCPNamespacedTool = derefString(mcpNamespacedToolName)
-		record.Status = derefString(status)
-		rawCallType := derefString(callType)
-		effectiveCallType := derefString(aggregationCallType)
+		originalCallType, cacheRead, cacheCreation := spendLogMetadataFields(entry.Metadata)
+		record := spendLogRecord{
+			UserID:                   entry.UserID,
+			Date:                     entry.StartTime.UTC().Format("2006-01-02"),
+			APIKey:                   entry.APIKey,
+			Model:                    entry.Model,
+			ModelGroup:               entry.ModelGroup,
+			CustomLLMProvider:        entry.CustomLLMProvider,
+			PromptTokens:             entry.PromptTokens,
+			CompletionTokens:         entry.CompletionTokens,
+			CacheReadInputTokens:     cacheRead,
+			CacheCreationInputTokens: cacheCreation,
+			Spend:                    entry.Spend,
+			Status:                   entry.Status,
+			RequestID:                item.requestID,
+			TeamID:                   entry.TeamID,
+			OrganizationID:           entry.OrganizationID,
+			EndUser:                  entry.EndUser,
+			RequestTags:              normalizeRequestTags(entry.RequestTags),
+		}
+
+		rawCallType := entry.CallType
+		effectiveCallType := rawCallType
+		if effectiveCallType == "" {
+			effectiveCallType = originalCallType
+		}
 		if effectiveCallType == "" {
 			record.SkipDaily = true
 		} else if _, knownEndpoint := dailyEndpointByCallType[effectiveCallType]; !knownEndpoint {
 			// A call_type outside the endpoint map is a permanent property of
-			// the row, not a transient fault: failing here would poison the
+			// the entry, not a transient fault: failing here would poison the
 			// whole batch (retries → DLQ) and lose valid rows alongside it.
 			// The raw spend row is already inserted in this transaction, so
 			// only its daily aggregation is skipped.
 			logger.Warn("[DB] "+scope+" aggregation: unknown call_type, skipping daily aggregation",
 				"call_type", effectiveCallType, "request_id", record.RequestID)
 			record.SkipDaily = true
-		} else {
-			if rawCallType == "" {
-				if record.Status != "failure" {
-					return nil, fmt.Errorf(
-						"empty raw LiteLLM call_type with status %q for request %q",
-						record.Status, record.RequestID,
-					)
-				}
-				// No nonzero-spend rejection here: LiteLLM legitimately writes
-				// failure rows with partial cost and usage (interrupted streams,
-				// recovered_response_cost in proxy_track_cost_callback).
-				// LiteLLM failure rows use the public model as their daily model and
-				// leave provider and endpoint empty. Keep the richer raw
-				// AIR dimensions intact while projecting the compatible daily key.
-				publicModel := record.ModelGroup
-				if publicModel == "" {
-					publicModel = record.Model
-				}
-				record.Model = publicModel
-				record.CustomLLMProvider = ""
-				record.Endpoint = ""
-				if effectiveCallType == "aresponses" {
-					record.ModelGroup = ""
-				}
-			} else {
-				record.Endpoint = dailyEndpoint(rawCallType)
+		} else if rawCallType == "" {
+			if record.Status != "failure" {
+				return nil, fmt.Errorf(
+					"empty raw LiteLLM call_type with status %q for request %q",
+					record.Status, record.RequestID,
+				)
 			}
+			// No nonzero-spend rejection here: LiteLLM legitimately writes
+			// failure rows with partial cost and usage (interrupted streams,
+			// recovered_response_cost in proxy_track_cost_callback).
+			// LiteLLM failure rows use the public model as their daily model and
+			// leave provider and endpoint empty. Keep the richer raw
+			// AIR dimensions intact while projecting the compatible daily key.
+			publicModel := record.ModelGroup
+			if publicModel == "" {
+				publicModel = record.Model
+			}
+			record.Model = publicModel
+			record.CustomLLMProvider = ""
+			record.Endpoint = ""
+			if effectiveCallType == "aresponses" {
+				record.ModelGroup = ""
+			}
+		} else {
+			record.Endpoint = dailyEndpoint(rawCallType)
 		}
-		record.TeamID = derefString(teamID)
-		record.OrganizationID = derefString(organizationID)
-		record.EndUser = derefString(endUser)
-		record.RequestTags = derefString(requestTags)
 
 		records = append(records, record)
-	}
-
-	if err := rows.Err(); err != nil {
-		logger.Error("[DB] "+scope+" aggregation: failed to iterate rows", "error", err)
-		return nil, err
 	}
 
 	return records, nil
 }
 
-func derefString(value *string) string {
-	if value == nil {
-		return ""
+// spendLogMetadataFields extracts the fields the daily aggregation used to read
+// back out of the just-inserted row: the legacy LiteLLM original call type and
+// the cache token counters. The cache extraction mirrors LiteLLM
+// _extract_cache_read_tokens/_extract_cache_creation_tokens (and the COALESCE /
+// NULLIF fallbacks of the retired SELECT): Anthropic-style top-level
+// usage_object fields win when nonzero, then the OpenAI-compatible
+// prompt_tokens_details fallbacks; zero is falsy and falls through.
+func spendLogMetadataFields(metadata string) (originalCallType string, cacheReadInputTokens, cacheCreationInputTokens int64) {
+	if metadata == "" {
+		return "", 0, 0
 	}
-	return *value
+	var doc map[string]interface{}
+	if err := json.Unmarshal([]byte(metadata), &doc); err != nil {
+		return "", 0, 0
+	}
+
+	if spendLogsMetadata, ok := doc["spend_logs_metadata"].(map[string]interface{}); ok {
+		originalCallType, _ = spendLogsMetadata["original_call_type"].(string)
+	}
+
+	usageObject, _ := doc["usage_object"].(map[string]interface{})
+	promptTokensDetails, _ := usageObject["prompt_tokens_details"].(map[string]interface{})
+	cacheReadInputTokens = firstNonZeroJSONInt(
+		usageObject["cache_read_input_tokens"],
+		promptTokensDetails["cached_tokens"],
+	)
+	cacheCreationInputTokens = firstNonZeroJSONInt(
+		usageObject["cache_creation_input_tokens"],
+		promptTokensDetails["cache_write_tokens"],
+		promptTokensDetails["cache_creation_tokens"],
+	)
+	return originalCallType, cacheReadInputTokens, cacheCreationInputTokens
+}
+
+func firstNonZeroJSONInt(values ...interface{}) int64 {
+	for _, value := range values {
+		if n := jsonInt64(value); n != 0 {
+			return n
+		}
+	}
+	return 0
+}
+
+func jsonInt64(value interface{}) int64 {
+	switch v := value.(type) {
+	case float64:
+		return int64(v)
+	case string:
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err == nil {
+			return n
+		}
+	case json.Number:
+		n, err := v.Int64()
+		if err == nil {
+			return n
+		}
+	}
+	return 0
 }
 
 // dailyLockOrdered is implemented by every daily aggregation key. lockOrder

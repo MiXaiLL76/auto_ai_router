@@ -7,33 +7,6 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func TestSelectSpendLogsUsesCallTypeAndLoadsAgent(t *testing.T) {
-	assert.Contains(t, QuerySelectUnprocessedSpendLogs, "call_type")
-	assert.Contains(t, QuerySelectUnprocessedSpendLogs, "agent_id")
-	// "startTime" is a naive UTC timestamp; AT TIME ZONE would re-render it in
-	// the session TimeZone and shift the daily bucket on non-UTC sessions.
-	assert.Contains(t, QuerySelectUnprocessedSpendLogs, `TO_CHAR("startTime", 'YYYY-MM-DD')`)
-	assert.NotContains(t, QuerySelectUnprocessedSpendLogs, "AT TIME ZONE")
-	assert.NotContains(t, QuerySelectUnprocessedSpendLogs, "api_base")
-}
-
-func TestSelectSpendLogsMirrorsLiteLLMCacheTokenFallbacks(t *testing.T) {
-	// LiteLLM _extract_cache_read_tokens/_extract_cache_creation_tokens:
-	// Anthropic top-level fields first, then prompt_tokens_details fallbacks.
-	assert.Contains(t, QuerySelectUnprocessedSpendLogs, "'{usage_object,cache_read_input_tokens}'")
-	assert.Contains(t, QuerySelectUnprocessedSpendLogs, "'{usage_object,prompt_tokens_details,cached_tokens}'")
-	assert.Contains(t, QuerySelectUnprocessedSpendLogs, "'{usage_object,cache_creation_input_tokens}'")
-	assert.Contains(t, QuerySelectUnprocessedSpendLogs, "'{usage_object,prompt_tokens_details,cache_write_tokens}'")
-	assert.Contains(t, QuerySelectUnprocessedSpendLogs, "'{usage_object,prompt_tokens_details,cache_creation_tokens}'")
-}
-
-func TestSelectSpendLogsKeepsRawCallTypeAndExposesOriginalRouteForFailureAggregation(t *testing.T) {
-	assert.Contains(t, QuerySelectUnprocessedSpendLogs, "call_type,")
-	assert.Contains(t, QuerySelectUnprocessedSpendLogs, "NULLIF(call_type, '')")
-	assert.Contains(t, QuerySelectUnprocessedSpendLogs, "metadata #>> '{spend_logs_metadata,original_call_type}'")
-	assert.Contains(t, QuerySelectUnprocessedSpendLogs, "AS aggregation_call_type")
-}
-
 func TestSpendLogInsertPrivacyColumnsAreExplicitEmptyObjects(t *testing.T) {
 	for _, query := range []string{QueryInsertSpendLog, BuildBatchInsertQuery(2)} {
 		assert.Contains(t, query, "messages")

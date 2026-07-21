@@ -6,37 +6,6 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func TestDerefString(t *testing.T) {
-	tests := []struct {
-		name     string
-		input    *string
-		expected string
-	}{
-		{
-			name:     "nil pointer returns empty string",
-			input:    nil,
-			expected: "",
-		},
-		{
-			name:     "pointer to hello returns hello",
-			input:    strPtr("hello"),
-			expected: "hello",
-		},
-		{
-			name:     "pointer to empty string returns empty string",
-			input:    strPtr(""),
-			expected: "",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := derefString(tt.input)
-			assert.Equal(t, tt.expected, result)
-		})
-	}
-}
-
 func TestSafeAPIKeyPrefix(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -76,9 +45,4 @@ func TestSafeAPIKeyPrefix(t *testing.T) {
 			assert.Equal(t, tt.expected, result)
 		})
 	}
-}
-
-// strPtr is a helper to create a string pointer
-func strPtr(s string) *string {
-	return &s
 }

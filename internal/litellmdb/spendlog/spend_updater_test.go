@@ -496,8 +496,10 @@ func TestFilterBatchByInsertedIDs(t *testing.T) {
 	result := filterBatchByInsertedIDs(batch, insertedIDs)
 
 	assert.Len(t, result, 2)
-	assert.Equal(t, "req-1", result[0].RequestID)
-	assert.Equal(t, "req-3", result[1].RequestID)
+	assert.Equal(t, "req-1", result[0].entry.RequestID)
+	assert.Equal(t, "req-1", result[0].requestID)
+	assert.Equal(t, "req-3", result[1].entry.RequestID)
+	assert.Equal(t, "req-3", result[1].requestID)
 }
 
 // TestFilterBatchByInsertedIDs_Empty tests empty inserted IDs

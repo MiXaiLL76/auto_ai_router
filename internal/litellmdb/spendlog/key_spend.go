@@ -146,8 +146,9 @@ func (sl *Logger) commitSpendOnce(
 	}
 	defer conn.Release()
 
-	// The collision owner lookup relies on a statement snapshot after INSERT's
-	// conflict wait, so retain the asynchronous writer's READ COMMITTED level.
+	// The collision ownership claim relies on a statement snapshot after
+	// INSERT's conflict wait, so retain the asynchronous writer's READ COMMITTED
+	// level.
 	tx, err := conn.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
 		return CommitResult{}, nil, fmt.Errorf("commit spend: begin transaction: %w", err)

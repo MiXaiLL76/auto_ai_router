@@ -37,8 +37,8 @@ func TestFilterBatchByInsertedIDs_DeduplicatesInputBatch(t *testing.T) {
 
 	inserted := filterBatchByInsertedIDs(batch, []string{"req-1"})
 	require.Len(t, inserted, 1)
-	assert.Equal(t, "req-1", inserted[0].RequestID)
-	assert.Equal(t, 1.0, aggregateSpendUpdates(inserted).Tokens[entityModelKey{EntityID: "key-1"}])
+	assert.Equal(t, "req-1", inserted[0].entry.RequestID)
+	assert.Equal(t, 1.0, aggregateSpendUpdates(insertedEntries(inserted)).Tokens[entityModelKey{EntityID: "key-1"}])
 }
 
 func TestRecordCommittedBatchCountsOnlyPersistedRows(t *testing.T) {

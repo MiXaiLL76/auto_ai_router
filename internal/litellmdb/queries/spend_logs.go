@@ -50,64 +50,24 @@ const (
 		ON CONFLICT (request_id) DO NOTHING
 	`
 
-	// QuerySelectSpendLogEventOwners resolves the logical AIR event that owns a
-	// provider-controlled request_id. It must run as a separate statement after
-	// INSERT ... ON CONFLICT so READ COMMITTED can observe a concurrent winner.
-	QuerySelectSpendLogEventOwners = `
-		SELECT
-			request_id,
-			COALESCE(metadata #>> '{spend_logs_metadata,air_event_id}', '')
-		FROM "LiteLLM_SpendLogs"
-		WHERE request_id = ANY($1)
-	`
-
-	// QuerySelectUnprocessedSpendLogs retrieves spend logs by request_ids for aggregation
-	QuerySelectUnprocessedSpendLogs = `
-		SELECT
-			"user",
-			-- "startTime" is timestamp WITHOUT time zone storing UTC wall-clock
-			-- time. Formatted as-is: any timezone conversion here would make
-			-- TO_CHAR render it in the session TimeZone, silently shifting the
-			-- daily bucket around midnight on non-UTC sessions.
-			TO_CHAR("startTime", 'YYYY-MM-DD') as date,
-			api_key,
-			model,
-			model_group,
-			custom_llm_provider,
-			mcp_namespaced_tool_name,
-			call_type,
-			COALESCE(
-				NULLIF(call_type, ''),
-				NULLIF(metadata #>> '{spend_logs_metadata,original_call_type}', '')
-			) AS aggregation_call_type,
-			prompt_tokens,
-			completion_tokens,
-			-- Mirrors LiteLLM _extract_cache_read_tokens: Anthropic-style
-			-- top-level usage_object fields win when nonzero, then the
-			-- OpenAI-compatible prompt_tokens_details fallbacks. NULLIF(x,'0')
-			-- reproduces Python's zero-is-falsy fall-through.
-			COALESCE(
-				NULLIF(NULLIF(metadata #>> '{usage_object,cache_read_input_tokens}', ''), '0')::bigint,
-				NULLIF(metadata #>> '{usage_object,prompt_tokens_details,cached_tokens}', '')::bigint,
-				0
-			) AS cache_read_input_tokens,
-			COALESCE(
-				NULLIF(NULLIF(metadata #>> '{usage_object,cache_creation_input_tokens}', ''), '0')::bigint,
-				NULLIF(NULLIF(metadata #>> '{usage_object,prompt_tokens_details,cache_write_tokens}', ''), '0')::bigint,
-				NULLIF(metadata #>> '{usage_object,prompt_tokens_details,cache_creation_tokens}', '')::bigint,
-				0
-			) AS cache_creation_input_tokens,
-			spend,
-			status,
-			request_id,
-			team_id,
-			organization_id,
-			end_user,
-			request_tags,
-			agent_id
-		FROM "LiteLLM_SpendLogs"
-		WHERE request_id = ANY($1)
-		ORDER BY "startTime" DESC
+	// QueryClaimSpendLogEventOwner reports whether the spend row with the given
+	// primary key already belongs to the AIR event, without reading SpendLogs
+	// rows back. The targeted UPDATE doubles as an idempotent claim: it matches
+	// only when the row's metadata already attributes the row to this event, so
+	// a replay detects its own earlier write, while a genuine provider
+	// request_id collision (different owner event) misses and the caller falls
+	// back to the AIR event ID row.
+	QueryClaimSpendLogEventOwner = `
+		UPDATE "LiteLLM_SpendLogs"
+		SET metadata = jsonb_set(
+			COALESCE(metadata, '{}'::jsonb),
+			'{spend_logs_metadata,air_event_id}',
+			to_jsonb($2::text),
+			true
+		)
+		WHERE request_id = $1
+			AND COALESCE(metadata #>> '{spend_logs_metadata,air_event_id}', '') = $2
+		RETURNING request_id
 	`
 
 	// QueryUpsertDailyUserSpend upserts into LiteLLM_DailyUserSpend

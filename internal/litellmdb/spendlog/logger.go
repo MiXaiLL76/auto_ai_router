@@ -590,7 +590,7 @@ func (sl *Logger) flushBatch(batch []*models.SpendLogEntry) {
 }
 
 // flushBatchWithSpendUpdate writes the complete LiteLLM accounting projection
-// atomically: raw SpendLogs, entity counters, and all six daily tables. A retry
+// atomically: raw SpendLogs, entity counters, and all five daily tables. A retry
 // can therefore safely replay the whole batch without leaving partial state.
 func (sl *Logger) flushBatchWithSpendUpdate(batch []*models.SpendLogEntry) error {
 	// Skip if pool is not initialized (e.g., in tests)
@@ -615,9 +615,10 @@ func (sl *Logger) flushBatchWithSpendUpdate(batch []*models.SpendLogEntry) error
 	}
 	defer conn.Release()
 
-	// Collision recovery performs an owner lookup in a statement after the
-	// preferred-ID INSERT. Pin READ COMMITTED so that statement can observe a
-	// concurrent transaction whose ON CONFLICT row just won and committed.
+	// Collision recovery claims a conflicting row's ownership in a statement
+	// after the preferred-ID INSERT. Pin READ COMMITTED so that statement can
+	// observe a concurrent transaction whose ON CONFLICT row just won and
+	// committed.
 	tx, err := conn.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
 		return fmt.Errorf("begin transaction: %w", err)
@@ -681,17 +682,17 @@ func (sl *Logger) writeBatchInTransaction(ctx context.Context, tx pgx.Tx, batch 
 	if len(filteredBatch) != len(insertedIDs) {
 		return nil, fmt.Errorf("map inserted rows to batch: expected %d, mapped %d", len(insertedIDs), len(filteredBatch))
 	}
-	spendUpdates := aggregateSpendUpdates(filteredBatch)
+	spendUpdates := aggregateSpendUpdates(insertedEntries(filteredBatch))
 	if err := executeSpendUpdates(ctx, tx, spendUpdates); err != nil {
 		return nil, fmt.Errorf("spend updates: %w", err)
 	}
 
-	records, err := loadUnprocessedSpendLogRecords(ctx, tx, sl.logger, "atomic", insertedIDs)
+	// Daily aggregates are built from the in-memory entries. Re-reading the
+	// just-inserted rows from LiteLLM_SpendLogs is a heavy query on the LiteLLM
+	// schema, and everything it returned is already known to the writer.
+	records, err := buildSpendLogRecords(filteredBatch, sl.logger, "atomic")
 	if err != nil {
-		return nil, fmt.Errorf("load inserted rows for daily aggregation: %w", err)
-	}
-	if len(records) != len(insertedIDs) {
-		return nil, fmt.Errorf("inserted rows missing inside transaction: expected %d, loaded %d", len(insertedIDs), len(records))
+		return nil, fmt.Errorf("build daily aggregation records: %w", err)
 	}
 	if err := sl.runAggregators(ctx, tx, "atomic", records); err != nil {
 		return nil, err
@@ -916,10 +917,18 @@ func getSampleRequestIDs(batch []*models.SpendLogEntry, count int) []string {
 	return result
 }
 
+// insertedSpendEntry pairs a batch entry with the effective request_id that
+// INSERT ... RETURNING produced for it: the preferred provider ID or the AIR
+// event ID fallback.
+type insertedSpendEntry struct {
+	entry     *models.SpendLogEntry
+	requestID string
+}
+
 // filterBatchByInsertedIDs returns only entries whose preferred provider ID or
 // unique AIR event fallback was produced by INSERT ... RETURNING. Each returned
 // ID is consumed once so same-event replays in one batch cannot feed accounting.
-func filterBatchByInsertedIDs(batch []*models.SpendLogEntry, insertedIDs []string) []*models.SpendLogEntry {
+func filterBatchByInsertedIDs(batch []*models.SpendLogEntry, insertedIDs []string) []insertedSpendEntry {
 	if len(insertedIDs) == 0 {
 		return nil
 	}
@@ -927,24 +936,33 @@ func filterBatchByInsertedIDs(batch []*models.SpendLogEntry, insertedIDs []strin
 	for _, id := range insertedIDs {
 		idSet[id] = struct{}{}
 	}
-	result := make([]*models.SpendLogEntry, 0, len(insertedIDs))
+	result := make([]insertedSpendEntry, 0, len(insertedIDs))
 	for _, entry := range batch {
 		if entry == nil {
 			continue
 		}
 		if _, ok := idSet[entry.RequestID]; ok {
-			result = append(result, entry)
+			result = append(result, insertedSpendEntry{entry: entry, requestID: entry.RequestID})
 			delete(idSet, entry.RequestID)
 			continue
 		}
 		if entry.AirEventID != "" {
 			if _, ok := idSet[entry.AirEventID]; ok {
-				result = append(result, entry)
+				result = append(result, insertedSpendEntry{entry: entry, requestID: entry.AirEventID})
 				delete(idSet, entry.AirEventID)
 			}
 		}
 	}
 	return result
+}
+
+// insertedEntries flattens inserted spend pairs back to their batch entries.
+func insertedEntries(inserted []insertedSpendEntry) []*models.SpendLogEntry {
+	entries := make([]*models.SpendLogEntry, 0, len(inserted))
+	for _, item := range inserted {
+		entries = append(entries, item.entry)
+	}
+	return entries
 }
 
 func (sl *Logger) resolvePendingEntries(count int) {
@@ -971,8 +989,8 @@ func (sl *Logger) recordCommittedBatch(batch []*models.SpendLogEntry, insertedID
 	}
 
 	eligible, ineligible := uint64(0), uint64(0)
-	for _, entry := range inserted {
-		if entry.ComparisonEligible {
+	for _, item := range inserted {
+		if item.entry.ComparisonEligible {
 			eligible++
 		} else {
 			ineligible++
