@@ -1080,6 +1080,11 @@ func (k *KafkaConfig) UnmarshalYAML(value *yaml.Node) error {
 	if k.Enabled, err = parseField(temp.Enabled, false, strconv.ParseBool, "kafka.enabled"); err != nil {
 		return err
 	}
+	// Resolve env variables in each broker address. A single YAML entry can
+	// resolve to a comma-separated list (documented KAFKA_BROKERS usage, e.g.
+	// "kafka1:9092,kafka2:9092") -- franz-go's kgo.SeedBrokers is variadic and
+	// does not split on commas itself, so each resolved value must be split
+	// and trimmed here before being treated as one or more seed addresses.
 	k.Brokers = make([]string, 0, len(temp.Brokers))
 	for _, broker := range temp.Brokers {
 		resolved := resolveEnvString(broker)
@@ -1090,6 +1095,8 @@ func (k *KafkaConfig) UnmarshalYAML(value *yaml.Node) error {
 			}
 		}
 	}
+	// Topic and ClientID are not mandatory here — defaults are applied by
+	// ApplyDefaults()/kafkalog.Config.ApplyDefaults(), not during unmarshaling.
 	k.Topic = resolveEnvString(temp.Topic)
 	k.ClientID = resolveEnvString(temp.ClientID)
 	if k.LogQueueSize, err = parseField(temp.LogQueueSize, 5000, strconv.Atoi, "kafka.log_queue_size"); err != nil {

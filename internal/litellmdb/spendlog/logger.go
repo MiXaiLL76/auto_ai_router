@@ -590,7 +590,7 @@ func (sl *Logger) flushBatch(batch []*models.SpendLogEntry) {
 }
 
 // flushBatchWithSpendUpdate writes the complete LiteLLM accounting projection
-// atomically: raw SpendLogs, entity counters, and all five daily tables. A retry
+// atomically: raw SpendLogs, entity counters, and all four daily tables. A retry
 // can therefore safely replay the whole batch without leaving partial state.
 func (sl *Logger) flushBatchWithSpendUpdate(batch []*models.SpendLogEntry) error {
 	// Skip if pool is not initialized (e.g., in tests)

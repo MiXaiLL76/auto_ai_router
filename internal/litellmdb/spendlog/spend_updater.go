@@ -2,7 +2,6 @@ package spendlog
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
@@ -12,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb/models"
+	"github.com/mixaill76/auto_ai_router/internal/litellmdb/queries"
 )
 
 // Schema compatibility flags — set to false on first SQLSTATE 42703 (column does not exist).
@@ -43,7 +43,6 @@ type SpendUpdates struct {
 	TeamMembers         map[teamMemberKey]float64         // team/user -> amount
 	OrganizationMembers map[organizationMemberKey]float64 // organization/user -> amount
 	EndUsers            map[string]float64                // endUserID -> amount
-	Tags                map[string]float64                // tagName -> amount
 }
 
 type entityModelKey struct {
@@ -137,7 +136,6 @@ func aggregateSpendUpdates(batch []*models.SpendLogEntry) *SpendUpdates {
 		TeamMembers:         make(map[teamMemberKey]float64),
 		OrganizationMembers: make(map[organizationMemberKey]float64),
 		EndUsers:            make(map[string]float64),
-		Tags:                make(map[string]float64),
 	}
 
 	for _, entry := range batch {
@@ -183,41 +181,9 @@ func aggregateSpendUpdates(batch []*models.SpendLogEntry) *SpendUpdates {
 		if entry.EndUser != "" {
 			updates.EndUsers[entry.EndUser] += entry.Spend
 		}
-
-		for _, tag := range uniqueRequestTags(entry.RequestTags) {
-			updates.Tags[tag] += entry.Spend
-		}
 	}
 
 	return updates
-}
-
-func uniqueRequestTags(raw string) []string {
-	tags, _ := parseUniqueRequestTags(raw)
-	return tags
-}
-
-func parseUniqueRequestTags(raw string) ([]string, error) {
-	if strings.TrimSpace(raw) == "" {
-		return nil, nil
-	}
-	var tags []string
-	if err := json.Unmarshal([]byte(raw), &tags); err != nil {
-		return nil, err
-	}
-	seen := make(map[string]struct{}, len(tags))
-	result := make([]string, 0, len(tags))
-	for _, tag := range tags {
-		if tag == "" {
-			continue
-		}
-		if _, exists := seen[tag]; exists {
-			continue
-		}
-		seen[tag] = struct{}{}
-		result = append(result, tag)
-	}
-	return result, nil
 }
 
 // executeSpendUpdates executes all UPDATE operations within the given transaction.
@@ -268,11 +234,6 @@ func executeSpendUpdates(ctx context.Context, tx pgx.Tx, updates *SpendUpdates) 
 			return fmt.Errorf("update end users: %w", err)
 		}
 	}
-	if len(updates.Tags) > 0 {
-		if err := updateTags(ctx, tx, updates.Tags); err != nil {
-			return fmt.Errorf("update tags: %w", err)
-		}
-	}
 
 	return nil
 }
@@ -292,25 +253,9 @@ func updateTokens(ctx context.Context, tx spendUpdateExecer, tokens map[entityMo
 		var err error
 		if schemaTokenHasLastActive.Load() {
 			if key.Model == "" {
-				_, err = tx.Exec(ctx, `
-					UPDATE "LiteLLM_VerificationToken"
-					SET spend = spend + $1, updated_at = NOW(), last_active = NOW()
-					WHERE token = $2 AND spend IS NOT NULL`,
-					amount, key.EntityID)
+				_, err = tx.Exec(ctx, queries.QueryUpdateTokenSpendWithLastActive, amount, key.EntityID)
 			} else {
-				_, err = tx.Exec(ctx, `
-					UPDATE "LiteLLM_VerificationToken"
-					SET spend = spend + $1,
-					    model_spend = jsonb_set(
-					        COALESCE(model_spend, '{}'::jsonb),
-					        ARRAY[$2]::text[],
-					        to_jsonb(COALESCE((COALESCE(model_spend, '{}'::jsonb) ->> $2)::double precision, 0) + $1),
-					        true
-					    ),
-					    updated_at = NOW(),
-					    last_active = NOW()
-					WHERE token = $3 AND spend IS NOT NULL`,
-					amount, key.Model, key.EntityID)
+				_, err = tx.Exec(ctx, queries.QueryUpdateTokenModelSpendWithLastActive, amount, key.Model, key.EntityID)
 			}
 			if err != nil && isColumnNotExist(err) {
 				schemaTokenHasLastActive.Store(false)
@@ -319,24 +264,9 @@ func updateTokens(ctx context.Context, tx spendUpdateExecer, tokens map[entityMo
 			}
 		} else {
 			if key.Model == "" {
-				_, err = tx.Exec(ctx, `
-					UPDATE "LiteLLM_VerificationToken"
-					SET spend = spend + $1, updated_at = NOW()
-					WHERE token = $2 AND spend IS NOT NULL`,
-					amount, key.EntityID)
+				_, err = tx.Exec(ctx, queries.QueryUpdateTokenSpend, amount, key.EntityID)
 			} else {
-				_, err = tx.Exec(ctx, `
-					UPDATE "LiteLLM_VerificationToken"
-					SET spend = spend + $1,
-					    model_spend = jsonb_set(
-					        COALESCE(model_spend, '{}'::jsonb),
-					        ARRAY[$2]::text[],
-					        to_jsonb(COALESCE((COALESCE(model_spend, '{}'::jsonb) ->> $2)::double precision, 0) + $1),
-					        true
-					    ),
-					    updated_at = NOW()
-					WHERE token = $3 AND spend IS NOT NULL`,
-					amount, key.Model, key.EntityID)
+				_, err = tx.Exec(ctx, queries.QueryUpdateTokenModelSpend, amount, key.Model, key.EntityID)
 			}
 		}
 		if err != nil {
@@ -399,24 +329,11 @@ func updateOrgs(ctx context.Context, tx spendUpdateExecer, orgs map[entityModelK
 // are compile-time constants supplied only by the wrappers above.
 func modelSpendUpdate(table, idColumn string, key entityModelKey, amount float64) (string, []interface{}) {
 	if key.Model == "" {
-		return fmt.Sprintf(`
-			UPDATE %s
-			SET spend = spend + $1, updated_at = NOW()
-			WHERE %s = $2 AND spend IS NOT NULL`, table, idColumn),
+		return fmt.Sprintf(queries.QueryUpdateEntitySpendTemplate, table, idColumn),
 			[]interface{}{amount, key.EntityID}
 	}
 
-	return fmt.Sprintf(`
-		UPDATE %s
-		SET spend = spend + $1,
-		    model_spend = jsonb_set(
-		        COALESCE(model_spend, '{}'::jsonb),
-		        ARRAY[$2]::text[],
-		        to_jsonb(COALESCE((COALESCE(model_spend, '{}'::jsonb) ->> $2)::double precision, 0) + $1),
-		        true
-		    ),
-		    updated_at = NOW()
-		WHERE %s = $3 AND spend IS NOT NULL`, table, idColumn),
+	return fmt.Sprintf(queries.QueryUpdateEntityModelSpendTemplate, table, idColumn),
 		[]interface{}{amount, key.Model, key.EntityID}
 }
 
@@ -428,27 +345,14 @@ func updateProjects(ctx context.Context, tx spendUpdateExecer, projects map[proj
 	for _, key := range sortedSpendKeys(projects, compareProjectModelKey) {
 		amount := projects[key]
 		if key.Model == "" {
-			_, err := tx.Exec(ctx,
-				`UPDATE "LiteLLM_ProjectTable" SET spend = COALESCE(spend, 0) + $1, updated_at = NOW() WHERE project_id = $2`,
-				amount, key.ProjectID)
+			_, err := tx.Exec(ctx, queries.QueryUpdateProjectSpend, amount, key.ProjectID)
 			if err != nil {
 				return err
 			}
 			continue
 		}
 
-		_, err := tx.Exec(ctx, `
-			UPDATE "LiteLLM_ProjectTable"
-			SET spend = COALESCE(spend, 0) + $1,
-			    model_spend = jsonb_set(
-			        COALESCE(model_spend, '{}'::jsonb),
-			        ARRAY[$2]::text[],
-			        to_jsonb(COALESCE((COALESCE(model_spend, '{}'::jsonb) ->> $2)::double precision, 0) + $1),
-			        true
-			    ),
-			    updated_at = NOW()
-			WHERE project_id = $3`,
-			amount, key.Model, key.ProjectID)
+		_, err := tx.Exec(ctx, queries.QueryUpdateProjectModelSpend, amount, key.Model, key.ProjectID)
 		if err != nil {
 			return err
 		}
@@ -468,18 +372,14 @@ func updateTeamMembers(ctx context.Context, tx spendUpdateExecer, teamMembers ma
 
 		var err error
 		if schemaTeamMemberHasTotalSpend.Load() {
-			_, err = tx.Exec(ctx,
-				`UPDATE "LiteLLM_TeamMembership" SET spend = spend + $1, total_spend = total_spend + $1 WHERE team_id = $2 AND user_id = $3 AND spend IS NOT NULL`,
-				amount, key.TeamID, key.UserID)
+			_, err = tx.Exec(ctx, queries.QueryUpdateTeamMemberSpendWithTotal, amount, key.TeamID, key.UserID)
 			if err != nil && isColumnNotExist(err) {
 				schemaTeamMemberHasTotalSpend.Store(false)
 				// Transaction aborted — caller will retry; next attempt uses fallback query.
 				return err
 			}
 		} else {
-			_, err = tx.Exec(ctx,
-				`UPDATE "LiteLLM_TeamMembership" SET spend = spend + $1 WHERE team_id = $2 AND user_id = $3 AND spend IS NOT NULL`,
-				amount, key.TeamID, key.UserID)
+			_, err = tx.Exec(ctx, queries.QueryUpdateTeamMemberSpend, amount, key.TeamID, key.UserID)
 		}
 		if err != nil {
 			return err
@@ -498,11 +398,7 @@ func updateOrganizationMembers(
 		if key.OrganizationID == "" || key.UserID == "" {
 			return fmt.Errorf("invalid organization member key: empty organizationID or userID")
 		}
-		_, err := tx.Exec(ctx, `
-			UPDATE "LiteLLM_OrganizationMembership"
-			SET spend = spend + $1, updated_at = NOW()
-			WHERE organization_id = $2 AND user_id = $3 AND spend IS NOT NULL`,
-			amount, key.OrganizationID, key.UserID)
+		_, err := tx.Exec(ctx, queries.QueryUpdateOrganizationMemberSpend, amount, key.OrganizationID, key.UserID)
 		if err != nil {
 			return err
 		}
@@ -513,25 +409,7 @@ func updateOrganizationMembers(
 func updateEndUsers(ctx context.Context, tx spendUpdateExecer, endUsers map[string]float64) error {
 	for _, endUserID := range sortedSpendKeys(endUsers, strings.Compare) {
 		amount := endUsers[endUserID]
-		_, err := tx.Exec(ctx, `
-			INSERT INTO "LiteLLM_EndUserTable" (user_id, spend)
-			VALUES ($1, $2)
-			ON CONFLICT (user_id) DO UPDATE
-			SET spend = COALESCE("LiteLLM_EndUserTable".spend, 0) + EXCLUDED.spend`,
-			endUserID, amount)
-		if err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func updateTags(ctx context.Context, tx pgx.Tx, tags map[string]float64) error {
-	for _, tagName := range sortedSpendKeys(tags, strings.Compare) {
-		amount := tags[tagName]
-		_, err := tx.Exec(ctx,
-			`UPDATE "LiteLLM_TagTable" SET spend = spend + $1, updated_at = NOW() WHERE tag_name = $2 AND spend IS NOT NULL`,
-			amount, tagName)
+		_, err := tx.Exec(ctx, queries.QueryUpsertEndUserSpend, endUserID, amount)
 		if err != nil {
 			return err
 		}

@@ -31,7 +31,6 @@ const (
 			"metadata",
 			cache_hit,
 			cache_key,
-			request_tags,
 			team_id,
 			organization_id,
 			end_user,
@@ -44,7 +43,7 @@ const (
 		) VALUES (
 			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
 			$11, $12, $13, $14, $15, $16, $17, $18, $19, $20,
-			$21, $22, $23, $24, $25, $26, $27,
+			$21, $22, $23, $24, $25, $26,
 			'{}'::jsonb, '{}'::jsonb, '{}'::jsonb
 		)
 		ON CONFLICT (request_id) DO NOTHING
@@ -217,48 +216,10 @@ const (
 			failed_requests = "LiteLLM_DailyEndUserSpend".failed_requests + EXCLUDED.failed_requests,
 			updated_at = now()
 	`
-
-	// QueryUpsertDailyTagSpend upserts into LiteLLM_DailyTagSpend
-	QueryUpsertDailyTagSpend = `
-		INSERT INTO "LiteLLM_DailyTagSpend" (
-			id,
-			tag,
-			request_id,
-			date,
-			api_key,
-			model,
-			model_group,
-			custom_llm_provider,
-			mcp_namespaced_tool_name,
-			endpoint,
-			prompt_tokens,
-			completion_tokens,
-			cache_read_input_tokens,
-			cache_creation_input_tokens,
-			spend,
-			api_requests,
-			successful_requests,
-			failed_requests,
-			created_at,
-			updated_at
-		) VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, now(), now())
-		ON CONFLICT (tag, date, api_key, model, custom_llm_provider, mcp_namespaced_tool_name, endpoint)
-		DO UPDATE SET
-			model_group = EXCLUDED.model_group,
-			prompt_tokens = "LiteLLM_DailyTagSpend".prompt_tokens + EXCLUDED.prompt_tokens,
-			completion_tokens = "LiteLLM_DailyTagSpend".completion_tokens + EXCLUDED.completion_tokens,
-			cache_read_input_tokens = "LiteLLM_DailyTagSpend".cache_read_input_tokens + EXCLUDED.cache_read_input_tokens,
-			cache_creation_input_tokens = "LiteLLM_DailyTagSpend".cache_creation_input_tokens + EXCLUDED.cache_creation_input_tokens,
-			spend = "LiteLLM_DailyTagSpend".spend + EXCLUDED.spend,
-			api_requests = "LiteLLM_DailyTagSpend".api_requests + EXCLUDED.api_requests,
-			successful_requests = "LiteLLM_DailyTagSpend".successful_requests + EXCLUDED.successful_requests,
-			failed_requests = "LiteLLM_DailyTagSpend".failed_requests + EXCLUDED.failed_requests,
-			updated_at = now()
-	`
 )
 
 // Number of parameters per SpendLogEntry in batch insert
-const SpendLogParamCount = 27
+const SpendLogParamCount = 26
 const (
 	spendLogParamCount = SpendLogParamCount
 )
@@ -278,7 +239,7 @@ func BuildBatchInsertQuery(count int) string {
 			prompt_tokens, completion_tokens, "startTime", "endTime",
 			request_duration_ms, "completionStartTime",
 			model, model_id, model_group, custom_llm_provider, api_base,
-			"user", "metadata", cache_hit, cache_key, request_tags,
+			"user", "metadata", cache_hit, cache_key,
 			team_id, organization_id, end_user, requester_ip_address,
 			session_id, status,
 			messages, response, proxy_server_request

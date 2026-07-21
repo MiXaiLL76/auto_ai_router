@@ -1,8 +1,6 @@
 package spendlog
 
 import (
-	"encoding/json"
-
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb/models"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb/queries"
 )
@@ -14,8 +12,6 @@ func GetSpendLogParams(entry *models.SpendLogEntry) []interface{} {
 	if metadata == "" {
 		metadata = "{}" // default to empty JSON object
 	}
-
-	requestTags := normalizeRequestTags(entry.RequestTags)
 
 	return []interface{}{
 		entry.RequestID,           // $1
@@ -38,29 +34,13 @@ func GetSpendLogParams(entry *models.SpendLogEntry) []interface{} {
 		metadata,                  // $18 ("metadata" column) - JSON object
 		entry.CacheHit,            // $19
 		entry.CacheKey,            // $20
-		requestTags,               // $21 (JSON array as string)
-		entry.TeamID,              // $22
-		entry.OrganizationID,      // $23
-		entry.EndUser,             // $24
-		entry.RequesterIP,         // $25
-		entry.SessionID,           // $26
-		entry.Status,              // $27
+		entry.TeamID,              // $21
+		entry.OrganizationID,      // $22
+		entry.EndUser,             // $23
+		entry.RequesterIP,         // $24
+		entry.SessionID,           // $25
+		entry.Status,              // $26
 	}
-}
-
-// normalizeRequestTags keeps the database column array-shaped even if a caller
-// accidentally supplies JSON null, a scalar, or malformed JSON. Production
-// views call jsonb_array_elements_text and fail on scalar JSON values.
-func normalizeRequestTags(raw string) string {
-	var tags []string
-	if err := json.Unmarshal([]byte(raw), &tags); err != nil || tags == nil {
-		return "[]"
-	}
-	encoded, err := json.Marshal(tags)
-	if err != nil {
-		return "[]"
-	}
-	return string(encoded)
 }
 
 // GetBatchParams returns all parameters for batch insert

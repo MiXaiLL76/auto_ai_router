@@ -1,7 +1,6 @@
 package spendlog
 
 import (
-	"context"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -115,16 +114,6 @@ func TestTryLogQueueFullIsImmediateAndRetainsExactEntryInDLQ(t *testing.T) {
 	assert.Same(t, second, logger.dlq[0].batch[0])
 }
 
-func TestTagAggregationRejectsMalformedJSON(t *testing.T) {
-	err := aggregateDailyTagSpendLogs(
-		context.Background(),
-		nil,
-		testhelpers.NewTestLogger(),
-		[]spendLogRecord{{RequestID: "req-invalid-tags", RequestTags: "not-json"}},
-	)
-	assert.Error(t, err)
-}
-
 func TestAggregationSuccessIsRecordedOnlyAfterAtomicCommit(t *testing.T) {
 	logger := newObservabilityTestLogger(2, 2)
 	before := time.Now()
@@ -176,19 +165,6 @@ func TestAddToDLQOwnsBatchSlice(t *testing.T) {
 	require.Len(t, logger.dlq[0].batch, 1)
 	assert.Same(t, original, logger.dlq[0].batch[0],
 		"DLQ must not be mutated by reuse of the worker batch buffer")
-}
-
-func TestParseUniqueRequestTagsDeduplicatesAndRejectsMalformedShapes(t *testing.T) {
-	tags, err := parseUniqueRequestTags(`["tag-a","tag-a","","tag-b"]`)
-	require.NoError(t, err)
-	assert.Equal(t, []string{"tag-a", "tag-b"}, tags)
-
-	for _, malformed := range []string{"not-json", `{"tag":"tag-a"}`, `["tag-a",1]`} {
-		t.Run(malformed, func(t *testing.T) {
-			_, err := parseUniqueRequestTags(malformed)
-			assert.Error(t, err)
-		})
-	}
 }
 
 func TestCommitErrorInvalidatesComparisonWindowButRemainsReplaySafe(t *testing.T) {

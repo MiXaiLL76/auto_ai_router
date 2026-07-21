@@ -50,7 +50,7 @@ func TestBuildBatchInsertQuery(t *testing.T) {
 			expectContains: []string{
 				`INSERT INTO "LiteLLM_SpendLogs"`,
 				"$1", "$2", "$3", // first row
-				"$55", "$56", "$57", // third row starts at $55 (27 params per row)
+				"$53", "$54", "$55", // third row starts at $53 (26 params per row)
 				"ON CONFLICT (request_id) DO NOTHING RETURNING request_id",
 			},
 		},
@@ -61,7 +61,7 @@ func TestBuildBatchInsertQuery(t *testing.T) {
 			expectContains: []string{
 				`INSERT INTO "LiteLLM_SpendLogs"`,
 				"$1",
-				"$135", // 5 rows * 27 params = 135
+				"$130", // 5 rows * 26 params = 130
 				"ON CONFLICT (request_id) DO NOTHING RETURNING request_id",
 			},
 		},

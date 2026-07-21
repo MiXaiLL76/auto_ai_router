@@ -286,7 +286,6 @@ func TestSpendLogQueryConstants(t *testing.T) {
 	assert.NotEmpty(t, QueryUpsertDailyTeamSpend)
 	assert.NotEmpty(t, QueryUpsertDailyOrganizationSpend)
 	assert.NotEmpty(t, QueryUpsertDailyEndUserSpend)
-	assert.NotEmpty(t, QueryUpsertDailyTagSpend)
 }
 
 // TestQueryContainsRequiredFields verifies queries contain required fields
@@ -313,7 +312,6 @@ func TestQueryContainsRequiredFields(t *testing.T) {
 	assert.Contains(t, QueryUpsertDailyTeamSpend, "team_id")
 	assert.Contains(t, QueryUpsertDailyOrganizationSpend, "organization_id")
 	assert.Contains(t, QueryUpsertDailyEndUserSpend, "end_user_id")
-	assert.Contains(t, QueryUpsertDailyTagSpend, "tag")
 }
 
 // tokenHierarchyScanColumns must equal the number of Scan destinations in

@@ -39,21 +39,58 @@ type spendLogRecord struct {
 	TeamID                   string
 	OrganizationID           string
 	EndUser                  string
-	RequestTags              string
 	SkipDaily                bool
 }
 
-var dailyEndpointByCallType = map[string]string{
-	"acompletion":       "/chat/completions",
-	"atext_completion":  "/completions",
-	"aembedding":        "/embeddings",
-	"aresponses":        "/responses",
-	"aimage_generation": "/image/generations",
-	"aimage_edit":       "/images/edits",
-	"atranscription":    "/audio/transcriptions",
-	"aspeech":           "/audio/speech",
-	"amoderation":       "/moderations",
-	"arerank":           "/rerank",
+// spendRoute ties together the three spellings AIR needs for one supported
+// spend route: the LiteLLM call_type recorded on the raw spend row, the
+// request-path fragment the proxy matches, and the LiteLLM
+// ROUTE_ENDPOINT_MAPPING endpoint used as the daily dimension.
+type spendRoute struct {
+	callType     string
+	pathFragment string
+	endpoint     string
+}
+
+// spendRoutes lists every AIR-supported spend route, ordered most specific
+// first: a path containing "/chat/completions" also contains "/completions",
+// so the bare fragment must stay last.
+var spendRoutes = []spendRoute{
+	{"acompletion", "/chat/completions", "/chat/completions"},
+	{"aembedding", "/embeddings", "/embeddings"},
+	{"aresponses", "/responses", "/responses"},
+	{"aimage_generation", "/images/generations", "/image/generations"},
+	{"aimage_edit", "/images/edits", "/images/edits"},
+	{"atranscription", "/audio/transcriptions", "/audio/transcriptions"},
+	{"aspeech", "/audio/speech", "/audio/speech"},
+	{"amoderation", "/moderations", "/moderations"},
+	{"arerank", "/rerank", "/rerank"},
+	{"atext_completion", "/completions", "/completions"},
+}
+
+var dailyEndpointByCallType = func() map[string]string {
+	endpoints := make(map[string]string, len(spendRoutes))
+	for _, route := range spendRoutes {
+		endpoints[route.callType] = route.endpoint
+	}
+	return endpoints
+}()
+
+// LiteLLMCallTypeForPath translates an AIR request path into the call_type
+// value the LiteLLM proxy records for the same operation (the async method
+// name, e.g. "acompletion" — see litellm
+// route_llm_request.ROUTE_ENDPOINT_MAPPING). The daily aggregation pipeline
+// keys its endpoint dimension off these values, and the spend comparison
+// relies on them matching the primary accounting. Unknown paths map to "" —
+// the raw spend row is still written, only the daily aggregation is skipped
+// for it.
+func LiteLLMCallTypeForPath(path string) string {
+	for _, route := range spendRoutes {
+		if strings.Contains(path, route.pathFragment) {
+			return route.callType
+		}
+	}
+	return ""
 }
 
 // dailyEndpoint mirrors LiteLLM ROUTE_ENDPOINT_MAPPING for AIR-supported
@@ -102,7 +139,6 @@ func buildSpendLogRecords(
 			TeamID:                   entry.TeamID,
 			OrganizationID:           entry.OrganizationID,
 			EndUser:                  entry.EndUser,
-			RequestTags:              normalizeRequestTags(entry.RequestTags),
 		}
 
 		rawCallType := entry.CallType
@@ -237,7 +273,7 @@ func sortedDailyKeys[K dailyLockOrdered, V any](aggregations map[K]V) []K {
 	return keys
 }
 
-// runAggregators runs all five daily aggregators sequentially on the transaction
+// runAggregators runs all four daily aggregators sequentially on the transaction
 // that inserted the source rows. The first error aborts the pipeline because a
 // PostgreSQL transaction is unusable after a statement error and must roll back.
 func (sl *Logger) runAggregators(aggCtx context.Context, tx dailySpendExecer, scope string, records []spendLogRecord) error {
@@ -270,11 +306,6 @@ func (sl *Logger) runAggregators(aggCtx context.Context, tx dailySpendExecer, sc
 			c, cn := context.WithTimeout(aggCtx, 30*time.Second)
 			defer cn()
 			return aggregateDailyEndUserSpendLogs(c, tx, sl.logger, dailyRecords)
-		}},
-		{"Tag", func() error {
-			c, cn := context.WithTimeout(aggCtx, 30*time.Second)
-			defer cn()
-			return aggregateDailyTagSpendLogs(c, tx, sl.logger, dailyRecords)
 		}},
 	}
 

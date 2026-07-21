@@ -162,18 +162,18 @@ func TestBuildBatchInsertQuery(t *testing.T) {
 		query := queries.BuildBatchInsertQuery(1)
 		assert.Contains(t, query, "INSERT INTO")
 		assert.Contains(t, query, "$1")
-		assert.Contains(t, query, "$27")
-		assert.NotContains(t, query, "$28") // 27 params + 3 empty-object constants
+		assert.Contains(t, query, "$26")
+		assert.NotContains(t, query, "$27") // 26 params + 3 empty-object constants
 		assert.Contains(t, query, "ON CONFLICT (request_id) DO NOTHING")
 	})
 
 	t.Run("multiple entries", func(t *testing.T) {
 		query := queries.BuildBatchInsertQuery(3)
 		assert.Contains(t, query, "$1")
-		assert.Contains(t, query, "$27") // First entry
-		assert.Contains(t, query, "$28") // Second entry start
-		assert.Contains(t, query, "$81") // Third entry end (3 * 27)
-		assert.NotContains(t, query, "$82")
+		assert.Contains(t, query, "$26") // First entry
+		assert.Contains(t, query, "$27") // Second entry start
+		assert.Contains(t, query, "$78") // Third entry end (3 * 26)
+		assert.NotContains(t, query, "$79")
 	})
 
 	t.Run("zero entries", func(t *testing.T) {
@@ -229,30 +229,8 @@ func TestGetSpendLogParams(t *testing.T) {
 	assert.Equal(t, "openai", params[14])      // CustomLLMProvider at position 14
 	assert.Equal(t, "user-1", params[16])      // UserID at position 16
 	assert.Equal(t, "{}", params[17])          // Metadata at position 17
-	assert.Equal(t, "session-123", params[25]) // SessionID at position 25
-	assert.Equal(t, "success", params[26])     // Status at position 26
-}
-
-func TestGetSpendLogParamsNormalizesRequestTagsToJSONArray(t *testing.T) {
-	tests := []struct {
-		name string
-		raw  string
-		want string
-	}{
-		{name: "empty", raw: "", want: "[]"},
-		{name: "JSON null", raw: "null", want: "[]"},
-		{name: "object", raw: `{}`, want: "[]"},
-		{name: "scalar", raw: `"tag"`, want: "[]"},
-		{name: "malformed", raw: `[`, want: "[]"},
-		{name: "array", raw: `["tag-a", "tag-b"]`, want: `["tag-a","tag-b"]`},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			params := GetSpendLogParams(&models.SpendLogEntry{RequestTags: tt.raw})
-			assert.Equal(t, tt.want, params[20])
-		})
-	}
+	assert.Equal(t, "session-123", params[24]) // SessionID at position 24
+	assert.Equal(t, "success", params[25])     // Status at position 25
 }
 
 func TestGetBatchParams(t *testing.T) {
@@ -588,8 +566,8 @@ func TestLogger_SQLInjectionPrevention(t *testing.T) {
 				query := queries.BuildBatchInsertQuery(2)
 				assert.NotEmpty(t, query)
 				assert.Contains(t, query, "$1")
-				assert.Contains(t, query, "$54") // 2 * 27 parameters
-				assert.NotContains(t, query, "$55")
+				assert.Contains(t, query, "$52") // 2 * 26 parameters
+				assert.NotContains(t, query, "$53")
 
 				// Get batch params
 				params := GetBatchParams(entries)

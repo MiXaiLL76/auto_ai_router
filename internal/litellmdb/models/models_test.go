@@ -201,6 +201,47 @@ func TestTokenInfo_IsModelAllowed_ModelNotInList(t *testing.T) {
 	assert.False(t, token.IsModelAllowed("claude-3"))
 }
 
+func TestTokenInfo_IsModelAllowed_RegexPattern(t *testing.T) {
+	token := &TokenInfo{
+		Models: []string{`anthropic/.*`, `.*claude-haiku.*`},
+	}
+
+	assert.True(t, token.IsModelAllowed("anthropic/claude-haiku-4.5"))
+	assert.True(t, token.IsModelAllowed("claude-haiku-4-5-20251001"))
+	assert.False(t, token.IsModelAllowed("gpt-4o"))
+	assert.False(t, token.IsModelAllowed("anthropic"), "the anchored pattern must cover the full name")
+}
+
+func TestTokenInfo_IsModelAllowed_LiteralEntriesKeepExactSemantics(t *testing.T) {
+	token := &TokenInfo{
+		Models: []string{"gpt-4"},
+	}
+
+	assert.True(t, token.IsModelAllowed("gpt-4"))
+	assert.False(t, token.IsModelAllowed("gpt-4o"), "a literal entry must not widen into a prefix match")
+}
+
+func TestTokenInfo_IsModelAllowed_InvalidRegexTreatedAsNoMatch(t *testing.T) {
+	token := &TokenInfo{
+		Models: []string{"gpt-4("},
+	}
+
+	// The entry still matches its own literal spelling via the exact comparison,
+	// but the broken pattern must not crash or match anything else.
+	assert.True(t, token.IsModelAllowed("gpt-4("))
+	assert.False(t, token.IsModelAllowed("gpt-4"))
+	assert.False(t, token.IsModelAllowed("gpt-4(x"))
+}
+
+func TestTokenInfo_IsModelAllowed_WildcardStillMatchesEverything(t *testing.T) {
+	token := &TokenInfo{
+		Models: []string{"*"},
+	}
+
+	assert.True(t, token.IsModelAllowed("gpt-4o"))
+	assert.True(t, token.IsModelAllowed("anthropic/claude-haiku-4.5"))
+}
+
 func TestTokenInfo_IsModelAllowed_IntersectsApplicableHierarchy(t *testing.T) {
 	token := &TokenInfo{
 		Models:           []string{"openai/gpt-4o-mini", "gpt-4o-mini"},

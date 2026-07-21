@@ -21,7 +21,6 @@ func TestAggregateSpendUpdates_AllEntities(t *testing.T) {
 			ProjectID:      "project-1",
 			Model:          "model-1",
 			EndUser:        "end-user-1",
-			RequestTags:    `["tag-1","tag-2"]`,
 			Spend:          10.0,
 		},
 		{
@@ -32,7 +31,6 @@ func TestAggregateSpendUpdates_AllEntities(t *testing.T) {
 			ProjectID:      "project-1",
 			Model:          "model-1",
 			EndUser:        "end-user-1",
-			RequestTags:    `["tag-1","tag-2"]`,
 			Spend:          5.0,
 		},
 		{
@@ -64,8 +62,6 @@ func TestAggregateSpendUpdates_AllEntities(t *testing.T) {
 	assert.Equal(t, 15.0, result.OrganizationMembers[organizationMemberKey{OrganizationID: "org-1", UserID: "user-1"}])
 
 	assert.Equal(t, 15.0, result.EndUsers["end-user-1"])
-	assert.Equal(t, 15.0, result.Tags["tag-1"])
-	assert.Equal(t, 15.0, result.Tags["tag-2"])
 }
 
 // TestAggregateSpendUpdates_EmptyBatch tests empty batch
@@ -81,7 +77,6 @@ func TestAggregateSpendUpdates_EmptyBatch(t *testing.T) {
 	assert.Empty(t, result.TeamMembers)
 	assert.Empty(t, result.OrganizationMembers)
 	assert.Empty(t, result.EndUsers)
-	assert.Empty(t, result.Tags)
 }
 
 // TestAggregateSpendUpdates_NilBatch tests nil batch
@@ -192,7 +187,6 @@ func TestSpendUpdates_Fields(t *testing.T) {
 		TeamMembers:         map[teamMemberKey]float64{{TeamID: "team1", UserID: "user1"}: 5.0},
 		OrganizationMembers: map[organizationMemberKey]float64{{OrganizationID: "org1", UserID: "user1"}: 5.5},
 		EndUsers:            map[string]float64{"end-user1": 6.0},
-		Tags:                map[string]float64{"tag1": 7.0},
 	}
 
 	assert.Len(t, updates.Tokens, 1)
@@ -203,7 +197,6 @@ func TestSpendUpdates_Fields(t *testing.T) {
 	assert.Len(t, updates.TeamMembers, 1)
 	assert.Len(t, updates.OrganizationMembers, 1)
 	assert.Len(t, updates.EndUsers, 1)
-	assert.Len(t, updates.Tags, 1)
 
 	assert.Equal(t, 1.0, updates.Tokens[entityModelKey{EntityID: "key1", Model: "model1"}])
 	assert.Equal(t, 2.0, updates.Users[entityModelKey{EntityID: "user1", Model: "model1"}])
@@ -213,7 +206,6 @@ func TestSpendUpdates_Fields(t *testing.T) {
 	assert.Equal(t, 5.0, updates.TeamMembers[teamMemberKey{TeamID: "team1", UserID: "user1"}])
 	assert.Equal(t, 5.5, updates.OrganizationMembers[organizationMemberKey{OrganizationID: "org1", UserID: "user1"}])
 	assert.Equal(t, 6.0, updates.EndUsers["end-user1"])
-	assert.Equal(t, 7.0, updates.Tags["tag1"])
 }
 
 // TestSpendUpdates_Empty verifies empty SpendUpdates
@@ -228,7 +220,6 @@ func TestSpendUpdates_Empty(t *testing.T) {
 	assert.Nil(t, updates.TeamMembers)
 	assert.Nil(t, updates.OrganizationMembers)
 	assert.Nil(t, updates.EndUsers)
-	assert.Nil(t, updates.Tags)
 }
 
 func TestSortedSpendKeysDeterministicAcrossTypedAggregateKeys(t *testing.T) {
@@ -455,14 +446,6 @@ func TestMembershipUpdatesKeepColonContainingCompositeIDsSeparate(t *testing.T) 
 	assert.Contains(t, call.query, "updated_at = NOW()")
 	assert.Contains(t, call.query, "organization_id = $2 AND user_id = $3")
 	assert.Equal(t, []interface{}{2.5, "org:west", "user:east"}, call.args)
-}
-
-func TestZeroSpendTagUpdatesAdvanceUpdatedAt(t *testing.T) {
-	tagTx := &atomicTestTx{}
-	require.NoError(t, updateTags(context.Background(), tagTx, map[string]float64{"tag-1": 0}))
-	require.Len(t, tagTx.attemptedSQL, 1)
-	assert.Contains(t, tagTx.attemptedSQL[0], `UPDATE "LiteLLM_TagTable"`)
-	assert.Contains(t, tagTx.attemptedSQL[0], "updated_at = NOW()")
 }
 
 func TestUpdateProjectsPersistsSpendAndNumericModelSpend(t *testing.T) {

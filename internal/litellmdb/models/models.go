@@ -3,6 +3,8 @@ package models
 import (
 	"errors"
 	"log/slog"
+	"regexp"
+	"strings"
 	"time"
 
 	"github.com/mixaill76/auto_ai_router/internal/utils"
@@ -368,6 +370,11 @@ func (t *TokenInfo) ModelAccessScopes() []ModelAccessScope {
 	return scopes
 }
 
+// exactModelScopeMatch reports whether model passes one allowlist. Besides the
+// exact name and the "*" / all-proxy-models wildcards, an entry may be a regex
+// (matched anchored, i.e. it must cover the whole model name): one pattern
+// such as "anthropic/.*" or ".*claude-haiku.*" then includes every non-public
+// naming of the model without enumerating each alias in the allowlist.
 func exactModelScopeMatch(model string, allowedModels []string) bool {
 	if len(allowedModels) == 0 {
 		return true
@@ -376,8 +383,22 @@ func exactModelScopeMatch(model string, allowedModels []string) bool {
 		if allowed == model || allowed == "*" || allowed == AllProxyModels {
 			return true
 		}
+		if modelScopePatternMatches(allowed, model) {
+			return true
+		}
 	}
 	return false
+}
+
+// modelScopePatternMatches treats an allowlist entry containing regex
+// metacharacters as an anchored pattern. Literal entries keep exact-match
+// semantics, so existing allowlists behave exactly as before.
+func modelScopePatternMatches(pattern, model string) bool {
+	if !strings.ContainsAny(pattern, `\.^$*+?()[]{}|`) {
+		return false
+	}
+	matched, err := regexp.MatchString("^(?:"+pattern+")$", model)
+	return err == nil && matched
 }
 
 // IsModelAllowedBy checks every applicable model scope with matcher.
@@ -557,9 +578,6 @@ type SpendLogEntry struct {
 	OrganizationID string // Organization ID
 	ProjectID      string // Runtime project attribution (persisted in Metadata)
 	EndUser        string // End user ID (from metadata)
-
-	// Tags
-	RequestTags string // JSON array of request tags
 
 	// Status
 	Status string // "success" | "failure"
