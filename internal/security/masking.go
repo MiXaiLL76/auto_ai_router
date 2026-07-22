@@ -105,7 +105,7 @@ func MaskSensitiveHeaders(headers http.Header) http.Header {
 	// List of sensitive headers to mask
 	sensitiveHeaders := map[string]bool{
 		"Authorization":        true,
-		"X-Api-Key":            true,
+		"X-API-Key":            true,
 		"X-Auth-Token":         true,
 		"Proxy-Authorization":  true,
 		"Cookie":               true,
@@ -119,11 +119,10 @@ func MaskSensitiveHeaders(headers http.Header) http.Header {
 			continue
 		}
 
-		canonicalKey := http.CanonicalHeaderKey(key)
-		if sensitiveHeaders[canonicalKey] {
+		if sensitiveHeaders[key] {
 			// Mask sensitive header values
 			value := values[0]
-			switch canonicalKey {
+			switch key {
 			case "Authorization":
 				// Handle Bearer tokens specially
 				if strings.HasPrefix(value, "Bearer ") {

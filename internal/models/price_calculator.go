@@ -40,8 +40,7 @@ func CalculateTokenCosts(usage *converter.TokenUsage, price *ModelPrice) *conver
 
 	// Calculate "regular" input tokens by subtracting specialized token types.
 	// Vertex/OpenAI: audio/cached tokens are included in PromptTokens; Anthropic: same + cache creation.
-	regularInputTokens := usage.PromptTokens - usage.AudioInputTokens - usage.CachedInputTokens -
-		usage.CacheCreationTokens - usage.ImageTokens
+	regularInputTokens := usage.PromptTokens - usage.AudioInputTokens - usage.CachedInputTokens - usage.CacheCreationTokens - usage.ImageTokens
 	if regularInputTokens < 0 {
 		regularInputTokens = 0
 	}
@@ -62,8 +61,7 @@ func CalculateTokenCosts(usage *converter.TokenUsage, price *ModelPrice) *conver
 
 	// Calculate "regular" output tokens by subtracting specialized token types
 	regularOutputTokens := usage.CompletionTokens - usage.AudioOutputTokens - usage.ReasoningTokens -
-		usage.AcceptedPredictionTokens - usage.RejectedPredictionTokens - usage.CachedOutputTokens -
-		usage.OutputImageTokens
+		usage.AcceptedPredictionTokens - usage.RejectedPredictionTokens - usage.OutputImageTokens
 	if regularOutputTokens < 0 {
 		regularOutputTokens = 0
 	}
@@ -141,27 +139,26 @@ func CalculateTokenCosts(usage *converter.TokenUsage, price *ModelPrice) *conver
 	// Rejected prediction tokens count as regular output tokens
 	costs.PredictionCost += float64(usage.RejectedPredictionTokens) * outputCostPerToken
 
-	// Image input tokens are included in PromptTokens. Image output tokens are
-	// included in CompletionTokens. Price the specialized portions exactly once,
-	// falling back to the corresponding text-token rate when no image-token rate
-	// is configured. A per-image output price takes precedence over output-token
-	// pricing, matching LiteLLM's image-generation semantics.
-	inputImagePrice := price.InputCostPerImageToken
-	if inputImagePrice == 0 {
-		inputImagePrice = inputCostPerToken
+	// Input image tokens are part of PromptTokens. Price them separately when a
+	// modality-specific rate exists, otherwise keep the regular input rate.
+	inputImageCost := price.InputCostPerImageToken
+	if inputImageCost == 0 {
+		inputImageCost = inputCostPerToken
 	}
-	costs.InputImageCost = float64(usage.ImageTokens) * inputImagePrice
+	costs.ImageCost = float64(usage.ImageTokens) * inputImageCost
 
-	if usage.ImageCount > 0 && price.OutputCostPerImage > 0 {
-		costs.OutputImageCost = float64(usage.ImageCount) * price.OutputCostPerImage
-	} else {
-		outputImagePrice := price.OutputCostPerImageToken
-		if outputImagePrice == 0 {
-			outputImagePrice = outputCostPerToken
+	// Generated image tokens are part of CompletionTokens and must not also be
+	// charged as text. Prefer the token-based image rate when the provider reports
+	// a token breakdown; otherwise use the per-image price for Imagen-style APIs.
+	if usage.OutputImageTokens > 0 {
+		outputImageCost := price.OutputCostPerImageToken
+		if outputImageCost == 0 {
+			outputImageCost = outputCostPerToken
 		}
-		costs.OutputImageCost = float64(usage.OutputImageTokens) * outputImagePrice
+		costs.ImageCost += float64(usage.OutputImageTokens) * outputImageCost
+	} else if usage.ImageCount > 0 && price.OutputCostPerImage > 0 {
+		costs.ImageCost += float64(usage.ImageCount) * price.OutputCostPerImage
 	}
-	costs.ImageCost = costs.InputImageCost + costs.OutputImageCost
 
 	// Calculate total
 	costs.TotalCost = costs.InputCost +

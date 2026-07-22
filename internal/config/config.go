@@ -806,30 +806,19 @@ const (
 	SpendAPIBase = "http://air-ru01/v1"
 )
 
-// ShadowAuthContextConfig configures verification of x-vsellm-auth-context.
-// PublicKeys maps a JWS kid to a base64/base64url encoded Ed25519 public key.
-type ShadowAuthContextConfig struct {
-	Issuer          string            `yaml:"issuer"`
-	Audience        string            `yaml:"audience"`
-	PublicKeys      map[string]string `yaml:"public_keys"`
-	ClockSkew       time.Duration     `yaml:"clock_skew"`
-	ReplayCacheSize int               `yaml:"replay_cache_size"`
-}
-
 // SpendLogConfig owns a database connection that is independent from the
 // LiteLLM control-plane/auth connection.
 type SpendLogConfig struct {
-	DatabaseURL          string                  `yaml:"database_url"`
-	ExpectedDatabaseName string                  `yaml:"expected_database_name"`
-	APIBase              string                  `yaml:"api_base"`
-	MaxConns             int                     `yaml:"max_conns"`
-	MinConns             int                     `yaml:"min_conns"`
-	HealthCheckInterval  time.Duration           `yaml:"health_check_interval"`
-	ConnectTimeout       time.Duration           `yaml:"connect_timeout"`
-	LogQueueSize         int                     `yaml:"log_queue_size"`
-	LogBatchSize         int                     `yaml:"log_batch_size"`
-	LogFlushInterval     time.Duration           `yaml:"log_flush_interval"`
-	AuthContext          ShadowAuthContextConfig `yaml:"auth_context"`
+	DatabaseURL          string        `yaml:"database_url"`
+	ExpectedDatabaseName string        `yaml:"expected_database_name"`
+	APIBase              string        `yaml:"api_base"`
+	MaxConns             int           `yaml:"max_conns"`
+	MinConns             int           `yaml:"min_conns"`
+	HealthCheckInterval  time.Duration `yaml:"health_check_interval"`
+	ConnectTimeout       time.Duration `yaml:"connect_timeout"`
+	LogQueueSize         int           `yaml:"log_queue_size"`
+	LogBatchSize         int           `yaml:"log_batch_size"`
+	LogFlushInterval     time.Duration `yaml:"log_flush_interval"`
 }
 
 // IsEnabled reports whether an isolated spend destination is configured.
@@ -1097,25 +1086,17 @@ func (l *LiteLLMDBConfig) UnmarshalYAML(value *yaml.Node) error {
 // UnmarshalYAML resolves environment-backed spend-writer settings and applies
 // safe defaults even when only part of spend_log is configured.
 func (s *SpendLogConfig) UnmarshalYAML(value *yaml.Node) error {
-	type rawAuthContext struct {
-		Issuer          string            `yaml:"issuer"`
-		Audience        string            `yaml:"audience"`
-		PublicKeys      map[string]string `yaml:"public_keys"`
-		ClockSkew       string            `yaml:"clock_skew"`
-		ReplayCacheSize string            `yaml:"replay_cache_size"`
-	}
 	type rawSpendLog struct {
-		DatabaseURL          string         `yaml:"database_url"`
-		ExpectedDatabaseName string         `yaml:"expected_database_name"`
-		APIBase              string         `yaml:"api_base"`
-		MaxConns             string         `yaml:"max_conns"`
-		MinConns             string         `yaml:"min_conns"`
-		HealthCheckInterval  string         `yaml:"health_check_interval"`
-		ConnectTimeout       string         `yaml:"connect_timeout"`
-		LogQueueSize         string         `yaml:"log_queue_size"`
-		LogBatchSize         string         `yaml:"log_batch_size"`
-		LogFlushInterval     string         `yaml:"log_flush_interval"`
-		AuthContext          rawAuthContext `yaml:"auth_context"`
+		DatabaseURL          string `yaml:"database_url"`
+		ExpectedDatabaseName string `yaml:"expected_database_name"`
+		APIBase              string `yaml:"api_base"`
+		MaxConns             string `yaml:"max_conns"`
+		MinConns             string `yaml:"min_conns"`
+		HealthCheckInterval  string `yaml:"health_check_interval"`
+		ConnectTimeout       string `yaml:"connect_timeout"`
+		LogQueueSize         string `yaml:"log_queue_size"`
+		LogBatchSize         string `yaml:"log_batch_size"`
+		LogFlushInterval     string `yaml:"log_flush_interval"`
 	}
 
 	var raw rawSpendLog
@@ -1151,19 +1132,6 @@ func (s *SpendLogConfig) UnmarshalYAML(value *yaml.Node) error {
 		return err
 	}
 	if s.LogFlushInterval, err = parseField(raw.LogFlushInterval, defaults.LogFlushInterval, time.ParseDuration, "spend_log.log_flush_interval"); err != nil {
-		return err
-	}
-
-	s.AuthContext.Issuer = resolveEnvString(raw.AuthContext.Issuer)
-	s.AuthContext.Audience = resolveEnvString(raw.AuthContext.Audience)
-	s.AuthContext.PublicKeys = make(map[string]string, len(raw.AuthContext.PublicKeys))
-	for kid, key := range raw.AuthContext.PublicKeys {
-		s.AuthContext.PublicKeys[resolveEnvString(kid)] = resolveEnvString(key)
-	}
-	if s.AuthContext.ClockSkew, err = parseField(raw.AuthContext.ClockSkew, defaults.AuthContext.ClockSkew, time.ParseDuration, "spend_log.auth_context.clock_skew"); err != nil {
-		return err
-	}
-	if s.AuthContext.ReplayCacheSize, err = parseField(raw.AuthContext.ReplayCacheSize, defaults.AuthContext.ReplayCacheSize, strconv.Atoi, "spend_log.auth_context.replay_cache_size"); err != nil {
 		return err
 	}
 	return nil
@@ -1471,11 +1439,6 @@ func defaultSpendLogConfig() SpendLogConfig {
 		LogQueueSize:        5000,
 		LogBatchSize:        100,
 		LogFlushInterval:    5 * time.Second,
-		AuthContext: ShadowAuthContextConfig{
-			PublicKeys:      map[string]string{},
-			ClockSkew:       30 * time.Second,
-			ReplayCacheSize: 10000,
-		},
 	}
 }
 

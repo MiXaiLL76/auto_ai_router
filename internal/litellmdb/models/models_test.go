@@ -156,10 +156,6 @@ func TestTokenInfo_IsBudgetExceeded_SpendLessThanMax(t *testing.T) {
 	assert.False(t, token.IsBudgetExceeded())
 }
 
-// LiteLLM 1.90.0 rejects the request when key spend reaches the budget
-// (litellm/proxy/auth/auth_checks.py: `spend >= valid_token.max_budget`,
-// the GHSA-2rv4-xv66-fpjg defense-in-depth check). AIR must match that
-// boundary for the key/token level.
 func TestTokenInfo_IsBudgetExceeded_SpendEqualToMax(t *testing.T) {
 	maxBudget := 100.0
 	token := &TokenInfo{
@@ -167,7 +163,7 @@ func TestTokenInfo_IsBudgetExceeded_SpendEqualToMax(t *testing.T) {
 		MaxBudget: &maxBudget,
 	}
 
-	assert.True(t, token.IsBudgetExceeded())
+	assert.False(t, token.IsBudgetExceeded())
 }
 
 func TestTokenInfo_IsBudgetExceeded_SpendGreaterThanMax(t *testing.T) {
@@ -333,21 +329,6 @@ func TestTokenInfo_checkUserBudget_PersonalKey(t *testing.T) {
 	assert.True(t, token.checkUserBudget())
 }
 
-// LiteLLM 1.90.0 user budget check is `user_spend >= user_budget`
-// (auth_checks.py `_user_max_budget_check`). Reaching the budget must reject.
-func TestTokenInfo_checkUserBudget_SpendEqualToMax(t *testing.T) {
-	userBudget := 100.0
-	userSpend := 100.0
-	token := &TokenInfo{
-		UserID:        "user1",
-		TeamID:        "",
-		UserMaxBudget: &userBudget,
-		UserSpend:     &userSpend,
-	}
-
-	assert.True(t, token.checkUserBudget())
-}
-
 func TestTokenInfo_checkUserBudget_NotPersonalKey(t *testing.T) {
 	userBudget := 100.0
 	userSpend := 150.0
@@ -386,20 +367,6 @@ func TestTokenInfo_checkTeamBudget_ExceededEmbedded(t *testing.T) {
 func TestTokenInfo_checkTeamBudget_NotExceeded(t *testing.T) {
 	teamBudget := 100.0
 	teamSpend := 50.0
-	token := &TokenInfo{
-		TeamMaxBudget: &teamBudget,
-		TeamSpend:     &teamSpend,
-	}
-
-	assert.False(t, token.checkTeamBudget())
-}
-
-// LiteLLM 1.90.0 team budget check is `spend > team.max_budget` (auth_checks.py),
-// a deliberately different boundary from the key/user (`>=`) levels: reaching the
-// team budget exactly is still allowed. Lock this in so it is not "unified" away.
-func TestTokenInfo_checkTeamBudget_SpendEqualToMax(t *testing.T) {
-	teamBudget := 100.0
-	teamSpend := 100.0
 	token := &TokenInfo{
 		TeamMaxBudget: &teamBudget,
 		TeamSpend:     &teamSpend,

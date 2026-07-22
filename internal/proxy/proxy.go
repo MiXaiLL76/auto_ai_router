@@ -72,18 +72,10 @@ func (logCtx *RequestLogContext) Context() context.Context {
 	return logCtx.Request.Context()
 }
 
-func (logCtx *RequestLogContext) markCompletionStart(at time.Time) {
-	if logCtx == nil || at.IsZero() || !logCtx.CompletionStartTime.IsZero() {
-		return
-	}
-	logCtx.CompletionStartTime = at
-}
-
 // RequestLogContext holds all data needed for logging a request to LiteLLM DB
 // Filled throughout request processing and logged at the end via defer
 type RequestLogContext struct {
 	RequestID            string                   // Request ID (UUID)
-	Billing              BillingContext           // Stable request billing identity
 	StartTime            time.Time                // Request start time
 	CompletionStartTime  time.Time                // Timestamp of the first real content/tool/reasoning delta (TTFT), not just the first byte/chunk; zero if not streamed or never reached
 	Request              *http.Request            // HTTP request

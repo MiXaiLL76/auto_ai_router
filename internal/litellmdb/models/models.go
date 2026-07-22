@@ -345,14 +345,12 @@ func (t *TokenInfo) IsExpired() bool {
 	return utils.NowUTC().After(*t.Expires)
 }
 
-// IsBudgetExceeded checks if token budget is exceeded.
-// LiteLLM 1.90.0 rejects at the boundary for keys: `spend >= max_budget`
-// (auth_checks.py, GHSA-2rv4-xv66-fpjg defense-in-depth). Match that exactly.
+// IsBudgetExceeded checks if token budget is exceeded (embedded, use >)
 func (t *TokenInfo) IsBudgetExceeded() bool {
 	if t.MaxBudget == nil {
 		return false
 	}
-	return t.Spend >= *t.MaxBudget
+	return t.Spend > *t.MaxBudget
 }
 
 // ModelAccessScopes returns the ordered set of allowlists applicable to this
@@ -451,9 +449,7 @@ func (t *TokenInfo) IsAnyModelAllowed(candidates []string) bool {
 	return false
 }
 
-// checkUserBudget checks user budget (personal key only).
-// LiteLLM 1.90.0 uses `user_spend >= user_budget` (auth_checks.py
-// _user_max_budget_check), so reaching the budget rejects.
+// checkUserBudget checks user budget (personal key only - embedded, use >)
 func (t *TokenInfo) checkUserBudget() bool {
 	// Only check user budget for personal keys (no team)
 	if t.TeamID != "" {
@@ -462,12 +458,10 @@ func (t *TokenInfo) checkUserBudget() bool {
 	if t.UserMaxBudget == nil || t.UserSpend == nil {
 		return false
 	}
-	return *t.UserSpend >= *t.UserMaxBudget
+	return *t.UserSpend > *t.UserMaxBudget
 }
 
-// checkTeamBudget checks team budget.
-// LiteLLM 1.90.0 uses `spend > team.max_budget` (auth_checks.py) — a deliberately
-// different boundary from key/user: reaching the team budget exactly is allowed.
+// checkTeamBudget checks team budget (embedded, use >)
 func (t *TokenInfo) checkTeamBudget() bool {
 	if t.TeamMaxBudget == nil || t.TeamSpend == nil {
 		return false

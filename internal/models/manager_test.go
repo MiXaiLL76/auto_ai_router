@@ -541,6 +541,7 @@ func TestModelScopeWildcardMatchingIsProviderAwareAndTreatsRegexSyntaxLiterally(
 	}
 	manager := New(logger, 100, []config.ModelRPMConfig{
 		{Name: "gpt-4o-mini", Credential: "openai-provider"},
+		{Name: "gpt-5.3-chat", Credential: "openai-provider"},
 		{Name: "gpt-4o-mini-retry", Credential: "openai-provider"},
 		{Name: "claude-sonnet-4-5", Credential: "openai-provider"},
 		{Name: "gemini-2.5-flash", Credential: "openai-provider"},
@@ -548,16 +549,25 @@ func TestModelScopeWildcardMatchingIsProviderAwareAndTreatsRegexSyntaxLiterally(
 	})
 	manager.SetCredentials(credentials)
 	manager.LoadModelsFromConfig(credentials)
+	manager.SetModelAliases(map[string]string{
+		"openai/gpt-4o-mini":                                "gpt-4o-mini",
+		"openai/gpt-5.3-chat":                               "gpt-5.3-chat",
+		"anthropic/claude-sonnet-4-5":                       "claude-sonnet-4-5",
+		"google/gemini-2.5-flash":                           "gemini-2.5-flash",
+		"bedrock/anthropic.claude-3-5-sonnet-20240620-v1:0": "anthropic.claude-3-5-sonnet-20240620-v1:0",
+	})
 
 	assert.True(t, manager.IsModelIDAllowedByScope("gpt-4o-mini", []string{"openai/*"}),
-		"a known short model inherits its pinned LiteLLM provider prefix")
+		"a configured short model inherits its canonical provider prefix")
+	assert.True(t, manager.IsModelIDAllowedByScope("gpt-5.3-chat", []string{"openai/*"}),
+		"new configured models do not require a compiled registry update")
 	assert.False(t, manager.IsModelIDAllowedByScope("gpt-4o-mini", []string{"openai/gpt-4o-mini"}),
 		"an exact provider-qualified entry must not widen access to the short request ID")
 	assert.True(t, manager.IsModelIDAllowedByScope("anthropic.claude-3-5-sonnet-20240620-v1:0", []string{"bedrock/anthropic.*"}))
 	assert.False(t, manager.IsModelIDAllowedByScope("gpt-4o-mini-retry", []string{"openai/*"}),
 		"an unknown custom short model must not inherit its transport provider")
 	assert.True(t, manager.IsModelIDAllowedByScope("claude-sonnet-4-5", []string{"anthropic/*"}),
-		"provider identity comes from LiteLLM model inference, not the OpenAI-compatible transport")
+		"provider identity comes from the canonical model, not the OpenAI-compatible transport")
 	assert.False(t, manager.IsModelIDAllowedByScope("claude-sonnet-4-5", []string{"openai/*"}),
 		"an OpenAI-compatible transport must not widen Claude access into openai/*")
 	assert.True(t, manager.IsModelIDAllowedByScope("gemini-2.5-flash", []string{"vertex_ai/*"}))

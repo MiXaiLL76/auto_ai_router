@@ -808,41 +808,41 @@ func modelScopeEntryAllows(modelID, allowedModelID string) bool {
 	return strings.ContainsRune(allowedModelID, '*') && modelScopePatternMatch(modelID, allowedModelID)
 }
 
+func modelScopeProviderPrefix(modelID string) (string, bool) {
+	separator := strings.IndexByte(modelID, '/')
+	if separator <= 0 {
+		return "", false
+	}
+	prefix := modelID[:separator]
+	if prefix == "google" {
+		return "vertex_ai", true
+	}
+	return prefix, true
+}
+
 func (m *Manager) liteLLMProviderPrefixForShortModelLocked(modelID string) (string, bool) {
-	inferredPrefix, inferred := inferLiteLLMShortModelProvider(modelID)
-	if !inferred {
+	if len(m.modelToCredentials[modelID]) == 0 {
 		return "", false
 	}
 
-	credentialNames := m.modelToCredentials[modelID]
-	if len(credentialNames) == 0 {
-		return "", false
-	}
-	credentialProviders := make(map[string]string, len(m.credentials))
-	for _, credential := range m.credentials {
-		prefix, ok := providerTypeLiteLLMPrefix[credential.Type]
-		if !ok {
-			prefix = string(credential.Type)
-		}
-		if prefix != "" {
-			credentialProviders[credential.Name] = prefix
-		}
-	}
-	transportPrefix := ""
-	for _, credentialName := range credentialNames {
-		candidate, exists := credentialProviders[credentialName]
-		if !exists {
-			return "", false
-		}
-		if transportPrefix == "" {
-			transportPrefix = candidate
+	prefix := ""
+	for publicModel, backendModel := range m.modelAliases {
+		if backendModel != modelID {
 			continue
 		}
-		if transportPrefix != candidate {
+		candidate, ok := modelScopeProviderPrefix(publicModel)
+		if !ok {
+			continue
+		}
+		if prefix == "" {
+			prefix = candidate
+			continue
+		}
+		if prefix != candidate {
 			return "", false
 		}
 	}
-	return inferredPrefix, transportPrefix != ""
+	return prefix, prefix != ""
 }
 
 func scopeAllowsAnyModelID(modelIDs []string, allowedModelIDs []string) bool {

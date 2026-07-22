@@ -283,11 +283,3 @@ spend_log:
   log_queue_size: 5000
   log_batch_size: 100
   log_flush_interval: 5s
-  auth_context:
-    issuer: "litellm"
-    audience: "air-ru01"
-    public_keys: {}
-    # public_keys:
-    #   shadow-key-2026-01: "os.environ/SHADOW_CONTEXT_ED25519_PUBLIC_KEY"
-    clock_skew: 30s
-    replay_cache_size: 10000

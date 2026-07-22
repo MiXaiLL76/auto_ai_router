@@ -219,7 +219,6 @@ func PrintConfig(logger *slog.Logger, cfg *Config) {
 			"log_queue_size", cfg.SpendLog.LogQueueSize,
 			"log_batch_size", cfg.SpendLog.LogBatchSize,
 			"log_flush_interval", cfg.SpendLog.LogFlushInterval.String(),
-			"auth_context_keys", len(cfg.SpendLog.AuthContext.PublicKeys),
 		)
 	} else {
 		logger.Info("spend_log", "status", "DISABLED")

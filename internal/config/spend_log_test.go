@@ -12,7 +12,6 @@ import (
 
 func TestLoadSpendLogConfig(t *testing.T) {
 	t.Setenv("SPEND_DATABASE_URL", "postgresql://spend:secret@db.example/test-db")
-	t.Setenv("SPEND_PUBLIC_KEY", "cHVibGljLWtleQ==")
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	require.NoError(t, os.WriteFile(path, []byte(`
 server:
@@ -36,13 +35,6 @@ spend_log:
   log_queue_size: 123
   log_batch_size: 17
   log_flush_interval: 2s
-  auth_context:
-    issuer: litellm
-    audience: air-ru01
-    public_keys:
-      test-key: os.environ/SPEND_PUBLIC_KEY
-    clock_skew: 15s
-    replay_cache_size: 321
 `), 0o600))
 
 	cfg, err := Load(path)
@@ -58,11 +50,6 @@ spend_log:
 	assert.Equal(t, 123, cfg.SpendLog.LogQueueSize)
 	assert.Equal(t, 17, cfg.SpendLog.LogBatchSize)
 	assert.Equal(t, 2*time.Second, cfg.SpendLog.LogFlushInterval)
-	assert.Equal(t, "litellm", cfg.SpendLog.AuthContext.Issuer)
-	assert.Equal(t, "air-ru01", cfg.SpendLog.AuthContext.Audience)
-	assert.Equal(t, "cHVibGljLWtleQ==", cfg.SpendLog.AuthContext.PublicKeys["test-key"])
-	assert.Equal(t, 15*time.Second, cfg.SpendLog.AuthContext.ClockSkew)
-	assert.Equal(t, 321, cfg.SpendLog.AuthContext.ReplayCacheSize)
 }
 
 func TestSpendLogConfigDefaultsToDisabled(t *testing.T) {

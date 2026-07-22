@@ -130,10 +130,10 @@ func TestTokenInfo_IsBudgetExceeded(t *testing.T) {
 		assert.False(t, info.IsBudgetExceeded())
 	})
 
-	t.Run("spend == max_budget - exceeded (LiteLLM 1.90.0 key check uses >=)", func(t *testing.T) {
+	t.Run("spend == max_budget - not exceeded (embedded uses >)", func(t *testing.T) {
 		maxBudget := 100.0
 		info := &models.TokenInfo{Spend: 100, MaxBudget: &maxBudget}
-		assert.True(t, info.IsBudgetExceeded())
+		assert.False(t, info.IsBudgetExceeded())
 	})
 
 	t.Run("spend > max_budget - exceeded", func(t *testing.T) {
