@@ -135,19 +135,6 @@ func (c *Config) Validate() error {
 	return nil
 }
 
-// ==================== Model access sentinels ====================
-
-// LiteLLM stores these special values inside VerificationToken.models instead
-// of (or alongside) real model names:
-//   - "all-proxy-models": key may call every model on the proxy.
-//   - "all-team-models":  key inherits its parent team's model allow-list
-//     (LiteLLM_TeamTable.models). A key with no team has nothing to inherit
-//     from, so it falls back to unrestricted access, same as an empty list.
-const (
-	specialModelAllProxyModels = "all-proxy-models"
-	specialModelAllTeamModels  = "all-team-models"
-)
-
 // ==================== TokenInfo ====================
 
 // TokenInfo holds information about a validated token from LiteLLM_VerificationToken
@@ -185,12 +172,7 @@ type TokenInfo struct {
 	ProjectBlocked *bool    // Project is blocked
 	Blocked        bool     // Is token blocked
 
-	// TeamDangling / ProjectDangling are set when the token carries a
-	// team_id / project_id but the LEFT JOIN found no parent row (the
-	// team_id_check / project_id_check sentinel scanned as NULL). A dangling
-	// parent fails closed: its scope denies every model instead of degrading
-	// to an unrestricted empty scope. An orphan user_id deliberately stays
-	// unrestricted (production holds valid tokens whose owner row is gone).
+	// Dangling parents fail closed instead of becoming unrestricted empty scopes.
 	TeamDangling    bool
 	ProjectDangling bool
 
@@ -353,20 +335,13 @@ func (t *TokenInfo) IsBudgetExceeded() bool {
 	return t.Spend > *t.MaxBudget
 }
 
-// ModelAccessScopes returns the ordered set of allowlists applicable to this
-// token. User models apply only to personal keys. A non-empty team-member
-// scope is an additional restriction; an empty one inherits the team scope.
-// A dangling team/project reference (ID set, parent row gone) yields a
-// DenyAll scope: the parent scope cannot be resolved, so it must not degrade
-// to an unrestricted empty one.
+// ModelAccessScopes returns the independently enforced model allowlists.
 func (t *TokenInfo) ModelAccessScopes() []ModelAccessScope {
 	keyModels := t.Models
 	for _, model := range t.Models {
 		if model == AllTeamModels {
 			// LiteLLM fails closed when all-team-models is used without a team.
 			// With a team it replaces, rather than extends, the key allowlist.
-			// A dangling team keeps TeamModels empty here and is rejected by
-			// the DenyAll team scope below.
 			if t.TeamID != "" {
 				keyModels = t.TeamModels
 			}

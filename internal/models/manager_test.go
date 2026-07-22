@@ -108,6 +108,23 @@ func TestGetAllModelsScoped_ProjectsExplicitClientSurfaceAfterVisibility(t *test
 	assert.Equal(t, []string{"public/a"}, responseModelIDs(manager.GetAllModelsWithAccessGroupsScoped(visibility)))
 }
 
+func TestClientCatalogActivatesPublicAliasThroughCanonicalRouteAlias(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+	credential := config.CredentialConfig{Name: "openai", Type: config.ProviderTypeOpenAI}
+	manager := New(logger, 100, []config.ModelRPMConfig{{
+		Name:       "gpt-4.1",
+		Credential: credential.Name,
+	}})
+	manager.SetModelAliases(map[string]string{"openai/gpt-4.1": "gpt-4.1"})
+	manager.SetClientModelIDs([]string{"openai/gpt-4.1"})
+	manager.SetPublicModelAliases(map[string]string{"gpt-4.1": "openai/gpt-4.1"})
+	manager.LoadModelsFromConfig([]config.CredentialConfig{credential})
+
+	assert.Equal(t, []string{"gpt-4.1"}, responseModelIDs(manager.GetAllModels()))
+	assert.Equal(t, []string{"gpt-4.1", "openai/gpt-4.1"}, responseModelIDs(manager.GetClientModels()))
+	assert.True(t, manager.IsModelIDAllowedByScope("gpt-4.1", []string{"openai/gpt-4.1"}))
+}
+
 func TestGetAllModelsWithAccessGroupsScoped_FiltersAliasesByScope(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
 	manager := New(logger, 100, []config.ModelRPMConfig{
@@ -364,8 +381,8 @@ func TestGetAllModelsPublishesConfiguredAliasesAlongsideTargetsInDeterministicOr
 		"orphan/alias":              "missing-backend",
 	})
 
-	first := manager.GetAllModels()
-	second := manager.GetAllModels()
+	first := manager.GetClientModels()
+	second := manager.GetClientModels()
 
 	firstIDs := make([]string, 0, len(first.Data))
 	secondIDs := make([]string, 0, len(second.Data))
@@ -404,7 +421,7 @@ func TestGetAllModelsIncludesConfiguredMigrationShortAliasesOnly(t *testing.T) {
 		"must-not-leak-orphan":          "unconfigured/backend-model",
 	})
 
-	response := manager.GetAllModels()
+	response := manager.GetClientModels()
 	ids := make([]string, 0, len(response.Data))
 	for _, model := range response.Data {
 		ids = append(ids, model.ID)
@@ -441,7 +458,7 @@ func TestRouterAliasViaDBPublicCandidateIsDiscoverableAndRoutable(t *testing.T) 
 		Credential: dbCredential.Name,
 	}}, nil, []config.CredentialConfig{dbCredential})
 
-	response := manager.GetAllModels()
+	response := manager.GetClientModels()
 	ids := make([]string, 0, len(response.Data))
 	for _, model := range response.Data {
 		ids = append(ids, model.ID)
@@ -478,7 +495,7 @@ func TestRoutableAliasTargetCanAlsoBeAnAliasKey(t *testing.T) {
 	})
 	manager.LoadModelsFromConfig([]config.CredentialConfig{credential})
 
-	response := manager.GetAllModels()
+	response := manager.GetClientModels()
 	ids := make([]string, 0, len(response.Data))
 	for _, model := range response.Data {
 		ids = append(ids, model.ID)
@@ -489,48 +506,10 @@ func TestRoutableAliasTargetCanAlsoBeAnAliasKey(t *testing.T) {
 	assert.NotContains(t, ids, "deep/public")
 	assert.NotContains(t, ids, "orphan/public")
 
-	// The current request resolves exactly one configured alias edge. The
-	// independently routable public model is therefore a terminal target even
-	// though it is also an alias key for a different request.
-	assert.True(t, manager.AreModelIDsAliasEquivalent("chatgpt-4o-latest", "openai/gpt-4o"))
-	assert.True(t, manager.AreModelIDsAliasEquivalent("openai/gpt-4o", "chatgpt-4o-latest"))
 	assert.True(t, manager.IsModelIDAllowedByScope("chatgpt-4o-latest", []string{"openai/gpt-4o"}),
 		"a configured request alias inherits its exact LiteLLM model-group permission")
 	assert.False(t, manager.IsModelIDAllowedByScope("openai/gpt-4o", []string{"chatgpt-4o-latest"}),
 		"an internal alias target cannot gain permission from the public alias in reverse")
-
-	// Equivalence is one-hop, not transitive. Siblings remain distinct public
-	// products, and unsafe graph shapes fail closed.
-	assert.False(t, manager.AreModelIDsAliasEquivalent("chatgpt-4o-latest", "chatgpt-4o-latest-backup"))
-	assert.False(t, manager.AreModelIDsAliasEquivalent("chatgpt-4o-latest", "gpt-4o"))
-	assert.False(t, manager.AreModelIDsAliasEquivalent("deep/public", "deep/intermediate"))
-	assert.False(t, manager.AreModelIDsAliasEquivalent("orphan/public", "missing/backend"))
-	assert.False(t, manager.AreModelIDsAliasEquivalent("cycle/a", "cycle/b"))
-}
-
-func TestAreModelIDsAliasEquivalent(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-	manager := New(logger, 100, []config.ModelRPMConfig{{
-		Name:       "gpt-4o-mini",
-		Credential: "openai-provider",
-	}})
-	manager.SetModelAliases(map[string]string{
-		"openai/gpt-4o-mini":        "gpt-4o-mini",
-		"public/gpt-4o-mini-backup": "gpt-4o-mini",
-		"chain/gpt-4o-mini":         "openai/gpt-4o-mini",
-		"cycle/a":                   "cycle/b",
-		"cycle/b":                   "cycle/a",
-		"orphan/gpt-4o-mini":        "missing/gpt-4o-mini",
-	})
-	manager.LoadModelsFromConfig([]config.CredentialConfig{{Name: "openai-provider"}})
-
-	assert.True(t, manager.AreModelIDsAliasEquivalent("openai/gpt-4o-mini", "gpt-4o-mini"))
-	assert.True(t, manager.AreModelIDsAliasEquivalent("gpt-4o-mini", "openai/gpt-4o-mini"))
-	assert.False(t, manager.AreModelIDsAliasEquivalent("openai/gpt-4o-mini", "public/gpt-4o-mini-backup"))
-	assert.False(t, manager.AreModelIDsAliasEquivalent("chain/gpt-4o-mini", "gpt-4o-mini"))
-	assert.False(t, manager.AreModelIDsAliasEquivalent("cycle/a", "cycle/b"))
-	assert.False(t, manager.AreModelIDsAliasEquivalent("orphan/gpt-4o-mini", "missing/gpt-4o-mini"))
-	assert.False(t, manager.AreModelIDsAliasEquivalent("openai/gpt-4o-mini", "anthropic/gpt-4o-mini"))
 }
 
 func TestModelScopeWildcardMatchingIsProviderAwareAndTreatsRegexSyntaxLiterally(t *testing.T) {
@@ -607,10 +586,9 @@ func TestPublicModelAliasInheritsCanonicalPermissionAcrossHierarchy(t *testing.T
 		"gpt-4o-mini": "openai/gpt-4o-mini",
 	})
 	manager.UpdateDBModels([]config.ModelRPMConfig{{
-		Name:         "openai/gpt-4o-mini",
-		Model:        "gpt-4o-mini",
-		Credential:   credential.Name,
-		DeploymentID: "deployment-gpt-4o-mini",
+		Name:       "openai/gpt-4o-mini",
+		Model:      "gpt-4o-mini",
+		Credential: credential.Name,
 	}}, []config.CredentialConfig{credential}, []config.CredentialConfig{credential})
 
 	assert.True(t, manager.IsModelIDAllowedByScope("openai/gpt-4o-mini", []string{"openai/gpt-4o-mini"}))
@@ -668,7 +646,7 @@ func TestActivePublicModelAliasesUsesRoutabilityAsTheOneHopTerminalBoundary(t *t
 		"cycle/b":                  "cycle/a",
 	}
 
-	_, active := activePublicModelAliases(availableTargets, aliases)
+	active := activePublicModelAliases(availableTargets, aliases)
 
 	assert.Equal(t, map[string]string{
 		"chatgpt-4o-latest":        "openai/gpt-4o",
@@ -1497,67 +1475,6 @@ func TestUpdateDBModels_PreservesStaticAndMapsDB(t *testing.T) {
 	real, ok = manager.GetRealModelName("static-real")
 	assert.True(t, ok)
 	assert.Equal(t, "real-static", real)
-}
-
-func TestUpdateDBModelsIndexesDeploymentByPublicModelAndCredential(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-	manager := New(logger, 100, nil)
-	credentials := []config.CredentialConfig{
-		{Name: "primary"},
-		{Name: "fallback"},
-		{Name: "other"},
-	}
-
-	manager.UpdateDBModels([]config.ModelRPMConfig{
-		{Name: "public/model", Credential: "primary", DeploymentID: "deployment-primary", RPM: -1, TPM: -1},
-		{Name: "public/model", Credential: "fallback", DeploymentID: "deployment-fallback", RPM: -1, TPM: -1},
-		// This is the shape produced by the unchanged migration render: the
-		// LiteLLM row uses an outer synthetic credential, while direct AIR serves
-		// the request with an unrelated inner provider credential.
-		{Name: "rendered/public-model", Credential: "db-model-rendered-deployment", DeploymentID: "rendered-deployment", RPM: -1, TPM: -1},
-		{Name: "same-id/model", Credential: "outer-a", DeploymentID: "same-deployment", RPM: -1, TPM: -1},
-		{Name: "same-id/model", Credential: "outer-b", DeploymentID: "same-deployment", RPM: -1, TPM: -1},
-		{Name: "global/model", DeploymentID: "deployment-global", RPM: -1, TPM: -1},
-		{Name: "ambiguous/model", Credential: "primary", DeploymentID: "deployment-a", RPM: -1, TPM: -1},
-		{Name: "ambiguous/model", Credential: "primary", DeploymentID: "deployment-b", RPM: -1, TPM: -1},
-		{Name: "ambiguous-public/model", Credential: "outer-a", DeploymentID: "deployment-a", RPM: -1, TPM: -1},
-		{Name: "ambiguous-public/model", Credential: "outer-b", DeploymentID: "deployment-b", RPM: -1, TPM: -1},
-	}, nil, credentials)
-
-	deploymentID, ok := manager.GetDeploymentID("public/model", "primary")
-	assert.True(t, ok)
-	assert.Equal(t, "deployment-primary", deploymentID)
-	deploymentID, ok = manager.GetDeploymentID("public/model", "fallback")
-	assert.True(t, ok)
-	assert.Equal(t, "deployment-fallback", deploymentID)
-	deploymentID, ok = manager.GetDeploymentID("global/model", "other")
-	assert.True(t, ok)
-	assert.Equal(t, "deployment-global", deploymentID)
-	deploymentID, ok = manager.GetDeploymentID("rendered/public-model", "mock-openai")
-	assert.True(t, ok, "one public deployment must survive an unrelated outer route credential")
-	assert.Equal(t, "rendered-deployment", deploymentID)
-	deploymentID, ok = manager.GetDeploymentID("same-id/model", "mock-openai")
-	assert.True(t, ok, "the same deployment ID repeated across outer credentials is still unique")
-	assert.Equal(t, "same-deployment", deploymentID)
-	_, ok = manager.GetDeploymentID("public/model", "other")
-	assert.False(t, ok, "multiple public deployment IDs without an exact credential are ambiguous")
-	_, ok = manager.GetDeploymentID("ambiguous/model", "primary")
-	assert.False(t, ok, "ambiguous deployment attribution must remain blank")
-	_, ok = manager.GetDeploymentID("ambiguous-public/model", "mock-openai")
-	assert.False(t, ok, "different deployment IDs across outer credentials must remain blank")
-
-	// Hot reload replaces the entire DB-derived index. The old primary ID must
-	// not leak; with one current public deployment, an unrelated inner
-	// credential resolves to that new unique ID.
-	manager.UpdateDBModels([]config.ModelRPMConfig{
-		{Name: "public/model", Credential: "fallback", DeploymentID: "deployment-fallback-v2", RPM: -1, TPM: -1},
-	}, nil, credentials)
-	deploymentID, ok = manager.GetDeploymentID("public/model", "primary")
-	assert.True(t, ok)
-	assert.Equal(t, "deployment-fallback-v2", deploymentID)
-	deploymentID, ok = manager.GetDeploymentID("public/model", "fallback")
-	assert.True(t, ok)
-	assert.Equal(t, "deployment-fallback-v2", deploymentID)
 }
 
 // TestUpdateDBModels_StaticRealNameNotOverriddenByDB verifies that a static

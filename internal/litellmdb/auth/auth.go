@@ -185,13 +185,12 @@ func (a *Authenticator) fetchTokenFromDB(ctx context.Context, hashedToken string
 	var info models.TokenInfo
 
 	// ============ Token fields ============
-	var keyName, keyAlias, userID, teamID, orgID, projectID, agentID *string
+	var keyName, keyAlias, userID, teamID, orgID, projectID *string
 	var tokenMaxBudget *float64
 	var tokenTPMLimit, tokenRPMLimit *int64
 	var expires *time.Time
 	var blocked *bool
 	var tokenModels []string
-	var tokenAllowedRoutes []string
 	var tokenMetadata []byte
 
 	// ============ User fields ============
@@ -245,9 +244,7 @@ func (a *Authenticator) fetchTokenFromDB(ctx context.Context, hashedToken string
 		&expires,
 		&blocked,
 		&tokenModels,
-		&tokenAllowedRoutes,
 		&projectID,
-		&agentID,
 		&tokenMetadata,
 
 		// User
@@ -330,15 +327,11 @@ func (a *Authenticator) fetchTokenFromDB(ctx context.Context, hashedToken string
 	if projectID != nil {
 		info.ProjectID = *projectID
 	}
-	if agentID != nil {
-		info.AgentID = *agentID
-	}
 	if blocked != nil {
 		info.Blocked = *blocked
 	}
 	info.Models = tokenModels
-	info.AllowedRoutes = tokenAllowedRoutes
-	info.Metadata, info.Tags = decodeTokenMetadata(tokenMetadata)
+	info.Metadata = decodeMetadata(tokenMetadata)
 
 	info.MaxBudget = tokenMaxBudget
 	info.Expires = expires
@@ -369,16 +362,10 @@ func (a *Authenticator) fetchTokenFromDB(ctx context.Context, hashedToken string
 	info.TeamRPMLimit = teamRPMLimit
 	info.TeamModels = teamModels
 
-	// team_id_check / project_id_check are join sentinels: a NULL there while
-	// the token carries the reference means the parent row is gone. Such a
-	// dangling parent must fail closed (see TokenInfo.TeamDangling) instead of
-	// leaving an unrestricted empty scope. An orphan user_id intentionally
-	// keeps its optional user policy unrestricted — production holds valid
-	// tokens whose owner row no longer exists (see auth_test.go).
+	// Missing referenced parents deny instead of becoming unrestricted scopes.
 	info.TeamDangling = teamID != nil && teamIDCheck == nil
 	info.ProjectDangling = projectID != nil && projectIDCheck == nil
 
-	// Project model scope is enforced whenever the token has a project_id.
 	info.ProjectModels = projectModels
 	info.ProjectBlocked = projectBlocked
 
@@ -411,28 +398,18 @@ func (a *Authenticator) fetchTokenFromDB(ctx context.Context, hashedToken string
 	return &info, nil
 }
 
-func decodeTokenMetadata(raw []byte) (map[string]interface{}, []string) {
+func decodeMetadata(raw []byte) map[string]interface{} {
 	if len(raw) == 0 {
-		return nil, nil
+		return nil
 	}
-
 	var metadata map[string]interface{}
 	if err := json.Unmarshal(raw, &metadata); err != nil {
-		return nil, nil
+		return nil
 	}
-	tagValue, exists := metadata["tags"]
-	if !exists || tagValue == nil {
-		return metadata, nil
+	if len(metadata) == 0 {
+		return nil
 	}
-	encodedTags, err := json.Marshal(tagValue)
-	if err != nil {
-		return metadata, nil
-	}
-	var tags []string
-	if err := json.Unmarshal(encodedTags, &tags); err != nil {
-		return metadata, nil
-	}
-	return metadata, append([]string(nil), tags...)
+	return metadata
 }
 
 // InvalidateToken removes a token from cache

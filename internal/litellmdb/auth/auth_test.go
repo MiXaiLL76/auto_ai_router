@@ -682,42 +682,6 @@ func TestAuthenticator_CacheStats(t *testing.T) {
 	assert.Greater(t, stats.Misses, uint64(0))
 }
 
-func TestDecodeTokenMetadataExtractsOnlyStringArrayTags(t *testing.T) {
-	tests := []struct {
-		name         string
-		raw          string
-		wantMetadata map[string]interface{}
-		wantTags     []string
-	}{
-		{
-			name:         "tags array",
-			raw:          `{"fixture":"migration","tags":["primary","chat"]}`,
-			wantMetadata: map[string]interface{}{"fixture": "migration", "tags": []interface{}{"primary", "chat"}},
-			wantTags:     []string{"primary", "chat"},
-		},
-		{
-			name:         "missing tags",
-			raw:          `{"fixture":"migration"}`,
-			wantMetadata: map[string]interface{}{"fixture": "migration"},
-		},
-		{
-			name:         "scalar tags rejected",
-			raw:          `{"tags":"must-not-be-coerced"}`,
-			wantMetadata: map[string]interface{}{"tags": "must-not-be-coerced"},
-		},
-		{name: "invalid metadata", raw: `{`, wantMetadata: nil},
-		{name: "SQL null metadata", raw: "", wantMetadata: nil},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			metadata, tags := decodeTokenMetadata([]byte(tt.raw))
-			assert.Equal(t, tt.wantMetadata, metadata)
-			assert.Equal(t, tt.wantTags, tags)
-		})
-	}
-}
-
 func TestAuthenticator_ValidateToken_NonSKToken(t *testing.T) {
 	cache, err := NewCache(100, time.Minute)
 	require.NoError(t, err)

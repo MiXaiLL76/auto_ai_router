@@ -239,9 +239,8 @@ func (a *ProxyModelTable) FetchModelsForAIR(ctx context.Context, signingKey stri
 
 		// Build ModelRPMConfig
 		rpmCfg := config.ModelRPMConfig{
-			Name:         modelName,
-			DeploymentID: derefStr(model.ModelId, ""),
-			Credential:   credName,
+			Name:       modelName,
+			Credential: credName,
 		}
 		if model.LlmParams.RPM != nil {
 			rpmCfg.RPM = *model.LlmParams.RPM
