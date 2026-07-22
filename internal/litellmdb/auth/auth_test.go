@@ -301,6 +301,31 @@ func TestTokenInfo_Validate(t *testing.T) {
 		err := info.Validate("") // Empty model - skip check
 		assert.NoError(t, err)
 	})
+
+	t.Run("orphan user reference keeps optional user policy unrestricted", func(t *testing.T) {
+		// Production contains active tokens whose user_id no longer has a
+		// LiteLLM_UserTable row. LEFT JOIN fields therefore scan as nil while
+		// the token identity itself remains present and valid.
+		info := &models.TokenInfo{
+			UserID:     "deleted-owner",
+			UserModels: nil,
+		}
+		assert.NoError(t, info.Validate("gpt-4"))
+	})
+
+	t.Run("dangling team reference fails closed", func(t *testing.T) {
+		// Unlike an orphan user (intentionally unrestricted, see above), a
+		// team_id whose LiteLLM_TeamTable row is gone must deny: the team
+		// scope cannot be resolved, and an empty scope would otherwise be
+		// treated as unrestricted — a fail-open for all-team-models keys.
+		info := &models.TokenInfo{
+			Models:       []string{models.AllTeamModels},
+			TeamID:       "deleted-team",
+			TeamDangling: true,
+		}
+		assert.ErrorIs(t, info.Validate("gpt-4"), models.ErrModelNotAllowed)
+	})
+
 }
 
 func TestCache_Auth_SetGet(t *testing.T) {
