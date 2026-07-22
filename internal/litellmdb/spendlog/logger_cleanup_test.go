@@ -511,6 +511,8 @@ func TestFinalizeDLQWaitsForWriterBarrier(t *testing.T) {
 	logger := NewLogger(nil, &models.Config{Logger: testhelpers.NewTestLogger()})
 	logger.addToDLQ([]*models.SpendLogEntry{{RequestID: "late-writer-failure"}}, assert.AnError, 1)
 
+	// Hold the writer barrier the way a running writer worker would.
+	logger.writerWg.Add(1)
 	finalized := make(chan struct{})
 	go func() {
 		logger.finalizeDLQ()
@@ -521,7 +523,7 @@ func TestFinalizeDLQWaitsForWriterBarrier(t *testing.T) {
 		t.Fatal("DLQ finalized before the writer barrier")
 	case <-time.After(20 * time.Millisecond):
 	}
-	close(logger.workerDone)
+	logger.writerWg.Done()
 	select {
 	case <-finalized:
 	case <-time.After(time.Second):

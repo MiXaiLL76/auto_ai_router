@@ -128,12 +128,19 @@ func NewLogger(cfg *Config) (*Logger, error) {
 	return l, nil
 }
 
-// Start starts the background worker, health checker and DLQ recovery loop.
+// Start starts the background workers, health checker and DLQ recovery loop.
 // Safe to call multiple times (idempotent).
 func (l *Logger) Start() {
 	l.startOnce.Do(func() {
-		l.wg.Add(3)
-		go l.worker()
+		numWorkers := l.config.LogWorkers
+		if numWorkers <= 0 {
+			numWorkers = 1
+		}
+
+		l.wg.Add(numWorkers + 2)
+		for i := 0; i < numWorkers; i++ {
+			go l.worker()
+		}
 		go l.healthCheckWorker()
 		go l.dlqRecoveryWorker()
 		l.logger.Info("[Kafka] SpendLogger started",
@@ -141,6 +148,7 @@ func (l *Logger) Start() {
 			"queue_size", l.config.LogQueueSize,
 			"batch_size", l.config.LogBatchSize,
 			"flush_interval", l.config.LogFlushInterval,
+			"workers", numWorkers,
 		)
 	})
 }

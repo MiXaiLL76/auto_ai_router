@@ -1,10 +1,6 @@
 package spendlog
 
 import (
-	"context"
-	"encoding/json"
-	"os"
-	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -40,8 +36,8 @@ func TestFilterBatchByInsertedIDs_DeduplicatesInputBatch(t *testing.T) {
 
 	inserted := filterBatchByInsertedIDs(batch, []string{"req-1"})
 	require.Len(t, inserted, 1)
-	assert.Equal(t, "req-1", inserted[0].RequestID)
-	assert.Equal(t, 1.0, aggregateSpendUpdates(inserted).Tokens[entityModelKey{EntityID: "key-1"}])
+	assert.Equal(t, "req-1", inserted[0].entry.RequestID)
+	assert.Equal(t, 1.0, aggregateSpendUpdates(insertedEntries(inserted)).Tokens[entityModelKey{EntityID: "key-1"}])
 }
 
 func TestRecordCommittedBatchCountsOnlyPersistedRows(t *testing.T) {
@@ -118,92 +114,6 @@ func TestTryLogQueueFullIsImmediateAndRetainsExactEntryInDLQ(t *testing.T) {
 	assert.Same(t, second, logger.dlq[0].batch[0])
 }
 
-func TestDailyEndpointMatchesGoldenFixtures(t *testing.T) {
-	files, err := filepath.Glob(filepath.Join("..", "..", "..", "testdata", "golden", "spend-log", "*.json"))
-	require.NoError(t, err)
-	require.NotEmpty(t, files)
-
-	for _, file := range files {
-		file := file
-		t.Run(filepath.Base(file), func(t *testing.T) {
-			payload, err := os.ReadFile(file)
-			require.NoError(t, err)
-			var fixture struct {
-				RawRow struct {
-					CallType string `json:"call_type"`
-				} `json:"raw_row"`
-				Daily struct {
-					Dimensions struct {
-						Endpoint string `json:"endpoint"`
-					} `json:"dimensions"`
-				} `json:"daily"`
-			}
-			require.NoError(t, json.Unmarshal(payload, &fixture))
-			assert.Equal(t, fixture.Daily.Dimensions.Endpoint, dailyEndpoint(fixture.RawRow.CallType))
-		})
-	}
-}
-
-func TestSpendCountersMatchGoldenContract(t *testing.T) {
-	payload, err := os.ReadFile(filepath.Join("..", "..", "..", "testdata", "golden", "spend-log", "chat-completions.json"))
-	require.NoError(t, err)
-	var fixture struct {
-		RawRow struct {
-			APIKey         string   `json:"api_key"`
-			Model          string   `json:"model"`
-			UserID         string   `json:"user"`
-			TeamID         string   `json:"team_id"`
-			OrganizationID string   `json:"organization_id"`
-			EndUser        string   `json:"end_user"`
-			AgentID        string   `json:"agent_id"`
-			RequestTags    []string `json:"request_tags"`
-			Spend          float64  `json:"spend"`
-		} `json:"raw_row"`
-		CounterDeltas []struct {
-			Table string `json:"table"`
-		} `json:"counter_deltas"`
-	}
-	require.NoError(t, json.Unmarshal(payload, &fixture))
-	tags, err := json.Marshal(fixture.RawRow.RequestTags)
-	require.NoError(t, err)
-	updates := aggregateSpendUpdates([]*models.SpendLogEntry{{
-		APIKey: fixture.RawRow.APIKey, Model: fixture.RawRow.Model, UserID: fixture.RawRow.UserID,
-		TeamID: fixture.RawRow.TeamID, OrganizationID: fixture.RawRow.OrganizationID,
-		EndUser: fixture.RawRow.EndUser, AgentID: fixture.RawRow.AgentID,
-		RequestTags: string(tags), Spend: fixture.RawRow.Spend,
-	}})
-
-	assert.Equal(t, map[entityModelKey]float64{{EntityID: fixture.RawRow.APIKey, Model: fixture.RawRow.Model}: fixture.RawRow.Spend}, updates.Tokens)
-	assert.Equal(t, map[entityModelKey]float64{{EntityID: fixture.RawRow.UserID, Model: fixture.RawRow.Model}: fixture.RawRow.Spend}, updates.Users)
-	assert.Equal(t, map[entityModelKey]float64{{EntityID: fixture.RawRow.TeamID, Model: fixture.RawRow.Model}: fixture.RawRow.Spend}, updates.Teams)
-	assert.Equal(t, map[entityModelKey]float64{{EntityID: fixture.RawRow.OrganizationID, Model: fixture.RawRow.Model}: fixture.RawRow.Spend}, updates.Orgs)
-	assert.Equal(t, map[teamMemberKey]float64{{TeamID: fixture.RawRow.TeamID, UserID: fixture.RawRow.UserID}: fixture.RawRow.Spend}, updates.TeamMembers)
-	assert.Equal(t, map[organizationMemberKey]float64{{OrganizationID: fixture.RawRow.OrganizationID, UserID: fixture.RawRow.UserID}: fixture.RawRow.Spend}, updates.OrganizationMembers)
-	assert.Equal(t, map[string]float64{fixture.RawRow.EndUser: fixture.RawRow.Spend}, updates.EndUsers)
-	assert.Equal(t, map[string]float64{fixture.RawRow.RequestTags[0]: fixture.RawRow.Spend}, updates.Tags)
-	assert.Equal(t, map[string]float64{fixture.RawRow.AgentID: fixture.RawRow.Spend}, updates.Agents)
-
-	tables := make([]string, 0, len(fixture.CounterDeltas))
-	for _, delta := range fixture.CounterDeltas {
-		tables = append(tables, delta.Table)
-	}
-	assert.ElementsMatch(t, []string{
-		"LiteLLM_VerificationToken", "LiteLLM_UserTable", "LiteLLM_TeamTable",
-		"LiteLLM_TeamMembership", "LiteLLM_OrganizationTable", "LiteLLM_OrganizationMembership",
-		"LiteLLM_EndUserTable", "LiteLLM_TagTable", "LiteLLM_AgentsTable",
-	}, tables)
-}
-
-func TestTagAggregationRejectsMalformedJSON(t *testing.T) {
-	err := aggregateDailyTagSpendLogs(
-		context.Background(),
-		nil,
-		testhelpers.NewTestLogger(),
-		[]spendLogRecord{{RequestID: "req-invalid-tags", RequestTags: "not-json"}},
-	)
-	assert.Error(t, err)
-}
-
 func TestAggregationSuccessIsRecordedOnlyAfterAtomicCommit(t *testing.T) {
 	logger := newObservabilityTestLogger(2, 2)
 	before := time.Now()
@@ -255,19 +165,6 @@ func TestAddToDLQOwnsBatchSlice(t *testing.T) {
 	require.Len(t, logger.dlq[0].batch, 1)
 	assert.Same(t, original, logger.dlq[0].batch[0],
 		"DLQ must not be mutated by reuse of the worker batch buffer")
-}
-
-func TestParseUniqueRequestTagsDeduplicatesAndRejectsMalformedShapes(t *testing.T) {
-	tags, err := parseUniqueRequestTags(`["tag-a","tag-a","","tag-b"]`)
-	require.NoError(t, err)
-	assert.Equal(t, []string{"tag-a", "tag-b"}, tags)
-
-	for _, malformed := range []string{"not-json", `{"tag":"tag-a"}`, `["tag-a",1]`} {
-		t.Run(malformed, func(t *testing.T) {
-			_, err := parseUniqueRequestTags(malformed)
-			assert.Error(t, err)
-		})
-	}
 }
 
 func TestCommitErrorInvalidatesComparisonWindowButRemainsReplaySafe(t *testing.T) {

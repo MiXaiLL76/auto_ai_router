@@ -297,17 +297,6 @@ func TestSpendObservabilityMetrics(t *testing.T) {
 	assert.Equal(t, 0.0, testutil.ToFloat64(SpendComparisonWindowValid))
 }
 
-func TestSpendSinkHealthyTracksLiveState(t *testing.T) {
-	SetSpendSinkHealthy(false)
-	assert.Zero(t, testutil.ToFloat64(SpendSinkHealthy))
-
-	SetSpendSinkHealthy(true)
-	assert.Equal(t, 1.0, testutil.ToFloat64(SpendSinkHealthy))
-
-	SetSpendSinkHealthy(false)
-	assert.Zero(t, testutil.ToFloat64(SpendSinkHealthy))
-}
-
 func TestUpdateCredentialTPM(t *testing.T) {
 	CredentialTPMCurrent.Reset()
 

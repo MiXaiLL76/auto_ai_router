@@ -33,7 +33,6 @@ nav = [
     { "Model Pricing" = "litellm-integration/pricing.md" },
     { "LiteLLM Auth" = "litellm-integration/litellm_auth.md" },
     { "Kafka Spend Log" = "litellm-integration/kafka_spend_log.md" },
-    { "Spend Log Operations" = "spend-log/operations.md" },
   ]},
   { "CLI Integration" = [
     {"Codex" = "cli-tools/codex.md"},

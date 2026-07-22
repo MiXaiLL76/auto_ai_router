@@ -13,6 +13,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/converter"
 	"github.com/mixaill76/auto_ai_router/internal/kafkalog"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb"
+	"github.com/mixaill76/auto_ai_router/internal/litellmdb/spendlog"
 	"github.com/mixaill76/auto_ai_router/internal/logger"
 	"github.com/mixaill76/auto_ai_router/internal/security"
 	"github.com/mixaill76/auto_ai_router/internal/utils"
@@ -153,39 +154,10 @@ func (p *Proxy) handleLiteLLMAuthError(ctx context.Context, w http.ResponseWrite
 	return true
 }
 
-// litellmCallType translates an AIR request path into the call_type value the
-// LiteLLM proxy records for the same operation (the async method name, e.g.
-// "acompletion" — see litellm route_llm_request.ROUTE_ENDPOINT_MAPPING). The
-// daily aggregation pipeline keys its endpoint dimension off these values, and
-// the spend comparison relies on them matching the primary accounting.
-// Unknown paths map to "" — the raw spend row is still written, only the daily
-// aggregation is skipped for it.
+// litellmCallType translates an AIR request path into the LiteLLM call_type.
+// The single source of truth for the route table is the spendlog package.
 func litellmCallType(path string) string {
-	switch {
-	case strings.Contains(path, "/chat/completions"):
-		return "acompletion"
-	case strings.Contains(path, "/embeddings"):
-		return "aembedding"
-	case strings.Contains(path, "/responses"):
-		return "aresponses"
-	case strings.Contains(path, "/images/generations"):
-		return "aimage_generation"
-	case strings.Contains(path, "/images/edits"):
-		return "aimage_edit"
-	case strings.Contains(path, "/audio/transcriptions"):
-		return "atranscription"
-	case strings.Contains(path, "/audio/speech"):
-		return "aspeech"
-	case strings.Contains(path, "/moderations"):
-		return "amoderation"
-	case strings.Contains(path, "/rerank"):
-		return "arerank"
-	// Bare "/completions" must stay below "/chat/completions".
-	case strings.Contains(path, "/completions"):
-		return "atext_completion"
-	default:
-		return ""
-	}
+	return spendlog.LiteLLMCallTypeForPath(path)
 }
 
 // logSpendToLiteLLMDB logs request to LiteLLM_SpendLogs table and, if enabled,

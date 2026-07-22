@@ -3,6 +3,7 @@ package spendlog
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -21,7 +22,6 @@ func TestCommitSpendTransactionReturnsLockedInclusiveSpendAfterCommit(t *testing
 	tx := &keySpendTestTx{
 		atomicTestTx: &atomicTestTx{
 			insertedIDs: []string{entry.RequestID},
-			spendRows:   [][]any{atomicTestSpendRow(entry)},
 		},
 		keySpend:      2.75,
 		keySpendKnown: true,
@@ -71,8 +71,6 @@ func TestCommitSpendTransactionReturnsCollisionFallbackID(t *testing.T) {
 	tx := &keySpendTestTx{
 		atomicTestTx: &atomicTestTx{
 			insertResults: [][]string{{}, {entry.AirEventID}},
-			ownerRows:     [][]any{{entry.RequestID, "air-event-owner"}},
-			spendRows:     [][]any{atomicTestSpendRowWithRequestID(entry, entry.AirEventID)},
 		},
 		keySpend:      1.25,
 		keySpendKnown: true,
@@ -92,7 +90,6 @@ func TestCommitSpendTransactionKeepsMissingOrNullKeySpendUnknown(t *testing.T) {
 	tx := &keySpendTestTx{
 		atomicTestTx: &atomicTestTx{
 			insertedIDs: []string{entry.RequestID},
-			spendRows:   [][]any{atomicTestSpendRow(entry)},
 		},
 		keySpendKnown: false,
 	}
@@ -111,7 +108,6 @@ func TestCommitSpendTransactionReadFailureRollsBackAndReturnsNoValue(t *testing.
 	tx := &keySpendTestTx{
 		atomicTestTx: &atomicTestTx{
 			insertedIDs: []string{entry.RequestID},
-			spendRows:   [][]any{atomicTestSpendRow(entry)},
 		},
 		queryRowErr: errors.New("injected key spend read failure"),
 	}
@@ -133,7 +129,6 @@ func TestCommitSpendTransactionAmbiguousCommitReturnsNoPreCommitValue(t *testing
 	tx := &keySpendTestTx{
 		atomicTestTx: &atomicTestTx{
 			insertedIDs: []string{entry.RequestID},
-			spendRows:   [][]any{atomicTestSpendRow(entry)},
 			commitErr:   errors.New("injected commit acknowledgement loss"),
 		},
 		keySpend:      9.75,
@@ -237,7 +232,10 @@ type keySpendTestTx struct {
 	rowArgs       [][]any
 }
 
-func (tx *keySpendTestTx) QueryRow(_ context.Context, sql string, args ...any) pgx.Row {
+func (tx *keySpendTestTx) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
+	if strings.Contains(sql, `UPDATE "LiteLLM_SpendLogs"`) {
+		return tx.atomicTestTx.QueryRow(ctx, sql, args...)
+	}
 	tx.rowQueries = append(tx.rowQueries, sql)
 	tx.rowArgs = append(tx.rowArgs, append([]any(nil), args...))
 	return keySpendTestRow{

@@ -3,6 +3,8 @@ package models
 import (
 	"errors"
 	"log/slog"
+	"regexp"
+	"strings"
 	"time"
 
 	"github.com/mixaill76/auto_ai_router/internal/utils"
@@ -22,9 +24,6 @@ var (
 
 	// ErrTeamBlocked is returned when the token's parent team is blocked
 	ErrTeamBlocked = errors.New("litellmdb: team blocked")
-
-	// ErrProjectBlocked is returned when the token's project is blocked
-	ErrProjectBlocked = errors.New("litellmdb: project blocked")
 
 	// ErrTokenExpired is returned when token has expired
 	ErrTokenExpired = errors.New("litellmdb: token expired")
@@ -63,6 +62,7 @@ type Config struct {
 	LogQueueSize        int           // Queue buffer size (default: 10000)
 	LogBatchSize        int           // Batch size for INSERT (default: 100)
 	LogFlushInterval    time.Duration // Flush interval (default: 5s)
+	LogWorkers          int           // Number of parallel queue-draining workers (default: 4)
 	DisableSpendLogging bool          // Control-plane managers set this to avoid creating a writer
 
 	// DisableSpendLogsWrite disables writing SpendLogEntry/Daily* aggregates to
@@ -85,6 +85,7 @@ func DefaultConfig() *Config {
 		LogQueueSize:        10000,
 		LogBatchSize:        100,
 		LogFlushInterval:    5 * time.Second,
+		LogWorkers:          4,
 	}
 }
 
@@ -122,6 +123,9 @@ func (c *Config) ApplyDefaults() {
 	if c.LogFlushInterval == 0 {
 		c.LogFlushInterval = defaults.LogFlushInterval
 	}
+	if c.LogWorkers == 0 {
+		c.LogWorkers = defaults.LogWorkers
+	}
 	if c.Logger == nil {
 		c.Logger = slog.Default()
 	}
@@ -151,7 +155,6 @@ type TokenInfo struct {
 	TeamID         string   // Team ID (optional)
 	OrganizationID string   // Organization ID (optional, resolved from token or team)
 	ProjectID      string   // Project ID (optional)
-	AgentID        string   // Agent ID (optional)
 	Tags           []string // Request tags from token metadata
 
 	// Token budget (embedded)
@@ -379,6 +382,11 @@ func (t *TokenInfo) ModelAccessScopes() []ModelAccessScope {
 	return scopes
 }
 
+// exactModelScopeMatch reports whether model passes one allowlist. Besides the
+// exact name and the "*" / all-proxy-models wildcards, an entry may be a regex
+// (matched anchored, i.e. it must cover the whole model name): one pattern
+// such as "anthropic/.*" or ".*claude-haiku.*" then includes every non-public
+// naming of the model without enumerating each alias in the allowlist.
 func exactModelScopeMatch(model string, allowedModels []string) bool {
 	if len(allowedModels) == 0 {
 		return true
@@ -387,8 +395,22 @@ func exactModelScopeMatch(model string, allowedModels []string) bool {
 		if allowed == model || allowed == "*" || allowed == AllProxyModels {
 			return true
 		}
+		if modelScopePatternMatches(allowed, model) {
+			return true
+		}
 	}
 	return false
+}
+
+// modelScopePatternMatches treats an allowlist entry containing regex
+// metacharacters as an anchored pattern. Literal entries keep exact-match
+// semantics, so existing allowlists behave exactly as before.
+func modelScopePatternMatches(pattern, model string) bool {
+	if !strings.ContainsAny(pattern, `\.^$*+?()[]{}|`) {
+		return false
+	}
+	matched, err := regexp.MatchString("^(?:"+pattern+")$", model)
+	return err == nil && matched
 }
 
 // IsModelAllowedBy checks every applicable model scope with matcher.
@@ -471,7 +493,7 @@ func (t *TokenInfo) checkOrganizationMemberBudget() bool {
 // Validate checks token validity for a request with full budget hierarchy
 // Order of checks (stops on first failure):
 // 1. Token blocked/expired
-// 2. Team/project blocked
+// 2. Team blocked
 // 3. Token budget
 // 4. Team budget
 // 5. Team member budget
@@ -489,9 +511,6 @@ func (t *TokenInfo) Validate(model string) error {
 	}
 	if t.TeamBlocked != nil && *t.TeamBlocked {
 		return ErrTeamBlocked
-	}
-	if t.ProjectBlocked != nil && *t.ProjectBlocked {
-		return ErrProjectBlocked
 	}
 
 	// Check budget hierarchy (embedded first, then external)
@@ -566,13 +585,7 @@ type SpendLogEntry struct {
 	UserID         string // User ID
 	TeamID         string // Team ID
 	OrganizationID string // Organization ID
-	ProjectID      string // Runtime project attribution (persisted in Metadata)
 	EndUser        string // End user ID (from metadata)
-
-	// MCP & Tags
-	MCPNamespacedToolName string // MCP tool name with namespace
-	RequestTags           string // JSON array of request tags
-	AgentID               string // Agent ID from signed context
 
 	// Status
 	Status string // "success" | "failure"
@@ -583,12 +596,6 @@ type SpendLogEntry struct {
 	// Runtime-only observability flag; persisted inside Metadata rather than as
 	// a LiteLLM_SpendLogs column.
 	ComparisonEligible bool
-
-	// Runtime-only tool discovery data. These fields feed LiteLLM_ToolTable in
-	// the same transaction as this SpendLog row and are never persisted in the
-	// LiteLLM_SpendLogs row or its metadata.
-	DeclaredToolNames []string
-	ToolKeyAlias      string
 }
 
 // ==================== Stats ====================

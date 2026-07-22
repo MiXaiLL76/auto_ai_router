@@ -250,7 +250,6 @@ redis:
   force_single_client: true             # Disable cluster detection for single-node setup
 
 # Optional: LiteLLM control-plane database integration (auth/model sync only).
-# Spend writes are configured separately in spend_log below.
 litellm_db:
   enabled: false  # Set to true to enable LiteLLM DB integration
   is_required: false  # Set to true to fail startup if DB connection fails
@@ -266,20 +265,6 @@ litellm_db:
   log_queue_size: 5000  # Spend log queue size (default: 5000)
   log_batch_size: 100  # Spend log batch size (default: 100)
   log_flush_interval: 5s  # Spend log flush interval (default: 5s)
+  log_workers: 4  # Parallel queue-draining writer workers (default: 4)
   log_retry_attempts: 3  # Spend log retry attempts (default: 3)
   log_retry_delay: 1s  # Spend log retry delay (default: 1s)
-
-# Isolated LiteLLM-compatible writer. It is enabled when database_url is set.
-# A database-name mismatch disables only this writer; client routing remains
-# available.
-spend_log:
-  database_url: "os.environ/SPEND_DATABASE_URL"
-  expected_database_name: "test-db"     # Exact current_database() guard
-  api_base: "http://air-ru01/v1"        # Fixed comparison contract
-  max_conns: 10
-  min_conns: 2
-  health_check_interval: 10s
-  connect_timeout: 5s
-  log_queue_size: 5000
-  log_batch_size: 100
-  log_flush_interval: 5s

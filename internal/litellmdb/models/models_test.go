@@ -201,48 +201,64 @@ func TestTokenInfo_IsModelAllowed_ModelNotInList(t *testing.T) {
 	assert.False(t, token.IsModelAllowed("claude-3"))
 }
 
+func TestTokenInfo_IsModelAllowed_RegexPattern(t *testing.T) {
+	token := &TokenInfo{
+		Models: []string{`anthropic/.*`, `.*claude-haiku.*`},
+	}
+
+	assert.True(t, token.IsModelAllowed("anthropic/claude-haiku-4.5"))
+	assert.True(t, token.IsModelAllowed("claude-haiku-4-5-20251001"))
+	assert.False(t, token.IsModelAllowed("gpt-4o"))
+	assert.False(t, token.IsModelAllowed("anthropic"), "the anchored pattern must cover the full name")
+}
+
+func TestTokenInfo_IsModelAllowed_LiteralEntriesKeepExactSemantics(t *testing.T) {
+	token := &TokenInfo{
+		Models: []string{"gpt-4"},
+	}
+
+	assert.True(t, token.IsModelAllowed("gpt-4"))
+	assert.False(t, token.IsModelAllowed("gpt-4o"), "a literal entry must not widen into a prefix match")
+}
+
+func TestTokenInfo_IsModelAllowed_InvalidRegexTreatedAsNoMatch(t *testing.T) {
+	token := &TokenInfo{
+		Models: []string{"gpt-4("},
+	}
+
+	// The entry still matches its own literal spelling via the exact comparison,
+	// but the broken pattern must not crash or match anything else.
+	assert.True(t, token.IsModelAllowed("gpt-4("))
+	assert.False(t, token.IsModelAllowed("gpt-4"))
+	assert.False(t, token.IsModelAllowed("gpt-4(x"))
+}
+
+func TestTokenInfo_IsModelAllowed_WildcardStillMatchesEverything(t *testing.T) {
+	token := &TokenInfo{
+		Models: []string{"*"},
+	}
+
+	assert.True(t, token.IsModelAllowed("gpt-4o"))
+	assert.True(t, token.IsModelAllowed("anthropic/claude-haiku-4.5"))
+}
+
 func TestTokenInfo_IsModelAllowed_IntersectsApplicableHierarchy(t *testing.T) {
 	token := &TokenInfo{
-		Models:           []string{"openai/gpt-4o-mini", "gpt-4o-mini"},
-		UserID:           "user-alt",
-		UserModels:       []string{"openai/gpt-4o-mini"},
-		TeamID:           "team-alt",
-		TeamModels:       []string{"openai/gpt-4o-mini"},
-		TeamMemberModels: []string{"openai/gpt-4o-mini"},
-		ProjectID:        "project-alt",
-		ProjectModels:    []string{"openai/gpt-4o-mini"},
+		Models:     []string{"openai/gpt-4o-mini", "gpt-4o-mini"},
+		UserID:     "user-alt",
+		TeamID:     "team-alt",
+		TeamModels: []string{"openai/gpt-4o-mini"},
 	}
 
 	assert.True(t, token.IsModelAllowed("openai/gpt-4o-mini"))
 	assert.False(t, token.IsModelAllowed("gpt-4o-mini"), "a child key cannot widen its parent scopes")
 }
 
-func TestTokenInfo_IsModelAllowed_UsesUserScopeOnlyForPersonalKeys(t *testing.T) {
-	personal := &TokenInfo{
-		Models:     []string{"public/chat", "public/embed"},
-		UserID:     "personal-user",
-		UserModels: []string{NoDefaultModels, "public/chat"},
-	}
-	assert.False(t, personal.IsModelAllowed("public/chat"), "no-default-models overrides explicit user model IDs")
-	assert.False(t, personal.IsModelAllowed("public/embed"))
-
-	teamKey := &TokenInfo{
-		Models:     []string{"public/chat", "public/embed"},
-		UserID:     "team-user",
-		UserModels: []string{NoDefaultModels},
-		TeamID:     "team",
-		TeamModels: []string{"public/chat", "public/embed"},
-	}
-	assert.True(t, teamKey.IsModelAllowed("public/embed"), "LiteLLM does not apply the user scope to team keys")
-}
-
 func TestTokenInfo_IsModelAllowed_EmptyParentScopeIsUnrestricted(t *testing.T) {
 	token := &TokenInfo{
-		Models:        []string{"public/chat"},
-		TeamID:        "team",
-		TeamModels:    nil,
-		ProjectID:     "project",
-		ProjectModels: []string{},
+		Models:     []string{"public/chat"},
+		TeamID:     "team",
+		TeamModels: nil,
 	}
 
 	assert.True(t, token.IsModelAllowed("public/chat"))
@@ -512,17 +528,9 @@ func TestTokenInfo_Validate_ModelAllowedWithEmptyCheck(t *testing.T) {
 
 func TestTokenInfo_Validate_BlockedParentScopes(t *testing.T) {
 	teamBlocked := true
-	projectBlocked := true
 
-	t.Run("team", func(t *testing.T) {
-		token := &TokenInfo{TeamID: "team", TeamBlocked: &teamBlocked}
-		assert.ErrorIs(t, token.Validate(""), ErrTeamBlocked)
-	})
-
-	t.Run("project", func(t *testing.T) {
-		token := &TokenInfo{ProjectID: "project", ProjectBlocked: &projectBlocked}
-		assert.ErrorIs(t, token.Validate(""), ErrProjectBlocked)
-	})
+	token := &TokenInfo{TeamID: "team", TeamBlocked: &teamBlocked}
+	assert.ErrorIs(t, token.Validate(""), ErrTeamBlocked)
 }
 
 func TestTokenInfo_Validate_ValidationOrder(t *testing.T) {

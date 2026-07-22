@@ -25,8 +25,7 @@ COPY . .
 # Build the application
 ARG VERSION=dev
 ARG COMMIT=unknown
-RUN go build -ldflags="-s -w -X main.Version=${VERSION} -X main.Commit=${COMMIT}" -o auto_ai_router ./cmd/server && \
-    go build -ldflags="-s -w" -o spend-compare ./cmd/spend-compare
+RUN go build -ldflags="-s -w -X main.Version=${VERSION} -X main.Commit=${COMMIT}" -o auto_ai_router ./cmd/server
 
 # Final stage
 FROM alpine:latest
@@ -42,7 +41,6 @@ WORKDIR /app
 
 # Copy binary from builder
 COPY --from=builder /app/auto_ai_router .
-COPY --from=builder /app/spend-compare .
 
 # Change ownership
 RUN chown -R appuser:appuser /app
@@ -64,10 +62,14 @@ ENV GOGC=300
 # other non-heap RSS). As live heap approaches this, GC runs more aggressively
 # to stay under it — turning a would-be abrupt OOMKill into graceful, bounded
 # GC pressure instead. This is what makes GOGC=300 safe to run.
-ENV GOMEMLIMIT=1700MiB
+# ENV GOMEMLIMIT=1700MiB
 
 # Expose port (adjust if needed)
 EXPOSE 8080
+# pprof port — off by default (monitoring.pprof_enabled: false). Documented
+# here for clarity only; never publish it (-p / k8s Service) to anything but
+# an internal debug path (kubectl port-forward).
+EXPOSE 6060
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
