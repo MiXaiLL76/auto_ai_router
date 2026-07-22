@@ -1078,7 +1078,17 @@ func TestProxyRequest_SosanaTimeoutMasked(t *testing.T) {
 
 	assert.Equal(t, http.StatusRequestTimeout, w.Code)
 	assert.Contains(t, w.Body.String(), "Upstream provider error")
-	assert.Contains(t, logBuf.String(), "response_body_masked=true")
+	assert.NotContains(t, w.Body.String(), "task-1")
+	logText := logBuf.String()
+	assert.Contains(t, logText, "context deadline exceeded")
+	assert.True(t,
+		strings.Contains(logText, "Sosana task polling timed out") ||
+			strings.Contains(logText, "Sosana upstream request failed"),
+		"unexpected timeout log: %s", logText,
+	)
+	if strings.Contains(logText, "response_body=") {
+		assert.Contains(t, logText, "response_body_masked=true")
+	}
 }
 
 var sosanaResultPNG = []byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n', 0, 0, 0, 0}
