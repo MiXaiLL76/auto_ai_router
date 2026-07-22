@@ -3,7 +3,18 @@ package queries
 import (
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
 )
+
+func TestSpendLogInsertPrivacyColumnsAreExplicitEmptyObjects(t *testing.T) {
+	for _, query := range []string{QueryInsertSpendLog, BuildBatchInsertQuery(2)} {
+		assert.Contains(t, query, "messages")
+		assert.Contains(t, query, "response")
+		assert.Contains(t, query, "proxy_server_request")
+		assert.Contains(t, query, "'{}'::jsonb, '{}'::jsonb, '{}'::jsonb")
+	}
+}
 
 func TestBuildBatchInsertQuery(t *testing.T) {
 	tests := []struct {
@@ -39,7 +50,7 @@ func TestBuildBatchInsertQuery(t *testing.T) {
 			expectContains: []string{
 				`INSERT INTO "LiteLLM_SpendLogs"`,
 				"$1", "$2", "$3", // first row
-				"$25", "$26", "$27", // third row starts at $25 (3 * 24 = 72 params, row 3 starts at $49)
+				"$53", "$54", "$55", // third row starts at $53 (26 params per row)
 				"ON CONFLICT (request_id) DO NOTHING RETURNING request_id",
 			},
 		},
@@ -50,7 +61,7 @@ func TestBuildBatchInsertQuery(t *testing.T) {
 			expectContains: []string{
 				`INSERT INTO "LiteLLM_SpendLogs"`,
 				"$1",
-				"$120", // 5 rows * 24 params = 120
+				"$130", // 5 rows * 26 params = 130
 				"ON CONFLICT (request_id) DO NOTHING RETURNING request_id",
 			},
 		},

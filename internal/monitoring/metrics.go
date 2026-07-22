@@ -2,11 +2,14 @@ package monitoring
 
 import (
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 )
+
+var spendAggregationOldestUnixNano atomic.Int64
 
 var (
 	RequestsTotal = promauto.NewCounterVec(
@@ -154,10 +157,8 @@ var (
 		},
 	)
 
-	// Kafka spend-log publisher metrics (internal/kafkalog). These mirror
-	// kafkalog.Stats snapshots (cumulative queue/DLQ counters), so gauges are
-	// used even for monotonic counts rather than prometheus.Counter, which
-	// would double-count on every periodic poll.
+	// Kafka publisher stats are snapshots of cumulative counters, so gauges avoid
+	// double-counting when the periodic updater publishes a new snapshot.
 	KafkaSpendLoggerQueuedTotal = promauto.NewGauge(
 		prometheus.GaugeOpts{
 			Name: "auto_ai_router_kafka_spend_logger_queued_total",
@@ -189,7 +190,7 @@ var (
 	KafkaSpendLoggerDLQSize = promauto.NewGauge(
 		prometheus.GaugeOpts{
 			Name: "auto_ai_router_kafka_spend_logger_dlq_size",
-			Help: "Current number of batches held in the Kafka spend logger's dead letter queue",
+			Help: "Current number of batches held in the Kafka spend logger dead letter queue",
 		},
 	)
 
@@ -199,7 +200,179 @@ var (
 			Help: "Kafka broker connectivity for spend-log publishing (1 = healthy, 0 = unhealthy)",
 		},
 	)
+
+	SpendQueueDepth = promauto.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "auto_ai_router_spend_queue_depth",
+			Help: "Current number of spend entries waiting in the input channel",
+		},
+	)
+
+	SpendPendingEntries = promauto.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "auto_ai_router_spend_pending_entries",
+			Help: "Accepted spend entries not yet resolved by the writer or DLQ",
+		},
+	)
+
+	SpendPendingAggregationDepth = promauto.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "auto_ai_router_spend_pending_aggregation_depth",
+			Help: "Inserted spend batches waiting for or undergoing daily aggregation",
+		},
+	)
+
+	SpendDLQSize = promauto.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "auto_ai_router_spend_dlq_size",
+			Help: "Current number of batches in the in-memory spend dead letter queue",
+		},
+	)
+
+	SpendAggregationLagSeconds = promauto.NewGaugeFunc(
+		prometheus.GaugeOpts{
+			Name: "auto_ai_router_spend_aggregation_lag_seconds",
+			Help: "Age in seconds of the oldest outstanding daily aggregation batch",
+		},
+		func() float64 {
+			oldest := spendAggregationOldestUnixNano.Load()
+			if oldest == 0 {
+				return 0
+			}
+			lag := time.Since(time.Unix(0, oldest)).Seconds()
+			if lag < 0 {
+				return 0
+			}
+			return lag
+		},
+	)
+
+	SpendComparisonWindowValid = promauto.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "auto_ai_router_spend_comparison_window_valid",
+			Help: "Whether the current process-lifetime comparison window is transport-complete and fully aggregated",
+		},
+	)
+
+	SpendDroppedTotal = promauto.NewCounter(
+		prometheus.CounterOpts{
+			Name: "auto_ai_router_spend_dropped_total",
+			Help: "Total spend entries dropped before persistence",
+		},
+	)
+
+	SpendDLQOverflowTotal = promauto.NewCounter(
+		prometheus.CounterOpts{
+			Name: "auto_ai_router_spend_dlq_overflow_total",
+			Help: "Total spend batches lost because the in-memory DLQ was full",
+		},
+	)
+
+	SpendDuplicatesTotal = promauto.NewCounter(
+		prometheus.CounterOpts{
+			Name: "auto_ai_router_spend_duplicates_total",
+			Help: "Total raw rows ignored by request_id ON CONFLICT",
+		},
+	)
+
+	SpendCollisionUnresolvedTotal = promauto.NewCounter(
+		prometheus.CounterOpts{
+			Name: "auto_ai_router_spend_collision_unresolved_total",
+			Help: "Total spend rows dropped on a request_id conflict owned by another transaction without an AIR event ID to resolve it",
+		},
+	)
+
+	SpendAggregationErrorsTotal = promauto.NewCounter(
+		prometheus.CounterOpts{
+			Name: "auto_ai_router_spend_aggregation_errors_total",
+			Help: "Total terminal atomic accounting failures with an ambiguous commit outcome",
+		},
+	)
+
+	SpendPendingAggregationOverflowTotal = promauto.NewCounter(
+		prometheus.CounterOpts{
+			Name: "auto_ai_router_spend_pending_aggregation_overflow_total",
+			Help: "Total inserted spend batches that could not enter the daily aggregation queue",
+		},
+	)
+
+	SpendComparisonRowsTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "auto_ai_router_spend_comparison_rows_total",
+			Help: "Newly persisted spend rows by comparison eligibility",
+		},
+		[]string{"eligibility"},
+	)
 )
+
+// SpendSnapshot contains instantaneous spend writer state. Loss/error
+// counters are recorded separately so repeated snapshots cannot double count.
+type SpendSnapshot struct {
+	QueueDepth            int
+	PendingEntries        int
+	PendingAggregation    int
+	DLQSize               int
+	AggregationLag        time.Duration
+	ComparisonWindowValid bool
+}
+
+func ObserveSpendSnapshot(snapshot SpendSnapshot) {
+	SpendQueueDepth.Set(float64(snapshot.QueueDepth))
+	SpendPendingEntries.Set(float64(snapshot.PendingEntries))
+	SpendPendingAggregationDepth.Set(float64(snapshot.PendingAggregation))
+	SpendDLQSize.Set(float64(snapshot.DLQSize))
+	if snapshot.PendingAggregation == 0 {
+		spendAggregationOldestUnixNano.Store(0)
+	} else {
+		spendAggregationOldestUnixNano.Store(time.Now().Add(-snapshot.AggregationLag).UnixNano())
+	}
+	if snapshot.ComparisonWindowValid {
+		SpendComparisonWindowValid.Set(1)
+	} else {
+		SpendComparisonWindowValid.Set(0)
+	}
+}
+
+func addCounter(counter prometheus.Counter, count uint64) {
+	if count > 0 {
+		counter.Add(float64(count))
+	}
+}
+
+func RecordSpendDropped(count uint64) {
+	addCounter(SpendDroppedTotal, count)
+}
+
+func RecordSpendDLQOverflow(count uint64) {
+	addCounter(SpendDLQOverflowTotal, count)
+}
+
+func RecordSpendDuplicates(count uint64) {
+	addCounter(SpendDuplicatesTotal, count)
+}
+
+func RecordSpendCollisionUnresolved(count uint64) {
+	addCounter(SpendCollisionUnresolvedTotal, count)
+}
+
+func RecordSpendAggregationErrors(count uint64) {
+	addCounter(SpendAggregationErrorsTotal, count)
+}
+
+func RecordSpendPendingAggregationOverflow(count uint64) {
+	addCounter(SpendPendingAggregationOverflowTotal, count)
+}
+
+func RecordSpendComparisonRows(eligible bool, count uint64) {
+	if count == 0 {
+		return
+	}
+	label := "ineligible"
+	if eligible {
+		label = "eligible"
+	}
+	SpendComparisonRowsTotal.WithLabelValues(label).Add(float64(count))
+}
 
 type Metrics struct {
 	enabled bool

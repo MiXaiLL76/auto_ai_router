@@ -169,9 +169,11 @@ func TestTokenInfo_IsModelAllowed(t *testing.T) {
 		assert.True(t, info.IsModelAllowed("claude-3"))
 	})
 
-	t.Run("all-team-models sentinel with no team - unrestricted", func(t *testing.T) {
+	t.Run("all-team-models sentinel with no team - fail closed", func(t *testing.T) {
+		// LiteLLM fails closed when all-team-models is used without a team;
+		// the fail-open behavior from PR #82 is intentionally not carried over.
 		info := &models.TokenInfo{Models: []string{"all-team-models"}, TeamID: ""}
-		assert.True(t, info.IsModelAllowed("gpt-4"))
+		assert.False(t, info.IsModelAllowed("gpt-4"))
 	})
 
 	t.Run("all-team-models sentinel - resolves against team allow-list", func(t *testing.T) {
@@ -696,4 +698,27 @@ func TestAuthenticator_CacheHitRate(t *testing.T) {
 	stats := auth.CacheStats()
 	assert.Greater(t, stats.HitRate, 0.0)
 	assert.LessOrEqual(t, stats.HitRate, 100.0)
+}
+
+func TestFetchMasterKey_ConfigKeyCachedWhenDBUnavailable(t *testing.T) {
+	cache, err := NewCache(100, time.Minute)
+	require.NoError(t, err)
+	auth := NewAuthenticator(nil, cache, slog.Default())
+
+	require.NoError(t, auth.FetchMasterKey(context.Background(), "sk-config-master"))
+
+	info, ok := cache.Get(HashToken("sk-config-master"))
+	require.True(t, ok)
+	assert.Equal(t, "litellm-master-key", info.UserID)
+	assert.Equal(t, "litellm-master-key", info.KeyName)
+}
+
+func TestFetchMasterKey_EmptyConfigAndNoDB(t *testing.T) {
+	cache, err := NewCache(100, time.Minute)
+	require.NoError(t, err)
+	auth := NewAuthenticator(nil, cache, slog.Default())
+
+	assert.ErrorIs(t, auth.FetchMasterKey(context.Background(), ""), models.ErrTokenNotFound)
+	_, ok := cache.Get(HashToken(""))
+	assert.False(t, ok)
 }

@@ -219,6 +219,19 @@ models:
     rpm: 60
     tpm: -1
 
+# Optional: explicit client-facing model boundary. When present, ordinary API
+# keys may call only these canonical IDs plus public_model_alias and
+# accepted_model_alias entries that target them. Provider backend names remain
+# available only to the trusted master-key hop and are hidden from /v1/models.
+# client_model_ids:
+#   - "openai/gpt-4o-mini"
+# model_alias:
+#   "openai/gpt-4o-mini": "gpt-4o-mini"
+# public_model_alias:
+#   "gpt-4o-mini": "openai/gpt-4o-mini"
+# accepted_model_alias:
+#   "legacy-gpt-4o-mini": "openai/gpt-4o-mini"
+
 # Optional: Redis/Valkey backend for distributed rate limiting and response storage.
 # When enabled, all replicas share a single counter namespace — RPM/TPM limits are
 # enforced globally across the whole cluster instead of per-pod.
@@ -236,7 +249,7 @@ redis:
   conn_write_timeout: 10s               # Write/pipeline timeout (default: 10s)
   force_single_client: true             # Disable cluster detection for single-node setup
 
-# Optional: LiteLLM database integration for spend logging and auth
+# Optional: LiteLLM control-plane database integration (auth/model sync only).
 litellm_db:
   enabled: false  # Set to true to enable LiteLLM DB integration
   is_required: false  # Set to true to fail startup if DB connection fails
@@ -252,5 +265,6 @@ litellm_db:
   log_queue_size: 5000  # Spend log queue size (default: 5000)
   log_batch_size: 100  # Spend log batch size (default: 100)
   log_flush_interval: 5s  # Spend log flush interval (default: 5s)
+  log_workers: 4  # Parallel queue-draining writer workers (default: 4)
   log_retry_attempts: 3  # Spend log retry attempts (default: 3)
   log_retry_delay: 1s  # Spend log retry delay (default: 1s)

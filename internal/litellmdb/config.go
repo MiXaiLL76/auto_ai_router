@@ -13,6 +13,7 @@ var (
 	ErrModuleDisabled   = models.ErrModuleDisabled
 	ErrTokenNotFound    = models.ErrTokenNotFound
 	ErrTokenBlocked     = models.ErrTokenBlocked
+	ErrTeamBlocked      = models.ErrTeamBlocked
 	ErrTokenExpired     = models.ErrTokenExpired
 	ErrBudgetExceeded   = models.ErrBudgetExceeded
 	ErrModelNotAllowed  = models.ErrModelNotAllowed

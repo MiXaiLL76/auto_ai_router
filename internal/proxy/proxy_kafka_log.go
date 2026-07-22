@@ -90,7 +90,7 @@ func (p *Proxy) buildKafkaSpendEvent(
 		DurationMs:          endTime.Sub(logCtx.StartTime).Milliseconds(),
 		TTFTMs:              ttftMs,
 
-		CallType:     logCtx.Request.URL.Path,
+		CallType:     litellmCallType(logCtx.Request.URL.Path),
 		APIBase:      apiBase,
 		Status:       status,
 		HTTPStatus:   logCtx.HTTPStatus,

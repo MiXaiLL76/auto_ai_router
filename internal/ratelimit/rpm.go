@@ -34,20 +34,6 @@ type limiterConfig struct {
 	tpm int
 }
 
-// tokenUsage is kept here (used by local_backend.go in the same package).
-type tokenUsage struct {
-	timestamp time.Time
-	count     int
-}
-
-// MaxRequestsBufferSize limits the maximum number of request timestamps stored in the
-// local backend. This prevents unbounded memory growth.
-const MaxRequestsBufferSize = 10_000_000
-
-// MaxTokensBufferSize limits the maximum number of token records stored in the
-// local backend.
-const MaxTokensBufferSize = 10_000_000
-
 // New creates a new RPMLimiter backed by the in-process local backend.
 func New() *RPMLimiter {
 	return &RPMLimiter{

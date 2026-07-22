@@ -102,3 +102,23 @@ LEFT JOIN "LiteLLM_BudgetTable" b_omem ON omem.budget_id = b_omem.budget_id
 
 WHERE t.token = $1
 `
+
+// QuerySelectKeySpend reads the latest committed scalar spend for a virtual
+// key. NULL spend is deliberately reported as unknown instead of being
+// rewritten to zero.
+const QuerySelectKeySpend = `
+SELECT spend
+FROM "LiteLLM_VerificationToken"
+WHERE token = $1 AND spend IS NOT NULL
+`
+
+// QuerySelectKeySpendForUpdate pins the virtual-key row until the surrounding
+// transaction commits. The synchronous spend writer uses this after applying
+// the accounting projection so the returned value is serialized across AIR
+// instances and is safe to expose only after commit succeeds.
+const QuerySelectKeySpendForUpdate = `
+SELECT spend
+FROM "LiteLLM_VerificationToken"
+WHERE token = $1 AND spend IS NOT NULL
+FOR UPDATE
+`

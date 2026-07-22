@@ -3,8 +3,8 @@ package spendlog
 import (
 	"context"
 	"log/slog"
+	"strings"
 
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb/queries"
 )
 
@@ -20,6 +20,11 @@ type aggregateTeamKey struct {
 	endpoint              string
 }
 
+func (k aggregateTeamKey) lockOrder() string {
+	return strings.Join([]string{k.teamID, k.date, k.apiKey, k.model, k.modelGroup,
+		k.customLLMProvider, k.mcpNamespacedToolName, k.endpoint}, "\x00")
+}
+
 // aggregateDailyTeamSpendLogs aggregates spend logs into DailyTeamSpend
 //
 // This function:
@@ -32,24 +37,20 @@ type aggregateTeamKey struct {
 // Returns error on any database operation failure.
 func aggregateDailyTeamSpendLogs(
 	ctx context.Context,
-	conn *pgxpool.Conn,
+	conn dailySpendExecer,
 	logger *slog.Logger,
 	records []spendLogRecord,
 ) error {
 	// Map to aggregate by unique key
 	aggregations := make(map[aggregateTeamKey]*aggregationValue)
 	totalRows := 0
-	skippedRows := 0
 
 	for _, record := range records {
 		totalRows++
 
-		// Skip if no team_id
-		if record.TeamID == "" {
-			skippedRows++
-			continue
-		}
-
+		// No skip for empty team_id: LiteLLM records daily team rows with
+		// team_id="" for keys without a team, and the spend comparison
+		// counts them.
 		key := aggregateTeamKey{
 			teamID:                record.TeamID,
 			date:                  record.Date,
@@ -70,7 +71,6 @@ func aggregateDailyTeamSpendLogs(
 
 	logger.Debug("[DB] Team aggregation: scan complete",
 		"total_rows", totalRows,
-		"skipped_rows", skippedRows,
 		"aggregation_groups", len(aggregations),
 	)
 
@@ -80,7 +80,8 @@ func aggregateDailyTeamSpendLogs(
 	}
 
 	// Insert aggregated data into DailyTeamSpend
-	for key, value := range aggregations {
+	for _, key := range sortedDailyKeys(aggregations) {
+		value := aggregations[key]
 		_, err := conn.Exec(ctx,
 			queries.QueryUpsertDailyTeamSpend,
 			key.teamID, key.date, key.apiKey, key.model, key.modelGroup,
