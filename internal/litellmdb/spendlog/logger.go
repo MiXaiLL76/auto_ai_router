@@ -680,7 +680,7 @@ func (sl *Logger) commitBatchTransaction(ctx context.Context, tx pgx.Tx, batch [
 // produced by INSERT ... RETURNING are eligible for counters or daily tables;
 // conflicts are a completed no-op and cannot double-charge on replay.
 func (sl *Logger) writeBatchInTransaction(ctx context.Context, tx pgx.Tx, batch []*models.SpendLogEntry) ([]string, error) {
-	insertedIDs, err := insertSpendRowsCollisionSafe(ctx, tx, batch)
+	insertedIDs, err := insertSpendRowsCollisionSafe(ctx, tx, batch, sl.logger)
 	if err != nil {
 		return nil, err
 	}

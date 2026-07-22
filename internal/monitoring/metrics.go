@@ -275,6 +275,13 @@ var (
 		},
 	)
 
+	SpendCollisionUnresolvedTotal = promauto.NewCounter(
+		prometheus.CounterOpts{
+			Name: "auto_ai_router_spend_collision_unresolved_total",
+			Help: "Total spend rows dropped on a request_id conflict owned by another transaction without an AIR event ID to resolve it",
+		},
+	)
+
 	SpendAggregationErrorsTotal = promauto.NewCounter(
 		prometheus.CounterOpts{
 			Name: "auto_ai_router_spend_aggregation_errors_total",
@@ -342,6 +349,10 @@ func RecordSpendDLQOverflow(count uint64) {
 
 func RecordSpendDuplicates(count uint64) {
 	addCounter(SpendDuplicatesTotal, count)
+}
+
+func RecordSpendCollisionUnresolved(count uint64) {
+	addCounter(SpendCollisionUnresolvedTotal, count)
 }
 
 func RecordSpendAggregationErrors(count uint64) {

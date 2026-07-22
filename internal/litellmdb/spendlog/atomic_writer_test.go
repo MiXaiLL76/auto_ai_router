@@ -13,7 +13,9 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb/models"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb/queries"
+	"github.com/mixaill76/auto_ai_router/internal/monitoring"
 	"github.com/mixaill76/auto_ai_router/internal/testhelpers"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -204,6 +206,26 @@ func TestAtomicWriterConcurrentProviderIDWinnerFallsBackToEventID(t *testing.T) 
 	assert.Equal(t, []any{"chatcmpl-concurrent", "air-event-loser"}, tx.queryArgs[1])
 	assert.Equal(t, "air-event-loser", tx.queryArgs[2][0])
 	assert.Equal(t, 4, countSQLContaining(tx.committedSQL, `INSERT INTO "LiteLLM_Daily`))
+}
+
+func TestAtomicWriterCollisionWithoutAirEventIDIsObservable(t *testing.T) {
+	logger := newAtomicTestLogger()
+	entry := atomicTestEntry("req-foreign-conflict")
+	tx := &atomicTestTx{
+		insertResults: [][]string{{}},
+		// The preferred row is owned by another transaction and the entry has no
+		// AIR event ID, so ownership cannot be resolved and the row stays dropped.
+	}
+	before := testutil.ToFloat64(monitoring.SpendCollisionUnresolvedTotal)
+
+	inserted, err := logger.commitBatchTransaction(context.Background(), tx, []*models.SpendLogEntry{entry})
+
+	require.NoError(t, err)
+	assert.Empty(t, inserted)
+	assert.Len(t, tx.queries, 1, "without an AIR event ID no ownership claim can run")
+	assert.Empty(t, tx.attemptedSQL, "a dropped row must not feed accounting")
+	assert.Equal(t, before+1, testutil.ToFloat64(monitoring.SpendCollisionUnresolvedTotal),
+		"the unresolvable drop must be counted instead of silently discarded")
 }
 
 func TestAtomicWriterProviderIDReplayDoesNotFeedAnyAccounting(t *testing.T) {

@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sort"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb/models"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb/queries"
+	"github.com/mixaill76/auto_ai_router/internal/monitoring"
 )
 
 // requestIDGroup contains all logical effects that prefer the same
@@ -27,7 +29,12 @@ type requestIDGroup struct {
 // transaction that is invisible to the INSERT statement snapshot, while the
 // next READ COMMITTED statement sees the committed winner. No SpendLogs row is
 // ever read back.
-func insertSpendRowsCollisionSafe(ctx context.Context, tx pgx.Tx, batch []*models.SpendLogEntry) ([]string, error) {
+//
+// Callers do not populate AirEventID today, so a conflict on a row owned by
+// another transaction cannot be classified as replay vs genuine collision; the
+// entry is skipped but the drop is logged and counted in
+// auto_ai_router_spend_collision_unresolved_total instead of staying silent.
+func insertSpendRowsCollisionSafe(ctx context.Context, tx pgx.Tx, batch []*models.SpendLogEntry, logger *slog.Logger) ([]string, error) {
 	groups := groupEntriesByPreferredRequestID(batch)
 	if len(groups) == 0 {
 		return nil, nil
@@ -71,6 +78,14 @@ func insertSpendRowsCollisionSafe(ctx context.Context, tx pgx.Tx, batch []*model
 		for _, entry := range group.entries {
 			eventID := entry.AirEventID
 			if eventID == "" {
+				// Without an AIR event ID there is no way to tell a benign
+				// replay of our own earlier write from a genuine collision
+				// with a different event. The row stays with the committed
+				// winner, but the drop must be observable, not silent.
+				logger.Warn("[DB] SpendLog row dropped: request_id owned by another transaction and no AIR event ID to resolve ownership",
+					"request_id", group.preferredID,
+				)
+				monitoring.RecordSpendCollisionUnresolved(1)
 				continue
 			}
 			if _, duplicateEvent := fallbackSeen[eventID]; duplicateEvent {
