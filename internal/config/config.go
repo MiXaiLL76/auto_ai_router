@@ -57,12 +57,15 @@ func normalizeProviderType(raw string) ProviderType {
 
 // ModelRPMConfig represents RPM and TPM limits for a specific model
 type ModelRPMConfig struct {
-	Name       string `yaml:"name"`
-	Model      string `yaml:"model,omitempty"` // Real model name sent to provider (alias for Name if different)
-	RPM        int    `yaml:"rpm"`
-	TPM        int    `yaml:"tpm"`
-	Weight     int    `yaml:"weight"`               // Weighted round-robin weight (0 = use credential default / 1)
-	Credential string `yaml:"credential,omitempty"` // If set, model is only available for this credential
+	Name  string `yaml:"name"`
+	Model string `yaml:"model,omitempty"` // Real model name sent to provider (alias for Name if different)
+	// DeploymentID is the authoritative LiteLLM_ProxyModelTable.model_id.
+	// It is populated only by the database loader and is never accepted from YAML.
+	DeploymentID string `yaml:"-"`
+	RPM          int    `yaml:"rpm"`
+	TPM          int    `yaml:"tpm"`
+	Weight       int    `yaml:"weight"`               // Weighted round-robin weight (0 = use credential default / 1)
+	Credential   string `yaml:"credential,omitempty"` // If set, model is only available for this credential
 
 	// PassthroughResponses controls whether Responses API requests for this model
 	// are forwarded as-is to the provider's native /v1/responses endpoint instead
@@ -120,16 +123,19 @@ func (m *ModelRPMConfig) UnmarshalYAML(value *yaml.Node) error {
 }
 
 type Config struct {
-	Server      ServerConfig       `yaml:"server"`
-	Fail2Ban    Fail2BanConfig     `yaml:"fail2ban,omitempty"`
-	Credentials []CredentialConfig `yaml:"credentials"`
-	Monitoring  MonitoringConfig   `yaml:"monitoring"`
-	Models      []ModelRPMConfig   `yaml:"models,omitempty"`
-	ModelAlias  map[string]string  `yaml:"model_alias,omitempty"`
-	LiteLLMDB   LiteLLMDBConfig    `yaml:"litellm_db,omitempty"`
-	Redis       RedisConfig        `yaml:"redis,omitempty"`
-	OTEL        OTELConfig         `yaml:"otel,omitempty"`
-	Kafka       KafkaConfig        `yaml:"kafka,omitempty"`
+	Server             ServerConfig       `yaml:"server"`
+	Fail2Ban           Fail2BanConfig     `yaml:"fail2ban,omitempty"`
+	Credentials        []CredentialConfig `yaml:"credentials"`
+	Monitoring         MonitoringConfig   `yaml:"monitoring"`
+	Models             []ModelRPMConfig   `yaml:"models,omitempty"`
+	ModelAlias         map[string]string  `yaml:"model_alias,omitempty"`
+	ClientModelIDs     []string           `yaml:"client_model_ids,omitempty"`
+	PublicModelAlias   map[string]string  `yaml:"public_model_alias,omitempty"`
+	AcceptedModelAlias map[string]string  `yaml:"accepted_model_alias,omitempty"`
+	LiteLLMDB          LiteLLMDBConfig    `yaml:"litellm_db,omitempty"`
+	Redis              RedisConfig        `yaml:"redis,omitempty"`
+	OTEL               OTELConfig         `yaml:"otel,omitempty"`
+	Kafka              KafkaConfig        `yaml:"kafka,omitempty"`
 	// ModelTemplates stores x-model-templates entries as raw interface{} so that
 	// both single-model mappings and lists of models can be defined as YAML anchors
 	// without type errors. The actual model data is extracted via anchor expansion.
@@ -147,17 +153,20 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 
 	// Then unmarshal the resolved data into Config
 	type RawConfig struct {
-		Server         ServerConfig           `yaml:"server"`
-		Fail2Ban       Fail2BanConfig         `yaml:"fail2ban,omitempty"`
-		Credentials    []CredentialConfig     `yaml:"credentials"`
-		Monitoring     MonitoringConfig       `yaml:"monitoring"`
-		Models         []ModelRPMConfig       `yaml:"models,omitempty"`
-		ModelAlias     map[string]string      `yaml:"model_alias,omitempty"`
-		LiteLLMDB      LiteLLMDBConfig        `yaml:"litellm_db,omitempty"`
-		Redis          RedisConfig            `yaml:"redis,omitempty"`
-		OTEL           OTELConfig             `yaml:"otel,omitempty"`
-		Kafka          KafkaConfig            `yaml:"kafka,omitempty"`
-		ModelTemplates map[string]interface{} `yaml:"x-model-templates,omitempty"`
+		Server             ServerConfig           `yaml:"server"`
+		Fail2Ban           Fail2BanConfig         `yaml:"fail2ban,omitempty"`
+		Credentials        []CredentialConfig     `yaml:"credentials"`
+		Monitoring         MonitoringConfig       `yaml:"monitoring"`
+		Models             []ModelRPMConfig       `yaml:"models,omitempty"`
+		ModelAlias         map[string]string      `yaml:"model_alias,omitempty"`
+		ClientModelIDs     []string               `yaml:"client_model_ids,omitempty"`
+		PublicModelAlias   map[string]string      `yaml:"public_model_alias,omitempty"`
+		AcceptedModelAlias map[string]string      `yaml:"accepted_model_alias,omitempty"`
+		LiteLLMDB          LiteLLMDBConfig        `yaml:"litellm_db,omitempty"`
+		Redis              RedisConfig            `yaml:"redis,omitempty"`
+		OTEL               OTELConfig             `yaml:"otel,omitempty"`
+		Kafka              KafkaConfig            `yaml:"kafka,omitempty"`
+		ModelTemplates     map[string]interface{} `yaml:"x-model-templates,omitempty"`
 	}
 
 	var raw RawConfig
@@ -172,6 +181,9 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 	c.Monitoring = raw.Monitoring
 	c.Models = raw.Models
 	c.ModelAlias = raw.ModelAlias
+	c.ClientModelIDs = raw.ClientModelIDs
+	c.PublicModelAlias = raw.PublicModelAlias
+	c.AcceptedModelAlias = raw.AcceptedModelAlias
 	c.LiteLLMDB = raw.LiteLLMDB
 	c.Redis = raw.Redis
 	c.OTEL = raw.OTEL
@@ -1027,12 +1039,6 @@ func (l *LiteLLMDBConfig) UnmarshalYAML(value *yaml.Node) error {
 	if l.EnforceKeyRateLimits, err = parseField(temp.EnforceKeyRateLimits, false, strconv.ParseBool, "litellm_db.enforce_key_rate_limits"); err != nil {
 		return err
 	}
-	if l.DefaultEstimatedCompletionTokens, err = parseField(temp.DefaultEstimatedCompletionTokens, 1000, strconv.Atoi, "litellm_db.default_estimated_completion_tokens"); err != nil {
-		return err
-	}
-	if l.BudgetReservationTTL, err = parseField(temp.BudgetReservationTTL, 15*time.Minute, time.ParseDuration, "litellm_db.budget_reservation_ttl"); err != nil {
-		return err
-	}
 
 	// Integer fields (defaults optimized for ~1000 requests/minute)
 	if l.MaxConns, err = parseField(temp.MaxConns, 25, strconv.Atoi, "litellm_db.max_conns"); err != nil {
@@ -1048,6 +1054,9 @@ func (l *LiteLLMDBConfig) UnmarshalYAML(value *yaml.Node) error {
 		return err
 	}
 	if l.LogBatchSize, err = parseField(temp.LogBatchSize, 100, strconv.Atoi, "litellm_db.log_batch_size"); err != nil {
+		return err
+	}
+	if l.DefaultEstimatedCompletionTokens, err = parseField(temp.DefaultEstimatedCompletionTokens, 1000, strconv.Atoi, "litellm_db.default_estimated_completion_tokens"); err != nil {
 		return err
 	}
 	if l.LogWorkers, err = parseField(temp.LogWorkers, 4, strconv.Atoi, "litellm_db.log_workers"); err != nil {
@@ -1067,6 +1076,9 @@ func (l *LiteLLMDBConfig) UnmarshalYAML(value *yaml.Node) error {
 		return err
 	}
 	if l.LogFlushInterval, err = parseField(temp.LogFlushInterval, 5*time.Second, time.ParseDuration, "litellm_db.log_flush_interval"); err != nil {
+		return err
+	}
+	if l.BudgetReservationTTL, err = parseField(temp.BudgetReservationTTL, 15*time.Minute, time.ParseDuration, "litellm_db.budget_reservation_ttl"); err != nil {
 		return err
 	}
 
@@ -1096,11 +1108,9 @@ func (k *KafkaConfig) UnmarshalYAML(value *yaml.Node) error {
 	}
 
 	var err error
-
 	if k.Enabled, err = parseField(temp.Enabled, false, strconv.ParseBool, "kafka.enabled"); err != nil {
 		return err
 	}
-
 	// Resolve env variables in each broker address. A single YAML entry can
 	// resolve to a comma-separated list (documented KAFKA_BROKERS usage, e.g.
 	// "kafka1:9092,kafka2:9092") -- franz-go's kgo.SeedBrokers is variadic and
@@ -1116,12 +1126,10 @@ func (k *KafkaConfig) UnmarshalYAML(value *yaml.Node) error {
 			}
 		}
 	}
-
 	// Topic and ClientID are not mandatory here — defaults are applied by
 	// ApplyDefaults()/kafkalog.Config.ApplyDefaults(), not during unmarshaling.
 	k.Topic = resolveEnvString(temp.Topic)
 	k.ClientID = resolveEnvString(temp.ClientID)
-
 	if k.LogQueueSize, err = parseField(temp.LogQueueSize, 5000, strconv.Atoi, "kafka.log_queue_size"); err != nil {
 		return err
 	}
@@ -1141,7 +1149,6 @@ func (k *KafkaConfig) UnmarshalYAML(value *yaml.Node) error {
 	k.SASLMechanism = resolveEnvString(temp.SASLMechanism)
 	k.SASLUsername = resolveEnvString(temp.SASLUsername)
 	k.SASLPassword = resolveEnvString(temp.SASLPassword)
-
 	return nil
 }
 
@@ -1235,6 +1242,27 @@ func Load(path string) (*Config, error) {
 		}
 		cfg.ModelAlias = resolved
 	}
+	if cfg.ClientModelIDs != nil {
+		resolved := make([]string, len(cfg.ClientModelIDs))
+		for index, modelID := range cfg.ClientModelIDs {
+			resolved[index] = resolveEnvString(modelID)
+		}
+		cfg.ClientModelIDs = resolved
+	}
+	if cfg.PublicModelAlias != nil {
+		resolved := make(map[string]string, len(cfg.PublicModelAlias))
+		for alias, target := range cfg.PublicModelAlias {
+			resolved[resolveEnvString(alias)] = resolveEnvString(target)
+		}
+		cfg.PublicModelAlias = resolved
+	}
+	if cfg.AcceptedModelAlias != nil {
+		resolved := make(map[string]string, len(cfg.AcceptedModelAlias))
+		for alias, target := range cfg.AcceptedModelAlias {
+			resolved[resolveEnvString(alias)] = resolveEnvString(target)
+		}
+		cfg.AcceptedModelAlias = resolved
+	}
 
 	if cfg.Credentials == nil {
 		cfg.Credentials = []CredentialConfig{}
@@ -1246,6 +1274,12 @@ func Load(path string) (*Config, error) {
 
 	if cfg.ModelAlias == nil {
 		cfg.ModelAlias = map[string]string{}
+	}
+	if cfg.PublicModelAlias == nil {
+		cfg.PublicModelAlias = map[string]string{}
+	}
+	if cfg.AcceptedModelAlias == nil {
+		cfg.AcceptedModelAlias = map[string]string{}
 	}
 
 	// Extract models from credentials and add to main Models list
@@ -1582,6 +1616,36 @@ func (c *Config) Validate() error {
 		}
 	}
 
+	// client_model_ids is an explicit product boundary. When present (including
+	// an empty list), AIR must not infer public request identifiers from provider
+	// backend names. Keep it exact and require compatibility aliases to resolve
+	// into that advertised canonical set.
+	if c.ClientModelIDs != nil {
+		clientIDs := make(map[string]struct{}, len(c.ClientModelIDs))
+		for _, modelID := range c.ClientModelIDs {
+			if modelID == "" {
+				return fmt.Errorf("client_model_ids must not contain an empty model ID")
+			}
+			if _, duplicate := clientIDs[modelID]; duplicate {
+				return fmt.Errorf("client_model_ids contains duplicate model ID %q", modelID)
+			}
+			clientIDs[modelID] = struct{}{}
+		}
+		for label, aliases := range map[string]map[string]string{
+			"public_model_alias":   c.PublicModelAlias,
+			"accepted_model_alias": c.AcceptedModelAlias,
+		} {
+			for alias, target := range aliases {
+				if _, exists := clientIDs[target]; !exists {
+					return fmt.Errorf("%s %q targets %q outside client_model_ids", label, alias, target)
+				}
+				if _, collision := clientIDs[alias]; collision {
+					return fmt.Errorf("%s %q collides with client_model_ids", label, alias)
+				}
+			}
+		}
+	}
+
 	// Validate Redis config
 	if c.Redis.Enabled {
 		if len(c.Redis.InitAddresses) == 0 {
@@ -1610,16 +1674,17 @@ func (c *Config) Validate() error {
 		if !strings.HasPrefix(c.LiteLLMDB.DatabaseURL, "postgres://") && !strings.HasPrefix(c.LiteLLMDB.DatabaseURL, "postgresql://") {
 			return fmt.Errorf("litellm_db.database_url must start with postgres:// or postgresql://, got: %s", c.LiteLLMDB.DatabaseURL)
 		}
+		if c.LiteLLMDB.EnforceBudgetReservation && c.LiteLLMDB.BudgetReservationTTL <= 0 {
+			return fmt.Errorf("litellm_db.budget_reservation_ttl must be positive when budget reservation is enabled")
+		}
+		if c.LiteLLMDB.EnforceBudgetReservation && c.LiteLLMDB.DefaultEstimatedCompletionTokens <= 0 {
+			return fmt.Errorf("litellm_db.default_estimated_completion_tokens must be positive when budget reservation is enabled")
+		}
 		if c.LiteLLMDB.LogWorkers <= 0 {
 			return fmt.Errorf("litellm_db.log_workers must be positive, got: %d", c.LiteLLMDB.LogWorkers)
 		}
 	}
 
-	// Validate Kafka config. Mirrors kafkalog.Config.Validate() so malformed
-	// Kafka config (bad SASL settings, non-positive queue/batch/flush values)
-	// fails fast at startup instead of surfacing only when kafkalog.New runs
-	// (see initializeKafkaLog, which degrades to NoopManager on that failure --
-	// silently dropping spend data if litellm_db.disable_spend_logs_write=true).
 	if c.Kafka.Enabled {
 		if len(c.Kafka.Brokers) == 0 {
 			return fmt.Errorf("kafka.brokers is required when kafka is enabled")
@@ -1649,9 +1714,6 @@ func (c *Config) Validate() error {
 		}
 	}
 
-	// kafka.enabled and litellm_db.disable_spend_logs_write are independent flags,
-	// but this specific combination drops spend data entirely: it would neither
-	// be written to Postgres (disabled) nor to Kafka (not enabled).
 	if !c.Kafka.Enabled && c.LiteLLMDB.DisableSpendLogsWrite {
 		return fmt.Errorf("invalid config: litellm_db.disable_spend_logs_write=true requires kafka.enabled=true, otherwise spend logs are lost entirely")
 	}

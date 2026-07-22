@@ -93,6 +93,28 @@ func TestConnectionPool_IsHealthy_BeforeClose(t *testing.T) {
 	assert.False(t, pool.IsHealthy())
 }
 
+func TestConnectionPoolHealthObserverPublishesLiveTransitions(t *testing.T) {
+	pool := &ConnectionPool{}
+	pool.healthy.Store(true)
+
+	var mu sync.Mutex
+	var observed []bool
+	pool.SetHealthObserver(func(healthy bool) {
+		mu.Lock()
+		observed = append(observed, healthy)
+		mu.Unlock()
+	})
+	pool.setHealthy(false)
+	pool.setHealthy(false) // no duplicate transition
+	pool.setHealthy(true)
+	pool.closed.Store(true)
+	pool.setHealthy(false)
+
+	mu.Lock()
+	defer mu.Unlock()
+	assert.Equal(t, []bool{true, false, true, false}, observed)
+}
+
 func TestConnectionPool_Acquire_WhenClosed(t *testing.T) {
 	cfg := &models.Config{
 		DatabaseURL: "postgres://localhost/test",

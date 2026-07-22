@@ -1,6 +1,7 @@
 package queries
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -280,12 +281,11 @@ func TestSpendLogQueryConstants(t *testing.T) {
 	// These are imported from spend_logs.go
 	// Verify they are defined (we can't import const from another file directly in test)
 	assert.NotEmpty(t, QueryInsertSpendLog)
-	assert.NotEmpty(t, QuerySelectUnprocessedSpendLogs)
+	assert.NotEmpty(t, QueryClaimSpendLogEventOwner)
 	assert.NotEmpty(t, QueryUpsertDailyUserSpend)
 	assert.NotEmpty(t, QueryUpsertDailyTeamSpend)
 	assert.NotEmpty(t, QueryUpsertDailyOrganizationSpend)
 	assert.NotEmpty(t, QueryUpsertDailyEndUserSpend)
-	assert.NotEmpty(t, QueryUpsertDailyTagSpend)
 }
 
 // TestQueryContainsRequiredFields verifies queries contain required fields
@@ -302,16 +302,46 @@ func TestQueryContainsRequiredFields(t *testing.T) {
 	assert.Contains(t, QueryProxyModelTable, "litellm_params")
 	assert.Contains(t, QueryProxyModelTable, "model_info")
 
-	// Verify spend log queries contain required fields
-	assert.Contains(t, QuerySelectUnprocessedSpendLogs, "request_id")
-	assert.Contains(t, QuerySelectUnprocessedSpendLogs, "prompt_tokens")
-	assert.Contains(t, QuerySelectUnprocessedSpendLogs, "completion_tokens")
-	assert.Contains(t, QuerySelectUnprocessedSpendLogs, "spend")
+	// Verify the event-owner claim is a targeted primary-key write, not a scan
+	assert.Contains(t, QueryClaimSpendLogEventOwner, `UPDATE "LiteLLM_SpendLogs"`)
+	assert.Contains(t, QueryClaimSpendLogEventOwner, "WHERE request_id = $1")
+	assert.Contains(t, QueryClaimSpendLogEventOwner, "RETURNING request_id")
 
 	// Verify upsert queries
 	assert.Contains(t, QueryUpsertDailyUserSpend, "user_id")
 	assert.Contains(t, QueryUpsertDailyTeamSpend, "team_id")
 	assert.Contains(t, QueryUpsertDailyOrganizationSpend, "organization_id")
 	assert.Contains(t, QueryUpsertDailyEndUserSpend, "end_user_id")
-	assert.Contains(t, QueryUpsertDailyTagSpend, "tag")
+}
+
+// tokenHierarchyScanColumns must equal the number of Scan destinations in
+// auth.Authenticator.fetchTokenFromDB. pgx fails every uncached token lookup
+// with "number of field descriptions must equal number of destinations" when
+// the SELECT list and the Scan call drift apart, so any column added here has
+// to land in both places at once.
+const tokenHierarchyScanColumns = 43
+
+func TestTokenValidationQueryColumnCountMatchesScan(t *testing.T) {
+	selectList := QueryValidateTokenWithHierarchy
+	fromIdx := strings.Index(selectList, `FROM "LiteLLM_VerificationToken"`)
+	if fromIdx < 0 {
+		t.Fatal("FROM clause not found in QueryValidateTokenWithHierarchy")
+	}
+	selectList = selectList[:fromIdx]
+
+	count := 0
+	for _, line := range strings.Split(selectList, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "--") || strings.HasPrefix(line, "SELECT") {
+			continue
+		}
+		count++
+	}
+	assert.Equal(t, tokenHierarchyScanColumns, count)
+}
+
+func TestTokenValidationQueryLoadsModelAccessHierarchy(t *testing.T) {
+	assert.Contains(t, QueryValidateTokenWithHierarchy, `LEFT JOIN "LiteLLM_UserTable" u ON t.user_id = u.user_id`)
+	assert.Contains(t, QueryValidateTokenWithHierarchy, "t.models as token_models")
+	assert.Contains(t, QueryValidateTokenWithHierarchy, "t.metadata as token_metadata")
 }

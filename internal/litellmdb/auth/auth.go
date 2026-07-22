@@ -33,46 +33,68 @@ func NewAuthenticator(pool *connection.ConnectionPool, cache *Cache, logger *slo
 	}
 }
 
-func (a *Authenticator) FetchMasterKey(ctx context.Context, default_key string) error {
-	if !a.pool.IsHealthy() {
-		return models.ErrConnectionFailed
+// FetchMasterKey seeds the auth cache with the proxy master key. The config
+// value is the source of truth: the copy litellm stores in
+// LiteLLM_Config.general_settings never overrides it and is read only to
+// detect drift — a differing DB value means litellm and AIR are configured
+// with different keys, so the trusted litellm->AIR hop would break. The DB
+// copy is used only when the config value is empty, and a DB failure is
+// non-fatal so the config key keeps working without the DB.
+func (a *Authenticator) FetchMasterKey(ctx context.Context, defaultKey string) error {
+	dbKey := a.fetchMasterKeyFromDB(ctx)
+
+	masterKey := defaultKey
+	source := "config"
+	switch {
+	case masterKey == "":
+		masterKey = dbKey
+		source = "DB"
+	case dbKey != "" && dbKey != masterKey:
+		a.logger.Warn("Master key in LiteLLM DB differs from config; config value takes precedence")
+	}
+	if masterKey == "" {
+		return models.ErrTokenNotFound
+	}
+
+	info := models.TokenInfo{
+		Token:   HashToken(masterKey),
+		KeyName: "litellm-master-key",
+		UserID:  "litellm-master-key",
+	}
+	a.cache.Set(info.Token, &info)
+
+	a.logger.Debug("Master key loaded", "source", source)
+
+	return nil
+}
+
+// fetchMasterKeyFromDB returns the master key stored in LiteLLM_Config, or ""
+// when the database is unavailable or stores none.
+func (a *Authenticator) fetchMasterKeyFromDB(ctx context.Context) string {
+	if a.pool == nil || !a.pool.IsHealthy() {
+		return ""
 	}
 
 	conn, err := a.pool.Acquire(ctx)
 	if err != nil {
-		a.logger.Error("Failed to acquire connection for fetch master key from DB",
+		a.logger.Warn("Failed to acquire connection for master key lookup",
 			"error", err,
 		)
-		return models.ErrConnectionFailed
+		return ""
 	}
 	defer conn.Release()
-	var info models.TokenInfo
+
 	var masterKey *string
-	err = conn.QueryRow(ctx, queries.QueryMasterKey).Scan(
-		&masterKey,
-	)
-	var master_key_source string
-	if err != nil {
+	if err := conn.QueryRow(ctx, queries.QueryMasterKey).Scan(&masterKey); err != nil {
 		a.logger.Warn("Failed to fetch master key from DB",
 			"error", err,
 		)
-		masterKey = &default_key
-		master_key_source = "config"
-	} else {
-		master_key_source = "DB"
+		return ""
 	}
 	if masterKey == nil {
-		return models.ErrTokenNotFound
+		return ""
 	}
-
-	info.Token = HashToken(*masterKey)
-	info.KeyName = "litellm-master-key"
-	info.UserID = "litellm-master-key"
-	a.cache.Set(info.Token, &info)
-
-	a.logger.Debug("Master key loaded", "source", master_key_source)
-
-	return nil
+	return *masterKey
 }
 
 // ValidateToken validates a token and returns its information

@@ -165,10 +165,25 @@ func PrintConfig(logger *slog.Logger, cfg *Config) {
 	}
 
 	// Model aliases
+	if cfg.ClientModelIDs != nil {
+		logger.Info("client_model_ids", "total_count", len(cfg.ClientModelIDs), "enforced", true)
+	}
 	if len(cfg.ModelAlias) > 0 {
 		logger.Info("model_alias", "total_count", len(cfg.ModelAlias))
 		for alias, target := range cfg.ModelAlias {
 			logger.Info("  alias", "from", alias, "to", target)
+		}
+	}
+	if len(cfg.PublicModelAlias) > 0 {
+		logger.Info("public_model_alias", "total_count", len(cfg.PublicModelAlias))
+		for alias, target := range cfg.PublicModelAlias {
+			logger.Info("  public alias", "from", alias, "to", target)
+		}
+	}
+	if len(cfg.AcceptedModelAlias) > 0 {
+		logger.Info("accepted_model_alias", "total_count", len(cfg.AcceptedModelAlias))
+		for alias, target := range cfg.AcceptedModelAlias {
+			logger.Info("  accepted alias", "from", alias, "to", target)
 		}
 	}
 
@@ -188,6 +203,10 @@ func PrintConfig(logger *slog.Logger, cfg *Config) {
 			"log_flush_interval", cfg.LiteLLMDB.LogFlushInterval.String(),
 			"log_workers", cfg.LiteLLMDB.LogWorkers,
 			"disable_spend_logs_write", cfg.LiteLLMDB.DisableSpendLogsWrite,
+			"enforce_budget_reservation", cfg.LiteLLMDB.EnforceBudgetReservation,
+			"budget_reservation_ttl", cfg.LiteLLMDB.BudgetReservationTTL.String(),
+			"enforce_key_rate_limits", cfg.LiteLLMDB.EnforceKeyRateLimits,
+			"default_estimated_completion_tokens", cfg.LiteLLMDB.DefaultEstimatedCompletionTokens,
 		)
 	} else {
 		logger.Info("litellm_db", "status", "DISABLED")
