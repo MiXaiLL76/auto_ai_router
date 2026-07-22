@@ -11,10 +11,23 @@ import (
 // mockLogger implements slog.Logger for testing
 type mockLogger struct {
 	messages []string
+	records  []loggedRecord
+}
+
+type loggedRecord struct {
+	level   slog.Level
+	message string
+	attrs   map[string]any
 }
 
 func newTestLogger() *slog.Logger {
-	return slog.New(&mockLoggerHandler{logger: &mockLogger{}})
+	logger, _ := newTestLoggerWithMock()
+	return logger
+}
+
+func newTestLoggerWithMock() (*slog.Logger, *mockLogger) {
+	mock := &mockLogger{}
+	return slog.New(&mockLoggerHandler{logger: mock}), mock
 }
 
 type mockLoggerHandler struct {
@@ -27,6 +40,16 @@ func (h *mockLoggerHandler) Enabled(ctx context.Context, level slog.Level) bool 
 
 func (h *mockLoggerHandler) Handle(ctx context.Context, r slog.Record) error {
 	h.logger.messages = append(h.logger.messages, r.Message)
+	record := loggedRecord{
+		level:   r.Level,
+		message: r.Message,
+		attrs:   make(map[string]any),
+	}
+	r.Attrs(func(attr slog.Attr) bool {
+		record.attrs[attr.Key] = attr.Value.Any()
+		return true
+	})
+	h.logger.records = append(h.logger.records, record)
 	return nil
 }
 
@@ -109,4 +132,49 @@ func TestValidateProxyCredentialsAtStartup_MixedCredentials(t *testing.T) {
 
 	// Should handle gracefully even if proxy is unreachable
 	ValidateProxyCredentialsAtStartup(cfg, logger)
+}
+
+func TestWarnImplicitProxyUsageFormat(t *testing.T) {
+	logger, mock := newTestLoggerWithMock()
+	proxyCredentials := []config.CredentialConfig{
+		{
+			Name:             "implicit-proxy",
+			Type:             config.ProviderTypeProxy,
+			BaseURL:          "http://router.example",
+			ProxyUsageFormat: config.ProxyUsageFormatOpenAI,
+		},
+		{
+			Name:                     "explicit-openai",
+			Type:                     config.ProviderTypeProxy,
+			BaseURL:                  "http://openai-compatible.example",
+			ProxyUsageFormat:         config.ProxyUsageFormatOpenAI,
+			ProxyUsageFormatExplicit: true,
+		},
+		{
+			Name:                     "explicit-normalized",
+			Type:                     config.ProviderTypeProxy,
+			BaseURL:                  "http://air.example",
+			ProxyUsageFormat:         config.ProxyUsageFormatNormalized,
+			ProxyUsageFormatExplicit: true,
+		},
+	}
+
+	warnImplicitProxyUsageFormat(proxyCredentials, logger)
+
+	if len(mock.records) != 1 {
+		t.Fatalf("expected one warning record, got %d", len(mock.records))
+	}
+	record := mock.records[0]
+	if record.level != slog.LevelWarn {
+		t.Fatalf("expected warn level, got %v", record.level)
+	}
+	if record.message != "Proxy credential uses default proxy_usage_format" {
+		t.Fatalf("unexpected warning message: %q", record.message)
+	}
+	if record.attrs["name"] != "implicit-proxy" {
+		t.Fatalf("expected implicit proxy name in warning, got %v", record.attrs["name"])
+	}
+	if record.attrs["default"] != config.ProxyUsageFormatOpenAI {
+		t.Fatalf("expected openai default in warning, got %v", record.attrs["default"])
+	}
 }

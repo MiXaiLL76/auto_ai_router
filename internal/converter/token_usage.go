@@ -29,17 +29,17 @@ func (tu *TokenUsage) Normalize() *TokenUsage {
 	if tu == nil {
 		return nil
 	}
-	tu.PromptTokens = nonNegativeTokenCount(tu.PromptTokens)
-	tu.CompletionTokens = nonNegativeTokenCount(tu.CompletionTokens)
-	tu.AudioInputTokens = nonNegativeTokenCount(tu.AudioInputTokens)
-	tu.AudioOutputTokens = nonNegativeTokenCount(tu.AudioOutputTokens)
+	tu.PromptTokens = converterutil.NonNegativeTokenCount(tu.PromptTokens)
+	tu.CompletionTokens = converterutil.NonNegativeTokenCount(tu.CompletionTokens)
+	tu.AudioInputTokens = converterutil.NonNegativeTokenCount(tu.AudioInputTokens)
+	tu.AudioOutputTokens = converterutil.NonNegativeTokenCount(tu.AudioOutputTokens)
 	tu.CachedInputTokens, tu.CachedAudioInputTokens = converterutil.NormalizeCachedAudioBreakdown(
 		tu.CachedInputTokens,
 		tu.CachedAudioInputTokens,
 	)
-	tu.CacheCreationTokens = nonNegativeTokenCount(tu.CacheCreationTokens)
-	tu.CacheCreation5mTokens = nonNegativeTokenCount(tu.CacheCreation5mTokens)
-	tu.CacheCreation1hTokens = nonNegativeTokenCount(tu.CacheCreation1hTokens)
+	tu.CacheCreationTokens = converterutil.NonNegativeTokenCount(tu.CacheCreationTokens)
+	tu.CacheCreation5mTokens = converterutil.NonNegativeTokenCount(tu.CacheCreation5mTokens)
+	tu.CacheCreation1hTokens = converterutil.NonNegativeTokenCount(tu.CacheCreation1hTokens)
 	if tu.CacheCreationTokens == 0 {
 		tu.CacheCreationTokens = tu.CacheCreation5mTokens + tu.CacheCreation1hTokens
 	}
@@ -49,14 +49,14 @@ func (tu *TokenUsage) Normalize() *TokenUsage {
 	if tu.CacheCreation1hTokens > tu.CacheCreationTokens-tu.CacheCreation5mTokens {
 		tu.CacheCreation1hTokens = tu.CacheCreationTokens - tu.CacheCreation5mTokens
 	}
-	tu.CachedOutputTokens = nonNegativeTokenCount(tu.CachedOutputTokens)
-	tu.ReasoningTokens = nonNegativeTokenCount(tu.ReasoningTokens)
-	tu.AcceptedPredictionTokens = nonNegativeTokenCount(tu.AcceptedPredictionTokens)
-	tu.RejectedPredictionTokens = nonNegativeTokenCount(tu.RejectedPredictionTokens)
-	tu.ImageCount = nonNegativeTokenCount(tu.ImageCount)
-	tu.ImageTokens = nonNegativeTokenCount(tu.ImageTokens)
-	tu.OutputImageTokens = nonNegativeTokenCount(tu.OutputImageTokens)
-	tu.WebSearchRequests = nonNegativeTokenCount(tu.WebSearchRequests)
+	tu.CachedOutputTokens = converterutil.NonNegativeTokenCount(tu.CachedOutputTokens)
+	tu.ReasoningTokens = converterutil.NonNegativeTokenCount(tu.ReasoningTokens)
+	tu.AcceptedPredictionTokens = converterutil.NonNegativeTokenCount(tu.AcceptedPredictionTokens)
+	tu.RejectedPredictionTokens = converterutil.NonNegativeTokenCount(tu.RejectedPredictionTokens)
+	tu.ImageCount = converterutil.NonNegativeTokenCount(tu.ImageCount)
+	tu.ImageTokens = converterutil.NonNegativeTokenCount(tu.ImageTokens)
+	tu.OutputImageTokens = converterutil.NonNegativeTokenCount(tu.OutputImageTokens)
+	tu.WebSearchRequests = converterutil.NonNegativeTokenCount(tu.WebSearchRequests)
 	if tu.WebSearchRequests > 0 || tu.WebSearchContextSize != "" {
 		tu.WebSearchContextSize = NormalizeWebSearchContextSize(tu.WebSearchContextSize)
 	}
@@ -94,11 +94,4 @@ func NormalizeWebSearchContextSize(size string) string {
 	default:
 		return "medium"
 	}
-}
-
-func nonNegativeTokenCount(tokens int) int {
-	if tokens < 0 {
-		return 0
-	}
-	return tokens
 }

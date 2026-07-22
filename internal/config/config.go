@@ -624,6 +624,9 @@ type CredentialConfig struct {
 	// Proxy specific fields
 	IsFallback       bool             `yaml:"is_fallback,omitempty"`
 	ProxyUsageFormat ProxyUsageFormat `yaml:"proxy_usage_format,omitempty"`
+	// ProxyUsageFormatExplicit is used only for startup rollout warnings;
+	// EffectiveProxyUsageFormat still applies the backward-compatible default.
+	ProxyUsageFormatExplicit bool `yaml:"-"`
 }
 
 func (c CredentialConfig) VisibleTo(visibility scope.Context) bool {
@@ -700,7 +703,9 @@ func (c *CredentialConfig) UnmarshalYAML(value *yaml.Node) error {
 	c.APIKey = resolveEnvString(temp.APIKey)
 	c.BaseURL = resolveEnvString(temp.BaseURL)
 	c.AuthType = strings.ToLower(resolveEnvString(temp.AuthType))
-	c.ProxyUsageFormat = ProxyUsageFormat(strings.ToLower(resolveEnvString(temp.ProxyUsageFormat)))
+	resolvedProxyUsageFormat := strings.ToLower(resolveEnvString(temp.ProxyUsageFormat))
+	c.ProxyUsageFormat = ProxyUsageFormat(resolvedProxyUsageFormat)
+	c.ProxyUsageFormatExplicit = resolvedProxyUsageFormat != ""
 	c.Scopes = scope.NormalizeList(temp.Scopes)
 	c.DeniedScopes = scope.NormalizeList(append(temp.DeniedScopes, temp.ForbiddenScopes...))
 

@@ -26,6 +26,7 @@ func ValidateProxyCredentialsAtStartup(cfg *config.Config, log *slog.Logger) {
 	}
 
 	log.Info("Checking proxy credential accessibility at startup", "total_proxies", len(proxyCredentials))
+	warnImplicitProxyUsageFormat(proxyCredentials, log)
 
 	reachableCount := 0
 	unreachableCount := 0
@@ -67,6 +68,21 @@ func ValidateProxyCredentialsAtStartup(cfg *config.Config, log *slog.Logger) {
 			"total", len(proxyCredentials),
 			"impact", "Proxy fallback routing will not be available until proxies become reachable",
 			"action_recommended", "Check that all proxy services are running and network-accessible before production deployment",
+		)
+	}
+}
+
+func warnImplicitProxyUsageFormat(proxyCredentials []config.CredentialConfig, log *slog.Logger) {
+	for _, cred := range proxyCredentials {
+		if cred.ProxyUsageFormatExplicit {
+			continue
+		}
+		log.Warn("Proxy credential uses default proxy_usage_format",
+			"name", cred.Name,
+			"url", cred.BaseURL,
+			"default", config.ProxyUsageFormatOpenAI,
+			"risk", "AIR-to-AIR chains return normalized usage; with the OpenAI-compatible default cached audio can be subtracted twice",
+			"recommendation", "Set proxy_usage_format=normalized when upstream is another Auto AI Router instance; set proxy_usage_format=openai for generic OpenAI-compatible APIs",
 		)
 	}
 }

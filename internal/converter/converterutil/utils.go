@@ -84,13 +84,16 @@ func DecodeBase64(encoded string) []byte {
 	return decoded
 }
 
+func NonNegativeTokenCount(tokens int) int {
+	if tokens < 0 {
+		return 0
+	}
+	return tokens
+}
+
 func NormalizeCachedAudioBreakdown(cachedTokens, cachedAudioTokens int) (int, int) {
-	if cachedTokens < 0 {
-		cachedTokens = 0
-	}
-	if cachedAudioTokens < 0 {
-		cachedAudioTokens = 0
-	}
+	cachedTokens = NonNegativeTokenCount(cachedTokens)
+	cachedAudioTokens = NonNegativeTokenCount(cachedAudioTokens)
 	if cachedAudioTokens > cachedTokens {
 		cachedAudioTokens = cachedTokens
 	}
@@ -98,18 +101,13 @@ func NormalizeCachedAudioBreakdown(cachedTokens, cachedAudioTokens int) (int, in
 }
 
 func NormalizeAudioInputTokens(audioTokens, cachedTokens, cachedAudioTokens int, includesCachedAudio bool) int {
-	if audioTokens < 0 {
-		return 0
-	}
+	audioTokens = NonNegativeTokenCount(audioTokens)
 	if !includesCachedAudio {
 		return audioTokens
 	}
 	_, cachedAudioTokens = NormalizeCachedAudioBreakdown(cachedTokens, cachedAudioTokens)
 	audioTokens -= cachedAudioTokens
-	if audioTokens < 0 {
-		return 0
-	}
-	return audioTokens
+	return NonNegativeTokenCount(audioTokens)
 }
 
 // BuildVersionedURL joins a provider base URL and API path without duplicating

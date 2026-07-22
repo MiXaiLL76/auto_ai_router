@@ -99,19 +99,28 @@ forbidden_scopes: [blocked]
 
 func TestCredentialConfig_UnmarshalProxyUsageFormat(t *testing.T) {
 	tests := []struct {
-		name string
-		yaml string
-		want ProxyUsageFormat
+		name         string
+		yaml         string
+		want         ProxyUsageFormat
+		wantExplicit bool
 	}{
 		{
-			name: "default is OpenAI-compatible",
-			yaml: "name: proxy\ntype: proxy\nbase_url: http://proxy.example\n",
-			want: ProxyUsageFormatOpenAI,
+			name:         "default is OpenAI-compatible",
+			yaml:         "name: proxy\ntype: proxy\nbase_url: http://proxy.example\n",
+			want:         ProxyUsageFormatOpenAI,
+			wantExplicit: false,
 		},
 		{
-			name: "normalized is explicit",
-			yaml: "name: proxy\ntype: proxy\nbase_url: http://proxy.example\nproxy_usage_format: normalized\n",
-			want: ProxyUsageFormatNormalized,
+			name:         "openai can be explicit",
+			yaml:         "name: proxy\ntype: proxy\nbase_url: http://proxy.example\nproxy_usage_format: openai\n",
+			want:         ProxyUsageFormatOpenAI,
+			wantExplicit: true,
+		},
+		{
+			name:         "normalized is explicit",
+			yaml:         "name: proxy\ntype: proxy\nbase_url: http://proxy.example\nproxy_usage_format: normalized\n",
+			want:         ProxyUsageFormatNormalized,
+			wantExplicit: true,
 		},
 	}
 
@@ -120,6 +129,7 @@ func TestCredentialConfig_UnmarshalProxyUsageFormat(t *testing.T) {
 			var cred CredentialConfig
 			require.NoError(t, yaml.Unmarshal([]byte(tt.yaml), &cred))
 			assert.Equal(t, tt.want, cred.ProxyUsageFormat)
+			assert.Equal(t, tt.wantExplicit, cred.ProxyUsageFormatExplicit)
 		})
 	}
 }

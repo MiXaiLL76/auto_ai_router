@@ -2,6 +2,7 @@ package models
 
 import (
 	"github.com/mixaill76/auto_ai_router/internal/converter"
+	"github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
 )
 
 const (
@@ -28,17 +29,17 @@ func CalculateTokenCosts(usage *converter.TokenUsage, price *ModelPrice) *conver
 	}
 
 	costs := &converter.TokenCosts{}
-	promptTokens := nonNegativeTokenCount(usage.PromptTokens)
-	completionTokens := nonNegativeTokenCount(usage.CompletionTokens)
-	audioInputTokens := nonNegativeTokenCount(usage.AudioInputTokens)
-	audioOutputTokens := nonNegativeTokenCount(usage.AudioOutputTokens)
-	imageTokens := nonNegativeTokenCount(usage.ImageTokens)
-	outputImageTokens := nonNegativeTokenCount(usage.OutputImageTokens)
-	cachedOutputTokens := nonNegativeTokenCount(usage.CachedOutputTokens)
-	reasoningTokens := nonNegativeTokenCount(usage.ReasoningTokens)
-	acceptedPredictionTokens := nonNegativeTokenCount(usage.AcceptedPredictionTokens)
-	rejectedPredictionTokens := nonNegativeTokenCount(usage.RejectedPredictionTokens)
-	imageCount := nonNegativeTokenCount(usage.ImageCount)
+	promptTokens := converterutil.NonNegativeTokenCount(usage.PromptTokens)
+	completionTokens := converterutil.NonNegativeTokenCount(usage.CompletionTokens)
+	audioInputTokens := converterutil.NonNegativeTokenCount(usage.AudioInputTokens)
+	audioOutputTokens := converterutil.NonNegativeTokenCount(usage.AudioOutputTokens)
+	imageTokens := converterutil.NonNegativeTokenCount(usage.ImageTokens)
+	outputImageTokens := converterutil.NonNegativeTokenCount(usage.OutputImageTokens)
+	cachedOutputTokens := converterutil.NonNegativeTokenCount(usage.CachedOutputTokens)
+	reasoningTokens := converterutil.NonNegativeTokenCount(usage.ReasoningTokens)
+	acceptedPredictionTokens := converterutil.NonNegativeTokenCount(usage.AcceptedPredictionTokens)
+	rejectedPredictionTokens := converterutil.NonNegativeTokenCount(usage.RejectedPredictionTokens)
+	imageCount := converterutil.NonNegativeTokenCount(usage.ImageCount)
 
 	longContext272k := promptTokens > tokenTiering272kThreshold
 	inputCostPerToken := price.InputCostPerToken
@@ -50,8 +51,8 @@ func CalculateTokenCosts(usage *converter.TokenUsage, price *ModelPrice) *conver
 		outputCostPerToken = price.OutputCostPerTokenAbove272k
 	}
 
-	cachedInputTokens := nonNegativeTokenCount(usage.CachedInputTokens)
-	cacheCreationTokens := nonNegativeTokenCount(usage.CacheCreationTokens)
+	cachedInputTokens := converterutil.NonNegativeTokenCount(usage.CachedInputTokens)
+	cacheCreationTokens := converterutil.NonNegativeTokenCount(usage.CacheCreationTokens)
 
 	// Calculate "regular" input tokens by subtracting specialized token types.
 	// Vertex/OpenAI: audio/cached tokens are included in PromptTokens; Anthropic: same + cache creation.
@@ -122,7 +123,7 @@ func CalculateTokenCosts(usage *converter.TokenUsage, price *ModelPrice) *conver
 	if cachedInputCost == 0 {
 		cachedInputCost = inputCostPerToken
 	}
-	cachedAudioTokens := nonNegativeTokenCount(usage.CachedAudioInputTokens)
+	cachedAudioTokens := converterutil.NonNegativeTokenCount(usage.CachedAudioInputTokens)
 	if cachedAudioTokens > cachedInputTokens {
 		cachedAudioTokens = cachedInputTokens
 	}
@@ -158,11 +159,11 @@ func CalculateTokenCosts(usage *converter.TokenUsage, price *ModelPrice) *conver
 
 	// The aggregate remains authoritative for compatibility. TTL details split it;
 	// malformed details are capped so they can never bill more than the aggregate.
-	cacheCreation5mTokens := nonNegativeTokenCount(usage.CacheCreation5mTokens)
+	cacheCreation5mTokens := converterutil.NonNegativeTokenCount(usage.CacheCreation5mTokens)
 	if cacheCreation5mTokens > cacheCreationTokens {
 		cacheCreation5mTokens = cacheCreationTokens
 	}
-	cacheCreation1hTokens := nonNegativeTokenCount(usage.CacheCreation1hTokens)
+	cacheCreation1hTokens := converterutil.NonNegativeTokenCount(usage.CacheCreation1hTokens)
 	if cacheCreation1hTokens > cacheCreationTokens-cacheCreation5mTokens {
 		cacheCreation1hTokens = cacheCreationTokens - cacheCreation5mTokens
 	}
@@ -214,7 +215,7 @@ func CalculateTokenCosts(usage *converter.TokenUsage, price *ModelPrice) *conver
 		costs.ImageCost += float64(imageCount) * price.OutputCostPerImage
 	}
 
-	webSearchRequests := nonNegativeTokenCount(usage.WebSearchRequests)
+	webSearchRequests := converterutil.NonNegativeTokenCount(usage.WebSearchRequests)
 	if webSearchRequests > 0 {
 		costs.WebSearchCost = float64(webSearchRequests) *
 			price.webSearchCostPerQuery(usage.WebSearchContextSize)
@@ -248,13 +249,6 @@ func (p *ModelPrice) CalculateCost(usage *converter.TokenUsage) float64 {
 // CalculateCosts returns the full cost breakdown for all token types.
 func (p *ModelPrice) CalculateCosts(usage *converter.TokenUsage) *converter.TokenCosts {
 	return CalculateTokenCosts(usage, p)
-}
-
-func nonNegativeTokenCount(tokens int) int {
-	if tokens < 0 {
-		return 0
-	}
-	return tokens
 }
 
 func (p *ModelPrice) webSearchCostPerQuery(contextSize string) float64 {

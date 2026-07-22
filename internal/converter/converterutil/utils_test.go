@@ -74,6 +74,12 @@ func TestNormalizeAudioInputTokens(t *testing.T) {
 	assert.Equal(t, 0, NormalizeAudioInputTokens(20, 80, 40, true))
 }
 
+func TestNonNegativeTokenCount(t *testing.T) {
+	assert.Equal(t, 0, NonNegativeTokenCount(-1))
+	assert.Equal(t, 0, NonNegativeTokenCount(0))
+	assert.Equal(t, 42, NonNegativeTokenCount(42))
+}
+
 func TestDecodeBase64(t *testing.T) {
 	tests := []struct {
 		name  string
