@@ -154,7 +154,6 @@ type TokenInfo struct {
 	UserID         string   // User ID (optional)
 	TeamID         string   // Team ID (optional)
 	OrganizationID string   // Organization ID (optional, resolved from token or team)
-	ProjectID      string   // Project ID (optional)
 	Tags           []string // Request tags from token metadata
 
 	// Token budget (embedded)
@@ -167,17 +166,13 @@ type TokenInfo struct {
 	Expires *time.Time // Expiration date (nil = no expiration)
 
 	// Access control
-	Models         []string // Key-level allowed models (empty = all)
-	AllowedRoutes  []string // LiteLLM virtual-key routes (empty = unrestricted)
-	UserModels     []string // Personal-user allowed models (empty = all)
-	TeamModels     []string // Team-level allowed models (empty = all)
-	ProjectModels  []string // Project-level allowed models (empty = all)
-	ProjectBlocked *bool    // Project is blocked
-	Blocked        bool     // Is token blocked
+	Models     []string // Key-level allowed models (empty = all)
+	UserModels []string // Personal-user allowed models (empty = all)
+	TeamModels []string // Team-level allowed models (empty = all)
+	Blocked    bool     // Is token blocked
 
-	// Dangling parents fail closed instead of becoming unrestricted empty scopes.
-	TeamDangling    bool
-	ProjectDangling bool
+	// A dangling team fails closed instead of becoming an unrestricted empty scope.
+	TeamDangling bool
 
 	// ==================== User Level (embedded budget) ====================
 	UserAlias     string   // User alias (optional) - user-friendly name
@@ -283,10 +278,8 @@ func (t *TokenInfo) Clone() *TokenInfo {
 	}
 	clone := *t
 	clone.Models = append([]string(nil), t.Models...)
-	clone.AllowedRoutes = append([]string(nil), t.AllowedRoutes...)
 	clone.UserModels = append([]string(nil), t.UserModels...)
 	clone.TeamModels = append([]string(nil), t.TeamModels...)
-	clone.ProjectModels = append([]string(nil), t.ProjectModels...)
 	clone.TeamMemberModels = append([]string(nil), t.TeamMemberModels...)
 	clone.Tags = append([]string(nil), t.Tags...)
 	if t.Metadata != nil {
@@ -297,7 +290,6 @@ func (t *TokenInfo) Clone() *TokenInfo {
 	clone.TPMLimit = clonePointer(t.TPMLimit)
 	clone.RPMLimit = clonePointer(t.RPMLimit)
 	clone.Expires = clonePointer(t.Expires)
-	clone.ProjectBlocked = clonePointer(t.ProjectBlocked)
 	clone.UserMaxBudget = clonePointer(t.UserMaxBudget)
 	clone.UserSpend = clonePointer(t.UserSpend)
 	clone.UserTPMLimit = clonePointer(t.UserTPMLimit)
@@ -371,13 +363,6 @@ func (t *TokenInfo) ModelAccessScopes() []ModelAccessScope {
 			}
 		}
 		scopes = append(scopes, userScope)
-	}
-	if t.ProjectID != "" {
-		if t.ProjectDangling {
-			scopes = append(scopes, ModelAccessScope{Name: "project", DenyAll: true})
-		} else {
-			scopes = append(scopes, ModelAccessScope{Name: "project", Models: t.ProjectModels})
-		}
 	}
 	return scopes
 }

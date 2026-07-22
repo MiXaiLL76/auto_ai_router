@@ -302,29 +302,11 @@ func TestTokenInfo_IsModelAllowed_DanglingTeamFailsClosed(t *testing.T) {
 		"even a key-allowed model must be denied while the team scope is unresolvable")
 }
 
-// Same fail-closed rule for project_id: a dangling project reference must
-// not leave an unrestricted empty project scope.
-func TestTokenInfo_IsModelAllowed_DanglingProjectFailsClosed(t *testing.T) {
+func TestTokenInfo_IsModelAllowed_ResolvedEmptyTeamScopeStaysUnrestricted(t *testing.T) {
 	token := &TokenInfo{
-		Models:          []string{"public/chat"},
-		ProjectID:       "deleted-project",
-		ProjectModels:   nil, // LEFT JOIN found no project row
-		ProjectDangling: true,
-	}
-
-	assert.False(t, token.IsModelAllowed("public/chat"))
-}
-
-// Contrast with the dangling case: a resolved parent with an empty model
-// list stays unrestricted (LiteLLM semantics), and an orphan user_id stays
-// unrestricted by design (see auth_test.go).
-func TestTokenInfo_IsModelAllowed_ResolvedEmptyParentScopesStayUnrestricted(t *testing.T) {
-	token := &TokenInfo{
-		Models:        []string{"public/chat"},
-		TeamID:        "team",
-		TeamModels:    nil,
-		ProjectID:     "project",
-		ProjectModels: nil,
+		Models:     []string{"public/chat"},
+		TeamID:     "team",
+		TeamModels: nil,
 	}
 
 	assert.True(t, token.IsModelAllowed("public/chat"))

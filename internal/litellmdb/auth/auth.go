@@ -185,7 +185,7 @@ func (a *Authenticator) fetchTokenFromDB(ctx context.Context, hashedToken string
 	var info models.TokenInfo
 
 	// ============ Token fields ============
-	var keyName, keyAlias, userID, teamID, orgID, projectID *string
+	var keyName, keyAlias, userID, teamID, orgID *string
 	var tokenMaxBudget *float64
 	var tokenTPMLimit, tokenRPMLimit *int64
 	var expires *time.Time
@@ -206,11 +206,6 @@ func (a *Authenticator) fetchTokenFromDB(ctx context.Context, hashedToken string
 	var teamBlocked *bool
 	var teamTPMLimit, teamRPMLimit *int64
 	var teamModels []string
-
-	// ============ Project fields ============
-	var projectIDCheck *string
-	var projectModels []string
-	var projectBlocked *bool
 
 	// ============ Organization fields (with external budget) ============
 	var orgIDCheck *string
@@ -244,7 +239,6 @@ func (a *Authenticator) fetchTokenFromDB(ctx context.Context, hashedToken string
 		&expires,
 		&blocked,
 		&tokenModels,
-		&projectID,
 		&tokenMetadata,
 
 		// User
@@ -267,11 +261,6 @@ func (a *Authenticator) fetchTokenFromDB(ctx context.Context, hashedToken string
 		&teamTPMLimit,
 		&teamRPMLimit,
 		&teamModels,
-
-		// Project
-		&projectIDCheck,
-		&projectModels,
-		&projectBlocked,
 
 		// Organization
 		&orgIDCheck,
@@ -324,9 +313,6 @@ func (a *Authenticator) fetchTokenFromDB(ctx context.Context, hashedToken string
 	if orgID != nil {
 		info.OrganizationID = *orgID
 	}
-	if projectID != nil {
-		info.ProjectID = *projectID
-	}
 	if blocked != nil {
 		info.Blocked = *blocked
 	}
@@ -362,12 +348,8 @@ func (a *Authenticator) fetchTokenFromDB(ctx context.Context, hashedToken string
 	info.TeamRPMLimit = teamRPMLimit
 	info.TeamModels = teamModels
 
-	// Missing referenced parents deny instead of becoming unrestricted scopes.
+	// A missing referenced team denies instead of becoming unrestricted.
 	info.TeamDangling = teamID != nil && teamIDCheck == nil
-	info.ProjectDangling = projectID != nil && projectIDCheck == nil
-
-	info.ProjectModels = projectModels
-	info.ProjectBlocked = projectBlocked
 
 	// Set Organization fields (external budget from BudgetTable)
 	info.OrgSpend = orgSpend

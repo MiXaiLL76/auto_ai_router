@@ -326,14 +326,6 @@ func TestTokenInfo_Validate(t *testing.T) {
 		assert.ErrorIs(t, info.Validate("gpt-4"), models.ErrModelNotAllowed)
 	})
 
-	t.Run("dangling project reference fails closed", func(t *testing.T) {
-		info := &models.TokenInfo{
-			Models:          []string{"gpt-4"},
-			ProjectID:       "deleted-project",
-			ProjectDangling: true,
-		}
-		assert.ErrorIs(t, info.Validate("gpt-4"), models.ErrModelNotAllowed)
-	})
 }
 
 func TestCache_Auth_SetGet(t *testing.T) {

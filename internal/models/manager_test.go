@@ -599,11 +599,9 @@ func TestPublicModelAliasInheritsCanonicalPermissionAcrossHierarchy(t *testing.T
 		"LiteLLM checks both a configured alias and its canonical model group")
 
 	token := &dbmodels.TokenInfo{
-		Models:        []string{"openai/gpt-4o-mini", "gpt-4o-mini"},
-		TeamID:        "restricted-team",
-		TeamModels:    []string{"openai/gpt-4o-mini"},
-		ProjectID:     "restricted-project",
-		ProjectModels: []string{"openai/gpt-4o-mini"},
+		Models:     []string{"openai/gpt-4o-mini", "gpt-4o-mini"},
+		TeamID:     "restricted-team",
+		TeamModels: []string{"openai/gpt-4o-mini"},
 	}
 	assert.True(t, token.IsModelAllowedBy("openai/gpt-4o-mini", manager.IsModelIDAllowedByScope))
 	assert.True(t, token.IsModelAllowedBy("gpt-4o-mini", manager.IsModelIDAllowedByScope),

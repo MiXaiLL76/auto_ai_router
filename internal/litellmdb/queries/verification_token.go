@@ -20,7 +20,6 @@ SELECT
   t.expires,
   t.blocked as token_blocked,
   t.models as token_models,
-  t.project_id,
   t.metadata as token_metadata,
 
   -- ============ User ============
@@ -43,11 +42,6 @@ SELECT
   tm.tpm_limit as team_tpm_limit,
   tm.rpm_limit as team_rpm_limit,
   tm.models as team_models,
-
-  -- ============ Project ============
-  p.project_id as project_id_check,
-  p.models as project_models,
-  p.blocked as project_blocked,
 
   -- ============ Organization ============
   o.organization_id as org_id_check,
@@ -76,9 +70,6 @@ LEFT JOIN "LiteLLM_UserTable" u ON t.user_id = u.user_id
 
 -- Join Team (optional - if team_id exists)
 LEFT JOIN "LiteLLM_TeamTable" tm ON t.team_id = tm.team_id
-
--- Join Project (optional - if project_id exists)
-LEFT JOIN "LiteLLM_ProjectTable" p ON t.project_id = p.project_id
 
 -- Join Organization
 -- Organization_id resolved from: token.organization_id OR team.organization_id
