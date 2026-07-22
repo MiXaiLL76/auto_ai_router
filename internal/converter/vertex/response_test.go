@@ -392,9 +392,9 @@ func TestConvertVertexUsageMetadata_NilModalityEntries(t *testing.T) {
 	}
 }
 
-// TestConvertVertexUsageMetadata_ImageVideoTokensIgnored verifies that image and video
-// tokens in modality details are not mapped to any OpenAI field (no dedicated field exists).
-func TestConvertVertexUsageMetadata_ImageVideoTokensIgnored(t *testing.T) {
+// TestConvertVertexUsageMetadata_ImageVideoTokens verifies that generated media tokens
+// are exposed through LiteLLM's completion_tokens_details.image_tokens extension.
+func TestConvertVertexUsageMetadata_ImageVideoTokens(t *testing.T) {
 	meta := &genai.GenerateContentResponseUsageMetadata{
 		PromptTokenCount:     200,
 		CandidatesTokenCount: 50,
@@ -411,13 +411,16 @@ func TestConvertVertexUsageMetadata_ImageVideoTokensIgnored(t *testing.T) {
 
 	usage := convertVertexUsageMetadata(meta)
 
-	// Image/video have no OpenAI field → PromptTokensDetails has no audio entry
+	// Input image/video details remain part of PromptTokens; this converter only
+	// exposes the generated media breakdown needed for output billing.
 	if usage.PromptTokensDetails != nil && usage.PromptTokensDetails.AudioTokens != 0 {
 		t.Fatalf("expected no audio tokens from image/video, got %d", usage.PromptTokensDetails.AudioTokens)
 	}
-	// CompletionTokensDetails may be nil or have zero audio tokens
-	if usage.CompletionTokensDetails != nil && usage.CompletionTokensDetails.AudioTokens != 0 {
-		t.Fatalf("expected no audio output tokens from image/video, got %d", usage.CompletionTokensDetails.AudioTokens)
+	if usage.CompletionTokensDetails == nil {
+		t.Fatal("expected completion token details for generated media")
+	}
+	if usage.CompletionTokensDetails.ImageTokens != 50 {
+		t.Fatalf("expected 50 image/video output tokens, got %d", usage.CompletionTokensDetails.ImageTokens)
 	}
 	// Total tokens still correct
 	if usage.PromptTokens != 200 || usage.CompletionTokens != 50 {

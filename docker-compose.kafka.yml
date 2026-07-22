@@ -1,0 +1,95 @@
+# Local dev/test environment for the Kafka -> ClickHouse spend-log analytics
+# pipeline (air.spend_logs). NOT for production use, and independent from the
+# main docker-compose.yml (see auto_ai_router_kafka_spend_log_tz.md, section 11.7).
+
+services:
+  kafka:
+    image: apache/kafka:3.9.0
+    container_name: kafka
+    hostname: kafka
+
+    ports:
+      - "9092:9092"
+
+    environment:
+      # Single-node KRaft mode (no Zookeeper): this node is both controller and broker.
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      # PLAINTEXT (29092) is for other containers on the kafka-clickhouse-network (e.g. ClickHouse).
+      # PLAINTEXT_HOST (9092) is for clients connecting from the host machine.
+      KAFKA_LISTENERS: PLAINTEXT://:29092,CONTROLLER://:29093,PLAINTEXT_HOST://:9092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:29093
+      # Fixed cluster ID so the single node can restart against its own persisted volume.
+      CLUSTER_ID: "0pwmBKBUSOaP5Ye1xd6vfA"
+
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      # Dev convenience: let the router auto-create "air.spend_logs" on first publish.
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      # Matches kafka_num_consumers=2 in clickhouse/init/01_spend_logs.sql — an
+      # auto-created topic otherwise defaults to 1 partition, which would leave
+      # one of the two ClickHouse Kafka-engine consumers permanently idle.
+      KAFKA_NUM_PARTITIONS: "2"
+
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-broker-api-versions.sh --bootstrap-server localhost:9092 >/dev/null 2>&1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+    networks:
+      - kafka-clickhouse-network
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8
+    container_name: clickhouse
+
+    ports:
+      - "8123:8123"  # HTTP
+      - "9000:9000"  # native protocol
+
+    environment:
+      - CLICKHOUSE_DB=air
+
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+      - ./clickhouse/init:/docker-entrypoint-initdb.d:ro
+
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8123/ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+
+    networks:
+      - kafka-clickhouse-network
+
+    depends_on:
+      kafka:
+        condition: service_healthy
+
+networks:
+  kafka-clickhouse-network:
+    driver: bridge
+
+volumes:
+  kafka-data:
+  clickhouse-data:

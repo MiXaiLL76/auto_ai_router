@@ -188,9 +188,35 @@ func TestMimeTypeToExt(t *testing.T) {
 // RewriteImageEditMultipart — invalid / passthrough cases
 // ---------------------------------------------------------------------------
 
+func TestRewriteImageEditMultipart_ReplacesModel(t *testing.T) {
+	body, ct := buildMultipart(t, []struct {
+		name        string
+		contentType string
+		filename    string
+		data        []byte
+	}{
+		{"model", "", "", []byte("gpt-image-2-vsellm")},
+		{"prompt", "", "", []byte("make it blue")},
+		{"image", "image/png", "input.png", makePNG()},
+	})
+
+	newBody, newCT := RewriteImageEditMultipart(body, ct, "gpt-image-2", false)
+	parts := parseResult(t, newBody, newCT)
+
+	if got := string(parts["model"].data); got != "gpt-image-2" {
+		t.Errorf("model = %q, want %q", got, "gpt-image-2")
+	}
+	if got := string(parts["prompt"].data); got != "make it blue" {
+		t.Errorf("prompt = %q, want %q", got, "make it blue")
+	}
+	if !bytes.Equal(parts["image"].data, makePNG()) {
+		t.Error("image data changed")
+	}
+}
+
 func TestRewriteImageEditMultipart_InvalidContentType(t *testing.T) {
 	body := []byte("not-multipart-data")
-	got, gotCT := RewriteImageEditMultipart(body, "application/json", false)
+	got, gotCT := RewriteImageEditMultipart(body, "application/json", "", false)
 	if !bytes.Equal(got, body) {
 		t.Error("expected original body returned for non-multipart content-type")
 	}
@@ -202,7 +228,7 @@ func TestRewriteImageEditMultipart_InvalidContentType(t *testing.T) {
 func TestRewriteImageEditMultipart_NoBoundary(t *testing.T) {
 	body := []byte("data")
 	ct := "multipart/form-data"
-	got, gotCT := RewriteImageEditMultipart(body, ct, false)
+	got, gotCT := RewriteImageEditMultipart(body, ct, "", false)
 	if !bytes.Equal(got, body) {
 		t.Error("expected original body returned when no boundary")
 	}
@@ -227,7 +253,7 @@ func TestRewriteImageEditMultipart_FixesPNGMIME(t *testing.T) {
 		{"image", "application/octet-stream", "", makePNG()},
 	})
 
-	newBody, newCT := RewriteImageEditMultipart(body, ct, false)
+	newBody, newCT := RewriteImageEditMultipart(body, ct, "", false)
 
 	parts := parseResult(t, newBody, newCT)
 	img, ok := parts["image"]
@@ -255,7 +281,7 @@ func TestRewriteImageEditMultipart_FixesJPEGMIME(t *testing.T) {
 		{"image", "application/octet-stream", "", makeJPEG()},
 	})
 
-	newBody, newCT := RewriteImageEditMultipart(body, ct, false)
+	newBody, newCT := RewriteImageEditMultipart(body, ct, "", false)
 	parts := parseResult(t, newBody, newCT)
 
 	if parts["image"].contentType != "image/jpeg" {
@@ -276,7 +302,7 @@ func TestRewriteImageEditMultipart_FixesWEBPMIME(t *testing.T) {
 		{"image", "application/octet-stream", "", makeWEBP()},
 	})
 
-	newBody, newCT := RewriteImageEditMultipart(body, ct, false)
+	newBody, newCT := RewriteImageEditMultipart(body, ct, "", false)
 	parts := parseResult(t, newBody, newCT)
 
 	if parts["image"].contentType != "image/webp" {
@@ -295,7 +321,7 @@ func TestRewriteImageEditMultipart_PreservesExplicitPNGMIME(t *testing.T) {
 		{"image", "image/png", "photo.png", makePNG()},
 	})
 
-	newBody, newCT := RewriteImageEditMultipart(body, ct, false)
+	newBody, newCT := RewriteImageEditMultipart(body, ct, "", false)
 	parts := parseResult(t, newBody, newCT)
 
 	if parts["image"].contentType != "image/png" {
@@ -318,7 +344,7 @@ func TestRewriteImageEditMultipart_UnknownImageData_NotChanged(t *testing.T) {
 		{"image", "application/octet-stream", "", unknownData},
 	})
 
-	newBody, newCT := RewriteImageEditMultipart(body, ct, false)
+	newBody, newCT := RewriteImageEditMultipart(body, ct, "", false)
 	parts := parseResult(t, newBody, newCT)
 
 	// Content-Type stays application/octet-stream (no detection possible).
@@ -342,7 +368,7 @@ func TestRewriteImageEditMultipart_MultipleImages_RenamedToArraySyntax(t *testin
 		{"image", "application/octet-stream", "", makeJPEG()},
 	})
 
-	newBody, newCT := RewriteImageEditMultipart(body, ct, false)
+	newBody, newCT := RewriteImageEditMultipart(body, ct, "", false)
 
 	// Count occurrences of "image" vs "image[]" in the rewritten body.
 	_, newParams, _ := mime.ParseMediaType(newCT)
@@ -385,7 +411,7 @@ func TestRewriteImageEditMultipart_SingleImage_KeepsOriginalName(t *testing.T) {
 		{"image", "application/octet-stream", "", makePNG()},
 	})
 
-	newBody, newCT := RewriteImageEditMultipart(body, ct, false)
+	newBody, newCT := RewriteImageEditMultipart(body, ct, "", false)
 	parts := parseResult(t, newBody, newCT)
 
 	if _, exists := parts["image"]; !exists {
@@ -408,7 +434,7 @@ func TestRewriteImageEditMultipart_MultipleImages_MIMEFixed(t *testing.T) {
 		{"image[1]", "application/octet-stream", "", makeJPEG()},
 	})
 
-	newBody, newCT := RewriteImageEditMultipart(body, ct, false)
+	newBody, newCT := RewriteImageEditMultipart(body, ct, "", false)
 	parts := parseResult(t, newBody, newCT)
 
 	if parts["image[0]"].contentType != "image/png" {
@@ -429,7 +455,7 @@ func TestRewriteImageEditMultipart_MaskField(t *testing.T) {
 		{"mask", "application/octet-stream", "", makePNG()},
 	})
 
-	newBody, newCT := RewriteImageEditMultipart(body, ct, false)
+	newBody, newCT := RewriteImageEditMultipart(body, ct, "", false)
 	parts := parseResult(t, newBody, newCT)
 
 	if parts["mask"].contentType != "image/png" {
@@ -454,7 +480,7 @@ func TestRewriteImageEditMultipart_StripResponseFormat(t *testing.T) {
 		{"image", "application/octet-stream", "", makePNG()},
 	})
 
-	newBody, newCT := RewriteImageEditMultipart(body, ct, true)
+	newBody, newCT := RewriteImageEditMultipart(body, ct, "", true)
 	parts := parseResult(t, newBody, newCT)
 
 	if _, exists := parts["response_format"]; exists {
@@ -479,7 +505,7 @@ func TestRewriteImageEditMultipart_PreserveResponseFormat_WhenNotStripping(t *te
 		{"image", "application/octet-stream", "", makePNG()},
 	})
 
-	newBody, newCT := RewriteImageEditMultipart(body, ct, false)
+	newBody, newCT := RewriteImageEditMultipart(body, ct, "", false)
 	parts := parseResult(t, newBody, newCT)
 
 	if _, exists := parts["response_format"]; !exists {
@@ -505,7 +531,7 @@ func TestRewriteImageEditMultipart_AllFieldsPreserved(t *testing.T) {
 		{"image", "application/octet-stream", "", makePNG()},
 	})
 
-	newBody, newCT := RewriteImageEditMultipart(body, ct, false)
+	newBody, newCT := RewriteImageEditMultipart(body, ct, "", false)
 	parts := parseResult(t, newBody, newCT)
 
 	for _, field := range []string{"model", "prompt", "n", "size", "image"} {
@@ -531,7 +557,7 @@ func TestRewriteImageEditMultipart_NewBoundaryDiffersFromOriginal(t *testing.T) 
 		{"image", "application/octet-stream", "", makePNG()},
 	})
 
-	_, newCT := RewriteImageEditMultipart(body, ct, false)
+	_, newCT := RewriteImageEditMultipart(body, ct, "", false)
 
 	_, origParams, _ := mime.ParseMediaType(ct)
 	_, newParams, _ := mime.ParseMediaType(newCT)

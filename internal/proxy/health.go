@@ -149,8 +149,13 @@ func (p *Proxy) HealthCheckScoped(visibility scope.Context) (bool, *httputil.Pro
 					counts[code] = cnt
 				}
 				ms.ErrorCodeCounts = counts
-				modelsInfo[modelKey] = ms
 			}
+			ms.ProviderError = bp.Reason
+			if !bp.BanUntil.IsZero() {
+				banUntil := bp.BanUntil
+				ms.BanUntil = &banUntil
+			}
+			modelsInfo[modelKey] = ms
 		}
 		// Aggregate into per-credential counts
 		if len(bp.ErrorCodeCounts) > 0 {

@@ -42,8 +42,10 @@ func responsesToolsToVertex(tools []responses.Tool) []*genai.Tool {
 				CodeExecution: &genai.ToolCodeExecution{},
 			})
 
-			// Other tool types (file_search, computer_use, mcp, image_generation) are
-			// not supported by Vertex — silently skip them.
+			// Other tool types (file_search, computer_use, mcp) are not supported by
+			// Vertex and are silently skipped. image_generation is intentionally not
+			// emitted as a tool either: buildGenConfig translates it to the IMAGE
+			// response modality.
 		}
 	}
 

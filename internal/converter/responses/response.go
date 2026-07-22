@@ -3,6 +3,7 @@ package responses
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 )
 
 // chatToResponseConfig holds optional parameters for ChatToResponse.
@@ -35,9 +36,15 @@ func ChatToResponse(body []byte, opts ...ChatToResponseOption) ([]byte, error) {
 		Choices []struct {
 			Index   int `json:"index"`
 			Message struct {
-				Role      string      `json:"role"`
-				Content   interface{} `json:"content"`
-				Refusal   string      `json:"refusal,omitempty"`
+				Role    string      `json:"role"`
+				Content interface{} `json:"content"`
+				Refusal string      `json:"refusal,omitempty"`
+				Images  []struct {
+					B64JSON  string `json:"b64_json,omitempty"`
+					ImageURL *struct {
+						URL string `json:"url"`
+					} `json:"image_url,omitempty"`
+				} `json:"images,omitempty"`
 				ToolCalls []struct {
 					ID       string `json:"id"`
 					Type     string `json:"type"`
@@ -58,6 +65,7 @@ func ChatToResponse(body []byte, opts ...ChatToResponseOption) ([]byte, error) {
 			} `json:"prompt_tokens_details,omitempty"`
 			CompletionTokensDetails *struct {
 				ReasoningTokens int `json:"reasoning_tokens,omitempty"`
+				ImageTokens     int `json:"image_tokens,omitempty"`
 			} `json:"completion_tokens_details,omitempty"`
 		} `json:"usage,omitempty"`
 	}
@@ -100,6 +108,20 @@ func ChatToResponse(body []byte, opts ...ChatToResponseOption) ([]byte, error) {
 					Content: msgContent,
 				}
 				output = append(output, msgItem)
+			}
+
+			for _, image := range choice.Message.Images {
+				result, outputFormat := responseImageResult(image.B64JSON, image.ImageURL)
+				if result == "" {
+					continue
+				}
+				output = append(output, OutputItem{
+					Type:         "image_generation_call",
+					ID:           GenerateItemID("ig_"),
+					Status:       "completed",
+					Result:       result,
+					OutputFormat: outputFormat,
+				})
 			}
 
 			// Add function_call output items for each tool call
@@ -151,6 +173,7 @@ func ChatToResponse(body []byte, opts ...ChatToResponseOption) ([]byte, error) {
 		}
 		if ccResp.Usage.CompletionTokensDetails != nil {
 			usage.OutputTokensDetails.ReasoningTokens = ccResp.Usage.CompletionTokensDetails.ReasoningTokens
+			usage.OutputTokensDetails.ImageTokens = ccResp.Usage.CompletionTokensDetails.ImageTokens
 		}
 	}
 
@@ -173,6 +196,32 @@ func ChatToResponse(body []byte, opts ...ChatToResponseOption) ([]byte, error) {
 		return nil, fmt.Errorf("failed to marshal responses API response: %w", err)
 	}
 	return result, nil
+}
+
+func responseImageResult(b64JSON string, imageURL *struct {
+	URL string `json:"url"`
+}) (result, outputFormat string) {
+	if b64JSON != "" {
+		return b64JSON, ""
+	}
+	if imageURL == nil {
+		return "", ""
+	}
+	url := imageURL.URL
+	comma := strings.IndexByte(url, ',')
+	if comma < 0 || !strings.HasPrefix(strings.ToLower(url), "data:image/") {
+		return "", ""
+	}
+	header := url[:comma]
+	if !strings.Contains(strings.ToLower(header), ";base64") {
+		return "", ""
+	}
+	mimeType := strings.TrimPrefix(strings.SplitN(header, ";", 2)[0], "data:")
+	format := strings.TrimPrefix(strings.ToLower(mimeType), "image/")
+	if format == "jpg" {
+		format = "jpeg"
+	}
+	return url[comma+1:], format
 }
 
 func convertChatMessageContent(content interface{}) []OutputContent {

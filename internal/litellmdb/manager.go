@@ -25,6 +25,16 @@ type Manager interface {
 	// Logging - asynchronous logging
 	LogSpend(entry *models.SpendLogEntry) error
 
+	// MarkSpendLogKafkaFallback flags an existing LiteLLM_SpendLogs row's
+	// metadata (metadata.kafka_fallback=true, metadata.kafka_fallback_reason)
+	// so it can be found later (e.g. by a DBA script querying
+	// metadata->>'kafka_fallback') and re-published to Kafka. AIR intentionally
+	// does not run its own resend job for this - flagging is as far as it goes.
+	// Used for failures kafkalog can't flag synchronously at insert time (e.g. a
+	// DLQ batch dropped after a sustained Kafka outage). Best-effort: callers
+	// only log a non-nil error, never treat it as fatal.
+	MarkSpendLogKafkaFallback(ctx context.Context, requestID, reason string) error
+
 	// Model table - fetch credentials/models/prices from LiteLLM DB for AIR
 	FetchModelsForAIR(ctx context.Context, signingKey string) ([]config.CredentialConfig, []config.ModelRPMConfig, map[string]*imodels.ModelPrice, error)
 
@@ -72,6 +82,11 @@ func (n *NoopManager) ValidateTokenForModel(ctx context.Context, rawToken, model
 }
 
 func (n *NoopManager) LogSpend(entry *models.SpendLogEntry) error {
+	// no-op
+	return nil
+}
+
+func (n *NoopManager) MarkSpendLogKafkaFallback(ctx context.Context, requestID, reason string) error {
 	// no-op
 	return nil
 }
@@ -146,9 +161,11 @@ func New(cfg *models.Config) (Manager, error) {
 
 	// Create authenticator
 	authenticator := auth.NewAuthenticator(pool, cache, cfg.Logger)
-	// Create spend logger
-	logger := spendlog.NewLogger(pool, cfg)
-	logger.Start()
+	var logger *spendlog.Logger
+	if !cfg.DisableSpendLogging {
+		logger = spendlog.NewLogger(pool, cfg)
+		logger.Start()
+	}
 
 	m := &DefaultManager{
 		pool:        pool,
@@ -194,7 +211,27 @@ func (m *DefaultManager) ValidateTokenForModel(ctx context.Context, rawToken, mo
 
 // LogSpend adds an entry to the logging queue
 func (m *DefaultManager) LogSpend(entry *models.SpendLogEntry) error {
+	if m.config.DisableSpendLogsWrite || m.spendLogger == nil {
+		return nil
+	}
 	return m.spendLogger.Log(entry)
+}
+
+// MarkSpendLogKafkaFallback flags an existing spend log row's metadata so it
+// can be found and re-published to Kafka later (by external/DBA tooling, not
+// by AIR itself). request_id is the table's primary key, so this is a single
+// targeted update — it's a no-op (rows affected = 0, no error) if the row
+// doesn't exist, which can happen if litellm_db writes are disabled for this
+// request.
+func (m *DefaultManager) MarkSpendLogKafkaFallback(ctx context.Context, requestID, reason string) error {
+	const query = `
+		UPDATE "LiteLLM_SpendLogs"
+		SET metadata = COALESCE(metadata, '{}'::jsonb)
+			|| jsonb_build_object('kafka_fallback', true, 'kafka_fallback_reason', $2::text)
+		WHERE request_id = $1
+	`
+	_, err := m.pool.Pool().Exec(ctx, query, requestID, reason)
+	return err
 }
 
 // IsEnabled returns true (module is enabled)
@@ -214,6 +251,9 @@ func (m *DefaultManager) AuthCacheStats() models.AuthCacheStats {
 
 // SpendLoggerStats returns spend logger statistics
 func (m *DefaultManager) SpendLoggerStats() models.SpendLoggerStats {
+	if m.spendLogger == nil {
+		return models.SpendLoggerStats{}
+	}
 	return m.spendLogger.Stats()
 }
 
@@ -232,8 +272,10 @@ func (m *DefaultManager) Shutdown(ctx context.Context) error {
 	m.logger.Info("Shutting down LiteLLM DB Manager...")
 
 	// First stop spend logger (to write all pending logs)
-	if err := m.spendLogger.Shutdown(ctx); err != nil {
-		m.logger.Error("SpendLogger shutdown error", "error", err)
+	if m.spendLogger != nil {
+		if err := m.spendLogger.Shutdown(ctx); err != nil {
+			m.logger.Error("SpendLogger shutdown error", "error", err)
+		}
 	}
 
 	// Close connection pool

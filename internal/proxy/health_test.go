@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -251,6 +252,51 @@ func TestHealthCheck_ModelInfo(t *testing.T) {
 	assert.NotNil(t, status.Models)
 	assert.Equal(t, 9, status.Models["test_cred:gpt-4"].Weight)
 	assert.Equal(t, 4, status.Models["test_cred:claude-3-opus"].Weight)
+}
+
+func TestHealthCheck_ModelProviderErrorAndBanUntil(t *testing.T) {
+	logger := testhelpers.NewTestLogger()
+	f2b := fail2ban.New(100, 0, []int{429})
+	rl := ratelimit.New()
+	cred := config.CredentialConfig{
+		Name:    "bedrock-a",
+		Type:    config.ProviderTypeBedrock,
+		APIKey:  "key",
+		BaseURL: "https://bedrock.example",
+		RPM:     100,
+	}
+	rl.AddCredential(cred.Name, 100)
+	rl.AddModelWithTPM(cred.Name, "claude-opus", 100, 1000)
+	until := time.Now().Add(time.Hour)
+	f2b.BanUntil(cred.Name, "claude-opus", http.StatusTooManyRequests, until, bedrockDailyQuotaProviderError)
+
+	bal := balancer.New([]config.CredentialConfig{cred}, f2b, rl)
+	proxy := createProxyWithParams(
+		bal,
+		logger,
+		10,
+		30*time.Second,
+		monitoring.New(false),
+		"test-key",
+		rl,
+		auth.NewVertexTokenManager(logger),
+		models.New(logger, 50, []config.ModelRPMConfig{}),
+		"test-version",
+		"test-commit",
+	)
+
+	_, health := proxy.HealthCheck()
+	stats := health.Models["bedrock-a:claude-opus"]
+	assert.True(t, stats.IsBanned)
+	assert.Equal(t, bedrockDailyQuotaProviderError, stats.ProviderError)
+	if assert.NotNil(t, stats.BanUntil) {
+		assert.WithinDuration(t, until, *stats.BanUntil, time.Second)
+	}
+
+	trace := proxy.TraceCheck(context.Background(), 0)
+	traceStats := trace.Models["bedrock-a:claude-opus"]
+	assert.Equal(t, bedrockDailyQuotaProviderError, traceStats.ProviderError)
+	assert.NotNil(t, traceStats.BanUntil)
 }
 
 func TestHealthCheck_IncludesModelManagerOnlyWeights(t *testing.T) {

@@ -6,8 +6,10 @@ import (
 	"net/http"
 	"sync"
 
+	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"github.com/mixaill76/auto_ai_router/internal/converter/responses"
+	"github.com/mixaill76/auto_ai_router/internal/utils"
 )
 
 var wsUpgrader = websocket.Upgrader{
@@ -215,6 +217,21 @@ func sendWSHTTPError(conn *websocket.Conn, raw []byte, fallbackStatus int) {
 // memory so that previous_response_id continuations work within the same session.
 // Reconnecting on a new WebSocket clears the cache, triggering previous_response_not_found.
 func (p *Proxy) HandleWebSocketResponses(w http.ResponseWriter, r *http.Request) {
+	// Authenticate the upgrade request BEFORE establishing the socket. An invalid
+	// key / exhausted budget gets an ordinary HTTP error (401/402/403) and the
+	// connection is never upgraded. The per-message response.create path still runs
+	// its own full auth via ProxyRequest (Authorization is cloned into internalReq),
+	// so this pre-check is purely a gate on connection establishment.
+	authLogCtx := &RequestLogContext{
+		RequestID: uuid.New().String(),
+		StartTime: utils.NowUTC(),
+		Request:   r,
+		Status:    "unknown",
+	}
+	if !p.authenticateRequest(w, r, authLogCtx, p.isLiteLLMHealthy()) {
+		return
+	}
+
 	conn, err := wsUpgrader.Upgrade(w, r, nil)
 	if err != nil {
 		p.logger.DebugContext(r.Context(), "ws: upgrade failed", "error", err)

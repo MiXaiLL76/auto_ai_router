@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/fail2ban"
@@ -577,6 +578,10 @@ func (r *RoundRobin) hasTriedPriorityCredential(exclude map[string]bool) bool {
 
 func (r *RoundRobin) RecordResponse(credentialName, modelID string, statusCode int) {
 	r.fail2ban.RecordResponse(credentialName, modelID, statusCode)
+}
+
+func (r *RoundRobin) BanUntil(credentialName, modelID string, statusCode int, until time.Time, reason string) {
+	r.fail2ban.BanUntil(credentialName, modelID, statusCode, until, reason)
 }
 
 func (r *RoundRobin) GetCredentialsSnapshot() []config.CredentialConfig {

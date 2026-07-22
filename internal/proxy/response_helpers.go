@@ -286,6 +286,49 @@ func decodeResponseBody(body []byte, encoding string) string {
 	return string(body)
 }
 
+func decodeResponseBodyPrefix(body []byte, encoding string, limit int64) []byte {
+	if limit <= 0 {
+		return nil
+	}
+
+	lowerEncoding := strings.ToLower(encoding)
+	if strings.Contains(lowerEncoding, "gzip") {
+		reader, err := gzip.NewReader(bytes.NewReader(body))
+		if err != nil {
+			return truncateBytes(body, limit)
+		}
+		defer func() {
+			_ = reader.Close()
+		}()
+		decoded, err := io.ReadAll(io.LimitReader(reader, limit))
+		if err != nil {
+			return truncateBytes(body, limit)
+		}
+		return decoded
+	}
+
+	if strings.Contains(lowerEncoding, "deflate") {
+		reader := flate.NewReader(bytes.NewReader(body))
+		defer func() {
+			_ = reader.Close()
+		}()
+		decoded, err := io.ReadAll(io.LimitReader(reader, limit))
+		if err != nil {
+			return truncateBytes(body, limit)
+		}
+		return decoded
+	}
+
+	return truncateBytes(body, limit)
+}
+
+func truncateBytes(body []byte, limit int64) []byte {
+	if int64(len(body)) <= limit {
+		return body
+	}
+	return body[:limit]
+}
+
 // extractTokensFromResponse extracts total_tokens from the response body
 // Supports both OpenAI format (usage.total_tokens) and Vertex AI format (usageMetadata.totalTokenCount)
 func extractTokensFromResponse(body string, credType config.ProviderType) int {

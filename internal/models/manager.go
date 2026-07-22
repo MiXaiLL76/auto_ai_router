@@ -316,6 +316,68 @@ func (m *Manager) GetRealModelNameForCredential(alias, credential string) (strin
 	return alias, false
 }
 
+// GetAliasesForCredentialRealModel returns route-visible model IDs on a
+// credential that resolve to the same provider-facing model name.
+func (m *Manager) GetAliasesForCredentialRealModel(credential, realModel string) []string {
+	if realModel == "" {
+		return nil
+	}
+
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	aliases := make([]string, 0)
+	seen := make(map[string]struct{})
+	for _, alias := range m.credentialModels[credential] {
+		resolved := alias
+		resolvedPerCredential := false
+		if names, ok := m.modelRealNamesPerCred[credential]; ok {
+			if real, ok := names[alias]; ok {
+				resolved = real
+				resolvedPerCredential = true
+			}
+		}
+		if !resolvedPerCredential {
+			if real, ok := m.modelRealNames[alias]; ok {
+				resolved = real
+			}
+		}
+		if resolved != realModel {
+			continue
+		}
+		if _, ok := seen[alias]; ok {
+			continue
+		}
+		seen[alias] = struct{}{}
+		aliases = append(aliases, alias)
+	}
+	slices.Sort(aliases)
+	return aliases
+}
+
+// GetAliasesForModel returns every alias — across all credentials that serve
+// modelID — that resolves to the same provider-facing realModelID. Unlike
+// GetAliasesForCredentialRealModel this doesn't require a credential to already
+// be picked, which matters for callers (e.g. key model-allow-list enforcement)
+// that run before credential selection.
+func (m *Manager) GetAliasesForModel(modelID, realModelID string) []string {
+	aliases := []string{modelID}
+	if realModelID == "" {
+		return aliases
+	}
+	seen := map[string]struct{}{modelID: {}}
+	for _, credential := range m.GetCredentialsForModel(modelID) {
+		for _, alias := range m.GetAliasesForCredentialRealModel(credential, realModelID) {
+			if _, ok := seen[alias]; ok {
+				continue
+			}
+			seen[alias] = struct{}{}
+			aliases = append(aliases, alias)
+		}
+	}
+	return aliases
+}
+
 // responsesAPIModelPrefixes lists model name substrings that natively support
 // the /v1/responses endpoint.  Checked case-insensitively via strings.Contains.
 // Source: https://platform.openai.com/docs/api-reference/responses

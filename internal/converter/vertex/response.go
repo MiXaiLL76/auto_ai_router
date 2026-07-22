@@ -189,8 +189,11 @@ func convertVertexUsageMetadata(meta *genai.GenerateContentResponseUsageMetadata
 			case genai.MediaModalityAudio:
 				usage.CompletionTokensDetails.AudioTokens += int(detail.TokenCount)
 			case genai.MediaModalityImage, genai.MediaModalityVideo:
-				// Image/video tokens are already included in CompletionTokens total;
-				// OpenAI format has no dedicated field for these modalities
+				// LiteLLM supports image_tokens as an extension to the OpenAI
+				// completion token details. Preserve the modality so generated
+				// images are billed with output_cost_per_image_token instead of
+				// the much lower text output rate.
+				usage.CompletionTokensDetails.ImageTokens += int(detail.TokenCount)
 			}
 		}
 	}

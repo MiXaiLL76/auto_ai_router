@@ -1,8 +1,10 @@
 package vertexresponses
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/mixaill76/auto_ai_router/internal/converter/responses"
@@ -139,6 +141,22 @@ func candidatesToOutputItems(vertexResp *genai.GenerateContentResponse) []respon
 					}
 				}
 
+			case part.InlineData != nil:
+				// Gemini image models return generated media as inlineData. The
+				// Responses API represents a generated image as a standalone
+				// image_generation_call whose result is raw base64 (without the
+				// data-URL prefix).
+				if strings.HasPrefix(strings.ToLower(part.InlineData.MIMEType), "image/") {
+					flushMessage()
+					output = append(output, responses.OutputItem{
+						Type:         "image_generation_call",
+						ID:           responses.GenerateItemID("ig_"),
+						Status:       "completed",
+						Result:       base64.StdEncoding.EncodeToString(part.InlineData.Data),
+						OutputFormat: imageOutputFormat(part.InlineData.MIMEType),
+					})
+				}
+
 			case part.Text != "":
 				// Regular text → accumulate as output_text content part.
 				msgContent = append(msgContent, responses.OutputContent{
@@ -181,6 +199,14 @@ func candidatesToOutputItems(vertexResp *genai.GenerateContentResponse) []respon
 	}
 
 	return output
+}
+
+func imageOutputFormat(mimeType string) string {
+	format := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(mimeType)), "image/")
+	if format == "jpg" {
+		return "jpeg"
+	}
+	return format
 }
 
 type textPartRef struct {
@@ -299,6 +325,16 @@ func usageMetadataToUsage(meta *genai.GenerateContentResponseUsageMetadata) *res
 	// Extract specialized token counts from modality details.
 	thoughtTokens := int(meta.ThoughtsTokenCount)
 	cachedTokens := int(meta.CachedContentTokenCount)
+	imageTokens := 0
+	for _, detail := range meta.CandidatesTokensDetails {
+		if detail == nil {
+			continue
+		}
+		switch genai.MediaModality(detail.Modality) {
+		case genai.MediaModalityImage, genai.MediaModalityVideo:
+			imageTokens += int(detail.TokenCount)
+		}
+	}
 
 	return &responses.Usage{
 		InputTokens:  int(meta.PromptTokenCount),
@@ -309,6 +345,7 @@ func usageMetadataToUsage(meta *genai.GenerateContentResponseUsageMetadata) *res
 		},
 		OutputTokensDetails: responses.OutputDetails{
 			ReasoningTokens: thoughtTokens,
+			ImageTokens:     imageTokens,
 		},
 	}
 }

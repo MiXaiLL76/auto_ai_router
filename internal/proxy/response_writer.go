@@ -4,8 +4,10 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"strings"
 
 	"github.com/mixaill76/auto_ai_router/internal/converter"
+	"github.com/mixaill76/auto_ai_router/internal/proxy/modelutils"
 )
 
 // writeProxyResponse writes raw upstream proxy response to client.
@@ -16,6 +18,15 @@ func (p *Proxy) writeProxyResponse(w http.ResponseWriter, resp *ProxyResponse, c
 		return
 	}
 
+	responseBody := resp.Body
+	responseBodyChanged := false
+	if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
+		if normalizedBody, changed := modelutils.NormalizeCompletionUsage(responseBody, modelID); changed {
+			responseBody = normalizedBody
+			responseBodyChanged = true
+		}
+	}
+
 	// Determine target encoding based on client's Accept-Encoding
 	acceptEncoding := clientReq.Header.Get("Accept-Encoding")
 	acceptedEncodings := ParseAcceptEncoding(acceptEncoding)
@@ -24,15 +35,15 @@ func (p *Proxy) writeProxyResponse(w http.ResponseWriter, resp *ProxyResponse, c
 	p.logger.DebugContext(clientReq.Context(), "Proxy response encoding decision",
 		"accept_encoding_header", acceptEncoding,
 		"target_encoding", targetEncoding,
-		"body_size", len(resp.Body),
+		"body_size", len(responseBody),
 	)
 
 	// Compress body if needed (Go's http.Client already decompressed upstream response)
-	responseBody := resp.Body
 	contentEncoding := ""
 
-	if targetEncoding != "identity" && len(resp.Body) > 0 {
-		compressedBody, usedEncoding, err := CompressBody(resp.Body, targetEncoding)
+	if targetEncoding != "identity" && len(responseBody) > 0 {
+		uncompressedSize := len(responseBody)
+		compressedBody, usedEncoding, err := CompressBody(responseBody, targetEncoding)
 		if err != nil {
 			p.logger.WarnContext(clientReq.Context(), "Failed to compress response body",
 				"encoding", targetEncoding,
@@ -42,7 +53,7 @@ func (p *Proxy) writeProxyResponse(w http.ResponseWriter, resp *ProxyResponse, c
 		} else {
 			p.logger.DebugContext(clientReq.Context(), "Response body compressed",
 				"encoding", usedEncoding,
-				"original_size", len(resp.Body),
+				"original_size", uncompressedSize,
 				"compressed_size", len(compressedBody),
 			)
 			responseBody = compressedBody
@@ -53,6 +64,9 @@ func (p *Proxy) writeProxyResponse(w http.ResponseWriter, resp *ProxyResponse, c
 	// Copy response headers
 	for key, values := range resp.Headers {
 		if isHopByHopHeader(key) {
+			continue
+		}
+		if responseBodyChanged && isRepresentationIntegrityHeader(key) {
 			continue
 		}
 		// Skip Content-Length, Transfer-Encoding, and Content-Encoding
@@ -93,18 +107,31 @@ func (p *Proxy) writeProxyStreamingResponseWithTokens(
 	credName string,
 	modelID string,
 	tokenizerModelID string,
+	logCtx *RequestLogContext,
 ) (*converter.TokenUsage, error) {
 	if resp == nil || resp.StreamBody == nil {
 		return nil, nil
 	}
+
+	streamBody := resp.StreamBody
+	normalizeStream := false
+	if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
+		if normalizedStreamBody, wrapped := modelutils.NewUsageNormalizingReadCloser(streamBody, modelID); wrapped {
+			streamBody = normalizedStreamBody
+			normalizeStream = true
+		}
+	}
 	defer func() {
-		if closeErr := resp.StreamBody.Close(); closeErr != nil {
+		if closeErr := streamBody.Close(); closeErr != nil {
 			p.logger.WarnContext(clientReq.Context(), "Failed to close proxy streaming response body", "error", closeErr)
 		}
 	}()
 
 	for key, values := range resp.Headers {
 		if isHopByHopHeader(key) {
+			continue
+		}
+		if normalizeStream && isRepresentationIntegrityHeader(key) {
 			continue
 		}
 		// Skip Content-Length, Transfer-Encoding, and Content-Encoding
@@ -144,12 +171,13 @@ func (p *Proxy) writeProxyStreamingResponseWithTokens(
 		err := p.streamToClient(
 			clientReq.Context(),
 			w,
-			resp.StreamBody,
+			streamBody,
 			credName,
 			modelID,
 			endpointFromRequest(clientReq),
 			onChunk,
 			nil,
+			logCtx,
 		)
 		if err != nil && p.drainUpstreamOnAbort {
 			// Drain upstream so the usage chunk arrives even though the client left.
@@ -158,7 +186,7 @@ func (p *Proxy) writeProxyStreamingResponseWithTokens(
 
 			p.drainUpstream(
 				drainCtx,
-				resp.StreamBody,
+				streamBody,
 				onChunk,
 				credName,
 			)
@@ -168,13 +196,22 @@ func (p *Proxy) writeProxyStreamingResponseWithTokens(
 	}
 
 	// Non-flushing fallback: copy as-is (token usage cannot be parsed reliably here).
-	if _, err := io.Copy(w, resp.StreamBody); err != nil {
+	if _, err := io.Copy(w, streamBody); err != nil {
 		if isClientDisconnectError(err) {
 			p.recordAbortedRequest(credName, endpointFromRequest(clientReq), modelID)
 		}
 		return buildFallbackUsage(), err
 	}
 	return buildFallbackUsage(), nil
+}
+
+func isRepresentationIntegrityHeader(key string) bool {
+	switch strings.ToLower(key) {
+	case "etag", "content-md5", "digest", "content-digest", "repr-digest":
+		return true
+	default:
+		return false
+	}
 }
 
 // itoa avoids fmt.Sprintf for a hot path.

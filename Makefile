@@ -1,4 +1,4 @@
-.PHONY: build run clean test fmt vet lint install-lint format help install-deps docker-build docs-install docs-serve docs-build docs-deploy test-clean
+.PHONY: build run clean test fmt vet lint install-lint format help install-deps docker-build docs-install docs-serve docs-build docs-deploy test-clean kafka-up kafka-down kafka-logs kafka-ps kafka-clean kafka-clickhouse-client
 
 # Build variables
 BINARY_NAME=auto_ai_router
@@ -17,6 +17,9 @@ INTERNAL_PKGS=./internal/...
 DOCKER_IMAGE=auto-ai-router
 DOCKER_TAG?=latest
 DOCKER_REGISTRY?=ghcr.io/mixaill76
+
+# Kafka/ClickHouse local dev stack
+KAFKA_COMPOSE_FILE=docker-compose.kafka.yml
 
 # Default target
 all: build
@@ -45,6 +48,14 @@ help:
 	@echo ""
 	@echo "Docker targets:"
 	@echo "  docker-build  - Build Docker image"
+	@echo ""
+	@echo "Kafka/ClickHouse targets (see docs/litellm-integration/kafka_spend_log.md):"
+	@echo "  kafka-up      - Start local Kafka + ClickHouse stack (docker-compose.kafka.yml)"
+	@echo "  kafka-down    - Stop the stack (keeps volumes)"
+	@echo "  kafka-clean   - Stop the stack and remove volumes (wipes topic/table data)"
+	@echo "  kafka-ps      - Show stack container status"
+	@echo "  kafka-logs    - Tail stack logs"
+	@echo "  kafka-clickhouse-client - Open clickhouse-client against the running stack"
 	@echo ""
 	@echo "Docs targets:"
 	@echo "  docs-install - Install Zensical"
@@ -196,6 +207,35 @@ docker-build:
 	@echo "Building Docker image $(DOCKER_IMAGE):$(DOCKER_TAG)..."
 	docker build -t $(DOCKER_IMAGE):$(DOCKER_TAG) .
 	@echo "Docker image built successfully"
+
+## kafka-up: Start local Kafka + ClickHouse stack
+kafka-up:
+	@echo "Starting Kafka + ClickHouse stack..."
+	docker compose -f $(KAFKA_COMPOSE_FILE) up -d
+	@echo "Kafka:      localhost:9092"
+	@echo "ClickHouse: localhost:8123 (HTTP), localhost:9000 (native)"
+
+## kafka-down: Stop the Kafka + ClickHouse stack (keeps volumes)
+kafka-down:
+	@echo "Stopping Kafka + ClickHouse stack..."
+	docker compose -f $(KAFKA_COMPOSE_FILE) down
+
+## kafka-clean: Stop the stack and remove volumes (wipes topic/table data)
+kafka-clean:
+	@echo "Stopping Kafka + ClickHouse stack and removing volumes..."
+	docker compose -f $(KAFKA_COMPOSE_FILE) down -v
+
+## kafka-ps: Show Kafka + ClickHouse stack container status
+kafka-ps:
+	docker compose -f $(KAFKA_COMPOSE_FILE) ps
+
+## kafka-logs: Tail Kafka + ClickHouse stack logs
+kafka-logs:
+	docker compose -f $(KAFKA_COMPOSE_FILE) logs -f
+
+## kafka-clickhouse-client: Open clickhouse-client against the running stack
+kafka-clickhouse-client:
+	docker compose -f $(KAFKA_COMPOSE_FILE) exec clickhouse clickhouse-client -d air
 
 ## docs-install: Install Zensical
 docs-install:

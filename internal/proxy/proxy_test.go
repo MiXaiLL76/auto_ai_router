@@ -671,7 +671,11 @@ func TestProxyRequest_MultipartImageEditConvertedToJSON(t *testing.T) {
 		err := json.NewDecoder(r.Body).Decode(&bodyMap)
 		assert.NoError(t, err)
 		assert.NotNil(t, bodyMap["contents"])
-		assert.NotNil(t, bodyMap["generationConfig"])
+		generationConfig, ok := bodyMap["generationConfig"].(map[string]interface{})
+		assert.True(t, ok)
+		assert.Equal(t, float64(42), generationConfig["seed"])
+		assert.InDelta(t, 0.7, generationConfig["temperature"], 1e-6)
+		assert.InDelta(t, 0.9, generationConfig["topP"], 1e-6)
 
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{"candidates":[{"content":{"parts":[{"inlineData":{"data":"aW1n","mimeType":"image/png"}}],"role":"model"}}]}`))
@@ -686,6 +690,9 @@ func TestProxyRequest_MultipartImageEditConvertedToJSON(t *testing.T) {
 	writer := multipart.NewWriter(&buf)
 	assert.NoError(t, writer.WriteField("model", "gemini-2.5-flash-image-preview"))
 	assert.NoError(t, writer.WriteField("prompt", "Edit this image"))
+	assert.NoError(t, writer.WriteField("seed", "42"))
+	assert.NoError(t, writer.WriteField("temperature", "0.7"))
+	assert.NoError(t, writer.WriteField("top_p", "0.9"))
 	part, err := writer.CreatePart(textproto.MIMEHeader{
 		"Content-Disposition": []string{`form-data; name="image"; filename="input.png"`},
 		"Content-Type":        []string{"image/png"},
@@ -698,6 +705,41 @@ func TestProxyRequest_MultipartImageEditConvertedToJSON(t *testing.T) {
 	req := httptest.NewRequest("POST", "/v1/images/edits", &buf)
 	req.Header.Set("Authorization", "Bearer master-key")
 	req.Header.Set("Content-Type", writer.FormDataContentType())
+	w := httptest.NewRecorder()
+
+	prx.ProxyRequest(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+}
+
+func TestProxyRequest_ImageGenerationSamplingParametersConvertedToJSON(t *testing.T) {
+	mockServer := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "application/json", r.Header.Get("Content-Type"))
+
+		var bodyMap map[string]interface{}
+		err := json.NewDecoder(r.Body).Decode(&bodyMap)
+		assert.NoError(t, err)
+		assert.NotNil(t, bodyMap["contents"])
+		generationConfig, ok := bodyMap["generationConfig"].(map[string]interface{})
+		assert.True(t, ok)
+		assert.Equal(t, float64(42), generationConfig["seed"])
+		assert.InDelta(t, 0.7, generationConfig["temperature"], 1e-6)
+		assert.InDelta(t, 0.9, generationConfig["topP"], 1e-6)
+
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"candidates":[{"content":{"parts":[{"inlineData":{"data":"aW1n","mimeType":"image/png"}}],"role":"model"}}]}`))
+	}))
+	defer mockServer.Close()
+
+	prx := NewTestProxyBuilder().
+		WithSingleCredential("test", config.ProviderTypeGemini, mockServer.URL, "upstream-key-1").
+		Build()
+
+	req := httptest.NewRequest("POST", "/v1/images/generations", strings.NewReader(
+		`{"model":"gemini-3.1-flash-image-preview","prompt":"Generate an image","seed":42,"temperature":0.7,"top_p":0.9}`,
+	))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 
 	prx.ProxyRequest(w, req)

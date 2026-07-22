@@ -206,6 +206,37 @@ func TestGetBannedPairs(t *testing.T) {
 	}
 }
 
+func TestBanUntilImmediatelyBansOnlyPairAndExposesReason(t *testing.T) {
+	f2b := New(100, 0, []int{429})
+	until := time.Now().Add(time.Hour)
+
+	f2b.BanUntil("bedrock-a", "claude-opus", 429, until, "bedrock_daily_token_quota_exhausted")
+
+	assert.True(t, f2b.IsBanned("bedrock-a", "claude-opus"))
+	assert.False(t, f2b.IsBanned("bedrock-a", "claude-sonnet"))
+	assert.False(t, f2b.IsBanned("bedrock-b", "claude-opus"))
+	assert.Equal(t, 1, f2b.GetFailureCount("bedrock-a", "claude-opus"))
+
+	pairs := f2b.GetBannedPairs()
+	if assert.Len(t, pairs, 1) {
+		assert.Equal(t, "bedrock_daily_token_quota_exhausted", pairs[0].Reason)
+		assert.WithinDuration(t, until, pairs[0].BanUntil, time.Second)
+	}
+}
+
+func TestBanUntilDoesNotShortenExistingBan(t *testing.T) {
+	f2b := New(100, 0, []int{429})
+	longer := time.Now().Add(2 * time.Hour)
+	f2b.BanUntil("bedrock-a", "claude-opus", 429, longer, "bedrock_daily_token_quota_exhausted")
+
+	f2b.BanUntil("bedrock-a", "claude-opus", 429, time.Now().Add(time.Hour), "bedrock_daily_token_quota_exhausted")
+
+	pairs := f2b.GetBannedPairs()
+	if assert.Len(t, pairs, 1) {
+		assert.WithinDuration(t, longer, pairs[0].BanUntil, time.Second)
+	}
+}
+
 func TestRecordResponse_IgnoreIfAlreadyBanned(t *testing.T) {
 	f2b := New(3, 0, []int{401, 403, 500})
 

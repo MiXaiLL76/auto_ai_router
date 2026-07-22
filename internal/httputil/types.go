@@ -1,6 +1,10 @@
 package httputil
 
-import "github.com/mixaill76/auto_ai_router/internal/scope"
+import (
+	"time"
+
+	"github.com/mixaill76/auto_ai_router/internal/scope"
+)
 
 // ProxyHealthResponse represents the JSON response from /health endpoint
 type ProxyHealthResponse struct {
@@ -44,6 +48,8 @@ type ModelHealthStats struct {
 	DeniedScopes    []string          `json:"denied_scopes,omitempty"`
 	ScopeExpression *scope.Expression `json:"scope_expression,omitempty"`
 	ErrorCodeCounts map[int]int       `json:"error_code_counts,omitempty"` // error code -> count when banned
+	ProviderError   string            `json:"provider_error,omitempty"`
+	BanUntil        *time.Time        `json:"ban_until,omitempty"`
 }
 
 // EffectiveHealthWeight resolves the health weight fallback chain:

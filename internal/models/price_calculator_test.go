@@ -27,6 +27,36 @@ func TestCalculateTokenCosts_RegularTokensOnly(t *testing.T) {
 	assert.Equal(t, 2.0, costs.TotalCost)  // 1.0 + 1.0
 }
 
+func TestCalculateTokenCosts_GeneratedImageTokensUseImageRate(t *testing.T) {
+	usage := &converter.TokenUsage{
+		PromptTokens:      22,
+		CompletionTokens:  1120,
+		OutputImageTokens: 1120,
+	}
+	price := &ModelPrice{
+		InputCostPerToken:       0.00000045,
+		OutputCostPerToken:      0.0000027,
+		OutputCostPerImageToken: 0.000054,
+	}
+
+	costs := CalculateTokenCosts(usage, price)
+	require.NotNil(t, costs)
+	assert.InDelta(t, 0.0000099, costs.InputCost, 1e-12)
+	assert.Zero(t, costs.OutputCost, "image tokens must not also be charged as text")
+	assert.InDelta(t, 0.06048, costs.ImageCost, 1e-12)
+	assert.InDelta(t, 0.0604899, costs.TotalCost, 1e-12)
+}
+
+func TestCalculateTokenCosts_ImagenUsesPerImageRate(t *testing.T) {
+	usage := &converter.TokenUsage{ImageCount: 2}
+	price := &ModelPrice{OutputCostPerImage: 0.018}
+
+	costs := CalculateTokenCosts(usage, price)
+	require.NotNil(t, costs)
+	assert.InDelta(t, 0.036, costs.ImageCost, 1e-12)
+	assert.InDelta(t, 0.036, costs.TotalCost, 1e-12)
+}
+
 func TestCalculateTokenCosts_Vertex_WithAudioAndCached(t *testing.T) {
 	// Vertex semantic: audio and cached are INCLUDED in totals
 	// promptTokenCount=100 includes AudioInputTokens=5 and CachedInputTokens=20

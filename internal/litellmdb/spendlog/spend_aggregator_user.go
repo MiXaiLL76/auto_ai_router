@@ -3,8 +3,8 @@ package spendlog
 import (
 	"context"
 	"log/slog"
+	"strings"
 
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb/queries"
 )
 
@@ -18,6 +18,11 @@ type aggregationKey struct {
 	customLLMProvider     string
 	mcpNamespacedToolName string
 	endpoint              string
+}
+
+func (k aggregationKey) lockOrder() string {
+	return strings.Join([]string{k.userID, k.date, k.apiKey, k.model, k.modelGroup,
+		k.customLLMProvider, k.mcpNamespacedToolName, k.endpoint}, "\x00")
 }
 
 // aggregationValue holds aggregated metrics for a single dimension
@@ -59,7 +64,7 @@ func (agg *aggregationValue) addRecord(record spendLogRecord) {
 // Returns error on any database operation failure.
 func aggregateDailyUserSpendLogs(
 	ctx context.Context,
-	conn *pgxpool.Conn,
+	conn dailySpendExecer,
 	logger *slog.Logger,
 	records []spendLogRecord,
 ) error {
@@ -67,11 +72,9 @@ func aggregateDailyUserSpendLogs(
 	aggregations := make(map[aggregationKey]*aggregationValue)
 
 	for _, record := range records {
-		// Skip if no user_id
-		if record.UserID == "" {
-			continue
-		}
-
+		// No skip for empty user_id: LiteLLM records daily user rows with
+		// user_id="" for unattributed traffic, and the spend comparison
+		// counts them.
 		key := aggregationKey{
 			userID:                record.UserID,
 			date:                  record.Date,
@@ -97,7 +100,8 @@ func aggregateDailyUserSpendLogs(
 
 	// Insert aggregated data into DailyUserSpend
 	upsertCount := 0
-	for key, value := range aggregations {
+	for _, key := range sortedDailyKeys(aggregations) {
+		value := aggregations[key]
 		_, err := conn.Exec(ctx,
 			queries.QueryUpsertDailyUserSpend,
 			key.userID, key.date, key.apiKey, key.model, key.modelGroup,

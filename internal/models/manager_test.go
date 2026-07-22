@@ -305,6 +305,33 @@ func TestGetCredentialsForModel(t *testing.T) {
 	assert.Nil(t, creds3)
 }
 
+func TestGetAliasesForModel(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+
+	// Same provider-facing model exposed under three route aliases, mirroring
+	// config.yaml.example's "Comet API Claude aliases for public model names".
+	staticModels := []config.ModelRPMConfig{
+		{Name: "anthropic/claude-haiku-4.5", Model: "claude-haiku-4-5-20251001", Credential: "comet"},
+		{Name: "claude-haiku-4.5", Model: "claude-haiku-4-5-20251001", Credential: "comet"},
+		{Name: "claude-haiku-4-5-20251001", Credential: "comet"},
+		{Name: "gpt-4o", Credential: "openai"},
+	}
+	manager := New(logger, 100, staticModels)
+	credentials := []config.CredentialConfig{{Name: "comet"}, {Name: "openai"}}
+	manager.LoadModelsFromConfig(credentials)
+
+	aliases := manager.GetAliasesForModel("claude-haiku-4.5", "claude-haiku-4-5-20251001")
+	assert.ElementsMatch(t, []string{"claude-haiku-4.5", "anthropic/claude-haiku-4.5", "claude-haiku-4-5-20251001"}, aliases)
+
+	// A model with no other aliases just returns itself.
+	aliases2 := manager.GetAliasesForModel("gpt-4o", "gpt-4o")
+	assert.Equal(t, []string{"gpt-4o"}, aliases2)
+
+	// Empty realModelID (e.g. no alias configured) - no lookup possible, returns modelID only.
+	aliases3 := manager.GetAliasesForModel("unknown-model", "")
+	assert.Equal(t, []string{"unknown-model"}, aliases3)
+}
+
 func TestHasModel(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
 

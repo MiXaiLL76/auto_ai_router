@@ -2,6 +2,7 @@ package vertexresponses
 
 import (
 	"bufio"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -26,6 +27,7 @@ type vertexStreamAccumulator struct {
 	fullText       string
 	fullReasoning  string
 	toolCalls      []accumulatedCall
+	images         []accumulatedImage
 	codeCallID     string
 	codeCallCode   string
 	codeCallOutput string
@@ -57,6 +59,13 @@ type accumulatedCall struct {
 	arguments   string
 	itemID      string
 	outputIndex int // output_index at which the item was announced
+}
+
+type accumulatedImage struct {
+	itemID      string
+	result      string
+	format      string
+	outputIndex int
 }
 
 // TransformVertexStreamToResponses reads Vertex AI SSE and writes Responses API SSE events.
@@ -157,10 +166,43 @@ func processPart(w io.Writer, acc *vertexStreamAccumulator, part *genai.Part) er
 		acc.codeCallOutput += part.CodeExecutionResult.Output
 		return nil
 
+	case part.InlineData != nil:
+		return processImagePart(w, acc, part.InlineData)
+
 	case part.Text != "":
 		return processTextDelta(w, acc, part.Text)
 	}
 	return nil
+}
+
+func processImagePart(w io.Writer, acc *vertexStreamAccumulator, blob *genai.Blob) error {
+	if blob == nil || !strings.HasPrefix(strings.ToLower(blob.MIMEType), "image/") {
+		return nil
+	}
+	if !acc.headerEmitted {
+		if err := emitVertexHeaderEvents(w, acc); err != nil {
+			return err
+		}
+	}
+
+	image := accumulatedImage{
+		itemID:      generateItemID("ig_"),
+		result:      base64.StdEncoding.EncodeToString(blob.Data),
+		format:      imageOutputFormat(blob.MIMEType),
+		outputIndex: currentOutputIndex(acc),
+	}
+	acc.images = append(acc.images, image)
+
+	return writeVertexSSE(w, "response.output_item.added", map[string]interface{}{
+		"type":         "response.output_item.added",
+		"output_index": image.outputIndex,
+		"item": map[string]interface{}{
+			"type":          "image_generation_call",
+			"id":            image.itemID,
+			"status":        "in_progress",
+			"output_format": image.format,
+		},
+	}, acc)
 }
 
 func processTextDelta(w io.Writer, acc *vertexStreamAccumulator, delta string) error {
@@ -305,6 +347,7 @@ func currentOutputIndex(acc *vertexStreamAccumulator) int {
 		idx++
 	}
 	idx += len(acc.toolCalls)
+	idx += len(acc.images)
 	if acc.codeCallID != "" {
 		idx++
 	}
@@ -422,6 +465,26 @@ func emitVertexCompletionEvents(w io.Writer, acc *vertexStreamAccumulator) error
 		})
 	}
 
+	for _, image := range acc.images {
+		image := image
+		closures = append(closures, closureItem{
+			outputIndex: image.outputIndex,
+			fn: func() error {
+				return writeVertexSSE(w, "response.output_item.done", map[string]interface{}{
+					"type":         "response.output_item.done",
+					"output_index": image.outputIndex,
+					"item": map[string]interface{}{
+						"type":          "image_generation_call",
+						"id":            image.itemID,
+						"status":        "completed",
+						"result":        image.result,
+						"output_format": image.format,
+					},
+				}, acc)
+			},
+		})
+	}
+
 	if acc.codeCallID != "" {
 		idx := acc.codeOutputIndex
 		closures = append(closures, closureItem{
@@ -470,44 +533,79 @@ func buildVertexInProgressResponse(acc *vertexStreamAccumulator) map[string]inte
 func buildVertexCompletedResponse(acc *vertexStreamAccumulator) *responses.Response {
 	status, incompleteDetails := vertexFinishReasonToStatus(acc.finishReason)
 
-	var output []responses.OutputItem
+	type indexedOutputItem struct {
+		index int
+		item  responses.OutputItem
+	}
+	var indexedOutput []indexedOutputItem
 	if acc.reasoningStarted && acc.fullReasoning != "" {
-		output = append(output, responses.OutputItem{
-			Type:   "reasoning",
-			ID:     acc.reasoningItemID,
-			Status: "completed",
-			Summary: []responses.OutputContent{
-				{Type: "summary_text", Text: acc.fullReasoning},
+		indexedOutput = append(indexedOutput, indexedOutputItem{
+			index: acc.reasoningOutputIndex,
+			item: responses.OutputItem{
+				Type:   "reasoning",
+				ID:     acc.reasoningItemID,
+				Status: "completed",
+				Summary: []responses.OutputContent{
+					{Type: "summary_text", Text: acc.fullReasoning},
+				},
 			},
 		})
 	}
 	if acc.messageStarted {
-		output = append(output, responses.OutputItem{
-			Type:    "message",
-			ID:      acc.messageItemID,
-			Status:  "completed",
-			Role:    "assistant",
-			Content: []responses.OutputContent{{Type: "output_text", Text: acc.fullText, Annotations: []responses.Annotation{}}},
+		indexedOutput = append(indexedOutput, indexedOutputItem{
+			index: acc.messageOutputIndex,
+			item: responses.OutputItem{
+				Type:    "message",
+				ID:      acc.messageItemID,
+				Status:  "completed",
+				Role:    "assistant",
+				Content: []responses.OutputContent{{Type: "output_text", Text: acc.fullText, Annotations: []responses.Annotation{}}},
+			},
 		})
 	}
 	for _, tc := range acc.toolCalls {
-		output = append(output, responses.OutputItem{
-			Type:      "function_call",
-			ID:        tc.itemID,
-			Status:    "completed",
-			CallID:    tc.callID,
-			Name:      tc.name,
-			Arguments: tc.arguments,
+		indexedOutput = append(indexedOutput, indexedOutputItem{
+			index: tc.outputIndex,
+			item: responses.OutputItem{
+				Type:      "function_call",
+				ID:        tc.itemID,
+				Status:    "completed",
+				CallID:    tc.callID,
+				Name:      tc.name,
+				Arguments: tc.arguments,
+			},
+		})
+	}
+	for _, image := range acc.images {
+		indexedOutput = append(indexedOutput, indexedOutputItem{
+			index: image.outputIndex,
+			item: responses.OutputItem{
+				Type:         "image_generation_call",
+				ID:           image.itemID,
+				Status:       "completed",
+				Result:       image.result,
+				OutputFormat: image.format,
+			},
 		})
 	}
 	if acc.codeCallID != "" {
-		output = append(output, responses.OutputItem{
-			Type:    "code_interpreter_call",
-			ID:      acc.codeCallID,
-			Status:  "completed",
-			Code:    acc.codeCallCode,
-			Outputs: []map[string]interface{}{{"type": "text", "text": acc.codeCallOutput}},
+		indexedOutput = append(indexedOutput, indexedOutputItem{
+			index: acc.codeOutputIndex,
+			item: responses.OutputItem{
+				Type:    "code_interpreter_call",
+				ID:      acc.codeCallID,
+				Status:  "completed",
+				Code:    acc.codeCallCode,
+				Outputs: []map[string]interface{}{{"type": "text", "text": acc.codeCallOutput}},
+			},
 		})
+	}
+	sort.SliceStable(indexedOutput, func(i, j int) bool {
+		return indexedOutput[i].index < indexedOutput[j].index
+	})
+	output := make([]responses.OutputItem, 0, len(indexedOutput))
+	for _, indexed := range indexedOutput {
+		output = append(output, indexed.item)
 	}
 	if len(output) == 0 {
 		output = []responses.OutputItem{{

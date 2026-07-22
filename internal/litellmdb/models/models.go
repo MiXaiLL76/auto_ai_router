@@ -3,6 +3,8 @@ package models
 import (
 	"errors"
 	"log/slog"
+	"regexp"
+	"strings"
 	"time"
 
 	"github.com/mixaill76/auto_ai_router/internal/utils"
@@ -19,6 +21,9 @@ var (
 
 	// ErrTokenBlocked is returned when token is blocked
 	ErrTokenBlocked = errors.New("litellmdb: token blocked")
+
+	// ErrTeamBlocked is returned when the token's parent team is blocked
+	ErrTeamBlocked = errors.New("litellmdb: team blocked")
 
 	// ErrTokenExpired is returned when token has expired
 	ErrTokenExpired = errors.New("litellmdb: token expired")
@@ -54,9 +59,15 @@ type Config struct {
 	AuthCacheSize int           // LRU cache size (default: 10000)
 
 	// Spend logging
-	LogQueueSize     int           // Queue buffer size (default: 10000)
-	LogBatchSize     int           // Batch size for INSERT (default: 100)
-	LogFlushInterval time.Duration // Flush interval (default: 5s)
+	LogQueueSize        int           // Queue buffer size (default: 10000)
+	LogBatchSize        int           // Batch size for INSERT (default: 100)
+	LogFlushInterval    time.Duration // Flush interval (default: 5s)
+	LogWorkers          int           // Number of parallel queue-draining workers (default: 4)
+	DisableSpendLogging bool          // Control-plane managers set this to avoid creating a writer
+
+	// DisableSpendLogsWrite disables writing SpendLogEntry/Daily* aggregates to
+	// Postgres while leaving auth (ValidateToken) untouched (default: false).
+	DisableSpendLogsWrite bool
 
 	// Logger
 	Logger *slog.Logger
@@ -74,6 +85,7 @@ func DefaultConfig() *Config {
 		LogQueueSize:        10000,
 		LogBatchSize:        100,
 		LogFlushInterval:    5 * time.Second,
+		LogWorkers:          4,
 	}
 }
 
@@ -111,6 +123,9 @@ func (c *Config) ApplyDefaults() {
 	if c.LogFlushInterval == 0 {
 		c.LogFlushInterval = defaults.LogFlushInterval
 	}
+	if c.LogWorkers == 0 {
+		c.LogWorkers = defaults.LogWorkers
+	}
 	if c.Logger == nil {
 		c.Logger = slog.Default()
 	}
@@ -136,9 +151,10 @@ type TokenInfo struct {
 	KeyAlias string // Key alias (optional) - user-friendly name
 
 	// Owner references
-	UserID         string // User ID (optional)
-	TeamID         string // Team ID (optional)
-	OrganizationID string // Organization ID (optional, resolved from token or team)
+	UserID         string   // User ID (optional)
+	TeamID         string   // Team ID (optional)
+	OrganizationID string   // Organization ID (optional, resolved from token or team)
+	Tags           []string // Request tags from token metadata
 
 	// Token budget (embedded)
 	Spend     float64  // Current spend
@@ -150,14 +166,18 @@ type TokenInfo struct {
 	Expires *time.Time // Expiration date (nil = no expiration)
 
 	// Access control
-	Models  []string // Allowed models (empty = all)
-	Blocked bool     // Is token blocked
+	Models        []string // Key-level allowed models (empty = all)
+	AllowedRoutes []string // LiteLLM virtual-key routes (empty = unrestricted)
+	TeamModels    []string // Team-level allowed models (empty = all)
+	Blocked       bool     // Is token blocked
 
 	// ==================== User Level (embedded budget) ====================
 	UserAlias     string   // User alias (optional) - user-friendly name
 	UserEmail     string   // User email (optional)
 	UserMaxBudget *float64 // User's personal max budget (nil = unlimited)
 	UserSpend     *float64 // User's current spend
+	UserTPMLimit  *int64   // User's TPM limit
+	UserRPMLimit  *int64   // User's RPM limit
 
 	// ==================== Team Level (embedded budget) ====================
 	TeamAlias     string   // Team alias (optional) - user-friendly name
@@ -189,6 +209,105 @@ type TokenInfo struct {
 	Metadata map[string]interface{}
 }
 
+// LiteLLM sentinel values stored in key model allowlists.
+const (
+	AllTeamModels  = "all-team-models"
+	AllProxyModels = "all-proxy-models"
+)
+
+// ModelAccessScope identifies one independently enforced model allowlist.
+// Applicable non-empty scopes form an intersection, matching LiteLLM's
+// key -> team/member or personal-user -> project request checks.
+type ModelAccessScope struct {
+	Name    string
+	Models  []string
+	DenyAll bool
+}
+
+// ModelScopeMatcher evaluates one allowlist. Empty scopes must be treated as
+// unrestricted. A custom matcher lets the routing layer apply LiteLLM's
+// directional request-alias expansion without coupling DB models to routing.
+type ModelScopeMatcher func(model string, allowedModels []string) bool
+
+func clonePointer[T any](value *T) *T {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	return &cloned
+}
+
+func cloneMetadataValue(value interface{}) interface{} {
+	switch typed := value.(type) {
+	case map[string]interface{}:
+		cloned := make(map[string]interface{}, len(typed))
+		for key, child := range typed {
+			cloned[key] = cloneMetadataValue(child)
+		}
+		return cloned
+	case []interface{}:
+		cloned := make([]interface{}, len(typed))
+		for index, child := range typed {
+			cloned[index] = cloneMetadataValue(child)
+		}
+		return cloned
+	case []string:
+		return append([]string(nil), typed...)
+	case map[string]string:
+		cloned := make(map[string]string, len(typed))
+		for key, child := range typed {
+			cloned[key] = child
+		}
+		return cloned
+	default:
+		return value
+	}
+}
+
+// Clone returns a defensive copy suitable for crossing cache or request
+// boundaries. Auth data is immutable once cached; callers may mutate their
+// copy without changing permissions observed by another request.
+func (t *TokenInfo) Clone() *TokenInfo {
+	if t == nil {
+		return nil
+	}
+	clone := *t
+	clone.Models = append([]string(nil), t.Models...)
+	clone.AllowedRoutes = append([]string(nil), t.AllowedRoutes...)
+	clone.TeamModels = append([]string(nil), t.TeamModels...)
+	clone.Tags = append([]string(nil), t.Tags...)
+	if t.Metadata != nil {
+		clone.Metadata = cloneMetadataValue(t.Metadata).(map[string]interface{})
+	}
+
+	clone.MaxBudget = clonePointer(t.MaxBudget)
+	clone.TPMLimit = clonePointer(t.TPMLimit)
+	clone.RPMLimit = clonePointer(t.RPMLimit)
+	clone.Expires = clonePointer(t.Expires)
+	clone.UserMaxBudget = clonePointer(t.UserMaxBudget)
+	clone.UserSpend = clonePointer(t.UserSpend)
+	clone.UserTPMLimit = clonePointer(t.UserTPMLimit)
+	clone.UserRPMLimit = clonePointer(t.UserRPMLimit)
+	clone.TeamMaxBudget = clonePointer(t.TeamMaxBudget)
+	clone.TeamSpend = clonePointer(t.TeamSpend)
+	clone.TeamBlocked = clonePointer(t.TeamBlocked)
+	clone.TeamTPMLimit = clonePointer(t.TeamTPMLimit)
+	clone.TeamRPMLimit = clonePointer(t.TeamRPMLimit)
+	clone.OrgSpend = clonePointer(t.OrgSpend)
+	clone.OrgMaxBudget = clonePointer(t.OrgMaxBudget)
+	clone.OrgTPMLimit = clonePointer(t.OrgTPMLimit)
+	clone.OrgRPMLimit = clonePointer(t.OrgRPMLimit)
+	clone.TeamMemberSpend = clonePointer(t.TeamMemberSpend)
+	clone.TeamMemberMaxBudget = clonePointer(t.TeamMemberMaxBudget)
+	clone.TeamMemberTPMLimit = clonePointer(t.TeamMemberTPMLimit)
+	clone.TeamMemberRPMLimit = clonePointer(t.TeamMemberRPMLimit)
+	clone.OrgMemberSpend = clonePointer(t.OrgMemberSpend)
+	clone.OrgMemberMaxBudget = clonePointer(t.OrgMemberMaxBudget)
+	clone.OrgMemberTPMLimit = clonePointer(t.OrgMemberTPMLimit)
+	clone.OrgMemberRPMLimit = clonePointer(t.OrgMemberRPMLimit)
+	return &clone
+}
+
 // IsExpired checks if token has expired
 func (t *TokenInfo) IsExpired() bool {
 	if t.Expires == nil {
@@ -205,14 +324,86 @@ func (t *TokenInfo) IsBudgetExceeded() bool {
 	return t.Spend > *t.MaxBudget
 }
 
-// IsModelAllowed checks if model is in allowed list
-func (t *TokenInfo) IsModelAllowed(model string) bool {
-	// Empty list = all models allowed
-	if len(t.Models) == 0 {
+// ModelAccessScopes returns the ordered set of allowlists applicable to this
+// token: the key scope plus the team scope for team keys.
+func (t *TokenInfo) ModelAccessScopes() []ModelAccessScope {
+	keyModels := t.Models
+	for _, model := range t.Models {
+		if model == AllTeamModels {
+			// LiteLLM fails closed when all-team-models is used without a team.
+			// With a team it replaces, rather than extends, the key allowlist.
+			if t.TeamID != "" {
+				keyModels = t.TeamModels
+			}
+			break
+		}
+	}
+
+	scopes := []ModelAccessScope{{Name: "key", Models: keyModels}}
+	if t.TeamID != "" {
+		scopes = append(scopes, ModelAccessScope{Name: "team", Models: t.TeamModels})
+	}
+	return scopes
+}
+
+// exactModelScopeMatch reports whether model passes one allowlist. Besides the
+// exact name and the "*" / all-proxy-models wildcards, an entry may be a regex
+// (matched anchored, i.e. it must cover the whole model name): one pattern
+// such as "anthropic/.*" or ".*claude-haiku.*" then includes every non-public
+// naming of the model without enumerating each alias in the allowlist.
+func exactModelScopeMatch(model string, allowedModels []string) bool {
+	if len(allowedModels) == 0 {
 		return true
 	}
-	for _, m := range t.Models {
-		if m == model {
+	for _, allowed := range allowedModels {
+		if allowed == model || allowed == "*" || allowed == AllProxyModels {
+			return true
+		}
+		if modelScopePatternMatches(allowed, model) {
+			return true
+		}
+	}
+	return false
+}
+
+// modelScopePatternMatches treats an allowlist entry containing regex
+// metacharacters as an anchored pattern. Literal entries keep exact-match
+// semantics, so existing allowlists behave exactly as before.
+func modelScopePatternMatches(pattern, model string) bool {
+	if !strings.ContainsAny(pattern, `\.^$*+?()[]{}|`) {
+		return false
+	}
+	matched, err := regexp.MatchString("^(?:"+pattern+")$", model)
+	return err == nil && matched
+}
+
+// IsModelAllowedBy checks every applicable model scope with matcher.
+func (t *TokenInfo) IsModelAllowedBy(model string, matcher ModelScopeMatcher) bool {
+	if matcher == nil {
+		matcher = exactModelScopeMatch
+	}
+	for _, scope := range t.ModelAccessScopes() {
+		if scope.DenyAll || !matcher(model, scope.Models) {
+			return false
+		}
+	}
+	return true
+}
+
+// IsModelAllowed checks all applicable allowlists using exact IDs.
+func (t *TokenInfo) IsModelAllowed(model string) bool {
+	return t.IsModelAllowedBy(model, exactModelScopeMatch)
+}
+
+// IsAnyModelAllowed reports whether at least one candidate name passes every
+// applicable model scope. The same provider model is often exposed under
+// several route aliases (e.g. "claude-haiku-4.5" and
+// "anthropic/claude-haiku-4.5" for the same credential+model); callers resolve
+// the alias-equivalence group (models.Manager.GetAliasesForModel) and pass it
+// here so the check isn't defeated by which spelling the client used.
+func (t *TokenInfo) IsAnyModelAllowed(candidates []string) bool {
+	for _, candidate := range candidates {
+		if t.IsModelAllowed(candidate) {
 			return true
 		}
 	}
@@ -266,13 +457,14 @@ func (t *TokenInfo) checkOrganizationMemberBudget() bool {
 // Validate checks token validity for a request with full budget hierarchy
 // Order of checks (stops on first failure):
 // 1. Token blocked/expired
-// 2. Token budget
-// 3. Team budget
-// 4. Team member budget
-// 5. Organization budget
-// 6. User budget (personal key only)
-// 7. Organization member budget
-// 8. Model allowed
+// 2. Team blocked
+// 3. Token budget
+// 4. Team budget
+// 5. Team member budget
+// 6. Organization budget
+// 7. User budget (personal key only)
+// 8. Organization member budget
+// 9. Model allowed
 func (t *TokenInfo) Validate(model string) error {
 	// Check basic validity
 	if t.Blocked {
@@ -280,6 +472,9 @@ func (t *TokenInfo) Validate(model string) error {
 	}
 	if t.IsExpired() {
 		return ErrTokenExpired
+	}
+	if t.TeamBlocked != nil && *t.TeamBlocked {
+		return ErrTeamBlocked
 	}
 
 	// Check budget hierarchy (embedded first, then external)
@@ -315,9 +510,12 @@ func (t *TokenInfo) Validate(model string) error {
 // SpendLogEntry represents a row for LiteLLM_SpendLogs table
 type SpendLogEntry struct {
 	// Request identification
-	RequestID string    // UUID (PRIMARY KEY)
-	StartTime time.Time // Request start time
-	EndTime   time.Time // Request end time
+	RequestID           string     // UUID (PRIMARY KEY)
+	AirEventID          string     // Runtime collision fallback; never persisted as a standalone column
+	StartTime           time.Time  // Request start time
+	EndTime             time.Time  // Request end time
+	RequestDurationMS   int        // Whole request duration in milliseconds
+	CompletionStartTime *time.Time // First completion token timestamp when available
 
 	// API info
 	CallType string // Path: "/v1/chat/completions", "/v1/embeddings", etc.
@@ -340,6 +538,8 @@ type SpendLogEntry struct {
 	TotalTokens      int // Total tokens
 
 	Metadata string // Metadata dict
+	CacheHit string // LiteLLM-compatible cache marker
+	CacheKey string // LiteLLM-compatible cache key marker
 
 	// Cost
 	Spend float64 // Request cost in USD
@@ -351,15 +551,15 @@ type SpendLogEntry struct {
 	OrganizationID string // Organization ID
 	EndUser        string // End user ID (from metadata)
 
-	// MCP & Tags
-	MCPNamespacedToolName string // MCP tool name with namespace
-	RequestTags           string // JSON array of request tags
-
 	// Status
 	Status string // "success" | "failure"
 
 	// IP address
 	RequesterIP string
+
+	// Runtime-only observability flag; persisted inside Metadata rather than as
+	// a LiteLLM_SpendLogs column.
+	ComparisonEligible bool
 }
 
 // ==================== Stats ====================
@@ -374,15 +574,27 @@ type AuthCacheStats struct {
 
 // SpendLoggerStats holds spend logger statistics
 type SpendLoggerStats struct {
-	QueueLen            int       // Current queue length
-	QueueCap            int       // Queue capacity
-	Queued              uint64    // Total queued
-	Written             uint64    // Successfully written
-	Dropped             uint64    // Dropped (queue full - timeout reached)
-	Errors              uint64    // Write errors
-	BatchesOK           uint64    // Successful batches
-	QueueFullCount      uint64    // Queue full events (timeouts)
-	AggregationCount    uint64    // Completed aggregations
-	AggregationErrors   uint64    // Aggregation errors
-	LastAggregationTime time.Time // Last successful aggregation
+	QueueLen                   int           // Current input channel length
+	QueueCap                   int           // Input channel capacity
+	PendingEntries             int           // Accepted entries not yet resolved by the writer
+	PendingAggregation         int           // Inserted batches awaiting/in daily aggregation
+	DLQSize                    int           // Current dead letter queue size in batches
+	Queued                     uint64        // Total queued
+	Written                    uint64        // Newly inserted raw rows
+	Dropped                    uint64        // Dropped (queue full - timeout reached)
+	Errors                     uint64        // Write errors
+	BatchesOK                  uint64        // Successful batches
+	QueueFullCount             uint64        // Queue full events (timeouts)
+	DLQCount                   uint64        // Batches sent to DLQ
+	DLQRecovered               uint64        // Batches recovered from DLQ
+	DLQOverflow                uint64        // Batches lost because DLQ was full
+	Duplicates                 uint64        // Rows ignored by ON CONFLICT
+	AggregationCount           uint64        // Completed aggregations
+	AggregationErrors          uint64        // Aggregation errors
+	PendingAggregationOverflow uint64        // Inserted batches lost before daily aggregation
+	ComparisonEligible         uint64        // Newly inserted rows eligible for full comparison
+	ComparisonIneligible       uint64        // Newly inserted rows excluded from full comparison
+	LastAggregationTime        time.Time     // Last successful aggregation
+	AggregationLag             time.Duration // Age of the oldest outstanding daily aggregation
+	ComparisonWindowValid      bool          // Conservative process-lifetime transport completeness
 }

@@ -20,9 +20,9 @@ func OpenAIToVertex(openAIBody []byte, isImageGeneration bool, isImageEdit bool,
 				err      error
 			)
 			if isImageEdit {
-				chatBody, err = ImageEditRequestToOpenAIChatRequest(openAIBody, contentType)
+				chatBody, err = imageEditRequestToOpenAIChatRequest(openAIBody, contentType, model)
 			} else {
-				chatBody, err = ImageRequestToOpenAIChatRequest(openAIBody)
+				chatBody, err = imageRequestToOpenAIChatRequest(openAIBody, model)
 			}
 			if err != nil {
 				return nil, err

@@ -23,7 +23,7 @@ func (p *Proxy) ScopeContextForRequest(r *http.Request) (scope.Context, error) {
 	if !ok {
 		return scope.PublicContext(), errInvalidScopeAuth
 	}
-	if token == p.masterKey {
+	if p.isMasterKey(token) {
 		return scope.AdminContext(), nil
 	}
 	if !p.isLiteLLMHealthy() {

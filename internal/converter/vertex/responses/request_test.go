@@ -122,6 +122,24 @@ func TestResponsesRequestToVertex_CodeInterpreterTool(t *testing.T) {
 	assert.Contains(t, tool, "codeExecution")
 }
 
+func TestResponsesRequestToVertex_ImageGenerationToolRequestsImageModality(t *testing.T) {
+	body := `{
+		"model": "gemini-3.1-flash-image-preview",
+		"input": "Generate a product image",
+		"tools": [{"type": "image_generation"}]
+	}`
+
+	result, err := ResponsesRequestToVertex([]byte(body), "gemini-3.1-flash-image-preview")
+	require.NoError(t, err)
+
+	var vr map[string]interface{}
+	require.NoError(t, json.Unmarshal(result, &vr))
+	assert.NotContains(t, vr, "tools", "image_generation is a response modality, not a Vertex tool")
+
+	cfg := vr["generationConfig"].(map[string]interface{})
+	assert.Equal(t, []interface{}{"IMAGE"}, cfg["responseModalities"])
+}
+
 func TestResponsesRequestToVertex_ConversationHistory(t *testing.T) {
 	body := `{
 		"model": "gemini-2.0-flash",

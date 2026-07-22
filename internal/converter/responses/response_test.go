@@ -265,6 +265,42 @@ func TestChatToResponse_Usage(t *testing.T) {
 	assert.Equal(t, 10, resp.Usage.OutputTokensDetails.ReasoningTokens)
 }
 
+func TestChatToResponse_GeminiImageAndImageTokenUsage(t *testing.T) {
+	ccBody := `{
+		"id": "chatcmpl-image",
+		"object": "chat.completion",
+		"created": 1700000000,
+		"model": "gemini-3.1-flash-image-preview",
+		"choices": [{
+			"index": 0,
+			"message": {
+				"role": "assistant",
+				"content": "",
+				"images": [{"type": "image_url", "image_url": {"url": "data:image/png;base64,aW1hZ2U="}}]
+			},
+			"finish_reason": "stop"
+		}],
+		"usage": {
+			"prompt_tokens": 22,
+			"completion_tokens": 1120,
+			"total_tokens": 1142,
+			"completion_tokens_details": {"image_tokens": 1120}
+		}
+	}`
+
+	result, err := ChatToResponse([]byte(ccBody))
+	require.NoError(t, err)
+
+	var resp Response
+	require.NoError(t, json.Unmarshal(result, &resp))
+	require.Len(t, resp.Output, 1)
+	assert.Equal(t, "image_generation_call", resp.Output[0].Type)
+	assert.Equal(t, "aW1hZ2U=", resp.Output[0].Result)
+	assert.Equal(t, "png", resp.Output[0].OutputFormat)
+	require.NotNil(t, resp.Usage)
+	assert.Equal(t, 1120, resp.Usage.OutputTokensDetails.ImageTokens)
+}
+
 func TestChatToResponse_Status(t *testing.T) {
 	tests := []struct {
 		finishReason string

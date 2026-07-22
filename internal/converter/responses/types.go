@@ -240,6 +240,7 @@ type InputDetails struct {
 type OutputDetails struct {
 	ReasoningTokens int `json:"reasoning_tokens"`
 	AudioTokens     int `json:"audio_tokens,omitempty"` // extension: audio output tokens
+	ImageTokens     int `json:"image_tokens,omitempty"` // extension: generated image/video tokens
 }
 
 // ===== Incomplete Details =====

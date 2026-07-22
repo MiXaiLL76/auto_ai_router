@@ -168,7 +168,7 @@ func TestProxyRequest_SosanaImageGenerationLogsLiteLLMImageSpend(t *testing.T) {
 	require.Equal(t, http.StatusOK, w.Code)
 	require.Len(t, spendManager.entries, 1)
 	entry := spendManager.entries[0]
-	assert.Equal(t, "/v1/images/generations", entry.CallType)
+	assert.Equal(t, "aimage_generation", entry.CallType)
 	assert.Equal(t, "public-image", entry.Model)
 	assert.Equal(t, "sosana:public-image", entry.ModelID)
 	assert.Equal(t, "sosana", entry.CustomLLMProvider)

@@ -10,6 +10,62 @@ import (
 	"strings"
 )
 
+type callIDContextKey struct{}
+
+const callIDAttribute = "litellm_call_id"
+
+// WithCallID makes the LiteLLM correlation ID available to every contextual
+// slog record without requiring each call site to repeat the attribute.
+func WithCallID(ctx context.Context, callID string) context.Context {
+	if callID == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, callIDContextKey{}, callID)
+}
+
+func CallIDFromContext(ctx context.Context) string {
+	if ctx == nil {
+		return ""
+	}
+	callID, _ := ctx.Value(callIDContextKey{}).(string)
+	return callID
+}
+
+type correlationHandler struct {
+	next slog.Handler
+}
+
+func (h *correlationHandler) Enabled(ctx context.Context, level slog.Level) bool {
+	return h.next.Enabled(ctx, level)
+}
+
+func (h *correlationHandler) Handle(ctx context.Context, record slog.Record) error {
+	if callID := CallIDFromContext(ctx); callID != "" && !recordHasAttribute(record, callIDAttribute) {
+		record.AddAttrs(slog.String(callIDAttribute, callID))
+	}
+	return h.next.Handle(ctx, record)
+}
+
+func (h *correlationHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	return &correlationHandler{next: h.next.WithAttrs(attrs)}
+}
+
+func (h *correlationHandler) WithGroup(name string) slog.Handler {
+	return &correlationHandler{next: h.next.WithGroup(name)}
+}
+
+func recordHasAttribute(record slog.Record, key string) bool {
+	found := false
+	record.Attrs(func(attr slog.Attr) bool {
+		if attr.Key == key {
+			found = true
+			return false
+		}
+		return true
+	})
+	return found
+}
+
 // New creates a new slog.Logger instance with the specified logging level
 // Uses a custom pretty formatter with colors
 // level can be: "info", "debug", "error"
@@ -22,7 +78,7 @@ func New(level string) *slog.Logger {
 			Level: slogLevel,
 		},
 	}
-	return slog.New(handler)
+	return slog.New(&correlationHandler{next: handler})
 }
 
 // NewMulti creates a slog.Logger that fans out every record to stdout (pretty
@@ -52,7 +108,7 @@ func NewMulti(level string, stdout bool, extra ...slog.Handler) *slog.Logger {
 	}
 	// Always go through MultiHandler so the level filter applies even to
 	// destinations that accept all levels (like the OTEL bridge).
-	return slog.New(&MultiHandler{handlers: handlers, level: slogLevel})
+	return slog.New(&correlationHandler{next: &MultiHandler{handlers: handlers, level: slogLevel}})
 }
 
 // MultiHandler fans out log records to multiple slog handlers.
@@ -107,7 +163,7 @@ func NewJSON(level string) *slog.Logger {
 	handler := slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
 		Level: slogLevel,
 	})
-	return slog.New(handler)
+	return slog.New(&correlationHandler{next: handler})
 }
 
 // parseLevel converts string level to slog.Level

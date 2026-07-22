@@ -11,7 +11,9 @@ import (
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/converter"
+	"github.com/mixaill76/auto_ai_router/internal/kafkalog"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb"
+	"github.com/mixaill76/auto_ai_router/internal/litellmdb/spendlog"
 	"github.com/mixaill76/auto_ai_router/internal/logger"
 	"github.com/mixaill76/auto_ai_router/internal/security"
 	"github.com/mixaill76/auto_ai_router/internal/utils"
@@ -178,16 +180,34 @@ func (p *Proxy) handleLiteLLMAuthError(ctx context.Context, w http.ResponseWrite
 	return true
 }
 
-// logSpendToLiteLLMDB logs request to LiteLLM_SpendLogs table
-// Returns error if the log entry cannot be queued (e.g., queue full)
+// litellmCallType translates an AIR request path into the LiteLLM call_type.
+// The single source of truth for the route table is the spendlog package.
+func litellmCallType(path string) string {
+	return spendlog.LiteLLMCallTypeForPath(path)
+}
+
+// logSpendToLiteLLMDB logs request to LiteLLM_SpendLogs table and, if enabled,
+// publishes an expanded copy of the same event to Kafka for ClickHouse
+// analytics (internal/kafkalog). The two write-paths are independent: either
+// can be enabled/disabled on its own (see litellm_db.disable_spend_logs_write
+// and kafka.enabled). Returns error only for the Postgres write — Kafka
+// publish failures are logged but never affect the caller.
 func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
-	if p.LiteLLMDB == nil || !p.LiteLLMDB.IsEnabled() {
+	litellmEnabled := p.LiteLLMDB != nil && p.LiteLLMDB.IsEnabled()
+	kafkaEnabled := p.kafkaLog != nil && p.kafkaLog.IsEnabled()
+	if !litellmEnabled && !kafkaEnabled {
 		return nil
 	}
 
 	if logCtx == nil || logCtx.Credential == nil || logCtx.Request == nil {
 		return nil
 	}
+
+	// Marks entry into the logging path itself, used below to compute the
+	// Kafka event's overhead_ms as the cost of this function (cost lookup +
+	// metadata/event building), distinct from duration_ms (full request
+	// lifetime) — see logSpendToKafka call below.
+	spendLogFnStart := time.Now()
 
 	// Fallback to request ID if session ID not provided
 	if logCtx.SessionID == "" {
@@ -211,11 +231,12 @@ func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
 		organizationID = logCtx.TokenInfo.OrganizationID
 	}
 
-	// Determine end user - prefer user email from tokenInfo
+	// LiteLLM's end_user is the caller-supplied end-user identifier ("user" in
+	// the request body, X-End-User for AIR). The key owner's email must NOT be
+	// used as a fallback: LiteLLM leaves end_user empty for such traffic, and
+	// substituting the email would fabricate EndUserTable/DailyEndUserSpend
+	// rows that have no counterpart in the primary accounting.
 	endUser := extractEndUser(logCtx.Request)
-	if logCtx.TokenInfo != nil && logCtx.TokenInfo.UserEmail != "" {
-		endUser = logCtx.TokenInfo.UserEmail
-	}
 
 	// Extract domain from targetURL for APIBase (e.g., "https://api.openai.com/..." -> "api.openai.com")
 	apiBase := "auto_ai_router"
@@ -272,42 +293,83 @@ func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
 		}
 	}
 
-	// Build metadata with usage, cost breakdown, requester IP, and optional error
-	requesterIP := getClientIP(logCtx.Request)
-	overheadMs := float64(time.Since(logCtx.StartTime).Microseconds()) / 1000.0
-	metadata := buildMetadata(hashedToken, logCtx.TokenInfo, logCtx.ErrorMsg, logCtx.HTTPStatus, logCtx.TokenUsage, requesterIP, tokenCosts, logCtx.ModelID, overheadMs)
+	// Settle any Redis budget reservation / TPM usage against the real cost.
+	// Guarded so it runs exactly once even though a defer safety-net may also call it.
+	p.reconcileBudgetAndRateLimits(logCtx, cost)
 
 	customLLMProvider := strings.Replace(string(logCtx.Credential.Type), "-", "_", 1)
 	if customLLMProvider == "proxy" {
 		customLLMProvider = string(config.ProviderTypeOpenAI)
 	}
 
-	if teamID == "" {
-		teamID = credName
+	// teamID deliberately stays empty when the key has no team: LiteLLM writes
+	// team_id="" in that case, and inventing one (e.g. the credential name)
+	// would create daily/team rows that never merge with the primary accounting
+	// and UPDATEs against non-existent LiteLLM_TeamTable rows.
+
+	endTime := utils.NowUTC()
+
+	// Publish to Kafka *before* building/inserting the Postgres row (not
+	// after) so a queue-full failure can be flagged in the same row's
+	// metadata at insert time, instead of needing a separate update later —
+	// see buildMetadata's kafkaFallbackReason parameter below.
+	var kafkaFallbackReason string
+	if kafkaEnabled {
+		// Deliberately distinct from the Postgres metadata's overheadMs (which
+		// measures full elapsed time since the request started, near-identical
+		// to duration_ms): kafkaOverheadMs measures only the cost of this
+		// logging function itself, matching the ТЗ's intent for overhead_ms to
+		// be a small, separate figure from duration_ms.
+		kafkaOverheadMs := float64(time.Since(spendLogFnStart).Microseconds()) / 1000.0
+		if err := p.logSpendToKafka(logCtx, credName, modelIDFormatted, hashedToken,
+			userID, teamID, organizationID, endUser, apiBase, status,
+			cost, tokenCosts, kafkaOverheadMs, endTime); err != nil {
+			if errors.Is(err, kafkalog.ErrQueueFull) {
+				kafkaFallbackReason = "queue_full"
+			} else {
+				kafkaFallbackReason = "publish_error"
+			}
+		}
 	}
 
-	return p.LiteLLMDB.LogSpend(&litellmdb.SpendLogEntry{
-		RequestID:         logCtx.RequestID,
-		StartTime:         logCtx.StartTime,
-		EndTime:           utils.NowUTC(),
-		CallType:          logCtx.Request.URL.Path,
-		APIBase:           apiBase,
-		Model:             logCtx.ModelID,    // Model name
-		ModelID:           modelIDFormatted,  // credential.name:model_name
-		ModelGroup:        logCtx.ModelID,    // Model name
-		CustomLLMProvider: customLLMProvider, // Provider type as string
-		PromptTokens:      logCtx.TokenUsage.PromptTokens,
-		CompletionTokens:  logCtx.TokenUsage.CompletionTokens,
-		TotalTokens:       logCtx.TokenUsage.Total(),
-		Metadata:          metadata,
-		Spend:             cost, // Calculated cost based on model pricing and token usage
-		APIKey:            hashedToken,
-		UserID:            userID,
-		TeamID:            teamID,
-		OrganizationID:    organizationID,
-		EndUser:           endUser,
-		RequesterIP:       getClientIP(logCtx.Request),
-		Status:            status,
-		SessionID:         logCtx.SessionID,
-	})
+	// Build metadata with usage, cost breakdown, requester IP, and optional error
+	requesterIP := getClientIP(logCtx.Request)
+	overheadMs := float64(time.Since(logCtx.StartTime).Microseconds()) / 1000.0
+	metadata := buildMetadata(hashedToken, logCtx.TokenInfo, logCtx.ErrorMsg, logCtx.HTTPStatus, logCtx.TokenUsage, requesterIP, tokenCosts, logCtx.ModelID, overheadMs, kafkaFallbackReason)
+
+	var completionStartTime *time.Time
+	if !logCtx.CompletionStartTime.IsZero() {
+		completionStartTime = &logCtx.CompletionStartTime
+	}
+
+	var pgErr error
+	if litellmEnabled {
+		pgErr = p.LiteLLMDB.LogSpend(&litellmdb.SpendLogEntry{
+			RequestID:           logCtx.RequestID,
+			StartTime:           logCtx.StartTime,
+			EndTime:             endTime,
+			CompletionStartTime: completionStartTime,
+			CallType:            litellmCallType(logCtx.Request.URL.Path),
+			APIBase:             apiBase,
+			Model:               logCtx.ModelID,    // Model name
+			ModelID:             modelIDFormatted,  // credential.name:model_name
+			ModelGroup:          logCtx.ModelID,    // Model name
+			CustomLLMProvider:   customLLMProvider, // Provider type as string
+			PromptTokens:        logCtx.TokenUsage.PromptTokens,
+			CompletionTokens:    logCtx.TokenUsage.CompletionTokens,
+			TotalTokens:         logCtx.TokenUsage.Total(),
+			Metadata:            metadata,
+			Spend:               cost, // Calculated cost based on model pricing and token usage
+			APIKey:              hashedToken,
+			UserID:              userID,
+			TeamID:              teamID,
+			OrganizationID:      organizationID,
+			EndUser:             endUser,
+			RequesterIP:         requesterIP,
+			Status:              status,
+			SessionID:           logCtx.SessionID,
+		})
+	}
+
+	return pgErr
 }

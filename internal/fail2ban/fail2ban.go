@@ -24,6 +24,7 @@ type banInfo struct {
 	banTime     time.Time
 	banDuration time.Duration // 0 = permanent
 	errorCode   int
+	reason      string
 }
 
 // BanPair represents a banned credential+model pair with ban details
@@ -34,6 +35,8 @@ type BanPair struct {
 	ErrorCodeCounts map[int]int
 	BanTime         time.Time
 	BanDuration     time.Duration
+	BanUntil        time.Time
+	Reason          string
 }
 
 type Fail2Ban struct {
@@ -184,6 +187,55 @@ func (f *Fail2Ban) RecordResponse(credentialName, modelID string, statusCode int
 			"ban_duration", rule.BanDuration,
 			"permanent", rule.BanDuration == 0)
 	}
+}
+
+// BanUntil immediately bans a credential+model pair until the absolute deadline.
+// It bypasses attempt thresholds and configured error-code filters. An existing
+// permanent or later-expiring ban is never shortened.
+func (f *Fail2Ban) BanUntil(credentialName, modelID string, statusCode int, until time.Time, reason string) {
+	now := utils.NowUTC()
+	until = until.UTC()
+	if !until.After(now) {
+		return
+	}
+
+	key := banKey(credentialName, modelID)
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if current, exists := f.banned[key]; exists {
+		if current.banDuration == 0 {
+			return
+		}
+		currentUntil := current.banTime.Add(current.banDuration)
+		if !currentUntil.Before(until) {
+			return
+		}
+	}
+
+	if f.failures[key] == nil {
+		f.failures[key] = make(map[int]int)
+	}
+	f.failures[key][statusCode]++
+	f.lastError[key] = now
+
+	duration := until.Sub(now)
+	f.banned[key] = &banInfo{
+		banTime:     now,
+		banDuration: duration,
+		errorCode:   statusCode,
+		reason:      reason,
+	}
+
+	monitoring.CredentialBanEvents.WithLabelValues(credentialName, modelID, strconv.Itoa(statusCode)).Inc()
+	f.logger.Error("Credential and model banned until provider quota retry",
+		"error_code", statusCode,
+		"credential", credentialName,
+		"model", modelID,
+		"provider_error", reason,
+		"ban_until", until,
+		"ban_duration", duration)
 }
 
 func (f *Fail2Ban) IsBanned(credentialName, modelID string) bool {
@@ -341,9 +393,18 @@ func (f *Fail2Ban) GetBannedPairs() []BanPair {
 			ErrorCodeCounts: counts,
 			BanTime:         ban.banTime,
 			BanDuration:     ban.banDuration,
+			BanUntil:        banUntil(ban),
+			Reason:          ban.reason,
 		})
 	}
 	return pairs
+}
+
+func banUntil(ban *banInfo) time.Time {
+	if ban == nil || ban.banDuration == 0 {
+		return time.Time{}
+	}
+	return ban.banTime.Add(ban.banDuration).UTC()
 }
 
 // GetBannedCount returns the count of currently active (non-expired) banned credential+model pairs

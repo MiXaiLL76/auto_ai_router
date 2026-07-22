@@ -54,7 +54,7 @@ func TestStreamToClient_RecordAbortedMetric(t *testing.T) {
 	prx.metrics = monitoring.New(true)
 
 	w := newFailAfterNBytesWriter(0)
-	err := prx.streamToClient(context.Background(), w, strings.NewReader("data: hello\n\n"), "cred1", "gpt-4o", "/v1/chat/completions", nil, nil)
+	err := prx.streamToClient(context.Background(), w, strings.NewReader("data: hello\n\n"), "cred1", "gpt-4o", "/v1/chat/completions", nil, nil, nil)
 	require.Error(t, err)
 
 	assert.Equal(t, 1.0, testutil.ToFloat64(monitoring.AbortedRequestsTotal.WithLabelValues("cred1", "gpt-4o", "/v1/chat/completions")))
@@ -466,7 +466,7 @@ func TestWriteProxyStreamingResponseWithTokens_Abort(t *testing.T) {
 	// Client disconnects after 10 bytes
 	w := newFailAfterNBytesWriter(10)
 
-	streamUsage, err := prx.writeProxyStreamingResponseWithTokens(w, proxyResp, &http.Request{Header: make(http.Header)}, "test", "test-model", "gpt-4o-mini")
+	streamUsage, err := prx.writeProxyStreamingResponseWithTokens(w, proxyResp, &http.Request{Header: make(http.Header)}, "test", "test-model", "gpt-4o-mini", nil)
 	assert.Error(t, err, "should return write error")
 
 	// Even on abort, estimated usage must be returned
@@ -526,7 +526,7 @@ func TestWriteProxyStreamingResponseWithTokens_DrainCapturesUsage(t *testing.T) 
 	// Client disconnects after 10 bytes (before usage chunk)
 	w := newFailAfterNBytesWriter(10)
 
-	streamUsage, err := prx.writeProxyStreamingResponseWithTokens(w, proxyResp, &http.Request{Header: make(http.Header)}, "test", "test-model", "gpt-4o-mini")
+	streamUsage, err := prx.writeProxyStreamingResponseWithTokens(w, proxyResp, &http.Request{Header: make(http.Header)}, "test", "test-model", "gpt-4o-mini", nil)
 	assert.Error(t, err, "should return write error")
 
 	// Drain must have captured the real usage chunk
@@ -578,7 +578,7 @@ func TestWriteProxyStreamingResponseWithTokens_NoUsageChunk(t *testing.T) {
 	}
 
 	w := httptest.NewRecorder()
-	streamUsage, err := prx.writeProxyStreamingResponseWithTokens(w, proxyResp, &http.Request{Header: make(http.Header)}, "test", "test-model", "gpt-4o-mini")
+	streamUsage, err := prx.writeProxyStreamingResponseWithTokens(w, proxyResp, &http.Request{Header: make(http.Header)}, "test", "test-model", "gpt-4o-mini", nil)
 	require.NoError(t, err)
 
 	// Should return estimated usage from streamed text when no usage chunk is present.

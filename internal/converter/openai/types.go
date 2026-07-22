@@ -133,6 +133,7 @@ type CompletionTokenDetails struct {
 	RejectedPredictionTokens int `json:"rejected_prediction_tokens,omitempty"`
 	AudioTokens              int `json:"audio_tokens,omitempty"`
 	ReasoningTokens          int `json:"reasoning_tokens,omitempty"`
+	ImageTokens              int `json:"image_tokens,omitempty"`
 }
 
 type OpenAIUsage struct {
@@ -188,18 +189,21 @@ type OpenAIStreamingToolFunction struct {
 
 // OpenAIImageRequest represents OpenAI image generation request
 type OpenAIImageRequest struct {
-	Model             string `json:"model"`
-	Prompt            string `json:"prompt"`
-	N                 *int   `json:"n,omitempty"`
-	Size              string `json:"size,omitempty"`
-	Quality           string `json:"quality,omitempty"`
-	ResponseFormat    string `json:"response_format,omitempty"`
-	Style             string `json:"style,omitempty"`
-	User              string `json:"user,omitempty"`
-	Background        string `json:"background,omitempty"`         // gpt-image-1
-	Moderation        string `json:"moderation,omitempty"`         // gpt-image-1
-	OutputCompression int    `json:"output_compression,omitempty"` // gpt-image-1
-	OutputFormat      string `json:"output_format,omitempty"`      // gpt-image-1
+	Model             string   `json:"model"`
+	Prompt            string   `json:"prompt"`
+	N                 *int     `json:"n,omitempty"`
+	Temperature       *float64 `json:"temperature,omitempty"`
+	TopP              *float64 `json:"top_p,omitempty"`
+	Seed              *int64   `json:"seed,omitempty"`
+	Size              string   `json:"size,omitempty"`
+	Quality           string   `json:"quality,omitempty"`
+	ResponseFormat    string   `json:"response_format,omitempty"`
+	Style             string   `json:"style,omitempty"`
+	User              string   `json:"user,omitempty"`
+	Background        string   `json:"background,omitempty"`         // gpt-image-1
+	Moderation        string   `json:"moderation,omitempty"`         // gpt-image-1
+	OutputCompression int      `json:"output_compression,omitempty"` // gpt-image-1
+	OutputFormat      string   `json:"output_format,omitempty"`      // gpt-image-1
 }
 
 type OpenAIImageData struct {

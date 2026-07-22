@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"mime"
 	"mime/multipart"
 	"net/http"
@@ -139,6 +140,10 @@ func VertexImageToOpenAI(vertexBody []byte) ([]byte, error) {
 // ImageRequestToOpenAIChatRequest converts OpenAI image generation request to OpenAI chat request format
 // This allows Gemini models to generate images through chat API with response_modalities: ["IMAGE"]
 func ImageRequestToOpenAIChatRequest(openAIBody []byte) ([]byte, error) {
+	return imageRequestToOpenAIChatRequest(openAIBody, "")
+}
+
+func imageRequestToOpenAIChatRequest(openAIBody []byte, providerModel string) ([]byte, error) {
 	var imageReq openai.OpenAIImageRequest
 	if err := json.Unmarshal(openAIBody, &imageReq); err != nil {
 		return nil, fmt.Errorf("failed to parse OpenAI image request: %w", err)
@@ -147,32 +152,18 @@ func ImageRequestToOpenAIChatRequest(openAIBody []byte) ([]byte, error) {
 	genConfig := map[string]interface{}{
 		"response_modalities": []string{"IMAGE"},
 	}
-
-	// Add image config if size is provided
-	if imageReq.Size != "" {
-		imageConfig := map[string]interface{}{}
-
-		// Convert OpenAI size format to Gemini aspect ratio
-		// Supported by Gemini: 1:1, 2:3, 3:2, 3:4, 4:3, 4:5, 5:4, 9:16, 16:9, 21:9
-		aspectRatio := sizeToAspectRatio(imageReq.Size)
-		if aspectRatio != "" {
-			imageConfig["aspectRatio"] = aspectRatio
-		}
-
-		// Convert size to Gemini image size (1K, 2K, 4K)
-		imageSize := sizeToImageSize(imageReq.Size)
-		if imageSize != "" {
-			imageConfig["imageSize"] = imageSize
-		}
-
-		if len(imageConfig) > 0 {
-			genConfig["image_config"] = imageConfig
-		}
+	if providerModel == "" {
+		providerModel = imageReq.Model
+	}
+	if err := applyGeminiImageSize(genConfig, providerModel, imageReq.Size); err != nil {
+		return nil, err
 	}
 
 	// Convert to OpenAI chat request format
 	chatReq := openai.OpenAIRequest{
-		Model: imageReq.Model,
+		Model:       imageReq.Model,
+		Temperature: imageReq.Temperature,
+		TopP:        imageReq.TopP,
 		Messages: []openai.OpenAIMessage{
 			{
 				Role:    "user",
@@ -182,6 +173,12 @@ func ImageRequestToOpenAIChatRequest(openAIBody []byte) ([]byte, error) {
 		ExtraBody: map[string]interface{}{
 			"generation_config": genConfig,
 		},
+	}
+	if imageReq.Seed != nil {
+		if *imageReq.Seed < math.MinInt32 || *imageReq.Seed > math.MaxInt32 {
+			return nil, fmt.Errorf("invalid image generation seed %d", *imageReq.Seed)
+		}
+		chatReq.Seed = imageReq.Seed
 	}
 	if imageReq.N != nil && *imageReq.N > 0 {
 		n := clampImageCount(*imageReq.N)
@@ -194,6 +191,10 @@ func ImageRequestToOpenAIChatRequest(openAIBody []byte) ([]byte, error) {
 // ImageEditRequestToOpenAIChatRequest converts OpenAI multipart images.edit payload
 // to an OpenAI chat request for Gemini image-capable models.
 func ImageEditRequestToOpenAIChatRequest(openAIBody []byte, contentType string) ([]byte, error) {
+	return imageEditRequestToOpenAIChatRequest(openAIBody, contentType, "")
+}
+
+func imageEditRequestToOpenAIChatRequest(openAIBody []byte, contentType, providerModel string) ([]byte, error) {
 	mediaType, params, err := mime.ParseMediaType(contentType)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse image edit content type: %w", err)
@@ -282,17 +283,11 @@ func ImageEditRequestToOpenAIChatRequest(openAIBody []byte, contentType string) 
 	genConfig := map[string]interface{}{
 		"response_modalities": []string{"IMAGE"},
 	}
-	if size := strings.TrimSpace(fields["size"]); size != "" {
-		imageConfig := map[string]interface{}{}
-		if aspectRatio := sizeToAspectRatio(size); aspectRatio != "" {
-			imageConfig["aspectRatio"] = aspectRatio
-		}
-		if imageSize := sizeToImageSize(size); imageSize != "" {
-			imageConfig["imageSize"] = imageSize
-		}
-		if len(imageConfig) > 0 {
-			genConfig["image_config"] = imageConfig
-		}
+	if providerModel == "" {
+		providerModel = model
+	}
+	if err := applyGeminiImageSize(genConfig, providerModel, fields["size"]); err != nil {
+		return nil, err
 	}
 
 	chatReq := openai.OpenAIRequest{
@@ -307,64 +302,33 @@ func ImageEditRequestToOpenAIChatRequest(openAIBody []byte, contentType string) 
 			"generation_config": genConfig,
 		},
 	}
+	if rawSeed := strings.TrimSpace(fields["seed"]); rawSeed != "" {
+		seed, err := strconv.ParseInt(rawSeed, 10, 32)
+		if err != nil {
+			return nil, fmt.Errorf("invalid image edit seed %q", rawSeed)
+		}
+		chatReq.Seed = &seed
+	}
+	if rawTemperature := strings.TrimSpace(fields["temperature"]); rawTemperature != "" {
+		temperature, err := parseImageEditFloat(rawTemperature, "temperature")
+		if err != nil {
+			return nil, err
+		}
+		chatReq.Temperature = &temperature
+	}
+	if rawTopP := strings.TrimSpace(fields["top_p"]); rawTopP != "" {
+		topP, err := parseImageEditFloat(rawTopP, "top_p")
+		if err != nil {
+			return nil, err
+		}
+		chatReq.TopP = &topP
+	}
 	if n := parsePositiveInt(fields["n"]); n > 0 {
 		n = clampImageCount(n)
 		chatReq.N = &n
 	}
 
 	return json.Marshal(chatReq)
-}
-
-// sizeToAspectRatio converts OpenAI size format (e.g., "1792x1024") to Gemini aspect ratio
-// Supported by Gemini: 1:1, 2:3, 3:2, 3:4, 4:3, 4:5, 5:4, 9:16, 16:9, 21:9
-func sizeToAspectRatio(size string) string {
-	switch size {
-	case "1024x1024", "512x512", "256x256":
-		return "1:1"
-	case "1792x1024":
-		return "16:9"
-	case "1024x1792":
-		return "9:16"
-	case "1536x1024":
-		return "3:2"
-	case "1024x1536":
-		return "2:3"
-	case "768x1024":
-		return "3:4"
-	case "1024x768":
-		return "4:3"
-	case "819x1024":
-		return "4:5"
-	case "1024x819":
-		return "5:4"
-	case "576x1024":
-		return "9:16"
-	case "2016x1008":
-		return "21:9"
-	default:
-		// Default to 1:1 if size not recognized
-		return "1:1"
-	}
-}
-
-// sizeToImageSize converts OpenAI size to Gemini image size (1K, 2K, 4K)
-// 1K ≈ 1024x1024, 2K ≈ 2048x2048, 4K ≈ 4096x4096
-func sizeToImageSize(size string) string {
-	switch size {
-	// 1K sizes
-	case "1024x1024", "512x512", "256x256", "1792x1024", "1024x1792", "1536x1024", "1024x1536", "768x1024", "1024x768", "819x1024", "1024x819", "576x1024":
-		return "1K"
-	// 2K sizes (larger variations)
-	case "2048x2048", "3584x2048", "2048x3584":
-		return "2K"
-	case "2016x1008":
-		return "2K"
-	// 4K sizes
-	case "4096x4096", "7168x4096", "4096x7168":
-		return "4K"
-	default:
-		return "1K" // Default to 1K
-	}
 }
 
 // VertexChatResponseToOpenAIImage converts Vertex AI chat response with image to OpenAI image format
@@ -456,6 +420,14 @@ func parsePositiveInt(raw string) int {
 		return 0
 	}
 	return n
+}
+
+func parseImageEditFloat(raw, name string) (float64, error) {
+	value, err := strconv.ParseFloat(raw, 64)
+	if err != nil || math.IsNaN(value) || math.IsInf(value, 0) {
+		return 0, fmt.Errorf("invalid image edit %s %q", name, raw)
+	}
+	return value, nil
 }
 
 func readMultipartPartLimit(part *multipart.Part, maxBytes int64) ([]byte, error) {

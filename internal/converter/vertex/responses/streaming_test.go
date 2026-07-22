@@ -92,3 +92,67 @@ func TestTransformVertexStreamToResponses_MessageEventsIncludeRequiredFields(t *
 		}
 	}
 }
+
+func TestTransformVertexStreamToResponses_ImageGenerationCallAndUsage(t *testing.T) {
+	stream := buildVertexSSEStream([]map[string]interface{}{
+		{
+			"candidates": []map[string]interface{}{
+				{
+					"content": map[string]interface{}{
+						"role": "model",
+						"parts": []map[string]interface{}{
+							{"inlineData": map[string]interface{}{"mimeType": "image/png", "data": "aW1hZ2U="}},
+						},
+					},
+					"finishReason": "STOP",
+				},
+			},
+			"usageMetadata": map[string]interface{}{
+				"promptTokenCount":     22,
+				"candidatesTokenCount": 1120,
+				"totalTokenCount":      1142,
+				"candidatesTokensDetails": []map[string]interface{}{
+					{"modality": "IMAGE", "tokenCount": 1120},
+				},
+			},
+		},
+	})
+
+	var out bytes.Buffer
+	err := TransformVertexStreamToResponses(
+		strings.NewReader(stream), &out, "gemini-3.1-flash-image-preview", "", nil, nil,
+	)
+	require.NoError(t, err)
+
+	events := parseVertexSSEEvents(out.String())
+	var completed map[string]interface{}
+	var sawImageAdded, sawImageDone bool
+	for _, event := range events {
+		switch event["type"] {
+		case "response.output_item.added":
+			item, _ := event["item"].(map[string]interface{})
+			sawImageAdded = sawImageAdded || item["type"] == "image_generation_call"
+		case "response.output_item.done":
+			item, _ := event["item"].(map[string]interface{})
+			if item["type"] == "image_generation_call" {
+				sawImageDone = true
+				assert.Equal(t, "aW1hZ2U=", item["result"])
+			}
+		case "response.completed":
+			completed, _ = event["response"].(map[string]interface{})
+		}
+	}
+	assert.True(t, sawImageAdded)
+	assert.True(t, sawImageDone)
+	require.NotNil(t, completed)
+
+	output := completed["output"].([]interface{})
+	require.Len(t, output, 1)
+	imageCall := output[0].(map[string]interface{})
+	assert.Equal(t, "image_generation_call", imageCall["type"])
+	assert.Equal(t, "aW1hZ2U=", imageCall["result"])
+
+	usage := completed["usage"].(map[string]interface{})
+	details := usage["output_tokens_details"].(map[string]interface{})
+	assert.Equal(t, float64(1120), details["image_tokens"])
+}

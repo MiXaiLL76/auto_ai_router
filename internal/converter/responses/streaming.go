@@ -75,6 +75,7 @@ type chatCompletionsUsage struct {
 	ReasoningTokens   int
 	AudioInputTokens  int
 	AudioOutputTokens int
+	ImageOutputTokens int
 }
 
 // chatStreamChunk represents a parsed Chat Completions streaming chunk.
@@ -112,6 +113,7 @@ type chatStreamChunk struct {
 		CompletionTokensDetails *struct {
 			ReasoningTokens int `json:"reasoning_tokens,omitempty"`
 			AudioTokens     int `json:"audio_tokens,omitempty"`
+			ImageTokens     int `json:"image_tokens,omitempty"`
 		} `json:"completion_tokens_details,omitempty"`
 	} `json:"usage,omitempty"`
 }
@@ -220,6 +222,7 @@ func transformChatStreamToResponsesInner(reader io.Reader, writer io.Writer, mod
 			if chunk.Usage.CompletionTokensDetails != nil {
 				acc.usage.ReasoningTokens = chunk.Usage.CompletionTokensDetails.ReasoningTokens
 				acc.usage.AudioOutputTokens = chunk.Usage.CompletionTokensDetails.AudioTokens
+				acc.usage.ImageOutputTokens = chunk.Usage.CompletionTokensDetails.ImageTokens
 			}
 		}
 
@@ -453,7 +456,7 @@ func buildTypedCompletedResponse(acc *streamAccumulator) *Response {
 			OutputTokens:        acc.usage.CompletionTokens,
 			TotalTokens:         acc.usage.TotalTokens,
 			InputTokensDetails:  InputDetails{CachedTokens: acc.usage.CachedTokens, AudioTokens: acc.usage.AudioInputTokens},
-			OutputTokensDetails: OutputDetails{ReasoningTokens: acc.usage.ReasoningTokens, AudioTokens: acc.usage.AudioOutputTokens},
+			OutputTokensDetails: OutputDetails{ReasoningTokens: acc.usage.ReasoningTokens, AudioTokens: acc.usage.AudioOutputTokens, ImageTokens: acc.usage.ImageOutputTokens},
 		}
 	}
 
@@ -706,9 +709,12 @@ func buildCompletedResponse(acc *streamAccumulator) map[string]interface{} {
 			TotalTokens:  acc.usage.TotalTokens,
 			InputTokensDetails: InputDetails{
 				CachedTokens: acc.usage.CachedTokens,
+				AudioTokens:  acc.usage.AudioInputTokens,
 			},
 			OutputTokensDetails: OutputDetails{
 				ReasoningTokens: acc.usage.ReasoningTokens,
+				AudioTokens:     acc.usage.AudioOutputTokens,
+				ImageTokens:     acc.usage.ImageOutputTokens,
 			},
 		}
 	}

@@ -134,7 +134,7 @@ func mapHTTPStatusToErrorClass(statusCode int) string {
 }
 
 // buildMetadata builds metadata JSON with user/team alias, usage, cost, and optional error info
-func buildMetadata(hashedToken string, tokenInfo *litellmdb.TokenInfo, errorMsg string, httpStatus int, usage *converter.TokenUsage, requesterIP string, costs *converter.TokenCosts, modelID string, overheadMs float64) string {
+func buildMetadata(hashedToken string, tokenInfo *litellmdb.TokenInfo, errorMsg string, httpStatus int, usage *converter.TokenUsage, requesterIP string, costs *converter.TokenCosts, modelID string, overheadMs float64, kafkaFallbackReason string) string {
 	var userID, teamID, organizationID string
 	if tokenInfo != nil {
 		userID = tokenInfo.UserID
@@ -162,9 +162,11 @@ func buildMetadata(hashedToken string, tokenInfo *litellmdb.TokenInfo, errorMsg 
 	var usageObject interface{}
 	if usage != nil {
 		promptTokensDetails["audio_tokens"] = usage.AudioInputTokens
+		promptTokensDetails["image_tokens"] = usage.ImageTokens
 		promptTokensDetails["cached_tokens"] = usage.CachedInputTokens
 		promptTokensDetails["cache_creation_tokens"] = usage.CacheCreationTokens
 		completionTokensDetails["audio_tokens"] = usage.AudioOutputTokens
+		completionTokensDetails["image_tokens"] = usage.OutputImageTokens
 		completionTokensDetails["reasoning_tokens"] = usage.ReasoningTokens
 		completionTokensDetails["accepted_prediction_tokens"] = usage.AcceptedPredictionTokens
 		completionTokensDetails["rejected_prediction_tokens"] = usage.RejectedPredictionTokens
@@ -181,11 +183,13 @@ func buildMetadata(hashedToken string, tokenInfo *litellmdb.TokenInfo, errorMsg 
 	additionalUsage := map[string]interface{}{
 		"prompt_tokens_details": map[string]interface{}{
 			"audio_tokens":          promptTokensDetails["audio_tokens"],
+			"image_tokens":          promptTokensDetails["image_tokens"],
 			"cached_tokens":         promptTokensDetails["cached_tokens"],
 			"cache_creation_tokens": promptTokensDetails["cache_creation_tokens"],
 		},
 		"completion_tokens_details": map[string]interface{}{
 			"audio_tokens":               completionTokensDetails["audio_tokens"],
+			"image_tokens":               completionTokensDetails["image_tokens"],
 			"reasoning_tokens":           completionTokensDetails["reasoning_tokens"],
 			"accepted_prediction_tokens": completionTokensDetails["accepted_prediction_tokens"],
 			"rejected_prediction_tokens": completionTokensDetails["rejected_prediction_tokens"],
@@ -251,6 +255,18 @@ func buildMetadata(hashedToken string, tokenInfo *litellmdb.TokenInfo, errorMsg 
 			"error_class":   mapHTTPStatusToErrorClass(httpStatus),
 		}
 		metadata["status"] = "failure"
+	}
+
+	// kafkaFallbackReason is set by the caller when publishing this event's
+	// Kafka copy failed (e.g. queue full after the 5s backpressure wait, see
+	// kafkalog.ErrQueueFull). Flagging it here — in the row that's about to be
+	// inserted anyway — lets it be found later via metadata->>'kafka_fallback'
+	// (e.g. by a DBA script) and re-published to Kafka, instead of the event
+	// being lost entirely when Kafka is degraded. AIR intentionally does not
+	// run its own resend job — see internal/litellmdb.Manager.MarkSpendLogKafkaFallback.
+	if kafkaFallbackReason != "" {
+		metadata["kafka_fallback"] = true
+		metadata["kafka_fallback_reason"] = kafkaFallbackReason
 	}
 
 	jsonBytes, err := json.Marshal(metadata)

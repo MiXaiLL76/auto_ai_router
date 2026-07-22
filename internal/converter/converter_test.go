@@ -125,6 +125,53 @@ func TestProviderConverter_RequestFrom_VertexImageGeneration_Imagen(t *testing.T
 	}
 }
 
+func TestProviderConverter_RequestFrom_GeminiImageGeneration_Size(t *testing.T) {
+	tests := []struct {
+		size        string
+		aspectRatio string
+		imageSize   string
+	}{
+		{size: "1024x1024", aspectRatio: "1:1", imageSize: "1K"},
+		{size: "1x1", aspectRatio: "1:1", imageSize: "1K"},
+		{size: "3:4", aspectRatio: "3:4", imageSize: "1K"},
+		{size: "1792x1024", aspectRatio: "16:9", imageSize: "1K"},
+		{size: "1792x2400", aspectRatio: "3:4", imageSize: "2K"},
+		{size: "896x1152", aspectRatio: "4:5", imageSize: "1K"},
+		{size: "640x1024", aspectRatio: "2:3", imageSize: "1K"},
+		{size: "792x168", aspectRatio: "21:9", imageSize: "512"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.size, func(t *testing.T) {
+			body := mustJSON(t, openai.OpenAIImageRequest{
+				Model:  "gemini-3.1-flash-image-preview",
+				Prompt: "make image",
+				Size:   tt.size,
+			})
+			c := New(config.ProviderTypeGemini, RequestMode{
+				IsImageGeneration: true,
+				ModelID:           "gemini-3.1-flash-image-preview",
+			})
+
+			got, err := c.RequestFrom(body)
+			if err != nil {
+				t.Fatalf("RequestFrom error: %v", err)
+			}
+
+			req := mustUnmarshal[vertex.VertexRequest](t, got)
+			if req.GenerationConfig == nil || req.GenerationConfig.ImageConfig == nil {
+				t.Fatalf("missing generationConfig.imageConfig in %s", got)
+			}
+			if req.GenerationConfig.ImageConfig.AspectRatio != tt.aspectRatio {
+				t.Fatalf("expected aspectRatio %q, got %q", tt.aspectRatio, req.GenerationConfig.ImageConfig.AspectRatio)
+			}
+			if req.GenerationConfig.ImageConfig.ImageSize != tt.imageSize {
+				t.Fatalf("expected imageSize %q, got %q", tt.imageSize, req.GenerationConfig.ImageConfig.ImageSize)
+			}
+		})
+	}
+}
+
 func TestProviderConverter_RequestFrom_VertexChat(t *testing.T) {
 	body := mustJSON(t, minimalOpenAIChatRequest())
 	c := New(config.ProviderTypeVertexAI, RequestMode{ModelID: "gemini-1.5-flash"})
@@ -472,7 +519,7 @@ func TestExtractTokenUsage(t *testing.T) {
 		t.Fatalf("expected nil for invalid json")
 	}
 
-	chatBody := []byte(`{"usage":{"prompt_tokens":5,"completion_tokens":7,"prompt_tokens_details":{"cached_tokens":2,"cache_creation_tokens":4,"audio_tokens":1},"completion_tokens_details":{"accepted_prediction_tokens":3,"rejected_prediction_tokens":1,"audio_tokens":4,"reasoning_tokens":6}}}`)
+	chatBody := []byte(`{"usage":{"prompt_tokens":5,"completion_tokens":7,"prompt_tokens_details":{"cached_tokens":2,"cache_creation_tokens":4,"audio_tokens":1},"completion_tokens_details":{"accepted_prediction_tokens":3,"rejected_prediction_tokens":1,"audio_tokens":4,"reasoning_tokens":6,"image_tokens":2}}}`)
 	usage := ExtractTokenUsage(chatBody)
 	if usage == nil {
 		t.Fatalf("expected usage for chat format")
@@ -486,6 +533,9 @@ func TestExtractTokenUsage(t *testing.T) {
 	}
 	if usage.AcceptedPredictionTokens != 3 || usage.RejectedPredictionTokens != 1 {
 		t.Fatalf("unexpected prediction tokens: %+v", usage)
+	}
+	if usage.OutputImageTokens != 2 {
+		t.Fatalf("expected output image tokens, got %+v", usage)
 	}
 
 	imageBody := []byte(`{"usage":{"input_tokens":9,"output_tokens":10,"input_tokens_details":{"image_tokens":8}}}`)
@@ -515,7 +565,7 @@ func TestExtractTokenUsage_ImageFallback(t *testing.T) {
 func TestExtractTokenUsage_ResponsesAPI(t *testing.T) {
 	// Responses API format (GPT-5, /v1/responses) uses input_tokens/output_tokens
 	// with output_tokens_details instead of completion_tokens_details
-	body := []byte(`{"usage":{"input_tokens":150,"output_tokens":80,"total_tokens":230,"input_tokens_details":{"cached_tokens":30,"audio_tokens":10},"output_tokens_details":{"reasoning_tokens":25,"audio_tokens":5}}}`)
+	body := []byte(`{"usage":{"input_tokens":150,"output_tokens":80,"total_tokens":230,"input_tokens_details":{"cached_tokens":30,"audio_tokens":10},"output_tokens_details":{"reasoning_tokens":25,"audio_tokens":5,"image_tokens":40}}}`)
 	usage := ExtractTokenUsage(body)
 	if usage == nil {
 		t.Fatalf("expected usage for Responses API format")
@@ -535,6 +585,9 @@ func TestExtractTokenUsage_ResponsesAPI(t *testing.T) {
 	}
 	if usage.AudioOutputTokens != 5 {
 		t.Fatalf("expected audio_output=5, got %d", usage.AudioOutputTokens)
+	}
+	if usage.OutputImageTokens != 40 {
+		t.Fatalf("expected output_image_tokens=40, got %d", usage.OutputImageTokens)
 	}
 }
 
@@ -570,7 +623,7 @@ func TestExtractTokenUsage_CacheWriteTokens(t *testing.T) {
 func TestExtractTokenUsage_ResponsesAPIStreamingEvent(t *testing.T) {
 	// Responses API streaming event format: response.completed SSE event
 	// Usage is nested inside response.usage, not at top level
-	body := []byte(`{"type":"response.completed","response":{"id":"resp_123","object":"response","status":"completed","model":"qwen3","output":[],"usage":{"input_tokens":16,"output_tokens":2,"output_tokens_details":{"reasoning_tokens":0},"input_tokens_details":{"cached_tokens":5},"total_tokens":18}}}`)
+	body := []byte(`{"type":"response.completed","response":{"id":"resp_123","object":"response","status":"completed","model":"qwen3","output":[],"usage":{"input_tokens":16,"output_tokens":2,"output_tokens_details":{"reasoning_tokens":0,"image_tokens":2},"input_tokens_details":{"cached_tokens":5},"total_tokens":18}}}`)
 	usage := ExtractTokenUsage(body)
 	if usage == nil {
 		t.Fatalf("expected usage for Responses API streaming event format")
@@ -581,6 +634,9 @@ func TestExtractTokenUsage_ResponsesAPIStreamingEvent(t *testing.T) {
 	}
 	if usage.CompletionTokens != 2 {
 		t.Fatalf("expected completion_tokens=2, got %d", usage.CompletionTokens)
+	}
+	if usage.OutputImageTokens != 2 {
+		t.Fatalf("expected output_image_tokens=2, got %d", usage.OutputImageTokens)
 	}
 	if usage.CachedInputTokens != 5 {
 		t.Fatalf("expected cached_tokens=5, got %d", usage.CachedInputTokens)

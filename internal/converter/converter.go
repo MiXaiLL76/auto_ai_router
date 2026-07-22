@@ -150,11 +150,12 @@ func (c *ProviderConverter) RequestFrom(body []byte) ([]byte, error) {
 		}
 
 		// /v1/images/edits uses multipart/form-data.  Rewrite the multipart to:
-		//   1. Fix image parts sent as application/octet-stream (detect real MIME from magic bytes).
-		//   2. Strip the response_format field for gpt-image-1 (JSON stripping won't work on multipart).
+		//   1. Replace model aliases with the provider-facing model name.
+		//   2. Fix image parts sent as application/octet-stream (detect real MIME from magic bytes).
+		//   3. Strip the response_format field for gpt-image-1 (JSON stripping won't work on multipart).
 		if c.mode.IsImageEdit && strings.Contains(strings.ToLower(c.mode.ContentType), "multipart/form-data") {
 			stripRF := openaiconv.IsGptImage1Model(c.mode.ModelID)
-			newBody, newCT := openaiconv.RewriteImageEditMultipart(body, c.mode.ContentType, stripRF)
+			newBody, newCT := openaiconv.RewriteImageEditMultipart(body, c.mode.ContentType, c.mode.ModelID, stripRF)
 			// Only replace when something actually changed (boundary or content differs).
 			if newCT != c.mode.ContentType {
 				c.rewrittenContentType = newCT
@@ -334,6 +335,7 @@ func ExtractTokenUsage(body []byte) *TokenUsage {
 		OutputTokensDetails struct {
 			AudioTokens     int `json:"audio_tokens,omitempty"`
 			ReasoningTokens int `json:"reasoning_tokens,omitempty"`
+			ImageTokens     int `json:"image_tokens,omitempty"`
 		} `json:"output_tokens_details,omitempty"`
 	}
 
@@ -348,12 +350,14 @@ func ExtractTokenUsage(body []byte) *TokenUsage {
 				CacheWriteTokens    int `json:"cache_write_tokens,omitempty"`
 				AudioTokens         int `json:"audio_tokens,omitempty"`
 				TextTokens          int `json:"text_tokens,omitempty"`
+				ImageTokens         int `json:"image_tokens,omitempty"`
 			} `json:"prompt_tokens_details,omitempty"`
 			CompletionTokensDetails struct {
 				AcceptedPredictionTokens int `json:"accepted_prediction_tokens,omitempty"`
 				RejectedPredictionTokens int `json:"rejected_prediction_tokens,omitempty"`
 				AudioTokens              int `json:"audio_tokens,omitempty"`
 				ReasoningTokens          int `json:"reasoning_tokens,omitempty"`
+				ImageTokens              int `json:"image_tokens,omitempty"`
 			} `json:"completion_tokens_details,omitempty"`
 			// Responses API / Image generation format (input_tokens/output_tokens)
 			responsesUsageDetails
@@ -408,6 +412,10 @@ func ExtractTokenUsage(body []byte) *TokenUsage {
 	if audioIn == 0 {
 		audioIn = resp.Usage.InputTokensDetails.AudioTokens
 	}
+	inputImageTokens := resp.Usage.PromptTokensDetails.ImageTokens
+	if inputImageTokens == 0 {
+		inputImageTokens = resp.Usage.InputTokensDetails.ImageTokens
+	}
 	audioOut := resp.Usage.CompletionTokensDetails.AudioTokens
 	if audioOut == 0 {
 		audioOut = resp.Usage.OutputTokensDetails.AudioTokens
@@ -415,6 +423,10 @@ func ExtractTokenUsage(body []byte) *TokenUsage {
 	reasoning := resp.Usage.CompletionTokensDetails.ReasoningTokens
 	if reasoning == 0 {
 		reasoning = resp.Usage.OutputTokensDetails.ReasoningTokens
+	}
+	outputImageTokens := resp.Usage.CompletionTokensDetails.ImageTokens
+	if outputImageTokens == 0 {
+		outputImageTokens = resp.Usage.OutputTokensDetails.ImageTokens
 	}
 
 	// If tokens came from the nested response.completed event, use its detail fields
@@ -432,11 +444,17 @@ func ExtractTokenUsage(body []byte) *TokenUsage {
 		if audioIn == 0 {
 			audioIn = u.InputTokensDetails.AudioTokens
 		}
+		if inputImageTokens == 0 {
+			inputImageTokens = u.InputTokensDetails.ImageTokens
+		}
 		if audioOut == 0 {
 			audioOut = u.OutputTokensDetails.AudioTokens
 		}
 		if reasoning == 0 {
 			reasoning = u.OutputTokensDetails.ReasoningTokens
+		}
+		if outputImageTokens == 0 {
+			outputImageTokens = u.OutputTokensDetails.ImageTokens
 		}
 	}
 
@@ -446,7 +464,8 @@ func ExtractTokenUsage(body []byte) *TokenUsage {
 		CachedInputTokens:        cachedTokens,
 		CacheCreationTokens:      cacheCreationTokens,
 		AudioInputTokens:         audioIn,
-		ImageTokens:              resp.Usage.InputTokensDetails.ImageTokens,
+		ImageTokens:              inputImageTokens,
+		OutputImageTokens:        outputImageTokens,
 		AcceptedPredictionTokens: resp.Usage.CompletionTokensDetails.AcceptedPredictionTokens,
 		RejectedPredictionTokens: resp.Usage.CompletionTokensDetails.RejectedPredictionTokens,
 		AudioOutputTokens:        audioOut,

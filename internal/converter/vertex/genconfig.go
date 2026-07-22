@@ -9,7 +9,7 @@ import (
 
 // buildGenerationConfig constructs Vertex GenerationConfig from OpenAI request params.
 // Returns nil if no config parameters are set.
-func buildGenerationConfig(req *openai.OpenAIRequest, model string) *genai.GenerationConfig {
+func buildGenerationConfig(req *openai.OpenAIRequest, model string) *VertexGenerationConfig {
 	// Check if any config params are present
 	hasParams := req.Temperature != nil || req.MaxTokens != nil || req.MaxCompletionTokens != nil ||
 		req.TopP != nil || req.ExtraBody != nil || req.N != nil || req.Seed != nil ||
@@ -35,7 +35,7 @@ func buildGenerationConfig(req *openai.OpenAIRequest, model string) *genai.Gener
 	//   - ParallelToolCalls: Vertex AI always allows parallel tool calls (cannot be disabled)
 	//   - StreamOptions: stream_options.include_usage is always enabled in this proxy
 
-	cfg := &genai.GenerationConfig{}
+	cfg := &VertexGenerationConfig{GenerationConfig: &genai.GenerationConfig{}}
 
 	// Direct scalar params
 	if req.Temperature != nil {
@@ -99,7 +99,7 @@ func buildGenerationConfig(req *openai.OpenAIRequest, model string) *genai.Gener
 
 	// ExtraBody overrides
 	if req.ExtraBody != nil {
-		applyExtraBodyToConfig(cfg, req.ExtraBody, req.Model)
+		cfg.ImageConfig = applyExtraBodyToConfig(cfg.GenerationConfig, req.ExtraBody, req.Model)
 	}
 
 	// Deduplicate ResponseModalities (modalities may be added from multiple sources:
@@ -203,7 +203,9 @@ func buildGenerationConfig(req *openai.OpenAIRequest, model string) *genai.Gener
 }
 
 // applyExtraBodyToConfig applies extra_body generation_config overrides to genai.GenerationConfig.
-func applyExtraBodyToConfig(cfg *genai.GenerationConfig, extraBody map[string]interface{}, model string) {
+func applyExtraBodyToConfig(cfg *genai.GenerationConfig, extraBody map[string]interface{}, model string) *genai.ImageConfig {
+	var imageConfig *genai.ImageConfig
+
 	// generation_config nested object
 	if gcMap, ok := extraBody["generation_config"].(map[string]interface{}); ok {
 		if mimeType, ok := gcMap["response_mime_type"].(string); ok {
@@ -231,6 +233,10 @@ func applyExtraBodyToConfig(cfg *genai.GenerationConfig, extraBody map[string]in
 			v := float32(temp)
 			cfg.Temperature = &v
 		}
+		imageConfig = parseImageConfig(gcMap["image_config"])
+		if imageConfig == nil {
+			imageConfig = parseImageConfig(gcMap["imageConfig"])
+		}
 	}
 
 	// top-level modalities in extra_body
@@ -240,6 +246,32 @@ func applyExtraBodyToConfig(cfg *genai.GenerationConfig, extraBody map[string]in
 				cfg.ResponseModalities = append(cfg.ResponseModalities, genai.Modality(strings.ToUpper(mod)))
 			}
 		}
+	}
+
+	return imageConfig
+}
+
+func parseImageConfig(value interface{}) *genai.ImageConfig {
+	params, ok := value.(map[string]interface{})
+	if !ok {
+		return nil
+	}
+
+	aspectRatio, _ := params["aspectRatio"].(string)
+	if aspectRatio == "" {
+		aspectRatio, _ = params["aspect_ratio"].(string)
+	}
+	imageSize, _ := params["imageSize"].(string)
+	if imageSize == "" {
+		imageSize, _ = params["image_size"].(string)
+	}
+	if aspectRatio == "" && imageSize == "" {
+		return nil
+	}
+
+	return &genai.ImageConfig{
+		AspectRatio: aspectRatio,
+		ImageSize:   imageSize,
 	}
 }
 

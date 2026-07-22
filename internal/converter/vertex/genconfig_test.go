@@ -136,6 +136,22 @@ func TestApplyExtraBodyToConfig(t *testing.T) {
 		assert.Contains(t, cfg.ResponseModalities, genai.Modality("IMAGE"))
 	})
 
+	t.Run("with image_config in generation_config", func(t *testing.T) {
+		cfg := &genai.GenerationConfig{}
+		extraBody := map[string]interface{}{
+			"generation_config": map[string]interface{}{
+				"image_config": map[string]interface{}{
+					"aspectRatio": "1:1",
+					"imageSize":   "1K",
+				},
+			},
+		}
+		imageConfig := applyExtraBodyToConfig(cfg, extraBody, "gemini-3.1-flash-image-preview")
+		require.NotNil(t, imageConfig)
+		assert.Equal(t, "1:1", imageConfig.AspectRatio)
+		assert.Equal(t, "1K", imageConfig.ImageSize)
+	})
+
 	t.Run("with top-level modalities uppercased", func(t *testing.T) {
 		cfg := &genai.GenerationConfig{}
 		extraBody := map[string]interface{}{

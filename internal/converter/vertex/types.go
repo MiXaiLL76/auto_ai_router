@@ -8,10 +8,15 @@ type VertexStreamingChunk struct {
 	UsageMetadata *genai.GenerateContentResponseUsageMetadata `json:"usageMetadata,omitempty"`
 }
 
+type VertexGenerationConfig struct {
+	*genai.GenerationConfig
+	ImageConfig *genai.ImageConfig `json:"imageConfig,omitempty"`
+}
+
 // VertexRequest represents the Vertex AI API request format
 type VertexRequest struct {
 	Contents          []*genai.Content        `json:"contents"`
-	GenerationConfig  *genai.GenerationConfig `json:"generationConfig,omitempty"`
+	GenerationConfig  *VertexGenerationConfig `json:"generationConfig,omitempty"`
 	SystemInstruction *genai.Content          `json:"systemInstruction,omitempty"`
 	Tools             []*genai.Tool           `json:"tools,omitempty"`
 	ToolConfig        *genai.ToolConfig       `json:"toolConfig,omitempty"`

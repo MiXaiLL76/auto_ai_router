@@ -26,6 +26,13 @@ const streamChunkWriteTimeout = 60 * time.Second
 // so we keep reading to capture the real usage chunk.
 const streamDrainTimeout = 60 * time.Second
 
+// streamTTFTDetectionLimit caps how many bytes streamToClient accumulates while
+// looking for the first real content delta (for CompletionStartTime/ttft_ms).
+// Streams that never produce a detectable content delta within this many bytes
+// (error-only or keep-alive-only streams) stop being scanned; CompletionStartTime
+// stays zero, matching existing "never reached" semantics.
+const streamTTFTDetectionLimit = 64 * 1024
+
 var streamBufPool = sync.Pool{
 	New: func() any {
 		buf := make([]byte, 8192)
@@ -42,7 +49,8 @@ type StreamUsageInfo struct {
 	CachedTokens        int // Tokens from cached prompt content (prompt_caching feature)
 	AudioInputTokens    int // Audio tokens in the request
 	AudioOutputTokens   int // Audio tokens in the response
-	ImageTokens         int // Image/video tokens (if reported)
+	ImageTokens         int // Input image/video tokens (if reported)
+	OutputImageTokens   int // Generated image/video tokens (if reported)
 	ReasoningTokens     int // Reasoning/thoughts tokens (output)
 	CacheCreationTokens int // Tokens created for cache (billed at different rate)
 	CacheReadTokens     int // Tokens read from cache (billed at cheaper rate)
@@ -98,10 +106,12 @@ func (o *openAIStreamUsageExtractor) extractChatCompletionUsage(payload []byte) 
 				CacheCreationTokens int `json:"cache_creation_tokens,omitempty"`
 				CacheWriteTokens    int `json:"cache_write_tokens,omitempty"`
 				AudioTokens         int `json:"audio_tokens,omitempty"`
+				ImageTokens         int `json:"image_tokens,omitempty"`
 			} `json:"prompt_tokens_details,omitempty"`
 			CompletionTokensDetails struct {
 				AudioTokens     int `json:"audio_tokens,omitempty"`
 				ReasoningTokens int `json:"reasoning_tokens,omitempty"`
+				ImageTokens     int `json:"image_tokens,omitempty"`
 			} `json:"completion_tokens_details,omitempty"`
 		} `json:"usage"`
 	}
@@ -126,6 +136,8 @@ func (o *openAIStreamUsageExtractor) extractChatCompletionUsage(payload []byte) 
 		CacheCreationTokens: cacheCreationTokens,
 		AudioInputTokens:    data.Usage.PromptTokensDetails.AudioTokens,
 		AudioOutputTokens:   data.Usage.CompletionTokensDetails.AudioTokens,
+		ImageTokens:         data.Usage.PromptTokensDetails.ImageTokens,
+		OutputImageTokens:   data.Usage.CompletionTokensDetails.ImageTokens,
 		ReasoningTokens:     data.Usage.CompletionTokensDetails.ReasoningTokens,
 	}
 }
@@ -169,6 +181,8 @@ func (o *openAIStreamUsageExtractor) extractResponsesAPIUsage(payload []byte) *S
 		CacheCreationTokens: cacheCreationTokens,
 		AudioInputTokens:    usage.InputTokensDetails.AudioTokens,
 		AudioOutputTokens:   usage.OutputTokensDetails.AudioTokens,
+		ImageTokens:         usage.InputTokensDetails.ImageTokens,
+		OutputImageTokens:   usage.OutputTokensDetails.ImageTokens,
 		ReasoningTokens:     usage.OutputTokensDetails.ReasoningTokens,
 	}
 }
@@ -182,10 +196,12 @@ type responsesAPIUsage struct {
 		CacheCreationTokens int `json:"cache_creation_tokens,omitempty"`
 		CacheWriteTokens    int `json:"cache_write_tokens,omitempty"`
 		AudioTokens         int `json:"audio_tokens,omitempty"`
+		ImageTokens         int `json:"image_tokens,omitempty"`
 	} `json:"input_tokens_details,omitempty"`
 	OutputTokensDetails struct {
 		AudioTokens     int `json:"audio_tokens,omitempty"`
 		ReasoningTokens int `json:"reasoning_tokens,omitempty"`
+		ImageTokens     int `json:"image_tokens,omitempty"`
 	} `json:"output_tokens_details,omitempty"`
 }
 
@@ -440,7 +456,7 @@ func (p *Proxy) handleTransformedStreaming(
 		}
 	}()
 
-	if err := p.streamToClient(respCtx(resp), w, pr, credName, metricModelID(modelID, logCtx), endpointFromLogContext(logCtx), nil, func() { _ = pr.Close() }); err != nil {
+	if err := p.streamToClient(respCtx(resp), w, pr, credName, metricModelID(modelID, logCtx), endpointFromLogContext(logCtx), nil, func() { _ = pr.Close() }, logCtx); err != nil {
 		p.logStreamHandlerError(respCtx(resp), "streamToClient error in handleTransformedStreaming", err,
 			"credential", credName, "provider", providerName, "model", modelID)
 		wg.Wait()
@@ -516,7 +532,7 @@ func (p *Proxy) handleStreamingWithTokens(w http.ResponseWriter, resp *http.Resp
 		rememberLastStreamDataChunk(&lastChunk, chunk)
 	}
 
-	if err := p.streamToClient(respCtx(resp), w, resp.Body, credName, metricModelID(modelID, logCtx), endpointFromLogContext(logCtx), onChunk, nil); err != nil {
+	if err := p.streamToClient(respCtx(resp), w, resp.Body, credName, metricModelID(modelID, logCtx), endpointFromLogContext(logCtx), onChunk, nil, logCtx); err != nil {
 		p.logStreamHandlerError(respCtx(resp), "streamToClient error in handleStreamingWithTokens", err,
 			"credential", credName, "model", modelID, "chunks_received", chunkCount)
 		if p.drainUpstreamOnAbort {
@@ -597,6 +613,9 @@ func (p *Proxy) finalizeStreamingLog(logCtx *RequestLogContext, totalTokens int,
 			if usageInfo.ImageTokens > 0 {
 				logCtx.TokenUsage.ImageTokens = usageInfo.ImageTokens
 			}
+			if usageInfo.OutputImageTokens > 0 {
+				logCtx.TokenUsage.OutputImageTokens = usageInfo.OutputImageTokens
+			}
 			if usageInfo.ReasoningTokens > 0 {
 				logCtx.TokenUsage.ReasoningTokens = usageInfo.ReasoningTokens
 			}
@@ -613,6 +632,7 @@ func (p *Proxy) finalizeStreamingLog(logCtx *RequestLogContext, totalTokens int,
 				"audio_input_tokens", usageInfo.AudioInputTokens,
 				"audio_output_tokens", usageInfo.AudioOutputTokens,
 				"image_tokens", usageInfo.ImageTokens,
+				"output_image_tokens", usageInfo.OutputImageTokens,
 				"reasoning_tokens", usageInfo.ReasoningTokens,
 			)
 		}
@@ -753,6 +773,7 @@ func (p *Proxy) streamToClient(
 	endpoint string,
 	onChunk func([]byte),
 	onWriteErr func(),
+	logCtx *RequestLogContext,
 ) error {
 	_, ok := w.(http.Flusher)
 	if !ok {
@@ -764,9 +785,31 @@ func (p *Proxy) streamToClient(
 
 	buf := streamBufPool.Get().(*[]byte)
 	defer streamBufPool.Put(buf)
+
+	// TTFT detection buffer: separate from the bytes forwarded to the client via
+	// onChunk (forwarding must stay byte-for-byte immediate for latency). A real
+	// content/tool/reasoning delta can straddle multiple Read calls, or be
+	// preceded by content-free SSE events (ping, role-only delta) that arrive in
+	// their own Read — so bytes accumulate here across reads until
+	// extractCompletionDeltaText finds actual content, rather than stamping
+	// CompletionStartTime on the first non-empty Read regardless of content.
+	var ttftBuf []byte
+	ttftPending := logCtx != nil && logCtx.CompletionStartTime.IsZero()
+
 	for {
 		n, err := reader.Read(*buf)
 		if n > 0 {
+			if ttftPending {
+				ttftBuf = append(ttftBuf, (*buf)[:n]...)
+				if extractCompletionDeltaText(ttftBuf) != "" {
+					logCtx.CompletionStartTime = time.Now()
+					ttftPending = false
+					ttftBuf = nil
+				} else if len(ttftBuf) > streamTTFTDetectionLimit {
+					ttftPending = false
+					ttftBuf = nil
+				}
+			}
 			if onChunk != nil {
 				onChunk((*buf)[:n])
 			}
@@ -1030,7 +1073,7 @@ func (p *Proxy) handlePassthroughResponsesStreaming(
 		}
 	}
 
-	if err := p.streamToClient(respCtx(resp), w, resp.Body, credName, metricModelID(modelID, logCtx), endpointFromLogContext(logCtx), onChunk, nil); err != nil {
+	if err := p.streamToClient(respCtx(resp), w, resp.Body, credName, metricModelID(modelID, logCtx), endpointFromLogContext(logCtx), onChunk, nil, logCtx); err != nil {
 		p.logStreamHandlerError(respCtx(resp), "streamToClient error in handlePassthroughResponsesStreaming", err,
 			"credential", credName, "model", modelID, "chunks_received", chunkCount)
 		if p.drainUpstreamOnAbort {

@@ -36,5 +36,11 @@ anyllm_example.py
 logs/*.txt
 bedrock_docs/
 skills/
-server
+/server
 conf*.json
+*.xlsx
+_LiteLLM_*.sql
+_LiteLLM_*.csv
+*.pb.gz
+Locust_*.html
+air_mock_*.json

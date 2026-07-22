@@ -62,19 +62,20 @@ type collectedPart struct {
 }
 
 // RewriteImageEditMultipart rewrites a multipart/form-data body for /v1/images/edits:
-//  1. Fixes image parts whose Content-Type is "application/octet-stream" by
+//  1. Replaces the model field with the provider-facing model name.
+//  2. Fixes image parts whose Content-Type is "application/octet-stream" by
 //     detecting the actual image format from magic bytes and setting the correct
 //     Content-Type (image/png, image/jpeg, or image/webp) and filename.
-//  2. Strips the "response_format" field when stripResponseFormat is true
+//  3. Strips the "response_format" field when stripResponseFormat is true
 //     (used for gpt-image-1 which rejects that parameter).
-//  3. Renames multiple "image" fields to "image[]" — when the client sends
+//  4. Renames multiple "image" fields to "image[]" — when the client sends
 //     more than one image using the same field name "image", OpenAI requires
 //     the array syntax "image[]" instead.
 //
 // Returns the rewritten body bytes and the new Content-Type header value
 // (multipart/form-data with updated boundary).  On any parse error the original
 // body and contentType are returned unchanged so the caller can still forward them.
-func RewriteImageEditMultipart(body []byte, contentType string, stripResponseFormat bool) (newBody []byte, newContentType string) {
+func RewriteImageEditMultipart(body []byte, contentType, modelID string, stripResponseFormat bool) (newBody []byte, newContentType string) {
 	// Parse the boundary from Content-Type.
 	mediaType, params, err := mime.ParseMediaType(contentType)
 	if err != nil || !strings.HasPrefix(mediaType, "multipart/") {
@@ -126,6 +127,9 @@ func RewriteImageEditMultipart(body []byte, contentType string, stripResponseFor
 		fieldName := p.fieldName
 		filename := p.filename
 		partData := p.data
+		if fieldName == "model" && modelID != "" {
+			partData = []byte(modelID)
+		}
 
 		// Skip response_format field when requested.
 		if stripResponseFormat && fieldName == "response_format" {

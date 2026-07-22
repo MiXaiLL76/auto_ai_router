@@ -28,7 +28,10 @@ func (m *MockDBManager) ValidateToken(ctx context.Context, rawToken string) (*mo
 func (m *MockDBManager) ValidateTokenForModel(ctx context.Context, rawToken, model string) (*models.TokenInfo, error) {
 	return nil, nil
 }
-func (m *MockDBManager) LogSpend(entry *models.SpendLogEntry) error                   { return nil }
+func (m *MockDBManager) LogSpend(entry *models.SpendLogEntry) error { return nil }
+func (m *MockDBManager) MarkSpendLogKafkaFallback(ctx context.Context, requestID, reason string) error {
+	return nil
+}
 func (m *MockDBManager) IsEnabled() bool                                              { return true }
 func (m *MockDBManager) IsHealthy() bool                                              { return m.healthy }
 func (m *MockDBManager) AuthCacheStats() models.AuthCacheStats                        { return models.AuthCacheStats{} }
