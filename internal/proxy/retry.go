@@ -303,6 +303,7 @@ func (p *Proxy) writeFallbackResponse(
 				logCtx.TokenUsage = streamUsage
 			}
 			if logCtx != nil && !logCtx.Logged {
+				logCtx.Logged = true
 				if queueErr := p.logSpendToLiteLLMDB(logCtx); queueErr != nil {
 					p.logger.WarnContext(r.Context(), "Failed to queue fallback stream failure spend log",
 						"error", queueErr,
@@ -369,6 +370,7 @@ func (p *Proxy) writeFallbackResponse(
 			logCtx.ErrorMsg = extractErrorMessage(proxyResp.Body)
 		}
 		if proxyResp.IsStreaming {
+			logCtx.Logged = true
 			if err := p.logSpendToLiteLLMDB(logCtx); err != nil {
 				p.logger.WarnContext(r.Context(), "Failed to queue fallback spend log",
 					"error", err,

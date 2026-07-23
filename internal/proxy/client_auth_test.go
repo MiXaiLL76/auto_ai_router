@@ -31,8 +31,8 @@ type clientAuthTestDB struct {
 	seen       []string
 }
 
-func (m *clientAuthTestDB) IsEnabled() bool { return true }
-func (m *clientAuthTestDB) IsHealthy() bool { return true }
+func (m *clientAuthTestDB) IsEnabled() bool                        { return true }
+func (m *clientAuthTestDB) IsHealthy() bool                        { return true }
 func (m *clientAuthTestDB) LogSpend(*dbmodels.SpendLogEntry) error { return nil }
 
 func (m *clientAuthTestDB) ValidateToken(_ context.Context, rawToken string) (*dbmodels.TokenInfo, error) {
@@ -142,6 +142,57 @@ func TestClientAuthenticationRejectsInvalidCredentialsWithoutChangingErrorContra
 			assert.Contains(t, w.Body.String(), tt.wantText)
 		})
 	}
+}
+
+func TestDirectProviderRestoresClientVisibleModel(t *testing.T) {
+	upstream := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(createMockChatCompletionResponse(
+			"chatcmpl-direct-alias",
+			"backend-chat",
+			"ok",
+		))
+	}))
+	defer upstream.Close()
+
+	prx := newClientAuthTestProxy(t, nil, upstream.URL, config.ProviderTypeOpenAI, "provider-key")
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(
+		`{"model":"public/chat","messages":[{"role":"user","content":"hello"}]}`,
+	))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+
+	prx.ProxyRequest(recorder, req)
+
+	require.Equal(t, http.StatusOK, recorder.Code)
+	var response map[string]any
+	require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &response))
+	assert.Equal(t, "public/chat", response["model"])
+}
+
+func TestDirectProviderStreamingDisablesProxyBuffering(t *testing.T) {
+	upstream := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(
+			"data: {\"id\":\"chatcmpl-direct-stream\",\"object\":\"chat.completion.chunk\",\"model\":\"backend-chat\",\"choices\":[]}\n\n" +
+				"data: [DONE]\n\n",
+		))
+	}))
+	defer upstream.Close()
+
+	prx := newClientAuthTestProxy(t, nil, upstream.URL, config.ProviderTypeOpenAI, "provider-key")
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(
+		`{"model":"public/chat","messages":[{"role":"user","content":"hello"}],"stream":true}`,
+	))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+
+	prx.ProxyRequest(recorder, req)
+
+	require.Equal(t, http.StatusOK, recorder.Code)
+	assert.Equal(t, "no", recorder.Header().Get(accelBufferingHeader))
 }
 
 func TestExplicitClientModelSurfaceRejectsBackendBeforeProviderAndSpend(t *testing.T) {
@@ -399,10 +450,10 @@ func TestInferenceModelACLIntersectsParentScopesBeforeAliasResolution(t *testing
 
 	db := &clientAuthTestDB{tokens: map[string]*dbmodels.TokenInfo{
 		"restricted-key": {
-			Token:         "restricted-hash",
-			Models:        []string{"public/chat", "backend-chat"},
-			TeamID:        "team-alt",
-			TeamModels:    []string{"public/chat"},
+			Token:      "restricted-hash",
+			Models:     []string{"public/chat", "backend-chat"},
+			TeamID:     "team-alt",
+			TeamModels: []string{"public/chat"},
 		},
 	}}
 	prx := newClientAuthTestProxy(t, db, upstream.URL, config.ProviderTypeOpenAI, "provider-key")

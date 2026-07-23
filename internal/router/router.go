@@ -33,8 +33,6 @@ var postOnlyPublicPaths = map[string]struct{}{
 	"/v1/responses/compact":  {},
 }
 
-const corsAllowedMethods = "DELETE, GET, HEAD, OPTIONS, PATCH, POST, PUT"
-
 func publicPathAllowedMethod(req *http.Request) (string, bool) {
 	path := req.URL.Path
 	if path == "/v1/models" {
@@ -50,32 +48,6 @@ func publicPathAllowedMethod(req *http.Request) (string, bool) {
 		return http.MethodGet, true
 	}
 	return "", false
-}
-
-func applyPublicCORS(w http.ResponseWriter, req *http.Request) bool {
-	_, public := publicPathAllowedMethod(req)
-	if !public {
-		return false
-	}
-	if req.Header.Get("Origin") != "" {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-	}
-	if req.Method != http.MethodOptions {
-		return false
-	}
-
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	w.Header().Set("Access-Control-Allow-Methods", corsAllowedMethods)
-	allowedHeaders := req.Header.Get("Access-Control-Request-Headers")
-	if allowedHeaders == "" {
-		allowedHeaders = "*"
-	}
-	w.Header().Set("Access-Control-Allow-Headers", allowedHeaders)
-	w.Header().Set("Access-Control-Max-Age", "600")
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte("OK"))
-	return true
 }
 
 func writeMethodNotAllowed(w http.ResponseWriter, allowedMethod string) {
@@ -127,9 +99,6 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		}
 	}()
 
-	if applyPublicCORS(w, req) {
-		return
-	}
 	if allowedMethod, public := publicPathAllowedMethod(req); public && req.Method != allowedMethod {
 		writeMethodNotAllowed(w, allowedMethod)
 		return

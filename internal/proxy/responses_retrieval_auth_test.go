@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
@@ -20,9 +21,14 @@ type retrievalAuthResponseStore struct {
 	ownerHash  string
 	getCalls   int
 	masterGets int
+	saved      *responses.Response
 }
 
-func (s *retrievalAuthResponseStore) SaveResponse(context.Context, string, *responses.Response, map[string]string, int, json.RawMessage, string) error {
+func (s *retrievalAuthResponseStore) SaveResponse(_ context.Context, _ string, response *responses.Response, _ map[string]string, _ int, _ json.RawMessage, _ string) error {
+	if response != nil {
+		saved := *response
+		s.saved = &saved
+	}
 	return nil
 }
 
@@ -113,4 +119,37 @@ func TestHandleGetResponsePreservesTenantOwnershipAndMasterBypass(t *testing.T) 
 			}
 		})
 	}
+}
+
+func TestStoredResponseUsesClientVisibleModel(t *testing.T) {
+	upstream := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"id":"resp-public-model",
+			"object":"response",
+			"created_at":1,
+			"model":"backend-chat",
+			"status":"completed",
+			"output":[],
+			"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}
+		}`))
+	}))
+	defer upstream.Close()
+
+	prx := newClientAuthTestProxy(t, nil, upstream.URL, config.ProviderTypeOpenAI, "provider-key")
+	store := &retrievalAuthResponseStore{}
+	prx.responseStore = store
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(
+		`{"model":"public/chat","input":"hello","store":true}`,
+	))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+
+	prx.ProxyRequest(recorder, req)
+
+	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+	require.NotNil(t, store.saved)
+	assert.Equal(t, "public/chat", store.saved.Model)
 }

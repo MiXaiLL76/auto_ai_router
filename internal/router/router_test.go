@@ -566,10 +566,10 @@ func TestServeHTTPV1ModelsRequiresAuthAndFiltersPublicCatalog(t *testing.T) {
 		// The key itself grants both IDs, while its parent scopes grant only the
 		// public model. The internal routing target must not be advertised.
 		"restricted-key": {
-			Token:         "restricted-hash",
-			Models:        []string{"openai/a-public", "a-backend"},
-			TeamID:        "team-alt",
-			TeamModels:    []string{"openai/a-public"},
+			Token:      "restricted-hash",
+			Models:     []string{"openai/a-public", "a-backend"},
+			TeamID:     "team-alt",
+			TeamModels: []string{"openai/a-public"},
 		},
 		"blocked-team-key": {
 			Token:       "blocked-team-hash",
@@ -670,7 +670,7 @@ func TestServeHTTPV1ModelsRequiresAuthAndFiltersPublicCatalog(t *testing.T) {
 	)
 }
 
-func TestServeHTTPPublicPreflightMatchesConfiguredLiteLLMCORS(t *testing.T) {
+func TestServeHTTPPublicPreflightDoesNotEnableWildcardCORS(t *testing.T) {
 	router := New(nil, nil, testhelpers.NewTestMonitoringConfig("/health", false, ""), testhelpers.NewTestLogger(), nil)
 	req := httptest.NewRequest(http.MethodOptions, "/v1/chat/completions", nil)
 	req.Header.Set("Origin", "https://client.example.invalid")
@@ -680,13 +680,11 @@ func TestServeHTTPPublicPreflightMatchesConfiguredLiteLLMCORS(t *testing.T) {
 
 	router.ServeHTTP(w, req)
 
-	assert.Equal(t, http.StatusOK, w.Code)
-	assert.Equal(t, "OK", w.Body.String())
-	assert.Equal(t, "*", w.Header().Get("Access-Control-Allow-Origin"))
-	assert.Equal(t, "content-type,x-api-key", w.Header().Get("Access-Control-Allow-Headers"))
-	assert.Equal(t, "DELETE, GET, HEAD, OPTIONS, PATCH, POST, PUT", w.Header().Get("Access-Control-Allow-Methods"))
-	assert.Equal(t, "600", w.Header().Get("Access-Control-Max-Age"))
-	assert.Equal(t, "text/plain; charset=utf-8", w.Header().Get("Content-Type"))
+	assert.Equal(t, http.StatusMethodNotAllowed, w.Code)
+	assert.Equal(t, http.MethodPost, w.Header().Get("Allow"))
+	assert.Empty(t, w.Header().Get("Access-Control-Allow-Origin"))
+	assert.Empty(t, w.Header().Get("Access-Control-Allow-Headers"))
+	assert.Empty(t, w.Header().Get("Access-Control-Allow-Methods"))
 }
 
 func TestServeHTTPRejectsUnsupportedMethodsBeforeAuth(t *testing.T) {

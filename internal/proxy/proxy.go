@@ -586,6 +586,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			if resp == nil {
 				return
 			}
+			resp.Model = clientVisibleResponseModel(logCtx, resp.Model)
 			applyResponsesMetadata(resp, meta)
 			if err := p.responseStore.SaveResponse(
 				context.Background(), apiKeyHash, resp, meta.Metadata, meta.TTL, meta.AccumulatedInput, cred.Name,
@@ -1503,6 +1504,23 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
+		if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
+			normalizedBody := normalizeSuccessfulResponseModel(
+				finalResponseBody,
+				endpointFromLogContext(logCtx),
+				clientVisibleResponseModel(logCtx, modelID),
+			)
+			if !bytes.Equal(normalizedBody, finalResponseBody) {
+				finalResponseBody = normalizedBody
+				bodyForTokenExtraction = normalizedBody
+				for key := range resp.Header {
+					if isRepresentationIntegrityHeader(key) {
+						resp.Header.Del(key)
+					}
+				}
+			}
+		}
+
 		rawErrorBody := finalResponseBody
 		if resp.StatusCode >= 400 && shouldMaskUpstreamErrors(cred) {
 			finalResponseBody = maskedUpstreamErrorBody(resp.StatusCode)
@@ -1600,6 +1618,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+		setSuccessfulSSEHeaders(w.Header(), resp.StatusCode)
 		w.WriteHeader(resp.StatusCode)
 
 		if logCtx != nil {
