@@ -51,10 +51,6 @@ func audioUsageContractFromHeaders(headers http.Header) audioUsageContract {
 	return audioUsageContractUnknown
 }
 
-func audioUsageExcludesCached(headers http.Header) bool {
-	return audioUsageContractFromHeaders(headers) == audioUsageContractExcludesCached
-}
-
 func tokenUsageExtractionOptionsForCredential(_ *config.CredentialConfig) converter.TokenUsageExtractionOptions {
 	return converter.TokenUsageExtractionOptions{AudioInputIncludesCachedAudio: true}
 }
