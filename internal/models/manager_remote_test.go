@@ -432,7 +432,7 @@ func TestGetRemoteModelsWithError_FallsBackToV1ModelsWhenHealthLacksMetadata(t *
 	server := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/health":
-			// Simulate older/non-AAR proxy returning unrelated JSON shape.
+			// Simulate older/non-AIR proxy returning unrelated JSON shape.
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(ModelsResponse{
 				Object: "list",

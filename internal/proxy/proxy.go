@@ -99,7 +99,7 @@ type RequestLogContext struct {
 	IsResponsesAPI       bool                     // True if this is a Responses API request (converted to Chat Completions)
 	RequestCompleted     bool                     // True only after the response was fully and successfully delivered
 	ActualCredentialName string                   // Real credential name from upstream when Credential.Type == ProviderTypeProxy
-	IsProxyRequest       bool                     // True when this request came from another auto_ai_router (X-Aar-Proxy-Client header)
+	IsProxyRequest       bool                     // True when this request came from another auto_ai_router (HeaderAIRProxyClient)
 	Scope                scope.Context
 
 	// ReservedEntities lists budget-hierarchy levels reserved for this request via
@@ -408,7 +408,7 @@ func (p *Proxy) executeProxyRequest(
 	copyRequestHeaders(proxyReq, r, cred.APIKey)
 	// Mark request as coming from an internal proxy client so the upstream router
 	// knows to include the X-Credential-Name response header.
-	proxyReq.Header.Set("X-Aar-Proxy-Client", "1")
+	proxyReq.Header.Set(HeaderAIRProxyClient, "1")
 
 	// Send request
 	resp, err := p.client.Do(proxyReq)
@@ -521,8 +521,8 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 
 	// Save and strip internal proxy marker. The marker is set by executeProxyRequest when
 	// acting as a proxy client. We save it here and delete it to prevent external spoofing.
-	isProxyRequest := r.Header.Get("X-Aar-Proxy-Client") == "1"
-	r.Header.Del("X-Aar-Proxy-Client")
+	isProxyRequest := r.Header.Get(HeaderAIRProxyClient) == "1"
+	r.Header.Del(HeaderAIRProxyClient)
 
 	// Create logging context that will be filled throughout request processing
 	// and logged at the end via defer to ensure all requests are logged

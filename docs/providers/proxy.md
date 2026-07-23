@@ -35,20 +35,20 @@ Generic OpenAI-compatible APIs usually report `audio_tokens` including `cached_a
 AIR responses also include an explicit cached-audio usage contract:
 
 ```http
-X-Aar-Usage-Audio-Tokens: exclude-cached
+Air-Usage-Audio-Tokens: exclude-cached
 ```
 
 or:
 
 ```http
-X-Aar-Usage-Audio-Tokens: include-cached
+Air-Usage-Audio-Tokens: include-cached
 ```
 
 Downstream AIR reads this header automatically.
 
 ## Migration / Rollout Note
 
-For AIR-to-AIR chained routing, switch credentials to `type: air`. Roll out the upstream AIR first or at least ensure the upstream emits `X-Aar-Usage-Audio-Tokens` on successful responses.
+For AIR-to-AIR chained routing, switch credentials to `type: air`. Roll out the upstream AIR first or at least ensure the upstream emits `Air-Usage-Audio-Tokens` on successful responses.
 
 ## Fallback Behavior
 

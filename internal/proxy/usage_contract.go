@@ -9,13 +9,17 @@ import (
 )
 
 const (
-	// HeaderAARUsageAudioTokens describes the cached-audio contract of the
+	// HeaderAIRProxyClient marks AIR-to-AIR internal proxy requests. AIR strips
+	// it from inbound requests before forwarding to real providers.
+	HeaderAIRProxyClient = "Air-Proxy-Client"
+
+	// HeaderAIRUsageAudioTokens describes the cached-audio contract of the
 	// response body. AIR sets it so downstream AIR proxies do not need a
 	// credential-level guess about whether audio_tokens includes cached audio.
-	HeaderAARUsageAudioTokens = "X-Aar-Usage-Audio-Tokens"
+	HeaderAIRUsageAudioTokens = "Air-Usage-Audio-Tokens"
 
-	aarUsageAudioTokensExcludeCached = "exclude-cached"
-	aarUsageAudioTokensIncludeCached = "include-cached"
+	airUsageAudioTokensExcludeCached = "exclude-cached"
+	airUsageAudioTokensIncludeCached = "include-cached"
 )
 
 type audioUsageContract int
@@ -27,23 +31,23 @@ const (
 )
 
 func markAudioUsageExcludesCached(headers http.Header) {
-	headers.Set(HeaderAARUsageAudioTokens, aarUsageAudioTokensExcludeCached)
+	headers.Set(HeaderAIRUsageAudioTokens, airUsageAudioTokensExcludeCached)
 }
 
 func markAudioUsageIncludesCached(headers http.Header) {
-	headers.Set(HeaderAARUsageAudioTokens, aarUsageAudioTokensIncludeCached)
+	headers.Set(HeaderAIRUsageAudioTokens, airUsageAudioTokensIncludeCached)
 }
 
 func audioUsageContractFromHeaders(headers http.Header) audioUsageContract {
 	if headers == nil {
 		return audioUsageContractUnknown
 	}
-	for _, value := range headers.Values(HeaderAARUsageAudioTokens) {
+	for _, value := range headers.Values(HeaderAIRUsageAudioTokens) {
 		for _, part := range strings.Split(value, ",") {
 			switch {
-			case strings.EqualFold(strings.TrimSpace(part), aarUsageAudioTokensExcludeCached):
+			case strings.EqualFold(strings.TrimSpace(part), airUsageAudioTokensExcludeCached):
 				return audioUsageContractExcludesCached
-			case strings.EqualFold(strings.TrimSpace(part), aarUsageAudioTokensIncludeCached):
+			case strings.EqualFold(strings.TrimSpace(part), airUsageAudioTokensIncludeCached):
 				return audioUsageContractIncludesCached
 			}
 		}

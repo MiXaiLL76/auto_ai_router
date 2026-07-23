@@ -36,8 +36,8 @@ func TestGetHopByHopHeaders(t *testing.T) {
 
 func TestCopyRequestHeadersStripsInternalUsageContractHeader(t *testing.T) {
 	src := httptestRequestWithHeaders(map[string]string{
-		HeaderAARUsageAudioTokens: "exclude-cached",
-		"X-Aar-Proxy-Client":      "1",
+		HeaderAIRUsageAudioTokens: "exclude-cached",
+		HeaderAIRProxyClient:      "1",
 		"X-Regular":               "ok",
 	})
 	dst, err := http.NewRequest(http.MethodPost, "http://upstream.example/v1/chat/completions", nil)
@@ -45,8 +45,8 @@ func TestCopyRequestHeadersStripsInternalUsageContractHeader(t *testing.T) {
 
 	copyRequestHeaders(dst, src, "")
 
-	assert.Empty(t, dst.Header.Get(HeaderAARUsageAudioTokens))
-	assert.Empty(t, dst.Header.Get("X-Aar-Proxy-Client"))
+	assert.Empty(t, dst.Header.Get(HeaderAIRUsageAudioTokens))
+	assert.Empty(t, dst.Header.Get(HeaderAIRProxyClient))
 	assert.Equal(t, "ok", dst.Header.Get("X-Regular"))
 }
 

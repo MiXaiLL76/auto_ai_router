@@ -50,9 +50,9 @@ func isHopByHopHeader(key string) bool {
 	return hopByHopHeaders[key]
 }
 
-func isInternalAARRequestHeader(key string) bool {
-	return strings.EqualFold(key, "X-Aar-Proxy-Client") ||
-		strings.EqualFold(key, HeaderAARUsageAudioTokens)
+func isInternalAIRRequestHeader(key string) bool {
+	return strings.EqualFold(key, HeaderAIRProxyClient) ||
+		strings.EqualFold(key, HeaderAIRUsageAudioTokens)
 }
 
 // GetHopByHopHeaders returns a copy of the hop-by-hop headers map for reference.
@@ -79,7 +79,7 @@ func copyRequestHeaders(dst *http.Request, src *http.Request, apiKey string) {
 			continue
 		}
 		// Strip internal AIR markers — they must not be forwarded to the actual provider.
-		if isInternalAARRequestHeader(key) {
+		if isInternalAIRRequestHeader(key) {
 			continue
 		}
 		if key == "Authorization" {
@@ -118,7 +118,7 @@ func copyHeadersSkipAuth(dst *http.Request, src *http.Request) {
 			continue
 		}
 		// Strip internal AIR markers — they must not be forwarded to the actual provider.
-		if isInternalAARRequestHeader(key) {
+		if isInternalAIRRequestHeader(key) {
 			continue
 		}
 		for _, value := range values {
@@ -137,7 +137,7 @@ func copyResponseHeaders(w http.ResponseWriter, src http.Header, credType config
 		if isHopByHopHeader(key) {
 			continue
 		}
-		if strings.EqualFold(key, HeaderAARUsageAudioTokens) && !credType.IsProxyLike() {
+		if strings.EqualFold(key, HeaderAIRUsageAudioTokens) && !credType.IsProxyLike() {
 			continue
 		}
 		// Skip Content-Length and Content-Encoding for all response types

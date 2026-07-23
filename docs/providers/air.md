@@ -22,13 +22,13 @@ credentials:
 AIR responses carry their cached-audio usage contract in:
 
 ```http
-X-Aar-Usage-Audio-Tokens: include-cached
+Air-Usage-Audio-Tokens: include-cached
 ```
 
 or:
 
 ```http
-X-Aar-Usage-Audio-Tokens: exclude-cached
+Air-Usage-Audio-Tokens: exclude-cached
 ```
 
 Downstream AIR reads this header automatically and bills audio/cache correctly.

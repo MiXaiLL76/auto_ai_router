@@ -27,7 +27,7 @@ func TestTokenUsageExtractionOptionsForResponse(t *testing.T) {
 			name: "AIR response header marks normalized usage without credential config",
 			cred: &config.CredentialConfig{Type: config.ProviderTypeProxy},
 			headers: http.Header{
-				HeaderAARUsageAudioTokens: []string{aarUsageAudioTokensExcludeCached},
+				HeaderAIRUsageAudioTokens: []string{airUsageAudioTokensExcludeCached},
 			},
 			includes: false,
 		},
@@ -35,7 +35,7 @@ func TestTokenUsageExtractionOptionsForResponse(t *testing.T) {
 			name: "AIR response header marks raw OpenAI-compatible usage",
 			cred: &config.CredentialConfig{Type: config.ProviderTypeProxy},
 			headers: http.Header{
-				HeaderAARUsageAudioTokens: []string{aarUsageAudioTokensIncludeCached},
+				HeaderAIRUsageAudioTokens: []string{airUsageAudioTokensIncludeCached},
 			},
 			includes: true,
 		},
@@ -48,7 +48,7 @@ func TestTokenUsageExtractionOptionsForResponse(t *testing.T) {
 			name: "AIR provider normalized response header",
 			cred: &config.CredentialConfig{Type: config.ProviderTypeAIR},
 			headers: http.Header{
-				HeaderAARUsageAudioTokens: []string{aarUsageAudioTokensExcludeCached},
+				HeaderAIRUsageAudioTokens: []string{airUsageAudioTokensExcludeCached},
 			},
 			includes: false,
 		},
@@ -56,7 +56,7 @@ func TestTokenUsageExtractionOptionsForResponse(t *testing.T) {
 			name: "AIR provider raw response header",
 			cred: &config.CredentialConfig{Type: config.ProviderTypeAIR},
 			headers: http.Header{
-				HeaderAARUsageAudioTokens: []string{aarUsageAudioTokensIncludeCached},
+				HeaderAIRUsageAudioTokens: []string{airUsageAudioTokensIncludeCached},
 			},
 			includes: true,
 		},
@@ -64,7 +64,7 @@ func TestTokenUsageExtractionOptionsForResponse(t *testing.T) {
 			name: "AIR response header tolerates comma joined duplicates",
 			cred: &config.CredentialConfig{Type: config.ProviderTypeProxy},
 			headers: http.Header{
-				HeaderAARUsageAudioTokens: []string{"exclude-cached, exclude-cached"},
+				HeaderAIRUsageAudioTokens: []string{"exclude-cached, exclude-cached"},
 			},
 			includes: false,
 		},
@@ -103,7 +103,7 @@ func TestProxyUsageContractCachedAudioMatrix(t *testing.T) {
 			name: "AIR-normalized proxy response header preserves non-cached audio",
 			cred: config.CredentialConfig{Type: config.ProviderTypeProxy},
 			headers: http.Header{
-				HeaderAARUsageAudioTokens: []string{aarUsageAudioTokensExcludeCached},
+				HeaderAIRUsageAudioTokens: []string{airUsageAudioTokensExcludeCached},
 			},
 			audio:     60,
 			wantAudio: 60,
@@ -112,7 +112,7 @@ func TestProxyUsageContractCachedAudioMatrix(t *testing.T) {
 			name: "AIR provider raw response header subtracts cached audio",
 			cred: config.CredentialConfig{Type: config.ProviderTypeAIR},
 			headers: http.Header{
-				HeaderAARUsageAudioTokens: []string{aarUsageAudioTokensIncludeCached},
+				HeaderAIRUsageAudioTokens: []string{airUsageAudioTokensIncludeCached},
 			},
 			audio:     100,
 			wantAudio: 60,
@@ -121,7 +121,7 @@ func TestProxyUsageContractCachedAudioMatrix(t *testing.T) {
 			name: "AIR provider normalized response header preserves non-cached audio",
 			cred: config.CredentialConfig{Type: config.ProviderTypeAIR},
 			headers: http.Header{
-				HeaderAARUsageAudioTokens: []string{aarUsageAudioTokensExcludeCached},
+				HeaderAIRUsageAudioTokens: []string{airUsageAudioTokensExcludeCached},
 			},
 			audio:     60,
 			wantAudio: 60,

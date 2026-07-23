@@ -24,14 +24,14 @@ func TestProxyRequest_CacheBillingLogsLiteLLMSpend(t *testing.T) {
 		{
 			name:                  "raw OpenAI-compatible proxy subtracts cached audio",
 			upstreamAudioTokens:   100,
-			expectedUsageHeader:   aarUsageAudioTokensIncludeCached,
+			expectedUsageHeader:   airUsageAudioTokensIncludeCached,
 			expectedLoggedAudioIn: 60,
 		},
 		{
 			name:                  "AIR-normalized proxy header keeps non-cached audio without credential config",
-			upstreamUsageHeader:   aarUsageAudioTokensExcludeCached,
+			upstreamUsageHeader:   airUsageAudioTokensExcludeCached,
 			upstreamAudioTokens:   60,
-			expectedUsageHeader:   aarUsageAudioTokensExcludeCached,
+			expectedUsageHeader:   airUsageAudioTokensExcludeCached,
 			expectedLoggedAudioIn: 60,
 		},
 	}
@@ -55,7 +55,7 @@ func TestProxyRequest_CacheBillingLogsLiteLLMSpend(t *testing.T) {
 			prx.ProxyRequest(w, req)
 
 			require.Equal(t, http.StatusOK, w.Code)
-			assert.Equal(t, tt.expectedUsageHeader, w.Header().Get(HeaderAARUsageAudioTokens))
+			assert.Equal(t, tt.expectedUsageHeader, w.Header().Get(HeaderAIRUsageAudioTokens))
 			require.JSONEq(t, `{"role":"assistant","content":"ok"}`, extractMessage(t, w.Body.String()))
 			require.Len(t, dbStub.loggedEntries, 1)
 
@@ -92,14 +92,14 @@ func TestProxyRequest_StreamingCacheBillingLogsLiteLLMSpend(t *testing.T) {
 		{
 			name:                  "raw OpenAI-compatible proxy subtracts cached audio",
 			upstreamAudioTokens:   100,
-			expectedUsageHeader:   aarUsageAudioTokensIncludeCached,
+			expectedUsageHeader:   airUsageAudioTokensIncludeCached,
 			expectedLoggedAudioIn: 60,
 		},
 		{
 			name:                  "AIR-normalized proxy header keeps non-cached audio without credential config",
-			upstreamUsageHeader:   aarUsageAudioTokensExcludeCached,
+			upstreamUsageHeader:   airUsageAudioTokensExcludeCached,
 			upstreamAudioTokens:   60,
-			expectedUsageHeader:   aarUsageAudioTokensExcludeCached,
+			expectedUsageHeader:   airUsageAudioTokensExcludeCached,
 			expectedLoggedAudioIn: 60,
 		},
 	}
@@ -124,7 +124,7 @@ func TestProxyRequest_StreamingCacheBillingLogsLiteLLMSpend(t *testing.T) {
 			prx.ProxyRequest(w, req)
 
 			require.Equal(t, http.StatusOK, w.Code)
-			assert.Equal(t, tt.expectedUsageHeader, w.Header().Get(HeaderAARUsageAudioTokens))
+			assert.Equal(t, tt.expectedUsageHeader, w.Header().Get(HeaderAIRUsageAudioTokens))
 			assert.Contains(t, w.Body.String(), "data: [DONE]")
 			require.Len(t, dbStub.loggedEntries, 1)
 
@@ -153,13 +153,13 @@ func TestProxyRequest_AIRCredentialCacheBillingUsesUsageContract(t *testing.T) {
 	}{
 		{
 			name:                  "AIR upstream says audio includes cached audio",
-			upstreamUsageHeader:   aarUsageAudioTokensIncludeCached,
+			upstreamUsageHeader:   airUsageAudioTokensIncludeCached,
 			upstreamAudioTokens:   100,
 			expectedLoggedAudioIn: 60,
 		},
 		{
 			name:                  "AIR upstream says audio excludes cached audio",
-			upstreamUsageHeader:   aarUsageAudioTokensExcludeCached,
+			upstreamUsageHeader:   airUsageAudioTokensExcludeCached,
 			upstreamAudioTokens:   60,
 			expectedLoggedAudioIn: 60,
 		},
@@ -184,7 +184,7 @@ func TestProxyRequest_AIRCredentialCacheBillingUsesUsageContract(t *testing.T) {
 			prx.ProxyRequest(w, req)
 
 			require.Equal(t, http.StatusOK, w.Code)
-			assert.Equal(t, tt.upstreamUsageHeader, w.Header().Get(HeaderAARUsageAudioTokens))
+			assert.Equal(t, tt.upstreamUsageHeader, w.Header().Get(HeaderAIRUsageAudioTokens))
 			require.Len(t, dbStub.loggedEntries, 1)
 
 			metadata := decodeMetadata(t, dbStub.loggedEntries[0].Metadata)
@@ -236,7 +236,7 @@ func TestProxyRequest_ConvertedResponsesEmitsNormalizedUsageHeaderAndLogsSpend(t
 	prx.ProxyRequest(w, req)
 
 	require.Equal(t, http.StatusOK, w.Code)
-	assert.Equal(t, aarUsageAudioTokensExcludeCached, w.Header().Get(HeaderAARUsageAudioTokens))
+	assert.Equal(t, airUsageAudioTokensExcludeCached, w.Header().Get(HeaderAIRUsageAudioTokens))
 
 	var response struct {
 		Usage struct {
@@ -319,7 +319,7 @@ func newCacheBillingUpstream(t *testing.T, stream bool, audioTokens int, usageHe
 
 		w.Header().Set("Content-Type", "application/json")
 		if usageHeader != "" {
-			w.Header().Set(HeaderAARUsageAudioTokens, usageHeader)
+			w.Header().Set(HeaderAIRUsageAudioTokens, usageHeader)
 		}
 		if stream {
 			w.Header().Set("Content-Type", "text/event-stream")
