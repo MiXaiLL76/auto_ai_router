@@ -43,15 +43,15 @@ aliases with model-level `model` values when the names differ.
 
 ## Not Implemented Or Not Claimed
 
-| Capability                                                | Status                                                                                 |
-| --------------------------------------------------------- | -------------------------------------------------------------------------------------- |
+| Capability                                                | Status                                                                                                                                                                                    |
+| --------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `/v1/messages/batches`                                    | Not claimed by this router surface. Direct ProMan can create and run batches, but currently returns `results_url` on `api.anthropic.com`; the same results path works on the ProMan host. |
-| Direct ProMan `/v1/responses`                             | Not required. Router converts Responses API requests to Anthropic Messages for ProMan; do not force `passthrough_responses: true` for ProMan models. |
-| Native Anthropic Messages endpoint exposed by this router | Not part of the current ProMan integration surface.                                    |
-| Long-context guarantees                                   | Not claimed from the current smoke tests.                                              |
-| Large tool schemas                                        | Not fully covered by the current smoke tests.                                          |
-| Parallel tool call quality                                | Not fully covered by the current smoke tests.                                          |
-| Image/file inputs                                         | Not claimed unless covered by a separate model-specific test.                          |
+| Direct ProMan `/v1/responses`                             | Not required. Router converts Responses API requests to Anthropic Messages for ProMan; do not force `passthrough_responses: true` for ProMan models.                                      |
+| Native Anthropic Messages endpoint exposed by this router | Not part of the current ProMan integration surface.                                                                                                                                       |
+| Long-context guarantees                                   | Not claimed from the current smoke tests.                                                                                                                                                 |
+| Large tool schemas                                        | Not fully covered by the current smoke tests.                                                                                                                                             |
+| Parallel tool call quality                                | Not fully covered by the current smoke tests.                                                                                                                                             |
+| Image/file inputs                                         | Not claimed unless covered by a separate model-specific test.                                                                                                                             |
 
 ## ProMan Compatibility Guards
 
@@ -60,11 +60,11 @@ does not send the request to ProMan. It tries another primary credential first,
 then a fallback proxy. If no compatible route exists, it returns a local 400 with
 a neutral error message.
 
-| Request field or shape                               | Router behavior |
-| ---------------------------------------------------- | --------------- |
-| Assistant prefill on models where ProMan rejects it  | Skip ProMan.    |
-| Reasoning on Sonnet 5 and Fable 5                    | Skip ProMan.    |
-| Recursive `server_tool_use` blocks                   | Skip ProMan.    |
+| Request field or shape                              | Router behavior |
+| --------------------------------------------------- | --------------- |
+| Assistant prefill on models where ProMan rejects it | Skip ProMan.    |
+| Reasoning on Sonnet 5 and Fable 5                   | Skip ProMan.    |
+| Recursive `server_tool_use` blocks                  | Skip ProMan.    |
 
 The router does not add ProMan-specific blocks for `temperature`, `top_p`,
 `top_k`, `tool_choice: {"type":"none"}`, or text documents. These request shapes
