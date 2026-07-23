@@ -3,6 +3,8 @@ package models
 import (
 	"errors"
 	"log/slog"
+	"regexp"
+	"strings"
 	"time"
 
 	"github.com/mixaill76/auto_ai_router/internal/utils"
@@ -22,9 +24,6 @@ var (
 
 	// ErrTeamBlocked is returned when the token's parent team is blocked
 	ErrTeamBlocked = errors.New("litellmdb: team blocked")
-
-	// ErrProjectBlocked is returned when the token's project is blocked
-	ErrProjectBlocked = errors.New("litellmdb: project blocked")
 
 	// ErrTokenExpired is returned when token has expired
 	ErrTokenExpired = errors.New("litellmdb: token expired")
@@ -63,6 +62,7 @@ type Config struct {
 	LogQueueSize        int           // Queue buffer size (default: 10000)
 	LogBatchSize        int           // Batch size for INSERT (default: 100)
 	LogFlushInterval    time.Duration // Flush interval (default: 5s)
+	LogWorkers          int           // Number of parallel queue-draining workers (default: 4)
 	DisableSpendLogging bool          // Control-plane managers set this to avoid creating a writer
 
 	// DisableSpendLogsWrite disables writing SpendLogEntry/Daily* aggregates to
@@ -85,6 +85,7 @@ func DefaultConfig() *Config {
 		LogQueueSize:        10000,
 		LogBatchSize:        100,
 		LogFlushInterval:    5 * time.Second,
+		LogWorkers:          4,
 	}
 }
 
@@ -122,6 +123,9 @@ func (c *Config) ApplyDefaults() {
 	if c.LogFlushInterval == 0 {
 		c.LogFlushInterval = defaults.LogFlushInterval
 	}
+	if c.LogWorkers == 0 {
+		c.LogWorkers = defaults.LogWorkers
+	}
 	if c.Logger == nil {
 		c.Logger = slog.Default()
 	}
@@ -134,19 +138,6 @@ func (c *Config) Validate() error {
 	}
 	return nil
 }
-
-// ==================== Model access sentinels ====================
-
-// LiteLLM stores these special values inside VerificationToken.models instead
-// of (or alongside) real model names:
-//   - "all-proxy-models": key may call every model on the proxy.
-//   - "all-team-models":  key inherits its parent team's model allow-list
-//     (LiteLLM_TeamTable.models). A key with no team has nothing to inherit
-//     from, so it falls back to unrestricted access, same as an empty list.
-const (
-	specialModelAllProxyModels = "all-proxy-models"
-	specialModelAllTeamModels  = "all-team-models"
-)
 
 // ==================== TokenInfo ====================
 
@@ -163,8 +154,6 @@ type TokenInfo struct {
 	UserID         string   // User ID (optional)
 	TeamID         string   // Team ID (optional)
 	OrganizationID string   // Organization ID (optional, resolved from token or team)
-	ProjectID      string   // Project ID (optional)
-	AgentID        string   // Agent ID (optional)
 	Tags           []string // Request tags from token metadata
 
 	// Token budget (embedded)
@@ -177,22 +166,13 @@ type TokenInfo struct {
 	Expires *time.Time // Expiration date (nil = no expiration)
 
 	// Access control
-	Models         []string // Key-level allowed models (empty = all)
-	AllowedRoutes  []string // LiteLLM virtual-key routes (empty = unrestricted)
-	UserModels     []string // Personal-user allowed models (empty = all)
-	TeamModels     []string // Team-level allowed models (empty = all)
-	ProjectModels  []string // Project-level allowed models (empty = all)
-	ProjectBlocked *bool    // Project is blocked
-	Blocked        bool     // Is token blocked
+	Models     []string // Key-level allowed models (empty = all)
+	UserModels []string // Personal-user allowed models (empty = all)
+	TeamModels []string // Team-level allowed models (empty = all)
+	Blocked    bool     // Is token blocked
 
-	// TeamDangling / ProjectDangling are set when the token carries a
-	// team_id / project_id but the LEFT JOIN found no parent row (the
-	// team_id_check / project_id_check sentinel scanned as NULL). A dangling
-	// parent fails closed: its scope denies every model instead of degrading
-	// to an unrestricted empty scope. An orphan user_id deliberately stays
-	// unrestricted (production holds valid tokens whose owner row is gone).
-	TeamDangling    bool
-	ProjectDangling bool
+	// A dangling team fails closed instead of becoming an unrestricted empty scope.
+	TeamDangling bool
 
 	// ==================== User Level (embedded budget) ====================
 	UserAlias     string   // User alias (optional) - user-friendly name
@@ -298,10 +278,8 @@ func (t *TokenInfo) Clone() *TokenInfo {
 	}
 	clone := *t
 	clone.Models = append([]string(nil), t.Models...)
-	clone.AllowedRoutes = append([]string(nil), t.AllowedRoutes...)
 	clone.UserModels = append([]string(nil), t.UserModels...)
 	clone.TeamModels = append([]string(nil), t.TeamModels...)
-	clone.ProjectModels = append([]string(nil), t.ProjectModels...)
 	clone.TeamMemberModels = append([]string(nil), t.TeamMemberModels...)
 	clone.Tags = append([]string(nil), t.Tags...)
 	if t.Metadata != nil {
@@ -312,7 +290,6 @@ func (t *TokenInfo) Clone() *TokenInfo {
 	clone.TPMLimit = clonePointer(t.TPMLimit)
 	clone.RPMLimit = clonePointer(t.RPMLimit)
 	clone.Expires = clonePointer(t.Expires)
-	clone.ProjectBlocked = clonePointer(t.ProjectBlocked)
 	clone.UserMaxBudget = clonePointer(t.UserMaxBudget)
 	clone.UserSpend = clonePointer(t.UserSpend)
 	clone.UserTPMLimit = clonePointer(t.UserTPMLimit)
@@ -345,30 +322,21 @@ func (t *TokenInfo) IsExpired() bool {
 	return utils.NowUTC().After(*t.Expires)
 }
 
-// IsBudgetExceeded checks if token budget is exceeded.
-// LiteLLM 1.90.0 rejects at the boundary for keys: `spend >= max_budget`
-// (auth_checks.py, GHSA-2rv4-xv66-fpjg defense-in-depth). Match that exactly.
+// IsBudgetExceeded checks if token budget is exceeded (embedded, use >)
 func (t *TokenInfo) IsBudgetExceeded() bool {
 	if t.MaxBudget == nil {
 		return false
 	}
-	return t.Spend >= *t.MaxBudget
+	return t.Spend > *t.MaxBudget
 }
 
-// ModelAccessScopes returns the ordered set of allowlists applicable to this
-// token. User models apply only to personal keys. A non-empty team-member
-// scope is an additional restriction; an empty one inherits the team scope.
-// A dangling team/project reference (ID set, parent row gone) yields a
-// DenyAll scope: the parent scope cannot be resolved, so it must not degrade
-// to an unrestricted empty one.
+// ModelAccessScopes returns the independently enforced model allowlists.
 func (t *TokenInfo) ModelAccessScopes() []ModelAccessScope {
 	keyModels := t.Models
 	for _, model := range t.Models {
 		if model == AllTeamModels {
 			// LiteLLM fails closed when all-team-models is used without a team.
 			// With a team it replaces, rather than extends, the key allowlist.
-			// A dangling team keeps TeamModels empty here and is rejected by
-			// the DenyAll team scope below.
 			if t.TeamID != "" {
 				keyModels = t.TeamModels
 			}
@@ -396,16 +364,14 @@ func (t *TokenInfo) ModelAccessScopes() []ModelAccessScope {
 		}
 		scopes = append(scopes, userScope)
 	}
-	if t.ProjectID != "" {
-		if t.ProjectDangling {
-			scopes = append(scopes, ModelAccessScope{Name: "project", DenyAll: true})
-		} else {
-			scopes = append(scopes, ModelAccessScope{Name: "project", Models: t.ProjectModels})
-		}
-	}
 	return scopes
 }
 
+// exactModelScopeMatch reports whether model passes one allowlist. Besides the
+// exact name and the "*" / all-proxy-models wildcards, an entry may be a regex
+// (matched anchored, i.e. it must cover the whole model name): one pattern
+// such as "anthropic/.*" or ".*claude-haiku.*" then includes every non-public
+// naming of the model without enumerating each alias in the allowlist.
 func exactModelScopeMatch(model string, allowedModels []string) bool {
 	if len(allowedModels) == 0 {
 		return true
@@ -414,8 +380,22 @@ func exactModelScopeMatch(model string, allowedModels []string) bool {
 		if allowed == model || allowed == "*" || allowed == AllProxyModels {
 			return true
 		}
+		if modelScopePatternMatches(allowed, model) {
+			return true
+		}
 	}
 	return false
+}
+
+// modelScopePatternMatches treats an allowlist entry containing regex
+// metacharacters as an anchored pattern. Literal entries keep exact-match
+// semantics, so existing allowlists behave exactly as before.
+func modelScopePatternMatches(pattern, model string) bool {
+	if !strings.ContainsAny(pattern, `\.^$*+?()[]{}|`) {
+		return false
+	}
+	matched, err := regexp.MatchString("^(?:"+pattern+")$", model)
+	return err == nil && matched
 }
 
 // IsModelAllowedBy checks every applicable model scope with matcher.
@@ -451,9 +431,7 @@ func (t *TokenInfo) IsAnyModelAllowed(candidates []string) bool {
 	return false
 }
 
-// checkUserBudget checks user budget (personal key only).
-// LiteLLM 1.90.0 uses `user_spend >= user_budget` (auth_checks.py
-// _user_max_budget_check), so reaching the budget rejects.
+// checkUserBudget checks user budget (personal key only - embedded, use >)
 func (t *TokenInfo) checkUserBudget() bool {
 	// Only check user budget for personal keys (no team)
 	if t.TeamID != "" {
@@ -462,12 +440,10 @@ func (t *TokenInfo) checkUserBudget() bool {
 	if t.UserMaxBudget == nil || t.UserSpend == nil {
 		return false
 	}
-	return *t.UserSpend >= *t.UserMaxBudget
+	return *t.UserSpend > *t.UserMaxBudget
 }
 
-// checkTeamBudget checks team budget.
-// LiteLLM 1.90.0 uses `spend > team.max_budget` (auth_checks.py) — a deliberately
-// different boundary from key/user: reaching the team budget exactly is allowed.
+// checkTeamBudget checks team budget (embedded, use >)
 func (t *TokenInfo) checkTeamBudget() bool {
 	if t.TeamMaxBudget == nil || t.TeamSpend == nil {
 		return false
@@ -502,7 +478,7 @@ func (t *TokenInfo) checkOrganizationMemberBudget() bool {
 // Validate checks token validity for a request with full budget hierarchy
 // Order of checks (stops on first failure):
 // 1. Token blocked/expired
-// 2. Team/project blocked
+// 2. Team blocked
 // 3. Token budget
 // 4. Team budget
 // 5. Team member budget
@@ -520,9 +496,6 @@ func (t *TokenInfo) Validate(model string) error {
 	}
 	if t.TeamBlocked != nil && *t.TeamBlocked {
 		return ErrTeamBlocked
-	}
-	if t.ProjectBlocked != nil && *t.ProjectBlocked {
-		return ErrProjectBlocked
 	}
 
 	// Check budget hierarchy (embedded first, then external)
@@ -597,13 +570,7 @@ type SpendLogEntry struct {
 	UserID         string // User ID
 	TeamID         string // Team ID
 	OrganizationID string // Organization ID
-	ProjectID      string // Runtime project attribution (persisted in Metadata)
 	EndUser        string // End user ID (from metadata)
-
-	// MCP & Tags
-	MCPNamespacedToolName string // MCP tool name with namespace
-	RequestTags           string // JSON array of request tags
-	AgentID               string // Agent ID from signed context
 
 	// Status
 	Status string // "success" | "failure"
@@ -614,12 +581,6 @@ type SpendLogEntry struct {
 	// Runtime-only observability flag; persisted inside Metadata rather than as
 	// a LiteLLM_SpendLogs column.
 	ComparisonEligible bool
-
-	// Runtime-only tool discovery data. These fields feed LiteLLM_ToolTable in
-	// the same transaction as this SpendLog row and are never persisted in the
-	// LiteLLM_SpendLogs row or its metadata.
-	DeclaredToolNames []string
-	ToolKeyAlias      string
 }
 
 // ==================== Stats ====================

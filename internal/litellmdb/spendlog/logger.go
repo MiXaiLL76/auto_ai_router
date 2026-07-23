@@ -51,20 +51,23 @@ type Logger struct {
 
 	// Lifecycle
 	stopChan     chan struct{}
-	workerDone   chan struct{}
 	shutdownDone chan struct{}
 	wg           sync.WaitGroup
-	lifecycleMu  sync.Mutex
-	started      bool
-	stopping     bool
-	doneOnce     sync.Once
-	startOnce    sync.Once // Ensure Start() is called only once
-	acceptStop   chan struct{}
-	enqueueWG    sync.WaitGroup
-	writeCtx     context.Context
-	writeCancel  context.CancelFunc
-	syncCtx      context.Context
-	syncCancel   context.CancelFunc
+	// writerWg tracks only the queue-draining writer workers so the DLQ
+	// recovery worker (itself part of wg) can wait for their final drain
+	// without deadlocking on its own completion.
+	writerWg    sync.WaitGroup
+	lifecycleMu sync.Mutex
+	started     bool
+	stopping    bool
+	doneOnce    sync.Once
+	startOnce   sync.Once // Ensure Start() is called only once
+	acceptStop  chan struct{}
+	enqueueWG   sync.WaitGroup
+	writeCtx    context.Context
+	writeCancel context.CancelFunc
+	syncCtx     context.Context
+	syncCancel  context.CancelFunc
 
 	// Metrics
 	queued            uint64 // Total queued
@@ -110,7 +113,6 @@ func NewLogger(pool *connection.ConnectionPool, cfg *models.Config) *Logger {
 		logger:       cfg.Logger,
 		queue:        make(chan *models.SpendLogEntry, cfg.LogQueueSize),
 		stopChan:     make(chan struct{}),
-		workerDone:   make(chan struct{}),
 		shutdownDone: make(chan struct{}),
 		acceptStop:   make(chan struct{}),
 		writeCtx:     writeCtx,
@@ -123,7 +125,7 @@ func NewLogger(pool *connection.ConnectionPool, cfg *models.Config) *Logger {
 	return sl
 }
 
-// Start starts the background writer and DLQ recovery worker.
+// Start starts the background writer workers and DLQ recovery worker.
 // Must be called once after creation. Safe to call multiple times (idempotent).
 func (sl *Logger) Start() {
 	sl.startOnce.Do(func() {
@@ -136,9 +138,17 @@ func (sl *Logger) Start() {
 		// Initialize tickers BEFORE starting goroutines to prevent nil dereference race
 		sl.dlqRecoveryTicker = time.NewTicker(5 * time.Minute)
 
-		sl.wg.Add(2)
+		numWorkers := sl.config.LogWorkers
+		if numWorkers <= 0 {
+			numWorkers = 1
+		}
+
+		sl.wg.Add(numWorkers + 1) // workers + dlqRecoveryWorker
+		sl.writerWg.Add(numWorkers)
 		sl.started = true
-		go sl.worker()
+		for i := 0; i < numWorkers; i++ {
+			go sl.worker()
+		}
 		go sl.dlqRecoveryWorker()
 		go func() {
 			sl.wg.Wait()
@@ -148,6 +158,7 @@ func (sl *Logger) Start() {
 			"queue_size", sl.config.LogQueueSize,
 			"batch_size", sl.config.LogBatchSize,
 			"flush_interval", sl.config.LogFlushInterval,
+			"workers", numWorkers,
 			"dlq_max_size", 10,
 			"dlq_recovery_interval", "5m",
 		)
@@ -456,7 +467,7 @@ func (sl *Logger) GetDLQStats() map[string]interface{} {
 // worker is the background goroutine that processes the queue
 func (sl *Logger) worker() {
 	defer sl.wg.Done()
-	defer close(sl.workerDone)
+	defer sl.writerWg.Done()
 
 	batch := make([]*models.SpendLogEntry, 0, sl.config.LogBatchSize)
 	ticker := time.NewTicker(sl.config.LogFlushInterval)
@@ -590,7 +601,7 @@ func (sl *Logger) flushBatch(batch []*models.SpendLogEntry) {
 }
 
 // flushBatchWithSpendUpdate writes the complete LiteLLM accounting projection
-// atomically: raw SpendLogs, entity counters, and all six daily tables. A retry
+// atomically: raw SpendLogs, entity counters, and all four daily tables. A retry
 // can therefore safely replay the whole batch without leaving partial state.
 func (sl *Logger) flushBatchWithSpendUpdate(batch []*models.SpendLogEntry) error {
 	// Skip if pool is not initialized (e.g., in tests)
@@ -615,9 +626,10 @@ func (sl *Logger) flushBatchWithSpendUpdate(batch []*models.SpendLogEntry) error
 	}
 	defer conn.Release()
 
-	// Collision recovery performs an owner lookup in a statement after the
-	// preferred-ID INSERT. Pin READ COMMITTED so that statement can observe a
-	// concurrent transaction whose ON CONFLICT row just won and committed.
+	// Collision recovery claims a conflicting row's ownership in a statement
+	// after the preferred-ID INSERT. Pin READ COMMITTED so that statement can
+	// observe a concurrent transaction whose ON CONFLICT row just won and
+	// committed.
 	tx, err := conn.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
 		return fmt.Errorf("begin transaction: %w", err)
@@ -668,7 +680,7 @@ func (sl *Logger) commitBatchTransaction(ctx context.Context, tx pgx.Tx, batch [
 // produced by INSERT ... RETURNING are eligible for counters or daily tables;
 // conflicts are a completed no-op and cannot double-charge on replay.
 func (sl *Logger) writeBatchInTransaction(ctx context.Context, tx pgx.Tx, batch []*models.SpendLogEntry) ([]string, error) {
-	insertedIDs, err := insertSpendRowsCollisionSafe(ctx, tx, batch)
+	insertedIDs, err := insertSpendRowsCollisionSafe(ctx, tx, batch, sl.logger)
 	if err != nil {
 		return nil, err
 	}
@@ -681,20 +693,17 @@ func (sl *Logger) writeBatchInTransaction(ctx context.Context, tx pgx.Tx, batch 
 	if len(filteredBatch) != len(insertedIDs) {
 		return nil, fmt.Errorf("map inserted rows to batch: expected %d, mapped %d", len(insertedIDs), len(filteredBatch))
 	}
-	if err := upsertDiscoveredTools(ctx, tx, filteredBatch); err != nil {
-		return nil, fmt.Errorf("tool registry: %w", err)
-	}
-	spendUpdates := aggregateSpendUpdates(filteredBatch)
+	spendUpdates := aggregateSpendUpdates(insertedEntries(filteredBatch))
 	if err := executeSpendUpdates(ctx, tx, spendUpdates); err != nil {
 		return nil, fmt.Errorf("spend updates: %w", err)
 	}
 
-	records, err := loadUnprocessedSpendLogRecords(ctx, tx, sl.logger, "atomic", insertedIDs)
+	// Daily aggregates are built from the in-memory entries. Re-reading the
+	// just-inserted rows from LiteLLM_SpendLogs is a heavy query on the LiteLLM
+	// schema, and everything it returned is already known to the writer.
+	records, err := buildSpendLogRecords(filteredBatch, sl.logger, "atomic")
 	if err != nil {
-		return nil, fmt.Errorf("load inserted rows for daily aggregation: %w", err)
-	}
-	if len(records) != len(insertedIDs) {
-		return nil, fmt.Errorf("inserted rows missing inside transaction: expected %d, loaded %d", len(insertedIDs), len(records))
+		return nil, fmt.Errorf("build daily aggregation records: %w", err)
 	}
 	if err := sl.runAggregators(ctx, tx, "atomic", records); err != nil {
 		return nil, err
@@ -786,9 +795,9 @@ func (sl *Logger) dlqRecoveryWorker() {
 }
 
 func (sl *Logger) finalizeDLQ() {
-	// The writer is the only producer of new DLQ batches. Wait for its final
-	// queue drain before making the terminal recovery attempt.
-	<-sl.workerDone
+	// The writer workers are the only producers of new DLQ batches. Wait for
+	// their final queue drain before making the terminal recovery attempt.
+	sl.writerWg.Wait()
 	sl.flushDLQ()
 }
 
@@ -919,10 +928,18 @@ func getSampleRequestIDs(batch []*models.SpendLogEntry, count int) []string {
 	return result
 }
 
+// insertedSpendEntry pairs a batch entry with the effective request_id that
+// INSERT ... RETURNING produced for it: the preferred provider ID or the AIR
+// event ID fallback.
+type insertedSpendEntry struct {
+	entry     *models.SpendLogEntry
+	requestID string
+}
+
 // filterBatchByInsertedIDs returns only entries whose preferred provider ID or
 // unique AIR event fallback was produced by INSERT ... RETURNING. Each returned
 // ID is consumed once so same-event replays in one batch cannot feed accounting.
-func filterBatchByInsertedIDs(batch []*models.SpendLogEntry, insertedIDs []string) []*models.SpendLogEntry {
+func filterBatchByInsertedIDs(batch []*models.SpendLogEntry, insertedIDs []string) []insertedSpendEntry {
 	if len(insertedIDs) == 0 {
 		return nil
 	}
@@ -930,24 +947,33 @@ func filterBatchByInsertedIDs(batch []*models.SpendLogEntry, insertedIDs []strin
 	for _, id := range insertedIDs {
 		idSet[id] = struct{}{}
 	}
-	result := make([]*models.SpendLogEntry, 0, len(insertedIDs))
+	result := make([]insertedSpendEntry, 0, len(insertedIDs))
 	for _, entry := range batch {
 		if entry == nil {
 			continue
 		}
 		if _, ok := idSet[entry.RequestID]; ok {
-			result = append(result, entry)
+			result = append(result, insertedSpendEntry{entry: entry, requestID: entry.RequestID})
 			delete(idSet, entry.RequestID)
 			continue
 		}
 		if entry.AirEventID != "" {
 			if _, ok := idSet[entry.AirEventID]; ok {
-				result = append(result, entry)
+				result = append(result, insertedSpendEntry{entry: entry, requestID: entry.AirEventID})
 				delete(idSet, entry.AirEventID)
 			}
 		}
 	}
 	return result
+}
+
+// insertedEntries flattens inserted spend pairs back to their batch entries.
+func insertedEntries(inserted []insertedSpendEntry) []*models.SpendLogEntry {
+	entries := make([]*models.SpendLogEntry, 0, len(inserted))
+	for _, item := range inserted {
+		entries = append(entries, item.entry)
+	}
+	return entries
 }
 
 func (sl *Logger) resolvePendingEntries(count int) {
@@ -974,8 +1000,8 @@ func (sl *Logger) recordCommittedBatch(batch []*models.SpendLogEntry, insertedID
 	}
 
 	eligible, ineligible := uint64(0), uint64(0)
-	for _, entry := range inserted {
-		if entry.ComparisonEligible {
+	for _, item := range inserted {
+		if item.entry.ComparisonEligible {
 			eligible++
 		} else {
 			ineligible++

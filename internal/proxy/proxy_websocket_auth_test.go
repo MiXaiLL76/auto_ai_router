@@ -18,12 +18,7 @@ func TestWebSocketResponsesAuthenticatesBeforeUpgrade(t *testing.T) {
 	db := &clientAuthTestDB{
 		tokens: map[string]*dbmodels.TokenInfo{
 			"llm-key": {
-				Token:         "llm-key-hash",
-				AllowedRoutes: []string{"llm_api_routes"},
-			},
-			"management-key": {
-				Token:         "management-key-hash",
-				AllowedRoutes: []string{"management_routes"},
+				Token: "llm-key-hash",
 			},
 		},
 		errors: map[string]error{"invalid-key": litellmdb.ErrTokenNotFound},
@@ -40,7 +35,6 @@ func TestWebSocketResponsesAuthenticatesBeforeUpgrade(t *testing.T) {
 	}{
 		{name: "missing", headers: http.Header{}, wantStatus: http.StatusUnauthorized},
 		{name: "invalid bearer", headers: http.Header{"Authorization": []string{"Bearer invalid-key"}}, wantStatus: http.StatusUnauthorized},
-		{name: "management route denied", headers: http.Header{"Authorization": []string{"Bearer management-key"}}, wantStatus: http.StatusForbidden},
 		{name: "valid bearer", headers: http.Header{"Authorization": []string{"Bearer llm-key"}}, wantStatus: http.StatusSwitchingProtocols},
 		{name: "valid x api key", headers: http.Header{"x-api-key": []string{"llm-key"}}, wantStatus: http.StatusSwitchingProtocols},
 		{name: "master", headers: http.Header{"Authorization": []string{"Bearer master-key"}}, wantStatus: http.StatusSwitchingProtocols},

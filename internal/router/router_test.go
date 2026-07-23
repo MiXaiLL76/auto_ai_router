@@ -53,7 +53,6 @@ func (m *routerAuthTestDB) ValidateToken(_ context.Context, rawToken string) (*d
 	clone.UserModels = append([]string(nil), info.UserModels...)
 	clone.TeamModels = append([]string(nil), info.TeamModels...)
 	clone.TeamMemberModels = append([]string(nil), info.TeamMemberModels...)
-	clone.ProjectModels = append([]string(nil), info.ProjectModels...)
 	if err := clone.Validate(""); err != nil {
 		return nil, err
 	}
@@ -556,6 +555,7 @@ func TestServeHTTPV1ModelsRequiresAuthAndFiltersPublicCatalog(t *testing.T) {
 		"openai/a-public":  "a-backend",
 		"openai/a-premium": "a-backend",
 	})
+	modelManager.SetClientModelIDs([]string{"openai/a-public", "openai/z-public"})
 	catalogCredentials := []config.CredentialConfig{{Name: "catalog", Type: config.ProviderTypeOpenAI}}
 	modelManager.SetCredentials(catalogCredentials)
 	modelManager.LoadModelsFromConfig(catalogCredentials)
@@ -570,18 +570,11 @@ func TestServeHTTPV1ModelsRequiresAuthAndFiltersPublicCatalog(t *testing.T) {
 			Models:        []string{"openai/a-public", "a-backend"},
 			TeamID:        "team-alt",
 			TeamModels:    []string{"openai/a-public"},
-			ProjectID:     "project-alt",
-			ProjectModels: []string{"openai/a-public"},
 		},
 		"blocked-team-key": {
 			Token:       "blocked-team-hash",
 			TeamID:      "team",
 			TeamBlocked: &blocked,
-		},
-		"blocked-project-key": {
-			Token:          "blocked-project-hash",
-			ProjectID:      "project",
-			ProjectBlocked: &blocked,
 		},
 		"no-default-user-key": {
 			Token:      "no-default-user-hash",
@@ -626,7 +619,7 @@ func TestServeHTTPV1ModelsRequiresAuthAndFiltersPublicCatalog(t *testing.T) {
 
 	invalid := request(map[string]string{"Authorization": "Bearer invalid-key"})
 	assert.Equal(t, http.StatusUnauthorized, invalid.Code)
-	for _, key := range []string{"blocked-team-key", "blocked-project-key"} {
+	for _, key := range []string{"blocked-team-key"} {
 		blockedResponse := request(map[string]string{"Authorization": "Bearer " + key})
 		assert.Equal(t, http.StatusForbidden, blockedResponse.Code)
 	}
@@ -641,7 +634,7 @@ func TestServeHTTPV1ModelsRequiresAuthAndFiltersPublicCatalog(t *testing.T) {
 
 	wildcard := request(map[string]string{"Authorization": "Bearer wildcard-key"})
 	require.Equal(t, http.StatusOK, wildcard.Code)
-	assert.Equal(t, []string{"openai/a-premium", "openai/a-public"}, modelIDs(t, wildcard),
+	assert.Equal(t, []string{"openai/a-public"}, modelIDs(t, wildcard),
 		"an unknown short backend must not inherit openai/* from its transport credential")
 
 	regexLooking := request(map[string]string{"Authorization": "Bearer regex-looking-key"})
@@ -651,7 +644,7 @@ func TestServeHTTPV1ModelsRequiresAuthAndFiltersPublicCatalog(t *testing.T) {
 	unrestricted := request(map[string]string{"x-api-key": "unrestricted-key"})
 	require.Equal(t, http.StatusOK, unrestricted.Code)
 	assert.Equal(t,
-		[]string{"a-backend", "openai/a-premium", "openai/a-public", "openai/z-public", "z-backend"},
+		[]string{"openai/a-public", "openai/z-public"},
 		modelIDs(t, unrestricted),
 	)
 
@@ -672,7 +665,7 @@ func TestServeHTTPV1ModelsRequiresAuthAndFiltersPublicCatalog(t *testing.T) {
 	router.ServeHTTP(unrestrictedGroups, unrestrictedGroupsReq)
 	require.Equal(t, http.StatusOK, unrestrictedGroups.Code)
 	assert.Equal(t,
-		[]string{"openai/a-backend", "openai/a-premium", "openai/a-public", "openai/z-backend", "openai/z-public"},
+		[]string{"openai/a-public", "openai/z-public"},
 		modelIDs(t, unrestrictedGroups),
 	)
 }

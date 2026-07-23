@@ -148,20 +148,6 @@ func decodeJSONString(raw json.RawMessage) string {
 	return strings.TrimSpace(value)
 }
 
-func invalidUpstreamResponseBody() []byte {
-	code := "invalid_upstream_response"
-	encoded, err := json.Marshal(APIErrorResponse{Error: APIError{
-		Message: "Upstream provider returned an invalid JSON response",
-		Type:    "api_connection_error",
-		Param:   nil,
-		Code:    &code,
-	}})
-	if err != nil {
-		return []byte(`{"error":{"message":"Upstream provider returned an invalid JSON response","type":"api_connection_error","param":null,"code":"invalid_upstream_response"}}` + "\n")
-	}
-	return append(encoded, '\n')
-}
-
 // WriteErrorBadRequest writes a 400 Bad Request JSON error.
 func WriteErrorBadRequest(w http.ResponseWriter, message string) {
 	WriteJSONError(w, http.StatusBadRequest, message, errorTypeForStatus(http.StatusBadRequest), nil, nil)

@@ -1,7 +1,6 @@
 package spendlog
 
 import (
-	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -18,12 +17,10 @@ func TestOpenAIChatFailureDailyProjectionKeepsEndpointAndFailureCount(t *testing
 	entry.TotalTokens = 0
 
 	logger := newAtomicTestLogger()
-	records, err := loadUnprocessedSpendLogRecords(
-		context.Background(),
-		&atomicTestTx{spendRows: [][]any{atomicTestSpendRow(entry)}},
+	records, err := buildSpendLogRecords(
+		[]insertedSpendEntry{{entry: entry, requestID: entry.RequestID}},
 		logger.logger,
 		"test",
-		[]string{entry.RequestID},
 	)
 
 	require.NoError(t, err)

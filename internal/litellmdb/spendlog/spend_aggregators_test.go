@@ -53,7 +53,6 @@ func TestSpendLogRecordFields(t *testing.T) {
 		TeamID:            "team-456",
 		OrganizationID:    "org-789",
 		EndUser:           "end-user-001",
-		RequestTags:       "tag1,tag2",
 	}
 
 	assert.Equal(t, "user-123", record.UserID)
@@ -72,24 +71,6 @@ func TestSpendLogRecordFields(t *testing.T) {
 	assert.Equal(t, "team-456", record.TeamID)
 	assert.Equal(t, "org-789", record.OrganizationID)
 	assert.Equal(t, "end-user-001", record.EndUser)
-	assert.Equal(t, "tag1,tag2", record.RequestTags)
-}
-
-// TestSpendLogRecord_NilFields tests that records with nil fields are handled correctly by derefString
-func TestSpendLogRecord_NilFields(t *testing.T) {
-	// Test derefString with nil pointer
-	result := derefString(nil)
-	assert.Equal(t, "", result)
-
-	// Test derefString with empty string
-	empty := ""
-	result = derefString(&empty)
-	assert.Equal(t, "", result)
-
-	// Test derefString with value
-	value := "test-value"
-	result = derefString(&value)
-	assert.Equal(t, "test-value", result)
 }
 
 // TestAggregationValue_Fields verifies the aggregationValue structure
@@ -203,29 +184,6 @@ func TestAggregateEndUserKey_Fields(t *testing.T) {
 	assert.Equal(t, "https://api.openai.com/v1/chat/completions", key.endpoint)
 }
 
-// TestAggregateTagKey_Fields verifies the aggregateTagKey structure
-func TestAggregateTagKey_Fields(t *testing.T) {
-	key := aggregateTagKey{
-		tag:                   "tag1",
-		date:                  "2024-01-15",
-		apiKey:                "sk-test-key",
-		model:                 "gpt-4",
-		modelGroup:            "gpt-4-group",
-		customLLMProvider:     "openai",
-		mcpNamespacedToolName: "mcp-tool",
-		endpoint:              "https://api.openai.com/v1/chat/completions",
-	}
-
-	assert.Equal(t, "tag1", key.tag)
-	assert.Equal(t, "2024-01-15", key.date)
-	assert.Equal(t, "sk-test-key", key.apiKey)
-	assert.Equal(t, "gpt-4", key.model)
-	assert.Equal(t, "gpt-4-group", key.modelGroup)
-	assert.Equal(t, "openai", key.customLLMProvider)
-	assert.Equal(t, "mcp-tool", key.mcpNamespacedToolName)
-	assert.Equal(t, "https://api.openai.com/v1/chat/completions", key.endpoint)
-}
-
 // TestSpendLogRecord_EmptyFields tests records with empty optional fields
 func TestSpendLogRecord_EmptyFields(t *testing.T) {
 	record := spendLogRecord{
@@ -248,7 +206,6 @@ func TestSpendLogRecord_EmptyFields(t *testing.T) {
 	assert.Equal(t, "", record.TeamID)
 	assert.Equal(t, "", record.OrganizationID)
 	assert.Equal(t, "", record.EndUser)
-	assert.Equal(t, "", record.RequestTags)
 }
 
 // TestSpendLogRecord_MultipleStatuses tests handling of different status values

@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/mixaill76/auto_ai_router/internal/converter/responses"
+	"github.com/stretchr/testify/require"
 )
 
 // createTestResponse creates a minimal Response for testing
@@ -72,10 +73,7 @@ func TestBboltStore_SaveAndGetResponse(t *testing.T) {
 		t.Fatalf("failed to get response: %v", err)
 	}
 
-	if got == nil {
-		t.Fatal("response is nil")
-		return
-	}
+	require.NotNil(t, got, "response is nil")
 
 	if got.ID != resp.ID {
 		t.Errorf("expected ID %s, got %s", resp.ID, got.ID)
@@ -175,10 +173,7 @@ func TestBboltStore_GetEntry(t *testing.T) {
 		t.Fatalf("failed to get entry: %v", err)
 	}
 
-	if entry == nil {
-		t.Fatal("entry is nil")
-		return
-	}
+	require.NotNil(t, entry, "entry is nil")
 
 	if entry.ResponseID != "entry-test-id" {
 		t.Errorf("expected ResponseID entry-test-id, got %s", entry.ResponseID)

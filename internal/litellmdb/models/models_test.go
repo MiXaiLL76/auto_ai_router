@@ -156,10 +156,6 @@ func TestTokenInfo_IsBudgetExceeded_SpendLessThanMax(t *testing.T) {
 	assert.False(t, token.IsBudgetExceeded())
 }
 
-// LiteLLM 1.90.0 rejects the request when key spend reaches the budget
-// (litellm/proxy/auth/auth_checks.py: `spend >= valid_token.max_budget`,
-// the GHSA-2rv4-xv66-fpjg defense-in-depth check). AIR must match that
-// boundary for the key/token level.
 func TestTokenInfo_IsBudgetExceeded_SpendEqualToMax(t *testing.T) {
 	maxBudget := 100.0
 	token := &TokenInfo{
@@ -167,7 +163,7 @@ func TestTokenInfo_IsBudgetExceeded_SpendEqualToMax(t *testing.T) {
 		MaxBudget: &maxBudget,
 	}
 
-	assert.True(t, token.IsBudgetExceeded())
+	assert.False(t, token.IsBudgetExceeded())
 }
 
 func TestTokenInfo_IsBudgetExceeded_SpendGreaterThanMax(t *testing.T) {
@@ -205,48 +201,64 @@ func TestTokenInfo_IsModelAllowed_ModelNotInList(t *testing.T) {
 	assert.False(t, token.IsModelAllowed("claude-3"))
 }
 
+func TestTokenInfo_IsModelAllowed_RegexPattern(t *testing.T) {
+	token := &TokenInfo{
+		Models: []string{`anthropic/.*`, `.*claude-haiku.*`},
+	}
+
+	assert.True(t, token.IsModelAllowed("anthropic/claude-haiku-4.5"))
+	assert.True(t, token.IsModelAllowed("claude-haiku-4-5-20251001"))
+	assert.False(t, token.IsModelAllowed("gpt-4o"))
+	assert.False(t, token.IsModelAllowed("anthropic"), "the anchored pattern must cover the full name")
+}
+
+func TestTokenInfo_IsModelAllowed_LiteralEntriesKeepExactSemantics(t *testing.T) {
+	token := &TokenInfo{
+		Models: []string{"gpt-4"},
+	}
+
+	assert.True(t, token.IsModelAllowed("gpt-4"))
+	assert.False(t, token.IsModelAllowed("gpt-4o"), "a literal entry must not widen into a prefix match")
+}
+
+func TestTokenInfo_IsModelAllowed_InvalidRegexTreatedAsNoMatch(t *testing.T) {
+	token := &TokenInfo{
+		Models: []string{"gpt-4("},
+	}
+
+	// The entry still matches its own literal spelling via the exact comparison,
+	// but the broken pattern must not crash or match anything else.
+	assert.True(t, token.IsModelAllowed("gpt-4("))
+	assert.False(t, token.IsModelAllowed("gpt-4"))
+	assert.False(t, token.IsModelAllowed("gpt-4(x"))
+}
+
+func TestTokenInfo_IsModelAllowed_WildcardStillMatchesEverything(t *testing.T) {
+	token := &TokenInfo{
+		Models: []string{"*"},
+	}
+
+	assert.True(t, token.IsModelAllowed("gpt-4o"))
+	assert.True(t, token.IsModelAllowed("anthropic/claude-haiku-4.5"))
+}
+
 func TestTokenInfo_IsModelAllowed_IntersectsApplicableHierarchy(t *testing.T) {
 	token := &TokenInfo{
-		Models:           []string{"openai/gpt-4o-mini", "gpt-4o-mini"},
-		UserID:           "user-alt",
-		UserModels:       []string{"openai/gpt-4o-mini"},
-		TeamID:           "team-alt",
-		TeamModels:       []string{"openai/gpt-4o-mini"},
-		TeamMemberModels: []string{"openai/gpt-4o-mini"},
-		ProjectID:        "project-alt",
-		ProjectModels:    []string{"openai/gpt-4o-mini"},
+		Models:     []string{"openai/gpt-4o-mini", "gpt-4o-mini"},
+		UserID:     "user-alt",
+		TeamID:     "team-alt",
+		TeamModels: []string{"openai/gpt-4o-mini"},
 	}
 
 	assert.True(t, token.IsModelAllowed("openai/gpt-4o-mini"))
 	assert.False(t, token.IsModelAllowed("gpt-4o-mini"), "a child key cannot widen its parent scopes")
 }
 
-func TestTokenInfo_IsModelAllowed_UsesUserScopeOnlyForPersonalKeys(t *testing.T) {
-	personal := &TokenInfo{
-		Models:     []string{"public/chat", "public/embed"},
-		UserID:     "personal-user",
-		UserModels: []string{NoDefaultModels, "public/chat"},
-	}
-	assert.False(t, personal.IsModelAllowed("public/chat"), "no-default-models overrides explicit user model IDs")
-	assert.False(t, personal.IsModelAllowed("public/embed"))
-
-	teamKey := &TokenInfo{
-		Models:     []string{"public/chat", "public/embed"},
-		UserID:     "team-user",
-		UserModels: []string{NoDefaultModels},
-		TeamID:     "team",
-		TeamModels: []string{"public/chat", "public/embed"},
-	}
-	assert.True(t, teamKey.IsModelAllowed("public/embed"), "LiteLLM does not apply the user scope to team keys")
-}
-
 func TestTokenInfo_IsModelAllowed_EmptyParentScopeIsUnrestricted(t *testing.T) {
 	token := &TokenInfo{
-		Models:        []string{"public/chat"},
-		TeamID:        "team",
-		TeamModels:    nil,
-		ProjectID:     "project",
-		ProjectModels: []string{},
+		Models:     []string{"public/chat"},
+		TeamID:     "team",
+		TeamModels: nil,
 	}
 
 	assert.True(t, token.IsModelAllowed("public/chat"))
@@ -290,29 +302,11 @@ func TestTokenInfo_IsModelAllowed_DanglingTeamFailsClosed(t *testing.T) {
 		"even a key-allowed model must be denied while the team scope is unresolvable")
 }
 
-// Same fail-closed rule for project_id: a dangling project reference must
-// not leave an unrestricted empty project scope.
-func TestTokenInfo_IsModelAllowed_DanglingProjectFailsClosed(t *testing.T) {
+func TestTokenInfo_IsModelAllowed_ResolvedEmptyTeamScopeStaysUnrestricted(t *testing.T) {
 	token := &TokenInfo{
-		Models:          []string{"public/chat"},
-		ProjectID:       "deleted-project",
-		ProjectModels:   nil, // LEFT JOIN found no project row
-		ProjectDangling: true,
-	}
-
-	assert.False(t, token.IsModelAllowed("public/chat"))
-}
-
-// Contrast with the dangling case: a resolved parent with an empty model
-// list stays unrestricted (LiteLLM semantics), and an orphan user_id stays
-// unrestricted by design (see auth_test.go).
-func TestTokenInfo_IsModelAllowed_ResolvedEmptyParentScopesStayUnrestricted(t *testing.T) {
-	token := &TokenInfo{
-		Models:        []string{"public/chat"},
-		TeamID:        "team",
-		TeamModels:    nil,
-		ProjectID:     "project",
-		ProjectModels: nil,
+		Models:     []string{"public/chat"},
+		TeamID:     "team",
+		TeamModels: nil,
 	}
 
 	assert.True(t, token.IsModelAllowed("public/chat"))
@@ -323,21 +317,6 @@ func TestTokenInfo_IsModelAllowed_ResolvedEmptyParentScopesStayUnrestricted(t *t
 func TestTokenInfo_checkUserBudget_PersonalKey(t *testing.T) {
 	userBudget := 100.0
 	userSpend := 150.0
-	token := &TokenInfo{
-		UserID:        "user1",
-		TeamID:        "",
-		UserMaxBudget: &userBudget,
-		UserSpend:     &userSpend,
-	}
-
-	assert.True(t, token.checkUserBudget())
-}
-
-// LiteLLM 1.90.0 user budget check is `user_spend >= user_budget`
-// (auth_checks.py `_user_max_budget_check`). Reaching the budget must reject.
-func TestTokenInfo_checkUserBudget_SpendEqualToMax(t *testing.T) {
-	userBudget := 100.0
-	userSpend := 100.0
 	token := &TokenInfo{
 		UserID:        "user1",
 		TeamID:        "",
@@ -386,20 +365,6 @@ func TestTokenInfo_checkTeamBudget_ExceededEmbedded(t *testing.T) {
 func TestTokenInfo_checkTeamBudget_NotExceeded(t *testing.T) {
 	teamBudget := 100.0
 	teamSpend := 50.0
-	token := &TokenInfo{
-		TeamMaxBudget: &teamBudget,
-		TeamSpend:     &teamSpend,
-	}
-
-	assert.False(t, token.checkTeamBudget())
-}
-
-// LiteLLM 1.90.0 team budget check is `spend > team.max_budget` (auth_checks.py),
-// a deliberately different boundary from the key/user (`>=`) levels: reaching the
-// team budget exactly is still allowed. Lock this in so it is not "unified" away.
-func TestTokenInfo_checkTeamBudget_SpendEqualToMax(t *testing.T) {
-	teamBudget := 100.0
-	teamSpend := 100.0
 	token := &TokenInfo{
 		TeamMaxBudget: &teamBudget,
 		TeamSpend:     &teamSpend,
@@ -545,17 +510,9 @@ func TestTokenInfo_Validate_ModelAllowedWithEmptyCheck(t *testing.T) {
 
 func TestTokenInfo_Validate_BlockedParentScopes(t *testing.T) {
 	teamBlocked := true
-	projectBlocked := true
 
-	t.Run("team", func(t *testing.T) {
-		token := &TokenInfo{TeamID: "team", TeamBlocked: &teamBlocked}
-		assert.ErrorIs(t, token.Validate(""), ErrTeamBlocked)
-	})
-
-	t.Run("project", func(t *testing.T) {
-		token := &TokenInfo{ProjectID: "project", ProjectBlocked: &projectBlocked}
-		assert.ErrorIs(t, token.Validate(""), ErrProjectBlocked)
-	})
+	token := &TokenInfo{TeamID: "team", TeamBlocked: &teamBlocked}
+	assert.ErrorIs(t, token.Validate(""), ErrTeamBlocked)
 }
 
 func TestTokenInfo_Validate_ValidationOrder(t *testing.T) {

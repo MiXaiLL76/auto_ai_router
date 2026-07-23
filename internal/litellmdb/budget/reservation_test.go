@@ -1,3 +1,8 @@
+// Package budget tests exercise the Redis-backed reservation against a real
+// Redis/Valkey (VALKEY_ADDR), mirroring internal/ratelimit's integration-test
+// convention: seeding from the DB spend snapshot, atomic reject-and-rollback
+// over budget, unlimited budgets, reconcile adjustments, and the nil-client
+// no-op degradation are all covered end to end.
 package budget
 
 import (

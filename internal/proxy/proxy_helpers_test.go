@@ -265,29 +265,6 @@ func TestExtractEndUser(t *testing.T) {
 	}
 }
 
-func TestShadowMetadataReservedPolicyKeepsTrustedNamespacesClosed(t *testing.T) {
-	for _, key := range []string{
-		"user_api_key_end_user_id",
-		"user_api_key_future_budget_field",
-		"litellm_call_id",
-		"litellm_future_router_field",
-		"model_id",
-		"response_cost",
-		"tags",
-	} {
-		assert.True(t, isShadowMetadataReservedKey(key), key)
-	}
-
-	for _, key := range []string{
-		"customer_metadata",
-		"custom_user_api_key_end_user_id",
-		"user_api_keys_are_not_the_reserved_prefix",
-		"littleml_custom_value",
-	} {
-		assert.False(t, isShadowMetadataReservedKey(key), key)
-	}
-}
-
 // Compile-time check that timeoutError implements net.Error
 var _ net.Error = (*timeoutError)(nil)
 var _ net.Error = (*nonTimeoutNetError)(nil)

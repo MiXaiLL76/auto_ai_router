@@ -2,7 +2,6 @@ package proxy
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -12,11 +11,11 @@ import (
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/converter"
+	"github.com/mixaill76/auto_ai_router/internal/kafkalog"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb"
+	"github.com/mixaill76/auto_ai_router/internal/litellmdb/spendlog"
 	"github.com/mixaill76/auto_ai_router/internal/logger"
-	aimodels "github.com/mixaill76/auto_ai_router/internal/models"
 	"github.com/mixaill76/auto_ai_router/internal/security"
-	"github.com/mixaill76/auto_ai_router/internal/shadowcontext"
 	"github.com/mixaill76/auto_ai_router/internal/utils"
 )
 
@@ -119,7 +118,6 @@ func (p *Proxy) handleLiteLLMAuthError(ctx context.Context, w http.ResponseWrite
 		litellmdb.ErrTokenNotFound:  {http.StatusUnauthorized, "Invalid token", "Token not found"},
 		litellmdb.ErrTokenBlocked:   {http.StatusForbidden, "Token blocked", "Token blocked"},
 		litellmdb.ErrTeamBlocked:    {http.StatusForbidden, "Team blocked", "Team blocked"},
-		litellmdb.ErrProjectBlocked: {http.StatusForbidden, "Project blocked", "Project blocked"},
 		litellmdb.ErrTokenExpired:   {http.StatusUnauthorized, "Token expired", "Token expired"},
 		litellmdb.ErrBudgetExceeded: {http.StatusPaymentRequired, "Budget exceeded", "Budget exceeded"},
 	}
@@ -157,497 +155,196 @@ func (p *Proxy) handleLiteLLMAuthError(ctx context.Context, w http.ResponseWrite
 	return true
 }
 
-func (p *Proxy) finalizeDeferredSpend(logCtx *RequestLogContext) error {
-	if logCtx == nil {
+// litellmCallType translates an AIR request path into the LiteLLM call_type.
+// The single source of truth for the route table is the spendlog package.
+func litellmCallType(path string) string {
+	return spendlog.LiteLLMCallTypeForPath(path)
+}
+
+// logSpendToLiteLLMDB logs request to LiteLLM_SpendLogs table and, if enabled,
+// publishes an expanded copy of the same event to Kafka for ClickHouse
+// analytics (internal/kafkalog). The two write-paths are independent: either
+// can be enabled/disabled on its own (see litellm_db.disable_spend_logs_write
+// and kafka.enabled). Returns error only for the Postgres write — Kafka
+// publish failures are logged but never affect the caller.
+func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
+	litellmEnabled := p.LiteLLMDB != nil && p.LiteLLMDB.IsEnabled()
+	kafkaEnabled := p.kafkaLog != nil && p.kafkaLog.IsEnabled()
+	if !litellmEnabled && !kafkaEnabled {
 		return nil
 	}
-	entry := logCtx.pendingSpendEntry
-	if entry == nil {
-		entry = p.buildSpendEntry(logCtx)
-		logCtx.pendingSpendEntry = entry
-	}
-	_ = p.publishKafkaSpendCopy(logCtx, entry)
-	if err := p.queueSpendEntry(entry); err != nil {
-		return err
-	}
-	logCtx.pendingSpendEntry = nil
-	logCtx.Logged = true
-	return nil
-}
 
-func (p *Proxy) queueSpendEntry(entry *litellmdb.SpendLogEntry) error {
-	if entry == nil || p.spendLogger == nil || !p.spendLogger.IsEnabled() {
-		return nil
-	}
-	return p.spendLogger.LogSpend(entry)
-}
-
-// setCommittedKeySpendSnapshot installs the latest committed key spend before
-// response headers can be written. It intentionally ignores the auth cache:
-// cached TokenInfo may be stale or may describe AIR's master key on a signed
-// LiteLLM -> AIR request.
-const spendResponseBudget = 2 * time.Second
-
-func boundedSpendContext(parent context.Context) (context.Context, context.CancelFunc) {
-	if parent == nil {
-		parent = context.Background()
-	}
-	return context.WithTimeout(parent, spendResponseBudget)
-}
-
-func (p *Proxy) setCommittedKeySpendSnapshot(ctx context.Context, headers http.Header, logCtx *RequestLogContext) {
-	if logCtx != nil {
-		logCtx.keySpendSnapshot = 0
-		logCtx.keySpendSnapshotKnown = false
-	}
-	apiKeyHash := spendIdentityKey(logCtx)
-	if apiKeyHash == "" || p.spendLogger == nil || !p.spendLogger.IsEnabled() {
-		setLiteLLMKeySpendHeaderForRequest(headers, 0, false, logCtx)
-		return
-	}
-
-	dbCtx, cancel := boundedSpendContext(ctx)
-	defer cancel()
-	spend, known, err := p.spendLogger.ReadKeySpend(dbCtx, apiKeyHash)
-	if err != nil {
-		setLiteLLMKeySpendHeaderForRequest(headers, 0, false, logCtx)
-		p.logger.WarnContext(ctx, "Failed to read committed key spend",
-			"error", err,
-			"request_id", logCtx.RequestID,
-		)
-		return
-	}
-	if logCtx != nil {
-		// This is a request-local PostgreSQL statement snapshot, captured only
-		// after authentication resolved the tenant identity. It is deliberately
-		// not sourced from TokenInfo or a process-local cache.
-		logCtx.keySpendSnapshot = spend
-		logCtx.keySpendSnapshotKnown = known
-	}
-	setLiteLLMKeySpendHeaderForRequest(headers, spend, known, logCtx)
-}
-
-func setKeySpendHeaderFromSnapshot(headers http.Header, logCtx *RequestLogContext) {
-	if logCtx == nil {
-		setLiteLLMKeySpendHeaderForRequest(headers, 0, false, nil)
-		return
-	}
-	setLiteLLMKeySpendHeaderForRequest(
-		headers,
-		logCtx.keySpendSnapshot,
-		logCtx.keySpendSnapshotKnown,
-		logCtx,
-	)
-}
-
-type spendCommitDisposition string
-
-const (
-	spendCommitSkipped       spendCommitDisposition = "skipped"
-	spendCommitted           spendCommitDisposition = "committed"
-	spendReplayQueued        spendCommitDisposition = "replay_queued"
-	spendReplayEnqueueFailed spendCommitDisposition = "replay_enqueue_failed"
-)
-
-type spendCommitResult struct {
-	Disposition spendCommitDisposition
-}
-
-// commitSpendBeforeResponse synchronously commits one non-stream spend
-// effect and publishes the inclusive key total only after PostgreSQL has
-// acknowledged the transaction. If the logger retains an ambiguous attempt for
-// exact idempotent replay, only a known pre-request PostgreSQL snapshot may be
-// reused; unclassified hard failures omit the header.
-func (p *Proxy) commitSpendBeforeResponse(ctx context.Context, headers http.Header, logCtx *RequestLogContext) (spendCommitResult, error) {
-	entry := p.buildSpendEntry(logCtx)
-	if entry != nil {
-		setLiteLLMResponseCostHeaderForRequest(headers, entry.Spend, logCtx)
-		_ = p.publishKafkaSpendCopy(logCtx, entry)
-	}
-	if entry == nil || p.spendLogger == nil || !p.spendLogger.IsEnabled() {
-		if logCtx != nil {
-			logCtx.Logged = true
-		}
-		return spendCommitResult{Disposition: spendCommitSkipped}, nil
-	}
-
-	dbCtx, cancel := boundedSpendContext(ctx)
-	defer cancel()
-	result, err := p.spendLogger.CommitSpend(dbCtx, entry)
-	if err != nil {
-		if result.ReplayRetained {
-			// The inclusive value is unknown because the synchronous transaction
-			// did not receive a commit acknowledgement. The logger still owns the
-			// exact idempotent event, so keep the earlier PostgreSQL statement
-			// snapshot instead of fabricating an inclusive total or omitting a
-			// known value. A later external commit may make this snapshot stale,
-			// but it can never make it uncommitted or greater than the database
-			// state that was observed when it was read.
-			setKeySpendHeaderFromSnapshot(headers, logCtx)
-			if logCtx != nil {
-				logCtx.pendingSpendEntry = nil
-				logCtx.Logged = true
-			}
-			return spendCommitResult{Disposition: spendReplayQueued}, err
-		}
-		// Without lifecycle-owned exact retention, do not allow an earlier
-		// value to survive an unclassified hard failure.
-		setLiteLLMKeySpendHeaderForRequest(headers, 0, false, logCtx)
-		if logCtx != nil {
-			logCtx.pendingSpendEntry = entry
-		}
-		queueErr := p.queueSpendEntry(entry)
-		if queueErr == nil && logCtx != nil {
-			logCtx.pendingSpendEntry = nil
-			logCtx.Logged = true
-		}
-		if queueErr != nil {
-			return spendCommitResult{Disposition: spendReplayEnqueueFailed}, errors.Join(err, queueErr)
-		}
-		return spendCommitResult{Disposition: spendReplayQueued}, err
-	}
-
-	if logCtx != nil {
-		// A successful commit always replaces the pre-request snapshot with the
-		// inclusive scalar observed under the transaction's row lock.
-		logCtx.keySpendSnapshot = result.KeySpend
-		logCtx.keySpendSnapshotKnown = result.KeySpendKnown
-	}
-	setLiteLLMKeySpendHeaderForRequest(headers, result.KeySpend, result.KeySpendKnown, logCtx)
-	if logCtx != nil {
-		logCtx.pendingSpendEntry = nil
-		logCtx.Logged = true
-	}
-	return spendCommitResult{Disposition: spendCommitted}, nil
-}
-
-func (p *Proxy) buildSpendEntry(logCtx *RequestLogContext) *litellmdb.SpendLogEntry {
 	if logCtx == nil || logCtx.Credential == nil || logCtx.Request == nil {
 		return nil
 	}
 
-	endTime := utils.NowUTC()
+	// Marks entry into the logging path itself, used below to compute the
+	// Kafka event's overhead_ms as the cost of this function (cost lookup +
+	// metadata/event building), distinct from duration_ms (full request
+	// lifetime) — see logSpendToKafka call below.
+	spendLogFnStart := time.Now()
+
+	// Fallback to request ID if session ID not provided
+	if logCtx.SessionID == "" {
+		logCtx.SessionID = logCtx.RequestID
+	}
+
+	// Build model_id as credential.name:model_name
+	// For proxy credentials, use the actual upstream credential name if available
+	credName := logCtx.Credential.Name
+	if logCtx.ActualCredentialName != "" {
+		credName = logCtx.ActualCredentialName
+	}
+	modelIDFormatted := credName + ":" + logCtx.ModelID
+	hashedToken := litellmdb.HashToken(logCtx.Token)
+
+	// Extract user info from tokenInfo (or use empty strings as fallback)
+	var userID, teamID, organizationID string
+	if logCtx.TokenInfo != nil {
+		userID = logCtx.TokenInfo.UserID
+		teamID = logCtx.TokenInfo.TeamID
+		organizationID = logCtx.TokenInfo.OrganizationID
+	}
+
+	// LiteLLM's end_user is the caller-supplied end-user identifier ("user" in
+	// the request body, X-End-User for AIR). The key owner's email must NOT be
+	// used as a fallback: LiteLLM leaves end_user empty for such traffic, and
+	// substituting the email would fabricate EndUserTable/DailyEndUserSpend
+	// rows that have no counterpart in the primary accounting.
+	endUser := extractEndUser(logCtx.Request)
+
+	// Extract domain from targetURL for APIBase (e.g., "https://api.openai.com/..." -> "api.openai.com")
+	apiBase := "auto_ai_router"
+	if logCtx.TargetURL != "" {
+		if u, err := url.Parse(logCtx.TargetURL); err == nil && u.Host != "" {
+			apiBase = u.Host
+		}
+	}
+
+	// Determine final status if not explicitly set
 	status := logCtx.Status
-	if status == "" || status == "unknown" {
-		if logCtx.HTTPStatus >= http.StatusBadRequest {
+	if status == "" {
+		if logCtx.HTTPStatus >= 400 {
 			status = "failure"
 		} else {
 			status = "success"
 		}
 	}
-	usage := logCtx.TokenUsage
-	usageSource := logCtx.UsageSource
-	if usage == nil {
-		usage = &converter.TokenUsage{}
-		usageSource = "missing"
-	} else {
-		usageCopy := *usage
-		usage = &usageCopy
-		if usageSource == "" {
-			usageSource = "provider"
-		}
-	}
-	if logCtx.IsImageGeneration {
-		// OpenAI image usage reports generated image tokens in output_tokens.
-		// Price those tokens with the image-output rate even when the optional
-		// completion_tokens_details.image_tokens breakdown is absent.
-		if usage.OutputImageTokens == 0 && usage.CompletionTokens > 0 {
-			usage.OutputImageTokens = usage.CompletionTokens
-		}
-		if usage.ImageCount == 0 && logCtx.ImageCount > 0 {
-			usage.ImageCount = logCtx.ImageCount
-		}
-		if usage.Total() == 0 && usage.ImageCount > 0 {
-			usageSource = "request_parameters"
-		}
-	}
-	billing := logCtx.Billing
-	if billing.EventID() == "" {
-		billing = NewBillingContext(logCtx.RequestID, logCtx.CallID, logCtx.Request.URL.Path, logCtx.ShadowContext.Identity).
-			WithPublicModel(logCtx.PublicModelID).
-			WithRouting(logCtx.ModelID, logCtx.RealModelID, string(logCtx.Credential.Type), logCtx.Credential.Name, logCtx.TargetURL)
-	}
-	backendModel := billing.BackendModel()
-	if backendModel == "" {
-		backendModel = logCtx.ModelID
-	}
-	priceModel := billing.ProviderModel()
-	if priceModel == "" {
-		priceModel = logCtx.RealModelID
-	}
-	if priceModel == "" {
-		priceModel = backendModel
+
+	// Ensure TokenUsage is not nil to prevent nil pointer dereference
+	if logCtx.TokenUsage == nil {
+		logCtx.TokenUsage = &converter.TokenUsage{}
 	}
 
-	priceStatus := "missing_registry"
-	var modelPrice *aimodels.ModelPrice
-	var tokenCosts *converter.TokenCosts
-	var priceUpdatedAt time.Time
-	resolvedPriceModel := priceModel
-	costStatus := "price_missing"
-	if p.priceRegistry != nil {
-		priceStatus = "missing_model"
-		modelPrice = p.priceRegistry.GetPrice(priceModel)
-		if modelPrice == nil && priceModel != backendModel {
-			modelPrice = p.priceRegistry.GetPrice(backendModel)
-			if modelPrice != nil {
-				resolvedPriceModel = backendModel
-			}
-		}
-		if modelPrice != nil {
-			priceStatus = "found"
-			priceUpdatedAt = p.priceRegistry.LastUpdate()
-			costStatus = "calculated"
-			if (usageSource == "missing" && status != "failure") ||
-				(logCtx.IsImageGeneration && usage.Total() == 0 && modelPrice.OutputCostPerImage <= 0) {
-				costStatus = "insufficient_usage"
-			} else {
-				tokenCosts = modelPrice.CalculateCosts(usage)
-			}
-		}
-	}
+	// Calculate cost based on model pricing and token usage.
+	// Try real model name first (from models[].model), then alias name.
 	var cost float64
-	if tokenCosts != nil {
-		cost = tokenCosts.TotalCost
-	}
-	if priceStatus != "found" {
-		p.logger.WarnContext(logCtx.Context(), "Spend row has no price",
-			"price_status", priceStatus,
-			"model", priceModel,
-		)
-	} else if costStatus != "calculated" {
-		p.logger.WarnContext(logCtx.Context(), "Spend row cost cannot be calculated",
-			"cost_status", costStatus,
-			"usage_source", usageSource,
-			"model", resolvedPriceModel,
-		)
-	}
-
-	identity, trustedIdentity := resolveSpendIdentity(logCtx, billing)
-	routingCredential := billing.Credential()
-	if routingCredential == "" {
-		routingCredential = logCtx.Credential.Name
-	}
-	// A valid signed LiteLLM identity already names the authoritative model-table
-	// deployment. Direct AIR requests resolve it from the DB model snapshot using
-	// the public model plus the credential that ultimately served this response.
-	if logCtx.ShadowContext.State != shadowcontext.StateValid && p.modelManager != nil {
-		if deploymentID, ok := p.modelManager.GetDeploymentID(identity.PublicModel, routingCredential); ok {
-			identity.DeploymentID = deploymentID
+	var tokenCosts *converter.TokenCosts
+	logSpendCtx := logCtx.Context()
+	if p.priceRegistry == nil {
+		p.logger.WarnContext(logSpendCtx, "Price registry not available, using 0 cost for spend log")
+	} else {
+		priceModelID := logCtx.ModelID
+		if logCtx.RealModelID != "" && logCtx.RealModelID != logCtx.ModelID {
+			priceModelID = logCtx.RealModelID
+		}
+		modelPrice := p.priceRegistry.GetPrice(priceModelID)
+		if modelPrice == nil && priceModelID != logCtx.ModelID {
+			modelPrice = p.priceRegistry.GetPrice(logCtx.ModelID)
+		}
+		if modelPrice == nil {
+			p.logger.WarnContext(logSpendCtx, "Model price not found in registry, using 0 cost",
+				"model_name", priceModelID)
+		} else {
+			tokenCosts = modelPrice.CalculateCosts(logCtx.TokenUsage)
+			if tokenCosts != nil {
+				cost = tokenCosts.TotalCost
+			}
+			p.logger.DebugContext(logSpendCtx, "Calculated cost for model",
+				"model_name", priceModelID,
+				"cost", cost,
+				"prompt_tokens", logCtx.TokenUsage.PromptTokens,
+				"completion_tokens", logCtx.TokenUsage.CompletionTokens)
 		}
 	}
-	comparisonEligible := trustedIdentity &&
-		priceStatus == "found" && identity.APIKeyHash != "" &&
-		identity.PublicModel != "" && identity.DeploymentID != "" &&
-		billing.CallType() != RouteUnknown && costStatus == "calculated"
-	actualCredential := routingCredential
-	if actualCredential == "" {
-		actualCredential = logCtx.Credential.Name
+
+	// Settle any Redis budget reservation / TPM usage against the real cost.
+	// Guarded so it runs exactly once even though a defer safety-net may also call it.
+	p.reconcileBudgetAndRateLimits(logCtx, cost)
+
+	customLLMProvider := strings.Replace(string(logCtx.Credential.Type), "-", "_", 1)
+	if customLLMProvider == "proxy" {
+		customLLMProvider = string(config.ProviderTypeOpenAI)
 	}
-	if logCtx.ActualCredentialName != "" {
-		actualCredential = logCtx.ActualCredentialName
+
+	// teamID deliberately stays empty when the key has no team: LiteLLM writes
+	// team_id="" in that case, and inventing one (e.g. the credential name)
+	// would create daily/team rows that never merge with the primary accounting
+	// and UPDATEs against non-existent LiteLLM_TeamTable rows.
+
+	endTime := utils.NowUTC()
+
+	// Publish to Kafka *before* building/inserting the Postgres row (not
+	// after) so a queue-full failure can be flagged in the same row's
+	// metadata at insert time, instead of needing a separate update later —
+	// see buildMetadata's kafkaFallbackReason parameter below.
+	var kafkaFallbackReason string
+	if kafkaEnabled {
+		// Deliberately distinct from the Postgres metadata's overheadMs (which
+		// measures full elapsed time since the request started, near-identical
+		// to duration_ms): kafkaOverheadMs measures only the cost of this
+		// logging function itself, matching the ТЗ's intent for overhead_ms to
+		// be a small, separate figure from duration_ms.
+		kafkaOverheadMs := float64(time.Since(spendLogFnStart).Microseconds()) / 1000.0
+		if err := p.logSpendToKafka(logCtx, credName, modelIDFormatted, hashedToken,
+			userID, teamID, organizationID, endUser, apiBase, status,
+			cost, tokenCosts, kafkaOverheadMs, endTime); err != nil {
+			if errors.Is(err, kafkalog.ErrQueueFull) {
+				kafkaFallbackReason = "queue_full"
+			} else {
+				kafkaFallbackReason = "publish_error"
+			}
+		}
 	}
+
+	// Build metadata with usage, cost breakdown, requester IP, and optional error
 	requesterIP := getClientIP(logCtx.Request)
-	metadata := buildShadowMetadata(shadowMetadataInput{
-		Identity:           identity,
-		ContextState:       logCtx.ShadowContext.State,
-		ComparisonEligible: comparisonEligible,
-		Status:             status,
-		ErrorMessage:       logCtx.ErrorMsg,
-		HTTPStatus:         logCtx.HTTPStatus,
-		Usage:              usage,
-		UsageSource:        usageSource,
-		Costs:              tokenCosts,
-		RequesterIP:        requesterIP,
-		Billing:            billing,
-		OverheadMS:         float64(endTime.Sub(logCtx.StartTime).Microseconds()) / 1000,
-		PriceStatus:        priceStatus,
-		CostStatus:         costStatus,
-		PriceModel:         resolvedPriceModel,
-		Price:              modelPrice,
-		PriceUpdatedAt:     priceUpdatedAt,
-		MaxRetries:         p.maxProviderRetries,
-		ActualCredential:   actualCredential,
-		Outcome:            logCtx.StreamOutcome,
-		RequestMetadata:    logCtx.RequestMetadata,
-	})
-	tags, _ := json.Marshal(normalizeIdentityTags(identity.Tags))
-	sessionID := logCtx.SessionID
-	if sessionID == "" {
-		sessionID = billing.EventID()
-	}
-	apiBase := p.spendAPIBase
-	if apiBase == "" {
-		apiBase = config.SpendAPIBase
-	}
+	overheadMs := float64(time.Since(logCtx.StartTime).Microseconds()) / 1000.0
+	metadata := buildMetadata(hashedToken, logCtx.TokenInfo, logCtx.ErrorMsg, logCtx.HTTPStatus, logCtx.TokenUsage, requesterIP, tokenCosts, logCtx.ModelID, overheadMs, kafkaFallbackReason)
+
 	var completionStartTime *time.Time
 	if !logCtx.CompletionStartTime.IsZero() {
-		value := logCtx.CompletionStartTime
-		completionStartTime = &value
-	}
-	callType := spendLogCallType(status, billing, hasMaterialUsage(usage) || cost != 0)
-	cacheHit := "None"
-	if billing.CallType() == RouteCompletion || billing.CallType() == RouteTextCompletion {
-		cacheHit = "False"
-	}
-	var toolKeyAlias string
-	if logCtx.TokenInfo != nil {
-		toolKeyAlias = logCtx.TokenInfo.KeyAlias
-	}
-	return &litellmdb.SpendLogEntry{
-		RequestID:           billing.SpendRequestID(),
-		AirEventID:          billing.EventID(),
-		StartTime:           logCtx.StartTime,
-		EndTime:             endTime,
-		RequestDurationMS:   int(endTime.Sub(logCtx.StartTime).Milliseconds()),
-		CompletionStartTime: completionStartTime,
-		CallType:            callType,
-		APIBase:             apiBase,
-		Model:               backendModel,
-		ModelID:             identity.DeploymentID,
-		ModelGroup:          identity.PublicModel,
-		CustomLLMProvider:   string(config.ProviderTypeOpenAI),
-		PromptTokens:        usage.PromptTokens,
-		CompletionTokens:    usage.CompletionTokens,
-		TotalTokens:         usage.Total(),
-		Metadata:            metadata,
-		CacheHit:            cacheHit,
-		CacheKey:            "Cache OFF",
-		Spend:               cost,
-		APIKey:              identity.APIKeyHash,
-		UserID:              identity.UserID,
-		TeamID:              identity.TeamID,
-		OrganizationID:      identity.OrganizationID,
-		ProjectID:           identity.ProjectID,
-		EndUser:             identity.EndUser,
-		RequesterIP:         requesterIP,
-		Status:              status,
-		SessionID:           sessionID,
-		RequestTags:         string(tags),
-		AgentID:             identity.AgentID,
-		ComparisonEligible:  comparisonEligible,
-		DeclaredToolNames:   append([]string(nil), logCtx.DeclaredToolNames...),
-		ToolKeyAlias:        toolKeyAlias,
-	}
-}
-
-// spendLogCallType keeps a canonical route whenever a terminal failure carries
-// billable/token effects.  Zero-effect non-chat failures retain LiteLLM's
-// historical empty raw call_type and are projected into daily tables from the
-// signed original_call_type metadata.  This prevents partial stream usage from
-// becoming an unrouteable aggregate while preserving the observed zero-effect
-// failure shape.
-func spendLogCallType(status string, billing BillingContext, hasEffect bool) string {
-	if status == "failure" && billing.CallType() != RouteCompletion && !hasEffect {
-		return ""
-	}
-	return string(billing.CallType())
-}
-
-func hasMaterialUsage(usage *converter.TokenUsage) bool {
-	if usage == nil {
-		return false
-	}
-	return usage.PromptTokens != 0 ||
-		usage.CompletionTokens != 0 ||
-		usage.AudioInputTokens != 0 ||
-		usage.AudioOutputTokens != 0 ||
-		usage.CachedInputTokens != 0 ||
-		usage.CacheCreationTokens != 0 ||
-		usage.CachedOutputTokens != 0 ||
-		usage.ReasoningTokens != 0 ||
-		usage.AcceptedPredictionTokens != 0 ||
-		usage.RejectedPredictionTokens != 0 ||
-		usage.ImageCount != 0 ||
-		usage.ImageTokens != 0 ||
-		usage.OutputImageTokens != 0
-}
-
-// resolveSpendIdentity selects exactly one authenticated identity source. A
-// valid signed LiteLLM context is authoritative for the chained route. Direct
-// AIR requests fall back to the TokenInfo loaded while authenticating the
-// bearer token; unverified shadow claims are never merged into that identity.
-func resolveSpendIdentity(logCtx *RequestLogContext, billing BillingContext) (shadowcontext.Identity, bool) {
-	if logCtx == nil {
-		return shadowcontext.Identity{Tags: []string{}}, false
-	}
-	if logCtx.ShadowContext.State == shadowcontext.StateValid {
-		identity := logCtx.ShadowContext.Identity
-		identity.Tags = normalizeIdentityTags(identity.Tags)
-		return identity, true
-	}
-	if logCtx.TokenInfo == nil {
-		return shadowcontext.Identity{Tags: []string{}}, false
+		completionStartTime = &logCtx.CompletionStartTime
 	}
 
-	apiKeyHash := spendIdentityKey(logCtx)
-	endUser := extractEndUser(logCtx.Request)
-	if endUser == "" {
-		// Existing request parsing records the OpenAI user/safety identifier in
-		// SessionID. It is the best authenticated-request fallback when no
-		// explicit end-user header is present.
-		endUser = logCtx.SessionID
+	var pgErr error
+	if litellmEnabled {
+		pgErr = p.LiteLLMDB.LogSpend(&litellmdb.SpendLogEntry{
+			RequestID:           logCtx.RequestID,
+			StartTime:           logCtx.StartTime,
+			EndTime:             endTime,
+			CompletionStartTime: completionStartTime,
+			CallType:            litellmCallType(logCtx.Request.URL.Path),
+			APIBase:             apiBase,
+			Model:               logCtx.ModelID,    // Model name
+			ModelID:             modelIDFormatted,  // credential.name:model_name
+			ModelGroup:          logCtx.ModelID,    // Model name
+			CustomLLMProvider:   customLLMProvider, // Provider type as string
+			PromptTokens:        logCtx.TokenUsage.PromptTokens,
+			CompletionTokens:    logCtx.TokenUsage.CompletionTokens,
+			TotalTokens:         logCtx.TokenUsage.Total(),
+			Metadata:            metadata,
+			Spend:               cost, // Calculated cost based on model pricing and token usage
+			APIKey:              hashedToken,
+			UserID:              userID,
+			TeamID:              teamID,
+			OrganizationID:      organizationID,
+			EndUser:             endUser,
+			RequesterIP:         requesterIP,
+			Status:              status,
+			SessionID:           logCtx.SessionID,
+		})
 	}
-	return shadowcontext.Identity{
-		APIKeyHash:     apiKeyHash,
-		UserID:         logCtx.TokenInfo.UserID,
-		TeamID:         logCtx.TokenInfo.TeamID,
-		OrganizationID: logCtx.TokenInfo.OrganizationID,
-		ProjectID:      logCtx.TokenInfo.ProjectID,
-		AgentID:        logCtx.TokenInfo.AgentID,
-		PublicModel:    billing.PublicModel(),
-		DeploymentID:   billing.DeploymentID(),
-		EndUser:        endUser,
-		Tags:           mergeIdentityTags(logCtx.TokenInfo.Tags, logCtx.RequestTags),
-		CallID:         billing.CallID(),
-	}, true
-}
 
-// spendIdentityKey returns exactly the key whose counters receive this spend.
-// A verified signed identity is authoritative even when empty; falling back to
-// AIR's bearer/master key in that case would attribute chained tenant spend to
-// the wrong key.
-func spendIdentityKey(logCtx *RequestLogContext) string {
-	if logCtx == nil {
-		return ""
-	}
-	if logCtx.ShadowContext.State == shadowcontext.StateValid {
-		return logCtx.ShadowContext.Identity.APIKeyHash
-	}
-	if logCtx.TokenInfo != nil && logCtx.TokenInfo.Token != "" {
-		return logCtx.TokenInfo.Token
-	}
-	if logCtx.Token != "" {
-		return litellmdb.HashToken(logCtx.Token)
-	}
-	return ""
-}
-
-func normalizeIdentityTags(tags []string) []string {
-	if len(tags) == 0 {
-		return []string{}
-	}
-	return append([]string(nil), tags...)
-}
-
-// mergeIdentityTags matches LiteLLM's request attribution shape: authenticated
-// key tags come first, request tags are appended, and exact duplicates are
-// removed without reordering. Signed chained identity never calls this merge;
-// its already-authenticated tag list remains authoritative.
-func mergeIdentityTags(identityTags, requestTags []string) []string {
-	result := make([]string, 0, len(identityTags)+len(requestTags))
-	seen := make(map[string]struct{}, len(identityTags)+len(requestTags))
-	for _, tags := range [][]string{identityTags, requestTags} {
-		for _, tag := range tags {
-			if tag == "" {
-				continue
-			}
-			if _, exists := seen[tag]; exists {
-				continue
-			}
-			seen[tag] = struct{}{}
-			result = append(result, tag)
-		}
-	}
-	return result
+	return pgErr
 }

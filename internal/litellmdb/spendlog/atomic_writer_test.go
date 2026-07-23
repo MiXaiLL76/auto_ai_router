@@ -13,51 +13,30 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb/models"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb/queries"
+	"github.com/mixaill76/auto_ai_router/internal/monitoring"
 	"github.com/mixaill76/auto_ai_router/internal/testhelpers"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-func TestAtomicWriterRollsBackWhenReturningRowsCannotBeLoaded(t *testing.T) {
-	logger := newAtomicTestLogger()
-	batch := []*models.SpendLogEntry{
-		atomicTestEntry("req-1"),
-		atomicTestEntry("req-2"),
-	}
-	tx := &atomicTestTx{
-		insertedIDs: []string{"req-1", "req-2"},
-		spendRows:   [][]any{atomicTestSpendRow(batch[0])},
-	}
-
-	_, err := logger.commitBatchTransaction(context.Background(), tx, batch)
-
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "expected 2, loaded 1")
-	assert.False(t, tx.committed)
-	assert.True(t, tx.rolledBack)
-	assert.Empty(t, tx.committedSQL, "entity updates must roll back with the raw rows")
-	assert.Zero(t, logger.Stats().AggregationErrors,
-		"a pre-commit failure remains pending for exact retry instead of poisoning the terminal window")
-}
 
 func TestAtomicWriterRollsBackAllProjectionsOnPartialDailyFailure(t *testing.T) {
 	logger := newAtomicTestLogger()
 	entry := atomicTestEntry("req-partial")
 	tx := &atomicTestTx{
 		insertedIDs:       []string{entry.RequestID},
-		spendRows:         [][]any{atomicTestSpendRow(entry)},
-		failExecSubstring: `INSERT INTO "LiteLLM_DailyTagSpend"`,
+		failExecSubstring: `INSERT INTO "LiteLLM_DailyEndUserSpend"`,
 	}
 
 	_, err := logger.commitBatchTransaction(context.Background(), tx, []*models.SpendLogEntry{entry})
 
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "Tag daily aggregation")
+	assert.Contains(t, err.Error(), "EndUser daily aggregation")
 	assert.False(t, tx.committed)
 	assert.True(t, tx.rolledBack)
-	assert.Empty(t, tx.committedSQL, "raw, counters, and the first five daily tables must roll back together")
-	assert.Equal(t, 6, countSQLContaining(tx.attemptedSQL, `INSERT INTO "LiteLLM_Daily`),
-		"the injected tag failure happens after the other five daily projections")
+	assert.Empty(t, tx.committedSQL, "raw, counters, and the first three daily tables must roll back together")
+	assert.Equal(t, 4, countSQLContaining(tx.attemptedSQL, `INSERT INTO "LiteLLM_Daily`),
+		"the injected end-user failure happens after the other three daily projections")
 	assert.Zero(t, logger.Stats().AggregationErrors,
 		"a rolled-back projection attempt is recoverable through the exact retained batch")
 }
@@ -67,8 +46,7 @@ func TestAtomicWriterRollbackIgnoresExpiredRequestContext(t *testing.T) {
 	entry := atomicTestEntry("req-deadline")
 	tx := &atomicTestTx{
 		insertedIDs:       []string{entry.RequestID},
-		spendRows:         [][]any{atomicTestSpendRow(entry)},
-		failExecSubstring: `INSERT INTO "LiteLLM_DailyTagSpend"`,
+		failExecSubstring: `INSERT INTO "LiteLLM_DailyEndUserSpend"`,
 		failExecErr:       context.DeadlineExceeded,
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -85,55 +63,27 @@ func TestAtomicWriterRollbackIgnoresExpiredRequestContext(t *testing.T) {
 	assert.Zero(t, logger.Stats().AggregationErrors)
 }
 
-func TestAtomicWriterRollsBackBeforeAccountingWhenToolRegistryFails(t *testing.T) {
-	logger := newAtomicTestLogger()
-	entry := atomicTestEntry("req-tool-failure")
-	entry.DeclaredToolNames = []string{"weather"}
-	tx := &atomicTestTx{
-		insertedIDs:       []string{entry.RequestID},
-		failExecSubstring: `INSERT INTO "LiteLLM_ToolTable"`,
-	}
-
-	_, err := logger.commitBatchTransaction(context.Background(), tx, []*models.SpendLogEntry{entry})
-
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), `tool registry: upsert tool "weather"`)
-	assert.False(t, tx.committed)
-	assert.True(t, tx.rolledBack)
-	assert.Empty(t, tx.committedSQL, "the raw row and tool upsert must roll back together")
-	assert.Equal(t, 1, countSQLContaining(tx.attemptedSQL, `INSERT INTO "LiteLLM_ToolTable"`))
-	assert.Equal(t, 0, countSQLContaining(tx.attemptedSQL, `UPDATE "LiteLLM_`), "entity counters must not start after a tool failure")
-	assert.Equal(t, 0, countSQLContaining(tx.attemptedSQL, `INSERT INTO "LiteLLM_Daily`), "daily projections must not start after a tool failure")
-}
-
 func TestAtomicWriterRetryAndReplayCannotDoubleCharge(t *testing.T) {
 	logger := newAtomicTestLogger()
 	entry := atomicTestEntry("req-retry")
-	entry.DeclaredToolNames = []string{"weather", "weather"}
-	entry.ToolKeyAlias = "fixture-key"
 	batch := []*models.SpendLogEntry{entry}
 
 	failed := &atomicTestTx{
 		insertedIDs:       []string{entry.RequestID},
-		spendRows:         [][]any{atomicTestSpendRow(entry)},
-		failExecSubstring: `INSERT INTO "LiteLLM_DailyTagSpend"`,
+		failExecSubstring: `INSERT INTO "LiteLLM_DailyEndUserSpend"`,
 	}
 	_, err := logger.commitBatchTransaction(context.Background(), failed, batch)
 	require.Error(t, err)
 	assert.Empty(t, failed.committedSQL)
-	assert.Equal(t, 1, countSQLContaining(failed.attemptedSQL, `INSERT INTO "LiteLLM_ToolTable"`))
 
 	retry := &atomicTestTx{
 		insertedIDs: []string{entry.RequestID},
-		spendRows:   [][]any{atomicTestSpendRow(entry)},
 	}
 	inserted, err := logger.commitBatchTransaction(context.Background(), retry, batch)
 	require.NoError(t, err)
 	assert.Equal(t, []string{entry.RequestID}, inserted)
 	assert.True(t, retry.committed)
-	assert.Equal(t, 6, countSQLContaining(retry.committedSQL, `INSERT INTO "LiteLLM_Daily`))
-	assert.Equal(t, 1, countSQLContaining(retry.committedSQL, `INSERT INTO "LiteLLM_ToolTable"`),
-		"duplicates in one successful writer batch increment the tool once")
+	assert.Equal(t, 4, countSQLContaining(retry.committedSQL, `INSERT INTO "LiteLLM_Daily`))
 	require.NotEmpty(t, retry.committedSQL, "the successful retry applies counters and daily projections once")
 
 	replay := &atomicTestTx{}
@@ -142,7 +92,7 @@ func TestAtomicWriterRetryAndReplayCannotDoubleCharge(t *testing.T) {
 	assert.Empty(t, inserted)
 	assert.True(t, replay.committed)
 	assert.Empty(t, replay.attemptedSQL,
-		"a raw-row conflict returns no IDs, so replay cannot update tools, counters, or daily tables")
+		"a raw-row conflict returns no IDs, so replay cannot update counters or daily tables")
 	assert.Len(t, replay.queries, 1, "a conflict-only replay must not reload or aggregate existing rows")
 }
 
@@ -151,17 +101,16 @@ func TestAtomicWriterUsesProviderResponseIDForNormalInsert(t *testing.T) {
 	entry := atomicProviderIDEntry("chatcmpl-provider", "air-event-normal")
 	tx := &atomicTestTx{
 		insertResults: [][]string{{entry.RequestID}},
-		spendRows:     [][]any{atomicTestSpendRow(entry)},
 	}
 
 	inserted, err := logger.commitBatchTransaction(context.Background(), tx, []*models.SpendLogEntry{entry})
 
 	require.NoError(t, err)
 	assert.Equal(t, []string{"chatcmpl-provider"}, inserted)
-	require.Len(t, tx.queryArgs, 2)
+	require.Len(t, tx.queryArgs, 1)
 	assert.Equal(t, "chatcmpl-provider", tx.queryArgs[0][0])
 	assert.Equal(t, 1, countSQLContaining(tx.committedSQL, `UPDATE "LiteLLM_VerificationToken"`))
-	assert.Equal(t, 6, countSQLContaining(tx.committedSQL, `INSERT INTO "LiteLLM_Daily`))
+	assert.Equal(t, 4, countSQLContaining(tx.committedSQL, `INSERT INTO "LiteLLM_Daily`))
 }
 
 func TestAtomicWriterKeepsLegacyFailureRawCallTypeEmptyButProjectsOriginalRoute(t *testing.T) {
@@ -171,11 +120,8 @@ func TestAtomicWriterKeepsLegacyFailureRawCallTypeEmptyButProjectsOriginalRoute(
 	entry.Status = "failure"
 	entry.Spend = 0
 	entry.Metadata = `{"spend_logs_metadata":{"original_call_type":"acompletion"}}`
-	spendRow := atomicTestSpendRow(entry)
-	spendRow[8] = "acompletion" // Metadata fallback makes the raw failure row aggregation-eligible.
 	tx := &atomicTestTx{
 		insertedIDs: []string{entry.RequestID},
-		spendRows:   [][]any{spendRow},
 	}
 
 	inserted, err := logger.commitBatchTransaction(context.Background(), tx, []*models.SpendLogEntry{entry})
@@ -184,10 +130,8 @@ func TestAtomicWriterKeepsLegacyFailureRawCallTypeEmptyButProjectsOriginalRoute(
 	assert.Equal(t, []string{entry.RequestID}, inserted)
 	require.NotEmpty(t, tx.queryArgs)
 	assert.Equal(t, "", tx.queryArgs[0][1], "the writer must not mutate a legacy raw failure row")
-	assert.Equal(t, 6, countSQLContaining(tx.committedSQL, `INSERT INTO "LiteLLM_Daily`),
+	assert.Equal(t, 4, countSQLContaining(tx.committedSQL, `INSERT INTO "LiteLLM_Daily`),
 		"the preserved original route must feed every daily aggregate")
-	assert.Equal(t, 1, countSQLContaining(tx.committedSQL, `UPDATE "LiteLLM_TagTable" SET spend = spend + $1, updated_at = NOW()`))
-	assert.Equal(t, 1, countSQLContaining(tx.committedSQL, `UPDATE "LiteLLM_AgentsTable" SET spend = spend + $1, updated_at = NOW()`))
 }
 
 func TestLegacyFailureOriginalRouteEnablesDailyAggregationWithoutPopulatingEndpoint(t *testing.T) {
@@ -195,12 +139,10 @@ func TestLegacyFailureOriginalRouteEnablesDailyAggregationWithoutPopulatingEndpo
 	entry := atomicTestEntry("req-failure-dimensions")
 	entry.CallType = ""
 	entry.Status = "failure"
-	row := atomicTestSpendRow(entry)
-	row[8] = "acompletion"
-	tx := &atomicTestTx{spendRows: [][]any{row}}
+	entry.Metadata = `{"spend_logs_metadata":{"original_call_type":"acompletion"}}`
 
-	records, err := loadUnprocessedSpendLogRecords(
-		context.Background(), tx, logger.logger, "test", []string{entry.RequestID},
+	records, err := buildSpendLogRecords(
+		[]insertedSpendEntry{{entry: entry, requestID: entry.RequestID}}, logger.logger, "test",
 	)
 
 	require.NoError(t, err)
@@ -215,10 +157,6 @@ func TestAtomicWriterSortsPreferredIDsBeforeUniqueIndexLocks(t *testing.T) {
 	firstID := atomicProviderIDEntry("chatcmpl-p", "air-event-p")
 	tx := &atomicTestTx{
 		insertResults: [][]string{{"chatcmpl-p", "chatcmpl-q"}},
-		spendRows: [][]any{
-			atomicTestSpendRow(firstID),
-			atomicTestSpendRow(secondID),
-		},
 	}
 
 	_, err := logger.commitBatchTransaction(context.Background(), tx, []*models.SpendLogEntry{secondID, firstID})
@@ -233,26 +171,20 @@ func TestAtomicWriterSameBatchProviderIDCollisionUsesEventFallback(t *testing.T)
 	logger := newAtomicTestLogger()
 	first := atomicProviderIDEntry("chatcmpl-shared", "air-event-1")
 	second := atomicProviderIDEntry("chatcmpl-shared", "air-event-2")
-	second.DeclaredToolNames = []string{"weather"}
 	tx := &atomicTestTx{
 		insertResults: [][]string{{"chatcmpl-shared"}, {"air-event-2"}},
-		spendRows: [][]any{
-			atomicTestSpendRowWithRequestID(first, "chatcmpl-shared"),
-			atomicTestSpendRowWithRequestID(second, "air-event-2"),
-		},
 	}
 
 	inserted, err := logger.commitBatchTransaction(context.Background(), tx, []*models.SpendLogEntry{first, second})
 
 	require.NoError(t, err)
 	assert.Equal(t, []string{"chatcmpl-shared", "air-event-2"}, inserted)
-	require.Len(t, tx.queryArgs, 3)
+	require.Len(t, tx.queryArgs, 2)
 	assert.Len(t, tx.queryArgs[0], queries.SpendLogParamCount, "one representative claims the provider ID")
 	assert.Equal(t, "chatcmpl-shared", tx.queryArgs[0][0])
 	assert.Len(t, tx.queryArgs[1], queries.SpendLogParamCount, "the colliding logical effect uses its event ID")
 	assert.Equal(t, "air-event-2", tx.queryArgs[1][0])
-	assert.Equal(t, 1, countSQLContaining(tx.committedSQL, `INSERT INTO "LiteLLM_ToolTable"`))
-	assert.Equal(t, 6, countSQLContaining(tx.committedSQL, `INSERT INTO "LiteLLM_Daily`))
+	assert.Equal(t, 4, countSQLContaining(tx.committedSQL, `INSERT INTO "LiteLLM_Daily`))
 }
 
 func TestAtomicWriterConcurrentProviderIDWinnerFallsBackToEventID(t *testing.T) {
@@ -260,48 +192,65 @@ func TestAtomicWriterConcurrentProviderIDWinnerFallsBackToEventID(t *testing.T) 
 	entry := atomicProviderIDEntry("chatcmpl-concurrent", "air-event-loser")
 	tx := &atomicTestTx{
 		insertResults: [][]string{{}, {"air-event-loser"}},
-		ownerRows:     [][]any{{"chatcmpl-concurrent", "air-event-winner"}},
-		spendRows:     [][]any{atomicTestSpendRowWithRequestID(entry, "air-event-loser")},
+		// The preferred row is owned by a different event ("air-event-winner"),
+		// so the ownership claim misses and the event falls back to its own ID.
 	}
 
 	inserted, err := logger.commitBatchTransaction(context.Background(), tx, []*models.SpendLogEntry{entry})
 
 	require.NoError(t, err)
 	assert.Equal(t, []string{"air-event-loser"}, inserted)
-	require.Len(t, tx.queries, 4)
-	assert.Equal(t, queries.QuerySelectSpendLogEventOwners, tx.queries[1],
-		"the concurrent owner must be read in a statement after the conflicting INSERT")
-	assert.Equal(t, []string{"chatcmpl-concurrent"}, tx.queryArgs[1][0])
+	require.Len(t, tx.queries, 3)
+	assert.Equal(t, queries.QueryClaimSpendLogEventOwner, tx.queries[1],
+		"the ownership claim must run in a statement after the conflicting INSERT")
+	assert.Equal(t, []any{"chatcmpl-concurrent", "air-event-loser"}, tx.queryArgs[1])
 	assert.Equal(t, "air-event-loser", tx.queryArgs[2][0])
-	assert.Equal(t, 6, countSQLContaining(tx.committedSQL, `INSERT INTO "LiteLLM_Daily`))
+	assert.Equal(t, 4, countSQLContaining(tx.committedSQL, `INSERT INTO "LiteLLM_Daily`))
+}
+
+func TestAtomicWriterCollisionWithoutAirEventIDIsObservable(t *testing.T) {
+	logger := newAtomicTestLogger()
+	entry := atomicTestEntry("req-foreign-conflict")
+	tx := &atomicTestTx{
+		insertResults: [][]string{{}},
+		// The preferred row is owned by another transaction and the entry has no
+		// AIR event ID, so ownership cannot be resolved and the row stays dropped.
+	}
+	before := testutil.ToFloat64(monitoring.SpendCollisionUnresolvedTotal)
+
+	inserted, err := logger.commitBatchTransaction(context.Background(), tx, []*models.SpendLogEntry{entry})
+
+	require.NoError(t, err)
+	assert.Empty(t, inserted)
+	assert.Len(t, tx.queries, 1, "without an AIR event ID no ownership claim can run")
+	assert.Empty(t, tx.attemptedSQL, "a dropped row must not feed accounting")
+	assert.Equal(t, before+1, testutil.ToFloat64(monitoring.SpendCollisionUnresolvedTotal),
+		"the unresolvable drop must be counted instead of silently discarded")
 }
 
 func TestAtomicWriterProviderIDReplayDoesNotFeedAnyAccounting(t *testing.T) {
 	logger := newAtomicTestLogger()
 	entry := atomicProviderIDEntry("chatcmpl-replay", "air-event-replay")
-	entry.DeclaredToolNames = []string{"must-not-increment"}
 	tx := &atomicTestTx{
 		insertResults: [][]string{{}},
-		ownerRows:     [][]any{{"chatcmpl-replay", "air-event-replay"}},
+		claimHits:     map[[2]string]bool{{"chatcmpl-replay", "air-event-replay"}: true},
 	}
 
 	inserted, err := logger.commitBatchTransaction(context.Background(), tx, []*models.SpendLogEntry{entry})
 
 	require.NoError(t, err)
 	assert.Empty(t, inserted)
-	assert.Len(t, tx.queries, 2, "replay needs only preferred INSERT and separate owner lookup")
-	assert.Empty(t, tx.attemptedSQL, "owner matches the event, so tools/counters/daily must not run")
+	assert.Len(t, tx.queries, 2, "replay needs only preferred INSERT and the ownership claim")
+	assert.Empty(t, tx.attemptedSQL, "the claim matches our event, so counters/daily must not run")
 }
 
 func TestAtomicWriterExistingOwnerCanBeLaterEntryInSameBatch(t *testing.T) {
 	logger := newAtomicTestLogger()
 	newEffect := atomicProviderIDEntry("chatcmpl-reordered", "air-event-new")
 	replayedOwner := atomicProviderIDEntry("chatcmpl-reordered", "air-event-owner")
-	replayedOwner.DeclaredToolNames = []string{"must-not-increment"}
 	tx := &atomicTestTx{
 		insertResults: [][]string{{}, {"air-event-new"}},
-		ownerRows:     [][]any{{"chatcmpl-reordered", "air-event-owner"}},
-		spendRows:     [][]any{atomicTestSpendRowWithRequestID(newEffect, "air-event-new")},
+		claimHits:     map[[2]string]bool{{"chatcmpl-reordered", "air-event-owner"}: true},
 	}
 
 	inserted, err := logger.commitBatchTransaction(context.Background(), tx, []*models.SpendLogEntry{newEffect, replayedOwner})
@@ -309,19 +258,17 @@ func TestAtomicWriterExistingOwnerCanBeLaterEntryInSameBatch(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []string{"air-event-new"}, inserted)
 	require.Len(t, tx.queryArgs, 4)
-	assert.Len(t, tx.queryArgs[2], queries.SpendLogParamCount, "only the non-owner effect gets a fallback row")
-	assert.Equal(t, "air-event-new", tx.queryArgs[2][0])
-	assert.Equal(t, 0, countSQLContaining(tx.committedSQL, `INSERT INTO "LiteLLM_ToolTable"`),
-		"the existing owner entry must not feed the tool registry")
+	assert.Len(t, tx.queryArgs[3], queries.SpendLogParamCount, "only the non-owner effect gets a fallback row")
+	assert.Equal(t, "air-event-new", tx.queryArgs[3][0])
 }
 
 func TestAtomicWriterEventFallbackReplayDoesNotFeedAccounting(t *testing.T) {
 	logger := newAtomicTestLogger()
 	entry := atomicProviderIDEntry("chatcmpl-collision-replay", "air-event-already-stored")
-	entry.DeclaredToolNames = []string{"must-not-increment"}
 	tx := &atomicTestTx{
 		insertResults: [][]string{{}, {}},
-		ownerRows:     [][]any{{"chatcmpl-collision-replay", "air-event-original-owner"}},
+		// The preferred row belongs to "air-event-original-owner", so the claim
+		// misses; the fallback row already exists and its INSERT conflicts.
 	}
 
 	inserted, err := logger.commitBatchTransaction(context.Background(), tx, []*models.SpendLogEntry{entry})
@@ -357,8 +304,6 @@ func atomicTestEntry(requestID string) *models.SpendLogEntry {
 		TeamID:             "team-1",
 		OrganizationID:     "org-1",
 		EndUser:            "end-user-1",
-		RequestTags:        `["tag-1"]`,
-		AgentID:            "agent-1",
 		Status:             "success",
 		ComparisonEligible: true,
 	}
@@ -369,38 +314,6 @@ func atomicProviderIDEntry(providerID, eventID string) *models.SpendLogEntry {
 	entry.AirEventID = eventID
 	entry.Metadata = fmt.Sprintf(`{"spend_logs_metadata":{"air_event_id":%q,"provider_response_id":%q}}`, eventID, providerID)
 	return entry
-}
-
-func atomicTestSpendRow(entry *models.SpendLogEntry) []any {
-	return []any{
-		entry.UserID,
-		entry.StartTime.UTC().Format("2006-01-02"),
-		entry.APIKey,
-		entry.Model,
-		entry.ModelGroup,
-		entry.CustomLLMProvider,
-		entry.MCPNamespacedToolName,
-		entry.CallType,
-		entry.CallType,
-		entry.PromptTokens,
-		entry.CompletionTokens,
-		int64(0),
-		int64(0),
-		entry.Spend,
-		entry.Status,
-		entry.RequestID,
-		entry.TeamID,
-		entry.OrganizationID,
-		entry.EndUser,
-		normalizeRequestTags(entry.RequestTags),
-		entry.AgentID,
-	}
-}
-
-func atomicTestSpendRowWithRequestID(entry *models.SpendLogEntry, requestID string) []any {
-	row := atomicTestSpendRow(entry)
-	row[15] = requestID
-	return row
 }
 
 func countSQLContaining(statements []string, fragment string) int {
@@ -417,8 +330,7 @@ type atomicTestTx struct {
 	insertedIDs                []string
 	insertResults              [][]string
 	insertQueryIndex           int
-	ownerRows                  [][]any
-	spendRows                  [][]any
+	claimHits                  map[[2]string]bool
 	failExecSubstring          string
 	failExecErr                error
 	commitErr                  error
@@ -499,24 +411,44 @@ func (tx *atomicTestTx) Query(_ context.Context, sql string, args ...any) (pgx.R
 			tx.stagedSQL = append(tx.stagedSQL, sql)
 		}
 		return &atomicTestRows{rows: rows}, nil
-	case strings.Contains(sql, `spend_logs_metadata,air_event_id`):
-		return &atomicTestRows{rows: tx.ownerRows}, nil
-	case strings.Contains(sql, `FROM "LiteLLM_SpendLogs"`):
-		return &atomicTestRows{rows: tx.spendRows}, nil
 	default:
 		return nil, errors.New("unexpected query")
 	}
 }
 
-func (tx *atomicTestTx) QueryRow(context.Context, string, ...any) pgx.Row {
+func (tx *atomicTestTx) QueryRow(_ context.Context, sql string, args ...any) pgx.Row {
+	tx.queries = append(tx.queries, sql)
+	tx.queryArgs = append(tx.queryArgs, append([]any(nil), args...))
+	if strings.Contains(sql, `UPDATE "LiteLLM_SpendLogs"`) {
+		if tx.claimHits[[2]string{args[0].(string), args[1].(string)}] {
+			return atomicTestRow{value: args[0].(string)}
+		}
+		return atomicTestRow{err: pgx.ErrNoRows}
+	}
 	return atomicTestRow{err: errors.New("unexpected QueryRow")}
 }
 
 func (tx *atomicTestTx) Conn() *pgx.Conn { return nil }
 
-type atomicTestRow struct{ err error }
+type atomicTestRow struct {
+	err   error
+	value string
+}
 
-func (row atomicTestRow) Scan(...any) error { return row.err }
+func (row atomicTestRow) Scan(dest ...any) error {
+	if row.err != nil {
+		return row.err
+	}
+	if len(dest) != 1 {
+		return errors.New("unexpected scan destination count")
+	}
+	value, ok := dest[0].(*string)
+	if !ok {
+		return errors.New("unexpected scan destination type")
+	}
+	*value = row.value
+	return nil
+}
 
 type atomicTestRows struct {
 	rows    [][]any

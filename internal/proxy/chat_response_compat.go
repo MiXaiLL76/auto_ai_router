@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
-	"reflect"
 )
 
 // modelBearingResponseRoutes is the product surface whose successful response
@@ -19,9 +18,6 @@ var modelBearingResponseRoutes = map[string]struct{}{
 }
 
 func normalizeSuccessfulResponseModel(body []byte, endpoint, publicModel string) []byte {
-	if endpoint == "/v1/chat/completions" {
-		return normalizeSuccessfulChatCompletionResponse(body, publicModel)
-	}
 	if publicModel == "" {
 		return body
 	}
@@ -48,9 +44,6 @@ func clientVisibleResponseModel(logCtx *RequestLogContext, fallback string) stri
 	if logCtx == nil {
 		return fallback
 	}
-	if model := logCtx.Billing.PublicModel(); model != "" {
-		return model
-	}
 	if logCtx.PublicModelID != "" {
 		return logCtx.PublicModelID
 	}
@@ -58,15 +51,11 @@ func clientVisibleResponseModel(logCtx *RequestLogContext, fallback string) stri
 }
 
 func streamRouteReturnsModel(logCtx *RequestLogContext) bool {
-	if logCtx == nil {
+	if logCtx == nil || logCtx.Request == nil || logCtx.Request.URL == nil {
 		return false
 	}
-	switch logCtx.Billing.CallType() {
-	case RouteCompletion, RouteTextCompletion, RouteResponses:
-		return true
-	default:
-		return false
-	}
+	_, ok := modelBearingResponseRoutes[logCtx.Request.URL.Path]
+	return ok
 }
 
 // normalizeSuccessfulResponseModelStream rewrites only JSON carried by SSE
@@ -183,68 +172,4 @@ func normalizeSSEDataLineModel(line []byte, publicModel string) []byte {
 	result = append(result, normalized...)
 	result = append(result, newline...)
 	return result
-}
-
-// normalizeSuccessfulChatCompletionResponse applies the client-visible subset of
-// LiteLLM's Chat Completions response normalization. Callers are responsible for
-// limiting this to successful, non-streaming /v1/chat/completions responses.
-// Invalid or non-Chat JSON is returned unchanged.
-func normalizeSuccessfulChatCompletionResponse(body []byte, publicModel string) []byte {
-	var response map[string]interface{}
-	if err := json.Unmarshal(body, &response); err != nil {
-		return body
-	}
-	if response["object"] != "chat.completion" {
-		return body
-	}
-
-	if publicModel != "" {
-		response["model"] = publicModel
-	}
-
-	choices, ok := response["choices"].([]interface{})
-	if !ok {
-		return body
-	}
-	for _, rawChoice := range choices {
-		choice, ok := rawChoice.(map[string]interface{})
-		if !ok {
-			continue
-		}
-		if logprobs, exists := choice["logprobs"]; exists && logprobs == nil {
-			delete(choice, "logprobs")
-		}
-
-		message, ok := choice["message"].(map[string]interface{})
-		if !ok {
-			continue
-		}
-		refusal, exists := message["refusal"]
-		if !exists || refusal == nil {
-			continue
-		}
-
-		rawProviderFields, fieldsExist := message["provider_specific_fields"]
-		providerFields, fieldsAreObject := rawProviderFields.(map[string]interface{})
-		if fieldsExist && !fieldsAreObject {
-			// Preserve an unexpected provider value rather than clobbering it.
-			continue
-		}
-		if !fieldsExist {
-			providerFields = make(map[string]interface{})
-			message["provider_specific_fields"] = providerFields
-		}
-		if existing, exists := providerFields["refusal"]; exists && !reflect.DeepEqual(existing, refusal) {
-			// A conflicting destination cannot be overwritten without losing data.
-			continue
-		}
-		providerFields["refusal"] = refusal
-		delete(message, "refusal")
-	}
-
-	normalized, err := json.Marshal(response)
-	if err != nil {
-		return body
-	}
-	return normalized
 }

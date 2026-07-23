@@ -2,14 +2,15 @@ package main
 
 import (
 	"context"
-	"errors"
 	"flag"
 	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
+	"net/http/pprof"
 	"os"
 	"os/signal"
+	"runtime"
 	"strings"
 	"sync"
 	"syscall"
@@ -32,8 +33,6 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/ratelimit"
 	"github.com/mixaill76/auto_ai_router/internal/responsestore"
 	"github.com/mixaill76/auto_ai_router/internal/router"
-	"github.com/mixaill76/auto_ai_router/internal/shadowcontext"
-	"github.com/mixaill76/auto_ai_router/internal/spendsink"
 	"github.com/mixaill76/auto_ai_router/internal/startup"
 	"github.com/mixaill76/auto_ai_router/internal/telemetry"
 
@@ -50,20 +49,6 @@ var (
 	Version = "dev"
 	Commit  = "unknown"
 )
-
-const timeoutResponseWriteGrace = 5 * time.Second
-
-// effectiveServerWriteTimeout reserves enough time for the proxy's upstream
-// request timeout to be converted into a complete client-facing JSON error.
-// An http.Server WriteTimeout equal to (or shorter than) RequestTimeout can
-// close the socket at the exact moment the handler tries to write that error.
-// Non-positive WriteTimeout keeps Go's explicit "disabled" semantics.
-func effectiveServerWriteTimeout(requestTimeout, writeTimeout time.Duration) time.Duration {
-	if writeTimeout <= 0 || requestTimeout <= 0 || writeTimeout > requestTimeout {
-		return writeTimeout
-	}
-	return requestTimeout + timeoutResponseWriteGrace
-}
 
 func main() {
 	configPath := flag.String("config", "config.yaml", "Path to configuration file")
@@ -201,15 +186,6 @@ func main() {
 	// endpoint (prometheus_enabled) and/or OTLP push (otel.enabled). The pull
 	// endpoint and the push pipeline are wired up separately below.
 	metrics := monitoring.New(cfg.MetricsCollectionEnabled())
-	spendSink := initializeSpendSink(cfg, log, metrics)
-	shadowContextVerifier, shadowContextErr := shadowcontext.NewVerifier(cfg.SpendLog.AuthContext)
-	if shadowContextErr != nil {
-		log.Error("CRITICAL: signed shadow context verification is disabled",
-			"error", shadowContextErr,
-			"impact", "shadow rows will be comparison-ineligible",
-		)
-		shadowContextVerifier = nil
-	}
 
 	// ==================== Initialize Model Pricing ====================
 	if cfg.Server.ModelPricesLink != "" {
@@ -251,35 +227,33 @@ func main() {
 
 	// ==================== Create Proxy ====================
 	prx := proxy.New(&proxy.Config{
-		Balancer:                         bal,
-		Logger:                           log,
-		MaxBodySizeMB:                    cfg.Server.MaxBodySizeMB,
-		ResponseBodyMultiplier:           cfg.Server.ResponseBodyMultiplier,
-		RequestTimeout:                   cfg.Server.RequestTimeout,
-		MaxIdleConns:                     cfg.Server.MaxIdleConns,
-		MaxIdleConnsPerHost:              cfg.Server.MaxIdleConnsPerHost,
-		IdleConnTimeout:                  cfg.Server.IdleConnTimeout,
-		Metrics:                          metrics,
-		MasterKey:                        cfg.Server.MasterKey,
-		RateLimiter:                      rateLimiter,
-		TokenManager:                     tokenManager,
-		ModelManager:                     modelManager,
-		Version:                          Version,
-		Commit:                           Commit,
-		LiteLLMDB:                        litellmDBManager,
-		KafkaLog:                         kafkaLogManager,
-		SpendLogger:                      spendSink,
-		SpendAPIBase:                     cfg.SpendLog.APIBase,
-		ShadowContextVerifier:            shadowContextVerifier,
-		HealthChecker:                    healthChecker,
-		PriceRegistry:                    priceRegistry,
-		MaxProviderRetries:               cfg.Server.MaxProviderRetries,
-		MaxFallbackAttempts:              cfg.Server.MaxFallbackAttempts,
-		ResponseStore:                    respStore,
-		SessionStickyEnabled:             cfg.Server.SessionStickyEnabled,
-		SessionStickyAutoCacheCtrl:       cfg.Server.SessionStickyAutoCacheCtrl,
-		SessionStoreTTL:                  time.Duration(cfg.Server.SessionStickyTTL) * time.Minute,
-		DrainUpstreamOnAbort:             cfg.Server.DrainUpstreamOnAbort,
+		Balancer:                   bal,
+		Logger:                     log,
+		MaxBodySizeMB:              cfg.Server.MaxBodySizeMB,
+		ResponseBodyMultiplier:     cfg.Server.ResponseBodyMultiplier,
+		RequestTimeout:             cfg.Server.RequestTimeout,
+		MaxIdleConns:               cfg.Server.MaxIdleConns,
+		MaxIdleConnsPerHost:        cfg.Server.MaxIdleConnsPerHost,
+		IdleConnTimeout:            cfg.Server.IdleConnTimeout,
+		Metrics:                    metrics,
+		MasterKey:                  cfg.Server.MasterKey,
+		RateLimiter:                rateLimiter,
+		TokenManager:               tokenManager,
+		ModelManager:               modelManager,
+		Version:                    Version,
+		Commit:                     Commit,
+		LiteLLMDB:                  litellmDBManager,
+		KafkaLog:                   kafkaLogManager,
+		HealthChecker:              healthChecker,
+		PriceRegistry:              priceRegistry,
+		MaxProviderRetries:         cfg.Server.MaxProviderRetries,
+		MaxFallbackAttempts:        cfg.Server.MaxFallbackAttempts,
+		ResponseStore:              respStore,
+		SessionStickyEnabled:       cfg.Server.SessionStickyEnabled,
+		SessionStickyAutoCacheCtrl: cfg.Server.SessionStickyAutoCacheCtrl,
+		SessionStoreTTL:            time.Duration(cfg.Server.SessionStickyTTL) * time.Minute,
+		DrainUpstreamOnAbort:       cfg.Server.DrainUpstreamOnAbort,
+
 		BudgetReserver:                   budgetReserver,
 		KeyRateLimiter:                   keyRateLimiter,
 		BudgetReservationEnabled:         cfg.LiteLLMDB.EnforceBudgetReservation,
@@ -359,20 +333,11 @@ func main() {
 		rootHandler = otelhttp.NewHandler(mux, "auto_ai_router", otelOpts...)
 	}
 
-	serverWriteTimeout := effectiveServerWriteTimeout(cfg.Server.RequestTimeout, cfg.Server.WriteTimeout)
-	if serverWriteTimeout != cfg.Server.WriteTimeout {
-		log.Warn("HTTP write timeout extended to preserve timeout error responses",
-			"configured_write_timeout", cfg.Server.WriteTimeout,
-			"request_timeout", cfg.Server.RequestTimeout,
-			"effective_write_timeout", serverWriteTimeout,
-		)
-	}
-
 	server := &http.Server{
 		Addr:         fmt.Sprintf(":%d", cfg.Server.Port),
 		Handler:      rootHandler,
 		ReadTimeout:  cfg.Server.ReadTimeout,
-		WriteTimeout: serverWriteTimeout,
+		WriteTimeout: cfg.Server.WriteTimeout,
 		IdleTimeout:  cfg.Server.IdleTimeout,
 	}
 
@@ -393,6 +358,55 @@ func main() {
 			os.Exit(1)
 		}
 	}()
+
+	// ==================== pprof (internal only, opt-in) ====================
+	// Deliberately on its own listener/mux rather than the public router: pprof
+	// exposes heap contents, goroutine stacks, and lets any caller trigger a
+	// blocking 30s CPU profile. The Service/Ingress in front of this pod must
+	// not route to PprofPort — only reachable via kubectl port-forward or
+	// from inside the cluster network.
+	var pprofServer *http.Server
+	if cfg.Monitoring.PprofEnabled {
+		// Off by default (rate 0): only sampled while pprof is explicitly
+		// enabled, so this cost is opt-in like the rest of the endpoint.
+		// Fraction=1 reports every contended mutex acquisition — cheap because
+		// it only fires on actual contention, not on every Lock()/Unlock().
+		// This is what lets /debug/pprof/mutex show contention on locks like
+		// the balancer's global RWMutex (internal/balancer/roundrobin.go).
+		runtime.SetMutexProfileFraction(1)
+
+		// Sample block-profile events at a 10us granularity: fine enough to
+		// catch second-scale waits that actually matter (io.Pipe backpressure
+		// in streaming, the 5s spend-logger queue timeout, lock waits) without
+		// recording every microsecond-scale channel op in normal I/O loops.
+		// rate=1 (every event) is too heavy here — unlike mutex contention,
+		// almost every goroutine spends most of its life blocked on I/O.
+		runtime.SetBlockProfileRate(10000)
+
+		pprofMux := http.NewServeMux()
+		pprofMux.HandleFunc("/debug/pprof/", pprof.Index)
+		pprofMux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+		pprofMux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+		pprofMux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+		pprofMux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+
+		pprofServer = &http.Server{
+			Addr:    fmt.Sprintf(":%d", cfg.Monitoring.PprofPort),
+			Handler: pprofMux,
+		}
+		pprofLn, err := net.Listen("tcp", pprofServer.Addr)
+		if err != nil {
+			log.Error("Failed to bind pprof port", "error", err, "port", cfg.Monitoring.PprofPort)
+			os.Exit(1)
+		}
+		log.Warn("pprof enabled on internal listener — must not be exposed via Service/Ingress",
+			"port", cfg.Monitoring.PprofPort)
+		go func() {
+			if err := pprofServer.Serve(pprofLn); err != nil && err != http.ErrServerClosed {
+				log.Error("pprof server failed", "error", err)
+			}
+		}()
+	}
 
 	// ==================== Signal Handling & Graceful Shutdown ====================
 	sigChan := make(chan os.Signal, 1)
@@ -420,6 +434,14 @@ func main() {
 		os.Exit(1)
 	}
 
+	if pprofServer != nil {
+		pprofCtx, pprofCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if err := pprofServer.Shutdown(pprofCtx); err != nil {
+			log.Error("pprof server forced to shutdown", "error", err)
+		}
+		pprofCancel()
+	}
+
 	// Stop background goroutines
 	log.Info("Stopping background goroutines...")
 	bgCancel()
@@ -439,16 +461,6 @@ func main() {
 	}
 
 	// Shutdown LiteLLM DB
-	if spendSink.IsEnabled() {
-		log.Info("Shutting down spend sink...")
-		spendShutdownCtx, spendShutdownCancel := context.WithTimeout(context.Background(), 15*time.Second)
-		if err := spendSink.Shutdown(spendShutdownCtx); err != nil {
-			log.Error("Spend sink shutdown error", "error", err)
-		}
-		spendShutdownCancel()
-	}
-
-	// Shutdown LiteLLM control-plane DB
 	if litellmDBManager.IsEnabled() {
 		log.Info("Shutting down LiteLLM DB...")
 		dbShutdownCtx, dbShutdownCancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -568,10 +580,7 @@ func initializeModelManager(
 	if len(cfg.ModelAlias) > 0 {
 		modelManager.SetModelAliases(cfg.ModelAlias)
 	}
-	// client_model_ids is a deny-by-default product boundary: an omitted key
-	// preserves the legacy inferred model surface, while an explicitly empty
-	// list intentionally denies every client-facing model ID. yaml.v3 keeps
-	// the slice nil only when the key is absent, so nil means "not configured".
+	// nil preserves legacy discovery; an explicit empty list denies all client IDs.
 	if cfg.ClientModelIDs != nil {
 		if len(cfg.ClientModelIDs) == 0 {
 			log.Warn("client_model_ids is explicitly empty: client model surface is deny-all")
@@ -581,16 +590,11 @@ func initializeModelManager(
 	if len(cfg.PublicModelAlias) > 0 {
 		modelManager.SetPublicModelAliases(cfg.PublicModelAlias)
 	}
-	if len(cfg.AcceptedModelAlias) > 0 {
-		modelManager.SetAcceptedModelAliases(cfg.AcceptedModelAlias)
-	}
 
-	// Initialize rate limiters from internal credential routing IDs, not from
-	// the client-facing catalog. An explicit client_model_ids boundary hides
-	// provider backends from /v1/models, but those backends remain the IDs used
-	// after canonical alias resolution.
+	// Initialize rate limiters for each model
+	modelsResp := modelManager.GetAllModels()
 	for _, cred := range cfg.Credentials {
-		for _, model := range modelManager.GetModelsForCredential(cred.Name) {
+		for _, model := range modelsResp.Data {
 			if modelManager.HasModel(cred.Name, model.ID) {
 				rpm := modelManager.GetModelRPMForCredential(model.ID, cred.Name)
 				tpm := modelManager.GetModelTPMForCredential(model.ID, cred.Name)
@@ -815,7 +819,7 @@ func initializeLiteLLMDB(cfg *config.Config, log *slog.Logger) litellmdb.Manager
 		LogQueueSize:          cfg.LiteLLMDB.LogQueueSize,
 		LogBatchSize:          cfg.LiteLLMDB.LogBatchSize,
 		LogFlushInterval:      cfg.LiteLLMDB.LogFlushInterval,
-		DisableSpendLogging:   true,
+		LogWorkers:            cfg.LiteLLMDB.LogWorkers,
 		DisableSpendLogsWrite: cfg.LiteLLMDB.DisableSpendLogsWrite,
 		Logger:                log,
 	}
@@ -865,6 +869,7 @@ func initializeKafkaLog(cfg *config.Config, log *slog.Logger, litellmDBManager l
 		LogQueueSize:     cfg.Kafka.LogQueueSize,
 		LogBatchSize:     cfg.Kafka.LogBatchSize,
 		LogFlushInterval: cfg.Kafka.LogFlushInterval,
+		LogWorkers:       cfg.Kafka.LogWorkers,
 		TLSEnabled:       cfg.Kafka.TLSEnabled,
 		SASLMechanism:    cfg.Kafka.SASLMechanism,
 		SASLUsername:     cfg.Kafka.SASLUsername,
@@ -895,37 +900,6 @@ func initializeKafkaLog(cfg *config.Config, log *slog.Logger, litellmDBManager l
 	}
 	log.Info("Kafka spend-log publisher initialized successfully")
 	return manager
-}
-
-func initializeSpendSink(cfg *config.Config, log *slog.Logger, metrics *monitoring.Metrics) spendsink.Sink {
-	if !cfg.SpendLog.IsEnabled() {
-		metrics.SetSpendSinkHealthy(false)
-		log.Info("Spend logging disabled")
-		return spendsink.NewDisabledSink("disabled by configuration")
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), cfg.SpendLog.ConnectTimeout)
-	defer cancel()
-	sink, err := spendsink.New(ctx, cfg.SpendLog, log)
-	if err != nil {
-		reason := "connection_or_preflight"
-		if errors.Is(err, spendsink.ErrUnexpectedDatabase) {
-			reason = "unexpected_database"
-		}
-		metrics.RecordSpendSinkStartupFailure(reason)
-		log.Error("CRITICAL: spend sink disabled; proxy traffic remains available",
-			"error", err,
-			"reason", reason,
-			"expected_database_name", cfg.SpendLog.ExpectedDatabaseName,
-		)
-		return spendsink.NewDisabledSink(reason)
-	}
-
-	log.Info("Spend sink initialized",
-		"expected_database_name", cfg.SpendLog.ExpectedDatabaseName,
-		"api_base", cfg.SpendLog.APIBase,
-	)
-	return sink
 }
 
 // loadAndUpdateModelPrices loads model prices and updates the registry

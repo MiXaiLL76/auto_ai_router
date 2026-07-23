@@ -1,7 +1,6 @@
 package proxy
 
 import (
-	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -10,7 +9,6 @@ import (
 	"time"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
-	litellmdbmodels "github.com/mixaill76/auto_ai_router/internal/litellmdb/models"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -115,97 +113,4 @@ func TestStreamingHandlersDetectFragmentedTerminalErrorsAcrossReads(t *testing.T
 			assert.Contains(t, logCtx.ErrorMsg, tt.wantMarker)
 		})
 	}
-}
-
-func TestProxyRequestPassthroughResponsesTerminalSemanticsForDirectAndProxyCredentials(t *testing.T) {
-	failedChunks := []string{
-		"event: response.failed\n",
-		`data: {"type":"response.`,
-		`failed","response":{"id":"resp-failed","status":"failed","error":{"message":"responses terminal failure"}}}` + "\n\n",
-	}
-	completedChunks := []string{
-		"event: response.completed\n",
-		`data: {"type":"response.com`,
-		`pleted","response":{"id":"resp-completed","object":"response","created_at":1,"status":"completed","model":"gpt-5","output":[],"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2,"input_tokens_details":{},"output_tokens_details":{}}}}` + "\n\n",
-	}
-
-	for _, providerType := range []config.ProviderType{config.ProviderTypeOpenAI, config.ProviderTypeProxy} {
-		for _, streamCase := range []struct {
-			name        string
-			chunks      []string
-			wantStatus  string
-			wantOutcome string
-			wantSession bool
-		}{
-			{name: "fragmented response.failed", chunks: failedChunks, wantStatus: "failure", wantOutcome: "stream_error"},
-			{name: "normal response.completed", chunks: completedChunks, wantStatus: "success", wantOutcome: "completed", wantSession: true},
-		} {
-			t.Run(string(providerType)+"/"+streamCase.name, func(t *testing.T) {
-				events := []string{}
-				sink := &keySpendTestSink{events: &events}
-				prx := NewTestProxyBuilder().
-					WithSingleCredential("responses-upstream", providerType, "https://responses.invalid", "upstream-key").
-					WithSessionSticky(time.Minute).
-					Build()
-				prx.spendLogger = sink
-				prx.client = &http.Client{Transport: fragmentedStreamingRoundTripper{
-					statusCode: http.StatusOK,
-					header:     http.Header{"Content-Type": {"text/event-stream"}},
-					chunks:     stringChunks(streamCase.chunks),
-				}}
-
-				const sessionID = "responses-terminal-session"
-				request := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(
-					`{"model":"gpt-5","input":"hello","stream":true,"session_id":"`+sessionID+`"}`,
-				))
-				request.Header.Set("Authorization", "Bearer master-key")
-				request.Header.Set("Content-Type", "application/json")
-				w := httptest.NewRecorder()
-
-				prx.ProxyRequest(w, request)
-
-				require.Equal(t, http.StatusOK, w.Code)
-				assert.Equal(t, strings.Join(streamCase.chunks, ""), w.Body.String(), "native Responses SSE must remain byte-for-byte passthrough")
-				require.Len(t, sink.replayed, 1)
-				assert.Equal(t, streamCase.wantStatus, sink.replayed[0].Status)
-				metadata := decodeSpendMetadata(t, sink.replayed[0])
-				extension := metadata["spend_logs_metadata"].(map[string]any)
-				assert.Equal(t, streamCase.wantOutcome, extension["outcome"])
-				_, hasSession := prx.sessionStore.Get(sessionID, "gpt-5")
-				assert.Equal(t, streamCase.wantSession, hasSession)
-				if streamCase.wantStatus == "failure" {
-					errorInfo := metadata["error_information"].(map[string]any)
-					assert.Equal(t, float64(http.StatusOK), errorInfo["error_code"])
-					assert.Contains(t, errorInfo["error_message"], "responses terminal failure")
-				}
-			})
-		}
-	}
-}
-
-type fragmentedStreamingRoundTripper struct {
-	statusCode int
-	header     http.Header
-	chunks     [][]byte
-}
-
-func (rt fragmentedStreamingRoundTripper) RoundTrip(request *http.Request) (*http.Response, error) {
-	chunks := make([][]byte, len(rt.chunks))
-	for i, chunk := range rt.chunks {
-		chunks[i] = append([]byte(nil), chunk...)
-	}
-	return &http.Response{
-		StatusCode:    rt.statusCode,
-		Header:        rt.header.Clone(),
-		Body:          &fragmentedStreamReadCloser{chunks: chunks},
-		ContentLength: -1,
-		Request:       request,
-	}, nil
-}
-
-func decodeSpendMetadata(t *testing.T, entry *litellmdbmodels.SpendLogEntry) map[string]any {
-	t.Helper()
-	var metadata map[string]any
-	require.NoError(t, json.Unmarshal([]byte(entry.Metadata), &metadata))
-	return metadata
 }

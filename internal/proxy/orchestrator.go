@@ -67,13 +67,6 @@ func (p *Proxy) orchestrateRequest(
 	if !p.authenticateRequest(w, r, logCtx, isLiteLLMHealthy) {
 		return nil, false
 	}
-	if shouldExposeLiteLLMFinancialHeaders(logCtx) {
-		setLiteLLMKeyLimitHeadersForRequest(w.Header(), logCtx.TokenInfo, logCtx)
-		p.setCommittedKeySpendSnapshot(r.Context(), w.Header(), logCtx)
-		setLiteLLMResponseCostHeaderForRequest(w.Header(), 0, logCtx)
-	} else {
-		clearLiteLLMFinancialHeaders(w.Header())
-	}
 
 	body, modelID, realModelID, streaming, ok := p.readRequestBodyAndSelectModel(w, r, logCtx)
 	if !ok {
@@ -239,12 +232,6 @@ func (p *Proxy) prepareRequestForCredential(
 	body := baseBody
 	proxyBody := baseProxyBody
 	realModelID := baseRealModelID
-	if cred.Type != config.ProviderTypeProxy {
-		// Root-level tags are LiteLLM proxy metadata. The first AIR hop captures
-		// them for SpendLogs; proxy credentials preserve them for the next policy
-		// hop, and only a terminal provider request consumes them.
-		body = stripProviderRequestTags(body, r.Header.Get("Content-Type"))
-	}
 	if cred.Type != config.ProviderTypeProxy && p.modelManager != nil {
 		if credRealName, ok := p.modelManager.GetRealModelNameForCredential(modelID, cred.Name); ok && credRealName != realModelID {
 			p.logger.DebugContext(r.Context(), "Re-resolved real model name for credential",
@@ -283,7 +270,8 @@ func (p *Proxy) prepareRequestForCredential(
 		req.passthroughResponses = true
 		p.logger.DebugContext(r.Context(), "Native Responses API passthrough",
 			"model", modelID, "provider", cred.Type, "streaming", streaming)
-	case responses.HasNativeResponsesForModel(cred.Type, realModelID):
+	case responses.HasNativeResponsesForModel(cred.Type, realModelID) &&
+		(p.modelManager == nil || !p.modelManager.HasPassthroughResponsesOverride(modelID)):
 		req.nativeResponses = true
 		p.logger.DebugContext(r.Context(), "Native Responses converter path",
 			"model", modelID, "provider", cred.Type, "streaming", streaming)
@@ -482,22 +470,6 @@ func (p *Proxy) authenticateRequest(
 		}
 		return false
 	}
-	if !isVirtualKeyAllowedToCallRoute(tokenInfo.AllowedRoutes, r.URL.Path) {
-		errorMessage := fmt.Sprintf(
-			"Virtual key is not allowed to call this route. Only allowed to call routes: %s. Tried to call route: %s",
-			formatLiteLLMAllowedRoutes(tokenInfo.AllowedRoutes),
-			r.URL.Path,
-		)
-		p.logger.WarnContext(r.Context(), "Virtual key route is not allowed",
-			"error_code", http.StatusForbidden,
-			"path", r.URL.Path,
-		)
-		logCtx.Status = "failure"
-		logCtx.HTTPStatus = http.StatusForbidden
-		logCtx.ErrorMsg = errorMessage
-		WriteErrorForbidden(w, errorMessage)
-		return false
-	}
 	p.logger.DebugContext(r.Context(), "Token validated via LiteLLM DB",
 		"user_id", tokenInfo.UserID,
 		"team_id", tokenInfo.TeamID,
@@ -539,27 +511,10 @@ func (p *Proxy) readRequestBodyAndSelectModel(
 		return nil, "", "", false, false
 	}
 
-	if validationErr := validateRequestBody(r.URL.Path, r.Header.Get("Content-Type"), body); validationErr != nil {
-		p.logger.WarnContext(r.Context(), "Invalid request body",
-			"error_code", http.StatusBadRequest,
-			"path", r.URL.Path,
-			"param", validationErr.Param,
-			"error", validationErr.Message,
-		)
-		logCtx.Status = "failure"
-		logCtx.HTTPStatus = http.StatusBadRequest
-		logCtx.ErrorMsg = validationErr.Message
-		param := validationErr.Param
-		WriteJSONError(w, http.StatusBadRequest, validationErr.Message, errorTypeForStatus(http.StatusBadRequest), &param, nil)
-		return nil, "", "", false, false
-	}
-	logCtx.DeclaredToolNames = extractOpenAIChatToolNames(r.URL.Path, body)
-	logCtx.RequestMetadata, logCtx.RequestTags = extractSpendRequestFields(body, r.Header.Get("Content-Type"))
 	modelID, streaming, sessionID, body := extractMetadataFromBody(body, r.Header.Get("Content-Type"))
 	logCtx.PublicModelID = modelID
 	logCtx.ModelID = modelID
 	logCtx.SessionID = sessionID
-	logCtx.Billing = logCtx.Billing.WithPublicModel(modelID)
 
 	if modelID == "" {
 		p.logger.WarnContext(r.Context(), "Model not specified in request body",
@@ -610,9 +565,8 @@ func (p *Proxy) readRequestBodyAndSelectModel(
 	}
 
 	// Resolve additional client-visible names to one exact LiteLLM deployment
-	// identity first. The requested name remains in PublicModelID/Billing so
-	// SpendLogs preserve the user-facing model_group; routing continues through
-	// the canonical public model and then the existing provider-backend alias.
+	// identity first. The requested name remains in PublicModelID while routing
+	// continues through the canonical public model and provider-backend alias.
 	// A trusted LiteLLM hop may submit an exact configured backend whose string
 	// also exists in the client accepted-alias map. Preserve that exact internal
 	// route; non-master callers and non-routable aliases still use the fail-closed
@@ -645,22 +599,6 @@ func (p *Proxy) readRequestBodyAndSelectModel(
 		body = openai.ReplaceModelInBody(body, modelID, resolved)
 		modelID = resolved
 		logCtx.ModelID = modelID
-	}
-
-	// LiteLLM's image-generation handler removes the provider prefix from
-	// OpenAI-compatible backend model names before forwarding to AIR. Restore
-	// only a unique configured model_alias target. The client model ACL above is
-	// intentionally evaluated against the original request before this rewrite.
-	if r.URL.Path == "/v1/images/generations" {
-		if resolved, isShortBackend := p.modelManager.ResolveUniqueAliasedBackendShortName(modelID); isShortBackend {
-			p.logger.DebugContext(r.Context(), "Resolved stripped image backend model",
-				"short_model", modelID,
-				"resolved", resolved,
-			)
-			body = openai.ReplaceModelInBody(body, modelID, resolved)
-			modelID = resolved
-			logCtx.ModelID = modelID
-		}
 	}
 
 	// Resolve models[].model field: replace model in body for provider but keep alias as modelID
@@ -774,7 +712,7 @@ func (p *Proxy) selectCredentialForModel(
 		Type: config.ProviderTypeProxy,
 	}
 
-	if err := p.finalizeDeferredSpend(logCtx); err != nil {
+	if err := p.logSpendToLiteLLMDB(logCtx); err != nil {
 		p.logger.WarnContext(logCtx.Context(), "Failed to queue error log for no credentials",
 			"error", err,
 			"request_id", logCtx.RequestID,

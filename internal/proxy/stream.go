@@ -432,7 +432,6 @@ func (p *Proxy) handleTransformedStreaming(
 
 	// Capture last chunk for usage extraction (Solution 3: Hybrid approach)
 	var lastChunk []byte
-	responseID := responseIDCapture{}
 	detectProviderStreamError := resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices
 	rawProviderStreamError := &proxyStreamErrorCapture{}
 	outputStreamError := &proxyStreamErrorCapture{}
@@ -460,7 +459,6 @@ func (p *Proxy) handleTransformedStreaming(
 			onChunk: func(chunk []byte) {
 				chunkCount++
 
-				logCtx.captureProviderResponseID(&responseID, chunk)
 				if detectProviderStreamError {
 					outputStreamError.Observe(chunk)
 				}
@@ -555,14 +553,12 @@ func (p *Proxy) handleStreamingWithTokens(w http.ResponseWriter, resp *http.Resp
 
 	// Capture last chunk for usage extraction (Solution 3: Hybrid approach)
 	var lastChunk []byte
-	responseID := responseIDCapture{}
 	detectProviderStreamError := resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices
 	providerStreamError := &proxyStreamErrorCapture{}
 
 	onChunk := func(chunk []byte) {
 		chunkCount++
 
-		logCtx.captureProviderResponseID(&responseID, chunk)
 		if detectProviderStreamError {
 			providerStreamError.Observe(chunk)
 		}
@@ -658,8 +654,6 @@ func (p *Proxy) finalizeStreamingLog(logCtx *RequestLogContext, totalTokens int,
 	if logCtx.TokenUsage == nil {
 		logCtx.TokenUsage = &converter.TokenUsage{}
 	}
-	logCtx.Billing = logCtx.Billing.WithProviderResponseID(extractClientVisibleResponseID(lastChunk))
-
 	fallbackPrompt := logCtx.PromptTokensEstimate
 	fallbackCompletion := totalTokens
 
@@ -764,12 +758,13 @@ func (p *Proxy) finalizeStreamingLog(logCtx *RequestLogContext, totalTokens int,
 				logCtx.TokenUsage.ReasoningTokens, logCtx.TokenUsage.CachedInputTokens)
 		}
 	}
-	if err := p.finalizeDeferredSpend(logCtx); err != nil {
+	if err := p.logSpendToLiteLLMDB(logCtx); err != nil {
 		p.logger.WarnContext(logCtx.Context(), "Failed to queue streaming spend log",
 			"error", err,
 			"request_id", logCtx.RequestID,
 		)
 	}
+	logCtx.Logged = true
 }
 
 func markStreamFailure(logCtx *RequestLogContext, err error) {
@@ -1124,14 +1119,12 @@ func (p *Proxy) handlePassthroughResponsesStreaming(
 		completedEventPayload []byte // JSON payload of response.completed (used instead of lastRawChunk)
 		partialSSELine        string // partial SSE line accumulator across buffer reads
 		completion            = newCompletionTokenAccumulator(modelID)
-		responseID            = responseIDCapture{}
 		detectStreamError     = resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices
 		providerStreamError   = &proxyStreamErrorCapture{}
 	)
 
 	onChunk := func(chunk []byte) {
 		chunkCount++
-		logCtx.captureProviderResponseID(&responseID, chunk)
 		if detectStreamError {
 			providerStreamError.Observe(chunk)
 		}

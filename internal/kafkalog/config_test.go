@@ -46,7 +46,7 @@ func TestConfig_Validate(t *testing.T) {
 	}{
 		{
 			name:    "valid minimal",
-			cfg:     &Config{Brokers: []string{"kafka:9092"}, Topic: "t", LogQueueSize: 1, LogBatchSize: 1, LogFlushInterval: time.Second},
+			cfg:     &Config{Brokers: []string{"kafka:9092"}, Topic: "t", LogQueueSize: 1, LogBatchSize: 1, LogFlushInterval: time.Second, LogWorkers: 1},
 			wantErr: false,
 		},
 		{
@@ -87,7 +87,7 @@ func TestConfig_Validate(t *testing.T) {
 		{
 			name: "sasl mechanism with credentials",
 			cfg: &Config{
-				Brokers: []string{"kafka:9092"}, Topic: "t", LogQueueSize: 1, LogBatchSize: 1, LogFlushInterval: time.Second,
+				Brokers: []string{"kafka:9092"}, Topic: "t", LogQueueSize: 1, LogBatchSize: 1, LogFlushInterval: time.Second, LogWorkers: 1,
 				SASLMechanism: "SCRAM-SHA-256", SASLUsername: "u", SASLPassword: "p",
 			},
 			wantErr: false,

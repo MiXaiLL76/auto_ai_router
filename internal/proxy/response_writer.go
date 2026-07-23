@@ -154,6 +154,19 @@ func (p *Proxy) writeProxyResponse(w http.ResponseWriter, resp *ProxyResponse, c
 	responseBody := resp.Body
 	responseBodyChanged := false
 	if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
+		endpoint := endpointFromRequest(clientReq)
+		if logCtx != nil && logCtx.Request != nil {
+			endpoint = endpointFromRequest(logCtx.Request)
+		}
+		normalizedModelBody := normalizeSuccessfulResponseModel(
+			responseBody,
+			endpoint,
+			clientVisibleResponseModel(logCtx, modelID),
+		)
+		if !bytes.Equal(normalizedModelBody, responseBody) {
+			responseBody = normalizedModelBody
+			responseBodyChanged = true
+		}
 		if normalizedBody, changed := modelutils.NormalizeCompletionUsage(responseBody, modelID); changed {
 			responseBody = normalizedBody
 			responseBodyChanged = true
@@ -286,11 +299,9 @@ func (p *Proxy) writeProxyStreamingResponseWithTokens(
 
 	var lastUsage *converter.TokenUsage
 	completion := newCompletionTokenAccumulator(tokenizerModelID)
-	responseID := responseIDCapture{}
 	detectProviderStreamError := resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices
 	providerStreamError := &proxyStreamErrorCapture{}
 	onChunk := func(chunk []byte) {
-		logCtx.captureProviderResponseID(&responseID, chunk)
 		if detectProviderStreamError {
 			providerStreamError.Observe(chunk)
 		}

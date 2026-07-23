@@ -7,55 +7,8 @@ import (
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/modelupdate"
-	"github.com/mixaill76/auto_ai_router/internal/monitoring"
 	"github.com/stretchr/testify/assert"
 )
-
-func TestEffectiveServerWriteTimeoutPreservesResponseGrace(t *testing.T) {
-	tests := []struct {
-		name           string
-		requestTimeout time.Duration
-		writeTimeout   time.Duration
-		want           time.Duration
-	}{
-		{
-			name:           "equal timeout gets response grace",
-			requestTimeout: 30 * time.Second,
-			writeTimeout:   30 * time.Second,
-			want:           35 * time.Second,
-		},
-		{
-			name:           "shorter write timeout gets response grace",
-			requestTimeout: 30 * time.Second,
-			writeTimeout:   20 * time.Second,
-			want:           35 * time.Second,
-		},
-		{
-			name:           "longer write timeout remains configured",
-			requestTimeout: 30 * time.Second,
-			writeTimeout:   60 * time.Second,
-			want:           60 * time.Second,
-		},
-		{
-			name:           "disabled write timeout remains disabled",
-			requestTimeout: 30 * time.Second,
-			writeTimeout:   0,
-			want:           0,
-		},
-		{
-			name:           "unlimited request timeout does not invent deadline",
-			requestTimeout: -1,
-			writeTimeout:   60 * time.Second,
-			want:           60 * time.Second,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, effectiveServerWriteTimeout(tt.requestTimeout, tt.writeTimeout))
-		})
-	}
-}
 
 func TestSplitCredentialModel(t *testing.T) {
 	tests := []struct {
@@ -93,14 +46,6 @@ func TestSplitCredentialModel(t *testing.T) {
 	}
 }
 
-func TestInitializeSpendSinkDisabledDoesNotCreateWriter(t *testing.T) {
-	cfg := &config.Config{SpendLog: config.SpendLogConfig{}}
-	sink := initializeSpendSink(cfg, slog.New(slog.DiscardHandler), monitoring.New(false))
-
-	assert.False(t, sink.IsEnabled())
-	assert.NoError(t, sink.LogSpend(nil))
-}
-
 func TestInitializeModelManagerKeepsBackendRateLimitsBehindClientSurface(t *testing.T) {
 	cfg := &config.Config{
 		Server: config.ServerConfig{DefaultModelsRPM: -1},
@@ -125,19 +70,8 @@ func TestInitializeModelManagerKeepsBackendRateLimitsBehindClientSurface(t *test
 	assert.Equal(t, 7, limiter.GetModelLimitRPM("provider", "backend-chat"))
 	assert.Equal(t, 70, limiter.GetModelLimitTPM("provider", "backend-chat"))
 	assert.Equal(t, -1, limiter.GetModelLimitRPM("provider", "public/chat"))
-	models := manager.GetAllModels()
+	models := manager.GetClientModels()
 	if assert.Len(t, models.Data, 1) {
 		assert.Equal(t, "public/chat", models.Data[0].ID)
 	}
-}
-
-func TestInitializeSpendSinkConnectionFailureIsFailOpen(t *testing.T) {
-	cfg := &config.Config{SpendLog: config.SpendLogConfig{
-		DatabaseURL:          "postgres://%zz",
-		ExpectedDatabaseName: "test-db",
-	}}
-	sink := initializeSpendSink(cfg, slog.New(slog.DiscardHandler), monitoring.New(false))
-
-	assert.False(t, sink.IsEnabled())
-	assert.NoError(t, sink.LogSpend(nil))
 }

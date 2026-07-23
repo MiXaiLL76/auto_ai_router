@@ -14,8 +14,8 @@ type TokenUsage struct {
 	AcceptedPredictionTokens int
 	RejectedPredictionTokens int
 	ImageCount               int // Number of images to generate (1-10)
-	ImageTokens              int // Input image/video tokens included in PromptTokens
-	OutputImageTokens        int // Generated image/video tokens included in CompletionTokens
+	ImageTokens              int // Input image/video tokens
+	OutputImageTokens        int // Generated image/video tokens
 }
 
 // Total returns the sum of prompt and completion tokens.
@@ -37,8 +37,6 @@ type TokenCosts struct {
 	CacheCreationCost float64
 	CachedOutputCost  float64
 	PredictionCost    float64
-	InputImageCost    float64
-	OutputImageCost   float64
 	ImageCost         float64
 	TotalCost         float64
 }

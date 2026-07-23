@@ -130,10 +130,10 @@ func TestTokenInfo_IsBudgetExceeded(t *testing.T) {
 		assert.False(t, info.IsBudgetExceeded())
 	})
 
-	t.Run("spend == max_budget - exceeded (LiteLLM 1.90.0 key check uses >=)", func(t *testing.T) {
+	t.Run("spend == max_budget - not exceeded (embedded uses >)", func(t *testing.T) {
 		maxBudget := 100.0
 		info := &models.TokenInfo{Spend: 100, MaxBudget: &maxBudget}
-		assert.True(t, info.IsBudgetExceeded())
+		assert.False(t, info.IsBudgetExceeded())
 	})
 
 	t.Run("spend > max_budget - exceeded", func(t *testing.T) {
@@ -326,14 +326,6 @@ func TestTokenInfo_Validate(t *testing.T) {
 		assert.ErrorIs(t, info.Validate("gpt-4"), models.ErrModelNotAllowed)
 	})
 
-	t.Run("dangling project reference fails closed", func(t *testing.T) {
-		info := &models.TokenInfo{
-			Models:          []string{"gpt-4"},
-			ProjectID:       "deleted-project",
-			ProjectDangling: true,
-		}
-		assert.ErrorIs(t, info.Validate("gpt-4"), models.ErrModelNotAllowed)
-	})
 }
 
 func TestCache_Auth_SetGet(t *testing.T) {
@@ -680,42 +672,6 @@ func TestAuthenticator_CacheStats(t *testing.T) {
 	assert.Equal(t, 1, stats.Size)
 	assert.Greater(t, stats.Hits, uint64(0))
 	assert.Greater(t, stats.Misses, uint64(0))
-}
-
-func TestDecodeTokenMetadataExtractsOnlyStringArrayTags(t *testing.T) {
-	tests := []struct {
-		name         string
-		raw          string
-		wantMetadata map[string]interface{}
-		wantTags     []string
-	}{
-		{
-			name:         "tags array",
-			raw:          `{"fixture":"migration","tags":["primary","chat"]}`,
-			wantMetadata: map[string]interface{}{"fixture": "migration", "tags": []interface{}{"primary", "chat"}},
-			wantTags:     []string{"primary", "chat"},
-		},
-		{
-			name:         "missing tags",
-			raw:          `{"fixture":"migration"}`,
-			wantMetadata: map[string]interface{}{"fixture": "migration"},
-		},
-		{
-			name:         "scalar tags rejected",
-			raw:          `{"tags":"must-not-be-coerced"}`,
-			wantMetadata: map[string]interface{}{"tags": "must-not-be-coerced"},
-		},
-		{name: "invalid metadata", raw: `{`, wantMetadata: nil},
-		{name: "SQL null metadata", raw: "", wantMetadata: nil},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			metadata, tags := decodeTokenMetadata([]byte(tt.raw))
-			assert.Equal(t, tt.wantMetadata, metadata)
-			assert.Equal(t, tt.wantTags, tags)
-		})
-	}
 }
 
 func TestAuthenticator_ValidateToken_NonSKToken(t *testing.T) {

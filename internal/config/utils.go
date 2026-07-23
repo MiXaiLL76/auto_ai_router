@@ -102,6 +102,8 @@ func PrintConfig(logger *slog.Logger, cfg *Config) {
 		"health_check_path", cfg.Monitoring.HealthCheckPath,
 		"log_errors", cfg.Monitoring.LogErrors,
 		"errors_log_path", cfg.Monitoring.ErrorsLogPath,
+		"pprof_enabled", cfg.Monitoring.PprofEnabled,
+		"pprof_port", cfg.Monitoring.PprofPort,
 	)
 
 	// Fail2Ban config
@@ -199,6 +201,7 @@ func PrintConfig(logger *slog.Logger, cfg *Config) {
 			"log_queue_size", cfg.LiteLLMDB.LogQueueSize,
 			"log_batch_size", cfg.LiteLLMDB.LogBatchSize,
 			"log_flush_interval", cfg.LiteLLMDB.LogFlushInterval.String(),
+			"log_workers", cfg.LiteLLMDB.LogWorkers,
 			"disable_spend_logs_write", cfg.LiteLLMDB.DisableSpendLogsWrite,
 			"enforce_budget_reservation", cfg.LiteLLMDB.EnforceBudgetReservation,
 			"budget_reservation_ttl", cfg.LiteLLMDB.BudgetReservationTTL.String(),
@@ -207,22 +210,6 @@ func PrintConfig(logger *slog.Logger, cfg *Config) {
 		)
 	} else {
 		logger.Info("litellm_db", "status", "DISABLED")
-	}
-
-	if cfg.SpendLog.IsEnabled() {
-		logger.Info("spend_log (ENABLED)",
-			"database_url", security.MaskDatabaseURL(cfg.SpendLog.DatabaseURL),
-			"expected_database_name", cfg.SpendLog.ExpectedDatabaseName,
-			"api_base", cfg.SpendLog.APIBase,
-			"max_conns", cfg.SpendLog.MaxConns,
-			"min_conns", cfg.SpendLog.MinConns,
-			"log_queue_size", cfg.SpendLog.LogQueueSize,
-			"log_batch_size", cfg.SpendLog.LogBatchSize,
-			"log_flush_interval", cfg.SpendLog.LogFlushInterval.String(),
-			"auth_context_keys", len(cfg.SpendLog.AuthContext.PublicKeys),
-		)
-	} else {
-		logger.Info("spend_log", "status", "DISABLED")
 	}
 
 	// Kafka spend-log config
@@ -238,6 +225,7 @@ func PrintConfig(logger *slog.Logger, cfg *Config) {
 			"log_queue_size", cfg.Kafka.LogQueueSize,
 			"log_batch_size", cfg.Kafka.LogBatchSize,
 			"log_flush_interval", cfg.Kafka.LogFlushInterval.String(),
+			"log_workers", cfg.Kafka.LogWorkers,
 			"tls_enabled", cfg.Kafka.TLSEnabled,
 			"sasl_mechanism", cfg.Kafka.SASLMechanism,
 			"sasl_username", cfg.Kafka.SASLUsername,

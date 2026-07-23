@@ -28,8 +28,6 @@ client_model_ids:
   - os.environ/CANONICAL_PUBLIC_MODEL
 public_model_alias:
   gpt-4.1: os.environ/CANONICAL_PUBLIC_MODEL
-accepted_model_alias:
-  hidden-gpt-4.1: os.environ/CANONICAL_PUBLIC_MODEL
 `), 0o600))
 
 	cfg, err := Load(path)
@@ -37,7 +35,6 @@ accepted_model_alias:
 	assert.Equal(t, map[string]string{"openai/gpt-4.1": "gpt-4.1"}, cfg.ModelAlias)
 	assert.Equal(t, []string{"openai/gpt-4.1"}, cfg.ClientModelIDs)
 	assert.Equal(t, map[string]string{"gpt-4.1": "openai/gpt-4.1"}, cfg.PublicModelAlias)
-	assert.Equal(t, map[string]string{"hidden-gpt-4.1": "openai/gpt-4.1"}, cfg.AcceptedModelAlias)
 }
 
 func TestClientModelIDsFailClosedOnDuplicateAndOutOfSurfaceAlias(t *testing.T) {

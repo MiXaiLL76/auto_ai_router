@@ -144,29 +144,6 @@ func (p *Proxy) estimateRequestCost(modelID, realModelID string, body []byte) (f
 	return price.CalculateCost(usage), true
 }
 
-func (p *Proxy) actualRequestCost(logCtx *RequestLogContext) float64 {
-	if p == nil || p.priceRegistry == nil || logCtx == nil || logCtx.TokenUsage == nil {
-		return 0
-	}
-	price := p.priceRegistry.GetPrice(logCtx.RealModelID)
-	if price == nil && logCtx.RealModelID != logCtx.ModelID {
-		price = p.priceRegistry.GetPrice(logCtx.ModelID)
-	}
-	if price == nil {
-		return 0
-	}
-	usage := *logCtx.TokenUsage
-	if logCtx.IsImageGeneration {
-		if usage.OutputImageTokens == 0 && usage.CompletionTokens > 0 {
-			usage.OutputImageTokens = usage.CompletionTokens
-		}
-		if usage.ImageCount == 0 {
-			usage.ImageCount = logCtx.ImageCount
-		}
-	}
-	return price.CalculateCost(&usage)
-}
-
 func (p *Proxy) enforceBudgetAndRateLimits(
 	w http.ResponseWriter,
 	r *http.Request,
