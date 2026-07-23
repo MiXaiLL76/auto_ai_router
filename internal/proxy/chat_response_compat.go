@@ -4,8 +4,11 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 )
+
+const maxSSEModelRewriteLineBytes = 1024 * 1024
 
 // modelBearingResponseRoutes is the product surface whose successful response
 // schema exposes a client-visible model. Image responses intentionally do not
@@ -25,8 +28,8 @@ func normalizeSuccessfulResponseModel(body []byte, endpoint, publicModel string)
 		return body
 	}
 
-	var response map[string]interface{}
-	if err := json.Unmarshal(body, &response); err != nil || response == nil {
+	response, err := decodeJSONObject(body)
+	if err != nil || response == nil {
 		return body
 	}
 	if response["model"] == publicModel {
@@ -85,6 +88,8 @@ type responseModelStreamReader struct {
 	publicModel string
 	pending     []byte
 	pendingErr  error
+	line        []byte
+	passthrough bool
 }
 
 func (r *responseModelStreamReader) Read(dst []byte) (int, error) {
@@ -97,11 +102,35 @@ func (r *responseModelStreamReader) Read(dst []byte) (int, error) {
 			r.pendingErr = nil
 			return 0, err
 		}
-		line, err := r.source.ReadBytes('\n')
-		if len(line) == 0 {
+		fragment, err := r.source.ReadSlice('\n')
+		if len(fragment) == 0 {
 			return 0, err
 		}
-		r.pending = normalizeSSEDataLineModel(line, r.publicModel)
+		if r.passthrough {
+			r.pending = append(r.pending, fragment...)
+			if !errors.Is(err, bufio.ErrBufferFull) {
+				r.passthrough = false
+				r.pendingErr = err
+			}
+			continue
+		}
+		if len(r.line)+len(fragment) > maxSSEModelRewriteLineBytes {
+			r.pending = append(r.pending, r.line...)
+			r.pending = append(r.pending, fragment...)
+			r.line = r.line[:0]
+			if errors.Is(err, bufio.ErrBufferFull) {
+				r.passthrough = true
+			} else {
+				r.pendingErr = err
+			}
+			continue
+		}
+		r.line = append(r.line, fragment...)
+		if errors.Is(err, bufio.ErrBufferFull) {
+			continue
+		}
+		r.pending = normalizeSSEDataLineModel(r.line, r.publicModel)
+		r.line = nil
 		r.pendingErr = err
 	}
 
@@ -130,8 +159,8 @@ func normalizeSSEDataLineModel(line []byte, publicModel string) []byte {
 	if len(payload) == 0 || bytes.Equal(payload, []byte("[DONE]")) {
 		return line
 	}
-	var event map[string]interface{}
-	if err := json.Unmarshal(payload, &event); err != nil || event == nil {
+	event, err := decodeJSONObject(payload)
+	if err != nil || event == nil {
 		return line
 	}
 	if rawError, exists := event["error"]; exists && rawError != nil {
@@ -172,4 +201,21 @@ func normalizeSSEDataLineModel(line []byte, publicModel string) []byte {
 	result = append(result, normalized...)
 	result = append(result, newline...)
 	return result
+}
+
+func decodeJSONObject(data []byte) (map[string]interface{}, error) {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	var object map[string]interface{}
+	if err := decoder.Decode(&object); err != nil {
+		return nil, err
+	}
+	var trailing interface{}
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return nil, errors.New("multiple JSON values")
+		}
+		return nil, err
+	}
+	return object, nil
 }

@@ -1,8 +1,10 @@
 package router
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -685,6 +687,32 @@ func TestServeHTTPPublicPreflightDoesNotEnableWildcardCORS(t *testing.T) {
 	assert.Empty(t, w.Header().Get("Access-Control-Allow-Origin"))
 	assert.Empty(t, w.Header().Get("Access-Control-Allow-Headers"))
 	assert.Empty(t, w.Header().Get("Access-Control-Allow-Methods"))
+}
+
+func TestServeHTTPWebSocketUpgradeIsCaseInsensitive(t *testing.T) {
+	prx := createTestProxy()
+	router := New(prx, nil, testhelpers.NewTestMonitoringConfig("/health", false, ""), testhelpers.NewTestLogger(), nil)
+	server := newIPv4Server(t, router)
+	defer server.Close()
+
+	conn, err := net.Dial("tcp", strings.TrimPrefix(server.URL, "http://"))
+	require.NoError(t, err)
+	defer func() { _ = conn.Close() }()
+
+	request := "GET /v1/responses HTTP/1.1\r\n" +
+		"Host: test\r\n" +
+		"Connection: Upgrade\r\n" +
+		"Upgrade: WebSocket\r\n" +
+		"Sec-WebSocket-Version: 13\r\n" +
+		"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n" +
+		"Authorization: Bearer test-master-key\r\n\r\n"
+	_, err = io.WriteString(conn, request)
+	require.NoError(t, err)
+
+	response, err := http.ReadResponse(bufio.NewReader(conn), &http.Request{Method: http.MethodGet})
+	require.NoError(t, err)
+	defer func() { _ = response.Body.Close() }()
+	assert.Equal(t, http.StatusSwitchingProtocols, response.StatusCode)
 }
 
 func TestServeHTTPRejectsUnsupportedMethodsBeforeAuth(t *testing.T) {

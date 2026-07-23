@@ -297,7 +297,8 @@ func (p *Proxy) writeFallbackResponse(
 			// corrupt the response).
 			// Still propagate partial token usage so the defer-logged spend entry isn't empty.
 			if streamUsage != nil && logCtx != nil {
-				if streamUsage.PromptTokens == 0 && logCtx.PromptTokensEstimate > 0 {
+				if streamUsage.PromptTokens == 0 && logCtx.PromptTokensEstimate > 0 &&
+					logCtx.UsageSource != "provider" {
 					streamUsage.PromptTokens = logCtx.PromptTokensEstimate
 				}
 				logCtx.TokenUsage = streamUsage
@@ -316,7 +317,8 @@ func (p *Proxy) writeFallbackResponse(
 		}
 		if streamUsage != nil && logCtx != nil {
 			// Backfill PromptTokens from estimate when provider didn't include it.
-			if streamUsage.PromptTokens == 0 && logCtx.PromptTokensEstimate > 0 {
+			if streamUsage.PromptTokens == 0 && logCtx.PromptTokensEstimate > 0 &&
+				logCtx.UsageSource != "provider" {
 				streamUsage.PromptTokens = logCtx.PromptTokensEstimate
 			}
 			logCtx.TokenUsage = streamUsage

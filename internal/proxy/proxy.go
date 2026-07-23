@@ -827,7 +827,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 				if streamUsage != nil {
 					// Backfill PromptTokens from estimate when provider didn't include it
 					// (e.g. stream cut before usage chunk, or provider omits prompt tokens).
-					if streamUsage.PromptTokens == 0 {
+					if streamUsage.PromptTokens == 0 && logCtx.UsageSource != "provider" {
 						streamUsage.PromptTokens = logCtx.PromptTokensEstimate
 					}
 					logCtx.TokenUsage = streamUsage

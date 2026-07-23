@@ -527,9 +527,12 @@ func TestOpenAIStreamUsageExtractor(t *testing.T) {
 			expectNil: true,
 		},
 		{
-			name:      "zero tokens (invalid)",
+			name:      "explicit zero usage",
 			chunk:     []byte(`{"usage":{"prompt_tokens":0,"completion_tokens":0}}`),
-			expectNil: true,
+			expectNil: false,
+			expectUsage: func(u *StreamUsageInfo) bool {
+				return u.PromptTokens == 0 && u.CompletionTokens == 0
+			},
 		},
 		{
 			name:      "invalid JSON",
@@ -698,9 +701,12 @@ func TestAnthropicStreamUsageExtractor(t *testing.T) {
 			expectNil: true,
 		},
 		{
-			name:      "zero tokens (invalid)",
+			name:      "explicit zero usage",
 			chunk:     []byte(`{"usage":{"input_tokens":0,"output_tokens":0}}`),
-			expectNil: true,
+			expectNil: false,
+			expectUsage: func(u *StreamUsageInfo) bool {
+				return u.PromptTokens == 0 && u.CompletionTokens == 0
+			},
 		},
 	}
 

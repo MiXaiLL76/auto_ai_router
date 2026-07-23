@@ -101,9 +101,9 @@ func (o *openAIStreamUsageExtractor) ExtractUsage(chunk []byte) *StreamUsageInfo
 // Format: {"usage":{"prompt_tokens":N,"completion_tokens":N,...}}
 func (o *openAIStreamUsageExtractor) extractChatCompletionUsage(payload []byte) *StreamUsageInfo {
 	var data struct {
-		Usage struct {
-			PromptTokens        int `json:"prompt_tokens"`
-			CompletionTokens    int `json:"completion_tokens"`
+		Usage *struct {
+			PromptTokens        *int `json:"prompt_tokens"`
+			CompletionTokens    *int `json:"completion_tokens"`
 			PromptTokensDetails struct {
 				CachedTokens        int `json:"cached_tokens,omitempty"`
 				CacheCreationTokens int `json:"cache_creation_tokens,omitempty"`
@@ -126,7 +126,7 @@ func (o *openAIStreamUsageExtractor) extractChatCompletionUsage(payload []byte) 
 		return nil
 	}
 
-	if data.Usage.PromptTokens == 0 && data.Usage.CompletionTokens == 0 {
+	if data.Usage == nil || (data.Usage.PromptTokens == nil && data.Usage.CompletionTokens == nil) {
 		return nil
 	}
 
@@ -136,8 +136,8 @@ func (o *openAIStreamUsageExtractor) extractChatCompletionUsage(payload []byte) 
 	}
 
 	return &StreamUsageInfo{
-		PromptTokens:             data.Usage.PromptTokens,
-		CompletionTokens:         data.Usage.CompletionTokens,
+		PromptTokens:             intValue(data.Usage.PromptTokens),
+		CompletionTokens:         intValue(data.Usage.CompletionTokens),
 		CachedTokens:             data.Usage.PromptTokensDetails.CachedTokens,
 		CacheCreationTokens:      cacheCreationTokens,
 		AudioInputTokens:         data.Usage.PromptTokensDetails.AudioTokens,
@@ -174,7 +174,7 @@ func (o *openAIStreamUsageExtractor) extractResponsesAPIUsage(payload []byte) *S
 	if usage == nil {
 		usage = data.Usage
 	}
-	if usage == nil || (usage.InputTokens == 0 && usage.OutputTokens == 0) {
+	if usage == nil || (usage.InputTokens == nil && usage.OutputTokens == nil) {
 		return nil
 	}
 
@@ -184,8 +184,8 @@ func (o *openAIStreamUsageExtractor) extractResponsesAPIUsage(payload []byte) *S
 	}
 
 	return &StreamUsageInfo{
-		PromptTokens:             usage.InputTokens,
-		CompletionTokens:         usage.OutputTokens,
+		PromptTokens:             intValue(usage.InputTokens),
+		CompletionTokens:         intValue(usage.OutputTokens),
 		CachedTokens:             usage.InputTokensDetails.CachedTokens,
 		CacheCreationTokens:      cacheCreationTokens,
 		AudioInputTokens:         usage.InputTokensDetails.AudioTokens,
@@ -201,8 +201,8 @@ func (o *openAIStreamUsageExtractor) extractResponsesAPIUsage(payload []byte) *S
 
 // responsesAPIUsage represents the usage object in OpenAI Responses API format.
 type responsesAPIUsage struct {
-	InputTokens        int `json:"input_tokens"`
-	OutputTokens       int `json:"output_tokens"`
+	InputTokens        *int `json:"input_tokens"`
+	OutputTokens       *int `json:"output_tokens"`
 	InputTokensDetails struct {
 		CachedTokens        int `json:"cached_tokens,omitempty"`
 		CacheCreationTokens int `json:"cache_creation_tokens,omitempty"`
@@ -229,11 +229,11 @@ func (a *anthropicStreamUsageExtractor) ExtractUsage(chunk []byte) *StreamUsageI
 	// Usage appears in the message_delta event at the end of streaming
 
 	var data struct {
-		Usage struct {
-			InputTokens              int `json:"input_tokens"`
-			OutputTokens             int `json:"output_tokens"`
-			CacheCreationInputTokens int `json:"cache_creation_input_tokens,omitempty"`
-			CacheReadInputTokens     int `json:"cache_read_input_tokens,omitempty"`
+		Usage *struct {
+			InputTokens              *int `json:"input_tokens"`
+			OutputTokens             *int `json:"output_tokens"`
+			CacheCreationInputTokens int  `json:"cache_creation_input_tokens,omitempty"`
+			CacheReadInputTokens     int  `json:"cache_read_input_tokens,omitempty"`
 		} `json:"usage"`
 	}
 
@@ -243,14 +243,13 @@ func (a *anthropicStreamUsageExtractor) ExtractUsage(chunk []byte) *StreamUsageI
 			continue
 		}
 
-		// Check if usage info is present
-		if data.Usage.InputTokens == 0 && data.Usage.OutputTokens == 0 {
+		if data.Usage == nil || (data.Usage.InputTokens == nil && data.Usage.OutputTokens == nil) {
 			continue
 		}
 
 		return &StreamUsageInfo{
-			PromptTokens:        data.Usage.InputTokens,
-			CompletionTokens:    data.Usage.OutputTokens,
+			PromptTokens:        intValue(data.Usage.InputTokens),
+			CompletionTokens:    intValue(data.Usage.OutputTokens),
 			CacheCreationTokens: data.Usage.CacheCreationInputTokens,
 			CacheReadTokens:     data.Usage.CacheReadInputTokens,
 			// Anthropic separates cache_creation (cached prompt tokens)
@@ -260,6 +259,13 @@ func (a *anthropicStreamUsageExtractor) ExtractUsage(chunk []byte) *StreamUsageI
 	}
 
 	return nil
+}
+
+func intValue(value *int) int {
+	if value == nil {
+		return 0
+	}
+	return *value
 }
 
 // extractJSONPayloadsFromStreamChunk extracts JSON payload candidates from raw stream chunks.
@@ -715,10 +721,10 @@ func (p *Proxy) finalizeStreamingLog(logCtx *RequestLogContext, totalTokens int,
 		}
 	}
 
-	if logCtx.TokenUsage.PromptTokens == 0 {
+	if !providerUsage && logCtx.TokenUsage.PromptTokens == 0 {
 		logCtx.TokenUsage.PromptTokens = fallbackPrompt
 	}
-	if logCtx.TokenUsage.CompletionTokens == 0 {
+	if !providerUsage && logCtx.TokenUsage.CompletionTokens == 0 {
 		logCtx.TokenUsage.CompletionTokens = fallbackCompletion
 	}
 	if providerUsage {

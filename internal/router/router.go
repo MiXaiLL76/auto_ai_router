@@ -167,7 +167,7 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	}
 
 	// Handle WebSocket upgrade on /v1/responses
-	if req.URL.Path == "/v1/responses" && req.Header.Get("Upgrade") == "websocket" {
+	if req.URL.Path == "/v1/responses" && strings.EqualFold(req.Header.Get("Upgrade"), "websocket") {
 		r.proxy.HandleWebSocketResponses(w, req)
 		return
 	}
