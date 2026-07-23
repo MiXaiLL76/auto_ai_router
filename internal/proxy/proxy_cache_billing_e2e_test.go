@@ -16,19 +16,22 @@ import (
 func TestProxyRequest_CacheBillingLogsLiteLLMSpend(t *testing.T) {
 	tests := []struct {
 		name                  string
-		upstreamUsageHeader   bool
+		upstreamUsageHeader   string
 		upstreamAudioTokens   int
+		expectedUsageHeader   string
 		expectedLoggedAudioIn int
 	}{
 		{
 			name:                  "raw OpenAI-compatible proxy subtracts cached audio",
 			upstreamAudioTokens:   100,
+			expectedUsageHeader:   aarUsageAudioTokensIncludeCached,
 			expectedLoggedAudioIn: 60,
 		},
 		{
 			name:                  "AIR-normalized proxy header keeps non-cached audio without credential config",
-			upstreamUsageHeader:   true,
+			upstreamUsageHeader:   aarUsageAudioTokensExcludeCached,
 			upstreamAudioTokens:   60,
+			expectedUsageHeader:   aarUsageAudioTokensExcludeCached,
 			expectedLoggedAudioIn: 60,
 		},
 	}
@@ -52,11 +55,7 @@ func TestProxyRequest_CacheBillingLogsLiteLLMSpend(t *testing.T) {
 			prx.ProxyRequest(w, req)
 
 			require.Equal(t, http.StatusOK, w.Code)
-			if tt.upstreamUsageHeader {
-				assert.Equal(t, aarUsageAudioTokensExcludeCached, w.Header().Get(HeaderAARUsageAudioTokens))
-			} else {
-				assert.Empty(t, w.Header().Get(HeaderAARUsageAudioTokens))
-			}
+			assert.Equal(t, tt.expectedUsageHeader, w.Header().Get(HeaderAARUsageAudioTokens))
 			require.JSONEq(t, `{"role":"assistant","content":"ok"}`, extractMessage(t, w.Body.String()))
 			require.Len(t, dbStub.loggedEntries, 1)
 
@@ -85,19 +84,22 @@ func TestProxyRequest_CacheBillingLogsLiteLLMSpend(t *testing.T) {
 func TestProxyRequest_StreamingCacheBillingLogsLiteLLMSpend(t *testing.T) {
 	tests := []struct {
 		name                  string
-		upstreamUsageHeader   bool
+		upstreamUsageHeader   string
 		upstreamAudioTokens   int
+		expectedUsageHeader   string
 		expectedLoggedAudioIn int
 	}{
 		{
 			name:                  "raw OpenAI-compatible proxy subtracts cached audio",
 			upstreamAudioTokens:   100,
+			expectedUsageHeader:   aarUsageAudioTokensIncludeCached,
 			expectedLoggedAudioIn: 60,
 		},
 		{
 			name:                  "AIR-normalized proxy header keeps non-cached audio without credential config",
-			upstreamUsageHeader:   true,
+			upstreamUsageHeader:   aarUsageAudioTokensExcludeCached,
 			upstreamAudioTokens:   60,
+			expectedUsageHeader:   aarUsageAudioTokensExcludeCached,
 			expectedLoggedAudioIn: 60,
 		},
 	}
@@ -122,11 +124,7 @@ func TestProxyRequest_StreamingCacheBillingLogsLiteLLMSpend(t *testing.T) {
 			prx.ProxyRequest(w, req)
 
 			require.Equal(t, http.StatusOK, w.Code)
-			if tt.upstreamUsageHeader {
-				assert.Equal(t, aarUsageAudioTokensExcludeCached, w.Header().Get(HeaderAARUsageAudioTokens))
-			} else {
-				assert.Empty(t, w.Header().Get(HeaderAARUsageAudioTokens))
-			}
+			assert.Equal(t, tt.expectedUsageHeader, w.Header().Get(HeaderAARUsageAudioTokens))
 			assert.Contains(t, w.Body.String(), "data: [DONE]")
 			require.Len(t, dbStub.loggedEntries, 1)
 
@@ -137,6 +135,59 @@ func TestProxyRequest_StreamingCacheBillingLogsLiteLLMSpend(t *testing.T) {
 			assert.Equal(t, 1090.0, entry.Spend)
 
 			metadata := decodeMetadata(t, entry.Metadata)
+			usageObject := metadata["usage_object"].(map[string]interface{})
+			promptDetails := usageObject["prompt_tokens_details"].(map[string]interface{})
+			assert.Equal(t, float64(tt.expectedLoggedAudioIn), promptDetails["audio_tokens"])
+			assert.Equal(t, float64(80), promptDetails["cached_tokens"])
+			assert.Equal(t, float64(40), promptDetails["cached_audio_tokens"])
+		})
+	}
+}
+
+func TestProxyRequest_AIRCredentialCacheBillingUsesUsageContract(t *testing.T) {
+	tests := []struct {
+		name                  string
+		upstreamUsageHeader   string
+		upstreamAudioTokens   int
+		expectedLoggedAudioIn int
+	}{
+		{
+			name:                  "AIR upstream says audio includes cached audio",
+			upstreamUsageHeader:   aarUsageAudioTokensIncludeCached,
+			upstreamAudioTokens:   100,
+			expectedLoggedAudioIn: 60,
+		},
+		{
+			name:                  "AIR upstream says audio excludes cached audio",
+			upstreamUsageHeader:   aarUsageAudioTokensExcludeCached,
+			upstreamAudioTokens:   60,
+			expectedLoggedAudioIn: 60,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			upstream := newCacheBillingUpstream(t, false, tt.upstreamAudioTokens, tt.upstreamUsageHeader)
+			defer upstream.Close()
+
+			dbStub := &stubLiteLLMManager{}
+			prx := newCacheBillingProxyWithType(t, config.ProviderTypeAIR, upstream.URL, dbStub)
+
+			req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{
+				"model": "gpt-cache",
+				"messages": [{"role": "user", "content": "hello"}]
+			}`))
+			req.Header.Set("Authorization", "Bearer master-key")
+			req.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+
+			prx.ProxyRequest(w, req)
+
+			require.Equal(t, http.StatusOK, w.Code)
+			assert.Equal(t, tt.upstreamUsageHeader, w.Header().Get(HeaderAARUsageAudioTokens))
+			require.Len(t, dbStub.loggedEntries, 1)
+
+			metadata := decodeMetadata(t, dbStub.loggedEntries[0].Metadata)
 			usageObject := metadata["usage_object"].(map[string]interface{})
 			promptDetails := usageObject["prompt_tokens_details"].(map[string]interface{})
 			assert.Equal(t, float64(tt.expectedLoggedAudioIn), promptDetails["audio_tokens"])
@@ -218,9 +269,15 @@ func TestProxyRequest_ConvertedResponsesEmitsNormalizedUsageHeaderAndLogsSpend(t
 func newCacheBillingProxy(t *testing.T, upstreamURL string, dbStub *stubLiteLLMManager) *Proxy {
 	t.Helper()
 
+	return newCacheBillingProxyWithType(t, config.ProviderTypeProxy, upstreamURL, dbStub)
+}
+
+func newCacheBillingProxyWithType(t *testing.T, providerType config.ProviderType, upstreamURL string, dbStub *stubLiteLLMManager) *Proxy {
+	t.Helper()
+
 	cred := config.CredentialConfig{
 		Name:    "proxy-cache",
-		Type:    config.ProviderTypeProxy,
+		Type:    providerType,
 		BaseURL: upstreamURL,
 		APIKey:  "upstream-key",
 		RPM:     100,
@@ -253,7 +310,7 @@ func installCacheBillingPrices(prx *Proxy) {
 	prx.priceRegistry = registry
 }
 
-func newCacheBillingUpstream(t *testing.T, stream bool, audioTokens int, normalizedUsageHeader bool) *httptest.Server {
+func newCacheBillingUpstream(t *testing.T, stream bool, audioTokens int, usageHeader string) *httptest.Server {
 	t.Helper()
 
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -261,8 +318,8 @@ func newCacheBillingUpstream(t *testing.T, stream bool, audioTokens int, normali
 		require.Equal(t, "Bearer upstream-key", r.Header.Get("Authorization"))
 
 		w.Header().Set("Content-Type", "application/json")
-		if normalizedUsageHeader {
-			markAudioUsageExcludesCached(w.Header())
+		if usageHeader != "" {
+			w.Header().Set(HeaderAARUsageAudioTokens, usageHeader)
 		}
 		if stream {
 			w.Header().Set("Content-Type", "text/event-stream")

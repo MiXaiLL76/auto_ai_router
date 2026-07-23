@@ -46,7 +46,7 @@ func (p *Proxy) TraceCheckScoped(ctx context.Context, depth int, visibility scop
 
 	var proxyCreds []config.CredentialConfig
 	for _, cred := range visibleCredentials(p.balancer.GetCredentialsSnapshot(), visibility) {
-		if cred.Type == config.ProviderTypeProxy {
+		if cred.IsProxyLike() {
 			proxyCreds = append(proxyCreds, cred)
 		}
 	}

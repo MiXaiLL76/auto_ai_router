@@ -32,6 +32,35 @@ func TestTokenUsageExtractionOptionsForResponse(t *testing.T) {
 			includes: false,
 		},
 		{
+			name: "AIR response header marks raw OpenAI-compatible usage",
+			cred: &config.CredentialConfig{Type: config.ProviderTypeProxy},
+			headers: http.Header{
+				HeaderAARUsageAudioTokens: []string{aarUsageAudioTokensIncludeCached},
+			},
+			includes: true,
+		},
+		{
+			name:     "AIR provider without header falls back to OpenAI semantics",
+			cred:     &config.CredentialConfig{Type: config.ProviderTypeAIR},
+			includes: true,
+		},
+		{
+			name: "AIR provider normalized response header",
+			cred: &config.CredentialConfig{Type: config.ProviderTypeAIR},
+			headers: http.Header{
+				HeaderAARUsageAudioTokens: []string{aarUsageAudioTokensExcludeCached},
+			},
+			includes: false,
+		},
+		{
+			name: "AIR provider raw response header",
+			cred: &config.CredentialConfig{Type: config.ProviderTypeAIR},
+			headers: http.Header{
+				HeaderAARUsageAudioTokens: []string{aarUsageAudioTokensIncludeCached},
+			},
+			includes: true,
+		},
+		{
 			name: "explicit OpenAI proxy",
 			cred: &config.CredentialConfig{
 				Type:             config.ProviderTypeProxy,
@@ -100,6 +129,24 @@ func TestProxyUsageContractCachedAudioMatrix(t *testing.T) {
 		{
 			name: "AIR-normalized proxy response header preserves non-cached audio",
 			cred: config.CredentialConfig{Type: config.ProviderTypeProxy},
+			headers: http.Header{
+				HeaderAARUsageAudioTokens: []string{aarUsageAudioTokensExcludeCached},
+			},
+			audio:     60,
+			wantAudio: 60,
+		},
+		{
+			name: "AIR provider raw response header subtracts cached audio",
+			cred: config.CredentialConfig{Type: config.ProviderTypeAIR},
+			headers: http.Header{
+				HeaderAARUsageAudioTokens: []string{aarUsageAudioTokensIncludeCached},
+			},
+			audio:     100,
+			wantAudio: 60,
+		},
+		{
+			name: "AIR provider normalized response header preserves non-cached audio",
+			cred: config.CredentialConfig{Type: config.ProviderTypeAIR},
 			headers: http.Header{
 				HeaderAARUsageAudioTokens: []string{aarUsageAudioTokensExcludeCached},
 			},

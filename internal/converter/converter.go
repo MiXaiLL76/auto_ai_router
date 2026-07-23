@@ -139,8 +139,9 @@ func (c *ProviderConverter) RequestFrom(body []byte) ([]byte, error) {
 		}
 		return body, nil
 	default:
-		// ProviderTypeOpenAI, ProviderTypeProxy, and others: convert non-function tools
-		// (web_search, web_search_preview) to web_search_options, then pass through.
+		// ProviderTypeOpenAI, ProviderTypeProxy, ProviderTypeAIR, and others:
+		// convert non-function tools (web_search, web_search_preview) to
+		// web_search_options, then pass through.
 		body = openaiconv.ConvertWebSearchTools(body)
 
 		// gpt-image-1 family does not support the response_format parameter in
@@ -299,7 +300,7 @@ func (c *ProviderConverter) RewrittenContentType() string {
 // Passthrough providers use the OpenAI wire format natively.
 func (c *ProviderConverter) IsPassthrough() bool {
 	switch c.providerType {
-	case config.ProviderTypeOpenAI, config.ProviderTypeProxy:
+	case config.ProviderTypeOpenAI, config.ProviderTypeProxy, config.ProviderTypeAIR:
 		return true
 	default:
 		return false

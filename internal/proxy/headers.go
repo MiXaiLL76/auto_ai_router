@@ -137,7 +137,7 @@ func copyResponseHeaders(w http.ResponseWriter, src http.Header, credType config
 		if isHopByHopHeader(key) {
 			continue
 		}
-		if strings.EqualFold(key, HeaderAARUsageAudioTokens) && credType != config.ProviderTypeProxy {
+		if strings.EqualFold(key, HeaderAARUsageAudioTokens) && !credType.IsProxyLike() {
 			continue
 		}
 		// Skip Content-Length and Content-Encoding for all response types

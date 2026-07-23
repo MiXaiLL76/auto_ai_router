@@ -28,6 +28,7 @@ const (
 	ProviderTypeCometAPI  ProviderType = "cometapi"
 	ProviderTypeBedrock   ProviderType = "bedrock"
 	ProviderTypeProxy     ProviderType = "proxy"
+	ProviderTypeAIR       ProviderType = "air"
 )
 
 // ProxyUsageFormat is a legacy override for proxy upstreams that do not emit
@@ -51,16 +52,25 @@ func (p ProviderType) LogValue() slog.Value {
 // IsValid checks if the provider type is valid
 func (p ProviderType) IsValid() bool {
 	switch p {
-	case ProviderTypeOpenAI, ProviderTypeVertexAI, ProviderTypeGemini, ProviderTypeAnthropic, ProviderTypeCometAPI, ProviderTypeBedrock, ProviderTypeProxy:
+	case ProviderTypeOpenAI, ProviderTypeVertexAI, ProviderTypeGemini, ProviderTypeAnthropic, ProviderTypeCometAPI, ProviderTypeBedrock, ProviderTypeProxy, ProviderTypeAIR:
 		return true
 	}
 	return false
+}
+
+// IsProxyLike reports whether the provider uses AIR's proxy forwarding path:
+// OpenAI-compatible request forwarding, remote /health model discovery, and
+// proxy-chain fallback semantics.
+func (p ProviderType) IsProxyLike() bool {
+	return p == ProviderTypeProxy || p == ProviderTypeAIR
 }
 
 func normalizeProviderType(raw string) ProviderType {
 	switch strings.ToLower(strings.TrimSpace(raw)) {
 	case "comet-api", "comet_api":
 		return ProviderTypeCometAPI
+	case "aar", "auto-ai-router", "auto_ai_router":
+		return ProviderTypeAIR
 	default:
 		return ProviderType(strings.ToLower(strings.TrimSpace(raw)))
 	}
@@ -621,7 +631,7 @@ type CredentialConfig struct {
 	CredentialsFile string `yaml:"credentials_file,omitempty"`
 	CredentialsJSON string `yaml:"credentials_json,omitempty"`
 
-	// Proxy specific fields
+	// Proxy/AIR remote-router specific fields
 	IsFallback       bool             `yaml:"is_fallback,omitempty"`
 	ProxyUsageFormat ProxyUsageFormat `yaml:"proxy_usage_format,omitempty"`
 }
@@ -651,6 +661,10 @@ func (c CredentialConfig) EffectiveProxyUsageFormat() ProxyUsageFormat {
 		return ProxyUsageFormatOpenAI
 	}
 	return c.ProxyUsageFormat
+}
+
+func (c CredentialConfig) IsProxyLike() bool {
+	return c.Type.IsProxyLike()
 }
 
 // SameProviderIdentity reports whether learned provider metadata can be reused.
@@ -1555,7 +1569,7 @@ func (c *Config) Validate() error {
 
 		// Validate provider type
 		if !cred.Type.IsValid() {
-			return fmt.Errorf("credential %s: invalid type: %s (must be 'openai', 'vertex-ai', 'gemini', 'anthropic', 'cometapi', 'bedrock', or 'proxy')", cred.Name, cred.Type)
+			return fmt.Errorf("credential %s: invalid type: %s (must be 'openai', 'vertex-ai', 'gemini', 'anthropic', 'cometapi', 'bedrock', 'proxy', or 'air')", cred.Name, cred.Type)
 		}
 		if cred.AuthType != "" && cred.AuthType != "bearer" && cred.AuthType != "x-api-key" {
 			return fmt.Errorf("credential %s: invalid auth_type: %s (must be 'bearer' or 'x-api-key')", cred.Name, cred.AuthType)
@@ -1566,10 +1580,10 @@ func (c *Config) Validate() error {
 
 		// Validate by provider type
 		switch cred.Type {
-		case ProviderTypeProxy:
-			// base_url is required for proxy
+		case ProviderTypeProxy, ProviderTypeAIR:
+			// base_url is required for remote router/proxy credentials
 			if cred.BaseURL == "" {
-				return fmt.Errorf("credential %s: base_url is required for proxy type", cred.Name)
+				return fmt.Errorf("credential %s: base_url is required for %s type", cred.Name, cred.Type)
 			}
 			if cred.ProxyUsageFormat != "" &&
 				cred.ProxyUsageFormat != ProxyUsageFormatOpenAI &&
@@ -1584,7 +1598,7 @@ func (c *Config) Validate() error {
 			if err := validateBaseURL(cred.Name, cred.BaseURL); err != nil {
 				return err
 			}
-			// api_key is optional for proxy
+			// api_key is optional for proxy/AIR
 
 		case ProviderTypeVertexAI:
 			// For Vertex AI, project_id and location are required

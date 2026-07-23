@@ -10,30 +10,49 @@ import (
 
 const (
 	// HeaderAARUsageAudioTokens describes the cached-audio contract of the
-	// response body. AIR sets it only when audio_tokens in usage already exclude
-	// cached_audio_tokens, so downstream AIR proxies must not subtract cached
-	// audio again.
+	// response body. AIR sets it so downstream AIR proxies do not need a
+	// credential-level guess about whether audio_tokens includes cached audio.
 	HeaderAARUsageAudioTokens = "X-Aar-Usage-Audio-Tokens"
 
 	aarUsageAudioTokensExcludeCached = "exclude-cached"
+	aarUsageAudioTokensIncludeCached = "include-cached"
+)
+
+type audioUsageContract int
+
+const (
+	audioUsageContractUnknown audioUsageContract = iota
+	audioUsageContractIncludesCached
+	audioUsageContractExcludesCached
 )
 
 func markAudioUsageExcludesCached(headers http.Header) {
 	headers.Set(HeaderAARUsageAudioTokens, aarUsageAudioTokensExcludeCached)
 }
 
-func audioUsageExcludesCached(headers http.Header) bool {
+func markAudioUsageIncludesCached(headers http.Header) {
+	headers.Set(HeaderAARUsageAudioTokens, aarUsageAudioTokensIncludeCached)
+}
+
+func audioUsageContractFromHeaders(headers http.Header) audioUsageContract {
 	if headers == nil {
-		return false
+		return audioUsageContractUnknown
 	}
 	for _, value := range headers.Values(HeaderAARUsageAudioTokens) {
 		for _, part := range strings.Split(value, ",") {
-			if strings.EqualFold(strings.TrimSpace(part), aarUsageAudioTokensExcludeCached) {
-				return true
+			switch {
+			case strings.EqualFold(strings.TrimSpace(part), aarUsageAudioTokensExcludeCached):
+				return audioUsageContractExcludesCached
+			case strings.EqualFold(strings.TrimSpace(part), aarUsageAudioTokensIncludeCached):
+				return audioUsageContractIncludesCached
 			}
 		}
 	}
-	return false
+	return audioUsageContractUnknown
+}
+
+func audioUsageExcludesCached(headers http.Header) bool {
+	return audioUsageContractFromHeaders(headers) == audioUsageContractExcludesCached
 }
 
 func tokenUsageExtractionOptionsForCredential(cred *config.CredentialConfig) converter.TokenUsageExtractionOptions {
@@ -49,26 +68,42 @@ func tokenUsageExtractionOptionsForCredential(cred *config.CredentialConfig) con
 
 func tokenUsageExtractionOptionsForResponse(cred *config.CredentialConfig, headers http.Header) converter.TokenUsageExtractionOptions {
 	opts := tokenUsageExtractionOptionsForCredential(cred)
-	if cred != nil && cred.Type == config.ProviderTypeProxy && audioUsageExcludesCached(headers) {
-		opts.AudioInputIncludesCachedAudio = false
+	if cred != nil && cred.IsProxyLike() {
+		switch audioUsageContractFromHeaders(headers) {
+		case audioUsageContractExcludesCached:
+			opts.AudioInputIncludesCachedAudio = false
+		case audioUsageContractIncludesCached:
+			opts.AudioInputIncludesCachedAudio = true
+		}
 	}
 	return opts
 }
 
-func directStreamingAudioUsageExcludesCached(prepared *orchestratedRequest, cred *config.CredentialConfig, statusCode int) bool {
+func markAudioUsageContract(headers http.Header, includesCachedAudio bool) {
+	if includesCachedAudio {
+		markAudioUsageIncludesCached(headers)
+	} else {
+		markAudioUsageExcludesCached(headers)
+	}
+}
+
+func directStreamingAudioUsageContract(prepared *orchestratedRequest, cred *config.CredentialConfig, statusCode int) audioUsageContract {
 	if statusCode < http.StatusOK || statusCode >= http.StatusMultipleChoices {
-		return false
+		return audioUsageContractUnknown
 	}
 	if prepared == nil {
-		return false
+		return audioUsageContractUnknown
 	}
 	if prepared.nativeResponses || prepared.convertedResp {
-		return true
+		return audioUsageContractExcludesCached
 	}
 	if prepared.passthroughResponses {
-		return false
+		return audioUsageContractIncludesCached
 	}
-	return transformedProviderAudioUsageExcludesCached(cred)
+	if transformedProviderAudioUsageExcludesCached(cred) {
+		return audioUsageContractExcludesCached
+	}
+	return audioUsageContractIncludesCached
 }
 
 func transformedProviderAudioUsageExcludesCached(cred *config.CredentialConfig) bool {

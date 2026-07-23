@@ -433,16 +433,16 @@ func (p *Proxy) executeProxyRequest(
 				"url", targetURL,
 			)
 		}
-		// Proxy credentials are dynamic relays — don't record them in fail2ban.
+		// Proxy/AIR credentials are dynamic relays — don't record them in fail2ban.
 		// Their 429/5xx reflect downstream capacity, not a permanent credential failure.
-		if cred.Type != config.ProviderTypeProxy {
+		if !cred.IsProxyLike() {
 			p.balancer.RecordResponse(cred.Name, modelID, statusCode)
 		}
 		p.metrics.RecordRequest(cred.Name, r.URL.Path, modelID, statusCode, time.Since(start))
 		return nil, err
 	}
-	// Proxy credentials are dynamic relays — don't record them in fail2ban.
-	if cred.Type != config.ProviderTypeProxy {
+	// Proxy/AIR credentials are dynamic relays — don't record them in fail2ban.
+	if !cred.IsProxyLike() {
 		p.balancer.RecordResponse(cred.Name, modelID, resp.StatusCode)
 	}
 	p.metrics.RecordRequest(cred.Name, r.URL.Path, modelID, resp.StatusCode, time.Since(start))
@@ -634,8 +634,8 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		logCtx.WebSearchContextSize = webSearchContextSize
 	}
 
-	// Handle proxy credential type with same-type retry + fallback
-	if cred.Type == config.ProviderTypeProxy {
+	// Handle proxy/AIR credential types with exact same-type retry + fallback.
+	if cred.IsProxyLike() {
 		logCtx.Credential = cred
 		triedCreds := GetTried(r.Context())
 		var proxyResp *ProxyResponse
@@ -645,9 +645,9 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 
 		for attempt := 0; attempt <= p.maxProviderRetries; attempt++ {
 			if attempt > 0 {
-				nextCred, err := p.balancer.NextSameTypeForModelExcludingScoped(modelID, config.ProviderTypeProxy, triedCreds, logCtx.Scope)
+				nextCred, err := p.balancer.NextSameTypeForModelExcludingScoped(modelID, cred.Type, triedCreds, logCtx.Scope)
 				if err != nil {
-					p.logger.DebugContext(r.Context(), "No more same-type proxy credentials for retry",
+					p.logger.DebugContext(r.Context(), "No more same-type remote-router credentials for retry",
 						"model", modelID, "attempt", attempt, "error", err)
 					break
 				}
@@ -802,8 +802,8 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 				if logCtx.IsProxyRequest && logCtx.ActualCredentialName != "" {
 					w.Header().Set("X-Credential-Name", logCtx.ActualCredentialName)
 				}
-				if proxyResp.StatusCode >= 200 && proxyResp.StatusCode < 300 && !tokenUsageOptions.AudioInputIncludesCachedAudio {
-					markAudioUsageExcludesCached(w.Header())
+				if proxyResp.StatusCode >= 200 && proxyResp.StatusCode < 300 {
+					markAudioUsageContract(w.Header(), tokenUsageOptions.AudioInputIncludesCachedAudio)
 				}
 				w.WriteHeader(proxyResp.StatusCode)
 				logCtx.PromptTokensEstimate = estimatePromptTokensForModel(body, realModelID)
@@ -822,8 +822,8 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 				if logCtx.IsProxyRequest && logCtx.ActualCredentialName != "" {
 					w.Header().Set("X-Credential-Name", logCtx.ActualCredentialName)
 				}
-				if proxyResp.StatusCode >= 200 && proxyResp.StatusCode < 300 && !tokenUsageOptions.AudioInputIncludesCachedAudio {
-					markAudioUsageExcludesCached(w.Header())
+				if proxyResp.StatusCode >= 200 && proxyResp.StatusCode < 300 {
+					markAudioUsageContract(w.Header(), tokenUsageOptions.AudioInputIncludesCachedAudio)
 				}
 				tokenizerModelID := realModelID
 				if tokenizerModelID == "" {
@@ -918,8 +918,8 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			if logCtx.IsProxyRequest && logCtx.ActualCredentialName != "" {
 				w.Header().Set("X-Credential-Name", logCtx.ActualCredentialName)
 			}
-			if proxyResp.StatusCode >= 200 && proxyResp.StatusCode < 300 && !tokenUsageOptions.AudioInputIncludesCachedAudio {
-				markAudioUsageExcludesCached(w.Header())
+			if proxyResp.StatusCode >= 200 && proxyResp.StatusCode < 300 {
+				markAudioUsageContract(w.Header(), tokenUsageOptions.AudioInputIncludesCachedAudio)
 			}
 			p.writeProxyResponse(w, proxyResp, r, cred.Name, modelID)
 			tokens := extractTokensFromResponse(string(proxyResp.Body), config.ProviderTypeOpenAI)
@@ -1419,7 +1419,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 
 	// === Process final response ===
 	var finalResponseBody []byte
-	outgoingAudioUsageExcludesCached := false
+	outgoingAudioUsageContract := audioUsageContractUnknown
 
 	if isStreamingResp {
 		p.logger.DebugContext(r.Context(), "Response is streaming", "credential", cred.Name)
@@ -1594,8 +1594,12 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		if logCtx.IsImageGeneration && logCtx.TokenUsage != nil {
 			logCtx.TokenUsage.ImageCount = logCtx.ImageCount
 		}
-		if resp.StatusCode >= 200 && resp.StatusCode < 300 && !tokenUsageOptions.AudioInputIncludesCachedAudio {
-			outgoingAudioUsageExcludesCached = true
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			if tokenUsageOptions.AudioInputIncludesCachedAudio {
+				outgoingAudioUsageContract = audioUsageContractIncludesCached
+			} else {
+				outgoingAudioUsageContract = audioUsageContractExcludesCached
+			}
 		}
 		if logCtx.Token != "" && logCtx.Credential != nil {
 			if err := p.logSpendToLiteLLMDB(logCtx); err != nil {
@@ -1606,13 +1610,16 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		logCtx.Logged = true
 	}
 	if isStreamingResp {
-		outgoingAudioUsageExcludesCached = directStreamingAudioUsageExcludesCached(prepared, cred, resp.StatusCode)
+		outgoingAudioUsageContract = directStreamingAudioUsageContract(prepared, cred, resp.StatusCode)
 	}
 
 	// Copy response headers (skip hop-by-hop headers and transformation-related headers)
 	copyResponseHeaders(w, resp.Header, cred.Type)
-	if outgoingAudioUsageExcludesCached {
+	switch outgoingAudioUsageContract {
+	case audioUsageContractExcludesCached:
 		markAudioUsageExcludesCached(w.Header())
+	case audioUsageContractIncludesCached:
+		markAudioUsageIncludesCached(w.Header())
 	}
 	// Return credential name only to internal proxy clients, not to end users.
 	if logCtx.IsProxyRequest {

@@ -497,6 +497,9 @@ func TestProviderConverter_IsPassthrough(t *testing.T) {
 	if !New(config.ProviderTypeProxy, RequestMode{}).IsPassthrough() {
 		t.Fatalf("proxy should be passthrough")
 	}
+	if !New(config.ProviderTypeAIR, RequestMode{}).IsPassthrough() {
+		t.Fatalf("air should be passthrough")
+	}
 	if New(config.ProviderTypeVertexAI, RequestMode{}).IsPassthrough() {
 		t.Fatalf("vertex should not be passthrough")
 	}

@@ -9,14 +9,14 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/proxy"
 )
 
-// ValidateProxyCredentialsAtStartup performs connectivity checks for proxy credentials at startup.
-// For each proxy credential, it attempts an HTTP GET to the /health endpoint with a 5-second timeout.
+// ValidateProxyCredentialsAtStartup performs connectivity checks for proxy/AIR credentials at startup.
+// For each remote-router credential, it attempts an HTTP GET to the /health endpoint with a 5-second timeout.
 // Results are logged as WARN if unreachable, but startup continues (non-blocking).
 // This helps catch misconfigured proxies early without failing the startup sequence.
 func ValidateProxyCredentialsAtStartup(cfg *config.Config, log *slog.Logger) {
 	proxyCredentials := make([]config.CredentialConfig, 0)
 	for _, cred := range cfg.Credentials {
-		if cred.Type == config.ProviderTypeProxy {
+		if cred.IsProxyLike() {
 			proxyCredentials = append(proxyCredentials, cred)
 		}
 	}
@@ -25,7 +25,7 @@ func ValidateProxyCredentialsAtStartup(cfg *config.Config, log *slog.Logger) {
 		return
 	}
 
-	log.Info("Checking proxy credential accessibility at startup", "total_proxies", len(proxyCredentials))
+	log.Info("Checking proxy/AIR credential accessibility at startup", "total_remote_routers", len(proxyCredentials))
 
 	reachableCount := 0
 	unreachableCount := 0
@@ -38,7 +38,7 @@ func ValidateProxyCredentialsAtStartup(cfg *config.Config, log *slog.Logger) {
 
 		if err != nil {
 			unreachableCount++
-			log.Warn("Proxy credential unreachable at startup",
+			log.Warn("Proxy/AIR credential unreachable at startup",
 				"name", cred.Name,
 				"url", cred.BaseURL,
 				"error", err.Error(),
@@ -46,7 +46,7 @@ func ValidateProxyCredentialsAtStartup(cfg *config.Config, log *slog.Logger) {
 			)
 		} else {
 			reachableCount++
-			log.Debug("Proxy credential accessible at startup",
+			log.Debug("Proxy/AIR credential accessible at startup",
 				"name", cred.Name,
 				"url", cred.BaseURL,
 			)
@@ -54,19 +54,19 @@ func ValidateProxyCredentialsAtStartup(cfg *config.Config, log *slog.Logger) {
 	}
 
 	// Log summary
-	log.Info("Proxy credential accessibility check completed at startup",
-		"total_proxies", len(proxyCredentials),
+	log.Info("Proxy/AIR credential accessibility check completed at startup",
+		"total_remote_routers", len(proxyCredentials),
 		"reachable", reachableCount,
 		"unreachable", unreachableCount,
 	)
 
 	// Alert if ALL proxies are unreachable (critical condition at startup)
 	if unreachableCount == len(proxyCredentials) && len(proxyCredentials) > 0 {
-		log.Error("WARNING: All proxy credentials are unreachable at startup",
+		log.Error("WARNING: All proxy/AIR credentials are unreachable at startup",
 			"healthy", 0,
 			"total", len(proxyCredentials),
-			"impact", "Proxy fallback routing will not be available until proxies become reachable",
-			"action_recommended", "Check that all proxy services are running and network-accessible before production deployment",
+			"impact", "Proxy/AIR fallback routing will not be available until remote routers become reachable",
+			"action_recommended", "Check that all proxy/AIR services are running and network-accessible before production deployment",
 		)
 	}
 }

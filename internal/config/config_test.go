@@ -151,6 +151,51 @@ func TestConfig_ValidateProxyUsageFormat(t *testing.T) {
 	assert.Contains(t, err.Error(), "invalid proxy_usage_format")
 }
 
+func TestConfig_ValidateAIRCredential(t *testing.T) {
+	cfg := &Config{
+		Server: ServerConfig{
+			Port:           8080,
+			MaxBodySizeMB:  10,
+			MasterKey:      "test-key",
+			RequestTimeout: 30 * time.Second,
+		},
+		Credentials: []CredentialConfig{{
+			Name:    "upstream-air",
+			Type:    ProviderTypeAIR,
+			BaseURL: "http://air.example",
+			RPM:     -1,
+			TPM:     -1,
+		}},
+		Fail2Ban: Fail2BanConfig{MaxAttempts: 3},
+	}
+
+	require.NoError(t, cfg.Validate())
+}
+
+func TestConfig_ValidateAIRRejectsProxyUsageFormat(t *testing.T) {
+	cfg := &Config{
+		Server: ServerConfig{
+			Port:           8080,
+			MaxBodySizeMB:  10,
+			MasterKey:      "test-key",
+			RequestTimeout: 30 * time.Second,
+		},
+		Credentials: []CredentialConfig{{
+			Name:             "upstream-air",
+			Type:             ProviderTypeAIR,
+			BaseURL:          "http://air.example",
+			ProxyUsageFormat: ProxyUsageFormatNormalized,
+			RPM:              -1,
+			TPM:              -1,
+		}},
+		Fail2Ban: Fail2BanConfig{MaxAttempts: 3},
+	}
+
+	err := cfg.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "proxy_usage_format is only valid for proxy type")
+}
+
 func TestCredentialConfig_SameProviderIdentityIncludesProxyUsageFormat(t *testing.T) {
 	openAI := CredentialConfig{
 		Name:             "proxy",
@@ -721,6 +766,7 @@ func TestProviderType_IsValid(t *testing.T) {
 		{"openai", ProviderTypeOpenAI, true},
 		{"vertex-ai", ProviderTypeVertexAI, true},
 		{"cometapi", ProviderTypeCometAPI, true},
+		{"air", ProviderTypeAIR, true},
 		{"invalid", ProviderType("azure"), false},
 		{"empty", ProviderType(""), false},
 	}
@@ -730,6 +776,13 @@ func TestProviderType_IsValid(t *testing.T) {
 			assert.Equal(t, tt.valid, tt.provider.IsValid())
 		})
 	}
+}
+
+func TestProviderType_IsProxyLike(t *testing.T) {
+	assert.True(t, ProviderTypeProxy.IsProxyLike())
+	assert.True(t, ProviderTypeAIR.IsProxyLike())
+	assert.False(t, ProviderTypeOpenAI.IsProxyLike())
+	assert.False(t, ProviderTypeVertexAI.IsProxyLike())
 }
 
 func TestCredentialConfig_NormalizeCometAPIProviderType(t *testing.T) {
@@ -744,6 +797,34 @@ rpm: 60
 
 	require.NoError(t, err)
 	assert.Equal(t, ProviderTypeCometAPI, cred.Type)
+}
+
+func TestCredentialConfig_NormalizeAIRProviderTypeAliases(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+	}{
+		{name: "air", raw: "air"},
+		{name: "aar", raw: "aar"},
+		{name: "auto-ai-router", raw: "auto-ai-router"},
+		{name: "auto_ai_router", raw: "auto_ai_router"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var cred CredentialConfig
+			err := yaml.Unmarshal([]byte(`
+name: upstream
+type: `+tt.raw+`
+base_url: https://air.example
+rpm: 60
+`), &cred)
+
+			require.NoError(t, err)
+			assert.Equal(t, ProviderTypeAIR, cred.Type)
+			assert.True(t, cred.IsProxyLike())
+		})
+	}
 }
 
 func TestConfig_Validate_VertexAI(t *testing.T) {

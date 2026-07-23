@@ -289,6 +289,8 @@ func derefStr(s *string, fallback string) string {
 func mapProviderType(provider string) config.ProviderType {
 	p := strings.ToLower(provider)
 	switch {
+	case p == "air" || p == "aar" || strings.Contains(p, "auto_ai_router") || strings.Contains(p, "auto-ai-router"):
+		return config.ProviderTypeAIR
 	case strings.Contains(p, "openai") || strings.Contains(p, "router"):
 		return config.ProviderTypeOpenAI
 	case strings.Contains(p, "vertex"):

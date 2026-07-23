@@ -1242,6 +1242,25 @@ func TestNextSameTypeForModelExcluding_ProxyDoesNotReturnVertexAI(t *testing.T) 
 	assert.Equal(t, "proxy2", cred.Name)
 }
 
+func TestNextSameTypeForModelExcluding_AIRDoesNotReturnGenericProxy(t *testing.T) {
+	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
+	rl := ratelimit.New()
+
+	credentials := []config.CredentialConfig{
+		{Name: "air1", Type: config.ProviderTypeAIR, BaseURL: "http://air1.com", RPM: -1},
+		{Name: "air2", Type: config.ProviderTypeAIR, BaseURL: "http://air2.com", RPM: -1},
+		{Name: "proxy1", Type: config.ProviderTypeProxy, BaseURL: "http://proxy1.com", RPM: -1},
+	}
+
+	bal := New(credentials, f2b, rl)
+
+	exclude := map[string]bool{"air1": true}
+	cred, err := bal.NextSameTypeForModelExcluding("gpt-cache", config.ProviderTypeAIR, exclude)
+	require.NoError(t, err)
+	assert.Equal(t, config.ProviderTypeAIR, cred.Type)
+	assert.Equal(t, "air2", cred.Name)
+}
+
 // TestNextSameTypeForModelExcluding_VertexAIDoesNotReturnProxy verifies that same-type
 // retry for vertex-ai credentials does not return proxy credentials.
 func TestNextSameTypeForModelExcluding_VertexAIDoesNotReturnProxy(t *testing.T) {
@@ -1436,6 +1455,7 @@ func TestIsProxyCredential_And_GetProxyCredentials(t *testing.T) {
 	creds := []config.CredentialConfig{
 		{Name: "openai-1", Type: config.ProviderTypeOpenAI, RPM: 100},
 		{Name: "proxy-1", Type: config.ProviderTypeProxy, RPM: 100, BaseURL: "http://localhost:8080"},
+		{Name: "air-1", Type: config.ProviderTypeAIR, RPM: 100, BaseURL: "http://localhost:8082"},
 		{Name: "vertex-1", Type: config.ProviderTypeVertexAI, RPM: 100},
 		{Name: "proxy-2", Type: config.ProviderTypeProxy, RPM: 200, BaseURL: "http://localhost:8081"},
 	}
@@ -1445,19 +1465,21 @@ func TestIsProxyCredential_And_GetProxyCredentials(t *testing.T) {
 	// IsProxyCredential
 	assert.False(t, rr.IsProxyCredential("openai-1"))
 	assert.True(t, rr.IsProxyCredential("proxy-1"))
+	assert.True(t, rr.IsProxyCredential("air-1"))
 	assert.False(t, rr.IsProxyCredential("vertex-1"))
 	assert.True(t, rr.IsProxyCredential("proxy-2"))
 	assert.False(t, rr.IsProxyCredential("nonexistent"))
 
 	// GetProxyCredentials
 	proxies := rr.GetProxyCredentials()
-	assert.Len(t, proxies, 2)
+	assert.Len(t, proxies, 3)
 
 	proxyNames := make(map[string]bool)
 	for _, p := range proxies {
 		proxyNames[p.Name] = true
 	}
 	assert.True(t, proxyNames["proxy-1"])
+	assert.True(t, proxyNames["air-1"])
 	assert.True(t, proxyNames["proxy-2"])
 }
 
