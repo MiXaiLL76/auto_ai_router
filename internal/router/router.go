@@ -23,14 +23,13 @@ type Router struct {
 	isReady          atomic.Bool
 }
 
-var postOnlyPublicPaths = map[string]struct{}{
+var proxiedPublicPaths = map[string]struct{}{
 	"/v1/chat/completions":   {},
 	"/v1/completions":        {},
 	"/v1/embeddings":         {},
 	"/v1/images/generations": {},
 	"/v1/images/edits":       {},
 	"/v1/responses":          {},
-	"/v1/responses/compact":  {},
 }
 
 func publicPathAllowedMethod(req *http.Request) (string, bool) {
@@ -41,7 +40,10 @@ func publicPathAllowedMethod(req *http.Request) (string, bool) {
 	if path == "/v1/responses" && req.Method == http.MethodGet && strings.EqualFold(req.Header.Get("Upgrade"), "websocket") {
 		return http.MethodGet, true
 	}
-	if _, ok := postOnlyPublicPaths[path]; ok {
+	if path == "/v1/responses/compact" {
+		return http.MethodPost, true
+	}
+	if _, ok := proxiedPublicPaths[path]; ok {
 		return http.MethodPost, true
 	}
 	if strings.HasPrefix(path, "/v1/responses/") {
@@ -172,15 +174,7 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
-	allowedPaths := map[string]bool{
-		"/v1/chat/completions":   true,
-		"/v1/completions":        true,
-		"/v1/embeddings":         true,
-		"/v1/images/generations": true,
-		"/v1/images/edits":       true,
-		"/v1/responses":          true,
-	}
-	if !allowedPaths[req.URL.Path] {
+	if _, allowed := proxiedPublicPaths[req.URL.Path]; !allowed {
 		proxy.WriteErrorNotFound(w, "Not Found")
 		return
 	}

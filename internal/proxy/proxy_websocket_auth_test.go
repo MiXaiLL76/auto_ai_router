@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/mixaill76/auto_ai_router/internal/config"
@@ -59,4 +60,25 @@ func TestWebSocketResponsesAuthenticatesBeforeUpgrade(t *testing.T) {
 			require.NoError(t, response.Body.Close())
 		})
 	}
+}
+
+func TestWaitForWSTurnWaitsForWorkerAfterRequestCancellation(t *testing.T) {
+	turnDone := make(chan struct{})
+	streamDone := make(chan struct{})
+	requestDone := make(chan struct{})
+	close(requestDone)
+
+	result := make(chan bool, 1)
+	go func() {
+		result <- waitForWSTurn(turnDone, streamDone, requestDone)
+	}()
+
+	select {
+	case <-result:
+		t.Fatal("waitForWSTurn returned while the worker was still running")
+	case <-time.After(25 * time.Millisecond):
+	}
+
+	close(turnDone)
+	assert.False(t, <-result)
 }

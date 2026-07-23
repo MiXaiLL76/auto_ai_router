@@ -402,12 +402,9 @@ outerLoop:
 		}()
 
 		// Wait for the turn to complete or the client to disconnect.
-		select {
-		case <-wsWriter.done:
-		case <-r.Context().Done():
+		if !waitForWSTurn(turnDone, wsWriter.done, r.Context().Done()) {
 			return
 		}
-		<-turnDone
 
 		// Update connection-local cache (only for explicit store:false responses).
 		if isStoreFalse {
@@ -423,4 +420,15 @@ outerLoop:
 			cacheMu.Unlock()
 		}
 	}
+}
+
+func waitForWSTurn(turnDone, streamDone, requestDone <-chan struct{}) bool {
+	select {
+	case <-streamDone:
+	case <-requestDone:
+		<-turnDone
+		return false
+	}
+	<-turnDone
+	return true
 }

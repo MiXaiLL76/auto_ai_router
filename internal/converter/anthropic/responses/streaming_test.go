@@ -581,3 +581,44 @@ func TestTransformAnthropicStreamToResponses_ToolUseEmptyArgs(t *testing.T) {
 	}
 	t.Fatal("no response.completed event found")
 }
+
+func TestTransformAnthropicStreamToResponses_ReturnsTerminalProviderError(t *testing.T) {
+	stream := buildAnthropicSSEStream([]map[string]interface{}{
+		{
+			"type": "message_start",
+			"message": map[string]interface{}{
+				"usage": map[string]interface{}{"input_tokens": 5},
+			},
+		},
+		{
+			"type":          "content_block_start",
+			"content_block": map[string]interface{}{"type": "text"},
+		},
+		{
+			"type":  "content_block_delta",
+			"delta": map[string]interface{}{"type": "text_delta", "text": "partial"},
+		},
+		{
+			"type": "error",
+			"error": map[string]interface{}{
+				"type":    "overloaded_error",
+				"message": "Overloaded",
+			},
+		},
+	})
+
+	var out bytes.Buffer
+	completed := false
+	err := TransformAnthropicStreamToResponses(
+		strings.NewReader(stream),
+		&out,
+		"claude-opus-4-5",
+		"resp_error",
+		nil,
+		func(*responses.Response) { completed = true },
+	)
+
+	require.ErrorContains(t, err, "anthropic stream error (overloaded_error): Overloaded")
+	assert.False(t, completed)
+	assert.NotContains(t, out.String(), "response.completed")
+}

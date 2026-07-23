@@ -3,7 +3,6 @@ package proxy
 import (
 	"encoding/json"
 	"net/http"
-	"strings"
 )
 
 // APIErrorResponse represents an OpenAI-compatible error response.
@@ -86,66 +85,6 @@ func maskedUpstreamErrorBody(statusCode int) []byte {
 		return []byte(`{"error":{"message":"Upstream provider error","type":"api_error","param":null,"code":"upstream_error"}}`)
 	}
 	return append(body, '\n')
-}
-
-// normalizeUpstreamErrorBody converts provider-specific errors to the stable
-// OpenAI error envelope exposed by AIR. A provider's non-empty string error
-// type is preserved (for example Anthropic's overloaded_error); malformed or
-// untyped envelopes fall back to the HTTP-derived public type.
-func normalizeUpstreamErrorBody(statusCode int, body []byte) []byte {
-	type providerError struct {
-		Message string          `json:"message"`
-		Type    json.RawMessage `json:"type"`
-		Param   *string         `json:"param"`
-		Code    json.RawMessage `json:"code"`
-	}
-	var envelope struct {
-		Error json.RawMessage `json:"error"`
-	}
-
-	message := "Upstream provider error"
-	errorType := errorTypeForStatus(statusCode)
-	var param *string
-	var code *string
-	if json.Unmarshal(body, &envelope) == nil && len(envelope.Error) > 0 {
-		var detail providerError
-		if json.Unmarshal(envelope.Error, &detail) == nil {
-			if strings.TrimSpace(detail.Message) != "" {
-				message = detail.Message
-			}
-			if value := decodeJSONString(detail.Type); value != "" {
-				errorType = value
-			}
-			param = detail.Param
-			if value := decodeJSONString(detail.Code); value != "" {
-				code = &value
-			}
-		} else {
-			var text string
-			if json.Unmarshal(envelope.Error, &text) == nil && strings.TrimSpace(text) != "" {
-				message = text
-			}
-		}
-	}
-
-	encoded, err := json.Marshal(APIErrorResponse{Error: APIError{
-		Message: message,
-		Type:    errorType,
-		Param:   param,
-		Code:    code,
-	}})
-	if err != nil {
-		return maskedUpstreamErrorBody(statusCode)
-	}
-	return append(encoded, '\n')
-}
-
-func decodeJSONString(raw json.RawMessage) string {
-	var value string
-	if len(raw) == 0 || json.Unmarshal(raw, &value) != nil {
-		return ""
-	}
-	return strings.TrimSpace(value)
 }
 
 // WriteErrorBadRequest writes a 400 Bad Request JSON error.

@@ -813,10 +813,8 @@ func extractStreamErrorEvent(chunk []byte) string {
 		if err := json.Unmarshal([]byte(payload), &evt); err != nil {
 			return ""
 		}
-		if evt.Type == "error" || evt.Type == "response.error" || evt.Type == "response.failed" {
-			return payload
-		}
-		if len(evt.Error) > 0 && string(evt.Error) != "null" {
+		hasError := len(evt.Error) > 0 && string(evt.Error) != "null"
+		if isStreamErrorEvent(evt.Type, hasError) {
 			return payload
 		}
 		return ""
@@ -847,6 +845,10 @@ func extractStreamErrorEvent(chunk []byte) string {
 		return checkPayload(strings.TrimSpace(string(chunk)))
 	}
 	return ""
+}
+
+func isStreamErrorEvent(eventType string, hasError bool) bool {
+	return hasError || eventType == "error" || eventType == "response.error" || eventType == "response.failed"
 }
 
 // drainUpstream reads from body until EOF, ctx expiry, or an error, calling

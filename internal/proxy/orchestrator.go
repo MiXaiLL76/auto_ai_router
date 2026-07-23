@@ -718,6 +718,7 @@ func (p *Proxy) selectCredentialForModel(
 			"request_id", logCtx.RequestID,
 		)
 	}
+	logCtx.Logged = true
 	WriteErrorRateLimit(w, errorMsg)
 	return nil, false
 }

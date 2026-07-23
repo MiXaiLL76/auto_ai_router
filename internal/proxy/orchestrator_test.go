@@ -162,6 +162,27 @@ func TestPrepareRequestForCredential_UsesCredentialSpecificRealModel(t *testing.
 	require.Contains(t, string(prepared.body), `"model":"global.anthropic.claude-sonnet-v1:0"`)
 }
 
+func TestSelectCredentialForModelMarksDirectSpendLogComplete(t *testing.T) {
+	prx := NewTestProxyBuilder().Build()
+	kafka := &stubKafkaManager{enabled: true}
+	prx.kafkaLog = kafka
+	logCtx := testLogCtx(t)
+	logCtx.Credential = nil
+
+	credential, ok := prx.selectCredentialForModel(
+		httptest.NewRecorder(),
+		"missing-model",
+		"",
+		"",
+		logCtx,
+	)
+
+	require.False(t, ok)
+	require.Nil(t, credential)
+	require.True(t, logCtx.Logged)
+	require.Len(t, kafka.events, 1)
+}
+
 func TestPrepareRequestForCredential_ProxyBodyKeepsOriginalParams(t *testing.T) {
 	prx := NewTestProxyBuilder().Build()
 	cred := config.CredentialConfig{Name: "openai", Type: config.ProviderTypeOpenAI, APIKey: "key", BaseURL: "http://openai.local", RPM: 100}

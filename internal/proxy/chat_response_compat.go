@@ -163,10 +163,9 @@ func normalizeSSEDataLineModel(line []byte, publicModel string) []byte {
 	if err != nil || event == nil {
 		return line
 	}
-	if rawError, exists := event["error"]; exists && rawError != nil {
-		return line
-	}
-	if eventType, _ := event["type"].(string); eventType == "error" || eventType == "response.error" || eventType == "response.failed" {
+	rawError, hasError := event["error"]
+	eventType, _ := event["type"].(string)
+	if isStreamErrorEvent(eventType, hasError && rawError != nil) {
 		return line
 	}
 

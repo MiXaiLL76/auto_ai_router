@@ -59,6 +59,31 @@ func TestNormalizeSuccessfulResponseModelStreamBoundsOversizedLines(t *testing.T
 	assert.Equal(t, stream, string(result))
 }
 
+func TestNormalizeSuccessfulResponseModelStreamPreservesErrorEventsAndFraming(t *testing.T) {
+	stream := "data: {\"model\":\"backend\",\"sequence\":1}\r\n\r\n" +
+		"data: {\"error\":{\"message\":\"failed\"},\"model\":\"backend\"}\r\n\r\n" +
+		"data: {\"type\":\"response.failed\",\"response\":{\"model\":\"backend\"}}\r\n\r\n" +
+		"data: {\"type\":\"response.error\",\"model\":\"backend\"}\r\n\r\n" +
+		"data: [DONE]\r\n\r\n"
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	logCtx := &RequestLogContext{Request: request, PublicModelID: "public"}
+
+	result, err := io.ReadAll(normalizeSuccessfulResponseModelStream(
+		strings.NewReader(stream),
+		http.StatusOK,
+		logCtx,
+		"backend",
+	))
+
+	require.NoError(t, err)
+	lines := strings.Split(string(result), "\r\n")
+	assert.Contains(t, lines[0], `"model":"public"`)
+	assert.Equal(t, `data: {"error":{"message":"failed"},"model":"backend"}`, lines[2])
+	assert.Equal(t, `data: {"type":"response.failed","response":{"model":"backend"}}`, lines[4])
+	assert.Equal(t, `data: {"type":"response.error","model":"backend"}`, lines[6])
+	assert.Equal(t, "data: [DONE]", lines[8])
+}
+
 func TestFinalizeStreamingLogKeepsExplicitZeroProviderUsage(t *testing.T) {
 	prx := NewTestProxyBuilder().Build()
 	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)

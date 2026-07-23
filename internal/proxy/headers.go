@@ -56,6 +56,10 @@ func isProxyOwnedResponseHeader(key string) bool {
 	return strings.EqualFold(key, accelBufferingHeader)
 }
 
+func isClientAuthHeader(key string) bool {
+	return strings.EqualFold(key, "Authorization") || strings.EqualFold(key, "X-Api-Key")
+}
+
 func setSuccessfulSSEHeaders(headers http.Header, statusCode int) {
 	if headers == nil || statusCode < http.StatusOK || statusCode >= http.StatusMultipleChoices {
 		return
@@ -79,8 +83,7 @@ func GetHopByHopHeaders() map[string]bool {
 // Accept-Encoding is also skipped (see copyHeadersSkipAuth for rationale).
 func copyRequestHeaders(dst *http.Request, src *http.Request, apiKey string) {
 	for key, values := range src.Header {
-		if isHopByHopHeader(key) || isPrivacyHeader(key) ||
-			strings.EqualFold(key, "Authorization") || strings.EqualFold(key, "X-Api-Key") {
+		if isHopByHopHeader(key) || isPrivacyHeader(key) || isClientAuthHeader(key) {
 			continue
 		}
 		// Don't forward Accept-Encoding to upstream (proxy handles per-segment).
@@ -108,8 +111,7 @@ func copyRequestHeaders(dst *http.Request, src *http.Request, apiKey string) {
 // bytes to flow through instead of decoded content.
 func copyHeadersSkipAuth(dst *http.Request, src *http.Request) {
 	for key, values := range src.Header {
-		if isHopByHopHeader(key) || isPrivacyHeader(key) ||
-			strings.EqualFold(key, "Authorization") || strings.EqualFold(key, "X-Api-Key") {
+		if isHopByHopHeader(key) || isPrivacyHeader(key) || isClientAuthHeader(key) {
 			continue
 		}
 		// Don't forward Accept-Encoding: proxy manages compression per connection segment.

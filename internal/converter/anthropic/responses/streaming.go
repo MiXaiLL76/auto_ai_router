@@ -224,6 +224,19 @@ func processAnthropicEvent(w io.Writer, acc *anthropicStreamAccumulator, event *
 
 	case "message_stop":
 		// Stream is ending; completion events emitted after the scan loop.
+
+	case "error":
+		errorType := "api_error"
+		message := "Anthropic stream error"
+		if event.Error != nil {
+			if event.Error.Type != "" {
+				errorType = event.Error.Type
+			}
+			if event.Error.Message != "" {
+				message = event.Error.Message
+			}
+		}
+		return fmt.Errorf("anthropic stream error (%s): %s", errorType, message)
 	}
 	return nil
 }

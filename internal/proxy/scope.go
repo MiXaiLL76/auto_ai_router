@@ -14,13 +14,11 @@ const liteLLMMasterKeyIdentity = "litellm-master-key"
 var errInvalidScopeAuth = errors.New("invalid authorization")
 
 func (p *Proxy) ScopeContextForRequest(r *http.Request) (scope.Context, error) {
-	authHeader := r.Header.Get("Authorization")
-	if authHeader == "" {
+	token, credentialState := extractClientToken(r)
+	if credentialState == clientCredentialMissing {
 		return scope.PublicContext(), nil
 	}
-
-	token, ok := bearerToken(authHeader)
-	if !ok {
+	if credentialState == clientCredentialMalformed {
 		return scope.PublicContext(), errInvalidScopeAuth
 	}
 	if p.isMasterKey(token) {
@@ -35,14 +33,6 @@ func (p *Proxy) ScopeContextForRequest(r *http.Request) (scope.Context, error) {
 		return scope.PublicContext(), err
 	}
 	return scopeContextFromTokenInfo(tokenInfo), nil
-}
-
-func bearerToken(authHeader string) (string, bool) {
-	token, ok := strings.CutPrefix(authHeader, "Bearer ")
-	if !ok || strings.TrimSpace(token) == "" {
-		return "", false
-	}
-	return strings.TrimSpace(token), true
 }
 
 func scopeContextFromTokenInfo(info *dbmodels.TokenInfo) scope.Context {
