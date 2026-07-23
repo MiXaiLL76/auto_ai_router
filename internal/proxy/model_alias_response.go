@@ -2,6 +2,8 @@ package proxy
 
 import (
 	"bufio"
+	"bytes"
+	"encoding/json"
 	"errors"
 	"io"
 
@@ -11,14 +13,20 @@ import (
 const maxModelAliasSSELineBytes = 1 << 20
 
 func rewriteResponseModelAlias(body []byte, realModelID, displayModelID string) []byte {
-	if realModelID == "" || displayModelID == "" || realModelID == displayModelID {
+	if displayModelID == "" {
+		return body
+	}
+	if rewritten, ok := rewriteTopLevelResponseModel(body, displayModelID); ok {
+		return rewritten
+	}
+	if realModelID == "" || realModelID == displayModelID {
 		return body
 	}
 	return openai.ReplaceModelInBody(body, realModelID, displayModelID)
 }
 
 func newOpenAIModelAliasReader(source io.Reader, realModelID, displayModelID string) io.Reader {
-	if source == nil || realModelID == "" || displayModelID == "" || realModelID == displayModelID {
+	if source == nil || displayModelID == "" {
 		return source
 	}
 	return &modelAliasSSEReader{
@@ -100,4 +108,86 @@ func (r *modelAliasSSEReader) consumeFragment(fragment []byte, readErr error) {
 		}
 	}
 	r.pending = line
+}
+
+func rewriteTopLevelResponseModel(body []byte, displayModelID string) ([]byte, bool) {
+	if rewritten, ok := rewriteJSONResponseModel(body, displayModelID); ok {
+		return rewritten, true
+	}
+	return rewriteSSEDataResponseModel(body, displayModelID)
+}
+
+func rewriteSSEDataResponseModel(line []byte, displayModelID string) ([]byte, bool) {
+	if !bytes.HasPrefix(line, []byte("data:")) {
+		return nil, false
+	}
+
+	payloadStart := len("data:")
+	for payloadStart < len(line) && (line[payloadStart] == ' ' || line[payloadStart] == '\t') {
+		payloadStart++
+	}
+
+	payload := line[payloadStart:]
+	payload, ending := splitLineEnding(payload)
+	if bytes.Equal(bytes.TrimSpace(payload), []byte("[DONE]")) {
+		return nil, false
+	}
+
+	rewrittenPayload, ok := rewriteJSONResponseModel(payload, displayModelID)
+	if !ok {
+		return nil, false
+	}
+
+	out := make([]byte, 0, payloadStart+len(rewrittenPayload)+len(ending))
+	out = append(out, line[:payloadStart]...)
+	out = append(out, rewrittenPayload...)
+	out = append(out, ending...)
+	return out, true
+}
+
+func splitLineEnding(line []byte) ([]byte, []byte) {
+	switch {
+	case bytes.HasSuffix(line, []byte("\r\n")):
+		return line[:len(line)-2], line[len(line)-2:]
+	case bytes.HasSuffix(line, []byte("\n")):
+		return line[:len(line)-1], line[len(line)-1:]
+	default:
+		return line, nil
+	}
+}
+
+func rewriteJSONResponseModel(body []byte, displayModelID string) ([]byte, bool) {
+	if len(bytes.TrimSpace(body)) == 0 {
+		return nil, false
+	}
+
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal(body, &obj); err != nil {
+		return nil, false
+	}
+
+	rawModel, ok := obj["model"]
+	if !ok {
+		return nil, false
+	}
+
+	var currentModel string
+	if err := json.Unmarshal(rawModel, &currentModel); err != nil {
+		return nil, false
+	}
+	if currentModel == displayModelID {
+		return body, true
+	}
+
+	model, err := json.Marshal(displayModelID)
+	if err != nil {
+		return nil, false
+	}
+	obj["model"] = model
+
+	rewritten, err := json.Marshal(obj)
+	if err != nil {
+		return nil, false
+	}
+	return rewritten, true
 }
