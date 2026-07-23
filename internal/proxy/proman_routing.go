@@ -261,10 +261,7 @@ func hasEnabledThinkingConfig(value any) bool {
 		return true
 	}
 	typ := strings.ToLower(strings.TrimSpace(stringValue(thinking["type"])))
-	if typ == "disabled" {
-		return false
-	}
-	return true
+	return typ != "disabled"
 }
 
 func hasProManRecursiveType(value any, targetType string) bool {
