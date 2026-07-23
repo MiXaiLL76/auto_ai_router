@@ -130,18 +130,17 @@ func (p *Proxy) estimateRequestCost(modelID, realModelID string, body []byte) (f
 	if p.priceRegistry == nil {
 		return 0, false
 	}
-	price := p.priceRegistry.GetPrice(realModelID)
-	if price == nil && realModelID != modelID {
-		price = p.priceRegistry.GetPrice(modelID)
-	}
-	if price == nil {
+	// Mirror final billing: reserve against the client-facing model price first,
+	// then fall back to the provider-facing real model if the alias is unpriced.
+	_, modelPrice := lookupBillingModelPrice(p.priceRegistry, modelID, realModelID)
+	if modelPrice == nil {
 		return 0, false
 	}
 	usage := &converter.TokenUsage{
 		PromptTokens:     estimatePromptTokensForModel(body, realModelID),
 		CompletionTokens: p.estimateCompletionTokens(body),
 	}
-	return price.CalculateCost(usage), true
+	return modelPrice.CalculateCost(usage), true
 }
 
 func (p *Proxy) enforceBudgetAndRateLimits(

@@ -7,7 +7,8 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/converter"
 	"github.com/mixaill76/auto_ai_router/internal/kafkalog"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb"
-	"github.com/mixaill76/auto_ai_router/internal/litellmdb/models"
+	dbmodels "github.com/mixaill76/auto_ai_router/internal/litellmdb/models"
+	routermodels "github.com/mixaill76/auto_ai_router/internal/models"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -17,12 +18,12 @@ import (
 // override what these tests actually exercise.
 type stubLiteLLMManager struct {
 	litellmdb.NoopManager
-	loggedEntries []*models.SpendLogEntry
+	loggedEntries []*dbmodels.SpendLogEntry
 }
 
 func (s *stubLiteLLMManager) IsEnabled() bool { return true }
 
-func (s *stubLiteLLMManager) LogSpend(entry *models.SpendLogEntry) error {
+func (s *stubLiteLLMManager) LogSpend(entry *dbmodels.SpendLogEntry) error {
 	s.loggedEntries = append(s.loggedEntries, entry)
 	return nil
 }
@@ -84,6 +85,7 @@ func TestLogSpendToLiteLLMDB_NoKafkaFallbackFlagOnSuccess(t *testing.T) {
 
 func TestLogSpendToLiteLLMDB_NormalizesTokenUsageBeforePersisting(t *testing.T) {
 	prx := NewTestProxyBuilder().Build()
+
 	dbStub := &stubLiteLLMManager{}
 	prx.LiteLLMDB = dbStub
 
@@ -118,4 +120,47 @@ func TestLogSpendToLiteLLMDB_NormalizesTokenUsageBeforePersisting(t *testing.T) 
 	ttlDetails := promptDetails["cache_creation_token_details"].(map[string]interface{})
 	assert.Equal(t, float64(8), ttlDetails["ephemeral_5m_input_tokens"])
 	assert.Equal(t, float64(2), ttlDetails["ephemeral_1h_input_tokens"])
+}
+
+func TestLogSpendToLiteLLMDB_BillsAliasPriceBeforeRealModelPrice(t *testing.T) {
+	prx := NewTestProxyBuilder().Build()
+	registry := routermodels.NewModelPriceRegistry()
+	registry.Update(map[string]*routermodels.ModelPrice{
+		"gpt-5.2-chat": {
+			InputCostPerToken:       0.000001575,
+			OutputCostPerToken:      0.0000126,
+			CacheReadInputTokenCost: 0.0000001575,
+		},
+		"gpt-chat-latest": {
+			InputCostPerToken:  0.0000045,
+			OutputCostPerToken: 0.000027,
+		},
+	})
+	prx.priceRegistry = registry
+
+	dbStub := &stubLiteLLMManager{}
+	prx.LiteLLMDB = dbStub
+
+	logCtx := testLogCtx(t)
+	logCtx.ModelID = "gpt-5.2-chat"
+	logCtx.RealModelID = "gpt-chat-latest"
+	logCtx.TokenUsage.PromptTokens = 25869
+	logCtx.TokenUsage.CompletionTokens = 318
+	logCtx.TokenUsage.ReasoningTokens = 64
+
+	err := prx.logSpendToLiteLLMDB(logCtx)
+	require.NoError(t, err)
+
+	require.Len(t, dbStub.loggedEntries, 1)
+	entry := dbStub.loggedEntries[0]
+	assert.InDelta(t, 0.044750475, entry.Spend, 0.000000001)
+
+	var metadata map[string]interface{}
+	require.NoError(t, json.Unmarshal([]byte(entry.Metadata), &metadata))
+	costBreakdown, ok := metadata["cost_breakdown"].(map[string]interface{})
+	require.True(t, ok)
+	assert.InDelta(t, 0.040743675, costBreakdown["input_cost"].(float64), 0.000000001)
+	assert.InDelta(t, 0.0032004, costBreakdown["output_cost"].(float64), 0.000000001)
+	assert.InDelta(t, 0.0008064, costBreakdown["reasoning_cost"].(float64), 0.000000001)
+	assert.InDelta(t, entry.Spend, costBreakdown["total_cost"].(float64), 0.000000001)
 }

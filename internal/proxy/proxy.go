@@ -1630,6 +1630,10 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			finalResponseBody = []byte(decodedBody)
 		}
 
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 && conv != nil && conv.IsPassthrough() {
+			finalResponseBody = rewriteResponseModelAlias(finalResponseBody, realModelID, modelID)
+		}
+
 		// bodyForTokenExtraction is set to finalResponseBody now and may be updated
 		// after Responses API conversion (for nativeResponses the raw provider body
 		// uses a provider-specific format that ExtractTokenUsage cannot parse).
