@@ -57,18 +57,18 @@ configs:
 
       credentials:
       - name: "ger01"
-        type: "proxy"
+        type: "air"
         api_key: sk-ger01-key
         base_url: http://ger01:8080
 
       - name: "fin01"
-        type: "proxy"
+        type: "air"
         is_fallback: true
         api_key: sk-fin01-key
         base_url: http://fin01:8080
 
       - name: "fra01"
-        type: "proxy"
+        type: "air"
         is_fallback: true
         api_key: sk-fra01-key
         base_url: http://fra01:8080

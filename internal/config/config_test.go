@@ -97,58 +97,18 @@ forbidden_scopes: [blocked]
 	assert.Equal(t, []string{"premium", "blocked"}, cred.DeniedScopes)
 }
 
-func TestCredentialConfig_UnmarshalProxyUsageFormat(t *testing.T) {
-	tests := []struct {
-		name string
-		yaml string
-		want ProxyUsageFormat
-	}{
-		{
-			name: "default is OpenAI-compatible",
-			yaml: "name: proxy\ntype: proxy\nbase_url: http://proxy.example\n",
-			want: ProxyUsageFormatOpenAI,
-		},
-		{
-			name: "legacy openai override is accepted",
-			yaml: "name: proxy\ntype: proxy\nbase_url: http://proxy.example\nproxy_usage_format: openai\n",
-			want: ProxyUsageFormatOpenAI,
-		},
-		{
-			name: "legacy normalized override is accepted",
-			yaml: "name: proxy\ntype: proxy\nbase_url: http://proxy.example\nproxy_usage_format: normalized\n",
-			want: ProxyUsageFormatNormalized,
-		},
-	}
+func TestCredentialConfig_UnmarshalRejectsLegacyProxyUsageFormat(t *testing.T) {
+	var cred CredentialConfig
+	err := yaml.Unmarshal([]byte(`
+name: proxy
+type: proxy
+base_url: http://proxy.example
+proxy_usage_format: normalized
+`), &cred)
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			var cred CredentialConfig
-			require.NoError(t, yaml.Unmarshal([]byte(tt.yaml), &cred))
-			assert.Equal(t, tt.want, cred.ProxyUsageFormat)
-		})
-	}
-}
-
-func TestConfig_ValidateProxyUsageFormat(t *testing.T) {
-	cfg := &Config{
-		Server: ServerConfig{
-			Port:           8080,
-			MaxBodySizeMB:  10,
-			MasterKey:      "test-key",
-			RequestTimeout: 30 * time.Second,
-		},
-		Credentials: []CredentialConfig{{
-			Name:             "proxy",
-			Type:             ProviderTypeProxy,
-			BaseURL:          "http://proxy.example",
-			ProxyUsageFormat: "ambiguous",
-		}},
-		Fail2Ban: Fail2BanConfig{MaxAttempts: 3},
-	}
-
-	err := cfg.Validate()
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "invalid proxy_usage_format")
+	assert.Contains(t, err.Error(), "proxy_usage_format is no longer supported")
+	assert.Contains(t, err.Error(), "type: air")
 }
 
 func TestConfig_ValidateAIRCredential(t *testing.T) {
@@ -170,46 +130,6 @@ func TestConfig_ValidateAIRCredential(t *testing.T) {
 	}
 
 	require.NoError(t, cfg.Validate())
-}
-
-func TestConfig_ValidateAIRRejectsProxyUsageFormat(t *testing.T) {
-	cfg := &Config{
-		Server: ServerConfig{
-			Port:           8080,
-			MaxBodySizeMB:  10,
-			MasterKey:      "test-key",
-			RequestTimeout: 30 * time.Second,
-		},
-		Credentials: []CredentialConfig{{
-			Name:             "upstream-air",
-			Type:             ProviderTypeAIR,
-			BaseURL:          "http://air.example",
-			ProxyUsageFormat: ProxyUsageFormatNormalized,
-			RPM:              -1,
-			TPM:              -1,
-		}},
-		Fail2Ban: Fail2BanConfig{MaxAttempts: 3},
-	}
-
-	err := cfg.Validate()
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "proxy_usage_format is only valid for proxy type")
-}
-
-func TestCredentialConfig_SameProviderIdentityIncludesProxyUsageFormat(t *testing.T) {
-	openAI := CredentialConfig{
-		Name:             "proxy",
-		Type:             ProviderTypeProxy,
-		BaseURL:          "http://proxy.example",
-		ProxyUsageFormat: ProxyUsageFormatOpenAI,
-	}
-	normalized := openAI
-	normalized.ProxyUsageFormat = ProxyUsageFormatNormalized
-	implicitOpenAI := openAI
-	implicitOpenAI.ProxyUsageFormat = ""
-
-	assert.False(t, openAI.SameProviderIdentity(normalized))
-	assert.True(t, openAI.SameProviderIdentity(implicitOpenAI))
 }
 
 func TestCredentialConfig_ScopeExpressionPreservesIndependentGroups(t *testing.T) {

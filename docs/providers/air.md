@@ -31,10 +31,12 @@ or:
 X-Aar-Usage-Audio-Tokens: exclude-cached
 ```
 
-Downstream AIR reads this header automatically and bills audio/cache correctly without `proxy_usage_format`.
+Downstream AIR reads this header automatically and bills audio/cache correctly.
 
 If the header is missing, AIR falls back to OpenAI-compatible semantics where `audio_tokens` includes `cached_audio_tokens`. This keeps older or partially rolled out upstreams safe for raw Chat Completions passthrough.
 
 ## When to use `proxy`
 
 Use `type: proxy` for generic OpenAI-compatible APIs that are not Auto AI Router instances.
+
+Older `proxy_usage_format` configuration is no longer supported. Use `type: air` for Auto AI Router upstreams.

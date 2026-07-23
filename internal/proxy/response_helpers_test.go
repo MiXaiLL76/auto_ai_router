@@ -61,33 +61,6 @@ func TestTokenUsageExtractionOptionsForResponse(t *testing.T) {
 			includes: true,
 		},
 		{
-			name: "explicit OpenAI proxy",
-			cred: &config.CredentialConfig{
-				Type:             config.ProviderTypeProxy,
-				ProxyUsageFormat: config.ProxyUsageFormatOpenAI,
-			},
-			includes: true,
-		},
-		{
-			name: "AIR response header overrides stale explicit OpenAI proxy config",
-			cred: &config.CredentialConfig{
-				Type:             config.ProviderTypeProxy,
-				ProxyUsageFormat: config.ProxyUsageFormatOpenAI,
-			},
-			headers: http.Header{
-				HeaderAARUsageAudioTokens: []string{aarUsageAudioTokensExcludeCached},
-			},
-			includes: false,
-		},
-		{
-			name: "explicit normalized proxy",
-			cred: &config.CredentialConfig{
-				Type:             config.ProviderTypeProxy,
-				ProxyUsageFormat: config.ProxyUsageFormatNormalized,
-			},
-			includes: false,
-		},
-		{
 			name: "AIR response header tolerates comma joined duplicates",
 			cred: &config.CredentialConfig{Type: config.ProviderTypeProxy},
 			headers: http.Header{

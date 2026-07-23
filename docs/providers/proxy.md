@@ -46,10 +46,6 @@ X-Aar-Usage-Audio-Tokens: include-cached
 
 Downstream AIR reads this header automatically.
 
-`proxy_usage_format: "normalized"` is still accepted as a legacy override for
-older upstream AIR deployments that do not emit the header yet, but new configs
-should use `type: air` for AIR-to-AIR routing.
-
 ## Migration / Rollout Note
 
 For AIR-to-AIR chained routing, switch credentials to `type: air`. Roll out the upstream AIR first or at least ensure the upstream emits `X-Aar-Usage-Audio-Tokens` on successful responses.

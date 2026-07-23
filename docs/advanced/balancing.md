@@ -151,30 +151,30 @@ with regular credentials that do not set `fallback_priority`. Fallback credentia
 (`is_fallback: true`) are still used only by the fallback mechanism. See
 [Proxy — Fallback Behavior](../providers/proxy.md#fallback-behavior) for details.
 
-## Proxy Chain Fallback
+## AIR Chain Fallback
 
 When using chained routers (e.g. router01 → router02 as primary, router03 as fallback), fallback works across the chain:
 
 ```
 router01 receives request
-  └─► router02 (primary proxy) → router02 returns 429/5xx
+  └─► router02 (primary AIR) → router02 returns 429/5xx
       └─► router01 detects retryable error
-          └─► router03 (fallback proxy) → success
+          └─► router03 (fallback AIR) → success
 ```
 
 router01 marks router02 as "tried" immediately on the first attempt, so same-type retries
-never re-select router02. After all primary proxies are exhausted, `TryFallbackProxy`
+never re-select router02. After all primary AIR credentials are exhausted, `TryFallbackProxy`
 selects the next `is_fallback: true` credential (router03).
 
 ```yaml
 credentials:
   - name: "router02"
-    type: "proxy"
+    type: "air"
     base_url: "https://router02.example.com"
     is_fallback: false
 
   - name: "router03"
-    type: "proxy"
+    type: "air"
     base_url: "https://router03.example.com"
     is_fallback: true
 ```

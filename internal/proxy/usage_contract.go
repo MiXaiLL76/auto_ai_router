@@ -55,15 +55,8 @@ func audioUsageExcludesCached(headers http.Header) bool {
 	return audioUsageContractFromHeaders(headers) == audioUsageContractExcludesCached
 }
 
-func tokenUsageExtractionOptionsForCredential(cred *config.CredentialConfig) converter.TokenUsageExtractionOptions {
-	includesCachedAudio := true
-	if cred != nil && cred.Type == config.ProviderTypeProxy {
-		// Legacy override for old upstream AIR deployments that do not emit the
-		// usage-contract response header yet. New AIR-to-AIR chains should rely on
-		// HeaderAARUsageAudioTokens instead of credential-level configuration.
-		includesCachedAudio = cred.EffectiveProxyUsageFormat() != config.ProxyUsageFormatNormalized
-	}
-	return converter.TokenUsageExtractionOptions{AudioInputIncludesCachedAudio: includesCachedAudio}
+func tokenUsageExtractionOptionsForCredential(_ *config.CredentialConfig) converter.TokenUsageExtractionOptions {
+	return converter.TokenUsageExtractionOptions{AudioInputIncludesCachedAudio: true}
 }
 
 func tokenUsageExtractionOptionsForResponse(cred *config.CredentialConfig, headers http.Header) converter.TokenUsageExtractionOptions {
