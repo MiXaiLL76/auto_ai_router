@@ -82,6 +82,36 @@ func isCometAPIHost(rawBaseURL string) bool {
 	return host == "cometapi.com" || strings.HasSuffix(host, ".cometapi.com")
 }
 
+func isProManCredential(cred *config.CredentialConfig) bool {
+	if cred == nil {
+		return false
+	}
+	if cred.Type == config.ProviderTypeProMan {
+		return true
+	}
+	name := strings.ToLower(cred.Name)
+	return strings.Contains(name, "proman") ||
+		strings.Contains(name, "pro-man") ||
+		strings.Contains(name, "pro_man") ||
+		isProManHost(cred.BaseURL)
+}
+
+func isProManHost(rawBaseURL string) bool {
+	baseURL := strings.TrimSpace(rawBaseURL)
+	if baseURL == "" {
+		return false
+	}
+	u, err := url.Parse(baseURL)
+	if err != nil || u.Hostname() == "" {
+		u, err = url.Parse("https://" + baseURL)
+		if err != nil {
+			return false
+		}
+	}
+	host := strings.TrimSuffix(strings.ToLower(u.Hostname()), ".")
+	return host == "proman.ai" || strings.HasSuffix(host, ".proman.ai")
+}
+
 // logStreamHandlerError logs a streaming handler failure. Client disconnects are
 // expected during normal operation and go to DEBUG; real failures go to ERROR.
 func (p *Proxy) logStreamHandlerError(ctx context.Context, msg string, err error, extra ...any) {
