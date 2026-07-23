@@ -156,66 +156,46 @@ func (p *Proxy) nextPrimaryAfterUnsupportedProMan(
 }
 
 type proManModelCapabilities struct {
-	allowReasoning bool
-	block          map[string]bool
+	blockAssistantPrefill bool
+	blockLegacyThinking   bool
 }
 
 var proManCapabilitiesByModel = map[string]proManModelCapabilities{
 	"claude-fable-5": {
-		allowReasoning: true,
-		block: map[string]bool{
-			"assistant_prefill": true,
-			"top_k":             true,
-			"top_p":             true,
-		},
+		blockAssistantPrefill: true,
+		blockLegacyThinking:   true,
 	},
 	"claude-haiku-4.5": {
-		allowReasoning: true,
-		block:          map[string]bool{},
+		blockAssistantPrefill: false,
+		blockLegacyThinking:   false,
 	},
 	"claude-opus-4.5": {
-		allowReasoning: false,
-		block:          map[string]bool{},
+		blockAssistantPrefill: false,
+		blockLegacyThinking:   false,
 	},
 	"claude-opus-4.6": {
-		allowReasoning: false,
-		block: map[string]bool{
-			"assistant_prefill": true,
-		},
+		blockAssistantPrefill: true,
+		blockLegacyThinking:   false,
 	},
 	"claude-opus-4.7": {
-		allowReasoning: false,
-		block: map[string]bool{
-			"assistant_prefill": true,
-			"top_k":             true,
-			"top_p":             true,
-		},
+		blockAssistantPrefill: true,
+		blockLegacyThinking:   false,
 	},
 	"claude-opus-4.8": {
-		allowReasoning: false,
-		block: map[string]bool{
-			"assistant_prefill": true,
-			"top_k":             true,
-			"top_p":             true,
-		},
+		blockAssistantPrefill: true,
+		blockLegacyThinking:   false,
 	},
 	"claude-sonnet-4.5": {
-		allowReasoning: true,
-		block:          map[string]bool{},
+		blockAssistantPrefill: false,
+		blockLegacyThinking:   false,
 	},
 	"claude-sonnet-4.6": {
-		allowReasoning: true,
-		block: map[string]bool{
-			"assistant_prefill": true,
-		},
+		blockAssistantPrefill: true,
+		blockLegacyThinking:   false,
 	},
 	"claude-sonnet-5": {
-		allowReasoning: false,
-		block: map[string]bool{
-			"assistant_prefill": true,
-			"top_k":             true,
-			"top_p":             true,
-		},
+		blockAssistantPrefill: true,
+		blockLegacyThinking:   true,
 	},
 }
 
@@ -240,112 +220,51 @@ func unsupportedProManRequest(body []byte, selectedModel string) string {
 		model = proManCanonicalModel(stringValue(obj["model"]))
 	}
 	caps, hasCaps := proManCapabilitiesByModel[model]
-	if hasProManContextManagement(obj) {
-		return "context_management"
-	}
-	if hasProManThinking(obj, !hasCaps || caps.allowReasoning) {
-		return "thinking"
-	}
-	if hasUnsupportedProManToolChoice(obj) {
-		return "tool_choice.none.disable_parallel_tool_use"
-	}
 	if hasProManRecursiveType(root, "server_tool_use") {
 		return "server_tool_use"
 	}
-	if hasProManTextPlainDocument(root) {
-		return "document.text_plain"
-	}
 	if hasCaps {
-		if caps.block["assistant_prefill"] && hasProManAssistantPrefill(obj) {
+		if caps.blockLegacyThinking && hasProManUnsupportedThinking(obj) {
+			return "thinking"
+		}
+		if caps.blockAssistantPrefill && hasProManAssistantPrefill(obj) {
 			return "assistant_prefill"
-		}
-		if hasProManSamplingPair(obj) {
-			return "temperature+top_p"
-		}
-		if caps.block["top_p"] && hasProManRequestField(obj, "top_p") {
-			return "top_p"
-		}
-		if caps.block["top_k"] && hasProManRequestField(obj, "top_k") {
-			return "top_k"
-		}
-		if proManTemperatureIsUnsupported(model, obj) {
-			return "temperature"
 		}
 	}
 	return ""
 }
 
-func hasProManContextManagement(obj map[string]any) bool {
-	if _, ok := obj["context_management"]; ok {
-		return true
-	}
-	if extra, ok := obj["extra_body"].(map[string]any); ok {
-		if _, ok := extra["context_management"]; ok {
-			return true
-		}
-	}
-	return false
-}
-
-func hasProManThinking(obj map[string]any, allowReasoning bool) bool {
+func hasProManUnsupportedThinking(obj map[string]any) bool {
 	for _, container := range []map[string]any{obj, mapValue(obj["extra_body"])} {
 		if container == nil {
 			continue
 		}
-		if thinking, ok := container["thinking"]; ok && !isDisabledThinking(thinking) {
-			if !allowReasoning || hasNestedThinkingEffort(thinking) {
+		if thinking, ok := container["thinking"]; ok {
+			if hasEnabledThinkingConfig(thinking) {
 				return true
 			}
 		}
-		if outputConfig, ok := container["output_config"].(map[string]any); ok {
-			if nonEmptyString(outputConfig["effort"]) && !allowReasoning {
-				return true
-			}
-		}
-		if nonNoneString(container["reasoning_effort"]) && !allowReasoning {
+		if nonNoneString(container["reasoning_effort"]) {
 			return true
 		}
 	}
 
 	if reasoning, ok := obj["reasoning"].(map[string]any); ok {
-		return nonNoneString(reasoning["effort"]) && !allowReasoning
+		return nonNoneString(reasoning["effort"])
 	}
 	return false
 }
 
-func hasNestedThinkingEffort(value any) bool {
+func hasEnabledThinkingConfig(value any) bool {
 	thinking, ok := value.(map[string]any)
 	if !ok {
+		return true
+	}
+	typ := strings.ToLower(strings.TrimSpace(stringValue(thinking["type"])))
+	if typ == "disabled" {
 		return false
 	}
-	_, hasEffort := thinking["effort"]
-	return hasEffort
-}
-
-func isDisabledThinking(value any) bool {
-	thinking, ok := value.(map[string]any)
-	if !ok {
-		return false
-	}
-	typ, _ := thinking["type"].(string)
-	return strings.EqualFold(strings.TrimSpace(typ), "disabled")
-}
-
-func hasUnsupportedProManToolChoice(obj map[string]any) bool {
-	for _, container := range []map[string]any{obj, mapValue(obj["extra_body"])} {
-		if container == nil {
-			continue
-		}
-		if toolChoice, ok := container["tool_choice"].(map[string]any); ok {
-			typ, _ := toolChoice["type"].(string)
-			if strings.EqualFold(strings.TrimSpace(typ), "none") {
-				if _, ok := toolChoice["disable_parallel_tool_use"]; ok {
-					return true
-				}
-			}
-		}
-	}
-	return false
+	return true
 }
 
 func hasProManRecursiveType(value any, targetType string) bool {
@@ -369,32 +288,6 @@ func hasProManRecursiveType(value any, targetType string) bool {
 	return false
 }
 
-func hasProManTextPlainDocument(value any) bool {
-	switch typed := value.(type) {
-	case map[string]any:
-		if typ, _ := typed["type"].(string); strings.EqualFold(strings.TrimSpace(typ), "document") {
-			if source, ok := typed["source"].(map[string]any); ok {
-				mediaType, _ := source["media_type"].(string)
-				if strings.EqualFold(strings.TrimSpace(mediaType), "text/plain") {
-					return true
-				}
-			}
-		}
-		for _, nested := range typed {
-			if hasProManTextPlainDocument(nested) {
-				return true
-			}
-		}
-	case []any:
-		for _, nested := range typed {
-			if hasProManTextPlainDocument(nested) {
-				return true
-			}
-		}
-	}
-	return false
-}
-
 func hasProManAssistantPrefill(obj map[string]any) bool {
 	messages, ok := obj["messages"].([]any)
 	if !ok || len(messages) == 0 {
@@ -411,57 +304,6 @@ func hasProManAssistantPrefill(obj map[string]any) bool {
 	}
 	role := strings.TrimSpace(strings.ToLower(stringValue(last["role"])))
 	return role == "assistant" || role == "model"
-}
-
-func hasProManSamplingPair(obj map[string]any) bool {
-	for _, container := range []map[string]any{obj, mapValue(obj["extra_body"])} {
-		if container == nil {
-			continue
-		}
-		if _, hasTemperature := container["temperature"]; hasTemperature {
-			if _, hasTopP := container["top_p"]; hasTopP {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func hasProManRequestField(obj map[string]any, field string) bool {
-	for _, container := range []map[string]any{obj, mapValue(obj["extra_body"])} {
-		if container == nil {
-			continue
-		}
-		if _, ok := container[field]; ok {
-			return true
-		}
-	}
-	return false
-}
-
-func proManTemperatureIsUnsupported(model string, obj map[string]any) bool {
-	switch model {
-	case "claude-fable-5", "claude-opus-4.7", "claude-opus-4.8", "claude-sonnet-5":
-	default:
-		return false
-	}
-	for _, container := range []map[string]any{obj, mapValue(obj["extra_body"])} {
-		if container == nil {
-			continue
-		}
-		value, ok := container["temperature"]
-		if !ok {
-			continue
-		}
-		number, ok := numberValue(value)
-		if !ok {
-			return true
-		}
-		if number != 1 {
-			return true
-		}
-	}
-	return false
 }
 
 func proManCanonicalModel(model string) string {
@@ -504,29 +346,6 @@ func mapValue(value any) map[string]any {
 func stringValue(value any) string {
 	s, _ := value.(string)
 	return s
-}
-
-func numberValue(value any) (float64, bool) {
-	switch typed := value.(type) {
-	case float64:
-		return typed, true
-	case float32:
-		return float64(typed), true
-	case int:
-		return float64(typed), true
-	case int64:
-		return float64(typed), true
-	case json.Number:
-		parsed, err := typed.Float64()
-		return parsed, err == nil
-	default:
-		return 0, false
-	}
-}
-
-func nonEmptyString(value any) bool {
-	s, ok := value.(string)
-	return ok && strings.TrimSpace(s) != ""
 }
 
 func nonNoneString(value any) bool {
