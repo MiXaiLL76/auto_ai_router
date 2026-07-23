@@ -337,7 +337,7 @@ func TestQueryContainsRequiredFields(t *testing.T) {
 // with "number of field descriptions must equal number of destinations" when
 // the SELECT list and the Scan call drift apart, so any column added here has
 // to land in both places at once.
-const tokenHierarchyScanColumns = 43
+const tokenHierarchyScanColumns = 45
 
 func TestTokenValidationQueryColumnCountMatchesScan(t *testing.T) {
 	selectList := QueryValidateTokenWithHierarchy

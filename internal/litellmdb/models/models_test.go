@@ -278,6 +278,40 @@ func TestTokenInfo_IsModelAllowed_AllTeamModelsInheritsTeamScope(t *testing.T) {
 	assert.False(t, broken.IsModelAllowed("public/chat"), "all-team-models without a team must fail closed")
 }
 
+// A token whose team_id references a deleted LiteLLM_TeamTable row gets an
+// empty team scope from the LEFT JOIN. That scope must deny, not degrade to
+// unrestricted — otherwise all-team-models keys would silently gain access
+// to every model.
+func TestTokenInfo_IsModelAllowed_DanglingTeamFailsClosed(t *testing.T) {
+	token := &TokenInfo{
+		Models:       []string{AllTeamModels},
+		TeamID:       "deleted-team",
+		TeamModels:   nil, // LEFT JOIN found no team row
+		TeamDangling: true,
+	}
+
+	assert.False(t, token.IsModelAllowed("public/chat"))
+	assert.False(t, token.IsModelAllowed("any-model"))
+
+	explicit := &TokenInfo{
+		Models:       []string{"public/chat"},
+		TeamID:       "deleted-team",
+		TeamDangling: true,
+	}
+	assert.False(t, explicit.IsModelAllowed("public/chat"),
+		"even a key-allowed model must be denied while the team scope is unresolvable")
+}
+
+func TestTokenInfo_IsModelAllowed_ResolvedEmptyTeamScopeStaysUnrestricted(t *testing.T) {
+	token := &TokenInfo{
+		Models:     []string{"public/chat"},
+		TeamID:     "team",
+		TeamModels: nil,
+	}
+
+	assert.True(t, token.IsModelAllowed("public/chat"))
+}
+
 // ==================== Budget Check Helper Tests ====================
 
 func TestTokenInfo_checkUserBudget_PersonalKey(t *testing.T) {

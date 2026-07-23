@@ -579,6 +579,16 @@ func initializeModelManager(
 	if len(cfg.ModelAlias) > 0 {
 		modelManager.SetModelAliases(cfg.ModelAlias)
 	}
+	// nil preserves legacy discovery; an explicit empty list denies all client IDs.
+	if cfg.ClientModelIDs != nil {
+		if len(cfg.ClientModelIDs) == 0 {
+			log.Warn("client_model_ids is explicitly empty: client model surface is deny-all")
+		}
+		modelManager.SetClientModelIDs(cfg.ClientModelIDs)
+	}
+	if len(cfg.PublicModelAlias) > 0 {
+		modelManager.SetPublicModelAliases(cfg.PublicModelAlias)
+	}
 
 	// Initialize rate limiters for each model
 	modelsResp := modelManager.GetAllModels()

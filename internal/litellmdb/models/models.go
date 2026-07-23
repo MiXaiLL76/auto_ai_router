@@ -168,9 +168,13 @@ type TokenInfo struct {
 	// Access control
 	Models        []string // Key-level allowed models (empty = all)
 	AllowedRoutes []string // LiteLLM virtual-key routes (empty = unrestricted)
+	UserModels    []string // Personal-user allowed models (empty = all)
 	TeamModels    []string // Team-level allowed models (empty = all)
 	Blocked       bool     // Is token blocked
 	IsMasterKey   bool     // Internal provenance marker; never populated from a verification-token row
+
+	// A dangling team fails closed instead of becoming an unrestricted empty scope.
+	TeamDangling bool
 
 	// ==================== User Level (embedded budget) ====================
 	UserAlias     string   // User alias (optional) - user-friendly name
@@ -199,6 +203,7 @@ type TokenInfo struct {
 	TeamMemberMaxBudget *float64 // Team member's max budget from BudgetTable (nil = unlimited)
 	TeamMemberTPMLimit  *int64   // Team member's TPM limit from BudgetTable
 	TeamMemberRPMLimit  *int64   // Team member's RPM limit from BudgetTable
+	TeamMemberModels    []string // Team member's model scope from BudgetTable (empty = inherit team)
 
 	// ==================== OrganizationMembership Level (external budget) ====================
 	OrgMemberSpend     *float64 // Org member's spend within organization
@@ -210,10 +215,11 @@ type TokenInfo struct {
 	Metadata map[string]interface{}
 }
 
-// LiteLLM sentinel values stored in key model allowlists.
+// LiteLLM sentinel values stored in key or user model allowlists.
 const (
-	AllTeamModels  = "all-team-models"
-	AllProxyModels = "all-proxy-models"
+	AllTeamModels   = "all-team-models"
+	AllProxyModels  = "all-proxy-models"
+	NoDefaultModels = "no-default-models"
 )
 
 // ModelAccessScope identifies one independently enforced model allowlist.
@@ -274,8 +280,9 @@ func (t *TokenInfo) Clone() *TokenInfo {
 	}
 	clone := *t
 	clone.Models = append([]string(nil), t.Models...)
-	clone.AllowedRoutes = append([]string(nil), t.AllowedRoutes...)
+	clone.UserModels = append([]string(nil), t.UserModels...)
 	clone.TeamModels = append([]string(nil), t.TeamModels...)
+	clone.TeamMemberModels = append([]string(nil), t.TeamMemberModels...)
 	clone.Tags = append([]string(nil), t.Tags...)
 	if t.Metadata != nil {
 		clone.Metadata = cloneMetadataValue(t.Metadata).(map[string]interface{})
@@ -325,8 +332,7 @@ func (t *TokenInfo) IsBudgetExceeded() bool {
 	return t.Spend > *t.MaxBudget
 }
 
-// ModelAccessScopes returns the ordered set of allowlists applicable to this
-// token: the key scope plus the team scope for team keys.
+// ModelAccessScopes returns the independently enforced model allowlists.
 func (t *TokenInfo) ModelAccessScopes() []ModelAccessScope {
 	keyModels := t.Models
 	for _, model := range t.Models {
@@ -342,7 +348,23 @@ func (t *TokenInfo) ModelAccessScopes() []ModelAccessScope {
 
 	scopes := []ModelAccessScope{{Name: "key", Models: keyModels}}
 	if t.TeamID != "" {
-		scopes = append(scopes, ModelAccessScope{Name: "team", Models: t.TeamModels})
+		if t.TeamDangling {
+			scopes = append(scopes, ModelAccessScope{Name: "team", DenyAll: true})
+		} else {
+			scopes = append(scopes, ModelAccessScope{Name: "team", Models: t.TeamModels})
+			if t.UserID != "" && len(t.TeamMemberModels) > 0 {
+				scopes = append(scopes, ModelAccessScope{Name: "team_member", Models: t.TeamMemberModels})
+			}
+		}
+	} else if t.UserID != "" {
+		userScope := ModelAccessScope{Name: "user", Models: t.UserModels}
+		for _, model := range t.UserModels {
+			if model == NoDefaultModels {
+				userScope.DenyAll = true
+				break
+			}
+		}
+		scopes = append(scopes, userScope)
 	}
 	return scopes
 }
