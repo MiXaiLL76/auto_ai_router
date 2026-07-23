@@ -16,7 +16,7 @@ import (
 func TestProxyRequest_CacheBillingLogsLiteLLMSpend(t *testing.T) {
 	tests := []struct {
 		name                  string
-		proxyUsageFormat      config.ProxyUsageFormat
+		upstreamUsageHeader   bool
 		upstreamAudioTokens   int
 		expectedLoggedAudioIn int
 	}{
@@ -26,8 +26,8 @@ func TestProxyRequest_CacheBillingLogsLiteLLMSpend(t *testing.T) {
 			expectedLoggedAudioIn: 60,
 		},
 		{
-			name:                  "normalized proxy keeps non-cached audio",
-			proxyUsageFormat:      config.ProxyUsageFormatNormalized,
+			name:                  "AIR-normalized proxy header keeps non-cached audio without credential config",
+			upstreamUsageHeader:   true,
 			upstreamAudioTokens:   60,
 			expectedLoggedAudioIn: 60,
 		},
@@ -35,11 +35,11 @@ func TestProxyRequest_CacheBillingLogsLiteLLMSpend(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			upstream := newCacheBillingUpstream(t, false, tt.upstreamAudioTokens)
+			upstream := newCacheBillingUpstream(t, false, tt.upstreamAudioTokens, tt.upstreamUsageHeader)
 			defer upstream.Close()
 
 			dbStub := &stubLiteLLMManager{}
-			prx := newCacheBillingProxy(t, upstream.URL, tt.proxyUsageFormat, dbStub)
+			prx := newCacheBillingProxy(t, upstream.URL, dbStub)
 
 			req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{
 				"model": "gpt-cache",
@@ -52,6 +52,11 @@ func TestProxyRequest_CacheBillingLogsLiteLLMSpend(t *testing.T) {
 			prx.ProxyRequest(w, req)
 
 			require.Equal(t, http.StatusOK, w.Code)
+			if tt.upstreamUsageHeader {
+				assert.Equal(t, aarUsageAudioTokensExcludeCached, w.Header().Get(HeaderAARUsageAudioTokens))
+			} else {
+				assert.Empty(t, w.Header().Get(HeaderAARUsageAudioTokens))
+			}
 			require.JSONEq(t, `{"role":"assistant","content":"ok"}`, extractMessage(t, w.Body.String()))
 			require.Len(t, dbStub.loggedEntries, 1)
 
@@ -78,16 +83,100 @@ func TestProxyRequest_CacheBillingLogsLiteLLMSpend(t *testing.T) {
 }
 
 func TestProxyRequest_StreamingCacheBillingLogsLiteLLMSpend(t *testing.T) {
-	upstream := newCacheBillingUpstream(t, true, 100)
-	defer upstream.Close()
+	tests := []struct {
+		name                  string
+		upstreamUsageHeader   bool
+		upstreamAudioTokens   int
+		expectedLoggedAudioIn int
+	}{
+		{
+			name:                  "raw OpenAI-compatible proxy subtracts cached audio",
+			upstreamAudioTokens:   100,
+			expectedLoggedAudioIn: 60,
+		},
+		{
+			name:                  "AIR-normalized proxy header keeps non-cached audio without credential config",
+			upstreamUsageHeader:   true,
+			upstreamAudioTokens:   60,
+			expectedLoggedAudioIn: 60,
+		},
+	}
 
-	dbStub := &stubLiteLLMManager{}
-	prx := newCacheBillingProxy(t, upstream.URL, "", dbStub)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			upstream := newCacheBillingUpstream(t, true, tt.upstreamAudioTokens, tt.upstreamUsageHeader)
+			defer upstream.Close()
 
-	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{
+			dbStub := &stubLiteLLMManager{}
+			prx := newCacheBillingProxy(t, upstream.URL, dbStub)
+
+			req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{
 		"model": "gpt-cache",
 		"stream": true,
 		"messages": [{"role": "user", "content": "hello"}]
+	}`))
+			req.Header.Set("Authorization", "Bearer master-key")
+			req.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+
+			prx.ProxyRequest(w, req)
+
+			require.Equal(t, http.StatusOK, w.Code)
+			if tt.upstreamUsageHeader {
+				assert.Equal(t, aarUsageAudioTokensExcludeCached, w.Header().Get(HeaderAARUsageAudioTokens))
+			} else {
+				assert.Empty(t, w.Header().Get(HeaderAARUsageAudioTokens))
+			}
+			assert.Contains(t, w.Body.String(), "data: [DONE]")
+			require.Len(t, dbStub.loggedEntries, 1)
+
+			entry := dbStub.loggedEntries[0]
+			assert.Equal(t, 200, entry.PromptTokens)
+			assert.Equal(t, 50, entry.CompletionTokens)
+			assert.Equal(t, 250, entry.TotalTokens)
+			assert.Equal(t, 1090.0, entry.Spend)
+
+			metadata := decodeMetadata(t, entry.Metadata)
+			usageObject := metadata["usage_object"].(map[string]interface{})
+			promptDetails := usageObject["prompt_tokens_details"].(map[string]interface{})
+			assert.Equal(t, float64(tt.expectedLoggedAudioIn), promptDetails["audio_tokens"])
+			assert.Equal(t, float64(80), promptDetails["cached_tokens"])
+			assert.Equal(t, float64(40), promptDetails["cached_audio_tokens"])
+		})
+	}
+}
+
+func TestProxyRequest_ConvertedResponsesEmitsNormalizedUsageHeaderAndLogsSpend(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "/v1/chat/completions", r.URL.Path)
+		require.Equal(t, "Bearer upstream-key", r.Header.Get("Authorization"))
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(cacheBillingResponseJSON(100)))
+	}))
+	defer upstream.Close()
+
+	passthroughResponses := false
+	dbStub := &stubLiteLLMManager{}
+	builder := NewTestProxyBuilder().
+		WithCredentials(config.CredentialConfig{
+			Name:    "openai-cache",
+			Type:    config.ProviderTypeOpenAI,
+			BaseURL: upstream.URL,
+			APIKey:  "upstream-key",
+			RPM:     100,
+			TPM:     10000,
+		}).
+		WithMasterKey("master-key")
+	builder.config.ModelManager = pricing.New(builder.config.Logger, 50, []config.ModelRPMConfig{
+		{Name: "gpt-cache", PassthroughResponses: &passthroughResponses},
+	})
+	prx := builder.Build()
+	prx.LiteLLMDB = dbStub
+	installCacheBillingPrices(prx)
+
+	req := httptest.NewRequest("POST", "/v1/responses", strings.NewReader(`{
+		"model": "gpt-cache",
+		"input": "hello"
 	}`))
 	req.Header.Set("Authorization", "Bearer master-key")
 	req.Header.Set("Content-Type", "application/json")
@@ -96,41 +185,58 @@ func TestProxyRequest_StreamingCacheBillingLogsLiteLLMSpend(t *testing.T) {
 	prx.ProxyRequest(w, req)
 
 	require.Equal(t, http.StatusOK, w.Code)
-	assert.Contains(t, w.Body.String(), "data: [DONE]")
-	require.Len(t, dbStub.loggedEntries, 1)
+	assert.Equal(t, aarUsageAudioTokensExcludeCached, w.Header().Get(HeaderAARUsageAudioTokens))
 
+	var response struct {
+		Usage struct {
+			InputTokensDetails struct {
+				AudioTokens       int `json:"audio_tokens"`
+				CachedTokens      int `json:"cached_tokens"`
+				CachedAudioTokens int `json:"cached_audio_tokens"`
+			} `json:"input_tokens_details"`
+		} `json:"usage"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &response))
+	assert.Equal(t, 60, response.Usage.InputTokensDetails.AudioTokens)
+	assert.Equal(t, 80, response.Usage.InputTokensDetails.CachedTokens)
+	assert.Equal(t, 40, response.Usage.InputTokensDetails.CachedAudioTokens)
+
+	require.Len(t, dbStub.loggedEntries, 1)
 	entry := dbStub.loggedEntries[0]
 	assert.Equal(t, 200, entry.PromptTokens)
 	assert.Equal(t, 50, entry.CompletionTokens)
-	assert.Equal(t, 250, entry.TotalTokens)
 	assert.Equal(t, 1090.0, entry.Spend)
 
 	metadata := decodeMetadata(t, entry.Metadata)
 	usageObject := metadata["usage_object"].(map[string]interface{})
-	promptDetails := usageObject["prompt_tokens_details"].(map[string]interface{})
-	assert.Equal(t, float64(60), promptDetails["audio_tokens"])
-	assert.Equal(t, float64(80), promptDetails["cached_tokens"])
-	assert.Equal(t, float64(40), promptDetails["cached_audio_tokens"])
+	inputDetails := usageObject["prompt_tokens_details"].(map[string]interface{})
+	assert.Equal(t, float64(60), inputDetails["audio_tokens"])
+	assert.Equal(t, float64(80), inputDetails["cached_tokens"])
+	assert.Equal(t, float64(40), inputDetails["cached_audio_tokens"])
 }
 
-func newCacheBillingProxy(t *testing.T, upstreamURL string, usageFormat config.ProxyUsageFormat, dbStub *stubLiteLLMManager) *Proxy {
+func newCacheBillingProxy(t *testing.T, upstreamURL string, dbStub *stubLiteLLMManager) *Proxy {
 	t.Helper()
 
 	cred := config.CredentialConfig{
-		Name:             "proxy-cache",
-		Type:             config.ProviderTypeProxy,
-		BaseURL:          upstreamURL,
-		APIKey:           "upstream-key",
-		RPM:              100,
-		TPM:              10000,
-		ProxyUsageFormat: usageFormat,
+		Name:    "proxy-cache",
+		Type:    config.ProviderTypeProxy,
+		BaseURL: upstreamURL,
+		APIKey:  "upstream-key",
+		RPM:     100,
+		TPM:     10000,
 	}
 	prx := NewTestProxyBuilder().
 		WithCredentials(cred).
 		WithMasterKey("master-key").
 		Build()
 	prx.LiteLLMDB = dbStub
+	installCacheBillingPrices(prx)
 
+	return prx
+}
+
+func installCacheBillingPrices(prx *Proxy) {
 	registry := pricing.NewModelPriceRegistry()
 	registry.Update(map[string]*pricing.ModelPrice{
 		"gpt-cache": {
@@ -145,11 +251,9 @@ func newCacheBillingProxy(t *testing.T, upstreamURL string, usageFormat config.P
 		},
 	})
 	prx.priceRegistry = registry
-
-	return prx
 }
 
-func newCacheBillingUpstream(t *testing.T, stream bool, audioTokens int) *httptest.Server {
+func newCacheBillingUpstream(t *testing.T, stream bool, audioTokens int, normalizedUsageHeader bool) *httptest.Server {
 	t.Helper()
 
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -157,6 +261,9 @@ func newCacheBillingUpstream(t *testing.T, stream bool, audioTokens int) *httpte
 		require.Equal(t, "Bearer upstream-key", r.Header.Get("Authorization"))
 
 		w.Header().Set("Content-Type", "application/json")
+		if normalizedUsageHeader {
+			markAudioUsageExcludesCached(w.Header())
+		}
 		if stream {
 			w.Header().Set("Content-Type", "text/event-stream")
 			_, _ = w.Write([]byte(`data: {"id":"chatcmpl-cache","object":"chat.completion.chunk","created":1,"model":"gpt-cache","choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":"stop"}]}` + "\n\n"))

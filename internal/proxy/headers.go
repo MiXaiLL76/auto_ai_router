@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"net/http"
+	"strings"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
 )
@@ -49,6 +50,11 @@ func isHopByHopHeader(key string) bool {
 	return hopByHopHeaders[key]
 }
 
+func isInternalAARRequestHeader(key string) bool {
+	return strings.EqualFold(key, "X-Aar-Proxy-Client") ||
+		strings.EqualFold(key, HeaderAARUsageAudioTokens)
+}
+
 // GetHopByHopHeaders returns a copy of the hop-by-hop headers map for reference.
 // Use isHopByHopHeader() to check if a specific header should be filtered.
 func GetHopByHopHeaders() map[string]bool {
@@ -72,8 +78,8 @@ func copyRequestHeaders(dst *http.Request, src *http.Request, apiKey string) {
 		if key == "Accept-Encoding" {
 			continue
 		}
-		// Strip internal proxy marker — must not be forwarded to the actual provider.
-		if key == "X-Aar-Proxy-Client" {
+		// Strip internal AIR markers — they must not be forwarded to the actual provider.
+		if isInternalAARRequestHeader(key) {
 			continue
 		}
 		if key == "Authorization" {
@@ -111,8 +117,8 @@ func copyHeadersSkipAuth(dst *http.Request, src *http.Request) {
 		if key == "Accept-Encoding" {
 			continue
 		}
-		// Strip internal proxy marker — must not be forwarded to the actual provider.
-		if key == "X-Aar-Proxy-Client" {
+		// Strip internal AIR markers — they must not be forwarded to the actual provider.
+		if isInternalAARRequestHeader(key) {
 			continue
 		}
 		for _, value := range values {
@@ -129,6 +135,9 @@ func copyHeadersSkipAuth(dst *http.Request, src *http.Request) {
 func copyResponseHeaders(w http.ResponseWriter, src http.Header, credType config.ProviderType) {
 	for key, values := range src {
 		if isHopByHopHeader(key) {
+			continue
+		}
+		if strings.EqualFold(key, HeaderAARUsageAudioTokens) && credType != config.ProviderTypeProxy {
 			continue
 		}
 		// Skip Content-Length and Content-Encoding for all response types

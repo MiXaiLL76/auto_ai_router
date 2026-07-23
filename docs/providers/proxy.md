@@ -10,7 +10,6 @@ credentials:
     type: "proxy"
     base_url: "http://backup-router.local:8080"
     api_key: "sk-remote-master-key"  # Optional
-    proxy_usage_format: "normalized" # Use only when upstream audio_tokens excludes cached audio
     rpm: 200
     tpm: 100000
     is_fallback: true
@@ -24,27 +23,37 @@ credentials:
 
 ## Optional Fields
 
-| Field                | Description                                                                       |
-| -------------------- | --------------------------------------------------------------------------------- |
-| `api_key`            | Remote master key (if the target requires authentication)                         |
-| `is_fallback`        | When `true`, this credential is only used after primary credentials are exhausted |
-| `proxy_usage_format` | Usage contract: `openai` (default) or `normalized`                                |
+| Field         | Description                                                                       |
+| ------------- | --------------------------------------------------------------------------------- |
+| `api_key`     | Remote master key (if the target requires authentication)                         |
+| `is_fallback` | When `true`, this credential is only used after primary credentials are exhausted |
 
-`proxy_usage_format` controls cached-audio accounting:
+## Usage Contract
 
-- `openai` means `audio_tokens` includes `cached_audio_tokens`; the router subtracts cached audio before billing ordinary audio. This is the safe default for generic OpenAI-compatible APIs.
-- `normalized` means `audio_tokens` already contains only non-cached audio and `cached_audio_tokens` is reported separately. Use this only when the upstream explicitly guarantees that contract, including AIR deployments configured to expose normalized usage.
+Generic OpenAI-compatible APIs usually report `audio_tokens` including
+`cached_audio_tokens`. AIR subtracts cached audio before billing ordinary audio
+for these responses.
 
-The setting is explicit because `type: proxy` can target either kind of API; the wire payload alone is ambiguous when both fields are present.
+AIR-normalized responses report `audio_tokens` as non-cached audio only and
+expose `cached_audio_tokens` separately. When AIR emits such a response, it sets:
+
+```http
+X-Aar-Usage-Audio-Tokens: exclude-cached
+```
+
+Downstream AIR proxies read this header automatically, so AIR-to-AIR chains do
+not need per-credential usage-format configuration.
+
+`proxy_usage_format: "normalized"` is still accepted as a legacy override for
+older upstream AIR deployments that do not emit the header yet, but new configs
+should not need it.
 
 ## Migration / Rollout Note
 
-Before rolling this change out to production, review every existing `type: proxy` credential:
-
-- Use `proxy_usage_format: "normalized"` when the upstream is another Auto AI Router instance.
-- Use `proxy_usage_format: "openai"` or omit the field when the upstream is a generic OpenAI-compatible API.
-
-The default is `openai` for backward compatibility. Existing AIR-to-AIR chains must be updated explicitly, otherwise cached audio can be subtracted twice from `audio_tokens` and audio input spend can be understated.
+For AIR-to-AIR chained routing, roll out the upstream AIR first or at least
+ensure the upstream emits `X-Aar-Usage-Audio-Tokens: exclude-cached` on
+normalized responses. Once that header is present, downstream proxy credentials
+can stay as plain `type: proxy`.
 
 ## Fallback Behavior
 
@@ -74,7 +83,6 @@ credentials:
     type: "proxy"
     base_url: "http://10.0.1.50:8080"
     api_key: "sk-remote-key"
-    proxy_usage_format: "normalized"
     is_fallback: true
 ```
 

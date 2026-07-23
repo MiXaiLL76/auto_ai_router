@@ -756,7 +756,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Write response (streaming or non-streaming)
-		tokenUsageOptions := tokenUsageExtractionOptionsForCredential(cred)
+		tokenUsageOptions := tokenUsageExtractionOptionsForResponse(cred, proxyResp.Headers)
 		if proxyResp.IsStreaming {
 			p.logger.DebugContext(r.Context(), "Response is streaming (no retry for streaming)",
 				"credential", cred.Name, "status", proxyResp.StatusCode)
@@ -773,6 +773,9 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 				copyResponseHeaders(w, proxyResp.Headers, cred.Type)
 				if logCtx.IsProxyRequest && logCtx.ActualCredentialName != "" {
 					w.Header().Set("X-Credential-Name", logCtx.ActualCredentialName)
+				}
+				if proxyResp.StatusCode >= 200 && proxyResp.StatusCode < 300 {
+					markAudioUsageExcludesCached(w.Header())
 				}
 				w.WriteHeader(proxyResp.StatusCode)
 				logCtx.PromptTokensEstimate = estimatePromptTokensForModel(body, realModelID)
@@ -799,6 +802,9 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 				if logCtx.IsProxyRequest && logCtx.ActualCredentialName != "" {
 					w.Header().Set("X-Credential-Name", logCtx.ActualCredentialName)
 				}
+				if proxyResp.StatusCode >= 200 && proxyResp.StatusCode < 300 && !tokenUsageOptions.AudioInputIncludesCachedAudio {
+					markAudioUsageExcludesCached(w.Header())
+				}
 				w.WriteHeader(proxyResp.StatusCode)
 				logCtx.PromptTokensEstimate = estimatePromptTokensForModel(body, realModelID)
 				fakeResp := &http.Response{
@@ -815,6 +821,9 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			} else {
 				if logCtx.IsProxyRequest && logCtx.ActualCredentialName != "" {
 					w.Header().Set("X-Credential-Name", logCtx.ActualCredentialName)
+				}
+				if proxyResp.StatusCode >= 200 && proxyResp.StatusCode < 300 && !tokenUsageOptions.AudioInputIncludesCachedAudio {
+					markAudioUsageExcludesCached(w.Header())
 				}
 				tokenizerModelID := realModelID
 				if tokenizerModelID == "" {
@@ -908,6 +917,9 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 
 			if logCtx.IsProxyRequest && logCtx.ActualCredentialName != "" {
 				w.Header().Set("X-Credential-Name", logCtx.ActualCredentialName)
+			}
+			if proxyResp.StatusCode >= 200 && proxyResp.StatusCode < 300 && !tokenUsageOptions.AudioInputIncludesCachedAudio {
+				markAudioUsageExcludesCached(w.Header())
 			}
 			p.writeProxyResponse(w, proxyResp, r, cred.Name, modelID)
 			tokens := extractTokensFromResponse(string(proxyResp.Body), config.ProviderTypeOpenAI)
@@ -1407,6 +1419,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 
 	// === Process final response ===
 	var finalResponseBody []byte
+	outgoingAudioUsageExcludesCached := false
 
 	if isStreamingResp {
 		p.logger.DebugContext(r.Context(), "Response is streaming", "credential", cred.Name)
@@ -1419,7 +1432,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		// For error responses (4xx/5xx) pass the provider body through unchanged.
 		// nativeResponses path skips this step — provider→Responses API conversion
 		// happens further down via provResponses.ResponseTo().
-		tokenUsageOptions := tokenUsageExtractionOptionsForCredential(cred)
+		tokenUsageOptions := tokenUsageExtractionOptionsForResponse(cred, resp.Header)
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 && !prepared.nativeResponses && conv != nil && !conv.IsPassthrough() {
 			convertedBody, convErr := conv.ResponseTo([]byte(decodedBody))
 			if convErr != nil {
@@ -1517,6 +1530,8 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 				finalResponseBody = responsesBody
+				bodyForTokenExtraction = finalResponseBody
+				tokenUsageOptions.AudioInputIncludesCachedAudio = false
 			}
 		}
 
@@ -1579,6 +1594,9 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		if logCtx.IsImageGeneration && logCtx.TokenUsage != nil {
 			logCtx.TokenUsage.ImageCount = logCtx.ImageCount
 		}
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 && !tokenUsageOptions.AudioInputIncludesCachedAudio {
+			outgoingAudioUsageExcludesCached = true
+		}
 		if logCtx.Token != "" && logCtx.Credential != nil {
 			if err := p.logSpendToLiteLLMDB(logCtx); err != nil {
 				p.logger.WarnContext(r.Context(), "Failed to queue spend log",
@@ -1587,9 +1605,15 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		}
 		logCtx.Logged = true
 	}
+	if isStreamingResp {
+		outgoingAudioUsageExcludesCached = directStreamingAudioUsageExcludesCached(prepared, cred, resp.StatusCode)
+	}
 
 	// Copy response headers (skip hop-by-hop headers and transformation-related headers)
 	copyResponseHeaders(w, resp.Header, cred.Type)
+	if outgoingAudioUsageExcludesCached {
+		markAudioUsageExcludesCached(w.Header())
+	}
 	// Return credential name only to internal proxy clients, not to end users.
 	if logCtx.IsProxyRequest {
 		w.Header().Set("X-Credential-Name", cred.Name)

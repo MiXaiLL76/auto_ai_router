@@ -66,6 +66,9 @@ func (p *Proxy) writeProxyResponse(w http.ResponseWriter, resp *ProxyResponse, c
 		if isHopByHopHeader(key) {
 			continue
 		}
+		if strings.EqualFold(key, HeaderAARUsageAudioTokens) && w.Header().Get(HeaderAARUsageAudioTokens) != "" {
+			continue
+		}
 		if responseBodyChanged && isRepresentationIntegrityHeader(key) {
 			continue
 		}
@@ -130,6 +133,9 @@ func (p *Proxy) writeProxyStreamingResponseWithTokens(
 
 	for key, values := range resp.Headers {
 		if isHopByHopHeader(key) {
+			continue
+		}
+		if strings.EqualFold(key, HeaderAARUsageAudioTokens) && w.Header().Get(HeaderAARUsageAudioTokens) != "" {
 			continue
 		}
 		if normalizeStream && isRepresentationIntegrityHeader(key) {

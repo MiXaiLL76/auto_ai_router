@@ -4,22 +4,32 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"testing"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/converter"
 )
 
-func TestTokenUsageExtractionOptionsForCredential(t *testing.T) {
+func TestTokenUsageExtractionOptionsForResponse(t *testing.T) {
 	tests := []struct {
 		name     string
 		cred     *config.CredentialConfig
+		headers  http.Header
 		includes bool
 	}{
 		{
 			name:     "generic proxy defaults to OpenAI semantics",
 			cred:     &config.CredentialConfig{Type: config.ProviderTypeProxy},
 			includes: true,
+		},
+		{
+			name: "AIR response header marks normalized usage without credential config",
+			cred: &config.CredentialConfig{Type: config.ProviderTypeProxy},
+			headers: http.Header{
+				HeaderAARUsageAudioTokens: []string{aarUsageAudioTokensExcludeCached},
+			},
+			includes: false,
 		},
 		{
 			name: "explicit OpenAI proxy",
@@ -30,10 +40,29 @@ func TestTokenUsageExtractionOptionsForCredential(t *testing.T) {
 			includes: true,
 		},
 		{
+			name: "AIR response header overrides stale explicit OpenAI proxy config",
+			cred: &config.CredentialConfig{
+				Type:             config.ProviderTypeProxy,
+				ProxyUsageFormat: config.ProxyUsageFormatOpenAI,
+			},
+			headers: http.Header{
+				HeaderAARUsageAudioTokens: []string{aarUsageAudioTokensExcludeCached},
+			},
+			includes: false,
+		},
+		{
 			name: "explicit normalized proxy",
 			cred: &config.CredentialConfig{
 				Type:             config.ProviderTypeProxy,
 				ProxyUsageFormat: config.ProxyUsageFormatNormalized,
+			},
+			includes: false,
+		},
+		{
+			name: "AIR response header tolerates comma joined duplicates",
+			cred: &config.CredentialConfig{Type: config.ProviderTypeProxy},
+			headers: http.Header{
+				HeaderAARUsageAudioTokens: []string{"exclude-cached, exclude-cached"},
 			},
 			includes: false,
 		},
@@ -46,7 +75,7 @@ func TestTokenUsageExtractionOptionsForCredential(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := tokenUsageExtractionOptionsForCredential(tt.cred)
+			got := tokenUsageExtractionOptionsForResponse(tt.cred, tt.headers)
 			if got.AudioInputIncludesCachedAudio != tt.includes {
 				t.Fatalf("unexpected usage semantics: got %v, want %v", got.AudioInputIncludesCachedAudio, tt.includes)
 			}
@@ -58,6 +87,7 @@ func TestProxyUsageContractCachedAudioMatrix(t *testing.T) {
 	tests := []struct {
 		name      string
 		cred      config.CredentialConfig
+		headers   http.Header
 		audio     int
 		wantAudio int
 	}{
@@ -68,10 +98,10 @@ func TestProxyUsageContractCachedAudioMatrix(t *testing.T) {
 			wantAudio: 60,
 		},
 		{
-			name: "normalized proxy preserves non-cached audio",
-			cred: config.CredentialConfig{
-				Type:             config.ProviderTypeProxy,
-				ProxyUsageFormat: config.ProxyUsageFormatNormalized,
+			name: "AIR-normalized proxy response header preserves non-cached audio",
+			cred: config.CredentialConfig{Type: config.ProviderTypeProxy},
+			headers: http.Header{
+				HeaderAARUsageAudioTokens: []string{aarUsageAudioTokensExcludeCached},
 			},
 			audio:     60,
 			wantAudio: 60,
@@ -84,7 +114,7 @@ func TestProxyUsageContractCachedAudioMatrix(t *testing.T) {
 				fmt.Sprintf("%d", tt.audio) + `}}}`)
 			usage := converter.ExtractTokenUsageWithOptions(
 				body,
-				tokenUsageExtractionOptionsForCredential(&tt.cred),
+				tokenUsageExtractionOptionsForResponse(&tt.cred, tt.headers),
 			)
 			if usage == nil || usage.AudioInputTokens != tt.wantAudio {
 				t.Fatalf("unexpected usage: %+v; want audio=%d", usage, tt.wantAudio)

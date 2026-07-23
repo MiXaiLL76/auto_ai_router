@@ -994,7 +994,7 @@ func (p *Proxy) handleResponsesAPIStreaming(
 		if conv.IsPassthrough() {
 			p.logger.DebugContext(respCtx(resp), "Responses API streaming: passthrough mode (Chat Completions SSE → Responses SSE)",
 				"model", modelID, "provider", cred.Type)
-			usageOptions := tokenUsageExtractionOptionsForCredential(cred)
+			usageOptions := tokenUsageExtractionOptionsForResponse(cred, resp.Header)
 			return responses.TransformChatStreamToResponsesWithMetaAndUsage(
 				r, w, modelID, reqMeta, usageOptions.AudioInputIncludesCachedAudio, onComplete,
 			)

@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"net/http"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -31,4 +32,28 @@ func TestGetHopByHopHeaders(t *testing.T) {
 	original := GetHopByHopHeaders()
 	_, hasCustom := original["X-Custom"]
 	assert.False(t, hasCustom, "modifying returned map should not affect the original")
+}
+
+func TestCopyRequestHeadersStripsInternalUsageContractHeader(t *testing.T) {
+	src := httptestRequestWithHeaders(map[string]string{
+		HeaderAARUsageAudioTokens: "exclude-cached",
+		"X-Aar-Proxy-Client":      "1",
+		"X-Regular":               "ok",
+	})
+	dst, err := http.NewRequest(http.MethodPost, "http://upstream.example/v1/chat/completions", nil)
+	assert.NoError(t, err)
+
+	copyRequestHeaders(dst, src, "")
+
+	assert.Empty(t, dst.Header.Get(HeaderAARUsageAudioTokens))
+	assert.Empty(t, dst.Header.Get("X-Aar-Proxy-Client"))
+	assert.Equal(t, "ok", dst.Header.Get("X-Regular"))
+}
+
+func httptestRequestWithHeaders(headers map[string]string) *http.Request {
+	req, _ := http.NewRequest(http.MethodPost, "http://router.example/v1/chat/completions", nil)
+	for key, value := range headers {
+		req.Header.Set(key, value)
+	}
+	return req
 }

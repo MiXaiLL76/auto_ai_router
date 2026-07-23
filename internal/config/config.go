@@ -30,8 +30,8 @@ const (
 	ProviderTypeProxy     ProviderType = "proxy"
 )
 
-// ProxyUsageFormat describes the cached-audio semantics used by an
-// OpenAI-compatible proxy upstream. OpenAI-compatible usage reports
+// ProxyUsageFormat is a legacy override for proxy upstreams that do not emit
+// AIR's usage-contract response header. OpenAI-compatible usage reports
 // audio_tokens including cached audio, while normalized usage reports only
 // non-cached audio and exposes cached_audio_tokens separately.
 type ProxyUsageFormat string
@@ -624,9 +624,6 @@ type CredentialConfig struct {
 	// Proxy specific fields
 	IsFallback       bool             `yaml:"is_fallback,omitempty"`
 	ProxyUsageFormat ProxyUsageFormat `yaml:"proxy_usage_format,omitempty"`
-	// ProxyUsageFormatExplicit is used only for startup rollout warnings;
-	// EffectiveProxyUsageFormat still applies the backward-compatible default.
-	ProxyUsageFormatExplicit bool `yaml:"-"`
 }
 
 func (c CredentialConfig) VisibleTo(visibility scope.Context) bool {
@@ -703,9 +700,7 @@ func (c *CredentialConfig) UnmarshalYAML(value *yaml.Node) error {
 	c.APIKey = resolveEnvString(temp.APIKey)
 	c.BaseURL = resolveEnvString(temp.BaseURL)
 	c.AuthType = strings.ToLower(resolveEnvString(temp.AuthType))
-	resolvedProxyUsageFormat := strings.ToLower(resolveEnvString(temp.ProxyUsageFormat))
-	c.ProxyUsageFormat = ProxyUsageFormat(resolvedProxyUsageFormat)
-	c.ProxyUsageFormatExplicit = resolvedProxyUsageFormat != ""
+	c.ProxyUsageFormat = ProxyUsageFormat(strings.ToLower(resolveEnvString(temp.ProxyUsageFormat)))
 	c.Scopes = scope.NormalizeList(temp.Scopes)
 	c.DeniedScopes = scope.NormalizeList(append(temp.DeniedScopes, temp.ForbiddenScopes...))
 
