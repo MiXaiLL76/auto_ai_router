@@ -869,65 +869,6 @@ func TestProxyRequest_SosanaImageResultRedirectMaskedAndNotFollowed(t *testing.T
 	assert.NotContains(t, w.Body.String(), targetServer.URL)
 }
 
-func TestDownloadSosanaResultImageRejectsUnsafeProductionURL(t *testing.T) {
-	var logBuf bytes.Buffer
-	called := false
-	imageServer := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		called = true
-	}))
-	defer imageServer.Close()
-
-	resultURL := imageServer.URL + "/private.png"
-	prx := newSosanaTestProxy("https://sosana.art", &logBuf)
-	cred := &config.CredentialConfig{Name: "sosana", Type: config.ProviderTypeSosana, BaseURL: "https://sosana.art"}
-	image, _, statusCode, err := prx.downloadSosanaResultImage(context.Background(), cred, "banana-2-1k-compliant", sosana.BananaTaskResponse{
-		Status:        sosana.StatusCompleted,
-		ResultFileURL: &resultURL,
-	}, nil, &RequestLogContext{})
-
-	require.Error(t, err)
-	assert.Nil(t, image)
-	assert.Equal(t, http.StatusBadGateway, statusCode)
-	assert.False(t, called)
-	assert.Contains(t, logBuf.String(), "unsafe result URL")
-	assert.Contains(t, logBuf.String(), "result_host=127.0.0.1")
-}
-
-func TestValidateSosanaResultURLBlocksUnsafeHosts(t *testing.T) {
-	tests := []string{
-		"http://main-r2.sosana.blog/image.png",
-		"https://localhost/image.png",
-		"https://127.0.0.1/image.png",
-		"https://169.254.169.254/latest/meta-data",
-		"https://100.64.0.1/image.png",
-		"https://example.com/image.png",
-	}
-
-	for _, rawURL := range tests {
-		t.Run(rawURL, func(t *testing.T) {
-			parsed, err := parseSosanaResultURL(rawURL)
-			require.NoError(t, err)
-			require.Error(t, validateSosanaResultURL(context.Background(), parsed))
-		})
-	}
-}
-
-func TestValidateSosanaResultURLAllowsLocalOnlyWithTestHook(t *testing.T) {
-	allowPrivateSosanaResultURLsForTest(t)
-
-	parsed, err := parseSosanaResultURL("http://127.0.0.1/image.png")
-	require.NoError(t, err)
-	require.NoError(t, validateSosanaResultURL(context.Background(), parsed))
-}
-
-func TestDialSosanaResultAddressRejectsPrivateIP(t *testing.T) {
-	conn, err := dialSosanaResultAddress(context.Background(), "tcp", net.JoinHostPort("127.0.0.1", "443"))
-
-	require.Error(t, err)
-	assert.Nil(t, conn)
-	assert.Contains(t, err.Error(), "private address")
-}
-
 func TestProxyRequest_SosanaImageResultTimeoutMasked(t *testing.T) {
 	allowPrivateSosanaResultURLsForTest(t)
 
@@ -1112,8 +1053,7 @@ func newSosanaResultImageServer(t *testing.T, status int, contentType string, bo
 func allowPrivateSosanaResultURLsForTest(t *testing.T) {
 	t.Helper()
 
-	previous := allowPrivateSosanaResultURLForTests
-	allowPrivateSosanaResultURLForTests = func(parsed *url.URL) bool {
+	restore := sosana.SetAllowPrivateResultURLForTests(func(parsed *url.URL) bool {
 		if parsed.Scheme != "http" {
 			return false
 		}
@@ -1122,11 +1062,9 @@ func allowPrivateSosanaResultURLsForTest(t *testing.T) {
 			return true
 		}
 		ip := net.ParseIP(host)
-		return ip != nil && isUnsafeSosanaResultIP(ip)
-	}
-	t.Cleanup(func() {
-		allowPrivateSosanaResultURLForTests = previous
+		return ip != nil && sosana.IsUnsafeResultIP(ip)
 	})
+	t.Cleanup(restore)
 }
 
 func newSosanaTestProxy(baseURL string, logBuf *bytes.Buffer) *Proxy {

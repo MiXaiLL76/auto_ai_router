@@ -1,36 +1,176 @@
 package proxy
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
-	"io"
 	"math/rand"
-	"net"
 	"net/http"
-	"net/url"
 	"strings"
 	"time"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/converter"
 	"github.com/mixaill76/auto_ai_router/internal/converter/sosana"
+	"github.com/mixaill76/auto_ai_router/internal/scope"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 )
 
 const (
-	sosanaPollInterval              = 2 * time.Second
-	maxSosanaResultImageBytes int64 = 32 * 1024 * 1024
-	maxSosanaResultErrorBytes int64 = 16 * 1024
+	sosanaPollInterval = time.Duration(sosana.PollInterval)
 )
 
-var allowPrivateSosanaResultURLForTests func(*url.URL) bool
+const unsupportedImageProviderRequestMessage = "request parameters are not supported by available image providers"
+const unsupportedProviderEndpointMessage = "request endpoint is not supported by available providers"
 
 type sosanaAttemptResult struct {
 	body        []byte
 	statusCode  int
 	retryable   bool
 	retryReason RetryReason
+}
+
+func (p *Proxy) applySosanaCompatibilityRouting(
+	w http.ResponseWriter,
+	r *http.Request,
+	prepared *orchestratedRequest,
+	modelID string,
+	cred **config.CredentialConfig,
+	body *[]byte,
+	proxyBody *[]byte,
+	realModelID *string,
+	isImageGeneration bool,
+	isImageEdit bool,
+	logCtx *RequestLogContext,
+	start time.Time,
+) bool {
+	if (*cred).Type != config.ProviderTypeSosana || (!isImageGeneration && !isImageEdit) {
+		return true
+	}
+
+	reason := sosana.UnsupportedModel(*realModelID)
+	if reason == "" {
+		reason = sosana.UnsupportedRequest(r.URL.Path, *body, r.Header.Get("Content-Type"))
+	}
+	if reason == "" {
+		return true
+	}
+
+	nextCred, nextReq, routed := p.nextPrimaryAfterUnsupportedSosana(r, prepared, modelID, *cred, logCtx.Scope, reason)
+	if routed {
+		*cred = nextCred
+		*body = nextReq.body
+		*proxyBody = nextReq.proxyBody
+		*realModelID = nextReq.realModelID
+		r.URL.Path = nextReq.path
+		prepared.body = nextReq.body
+		prepared.proxyBody = nextReq.proxyBody
+		prepared.proxyPath = nextReq.proxyPath
+		prepared.realModelID = nextReq.realModelID
+		prepared.convertedResp = nextReq.convertedResp
+		prepared.passthroughResponses = nextReq.passthroughResponses
+		prepared.nativeResponses = nextReq.nativeResponses
+		logCtx.RealModelID = *realModelID
+		if span := trace.SpanFromContext(r.Context()); span.IsRecording() {
+			span.SetAttributes(
+				attribute.String("aar.real_model", *realModelID),
+				attribute.String("aar.credential", nextCred.Name),
+				attribute.String("aar.provider", string(nextCred.Type)),
+				attribute.Bool("aar.provider_compatibility_skip", true),
+			)
+		}
+		return true
+	}
+
+	success, fallbackReason := p.TryFallbackProxy(
+		w,
+		requestWithPath(r, prepared.proxyPath),
+		modelID,
+		(*cred).Name,
+		http.StatusBadRequest,
+		RetryReasonServerErr,
+		*proxyBody,
+		start,
+		logCtx,
+	)
+	if success {
+		return false
+	}
+	p.logger.DebugContext(r.Context(), "No fallback handled unsupported image provider request",
+		"credential", (*cred).Name,
+		"model", modelID,
+		"reason", reason,
+		"fallback_reason", fallbackReason)
+	logCtx.Credential = *cred
+	logCtx.Status = "failure"
+	logCtx.HTTPStatus = http.StatusBadRequest
+	logCtx.ErrorMsg = unsupportedImageProviderRequestMessage
+	WriteErrorBadRequest(w, unsupportedImageProviderRequestMessage)
+	return false
+}
+
+func (p *Proxy) nextPrimaryAfterUnsupportedSosana(
+	r *http.Request,
+	prepared *orchestratedRequest,
+	modelID string,
+	currentCred *config.CredentialConfig,
+	visibility scope.Context,
+	reason string,
+) (*config.CredentialConfig, credentialPreparedRequest, bool) {
+	triedCreds := GetTried(r.Context())
+	triedCreds[currentCred.Name] = true
+
+	for attempts := 0; attempts < 128; attempts++ {
+		candidate, err := p.balancer.NextForModelExcludingScoped(modelID, triedCreds, visibility)
+		if err != nil {
+			p.logger.DebugContext(r.Context(), "No compatible primary credential available for unsupported image request",
+				"model", modelID,
+				"credential", currentCred.Name,
+				"reason", reason,
+				"error", err)
+			return nil, credentialPreparedRequest{}, false
+		}
+		triedCreds[candidate.Name] = true
+		if candidate.Type == config.ProviderTypeSosana {
+			continue
+		}
+
+		nextReq, prepErr := p.prepareRequestForCredential(
+			r,
+			prepared.baseBody,
+			prepared.baseProxyBody,
+			modelID,
+			prepared.baseRealModelID,
+			prepared.basePath,
+			prepared.streaming,
+			candidate,
+			prepared.isResponsesAPI,
+			prepared.responsesPrevHandled,
+			prepared.stickyCacheEligible,
+		)
+		if prepErr != nil {
+			p.logger.WarnContext(r.Context(), "Failed to prepare alternate primary request after image compatibility skip",
+				"credential", candidate.Name,
+				"provider", string(candidate.Type),
+				"model", modelID,
+				"reason", reason,
+				"error", prepErr)
+			continue
+		}
+
+		p.logger.InfoContext(r.Context(), "Skipping incompatible image credential for unsupported image request",
+			"credential", currentCred.Name,
+			"next_credential", candidate.Name,
+			"model", modelID,
+			"reason", reason)
+		return candidate, nextReq, true
+	}
+
+	p.logger.WarnContext(r.Context(), "Image compatibility skip exhausted primary credential scan",
+		"credential", currentCred.Name,
+		"model", modelID,
+		"reason", reason)
+	return nil, credentialPreparedRequest{}, false
 }
 
 func (p *Proxy) handleSosanaRequest(
@@ -296,7 +436,7 @@ func (p *Proxy) sosanaCompletedImageBody(
 	p.logger.DebugContext(ctx, "Downloaded Sosana result image",
 		"credential", cred.Name,
 		"model", modelID,
-		"result_host", sosanaResultHost(task),
+		"result_host", sosana.ResultHost(task),
 		"image_bytes", len(image),
 		"content_type", contentType,
 		"request_id", logCtx.RequestID)
@@ -311,330 +451,67 @@ func (p *Proxy) downloadSosanaResultImage(
 	rawTaskBody []byte,
 	logCtx *RequestLogContext,
 ) ([]byte, string, int, error) {
-	resultURL := ""
-	if task.ResultFileURL != nil {
-		resultURL = strings.TrimSpace(*task.ResultFileURL)
+	image, err := sosana.DownloadResultImage(ctx, p.client, task)
+	if err == nil {
+		return image.Bytes, image.ContentType, http.StatusOK, nil
 	}
-	parsed, err := parseSosanaResultURL(resultURL)
-	if err != nil {
-		p.logUpstreamError(ctx, "Sosana completed task returned invalid result URL", http.StatusBadGateway, cred, modelID, rawTaskBody,
+
+	statusCode := http.StatusBadGateway
+	resultHost := sosana.ResultHost(task)
+	var imageErr *sosana.ResultImageError
+	if errors.As(err, &imageErr) {
+		statusCode = imageErr.StatusCode
+		resultHost = imageErr.Host
+	}
+
+	switch {
+	case imageErr == nil:
+		p.logUpstreamError(ctx, "Sosana result image download failed", statusCode, cred, modelID, nil,
+			"result_host", resultHost,
 			"request_id", logCtx.RequestID,
 			"error", err)
-		return nil, "", http.StatusBadGateway, err
-	}
-	if err := validateSosanaResultURL(ctx, parsed); err != nil {
-		p.logUpstreamError(ctx, "Sosana completed task returned unsafe result URL", http.StatusBadGateway, cred, modelID, rawTaskBody,
-			"result_host", parsed.Hostname(),
+	case imageErr.ResponseBody != nil:
+		message := "Sosana result image download returned error status"
+		if imageErr.SniffedContentType != "" {
+			message = "Sosana result URL returned non-PNG content"
+		}
+		attrs := []any{
+			"result_host", resultHost,
+			"content_type", imageErr.ContentType,
+			"request_id", logCtx.RequestID,
+			"error", imageErr.Err,
+		}
+		if imageErr.UpstreamStatus != 0 {
+			attrs = append(attrs, "upstream_status", imageErr.UpstreamStatus)
+		}
+		if imageErr.SniffedContentType != "" {
+			attrs = append(attrs, "sniffed_content_type", imageErr.SniffedContentType)
+		}
+		p.logUpstreamError(ctx, message, statusCode, cred, modelID, imageErr.ResponseBody, attrs...)
+	default:
+		message := "Sosana result image download failed"
+		if strings.Contains(err.Error(), "invalid") || strings.Contains(err.Error(), "without result_file_url") {
+			message = "Sosana completed task returned invalid result URL"
+		}
+		if strings.Contains(err.Error(), "host is not allowed") ||
+			strings.Contains(err.Error(), "private address") ||
+			strings.Contains(err.Error(), "must use https") {
+			message = "Sosana completed task returned unsafe result URL"
+		}
+		p.logUpstreamError(ctx, message, statusCode, cred, modelID, nil,
+			"result_host", resultHost,
 			"request_id", logCtx.RequestID,
 			"error", err)
-		return nil, "", http.StatusBadGateway, err
 	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, resultURL, nil)
-	if err != nil {
-		p.logUpstreamError(ctx, "Failed to build Sosana result image request", http.StatusBadGateway, cred, modelID, nil,
-			"result_host", parsed.Hostname(),
-			"request_id", logCtx.RequestID,
-			"error", err)
-		return nil, "", http.StatusBadGateway, err
-	}
-	req.Header.Set("Accept", "image/*")
-
-	resp, err := p.doSosanaResultImageRequest(req)
-	if err != nil {
-		statusCode := http.StatusBadGateway
-		if isTimeoutError(err) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			statusCode = http.StatusRequestTimeout
-		}
-		p.logUpstreamError(context.Background(), "Sosana result image download failed", statusCode, cred, modelID, nil,
-			"result_host", parsed.Hostname(),
-			"request_id", logCtx.RequestID,
-			"error", err)
-		return nil, "", statusCode, err
-	}
-	defer func() {
-		if closeErr := resp.Body.Close(); closeErr != nil {
-			p.logger.WarnContext(ctx, "Failed to close Sosana result image body", "error", closeErr)
-		}
-	}()
-
-	contentType := strings.TrimSpace(resp.Header.Get("Content-Type"))
-	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		errorBody := readTextBodyForSosanaResultLog(resp.Body, contentType)
-		p.logUpstreamError(ctx, "Sosana result image download returned error status", http.StatusBadGateway, cred, modelID, errorBody,
-			"upstream_status", resp.StatusCode,
-			"result_host", parsed.Hostname(),
-			"request_id", logCtx.RequestID)
-		return nil, "", http.StatusBadGateway, errors.New("sosana result image download returned error status")
-	}
-
-	image, err := readLimitedSosanaResultImage(resp.Body)
-	if err != nil {
-		p.logUpstreamError(ctx, "Failed to read Sosana result image", http.StatusBadGateway, cred, modelID, nil,
-			"result_host", parsed.Hostname(),
-			"request_id", logCtx.RequestID,
-			"error", err)
-		return nil, "", http.StatusBadGateway, err
-	}
-	sniffedType := http.DetectContentType(image)
-	if !isPNGContentType(contentType) && !isPNGContentType(sniffedType) {
-		responseBody := textBodyPrefixForSosanaResultLog(image, contentType, sniffedType)
-		p.logUpstreamError(ctx, "Sosana result URL returned non-PNG content", http.StatusBadGateway, cred, modelID, responseBody,
-			"result_host", parsed.Hostname(),
-			"content_type", contentType,
-			"sniffed_content_type", sniffedType,
-			"request_id", logCtx.RequestID)
-		return nil, "", http.StatusBadGateway, errors.New("sosana result URL returned non-PNG content")
-	}
-	if !isPNGContentType(contentType) {
-		contentType = sniffedType
-	}
-	return image, contentType, http.StatusOK, nil
-}
-
-func (p *Proxy) doSosanaResultImageRequest(req *http.Request) (*http.Response, error) {
-	client := *p.client
-	client.Transport = sosanaResultImageTransport()
-	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
-		return http.ErrUseLastResponse
-	}
-	return client.Do(req)
-}
-
-func sosanaResultImageTransport() http.RoundTripper {
-	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.Proxy = nil
-	transport.DisableKeepAlives = true
-	transport.DialContext = dialSosanaResultAddress
-	return transport
-}
-
-func dialSosanaResultAddress(ctx context.Context, network, address string) (net.Conn, error) {
-	host, port, err := net.SplitHostPort(address)
-	if err != nil {
-		return nil, err
-	}
-
-	dialer := &net.Dialer{}
-	if allowPrivateSosanaResultHostForTests(host) {
-		return dialer.DialContext(ctx, network, address)
-	}
-	if ip := net.ParseIP(host); ip != nil {
-		if isUnsafeSosanaResultIP(ip) {
-			return nil, errors.New("sosana result_file_url resolves to a private address")
-		}
-		return dialer.DialContext(ctx, network, address)
-	}
-
-	addrs, err := net.DefaultResolver.LookupIPAddr(ctx, host)
-	if err != nil {
-		return nil, err
-	}
-	if len(addrs) == 0 {
-		return nil, errors.New("sosana result_file_url host has no addresses")
-	}
-	for _, addr := range addrs {
-		if isUnsafeSosanaResultIP(addr.IP) {
-			return nil, errors.New("sosana result_file_url resolves to a private address")
-		}
-	}
-
-	var dialErr error
-	for _, addr := range addrs {
-		conn, err := dialer.DialContext(ctx, network, net.JoinHostPort(addr.IP.String(), port))
-		if err == nil {
-			return conn, nil
-		}
-		dialErr = err
-	}
-	if dialErr != nil {
-		return nil, dialErr
-	}
-	return nil, errors.New("sosana result_file_url host has no dialable addresses")
-}
-
-func allowPrivateSosanaResultHostForTests(host string) bool {
-	if allowPrivateSosanaResultURLForTests == nil {
-		return false
-	}
-	return allowPrivateSosanaResultURLForTests(&url.URL{Scheme: "http", Host: host})
-}
-
-func parseSosanaResultURL(raw string) (*url.URL, error) {
-	if raw == "" {
-		return nil, errors.New("sosana task completed without result_file_url")
-	}
-	parsed, err := url.Parse(raw)
-	if err != nil {
-		return nil, err
-	}
-	if parsed.Hostname() == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
-		return nil, errors.New("sosana result_file_url must be an http or https URL")
-	}
-	return parsed, nil
-}
-
-func validateSosanaResultURL(ctx context.Context, parsed *url.URL) error {
-	if allowPrivateSosanaResultURLForTests != nil && allowPrivateSosanaResultURLForTests(parsed) {
-		return nil
-	}
-	if parsed.Scheme != "https" {
-		return errors.New("sosana result_file_url must use https")
-	}
-
-	host := parsed.Hostname()
-	if strings.EqualFold(host, "localhost") {
-		return errors.New("sosana result_file_url host is not allowed")
-	}
-	if !isAllowedSosanaResultHost(host) {
-		return errors.New("sosana result_file_url host is not allowed")
-	}
-	if ip := net.ParseIP(host); ip != nil {
-		if isUnsafeSosanaResultIP(ip) {
-			return errors.New("sosana result_file_url resolves to a private address")
-		}
-		return nil
-	}
-
-	addrs, err := net.DefaultResolver.LookupIPAddr(ctx, host)
-	if err != nil {
-		return err
-	}
-	if len(addrs) == 0 {
-		return errors.New("sosana result_file_url host has no addresses")
-	}
-	for _, addr := range addrs {
-		if isUnsafeSosanaResultIP(addr.IP) {
-			return errors.New("sosana result_file_url resolves to a private address")
-		}
-	}
-	return nil
-}
-
-func isAllowedSosanaResultHost(host string) bool {
-	host = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(host)), ".")
-	for _, suffix := range []string{
-		"sosana.blog",
-		"sosana.art",
-		"storage.yandexcloud.net",
-	} {
-		if host == suffix || strings.HasSuffix(host, "."+suffix) {
-			return true
-		}
-	}
-	return false
-}
-
-func isUnsafeSosanaResultIP(ip net.IP) bool {
-	if ip == nil {
-		return true
-	}
-	if v4 := ip.To4(); v4 != nil && v4[0] == 100 && v4[1]&0xc0 == 64 {
-		return true
-	}
-	return ip.IsLoopback() ||
-		ip.IsPrivate() ||
-		ip.IsLinkLocalUnicast() ||
-		ip.IsLinkLocalMulticast() ||
-		ip.IsMulticast() ||
-		ip.IsUnspecified()
-}
-
-func sosanaResultHost(task sosana.BananaTaskResponse) string {
-	if task.ResultFileURL == nil {
-		return ""
-	}
-	parsed, err := url.Parse(strings.TrimSpace(*task.ResultFileURL))
-	if err != nil {
-		return ""
-	}
-	return parsed.Hostname()
-}
-
-func readLimitedSosanaResultImage(body io.Reader) ([]byte, error) {
-	data, err := io.ReadAll(io.LimitReader(body, maxSosanaResultImageBytes+1))
-	if err != nil {
-		return nil, err
-	}
-	if int64(len(data)) > maxSosanaResultImageBytes {
-		return nil, ErrResponseBodyTooLarge
-	}
-	if len(data) == 0 {
-		return nil, errors.New("sosana result image body is empty")
-	}
-	return data, nil
-}
-
-func readTextBodyForSosanaResultLog(body io.Reader, contentType string) []byte {
-	if !isTextContentType(contentType) {
-		return nil
-	}
-	data, err := io.ReadAll(io.LimitReader(body, maxSosanaResultErrorBytes))
-	if err != nil {
-		return nil
-	}
-	return data
-}
-
-func textBodyPrefixForSosanaResultLog(body []byte, contentTypes ...string) []byte {
-	for _, contentType := range contentTypes {
-		if isTextContentType(contentType) {
-			if int64(len(body)) > maxSosanaResultErrorBytes {
-				return body[:maxSosanaResultErrorBytes]
-			}
-			return body
-		}
-	}
-	return nil
-}
-
-func isPNGContentType(contentType string) bool {
-	contentType = strings.ToLower(strings.TrimSpace(contentType))
-	return contentType == "image/png" || strings.HasPrefix(contentType, "image/png;")
-}
-
-func isTextContentType(contentType string) bool {
-	contentType = strings.ToLower(strings.TrimSpace(contentType))
-	return strings.HasPrefix(contentType, "text/") ||
-		strings.Contains(contentType, "json") ||
-		strings.Contains(contentType, "xml")
+	return nil, "", statusCode, err
 }
 
 func (p *Proxy) doSosanaTaskRequest(ctx context.Context, method, url string, cred *config.CredentialConfig, body []byte) (sosana.BananaTaskResponse, []byte, int, error) {
-	var reader *bytes.Reader
-	if body != nil {
-		reader = bytes.NewReader(body)
-	} else {
-		reader = bytes.NewReader(nil)
-	}
-	req, err := http.NewRequestWithContext(ctx, method, url, reader)
+	result, err := sosana.DoTaskRequest(ctx, p.client, method, url, cred.APIKey, body)
 	if err != nil {
-		return sosana.BananaTaskResponse{}, nil, http.StatusInternalServerError, err
+		return result.Task, result.RawBody, result.StatusCode, err
 	}
-	req.Header.Set("Authorization", "Bearer "+cred.APIKey)
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
-	}
-
-	resp, err := p.client.Do(req)
-	if err != nil {
-		return sosana.BananaTaskResponse{}, nil, http.StatusBadGateway, err
-	}
-	defer func() {
-		if closeErr := resp.Body.Close(); closeErr != nil {
-			p.logger.WarnContext(ctx, "Failed to close Sosana response body", "error", closeErr)
-		}
-	}()
-
-	rawBody, err := p.readLimitedResponseBody(resp.Body)
-	if err != nil {
-		return sosana.BananaTaskResponse{}, nil, http.StatusBadGateway, err
-	}
-	var task sosana.BananaTaskResponse
-	if len(rawBody) > 0 {
-		_ = json.Unmarshal(rawBody, &task)
-	}
-	return task, rawBody, resp.StatusCode, nil
+	return result.Task, result.RawBody, result.StatusCode, nil
 }
 
 func (p *Proxy) sosanaTransportError(ctx context.Context, err error, cred *config.CredentialConfig, modelID, url string, logCtx *RequestLogContext) ([]byte, int) {
