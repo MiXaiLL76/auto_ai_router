@@ -22,21 +22,21 @@ func TestUnsupportedProManRequest(t *testing.T) {
 		want  string
 	}{
 		{
-			name:  "adaptive thinking nested effort",
-			model: "claude-haiku-4.5",
-			body:  `{"model":"claude-haiku-4.5","messages":[],"thinking":{"type":"adaptive","effort":"high"}}`,
+			name:  "thinking rejected for legacy-mapped model",
+			model: "claude-sonnet-5",
+			body:  `{"model":"claude-sonnet-5","messages":[],"thinking":{"type":"adaptive","effort":"high"}}`,
 			want:  "thinking",
 		},
 		{
 			name:  "reasoning effort rejected for unsupported model",
-			model: "claude-opus-4.8",
-			body:  `{"model":"claude-opus-4.8","messages":[],"reasoning_effort":"high"}`,
+			model: "claude-sonnet-5",
+			body:  `{"model":"claude-sonnet-5","messages":[],"reasoning_effort":"high"}`,
 			want:  "thinking",
 		},
 		{
-			name:  "reasoning effort allowed for supported model",
-			model: "claude-haiku-4.5",
-			body:  `{"model":"claude-haiku-4.5","messages":[],"reasoning_effort":"high"}`,
+			name:  "reasoning effort allowed for adaptive-mapped model",
+			model: "claude-opus-4.8",
+			body:  `{"model":"claude-opus-4.8","messages":[],"reasoning_effort":"high"}`,
 			want:  "",
 		},
 		{
@@ -47,21 +47,21 @@ func TestUnsupportedProManRequest(t *testing.T) {
 		},
 		{
 			name:  "disabled thinking allowed",
-			model: "claude-opus-4.8",
-			body:  `{"model":"claude-opus-4.8","messages":[],"thinking":{"type":"disabled"}}`,
+			model: "claude-sonnet-5",
+			body:  `{"model":"claude-sonnet-5","messages":[],"thinking":{"type":"disabled"}}`,
 			want:  "",
 		},
 		{
-			name:  "context management",
+			name:  "context management not provider-blocked",
 			model: "claude-opus-4.8",
 			body:  `{"model":"claude-opus-4.8","messages":[],"context_management":{"edits":[{"type":"compact_20260112"}]}}`,
-			want:  "context_management",
+			want:  "",
 		},
 		{
-			name:  "tool choice none disable parallel",
+			name:  "tool choice none disable parallel not provider-blocked",
 			model: "claude-haiku-4.5",
 			body:  `{"model":"claude-haiku-4.5","messages":[],"tool_choice":{"type":"none","disable_parallel_tool_use":true}}`,
-			want:  "tool_choice.none.disable_parallel_tool_use",
+			want:  "",
 		},
 		{
 			name:  "tool choice none without disable allowed",
@@ -76,10 +76,10 @@ func TestUnsupportedProManRequest(t *testing.T) {
 			want:  "server_tool_use",
 		},
 		{
-			name:  "text plain document",
+			name:  "text plain document allowed",
 			model: "claude-sonnet-4.6",
 			body:  `{"model":"claude-sonnet-4.6","messages":[{"role":"user","content":[{"type":"document","source":{"type":"base64","media_type":"text/plain","data":"SGk="}}]}]}`,
-			want:  "document.text_plain",
+			want:  "",
 		},
 		{
 			name:  "assistant prefill rejected for model",
@@ -94,22 +94,22 @@ func TestUnsupportedProManRequest(t *testing.T) {
 			want:  "",
 		},
 		{
-			name:  "temperature top p rejected for all known models",
+			name:  "temperature top p allowed",
 			model: "claude-haiku-4.5",
 			body:  `{"model":"claude-haiku-4.5","messages":[],"temperature":0.2,"top_p":0.9}`,
-			want:  "temperature+top_p",
+			want:  "",
 		},
 		{
-			name:  "top p rejected for deprecated sampling model",
+			name:  "top p allowed",
 			model: "claude-sonnet-5",
 			body:  `{"model":"claude-sonnet-5","messages":[],"top_p":0.9}`,
-			want:  "top_p",
+			want:  "",
 		},
 		{
-			name:  "top k rejected for deprecated sampling model",
+			name:  "top k allowed",
 			model: "claude-opus-4.8",
 			body:  `{"model":"claude-opus-4.8","messages":[],"top_k":10}`,
-			want:  "top_k",
+			want:  "",
 		},
 		{
 			name:  "temperature one allowed for deprecated sampling model",
@@ -118,10 +118,10 @@ func TestUnsupportedProManRequest(t *testing.T) {
 			want:  "",
 		},
 		{
-			name:  "low temperature rejected for deprecated sampling model",
+			name:  "low temperature allowed",
 			model: "claude-opus-4.8",
 			body:  `{"model":"claude-opus-4.8","messages":[],"temperature":0.2}`,
-			want:  "temperature",
+			want:  "",
 		},
 		{
 			name:  "basic request allowed",
@@ -172,7 +172,7 @@ func TestProxyRequest_UnsupportedProManRequestRoutesToNextPrimary(t *testing.T) 
 		).
 		Build()
 
-	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"claude-opus-4-8","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"high"}`))
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"claude-sonnet-5","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"high"}`))
 	req.Header.Set("Authorization", "Bearer master-key")
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -215,7 +215,7 @@ func TestProxyRequest_UnsupportedProManRequestRoutesToFallbackProxy(t *testing.T
 		).
 		Build()
 
-	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"claude-haiku-4-5","messages":[{"role":"user","content":"2+2"}],"tool_choice":{"type":"none","disable_parallel_tool_use":true}}`))
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"claude-sonnet-4-6","messages":[{"role":"user","content":"2+2"},{"role":"assistant","content":"4"}]}`))
 	req.Header.Set("Authorization", "Bearer master-key")
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -240,7 +240,7 @@ func TestProxyRequest_UnsupportedProManRequestWithoutFallbackReturnsLocalError(t
 		WithSingleCredential("proman", config.ProviderTypeProMan, promanUpstream.URL, "proman-key").
 		Build()
 
-	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"claude-opus-4-8","messages":[{"role":"user","content":"summarize"}],"context_management":{"edits":[{"type":"compact_20260112"}]}}`))
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"claude-sonnet-4-6","messages":[{"role":"assistant","content":[{"type":"server_tool_use","name":"web_search"}]}]}`))
 	req.Header.Set("Authorization", "Bearer master-key")
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
