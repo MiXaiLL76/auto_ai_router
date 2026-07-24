@@ -1,293 +1,28 @@
 package proxy
 
 import (
-	"bufio"
 	"bytes"
 	"context"
-	"encoding/json"
-	"errors"
 	"io"
 	"net/http"
 	"strings"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/converter"
+	promanutils "github.com/mixaill76/auto_ai_router/internal/converter/proman/utils"
 	"github.com/mixaill76/auto_ai_router/internal/proxy/modelutils"
 )
-
-const maxSanitizingSSELineBytes = 1 << 20
-
-func shouldSanitizeUpstreamSurface(cred *config.CredentialConfig) bool {
-	return isProManCredential(cred)
-}
 
 func clientResponseBodyForCredential(statusCode int, body []byte, cred *config.CredentialConfig, displayModel string) ([]byte, bool, bool) {
 	if statusCode >= 400 && shouldMaskUpstreamErrors(cred) {
 		masked := maskedUpstreamErrorBody(statusCode)
 		return masked, !bytes.Equal(body, masked), true
 	}
-	if statusCode >= 200 && statusCode < 300 && shouldSanitizeUpstreamSurface(cred) {
-		sanitized, changed := sanitizeUpstreamJSONBody(body, displayModel)
+	if statusCode >= 200 && statusCode < 300 && promanutils.ShouldSanitizeUpstreamSurface(cred) {
+		sanitized, changed := promanutils.SanitizeUpstreamJSONBody(body, displayModel)
 		return sanitized, changed, false
 	}
 	return body, false, false
-}
-
-func sanitizeUpstreamJSONBody(body []byte, displayModel string) ([]byte, bool) {
-	if len(bytes.TrimSpace(body)) == 0 {
-		return body, false
-	}
-
-	var value any
-	decoder := json.NewDecoder(bytes.NewReader(body))
-	decoder.UseNumber()
-	if err := decoder.Decode(&value); err != nil {
-		return body, false
-	}
-
-	changed := sanitizeJSONValue(&value, displayModel)
-	if !changed {
-		return body, false
-	}
-
-	sanitized, err := json.Marshal(value)
-	if err != nil {
-		return body, false
-	}
-	return sanitized, true
-}
-
-func sanitizeJSONValue(value *any, displayModel string) bool {
-	switch typed := (*value).(type) {
-	case map[string]any:
-		changed := false
-		if eventType, _ := typed["type"].(string); eventType == "error" {
-			if errObj, ok := typed["error"].(map[string]any); ok {
-				if _, hasMessage := errObj["message"]; hasMessage {
-					errObj["message"] = "Upstream provider error"
-					changed = true
-				}
-			}
-		}
-		for key, nested := range typed {
-			if isInternalJSONField(key) {
-				delete(typed, key)
-				changed = true
-				continue
-			}
-			lowerKey := strings.ToLower(key)
-			if lowerKey == "model" && displayModel != "" {
-				if s, ok := nested.(string); ok && isInternalModelString(s) {
-					typed[key] = displayModel
-					changed = true
-					continue
-				}
-			}
-			nestedValue := nested
-			if sanitizeJSONValue(&nestedValue, displayModel) {
-				typed[key] = nestedValue
-				changed = true
-			}
-		}
-		return changed
-	case []any:
-		changed := false
-		for i, nested := range typed {
-			nestedValue := nested
-			if sanitizeJSONValue(&nestedValue, displayModel) {
-				typed[i] = nestedValue
-				changed = true
-			}
-		}
-		return changed
-	default:
-		return false
-	}
-}
-
-func isInternalJSONField(key string) bool {
-	lower := strings.ToLower(key)
-	switch lower {
-	case "provider_specific_fields",
-		"caller",
-		"litellm_metadata",
-		"litellm_params",
-		"litellm_call_id",
-		"llm_provider",
-		"llm_provider_id":
-		return true
-	}
-	return strings.HasPrefix(lower, "litellm_") ||
-		strings.HasPrefix(lower, "x-litellm") ||
-		strings.HasPrefix(lower, "llm_provider")
-}
-
-func isInternalModelString(value string) bool {
-	lower := strings.ToLower(value)
-	if strings.HasPrefix(lower, "anthropic/") {
-		return true
-	}
-	internalMarkers := []string{
-		"anthropic-direct-client",
-		"litellm",
-		"llm_provider",
-		"proman",
-		"bedrock",
-		"amazonaws",
-		"aws/",
-	}
-	for _, marker := range internalMarkers {
-		if strings.Contains(lower, marker) {
-			return true
-		}
-	}
-	return false
-}
-
-type sanitizingSSEReadCloser struct {
-	source io.Closer
-	reader *sanitizingSSEReader
-}
-
-type sanitizingSSEReader struct {
-	reader       *bufio.Reader
-	pending      []byte
-	line         []byte
-	passthrough  bool
-	displayModel string
-	terminalErr  error
-}
-
-func newSanitizingSSEReader(source io.Reader, displayModel string) io.Reader {
-	return &sanitizingSSEReader{
-		reader:       bufio.NewReader(source),
-		displayModel: displayModel,
-	}
-}
-
-func newSanitizingSSEReadCloser(source io.ReadCloser, displayModel string) io.ReadCloser {
-	return &sanitizingSSEReadCloser{
-		source: source,
-		reader: newSanitizingSSEReader(source, displayModel).(*sanitizingSSEReader),
-	}
-}
-
-func (r *sanitizingSSEReader) Read(p []byte) (int, error) {
-	if len(p) == 0 {
-		return 0, nil
-	}
-
-	for len(r.pending) == 0 {
-		if r.terminalErr != nil {
-			err := r.terminalErr
-			if err != io.EOF {
-				r.terminalErr = io.EOF
-			}
-			return 0, err
-		}
-
-		r.readNextSSEFragment()
-	}
-
-	n := copy(p, r.pending)
-	r.pending = r.pending[n:]
-	return n, nil
-}
-
-func (r *sanitizingSSEReader) readNextSSEFragment() {
-	for len(r.pending) == 0 && r.terminalErr == nil {
-		fragment, err := r.reader.ReadSlice('\n')
-
-		if r.passthrough {
-			if len(fragment) > 0 {
-				r.pending = fragment
-			}
-			if !errors.Is(err, bufio.ErrBufferFull) {
-				r.passthrough = false
-			}
-		} else {
-			r.consumeSanitizingSSEFragment(fragment, err)
-		}
-
-		if err != nil && !errors.Is(err, bufio.ErrBufferFull) {
-			r.terminalErr = err
-		}
-	}
-}
-
-func (r *sanitizingSSEReader) consumeSanitizingSSEFragment(fragment []byte, readErr error) {
-	if errors.Is(readErr, bufio.ErrBufferFull) {
-		if len(r.line)+len(fragment) <= maxSanitizingSSELineBytes {
-			r.line = append(r.line, fragment...)
-			return
-		}
-
-		r.pending = append(r.line, fragment...)
-		r.line = nil
-		r.passthrough = true
-		return
-	}
-
-	line := append(r.line, fragment...)
-	r.line = nil
-	if len(line) == 0 {
-		return
-	}
-
-	if readErr == nil || errors.Is(readErr, io.EOF) {
-		if len(line) <= maxSanitizingSSELineBytes {
-			r.pending = sanitizeSSELine(line, r.displayModel)
-			return
-		}
-	}
-
-	r.pending = line
-}
-
-func (r *sanitizingSSEReadCloser) Read(p []byte) (int, error) {
-	return r.reader.Read(p)
-}
-
-func (r *sanitizingSSEReadCloser) Close() error {
-	return r.source.Close()
-}
-
-func sanitizeSSELine(line []byte, displayModel string) []byte {
-	content, ending := splitSSELineEnding(line)
-	if !bytes.HasPrefix(content, []byte("data:")) {
-		return line
-	}
-
-	rawPayload := content[len("data:"):]
-	payload := bytes.TrimSpace(rawPayload)
-	if len(payload) == 0 || bytes.Equal(payload, []byte("[DONE]")) || payload[0] != '{' {
-		return line
-	}
-
-	sanitizedPayload, changed := sanitizeUpstreamJSONBody(payload, displayModel)
-	if !changed {
-		return line
-	}
-
-	payloadStart := bytes.Index(rawPayload, payload)
-	payloadEnd := payloadStart + len(payload)
-	sanitized := make([]byte, 0, len(line)-len(payload)+len(sanitizedPayload))
-	sanitized = append(sanitized, content[:len("data:")]...)
-	sanitized = append(sanitized, rawPayload[:payloadStart]...)
-	sanitized = append(sanitized, sanitizedPayload...)
-	sanitized = append(sanitized, rawPayload[payloadEnd:]...)
-	sanitized = append(sanitized, ending...)
-	return sanitized
-}
-
-func splitSSELineEnding(line []byte) (content, ending []byte) {
-	if len(line) == 0 || line[len(line)-1] != '\n' {
-		return line, nil
-	}
-	if len(line) >= 2 && line[len(line)-2] == '\r' {
-		return line[:len(line)-2], line[len(line)-2:]
-	}
-	return line[:len(line)-1], line[len(line)-1:]
 }
 
 // writeProxyResponse writes raw upstream proxy response to client.
@@ -408,8 +143,8 @@ func (p *Proxy) writeProxyStreamingResponseWithTokens(
 			normalizeStream = true
 		}
 	}
-	if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices && shouldSanitizeUpstreamSurface(cred) {
-		streamBody = newSanitizingSSEReadCloser(streamBody, modelID)
+	if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices && promanutils.ShouldSanitizeUpstreamSurface(cred) {
+		streamBody = promanutils.NewSanitizingSSEReadCloser(streamBody, modelID)
 	}
 	defer func() {
 		if closeErr := streamBody.Close(); closeErr != nil {
