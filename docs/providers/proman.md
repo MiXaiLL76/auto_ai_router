@@ -25,21 +25,21 @@ aliases with model-level `model` values when the names differ.
 
 ## Supported By Live Tests
 
-| Capability                                                                       | Result                                      |
-| -------------------------------------------------------------------------------- | ------------------------------------------- |
-| Basic `/v1/messages` request to ProMan                                           | Works.                                      |
-| System prompt                                                                    | Works.                                      |
-| Content blocks                                                                   | Works.                                      |
-| Consecutive user messages                                                        | Works.                                      |
-| Assistant prefill                                                                | Works in current smoke tests.               |
-| `stop_sequences`                                                                 | Works.                                      |
-| Forced tool calls                                                                | Works.                                      |
-| Streaming                                                                        | Works.                                      |
-| `/v1/messages/count_tokens`                                                      | Works.                                      |
-| OpenAI-compatible `/v1/chat/completions`                                         | Works.                                      |
-| Router `/v1/chat/completions` through ProMan                                     | Works.                                      |
-| Router `/v1/responses` through ProMan                                            | Works.                                      |
-| Full chain: client -> LiteLLM -> router -> ProMan -> router -> LiteLLM -> client | Works in smoke tests.                       |
+| Capability                                                                       | Result                        |
+| -------------------------------------------------------------------------------- | ----------------------------- |
+| Basic `/v1/messages` request to ProMan                                           | Works.                        |
+| System prompt                                                                    | Works.                        |
+| Content blocks                                                                   | Works.                        |
+| Consecutive user messages                                                        | Works.                        |
+| Assistant prefill                                                                | Works in current smoke tests. |
+| `stop_sequences`                                                                 | Works.                        |
+| Forced tool calls                                                                | Works.                        |
+| Streaming                                                                        | Works.                        |
+| `/v1/messages/count_tokens`                                                      | Works.                        |
+| OpenAI-compatible `/v1/chat/completions`                                         | Works.                        |
+| Router `/v1/chat/completions` through ProMan                                     | Works.                        |
+| Router `/v1/responses` through ProMan                                            | Works.                        |
+| Full chain: client -> LiteLLM -> router -> ProMan -> router -> LiteLLM -> client | Works in smoke tests.         |
 
 ## Not Implemented Or Not Claimed
 
