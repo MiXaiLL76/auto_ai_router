@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"net/url"
 	"strings"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
@@ -15,17 +14,7 @@ import (
 const MaxSanitizingSSELineBytes = 1 << 20
 
 func IsCredential(cred *config.CredentialConfig) bool {
-	if cred == nil {
-		return false
-	}
-	if cred.Type == config.ProviderTypeProMan {
-		return true
-	}
-	name := strings.ToLower(cred.Name)
-	return strings.Contains(name, "proman") ||
-		strings.Contains(name, "pro-man") ||
-		strings.Contains(name, "pro_man") ||
-		isProviderHost(cred.BaseURL, "proman.ai")
+	return cred != nil && cred.Type == config.ProviderTypeProMan
 }
 
 func ShouldSanitizeUpstreamSurface(cred *config.CredentialConfig) bool {
@@ -65,7 +54,7 @@ func IsProviderInternalResponseHeader(key string) bool {
 	return false
 }
 
-func UnsupportedRequest(body []byte, selectedModel string) string {
+func UnsupportedRequest(body []byte, _ string) string {
 	if len(bytes.TrimSpace(body)) == 0 {
 		return ""
 	}
@@ -81,21 +70,8 @@ func UnsupportedRequest(body []byte, selectedModel string) string {
 	if !ok {
 		return ""
 	}
-	model := proManCanonicalModel(selectedModel)
-	if model == "" {
-		model = proManCanonicalModel(stringValue(obj["model"]))
-	}
-	caps, hasCaps := proManCapabilitiesByModel[model]
-	if hasProManRecursiveType(root, "server_tool_use") {
+	if hasServerToolUseMessageBlock(obj) {
 		return "server_tool_use"
-	}
-	if hasCaps {
-		if caps.blockLegacyThinking && hasProManUnsupportedThinking(obj) {
-			return "thinking"
-		}
-		if caps.blockAssistantPrefill && hasProManAssistantPrefill(obj) {
-			return "assistant_prefill"
-		}
 	}
 	return ""
 }
@@ -112,7 +88,7 @@ func SanitizeUpstreamJSONBody(body []byte, displayModel string) ([]byte, bool) {
 		return body, false
 	}
 
-	changed := sanitizeJSONValue(&value, displayModel)
+	changed := sanitizeJSONEnvelope(&value, displayModel)
 	if !changed {
 		return body, false
 	}
@@ -235,96 +211,64 @@ func (r *sanitizingSSEReadCloser) Close() error {
 	return r.source.Close()
 }
 
-type proManModelCapabilities struct {
-	blockAssistantPrefill bool
-	blockLegacyThinking   bool
-}
-
-var proManCapabilitiesByModel = map[string]proManModelCapabilities{
-	"claude-fable-5": {
-		blockAssistantPrefill: true,
-		blockLegacyThinking:   true,
-	},
-	"claude-haiku-4.5": {
-		blockAssistantPrefill: false,
-		blockLegacyThinking:   false,
-	},
-	"claude-opus-4.5": {
-		blockAssistantPrefill: false,
-		blockLegacyThinking:   false,
-	},
-	"claude-opus-4.6": {
-		blockAssistantPrefill: true,
-		blockLegacyThinking:   false,
-	},
-	"claude-opus-4.7": {
-		blockAssistantPrefill: true,
-		blockLegacyThinking:   false,
-	},
-	"claude-opus-4.8": {
-		blockAssistantPrefill: true,
-		blockLegacyThinking:   false,
-	},
-	"claude-sonnet-4.5": {
-		blockAssistantPrefill: false,
-		blockLegacyThinking:   false,
-	},
-	"claude-sonnet-4.6": {
-		blockAssistantPrefill: true,
-		blockLegacyThinking:   false,
-	},
-	"claude-sonnet-5": {
-		blockAssistantPrefill: true,
-		blockLegacyThinking:   true,
-	},
-}
-
-func sanitizeJSONValue(value *any, displayModel string) bool {
-	switch typed := (*value).(type) {
-	case map[string]any:
-		changed := false
-		if eventType, _ := typed["type"].(string); eventType == "error" {
-			if errObj, ok := typed["error"].(map[string]any); ok {
-				if _, hasMessage := errObj["message"]; hasMessage {
-					errObj["message"] = "Upstream provider error"
-					changed = true
-				}
-			}
-		}
-		for key, nested := range typed {
-			if isInternalJSONField(key) {
-				delete(typed, key)
-				changed = true
-				continue
-			}
-			lowerKey := strings.ToLower(key)
-			if lowerKey == "model" && displayModel != "" {
-				if s, ok := nested.(string); ok && isInternalModelString(s) {
-					typed[key] = displayModel
-					changed = true
-					continue
-				}
-			}
-			nestedValue := nested
-			if sanitizeJSONValue(&nestedValue, displayModel) {
-				typed[key] = nestedValue
-				changed = true
-			}
-		}
-		return changed
-	case []any:
-		changed := false
-		for i, nested := range typed {
-			nestedValue := nested
-			if sanitizeJSONValue(&nestedValue, displayModel) {
-				typed[i] = nestedValue
-				changed = true
-			}
-		}
-		return changed
-	default:
+func sanitizeJSONEnvelope(value *any, displayModel string) bool {
+	obj, ok := (*value).(map[string]any)
+	if !ok {
 		return false
 	}
+	return sanitizeEnvelopeMap(obj, displayModel)
+}
+
+func sanitizeEnvelopeMap(obj map[string]any, displayModel string) bool {
+	changed := sanitizeEnvelopeFields(obj, displayModel)
+	if eventType, _ := obj["type"].(string); eventType == "error" {
+		if errObj, ok := obj["error"].(map[string]any); ok {
+			if _, hasMessage := errObj["message"]; hasMessage {
+				errObj["message"] = "Upstream provider error"
+				changed = true
+			}
+		}
+	}
+
+	for _, key := range []string{"response", "message", "delta", "usage", "error"} {
+		if child, ok := obj[key].(map[string]any); ok {
+			if sanitizeEnvelopeMap(child, displayModel) {
+				changed = true
+			}
+		}
+	}
+
+	if choices, ok := obj["choices"].([]any); ok {
+		for _, choice := range choices {
+			choiceObj, ok := choice.(map[string]any)
+			if !ok {
+				continue
+			}
+			if sanitizeEnvelopeMap(choiceObj, displayModel) {
+				changed = true
+			}
+		}
+	}
+	return changed
+}
+
+func sanitizeEnvelopeFields(obj map[string]any, displayModel string) bool {
+	changed := false
+	for key, nested := range obj {
+		if isInternalJSONField(key) {
+			delete(obj, key)
+			changed = true
+			continue
+		}
+		lowerKey := strings.ToLower(key)
+		if lowerKey == "model" && displayModel != "" {
+			if s, ok := nested.(string); ok && isInternalModelString(s) {
+				obj[key] = displayModel
+				changed = true
+			}
+		}
+	}
+	return changed
 }
 
 func isInternalJSONField(key string) bool {
@@ -407,143 +351,46 @@ func splitSSELineEnding(line []byte) (content, ending []byte) {
 	return line[:len(line)-1], line[len(line)-1:]
 }
 
-func hasProManUnsupportedThinking(obj map[string]any) bool {
-	for _, container := range []map[string]any{obj, mapValue(obj["extra_body"])} {
-		if container == nil {
+func hasServerToolUseMessageBlock(obj map[string]any) bool {
+	return hasServerToolUseInMessages(obj["messages"]) ||
+		hasServerToolUseInMessages(obj["input"])
+}
+
+func hasServerToolUseInMessages(value any) bool {
+	messages, ok := value.([]any)
+	if !ok {
+		return false
+	}
+	for _, message := range messages {
+		messageObj, ok := message.(map[string]any)
+		if !ok {
 			continue
 		}
-		if thinking, ok := container["thinking"]; ok {
-			if hasEnabledThinkingConfig(thinking) {
-				return true
-			}
-		}
-		if nonNoneString(container["reasoning_effort"]) {
+		if hasServerToolUseContentBlock(messageObj["content"]) {
 			return true
-		}
-	}
-
-	if reasoning, ok := obj["reasoning"].(map[string]any); ok {
-		return nonNoneString(reasoning["effort"])
-	}
-	return false
-}
-
-func hasEnabledThinkingConfig(value any) bool {
-	thinking, ok := value.(map[string]any)
-	if !ok {
-		return true
-	}
-	typ := strings.ToLower(strings.TrimSpace(stringValue(thinking["type"])))
-	return typ != "disabled"
-}
-
-func hasProManRecursiveType(value any, targetType string) bool {
-	switch typed := value.(type) {
-	case map[string]any:
-		if typ, _ := typed["type"].(string); strings.EqualFold(strings.TrimSpace(typ), targetType) {
-			return true
-		}
-		for _, nested := range typed {
-			if hasProManRecursiveType(nested, targetType) {
-				return true
-			}
-		}
-	case []any:
-		for _, nested := range typed {
-			if hasProManRecursiveType(nested, targetType) {
-				return true
-			}
 		}
 	}
 	return false
 }
 
-func hasProManAssistantPrefill(obj map[string]any) bool {
-	messages, ok := obj["messages"].([]any)
-	if !ok || len(messages) == 0 {
-		if input, ok := obj["input"].([]any); ok {
-			messages = input
-		}
-	}
-	if len(messages) == 0 {
-		return false
-	}
-	last, ok := messages[len(messages)-1].(map[string]any)
+func hasServerToolUseContentBlock(value any) bool {
+	blocks, ok := value.([]any)
 	if !ok {
 		return false
 	}
-	role := strings.TrimSpace(strings.ToLower(stringValue(last["role"])))
-	return role == "assistant" || role == "model"
-}
-
-func proManCanonicalModel(model string) string {
-	normalized := strings.ToLower(strings.TrimSpace(model))
-	normalized = strings.ReplaceAll(normalized, "_", "-")
-	normalized = strings.ReplaceAll(normalized, ".", "-")
-	for _, prefix := range []string{"anthropic/", "anthropic-", "claude/"} {
-		normalized = strings.TrimPrefix(normalized, prefix)
+	for _, block := range blocks {
+		blockObj, ok := block.(map[string]any)
+		if !ok {
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(stringValue(blockObj["type"])), "server_tool_use") {
+			return true
+		}
 	}
-
-	switch {
-	case strings.Contains(normalized, "fable-5"):
-		return "claude-fable-5"
-	case strings.Contains(normalized, "haiku-4-5"):
-		return "claude-haiku-4.5"
-	case strings.Contains(normalized, "opus-4-5"):
-		return "claude-opus-4.5"
-	case strings.Contains(normalized, "opus-4-6"):
-		return "claude-opus-4.6"
-	case strings.Contains(normalized, "opus-4-7"):
-		return "claude-opus-4.7"
-	case strings.Contains(normalized, "opus-4-8"):
-		return "claude-opus-4.8"
-	case strings.Contains(normalized, "sonnet-4-5"):
-		return "claude-sonnet-4.5"
-	case strings.Contains(normalized, "sonnet-4-6"):
-		return "claude-sonnet-4.6"
-	case strings.Contains(normalized, "sonnet-5"):
-		return "claude-sonnet-5"
-	default:
-		return ""
-	}
-}
-
-func mapValue(value any) map[string]any {
-	obj, _ := value.(map[string]any)
-	return obj
+	return false
 }
 
 func stringValue(value any) string {
 	s, _ := value.(string)
 	return s
-}
-
-func nonNoneString(value any) bool {
-	s, ok := value.(string)
-	if !ok {
-		return false
-	}
-	switch strings.ToLower(strings.TrimSpace(s)) {
-	case "", "none", "disable", "disabled":
-		return false
-	default:
-		return true
-	}
-}
-
-func isProviderHost(rawBaseURL, domain string) bool {
-	baseURL := strings.TrimSpace(rawBaseURL)
-	domain = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(domain)), ".")
-	if baseURL == "" || domain == "" {
-		return false
-	}
-	u, err := url.Parse(baseURL)
-	if err != nil || u.Hostname() == "" {
-		u, err = url.Parse("https://" + baseURL)
-		if err != nil {
-			return false
-		}
-	}
-	host := strings.TrimSuffix(strings.ToLower(u.Hostname()), ".")
-	return host == domain || strings.HasSuffix(host, "."+domain)
 }

@@ -21,7 +21,7 @@ aliases with model-level `model` values when the names differ.
 | Model catalog                | Internal upstream model IDs are sanitized from client responses.     |
 | Error surface                | ProMan upstream errors are masked before returning to clients.       |
 | Header surface               | Internal provider and LiteLLM/LightLLM routing headers are stripped. |
-| Unsupported request handling | Known unsupported ProMan fields are not sent to ProMan.              |
+| Unsupported request handling | Known provider-level unsupported blocks are not sent to ProMan.      |
 
 ## Supported By Live Tests
 
@@ -31,7 +31,7 @@ aliases with model-level `model` values when the names differ.
 | System prompt                                                                    | Works.                                      |
 | Content blocks                                                                   | Works.                                      |
 | Consecutive user messages                                                        | Works.                                      |
-| Assistant prefill                                                                | Works only on tested models that accept it. |
+| Assistant prefill                                                                | Works in current smoke tests.               |
 | `stop_sequences`                                                                 | Works.                                      |
 | Forced tool calls                                                                | Works.                                      |
 | Streaming                                                                        | Works.                                      |
@@ -60,17 +60,19 @@ does not send the request to ProMan. It tries another primary credential first,
 then a fallback proxy. If no compatible route exists, it returns a local 400 with
 a neutral error message.
 
-| Request field or shape                              | Router behavior |
-| --------------------------------------------------- | --------------- |
-| Assistant prefill on models where ProMan rejects it | Skip ProMan.    |
-| Reasoning on Sonnet 5 and Fable 5                   | Skip ProMan.    |
-| Recursive `server_tool_use` blocks                  | Skip ProMan.    |
+| Request field or shape                            | Router behavior |
+| ------------------------------------------------- | --------------- |
+| Top-level message content `server_tool_use` block | Skip ProMan.    |
+
+The router does not hard-code ProMan behavior by concrete model name. Model-level
+capability drift must be tracked by live/provider fixture results and provider
+configuration, not by adding temporary model matrices to the proxy binary.
 
 The router does not add ProMan-specific blocks for `temperature`, `top_p`,
-`top_k`, `tool_choice: {"type":"none"}`, or text documents. These request shapes
-passed the latest direct ProMan compatibility checks and should follow the normal
-provider path. The Sonnet 5 and Fable 5 reasoning guard can be removed after the
-shared Anthropic converter emits adaptive thinking for those models.
+`top_k`, reasoning/thinking parameters, assistant prefill,
+`tool_choice: {"type":"none"}`, or text documents. These request shapes passed
+the latest direct ProMan compatibility checks and should follow the normal
+provider path.
 
 ## Masked From Clients
 

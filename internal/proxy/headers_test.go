@@ -78,7 +78,7 @@ func TestCopyResponseHeadersRegularCredentialKeepsNonStructuralHeaders(t *testin
 		"X-Litellm-Version": []string{"debug-upstream"},
 		"Server":            []string{"provider-server"},
 	}
-	cred := &config.CredentialConfig{Name: "regular-anthropic", Type: config.ProviderTypeAnthropic}
+	cred := &config.CredentialConfig{Name: "anthropic-promanYT-01", Type: config.ProviderTypeAnthropic}
 	w := httptest.NewRecorder()
 
 	copyResponseHeaders(w, src, cred)

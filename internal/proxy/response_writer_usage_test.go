@@ -151,6 +151,29 @@ func TestWriteProxyResponseProManSanitizesSuccessBody(t *testing.T) {
 	assert.NotContains(t, w.Body.String(), "anthropic-direct-client")
 }
 
+func TestWriteProxyResponseDoesNotSanitizeProviderLookingNameWithoutProManType(t *testing.T) {
+	rawBody := []byte(`{"model":"anthropic/customer-choice","caller":"customer-app","provider_specific_fields":{"keep":"regular"},"choices":[{"message":{"content":"ok"}}]}`)
+	resp := &ProxyResponse{
+		StatusCode: http.StatusOK,
+		Headers: http.Header{
+			"Content-Type": []string{"application/json"},
+			"Server":       []string{"provider-server"},
+		},
+		Body: rawBody,
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	w := httptest.NewRecorder()
+	cred := &config.CredentialConfig{Name: "anthropic-promanYT-01", Type: config.ProviderTypeAnthropic}
+
+	NewTestProxyBuilder().Build().writeProxyResponse(w, resp, req, cred, "claude-haiku-4.5", nil)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "provider-server", w.Header().Get("Server"))
+	assert.Contains(t, w.Body.String(), `"caller":"customer-app"`)
+	assert.Contains(t, w.Body.String(), `"provider_specific_fields":{"keep":"regular"}`)
+	assert.NotContains(t, w.Body.String(), "anthropic-direct-client")
+}
+
 func TestClientResponseBodyForProManMasksErrors(t *testing.T) {
 	cred := &config.CredentialConfig{Name: "proman", Type: config.ProviderTypeProMan}
 	raw := []byte(`{"error":{"message":"litellm.BadRequestError: Received Model Group=anthropic/claude/anthropic-direct-client-0dce8b1a Available Model Group Fallbacks=None"}}`)
