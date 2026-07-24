@@ -39,7 +39,7 @@ func TestLogMasking_MasterKeyNotExposed(t *testing.T) {
 	// Create request with wrong token
 	invalidToken := "sk_test_invalid_token_abcdefghijklmnop"
 	req := httptest.NewRequest("POST", "/v1/chat/completions",
-		strings.NewReader(`{"model": "gpt-4"}`))
+		strings.NewReader(`{"model":"gpt-4","messages":[{"role":"user","content":"test"}]}`))
 	req.Header.Set("Authorization", "Bearer "+invalidToken)
 	req.Header.Set("Content-Type", "application/json")
 
@@ -92,7 +92,7 @@ func TestLogMasking_HeadersNotExposed(t *testing.T) {
 
 	// Create request
 	req := httptest.NewRequest("POST", "/v1/chat/completions",
-		strings.NewReader(`{"model": "gpt-4"}`))
+		strings.NewReader(`{"model":"gpt-4","messages":[{"role":"user","content":"test"}]}`))
 	req.Header.Set("Authorization", "Bearer master-key")
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Custom-Header", "custom-value")

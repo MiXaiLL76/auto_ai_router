@@ -33,7 +33,7 @@ func TestWriteProxyResponseNormalizesQwenUsageBeforeCompression(t *testing.T) {
 	req.Header.Set("Accept-Encoding", "gzip")
 	w := httptest.NewRecorder()
 
-	NewTestProxyBuilder().Build().writeProxyResponse(w, resp, req, "test", "qwen/qwen3.6-35b-a3b")
+	NewTestProxyBuilder().Build().writeProxyResponse(w, resp, req, "test", "qwen/qwen3.6-35b-a3b", nil)
 
 	require.Equal(t, http.StatusOK, w.Code)
 	require.Equal(t, "gzip", w.Header().Get("Content-Encoding"))
@@ -89,7 +89,7 @@ func TestWriteProxyResponseDoesNotNormalizeError(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 	w := httptest.NewRecorder()
 
-	NewTestProxyBuilder().Build().writeProxyResponse(w, resp, req, "test", "qwen3.6-35b-a3b")
+	NewTestProxyBuilder().Build().writeProxyResponse(w, resp, req, "test", "qwen3.6-35b-a3b", nil)
 
 	assert.Equal(t, http.StatusBadGateway, w.Code)
 	assert.Equal(t, originalBody, w.Body.Bytes())

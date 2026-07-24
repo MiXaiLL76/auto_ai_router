@@ -33,7 +33,7 @@ func errorTypeForStatus(statusCode int) string {
 		return "not_found_error"
 	case http.StatusMethodNotAllowed:
 		return "invalid_request_error"
-	case http.StatusRequestTimeout:
+	case http.StatusRequestTimeout, http.StatusGatewayTimeout:
 		return "timeout_error"
 	case http.StatusTooManyRequests:
 		return "rate_limit_error"

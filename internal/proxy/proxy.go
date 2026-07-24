@@ -80,12 +80,15 @@ type RequestLogContext struct {
 	CompletionStartTime  time.Time                // Timestamp of the first real content/tool/reasoning delta (TTFT), not just the first byte/chunk; zero if not streamed or never reached
 	Request              *http.Request            // HTTP request
 	Token                string                   // Auth token (raw, will be hashed)
+	PublicModelID        string                   // Client-facing model before alias resolution
 	ModelID              string                   // Model alias name (what client requested)
 	RealModelID          string                   // Real model name sent to provider (for price lookup; equals ModelID if no alias)
 	Status               string                   // "success" or "failure"
 	HTTPStatus           int                      // HTTP response status code
 	ErrorMsg             string                   // Error message (added to metadata on failure)
 	TokenUsage           *converter.TokenUsage    // Token usage with detailed breakdown
+	UsageSource          string                   // provider, estimated, request_parameters, or missing
+	StreamOutcome        string                   // completed, client_aborted, or stream_error
 	Credential           *config.CredentialConfig // Credential used
 	SessionID            string                   // Session ID
 	TargetURL            string                   // Target URL (for APIBase extraction)
@@ -100,12 +103,8 @@ type RequestLogContext struct {
 	IsProxyRequest       bool                     // True when this request came from another auto_ai_router (X-Aar-Proxy-Client header)
 	Scope                scope.Context
 
-	// ReservedEntities lists budget-hierarchy levels reserved for this request via
-	// enforceBudgetAndRateLimits; reconcileBudgetAndRateLimits settles each one.
-	ReservedEntities []reservedEntity
-	// RateLimitedEntitiesForTPM lists entity keys that had a TPM limit, so the real
-	// token count can be recorded post-call via ConsumeTokensCtx.
-	RateLimitedEntitiesForTPM []string
+	reservedEntities       []reservedEntity
+	rateLimitedTPMEntities []string
 	// budgetReconciled guards against double reconciliation: the first call (from
 	// logSpendToLiteLLMDB with the real cost, or the ProxyRequest defer safety-net
 	// with cost 0) wins; later calls are no-ops.
@@ -150,7 +149,8 @@ type Config struct {
 	BudgetReserver                   *budget.Reserver      // Atomic Redis budget reservation (nil if Redis disabled — feature is a no-op)
 	KeyRateLimiter                   *ratelimit.RPMLimiter // Key/user/team/org RPM/TPM enforcement (nil if Redis disabled)
 	BudgetReservationEnabled         bool                  // Config toggle; independent of nil-check for clearer intent
-	DefaultEstimatedCompletionTokens int                   // Completion-token estimate when max_tokens is absent (default: 1000)
+	KeyRateLimitsEnabled             bool
+	DefaultEstimatedCompletionTokens int // Completion-token estimate when max_tokens is absent (default: 1000)
 }
 
 type Proxy struct {
@@ -180,6 +180,7 @@ type Proxy struct {
 	budgetReserver                   *budget.Reserver
 	keyRateLimiter                   *ratelimit.RPMLimiter
 	budgetReservationEnabled         bool
+	keyRateLimitsEnabled             bool
 	defaultEstimatedCompletionTokens int
 	version                          string
 	commit                           string
@@ -248,6 +249,7 @@ func New(cfg *Config) *Proxy {
 		budgetReserver:                   cfg.BudgetReserver,
 		keyRateLimiter:                   cfg.KeyRateLimiter,
 		budgetReservationEnabled:         cfg.BudgetReservationEnabled,
+		keyRateLimitsEnabled:             cfg.KeyRateLimitsEnabled,
 		defaultEstimatedCompletionTokens: cfg.DefaultEstimatedCompletionTokens,
 		client:                           httputil.NewHTTPClient(httpClientCfg),
 		version:                          cfg.Version,
@@ -584,6 +586,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			if resp == nil {
 				return
 			}
+			resp.Model = clientVisibleResponseModel(logCtx, resp.Model)
 			applyResponsesMetadata(resp, meta)
 			if err := p.responseStore.SaveResponse(
 				context.Background(), apiKeyHash, resp, meta.Metadata, meta.TTL, meta.AccumulatedInput, cred.Name,
@@ -824,7 +827,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 				if streamUsage != nil {
 					// Backfill PromptTokens from estimate when provider didn't include it
 					// (e.g. stream cut before usage chunk, or provider omits prompt tokens).
-					if streamUsage.PromptTokens == 0 {
+					if streamUsage.PromptTokens == 0 && logCtx.UsageSource != "provider" {
 						streamUsage.PromptTokens = logCtx.PromptTokensEstimate
 					}
 					logCtx.TokenUsage = streamUsage
@@ -896,7 +899,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			if logCtx.IsProxyRequest && logCtx.ActualCredentialName != "" {
 				w.Header().Set("X-Credential-Name", logCtx.ActualCredentialName)
 			}
-			p.writeProxyResponse(w, proxyResp, r, cred.Name, modelID)
+			p.writeProxyResponse(w, proxyResp, r, cred.Name, modelID, logCtx)
 			tokens := extractTokensFromResponse(string(proxyResp.Body), config.ProviderTypeOpenAI)
 			if tokens > 0 {
 				p.rateLimiter.ConsumeTokens(cred.Name, tokens)
@@ -1501,6 +1504,23 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
+		if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
+			normalizedBody := normalizeSuccessfulResponseModel(
+				finalResponseBody,
+				endpointFromLogContext(logCtx),
+				clientVisibleResponseModel(logCtx, modelID),
+			)
+			if !bytes.Equal(normalizedBody, finalResponseBody) {
+				finalResponseBody = normalizedBody
+				bodyForTokenExtraction = normalizedBody
+				for key := range resp.Header {
+					if isRepresentationIntegrityHeader(key) {
+						resp.Header.Del(key)
+					}
+				}
+			}
+		}
+
 		rawErrorBody := finalResponseBody
 		if resp.StatusCode >= 400 && shouldMaskUpstreamErrors(cred) {
 			finalResponseBody = maskedUpstreamErrorBody(resp.StatusCode)
@@ -1598,6 +1618,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+		setSuccessfulSSEHeaders(w.Header(), resp.StatusCode)
 		w.WriteHeader(resp.StatusCode)
 
 		if logCtx != nil {
@@ -1792,6 +1813,11 @@ func applyResponsesMetadata(resp *responses.Response, meta *responses.ResponsesM
 // HandleGetResponse handles GET /v1/responses/{response_id}.
 // Returns the stored Responses API response if the caller owns it.
 func (p *Proxy) HandleGetResponse(w http.ResponseWriter, r *http.Request) {
+	tokenInfo, ok := p.AuthenticateClientRequest(w, r)
+	if !ok {
+		return
+	}
+
 	if p.responseStore == nil {
 		WriteErrorNotFound(w, "Response store not enabled")
 		return
@@ -1805,37 +1831,18 @@ func (p *Proxy) HandleGetResponse(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Auth
-	authHeader := r.Header.Get("Authorization")
-	if authHeader == "" {
-		WriteErrorUnauthorized(w, "Missing Authorization header")
-		return
-	}
-	token := strings.TrimPrefix(authHeader, "Bearer ")
-	if token == authHeader {
-		WriteErrorUnauthorized(w, "Invalid Authorization header format")
-		return
-	}
+	token, _ := extractClientToken(r)
 
 	var resp *responses.Response
 	var err error
 
 	if p.isMasterKey(token) {
-		// Master key: bypass ownership check
 		resp, err = p.responseStore.GetResponseByID(r.Context(), responseID)
 	} else {
-		// Enforce blocked/expired/budget on the token before serving stored
-		// responses, matching the checks other endpoints run via authenticateRequest.
-		// On DB unavailability (handleLiteLLMAuthError returns false) fall back to the
-		// legacy ownership-only path so reads stay available during a DB outage.
-		if p.LiteLLMDB != nil && p.LiteLLMDB.IsEnabled() {
-			if _, valErr := p.LiteLLMDB.ValidateToken(r.Context(), token); valErr != nil {
-				if p.handleLiteLLMAuthError(r.Context(), w, valErr, token) {
-					return
-				}
-			}
+		apiKeyHash := tokenInfo.Token
+		if apiKeyHash == "" {
+			apiKeyHash = litellmdb.HashToken(token)
 		}
-		apiKeyHash := litellmdb.HashToken(token)
 		resp, err = p.responseStore.GetResponse(r.Context(), responseID, apiKeyHash)
 	}
 

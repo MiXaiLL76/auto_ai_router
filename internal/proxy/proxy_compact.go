@@ -31,6 +31,15 @@ func (cw *captureResponseWriter) Write(b []byte) (int, error) { return cw.body.W
 // It summarizes the provided conversation via the LLM and returns a CompactResource
 // containing a single compaction output item that can be reused as input context.
 func (p *Proxy) HandleCompactResponse(w http.ResponseWriter, r *http.Request) {
+	// Authorize the public compact operation before reading or transforming its
+	// body. The inner chat request inherits this in-process identity rather than
+	// re-checking allowed_routes against the implementation-detail chat path.
+	tokenInfo, ok := p.AuthenticateClientRequest(w, r)
+	if !ok {
+		return
+	}
+	rawToken, _ := extractClientToken(r)
+
 	body, err := io.ReadAll(io.LimitReader(r.Body, 10<<20))
 	if err != nil {
 		WriteErrorBadRequest(w, "Failed to read request body")
@@ -68,6 +77,7 @@ func (p *Proxy) HandleCompactResponse(w http.ResponseWriter, r *http.Request) {
 	internalReq.URL.Path = "/v1/chat/completions"
 	internalReq.Header = r.Header.Clone()
 	internalReq.Header.Set("Content-Type", "application/json")
+	internalReq = withTrustedClientAuth(internalReq, rawToken, tokenInfo)
 
 	capture := newCaptureResponseWriter()
 	p.ProxyRequest(capture, internalReq)
