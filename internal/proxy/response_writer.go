@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -14,19 +15,22 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/proxy/modelutils"
 )
 
+const maxSanitizingSSELineBytes = 1 << 20
+
 func shouldSanitizeUpstreamSurface(cred *config.CredentialConfig) bool {
 	return isProManCredential(cred)
 }
 
-func clientResponseBodyForCredential(statusCode int, body []byte, cred *config.CredentialConfig, displayModel string) ([]byte, bool) {
+func clientResponseBodyForCredential(statusCode int, body []byte, cred *config.CredentialConfig, displayModel string) ([]byte, bool, bool) {
 	if statusCode >= 400 && shouldMaskUpstreamErrors(cred) {
 		masked := maskedUpstreamErrorBody(statusCode)
-		return masked, !bytes.Equal(body, masked)
+		return masked, !bytes.Equal(body, masked), true
 	}
 	if statusCode >= 200 && statusCode < 300 && shouldSanitizeUpstreamSurface(cred) {
-		return sanitizeUpstreamJSONBody(body, displayModel)
+		sanitized, changed := sanitizeUpstreamJSONBody(body, displayModel)
+		return sanitized, changed, false
 	}
-	return body, false
+	return body, false, false
 }
 
 func sanitizeUpstreamJSONBody(body []byte, displayModel string) ([]byte, bool) {
@@ -146,18 +150,17 @@ type sanitizingSSEReadCloser struct {
 }
 
 type sanitizingSSEReader struct {
-	scanner      *bufio.Scanner
-	buffer       bytes.Buffer
+	reader       *bufio.Reader
+	pending      []byte
+	line         []byte
+	passthrough  bool
 	displayModel string
-	done         bool
-	err          error
+	terminalErr  error
 }
 
 func newSanitizingSSEReader(source io.Reader, displayModel string) io.Reader {
-	scanner := bufio.NewScanner(source)
-	scanner.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
 	return &sanitizingSSEReader{
-		scanner:      scanner,
+		reader:       bufio.NewReader(source),
 		displayModel: displayModel,
 	}
 }
@@ -170,24 +173,75 @@ func newSanitizingSSEReadCloser(source io.ReadCloser, displayModel string) io.Re
 }
 
 func (r *sanitizingSSEReader) Read(p []byte) (int, error) {
-	for r.buffer.Len() == 0 && !r.done {
-		if !r.scanner.Scan() {
-			r.done = true
-			r.err = r.scanner.Err()
-			break
-		}
-		line := r.scanner.Text()
-		r.buffer.WriteString(sanitizeSSELine(line, r.displayModel))
-		r.buffer.WriteByte('\n')
+	if len(p) == 0 {
+		return 0, nil
 	}
 
-	if r.buffer.Len() > 0 {
-		return r.buffer.Read(p)
+	for len(r.pending) == 0 {
+		if r.terminalErr != nil {
+			err := r.terminalErr
+			if err != io.EOF {
+				r.terminalErr = io.EOF
+			}
+			return 0, err
+		}
+
+		r.readNextSSEFragment()
 	}
-	if r.err != nil {
-		return 0, r.err
+
+	n := copy(p, r.pending)
+	r.pending = r.pending[n:]
+	return n, nil
+}
+
+func (r *sanitizingSSEReader) readNextSSEFragment() {
+	for len(r.pending) == 0 && r.terminalErr == nil {
+		fragment, err := r.reader.ReadSlice('\n')
+
+		if r.passthrough {
+			if len(fragment) > 0 {
+				r.pending = fragment
+			}
+			if !errors.Is(err, bufio.ErrBufferFull) {
+				r.passthrough = false
+			}
+		} else {
+			r.consumeSanitizingSSEFragment(fragment, err)
+		}
+
+		if err != nil && !errors.Is(err, bufio.ErrBufferFull) {
+			r.terminalErr = err
+		}
 	}
-	return 0, io.EOF
+}
+
+func (r *sanitizingSSEReader) consumeSanitizingSSEFragment(fragment []byte, readErr error) {
+	if errors.Is(readErr, bufio.ErrBufferFull) {
+		if len(r.line)+len(fragment) <= maxSanitizingSSELineBytes {
+			r.line = append(r.line, fragment...)
+			return
+		}
+
+		r.pending = append(r.line, fragment...)
+		r.line = nil
+		r.passthrough = true
+		return
+	}
+
+	line := append(r.line, fragment...)
+	r.line = nil
+	if len(line) == 0 {
+		return
+	}
+
+	if readErr == nil || errors.Is(readErr, io.EOF) {
+		if len(line) <= maxSanitizingSSELineBytes {
+			r.pending = sanitizeSSELine(line, r.displayModel)
+			return
+		}
+	}
+
+	r.pending = line
 }
 
 func (r *sanitizingSSEReadCloser) Read(p []byte) (int, error) {
@@ -198,18 +252,42 @@ func (r *sanitizingSSEReadCloser) Close() error {
 	return r.source.Close()
 }
 
-func sanitizeSSELine(line, displayModel string) string {
-	if !strings.HasPrefix(line, "data: ") {
+func sanitizeSSELine(line []byte, displayModel string) []byte {
+	content, ending := splitSSELineEnding(line)
+	if !bytes.HasPrefix(content, []byte("data:")) {
 		return line
 	}
-	data := strings.TrimPrefix(line, "data: ")
-	if data == "" || data == "[DONE]" {
+
+	rawPayload := content[len("data:"):]
+	payload := bytes.TrimSpace(rawPayload)
+	if len(payload) == 0 || bytes.Equal(payload, []byte("[DONE]")) || payload[0] != '{' {
 		return line
 	}
-	if sanitized, changed := sanitizeUpstreamJSONBody([]byte(data), displayModel); changed {
-		return "data: " + string(sanitized)
+
+	sanitizedPayload, changed := sanitizeUpstreamJSONBody(payload, displayModel)
+	if !changed {
+		return line
 	}
-	return line
+
+	payloadStart := bytes.Index(rawPayload, payload)
+	payloadEnd := payloadStart + len(payload)
+	sanitized := make([]byte, 0, len(line)-len(payload)+len(sanitizedPayload))
+	sanitized = append(sanitized, content[:len("data:")]...)
+	sanitized = append(sanitized, rawPayload[:payloadStart]...)
+	sanitized = append(sanitized, sanitizedPayload...)
+	sanitized = append(sanitized, rawPayload[payloadEnd:]...)
+	sanitized = append(sanitized, ending...)
+	return sanitized
+}
+
+func splitSSELineEnding(line []byte) (content, ending []byte) {
+	if len(line) == 0 || line[len(line)-1] != '\n' {
+		return line, nil
+	}
+	if len(line) >= 2 && line[len(line)-2] == '\r' {
+		return line[:len(line)-2], line[len(line)-2:]
+	}
+	return line[:len(line)-1], line[len(line)-1:]
 }
 
 // writeProxyResponse writes raw upstream proxy response to client.
@@ -225,8 +303,7 @@ func (p *Proxy) writeProxyResponse(w http.ResponseWriter, resp *ProxyResponse, c
 		credName = cred.Name
 	}
 
-	responseBody, responseBodyChanged := clientResponseBodyForCredential(resp.StatusCode, resp.Body, cred, modelID)
-	responseBodyMasked := resp.StatusCode >= http.StatusBadRequest && shouldMaskUpstreamErrors(cred)
+	responseBody, responseBodyChanged, responseBodyMasked := clientResponseBodyForCredential(resp.StatusCode, resp.Body, cred, modelID)
 	if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
 		if normalizedBody, changed := modelutils.NormalizeCompletionUsage(responseBody, modelID); changed {
 			responseBody = normalizedBody

@@ -180,9 +180,10 @@ func TestClientResponseBodyForProManMasksErrors(t *testing.T) {
 	cred := &config.CredentialConfig{Name: "proman", Type: config.ProviderTypeProMan}
 	raw := []byte(`{"error":{"message":"litellm.BadRequestError: Received Model Group=anthropic/claude/anthropic-direct-client-0dce8b1a Available Model Group Fallbacks=None"}}`)
 
-	body, changed := clientResponseBodyForCredential(400, raw, cred, "claude-haiku-4.5")
+	body, changed, masked := clientResponseBodyForCredential(400, raw, cred, "claude-haiku-4.5")
 
 	require.True(t, changed)
+	require.True(t, masked)
 	assert.NotContains(t, string(body), "litellm")
 	assert.NotContains(t, string(body), "anthropic-direct-client")
 	assert.NotContains(t, string(body), "Model Group")
@@ -210,6 +211,24 @@ func TestSanitizingSSEReadCloserRemovesInternalFields(t *testing.T) {
 	assert.NotContains(t, string(out), "anthropic-direct-client")
 	assert.NotContains(t, string(out), "Model Group")
 	assert.Contains(t, string(out), "data: [DONE]")
+}
+
+func TestSanitizingSSEReadCloserPassesThroughOversizedLine(t *testing.T) {
+	oversizedPayload := strings.Repeat("x", maxSanitizingSSELineBytes+8192)
+	oversizedLine := `data: {"blob":"` + oversizedPayload + `"}` + "\n"
+	sanitizableLine := `data: {"model":"anthropic/claude-haiku-4-5-20251001/anthropic-direct-client-0dce8b1a","provider_specific_fields":{"trace":"hidden"}}` + "\n"
+	stream := oversizedLine + sanitizableLine + "data: [DONE]\n"
+	rc := newSanitizingSSEReadCloser(io.NopCloser(strings.NewReader(stream)), "claude-haiku-4.5")
+
+	out, err := io.ReadAll(rc)
+	require.NoError(t, err)
+
+	body := string(out)
+	assert.Contains(t, body, oversizedLine)
+	assert.Contains(t, body, `"model":"claude-haiku-4.5"`)
+	assert.NotContains(t, body, "provider_specific_fields")
+	assert.NotContains(t, body, "anthropic-direct-client")
+	assert.Contains(t, body, "data: [DONE]")
 }
 
 func TestWriteProxyStreamingResponseNormalizesQwenUsage(t *testing.T) {
