@@ -61,14 +61,15 @@ func isCometAPICredential(cred *config.CredentialConfig) bool {
 		return true
 	}
 	name := strings.ToLower(cred.Name)
-	return isCometAPIHost(cred.BaseURL) ||
+	return isProviderHost(cred.BaseURL, "cometapi.com") ||
 		strings.Contains(name, "cometapi") ||
 		strings.Contains(name, "comet-api")
 }
 
-func isCometAPIHost(rawBaseURL string) bool {
+func isProviderHost(rawBaseURL, domain string) bool {
 	baseURL := strings.TrimSpace(rawBaseURL)
-	if baseURL == "" {
+	domain = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(domain)), ".")
+	if baseURL == "" || domain == "" {
 		return false
 	}
 	u, err := url.Parse(baseURL)
@@ -79,7 +80,7 @@ func isCometAPIHost(rawBaseURL string) bool {
 		}
 	}
 	host := strings.TrimSuffix(strings.ToLower(u.Hostname()), ".")
-	return host == "cometapi.com" || strings.HasSuffix(host, ".cometapi.com")
+	return host == domain || strings.HasSuffix(host, "."+domain)
 }
 
 func isProManCredential(cred *config.CredentialConfig) bool {
@@ -93,23 +94,7 @@ func isProManCredential(cred *config.CredentialConfig) bool {
 	return strings.Contains(name, "proman") ||
 		strings.Contains(name, "pro-man") ||
 		strings.Contains(name, "pro_man") ||
-		isProManHost(cred.BaseURL)
-}
-
-func isProManHost(rawBaseURL string) bool {
-	baseURL := strings.TrimSpace(rawBaseURL)
-	if baseURL == "" {
-		return false
-	}
-	u, err := url.Parse(baseURL)
-	if err != nil || u.Hostname() == "" {
-		u, err = url.Parse("https://" + baseURL)
-		if err != nil {
-			return false
-		}
-	}
-	host := strings.TrimSuffix(strings.ToLower(u.Hostname()), ".")
-	return host == "proman.ai" || strings.HasSuffix(host, ".proman.ai")
+		isProviderHost(cred.BaseURL, "proman.ai")
 }
 
 // logStreamHandlerError logs a streaming handler failure. Client disconnects are

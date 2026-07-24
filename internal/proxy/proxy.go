@@ -68,30 +68,24 @@ func (p *Proxy) applyCredentialCompatibilityRouting(
 	w http.ResponseWriter,
 	r *http.Request,
 	prepared *orchestratedRequest,
-	modelID string,
-	cred **config.CredentialConfig,
-	body *[]byte,
-	proxyBody *[]byte,
-	realModelID *string,
 	logCtx *RequestLogContext,
 	start time.Time,
 ) bool {
-	if (*cred).Type == config.ProviderTypeProxy {
+	cred := prepared.cred
+	modelID := prepared.modelID
+	if cred.Type == config.ProviderTypeProxy {
 		return true
 	}
 
-	reason, provider := unsupportedCredentialRequest(*cred, *body, modelID)
+	reason, provider := unsupportedCredentialRequest(cred, prepared.body, modelID)
 	if reason == "" {
 		return true
 	}
 
-	nextCred, nextReq, routed := p.nextPrimaryAfterUnsupportedCredential(r, prepared, modelID, *cred, logCtx.Scope, reason, provider)
+	nextCred, nextReq, routed := p.nextPrimaryAfterUnsupportedCredential(r, prepared, modelID, cred, logCtx.Scope, reason, provider)
 	if routed {
-		*cred = nextCred
-		*body = nextReq.body
-		*proxyBody = nextReq.proxyBody
-		*realModelID = nextReq.realModelID
 		r.URL.Path = nextReq.path
+		prepared.cred = nextCred
 		prepared.body = nextReq.body
 		prepared.proxyBody = nextReq.proxyBody
 		prepared.proxyPath = nextReq.proxyPath
@@ -100,10 +94,10 @@ func (p *Proxy) applyCredentialCompatibilityRouting(
 		prepared.passthroughResponses = nextReq.passthroughResponses
 		prepared.nativeResponses = nextReq.nativeResponses
 		logCtx.Credential = nextCred
-		logCtx.RealModelID = *realModelID
+		logCtx.RealModelID = prepared.realModelID
 		if span := trace.SpanFromContext(r.Context()); span.IsRecording() {
 			span.SetAttributes(
-				attribute.String("aar.real_model", *realModelID),
+				attribute.String("aar.real_model", prepared.realModelID),
 				attribute.String("aar.credential", nextCred.Name),
 				attribute.String("aar.provider", string(nextCred.Type)),
 				attribute.Bool("aar.provider_compatibility_skip", true),
@@ -116,10 +110,10 @@ func (p *Proxy) applyCredentialCompatibilityRouting(
 		w,
 		requestWithPath(r, prepared.proxyPath),
 		modelID,
-		(*cred).Name,
+		cred.Name,
 		http.StatusBadRequest,
 		RetryReasonServerErr,
-		*proxyBody,
+		prepared.proxyBody,
 		start,
 		logCtx,
 	)
@@ -128,12 +122,17 @@ func (p *Proxy) applyCredentialCompatibilityRouting(
 	}
 
 	p.logger.DebugContext(r.Context(), "No fallback handled unsupported provider request",
-		"credential", (*cred).Name,
+		"credential", cred.Name,
 		"provider", provider,
 		"model", modelID,
 		"reason", reason,
 		"fallback_reason", fallbackReason)
-	logCtx.Credential = *cred
+	p.logUpstreamError(r.Context(), "Provider compatibility routing failed with no fallback", http.StatusBadRequest, cred, modelID, nil,
+		"provider", provider,
+		"reason", reason,
+		"fallback_reason", fallbackReason,
+		"request_id", logCtx.RequestID)
+	logCtx.Credential = cred
 	logCtx.Status = "failure"
 	logCtx.HTTPStatus = http.StatusBadRequest
 	logCtx.ErrorMsg = unsupportedCredentialRequestMessage
@@ -921,7 +920,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 	r = prepared.request
 	logCtx.Request = r
 	body := prepared.body
-	proxyBody := prepared.proxyBody
+	var proxyBody []byte
 	modelID := prepared.modelID
 	realModelID := prepared.realModelID
 	streaming := prepared.streaming
@@ -985,9 +984,13 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if !p.applyCredentialCompatibilityRouting(w, r, prepared, modelID, &cred, &body, &proxyBody, &realModelID, logCtx, start) {
+	if !p.applyCredentialCompatibilityRouting(w, r, prepared, logCtx, start) {
 		return
 	}
+	body = prepared.body
+	proxyBody = prepared.proxyBody
+	realModelID = prepared.realModelID
+	cred = prepared.cred
 
 	// Handle proxy credential type with same-type retry + fallback
 	if cred.Type == config.ProviderTypeProxy {
@@ -1862,20 +1865,17 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		if resp.StatusCode >= 200 && resp.StatusCode < 300 && shouldSanitizeUpstreamSurface(cred) {
-			if sanitized, changed := sanitizeUpstreamJSONBody(finalResponseBody, modelID); changed {
-				finalResponseBody = sanitized
-				bodyForTokenExtraction = finalResponseBody
-				dropRepresentationIntegrityHeaders(resp.Header)
-			}
-		}
-
 		rawErrorBody := finalResponseBody
-		if resp.StatusCode >= 400 && shouldMaskUpstreamErrors(cred) {
-			finalResponseBody = maskedUpstreamErrorBody(resp.StatusCode)
-			bodyForTokenExtraction = finalResponseBody
-			resp.Header.Set("Content-Type", "application/json")
+		clientBody, clientBodyChanged, clientBodyMasked := clientResponseBodyForCredential(resp.StatusCode, finalResponseBody, cred, modelID)
+		if clientBodyChanged {
+			finalResponseBody = clientBody
+			bodyForTokenExtraction = clientBody
+		}
+		if clientBodyChanged || clientBodyMasked {
 			dropRepresentationIntegrityHeaders(resp.Header)
+		}
+		if clientBodyMasked {
+			resp.Header.Set("Content-Type", "application/json")
 		}
 
 		tokens := extractTokensFromResponse(string(bodyForTokenExtraction), config.ProviderTypeOpenAI)
