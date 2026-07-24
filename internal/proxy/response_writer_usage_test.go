@@ -165,7 +165,7 @@ func TestWriteProxyResponseDoesNotSanitizeProviderLookingNameWithoutProManType(t
 	w := httptest.NewRecorder()
 	cred := &config.CredentialConfig{Name: "anthropic-promanYT-01", Type: config.ProviderTypeAnthropic}
 
-	NewTestProxyBuilder().Build().writeProxyResponse(w, resp, req, cred, "claude-haiku-4.5", nil)
+	NewTestProxyBuilder().Build().writeProxyResponse(w, resp, req, cred, "claude-haiku-4.5")
 
 	require.Equal(t, http.StatusOK, w.Code)
 	assert.Equal(t, "provider-server", w.Header().Get("Server"))

@@ -2,7 +2,6 @@ package proxy
 
 import (
 	"net/http"
-	"strings"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	promanutils "github.com/mixaill76/auto_ai_router/internal/converter/proman/utils"
