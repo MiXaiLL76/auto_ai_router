@@ -337,7 +337,7 @@ func TestProxyRequest_UnsupportedProManRequestRoutesToNextPrimary(t *testing.T) 
 		assert.Equal(t, "Bearer next-key", r.Header.Get("Authorization"))
 		body, err := io.ReadAll(r.Body)
 		require.NoError(t, err)
-		assert.Contains(t, string(body), `"reasoning_effort":"high"`)
+		assert.Contains(t, string(body), `"server_tool_use"`)
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"id":     "chatcmpl-next",
@@ -356,7 +356,7 @@ func TestProxyRequest_UnsupportedProManRequestRoutesToNextPrimary(t *testing.T) 
 		).
 		Build()
 
-	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"claude-sonnet-5","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"high"}`))
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"claude-sonnet-4-6","messages":[{"role":"assistant","content":[{"type":"server_tool_use","name":"web_search"}]}]}`))
 	req.Header.Set("Authorization", "Bearer master-key")
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
@@ -399,7 +399,7 @@ func TestProxyRequest_UnsupportedProManRequestRoutesToFallbackProxy(t *testing.T
 		).
 		Build()
 
-	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"claude-sonnet-4-6","messages":[{"role":"user","content":"2+2"},{"role":"assistant","content":"4"}]}`))
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"claude-sonnet-4-6","messages":[{"role":"assistant","content":[{"type":"server_tool_use","name":"web_search"}]}]}`))
 	req.Header.Set("Authorization", "Bearer master-key")
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()

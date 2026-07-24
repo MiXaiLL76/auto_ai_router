@@ -23,19 +23,19 @@ func TestIsCredential(t *testing.T) {
 			want: true,
 		},
 		{
-			name: "known credential name fallback",
+			name: "provider-looking credential name is not enough",
 			cred: &config.CredentialConfig{Name: "anthropic-promanYT-01", Type: config.ProviderTypeAnthropic},
-			want: true,
+			want: false,
 		},
 		{
-			name: "hyphenated provider name",
+			name: "hyphenated provider name is not enough",
 			cred: &config.CredentialConfig{Name: "pro-man-claude", Type: config.ProviderTypeProxy},
-			want: true,
+			want: false,
 		},
 		{
-			name: "proman host",
+			name: "proman host is not enough",
 			cred: &config.CredentialConfig{Name: "claude", BaseURL: "https://api.proman.ai/v1"},
-			want: true,
+			want: false,
 		},
 		{
 			name: "aws elb host without explicit name is not enough",
@@ -82,33 +82,33 @@ func TestUnsupportedRequest(t *testing.T) {
 		want  string
 	}{
 		{
-			name:  "thinking rejected for legacy-mapped model",
-			model: "claude-sonnet-5",
-			body:  `{"model":"claude-sonnet-5","messages":[],"thinking":{"type":"adaptive","effort":"high"}}`,
-			want:  "thinking",
+			name:  "server tool use history rejected",
+			model: "claude-sonnet-4.6",
+			body:  `{"model":"claude-sonnet-4.6","messages":[{"role":"assistant","content":[{"type":"server_tool_use","name":"web_search"}]}]}`,
+			want:  "server_tool_use",
 		},
 		{
-			name:  "reasoning effort rejected for unsupported model",
-			model: "claude-sonnet-5",
-			body:  `{"model":"claude-sonnet-5","messages":[],"reasoning_effort":"high"}`,
-			want:  "thinking",
+			name:  "server tool use in responses input rejected",
+			model: "claude-sonnet-4.6",
+			body:  `{"model":"claude-sonnet-4.6","input":[{"role":"assistant","content":[{"type":"server_tool_use","name":"web_search"}]}]}`,
+			want:  "server_tool_use",
 		},
 		{
-			name:  "reasoning effort allowed for adaptive-mapped model",
-			model: "claude-opus-4.8",
-			body:  `{"model":"claude-opus-4.8","messages":[],"reasoning_effort":"high"}`,
+			name:  "server tool use inside user payload ignored",
+			model: "claude-sonnet-4.6",
+			body:  `{"model":"claude-sonnet-4.6","messages":[{"role":"user","content":[{"type":"tool_result","content":[{"type":"server_tool_use","value":"customer json"}]}]}]}`,
 			want:  "",
 		},
 		{
-			name:  "responses reasoning effort rejected for unsupported model",
+			name:  "thinking not provider-blocked",
 			model: "claude-sonnet-5",
-			body:  `{"model":"claude-sonnet-5","input":"hi","reasoning":{"effort":"medium"}}`,
-			want:  "thinking",
+			body:  `{"model":"claude-sonnet-5","messages":[],"thinking":{"type":"adaptive","effort":"high"}}`,
+			want:  "",
 		},
 		{
-			name:  "disabled thinking allowed",
+			name:  "reasoning effort not provider-blocked",
 			model: "claude-sonnet-5",
-			body:  `{"model":"claude-sonnet-5","messages":[],"thinking":{"type":"disabled"}}`,
+			body:  `{"model":"claude-sonnet-5","messages":[],"reasoning_effort":"high"}`,
 			want:  "",
 		},
 		{
@@ -130,27 +130,15 @@ func TestUnsupportedRequest(t *testing.T) {
 			want:  "",
 		},
 		{
-			name:  "server tool use history",
-			model: "claude-sonnet-4.6",
-			body:  `{"model":"claude-sonnet-4.6","messages":[{"role":"assistant","content":[{"type":"server_tool_use","name":"web_search"}]}]}`,
-			want:  "server_tool_use",
-		},
-		{
 			name:  "text plain document allowed",
 			model: "claude-sonnet-4.6",
 			body:  `{"model":"claude-sonnet-4.6","messages":[{"role":"user","content":[{"type":"document","source":{"type":"base64","media_type":"text/plain","data":"SGk="}}]}]}`,
 			want:  "",
 		},
 		{
-			name:  "assistant prefill rejected for model",
+			name:  "assistant prefill not provider-blocked",
 			model: "claude-sonnet-4.6",
 			body:  `{"model":"claude-sonnet-4.6","messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"pre"}]}`,
-			want:  "assistant_prefill",
-		},
-		{
-			name:  "assistant prefill allowed for model",
-			model: "claude-sonnet-4.5",
-			body:  `{"model":"claude-sonnet-4.5","messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"pre"}]}`,
 			want:  "",
 		},
 		{
@@ -198,13 +186,21 @@ func TestUnsupportedRequest(t *testing.T) {
 	}
 }
 
-func TestSanitizeUpstreamJSONBodyRemovesLiteLLMSurface(t *testing.T) {
+func TestSanitizeUpstreamJSONBodyOnlyTouchesResponseEnvelope(t *testing.T) {
 	raw := []byte(`{
 		"id":"chatcmpl-1",
 		"model":"anthropic/claude-haiku-4-5-20251001/anthropic-direct-client-0dce8b1a",
 		"provider_specific_fields":{"trace":"hidden"},
 		"caller":"litellm",
-		"choices":[{"message":{"content":"ok"},"provider_specific_fields":{"router":"hidden"}}],
+		"choices":[{
+			"message":{
+				"content":[{
+					"type":"tool_use",
+					"input":{"caller":"customer-app","model":"anthropic/customer-choice","provider_specific_fields":{"keep":"user-payload"}}
+				}]
+			},
+			"provider_specific_fields":{"router":"hidden"}
+		}],
 		"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}
 	}`)
 
@@ -212,10 +208,14 @@ func TestSanitizeUpstreamJSONBodyRemovesLiteLLMSurface(t *testing.T) {
 
 	require.True(t, changed)
 	body := string(sanitized)
-	assert.NotContains(t, body, "provider_specific_fields")
-	assert.NotContains(t, body, "caller")
+	assert.NotContains(t, body, `"caller":"litellm"`)
+	assert.NotContains(t, body, `"provider_specific_fields":{"trace":"hidden"}`)
+	assert.NotContains(t, body, `"provider_specific_fields":{"router":"hidden"}`)
 	assert.NotContains(t, body, "anthropic-direct-client")
 	assert.NotContains(t, body, "litellm")
+	assert.Contains(t, body, `"caller":"customer-app"`)
+	assert.Contains(t, body, `"model":"anthropic/customer-choice"`)
+	assert.Contains(t, body, `"provider_specific_fields":{"keep":"user-payload"}`)
 
 	var decoded map[string]any
 	require.NoError(t, json.Unmarshal(sanitized, &decoded))
