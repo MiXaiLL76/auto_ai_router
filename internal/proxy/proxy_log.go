@@ -11,6 +11,7 @@ import (
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/converter"
+	promanutils "github.com/mixaill76/auto_ai_router/internal/converter/proman/utils"
 	"github.com/mixaill76/auto_ai_router/internal/kafkalog"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb/spendlog"
@@ -51,7 +52,7 @@ func appendResponseBodyForLogs(args []any, cred *config.CredentialConfig, body s
 }
 
 func shouldMaskUpstreamErrors(cred *config.CredentialConfig) bool {
-	return isCometAPICredential(cred)
+	return isCometAPICredential(cred) || promanutils.IsCredential(cred)
 }
 
 func isCometAPICredential(cred *config.CredentialConfig) bool {
@@ -62,14 +63,15 @@ func isCometAPICredential(cred *config.CredentialConfig) bool {
 		return true
 	}
 	name := strings.ToLower(cred.Name)
-	return isCometAPIHost(cred.BaseURL) ||
+	return isProviderHost(cred.BaseURL, "cometapi.com") ||
 		strings.Contains(name, "cometapi") ||
 		strings.Contains(name, "comet-api")
 }
 
-func isCometAPIHost(rawBaseURL string) bool {
+func isProviderHost(rawBaseURL, domain string) bool {
 	baseURL := strings.TrimSpace(rawBaseURL)
-	if baseURL == "" {
+	domain = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(domain)), ".")
+	if baseURL == "" || domain == "" {
 		return false
 	}
 	u, err := url.Parse(baseURL)
@@ -80,7 +82,7 @@ func isCometAPIHost(rawBaseURL string) bool {
 		}
 	}
 	host := strings.TrimSuffix(strings.ToLower(u.Hostname()), ".")
-	return host == "cometapi.com" || strings.HasSuffix(host, ".cometapi.com")
+	return host == domain || strings.HasSuffix(host, "."+domain)
 }
 
 // logStreamHandlerError logs a streaming handler failure. Client disconnects are

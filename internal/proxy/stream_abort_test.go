@@ -505,7 +505,7 @@ func TestWriteProxyStreamingResponseWithTokens_Abort(t *testing.T) {
 	w := newFailAfterNBytesWriter(10)
 	logCtx := &RequestLogContext{}
 
-	streamUsage, err := prx.writeProxyStreamingResponseWithTokens(w, proxyResp, &http.Request{Header: make(http.Header)}, "test", "test-model", "gpt-4o-mini", logCtx)
+	streamUsage, err := prx.writeProxyStreamingResponseWithTokens(w, proxyResp, &http.Request{Header: make(http.Header)}, &config.CredentialConfig{Name: "test"}, "test-model", "gpt-4o-mini", logCtx)
 	assert.Error(t, err, "should return write error")
 
 	// Even on abort, estimated usage must be returned
@@ -568,7 +568,7 @@ func TestWriteProxyStreamingResponseWithTokens_DrainCapturesUsage(t *testing.T) 
 	w := newFailAfterNBytesWriter(10)
 	logCtx := &RequestLogContext{}
 
-	streamUsage, err := prx.writeProxyStreamingResponseWithTokens(w, proxyResp, &http.Request{Header: make(http.Header)}, "test", "test-model", "gpt-4o-mini", logCtx)
+	streamUsage, err := prx.writeProxyStreamingResponseWithTokens(w, proxyResp, &http.Request{Header: make(http.Header)}, &config.CredentialConfig{Name: "test"}, "test-model", "gpt-4o-mini", logCtx)
 	assert.Error(t, err, "should return write error")
 
 	// Drain must have captured the real usage chunk
@@ -623,7 +623,7 @@ func TestWriteProxyStreamingResponseWithTokens_NoUsageChunk(t *testing.T) {
 
 	w := httptest.NewRecorder()
 	logCtx := &RequestLogContext{}
-	streamUsage, err := prx.writeProxyStreamingResponseWithTokens(w, proxyResp, &http.Request{Header: make(http.Header)}, "test", "test-model", "gpt-4o-mini", logCtx)
+	streamUsage, err := prx.writeProxyStreamingResponseWithTokens(w, proxyResp, &http.Request{Header: make(http.Header)}, &config.CredentialConfig{Name: "test"}, "test-model", "gpt-4o-mini", logCtx)
 	require.NoError(t, err)
 
 	// Should return estimated usage from streamed text when no usage chunk is present.
@@ -651,7 +651,7 @@ func TestWriteProxyStreamingResponseWithTokens_DoesNotDisableBufferingForPreStre
 		w,
 		proxyResp,
 		&http.Request{Header: make(http.Header)},
-		"test",
+		&config.CredentialConfig{Name: "test"},
 		"test-model",
 		"gpt-4o-mini",
 		nil,

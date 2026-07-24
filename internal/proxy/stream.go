@@ -14,6 +14,7 @@ import (
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/converter"
+	promanutils "github.com/mixaill76/auto_ai_router/internal/converter/proman/utils"
 	"github.com/mixaill76/auto_ai_router/internal/converter/responses"
 )
 
@@ -344,9 +345,11 @@ func (p *Proxy) handleProviderStreaming(
 	case config.ProviderTypeVertexAI, config.ProviderTypeGemini:
 		return p.handleVertexStreaming(w, resp, cred.Name, realModelID, publicModel, logCtx)
 	case config.ProviderTypeAnthropic:
-		return p.handleAnthropicCompatibleStreaming(w, resp, cred.Name, realModelID, publicModel, cred.Type, "Anthropic", logCtx)
+		return p.handleAnthropicCompatibleStreaming(w, resp, cred, realModelID, publicModel, cred.Type, "Anthropic", logCtx)
 	case config.ProviderTypeCometAPI:
-		return p.handleAnthropicCompatibleStreaming(w, resp, cred.Name, realModelID, publicModel, cred.Type, "Comet API", logCtx)
+		return p.handleAnthropicCompatibleStreaming(w, resp, cred, realModelID, publicModel, cred.Type, "Comet API", logCtx)
+	case config.ProviderTypeProMan:
+		return p.handleAnthropicCompatibleStreaming(w, resp, cred, realModelID, publicModel, cred.Type, "ProMan", logCtx)
 	case config.ProviderTypeBedrock:
 		return p.handleBedrockStreaming(w, resp, cred.Name, realModelID, publicModel, logCtx)
 	default:
@@ -362,12 +365,15 @@ func (p *Proxy) handleVertexStreaming(w http.ResponseWriter, resp *http.Response
 	return p.handleTransformedStreaming(w, resp, credName, modelID, "Vertex AI", transformer, logCtx)
 }
 
-func (p *Proxy) handleAnthropicCompatibleStreaming(w http.ResponseWriter, resp *http.Response, credName, modelID, displayModelID string, providerType config.ProviderType, providerLabel string, logCtx *RequestLogContext) error {
+func (p *Proxy) handleAnthropicCompatibleStreaming(w http.ResponseWriter, resp *http.Response, cred *config.CredentialConfig, modelID, displayModelID string, providerType config.ProviderType, providerLabel string, logCtx *RequestLogContext) error {
 	conv := converter.New(providerType, converter.RequestMode{ModelID: modelID, DisplayModelID: displayModelID, IsStreaming: true})
 	transformer := func(r io.Reader, id string, w io.Writer) error {
+		if promanutils.ShouldSanitizeUpstreamSurface(cred) {
+			r = promanutils.NewSanitizingSSEReader(r, displayModelID)
+		}
 		return conv.StreamTo(r, w)
 	}
-	return p.handleTransformedStreaming(w, resp, credName, modelID, providerLabel, transformer, logCtx)
+	return p.handleTransformedStreaming(w, resp, cred.Name, modelID, providerLabel, transformer, logCtx)
 }
 
 func (p *Proxy) handleBedrockStreaming(w http.ResponseWriter, resp *http.Response, credName, modelID, displayModelID string, logCtx *RequestLogContext) error {

@@ -12,6 +12,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/models"
 	"github.com/mixaill76/auto_ai_router/internal/testhelpers"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -343,4 +344,119 @@ func TestProxyRequest_ResponsesRetryRecomputesProviderMode(t *testing.T) {
 	require.NoError(t, json.Unmarshal(anthropicBody, &raw))
 	require.Contains(t, raw, "messages")
 	require.NotContains(t, raw, "input")
+}
+
+func TestProxyRequest_UnsupportedProManRequestRoutesToNextPrimary(t *testing.T) {
+	var promanCalls int32
+	promanUpstream := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&promanCalls, 1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer promanUpstream.Close()
+
+	var nextPrimaryCalls int32
+	nextPrimary := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&nextPrimaryCalls, 1)
+		assert.Equal(t, "/v1/chat/completions", r.URL.Path)
+		assert.Equal(t, "Bearer next-key", r.Header.Get("Authorization"))
+		body, err := io.ReadAll(r.Body)
+		require.NoError(t, err)
+		assert.Contains(t, string(body), `"server_tool_use"`)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":     "chatcmpl-next",
+			"object": "chat.completion",
+			"choices": []map[string]any{{
+				"message": map[string]string{"role": "assistant", "content": "next primary"},
+			}},
+		})
+	}))
+	defer nextPrimary.Close()
+
+	prx := NewTestProxyBuilder().
+		WithCredentials(
+			config.CredentialConfig{Name: "proman", Type: config.ProviderTypeProMan, BaseURL: promanUpstream.URL, APIKey: "proman-key", RPM: 100, TPM: 10000},
+			config.CredentialConfig{Name: "next-primary", Type: config.ProviderTypeProxy, BaseURL: nextPrimary.URL, APIKey: "next-key", RPM: 100, TPM: 10000},
+		).
+		Build()
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"claude-sonnet-4-6","messages":[{"role":"assistant","content":[{"type":"server_tool_use","name":"web_search"}]}]}`))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	prx.ProxyRequest(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), "next primary")
+	assert.Equal(t, int32(0), atomic.LoadInt32(&promanCalls))
+	assert.Equal(t, int32(1), atomic.LoadInt32(&nextPrimaryCalls))
+}
+
+func TestProxyRequest_UnsupportedProManRequestRoutesToFallbackProxy(t *testing.T) {
+	var promanCalls int32
+	promanUpstream := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&promanCalls, 1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer promanUpstream.Close()
+
+	var fallbackCalls int32
+	fallback := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&fallbackCalls, 1)
+		assert.Equal(t, "/v1/chat/completions", r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":     "chatcmpl-fallback",
+			"object": "chat.completion",
+			"choices": []map[string]any{{
+				"message": map[string]string{"role": "assistant", "content": "fallback ok"},
+			}},
+		})
+	}))
+	defer fallback.Close()
+
+	prx := NewTestProxyBuilder().
+		WithCredentials(
+			config.CredentialConfig{Name: "proman", Type: config.ProviderTypeProMan, BaseURL: promanUpstream.URL, APIKey: "proman-key", RPM: 100, TPM: 10000},
+			config.CredentialConfig{Name: "fallback", Type: config.ProviderTypeProxy, BaseURL: fallback.URL, APIKey: "fallback-key", RPM: 100, TPM: 10000, IsFallback: true},
+		).
+		Build()
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"claude-sonnet-4-6","messages":[{"role":"assistant","content":[{"type":"server_tool_use","name":"web_search"}]}]}`))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	prx.ProxyRequest(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), "fallback ok")
+	assert.Equal(t, int32(0), atomic.LoadInt32(&promanCalls))
+	assert.Equal(t, int32(1), atomic.LoadInt32(&fallbackCalls))
+}
+
+func TestProxyRequest_UnsupportedProManRequestWithoutFallbackReturnsLocalError(t *testing.T) {
+	var promanCalls int32
+	promanUpstream := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&promanCalls, 1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer promanUpstream.Close()
+
+	prx := NewTestProxyBuilder().
+		WithSingleCredential("proman", config.ProviderTypeProMan, promanUpstream.URL, "proman-key").
+		Build()
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"claude-sonnet-4-6","messages":[{"role":"assistant","content":[{"type":"server_tool_use","name":"web_search"}]}]}`))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	prx.ProxyRequest(w, req)
+
+	require.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Contains(t, w.Body.String(), unsupportedCredentialRequestMessage)
+	assert.NotContains(t, strings.ToLower(w.Body.String()), "proman")
+	assert.Equal(t, int32(0), atomic.LoadInt32(&promanCalls))
 }
