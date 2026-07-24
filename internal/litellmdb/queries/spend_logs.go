@@ -20,6 +20,8 @@ const (
 			completion_tokens,
 			"startTime",
 			"endTime",
+			request_duration_ms,
+			"completionStartTime",
 			model,
 			model_id,
 			model_group,
@@ -27,49 +29,44 @@ const (
 			api_base,
 			"user",
 			"metadata",
+			cache_hit,
+			cache_key,
 			team_id,
 			organization_id,
 			end_user,
 			requester_ip_address,
-			status,
 			session_id,
-			mcp_namespaced_tool_name,
-			request_tags,
+			status,
 			messages,
-			response
+			response,
+			proxy_server_request
 		) VALUES (
 			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
 			$11, $12, $13, $14, $15, $16, $17, $18, $19, $20,
-			$21, $22, $23, $24, NULL, NULL
+			$21, $22, $23, $24, $25, $26,
+			'{}'::jsonb, '{}'::jsonb, '{}'::jsonb
 		)
 		ON CONFLICT (request_id) DO NOTHING
 	`
 
-	// QuerySelectUnprocessedSpendLogs retrieves spend logs by request_ids for aggregation
-	QuerySelectUnprocessedSpendLogs = `
-		SELECT
-			"user",
-			TO_CHAR(DATE("startTime"), 'YYYY-MM-DD') as date,
-			api_key,
-			model,
-			model_group,
-			custom_llm_provider,
-			mcp_namespaced_tool_name,
-			api_base,
-			prompt_tokens,
-			completion_tokens,
-			COALESCE(NULLIF(metadata #>> '{usage_object,prompt_tokens_details,cached_tokens}', '')::bigint, 0) AS cache_read_input_tokens,
-			COALESCE(NULLIF(metadata #>> '{usage_object,prompt_tokens_details,cache_creation_tokens}', '')::bigint, 0) AS cache_creation_input_tokens,
-			spend,
-			status,
-			request_id,
-			team_id,
-			organization_id,
-			end_user,
-			request_tags
-		FROM "LiteLLM_SpendLogs"
-		WHERE request_id = ANY($1)
-		ORDER BY "startTime" DESC
+	// QueryClaimSpendLogEventOwner reports whether the spend row with the given
+	// primary key already belongs to the AIR event, without reading SpendLogs
+	// rows back. The targeted UPDATE doubles as an idempotent claim: it matches
+	// only when the row's metadata already attributes the row to this event, so
+	// a replay detects its own earlier write, while a genuine provider
+	// request_id collision (different owner event) misses and the caller falls
+	// back to the AIR event ID row.
+	QueryClaimSpendLogEventOwner = `
+		UPDATE "LiteLLM_SpendLogs"
+		SET metadata = jsonb_set(
+			COALESCE(metadata, '{}'::jsonb),
+			'{spend_logs_metadata,air_event_id}',
+			to_jsonb($2::text),
+			true
+		)
+		WHERE request_id = $1
+			AND COALESCE(metadata #>> '{spend_logs_metadata,air_event_id}', '') = $2
+		RETURNING request_id
 	`
 
 	// QueryUpsertDailyUserSpend upserts into LiteLLM_DailyUserSpend
@@ -219,48 +216,13 @@ const (
 			failed_requests = "LiteLLM_DailyEndUserSpend".failed_requests + EXCLUDED.failed_requests,
 			updated_at = now()
 	`
-
-	// QueryUpsertDailyTagSpend upserts into LiteLLM_DailyTagSpend
-	QueryUpsertDailyTagSpend = `
-		INSERT INTO "LiteLLM_DailyTagSpend" (
-			id,
-			tag,
-			request_id,
-			date,
-			api_key,
-			model,
-			model_group,
-			custom_llm_provider,
-			mcp_namespaced_tool_name,
-			endpoint,
-			prompt_tokens,
-			completion_tokens,
-			cache_read_input_tokens,
-			cache_creation_input_tokens,
-			spend,
-			api_requests,
-			successful_requests,
-			failed_requests,
-			created_at,
-			updated_at
-		) VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, now(), now())
-		ON CONFLICT (tag, date, api_key, model, custom_llm_provider, mcp_namespaced_tool_name, endpoint)
-		DO UPDATE SET
-			model_group = EXCLUDED.model_group,
-			prompt_tokens = "LiteLLM_DailyTagSpend".prompt_tokens + EXCLUDED.prompt_tokens,
-			completion_tokens = "LiteLLM_DailyTagSpend".completion_tokens + EXCLUDED.completion_tokens,
-			cache_read_input_tokens = "LiteLLM_DailyTagSpend".cache_read_input_tokens + EXCLUDED.cache_read_input_tokens,
-			cache_creation_input_tokens = "LiteLLM_DailyTagSpend".cache_creation_input_tokens + EXCLUDED.cache_creation_input_tokens,
-			spend = "LiteLLM_DailyTagSpend".spend + EXCLUDED.spend,
-			api_requests = "LiteLLM_DailyTagSpend".api_requests + EXCLUDED.api_requests,
-			successful_requests = "LiteLLM_DailyTagSpend".successful_requests + EXCLUDED.successful_requests,
-			failed_requests = "LiteLLM_DailyTagSpend".failed_requests + EXCLUDED.failed_requests,
-			updated_at = now()
-	`
 )
 
 // Number of parameters per SpendLogEntry in batch insert
-const spendLogParamCount = 24
+const SpendLogParamCount = 26
+const (
+	spendLogParamCount = SpendLogParamCount
+)
 
 // BuildBatchInsertQuery builds a query for batch INSERT
 func BuildBatchInsertQuery(count int) string {
@@ -275,11 +237,12 @@ func BuildBatchInsertQuery(count int) string {
 		INSERT INTO "LiteLLM_SpendLogs" (
 			request_id, call_type, api_key, spend, total_tokens,
 			prompt_tokens, completion_tokens, "startTime", "endTime",
+			request_duration_ms, "completionStartTime",
 			model, model_id, model_group, custom_llm_provider, api_base,
-			"user", "metadata", team_id, organization_id, end_user,
-			requester_ip_address, status, session_id,
-			mcp_namespaced_tool_name, request_tags,
-			messages, response
+			"user", "metadata", cache_hit, cache_key,
+			team_id, organization_id, end_user, requester_ip_address,
+			session_id, status,
+			messages, response, proxy_server_request
 		) VALUES `)
 
 	paramIdx := 1
@@ -295,7 +258,10 @@ func BuildBatchInsertQuery(count int) string {
 			fmt.Fprintf(&b, "$%d", paramIdx)
 			paramIdx++
 		}
-		b.WriteString(", NULL, NULL)") // messages, response = NULL
+		// LiteLLM's payload-disabled writer persists empty JSON objects for these
+		// privacy fields. AIR matches that shape without retaining request or
+		// response content.
+		b.WriteString(", '{}'::jsonb, '{}'::jsonb, '{}'::jsonb)")
 	}
 
 	b.WriteString(" ON CONFLICT (request_id) DO NOTHING RETURNING request_id")

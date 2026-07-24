@@ -194,12 +194,12 @@ func TestCache_Len(t *testing.T) {
 }
 
 func TestCache_ThreadSafety_ConcurrentSetGet(t *testing.T) {
-	cache, err := NewCache(100, 60*time.Second)
+	tokenCount := 50
+	goroutineCount := 10
+	cache, err := NewCache(tokenCount*goroutineCount, 60*time.Second)
 	require.NoError(t, err)
 
 	var wg sync.WaitGroup
-	tokenCount := 50
-	goroutineCount := 10
 
 	// Spawn goroutines that concurrently set and get
 	for g := 0; g < goroutineCount; g++ {

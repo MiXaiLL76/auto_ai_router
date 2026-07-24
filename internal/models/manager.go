@@ -174,29 +174,33 @@ const (
 
 // Manager handles model discovery and mapping
 type Manager struct {
-	mu                          sync.RWMutex
-	credentialModels            map[string][]string          // credential name -> list of model IDs
-	allModels                   []Model                      // deduplicated list of all models
-	modelToCredentials          map[string][]string          // model ID -> list of credential names
-	modelLimits                 map[string][]ModelLimits     // model ID -> limits (may have multiple entries for different credentials)
-	staticModelLimits           map[string][]ModelLimits     // immutable snapshot of limits from config.yaml (never modified after New())
-	staticModelRealNames        map[string]string            // immutable snapshot of global real names from config.yaml
-	staticModelRealNamesPerCred map[string]map[string]string // immutable snapshot of per-credential real names: credential -> alias -> real name
-	modelPassthroughResponses   map[string]*bool             // model name -> explicit passthrough_responses override (nil = auto)
-	dynamicModelWeights         map[string]map[string]int    // model ID -> credential -> weight learned from upstream /health
-	dynamicModelScopes          map[string]map[string]ScopeMetadata
-	dbModelNames                map[string]bool              // model names that were loaded from LiteLLM DB (for hot-reload diffing)
-	modelAliases                map[string]string            // alias -> real model name (from model_alias config)
-	modelRealNames              map[string]string            // alias name -> real model name (global, no specific credential)
-	modelRealNamesPerCred       map[string]map[string]string // credential -> alias -> real model name (for credential-specific entries)
-	defaultModelsRPM            int                          // default RPM for models
-	logger                      *slog.Logger
-	credentials                 []config.CredentialConfig // credentials for fetching remote models
-	credentialsConfigured       bool
-	remoteModelsCache           map[string]remoteModelCache        // cache for remote models per credential (credentialName -> cache)
-	cacheExpiration             time.Duration                      // how long to cache remote models (default 5 minutes)
-	allModelsCache              allModelsCache                     // cached result of GetAllModels (3 second TTL)
-	scopedAllModelsCache        *lru.Cache[string, allModelsCache] // cached scoped /v1/models responses
+	mu                           sync.RWMutex
+	credentialModels             map[string][]string          // credential name -> list of model IDs
+	allModels                    []Model                      // deduplicated list of all models
+	modelToCredentials           map[string][]string          // model ID -> list of credential names
+	modelLimits                  map[string][]ModelLimits     // model ID -> limits (may have multiple entries for different credentials)
+	staticModelLimits            map[string][]ModelLimits     // immutable snapshot of limits from config.yaml (never modified after New())
+	staticModelRealNames         map[string]string            // immutable snapshot of global real names from config.yaml
+	staticModelRealNamesPerCred  map[string]map[string]string // immutable snapshot of per-credential real names: credential -> alias -> real name
+	modelPassthroughResponses    map[string]*bool             // model name -> explicit passthrough_responses override (nil = auto)
+	dynamicModelWeights          map[string]map[string]int    // model ID -> credential -> weight learned from upstream /health
+	dynamicModelScopes           map[string]map[string]ScopeMetadata
+	dbModelNames                 map[string]bool              // model names that were loaded from LiteLLM DB (for hot-reload diffing)
+	modelAliases                 map[string]string            // alias -> real model name (from model_alias config)
+	clientModelIDs               map[string]struct{}          // exact advertised canonical client IDs
+	clientModelSurfaceConfigured bool                         // distinguishes an omitted boundary from an explicit empty boundary
+	publicModelAliases           map[string]string            // client alias -> canonical LiteLLM public deployment identity
+	modelRealNames               map[string]string            // alias name -> real model name (global, no specific credential)
+	modelRealNamesPerCred        map[string]map[string]string // credential -> alias -> real model name (for credential-specific entries)
+	credentialMappingsReady      bool                         // true after static/DB credential mappings have been initialized
+	defaultModelsRPM             int                          // default RPM for models
+	logger                       *slog.Logger
+	credentials                  []config.CredentialConfig // credentials for fetching remote models
+	credentialsConfigured        bool
+	remoteModelsCache            map[string]remoteModelCache        // cache for remote models per credential (credentialName -> cache)
+	cacheExpiration              time.Duration                      // how long to cache remote models (default 5 minutes)
+	allModelsCache               allModelsCache                     // cached result of GetAllModels (3 second TTL)
+	scopedAllModelsCache         *lru.Cache[string, allModelsCache] // cached scoped /v1/models responses
 }
 
 // New creates a new model manager
@@ -211,6 +215,8 @@ func New(logger *slog.Logger, defaultModelsRPM int, staticModels []config.ModelR
 		staticModelRealNamesPerCred: make(map[string]map[string]string),
 		dbModelNames:                make(map[string]bool),
 		modelAliases:                make(map[string]string),
+		clientModelIDs:              make(map[string]struct{}),
+		publicModelAliases:          make(map[string]string),
 		modelRealNames:              make(map[string]string),
 		modelRealNamesPerCred:       make(map[string]map[string]string),
 		modelPassthroughResponses:   make(map[string]*bool),
@@ -354,6 +360,34 @@ func (m *Manager) GetAliasesForCredentialRealModel(credential, realModel string)
 	return aliases
 }
 
+// GetAliasesForModel returns every alias — across all credentials that serve
+// modelID — that resolves to the same provider-facing realModelID. Unlike
+// GetAliasesForCredentialRealModel this doesn't require a credential to already
+// be picked, which matters for callers (e.g. key model-allow-list enforcement)
+// that run before credential selection.
+func (m *Manager) GetAliasesForModel(modelID, realModelID string) []string {
+	aliases := []string{modelID}
+	if realModelID == "" {
+		return aliases
+	}
+	seen := map[string]struct{}{modelID: {}}
+	for _, credential := range m.GetCredentialsForModel(modelID) {
+		for _, alias := range m.GetAliasesForCredentialRealModel(credential, realModelID) {
+			if _, ok := seen[alias]; ok {
+				continue
+			}
+			seen[alias] = struct{}{}
+			aliases = append(aliases, alias)
+		}
+	}
+	return aliases
+}
+
+func (m *Manager) publicModelAliasTargetActiveLocked(target string) bool {
+	_, active := m.clientCanonicalRouteTargetLocked(target)
+	return active
+}
+
 // responsesAPIModelPrefixes lists model name substrings that natively support
 // the /v1/responses endpoint.  Checked case-insensitively via strings.Contains.
 // Source: https://platform.openai.com/docs/api-reference/responses
@@ -428,6 +462,13 @@ func (m *Manager) IsPassthroughResponsesForProvider(modelID string, providerType
 	return isNativeResponsesModel(modelID)
 }
 
+func (m *Manager) HasPassthroughResponsesOverride(modelID string) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	value, ok := m.modelPassthroughResponses[modelID]
+	return ok && value != nil
+}
+
 // SetCredentials sets the credentials for fetching remote models from proxies
 func (m *Manager) SetCredentials(credentials []config.CredentialConfig) {
 	m.mu.Lock()
@@ -479,6 +520,97 @@ func (m *Manager) SetModelAliases(aliases map[string]string) {
 		m.modelAliases[alias] = target
 		m.logger.Info("Registered model alias", "alias", alias, "target", target)
 	}
+	// Public model discovery includes aliases, so a changed alias set invalidates
+	// both the rendered response and the accumulated discovery snapshot.
+	m.allModels = nil
+	m.invalidateAllModelsCachesLocked()
+}
+
+// SetClientModelIDs installs an explicit product boundary between identifiers
+// accepted from an ordinary client and internal/provider routing names. Calling
+// this method with an empty slice intentionally creates a deny-all boundary;
+// not calling it preserves the legacy inferred model surface.
+func (m *Manager) SetClientModelIDs(modelIDs []string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.clientModelSurfaceConfigured = true
+	m.clientModelIDs = make(map[string]struct{}, len(modelIDs))
+	for _, modelID := range modelIDs {
+		if modelID == "" {
+			m.logger.Warn("Invalid client model ID, skipping")
+			continue
+		}
+		m.clientModelIDs[modelID] = struct{}{}
+	}
+	m.allModels = nil
+	m.invalidateAllModelsCachesLocked()
+}
+
+// SetPublicModelAliases configures client-visible aliases that share the
+// deployment identity of an exact LiteLLM public model. This mapping is kept
+// separate from model_alias: model_alias translates a routable public model to
+// its provider backend, while public_model_alias translates an additional
+// client name to that canonical public model. Combining the two maps would
+// create cycles for common short backend names (for example
+// gpt-4.1 -> openai/gpt-4.1 -> gpt-4.1).
+func (m *Manager) SetPublicModelAliases(aliases map[string]string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.publicModelAliases = make(map[string]string, len(aliases))
+	for alias, target := range aliases {
+		if alias == "" || target == "" || alias == target {
+			m.logger.Warn("Invalid public model alias, skipping", "alias", alias, "target", target)
+			continue
+		}
+		m.publicModelAliases[alias] = target
+		m.logger.Info("Registered public model alias", "alias", alias, "target", target)
+	}
+	m.allModels = nil
+	m.invalidateAllModelsCachesLocked()
+}
+
+func (m *Manager) IsClientModelIDRoutable(modelID string) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if target, aliased := m.publicModelAliases[modelID]; aliased {
+		return m.publicModelAliasTargetActiveLocked(target)
+	}
+	if m.clientModelSurfaceConfigured {
+		if _, allowed := m.clientModelIDs[modelID]; !allowed {
+			return false
+		}
+	}
+	_, routable := m.clientCanonicalRouteTargetLocked(modelID)
+	return routable
+}
+
+func (m *Manager) ResolvePublicModelAlias(modelID string) (string, bool, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	target, aliased := m.publicModelAliases[modelID]
+	if !aliased {
+		return modelID, false, nil
+	}
+	if !m.publicModelAliasTargetActiveLocked(target) {
+		return modelID, false, fmt.Errorf("public model alias %q is not routable", modelID)
+	}
+	return target, true, nil
+}
+
+func (m *Manager) clientCanonicalRouteTargetLocked(modelID string) (string, bool) {
+	if len(m.modelToCredentials[modelID]) > 0 {
+		return modelID, true
+	}
+	target, aliased := m.modelAliases[modelID]
+	if aliased && isActiveModelAlias(
+		modelID,
+		target,
+		len(m.modelToCredentials[target]) > 0,
+		m.modelAliases,
+	) {
+		return target, true
+	}
+	return modelID, false
 }
 
 // ResolveAlias resolves a model alias to the real model name.
@@ -490,6 +622,184 @@ func (m *Manager) ResolveAlias(modelID string) (string, bool) {
 		return resolved, true
 	}
 	return modelID, false
+}
+
+// isActiveModelAlias is the shared activation rule for catalog projection and
+// model-scope equivalence. Routability belongs to the immediate target; alias
+// keys are not recursively made routable by another active alias.
+func isActiveModelAlias(alias, target string, targetRoutable bool, aliases map[string]string) bool {
+	if alias == "" || target == "" || !targetRoutable {
+		return false
+	}
+	configuredTarget, configured := aliases[alias]
+	if !configured || configuredTarget != target {
+		return false
+	}
+	return !modelAliasPathHasCycle(alias, aliases)
+}
+
+func modelAliasPathHasCycle(start string, aliases map[string]string) bool {
+	seen := make(map[string]struct{}, len(aliases))
+	current := start
+	for {
+		if _, repeated := seen[current]; repeated {
+			return true
+		}
+		seen[current] = struct{}{}
+
+		next, isAlias := aliases[current]
+		if !isAlias {
+			return false
+		}
+		current = next
+	}
+}
+
+// modelScopePatternMatch implements LiteLLM's '*' model-scope wildcard while
+// treating every other byte literally. This deliberately avoids turning DB
+// allowlists into regular expressions.
+func modelScopePatternMatch(model, pattern string) bool {
+	modelIndex, patternIndex := 0, 0
+	starIndex, starModelIndex := -1, 0
+	for modelIndex < len(model) {
+		if patternIndex < len(pattern) && pattern[patternIndex] != '*' && pattern[patternIndex] == model[modelIndex] {
+			modelIndex++
+			patternIndex++
+			continue
+		}
+		if patternIndex < len(pattern) && pattern[patternIndex] == '*' {
+			starIndex = patternIndex
+			starModelIndex = modelIndex
+			patternIndex++
+			continue
+		}
+		if starIndex < 0 {
+			return false
+		}
+		patternIndex = starIndex + 1
+		starModelIndex++
+		modelIndex = starModelIndex
+	}
+	for patternIndex < len(pattern) && pattern[patternIndex] == '*' {
+		patternIndex++
+	}
+	return patternIndex == len(pattern)
+}
+
+func modelScopeEntryAllows(modelID, allowedModelID string) bool {
+	if allowedModelID == "*" || allowedModelID == "all-proxy-models" || modelID == allowedModelID {
+		return true
+	}
+	return strings.ContainsRune(allowedModelID, '*') && modelScopePatternMatch(modelID, allowedModelID)
+}
+
+func modelScopeProviderPrefix(modelID string) (string, bool) {
+	separator := strings.IndexByte(modelID, '/')
+	if separator <= 0 {
+		return "", false
+	}
+	prefix := modelID[:separator]
+	if prefix == "google" {
+		return "vertex_ai", true
+	}
+	return prefix, true
+}
+
+func (m *Manager) liteLLMProviderPrefixForShortModelLocked(modelID string) (string, bool) {
+	if len(m.modelToCredentials[modelID]) == 0 {
+		return "", false
+	}
+
+	prefix := ""
+	for publicModel, backendModel := range m.modelAliases {
+		if backendModel != modelID {
+			continue
+		}
+		candidate, ok := modelScopeProviderPrefix(publicModel)
+		if !ok {
+			continue
+		}
+		if prefix == "" {
+			prefix = candidate
+			continue
+		}
+		if prefix != candidate {
+			return "", false
+		}
+	}
+	return prefix, prefix != ""
+}
+
+func scopeAllowsAnyModelID(modelIDs []string, allowedModelIDs []string) bool {
+	for _, modelID := range modelIDs {
+		for _, allowedModelID := range allowedModelIDs {
+			if modelScopeEntryAllows(modelID, allowedModelID) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func scopeAllowsProviderQualifiedWildcard(modelID string, allowedModelIDs []string) bool {
+	for _, allowedModelID := range allowedModelIDs {
+		// LiteLLM's provider-qualified fallback exists only for wildcard
+		// patterns. An exact entry such as openai/gpt-4o-mini must not widen
+		// access to the distinct short request ID gpt-4o-mini.
+		if strings.ContainsRune(allowedModelID, '*') && modelScopeEntryAllows(modelID, allowedModelID) {
+			return true
+		}
+	}
+	return false
+}
+
+// IsModelIDAllowedByScope is the shared model-scope predicate for discovery
+// and inference. An empty scope means all models, matching LiteLLM semantics.
+// A request alias may inherit permission from its configured target, but the
+// reverse is forbidden: AIR's internal routing target must not gain permission
+// merely because a DB scope contains the client-visible alias.
+func (m *Manager) IsModelIDAllowedByScope(modelID string, allowedModelIDs []string) bool {
+	if len(allowedModelIDs) == 0 {
+		return true
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	requestIDs := []string{modelID}
+	if target, isPublicAlias := m.publicModelAliases[modelID]; isPublicAlias {
+		if !m.publicModelAliasTargetActiveLocked(target) {
+			return false
+		}
+		requestIDs = append(requestIDs, target)
+	}
+	if target, isAlias := m.modelAliases[modelID]; isAlias && isActiveModelAlias(
+		modelID,
+		target,
+		len(m.modelToCredentials[target]) > 0,
+		m.modelAliases,
+	) {
+		requestIDs = append(requestIDs, target)
+	}
+	if scopeAllowsAnyModelID(requestIDs, allowedModelIDs) {
+		return true
+	}
+
+	// LiteLLM also evaluates provider-qualified wildcard patterns for short
+	// model IDs. Infer provider identity from the pinned LiteLLM model registry,
+	// while requiring unambiguous routing metadata. Unknown IDs, missing
+	// credentials and mixed transports all fail closed.
+	for _, requestID := range requestIDs {
+		if strings.ContainsRune(requestID, '/') {
+			continue
+		}
+		prefix, ok := m.liteLLMProviderPrefixForShortModelLocked(requestID)
+		if !ok {
+			continue
+		}
+		if scopeAllowsProviderQualifiedWildcard(prefix+"/"+requestID, allowedModelIDs) {
+			return true
+		}
+	}
+	return false
 }
 
 // addModelToMaps adds model to credential mapping, avoiding duplicates using sets
@@ -526,8 +836,11 @@ func addModelToMaps(
 func (m *Manager) LoadModelsFromConfig(credentials []config.CredentialConfig) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.credentialMappingsReady = true
 
 	if len(m.modelLimits) == 0 {
+		m.allModels = nil
+		m.invalidateAllModelsCachesLocked()
 		m.logger.Debug("No models in config to load")
 		return
 	}
@@ -617,6 +930,8 @@ func (m *Manager) LoadModelsFromConfig(credentials []config.CredentialConfig) {
 		"credential_specific", credentialSpecificCount,
 		"global_models", globalModelsCount,
 	)
+	m.allModels = nil
+	m.invalidateAllModelsCachesLocked()
 }
 
 // UpdateDBModels atomically replaces DB-sourced model limits and credential mappings.
@@ -655,7 +970,6 @@ func (m *Manager) UpdateDBModels(dbModels []config.ModelRPMConfig, staticCreds [
 		}
 		newRealNamesPerCred[cred] = snapshot
 	}
-
 	// 3. Apply DB model data.
 	newDBNames := make(map[string]bool, len(dbModels))
 	for _, dm := range dbModels {
@@ -781,6 +1095,7 @@ func (m *Manager) UpdateDBModels(dbModels []config.ModelRPMConfig, staticCreds [
 
 	m.credentialModels = newCredentialModels
 	m.modelToCredentials = newModelToCredentials
+	m.credentialMappingsReady = true
 
 	// 5. Invalidate caches so next GetAllModels rebuilds from the updated modelLimits.
 	m.allModels = nil
@@ -811,11 +1126,22 @@ func (m *Manager) GetAllModels() ModelsResponse {
 	var models []Model
 	modelMap := make(map[string]bool)
 	allModelsSnapshot := append([]Model(nil), m.allModels...)
-
+	routableModels := make(map[string]struct{}, len(m.modelToCredentials))
+	for modelID, credentialNames := range m.modelToCredentials {
+		if len(credentialNames) > 0 {
+			routableModels[modelID] = struct{}{}
+		}
+	}
+	credentialMappingsReady := m.credentialMappingsReady
 	// Add static models first (configured in model_limits)
 	if len(m.modelLimits) > 0 {
 		models = make([]Model, 0, len(m.modelLimits)+len(allModelsSnapshot))
 		for modelName := range m.modelLimits {
+			if credentialMappingsReady {
+				if _, routable := routableModels[modelName]; !routable {
+					continue
+				}
+			}
 			models = append(models, Model{
 				ID:      modelName,
 				Object:  "model",
@@ -830,6 +1156,11 @@ func (m *Manager) GetAllModels() ModelsResponse {
 
 	// Also add models from credential config (allModels)
 	for _, model := range allModelsSnapshot {
+		if credentialMappingsReady {
+			if _, routable := routableModels[model.ID]; !routable {
+				continue
+			}
+		}
 		if !modelMap[model.ID] {
 			models = append(models, model)
 			modelMap[model.ID] = true
@@ -843,6 +1174,8 @@ func (m *Manager) GetAllModels() ModelsResponse {
 	m.mu.RUnlock()
 
 	// Add models from proxy credentials only (not from other provider types)
+	modelUpdates := make(map[string][]string) // model -> credentials to add
+	successfullyFetched := make(map[string]bool)
 	for _, cred := range credentials {
 		// Skip non-proxy credentials - we only fetch models from proxy credentials
 		if cred.Type != config.ProviderTypeProxy {
@@ -864,6 +1197,7 @@ func (m *Manager) GetAllModels() ModelsResponse {
 			)
 			continue
 		}
+		successfullyFetched[cred.Name] = true
 		m.logger.Debug("Got models from proxy",
 			"credential", cred.Name,
 			"remote_models_count", len(remoteModels),
@@ -871,6 +1205,10 @@ func (m *Manager) GetAllModels() ModelsResponse {
 		)
 		added := 0
 		for _, model := range remoteModels {
+			// Always record credential→model mapping for ALL credentials that support this model
+			// (not just the first one that returned it)
+			modelUpdates[model.ID] = append(modelUpdates[model.ID], cred.Name)
+			routableModels[model.ID] = struct{}{}
 			if !modelMap[model.ID] {
 				models = append(models, model)
 				modelMap[model.ID] = true
@@ -885,20 +1223,52 @@ func (m *Manager) GetAllModels() ModelsResponse {
 		)
 	}
 
-	response := ModelsResponse{
-		Object: "list",
-		Data:   models,
-	}
+	// Keep the routable/discovered IDs internally. Public projection is applied
+	// only after the refreshed credential mappings are installed under the lock;
+	// doing it earlier lets the reconciliation step re-introduce backend IDs.
+	internalModels := append([]Model(nil), models...)
+	response := ModelsResponse{Object: "list", Data: internalModels}
 
 	// Update cache and modelToCredentials atomically
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	// Replace mappings only for proxy credentials whose refresh succeeded.
+	// Failed fetches retain their previous mappings to avoid transient false denies.
+	if len(successfullyFetched) > 0 {
+		for modelID, creds := range m.modelToCredentials {
+			kept := make([]string, 0, len(creds))
+			for _, credential := range creds {
+				if !successfullyFetched[credential] {
+					kept = append(kept, credential)
+				}
+			}
+			if len(kept) == 0 {
+				delete(m.modelToCredentials, modelID)
+			} else {
+				m.modelToCredentials[modelID] = kept
+			}
+		}
+	}
+	for modelID, creds := range modelUpdates {
+		m.modelToCredentials[modelID] = append(m.modelToCredentials[modelID], creds...)
+	}
+
 	currentCredentials := make(map[string]bool, len(m.credentials))
 	for _, credential := range m.credentials {
 		currentCredentials[credential.Name] = true
 	}
-	response = m.currentModelsLocked(response, currentCredentials)
+	if !m.credentialsConfigured {
+		// LoadModelsFromConfig is also a supported standalone initialization
+		// path in embedders/tests. In that mode the mapping itself is the only
+		// authoritative credential inventory.
+		for credentialName := range m.credentialModels {
+			currentCredentials[credentialName] = true
+		}
+	}
+	internalResponse := m.currentModelsLocked(response, currentCredentials)
+	internalModels = internalResponse.Data
+	response = internalResponse
 
 	// Cache a copy so the cached backing array is independent from the returned response.
 	m.allModelsCache = allModelsCache{
@@ -908,9 +1278,17 @@ func (m *Manager) GetAllModels() ModelsResponse {
 		},
 		expiresAt: utils.NowUTC().Add(allModelsCacheTTL),
 	}
-	m.allModels = append([]Model(nil), response.Data...)
+	m.allModels = append([]Model(nil), internalModels...)
 	m.invalidateScopedAllModelsCacheLocked()
 
+	return response
+}
+
+func (m *Manager) GetClientModels() ModelsResponse {
+	response := m.GetAllModels()
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	response.Data = m.projectClientModelCatalogLocked(response.Data)
 	return response
 }
 
@@ -931,7 +1309,10 @@ func (m *Manager) GetAllModelsScoped(visibility scope.Context) ModelsResponse {
 			filtered = append(filtered, model)
 		}
 	}
-	scopedResponse := ModelsResponse{Object: response.Object, Data: filtered}
+	scopedResponse := ModelsResponse{
+		Object: response.Object,
+		Data:   m.projectClientModelCatalogLocked(filtered),
+	}
 	m.scopedAllModelsCache.Add(m.scopedAllModelsCacheKeyLocked(visibility), allModelsCache{
 		response:  copyModelsResponse(scopedResponse),
 		expiresAt: utils.NowUTC().Add(allModelsCacheTTL),
@@ -986,41 +1367,83 @@ func (m *Manager) invalidateScopedAllModelsCacheLocked() {
 
 func (m *Manager) currentModelsLocked(response ModelsResponse, visibleCredentials map[string]bool) ModelsResponse {
 	metadata := make(map[string]Model, len(response.Data)+len(m.allModels))
-	for _, model := range response.Data {
-		if model.ID != "" {
-			metadata[model.ID] = model
-		}
-	}
 	for _, model := range m.allModels {
 		if model.ID != "" {
 			metadata[model.ID] = model
 		}
 	}
-	seen := make(map[string]bool)
-	models := make([]Model, 0, len(metadata))
-	appendModel := func(modelID string) {
-		if modelID == "" || seen[modelID] {
+	for _, model := range response.Data {
+		if model.ID != "" {
+			metadata[model.ID] = model
+		}
+	}
+	candidateIDs := make(map[string]struct{}, len(metadata))
+	appendCandidate := func(modelID string) {
+		if modelID == "" {
 			return
 		}
-		seen[modelID] = true
+		if m.credentialMappingsReady {
+			visible := false
+			for _, credentialName := range m.modelToCredentials[modelID] {
+				if visibleCredentials[credentialName] {
+					visible = true
+					break
+				}
+			}
+			if !visible {
+				return
+			}
+		}
+		candidateIDs[modelID] = struct{}{}
+	}
+	for modelID := range m.modelLimits {
+		appendCandidate(modelID)
+	}
+	for _, model := range m.allModels {
+		appendCandidate(model.ID)
+	}
+	for credentialName := range visibleCredentials {
+		for _, modelID := range m.credentialModels[credentialName] {
+			appendCandidate(modelID)
+		}
+	}
+	modelIDs := make([]string, 0, len(candidateIDs))
+	for modelID := range candidateIDs {
+		modelIDs = append(modelIDs, modelID)
+	}
+	slices.Sort(modelIDs)
+	models := make([]Model, 0, len(modelIDs))
+	for _, modelID := range modelIDs {
 		model, ok := metadata[modelID]
 		if !ok {
 			model = Model{ID: modelID, Object: "model", Created: converterutil.GetCurrentTimestamp(), OwnedBy: "system"}
 		}
 		models = append(models, model)
 	}
-	for modelID := range m.modelLimits {
-		appendModel(modelID)
-	}
-	for _, model := range m.allModels {
-		appendModel(model.ID)
-	}
-	for credentialName := range visibleCredentials {
-		for _, modelID := range m.credentialModels[credentialName] {
-			appendModel(modelID)
+	return ModelsResponse{Object: response.Object, Data: models}
+}
+
+// projectClientModelCatalogLocked is the single public boundary used by both
+// unscoped and key-scoped discovery. Its input must already contain only
+// internal models visible through the selected credentials/scopes.
+func (m *Manager) projectClientModelCatalogLocked(internalModels []Model) []Model {
+	activePublicAliases := make(map[string]string, len(m.publicModelAliases))
+	for alias, target := range m.publicModelAliases {
+		if m.publicModelAliasTargetActiveLocked(target) {
+			activePublicAliases[alias] = target
 		}
 	}
-	return ModelsResponse{Object: response.Object, Data: models}
+	if m.clientModelSurfaceConfigured {
+		return projectConfiguredClientModelCatalog(
+			internalModels,
+			m.clientModelIDs,
+			m.modelAliases,
+			activePublicAliases,
+		)
+	}
+	models := projectPublicModelCatalog(internalModels, m.modelAliases)
+	models = projectCanonicalPublicAliases(models, activePublicAliases)
+	return models
 }
 
 func (m *Manager) invalidateAllModelsCachesLocked() {
@@ -1085,6 +1508,141 @@ func (m *Manager) getAllModelsScoped(visibility scope.Context) ModelsResponse {
 	}
 
 	return ModelsResponse{Object: "list", Data: models}
+}
+
+// projectConfiguredClientModelCatalog emits only configured client IDs and active public aliases.
+func projectConfiguredClientModelCatalog(
+	internalModels []Model,
+	clientModelIDs map[string]struct{},
+	modelAliases map[string]string,
+	publicModelAliases map[string]string,
+) []Model {
+	internalByID := make(map[string]Model, len(internalModels))
+	availableTargets := make(map[string]struct{}, len(internalModels))
+	for _, model := range internalModels {
+		if model.ID == "" {
+			continue
+		}
+		if _, exists := internalByID[model.ID]; !exists {
+			internalByID[model.ID] = model
+			availableTargets[model.ID] = struct{}{}
+		}
+	}
+	activeAliases := activePublicModelAliases(availableTargets, modelAliases)
+	publicByID := make(map[string]Model, len(clientModelIDs)+len(publicModelAliases))
+	for modelID := range clientModelIDs {
+		model, direct := internalByID[modelID]
+		if !direct {
+			target, active := activeAliases[modelID]
+			if !active {
+				continue
+			}
+			model = internalByID[target]
+		}
+		model.ID = modelID
+		publicByID[modelID] = model
+	}
+	for alias, target := range publicModelAliases {
+		targetModel, targetVisible := publicByID[target]
+		if !targetVisible {
+			continue
+		}
+		targetModel.ID = alias
+		publicByID[alias] = targetModel
+	}
+	result := make([]Model, 0, len(publicByID))
+	for _, model := range publicByID {
+		result = append(result, model)
+	}
+	slices.SortFunc(result, func(left, right Model) int {
+		return strings.Compare(left.ID, right.ID)
+	})
+	return result
+}
+
+func projectCanonicalPublicAliases(models []Model, aliases map[string]string) []Model {
+	byID := make(map[string]Model, len(models)+len(aliases))
+	for _, model := range models {
+		if model.ID != "" {
+			byID[model.ID] = model
+		}
+	}
+	for alias, target := range aliases {
+		if alias == "" || target == "" {
+			continue
+		}
+		targetModel, targetVisible := byID[target]
+		if !targetVisible {
+			continue
+		}
+		if _, alreadyVisible := byID[alias]; alreadyVisible {
+			continue
+		}
+		targetModel.ID = alias
+		byID[alias] = targetModel
+	}
+	result := make([]Model, 0, len(byID))
+	for _, model := range byID {
+		result = append(result, model)
+	}
+	slices.SortFunc(result, func(left, right Model) int {
+		return strings.Compare(left.ID, right.ID)
+	})
+	return result
+}
+
+// projectPublicModelCatalog augments routable model IDs with configured public
+// aliases. Targets remain visible because LiteLLM exposes both a configured
+// public model and its accepted short alias. Orphan aliases are ignored, so an
+// alias cannot make an unrelated/unroutable model visible.
+func projectPublicModelCatalog(internalModels []Model, aliases map[string]string) []Model {
+	internalByID := make(map[string]Model, len(internalModels))
+	availableTargets := make(map[string]struct{}, len(internalModels))
+	for _, model := range internalModels {
+		if model.ID == "" {
+			continue
+		}
+		if _, exists := internalByID[model.ID]; !exists {
+			internalByID[model.ID] = model
+			availableTargets[model.ID] = struct{}{}
+		}
+	}
+
+	activeAliases := activePublicModelAliases(availableTargets, aliases)
+
+	publicByID := make(map[string]Model, len(internalByID)+len(aliases))
+	for id, model := range internalByID {
+		publicByID[id] = model
+	}
+	for alias, target := range activeAliases {
+		targetModel := internalByID[target]
+		targetModel.ID = alias
+		publicByID[alias] = targetModel
+	}
+
+	publicModels := make([]Model, 0, len(publicByID))
+	for _, model := range publicByID {
+		publicModels = append(publicModels, model)
+	}
+	slices.SortFunc(publicModels, func(left, right Model) int {
+		return strings.Compare(left.ID, right.ID)
+	})
+	return publicModels
+}
+
+// activePublicModelAliases applies the shared public-catalog rule used by both
+// /v1/models variants: empty/orphan aliases are ignored, and only aliases for
+// already-routable targets are activated.
+func activePublicModelAliases(availableTargets map[string]struct{}, aliases map[string]string) map[string]string {
+	activeAliases := make(map[string]string, len(aliases))
+	for alias, target := range aliases {
+		_, targetRoutable := availableTargets[target]
+		if !isActiveModelAlias(alias, target, targetRoutable, aliases) {
+			continue
+		}
+		activeAliases[alias] = target
+	}
+	return activeAliases
 }
 
 // GetCredentialsForModel returns list of credential names that support the given model
@@ -1209,6 +1767,7 @@ func (m *Manager) AddModel(credentialName, modelID string) {
 	if !m.contains(m.modelToCredentials[modelID], credentialName) {
 		m.modelToCredentials[modelID] = append(m.modelToCredentials[modelID], credentialName)
 	}
+	m.credentialMappingsReady = true
 	m.invalidateScopedAllModelsCacheLocked()
 }
 
@@ -1268,6 +1827,7 @@ func (m *Manager) replaceModelsForCredentialLocked(credentialName string, modelI
 			m.modelToCredentials[modelID] = append(m.modelToCredentials[modelID], credentialName)
 		}
 	}
+	m.credentialMappingsReady = true
 
 	m.allModels = nil
 	m.invalidateAllModelsCachesLocked()
@@ -1731,6 +2291,16 @@ func (m *Manager) GetAllModelsWithAccessGroups() ModelsResponse {
 
 func (m *Manager) GetAllModelsWithAccessGroupsScoped(visibility scope.Context) ModelsResponse {
 	m.mu.RLock()
+	explicitClientSurface := m.clientModelSurfaceConfigured
+	m.mu.RUnlock()
+	if explicitClientSurface {
+		// Provider access-group projection is an administrative view over
+		// internal routes. Once a product surface is explicit, returning that
+		// projection would re-introduce backend IDs through a query parameter.
+		return m.GetAllModelsScoped(visibility)
+	}
+
+	m.mu.RLock()
 	defer m.mu.RUnlock()
 
 	credProvider := make(map[string]string, len(m.credentials))
@@ -1745,8 +2315,40 @@ func (m *Manager) GetAllModelsWithAccessGroupsScoped(visibility scope.Context) M
 		credProvider[cred.Name] = prefix
 	}
 
+	availableTargets := make(map[string]struct{}, len(m.modelToCredentials))
+	for modelID, credentialNames := range m.modelToCredentials {
+		if len(credentialNames) > 0 {
+			availableTargets[modelID] = struct{}{}
+		}
+	}
+	activeAliases := activePublicModelAliases(availableTargets, m.modelAliases)
+	activeDeploymentAliases := make(map[string]string, len(m.publicModelAliases))
+	for alias, target := range m.publicModelAliases {
+		if m.publicModelAliasTargetActiveLocked(target) {
+			activeDeploymentAliases[alias] = target
+		}
+	}
+
+	// An alias is listed for a key only when the key could see the alias target
+	// itself: the alias must not widen the scoped view onto foreign models.
+	aliasTargetVisible := func(target string) bool {
+		routeTarget, active := m.clientCanonicalRouteTargetLocked(target)
+		if !active {
+			return false
+		}
+		for _, credName := range m.modelToCredentials[routeTarget] {
+			if _, visible := credProvider[credName]; !visible {
+				continue
+			}
+			if m.modelScopeAllowsLocked(routeTarget, credName, visibility) {
+				return true
+			}
+		}
+		return false
+	}
+
 	seen := make(map[string]bool)
-	result := make([]Model, 0, len(m.modelToCredentials))
+	result := make([]Model, 0, len(m.modelToCredentials)+len(activeAliases)+len(activeDeploymentAliases))
 
 	for modelID, creds := range m.modelToCredentials {
 		for _, credName := range creds {
@@ -1757,7 +2359,10 @@ func (m *Manager) GetAllModelsWithAccessGroupsScoped(visibility scope.Context) M
 			if !m.modelScopeAllowsLocked(modelID, credName, visibility) {
 				continue
 			}
-			prefixedID := prefix + "/" + modelID
+			prefixedID := modelID
+			if !strings.HasPrefix(modelID, prefix+"/") {
+				prefixedID = prefix + "/" + modelID
+			}
 			if seen[prefixedID] {
 				continue
 			}
@@ -1770,6 +2375,33 @@ func (m *Manager) GetAllModelsWithAccessGroupsScoped(visibility scope.Context) M
 			})
 		}
 	}
+	for alias, target := range activeAliases {
+		if seen[alias] || !aliasTargetVisible(target) {
+			continue
+		}
+		seen[alias] = true
+		result = append(result, Model{
+			ID:      alias,
+			Object:  "model",
+			Created: converterutil.GetCurrentTimestamp(),
+			OwnedBy: "system",
+		})
+	}
+	for alias, target := range activeDeploymentAliases {
+		if seen[alias] || !aliasTargetVisible(target) {
+			continue
+		}
+		seen[alias] = true
+		result = append(result, Model{
+			ID:      alias,
+			Object:  "model",
+			Created: converterutil.GetCurrentTimestamp(),
+			OwnedBy: "system",
+		})
+	}
+	slices.SortFunc(result, func(left, right Model) int {
+		return strings.Compare(left.ID, right.ID)
+	})
 
 	return ModelsResponse{Object: "list", Data: result}
 }

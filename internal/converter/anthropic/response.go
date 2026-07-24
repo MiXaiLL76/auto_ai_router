@@ -18,7 +18,7 @@ func AnthropicToOpenAI(anthropicBody []byte, model string) ([]byte, error) {
 	}
 
 	openAIResp := openai.OpenAIResponse{
-		ID:      anthropicResp.ID,
+		ID:      openAIChatCompletionID(anthropicResp.ID),
 		Object:  "chat.completion",
 		Created: converterutil.GetCurrentTimestamp(),
 		Model:   model,
@@ -83,9 +83,21 @@ func AnthropicToOpenAI(anthropicBody []byte, model string) ([]byte, error) {
 	openAIResp.Choices = append(openAIResp.Choices, choice)
 
 	// Usage
-	openAIResp.Usage = convertAnthropicUsageToOpenAI(&anthropicResp.Usage)
+	openAIResp.Usage = convertAnthropicUsageToOpenAI(anthropicResp.Usage)
 
 	return json.Marshal(openAIResp)
+}
+
+// openAIChatCompletionID exposes an OpenAI-compatible response ID while keeping
+// the upstream Anthropic message ID in the value for request correlation.
+func openAIChatCompletionID(providerID string) string {
+	if providerID == "" {
+		return converterutil.GenerateID()
+	}
+	if strings.HasPrefix(providerID, "chatcmpl-") {
+		return providerID
+	}
+	return "chatcmpl-" + providerID
 }
 
 // mapAnthropicStopReason maps an Anthropic stop_reason value to the OpenAI finish_reason.

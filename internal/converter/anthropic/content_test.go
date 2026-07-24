@@ -1,6 +1,8 @@
 package anthropic
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -46,12 +48,18 @@ func TestConvertImageURLToAnthropic(t *testing.T) {
 	})
 
 	t.Run("http_url", func(t *testing.T) {
-		url := "https://upload.wikimedia.org/wikipedia/commons/thumb/e/ea/Van_Gogh_-_Starry_Night_-_Google_Art_Project.jpg/1280px-Van_Gogh_-_Starry_Night_-_Google_Art_Project.jpg"
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			assert.Contains(t, r.Header.Get("User-Agent"), "auto-ai-router")
+			w.Header().Set("Content-Type", "image/jpeg")
+			_, _ = w.Write([]byte{0xff, 0xd8, 0xff, 0xd9})
+		}))
+		defer server.Close()
 
-		result := convertImageURLToAnthropic(url)
+		result := convertImageURLToAnthropic(server.URL + "/image.jpg")
 		require.NotNil(t, result)
 		assert.Equal(t, "image", result.Type)
 		assert.Equal(t, "base64", result.Source.Type)
+		assert.Equal(t, "image/jpeg", result.Source.MediaType)
 	})
 
 	t.Run("invalid_data_url_no_comma", func(t *testing.T) {

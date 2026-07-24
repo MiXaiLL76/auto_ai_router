@@ -91,12 +91,15 @@ func TestOrchestrateRequest_ResponsesAPI_ConvertedForOpenAIWhenPassthroughDisabl
 	builder := NewTestProxyBuilder().
 		WithSingleCredential("test", config.ProviderTypeOpenAI, "http://test.local", "upstream-key").
 		WithMasterKey("master-key")
-	builder.config.ModelManager = models.New(logger, 50, []config.ModelRPMConfig{
+	modelManager := models.New(logger, 50, []config.ModelRPMConfig{
 		{
 			Name:                 "qwen-5",
+			Credential:           "test",
 			PassthroughResponses: &passthroughResponses,
 		},
 	})
+	modelManager.LoadModelsFromConfig(builder.config.Credentials)
+	builder.config.ModelManager = modelManager
 	prx := builder.Build()
 	prx.logger = logger
 
@@ -158,6 +161,27 @@ func TestPrepareRequestForCredential_UsesCredentialSpecificRealModel(t *testing.
 	require.NoError(t, err)
 	require.Equal(t, "global.anthropic.claude-sonnet-v1:0", prepared.realModelID)
 	require.Contains(t, string(prepared.body), `"model":"global.anthropic.claude-sonnet-v1:0"`)
+}
+
+func TestSelectCredentialForModelMarksDirectSpendLogComplete(t *testing.T) {
+	prx := NewTestProxyBuilder().Build()
+	kafka := &stubKafkaManager{enabled: true}
+	prx.kafkaLog = kafka
+	logCtx := testLogCtx(t)
+	logCtx.Credential = nil
+
+	credential, ok := prx.selectCredentialForModel(
+		httptest.NewRecorder(),
+		"missing-model",
+		"",
+		"",
+		logCtx,
+	)
+
+	require.False(t, ok)
+	require.Nil(t, credential)
+	require.True(t, logCtx.Logged)
+	require.Len(t, kafka.events, 1)
 }
 
 func TestPrepareRequestForCredential_ProxyBodyKeepsOriginalParams(t *testing.T) {

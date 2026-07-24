@@ -38,5 +38,9 @@ bedrock_docs/
 skills/
 /server
 conf*.json
-_LiteLLM_SpendLogs__*.sql
 *.xlsx
+_LiteLLM_*.sql
+_LiteLLM_*.csv
+*.pb.gz
+Locust_*.html
+air_mock_*.json

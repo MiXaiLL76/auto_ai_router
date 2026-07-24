@@ -1,8 +1,7 @@
 package queries
 
-// SQL query for comprehensive token validation with budget hierarchy
-// Loads all related data in ONE query instead of 5-7 separate queries
-// Uses PostgreSQL JOINs and COALESCE for organization_id resolution
+// The positional SELECT list must match fetchTokenFromDB.Scan.
+// The *_check columns distinguish missing parents from unset references.
 
 const QueryValidateTokenWithHierarchy = `
 -- Main query with all JOINs
@@ -29,6 +28,9 @@ SELECT
   u.user_email,
   u.max_budget as user_max_budget,
   u.spend as user_spend,
+  u.tpm_limit as user_tpm_limit,
+  u.rpm_limit as user_rpm_limit,
+  u.models as user_models,
 
   -- ============ Team ============
   tm.team_id as team_id_check,
@@ -39,6 +41,7 @@ SELECT
   tm.blocked as team_blocked,
   tm.tpm_limit as team_tpm_limit,
   tm.rpm_limit as team_rpm_limit,
+  tm.models as team_models,
 
   -- ============ Organization ============
   o.organization_id as org_id_check,
@@ -52,6 +55,7 @@ SELECT
   b_tmem.max_budget as team_member_max_budget,
   b_tmem.tpm_limit as team_member_tpm_limit,
   b_tmem.rpm_limit as team_member_rpm_limit,
+  b_tmem.allowed_models as team_member_models,
 
   -- ============ OrganizationMembership ============
   omem.spend as org_member_spend,
@@ -98,4 +102,24 @@ LEFT JOIN "LiteLLM_OrganizationMembership" omem ON
 LEFT JOIN "LiteLLM_BudgetTable" b_omem ON omem.budget_id = b_omem.budget_id
 
 WHERE t.token = $1
+`
+
+// QuerySelectKeySpend reads the latest committed scalar spend for a virtual
+// key. NULL spend is deliberately reported as unknown instead of being
+// rewritten to zero.
+const QuerySelectKeySpend = `
+SELECT spend
+FROM "LiteLLM_VerificationToken"
+WHERE token = $1 AND spend IS NOT NULL
+`
+
+// QuerySelectKeySpendForUpdate pins the virtual-key row until the surrounding
+// transaction commits. The synchronous spend writer uses this after applying
+// the accounting projection so the returned value is serialized across AIR
+// instances and is safe to expose only after commit succeeds.
+const QuerySelectKeySpendForUpdate = `
+SELECT spend
+FROM "LiteLLM_VerificationToken"
+WHERE token = $1 AND spend IS NOT NULL
+FOR UPDATE
 `

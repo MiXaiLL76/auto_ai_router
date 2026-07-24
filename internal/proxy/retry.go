@@ -197,9 +197,7 @@ func (p *Proxy) TryFallbackProxy(
 		// Add jitter (0-50ms) to prevent thundering herd when multiple requests fail simultaneously
 		jitter := time.Duration(rand.Intn(50)) * time.Millisecond
 		time.Sleep(jitter)
-
 		proxyResp, fwdErr := p.forwardToProxy(w, r, modelID, fallbackCred, body, start)
-		lastFallbackCred = fallbackCred
 		if fwdErr != nil {
 			// Mid-chain failure — the next fallback is tried; the final outcome
 			// is logged at ERROR when the response is written to the client.
@@ -210,12 +208,17 @@ func (p *Proxy) TryFallbackProxy(
 			)
 			continue
 		}
-
-		if logCtx != nil && proxyResp.ActualCredentialName != "" {
+		if proxyResp == nil {
+			continue
+		}
+		lastFallbackCred = fallbackCred
+		if logCtx != nil {
+			// ActualCredentialName belongs to this exact response. Assigning the
+			// empty value is intentional: a prior retry's nested credential must
+			// not leak into a later response that did not report one.
 			logCtx.ActualCredentialName = proxyResp.ActualCredentialName
 		}
 		lastProxyResp = proxyResp
-
 		// Streaming responses cannot be retried — write immediately.
 		if proxyResp.IsStreaming {
 			return p.writeFallbackResponse(w, r, proxyResp, fallbackCred, modelID, originalCredName, logCtx, start)
@@ -253,6 +256,16 @@ func (p *Proxy) writeFallbackResponse(
 	logCtx *RequestLogContext,
 	start time.Time,
 ) (bool, string) {
+	if logCtx != nil {
+		logCtx.Credential = fallbackCred
+		logCtx.TargetURL = fallbackCred.BaseURL
+		logCtx.HTTPStatus = proxyResp.StatusCode
+		logCtx.Status = "success"
+		if proxyResp.StatusCode >= http.StatusBadRequest {
+			logCtx.Status = "failure"
+		}
+	}
+
 	if proxyResp.StatusCode >= 400 {
 		// Final error returned to the client after the fallback chain —
 		// single unified ERROR record (response_body is nil for streaming).
@@ -273,6 +286,7 @@ func (p *Proxy) writeFallbackResponse(
 		}
 		streamUsage, err := p.writeProxyStreamingResponseWithTokens(w, proxyResp, r, fallbackCred, modelID, modelID, logCtx)
 		if err != nil {
+			markStreamFailure(logCtx, err)
 			p.logStreamHandlerError(r.Context(), "Failed to write fallback streaming proxy response", err,
 				"fallback_credential", fallbackCred.Name,
 				"model", modelID,
@@ -283,16 +297,28 @@ func (p *Proxy) writeFallbackResponse(
 			// corrupt the response).
 			// Still propagate partial token usage so the defer-logged spend entry isn't empty.
 			if streamUsage != nil && logCtx != nil {
-				if streamUsage.PromptTokens == 0 && logCtx.PromptTokensEstimate > 0 {
+				if streamUsage.PromptTokens == 0 && logCtx.PromptTokensEstimate > 0 &&
+					logCtx.UsageSource != "provider" {
 					streamUsage.PromptTokens = logCtx.PromptTokensEstimate
 				}
 				logCtx.TokenUsage = streamUsage
+			}
+			if logCtx != nil && !logCtx.Logged {
+				logCtx.Logged = true
+				if queueErr := p.logSpendToLiteLLMDB(logCtx); queueErr != nil {
+					p.logger.WarnContext(r.Context(), "Failed to queue fallback stream failure spend log",
+						"error", queueErr,
+						"request_id", logCtx.RequestID,
+						"fallback_credential", fallbackCred.Name,
+					)
+				}
 			}
 			return true, "fallback_stream_write_failed"
 		}
 		if streamUsage != nil && logCtx != nil {
 			// Backfill PromptTokens from estimate when provider didn't include it.
-			if streamUsage.PromptTokens == 0 && logCtx.PromptTokensEstimate > 0 {
+			if streamUsage.PromptTokens == 0 && logCtx.PromptTokensEstimate > 0 &&
+				logCtx.UsageSource != "provider" {
 				streamUsage.PromptTokens = logCtx.PromptTokensEstimate
 			}
 			logCtx.TokenUsage = streamUsage
@@ -319,7 +345,6 @@ func (p *Proxy) writeFallbackResponse(
 		if logCtx != nil && logCtx.IsProxyRequest && logCtx.ActualCredentialName != "" {
 			w.Header().Set("X-Credential-Name", logCtx.ActualCredentialName)
 		}
-		p.writeProxyResponse(w, proxyResp, r, fallbackCred, modelID)
 		if logCtx != nil {
 			logCtx.TokenUsage = converter.ExtractTokenUsage(proxyResp.Body)
 		}
@@ -343,32 +368,32 @@ func (p *Proxy) writeFallbackResponse(
 	)
 
 	if logCtx != nil && !logCtx.Logged {
-		logCtx.Credential = fallbackCred
-		logCtx.TargetURL = fallbackCred.BaseURL
-		logCtx.Status = "success"
-		if proxyResp.StatusCode >= 400 {
-			logCtx.Status = "failure"
+		if logCtx.Status == "failure" && !proxyResp.IsStreaming {
+			logCtx.ErrorMsg = extractErrorMessage(proxyResp.Body)
 		}
-		logCtx.HTTPStatus = proxyResp.StatusCode
-		if logCtx.Status == "success" {
-			logCtx.RequestCompleted = true
-			p.setSessionBinding(logCtx.SessionID, modelID, fallbackCred.Name)
-			p.logger.DebugContext(r.Context(), "Session-sticky routing: updated session after failover",
-				"session_id", logCtx.SessionID,
-				"old_credential", originalCredName,
-				"new_credential", fallbackCred.Name,
-				"model", modelID,
-			)
+		if proxyResp.IsStreaming {
+			logCtx.Logged = true
+			if err := p.logSpendToLiteLLMDB(logCtx); err != nil {
+				p.logger.WarnContext(r.Context(), "Failed to queue fallback spend log",
+					"error", err,
+					"request_id", logCtx.RequestID,
+					"fallback_credential", fallbackCred.Name,
+				)
+			}
 		}
-		logCtx.Logged = true
-
-		if err := p.logSpendToLiteLLMDB(logCtx); err != nil {
-			p.logger.WarnContext(r.Context(), "Failed to queue fallback spend log",
-				"error", err,
-				"request_id", logCtx.RequestID,
-				"fallback_credential", fallbackCred.Name,
-			)
-		}
+	}
+	if !proxyResp.IsStreaming {
+		p.writeProxyResponse(w, proxyResp, r, fallbackCred, modelID, logCtx)
+	}
+	if logCtx != nil && logCtx.Status == "success" {
+		logCtx.RequestCompleted = true
+		p.setSessionBinding(logCtx.SessionID, modelID, fallbackCred.Name)
+		p.logger.DebugContext(r.Context(), "Session-sticky routing: updated session after failover",
+			"session_id", logCtx.SessionID,
+			"old_credential", originalCredName,
+			"new_credential", fallbackCred.Name,
+			"model", modelID,
+		)
 	}
 
 	return true, ""

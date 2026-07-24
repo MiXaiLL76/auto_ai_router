@@ -513,14 +513,26 @@ func TestOpenAIStreamUsageExtractor(t *testing.T) {
 			},
 		},
 		{
+			name:      "usage with image prediction and cached output details",
+			chunk:     []byte(`{"usage":{"prompt_tokens":100,"completion_tokens":50,"prompt_tokens_details":{"image_tokens":7},"completion_tokens_details":{"image_tokens":11,"cached_tokens":3,"accepted_prediction_tokens":5,"rejected_prediction_tokens":2}}}`),
+			expectNil: false,
+			expectUsage: func(u *StreamUsageInfo) bool {
+				return u.ImageTokens == 7 && u.OutputImageTokens == 11 && u.CachedOutputTokens == 3 &&
+					u.AcceptedPredictionTokens == 5 && u.RejectedPredictionTokens == 2
+			},
+		},
+		{
 			name:      "no usage field",
 			chunk:     []byte(`{"choices":[{"delta":{"content":"hello"}}]}`),
 			expectNil: true,
 		},
 		{
-			name:      "zero tokens (invalid)",
+			name:      "explicit zero usage",
 			chunk:     []byte(`{"usage":{"prompt_tokens":0,"completion_tokens":0}}`),
-			expectNil: true,
+			expectNil: false,
+			expectUsage: func(u *StreamUsageInfo) bool {
+				return u.PromptTokens == 0 && u.CompletionTokens == 0
+			},
 		},
 		{
 			name:      "invalid JSON",
@@ -546,10 +558,11 @@ func TestOpenAIStreamUsageExtractor(t *testing.T) {
 		},
 		{
 			name:      "responses API - with output_tokens_details",
-			chunk:     []byte(`{"type":"response.completed","response":{"usage":{"input_tokens":150,"output_tokens":100,"output_tokens_details":{"reasoning_tokens":40}}}}`),
+			chunk:     []byte(`{"type":"response.completed","response":{"usage":{"input_tokens":150,"output_tokens":100,"input_tokens_details":{"image_tokens":8},"output_tokens_details":{"reasoning_tokens":40,"image_tokens":12}}}}`),
 			expectNil: false,
 			expectUsage: func(u *StreamUsageInfo) bool {
-				return u.PromptTokens == 150 && u.CompletionTokens == 100 && u.ReasoningTokens == 40
+				return u.PromptTokens == 150 && u.CompletionTokens == 100 && u.ReasoningTokens == 40 &&
+					u.ImageTokens == 8 && u.OutputImageTokens == 12
 			},
 		},
 		{
@@ -688,9 +701,12 @@ func TestAnthropicStreamUsageExtractor(t *testing.T) {
 			expectNil: true,
 		},
 		{
-			name:      "zero tokens (invalid)",
+			name:      "explicit zero usage",
 			chunk:     []byte(`{"usage":{"input_tokens":0,"output_tokens":0}}`),
-			expectNil: true,
+			expectNil: false,
+			expectUsage: func(u *StreamUsageInfo) bool {
+				return u.PromptTokens == 0 && u.CompletionTokens == 0
+			},
 		},
 	}
 

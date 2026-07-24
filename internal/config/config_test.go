@@ -1038,6 +1038,7 @@ func TestConfig_Validate_DatabaseURL(t *testing.T) {
 				LiteLLMDB: LiteLLMDBConfig{
 					Enabled:     true,
 					DatabaseURL: tt.databaseURL,
+					LogWorkers:  4,
 				},
 			}
 			err := cfg.Validate()

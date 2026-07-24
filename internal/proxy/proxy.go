@@ -3,6 +3,7 @@ package proxy
 import (
 	"bytes"
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -24,6 +25,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/httputil"
 	"github.com/mixaill76/auto_ai_router/internal/kafkalog"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb"
+	"github.com/mixaill76/auto_ai_router/internal/litellmdb/budget"
 	"github.com/mixaill76/auto_ai_router/internal/logger"
 	"github.com/mixaill76/auto_ai_router/internal/models"
 	"github.com/mixaill76/auto_ai_router/internal/monitoring"
@@ -434,12 +436,15 @@ type RequestLogContext struct {
 	CompletionStartTime  time.Time                // Timestamp of the first real content/tool/reasoning delta (TTFT), not just the first byte/chunk; zero if not streamed or never reached
 	Request              *http.Request            // HTTP request
 	Token                string                   // Auth token (raw, will be hashed)
+	PublicModelID        string                   // Client-facing model before alias resolution
 	ModelID              string                   // Model alias name (what client requested)
 	RealModelID          string                   // Real model name sent to provider (for price lookup; equals ModelID if no alias)
 	Status               string                   // "success" or "failure"
 	HTTPStatus           int                      // HTTP response status code
 	ErrorMsg             string                   // Error message (added to metadata on failure)
 	TokenUsage           *converter.TokenUsage    // Token usage with detailed breakdown
+	UsageSource          string                   // provider, estimated, request_parameters, or missing
+	StreamOutcome        string                   // completed, client_aborted, or stream_error
 	Credential           *config.CredentialConfig // Credential used
 	SessionID            string                   // Session ID
 	TargetURL            string                   // Target URL (for APIBase extraction)
@@ -453,6 +458,13 @@ type RequestLogContext struct {
 	ActualCredentialName string                   // Real credential name from upstream when Credential.Type == ProviderTypeProxy
 	IsProxyRequest       bool                     // True when this request came from another auto_ai_router (X-Aar-Proxy-Client header)
 	Scope                scope.Context
+
+	reservedEntities       []reservedEntity
+	rateLimitedTPMEntities []string
+	// budgetReconciled guards against double reconciliation: the first call (from
+	// logSpendToLiteLLMDB with the real cost, or the ProxyRequest defer safety-net
+	// with cost 0) wins; later calls are no-ops.
+	budgetReconciled bool
 }
 
 // HealthChecker provides cached database health status
@@ -489,34 +501,45 @@ type Config struct {
 	SessionStoreTTL            time.Duration
 	RouterID                   string // Human-readable name for this router (shown in /trace); defaults to hostname
 	DrainUpstreamOnAbort       bool   // When true, keep reading upstream after client disconnect to get real usage (default: false)
+
+	BudgetReserver                   *budget.Reserver      // Atomic Redis budget reservation (nil if Redis disabled — feature is a no-op)
+	KeyRateLimiter                   *ratelimit.RPMLimiter // Key/user/team/org RPM/TPM enforcement (nil if Redis disabled)
+	BudgetReservationEnabled         bool                  // Config toggle; independent of nil-check for clearer intent
+	KeyRateLimitsEnabled             bool
+	DefaultEstimatedCompletionTokens int // Completion-token estimate when max_tokens is absent (default: 1000)
 }
 
 type Proxy struct {
-	balancer             *balancer.RoundRobin
-	client               *http.Client
-	logger               *slog.Logger
-	maxBodySizeMB        int
-	maxResponseBodySize  int64 // Pre-computed max response body size in bytes
-	requestTimeout       time.Duration
-	metrics              *monitoring.Metrics
-	masterKey            string
-	rateLimiter          *ratelimit.RPMLimiter
-	tokenManager         *auth.VertexTokenManager
-	routerID             string                     // Identifier for this router used in /trace responses
-	modelManager         *models.Manager            // Model manager for getting configured models
-	LiteLLMDB            litellmdb.Manager          // LiteLLM database integration
-	kafkaLog             kafkalog.Manager           // Kafka spend-log publishing (optional, analytics write-path)
-	healthChecker        HealthChecker              // Cached DB health status (optional)
-	priceRegistry        *models.ModelPriceRegistry // Model pricing information (optional)
-	maxProviderRetries   int                        // Max same-type credential retries on provider errors
-	maxFallbackAttempts  int                        // Max fallback proxy hops per request chain
-	responseStore        responsestore.Store        // Optional: Responses API store (bbolt or Redis)
-	sessionStore         *SessionStore              // Optional: session-sticky credential routing
-	stickyAutoCacheCtrl  bool                       // Auto-inject Anthropic cache_control when session is active
-	drainUpstreamOnAbort bool                       // Keep reading upstream after client disconnect to get real usage chunk
-	bedrockDailyQuota    *bedrockDailyQuotaTracker
-	version              string
-	commit               string
+	balancer                         *balancer.RoundRobin
+	client                           *http.Client
+	logger                           *slog.Logger
+	maxBodySizeMB                    int
+	maxResponseBodySize              int64 // Pre-computed max response body size in bytes
+	requestTimeout                   time.Duration
+	metrics                          *monitoring.Metrics
+	masterKey                        string
+	rateLimiter                      *ratelimit.RPMLimiter
+	tokenManager                     *auth.VertexTokenManager
+	routerID                         string                     // Identifier for this router used in /trace responses
+	modelManager                     *models.Manager            // Model manager for getting configured models
+	LiteLLMDB                        litellmdb.Manager          // LiteLLM database integration
+	kafkaLog                         kafkalog.Manager           // Kafka spend-log publishing (optional, analytics write-path)
+	healthChecker                    HealthChecker              // Cached DB health status (optional)
+	priceRegistry                    *models.ModelPriceRegistry // Model pricing information (optional)
+	maxProviderRetries               int                        // Max same-type credential retries on provider errors
+	maxFallbackAttempts              int                        // Max fallback proxy hops per request chain
+	responseStore                    responsestore.Store        // Optional: Responses API store (bbolt or Redis)
+	sessionStore                     *SessionStore              // Optional: session-sticky credential routing
+	stickyAutoCacheCtrl              bool                       // Auto-inject Anthropic cache_control when session is active
+	drainUpstreamOnAbort             bool                       // Keep reading upstream after client disconnect to get real usage chunk
+	bedrockDailyQuota                *bedrockDailyQuotaTracker
+	budgetReserver                   *budget.Reserver
+	keyRateLimiter                   *ratelimit.RPMLimiter
+	budgetReservationEnabled         bool
+	keyRateLimitsEnabled             bool
+	defaultEstimatedCompletionTokens int
+	version                          string
+	commit                           string
 }
 
 func New(cfg *Config) *Proxy {
@@ -557,31 +580,36 @@ func New(cfg *Config) *Proxy {
 	}
 
 	return &Proxy{
-		routerID:             routerID,
-		balancer:             cfg.Balancer,
-		logger:               cfg.Logger,
-		maxBodySizeMB:        cfg.MaxBodySizeMB,
-		maxResponseBodySize:  maxResponseBodySize,
-		requestTimeout:       cfg.RequestTimeout,
-		metrics:              cfg.Metrics,
-		masterKey:            cfg.MasterKey,
-		rateLimiter:          cfg.RateLimiter,
-		tokenManager:         cfg.TokenManager,
-		modelManager:         cfg.ModelManager,
-		LiteLLMDB:            cfg.LiteLLMDB,
-		kafkaLog:             cfg.KafkaLog,
-		healthChecker:        cfg.HealthChecker,
-		priceRegistry:        cfg.PriceRegistry,
-		maxProviderRetries:   cfg.MaxProviderRetries,
-		maxFallbackAttempts:  cfg.MaxFallbackAttempts,
-		responseStore:        cfg.ResponseStore,
-		sessionStore:         sessionStore,
-		stickyAutoCacheCtrl:  cfg.SessionStickyAutoCacheCtrl,
-		drainUpstreamOnAbort: cfg.DrainUpstreamOnAbort,
-		bedrockDailyQuota:    newBedrockDailyQuotaTracker(),
-		client:               httputil.NewHTTPClient(httpClientCfg),
-		version:              cfg.Version,
-		commit:               cfg.Commit,
+		routerID:                         routerID,
+		balancer:                         cfg.Balancer,
+		logger:                           cfg.Logger,
+		maxBodySizeMB:                    cfg.MaxBodySizeMB,
+		maxResponseBodySize:              maxResponseBodySize,
+		requestTimeout:                   cfg.RequestTimeout,
+		metrics:                          cfg.Metrics,
+		masterKey:                        cfg.MasterKey,
+		rateLimiter:                      cfg.RateLimiter,
+		tokenManager:                     cfg.TokenManager,
+		modelManager:                     cfg.ModelManager,
+		LiteLLMDB:                        cfg.LiteLLMDB,
+		kafkaLog:                         cfg.KafkaLog,
+		healthChecker:                    cfg.HealthChecker,
+		priceRegistry:                    cfg.PriceRegistry,
+		maxProviderRetries:               cfg.MaxProviderRetries,
+		maxFallbackAttempts:              cfg.MaxFallbackAttempts,
+		responseStore:                    cfg.ResponseStore,
+		sessionStore:                     sessionStore,
+		stickyAutoCacheCtrl:              cfg.SessionStickyAutoCacheCtrl,
+		drainUpstreamOnAbort:             cfg.DrainUpstreamOnAbort,
+		bedrockDailyQuota:                newBedrockDailyQuotaTracker(),
+		budgetReserver:                   cfg.BudgetReserver,
+		keyRateLimiter:                   cfg.KeyRateLimiter,
+		budgetReservationEnabled:         cfg.BudgetReservationEnabled,
+		keyRateLimitsEnabled:             cfg.KeyRateLimitsEnabled,
+		defaultEstimatedCompletionTokens: cfg.DefaultEstimatedCompletionTokens,
+		client:                           httputil.NewHTTPClient(httpClientCfg),
+		version:                          cfg.Version,
+		commit:                           cfg.Commit,
 	}
 }
 
@@ -611,6 +639,16 @@ func (p *Proxy) GetMasterKey() string {
 	return p.masterKey
 }
 
+// isMasterKey reports whether token equals the master key using a constant-time
+// comparison (timing-attack safe). An empty master key never matches, so an
+// empty/absent token can never be mistaken for the master key.
+func (p *Proxy) isMasterKey(token string) bool {
+	if p.masterKey == "" {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(token), []byte(p.masterKey)) == 1
+}
+
 // GetVersion returns the build version string.
 func (p *Proxy) GetVersion() string {
 	return p.version
@@ -631,6 +669,57 @@ type ProxyResponse struct {
 	ActualCredentialName string // Credential name from upstream X-Credential-Name header
 }
 
+// cancelOnCloseBody wraps an upstream response body so the context that
+// governs its lifetime is only canceled once the caller is actually done
+// reading — i.e. on Close(), not on the return from executeProxyRequest.
+type cancelOnCloseBody struct {
+	io.ReadCloser
+	cancel context.CancelFunc
+}
+
+func (b *cancelOnCloseBody) Close() error {
+	err := b.ReadCloser.Close()
+	b.cancel()
+	return err
+}
+
+// upstreamRequestContext returns the context to use for the outbound provider
+// call, derived from the incoming request r.
+//
+// When drainUpstreamOnAbort is false (the default), it returns r.Context()
+// unchanged: a client disconnect cancels the upstream call immediately, same
+// as always — no extra spend, no phantom token counting.
+//
+// When drainUpstreamOnAbort is true, the returned context keeps r.Context()'s
+// values (so OTEL span/trace propagation still works) but detaches
+// cancellation: a client disconnect no longer tears down the upstream
+// connection outright, giving streamToClient's abort path a real chance to
+// drain the response, capture actual usage, and return the TCP connection to
+// the pool. The detached call is still bounded — it gets canceled
+// streamDrainTimeout after the client goes away, and always via the returned
+// cancel func once the request finishes normally.
+func (p *Proxy) upstreamRequestContext(r *http.Request) (context.Context, context.CancelFunc) {
+	if !p.drainUpstreamOnAbort {
+		return r.Context(), func() {}
+	}
+
+	ctx, cancel := context.WithCancel(context.WithoutCancel(r.Context()))
+	go func() {
+		select {
+		case <-r.Context().Done():
+			timer := time.NewTimer(streamDrainTimeout)
+			defer timer.Stop()
+			select {
+			case <-timer.C:
+				cancel()
+			case <-ctx.Done():
+			}
+		case <-ctx.Done():
+		}
+	}()
+	return ctx, cancel
+}
+
 // executeProxyRequest executes a request to a proxy credential and returns response details.
 // This is a private helper method to avoid code duplication between forwardToProxy and related functions.
 func (p *Proxy) executeProxyRequest(
@@ -648,9 +737,24 @@ func (p *Proxy) executeProxyRequest(
 	}
 
 	// Create proxy request. The incoming request context carries the OTEL span,
-	// so the client span parents correctly and traceparent is propagated, and the
-	// upstream call is canceled if the client disconnects.
-	proxyReq, err := http.NewRequestWithContext(r.Context(), r.Method, targetURL, bytes.NewReader(body))
+	// so the client span parents correctly and traceparent is propagated. By
+	// default the upstream call is also canceled if the client disconnects; see
+	// upstreamRequestContext for the drainUpstreamOnAbort exception.
+	//
+	// cancelUpstream is owned by this function until a streaming response hands
+	// it off to the returned StreamBody's Close(): the deferred cancel below
+	// covers every other return path (request-build error, transport error,
+	// non-streaming body read), but a streaming caller drains — and closes —
+	// the body well after this function returns, so canceling here would tear
+	// down the connection before a single chunk is read.
+	upstreamCtx, cancelUpstream := p.upstreamRequestContext(r)
+	cancelOwned := true
+	defer func() {
+		if cancelOwned {
+			cancelUpstream()
+		}
+	}()
+	proxyReq, err := http.NewRequestWithContext(upstreamCtx, r.Method, targetURL, bytes.NewReader(body))
 	if err != nil {
 		p.logger.ErrorContext(r.Context(), "Failed to create proxy request", "error", err, "url", targetURL)
 		return nil, err
@@ -709,11 +813,16 @@ func (p *Proxy) executeProxyRequest(
 	actualCredName := resp.Header.Get("X-Credential-Name")
 
 	// For streaming responses, return body reader directly to avoid buffering entire stream.
+	// Ownership of cancelUpstream transfers to the wrapped body: the caller
+	// always closes StreamBody once it's done reading (normal completion, or
+	// after the drainUpstreamOnAbort grace period), which is the correct point
+	// to cancel the detached upstream context.
 	if IsStreamingResponse(resp) {
+		cancelOwned = false
 		return &ProxyResponse{
 			StatusCode:           resp.StatusCode,
 			Headers:              resp.Header,
-			StreamBody:           resp.Body,
+			StreamBody:           &cancelOnCloseBody{ReadCloser: resp.Body, cancel: cancelUpstream},
 			IsStreaming:          true,
 			ActualCredentialName: actualCredName,
 		}, nil
@@ -796,6 +905,10 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			}
 			logCtx.Logged = true
 		}
+		// Safety net: release any budget reservation that never reached
+		// logSpendToLiteLLMDB (e.g. an early failure before a credential was set).
+		// The guard makes this a no-op when reconciliation already happened.
+		p.reconcileBudgetAndRateLimits(logCtx, 0)
 		if !logCtx.RequestCompleted {
 			p.clearSessionBinding(logCtx.SessionID, logCtx.ModelID)
 		}
@@ -829,6 +942,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			if resp == nil {
 				return
 			}
+			resp.Model = clientVisibleResponseModel(logCtx, resp.Model)
 			applyResponsesMetadata(resp, meta)
 			if err := p.responseStore.SaveResponse(
 				context.Background(), apiKeyHash, resp, meta.Metadata, meta.TTL, meta.AccumulatedInput, cred.Name,
@@ -1077,7 +1191,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 				if streamUsage != nil {
 					// Backfill PromptTokens from estimate when provider didn't include it
 					// (e.g. stream cut before usage chunk, or provider omits prompt tokens).
-					if streamUsage.PromptTokens == 0 {
+					if streamUsage.PromptTokens == 0 && logCtx.UsageSource != "provider" {
 						streamUsage.PromptTokens = logCtx.PromptTokensEstimate
 					}
 					logCtx.TokenUsage = streamUsage
@@ -1149,7 +1263,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			if logCtx.IsProxyRequest && logCtx.ActualCredentialName != "" {
 				w.Header().Set("X-Credential-Name", logCtx.ActualCredentialName)
 			}
-			p.writeProxyResponse(w, proxyResp, r, cred, modelID)
+			p.writeProxyResponse(w, proxyResp, r, cred, modelID, logCtx)
 			tokens := extractTokensFromResponse(string(proxyResp.Body), config.ProviderTypeOpenAI)
 			if tokens > 0 {
 				p.rateLimiter.ConsumeTokens(cred.Name, tokens)
@@ -1413,7 +1527,9 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		proxyReq, reqErr := http.NewRequestWithContext(r.Context(), r.Method, targetURL, bytes.NewReader(requestBody))
+		upstreamCtx, cancelUpstream := p.upstreamRequestContext(r)
+		defer cancelUpstream()
+		proxyReq, reqErr := http.NewRequestWithContext(upstreamCtx, r.Method, targetURL, bytes.NewReader(requestBody))
 		if reqErr != nil {
 			// Fatal: request creation error
 			p.logger.ErrorContext(r.Context(), "Failed to create proxy request", "error", reqErr, "url", targetURL)
@@ -1752,6 +1868,23 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
+		if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
+			normalizedBody := normalizeSuccessfulResponseModel(
+				finalResponseBody,
+				endpointFromLogContext(logCtx),
+				clientVisibleResponseModel(logCtx, modelID),
+			)
+			if !bytes.Equal(normalizedBody, finalResponseBody) {
+				finalResponseBody = normalizedBody
+				bodyForTokenExtraction = normalizedBody
+				for key := range resp.Header {
+					if isRepresentationIntegrityHeader(key) {
+						resp.Header.Del(key)
+					}
+				}
+			}
+		}
+
 		rawErrorBody := finalResponseBody
 		clientBody, clientBodyChanged, clientBodyMasked := clientResponseBodyForCredential(resp.StatusCode, finalResponseBody, cred, modelID)
 		if clientBodyChanged {
@@ -1856,6 +1989,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+		setSuccessfulSSEHeaders(w.Header(), resp.StatusCode)
 		w.WriteHeader(resp.StatusCode)
 
 		if logCtx != nil {
@@ -2050,6 +2184,11 @@ func applyResponsesMetadata(resp *responses.Response, meta *responses.ResponsesM
 // HandleGetResponse handles GET /v1/responses/{response_id}.
 // Returns the stored Responses API response if the caller owns it.
 func (p *Proxy) HandleGetResponse(w http.ResponseWriter, r *http.Request) {
+	tokenInfo, ok := p.AuthenticateClientRequest(w, r)
+	if !ok {
+		return
+	}
+
 	if p.responseStore == nil {
 		WriteErrorNotFound(w, "Response store not enabled")
 		return
@@ -2063,26 +2202,18 @@ func (p *Proxy) HandleGetResponse(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Auth
-	authHeader := r.Header.Get("Authorization")
-	if authHeader == "" {
-		WriteErrorUnauthorized(w, "Missing Authorization header")
-		return
-	}
-	token := strings.TrimPrefix(authHeader, "Bearer ")
-	if token == authHeader {
-		WriteErrorUnauthorized(w, "Invalid Authorization header format")
-		return
-	}
+	token, _ := extractClientToken(r)
 
 	var resp *responses.Response
 	var err error
 
-	if token == p.masterKey {
-		// Master key: bypass ownership check
+	if p.isMasterKey(token) {
 		resp, err = p.responseStore.GetResponseByID(r.Context(), responseID)
 	} else {
-		apiKeyHash := litellmdb.HashToken(token)
+		apiKeyHash := tokenInfo.Token
+		if apiKeyHash == "" {
+			apiKeyHash = litellmdb.HashToken(token)
+		}
 		resp, err = p.responseStore.GetResponse(r.Context(), responseID, apiKeyHash)
 	}
 

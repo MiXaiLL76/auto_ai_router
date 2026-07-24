@@ -14,16 +14,14 @@ const liteLLMMasterKeyIdentity = "litellm-master-key"
 var errInvalidScopeAuth = errors.New("invalid authorization")
 
 func (p *Proxy) ScopeContextForRequest(r *http.Request) (scope.Context, error) {
-	authHeader := r.Header.Get("Authorization")
-	if authHeader == "" {
+	token, credentialState := extractClientToken(r)
+	if credentialState == clientCredentialMissing {
 		return scope.PublicContext(), nil
 	}
-
-	token, ok := bearerToken(authHeader)
-	if !ok {
+	if credentialState == clientCredentialMalformed {
 		return scope.PublicContext(), errInvalidScopeAuth
 	}
-	if token == p.masterKey {
+	if p.isMasterKey(token) {
 		return scope.AdminContext(), nil
 	}
 	if !p.isLiteLLMHealthy() {
@@ -35,14 +33,6 @@ func (p *Proxy) ScopeContextForRequest(r *http.Request) (scope.Context, error) {
 		return scope.PublicContext(), err
 	}
 	return scopeContextFromTokenInfo(tokenInfo), nil
-}
-
-func bearerToken(authHeader string) (string, bool) {
-	token, ok := strings.CutPrefix(authHeader, "Bearer ")
-	if !ok || strings.TrimSpace(token) == "" {
-		return "", false
-	}
-	return strings.TrimSpace(token), true
 }
 
 func scopeContextFromTokenInfo(info *dbmodels.TokenInfo) scope.Context {
@@ -69,6 +59,13 @@ func scopeContextFromTokenInfo(info *dbmodels.TokenInfo) scope.Context {
 	)
 
 	return scope.NewContext(allowed, denied)
+}
+
+// ScopeContextFromTokenInfo derives the model/credential visibility scope from
+// an identity that has already passed the shared client authentication path.
+// Public endpoints use this to avoid validating the same token twice.
+func ScopeContextFromTokenInfo(info *dbmodels.TokenInfo) scope.Context {
+	return scopeContextFromTokenInfo(info)
 }
 
 func isLiteLLMMasterTokenInfo(info *dbmodels.TokenInfo) bool {

@@ -33,7 +33,7 @@ func TestWriteProxyResponseNormalizesQwenUsageBeforeCompression(t *testing.T) {
 	req.Header.Set("Accept-Encoding", "gzip")
 	w := httptest.NewRecorder()
 
-	NewTestProxyBuilder().Build().writeProxyResponse(w, resp, req, &config.CredentialConfig{Name: "test"}, "qwen/qwen3.6-35b-a3b")
+	NewTestProxyBuilder().Build().writeProxyResponse(w, resp, req, &config.CredentialConfig{Name: "test"}, "qwen/qwen3.6-35b-a3b", nil)
 
 	require.Equal(t, http.StatusOK, w.Code)
 	require.Equal(t, "gzip", w.Header().Get("Content-Encoding"))
@@ -89,7 +89,7 @@ func TestWriteProxyResponseDoesNotNormalizeError(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 	w := httptest.NewRecorder()
 
-	NewTestProxyBuilder().Build().writeProxyResponse(w, resp, req, &config.CredentialConfig{Name: "test"}, "qwen3.6-35b-a3b")
+	NewTestProxyBuilder().Build().writeProxyResponse(w, resp, req, &config.CredentialConfig{Name: "test"}, "qwen3.6-35b-a3b", nil)
 
 	assert.Equal(t, http.StatusBadGateway, w.Code)
 	assert.Equal(t, originalBody, w.Body.Bytes())
@@ -113,7 +113,7 @@ func TestWriteProxyResponseProManMasksErrorAndStripsHeaders(t *testing.T) {
 	w := httptest.NewRecorder()
 	cred := &config.CredentialConfig{Name: "proman", Type: config.ProviderTypeProMan}
 
-	NewTestProxyBuilder().Build().writeProxyResponse(w, resp, req, cred, "claude-haiku-4.5")
+	NewTestProxyBuilder().Build().writeProxyResponse(w, resp, req, cred, "claude-haiku-4.5", nil)
 
 	require.Equal(t, http.StatusBadRequest, w.Code)
 	assert.Equal(t, "application/json", w.Header().Get("Content-Type"))
@@ -141,7 +141,7 @@ func TestWriteProxyResponseProManSanitizesSuccessBody(t *testing.T) {
 	w := httptest.NewRecorder()
 	cred := &config.CredentialConfig{Name: "proman", Type: config.ProviderTypeProMan}
 
-	NewTestProxyBuilder().Build().writeProxyResponse(w, resp, req, cred, "claude-haiku-4.5")
+	NewTestProxyBuilder().Build().writeProxyResponse(w, resp, req, cred, "claude-haiku-4.5", nil)
 
 	require.Equal(t, http.StatusOK, w.Code)
 	assert.Empty(t, w.Header().Get("X-Litellm-Version"))

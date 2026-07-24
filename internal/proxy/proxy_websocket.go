@@ -215,11 +215,24 @@ func sendWSHTTPError(conn *websocket.Conn, raw []byte, fallbackStatus int) {
 // memory so that previous_response_id continuations work within the same session.
 // Reconnecting on a new WebSocket clears the cache, triggering previous_response_not_found.
 func (p *Proxy) HandleWebSocketResponses(w http.ResponseWriter, r *http.Request) {
+	// Match LiteLLM's handshake boundary: authenticate and authorize the
+	// original Responses route before returning 101. Per-turn ProxyRequest
+	// authentication remains in place so revoked/blocked keys fail closed on
+	// an already-open connection.
+	if _, ok := p.AuthenticateClientRequest(w, r); !ok {
+		return
+	}
+
 	conn, err := wsUpgrader.Upgrade(w, r, nil)
 	if err != nil {
 		p.logger.DebugContext(r.Context(), "ws: upgrade failed", "error", err)
 		return
 	}
+	readLimit := int64(p.maxBodySizeMB) * 1024 * 1024
+	if readLimit <= 0 {
+		readLimit = 1024 * 1024
+	}
+	conn.SetReadLimit(readLimit)
 	defer func() {
 		if closeErr := conn.Close(); closeErr != nil && p.logger != nil {
 			p.logger.DebugContext(r.Context(), "ws: close failed", "error", closeErr)
@@ -389,12 +402,9 @@ outerLoop:
 		}()
 
 		// Wait for the turn to complete or the client to disconnect.
-		select {
-		case <-wsWriter.done:
-		case <-r.Context().Done():
+		if !waitForWSTurn(turnDone, wsWriter.done, r.Context().Done()) {
 			return
 		}
-		<-turnDone
 
 		// Update connection-local cache (only for explicit store:false responses).
 		if isStoreFalse {
@@ -410,4 +420,15 @@ outerLoop:
 			cacheMu.Unlock()
 		}
 	}
+}
+
+func waitForWSTurn(turnDone, streamDone, requestDone <-chan struct{}) bool {
+	select {
+	case <-streamDone:
+	case <-requestDone:
+		<-turnDone
+		return false
+	}
+	<-turnDone
+	return true
 }

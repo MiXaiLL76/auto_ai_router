@@ -105,14 +105,14 @@ type AnthropicMetadata struct {
 
 // AnthropicResponse represents a non-streaming response from the Anthropic Messages API.
 type AnthropicResponse struct {
-	ID           string         `json:"id"`
-	Type         string         `json:"type"`
-	Role         string         `json:"role"`
-	Content      []ContentBlock `json:"content"`
-	Model        string         `json:"model"`
-	StopReason   string         `json:"stop_reason"`
-	StopSequence string         `json:"stop_sequence,omitempty"`
-	Usage        AnthropicUsage `json:"usage"`
+	ID           string          `json:"id"`
+	Type         string          `json:"type"`
+	Role         string          `json:"role"`
+	Content      []ContentBlock  `json:"content"`
+	Model        string          `json:"model"`
+	StopReason   string          `json:"stop_reason"`
+	StopSequence string          `json:"stop_sequence,omitempty"`
+	Usage        *AnthropicUsage `json:"usage,omitempty"`
 }
 
 // CacheCreationDetails contains per-TTL breakdown of cache creation tokens.
@@ -166,8 +166,8 @@ type AnthropicStreamEvent struct {
 
 // AnthropicStreamMessage is the message skeleton delivered in the message_start event.
 type AnthropicStreamMessage struct {
-	ID    string         `json:"id"`
-	Usage AnthropicUsage `json:"usage"`
+	ID    string          `json:"id"`
+	Usage *AnthropicUsage `json:"usage,omitempty"`
 }
 
 // AnthropicStreamDelta represents incremental data in content_block_delta or message_delta events.
@@ -195,10 +195,12 @@ type AnthropicError struct {
 	Message string `json:"message"` // human-readable error message
 }
 
-// AnthropicStreamUsage carries token counts in message_delta events.
+// AnthropicStreamUsage carries token counts in message_delta events. Pointers
+// preserve the provider distinction between an omitted counter and an explicit
+// zero, which may intentionally replace a value reported by message_start.
 type AnthropicStreamUsage struct {
-	InputTokens              int `json:"input_tokens,omitempty"`
-	OutputTokens             int `json:"output_tokens,omitempty"`
-	CacheReadInputTokens     int `json:"cache_read_input_tokens,omitempty"`
-	CacheCreationInputTokens int `json:"cache_creation_input_tokens,omitempty"`
+	InputTokens              *int `json:"input_tokens,omitempty"`
+	OutputTokens             *int `json:"output_tokens,omitempty"`
+	CacheReadInputTokens     *int `json:"cache_read_input_tokens,omitempty"`
+	CacheCreationInputTokens *int `json:"cache_creation_input_tokens,omitempty"`
 }

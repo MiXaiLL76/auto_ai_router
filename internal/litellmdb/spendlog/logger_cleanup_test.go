@@ -2,14 +2,17 @@ package spendlog
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb/models"
 	"github.com/mixaill76/auto_ai_router/internal/testhelpers"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // MockConnectionPool is a mock for testing without real database
@@ -271,7 +274,7 @@ func TestLogger_ConcurrentLogAndShutdown(t *testing.T) {
 	defer cancel()
 
 	err := logger.Shutdown(ctx)
-	assert.NoError(t, err)
+	assert.ErrorIs(t, err, ErrDrainIncomplete)
 }
 
 func TestLogger_GetDLQStatsEmpty(t *testing.T) {
@@ -378,7 +381,7 @@ func TestLogger_DrainQueueOnShutdown(t *testing.T) {
 	defer cancel()
 
 	err := logger.Shutdown(ctx)
-	assert.NoError(t, err)
+	assert.ErrorIs(t, err, ErrDrainIncomplete)
 
 	// Queue still has entries because worker was never started
 	assert.Equal(t, 5, len(logger.queue))
@@ -421,7 +424,7 @@ func TestLogger_WorkerRoutinesCleanup(t *testing.T) {
 
 	time.Sleep(50 * time.Millisecond)
 
-	// Verify 3 goroutines are running (worker, aggregationWorker, dlqRecoveryWorker)
+	// Verify both goroutines are running (atomic writer and DLQ recovery worker).
 	// We can't directly count goroutines, but we verify shutdown completes
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -431,6 +434,138 @@ func TestLogger_WorkerRoutinesCleanup(t *testing.T) {
 	assert.NoError(t, err)
 
 	// If all goroutines didn't exit, this would timeout
+}
+
+func TestLoggerShutdownWaitsForWriterBeforeFinalDLQRecovery(t *testing.T) {
+	cfg := &models.Config{
+		LogQueueSize:     4,
+		LogBatchSize:     4,
+		LogFlushInterval: time.Hour,
+		Logger:           testhelpers.NewTestLogger(),
+	}
+	logger := NewLogger(nil, cfg)
+	logger.Start()
+	require.NoError(t, logger.TryLog(&models.SpendLogEntry{RequestID: "shutdown-dlq"}))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	err := logger.Shutdown(ctx)
+
+	assert.ErrorIs(t, err, ErrDrainIncomplete)
+	stats := logger.Stats()
+	assert.Equal(t, 1, stats.PendingEntries)
+	assert.Equal(t, 1, stats.DLQSize)
+	assert.False(t, stats.ComparisonWindowValid)
+	logger.mu.RLock()
+	lastRecovery := logger.lastDLQRecoveryTime
+	logger.mu.RUnlock()
+	assert.False(t, lastRecovery.IsZero(), "final DLQ recovery must run after the writer can add its terminal failure")
+}
+
+func TestLoggerShutdownDeadlineCancelsWritesAndCanBeAwaitedAgain(t *testing.T) {
+	cfg := &models.Config{Logger: testhelpers.NewTestLogger()}
+	logger := NewLogger(nil, cfg)
+	logger.wg.Add(2)
+	logger.lifecycleMu.Lock()
+	logger.started = true
+	logger.lifecycleMu.Unlock()
+	go func() {
+		logger.wg.Wait()
+		logger.doneOnce.Do(func() { close(logger.shutdownDone) })
+	}()
+	writeCanceled := make(chan struct{})
+	go func() {
+		<-logger.writeCtx.Done()
+		close(writeCanceled)
+		logger.wg.Done()
+	}()
+	releaseShutdown := make(chan struct{})
+	go func() {
+		<-releaseShutdown
+		logger.wg.Done()
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	err := logger.Shutdown(ctx)
+	assert.True(t, errors.Is(err, context.DeadlineExceeded))
+	select {
+	case <-writeCanceled:
+	case <-time.After(time.Second):
+		t.Fatal("shutdown deadline did not cancel the writer context")
+	}
+
+	secondDone := make(chan error, 1)
+	go func() { secondDone <- logger.Shutdown(context.Background()) }()
+	select {
+	case err := <-secondDone:
+		t.Fatalf("second shutdown returned before the shared lifecycle completed: %v", err)
+	case <-time.After(30 * time.Millisecond):
+	}
+	close(releaseShutdown)
+	require.NoError(t, <-secondDone,
+		"a later caller must await/reobserve the completed shutdown instead of returning from an early CAS")
+}
+
+func TestFinalizeDLQWaitsForWriterBarrier(t *testing.T) {
+	logger := NewLogger(nil, &models.Config{Logger: testhelpers.NewTestLogger()})
+	logger.addToDLQ([]*models.SpendLogEntry{{RequestID: "late-writer-failure"}}, assert.AnError, 1)
+
+	// Hold the writer barrier the way a running writer worker would.
+	logger.writerWg.Add(1)
+	finalized := make(chan struct{})
+	go func() {
+		logger.finalizeDLQ()
+		close(finalized)
+	}()
+	select {
+	case <-finalized:
+		t.Fatal("DLQ finalized before the writer barrier")
+	case <-time.After(20 * time.Millisecond):
+	}
+	logger.writerWg.Done()
+	select {
+	case <-finalized:
+	case <-time.After(time.Second):
+		t.Fatal("DLQ finalizer did not run after the writer barrier")
+	}
+	logger.mu.RLock()
+	lastRecovery := logger.lastDLQRecoveryTime
+	logger.mu.RUnlock()
+	assert.False(t, lastRecovery.IsZero())
+}
+
+func TestLoggerShutdownClosesAcceptanceBarrierBeforeWorkerStop(t *testing.T) {
+	logger := NewLogger(nil, &models.Config{
+		LogQueueSize: 1,
+		Logger:       testhelpers.NewTestLogger(),
+	})
+	require.NoError(t, logger.TryLog(&models.SpendLogEntry{RequestID: "accepted-before-shutdown"}))
+
+	blockedLog := make(chan error, 1)
+	go func() {
+		blockedLog <- logger.Log(&models.SpendLogEntry{RequestID: "blocked-at-shutdown"})
+	}()
+	require.Eventually(t, func() bool {
+		return atomic.LoadInt64(&logger.pendingEntries) == 2
+	}, time.Second, time.Millisecond, "blocking Log must hold an acceptance ticket")
+
+	err := logger.Shutdown(context.Background())
+	assert.ErrorIs(t, err, ErrDrainIncomplete)
+	assert.ErrorIs(t, <-blockedLog, ErrLoggerStopped)
+	assert.ErrorIs(t, logger.TryLog(&models.SpendLogEntry{RequestID: "after-stop-try"}), ErrLoggerStopped)
+	assert.ErrorIs(t, logger.Log(&models.SpendLogEntry{RequestID: "after-stop-blocking"}), ErrLoggerStopped)
+	assert.Equal(t, 1, len(logger.queue), "no entry may be enqueued after the shutdown barrier")
+	assert.Equal(t, uint64(1), logger.Stats().Queued)
+}
+
+func TestLoggerRejectsEnqueueAfterWorkerExit(t *testing.T) {
+	logger := NewLogger(nil, &models.Config{Logger: testhelpers.NewTestLogger()})
+	logger.Start()
+	require.NoError(t, logger.Shutdown(context.Background()))
+
+	assert.ErrorIs(t, logger.TryLog(&models.SpendLogEntry{RequestID: "after-worker-exit"}), ErrLoggerStopped)
+	assert.Zero(t, logger.Stats().QueueLen)
 }
 
 func TestLogger_TickerStoppedAfterShutdown(t *testing.T) {

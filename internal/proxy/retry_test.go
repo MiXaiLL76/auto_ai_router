@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -377,6 +378,54 @@ func TestTryFallbackProxy_NoFallbackAvailable(t *testing.T) {
 	// Assertions
 	assert.False(t, success, "TryFallbackProxy should return success=false when no fallback available")
 	assert.Equal(t, "no_fallback_available", reason, "Should return no_fallback_available reason")
+}
+
+func TestFallbackStreamingSpendIsFinalizedOnce(t *testing.T) {
+	prx := NewTestProxyBuilder().Build()
+	db := &stubLiteLLMManager{}
+	prx.LiteLLMDB = db
+
+	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	credential := &config.CredentialConfig{
+		Name:    "fallback",
+		Type:    config.ProviderTypeProxy,
+		BaseURL: "http://fallback.invalid",
+	}
+	logCtx := &RequestLogContext{
+		RequestID:  "fallback-stream-once",
+		StartTime:  time.Now().UTC(),
+		Request:    request,
+		Token:      "client-key",
+		ModelID:    "gpt-4",
+		Credential: credential,
+	}
+	response := &ProxyResponse{
+		StatusCode:  http.StatusOK,
+		Headers:     http.Header{"Content-Type": {"text/event-stream"}},
+		StreamBody:  io.NopCloser(strings.NewReader("data: {\"choices\":[],\"usage\":{\"prompt_tokens\":1,\"completion_tokens\":1}}\n\ndata: [DONE]\n\n")),
+		IsStreaming: true,
+	}
+	recorder := httptest.NewRecorder()
+
+	handled, reason := prx.writeFallbackResponse(
+		recorder,
+		request,
+		response,
+		credential,
+		"gpt-4",
+		"primary",
+		logCtx,
+		time.Now().UTC(),
+	)
+	require.True(t, handled)
+	require.Empty(t, reason)
+
+	if !logCtx.Logged {
+		require.NoError(t, prx.logSpendToLiteLLMDB(logCtx))
+	}
+
+	assert.True(t, logCtx.Logged)
+	assert.Len(t, db.loggedEntries, 1)
 }
 
 func TestFormatTriedCreds(t *testing.T) {

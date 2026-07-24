@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"bytes"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -119,8 +120,8 @@ func TestForwardToProxy_Headers(t *testing.T) {
 	)
 }
 
-// TestForwardToProxy_HeadersWithoutAPIKey проверяет что Authorization копируется
-// если в credentials нет APIKey
+// TestForwardToProxy_HeadersWithoutAPIKey проверяет, что клиентский
+// Authorization не утекает upstream, если в credentials нет APIKey.
 func TestForwardToProxy_HeadersWithoutAPIKey(t *testing.T) {
 	var authHeaderValue string
 
@@ -154,9 +155,8 @@ func TestForwardToProxy_HeadersWithoutAPIKey(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, proxyResp)
 
-	// Когда APIKey пустой, оригинальный Authorization должен быть скопирован
-	assert.Equal(t, "Bearer custom-token", authHeaderValue,
-		"Когда APIKey отсутствует, оригинальный Authorization должен быть скопирован",
+	assert.Empty(t, authHeaderValue,
+		"клиентский Authorization не должен проксироваться при пустом provider APIKey",
 	)
 }
 
@@ -374,4 +374,65 @@ func TestForwardToProxy_UpstreamError(t *testing.T) {
 	assert.Equal(t, http.StatusInternalServerError, proxyResp.StatusCode,
 		"Статус код ошибки должен быть проксирован",
 	)
+}
+
+// TestForwardToProxy_StreamingWithDrainUpstreamOnAbort_BodyReadableAfterReturn
+// is a regression test for executeProxyRequest prematurely canceling the
+// upstream context on the streaming early-return path (before the caller
+// ever reads StreamBody). With drain_upstream_on_abort enabled,
+// upstreamRequestContext hands back a real context.CancelFunc, and the old
+// `defer cancelUpstream()` fired the moment executeProxyRequest returned —
+// i.e. right after headers arrived, tearing down the connection before a
+// single streamed chunk was read. This test asserts the full stream is still
+// readable (and the client's own disconnect still eventually cancels it via
+// StreamBody.Close(), not before).
+func TestForwardToProxy_StreamingWithDrainUpstreamOnAbort_BodyReadableAfterReturn(t *testing.T) {
+	const chunk1 = "data: {\"choices\":[{\"delta\":{\"content\":\"hello\"}}]}\n\n"
+	const chunk2 = "data: {\"choices\":[{\"delta\":{\"content\":\" world\"}}]}\n\n"
+	const doneChunk = "data: [DONE]\n\n"
+
+	upstreamServer := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		flusher := w.(http.Flusher)
+		for _, c := range []string{chunk1, chunk2, doneChunk} {
+			_, _ = w.Write([]byte(c))
+			flusher.Flush()
+			// Force the client to make a separate blocking Read per chunk
+			// instead of getting the whole body in one buffered read — this
+			// is what makes a premature context cancellation observable.
+			time.Sleep(50 * time.Millisecond)
+		}
+	}))
+	defer upstreamServer.Close()
+
+	cred := &config.CredentialConfig{
+		Name:    "gateway",
+		Type:    config.ProviderTypeProxy,
+		BaseURL: upstreamServer.URL,
+		APIKey:  "key",
+	}
+
+	prx := NewTestProxyBuilder().
+		WithSingleCredential("test", config.ProviderTypeProxy, upstreamServer.URL, "upstream-key-1").
+		WithRequestTimeout(5 * time.Second).
+		WithDrainUpstreamOnAbort(true).
+		Build()
+
+	upstreamReq := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader("body"))
+	upstreamReq.Header.Set("Authorization", "Bearer key")
+
+	w := httptest.NewRecorder()
+	proxyResp, err := prx.forwardToProxy(w, upstreamReq, "test-model", cred, []byte("body"), time.Now().UTC())
+
+	require.NoError(t, err)
+	require.NotNil(t, proxyResp)
+	require.True(t, proxyResp.IsStreaming, "response must be detected as streaming")
+	require.NotNil(t, proxyResp.StreamBody)
+
+	got, err := io.ReadAll(proxyResp.StreamBody)
+	require.NoError(t, err, "streamed body must be fully readable — cancelUpstream must not fire before the caller reads it")
+	assert.Equal(t, chunk1+chunk2+doneChunk, string(got))
+
+	require.NoError(t, proxyResp.StreamBody.Close())
 }
