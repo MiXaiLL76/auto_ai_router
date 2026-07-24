@@ -117,13 +117,15 @@ func processAnthropicEvent(w io.Writer, acc *anthropicStreamAccumulator, event *
 	switch event.Type {
 	case "message_start":
 		if event.Message != nil {
-			acc.inputTokens = event.Message.Usage.InputTokens
-			acc.cachedTokens = event.Message.Usage.CacheReadInputTokens
-			acc.cacheCreationTokens, acc.cacheCreation5mTokens, acc.cacheCreation1hTokens = anthropic.NormalizeCacheCreationUsage(
-				event.Message.Usage.CacheCreationInputTokens, event.Message.Usage.CacheCreation,
-			)
-			if event.Message.Usage.ServerToolUse != nil && event.Message.Usage.ServerToolUse.WebSearchRequests > 0 {
-				acc.webSearchRequests = event.Message.Usage.ServerToolUse.WebSearchRequests
+			if event.Message.Usage != nil {
+				acc.inputTokens = event.Message.Usage.InputTokens
+				acc.cachedTokens = event.Message.Usage.CacheReadInputTokens
+				acc.cacheCreationTokens, acc.cacheCreation5mTokens, acc.cacheCreation1hTokens = anthropic.NormalizeCacheCreationUsage(
+					event.Message.Usage.CacheCreationInputTokens, event.Message.Usage.CacheCreation,
+				)
+				if event.Message.Usage.ServerToolUse != nil && event.Message.Usage.ServerToolUse.WebSearchRequests > 0 {
+					acc.webSearchRequests = event.Message.Usage.ServerToolUse.WebSearchRequests
+				}
 			}
 		}
 
@@ -227,15 +229,17 @@ func processAnthropicEvent(w io.Writer, acc *anthropicStreamAccumulator, event *
 			acc.stopReason = event.Delta.StopReason
 		}
 		if event.Usage != nil {
-			acc.outputTokens = event.Usage.OutputTokens
-			if event.Usage.CacheReadInputTokens > 0 {
-				acc.cachedTokens = event.Usage.CacheReadInputTokens
+			if event.Usage.OutputTokens != nil {
+				acc.outputTokens = *event.Usage.OutputTokens
 			}
-			if event.Usage.CacheCreationInputTokens > 0 {
-				acc.cacheCreationTokens = event.Usage.CacheCreationInputTokens
+			if event.Usage.CacheReadInputTokens != nil && *event.Usage.CacheReadInputTokens > 0 {
+				acc.cachedTokens = *event.Usage.CacheReadInputTokens
+			}
+			if event.Usage.CacheCreationInputTokens != nil && *event.Usage.CacheCreationInputTokens > 0 {
+				acc.cacheCreationTokens = *event.Usage.CacheCreationInputTokens
 				if event.Usage.CacheCreation != nil {
 					acc.cacheCreationTokens, acc.cacheCreation5mTokens, acc.cacheCreation1hTokens = anthropic.NormalizeCacheCreationUsage(
-						event.Usage.CacheCreationInputTokens, event.Usage.CacheCreation,
+						*event.Usage.CacheCreationInputTokens, event.Usage.CacheCreation,
 					)
 				}
 			} else if event.Usage.CacheCreation != nil {
@@ -250,6 +254,19 @@ func processAnthropicEvent(w io.Writer, acc *anthropicStreamAccumulator, event *
 
 	case "message_stop":
 		// Stream is ending; completion events emitted after the scan loop.
+
+	case "error":
+		errorType := "api_error"
+		message := "Anthropic stream error"
+		if event.Error != nil {
+			if event.Error.Type != "" {
+				errorType = event.Error.Type
+			}
+			if event.Error.Message != "" {
+				message = event.Error.Message
+			}
+		}
+		return fmt.Errorf("anthropic stream error (%s): %s", errorType, message)
 	}
 	return nil
 }
@@ -330,6 +347,7 @@ func finalizeCurrentBlock(w io.Writer, acc *anthropicStreamAccumulator) error {
 			"type":         "response.function_call_arguments.done",
 			"item_id":      itemID,
 			"output_index": acc.currentToolOutputIndex,
+			"name":         acc.currentBlockName,
 			"arguments":    argsJSON,
 		}, acc); err != nil {
 			return err

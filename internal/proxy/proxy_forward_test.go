@@ -120,8 +120,8 @@ func TestForwardToProxy_Headers(t *testing.T) {
 	)
 }
 
-// TestForwardToProxy_HeadersWithoutAPIKey проверяет что Authorization копируется
-// если в credentials нет APIKey
+// TestForwardToProxy_HeadersWithoutAPIKey проверяет, что клиентский
+// Authorization не утекает upstream, если в credentials нет APIKey.
 func TestForwardToProxy_HeadersWithoutAPIKey(t *testing.T) {
 	var authHeaderValue string
 
@@ -155,9 +155,8 @@ func TestForwardToProxy_HeadersWithoutAPIKey(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, proxyResp)
 
-	// Когда APIKey пустой, оригинальный Authorization должен быть скопирован
-	assert.Equal(t, "Bearer custom-token", authHeaderValue,
-		"Когда APIKey отсутствует, оригинальный Authorization должен быть скопирован",
+	assert.Empty(t, authHeaderValue,
+		"клиентский Authorization не должен проксироваться при пустом provider APIKey",
 	)
 }
 

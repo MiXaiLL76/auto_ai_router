@@ -119,3 +119,24 @@ func TestScopeContextForRequest_LiteLLMMasterKeyFromDBIsAdmin(t *testing.T) {
 		t.Fatal("DB-loaded LiteLLM master key must use admin visibility")
 	}
 }
+
+func TestScopeContextForRequestAcceptsXAPIKey(t *testing.T) {
+	prx := NewTestProxyBuilder().Build()
+	prx.LiteLLMDB = scopeTestDB{
+		NoopManager: litellmdb.NewNoopManager(),
+		info: &dbmodels.TokenInfo{
+			KeyName: "private",
+		},
+	}
+
+	req := httptest.NewRequest("GET", "/health", nil)
+	req.Header.Set("x-api-key", "virtual-key")
+
+	ctx, err := prx.ScopeContextForRequest(req)
+	if err != nil {
+		t.Fatalf("ScopeContextForRequest returned error: %v", err)
+	}
+	if !ctx.Allows([]string{"private"}, nil) {
+		t.Fatal("x-api-key must produce the same visibility scope as Bearer auth")
+	}
+}

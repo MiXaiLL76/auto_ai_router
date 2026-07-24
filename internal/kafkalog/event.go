@@ -48,7 +48,10 @@ type SpendEvent struct {
 	AudioInputTokens         int    `json:"audio_input_tokens"`
 	AudioOutputTokens        int    `json:"audio_output_tokens"`
 	CachedInputTokens        int    `json:"cached_input_tokens"`
+	CachedAudioInputTokens   int    `json:"cached_audio_input_tokens"`
 	CacheCreationTokens      int    `json:"cache_creation_tokens"`
+	CacheCreation5mTokens    int    `json:"cache_creation_5m_tokens"`
+	CacheCreation1hTokens    int    `json:"cache_creation_1h_tokens"`
 	CachedOutputTokens       int    `json:"cached_output_tokens"`
 	ReasoningTokens          int    `json:"reasoning_tokens"`
 	AcceptedPredictionTokens int    `json:"accepted_prediction_tokens"`

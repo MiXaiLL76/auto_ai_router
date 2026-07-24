@@ -60,6 +60,38 @@ func TestStreamToClient_RecordAbortedMetric(t *testing.T) {
 	assert.Equal(t, 1.0, testutil.ToFloat64(monitoring.AbortedRequestsTotal.WithLabelValues("cred1", "gpt-4o", "/v1/chat/completions")))
 }
 
+type unexpectedEOFReader struct {
+	read bool
+}
+
+func (r *unexpectedEOFReader) Read(p []byte) (int, error) {
+	if r.read {
+		return 0, io.EOF
+	}
+	r.read = true
+	return copy(p, "data: partial\n\n"), io.ErrUnexpectedEOF
+}
+
+func TestStreamToClientPropagatesUnexpectedReadError(t *testing.T) {
+	prx := NewTestProxyBuilder().Build()
+	w := httptest.NewRecorder()
+
+	err := prx.streamToClient(
+		context.Background(),
+		w,
+		&unexpectedEOFReader{},
+		"cred1",
+		"gpt-4o",
+		"/v1/chat/completions",
+		nil,
+		nil,
+		nil,
+	)
+
+	require.ErrorIs(t, err, io.ErrUnexpectedEOF)
+	assert.Equal(t, "data: partial\n\n", w.Body.String())
+}
+
 // TestHandleStreamingWithTokens_AbortLogsTokens verifies that when the client
 // disconnects mid-stream (before the usage chunk), the handler drains the upstream
 // to capture the real usage chunk and logs accurate token counts.
@@ -120,6 +152,9 @@ func TestHandleStreamingWithTokens_AbortLogsTokens(t *testing.T) {
 		"completion tokens must match real usage chunk captured during drain")
 	assert.Equal(t, 20, logCtx.TokenUsage.PromptTokens,
 		"prompt tokens must come from real usage chunk captured during drain")
+	assert.Equal(t, "client_aborted", logCtx.StreamOutcome)
+	assert.Equal(t, "failure", logCtx.Status)
+	assert.Equal(t, "provider", logCtx.UsageSource)
 
 	t.Logf("Abort logging result: prompt=%d completion=%d",
 		logCtx.TokenUsage.PromptTokens, logCtx.TokenUsage.CompletionTokens)
@@ -179,6 +214,9 @@ func TestHandleStreamingWithTokens_AbortEstimatesWithoutDrain(t *testing.T) {
 	// Real usage chunk NOT captured — prompt comes from PromptTokensEstimate
 	assert.Equal(t, 15, logCtx.TokenUsage.PromptTokens,
 		"prompt tokens must come from PromptTokensEstimate when drain is disabled")
+	assert.Equal(t, "client_aborted", logCtx.StreamOutcome)
+	assert.Equal(t, "failure", logCtx.Status)
+	assert.Equal(t, "estimated", logCtx.UsageSource)
 
 	t.Logf("No-drain abort: prompt=%d completion=%d (estimated)",
 		logCtx.TokenUsage.PromptTokens, logCtx.TokenUsage.CompletionTokens)
@@ -465,14 +503,17 @@ func TestWriteProxyStreamingResponseWithTokens_Abort(t *testing.T) {
 
 	// Client disconnects after 10 bytes
 	w := newFailAfterNBytesWriter(10)
+	logCtx := &RequestLogContext{}
 
-	streamUsage, err := prx.writeProxyStreamingResponseWithTokens(w, proxyResp, &http.Request{Header: make(http.Header)}, "test", "test-model", "gpt-4o-mini", nil)
+	streamUsage, err := prx.writeProxyStreamingResponseWithTokens(w, proxyResp, &http.Request{Header: make(http.Header)}, "test", "test-model", "gpt-4o-mini", logCtx)
 	assert.Error(t, err, "should return write error")
 
 	// Even on abort, estimated usage must be returned
 	require.NotNil(t, streamUsage, "writeProxyStreamingResponseWithTokens must return partial usage on abort")
 	assert.Greater(t, streamUsage.CompletionTokens, 0,
 		"completion tokens must be counted from 'OpenRouter reply text' delta text")
+	assert.Equal(t, "client_aborted", logCtx.StreamOutcome)
+	assert.Equal(t, "estimated", logCtx.UsageSource)
 
 	t.Logf("Proxy abort estimated completion tokens: %d", streamUsage.CompletionTokens)
 }
@@ -525,8 +566,9 @@ func TestWriteProxyStreamingResponseWithTokens_DrainCapturesUsage(t *testing.T) 
 
 	// Client disconnects after 10 bytes (before usage chunk)
 	w := newFailAfterNBytesWriter(10)
+	logCtx := &RequestLogContext{}
 
-	streamUsage, err := prx.writeProxyStreamingResponseWithTokens(w, proxyResp, &http.Request{Header: make(http.Header)}, "test", "test-model", "gpt-4o-mini", nil)
+	streamUsage, err := prx.writeProxyStreamingResponseWithTokens(w, proxyResp, &http.Request{Header: make(http.Header)}, "test", "test-model", "gpt-4o-mini", logCtx)
 	assert.Error(t, err, "should return write error")
 
 	// Drain must have captured the real usage chunk
@@ -535,6 +577,8 @@ func TestWriteProxyStreamingResponseWithTokens_DrainCapturesUsage(t *testing.T) 
 		"completion tokens must come from real usage chunk captured during drain")
 	assert.Equal(t, 42, streamUsage.PromptTokens,
 		"prompt tokens must come from real usage chunk captured during drain")
+	assert.Equal(t, "client_aborted", logCtx.StreamOutcome)
+	assert.Equal(t, "provider", logCtx.UsageSource)
 
 	t.Logf("Drain captured usage: prompt=%d completion=%d",
 		streamUsage.PromptTokens, streamUsage.CompletionTokens)
@@ -578,13 +622,42 @@ func TestWriteProxyStreamingResponseWithTokens_NoUsageChunk(t *testing.T) {
 	}
 
 	w := httptest.NewRecorder()
-	streamUsage, err := prx.writeProxyStreamingResponseWithTokens(w, proxyResp, &http.Request{Header: make(http.Header)}, "test", "test-model", "gpt-4o-mini", nil)
+	logCtx := &RequestLogContext{}
+	streamUsage, err := prx.writeProxyStreamingResponseWithTokens(w, proxyResp, &http.Request{Header: make(http.Header)}, "test", "test-model", "gpt-4o-mini", logCtx)
 	require.NoError(t, err)
 
 	// Should return estimated usage from streamed text when no usage chunk is present.
 	require.NotNil(t, streamUsage, "must return estimated usage when no usage chunk")
 	assert.Greater(t, streamUsage.CompletionTokens, 0,
 		"completion tokens estimated from delta text")
+	assert.Equal(t, "completed", logCtx.StreamOutcome)
+	assert.Equal(t, "estimated", logCtx.UsageSource)
+	assert.Equal(t, "no", w.Header().Get(accelBufferingHeader))
 
 	t.Logf("No-usage-chunk estimated completion tokens: %d", streamUsage.CompletionTokens)
+}
+
+func TestWriteProxyStreamingResponseWithTokens_DoesNotDisableBufferingForPreStreamError(t *testing.T) {
+	prx := NewTestProxyBuilder().Build()
+	proxyResp := &ProxyResponse{
+		StatusCode:  http.StatusTooManyRequests,
+		Headers:     http.Header{"Content-Type": {"application/json"}},
+		StreamBody:  io.NopCloser(strings.NewReader(`{"error":{"message":"rate limited"}}`)),
+		IsStreaming: true,
+	}
+	w := httptest.NewRecorder()
+
+	_, err := prx.writeProxyStreamingResponseWithTokens(
+		w,
+		proxyResp,
+		&http.Request{Header: make(http.Header)},
+		"test",
+		"test-model",
+		"gpt-4o-mini",
+		nil,
+	)
+
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusTooManyRequests, w.Code)
+	assert.Empty(t, w.Header().Get(accelBufferingHeader))
 }

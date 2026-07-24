@@ -256,7 +256,8 @@ func main() {
 
 		BudgetReserver:                   budgetReserver,
 		KeyRateLimiter:                   keyRateLimiter,
-		BudgetReservationEnabled:         cfg.LiteLLMDB.EnforceBudgetReservation || cfg.LiteLLMDB.EnforceKeyRateLimits,
+		BudgetReservationEnabled:         cfg.LiteLLMDB.EnforceBudgetReservation,
+		KeyRateLimitsEnabled:             cfg.LiteLLMDB.EnforceKeyRateLimits,
 		DefaultEstimatedCompletionTokens: cfg.LiteLLMDB.DefaultEstimatedCompletionTokens,
 	})
 

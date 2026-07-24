@@ -165,7 +165,10 @@ func anthropicStopReasonToStatus(stopReason string) (string, *responses.Incomple
 }
 
 // anthropicUsageToUsage converts Anthropic usage to responses.Usage.
-func anthropicUsageToUsage(au anthropic.AnthropicUsage) *responses.Usage {
+func anthropicUsageToUsage(au *anthropic.AnthropicUsage) *responses.Usage {
+	if au == nil {
+		return nil
+	}
 	cacheCreationTokens, cacheCreation5mTokens, cacheCreation1hTokens := anthropic.NormalizeCacheCreationUsage(
 		au.CacheCreationInputTokens, au.CacheCreation,
 	)

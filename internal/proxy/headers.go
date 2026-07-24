@@ -7,6 +7,8 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/config"
 )
 
+const accelBufferingHeader = "X-Accel-Buffering"
+
 // hopByHopHeaders are headers that should not be proxied.
 // These are hop-by-hop headers as defined in RFC 7230 Section 6.1.
 // They are meant for single HTTP connection and must not be forwarded to the next hop.
@@ -55,6 +57,21 @@ func isInternalAIRRequestHeader(key string) bool {
 		strings.EqualFold(key, HeaderAIRUsageAudioTokens)
 }
 
+func isProxyOwnedResponseHeader(key string) bool {
+	return strings.EqualFold(key, accelBufferingHeader)
+}
+
+func isClientAuthHeader(key string) bool {
+	return strings.EqualFold(key, "Authorization") || strings.EqualFold(key, "X-Api-Key")
+}
+
+func setSuccessfulSSEHeaders(headers http.Header, statusCode int) {
+	if headers == nil || statusCode < http.StatusOK || statusCode >= http.StatusMultipleChoices {
+		return
+	}
+	headers.Set(accelBufferingHeader, "no")
+}
+
 // GetHopByHopHeaders returns a copy of the hop-by-hop headers map for reference.
 // Use isHopByHopHeader() to check if a specific header should be filtered.
 func GetHopByHopHeaders() map[string]bool {
@@ -71,7 +88,7 @@ func GetHopByHopHeaders() map[string]bool {
 // Accept-Encoding is also skipped (see copyHeadersSkipAuth for rationale).
 func copyRequestHeaders(dst *http.Request, src *http.Request, apiKey string) {
 	for key, values := range src.Header {
-		if isHopByHopHeader(key) || isPrivacyHeader(key) {
+		if isHopByHopHeader(key) || isPrivacyHeader(key) || isClientAuthHeader(key) {
 			continue
 		}
 		// Don't forward Accept-Encoding to upstream (proxy handles per-segment).
@@ -82,21 +99,12 @@ func copyRequestHeaders(dst *http.Request, src *http.Request, apiKey string) {
 		if isInternalAIRRequestHeader(key) {
 			continue
 		}
-		if key == "Authorization" {
-			// Handle Authorization header: use credential API key if available, otherwise copy original
-			if apiKey != "" {
-				dst.Header.Set("Authorization", "Bearer "+apiKey)
-			} else {
-				// Copy original Authorization header if no API key configured
-				for _, value := range values {
-					dst.Header.Add(key, value)
-				}
-			}
-		} else {
-			for _, value := range values {
-				dst.Header.Add(key, value)
-			}
+		for _, value := range values {
+			dst.Header.Add(key, value)
 		}
+	}
+	if apiKey != "" {
+		dst.Header.Set("Authorization", "Bearer "+apiKey)
 	}
 }
 
@@ -108,7 +116,7 @@ func copyRequestHeaders(dst *http.Request, src *http.Request, apiKey string) {
 // bytes to flow through instead of decoded content.
 func copyHeadersSkipAuth(dst *http.Request, src *http.Request) {
 	for key, values := range src.Header {
-		if isHopByHopHeader(key) || isPrivacyHeader(key) || key == "Authorization" {
+		if isHopByHopHeader(key) || isPrivacyHeader(key) || isClientAuthHeader(key) {
 			continue
 		}
 		// Don't forward Accept-Encoding: proxy manages compression per connection segment.

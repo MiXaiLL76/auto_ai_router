@@ -219,8 +219,9 @@ func TestProxyRequest_ConvertedResponsesEmitsNormalizedUsageHeaderAndLogsSpend(t
 		}).
 		WithMasterKey("master-key")
 	builder.config.ModelManager = pricing.New(builder.config.Logger, 50, []config.ModelRPMConfig{
-		{Name: "gpt-cache", PassthroughResponses: &passthroughResponses},
+		{Name: "gpt-cache", Credential: "openai-cache", PassthroughResponses: &passthroughResponses},
 	})
+	builder.config.ModelManager.LoadModelsFromConfig(builder.config.Credentials)
 	prx := builder.Build()
 	prx.LiteLLMDB = dbStub
 	installCacheBillingPrices(prx)

@@ -353,8 +353,10 @@ func ExtractTokenUsageWithOptions(body []byte, opts TokenUsageExtractionOptions)
 		} `json:"input_tokens_details,omitempty"`
 		OutputTokensDetails struct {
 			AudioTokens     int `json:"audio_tokens,omitempty"`
-			ReasoningTokens int `json:"reasoning_tokens,omitempty"`
+			CachedTokens    int `json:"cached_tokens,omitempty"`
 			ImageTokens     int `json:"image_tokens,omitempty"`
+			ReasoningTokens int `json:"reasoning_tokens,omitempty"`
+			TextTokens      int `json:"text_tokens,omitempty"`
 		} `json:"output_tokens_details,omitempty"`
 		ServerToolUse struct {
 			WebSearchRequests int `json:"web_search_requests,omitempty"`
@@ -384,8 +386,10 @@ func ExtractTokenUsageWithOptions(body []byte, opts TokenUsageExtractionOptions)
 				AcceptedPredictionTokens int `json:"accepted_prediction_tokens,omitempty"`
 				RejectedPredictionTokens int `json:"rejected_prediction_tokens,omitempty"`
 				AudioTokens              int `json:"audio_tokens,omitempty"`
-				ReasoningTokens          int `json:"reasoning_tokens,omitempty"`
+				CachedTokens             int `json:"cached_tokens,omitempty"`
 				ImageTokens              int `json:"image_tokens,omitempty"`
+				ReasoningTokens          int `json:"reasoning_tokens,omitempty"`
+				TextTokens               int `json:"text_tokens,omitempty"`
 			} `json:"completion_tokens_details,omitempty"`
 			// Responses API / Image generation format (input_tokens/output_tokens)
 			responsesUsageDetails
@@ -472,6 +476,10 @@ func ExtractTokenUsageWithOptions(body []byte, opts TokenUsageExtractionOptions)
 	if outputImageTokens == 0 {
 		outputImageTokens = resp.Usage.OutputTokensDetails.ImageTokens
 	}
+	cachedOutputTokens := resp.Usage.CompletionTokensDetails.CachedTokens
+	if cachedOutputTokens == 0 {
+		cachedOutputTokens = resp.Usage.OutputTokensDetails.CachedTokens
+	}
 
 	// If tokens came from the nested response.completed event, use its detail fields
 	if resp.Usage.PromptTokens == 0 && resp.Usage.InputTokens == 0 && resp.Response.Usage != nil {
@@ -502,8 +510,14 @@ func ExtractTokenUsageWithOptions(body []byte, opts TokenUsageExtractionOptions)
 		if reasoning == 0 {
 			reasoning = u.OutputTokensDetails.ReasoningTokens
 		}
+		if inputImageTokens == 0 {
+			inputImageTokens = u.InputTokensDetails.ImageTokens
+		}
 		if outputImageTokens == 0 {
 			outputImageTokens = u.OutputTokensDetails.ImageTokens
+		}
+		if cachedOutputTokens == 0 {
+			cachedOutputTokens = u.OutputTokensDetails.CachedTokens
 		}
 	}
 	if cacheCreationTokens == 0 {
@@ -522,6 +536,7 @@ func ExtractTokenUsageWithOptions(body []byte, opts TokenUsageExtractionOptions)
 		CompletionTokens:         completionTokens,
 		CachedInputTokens:        cachedTokens,
 		CachedAudioInputTokens:   cachedAudioTokens,
+		CachedOutputTokens:       cachedOutputTokens,
 		CacheCreationTokens:      cacheCreationTokens,
 		CacheCreation5mTokens:    cacheCreation5mTokens,
 		CacheCreation1hTokens:    cacheCreation1hTokens,

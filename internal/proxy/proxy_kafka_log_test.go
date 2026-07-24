@@ -140,7 +140,33 @@ func TestBuildKafkaSpendEvent_NormalizesTokenUsage(t *testing.T) {
 	assert.Equal(t, 50, event.TotalTokens)
 	assert.Equal(t, 0, event.AudioInputTokens)
 	assert.Equal(t, 0, event.CachedInputTokens)
+	assert.Equal(t, 0, event.CachedAudioInputTokens)
 	assert.Equal(t, 10, event.CacheCreationTokens)
+	assert.Equal(t, 8, event.CacheCreation5mTokens)
+	assert.Equal(t, 2, event.CacheCreation1hTokens)
+}
+
+func TestBuildKafkaSpendEvent_CacheBreakdownMapped(t *testing.T) {
+	prx := NewTestProxyBuilder().Build()
+	logCtx := testLogCtx(t)
+	logCtx.TokenUsage = &converter.TokenUsage{
+		PromptTokens:           200,
+		CompletionTokens:       50,
+		CachedInputTokens:      80,
+		CachedAudioInputTokens: 40,
+		CacheCreationTokens:    30,
+		CacheCreation5mTokens:  10,
+		CacheCreation1hTokens:  20,
+	}
+
+	event := prx.buildKafkaSpendEvent(logCtx, "cred", "cred:model", "hash",
+		"", "", "", "", "api.openai.com", "success", 0, nil, 0, logCtx.StartTime)
+
+	assert.Equal(t, 80, event.CachedInputTokens)
+	assert.Equal(t, 40, event.CachedAudioInputTokens)
+	assert.Equal(t, 30, event.CacheCreationTokens)
+	assert.Equal(t, 10, event.CacheCreation5mTokens)
+	assert.Equal(t, 20, event.CacheCreation1hTokens)
 }
 
 func TestBuildKafkaSpendEvent_TTFTComputedWhenStreamed(t *testing.T) {

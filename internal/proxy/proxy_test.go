@@ -157,7 +157,7 @@ func TestProxyRequest_NoCredentialsAvailable(t *testing.T) {
 	tm := createTestTokenManager(logger)
 	prx := createProxyWithParams(bal, logger, 10, 30*time.Second, metrics, "master-key", rl, tm, createTestModelManager(logger), "test-version", "test-commit")
 
-	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model": "gpt-4"}`))
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"gpt-4","messages":[{"role":"user","content":"test"}]}`))
 	req.Header.Set("Authorization", "Bearer master-key")
 	w := httptest.NewRecorder()
 
@@ -188,7 +188,7 @@ func TestProxyRequest_RateLimitExceeded(t *testing.T) {
 	rl.Allow("test1")
 
 	// Next request should fail due to rate limit
-	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model": "gpt-4"}`))
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"gpt-4","messages":[{"role":"user","content":"test"}]}`))
 	req.Header.Set("Authorization", "Bearer master-key")
 	w := httptest.NewRecorder()
 
@@ -209,7 +209,7 @@ func TestProxyRequest_UpstreamError(t *testing.T) {
 		WithSingleCredential("test", config.ProviderTypeProxy, mockServer.URL, "upstream-key-1").
 		Build()
 
-	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model": "gpt-4"}`))
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"gpt-4","messages":[{"role":"user","content":"test"}]}`))
 	req.Header.Set("Authorization", "Bearer master-key")
 	w := httptest.NewRecorder()
 
@@ -238,7 +238,7 @@ func TestProxyRequest_Streaming(t *testing.T) {
 		WithSingleCredential("test", config.ProviderTypeProxy, mockServer.URL, "upstream-key-1").
 		Build()
 
-	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model": "gpt-4", "stream": true}`))
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"gpt-4","messages":[{"role":"user","content":"test"}],"stream":true}`))
 	req.Header.Set("Authorization", "Bearer master-key")
 	w := httptest.NewRecorder()
 
@@ -652,7 +652,7 @@ func TestProxyRequest_HeadersForwarding(t *testing.T) {
 		WithSingleCredential("test", config.ProviderTypeProxy, mockServer.URL, "upstream-key-1").
 		Build()
 
-	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model": "gpt-4"}`))
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"gpt-4","messages":[{"role":"user","content":"test"}]}`))
 	req.Header.Set("Authorization", "Bearer master-key")
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Custom-Header", "custom-value")
@@ -761,7 +761,7 @@ func TestProxyRequest_QueryParameters(t *testing.T) {
 		WithSingleCredential("test", config.ProviderTypeProxy, mockServer.URL, "upstream-key-1").
 		Build()
 
-	req := httptest.NewRequest("POST", "/v1/chat/completions?param1=value1&param2=value2", strings.NewReader(`{"model": "gpt-4"}`))
+	req := httptest.NewRequest("POST", "/v1/chat/completions?param1=value1&param2=value2", strings.NewReader(`{"model":"gpt-4","messages":[{"role":"user","content":"test"}]}`))
 	req.Header.Set("Authorization", "Bearer master-key")
 	w := httptest.NewRecorder()
 

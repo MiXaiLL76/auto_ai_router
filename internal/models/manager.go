@@ -471,6 +471,13 @@ func (m *Manager) IsPassthroughResponsesForProvider(modelID string, providerType
 	return isNativeResponsesModel(modelID)
 }
 
+func (m *Manager) HasPassthroughResponsesOverride(modelID string) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	value, ok := m.modelPassthroughResponses[modelID]
+	return ok && value != nil
+}
+
 // SetCredentials sets the credentials for fetching remote models from proxies
 func (m *Manager) SetCredentials(credentials []config.CredentialConfig) {
 	m.mu.Lock()
@@ -569,6 +576,34 @@ func (m *Manager) SetPublicModelAliases(aliases map[string]string) {
 	}
 	m.allModels = nil
 	m.invalidateAllModelsCachesLocked()
+}
+
+func (m *Manager) IsClientModelIDRoutable(modelID string) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if target, aliased := m.publicModelAliases[modelID]; aliased {
+		return m.publicModelAliasTargetActiveLocked(target)
+	}
+	if m.clientModelSurfaceConfigured {
+		if _, allowed := m.clientModelIDs[modelID]; !allowed {
+			return false
+		}
+	}
+	_, routable := m.clientCanonicalRouteTargetLocked(modelID)
+	return routable
+}
+
+func (m *Manager) ResolvePublicModelAlias(modelID string) (string, bool, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	target, aliased := m.publicModelAliases[modelID]
+	if !aliased {
+		return modelID, false, nil
+	}
+	if !m.publicModelAliasTargetActiveLocked(target) {
+		return modelID, false, fmt.Errorf("public model alias %q is not routable", modelID)
+	}
+	return target, true, nil
 }
 
 func (m *Manager) clientCanonicalRouteTargetLocked(modelID string) (string, bool) {
