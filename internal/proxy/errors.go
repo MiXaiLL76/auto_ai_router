@@ -141,8 +141,3 @@ func WriteErrorBadGateway(w http.ResponseWriter, message string) {
 func WriteErrorTimeout(w http.ResponseWriter, message string) {
 	WriteJSONError(w, http.StatusRequestTimeout, message, errorTypeForStatus(http.StatusRequestTimeout), nil, nil)
 }
-
-// WriteErrorGatewayTimeout writes the gateway-facing 504 timeout contract.
-func WriteErrorGatewayTimeout(w http.ResponseWriter, message string) {
-	WriteJSONError(w, http.StatusGatewayTimeout, message, errorTypeForStatus(http.StatusGatewayTimeout), nil, nil)
-}

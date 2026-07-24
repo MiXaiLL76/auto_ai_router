@@ -51,7 +51,6 @@ func TestWriteErrorConvenienceFunctions(t *testing.T) {
 		{"TooLarge", WriteErrorTooLarge, 413, "invalid_request_error"},
 		{"BadGateway", WriteErrorBadGateway, 502, "api_error"},
 		{"Timeout", WriteErrorTimeout, 408, "timeout_error"},
-		{"GatewayTimeout", WriteErrorGatewayTimeout, 504, "timeout_error"},
 		{"Unauthorized", WriteErrorUnauthorized, 401, "authentication_error"},
 		{"NotFound", WriteErrorNotFound, 404, "not_found_error"},
 		{"RateLimit", WriteErrorRateLimit, 429, "rate_limit_error"},
