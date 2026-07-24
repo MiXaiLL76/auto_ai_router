@@ -11,6 +11,7 @@ import (
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/converter"
+	promanutils "github.com/mixaill76/auto_ai_router/internal/converter/proman/utils"
 	"github.com/mixaill76/auto_ai_router/internal/kafkalog"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb/spendlog"
@@ -51,7 +52,7 @@ func appendResponseBodyForLogs(args []any, cred *config.CredentialConfig, body s
 }
 
 func shouldMaskUpstreamErrors(cred *config.CredentialConfig) bool {
-	return isCometAPICredential(cred) || isProManCredential(cred)
+	return isCometAPICredential(cred) || promanutils.IsCredential(cred)
 }
 
 func isCometAPICredential(cred *config.CredentialConfig) bool {
@@ -82,20 +83,6 @@ func isProviderHost(rawBaseURL, domain string) bool {
 	}
 	host := strings.TrimSuffix(strings.ToLower(u.Hostname()), ".")
 	return host == domain || strings.HasSuffix(host, "."+domain)
-}
-
-func isProManCredential(cred *config.CredentialConfig) bool {
-	if cred == nil {
-		return false
-	}
-	if cred.Type == config.ProviderTypeProMan {
-		return true
-	}
-	name := strings.ToLower(cred.Name)
-	return strings.Contains(name, "proman") ||
-		strings.Contains(name, "pro-man") ||
-		strings.Contains(name, "pro_man") ||
-		isProviderHost(cred.BaseURL, "proman.ai")
 }
 
 // logStreamHandlerError logs a streaming handler failure. Client disconnects are

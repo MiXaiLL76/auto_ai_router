@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
+	promanutils "github.com/mixaill76/auto_ai_router/internal/converter/proman/utils"
 )
 
 const accelBufferingHeader = "X-Accel-Buffering"
@@ -158,41 +159,8 @@ func shouldSkipResponseHeaderForClient(key string, cred *config.CredentialConfig
 	case "Content-Length", "Content-Encoding", "Transfer-Encoding", "X-Credential-Name":
 		return true
 	}
-	if shouldSanitizeUpstreamSurface(cred) && isProviderInternalResponseHeader(canonical) {
+	if promanutils.ShouldSanitizeUpstreamSurface(cred) && promanutils.IsProviderInternalResponseHeader(canonical) {
 		return true
-	}
-	return false
-}
-
-func isProviderInternalResponseHeader(key string) bool {
-	lower := strings.ToLower(key)
-	switch lower {
-	case "server",
-		"via",
-		"x-powered-by",
-		"request-id",
-		"x-request-id",
-		"anthropic-organization-id",
-		"cf-ray",
-		"cf-cache-status",
-		"traceresponse",
-		"x-robots-tag":
-		return true
-	}
-
-	internalPrefixes := []string{
-		"x-litellm-",
-		"llm_provider-",
-		"x-provider-",
-		"x-ratelimit-",
-		"anthropic-ratelimit-",
-		"x-amz-",
-		"x-amzn-",
-	}
-	for _, prefix := range internalPrefixes {
-		if strings.HasPrefix(lower, prefix) {
-			return true
-		}
 	}
 	return false
 }

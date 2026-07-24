@@ -14,6 +14,7 @@ import (
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/converter"
+	promanutils "github.com/mixaill76/auto_ai_router/internal/converter/proman/utils"
 	"github.com/mixaill76/auto_ai_router/internal/converter/responses"
 )
 
@@ -367,8 +368,8 @@ func (p *Proxy) handleVertexStreaming(w http.ResponseWriter, resp *http.Response
 func (p *Proxy) handleAnthropicCompatibleStreaming(w http.ResponseWriter, resp *http.Response, cred *config.CredentialConfig, modelID, displayModelID string, providerType config.ProviderType, providerLabel string, logCtx *RequestLogContext) error {
 	conv := converter.New(providerType, converter.RequestMode{ModelID: modelID, DisplayModelID: displayModelID, IsStreaming: true})
 	transformer := func(r io.Reader, id string, w io.Writer) error {
-		if shouldSanitizeUpstreamSurface(cred) {
-			r = newSanitizingSSEReader(r, displayModelID)
+		if promanutils.ShouldSanitizeUpstreamSurface(cred) {
+			r = promanutils.NewSanitizingSSEReader(r, displayModelID)
 		}
 		return conv.StreamTo(r, w)
 	}
