@@ -687,6 +687,7 @@ func TestProviderType_IsValid(t *testing.T) {
 		{"vertex-ai", ProviderTypeVertexAI, true},
 		{"cometapi", ProviderTypeCometAPI, true},
 		{"air", ProviderTypeAIR, true},
+		{"proman", ProviderTypeProMan, true},
 		{"invalid", ProviderType("azure"), false},
 		{"empty", ProviderType(""), false},
 	}
@@ -703,6 +704,7 @@ func TestProviderType_IsProxyLike(t *testing.T) {
 	assert.True(t, ProviderTypeAIR.IsProxyLike())
 	assert.False(t, ProviderTypeOpenAI.IsProxyLike())
 	assert.False(t, ProviderTypeVertexAI.IsProxyLike())
+	assert.False(t, ProviderTypeProMan.IsProxyLike())
 }
 
 func TestCredentialConfig_NormalizeCometAPIProviderType(t *testing.T) {
@@ -745,6 +747,20 @@ rpm: 60
 			assert.True(t, cred.IsProxyLike())
 		})
 	}
+}
+
+func TestCredentialConfig_NormalizeProManProviderType(t *testing.T) {
+	var cred CredentialConfig
+	err := yaml.Unmarshal([]byte(`
+name: proman
+type: pro-man
+api_key: key
+base_url: https://api.proman.ai/v1
+rpm: 60
+`), &cred)
+
+	require.NoError(t, err)
+	assert.Equal(t, ProviderTypeProMan, cred.Type)
 }
 
 func TestConfig_Validate_VertexAI(t *testing.T) {

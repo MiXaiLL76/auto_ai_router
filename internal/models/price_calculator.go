@@ -28,6 +28,9 @@ func CalculateTokenCosts(usage *converter.TokenUsage, price *ModelPrice) *conver
 		return nil
 	}
 
+	normalizedUsage := *usage
+	usage = normalizedUsage.Normalize()
+
 	costs := &converter.TokenCosts{}
 	promptTokens := converterutil.NonNegativeTokenCount(usage.PromptTokens)
 	completionTokens := converterutil.NonNegativeTokenCount(usage.CompletionTokens)

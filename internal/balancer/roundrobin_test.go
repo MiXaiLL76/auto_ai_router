@@ -1242,13 +1242,12 @@ func TestNextSameTypeForModelExcluding_ProxyDoesNotReturnVertexAI(t *testing.T) 
 	assert.Equal(t, "proxy2", cred.Name)
 }
 
-func TestNextSameTypeForModelExcluding_AIRDoesNotReturnGenericProxy(t *testing.T) {
+func TestNextSameTypeForModelExcluding_AIRCanReturnGenericProxy(t *testing.T) {
 	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
 	rl := ratelimit.New()
 
 	credentials := []config.CredentialConfig{
 		{Name: "air1", Type: config.ProviderTypeAIR, BaseURL: "http://air1.com", RPM: -1},
-		{Name: "air2", Type: config.ProviderTypeAIR, BaseURL: "http://air2.com", RPM: -1},
 		{Name: "proxy1", Type: config.ProviderTypeProxy, BaseURL: "http://proxy1.com", RPM: -1},
 	}
 
@@ -1257,8 +1256,28 @@ func TestNextSameTypeForModelExcluding_AIRDoesNotReturnGenericProxy(t *testing.T
 	exclude := map[string]bool{"air1": true}
 	cred, err := bal.NextSameTypeForModelExcluding("gpt-cache", config.ProviderTypeAIR, exclude)
 	require.NoError(t, err)
-	assert.Equal(t, config.ProviderTypeAIR, cred.Type)
-	assert.Equal(t, "air2", cred.Name)
+	assert.Equal(t, config.ProviderTypeProxy, cred.Type)
+	assert.Equal(t, "proxy1", cred.Name)
+}
+
+func TestNextRetryForModelExcluding_ProxyLikeRetriesAcrossAIRAndProxy(t *testing.T) {
+	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
+	rl := ratelimit.New()
+
+	credentials := []config.CredentialConfig{
+		{Name: "air1", Type: config.ProviderTypeAIR, BaseURL: "http://air1.com", RPM: -1},
+		{Name: "proxy1", Type: config.ProviderTypeProxy, BaseURL: "http://proxy1.com", RPM: -1},
+	}
+
+	bal := New(credentials, f2b, rl)
+
+	proxyCred, err := bal.NextRetryForModelExcluding("gpt-cache", &credentials[0], map[string]bool{"air1": true})
+	require.NoError(t, err)
+	assert.Equal(t, "proxy1", proxyCred.Name)
+
+	airCred, err := bal.NextRetryForModelExcluding("gpt-cache", &credentials[1], map[string]bool{"proxy1": true})
+	require.NoError(t, err)
+	assert.Equal(t, "air1", airCred.Name)
 }
 
 // TestNextSameTypeForModelExcluding_VertexAIDoesNotReturnProxy verifies that same-type

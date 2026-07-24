@@ -3,6 +3,8 @@ package startup
 import (
 	"context"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
@@ -59,6 +61,15 @@ func (h *mockLoggerHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
 
 func (h *mockLoggerHandler) WithGroup(name string) slog.Handler {
 	return h
+}
+
+func hasLogRecord(mock *mockLogger, level slog.Level, message string) bool {
+	for _, record := range mock.records {
+		if record.level == level && record.message == message {
+			return true
+		}
+	}
+	return false
 }
 
 func TestValidateProxyCredentialsAtStartup_NoProxies(t *testing.T) {
@@ -132,4 +143,56 @@ func TestValidateProxyCredentialsAtStartup_MixedCredentials(t *testing.T) {
 
 	// Should handle gracefully even if proxy is unreachable
 	ValidateProxyCredentialsAtStartup(cfg, logger)
+}
+
+func TestValidateProxyCredentialsAtStartup_WarnsWhenGenericProxyLooksLikeAIR(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Router-Version", "test-version")
+		w.Header().Set("X-Router-Commit", "test-commit")
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	}))
+	defer upstream.Close()
+
+	cfg := &config.Config{
+		Credentials: []config.CredentialConfig{
+			{
+				Name:    "generic-proxy-to-air",
+				Type:    config.ProviderTypeProxy,
+				BaseURL: upstream.URL,
+			},
+		},
+	}
+	logger, mock := newTestLoggerWithMock()
+
+	ValidateProxyCredentialsAtStartup(cfg, logger)
+
+	if !hasLogRecord(mock, slog.LevelWarn, "Proxy credential appears to point to an Auto AI Router upstream") {
+		t.Fatalf("expected AIR misconfiguration warning, got records: %+v", mock.records)
+	}
+}
+
+func TestValidateProxyCredentialsAtStartup_DoesNotWarnForExplicitAIR(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Router-Version", "test-version")
+		w.Header().Set("X-Router-Commit", "test-commit")
+		_, _ = w.Write([]byte(`{"status":"ok"}`))
+	}))
+	defer upstream.Close()
+
+	cfg := &config.Config{
+		Credentials: []config.CredentialConfig{
+			{
+				Name:    "explicit-air",
+				Type:    config.ProviderTypeAIR,
+				BaseURL: upstream.URL,
+			},
+		},
+	}
+	logger, mock := newTestLoggerWithMock()
+
+	ValidateProxyCredentialsAtStartup(cfg, logger)
+
+	if hasLogRecord(mock, slog.LevelWarn, "Proxy credential appears to point to an Auto AI Router upstream") {
+		t.Fatalf("did not expect AIR misconfiguration warning for type air, got records: %+v", mock.records)
+	}
 }

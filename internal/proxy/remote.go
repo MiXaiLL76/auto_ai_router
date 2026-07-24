@@ -2,7 +2,9 @@ package proxy
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
+	"net/http"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/httputil"
@@ -47,16 +49,35 @@ func FetchHealthFromRemoteProxy(
 	cred *config.CredentialConfig,
 	logger *slog.Logger,
 ) (*httputil.ProxyHealthResponse, error) {
+	health, _, err := FetchHealthResponseFromRemoteProxy(ctx, cred, logger)
+	return health, err
+}
+
+// FetchHealthResponseFromRemoteProxy retrieves proxy health data and response
+// headers from the /health endpoint.
+func FetchHealthResponseFromRemoteProxy(
+	ctx context.Context,
+	cred *config.CredentialConfig,
+	logger *slog.Logger,
+) (*httputil.ProxyHealthResponse, http.Header, error) {
 	var health httputil.ProxyHealthResponse
-	if err := httputil.FetchJSONFromProxy(ctx, cred, "/health", logger, &health); err != nil {
+	body, headers, err := httputil.FetchResponseFromProxy(ctx, cred, "/health", logger)
+	if err != nil {
 		logger.Debug("Failed to fetch remote proxy stats",
 			"credential", cred.Name,
 			"error", err,
 		)
-		return nil, err
+		return nil, headers, err
+	}
+	if err := json.Unmarshal(body, &health); err != nil {
+		logger.Error("Failed to parse remote proxy health response",
+			"credential", cred.Name,
+			"error", err,
+		)
+		return nil, headers, err
 	}
 
-	return &health, nil
+	return &health, headers, nil
 }
 
 // UpdateStatsFromHealth updates RPM/TPM limits from already-fetched health data.

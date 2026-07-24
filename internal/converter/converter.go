@@ -112,7 +112,7 @@ func (c *ProviderConverter) RequestFrom(body []byte) ([]byte, error) {
 				c.inputTexts = texts
 			}
 			return vertex.OpenAIEmbeddingToGemini(body, c.mode.ModelID)
-		case config.ProviderTypeAnthropic, config.ProviderTypeCometAPI:
+		case config.ProviderTypeAnthropic, config.ProviderTypeCometAPI, config.ProviderTypeProMan:
 			return nil, errors.New(string(c.providerType) + " does not support embeddings")
 		case config.ProviderTypeBedrock:
 			return nil, errors.New("bedrock does not support embeddings")
@@ -124,7 +124,7 @@ func (c *ProviderConverter) RequestFrom(body []byte) ([]byte, error) {
 	switch c.providerType {
 	case config.ProviderTypeVertexAI, config.ProviderTypeGemini:
 		return vertex.OpenAIToVertex(body, c.mode.IsImageGeneration, c.mode.IsImageEdit, c.mode.ModelID, c.mode.ContentType)
-	case config.ProviderTypeAnthropic, config.ProviderTypeCometAPI:
+	case config.ProviderTypeAnthropic, config.ProviderTypeCometAPI, config.ProviderTypeProMan:
 		// Anthropic-compatible providers do not support image generation
 		if c.mode.IsImageGeneration {
 			return nil, errors.New(string(c.providerType) + " does not support image generation")
@@ -194,7 +194,7 @@ func (c *ProviderConverter) ResponseTo(body []byte) ([]byte, error) {
 			return vertex.VertexImageToOpenAI(body)
 		}
 		return vertex.VertexToOpenAI(body, c.mode.responseModel())
-	case config.ProviderTypeAnthropic, config.ProviderTypeCometAPI:
+	case config.ProviderTypeAnthropic, config.ProviderTypeCometAPI, config.ProviderTypeProMan:
 		return anthropic.AnthropicToOpenAI(body, c.mode.responseModel())
 	case config.ProviderTypeBedrock:
 		if isAnthropicBedrockModel(c.mode.ModelID) {
@@ -216,7 +216,7 @@ func (c *ProviderConverter) StreamTo(reader io.Reader, writer io.Writer) error {
 	switch c.providerType {
 	case config.ProviderTypeVertexAI, config.ProviderTypeGemini:
 		return vertex.TransformVertexStreamToOpenAI(reader, c.mode.responseModel(), writer)
-	case config.ProviderTypeAnthropic, config.ProviderTypeCometAPI:
+	case config.ProviderTypeAnthropic, config.ProviderTypeCometAPI, config.ProviderTypeProMan:
 		return anthropic.TransformAnthropicStreamToOpenAI(reader, c.mode.responseModel(), writer)
 	case config.ProviderTypeBedrock:
 		// Bedrock uses AWS Event Stream binary framing instead of SSE.
@@ -275,7 +275,7 @@ func (c *ProviderConverter) BuildURL(cred *config.CredentialConfig) string {
 			return vertex.BuildGeminiImageURL(cred, c.mode.ModelID)
 		}
 		return vertex.BuildGeminiURL(cred, c.mode.ModelID, c.mode.IsStreaming)
-	case config.ProviderTypeAnthropic, config.ProviderTypeCometAPI:
+	case config.ProviderTypeAnthropic, config.ProviderTypeCometAPI, config.ProviderTypeProMan:
 		return converterutil.BuildVersionedURL(cred.BaseURL, "/v1/messages")
 	case config.ProviderTypeBedrock:
 		baseURL := strings.TrimSuffix(cred.BaseURL, "/")
@@ -445,7 +445,7 @@ func ExtractTokenUsageWithOptions(body []byte, opts TokenUsageExtractionOptions)
 	if cacheCreationTokens == 0 {
 		cacheCreationTokens = resp.Usage.PromptTokensDetails.CacheWriteTokens
 	}
-	if cacheCreationTokens == 0 {
+	if cacheCreationTokens == 0 && cacheCreation5mTokens == 0 && cacheCreation1hTokens == 0 {
 		cacheCreationTokens = resp.Usage.InputTokensDetails.CacheCreationTokens
 		cacheCreation5mTokens = resp.Usage.InputTokensDetails.CacheCreationTokenDetails.Ephemeral5mInputTokens
 		cacheCreation1hTokens = resp.Usage.InputTokensDetails.CacheCreationTokenDetails.Ephemeral1hInputTokens

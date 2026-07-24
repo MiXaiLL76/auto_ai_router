@@ -7,9 +7,23 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/converter"
+	promanutils "github.com/mixaill76/auto_ai_router/internal/converter/proman/utils"
 	"github.com/mixaill76/auto_ai_router/internal/proxy/modelutils"
 )
+
+func clientResponseBodyForCredential(statusCode int, body []byte, cred *config.CredentialConfig, displayModel string) ([]byte, bool, bool) {
+	if statusCode >= 400 && shouldMaskUpstreamErrors(cred) {
+		masked := maskedUpstreamErrorBody(statusCode)
+		return masked, !bytes.Equal(body, masked), true
+	}
+	if statusCode >= 200 && statusCode < 300 && promanutils.ShouldSanitizeUpstreamSurface(cred) {
+		sanitized, changed := promanutils.SanitizeUpstreamJSONBody(body, displayModel)
+		return sanitized, changed, false
+	}
+	return body, false, false
+}
 
 const maxProxyStreamErrorCaptureBytes = 256 * 1024
 
@@ -146,13 +160,17 @@ func resolveCapturedProviderStreamError(
 // writeProxyResponse writes raw upstream proxy response to client.
 // Respects the client's Accept-Encoding header to compress the response appropriately.
 // Used by both primary proxy path and fallback retry path to avoid duplication.
-func (p *Proxy) writeProxyResponse(w http.ResponseWriter, resp *ProxyResponse, clientReq *http.Request, credName, modelID string, logCtx *RequestLogContext) {
+func (p *Proxy) writeProxyResponse(w http.ResponseWriter, resp *ProxyResponse, clientReq *http.Request, cred *config.CredentialConfig, modelID string, logCtx *RequestLogContext) {
 	if resp == nil {
 		return
 	}
 
-	responseBody := resp.Body
-	responseBodyChanged := false
+	credName := ""
+	if cred != nil {
+		credName = cred.Name
+	}
+
+	responseBody, responseBodyChanged, responseBodyMasked := clientResponseBodyForCredential(resp.StatusCode, resp.Body, cred, modelID)
 	if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
 		endpoint := endpointFromRequest(clientReq)
 		if logCtx != nil && logCtx.Request != nil {
@@ -209,7 +227,7 @@ func (p *Proxy) writeProxyResponse(w http.ResponseWriter, resp *ProxyResponse, c
 
 	// Copy response headers
 	for key, values := range resp.Headers {
-		if isHopByHopHeader(key) || isProxyOwnedResponseHeader(key) {
+		if shouldSkipResponseHeaderForClient(key, cred) {
 			continue
 		}
 		if strings.EqualFold(key, HeaderAIRUsageAudioTokens) && w.Header().Get(HeaderAIRUsageAudioTokens) != "" {
@@ -218,15 +236,13 @@ func (p *Proxy) writeProxyResponse(w http.ResponseWriter, resp *ProxyResponse, c
 		if responseBodyChanged && isRepresentationIntegrityHeader(key) {
 			continue
 		}
-		// Skip Content-Length, Transfer-Encoding, and Content-Encoding
-		// We'll set Content-Encoding based on our compression, and Content-Length based on actual body size
-		// Skip X-Credential-Name — internal header for proxy-to-proxy routing, not exposed to end clients
-		if key == "Content-Length" || key == "Transfer-Encoding" || key == "Content-Encoding" || key == "X-Credential-Name" {
-			continue
-		}
 		for _, value := range values {
 			w.Header().Add(key, value)
 		}
+	}
+
+	if responseBodyMasked {
+		w.Header().Set("Content-Type", "application/json")
 	}
 
 	// Set Content-Encoding if we compressed the response
@@ -253,7 +269,7 @@ func (p *Proxy) writeProxyStreamingResponseWithTokens(
 	w http.ResponseWriter,
 	resp *ProxyResponse,
 	clientReq *http.Request,
-	credName string,
+	cred *config.CredentialConfig,
 	modelID string,
 	tokenizerModelID string,
 	logCtx *RequestLogContext,
@@ -261,6 +277,11 @@ func (p *Proxy) writeProxyStreamingResponseWithTokens(
 ) (*converter.TokenUsage, error) {
 	if resp == nil || resp.StreamBody == nil {
 		return nil, nil
+	}
+
+	credName := ""
+	if cred != nil {
+		credName = cred.Name
 	}
 
 	streamBody := resp.StreamBody
@@ -271,6 +292,9 @@ func (p *Proxy) writeProxyStreamingResponseWithTokens(
 			normalizeStream = true
 		}
 	}
+	if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices && promanutils.ShouldSanitizeUpstreamSurface(cred) {
+		streamBody = promanutils.NewSanitizingSSEReadCloser(streamBody, modelID)
+	}
 	normalizeResponseModel := resp.StatusCode >= http.StatusOK &&
 		resp.StatusCode < http.StatusMultipleChoices && streamRouteReturnsModel(logCtx)
 	defer func() {
@@ -280,20 +304,13 @@ func (p *Proxy) writeProxyStreamingResponseWithTokens(
 	}()
 
 	for key, values := range resp.Headers {
-		if isHopByHopHeader(key) || isProxyOwnedResponseHeader(key) {
+		if shouldSkipResponseHeaderForClient(key, cred) {
 			continue
 		}
 		if strings.EqualFold(key, HeaderAIRUsageAudioTokens) && w.Header().Get(HeaderAIRUsageAudioTokens) != "" {
 			continue
 		}
 		if (normalizeStream || normalizeResponseModel) && isRepresentationIntegrityHeader(key) {
-			continue
-		}
-		// Skip Content-Length, Transfer-Encoding, and Content-Encoding
-		// For streaming responses, we don't re-compress since it would break the stream protocol.
-		// We remove Content-Encoding from upstream since Go's http.Client already decompressed it.
-		// Skip X-Credential-Name — internal header for proxy-to-proxy routing, not exposed to end clients
-		if key == "Content-Length" || key == "Transfer-Encoding" || key == "Content-Encoding" || key == "X-Credential-Name" {
 			continue
 		}
 		for _, value := range values {

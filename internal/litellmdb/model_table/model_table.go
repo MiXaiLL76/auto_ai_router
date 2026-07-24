@@ -299,6 +299,8 @@ func mapProviderType(provider string) config.ProviderType {
 		return config.ProviderTypeGemini
 	case strings.Contains(p, "cometapi") || strings.Contains(p, "comet-api"):
 		return config.ProviderTypeCometAPI
+	case strings.Contains(p, "proman") || strings.Contains(p, "pro-man") || strings.Contains(p, "pro_man"):
+		return config.ProviderTypeProMan
 	case strings.Contains(p, "xai"):
 		return config.ProviderTypeOpenAI
 	default:

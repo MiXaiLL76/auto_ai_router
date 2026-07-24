@@ -3,6 +3,7 @@ package startup
 import (
 	"context"
 	"log/slog"
+	"net/http"
 	"time"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
@@ -33,7 +34,7 @@ func ValidateProxyCredentialsAtStartup(cfg *config.Config, log *slog.Logger) {
 	for _, cred := range proxyCredentials {
 		// Create HTTP client with 5-second timeout for connectivity check
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		_, err := proxy.FetchHealthFromRemoteProxy(ctx, &cred, log)
+		_, headers, err := proxy.FetchHealthResponseFromRemoteProxy(ctx, &cred, log)
 		cancel()
 
 		if err != nil {
@@ -46,6 +47,7 @@ func ValidateProxyCredentialsAtStartup(cfg *config.Config, log *slog.Logger) {
 			)
 		} else {
 			reachableCount++
+			warnIfGenericProxyPointsToAIR(cred, headers, log)
 			log.Debug("Proxy/AIR credential accessible at startup",
 				"name", cred.Name,
 				"url", cred.BaseURL,
@@ -69,4 +71,24 @@ func ValidateProxyCredentialsAtStartup(cfg *config.Config, log *slog.Logger) {
 			"action_recommended", "Check that all proxy/AIR services are running and network-accessible before production deployment",
 		)
 	}
+}
+
+func warnIfGenericProxyPointsToAIR(cred config.CredentialConfig, headers http.Header, log *slog.Logger) {
+	if cred.Type != config.ProviderTypeProxy || headers == nil {
+		return
+	}
+	routerVersion := headers.Get("X-Router-Version")
+	routerCommit := headers.Get("X-Router-Commit")
+	if routerVersion == "" && routerCommit == "" {
+		return
+	}
+	log.Warn("Proxy credential appears to point to an Auto AI Router upstream",
+		"name", cred.Name,
+		"url", cred.BaseURL,
+		"configured_type", cred.Type,
+		"recommended_type", config.ProviderTypeAIR,
+		"router_version", routerVersion,
+		"router_commit", routerCommit,
+		"impact", "cached audio usage may be billed incorrectly when AIR upstreams are configured as generic proxy credentials",
+	)
 }

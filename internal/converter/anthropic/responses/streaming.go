@@ -232,15 +232,19 @@ func processAnthropicEvent(w io.Writer, acc *anthropicStreamAccumulator, event *
 			if event.Usage.OutputTokens != nil {
 				acc.outputTokens = *event.Usage.OutputTokens
 			}
-			if event.Usage.CacheReadInputTokens != nil && *event.Usage.CacheReadInputTokens > 0 {
-				acc.cachedTokens = *event.Usage.CacheReadInputTokens
+			if event.Usage.CacheReadInputTokens != nil {
+				acc.cachedTokens = nonNegativeAnthropicStreamTokenCount(*event.Usage.CacheReadInputTokens)
 			}
-			if event.Usage.CacheCreationInputTokens != nil && *event.Usage.CacheCreationInputTokens > 0 {
-				acc.cacheCreationTokens = *event.Usage.CacheCreationInputTokens
+			if event.Usage.CacheCreationInputTokens != nil {
+				cacheCreationInputTokens := nonNegativeAnthropicStreamTokenCount(*event.Usage.CacheCreationInputTokens)
+				acc.cacheCreationTokens = cacheCreationInputTokens
 				if event.Usage.CacheCreation != nil {
 					acc.cacheCreationTokens, acc.cacheCreation5mTokens, acc.cacheCreation1hTokens = anthropic.NormalizeCacheCreationUsage(
-						*event.Usage.CacheCreationInputTokens, event.Usage.CacheCreation,
+						cacheCreationInputTokens, event.Usage.CacheCreation,
 					)
+				} else if cacheCreationInputTokens == 0 {
+					acc.cacheCreation5mTokens = 0
+					acc.cacheCreation1hTokens = 0
 				}
 			} else if event.Usage.CacheCreation != nil {
 				acc.cacheCreationTokens, acc.cacheCreation5mTokens, acc.cacheCreation1hTokens = anthropic.NormalizeCacheCreationUsage(
@@ -269,6 +273,13 @@ func processAnthropicEvent(w io.Writer, acc *anthropicStreamAccumulator, event *
 		return fmt.Errorf("anthropic stream error (%s): %s", errorType, message)
 	}
 	return nil
+}
+
+func nonNegativeAnthropicStreamTokenCount(value int) int {
+	if value < 0 {
+		return 0
+	}
+	return value
 }
 
 func handleAnthropicTextDelta(w io.Writer, acc *anthropicStreamAccumulator, delta string) error {

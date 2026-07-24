@@ -34,7 +34,7 @@ func TestWriteProxyResponseNormalizesQwenUsageBeforeCompression(t *testing.T) {
 	req.Header.Set("Accept-Encoding", "gzip")
 	w := httptest.NewRecorder()
 
-	NewTestProxyBuilder().Build().writeProxyResponse(w, resp, req, "test", "qwen/qwen3.6-35b-a3b", nil)
+	NewTestProxyBuilder().Build().writeProxyResponse(w, resp, req, &config.CredentialConfig{Name: "test"}, "qwen/qwen3.6-35b-a3b", nil)
 
 	require.Equal(t, http.StatusOK, w.Code)
 	require.Equal(t, "gzip", w.Header().Get("Content-Encoding"))
@@ -90,11 +90,103 @@ func TestWriteProxyResponseDoesNotNormalizeError(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 	w := httptest.NewRecorder()
 
-	NewTestProxyBuilder().Build().writeProxyResponse(w, resp, req, "test", "qwen3.6-35b-a3b", nil)
+	NewTestProxyBuilder().Build().writeProxyResponse(w, resp, req, &config.CredentialConfig{Name: "test"}, "qwen3.6-35b-a3b", nil)
 
 	assert.Equal(t, http.StatusBadGateway, w.Code)
 	assert.Equal(t, originalBody, w.Body.Bytes())
 	assert.Equal(t, `"unchanged-error-body"`, w.Header().Get("ETag"))
+}
+
+func TestWriteProxyResponseProManMasksErrorAndStripsHeaders(t *testing.T) {
+	rawBody := []byte(`{"error":{"message":"litellm.BadRequestError: Received Model Group=anthropic/claude-haiku-4-5-20251001/anthropic-direct-client-0dce8b1a Available Model Group Fallbacks=None"}}`)
+	resp := &ProxyResponse{
+		StatusCode: http.StatusBadRequest,
+		Headers: http.Header{
+			"Content-Type":      []string{"application/json"},
+			"X-Litellm-Version": []string{"1.92.0"},
+			"Llm_provider-Base": []string{"anthropic-direct"},
+			"Server":            []string{"uvicorn"},
+			"ETag":              []string{`"raw-error"`},
+		},
+		Body: rawBody,
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	w := httptest.NewRecorder()
+	cred := &config.CredentialConfig{Name: "proman", Type: config.ProviderTypeProMan}
+
+	NewTestProxyBuilder().Build().writeProxyResponse(w, resp, req, cred, "claude-haiku-4.5", nil)
+
+	require.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Equal(t, "application/json", w.Header().Get("Content-Type"))
+	assert.Empty(t, w.Header().Get("X-Litellm-Version"))
+	assert.Empty(t, w.Header().Get("Llm_provider-Base"))
+	assert.Empty(t, w.Header().Get("Server"))
+	assert.Empty(t, w.Header().Get("ETag"))
+	assert.NotContains(t, w.Body.String(), "litellm")
+	assert.NotContains(t, w.Body.String(), "anthropic-direct-client")
+	assert.Contains(t, w.Body.String(), "Upstream provider error")
+	assert.Equal(t, rawBody, resp.Body, "raw upstream body should remain available to internal logging")
+}
+
+func TestWriteProxyResponseProManSanitizesSuccessBody(t *testing.T) {
+	resp := &ProxyResponse{
+		StatusCode: http.StatusOK,
+		Headers: http.Header{
+			"Content-Type":      []string{"application/json"},
+			"X-Litellm-Version": []string{"1.92.0"},
+			"ETag":              []string{`"raw-success"`},
+		},
+		Body: []byte(`{"id":"chatcmpl-1","model":"anthropic/claude-haiku-4-5-20251001/anthropic-direct-client-0dce8b1a","provider_specific_fields":{"trace":"hidden"},"choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`),
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	w := httptest.NewRecorder()
+	cred := &config.CredentialConfig{Name: "proman", Type: config.ProviderTypeProMan}
+
+	NewTestProxyBuilder().Build().writeProxyResponse(w, resp, req, cred, "claude-haiku-4.5", nil)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.Empty(t, w.Header().Get("X-Litellm-Version"))
+	assert.Empty(t, w.Header().Get("ETag"))
+	assert.Contains(t, w.Body.String(), `"model":"claude-haiku-4.5"`)
+	assert.NotContains(t, w.Body.String(), "provider_specific_fields")
+	assert.NotContains(t, w.Body.String(), "anthropic-direct-client")
+}
+
+func TestWriteProxyResponseDoesNotSanitizeProviderLookingNameWithoutProManType(t *testing.T) {
+	rawBody := []byte(`{"model":"anthropic/customer-choice","caller":"customer-app","provider_specific_fields":{"keep":"regular"},"choices":[{"message":{"content":"ok"}}]}`)
+	resp := &ProxyResponse{
+		StatusCode: http.StatusOK,
+		Headers: http.Header{
+			"Content-Type": []string{"application/json"},
+			"Server":       []string{"provider-server"},
+		},
+		Body: rawBody,
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	w := httptest.NewRecorder()
+	cred := &config.CredentialConfig{Name: "anthropic-promanYT-01", Type: config.ProviderTypeAnthropic}
+
+	NewTestProxyBuilder().Build().writeProxyResponse(w, resp, req, cred, "claude-haiku-4.5", nil)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "provider-server", w.Header().Get("Server"))
+	assert.Contains(t, w.Body.String(), `"caller":"customer-app"`)
+	assert.Contains(t, w.Body.String(), `"provider_specific_fields":{"keep":"regular"}`)
+	assert.NotContains(t, w.Body.String(), "anthropic-direct-client")
+}
+
+func TestClientResponseBodyForProManMasksErrors(t *testing.T) {
+	cred := &config.CredentialConfig{Name: "proman", Type: config.ProviderTypeProMan}
+	raw := []byte(`{"error":{"message":"litellm.BadRequestError: Received Model Group=anthropic/claude/anthropic-direct-client-0dce8b1a Available Model Group Fallbacks=None"}}`)
+
+	body, changed, masked := clientResponseBodyForCredential(400, raw, cred, "claude-haiku-4.5")
+
+	require.True(t, changed)
+	require.True(t, masked)
+	assert.NotContains(t, string(body), "litellm")
+	assert.NotContains(t, string(body), "anthropic-direct-client")
+	assert.NotContains(t, string(body), "Model Group")
+	assert.Contains(t, string(body), "Upstream provider error")
 }
 
 func TestWriteProxyStreamingResponseNormalizesQwenUsage(t *testing.T) {
@@ -117,7 +209,7 @@ func TestWriteProxyStreamingResponseNormalizesQwenUsage(t *testing.T) {
 		w,
 		resp,
 		req,
-		"test",
+		&config.CredentialConfig{Name: "test"},
 		"gateway/qwen3.6-35b-a3b-20260415",
 		"qwen3.6-35b-a3b",
 		nil,
@@ -152,7 +244,7 @@ func TestWriteProxyStreamingResponsePreservesNormalizedCachedAudioUsage(t *testi
 		w,
 		resp,
 		req,
-		"downstream-air",
+		&config.CredentialConfig{Name: "downstream-air", Type: config.ProviderTypeAIR},
 		"gpt-4o-audio",
 		"gpt-4o-audio",
 		nil,
@@ -183,7 +275,7 @@ func TestWriteProxyStreamingResponseNormalizesRawOpenAICachedAudioUsage(t *testi
 		w,
 		resp,
 		req,
-		"generic-openai-proxy",
+		&config.CredentialConfig{Name: "generic-openai-proxy", Type: config.ProviderTypeProxy},
 		"gpt-4o-audio",
 		"gpt-4o-audio",
 		nil,
@@ -235,7 +327,7 @@ func TestWriteProxyStreamingResponseQwenDrainCapturesUsage(t *testing.T) {
 	w := newFailAfterNBytesWriter(10)
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 
-	usage, err := prx.writeProxyStreamingResponseWithTokens(w, proxyResp, req, "test", "qwen3.6-35b-a3b", "qwen3.6-35b-a3b", nil)
+	usage, err := prx.writeProxyStreamingResponseWithTokens(w, proxyResp, req, &config.CredentialConfig{Name: "test"}, "qwen3.6-35b-a3b", "qwen3.6-35b-a3b", nil)
 
 	require.Error(t, err)
 	require.NotNil(t, usage)

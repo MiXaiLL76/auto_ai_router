@@ -21,6 +21,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/balancer"
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/converter"
+	promanutils "github.com/mixaill76/auto_ai_router/internal/converter/proman/utils"
 	"github.com/mixaill76/auto_ai_router/internal/converter/responses"
 	"github.com/mixaill76/auto_ai_router/internal/httputil"
 	"github.com/mixaill76/auto_ai_router/internal/kafkalog"
@@ -60,6 +61,159 @@ func requestWithPath(r *http.Request, path string) *http.Request {
 	clone := r.Clone(r.Context())
 	clone.URL.Path = path
 	return clone
+}
+
+const unsupportedCredentialRequestMessage = "request parameters are not supported by available providers"
+
+func (p *Proxy) applyCredentialCompatibilityRouting(
+	w http.ResponseWriter,
+	r *http.Request,
+	prepared *orchestratedRequest,
+	logCtx *RequestLogContext,
+	start time.Time,
+) bool {
+	cred := prepared.cred
+	modelID := prepared.modelID
+	if cred.Type == config.ProviderTypeProxy {
+		return true
+	}
+
+	reason, provider := unsupportedCredentialRequest(cred, prepared.body, modelID)
+	if reason == "" {
+		return true
+	}
+
+	nextCred, nextReq, routed := p.nextPrimaryAfterUnsupportedCredential(r, prepared, modelID, cred, logCtx.Scope, reason, provider)
+	if routed {
+		r.URL.Path = nextReq.path
+		prepared.cred = nextCred
+		prepared.body = nextReq.body
+		prepared.proxyBody = nextReq.proxyBody
+		prepared.proxyPath = nextReq.proxyPath
+		prepared.realModelID = nextReq.realModelID
+		prepared.convertedResp = nextReq.convertedResp
+		prepared.passthroughResponses = nextReq.passthroughResponses
+		prepared.nativeResponses = nextReq.nativeResponses
+		logCtx.Credential = nextCred
+		logCtx.RealModelID = prepared.realModelID
+		if span := trace.SpanFromContext(r.Context()); span.IsRecording() {
+			span.SetAttributes(
+				attribute.String("aar.real_model", prepared.realModelID),
+				attribute.String("aar.credential", nextCred.Name),
+				attribute.String("aar.provider", string(nextCred.Type)),
+				attribute.Bool("aar.provider_compatibility_skip", true),
+			)
+		}
+		return true
+	}
+
+	success, fallbackReason := p.TryFallbackProxy(
+		w,
+		requestWithPath(r, prepared.proxyPath),
+		modelID,
+		cred.Name,
+		http.StatusBadRequest,
+		RetryReasonServerErr,
+		prepared.proxyBody,
+		start,
+		logCtx,
+	)
+	if success {
+		return false
+	}
+
+	p.logger.DebugContext(r.Context(), "No fallback handled unsupported provider request",
+		"credential", cred.Name,
+		"provider", provider,
+		"model", modelID,
+		"reason", reason,
+		"fallback_reason", fallbackReason)
+	p.logUpstreamError(r.Context(), "Provider compatibility routing failed with no fallback", http.StatusBadRequest, cred, modelID, nil,
+		"provider", provider,
+		"reason", reason,
+		"fallback_reason", fallbackReason,
+		"request_id", logCtx.RequestID)
+	logCtx.Credential = cred
+	logCtx.Status = "failure"
+	logCtx.HTTPStatus = http.StatusBadRequest
+	logCtx.ErrorMsg = unsupportedCredentialRequestMessage
+	WriteErrorBadRequest(w, unsupportedCredentialRequestMessage)
+	return false
+}
+
+func (p *Proxy) nextPrimaryAfterUnsupportedCredential(
+	r *http.Request,
+	prepared *orchestratedRequest,
+	modelID string,
+	currentCred *config.CredentialConfig,
+	visibility scope.Context,
+	reason string,
+	provider string,
+) (*config.CredentialConfig, credentialPreparedRequest, bool) {
+	triedCreds := GetTried(r.Context())
+	triedCreds[currentCred.Name] = true
+
+	for attempts := 0; attempts < 128; attempts++ {
+		candidate, err := p.balancer.NextForModelExcludingScoped(modelID, triedCreds, visibility)
+		if err != nil {
+			p.logger.DebugContext(r.Context(), "No compatible primary credential available for unsupported provider request",
+				"model", modelID,
+				"credential", currentCred.Name,
+				"provider", provider,
+				"reason", reason,
+				"error", err)
+			return nil, credentialPreparedRequest{}, false
+		}
+		triedCreds[candidate.Name] = true
+		if candidateReason, _ := unsupportedCredentialRequest(candidate, prepared.baseBody, modelID); candidateReason != "" {
+			continue
+		}
+
+		nextReq, prepErr := p.prepareRequestForCredential(
+			r,
+			prepared.baseBody,
+			prepared.baseProxyBody,
+			modelID,
+			prepared.baseRealModelID,
+			prepared.basePath,
+			prepared.streaming,
+			candidate,
+			prepared.isResponsesAPI,
+			prepared.responsesPrevHandled,
+			prepared.stickyCacheEligible,
+		)
+		if prepErr != nil {
+			p.logger.WarnContext(r.Context(), "Failed to prepare alternate primary request after provider compatibility skip",
+				"credential", candidate.Name,
+				"provider", string(candidate.Type),
+				"model", modelID,
+				"reason", reason,
+				"error", prepErr)
+			continue
+		}
+
+		p.logger.InfoContext(r.Context(), "Skipping incompatible credential for unsupported request",
+			"credential", currentCred.Name,
+			"provider", provider,
+			"next_credential", candidate.Name,
+			"model", modelID,
+			"reason", reason)
+		return candidate, nextReq, true
+	}
+
+	p.logger.WarnContext(r.Context(), "Provider compatibility skip exhausted primary credential scan",
+		"credential", currentCred.Name,
+		"provider", provider,
+		"model", modelID,
+		"reason", reason)
+	return nil, credentialPreparedRequest{}, false
+}
+
+func unsupportedCredentialRequest(cred *config.CredentialConfig, body []byte, selectedModel string) (string, string) {
+	if promanutils.IsCredential(cred) {
+		return promanutils.UnsupportedRequest(body, selectedModel), "ProMan"
+	}
+	return "", ""
 }
 
 // Context returns the originating client request's context (carrying the OTEL
@@ -568,7 +722,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 	r = prepared.request
 	logCtx.Request = r
 	body := prepared.body
-	proxyBody := prepared.proxyBody
+	var proxyBody []byte
 	modelID := prepared.modelID
 	realModelID := prepared.realModelID
 	streaming := prepared.streaming
@@ -636,6 +790,14 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		logCtx.WebSearchRequested = true
 		logCtx.WebSearchContextSize = webSearchContextSize
 	}
+
+	if !p.applyCredentialCompatibilityRouting(w, r, prepared, logCtx, start) {
+		return
+	}
+	body = prepared.body
+	proxyBody = prepared.proxyBody
+	realModelID = prepared.realModelID
+	cred = prepared.cred
 
 	// Handle proxy/AIR credential types with exact same-type retry + fallback.
 	if cred.IsProxyLike() {
@@ -773,7 +935,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 						p.logger.WarnContext(r.Context(), "Failed to close proxy streaming response body", "error", closeErr)
 					}
 				}()
-				copyResponseHeaders(w, proxyResp.Headers, cred.Type)
+				copyResponseHeaders(w, proxyResp.Headers, cred)
 				if logCtx.IsProxyRequest && logCtx.ActualCredentialName != "" {
 					w.Header().Set("X-Credential-Name", logCtx.ActualCredentialName)
 				}
@@ -801,7 +963,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 						p.logger.WarnContext(r.Context(), "Failed to close proxy streaming response body", "error", closeErr)
 					}
 				}()
-				copyResponseHeaders(w, proxyResp.Headers, cred.Type)
+				copyResponseHeaders(w, proxyResp.Headers, cred)
 				if logCtx.IsProxyRequest && logCtx.ActualCredentialName != "" {
 					w.Header().Set("X-Credential-Name", logCtx.ActualCredentialName)
 				}
@@ -834,7 +996,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 				}
 				logCtx.PromptTokensEstimate = estimatePromptTokensForModel(proxyBody, tokenizerModelID)
 				streamUsage, err := p.writeProxyStreamingResponseWithTokens(
-					w, proxyResp, r, cred.Name, modelID, tokenizerModelID, logCtx, tokenUsageOptions,
+					w, proxyResp, r, cred, modelID, tokenizerModelID, logCtx, tokenUsageOptions,
 				)
 				if err != nil {
 					p.logStreamHandlerError(r.Context(), "Failed to write streaming proxy response", err,
@@ -924,7 +1086,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			if proxyResp.StatusCode >= 200 && proxyResp.StatusCode < 300 {
 				markAudioUsageContract(w.Header(), tokenUsageOptions.AudioInputIncludesCachedAudio)
 			}
-			p.writeProxyResponse(w, proxyResp, r, cred.Name, modelID, logCtx)
+			p.writeProxyResponse(w, proxyResp, r, cred, modelID, logCtx)
 			tokens := extractTokensFromResponse(string(proxyResp.Body), config.ProviderTypeOpenAI)
 			if tokens > 0 {
 				p.rateLimiter.ConsumeTokens(cred.Name, tokens)
@@ -1224,7 +1386,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			proxyReq.Header.Set("Authorization", "Bearer "+vertexToken)
 		case config.ProviderTypeGemini:
 			proxyReq.Header.Set("x-goog-api-key", cred.APIKey)
-		case config.ProviderTypeAnthropic, config.ProviderTypeCometAPI:
+		case config.ProviderTypeAnthropic, config.ProviderTypeCometAPI, config.ProviderTypeProMan:
 			if cred.AuthType == "bearer" {
 				proxyReq.Header.Set("Authorization", "Bearer "+cred.APIKey)
 			} else {
@@ -1556,9 +1718,15 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		}
 
 		rawErrorBody := finalResponseBody
-		if resp.StatusCode >= 400 && shouldMaskUpstreamErrors(cred) {
-			finalResponseBody = maskedUpstreamErrorBody(resp.StatusCode)
-			bodyForTokenExtraction = finalResponseBody
+		clientBody, clientBodyChanged, clientBodyMasked := clientResponseBodyForCredential(resp.StatusCode, finalResponseBody, cred, modelID)
+		if clientBodyChanged {
+			finalResponseBody = clientBody
+			bodyForTokenExtraction = clientBody
+		}
+		if clientBodyChanged || clientBodyMasked {
+			dropRepresentationIntegrityHeaders(resp.Header)
+		}
+		if clientBodyMasked {
 			resp.Header.Set("Content-Type", "application/json")
 		}
 
@@ -1634,7 +1802,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Copy response headers (skip hop-by-hop headers and transformation-related headers)
-	copyResponseHeaders(w, resp.Header, cred.Type)
+	copyResponseHeaders(w, resp.Header, cred)
 	switch outgoingAudioUsageContract {
 	case audioUsageContractExcludesCached:
 		markAudioUsageExcludesCached(w.Header())
@@ -1659,6 +1827,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 				body := maskedUpstreamErrorBody(resp.StatusCode)
 				w.Header().Set("Content-Type", "application/json")
 				w.Header().Set("Content-Length", fmt.Sprintf("%d", len(body)))
+				dropRepresentationIntegrityHeaders(w.Header())
 				w.WriteHeader(resp.StatusCode)
 				_, _ = w.Write(body)
 				logCtx.Status = "failure"

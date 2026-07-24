@@ -578,12 +578,28 @@ func TestExtractTokenUsage(t *testing.T) {
 }
 
 func TestExtractTokenUsage_CacheCreationDetailsProvideMissingAggregate(t *testing.T) {
-	body := []byte(`{"usage":{"input_tokens":10,"output_tokens":1,"input_tokens_details":{"cache_creation_token_details":{"ephemeral_5m_input_tokens":3,"ephemeral_1h_input_tokens":7}}}}`)
+	tests := []struct {
+		name string
+		body string
+	}{
+		{
+			name: "responses shape",
+			body: `{"usage":{"input_tokens":10,"output_tokens":1,"input_tokens_details":{"cache_creation_token_details":{"ephemeral_5m_input_tokens":3,"ephemeral_1h_input_tokens":7}}}}`,
+		},
+		{
+			name: "chat completions shape",
+			body: `{"usage":{"prompt_tokens":10,"completion_tokens":1,"prompt_tokens_details":{"cache_creation_token_details":{"ephemeral_5m_input_tokens":3,"ephemeral_1h_input_tokens":7}}}}`,
+		},
+	}
 
-	usage := ExtractTokenUsage(body)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			usage := ExtractTokenUsage([]byte(tt.body))
 
-	if usage == nil || usage.CacheCreationTokens != 10 || usage.CacheCreation5mTokens != 3 || usage.CacheCreation1hTokens != 7 {
-		t.Fatalf("unexpected cache creation usage: %+v", usage)
+			if usage == nil || usage.CacheCreationTokens != 10 || usage.CacheCreation5mTokens != 3 || usage.CacheCreation1hTokens != 7 {
+				t.Fatalf("unexpected cache creation usage: %+v", usage)
+			}
+		})
 	}
 }
 

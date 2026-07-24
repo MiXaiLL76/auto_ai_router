@@ -286,7 +286,7 @@ func (p *Proxy) writeFallbackResponse(
 		}
 		usageOptions := tokenUsageExtractionOptionsForResponse(fallbackCred, proxyResp.Headers)
 		streamUsage, err := p.writeProxyStreamingResponseWithTokens(
-			w, proxyResp, r, fallbackCred.Name, modelID, modelID, logCtx, usageOptions,
+			w, proxyResp, r, fallbackCred, modelID, modelID, logCtx, usageOptions,
 		)
 		if err != nil {
 			markStreamFailure(logCtx, err)
@@ -389,7 +389,7 @@ func (p *Proxy) writeFallbackResponse(
 		}
 	}
 	if !proxyResp.IsStreaming {
-		p.writeProxyResponse(w, proxyResp, r, fallbackCred.Name, modelID, logCtx)
+		p.writeProxyResponse(w, proxyResp, r, fallbackCred, modelID, logCtx)
 	}
 	if logCtx != nil && logCtx.Status == "success" {
 		logCtx.RequestCompleted = true

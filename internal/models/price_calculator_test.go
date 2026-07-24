@@ -708,6 +708,25 @@ func TestCalculateTokenCosts_CacheCreationTTLBreakdownIsCappedAtAggregate(t *tes
 	assert.InDelta(t, 26, costs.CacheCreationCost, 1e-9) // 8*2 + capped 2*5
 }
 
+func TestCalculateTokenCosts_CacheCreationTTLBreakdownProvidesMissingAggregate(t *testing.T) {
+	usage := &converter.TokenUsage{
+		PromptTokens:          100,
+		CacheCreation5mTokens: 8,
+		CacheCreation1hTokens: 2,
+	}
+	price := &ModelPrice{
+		InputCostPerToken:                   0.01,
+		CacheCreationInputTokenCost:         2,
+		CacheCreationInputTokenCostAbove1hr: 5,
+	}
+
+	costs := CalculateTokenCosts(usage, price)
+
+	require.NotNil(t, costs)
+	assert.Zero(t, usage.CacheCreationTokens, "CalculateTokenCosts must not mutate caller-owned usage")
+	assert.InDelta(t, 26, costs.CacheCreationCost, 1e-9) // 8*2 + 2*5
+}
+
 func TestCalculateTokenCosts_CacheCreation1hCostsMoreThan5mForSameVolume(t *testing.T) {
 	price := &ModelPrice{
 		InputCostPerToken:                   0.000003,

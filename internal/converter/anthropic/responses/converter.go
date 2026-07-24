@@ -18,6 +18,9 @@ func init() {
 	responses.RegisterProviderResponses(config.ProviderTypeCometAPI, func(mode responses.ResponsesRequestMode) responses.ProviderResponses {
 		return &AnthropicResponses{mode: mode}
 	})
+	responses.RegisterProviderResponses(config.ProviderTypeProMan, func(mode responses.ResponsesRequestMode) responses.ProviderResponses {
+		return &AnthropicResponses{mode: mode}
+	})
 }
 
 // AnthropicResponses converts between the Responses API and Anthropic Messages API.
