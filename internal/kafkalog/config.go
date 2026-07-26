@@ -28,6 +28,12 @@ type Config struct {
 	SASLMechanism string // "" | "PLAIN" | "SCRAM-SHA-256" | "SCRAM-SHA-512"
 	SASLUsername  string
 	SASLPassword  string
+	// TLSCACert is an optional path to a PEM-encoded CA certificate bundle
+	// used to verify the broker's TLS certificate. Required for clusters
+	// whose certificates are signed by a CA not present in the host's system
+	// trust store (e.g. Yandex Managed Service for Kafka's
+	// YandexInternalRootCA). When empty, the OS default trust store is used.
+	TLSCACert string
 
 	Logger *slog.Logger
 

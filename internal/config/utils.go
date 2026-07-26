@@ -227,6 +227,7 @@ func PrintConfig(logger *slog.Logger, cfg *Config) {
 			"log_flush_interval", cfg.Kafka.LogFlushInterval.String(),
 			"log_workers", cfg.Kafka.LogWorkers,
 			"tls_enabled", cfg.Kafka.TLSEnabled,
+			"tls_ca_cert", cfg.Kafka.TLSCACert,
 			"sasl_mechanism", cfg.Kafka.SASLMechanism,
 			"sasl_username", cfg.Kafka.SASLUsername,
 			"sasl_password", saslPassword,

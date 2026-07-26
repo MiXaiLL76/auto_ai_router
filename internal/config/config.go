@@ -818,6 +818,11 @@ type KafkaConfig struct {
 	SASLMechanism string `yaml:"sasl_mechanism,omitempty"` // "" | "PLAIN" | "SCRAM-SHA-256" | "SCRAM-SHA-512"
 	SASLUsername  string `yaml:"sasl_username,omitempty"`
 	SASLPassword  string `yaml:"sasl_password,omitempty"`
+	// TLSCACert is an optional path to a PEM-encoded CA certificate bundle
+	// used to verify the broker's TLS certificate (e.g. Yandex Managed
+	// Service for Kafka requires its own CA, not present in the OS default
+	// trust store). Empty means the OS default trust store is used.
+	TLSCACert string `yaml:"tls_ca_cert,omitempty"`
 }
 
 // OTELConfig holds OpenTelemetry export configuration for logs, traces and metrics.
@@ -1103,6 +1108,7 @@ func (k *KafkaConfig) UnmarshalYAML(value *yaml.Node) error {
 		SASLMechanism    string   `yaml:"sasl_mechanism,omitempty"`
 		SASLUsername     string   `yaml:"sasl_username,omitempty"`
 		SASLPassword     string   `yaml:"sasl_password,omitempty"`
+		TLSCACert        string   `yaml:"tls_ca_cert,omitempty"`
 	}
 
 	var temp tempConfig
@@ -1152,6 +1158,7 @@ func (k *KafkaConfig) UnmarshalYAML(value *yaml.Node) error {
 	k.SASLMechanism = resolveEnvString(temp.SASLMechanism)
 	k.SASLUsername = resolveEnvString(temp.SASLUsername)
 	k.SASLPassword = resolveEnvString(temp.SASLPassword)
+	k.TLSCACert = resolveEnvString(temp.TLSCACert)
 	return nil
 }
 

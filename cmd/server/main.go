@@ -874,6 +874,7 @@ func initializeKafkaLog(cfg *config.Config, log *slog.Logger, litellmDBManager l
 		SASLMechanism:    cfg.Kafka.SASLMechanism,
 		SASLUsername:     cfg.Kafka.SASLUsername,
 		SASLPassword:     cfg.Kafka.SASLPassword,
+		TLSCACert:        cfg.Kafka.TLSCACert,
 		Logger:           log,
 		// Flags a batch's underlying LiteLLM_SpendLogs rows for later re-send
 		// when the batch is dropped from the in-memory DLQ after a sustained
