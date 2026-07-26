@@ -86,6 +86,11 @@ func (n *NoopManager) LogSpend(entry *models.SpendLogEntry) error {
 	return nil
 }
 
+// SpendLoggingEnabled reports whether PostgreSQL spend writes are active.
+func (n *NoopManager) SpendLoggingEnabled() bool {
+	return false
+}
+
 func (n *NoopManager) MarkSpendLogKafkaFallback(ctx context.Context, requestID, reason string) error {
 	// no-op
 	return nil
@@ -215,6 +220,11 @@ func (m *DefaultManager) LogSpend(entry *models.SpendLogEntry) error {
 		return nil
 	}
 	return m.spendLogger.Log(entry)
+}
+
+// SpendLoggingEnabled reports whether PostgreSQL spend writes are active.
+func (m *DefaultManager) SpendLoggingEnabled() bool {
+	return !m.config.DisableSpendLogsWrite && m.spendLogger != nil
 }
 
 // MarkSpendLogKafkaFallback flags an existing spend log row's metadata so it

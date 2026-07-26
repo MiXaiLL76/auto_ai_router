@@ -23,6 +23,8 @@ type stubLiteLLMManager struct {
 
 func (s *stubLiteLLMManager) IsEnabled() bool { return true }
 
+func (s *stubLiteLLMManager) SpendLoggingEnabled() bool { return true }
+
 func (s *stubLiteLLMManager) LogSpend(entry *dbmodels.SpendLogEntry) error {
 	s.loggedEntries = append(s.loggedEntries, entry)
 	return nil
@@ -44,6 +46,9 @@ func TestLogSpendToLiteLLMDB_FlagsKafkaFallbackOnQueueFull(t *testing.T) {
 
 	dbStub := &stubLiteLLMManager{}
 	prx.LiteLLMDB = dbStub
+	setTestModelPrice(prx, "gpt-4o-mini", &routermodels.ModelPrice{
+		InputCostPerToken: 0.000001, OutputCostPerToken: 0.000002,
+	})
 
 	logCtx := testLogCtx(t)
 
@@ -69,6 +74,9 @@ func TestLogSpendToLiteLLMDB_NoKafkaFallbackFlagOnSuccess(t *testing.T) {
 
 	dbStub := &stubLiteLLMManager{}
 	prx.LiteLLMDB = dbStub
+	setTestModelPrice(prx, "gpt-4o-mini", &routermodels.ModelPrice{
+		InputCostPerToken: 0.000001, OutputCostPerToken: 0.000002,
+	})
 
 	logCtx := testLogCtx(t)
 
@@ -88,6 +96,9 @@ func TestLogSpendToLiteLLMDB_NormalizesTokenUsageBeforePersisting(t *testing.T) 
 
 	dbStub := &stubLiteLLMManager{}
 	prx.LiteLLMDB = dbStub
+	setTestModelPrice(prx, "gpt-4o-mini", &routermodels.ModelPrice{
+		InputCostPerToken: 0.000001, OutputCostPerToken: 0.000002,
+	})
 
 	logCtx := testLogCtx(t)
 	logCtx.TokenUsage = &converter.TokenUsage{
@@ -122,13 +133,13 @@ func TestLogSpendToLiteLLMDB_NormalizesTokenUsageBeforePersisting(t *testing.T) 
 	assert.Equal(t, float64(2), ttlDetails["ephemeral_1h_input_tokens"])
 }
 
-func TestLogSpendToLiteLLMDB_TeamIDFallback(t *testing.T) {
+func TestLogSpendToLiteLLMDB_PreservesTeamID(t *testing.T) {
 	tests := []struct {
 		name       string
 		teamID     string
 		expectedID string
 	}{
-		{name: "credential fallback", expectedID: "openai_primary"},
+		{name: "empty team", expectedID: ""},
 		{name: "token team", teamID: "team-1", expectedID: "team-1"},
 	}
 
@@ -137,6 +148,9 @@ func TestLogSpendToLiteLLMDB_TeamIDFallback(t *testing.T) {
 			prx := NewTestProxyBuilder().Build()
 			dbStub := &stubLiteLLMManager{}
 			prx.LiteLLMDB = dbStub
+			setTestModelPrice(prx, "gpt-4o-mini", &routermodels.ModelPrice{
+				InputCostPerToken: 0.000001, OutputCostPerToken: 0.000002,
+			})
 
 			logCtx := testLogCtx(t)
 			logCtx.TokenInfo = &litellmdb.TokenInfo{TeamID: tt.teamID}
@@ -189,4 +203,48 @@ func TestLogSpendToLiteLLMDB_BillsAliasPriceBeforeRealModelPrice(t *testing.T) {
 	assert.InDelta(t, 0.0032004, costBreakdown["output_cost"].(float64), 0.000000001)
 	assert.InDelta(t, 0.0008064, costBreakdown["reasoning_cost"].(float64), 0.000000001)
 	assert.InDelta(t, entry.Spend, costBreakdown["total_cost"].(float64), 0.000000001)
+}
+
+func TestLogSpendToLiteLLMDB_RejectsUnknownPrice(t *testing.T) {
+	prx := NewTestProxyBuilder().Build()
+	dbStub := &stubLiteLLMManager{}
+	prx.LiteLLMDB = dbStub
+
+	err := prx.logSpendToLiteLLMDB(testLogCtx(t))
+
+	require.ErrorContains(t, err, "model price unavailable")
+	assert.Empty(t, dbStub.loggedEntries)
+}
+
+func TestLogSpendToLiteLLMDB_DoesNotInventTeamID(t *testing.T) {
+	prx := NewTestProxyBuilder().Build()
+	dbStub := &stubLiteLLMManager{}
+	prx.LiteLLMDB = dbStub
+	setTestModelPrice(prx, "gpt-4o-mini", &routermodels.ModelPrice{
+		InputCostPerToken: 0.000001, OutputCostPerToken: 0.000002,
+	})
+	logCtx := testLogCtx(t)
+	logCtx.TokenInfo = &dbmodels.TokenInfo{UserID: "user-1"}
+
+	require.NoError(t, prx.logSpendToLiteLLMDB(logCtx))
+
+	require.Len(t, dbStub.loggedEntries, 1)
+	assert.Empty(t, dbStub.loggedEntries[0].TeamID)
+	assert.Positive(t, dbStub.loggedEntries[0].Spend)
+}
+
+func TestLogSpendToLiteLLMDB_ChargesImagesWithoutProviderUsage(t *testing.T) {
+	prx := NewTestProxyBuilder().Build()
+	dbStub := &stubLiteLLMManager{}
+	prx.LiteLLMDB = dbStub
+	setTestModelPrice(prx, "gpt-4o-mini", &routermodels.ModelPrice{OutputCostPerImage: 0.04})
+	logCtx := testLogCtx(t)
+	logCtx.IsImageGeneration = true
+	logCtx.ImageCount = 2
+	logCtx.TokenUsage = nil
+
+	require.NoError(t, prx.logSpendToLiteLLMDB(logCtx))
+
+	require.Len(t, dbStub.loggedEntries, 1)
+	assert.InDelta(t, 0.08, dbStub.loggedEntries[0].Spend, 1e-12)
 }

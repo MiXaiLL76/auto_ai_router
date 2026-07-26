@@ -144,6 +144,22 @@ func (p *Proxy) estimateRequestCost(logCtx *RequestLogContext, publicModelID, mo
 	return modelPrice.CalculateCost(usage), true
 }
 
+func (p *Proxy) spendTrackingEnabled() bool {
+	return p.postgresSpendTrackingEnabled() ||
+		p.kafkaLog != nil && p.kafkaLog.IsEnabled()
+}
+
+func (p *Proxy) postgresSpendTrackingEnabled() bool {
+	if p.LiteLLMDB == nil || !p.LiteLLMDB.IsEnabled() {
+		return false
+	}
+	manager, ok := p.LiteLLMDB.(interface{ SpendLoggingEnabled() bool })
+	if !ok {
+		return true
+	}
+	return manager.SpendLoggingEnabled()
+}
+
 func (p *Proxy) enforceBudgetAndRateLimits(
 	w http.ResponseWriter,
 	r *http.Request,
@@ -152,6 +168,36 @@ func (p *Proxy) enforceBudgetAndRateLimits(
 	realModelID string,
 	body []byte,
 ) bool {
+	publicModelID := modelID
+	if logCtx != nil && logCtx.PublicModelID != "" {
+		publicModelID = logCtx.PublicModelID
+	}
+	priceModelID, modelPrice := lookupBillingModelPrice(p.priceRegistry, publicModelID, modelID, realModelID)
+	if logCtx != nil {
+		priceModelID, modelPrice = p.resolveBillingPrice(logCtx, publicModelID, modelID, realModelID)
+	}
+	if modelPrice == nil && p.spendTrackingEnabled() {
+		requestID := ""
+		if logCtx != nil {
+			requestID = logCtx.RequestID
+		}
+		p.logger.ErrorContext(r.Context(), "Model price unavailable; request rejected",
+			"error_code", http.StatusServiceUnavailable,
+			"model", modelID,
+			"real_model", realModelID,
+			"request_id", requestID)
+		if logCtx != nil {
+			logCtx.Status = "failure"
+			logCtx.HTTPStatus = http.StatusServiceUnavailable
+			logCtx.ErrorMsg = "model pricing unavailable"
+		}
+		WriteErrorServiceUnavailable(w, "Model pricing unavailable")
+		return false
+	}
+	if logCtx != nil {
+		logCtx.ModelPrice = modelPrice
+		logCtx.PriceModelID = priceModelID
+	}
 	if logCtx == nil || logCtx.Scope.Admin || logCtx.TokenInfo == nil {
 		return true
 	}

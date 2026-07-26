@@ -167,6 +167,7 @@ func TestSelectCredentialForModelMarksDirectSpendLogComplete(t *testing.T) {
 	prx := NewTestProxyBuilder().Build()
 	kafka := &stubKafkaManager{enabled: true}
 	prx.kafkaLog = kafka
+	setTestModelPrice(prx, "gpt-4o-mini", &models.ModelPrice{})
 	logCtx := testLogCtx(t)
 	logCtx.Credential = nil
 

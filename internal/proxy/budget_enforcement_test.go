@@ -1,8 +1,13 @@
 package proxy
 
 import (
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync/atomic"
 	"testing"
 
+	"github.com/mixaill76/auto_ai_router/internal/config"
 	dbmodels "github.com/mixaill76/auto_ai_router/internal/litellmdb/models"
 	routermodels "github.com/mixaill76/auto_ai_router/internal/models"
 	"github.com/stretchr/testify/assert"
@@ -129,4 +134,65 @@ func TestResolveBillingPriceCachesAcrossCalls(t *testing.T) {
 	secondID, secondPrice := prx.resolveBillingPrice(logCtx, "gpt-5.2-chat", "gpt-5.2-chat", "gpt-chat-latest")
 	assert.Same(t, firstPrice, secondPrice)
 	assert.Equal(t, firstID, secondID)
+}
+
+func TestEnforceBudgetAndRateLimitsRejectsUnknownPriceWhenSpendTrackingEnabled(t *testing.T) {
+	prx := NewTestProxyBuilder().Build()
+	prx.kafkaLog = &stubKafkaManager{enabled: true}
+	prx.priceRegistry = routermodels.NewModelPriceRegistry()
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	logCtx := testLogCtx(t)
+
+	allowed := prx.enforceBudgetAndRateLimits(
+		recorder, request, logCtx, "new-model", "provider/new-model-v2", []byte(`{"messages":[]}`),
+	)
+
+	assert.False(t, allowed)
+	assert.Equal(t, http.StatusServiceUnavailable, recorder.Code)
+	assert.Equal(t, "failure", logCtx.Status)
+	assert.Nil(t, logCtx.ModelPrice)
+}
+
+func TestEnforceBudgetAndRateLimitsCachesResolvedAliasPrice(t *testing.T) {
+	prx := NewTestProxyBuilder().Build()
+	prx.kafkaLog = &stubKafkaManager{enabled: true}
+	price := &routermodels.ModelPrice{InputCostPerToken: 0.000001}
+	setTestModelPrice(prx, "model-alias", price)
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	logCtx := testLogCtx(t)
+
+	allowed := prx.enforceBudgetAndRateLimits(
+		recorder, request, logCtx, "model-alias", "provider/model-v2", []byte(`{"messages":[]}`),
+	)
+
+	assert.True(t, allowed)
+	assert.Same(t, price, logCtx.ModelPrice)
+	assert.Equal(t, "model-alias", logCtx.PriceModelID)
+}
+
+func TestProxyRequestRejectsUnknownPriceBeforeProvider(t *testing.T) {
+	var providerCalls atomic.Int32
+	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		providerCalls.Add(1)
+		_, _ = w.Write([]byte(`{"usage":{"prompt_tokens":1,"completion_tokens":1}}`))
+	}))
+	defer provider.Close()
+
+	prx := NewTestProxyBuilder().
+		WithSingleCredential("openai", config.ProviderTypeOpenAI, provider.URL, "provider-key").
+		Build()
+	prx.kafkaLog = &stubKafkaManager{enabled: true}
+	prx.priceRegistry = routermodels.NewModelPriceRegistry()
+	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"gpt-4","messages":[]}`))
+	request.Header.Set("Authorization", "Bearer master-key")
+	request.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+
+	prx.ProxyRequest(recorder, request)
+
+	assert.Equal(t, http.StatusServiceUnavailable, recorder.Code)
+	assert.Zero(t, providerCalls.Load())
 }
