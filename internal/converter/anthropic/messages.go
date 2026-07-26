@@ -193,6 +193,18 @@ func convertOpenAIMessagesToAnthropic(openAIMessages []openai.OpenAIMessage) (in
 
 		case "assistant":
 			var blocks []ContentBlock
+			for _, thinking := range msg.ThinkingBlocks {
+				if thinking.Type != "thinking" && thinking.Type != "redacted_thinking" {
+					continue
+				}
+				blocks = append(blocks, ContentBlock{
+					Type:         thinking.Type,
+					Thinking:     thinking.Thinking,
+					Signature:    thinking.Signature,
+					Data:         thinking.Data,
+					CacheControl: thinking.CacheControl,
+				})
+			}
 			if textBlocks := convertOpenAIContentToAnthropic(msg.Content); len(textBlocks) > 0 {
 				blocks = append(blocks, textBlocks...)
 			}

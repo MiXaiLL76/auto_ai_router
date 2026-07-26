@@ -50,13 +50,22 @@ type OpenAIRequest struct {
 }
 
 type OpenAIMessage struct {
-	Role             string        `json:"role"`
-	Content          interface{}   `json:"content"`
-	Name             string        `json:"name,omitempty"`
-	ToolCallID       string        `json:"tool_call_id,omitempty"`
-	ToolCalls        []interface{} `json:"tool_calls,omitempty"`
-	Refusal          string        `json:"refusal,omitempty"`
-	ReasoningContent string        `json:"reasoning_content,omitempty"`
+	Role             string                `json:"role"`
+	Content          interface{}           `json:"content"`
+	Name             string                `json:"name,omitempty"`
+	ToolCallID       string                `json:"tool_call_id,omitempty"`
+	ToolCalls        []interface{}         `json:"tool_calls,omitempty"`
+	ThinkingBlocks   []OpenAIThinkingBlock `json:"thinking_blocks,omitempty"`
+	Refusal          string                `json:"refusal,omitempty"`
+	ReasoningContent string                `json:"reasoning_content,omitempty"`
+}
+
+type OpenAIThinkingBlock struct {
+	Type         string      `json:"type"`
+	Thinking     string      `json:"thinking,omitempty"`
+	Signature    string      `json:"signature,omitempty"`
+	Data         string      `json:"data,omitempty"`
+	CacheControl interface{} `json:"cache_control,omitempty"`
 }
 
 type ContentBlock struct {
@@ -133,6 +142,7 @@ type TokenDetails struct {
 	CachedAudioTokens         int                        `json:"cached_audio_tokens,omitempty"`
 	CacheCreationTokens       int                        `json:"cache_creation_tokens,omitempty"`
 	CacheCreationTokenDetails *CacheCreationTokenDetails `json:"cache_creation_token_details,omitempty"`
+	CacheWriteTokens          int                        `json:"cache_write_tokens,omitempty"`
 	AudioTokens               int                        `json:"audio_tokens,omitempty"`
 }
 

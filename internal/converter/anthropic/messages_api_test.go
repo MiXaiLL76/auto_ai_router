@@ -1,0 +1,176 @@
+package anthropic
+
+import (
+	"bytes"
+	"encoding/json"
+	"strings"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+func TestMessagesToChat(t *testing.T) {
+	longName := strings.Repeat("tool", 20)
+	body := []byte(`{
+		"model":"claude-alias",
+		"max_tokens":512,
+		"system":[{"type":"text","text":"Be concise","cache_control":{"type":"ephemeral"}}],
+		"messages":[
+			{"role":"assistant","content":[
+				{"type":"text","text":"Calling "},
+				{"type":"tool_use","id":"tool.1","name":"` + longName + `","input":{"q":"weather"}}
+			]},
+			{"role":"user","content":[
+				{"type":"tool_result","tool_use_id":"tool.1","content":[{"type":"text","text":"sunny"}]},
+				{"type":"text","text":"Continue"},
+				{"type":"image","source":{"type":"base64","media_type":"image/png","data":"aGVsbG8="}}
+			]}
+		],
+		"tools":[{"name":"` + longName + `","description":"Search","input_schema":{"type":"object"}}],
+		"tool_choice":{"type":"tool","name":"` + longName + `"},
+		"stop_sequences":["STOP"],
+		"metadata":{"user_id":"user-1"},
+		"stream":true
+	}`)
+
+	converted, metadata, err := MessagesToChat(body)
+	require.NoError(t, err)
+
+	var got map[string]interface{}
+	require.NoError(t, json.Unmarshal(converted, &got))
+	assert.Equal(t, "claude-alias", got["model"])
+	assert.Equal(t, []interface{}{"STOP"}, got["stop"])
+	assert.Equal(t, "user-1", got["user"])
+	assert.Equal(t, map[string]interface{}{"include_usage": true}, got["stream_options"])
+	require.Len(t, metadata.ToolNames, 1)
+
+	messages := got["messages"].([]interface{})
+	require.Len(t, messages, 4)
+	assert.Equal(t, "system", messages[0].(map[string]interface{})["role"])
+	assert.Equal(t, "assistant", messages[1].(map[string]interface{})["role"])
+	assert.Equal(t, "tool", messages[2].(map[string]interface{})["role"])
+	assert.Equal(t, "user", messages[3].(map[string]interface{})["role"])
+
+	tool := got["tools"].([]interface{})[0].(map[string]interface{})
+	truncated := tool["function"].(map[string]interface{})["name"].(string)
+	assert.Len(t, truncated, maxOpenAIToolNameLength)
+	assert.Equal(t, longName, metadata.ToolNames[truncated])
+	assert.Equal(t, truncated, got["tool_choice"].(map[string]interface{})["function"].(map[string]interface{})["name"])
+}
+
+func TestChatToMessages(t *testing.T) {
+	longName := strings.Repeat("tool", 20)
+	truncated := truncateToolName(longName)
+	body := []byte(`{
+		"id":"chatcmpl-1",
+		"model":"model-alias",
+		"choices":[{
+			"index":0,
+			"message":{
+				"role":"assistant",
+				"content":null,
+				"reasoning_content":"thinking",
+				"tool_calls":[{"id":"functions.weather:0","type":"function","function":{"name":"` + truncated + `","arguments":"{\"city\":\"Moscow\"}"}}]
+			},
+			"finish_reason":"tool_calls"
+		}],
+		"usage":{
+			"prompt_tokens":120,
+			"completion_tokens":8,
+			"total_tokens":128,
+			"prompt_tokens_details":{"cached_tokens":20,"cache_creation_tokens":10}
+		}
+	}`)
+
+	converted, err := ChatToMessages(body, MessagesAdapterMetadata{ToolNames: map[string]string{truncated: longName}})
+	require.NoError(t, err)
+
+	var got map[string]interface{}
+	require.NoError(t, json.Unmarshal(converted, &got))
+	assert.Equal(t, "message", got["type"])
+	assert.Equal(t, "assistant", got["role"])
+	assert.Equal(t, "tool_use", got["stop_reason"])
+	assert.Nil(t, got["stop_sequence"])
+	content := got["content"].([]interface{})
+	require.Len(t, content, 2)
+	assert.Equal(t, "thinking", content[0].(map[string]interface{})["type"])
+	tool := content[1].(map[string]interface{})
+	assert.Equal(t, "tool_use", tool["type"])
+	assert.Equal(t, "functions_weather_0", tool["id"])
+	assert.Equal(t, longName, tool["name"])
+	assert.Equal(t, "Moscow", tool["input"].(map[string]interface{})["city"])
+	usage := got["usage"].(map[string]interface{})
+	assert.Equal(t, float64(90), usage["input_tokens"])
+	assert.Equal(t, float64(8), usage["output_tokens"])
+	assert.Equal(t, float64(20), usage["cache_read_input_tokens"])
+	assert.Equal(t, float64(10), usage["cache_creation_input_tokens"])
+}
+
+func TestMessagesToChatPreservesThinkingForAnthropicProvider(t *testing.T) {
+	body := []byte(`{
+		"model":"claude-sonnet",
+		"max_tokens":4096,
+		"thinking":{"type":"enabled","budget_tokens":1024},
+		"messages":[
+			{"role":"assistant","content":[
+				{"type":"thinking","thinking":"reasoning","signature":"signature"},
+				{"type":"tool_use","id":"functions.weather:0","name":"weather","input":{"city":"Moscow"}}
+			]},
+			{"role":"user","content":[
+				{"type":"tool_result","tool_use_id":"functions.weather:0","content":"sunny"}
+			]}
+		]
+	}`)
+
+	chat, _, err := MessagesToChat(body)
+	require.NoError(t, err)
+	roundTrip, err := OpenAIToAnthropic(chat, "claude-sonnet")
+	require.NoError(t, err)
+
+	var got map[string]interface{}
+	require.NoError(t, json.Unmarshal(roundTrip, &got))
+	messages := got["messages"].([]interface{})
+	assistant := messages[0].(map[string]interface{})["content"].([]interface{})
+	assert.Equal(t, "thinking", assistant[0].(map[string]interface{})["type"])
+	assert.Equal(t, "signature", assistant[0].(map[string]interface{})["signature"])
+	assert.Equal(t, "functions_weather_0", assistant[1].(map[string]interface{})["id"])
+	result := messages[1].(map[string]interface{})["content"].([]interface{})[0].(map[string]interface{})
+	assert.Equal(t, "functions_weather_0", result["tool_use_id"])
+}
+
+func TestTransformChatStreamToMessages(t *testing.T) {
+	stream := strings.Join([]string{
+		`data: {"id":"chatcmpl-1","model":"model-alias","choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}`,
+		"",
+		`data: {"id":"chatcmpl-1","model":"model-alias","choices":[{"index":0,"delta":{"reasoning_content":"think"},"finish_reason":null}]}`,
+		"",
+		`data: {"id":"chatcmpl-1","model":"model-alias","choices":[{"index":0,"delta":{"content":"hello"},"finish_reason":null}]}`,
+		"",
+		`data: {"id":"chatcmpl-1","model":"model-alias","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call.1","type":"function","function":{"name":"weather","arguments":""}}]},"finish_reason":null}]}`,
+		"",
+		`data: {"id":"chatcmpl-1","model":"model-alias","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"city\":\"Moscow\"}"}}]},"finish_reason":null}]}`,
+		"",
+		`data: {"id":"chatcmpl-1","model":"model-alias","choices":[{"index":0,"delta":{},"finish_reason":"tool_calls"}]}`,
+		"",
+		`data: {"id":"chatcmpl-1","model":"model-alias","choices":[],"usage":{"prompt_tokens":10,"completion_tokens":4,"total_tokens":14}}`,
+		"",
+		"data: [DONE]",
+		"",
+	}, "\n")
+
+	var output bytes.Buffer
+	require.NoError(t, TransformChatStreamToMessages(strings.NewReader(stream), &output, "fallback-model", MessagesAdapterMetadata{}))
+
+	got := output.String()
+	assert.Contains(t, got, "event: message_start")
+	assert.Contains(t, got, `"id":"chatcmpl-1"`)
+	assert.Contains(t, got, `"thinking":"think","type":"thinking_delta"`)
+	assert.Contains(t, got, `"text":"hello","type":"text_delta"`)
+	assert.Contains(t, got, `"id":"call_1","input":{},"name":"weather","type":"tool_use"`)
+	assert.Contains(t, got, `"partial_json":"{\"city\":\"Moscow\"}"`)
+	assert.Contains(t, got, `"stop_reason":"tool_use"`)
+	assert.Contains(t, got, `"input_tokens":10`)
+	assert.Contains(t, got, `"output_tokens":4`)
+	assert.True(t, strings.HasSuffix(got, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"))
+}
