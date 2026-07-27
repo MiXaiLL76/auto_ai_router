@@ -3,9 +3,11 @@ package kafkalog
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -97,7 +99,19 @@ func NewLogger(cfg *Config) (*Logger, error) {
 	}
 
 	if cfg.TLSEnabled {
-		opts = append(opts, kgo.DialTLSConfig(&tls.Config{MinVersion: tls.VersionTLS12}))
+		tlsConf := &tls.Config{MinVersion: tls.VersionTLS12}
+		if cfg.TLSCACert != "" {
+			pemData, err := os.ReadFile(cfg.TLSCACert)
+			if err != nil {
+				return nil, fmt.Errorf("kafkalog: read tls_ca_cert %q: %w", cfg.TLSCACert, err)
+			}
+			pool := x509.NewCertPool()
+			if !pool.AppendCertsFromPEM(pemData) {
+				return nil, fmt.Errorf("kafkalog: no valid certificates found in tls_ca_cert %q", cfg.TLSCACert)
+			}
+			tlsConf.RootCAs = pool
+		}
+		opts = append(opts, kgo.DialTLSConfig(tlsConf))
 	}
 
 	switch cfg.SASLMechanism {
