@@ -1301,6 +1301,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 				IsImageEdit:       isImageEdit,
 				IsEmbeddings:      isEmbeddings,
 				IsStreaming:       streaming,
+				IsResponsesAPI:    prepared.passthroughResponses,
 				ModelID:           realModelID,
 				DisplayModelID:    modelID,
 				ContentType:       r.Header.Get("Content-Type"),

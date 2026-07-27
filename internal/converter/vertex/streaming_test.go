@@ -41,6 +41,46 @@ func TestTransformVertexStreamToOpenAI_PreservesGroundedSearchUsage(t *testing.T
 	assert.Contains(t, out.String(), `"server_tool_use":{"web_search_requests":2}`)
 }
 
+func TestTransformVertexStreamToOpenAI_AccumulatesDistinctSearchesAcrossChunks(t *testing.T) {
+	makeChunk := func(query string, includeUsage bool) string {
+		chunk := map[string]interface{}{
+			"candidates": []map[string]interface{}{{
+				"content": map[string]interface{}{
+					"role":  "model",
+					"parts": []map[string]interface{}{{"text": query}},
+				},
+				"groundingMetadata": map[string]interface{}{
+					"webSearchQueries": []string{query},
+				},
+			}},
+		}
+		if includeUsage {
+			chunk["usageMetadata"] = map[string]interface{}{
+				"promptTokenCount":     5,
+				"candidatesTokenCount": 2,
+				"totalTokenCount":      7,
+			}
+		}
+		data, err := json.Marshal(chunk)
+		require.NoError(t, err)
+		return "data: " + string(data) + "\n\n"
+	}
+
+	stream := makeChunk("query one", false) +
+		makeChunk("query two", false) +
+		makeChunk("query one", true) +
+		"data: [DONE]\n\n"
+
+	var out bytes.Buffer
+	require.NoError(t, TransformVertexStreamToOpenAI(
+		strings.NewReader(stream),
+		"gemini-test",
+		&out,
+	))
+
+	assert.Contains(t, out.String(), `"server_tool_use":{"web_search_requests":2}`)
+}
+
 func TestConvertVertexFunctionCallToStreamingOpenAI(t *testing.T) {
 	t.Run("valid function call with name and args", func(t *testing.T) {
 		fc := &genai.FunctionCall{

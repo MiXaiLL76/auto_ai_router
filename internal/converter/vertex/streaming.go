@@ -21,7 +21,7 @@ func TransformVertexStreamToOpenAI(vertexStream io.Reader, model string, output 
 	timestamp := converterutil.GetCurrentTimestamp()
 	isFirstChunk := true
 	doneWritten := false // track if [DONE] was sent
-	webSearchRequests := 0
+	webSearchQueries := make(map[string]struct{})
 
 	vertexLineCount := 0
 	vertexChunkCount := 0
@@ -53,9 +53,8 @@ func TransformVertexStreamToOpenAI(vertexStream io.Reader, model string, output 
 				"error", err, "json_prefix", jsonData[:min(len(jsonData), 200)])
 			continue // Skip malformed chunks
 		}
-		if requests := CountWebSearchRequests(vertexChunk.Candidates); requests > webSearchRequests {
-			webSearchRequests = requests
-		}
+		AddWebSearchQueries(webSearchQueries, vertexChunk.Candidates)
+		webSearchRequests := len(webSearchQueries)
 
 		// Skip chunks with no candidates
 		if len(vertexChunk.Candidates) == 0 {

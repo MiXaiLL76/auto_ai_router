@@ -20,6 +20,7 @@ type RequestMode struct {
 	IsImageEdit       bool   // true for /images/edits requests
 	IsEmbeddings      bool   // true for /embeddings requests
 	IsStreaming       bool   // true for streaming (stream: true) requests
+	IsResponsesAPI    bool   // true when the outbound request uses /v1/responses
 	ModelID           string // real provider model name (URL construction, format detection)
 	DisplayModelID    string // alias to echo in responses; falls back to ModelID when empty
 	ContentType       string // original request content type (needed for multipart endpoints)
@@ -140,9 +141,12 @@ func (c *ProviderConverter) RequestFrom(body []byte) ([]byte, error) {
 		return body, nil
 	default:
 		// ProviderTypeOpenAI, ProviderTypeProxy, ProviderTypeAIR, and others:
-		// convert non-function tools (web_search, web_search_preview) to
-		// web_search_options, then pass through.
-		body = openaiconv.ConvertWebSearchTools(body)
+		// Chat Completions and Responses have different built-in tool contracts.
+		// Native Responses requests must pass through unchanged, while Chat
+		// Completions requests need their tool list normalized.
+		if !c.mode.IsResponsesAPI {
+			body = openaiconv.ConvertWebSearchTools(body)
+		}
 
 		// gpt-image-1 family does not support the response_format parameter in
 		// /v1/images/generations — strip it before forwarding to avoid a 400.

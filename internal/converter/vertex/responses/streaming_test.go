@@ -194,3 +194,50 @@ func TestTransformVertexStreamToResponses_PreservesGroundedSearchUsage(t *testin
 	}
 	t.Fatal("missing response.completed event")
 }
+
+func TestTransformVertexStreamToResponses_AccumulatesDistinctSearchesAcrossChunks(t *testing.T) {
+	searchChunk := func(query string, includeUsage bool) map[string]interface{} {
+		chunk := map[string]interface{}{
+			"candidates": []map[string]interface{}{{
+				"content": map[string]interface{}{
+					"role":  "model",
+					"parts": []map[string]interface{}{{"text": query}},
+				},
+				"groundingMetadata": map[string]interface{}{
+					"webSearchQueries": []string{query},
+				},
+			}},
+		}
+		if includeUsage {
+			chunk["usageMetadata"] = map[string]interface{}{
+				"promptTokenCount":     5,
+				"candidatesTokenCount": 2,
+				"totalTokenCount":      7,
+			}
+		}
+		return chunk
+	}
+	stream := buildVertexSSEStream([]map[string]interface{}{
+		searchChunk("query one", false),
+		searchChunk("query two", false),
+		searchChunk("query one", true),
+	})
+
+	var out bytes.Buffer
+	require.NoError(t, TransformVertexStreamToResponses(
+		strings.NewReader(stream), &out, "gemini-test", "", nil, nil,
+	))
+
+	events := parseVertexSSEEvents(out.String())
+	for _, event := range events {
+		if event["type"] != "response.completed" {
+			continue
+		}
+		response := event["response"].(map[string]interface{})
+		usage := response["usage"].(map[string]interface{})
+		serverToolUse := usage["server_tool_use"].(map[string]interface{})
+		assert.Equal(t, float64(2), serverToolUse["web_search_requests"])
+		return
+	}
+	t.Fatal("missing response.completed event")
+}

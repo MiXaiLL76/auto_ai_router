@@ -140,6 +140,14 @@ func VertexToOpenAI(vertexBody []byte, model string) ([]byte, error) {
 // confirmed by Vertex grounding metadata.
 func CountWebSearchRequests(candidates []*genai.Candidate) int {
 	queries := make(map[string]struct{})
+	AddWebSearchQueries(queries, candidates)
+	return len(queries)
+}
+
+// AddWebSearchQueries adds distinct, non-empty Google Search queries from the
+// supplied candidates to queries. Callers can reuse the same set across
+// streaming chunks so each provider query is billed exactly once.
+func AddWebSearchQueries(queries map[string]struct{}, candidates []*genai.Candidate) {
 	for _, candidate := range candidates {
 		if candidate == nil || candidate.GroundingMetadata == nil {
 			continue
@@ -151,7 +159,6 @@ func CountWebSearchRequests(candidates []*genai.Candidate) int {
 			}
 		}
 	}
-	return len(queries)
 }
 
 func inlineDataToChatImage(index int, blob *genai.Blob) (openai.ImageData, bool) {
