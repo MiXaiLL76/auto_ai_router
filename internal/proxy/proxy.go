@@ -565,6 +565,7 @@ func (p *Proxy) executeProxyRequest(
 	// Mark request as coming from an internal proxy client so the upstream router
 	// knows to include the X-Credential-Name response header.
 	proxyReq.Header.Set(HeaderAIRProxyClient, "1")
+	proxyReq.Header.Set(HeaderLegacyAIRProxyClient, "1")
 
 	// Send request
 	resp, err := p.client.Do(proxyReq)
@@ -675,10 +676,12 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 	start := utils.NowUTC()
 	requestID := uuid.New().String()
 
-	// Save and strip internal proxy marker. The marker is set by executeProxyRequest when
-	// acting as a proxy client. We save it here and delete it to prevent external spoofing.
-	isProxyRequest := r.Header.Get(HeaderAIRProxyClient) == "1"
+	// Save and strip internal proxy markers before normal request handling. Their
+	// value is trusted only after authentication proves this is a master-key AIR peer.
+	proxyMarkerPresent := r.Header.Get(HeaderAIRProxyClient) == "1" ||
+		r.Header.Get(HeaderLegacyAIRProxyClient) == "1"
 	r.Header.Del(HeaderAIRProxyClient)
+	r.Header.Del(HeaderLegacyAIRProxyClient)
 
 	// Create logging context that will be filled throughout request processing
 	// and logged at the end via defer to ensure all requests are logged
@@ -687,7 +690,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		StartTime:      start,
 		Request:        r,
 		Status:         "unknown",
-		IsProxyRequest: isProxyRequest,
+		IsProxyRequest: false,
 	}
 
 	// Ensure request is logged at the end regardless of which path is taken
@@ -717,6 +720,14 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 	prepared, ok := p.orchestrateRequest(w, r, logCtx)
 	if !ok {
 		return
+	}
+	if proxyMarkerPresent {
+		logCtx.IsProxyRequest = p.isMasterKey(logCtx.Token)
+		if !logCtx.IsProxyRequest {
+			p.logger.WarnContext(r.Context(), "Ignoring untrusted AIR proxy marker",
+				"request_id", requestID,
+			)
+		}
 	}
 
 	r = prepared.request

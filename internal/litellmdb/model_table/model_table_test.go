@@ -183,6 +183,7 @@ func TestConvertPricingToModelPrice_AllFields(t *testing.T) {
 		"search_context_size_medium": 0.02,
 		"search_context_size_high":   0.03,
 	}
+	webSearchBillingUnit := "per_prompt"
 
 	price := convertPricingToModelPrice(&queries.CustomPricingLiteLLMParams{
 		InputCostPerToken:                                  &input,
@@ -206,6 +207,7 @@ func TestConvertPricingToModelPrice_AllFields(t *testing.T) {
 		OutputCostPerImage:                                 &outputImage,
 		OutputCostPerImageToken:                            &outputImageToken,
 		SearchContextCostPerQuery:                          searchContextCost,
+		WebSearchBillingUnit:                               &webSearchBillingUnit,
 	})
 
 	assert.NotNil(t, price)
@@ -230,6 +232,7 @@ func TestConvertPricingToModelPrice_AllFields(t *testing.T) {
 	assert.Equal(t, outputImage, price.OutputCostPerImage)
 	assert.Equal(t, outputImageToken, price.OutputCostPerImageToken)
 	assert.Equal(t, searchContextCost, price.SearchContextCostPerQuery)
+	assert.Equal(t, webSearchBillingUnit, price.WebSearchBillingUnit)
 }
 
 func TestConvertPricingToModelPrice_WebSearchOnly(t *testing.T) {

@@ -48,7 +48,7 @@ Downstream AIR reads this header automatically.
 
 ## Migration / Rollout Note
 
-For AIR-to-AIR chained routing, switch credentials to `type: air`. Roll out the upstream AIR first or at least ensure the upstream emits `Air-Usage-Audio-Tokens` on successful responses.
+For AIR-to-AIR chained routing, switch credentials to `type: air`. Roll out the upstream AIR first. During the transition, current AIR releases read and write both the current `Air-Proxy-Client` marker and the legacy `X-Aar-Proxy-Client` marker.
 
 ## Fallback Behavior
 

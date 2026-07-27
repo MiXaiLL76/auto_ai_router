@@ -48,6 +48,7 @@ type CustomPricingLiteLLMParams struct {
 	OutputCostPerImageToken          *float64           `json:"output_cost_per_image_token,omitempty"`
 	OutputCostPerReasoningToken      *float64           `json:"output_cost_per_reasoning_token,omitempty"`
 	SearchContextCostPerQuery        map[string]float64 `json:"search_context_cost_per_query,omitempty"`
+	WebSearchBillingUnit             *string            `json:"web_search_billing_unit,omitempty"`
 }
 
 // GenericLiteLLMParams

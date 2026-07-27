@@ -97,6 +97,7 @@ For reference:
 | `output_cost_per_prediction_token`                            | Accepted predicted-output tokens (falls back to `output_cost_per_token`)     |
 | `output_cost_per_image`                                       | Cost per generated image (takes priority over `output_cost_per_image_token`) |
 | `search_context_cost_per_query`                               | Web Search cost per request/call, keyed by `search_context_size_*`           |
+| `web_search_billing_unit`                                     | `per_query` or `per_prompt` Web Search charging mode                         |
 
 ## Cost Calculation
 
@@ -141,14 +142,19 @@ Web Search is billed as a separate tool cost, not as tokens. The calculator read
 
 AIR gets the request size from `web_search_options.search_context_size` or from a `web_search` / `web_search_preview` tool definition. If the request does not specify a size, `medium` is used.
 
-For the count, AIR prefers provider-reported usage:
+AIR charges only confirmed response usage:
 
 - `usage.server_tool_use.web_search_requests`
 - `usage.web_search_requests`
 - `response.output[]` or `output[]` items with `type: "web_search_call"`
-- Chat Completions annotations as a one-request fallback
+- Chat Completions `url_citation` annotations when that API contract confirms a search
+- Vertex/Gemini `groundingMetadata.webSearchQueries`
 
-If the provider does not return a count but the original request enabled Web Search, AIR bills one Web Search request. The count and selected context size are written to spend metadata under `usage_object.server_tool_use` and `additional_usage_values.server_tool_use`; the tool cost is written to `cost_breakdown.tool_usage_cost` and `cost_breakdown.web_search_cost`.
+Merely enabling a tool does not count as execution. A successful response with no confirmed usage is billed for zero searches. Streaming requests use the final provider usage or completed response output. An incomplete tool event is not billed.
+
+`per_query` multiplies the configured price by the confirmed query count. `per_prompt` clamps any positive count to one charge. LiteLLM Gemini 2.x entries without an explicit unit use `per_prompt`, while Gemini 3.x entries explicitly use `per_query`.
+
+The count and selected context size are written to spend metadata under `usage_object.server_tool_use` and `additional_usage_values.server_tool_use`; the tool cost is written to `cost_breakdown.tool_usage_cost` and `cost_breakdown.web_search_cost`.
 
 ### Regular input tokens
 
@@ -203,7 +209,7 @@ When the prompt exceeds 272 000 tokens, models such as GPT-5.6 apply their `*_ab
 | Accepted prediction | `accepted_prediction_tokens × output_cost_per_prediction_token` (falls back to regular output rate)                                                 |
 | Rejected prediction | `rejected_prediction_tokens × output_cost_per_token` (always at regular output rate)                                                                |
 | Images              | `image_count × output_cost_per_image` OR `output_image_tokens × output_cost_per_image_token`                                                        |
-| Web Search          | `web_search_requests × search_context_cost_per_query[search_context_size]`                                                                          |
+| Web Search          | `billable_web_search_count × search_context_cost_per_query[search_context_size]`, with `per_prompt` clamped to one                                  |
 
 ## How Prices Are Loaded
 
@@ -225,6 +231,12 @@ When the LiteLLM database is enabled, prices defined in `LiteLLM_ModelTable` are
 
 Cache writes are read from `cache_creation_tokens` or the OpenAI-compatible `cache_write_tokens` alias in both Chat Completions and Responses API usage objects.
 Anthropic's `cache_creation_token_details` (`ephemeral_5m_input_tokens` and `ephemeral_1h_input_tokens`) is preserved in spend-log metadata while the existing aggregate cache-creation token columns remain backward-compatible. Gemini cached-audio counts are taken from `cacheTokensDetails` when the provider supplies a modality breakdown.
+
+### Spend storage contract
+
+AIR keeps LiteLLM's upstream PostgreSQL schema unchanged. `LiteLLM_SpendLogs.spend` and the daily user, team, organization, and end-user tables contain the total cost. Cache and Web Search breakdowns are stored in `LiteLLM_SpendLogs.metadata`.
+
+Kafka and ClickHouse expose the same breakdown as typed fields, including `web_search_requests` and `web_search_cost`. Use that analytics path when structured reconciliation by usage type is required.
 
 ### Lookup
 

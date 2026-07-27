@@ -564,3 +564,38 @@ func TestVertexToOpenAI_FinishReasonNoOverrideWithoutToolCalls(t *testing.T) {
 		t.Fatalf("expected finish_reason = %q, got %q", "stop", openAIResp.Choices[0].FinishReason)
 	}
 }
+
+func TestVertexToOpenAI_UsesGroundingQueriesForWebSearchUsage(t *testing.T) {
+	vertexResp := genai.GenerateContentResponse{
+		Candidates: []*genai.Candidate{{
+			Content: &genai.Content{Parts: []*genai.Part{{Text: "grounded"}}},
+			GroundingMetadata: &genai.GroundingMetadata{
+				WebSearchQueries: []string{"first query", "second query", "first query"},
+			},
+		}},
+		UsageMetadata: &genai.GenerateContentResponseUsageMetadata{
+			PromptTokenCount:     5,
+			CandidatesTokenCount: 2,
+			TotalTokenCount:      7,
+		},
+	}
+	body, err := json.Marshal(vertexResp)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	converted, err := VertexToOpenAI(body, "gemini-test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var response openai.OpenAIResponse
+	if err := json.Unmarshal(converted, &response); err != nil {
+		t.Fatal(err)
+	}
+	if response.Usage == nil || response.Usage.ServerToolUse == nil {
+		t.Fatalf("expected web search usage, got %#v", response.Usage)
+	}
+	if response.Usage.ServerToolUse.WebSearchRequests != 2 {
+		t.Fatalf("expected two distinct search queries, got %d", response.Usage.ServerToolUse.WebSearchRequests)
+	}
+}

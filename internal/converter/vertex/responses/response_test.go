@@ -249,6 +249,16 @@ func TestCandidatesToOutputItems_GroundingMetadataAddsAnnotationsAndWebSearchCal
 
 	assert.Equal(t, "web_search_call", output[1].Type)
 	assert.Equal(t, []string{"capital of france"}, output[1].Queries)
+
+	vertexResp.UsageMetadata = &genai.GenerateContentResponseUsageMetadata{
+		PromptTokenCount:     5,
+		CandidatesTokenCount: 2,
+		TotalTokenCount:      7,
+	}
+	response := buildResponsesResponse(vertexResp, "gemini-test", "resp_test", 1)
+	require.NotNil(t, response.Usage)
+	require.NotNil(t, response.Usage.ServerToolUse)
+	assert.Equal(t, 1, response.Usage.ServerToolUse.WebSearchRequests)
 }
 
 func TestVertexToResponsesResponse_RequiredSchemaFields(t *testing.T) {

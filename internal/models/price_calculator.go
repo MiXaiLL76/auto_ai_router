@@ -1,6 +1,8 @@
 package models
 
 import (
+	"strings"
+
 	"github.com/mixaill76/auto_ai_router/internal/converter"
 	"github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
 )
@@ -220,6 +222,9 @@ func CalculateTokenCosts(usage *converter.TokenUsage, price *ModelPrice) *conver
 
 	webSearchRequests := converterutil.NonNegativeTokenCount(usage.WebSearchRequests)
 	if webSearchRequests > 0 {
+		if price.webSearchBillingUnit() == "per_prompt" {
+			webSearchRequests = 1
+		}
 		costs.WebSearchCost = float64(webSearchRequests) *
 			price.webSearchCostPerQuery(usage.WebSearchContextSize)
 	}
@@ -260,4 +265,21 @@ func (p *ModelPrice) webSearchCostPerQuery(contextSize string) float64 {
 	}
 	key := "search_context_size_" + converter.NormalizeWebSearchContextSize(contextSize)
 	return p.SearchContextCostPerQuery[key]
+}
+
+func (p *ModelPrice) webSearchBillingUnit() string {
+	if p == nil {
+		return ""
+	}
+	unit := strings.ToLower(strings.TrimSpace(p.WebSearchBillingUnit))
+	if unit != "" {
+		return unit
+	}
+	provider := strings.ToLower(strings.TrimSpace(p.LiteLLMProvider))
+	if strings.Contains(provider, "gemini") || strings.Contains(provider, "vertex") {
+		// LiteLLM treats Gemini 2.x pricing entries without an explicit unit as
+		// per-prompt. Gemini 3.x entries explicitly opt into per-query billing.
+		return "per_prompt"
+	}
+	return "per_query"
 }

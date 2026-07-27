@@ -409,9 +409,6 @@ func (r *RoundRobin) NextSameTypeForModelExcluding(modelID string, credType conf
 }
 
 func (r *RoundRobin) NextSameTypeForModelExcludingScoped(modelID string, credType config.ProviderType, exclude map[string]bool, visibility scope.Context) (*config.CredentialConfig, error) {
-	if credType.IsProxyLike() {
-		return r.nextExcludingScoped(modelID, false, true, "", exclude, visibility)
-	}
 	return r.nextExcludingScoped(modelID, false, false, credType, exclude, visibility)
 }
 

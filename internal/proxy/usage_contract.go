@@ -13,6 +13,9 @@ const (
 	// it from inbound requests before forwarding to real providers.
 	HeaderAIRProxyClient = "Air-Proxy-Client"
 
+	// HeaderLegacyAIRProxyClient is kept for one rolling-upgrade window.
+	HeaderLegacyAIRProxyClient = "X-Aar-Proxy-Client"
+
 	// HeaderAIRUsageAudioTokens describes the cached-audio contract of the
 	// response body. AIR sets it so downstream AIR proxies do not need a
 	// credential-level guess about whether audio_tokens includes cached audio.
@@ -55,8 +58,15 @@ func audioUsageContractFromHeaders(headers http.Header) audioUsageContract {
 	return audioUsageContractUnknown
 }
 
-func tokenUsageExtractionOptionsForCredential(_ *config.CredentialConfig) converter.TokenUsageExtractionOptions {
-	return converter.TokenUsageExtractionOptions{AudioInputIncludesCachedAudio: true}
+func tokenUsageExtractionOptionsForCredential(cred *config.CredentialConfig) converter.TokenUsageExtractionOptions {
+	includesCachedAudio := true
+	if cred != nil && cred.Type == config.ProviderTypeAIR {
+		// AIR has always emitted normalized audio usage after provider
+		// conversion. This fallback keeps mixed-version AIR chains correct when
+		// an older upstream does not yet send the explicit usage header.
+		includesCachedAudio = false
+	}
+	return converter.TokenUsageExtractionOptions{AudioInputIncludesCachedAudio: includesCachedAudio}
 }
 
 func tokenUsageExtractionOptionsForResponse(cred *config.CredentialConfig, headers http.Header) converter.TokenUsageExtractionOptions {

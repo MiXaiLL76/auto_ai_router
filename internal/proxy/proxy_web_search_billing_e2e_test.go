@@ -12,7 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestProxyRequest_WebSearchBillingLogsLiteLLMSpend(t *testing.T) {
+func TestProxyRequest_WebSearchEnabledButUnusedDoesNotBillToolCost(t *testing.T) {
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		require.Equal(t, "/v1/chat/completions", r.URL.Path)
 		require.Equal(t, "Bearer upstream-key", r.Header.Get("Authorization"))
@@ -83,18 +83,18 @@ func TestProxyRequest_WebSearchBillingLogsLiteLLMSpend(t *testing.T) {
 	assert.Equal(t, 10, entry.PromptTokens)
 	assert.Equal(t, 4, entry.CompletionTokens)
 	assert.Equal(t, 14, entry.TotalTokens)
-	assert.Equal(t, 25.0, entry.Spend) // 10*1 + 4*2 + 1 high-context web search * 7
+	assert.Equal(t, 18.0, entry.Spend) // 10*1 + 4*2; request enablement is not usage
 
 	metadata := decodeMetadata(t, entry.Metadata)
 	usageObject := metadata["usage_object"].(map[string]interface{})
 	serverToolUse := usageObject["server_tool_use"].(map[string]interface{})
-	assert.Equal(t, float64(1), serverToolUse["web_search_requests"])
-	assert.Equal(t, "high", serverToolUse["web_search_context_size"])
+	assert.Equal(t, float64(0), serverToolUse["web_search_requests"])
+	assert.Nil(t, serverToolUse["web_search_context_size"])
 
 	costBreakdown := metadata["cost_breakdown"].(map[string]interface{})
-	assert.Equal(t, float64(7), costBreakdown["tool_usage_cost"])
-	assert.Equal(t, float64(7), costBreakdown["web_search_cost"])
-	assert.Equal(t, float64(25), costBreakdown["total_cost"])
+	assert.Equal(t, float64(0), costBreakdown["tool_usage_cost"])
+	assert.Equal(t, float64(0), costBreakdown["web_search_cost"])
+	assert.Equal(t, float64(18), costBreakdown["total_cost"])
 }
 
 func TestProxyRequest_ResponsesWebSearchCallsOverrideRequestFallback(t *testing.T) {
@@ -181,4 +181,159 @@ func TestProxyRequest_ResponsesWebSearchCallsOverrideRequestFallback(t *testing.
 	assert.Equal(t, float64(6), costBreakdown["tool_usage_cost"])
 	assert.Equal(t, float64(6), costBreakdown["web_search_cost"])
 	assert.Equal(t, float64(24), costBreakdown["total_cost"])
+}
+
+func TestProxyRequest_StreamingWebSearchBillingUsesCompletedResponse(t *testing.T) {
+	tests := []struct {
+		name              string
+		output            string
+		billingUnit       string
+		wantRequests      int
+		wantWebSearchCost float64
+	}{
+		{
+			name:              "tool enabled but unused",
+			output:            `[{"type":"message","id":"msg_1","status":"completed","role":"assistant","content":[]}]`,
+			billingUnit:       "per_query",
+			wantRequests:      0,
+			wantWebSearchCost: 0,
+		},
+		{
+			name:              "one completed call",
+			output:            `[{"type":"web_search_call","id":"ws_1","status":"completed"}]`,
+			billingUnit:       "per_query",
+			wantRequests:      1,
+			wantWebSearchCost: 3,
+		},
+		{
+			name:              "two completed calls per query",
+			output:            `[{"type":"web_search_call","id":"ws_1","status":"completed"},{"type":"web_search_call","id":"ws_2","status":"completed"}]`,
+			billingUnit:       "per_query",
+			wantRequests:      2,
+			wantWebSearchCost: 6,
+		},
+		{
+			name:              "two completed calls per prompt",
+			output:            `[{"type":"web_search_call","id":"ws_1","status":"completed"},{"type":"web_search_call","id":"ws_2","status":"completed"}]`,
+			billingUnit:       "per_prompt",
+			wantRequests:      2,
+			wantWebSearchCost: 3,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			upstream := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = w.Write([]byte("event: response.completed\ndata: " +
+					`{"type":"response.completed","response":{"id":"resp_stream","object":"response","status":"completed","model":"gpt-web-search","output":` +
+					tt.output +
+					`,"usage":{"input_tokens":10,"output_tokens":4,"total_tokens":14}}}` +
+					"\n\ndata: [DONE]\n\n"))
+			}))
+			defer upstream.Close()
+
+			dbStub := &stubLiteLLMManager{}
+			prx := NewTestProxyBuilder().
+				WithCredentials(config.CredentialConfig{
+					Name:    "openai-web-search",
+					Type:    config.ProviderTypeOpenAI,
+					BaseURL: upstream.URL,
+					APIKey:  "upstream-key",
+					RPM:     100,
+					TPM:     10000,
+				}).
+				WithMasterKey("master-key").
+				Build()
+			prx.LiteLLMDB = dbStub
+			registry := pricing.NewModelPriceRegistry()
+			registry.Update(map[string]*pricing.ModelPrice{
+				"gpt-web-search": {
+					InputCostPerToken:    1,
+					OutputCostPerToken:   2,
+					WebSearchBillingUnit: tt.billingUnit,
+					SearchContextCostPerQuery: map[string]float64{
+						"search_context_size_low": 3,
+					},
+				},
+			})
+			prx.priceRegistry = registry
+
+			req := httptest.NewRequest("POST", "/v1/responses", strings.NewReader(`{
+				"model": "gpt-web-search",
+				"input": "latest news?",
+				"stream": true,
+				"tools": [{"type": "web_search_preview", "search_context_size": "low"}]
+			}`))
+			req.Header.Set("Authorization", "Bearer master-key")
+			req.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+
+			prx.ProxyRequest(w, req)
+
+			require.Equal(t, http.StatusOK, w.Code)
+			require.Len(t, dbStub.loggedEntries, 1)
+			entry := dbStub.loggedEntries[0]
+			metadata := decodeMetadata(t, entry.Metadata)
+			usageObject := metadata["usage_object"].(map[string]interface{})
+			serverToolUse := usageObject["server_tool_use"].(map[string]interface{})
+			assert.Equal(t, float64(tt.wantRequests), serverToolUse["web_search_requests"])
+			costBreakdown := metadata["cost_breakdown"].(map[string]interface{})
+			assert.Equal(t, tt.wantWebSearchCost, costBreakdown["web_search_cost"])
+		})
+	}
+}
+
+func TestProxyRequest_InterruptedStreamingSearchIsNotBilledWithoutConfirmation(t *testing.T) {
+	upstream := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte(
+			"event: response.web_search_call.in_progress\n" +
+				`data: {"type":"response.web_search_call.in_progress","item_id":"ws_unconfirmed","output_index":0}` +
+				"\n\n",
+		))
+	}))
+	defer upstream.Close()
+
+	dbStub := &stubLiteLLMManager{}
+	prx := NewTestProxyBuilder().
+		WithCredentials(config.CredentialConfig{
+			Name:    "openai-web-search",
+			Type:    config.ProviderTypeOpenAI,
+			BaseURL: upstream.URL,
+			APIKey:  "upstream-key",
+			RPM:     100,
+			TPM:     10000,
+		}).
+		WithMasterKey("master-key").
+		Build()
+	prx.LiteLLMDB = dbStub
+	registry := pricing.NewModelPriceRegistry()
+	registry.Update(map[string]*pricing.ModelPrice{
+		"gpt-web-search": {
+			SearchContextCostPerQuery: map[string]float64{"search_context_size_medium": 5},
+		},
+	})
+	prx.priceRegistry = registry
+
+	req := httptest.NewRequest("POST", "/v1/responses", strings.NewReader(`{
+		"model": "gpt-web-search",
+		"input": "latest news?",
+		"stream": true,
+		"tools": [{"type": "web_search_preview"}]
+	}`))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	prx.ProxyRequest(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	require.Len(t, dbStub.loggedEntries, 1)
+	metadata := decodeMetadata(t, dbStub.loggedEntries[0].Metadata)
+	usageObject := metadata["usage_object"].(map[string]interface{})
+	serverToolUse := usageObject["server_tool_use"].(map[string]interface{})
+	assert.Equal(t, float64(0), serverToolUse["web_search_requests"])
+	costBreakdown := metadata["cost_breakdown"].(map[string]interface{})
+	assert.Equal(t, float64(0), costBreakdown["web_search_cost"])
 }

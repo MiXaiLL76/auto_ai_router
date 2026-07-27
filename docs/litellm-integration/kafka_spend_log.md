@@ -78,6 +78,16 @@ A reference DDL — a `Kafka`-engine table reading `air.spend_logs`, a `MergeTre
 
 This DDL is a reference/example for local development and for DBAs setting up a production ClickHouse cluster — Auto AI Router itself does not create, own, or administer this schema. Retention (`TTL`) and Kafka topic partitioning are likewise left to whoever operates the target cluster; the router's only responsibility is producing well-formed events to the topic.
 
+### Upgrading an existing ClickHouse pipeline
+
+The init DDL runs only for an empty ClickHouse data directory. Before deploying a router that publishes the cache and Web Search fields, pause AIR Kafka publishing and apply [`clickhouse/migrations/002_cache_web_search_columns.sql`](../../clickhouse/migrations/002_cache_web_search_columns.sql).
+
+The migration detaches the materialized view, adds the fields to both the MergeTree and Kafka tables, then reattaches the view. For replicated production tables, add the cluster-specific `ON CLUSTER` clause required by your deployment.
+
+After re-enabling publishing, send one synthetic event with non-zero `cached_audio_input_tokens`, `cache_creation_5m_tokens`, `cache_creation_1h_tokens`, `web_search_requests`, and `web_search_cost`. Verify that the row appears in `air.spend_logs` and that `system.kafka_consumers` reports no parse exceptions before completing the rollout.
+
+PostgreSQL intentionally retains the upstream LiteLLM schema. Detailed cache and Web Search values live in `LiteLLM_SpendLogs.metadata`; the typed fields are available in Kafka and ClickHouse.
+
 **Replication:** the `air.spend_logs` table uses plain `MergeTree` because `docker-compose.kafka.yml` runs a single, unreplicated ClickHouse node. For a production cluster with more than one replica, swap it for `ReplicatedMergeTree` (or a `Replicated` database engine) once Keeper/ZooKeeper and `{shard}`/`{replica}` macros are set up — otherwise a node failure loses spend/billing data. See the comment above the `CREATE TABLE air.spend_logs` statement in `clickhouse/init/01_spend_logs.sql` for the exact engine syntax.
 
 ## Running locally

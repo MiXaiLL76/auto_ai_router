@@ -143,9 +143,6 @@ func (logCtx *RequestLogContext) applyWebSearchUsageDefaults(status string) {
 	if logCtx.WebSearchContextSize != "" {
 		logCtx.TokenUsage.WebSearchContextSize = logCtx.WebSearchContextSize
 	}
-	if logCtx.TokenUsage.WebSearchRequests == 0 && logCtx.WebSearchRequested {
-		logCtx.TokenUsage.WebSearchRequests = 1
-	}
 }
 
 // buildMetadata builds metadata JSON with user/team alias, usage, cost, and optional error info

@@ -795,6 +795,57 @@ func TestCalculateTokenCosts_WebSearchUsesContextPricing(t *testing.T) {
 	assert.Equal(t, 15, usage.Total())
 }
 
+func TestCalculateTokenCosts_WebSearchBillingUnit(t *testing.T) {
+	tests := []struct {
+		name       string
+		price      ModelPrice
+		wantSearch float64
+	}{
+		{
+			name: "per query",
+			price: ModelPrice{
+				WebSearchBillingUnit: "per_query",
+			},
+			wantSearch: 0.60,
+		},
+		{
+			name: "per prompt",
+			price: ModelPrice{
+				WebSearchBillingUnit: "per_prompt",
+			},
+			wantSearch: 0.20,
+		},
+		{
+			name: "Gemini 2 pricing defaults to per prompt like LiteLLM",
+			price: ModelPrice{
+				LiteLLMProvider: "gemini",
+			},
+			wantSearch: 0.20,
+		},
+		{
+			name: "non Gemini pricing keeps per query default",
+			price: ModelPrice{
+				LiteLLMProvider: "anthropic",
+			},
+			wantSearch: 0.60,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tt.price.SearchContextCostPerQuery = map[string]float64{
+				"search_context_size_medium": 0.20,
+			}
+			costs := CalculateTokenCosts(&converter.TokenUsage{
+				WebSearchRequests: 3,
+			}, &tt.price)
+
+			assert.InDelta(t, tt.wantSearch, costs.WebSearchCost, 1e-9)
+			assert.InDelta(t, tt.wantSearch, costs.TotalCost, 1e-9)
+		})
+	}
+}
+
 func TestCalculateTokenCosts_WebSearchDefaultsToMedium(t *testing.T) {
 	usage := &converter.TokenUsage{
 		WebSearchRequests: 1,

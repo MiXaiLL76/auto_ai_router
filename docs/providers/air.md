@@ -33,7 +33,11 @@ Air-Usage-Audio-Tokens: exclude-cached
 
 Downstream AIR reads this header automatically and bills audio/cache correctly.
 
-If the header is missing, AIR falls back to OpenAI-compatible semantics where `audio_tokens` includes `cached_audio_tokens`. This keeps older or partially rolled out upstreams safe for raw Chat Completions passthrough.
+If this header is missing on a `type: air` credential, AIR uses the legacy AIR contract where provider-converted `audio_tokens` already excludes cached audio. Generic `type: proxy` credentials continue to use raw OpenAI-compatible semantics.
+
+For one rolling-upgrade window, AIR sends and accepts both `Air-Proxy-Client` and the legacy `X-Aar-Proxy-Client` marker. The marker only enables internal response fields when the request also authenticates with the upstream router's master key. A marker supplied with an ordinary client key is ignored.
+
+Roll out upstream routers first, then downstream routers. Mixed-version chains remain billable because the explicit `type: air` contract covers an older upstream that does not yet return `Air-Usage-Audio-Tokens`.
 
 ## When to use `proxy`
 

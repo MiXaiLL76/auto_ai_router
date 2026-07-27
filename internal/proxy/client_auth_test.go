@@ -144,6 +144,80 @@ func TestClientAuthenticationRejectsInvalidCredentialsWithoutChangingErrorContra
 	}
 }
 
+func TestAIRProxyMarkerRequiresMasterKeyPeer(t *testing.T) {
+	upstream := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(createMockChatCompletionResponse(
+			"chatcmpl-air-marker",
+			"backend-chat",
+			"ok",
+		))
+	}))
+	defer upstream.Close()
+
+	db := &clientAuthTestDB{tokens: map[string]*dbmodels.TokenInfo{
+		"virtual-key": {Token: "hash"},
+	}}
+	prx := newClientAuthTestProxy(t, db, upstream.URL, config.ProviderTypeOpenAI, "provider-key")
+
+	for _, tt := range []struct {
+		name       string
+		token      string
+		header     string
+		wantHeader bool
+	}{
+		{name: "external virtual key cannot spoof marker", token: "virtual-key", header: HeaderAIRProxyClient},
+		{name: "external virtual key cannot spoof legacy marker", token: "virtual-key", header: HeaderLegacyAIRProxyClient},
+		{name: "master key accepts current marker", token: "master-key", header: HeaderAIRProxyClient, wantHeader: true},
+		{name: "master key accepts legacy marker", token: "master-key", header: HeaderLegacyAIRProxyClient, wantHeader: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(
+				`{"model":"public/chat","messages":[{"role":"user","content":"hi"}]}`,
+			))
+			req.Header.Set("Authorization", "Bearer "+tt.token)
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set(tt.header, "1")
+			w := httptest.NewRecorder()
+
+			prx.ProxyRequest(w, req)
+
+			require.Equal(t, http.StatusOK, w.Code)
+			if tt.wantHeader {
+				assert.Equal(t, "provider", w.Header().Get("X-Credential-Name"))
+			} else {
+				assert.Empty(t, w.Header().Get("X-Credential-Name"))
+			}
+		})
+	}
+}
+
+func TestAIRCredentialSendsCurrentAndLegacyProxyMarkers(t *testing.T) {
+	upstream := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "1", r.Header.Get(HeaderAIRProxyClient))
+		assert.Equal(t, "1", r.Header.Get(HeaderLegacyAIRProxyClient))
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(createMockChatCompletionResponse(
+			"chatcmpl-air-peer",
+			"public/chat",
+			"ok",
+		))
+	}))
+	defer upstream.Close()
+
+	prx := newClientAuthTestProxy(t, &clientAuthTestDB{}, upstream.URL, config.ProviderTypeAIR, "remote-master-key")
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(
+		`{"model":"public/chat","messages":[{"role":"user","content":"hi"}]}`,
+	))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	prx.ProxyRequest(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code)
+}
+
 func TestDirectProviderRestoresClientVisibleModel(t *testing.T) {
 	upstream := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

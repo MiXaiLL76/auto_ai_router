@@ -803,6 +803,11 @@ func TestExtractTokenUsage_WebSearchRequests(t *testing.T) {
 			body: `{"usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12},"choices":[{"message":{"annotations":[{"type":"url_citation"}]}}]}`,
 			want: 1,
 		},
+		{
+			name: "non web annotation is not billed",
+			body: `{"usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12},"choices":[{"message":{"annotations":[{"type":"file_citation"}]}}]}`,
+			want: 0,
+		},
 	}
 
 	for _, tt := range tests {

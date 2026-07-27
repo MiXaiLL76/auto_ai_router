@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/mixaill76/auto_ai_router/internal/converter/responses"
+	"github.com/mixaill76/auto_ai_router/internal/converter/vertex"
 	"google.golang.org/genai"
 )
 
@@ -35,6 +36,11 @@ func buildResponsesResponse(
 	status, incompleteDetails := finishReasonToStatus(vertexResp)
 	output := candidatesToOutputItems(vertexResp)
 	usage := usageMetadataToUsage(vertexResp.UsageMetadata)
+	webSearchRequests := vertex.CountWebSearchRequests(vertexResp.Candidates)
+	if usage == nil && webSearchRequests > 0 {
+		usage = &responses.Usage{}
+	}
+	setWebSearchUsage(usage, webSearchRequests)
 	completedAt := createdAt
 	return responses.BuildCompletedResponse(responses.CompletedResponseParams{
 		ID:                responseID,
@@ -46,6 +52,13 @@ func buildResponsesResponse(
 		Output:            output,
 		Usage:             usage,
 	})
+}
+
+func setWebSearchUsage(usage *responses.Usage, requests int) {
+	if usage == nil || requests <= 0 {
+		return
+	}
+	usage.ServerToolUse = &responses.ServerToolUseDetails{WebSearchRequests: requests}
 }
 
 // candidatesToOutputItems converts Vertex candidates to Responses API OutputItems.

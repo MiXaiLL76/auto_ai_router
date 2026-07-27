@@ -40,9 +40,9 @@ func TestTokenUsageExtractionOptionsForResponse(t *testing.T) {
 			includes: true,
 		},
 		{
-			name:     "AIR provider without header falls back to OpenAI semantics",
+			name:     "AIR provider without header keeps legacy AIR normalized semantics",
 			cred:     &config.CredentialConfig{Type: config.ProviderTypeAIR},
-			includes: true,
+			includes: false,
 		},
 		{
 			name: "AIR provider normalized response header",
@@ -123,6 +123,12 @@ func TestProxyUsageContractCachedAudioMatrix(t *testing.T) {
 			headers: http.Header{
 				HeaderAIRUsageAudioTokens: []string{airUsageAudioTokensExcludeCached},
 			},
+			audio:     60,
+			wantAudio: 60,
+		},
+		{
+			name:      "legacy AIR without usage header preserves normalized audio",
+			cred:      config.CredentialConfig{Type: config.ProviderTypeAIR},
 			audio:     60,
 			wantAudio: 60,
 		},

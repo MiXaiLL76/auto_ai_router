@@ -538,6 +538,14 @@ func TestOpenAIStreamUsageExtractor(t *testing.T) {
 			},
 		},
 		{
+			name:      "chat usage with confirmed web search requests",
+			chunk:     []byte(`{"usage":{"prompt_tokens":100,"completion_tokens":50,"server_tool_use":{"web_search_requests":3}}}`),
+			expectNil: false,
+			expectUsage: func(u *StreamUsageInfo) bool {
+				return u.WebSearchRequests == 3
+			},
+		},
+		{
 			name:      "no usage field",
 			chunk:     []byte(`{"choices":[{"delta":{"content":"hello"}}]}`),
 			expectNil: true,
@@ -570,6 +578,22 @@ func TestOpenAIStreamUsageExtractor(t *testing.T) {
 			expectNil: false,
 			expectUsage: func(u *StreamUsageInfo) bool {
 				return u.PromptTokens == 200 && u.CompletionTokens == 80
+			},
+		},
+		{
+			name:      "responses API - completed output items provide web search count",
+			chunk:     []byte(`{"type":"response.completed","response":{"output":[{"type":"web_search_call","status":"completed"},{"type":"web_search_call","status":"completed"}],"usage":{"input_tokens":20,"output_tokens":5,"total_tokens":25}}}`),
+			expectNil: false,
+			expectUsage: func(u *StreamUsageInfo) bool {
+				return u.WebSearchRequests == 2
+			},
+		},
+		{
+			name:      "responses API - usage count takes precedence over output items",
+			chunk:     []byte(`{"type":"response.completed","response":{"output":[{"type":"web_search_call","status":"completed"}],"usage":{"input_tokens":20,"output_tokens":5,"server_tool_use":{"web_search_requests":3}}}}`),
+			expectNil: false,
+			expectUsage: func(u *StreamUsageInfo) bool {
+				return u.WebSearchRequests == 3
 			},
 		},
 		{
@@ -735,6 +759,14 @@ func TestAnthropicStreamUsageExtractor(t *testing.T) {
 			expectNil: false,
 			expectUsage: func(u *StreamUsageInfo) bool {
 				return u.PromptTokens == 100 && u.CacheReadTokens == 20
+			},
+		},
+		{
+			name:      "confirmed Anthropic web search usage",
+			chunk:     []byte(`{"usage":{"input_tokens":100,"output_tokens":50,"server_tool_use":{"web_search_requests":2}}}`),
+			expectNil: false,
+			expectUsage: func(u *StreamUsageInfo) bool {
+				return u.WebSearchRequests == 2
 			},
 		},
 		{

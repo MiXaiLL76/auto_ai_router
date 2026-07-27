@@ -125,7 +125,33 @@ func VertexToOpenAI(vertexBody []byte, model string) ([]byte, error) {
 	if vertexResp.UsageMetadata != nil {
 		openAIResp.Usage = convertVertexUsageMetadata(vertexResp.UsageMetadata)
 	}
+	if webSearchRequests := CountWebSearchRequests(vertexResp.Candidates); webSearchRequests > 0 {
+		if openAIResp.Usage == nil {
+			openAIResp.Usage = &openai.OpenAIUsage{}
+		}
+		openAIResp.Usage.ServerToolUse = &openai.ServerToolUseDetails{
+			WebSearchRequests: webSearchRequests,
+		}
+	}
 	return json.Marshal(openAIResp)
+}
+
+// CountWebSearchRequests returns the number of distinct Google Search queries
+// confirmed by Vertex grounding metadata.
+func CountWebSearchRequests(candidates []*genai.Candidate) int {
+	queries := make(map[string]struct{})
+	for _, candidate := range candidates {
+		if candidate == nil || candidate.GroundingMetadata == nil {
+			continue
+		}
+		for _, query := range candidate.GroundingMetadata.WebSearchQueries {
+			query = strings.TrimSpace(query)
+			if query != "" {
+				queries[query] = struct{}{}
+			}
+		}
+	}
+	return len(queries)
 }
 
 func inlineDataToChatImage(index int, blob *genai.Blob) (openai.ImageData, bool) {

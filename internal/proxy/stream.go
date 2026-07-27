@@ -62,6 +62,7 @@ type StreamUsageInfo struct {
 	CacheCreation5mTokens    int
 	CacheCreation1hTokens    int
 	CacheReadTokens          int // Tokens read from cache (billed at cheaper rate)
+	WebSearchRequests        int // Confirmed built-in web search executions
 }
 
 // StreamUsageExtractor provides a provider-agnostic interface for extracting
@@ -131,6 +132,10 @@ func (o *openAIStreamUsageExtractor) extractChatCompletionUsage(payload []byte) 
 				ReasoningTokens          int `json:"reasoning_tokens,omitempty"`
 				RejectedPredictionTokens int `json:"rejected_prediction_tokens,omitempty"`
 			} `json:"completion_tokens_details,omitempty"`
+			ServerToolUse struct {
+				WebSearchRequests int `json:"web_search_requests,omitempty"`
+			} `json:"server_tool_use,omitempty"`
+			WebSearchRequests int `json:"web_search_requests,omitempty"`
 		} `json:"usage"`
 	}
 
@@ -176,6 +181,10 @@ func (o *openAIStreamUsageExtractor) extractChatCompletionUsage(payload []byte) 
 		AcceptedPredictionTokens: data.Usage.CompletionTokensDetails.AcceptedPredictionTokens,
 		RejectedPredictionTokens: data.Usage.CompletionTokensDetails.RejectedPredictionTokens,
 		CachedOutputTokens:       data.Usage.CompletionTokensDetails.CachedTokens,
+		WebSearchRequests: webSearchRequestsFromUsage(
+			data.Usage.ServerToolUse.WebSearchRequests,
+			data.Usage.WebSearchRequests,
+		),
 	}
 }
 
@@ -186,10 +195,12 @@ func (o *openAIStreamUsageExtractor) extractChatCompletionUsage(payload []byte) 
 func (o *openAIStreamUsageExtractor) extractResponsesAPIUsage(payload []byte) *StreamUsageInfo {
 	var data struct {
 		// Top-level usage (some Responses API events)
-		Usage *responsesAPIUsage `json:"usage,omitempty"`
+		Usage  *responsesAPIUsage        `json:"usage,omitempty"`
+		Output []streamingResponseOutput `json:"output,omitempty"`
 		// Nested usage in response.completed event
 		Response struct {
-			Usage *responsesAPIUsage `json:"usage,omitempty"`
+			Usage  *responsesAPIUsage        `json:"usage,omitempty"`
+			Output []streamingResponseOutput `json:"output,omitempty"`
 		} `json:"response,omitempty"`
 	}
 
@@ -218,6 +229,16 @@ func (o *openAIStreamUsageExtractor) extractResponsesAPIUsage(payload []byte) *S
 		usage.InputTokensDetails.CachedTokens,
 		usage.InputTokensDetails.CachedAudioTokens,
 	)
+	webSearchRequests := webSearchRequestsFromUsage(
+		usage.ServerToolUse.WebSearchRequests,
+		usage.WebSearchRequests,
+	)
+	if webSearchRequests == 0 {
+		webSearchRequests = countCompletedStreamingWebSearchItems(data.Response.Output)
+	}
+	if webSearchRequests == 0 {
+		webSearchRequests = countCompletedStreamingWebSearchItems(data.Output)
+	}
 
 	return &StreamUsageInfo{
 		PromptTokens:          intValue(usage.InputTokens),
@@ -240,7 +261,23 @@ func (o *openAIStreamUsageExtractor) extractResponsesAPIUsage(payload []byte) *S
 		AcceptedPredictionTokens: usage.OutputTokensDetails.AcceptedPredictionTokens,
 		RejectedPredictionTokens: usage.OutputTokensDetails.RejectedPredictionTokens,
 		CachedOutputTokens:       usage.OutputTokensDetails.CachedTokens,
+		WebSearchRequests:        webSearchRequests,
 	}
+}
+
+type streamingResponseOutput struct {
+	Type   string `json:"type"`
+	Status string `json:"status,omitempty"`
+}
+
+func countCompletedStreamingWebSearchItems(output []streamingResponseOutput) int {
+	count := 0
+	for _, item := range output {
+		if item.Type == "web_search_call" && (item.Status == "" || item.Status == "completed") {
+			count++
+		}
+	}
+	return count
 }
 
 // responsesAPIUsage represents the usage object in OpenAI Responses API format.
@@ -267,6 +304,10 @@ type responsesAPIUsage struct {
 		ReasoningTokens          int `json:"reasoning_tokens,omitempty"`
 		RejectedPredictionTokens int `json:"rejected_prediction_tokens,omitempty"`
 	} `json:"output_tokens_details,omitempty"`
+	ServerToolUse struct {
+		WebSearchRequests int `json:"web_search_requests,omitempty"`
+	} `json:"server_tool_use,omitempty"`
+	WebSearchRequests int `json:"web_search_requests,omitempty"`
 }
 
 // anthropicStreamUsageExtractor implements StreamUsageExtractor for Anthropic format
@@ -287,6 +328,9 @@ func (a *anthropicStreamUsageExtractor) ExtractUsage(chunk []byte) *StreamUsageI
 				Ephemeral5mInputTokens int `json:"ephemeral_5m_input_tokens,omitempty"`
 				Ephemeral1hInputTokens int `json:"ephemeral_1h_input_tokens,omitempty"`
 			} `json:"cache_creation,omitempty"`
+			ServerToolUse struct {
+				WebSearchRequests int `json:"web_search_requests,omitempty"`
+			} `json:"server_tool_use,omitempty"`
 		} `json:"usage"`
 	}
 
@@ -311,6 +355,7 @@ func (a *anthropicStreamUsageExtractor) ExtractUsage(chunk []byte) *StreamUsageI
 			CacheCreation5mTokens: data.Usage.CacheCreation.Ephemeral5mInputTokens,
 			CacheCreation1hTokens: data.Usage.CacheCreation.Ephemeral1hInputTokens,
 			CacheReadTokens:       data.Usage.CacheReadInputTokens,
+			WebSearchRequests:     data.Usage.ServerToolUse.WebSearchRequests,
 			// Anthropic separates cache_creation (cached prompt tokens)
 			// For logging purposes, we combine under CachedTokens
 			CachedTokens: data.Usage.CacheReadInputTokens,
@@ -325,6 +370,15 @@ func intValue(value *int) int {
 		return 0
 	}
 	return *value
+}
+
+func webSearchRequestsFromUsage(values ...int) int {
+	for _, value := range values {
+		if value > 0 {
+			return value
+		}
+	}
+	return 0
 }
 
 // extractJSONPayloadsFromStreamChunk extracts JSON payload candidates from raw stream chunks.
@@ -789,6 +843,9 @@ func (p *Proxy) finalizeStreamingLog(logCtx *RequestLogContext, totalTokens int,
 			if usageInfo.CacheCreation1hTokens > 0 {
 				logCtx.TokenUsage.CacheCreation1hTokens = usageInfo.CacheCreation1hTokens
 			}
+			if usageInfo.WebSearchRequests > 0 {
+				logCtx.TokenUsage.WebSearchRequests = usageInfo.WebSearchRequests
+			}
 
 			p.logger.DebugContext(logCtx.Context(), "Extracted usage from streaming response",
 				"provider", providerName,
@@ -800,6 +857,7 @@ func (p *Proxy) finalizeStreamingLog(logCtx *RequestLogContext, totalTokens int,
 				"image_tokens", usageInfo.ImageTokens,
 				"output_image_tokens", usageInfo.OutputImageTokens,
 				"reasoning_tokens", usageInfo.ReasoningTokens,
+				"web_search_requests", usageInfo.WebSearchRequests,
 			)
 		}
 	}
@@ -1296,6 +1354,9 @@ func (p *Proxy) handlePassthroughResponsesStreaming(
 						)
 						logCtx.TokenUsage.AudioOutputTokens = event.Response.Usage.OutputTokensDetails.AudioTokens
 						logCtx.TokenUsage.ReasoningTokens = event.Response.Usage.OutputTokensDetails.ReasoningTokens
+						if event.Response.Usage.ServerToolUse != nil {
+							logCtx.TokenUsage.WebSearchRequests = event.Response.Usage.ServerToolUse.WebSearchRequests
+						}
 					}
 				}
 				completedEventPayload = []byte(jsonData) // plain JSON; extractResponsesAPIUsage handles it

@@ -553,8 +553,12 @@ func ExtractTokenUsageWithOptions(body []byte, opts TokenUsageExtractionOptions)
 
 type extractedChoiceWithAnnotations struct {
 	Message struct {
-		Annotations []interface{} `json:"annotations,omitempty"`
+		Annotations []extractedAnnotation `json:"annotations,omitempty"`
 	} `json:"message"`
+}
+
+type extractedAnnotation struct {
+	Type string `json:"type,omitempty"`
 }
 
 type extractedOutputItem struct {
@@ -588,8 +592,10 @@ func webSearchRequestsFromExtractedResponse(
 		return requests
 	}
 	for _, choice := range choices {
-		if len(choice.Message.Annotations) > 0 {
-			return 1
+		for _, annotation := range choice.Message.Annotations {
+			if annotation.Type == "url_citation" {
+				return 1
+			}
 		}
 	}
 	return 0

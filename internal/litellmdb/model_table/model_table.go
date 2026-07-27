@@ -263,6 +263,7 @@ func (a *ProxyModelTable) FetchModelsForAIR(ctx context.Context, signingKey stri
 
 		// Build ModelPrice from CustomPricingLiteLLMParams
 		if price := convertPricingToModelPrice(&model.LlmParams.CustomPricingLiteLLMParams); price != nil {
+			price.LiteLLMProvider = pricingProviderName(model.LlmParams)
 			airPrices[manager.NormalizeModelName(modelName)] = price
 		}
 	}
@@ -460,6 +461,27 @@ func convertPricingToModelPrice(p *queries.CustomPricingLiteLLMParams) *manager.
 	if len(p.SearchContextCostPerQuery) > 0 {
 		price.SearchContextCostPerQuery = p.SearchContextCostPerQuery
 	}
+	if p.WebSearchBillingUnit != nil {
+		price.WebSearchBillingUnit = *p.WebSearchBillingUnit
+	}
 
 	return price
+}
+
+func pricingProviderName(params *queries.GenericLiteLLMParams) string {
+	if params == nil {
+		return ""
+	}
+	if params.CustomLLMProvider != nil && *params.CustomLLMProvider != "" {
+		return *params.CustomLLMProvider
+	}
+	if params.CustomLLMProviderName != nil && *params.CustomLLMProviderName != "" {
+		return *params.CustomLLMProviderName
+	}
+	if params.Model != nil {
+		if slash := strings.IndexByte(*params.Model, '/'); slash > 0 {
+			return (*params.Model)[:slash]
+		}
+	}
+	return ""
 }

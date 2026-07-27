@@ -21,6 +21,7 @@ func TransformVertexStreamToOpenAI(vertexStream io.Reader, model string, output 
 	timestamp := converterutil.GetCurrentTimestamp()
 	isFirstChunk := true
 	doneWritten := false // track if [DONE] was sent
+	webSearchRequests := 0
 
 	vertexLineCount := 0
 	vertexChunkCount := 0
@@ -52,6 +53,9 @@ func TransformVertexStreamToOpenAI(vertexStream io.Reader, model string, output 
 				"error", err, "json_prefix", jsonData[:min(len(jsonData), 200)])
 			continue // Skip malformed chunks
 		}
+		if requests := CountWebSearchRequests(vertexChunk.Candidates); requests > webSearchRequests {
+			webSearchRequests = requests
+		}
 
 		// Skip chunks with no candidates
 		if len(vertexChunk.Candidates) == 0 {
@@ -67,6 +71,7 @@ func TransformVertexStreamToOpenAI(vertexStream io.Reader, model string, output 
 					Choices: []openai.OpenAIStreamingChoice{},
 					Usage:   convertVertexUsageMetadata(vertexChunk.UsageMetadata),
 				}
+				setVertexWebSearchUsage(openAIChunk.Usage, webSearchRequests)
 				chunkJSON, err := json.Marshal(openAIChunk)
 				if err == nil {
 					slog.Debug("[vertex/streaming] emitting usage-only chunk",
@@ -161,6 +166,7 @@ func TransformVertexStreamToOpenAI(vertexStream io.Reader, model string, output 
 			//	"cached_tokens", vertexChunk.UsageMetadata.CachedContentTokenCount,
 			//)
 			openAIChunk.Usage = convertVertexUsageMetadata(vertexChunk.UsageMetadata)
+			setVertexWebSearchUsage(openAIChunk.Usage, webSearchRequests)
 		}
 
 		// Write OpenAI formatted chunk
@@ -185,6 +191,13 @@ func TransformVertexStreamToOpenAI(vertexStream io.Reader, model string, output 
 	}
 
 	return scanner.Err()
+}
+
+func setVertexWebSearchUsage(usage *openai.OpenAIUsage, requests int) {
+	if usage == nil || requests <= 0 {
+		return
+	}
+	usage.ServerToolUse = &openai.ServerToolUseDetails{WebSearchRequests: requests}
 }
 
 // convertVertexFunctionCallToStreamingOpenAI converts Vertex function call to OpenAI streaming tool call format.

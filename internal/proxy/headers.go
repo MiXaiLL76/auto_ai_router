@@ -55,6 +55,7 @@ func isHopByHopHeader(key string) bool {
 
 func isInternalAIRRequestHeader(key string) bool {
 	return strings.EqualFold(key, HeaderAIRProxyClient) ||
+		strings.EqualFold(key, HeaderLegacyAIRProxyClient) ||
 		strings.EqualFold(key, HeaderAIRUsageAudioTokens)
 }
 

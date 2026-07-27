@@ -67,6 +67,8 @@ type ModelPrice struct {
 	// Built-in web search tool pricing. Values are per query/call, keyed by
 	// search_context_size_low|medium|high in LiteLLM's price format.
 	SearchContextCostPerQuery map[string]float64 `json:"search_context_cost_per_query,omitempty"`
+	WebSearchBillingUnit      string             `json:"web_search_billing_unit,omitempty"`
+	LiteLLMProvider           string             `json:"litellm_provider,omitempty"`
 }
 
 // ModelPriceRegistry stores and manages cached model prices

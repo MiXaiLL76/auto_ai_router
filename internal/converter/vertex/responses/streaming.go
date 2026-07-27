@@ -37,6 +37,8 @@ type vertexStreamAccumulator struct {
 
 	// Usage from the final chunk
 	usage *genai.GenerateContentResponseUsageMetadata
+	// Confirmed Google Search queries from grounding metadata.
+	webSearchRequests int
 
 	// Finish reason (string)
 	finishReason string
@@ -116,6 +118,9 @@ func TransformVertexStreamToResponses(
 
 		if len(chunk.Candidates) == 0 {
 			continue
+		}
+		if requests := vertex.CountWebSearchRequests(chunk.Candidates); requests > acc.webSearchRequests {
+			acc.webSearchRequests = requests
 		}
 
 		candidate := chunk.Candidates[0]
@@ -621,6 +626,10 @@ func buildVertexCompletedResponse(acc *vertexStreamAccumulator) *responses.Respo
 	if acc.usage != nil {
 		usage = usageMetadataToUsage(acc.usage)
 	}
+	if usage == nil && acc.webSearchRequests > 0 {
+		usage = &responses.Usage{}
+	}
+	setWebSearchUsage(usage, acc.webSearchRequests)
 
 	completedAt := acc.createdAt
 	metadata := map[string]string{}
