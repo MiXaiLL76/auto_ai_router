@@ -45,6 +45,8 @@ func (u *streamUsage) observeDelta(value *AnthropicStreamUsage) {
 	setIfPresent(&u.value.CacheCreationInputTokens, value.CacheCreationInputTokens)
 	if value.CacheCreation != nil {
 		u.value.CacheCreation = value.CacheCreation
+	} else if value.CacheCreationInputTokens != nil && *value.CacheCreationInputTokens == 0 {
+		u.value.CacheCreation = nil
 	}
 	if value.ServerToolUse != nil {
 		u.value.ServerToolUse = value.ServerToolUse
