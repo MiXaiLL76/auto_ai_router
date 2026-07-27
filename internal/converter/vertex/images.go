@@ -289,6 +289,9 @@ func imageEditRequestToOpenAIChatRequest(openAIBody []byte, contentType, provide
 	if err := applyGeminiImageSize(genConfig, providerModel, fields["size"]); err != nil {
 		return nil, err
 	}
+	if err := applyGeminiImageConfigFields(genConfig, fields); err != nil {
+		return nil, err
+	}
 
 	chatReq := openai.OpenAIRequest{
 		Model: model,
@@ -428,6 +431,61 @@ func parseImageEditFloat(raw, name string) (float64, error) {
 		return 0, fmt.Errorf("invalid image edit %s %q", name, raw)
 	}
 	return value, nil
+}
+
+func applyGeminiImageConfigFields(genConfig map[string]interface{}, fields map[string]string) error {
+	imageConfig := map[string]interface{}{}
+	if existing, ok := genConfig["image_config"].(map[string]interface{}); ok {
+		for key, value := range existing {
+			imageConfig[key] = value
+		}
+	}
+
+	for _, name := range []string{"image_config", "imageConfig"} {
+		raw := strings.TrimSpace(fields[name])
+		if raw == "" {
+			continue
+		}
+		var parsed map[string]interface{}
+		if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
+			return fmt.Errorf("invalid image edit %s %q", name, raw)
+		}
+		for key, value := range parsed {
+			imageConfig[key] = value
+		}
+	}
+
+	if aspectRatio := firstNonEmptyField(fields, "aspect_ratio", "aspectRatio"); aspectRatio != "" {
+		imageConfig["aspectRatio"] = aspectRatio
+		delete(imageConfig, "aspect_ratio")
+	}
+	if imageSize := firstNonEmptyField(fields, "image_size", "imageSize"); imageSize != "" {
+		imageConfig["imageSize"] = imageSize
+		delete(imageConfig, "image_size")
+	}
+
+	if aspectRatio, ok := imageConfig["aspect_ratio"].(string); ok && aspectRatio != "" {
+		imageConfig["aspectRatio"] = aspectRatio
+		delete(imageConfig, "aspect_ratio")
+	}
+	if imageSize, ok := imageConfig["image_size"].(string); ok && imageSize != "" {
+		imageConfig["imageSize"] = imageSize
+		delete(imageConfig, "image_size")
+	}
+
+	if len(imageConfig) > 0 {
+		genConfig["image_config"] = imageConfig
+	}
+	return nil
+}
+
+func firstNonEmptyField(fields map[string]string, names ...string) string {
+	for _, name := range names {
+		if value := strings.TrimSpace(fields[name]); value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func readMultipartPartLimit(part *multipart.Part, maxBytes int64) ([]byte, error) {

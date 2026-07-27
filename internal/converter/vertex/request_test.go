@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/mixaill76/auto_ai_router/internal/converter/openai"
+	"github.com/stretchr/testify/require"
 )
 
 // TestOpenAIToVertex_ToolRoleMessage_UsesNameField verifies that when a tool-role
@@ -66,6 +67,37 @@ func TestOpenAIToVertex_ToolRoleMessage_UsesNameField(t *testing.T) {
 	} else if temp != float64(22) {
 		t.Fatalf("expected temperature = 22, got %v", temp)
 	}
+}
+
+func TestOpenAIToVertex_TopLevelImageConfig(t *testing.T) {
+	req := openai.OpenAIRequest{
+		Model: "gemini-3.1-flash-image",
+		Messages: []openai.OpenAIMessage{
+			{
+				Role: "user",
+				Content: []interface{}{
+					map[string]interface{}{"type": "text", "text": "edit"},
+				},
+			},
+		},
+		ImageConfigSnake: map[string]interface{}{
+			"aspect_ratio": "3:4",
+			"image_size":   "2K",
+		},
+	}
+
+	body, err := json.Marshal(req)
+	require.NoError(t, err)
+
+	resultBytes, err := OpenAIToVertex(body, false, false, "gemini-3.1-flash-image", "application/json")
+	require.NoError(t, err)
+
+	var vertexReq VertexRequest
+	require.NoError(t, json.Unmarshal(resultBytes, &vertexReq))
+	require.NotNil(t, vertexReq.GenerationConfig)
+	require.NotNil(t, vertexReq.GenerationConfig.ImageConfig)
+	require.Equal(t, "3:4", vertexReq.GenerationConfig.ImageConfig.AspectRatio)
+	require.Equal(t, "2K", vertexReq.GenerationConfig.ImageConfig.ImageSize)
 }
 
 // TestOpenAIToVertex_ToolRoleMessage_EmptyName_FallbackToToolResult verifies

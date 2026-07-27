@@ -194,6 +194,66 @@ func TestApplyExtraBodyToConfig(t *testing.T) {
 	})
 }
 
+func TestBuildGenerationConfigTopLevelImageConfig(t *testing.T) {
+	t.Run("with snake case image_config", func(t *testing.T) {
+		req := &openai.OpenAIRequest{
+			Model: "gemini-3.1-flash-image",
+			ImageConfigSnake: map[string]interface{}{
+				"aspect_ratio": "3:4",
+				"image_size":   "2K",
+			},
+		}
+
+		cfg := buildGenerationConfig(req, "gemini-3.1-flash-image")
+		require.NotNil(t, cfg)
+		require.NotNil(t, cfg.ImageConfig)
+		assert.Equal(t, "3:4", cfg.ImageConfig.AspectRatio)
+		assert.Equal(t, "2K", cfg.ImageConfig.ImageSize)
+	})
+
+	t.Run("top-level scalar fields override image_config", func(t *testing.T) {
+		req := &openai.OpenAIRequest{
+			Model: "gemini-3.1-flash-image",
+			ImageConfigSnake: map[string]interface{}{
+				"aspect_ratio": "1:1",
+				"image_size":   "1K",
+			},
+			AspectRatioSnake: "3:4",
+			ImageSizeSnake:   "2K",
+		}
+
+		cfg := buildGenerationConfig(req, "gemini-3.1-flash-image")
+		require.NotNil(t, cfg)
+		require.NotNil(t, cfg.ImageConfig)
+		assert.Equal(t, "3:4", cfg.ImageConfig.AspectRatio)
+		assert.Equal(t, "2K", cfg.ImageConfig.ImageSize)
+	})
+
+	t.Run("top-level image_config overrides extra_body image_config", func(t *testing.T) {
+		req := &openai.OpenAIRequest{
+			Model: "gemini-3.1-flash-image",
+			ExtraBody: map[string]interface{}{
+				"generation_config": map[string]interface{}{
+					"image_config": map[string]interface{}{
+						"aspect_ratio": "1:1",
+						"image_size":   "1K",
+					},
+				},
+			},
+			ImageConfigSnake: map[string]interface{}{
+				"aspect_ratio": "3:4",
+				"image_size":   "2K",
+			},
+		}
+
+		cfg := buildGenerationConfig(req, "gemini-3.1-flash-image")
+		require.NotNil(t, cfg)
+		require.NotNil(t, cfg.ImageConfig)
+		assert.Equal(t, "3:4", cfg.ImageConfig.AspectRatio)
+		assert.Equal(t, "2K", cfg.ImageConfig.ImageSize)
+	})
+}
+
 func TestMapAudioParam(t *testing.T) {
 	t.Run("nil param returns nil", func(t *testing.T) {
 		result := mapAudioParam(nil)
