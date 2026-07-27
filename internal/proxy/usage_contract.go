@@ -59,13 +59,7 @@ func audioUsageContractFromHeaders(headers http.Header) audioUsageContract {
 }
 
 func tokenUsageExtractionOptionsForCredential(cred *config.CredentialConfig) converter.TokenUsageExtractionOptions {
-	includesCachedAudio := true
-	if cred != nil && cred.Type == config.ProviderTypeAIR {
-		// AIR has always emitted normalized audio usage after provider
-		// conversion. This fallback keeps mixed-version AIR chains correct when
-		// an older upstream does not yet send the explicit usage header.
-		includesCachedAudio = false
-	}
+	includesCachedAudio := cred == nil || cred.Type != config.ProviderTypeAIR
 	return converter.TokenUsageExtractionOptions{AudioInputIncludesCachedAudio: includesCachedAudio}
 }
 
