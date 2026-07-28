@@ -190,6 +190,7 @@ type Manager struct {
 	clientModelIDs               map[string]struct{}          // exact advertised canonical client IDs
 	clientModelSurfaceConfigured bool                         // distinguishes an omitted boundary from an explicit empty boundary
 	publicModelAliases           map[string]string            // client alias -> canonical LiteLLM public deployment identity
+	acceptedModelAliases         map[string]string            // accepted client alias -> canonical model, hidden from discovery
 	modelRealNames               map[string]string            // alias name -> real model name (global, no specific credential)
 	modelRealNamesPerCred        map[string]map[string]string // credential -> alias -> real model name (for credential-specific entries)
 	credentialMappingsReady      bool                         // true after static/DB credential mappings have been initialized
@@ -217,6 +218,7 @@ func New(logger *slog.Logger, defaultModelsRPM int, staticModels []config.ModelR
 		modelAliases:                make(map[string]string),
 		clientModelIDs:              make(map[string]struct{}),
 		publicModelAliases:          make(map[string]string),
+		acceptedModelAliases:        make(map[string]string),
 		modelRealNames:              make(map[string]string),
 		modelRealNamesPerCred:       make(map[string]map[string]string),
 		modelPassthroughResponses:   make(map[string]*bool),
@@ -569,11 +571,49 @@ func (m *Manager) SetPublicModelAliases(aliases map[string]string) {
 	m.invalidateAllModelsCachesLocked()
 }
 
+func (m *Manager) SetAcceptedModelAliases(aliases map[string]string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.acceptedModelAliases = make(map[string]string, len(aliases))
+	for alias, target := range aliases {
+		if alias == "" || target == "" || alias == target {
+			m.logger.Warn("Invalid accepted model alias, skipping", "alias", alias, "target", target)
+			continue
+		}
+		m.acceptedModelAliases[alias] = target
+		m.logger.Info("Registered accepted model alias", "alias", alias, "target", target)
+	}
+	m.allModels = nil
+	m.invalidateAllModelsCachesLocked()
+}
+
+func (m *Manager) clientAliasTargetLocked(modelID string) (string, bool, bool) {
+	publicTarget, publicConfigured := m.publicModelAliases[modelID]
+	acceptedTarget, acceptedConfigured := m.acceptedModelAliases[modelID]
+	if publicConfigured && acceptedConfigured && publicTarget != acceptedTarget {
+		return modelID, true, false
+	}
+	if publicConfigured {
+		return publicTarget, true, true
+	}
+	if acceptedConfigured {
+		return acceptedTarget, true, true
+	}
+	return modelID, false, true
+}
+
 func (m *Manager) IsClientModelIDRoutable(modelID string) bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	if target, aliased := m.publicModelAliases[modelID]; aliased {
-		return m.publicModelAliasTargetActiveLocked(target)
+	if target, aliased, unambiguous := m.clientAliasTargetLocked(modelID); aliased {
+		if !unambiguous || !m.publicModelAliasTargetActiveLocked(target) {
+			return false
+		}
+		if m.clientModelSurfaceConfigured {
+			_, allowed := m.clientModelIDs[target]
+			return allowed
+		}
+		return true
 	}
 	if m.clientModelSurfaceConfigured {
 		if _, allowed := m.clientModelIDs[modelID]; !allowed {
@@ -587,11 +627,11 @@ func (m *Manager) IsClientModelIDRoutable(modelID string) bool {
 func (m *Manager) ResolvePublicModelAlias(modelID string) (string, bool, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	target, aliased := m.publicModelAliases[modelID]
+	target, aliased, unambiguous := m.clientAliasTargetLocked(modelID)
 	if !aliased {
 		return modelID, false, nil
 	}
-	if !m.publicModelAliasTargetActiveLocked(target) {
+	if !unambiguous || !m.publicModelAliasTargetActiveLocked(target) {
 		return modelID, false, fmt.Errorf("public model alias %q is not routable", modelID)
 	}
 	return target, true, nil
@@ -765,8 +805,8 @@ func (m *Manager) IsModelIDAllowedByScope(modelID string, allowedModelIDs []stri
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	requestIDs := []string{modelID}
-	if target, isPublicAlias := m.publicModelAliases[modelID]; isPublicAlias {
-		if !m.publicModelAliasTargetActiveLocked(target) {
+	if target, isClientAlias, unambiguous := m.clientAliasTargetLocked(modelID); isClientAlias {
+		if !unambiguous || !m.publicModelAliasTargetActiveLocked(target) {
 			return false
 		}
 		requestIDs = append(requestIDs, target)
@@ -1433,17 +1473,32 @@ func (m *Manager) projectClientModelCatalogLocked(internalModels []Model) []Mode
 			activePublicAliases[alias] = target
 		}
 	}
+	var models []Model
 	if m.clientModelSurfaceConfigured {
-		return projectConfiguredClientModelCatalog(
+		models = projectConfiguredClientModelCatalog(
 			internalModels,
 			m.clientModelIDs,
 			m.modelAliases,
 			activePublicAliases,
 		)
+	} else {
+		models = projectPublicModelCatalog(internalModels, m.modelAliases)
+		models = projectCanonicalPublicAliases(models, activePublicAliases)
 	}
-	models := projectPublicModelCatalog(internalModels, m.modelAliases)
-	models = projectCanonicalPublicAliases(models, activePublicAliases)
-	return models
+	return hideAcceptedModelAliases(models, m.acceptedModelAliases)
+}
+
+func hideAcceptedModelAliases(models []Model, aliases map[string]string) []Model {
+	if len(aliases) == 0 {
+		return models
+	}
+	visible := make([]Model, 0, len(models))
+	for _, model := range models {
+		if _, hidden := aliases[model.ID]; !hidden {
+			visible = append(visible, model)
+		}
+	}
+	return visible
 }
 
 func (m *Manager) invalidateAllModelsCachesLocked() {

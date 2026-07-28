@@ -125,6 +125,26 @@ func TestClientCatalogActivatesPublicAliasThroughCanonicalRouteAlias(t *testing.
 	assert.True(t, manager.IsModelIDAllowedByScope("gpt-4.1", []string{"openai/gpt-4.1"}))
 }
 
+func TestAcceptedModelAliasRoutesWithoutDiscovery(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+	credential := config.CredentialConfig{Name: "openai", Type: config.ProviderTypeOpenAI}
+	manager := New(logger, 100, []config.ModelRPMConfig{{
+		Name:       "gpt-4.1",
+		Credential: credential.Name,
+	}})
+	manager.SetModelAliases(map[string]string{"openai/gpt-4.1": "gpt-4.1"})
+	manager.SetClientModelIDs([]string{"openai/gpt-4.1"})
+	manager.SetAcceptedModelAliases(map[string]string{"legacy-gpt-4.1": "openai/gpt-4.1"})
+	manager.LoadModelsFromConfig([]config.CredentialConfig{credential})
+
+	assert.True(t, manager.IsClientModelIDRoutable("legacy-gpt-4.1"))
+	canonical, alias, err := manager.ResolvePublicModelAlias("legacy-gpt-4.1")
+	assert.NoError(t, err)
+	assert.True(t, alias)
+	assert.Equal(t, "openai/gpt-4.1", canonical)
+	assert.Equal(t, []string{"openai/gpt-4.1"}, responseModelIDs(manager.GetClientModels()))
+}
+
 func TestGetAllModelsWithAccessGroupsScoped_FiltersAliasesByScope(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
 	manager := New(logger, 100, []config.ModelRPMConfig{

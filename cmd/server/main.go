@@ -590,6 +590,9 @@ func initializeModelManager(
 	if len(cfg.PublicModelAlias) > 0 {
 		modelManager.SetPublicModelAliases(cfg.PublicModelAlias)
 	}
+	if len(cfg.AcceptedModelAlias) > 0 {
+		modelManager.SetAcceptedModelAliases(cfg.AcceptedModelAlias)
+	}
 
 	// Initialize rate limiters for each model
 	modelsResp := modelManager.GetAllModels()
