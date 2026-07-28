@@ -233,6 +233,40 @@ func TestExplicitClientModelSurfaceRejectsBackendBeforeProviderAndSpend(t *testi
 	assert.Equal(t, int32(1), providerCalls.Load(), "master-key internal routing must remain available")
 }
 
+func TestAcceptedModelAliasPreservesRestrictedTokenRouting(t *testing.T) {
+	var providerModel string
+	provider := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+		providerModel, _ = body["model"].(string)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl-accepted","object":"chat.completion","created":1,"model":"backend-chat","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+	}))
+	defer provider.Close()
+
+	db := &clientAuthTestDB{tokens: map[string]*dbmodels.TokenInfo{
+		"restricted-key": {
+			Token:  "restricted-hash",
+			Models: []string{"public/chat"},
+		},
+	}}
+	prx := newClientAuthTestProxy(t, db, provider.URL, config.ProviderTypeOpenAI, "provider-key")
+	prx.modelManager.SetClientModelIDs([]string{"public/chat"})
+	prx.modelManager.SetAcceptedModelAliases(map[string]string{"legacy-chat": "public/chat"})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(
+		`{"model":"legacy-chat","messages":[{"role":"user","content":"hello"}]}`,
+	))
+	req.Header.Set("Authorization", "Bearer restricted-key")
+	req.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+
+	prx.ProxyRequest(recorder, req)
+
+	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+	assert.Equal(t, "backend-chat", providerModel)
+}
+
 func TestExplicitClientModelSurfacePreservesRestrictedACLPrecedenceForUnknownModel(t *testing.T) {
 	var providerCalls atomic.Int32
 	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
