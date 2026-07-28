@@ -161,9 +161,11 @@ func New(cfg *models.Config) (Manager, error) {
 
 	// Create authenticator
 	authenticator := auth.NewAuthenticator(pool, cache, cfg.Logger)
-	// Create spend logger
-	logger := spendlog.NewLogger(pool, cfg)
-	logger.Start()
+	var logger *spendlog.Logger
+	if !cfg.DisableSpendLogging {
+		logger = spendlog.NewLogger(pool, cfg)
+		logger.Start()
+	}
 
 	m := &DefaultManager{
 		pool:        pool,
@@ -209,7 +211,7 @@ func (m *DefaultManager) ValidateTokenForModel(ctx context.Context, rawToken, mo
 
 // LogSpend adds an entry to the logging queue
 func (m *DefaultManager) LogSpend(entry *models.SpendLogEntry) error {
-	if m.config.DisableSpendLogsWrite {
+	if m.config.DisableSpendLogsWrite || m.spendLogger == nil {
 		return nil
 	}
 	return m.spendLogger.Log(entry)
@@ -249,6 +251,9 @@ func (m *DefaultManager) AuthCacheStats() models.AuthCacheStats {
 
 // SpendLoggerStats returns spend logger statistics
 func (m *DefaultManager) SpendLoggerStats() models.SpendLoggerStats {
+	if m.spendLogger == nil {
+		return models.SpendLoggerStats{}
+	}
 	return m.spendLogger.Stats()
 }
 
@@ -267,8 +272,10 @@ func (m *DefaultManager) Shutdown(ctx context.Context) error {
 	m.logger.Info("Shutting down LiteLLM DB Manager...")
 
 	// First stop spend logger (to write all pending logs)
-	if err := m.spendLogger.Shutdown(ctx); err != nil {
-		m.logger.Error("SpendLogger shutdown error", "error", err)
+	if m.spendLogger != nil {
+		if err := m.spendLogger.Shutdown(ctx); err != nil {
+			m.logger.Error("SpendLogger shutdown error", "error", err)
+		}
 	}
 
 	// Close connection pool

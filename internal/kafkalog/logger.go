@@ -3,9 +3,11 @@ package kafkalog
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -97,7 +99,19 @@ func NewLogger(cfg *Config) (*Logger, error) {
 	}
 
 	if cfg.TLSEnabled {
-		opts = append(opts, kgo.DialTLSConfig(&tls.Config{MinVersion: tls.VersionTLS12}))
+		tlsConf := &tls.Config{MinVersion: tls.VersionTLS12}
+		if cfg.TLSCACert != "" {
+			pemData, err := os.ReadFile(cfg.TLSCACert)
+			if err != nil {
+				return nil, fmt.Errorf("kafkalog: read tls_ca_cert %q: %w", cfg.TLSCACert, err)
+			}
+			pool := x509.NewCertPool()
+			if !pool.AppendCertsFromPEM(pemData) {
+				return nil, fmt.Errorf("kafkalog: no valid certificates found in tls_ca_cert %q", cfg.TLSCACert)
+			}
+			tlsConf.RootCAs = pool
+		}
+		opts = append(opts, kgo.DialTLSConfig(tlsConf))
 	}
 
 	switch cfg.SASLMechanism {
@@ -128,12 +142,19 @@ func NewLogger(cfg *Config) (*Logger, error) {
 	return l, nil
 }
 
-// Start starts the background worker, health checker and DLQ recovery loop.
+// Start starts the background workers, health checker and DLQ recovery loop.
 // Safe to call multiple times (idempotent).
 func (l *Logger) Start() {
 	l.startOnce.Do(func() {
-		l.wg.Add(3)
-		go l.worker()
+		numWorkers := l.config.LogWorkers
+		if numWorkers <= 0 {
+			numWorkers = 1
+		}
+
+		l.wg.Add(numWorkers + 2)
+		for i := 0; i < numWorkers; i++ {
+			go l.worker()
+		}
 		go l.healthCheckWorker()
 		go l.dlqRecoveryWorker()
 		l.logger.Info("[Kafka] SpendLogger started",
@@ -141,6 +162,7 @@ func (l *Logger) Start() {
 			"queue_size", l.config.LogQueueSize,
 			"batch_size", l.config.LogBatchSize,
 			"flush_interval", l.config.LogFlushInterval,
+			"workers", numWorkers,
 		)
 	})
 }

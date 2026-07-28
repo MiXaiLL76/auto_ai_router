@@ -19,22 +19,22 @@ import (
 // buildProxyBodyTestProxyWithMM constructs a Proxy using the provided model manager.
 // This lets us inject a model manager that has a model:real-name mapping.
 func buildProxyBodyTestProxyWithMM(credURL string, mm *models.Manager) *Proxy {
-	prx := NewTestProxyBuilder().
+	builder := NewTestProxyBuilder().
 		WithSingleCredential("upstream", config.ProviderTypeProxy, credURL, "upstream-key").
-		WithMasterKey("master-key").
-		Build()
-	prx.modelManager = mm
-	return prx
+		WithMasterKey("master-key")
+	mm.LoadModelsFromConfig(builder.config.Credentials)
+	builder.config.ModelManager = mm
+	return builder.Build()
 }
 
 // buildProxyBodyTestProxyWithFallbackMM is the same but with primary + fallback credential.
 func buildProxyBodyTestProxyWithFallbackMM(primaryURL, fallbackURL string, mm *models.Manager) *Proxy {
-	prx := NewTestProxyBuilder().
+	builder := NewTestProxyBuilder().
 		WithPrimaryAndFallback(primaryURL, fallbackURL).
-		WithMasterKey("master-key").
-		Build()
-	prx.modelManager = mm
-	return prx
+		WithMasterKey("master-key")
+	mm.LoadModelsFromConfig(builder.config.Credentials)
+	builder.config.ModelManager = mm
+	return builder.Build()
 }
 
 // TestProxyBody_NoAlias verifies that when modelID == realModelID (no alias configured),
@@ -98,7 +98,9 @@ func TestProxyBody_WithAlias(t *testing.T) {
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(createMockChatCompletionResponse("id-2", modelAlias, "ok"))
+		// A proxy hop may expose its provider-facing model in the response even
+		// though it accepted the public alias in the request.
+		_ = json.NewEncoder(w).Encode(createMockChatCompletionResponse("id-2", modelReal, "ok"))
 	}))
 	defer upstream.Close()
 
@@ -127,6 +129,45 @@ func TestProxyBody_WithAlias(t *testing.T) {
 	// The proxy-type upstream must receive the original alias name, NOT the provider real name.
 	assert.Equal(t, modelAlias, receivedModel,
 		"proxy upstream should receive the alias name (proxyBody), not the real provider name")
+	var clientResponse map[string]interface{}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &clientResponse))
+	assert.Equal(t, modelAlias, clientResponse["model"],
+		"client response should restore the public alias exposed by this router")
+}
+
+func TestProxyBody_GlobalModelAliasRestoresClientVisibleModel(t *testing.T) {
+	const publicModel = "openai/gpt-4o-mini"
+	const backendModel = "backend-gpt-4o-mini"
+
+	var receivedModel string
+	upstream := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var requestBody map[string]any
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&requestBody))
+		receivedModel, _ = requestBody["model"].(string)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(createMockChatCompletionResponse("id-global-alias", backendModel, "ok"))
+	}))
+	defer upstream.Close()
+
+	logger := testhelpers.NewTestLogger()
+	manager := models.New(logger, 50, nil)
+	manager.SetModelAliases(map[string]string{publicModel: backendModel})
+	prx := buildProxyBodyTestProxyWithMM(upstream.URL, manager)
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(
+		`{"model":"openai/gpt-4o-mini","messages":[{"role":"user","content":"hello"}]}`,
+	))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	prx.ProxyRequest(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, backendModel, receivedModel)
+	var response map[string]any
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &response))
+	assert.Equal(t, publicModel, response["model"])
 }
 
 // TestProxyBody_FallbackReceivesAlias verifies that when the primary proxy returns 429
@@ -249,11 +290,12 @@ func TestProxyBody_OrchestratedRequest_ProxyBodySet(t *testing.T) {
 		logger := testhelpers.NewTestLogger()
 		mm := models.New(logger, 50, []config.ModelRPMConfig{})
 
-		prx := NewTestProxyBuilder().
+		builder := NewTestProxyBuilder().
 			WithSingleCredential("c", config.ProviderTypeProxy, "http://nowhere.invalid", "k").
-			WithMasterKey("master-key").
-			Build()
-		prx.modelManager = mm
+			WithMasterKey("master-key")
+		mm.LoadModelsFromConfig(builder.config.Credentials)
+		builder.config.ModelManager = mm
+		prx := builder.Build()
 
 		reqBody := `{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}`
 		req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(reqBody))
@@ -281,11 +323,12 @@ func TestProxyBody_OrchestratedRequest_ProxyBodySet(t *testing.T) {
 			{Name: modelAlias, Model: modelReal},
 		})
 
-		prx := NewTestProxyBuilder().
+		builder := NewTestProxyBuilder().
 			WithSingleCredential("c", config.ProviderTypeProxy, "http://nowhere.invalid", "k").
-			WithMasterKey("master-key").
-			Build()
-		prx.modelManager = mm
+			WithMasterKey("master-key")
+		mm.LoadModelsFromConfig(builder.config.Credentials)
+		builder.config.ModelManager = mm
+		prx := builder.Build()
 
 		reqBodyStr, err := json.Marshal(map[string]interface{}{
 			"model":    modelAlias,

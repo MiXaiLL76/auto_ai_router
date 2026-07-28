@@ -6,10 +6,8 @@ import (
 	"net/http"
 	"sync"
 
-	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"github.com/mixaill76/auto_ai_router/internal/converter/responses"
-	"github.com/mixaill76/auto_ai_router/internal/utils"
 )
 
 var wsUpgrader = websocket.Upgrader{
@@ -217,18 +215,11 @@ func sendWSHTTPError(conn *websocket.Conn, raw []byte, fallbackStatus int) {
 // memory so that previous_response_id continuations work within the same session.
 // Reconnecting on a new WebSocket clears the cache, triggering previous_response_not_found.
 func (p *Proxy) HandleWebSocketResponses(w http.ResponseWriter, r *http.Request) {
-	// Authenticate the upgrade request BEFORE establishing the socket. An invalid
-	// key / exhausted budget gets an ordinary HTTP error (401/402/403) and the
-	// connection is never upgraded. The per-message response.create path still runs
-	// its own full auth via ProxyRequest (Authorization is cloned into internalReq),
-	// so this pre-check is purely a gate on connection establishment.
-	authLogCtx := &RequestLogContext{
-		RequestID: uuid.New().String(),
-		StartTime: utils.NowUTC(),
-		Request:   r,
-		Status:    "unknown",
-	}
-	if !p.authenticateRequest(w, r, authLogCtx, p.isLiteLLMHealthy()) {
+	// Match LiteLLM's handshake boundary: authenticate and authorize the
+	// original Responses route before returning 101. Per-turn ProxyRequest
+	// authentication remains in place so revoked/blocked keys fail closed on
+	// an already-open connection.
+	if _, ok := p.AuthenticateClientRequest(w, r); !ok {
 		return
 	}
 
@@ -237,6 +228,11 @@ func (p *Proxy) HandleWebSocketResponses(w http.ResponseWriter, r *http.Request)
 		p.logger.DebugContext(r.Context(), "ws: upgrade failed", "error", err)
 		return
 	}
+	readLimit := int64(p.maxBodySizeMB) * 1024 * 1024
+	if readLimit <= 0 {
+		readLimit = 1024 * 1024
+	}
+	conn.SetReadLimit(readLimit)
 	defer func() {
 		if closeErr := conn.Close(); closeErr != nil && p.logger != nil {
 			p.logger.DebugContext(r.Context(), "ws: close failed", "error", closeErr)
@@ -406,12 +402,9 @@ outerLoop:
 		}()
 
 		// Wait for the turn to complete or the client to disconnect.
-		select {
-		case <-wsWriter.done:
-		case <-r.Context().Done():
+		if !waitForWSTurn(turnDone, wsWriter.done, r.Context().Done()) {
 			return
 		}
-		<-turnDone
 
 		// Update connection-local cache (only for explicit store:false responses).
 		if isStoreFalse {
@@ -427,4 +420,15 @@ outerLoop:
 			cacheMu.Unlock()
 		}
 	}
+}
+
+func waitForWSTurn(turnDone, streamDone, requestDone <-chan struct{}) bool {
+	select {
+	case <-streamDone:
+	case <-requestDone:
+		<-turnDone
+		return false
+	}
+	<-turnDone
+	return true
 }

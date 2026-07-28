@@ -26,8 +26,10 @@ const (
 	ProviderTypeGemini    ProviderType = "gemini"
 	ProviderTypeAnthropic ProviderType = "anthropic"
 	ProviderTypeCometAPI  ProviderType = "cometapi"
+	ProviderTypeProMan    ProviderType = "proman"
 	ProviderTypeBedrock   ProviderType = "bedrock"
 	ProviderTypeProxy     ProviderType = "proxy"
+	ProviderTypeAIR       ProviderType = "air"
 )
 
 // LogValue implements slog.LogValuer so structured log backends (e.g. the
@@ -40,16 +42,27 @@ func (p ProviderType) LogValue() slog.Value {
 // IsValid checks if the provider type is valid
 func (p ProviderType) IsValid() bool {
 	switch p {
-	case ProviderTypeOpenAI, ProviderTypeVertexAI, ProviderTypeGemini, ProviderTypeAnthropic, ProviderTypeCometAPI, ProviderTypeBedrock, ProviderTypeProxy:
+	case ProviderTypeOpenAI, ProviderTypeVertexAI, ProviderTypeGemini, ProviderTypeAnthropic, ProviderTypeCometAPI, ProviderTypeProMan, ProviderTypeBedrock, ProviderTypeProxy, ProviderTypeAIR:
 		return true
 	}
 	return false
+}
+
+// IsProxyLike reports whether the provider uses AIR's proxy forwarding path:
+// OpenAI-compatible request forwarding, remote /health model discovery, and
+// proxy-chain fallback semantics.
+func (p ProviderType) IsProxyLike() bool {
+	return p == ProviderTypeProxy || p == ProviderTypeAIR
 }
 
 func normalizeProviderType(raw string) ProviderType {
 	switch strings.ToLower(strings.TrimSpace(raw)) {
 	case "comet-api", "comet_api":
 		return ProviderTypeCometAPI
+	case "aar", "auto-ai-router", "auto_ai_router":
+		return ProviderTypeAIR
+	case "pro-man", "pro_man":
+		return ProviderTypeProMan
 	default:
 		return ProviderType(strings.ToLower(strings.TrimSpace(raw)))
 	}
@@ -57,12 +70,15 @@ func normalizeProviderType(raw string) ProviderType {
 
 // ModelRPMConfig represents RPM and TPM limits for a specific model
 type ModelRPMConfig struct {
-	Name       string `yaml:"name"`
-	Model      string `yaml:"model,omitempty"` // Real model name sent to provider (alias for Name if different)
-	RPM        int    `yaml:"rpm"`
-	TPM        int    `yaml:"tpm"`
-	Weight     int    `yaml:"weight"`               // Weighted round-robin weight (0 = use credential default / 1)
-	Credential string `yaml:"credential,omitempty"` // If set, model is only available for this credential
+	Name  string `yaml:"name"`
+	Model string `yaml:"model,omitempty"` // Real model name sent to provider (alias for Name if different)
+	// DeploymentID is the authoritative LiteLLM_ProxyModelTable.model_id.
+	// It is populated only by the database loader and is never accepted from YAML.
+	DeploymentID string `yaml:"-"`
+	RPM          int    `yaml:"rpm"`
+	TPM          int    `yaml:"tpm"`
+	Weight       int    `yaml:"weight"`               // Weighted round-robin weight (0 = use credential default / 1)
+	Credential   string `yaml:"credential,omitempty"` // If set, model is only available for this credential
 
 	// PassthroughResponses controls whether Responses API requests for this model
 	// are forwarded as-is to the provider's native /v1/responses endpoint instead
@@ -120,16 +136,19 @@ func (m *ModelRPMConfig) UnmarshalYAML(value *yaml.Node) error {
 }
 
 type Config struct {
-	Server      ServerConfig       `yaml:"server"`
-	Fail2Ban    Fail2BanConfig     `yaml:"fail2ban,omitempty"`
-	Credentials []CredentialConfig `yaml:"credentials"`
-	Monitoring  MonitoringConfig   `yaml:"monitoring"`
-	Models      []ModelRPMConfig   `yaml:"models,omitempty"`
-	ModelAlias  map[string]string  `yaml:"model_alias,omitempty"`
-	LiteLLMDB   LiteLLMDBConfig    `yaml:"litellm_db,omitempty"`
-	Redis       RedisConfig        `yaml:"redis,omitempty"`
-	OTEL        OTELConfig         `yaml:"otel,omitempty"`
-	Kafka       KafkaConfig        `yaml:"kafka,omitempty"`
+	Server             ServerConfig       `yaml:"server"`
+	Fail2Ban           Fail2BanConfig     `yaml:"fail2ban,omitempty"`
+	Credentials        []CredentialConfig `yaml:"credentials"`
+	Monitoring         MonitoringConfig   `yaml:"monitoring"`
+	Models             []ModelRPMConfig   `yaml:"models,omitempty"`
+	ModelAlias         map[string]string  `yaml:"model_alias,omitempty"`
+	ClientModelIDs     []string           `yaml:"client_model_ids,omitempty"`
+	PublicModelAlias   map[string]string  `yaml:"public_model_alias,omitempty"`
+	AcceptedModelAlias map[string]string  `yaml:"accepted_model_alias,omitempty"`
+	LiteLLMDB          LiteLLMDBConfig    `yaml:"litellm_db,omitempty"`
+	Redis              RedisConfig        `yaml:"redis,omitempty"`
+	OTEL               OTELConfig         `yaml:"otel,omitempty"`
+	Kafka              KafkaConfig        `yaml:"kafka,omitempty"`
 	// ModelTemplates stores x-model-templates entries as raw interface{} so that
 	// both single-model mappings and lists of models can be defined as YAML anchors
 	// without type errors. The actual model data is extracted via anchor expansion.
@@ -147,17 +166,20 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 
 	// Then unmarshal the resolved data into Config
 	type RawConfig struct {
-		Server         ServerConfig           `yaml:"server"`
-		Fail2Ban       Fail2BanConfig         `yaml:"fail2ban,omitempty"`
-		Credentials    []CredentialConfig     `yaml:"credentials"`
-		Monitoring     MonitoringConfig       `yaml:"monitoring"`
-		Models         []ModelRPMConfig       `yaml:"models,omitempty"`
-		ModelAlias     map[string]string      `yaml:"model_alias,omitempty"`
-		LiteLLMDB      LiteLLMDBConfig        `yaml:"litellm_db,omitempty"`
-		Redis          RedisConfig            `yaml:"redis,omitempty"`
-		OTEL           OTELConfig             `yaml:"otel,omitempty"`
-		Kafka          KafkaConfig            `yaml:"kafka,omitempty"`
-		ModelTemplates map[string]interface{} `yaml:"x-model-templates,omitempty"`
+		Server             ServerConfig           `yaml:"server"`
+		Fail2Ban           Fail2BanConfig         `yaml:"fail2ban,omitempty"`
+		Credentials        []CredentialConfig     `yaml:"credentials"`
+		Monitoring         MonitoringConfig       `yaml:"monitoring"`
+		Models             []ModelRPMConfig       `yaml:"models,omitempty"`
+		ModelAlias         map[string]string      `yaml:"model_alias,omitempty"`
+		ClientModelIDs     []string               `yaml:"client_model_ids,omitempty"`
+		PublicModelAlias   map[string]string      `yaml:"public_model_alias,omitempty"`
+		AcceptedModelAlias map[string]string      `yaml:"accepted_model_alias,omitempty"`
+		LiteLLMDB          LiteLLMDBConfig        `yaml:"litellm_db,omitempty"`
+		Redis              RedisConfig            `yaml:"redis,omitempty"`
+		OTEL               OTELConfig             `yaml:"otel,omitempty"`
+		Kafka              KafkaConfig            `yaml:"kafka,omitempty"`
+		ModelTemplates     map[string]interface{} `yaml:"x-model-templates,omitempty"`
 	}
 
 	var raw RawConfig
@@ -172,6 +194,9 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 	c.Monitoring = raw.Monitoring
 	c.Models = raw.Models
 	c.ModelAlias = raw.ModelAlias
+	c.ClientModelIDs = raw.ClientModelIDs
+	c.PublicModelAlias = raw.PublicModelAlias
+	c.AcceptedModelAlias = raw.AcceptedModelAlias
 	c.LiteLLMDB = raw.LiteLLMDB
 	c.Redis = raw.Redis
 	c.OTEL = raw.OTEL
@@ -549,10 +574,14 @@ func (s *ServerConfig) UnmarshalYAML(value *yaml.Node) error {
 	if s.DefaultModelsRPM, err = parseField(temp.DefaultModelsRPM, -1, strconv.Atoi, "default_models_rpm"); err != nil {
 		return err
 	}
-	if s.MaxIdleConns, err = parseField(temp.MaxIdleConns, 200, strconv.Atoi, "max_idle_conns"); err != nil {
+	// Defaults sized for sustained several-hundred-RPS proxy traffic against a
+	// handful of upstream hosts: too low a per-host cap forces the transport to
+	// close and re-dial TCP connections instead of reusing idle ones, which
+	// shows up as a syscall.connect hot path under load.
+	if s.MaxIdleConns, err = parseField(temp.MaxIdleConns, 1024, strconv.Atoi, "max_idle_conns"); err != nil {
 		return err
 	}
-	if s.MaxIdleConnsPerHost, err = parseField(temp.MaxIdleConnsPerHost, 20, strconv.Atoi, "max_idle_conns_per_host"); err != nil {
+	if s.MaxIdleConnsPerHost, err = parseField(temp.MaxIdleConnsPerHost, 256, strconv.Atoi, "max_idle_conns_per_host"); err != nil {
 		return err
 	}
 
@@ -636,7 +665,7 @@ type CredentialConfig struct {
 	CredentialsFile string `yaml:"credentials_file,omitempty"`
 	CredentialsJSON string `yaml:"credentials_json,omitempty"`
 
-	// Proxy specific fields
+	// Proxy/AIR remote-router specific fields
 	IsFallback bool `yaml:"is_fallback,omitempty"`
 }
 
@@ -653,6 +682,10 @@ func (c CredentialConfig) ScopeExpression() *scope.Expression {
 		scope.FromScopes(c.Scopes, c.DeniedScopes),
 		providerExpression,
 	)
+}
+
+func (c CredentialConfig) IsProxyLike() bool {
+	return c.Type.IsProxyLike()
 }
 
 // SameProviderIdentity reports whether learned provider metadata can be reused.
@@ -692,6 +725,13 @@ func (c *CredentialConfig) UnmarshalYAML(value *yaml.Node) error {
 	var temp tempConfig
 	if err := value.Decode(&temp); err != nil {
 		return err
+	}
+	if hasYAMLKey(value, "proxy_usage_format") {
+		name := resolveEnvString(temp.Name)
+		if name == "" {
+			name = "<unnamed>"
+		}
+		return fmt.Errorf("credential %s: proxy_usage_format is no longer supported; use type: air for Auto AI Router upstreams or type: proxy for generic OpenAI-compatible APIs", name)
 	}
 
 	// Resolve string fields
@@ -742,11 +782,30 @@ func (c *CredentialConfig) UnmarshalYAML(value *yaml.Node) error {
 	return nil
 }
 
+func hasYAMLKey(value *yaml.Node, key string) bool {
+	if value == nil || value.Kind != yaml.MappingNode {
+		return false
+	}
+	for i := 0; i+1 < len(value.Content); i += 2 {
+		if value.Content[i].Value == key {
+			return true
+		}
+	}
+	return false
+}
+
 type MonitoringConfig struct {
 	PrometheusEnabled bool   `yaml:"prometheus_enabled"`
 	HealthCheckPath   string `yaml:"-"` // Fixed to "/health", not configurable via YAML
 	LogErrors         bool   `yaml:"log_errors,omitempty"`
 	ErrorsLogPath     string `yaml:"errors_log_path,omitempty"`
+	// PprofEnabled turns on net/http/pprof profiling handlers on a separate
+	// internal-only listener (see PprofPort). Opt-in and off by default:
+	// pprof exposes heap contents, goroutine stacks and lets any caller
+	// trigger a 30s CPU profile, so it must never be reachable from outside
+	// the cluster (no Service/Ingress route to PprofPort).
+	PprofEnabled bool `yaml:"pprof_enabled,omitempty"` // default: false
+	PprofPort    int  `yaml:"pprof_port,omitempty"`    // default: 6060
 }
 
 // LiteLLMDBConfig holds configuration for LiteLLM database integration
@@ -779,6 +838,10 @@ type LiteLLMDBConfig struct {
 	LogQueueSize     int           `yaml:"log_queue_size"`     // default: 10000
 	LogBatchSize     int           `yaml:"log_batch_size"`     // default: 100
 	LogFlushInterval time.Duration `yaml:"log_flush_interval"` // default: 5s
+	// LogWorkers is the number of goroutines concurrently draining the spend-log
+	// queue into Postgres. Each worker batches and flushes independently, so a
+	// slow INSERT or retry backoff in one worker doesn't stall the others.
+	LogWorkers int `yaml:"log_workers"` // default: 4
 
 	// DisableSpendLogsWrite disables writing SpendLogEntry/Daily* aggregates to
 	// Postgres while leaving auth (ValidateToken) untouched. Intended for setups
@@ -821,12 +884,20 @@ type KafkaConfig struct {
 	LogQueueSize     int           `yaml:"log_queue_size"`     // default: 5000
 	LogBatchSize     int           `yaml:"log_batch_size"`     // default: 100
 	LogFlushInterval time.Duration `yaml:"log_flush_interval"` // default: 5s
+	// LogWorkers is the number of goroutines concurrently draining the queue
+	// and producing to Kafka (mirrors litellm_db.log_workers).
+	LogWorkers int `yaml:"log_workers"` // default: 4
 
 	// TLS/SASL — optional, for production clusters.
 	TLSEnabled    bool   `yaml:"tls_enabled,omitempty"`
 	SASLMechanism string `yaml:"sasl_mechanism,omitempty"` // "" | "PLAIN" | "SCRAM-SHA-256" | "SCRAM-SHA-512"
 	SASLUsername  string `yaml:"sasl_username,omitempty"`
 	SASLPassword  string `yaml:"sasl_password,omitempty"`
+	// TLSCACert is an optional path to a PEM-encoded CA certificate bundle
+	// used to verify the broker's TLS certificate (e.g. Yandex Managed
+	// Service for Kafka requires its own CA, not present in the OS default
+	// trust store). Empty means the OS default trust store is used.
+	TLSCACert string `yaml:"tls_ca_cert,omitempty"`
 }
 
 // OTELConfig holds OpenTelemetry export configuration for logs, traces and metrics.
@@ -966,6 +1037,8 @@ func (m *MonitoringConfig) UnmarshalYAML(value *yaml.Node) error {
 		PrometheusEnabled string `yaml:"prometheus_enabled"`
 		LogErrors         string `yaml:"log_errors,omitempty"`
 		ErrorsLogPath     string `yaml:"errors_log_path,omitempty"`
+		PprofEnabled      string `yaml:"pprof_enabled,omitempty"`
+		PprofPort         string `yaml:"pprof_port,omitempty"`
 	}
 
 	var temp tempConfig
@@ -979,6 +1052,12 @@ func (m *MonitoringConfig) UnmarshalYAML(value *yaml.Node) error {
 		return err
 	}
 	if m.LogErrors, err = parseField(temp.LogErrors, false, strconv.ParseBool, "log_errors"); err != nil {
+		return err
+	}
+	if m.PprofEnabled, err = parseField(temp.PprofEnabled, false, strconv.ParseBool, "pprof_enabled"); err != nil {
+		return err
+	}
+	if m.PprofPort, err = parseField(temp.PprofPort, 6060, strconv.Atoi, "pprof_port"); err != nil {
 		return err
 	}
 
@@ -1006,6 +1085,7 @@ func (l *LiteLLMDBConfig) UnmarshalYAML(value *yaml.Node) error {
 		LogQueueSize          string `yaml:"log_queue_size"`
 		LogBatchSize          string `yaml:"log_batch_size"`
 		LogFlushInterval      string `yaml:"log_flush_interval"`
+		LogWorkers            string `yaml:"log_workers"`
 		DisableSpendLogsWrite string `yaml:"disable_spend_logs_write"`
 
 		EnforceBudgetReservation         string `yaml:"enforce_budget_reservation"`
@@ -1042,12 +1122,6 @@ func (l *LiteLLMDBConfig) UnmarshalYAML(value *yaml.Node) error {
 	if l.EnforceKeyRateLimits, err = parseField(temp.EnforceKeyRateLimits, false, strconv.ParseBool, "litellm_db.enforce_key_rate_limits"); err != nil {
 		return err
 	}
-	if l.DefaultEstimatedCompletionTokens, err = parseField(temp.DefaultEstimatedCompletionTokens, 1000, strconv.Atoi, "litellm_db.default_estimated_completion_tokens"); err != nil {
-		return err
-	}
-	if l.BudgetReservationTTL, err = parseField(temp.BudgetReservationTTL, 15*time.Minute, time.ParseDuration, "litellm_db.budget_reservation_ttl"); err != nil {
-		return err
-	}
 
 	// Integer fields (defaults optimized for ~1000 requests/minute)
 	if l.MaxConns, err = parseField(temp.MaxConns, 25, strconv.Atoi, "litellm_db.max_conns"); err != nil {
@@ -1063,6 +1137,12 @@ func (l *LiteLLMDBConfig) UnmarshalYAML(value *yaml.Node) error {
 		return err
 	}
 	if l.LogBatchSize, err = parseField(temp.LogBatchSize, 100, strconv.Atoi, "litellm_db.log_batch_size"); err != nil {
+		return err
+	}
+	if l.DefaultEstimatedCompletionTokens, err = parseField(temp.DefaultEstimatedCompletionTokens, 1000, strconv.Atoi, "litellm_db.default_estimated_completion_tokens"); err != nil {
+		return err
+	}
+	if l.LogWorkers, err = parseField(temp.LogWorkers, 4, strconv.Atoi, "litellm_db.log_workers"); err != nil {
 		return err
 	}
 	// Duration fields
@@ -1081,6 +1161,9 @@ func (l *LiteLLMDBConfig) UnmarshalYAML(value *yaml.Node) error {
 	if l.LogFlushInterval, err = parseField(temp.LogFlushInterval, 5*time.Second, time.ParseDuration, "litellm_db.log_flush_interval"); err != nil {
 		return err
 	}
+	if l.BudgetReservationTTL, err = parseField(temp.BudgetReservationTTL, 15*time.Minute, time.ParseDuration, "litellm_db.budget_reservation_ttl"); err != nil {
+		return err
+	}
 
 	return nil
 }
@@ -1095,10 +1178,12 @@ func (k *KafkaConfig) UnmarshalYAML(value *yaml.Node) error {
 		LogQueueSize     string   `yaml:"log_queue_size"`
 		LogBatchSize     string   `yaml:"log_batch_size"`
 		LogFlushInterval string   `yaml:"log_flush_interval"`
+		LogWorkers       string   `yaml:"log_workers"`
 		TLSEnabled       string   `yaml:"tls_enabled,omitempty"`
 		SASLMechanism    string   `yaml:"sasl_mechanism,omitempty"`
 		SASLUsername     string   `yaml:"sasl_username,omitempty"`
 		SASLPassword     string   `yaml:"sasl_password,omitempty"`
+		TLSCACert        string   `yaml:"tls_ca_cert,omitempty"`
 	}
 
 	var temp tempConfig
@@ -1107,11 +1192,9 @@ func (k *KafkaConfig) UnmarshalYAML(value *yaml.Node) error {
 	}
 
 	var err error
-
 	if k.Enabled, err = parseField(temp.Enabled, false, strconv.ParseBool, "kafka.enabled"); err != nil {
 		return err
 	}
-
 	// Resolve env variables in each broker address. A single YAML entry can
 	// resolve to a comma-separated list (documented KAFKA_BROKERS usage, e.g.
 	// "kafka1:9092,kafka2:9092") -- franz-go's kgo.SeedBrokers is variadic and
@@ -1127,12 +1210,10 @@ func (k *KafkaConfig) UnmarshalYAML(value *yaml.Node) error {
 			}
 		}
 	}
-
 	// Topic and ClientID are not mandatory here — defaults are applied by
 	// ApplyDefaults()/kafkalog.Config.ApplyDefaults(), not during unmarshaling.
 	k.Topic = resolveEnvString(temp.Topic)
 	k.ClientID = resolveEnvString(temp.ClientID)
-
 	if k.LogQueueSize, err = parseField(temp.LogQueueSize, 5000, strconv.Atoi, "kafka.log_queue_size"); err != nil {
 		return err
 	}
@@ -1142,6 +1223,9 @@ func (k *KafkaConfig) UnmarshalYAML(value *yaml.Node) error {
 	if k.LogFlushInterval, err = parseField(temp.LogFlushInterval, 5*time.Second, time.ParseDuration, "kafka.log_flush_interval"); err != nil {
 		return err
 	}
+	if k.LogWorkers, err = parseField(temp.LogWorkers, 4, strconv.Atoi, "kafka.log_workers"); err != nil {
+		return err
+	}
 
 	if k.TLSEnabled, err = parseField(temp.TLSEnabled, false, strconv.ParseBool, "kafka.tls_enabled"); err != nil {
 		return err
@@ -1149,7 +1233,7 @@ func (k *KafkaConfig) UnmarshalYAML(value *yaml.Node) error {
 	k.SASLMechanism = resolveEnvString(temp.SASLMechanism)
 	k.SASLUsername = resolveEnvString(temp.SASLUsername)
 	k.SASLPassword = resolveEnvString(temp.SASLPassword)
-
+	k.TLSCACert = resolveEnvString(temp.TLSCACert)
 	return nil
 }
 
@@ -1243,6 +1327,27 @@ func Load(path string) (*Config, error) {
 		}
 		cfg.ModelAlias = resolved
 	}
+	if cfg.ClientModelIDs != nil {
+		resolved := make([]string, len(cfg.ClientModelIDs))
+		for index, modelID := range cfg.ClientModelIDs {
+			resolved[index] = resolveEnvString(modelID)
+		}
+		cfg.ClientModelIDs = resolved
+	}
+	if cfg.PublicModelAlias != nil {
+		resolved := make(map[string]string, len(cfg.PublicModelAlias))
+		for alias, target := range cfg.PublicModelAlias {
+			resolved[resolveEnvString(alias)] = resolveEnvString(target)
+		}
+		cfg.PublicModelAlias = resolved
+	}
+	if cfg.AcceptedModelAlias != nil {
+		resolved := make(map[string]string, len(cfg.AcceptedModelAlias))
+		for alias, target := range cfg.AcceptedModelAlias {
+			resolved[resolveEnvString(alias)] = resolveEnvString(target)
+		}
+		cfg.AcceptedModelAlias = resolved
+	}
 
 	if cfg.Credentials == nil {
 		cfg.Credentials = []CredentialConfig{}
@@ -1254,6 +1359,12 @@ func Load(path string) (*Config, error) {
 
 	if cfg.ModelAlias == nil {
 		cfg.ModelAlias = map[string]string{}
+	}
+	if cfg.PublicModelAlias == nil {
+		cfg.PublicModelAlias = map[string]string{}
+	}
+	if cfg.AcceptedModelAlias == nil {
+		cfg.AcceptedModelAlias = map[string]string{}
 	}
 
 	// Extract models from credentials and add to main Models list
@@ -1301,6 +1412,8 @@ func defaultMonitoringConfig() MonitoringConfig {
 		HealthCheckPath:   "/health",
 		LogErrors:         false,
 		ErrorsLogPath:     "logs/logs.jsonl",
+		PprofEnabled:      false,
+		PprofPort:         6060,
 	}
 }
 
@@ -1340,6 +1453,7 @@ func defaultLiteLLMDBConfig() LiteLLMDBConfig {
 		LogQueueSize:          5000,
 		LogBatchSize:          100,
 		LogFlushInterval:      5 * time.Second,
+		LogWorkers:            4,
 
 		EnforceBudgetReservation:         false,
 		BudgetReservationTTL:             15 * time.Minute,
@@ -1357,6 +1471,7 @@ func defaultKafkaConfig() KafkaConfig {
 		LogQueueSize:     5000,
 		LogBatchSize:     100,
 		LogFlushInterval: 5 * time.Second,
+		LogWorkers:       4,
 	}
 }
 
@@ -1502,7 +1617,7 @@ func (c *Config) Validate() error {
 
 		// Validate provider type
 		if !cred.Type.IsValid() {
-			return fmt.Errorf("credential %s: invalid type: %s (must be 'openai', 'vertex-ai', 'gemini', 'anthropic', 'cometapi', 'bedrock', or 'proxy')", cred.Name, cred.Type)
+			return fmt.Errorf("credential %s: invalid type: %s (must be 'openai', 'vertex-ai', 'gemini', 'anthropic', 'cometapi', 'proman', 'bedrock', 'proxy', or 'air')", cred.Name, cred.Type)
 		}
 		if cred.AuthType != "" && cred.AuthType != "bearer" && cred.AuthType != "x-api-key" {
 			return fmt.Errorf("credential %s: invalid auth_type: %s (must be 'bearer' or 'x-api-key')", cred.Name, cred.AuthType)
@@ -1510,16 +1625,16 @@ func (c *Config) Validate() error {
 
 		// Validate by provider type
 		switch cred.Type {
-		case ProviderTypeProxy:
-			// base_url is required for proxy
+		case ProviderTypeProxy, ProviderTypeAIR:
+			// base_url is required for remote router/proxy credentials
 			if cred.BaseURL == "" {
-				return fmt.Errorf("credential %s: base_url is required for proxy type", cred.Name)
+				return fmt.Errorf("credential %s: base_url is required for %s type", cred.Name, cred.Type)
 			}
 			// Validate base_url is a valid URL
 			if err := validateBaseURL(cred.Name, cred.BaseURL); err != nil {
 				return err
 			}
-			// api_key is optional for proxy
+			// api_key is optional for proxy/AIR
 
 		case ProviderTypeVertexAI:
 			// For Vertex AI, project_id and location are required
@@ -1593,6 +1708,36 @@ func (c *Config) Validate() error {
 		}
 	}
 
+	// client_model_ids is an explicit product boundary. When present (including
+	// an empty list), AIR must not infer public request identifiers from provider
+	// backend names. Keep it exact and require compatibility aliases to resolve
+	// into that advertised canonical set.
+	if c.ClientModelIDs != nil {
+		clientIDs := make(map[string]struct{}, len(c.ClientModelIDs))
+		for _, modelID := range c.ClientModelIDs {
+			if modelID == "" {
+				return fmt.Errorf("client_model_ids must not contain an empty model ID")
+			}
+			if _, duplicate := clientIDs[modelID]; duplicate {
+				return fmt.Errorf("client_model_ids contains duplicate model ID %q", modelID)
+			}
+			clientIDs[modelID] = struct{}{}
+		}
+		for label, aliases := range map[string]map[string]string{
+			"public_model_alias":   c.PublicModelAlias,
+			"accepted_model_alias": c.AcceptedModelAlias,
+		} {
+			for alias, target := range aliases {
+				if _, exists := clientIDs[target]; !exists {
+					return fmt.Errorf("%s %q targets %q outside client_model_ids", label, alias, target)
+				}
+				if _, collision := clientIDs[alias]; collision {
+					return fmt.Errorf("%s %q collides with client_model_ids", label, alias)
+				}
+			}
+		}
+	}
+
 	// Validate Redis config
 	if c.Redis.Enabled {
 		if len(c.Redis.InitAddresses) == 0 {
@@ -1621,13 +1766,17 @@ func (c *Config) Validate() error {
 		if !strings.HasPrefix(c.LiteLLMDB.DatabaseURL, "postgres://") && !strings.HasPrefix(c.LiteLLMDB.DatabaseURL, "postgresql://") {
 			return fmt.Errorf("litellm_db.database_url must start with postgres:// or postgresql://, got: %s", c.LiteLLMDB.DatabaseURL)
 		}
+		if c.LiteLLMDB.EnforceBudgetReservation && c.LiteLLMDB.BudgetReservationTTL <= 0 {
+			return fmt.Errorf("litellm_db.budget_reservation_ttl must be positive when budget reservation is enabled")
+		}
+		if c.LiteLLMDB.EnforceBudgetReservation && c.LiteLLMDB.DefaultEstimatedCompletionTokens <= 0 {
+			return fmt.Errorf("litellm_db.default_estimated_completion_tokens must be positive when budget reservation is enabled")
+		}
+		if c.LiteLLMDB.LogWorkers <= 0 {
+			return fmt.Errorf("litellm_db.log_workers must be positive, got: %d", c.LiteLLMDB.LogWorkers)
+		}
 	}
 
-	// Validate Kafka config. Mirrors kafkalog.Config.Validate() so malformed
-	// Kafka config (bad SASL settings, non-positive queue/batch/flush values)
-	// fails fast at startup instead of surfacing only when kafkalog.New runs
-	// (see initializeKafkaLog, which degrades to NoopManager on that failure --
-	// silently dropping spend data if litellm_db.disable_spend_logs_write=true).
 	if c.Kafka.Enabled {
 		if len(c.Kafka.Brokers) == 0 {
 			return fmt.Errorf("kafka.brokers is required when kafka is enabled")
@@ -1644,6 +1793,9 @@ func (c *Config) Validate() error {
 		if c.Kafka.LogFlushInterval <= 0 {
 			return fmt.Errorf("kafka.log_flush_interval must be positive, got: %s", c.Kafka.LogFlushInterval)
 		}
+		if c.Kafka.LogWorkers <= 0 {
+			return fmt.Errorf("kafka.log_workers must be positive, got: %d", c.Kafka.LogWorkers)
+		}
 		switch c.Kafka.SASLMechanism {
 		case "", "PLAIN", "SCRAM-SHA-256", "SCRAM-SHA-512":
 		default:
@@ -1654,9 +1806,6 @@ func (c *Config) Validate() error {
 		}
 	}
 
-	// kafka.enabled and litellm_db.disable_spend_logs_write are independent flags,
-	// but this specific combination drops spend data entirely: it would neither
-	// be written to Postgres (disabled) nor to Kafka (not enabled).
 	if !c.Kafka.Enabled && c.LiteLLMDB.DisableSpendLogsWrite {
 		return fmt.Errorf("invalid config: litellm_db.disable_spend_logs_write=true requires kafka.enabled=true, otherwise spend logs are lost entirely")
 	}

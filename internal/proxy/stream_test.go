@@ -497,6 +497,22 @@ func TestOpenAIStreamUsageExtractor(t *testing.T) {
 			},
 		},
 		{
+			name:      "usage with cached audio tokens",
+			chunk:     []byte(`{"usage":{"prompt_tokens":200,"completion_tokens":50,"prompt_tokens_details":{"cached_tokens":80,"cached_audio_tokens":40,"audio_tokens":100}}}`),
+			expectNil: false,
+			expectUsage: func(u *StreamUsageInfo) bool {
+				return u.PromptTokens == 200 && u.CachedTokens == 80 && u.CachedAudioTokens == 40 && u.AudioInputTokens == 60
+			},
+		},
+		{
+			name:      "usage with negative cached tokens and cached audio",
+			chunk:     []byte(`{"usage":{"prompt_tokens":200,"completion_tokens":50,"prompt_tokens_details":{"cached_tokens":-80,"cached_audio_tokens":40,"audio_tokens":100}}}`),
+			expectNil: false,
+			expectUsage: func(u *StreamUsageInfo) bool {
+				return u.PromptTokens == 200 && u.CachedTokens == 0 && u.CachedAudioTokens == 0 && u.AudioInputTokens == 100
+			},
+		},
+		{
 			name:      "usage with cache write tokens",
 			chunk:     []byte(`{"usage":{"prompt_tokens":100,"completion_tokens":50,"prompt_tokens_details":{"cache_write_tokens":40}}}`),
 			expectNil: false,
@@ -513,14 +529,34 @@ func TestOpenAIStreamUsageExtractor(t *testing.T) {
 			},
 		},
 		{
+			name:      "usage with image prediction and cached output details",
+			chunk:     []byte(`{"usage":{"prompt_tokens":100,"completion_tokens":50,"prompt_tokens_details":{"image_tokens":7},"completion_tokens_details":{"image_tokens":11,"cached_tokens":3,"accepted_prediction_tokens":5,"rejected_prediction_tokens":2}}}`),
+			expectNil: false,
+			expectUsage: func(u *StreamUsageInfo) bool {
+				return u.ImageTokens == 7 && u.OutputImageTokens == 11 && u.CachedOutputTokens == 3 &&
+					u.AcceptedPredictionTokens == 5 && u.RejectedPredictionTokens == 2
+			},
+		},
+		{
+			name:      "chat usage with confirmed web search requests",
+			chunk:     []byte(`{"usage":{"prompt_tokens":100,"completion_tokens":50,"server_tool_use":{"web_search_requests":3}}}`),
+			expectNil: false,
+			expectUsage: func(u *StreamUsageInfo) bool {
+				return u.WebSearchRequests == 3
+			},
+		},
+		{
 			name:      "no usage field",
 			chunk:     []byte(`{"choices":[{"delta":{"content":"hello"}}]}`),
 			expectNil: true,
 		},
 		{
-			name:      "zero tokens (invalid)",
+			name:      "explicit zero usage",
 			chunk:     []byte(`{"usage":{"prompt_tokens":0,"completion_tokens":0}}`),
-			expectNil: true,
+			expectNil: false,
+			expectUsage: func(u *StreamUsageInfo) bool {
+				return u.PromptTokens == 0 && u.CompletionTokens == 0
+			},
 		},
 		{
 			name:      "invalid JSON",
@@ -545,11 +581,28 @@ func TestOpenAIStreamUsageExtractor(t *testing.T) {
 			},
 		},
 		{
-			name:      "responses API - with output_tokens_details",
-			chunk:     []byte(`{"type":"response.completed","response":{"usage":{"input_tokens":150,"output_tokens":100,"output_tokens_details":{"reasoning_tokens":40}}}}`),
+			name:      "responses API - completed output items provide web search count",
+			chunk:     []byte(`{"type":"response.completed","response":{"output":[{"type":"web_search_call","status":"completed"},{"type":"web_search_call","status":"completed"}],"usage":{"input_tokens":20,"output_tokens":5,"total_tokens":25}}}`),
 			expectNil: false,
 			expectUsage: func(u *StreamUsageInfo) bool {
-				return u.PromptTokens == 150 && u.CompletionTokens == 100 && u.ReasoningTokens == 40
+				return u.WebSearchRequests == 2
+			},
+		},
+		{
+			name:      "responses API - usage count takes precedence over output items",
+			chunk:     []byte(`{"type":"response.completed","response":{"output":[{"type":"web_search_call","status":"completed"}],"usage":{"input_tokens":20,"output_tokens":5,"server_tool_use":{"web_search_requests":3}}}}`),
+			expectNil: false,
+			expectUsage: func(u *StreamUsageInfo) bool {
+				return u.WebSearchRequests == 3
+			},
+		},
+		{
+			name:      "responses API - with output_tokens_details",
+			chunk:     []byte(`{"type":"response.completed","response":{"usage":{"input_tokens":150,"output_tokens":100,"input_tokens_details":{"image_tokens":8},"output_tokens_details":{"reasoning_tokens":40,"image_tokens":12}}}}`),
+			expectNil: false,
+			expectUsage: func(u *StreamUsageInfo) bool {
+				return u.PromptTokens == 150 && u.CompletionTokens == 100 && u.ReasoningTokens == 40 &&
+					u.ImageTokens == 8 && u.OutputImageTokens == 12
 			},
 		},
 		{
@@ -558,6 +611,22 @@ func TestOpenAIStreamUsageExtractor(t *testing.T) {
 			expectNil: false,
 			expectUsage: func(u *StreamUsageInfo) bool {
 				return u.PromptTokens == 300 && u.CompletionTokens == 50 && u.CachedTokens == 100
+			},
+		},
+		{
+			name:      "responses API - cached audio is excluded from audio input",
+			chunk:     []byte(`{"usage":{"input_tokens":300,"output_tokens":50,"input_tokens_details":{"cached_tokens":80,"cached_audio_tokens":40,"audio_tokens":100}}}`),
+			expectNil: false,
+			expectUsage: func(u *StreamUsageInfo) bool {
+				return u.PromptTokens == 300 && u.CompletionTokens == 50 && u.CachedAudioTokens == 40 && u.AudioInputTokens == 60
+			},
+		},
+		{
+			name:      "responses API - negative cached tokens do not increase audio",
+			chunk:     []byte(`{"usage":{"input_tokens":300,"output_tokens":50,"input_tokens_details":{"cached_tokens":-80,"cached_audio_tokens":40,"audio_tokens":100}}}`),
+			expectNil: false,
+			expectUsage: func(u *StreamUsageInfo) bool {
+				return u.PromptTokens == 300 && u.CompletionTokens == 50 && u.CachedTokens == 0 && u.CachedAudioTokens == 0 && u.AudioInputTokens == 100
 			},
 		},
 		{
@@ -602,6 +671,16 @@ func TestOpenAIStreamUsageExtractor(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestOpenAIStreamUsageExtractor_PreservesTransformedAudioInput(t *testing.T) {
+	extractor := &openAIStreamUsageExtractor{audioInputAlreadyExcludesCachedAudio: true}
+
+	result := extractor.ExtractUsage([]byte(`{"usage":{"prompt_tokens":200,"completion_tokens":50,"prompt_tokens_details":{"cached_tokens":80,"cached_audio_tokens":40,"audio_tokens":60}}}`))
+
+	require.NotNil(t, result)
+	assert.Equal(t, 60, result.AudioInputTokens)
+	assert.Equal(t, 40, result.CachedAudioTokens)
 }
 
 func TestHandleResponsesAPIStreaming_Passthrough(t *testing.T) {
@@ -683,14 +762,25 @@ func TestAnthropicStreamUsageExtractor(t *testing.T) {
 			},
 		},
 		{
+			name:      "confirmed Anthropic web search usage",
+			chunk:     []byte(`{"usage":{"input_tokens":100,"output_tokens":50,"server_tool_use":{"web_search_requests":2}}}`),
+			expectNil: false,
+			expectUsage: func(u *StreamUsageInfo) bool {
+				return u.WebSearchRequests == 2
+			},
+		},
+		{
 			name:      "no usage field",
 			chunk:     []byte(`{"type":"message_delta","delta":{"stop_reason":"end_turn"}}`),
 			expectNil: true,
 		},
 		{
-			name:      "zero tokens (invalid)",
+			name:      "explicit zero usage",
 			chunk:     []byte(`{"usage":{"input_tokens":0,"output_tokens":0}}`),
-			expectNil: true,
+			expectNil: false,
+			expectUsage: func(u *StreamUsageInfo) bool {
+				return u.PromptTokens == 0 && u.CompletionTokens == 0
+			},
 		},
 	}
 
@@ -764,7 +854,7 @@ func TestGetStreamUsageExtractor(t *testing.T) {
 func TestAnthropicStreamUsageExtractor_CacheCreationTokens(t *testing.T) {
 	extractor := &anthropicStreamUsageExtractor{}
 
-	chunk := []byte(`{"type":"message_delta","usage":{"input_tokens":200,"output_tokens":80,"cache_creation_input_tokens":150,"cache_read_input_tokens":30}}`)
+	chunk := []byte(`{"type":"message_delta","usage":{"input_tokens":200,"output_tokens":80,"cache_creation_input_tokens":150,"cache_read_input_tokens":30,"cache_creation":{"ephemeral_5m_input_tokens":50,"ephemeral_1h_input_tokens":100}}}`)
 
 	result := extractor.ExtractUsage(chunk)
 	require.NotNil(t, result, "should extract usage from chunk with cache_creation_input_tokens")
@@ -772,8 +862,24 @@ func TestAnthropicStreamUsageExtractor_CacheCreationTokens(t *testing.T) {
 	assert.Equal(t, 200, result.PromptTokens, "PromptTokens should be 200")
 	assert.Equal(t, 80, result.CompletionTokens, "CompletionTokens should be 80")
 	assert.Equal(t, 150, result.CacheCreationTokens, "CacheCreationTokens should be 150")
+	assert.Equal(t, 50, result.CacheCreation5mTokens)
+	assert.Equal(t, 100, result.CacheCreation1hTokens)
 	assert.Equal(t, 30, result.CacheReadTokens, "CacheReadTokens should be 30")
 	assert.Equal(t, 30, result.CachedTokens, "CachedTokens should equal CacheReadTokens (30)")
+}
+
+func TestOpenAIStreamUsageExtractor_CacheTTLAndAudioDetails(t *testing.T) {
+	extractor := &openAIStreamUsageExtractor{}
+	chunk := []byte(`data: {"usage":{"prompt_tokens":100,"completion_tokens":10,"prompt_tokens_details":{"cached_tokens":40,"cached_audio_tokens":15,"cache_creation_tokens":20,"cache_creation_token_details":{"ephemeral_5m_input_tokens":5,"ephemeral_1h_input_tokens":15}}}}`)
+
+	result := extractor.ExtractUsage(chunk)
+
+	require.NotNil(t, result)
+	assert.Equal(t, 40, result.CachedTokens)
+	assert.Equal(t, 15, result.CachedAudioTokens)
+	assert.Equal(t, 20, result.CacheCreationTokens)
+	assert.Equal(t, 5, result.CacheCreation5mTokens)
+	assert.Equal(t, 15, result.CacheCreation1hTokens)
 }
 
 // TestOpenAIStreamUsageExtractor_MultiPayloadNoStaleData verifies that when a single

@@ -21,6 +21,7 @@ func TestWriteJSONError(t *testing.T) {
 		{"404", http.StatusNotFound, "not_found_error"},
 		{"405", http.StatusMethodNotAllowed, "invalid_request_error"},
 		{"408", http.StatusRequestTimeout, "timeout_error"},
+		{"504", http.StatusGatewayTimeout, "timeout_error"},
 		{"413", http.StatusRequestEntityTooLarge, "invalid_request_error"},
 		{"429", http.StatusTooManyRequests, "rate_limit_error"},
 		{"500", http.StatusInternalServerError, "server_error"},

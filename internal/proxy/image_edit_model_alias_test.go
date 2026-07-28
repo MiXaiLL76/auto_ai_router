@@ -39,6 +39,10 @@ func TestProxyRequest_ImageEditReplacesModelAlias(t *testing.T) {
 	modelManager := models.New(logger, 50, []config.ModelRPMConfig{
 		{Name: modelAlias, Model: realModel, RPM: 100, TPM: -1},
 	})
+	modelManager.LoadModelsFromConfig([]config.CredentialConfig{{
+		Name: "azure",
+		Type: config.ProviderTypeOpenAI,
+	}})
 	proxy := NewTestProxyBuilder().
 		WithSingleCredential("azure", config.ProviderTypeOpenAI, upstream.URL, "azure-key").
 		Build()

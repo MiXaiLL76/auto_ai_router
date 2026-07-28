@@ -7,8 +7,10 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/http/pprof"
 	"os"
 	"os/signal"
+	"runtime"
 	"strings"
 	"sync"
 	"syscall"
@@ -255,7 +257,8 @@ func main() {
 
 		BudgetReserver:                   budgetReserver,
 		KeyRateLimiter:                   keyRateLimiter,
-		BudgetReservationEnabled:         cfg.LiteLLMDB.EnforceBudgetReservation || cfg.LiteLLMDB.EnforceKeyRateLimits,
+		BudgetReservationEnabled:         cfg.LiteLLMDB.EnforceBudgetReservation,
+		KeyRateLimitsEnabled:             cfg.LiteLLMDB.EnforceKeyRateLimits,
 		DefaultEstimatedCompletionTokens: cfg.LiteLLMDB.DefaultEstimatedCompletionTokens,
 	})
 
@@ -357,6 +360,55 @@ func main() {
 		}
 	}()
 
+	// ==================== pprof (internal only, opt-in) ====================
+	// Deliberately on its own listener/mux rather than the public router: pprof
+	// exposes heap contents, goroutine stacks, and lets any caller trigger a
+	// blocking 30s CPU profile. The Service/Ingress in front of this pod must
+	// not route to PprofPort — only reachable via kubectl port-forward or
+	// from inside the cluster network.
+	var pprofServer *http.Server
+	if cfg.Monitoring.PprofEnabled {
+		// Off by default (rate 0): only sampled while pprof is explicitly
+		// enabled, so this cost is opt-in like the rest of the endpoint.
+		// Fraction=1 reports every contended mutex acquisition — cheap because
+		// it only fires on actual contention, not on every Lock()/Unlock().
+		// This is what lets /debug/pprof/mutex show contention on locks like
+		// the balancer's global RWMutex (internal/balancer/roundrobin.go).
+		runtime.SetMutexProfileFraction(1)
+
+		// Sample block-profile events at a 10us granularity: fine enough to
+		// catch second-scale waits that actually matter (io.Pipe backpressure
+		// in streaming, the 5s spend-logger queue timeout, lock waits) without
+		// recording every microsecond-scale channel op in normal I/O loops.
+		// rate=1 (every event) is too heavy here — unlike mutex contention,
+		// almost every goroutine spends most of its life blocked on I/O.
+		runtime.SetBlockProfileRate(10000)
+
+		pprofMux := http.NewServeMux()
+		pprofMux.HandleFunc("/debug/pprof/", pprof.Index)
+		pprofMux.HandleFunc("/debug/pprof/cmdline", pprof.Cmdline)
+		pprofMux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+		pprofMux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
+		pprofMux.HandleFunc("/debug/pprof/trace", pprof.Trace)
+
+		pprofServer = &http.Server{
+			Addr:    fmt.Sprintf(":%d", cfg.Monitoring.PprofPort),
+			Handler: pprofMux,
+		}
+		pprofLn, err := net.Listen("tcp", pprofServer.Addr)
+		if err != nil {
+			log.Error("Failed to bind pprof port", "error", err, "port", cfg.Monitoring.PprofPort)
+			os.Exit(1)
+		}
+		log.Warn("pprof enabled on internal listener — must not be exposed via Service/Ingress",
+			"port", cfg.Monitoring.PprofPort)
+		go func() {
+			if err := pprofServer.Serve(pprofLn); err != nil && err != http.ErrServerClosed {
+				log.Error("pprof server failed", "error", err)
+			}
+		}()
+	}
+
 	// ==================== Signal Handling & Graceful Shutdown ====================
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
@@ -381,6 +433,14 @@ func main() {
 	if err := server.Shutdown(ctx); err != nil {
 		log.Error("Server forced to shutdown", "error", err)
 		os.Exit(1)
+	}
+
+	if pprofServer != nil {
+		pprofCtx, pprofCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if err := pprofServer.Shutdown(pprofCtx); err != nil {
+			log.Error("pprof server forced to shutdown", "error", err)
+		}
+		pprofCancel()
 	}
 
 	// Stop background goroutines
@@ -520,6 +580,19 @@ func initializeModelManager(
 	modelManager.SetCredentials(cfg.Credentials)
 	if len(cfg.ModelAlias) > 0 {
 		modelManager.SetModelAliases(cfg.ModelAlias)
+	}
+	// nil preserves legacy discovery; an explicit empty list denies all client IDs.
+	if cfg.ClientModelIDs != nil {
+		if len(cfg.ClientModelIDs) == 0 {
+			log.Warn("client_model_ids is explicitly empty: client model surface is deny-all")
+		}
+		modelManager.SetClientModelIDs(cfg.ClientModelIDs)
+	}
+	if len(cfg.PublicModelAlias) > 0 {
+		modelManager.SetPublicModelAliases(cfg.PublicModelAlias)
+	}
+	if len(cfg.AcceptedModelAlias) > 0 {
+		modelManager.SetAcceptedModelAliases(cfg.AcceptedModelAlias)
 	}
 
 	// Initialize rate limiters for each model
@@ -750,6 +823,7 @@ func initializeLiteLLMDB(cfg *config.Config, log *slog.Logger) litellmdb.Manager
 		LogQueueSize:          cfg.LiteLLMDB.LogQueueSize,
 		LogBatchSize:          cfg.LiteLLMDB.LogBatchSize,
 		LogFlushInterval:      cfg.LiteLLMDB.LogFlushInterval,
+		LogWorkers:            cfg.LiteLLMDB.LogWorkers,
 		DisableSpendLogsWrite: cfg.LiteLLMDB.DisableSpendLogsWrite,
 		Logger:                log,
 	}
@@ -799,10 +873,12 @@ func initializeKafkaLog(cfg *config.Config, log *slog.Logger, litellmDBManager l
 		LogQueueSize:     cfg.Kafka.LogQueueSize,
 		LogBatchSize:     cfg.Kafka.LogBatchSize,
 		LogFlushInterval: cfg.Kafka.LogFlushInterval,
+		LogWorkers:       cfg.Kafka.LogWorkers,
 		TLSEnabled:       cfg.Kafka.TLSEnabled,
 		SASLMechanism:    cfg.Kafka.SASLMechanism,
 		SASLUsername:     cfg.Kafka.SASLUsername,
 		SASLPassword:     cfg.Kafka.SASLPassword,
+		TLSCACert:        cfg.Kafka.TLSCACert,
 		Logger:           log,
 		// Flags a batch's underlying LiteLLM_SpendLogs rows for later re-send
 		// when the batch is dropped from the in-memory DLQ after a sustained

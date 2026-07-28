@@ -157,7 +157,7 @@ func TestProxyRequest_NoCredentialsAvailable(t *testing.T) {
 	tm := createTestTokenManager(logger)
 	prx := createProxyWithParams(bal, logger, 10, 30*time.Second, metrics, "master-key", rl, tm, createTestModelManager(logger), "test-version", "test-commit")
 
-	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model": "gpt-4"}`))
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"gpt-4","messages":[{"role":"user","content":"test"}]}`))
 	req.Header.Set("Authorization", "Bearer master-key")
 	w := httptest.NewRecorder()
 
@@ -188,7 +188,7 @@ func TestProxyRequest_RateLimitExceeded(t *testing.T) {
 	rl.Allow("test1")
 
 	// Next request should fail due to rate limit
-	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model": "gpt-4"}`))
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"gpt-4","messages":[{"role":"user","content":"test"}]}`))
 	req.Header.Set("Authorization", "Bearer master-key")
 	w := httptest.NewRecorder()
 
@@ -209,7 +209,7 @@ func TestProxyRequest_UpstreamError(t *testing.T) {
 		WithSingleCredential("test", config.ProviderTypeProxy, mockServer.URL, "upstream-key-1").
 		Build()
 
-	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model": "gpt-4"}`))
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"gpt-4","messages":[{"role":"user","content":"test"}]}`))
 	req.Header.Set("Authorization", "Bearer master-key")
 	w := httptest.NewRecorder()
 
@@ -238,7 +238,7 @@ func TestProxyRequest_Streaming(t *testing.T) {
 		WithSingleCredential("test", config.ProviderTypeProxy, mockServer.URL, "upstream-key-1").
 		Build()
 
-	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model": "gpt-4", "stream": true}`))
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"gpt-4","messages":[{"role":"user","content":"test"}],"stream":true}`))
 	req.Header.Set("Authorization", "Bearer master-key")
 	w := httptest.NewRecorder()
 
@@ -652,7 +652,7 @@ func TestProxyRequest_HeadersForwarding(t *testing.T) {
 		WithSingleCredential("test", config.ProviderTypeProxy, mockServer.URL, "upstream-key-1").
 		Build()
 
-	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model": "gpt-4"}`))
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"gpt-4","messages":[{"role":"user","content":"test"}]}`))
 	req.Header.Set("Authorization", "Bearer master-key")
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Custom-Header", "custom-value")
@@ -700,6 +700,82 @@ func TestProxyRequest_MultipartImageEditConvertedToJSON(t *testing.T) {
 	assert.NoError(t, err)
 	_, err = part.Write([]byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'})
 	assert.NoError(t, err)
+	assert.NoError(t, writer.Close())
+
+	req := httptest.NewRequest("POST", "/v1/images/edits", &buf)
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	w := httptest.NewRecorder()
+
+	prx.ProxyRequest(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+}
+
+func TestProxyRequest_MultipartImageEditWithFourImagesAndImageConfig(t *testing.T) {
+	mockServer := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "application/json", r.Header.Get("Content-Type"))
+
+		var bodyMap map[string]interface{}
+		err := json.NewDecoder(r.Body).Decode(&bodyMap)
+		assert.NoError(t, err)
+
+		contents, ok := bodyMap["contents"].([]interface{})
+		assert.True(t, ok)
+		assert.Len(t, contents, 1)
+		content, ok := contents[0].(map[string]interface{})
+		assert.True(t, ok)
+		parts, ok := content["parts"].([]interface{})
+		assert.True(t, ok)
+		assert.Len(t, parts, 5)
+
+		inlineDataCount := 0
+		for _, partValue := range parts {
+			part, ok := partValue.(map[string]interface{})
+			assert.True(t, ok)
+			if _, exists := part["inlineData"]; exists {
+				inlineDataCount++
+			}
+		}
+		assert.Equal(t, 4, inlineDataCount)
+
+		generationConfig, ok := bodyMap["generationConfig"].(map[string]interface{})
+		assert.True(t, ok)
+		assert.Equal(t, float64(42), generationConfig["seed"])
+		assert.InDelta(t, 0.0, generationConfig["temperature"], 1e-6)
+		assert.InDelta(t, 0.0, generationConfig["topP"], 1e-6)
+
+		imageConfig, ok := generationConfig["imageConfig"].(map[string]interface{})
+		assert.True(t, ok)
+		assert.Equal(t, "3:4", imageConfig["aspectRatio"])
+		assert.Equal(t, "2K", imageConfig["imageSize"])
+
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"candidates":[{"content":{"parts":[{"inlineData":{"data":"aW1n","mimeType":"image/png"}}],"role":"model"}}]}`))
+	}))
+	defer mockServer.Close()
+
+	prx := NewTestProxyBuilder().
+		WithSingleCredential("test", config.ProviderTypeGemini, mockServer.URL, "upstream-key-1").
+		Build()
+
+	var buf bytes.Buffer
+	writer := multipart.NewWriter(&buf)
+	assert.NoError(t, writer.WriteField("model", "gemini-3.1-flash-image-preview"))
+	assert.NoError(t, writer.WriteField("prompt", "Edit these images"))
+	assert.NoError(t, writer.WriteField("seed", "42"))
+	assert.NoError(t, writer.WriteField("temperature", "0"))
+	assert.NoError(t, writer.WriteField("top_p", "0"))
+	assert.NoError(t, writer.WriteField("image_config", `{"aspect_ratio":"3:4","image_size":"2K"}`))
+	for i := 0; i < 4; i++ {
+		part, err := writer.CreatePart(textproto.MIMEHeader{
+			"Content-Disposition": []string{`form-data; name="image[]"; filename="input.png"`},
+			"Content-Type":        []string{"image/png"},
+		})
+		assert.NoError(t, err)
+		_, err = part.Write([]byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n', byte(i)})
+		assert.NoError(t, err)
+	}
 	assert.NoError(t, writer.Close())
 
 	req := httptest.NewRequest("POST", "/v1/images/edits", &buf)
@@ -761,7 +837,7 @@ func TestProxyRequest_QueryParameters(t *testing.T) {
 		WithSingleCredential("test", config.ProviderTypeProxy, mockServer.URL, "upstream-key-1").
 		Build()
 
-	req := httptest.NewRequest("POST", "/v1/chat/completions?param1=value1&param2=value2", strings.NewReader(`{"model": "gpt-4"}`))
+	req := httptest.NewRequest("POST", "/v1/chat/completions?param1=value1&param2=value2", strings.NewReader(`{"model":"gpt-4","messages":[{"role":"user","content":"test"}]}`))
 	req.Header.Set("Authorization", "Bearer master-key")
 	w := httptest.NewRecorder()
 

@@ -40,6 +40,12 @@ type OpenAIRequest struct {
 	Verbosity            string                 `json:"verbosity,omitempty"`
 	Prediction           interface{}            `json:"prediction,omitempty"`
 	WebSearchOptions     interface{}            `json:"web_search_options,omitempty"`
+	ImageConfig          map[string]interface{} `json:"imageConfig,omitempty"`
+	ImageConfigSnake     map[string]interface{} `json:"image_config,omitempty"`
+	AspectRatio          string                 `json:"aspectRatio,omitempty"`
+	AspectRatioSnake     string                 `json:"aspect_ratio,omitempty"`
+	ImageSize            string                 `json:"imageSize,omitempty"`
+	ImageSizeSnake       string                 `json:"image_size,omitempty"`
 	ExtraBody            map[string]interface{} `json:"extra_body,omitempty"`
 }
 
@@ -123,9 +129,18 @@ type ImageData struct {
 }
 
 type TokenDetails struct {
-	CachedTokens        int `json:"cached_tokens,omitempty"`
-	CacheCreationTokens int `json:"cache_creation_tokens,omitempty"`
-	AudioTokens         int `json:"audio_tokens,omitempty"`
+	CachedTokens              int                        `json:"cached_tokens,omitempty"`
+	CachedAudioTokens         int                        `json:"cached_audio_tokens,omitempty"`
+	CacheCreationTokens       int                        `json:"cache_creation_tokens,omitempty"`
+	CacheCreationTokenDetails *CacheCreationTokenDetails `json:"cache_creation_token_details,omitempty"`
+	AudioTokens               int                        `json:"audio_tokens,omitempty"`
+}
+
+// CacheCreationTokenDetails preserves Anthropic's cache-write TTL breakdown.
+// The enclosing CacheCreationTokens remains the aggregate for compatibility.
+type CacheCreationTokenDetails struct {
+	Ephemeral5mInputTokens int `json:"ephemeral_5m_input_tokens,omitempty"`
+	Ephemeral1hInputTokens int `json:"ephemeral_1h_input_tokens,omitempty"`
 }
 
 type CompletionTokenDetails struct {
@@ -142,6 +157,11 @@ type OpenAIUsage struct {
 	TotalTokens             int                     `json:"total_tokens"`
 	PromptTokensDetails     *TokenDetails           `json:"prompt_tokens_details,omitempty"`
 	CompletionTokensDetails *CompletionTokenDetails `json:"completion_tokens_details,omitempty"`
+	ServerToolUse           *ServerToolUseDetails   `json:"server_tool_use,omitempty"`
+}
+
+type ServerToolUseDetails struct {
+	WebSearchRequests int `json:"web_search_requests,omitempty"`
 }
 
 // Streaming types

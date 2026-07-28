@@ -23,7 +23,9 @@ type ConnectionPool struct {
 	logger *slog.Logger
 
 	// Health status
-	healthy atomic.Bool
+	healthy          atomic.Bool
+	healthObserverMu sync.Mutex
+	healthObserver   func(bool)
 
 	// Lifecycle
 	ctx    context.Context
@@ -127,7 +129,31 @@ func (cp *ConnectionPool) Pool() *pgxpool.Pool {
 
 // IsHealthy returns connection health status
 func (cp *ConnectionPool) IsHealthy() bool {
-	return cp.healthy.Load()
+	return cp.healthy.Load() && !cp.closed.Load()
+}
+
+// SetHealthObserver installs a live health observer and immediately publishes
+// the current state. Health callbacks are serialized with state transitions so
+// concurrent Close/health-check activity cannot publish them out of order.
+func (cp *ConnectionPool) SetHealthObserver(observer func(bool)) {
+	cp.healthObserverMu.Lock()
+	defer cp.healthObserverMu.Unlock()
+	cp.healthObserver = observer
+	if observer != nil {
+		observer(cp.IsHealthy())
+	}
+}
+
+func (cp *ConnectionPool) setHealthy(healthy bool) bool {
+	cp.healthObserverMu.Lock()
+	defer cp.healthObserverMu.Unlock()
+	previous := cp.healthy.Swap(healthy)
+	if previous != healthy {
+		if cp.healthObserver != nil {
+			cp.healthObserver(healthy && !cp.closed.Load())
+		}
+	}
+	return previous
 }
 
 // Stats returns pool statistics
@@ -143,6 +169,7 @@ func (cp *ConnectionPool) Close() {
 	if !cp.closed.CompareAndSwap(false, true) {
 		return // Already closed
 	}
+	cp.setHealthy(false)
 
 	// Stop background goroutines
 	cp.cancel()
@@ -196,7 +223,7 @@ func (cp *ConnectionPool) performHealthCheck() {
 	err := cp.pool.QueryRow(ctx, queries.QueryHealthCheck).Scan(&result)
 
 	if err != nil {
-		wasHealthy := cp.healthy.Swap(false)
+		wasHealthy := cp.setHealthy(false)
 		if wasHealthy {
 			cp.logger.Error("LiteLLM DB health check failed",
 				"error", err,
@@ -205,7 +232,7 @@ func (cp *ConnectionPool) performHealthCheck() {
 		// Try to reconnect
 		cp.tryReconnect()
 	} else {
-		wasUnhealthy := !cp.healthy.Swap(true)
+		wasUnhealthy := !cp.setHealthy(true)
 		if wasUnhealthy {
 			cp.logger.Info("LiteLLM DB connection restored")
 			cp.reconnectDelay = time.Second // Reset backoff
@@ -241,7 +268,7 @@ func (cp *ConnectionPool) tryReconnect() {
 			"next_delay", cp.reconnectDelay,
 		)
 	} else {
-		cp.healthy.Store(true)
+		cp.setHealthy(true)
 		cp.reconnectDelay = time.Second
 		cp.logger.Info("Reconnection successful")
 	}

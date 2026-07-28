@@ -20,6 +20,7 @@ type RequestMode struct {
 	IsImageEdit       bool   // true for /images/edits requests
 	IsEmbeddings      bool   // true for /embeddings requests
 	IsStreaming       bool   // true for streaming (stream: true) requests
+	IsResponsesAPI    bool   // true when the outbound request uses /v1/responses
 	ModelID           string // real provider model name (URL construction, format detection)
 	DisplayModelID    string // alias to echo in responses; falls back to ModelID when empty
 	ContentType       string // original request content type (needed for multipart endpoints)
@@ -112,7 +113,7 @@ func (c *ProviderConverter) RequestFrom(body []byte) ([]byte, error) {
 				c.inputTexts = texts
 			}
 			return vertex.OpenAIEmbeddingToGemini(body, c.mode.ModelID)
-		case config.ProviderTypeAnthropic, config.ProviderTypeCometAPI:
+		case config.ProviderTypeAnthropic, config.ProviderTypeCometAPI, config.ProviderTypeProMan:
 			return nil, errors.New(string(c.providerType) + " does not support embeddings")
 		case config.ProviderTypeBedrock:
 			return nil, errors.New("bedrock does not support embeddings")
@@ -124,7 +125,7 @@ func (c *ProviderConverter) RequestFrom(body []byte) ([]byte, error) {
 	switch c.providerType {
 	case config.ProviderTypeVertexAI, config.ProviderTypeGemini:
 		return vertex.OpenAIToVertex(body, c.mode.IsImageGeneration, c.mode.IsImageEdit, c.mode.ModelID, c.mode.ContentType)
-	case config.ProviderTypeAnthropic, config.ProviderTypeCometAPI:
+	case config.ProviderTypeAnthropic, config.ProviderTypeCometAPI, config.ProviderTypeProMan:
 		// Anthropic-compatible providers do not support image generation
 		if c.mode.IsImageGeneration {
 			return nil, errors.New(string(c.providerType) + " does not support image generation")
@@ -139,9 +140,13 @@ func (c *ProviderConverter) RequestFrom(body []byte) ([]byte, error) {
 		}
 		return body, nil
 	default:
-		// ProviderTypeOpenAI, ProviderTypeProxy, and others: convert non-function tools
-		// (web_search, web_search_preview) to web_search_options, then pass through.
-		body = openaiconv.ConvertWebSearchTools(body)
+		// ProviderTypeOpenAI, ProviderTypeProxy, ProviderTypeAIR, and others:
+		// Chat Completions and Responses have different built-in tool contracts.
+		// Native Responses requests must pass through unchanged, while Chat
+		// Completions requests need their tool list normalized.
+		if !c.mode.IsResponsesAPI {
+			body = openaiconv.ConvertWebSearchTools(body)
+		}
 
 		// gpt-image-1 family does not support the response_format parameter in
 		// /v1/images/generations — strip it before forwarding to avoid a 400.
@@ -193,7 +198,7 @@ func (c *ProviderConverter) ResponseTo(body []byte) ([]byte, error) {
 			return vertex.VertexImageToOpenAI(body)
 		}
 		return vertex.VertexToOpenAI(body, c.mode.responseModel())
-	case config.ProviderTypeAnthropic, config.ProviderTypeCometAPI:
+	case config.ProviderTypeAnthropic, config.ProviderTypeCometAPI, config.ProviderTypeProMan:
 		return anthropic.AnthropicToOpenAI(body, c.mode.responseModel())
 	case config.ProviderTypeBedrock:
 		if isAnthropicBedrockModel(c.mode.ModelID) {
@@ -215,7 +220,7 @@ func (c *ProviderConverter) StreamTo(reader io.Reader, writer io.Writer) error {
 	switch c.providerType {
 	case config.ProviderTypeVertexAI, config.ProviderTypeGemini:
 		return vertex.TransformVertexStreamToOpenAI(reader, c.mode.responseModel(), writer)
-	case config.ProviderTypeAnthropic, config.ProviderTypeCometAPI:
+	case config.ProviderTypeAnthropic, config.ProviderTypeCometAPI, config.ProviderTypeProMan:
 		return anthropic.TransformAnthropicStreamToOpenAI(reader, c.mode.responseModel(), writer)
 	case config.ProviderTypeBedrock:
 		// Bedrock uses AWS Event Stream binary framing instead of SSE.
@@ -274,7 +279,7 @@ func (c *ProviderConverter) BuildURL(cred *config.CredentialConfig) string {
 			return vertex.BuildGeminiImageURL(cred, c.mode.ModelID)
 		}
 		return vertex.BuildGeminiURL(cred, c.mode.ModelID, c.mode.IsStreaming)
-	case config.ProviderTypeAnthropic, config.ProviderTypeCometAPI:
+	case config.ProviderTypeAnthropic, config.ProviderTypeCometAPI, config.ProviderTypeProMan:
 		return converterutil.BuildVersionedURL(cred.BaseURL, "/v1/messages")
 	case config.ProviderTypeBedrock:
 		baseURL := strings.TrimSuffix(cred.BaseURL, "/")
@@ -299,7 +304,7 @@ func (c *ProviderConverter) RewrittenContentType() string {
 // Passthrough providers use the OpenAI wire format natively.
 func (c *ProviderConverter) IsPassthrough() bool {
 	switch c.providerType {
-	case config.ProviderTypeOpenAI, config.ProviderTypeProxy:
+	case config.ProviderTypeOpenAI, config.ProviderTypeProxy, config.ProviderTypeAIR:
 		return true
 	default:
 		return false
@@ -309,7 +314,14 @@ func (c *ProviderConverter) IsPassthrough() bool {
 // UsageFromResponse extracts token usage from an OpenAI-format response body.
 // Should be called after ResponseTo() so the body is always in OpenAI format.
 func (c *ProviderConverter) UsageFromResponse(body []byte) *TokenUsage {
-	return ExtractTokenUsage(body)
+	if c.IsPassthrough() {
+		return ExtractTokenUsage(body)
+	}
+	return ExtractTokenUsageWithOptions(body, TokenUsageExtractionOptions{})
+}
+
+type TokenUsageExtractionOptions struct {
+	AudioInputIncludesCachedAudio bool
 }
 
 // ExtractTokenUsage parses token usage from an OpenAI-format JSON response body.
@@ -317,6 +329,12 @@ func (c *ProviderConverter) UsageFromResponse(body []byte) *TokenUsage {
 // and image generation format (input_tokens/output_tokens).
 // Returns nil if body cannot be parsed or contains no usage data.
 func ExtractTokenUsage(body []byte) *TokenUsage {
+	return ExtractTokenUsageWithOptions(body, TokenUsageExtractionOptions{AudioInputIncludesCachedAudio: true})
+}
+
+// ExtractTokenUsageWithOptions is like ExtractTokenUsage, but lets callers
+// preserve provider-converted usage that already reports non-cached audio input.
+func ExtractTokenUsageWithOptions(body []byte, opts TokenUsageExtractionOptions) *TokenUsage {
 	if len(body) == 0 {
 		return nil
 	}
@@ -325,18 +343,29 @@ func ExtractTokenUsage(body []byte) *TokenUsage {
 		InputTokens        int `json:"input_tokens"`
 		OutputTokens       int `json:"output_tokens"`
 		InputTokensDetails struct {
-			CachedTokens        int `json:"cached_tokens,omitempty"`
-			CacheCreationTokens int `json:"cache_creation_tokens,omitempty"`
-			CacheWriteTokens    int `json:"cache_write_tokens,omitempty"`
-			ImageTokens         int `json:"image_tokens,omitempty"`
-			TextTokens          int `json:"text_tokens,omitempty"`
-			AudioTokens         int `json:"audio_tokens,omitempty"`
+			CachedTokens              int `json:"cached_tokens,omitempty"`
+			CachedAudioTokens         int `json:"cached_audio_tokens,omitempty"`
+			CacheCreationTokens       int `json:"cache_creation_tokens,omitempty"`
+			CacheWriteTokens          int `json:"cache_write_tokens,omitempty"`
+			CacheCreationTokenDetails struct {
+				Ephemeral5mInputTokens int `json:"ephemeral_5m_input_tokens,omitempty"`
+				Ephemeral1hInputTokens int `json:"ephemeral_1h_input_tokens,omitempty"`
+			} `json:"cache_creation_token_details,omitempty"`
+			ImageTokens int `json:"image_tokens,omitempty"`
+			TextTokens  int `json:"text_tokens,omitempty"`
+			AudioTokens int `json:"audio_tokens,omitempty"`
 		} `json:"input_tokens_details,omitempty"`
 		OutputTokensDetails struct {
 			AudioTokens     int `json:"audio_tokens,omitempty"`
-			ReasoningTokens int `json:"reasoning_tokens,omitempty"`
+			CachedTokens    int `json:"cached_tokens,omitempty"`
 			ImageTokens     int `json:"image_tokens,omitempty"`
+			ReasoningTokens int `json:"reasoning_tokens,omitempty"`
+			TextTokens      int `json:"text_tokens,omitempty"`
 		} `json:"output_tokens_details,omitempty"`
+		ServerToolUse struct {
+			WebSearchRequests int `json:"web_search_requests,omitempty"`
+		} `json:"server_tool_use,omitempty"`
+		WebSearchRequests int `json:"web_search_requests,omitempty"`
 	}
 
 	var resp struct {
@@ -345,26 +374,36 @@ func ExtractTokenUsage(body []byte) *TokenUsage {
 			PromptTokens        int `json:"prompt_tokens"`
 			CompletionTokens    int `json:"completion_tokens"`
 			PromptTokensDetails struct {
-				CachedTokens        int `json:"cached_tokens,omitempty"`
-				CacheCreationTokens int `json:"cache_creation_tokens,omitempty"`
-				CacheWriteTokens    int `json:"cache_write_tokens,omitempty"`
-				AudioTokens         int `json:"audio_tokens,omitempty"`
-				TextTokens          int `json:"text_tokens,omitempty"`
-				ImageTokens         int `json:"image_tokens,omitempty"`
+				CachedTokens              int `json:"cached_tokens,omitempty"`
+				CachedAudioTokens         int `json:"cached_audio_tokens,omitempty"`
+				CacheCreationTokens       int `json:"cache_creation_tokens,omitempty"`
+				CacheWriteTokens          int `json:"cache_write_tokens,omitempty"`
+				CacheCreationTokenDetails struct {
+					Ephemeral5mInputTokens int `json:"ephemeral_5m_input_tokens,omitempty"`
+					Ephemeral1hInputTokens int `json:"ephemeral_1h_input_tokens,omitempty"`
+				} `json:"cache_creation_token_details,omitempty"`
+				AudioTokens int `json:"audio_tokens,omitempty"`
+				TextTokens  int `json:"text_tokens,omitempty"`
+				ImageTokens int `json:"image_tokens,omitempty"`
 			} `json:"prompt_tokens_details,omitempty"`
 			CompletionTokensDetails struct {
 				AcceptedPredictionTokens int `json:"accepted_prediction_tokens,omitempty"`
 				RejectedPredictionTokens int `json:"rejected_prediction_tokens,omitempty"`
 				AudioTokens              int `json:"audio_tokens,omitempty"`
-				ReasoningTokens          int `json:"reasoning_tokens,omitempty"`
+				CachedTokens             int `json:"cached_tokens,omitempty"`
 				ImageTokens              int `json:"image_tokens,omitempty"`
+				ReasoningTokens          int `json:"reasoning_tokens,omitempty"`
+				TextTokens               int `json:"text_tokens,omitempty"`
 			} `json:"completion_tokens_details,omitempty"`
 			// Responses API / Image generation format (input_tokens/output_tokens)
 			responsesUsageDetails
 		} `json:"usage"`
+		Choices []extractedChoiceWithAnnotations `json:"choices,omitempty"`
+		Output  []extractedOutputItem            `json:"output,omitempty"`
 		// Responses API streaming event format: {"type":"response.completed","response":{"usage":{...}}}
 		Response struct {
-			Usage *responsesUsageDetails `json:"usage,omitempty"`
+			Usage  *responsesUsageDetails `json:"usage,omitempty"`
+			Output []extractedOutputItem  `json:"output,omitempty"`
 		} `json:"response,omitempty"`
 	}
 
@@ -388,7 +427,12 @@ func ExtractTokenUsage(body []byte) *TokenUsage {
 		completionTokens = resp.Response.Usage.OutputTokens
 	}
 
-	if promptTokens == 0 && completionTokens == 0 {
+	webSearchRequests := webSearchRequestsFromExtractedResponse(resp.Usage.ServerToolUse.WebSearchRequests, resp.Usage.WebSearchRequests, resp.Choices, resp.Output, resp.Response.Output)
+	if webSearchRequests == 0 && resp.Response.Usage != nil {
+		webSearchRequests = webSearchRequestsFromUsage(resp.Response.Usage.ServerToolUse.WebSearchRequests, resp.Response.Usage.WebSearchRequests)
+	}
+
+	if promptTokens == 0 && completionTokens == 0 && webSearchRequests == 0 {
 		return nil
 	}
 
@@ -399,14 +443,22 @@ func ExtractTokenUsage(body []byte) *TokenUsage {
 		cachedTokens = resp.Usage.InputTokensDetails.CachedTokens
 	}
 	cacheCreationTokens := resp.Usage.PromptTokensDetails.CacheCreationTokens
+	cacheCreation5mTokens := resp.Usage.PromptTokensDetails.CacheCreationTokenDetails.Ephemeral5mInputTokens
+	cacheCreation1hTokens := resp.Usage.PromptTokensDetails.CacheCreationTokenDetails.Ephemeral1hInputTokens
+	cachedAudioTokens := resp.Usage.PromptTokensDetails.CachedAudioTokens
 	if cacheCreationTokens == 0 {
 		cacheCreationTokens = resp.Usage.PromptTokensDetails.CacheWriteTokens
 	}
-	if cacheCreationTokens == 0 {
+	if cacheCreationTokens == 0 && cacheCreation5mTokens == 0 && cacheCreation1hTokens == 0 {
 		cacheCreationTokens = resp.Usage.InputTokensDetails.CacheCreationTokens
+		cacheCreation5mTokens = resp.Usage.InputTokensDetails.CacheCreationTokenDetails.Ephemeral5mInputTokens
+		cacheCreation1hTokens = resp.Usage.InputTokensDetails.CacheCreationTokenDetails.Ephemeral1hInputTokens
 	}
 	if cacheCreationTokens == 0 {
 		cacheCreationTokens = resp.Usage.InputTokensDetails.CacheWriteTokens
+	}
+	if cachedAudioTokens == 0 {
+		cachedAudioTokens = resp.Usage.InputTokensDetails.CachedAudioTokens
 	}
 	audioIn := resp.Usage.PromptTokensDetails.AudioTokens
 	if audioIn == 0 {
@@ -428,6 +480,10 @@ func ExtractTokenUsage(body []byte) *TokenUsage {
 	if outputImageTokens == 0 {
 		outputImageTokens = resp.Usage.OutputTokensDetails.ImageTokens
 	}
+	cachedOutputTokens := resp.Usage.CompletionTokensDetails.CachedTokens
+	if cachedOutputTokens == 0 {
+		cachedOutputTokens = resp.Usage.OutputTokensDetails.CachedTokens
+	}
 
 	// If tokens came from the nested response.completed event, use its detail fields
 	if resp.Usage.PromptTokens == 0 && resp.Usage.InputTokens == 0 && resp.Response.Usage != nil {
@@ -437,6 +493,8 @@ func ExtractTokenUsage(body []byte) *TokenUsage {
 		}
 		if cacheCreationTokens == 0 {
 			cacheCreationTokens = u.InputTokensDetails.CacheCreationTokens
+			cacheCreation5mTokens = u.InputTokensDetails.CacheCreationTokenDetails.Ephemeral5mInputTokens
+			cacheCreation1hTokens = u.InputTokensDetails.CacheCreationTokenDetails.Ephemeral1hInputTokens
 		}
 		if cacheCreationTokens == 0 {
 			cacheCreationTokens = u.InputTokensDetails.CacheWriteTokens
@@ -447,22 +505,45 @@ func ExtractTokenUsage(body []byte) *TokenUsage {
 		if inputImageTokens == 0 {
 			inputImageTokens = u.InputTokensDetails.ImageTokens
 		}
+		if cachedAudioTokens == 0 {
+			cachedAudioTokens = u.InputTokensDetails.CachedAudioTokens
+		}
 		if audioOut == 0 {
 			audioOut = u.OutputTokensDetails.AudioTokens
 		}
 		if reasoning == 0 {
 			reasoning = u.OutputTokensDetails.ReasoningTokens
 		}
+		if inputImageTokens == 0 {
+			inputImageTokens = u.InputTokensDetails.ImageTokens
+		}
 		if outputImageTokens == 0 {
 			outputImageTokens = u.OutputTokensDetails.ImageTokens
 		}
+		if cachedOutputTokens == 0 {
+			cachedOutputTokens = u.OutputTokensDetails.CachedTokens
+		}
 	}
+	if cacheCreationTokens == 0 {
+		cacheCreationTokens = cacheCreation5mTokens + cacheCreation1hTokens
+	}
+	cachedTokens, cachedAudioTokens = converterutil.NormalizeCachedAudioBreakdown(cachedTokens, cachedAudioTokens)
+	audioIn = converterutil.NormalizeAudioInputTokens(
+		audioIn,
+		cachedTokens,
+		cachedAudioTokens,
+		opts.AudioInputIncludesCachedAudio,
+	)
 
-	return &TokenUsage{
+	return (&TokenUsage{
 		PromptTokens:             promptTokens,
 		CompletionTokens:         completionTokens,
 		CachedInputTokens:        cachedTokens,
+		CachedAudioInputTokens:   cachedAudioTokens,
+		CachedOutputTokens:       cachedOutputTokens,
 		CacheCreationTokens:      cacheCreationTokens,
+		CacheCreation5mTokens:    cacheCreation5mTokens,
+		CacheCreation1hTokens:    cacheCreation1hTokens,
 		AudioInputTokens:         audioIn,
 		ImageTokens:              inputImageTokens,
 		OutputImageTokens:        outputImageTokens,
@@ -470,5 +551,69 @@ func ExtractTokenUsage(body []byte) *TokenUsage {
 		RejectedPredictionTokens: resp.Usage.CompletionTokensDetails.RejectedPredictionTokens,
 		AudioOutputTokens:        audioOut,
 		ReasoningTokens:          reasoning,
+		WebSearchRequests:        webSearchRequests,
+	}).Normalize()
+}
+
+type extractedChoiceWithAnnotations struct {
+	Message struct {
+		Annotations []extractedAnnotation `json:"annotations,omitempty"`
+	} `json:"message"`
+}
+
+type extractedAnnotation struct {
+	Type string `json:"type,omitempty"`
+}
+
+type extractedOutputItem struct {
+	Type   string `json:"type"`
+	Status string `json:"status,omitempty"`
+}
+
+func webSearchRequestsFromUsage(values ...int) int {
+	for _, value := range values {
+		if value > 0 {
+			return value
+		}
 	}
+	return 0
+}
+
+func webSearchRequestsFromExtractedResponse(
+	serverToolUseRequests int,
+	usageRequests int,
+	choices []extractedChoiceWithAnnotations,
+	output []extractedOutputItem,
+	nestedOutput []extractedOutputItem,
+) int {
+	if requests := webSearchRequestsFromUsage(serverToolUseRequests, usageRequests); requests > 0 {
+		return requests
+	}
+	if requests := countCompletedWebSearchOutputItems(output); requests > 0 {
+		return requests
+	}
+	if requests := countCompletedWebSearchOutputItems(nestedOutput); requests > 0 {
+		return requests
+	}
+	for _, choice := range choices {
+		for _, annotation := range choice.Message.Annotations {
+			if annotation.Type == "url_citation" {
+				return 1
+			}
+		}
+	}
+	return 0
+}
+
+func countCompletedWebSearchOutputItems(output []extractedOutputItem) int {
+	count := 0
+	for _, item := range output {
+		if item.Type != "web_search_call" {
+			continue
+		}
+		if item.Status == "" || item.Status == "completed" {
+			count++
+		}
+	}
+	return count
 }

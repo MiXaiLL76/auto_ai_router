@@ -35,9 +35,13 @@ type anthropicStreamAccumulator struct {
 	// reasoningItem *responses.OutputItem
 
 	// Usage
-	inputTokens  int
-	outputTokens int
-	cachedTokens int
+	inputTokens           int
+	outputTokens          int
+	cachedTokens          int
+	cacheCreationTokens   int
+	cacheCreation5mTokens int
+	cacheCreation1hTokens int
+	webSearchRequests     int
 
 	// Stream status
 	stopReason         string
@@ -113,8 +117,16 @@ func processAnthropicEvent(w io.Writer, acc *anthropicStreamAccumulator, event *
 	switch event.Type {
 	case "message_start":
 		if event.Message != nil {
-			acc.inputTokens = event.Message.Usage.InputTokens
-			acc.cachedTokens = event.Message.Usage.CacheReadInputTokens
+			if event.Message.Usage != nil {
+				acc.inputTokens = event.Message.Usage.InputTokens
+				acc.cachedTokens = event.Message.Usage.CacheReadInputTokens
+				acc.cacheCreationTokens, acc.cacheCreation5mTokens, acc.cacheCreation1hTokens = anthropic.NormalizeCacheCreationUsage(
+					event.Message.Usage.CacheCreationInputTokens, event.Message.Usage.CacheCreation,
+				)
+				if event.Message.Usage.ServerToolUse != nil && event.Message.Usage.ServerToolUse.WebSearchRequests > 0 {
+					acc.webSearchRequests = event.Message.Usage.ServerToolUse.WebSearchRequests
+				}
+			}
 		}
 
 	case "content_block_start":
@@ -217,13 +229,57 @@ func processAnthropicEvent(w io.Writer, acc *anthropicStreamAccumulator, event *
 			acc.stopReason = event.Delta.StopReason
 		}
 		if event.Usage != nil {
-			acc.outputTokens = event.Usage.OutputTokens
+			if event.Usage.OutputTokens != nil {
+				acc.outputTokens = *event.Usage.OutputTokens
+			}
+			if event.Usage.CacheReadInputTokens != nil {
+				acc.cachedTokens = nonNegativeAnthropicStreamTokenCount(*event.Usage.CacheReadInputTokens)
+			}
+			if event.Usage.CacheCreationInputTokens != nil {
+				cacheCreationInputTokens := nonNegativeAnthropicStreamTokenCount(*event.Usage.CacheCreationInputTokens)
+				acc.cacheCreationTokens = cacheCreationInputTokens
+				if event.Usage.CacheCreation != nil {
+					acc.cacheCreationTokens, acc.cacheCreation5mTokens, acc.cacheCreation1hTokens = anthropic.NormalizeCacheCreationUsage(
+						cacheCreationInputTokens, event.Usage.CacheCreation,
+					)
+				} else if cacheCreationInputTokens == 0 {
+					acc.cacheCreation5mTokens = 0
+					acc.cacheCreation1hTokens = 0
+				}
+			} else if event.Usage.CacheCreation != nil {
+				acc.cacheCreationTokens, acc.cacheCreation5mTokens, acc.cacheCreation1hTokens = anthropic.NormalizeCacheCreationUsage(
+					acc.cacheCreationTokens, event.Usage.CacheCreation,
+				)
+			}
+			if event.Usage.ServerToolUse != nil && event.Usage.ServerToolUse.WebSearchRequests > 0 {
+				acc.webSearchRequests = event.Usage.ServerToolUse.WebSearchRequests
+			}
 		}
 
 	case "message_stop":
 		// Stream is ending; completion events emitted after the scan loop.
+
+	case "error":
+		errorType := "api_error"
+		message := "Anthropic stream error"
+		if event.Error != nil {
+			if event.Error.Type != "" {
+				errorType = event.Error.Type
+			}
+			if event.Error.Message != "" {
+				message = event.Error.Message
+			}
+		}
+		return fmt.Errorf("anthropic stream error (%s): %s", errorType, message)
 	}
 	return nil
+}
+
+func nonNegativeAnthropicStreamTokenCount(value int) int {
+	if value < 0 {
+		return 0
+	}
+	return value
 }
 
 func handleAnthropicTextDelta(w io.Writer, acc *anthropicStreamAccumulator, delta string) error {
@@ -302,6 +358,7 @@ func finalizeCurrentBlock(w io.Writer, acc *anthropicStreamAccumulator) error {
 			"type":         "response.function_call_arguments.done",
 			"item_id":      itemID,
 			"output_index": acc.currentToolOutputIndex,
+			"name":         acc.currentBlockName,
 			"arguments":    argsJSON,
 		}, acc); err != nil {
 			return err
@@ -462,13 +519,26 @@ func buildAnthropicCompletedResponse(acc *anthropicStreamAccumulator) *responses
 		}}
 	}
 
+	totalInputTokens := acc.inputTokens + acc.cachedTokens + acc.cacheCreationTokens
 	usage := &responses.Usage{
-		InputTokens:  acc.inputTokens,
+		InputTokens:  totalInputTokens,
 		OutputTokens: acc.outputTokens,
-		TotalTokens:  acc.inputTokens + acc.outputTokens,
+		TotalTokens:  totalInputTokens + acc.outputTokens,
 		InputTokensDetails: responses.InputDetails{
-			CachedTokens: acc.cachedTokens,
+			CachedTokens:        acc.cachedTokens,
+			CacheCreationTokens: acc.cacheCreationTokens,
 		},
+	}
+	if acc.cacheCreation5mTokens > 0 || acc.cacheCreation1hTokens > 0 {
+		usage.InputTokensDetails.CacheCreationTokenDetails = &responses.CacheCreationTokenDetails{
+			Ephemeral5mInputTokens: acc.cacheCreation5mTokens,
+			Ephemeral1hInputTokens: acc.cacheCreation1hTokens,
+		}
+	}
+	if acc.webSearchRequests > 0 {
+		usage.ServerToolUse = &responses.ServerToolUseDetails{
+			WebSearchRequests: acc.webSearchRequests,
+		}
 	}
 
 	completedAt := acc.createdAt

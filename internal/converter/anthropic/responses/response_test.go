@@ -170,6 +170,40 @@ func TestAnthropicToResponsesResponse_CachedTokens(t *testing.T) {
 	assert.Equal(t, 80, resp.Usage.InputTokensDetails.CachedTokens)
 }
 
+func TestAnthropicToResponsesResponse_CacheUsageUsesInclusiveInputTotal(t *testing.T) {
+	body := `{
+		"id": "msg_cache_total",
+		"type": "message",
+		"role": "assistant",
+		"model": "claude-opus-4-5",
+		"content": [{"type": "text", "text": "ok"}],
+		"stop_reason": "end_turn",
+		"usage": {
+			"input_tokens": 100,
+			"output_tokens": 10,
+			"cache_read_input_tokens": 80,
+			"cache_creation_input_tokens": 20,
+			"cache_creation": {"ephemeral_5m_input_tokens": 5, "ephemeral_1h_input_tokens": 15}
+		}
+	}`
+
+	resp, err := AnthropicToResponsesResponse([]byte(body), "claude-opus-4-5", "", 0)
+	require.NoError(t, err)
+	require.NotNil(t, resp.Usage)
+	assert.Equal(t, 200, resp.Usage.InputTokens)
+	assert.Equal(t, 210, resp.Usage.TotalTokens)
+
+	raw, err := json.Marshal(resp.Usage.InputTokensDetails)
+	require.NoError(t, err)
+	var details map[string]interface{}
+	require.NoError(t, json.Unmarshal(raw, &details))
+	assert.Equal(t, float64(80), details["cached_tokens"])
+	assert.Equal(t, float64(20), details["cache_creation_tokens"])
+	ttlDetails := details["cache_creation_token_details"].(map[string]interface{})
+	assert.Equal(t, float64(5), ttlDetails["ephemeral_5m_input_tokens"])
+	assert.Equal(t, float64(15), ttlDetails["ephemeral_1h_input_tokens"])
+}
+
 func TestAnthropicToResponsesResponse_CustomResponseID(t *testing.T) {
 	body := `{
 		"id": "msg_07",
@@ -331,8 +365,8 @@ func TestAnthropicUsageToUsage(t *testing.T) {
 	resp, err := AnthropicToResponsesResponse([]byte(body), "claude-opus-4-5", "", 0)
 	require.NoError(t, err)
 
-	assert.Equal(t, 100, resp.Usage.InputTokens)
+	assert.Equal(t, 130, resp.Usage.InputTokens)
 	assert.Equal(t, 50, resp.Usage.OutputTokens)
-	assert.Equal(t, 150, resp.Usage.TotalTokens)
+	assert.Equal(t, 180, resp.Usage.TotalTokens)
 	assert.Equal(t, 30, resp.Usage.InputTokensDetails.CachedTokens)
 }

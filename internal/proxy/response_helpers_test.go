@@ -3,8 +3,193 @@ package proxy
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
+	"net/http"
 	"testing"
+
+	"github.com/mixaill76/auto_ai_router/internal/config"
+	"github.com/mixaill76/auto_ai_router/internal/converter"
 )
+
+func TestTokenUsageExtractionOptionsForResponse(t *testing.T) {
+	tests := []struct {
+		name     string
+		cred     *config.CredentialConfig
+		headers  http.Header
+		includes bool
+	}{
+		{
+			name:     "generic proxy defaults to OpenAI semantics",
+			cred:     &config.CredentialConfig{Type: config.ProviderTypeProxy},
+			includes: true,
+		},
+		{
+			name: "AIR response header marks normalized usage without credential config",
+			cred: &config.CredentialConfig{Type: config.ProviderTypeProxy},
+			headers: http.Header{
+				HeaderAIRUsageAudioTokens: []string{airUsageAudioTokensExcludeCached},
+			},
+			includes: false,
+		},
+		{
+			name: "AIR response header marks raw OpenAI-compatible usage",
+			cred: &config.CredentialConfig{Type: config.ProviderTypeProxy},
+			headers: http.Header{
+				HeaderAIRUsageAudioTokens: []string{airUsageAudioTokensIncludeCached},
+			},
+			includes: true,
+		},
+		{
+			name:     "AIR provider without header keeps legacy AIR normalized semantics",
+			cred:     &config.CredentialConfig{Type: config.ProviderTypeAIR},
+			includes: false,
+		},
+		{
+			name: "AIR provider normalized response header",
+			cred: &config.CredentialConfig{Type: config.ProviderTypeAIR},
+			headers: http.Header{
+				HeaderAIRUsageAudioTokens: []string{airUsageAudioTokensExcludeCached},
+			},
+			includes: false,
+		},
+		{
+			name: "AIR provider raw response header",
+			cred: &config.CredentialConfig{Type: config.ProviderTypeAIR},
+			headers: http.Header{
+				HeaderAIRUsageAudioTokens: []string{airUsageAudioTokensIncludeCached},
+			},
+			includes: true,
+		},
+		{
+			name: "AIR response header tolerates comma joined duplicates",
+			cred: &config.CredentialConfig{Type: config.ProviderTypeProxy},
+			headers: http.Header{
+				HeaderAIRUsageAudioTokens: []string{"exclude-cached, exclude-cached"},
+			},
+			includes: false,
+		},
+		{
+			name:     "direct OpenAI provider",
+			cred:     &config.CredentialConfig{Type: config.ProviderTypeOpenAI},
+			includes: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := tokenUsageExtractionOptionsForResponse(tt.cred, tt.headers)
+			if got.AudioInputIncludesCachedAudio != tt.includes {
+				t.Fatalf("unexpected usage semantics: got %v, want %v", got.AudioInputIncludesCachedAudio, tt.includes)
+			}
+		})
+	}
+}
+
+func TestProxyUsageContractCachedAudioMatrix(t *testing.T) {
+	tests := []struct {
+		name      string
+		cred      config.CredentialConfig
+		headers   http.Header
+		audio     int
+		wantAudio int
+	}{
+		{
+			name:      "raw OpenAI-compatible proxy subtracts cached audio",
+			cred:      config.CredentialConfig{Type: config.ProviderTypeProxy},
+			audio:     100,
+			wantAudio: 60,
+		},
+		{
+			name: "AIR-normalized proxy response header preserves non-cached audio",
+			cred: config.CredentialConfig{Type: config.ProviderTypeProxy},
+			headers: http.Header{
+				HeaderAIRUsageAudioTokens: []string{airUsageAudioTokensExcludeCached},
+			},
+			audio:     60,
+			wantAudio: 60,
+		},
+		{
+			name: "AIR provider raw response header subtracts cached audio",
+			cred: config.CredentialConfig{Type: config.ProviderTypeAIR},
+			headers: http.Header{
+				HeaderAIRUsageAudioTokens: []string{airUsageAudioTokensIncludeCached},
+			},
+			audio:     100,
+			wantAudio: 60,
+		},
+		{
+			name: "AIR provider normalized response header preserves non-cached audio",
+			cred: config.CredentialConfig{Type: config.ProviderTypeAIR},
+			headers: http.Header{
+				HeaderAIRUsageAudioTokens: []string{airUsageAudioTokensExcludeCached},
+			},
+			audio:     60,
+			wantAudio: 60,
+		},
+		{
+			name:      "legacy AIR without usage header preserves normalized audio",
+			cred:      config.CredentialConfig{Type: config.ProviderTypeAIR},
+			audio:     60,
+			wantAudio: 60,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body := []byte(`{"usage":{"prompt_tokens":200,"completion_tokens":1,"prompt_tokens_details":{"cached_tokens":80,"cached_audio_tokens":40,"audio_tokens":` +
+				fmt.Sprintf("%d", tt.audio) + `}}}`)
+			usage := converter.ExtractTokenUsageWithOptions(
+				body,
+				tokenUsageExtractionOptionsForResponse(&tt.cred, tt.headers),
+			)
+			if usage == nil || usage.AudioInputTokens != tt.wantAudio {
+				t.Fatalf("unexpected usage: %+v; want audio=%d", usage, tt.wantAudio)
+			}
+		})
+	}
+}
+
+func TestExtractWebSearchRequestUsage(t *testing.T) {
+	tests := []struct {
+		name     string
+		body     string
+		wantOn   bool
+		wantSize string
+	}{
+		{
+			name:     "web_search_options high",
+			body:     `{"model":"gpt-4o-search-preview","web_search_options":{"search_context_size":"high"}}`,
+			wantOn:   true,
+			wantSize: "high",
+		},
+		{
+			name:     "web_search tool defaults medium",
+			body:     `{"model":"gpt-4o","tools":[{"type":"web_search"}]}`,
+			wantOn:   true,
+			wantSize: "medium",
+		},
+		{
+			name:     "versioned web_search tool low",
+			body:     `{"model":"gpt-4o","tools":[{"type":"web_search_preview_2025_03_11","search_context_size":"low"}]}`,
+			wantOn:   true,
+			wantSize: "low",
+		},
+		{
+			name:   "no web search",
+			body:   `{"model":"gpt-4o","tools":[{"type":"function","function":{"name":"f"}}]}`,
+			wantOn: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotOn, gotSize := extractWebSearchRequestUsage([]byte(tt.body), "application/json")
+			if gotOn != tt.wantOn || gotSize != tt.wantSize {
+				t.Fatalf("unexpected web search usage: got (%v,%q), want (%v,%q)", gotOn, gotSize, tt.wantOn, tt.wantSize)
+			}
+		})
+	}
+}
 
 func TestInjectStreamOptions_AddsIncludeUsage(t *testing.T) {
 	body := []byte(`{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}`)

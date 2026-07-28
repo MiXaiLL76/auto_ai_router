@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/mixaill76/auto_ai_router/internal/converter"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb"
 )
 
@@ -234,6 +235,36 @@ func TestBuildMetadata(t *testing.T) {
 		assert.Equal(t, "rate limit exceeded", errInfo["error_message"])
 		assert.Equal(t, float64(429), errInfo["error_code"])
 		assert.Equal(t, "RateLimitError", errInfo["error_class"])
+	})
+
+	t.Run("normalizes_usage", func(t *testing.T) {
+		usage := &converter.TokenUsage{
+			PromptTokens:           -1,
+			CompletionTokens:       2,
+			AudioInputTokens:       -3,
+			CachedInputTokens:      -80,
+			CachedAudioInputTokens: 40,
+			CacheCreationTokens:    10,
+			CacheCreation5mTokens:  8,
+			CacheCreation1hTokens:  8,
+		}
+
+		result := buildMetadata("hashed", nil, "", 0, usage, "", nil, "gpt-4o", 0, "")
+		var m map[string]interface{}
+		err := json.Unmarshal([]byte(result), &m)
+		require.NoError(t, err)
+
+		usageObject := m["usage_object"].(map[string]interface{})
+		assert.Equal(t, float64(0), usageObject["prompt_tokens"])
+		assert.Equal(t, float64(2), usageObject["completion_tokens"])
+		assert.Equal(t, float64(2), usageObject["total_tokens"])
+		promptDetails := usageObject["prompt_tokens_details"].(map[string]interface{})
+		assert.Equal(t, float64(0), promptDetails["audio_tokens"])
+		assert.Equal(t, float64(0), promptDetails["cached_tokens"])
+		assert.Equal(t, float64(0), promptDetails["cached_audio_tokens"])
+		ttlDetails := promptDetails["cache_creation_token_details"].(map[string]interface{})
+		assert.Equal(t, float64(8), ttlDetails["ephemeral_5m_input_tokens"])
+		assert.Equal(t, float64(2), ttlDetails["ephemeral_1h_input_tokens"])
 	})
 }
 

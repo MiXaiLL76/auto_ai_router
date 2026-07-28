@@ -251,10 +251,11 @@ func TestStreamTransform_EventSequence(t *testing.T) {
 
 func TestStreamTransform_Usage(t *testing.T) {
 	stopReason := "stop"
+	usageChunk := `{"id":"chatcmpl-test","object":"chat.completion.chunk","model":"gpt-4o","choices":[],"usage":{"prompt_tokens":100,"completion_tokens":50,"total_tokens":150,"prompt_tokens_details":{"cached_tokens":20,"cached_audio_tokens":5,"audio_tokens":12,"cache_write_tokens":15,"cache_creation_token_details":{"ephemeral_5m_input_tokens":4,"ephemeral_1h_input_tokens":11}},"completion_tokens_details":{"audio_tokens":3}}}`
 
 	input := buildSSEChunk(buildChatChunk("test", nil)) +
 		buildSSEChunk(buildChatChunk("", &stopReason)) +
-		buildSSEChunk(buildUsageChunk(100, 50, 150)) +
+		buildSSEChunk(usageChunk) +
 		"data: [DONE]\n\n"
 
 	var output bytes.Buffer
@@ -288,6 +289,93 @@ func TestStreamTransform_Usage(t *testing.T) {
 	assert.Equal(t, float64(100), completedEvent.Response.Usage["input_tokens"])
 	assert.Equal(t, float64(50), completedEvent.Response.Usage["output_tokens"])
 	assert.Equal(t, float64(150), completedEvent.Response.Usage["total_tokens"])
+	details := completedEvent.Response.Usage["input_tokens_details"].(map[string]interface{})
+	assert.Equal(t, float64(20), details["cached_tokens"])
+	assert.Equal(t, float64(5), details["cached_audio_tokens"])
+	assert.Equal(t, float64(7), details["audio_tokens"])
+	assert.Equal(t, float64(15), details["cache_creation_tokens"])
+	ttlDetails := details["cache_creation_token_details"].(map[string]interface{})
+	assert.Equal(t, float64(4), ttlDetails["ephemeral_5m_input_tokens"])
+	assert.Equal(t, float64(11), ttlDetails["ephemeral_1h_input_tokens"])
+	outputDetails := completedEvent.Response.Usage["output_tokens_details"].(map[string]interface{})
+	assert.Equal(t, float64(3), outputDetails["audio_tokens"])
+}
+
+func TestStreamTransform_UsageSanitizesCachedAudioFields(t *testing.T) {
+	stopReason := "stop"
+	usageChunk := `{"id":"chatcmpl-test","object":"chat.completion.chunk","model":"gpt-4o","choices":[],"usage":{"prompt_tokens":200,"completion_tokens":1,"total_tokens":201,"prompt_tokens_details":{"cached_tokens":-80,"cached_audio_tokens":40,"audio_tokens":100}}}`
+
+	input := buildSSEChunk(buildChatChunk("test", nil)) +
+		buildSSEChunk(buildChatChunk("", &stopReason)) +
+		buildSSEChunk(usageChunk) +
+		"data: [DONE]\n\n"
+
+	var output bytes.Buffer
+	err := TransformChatStreamToResponses(strings.NewReader(input), &output, "gpt-4o")
+	require.NoError(t, err)
+
+	result := output.String()
+	completedIdx := strings.Index(result, "event: response.completed\n")
+	require.NotEqual(t, -1, completedIdx)
+
+	afterEvent := result[completedIdx:]
+	dataIdx := strings.Index(afterEvent, "data: ")
+	require.NotEqual(t, -1, dataIdx)
+
+	dataLine := afterEvent[dataIdx+6:]
+	endIdx := strings.Index(dataLine, "\n")
+	if endIdx > 0 {
+		dataLine = dataLine[:endIdx]
+	}
+
+	var completedEvent struct {
+		Response struct {
+			Usage map[string]interface{} `json:"usage"`
+		} `json:"response"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(dataLine), &completedEvent))
+
+	details := completedEvent.Response.Usage["input_tokens_details"].(map[string]interface{})
+	assert.Equal(t, float64(0), details["cached_tokens"])
+	assert.NotContains(t, details, "cached_audio_tokens")
+	assert.Equal(t, float64(100), details["audio_tokens"])
+}
+
+func TestStreamTransform_UsagePreservesNormalizedAudioInput(t *testing.T) {
+	stopReason := "stop"
+	usageChunk := `{"id":"chatcmpl-test","object":"chat.completion.chunk","model":"gpt-4o","choices":[],"usage":{"prompt_tokens":200,"completion_tokens":1,"total_tokens":201,"prompt_tokens_details":{"cached_tokens":80,"cached_audio_tokens":40,"audio_tokens":60}}}`
+	input := buildSSEChunk(buildChatChunk("test", nil)) +
+		buildSSEChunk(buildChatChunk("", &stopReason)) +
+		buildSSEChunk(usageChunk) +
+		"data: [DONE]\n\n"
+
+	var output bytes.Buffer
+	err := TransformChatStreamToResponsesWithMetaAndUsage(
+		strings.NewReader(input), &output, "gpt-4o", nil, false,
+	)
+	require.NoError(t, err)
+
+	result := output.String()
+	completedIdx := strings.Index(result, "event: response.completed\n")
+	require.NotEqual(t, -1, completedIdx)
+	afterEvent := result[completedIdx:]
+	dataIdx := strings.Index(afterEvent, "data: ")
+	require.NotEqual(t, -1, dataIdx)
+	dataLine := afterEvent[dataIdx+6:]
+	if endIdx := strings.Index(dataLine, "\n"); endIdx > 0 {
+		dataLine = dataLine[:endIdx]
+	}
+
+	var completedEvent struct {
+		Response struct {
+			Usage map[string]interface{} `json:"usage"`
+		} `json:"response"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(dataLine), &completedEvent))
+	details := completedEvent.Response.Usage["input_tokens_details"].(map[string]interface{})
+	assert.Equal(t, float64(80), details["cached_tokens"])
+	assert.Equal(t, float64(40), details["cached_audio_tokens"])
+	assert.Equal(t, float64(60), details["audio_tokens"])
 }
 
 func TestStreamTransform_ConsistentMessageIDs(t *testing.T) {

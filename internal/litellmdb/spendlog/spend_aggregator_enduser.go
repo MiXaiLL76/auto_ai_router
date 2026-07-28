@@ -3,8 +3,8 @@ package spendlog
 import (
 	"context"
 	"log/slog"
+	"strings"
 
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb/queries"
 )
 
@@ -20,6 +20,11 @@ type aggregateEndUserKey struct {
 	endpoint              string
 }
 
+func (k aggregateEndUserKey) lockOrder() string {
+	return strings.Join([]string{k.endUserID, k.date, k.apiKey, k.model, k.modelGroup,
+		k.customLLMProvider, k.mcpNamespacedToolName, k.endpoint}, "\x00")
+}
+
 // aggregateDailyEndUserSpendLogs aggregates spend logs into DailyEndUserSpend
 //
 // This function:
@@ -32,7 +37,7 @@ type aggregateEndUserKey struct {
 // Returns error on any database operation failure.
 func aggregateDailyEndUserSpendLogs(
 	ctx context.Context,
-	conn *pgxpool.Conn,
+	conn dailySpendExecer,
 	logger *slog.Logger,
 	records []spendLogRecord,
 ) error {
@@ -79,7 +84,8 @@ func aggregateDailyEndUserSpendLogs(
 	}
 
 	// Insert aggregated data into DailyEndUserSpend
-	for key, value := range aggregations {
+	for _, key := range sortedDailyKeys(aggregations) {
+		value := aggregations[key]
 		_, err := conn.Exec(ctx,
 			queries.QueryUpsertDailyEndUserSpend,
 			key.endUserID, key.date, key.apiKey, key.model, key.modelGroup,

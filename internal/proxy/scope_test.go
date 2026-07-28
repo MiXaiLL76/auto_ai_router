@@ -68,8 +68,9 @@ func TestScopeContextFromTokenInfo_ForbiddenScopesAlias(t *testing.T) {
 
 func TestScopeContextFromTokenInfo_LiteLLMMasterKeyIsAdmin(t *testing.T) {
 	ctx := scopeContextFromTokenInfo(&dbmodels.TokenInfo{
-		KeyName: liteLLMMasterKeyIdentity,
-		UserID:  liteLLMMasterKeyIdentity,
+		KeyName:     liteLLMMasterKeyIdentity,
+		UserID:      liteLLMMasterKeyIdentity,
+		IsMasterKey: true,
 	})
 
 	if !ctx.Admin {
@@ -80,6 +81,20 @@ func TestScopeContextFromTokenInfo_LiteLLMMasterKeyIsAdmin(t *testing.T) {
 	}
 }
 
+func TestScopeContextFromTokenInfo_MasterUserIDDoesNotGrantAdmin(t *testing.T) {
+	ctx := scopeContextFromTokenInfo(&dbmodels.TokenInfo{
+		KeyName: "regular-key",
+		UserID:  liteLLMMasterKeyIdentity,
+	})
+
+	if ctx.Admin {
+		t.Fatal("a user-controlled user_id must not grant admin visibility")
+	}
+	if !ctx.Allows([]string{"regular-key"}, nil) {
+		t.Fatal("a regular token with the reserved user_id must retain its normal key scope")
+	}
+}
+
 func TestScopeContextForRequest_LiteLLMMasterKeyFromDBIsAdmin(t *testing.T) {
 	prx := NewTestProxyBuilder().
 		WithMasterKey("config-master").
@@ -87,8 +102,9 @@ func TestScopeContextForRequest_LiteLLMMasterKeyFromDBIsAdmin(t *testing.T) {
 	prx.LiteLLMDB = scopeTestDB{
 		NoopManager: litellmdb.NewNoopManager(),
 		info: &dbmodels.TokenInfo{
-			KeyName: liteLLMMasterKeyIdentity,
-			UserID:  liteLLMMasterKeyIdentity,
+			KeyName:     liteLLMMasterKeyIdentity,
+			UserID:      liteLLMMasterKeyIdentity,
+			IsMasterKey: true,
 		},
 	}
 
@@ -101,5 +117,26 @@ func TestScopeContextForRequest_LiteLLMMasterKeyFromDBIsAdmin(t *testing.T) {
 	}
 	if !ctx.Admin {
 		t.Fatal("DB-loaded LiteLLM master key must use admin visibility")
+	}
+}
+
+func TestScopeContextForRequestAcceptsXAPIKey(t *testing.T) {
+	prx := NewTestProxyBuilder().Build()
+	prx.LiteLLMDB = scopeTestDB{
+		NoopManager: litellmdb.NewNoopManager(),
+		info: &dbmodels.TokenInfo{
+			KeyName: "private",
+		},
+	}
+
+	req := httptest.NewRequest("GET", "/health", nil)
+	req.Header.Set("x-api-key", "virtual-key")
+
+	ctx, err := prx.ScopeContextForRequest(req)
+	if err != nil {
+		t.Fatalf("ScopeContextForRequest returned error: %v", err)
+	}
+	if !ctx.Allows([]string{"private"}, nil) {
+		t.Fatal("x-api-key must produce the same visibility scope as Bearer auth")
 	}
 }

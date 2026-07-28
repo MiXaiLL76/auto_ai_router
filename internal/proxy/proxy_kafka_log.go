@@ -56,6 +56,9 @@ func (p *Proxy) buildKafkaSpendEvent(
 	usage := logCtx.TokenUsage
 	if usage == nil {
 		usage = &converter.TokenUsage{}
+	} else {
+		normalizedUsage := *usage
+		usage = normalizedUsage.Normalize()
 	}
 
 	realModel := logCtx.RealModelID
@@ -87,7 +90,7 @@ func (p *Proxy) buildKafkaSpendEvent(
 		DurationMs:          endTime.Sub(logCtx.StartTime).Milliseconds(),
 		TTFTMs:              ttftMs,
 
-		CallType:     logCtx.Request.URL.Path,
+		CallType:     litellmCallType(logCtx.Request.URL.Path),
 		APIBase:      apiBase,
 		Status:       status,
 		HTTPStatus:   logCtx.HTTPStatus,
@@ -114,7 +117,10 @@ func (p *Proxy) buildKafkaSpendEvent(
 		AudioInputTokens:         usage.AudioInputTokens,
 		AudioOutputTokens:        usage.AudioOutputTokens,
 		CachedInputTokens:        usage.CachedInputTokens,
+		CachedAudioInputTokens:   usage.CachedAudioInputTokens,
 		CacheCreationTokens:      usage.CacheCreationTokens,
+		CacheCreation5mTokens:    usage.CacheCreation5mTokens,
+		CacheCreation1hTokens:    usage.CacheCreation1hTokens,
 		CachedOutputTokens:       usage.CachedOutputTokens,
 		ReasoningTokens:          usage.ReasoningTokens,
 		AcceptedPredictionTokens: usage.AcceptedPredictionTokens,
@@ -122,6 +128,8 @@ func (p *Proxy) buildKafkaSpendEvent(
 		ImageCount:               usage.ImageCount,
 		ImageTokens:              usage.ImageTokens,
 		OutputImageTokens:        usage.OutputImageTokens,
+		WebSearchRequests:        usage.WebSearchRequests,
+		WebSearchContextSize:     usage.WebSearchContextSize,
 
 		TotalCost: cost,
 
@@ -150,6 +158,7 @@ func (p *Proxy) buildKafkaSpendEvent(
 		event.CachedOutputCost = tokenCosts.CachedOutputCost
 		event.PredictionCost = tokenCosts.PredictionCost
 		event.ImageCost = tokenCosts.ImageCost
+		event.WebSearchCost = tokenCosts.WebSearchCost
 	}
 
 	if status == "failure" {

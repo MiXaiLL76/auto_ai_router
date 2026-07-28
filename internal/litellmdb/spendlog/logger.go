@@ -2,6 +2,7 @@ package spendlog
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math/rand/v2"
@@ -9,21 +10,12 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb/connection"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb/models"
-	"github.com/mixaill76/auto_ai_router/internal/litellmdb/queries"
+	"github.com/mixaill76/auto_ai_router/internal/monitoring"
 	"github.com/mixaill76/auto_ai_router/internal/utils"
 )
-
-// pendingAggregationCap returns the buffer size for the pendingAggregation channel.
-// Minimum 500; if the calculated cap exceeds 500, adds another 500 as headroom.
-func pendingAggregationCap(cfg *models.Config) int {
-	cap := cfg.LogQueueSize/cfg.LogBatchSize + 10
-	if cap < 500 {
-		return 500
-	}
-	return cap + 500
-}
 
 // deadLetterBatch represents a batch that failed to insert after all retries
 type deadLetterBatch struct {
@@ -33,6 +25,11 @@ type deadLetterBatch struct {
 	attempts  int
 }
 
+var (
+	ErrDrainIncomplete = errors.New("spend logger drain incomplete")
+	ErrLoggerStopped   = errors.New("spend logger is stopping")
+)
+
 // Logger is an asynchronous logger for LiteLLM_SpendLogs table
 //
 // Features:
@@ -40,9 +37,9 @@ type deadLetterBatch struct {
 // - Batching: collects entries and does batch INSERT
 // - Graceful shutdown: waits for all logs to be written
 // - Retry: retries on database errors with exponential backoff
-// - Dead Letter Queue: persists batches that fail after all retries
+// - Dead Letter Queue: retains failed batches and fail-open queue overflow in a bounded in-memory queue
 // - DLQ Recovery: periodically retries failed batches from DLQ
-// - Backpressure: drops entries when queue is full
+// - Backpressure: blocking producers report terminal timeout; fail-open producers spill to the DLQ
 // - Daily aggregation: aggregates logs into LiteLLM_DailyUserSpend
 type Logger struct {
 	pool   *connection.ConnectionPool
@@ -53,11 +50,24 @@ type Logger struct {
 	queue chan *models.SpendLogEntry
 
 	// Lifecycle
-	stopChan   chan struct{}
-	wg         sync.WaitGroup
-	producerWg sync.WaitGroup // tracks worker + dlqRecoveryWorker (producers of pendingAggregation)
-	shutdown   atomic.Bool    // Track if shutdown has been called
-	startOnce  sync.Once      // Ensure Start() is called only once
+	stopChan     chan struct{}
+	shutdownDone chan struct{}
+	wg           sync.WaitGroup
+	// writerWg tracks only the queue-draining writer workers so the DLQ
+	// recovery worker (itself part of wg) can wait for their final drain
+	// without deadlocking on its own completion.
+	writerWg    sync.WaitGroup
+	lifecycleMu sync.Mutex
+	started     bool
+	stopping    bool
+	doneOnce    sync.Once
+	startOnce   sync.Once // Ensure Start() is called only once
+	acceptStop  chan struct{}
+	enqueueWG   sync.WaitGroup
+	writeCtx    context.Context
+	writeCancel context.CancelFunc
+	syncCtx     context.Context
+	syncCancel  context.CancelFunc
 
 	// Metrics
 	queued            uint64 // Total queued
@@ -71,6 +81,15 @@ type Logger struct {
 	dlqOverflow       uint64 // Batches dropped due to DLQ full
 	aggregationCount  uint64 // Aggregations completed
 	aggregationErrors uint64 // Aggregation errors
+	duplicates        uint64 // Rows ignored by ON CONFLICT
+
+	comparisonEligible   uint64 // Inserted rows eligible for full comparison
+	comparisonIneligible uint64 // Inserted rows excluded from full comparison
+
+	// Accepted input remains pending while it is buffered locally, being written
+	// atomically, or retained in the DLQ. There is no separate daily queue: raw,
+	// counters, and daily aggregates share one transaction.
+	pendingEntries int64
 
 	// Dead Letter Queue (in-memory circular buffer)
 	dlqMu               sync.Mutex
@@ -80,51 +99,66 @@ type Logger struct {
 
 	mu                  sync.RWMutex
 	lastAggregationTime time.Time
-
-	// pendingAggregation receives insertedIDs from flushBatchWithSpendUpdate for aggregation.
-	// Sized to hold all batches from a full queue; on overflow IDs are dropped.
-	// Closed by a background goroutine after all producers (worker + dlqRecoveryWorker) finish.
-	pendingAggregation chan []string
 }
 
 // NewLogger creates a new asynchronous logger
 func NewLogger(pool *connection.ConnectionPool, cfg *models.Config) *Logger {
 	cfg.ApplyDefaults()
+	writeCtx, writeCancel := context.WithCancel(context.Background())
+	syncCtx, syncCancel := context.WithCancel(context.Background())
 
 	sl := &Logger{
-		pool:               pool,
-		config:             cfg,
-		logger:             cfg.Logger,
-		queue:              make(chan *models.SpendLogEntry, cfg.LogQueueSize),
-		stopChan:           make(chan struct{}),
-		pendingAggregation: make(chan []string, pendingAggregationCap(cfg)),
+		pool:         pool,
+		config:       cfg,
+		logger:       cfg.Logger,
+		queue:        make(chan *models.SpendLogEntry, cfg.LogQueueSize),
+		stopChan:     make(chan struct{}),
+		shutdownDone: make(chan struct{}),
+		acceptStop:   make(chan struct{}),
+		writeCtx:     writeCtx,
+		writeCancel:  writeCancel,
+		syncCtx:      syncCtx,
+		syncCancel:   syncCancel,
 	}
+	sl.publishSnapshot()
 
 	return sl
 }
 
-// Start starts the background worker and aggregation ticker
+// Start starts the background writer workers and DLQ recovery worker.
 // Must be called once after creation. Safe to call multiple times (idempotent).
 func (sl *Logger) Start() {
 	sl.startOnce.Do(func() {
+		sl.lifecycleMu.Lock()
+		defer sl.lifecycleMu.Unlock()
+		if sl.stopping {
+			return
+		}
+
 		// Initialize tickers BEFORE starting goroutines to prevent nil dereference race
 		sl.dlqRecoveryTicker = time.NewTicker(5 * time.Minute)
 
-		sl.producerWg.Add(2) // worker + dlqRecoveryWorker
-		// Close pendingAggregation once all producers finish so aggregationWorker exits cleanly.
-		go func() {
-			sl.producerWg.Wait()
-			close(sl.pendingAggregation)
-		}()
+		numWorkers := sl.config.LogWorkers
+		if numWorkers <= 0 {
+			numWorkers = 1
+		}
 
-		sl.wg.Add(3)
-		go sl.worker()
-		go sl.aggregationWorker()
+		sl.wg.Add(numWorkers + 1) // workers + dlqRecoveryWorker
+		sl.writerWg.Add(numWorkers)
+		sl.started = true
+		for i := 0; i < numWorkers; i++ {
+			go sl.worker()
+		}
 		go sl.dlqRecoveryWorker()
+		go func() {
+			sl.wg.Wait()
+			sl.doneOnce.Do(func() { close(sl.shutdownDone) })
+		}()
 		sl.logger.Info("[DB] SpendLogger started",
 			"queue_size", sl.config.LogQueueSize,
 			"batch_size", sl.config.LogBatchSize,
 			"flush_interval", sl.config.LogFlushInterval,
+			"workers", numWorkers,
 			"dlq_max_size", 10,
 			"dlq_recovery_interval", "5m",
 		)
@@ -140,23 +174,24 @@ func (sl *Logger) Log(entry *models.SpendLogEntry) error {
 	if entry == nil {
 		return nil
 	}
+	if !sl.beginEnqueue() {
+		return ErrLoggerStopped
+	}
+	defer sl.enqueueWG.Done()
 
-	// Try non-blocking send first (fast path)
-	select {
-	case sl.queue <- entry:
-		atomic.AddUint64(&sl.queued, 1)
+	if sl.tryEnqueueNow(entry) {
 		return nil
-	default:
-		// Queue is full, use blocking send with 5 second timeout
 	}
 
 	// Queue was full, now attempt blocking send with timeout
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+	atomic.AddInt64(&sl.pendingEntries, 1)
 
 	select {
 	case sl.queue <- entry:
 		atomic.AddUint64(&sl.queued, 1)
+		sl.publishSnapshot()
 		sl.logger.Debug("[DB] SpendLog entry queued after backpressure",
 			"request_id", entry.RequestID,
 			"queue_len", len(sl.queue),
@@ -164,89 +199,235 @@ func (sl *Logger) Log(entry *models.SpendLogEntry) error {
 		return nil
 
 	case <-ctx.Done():
+		atomic.AddInt64(&sl.pendingEntries, -1)
 		// Timeout reached - queue still full after 5 seconds
-		atomic.AddUint64(&sl.dropped, 1)
-		atomic.AddUint64(&sl.queueFullCount, 1)
-		sl.logger.Error("[DB] SpendLog entry dropped: queue full timeout",
-			"request_id", entry.RequestID,
-			"queue_len", len(sl.queue),
-			"queue_cap", cap(sl.queue),
-			"timeout_sec", 5,
-		)
+		sl.recordQueueDrop(entry, "queue_full_timeout")
 		return models.ErrQueueFull
+
+	case <-sl.acceptStop:
+		atomic.AddInt64(&sl.pendingEntries, -1)
+		return ErrLoggerStopped
 	}
+}
+
+// TryLog performs the fail-open spend enqueue. It never waits for queue space;
+// callers can return the provider response without spend DB backpressure. A
+// full writer queue is not itself data loss: the exact entry is retained in the
+// bounded DLQ and recovered by the same idempotent atomic writer. Only a later
+// DLQ overflow is a terminal loss and invalidates the comparison window.
+func (sl *Logger) TryLog(entry *models.SpendLogEntry) error {
+	if entry == nil {
+		return nil
+	}
+	if !sl.beginEnqueue() {
+		return ErrLoggerStopped
+	}
+	defer sl.enqueueWG.Done()
+
+	if sl.tryEnqueueNow(entry) {
+		return nil
+	}
+
+	// tryEnqueueNow rolled back its pending reservation when the channel was
+	// full. Reserve the entry again before exposing it through the DLQ so a
+	// concurrent recovery cannot resolve an entry that was never counted.
+	atomic.AddInt64(&sl.pendingEntries, 1)
+	atomic.AddUint64(&sl.queued, 1)
+	atomic.AddUint64(&sl.queueFullCount, 1)
+	sl.addToDLQ([]*models.SpendLogEntry{entry}, models.ErrQueueFull, 0)
+	sl.logger.Warn("[DB] SpendLog writer queue full; entry retained in DLQ",
+		"request_id", entry.RequestID,
+		"queue_len", len(sl.queue),
+		"queue_cap", cap(sl.queue),
+	)
+	return nil
+}
+
+// beginEnqueue gives an asynchronous producer a lifecycle ticket.
+func (sl *Logger) beginEnqueue() bool {
+	return sl.beginOperation()
+}
+
+// beginOperation admits a database or queue operation while the logger is
+// running. Shutdown closes this barrier under the same mutex and waits for all
+// admitted operations before the worker drains and the owning sink closes its
+// connection pool.
+func (sl *Logger) beginOperation() bool {
+	sl.lifecycleMu.Lock()
+	defer sl.lifecycleMu.Unlock()
+	if sl.stopping {
+		return false
+	}
+	sl.enqueueWG.Add(1)
+	return true
+}
+
+func (sl *Logger) tryEnqueueNow(entry *models.SpendLogEntry) bool {
+	// Reserve before publishing to the channel so a fast worker cannot resolve
+	// the entry before pendingEntries observes it.
+	atomic.AddInt64(&sl.pendingEntries, 1)
+	select {
+	case sl.queue <- entry:
+		atomic.AddUint64(&sl.queued, 1)
+		sl.publishSnapshot()
+		return true
+	default:
+		atomic.AddInt64(&sl.pendingEntries, -1)
+		return false
+	}
+}
+
+func (sl *Logger) recordQueueDrop(entry *models.SpendLogEntry, reason string) {
+	atomic.AddUint64(&sl.dropped, 1)
+	atomic.AddUint64(&sl.queueFullCount, 1)
+	monitoring.RecordSpendDropped(1)
+	sl.publishSnapshot()
+	sl.logger.Error("[DB] SpendLog entry dropped: queue full",
+		"request_id", entry.RequestID,
+		"queue_len", len(sl.queue),
+		"queue_cap", cap(sl.queue),
+		"reason", reason,
+	)
 }
 
 // Shutdown stops the logger and waits for all logs to be written
 // Idempotent: safe to call multiple times
 func (sl *Logger) Shutdown(ctx context.Context) error {
-	// Check if already shut down
-	if !sl.shutdown.CompareAndSwap(false, true) {
-		return nil // Already shut down
-	}
-
-	sl.logger.Info("[DB] SpendLogger shutting down...",
-		"pending", len(sl.queue),
-	)
-
-	// Stop tickers and drain channels to prevent spurious post-shutdown fires
-	if sl.dlqRecoveryTicker != nil {
-		sl.dlqRecoveryTicker.Stop()
-		// Drain ticker channel (Stop doesn't drain per Go docs)
-		select {
-		case <-sl.dlqRecoveryTicker.C:
-		default:
+	sl.lifecycleMu.Lock()
+	if !sl.stopping {
+		sl.stopping = true
+		// Synchronous response-path reads/commits must release their lifecycle
+		// ticket as soon as shutdown starts. The asynchronous writer has a
+		// separate context so already accepted queue entries can still drain.
+		if sl.syncCancel != nil {
+			sl.syncCancel()
 		}
-	}
-	// Signal worker to stop
-	close(sl.stopChan)
+		sl.logger.Info("[DB] SpendLogger shutting down...",
+			"pending", len(sl.queue),
+		)
 
-	// Wait for completion with timeout
-	done := make(chan struct{})
-	go func() {
-		sl.wg.Wait()
-		close(done)
-	}()
+		if sl.dlqRecoveryTicker != nil {
+			sl.dlqRecoveryTicker.Stop()
+			select {
+			case <-sl.dlqRecoveryTicker.C:
+			default:
+			}
+		}
+		close(sl.acceptStop)
+		started := sl.started
+		go sl.finishShutdown(started)
+	}
+	done := sl.shutdownDone
+	sl.lifecycleMu.Unlock()
 
 	select {
 	case <-done:
-		dlqSize := sl.getDLQSize()
-		sl.logger.Info("[DB] SpendLogger shutdown complete",
-			"written", atomic.LoadUint64(&sl.written),
-			"dropped", atomic.LoadUint64(&sl.dropped),
-			"errors", atomic.LoadUint64(&sl.errors),
-			"dlq_size", dlqSize,
-			"dlq_recovered", atomic.LoadUint64(&sl.dlqRecovered),
-		)
-		return nil
 	case <-ctx.Done():
-		sl.logger.Warn("[DB] SpendLogger shutdown timeout",
-			"pending", len(sl.queue),
-		)
+		if sl.writeCancel != nil {
+			sl.writeCancel()
+		}
+		// Retain shutdownDone for a later caller. The owning PostgresSink must not
+		// close the pool until a subsequent call observes terminal completion.
 		return ctx.Err()
+	}
+	if sl.writeCancel != nil {
+		sl.writeCancel()
+	}
+
+	drainErr := sl.drainError()
+	sl.logger.Info("[DB] SpendLogger shutdown complete",
+		"written", atomic.LoadUint64(&sl.written),
+		"dropped", atomic.LoadUint64(&sl.dropped),
+		"errors", atomic.LoadUint64(&sl.errors),
+		"dlq_size", sl.getDLQSize(),
+		"dlq_recovered", atomic.LoadUint64(&sl.dlqRecovered),
+		"drained", drainErr == nil,
+	)
+	return drainErr
+}
+
+func (sl *Logger) finishShutdown(started bool) {
+	// No new Add can race this Wait: Shutdown set stopping while holding the
+	// same lifecycle mutex used by beginOperation before starting this goroutine.
+	sl.enqueueWG.Wait()
+	close(sl.stopChan)
+	if !started {
+		sl.doneOnce.Do(func() { close(sl.shutdownDone) })
 	}
 }
 
-// Stats returns logger statistics
-func (sl *Logger) Stats() models.SpendLoggerStats {
+func (sl *Logger) drainError() error {
+	stats := sl.snapshot()
+	if stats.QueueLen == 0 && stats.PendingEntries == 0 && stats.DLQSize == 0 {
+		return nil
+	}
+	return fmt.Errorf("%w: queue=%d pending=%d dlq=%d", ErrDrainIncomplete, stats.QueueLen, stats.PendingEntries, stats.DLQSize)
+}
+
+func (sl *Logger) snapshot() models.SpendLoggerStats {
 	sl.mu.RLock()
 	lastAgg := sl.lastAggregationTime
 	sl.mu.RUnlock()
 
-	return models.SpendLoggerStats{
-		QueueLen:            len(sl.queue),
-		QueueCap:            cap(sl.queue),
-		Queued:              atomic.LoadUint64(&sl.queued),
-		Written:             atomic.LoadUint64(&sl.written),
-		Dropped:             atomic.LoadUint64(&sl.dropped),
-		Errors:              atomic.LoadUint64(&sl.errors),
-		BatchesOK:           atomic.LoadUint64(&sl.batchesOK),
-		QueueFullCount:      atomic.LoadUint64(&sl.queueFullCount),
-		AggregationCount:    atomic.LoadUint64(&sl.aggregationCount),
-		AggregationErrors:   atomic.LoadUint64(&sl.aggregationErrors),
-		DLQDropped:          atomic.LoadUint64(&sl.dlqOverflow),
-		LastAggregationTime: lastAgg,
+	sl.dlqMu.Lock()
+	dlqSize := len(sl.dlq)
+	sl.dlqMu.Unlock()
+
+	stats := models.SpendLoggerStats{
+		QueueLen:                   len(sl.queue),
+		QueueCap:                   cap(sl.queue),
+		PendingEntries:             int(atomic.LoadInt64(&sl.pendingEntries)),
+		PendingAggregation:         0,
+		DLQSize:                    dlqSize,
+		Queued:                     atomic.LoadUint64(&sl.queued),
+		Written:                    atomic.LoadUint64(&sl.written),
+		Dropped:                    atomic.LoadUint64(&sl.dropped),
+		Errors:                     atomic.LoadUint64(&sl.errors),
+		BatchesOK:                  atomic.LoadUint64(&sl.batchesOK),
+		QueueFullCount:             atomic.LoadUint64(&sl.queueFullCount),
+		DLQCount:                   atomic.LoadUint64(&sl.dlqCount),
+		DLQRecovered:               atomic.LoadUint64(&sl.dlqRecovered),
+		DLQOverflow:                atomic.LoadUint64(&sl.dlqOverflow),
+		Duplicates:                 atomic.LoadUint64(&sl.duplicates),
+		AggregationCount:           atomic.LoadUint64(&sl.aggregationCount),
+		AggregationErrors:          atomic.LoadUint64(&sl.aggregationErrors),
+		PendingAggregationOverflow: 0,
+		ComparisonEligible:         atomic.LoadUint64(&sl.comparisonEligible),
+		ComparisonIneligible:       atomic.LoadUint64(&sl.comparisonIneligible),
+		LastAggregationTime:        lastAgg,
+		AggregationLag:             0,
 	}
+	stats.ComparisonWindowValid = stats.QueueLen == 0 &&
+		stats.PendingEntries == 0 &&
+		stats.PendingAggregation == 0 &&
+		stats.DLQSize == 0 &&
+		stats.Dropped == 0 &&
+		stats.DLQOverflow == 0 &&
+		stats.AggregationErrors == 0 &&
+		stats.PendingAggregationOverflow == 0
+	return stats
+}
+
+func (sl *Logger) publishSnapshot() {
+	observeSnapshot(sl.snapshot())
+}
+
+func observeSnapshot(stats models.SpendLoggerStats) {
+	monitoring.ObserveSpendSnapshot(monitoring.SpendSnapshot{
+		QueueDepth:            stats.QueueLen,
+		PendingEntries:        stats.PendingEntries,
+		PendingAggregation:    stats.PendingAggregation,
+		DLQSize:               stats.DLQSize,
+		AggregationLag:        stats.AggregationLag,
+		ComparisonWindowValid: stats.ComparisonWindowValid,
+	})
+}
+
+// Stats returns logger statistics and refreshes instantaneous Prometheus gauges.
+func (sl *Logger) Stats() models.SpendLoggerStats {
+	stats := sl.snapshot()
+	observeSnapshot(stats)
+	return stats
 }
 
 // GetDLQStats returns dead letter queue statistics
@@ -286,7 +467,7 @@ func (sl *Logger) GetDLQStats() map[string]interface{} {
 // worker is the background goroutine that processes the queue
 func (sl *Logger) worker() {
 	defer sl.wg.Done()
-	defer sl.producerWg.Done()
+	defer sl.writerWg.Done()
 
 	batch := make([]*models.SpendLogEntry, 0, sl.config.LogBatchSize)
 	ticker := time.NewTicker(sl.config.LogFlushInterval)
@@ -304,6 +485,7 @@ func (sl *Logger) worker() {
 
 		case entry := <-sl.queue:
 			batch = append(batch, entry)
+			sl.publishSnapshot()
 			// Check batch size
 			if len(batch) >= sl.config.LogBatchSize {
 				sl.flushBatch(batch)
@@ -357,6 +539,8 @@ func (sl *Logger) flushBatch(batch []*models.SpendLogEntry) {
 			// and can deadlock again. litellm's db_spend_update_writer.py hits
 			// the same problem and randomizes retry sleep for this reason.
 			backoff := backoffDurations[attempt]
+			// Desynchronize replicas after a transient lock conflict. Fixed retry
+			// intervals can make the same batches collide again in lockstep.
 			backoff += time.Duration(rand.Int64N(int64(backoff)/2 + 1))
 			sl.logger.Debug("[DB] SpendLog batch retry backoff",
 				"attempt", attempt+1,
@@ -376,7 +560,6 @@ func (sl *Logger) flushBatch(batch []*models.SpendLogEntry) {
 					"batch_size", len(batch),
 				)
 				if finalErr := sl.flushBatchWithSpendUpdate(batch); finalErr == nil {
-					atomic.AddUint64(&sl.written, uint64(len(batch)))
 					atomic.AddUint64(&sl.batchesOK, 1)
 					return
 				} else {
@@ -395,7 +578,6 @@ func (sl *Logger) flushBatch(batch []*models.SpendLogEntry) {
 
 		err := sl.flushBatchWithSpendUpdate(batch)
 		if err == nil {
-			atomic.AddUint64(&sl.written, uint64(len(batch)))
 			atomic.AddUint64(&sl.batchesOK, 1)
 			sl.logger.Debug("[DB] SpendLog batch written with spend updates",
 				"count", len(batch),
@@ -418,10 +600,9 @@ func (sl *Logger) flushBatch(batch []*models.SpendLogEntry) {
 	sl.addToDLQ(batch, lastErr, maxAttempts)
 }
 
-// flushBatchWithSpendUpdate executes batch INSERT and spend updates atomically
-// 1. INSERT batch into SpendLogs
-// 2. Aggregate and UPDATE spend for Token, User, Team, Org, TeamMember, OrgMember
-// All operations executed in a single transaction for atomicity
+// flushBatchWithSpendUpdate writes the complete LiteLLM accounting projection
+// atomically: raw SpendLogs, entity counters, and all four daily tables. A retry
+// can therefore safely replay the whole batch without leaving partial state.
 func (sl *Logger) flushBatchWithSpendUpdate(batch []*models.SpendLogEntry) error {
 	// Skip if pool is not initialized (e.g., in tests)
 	if sl.pool == nil {
@@ -432,7 +613,11 @@ func (sl *Logger) flushBatchWithSpendUpdate(batch []*models.SpendLogEntry) error
 		return models.ErrConnectionFailed
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	writeCtx := sl.writeCtx
+	if writeCtx == nil {
+		writeCtx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(writeCtx, 3*time.Minute)
 	defer cancel()
 
 	conn, err := sl.pool.Acquire(ctx)
@@ -441,66 +626,90 @@ func (sl *Logger) flushBatchWithSpendUpdate(batch []*models.SpendLogEntry) error
 	}
 	defer conn.Release()
 
-	// Begin transaction
-	tx, err := conn.Begin(ctx)
+	// Collision recovery claims a conflicting row's ownership in a statement
+	// after the preferred-ID INSERT. Pin READ COMMITTED so that statement can
+	// observe a concurrent transaction whose ON CONFLICT row just won and
+	// committed.
+	tx, err := conn.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
 	if err != nil {
 		return fmt.Errorf("begin transaction: %w", err)
 	}
 
+	insertedIDs, err := sl.commitBatchTransaction(ctx, tx, batch)
+	if err != nil {
+		return err
+	}
+
+	sl.recordCommittedBatch(batch, insertedIDs)
+	if len(insertedIDs) > 0 {
+		sl.recordAggregationSuccess()
+	}
+	sl.publishSnapshot()
+	return nil
+}
+
+const transactionRollbackTimeout = 250 * time.Millisecond
+
+// rollbackTransaction uses an independent bounded context. In particular, a
+// response deadline must not prevent PostgreSQL from cleaning up a failed
+// pre-commit attempt. pgx treats Rollback as a no-op after a successful commit.
+func rollbackTransaction(parent context.Context, tx pgx.Tx) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), transactionRollbackTimeout)
+	defer cancel()
+	_ = tx.Rollback(ctx)
+}
+
+// commitBatchTransaction owns the transaction lifecycle. Rollback is always
+// attempted; pgx treats it as a no-op after a successful commit.
+func (sl *Logger) commitBatchTransaction(ctx context.Context, tx pgx.Tx, batch []*models.SpendLogEntry) ([]string, error) {
 	defer func() {
-		// Rollback is a no-op if tx is already committed
-		_ = tx.Rollback(ctx)
+		rollbackTransaction(ctx, tx)
 	}()
 
-	// 1. INSERT batch into SpendLogs with RETURNING request_id
-	query := queries.BuildBatchInsertQuery(len(batch))
-	params := GetBatchParams(batch)
-	insertRows, err := tx.Query(ctx, query, params...)
+	insertedIDs, err := sl.writeBatchInTransaction(ctx, tx, batch)
 	if err != nil {
-		return fmt.Errorf("batch insert: %w", err)
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, sl.handleCommitError(err)
+	}
+	return insertedIDs, nil
+}
+
+// writeBatchInTransaction performs every accounting mutation on tx. Only rows
+// produced by INSERT ... RETURNING are eligible for counters or daily tables;
+// conflicts are a completed no-op and cannot double-charge on replay.
+func (sl *Logger) writeBatchInTransaction(ctx context.Context, tx pgx.Tx, batch []*models.SpendLogEntry) ([]string, error) {
+	insertedIDs, err := insertSpendRowsCollisionSafe(ctx, tx, batch, sl.logger)
+	if err != nil {
+		return nil, err
 	}
 
-	var insertedIDs []string
-	for insertRows.Next() {
-		var id string
-		if err := insertRows.Scan(&id); err != nil {
-			insertRows.Close()
-			return fmt.Errorf("scan returning request_id: %w", err)
-		}
-		insertedIDs = append(insertedIDs, id)
-	}
-	insertRows.Close()
-	if err := insertRows.Err(); err != nil {
-		return fmt.Errorf("iterate returning rows: %w", err)
+	if len(insertedIDs) == 0 {
+		return nil, nil
 	}
 
-	// 2. Aggregate and UPDATE spend (only for actually inserted entries)
 	filteredBatch := filterBatchByInsertedIDs(batch, insertedIDs)
-	spendUpdates := aggregateSpendUpdates(filteredBatch)
-	err = executeSpendUpdates(ctx, tx, spendUpdates)
+	if len(filteredBatch) != len(insertedIDs) {
+		return nil, fmt.Errorf("map inserted rows to batch: expected %d, mapped %d", len(insertedIDs), len(filteredBatch))
+	}
+	spendUpdates := aggregateSpendUpdates(insertedEntries(filteredBatch))
+	if err := executeSpendUpdates(ctx, tx, spendUpdates); err != nil {
+		return nil, fmt.Errorf("spend updates: %w", err)
+	}
+
+	// Daily aggregates are built from the in-memory entries. Re-reading the
+	// just-inserted rows from LiteLLM_SpendLogs is a heavy query on the LiteLLM
+	// schema, and everything it returned is already known to the writer.
+	records, err := buildSpendLogRecords(filteredBatch, sl.logger, "atomic")
 	if err != nil {
-		return fmt.Errorf("spend updates: %w", err)
+		return nil, fmt.Errorf("build daily aggregation records: %w", err)
+	}
+	if err := sl.runAggregators(ctx, tx, "atomic", records); err != nil {
+		return nil, err
 	}
 
-	// Commit transaction
-	err = tx.Commit(ctx)
-	if err != nil {
-		return fmt.Errorf("commit transaction: %w", err)
-	}
-
-	// Send insertedIDs to aggregationWorker (non-blocking)
-	if len(insertedIDs) > 0 {
-		select {
-		case sl.pendingAggregation <- insertedIDs:
-			// sent
-		default:
-			sl.logger.Warn("[DB] pendingAggregation channel full, safety-net will handle",
-				"ids_count", len(insertedIDs),
-			)
-		}
-	}
-
-	return nil
+	return insertedIDs, nil
 }
 
 // addToDLQ adds a failed batch to the dead letter queue
@@ -508,10 +717,11 @@ func (sl *Logger) flushBatchWithSpendUpdate(batch []*models.SpendLogEntry) error
 // If DLQ is full, drops the oldest batch and logs error
 func (sl *Logger) addToDLQ(batch []*models.SpendLogEntry, lastErr error, attempts int) {
 	sl.dlqMu.Lock()
-	defer sl.dlqMu.Unlock()
 
 	dlb := &deadLetterBatch{
-		batch:     batch,
+		// worker() reuses its batch backing array after flushBatch returns.
+		// Retain an owned slice so later queue traffic cannot rewrite the DLQ.
+		batch:     append([]*models.SpendLogEntry(nil), batch...),
 		failedAt:  utils.NowUTC(),
 		lastError: lastErr,
 		attempts:  attempts,
@@ -523,12 +733,14 @@ func (sl *Logger) addToDLQ(batch []*models.SpendLogEntry, lastErr error, attempt
 		dropped := sl.dlq[0]
 		sl.dlq = sl.dlq[1:]
 		atomic.AddUint64(&sl.dlqOverflow, 1)
+		monitoring.RecordSpendDLQOverflow(1)
+		sl.resolvePendingEntries(len(dropped.batch))
 
 		sl.logger.Error("[DB] SpendLog DLQ overflow - batch dropped (billing data loss)",
 			"dropped_records", len(dropped.batch),
 			"dropped_at", dropped.failedAt,
 			"dlq_size", len(sl.dlq),
-			"total_dropped", atomic.LoadUint64(&sl.dlqOverflow),
+			"total_dropped_batches", atomic.LoadUint64(&sl.dlqOverflow),
 			"sample_request_ids", getSampleRequestIDs(dropped.batch, 3),
 			"reason", "dlq_full",
 		)
@@ -536,11 +748,14 @@ func (sl *Logger) addToDLQ(batch []*models.SpendLogEntry, lastErr error, attempt
 
 	sl.dlq = append(sl.dlq, dlb)
 	atomic.AddUint64(&sl.dlqCount, 1)
+	dlqSize := len(sl.dlq)
+	sl.dlqMu.Unlock()
+	sl.publishSnapshot()
 
 	// Log batch details
 	sl.logger.Error("[DB] SpendLog batch sent to Dead Letter Queue",
 		"batch_size", len(batch),
-		"dlq_size", len(sl.dlq),
+		"dlq_size", dlqSize,
 		"failed_at", dlb.failedAt,
 		"last_error", lastErr,
 		"attempts", attempts,
@@ -559,26 +774,31 @@ func (sl *Logger) getDLQSize() int {
 // Runs every 5 minutes, uses same retry logic as normal batches
 func (sl *Logger) dlqRecoveryWorker() {
 	defer sl.wg.Done()
-	defer sl.producerWg.Done()
 
 	for {
 		select {
 		case <-sl.stopChan:
-			// Shutdown: attempt final DLQ recovery
-			sl.flushDLQ()
+			sl.finalizeDLQ()
 			return
 
 		case <-sl.dlqRecoveryTicker.C:
 			// Priority check: if stopChan is also ready, prefer shutdown
 			select {
 			case <-sl.stopChan:
-				sl.flushDLQ()
+				sl.finalizeDLQ()
 				return
 			default:
 			}
 			sl.flushDLQ()
 		}
 	}
+}
+
+func (sl *Logger) finalizeDLQ() {
+	// The writer workers are the only producers of new DLQ batches. Wait for
+	// their final queue drain before making the terminal recovery attempt.
+	sl.writerWg.Wait()
+	sl.flushDLQ()
 }
 
 // flushDLQ attempts to recover batches from the dead letter queue
@@ -603,6 +823,7 @@ func (sl *Logger) flushDLQ() {
 	// Process batches (retry in order)
 	recovered := 0
 	failed := 0
+	failedBatches := make([]*deadLetterBatch, 0, len(sl.dlq))
 
 	// Copy DLQ under lock and clear original to avoid race with addToDLQ
 	dlqCopy := make([]*deadLetterBatch, len(sl.dlq))
@@ -615,7 +836,6 @@ func (sl *Logger) flushDLQ() {
 		err := sl.flushBatchWithSpendUpdate(dlb.batch)
 		if err == nil {
 			// Batch recovered successfully
-			atomic.AddUint64(&sl.written, uint64(len(dlb.batch)))
 			atomic.AddUint64(&sl.batchesOK, 1)
 			atomic.AddUint64(&sl.dlqRecovered, 1)
 			recovered++
@@ -634,12 +854,10 @@ func (sl *Logger) flushDLQ() {
 				"error", err,
 			)
 
-			// Re-add failed batch back to DLQ
-			sl.dlqMu.Lock()
-			sl.dlq = append(sl.dlq, dlb)
-			sl.dlqMu.Unlock()
+			failedBatches = append(failedBatches, dlb)
 		}
 	}
+	sl.restoreFailedDLQBatches(failedBatches)
 
 	// Update recovery time
 	sl.mu.Lock()
@@ -653,6 +871,40 @@ func (sl *Logger) flushDLQ() {
 			"dlq_size", sl.getDLQSize(),
 		)
 	}
+	sl.publishSnapshot()
+}
+
+// restoreFailedDLQBatches merges failed recovery candidates ahead of batches
+// accepted concurrently during recovery. The oldest batches are discarded if
+// the bounded DLQ would otherwise exceed ten entries.
+func (sl *Logger) restoreFailedDLQBatches(failed []*deadLetterBatch) {
+	if len(failed) == 0 {
+		return
+	}
+
+	sl.dlqMu.Lock()
+	merged := make([]*deadLetterBatch, 0, len(failed)+len(sl.dlq))
+	merged = append(merged, failed...)
+	merged = append(merged, sl.dlq...)
+	overflow := len(merged) - 10
+	if overflow < 0 {
+		overflow = 0
+	}
+	dropped := append([]*deadLetterBatch(nil), merged[:overflow]...)
+	sl.dlq = merged[overflow:]
+	sl.dlqMu.Unlock()
+
+	for _, batch := range dropped {
+		atomic.AddUint64(&sl.dlqOverflow, 1)
+		monitoring.RecordSpendDLQOverflow(1)
+		sl.resolvePendingEntries(len(batch.batch))
+		sl.logger.Error("[DB] SpendLog DLQ overflow while restoring failed recovery batch",
+			"dropped_batch_size", len(batch.batch),
+			"dropped_at", batch.failedAt,
+			"reason", "dlq_full_during_recovery",
+		)
+	}
+	sl.publishSnapshot()
 }
 
 // countEntriesInDLQ counts total number of spend log entries in all DLQ batches
@@ -676,9 +928,18 @@ func getSampleRequestIDs(batch []*models.SpendLogEntry, count int) []string {
 	return result
 }
 
-// filterBatchByInsertedIDs returns only entries whose RequestID is in insertedIDs.
-// Used after INSERT ... RETURNING to exclude conflicting (already existing) entries.
-func filterBatchByInsertedIDs(batch []*models.SpendLogEntry, insertedIDs []string) []*models.SpendLogEntry {
+// insertedSpendEntry pairs a batch entry with the effective request_id that
+// INSERT ... RETURNING produced for it: the preferred provider ID or the AIR
+// event ID fallback.
+type insertedSpendEntry struct {
+	entry     *models.SpendLogEntry
+	requestID string
+}
+
+// filterBatchByInsertedIDs returns only entries whose preferred provider ID or
+// unique AIR event fallback was produced by INSERT ... RETURNING. Each returned
+// ID is consumed once so same-event replays in one batch cannot feed accounting.
+func filterBatchByInsertedIDs(batch []*models.SpendLogEntry, insertedIDs []string) []insertedSpendEntry {
 	if len(insertedIDs) == 0 {
 		return nil
 	}
@@ -686,21 +947,100 @@ func filterBatchByInsertedIDs(batch []*models.SpendLogEntry, insertedIDs []strin
 	for _, id := range insertedIDs {
 		idSet[id] = struct{}{}
 	}
-	result := make([]*models.SpendLogEntry, 0, len(insertedIDs))
+	result := make([]insertedSpendEntry, 0, len(insertedIDs))
 	for _, entry := range batch {
+		if entry == nil {
+			continue
+		}
 		if _, ok := idSet[entry.RequestID]; ok {
-			result = append(result, entry)
+			result = append(result, insertedSpendEntry{entry: entry, requestID: entry.RequestID})
+			delete(idSet, entry.RequestID)
+			continue
+		}
+		if entry.AirEventID != "" {
+			if _, ok := idSet[entry.AirEventID]; ok {
+				result = append(result, insertedSpendEntry{entry: entry, requestID: entry.AirEventID})
+				delete(idSet, entry.AirEventID)
+			}
 		}
 	}
 	return result
 }
 
-// aggregationWorker processes push-path aggregation.
-// Exits when pendingAggregation is closed (after all producers finish on shutdown).
-func (sl *Logger) aggregationWorker() {
-	defer sl.wg.Done()
-
-	for ids := range sl.pendingAggregation {
-		sl.aggregateByIDs(ids)
+// insertedEntries flattens inserted spend pairs back to their batch entries.
+func insertedEntries(inserted []insertedSpendEntry) []*models.SpendLogEntry {
+	entries := make([]*models.SpendLogEntry, 0, len(inserted))
+	for _, item := range inserted {
+		entries = append(entries, item.entry)
 	}
+	return entries
+}
+
+func (sl *Logger) resolvePendingEntries(count int) {
+	if count <= 0 {
+		return
+	}
+	for {
+		current := atomic.LoadInt64(&sl.pendingEntries)
+		next := current - int64(count)
+		if next < 0 {
+			next = 0
+		}
+		if atomic.CompareAndSwapInt64(&sl.pendingEntries, current, next) {
+			return
+		}
+	}
+}
+
+func (sl *Logger) recordCommittedBatch(batch []*models.SpendLogEntry, insertedIDs []string) {
+	inserted := filterBatchByInsertedIDs(batch, insertedIDs)
+	duplicateCount := len(batch) - len(inserted)
+	if duplicateCount < 0 {
+		duplicateCount = 0
+	}
+
+	eligible, ineligible := uint64(0), uint64(0)
+	for _, item := range inserted {
+		if item.entry.ComparisonEligible {
+			eligible++
+		} else {
+			ineligible++
+		}
+	}
+
+	atomic.AddUint64(&sl.written, uint64(len(inserted)))
+	atomic.AddUint64(&sl.duplicates, uint64(duplicateCount))
+	atomic.AddUint64(&sl.comparisonEligible, eligible)
+	atomic.AddUint64(&sl.comparisonIneligible, ineligible)
+	sl.resolvePendingEntries(len(batch))
+
+	monitoring.RecordSpendDuplicates(uint64(duplicateCount))
+	monitoring.RecordSpendComparisonRows(true, eligible)
+	monitoring.RecordSpendComparisonRows(false, ineligible)
+}
+
+func (sl *Logger) recordAggregationError() {
+	atomic.AddUint64(&sl.aggregationErrors, 1)
+	monitoring.RecordSpendAggregationErrors(1)
+	sl.publishSnapshot()
+}
+
+func (sl *Logger) recordAggregationSuccess() {
+	atomic.AddUint64(&sl.aggregationCount, 1)
+	sl.mu.Lock()
+	sl.lastAggregationTime = utils.NowUTC()
+	sl.mu.Unlock()
+}
+
+func (sl *Logger) handleCommitError(err error) error {
+	// A commit acknowledgement can be outcome-ambiguous. The accounting unit is
+	// nevertheless safe to retry: a committed raw row conflicts and feeds no
+	// counters/daily updates, while a rolled-back row is inserted and projected
+	// in full on the next attempt. Keep the comparison window conservative
+	// because this process can no longer attribute the committed rows to its
+	// terminal observability counters with certainty. Pre-commit failures are
+	// different: the transaction is rolled back and the still-pending exact
+	// batch remains owned by retry/DLQ until it is durably replayed.
+	sl.recordAggregationError()
+	return fmt.Errorf("commit transaction: %w", err)
 }

@@ -114,6 +114,38 @@ func TestGetRemoteModels_Caching(t *testing.T) {
 	assert.Equal(t, 2, requestCount, "Fourth call should NOT make HTTP request (using cache)")
 }
 
+func TestGetRemoteModelsWithError_AIRCredentialUsesRemoteHealth(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelError}))
+
+	server := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/health" {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(&httputil.ProxyHealthResponse{
+			Credentials: map[string]httputil.CredentialHealthStats{
+				"upstream-air-openai": {Type: "openai", IsFallback: false},
+			},
+			Models: map[string]httputil.ModelHealthStats{
+				"m1": {Credential: "upstream-air-openai", Model: "gpt-air"},
+			},
+		})
+	}))
+	defer server.Close()
+
+	m := New(logger, 100, []config.ModelRPMConfig{})
+	cred := &config.CredentialConfig{
+		Name:    "air-1",
+		Type:    config.ProviderTypeAIR,
+		BaseURL: server.URL,
+	}
+
+	models, err := m.GetRemoteModelsWithError(context.Background(), cred)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"gpt-air"}, modelIDs(models))
+}
+
 func TestGetRemoteModels_CachingMultipleCredentials(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelError}))
 
@@ -400,7 +432,7 @@ func TestGetRemoteModelsWithError_FallsBackToV1ModelsWhenHealthLacksMetadata(t *
 	server := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/health":
-			// Simulate older/non-AAR proxy returning unrelated JSON shape.
+			// Simulate older/non-AIR proxy returning unrelated JSON shape.
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(ModelsResponse{
 				Object: "list",

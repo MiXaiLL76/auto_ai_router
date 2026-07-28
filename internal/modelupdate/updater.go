@@ -36,7 +36,7 @@ func UpdateAllProxyCredentials(
 	proxyCredentials := make([]*config.CredentialConfig, 0)
 
 	for i, cred := range credentials {
-		if cred.Type == config.ProviderTypeProxy {
+		if cred.IsProxyLike() {
 			proxyCredentials = append(proxyCredentials, &credentials[i])
 		}
 	}

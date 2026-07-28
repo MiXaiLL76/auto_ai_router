@@ -201,113 +201,115 @@ func TestTokenInfo_IsModelAllowed_ModelNotInList(t *testing.T) {
 	assert.False(t, token.IsModelAllowed("claude-3"))
 }
 
-// ==================== IsModelAllowed sentinel tests ====================
-// LiteLLM stores "all-proxy-models" / "all-team-models" inside
-// VerificationToken.models instead of real model names (confirmed against a
-// production LiteLLM_VerificationToken dump: 178 keys use all-proxy-models,
-// 42 use all-team-models).
-
-func TestTokenInfo_IsModelAllowed_AllProxyModels_AnyModelAllowed(t *testing.T) {
+func TestTokenInfo_IsModelAllowed_RegexPattern(t *testing.T) {
 	token := &TokenInfo{
-		Models: []string{"all-proxy-models"},
+		Models: []string{`anthropic/.*`, `.*claude-haiku.*`},
 	}
 
-	assert.True(t, token.IsModelAllowed("gpt-4"))
-	assert.True(t, token.IsModelAllowed("claude-3"))
-	assert.True(t, token.IsModelAllowed("anything"))
+	assert.True(t, token.IsModelAllowed("anthropic/claude-haiku-4.5"))
+	assert.True(t, token.IsModelAllowed("claude-haiku-4-5-20251001"))
+	assert.False(t, token.IsModelAllowed("gpt-4o"))
+	assert.False(t, token.IsModelAllowed("anthropic"), "the anchored pattern must cover the full name")
 }
 
-func TestTokenInfo_IsModelAllowed_AllProxyModels_MixedWithRealNames(t *testing.T) {
-	// Sentinel can appear alongside real model names in the array - still unrestricted.
-	token := &TokenInfo{
-		Models: []string{"gpt-4", "all-proxy-models"},
-	}
-
-	assert.True(t, token.IsModelAllowed("claude-3"))
-}
-
-func TestTokenInfo_IsModelAllowed_AllTeamModels_NoTeam_Unrestricted(t *testing.T) {
-	// No team to inherit from -> falls back to unrestricted, same as empty Models.
-	token := &TokenInfo{
-		Models: []string{"all-team-models"},
-		TeamID: "",
-	}
-
-	assert.True(t, token.IsModelAllowed("gpt-4"))
-	assert.True(t, token.IsModelAllowed("claude-3"))
-}
-
-func TestTokenInfo_IsModelAllowed_AllTeamModels_UsesTeamAllowList(t *testing.T) {
-	token := &TokenInfo{
-		Models:     []string{"all-team-models"},
-		TeamID:     "team1",
-		TeamModels: []string{"gpt-4"},
-	}
-
-	assert.True(t, token.IsModelAllowed("gpt-4"))
-	assert.False(t, token.IsModelAllowed("claude-3"))
-}
-
-func TestTokenInfo_IsModelAllowed_AllTeamModels_TeamHasEmptyList_Unrestricted(t *testing.T) {
-	// Team itself has no restriction (empty models = all allowed).
-	token := &TokenInfo{
-		Models:     []string{"all-team-models"},
-		TeamID:     "team1",
-		TeamModels: nil,
-	}
-
-	assert.True(t, token.IsModelAllowed("gpt-4"))
-	assert.True(t, token.IsModelAllowed("claude-3"))
-}
-
-func TestTokenInfo_IsModelAllowed_AllTeamModels_TeamAlsoAllowsAllProxyModels(t *testing.T) {
-	token := &TokenInfo{
-		Models:     []string{"all-team-models"},
-		TeamID:     "team1",
-		TeamModels: []string{"all-proxy-models"},
-	}
-
-	assert.True(t, token.IsModelAllowed("gpt-4"))
-	assert.True(t, token.IsModelAllowed("claude-3"))
-}
-
-func TestTokenInfo_IsModelAllowed_AllTeamModels_KeyTeamModelsIgnoredWithoutSentinel(t *testing.T) {
-	// TeamModels must only apply when the "all-team-models" sentinel is present -
-	// a key with its own explicit model list is not implicitly widened by the team's list.
-	token := &TokenInfo{
-		Models:     []string{"gpt-4"},
-		TeamID:     "team1",
-		TeamModels: []string{"claude-3"},
-	}
-
-	assert.True(t, token.IsModelAllowed("gpt-4"))
-	assert.False(t, token.IsModelAllowed("claude-3"))
-}
-
-// ==================== IsAnyModelAllowed alias-group tests ====================
-
-func TestTokenInfo_IsAnyModelAllowed_MatchesOnAnyCandidate(t *testing.T) {
-	// Key is restricted to one alias of a model; client called it under a
-	// different alias for the same underlying credential+model.
-	token := &TokenInfo{
-		Models: []string{"claude-haiku-4.5"},
-	}
-
-	assert.True(t, token.IsAnyModelAllowed([]string{"anthropic/claude-haiku-4.5", "claude-haiku-4.5", "claude-haiku-4-5-20251001"}))
-}
-
-func TestTokenInfo_IsAnyModelAllowed_NoneMatch(t *testing.T) {
+func TestTokenInfo_IsModelAllowed_LiteralEntriesKeepExactSemantics(t *testing.T) {
 	token := &TokenInfo{
 		Models: []string{"gpt-4"},
 	}
 
-	assert.False(t, token.IsAnyModelAllowed([]string{"claude-3", "claude-3-opus"}))
+	assert.True(t, token.IsModelAllowed("gpt-4"))
+	assert.False(t, token.IsModelAllowed("gpt-4o"), "a literal entry must not widen into a prefix match")
 }
 
-func TestTokenInfo_IsAnyModelAllowed_EmptyModelsList(t *testing.T) {
-	token := &TokenInfo{Models: nil}
+func TestTokenInfo_IsModelAllowed_InvalidRegexTreatedAsNoMatch(t *testing.T) {
+	token := &TokenInfo{
+		Models: []string{"gpt-4("},
+	}
 
-	assert.True(t, token.IsAnyModelAllowed([]string{"anything"}))
+	// The entry still matches its own literal spelling via the exact comparison,
+	// but the broken pattern must not crash or match anything else.
+	assert.True(t, token.IsModelAllowed("gpt-4("))
+	assert.False(t, token.IsModelAllowed("gpt-4"))
+	assert.False(t, token.IsModelAllowed("gpt-4(x"))
+}
+
+func TestTokenInfo_IsModelAllowed_WildcardStillMatchesEverything(t *testing.T) {
+	token := &TokenInfo{
+		Models: []string{"*"},
+	}
+
+	assert.True(t, token.IsModelAllowed("gpt-4o"))
+	assert.True(t, token.IsModelAllowed("anthropic/claude-haiku-4.5"))
+}
+
+func TestTokenInfo_IsModelAllowed_IntersectsApplicableHierarchy(t *testing.T) {
+	token := &TokenInfo{
+		Models:     []string{"openai/gpt-4o-mini", "gpt-4o-mini"},
+		UserID:     "user-alt",
+		TeamID:     "team-alt",
+		TeamModels: []string{"openai/gpt-4o-mini"},
+	}
+
+	assert.True(t, token.IsModelAllowed("openai/gpt-4o-mini"))
+	assert.False(t, token.IsModelAllowed("gpt-4o-mini"), "a child key cannot widen its parent scopes")
+}
+
+func TestTokenInfo_IsModelAllowed_EmptyParentScopeIsUnrestricted(t *testing.T) {
+	token := &TokenInfo{
+		Models:     []string{"public/chat"},
+		TeamID:     "team",
+		TeamModels: nil,
+	}
+
+	assert.True(t, token.IsModelAllowed("public/chat"))
+}
+
+func TestTokenInfo_IsModelAllowed_AllTeamModelsInheritsTeamScope(t *testing.T) {
+	token := &TokenInfo{
+		Models:     []string{AllTeamModels},
+		TeamID:     "team",
+		TeamModels: []string{"public/chat"},
+	}
+
+	assert.True(t, token.IsModelAllowed("public/chat"))
+	assert.False(t, token.IsModelAllowed("public/embed"))
+
+	broken := &TokenInfo{Models: []string{AllTeamModels}}
+	assert.False(t, broken.IsModelAllowed("public/chat"), "all-team-models without a team must fail closed")
+}
+
+// A token whose team_id references a deleted LiteLLM_TeamTable row gets an
+// empty team scope from the LEFT JOIN. That scope must deny, not degrade to
+// unrestricted — otherwise all-team-models keys would silently gain access
+// to every model.
+func TestTokenInfo_IsModelAllowed_DanglingTeamFailsClosed(t *testing.T) {
+	token := &TokenInfo{
+		Models:       []string{AllTeamModels},
+		TeamID:       "deleted-team",
+		TeamModels:   nil, // LEFT JOIN found no team row
+		TeamDangling: true,
+	}
+
+	assert.False(t, token.IsModelAllowed("public/chat"))
+	assert.False(t, token.IsModelAllowed("any-model"))
+
+	explicit := &TokenInfo{
+		Models:       []string{"public/chat"},
+		TeamID:       "deleted-team",
+		TeamDangling: true,
+	}
+	assert.False(t, explicit.IsModelAllowed("public/chat"),
+		"even a key-allowed model must be denied while the team scope is unresolvable")
+}
+
+func TestTokenInfo_IsModelAllowed_ResolvedEmptyTeamScopeStaysUnrestricted(t *testing.T) {
+	token := &TokenInfo{
+		Models:     []string{"public/chat"},
+		TeamID:     "team",
+		TeamModels: nil,
+	}
+
+	assert.True(t, token.IsModelAllowed("public/chat"))
 }
 
 // ==================== Budget Check Helper Tests ====================
@@ -504,6 +506,13 @@ func TestTokenInfo_Validate_ModelAllowedWithEmptyCheck(t *testing.T) {
 
 	err := token.Validate("")
 	assert.NoError(t, err)
+}
+
+func TestTokenInfo_Validate_BlockedParentScopes(t *testing.T) {
+	teamBlocked := true
+
+	token := &TokenInfo{TeamID: "team", TeamBlocked: &teamBlocked}
+	assert.ErrorIs(t, token.Validate(""), ErrTeamBlocked)
 }
 
 func TestTokenInfo_Validate_ValidationOrder(t *testing.T) {

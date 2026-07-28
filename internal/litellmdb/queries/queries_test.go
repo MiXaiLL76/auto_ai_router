@@ -1,6 +1,7 @@
 package queries
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -104,8 +105,12 @@ func TestCustomPricingLiteLLMParamsFields(t *testing.T) {
 	cacheReadInput := 0.000001
 	cacheCreationInput := 0.00000125
 	cacheReadInputAbove200k := 0.0000008
+	cacheCreationInputAbove200k := 0.0000015
+	cacheCreationInputAbove1hr := 0.000002
+	cacheCreationInputAbove1hrAbove200k := 0.000003
 	cacheReadInputAbove272k := 0.000001
 	cacheCreationInputAbove272k := 0.0000125
+	cacheReadInputAudio := 0.0000009
 
 	inputAudio := 0.000006
 	inputAudioPerSecond := 0.00006
@@ -123,37 +128,45 @@ func TestCustomPricingLiteLLMParamsFields(t *testing.T) {
 	outputImage := 0.0000425
 	outputImageToken := 0.000001
 	outputReasoningToken := 0.000018
+	searchContextCost := map[string]float64{
+		"search_context_size_medium": 0.02,
+	}
 
 	params := CustomPricingLiteLLMParams{
-		InputCostPerToken:                          &inputCost,
-		OutputCostPerToken:                         &outputCost,
-		InputCostPerTokenAbove128kTokens:           &inputAbove128k,
-		InputCostPerTokenAbove200kTokens:           &inputAbove200k,
-		InputCostPerTokenAbove272kTokens:           &inputAbove272k,
-		OutputCostPerTokenAbove128kTokens:          &outputAbove128k,
-		OutputCostPerTokenAbove200kTokens:          &outputAbove200k,
-		OutputCostPerTokenAbove272kTokens:          &outputAbove272k,
-		InputCostPerSecond:                         &inputCostPerSecond,
-		OutputCostPerSecond:                        &outputCostPerSecond,
-		CacheReadInputTokenCost:                    &cacheReadInput,
-		CacheCreationInputTokenCost:                &cacheCreationInput,
-		CacheReadInputTokenCostAbove200kTokens:     &cacheReadInputAbove200k,
-		CacheReadInputTokenCostAbove272kTokens:     &cacheReadInputAbove272k,
-		CacheCreationInputTokenCostAbove272kTokens: &cacheCreationInputAbove272k,
-		InputCostPerAudioToken:                     &inputAudio,
-		InputCostPerAudioPerSecond:                 &inputAudioPerSecond,
-		InputCostPerAudioPerSecondAbove128kTokens:  &inputAudioAbove128k,
-		OutputCostPerAudioToken:                    &outputAudio,
-		OutputCostPerAudioPerSecond:                &outputAudioPerSecond,
-		InputCostPerVideoPerSecond:                 &inputVideoPerSecond,
-		InputCostPerVideoPerSecondAbove15sInterval: &inputVideoPerSecondAbove15s,
-		InputCostPerVideoPerSecondAbove8sInterval:  &inputVideoPerSecondAbove8s,
-		OutputCostPerVideoPerSecond:                &outputVideoPerSecond,
-		InputCostPerImage:                          &inputImage,
-		InputCostPerImageAbove128kTokens:           &inputImageAbove128k,
-		OutputCostPerImage:                         &outputImage,
-		OutputCostPerImageToken:                    &outputImageToken,
-		OutputCostPerReasoningToken:                &outputReasoningToken,
+		InputCostPerToken:                                  &inputCost,
+		OutputCostPerToken:                                 &outputCost,
+		InputCostPerTokenAbove128kTokens:                   &inputAbove128k,
+		InputCostPerTokenAbove200kTokens:                   &inputAbove200k,
+		InputCostPerTokenAbove272kTokens:                   &inputAbove272k,
+		OutputCostPerTokenAbove128kTokens:                  &outputAbove128k,
+		OutputCostPerTokenAbove200kTokens:                  &outputAbove200k,
+		OutputCostPerTokenAbove272kTokens:                  &outputAbove272k,
+		InputCostPerSecond:                                 &inputCostPerSecond,
+		OutputCostPerSecond:                                &outputCostPerSecond,
+		CacheReadInputTokenCost:                            &cacheReadInput,
+		CacheCreationInputTokenCost:                        &cacheCreationInput,
+		CacheReadInputTokenCostAbove200kTokens:             &cacheReadInputAbove200k,
+		CacheCreationInputTokenCostAbove200kTokens:         &cacheCreationInputAbove200k,
+		CacheCreationInputTokenCostAbove1hr:                &cacheCreationInputAbove1hr,
+		CacheCreationInputTokenCostAbove1hrAbove200kTokens: &cacheCreationInputAbove1hrAbove200k,
+		CacheReadInputTokenCostAbove272kTokens:             &cacheReadInputAbove272k,
+		CacheCreationInputTokenCostAbove272kTokens:         &cacheCreationInputAbove272k,
+		CacheReadInputAudioTokenCost:                       &cacheReadInputAudio,
+		InputCostPerAudioToken:                             &inputAudio,
+		InputCostPerAudioPerSecond:                         &inputAudioPerSecond,
+		InputCostPerAudioPerSecondAbove128kTokens:          &inputAudioAbove128k,
+		OutputCostPerAudioToken:                            &outputAudio,
+		OutputCostPerAudioPerSecond:                        &outputAudioPerSecond,
+		InputCostPerVideoPerSecond:                         &inputVideoPerSecond,
+		InputCostPerVideoPerSecondAbove15sInterval:         &inputVideoPerSecondAbove15s,
+		InputCostPerVideoPerSecondAbove8sInterval:          &inputVideoPerSecondAbove8s,
+		OutputCostPerVideoPerSecond:                        &outputVideoPerSecond,
+		InputCostPerImage:                                  &inputImage,
+		InputCostPerImageAbove128kTokens:                   &inputImageAbove128k,
+		OutputCostPerImage:                                 &outputImage,
+		OutputCostPerImageToken:                            &outputImageToken,
+		OutputCostPerReasoningToken:                        &outputReasoningToken,
+		SearchContextCostPerQuery:                          searchContextCost,
 	}
 
 	assert.NotNil(t, params.InputCostPerToken)
@@ -162,10 +175,16 @@ func TestCustomPricingLiteLLMParamsFields(t *testing.T) {
 	assert.Equal(t, 0.00003, *params.OutputCostPerToken)
 	assert.Equal(t, 0.000018, *params.OutputCostPerReasoningToken)
 	assert.Equal(t, 0.00000125, *params.CacheCreationInputTokenCost)
+	assert.Equal(t, 0.0000008, *params.CacheReadInputTokenCostAbove200kTokens)
+	assert.Equal(t, 0.0000015, *params.CacheCreationInputTokenCostAbove200kTokens)
+	assert.Equal(t, 0.000002, *params.CacheCreationInputTokenCostAbove1hr)
+	assert.Equal(t, 0.000003, *params.CacheCreationInputTokenCostAbove1hrAbove200kTokens)
+	assert.Equal(t, 0.0000009, *params.CacheReadInputAudioTokenCost)
 	assert.Equal(t, 0.00001, *params.InputCostPerTokenAbove272kTokens)
 	assert.Equal(t, 0.000045, *params.OutputCostPerTokenAbove272kTokens)
 	assert.Equal(t, 0.000001, *params.CacheReadInputTokenCostAbove272kTokens)
 	assert.Equal(t, 0.0000125, *params.CacheCreationInputTokenCostAbove272kTokens)
+	assert.Equal(t, searchContextCost, params.SearchContextCostPerQuery)
 }
 
 // TestGenericLiteLLMParamsFields verifies GenericLiteLLMParams structure with embedded types
@@ -280,12 +299,11 @@ func TestSpendLogQueryConstants(t *testing.T) {
 	// These are imported from spend_logs.go
 	// Verify they are defined (we can't import const from another file directly in test)
 	assert.NotEmpty(t, QueryInsertSpendLog)
-	assert.NotEmpty(t, QuerySelectUnprocessedSpendLogs)
+	assert.NotEmpty(t, QueryClaimSpendLogEventOwner)
 	assert.NotEmpty(t, QueryUpsertDailyUserSpend)
 	assert.NotEmpty(t, QueryUpsertDailyTeamSpend)
 	assert.NotEmpty(t, QueryUpsertDailyOrganizationSpend)
 	assert.NotEmpty(t, QueryUpsertDailyEndUserSpend)
-	assert.NotEmpty(t, QueryUpsertDailyTagSpend)
 }
 
 // TestQueryContainsRequiredFields verifies queries contain required fields
@@ -302,16 +320,46 @@ func TestQueryContainsRequiredFields(t *testing.T) {
 	assert.Contains(t, QueryProxyModelTable, "litellm_params")
 	assert.Contains(t, QueryProxyModelTable, "model_info")
 
-	// Verify spend log queries contain required fields
-	assert.Contains(t, QuerySelectUnprocessedSpendLogs, "request_id")
-	assert.Contains(t, QuerySelectUnprocessedSpendLogs, "prompt_tokens")
-	assert.Contains(t, QuerySelectUnprocessedSpendLogs, "completion_tokens")
-	assert.Contains(t, QuerySelectUnprocessedSpendLogs, "spend")
+	// Verify the event-owner claim is a targeted primary-key write, not a scan
+	assert.Contains(t, QueryClaimSpendLogEventOwner, `UPDATE "LiteLLM_SpendLogs"`)
+	assert.Contains(t, QueryClaimSpendLogEventOwner, "WHERE request_id = $1")
+	assert.Contains(t, QueryClaimSpendLogEventOwner, "RETURNING request_id")
 
 	// Verify upsert queries
 	assert.Contains(t, QueryUpsertDailyUserSpend, "user_id")
 	assert.Contains(t, QueryUpsertDailyTeamSpend, "team_id")
 	assert.Contains(t, QueryUpsertDailyOrganizationSpend, "organization_id")
 	assert.Contains(t, QueryUpsertDailyEndUserSpend, "end_user_id")
-	assert.Contains(t, QueryUpsertDailyTagSpend, "tag")
+}
+
+// tokenHierarchyScanColumns must equal the number of Scan destinations in
+// auth.Authenticator.fetchTokenFromDB. pgx fails every uncached token lookup
+// with "number of field descriptions must equal number of destinations" when
+// the SELECT list and the Scan call drift apart, so any column added here has
+// to land in both places at once.
+const tokenHierarchyScanColumns = 45
+
+func TestTokenValidationQueryColumnCountMatchesScan(t *testing.T) {
+	selectList := QueryValidateTokenWithHierarchy
+	fromIdx := strings.Index(selectList, `FROM "LiteLLM_VerificationToken"`)
+	if fromIdx < 0 {
+		t.Fatal("FROM clause not found in QueryValidateTokenWithHierarchy")
+	}
+	selectList = selectList[:fromIdx]
+
+	count := 0
+	for _, line := range strings.Split(selectList, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "--") || strings.HasPrefix(line, "SELECT") {
+			continue
+		}
+		count++
+	}
+	assert.Equal(t, tokenHierarchyScanColumns, count)
+}
+
+func TestTokenValidationQueryLoadsModelAccessHierarchy(t *testing.T) {
+	assert.Contains(t, QueryValidateTokenWithHierarchy, `LEFT JOIN "LiteLLM_UserTable" u ON t.user_id = u.user_id`)
+	assert.Contains(t, QueryValidateTokenWithHierarchy, "t.models as token_models")
+	assert.Contains(t, QueryValidateTokenWithHierarchy, "t.metadata as token_metadata")
 }

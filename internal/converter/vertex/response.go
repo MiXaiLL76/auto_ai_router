@@ -125,7 +125,40 @@ func VertexToOpenAI(vertexBody []byte, model string) ([]byte, error) {
 	if vertexResp.UsageMetadata != nil {
 		openAIResp.Usage = convertVertexUsageMetadata(vertexResp.UsageMetadata)
 	}
+	if webSearchRequests := CountWebSearchRequests(vertexResp.Candidates); webSearchRequests > 0 {
+		if openAIResp.Usage == nil {
+			openAIResp.Usage = &openai.OpenAIUsage{}
+		}
+		openAIResp.Usage.ServerToolUse = &openai.ServerToolUseDetails{
+			WebSearchRequests: webSearchRequests,
+		}
+	}
 	return json.Marshal(openAIResp)
+}
+
+// CountWebSearchRequests returns the number of distinct Google Search queries
+// confirmed by Vertex grounding metadata.
+func CountWebSearchRequests(candidates []*genai.Candidate) int {
+	queries := make(map[string]struct{})
+	AddWebSearchQueries(queries, candidates)
+	return len(queries)
+}
+
+// AddWebSearchQueries adds distinct, non-empty Google Search queries from the
+// supplied candidates to queries. Callers can reuse the same set across
+// streaming chunks so each provider query is billed exactly once.
+func AddWebSearchQueries(queries map[string]struct{}, candidates []*genai.Candidate) {
+	for _, candidate := range candidates {
+		if candidate == nil || candidate.GroundingMetadata == nil {
+			continue
+		}
+		for _, query := range candidate.GroundingMetadata.WebSearchQueries {
+			query = strings.TrimSpace(query)
+			if query != "" {
+				queries[query] = struct{}{}
+			}
+		}
+	}
 }
 
 func inlineDataToChatImage(index int, blob *genai.Blob) (openai.ImageData, bool) {
@@ -237,6 +270,7 @@ func convertVertexUsageMetadata(meta *genai.GenerateContentResponseUsageMetadata
 			}
 			switch genai.MediaModality(detail.Modality) {
 			case genai.MediaModalityAudio:
+				usage.PromptTokensDetails.CachedAudioTokens += int(detail.TokenCount)
 				usage.PromptTokensDetails.AudioTokens -= int(detail.TokenCount)
 				if usage.PromptTokensDetails.AudioTokens < 0 {
 					usage.PromptTokensDetails.AudioTokens = 0

@@ -4,11 +4,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+
+	"github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
 )
 
 // chatToResponseConfig holds optional parameters for ChatToResponse.
 type chatToResponseConfig struct {
-	extraOutputItems []OutputItem
+	extraOutputItems              []OutputItem
+	audioInputIncludesCachedAudio bool
 }
 
 // ChatToResponseOption is a functional option for ChatToResponse.
@@ -22,9 +25,18 @@ func WithExtraOutputItems(items []OutputItem) ChatToResponseOption {
 	}
 }
 
+// WithAudioInputIncludesCachedAudio defines the semantics of audio_tokens in
+// the source Chat Completions usage. Raw OpenAI-compatible responses include
+// cached audio; normalized router responses expose non-cached audio only.
+func WithAudioInputIncludesCachedAudio(includes bool) ChatToResponseOption {
+	return func(c *chatToResponseConfig) {
+		c.audioInputIncludesCachedAudio = includes
+	}
+}
+
 // ChatToResponse converts a Chat Completions response body to Responses API format.
 func ChatToResponse(body []byte, opts ...ChatToResponseOption) ([]byte, error) {
-	cfg := &chatToResponseConfig{}
+	cfg := &chatToResponseConfig{audioInputIncludesCachedAudio: true}
 	for _, o := range opts {
 		o(cfg)
 	}
@@ -61,12 +73,24 @@ func ChatToResponse(body []byte, opts ...ChatToResponseOption) ([]byte, error) {
 			CompletionTokens    int `json:"completion_tokens"`
 			TotalTokens         int `json:"total_tokens"`
 			PromptTokensDetails *struct {
-				CachedTokens int `json:"cached_tokens,omitempty"`
+				CachedTokens              int `json:"cached_tokens,omitempty"`
+				CachedAudioTokens         int `json:"cached_audio_tokens,omitempty"`
+				CacheCreationTokens       int `json:"cache_creation_tokens,omitempty"`
+				CacheWriteTokens          int `json:"cache_write_tokens,omitempty"`
+				CacheCreationTokenDetails *struct {
+					Ephemeral5mInputTokens int `json:"ephemeral_5m_input_tokens,omitempty"`
+					Ephemeral1hInputTokens int `json:"ephemeral_1h_input_tokens,omitempty"`
+				} `json:"cache_creation_token_details,omitempty"`
+				AudioTokens int `json:"audio_tokens,omitempty"`
 			} `json:"prompt_tokens_details,omitempty"`
 			CompletionTokensDetails *struct {
 				ReasoningTokens int `json:"reasoning_tokens,omitempty"`
+				AudioTokens     int `json:"audio_tokens,omitempty"`
 				ImageTokens     int `json:"image_tokens,omitempty"`
 			} `json:"completion_tokens_details,omitempty"`
+			ServerToolUse *struct {
+				WebSearchRequests int `json:"web_search_requests,omitempty"`
+			} `json:"server_tool_use,omitempty"`
 		} `json:"usage,omitempty"`
 	}
 
@@ -169,11 +193,41 @@ func ChatToResponse(body []byte, opts ...ChatToResponseOption) ([]byte, error) {
 			OutputTokensDetails: OutputDetails{},
 		}
 		if ccResp.Usage.PromptTokensDetails != nil {
-			usage.InputTokensDetails.CachedTokens = ccResp.Usage.PromptTokensDetails.CachedTokens
+			cachedTokens, cachedAudioTokens := converterutil.NormalizeCachedAudioBreakdown(
+				ccResp.Usage.PromptTokensDetails.CachedTokens,
+				ccResp.Usage.PromptTokensDetails.CachedAudioTokens,
+			)
+			usage.InputTokensDetails.CachedTokens = cachedTokens
+			usage.InputTokensDetails.CachedAudioTokens = cachedAudioTokens
+			usage.InputTokensDetails.AudioTokens = normalizedAudioTokens(
+				ccResp.Usage.PromptTokensDetails.AudioTokens,
+				cachedTokens,
+				cachedAudioTokens,
+				cfg.audioInputIncludesCachedAudio,
+			)
+			usage.InputTokensDetails.CacheCreationTokens = ccResp.Usage.PromptTokensDetails.CacheCreationTokens
+			if usage.InputTokensDetails.CacheCreationTokens == 0 {
+				usage.InputTokensDetails.CacheCreationTokens = ccResp.Usage.PromptTokensDetails.CacheWriteTokens
+			}
+			if details := ccResp.Usage.PromptTokensDetails.CacheCreationTokenDetails; details != nil {
+				usage.InputTokensDetails.CacheCreationTokenDetails = &CacheCreationTokenDetails{
+					Ephemeral5mInputTokens: details.Ephemeral5mInputTokens,
+					Ephemeral1hInputTokens: details.Ephemeral1hInputTokens,
+				}
+				if usage.InputTokensDetails.CacheCreationTokens == 0 {
+					usage.InputTokensDetails.CacheCreationTokens = details.Ephemeral5mInputTokens + details.Ephemeral1hInputTokens
+				}
+			}
 		}
 		if ccResp.Usage.CompletionTokensDetails != nil {
 			usage.OutputTokensDetails.ReasoningTokens = ccResp.Usage.CompletionTokensDetails.ReasoningTokens
+			usage.OutputTokensDetails.AudioTokens = ccResp.Usage.CompletionTokensDetails.AudioTokens
 			usage.OutputTokensDetails.ImageTokens = ccResp.Usage.CompletionTokensDetails.ImageTokens
+		}
+		if ccResp.Usage.ServerToolUse != nil && ccResp.Usage.ServerToolUse.WebSearchRequests > 0 {
+			usage.ServerToolUse = &ServerToolUseDetails{
+				WebSearchRequests: ccResp.Usage.ServerToolUse.WebSearchRequests,
+			}
 		}
 	}
 
@@ -259,4 +313,8 @@ func convertChatMessageContent(content interface{}) []OutputContent {
 	default:
 		return nil
 	}
+}
+
+func normalizedAudioTokens(audioTokens, cachedTokens, cachedAudioTokens int, includesCachedAudio bool) int {
+	return converterutil.NormalizeAudioInputTokens(audioTokens, cachedTokens, cachedAudioTokens, includesCachedAudio)
 }
