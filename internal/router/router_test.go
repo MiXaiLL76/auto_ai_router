@@ -76,8 +76,11 @@ func newIPv4Server(t *testing.T, handler http.Handler) *httptest.Server {
 	return server
 }
 
-// createTestProxy creates a test proxy instance
 func createTestProxy() *proxy.Proxy {
+	return createTestProxyWithStrictACL(false)
+}
+
+func createTestProxyWithStrictACL(strictAllTeamModelsACL bool) *proxy.Proxy {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
 	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
 	rl := ratelimit.New()
@@ -96,20 +99,21 @@ func createTestProxy() *proxy.Proxy {
 	tokenManager := auth.NewVertexTokenManager(logger)
 
 	return proxy.New(&proxy.Config{
-		Balancer:            bal,
-		Logger:              logger,
-		MaxBodySizeMB:       10,
-		RequestTimeout:      30 * time.Second,
-		MaxIdleConns:        200,
-		MaxIdleConnsPerHost: 20,
-		IdleConnTimeout:     120 * time.Second,
-		Metrics:             metrics,
-		MasterKey:           "test-master-key",
-		RateLimiter:         rl,
-		TokenManager:        tokenManager,
-		ModelManager:        createTestModelManager(),
-		Version:             "test-version",
-		Commit:              "test-commit",
+		Balancer:               bal,
+		Logger:                 logger,
+		MaxBodySizeMB:          10,
+		RequestTimeout:         30 * time.Second,
+		MaxIdleConns:           200,
+		MaxIdleConnsPerHost:    20,
+		IdleConnTimeout:        120 * time.Second,
+		Metrics:                metrics,
+		MasterKey:              "test-master-key",
+		RateLimiter:            rl,
+		TokenManager:           tokenManager,
+		ModelManager:           createTestModelManager(),
+		Version:                "test-version",
+		Commit:                 "test-commit",
+		StrictAllTeamModelsACL: strictAllTeamModelsACL,
 	})
 }
 
@@ -546,7 +550,7 @@ func TestHandleModels(t *testing.T) {
 	// Models list might be empty if not fetched, which is OK
 }
 
-func TestServeHTTPV1ModelsRequiresAuthAndFiltersPublicCatalog(t *testing.T) {
+func TestServeHTTPV1ModelsAuthAndModelACLPolicy(t *testing.T) {
 	logger := testhelpers.NewTestLogger()
 	modelManager := models.New(logger, 100, []config.ModelRPMConfig{
 		{Name: "z-backend", RPM: 100},
@@ -561,7 +565,7 @@ func TestServeHTTPV1ModelsRequiresAuthAndFiltersPublicCatalog(t *testing.T) {
 	catalogCredentials := []config.CredentialConfig{{Name: "catalog", Type: config.ProviderTypeOpenAI}}
 	modelManager.SetCredentials(catalogCredentials)
 	modelManager.LoadModelsFromConfig(catalogCredentials)
-	prx := createTestProxy()
+	prx := createTestProxyWithStrictACL(true)
 	blocked := true
 	prx.LiteLLMDB = &routerAuthTestDB{tokens: map[string]*dbmodels.TokenInfo{
 		"unrestricted-key": {Token: "unrestricted-hash"},
@@ -583,6 +587,12 @@ func TestServeHTTPV1ModelsRequiresAuthAndFiltersPublicCatalog(t *testing.T) {
 			Models:     []string{"openai/a-public"},
 			UserID:     "personal-user",
 			UserModels: []string{dbmodels.NoDefaultModels, "openai/a-public"},
+		},
+		"dangling-team-key": {
+			Token:        "dangling-team-hash",
+			Models:       []string{"openai/a-public"},
+			TeamID:       "deleted-team",
+			TeamDangling: true,
 		},
 		"wildcard-key": {
 			Token:  "wildcard-hash",
@@ -634,6 +644,10 @@ func TestServeHTTPV1ModelsRequiresAuthAndFiltersPublicCatalog(t *testing.T) {
 	require.Equal(t, http.StatusOK, noDefault.Code)
 	assert.Empty(t, modelIDs(t, noDefault))
 
+	danglingTeam := request(map[string]string{"Authorization": "Bearer dangling-team-key"})
+	require.Equal(t, http.StatusOK, danglingTeam.Code)
+	assert.Empty(t, modelIDs(t, danglingTeam))
+
 	wildcard := request(map[string]string{"Authorization": "Bearer wildcard-key"})
 	require.Equal(t, http.StatusOK, wildcard.Code)
 	assert.Equal(t, []string{"openai/a-public"}, modelIDs(t, wildcard),
@@ -670,6 +684,36 @@ func TestServeHTTPV1ModelsRequiresAuthAndFiltersPublicCatalog(t *testing.T) {
 		[]string{"openai/a-public", "openai/z-public"},
 		modelIDs(t, unrestrictedGroups),
 	)
+
+	compatibilityProxy := createTestProxy()
+	compatibilityProxy.LiteLLMDB = prx.LiteLLMDB
+	compatibilityRouter := New(
+		compatibilityProxy,
+		modelManager,
+		testhelpers.NewTestMonitoringConfig("/health", false, ""),
+		logger,
+		nil,
+	)
+	compatibilityRequest := func(key string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+		req.Header.Set("Authorization", "Bearer "+key)
+		w := httptest.NewRecorder()
+		compatibilityRouter.ServeHTTP(w, req)
+		return w
+	}
+	allModels := []string{"openai/a-public", "openai/z-public"}
+	for _, key := range []string{
+		"restricted-key",
+		"no-default-user-key",
+		"dangling-team-key",
+		"wildcard-key",
+		"regex-looking-key",
+	} {
+		response := compatibilityRequest(key)
+		require.Equal(t, http.StatusOK, response.Code)
+		assert.Equal(t, allModels, modelIDs(t, response))
+	}
+	assert.Equal(t, http.StatusForbidden, compatibilityRequest("blocked-team-key").Code)
 }
 
 func TestServeHTTPPublicPreflightDoesNotEnableWildcardCORS(t *testing.T) {

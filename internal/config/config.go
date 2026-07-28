@@ -467,8 +467,8 @@ type ServerConfig struct {
 	ModelPricesLink            string                `yaml:"model_prices_link,omitempty"`       // URL or file path to model prices JSON - supports os.environ/VAR_NAME
 	ShutdownDelay              time.Duration         `yaml:"shutdown_delay"`                    // Delay between readiness=false and server.Shutdown (default: 5s)
 	DrainUpstreamOnAbort       bool                  `yaml:"drain_upstream_on_abort"`           // When true, keep reading upstream after client disconnect to capture real usage chunk (default: false — estimate from delta text)
-	StrictAllTeamModelsACL     bool                  `yaml:"strict_all_team_models_acl"`
-	ProxyHealthTimeout         time.Duration         `yaml:"proxy_health_timeout"` // Timeout for fetching /health from remote proxy credentials (default: 15s)
+	StrictAllTeamModelsACL     bool                  `yaml:"strict_all_team_models_acl"`        // Enforce key/team/user model ACLs (default: false)
+	ProxyHealthTimeout         time.Duration         `yaml:"proxy_health_timeout"`              // Timeout for fetching /health from remote proxy credentials (default: 15s)
 	ResponseHeaders            ResponseHeadersConfig `yaml:"response_headers"`
 }
 
