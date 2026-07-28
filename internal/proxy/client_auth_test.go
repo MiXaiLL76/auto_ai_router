@@ -619,6 +619,44 @@ func TestInferenceModelACLIntersectsParentScopesBeforeAliasResolution(t *testing
 	assert.Equal(t, 1, upstreamCalls, "a disallowed model must be rejected before provider dispatch")
 }
 
+func TestInferenceAllTeamModelsWithoutTeamPolicy(t *testing.T) {
+	upstream := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl-auth","object":"chat.completion","created":1,"model":"backend-chat","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+	}))
+	defer upstream.Close()
+
+	for _, tt := range []struct {
+		name       string
+		strict     bool
+		wantStatus int
+	}{
+		{name: "compatibility", wantStatus: http.StatusOK},
+		{name: "strict", strict: true, wantStatus: http.StatusForbidden},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			db := &clientAuthTestDB{tokens: map[string]*dbmodels.TokenInfo{
+				"gateway-key": {
+					Token:  "gateway-hash",
+					Models: []string{dbmodels.AllTeamModels},
+				},
+			}}
+			prx := newClientAuthTestProxy(t, db, upstream.URL, config.ProviderTypeOpenAI, "provider-key")
+			prx.strictAllTeamModelsACL = tt.strict
+			req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(
+				`{"model":"backend-chat","messages":[{"role":"user","content":"hello"}]}`,
+			))
+			req.Header.Set("Authorization", "Bearer gateway-key")
+			req.Header.Set("Content-Type", "application/json")
+			writer := httptest.NewRecorder()
+
+			prx.ProxyRequest(writer, req)
+
+			assert.Equal(t, tt.wantStatus, writer.Code)
+		})
+	}
+}
+
 func TestInferenceRejectsBlockedParentsAndNoDefaultPersonalUserBeforeProvider(t *testing.T) {
 	var upstreamCalls int
 	upstream := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

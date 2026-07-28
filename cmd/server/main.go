@@ -253,6 +253,7 @@ func main() {
 		SessionStickyAutoCacheCtrl: cfg.Server.SessionStickyAutoCacheCtrl,
 		SessionStoreTTL:            time.Duration(cfg.Server.SessionStickyTTL) * time.Minute,
 		DrainUpstreamOnAbort:       cfg.Server.DrainUpstreamOnAbort,
+		StrictAllTeamModelsACL:     cfg.Server.StrictAllTeamModelsACL,
 		ResponseHeaderMode:         cfg.Server.ResponseHeaders.Mode,
 
 		BudgetReserver:                   budgetReserver,

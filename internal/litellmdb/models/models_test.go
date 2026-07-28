@@ -274,8 +274,13 @@ func TestTokenInfo_IsModelAllowed_AllTeamModelsInheritsTeamScope(t *testing.T) {
 	assert.True(t, token.IsModelAllowed("public/chat"))
 	assert.False(t, token.IsModelAllowed("public/embed"))
 
-	broken := &TokenInfo{Models: []string{AllTeamModels}}
-	assert.False(t, broken.IsModelAllowed("public/chat"), "all-team-models without a team must fail closed")
+	orphan := &TokenInfo{Models: []string{AllTeamModels}}
+	assert.True(t, orphan.IsModelAllowed("public/chat"))
+	assert.False(t, orphan.IsModelAllowedByPolicy(
+		"public/chat",
+		nil,
+		ModelAccessPolicy{StrictAllTeamModelsACL: true},
+	))
 }
 
 // A token whose team_id references a deleted LiteLLM_TeamTable row gets an

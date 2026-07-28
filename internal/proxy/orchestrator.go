@@ -403,6 +403,19 @@ func (p *Proxy) AuthenticateClientRequestScoped(w http.ResponseWriter, r *http.R
 	return logCtx.TokenInfo, logCtx.Scope, true
 }
 
+func (p *Proxy) IsModelAllowedForToken(tokenInfo *models.TokenInfo, model string) bool {
+	if tokenInfo == nil {
+		return true
+	}
+	var matcher models.ModelScopeMatcher
+	if p.modelManager != nil {
+		matcher = p.modelManager.IsModelIDAllowedByScope
+	}
+	return tokenInfo.IsModelAllowedByPolicy(model, matcher, models.ModelAccessPolicy{
+		StrictAllTeamModelsACL: p.strictAllTeamModelsACL,
+	})
+}
+
 func (p *Proxy) authenticateRequest(
 	w http.ResponseWriter,
 	r *http.Request,
@@ -535,14 +548,7 @@ func (p *Proxy) readRequestBodyAndSelectModel(
 	// LiteLLM -> AIR hop authenticated with AIR's master key, but ordinary keys
 	// cannot discover or invoke them even when their DB model ACL is empty.
 	trustedInternalModelID := p.isMasterKey(logCtx.Token)
-	// Token model scopes contain client-visible model IDs. Enforce the scope
-	// before route-surface lookup or alias rewrites. LiteLLM reports a restricted
-	// key's unknown/disallowed model as an authorization failure; unrestricted
-	// keys continue to the product-surface check and receive a not-found error.
-	modelAllowed := logCtx.TokenInfo == nil || logCtx.TokenInfo.IsModelAllowed(modelID)
-	if logCtx.TokenInfo != nil && p.modelManager != nil {
-		modelAllowed = logCtx.TokenInfo.IsModelAllowedBy(modelID, p.modelManager.IsModelIDAllowedByScope)
-	}
+	modelAllowed := p.IsModelAllowedForToken(logCtx.TokenInfo, modelID)
 	if !modelAllowed {
 		p.logger.WarnContext(r.Context(), "Model is not allowed for token",
 			"error_code", http.StatusForbidden,
