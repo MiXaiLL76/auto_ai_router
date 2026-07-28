@@ -280,9 +280,12 @@ func (p *Proxy) writeFallbackResponse(
 			"request_id", requestID)
 	}
 
+	// Computed once: both branches below need the same audio-usage-contract
+	// derived from the fallback upstream's response, regardless of streaming.
+	usageOptions := tokenUsageExtractionOptionsForResponse(fallbackCred, proxyResp.Headers)
+
 	if proxyResp.IsStreaming {
 		p.setCredentialResponseHeader(w, logCtx, "")
-		usageOptions := tokenUsageExtractionOptionsForResponse(fallbackCred, proxyResp.Headers)
 		streamUsage, err := p.writeProxyStreamingResponseWithTokens(
 			w, proxyResp, r, fallbackCred, modelID, modelID, logCtx, usageOptions,
 		)
@@ -347,7 +350,7 @@ func (p *Proxy) writeFallbackResponse(
 		if logCtx != nil {
 			logCtx.TokenUsage = converter.ExtractTokenUsageWithOptions(
 				proxyResp.Body,
-				tokenUsageExtractionOptionsForResponse(fallbackCred, proxyResp.Headers),
+				usageOptions,
 			)
 		}
 		tokens := extractTokensFromResponse(string(proxyResp.Body), config.ProviderTypeOpenAI)
@@ -385,7 +388,7 @@ func (p *Proxy) writeFallbackResponse(
 		}
 	}
 	if !proxyResp.IsStreaming {
-		p.writeProxyResponse(w, proxyResp, r, fallbackCred, modelID, logCtx)
+		p.writeProxyResponse(w, proxyResp, r, fallbackCred, modelID, logCtx, usageOptions)
 	}
 	if logCtx != nil && logCtx.Status == "success" {
 		logCtx.RequestCompleted = true

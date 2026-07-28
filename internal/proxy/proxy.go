@@ -952,7 +952,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 				p.copyResponseHeaders(w, proxyResp.Headers, cred, false)
 				p.setCredentialResponseHeader(w, logCtx, logCtx.ActualCredentialName)
 				if proxyResp.StatusCode >= 200 && proxyResp.StatusCode < 300 {
-					markAudioUsageExcludesCached(w.Header())
+					p.markAudioUsageExcludesCachedForClient(w, logCtx)
 				}
 				w.WriteHeader(proxyResp.StatusCode)
 				logCtx.PromptTokensEstimate = estimatePromptTokensForModel(body, realModelID)
@@ -978,7 +978,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 				p.copyResponseHeaders(w, proxyResp.Headers, cred, false)
 				p.setCredentialResponseHeader(w, logCtx, logCtx.ActualCredentialName)
 				if proxyResp.StatusCode >= 200 && proxyResp.StatusCode < 300 {
-					markAudioUsageContract(w.Header(), tokenUsageOptions.AudioInputIncludesCachedAudio)
+					p.markAudioUsageContractForClient(w, logCtx, tokenUsageOptions.AudioInputIncludesCachedAudio)
 				}
 				w.WriteHeader(proxyResp.StatusCode)
 				logCtx.PromptTokensEstimate = estimatePromptTokensForModel(body, realModelID)
@@ -995,9 +995,6 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 				}
 			} else {
 				p.setCredentialResponseHeader(w, logCtx, logCtx.ActualCredentialName)
-				if proxyResp.StatusCode >= 200 && proxyResp.StatusCode < 300 {
-					markAudioUsageContract(w.Header(), tokenUsageOptions.AudioInputIncludesCachedAudio)
-				}
 				tokenizerModelID := realModelID
 				if tokenizerModelID == "" {
 					tokenizerModelID = modelID
@@ -1089,10 +1086,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			}
 
 			p.setCredentialResponseHeader(w, logCtx, logCtx.ActualCredentialName)
-			if proxyResp.StatusCode >= 200 && proxyResp.StatusCode < 300 {
-				markAudioUsageContract(w.Header(), tokenUsageOptions.AudioInputIncludesCachedAudio)
-			}
-			p.writeProxyResponse(w, proxyResp, r, cred, modelID, logCtx)
+			p.writeProxyResponse(w, proxyResp, r, cred, modelID, logCtx, tokenUsageOptions)
 			tokens := extractTokensFromResponse(string(proxyResp.Body), config.ProviderTypeOpenAI)
 			if tokens > 0 {
 				p.rateLimiter.ConsumeTokens(cred.Name, tokens)
@@ -1812,9 +1806,9 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 	p.copyResponseHeaders(w, resp.Header, cred, false)
 	switch outgoingAudioUsageContract {
 	case audioUsageContractExcludesCached:
-		markAudioUsageExcludesCached(w.Header())
+		p.markAudioUsageExcludesCachedForClient(w, logCtx)
 	case audioUsageContractIncludesCached:
-		markAudioUsageIncludesCached(w.Header())
+		p.markAudioUsageIncludesCachedForClient(w, logCtx)
 	}
 	// Return credential name only to internal proxy clients, not to end users.
 	p.setCredentialResponseHeader(w, logCtx, cred.Name)

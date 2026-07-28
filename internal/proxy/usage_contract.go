@@ -84,6 +84,29 @@ func markAudioUsageContract(headers http.Header, includesCachedAudio bool) {
 	}
 }
 
+// markAudioUsageContractForClient sets the AIR audio-usage-contract header
+// like markAudioUsageContract, but — mirroring setCredentialResponseHeader —
+// suppresses it in allowlist mode for clients that aren't trusted internal
+// AIR/proxy callers. The header only has a documented consumer (a downstream
+// AIR router in the chain, see docs/providers/air.md) and must not leak
+// router-internal signaling to plain external clients once allowlist mode
+// asks for exactly that.
+func (p *Proxy) markAudioUsageContractForClient(w http.ResponseWriter, logCtx *RequestLogContext, includesCachedAudio bool) {
+	if p.responseHeaderMode == config.ResponseHeaderModeAllowlist && (logCtx == nil || !logCtx.IsProxyRequest) {
+		w.Header().Del(HeaderAIRUsageAudioTokens)
+		return
+	}
+	markAudioUsageContract(w.Header(), includesCachedAudio)
+}
+
+func (p *Proxy) markAudioUsageExcludesCachedForClient(w http.ResponseWriter, logCtx *RequestLogContext) {
+	p.markAudioUsageContractForClient(w, logCtx, false)
+}
+
+func (p *Proxy) markAudioUsageIncludesCachedForClient(w http.ResponseWriter, logCtx *RequestLogContext) {
+	p.markAudioUsageContractForClient(w, logCtx, true)
+}
+
 func directStreamingAudioUsageContract(prepared *orchestratedRequest, cred *config.CredentialConfig, statusCode int) audioUsageContract {
 	if statusCode < http.StatusOK || statusCode >= http.StatusMultipleChoices {
 		return audioUsageContractUnknown

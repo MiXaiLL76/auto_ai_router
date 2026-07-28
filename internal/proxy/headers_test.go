@@ -180,7 +180,7 @@ func TestCopyResponseHeadersProManStripsInternalProviderHeaders(t *testing.T) {
 	cred := &config.CredentialConfig{Name: "proman", Type: config.ProviderTypeProMan}
 	w := httptest.NewRecorder()
 
-	copyResponseHeaders(w, src, cred)
+	NewTestProxyBuilder().Build().copyResponseHeaders(w, src, cred, false)
 
 	assert.Equal(t, "application/json", w.Header().Get("Content-Type"))
 	for _, header := range []string{
@@ -208,7 +208,7 @@ func TestCopyResponseHeadersRegularCredentialKeepsNonStructuralHeaders(t *testin
 	cred := &config.CredentialConfig{Name: "anthropic-promanYT-01", Type: config.ProviderTypeAnthropic}
 	w := httptest.NewRecorder()
 
-	copyResponseHeaders(w, src, cred)
+	NewTestProxyBuilder().Build().copyResponseHeaders(w, src, cred, false)
 
 	assert.Equal(t, "application/json", w.Header().Get("Content-Type"))
 	assert.Equal(t, "debug-upstream", w.Header().Get("X-Litellm-Version"))

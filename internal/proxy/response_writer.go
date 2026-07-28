@@ -160,9 +160,14 @@ func resolveCapturedProviderStreamError(
 // writeProxyResponse writes raw upstream proxy response to client.
 // Respects the client's Accept-Encoding header to compress the response appropriately.
 // Used by both primary proxy path and fallback retry path to avoid duplication.
-func (p *Proxy) writeProxyResponse(w http.ResponseWriter, resp *ProxyResponse, clientReq *http.Request, cred *config.CredentialConfig, modelID string, logCtx *RequestLogContext) {
+func (p *Proxy) writeProxyResponse(w http.ResponseWriter, resp *ProxyResponse, clientReq *http.Request, cred *config.CredentialConfig, modelID string, logCtx *RequestLogContext, usageOptions ...converter.TokenUsageExtractionOptions) {
 	if resp == nil {
 		return
+	}
+
+	tokenUsageOptions := converter.TokenUsageExtractionOptions{AudioInputIncludesCachedAudio: true}
+	if len(usageOptions) > 0 {
+		tokenUsageOptions = usageOptions[0]
 	}
 
 	credName := ""
@@ -226,6 +231,9 @@ func (p *Proxy) writeProxyResponse(w http.ResponseWriter, resp *ProxyResponse, c
 	}
 
 	p.copyResponseHeaders(w, resp.Headers, cred, responseBodyChanged)
+	if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
+		p.markAudioUsageContractForClient(w, logCtx, tokenUsageOptions.AudioInputIncludesCachedAudio)
+	}
 
 	if responseBodyMasked {
 		w.Header().Set("Content-Type", "application/json")
@@ -289,17 +297,21 @@ func (p *Proxy) writeProxyStreamingResponseWithTokens(
 		}
 	}()
 
+	tokenUsageOptions := converter.TokenUsageExtractionOptions{AudioInputIncludesCachedAudio: true}
+	if len(usageOptions) > 0 {
+		tokenUsageOptions = usageOptions[0]
+	}
+
 	p.copyResponseHeaders(w, resp.Headers, cred, normalizeStream || normalizeResponseModel)
+	if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
+		p.markAudioUsageContractForClient(w, logCtx, tokenUsageOptions.AudioInputIncludesCachedAudio)
+	}
 	setSuccessfulSSEHeaders(w.Header(), resp.StatusCode)
 
 	w.WriteHeader(resp.StatusCode)
 
 	var lastUsage *converter.TokenUsage
 	completion := newCompletionTokenAccumulator(tokenizerModelID)
-	tokenUsageOptions := converter.TokenUsageExtractionOptions{AudioInputIncludesCachedAudio: true}
-	if len(usageOptions) > 0 {
-		tokenUsageOptions = usageOptions[0]
-	}
 	detectProviderStreamError := resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices
 	providerStreamError := &proxyStreamErrorCapture{}
 	onChunk := func(chunk []byte) {

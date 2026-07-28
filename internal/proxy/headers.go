@@ -170,17 +170,6 @@ func (p *Proxy) copyResponseHeaders(w http.ResponseWriter, src http.Header, cred
 	}
 }
 
-func copyResponseHeaders(w http.ResponseWriter, src http.Header, cred *config.CredentialConfig) {
-	for key, values := range src {
-		if shouldSkipResponseHeaderForClient(key, cred) {
-			continue
-		}
-		for _, value := range values {
-			w.Header().Add(key, value)
-		}
-	}
-}
-
 func (p *Proxy) setCredentialResponseHeader(w http.ResponseWriter, logCtx *RequestLogContext, credentialName string) {
 	if credentialName == "" && logCtx != nil {
 		credentialName = logCtx.ActualCredentialName

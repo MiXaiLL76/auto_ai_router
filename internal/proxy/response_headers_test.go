@@ -134,6 +134,38 @@ func TestProxyRequest_FallbackResponseHeaderAllowlist(t *testing.T) {
 	assertPublicProviderHeaders(t, w.Header())
 }
 
+func TestProxyRequest_FallbackResponseHeaderAllowlistPreservesAudioContractForTrustedPeer(t *testing.T) {
+	primary := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "rate_limit"})
+	}))
+	defer primary.Close()
+
+	fallback := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		setProviderResponseHeaders(w.Header())
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(createMockChatCompletionResponse("fallback-id", "gpt-4", "ok"))
+	}))
+	defer fallback.Close()
+
+	prx := NewTestProxyBuilder().
+		WithPrimaryAndFallback(primary.URL, fallback.URL).
+		WithResponseHeaderMode(config.ResponseHeaderModeAllowlist).
+		Build()
+	w := httptest.NewRecorder()
+
+	prx.ProxyRequest(w, newTrustedProxyHeaderPolicyRequest(false))
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), "fallback-id")
+	// A trusted internal AIR/proxy caller must still see the audio-usage
+	// contract on the fallback response even in allowlist mode, otherwise
+	// the caller falls back to a guessed contract and cached-audio tokens
+	// get double-counted/dropped further up the chain.
+	assert.NotEmpty(t, w.Header().Get(HeaderAIRUsageAudioTokens))
+}
+
 func newHeaderPolicyRequest(stream bool) *http.Request {
 	body := `{"model":"gpt-4","messages":[{"role":"user","content":"test"}]}`
 	if stream {
@@ -142,6 +174,15 @@ func newHeaderPolicyRequest(stream bool) *http.Request {
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
 	req.Header.Set("Authorization", "Bearer master-key")
 	req.Header.Set("Content-Type", "application/json")
+	return req
+}
+
+// newTrustedProxyHeaderPolicyRequest builds a request that authenticates as
+// the master key and carries the AIR proxy marker, i.e. a request from
+// another trusted internal Auto AI Router instance rather than an end user.
+func newTrustedProxyHeaderPolicyRequest(stream bool) *http.Request {
+	req := newHeaderPolicyRequest(stream)
+	req.Header.Set(HeaderAIRProxyClient, "1")
 	return req
 }
 
@@ -168,4 +209,5 @@ func assertPublicProviderHeaders(t *testing.T, header http.Header) {
 	assert.Empty(t, header.Get("Llm_provider-Api-Base"))
 	assert.Empty(t, header.Get("X-Future-Provider"))
 	assert.Empty(t, header.Get("X-Credential-Name"))
+	assert.Empty(t, header.Get(HeaderAIRUsageAudioTokens))
 }
