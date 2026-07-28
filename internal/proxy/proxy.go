@@ -311,6 +311,7 @@ type Config struct {
 	SessionStoreTTL            time.Duration
 	RouterID                   string // Human-readable name for this router (shown in /trace); defaults to hostname
 	DrainUpstreamOnAbort       bool   // When true, keep reading upstream after client disconnect to get real usage (default: false)
+	ResponseHeaderMode         config.ResponseHeaderMode
 
 	BudgetReserver                   *budget.Reserver      // Atomic Redis budget reservation (nil if Redis disabled — feature is a no-op)
 	KeyRateLimiter                   *ratelimit.RPMLimiter // Key/user/team/org RPM/TPM enforcement (nil if Redis disabled)
@@ -342,6 +343,7 @@ type Proxy struct {
 	sessionStore                     *SessionStore              // Optional: session-sticky credential routing
 	stickyAutoCacheCtrl              bool                       // Auto-inject Anthropic cache_control when session is active
 	drainUpstreamOnAbort             bool                       // Keep reading upstream after client disconnect to get real usage chunk
+	responseHeaderMode               config.ResponseHeaderMode
 	bedrockDailyQuota                *bedrockDailyQuotaTracker
 	budgetReserver                   *budget.Reserver
 	keyRateLimiter                   *ratelimit.RPMLimiter
@@ -411,6 +413,7 @@ func New(cfg *Config) *Proxy {
 		sessionStore:                     sessionStore,
 		stickyAutoCacheCtrl:              cfg.SessionStickyAutoCacheCtrl,
 		drainUpstreamOnAbort:             cfg.DrainUpstreamOnAbort,
+		responseHeaderMode:               cfg.ResponseHeaderMode,
 		bedrockDailyQuota:                newBedrockDailyQuotaTracker(),
 		budgetReserver:                   cfg.BudgetReserver,
 		keyRateLimiter:                   cfg.KeyRateLimiter,
@@ -956,12 +959,10 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 						p.logger.WarnContext(r.Context(), "Failed to close proxy streaming response body", "error", closeErr)
 					}
 				}()
-				copyResponseHeaders(w, proxyResp.Headers, cred)
-				if logCtx.IsProxyRequest && logCtx.ActualCredentialName != "" {
-					w.Header().Set("X-Credential-Name", logCtx.ActualCredentialName)
-				}
+				p.copyResponseHeaders(w, proxyResp.Headers, cred, false)
+				p.setCredentialResponseHeader(w, logCtx, logCtx.ActualCredentialName)
 				if proxyResp.StatusCode >= 200 && proxyResp.StatusCode < 300 {
-					markAudioUsageExcludesCached(w.Header())
+					p.markAudioUsageExcludesCachedForClient(w, logCtx)
 				}
 				w.WriteHeader(proxyResp.StatusCode)
 				logCtx.PromptTokensEstimate = estimatePromptTokensForModel(body, realModelID)
@@ -984,12 +985,10 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 						p.logger.WarnContext(r.Context(), "Failed to close proxy streaming response body", "error", closeErr)
 					}
 				}()
-				copyResponseHeaders(w, proxyResp.Headers, cred)
-				if logCtx.IsProxyRequest && logCtx.ActualCredentialName != "" {
-					w.Header().Set("X-Credential-Name", logCtx.ActualCredentialName)
-				}
+				p.copyResponseHeaders(w, proxyResp.Headers, cred, false)
+				p.setCredentialResponseHeader(w, logCtx, logCtx.ActualCredentialName)
 				if proxyResp.StatusCode >= 200 && proxyResp.StatusCode < 300 {
-					markAudioUsageContract(w.Header(), tokenUsageOptions.AudioInputIncludesCachedAudio)
+					p.markAudioUsageContractForClient(w, logCtx, tokenUsageOptions.AudioInputIncludesCachedAudio)
 				}
 				w.WriteHeader(proxyResp.StatusCode)
 				logCtx.PromptTokensEstimate = estimatePromptTokensForModel(body, realModelID)
@@ -1005,12 +1004,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 					streamCompleted = true
 				}
 			} else {
-				if logCtx.IsProxyRequest && logCtx.ActualCredentialName != "" {
-					w.Header().Set("X-Credential-Name", logCtx.ActualCredentialName)
-				}
-				if proxyResp.StatusCode >= 200 && proxyResp.StatusCode < 300 {
-					markAudioUsageContract(w.Header(), tokenUsageOptions.AudioInputIncludesCachedAudio)
-				}
+				p.setCredentialResponseHeader(w, logCtx, logCtx.ActualCredentialName)
 				tokenizerModelID := realModelID
 				if tokenizerModelID == "" {
 					tokenizerModelID = modelID
@@ -1101,13 +1095,8 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 
-			if logCtx.IsProxyRequest && logCtx.ActualCredentialName != "" {
-				w.Header().Set("X-Credential-Name", logCtx.ActualCredentialName)
-			}
-			if proxyResp.StatusCode >= 200 && proxyResp.StatusCode < 300 {
-				markAudioUsageContract(w.Header(), tokenUsageOptions.AudioInputIncludesCachedAudio)
-			}
-			p.writeProxyResponse(w, proxyResp, r, cred, modelID, logCtx)
+			p.setCredentialResponseHeader(w, logCtx, logCtx.ActualCredentialName)
+			p.writeProxyResponse(w, proxyResp, r, cred, modelID, logCtx, tokenUsageOptions)
 			tokens := extractTokensFromResponse(string(proxyResp.Body), config.ProviderTypeOpenAI)
 			if tokens > 0 {
 				p.rateLimiter.ConsumeTokens(cred.Name, tokens)
@@ -1828,17 +1817,15 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Copy response headers (skip hop-by-hop headers and transformation-related headers)
-	copyResponseHeaders(w, resp.Header, cred)
+	p.copyResponseHeaders(w, resp.Header, cred, false)
 	switch outgoingAudioUsageContract {
 	case audioUsageContractExcludesCached:
-		markAudioUsageExcludesCached(w.Header())
+		p.markAudioUsageExcludesCachedForClient(w, logCtx)
 	case audioUsageContractIncludesCached:
-		markAudioUsageIncludesCached(w.Header())
+		p.markAudioUsageIncludesCachedForClient(w, logCtx)
 	}
 	// Return credential name only to internal proxy clients, not to end users.
-	if logCtx.IsProxyRequest {
-		w.Header().Set("X-Credential-Name", cred.Name)
-	}
+	p.setCredentialResponseHeader(w, logCtx, cred.Name)
 
 	rc := http.NewResponseController(w)
 

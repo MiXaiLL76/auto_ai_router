@@ -104,6 +104,7 @@ type TestProxyConfig struct {
 	MaxProviderRetries   int
 	MaxFallbackAttempts  int
 	DrainUpstreamOnAbort bool
+	ResponseHeaderMode   config.ResponseHeaderMode
 }
 
 // NewTestProxyBuilder creates a builder with default configuration.
@@ -236,6 +237,11 @@ func (b *TestProxyBuilder) WithDrainUpstreamOnAbort(v bool) *TestProxyBuilder {
 	return b
 }
 
+func (b *TestProxyBuilder) WithResponseHeaderMode(mode config.ResponseHeaderMode) *TestProxyBuilder {
+	b.config.ResponseHeaderMode = mode
+	return b
+}
+
 // Build creates and returns a Proxy instance with the configured settings.
 func (b *TestProxyBuilder) Build() *Proxy {
 	if b.config.RateLimiter == nil {
@@ -265,6 +271,7 @@ func (b *TestProxyBuilder) Build() *Proxy {
 		MaxProviderRetries:   b.config.MaxProviderRetries,
 		MaxFallbackAttempts:  b.config.MaxFallbackAttempts,
 		DrainUpstreamOnAbort: b.config.DrainUpstreamOnAbort,
+		ResponseHeaderMode:   b.config.ResponseHeaderMode,
 	})
 }
 

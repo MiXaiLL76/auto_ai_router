@@ -63,6 +63,7 @@ monitoring:
 	assert.Equal(t, "info", cfg.Server.LoggingLevel)
 	assert.Equal(t, "sk-test-master-key", cfg.Server.MasterKey)
 	assert.Equal(t, 50, cfg.Server.DefaultModelsRPM)
+	assert.Equal(t, ResponseHeaderModePassthrough, cfg.Server.ResponseHeaders.Mode)
 
 	// Validate fail2ban config
 	assert.Equal(t, 3, cfg.Fail2Ban.MaxAttempts)
@@ -78,6 +79,103 @@ monitoring:
 	// Validate monitoring
 	assert.True(t, cfg.Monitoring.PrometheusEnabled)
 	assert.Equal(t, "/health", cfg.Monitoring.HealthCheckPath)
+}
+
+func TestLoad_ResponseHeadersAllowlist(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	configContent := `
+server:
+  master_key: sk-test
+  response_headers:
+    mode: allowlist
+credentials:
+  - name: provider
+    type: openai
+    api_key: sk-provider
+    base_url: https://api.openai.com
+    rpm: 10
+`
+	require.NoError(t, os.WriteFile(configPath, []byte(configContent), 0600))
+
+	cfg, err := Load(configPath)
+
+	require.NoError(t, err)
+	assert.Equal(t, ResponseHeaderModeAllowlist, cfg.Server.ResponseHeaders.Mode)
+}
+
+func TestLoad_ResponseHeadersModeFromEnvironment(t *testing.T) {
+	t.Setenv("TEST_RESPONSE_HEADER_MODE", "ALLOWLIST")
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	configContent := `
+server:
+  master_key: sk-test
+  response_headers:
+    mode: os.environ/TEST_RESPONSE_HEADER_MODE
+credentials:
+  - name: provider
+    type: openai
+    api_key: sk-provider
+    base_url: https://api.openai.com
+    rpm: 10
+`
+	require.NoError(t, os.WriteFile(configPath, []byte(configContent), 0600))
+
+	cfg, err := Load(configPath)
+
+	require.NoError(t, err)
+	assert.Equal(t, ResponseHeaderModeAllowlist, cfg.Server.ResponseHeaders.Mode)
+}
+
+func TestLoad_ResponseHeadersModeFromUnsetEnvironment(t *testing.T) {
+	const envName = "UNSET_RESPONSE_HEADER_MODE"
+	previous, existed := os.LookupEnv(envName)
+	require.NoError(t, os.Unsetenv(envName))
+	t.Cleanup(func() {
+		if existed {
+			_ = os.Setenv(envName, previous)
+		}
+	})
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	configContent := `
+server:
+  master_key: sk-test
+  response_headers:
+    mode: os.environ/UNSET_RESPONSE_HEADER_MODE
+credentials:
+  - name: provider
+    type: openai
+    api_key: sk-provider
+    base_url: https://api.openai.com
+    rpm: 10
+`
+	require.NoError(t, os.WriteFile(configPath, []byte(configContent), 0600))
+
+	_, err := Load(configPath)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "UNSET_RESPONSE_HEADER_MODE")
+}
+
+func TestLoad_InvalidResponseHeadersMode(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	configContent := `
+server:
+  master_key: sk-test
+  response_headers:
+    mode: denylist
+credentials:
+  - name: provider
+    type: openai
+    api_key: sk-provider
+    base_url: https://api.openai.com
+    rpm: 10
+`
+	require.NoError(t, os.WriteFile(configPath, []byte(configContent), 0600))
+
+	_, err := Load(configPath)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "response_headers.mode")
 }
 
 func TestCredentialConfig_UnmarshalScopes(t *testing.T) {
