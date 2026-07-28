@@ -244,10 +244,10 @@ func TestChatToResponse_Usage(t *testing.T) {
 			"prompt_tokens": 100,
 			"completion_tokens": 50,
 			"total_tokens": 150,
-			"prompt_tokens_details": {"cached_tokens": 20},
-			"completion_tokens_details": {"reasoning_tokens": 10}
-		}
-	}`
+				"prompt_tokens_details": {"cached_tokens": 20, "cached_audio_tokens": 5, "audio_tokens": 12, "cache_creation_tokens": 15, "cache_creation_token_details": {"ephemeral_5m_input_tokens": 4, "ephemeral_1h_input_tokens": 11}},
+				"completion_tokens_details": {"reasoning_tokens": 10, "audio_tokens": 3}
+			}
+		}`
 
 	result, err := ChatToResponse([]byte(ccBody))
 	require.NoError(t, err)
@@ -261,8 +261,73 @@ func TestChatToResponse_Usage(t *testing.T) {
 	assert.Equal(t, 150, resp.Usage.TotalTokens)
 	assert.NotNil(t, resp.Usage.InputTokensDetails)
 	assert.Equal(t, 20, resp.Usage.InputTokensDetails.CachedTokens)
+	assert.Equal(t, 5, resp.Usage.InputTokensDetails.CachedAudioTokens)
+	assert.Equal(t, 7, resp.Usage.InputTokensDetails.AudioTokens)
+	assert.Equal(t, 15, resp.Usage.InputTokensDetails.CacheCreationTokens)
+	require.NotNil(t, resp.Usage.InputTokensDetails.CacheCreationTokenDetails)
+	assert.Equal(t, 4, resp.Usage.InputTokensDetails.CacheCreationTokenDetails.Ephemeral5mInputTokens)
+	assert.Equal(t, 11, resp.Usage.InputTokensDetails.CacheCreationTokenDetails.Ephemeral1hInputTokens)
 	assert.NotNil(t, resp.Usage.OutputTokensDetails)
 	assert.Equal(t, 10, resp.Usage.OutputTokensDetails.ReasoningTokens)
+	assert.Equal(t, 3, resp.Usage.OutputTokensDetails.AudioTokens)
+}
+
+func TestChatToResponse_NegativeCachedTokensDoNotIncreaseAudioInput(t *testing.T) {
+	ccBody := `{
+		"id": "chatcmpl-abc123",
+		"object": "chat.completion",
+		"created": 1700000000,
+		"model": "gpt-4o",
+		"choices": [{
+			"index": 0,
+			"message": {"role": "assistant", "content": "hi"},
+			"finish_reason": "stop"
+		}],
+		"usage": {
+			"prompt_tokens": 200,
+			"completion_tokens": 1,
+			"total_tokens": 201,
+			"prompt_tokens_details": {"cached_tokens": -80, "cached_audio_tokens": 40, "audio_tokens": 100}
+		}
+	}`
+
+	result, err := ChatToResponse([]byte(ccBody))
+	require.NoError(t, err)
+
+	var resp Response
+	require.NoError(t, json.Unmarshal(result, &resp))
+
+	require.NotNil(t, resp.Usage)
+	assert.Equal(t, 0, resp.Usage.InputTokensDetails.CachedTokens)
+	assert.Equal(t, 0, resp.Usage.InputTokensDetails.CachedAudioTokens)
+	assert.Equal(t, 100, resp.Usage.InputTokensDetails.AudioTokens)
+}
+
+func TestChatToResponse_PreservesNormalizedAudioInput(t *testing.T) {
+	ccBody := `{
+		"id":"chatcmpl-normalized",
+		"model":"gpt-4o",
+		"choices":[{"message":{"role":"assistant","content":"hi"},"finish_reason":"stop"}],
+		"usage":{
+			"prompt_tokens":200,
+			"completion_tokens":1,
+			"total_tokens":201,
+			"prompt_tokens_details":{"cached_tokens":80,"cached_audio_tokens":40,"audio_tokens":60}
+		}
+	}`
+
+	result, err := ChatToResponse(
+		[]byte(ccBody),
+		WithAudioInputIncludesCachedAudio(false),
+	)
+	require.NoError(t, err)
+
+	var resp Response
+	require.NoError(t, json.Unmarshal(result, &resp))
+	require.NotNil(t, resp.Usage)
+	assert.Equal(t, 80, resp.Usage.InputTokensDetails.CachedTokens)
+	assert.Equal(t, 40, resp.Usage.InputTokensDetails.CachedAudioTokens)
+	assert.Equal(t, 60, resp.Usage.InputTokensDetails.AudioTokens)
 }
 
 func TestChatToResponse_GeminiImageAndImageTokenUsage(t *testing.T) {

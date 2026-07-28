@@ -338,6 +338,74 @@ func TestTryFallbackProxy_Success(t *testing.T) {
 	assert.Equal(t, "gpt-4", respData["model"])
 }
 
+func TestWriteFallbackResponseUsesAIRUsageContractForNonStreaming(t *testing.T) {
+	prx := NewTestProxyBuilder().Build()
+	body := []byte(`{"id":"chatcmpl-fallback","object":"chat.completion","model":"gpt-4o-audio","choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{"prompt_tokens":200,"completion_tokens":1,"prompt_tokens_details":{"cached_tokens":80,"cached_audio_tokens":40,"audio_tokens":60}}}`)
+	proxyResp := &ProxyResponse{
+		StatusCode: http.StatusOK,
+		Headers: http.Header{
+			"Content-Type":            []string{"application/json"},
+			HeaderAIRUsageAudioTokens: []string{airUsageAudioTokensExcludeCached},
+		},
+		Body: body,
+	}
+	fallbackCred := &config.CredentialConfig{
+		Name:    "fallback-air",
+		Type:    config.ProviderTypeAIR,
+		BaseURL: "http://fallback-air.local",
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"gpt-4o-audio"}`))
+	w := httptest.NewRecorder()
+	logCtx := &RequestLogContext{RequestID: "req-fallback", Logged: true}
+
+	success, reason := prx.writeFallbackResponse(
+		w, req, proxyResp, fallbackCred, "gpt-4o-audio", "primary", logCtx, time.Now().UTC(),
+	)
+
+	require.True(t, success)
+	assert.Empty(t, reason)
+	require.NotNil(t, logCtx.TokenUsage)
+	assert.Equal(t, 200, logCtx.TokenUsage.PromptTokens)
+	assert.Equal(t, 80, logCtx.TokenUsage.CachedInputTokens)
+	assert.Equal(t, 40, logCtx.TokenUsage.CachedAudioInputTokens)
+	assert.Equal(t, 60, logCtx.TokenUsage.AudioInputTokens)
+}
+
+func TestWriteFallbackResponseUsesAIRUsageContractForStreaming(t *testing.T) {
+	prx := NewTestProxyBuilder().Build()
+	stream := `data: {"choices":[],"usage":{"prompt_tokens":200,"completion_tokens":1,"prompt_tokens_details":{"cached_tokens":80,"cached_audio_tokens":40,"audio_tokens":60}}}` + "\n\n" +
+		"data: [DONE]\n\n"
+	proxyResp := &ProxyResponse{
+		StatusCode: http.StatusOK,
+		Headers: http.Header{
+			"Content-Type":            []string{"text/event-stream"},
+			HeaderAIRUsageAudioTokens: []string{airUsageAudioTokensExcludeCached},
+		},
+		StreamBody:  io.NopCloser(strings.NewReader(stream)),
+		IsStreaming: true,
+	}
+	fallbackCred := &config.CredentialConfig{
+		Name:    "fallback-air",
+		Type:    config.ProviderTypeAIR,
+		BaseURL: "http://fallback-air.local",
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"gpt-4o-audio"}`))
+	w := httptest.NewRecorder()
+	logCtx := &RequestLogContext{RequestID: "req-fallback-stream", Logged: true}
+
+	success, reason := prx.writeFallbackResponse(
+		w, req, proxyResp, fallbackCred, "gpt-4o-audio", "primary", logCtx, time.Now().UTC(),
+	)
+
+	require.True(t, success)
+	assert.Empty(t, reason)
+	require.NotNil(t, logCtx.TokenUsage)
+	assert.Equal(t, 200, logCtx.TokenUsage.PromptTokens)
+	assert.Equal(t, 80, logCtx.TokenUsage.CachedInputTokens)
+	assert.Equal(t, 40, logCtx.TokenUsage.CachedAudioInputTokens)
+	assert.Equal(t, 60, logCtx.TokenUsage.AudioInputTokens)
+}
+
 func TestTryFallbackProxy_NoFallbackAvailable(t *testing.T) {
 	// Build proxy with only primary credential (no fallback)
 	prx := NewTestProxyBuilder().

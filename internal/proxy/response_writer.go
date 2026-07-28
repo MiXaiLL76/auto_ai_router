@@ -230,6 +230,9 @@ func (p *Proxy) writeProxyResponse(w http.ResponseWriter, resp *ProxyResponse, c
 		if shouldSkipResponseHeaderForClient(key, cred) {
 			continue
 		}
+		if strings.EqualFold(key, HeaderAIRUsageAudioTokens) && w.Header().Get(HeaderAIRUsageAudioTokens) != "" {
+			continue
+		}
 		if responseBodyChanged && isRepresentationIntegrityHeader(key) {
 			continue
 		}
@@ -270,6 +273,7 @@ func (p *Proxy) writeProxyStreamingResponseWithTokens(
 	modelID string,
 	tokenizerModelID string,
 	logCtx *RequestLogContext,
+	usageOptions ...converter.TokenUsageExtractionOptions,
 ) (*converter.TokenUsage, error) {
 	if resp == nil || resp.StreamBody == nil {
 		return nil, nil
@@ -303,6 +307,9 @@ func (p *Proxy) writeProxyStreamingResponseWithTokens(
 		if shouldSkipResponseHeaderForClient(key, cred) {
 			continue
 		}
+		if strings.EqualFold(key, HeaderAIRUsageAudioTokens) && w.Header().Get(HeaderAIRUsageAudioTokens) != "" {
+			continue
+		}
 		if (normalizeStream || normalizeResponseModel) && isRepresentationIntegrityHeader(key) {
 			continue
 		}
@@ -316,13 +323,17 @@ func (p *Proxy) writeProxyStreamingResponseWithTokens(
 
 	var lastUsage *converter.TokenUsage
 	completion := newCompletionTokenAccumulator(tokenizerModelID)
+	tokenUsageOptions := converter.TokenUsageExtractionOptions{AudioInputIncludesCachedAudio: true}
+	if len(usageOptions) > 0 {
+		tokenUsageOptions = usageOptions[0]
+	}
 	detectProviderStreamError := resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices
 	providerStreamError := &proxyStreamErrorCapture{}
 	onChunk := func(chunk []byte) {
 		if detectProviderStreamError {
 			providerStreamError.Observe(chunk)
 		}
-		if usage := extractTokenUsageFromStreamingChunk(string(chunk)); usage != nil {
+		if usage := extractTokenUsageFromStreamingChunkWithOptions(string(chunk), tokenUsageOptions); usage != nil {
 			lastUsage = usage
 			if logCtx != nil {
 				logCtx.UsageSource = "provider"

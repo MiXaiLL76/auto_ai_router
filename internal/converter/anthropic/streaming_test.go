@@ -228,6 +228,14 @@ func TestTransformAnthropicStreamToOpenAIPreservesUsagePresenceAndExplicitZeroes
 			wantUsage: openai.OpenAIUsage{PromptTokens: 12, CompletionTokens: 7, TotalTokens: 19},
 		},
 		{
+			name: "explicit terminal cache zero clears stale ttl breakdown",
+			usageEvents: []string{
+				`data: {"type":"message_start","message":{"id":"msg_cache_zero_ttl","usage":{"input_tokens":12,"cache_creation_input_tokens":20,"cache_read_input_tokens":3,"cache_creation":{"ephemeral_5m_input_tokens":5,"ephemeral_1h_input_tokens":15}}}}`,
+				`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":7,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}`,
+			},
+			wantUsage: openai.OpenAIUsage{PromptTokens: 12, CompletionTokens: 7, TotalTokens: 19},
+		},
+		{
 			name: "usage event can precede finish event",
 			usageEvents: []string{
 				`data: {"type":"message_start","message":{"id":"msg_split_usage","usage":{"input_tokens":12}}}`,

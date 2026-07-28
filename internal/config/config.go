@@ -29,6 +29,7 @@ const (
 	ProviderTypeProMan    ProviderType = "proman"
 	ProviderTypeBedrock   ProviderType = "bedrock"
 	ProviderTypeProxy     ProviderType = "proxy"
+	ProviderTypeAIR       ProviderType = "air"
 )
 
 // LogValue implements slog.LogValuer so structured log backends (e.g. the
@@ -41,16 +42,25 @@ func (p ProviderType) LogValue() slog.Value {
 // IsValid checks if the provider type is valid
 func (p ProviderType) IsValid() bool {
 	switch p {
-	case ProviderTypeOpenAI, ProviderTypeVertexAI, ProviderTypeGemini, ProviderTypeAnthropic, ProviderTypeCometAPI, ProviderTypeProMan, ProviderTypeBedrock, ProviderTypeProxy:
+	case ProviderTypeOpenAI, ProviderTypeVertexAI, ProviderTypeGemini, ProviderTypeAnthropic, ProviderTypeCometAPI, ProviderTypeProMan, ProviderTypeBedrock, ProviderTypeProxy, ProviderTypeAIR:
 		return true
 	}
 	return false
+}
+
+// IsProxyLike reports whether the provider uses AIR's proxy forwarding path:
+// OpenAI-compatible request forwarding, remote /health model discovery, and
+// proxy-chain fallback semantics.
+func (p ProviderType) IsProxyLike() bool {
+	return p == ProviderTypeProxy || p == ProviderTypeAIR
 }
 
 func normalizeProviderType(raw string) ProviderType {
 	switch strings.ToLower(strings.TrimSpace(raw)) {
 	case "comet-api", "comet_api":
 		return ProviderTypeCometAPI
+	case "aar", "auto-ai-router", "auto_ai_router":
+		return ProviderTypeAIR
 	case "pro-man", "pro_man":
 		return ProviderTypeProMan
 	default:
@@ -613,7 +623,7 @@ type CredentialConfig struct {
 	CredentialsFile string `yaml:"credentials_file,omitempty"`
 	CredentialsJSON string `yaml:"credentials_json,omitempty"`
 
-	// Proxy specific fields
+	// Proxy/AIR remote-router specific fields
 	IsFallback bool `yaml:"is_fallback,omitempty"`
 }
 
@@ -630,6 +640,10 @@ func (c CredentialConfig) ScopeExpression() *scope.Expression {
 		scope.FromScopes(c.Scopes, c.DeniedScopes),
 		providerExpression,
 	)
+}
+
+func (c CredentialConfig) IsProxyLike() bool {
+	return c.Type.IsProxyLike()
 }
 
 // SameProviderIdentity reports whether learned provider metadata can be reused.
@@ -669,6 +683,13 @@ func (c *CredentialConfig) UnmarshalYAML(value *yaml.Node) error {
 	var temp tempConfig
 	if err := value.Decode(&temp); err != nil {
 		return err
+	}
+	if hasYAMLKey(value, "proxy_usage_format") {
+		name := resolveEnvString(temp.Name)
+		if name == "" {
+			name = "<unnamed>"
+		}
+		return fmt.Errorf("credential %s: proxy_usage_format is no longer supported; use type: air for Auto AI Router upstreams or type: proxy for generic OpenAI-compatible APIs", name)
 	}
 
 	// Resolve string fields
@@ -717,6 +738,18 @@ func (c *CredentialConfig) UnmarshalYAML(value *yaml.Node) error {
 	}
 
 	return nil
+}
+
+func hasYAMLKey(value *yaml.Node, key string) bool {
+	if value == nil || value.Kind != yaml.MappingNode {
+		return false
+	}
+	for i := 0; i+1 < len(value.Content); i += 2 {
+		if value.Content[i].Value == key {
+			return true
+		}
+	}
+	return false
 }
 
 type MonitoringConfig struct {
@@ -1535,7 +1568,7 @@ func (c *Config) Validate() error {
 
 		// Validate provider type
 		if !cred.Type.IsValid() {
-			return fmt.Errorf("credential %s: invalid type: %s (must be 'openai', 'vertex-ai', 'gemini', 'anthropic', 'cometapi', 'proman', 'bedrock', or 'proxy')", cred.Name, cred.Type)
+			return fmt.Errorf("credential %s: invalid type: %s (must be 'openai', 'vertex-ai', 'gemini', 'anthropic', 'cometapi', 'proman', 'bedrock', 'proxy', or 'air')", cred.Name, cred.Type)
 		}
 		if cred.AuthType != "" && cred.AuthType != "bearer" && cred.AuthType != "x-api-key" {
 			return fmt.Errorf("credential %s: invalid auth_type: %s (must be 'bearer' or 'x-api-key')", cred.Name, cred.AuthType)
@@ -1543,16 +1576,16 @@ func (c *Config) Validate() error {
 
 		// Validate by provider type
 		switch cred.Type {
-		case ProviderTypeProxy:
-			// base_url is required for proxy
+		case ProviderTypeProxy, ProviderTypeAIR:
+			// base_url is required for remote router/proxy credentials
 			if cred.BaseURL == "" {
-				return fmt.Errorf("credential %s: base_url is required for proxy type", cred.Name)
+				return fmt.Errorf("credential %s: base_url is required for %s type", cred.Name, cred.Type)
 			}
 			// Validate base_url is a valid URL
 			if err := validateBaseURL(cred.Name, cred.BaseURL); err != nil {
 				return err
 			}
-			// api_key is optional for proxy
+			// api_key is optional for proxy/AIR
 
 		case ProviderTypeVertexAI:
 			// For Vertex AI, project_id and location are required

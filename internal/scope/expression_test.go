@@ -113,3 +113,36 @@ func TestNormalizeExpression_TooManyAlternativesFailsClosed(t *testing.T) {
 		t.Fatal("oversized expression must not expose a route")
 	}
 }
+
+func TestOr_DeduplicatesBeforeAlternativeLimit(t *testing.T) {
+	expressions := make([]*Expression, maxExpressionAlternatives+1)
+	for i := range expressions {
+		expressions[i] = FromScopes([]string{"team-a"}, nil)
+	}
+
+	expression := Or(expressions...)
+	if !NewContext([]string{"team-a"}, nil).AllowsExpression(expression) {
+		t.Fatal("duplicate alternatives must not make an OR expression fail closed")
+	}
+	if len(expression.Alternatives) != 1 {
+		t.Fatalf("expected one deduplicated alternative, got %d", len(expression.Alternatives))
+	}
+}
+
+func TestOr_UnrestrictedAlternativeSimplifiesOversizedExpression(t *testing.T) {
+	expressions := make([]*Expression, 0, maxExpressionAlternatives+2)
+	for i := 0; i <= maxExpressionAlternatives; i++ {
+		expressions = append(expressions, FromScopes([]string{fmt.Sprintf("scope-%d", i)}, nil))
+	}
+	// Keep the unrestricted path last to prove that the limit is applied only
+	// after semantic simplification, independently of map/input order.
+	expressions = append(expressions, FromScopes(nil, nil))
+
+	expression := Or(expressions...)
+	if !PublicContext().AllowsExpression(expression) {
+		t.Fatal("an unrestricted alternative must keep the entire OR expression unrestricted")
+	}
+	if len(expression.Alternatives) != 1 || !isUnrestrictedAlternative(expression.Alternatives[0]) {
+		t.Fatal("oversized expression must simplify to one unrestricted alternative")
+	}
+}

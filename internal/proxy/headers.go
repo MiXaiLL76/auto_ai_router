@@ -53,6 +53,12 @@ func isHopByHopHeader(key string) bool {
 	return hopByHopHeaders[http.CanonicalHeaderKey(key)]
 }
 
+func isInternalAIRRequestHeader(key string) bool {
+	return strings.EqualFold(key, HeaderAIRProxyClient) ||
+		strings.EqualFold(key, HeaderLegacyAIRProxyClient) ||
+		strings.EqualFold(key, HeaderAIRUsageAudioTokens)
+}
+
 func isProxyOwnedResponseHeader(key string) bool {
 	return strings.EqualFold(key, accelBufferingHeader)
 }
@@ -91,8 +97,8 @@ func copyRequestHeaders(dst *http.Request, src *http.Request, apiKey string) {
 		if key == "Accept-Encoding" {
 			continue
 		}
-		// Strip internal proxy marker — must not be forwarded to the actual provider.
-		if key == "X-Aar-Proxy-Client" {
+		// Strip internal AIR markers — they must not be forwarded to the actual provider.
+		if isInternalAIRRequestHeader(key) {
 			continue
 		}
 		for _, value := range values {
@@ -121,8 +127,8 @@ func copyHeadersSkipAuth(dst *http.Request, src *http.Request) {
 		if key == "Accept-Encoding" {
 			continue
 		}
-		// Strip internal proxy marker — must not be forwarded to the actual provider.
-		if key == "X-Aar-Proxy-Client" {
+		// Strip internal AIR markers — they must not be forwarded to the actual provider.
+		if isInternalAIRRequestHeader(key) {
 			continue
 		}
 		for _, value := range values {
@@ -157,6 +163,9 @@ func shouldSkipResponseHeaderForClient(key string, cred *config.CredentialConfig
 	// has already decompressed gzip/deflate bodies when Content-Encoding is present.
 	switch canonical {
 	case "Content-Length", "Content-Encoding", "Transfer-Encoding", "X-Credential-Name":
+		return true
+	}
+	if strings.EqualFold(canonical, HeaderAIRUsageAudioTokens) && (cred == nil || !cred.IsProxyLike()) {
 		return true
 	}
 	if promanutils.ShouldSanitizeUpstreamSurface(cred) && promanutils.IsProviderInternalResponseHeader(canonical) {

@@ -95,7 +95,7 @@ func (p *Proxy) HealthCheckScoped(visibility scope.Context) (bool, *httputil.Pro
 	for _, cred := range creds {
 		limitRPM := cred.RPM
 		limitTPM := cred.TPM
-		if cred.Type == config.ProviderTypeProxy {
+		if cred.IsProxyLike() {
 			rateLimiterRPM := p.rateLimiter.GetLimitRPM(cred.Name)
 			rateLimiterTPM := p.rateLimiter.GetLimitTPM(cred.Name)
 			if rateLimiterRPM != -1 {

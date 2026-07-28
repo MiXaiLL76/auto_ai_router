@@ -3,6 +3,8 @@ package openai
 import (
 	"encoding/json"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
 )
 
 // helper: unmarshal body into map for assertions
@@ -585,41 +587,32 @@ func TestReplaceModelInBody(t *testing.T) {
 
 // --- ConvertWebSearchTools tests ---
 
-// TestConvertWebSearchTools_WebSearchPassthrough verifies that web_search_preview
-// is passed through as-is in the tools array for any model.
-func TestConvertWebSearchTools_WebSearchPassthrough(t *testing.T) {
-	for _, model := range []string{"gpt-4o-search-preview", "gpt-4o-mini", "gpt-5-mini", "gpt-4o"} {
-		t.Run(model, func(t *testing.T) {
-			body := []byte(`{"model":"` + model + `","tools":[{"type":"web_search_preview"}],"tool_choice":"auto"}`)
-			result := bodyToMap(t, ConvertWebSearchTools(body))
+func TestConvertWebSearchTools_SearchPreviewConvertsToOptions(t *testing.T) {
+	body := []byte(`{
+		"model":"gpt-4o-search-preview",
+		"tools":[{
+			"type":"web_search_preview",
+			"search_context_size":"high",
+			"user_location":{"type":"approximate","country":"RU"}
+		}],
+		"tool_choice":"auto"
+	}`)
+	result := bodyToMap(t, ConvertWebSearchTools(body))
 
-			if _, ok := result["web_search_options"]; ok {
-				t.Error("web_search_options must NOT be added (no conversion)")
-			}
-			tools, ok := result["tools"].([]interface{})
-			if !ok {
-				t.Fatal("tools should remain in the array")
-			}
-			if len(tools) != 1 {
-				t.Errorf("expected 1 tool, got %d", len(tools))
-			}
-			toolMap := tools[0].(map[string]interface{})
-			if toolMap["type"] != "web_search_preview" {
-				t.Errorf("expected web_search_preview tool, got %v", toolMap["type"])
-			}
-		})
-	}
+	assert.NotContains(t, result, "tools")
+	assert.NotContains(t, result, "tool_choice")
+	options := result["web_search_options"].(map[string]interface{})
+	assert.Equal(t, "high", options["search_context_size"])
+	assert.Equal(t, "RU", options["user_location"].(map[string]interface{})["country"])
 }
 
-// TestConvertWebSearchTools_WebSearchWithFunctions verifies mixed tool arrays:
-// both web_search_preview and function tools are kept.
+// TestConvertWebSearchTools_WebSearchWithFunctions verifies that conversion
+// removes the built-in tool but preserves ordinary function tools.
 func TestConvertWebSearchTools_WebSearchWithFunctions(t *testing.T) {
 	body := []byte(`{"model":"gpt-4o-search-preview","tools":[{"type":"web_search_preview"},{"type":"function","function":{"name":"get_weather"}}],"tool_choice":"auto"}`)
 	result := bodyToMap(t, ConvertWebSearchTools(body))
 
-	if _, ok := result["web_search_options"]; ok {
-		t.Error("web_search_options must NOT be added")
-	}
+	assert.Contains(t, result, "web_search_options")
 	if _, ok := result["tool_choice"]; !ok {
 		t.Error("tool_choice should remain")
 	}
@@ -627,13 +620,15 @@ func TestConvertWebSearchTools_WebSearchWithFunctions(t *testing.T) {
 	if !ok {
 		t.Fatal("tools should be an array")
 	}
-	if len(tools) != 2 {
-		t.Errorf("expected 2 tools (web_search_preview + function), got %d", len(tools))
+	if len(tools) != 1 {
+		t.Errorf("expected one function tool, got %d", len(tools))
 	}
+	assert.Equal(t, "function", tools[0].(map[string]interface{})["type"])
 }
 
-// TestConvertWebSearchTools_NonSearchModelWithFunctions: web_search_preview and
-// function tools are both kept regardless of model.
+// TestConvertWebSearchTools_NonSearchModelWithFunctions documents the local
+// compatibility policy: unsupported Chat Completions models lose the built-in
+// web-search tool while ordinary functions remain available.
 func TestConvertWebSearchTools_NonSearchModelWithFunctions(t *testing.T) {
 	body := []byte(`{"model":"gpt-4o-mini","tools":[{"type":"web_search_preview"},{"type":"function","function":{"name":"get_weather"}}],"tool_choice":"auto"}`)
 	result := bodyToMap(t, ConvertWebSearchTools(body))
@@ -645,9 +640,10 @@ func TestConvertWebSearchTools_NonSearchModelWithFunctions(t *testing.T) {
 	if !ok {
 		t.Fatal("tools should remain")
 	}
-	if len(tools) != 2 {
-		t.Errorf("expected 2 tools, got %d", len(tools))
+	if len(tools) != 1 {
+		t.Errorf("expected one function tool, got %d", len(tools))
 	}
+	assert.Equal(t, "function", tools[0].(map[string]interface{})["type"])
 	if _, ok := result["tool_choice"]; !ok {
 		t.Error("tool_choice should remain")
 	}
@@ -673,22 +669,14 @@ func TestConvertWebSearchTools_NoTools(t *testing.T) {
 	}
 }
 
-// TestConvertWebSearchTools_BothWebSearchTypes: both web_search and web_search_preview
-// are passed through as-is.
+// TestConvertWebSearchTools_BothWebSearchTypes verifies that duplicate built-in
+// representations collapse into one Chat Completions options object.
 func TestConvertWebSearchTools_BothWebSearchTypes(t *testing.T) {
 	body := []byte(`{"model":"gpt-4o-mini-search-preview","tools":[{"type":"web_search"},{"type":"web_search_preview"}]}`)
 	result := bodyToMap(t, ConvertWebSearchTools(body))
 
-	if _, ok := result["web_search_options"]; ok {
-		t.Error("web_search_options must NOT be added")
-	}
-	tools, ok := result["tools"].([]interface{})
-	if !ok {
-		t.Fatal("tools should remain")
-	}
-	if len(tools) != 2 {
-		t.Errorf("expected 2 tools, got %d", len(tools))
-	}
+	assert.Contains(t, result, "web_search_options")
+	assert.NotContains(t, result, "tools")
 }
 
 func TestConvertWebSearchTools_PreservesExistingWebSearchOptions(t *testing.T) {

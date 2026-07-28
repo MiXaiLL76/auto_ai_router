@@ -48,16 +48,27 @@ type ModelPrice struct {
 	OutputCostPerReasoningToken float64 `json:"output_cost_per_reasoning_token,omitempty"`
 
 	// Cached/Prediction tokens
-	OutputCostPerCachedToken             float64 `json:"output_cost_per_cached_token,omitempty"`
-	InputCostPerCachedToken              float64 `json:"input_cost_per_cached_token,omitempty"`
-	CacheReadInputTokenCost              float64 `json:"cache_read_input_token_cost,omitempty"`
-	CacheCreationInputTokenCost          float64 `json:"cache_creation_input_token_cost,omitempty"`
-	CacheReadInputTokenCostAbove272k     float64 `json:"cache_read_input_token_cost_above_272k_tokens,omitempty"`
-	CacheCreationInputTokenCostAbove272k float64 `json:"cache_creation_input_token_cost_above_272k_tokens,omitempty"`
-	OutputCostPerPredictionToken         float64 `json:"output_cost_per_prediction_token,omitempty"`
+	OutputCostPerCachedToken                     float64 `json:"output_cost_per_cached_token,omitempty"`
+	InputCostPerCachedToken                      float64 `json:"input_cost_per_cached_token,omitempty"`
+	CacheReadInputTokenCost                      float64 `json:"cache_read_input_token_cost,omitempty"`
+	CacheCreationInputTokenCost                  float64 `json:"cache_creation_input_token_cost,omitempty"`
+	CacheReadInputTokenCostAbove200k             float64 `json:"cache_read_input_token_cost_above_200k_tokens,omitempty"`
+	CacheCreationInputTokenCostAbove200k         float64 `json:"cache_creation_input_token_cost_above_200k_tokens,omitempty"`
+	CacheCreationInputTokenCostAbove1hr          float64 `json:"cache_creation_input_token_cost_above_1hr,omitempty"`
+	CacheCreationInputTokenCostAbove1hrAbove200k float64 `json:"cache_creation_input_token_cost_above_1hr_above_200k_tokens,omitempty"`
+	CacheReadInputTokenCostAbove272k             float64 `json:"cache_read_input_token_cost_above_272k_tokens,omitempty"`
+	CacheCreationInputTokenCostAbove272k         float64 `json:"cache_creation_input_token_cost_above_272k_tokens,omitempty"`
+	CacheReadInputAudioTokenCost                 float64 `json:"cache_read_input_audio_token_cost,omitempty"`
+	OutputCostPerPredictionToken                 float64 `json:"output_cost_per_prediction_token,omitempty"`
 
 	// Vision/Images cost per image (not per token)
 	OutputCostPerImage float64 `json:"output_cost_per_image,omitempty"`
+
+	// Built-in web search tool pricing. Values are per query/call, keyed by
+	// search_context_size_low|medium|high in LiteLLM's price format.
+	SearchContextCostPerQuery map[string]float64 `json:"search_context_cost_per_query,omitempty"`
+	WebSearchBillingUnit      string             `json:"web_search_billing_unit,omitempty"`
+	LiteLLMProvider           string             `json:"litellm_provider,omitempty"`
 }
 
 // ModelPriceRegistry stores and manages cached model prices
@@ -421,6 +432,7 @@ func isNativeResponsesModel(modelID string) bool {
 var providerPassthroughDefaults = map[config.ProviderType]bool{
 	config.ProviderTypeOpenAI:    true,
 	config.ProviderTypeProxy:     true,
+	config.ProviderTypeAIR:       true,
 	config.ProviderTypeVertexAI:  false,
 	config.ProviderTypeGemini:    false,
 	config.ProviderTypeAnthropic: false,
@@ -493,7 +505,7 @@ func (m *Manager) SetCredentials(credentials []config.CredentialConfig) {
 			continue
 		}
 		delete(m.remoteModelsCache, next[i].Name)
-		if ok && next[i].Type == config.ProviderTypeProxy && next[i].ProviderScopeExpression == nil &&
+		if ok && next[i].IsProxyLike() && next[i].ProviderScopeExpression == nil &&
 			len(next[i].ProviderScopes) == 0 && len(next[i].ProviderDeniedScopes) == 0 {
 			next[i].ProviderScopeExpression = scope.FalseExpression()
 		}
@@ -954,8 +966,8 @@ func (m *Manager) LoadModelsFromConfig(credentials []config.CredentialConfig) {
 	// but it incorrectly allows non-proxy credentials (e.g. openai_backup with no models:)
 	// to match any model when static models are configured for other credentials.
 	for _, cred := range credentials {
-		if cred.Type == config.ProviderTypeProxy {
-			continue // proxy models are fetched dynamically via GetAllModels
+		if cred.IsProxyLike() {
+			continue // proxy/AIR models are fetched dynamically via GetAllModels
 		}
 		if _, exists := m.credentialModels[cred.Name]; !exists {
 			m.credentialModels[cred.Name] = []string{}
@@ -1102,7 +1114,7 @@ func (m *Manager) UpdateDBModels(dbModels []config.ModelRPMConfig, staticCreds [
 
 	// Register non-proxy credentials with no models — same logic as in LoadModelsFromConfig.
 	for _, c := range allCreds {
-		if c.Type == config.ProviderTypeProxy {
+		if c.IsProxyLike() {
 			continue
 		}
 		if _, exists := newCredentialModels[c.Name]; !exists {
@@ -1115,7 +1127,7 @@ func (m *Manager) UpdateDBModels(dbModels []config.ModelRPMConfig, staticCreds [
 	// every DB sync cycle wipes dynamically-fetched proxy model data and causes routing gaps
 	// until the next UpdateAllProxyCredentials tick.
 	for _, c := range allCreds {
-		if c.Type != config.ProviderTypeProxy {
+		if !c.IsProxyLike() {
 			continue
 		}
 		if oldModels, ok := m.credentialModels[c.Name]; ok && len(oldModels) > 0 {
@@ -1217,9 +1229,9 @@ func (m *Manager) GetAllModels() ModelsResponse {
 	modelUpdates := make(map[string][]string) // model -> credentials to add
 	successfullyFetched := make(map[string]bool)
 	for _, cred := range credentials {
-		// Skip non-proxy credentials - we only fetch models from proxy credentials
-		if cred.Type != config.ProviderTypeProxy {
-			m.logger.Debug("Skipping model fetch for non-proxy credential",
+		// Skip non-remote-router credentials - we only fetch models from proxy/AIR credentials.
+		if !cred.IsProxyLike() {
+			m.logger.Debug("Skipping model fetch for non-proxy-like credential",
 				"credential", cred.Name,
 				"type", cred.Type,
 			)
@@ -1543,7 +1555,7 @@ func (m *Manager) getAllModelsScoped(visibility scope.Context) ModelsResponse {
 	m.mu.RUnlock()
 
 	for _, cred := range credentials {
-		if cred.Type != config.ProviderTypeProxy {
+		if !cred.IsProxyLike() {
 			continue
 		}
 		remoteModels, err := m.GetRemoteModelsWithError(context.Background(), &cred)
@@ -2335,6 +2347,7 @@ var providerTypeLiteLLMPrefix = map[config.ProviderType]string{
 	config.ProviderTypeProMan:    "proman",
 	config.ProviderTypeBedrock:   "bedrock",
 	config.ProviderTypeProxy:     "openai",
+	config.ProviderTypeAIR:       "openai",
 }
 
 // GetAllModelsWithAccessGroups returns all models in "provider/model-id" format,
@@ -2584,7 +2597,7 @@ func (m *Manager) GetRemoteModels(cred *config.CredentialConfig) []Model {
 // GetRemoteModelsWithError fetches models from a remote proxy credential with caching.
 // Returns explicit error when remote fetch fails.
 func (m *Manager) GetRemoteModelsWithError(ctx context.Context, cred *config.CredentialConfig) ([]Model, error) {
-	if cred.Type != config.ProviderTypeProxy {
+	if !cred.IsProxyLike() {
 		return nil, nil
 	}
 

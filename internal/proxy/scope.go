@@ -69,7 +69,7 @@ func ScopeContextFromTokenInfo(info *dbmodels.TokenInfo) scope.Context {
 }
 
 func isLiteLLMMasterTokenInfo(info *dbmodels.TokenInfo) bool {
-	return info != nil && info.UserID == liteLLMMasterKeyIdentity
+	return info != nil && info.IsMasterKey
 }
 
 func metadataScopes(metadata map[string]interface{}, keys ...string) []string {

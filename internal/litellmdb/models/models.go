@@ -166,10 +166,12 @@ type TokenInfo struct {
 	Expires *time.Time // Expiration date (nil = no expiration)
 
 	// Access control
-	Models     []string // Key-level allowed models (empty = all)
-	UserModels []string // Personal-user allowed models (empty = all)
-	TeamModels []string // Team-level allowed models (empty = all)
-	Blocked    bool     // Is token blocked
+	Models        []string // Key-level allowed models (empty = all)
+	AllowedRoutes []string // LiteLLM virtual-key routes (empty = unrestricted)
+	UserModels    []string // Personal-user allowed models (empty = all)
+	TeamModels    []string // Team-level allowed models (empty = all)
+	Blocked       bool     // Is token blocked
+	IsMasterKey   bool     // Internal provenance marker; never populated from a verification-token row
 
 	// A dangling team fails closed instead of becoming an unrestricted empty scope.
 	TeamDangling bool

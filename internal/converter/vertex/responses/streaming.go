@@ -37,6 +37,8 @@ type vertexStreamAccumulator struct {
 
 	// Usage from the final chunk
 	usage *genai.GenerateContentResponseUsageMetadata
+	// Confirmed Google Search queries from grounding metadata.
+	webSearchQueries map[string]struct{}
 
 	// Finish reason (string)
 	finishReason string
@@ -81,10 +83,11 @@ func TransformVertexStreamToResponses(
 		responseID = generateResponseID()
 	}
 	acc := &vertexStreamAccumulator{
-		responseID: responseID,
-		model:      model,
-		createdAt:  time.Now().Unix(),
-		meta:       meta,
+		responseID:       responseID,
+		model:            model,
+		createdAt:        time.Now().Unix(),
+		meta:             meta,
+		webSearchQueries: make(map[string]struct{}),
 	}
 
 	scanner := bufio.NewScanner(reader)
@@ -117,6 +120,7 @@ func TransformVertexStreamToResponses(
 		if len(chunk.Candidates) == 0 {
 			continue
 		}
+		vertex.AddWebSearchQueries(acc.webSearchQueries, chunk.Candidates)
 
 		candidate := chunk.Candidates[0]
 		if candidate.FinishReason != genai.FinishReasonUnspecified {
@@ -621,6 +625,11 @@ func buildVertexCompletedResponse(acc *vertexStreamAccumulator) *responses.Respo
 	if acc.usage != nil {
 		usage = usageMetadataToUsage(acc.usage)
 	}
+	webSearchRequests := len(acc.webSearchQueries)
+	if usage == nil && webSearchRequests > 0 {
+		usage = &responses.Usage{}
+	}
+	setWebSearchUsage(usage, webSearchRequests)
 
 	completedAt := acc.createdAt
 	metadata := map[string]string{}

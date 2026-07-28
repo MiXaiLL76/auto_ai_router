@@ -431,9 +431,117 @@ func TestTransformAnthropicStreamToResponses_UsageTokens(t *testing.T) {
 
 	respObj := completedEvent["response"].(map[string]interface{})
 	usage := respObj["usage"].(map[string]interface{})
-	assert.Equal(t, float64(42), usage["input_tokens"])
+	assert.Equal(t, float64(52), usage["input_tokens"])
 	assert.Equal(t, float64(7), usage["output_tokens"])
-	assert.Equal(t, float64(49), usage["total_tokens"])
+	assert.Equal(t, float64(59), usage["total_tokens"])
+	details := usage["input_tokens_details"].(map[string]interface{})
+	assert.Equal(t, float64(10), details["cached_tokens"])
+}
+
+func TestTransformAnthropicStreamToResponses_CacheUsageUsesInclusiveInputTotal(t *testing.T) {
+	stream := buildAnthropicSSEStream([]map[string]interface{}{
+		{
+			"type": "message_start",
+			"message": map[string]interface{}{
+				"usage": map[string]interface{}{
+					"input_tokens": 100, "cache_read_input_tokens": 80, "cache_creation_input_tokens": 20,
+					"cache_creation": map[string]interface{}{"ephemeral_5m_input_tokens": 5, "ephemeral_1h_input_tokens": 15},
+				},
+			},
+		},
+		{
+			"type":          "content_block_start",
+			"content_block": map[string]interface{}{"type": "text"},
+		},
+		{
+			"type":  "content_block_delta",
+			"delta": map[string]interface{}{"type": "text_delta", "text": "ok"},
+		},
+		{"type": "content_block_stop"},
+		{
+			"type":  "message_delta",
+			"delta": map[string]interface{}{"stop_reason": "end_turn"},
+			"usage": map[string]interface{}{"output_tokens": 10},
+		},
+		{"type": "message_stop"},
+	})
+
+	var out bytes.Buffer
+	require.NoError(t, TransformAnthropicStreamToResponses(
+		strings.NewReader(stream), &out, "claude-opus-4-5", "", nil, nil,
+	))
+
+	events := parseSSEEvents(out.String())
+	var response map[string]interface{}
+	for _, event := range events {
+		if event["type"] == "response.completed" {
+			response = event["response"].(map[string]interface{})
+		}
+	}
+	require.NotNil(t, response)
+	usage := response["usage"].(map[string]interface{})
+	assert.Equal(t, float64(200), usage["input_tokens"])
+	assert.Equal(t, float64(210), usage["total_tokens"])
+	details := usage["input_tokens_details"].(map[string]interface{})
+	assert.Equal(t, float64(80), details["cached_tokens"])
+	assert.Equal(t, float64(20), details["cache_creation_tokens"])
+	ttlDetails := details["cache_creation_token_details"].(map[string]interface{})
+	assert.Equal(t, float64(5), ttlDetails["ephemeral_5m_input_tokens"])
+	assert.Equal(t, float64(15), ttlDetails["ephemeral_1h_input_tokens"])
+}
+
+func TestTransformAnthropicStreamToResponses_ExplicitZeroCacheDeltaClearsPreviousUsage(t *testing.T) {
+	stream := buildAnthropicSSEStream([]map[string]interface{}{
+		{
+			"type": "message_start",
+			"message": map[string]interface{}{
+				"usage": map[string]interface{}{
+					"input_tokens": 100, "cache_read_input_tokens": 80, "cache_creation_input_tokens": 20,
+					"cache_creation": map[string]interface{}{"ephemeral_5m_input_tokens": 5, "ephemeral_1h_input_tokens": 15},
+				},
+			},
+		},
+		{
+			"type":          "content_block_start",
+			"content_block": map[string]interface{}{"type": "text"},
+		},
+		{
+			"type":  "content_block_delta",
+			"delta": map[string]interface{}{"type": "text_delta", "text": "ok"},
+		},
+		{"type": "content_block_stop"},
+		{
+			"type":  "message_delta",
+			"delta": map[string]interface{}{"stop_reason": "end_turn"},
+			"usage": map[string]interface{}{
+				"output_tokens":               10,
+				"cache_read_input_tokens":     0,
+				"cache_creation_input_tokens": 0,
+			},
+		},
+		{"type": "message_stop"},
+	})
+
+	var out bytes.Buffer
+	require.NoError(t, TransformAnthropicStreamToResponses(
+		strings.NewReader(stream), &out, "claude-opus-4-5", "", nil, nil,
+	))
+
+	events := parseSSEEvents(out.String())
+	var response map[string]interface{}
+	for _, event := range events {
+		if event["type"] == "response.completed" {
+			response = event["response"].(map[string]interface{})
+		}
+	}
+	require.NotNil(t, response)
+	usage := response["usage"].(map[string]interface{})
+	assert.Equal(t, float64(100), usage["input_tokens"])
+	assert.Equal(t, float64(110), usage["total_tokens"])
+	details := usage["input_tokens_details"].(map[string]interface{})
+	assert.Equal(t, float64(0), details["cached_tokens"])
+	assert.NotContains(t, details, "cache_creation_tokens")
+	assert.NotContains(t, details, "cache_creation_token_details")
 }
 
 func TestTransformAnthropicStreamToResponses_OnComplete(t *testing.T) {

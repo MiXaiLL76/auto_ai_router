@@ -127,17 +127,31 @@ func convertAnthropicUsageToOpenAI(usage *AnthropicUsage) *openai.OpenAIUsage {
 	if usage == nil {
 		return nil
 	}
-	totalInputTokens := usage.InputTokens + usage.CacheCreationInputTokens + usage.CacheReadInputTokens
+	cacheCreationTokens, cacheCreation5mTokens, cacheCreation1hTokens := NormalizeCacheCreationUsage(
+		usage.CacheCreationInputTokens, usage.CacheCreation,
+	)
+	totalInputTokens := usage.InputTokens + cacheCreationTokens + usage.CacheReadInputTokens
 	result := &openai.OpenAIUsage{
 		PromptTokens:     totalInputTokens,
 		CompletionTokens: usage.OutputTokens,
 		TotalTokens:      totalInputTokens + usage.OutputTokens,
 	}
 	// map cache_read + cache_creation tokens to prompt_tokens_details
-	if usage.CacheReadInputTokens > 0 || usage.CacheCreationInputTokens > 0 {
+	if usage.CacheReadInputTokens > 0 || cacheCreationTokens > 0 {
 		result.PromptTokensDetails = &openai.TokenDetails{
 			CachedTokens:        usage.CacheReadInputTokens,
-			CacheCreationTokens: usage.CacheCreationInputTokens,
+			CacheCreationTokens: cacheCreationTokens,
+		}
+		if cacheCreation5mTokens > 0 || cacheCreation1hTokens > 0 {
+			result.PromptTokensDetails.CacheCreationTokenDetails = &openai.CacheCreationTokenDetails{
+				Ephemeral5mInputTokens: cacheCreation5mTokens,
+				Ephemeral1hInputTokens: cacheCreation1hTokens,
+			}
+		}
+	}
+	if usage.ServerToolUse != nil && usage.ServerToolUse.WebSearchRequests > 0 {
+		result.ServerToolUse = &openai.ServerToolUseDetails{
+			WebSearchRequests: usage.ServerToolUse.WebSearchRequests,
 		}
 	}
 	return result

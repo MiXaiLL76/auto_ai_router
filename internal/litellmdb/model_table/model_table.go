@@ -263,6 +263,7 @@ func (a *ProxyModelTable) FetchModelsForAIR(ctx context.Context, signingKey stri
 
 		// Build ModelPrice from CustomPricingLiteLLMParams
 		if price := convertPricingToModelPrice(&model.LlmParams.CustomPricingLiteLLMParams); price != nil {
+			price.LiteLLMProvider = pricingProviderName(model.LlmParams)
 			airPrices[manager.NormalizeModelName(modelName)] = price
 		}
 	}
@@ -289,6 +290,8 @@ func derefStr(s *string, fallback string) string {
 func mapProviderType(provider string) config.ProviderType {
 	p := strings.ToLower(provider)
 	switch {
+	case p == "air" || p == "aar" || strings.Contains(p, "auto_ai_router") || strings.Contains(p, "auto-ai-router"):
+		return config.ProviderTypeAIR
 	case strings.Contains(p, "openai") || strings.Contains(p, "router"):
 		return config.ProviderTypeOpenAI
 	case strings.Contains(p, "vertex"):
@@ -390,7 +393,7 @@ func convertPricingToModelPrice(p *queries.CustomPricingLiteLLMParams) *manager.
 	if p == nil {
 		return nil
 	}
-	if p.InputCostPerToken == nil && p.OutputCostPerToken == nil {
+	if p.InputCostPerToken == nil && p.OutputCostPerToken == nil && len(p.SearchContextCostPerQuery) == 0 {
 		return nil
 	}
 
@@ -428,11 +431,26 @@ func convertPricingToModelPrice(p *queries.CustomPricingLiteLLMParams) *manager.
 	if p.CacheCreationInputTokenCost != nil {
 		price.CacheCreationInputTokenCost = *p.CacheCreationInputTokenCost
 	}
+	if p.CacheReadInputTokenCostAbove200kTokens != nil {
+		price.CacheReadInputTokenCostAbove200k = *p.CacheReadInputTokenCostAbove200kTokens
+	}
+	if p.CacheCreationInputTokenCostAbove200kTokens != nil {
+		price.CacheCreationInputTokenCostAbove200k = *p.CacheCreationInputTokenCostAbove200kTokens
+	}
+	if p.CacheCreationInputTokenCostAbove1hr != nil {
+		price.CacheCreationInputTokenCostAbove1hr = *p.CacheCreationInputTokenCostAbove1hr
+	}
+	if p.CacheCreationInputTokenCostAbove1hrAbove200kTokens != nil {
+		price.CacheCreationInputTokenCostAbove1hrAbove200k = *p.CacheCreationInputTokenCostAbove1hrAbove200kTokens
+	}
 	if p.CacheReadInputTokenCostAbove272kTokens != nil {
 		price.CacheReadInputTokenCostAbove272k = *p.CacheReadInputTokenCostAbove272kTokens
 	}
 	if p.CacheCreationInputTokenCostAbove272kTokens != nil {
 		price.CacheCreationInputTokenCostAbove272k = *p.CacheCreationInputTokenCostAbove272kTokens
+	}
+	if p.CacheReadInputAudioTokenCost != nil {
+		price.CacheReadInputAudioTokenCost = *p.CacheReadInputAudioTokenCost
 	}
 	if p.OutputCostPerImage != nil {
 		price.OutputCostPerImage = *p.OutputCostPerImage
@@ -440,6 +458,30 @@ func convertPricingToModelPrice(p *queries.CustomPricingLiteLLMParams) *manager.
 	if p.OutputCostPerImageToken != nil {
 		price.OutputCostPerImageToken = *p.OutputCostPerImageToken
 	}
+	if len(p.SearchContextCostPerQuery) > 0 {
+		price.SearchContextCostPerQuery = p.SearchContextCostPerQuery
+	}
+	if p.WebSearchBillingUnit != nil {
+		price.WebSearchBillingUnit = *p.WebSearchBillingUnit
+	}
 
 	return price
+}
+
+func pricingProviderName(params *queries.GenericLiteLLMParams) string {
+	if params == nil {
+		return ""
+	}
+	if params.CustomLLMProvider != nil && *params.CustomLLMProvider != "" {
+		return *params.CustomLLMProvider
+	}
+	if params.CustomLLMProviderName != nil && *params.CustomLLMProviderName != "" {
+		return *params.CustomLLMProviderName
+	}
+	if params.Model != nil {
+		if slash := strings.IndexByte(*params.Model, '/'); slash > 0 {
+			return (*params.Model)[:slash]
+		}
+	}
+	return ""
 }

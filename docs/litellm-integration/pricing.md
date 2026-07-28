@@ -38,10 +38,23 @@ The file is a JSON object where each key is a model name and each value is a pri
     "input_cost_per_token": 1.5e-05,
     "output_cost_per_token": 7.5e-05,
     "cache_read_input_token_cost": 1.5e-06,
-    "cache_creation_input_token_cost": 1.875e-05
+    "cache_creation_input_token_cost": 1.875e-05,
+    "cache_creation_input_token_cost_above_1hr": 3e-05,
+    "cache_read_input_token_cost_above_200k_tokens": 3e-06,
+    "cache_creation_input_token_cost_above_200k_tokens": 3.75e-05,
+    "cache_creation_input_token_cost_above_1hr_above_200k_tokens": 6e-05
   },
   "imagen-4.0-fast-generate-001": {
     "output_cost_per_image": 0.02
+  },
+  "gpt-4o-search-preview": {
+    "input_cost_per_token": 2.5e-06,
+    "output_cost_per_token": 1e-05,
+    "search_context_cost_per_query": {
+      "search_context_size_low": 0.025,
+      "search_context_size_medium": 0.0275,
+      "search_context_size_high": 0.03
+    }
   }
 }
 ```
@@ -57,27 +70,34 @@ For reference:
 
 ### Available fields
 
-| Field                                               | Description                                                                  |
-| --------------------------------------------------- | ---------------------------------------------------------------------------- |
-| `input_cost_per_token`                              | Regular input tokens                                                         |
-| `output_cost_per_token`                             | Regular output tokens                                                        |
-| `input_cost_per_token_above_200k_tokens`            | Input rate for tokens beyond the 200k threshold                              |
-| `output_cost_per_token_above_200k_tokens`           | Output rate for tokens beyond the 200k threshold                             |
-| `input_cost_per_token_above_272k_tokens`            | Full-session input rate when prompt exceeds 272k tokens                      |
-| `output_cost_per_token_above_272k_tokens`           | Full-session output rate when prompt exceeds 272k tokens                     |
-| `input_cost_per_audio_token`                        | Audio input tokens (falls back to `input_cost_per_token` if absent)          |
-| `output_cost_per_audio_token`                       | Audio output tokens (falls back to `output_cost_per_token` if absent)        |
-| `input_cost_per_image_token`                        | Image input tokens                                                           |
-| `output_cost_per_image_token`                       | Image output tokens                                                          |
-| `output_cost_per_reasoning_token`                   | Reasoning/thinking tokens (falls back to `output_cost_per_token`)            |
-| `input_cost_per_cached_token`                       | Cached prompt read cost (alias: `cache_read_input_token_cost`)               |
-| `cache_read_input_token_cost`                       | LiteLLM-compatible alias for `input_cost_per_cached_token`                   |
-| `cache_creation_input_token_cost`                   | Prompt cache write cost (falls back to `input_cost_per_token`)               |
-| `cache_read_input_token_cost_above_272k_tokens`     | Full-session cache read rate when prompt exceeds 272k tokens                 |
-| `cache_creation_input_token_cost_above_272k_tokens` | Full-session cache write rate when prompt exceeds 272k tokens                |
-| `output_cost_per_cached_token`                      | Cached output tokens (falls back to `output_cost_per_token`)                 |
-| `output_cost_per_prediction_token`                  | Accepted predicted-output tokens (falls back to `output_cost_per_token`)     |
-| `output_cost_per_image`                             | Cost per generated image (takes priority over `output_cost_per_image_token`) |
+| Field                                                         | Description                                                                  |
+| ------------------------------------------------------------- | ---------------------------------------------------------------------------- |
+| `input_cost_per_token`                                        | Regular input tokens                                                         |
+| `output_cost_per_token`                                       | Regular output tokens                                                        |
+| `input_cost_per_token_above_200k_tokens`                      | Input rate for tokens beyond the 200k threshold                              |
+| `output_cost_per_token_above_200k_tokens`                     | Output rate for tokens beyond the 200k threshold                             |
+| `input_cost_per_token_above_272k_tokens`                      | Full-session input rate when prompt exceeds 272k tokens                      |
+| `output_cost_per_token_above_272k_tokens`                     | Full-session output rate when prompt exceeds 272k tokens                     |
+| `input_cost_per_audio_token`                                  | Audio input tokens (falls back to `input_cost_per_token` if absent)          |
+| `output_cost_per_audio_token`                                 | Audio output tokens (falls back to `output_cost_per_token` if absent)        |
+| `input_cost_per_image_token`                                  | Image input tokens                                                           |
+| `output_cost_per_image_token`                                 | Image output tokens                                                          |
+| `output_cost_per_reasoning_token`                             | Reasoning/thinking tokens (falls back to `output_cost_per_token`)            |
+| `input_cost_per_cached_token`                                 | Cached prompt read cost (alias: `cache_read_input_token_cost`)               |
+| `cache_read_input_token_cost`                                 | LiteLLM-compatible alias for `input_cost_per_cached_token`                   |
+| `cache_creation_input_token_cost`                             | Prompt cache write cost (falls back to `input_cost_per_token`)               |
+| `cache_read_input_token_cost_above_200k_tokens`               | Full-session cache read rate when prompt exceeds 200k tokens                 |
+| `cache_creation_input_token_cost_above_200k_tokens`           | Full-session 5m/unclassified cache write rate above 200k                     |
+| `cache_creation_input_token_cost_above_1hr`                   | Anthropic 1h cache write rate (falls back to regular cache write rate)       |
+| `cache_creation_input_token_cost_above_1hr_above_200k_tokens` | Anthropic 1h cache write rate above 200k                                     |
+| `cache_read_input_token_cost_above_272k_tokens`               | Full-session cache read rate when prompt exceeds 272k tokens                 |
+| `cache_creation_input_token_cost_above_272k_tokens`           | Full-session cache write rate when prompt exceeds 272k tokens                |
+| `cache_read_input_audio_token_cost`                           | Cached audio input rate (falls back to the selected cache read rate)         |
+| `output_cost_per_cached_token`                                | Cached output tokens (falls back to `output_cost_per_token`)                 |
+| `output_cost_per_prediction_token`                            | Accepted predicted-output tokens (falls back to `output_cost_per_token`)     |
+| `output_cost_per_image`                                       | Cost per generated image (takes priority over `output_cost_per_image_token`) |
+| `search_context_cost_per_query`                               | Web Search cost per request/call, keyed by `search_context_size_*`           |
+| `web_search_billing_unit`                                     | `per_query` or `per_prompt` Web Search charging mode                         |
 
 ## Cost Calculation
 
@@ -98,23 +118,50 @@ total = regular_input  × input_cost_per_token
       + regular_output × output_cost_per_token
       + audio_input_tokens  × input_cost_per_audio_token
       + audio_output_tokens × output_cost_per_audio_token
-      + cached_input_tokens    × cache_read_input_token_cost
-      + cache_creation_tokens  × cache_creation_input_token_cost
+      + cached_text_tokens  × cache_read_input_token_cost
+      + cached_audio_tokens × cache_read_input_audio_token_cost
+      + cache_creation_5m_tokens × cache_creation_input_token_cost
+      + cache_creation_1h_tokens × cache_creation_input_token_cost_above_1hr
       + cached_output_tokens   × output_cost_per_cached_token
       + reasoning_tokens            × output_cost_per_reasoning_token
       + accepted_prediction_tokens  × output_cost_per_prediction_token
       + rejected_prediction_tokens  × output_cost_per_token
       + image_count × output_cost_per_image
+      + web_search_requests × search_context_cost_per_query[search_context_size]
 ```
 
 This means every token is billed **exactly once** regardless of how the provider reported it.
 
+### Web Search billing
+
+Web Search is billed as a separate tool cost, not as tokens. The calculator reads LiteLLM-compatible `search_context_cost_per_query` prices and selects one of:
+
+- `search_context_size_low`
+- `search_context_size_medium`
+- `search_context_size_high`
+
+AIR gets the request size from `web_search_options.search_context_size` or from a `web_search` / `web_search_preview` tool definition. If the request does not specify a size, `medium` is used.
+
+AIR charges only confirmed response usage:
+
+- `usage.server_tool_use.web_search_requests`
+- `usage.web_search_requests`
+- `response.output[]` or `output[]` items with `type: "web_search_call"`
+- Chat Completions `url_citation` annotations when that API contract confirms a search
+- Vertex/Gemini `groundingMetadata.webSearchQueries`
+
+Merely enabling a tool does not count as execution. A successful response with no confirmed usage is billed for zero searches. Streaming requests use the final provider usage or completed response output. An incomplete tool event is not billed.
+
+`per_query` multiplies the configured price by the confirmed query count. `per_prompt` clamps any positive count to one charge. LiteLLM Gemini 2.x entries without an explicit unit use `per_prompt`, while Gemini 3.x entries explicitly use `per_query`.
+
+The count and selected context size are written to spend metadata under `usage_object.server_tool_use` and `additional_usage_values.server_tool_use`; the tool cost is written to `cost_breakdown.tool_usage_cost` and `cost_breakdown.web_search_cost`.
+
 ### Regular input tokens
 
-Vertex AI and OpenAI include audio and cached tokens **inside** `prompt_tokens`. Anthropic reports cached tokens **separately**. The formula above handles both:
+Vertex AI and OpenAI include audio and cached tokens **inside** `prompt_tokens`. Anthropic reports cache reads and writes separately on the wire, so AIR first normalises Anthropic usage to an inclusive prompt total. The formula then uses the same semantics for every provider:
 
 - Vertex/OpenAI: `100 prompt − 5 audio − 20 cached = 75 regular`, then +5 audio +20 cached at their rates
-- Anthropic: `100 prompt − 0 − 20 cached = 80 regular` (cached was separate, so subtracted here keeps the math consistent)
+- Anthropic wire usage: `100 input + 20 cache read = 120 normalised prompt`; billing uses `120 − 20 cached = 100 regular`, then +20 cached at its rate
 
 ### Regular output tokens
 
@@ -144,22 +191,25 @@ input_cost = regular_below × input_cost_per_token
 
 The same logic applies to output tokens using `output_cost_per_token_above_200k_tokens`.
 
+Cache prices follow LiteLLM's full-session semantics: when `prompt_tokens > 200_000`, all cache read/write tokens use the matching `*_above_200k_tokens` rate. The 272k cache fields take precedence when both tiers are configured.
+
 ### Long-context pricing (272k threshold)
 
 When the prompt exceeds 272 000 tokens, models such as GPT-5.6 apply their `*_above_272k_tokens` rates to the full session rather than only the tokens beyond the threshold. The prompt size selects the tier for regular input, output, cache reads, and cache writes. At exactly 272 000 tokens, base rates still apply.
 
 ### Specialised token types
 
-| Type                | Formula                                                                                                                    |
-| ------------------- | -------------------------------------------------------------------------------------------------------------------------- |
-| Audio input         | `audio_input_tokens × input_cost_per_audio_token` (falls back to regular input rate)                                       |
-| Audio output        | `audio_output_tokens × output_cost_per_audio_token` (falls back to regular output rate)                                    |
-| Cached read         | `cached_input_tokens × cache_read_input_token_cost` (falls back to `input_cost_per_cached_token`, then regular input rate) |
-| Cache creation      | `cache_creation_tokens × cache_creation_input_token_cost` (falls back to regular input rate)                               |
-| Reasoning           | `reasoning_tokens × output_cost_per_reasoning_token` (falls back to regular output rate)                                   |
-| Accepted prediction | `accepted_prediction_tokens × output_cost_per_prediction_token` (falls back to regular output rate)                        |
-| Rejected prediction | `rejected_prediction_tokens × output_cost_per_token` (always at regular output rate)                                       |
-| Images              | `image_count × output_cost_per_image` OR `image_count × output_cost_per_image_token`                                       |
+| Type                | Formula                                                                                                                                             |
+| ------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Audio input         | `audio_input_tokens × input_cost_per_audio_token` (falls back to regular input rate)                                                                |
+| Audio output        | `audio_output_tokens × output_cost_per_audio_token` (falls back to regular output rate)                                                             |
+| Cached read         | Cached text uses `cache_read_input_token_cost`; cached audio uses `cache_read_input_audio_token_cost` with fallback to the selected cache read rate |
+| Cache creation      | 5m and unclassified tokens use `cache_creation_input_token_cost`; 1h tokens use `cache_creation_input_token_cost_above_1hr`; both fall back safely  |
+| Reasoning           | `reasoning_tokens × output_cost_per_reasoning_token` (falls back to regular output rate)                                                            |
+| Accepted prediction | `accepted_prediction_tokens × output_cost_per_prediction_token` (falls back to regular output rate)                                                 |
+| Rejected prediction | `rejected_prediction_tokens × output_cost_per_token` (always at regular output rate)                                                                |
+| Images              | `image_count × output_cost_per_image` OR `output_image_tokens × output_cost_per_image_token`                                                        |
+| Web Search          | `billable_web_search_count × search_context_cost_per_query[search_context_size]`, with `per_prompt` clamped to one                                  |
 
 ## How Prices Are Loaded
 
@@ -180,7 +230,14 @@ Loading is handled by `internal/models/price_loader.go`:
 When the LiteLLM database is enabled, prices defined in `LiteLLM_ModelTable` are merged on top of the file-based registry via `MergeDB`. Database prices take precedence for any model that appears in both sources. The file-based prices remain intact for all other models.
 
 Cache writes are read from `cache_creation_tokens` or the OpenAI-compatible `cache_write_tokens` alias in both Chat Completions and Responses API usage objects.
+Anthropic's `cache_creation_token_details` (`ephemeral_5m_input_tokens` and `ephemeral_1h_input_tokens`) is preserved in spend-log metadata while the existing aggregate cache-creation token columns remain backward-compatible. Gemini cached-audio counts are taken from `cacheTokensDetails` when the provider supplies a modality breakdown.
+
+### Spend storage contract
+
+AIR keeps LiteLLM's upstream PostgreSQL schema unchanged. `LiteLLM_SpendLogs.spend` and the daily user, team, organization, and end-user tables contain the total cost. Cache and Web Search breakdowns are stored in `LiteLLM_SpendLogs.metadata`.
+
+Kafka and ClickHouse expose the same breakdown as typed fields, including `web_search_requests` and `web_search_cost`. Use that analytics path when structured reconciliation by usage type is required.
 
 ### Lookup
 
-When a request completes, the router calls `GetPrice(modelName)` which normalises the name and returns the `*ModelPrice`. If no entry is found, cost calculation is skipped and `null` is stored in the spend log.
+When a request completes, the router calls `GetPrice(modelName)` which normalises the name and returns the `*ModelPrice`. If no entry is found, cost calculation is skipped, `spend` is stored as `0`, and the metadata cost breakdown is omitted.

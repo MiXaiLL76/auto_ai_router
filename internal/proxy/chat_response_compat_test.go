@@ -93,7 +93,7 @@ func TestFinalizeStreamingLogKeepsExplicitZeroProviderUsage(t *testing.T) {
 	}
 	lastChunk := []byte(`data: {"choices":[],"usage":{"prompt_tokens":0,"completion_tokens":0}}`)
 
-	prx.finalizeStreamingLog(logCtx, 456, lastChunk, "openai", http.StatusOK)
+	prx.finalizeStreamingLog(logCtx, 456, lastChunk, "openai", http.StatusOK, false)
 
 	require.NotNil(t, logCtx.TokenUsage)
 	assert.Zero(t, logCtx.TokenUsage.PromptTokens)

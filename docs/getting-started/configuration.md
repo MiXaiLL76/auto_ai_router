@@ -59,8 +59,8 @@ credentials:
     rpm: 60
     tpm: -1
 
-  - name: "proxy_fallback"
-    type: "proxy"
+  - name: "air_fallback"
+    type: "air"
     base_url: "http://backup-router.local:8080"
     api_key: "sk-remote-master-key"
     rpm: 200

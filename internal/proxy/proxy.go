@@ -249,12 +249,14 @@ type RequestLogContext struct {
 	TokenInfo            *litellmdb.TokenInfo     // User/team/org info
 	IsImageGeneration    bool                     // True if this is an image generation request
 	ImageCount           int                      // Number of images to generate (from 'n' param)
+	WebSearchRequested   bool                     // True when the request enabled the built-in web search tool
+	WebSearchContextSize string                   // low|medium|high from web_search_options/tool config
 	Logged               bool                     // True if already logged (prevents duplicate logging)
 	PromptTokensEstimate int                      // Estimated prompt tokens for streaming responses (since streaming doesn't provide prompt tokens in headers)
 	IsResponsesAPI       bool                     // True if this is a Responses API request (converted to Chat Completions)
 	RequestCompleted     bool                     // True only after the response was fully and successfully delivered
 	ActualCredentialName string                   // Real credential name from upstream when Credential.Type == ProviderTypeProxy
-	IsProxyRequest       bool                     // True when this request came from another auto_ai_router (X-Aar-Proxy-Client header)
+	IsProxyRequest       bool                     // True when this request came from another auto_ai_router (HeaderAIRProxyClient)
 	Scope                scope.Context
 
 	reservedEntities       []reservedEntity
@@ -562,7 +564,8 @@ func (p *Proxy) executeProxyRequest(
 	copyRequestHeaders(proxyReq, r, cred.APIKey)
 	// Mark request as coming from an internal proxy client so the upstream router
 	// knows to include the X-Credential-Name response header.
-	proxyReq.Header.Set("X-Aar-Proxy-Client", "1")
+	proxyReq.Header.Set(HeaderAIRProxyClient, "1")
+	proxyReq.Header.Set(HeaderLegacyAIRProxyClient, "1")
 
 	// Send request
 	resp, err := p.client.Do(proxyReq)
@@ -587,16 +590,16 @@ func (p *Proxy) executeProxyRequest(
 				"url", targetURL,
 			)
 		}
-		// Proxy credentials are dynamic relays — don't record them in fail2ban.
+		// Proxy/AIR credentials are dynamic relays — don't record them in fail2ban.
 		// Their 429/5xx reflect downstream capacity, not a permanent credential failure.
-		if cred.Type != config.ProviderTypeProxy {
+		if !cred.IsProxyLike() {
 			p.balancer.RecordResponse(cred.Name, modelID, statusCode)
 		}
 		p.metrics.RecordRequest(cred.Name, r.URL.Path, modelID, statusCode, time.Since(start))
 		return nil, err
 	}
-	// Proxy credentials are dynamic relays — don't record them in fail2ban.
-	if cred.Type != config.ProviderTypeProxy {
+	// Proxy/AIR credentials are dynamic relays — don't record them in fail2ban.
+	if !cred.IsProxyLike() {
 		p.balancer.RecordResponse(cred.Name, modelID, resp.StatusCode)
 	}
 	p.metrics.RecordRequest(cred.Name, r.URL.Path, modelID, resp.StatusCode, time.Since(start))
@@ -673,10 +676,12 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 	start := utils.NowUTC()
 	requestID := uuid.New().String()
 
-	// Save and strip internal proxy marker. The marker is set by executeProxyRequest when
-	// acting as a proxy client. We save it here and delete it to prevent external spoofing.
-	isProxyRequest := r.Header.Get("X-Aar-Proxy-Client") == "1"
-	r.Header.Del("X-Aar-Proxy-Client")
+	// Save and strip internal proxy markers before normal request handling. Their
+	// value is trusted only after authentication proves this is a master-key AIR peer.
+	proxyMarkerPresent := r.Header.Get(HeaderAIRProxyClient) == "1" ||
+		r.Header.Get(HeaderLegacyAIRProxyClient) == "1"
+	r.Header.Del(HeaderAIRProxyClient)
+	r.Header.Del(HeaderLegacyAIRProxyClient)
 
 	// Create logging context that will be filled throughout request processing
 	// and logged at the end via defer to ensure all requests are logged
@@ -685,7 +690,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		StartTime:      start,
 		Request:        r,
 		Status:         "unknown",
-		IsProxyRequest: isProxyRequest,
+		IsProxyRequest: false,
 	}
 
 	// Ensure request is logged at the end regardless of which path is taken
@@ -715,6 +720,14 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 	prepared, ok := p.orchestrateRequest(w, r, logCtx)
 	if !ok {
 		return
+	}
+	if proxyMarkerPresent {
+		logCtx.IsProxyRequest = p.isMasterKey(logCtx.Token)
+		if !logCtx.IsProxyRequest {
+			p.logger.WarnContext(r.Context(), "Ignoring untrusted AIR proxy marker",
+				"request_id", requestID,
+			)
+		}
 	}
 
 	r = prepared.request
@@ -784,6 +797,10 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			logCtx.ImageCount = 1
 		}
 	}
+	if webSearchRequested, webSearchContextSize := extractWebSearchRequestUsage(body, r.Header.Get("Content-Type")); webSearchRequested {
+		logCtx.WebSearchRequested = true
+		logCtx.WebSearchContextSize = webSearchContextSize
+	}
 
 	if !p.applyCredentialCompatibilityRouting(w, r, prepared, logCtx, start) {
 		return
@@ -793,8 +810,8 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 	realModelID = prepared.realModelID
 	cred = prepared.cred
 
-	// Handle proxy credential type with same-type retry + fallback
-	if cred.Type == config.ProviderTypeProxy {
+	// Handle proxy/AIR credential types with exact same-type retry + fallback.
+	if cred.IsProxyLike() {
 		logCtx.Credential = cred
 		triedCreds := GetTried(r.Context())
 		var proxyResp *ProxyResponse
@@ -804,9 +821,9 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 
 		for attempt := 0; attempt <= p.maxProviderRetries; attempt++ {
 			if attempt > 0 {
-				nextCred, err := p.balancer.NextSameTypeForModelExcludingScoped(modelID, config.ProviderTypeProxy, triedCreds, logCtx.Scope)
+				nextCred, err := p.balancer.NextSameTypeForModelExcludingScoped(modelID, cred.Type, triedCreds, logCtx.Scope)
 				if err != nil {
-					p.logger.DebugContext(r.Context(), "No more same-type proxy credentials for retry",
+					p.logger.DebugContext(r.Context(), "No more same-type remote-router credentials for retry",
 						"model", modelID, "attempt", attempt, "error", err)
 					break
 				}
@@ -915,6 +932,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Write response (streaming or non-streaming)
+		tokenUsageOptions := tokenUsageExtractionOptionsForResponse(cred, proxyResp.Headers)
 		if proxyResp.IsStreaming {
 			p.logger.DebugContext(r.Context(), "Response is streaming (no retry for streaming)",
 				"credential", cred.Name, "status", proxyResp.StatusCode)
@@ -931,6 +949,9 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 				copyResponseHeaders(w, proxyResp.Headers, cred)
 				if logCtx.IsProxyRequest && logCtx.ActualCredentialName != "" {
 					w.Header().Set("X-Credential-Name", logCtx.ActualCredentialName)
+				}
+				if proxyResp.StatusCode >= 200 && proxyResp.StatusCode < 300 {
+					markAudioUsageExcludesCached(w.Header())
 				}
 				w.WriteHeader(proxyResp.StatusCode)
 				logCtx.PromptTokensEstimate = estimatePromptTokensForModel(body, realModelID)
@@ -957,6 +978,9 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 				if logCtx.IsProxyRequest && logCtx.ActualCredentialName != "" {
 					w.Header().Set("X-Credential-Name", logCtx.ActualCredentialName)
 				}
+				if proxyResp.StatusCode >= 200 && proxyResp.StatusCode < 300 {
+					markAudioUsageContract(w.Header(), tokenUsageOptions.AudioInputIncludesCachedAudio)
+				}
 				w.WriteHeader(proxyResp.StatusCode)
 				logCtx.PromptTokensEstimate = estimatePromptTokensForModel(body, realModelID)
 				fakeResp := &http.Response{
@@ -964,7 +988,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 					Header:     proxyResp.Headers,
 					Body:       proxyResp.StreamBody,
 				}
-				if err := p.handlePassthroughResponsesStreaming(w, fakeResp, cred.Name, realModelID, logCtx, saveResponseFn); err != nil {
+				if err := p.handlePassthroughResponsesStreaming(w, fakeResp, cred.Name, realModelID, logCtx, saveResponseFn, tokenUsageOptions); err != nil {
 					p.logStreamHandlerError(r.Context(), "Failed to handle proxy passthrough Responses API streaming", err,
 						"credential", cred.Name, "model", modelID, "request_id", logCtx.RequestID)
 				} else if proxyResp.StatusCode >= 200 && proxyResp.StatusCode < 300 {
@@ -974,12 +998,17 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 				if logCtx.IsProxyRequest && logCtx.ActualCredentialName != "" {
 					w.Header().Set("X-Credential-Name", logCtx.ActualCredentialName)
 				}
+				if proxyResp.StatusCode >= 200 && proxyResp.StatusCode < 300 {
+					markAudioUsageContract(w.Header(), tokenUsageOptions.AudioInputIncludesCachedAudio)
+				}
 				tokenizerModelID := realModelID
 				if tokenizerModelID == "" {
 					tokenizerModelID = modelID
 				}
 				logCtx.PromptTokensEstimate = estimatePromptTokensForModel(proxyBody, tokenizerModelID)
-				streamUsage, err := p.writeProxyStreamingResponseWithTokens(w, proxyResp, r, cred, modelID, tokenizerModelID, logCtx)
+				streamUsage, err := p.writeProxyStreamingResponseWithTokens(
+					w, proxyResp, r, cred, modelID, tokenizerModelID, logCtx, tokenUsageOptions,
+				)
 				if err != nil {
 					p.logStreamHandlerError(r.Context(), "Failed to write streaming proxy response", err,
 						"credential", cred.Name, "model", modelID, "request_id", logCtx.RequestID)
@@ -1030,7 +1059,10 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 			} else if prepared.convertedResp && proxyResp.StatusCode >= 200 && proxyResp.StatusCode < 300 {
-				responsesBody, convErr := responses.ChatToResponse(proxyResp.Body)
+				responsesBody, convErr := responses.ChatToResponse(
+					proxyResp.Body,
+					responses.WithAudioInputIncludesCachedAudio(tokenUsageOptions.AudioInputIncludesCachedAudio),
+				)
 				if convErr != nil {
 					p.logger.ErrorContext(r.Context(), "Failed to convert proxy response to Responses API format",
 						"credential", cred.Name, "model", modelID, "error", convErr,
@@ -1055,11 +1087,15 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 						}
 					}
 					proxyResp.Body = responsesBody
+					tokenUsageOptions.AudioInputIncludesCachedAudio = false
 				}
 			}
 
 			if logCtx.IsProxyRequest && logCtx.ActualCredentialName != "" {
 				w.Header().Set("X-Credential-Name", logCtx.ActualCredentialName)
+			}
+			if proxyResp.StatusCode >= 200 && proxyResp.StatusCode < 300 {
+				markAudioUsageContract(w.Header(), tokenUsageOptions.AudioInputIncludesCachedAudio)
 			}
 			p.writeProxyResponse(w, proxyResp, r, cred, modelID, logCtx)
 			tokens := extractTokensFromResponse(string(proxyResp.Body), config.ProviderTypeOpenAI)
@@ -1093,7 +1129,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		logCtx.HTTPStatus = proxyResp.StatusCode
 		logCtx.TargetURL = cred.BaseURL
 		if !proxyResp.IsStreaming {
-			logCtx.TokenUsage = converter.ExtractTokenUsage(proxyResp.Body)
+			logCtx.TokenUsage = converter.ExtractTokenUsageWithOptions(proxyResp.Body, tokenUsageOptions)
 			if logCtx.TokenUsage != nil && proxyResp.StatusCode < 400 {
 				p.metrics.RecordTokenUsage(cred.Name, modelID,
 					logCtx.TokenUsage.PromptTokens, logCtx.TokenUsage.CompletionTokens,
@@ -1265,6 +1301,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 				IsImageEdit:       isImageEdit,
 				IsEmbeddings:      isEmbeddings,
 				IsStreaming:       streaming,
+				IsResponsesAPI:    prepared.passthroughResponses,
 				ModelID:           realModelID,
 				DisplayModelID:    modelID,
 				ContentType:       r.Header.Get("Content-Type"),
@@ -1559,6 +1596,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 
 	// === Process final response ===
 	var finalResponseBody []byte
+	outgoingAudioUsageContract := audioUsageContractUnknown
 
 	if isStreamingResp {
 		p.logger.DebugContext(r.Context(), "Response is streaming", "credential", cred.Name)
@@ -1571,6 +1609,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		// For error responses (4xx/5xx) pass the provider body through unchanged.
 		// nativeResponses path skips this step — provider→Responses API conversion
 		// happens further down via provResponses.ResponseTo().
+		tokenUsageOptions := tokenUsageExtractionOptionsForResponse(cred, resp.Header)
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 && !prepared.nativeResponses && conv != nil && !conv.IsPassthrough() {
 			convertedBody, convErr := conv.ResponseTo([]byte(decodedBody))
 			if convErr != nil {
@@ -1584,6 +1623,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 				finalResponseBody = []byte(decodedBody)
 			} else {
 				finalResponseBody = convertedBody
+				tokenUsageOptions.AudioInputIncludesCachedAudio = false
 				p.logTransformedResponse(r.Context(), cred.Name, string(cred.Type), finalResponseBody)
 			}
 		} else {
@@ -1619,6 +1659,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 					// the raw provider body (e.g. Vertex usageMetadata) is not
 					// parseable by ExtractTokenUsage which expects OpenAI-compatible fields.
 					bodyForTokenExtraction = finalResponseBody
+					tokenUsageOptions.AudioInputIncludesCachedAudio = false
 				}
 				if saveResponseFn != nil {
 					saveResponseFn(nativeResp)
@@ -1638,7 +1679,10 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			}
 		} else if prepared.convertedResp && resp.StatusCode >= 200 && resp.StatusCode < 300 {
 			// Non-codex: convert Chat Completions response back to Responses API format.
-			responsesBody, convErr := responses.ChatToResponse(finalResponseBody)
+			responsesBody, convErr := responses.ChatToResponse(
+				finalResponseBody,
+				responses.WithAudioInputIncludesCachedAudio(tokenUsageOptions.AudioInputIncludesCachedAudio),
+			)
 			if convErr != nil {
 				p.logger.ErrorContext(r.Context(), "Failed to convert to Responses API format",
 					"credential", cred.Name, "model", modelID, "error", convErr,
@@ -1663,6 +1707,8 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 				finalResponseBody = responsesBody
+				bodyForTokenExtraction = finalResponseBody
+				tokenUsageOptions.AudioInputIncludesCachedAudio = false
 			}
 		}
 
@@ -1722,7 +1768,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		resp.Body = io.NopCloser(bytes.NewReader(finalResponseBody))
 
 		// Log to LiteLLM DB (non-streaming)
-		logCtx.TokenUsage = converter.ExtractTokenUsage(bodyForTokenExtraction)
+		logCtx.TokenUsage = converter.ExtractTokenUsageWithOptions(bodyForTokenExtraction, tokenUsageOptions)
 		logCtx.Status = "success"
 		logCtx.HTTPStatus = resp.StatusCode
 		logCtx.TargetURL = targetURL
@@ -1748,6 +1794,13 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		if logCtx.IsImageGeneration && logCtx.TokenUsage != nil {
 			logCtx.TokenUsage.ImageCount = logCtx.ImageCount
 		}
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			if tokenUsageOptions.AudioInputIncludesCachedAudio {
+				outgoingAudioUsageContract = audioUsageContractIncludesCached
+			} else {
+				outgoingAudioUsageContract = audioUsageContractExcludesCached
+			}
+		}
 		if logCtx.Token != "" && logCtx.Credential != nil {
 			if err := p.logSpendToLiteLLMDB(logCtx); err != nil {
 				p.logger.WarnContext(r.Context(), "Failed to queue spend log",
@@ -1756,9 +1809,18 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		}
 		logCtx.Logged = true
 	}
+	if isStreamingResp {
+		outgoingAudioUsageContract = directStreamingAudioUsageContract(prepared, cred, resp.StatusCode)
+	}
 
 	// Copy response headers (skip hop-by-hop headers and transformation-related headers)
 	copyResponseHeaders(w, resp.Header, cred)
+	switch outgoingAudioUsageContract {
+	case audioUsageContractExcludesCached:
+		markAudioUsageExcludesCached(w.Header())
+	case audioUsageContractIncludesCached:
+		markAudioUsageIncludesCached(w.Header())
+	}
 	// Return credential name only to internal proxy clients, not to end users.
 	if logCtx.IsProxyRequest {
 		w.Header().Set("X-Credential-Name", cred.Name)

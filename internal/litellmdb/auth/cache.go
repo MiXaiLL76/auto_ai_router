@@ -64,7 +64,7 @@ func (c *Cache) Get(hashedToken string) (*models.TokenInfo, bool) {
 		atomic.AddUint64(&c.misses, 1)
 		return nil, false
 	}
-	if cached.info.UserID != "litellm-master-key" {
+	if !cached.info.IsMasterKey {
 		// Check TTL
 		if time.Since(cached.cachedAt) > c.ttl {
 			// TTL expired - re-check under write lock to avoid evicting a fresh entry

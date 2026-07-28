@@ -1,6 +1,7 @@
 package models
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/mixaill76/auto_ai_router/internal/httputil"
@@ -95,4 +96,18 @@ func TestAggregateProviderScopes_DistinguishesFalseAndUnrestricted(t *testing.T)
 
 	assert.False(t, scope.PublicContext().AllowsExpression(blocked.ScopeExpression))
 	assert.True(t, scope.PublicContext().AllowsExpression(unrestricted.ScopeExpression))
+}
+
+func TestAggregateProviderScopes_ManyUnrestrictedCredentialsRemainVisible(t *testing.T) {
+	health := &httputil.ProxyHealthResponse{
+		Credentials: make(map[string]httputil.CredentialHealthStats, 300),
+	}
+	for i := 0; i < 300; i++ {
+		health.Credentials[fmt.Sprintf("credential-%d", i)] = httputil.CredentialHealthStats{}
+	}
+
+	metadata := AggregateProviderScopesFromHealth(health, false)
+
+	assert.True(t, scope.PublicContext().AllowsExpression(metadata.ScopeExpression))
+	assert.Len(t, metadata.ScopeExpression.Alternatives, 1)
 }

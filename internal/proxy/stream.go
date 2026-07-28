@@ -14,6 +14,7 @@ import (
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/converter"
+	"github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
 	promanutils "github.com/mixaill76/auto_ai_router/internal/converter/proman/utils"
 	"github.com/mixaill76/auto_ai_router/internal/converter/responses"
 )
@@ -48,6 +49,7 @@ type StreamUsageInfo struct {
 	PromptTokens             int // May be 0 if not provided in streaming response
 	CompletionTokens         int
 	CachedTokens             int // Tokens from cached prompt content (prompt_caching feature)
+	CachedAudioTokens        int // Cached prompt tokens whose modality is audio
 	AudioInputTokens         int // Audio tokens in the request
 	AudioOutputTokens        int // Audio tokens in the response
 	ImageTokens              int // Input image/video tokens (if reported)
@@ -56,8 +58,11 @@ type StreamUsageInfo struct {
 	AcceptedPredictionTokens int
 	RejectedPredictionTokens int
 	CachedOutputTokens       int
-	CacheCreationTokens      int // Anthropic: tokens created for cache (billed at different rate)
-	CacheReadTokens          int // Anthropic: tokens read from cache (billed at cheaper rate)
+	CacheCreationTokens      int // Tokens created for cache (billed at different rate)
+	CacheCreation5mTokens    int
+	CacheCreation1hTokens    int
+	CacheReadTokens          int // Tokens read from cache (billed at cheaper rate)
+	WebSearchRequests        int // Confirmed built-in web search executions
 }
 
 // StreamUsageExtractor provides a provider-agnostic interface for extracting
@@ -72,7 +77,9 @@ type StreamUsageExtractor interface {
 }
 
 // openAIStreamUsageExtractor implements StreamUsageExtractor for OpenAI format
-type openAIStreamUsageExtractor struct{}
+type openAIStreamUsageExtractor struct {
+	audioInputAlreadyExcludesCachedAudio bool
+}
 
 func (o *openAIStreamUsageExtractor) ExtractUsage(chunk []byte) *StreamUsageInfo {
 	// Supports two OpenAI streaming formats:
@@ -106,11 +113,16 @@ func (o *openAIStreamUsageExtractor) extractChatCompletionUsage(payload []byte) 
 			PromptTokens        *int `json:"prompt_tokens"`
 			CompletionTokens    *int `json:"completion_tokens"`
 			PromptTokensDetails struct {
-				CachedTokens        int `json:"cached_tokens,omitempty"`
-				CacheCreationTokens int `json:"cache_creation_tokens,omitempty"`
-				CacheWriteTokens    int `json:"cache_write_tokens,omitempty"`
-				AudioTokens         int `json:"audio_tokens,omitempty"`
-				ImageTokens         int `json:"image_tokens,omitempty"`
+				CachedTokens              int `json:"cached_tokens,omitempty"`
+				CachedAudioTokens         int `json:"cached_audio_tokens,omitempty"`
+				CacheCreationTokens       int `json:"cache_creation_tokens,omitempty"`
+				CacheWriteTokens          int `json:"cache_write_tokens,omitempty"`
+				CacheCreationTokenDetails struct {
+					Ephemeral5mInputTokens int `json:"ephemeral_5m_input_tokens,omitempty"`
+					Ephemeral1hInputTokens int `json:"ephemeral_1h_input_tokens,omitempty"`
+				} `json:"cache_creation_token_details,omitempty"`
+				AudioTokens int `json:"audio_tokens,omitempty"`
+				ImageTokens int `json:"image_tokens,omitempty"`
 			} `json:"prompt_tokens_details,omitempty"`
 			CompletionTokensDetails struct {
 				AcceptedPredictionTokens int `json:"accepted_prediction_tokens,omitempty"`
@@ -120,6 +132,10 @@ func (o *openAIStreamUsageExtractor) extractChatCompletionUsage(payload []byte) 
 				ReasoningTokens          int `json:"reasoning_tokens,omitempty"`
 				RejectedPredictionTokens int `json:"rejected_prediction_tokens,omitempty"`
 			} `json:"completion_tokens_details,omitempty"`
+			ServerToolUse struct {
+				WebSearchRequests int `json:"web_search_requests,omitempty"`
+			} `json:"server_tool_use,omitempty"`
+			WebSearchRequests int `json:"web_search_requests,omitempty"`
 		} `json:"usage"`
 	}
 
@@ -135,13 +151,29 @@ func (o *openAIStreamUsageExtractor) extractChatCompletionUsage(payload []byte) 
 	if cacheCreationTokens == 0 {
 		cacheCreationTokens = data.Usage.PromptTokensDetails.CacheWriteTokens
 	}
+	if cacheCreationTokens == 0 {
+		cacheCreationTokens = data.Usage.PromptTokensDetails.CacheCreationTokenDetails.Ephemeral5mInputTokens +
+			data.Usage.PromptTokensDetails.CacheCreationTokenDetails.Ephemeral1hInputTokens
+	}
+	cachedTokens, cachedAudioTokens := converterutil.NormalizeCachedAudioBreakdown(
+		data.Usage.PromptTokensDetails.CachedTokens,
+		data.Usage.PromptTokensDetails.CachedAudioTokens,
+	)
 
 	return &StreamUsageInfo{
-		PromptTokens:             intValue(data.Usage.PromptTokens),
-		CompletionTokens:         intValue(data.Usage.CompletionTokens),
-		CachedTokens:             data.Usage.PromptTokensDetails.CachedTokens,
-		CacheCreationTokens:      cacheCreationTokens,
-		AudioInputTokens:         data.Usage.PromptTokensDetails.AudioTokens,
+		PromptTokens:          intValue(data.Usage.PromptTokens),
+		CompletionTokens:      intValue(data.Usage.CompletionTokens),
+		CachedTokens:          cachedTokens,
+		CachedAudioTokens:     cachedAudioTokens,
+		CacheCreationTokens:   cacheCreationTokens,
+		CacheCreation5mTokens: data.Usage.PromptTokensDetails.CacheCreationTokenDetails.Ephemeral5mInputTokens,
+		CacheCreation1hTokens: data.Usage.PromptTokensDetails.CacheCreationTokenDetails.Ephemeral1hInputTokens,
+		AudioInputTokens: normalizeStreamAudioInput(
+			data.Usage.PromptTokensDetails.AudioTokens,
+			cachedTokens,
+			cachedAudioTokens,
+			o.audioInputAlreadyExcludesCachedAudio,
+		),
 		AudioOutputTokens:        data.Usage.CompletionTokensDetails.AudioTokens,
 		ImageTokens:              data.Usage.PromptTokensDetails.ImageTokens,
 		OutputImageTokens:        data.Usage.CompletionTokensDetails.ImageTokens,
@@ -149,6 +181,10 @@ func (o *openAIStreamUsageExtractor) extractChatCompletionUsage(payload []byte) 
 		AcceptedPredictionTokens: data.Usage.CompletionTokensDetails.AcceptedPredictionTokens,
 		RejectedPredictionTokens: data.Usage.CompletionTokensDetails.RejectedPredictionTokens,
 		CachedOutputTokens:       data.Usage.CompletionTokensDetails.CachedTokens,
+		WebSearchRequests: webSearchRequestsFromUsage(
+			data.Usage.ServerToolUse.WebSearchRequests,
+			data.Usage.WebSearchRequests,
+		),
 	}
 }
 
@@ -159,10 +195,12 @@ func (o *openAIStreamUsageExtractor) extractChatCompletionUsage(payload []byte) 
 func (o *openAIStreamUsageExtractor) extractResponsesAPIUsage(payload []byte) *StreamUsageInfo {
 	var data struct {
 		// Top-level usage (some Responses API events)
-		Usage *responsesAPIUsage `json:"usage,omitempty"`
+		Usage  *responsesAPIUsage        `json:"usage,omitempty"`
+		Output []streamingResponseOutput `json:"output,omitempty"`
 		// Nested usage in response.completed event
 		Response struct {
-			Usage *responsesAPIUsage `json:"usage,omitempty"`
+			Usage  *responsesAPIUsage        `json:"usage,omitempty"`
+			Output []streamingResponseOutput `json:"output,omitempty"`
 		} `json:"response,omitempty"`
 	}
 
@@ -183,13 +221,39 @@ func (o *openAIStreamUsageExtractor) extractResponsesAPIUsage(payload []byte) *S
 	if cacheCreationTokens == 0 {
 		cacheCreationTokens = usage.InputTokensDetails.CacheWriteTokens
 	}
+	if cacheCreationTokens == 0 {
+		cacheCreationTokens = usage.InputTokensDetails.CacheCreationTokenDetails.Ephemeral5mInputTokens +
+			usage.InputTokensDetails.CacheCreationTokenDetails.Ephemeral1hInputTokens
+	}
+	cachedTokens, cachedAudioTokens := converterutil.NormalizeCachedAudioBreakdown(
+		usage.InputTokensDetails.CachedTokens,
+		usage.InputTokensDetails.CachedAudioTokens,
+	)
+	webSearchRequests := webSearchRequestsFromUsage(
+		usage.ServerToolUse.WebSearchRequests,
+		usage.WebSearchRequests,
+	)
+	if webSearchRequests == 0 {
+		webSearchRequests = countCompletedStreamingWebSearchItems(data.Response.Output)
+	}
+	if webSearchRequests == 0 {
+		webSearchRequests = countCompletedStreamingWebSearchItems(data.Output)
+	}
 
 	return &StreamUsageInfo{
-		PromptTokens:             intValue(usage.InputTokens),
-		CompletionTokens:         intValue(usage.OutputTokens),
-		CachedTokens:             usage.InputTokensDetails.CachedTokens,
-		CacheCreationTokens:      cacheCreationTokens,
-		AudioInputTokens:         usage.InputTokensDetails.AudioTokens,
+		PromptTokens:          intValue(usage.InputTokens),
+		CompletionTokens:      intValue(usage.OutputTokens),
+		CachedTokens:          cachedTokens,
+		CachedAudioTokens:     cachedAudioTokens,
+		CacheCreationTokens:   cacheCreationTokens,
+		CacheCreation5mTokens: usage.InputTokensDetails.CacheCreationTokenDetails.Ephemeral5mInputTokens,
+		CacheCreation1hTokens: usage.InputTokensDetails.CacheCreationTokenDetails.Ephemeral1hInputTokens,
+		AudioInputTokens: normalizeStreamAudioInput(
+			usage.InputTokensDetails.AudioTokens,
+			cachedTokens,
+			cachedAudioTokens,
+			o.audioInputAlreadyExcludesCachedAudio,
+		),
 		AudioOutputTokens:        usage.OutputTokensDetails.AudioTokens,
 		ImageTokens:              usage.InputTokensDetails.ImageTokens,
 		OutputImageTokens:        usage.OutputTokensDetails.ImageTokens,
@@ -197,7 +261,23 @@ func (o *openAIStreamUsageExtractor) extractResponsesAPIUsage(payload []byte) *S
 		AcceptedPredictionTokens: usage.OutputTokensDetails.AcceptedPredictionTokens,
 		RejectedPredictionTokens: usage.OutputTokensDetails.RejectedPredictionTokens,
 		CachedOutputTokens:       usage.OutputTokensDetails.CachedTokens,
+		WebSearchRequests:        webSearchRequests,
 	}
+}
+
+type streamingResponseOutput struct {
+	Type   string `json:"type"`
+	Status string `json:"status,omitempty"`
+}
+
+func countCompletedStreamingWebSearchItems(output []streamingResponseOutput) int {
+	count := 0
+	for _, item := range output {
+		if item.Type == "web_search_call" && (item.Status == "" || item.Status == "completed") {
+			count++
+		}
+	}
+	return count
 }
 
 // responsesAPIUsage represents the usage object in OpenAI Responses API format.
@@ -205,11 +285,16 @@ type responsesAPIUsage struct {
 	InputTokens        *int `json:"input_tokens"`
 	OutputTokens       *int `json:"output_tokens"`
 	InputTokensDetails struct {
-		CachedTokens        int `json:"cached_tokens,omitempty"`
-		CacheCreationTokens int `json:"cache_creation_tokens,omitempty"`
-		CacheWriteTokens    int `json:"cache_write_tokens,omitempty"`
-		AudioTokens         int `json:"audio_tokens,omitempty"`
-		ImageTokens         int `json:"image_tokens,omitempty"`
+		CachedTokens              int `json:"cached_tokens,omitempty"`
+		CachedAudioTokens         int `json:"cached_audio_tokens,omitempty"`
+		CacheCreationTokens       int `json:"cache_creation_tokens,omitempty"`
+		CacheWriteTokens          int `json:"cache_write_tokens,omitempty"`
+		CacheCreationTokenDetails struct {
+			Ephemeral5mInputTokens int `json:"ephemeral_5m_input_tokens,omitempty"`
+			Ephemeral1hInputTokens int `json:"ephemeral_1h_input_tokens,omitempty"`
+		} `json:"cache_creation_token_details,omitempty"`
+		AudioTokens int `json:"audio_tokens,omitempty"`
+		ImageTokens int `json:"image_tokens,omitempty"`
 	} `json:"input_tokens_details,omitempty"`
 	OutputTokensDetails struct {
 		AcceptedPredictionTokens int `json:"accepted_prediction_tokens,omitempty"`
@@ -219,6 +304,10 @@ type responsesAPIUsage struct {
 		ReasoningTokens          int `json:"reasoning_tokens,omitempty"`
 		RejectedPredictionTokens int `json:"rejected_prediction_tokens,omitempty"`
 	} `json:"output_tokens_details,omitempty"`
+	ServerToolUse struct {
+		WebSearchRequests int `json:"web_search_requests,omitempty"`
+	} `json:"server_tool_use,omitempty"`
+	WebSearchRequests int `json:"web_search_requests,omitempty"`
 }
 
 // anthropicStreamUsageExtractor implements StreamUsageExtractor for Anthropic format
@@ -235,6 +324,13 @@ func (a *anthropicStreamUsageExtractor) ExtractUsage(chunk []byte) *StreamUsageI
 			OutputTokens             *int `json:"output_tokens"`
 			CacheCreationInputTokens int  `json:"cache_creation_input_tokens,omitempty"`
 			CacheReadInputTokens     int  `json:"cache_read_input_tokens,omitempty"`
+			CacheCreation            struct {
+				Ephemeral5mInputTokens int `json:"ephemeral_5m_input_tokens,omitempty"`
+				Ephemeral1hInputTokens int `json:"ephemeral_1h_input_tokens,omitempty"`
+			} `json:"cache_creation,omitempty"`
+			ServerToolUse struct {
+				WebSearchRequests int `json:"web_search_requests,omitempty"`
+			} `json:"server_tool_use,omitempty"`
 		} `json:"usage"`
 	}
 
@@ -248,11 +344,18 @@ func (a *anthropicStreamUsageExtractor) ExtractUsage(chunk []byte) *StreamUsageI
 			continue
 		}
 
+		cacheCreationTokens := data.Usage.CacheCreationInputTokens
+		if cacheCreationTokens == 0 {
+			cacheCreationTokens = data.Usage.CacheCreation.Ephemeral5mInputTokens + data.Usage.CacheCreation.Ephemeral1hInputTokens
+		}
 		return &StreamUsageInfo{
-			PromptTokens:        intValue(data.Usage.InputTokens),
-			CompletionTokens:    intValue(data.Usage.OutputTokens),
-			CacheCreationTokens: data.Usage.CacheCreationInputTokens,
-			CacheReadTokens:     data.Usage.CacheReadInputTokens,
+			PromptTokens:          intValue(data.Usage.InputTokens),
+			CompletionTokens:      intValue(data.Usage.OutputTokens),
+			CacheCreationTokens:   cacheCreationTokens,
+			CacheCreation5mTokens: data.Usage.CacheCreation.Ephemeral5mInputTokens,
+			CacheCreation1hTokens: data.Usage.CacheCreation.Ephemeral1hInputTokens,
+			CacheReadTokens:       data.Usage.CacheReadInputTokens,
+			WebSearchRequests:     data.Usage.ServerToolUse.WebSearchRequests,
 			// Anthropic separates cache_creation (cached prompt tokens)
 			// For logging purposes, we combine under CachedTokens
 			CachedTokens: data.Usage.CacheReadInputTokens,
@@ -267,6 +370,15 @@ func intValue(value *int) int {
 		return 0
 	}
 	return *value
+}
+
+func webSearchRequestsFromUsage(values ...int) int {
+	for _, value := range values {
+		if value > 0 {
+			return value
+		}
+	}
+	return 0
 }
 
 // extractJSONPayloadsFromStreamChunk extracts JSON payload candidates from raw stream chunks.
@@ -309,19 +421,26 @@ func getStreamUsageExtractor(providerName string) StreamUsageExtractor {
 	case "anthropic":
 		// Anthropic streaming goes through handleTransformedStreaming which converts
 		// chunks to OpenAI format, so we use OpenAI extractor for the transformed response
-		return &openAIStreamUsageExtractor{}
+		return &openAIStreamUsageExtractor{audioInputAlreadyExcludesCachedAudio: true}
 	case "vertex ai":
 		// Vertex AI transforms to OpenAI format during streaming,
 		// so we use OpenAI extractor for the transformed response
-		return &openAIStreamUsageExtractor{}
+		return &openAIStreamUsageExtractor{audioInputAlreadyExcludesCachedAudio: true}
 	case "bedrock":
 		// Bedrock transforms to OpenAI format during streaming (via Anthropic converter),
 		// so we use OpenAI extractor for the transformed response
-		return &openAIStreamUsageExtractor{}
+		return &openAIStreamUsageExtractor{audioInputAlreadyExcludesCachedAudio: true}
+	case "native_responses":
+		// Native Responses converters emit billing-normalized usage.
+		return &openAIStreamUsageExtractor{audioInputAlreadyExcludesCachedAudio: true}
 	default:
 		// Fallback: try OpenAI format first (most common)
 		return &openAIStreamUsageExtractor{}
 	}
+}
+
+func normalizeStreamAudioInput(audioTokens, cachedTokens, cachedAudioTokens int, alreadyExcludesCachedAudio bool) int {
+	return converterutil.NormalizeAudioInputTokens(audioTokens, cachedTokens, cachedAudioTokens, !alreadyExcludesCachedAudio)
 }
 
 func IsStreamingResponse(resp *http.Response) bool {
@@ -475,7 +594,7 @@ func (p *Proxy) handleTransformedStreaming(
 					outputStreamError.Observe(chunk)
 				}
 				if logCtx != nil {
-					if usage := extractTokenUsageFromStreamingChunk(string(chunk)); usage != nil {
+					if usage := extractTokenUsageFromStreamingChunkWithOptions(string(chunk), converter.TokenUsageExtractionOptions{}); usage != nil {
 						if logCtx.TokenUsage == nil {
 							logCtx.TokenUsage = &converter.TokenUsage{}
 						}
@@ -512,7 +631,7 @@ func (p *Proxy) handleTransformedStreaming(
 			err = resolveCapturedProviderStreamError(logCtx, resp.StatusCode, err, rawProviderStreamError, outputStreamError)
 		}
 		markStreamFailure(logCtx, err)
-		p.finalizeStreamingLog(logCtx, estimated, lastChunk, providerName, resp.StatusCode)
+		p.finalizeStreamingLog(logCtx, estimated, lastChunk, providerName, resp.StatusCode, true)
 		return err
 	}
 	wg.Wait()
@@ -546,7 +665,7 @@ func (p *Proxy) handleTransformedStreaming(
 		p.logger.DebugContext(respCtx(resp), "Streaming token usage recorded", "credential", credName, "model", modelID, "tokens", totalTokens)
 	}
 
-	p.finalizeStreamingLog(logCtx, logTokens, lastChunk, providerName, resp.StatusCode)
+	p.finalizeStreamingLog(logCtx, logTokens, lastChunk, providerName, resp.StatusCode, true)
 
 	if streamErr == nil {
 		p.logger.DebugContext(respCtx(resp), "Streaming response completed", "provider", providerName, "credential", credName)
@@ -612,7 +731,7 @@ func (p *Proxy) handleStreamingWithTokens(w http.ResponseWriter, resp *http.Resp
 			err = resolveCapturedProviderStreamError(logCtx, resp.StatusCode, err, providerStreamError)
 		}
 		markStreamFailure(logCtx, err)
-		p.finalizeStreamingLog(logCtx, estimated, lastChunk, "openai", resp.StatusCode)
+		p.finalizeStreamingLog(logCtx, estimated, lastChunk, "openai", resp.StatusCode, false)
 		return err
 	}
 
@@ -646,7 +765,7 @@ func (p *Proxy) handleStreamingWithTokens(w http.ResponseWriter, resp *http.Resp
 		p.logger.DebugContext(respCtx(resp), "Streaming token usage recorded", "credential", credName, "model", modelID, "tokens", totalTokens)
 	}
 
-	p.finalizeStreamingLog(logCtx, logTokens, lastChunk, "openai", resp.StatusCode)
+	p.finalizeStreamingLog(logCtx, logTokens, lastChunk, "openai", resp.StatusCode, false)
 
 	if streamErr == nil {
 		p.logger.DebugContext(respCtx(resp), "Streaming response completed", "credential", credName)
@@ -655,7 +774,7 @@ func (p *Proxy) handleStreamingWithTokens(w http.ResponseWriter, resp *http.Resp
 }
 
 // finalizeStreamingLog extracts usage info from the last streaming chunk and logs spend to LiteLLM DB.
-func (p *Proxy) finalizeStreamingLog(logCtx *RequestLogContext, totalTokens int, lastChunk []byte, providerName string, statusCode int) {
+func (p *Proxy) finalizeStreamingLog(logCtx *RequestLogContext, totalTokens int, lastChunk []byte, providerName string, statusCode int, audioInputAlreadyExcludesCachedAudio bool) {
 	if logCtx == nil || logCtx.Logged {
 		return
 	}
@@ -672,6 +791,9 @@ func (p *Proxy) finalizeStreamingLog(logCtx *RequestLogContext, totalTokens int,
 	providerUsage := false
 	if len(lastChunk) > 0 {
 		extractor := getStreamUsageExtractor(providerName)
+		if audioInputAlreadyExcludesCachedAudio {
+			extractor = &openAIStreamUsageExtractor{audioInputAlreadyExcludesCachedAudio: true}
+		}
 		if usageInfo := extractor.ExtractUsage(lastChunk); usageInfo != nil {
 			providerUsage = true
 			if usageInfo.PromptTokens > 0 {
@@ -683,6 +805,9 @@ func (p *Proxy) finalizeStreamingLog(logCtx *RequestLogContext, totalTokens int,
 
 			if usageInfo.CachedTokens > 0 {
 				logCtx.TokenUsage.CachedInputTokens = usageInfo.CachedTokens
+			}
+			if usageInfo.CachedAudioTokens > 0 {
+				logCtx.TokenUsage.CachedAudioInputTokens = usageInfo.CachedAudioTokens
 			}
 			if usageInfo.AudioInputTokens > 0 {
 				logCtx.TokenUsage.AudioInputTokens = usageInfo.AudioInputTokens
@@ -712,6 +837,15 @@ func (p *Proxy) finalizeStreamingLog(logCtx *RequestLogContext, totalTokens int,
 			if usageInfo.CacheCreationTokens > 0 {
 				logCtx.TokenUsage.CacheCreationTokens = usageInfo.CacheCreationTokens
 			}
+			if usageInfo.CacheCreation5mTokens > 0 {
+				logCtx.TokenUsage.CacheCreation5mTokens = usageInfo.CacheCreation5mTokens
+			}
+			if usageInfo.CacheCreation1hTokens > 0 {
+				logCtx.TokenUsage.CacheCreation1hTokens = usageInfo.CacheCreation1hTokens
+			}
+			if usageInfo.WebSearchRequests > 0 {
+				logCtx.TokenUsage.WebSearchRequests = usageInfo.WebSearchRequests
+			}
 
 			p.logger.DebugContext(logCtx.Context(), "Extracted usage from streaming response",
 				"provider", providerName,
@@ -723,6 +857,7 @@ func (p *Proxy) finalizeStreamingLog(logCtx *RequestLogContext, totalTokens int,
 				"image_tokens", usageInfo.ImageTokens,
 				"output_image_tokens", usageInfo.OutputImageTokens,
 				"reasoning_tokens", usageInfo.ReasoningTokens,
+				"web_search_requests", usageInfo.WebSearchRequests,
 			)
 		}
 	}
@@ -733,6 +868,7 @@ func (p *Proxy) finalizeStreamingLog(logCtx *RequestLogContext, totalTokens int,
 	if !providerUsage && logCtx.TokenUsage.CompletionTokens == 0 {
 		logCtx.TokenUsage.CompletionTokens = fallbackCompletion
 	}
+	logCtx.TokenUsage.Normalize()
 	if providerUsage {
 		logCtx.UsageSource = "provider"
 	} else if logCtx.UsageSource == "" {
@@ -1040,7 +1176,10 @@ func (p *Proxy) handleResponsesAPIStreaming(
 		if conv.IsPassthrough() {
 			p.logger.DebugContext(respCtx(resp), "Responses API streaming: passthrough mode (Chat Completions SSE → Responses SSE)",
 				"model", modelID, "provider", cred.Type)
-			return responses.TransformChatStreamToResponsesWithMeta(r, w, publicModel, reqMeta, onComplete)
+			usageOptions := tokenUsageExtractionOptionsForResponse(cred, resp.Header)
+			return responses.TransformChatStreamToResponsesWithMetaAndUsage(
+				r, w, publicModel, reqMeta, usageOptions.AudioInputIncludesCachedAudio, onComplete,
+			)
 		}
 
 		p.logger.DebugContext(respCtx(resp), "Responses API streaming: converted mode (Provider SSE → Chat Completions SSE → Responses SSE)",
@@ -1066,7 +1205,9 @@ func (p *Proxy) handleResponsesAPIStreaming(
 		}()
 
 		// Then convert Chat Completions SSE to Responses API SSE
-		err := responses.TransformChatStreamToResponsesWithMeta(pr, w, publicModel, reqMeta, onComplete)
+		err := responses.TransformChatStreamToResponsesWithMetaAndUsage(
+			pr, w, publicModel, reqMeta, false, onComplete,
+		)
 		_ = pr.Close()
 		wg.Wait() // ensure goroutine completes before reading transformErr
 		if err != nil {
@@ -1122,9 +1263,15 @@ func (p *Proxy) handlePassthroughResponsesStreaming(
 	credName, modelID string,
 	logCtx *RequestLogContext,
 	onComplete func(*responses.Response),
+	usageOptions ...converter.TokenUsageExtractionOptions,
 ) error {
 	p.logger.DebugContext(respCtx(resp), "Starting passthrough Responses API streaming",
 		"credential", credName, "model", modelID)
+	tokenUsageOptions := converter.TokenUsageExtractionOptions{AudioInputIncludesCachedAudio: true}
+	if len(usageOptions) > 0 {
+		tokenUsageOptions = usageOptions[0]
+	}
+	audioInputAlreadyExcludesCachedAudio := !tokenUsageOptions.AudioInputIncludesCachedAudio
 
 	var (
 		totalTokens           int
@@ -1186,12 +1333,30 @@ func (p *Proxy) handlePassthroughResponsesStreaming(
 						if logCtx.TokenUsage == nil {
 							logCtx.TokenUsage = &converter.TokenUsage{}
 						}
+						cachedTokens, cachedAudioTokens := converterutil.NormalizeCachedAudioBreakdown(
+							event.Response.Usage.InputTokensDetails.CachedTokens,
+							event.Response.Usage.InputTokensDetails.CachedAudioTokens,
+						)
 						logCtx.TokenUsage.PromptTokens = event.Response.Usage.InputTokens
 						logCtx.TokenUsage.CompletionTokens = event.Response.Usage.OutputTokens
-						logCtx.TokenUsage.CachedInputTokens = event.Response.Usage.InputTokensDetails.CachedTokens
-						logCtx.TokenUsage.AudioInputTokens = event.Response.Usage.InputTokensDetails.AudioTokens
+						logCtx.TokenUsage.CachedInputTokens = cachedTokens
+						logCtx.TokenUsage.CachedAudioInputTokens = cachedAudioTokens
+						logCtx.TokenUsage.CacheCreationTokens = event.Response.Usage.InputTokensDetails.CacheCreationTokens
+						if details := event.Response.Usage.InputTokensDetails.CacheCreationTokenDetails; details != nil {
+							logCtx.TokenUsage.CacheCreation5mTokens = details.Ephemeral5mInputTokens
+							logCtx.TokenUsage.CacheCreation1hTokens = details.Ephemeral1hInputTokens
+						}
+						logCtx.TokenUsage.AudioInputTokens = normalizeStreamAudioInput(
+							event.Response.Usage.InputTokensDetails.AudioTokens,
+							cachedTokens,
+							cachedAudioTokens,
+							audioInputAlreadyExcludesCachedAudio,
+						)
 						logCtx.TokenUsage.AudioOutputTokens = event.Response.Usage.OutputTokensDetails.AudioTokens
 						logCtx.TokenUsage.ReasoningTokens = event.Response.Usage.OutputTokensDetails.ReasoningTokens
+						if event.Response.Usage.ServerToolUse != nil {
+							logCtx.TokenUsage.WebSearchRequests = event.Response.Usage.ServerToolUse.WebSearchRequests
+						}
 					}
 				}
 				completedEventPayload = []byte(jsonData) // plain JSON; extractResponsesAPIUsage handles it
@@ -1223,7 +1388,7 @@ func (p *Proxy) handlePassthroughResponsesStreaming(
 			err = resolveCapturedProviderStreamError(logCtx, resp.StatusCode, err, providerStreamError)
 		}
 		markStreamFailure(logCtx, err)
-		p.finalizeStreamingLog(logCtx, logTokens, finalChunk, "openai", resp.StatusCode)
+		p.finalizeStreamingLog(logCtx, logTokens, finalChunk, "openai", resp.StatusCode, audioInputAlreadyExcludesCachedAudio)
 		return err
 	}
 
@@ -1262,6 +1427,6 @@ func (p *Proxy) handlePassthroughResponsesStreaming(
 		finalChunk = completedEventPayload
 	}
 
-	p.finalizeStreamingLog(logCtx, logTokens, finalChunk, "openai", resp.StatusCode)
+	p.finalizeStreamingLog(logCtx, logTokens, finalChunk, "openai", resp.StatusCode, audioInputAlreadyExcludesCachedAudio)
 	return streamErr
 }

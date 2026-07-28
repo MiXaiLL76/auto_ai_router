@@ -57,9 +57,10 @@ func (a *Authenticator) FetchMasterKey(ctx context.Context, defaultKey string) e
 	}
 
 	info := models.TokenInfo{
-		Token:   HashToken(masterKey),
-		KeyName: "litellm-master-key",
-		UserID:  "litellm-master-key",
+		Token:       HashToken(masterKey),
+		KeyName:     "litellm-master-key",
+		UserID:      "litellm-master-key",
+		IsMasterKey: true,
 	}
 	a.cache.Set(info.Token, &info)
 

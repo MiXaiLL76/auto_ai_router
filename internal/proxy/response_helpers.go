@@ -62,6 +62,10 @@ func extractTokensFromStreamingChunk(chunk string) int {
 // extractTokenUsageFromStreamingChunk parses full TokenUsage (prompt+completion+details)
 // from an SSE chunk. Returns nil if no usage data is found.
 func extractTokenUsageFromStreamingChunk(chunk string) *converter.TokenUsage {
+	return extractTokenUsageFromStreamingChunkWithOptions(chunk, converter.TokenUsageExtractionOptions{AudioInputIncludesCachedAudio: true})
+}
+
+func extractTokenUsageFromStreamingChunkWithOptions(chunk string, opts converter.TokenUsageExtractionOptions) *converter.TokenUsage {
 	lines := strings.Split(chunk, "\n")
 	for _, line := range lines {
 		if strings.HasPrefix(line, "data: ") {
@@ -69,7 +73,7 @@ func extractTokenUsageFromStreamingChunk(chunk string) *converter.TokenUsage {
 			if jsonData == "[DONE]" {
 				continue
 			}
-			if usage := converter.ExtractTokenUsage([]byte(jsonData)); usage != nil {
+			if usage := converter.ExtractTokenUsageWithOptions([]byte(jsonData), opts); usage != nil {
 				return usage
 			}
 		}
@@ -245,6 +249,44 @@ func extractImageCountFromBody(body []byte, contentType string) int {
 		return *imgReq.N
 	}
 	return 1
+}
+
+func extractWebSearchRequestUsage(body []byte, contentType string) (bool, string) {
+	if len(body) == 0 || strings.HasPrefix(strings.ToLower(contentType), "multipart/form-data") {
+		return false, ""
+	}
+
+	var req struct {
+		WebSearchOptions map[string]interface{}   `json:"web_search_options,omitempty"`
+		Tools            []map[string]interface{} `json:"tools,omitempty"`
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		return false, ""
+	}
+
+	if req.WebSearchOptions != nil {
+		return true, webSearchContextSizeFromMap(req.WebSearchOptions)
+	}
+	for _, tool := range req.Tools {
+		if !isWebSearchTool(tool) {
+			continue
+		}
+		return true, webSearchContextSizeFromMap(tool)
+	}
+	return false, ""
+}
+
+func isWebSearchTool(tool map[string]interface{}) bool {
+	toolType, _ := tool["type"].(string)
+	return toolType == "web_search" || strings.HasPrefix(toolType, "web_search_")
+}
+
+func webSearchContextSizeFromMap(values map[string]interface{}) string {
+	if values == nil {
+		return converter.NormalizeWebSearchContextSize("")
+	}
+	size, _ := values["search_context_size"].(string)
+	return converter.NormalizeWebSearchContextSize(size)
 }
 
 // decodeResponseBody decodes the response body based on Content-Encoding

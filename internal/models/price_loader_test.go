@@ -67,6 +67,57 @@ func TestLoadModelPrices_GPT56LongContext(t *testing.T) {
 	assert.InDelta(t, 0.00001625, price.CacheCreationInputTokenCostAbove272k, 1e-12)
 }
 
+func TestLoadModelPrices_CachePricingExtensions(t *testing.T) {
+	filePath := filepath.Join(t.TempDir(), "prices.json")
+	pricesJSON := `{
+		"claude-test": {
+			"input_cost_per_token": 0.000003,
+			"output_cost_per_token": 0.000015,
+			"cache_read_input_token_cost_above_200k_tokens": 0.0000006,
+			"cache_creation_input_token_cost_above_200k_tokens": 0.0000075,
+			"cache_creation_input_token_cost_above_1hr": 0.000006,
+			"cache_creation_input_token_cost_above_1hr_above_200k_tokens": 0.000012,
+			"cache_read_input_audio_token_cost": 0.0000009,
+			"search_context_cost_per_query": {
+				"search_context_size_low": 0.01,
+				"search_context_size_medium": 0.02,
+				"search_context_size_high": 0.03
+			},
+			"web_search_billing_unit": "per_prompt",
+			"litellm_provider": "gemini"
+		}
+	}`
+	require.NoError(t, os.WriteFile(filePath, []byte(pricesJSON), 0o600))
+
+	prices, err := LoadModelPrices(filePath)
+	require.NoError(t, err)
+	price := prices["claude-test"]
+	require.NotNil(t, price)
+	assert.InDelta(t, 0.0000006, price.CacheReadInputTokenCostAbove200k, 1e-12)
+	assert.InDelta(t, 0.0000075, price.CacheCreationInputTokenCostAbove200k, 1e-12)
+	assert.InDelta(t, 0.000006, price.CacheCreationInputTokenCostAbove1hr, 1e-12)
+	assert.InDelta(t, 0.000012, price.CacheCreationInputTokenCostAbove1hrAbove200k, 1e-12)
+	assert.InDelta(t, 0.0000009, price.CacheReadInputAudioTokenCost, 1e-12)
+	assert.InDelta(t, 0.02, price.SearchContextCostPerQuery["search_context_size_medium"], 1e-12)
+	assert.Equal(t, "per_prompt", price.WebSearchBillingUnit)
+	assert.Equal(t, "gemini", price.LiteLLMProvider)
+}
+
+func TestLoadModelPrices_InfersProviderFromPrefixedKey(t *testing.T) {
+	filePath := filepath.Join(t.TempDir(), "prices.json")
+	require.NoError(t, os.WriteFile(filePath, []byte(`{
+		"vertex_ai/gemini-2.5-flash": {
+			"search_context_cost_per_query": {
+				"search_context_size_medium": 0.035
+			}
+		}
+	}`), 0o600))
+
+	prices, err := LoadModelPrices(filePath)
+	require.NoError(t, err)
+	assert.Equal(t, "vertex_ai", prices["gemini-2.5-flash"].LiteLLMProvider)
+}
+
 func TestLoadModelPrices_FromFilePath(t *testing.T) {
 	// Create a temporary file with valid JSON
 	tmpDir := t.TempDir()

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/mixaill76/auto_ai_router/internal/converter"
 	"github.com/mixaill76/auto_ai_router/internal/kafkalog"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb/models"
@@ -79,4 +80,42 @@ func TestLogSpendToLiteLLMDB_NoKafkaFallbackFlagOnSuccess(t *testing.T) {
 
 	_, hasFlag := metadata["kafka_fallback"]
 	assert.False(t, hasFlag)
+}
+
+func TestLogSpendToLiteLLMDB_NormalizesTokenUsageBeforePersisting(t *testing.T) {
+	prx := NewTestProxyBuilder().Build()
+	dbStub := &stubLiteLLMManager{}
+	prx.LiteLLMDB = dbStub
+
+	logCtx := testLogCtx(t)
+	logCtx.TokenUsage = &converter.TokenUsage{
+		PromptTokens:           -100,
+		CompletionTokens:       50,
+		AudioInputTokens:       -10,
+		CachedInputTokens:      -80,
+		CachedAudioInputTokens: 40,
+		CacheCreationTokens:    10,
+		CacheCreation5mTokens:  8,
+		CacheCreation1hTokens:  8,
+	}
+
+	err := prx.logSpendToLiteLLMDB(logCtx)
+	require.NoError(t, err)
+
+	require.Len(t, dbStub.loggedEntries, 1)
+	entry := dbStub.loggedEntries[0]
+	assert.Equal(t, 0, entry.PromptTokens)
+	assert.Equal(t, 50, entry.CompletionTokens)
+	assert.Equal(t, 50, entry.TotalTokens)
+
+	var metadata map[string]interface{}
+	require.NoError(t, json.Unmarshal([]byte(entry.Metadata), &metadata))
+	usageObject := metadata["usage_object"].(map[string]interface{})
+	promptDetails := usageObject["prompt_tokens_details"].(map[string]interface{})
+	assert.Equal(t, float64(0), promptDetails["audio_tokens"])
+	assert.Equal(t, float64(0), promptDetails["cached_tokens"])
+	assert.Equal(t, float64(0), promptDetails["cached_audio_tokens"])
+	ttlDetails := promptDetails["cache_creation_token_details"].(map[string]interface{})
+	assert.Equal(t, float64(8), ttlDetails["ephemeral_5m_input_tokens"])
+	assert.Equal(t, float64(2), ttlDetails["ephemeral_1h_input_tokens"])
 }

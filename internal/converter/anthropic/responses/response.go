@@ -169,13 +169,31 @@ func anthropicUsageToUsage(au *anthropic.AnthropicUsage) *responses.Usage {
 	if au == nil {
 		return nil
 	}
-	return &responses.Usage{
-		InputTokens:  au.InputTokens,
-		OutputTokens: au.OutputTokens,
-		TotalTokens:  au.InputTokens + au.OutputTokens,
-		InputTokensDetails: responses.InputDetails{
-			CachedTokens: au.CacheReadInputTokens,
-		},
+	cacheCreationTokens, cacheCreation5mTokens, cacheCreation1hTokens := anthropic.NormalizeCacheCreationUsage(
+		au.CacheCreationInputTokens, au.CacheCreation,
+	)
+	totalInputTokens := au.InputTokens + au.CacheReadInputTokens + cacheCreationTokens
+	inputDetails := responses.InputDetails{
+		CachedTokens:        au.CacheReadInputTokens,
+		CacheCreationTokens: cacheCreationTokens,
+	}
+	if cacheCreation5mTokens > 0 || cacheCreation1hTokens > 0 {
+		inputDetails.CacheCreationTokenDetails = &responses.CacheCreationTokenDetails{
+			Ephemeral5mInputTokens: cacheCreation5mTokens,
+			Ephemeral1hInputTokens: cacheCreation1hTokens,
+		}
+	}
+	usage := &responses.Usage{
+		InputTokens:         totalInputTokens,
+		OutputTokens:        au.OutputTokens,
+		TotalTokens:         totalInputTokens + au.OutputTokens,
+		InputTokensDetails:  inputDetails,
 		OutputTokensDetails: responses.OutputDetails{},
 	}
+	if au.ServerToolUse != nil && au.ServerToolUse.WebSearchRequests > 0 {
+		usage.ServerToolUse = &responses.ServerToolUseDetails{
+			WebSearchRequests: au.ServerToolUse.WebSearchRequests,
+		}
+	}
+	return usage
 }

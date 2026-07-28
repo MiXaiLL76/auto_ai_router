@@ -1,6 +1,6 @@
 # Proxy
 
-The proxy provider forwards requests to another Auto AI Router instance (or any OpenAI-compatible API). This enables router chaining and fallback configurations.
+The proxy provider forwards requests to a generic OpenAI-compatible API. For another Auto AI Router instance, prefer [`type: air`](air.md).
 
 ## Configuration
 
@@ -8,8 +8,8 @@ The proxy provider forwards requests to another Auto AI Router instance (or any 
 credentials:
   - name: "proxy_fallback"
     type: "proxy"
-    base_url: "http://backup-router.local:8080"
-    api_key: "sk-remote-master-key"  # Optional
+    base_url: "https://openai-compatible.example/v1"
+    api_key: "sk-upstream-key" # Optional
     rpm: 200
     tpm: 100000
     is_fallback: true
@@ -17,9 +17,9 @@ credentials:
 
 ## Required Fields
 
-| Field      | Description                                       |
-| ---------- | ------------------------------------------------- |
-| `base_url` | URL of the remote router or OpenAI-compatible API |
+| Field      | Description                      |
+| ---------- | -------------------------------- |
+| `base_url` | URL of the OpenAI-compatible API |
 
 ## Optional Fields
 
@@ -27,6 +27,28 @@ credentials:
 | ------------- | --------------------------------------------------------------------------------- |
 | `api_key`     | Remote master key (if the target requires authentication)                         |
 | `is_fallback` | When `true`, this credential is only used after primary credentials are exhausted |
+
+## Usage Contract
+
+Generic OpenAI-compatible APIs usually report `audio_tokens` including `cached_audio_tokens`. AIR subtracts cached audio before billing ordinary audio for these responses.
+
+AIR responses also include an explicit cached-audio usage contract:
+
+```http
+Air-Usage-Audio-Tokens: exclude-cached
+```
+
+or:
+
+```http
+Air-Usage-Audio-Tokens: include-cached
+```
+
+Downstream AIR reads this header automatically.
+
+## Migration / Rollout Note
+
+For AIR-to-AIR chained routing, switch credentials to `type: air`. Roll out the upstream AIR first. During the transition, current AIR releases read and write both the current `Air-Proxy-Client` marker and the legacy `X-Aar-Proxy-Client` marker.
 
 ## Fallback Behavior
 
@@ -53,7 +75,7 @@ credentials:
 
   # Fallback: another Auto AI Router instance
   - name: "backup_router"
-    type: "proxy"
+    type: "air"
     base_url: "http://10.0.1.50:8080"
     api_key: "sk-remote-key"
     is_fallback: true
@@ -63,7 +85,7 @@ When `openai_main` exhausts its rate limits, requests automatically route to `ba
 
 ### Multiple Fallbacks
 
-You can configure multiple fallback proxies — they are also load-balanced using round-robin:
+You can configure multiple fallback proxy/AIR credentials — they are also load-balanced using round-robin:
 
 ```yaml
 credentials:
@@ -74,12 +96,12 @@ credentials:
     rpm: 100
 
   - name: "backup_1"
-    type: "proxy"
+    type: "air"
     base_url: "http://router-1:8080"
     is_fallback: true
 
   - name: "backup_2"
-    type: "proxy"
+    type: "air"
     base_url: "http://router-2:8080"
     is_fallback: true
 ```

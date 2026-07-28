@@ -121,6 +121,29 @@ type CacheCreationDetails struct {
 	Ephemeral1hInputTokens int `json:"ephemeral_1h_input_tokens,omitempty"`
 }
 
+// NormalizeCacheCreationUsage returns a safe aggregate and TTL split. Some
+// compatible providers omit the aggregate while still returning the details.
+func NormalizeCacheCreationUsage(total int, details *CacheCreationDetails) (normalizedTotal, fiveMinutes, oneHour int) {
+	if total < 0 {
+		total = 0
+	}
+	if details == nil {
+		return total, 0, 0
+	}
+	fiveMinutes = details.Ephemeral5mInputTokens
+	oneHour = details.Ephemeral1hInputTokens
+	if fiveMinutes < 0 {
+		fiveMinutes = 0
+	}
+	if oneHour < 0 {
+		oneHour = 0
+	}
+	if total == 0 && fiveMinutes+oneHour > 0 {
+		total = fiveMinutes + oneHour
+	}
+	return total, fiveMinutes, oneHour
+}
+
 // ServerToolUsageDetails holds counts of server-side tool invocations.
 type ServerToolUsageDetails struct {
 	WebSearchRequests int `json:"web_search_requests,omitempty"`
@@ -199,8 +222,10 @@ type AnthropicError struct {
 // preserve the provider distinction between an omitted counter and an explicit
 // zero, which may intentionally replace a value reported by message_start.
 type AnthropicStreamUsage struct {
-	InputTokens              *int `json:"input_tokens,omitempty"`
-	OutputTokens             *int `json:"output_tokens,omitempty"`
-	CacheReadInputTokens     *int `json:"cache_read_input_tokens,omitempty"`
-	CacheCreationInputTokens *int `json:"cache_creation_input_tokens,omitempty"`
+	InputTokens              *int                    `json:"input_tokens,omitempty"`
+	OutputTokens             *int                    `json:"output_tokens,omitempty"`
+	CacheReadInputTokens     *int                    `json:"cache_read_input_tokens,omitempty"`
+	CacheCreationInputTokens *int                    `json:"cache_creation_input_tokens,omitempty"`
+	CacheCreation            *CacheCreationDetails   `json:"cache_creation,omitempty"`
+	ServerToolUse            *ServerToolUsageDetails `json:"server_tool_use,omitempty"`
 }

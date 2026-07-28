@@ -19,6 +19,7 @@ graph LR
         Gemini[Gemini]
         Bedrock[Bedrock]
         Proxy[Proxy]
+        AIR[AIR]
     end
 
     Client <--> Router
@@ -28,12 +29,13 @@ graph LR
     Router --> Gemini
     Router --> Bedrock
     Router --> Proxy
+    Router --> AIR
 ```
 
 ## Features
 
 - **Multi-provider routing** — OpenAI, Vertex AI, Gemini AI Studio, Anthropic, Comet API
-- **Proxy chains** — forward to other Auto AI Router instances as fallback
+- **AIR chains** — forward to other Auto AI Router instances as fallback
 - **Round-robin balancing** — distribute load across multiple credentials
 - **Two-level rate limiting** — per-credential RPM/TPM + per-model limits
 - **Fail2ban protection** — auto-ban credentials on repeated errors
