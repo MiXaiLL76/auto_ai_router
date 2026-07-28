@@ -78,6 +78,7 @@ func PrintConfig(logger *slog.Logger, cfg *Config) {
 		"port", cfg.Server.Port,
 		"max_body_size_mb", cfg.Server.MaxBodySizeMB,
 		"response_body_multiplier", cfg.Server.ResponseBodyMultiplier,
+		"response_compatibility", cfg.Server.ResponseCompatibility,
 		"request_timeout", cfg.Server.RequestTimeout.String(),
 		"read_timeout", cfg.Server.ReadTimeout.String(),
 		"write_timeout", cfg.Server.WriteTimeout.String(),

@@ -516,6 +516,14 @@ func (p *Proxy) readRequestBodyAndSelectModel(
 		return nil, "", "", false, false
 	}
 
+	if info := responseCompatRequestFromContext(r.Context()); info != nil {
+		var raw map[string]any
+		if json.Unmarshal(body, &raw) == nil {
+			info.RequestedModel, _ = raw["model"].(string)
+		}
+		info.IncludeUsage = strings.Contains(r.URL.Path, "/responses") || clientRequestedStreamUsage(body)
+	}
+
 	modelID, streaming, sessionID, body := extractMetadataFromBody(body, r.Header.Get("Content-Type"))
 	logCtx.PublicModelID = modelID
 	logCtx.ModelID = modelID

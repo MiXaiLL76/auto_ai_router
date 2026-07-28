@@ -63,6 +63,7 @@ monitoring:
 	assert.Equal(t, "info", cfg.Server.LoggingLevel)
 	assert.Equal(t, "sk-test-master-key", cfg.Server.MasterKey)
 	assert.Equal(t, 50, cfg.Server.DefaultModelsRPM)
+	assert.Equal(t, "native", cfg.Server.ResponseCompatibility)
 
 	// Validate fail2ban config
 	assert.Equal(t, 3, cfg.Fail2Ban.MaxAttempts)
@@ -141,6 +142,35 @@ func TestCredentialConfig_ScopeExpressionPreservesIndependentGroups(t *testing.T
 	expression := cred.ScopeExpression()
 	assert.True(t, scope.NewContext([]string{"team-a", "team-b"}, nil).AllowsExpression(expression))
 	assert.False(t, scope.NewContext([]string{"team-a"}, nil).AllowsExpression(expression))
+}
+
+func TestConfigResponseCompatibility(t *testing.T) {
+	cfg := &Config{
+		Server: ServerConfig{
+			Port:                  8080,
+			MaxBodySizeMB:         10,
+			MasterKey:             "test-key",
+			RequestTimeout:        30 * time.Second,
+			ResponseCompatibility: "litellm",
+		},
+		Fail2Ban: Fail2BanConfig{MaxAttempts: 3},
+		Credentials: []CredentialConfig{
+			{Name: "openai", Type: ProviderTypeOpenAI, APIKey: "key", BaseURL: "https://api.openai.com", RPM: 1},
+		},
+	}
+	require.NoError(t, cfg.Validate())
+	assert.Equal(t, "litellm", cfg.Server.ResponseCompatibility)
+
+	cfg.Server.ResponseCompatibility = "unknown"
+	err := cfg.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "response_compatibility")
+}
+
+func TestServerConfigUnmarshalResponseCompatibility(t *testing.T) {
+	var server ServerConfig
+	require.NoError(t, yaml.Unmarshal([]byte("response_compatibility: LiteLLM\n"), &server))
+	assert.Equal(t, "litellm", server.ResponseCompatibility)
 }
 
 func TestConfig_Validate_InvalidAuthType(t *testing.T) {

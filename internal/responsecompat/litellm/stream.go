@@ -1,0 +1,303 @@
+package litellm
+
+import (
+	"bufio"
+	"bytes"
+	"encoding/json"
+	"io"
+	"strings"
+	"time"
+
+	"github.com/google/uuid"
+)
+
+type streamReader struct {
+	ctx           Context
+	source        *bufio.Reader
+	pending       bytes.Buffer
+	id            string
+	created       any
+	sentRole      bool
+	sentFinish    bool
+	sentDone      bool
+	sawTools      bool
+	pendingFinish string
+}
+
+func newStreamReader(ctx Context, source io.Reader) io.Reader {
+	return &streamReader{ctx: ctx, source: bufio.NewReader(source)}
+}
+
+func (r *streamReader) Read(target []byte) (int, error) {
+	for r.pending.Len() == 0 && !r.sentDone {
+		if err := r.readFrame(); err != nil {
+			if err != io.EOF {
+				return 0, err
+			}
+			r.finish()
+		}
+	}
+	if r.pending.Len() > 0 {
+		return r.pending.Read(target)
+	}
+	return 0, io.EOF
+}
+
+func (r *streamReader) readFrame() error {
+	var lines []string
+	for {
+		line, err := r.source.ReadString('\n')
+		if len(line) > 0 {
+			trimmed := strings.TrimRight(line, "\r\n")
+			if trimmed == "" {
+				break
+			}
+			lines = append(lines, trimmed)
+		}
+		if err != nil {
+			if len(lines) > 0 {
+				break
+			}
+			return err
+		}
+	}
+	if len(lines) == 0 {
+		return nil
+	}
+
+	dataIndex := -1
+	for index, line := range lines {
+		if strings.HasPrefix(line, "data:") {
+			dataIndex = index
+			break
+		}
+	}
+	if dataIndex < 0 {
+		r.writeFrame(strings.Join(lines, "\n"))
+		return nil
+	}
+
+	payload := strings.TrimSpace(strings.TrimPrefix(lines[dataIndex], "data:"))
+	if payload == "[DONE]" {
+		r.finish()
+		return nil
+	}
+
+	var body map[string]any
+	if json.Unmarshal([]byte(payload), &body) != nil {
+		r.writeFrame(strings.Join(lines, "\n"))
+		return nil
+	}
+
+	switch r.ctx.Endpoint {
+	case "/v1/chat/completions":
+		if !r.normalizeChatChunk(body) {
+			return nil
+		}
+	case "/v1/completions":
+		if !r.normalizeTextChunk(body) {
+			return nil
+		}
+	default:
+		r.normalizeResponsesChunk(body)
+	}
+
+	encoded, err := json.Marshal(stripNulls(body, false))
+	if err != nil {
+		return err
+	}
+	lines[dataIndex] = "data: " + string(encoded)
+	r.writeFrame(strings.Join(lines, "\n"))
+	r.writePendingFinish()
+	return nil
+}
+
+func (r *streamReader) normalizeTextChunk(body map[string]any) bool {
+	body["object"] = "text_completion"
+	if r.ctx.RequestedModel != "" {
+		body["model"] = r.ctx.RequestedModel
+	}
+	if r.id == "" {
+		r.id, _ = body["id"].(string)
+		if r.id == "" {
+			r.id = "cmpl-" + uuid.NewString()
+		}
+	}
+	body["id"] = r.id
+	if r.created == nil {
+		r.created = body["created"]
+		if r.created == nil {
+			r.created = time.Now().Unix()
+		}
+	}
+	body["created"] = r.created
+	if usage, ok := body["usage"].(map[string]any); ok {
+		normalizeUsage(usage)
+		if !r.ctx.IncludeUsage {
+			delete(body, "usage")
+		}
+	}
+	choices, _ := body["choices"].([]any)
+	for index, rawChoice := range choices {
+		choice, ok := rawChoice.(map[string]any)
+		if !ok {
+			continue
+		}
+		if choice["index"] == nil {
+			choice["index"] = index
+		}
+		if reason, _ := choice["finish_reason"].(string); reason != "" {
+			choice["finish_reason"] = mapFinishReason(reason)
+			r.sentFinish = true
+		}
+	}
+	_, hasUsage := body["usage"]
+	return len(choices) > 0 || hasUsage
+}
+
+func (r *streamReader) normalizeChatChunk(body map[string]any) bool {
+	body["object"] = "chat.completion.chunk"
+	if r.ctx.RequestedModel != "" {
+		body["model"] = r.ctx.RequestedModel
+	}
+	if r.id == "" {
+		r.id, _ = body["id"].(string)
+		if r.id == "" {
+			r.id = "chatcmpl-" + uuid.NewString()
+		}
+	}
+	body["id"] = r.id
+	if r.created == nil {
+		r.created = body["created"]
+		if r.created == nil {
+			r.created = time.Now().Unix()
+		}
+	}
+	body["created"] = r.created
+
+	if usage, ok := body["usage"].(map[string]any); ok {
+		normalizeUsage(usage)
+		if !r.ctx.IncludeUsage {
+			delete(body, "usage")
+		}
+	}
+
+	choices, _ := body["choices"].([]any)
+	for index, rawChoice := range choices {
+		choice, ok := rawChoice.(map[string]any)
+		if !ok {
+			continue
+		}
+		if choice["index"] == nil {
+			choice["index"] = index
+		}
+		delta, ok := choice["delta"].(map[string]any)
+		if !ok {
+			delta = map[string]any{}
+			choice["delta"] = delta
+		}
+		if reasoning, ok := delta["reasoning"]; ok {
+			if _, exists := delta["reasoning_content"]; !exists {
+				delta["reasoning_content"] = reasoning
+			}
+			delete(delta, "reasoning")
+		}
+		hasDelta := hasStreamDelta(delta)
+		if toolCalls, ok := delta["tool_calls"].([]any); ok && len(toolCalls) > 0 {
+			r.sawTools = true
+		}
+		if !r.sentRole {
+			delta["role"] = "assistant"
+			r.sentRole = true
+		} else {
+			delete(delta, "role")
+		}
+
+		if reason, _ := choice["finish_reason"].(string); reason != "" {
+			if reason == "stop" && r.sawTools {
+				reason = "tool_calls"
+			}
+			reason = mapFinishReason(reason)
+			if hasDelta {
+				choice["finish_reason"] = nil
+				r.pendingFinish = reason
+				continue
+			}
+			choice["finish_reason"] = reason
+			r.sentFinish = true
+		}
+	}
+	_, hasUsage := body["usage"]
+	return len(choices) > 0 || hasUsage
+}
+
+func hasStreamDelta(delta map[string]any) bool {
+	for _, field := range []string{"content", "tool_calls", "function_call", "reasoning_content", "audio"} {
+		if value, ok := delta[field]; ok && value != nil {
+			return true
+		}
+	}
+	return false
+}
+
+func (r *streamReader) writePendingFinish() {
+	if r.pendingFinish == "" {
+		return
+	}
+	body := map[string]any{
+		"id":      r.id,
+		"object":  "chat.completion.chunk",
+		"created": r.created,
+		"model":   r.ctx.RequestedModel,
+		"choices": []any{
+			map[string]any{
+				"index":         0,
+				"delta":         map[string]any{"content": nil},
+				"finish_reason": r.pendingFinish,
+			},
+		},
+	}
+	encoded, _ := json.Marshal(stripNulls(body, false))
+	r.writeFrame("data: " + string(encoded))
+	r.pendingFinish = ""
+	r.sentFinish = true
+}
+
+func (r *streamReader) normalizeResponsesChunk(body map[string]any) {
+	if response, ok := body["response"].(map[string]any); ok && r.ctx.RequestedModel != "" {
+		response["model"] = r.ctx.RequestedModel
+	}
+	if errorBody, ok := body["error"].(map[string]any); ok && errorBody["code"] == nil {
+		errorBody["code"] = "unknown_error"
+	}
+}
+
+func (r *streamReader) finish() {
+	if r.sentDone {
+		return
+	}
+	if r.ctx.Endpoint == "/v1/chat/completions" && !r.sentFinish && r.sentRole {
+		body := map[string]any{
+			"id":      r.id,
+			"object":  "chat.completion.chunk",
+			"created": r.created,
+			"model":   r.ctx.RequestedModel,
+			"choices": []any{
+				map[string]any{
+					"index":         0,
+					"delta":         map[string]any{"content": nil},
+					"finish_reason": "stop",
+				},
+			},
+		}
+		encoded, _ := json.Marshal(stripNulls(body, false))
+		r.writeFrame("data: " + string(encoded))
+	}
+	r.writeFrame("data: [DONE]")
+	r.sentDone = true
+}
+
+func (r *streamReader) writeFrame(frame string) {
+	r.pending.WriteString(frame)
+	r.pending.WriteString("\n\n")
+}

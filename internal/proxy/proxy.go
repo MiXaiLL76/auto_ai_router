@@ -31,6 +31,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/models"
 	"github.com/mixaill76/auto_ai_router/internal/monitoring"
 	"github.com/mixaill76/auto_ai_router/internal/ratelimit"
+	compatlitellm "github.com/mixaill76/auto_ai_router/internal/responsecompat/litellm"
 	"github.com/mixaill76/auto_ai_router/internal/responsestore"
 	"github.com/mixaill76/auto_ai_router/internal/scope"
 	"github.com/mixaill76/auto_ai_router/internal/security"
@@ -301,6 +302,7 @@ type Config struct {
 	SessionStoreTTL            time.Duration
 	RouterID                   string // Human-readable name for this router (shown in /trace); defaults to hostname
 	DrainUpstreamOnAbort       bool   // When true, keep reading upstream after client disconnect to get real usage (default: false)
+	ResponseCompatibility      string
 
 	BudgetReserver                   *budget.Reserver      // Atomic Redis budget reservation (nil if Redis disabled — feature is a no-op)
 	KeyRateLimiter                   *ratelimit.RPMLimiter // Key/user/team/org RPM/TPM enforcement (nil if Redis disabled)
@@ -338,6 +340,7 @@ type Proxy struct {
 	budgetReservationEnabled         bool
 	keyRateLimitsEnabled             bool
 	defaultEstimatedCompletionTokens int
+	responseCompat                   *compatlitellm.Transformer
 	version                          string
 	commit                           string
 }
@@ -379,6 +382,11 @@ func New(cfg *Config) *Proxy {
 		sessionStore = NewSessionStore(ttl)
 	}
 
+	var responseCompat *compatlitellm.Transformer
+	if cfg.ResponseCompatibility == "litellm" {
+		responseCompat = compatlitellm.New()
+	}
+
 	return &Proxy{
 		routerID:                         routerID,
 		balancer:                         cfg.Balancer,
@@ -407,6 +415,7 @@ func New(cfg *Config) *Proxy {
 		budgetReservationEnabled:         cfg.BudgetReservationEnabled,
 		keyRateLimitsEnabled:             cfg.KeyRateLimitsEnabled,
 		defaultEstimatedCompletionTokens: cfg.DefaultEstimatedCompletionTokens,
+		responseCompat:                   responseCompat,
 		client:                           httputil.NewHTTPClient(httpClientCfg),
 		version:                          cfg.Version,
 		commit:                           cfg.Commit,
@@ -673,8 +682,26 @@ func (p *Proxy) forwardToProxy(
 }
 
 func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
+	if p.responseCompat == nil {
+		p.proxyRequest(w, r)
+		return
+	}
+
+	r, _ = withResponseCompatRequest(r)
+	r.Header.Del("Accept-Encoding")
+	writer := newResponseCompatibilityWriter(w, p.responseCompat, r)
+	p.proxyRequest(writer, r)
+	if err := writer.Close(); err != nil {
+		p.logger.DebugContext(r.Context(), "Failed to write LiteLLM-compatible response", "error", err)
+	}
+}
+
+func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 	start := utils.NowUTC()
 	requestID := uuid.New().String()
+	if info := responseCompatRequestFromContext(r.Context()); info != nil {
+		info.RequestID = requestID
+	}
 
 	// Save and strip internal proxy markers before normal request handling. Their
 	// value is trusted only after authentication proves this is a master-key AIR peer.

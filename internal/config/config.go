@@ -448,6 +448,7 @@ type ServerConfig struct {
 	Port                       int           `yaml:"port"`
 	MaxBodySizeMB              int           `yaml:"max_body_size_mb"`
 	ResponseBodyMultiplier     int           `yaml:"response_body_multiplier"` // Multiplier for response body size limit relative to max_body_size_mb (default: 10)
+	ResponseCompatibility      string        `yaml:"response_compatibility"`
 	RequestTimeout             time.Duration `yaml:"request_timeout"`
 	LoggingLevel               string        `yaml:"logging_level"`
 	StdoutLogsEnabled          bool          `yaml:"stdout_logs_enabled"` // Write logs to stdout (default: true); disable to ship logs only via OTEL
@@ -491,6 +492,7 @@ func (s *ServerConfig) UnmarshalYAML(value *yaml.Node) error {
 		Port                       string `yaml:"port"`
 		MaxBodySizeMB              string `yaml:"max_body_size_mb"`
 		ResponseBodyMultiplier     string `yaml:"response_body_multiplier"`
+		ResponseCompatibility      string `yaml:"response_compatibility"`
 		RequestTimeout             string `yaml:"request_timeout"`
 		LoggingLevel               string `yaml:"logging_level"`
 		StdoutLogsEnabled          string `yaml:"stdout_logs_enabled"`
@@ -593,6 +595,7 @@ func (s *ServerConfig) UnmarshalYAML(value *yaml.Node) error {
 	s.LoggingLevel = resolveEnvString(temp.LoggingLevel)
 	s.MasterKey = resolveEnvString(temp.MasterKey)
 	s.ModelPricesLink = resolveEnvString(temp.ModelPricesLink)
+	s.ResponseCompatibility = strings.ToLower(strings.TrimSpace(resolveEnvString(temp.ResponseCompatibility)))
 
 	return nil
 }
@@ -1493,6 +1496,13 @@ func (c *Config) Validate() error {
 
 	if c.Server.ResponseBodyMultiplier <= 0 {
 		c.Server.ResponseBodyMultiplier = 10
+	}
+	switch c.Server.ResponseCompatibility {
+	case "", "native":
+		c.Server.ResponseCompatibility = "native"
+	case "litellm":
+	default:
+		return fmt.Errorf("invalid response_compatibility: %s (must be native or litellm)", c.Server.ResponseCompatibility)
 	}
 
 	// -1 means unlimited timeout
