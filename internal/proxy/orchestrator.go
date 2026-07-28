@@ -404,7 +404,7 @@ func (p *Proxy) AuthenticateClientRequestScoped(w http.ResponseWriter, r *http.R
 }
 
 func (p *Proxy) IsModelAllowedForToken(tokenInfo *models.TokenInfo, model string) bool {
-	if tokenInfo == nil {
+	if tokenInfo == nil || !p.strictAllTeamModelsACL {
 		return true
 	}
 	var matcher models.ModelScopeMatcher
@@ -412,7 +412,7 @@ func (p *Proxy) IsModelAllowedForToken(tokenInfo *models.TokenInfo, model string
 		matcher = p.modelManager.IsModelIDAllowedByScope
 	}
 	return tokenInfo.IsModelAllowedByPolicy(model, matcher, models.ModelAccessPolicy{
-		StrictAllTeamModelsACL: p.strictAllTeamModelsACL,
+		StrictAllTeamModelsACL: true,
 	})
 }
 

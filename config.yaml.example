@@ -12,7 +12,7 @@ server:
   stdout_logs_enabled: true  # Write logs to stdout (default: true); set false to ship logs only via OTEL
   master_key: "sk-your-master-key-here"  # Required: Master key for authentication
   default_models_rpm: -1  # Default RPM limit for models (-1 for unlimited, default: -1)
-  strict_all_team_models_acl: false  # Deny all-team-models keys that have no team
+  strict_all_team_models_acl: false  # Enforce key/team/user model ACLs (default: false)
   model_prices_link: ""  # Optional: URL or file path to model prices JSON (supports os.environ/VAR_NAME)
   response_headers:
     mode: passthrough  # Use allowlist to expose only standard response metadata
