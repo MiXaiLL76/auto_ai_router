@@ -252,6 +252,41 @@ func TestBuildGenerationConfigTopLevelImageConfig(t *testing.T) {
 		assert.Equal(t, "3:4", cfg.ImageConfig.AspectRatio)
 		assert.Equal(t, "2K", cfg.ImageConfig.ImageSize)
 	})
+
+	t.Run("top-level scalar field merges with extra_body image_config instead of clobbering it", func(t *testing.T) {
+		req := &openai.OpenAIRequest{
+			Model: "gemini-3.1-flash-image",
+			ExtraBody: map[string]interface{}{
+				"generation_config": map[string]interface{}{
+					"image_config": map[string]interface{}{
+						"image_size": "2K",
+					},
+				},
+			},
+			AspectRatioSnake: "3:4",
+		}
+
+		cfg := buildGenerationConfig(req, "gemini-3.1-flash-image")
+		require.NotNil(t, cfg)
+		require.NotNil(t, cfg.ImageConfig)
+		assert.Equal(t, "3:4", cfg.ImageConfig.AspectRatio)
+		assert.Equal(t, "2K", cfg.ImageConfig.ImageSize, "top-level aspect_ratio must not drop extra_body image_size")
+	})
+
+	t.Run("scalar override wins over mixed-case key already in image_config map", func(t *testing.T) {
+		req := &openai.OpenAIRequest{
+			Model: "gemini-3.1-flash-image",
+			ImageConfigSnake: map[string]interface{}{
+				"aspectRatio": "1:1",
+			},
+			AspectRatioSnake: "3:4",
+		}
+
+		cfg := buildGenerationConfig(req, "gemini-3.1-flash-image")
+		require.NotNil(t, cfg)
+		require.NotNil(t, cfg.ImageConfig)
+		assert.Equal(t, "3:4", cfg.ImageConfig.AspectRatio)
+	})
 }
 
 func TestMapAudioParam(t *testing.T) {

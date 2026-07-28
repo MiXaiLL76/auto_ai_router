@@ -102,8 +102,17 @@ func buildGenerationConfig(req *openai.OpenAIRequest, model string) *VertexGener
 	if req.ExtraBody != nil {
 		cfg.ImageConfig = applyExtraBodyToConfig(cfg.GenerationConfig, req.ExtraBody, req.Model)
 	}
-	if imageConfig := parseTopLevelImageConfig(req); imageConfig != nil {
-		cfg.ImageConfig = imageConfig
+	if topLevelImageConfig := parseTopLevelImageConfig(req); topLevelImageConfig != nil {
+		if cfg.ImageConfig == nil {
+			cfg.ImageConfig = topLevelImageConfig
+		} else {
+			if topLevelImageConfig.AspectRatio != "" {
+				cfg.ImageConfig.AspectRatio = topLevelImageConfig.AspectRatio
+			}
+			if topLevelImageConfig.ImageSize != "" {
+				cfg.ImageConfig.ImageSize = topLevelImageConfig.ImageSize
+			}
+		}
 	}
 
 	// Deduplicate ResponseModalities (modalities may be added from multiple sources:
@@ -295,15 +304,19 @@ func parseTopLevelImageConfig(req *openai.OpenAIRequest) *genai.ImageConfig {
 	}
 	if req.AspectRatio != "" {
 		params["aspectRatio"] = req.AspectRatio
+		delete(params, "aspect_ratio")
 	}
 	if req.AspectRatioSnake != "" {
-		params["aspect_ratio"] = req.AspectRatioSnake
+		params["aspectRatio"] = req.AspectRatioSnake
+		delete(params, "aspect_ratio")
 	}
 	if req.ImageSize != "" {
 		params["imageSize"] = req.ImageSize
+		delete(params, "image_size")
 	}
 	if req.ImageSizeSnake != "" {
-		params["image_size"] = req.ImageSizeSnake
+		params["imageSize"] = req.ImageSizeSnake
+		delete(params, "image_size")
 	}
 	return parseImageConfig(params)
 }
