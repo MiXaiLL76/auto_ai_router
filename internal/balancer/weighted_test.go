@@ -256,7 +256,10 @@ func TestWeighted_NoBurstAfterRPMRecovery(t *testing.T) {
 	}
 	bal := New(credentials, f2b, rl)
 
-	rl.SetCredentialCurrentUsage("heavy", 100, 0)
+	// Set remote-synced usage well above the 100 RPM limit. The limiter spreads
+	// synced usage across the trailing minute, so exact-at-limit values can shed
+	// a bucket on slow CI runners before the assertions run.
+	rl.SetCredentialCurrentUsage("heavy", 1000, 0)
 
 	during := tally(drawN(t, bal, "", 30))
 	assert.Equal(t, 30, during["light"])

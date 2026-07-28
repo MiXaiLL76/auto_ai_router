@@ -265,6 +265,16 @@ type RequestLogContext struct {
 	// logSpendToLiteLLMDB with the real cost, or the ProxyRequest defer safety-net
 	// with cost 0) wins; later calls are no-ops.
 	budgetReconciled bool
+
+	// billingPriceResolved/billingPriceModelID/billingPrice cache the result of
+	// resolveBillingPrice so budget reservation (estimateRequestCost, at request
+	// start) and final spend logging (logSpendToLiteLLMDB, at request end) agree
+	// on the same price row instead of independently re-querying the price
+	// registry, which could observe two different registry generations if a
+	// reload lands between the two calls.
+	billingPriceResolved bool
+	billingPriceModelID  string
+	billingPrice         *models.ModelPrice
 }
 
 // HealthChecker provides cached database health status
@@ -1628,6 +1638,10 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			}
 		} else {
 			finalResponseBody = []byte(decodedBody)
+		}
+
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 && conv != nil && conv.IsPassthrough() {
+			finalResponseBody = rewriteResponseModelAlias(finalResponseBody, realModelID, modelID)
 		}
 
 		// bodyForTokenExtraction is set to finalResponseBody now and may be updated

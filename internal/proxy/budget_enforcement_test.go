@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	dbmodels "github.com/mixaill76/auto_ai_router/internal/litellmdb/models"
+	routermodels "github.com/mixaill76/auto_ai_router/internal/models"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -40,4 +41,92 @@ func TestEstimateCompletionTokensUsesRequestLimitThenSafeDefault(t *testing.T) {
 	assert.Equal(t, 42, proxy.estimateCompletionTokens([]byte(`{"max_completion_tokens":42}`)))
 	assert.Equal(t, 321, proxy.estimateCompletionTokens([]byte(`{"messages":[]}`)))
 	assert.Equal(t, 321, proxy.estimateCompletionTokens([]byte(`not-json`)))
+}
+
+// TestEstimateRequestCostUsesPublicModelPriceBeforeRealModelPrice guards
+// against the budget-reservation path regressing to main's pre-fix behavior
+// (real-model-first pricing, ignoring the client-facing alias entirely).
+func TestEstimateRequestCostUsesPublicModelPriceBeforeRealModelPrice(t *testing.T) {
+	prx := NewTestProxyBuilder().Build()
+	registry := routermodels.NewModelPriceRegistry()
+	registry.Update(map[string]*routermodels.ModelPrice{
+		"gpt-5.2-chat": {
+			OutputCostPerToken: 0.01,
+		},
+		"gpt-chat-latest": {
+			OutputCostPerToken: 1.00,
+		},
+	})
+	prx.priceRegistry = registry
+
+	cost, ok := prx.estimateRequestCost(
+		&RequestLogContext{},
+		"gpt-5.2-chat",
+		"gpt-5.2-chat",
+		"gpt-chat-latest",
+		[]byte(`{"messages":[],"max_completion_tokens":10}`),
+	)
+
+	require.True(t, ok)
+	assert.InDelta(t, 0.10, cost, 0.000000001)
+}
+
+// TestEstimateRequestCostPrefersPublicModelPriceOverDistinctModelIDPrice
+// covers the 3-way-divergent case (PublicModelID != ModelID != RealModelID,
+// all three priced) that the earlier two-ID-collision tests couldn't
+// distinguish: it proves PublicModelID wins specifically over ModelID, not
+// just over RealModelID.
+func TestEstimateRequestCostPrefersPublicModelPriceOverDistinctModelIDPrice(t *testing.T) {
+	prx := NewTestProxyBuilder().Build()
+	registry := routermodels.NewModelPriceRegistry()
+	registry.Update(map[string]*routermodels.ModelPrice{
+		"gpt-5.2-chat-alias": { // PublicModelID: client-facing alias
+			OutputCostPerToken: 0.01,
+		},
+		"gpt-5.2-chat": { // ModelID: resolved canonical name
+			OutputCostPerToken: 0.5,
+		},
+		"gpt-chat-latest": { // RealModelID: provider deployment name
+			OutputCostPerToken: 1.00,
+		},
+	})
+	prx.priceRegistry = registry
+
+	cost, ok := prx.estimateRequestCost(
+		&RequestLogContext{},
+		"gpt-5.2-chat-alias",
+		"gpt-5.2-chat",
+		"gpt-chat-latest",
+		[]byte(`{"messages":[],"max_completion_tokens":10}`),
+	)
+
+	require.True(t, ok)
+	assert.InDelta(t, 0.10, cost, 0.000000001)
+}
+
+// TestResolveBillingPriceCachesAcrossCalls verifies budget reservation and
+// final spend logging observe the same resolved price even if the registry
+// is reloaded between the two calls on the same logCtx.
+func TestResolveBillingPriceCachesAcrossCalls(t *testing.T) {
+	prx := NewTestProxyBuilder().Build()
+	registry := routermodels.NewModelPriceRegistry()
+	registry.Update(map[string]*routermodels.ModelPrice{
+		"gpt-5.2-chat": {OutputCostPerToken: 0.01},
+	})
+	prx.priceRegistry = registry
+
+	logCtx := &RequestLogContext{}
+	firstID, firstPrice := prx.resolveBillingPrice(logCtx, "gpt-5.2-chat", "gpt-5.2-chat", "gpt-chat-latest")
+	require.NotNil(t, firstPrice)
+	assert.Equal(t, "gpt-5.2-chat", firstID)
+
+	// Simulate a background price-registry reload landing between the two
+	// call sites (estimateRequestCost, then logSpendToLiteLLMDB).
+	registry.Update(map[string]*routermodels.ModelPrice{
+		"gpt-chat-latest": {OutputCostPerToken: 1.00},
+	})
+
+	secondID, secondPrice := prx.resolveBillingPrice(logCtx, "gpt-5.2-chat", "gpt-5.2-chat", "gpt-chat-latest")
+	assert.Same(t, firstPrice, secondPrice)
+	assert.Equal(t, firstID, secondID)
 }
