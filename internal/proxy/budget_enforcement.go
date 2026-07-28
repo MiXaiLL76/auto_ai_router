@@ -126,13 +126,14 @@ func (p *Proxy) estimateCompletionTokens(body []byte) int {
 	return fallback
 }
 
-func (p *Proxy) estimateRequestCost(modelID, realModelID string, body []byte) (float64, bool) {
+func (p *Proxy) estimateRequestCost(logCtx *RequestLogContext, publicModelID, modelID, realModelID string, body []byte) (float64, bool) {
 	if p.priceRegistry == nil {
 		return 0, false
 	}
 	// Mirror final billing: reserve against the client-facing model price first,
 	// then fall back to the provider-facing real model if the alias is unpriced.
-	_, modelPrice := lookupBillingModelPrice(p.priceRegistry, modelID, modelID, realModelID)
+	// Cached via logCtx so logSpendToLiteLLMDB reuses this exact resolution.
+	_, modelPrice := p.resolveBillingPrice(logCtx, publicModelID, modelID, realModelID)
 	if modelPrice == nil {
 		return 0, false
 	}
@@ -161,7 +162,7 @@ func (p *Proxy) enforceBudgetAndRateLimits(
 	}
 
 	levels := budgetLevels(logCtx.TokenInfo)
-	estimatedCost, costKnown := p.estimateRequestCost(modelID, realModelID, body)
+	estimatedCost, costKnown := p.estimateRequestCost(logCtx, logCtx.PublicModelID, modelID, realModelID, body)
 	if budgetEnabled && !costKnown {
 		p.logger.DebugContext(r.Context(), "Budget reservation skipped: model price unavailable", "model", modelID)
 	}
