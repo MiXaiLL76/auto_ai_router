@@ -132,7 +132,7 @@ func (p *Proxy) estimateRequestCost(modelID, realModelID string, body []byte) (f
 	}
 	// Mirror final billing: reserve against the client-facing model price first,
 	// then fall back to the provider-facing real model if the alias is unpriced.
-	_, modelPrice := lookupBillingModelPrice(p.priceRegistry, modelID, realModelID)
+	_, modelPrice := lookupBillingModelPrice(p.priceRegistry, modelID, modelID, realModelID)
 	if modelPrice == nil {
 		return 0, false
 	}

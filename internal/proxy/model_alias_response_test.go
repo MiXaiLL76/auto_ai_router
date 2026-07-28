@@ -41,10 +41,19 @@ func TestProxyRequest_OpenAIPassthroughResponseUsesAliasModel(t *testing.T) {
 	defer upstream.Close()
 
 	mm := models.New(testhelpers.NewTestLogger(), 50, []config.ModelRPMConfig{
-		{Name: aliasModel, Model: realModel},
+		{Name: aliasModel, Model: realModel, Credential: "openai"},
 	})
+	credential := config.CredentialConfig{
+		Name:    "openai",
+		Type:    config.ProviderTypeOpenAI,
+		BaseURL: upstream.URL,
+		APIKey:  "upstream-key",
+		RPM:     100,
+		TPM:     10000,
+	}
+	mm.LoadModelsFromConfig([]config.CredentialConfig{credential})
 	prx := NewTestProxyBuilder().
-		WithSingleCredential("openai", config.ProviderTypeOpenAI, upstream.URL, "upstream-key").
+		WithCredentials(credential).
 		WithMasterKey("master-key").
 		Build()
 	prx.modelManager = mm

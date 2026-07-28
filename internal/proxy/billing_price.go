@@ -2,9 +2,16 @@ package proxy
 
 import "github.com/mixaill76/auto_ai_router/internal/models"
 
-func lookupBillingModelPrice(registry *models.ModelPriceRegistry, modelID, realModelID string) (string, *models.ModelPrice) {
+func lookupBillingModelPrice(registry *models.ModelPriceRegistry, publicModelID, modelID, realModelID string) (string, *models.ModelPrice) {
 	if registry == nil {
 		return modelID, nil
+	}
+
+	if publicModelID != "" {
+		modelPrice := registry.GetPrice(publicModelID)
+		if modelPrice != nil {
+			return publicModelID, modelPrice
+		}
 	}
 
 	modelPrice := registry.GetPrice(modelID)

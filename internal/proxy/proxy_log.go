@@ -248,7 +248,7 @@ func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
 	if p.priceRegistry == nil {
 		p.logger.WarnContext(logSpendCtx, "Price registry not available, using 0 cost for spend log")
 	} else {
-		priceModelID, modelPrice := lookupBillingModelPrice(p.priceRegistry, logCtx.ModelID, logCtx.RealModelID)
+		priceModelID, modelPrice := lookupBillingModelPrice(p.priceRegistry, logCtx.PublicModelID, logCtx.ModelID, logCtx.RealModelID)
 		if modelPrice == nil {
 			p.logger.WarnContext(logSpendCtx, "Model price not found in registry, using 0 cost",
 				"model_name", priceModelID)
