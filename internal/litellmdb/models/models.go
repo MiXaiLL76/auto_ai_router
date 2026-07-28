@@ -236,6 +236,10 @@ type ModelAccessScope struct {
 // directional request-alias expansion without coupling DB models to routing.
 type ModelScopeMatcher func(model string, allowedModels []string) bool
 
+type ModelAccessPolicy struct {
+	StrictAllTeamModelsACL bool
+}
+
 func clonePointer[T any](value *T) *T {
 	if value == nil {
 		return nil
@@ -334,13 +338,17 @@ func (t *TokenInfo) IsBudgetExceeded() bool {
 
 // ModelAccessScopes returns the independently enforced model allowlists.
 func (t *TokenInfo) ModelAccessScopes() []ModelAccessScope {
+	return t.ModelAccessScopesWithPolicy(ModelAccessPolicy{})
+}
+
+func (t *TokenInfo) ModelAccessScopesWithPolicy(policy ModelAccessPolicy) []ModelAccessScope {
 	keyModels := t.Models
 	for _, model := range t.Models {
 		if model == AllTeamModels {
-			// LiteLLM fails closed when all-team-models is used without a team.
-			// With a team it replaces, rather than extends, the key allowlist.
 			if t.TeamID != "" {
 				keyModels = t.TeamModels
+			} else if !policy.StrictAllTeamModelsACL {
+				keyModels = nil
 			}
 			break
 		}
@@ -402,10 +410,18 @@ func modelScopePatternMatches(pattern, model string) bool {
 
 // IsModelAllowedBy checks every applicable model scope with matcher.
 func (t *TokenInfo) IsModelAllowedBy(model string, matcher ModelScopeMatcher) bool {
+	return t.IsModelAllowedByPolicy(model, matcher, ModelAccessPolicy{})
+}
+
+func (t *TokenInfo) IsModelAllowedByPolicy(
+	model string,
+	matcher ModelScopeMatcher,
+	policy ModelAccessPolicy,
+) bool {
 	if matcher == nil {
 		matcher = exactModelScopeMatch
 	}
-	for _, scope := range t.ModelAccessScopes() {
+	for _, scope := range t.ModelAccessScopesWithPolicy(policy) {
 		if scope.DenyAll || !matcher(model, scope.Models) {
 			return false
 		}

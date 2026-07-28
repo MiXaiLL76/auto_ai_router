@@ -1401,6 +1401,16 @@ monitoring:
 	assert.Equal(t, 15, cfg.Server.SessionStickyTTL)
 }
 
+func TestServerConfigStrictAllTeamModelsACL(t *testing.T) {
+	var defaults ServerConfig
+	require.NoError(t, yaml.Unmarshal([]byte("{}"), &defaults))
+	assert.False(t, defaults.StrictAllTeamModelsACL)
+
+	var strict ServerConfig
+	require.NoError(t, yaml.Unmarshal([]byte("strict_all_team_models_acl: true"), &strict))
+	assert.True(t, strict.StrictAllTeamModelsACL)
+}
+
 func TestLoad_ModelAlias(t *testing.T) {
 	tmpDir := t.TempDir()
 	configPath := filepath.Join(tmpDir, "config.yaml")

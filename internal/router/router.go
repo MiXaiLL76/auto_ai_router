@@ -228,11 +228,7 @@ func (r *Router) handleModels(w http.ResponseWriter, req *http.Request) {
 	if tokenInfo != nil {
 		filtered := make([]models.Model, 0, len(modelsResp.Data))
 		for _, model := range modelsResp.Data {
-			allowed := tokenInfo.IsModelAllowed(model.ID)
-			if r.modelManager != nil {
-				allowed = tokenInfo.IsModelAllowedBy(model.ID, r.modelManager.IsModelIDAllowedByScope)
-			}
-			if allowed {
+			if r.proxy.IsModelAllowedForToken(tokenInfo, model.ID) {
 				filtered = append(filtered, model)
 			}
 		}
