@@ -176,7 +176,7 @@ func copyResponseHeaders(w http.ResponseWriter, src http.Header, cred *config.Cr
 			continue
 		}
 		for _, value := range values {
-			w.Header().Add(http.CanonicalHeaderKey(key), value)
+			w.Header().Add(key, value)
 		}
 	}
 }
