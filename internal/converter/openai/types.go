@@ -40,6 +40,12 @@ type OpenAIRequest struct {
 	Verbosity            string                 `json:"verbosity,omitempty"`
 	Prediction           interface{}            `json:"prediction,omitempty"`
 	WebSearchOptions     interface{}            `json:"web_search_options,omitempty"`
+	ImageConfig          map[string]interface{} `json:"imageConfig,omitempty"`
+	ImageConfigSnake     map[string]interface{} `json:"image_config,omitempty"`
+	AspectRatio          string                 `json:"aspectRatio,omitempty"`
+	AspectRatioSnake     string                 `json:"aspect_ratio,omitempty"`
+	ImageSize            string                 `json:"imageSize,omitempty"`
+	ImageSizeSnake       string                 `json:"image_size,omitempty"`
 	ExtraBody            map[string]interface{} `json:"extra_body,omitempty"`
 }
 
