@@ -681,10 +681,6 @@ func (p *Proxy) handleStreamingWithTokens(w http.ResponseWriter, resp *http.Resp
 	var totalTokens int
 	completion := newCompletionTokenAccumulator(modelID)
 	chunkCount := 0
-	streamBody := io.Reader(resp.Body)
-	if logCtx != nil {
-		streamBody = newOpenAIModelAliasReader(streamBody, logCtx.RealModelID, logCtx.ModelID)
-	}
 
 	// Capture last chunk for usage extraction (Solution 3: Hybrid approach)
 	var lastChunk []byte
