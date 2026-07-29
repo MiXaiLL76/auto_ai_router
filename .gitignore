@@ -44,3 +44,4 @@ _LiteLLM_*.csv
 *.pb.gz
 Locust_*.html
 air_mock_*.json
+mock-go

@@ -3,9 +3,16 @@ package proxy
 import (
 	"bufio"
 	"bytes"
-	"encoding/json"
 	"errors"
 	"io"
+
+	// goccy/go-json instead of encoding/json: rewriteJSONResponseModel decodes
+	// into map[string]json.RawMessage on every non-streaming passthrough
+	// response just to rewrite one field ("model"). Benchmarked against the
+	// real embedding-response shape (1536-float vector) this is ~1.66x faster
+	// (profiled: this path was ~19% of CPU under embeddings load). RawMessage
+	// stays API-compatible, so the rest of this file is unaffected.
+	json "github.com/goccy/go-json"
 
 	"github.com/mixaill76/auto_ai_router/internal/converter/openai"
 )

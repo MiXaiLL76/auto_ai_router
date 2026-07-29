@@ -6,6 +6,15 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+
+	// Aliased separately (not a blanket replacement of this file's json import)
+	// because only normalizeSuccessfulResponseModel below benefits: it
+	// full-body-decodes+remarshals every non-streaming response, and
+	// benchmarked against a real embedding body (1536-float vector) goccy is
+	// ~1.66x faster there. normalizeSSEDataLineModel/decodeJSONObject further
+	// down operate on small per-SSE-chunk payloads, not large arrays, so
+	// there's no measured case for touching them too.
+	goccyjson "github.com/goccy/go-json"
 )
 
 const maxSSEModelRewriteLineBytes = 1024 * 1024
@@ -34,22 +43,22 @@ func normalizeSuccessfulResponseModel(body []byte, endpoint, publicModel string)
 		return body
 	}
 
-	var response map[string]json.RawMessage
-	if err := json.Unmarshal(body, &response); err != nil || response == nil {
+	var response map[string]goccyjson.RawMessage
+	if err := goccyjson.Unmarshal(body, &response); err != nil || response == nil {
 		return body
 	}
 	if rawModel, ok := response["model"]; ok {
 		var currentModel string
-		if err := json.Unmarshal(rawModel, &currentModel); err == nil && currentModel == publicModel {
+		if err := goccyjson.Unmarshal(rawModel, &currentModel); err == nil && currentModel == publicModel {
 			return body
 		}
 	}
-	modelJSON, err := json.Marshal(publicModel)
+	modelJSON, err := goccyjson.Marshal(publicModel)
 	if err != nil {
 		return body
 	}
 	response["model"] = modelJSON
-	normalized, err := json.Marshal(response)
+	normalized, err := goccyjson.Marshal(response)
 	if err != nil {
 		return body
 	}
