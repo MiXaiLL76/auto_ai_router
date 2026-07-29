@@ -35,6 +35,17 @@ const streamDrainTimeout = 60 * time.Second
 // stays zero, matching existing "never reached" semantics.
 const streamTTFTDetectionLimit = 64 * 1024
 
+// streamFlushCoalesceWindow throttles how often streamToClient calls Flush().
+// Profiled under concurrent streaming load: a Flush() (and the write syscall
+// behind it) on every single upstream Read is a dominant CPU cost at high
+// concurrency. 10ms is well under human-perceptible inter-token latency, so
+// coalescing flushes within that window costs nothing on the "feels live"
+// front while cutting syscall volume whenever reads arrive in a burst (e.g.
+// providers/mocks that batch several SSE frames per write). The very first
+// flush and the final one (stream end/error) always fire immediately —
+// TTFT accuracy and "no buffered bytes left behind" are never traded away.
+const streamFlushCoalesceWindow = 10 * time.Millisecond
+
 var streamBufPool = sync.Pool{
 	New: func() any {
 		buf := make([]byte, 8192)
@@ -1054,6 +1065,7 @@ func (p *Proxy) streamToClient(
 	// CompletionStartTime on the first non-empty Read regardless of content.
 	var ttftBuf []byte
 	ttftPending := logCtx != nil && logCtx.CompletionStartTime.IsZero()
+	var lastFlush time.Time
 
 	for {
 		n, err := reader.Read(*buf)
@@ -1087,15 +1099,24 @@ func (p *Proxy) streamToClient(
 				}
 				return writeErr
 			}
-			if flushErr := p.flushStreaming(ctx, controller, credName); flushErr != nil {
-				if isClientDisconnectError(flushErr) {
-					p.logger.DebugContext(ctx, "Client disconnected during streaming flush", "error", flushErr, "credential", credName)
-					p.recordAbortedRequest(credName, endpoint, modelID)
+			// Coalesce flushes within streamFlushCoalesceWindow: always flush the
+			// first chunk (TTFT) and the last one (err != nil, nothing left
+			// buffered on return); in between, skip a flush if the previous one
+			// was very recent — bursty reads (e.g. an upstream that batches
+			// several SSE frames per write) then cost one syscall, not N.
+			now := time.Now()
+			if lastFlush.IsZero() || err != nil || now.Sub(lastFlush) >= streamFlushCoalesceWindow {
+				if flushErr := p.flushStreaming(ctx, controller, credName); flushErr != nil {
+					if isClientDisconnectError(flushErr) {
+						p.logger.DebugContext(ctx, "Client disconnected during streaming flush", "error", flushErr, "credential", credName)
+						p.recordAbortedRequest(credName, endpoint, modelID)
+					}
+					if onWriteErr != nil {
+						onWriteErr()
+					}
+					return flushErr
 				}
-				if onWriteErr != nil {
-					onWriteErr()
-				}
-				return flushErr
+				lastFlush = now
 			}
 		}
 		if err != nil {

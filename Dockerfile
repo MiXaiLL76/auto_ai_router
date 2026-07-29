@@ -6,6 +6,12 @@ FROM golang:1.26-alpine AS builder
 # Pinning it guarantees a fully static binary (pure-Go DNS resolver, portable
 # across libc flavors) even if a future base image or dependency adds gcc.
 ENV CGO_ENABLED=0
+# GOAMD64=v3 targets Haswell+ (AVX2, BMI2, ...) — every mainstream cloud
+# instance since ~2015. Lets the compiler/stdlib (encoding/json, compress/*,
+# crypto) use newer instructions in their hand-tuned asm paths. Do not raise
+# this if a deployment target ever includes pre-2015 hardware — the binary
+# will hit SIGILL there instead of falling back.
+ENV GOAMD64=v3
 
 # Install build dependencies
 RUN apk add --no-cache git make

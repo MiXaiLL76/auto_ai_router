@@ -6,6 +6,15 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+
+	// Aliased separately (not a blanket replacement of this file's json import)
+	// because only normalizeSuccessfulResponseModel below benefits: it
+	// full-body-decodes+remarshals every non-streaming response, and
+	// benchmarked against a real embedding body (1536-float vector) goccy is
+	// ~1.66x faster there. normalizeSSEDataLineModel/decodeJSONObject further
+	// down operate on small per-SSE-chunk payloads, not large arrays, so
+	// there's no measured case for touching them too.
+	goccyjson "github.com/goccy/go-json"
 )
 
 const maxSSEModelRewriteLineBytes = 1024 * 1024
@@ -20,6 +29,12 @@ var modelBearingResponseRoutes = map[string]struct{}{
 	"/v1/responses":        {},
 }
 
+// Rewrites only the top-level "model" field, via map[string]json.RawMessage
+// (same technique as rewriteJSONResponseModel in model_alias_response.go) so
+// the rest of the body — e.g. a 1536-float embedding vector — is copied
+// through as opaque bytes instead of being deep-decoded into
+// map[string]interface{} (profiled: that was ~21% of total CPU under
+// embeddings load, entirely to leave everything but "model" unchanged).
 func normalizeSuccessfulResponseModel(body []byte, endpoint, publicModel string) []byte {
 	if publicModel == "" {
 		return body
@@ -28,15 +43,22 @@ func normalizeSuccessfulResponseModel(body []byte, endpoint, publicModel string)
 		return body
 	}
 
-	response, err := decodeJSONObject(body)
-	if err != nil || response == nil {
+	var response map[string]goccyjson.RawMessage
+	if err := goccyjson.Unmarshal(body, &response); err != nil || response == nil {
 		return body
 	}
-	if response["model"] == publicModel {
+	if rawModel, ok := response["model"]; ok {
+		var currentModel string
+		if err := goccyjson.Unmarshal(rawModel, &currentModel); err == nil && currentModel == publicModel {
+			return body
+		}
+	}
+	modelJSON, err := goccyjson.Marshal(publicModel)
+	if err != nil {
 		return body
 	}
-	response["model"] = publicModel
-	normalized, err := json.Marshal(response)
+	response["model"] = modelJSON
+	normalized, err := goccyjson.Marshal(response)
 	if err != nil {
 		return body
 	}

@@ -1100,7 +1100,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 
 			p.setCredentialResponseHeader(w, logCtx, logCtx.ActualCredentialName)
 			p.writeProxyResponse(w, proxyResp, r, cred, modelID, logCtx, tokenUsageOptions)
-			tokens := extractTokensFromResponse(string(proxyResp.Body), config.ProviderTypeOpenAI)
+			tokens := extractTokensFromResponse(proxyResp.Body, config.ProviderTypeOpenAI)
 			if tokens > 0 {
 				p.rateLimiter.ConsumeTokens(cred.Name, tokens)
 				if modelID != "" {
@@ -1748,7 +1748,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			resp.Header.Set("Content-Type", "application/json")
 		}
 
-		tokens := extractTokensFromResponse(string(bodyForTokenExtraction), config.ProviderTypeOpenAI)
+		tokens := extractTokensFromResponse(bodyForTokenExtraction, config.ProviderTypeOpenAI)
 		if tokens > 0 {
 			p.rateLimiter.ConsumeTokens(cred.Name, tokens)
 			if modelID != "" {
