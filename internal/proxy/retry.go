@@ -353,7 +353,7 @@ func (p *Proxy) writeFallbackResponse(
 				usageOptions,
 			)
 		}
-		tokens := extractTokensFromResponse(string(proxyResp.Body), config.ProviderTypeOpenAI)
+		tokens := extractTokensFromResponse(proxyResp.Body, config.ProviderTypeOpenAI)
 		if tokens > 0 {
 			p.rateLimiter.ConsumeTokens(fallbackCred.Name, tokens)
 			if modelID != "" {

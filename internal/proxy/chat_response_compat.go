@@ -20,6 +20,12 @@ var modelBearingResponseRoutes = map[string]struct{}{
 	"/v1/responses":        {},
 }
 
+// Rewrites only the top-level "model" field, via map[string]json.RawMessage
+// (same technique as rewriteJSONResponseModel in model_alias_response.go) so
+// the rest of the body — e.g. a 1536-float embedding vector — is copied
+// through as opaque bytes instead of being deep-decoded into
+// map[string]interface{} (profiled: that was ~21% of total CPU under
+// embeddings load, entirely to leave everything but "model" unchanged).
 func normalizeSuccessfulResponseModel(body []byte, endpoint, publicModel string) []byte {
 	if publicModel == "" {
 		return body
@@ -28,14 +34,21 @@ func normalizeSuccessfulResponseModel(body []byte, endpoint, publicModel string)
 		return body
 	}
 
-	response, err := decodeJSONObject(body)
-	if err != nil || response == nil {
+	var response map[string]json.RawMessage
+	if err := json.Unmarshal(body, &response); err != nil || response == nil {
 		return body
 	}
-	if response["model"] == publicModel {
+	if rawModel, ok := response["model"]; ok {
+		var currentModel string
+		if err := json.Unmarshal(rawModel, &currentModel); err == nil && currentModel == publicModel {
+			return body
+		}
+	}
+	modelJSON, err := json.Marshal(publicModel)
+	if err != nil {
 		return body
 	}
-	response["model"] = publicModel
+	response["model"] = modelJSON
 	normalized, err := json.Marshal(response)
 	if err != nil {
 		return body
