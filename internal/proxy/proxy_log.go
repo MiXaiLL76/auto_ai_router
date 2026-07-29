@@ -274,10 +274,9 @@ func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
 		customLLMProvider = string(config.ProviderTypeOpenAI)
 	}
 
-	// teamID deliberately stays empty when the key has no team: LiteLLM writes
-	// team_id="" in that case, and inventing one (e.g. the credential name)
-	// would create daily/team rows that never merge with the primary accounting
-	// and UPDATEs against non-existent LiteLLM_TeamTable rows.
+	if teamID == "" {
+		teamID = credName
+	}
 
 	endTime := utils.NowUTC()
 
