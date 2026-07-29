@@ -4,10 +4,30 @@ import (
 	"bytes"
 	"compress/flate"
 	"compress/gzip"
+	"io"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 )
+
+// gzipWriterPool and flateWriterPool reuse compressor state (window/hash
+// tables) across requests. CompressBody runs on every non-streaming response
+// with a compressible Accept-Encoding, so allocating a fresh *gzip.Writer /
+// *flate.Writer per call is a significant, avoidable CPU/GC cost under load
+// (profiled: compress/flate.NewWriter alone was ~11% of total CPU time).
+var gzipWriterPool = sync.Pool{
+	New: func() any {
+		return gzip.NewWriter(io.Discard)
+	},
+}
+
+var flateWriterPool = sync.Pool{
+	New: func() any {
+		w, _ := flate.NewWriter(io.Discard, flate.DefaultCompression)
+		return w
+	},
+}
 
 // AcceptedEncoding represents a single encoding from Accept-Encoding header
 type AcceptedEncoding struct {
@@ -151,7 +171,9 @@ func CompressBody(body []byte, encoding string) ([]byte, string, error) {
 	switch encoding {
 	case "gzip":
 		var buf bytes.Buffer
-		gzWriter := gzip.NewWriter(&buf)
+		gzWriter := gzipWriterPool.Get().(*gzip.Writer)
+		gzWriter.Reset(&buf)
+		defer gzipWriterPool.Put(gzWriter)
 		if _, err := gzWriter.Write(body); err != nil {
 			return nil, "", err
 		}
@@ -162,10 +184,9 @@ func CompressBody(body []byte, encoding string) ([]byte, string, error) {
 
 	case "deflate":
 		var buf bytes.Buffer
-		flateWriter, err := flate.NewWriter(&buf, flate.DefaultCompression)
-		if err != nil {
-			return nil, "", err
-		}
+		flateWriter := flateWriterPool.Get().(*flate.Writer)
+		flateWriter.Reset(&buf)
+		defer flateWriterPool.Put(flateWriter)
 		if _, err := flateWriter.Write(body); err != nil {
 			return nil, "", err
 		}
