@@ -1,11 +1,16 @@
 package proxy
 
 import (
+	"bytes"
 	"encoding/json"
 	"strings"
 	"unicode"
 	"unicode/utf8"
 
+	// goccyjson is used only for appendChatCompletionDeltaText/appendResponsesDeltaText
+	// (small, per-SSE-chunk typed unmarshals in the streaming hot path) — benchmarked
+	// separately from this file's other encoding/json uses, which stay on stdlib.
+	goccyjson "github.com/goccy/go-json"
 	"github.com/tiktoken-go/tokenizer"
 )
 
@@ -401,10 +406,31 @@ func extractCompletionDeltaText(chunk []byte) string {
 
 	var b strings.Builder
 	for _, payload := range payloads {
-		appendChatCompletionDeltaText(&b, payload)
-		appendResponsesDeltaText(&b, payload)
+		appendDeltaTextForPayload(&b, payload)
 	}
 	return b.String()
+}
+
+// appendDeltaTextForPayload picks which shape-specific decoder(s) to run for a
+// single SSE payload. A stream is always either Chat-Completions-shaped or
+// Responses-shaped, never both, so unconditionally running both
+// appendChatCompletionDeltaText and appendResponsesDeltaText — as this used
+// to do — means one of the two always does a full, wasted json.Unmarshal of
+// the same bytes. A raw substring check is a cheap, allocation-free way to
+// rule out the shape that can't match before paying for its unmarshal; a
+// false positive (the substring appearing inside delta text itself, e.g. a
+// model streaming a code sample containing `"type"`) only costs one harmless
+// extra unmarshal that finds no matching top-level field, same as today —
+// never a wrong result. (A map[string]json.RawMessage pre-decode was tried
+// first and measured slower here: the extra map/RawMessage allocations
+// outweigh the unmarshal it saves at this payload size.)
+func appendDeltaTextForPayload(b *strings.Builder, payload []byte) {
+	if bytes.Contains(payload, []byte(`"choices"`)) {
+		appendChatCompletionDeltaText(b, payload)
+	}
+	if bytes.Contains(payload, []byte(`"type"`)) {
+		appendResponsesDeltaText(b, payload)
+	}
 }
 
 func appendChatCompletionDeltaText(b *strings.Builder, payload []byte) {
@@ -426,7 +452,7 @@ func appendChatCompletionDeltaText(b *strings.Builder, payload []byte) {
 			} `json:"delta"`
 		} `json:"choices"`
 	}
-	if err := json.Unmarshal(payload, &data); err != nil {
+	if err := goccyjson.Unmarshal(payload, &data); err != nil {
 		return
 	}
 	for _, choice := range data.Choices {
@@ -448,7 +474,7 @@ func appendResponsesDeltaText(b *strings.Builder, payload []byte) {
 		Type  string      `json:"type"`
 		Delta interface{} `json:"delta"`
 	}
-	if err := json.Unmarshal(payload, &event); err != nil || event.Type == "" {
+	if err := goccyjson.Unmarshal(payload, &event); err != nil || event.Type == "" {
 		return
 	}
 

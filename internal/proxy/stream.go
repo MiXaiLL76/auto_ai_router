@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -34,6 +35,40 @@ const streamDrainTimeout = 60 * time.Second
 // (error-only or keep-alive-only streams) stop being scanned; CompletionStartTime
 // stays zero, matching existing "never reached" semantics.
 const streamTTFTDetectionLimit = 64 * 1024
+
+// ttftScanState incrementally scans SSE lines for the first detectable content
+// delta, byte-for-byte equivalent to calling extractCompletionDeltaText on the
+// whole buffer accumulated so far after every Read — but each byte is scanned
+// exactly once (as part of the line it completes) instead of once per Read,
+// which made the old approach O(n²) in the bytes accumulated before a match.
+// A line can only ever contain a complete JSON payload once its trailing
+// newline has arrived, so deferring extraction until then loses no matches
+// extractCompletionDeltaText could have found on a still-partial line.
+type ttftScanState struct {
+	pending []byte
+	total   int
+}
+
+// observe feeds a newly read chunk into the scan and reports whether a
+// detectable content delta was found. total tracks cumulative bytes observed
+// (not just the still-unprocessed tail in pending) so streamTTFTDetectionLimit
+// keeps its original "give up after this many bytes with no match" meaning.
+func (s *ttftScanState) observe(chunk []byte) bool {
+	s.total += len(chunk)
+	s.pending = append(s.pending, chunk...)
+	for {
+		idx := bytes.IndexByte(s.pending, '\n')
+		if idx < 0 {
+			break
+		}
+		line := s.pending[:idx]
+		s.pending = s.pending[idx+1:]
+		if extractCompletionDeltaText(line) != "" {
+			return true
+		}
+	}
+	return false
+}
 
 // streamFlushCoalesceWindow throttles how often streamToClient calls Flush().
 // Profiled under concurrent streaming load: a Flush() (and the write syscall
@@ -917,6 +952,13 @@ func (p *Proxy) finalizeStreamingLog(logCtx *RequestLogContext, totalTokens int,
 				logCtx.TokenUsage.ReasoningTokens, logCtx.TokenUsage.CachedInputTokens)
 		}
 	}
+	// TTFT: only meaningful if a real content delta actually arrived (streamToClient
+	// stamps CompletionStartTime the moment it does) — a stream that errored before
+	// any content, or wasn't streaming at all, has nothing to report here.
+	if logCtx.Credential != nil && !logCtx.CompletionStartTime.IsZero() {
+		p.metrics.RecordTTFT(logCtx.Credential.Name, endpointFromLogContext(logCtx),
+			logCtx.CompletionStartTime.Sub(logCtx.StartTime))
+	}
 	if err := p.logSpendToLiteLLMDB(logCtx); err != nil {
 		p.logger.WarnContext(logCtx.Context(), "Failed to queue streaming spend log",
 			"error", err,
@@ -1056,14 +1098,14 @@ func (p *Proxy) streamToClient(
 	buf := streamBufPool.Get().(*[]byte)
 	defer streamBufPool.Put(buf)
 
-	// TTFT detection buffer: separate from the bytes forwarded to the client via
+	// TTFT detection: separate from the bytes forwarded to the client via
 	// onChunk (forwarding must stay byte-for-byte immediate for latency). A real
 	// content/tool/reasoning delta can straddle multiple Read calls, or be
 	// preceded by content-free SSE events (ping, role-only delta) that arrive in
-	// their own Read — so bytes accumulate here across reads until
-	// extractCompletionDeltaText finds actual content, rather than stamping
+	// their own Read — so lines accumulate across reads via ttftScan until a
+	// complete line yields actual content, rather than stamping
 	// CompletionStartTime on the first non-empty Read regardless of content.
-	var ttftBuf []byte
+	var ttftScan ttftScanState
 	ttftPending := logCtx != nil && logCtx.CompletionStartTime.IsZero()
 	var lastFlush time.Time
 
@@ -1071,14 +1113,14 @@ func (p *Proxy) streamToClient(
 		n, err := reader.Read(*buf)
 		if n > 0 {
 			if ttftPending {
-				ttftBuf = append(ttftBuf, (*buf)[:n]...)
-				if extractCompletionDeltaText(ttftBuf) != "" {
+				if ttftScan.observe((*buf)[:n]) {
 					logCtx.CompletionStartTime = time.Now()
 					ttftPending = false
-					ttftBuf = nil
-				} else if len(ttftBuf) > streamTTFTDetectionLimit {
+				} else if ttftScan.total > streamTTFTDetectionLimit {
 					ttftPending = false
-					ttftBuf = nil
+				}
+				if !ttftPending {
+					ttftScan = ttftScanState{}
 				}
 			}
 			if onChunk != nil {

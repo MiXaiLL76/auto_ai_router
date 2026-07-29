@@ -2,6 +2,7 @@ package monitoring
 
 import (
 	"strconv"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -10,6 +11,18 @@ import (
 )
 
 var spendAggregationOldestUnixNano atomic.Int64
+
+// spendSnapshotMu serializes ObserveSpendSnapshot. It is called from many
+// goroutines (spend writer, aggregator, DLQ retry, and the Stats() path used
+// by health checks — see call sites of publishSnapshot()/Stats() in
+// internal/litellmdb/spendlog). Each individual gauge Set()/atomic Store() is
+// already thread-safe in isolation, but without this lock two concurrent
+// snapshots could interleave field-by-field (e.g. QueueDepth from a newer
+// snapshot combined with PendingAggregation from an older, differently-timed
+// one still in flight), producing a gauge combination that never actually
+// existed together. The lock makes each snapshot apply as one atomic unit;
+// it's cheap (one Observe-sized call per spend event, not per request).
+var spendSnapshotMu sync.Mutex
 
 var (
 	RequestsTotal = promauto.NewCounterVec(
@@ -22,9 +35,33 @@ var (
 
 	RequestDuration = promauto.NewHistogramVec(
 		prometheus.HistogramOpts{
-			Name:    "auto_ai_router_requests_duration_seconds",
-			Help:    "Request duration in seconds",
-			Buckets: []float64{1, 10, 30, 60, 120, 240, 600},
+			Name: "auto_ai_router_requests_duration_seconds",
+			Help: "Request duration in seconds",
+			// Fine-grained where real traffic lives (real p50/p95 for this router is
+			// ~1-3s, confirmed via sum(...)/count(...)), coarser in the long tail.
+			// The previous {1, 10, 30, ...} buckets had no bucket between 1s and 10s,
+			// so histogram_quantile linearly interpolated across that whole 9s span
+			// and reported a P95 artifact near 10s even though every sample in that
+			// bucket was actually 1-2.5s. See docs/monitoring/prometheus.md.
+			Buckets: []float64{0.05, 0.1, 0.25, 0.5, 0.75, 1, 1.5, 2, 2.5, 3, 4, 5, 7.5, 10, 15, 20, 30, 60, 120, 240, 600},
+		},
+		[]string{"credential", "endpoint"},
+	)
+
+	// TimeToFirstTokenSeconds measures true TTFT for streaming responses: time
+	// from request start to the first real content/tool/reasoning delta
+	// (RequestLogContext.CompletionStartTime), not just the first HTTP byte/chunk
+	// (a ping/role-only SSE event or empty keep-alive frame can arrive well before
+	// any real content and would understate provider think-time if used instead).
+	// Only observed for requests that actually streamed a content delta — requests
+	// that errored before any delta, or weren't streaming at all, don't emit a
+	// sample here, so this histogram's _count is its own "streamed successfully
+	// past first token" denominator.
+	TimeToFirstTokenSeconds = promauto.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "auto_ai_router_time_to_first_token_seconds",
+			Help:    "Time to first token (TTFT) for streaming responses, from request start to the first real content delta",
+			Buckets: []float64{0.05, 0.1, 0.25, 0.5, 0.75, 1, 1.5, 2, 2.5, 3, 4, 5, 7.5, 10, 15, 20, 30, 60},
 		},
 		[]string{"credential", "endpoint"},
 	)
@@ -317,6 +354,9 @@ type SpendSnapshot struct {
 }
 
 func ObserveSpendSnapshot(snapshot SpendSnapshot) {
+	spendSnapshotMu.Lock()
+	defer spendSnapshotMu.Unlock()
+
 	SpendQueueDepth.Set(float64(snapshot.QueueDepth))
 	SpendPendingEntries.Set(float64(snapshot.PendingEntries))
 	SpendPendingAggregationDepth.Set(float64(snapshot.PendingAggregation))
@@ -404,6 +444,15 @@ func (m *Metrics) updateModelMetric(gauge *prometheus.GaugeVec, credential, mode
 	gauge.WithLabelValues(credential, model).Set(float64(value))
 }
 
+// RecordRequest records one client-facing request outcome: genuine end-to-end
+// duration (from the moment the client's request arrived, across every retry
+// attempt) and the final status/credential that was actually returned to the
+// client. Call this exactly ONCE per client request, at the point the final
+// response (success or exhausted-retries) is decided — never once per
+// upstream attempt, or retries will inflate RequestsTotal and mislabel
+// RequestDuration with cumulative-since-first-attempt time under the
+// attempt's own (unrelated) credential/status. For per-attempt/per-credential
+// error visibility, use RecordCredentialAttemptError instead.
 func (m *Metrics) RecordRequest(credential, endpoint, model string, statusCode int, duration time.Duration) {
 	if !m.isEnabled() {
 		return
@@ -412,10 +461,32 @@ func (m *Metrics) RecordRequest(credential, endpoint, model string, statusCode i
 	status := strconv.Itoa(statusCode)
 	RequestsTotal.WithLabelValues(credential, model, endpoint, status).Inc()
 	RequestDuration.WithLabelValues(credential, endpoint).Observe(duration.Seconds())
+}
 
-	if statusCode != 200 {
-		CredentialErrorsTotal.WithLabelValues(credential).Inc()
+// RecordTTFT records time-to-first-token for a streaming request that
+// produced at least one real content/tool/reasoning delta. Call once per
+// stream, at the point the stream finishes (success or mid-stream failure
+// after content had already started) — ttft is the duration from request
+// start to that first delta, not to the first HTTP byte.
+func (m *Metrics) RecordTTFT(credential, endpoint string, ttft time.Duration) {
+	if !m.isEnabled() {
+		return
 	}
+	TimeToFirstTokenSeconds.WithLabelValues(credential, endpoint).Observe(ttft.Seconds())
+}
+
+// RecordCredentialAttemptError records that a single upstream attempt against
+// this credential failed (transport error or non-200 response), regardless of
+// whether the overall client request eventually succeeded via a different
+// credential/retry. Intended to be called once per failing attempt inside a
+// retry loop, so credential health stays visible even when retries mask the
+// failure from the client's perspective (see auto_ai_router_credential_errors_total
+// panels in examples/grafana.json / grafana_k8s.json).
+func (m *Metrics) RecordCredentialAttemptError(credential string) {
+	if !m.isEnabled() {
+		return
+	}
+	CredentialErrorsTotal.WithLabelValues(credential).Inc()
 }
 
 func (m *Metrics) RecordAbortedRequest(credential, endpoint, model string) {

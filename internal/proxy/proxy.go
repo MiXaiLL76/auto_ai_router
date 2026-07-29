@@ -611,14 +611,19 @@ func (p *Proxy) executeProxyRequest(
 		if !cred.IsProxyLike() {
 			p.balancer.RecordResponse(cred.Name, modelID, statusCode)
 		}
-		p.metrics.RecordRequest(cred.Name, r.URL.Path, modelID, statusCode, time.Since(start))
+		// Per-attempt failure — tracked separately from the client-facing
+		// RequestsTotal/RequestDuration metrics, which the caller records exactly
+		// once per client request at the final outcome (see ProxyRequest/TryFallbackProxy).
+		p.metrics.RecordCredentialAttemptError(cred.Name)
 		return nil, err
 	}
 	// Proxy/AIR credentials are dynamic relays — don't record them in fail2ban.
 	if !cred.IsProxyLike() {
 		p.balancer.RecordResponse(cred.Name, modelID, resp.StatusCode)
 	}
-	p.metrics.RecordRequest(cred.Name, r.URL.Path, modelID, resp.StatusCode, time.Since(start))
+	if resp.StatusCode != http.StatusOK {
+		p.metrics.RecordCredentialAttemptError(cred.Name)
+	}
 
 	p.logger.DebugContext(r.Context(), "Proxy request forwarded",
 		"credential", cred.Name,
@@ -656,6 +661,14 @@ func (p *Proxy) executeProxyRequest(
 	if err != nil {
 		p.logger.WarnContext(r.Context(), "Failed to read proxy response body, caller may retry",
 			"credential", cred.Name, "model", modelID, "error", err)
+		// This attempt genuinely failed (got a response, then lost the body).
+		// Only record here if the StatusOK check above didn't already count it —
+		// status 200 with a failed body read is exactly the case that check
+		// can't see; guarding on StatusOK keeps this to exactly one record per
+		// failed attempt either way.
+		if resp.StatusCode == http.StatusOK {
+			p.metrics.RecordCredentialAttemptError(cred.Name)
+		}
 		return nil, err
 	}
 
@@ -831,6 +844,14 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		logCtx.Credential = cred
 		triedCreds := GetTried(r.Context())
 		var proxyResp *ProxyResponse
+		// respCred is the credential that actually produced proxyResp. It can
+		// lag behind `cred`: e.g. attempt A returns a retryable error (proxyResp
+		// set, cred==A), attempt B (cred reassigned to B) then fails with a
+		// transport error — proxyResp is left untouched from A while `cred` has
+		// already moved to B. Restored onto `cred`/logCtx.Credential below,
+		// right before proxyResp is used, so metrics/headers/logging attribute
+		// the response to the credential that actually produced it.
+		var respCred *config.CredentialConfig
 		var lastProxyErr error
 		var shouldRetry bool
 		var retryReason RetryReason
@@ -863,6 +884,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			proxyResp = resp
+			respCred = cred
 			if proxyResp.ActualCredentialName != "" {
 				logCtx.ActualCredentialName = proxyResp.ActualCredentialName
 			}
@@ -939,6 +961,9 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			logCtx.HTTPStatus = statusCode
 			logCtx.ErrorMsg = errorMsg
 			logCtx.TargetURL = cred.BaseURL
+			// Client-facing outcome decided (all attempts exhausted, no response at
+			// all) — record exactly once here with genuine end-to-end duration.
+			p.metrics.RecordRequest(cred.Name, r.URL.Path, modelID, statusCode, time.Since(start))
 			if statusCode == http.StatusRequestTimeout {
 				WriteErrorTimeout(w, statusMessage)
 			} else {
@@ -946,6 +971,20 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			}
 			return
 		}
+
+		// proxyResp may have been left over from an earlier attempt whose
+		// credential no longer matches `cred` (see respCred's doc comment
+		// above) — realign before attributing anything to a credential.
+		if respCred != nil && respCred != cred {
+			cred = respCred
+			logCtx.Credential = cred
+		}
+
+		// Client-facing outcome decided (this response — success or the last
+		// retryable error with no more attempts left — is what gets written to
+		// the client below) — record exactly once here with genuine end-to-end
+		// duration, not once per retry attempt.
+		p.metrics.RecordRequest(cred.Name, r.URL.Path, modelID, proxyResp.StatusCode, time.Since(start))
 
 		// Write response (streaming or non-streaming)
 		tokenUsageOptions := tokenUsageExtractionOptionsForResponse(cred, proxyResp.Headers)
@@ -1359,7 +1398,9 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 				shouldRetry = true
 				retryReason = RetryReasonAuthErr
 				p.balancer.RecordResponse(cred.Name, modelID, http.StatusInternalServerError)
-				p.metrics.RecordRequest(cred.Name, r.URL.Path, modelID, http.StatusInternalServerError, time.Since(start))
+				// Per-attempt failure only — the client-facing RequestsTotal/RequestDuration
+				// metrics are recorded exactly once at the final outcome below.
+				p.metrics.RecordCredentialAttemptError(cred.Name)
 				continue
 			}
 		}
@@ -1444,7 +1485,9 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 					"credential", cred.Name, "model", modelID, "error", doErr, "url", targetURL)
 			}
 			p.balancer.RecordResponse(cred.Name, modelID, statusCode)
-			p.metrics.RecordRequest(cred.Name, r.URL.Path, modelID, statusCode, time.Since(start))
+			// Per-attempt failure only — the client-facing RequestsTotal/RequestDuration
+			// metrics are recorded exactly once at the final outcome below.
+			p.metrics.RecordCredentialAttemptError(cred.Name)
 			shouldRetry = true
 			retryReason = RetryReasonNetErr
 			transportErr = doErr
@@ -1461,7 +1504,11 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			})
 		}
 
-		p.metrics.RecordRequest(cred.Name, r.URL.Path, modelID, resp.StatusCode, time.Since(start))
+		// Per-attempt failure only — the client-facing RequestsTotal/RequestDuration
+		// metrics are recorded exactly once at the final outcome after the retry loop.
+		if resp.StatusCode != http.StatusOK {
+			p.metrics.RecordCredentialAttemptError(cred.Name)
+		}
 
 		// Debug: log response headers
 		maskedRespHeaders := security.MaskSensitiveHeaders(resp.Header)
@@ -1495,6 +1542,14 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		if readErr != nil {
 			closeBody()
 			p.balancer.RecordResponse(cred.Name, modelID, resp.StatusCode)
+			// This attempt genuinely failed (got a response, then lost the body).
+			// Only record here if the earlier `resp.StatusCode != http.StatusOK`
+			// check didn't already count it — status 200 with a failed body read
+			// is exactly the case that check can't see; guarding on StatusOK here
+			// keeps this to exactly one record per failed attempt either way.
+			if resp.StatusCode == http.StatusOK {
+				p.metrics.RecordCredentialAttemptError(cred.Name)
+			}
 			if errors.Is(readErr, ErrResponseBodyTooLarge) {
 				// Response too large — fatal, another credential won't help
 				p.logUpstreamError(r.Context(), "Failed to read response body: too large", http.StatusBadGateway, cred, modelID, nil,
@@ -1505,6 +1560,9 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 				logCtx.HTTPStatus = http.StatusBadGateway
 				logCtx.ErrorMsg = fmt.Sprintf("Failed to read response body: %v", readErr)
 				logCtx.TargetURL = targetURL
+				// Client-facing outcome decided (502 written to the client below,
+				// no further attempts) — record exactly once here.
+				p.metrics.RecordRequest(cred.Name, r.URL.Path, modelID, http.StatusBadGateway, time.Since(start))
 				WriteErrorBadGateway(w, "upstream response too large")
 				return
 			}
@@ -1583,6 +1641,9 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		logCtx.HTTPStatus = statusCode
 		logCtx.ErrorMsg = "All provider attempts failed"
 		logCtx.TargetURL = targetURL
+		// Client-facing outcome decided (all attempts exhausted, no response at
+		// all) — record exactly once here with genuine end-to-end duration.
+		p.metrics.RecordRequest(cred.Name, r.URL.Path, modelID, statusCode, time.Since(start))
 		if statusCode == http.StatusRequestTimeout {
 			WriteErrorTimeout(w, statusMessage)
 		} else {
@@ -1595,6 +1656,12 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 	if closeBody != nil {
 		defer closeBody()
 	}
+
+	// Client-facing outcome decided (this response — success or the last
+	// retryable error with no more attempts left — is what gets written to
+	// the client below) — record exactly once here with genuine end-to-end
+	// duration, not once per retry attempt.
+	p.metrics.RecordRequest(cred.Name, r.URL.Path, modelID, resp.StatusCode, time.Since(start))
 
 	// === Process final response ===
 	var finalResponseBody []byte
