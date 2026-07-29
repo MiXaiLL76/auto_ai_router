@@ -266,6 +266,12 @@ func (p *Proxy) writeFallbackResponse(
 		}
 	}
 
+	// Client-facing outcome decided — this is the response actually written to
+	// the client below, whether the fallback chain succeeded or exhausted all
+	// attempts. Recorded exactly once here (not per fallback attempt) with
+	// genuine end-to-end duration since the original client request arrived.
+	p.metrics.RecordRequest(fallbackCred.Name, r.URL.Path, modelID, proxyResp.StatusCode, time.Since(start))
+
 	if proxyResp.StatusCode >= 400 {
 		// Final error returned to the client after the fallback chain —
 		// single unified ERROR record (response_body is nil for streaming).

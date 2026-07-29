@@ -1069,6 +1069,7 @@ func updateMetrics(
 		cs := credStats[name]
 		metrics.UpdateCredentialRPM(name, cs.RPM)
 		metrics.UpdateCredentialTPM(name, cs.TPM)
+		metrics.UpdateCredentialBanStatus(name, bal.HasAnyBan(name))
 	}
 
 	for _, p := range filteredPairs {

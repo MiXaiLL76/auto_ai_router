@@ -23,7 +23,6 @@ func TestRecordRequest_Enabled(t *testing.T) {
 	// Reset metrics before test
 	RequestsTotal.Reset()
 	RequestDuration.Reset()
-	CredentialErrorsTotal.Reset()
 
 	m := New(true)
 
@@ -34,12 +33,52 @@ func TestRecordRequest_Enabled(t *testing.T) {
 	count := testutil.CollectAndCount(RequestsTotal)
 	assert.Greater(t, count, 0)
 
-	// Record an error request
+	// Record an error request (RecordRequest itself is client-facing-only and no
+	// longer touches CredentialErrorsTotal — see TestRecordCredentialAttemptError)
 	m.RecordRequest("cred1", "/v1/chat/completions", "test-model", 500, 150*time.Millisecond)
 
-	// Verify CredentialErrorsTotal metric was incremented
-	count = testutil.CollectAndCount(CredentialErrorsTotal)
+	count = testutil.CollectAndCount(RequestDuration)
 	assert.Greater(t, count, 0)
+}
+
+func TestRecordTTFT_Enabled(t *testing.T) {
+	TimeToFirstTokenSeconds.Reset()
+
+	m := New(true)
+	m.RecordTTFT("cred1", "/v1/chat/completions", 250*time.Millisecond)
+
+	count := testutil.CollectAndCount(TimeToFirstTokenSeconds)
+	assert.Greater(t, count, 0)
+}
+
+func TestRecordTTFT_Disabled(t *testing.T) {
+	TimeToFirstTokenSeconds.Reset()
+
+	m := New(false)
+	m.RecordTTFT("cred1", "/v1/chat/completions", 250*time.Millisecond)
+
+	assert.Equal(t, 0, testutil.CollectAndCount(TimeToFirstTokenSeconds))
+}
+
+func TestRecordCredentialAttemptError_Enabled(t *testing.T) {
+	CredentialErrorsTotal.Reset()
+
+	m := New(true)
+
+	initialErrors := testutil.ToFloat64(CredentialErrorsTotal.WithLabelValues("cred1"))
+	m.RecordCredentialAttemptError("cred1")
+	finalErrors := testutil.ToFloat64(CredentialErrorsTotal.WithLabelValues("cred1"))
+
+	assert.Greater(t, finalErrors, initialErrors)
+}
+
+func TestRecordCredentialAttemptError_Disabled(t *testing.T) {
+	CredentialErrorsTotal.Reset()
+
+	m := New(false)
+	m.RecordCredentialAttemptError("cred1")
+
+	assert.Equal(t, 0.0, testutil.ToFloat64(CredentialErrorsTotal.WithLabelValues("cred1")))
 }
 
 func TestRecordRequest_Disabled(t *testing.T) {
@@ -171,6 +210,11 @@ func TestMetrics_Integration(t *testing.T) {
 	m.RecordRequest("cred2", "/v1/embeddings", "test-model", 200, 80*time.Millisecond)
 	m.RecordRequest("cred2", "/v1/embeddings", "test-model", 429, 90*time.Millisecond) // Rate limit error
 
+	// Per-attempt credential error tracking is a distinct call from RecordRequest
+	// (see the retry-loop call sites in internal/proxy/proxy.go), simulated here.
+	m.RecordCredentialAttemptError("cred1")
+	m.RecordCredentialAttemptError("cred2")
+
 	// Update RPM metrics
 	m.UpdateCredentialRPM("cred1", 3)
 	m.UpdateCredentialRPM("cred2", 2)
@@ -202,19 +246,16 @@ func TestMetrics_PrometheusRegistration(t *testing.T) {
 	}
 }
 
-func TestRecordRequest_ErrorIncrementsCounter(t *testing.T) {
+func TestRecordCredentialAttemptError_IncrementsCounter(t *testing.T) {
 	CredentialErrorsTotal.Reset()
 
 	m := New(true)
 
-	// Record successful request (200)
-	m.RecordRequest("cred1", "/v1/test", "test-model", 200, 50*time.Millisecond)
-
 	// Get initial error count (should be 0)
 	initialErrors := testutil.ToFloat64(CredentialErrorsTotal.WithLabelValues("cred1"))
 
-	// Record error request
-	m.RecordRequest("cred1", "/v1/test", "test-model", 500, 50*time.Millisecond)
+	// Record a failed attempt against the credential
+	m.RecordCredentialAttemptError("cred1")
 
 	// Error count should increase
 	finalErrors := testutil.ToFloat64(CredentialErrorsTotal.WithLabelValues("cred1"))
