@@ -3,17 +3,18 @@ package proxy
 import (
 	"bufio"
 	"bytes"
-	"encoding/json"
 	"errors"
 	"io"
 
-	// Aliased separately (not a blanket replacement of this file's json import)
-	// because only normalizeSuccessfulResponseModel below benefits: it
-	// full-body-decodes+remarshals every non-streaming response, and
-	// benchmarked against a real embedding body (1536-float vector) goccy is
-	// ~1.66x faster there. normalizeSSEDataLineModel/decodeJSONObject further
-	// down operate on small per-SSE-chunk payloads, not large arrays, so
-	// there's no measured case for touching them too.
+	// goccy/go-json for every JSON call in this file: normalizeSuccessfulResponseModel
+	// full-body-decodes+remarshals every non-streaming response (benchmarked
+	// ~1.66x faster than encoding/json against a real embedding body, 1536-float
+	// vector). normalizeSSEDataLineModel/decodeJSONObject were originally left on
+	// stdlib on the assumption that small per-SSE-chunk map[string]interface{}
+	// decodes wouldn't show the same win — re-benchmarked after the
+	// token_estimator.go streaming fixes proved that assumption wrong even for
+	// tiny typed-struct payloads; goccy measured ~1.5x faster here too
+	// (map[string]interface{} decode+encode, not just typed structs).
 	goccyjson "github.com/goccy/go-json"
 )
 
@@ -211,7 +212,7 @@ func normalizeSSEDataLineModel(line []byte, publicModel string) []byte {
 		return line
 	}
 
-	normalized, err := json.Marshal(event)
+	normalized, err := goccyjson.Marshal(event)
 	if err != nil {
 		return line
 	}
@@ -225,7 +226,7 @@ func normalizeSSEDataLineModel(line []byte, publicModel string) []byte {
 }
 
 func decodeJSONObject(data []byte) (map[string]interface{}, error) {
-	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder := goccyjson.NewDecoder(bytes.NewReader(data))
 	decoder.UseNumber()
 	var object map[string]interface{}
 	if err := decoder.Decode(&object); err != nil {

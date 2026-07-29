@@ -3,13 +3,19 @@ package vertexresponses
 import (
 	"bufio"
 	"encoding/base64"
-	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"sort"
 	"strings"
 	"time"
+
+	// goccy/go-json instead of encoding/json: both json.* calls in this file run
+	// once per streamed chunk (VertexStreamingChunk unmarshal — same type
+	// benchmarked ~3.5x faster in internal/converter/vertex's
+	// streaming_bench_test.go, plus a round-trip correctness check — and a
+	// function-call-args marshal).
+	json "github.com/goccy/go-json"
 
 	"github.com/mixaill76/auto_ai_router/internal/converter/responses"
 	"github.com/mixaill76/auto_ai_router/internal/converter/vertex"

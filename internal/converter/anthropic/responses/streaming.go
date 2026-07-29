@@ -2,12 +2,18 @@ package anthropicresponses
 
 import (
 	"bufio"
-	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"strings"
 	"time"
+
+	// goccy/go-json instead of encoding/json: the only json.* call in this file
+	// is the per-SSE-event AnthropicStreamEvent unmarshal below, run once per
+	// streamed delta — benchmarked ~6x faster than encoding/json on
+	// representative small event payloads (see internal/converter/anthropic's
+	// streaming_bench_test.go, same struct).
+	json "github.com/goccy/go-json"
 
 	"github.com/mixaill76/auto_ai_router/internal/converter/anthropic"
 	"github.com/mixaill76/auto_ai_router/internal/converter/responses"
