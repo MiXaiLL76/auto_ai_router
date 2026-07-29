@@ -38,8 +38,30 @@ func NormalizeExpression(expression *Expression) *Expression {
 }
 
 func normalizeAlternatives(groups ...[]Alternative) *Expression {
-	alternatives := make([]Alternative, 0, maxExpressionAlternatives)
-	seen := make(map[string]struct{}, maxExpressionAlternatives)
+	// Hot path: CredentialConfig.ScopeExpression() calls into this on every
+	// balancer credential-selection scan, and FromScopes (the overwhelmingly
+	// common caller, invoked for both own and provider scopes) always passes
+	// exactly one alternative. Handle that shape without allocating the
+	// dedup map/slice at all — most credentials carry no scopes, so this
+	// skips a 256-capacity map+slice pair per call in the common case.
+	if len(groups) == 1 && len(groups[0]) == 1 {
+		normalized, ok := normalizeAlternative(groups[0][0])
+		if !ok {
+			return &Expression{Alternatives: []Alternative{}}
+		}
+		if isUnrestrictedAlternative(normalized) {
+			return unrestrictedExpression()
+		}
+		return &Expression{Alternatives: []Alternative{normalized}}
+	}
+
+	total := 0
+	for _, group := range groups {
+		total += len(group)
+	}
+	capHint := min(total, maxExpressionAlternatives)
+	alternatives := make([]Alternative, 0, capHint)
+	seen := make(map[string]struct{}, capHint)
 	oversized := false
 	for _, group := range groups {
 		for _, alternative := range group {
