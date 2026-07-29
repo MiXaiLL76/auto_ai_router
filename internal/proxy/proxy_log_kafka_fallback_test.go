@@ -122,6 +122,32 @@ func TestLogSpendToLiteLLMDB_NormalizesTokenUsageBeforePersisting(t *testing.T) 
 	assert.Equal(t, float64(2), ttlDetails["ephemeral_1h_input_tokens"])
 }
 
+func TestLogSpendToLiteLLMDB_TeamIDFallback(t *testing.T) {
+	tests := []struct {
+		name       string
+		teamID     string
+		expectedID string
+	}{
+		{name: "credential fallback", expectedID: "openai_primary"},
+		{name: "token team", teamID: "team-1", expectedID: "team-1"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			prx := NewTestProxyBuilder().Build()
+			dbStub := &stubLiteLLMManager{}
+			prx.LiteLLMDB = dbStub
+
+			logCtx := testLogCtx(t)
+			logCtx.TokenInfo = &litellmdb.TokenInfo{TeamID: tt.teamID}
+
+			require.NoError(t, prx.logSpendToLiteLLMDB(logCtx))
+			require.Len(t, dbStub.loggedEntries, 1)
+			assert.Equal(t, tt.expectedID, dbStub.loggedEntries[0].TeamID)
+		})
+	}
+}
+
 func TestLogSpendToLiteLLMDB_BillsAliasPriceBeforeRealModelPrice(t *testing.T) {
 	prx := NewTestProxyBuilder().Build()
 	registry := routermodels.NewModelPriceRegistry()
