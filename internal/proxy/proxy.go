@@ -661,6 +661,14 @@ func (p *Proxy) executeProxyRequest(
 	if err != nil {
 		p.logger.WarnContext(r.Context(), "Failed to read proxy response body, caller may retry",
 			"credential", cred.Name, "model", modelID, "error", err)
+		// This attempt genuinely failed (got a response, then lost the body).
+		// Only record here if the StatusOK check above didn't already count it —
+		// status 200 with a failed body read is exactly the case that check
+		// can't see; guarding on StatusOK keeps this to exactly one record per
+		// failed attempt either way.
+		if resp.StatusCode == http.StatusOK {
+			p.metrics.RecordCredentialAttemptError(cred.Name)
+		}
 		return nil, err
 	}
 
@@ -836,6 +844,14 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		logCtx.Credential = cred
 		triedCreds := GetTried(r.Context())
 		var proxyResp *ProxyResponse
+		// respCred is the credential that actually produced proxyResp. It can
+		// lag behind `cred`: e.g. attempt A returns a retryable error (proxyResp
+		// set, cred==A), attempt B (cred reassigned to B) then fails with a
+		// transport error — proxyResp is left untouched from A while `cred` has
+		// already moved to B. Restored onto `cred`/logCtx.Credential below,
+		// right before proxyResp is used, so metrics/headers/logging attribute
+		// the response to the credential that actually produced it.
+		var respCred *config.CredentialConfig
 		var lastProxyErr error
 		var shouldRetry bool
 		var retryReason RetryReason
@@ -868,6 +884,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			proxyResp = resp
+			respCred = cred
 			if proxyResp.ActualCredentialName != "" {
 				logCtx.ActualCredentialName = proxyResp.ActualCredentialName
 			}
@@ -953,6 +970,14 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 				WriteErrorBadGateway(w, statusMessage)
 			}
 			return
+		}
+
+		// proxyResp may have been left over from an earlier attempt whose
+		// credential no longer matches `cred` (see respCred's doc comment
+		// above) — realign before attributing anything to a credential.
+		if respCred != nil && respCred != cred {
+			cred = respCred
+			logCtx.Credential = cred
 		}
 
 		// Client-facing outcome decided (this response — success or the last
@@ -1517,6 +1542,14 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		if readErr != nil {
 			closeBody()
 			p.balancer.RecordResponse(cred.Name, modelID, resp.StatusCode)
+			// This attempt genuinely failed (got a response, then lost the body).
+			// Only record here if the earlier `resp.StatusCode != http.StatusOK`
+			// check didn't already count it — status 200 with a failed body read
+			// is exactly the case that check can't see; guarding on StatusOK here
+			// keeps this to exactly one record per failed attempt either way.
+			if resp.StatusCode == http.StatusOK {
+				p.metrics.RecordCredentialAttemptError(cred.Name)
+			}
 			if errors.Is(readErr, ErrResponseBodyTooLarge) {
 				// Response too large — fatal, another credential won't help
 				p.logUpstreamError(r.Context(), "Failed to read response body: too large", http.StatusBadGateway, cred, modelID, nil,
@@ -1527,6 +1560,9 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 				logCtx.HTTPStatus = http.StatusBadGateway
 				logCtx.ErrorMsg = fmt.Sprintf("Failed to read response body: %v", readErr)
 				logCtx.TargetURL = targetURL
+				// Client-facing outcome decided (502 written to the client below,
+				// no further attempts) — record exactly once here.
+				p.metrics.RecordRequest(cred.Name, r.URL.Path, modelID, http.StatusBadGateway, time.Since(start))
 				WriteErrorBadGateway(w, "upstream response too large")
 				return
 			}

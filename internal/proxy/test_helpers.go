@@ -87,24 +87,25 @@ func createTestBalancer(baseURL string) (*balancer.RoundRobin, *ratelimit.RPMLim
 
 // TestProxyConfig holds configuration for building a test proxy instance.
 type TestProxyConfig struct {
-	Credentials          []config.CredentialConfig
-	Logger               *slog.Logger
-	Balancer             *balancer.RoundRobin
-	RateLimiter          *ratelimit.RPMLimiter
-	Metrics              *monitoring.Metrics
-	TokenManager         *auth.VertexTokenManager
-	ModelManager         *models.Manager
-	MasterKey            string
-	MaxBodySizeMB        int
-	RequestTimeout       time.Duration
-	Version              string
-	Commit               string
-	SessionStickyEnabled bool
-	SessionStoreTTL      time.Duration
-	MaxProviderRetries   int
-	MaxFallbackAttempts  int
-	DrainUpstreamOnAbort bool
-	ResponseHeaderMode   config.ResponseHeaderMode
+	Credentials            []config.CredentialConfig
+	Logger                 *slog.Logger
+	Balancer               *balancer.RoundRobin
+	RateLimiter            *ratelimit.RPMLimiter
+	Metrics                *monitoring.Metrics
+	TokenManager           *auth.VertexTokenManager
+	ModelManager           *models.Manager
+	MasterKey              string
+	MaxBodySizeMB          int
+	ResponseBodyMultiplier int
+	RequestTimeout         time.Duration
+	Version                string
+	Commit                 string
+	SessionStickyEnabled   bool
+	SessionStoreTTL        time.Duration
+	MaxProviderRetries     int
+	MaxFallbackAttempts    int
+	DrainUpstreamOnAbort   bool
+	ResponseHeaderMode     config.ResponseHeaderMode
 }
 
 // NewTestProxyBuilder creates a builder with default configuration.
@@ -221,6 +222,21 @@ func (b *TestProxyBuilder) WithSessionSticky(ttl time.Duration) *TestProxyBuilde
 	return b
 }
 
+// WithMaxBodySizeMB sets the max response body size (in MB, before the
+// ResponseBodyMultiplier is applied). Use together with WithResponseBodyMultiplier
+// to get a small, test-friendly size limit for exercising ErrResponseBodyTooLarge.
+func (b *TestProxyBuilder) WithMaxBodySizeMB(mb int) *TestProxyBuilder {
+	b.config.MaxBodySizeMB = mb
+	return b
+}
+
+// WithResponseBodyMultiplier overrides DefaultResponseBodyMultiplier (10) for tests
+// that need a precise, small max response body size (MaxBodySizeMB * multiplier).
+func (b *TestProxyBuilder) WithResponseBodyMultiplier(multiplier int) *TestProxyBuilder {
+	b.config.ResponseBodyMultiplier = multiplier
+	return b
+}
+
 // WithMaxProviderRetries sets the maximum number of same-type credential retries.
 // This mirrors the production Config.MaxProviderRetries (default: 2).
 // Use this in tests that need to validate retry/fallback behavior under realistic
@@ -255,23 +271,24 @@ func (b *TestProxyBuilder) Build() *Proxy {
 		b.config.Balancer = balancer.New(b.config.Credentials, f2b, b.config.RateLimiter)
 	}
 	return New(&Config{
-		Balancer:             b.config.Balancer,
-		Logger:               b.config.Logger,
-		MaxBodySizeMB:        b.config.MaxBodySizeMB,
-		RequestTimeout:       b.config.RequestTimeout,
-		Metrics:              b.config.Metrics,
-		MasterKey:            b.config.MasterKey,
-		RateLimiter:          b.config.RateLimiter,
-		TokenManager:         b.config.TokenManager,
-		ModelManager:         b.config.ModelManager,
-		Version:              b.config.Version,
-		Commit:               b.config.Commit,
-		SessionStickyEnabled: b.config.SessionStickyEnabled,
-		SessionStoreTTL:      b.config.SessionStoreTTL,
-		MaxProviderRetries:   b.config.MaxProviderRetries,
-		MaxFallbackAttempts:  b.config.MaxFallbackAttempts,
-		DrainUpstreamOnAbort: b.config.DrainUpstreamOnAbort,
-		ResponseHeaderMode:   b.config.ResponseHeaderMode,
+		Balancer:               b.config.Balancer,
+		Logger:                 b.config.Logger,
+		MaxBodySizeMB:          b.config.MaxBodySizeMB,
+		ResponseBodyMultiplier: b.config.ResponseBodyMultiplier,
+		RequestTimeout:         b.config.RequestTimeout,
+		Metrics:                b.config.Metrics,
+		MasterKey:              b.config.MasterKey,
+		RateLimiter:            b.config.RateLimiter,
+		TokenManager:           b.config.TokenManager,
+		ModelManager:           b.config.ModelManager,
+		Version:                b.config.Version,
+		Commit:                 b.config.Commit,
+		SessionStickyEnabled:   b.config.SessionStickyEnabled,
+		SessionStoreTTL:        b.config.SessionStoreTTL,
+		MaxProviderRetries:     b.config.MaxProviderRetries,
+		MaxFallbackAttempts:    b.config.MaxFallbackAttempts,
+		DrainUpstreamOnAbort:   b.config.DrainUpstreamOnAbort,
+		ResponseHeaderMode:     b.config.ResponseHeaderMode,
 	})
 }
 
