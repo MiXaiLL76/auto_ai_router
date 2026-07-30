@@ -43,7 +43,15 @@ const streamTTFTDetectionLimit = 64 * 1024
 // which made the old approach O(n²) in the bytes accumulated before a match.
 // A line can only ever contain a complete JSON payload once its trailing
 // newline has arrived, so deferring extraction until then loses no matches
-// extractCompletionDeltaText could have found on a still-partial line.
+// extractCompletionDeltaText could have found on a still-partial line — for
+// real SSE framing (every current caller feeds streamToClient real "data:
+// ...\n\n" events). This is NOT a universal guarantee: a hypothetical stream
+// whose final content line never terminates with '\n' would leave that line
+// stuck in s.pending forever, and TTFT would never be stamped for it. Narrow
+// in practice (only the CompletionStartTime metric is affected — no
+// correctness/billing impact — and no current caller produces such a
+// stream), but worth knowing before reusing this pattern somewhere newline
+// termination isn't guaranteed.
 type ttftScanState struct {
 	pending []byte
 	total   int
@@ -77,8 +85,13 @@ func (s *ttftScanState) observe(chunk []byte) bool {
 // coalescing flushes within that window costs nothing on the "feels live"
 // front while cutting syscall volume whenever reads arrive in a burst (e.g.
 // providers/mocks that batch several SSE frames per write). The very first
-// flush and the final one (stream end/error) always fire immediately —
-// TTFT accuracy and "no buffered bytes left behind" are never traded away.
+// flush always fires immediately (TTFT accuracy), and every write is
+// guaranteed to be flushed by the time streamToClient returns (see
+// flushPending in that function — no buffered bytes are ever left behind at
+// stream end). That guarantee does NOT extend to a live mid-stream pause: a
+// chunk written just before the reader blocks on the next upstream Read can
+// still sit unflushed for the whole pause, since nothing outside the read
+// loop can force a flush — see TestStreamToClient_FlushesTailOnMidStreamPause.
 const streamFlushCoalesceWindow = 10 * time.Millisecond
 
 var streamBufPool = sync.Pool{
@@ -439,7 +452,52 @@ var (
 	// cannot possibly carry usage/total_tokens — skip the unmarshal attempt
 	// entirely rather than paying for it on every content-only chunk.
 	sseUsageNeedle = []byte(`"usage"`)
+	// sseWebSearchCallNeedle and sseAnnotationsNeedle catch the two other
+	// shapes converter.ExtractTokenUsageWithOptions can derive a non-nil,
+	// billable TokenUsage from *without* any "usage" key present at all:
+	// a completed output[]/response.output[] item of type "web_search_call",
+	// or a choices[].message.annotations[] entry with type "url_citation".
+	// Found by review: a chunk carrying only one of these (e.g. a
+	// Chat-Completions-shaped full "message" frame relayed by an upstream
+	// AIR/proxy-type credential, separate from the frame that carries usage)
+	// was being silently skipped by the "usage"-only prefilter below,
+	// dropping billed WebSearchRequests. Checking chunk-wide (not per-payload)
+	// keeps this a single cheap scan like the usage check.
+	sseWebSearchCallNeedle = []byte(`"web_search_call"`)
+	sseAnnotationsNeedle   = []byte(`"annotations"`)
+	// sseErrorNeedle and sseResponseFailedNeedle prefilter
+	// extractStreamErrorEvent's json.Unmarshal (called from
+	// proxyStreamErrorCapture.Observe/Finalize on every assembled SSE frame):
+	// it only ever matches a frame containing an "error" field key, or an
+	// eventType of "error"/"response.error" (all covered by the unquoted
+	// substring "error"), or "response.failed" (which doesn't contain
+	// "error", hence the second needle). Checked against the
+	// fully-assembled frame (post nextSSEFrameEnd), not a possibly-split raw
+	// read, so there's no risk of a false negative from a match straddling
+	// two reads.
+	sseErrorNeedle          = []byte("error")
+	sseResponseFailedNeedle = []byte("response.failed")
 )
+
+// frameMayCarryStreamError reports whether frame could possibly make
+// extractStreamErrorEvent return non-empty. See sseErrorNeedle/
+// sseResponseFailedNeedle above.
+func frameMayCarryStreamError(frame []byte) bool {
+	return bytes.Contains(frame, sseErrorNeedle) || bytes.Contains(frame, sseResponseFailedNeedle)
+}
+
+// chunkMayCarryTokenUsage reports whether chunk could possibly yield a
+// non-nil result from extractTokenUsageFromPayloads/
+// converter.ExtractTokenUsageWithOptions — i.e. it contains "usage", or
+// either of the web-search-only signal shapes those functions also read
+// (see sseWebSearchCallNeedle/sseAnnotationsNeedle above). Used to gate the
+// per-chunk usage-extraction attempt (plan item D) without dropping the
+// web-search billing signal for chunks that carry it without any "usage" key.
+func chunkMayCarryTokenUsage(chunk []byte) bool {
+	return bytes.Contains(chunk, sseUsageNeedle) ||
+		bytes.Contains(chunk, sseWebSearchCallNeedle) ||
+		bytes.Contains(chunk, sseAnnotationsNeedle)
+}
 
 // splitSSEPayloads splits an SSE-formatted chunk into its "data:" JSON payload
 // sub-slices using a single bytes.IndexByte('\n') scan — no strings.Split, no
@@ -616,9 +674,12 @@ func (tcw *tokenCapturingWriter) Write(p []byte) (n int, err error) {
 	tcw.payloadBuf = splitSSEPayloads(p, tcw.payloadBuf)
 
 	// Byte-level prefilter (plan item D): stream_options.include_usage means
-	// usage/total_tokens can only ever appear in a chunk containing this
-	// literal substring — skip the unmarshal attempt entirely otherwise.
-	hasUsage := bytes.Contains(p, sseUsageNeedle)
+	// total_tokens can only ever appear in a chunk containing "usage" — but
+	// converter.ExtractTokenUsageWithOptions (via the onChunk callback below)
+	// can also derive a billable WebSearchRequests from "web_search_call"/
+	// "annotations" shapes with no "usage" key at all, so the gate has to
+	// cover those too (see chunkMayCarryTokenUsage's doc comment).
+	hasUsage := chunkMayCarryTokenUsage(p)
 	if hasUsage {
 		// Extract tokens from the data being written.
 		// Use assignment (not +=) because Vertex/Gemini include cumulative total_tokens in every
@@ -711,7 +772,11 @@ func (p *Proxy) handleTransformedStreaming(
 						if logCtx.TokenUsage == nil {
 							logCtx.TokenUsage = &converter.TokenUsage{}
 						}
-						*logCtx.TokenUsage = *usage
+						// Merge rather than replace — see MergeNonZero's doc
+						// comment: a web-search-only chunk's WebSearchRequests
+						// must not be clobbered back to zero by a later
+						// chunk's usage read that doesn't carry it.
+						logCtx.TokenUsage.MergeNonZero(usage)
 					}
 				}
 
@@ -813,13 +878,17 @@ func (p *Proxy) handleStreamingWithTokens(w http.ResponseWriter, resp *http.Resp
 		// reused buffer (see completionTokenAccumulator.payloadBuf) since it
 		// also has to run on hasUsage==false chunks.
 		payloadBuf = splitSSEPayloads(chunk, payloadBuf)
-		if hasUsage := bytes.Contains(chunk, sseUsageNeedle); hasUsage {
+		if hasUsage := chunkMayCarryTokenUsage(chunk); hasUsage {
 			if logCtx != nil {
 				if usage := extractTokenUsageFromPayloads(payloadBuf, converter.TokenUsageExtractionOptions{AudioInputIncludesCachedAudio: true}); usage != nil {
 					if logCtx.TokenUsage == nil {
 						logCtx.TokenUsage = &converter.TokenUsage{}
 					}
-					*logCtx.TokenUsage = *usage
+					// Merge rather than replace — see MergeNonZero's doc
+					// comment: a web-search-only chunk's WebSearchRequests
+					// must not be clobbered back to zero by a later chunk's
+					// usage read that doesn't carry it.
+					logCtx.TokenUsage.MergeNonZero(usage)
 				}
 			}
 
@@ -1182,6 +1251,20 @@ func (p *Proxy) streamToClient(
 	var ttftScan ttftScanState
 	ttftPending := logCtx != nil && logCtx.CompletionStartTime.IsZero()
 	var lastFlush time.Time
+	// flushPending tracks whether the most recent write was buffered rather
+	// than flushed (coalescing skip below). It is guaranteed to be flushed
+	// before this function returns — see the unconditional check on every
+	// loop-exit path — fixing the bug where a terminal Read() returning (0,
+	// io.EOF) never reached the "if n > 0" block at all, leaving any
+	// buffered tail stuck for the rest of the connection's lifetime.
+	// KNOWN LIMITATION (not fixed by this flag): a chunk written just before
+	// a live upstream pause can still sit unflushed for the pause's whole
+	// duration, since this loop is blocked synchronously in reader.Read()
+	// and nothing forces a flush until the next Read() returns. Closing that
+	// gap needs a timer-driven background flush with its own
+	// synchronization against concurrent Write() — deliberately out of scope
+	// here; see TestStreamToClient_FlushesTailOnMidStreamPause.
+	flushPending := false
 
 	for {
 		n, err := reader.Read(*buf)
@@ -1216,12 +1299,15 @@ func (p *Proxy) streamToClient(
 				return writeErr
 			}
 			// Coalesce flushes within streamFlushCoalesceWindow: always flush the
-			// first chunk (TTFT) and the last one (err != nil, nothing left
-			// buffered on return); in between, skip a flush if the previous one
-			// was very recent — bursty reads (e.g. an upstream that batches
-			// several SSE frames per write) then cost one syscall, not N.
+			// first chunk (TTFT); in between, skip a flush if the previous one was
+			// very recent — bursty reads (e.g. an upstream that batches several SSE
+			// frames per write) then cost one syscall, not N. Whatever gets skipped
+			// here is guaranteed to be flushed before this function returns (see
+			// the unconditional flushPending check below) — do NOT rely on "err !=
+			// nil" to force a flush from inside this block: a terminal Read()
+			// commonly returns (0, io.EOF), which never enters "if n > 0" at all.
 			now := time.Now()
-			if lastFlush.IsZero() || err != nil || now.Sub(lastFlush) >= streamFlushCoalesceWindow {
+			if lastFlush.IsZero() || now.Sub(lastFlush) >= streamFlushCoalesceWindow {
 				if flushErr := p.flushStreaming(ctx, controller, credName); flushErr != nil {
 					if isClientDisconnectError(flushErr) {
 						p.logger.DebugContext(ctx, "Client disconnected during streaming flush", "error", flushErr, "credential", credName)
@@ -1233,9 +1319,26 @@ func (p *Proxy) streamToClient(
 					return flushErr
 				}
 				lastFlush = now
+				flushPending = false
+			} else {
+				flushPending = true
 			}
 		}
 		if err != nil {
+			if flushPending {
+				// No need to clear flushPending here — every path below
+				// returns immediately, so nothing would ever read it again.
+				if flushErr := p.flushStreaming(ctx, controller, credName); flushErr != nil {
+					if isClientDisconnectError(flushErr) {
+						p.logger.DebugContext(ctx, "Client disconnected during streaming flush", "error", flushErr, "credential", credName)
+						p.recordAbortedRequest(credName, endpoint, modelID)
+					}
+					if onWriteErr != nil {
+						onWriteErr()
+					}
+					return flushErr
+				}
+			}
 			if err != io.EOF {
 				p.logStreamHandlerError(ctx, "Streaming read error", err, "credential", credName)
 				return err

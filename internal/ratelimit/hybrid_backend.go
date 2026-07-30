@@ -94,7 +94,12 @@ func NewHybridBackend(remote *RedisBackend, syncInterval time.Duration, log *slo
 // Redis. metrics may be nil in tests that construct a HybridBackend without
 // a full Metrics instance.
 func (h *HybridBackend) recordRedisError(operation string, err error) {
-	h.log.Error("Hybrid backend: Redis operation failed", "operation", operation, "error", err)
+	// Warn, not Error: a failed background write/sync degrades this backend
+	// to local-only counting for the affected key until Redis recovers — by
+	// design, non-fatal and self-healing, not an operator-actionable
+	// emergency on its own. The metric below (unaffected by log level) is
+	// the real signal for alerting on a sustained outage.
+	h.log.Warn("Hybrid backend: Redis operation failed", "operation", operation, "error", err)
 	if h.metrics != nil {
 		h.metrics.RecordRedisConnectionError(operation)
 	}
@@ -235,32 +240,35 @@ func (h *HybridBackend) doSync() {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	// Fetch Redis totals (all instances) and local counts in parallel.
+	// Fetch Redis totals (all instances) and local counts in parallel. The
+	// goroutine below only ever produces a result — it never calls
+	// recordRedisError itself, so the outer select (the only place that
+	// reports) can't double-count the same underlying failure once for the
+	// goroutine's own error and again for a racing ctx.Done() timeout.
 	type statsResult struct {
-		total map[string][2]int
-		local map[string][2]int
+		total    map[string][2]int
+		local    map[string][2]int
+		totalErr error
 	}
 	ch := make(chan statsResult, 1)
 
 	go func() {
 		total, err := h.remote.batchCurrentStatsErr(ctx, keys)
-		if err != nil {
-			h.recordRedisError("hybrid_sync", err)
-		}
 		local := h.local.batchCurrentStats(ctx, keys)
 		select {
-		case ch <- statsResult{total, local}:
+		case ch <- statsResult{total, local, err}:
 		case <-ctx.Done():
 		}
 	}()
 
 	select {
 	case <-ctx.Done():
-		if err := ctx.Err(); err != nil {
-			h.recordRedisError("hybrid_sync", err)
-		}
+		h.recordRedisError("hybrid_sync", ctx.Err())
 		return
 	case r := <-ch:
+		if r.totalErr != nil {
+			h.recordRedisError("hybrid_sync", r.totalErr)
+		}
 		h.remoteMu.Lock()
 		for _, key := range keys {
 			total := r.total[key]
