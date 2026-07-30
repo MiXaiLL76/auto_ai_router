@@ -65,7 +65,7 @@ func TestInitializeModelManagerKeepsBackendRateLimitsBehindClientSurface(t *test
 		ClientModelIDs: []string{"public/chat"},
 	}
 	logger := slog.New(slog.DiscardHandler)
-	_, limiter, bal := initializeBalancer(cfg, logger, nil)
+	_, limiter, bal := initializeBalancer(cfg, logger, nil, nil)
 	manager := initializeModelManager(logger, cfg, limiter, bal)
 
 	assert.Equal(t, 7, limiter.GetModelLimitRPM("provider", "backend-chat"))
@@ -91,7 +91,7 @@ func TestInitializeModelManagerRegistersAcceptedModelAliases(t *testing.T) {
 		AcceptedModelAlias: map[string]string{"legacy-chat": "public/chat"},
 	}
 	logger := slog.New(slog.DiscardHandler)
-	_, limiter, bal := initializeBalancer(cfg, logger, nil)
+	_, limiter, bal := initializeBalancer(cfg, logger, nil, nil)
 	manager := initializeModelManager(logger, cfg, limiter, bal)
 
 	assert.True(t, manager.IsClientModelIDRoutable("legacy-chat"))

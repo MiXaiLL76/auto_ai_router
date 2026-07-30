@@ -3,11 +3,14 @@ package ratelimit
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/valkey-io/valkey-go"
+
+	"github.com/mixaill76/auto_ai_router/internal/monitoring"
 )
 
 const (
@@ -41,6 +44,8 @@ type HybridBackend struct {
 	local        *localBackend
 	remote       *RedisBackend
 	syncInterval time.Duration
+	log          *slog.Logger
+	metrics      *monitoring.Metrics
 
 	trackedMu sync.Mutex
 	tracked   map[string]struct{}
@@ -58,14 +63,22 @@ type HybridBackend struct {
 // NewHybridBackend wraps remote with a local in-process counter. Hot-path
 // operations run entirely on the local backend; Redis is updated asynchronously.
 // syncInterval controls how often remote stats are pulled (default: 5s).
-func NewHybridBackend(remote *RedisBackend, syncInterval time.Duration) *HybridBackend {
+// log and metrics report failures in the background write/sync workers,
+// which would otherwise fail against an unreachable Redis with no visibility
+// (see redis_todo.md item 3).
+func NewHybridBackend(remote *RedisBackend, syncInterval time.Duration, log *slog.Logger, metrics *monitoring.Metrics) *HybridBackend {
 	if syncInterval <= 0 {
 		syncInterval = 5 * time.Second
+	}
+	if log == nil {
+		log = slog.Default()
 	}
 	h := &HybridBackend{
 		local:        newLocalBackend(),
 		remote:       remote,
 		syncInterval: syncInterval,
+		log:          log,
+		metrics:      metrics,
 		tracked:      make(map[string]struct{}),
 		remoteStats:  make(map[string][2]int),
 		writeQueue:   make(chan asyncOp, hybridWriteQueueSize),
@@ -75,6 +88,16 @@ func NewHybridBackend(remote *RedisBackend, syncInterval time.Duration) *HybridB
 	go h.writeWorker()
 	go h.syncWorker()
 	return h
+}
+
+// recordRedisError logs and records a background-worker failure against
+// Redis. metrics may be nil in tests that construct a HybridBackend without
+// a full Metrics instance.
+func (h *HybridBackend) recordRedisError(operation string, err error) {
+	h.log.Error("Hybrid backend: Redis operation failed", "operation", operation, "error", err)
+	if h.metrics != nil {
+		h.metrics.RecordRedisConnectionError(operation)
+	}
 }
 
 // Close stops background goroutines. Call during server shutdown.
@@ -148,8 +171,14 @@ func (h *HybridBackend) writeWorker() {
 		}
 
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		h.remote.client.DoMulti(ctx, cmds...)
+		results := h.remote.client.DoMulti(ctx, cmds...)
 		cancel()
+		for _, res := range results {
+			if err := res.Error(); err != nil {
+				h.recordRedisError("hybrid_write", err)
+				break
+			}
+		}
 		batch = batch[:0]
 	}
 
@@ -214,7 +243,10 @@ func (h *HybridBackend) doSync() {
 	ch := make(chan statsResult, 1)
 
 	go func() {
-		total := h.remote.batchCurrentStats(ctx, keys)
+		total, err := h.remote.batchCurrentStatsErr(ctx, keys)
+		if err != nil {
+			h.recordRedisError("hybrid_sync", err)
+		}
 		local := h.local.batchCurrentStats(ctx, keys)
 		select {
 		case ch <- statsResult{total, local}:
@@ -224,6 +256,9 @@ func (h *HybridBackend) doSync() {
 
 	select {
 	case <-ctx.Done():
+		if err := ctx.Err(); err != nil {
+			h.recordRedisError("hybrid_sync", err)
+		}
 		return
 	case r := <-ch:
 		h.remoteMu.Lock()

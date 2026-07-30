@@ -311,20 +311,26 @@ func (p *Proxy) writeProxyStreamingResponseWithTokens(
 	w.WriteHeader(resp.StatusCode)
 
 	var lastUsage *converter.TokenUsage
-	completion := newCompletionTokenAccumulator(tokenizerModelID)
+	completion := p.newCompletionTokenAccumulator(tokenizerModelID)
 	detectProviderStreamError := resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices
 	providerStreamError := &proxyStreamErrorCapture{}
+	var payloadBuf [][]byte
 	onChunk := func(chunk []byte) {
 		if detectProviderStreamError {
 			providerStreamError.Observe(chunk)
 		}
-		if usage := extractTokenUsageFromStreamingChunkWithOptions(string(chunk), tokenUsageOptions); usage != nil {
-			lastUsage = usage
-			if logCtx != nil {
-				logCtx.UsageSource = "provider"
+		// One split per chunk (plan item C), reused for both usage
+		// extraction and the completion accumulator.
+		payloadBuf = splitSSEPayloads(chunk, payloadBuf)
+		if bytes.Contains(chunk, sseUsageNeedle) {
+			if usage := extractTokenUsageFromPayloads(payloadBuf, tokenUsageOptions); usage != nil {
+				lastUsage = usage
+				if logCtx != nil {
+					logCtx.UsageSource = "provider"
+				}
 			}
 		}
-		completion.AddChunk(chunk)
+		completion.AddPayloads(payloadBuf)
 	}
 
 	buildFallbackUsage := func() *converter.TokenUsage {

@@ -252,7 +252,6 @@ type RequestLogContext struct {
 	WebSearchRequested   bool                     // True when the request enabled the built-in web search tool
 	WebSearchContextSize string                   // low|medium|high from web_search_options/tool config
 	Logged               bool                     // True if already logged (prevents duplicate logging)
-	PromptTokensEstimate int                      // Estimated prompt tokens for streaming responses (since streaming doesn't provide prompt tokens in headers)
 	IsResponsesAPI       bool                     // True if this is a Responses API request (converted to Chat Completions)
 	RequestCompleted     bool                     // True only after the response was fully and successfully delivered
 	ActualCredentialName string                   // Real credential name from upstream when Credential.Type == ProviderTypeProxy
@@ -275,6 +274,35 @@ type RequestLogContext struct {
 	billingPriceResolved bool
 	billingPriceModelID  string
 	billingPrice         *models.ModelPrice
+
+	// promptTokensEstimateFn lazily computes the local tiktoken-based prompt-token
+	// estimate (full body JSON decode + BPE tokenization) for this request. It is armed
+	// (non-nil) by the streaming entry paths in proxy.go right before the request body
+	// would otherwise go out of scope, but the estimator itself only runs the first time
+	// promptTokensEstimate() is actually called — i.e. when a provider genuinely didn't
+	// report usage. nil when tiktoken_enabled=false (Proxy.tiktokenEnabled), in which case
+	// promptTokensEstimate() always returns 0. Memoized in promptTokensEstimateVal; safe
+	// without a mutex because promptTokensEstimate() is only ever called from the single
+	// goroutine that owns logCtx after any per-request streaming transform goroutines have
+	// already joined (see the wg.Wait() calls guarding logCtx access in stream.go).
+	promptTokensEstimateFn    func() int
+	promptTokensEstimateVal   int
+	promptTokensEstimateReady bool
+}
+
+// promptTokensEstimate returns the memoized local tiktoken-based prompt-token estimate,
+// computing it on first call via promptTokensEstimateFn (if armed). Returns 0 when no
+// estimator was armed for this request (tiktoken_enabled=false, or a non-streaming/
+// non-fallback path that never needed one).
+func (logCtx *RequestLogContext) promptTokensEstimate() int {
+	if logCtx == nil || logCtx.promptTokensEstimateFn == nil {
+		return 0
+	}
+	if !logCtx.promptTokensEstimateReady {
+		logCtx.promptTokensEstimateVal = logCtx.promptTokensEstimateFn()
+		logCtx.promptTokensEstimateReady = true
+	}
+	return logCtx.promptTokensEstimateVal
 }
 
 // HealthChecker provides cached database health status
@@ -311,6 +339,7 @@ type Config struct {
 	SessionStoreTTL            time.Duration
 	RouterID                   string // Human-readable name for this router (shown in /trace); defaults to hostname
 	DrainUpstreamOnAbort       bool   // When true, keep reading upstream after client disconnect to get real usage (default: false)
+	TiktokenEnabled            bool   // Local tiktoken-based prompt/completion token fallback estimation (default: true)
 	StrictAllTeamModelsACL     bool
 	ResponseHeaderMode         config.ResponseHeaderMode
 
@@ -344,6 +373,7 @@ type Proxy struct {
 	sessionStore                     *SessionStore              // Optional: session-sticky credential routing
 	stickyAutoCacheCtrl              bool                       // Auto-inject Anthropic cache_control when session is active
 	drainUpstreamOnAbort             bool                       // Keep reading upstream after client disconnect to get real usage chunk
+	tiktokenEnabled                  bool                       // Local tiktoken-based prompt/completion token fallback estimation
 	strictAllTeamModelsACL           bool
 	responseHeaderMode               config.ResponseHeaderMode
 	bedrockDailyQuota                *bedrockDailyQuotaTracker
@@ -415,6 +445,7 @@ func New(cfg *Config) *Proxy {
 		sessionStore:                     sessionStore,
 		stickyAutoCacheCtrl:              cfg.SessionStickyAutoCacheCtrl,
 		drainUpstreamOnAbort:             cfg.DrainUpstreamOnAbort,
+		tiktokenEnabled:                  cfg.TiktokenEnabled,
 		strictAllTeamModelsACL:           cfg.StrictAllTeamModelsACL,
 		responseHeaderMode:               cfg.ResponseHeaderMode,
 		bedrockDailyQuota:                newBedrockDailyQuotaTracker(),
@@ -988,6 +1019,12 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 
 		// Write response (streaming or non-streaming)
 		tokenUsageOptions := tokenUsageExtractionOptionsForResponse(cred, proxyResp.Headers)
+		// Populated in the non-streaming branch below via extractOpenAITokensAndUsage
+		// (plan item G — one shared decode of proxyResp.Body instead of the
+		// rate-limiter's extractTokensFromResponse and the spend-logging
+		// converter.ExtractTokenUsageWithOptions each re-decoding it independently)
+		// and consumed further down in the shared !proxyResp.IsStreaming logging block.
+		var nonStreamingTokenUsage *converter.TokenUsage
 		if proxyResp.IsStreaming {
 			p.logger.DebugContext(r.Context(), "Response is streaming (no retry for streaming)",
 				"credential", cred.Name, "status", proxyResp.StatusCode)
@@ -1007,7 +1044,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 					p.markAudioUsageExcludesCachedForClient(w, logCtx)
 				}
 				w.WriteHeader(proxyResp.StatusCode)
-				logCtx.PromptTokensEstimate = estimatePromptTokensForModel(body, realModelID)
+				p.setPromptTokensEstimate(logCtx, body, realModelID)
 				fakeResp := &http.Response{
 					StatusCode: proxyResp.StatusCode,
 					Header:     proxyResp.Headers,
@@ -1033,7 +1070,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 					p.markAudioUsageContractForClient(w, logCtx, tokenUsageOptions.AudioInputIncludesCachedAudio)
 				}
 				w.WriteHeader(proxyResp.StatusCode)
-				logCtx.PromptTokensEstimate = estimatePromptTokensForModel(body, realModelID)
+				p.setPromptTokensEstimate(logCtx, body, realModelID)
 				fakeResp := &http.Response{
 					StatusCode: proxyResp.StatusCode,
 					Header:     proxyResp.Headers,
@@ -1051,7 +1088,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 				if tokenizerModelID == "" {
 					tokenizerModelID = modelID
 				}
-				logCtx.PromptTokensEstimate = estimatePromptTokensForModel(proxyBody, tokenizerModelID)
+				p.setPromptTokensEstimate(logCtx, proxyBody, tokenizerModelID)
 				streamUsage, err := p.writeProxyStreamingResponseWithTokens(
 					w, proxyResp, r, cred, modelID, tokenizerModelID, logCtx, tokenUsageOptions,
 				)
@@ -1065,7 +1102,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 					// Backfill PromptTokens from estimate when provider didn't include it
 					// (e.g. stream cut before usage chunk, or provider omits prompt tokens).
 					if streamUsage.PromptTokens == 0 && logCtx.UsageSource != "provider" {
-						streamUsage.PromptTokens = logCtx.PromptTokensEstimate
+						streamUsage.PromptTokens = logCtx.promptTokensEstimate()
 					}
 					logCtx.TokenUsage = streamUsage
 					if proxyResp.StatusCode < 400 {
@@ -1139,7 +1176,8 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 
 			p.setCredentialResponseHeader(w, logCtx, logCtx.ActualCredentialName)
 			p.writeProxyResponse(w, proxyResp, r, cred, modelID, logCtx, tokenUsageOptions)
-			tokens := extractTokensFromResponse(proxyResp.Body, config.ProviderTypeOpenAI)
+			tokens, usage := extractOpenAITokensAndUsage(proxyResp.Body, tokenUsageOptions)
+			nonStreamingTokenUsage = usage
 			if tokens > 0 {
 				p.rateLimiter.ConsumeTokens(cred.Name, tokens)
 				if modelID != "" {
@@ -1170,7 +1208,10 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		logCtx.HTTPStatus = proxyResp.StatusCode
 		logCtx.TargetURL = cred.BaseURL
 		if !proxyResp.IsStreaming {
-			logCtx.TokenUsage = converter.ExtractTokenUsageWithOptions(proxyResp.Body, tokenUsageOptions)
+			// Reuses the decode already done above (extractOpenAITokensAndUsage)
+			// instead of a second independent converter.ExtractTokenUsageWithOptions
+			// Unmarshal of the same proxyResp.Body.
+			logCtx.TokenUsage = nonStreamingTokenUsage
 			if logCtx.TokenUsage != nil && proxyResp.StatusCode < 400 {
 				p.metrics.RecordTokenUsage(cred.Name, modelID,
 					logCtx.TokenUsage.PromptTokens, logCtx.TokenUsage.CompletionTokens,
@@ -1815,7 +1856,16 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			resp.Header.Set("Content-Type", "application/json")
 		}
 
-		tokens := extractTokensFromResponse(bodyForTokenExtraction, config.ProviderTypeOpenAI)
+		// Single shared decode of bodyForTokenExtraction for both token-accounting
+		// consumers (plan item G) — the rate-limiter's total-tokens count
+		// (RPM/TPM accounting) and the spend-logging TokenUsage below used to
+		// each run their own independent full-body Unmarshal. They compute
+		// genuinely different numbers (see
+		// converter.ExtractTotalTokensAndUsageWithOptions's doc comment), so
+		// only the decode is shared, not the computation.
+		// bodyForTokenExtraction is not mutated between here and its next use
+		// below.
+		tokens, directProviderTokenUsage := extractOpenAITokensAndUsage(bodyForTokenExtraction, tokenUsageOptions)
 		if tokens > 0 {
 			p.rateLimiter.ConsumeTokens(cred.Name, tokens)
 			if modelID != "" {
@@ -1841,7 +1891,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		resp.Body = io.NopCloser(bytes.NewReader(finalResponseBody))
 
 		// Log to LiteLLM DB (non-streaming)
-		logCtx.TokenUsage = converter.ExtractTokenUsageWithOptions(bodyForTokenExtraction, tokenUsageOptions)
+		logCtx.TokenUsage = directProviderTokenUsage
 		logCtx.Status = "success"
 		logCtx.HTTPStatus = resp.StatusCode
 		logCtx.TargetURL = targetURL
@@ -1923,16 +1973,11 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		setSuccessfulSSEHeaders(w.Header(), resp.StatusCode)
 		w.WriteHeader(resp.StatusCode)
 
-		if logCtx != nil {
-			logCtx.PromptTokensEstimate = estimatePromptTokensForModel(body, realModelID)
-
-			p.logger.DebugContext(
-				r.Context(),
-				"Estimated prompt tokens for streaming response",
-				"estimate", logCtx.PromptTokensEstimate,
-				"request_id", logCtx.RequestID,
-			)
-		}
+		// Arms the lazy fallback estimate; the actual json-decode + tiktoken pass only
+		// runs later, inside finalizeStreamingLog, and only if the provider never sent
+		// usage — logging it eagerly here would defeat that (DebugContext's args are
+		// evaluated unconditionally regardless of whether debug level is enabled).
+		p.setPromptTokensEstimate(logCtx, body, realModelID)
 
 		p.logger.DebugContext(r.Context(), "Streaming handler selection",
 			"is_responses_api", prepared.isResponsesAPI,

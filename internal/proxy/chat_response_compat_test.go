@@ -88,8 +88,8 @@ func TestFinalizeStreamingLogKeepsExplicitZeroProviderUsage(t *testing.T) {
 	prx := NewTestProxyBuilder().Build()
 	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 	logCtx := &RequestLogContext{
-		Request:              request,
-		PromptTokensEstimate: 123,
+		Request:                request,
+		promptTokensEstimateFn: func() int { return 123 },
 	}
 	lastChunk := []byte(`data: {"choices":[],"usage":{"prompt_tokens":0,"completion_tokens":0}}`)
 

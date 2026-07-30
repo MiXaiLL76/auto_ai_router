@@ -138,7 +138,7 @@ func (o *openAIStreamUsageExtractor) ExtractUsage(chunk []byte) *StreamUsageInfo
 	//    Usage fields use input_tokens/output_tokens and output_tokens_details instead of
 	//    prompt_tokens/completion_tokens and completion_tokens_details.
 
-	payloads := extractJSONPayloadsFromStreamChunk(chunk)
+	payloads := splitSSEPayloads(chunk, nil)
 	for i := len(payloads) - 1; i >= 0; i-- {
 		if info := o.extractChatCompletionUsage(payloads[i]); info != nil {
 			return info
@@ -380,7 +380,7 @@ func (a *anthropicStreamUsageExtractor) ExtractUsage(chunk []byte) *StreamUsageI
 		} `json:"usage"`
 	}
 
-	payloads := extractJSONPayloadsFromStreamChunk(chunk)
+	payloads := splitSSEPayloads(chunk, nil)
 	for i := len(payloads) - 1; i >= 0; i-- {
 		if err := json.Unmarshal(payloads[i], &data); err != nil {
 			continue
@@ -427,34 +427,75 @@ func webSearchRequestsFromUsage(values ...int) int {
 	return 0
 }
 
-// extractJSONPayloadsFromStreamChunk extracts JSON payload candidates from raw stream chunks.
-// Supports both plain JSON chunks and SSE-formatted chunks (lines prefixed with "data: ").
-func extractJSONPayloadsFromStreamChunk(chunk []byte) [][]byte {
-	trimmed := strings.TrimSpace(string(chunk))
-	if trimmed == "" {
-		return nil
+// sseDataPrefix and sseDoneSentinel are shared byte-literal needles for
+// splitSSEPayloads — declared once to avoid re-allocating a []byte from a
+// string literal on every call.
+var (
+	sseDataPrefix   = []byte("data:")
+	sseDoneSentinel = []byte("[DONE]")
+	// sseUsageNeedle is the byte-level prefilter needle (Reviewer #2 / plan
+	// item D): stream_options.include_usage forces usage to arrive only in
+	// the final chunk, so a chunk that doesn't even contain this substring
+	// cannot possibly carry usage/total_tokens — skip the unmarshal attempt
+	// entirely rather than paying for it on every content-only chunk.
+	sseUsageNeedle = []byte(`"usage"`)
+)
+
+// splitSSEPayloads splits an SSE-formatted chunk into its "data:" JSON payload
+// sub-slices using a single bytes.IndexByte('\n') scan — no strings.Split, no
+// per-payload []byte(...) copy. If the chunk contains no "data:" marker at
+// all, the whole (trimmed) chunk is treated as one plain-JSON payload (fast
+// path for non-SSE callers, e.g. a bare response.completed JSON event).
+//
+// dst is reused via the dst[:0] pattern: pass the same backing slice back in
+// on the next call (typically a field alongside a stream's other per-request
+// state, e.g. completionTokenAccumulator.payloadBuf or a local var captured
+// by an onChunk closure) to avoid allocating a new [][]byte per chunk. Pass
+// nil for one-off, non-hot-path calls.
+//
+// ⚠️ Every returned payload is a sub-slice of chunk itself — zero copies.
+// The result is only valid until chunk's backing array is next overwritten
+// (e.g. the next Read() into a buffer pulled from streamBufPool). Every
+// current caller is synchronous within the Write/onChunk call that produced
+// chunk and finishes before returning, so this is safe today — but don't
+// stash a returned payload past that call. rememberLastStreamDataChunk is the
+// one exception that must survive past the current chunk's lifetime, and it
+// copies explicitly (see its own doc comment).
+func splitSSEPayloads(chunk []byte, dst [][]byte) [][]byte {
+	dst = dst[:0]
+	trimmed := bytes.TrimSpace(chunk)
+	if len(trimmed) == 0 {
+		return dst
 	}
 
-	// Fast path: non-SSE plain JSON
-	if !strings.Contains(trimmed, "data:") {
-		return [][]byte{[]byte(trimmed)}
+	// Fast path: non-SSE plain JSON.
+	if !bytes.Contains(trimmed, sseDataPrefix) {
+		return append(dst, trimmed)
 	}
 
-	lines := strings.Split(trimmed, "\n")
-	payloads := make([][]byte, 0, len(lines))
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if !strings.HasPrefix(line, "data:") {
-			continue
+	rest := trimmed
+	for {
+		var line []byte
+		if idx := bytes.IndexByte(rest, '\n'); idx >= 0 {
+			line = rest[:idx]
+			rest = rest[idx+1:]
+		} else {
+			line = rest
+			rest = nil
 		}
-		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
-		if payload == "" || payload == "[DONE]" {
-			continue
+		line = bytes.TrimSpace(line)
+		if bytes.HasPrefix(line, sseDataPrefix) {
+			payload := bytes.TrimSpace(line[len(sseDataPrefix):])
+			if len(payload) > 0 && !bytes.Equal(payload, sseDoneSentinel) {
+				dst = append(dst, payload)
+			}
 		}
-		payloads = append(payloads, []byte(payload))
+		if rest == nil {
+			break
+		}
 	}
 
-	return payloads
+	return dst
 }
 
 // getStreamUsageExtractor returns the appropriate usage extractor for a provider.
@@ -554,39 +595,65 @@ type tokenCapturingWriter struct {
 	tokens     *int
 	completion *completionTokenAccumulator
 	logger     *slog.Logger
-	onChunk    func([]byte) // Callback invoked for each chunk (optional, for capturing last chunk)
+	// payloadBuf is reused across Write calls (dst[:0] pattern) — one split
+	// per chunk, shared between the token count below, the completion
+	// accumulator, and onChunk, instead of each doing its own copy+split.
+	// Safe because a tokenCapturingWriter is created fresh per stream, never
+	// shared across concurrent streams.
+	payloadBuf [][]byte
+	// onChunk is invoked for each chunk with the payloads already split out
+	// of it (see splitSSEPayloads — valid only for the duration of this call)
+	// and whether the chunk contains the literal `"usage"` substring, so
+	// callers can skip their own usage-unmarshal attempt without re-scanning
+	// the chunk. Optional; used to capture the last chunk for usage
+	// extraction.
+	onChunk func(chunk []byte, payloads [][]byte, hasUsage bool)
 }
 
 func (tcw *tokenCapturingWriter) Write(p []byte) (n int, err error) {
-	// Extract tokens from the data being written.
-	// Use assignment (not +=) because Vertex/Gemini include cumulative total_tokens in every
-	// streaming chunk. Accumulating across chunks would multiply the real count by the number
-	// of chunks (e.g. 50 chunks × 1000 tokens = 50 000 instead of 1 000).
-	// OpenAI only emits total_tokens in the final usage chunk, so assignment is equivalent there.
-	tokens := extractTokensFromStreamingChunk(string(p))
-	if tokens > 0 {
-		*tcw.tokens = tokens
+	// One parse per chunk: split once, reuse the sub-slices for the token
+	// count below, the completion accumulator, and onChunk.
+	tcw.payloadBuf = splitSSEPayloads(p, tcw.payloadBuf)
+
+	// Byte-level prefilter (plan item D): stream_options.include_usage means
+	// usage/total_tokens can only ever appear in a chunk containing this
+	// literal substring — skip the unmarshal attempt entirely otherwise.
+	hasUsage := bytes.Contains(p, sseUsageNeedle)
+	if hasUsage {
+		// Extract tokens from the data being written.
+		// Use assignment (not +=) because Vertex/Gemini include cumulative total_tokens in every
+		// streaming chunk. Accumulating across chunks would multiply the real count by the number
+		// of chunks (e.g. 50 chunks × 1000 tokens = 50 000 instead of 1 000).
+		// OpenAI only emits total_tokens in the final usage chunk, so assignment is equivalent there.
+		if tokens := extractTokensFromPayloads(tcw.payloadBuf); tokens > 0 {
+			*tcw.tokens = tokens
+		}
 	}
 
 	if tcw.completion != nil {
-		tcw.completion.AddChunk(p)
+		tcw.completion.AddPayloads(tcw.payloadBuf)
 	}
 
 	// Invoke callback if provided (used to capture last chunk for usage extraction)
 	if tcw.onChunk != nil {
-		tcw.onChunk(p)
+		tcw.onChunk(p, tcw.payloadBuf, hasUsage)
 	}
 
 	return tcw.writer.Write(p)
 }
 
-// rememberLastStreamDataChunk stores each chunk, keeping only the last one that contains actual data and isn't [DONE].
+// rememberLastStreamDataChunk stores each chunk, keeping only the last one
+// that contains actual data and isn't [DONE]. *dst's backing array is reused
+// across calls (append((*dst)[:0], ...)) instead of allocating fresh on every
+// chunk — this is the one place that must copy rather than sub-slice chunk,
+// since it's the only state here that survives past the current chunk's
+// lifetime (see splitSSEPayloads' doc comment on that sharp edge).
 func rememberLastStreamDataChunk(dst *[]byte, chunk []byte) {
-	trimmed := strings.TrimSpace(string(chunk))
-	if trimmed == "" || trimmed == "data: [DONE]" || trimmed == "[DONE]" {
+	trimmed := bytes.TrimSpace(chunk)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, sseDoneSentinel) || bytes.Equal(trimmed, []byte("data: [DONE]")) {
 		return
 	}
-	*dst = append([]byte(nil), chunk...)
+	*dst = append((*dst)[:0], chunk...)
 }
 
 func (p *Proxy) handleTransformedStreaming(
@@ -605,7 +672,7 @@ func (p *Proxy) handleTransformedStreaming(
 		_ = pr.Close()
 	}()
 	var totalTokens int
-	completion := newCompletionTokenAccumulator(modelID)
+	completion := p.newCompletionTokenAccumulator(modelID)
 
 	// Capture last chunk for usage extraction (Solution 3: Hybrid approach)
 	var lastChunk []byte
@@ -633,14 +700,14 @@ func (p *Proxy) handleTransformedStreaming(
 			tokens:     &totalTokens,
 			completion: completion,
 			logger:     p.logger,
-			onChunk: func(chunk []byte) {
+			onChunk: func(chunk []byte, payloads [][]byte, hasUsage bool) {
 				chunkCount++
 
 				if detectProviderStreamError {
 					outputStreamError.Observe(chunk)
 				}
-				if logCtx != nil {
-					if usage := extractTokenUsageFromStreamingChunkWithOptions(string(chunk), converter.TokenUsageExtractionOptions{}); usage != nil {
+				if logCtx != nil && hasUsage {
+					if usage := extractTokenUsageFromPayloads(payloads, converter.TokenUsageExtractionOptions{}); usage != nil {
 						if logCtx.TokenUsage == nil {
 							logCtx.TokenUsage = &converter.TokenUsage{}
 						}
@@ -725,7 +792,7 @@ func (p *Proxy) handleStreamingWithTokens(w http.ResponseWriter, resp *http.Resp
 		"content_type", resp.Header.Get("Content-Type"))
 
 	var totalTokens int
-	completion := newCompletionTokenAccumulator(modelID)
+	completion := p.newCompletionTokenAccumulator(modelID)
 	chunkCount := 0
 
 	// Capture last chunk for usage extraction (Solution 3: Hybrid approach)
@@ -733,26 +800,34 @@ func (p *Proxy) handleStreamingWithTokens(w http.ResponseWriter, resp *http.Resp
 	detectProviderStreamError := resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices
 	providerStreamError := &proxyStreamErrorCapture{}
 
+	var payloadBuf [][]byte
 	onChunk := func(chunk []byte) {
 		chunkCount++
 
 		if detectProviderStreamError {
 			providerStreamError.Observe(chunk)
 		}
-		if logCtx != nil {
-			if usage := extractTokenUsageFromStreamingChunk(string(chunk)); usage != nil {
-				if logCtx.TokenUsage == nil {
-					logCtx.TokenUsage = &converter.TokenUsage{}
+
+		// One split per chunk (plan item C), reused below for both usage and
+		// total-tokens extraction; the completion accumulator keeps its own
+		// reused buffer (see completionTokenAccumulator.payloadBuf) since it
+		// also has to run on hasUsage==false chunks.
+		payloadBuf = splitSSEPayloads(chunk, payloadBuf)
+		if hasUsage := bytes.Contains(chunk, sseUsageNeedle); hasUsage {
+			if logCtx != nil {
+				if usage := extractTokenUsageFromPayloads(payloadBuf, converter.TokenUsageExtractionOptions{AudioInputIncludesCachedAudio: true}); usage != nil {
+					if logCtx.TokenUsage == nil {
+						logCtx.TokenUsage = &converter.TokenUsage{}
+					}
+					*logCtx.TokenUsage = *usage
 				}
-				*logCtx.TokenUsage = *usage
+			}
+
+			if tokens := extractTokensFromPayloads(payloadBuf); tokens > 0 {
+				totalTokens += tokens
 			}
 		}
-
-		tokens := extractTokensFromStreamingChunk(string(chunk))
-		if tokens > 0 {
-			totalTokens += tokens
-		}
-		completion.AddChunk(chunk)
+		completion.AddPayloads(payloadBuf)
 
 		// Don't let a bare [DONE] sentinel or empty chunks overwrite a lastChunk that carries usage data.
 		rememberLastStreamDataChunk(&lastChunk, chunk)
@@ -831,7 +906,6 @@ func (p *Proxy) finalizeStreamingLog(logCtx *RequestLogContext, totalTokens int,
 	if logCtx.TokenUsage == nil {
 		logCtx.TokenUsage = &converter.TokenUsage{}
 	}
-	fallbackPrompt := logCtx.PromptTokensEstimate
 	fallbackCompletion := totalTokens
 
 	providerUsage := false
@@ -909,7 +983,7 @@ func (p *Proxy) finalizeStreamingLog(logCtx *RequestLogContext, totalTokens int,
 	}
 
 	if !providerUsage && logCtx.TokenUsage.PromptTokens == 0 {
-		logCtx.TokenUsage.PromptTokens = fallbackPrompt
+		logCtx.TokenUsage.PromptTokens = logCtx.promptTokensEstimate()
 	}
 	if !providerUsage && logCtx.TokenUsage.CompletionTokens == 0 {
 		logCtx.TokenUsage.CompletionTokens = fallbackCompletion
@@ -1342,7 +1416,7 @@ func (p *Proxy) handlePassthroughResponsesStreaming(
 		lastRawChunk          []byte // last raw buffer for fallback in finalizeStreamingLog
 		completedEventPayload []byte // JSON payload of response.completed (used instead of lastRawChunk)
 		partialSSELine        string // partial SSE line accumulator across buffer reads
-		completion            = newCompletionTokenAccumulator(modelID)
+		completion            = p.newCompletionTokenAccumulator(modelID)
 		detectStreamError     = resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices
 		providerStreamError   = &proxyStreamErrorCapture{}
 	)
