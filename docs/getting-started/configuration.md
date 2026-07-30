@@ -98,23 +98,23 @@ litellm_db:
 
 ## Server Parameters
 
-| Parameter                  | Type     | Default     | Description                                                                |
-| -------------------------- | -------- | ----------- | -------------------------------------------------------------------------- |
-| `port`                     | int      | 8080        | Listen port                                                                |
-| `max_body_size_mb`         | int      | 100         | Maximum request body size (MB)                                             |
-| `response_body_multiplier` | int      | 10          | Response body limit = max_body_size_mb * this value                        |
-| `request_timeout`          | duration | 60s         | Request timeout                                                            |
-| `write_timeout`            | duration | 60s         | HTTP server write timeout                                                  |
-| `idle_timeout`             | duration | 2m          | HTTP server idle timeout (default: 2 * write_timeout)                      |
-| `idle_conn_timeout`        | duration | 120s        | Idle connection timeout for keep-alive connections                         |
-| `max_idle_conns`           | int      | 200         | Maximum idle connections                                                   |
-| `max_idle_conns_per_host`  | int      | 20          | Maximum idle connections per host                                          |
-| `logging_level`            | string   | info        | Logging level: `info`, `debug`, `error`                                    |
-| `master_key`               | string   | —           | **Required.** Master key for client authentication                         |
-| `default_models_rpm`       | int      | -1          | Default RPM limit for models (-1 = unlimited)                              |
-| `model_prices_link`        | string   | —           | URL or file path to model prices JSON                                      |
-| `proxy_health_timeout`     | duration | 15s         | Timeout for fetching `/health` from remote proxy credentials               |
-| `response_headers.mode`    | string   | passthrough | Response header policy. Supported values are `passthrough` and `allowlist` |
+| Parameter                  | Type     | Default     | Description                                                                        |
+| -------------------------- | -------- | ----------- | ---------------------------------------------------------------------------------- |
+| `port`                     | int      | 8080        | Listen port                                                                        |
+| `max_body_size_mb`         | int      | 100         | Maximum request body size (MB)                                                     |
+| `response_body_multiplier` | int      | 10          | Response body limit = max_body_size_mb * this value                                |
+| `request_timeout`          | duration | 60s         | Request timeout                                                                    |
+| `write_timeout`            | duration | 60s         | HTTP server write timeout                                                          |
+| `idle_timeout`             | duration | 2m          | HTTP server idle timeout (default: 2 * write_timeout)                              |
+| `idle_conn_timeout`        | duration | 120s        | Idle connection timeout for keep-alive connections                                 |
+| `max_idle_conns`           | int      | 200         | Maximum idle connections                                                           |
+| `max_idle_conns_per_host`  | int      | 20          | Maximum idle connections per host                                                  |
+| `logging_level`            | string   | info        | Logging level: `info`, `debug`, `error`                                            |
+| `master_key`               | string   | —           | **Required.** Master key for client authentication                                 |
+| `default_models_rpm`       | int      | -1          | Default RPM limit for models (-1 = unlimited)                                      |
+| `model_prices_link`        | string   | —           | URL or file path to model prices JSON                                              |
+| `proxy_health_timeout`     | duration | 15s         | Timeout for fetching `/health` from remote proxy credentials                       |
+| `response_headers.mode`    | string   | passthrough | Response header policy. Supported values are `passthrough` and `allowlist`         |
 | `tiktoken_enabled`         | bool     | true        | Local tiktoken-based fallback token estimation for streaming responses (see below) |
 
 The `allowlist` mode forwards `Content-Type`, `Cache-Control`, `Retry-After`, `Content-Disposition`, `Content-Range`, `Last-Modified`, and `Location`. Transport headers are generated by the router. Other upstream response headers are removed.
