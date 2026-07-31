@@ -3,6 +3,7 @@ package proxy
 import (
 	"testing"
 
+	"github.com/mixaill76/auto_ai_router/internal/converter"
 	dbmodels "github.com/mixaill76/auto_ai_router/internal/litellmdb/models"
 	routermodels "github.com/mixaill76/auto_ai_router/internal/models"
 	"github.com/stretchr/testify/assert"
@@ -129,4 +130,53 @@ func TestResolveBillingPriceCachesAcrossCalls(t *testing.T) {
 	secondID, secondPrice := prx.resolveBillingPrice(logCtx, "gpt-5.2-chat", "gpt-5.2-chat", "gpt-chat-latest")
 	assert.Same(t, firstPrice, secondPrice)
 	assert.Equal(t, firstID, secondID)
+}
+
+// TestEstimateRequestCostSkipsPromptTokenEstimateWhenTiktokenDisabled is a
+// regression test: estimateRequestCost used to call
+// estimatePromptTokensForModel (the full tiktoken BPE pass) unconditionally,
+// with no check against Proxy.tiktokenEnabled — the only other call site of
+// that function is correctly gated. tiktoken_enabled=false must skip the
+// prompt-token estimate (PromptTokens: 0) while still leaving budget
+// reservation active (costKnown stays true; only the completion-token
+// portion of the estimate is used).
+func TestEstimateRequestCostSkipsPromptTokenEstimateWhenTiktokenDisabled(t *testing.T) {
+	registry := routermodels.NewModelPriceRegistry()
+	registry.Update(map[string]*routermodels.ModelPrice{
+		"gpt-5.2-chat": {InputCostPerToken: 0.01, OutputCostPerToken: 0.02},
+	})
+	body := []byte(`{"messages":[{"role":"user","content":"this is a real prompt with several words in it"}],"max_completion_tokens":10}`)
+
+	t.Run("disabled: cost reflects only the completion-token estimate", func(t *testing.T) {
+		prx := NewTestProxyBuilder().WithTiktokenEnabled(false).Build()
+		prx.priceRegistry = registry
+
+		cost, ok := prx.estimateRequestCost(&RequestLogContext{}, "gpt-5.2-chat", "gpt-5.2-chat", "gpt-5.2-chat", body)
+		require.True(t, ok, "costKnown must stay true even with tiktoken_enabled=false")
+
+		_, modelPrice := prx.resolveBillingPrice(&RequestLogContext{}, "gpt-5.2-chat", "gpt-5.2-chat", "gpt-5.2-chat")
+		require.NotNil(t, modelPrice)
+		expected := modelPrice.CalculateCost(&converter.TokenUsage{
+			CompletionTokens: prx.estimateCompletionTokens(body),
+		})
+		assert.InDelta(t, expected, cost, 0.000000001)
+	})
+
+	t.Run("enabled: cost also includes a non-zero prompt-token contribution", func(t *testing.T) {
+		prx := NewTestProxyBuilder().WithTiktokenEnabled(true).Build()
+		prx.priceRegistry = registry
+
+		cost, ok := prx.estimateRequestCost(&RequestLogContext{}, "gpt-5.2-chat", "gpt-5.2-chat", "gpt-5.2-chat", body)
+		require.True(t, ok)
+
+		promptOnlyTokens := estimatePromptTokensForModel(body, "gpt-5.2-chat")
+		require.Greater(t, promptOnlyTokens, 0, "test setup: body must yield a non-zero prompt-token estimate")
+		assert.Greater(t, cost, modelPriceCompletionOnlyCost(t, registry.GetPrice("gpt-5.2-chat"), prx.estimateCompletionTokens(body)))
+	})
+}
+
+func modelPriceCompletionOnlyCost(t *testing.T, modelPrice *routermodels.ModelPrice, completionTokens int) float64 {
+	t.Helper()
+	require.NotNil(t, modelPrice)
+	return modelPrice.CalculateCost(&converter.TokenUsage{CompletionTokens: completionTokens})
 }

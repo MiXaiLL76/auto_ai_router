@@ -132,10 +132,10 @@ func TestHandleStreamingWithTokens_AbortLogsTokens(t *testing.T) {
 	defer func() { _ = resp.Body.Close() }()
 
 	logCtx := &RequestLogContext{
-		RequestID:            "abort-test-1",
-		PromptTokensEstimate: 15,
-		Credential:           &config.CredentialConfig{Name: "test", Type: config.ProviderTypeOpenAI},
-		TokenUsage:           &converter.TokenUsage{},
+		RequestID:              "abort-test-1",
+		promptTokensEstimateFn: func() int { return 15 },
+		Credential:             &config.CredentialConfig{Name: "test", Type: config.ProviderTypeOpenAI},
+		TokenUsage:             &converter.TokenUsage{},
 	}
 
 	// Client disconnects after 10 bytes (before the usage chunk)
@@ -196,10 +196,10 @@ func TestHandleStreamingWithTokens_AbortEstimatesWithoutDrain(t *testing.T) {
 	defer func() { _ = resp.Body.Close() }()
 
 	logCtx := &RequestLogContext{
-		RequestID:            "abort-no-drain-test",
-		PromptTokensEstimate: 15,
-		Credential:           &config.CredentialConfig{Name: "test", Type: config.ProviderTypeOpenAI},
-		TokenUsage:           &converter.TokenUsage{},
+		RequestID:              "abort-no-drain-test",
+		promptTokensEstimateFn: func() int { return 15 },
+		Credential:             &config.CredentialConfig{Name: "test", Type: config.ProviderTypeOpenAI},
+		TokenUsage:             &converter.TokenUsage{},
 	}
 
 	w := newFailAfterNBytesWriter(10)
@@ -257,10 +257,10 @@ func TestHandleStreamingWithTokens_ProviderEOFWithoutUsage(t *testing.T) {
 	defer func() { _ = resp.Body.Close() }()
 
 	logCtx := &RequestLogContext{
-		RequestID:            "eof-no-usage-test",
-		PromptTokensEstimate: 10,
-		Credential:           &config.CredentialConfig{Name: "test", Type: config.ProviderTypeOpenAI},
-		TokenUsage:           &converter.TokenUsage{},
+		RequestID:              "eof-no-usage-test",
+		promptTokensEstimateFn: func() int { return 10 },
+		Credential:             &config.CredentialConfig{Name: "test", Type: config.ProviderTypeOpenAI},
+		TokenUsage:             &converter.TokenUsage{},
 	}
 
 	w := httptest.NewRecorder()
@@ -316,10 +316,10 @@ func TestHandleStreamingWithTokens_NormalCompletion(t *testing.T) {
 	defer func() { _ = resp.Body.Close() }()
 
 	logCtx := &RequestLogContext{
-		RequestID:            "normal-completion-test",
-		PromptTokensEstimate: 1, // Tiny estimate; real values (50/25) must win
-		Credential:           &config.CredentialConfig{Name: "test", Type: config.ProviderTypeOpenAI},
-		TokenUsage:           &converter.TokenUsage{},
+		RequestID:              "normal-completion-test",
+		promptTokensEstimateFn: func() int { return 1 }, // Tiny estimate; real values (50/25) must win
+		Credential:             &config.CredentialConfig{Name: "test", Type: config.ProviderTypeOpenAI},
+		TokenUsage:             &converter.TokenUsage{},
 	}
 
 	w := httptest.NewRecorder()
@@ -376,10 +376,10 @@ func TestHandleTransformedStreaming_AbortLogsTokens(t *testing.T) {
 	defer func() { _ = resp.Body.Close() }()
 
 	logCtx := &RequestLogContext{
-		RequestID:            "transformed-abort-test",
-		PromptTokensEstimate: 20,
-		Credential:           &config.CredentialConfig{Name: "test", Type: config.ProviderTypeOpenAI},
-		TokenUsage:           &converter.TokenUsage{},
+		RequestID:              "transformed-abort-test",
+		promptTokensEstimateFn: func() int { return 20 },
+		Credential:             &config.CredentialConfig{Name: "test", Type: config.ProviderTypeOpenAI},
+		TokenUsage:             &converter.TokenUsage{},
 	}
 
 	// Fail after receiving first chunk (before usage chunk arrives)

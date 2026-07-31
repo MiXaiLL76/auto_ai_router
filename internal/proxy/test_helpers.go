@@ -23,17 +23,18 @@ import (
 // Used in tests that directly call New() instead of using TestProxyBuilder.
 func createProxyWithParams(bal *balancer.RoundRobin, logger *slog.Logger, maxBodySizeMB int, requestTimeout time.Duration, metrics *monitoring.Metrics, masterKey string, rl *ratelimit.RPMLimiter, tm *auth.VertexTokenManager, mm *models.Manager, version, commit string) *Proxy {
 	return New(&Config{
-		Balancer:       bal,
-		Logger:         logger,
-		MaxBodySizeMB:  maxBodySizeMB,
-		RequestTimeout: requestTimeout,
-		Metrics:        metrics,
-		MasterKey:      masterKey,
-		RateLimiter:    rl,
-		TokenManager:   tm,
-		ModelManager:   mm,
-		Version:        version,
-		Commit:         commit,
+		Balancer:        bal,
+		Logger:          logger,
+		MaxBodySizeMB:   maxBodySizeMB,
+		RequestTimeout:  requestTimeout,
+		Metrics:         metrics,
+		MasterKey:       masterKey,
+		RateLimiter:     rl,
+		TokenManager:    tm,
+		ModelManager:    mm,
+		Version:         version,
+		Commit:          commit,
+		TiktokenEnabled: true, // matches production default (server.tiktoken_enabled: true)
 	})
 }
 
@@ -105,6 +106,7 @@ type TestProxyConfig struct {
 	MaxProviderRetries     int
 	MaxFallbackAttempts    int
 	DrainUpstreamOnAbort   bool
+	TiktokenEnabled        bool
 	ResponseHeaderMode     config.ResponseHeaderMode
 }
 
@@ -113,15 +115,16 @@ func NewTestProxyBuilder() *TestProxyBuilder {
 	logger := testhelpers.NewTestLogger()
 	return &TestProxyBuilder{
 		config: &TestProxyConfig{
-			Logger:         logger,
-			Metrics:        createTestProxyMetrics(),
-			TokenManager:   createTestTokenManager(logger),
-			ModelManager:   createTestModelManager(logger),
-			MasterKey:      "master-key",
-			MaxBodySizeMB:  10,
-			RequestTimeout: 30 * time.Second,
-			Version:        "test-version",
-			Commit:         "test-commit",
+			Logger:          logger,
+			Metrics:         createTestProxyMetrics(),
+			TokenManager:    createTestTokenManager(logger),
+			ModelManager:    createTestModelManager(logger),
+			MasterKey:       "master-key",
+			MaxBodySizeMB:   10,
+			RequestTimeout:  30 * time.Second,
+			Version:         "test-version",
+			Commit:          "test-commit",
+			TiktokenEnabled: true, // matches production default (server.tiktoken_enabled: true)
 		},
 	}
 }
@@ -253,6 +256,14 @@ func (b *TestProxyBuilder) WithDrainUpstreamOnAbort(v bool) *TestProxyBuilder {
 	return b
 }
 
+// WithTiktokenEnabled overrides the default (true) local tiktoken-based prompt/completion
+// token fallback estimation toggle. Use WithTiktokenEnabled(false) to test the codepath
+// where a provider's own usage is unavailable and no local estimate backfills it.
+func (b *TestProxyBuilder) WithTiktokenEnabled(v bool) *TestProxyBuilder {
+	b.config.TiktokenEnabled = v
+	return b
+}
+
 func (b *TestProxyBuilder) WithResponseHeaderMode(mode config.ResponseHeaderMode) *TestProxyBuilder {
 	b.config.ResponseHeaderMode = mode
 	return b
@@ -288,6 +299,7 @@ func (b *TestProxyBuilder) Build() *Proxy {
 		MaxProviderRetries:     b.config.MaxProviderRetries,
 		MaxFallbackAttempts:    b.config.MaxFallbackAttempts,
 		DrainUpstreamOnAbort:   b.config.DrainUpstreamOnAbort,
+		TiktokenEnabled:        b.config.TiktokenEnabled,
 		ResponseHeaderMode:     b.config.ResponseHeaderMode,
 	})
 }

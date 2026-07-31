@@ -467,6 +467,7 @@ type ServerConfig struct {
 	ModelPricesLink            string                `yaml:"model_prices_link,omitempty"`       // URL or file path to model prices JSON - supports os.environ/VAR_NAME
 	ShutdownDelay              time.Duration         `yaml:"shutdown_delay"`                    // Delay between readiness=false and server.Shutdown (default: 5s)
 	DrainUpstreamOnAbort       bool                  `yaml:"drain_upstream_on_abort"`           // When true, keep reading upstream after client disconnect to capture real usage chunk (default: false — estimate from delta text)
+	TiktokenEnabled            bool                  `yaml:"tiktoken_enabled"`                  // Enable local tiktoken-based prompt/completion token estimation as a fallback when a provider omits usage (default: true; disable if all configured providers always report usage)
 	StrictAllTeamModelsACL     bool                  `yaml:"strict_all_team_models_acl"`        // Enforce key/team/user model ACLs (default: false)
 	ProxyHealthTimeout         time.Duration         `yaml:"proxy_health_timeout"`              // Timeout for fetching /health from remote proxy credentials (default: 15s)
 	ResponseHeaders            ResponseHeadersConfig `yaml:"response_headers"`
@@ -550,6 +551,7 @@ func (s *ServerConfig) UnmarshalYAML(value *yaml.Node) error {
 		ModelPricesLink            string                `yaml:"model_prices_link,omitempty"`
 		ShutdownDelay              string                `yaml:"shutdown_delay"`
 		DrainUpstreamOnAbort       string                `yaml:"drain_upstream_on_abort"`
+		TiktokenEnabled            string                `yaml:"tiktoken_enabled"`
 		StrictAllTeamModelsACL     string                `yaml:"strict_all_team_models_acl"`
 		ProxyHealthTimeout         string                `yaml:"proxy_health_timeout"`
 		ResponseHeaders            ResponseHeadersConfig `yaml:"response_headers"`
@@ -626,6 +628,9 @@ func (s *ServerConfig) UnmarshalYAML(value *yaml.Node) error {
 		return err
 	}
 	if s.DrainUpstreamOnAbort, err = parseField(temp.DrainUpstreamOnAbort, false, strconv.ParseBool, "drain_upstream_on_abort"); err != nil {
+		return err
+	}
+	if s.TiktokenEnabled, err = parseField(temp.TiktokenEnabled, true, strconv.ParseBool, "tiktoken_enabled"); err != nil {
 		return err
 	}
 	if s.StrictAllTeamModelsACL, err = parseField(temp.StrictAllTeamModelsACL, false, strconv.ParseBool, "strict_all_team_models_acl"); err != nil {
