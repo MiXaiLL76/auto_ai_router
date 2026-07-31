@@ -97,13 +97,23 @@ func extractTokenUsageFromStreamingChunkWithOptions(chunk []byte, opts converter
 // extractTokenUsageFromStreamingChunkWithOptions — callers that already hold
 // splitSSEPayloads' result call this directly instead of re-splitting the
 // same chunk (plan item C).
+//
+// Merges usage across every payload in the batch (via MergeNonZero) rather
+// than returning the first non-nil hit: a single Read can surface multiple
+// SSE frames (e.g. a web-search-only annotation frame followed by the final
+// usage frame), and returning early on the first would silently drop the
+// real prompt/completion tokens carried by a later frame in the same batch.
 func extractTokenUsageFromPayloads(payloads [][]byte, opts converter.TokenUsageExtractionOptions) *converter.TokenUsage {
+	var merged *converter.TokenUsage
 	for _, payload := range payloads {
 		if usage := converter.ExtractTokenUsageWithOptions(payload, opts); usage != nil {
-			return usage
+			if merged == nil {
+				merged = &converter.TokenUsage{}
+			}
+			merged.MergeNonZero(usage)
 		}
 	}
-	return nil
+	return merged
 }
 
 // rawJSONString mirrors a `.(string)` type assertion on a decoded
