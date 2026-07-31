@@ -348,8 +348,14 @@ func ExtractTokenUsageWithOptions(body []byte, opts TokenUsageExtractionOptions)
 	}
 
 	type responsesUsageDetails struct {
-		InputTokens        int `json:"input_tokens"`
-		OutputTokens       int `json:"output_tokens"`
+		InputTokens              int `json:"input_tokens"`
+		OutputTokens             int `json:"output_tokens"`
+		CacheReadInputTokens     int `json:"cache_read_input_tokens,omitempty"`
+		CacheCreationInputTokens int `json:"cache_creation_input_tokens,omitempty"`
+		CacheCreation            struct {
+			Ephemeral5mInputTokens int `json:"ephemeral_5m_input_tokens,omitempty"`
+			Ephemeral1hInputTokens int `json:"ephemeral_1h_input_tokens,omitempty"`
+		} `json:"cache_creation,omitempty"`
 		InputTokensDetails struct {
 			CachedTokens              int `json:"cached_tokens,omitempty"`
 			CachedAudioTokens         int `json:"cached_audio_tokens,omitempty"`
@@ -450,6 +456,9 @@ func ExtractTokenUsageWithOptions(body []byte, opts TokenUsageExtractionOptions)
 	if cachedTokens == 0 {
 		cachedTokens = resp.Usage.InputTokensDetails.CachedTokens
 	}
+	if cachedTokens == 0 {
+		cachedTokens = resp.Usage.CacheReadInputTokens
+	}
 	cacheCreationTokens := resp.Usage.PromptTokensDetails.CacheCreationTokens
 	cacheCreation5mTokens := resp.Usage.PromptTokensDetails.CacheCreationTokenDetails.Ephemeral5mInputTokens
 	cacheCreation1hTokens := resp.Usage.PromptTokensDetails.CacheCreationTokenDetails.Ephemeral1hInputTokens
@@ -464,6 +473,13 @@ func ExtractTokenUsageWithOptions(body []byte, opts TokenUsageExtractionOptions)
 	}
 	if cacheCreationTokens == 0 {
 		cacheCreationTokens = resp.Usage.InputTokensDetails.CacheWriteTokens
+	}
+	if cacheCreationTokens == 0 {
+		cacheCreationTokens = resp.Usage.CacheCreationInputTokens
+	}
+	if cacheCreation5mTokens == 0 && cacheCreation1hTokens == 0 {
+		cacheCreation5mTokens = resp.Usage.CacheCreation.Ephemeral5mInputTokens
+		cacheCreation1hTokens = resp.Usage.CacheCreation.Ephemeral1hInputTokens
 	}
 	if cachedAudioTokens == 0 {
 		cachedAudioTokens = resp.Usage.InputTokensDetails.CachedAudioTokens

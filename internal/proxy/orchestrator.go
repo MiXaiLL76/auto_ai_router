@@ -279,14 +279,8 @@ func (p *Proxy) prepareRequestForCredential(
 		if err != nil {
 			return req, err
 		}
-		proxyChatBody, _, err := anthropicconv.MessagesToChat(proxyBody)
-		if err != nil {
-			return req, err
-		}
 		req.body = openai.ReplaceBodyParam(realModelID, chatBody)
-		req.proxyBody = proxyChatBody
 		req.path = "/v1/chat/completions"
-		req.proxyPath = req.path
 		req.convertedMessages = true
 		req.messagesMetadata = metadata
 		return req, nil

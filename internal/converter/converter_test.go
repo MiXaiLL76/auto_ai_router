@@ -577,6 +577,22 @@ func TestExtractTokenUsage(t *testing.T) {
 	}
 }
 
+func TestExtractTokenUsage_AnthropicFlatCacheFields(t *testing.T) {
+	body := []byte(`{"usage":{"input_tokens":70,"output_tokens":20,"cache_read_input_tokens":25,"cache_creation_input_tokens":5}}`)
+
+	usage := ExtractTokenUsage(body)
+
+	if usage == nil {
+		t.Fatal("expected Anthropic usage")
+	}
+	if usage.PromptTokens != 70 || usage.CompletionTokens != 20 {
+		t.Fatalf("unexpected token counts: %+v", usage)
+	}
+	if usage.CachedInputTokens != 25 || usage.CacheCreationTokens != 5 {
+		t.Fatalf("unexpected Anthropic cache usage: %+v", usage)
+	}
+}
+
 func TestExtractTokenUsage_CacheCreationDetailsProvideMissingAggregate(t *testing.T) {
 	tests := []struct {
 		name string

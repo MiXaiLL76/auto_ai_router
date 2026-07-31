@@ -48,6 +48,25 @@ func extractOpenAITotalTokens(payload []byte) int {
 	return openAIResp.Response.Usage.TotalTokens
 }
 
+func extractMessagesTotalTokens(payload []byte) int {
+	var event struct {
+		Type  string `json:"type"`
+		Usage struct {
+			InputTokens              int `json:"input_tokens"`
+			OutputTokens             int `json:"output_tokens"`
+			CacheReadInputTokens     int `json:"cache_read_input_tokens"`
+			CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
+		} `json:"usage"`
+	}
+	if err := json.Unmarshal(payload, &event); err != nil || event.Type != "message_delta" {
+		return 0
+	}
+	return event.Usage.InputTokens +
+		event.Usage.OutputTokens +
+		event.Usage.CacheReadInputTokens +
+		event.Usage.CacheCreationInputTokens
+}
+
 func extractTokensFromStreamingChunk(chunk string) int {
 	// Look for usage information in streaming chunks
 	lines := strings.Split(chunk, "\n")
@@ -58,7 +77,11 @@ func extractTokensFromStreamingChunk(chunk string) int {
 				continue
 			}
 
-			tokens := extractOpenAITotalTokens([]byte(jsonData))
+			payload := []byte(jsonData)
+			tokens := extractMessagesTotalTokens(payload)
+			if tokens == 0 {
+				tokens = extractOpenAITotalTokens(payload)
+			}
 			if tokens > 0 {
 				return tokens
 			}

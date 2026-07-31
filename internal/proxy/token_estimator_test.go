@@ -140,6 +140,18 @@ func TestExtractCompletionDeltaText_ResponsesReasoningAndTools(t *testing.T) {
 	assert.Equal(t, "thinksumfnmcpcustomcode", extractCompletionDeltaText(chunk))
 }
 
+func TestExtractCompletionDeltaText_MessagesAPI(t *testing.T) {
+	chunk := []byte(
+		`event: content_block_delta` + "\n" +
+			`data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"hello"}}` + "\n\n" +
+			`event: content_block_delta` + "\n" +
+			`data: {"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"think"}}` + "\n\n" +
+			`event: content_block_delta` + "\n" +
+			`data: {"type":"content_block_delta","delta":{"type":"input_json_delta","partial_json":"{\"city\":\"Moscow\"}"}}` + "\n\n")
+
+	assert.Equal(t, `hellothink{"city":"Moscow"}`, extractCompletionDeltaText(chunk))
+}
+
 func TestExtractCompletionDeltaText_IgnoresAudioBytes(t *testing.T) {
 	chunk := []byte(`data: {"type":"response.output_audio.delta","delta":"QUJDREVGRw=="}` + "\n\n" +
 		`data: {"type":"response.audio.delta","delta":"QUJDREVGRw=="}` + "\n\n")
