@@ -238,7 +238,7 @@ func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
 	if logCtx.TokenUsage == nil {
 		logCtx.TokenUsage = &converter.TokenUsage{}
 	}
-	if logCtx.IsImageGeneration && logCtx.TokenUsage.ImageCount <= 0 {
+	if logCtx.IsImageGeneration && status == "success" && logCtx.TokenUsage.ImageCount <= 0 {
 		logCtx.TokenUsage.ImageCount = logCtx.ImageCount
 		if logCtx.TokenUsage.ImageCount <= 0 {
 			logCtx.TokenUsage.ImageCount = 1
@@ -274,6 +274,10 @@ func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
 	customLLMProvider := strings.Replace(string(logCtx.Credential.Type), "-", "_", 1)
 	if customLLMProvider == "proxy" {
 		customLLMProvider = string(config.ProviderTypeOpenAI)
+	}
+
+	if teamID == "" {
+		teamID = credName
 	}
 
 	endTime := utils.NowUTC()

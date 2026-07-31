@@ -1890,7 +1890,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 				logCtx.TokenUsage.ReasoningTokens, logCtx.TokenUsage.CachedInputTokens)
 		}
 
-		if logCtx.IsImageGeneration {
+		if logCtx.IsImageGeneration && resp.StatusCode < 400 {
 			if logCtx.TokenUsage == nil {
 				logCtx.TokenUsage = &converter.TokenUsage{}
 			}

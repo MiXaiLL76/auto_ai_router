@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"encoding/json"
+	"net/http"
 	"testing"
 
 	"github.com/mixaill76/auto_ai_router/internal/converter"
@@ -133,13 +134,13 @@ func TestLogSpendToLiteLLMDB_NormalizesTokenUsageBeforePersisting(t *testing.T) 
 	assert.Equal(t, float64(2), ttlDetails["ephemeral_1h_input_tokens"])
 }
 
-func TestLogSpendToLiteLLMDB_PreservesTeamID(t *testing.T) {
+func TestLogSpendToLiteLLMDB_TeamIDFallback(t *testing.T) {
 	tests := []struct {
 		name       string
 		teamID     string
 		expectedID string
 	}{
-		{name: "empty team", expectedID: ""},
+		{name: "credential fallback", expectedID: "openai_primary"},
 		{name: "token team", teamID: "team-1", expectedID: "team-1"},
 	}
 
@@ -216,23 +217,6 @@ func TestLogSpendToLiteLLMDB_RejectsUnknownPrice(t *testing.T) {
 	assert.Empty(t, dbStub.loggedEntries)
 }
 
-func TestLogSpendToLiteLLMDB_DoesNotInventTeamID(t *testing.T) {
-	prx := NewTestProxyBuilder().Build()
-	dbStub := &stubLiteLLMManager{}
-	prx.LiteLLMDB = dbStub
-	setTestModelPrice(prx, "gpt-4o-mini", &routermodels.ModelPrice{
-		InputCostPerToken: 0.000001, OutputCostPerToken: 0.000002,
-	})
-	logCtx := testLogCtx(t)
-	logCtx.TokenInfo = &dbmodels.TokenInfo{UserID: "user-1"}
-
-	require.NoError(t, prx.logSpendToLiteLLMDB(logCtx))
-
-	require.Len(t, dbStub.loggedEntries, 1)
-	assert.Empty(t, dbStub.loggedEntries[0].TeamID)
-	assert.Positive(t, dbStub.loggedEntries[0].Spend)
-}
-
 func TestLogSpendToLiteLLMDB_ChargesImagesWithoutProviderUsage(t *testing.T) {
 	prx := NewTestProxyBuilder().Build()
 	dbStub := &stubLiteLLMManager{}
@@ -247,4 +231,22 @@ func TestLogSpendToLiteLLMDB_ChargesImagesWithoutProviderUsage(t *testing.T) {
 
 	require.Len(t, dbStub.loggedEntries, 1)
 	assert.InDelta(t, 0.08, dbStub.loggedEntries[0].Spend, 1e-12)
+}
+
+func TestLogSpendToLiteLLMDB_DoesNotChargeFailedImageRequest(t *testing.T) {
+	prx := NewTestProxyBuilder().Build()
+	dbStub := &stubLiteLLMManager{}
+	prx.LiteLLMDB = dbStub
+	setTestModelPrice(prx, "gpt-4o-mini", &routermodels.ModelPrice{OutputCostPerImage: 0.04})
+	logCtx := testLogCtx(t)
+	logCtx.IsImageGeneration = true
+	logCtx.ImageCount = 2
+	logCtx.TokenUsage = nil
+	logCtx.Status = "failure"
+	logCtx.HTTPStatus = http.StatusBadRequest
+
+	require.NoError(t, prx.logSpendToLiteLLMDB(logCtx))
+
+	require.Len(t, dbStub.loggedEntries, 1)
+	assert.Zero(t, dbStub.loggedEntries[0].Spend)
 }
