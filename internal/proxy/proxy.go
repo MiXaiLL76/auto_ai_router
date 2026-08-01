@@ -21,6 +21,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/balancer"
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/converter"
+	anthropicconv "github.com/mixaill76/auto_ai_router/internal/converter/anthropic"
 	promanutils "github.com/mixaill76/auto_ai_router/internal/converter/proman/utils"
 	"github.com/mixaill76/auto_ai_router/internal/converter/responses"
 	"github.com/mixaill76/auto_ai_router/internal/httputil"
@@ -92,8 +93,10 @@ func (p *Proxy) applyCredentialCompatibilityRouting(
 		prepared.proxyPath = nextReq.proxyPath
 		prepared.realModelID = nextReq.realModelID
 		prepared.convertedResp = nextReq.convertedResp
+		prepared.convertedMessages = nextReq.convertedMessages
 		prepared.passthroughResponses = nextReq.passthroughResponses
 		prepared.nativeResponses = nextReq.nativeResponses
+		prepared.messagesMetadata = nextReq.messagesMetadata
 		logCtx.Credential = nextCred
 		logCtx.RealModelID = prepared.realModelID
 		if span := trace.SpanFromContext(r.Context()); span.IsRecording() {
@@ -1030,7 +1033,31 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 				"credential", cred.Name, "status", proxyResp.StatusCode)
 			streamCompleted := false
 
-			if prepared.convertedResp {
+			if prepared.convertedMessages && proxyResp.StatusCode >= 200 && proxyResp.StatusCode < 300 {
+				defer func() {
+					if closeErr := proxyResp.StreamBody.Close(); closeErr != nil {
+						p.logger.WarnContext(r.Context(), "Failed to close proxy streaming response body", "error", closeErr)
+					}
+				}()
+				p.copyResponseHeaders(w, proxyResp.Headers, cred, true)
+				setSuccessfulSSEHeaders(w.Header(), proxyResp.StatusCode)
+				if logCtx.IsProxyRequest && logCtx.ActualCredentialName != "" {
+					w.Header().Set("X-Credential-Name", logCtx.ActualCredentialName)
+				}
+				w.WriteHeader(proxyResp.StatusCode)
+				p.setPromptTokensEstimate(logCtx, body, realModelID)
+				fakeResp := &http.Response{
+					StatusCode: proxyResp.StatusCode,
+					Header:     proxyResp.Headers,
+					Body:       proxyResp.StreamBody,
+				}
+				if err := p.handleMessagesAPIStreaming(w, fakeResp, cred, realModelID, logCtx, prepared.messagesMetadata); err != nil {
+					p.logStreamHandlerError(r.Context(), "Failed to handle proxy Messages API streaming", err,
+						"credential", cred.Name, "model", modelID, "request_id", logCtx.RequestID)
+				} else {
+					streamCompleted = true
+				}
+			} else if prepared.convertedResp {
 				// Proxy streaming + Responses API: need to convert Chat Completions SSE
 				// to Responses API SSE. Wrap StreamBody in http.Response for handleResponsesAPIStreaming.
 				defer func() {
@@ -1129,7 +1156,16 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			}
 		} else {
 			// Save passthrough Responses API response or convert Chat Completions response if needed
-			if prepared.passthroughResponses && proxyResp.StatusCode >= 200 && proxyResp.StatusCode < 300 {
+			if prepared.convertedMessages && proxyResp.StatusCode >= 200 && proxyResp.StatusCode < 300 {
+				messagesBody, convErr := anthropicconv.ChatToMessages(proxyResp.Body, prepared.messagesMetadata)
+				if convErr != nil {
+					p.logger.ErrorContext(r.Context(), "Failed to convert proxy response to Messages API format",
+						"credential", cred.Name, "model", modelID, "error", convErr,
+						"request_id", logCtx.RequestID)
+				} else {
+					proxyResp.Body = messagesBody
+				}
+			} else if prepared.passthroughResponses && proxyResp.StatusCode >= 200 && proxyResp.StatusCode < 300 {
 				// Codex passthrough: body is already in Responses API format — just enrich and save.
 				var respObj responses.Response
 				if err := json.Unmarshal(proxyResp.Body, &respObj); err == nil {
@@ -1318,8 +1354,10 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			prepared.proxyPath = nextReq.proxyPath
 			prepared.realModelID = nextReq.realModelID
 			prepared.convertedResp = nextReq.convertedResp
+			prepared.convertedMessages = nextReq.convertedMessages
 			prepared.passthroughResponses = nextReq.passthroughResponses
 			prepared.nativeResponses = nextReq.nativeResponses
+			prepared.messagesMetadata = nextReq.messagesMetadata
 			logCtx.RealModelID = realModelID
 
 			p.logger.InfoContext(r.Context(), "Retrying with next credential",
@@ -1753,7 +1791,16 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		}
 
 		// Handle Responses API response body.
-		if prepared.nativeResponses && resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		if prepared.convertedMessages && resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			messagesBody, convErr := anthropicconv.ChatToMessages(finalResponseBody, prepared.messagesMetadata)
+			if convErr != nil {
+				p.logger.ErrorContext(r.Context(), "Failed to convert to Messages API format",
+					"credential", cred.Name, "model", modelID, "error", convErr,
+					"request_id", logCtx.RequestID)
+			} else {
+				finalResponseBody = messagesBody
+			}
+		} else if prepared.nativeResponses && resp.StatusCode >= 200 && resp.StatusCode < 300 {
 			// Native Responses converter: convert provider response → *responses.Response.
 			nativeResp, convErr := provResponses.ResponseTo([]byte(decodedBody), modelID)
 			if convErr != nil {
@@ -1981,14 +2028,32 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 
 		p.logger.DebugContext(r.Context(), "Streaming handler selection",
 			"is_responses_api", prepared.isResponsesAPI,
+			"is_messages_api", prepared.isMessagesAPI,
 			"converted_resp", prepared.convertedResp,
+			"converted_messages", prepared.convertedMessages,
 			"provider", cred.Type,
 			"model", modelID,
 			"resp_content_type", resp.Header.Get("Content-Type"),
 			"resp_status", resp.StatusCode)
 
 		streamCompleted := false
-		if prepared.nativeResponses {
+		if prepared.convertedMessages {
+			if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+				err := p.handleMessagesAPIStreaming(w, resp, cred, modelID, logCtx, prepared.messagesMetadata)
+				if err != nil {
+					p.logStreamHandlerError(r.Context(), "Failed to handle Messages API streaming", err,
+						"credential", cred.Name, "model", modelID, "request_id", logCtx.RequestID)
+				} else {
+					streamCompleted = true
+				}
+			} else {
+				err := p.handleProviderStreaming(w, resp, cred, realModelID, modelID, logCtx)
+				if err != nil {
+					p.logStreamHandlerError(r.Context(), "Failed to handle provider streaming response", err,
+						"credential", cred.Name, "provider", cred.Type, "model", modelID, "request_id", logCtx.RequestID)
+				}
+			}
+		} else if prepared.nativeResponses {
 			// Native Responses converter (Vertex AI, Anthropic): convert provider SSE
 			// directly to Responses API SSE via ProviderResponses.StreamTo().
 			if resp.StatusCode >= 200 && resp.StatusCode < 300 {

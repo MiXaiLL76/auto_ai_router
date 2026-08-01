@@ -475,6 +475,9 @@ func appendDeltaTextForPayload(b *strings.Builder, payload []byte) {
 	if bytes.Contains(payload, []byte(`"choices"`)) {
 		appendChatCompletionDeltaText(b, payload)
 	}
+	if bytes.Contains(payload, []byte(`"content_block_delta"`)) {
+		appendMessagesDeltaText(b, payload)
+	}
 	if bytes.Contains(payload, []byte(`"type"`)) {
 		appendResponsesDeltaText(b, payload)
 	}
@@ -535,6 +538,29 @@ func appendResponsesDeltaText(b *strings.Builder, payload []byte) {
 		"response.custom_tool_call_input.delta",
 		"response.code_interpreter_call_code.delta":
 		appendDeltaValueText(b, event.Delta)
+	}
+}
+
+func appendMessagesDeltaText(b *strings.Builder, payload []byte) {
+	var event struct {
+		Type  string `json:"type"`
+		Delta struct {
+			Type        string `json:"type"`
+			Text        string `json:"text"`
+			Thinking    string `json:"thinking"`
+			PartialJSON string `json:"partial_json"`
+		} `json:"delta"`
+	}
+	if err := goccyjson.Unmarshal(payload, &event); err != nil || event.Type != "content_block_delta" {
+		return
+	}
+	switch event.Delta.Type {
+	case "text_delta":
+		b.WriteString(event.Delta.Text)
+	case "thinking_delta":
+		b.WriteString(event.Delta.Thinking)
+	case "input_json_delta":
+		b.WriteString(event.Delta.PartialJSON)
 	}
 }
 

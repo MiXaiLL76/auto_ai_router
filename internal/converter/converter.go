@@ -349,9 +349,15 @@ func ExtractTokenUsage(body []byte) *TokenUsage {
 // that function's doc comment) — folded in here so it comes along for free
 // during the same decode instead of a second, separate Unmarshal.
 type responsesUsageDetails struct {
-	InputTokens        int `json:"input_tokens"`
-	OutputTokens       int `json:"output_tokens"`
-	TotalTokens        int `json:"total_tokens,omitempty"`
+	InputTokens              int `json:"input_tokens"`
+	OutputTokens             int `json:"output_tokens"`
+	TotalTokens              int `json:"total_tokens,omitempty"`
+	CacheReadInputTokens     int `json:"cache_read_input_tokens,omitempty"`
+	CacheCreationInputTokens int `json:"cache_creation_input_tokens,omitempty"`
+	CacheCreation            struct {
+		Ephemeral5mInputTokens int `json:"ephemeral_5m_input_tokens,omitempty"`
+		Ephemeral1hInputTokens int `json:"ephemeral_1h_input_tokens,omitempty"`
+	} `json:"cache_creation,omitempty"`
 	InputTokensDetails struct {
 		CachedTokens              int `json:"cached_tokens,omitempty"`
 		CachedAudioTokens         int `json:"cached_audio_tokens,omitempty"`
@@ -489,6 +495,7 @@ func ExtractTotalTokensAndUsageWithOptions(body []byte, opts TokenUsageExtractio
 // ExtractTokenUsageWithOptions and ExtractTotalTokensAndUsageWithOptions.
 func tokenUsageFromShape(resp *tokenUsageResponseShape, opts TokenUsageExtractionOptions) *TokenUsage {
 	// Prefer Chat Completions tokens; fall back to Responses API / image tokens
+	promptTokensFromInputTokens := resp.Usage.PromptTokens == 0
 	promptTokens := resp.Usage.PromptTokens
 	if promptTokens == 0 {
 		promptTokens = resp.Usage.InputTokens
@@ -515,9 +522,21 @@ func tokenUsageFromShape(resp *tokenUsageResponseShape, opts TokenUsageExtractio
 
 	// Merge detail fields: Chat Completions uses completion_tokens_details,
 	// Responses API uses output_tokens_details. Pick whichever is populated.
+	// Anthropic's usage object reports cache tokens as flat fields (cache_read_input_tokens,
+	// cache_creation_input_tokens) and its input_tokens is EXCLUSIVE of them, unlike the
+	// nested OpenAI/Responses API detail fields where prompt_tokens/input_tokens is INCLUSIVE.
+	// Track whether the flat Anthropic fields supplied the cache figures so promptTokens can
+	// be corrected back to the inclusive total CalculateTokenCosts expects.
+	anthropicFlatCacheRead := false
+	anthropicFlatCacheCreation := false
+
 	cachedTokens := resp.Usage.PromptTokensDetails.CachedTokens
 	if cachedTokens == 0 {
 		cachedTokens = resp.Usage.InputTokensDetails.CachedTokens
+	}
+	if cachedTokens == 0 && resp.Usage.CacheReadInputTokens > 0 {
+		cachedTokens = resp.Usage.CacheReadInputTokens
+		anthropicFlatCacheRead = true
 	}
 	cacheCreationTokens := resp.Usage.PromptTokensDetails.CacheCreationTokens
 	cacheCreation5mTokens := resp.Usage.PromptTokensDetails.CacheCreationTokenDetails.Ephemeral5mInputTokens
@@ -533,6 +552,19 @@ func tokenUsageFromShape(resp *tokenUsageResponseShape, opts TokenUsageExtractio
 	}
 	if cacheCreationTokens == 0 {
 		cacheCreationTokens = resp.Usage.InputTokensDetails.CacheWriteTokens
+	}
+	if cacheCreationTokens == 0 {
+		cacheCreationTokens = resp.Usage.CacheCreationInputTokens
+		if cacheCreationTokens > 0 {
+			anthropicFlatCacheCreation = true
+		}
+	}
+	if cacheCreation5mTokens == 0 && cacheCreation1hTokens == 0 {
+		cacheCreation5mTokens = resp.Usage.CacheCreation.Ephemeral5mInputTokens
+		cacheCreation1hTokens = resp.Usage.CacheCreation.Ephemeral1hInputTokens
+		if cacheCreation5mTokens > 0 || cacheCreation1hTokens > 0 {
+			anthropicFlatCacheCreation = true
+		}
 	}
 	if cachedAudioTokens == 0 {
 		cachedAudioTokens = resp.Usage.InputTokensDetails.CachedAudioTokens
@@ -603,6 +635,14 @@ func tokenUsageFromShape(resp *tokenUsageResponseShape, opts TokenUsageExtractio
 	}
 	if cacheCreationTokens == 0 {
 		cacheCreationTokens = cacheCreation5mTokens + cacheCreation1hTokens
+	}
+	// Anthropic's input_tokens excludes cache tokens; add them back so promptTokens
+	// matches the inclusive-total semantics CalculateTokenCosts subtracts cache from.
+	if promptTokensFromInputTokens && anthropicFlatCacheRead {
+		promptTokens += cachedTokens
+	}
+	if promptTokensFromInputTokens && anthropicFlatCacheCreation {
+		promptTokens += cacheCreationTokens
 	}
 	cachedTokens, cachedAudioTokens = converterutil.NormalizeCachedAudioBreakdown(cachedTokens, cachedAudioTokens)
 	audioIn = converterutil.NormalizeAudioInputTokens(

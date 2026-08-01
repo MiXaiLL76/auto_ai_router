@@ -15,6 +15,7 @@ import (
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/converter"
+	anthropicconv "github.com/mixaill76/auto_ai_router/internal/converter/anthropic"
 	"github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
 	promanutils "github.com/mixaill76/auto_ai_router/internal/converter/proman/utils"
 	"github.com/mixaill76/auto_ai_router/internal/converter/responses"
@@ -1463,6 +1464,52 @@ func (p *Proxy) handleResponsesAPIStreaming(
 	}
 
 	return p.handleTransformedStreaming(w, resp, cred.Name, modelID, string(cred.Type), transformer, logCtx)
+}
+
+func (p *Proxy) handleMessagesAPIStreaming(
+	w http.ResponseWriter,
+	resp *http.Response,
+	cred *config.CredentialConfig,
+	modelID string,
+	logCtx *RequestLogContext,
+	metadata anthropicconv.MessagesAdapterMetadata,
+) error {
+	publicModel := clientVisibleResponseModel(logCtx, modelID)
+	converterModelID := modelID
+	if logCtx != nil && logCtx.RealModelID != "" {
+		converterModelID = logCtx.RealModelID
+	}
+	conv := converter.New(cred.Type, converter.RequestMode{
+		ModelID:        converterModelID,
+		DisplayModelID: publicModel,
+		IsStreaming:    true,
+	})
+	transformer := func(reader io.Reader, _ string, writer io.Writer) error {
+		if conv.IsPassthrough() {
+			return anthropicconv.TransformChatStreamToMessages(reader, writer, publicModel, metadata)
+		}
+		chatReader, chatWriter := io.Pipe()
+		var providerErr error
+		var wg sync.WaitGroup
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			providerErr = conv.StreamTo(reader, chatWriter)
+			if providerErr != nil {
+				_ = chatWriter.CloseWithError(providerErr)
+				return
+			}
+			_ = chatWriter.Close()
+		}()
+		err := anthropicconv.TransformChatStreamToMessages(chatReader, writer, publicModel, metadata)
+		_ = chatReader.Close()
+		wg.Wait()
+		if err != nil {
+			return err
+		}
+		return providerErr
+	}
+	return p.handleTransformedStreaming(w, resp, cred.Name, modelID, "messages", transformer, logCtx)
 }
 
 // handleNativeResponsesStreaming handles Responses API streaming via the Phase 4

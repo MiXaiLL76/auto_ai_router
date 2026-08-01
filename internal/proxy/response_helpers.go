@@ -48,6 +48,31 @@ func extractOpenAITotalTokens(payload []byte) int {
 	return openAIResp.Response.Usage.TotalTokens
 }
 
+// extractMessagesTotalTokens reads Anthropic Messages API streaming usage
+// (message_delta event) for the rate limiter's crude per-chunk token count.
+// Kept as a fallback behind extractOpenAITotalTokens in extractTokensFromPayloads
+// so the extra unmarshal only runs for the minority Anthropic-shaped traffic,
+// not on every chunk of the majority Chat Completions/Responses/Vertex/Bedrock
+// hot path.
+func extractMessagesTotalTokens(payload []byte) int {
+	var event struct {
+		Type  string `json:"type"`
+		Usage struct {
+			InputTokens              int `json:"input_tokens"`
+			OutputTokens             int `json:"output_tokens"`
+			CacheReadInputTokens     int `json:"cache_read_input_tokens"`
+			CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
+		} `json:"usage"`
+	}
+	if err := json.Unmarshal(payload, &event); err != nil || event.Type != "message_delta" {
+		return 0
+	}
+	return event.Usage.InputTokens +
+		event.Usage.OutputTokens +
+		event.Usage.CacheReadInputTokens +
+		event.Usage.CacheCreationInputTokens
+}
+
 // extractOpenAITokensAndUsage runs both non-streaming token-accounting
 // consumers off a single shared decode of body (converter.ExtractTotalTokensAndUsageWithOptions):
 // the plain "total_tokens" count consumed by the rate limiter (RPM/TPM
@@ -83,6 +108,9 @@ func extractTokensFromStreamingChunk(chunk []byte) int {
 func extractTokensFromPayloads(payloads [][]byte) int {
 	for _, payload := range payloads {
 		if tokens := extractOpenAITotalTokens(payload); tokens > 0 {
+			return tokens
+		}
+		if tokens := extractMessagesTotalTokens(payload); tokens > 0 {
 			return tokens
 		}
 	}
