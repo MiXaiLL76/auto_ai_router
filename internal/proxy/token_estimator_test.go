@@ -1,10 +1,14 @@
 package proxy
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
+	"github.com/mixaill76/auto_ai_router/internal/converter"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestEstimatePromptTokensForModel_OpenAIChatUsesTokenizer(t *testing.T) {
@@ -157,4 +161,119 @@ func TestExtractCompletionDeltaText_IgnoresAudioBytes(t *testing.T) {
 		`data: {"type":"response.audio.delta","delta":"QUJDREVGRw=="}` + "\n\n")
 
 	assert.Equal(t, "", extractCompletionDeltaText(chunk))
+}
+
+// --- Fix A: lazy prompt-token estimate + tiktoken_enabled toggle ---
+
+func TestRequestLogContext_PromptTokensEstimate_MemoizedAfterFirstCall(t *testing.T) {
+	calls := 0
+	logCtx := &RequestLogContext{
+		promptTokensEstimateFn: func() int {
+			calls++
+			return 42
+		},
+	}
+
+	assert.Equal(t, 42, logCtx.promptTokensEstimate())
+	assert.Equal(t, 42, logCtx.promptTokensEstimate())
+	assert.Equal(t, 42, logCtx.promptTokensEstimate())
+	assert.Equal(t, 1, calls, "estimator closure must run at most once, memoized afterward")
+}
+
+func TestRequestLogContext_PromptTokensEstimate_ZeroWhenUnarmed(t *testing.T) {
+	logCtx := &RequestLogContext{}
+	assert.Equal(t, 0, logCtx.promptTokensEstimate())
+
+	var nilLogCtx *RequestLogContext
+	assert.Equal(t, 0, nilLogCtx.promptTokensEstimate())
+}
+
+func TestProxy_SetPromptTokensEstimate_ComputesWhenTiktokenEnabled(t *testing.T) {
+	body := []byte(`{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hello world"}]}`)
+	prx := NewTestProxyBuilder().Build() // tiktoken_enabled defaults to true
+
+	logCtx := &RequestLogContext{}
+	prx.setPromptTokensEstimate(logCtx, body, "gpt-4o-mini")
+
+	assert.NotNil(t, logCtx.promptTokensEstimateFn)
+	assert.Equal(t, estimatePromptTokensForModel(body, "gpt-4o-mini"), logCtx.promptTokensEstimate())
+}
+
+func TestProxy_SetPromptTokensEstimate_NoOpWhenTiktokenDisabled(t *testing.T) {
+	body := []byte(`{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hello world"}]}`)
+	prx := NewTestProxyBuilder().WithTiktokenEnabled(false).Build()
+
+	logCtx := &RequestLogContext{}
+	prx.setPromptTokensEstimate(logCtx, body, "gpt-4o-mini")
+
+	assert.Nil(t, logCtx.promptTokensEstimateFn, "no estimator should be armed when tiktoken_enabled=false")
+	assert.Equal(t, 0, logCtx.promptTokensEstimate())
+}
+
+func TestProxy_NewCompletionTokenAccumulator_NilWhenTiktokenDisabled(t *testing.T) {
+	prx := NewTestProxyBuilder().WithTiktokenEnabled(false).Build()
+
+	acc := prx.newCompletionTokenAccumulator("gpt-4o-mini")
+	require.Nil(t, acc)
+
+	// AddChunk/TokenCount on a nil accumulator must stay safe no-ops — this is how
+	// the streaming hot path skips the per-chunk delta-text JSON decode entirely
+	// when tiktoken_enabled=false, rather than just discarding its result.
+	acc.AddChunk([]byte(`data: {"choices":[{"delta":{"content":"hello"}}]}` + "\n\n"))
+	assert.Equal(t, 0, acc.TokenCount())
+}
+
+func TestProxy_NewCompletionTokenAccumulator_ActiveWhenTiktokenEnabled(t *testing.T) {
+	prx := NewTestProxyBuilder().Build()
+
+	acc := prx.newCompletionTokenAccumulator("gpt-4o-mini")
+	require.NotNil(t, acc)
+	acc.AddChunk([]byte(`data: {"choices":[{"delta":{"content":"hello"}}]}` + "\n\n"))
+	assert.Greater(t, acc.TokenCount(), 0)
+}
+
+// TestFinalizeStreamingLog_EstimatorNeverInvokedWhenProviderSendsUsage confirms the
+// call-count claim behind fix A: once a provider genuinely reports usage
+// (providerUsage=true), the armed local-tokenizer fallback closure must never run at
+// all, not merely have its result discarded.
+func TestFinalizeStreamingLog_EstimatorNeverInvokedWhenProviderSendsUsage(t *testing.T) {
+	prx := NewTestProxyBuilder().Build()
+	calls := 0
+	logCtx := &RequestLogContext{
+		Request: httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil),
+		promptTokensEstimateFn: func() int {
+			calls++
+			return 999
+		},
+		TokenUsage: &converter.TokenUsage{},
+	}
+	lastChunk := []byte(`data: {"choices":[],"usage":{"prompt_tokens":50,"completion_tokens":10,"total_tokens":60}}`)
+
+	prx.finalizeStreamingLog(logCtx, 0, lastChunk, "openai", http.StatusOK, false)
+
+	assert.Equal(t, 0, calls, "estimator closure must never be invoked when the provider sent real usage")
+	assert.Equal(t, 50, logCtx.TokenUsage.PromptTokens)
+	assert.Equal(t, "provider", logCtx.UsageSource)
+}
+
+// TestFinalizeStreamingLog_EstimatorInvokedOnceWhenProviderOmitsUsage is the
+// complementary case: the estimator must still run exactly once — not zero times,
+// not on every access — when the provider never sends usage.
+func TestFinalizeStreamingLog_EstimatorInvokedOnceWhenProviderOmitsUsage(t *testing.T) {
+	prx := NewTestProxyBuilder().Build()
+	calls := 0
+	logCtx := &RequestLogContext{
+		Request: httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil),
+		promptTokensEstimateFn: func() int {
+			calls++
+			return 77
+		},
+		TokenUsage: &converter.TokenUsage{},
+	}
+
+	prx.finalizeStreamingLog(logCtx, 5, nil, "openai", http.StatusOK, false)
+
+	assert.Equal(t, 1, calls)
+	assert.Equal(t, 77, logCtx.TokenUsage.PromptTokens)
+	assert.Equal(t, "estimated", logCtx.UsageSource)
 }

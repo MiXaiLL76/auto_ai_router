@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
-	"github.com/mixaill76/auto_ai_router/internal/converter"
 	"github.com/mixaill76/auto_ai_router/internal/scope"
 )
 
@@ -307,9 +306,10 @@ func (p *Proxy) writeFallbackResponse(
 			// corrupt the response).
 			// Still propagate partial token usage so the defer-logged spend entry isn't empty.
 			if streamUsage != nil && logCtx != nil {
-				if streamUsage.PromptTokens == 0 && logCtx.PromptTokensEstimate > 0 &&
-					logCtx.UsageSource != "provider" {
-					streamUsage.PromptTokens = logCtx.PromptTokensEstimate
+				if streamUsage.PromptTokens == 0 && logCtx.UsageSource != "provider" {
+					if estimate := logCtx.promptTokensEstimate(); estimate > 0 {
+						streamUsage.PromptTokens = estimate
+					}
 				}
 				logCtx.TokenUsage = streamUsage
 			}
@@ -327,9 +327,10 @@ func (p *Proxy) writeFallbackResponse(
 		}
 		if streamUsage != nil && logCtx != nil {
 			// Backfill PromptTokens from estimate when provider didn't include it.
-			if streamUsage.PromptTokens == 0 && logCtx.PromptTokensEstimate > 0 &&
-				logCtx.UsageSource != "provider" {
-				streamUsage.PromptTokens = logCtx.PromptTokensEstimate
+			if streamUsage.PromptTokens == 0 && logCtx.UsageSource != "provider" {
+				if estimate := logCtx.promptTokensEstimate(); estimate > 0 {
+					streamUsage.PromptTokens = estimate
+				}
 			}
 			logCtx.TokenUsage = streamUsage
 			if proxyResp.StatusCode < 400 {
@@ -353,13 +354,16 @@ func (p *Proxy) writeFallbackResponse(
 		}
 	} else {
 		p.setCredentialResponseHeader(w, logCtx, "")
+		// Single shared decode for both token-accounting consumers (plan item
+		// G) instead of two independent full-body Unmarshals of the same
+		// bytes: the rate-limiter's total-tokens count and the spend-logging
+		// TokenUsage are genuinely different numbers computed off the same
+		// decode, not derived from each other — see
+		// converter.ExtractTotalTokensAndUsageWithOptions's doc comment.
+		tokens, usage := extractOpenAITokensAndUsage(proxyResp.Body, usageOptions)
 		if logCtx != nil {
-			logCtx.TokenUsage = converter.ExtractTokenUsageWithOptions(
-				proxyResp.Body,
-				usageOptions,
-			)
+			logCtx.TokenUsage = usage
 		}
-		tokens := extractTokensFromResponse(proxyResp.Body, config.ProviderTypeOpenAI)
 		if tokens > 0 {
 			p.rateLimiter.ConsumeTokens(fallbackCred.Name, tokens)
 			if modelID != "" {
