@@ -30,11 +30,7 @@ func InjectCacheControl(body []byte) []byte {
 		return body
 	}
 
-	modified := false
-
-	if hasSystemField && markSystemField(req) {
-		modified = true
-	}
+	modified := hasSystemField && markSystemField(req)
 
 	for _, msg := range messages {
 		m, ok := msg.(map[string]interface{})

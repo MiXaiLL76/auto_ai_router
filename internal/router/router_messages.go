@@ -62,14 +62,14 @@ func (w *messagesErrorWriter) decodeBufferedBody() []byte {
 		if err != nil {
 			return raw
 		}
-		defer zr.Close()
+		defer func() { _ = zr.Close() }()
 		if decoded, err := io.ReadAll(zr); err == nil {
 			return decoded
 		}
 		return raw
 	case "deflate":
 		fr := flate.NewReader(bytes.NewReader(raw))
-		defer fr.Close()
+		defer func() { _ = fr.Close() }()
 		if decoded, err := io.ReadAll(fr); err == nil {
 			return decoded
 		}
