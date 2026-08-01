@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"github.com/mixaill76/auto_ai_router/internal/converter/openai"
@@ -368,7 +369,11 @@ func truncateToolName(name string) string {
 	if len(name) <= maxOpenAIToolNameLength {
 		return name
 	}
-	return name[:maxOpenAIToolNameLength]
+	truncated := name[:maxOpenAIToolNameLength]
+	for len(truncated) > 0 && !utf8.ValidString(truncated) {
+		truncated = truncated[:len(truncated)-1]
+	}
+	return truncated
 }
 
 func isClaudeModel(model string) bool {

@@ -2,9 +2,13 @@ package router
 
 import (
 	"bytes"
+	"compress/flate"
+	"compress/gzip"
 	"encoding/json"
+	"io"
 	"net/http"
 	"strconv"
+	"strings"
 )
 
 type messagesErrorWriter struct {
@@ -47,25 +51,54 @@ func (w *messagesErrorWriter) Unwrap() http.ResponseWriter {
 	return w.ResponseWriter
 }
 
+// decodeBufferedBody undoes any Content-Encoding applied upstream before we
+// intercepted the write, since the client's real Accept-Encoding is honored
+// for successful responses and may have triggered compression here too.
+func (w *messagesErrorWriter) decodeBufferedBody() []byte {
+	raw := w.body.Bytes()
+	switch strings.ToLower(w.Header().Get("Content-Encoding")) {
+	case "gzip":
+		zr, err := gzip.NewReader(bytes.NewReader(raw))
+		if err != nil {
+			return raw
+		}
+		defer zr.Close()
+		if decoded, err := io.ReadAll(zr); err == nil {
+			return decoded
+		}
+		return raw
+	case "deflate":
+		fr := flate.NewReader(bytes.NewReader(raw))
+		defer fr.Close()
+		if decoded, err := io.ReadAll(fr); err == nil {
+			return decoded
+		}
+		return raw
+	default:
+		return raw
+	}
+}
+
 func (w *messagesErrorWriter) finalize() {
 	if !w.buffering {
 		return
 	}
 	message := http.StatusText(w.status)
+	decodedBody := w.decodeBufferedBody()
 	var response struct {
 		Error struct {
 			Message string `json:"message"`
 		} `json:"error"`
 		Detail string `json:"detail"`
 	}
-	if json.Unmarshal(w.body.Bytes(), &response) == nil {
+	if json.Unmarshal(decodedBody, &response) == nil {
 		if response.Error.Message != "" {
 			message = response.Error.Message
 		} else if response.Detail != "" {
 			message = response.Detail
 		}
-	} else if w.body.Len() > 0 {
-		message = w.body.String()
+	} else if len(decodedBody) > 0 {
+		message = string(decodedBody)
 	}
 	body, _ := json.Marshal(map[string]interface{}{
 		"type": "error",
@@ -109,7 +142,6 @@ func (r *Router) proxyPublicRequest(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	writer := &messagesErrorWriter{ResponseWriter: w}
-	req.Header.Set("Accept-Encoding", "identity")
 	r.proxy.ProxyRequest(writer, req)
 	writer.finalize()
 }

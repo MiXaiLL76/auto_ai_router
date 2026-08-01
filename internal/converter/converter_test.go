@@ -578,6 +578,10 @@ func TestExtractTokenUsage(t *testing.T) {
 }
 
 func TestExtractTokenUsage_AnthropicFlatCacheFields(t *testing.T) {
+	// Anthropic's input_tokens is EXCLUSIVE of cache tokens (unlike OpenAI's inclusive
+	// prompt_tokens), so PromptTokens must be corrected back to the inclusive total
+	// (70+25+5=100) here — CalculateTokenCosts subtracts CachedInputTokens/CacheCreationTokens
+	// from PromptTokens assuming it is always the inclusive total.
 	body := []byte(`{"usage":{"input_tokens":70,"output_tokens":20,"cache_read_input_tokens":25,"cache_creation_input_tokens":5}}`)
 
 	usage := ExtractTokenUsage(body)
@@ -585,7 +589,7 @@ func TestExtractTokenUsage_AnthropicFlatCacheFields(t *testing.T) {
 	if usage == nil {
 		t.Fatal("expected Anthropic usage")
 	}
-	if usage.PromptTokens != 70 || usage.CompletionTokens != 20 {
+	if usage.PromptTokens != 100 || usage.CompletionTokens != 20 {
 		t.Fatalf("unexpected token counts: %+v", usage)
 	}
 	if usage.CachedInputTokens != 25 || usage.CacheCreationTokens != 5 {

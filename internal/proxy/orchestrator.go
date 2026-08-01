@@ -275,6 +275,12 @@ func (p *Proxy) prepareRequestForCredential(
 		path:        basePath,
 	}
 	if basePath == "/v1/messages" {
+		if cred.IsProxyLike() {
+			// Proxy-like credentials (AIR-to-AIR chaining) forward the original
+			// Anthropic-shaped request/path as-is; the downstream peer does its
+			// own routing and conversion, same as the Responses API passthrough.
+			return req, nil
+		}
 		chatBody, metadata, err := anthropicconv.MessagesToChat(body)
 		if err != nil {
 			return req, err

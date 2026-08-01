@@ -5,10 +5,21 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestTruncateToolNamePreservesUTF8(t *testing.T) {
+	// A multi-byte-rune name whose byte length exceeds maxOpenAIToolNameLength must
+	// not be sliced mid-rune, which would produce invalid UTF-8.
+	name := strings.Repeat("Привет", 20) // Cyrillic "Привет" x20, 2 bytes/rune
+	truncated := truncateToolName(name)
+
+	require.True(t, utf8.ValidString(truncated), "truncated name must be valid UTF-8: %q", truncated)
+	require.LessOrEqual(t, len(truncated), maxOpenAIToolNameLength)
+}
 
 func TestMessagesToChat(t *testing.T) {
 	longName := strings.Repeat("tool", 20)
