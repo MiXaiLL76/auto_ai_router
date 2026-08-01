@@ -1045,7 +1045,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 					w.Header().Set("X-Credential-Name", logCtx.ActualCredentialName)
 				}
 				w.WriteHeader(proxyResp.StatusCode)
-				logCtx.PromptTokensEstimate = estimatePromptTokensForModel(body, realModelID)
+				p.setPromptTokensEstimate(logCtx, body, realModelID)
 				fakeResp := &http.Response{
 					StatusCode: proxyResp.StatusCode,
 					Header:     proxyResp.Headers,
