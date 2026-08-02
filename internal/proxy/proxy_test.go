@@ -1046,11 +1046,16 @@ func TestExtractTokensFromStreamingChunk(t *testing.T) {
 			chunk:    "data: {\"usage\":{\"input_tokens\":100,\"output_tokens\":50,\"total_tokens\":150}}\n\n",
 			expected: 150,
 		},
+		{
+			name:     "messages API flat usage",
+			chunk:    "event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"input_tokens\":70,\"output_tokens\":20,\"cache_read_input_tokens\":25,\"cache_creation_input_tokens\":5}}\n\n",
+			expected: 120,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			tokens := extractTokensFromStreamingChunk(tt.chunk)
+			tokens := extractTokensFromStreamingChunk([]byte(tt.chunk))
 			assert.Equal(t, tt.expected, tokens)
 		})
 	}

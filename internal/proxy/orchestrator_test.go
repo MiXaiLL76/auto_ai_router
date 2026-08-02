@@ -221,6 +221,67 @@ func TestPrepareRequestForCredential_ProxyBodyKeepsOriginalParams(t *testing.T) 
 	require.Contains(t, forwarded, "temperature")
 }
 
+func TestPrepareRequestForCredential_MessagesKeepsOriginalProxyRequest(t *testing.T) {
+	prx := NewTestProxyBuilder().Build()
+	cred := config.CredentialConfig{Name: "openai", Type: config.ProviderTypeOpenAI, APIKey: "key", BaseURL: "http://openai.local", RPM: 100}
+	req := httptest.NewRequest("POST", "/v1/messages", nil)
+	body := []byte(`{"model":"claude-sonnet","max_tokens":100,"messages":[{"role":"user","content":"hello"}]}`)
+	proxyBody := []byte(`{"model":"claude-alias","max_tokens":100,"messages":[{"role":"user","content":"hello"}]}`)
+
+	prepared, err := prx.prepareRequestForCredential(
+		req,
+		body,
+		proxyBody,
+		"claude-alias",
+		"claude-sonnet",
+		"/v1/messages",
+		false,
+		&cred,
+		false,
+		false,
+		false,
+	)
+
+	require.NoError(t, err)
+	require.Equal(t, "/v1/chat/completions", prepared.path)
+	require.Equal(t, "/v1/messages", prepared.proxyPath)
+	require.JSONEq(t, string(proxyBody), string(prepared.proxyBody))
+	require.Contains(t, string(prepared.body), `"model":"claude-sonnet"`)
+	require.True(t, prepared.convertedMessages)
+}
+
+func TestPrepareRequestForCredential_MessagesProxyLikeCredentialKeepsNativeFormat(t *testing.T) {
+	prx := NewTestProxyBuilder().Build()
+	cred := config.CredentialConfig{Name: "air-peer", Type: config.ProviderTypeAIR, APIKey: "key", BaseURL: "http://air-peer.local", RPM: 100}
+	req := httptest.NewRequest("POST", "/v1/messages", nil)
+	body := []byte(`{"model":"claude-sonnet","max_tokens":100,"messages":[{"role":"user","content":"hello"}]}`)
+	proxyBody := []byte(`{"model":"claude-alias","max_tokens":100,"messages":[{"role":"user","content":"hello"}]}`)
+
+	prepared, err := prx.prepareRequestForCredential(
+		req,
+		body,
+		proxyBody,
+		"claude-alias",
+		"claude-sonnet",
+		"/v1/messages",
+		false,
+		&cred,
+		false,
+		false,
+		false,
+	)
+
+	require.NoError(t, err)
+	// Proxy-like credentials (AIR-to-AIR chaining) must receive the original
+	// Anthropic-shaped request/path unchanged: the downstream peer does its own
+	// routing/conversion, same as the Responses API passthrough contract.
+	require.Equal(t, "/v1/messages", prepared.path)
+	require.Equal(t, "/v1/messages", prepared.proxyPath)
+	require.JSONEq(t, string(body), string(prepared.body))
+	require.JSONEq(t, string(proxyBody), string(prepared.proxyBody))
+	require.False(t, prepared.convertedMessages)
+}
+
 func TestPrepareRequestForCredential_ResponsesRecomputesProviderMode(t *testing.T) {
 	logger := testhelpers.NewTestLogger()
 	openaiCred := config.CredentialConfig{Name: "openai", Type: config.ProviderTypeOpenAI, APIKey: "key", BaseURL: "http://openai.local", RPM: 100}

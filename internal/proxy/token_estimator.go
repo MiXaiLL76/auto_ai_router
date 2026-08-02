@@ -374,21 +374,68 @@ func normalizeOpenAIModelName(model string) string {
 type completionTokenAccumulator struct {
 	model string
 	text  strings.Builder
+	// payloadBuf is reused across AddChunk calls (dst[:0] pattern) so a
+	// stream's per-chunk delta-text extraction doesn't allocate a fresh
+	// [][]byte on every chunk. Safe because each accumulator is created fresh
+	// per stream (see newCompletionTokenAccumulator) — never shared across
+	// concurrent streams.
+	payloadBuf [][]byte
 }
 
 func newCompletionTokenAccumulator(model string) *completionTokenAccumulator {
 	return &completionTokenAccumulator{model: model}
 }
 
+// newCompletionTokenAccumulator returns nil when tiktoken_enabled=false, so the per-chunk
+// AddChunk/TokenCount calls in the streaming hot path become no-ops (both are already
+// nil-safe) instead of doing a wasted per-chunk JSON decode whose result is then discarded.
+func (p *Proxy) newCompletionTokenAccumulator(model string) *completionTokenAccumulator {
+	if !p.tiktokenEnabled {
+		return nil
+	}
+	return newCompletionTokenAccumulator(model)
+}
+
+// setPromptTokensEstimate arms logCtx's lazy local-tokenizer fallback estimate for the
+// given request body/model. The estimator itself (full body JSON decode + tiktoken BPE)
+// only runs if a consumer later calls logCtx.promptTokensEstimate() — i.e. only when the
+// provider genuinely didn't report usage. body must not be mutated by the caller after
+// this point (verified true at every current call site: the retry loops that could
+// reassign body/proxyBody have already broken out by the time streaming starts).
+// No-op (leaves the estimator unarmed, so promptTokensEstimate() returns 0) when
+// tiktoken_enabled=false.
+func (p *Proxy) setPromptTokensEstimate(logCtx *RequestLogContext, body []byte, model string) {
+	if logCtx == nil || !p.tiktokenEnabled {
+		return
+	}
+	logCtx.promptTokensEstimateFn = func() int {
+		return estimatePromptTokensForModel(body, model)
+	}
+}
+
 func (a *completionTokenAccumulator) AddChunk(chunk []byte) {
 	if a == nil {
 		return
 	}
-	text := extractCompletionDeltaText(chunk)
-	if text == "" {
+	a.payloadBuf = splitSSEPayloads(chunk, a.payloadBuf)
+	a.appendPayloadsText(a.payloadBuf)
+}
+
+// AddPayloads adds delta text from payloads a caller already split out of the
+// current chunk (e.g. tokenCapturingWriter.Write or an onChunk closure that
+// splits once and shares the sub-slices with every consumer) — avoids a
+// second, redundant split of the same chunk that AddChunk would otherwise do.
+func (a *completionTokenAccumulator) AddPayloads(payloads [][]byte) {
+	if a == nil {
 		return
 	}
-	a.text.WriteString(text)
+	a.appendPayloadsText(payloads)
+}
+
+func (a *completionTokenAccumulator) appendPayloadsText(payloads [][]byte) {
+	for _, payload := range payloads {
+		appendDeltaTextForPayload(&a.text, payload)
+	}
 }
 
 func (a *completionTokenAccumulator) TokenCount() int {
@@ -399,7 +446,7 @@ func (a *completionTokenAccumulator) TokenCount() int {
 }
 
 func extractCompletionDeltaText(chunk []byte) string {
-	payloads := extractJSONPayloadsFromStreamChunk(chunk)
+	payloads := splitSSEPayloads(chunk, nil)
 	if len(payloads) == 0 {
 		return ""
 	}
@@ -427,6 +474,9 @@ func extractCompletionDeltaText(chunk []byte) string {
 func appendDeltaTextForPayload(b *strings.Builder, payload []byte) {
 	if bytes.Contains(payload, []byte(`"choices"`)) {
 		appendChatCompletionDeltaText(b, payload)
+	}
+	if bytes.Contains(payload, []byte(`"content_block_delta"`)) {
+		appendMessagesDeltaText(b, payload)
 	}
 	if bytes.Contains(payload, []byte(`"type"`)) {
 		appendResponsesDeltaText(b, payload)
@@ -488,6 +538,29 @@ func appendResponsesDeltaText(b *strings.Builder, payload []byte) {
 		"response.custom_tool_call_input.delta",
 		"response.code_interpreter_call_code.delta":
 		appendDeltaValueText(b, event.Delta)
+	}
+}
+
+func appendMessagesDeltaText(b *strings.Builder, payload []byte) {
+	var event struct {
+		Type  string `json:"type"`
+		Delta struct {
+			Type        string `json:"type"`
+			Text        string `json:"text"`
+			Thinking    string `json:"thinking"`
+			PartialJSON string `json:"partial_json"`
+		} `json:"delta"`
+	}
+	if err := goccyjson.Unmarshal(payload, &event); err != nil || event.Type != "content_block_delta" {
+		return
+	}
+	switch event.Delta.Type {
+	case "text_delta":
+		b.WriteString(event.Delta.Text)
+	case "thinking_delta":
+		b.WriteString(event.Delta.Thinking)
+	case "input_json_delta":
+		b.WriteString(event.Delta.PartialJSON)
 	}
 }
 
