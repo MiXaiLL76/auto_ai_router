@@ -482,12 +482,12 @@ func TestExtractModelFromBody(t *testing.T) {
 	// Additional check: Responses API streaming must NOT have stream_options
 	t.Run("responses API streaming must not inject stream_options", func(t *testing.T) {
 		body := `{"model": "gpt-5", "stream": true, "input": "Hello"}`
-		_, stream, _, modifiedBody, err := extractMetadataFromBody([]byte(body), "application/json")
+		result, err := sanitizeAndExtractRequestBody([]byte(body), "application/json")
 		assert.NoError(t, err)
-		assert.True(t, stream)
+		assert.True(t, result.Streaming)
 
 		var bodyMap map[string]interface{}
-		err = json.Unmarshal(modifiedBody, &bodyMap)
+		err = json.Unmarshal(result.Body, &bodyMap)
 		assert.NoError(t, err)
 
 		_, hasStreamOptions := bodyMap["stream_options"]
@@ -496,15 +496,15 @@ func TestExtractModelFromBody(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			model, stream, _, modifiedBody, err := extractMetadataFromBody([]byte(tt.body), "application/json")
+			result, err := sanitizeAndExtractRequestBody([]byte(tt.body), "application/json")
 			assert.NoError(t, err)
-			assert.Equal(t, tt.expectedModel, model)
-			assert.Equal(t, tt.expectedStream, stream)
+			assert.Equal(t, tt.expectedModel, result.ModelID)
+			assert.Equal(t, tt.expectedStream, result.Streaming)
 
-			if tt.checkModifiedBody && stream {
+			if tt.checkModifiedBody && result.Streaming {
 				// For streaming requests, verify stream_options.include_usage is set to true
 				var bodyMap map[string]interface{}
-				err := json.Unmarshal(modifiedBody, &bodyMap)
+				err := json.Unmarshal(result.Body, &bodyMap)
 				assert.NoError(t, err)
 
 				streamOptions, ok := bodyMap["stream_options"].(map[string]interface{})
@@ -528,11 +528,11 @@ func TestExtractModelFromBody(t *testing.T) {
 		assert.NoError(t, err)
 		assert.NoError(t, writer.Close())
 
-		model, stream, _, modifiedBody, err := extractMetadataFromBody(buf.Bytes(), writer.FormDataContentType())
+		result, err := sanitizeAndExtractRequestBody(buf.Bytes(), writer.FormDataContentType())
 		assert.NoError(t, err)
-		assert.Equal(t, "gemini-2.5-flash-image-preview", model)
-		assert.False(t, stream)
-		assert.Equal(t, buf.Bytes(), modifiedBody)
+		assert.Equal(t, "gemini-2.5-flash-image-preview", result.ModelID)
+		assert.False(t, result.Streaming)
+		assert.Equal(t, buf.Bytes(), result.Body)
 	})
 }
 

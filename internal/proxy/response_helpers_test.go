@@ -276,6 +276,7 @@ func TestExtractTokenUsageFromPayloads_BatchedSSEMergesUsage(t *testing.T) {
 	usage := extractTokenUsageFromPayloads(payloads, converter.TokenUsageExtractionOptions{})
 	if usage == nil {
 		t.Fatal("expected non-nil merged usage")
+		return
 	}
 	if usage.PromptTokens != 10 || usage.CompletionTokens != 5 {
 		t.Fatalf("expected PromptTokens=10 CompletionTokens=5, got PromptTokens=%d CompletionTokens=%d",
@@ -294,6 +295,7 @@ func TestExtractTokenUsageFromPayloads_SingleFrameStillWorks(t *testing.T) {
 	usage := extractTokenUsageFromPayloads(payloads, converter.TokenUsageExtractionOptions{})
 	if usage == nil {
 		t.Fatal("expected non-nil usage")
+		return
 	}
 	if usage.PromptTokens != 3 || usage.CompletionTokens != 7 {
 		t.Fatalf("expected PromptTokens=3 CompletionTokens=7, got PromptTokens=%d CompletionTokens=%d",

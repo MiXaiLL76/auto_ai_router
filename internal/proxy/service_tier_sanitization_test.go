@@ -56,14 +56,14 @@ func TestExtractMetadataFromBodyStripsClientControlledServiceTier(t *testing.T) 
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			model, stream, sessionID, sanitized, err := extractMetadataFromBody([]byte(tt.body), "application/json")
+			result, err := sanitizeAndExtractRequestBody([]byte(tt.body), "application/json")
 			require.NoError(t, err)
-			assert.Equal(t, "gpt-4", model)
-			assert.Equal(t, tt.wantStream, stream)
-			assert.Equal(t, tt.wantSessionID, sessionID)
+			assert.Equal(t, "gpt-4", result.ModelID)
+			assert.Equal(t, tt.wantStream, result.Streaming)
+			assert.Equal(t, tt.wantSessionID, result.SessionID)
 
 			var body map[string]json.RawMessage
-			require.NoError(t, json.Unmarshal(sanitized, &body))
+			require.NoError(t, json.Unmarshal(result.Body, &body))
 			assert.NotContains(t, body, "service_tier")
 			if extraRaw, exists := body["extra_body"]; exists {
 				var extra map[string]json.RawMessage
@@ -90,10 +90,10 @@ func TestStripClientControlledServiceTierAcceptsEveryJSONType(t *testing.T) {
 	for _, value := range values {
 		t.Run(value, func(t *testing.T) {
 			body := []byte(`{"model":"gpt-4","messages":[],"service_tier":` + value + `,"extra_body":{"service_tier":` + value + `,"keep":true}}`)
-			_, _, _, sanitized, err := extractMetadataFromBody(body, "application/json")
+			result, err := sanitizeAndExtractRequestBody(body, "application/json")
 			require.NoError(t, err)
 			var parsed map[string]json.RawMessage
-			require.NoError(t, json.Unmarshal(sanitized, &parsed))
+			require.NoError(t, json.Unmarshal(result.Body, &parsed))
 			assert.NotContains(t, parsed, "service_tier")
 			var extra map[string]json.RawMessage
 			require.NoError(t, json.Unmarshal(parsed["extra_body"], &extra))
@@ -114,12 +114,12 @@ func TestServiceTierSanitizationPreservesUnrelatedData(t *testing.T) {
 		"service_tier":"priority"
 	}`)
 
-	_, _, sessionID, sanitized, err := extractMetadataFromBody(body, "application/json")
+	result, err := sanitizeAndExtractRequestBody(body, "application/json")
 	require.NoError(t, err)
-	assert.Equal(t, "session-1", sessionID)
+	assert.Equal(t, "session-1", result.SessionID)
 
 	var parsed map[string]json.RawMessage
-	require.NoError(t, json.Unmarshal(sanitized, &parsed))
+	require.NoError(t, json.Unmarshal(result.Body, &parsed))
 	assert.NotContains(t, parsed, "service_tier")
 	assert.Equal(t, "9223372036854775807", string(parsed["seed"]))
 	assert.JSONEq(t, `{"service_tier":"customer-tag"}`, string(parsed["metadata"]))
@@ -134,10 +134,10 @@ func TestServiceTierSanitizationPreservesUnrelatedData(t *testing.T) {
 
 func TestExtractMetadataFromBodyDoesNotRebuildUnchangedNonStreamingBody(t *testing.T) {
 	body := []byte("{ \"model\" : \"gpt-4\", \"messages\" : [], \"seed\" : 9223372036854775807 }")
-	_, stream, _, got, err := extractMetadataFromBody(body, "application/json")
+	result, err := sanitizeAndExtractRequestBody(body, "application/json")
 	require.NoError(t, err)
-	assert.False(t, stream)
-	assert.Equal(t, body, got)
+	assert.False(t, result.Streaming)
+	assert.Equal(t, body, result.Body)
 }
 
 func TestProxyRequestNeverForwardsClientControlledServiceTier(t *testing.T) {
