@@ -136,10 +136,10 @@ func TestChatStreamTracksEachChoiceIndependently(t *testing.T) {
 
 func TestChatStreamMatchesLiteLLMFraming(t *testing.T) {
 	source := strings.NewReader(
-		"data: {\"id\":\"\",\"created\":10,\"model\":\"public-model\",\"object\":\"chat.completion.chunk\",\"choices\":[]}\n\n" +
-			"data: {\"id\":\"air-id\",\"created\":0,\"model\":\"provider-model\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"}}]}\n\n" +
-			"data: {\"id\":\"air-id\",\"created\":0,\"model\":\"provider-model\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"}}]}\n\n" +
-			"data: {\"id\":\"air-id\",\"created\":0,\"model\":\"provider-model\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n" +
+		"data: {\"id\":\"\",\"created\":0,\"model\":\"provider-model\",\"object\":\"\",\"choices\":[],\"prompt_filter_results\":[{\"prompt_index\":0}]}\n\n" +
+			"data: {\"id\":\"air-id\",\"created\":10,\"model\":\"provider-model\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"},\"finish_reason\":null}],\"usage\":null}\n\n" +
+			"data: {\"id\":\"air-id\",\"created\":10,\"model\":\"provider-model\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"},\"finish_reason\":null}],\"usage\":null}\n\n" +
+			"data: {\"id\":\"air-id\",\"created\":10,\"model\":\"provider-model\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":null}\n\n" +
 			"data: {\"id\":\"air-id\",\"created\":0,\"model\":\"provider-model\",\"choices\":[{\"index\":0,\"delta\":{},\"content_filter_results\":{\"hate\":{\"filtered\":false}},\"content_filter_offsets\":{\"start_offset\":0}}]}\n\n" +
 			"data: {\"id\":\"air-id\",\"created\":0,\"model\":\"provider-model\",\"choices\":[],\"latency_checkpoint\":{\"engine_ttft_ms\":10},\"obfuscation\":\"\",\"service_tier\":\"default\",\"system_fingerprint\":\"fp-1\",\"usage\":{\"prompt_tokens\":13,\"completion_tokens\":3,\"total_tokens\":16}}\n\n" +
 			"data: [DONE]\n\n",
@@ -159,11 +159,13 @@ func TestChatStreamMatchesLiteLLMFraming(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(frames[0]), &prelude))
 	assert.Empty(t, prelude["choices"])
 	assert.Equal(t, "", prelude["id"])
+	assert.Equal(t, float64(10), prelude["created"])
 
 	var roleChunk map[string]any
 	require.NoError(t, json.Unmarshal([]byte(frames[1]), &roleChunk))
 	roleChoice := roleChunk["choices"].([]any)[0].(map[string]any)
 	assert.Equal(t, map[string]any{"content": "", "role": "assistant"}, roleChoice["delta"])
+	assert.Equal(t, "air-id", roleChunk["id"])
 
 	var contentChunk map[string]any
 	require.NoError(t, json.Unmarshal([]byte(frames[2]), &contentChunk))

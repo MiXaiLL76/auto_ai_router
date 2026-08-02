@@ -168,6 +168,16 @@ func (r *streamReader) normalizeTextChunk(body map[string]any) bool {
 }
 
 func (r *streamReader) normalizeChatChunk(body map[string]any) bool {
+	usage, hasUsage := body["usage"].(map[string]any)
+	hasUsage = hasUsage && usage != nil
+	if !hasUsage {
+		delete(body, "usage")
+	}
+	choices, _ := body["choices"].([]any)
+	if len(choices) == 0 && !hasUsage {
+		return false
+	}
+
 	body["object"] = "chat.completion.chunk"
 	if r.ctx.RequestedModel != "" {
 		body["model"] = r.ctx.RequestedModel
@@ -187,9 +197,10 @@ func (r *streamReader) normalizeChatChunk(body map[string]any) bool {
 	}
 	body["created"] = r.created
 
-	if _, ok := body["usage"].(map[string]any); ok {
+	if hasUsage {
 		if !r.ctx.IncludeUsage {
 			delete(body, "usage")
+			hasUsage = false
 		} else {
 			body["usage"] = liteLLMStreamUsage()
 			for _, field := range []string{"latency_checkpoint", "obfuscation", "service_tier", "system_fingerprint"} {
@@ -198,7 +209,6 @@ func (r *streamReader) normalizeChatChunk(body map[string]any) bool {
 		}
 	}
 
-	choices, _ := body["choices"].([]any)
 	for index, rawChoice := range choices {
 		choice, ok := rawChoice.(map[string]any)
 		if !ok {
@@ -251,7 +261,6 @@ func (r *streamReader) normalizeChatChunk(body map[string]any) bool {
 			}
 		}
 	}
-	_, hasUsage := body["usage"]
 	if hasUsage {
 		body["choices"] = r.usageChoices()
 	}

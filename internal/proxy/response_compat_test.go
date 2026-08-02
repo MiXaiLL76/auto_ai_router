@@ -170,11 +170,11 @@ func TestProxyRequestLiteLLMStreamingCompatibility(t *testing.T) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.WriteHeader(http.StatusOK)
 		frames := []string{
-			`data: {"id":"","created":10,"model":"public-model","object":"chat.completion.chunk","choices":[]}` + "\n\n",
-			`data: {"id":"provider-id","created":10,"model":"provider-model","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"","role":"assistant"}}]}` + "\n\n",
-			`data: {"id":"provider-id","created":10,"model":"provider-model","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"stream"}}]}` + "\n\n",
-			`data: {"id":"provider-id","created":10,"model":"provider-model","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"-ok"}}]}` + "\n\n",
-			`data: {"id":"provider-id","created":10,"model":"provider-model","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}` + "\n\n",
+			`data: {"id":"","created":0,"model":"provider-model","object":"","choices":[],"prompt_filter_results":[{"prompt_index":0}]}` + "\n\n",
+			`data: {"id":"provider-id","created":10,"model":"provider-model","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"","refusal":null,"role":"assistant"},"finish_reason":null,"logprobs":null}],"usage":null}` + "\n\n",
+			`data: {"id":"provider-id","created":10,"model":"provider-model","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"stream"},"finish_reason":null,"logprobs":null}],"usage":null}` + "\n\n",
+			`data: {"id":"provider-id","created":10,"model":"provider-model","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"-ok"},"finish_reason":null,"logprobs":null}],"usage":null}` + "\n\n",
+			`data: {"id":"provider-id","created":10,"model":"provider-model","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"stop","logprobs":null}],"usage":null}` + "\n\n",
 			`data: {"id":"","created":10,"model":"public-model","object":"chat.completion.chunk","choices":[{"index":0,"delta":{}}],"usage":{"completion_tokens":0,"prompt_tokens":0,"total_tokens":0,"completion_tokens_details":{"reasoning_tokens":0}}}` + "\n\n",
 			"data: [DONE]\n\n",
 		}
