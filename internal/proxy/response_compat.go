@@ -45,6 +45,25 @@ func clientRequestedStreamUsage(body []byte) bool {
 	return includeUsage
 }
 
+func applyLiteLLMRequestCompatibility(path string, body []byte) []byte {
+	if path != "/v1/embeddings" {
+		return body
+	}
+	var request map[string]any
+	if json.Unmarshal(body, &request) != nil {
+		return body
+	}
+	if _, exists := request["encoding_format"]; exists {
+		return body
+	}
+	request["encoding_format"] = "float"
+	compatible, err := json.Marshal(request)
+	if err != nil {
+		return body
+	}
+	return compatible
+}
+
 type responseCompatibilityWriter struct {
 	target         http.ResponseWriter
 	transformer    *compatlitellm.Transformer

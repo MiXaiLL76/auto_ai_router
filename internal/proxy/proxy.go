@@ -745,15 +745,23 @@ func (p *Proxy) forwardToProxy(
 }
 
 func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
+	p.WithResponseCompatibility(w, r, p.proxyRequest)
+}
+
+func (p *Proxy) WithResponseCompatibility(
+	w http.ResponseWriter,
+	r *http.Request,
+	next func(http.ResponseWriter, *http.Request),
+) {
 	if p.responseCompat == nil {
-		p.proxyRequest(w, r)
+		next(w, r)
 		return
 	}
 
 	r, _ = withResponseCompatRequest(r)
 	r.Header.Del("Accept-Encoding")
 	writer := newResponseCompatibilityWriter(w, p.responseCompat, r)
-	p.proxyRequest(writer, r)
+	next(writer, r)
 	if err := writer.Close(); err != nil {
 		p.logger.DebugContext(r.Context(), "Failed to write LiteLLM-compatible response", "error", err)
 	}

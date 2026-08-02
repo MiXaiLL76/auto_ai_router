@@ -31,10 +31,12 @@ func TestTransformChatCompletion(t *testing.T) {
 				"message": {
 					"role": null,
 					"content": null,
+					"refusal": null,
 					"tool_calls": [{"id":"call-1","type":"function","function":{"name":"f","arguments":"{}"}}],
 					"unused": null
 				},
 				"finish_reason": "stop",
+				"content_filter_results": {"hate":{"filtered":false,"severity":"safe"}},
 				"logprobs": null
 			}],
 			"usage": {"prompt_tokens": 2, "completion_tokens": null, "total_tokens": null}
@@ -59,16 +61,37 @@ func TestTransformChatCompletion(t *testing.T) {
 	assert.Equal(t, float64(0), choice["index"])
 	assert.Equal(t, "tool_calls", choice["finish_reason"])
 	assert.NotContains(t, choice, "logprobs")
+	assert.NotContains(t, choice, "content_filter_results")
+	choiceProviderFields := choice["provider_specific_fields"].(map[string]any)
+	assert.Contains(t, choiceProviderFields, "content_filter_results")
 
 	message := choice["message"].(map[string]any)
 	assert.Equal(t, "assistant", message["role"])
 	assert.Contains(t, message, "content")
 	assert.Nil(t, message["content"])
 	assert.NotContains(t, message, "unused")
+	assert.NotContains(t, message, "refusal")
+	messageProviderFields := message["provider_specific_fields"].(map[string]any)
+	assert.Contains(t, messageProviderFields, "refusal")
+	assert.Nil(t, messageProviderFields["refusal"])
 
 	usage := body["usage"].(map[string]any)
 	assert.Equal(t, float64(0), usage["completion_tokens"])
 	assert.Equal(t, float64(0), usage["total_tokens"])
+}
+
+func TestTransformModelsUsesLiteLLMModelOwner(t *testing.T) {
+	result := New().Transform(Context{Endpoint: "/v1/models"}, Response{
+		StatusCode: http.StatusOK,
+		Headers:    make(http.Header),
+		Body:       []byte(`{"object":"list","data":[{"id":"openai/gpt-4.1-mini","object":"model","owned_by":"system"}]}`),
+	})
+
+	require.Equal(t, http.StatusOK, result.StatusCode)
+	var body map[string]any
+	require.NoError(t, json.Unmarshal(result.Body, &body))
+	model := body["data"].([]any)[0].(map[string]any)
+	assert.Equal(t, "openai", model["owned_by"])
 }
 
 func TestTransformMissingChoices(t *testing.T) {

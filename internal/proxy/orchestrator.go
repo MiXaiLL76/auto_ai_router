@@ -568,6 +568,7 @@ func (p *Proxy) readRequestBodyAndSelectModel(
 			info.RequestedModel, _ = raw["model"].(string)
 		}
 		info.IncludeUsage = strings.Contains(r.URL.Path, "/responses") || clientRequestedStreamUsage(body)
+		body = applyLiteLLMRequestCompatibility(r.URL.Path, body)
 	}
 
 	modelID, streaming, sessionID, body := extractMetadataFromBody(body, r.Header.Get("Content-Type"))

@@ -53,6 +53,20 @@ func TestResponseCompatibilityWriterTransformsStream(t *testing.T) {
 	assert.Equal(t, 1, strings.Count(recorder.Body.String(), "data: [DONE]"))
 }
 
+func TestLiteLLMRequestCompatibilityAddsEmbeddingEncodingFormat(t *testing.T) {
+	body := applyLiteLLMRequestCompatibility(
+		"/v1/embeddings",
+		[]byte(`{"input":"AIR shadow fixture","model":"text-embedding-3-small"}`),
+	)
+
+	var request map[string]any
+	require.NoError(t, json.Unmarshal(body, &request))
+	assert.Equal(t, "float", request["encoding_format"])
+
+	explicit := []byte(`{"input":"fixture","model":"text-embedding-3-small","encoding_format":"base64"}`)
+	assert.Equal(t, explicit, applyLiteLLMRequestCompatibility("/v1/embeddings", explicit))
+}
+
 func TestResponseCompatibilityWriterDoesNotCompleteFailedStream(t *testing.T) {
 	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 	request, info := withResponseCompatRequest(request)

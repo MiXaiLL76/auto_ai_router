@@ -41,6 +41,8 @@ func (t *Transformer) Transform(ctx Context, response Response) Response {
 
 	var err error
 	switch ctx.Endpoint {
+	case "/v1/models":
+		normalizeModels(body)
 	case "/v1/chat/completions":
 		err = normalizeCompletion(ctx, body)
 	case "/v1/completions":
@@ -156,6 +158,8 @@ func normalizeCompletion(ctx Context, body map[string]any) error {
 		if _, ok := message["content"]; !ok {
 			message["content"] = nil
 		}
+		moveProviderSpecificField(message, "refusal")
+		moveProviderSpecificField(choice, "content_filter_results")
 		if reasoning, ok := message["reasoning"]; ok {
 			if _, exists := message["reasoning_content"]; !exists {
 				message["reasoning_content"] = reasoning
@@ -180,6 +184,29 @@ func normalizeCompletion(ctx Context, body map[string]any) error {
 		normalizeUsage(usage)
 	}
 	return nil
+}
+
+func normalizeModels(body map[string]any) {
+	models, _ := body["data"].([]any)
+	for _, rawModel := range models {
+		if model, ok := rawModel.(map[string]any); ok {
+			model["owned_by"] = "openai"
+		}
+	}
+}
+
+func moveProviderSpecificField(target map[string]any, field string) {
+	value, exists := target[field]
+	if !exists {
+		return
+	}
+	providerFields, _ := target["provider_specific_fields"].(map[string]any)
+	if providerFields == nil {
+		providerFields = make(map[string]any)
+		target["provider_specific_fields"] = providerFields
+	}
+	providerFields[field] = value
+	delete(target, field)
 }
 
 func overrideModel(requestedModel string, body map[string]any) {
@@ -221,7 +248,7 @@ func stripNulls(value any, preserveContent bool) any {
 	case map[string]any:
 		cleaned := make(map[string]any, len(typed))
 		for key, child := range typed {
-			keepNull := preserveContent && key == "content"
+			keepNull := (preserveContent && key == "content") || key == "refusal"
 			if child == nil && !keepNull {
 				continue
 			}
