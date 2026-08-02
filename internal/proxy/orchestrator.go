@@ -35,11 +35,14 @@ type orchestratedRequest struct {
 	streaming            bool
 	cred                 *config.CredentialConfig
 	isResponsesAPI       bool
+	isMessagesAPI        bool
 	convertedResp        bool
+	convertedMessages    bool
 	passthroughResponses bool // true for codex/OpenAI models: Responses API forwarded as-is (no conversion)
 	nativeResponses      bool // true when using Phase 4 ProviderResponses converter (Vertex/Anthropic)
 	responsesPrevHandled bool
 	responsesMetadata    *responses.ResponsesMetadata // non-nil for Responses API requests
+	messagesMetadata     anthropicconv.MessagesAdapterMetadata
 	stickyCacheEligible  bool
 }
 
@@ -50,8 +53,10 @@ type credentialPreparedRequest struct {
 	realModelID          string
 	path                 string
 	convertedResp        bool
+	convertedMessages    bool
 	passthroughResponses bool
 	nativeResponses      bool
+	messagesMetadata     anthropicconv.MessagesAdapterMetadata
 }
 
 // orchestrateRequest performs auth and credential selection for an incoming request.
@@ -91,6 +96,7 @@ func (p *Proxy) orchestrateRequest(
 
 	// Detect Responses API requests and select credential before conversion.
 	isResponsesAPI := responses.IsResponsesAPI(body) && strings.Contains(r.URL.Path, "/responses")
+	isMessagesAPI := r.URL.Path == "/v1/messages"
 
 	var responsesMetadata *responses.ResponsesMetadata
 	var prevEntry *responsestore.StoredEntry
@@ -122,6 +128,7 @@ func (p *Proxy) orchestrateRequest(
 
 	p.logger.DebugContext(r.Context(), "Responses API detection",
 		"is_responses_api", isResponsesAPI,
+		"is_messages_api", isMessagesAPI,
 		"provider", cred.Type,
 		"model", modelID,
 		"streaming", streaming,
@@ -174,6 +181,12 @@ func (p *Proxy) orchestrateRequest(
 		stickyCacheEligible,
 	)
 	if prepErr != nil {
+		apiName := "request"
+		if isResponsesAPI {
+			apiName = "Responses API request"
+		} else if isMessagesAPI {
+			apiName = "Messages API request"
+		}
 		p.logger.ErrorContext(r.Context(), "Failed to prepare request for credential",
 			"error_code", http.StatusBadRequest,
 			"credential", cred.Name, "provider", string(cred.Type),
@@ -181,8 +194,8 @@ func (p *Proxy) orchestrateRequest(
 			"request_id", logCtx.RequestID)
 		logCtx.Status = "failure"
 		logCtx.HTTPStatus = http.StatusBadRequest
-		logCtx.ErrorMsg = "Failed to convert Responses API request: " + prepErr.Error()
-		WriteErrorBadRequest(w, "Failed to convert Responses API request")
+		logCtx.ErrorMsg = "Failed to convert " + apiName + ": " + prepErr.Error()
+		WriteErrorBadRequest(w, "Failed to convert "+apiName)
 		return nil, false
 	}
 	body = credentialReq.body
@@ -207,11 +220,14 @@ func (p *Proxy) orchestrateRequest(
 		streaming:            streaming,
 		cred:                 cred,
 		isResponsesAPI:       isResponsesAPI,
+		isMessagesAPI:        isMessagesAPI,
 		convertedResp:        credentialReq.convertedResp,
+		convertedMessages:    credentialReq.convertedMessages,
 		passthroughResponses: credentialReq.passthroughResponses,
 		nativeResponses:      credentialReq.nativeResponses,
 		responsesPrevHandled: prevEntryHandled,
 		responsesMetadata:    responsesMetadata,
+		messagesMetadata:     credentialReq.messagesMetadata,
 		stickyCacheEligible:  stickyCacheEligible,
 	}, true
 }
@@ -257,6 +273,23 @@ func (p *Proxy) prepareRequestForCredential(
 		proxyPath:   basePath,
 		realModelID: realModelID,
 		path:        basePath,
+	}
+	if basePath == "/v1/messages" {
+		if cred.IsProxyLike() {
+			// Proxy-like credentials (AIR-to-AIR chaining) forward the original
+			// Anthropic-shaped request/path as-is; the downstream peer does its
+			// own routing and conversion, same as the Responses API passthrough.
+			return req, nil
+		}
+		chatBody, metadata, err := anthropicconv.MessagesToChat(body)
+		if err != nil {
+			return req, err
+		}
+		req.body = openai.ReplaceBodyParam(realModelID, chatBody)
+		req.path = "/v1/chat/completions"
+		req.convertedMessages = true
+		req.messagesMetadata = metadata
+		return req, nil
 	}
 	if !isResponsesAPI {
 		req.body = openai.ReplaceBodyParam(realModelID, body)
@@ -403,6 +436,19 @@ func (p *Proxy) AuthenticateClientRequestScoped(w http.ResponseWriter, r *http.R
 	return logCtx.TokenInfo, logCtx.Scope, true
 }
 
+func (p *Proxy) IsModelAllowedForToken(tokenInfo *models.TokenInfo, model string) bool {
+	if tokenInfo == nil || !p.strictAllTeamModelsACL {
+		return true
+	}
+	var matcher models.ModelScopeMatcher
+	if p.modelManager != nil {
+		matcher = p.modelManager.IsModelIDAllowedByScope
+	}
+	return tokenInfo.IsModelAllowedByPolicy(model, matcher, models.ModelAccessPolicy{
+		StrictAllTeamModelsACL: true,
+	})
+}
+
 func (p *Proxy) authenticateRequest(
 	w http.ResponseWriter,
 	r *http.Request,
@@ -543,14 +589,7 @@ func (p *Proxy) readRequestBodyAndSelectModel(
 	// LiteLLM -> AIR hop authenticated with AIR's master key, but ordinary keys
 	// cannot discover or invoke them even when their DB model ACL is empty.
 	trustedInternalModelID := p.isMasterKey(logCtx.Token)
-	// Token model scopes contain client-visible model IDs. Enforce the scope
-	// before route-surface lookup or alias rewrites. LiteLLM reports a restricted
-	// key's unknown/disallowed model as an authorization failure; unrestricted
-	// keys continue to the product-surface check and receive a not-found error.
-	modelAllowed := logCtx.TokenInfo == nil || logCtx.TokenInfo.IsModelAllowed(modelID)
-	if logCtx.TokenInfo != nil && p.modelManager != nil {
-		modelAllowed = logCtx.TokenInfo.IsModelAllowedBy(modelID, p.modelManager.IsModelIDAllowedByScope)
-	}
+	modelAllowed := p.IsModelAllowedForToken(logCtx.TokenInfo, modelID)
 	if !modelAllowed {
 		p.logger.WarnContext(r.Context(), "Model is not allowed for token",
 			"error_code", http.StatusForbidden,

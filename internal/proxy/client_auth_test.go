@@ -360,6 +360,7 @@ func TestExplicitClientModelSurfacePreservesRestrictedACLPrecedenceForUnknownMod
 		},
 	}}
 	prx := newClientAuthTestProxy(t, db, provider.URL, config.ProviderTypeOpenAI, "provider-key")
+	prx.strictAllTeamModelsACL = true
 	prx.modelManager.SetClientModelIDs([]string{"public/chat", "public/embed"})
 
 	request := func(key string) *httptest.ResponseRecorder {
@@ -565,6 +566,7 @@ func TestInferenceModelACLIntersectsParentScopesBeforeAliasResolution(t *testing
 		},
 	}}
 	prx := newClientAuthTestProxy(t, db, upstream.URL, config.ProviderTypeOpenAI, "provider-key")
+	prx.strictAllTeamModelsACL = true
 
 	allowed := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(
 		`{"model":"public/chat","messages":[{"role":"user","content":"hello"}]}`,
@@ -619,7 +621,83 @@ func TestInferenceModelACLIntersectsParentScopesBeforeAliasResolution(t *testing
 	assert.Equal(t, 1, upstreamCalls, "a disallowed model must be rejected before provider dispatch")
 }
 
-func TestInferenceRejectsBlockedParentsAndNoDefaultPersonalUserBeforeProvider(t *testing.T) {
+func TestInferenceModelACLPolicy(t *testing.T) {
+	upstream := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl-auth","object":"chat.completion","created":1,"model":"backend-chat","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+	}))
+	defer upstream.Close()
+
+	for _, tokenCase := range []struct {
+		name string
+		info *dbmodels.TokenInfo
+	}{
+		{
+			name: "all-team-models without team",
+			info: &dbmodels.TokenInfo{Models: []string{dbmodels.AllTeamModels}},
+		},
+		{
+			name: "explicit key model mismatch",
+			info: &dbmodels.TokenInfo{Models: []string{"other-model"}},
+		},
+		{
+			name: "dangling team",
+			info: &dbmodels.TokenInfo{
+				Models:       []string{"backend-chat"},
+				TeamID:       "deleted-team",
+				TeamDangling: true,
+			},
+		},
+		{
+			name: "team model mismatch",
+			info: &dbmodels.TokenInfo{
+				Models:     []string{"backend-chat"},
+				TeamID:     "team",
+				TeamModels: []string{"other-model"},
+			},
+		},
+		{
+			name: "personal user no-default-models",
+			info: &dbmodels.TokenInfo{
+				Models:     []string{"backend-chat"},
+				UserID:     "user",
+				UserModels: []string{dbmodels.NoDefaultModels},
+			},
+		},
+	} {
+		t.Run(tokenCase.name, func(t *testing.T) {
+			for _, policy := range []struct {
+				name       string
+				strict     bool
+				wantStatus int
+			}{
+				{name: "compatibility", wantStatus: http.StatusOK},
+				{name: "strict", strict: true, wantStatus: http.StatusForbidden},
+			} {
+				t.Run(policy.name, func(t *testing.T) {
+					tokenCase.info.Token = "gateway-hash"
+					db := &clientAuthTestDB{tokens: map[string]*dbmodels.TokenInfo{
+						"gateway-key": tokenCase.info,
+					}}
+					prx := newClientAuthTestProxy(t, db, upstream.URL, config.ProviderTypeOpenAI, "provider-key")
+					prx.strictAllTeamModelsACL = policy.strict
+					req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(
+						`{"model":"backend-chat","messages":[{"role":"user","content":"hello"}]}`,
+					))
+					req.Header.Set("Authorization", "Bearer gateway-key")
+					req.Header.Set("Content-Type", "application/json")
+					writer := httptest.NewRecorder()
+
+					prx.ProxyRequest(writer, req)
+
+					assert.Equal(t, policy.wantStatus, writer.Code)
+				})
+			}
+		})
+	}
+}
+
+func TestInferenceRejectsBlockedParentBeforeProvider(t *testing.T) {
 	var upstreamCalls int
 	upstream := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		upstreamCalls++
@@ -637,29 +715,19 @@ func TestInferenceRejectsBlockedParentsAndNoDefaultPersonalUserBeforeProvider(t 
 			TeamModels:  []string{"public/chat"},
 			TeamBlocked: &blocked,
 		},
-		"no-default-user": {
-			Token:      "no-default-user-hash",
-			Models:     []string{"public/chat"},
-			UserID:     "personal-user",
-			UserModels: []string{dbmodels.NoDefaultModels, "public/chat"},
-		},
 	}}
 	prx := newClientAuthTestProxy(t, db, upstream.URL, config.ProviderTypeOpenAI, "provider-key")
 
-	for _, key := range []string{"blocked-team", "no-default-user"} {
-		t.Run(key, func(t *testing.T) {
-			req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(
-				`{"model":"public/chat","messages":[{"role":"user","content":"hello"}]}`,
-			))
-			req.Header.Set("Authorization", "Bearer "+key)
-			req.Header.Set("Content-Type", "application/json")
-			writer := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(
+		`{"model":"public/chat","messages":[{"role":"user","content":"hello"}]}`,
+	))
+	req.Header.Set("Authorization", "Bearer blocked-team")
+	req.Header.Set("Content-Type", "application/json")
+	writer := httptest.NewRecorder()
 
-			prx.ProxyRequest(writer, req)
+	prx.ProxyRequest(writer, req)
 
-			assertAuthErrorShape(t, writer, http.StatusForbidden)
-		})
-	}
+	assertAuthErrorShape(t, writer, http.StatusForbidden)
 	assert.Equal(t, 0, upstreamCalls)
 }
 
@@ -685,6 +753,7 @@ func TestInferenceModelACLWildcardTreatsOnlyStarAsSyntax(t *testing.T) {
 		},
 	}}
 	prx := newClientAuthTestProxy(t, db, upstream.URL, config.ProviderTypeOpenAI, "provider-key")
+	prx.strictAllTeamModelsACL = true
 
 	request := func(key string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(
@@ -704,6 +773,7 @@ func TestInferenceModelACLWildcardTreatsOnlyStarAsSyntax(t *testing.T) {
 
 func TestInferenceModelACLRejectsBeforeRoutingAcrossPublicEndpoints(t *testing.T) {
 	prx := newClientAuthTestProxy(t, nil, "http://example.invalid", config.ProviderTypeOpenAI, "provider-key")
+	prx.strictAllTeamModelsACL = true
 	type requestFixture struct {
 		path        string
 		contentType string

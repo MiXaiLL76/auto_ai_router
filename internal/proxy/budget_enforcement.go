@@ -126,22 +126,32 @@ func (p *Proxy) estimateCompletionTokens(body []byte) int {
 	return fallback
 }
 
-func (p *Proxy) estimateRequestCost(modelID, realModelID string, body []byte) (float64, bool) {
+func (p *Proxy) estimateRequestCost(logCtx *RequestLogContext, publicModelID, modelID, realModelID string, body []byte) (float64, bool) {
 	if p.priceRegistry == nil {
 		return 0, false
 	}
-	price := p.priceRegistry.GetPrice(realModelID)
-	if price == nil && realModelID != modelID {
-		price = p.priceRegistry.GetPrice(modelID)
-	}
-	if price == nil {
+	// Mirror final billing: reserve against the client-facing model price first,
+	// then fall back to the provider-facing real model if the alias is unpriced.
+	// Cached via logCtx so logSpendToLiteLLMDB reuses this exact resolution.
+	_, modelPrice := p.resolveBillingPrice(logCtx, publicModelID, modelID, realModelID)
+	if modelPrice == nil {
 		return 0, false
 	}
+	// PromptTokens is skipped (not the whole estimate) when tiktoken_enabled
+	// is off — this only undercounts the prompt-token portion of the budget
+	// reservation, which is the documented trade-off of disabling local
+	// tokenization; it must not also disable reservation entirely (costKnown
+	// stays true — see estimateCompletionTokens below, which never touches
+	// the tokenizer and so needs no such gate).
+	var promptTokens int
+	if p.tiktokenEnabled {
+		promptTokens = estimatePromptTokensForModel(body, realModelID)
+	}
 	usage := &converter.TokenUsage{
-		PromptTokens:     estimatePromptTokensForModel(body, realModelID),
+		PromptTokens:     promptTokens,
 		CompletionTokens: p.estimateCompletionTokens(body),
 	}
-	return price.CalculateCost(usage), true
+	return modelPrice.CalculateCost(usage), true
 }
 
 func (p *Proxy) enforceBudgetAndRateLimits(
@@ -162,7 +172,7 @@ func (p *Proxy) enforceBudgetAndRateLimits(
 	}
 
 	levels := budgetLevels(logCtx.TokenInfo)
-	estimatedCost, costKnown := p.estimateRequestCost(modelID, realModelID, body)
+	estimatedCost, costKnown := p.estimateRequestCost(logCtx, logCtx.PublicModelID, modelID, realModelID, body)
 	if budgetEnabled && !costKnown {
 		p.logger.DebugContext(r.Context(), "Budget reservation skipped: model price unavailable", "model", modelID)
 	}

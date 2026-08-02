@@ -46,6 +46,24 @@ response = client.chat.completions.create(
 print(response.choices[0].message.content)
 ```
 
+## Anthropic Messages API
+
+`POST /v1/messages` accepts Anthropic Messages requests and adapts them to the router's Chat Completions pipeline. Authentication, model routing, balancing, fallbacks, and usage accounting are the same as for `/v1/chat/completions`.
+
+```bash
+curl -X POST http://localhost:8080/v1/messages \
+  -H "x-api-key: sk-your-master-key-here" \
+  -H "anthropic-version: 2023-06-01" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "claude-sonnet-4-20250514",
+    "max_tokens": 1024,
+    "messages": [{"role": "user", "content": "Hello!"}]
+  }'
+```
+
+Set `"stream": true` to receive Anthropic-compatible `message_start`, content block, `message_delta`, and `message_stop` SSE events. Both `x-api-key` and `Authorization: Bearer ...` authentication are supported.
+
 ## Responses API
 
 The router supports the [OpenAI Responses API](../advanced/responses.md) with native provider integration for Anthropic, Comet API, Vertex AI, and AWS Bedrock.

@@ -240,22 +240,15 @@ func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
 	logCtx.applyWebSearchUsageDefaults(status)
 	logCtx.TokenUsage.Normalize()
 
-	// Calculate cost based on model pricing and token usage.
-	// Try real model name first (from models[].model), then alias name.
+	// Calculate cost based on the client-facing billing model first. If a
+	// provider-facing real model is the only priced entry, fall back to it.
 	var cost float64
 	var tokenCosts *converter.TokenCosts
 	logSpendCtx := logCtx.Context()
 	if p.priceRegistry == nil {
 		p.logger.WarnContext(logSpendCtx, "Price registry not available, using 0 cost for spend log")
 	} else {
-		priceModelID := logCtx.ModelID
-		if logCtx.RealModelID != "" && logCtx.RealModelID != logCtx.ModelID {
-			priceModelID = logCtx.RealModelID
-		}
-		modelPrice := p.priceRegistry.GetPrice(priceModelID)
-		if modelPrice == nil && priceModelID != logCtx.ModelID {
-			modelPrice = p.priceRegistry.GetPrice(logCtx.ModelID)
-		}
+		priceModelID, modelPrice := p.resolveBillingPrice(logCtx, logCtx.PublicModelID, logCtx.ModelID, logCtx.RealModelID)
 		if modelPrice == nil {
 			p.logger.WarnContext(logSpendCtx, "Model price not found in registry, using 0 cost",
 				"model_name", priceModelID)
@@ -281,10 +274,9 @@ func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
 		customLLMProvider = string(config.ProviderTypeOpenAI)
 	}
 
-	// teamID deliberately stays empty when the key has no team: LiteLLM writes
-	// team_id="" in that case, and inventing one (e.g. the credential name)
-	// would create daily/team rows that never merge with the primary accounting
-	// and UPDATEs against non-existent LiteLLM_TeamTable rows.
+	if teamID == "" {
+		teamID = credName
+	}
 
 	endTime := utils.NowUTC()
 

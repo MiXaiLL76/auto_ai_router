@@ -255,3 +255,60 @@ func TestInjectStreamOptions_InvalidJSON(t *testing.T) {
 		t.Fatalf("expected invalid json to be returned as-is")
 	}
 }
+
+// TestExtractTokenUsageFromPayloads_BatchedSSEMergesUsage reproduces a
+// real-world batching case: upstream flushes a web-search-only annotation
+// frame and the final usage frame close enough together that a single
+// downstream Read (and therefore a single splitSSEPayloads call) returns
+// both SSE frames as one payload batch. extractTokenUsageFromPayloads must
+// merge usage across every payload in the batch — returning on the first
+// non-nil hit would report only WebSearchRequests and silently drop the
+// real prompt/completion tokens carried by the later frame.
+func TestExtractTokenUsageFromPayloads_BatchedSSEMergesUsage(t *testing.T) {
+	chunk := []byte("data: {\"usage\":{\"web_search_requests\":1}}\n\n" +
+		"data: {\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5}}\n\n")
+
+	payloads := splitSSEPayloads(chunk, nil)
+	if len(payloads) != 2 {
+		t.Fatalf("expected 2 SSE payloads in the batch, got %d", len(payloads))
+	}
+
+	usage := extractTokenUsageFromPayloads(payloads, converter.TokenUsageExtractionOptions{})
+	if usage == nil {
+		t.Fatal("expected non-nil merged usage")
+	}
+	if usage.PromptTokens != 10 || usage.CompletionTokens != 5 {
+		t.Fatalf("expected PromptTokens=10 CompletionTokens=5, got PromptTokens=%d CompletionTokens=%d",
+			usage.PromptTokens, usage.CompletionTokens)
+	}
+	if usage.WebSearchRequests != 1 {
+		t.Fatalf("expected WebSearchRequests=1 preserved from the earlier frame, got %d", usage.WebSearchRequests)
+	}
+}
+
+// TestExtractTokenUsageFromPayloads_SingleFrameStillWorks is a sanity check
+// that the merge loop doesn't change single-payload behavior.
+func TestExtractTokenUsageFromPayloads_SingleFrameStillWorks(t *testing.T) {
+	payloads := [][]byte{[]byte(`{"usage":{"prompt_tokens":3,"completion_tokens":7}}`)}
+
+	usage := extractTokenUsageFromPayloads(payloads, converter.TokenUsageExtractionOptions{})
+	if usage == nil {
+		t.Fatal("expected non-nil usage")
+	}
+	if usage.PromptTokens != 3 || usage.CompletionTokens != 7 {
+		t.Fatalf("expected PromptTokens=3 CompletionTokens=7, got PromptTokens=%d CompletionTokens=%d",
+			usage.PromptTokens, usage.CompletionTokens)
+	}
+}
+
+// TestExtractTokenUsageFromPayloads_NoUsageReturnsNil ensures the loop still
+// returns nil (not an empty non-nil TokenUsage) when nothing in the batch
+// carries usage.
+func TestExtractTokenUsageFromPayloads_NoUsageReturnsNil(t *testing.T) {
+	payloads := [][]byte{[]byte(`{"choices":[{"delta":{"content":"hi"}}]}`)}
+
+	usage := extractTokenUsageFromPayloads(payloads, converter.TokenUsageExtractionOptions{})
+	if usage != nil {
+		t.Fatalf("expected nil usage, got %+v", usage)
+	}
+}

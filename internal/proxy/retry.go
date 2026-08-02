@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
-	"github.com/mixaill76/auto_ai_router/internal/converter"
 	"github.com/mixaill76/auto_ai_router/internal/scope"
 )
 
@@ -266,6 +265,12 @@ func (p *Proxy) writeFallbackResponse(
 		}
 	}
 
+	// Client-facing outcome decided — this is the response actually written to
+	// the client below, whether the fallback chain succeeded or exhausted all
+	// attempts. Recorded exactly once here (not per fallback attempt) with
+	// genuine end-to-end duration since the original client request arrived.
+	p.metrics.RecordRequest(fallbackCred.Name, r.URL.Path, modelID, proxyResp.StatusCode, time.Since(start))
+
 	if proxyResp.StatusCode >= 400 {
 		// Final error returned to the client after the fallback chain —
 		// single unified ERROR record (response_body is nil for streaming).
@@ -280,11 +285,12 @@ func (p *Proxy) writeFallbackResponse(
 			"request_id", requestID)
 	}
 
+	// Computed once: both branches below need the same audio-usage-contract
+	// derived from the fallback upstream's response, regardless of streaming.
+	usageOptions := tokenUsageExtractionOptionsForResponse(fallbackCred, proxyResp.Headers)
+
 	if proxyResp.IsStreaming {
-		if logCtx != nil && logCtx.IsProxyRequest && logCtx.ActualCredentialName != "" {
-			w.Header().Set("X-Credential-Name", logCtx.ActualCredentialName)
-		}
-		usageOptions := tokenUsageExtractionOptionsForResponse(fallbackCred, proxyResp.Headers)
+		p.setCredentialResponseHeader(w, logCtx, "")
 		streamUsage, err := p.writeProxyStreamingResponseWithTokens(
 			w, proxyResp, r, fallbackCred, modelID, modelID, logCtx, usageOptions,
 		)
@@ -300,9 +306,10 @@ func (p *Proxy) writeFallbackResponse(
 			// corrupt the response).
 			// Still propagate partial token usage so the defer-logged spend entry isn't empty.
 			if streamUsage != nil && logCtx != nil {
-				if streamUsage.PromptTokens == 0 && logCtx.PromptTokensEstimate > 0 &&
-					logCtx.UsageSource != "provider" {
-					streamUsage.PromptTokens = logCtx.PromptTokensEstimate
+				if streamUsage.PromptTokens == 0 && logCtx.UsageSource != "provider" {
+					if estimate := logCtx.promptTokensEstimate(); estimate > 0 {
+						streamUsage.PromptTokens = estimate
+					}
 				}
 				logCtx.TokenUsage = streamUsage
 			}
@@ -320,9 +327,10 @@ func (p *Proxy) writeFallbackResponse(
 		}
 		if streamUsage != nil && logCtx != nil {
 			// Backfill PromptTokens from estimate when provider didn't include it.
-			if streamUsage.PromptTokens == 0 && logCtx.PromptTokensEstimate > 0 &&
-				logCtx.UsageSource != "provider" {
-				streamUsage.PromptTokens = logCtx.PromptTokensEstimate
+			if streamUsage.PromptTokens == 0 && logCtx.UsageSource != "provider" {
+				if estimate := logCtx.promptTokensEstimate(); estimate > 0 {
+					streamUsage.PromptTokens = estimate
+				}
 			}
 			logCtx.TokenUsage = streamUsage
 			if proxyResp.StatusCode < 400 {
@@ -345,16 +353,17 @@ func (p *Proxy) writeFallbackResponse(
 			}
 		}
 	} else {
-		if logCtx != nil && logCtx.IsProxyRequest && logCtx.ActualCredentialName != "" {
-			w.Header().Set("X-Credential-Name", logCtx.ActualCredentialName)
-		}
+		p.setCredentialResponseHeader(w, logCtx, "")
+		// Single shared decode for both token-accounting consumers (plan item
+		// G) instead of two independent full-body Unmarshals of the same
+		// bytes: the rate-limiter's total-tokens count and the spend-logging
+		// TokenUsage are genuinely different numbers computed off the same
+		// decode, not derived from each other — see
+		// converter.ExtractTotalTokensAndUsageWithOptions's doc comment.
+		tokens, usage := extractOpenAITokensAndUsage(proxyResp.Body, usageOptions)
 		if logCtx != nil {
-			logCtx.TokenUsage = converter.ExtractTokenUsageWithOptions(
-				proxyResp.Body,
-				tokenUsageExtractionOptionsForResponse(fallbackCred, proxyResp.Headers),
-			)
+			logCtx.TokenUsage = usage
 		}
-		tokens := extractTokensFromResponse(string(proxyResp.Body), config.ProviderTypeOpenAI)
 		if tokens > 0 {
 			p.rateLimiter.ConsumeTokens(fallbackCred.Name, tokens)
 			if modelID != "" {
@@ -389,7 +398,7 @@ func (p *Proxy) writeFallbackResponse(
 		}
 	}
 	if !proxyResp.IsStreaming {
-		p.writeProxyResponse(w, proxyResp, r, fallbackCred, modelID, logCtx)
+		p.writeProxyResponse(w, proxyResp, r, fallbackCred, modelID, logCtx, usageOptions)
 	}
 	if logCtx != nil && logCtx.Status == "success" {
 		logCtx.RequestCompleted = true

@@ -22,6 +22,8 @@ server:
   master_key: "sk-your-master-key-here"
   default_models_rpm: -1
   model_prices_link: ""
+  response_headers:
+    mode: passthrough
 
 fail2ban:
   max_attempts: 3
@@ -97,23 +99,31 @@ litellm_db:
 
 ## Server Parameters
 
-| Parameter                  | Type     | Default | Description                                                  |
-| -------------------------- | -------- | ------- | ------------------------------------------------------------ |
-| `port`                     | int      | 8080    | Listen port                                                  |
-| `max_body_size_mb`         | int      | 100     | Maximum request body size (MB)                               |
-| `response_body_multiplier` | int      | 10      | Response body limit = max_body_size_mb * this value          |
-| `response_compatibility`   | string   | native  | Response contract: `native` or LiteLLM-compatible `litellm`  |
-| `request_timeout`          | duration | 60s     | Request timeout                                              |
-| `write_timeout`            | duration | 60s     | HTTP server write timeout                                    |
-| `idle_timeout`             | duration | 2m      | HTTP server idle timeout (default: 2 * write_timeout)        |
-| `idle_conn_timeout`        | duration | 120s    | Idle connection timeout for keep-alive connections           |
-| `max_idle_conns`           | int      | 200     | Maximum idle connections                                     |
-| `max_idle_conns_per_host`  | int      | 20      | Maximum idle connections per host                            |
-| `logging_level`            | string   | info    | Logging level: `info`, `debug`, `error`                      |
-| `master_key`               | string   | —       | **Required.** Master key for client authentication           |
-| `default_models_rpm`       | int      | -1      | Default RPM limit for models (-1 = unlimited)                |
-| `model_prices_link`        | string   | —       | URL or file path to model prices JSON                        |
-| `proxy_health_timeout`     | duration | 15s     | Timeout for fetching `/health` from remote proxy credentials |
+| Parameter                  | Type     | Default     | Description                                                                        |
+| -------------------------- | -------- | ----------- | ---------------------------------------------------------------------------------- |
+| `port`                     | int      | 8080        | Listen port                                                                        |
+| `max_body_size_mb`         | int      | 100         | Maximum request body size (MB)                                                     |
+| `response_body_multiplier` | int      | 10          | Response body limit = max_body_size_mb * this value                                |
+| `response_compatibility`   | string   | native      | Response contract: `native` or LiteLLM-compatible `litellm`                        |
+| `request_timeout`          | duration | 60s         | Request timeout                                                                    |
+| `write_timeout`            | duration | 60s         | HTTP server write timeout                                                          |
+| `idle_timeout`             | duration | 2m          | HTTP server idle timeout (default: 2 * write_timeout)                              |
+| `idle_conn_timeout`        | duration | 120s        | Idle connection timeout for keep-alive connections                                 |
+| `max_idle_conns`           | int      | 200         | Maximum idle connections                                                           |
+| `max_idle_conns_per_host`  | int      | 20          | Maximum idle connections per host                                                  |
+| `logging_level`            | string   | info        | Logging level: `info`, `debug`, `error`                                            |
+| `master_key`               | string   | —           | **Required.** Master key for client authentication                                 |
+| `default_models_rpm`       | int      | -1          | Default RPM limit for models (-1 = unlimited)                                      |
+| `model_prices_link`        | string   | —           | URL or file path to model prices JSON                                              |
+| `proxy_health_timeout`     | duration | 15s         | Timeout for fetching `/health` from remote proxy credentials                       |
+| `response_headers.mode`    | string   | passthrough | Response header policy. Supported values are `passthrough` and `allowlist`         |
+| `tiktoken_enabled`         | bool     | true        | Local tiktoken-based fallback token estimation for streaming responses (see below) |
+
+The `allowlist` mode forwards `Content-Type`, `Cache-Control`, `Retry-After`, `Content-Disposition`, `Content-Range`, `Last-Modified`, and `Location`. Transport headers are generated by the router. Other upstream response headers are removed.
+
+`tiktoken_enabled` controls the local prompt/completion token estimator used as a fallback for streaming responses when a provider doesn't report usage (e.g. the stream is cut before the final usage chunk, or the provider omits token counts entirely), and for budget-reservation cost estimates ahead of the request. Two different costs apply while it's on: the **prompt-token estimate and the final completion-token BPE count are lazy** — computed only if a stream actually finishes without provider-reported usage — so they're free for providers that do report usage. However, **per-chunk delta-text accumulation runs on every streaming chunk of every stream** while this flag is on, regardless of whether the provider ultimately reports usage, since the accumulator has to keep pace with the stream in case it's needed at the end.
+
+Set to `false` to skip local estimation entirely if all your configured providers always report usage and you'd rather not carry any tiktoken-related per-chunk cost. This has three effects, not just spend logging: spend logs show `0` prompt/completion tokens (instead of an estimate) for streaming requests where a provider omits usage; the streaming-fallback total that feeds `rateLimiter.ConsumeTokens`/`ConsumeModelTokens` is zeroed the same way; and budget-reservation cost estimates (`server.litellm_db.enforce_budget_reservation`) undercount, reflecting only the completion-token portion — reservation itself still runs, it just can't account for prompt-token cost without local tokenization.
 
 ## Fail2Ban Parameters
 

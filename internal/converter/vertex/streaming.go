@@ -2,11 +2,20 @@ package vertex
 
 import (
 	"bufio"
-	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"strings"
+
+	// goccy/go-json instead of encoding/json: every json.* call in this file is
+	// on the per-SSE-chunk hot path (VertexStreamingChunk unmarshal, outgoing
+	// OpenAIStreamingChunk marshal, function-call-args marshal). Benchmarked
+	// ~3.5x faster decoding VertexStreamingChunk (which wraps genai.Candidate
+	// et al.) than encoding/json; a round-trip test
+	// (TestVertexStreamingChunkUnmarshal_GoccyMatchesStdlib) confirms identical
+	// decode results, including genai's []byte/base64 fields like
+	// ThoughtSignature.
+	json "github.com/goccy/go-json"
 
 	converterutil "github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
 	"github.com/mixaill76/auto_ai_router/internal/converter/openai"

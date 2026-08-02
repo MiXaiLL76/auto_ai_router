@@ -64,6 +64,7 @@ monitoring:
 	assert.Equal(t, "sk-test-master-key", cfg.Server.MasterKey)
 	assert.Equal(t, 50, cfg.Server.DefaultModelsRPM)
 	assert.Equal(t, "native", cfg.Server.ResponseCompatibility)
+	assert.Equal(t, ResponseHeaderModePassthrough, cfg.Server.ResponseHeaders.Mode)
 
 	// Validate fail2ban config
 	assert.Equal(t, 3, cfg.Fail2Ban.MaxAttempts)
@@ -79,6 +80,103 @@ monitoring:
 	// Validate monitoring
 	assert.True(t, cfg.Monitoring.PrometheusEnabled)
 	assert.Equal(t, "/health", cfg.Monitoring.HealthCheckPath)
+}
+
+func TestLoad_ResponseHeadersAllowlist(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	configContent := `
+server:
+  master_key: sk-test
+  response_headers:
+    mode: allowlist
+credentials:
+  - name: provider
+    type: openai
+    api_key: sk-provider
+    base_url: https://api.openai.com
+    rpm: 10
+`
+	require.NoError(t, os.WriteFile(configPath, []byte(configContent), 0600))
+
+	cfg, err := Load(configPath)
+
+	require.NoError(t, err)
+	assert.Equal(t, ResponseHeaderModeAllowlist, cfg.Server.ResponseHeaders.Mode)
+}
+
+func TestLoad_ResponseHeadersModeFromEnvironment(t *testing.T) {
+	t.Setenv("TEST_RESPONSE_HEADER_MODE", "ALLOWLIST")
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	configContent := `
+server:
+  master_key: sk-test
+  response_headers:
+    mode: os.environ/TEST_RESPONSE_HEADER_MODE
+credentials:
+  - name: provider
+    type: openai
+    api_key: sk-provider
+    base_url: https://api.openai.com
+    rpm: 10
+`
+	require.NoError(t, os.WriteFile(configPath, []byte(configContent), 0600))
+
+	cfg, err := Load(configPath)
+
+	require.NoError(t, err)
+	assert.Equal(t, ResponseHeaderModeAllowlist, cfg.Server.ResponseHeaders.Mode)
+}
+
+func TestLoad_ResponseHeadersModeFromUnsetEnvironment(t *testing.T) {
+	const envName = "UNSET_RESPONSE_HEADER_MODE"
+	previous, existed := os.LookupEnv(envName)
+	require.NoError(t, os.Unsetenv(envName))
+	t.Cleanup(func() {
+		if existed {
+			_ = os.Setenv(envName, previous)
+		}
+	})
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	configContent := `
+server:
+  master_key: sk-test
+  response_headers:
+    mode: os.environ/UNSET_RESPONSE_HEADER_MODE
+credentials:
+  - name: provider
+    type: openai
+    api_key: sk-provider
+    base_url: https://api.openai.com
+    rpm: 10
+`
+	require.NoError(t, os.WriteFile(configPath, []byte(configContent), 0600))
+
+	_, err := Load(configPath)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "UNSET_RESPONSE_HEADER_MODE")
+}
+
+func TestLoad_InvalidResponseHeadersMode(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	configContent := `
+server:
+  master_key: sk-test
+  response_headers:
+    mode: denylist
+credentials:
+  - name: provider
+    type: openai
+    api_key: sk-provider
+    base_url: https://api.openai.com
+    rpm: 10
+`
+	require.NoError(t, os.WriteFile(configPath, []byte(configContent), 0600))
+
+	_, err := Load(configPath)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "response_headers.mode")
 }
 
 func TestCredentialConfig_UnmarshalScopes(t *testing.T) {
@@ -1331,6 +1429,85 @@ monitoring:
 	require.NoError(t, err)
 	assert.False(t, cfg.Server.SessionStickyEnabled)
 	assert.Equal(t, 15, cfg.Server.SessionStickyTTL)
+}
+
+func TestLoad_TiktokenEnabledDefault(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.yaml")
+
+	configContent := `
+server:
+  port: 8080
+  max_body_size_mb: 10
+  request_timeout: 30s
+  master_key: "sk-test"
+
+fail2ban:
+  max_attempts: 3
+  ban_duration: permanent
+  error_codes: [401]
+
+credentials:
+  - name: "test"
+    type: "openai"
+    api_key: "sk-test"
+    base_url: "https://api.openai.com"
+    rpm: 10
+
+monitoring:
+  prometheus_enabled: false
+`
+	err := os.WriteFile(configPath, []byte(configContent), 0644)
+	require.NoError(t, err)
+
+	cfg, err := Load(configPath)
+	require.NoError(t, err)
+	assert.True(t, cfg.Server.TiktokenEnabled)
+}
+
+func TestLoad_TiktokenEnabledExplicitFalse(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.yaml")
+
+	configContent := `
+server:
+  port: 8080
+  max_body_size_mb: 10
+  request_timeout: 30s
+  master_key: "sk-test"
+  tiktoken_enabled: false
+
+fail2ban:
+  max_attempts: 3
+  ban_duration: permanent
+  error_codes: [401]
+
+credentials:
+  - name: "test"
+    type: "openai"
+    api_key: "sk-test"
+    base_url: "https://api.openai.com"
+    rpm: 10
+
+monitoring:
+  prometheus_enabled: false
+`
+	err := os.WriteFile(configPath, []byte(configContent), 0644)
+	require.NoError(t, err)
+
+	cfg, err := Load(configPath)
+	require.NoError(t, err)
+	assert.False(t, cfg.Server.TiktokenEnabled)
+}
+
+func TestServerConfigStrictAllTeamModelsACL(t *testing.T) {
+	var defaults ServerConfig
+	require.NoError(t, yaml.Unmarshal([]byte("{}"), &defaults))
+	assert.False(t, defaults.StrictAllTeamModelsACL)
+
+	var strict ServerConfig
+	require.NoError(t, yaml.Unmarshal([]byte("strict_all_team_models_acl: true"), &strict))
+	assert.True(t, strict.StrictAllTeamModelsACL)
 }
 
 func TestLoad_ModelAlias(t *testing.T) {

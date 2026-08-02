@@ -76,8 +76,11 @@ func newIPv4Server(t *testing.T, handler http.Handler) *httptest.Server {
 	return server
 }
 
-// createTestProxy creates a test proxy instance
 func createTestProxy() *proxy.Proxy {
+	return createTestProxyWithStrictACL(false)
+}
+
+func createTestProxyWithStrictACL(strictAllTeamModelsACL bool) *proxy.Proxy {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
 	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
 	rl := ratelimit.New()
@@ -96,20 +99,21 @@ func createTestProxy() *proxy.Proxy {
 	tokenManager := auth.NewVertexTokenManager(logger)
 
 	return proxy.New(&proxy.Config{
-		Balancer:            bal,
-		Logger:              logger,
-		MaxBodySizeMB:       10,
-		RequestTimeout:      30 * time.Second,
-		MaxIdleConns:        200,
-		MaxIdleConnsPerHost: 20,
-		IdleConnTimeout:     120 * time.Second,
-		Metrics:             metrics,
-		MasterKey:           "test-master-key",
-		RateLimiter:         rl,
-		TokenManager:        tokenManager,
-		ModelManager:        createTestModelManager(),
-		Version:             "test-version",
-		Commit:              "test-commit",
+		Balancer:               bal,
+		Logger:                 logger,
+		MaxBodySizeMB:          10,
+		RequestTimeout:         30 * time.Second,
+		MaxIdleConns:           200,
+		MaxIdleConnsPerHost:    20,
+		IdleConnTimeout:        120 * time.Second,
+		Metrics:                metrics,
+		MasterKey:              "test-master-key",
+		RateLimiter:            rl,
+		TokenManager:           tokenManager,
+		ModelManager:           createTestModelManager(),
+		Version:                "test-version",
+		Commit:                 "test-commit",
+		StrictAllTeamModelsACL: strictAllTeamModelsACL,
 	})
 }
 
@@ -431,6 +435,110 @@ func TestServeHTTP_ProxyRequest(t *testing.T) {
 	}
 }
 
+func TestServeHTTP_Messages(t *testing.T) {
+	upstream := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/v1/chat/completions", r.URL.Path)
+		var body map[string]interface{}
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+		messages := body["messages"].([]interface{})
+		require.Len(t, messages, 2)
+		assert.Equal(t, "system", messages[0].(map[string]interface{})["role"])
+		assert.Equal(t, "user", messages[1].(map[string]interface{})["role"])
+
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{
+			"id":"chatcmpl-1",
+			"object":"chat.completion",
+			"created":1,
+			"model":"test-model",
+			"choices":[{"index":0,"message":{"role":"assistant","content":"hello"},"finish_reason":"stop"}],
+			"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}
+		}`)
+	}))
+	defer upstream.Close()
+
+	prx := createProxyWithMockServer(upstream.URL)
+	router := New(prx, nil, testhelpers.NewTestMonitoringConfig("/health", false, ""), testhelpers.NewTestLogger(), nil)
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{
+		"model":"test-model",
+		"max_tokens":64,
+		"system":"Be concise",
+		"messages":[{"role":"user","content":"hi"}]
+	}`))
+	req.Header.Set("Authorization", "Bearer test-key")
+	req.Header.Set("Content-Type", "application/json")
+	result := httptest.NewRecorder()
+
+	router.ServeHTTP(result, req)
+
+	require.Equal(t, http.StatusOK, result.Code)
+	assert.Equal(t, "application/json", result.Header().Get("Content-Type"))
+	var response map[string]interface{}
+	require.NoError(t, json.Unmarshal(result.Body.Bytes(), &response))
+	assert.Equal(t, "message", response["type"])
+	assert.Equal(t, "assistant", response["role"])
+	assert.Equal(t, "end_turn", response["stop_reason"])
+	assert.Equal(t, "hello", response["content"].([]interface{})[0].(map[string]interface{})["text"])
+}
+
+func TestServeHTTP_MessagesStreaming(t *testing.T) {
+	upstream := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/v1/chat/completions", r.URL.Path)
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher := w.(http.Flusher)
+		_, _ = io.WriteString(w, "data: {\"id\":\"chatcmpl-1\",\"model\":\"test-model\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"},\"finish_reason\":null}]}\n\n")
+		flusher.Flush()
+		_, _ = io.WriteString(w, "data: {\"id\":\"chatcmpl-1\",\"model\":\"test-model\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"},\"finish_reason\":null}]}\n\n")
+		flusher.Flush()
+		_, _ = io.WriteString(w, "data: {\"id\":\"chatcmpl-1\",\"model\":\"test-model\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n")
+		_, _ = io.WriteString(w, "data: {\"id\":\"chatcmpl-1\",\"model\":\"test-model\",\"choices\":[],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":2,\"total_tokens\":7}}\n\n")
+		_, _ = io.WriteString(w, "data: [DONE]\n\n")
+		flusher.Flush()
+	}))
+	defer upstream.Close()
+
+	prx := createProxyWithMockServer(upstream.URL)
+	router := New(prx, nil, testhelpers.NewTestMonitoringConfig("/health", false, ""), testhelpers.NewTestLogger(), nil)
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{
+		"model":"test-model",
+		"max_tokens":64,
+		"stream":true,
+		"messages":[{"role":"user","content":"hi"}]
+	}`))
+	req.Header.Set("Authorization", "Bearer test-key")
+	req.Header.Set("Content-Type", "application/json")
+	result := httptest.NewRecorder()
+
+	router.ServeHTTP(result, req)
+
+	require.Equal(t, http.StatusOK, result.Code)
+	assert.Contains(t, result.Header().Get("Content-Type"), "text/event-stream")
+	assert.Contains(t, result.Body.String(), "event: message_start")
+	assert.Contains(t, result.Body.String(), `"text":"hello","type":"text_delta"`)
+	assert.Contains(t, result.Body.String(), `"stop_reason":"end_turn"`)
+	assert.Contains(t, result.Body.String(), "event: message_stop")
+}
+
+func TestServeHTTP_MessagesUsesAnthropicErrorShape(t *testing.T) {
+	prx := createTestProxy()
+	router := New(prx, nil, testhelpers.NewTestMonitoringConfig("/health", false, ""), testhelpers.NewTestLogger(), nil)
+	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{
+		"model":"test-model",
+		"max_tokens":64,
+		"messages":[{"role":"user","content":"hi"}]
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	result := httptest.NewRecorder()
+
+	router.ServeHTTP(result, req)
+
+	require.Equal(t, http.StatusUnauthorized, result.Code)
+	assert.JSONEq(t, `{
+		"type":"error",
+		"error":{"type":"authentication_error","message":"Missing Authorization header"}
+	}`, result.Body.String())
+}
+
 func TestServeHTTP_NotFound(t *testing.T) {
 	prx := createTestProxy()
 	router := New(prx, nil, testhelpers.NewTestMonitoringConfig("/health", false, ""), testhelpers.NewTestLogger(), nil)
@@ -546,7 +654,7 @@ func TestHandleModels(t *testing.T) {
 	// Models list might be empty if not fetched, which is OK
 }
 
-func TestServeHTTPV1ModelsRequiresAuthAndFiltersPublicCatalog(t *testing.T) {
+func TestServeHTTPV1ModelsAuthAndModelACLPolicy(t *testing.T) {
 	logger := testhelpers.NewTestLogger()
 	modelManager := models.New(logger, 100, []config.ModelRPMConfig{
 		{Name: "z-backend", RPM: 100},
@@ -561,7 +669,7 @@ func TestServeHTTPV1ModelsRequiresAuthAndFiltersPublicCatalog(t *testing.T) {
 	catalogCredentials := []config.CredentialConfig{{Name: "catalog", Type: config.ProviderTypeOpenAI}}
 	modelManager.SetCredentials(catalogCredentials)
 	modelManager.LoadModelsFromConfig(catalogCredentials)
-	prx := createTestProxy()
+	prx := createTestProxyWithStrictACL(true)
 	blocked := true
 	prx.LiteLLMDB = &routerAuthTestDB{tokens: map[string]*dbmodels.TokenInfo{
 		"unrestricted-key": {Token: "unrestricted-hash"},
@@ -583,6 +691,12 @@ func TestServeHTTPV1ModelsRequiresAuthAndFiltersPublicCatalog(t *testing.T) {
 			Models:     []string{"openai/a-public"},
 			UserID:     "personal-user",
 			UserModels: []string{dbmodels.NoDefaultModels, "openai/a-public"},
+		},
+		"dangling-team-key": {
+			Token:        "dangling-team-hash",
+			Models:       []string{"openai/a-public"},
+			TeamID:       "deleted-team",
+			TeamDangling: true,
 		},
 		"wildcard-key": {
 			Token:  "wildcard-hash",
@@ -634,6 +748,10 @@ func TestServeHTTPV1ModelsRequiresAuthAndFiltersPublicCatalog(t *testing.T) {
 	require.Equal(t, http.StatusOK, noDefault.Code)
 	assert.Empty(t, modelIDs(t, noDefault))
 
+	danglingTeam := request(map[string]string{"Authorization": "Bearer dangling-team-key"})
+	require.Equal(t, http.StatusOK, danglingTeam.Code)
+	assert.Empty(t, modelIDs(t, danglingTeam))
+
 	wildcard := request(map[string]string{"Authorization": "Bearer wildcard-key"})
 	require.Equal(t, http.StatusOK, wildcard.Code)
 	assert.Equal(t, []string{"openai/a-public"}, modelIDs(t, wildcard),
@@ -670,6 +788,36 @@ func TestServeHTTPV1ModelsRequiresAuthAndFiltersPublicCatalog(t *testing.T) {
 		[]string{"openai/a-public", "openai/z-public"},
 		modelIDs(t, unrestrictedGroups),
 	)
+
+	compatibilityProxy := createTestProxy()
+	compatibilityProxy.LiteLLMDB = prx.LiteLLMDB
+	compatibilityRouter := New(
+		compatibilityProxy,
+		modelManager,
+		testhelpers.NewTestMonitoringConfig("/health", false, ""),
+		logger,
+		nil,
+	)
+	compatibilityRequest := func(key string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+		req.Header.Set("Authorization", "Bearer "+key)
+		w := httptest.NewRecorder()
+		compatibilityRouter.ServeHTTP(w, req)
+		return w
+	}
+	allModels := []string{"openai/a-public", "openai/z-public"}
+	for _, key := range []string{
+		"restricted-key",
+		"no-default-user-key",
+		"dangling-team-key",
+		"wildcard-key",
+		"regex-looking-key",
+	} {
+		response := compatibilityRequest(key)
+		require.Equal(t, http.StatusOK, response.Code)
+		assert.Equal(t, allModels, modelIDs(t, response))
+	}
+	assert.Equal(t, http.StatusForbidden, compatibilityRequest("blocked-team-key").Code)
 }
 
 func TestServeHTTPPublicPreflightDoesNotEnableWildcardCORS(t *testing.T) {
@@ -732,13 +880,12 @@ func TestServeHTTPRejectsUnsupportedMethodsBeforeAuth(t *testing.T) {
 	assert.Equal(t, http.StatusMethodNotAllowed, modelsResult.Code)
 	assert.Equal(t, http.MethodGet, modelsResult.Header().Get("Allow"))
 
-	// Native Anthropic Messages is intentionally outside the configured public
-	// surface; adding CORS must not make it look supported.
 	messagesReq := httptest.NewRequest(http.MethodOptions, "/v1/messages", nil)
 	messagesReq.Header.Set("Origin", "https://client.example.invalid")
 	messagesResult := httptest.NewRecorder()
 	router.ServeHTTP(messagesResult, messagesReq)
-	assert.Equal(t, http.StatusNotFound, messagesResult.Code)
+	assert.Equal(t, http.StatusMethodNotAllowed, messagesResult.Code)
+	assert.Equal(t, http.MethodPost, messagesResult.Header().Get("Allow"))
 	assert.Empty(t, messagesResult.Header().Get("Access-Control-Allow-Origin"))
 }
 

@@ -72,10 +72,12 @@ func (c *proxyStreamErrorCapture) Observe(chunk []byte) string {
 		}
 		frame := c.pending[:frameEnd]
 		c.pending = c.pending[frameEnd:]
-		if payload := extractStreamErrorEvent(frame); payload != "" {
-			c.payload = payload
-			c.pending = nil
-			return payload
+		if frameMayCarryStreamError(frame) {
+			if payload := extractStreamErrorEvent(frame); payload != "" {
+				c.payload = payload
+				c.pending = nil
+				return payload
+			}
 		}
 	}
 
@@ -93,8 +95,10 @@ func (c *proxyStreamErrorCapture) Finalize() string {
 		}
 		return c.payload
 	}
-	if payload := extractStreamErrorEvent(c.pending); payload != "" {
-		c.payload = payload
+	if frameMayCarryStreamError(c.pending) {
+		if payload := extractStreamErrorEvent(c.pending); payload != "" {
+			c.payload = payload
+		}
 	}
 	c.pending = nil
 	return c.payload
@@ -160,9 +164,14 @@ func resolveCapturedProviderStreamError(
 // writeProxyResponse writes raw upstream proxy response to client.
 // Respects the client's Accept-Encoding header to compress the response appropriately.
 // Used by both primary proxy path and fallback retry path to avoid duplication.
-func (p *Proxy) writeProxyResponse(w http.ResponseWriter, resp *ProxyResponse, clientReq *http.Request, cred *config.CredentialConfig, modelID string, logCtx *RequestLogContext) {
+func (p *Proxy) writeProxyResponse(w http.ResponseWriter, resp *ProxyResponse, clientReq *http.Request, cred *config.CredentialConfig, modelID string, logCtx *RequestLogContext, usageOptions ...converter.TokenUsageExtractionOptions) {
 	if resp == nil {
 		return
+	}
+
+	tokenUsageOptions := converter.TokenUsageExtractionOptions{AudioInputIncludesCachedAudio: true}
+	if len(usageOptions) > 0 {
+		tokenUsageOptions = usageOptions[0]
 	}
 
 	credName := ""
@@ -225,20 +234,9 @@ func (p *Proxy) writeProxyResponse(w http.ResponseWriter, resp *ProxyResponse, c
 		}
 	}
 
-	// Copy response headers
-	for key, values := range resp.Headers {
-		if shouldSkipResponseHeaderForClient(key, cred) {
-			continue
-		}
-		if strings.EqualFold(key, HeaderAIRUsageAudioTokens) && w.Header().Get(HeaderAIRUsageAudioTokens) != "" {
-			continue
-		}
-		if responseBodyChanged && isRepresentationIntegrityHeader(key) {
-			continue
-		}
-		for _, value := range values {
-			w.Header().Add(key, value)
-		}
+	p.copyResponseHeaders(w, resp.Headers, cred, responseBodyChanged)
+	if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
+		p.markAudioUsageContractForClient(w, logCtx, tokenUsageOptions.AudioInputIncludesCachedAudio)
 	}
 
 	if responseBodyMasked {
@@ -303,43 +301,47 @@ func (p *Proxy) writeProxyStreamingResponseWithTokens(
 		}
 	}()
 
-	for key, values := range resp.Headers {
-		if shouldSkipResponseHeaderForClient(key, cred) {
-			continue
-		}
-		if strings.EqualFold(key, HeaderAIRUsageAudioTokens) && w.Header().Get(HeaderAIRUsageAudioTokens) != "" {
-			continue
-		}
-		if (normalizeStream || normalizeResponseModel) && isRepresentationIntegrityHeader(key) {
-			continue
-		}
-		for _, value := range values {
-			w.Header().Add(key, value)
-		}
+	tokenUsageOptions := converter.TokenUsageExtractionOptions{AudioInputIncludesCachedAudio: true}
+	if len(usageOptions) > 0 {
+		tokenUsageOptions = usageOptions[0]
+	}
+
+	p.copyResponseHeaders(w, resp.Headers, cred, normalizeStream || normalizeResponseModel)
+	if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
+		p.markAudioUsageContractForClient(w, logCtx, tokenUsageOptions.AudioInputIncludesCachedAudio)
 	}
 	setSuccessfulSSEHeaders(w.Header(), resp.StatusCode)
 
 	w.WriteHeader(resp.StatusCode)
 
 	var lastUsage *converter.TokenUsage
-	completion := newCompletionTokenAccumulator(tokenizerModelID)
-	tokenUsageOptions := converter.TokenUsageExtractionOptions{AudioInputIncludesCachedAudio: true}
-	if len(usageOptions) > 0 {
-		tokenUsageOptions = usageOptions[0]
-	}
+	completion := p.newCompletionTokenAccumulator(tokenizerModelID)
 	detectProviderStreamError := resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices
 	providerStreamError := &proxyStreamErrorCapture{}
+	var payloadBuf [][]byte
 	onChunk := func(chunk []byte) {
 		if detectProviderStreamError {
 			providerStreamError.Observe(chunk)
 		}
-		if usage := extractTokenUsageFromStreamingChunkWithOptions(string(chunk), tokenUsageOptions); usage != nil {
-			lastUsage = usage
-			if logCtx != nil {
-				logCtx.UsageSource = "provider"
+		// One split per chunk (plan item C), reused for both usage
+		// extraction and the completion accumulator.
+		payloadBuf = splitSSEPayloads(chunk, payloadBuf)
+		if chunkMayCarryTokenUsage(chunk) {
+			if usage := extractTokenUsageFromPayloads(payloadBuf, tokenUsageOptions); usage != nil {
+				// Merge rather than replace: a web-search-only chunk (no
+				// prompt/completion tokens) arriving separately from the
+				// usage chunk must not have its WebSearchRequests clobbered
+				// back to zero by a later chunk's usage read.
+				if lastUsage == nil {
+					lastUsage = &converter.TokenUsage{}
+				}
+				lastUsage.MergeNonZero(usage)
+				if logCtx != nil {
+					logCtx.UsageSource = "provider"
+				}
 			}
 		}
-		completion.AddChunk(chunk)
+		completion.AddPayloads(payloadBuf)
 	}
 
 	buildFallbackUsage := func() *converter.TokenUsage {

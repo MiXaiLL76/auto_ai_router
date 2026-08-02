@@ -960,9 +960,9 @@ func TestHandleStreamingWithTokens_HybridApproach(t *testing.T) {
 
 	// Create log context with prompt tokens estimate
 	logCtx := &RequestLogContext{
-		RequestID:            "test-request-123",
-		PromptTokensEstimate: 95, // Simulating estimated prompt tokens
-		TokenUsage:           &converter.TokenUsage{},
+		RequestID:              "test-request-123",
+		promptTokensEstimateFn: func() int { return 95 }, // Simulating estimated prompt tokens
+		TokenUsage:             &converter.TokenUsage{},
 	}
 
 	err = prx.handleStreamingWithTokens(w, resp, "test-cred", "gpt-4o-mini", logCtx)
@@ -1022,9 +1022,9 @@ func TestHandleStreamingWithTokens_WithDoneAndUsage(t *testing.T) {
 	w := httptest.NewRecorder()
 
 	logCtx := &RequestLogContext{
-		RequestID:            "test-request-done-123",
-		PromptTokensEstimate: 95,
-		TokenUsage:           &converter.TokenUsage{},
+		RequestID:              "test-request-done-123",
+		promptTokensEstimateFn: func() int { return 95 },
+		TokenUsage:             &converter.TokenUsage{},
 		Credential: &config.CredentialConfig{
 			Name: "test",
 			Type: config.ProviderTypeOpenAI,
@@ -1085,9 +1085,9 @@ func TestHandleStreamingWithTokens_CombinedUsageAndDone(t *testing.T) {
 	w := httptest.NewRecorder()
 
 	logCtx := &RequestLogContext{
-		RequestID:            "test-request-combined-123",
-		PromptTokensEstimate: 95,
-		TokenUsage:           &converter.TokenUsage{},
+		RequestID:              "test-request-combined-123",
+		promptTokensEstimateFn: func() int { return 95 },
+		TokenUsage:             &converter.TokenUsage{},
 		Credential: &config.CredentialConfig{
 			Name: "test",
 			Type: config.ProviderTypeOpenAI,

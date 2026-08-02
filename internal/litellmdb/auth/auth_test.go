@@ -169,11 +169,9 @@ func TestTokenInfo_IsModelAllowed(t *testing.T) {
 		assert.True(t, info.IsModelAllowed("claude-3"))
 	})
 
-	t.Run("all-team-models sentinel with no team - fail closed", func(t *testing.T) {
-		// LiteLLM fails closed when all-team-models is used without a team;
-		// the fail-open behavior from PR #82 is intentionally not carried over.
+	t.Run("all-team-models sentinel with no team - unrestricted", func(t *testing.T) {
 		info := &models.TokenInfo{Models: []string{"all-team-models"}, TeamID: ""}
-		assert.False(t, info.IsModelAllowed("gpt-4"))
+		assert.True(t, info.IsModelAllowed("gpt-4"))
 	})
 
 	t.Run("all-team-models sentinel - resolves against team allow-list", func(t *testing.T) {

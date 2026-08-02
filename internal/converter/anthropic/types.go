@@ -48,6 +48,7 @@ type ContentBlock struct {
 	// thinking block (in responses)
 	Thinking  string `json:"thinking,omitempty"`
 	Signature string `json:"signature,omitempty"`
+	Data      string `json:"data,omitempty"`
 
 	// prompt caching (requests only)
 	CacheControl interface{} `json:"cache_control,omitempty"`

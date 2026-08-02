@@ -71,6 +71,77 @@ func (tu *TokenUsage) Total() int {
 	return tu.PromptTokens + tu.CompletionTokens
 }
 
+// MergeNonZero copies every non-zero/non-empty field from src into tu,
+// leaving tu's existing value in place wherever src's is zero/empty.
+//
+// This matters for streaming: a provider (or an upstream AIR/proxy-type
+// credential relaying frames) can split usage-relevant fields across
+// multiple SSE chunks — e.g. a WebSearchRequests-bearing chunk arriving
+// separately from the chunk carrying prompt/completion tokens. A plain
+// "*dst = *src" per-chunk overwrite silently loses whatever the earlier
+// chunk had set (since a later chunk's zero value for that field replaces
+// it) — this method fixes that by only ever raising a field, never
+// resetting one to zero because a later read didn't happen to touch it.
+func (tu *TokenUsage) MergeNonZero(src *TokenUsage) {
+	if tu == nil || src == nil {
+		return
+	}
+	if src.PromptTokens != 0 {
+		tu.PromptTokens = src.PromptTokens
+	}
+	if src.CompletionTokens != 0 {
+		tu.CompletionTokens = src.CompletionTokens
+	}
+	if src.AudioInputTokens != 0 {
+		tu.AudioInputTokens = src.AudioInputTokens
+	}
+	if src.AudioOutputTokens != 0 {
+		tu.AudioOutputTokens = src.AudioOutputTokens
+	}
+	if src.CachedInputTokens != 0 {
+		tu.CachedInputTokens = src.CachedInputTokens
+	}
+	if src.CachedAudioInputTokens != 0 {
+		tu.CachedAudioInputTokens = src.CachedAudioInputTokens
+	}
+	if src.CacheCreationTokens != 0 {
+		tu.CacheCreationTokens = src.CacheCreationTokens
+	}
+	if src.CacheCreation5mTokens != 0 {
+		tu.CacheCreation5mTokens = src.CacheCreation5mTokens
+	}
+	if src.CacheCreation1hTokens != 0 {
+		tu.CacheCreation1hTokens = src.CacheCreation1hTokens
+	}
+	if src.CachedOutputTokens != 0 {
+		tu.CachedOutputTokens = src.CachedOutputTokens
+	}
+	if src.ReasoningTokens != 0 {
+		tu.ReasoningTokens = src.ReasoningTokens
+	}
+	if src.AcceptedPredictionTokens != 0 {
+		tu.AcceptedPredictionTokens = src.AcceptedPredictionTokens
+	}
+	if src.RejectedPredictionTokens != 0 {
+		tu.RejectedPredictionTokens = src.RejectedPredictionTokens
+	}
+	if src.ImageCount != 0 {
+		tu.ImageCount = src.ImageCount
+	}
+	if src.ImageTokens != 0 {
+		tu.ImageTokens = src.ImageTokens
+	}
+	if src.OutputImageTokens != 0 {
+		tu.OutputImageTokens = src.OutputImageTokens
+	}
+	if src.WebSearchRequests != 0 {
+		tu.WebSearchRequests = src.WebSearchRequests
+	}
+	if src.WebSearchContextSize != "" {
+		tu.WebSearchContextSize = src.WebSearchContextSize
+	}
+}
+
 // TokenCosts contains cost breakdown by token type
 type TokenCosts struct {
 	InputCost         float64

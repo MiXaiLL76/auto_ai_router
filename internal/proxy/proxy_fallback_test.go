@@ -10,7 +10,9 @@ import (
 	"testing"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
+	"github.com/mixaill76/auto_ai_router/internal/monitoring"
 	"github.com/mixaill76/auto_ai_router/internal/testhelpers"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -460,4 +462,62 @@ func TestProxy_429PreservedWhenNoFallbackAndNetworkError(t *testing.T) {
 	assert.Equal(t, http.StatusTooManyRequests, w.Code,
 		"a single-credential 429 followed by a network error must still return 429, not 502")
 	assert.Equal(t, int32(1), atomic.LoadInt32(&cred1Calls))
+}
+
+// TestProxy_MetricsAttributeToRespondingCredentialNotLastAttempted is a
+// regression test for a metrics attribution bug: when attempt A (credential
+// "primary") returns a retryable 429 and the subsequent retry against
+// credential "secondary" fails with a transport error (no fallback
+// available), the *response* written to the client is still primary's 429 —
+// but the loop variable `cred` has already moved on to "secondary" by the
+// time the final RecordRequest call ran. Without restoring the credential
+// that actually produced the response, RequestsTotal/RequestDuration would be
+// mislabeled under "secondary" for a response "primary" produced, defeating
+// this PR's central goal of correct per-credential attribution.
+func TestProxy_MetricsAttributeToRespondingCredentialNotLastAttempted(t *testing.T) {
+	monitoring.RequestsTotal.Reset()
+
+	primaryServer := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_ = json.NewEncoder(w).Encode(map[string]string{"error": "rate_limit_exceeded"})
+	}))
+	defer primaryServer.Close()
+
+	deadServer := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	deadURL := deadServer.URL
+	deadServer.Close()
+
+	prx := NewTestProxyBuilder().
+		WithCredentials(
+			config.CredentialConfig{
+				Name: "primary", Type: config.ProviderTypeProxy, APIKey: "key1",
+				BaseURL: primaryServer.URL, RPM: 100, TPM: 10000, IsFallback: false,
+			},
+			config.CredentialConfig{
+				Name: "secondary", Type: config.ProviderTypeProxy, APIKey: "key2",
+				BaseURL: deadURL, RPM: 100, TPM: 10000, IsFallback: false,
+			},
+		).
+		WithMasterKey("master-key").
+		WithMaxProviderRetries(1).
+		Build()
+	prx.metrics = monitoring.New(true)
+
+	reqBody := `{"model":"gpt-4","messages":[{"role":"user","content":"hello"}]}`
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(reqBody))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+
+	w := httptest.NewRecorder()
+	prx.ProxyRequest(w, req)
+
+	require.Equal(t, http.StatusTooManyRequests, w.Code)
+
+	assert.Equal(t, 1.0,
+		testutil.ToFloat64(monitoring.RequestsTotal.WithLabelValues("primary", "gpt-4", "/v1/chat/completions", "429")),
+		"the 429 response actually written to the client came from 'primary' and must be recorded under its name")
+	assert.Equal(t, 0.0,
+		testutil.ToFloat64(monitoring.RequestsTotal.WithLabelValues("secondary", "gpt-4", "/v1/chat/completions", "429")),
+		"'secondary' never produced a response — it must not be attributed a 429 that belongs to 'primary'")
 }

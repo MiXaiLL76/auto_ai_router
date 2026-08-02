@@ -92,6 +92,24 @@ func (r *ModelPriceRegistry) GetPrice(modelName string) *ModelPrice {
 	return r.prices[NormalizeModelName(modelName)]
 }
 
+// GetPriceAny looks up prices for multiple candidate model names under a
+// single read lock, returning the first match in the given priority order.
+// This avoids a concurrent Update() straddling two map generations, which
+// can happen when callers issue separate GetPrice calls per candidate.
+func (r *ModelPriceRegistry) GetPriceAny(modelNames ...string) (string, *ModelPrice) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for _, modelName := range modelNames {
+		if modelName == "" {
+			continue
+		}
+		if price := r.prices[NormalizeModelName(modelName)]; price != nil {
+			return modelName, price
+		}
+	}
+	return "", nil
+}
+
 // Update safely updates the registry with new prices
 func (r *ModelPriceRegistry) Update(prices map[string]*ModelPrice) {
 	r.mu.Lock()

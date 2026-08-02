@@ -23,17 +23,18 @@ import (
 // Used in tests that directly call New() instead of using TestProxyBuilder.
 func createProxyWithParams(bal *balancer.RoundRobin, logger *slog.Logger, maxBodySizeMB int, requestTimeout time.Duration, metrics *monitoring.Metrics, masterKey string, rl *ratelimit.RPMLimiter, tm *auth.VertexTokenManager, mm *models.Manager, version, commit string) *Proxy {
 	return New(&Config{
-		Balancer:       bal,
-		Logger:         logger,
-		MaxBodySizeMB:  maxBodySizeMB,
-		RequestTimeout: requestTimeout,
-		Metrics:        metrics,
-		MasterKey:      masterKey,
-		RateLimiter:    rl,
-		TokenManager:   tm,
-		ModelManager:   mm,
-		Version:        version,
-		Commit:         commit,
+		Balancer:        bal,
+		Logger:          logger,
+		MaxBodySizeMB:   maxBodySizeMB,
+		RequestTimeout:  requestTimeout,
+		Metrics:         metrics,
+		MasterKey:       masterKey,
+		RateLimiter:     rl,
+		TokenManager:    tm,
+		ModelManager:    mm,
+		Version:         version,
+		Commit:          commit,
+		TiktokenEnabled: true, // matches production default (server.tiktoken_enabled: true)
 	})
 }
 
@@ -87,23 +88,26 @@ func createTestBalancer(baseURL string) (*balancer.RoundRobin, *ratelimit.RPMLim
 
 // TestProxyConfig holds configuration for building a test proxy instance.
 type TestProxyConfig struct {
-	Credentials          []config.CredentialConfig
-	Logger               *slog.Logger
-	Balancer             *balancer.RoundRobin
-	RateLimiter          *ratelimit.RPMLimiter
-	Metrics              *monitoring.Metrics
-	TokenManager         *auth.VertexTokenManager
-	ModelManager         *models.Manager
-	MasterKey            string
-	MaxBodySizeMB        int
-	RequestTimeout       time.Duration
-	Version              string
-	Commit               string
-	SessionStickyEnabled bool
-	SessionStoreTTL      time.Duration
-	MaxProviderRetries   int
-	MaxFallbackAttempts  int
-	DrainUpstreamOnAbort bool
+	Credentials            []config.CredentialConfig
+	Logger                 *slog.Logger
+	Balancer               *balancer.RoundRobin
+	RateLimiter            *ratelimit.RPMLimiter
+	Metrics                *monitoring.Metrics
+	TokenManager           *auth.VertexTokenManager
+	ModelManager           *models.Manager
+	MasterKey              string
+	MaxBodySizeMB          int
+	ResponseBodyMultiplier int
+	RequestTimeout         time.Duration
+	Version                string
+	Commit                 string
+	SessionStickyEnabled   bool
+	SessionStoreTTL        time.Duration
+	MaxProviderRetries     int
+	MaxFallbackAttempts    int
+	DrainUpstreamOnAbort   bool
+	TiktokenEnabled        bool
+	ResponseHeaderMode     config.ResponseHeaderMode
 }
 
 // NewTestProxyBuilder creates a builder with default configuration.
@@ -111,15 +115,16 @@ func NewTestProxyBuilder() *TestProxyBuilder {
 	logger := testhelpers.NewTestLogger()
 	return &TestProxyBuilder{
 		config: &TestProxyConfig{
-			Logger:         logger,
-			Metrics:        createTestProxyMetrics(),
-			TokenManager:   createTestTokenManager(logger),
-			ModelManager:   createTestModelManager(logger),
-			MasterKey:      "master-key",
-			MaxBodySizeMB:  10,
-			RequestTimeout: 30 * time.Second,
-			Version:        "test-version",
-			Commit:         "test-commit",
+			Logger:          logger,
+			Metrics:         createTestProxyMetrics(),
+			TokenManager:    createTestTokenManager(logger),
+			ModelManager:    createTestModelManager(logger),
+			MasterKey:       "master-key",
+			MaxBodySizeMB:   10,
+			RequestTimeout:  30 * time.Second,
+			Version:         "test-version",
+			Commit:          "test-commit",
+			TiktokenEnabled: true, // matches production default (server.tiktoken_enabled: true)
 		},
 	}
 }
@@ -220,6 +225,21 @@ func (b *TestProxyBuilder) WithSessionSticky(ttl time.Duration) *TestProxyBuilde
 	return b
 }
 
+// WithMaxBodySizeMB sets the max response body size (in MB, before the
+// ResponseBodyMultiplier is applied). Use together with WithResponseBodyMultiplier
+// to get a small, test-friendly size limit for exercising ErrResponseBodyTooLarge.
+func (b *TestProxyBuilder) WithMaxBodySizeMB(mb int) *TestProxyBuilder {
+	b.config.MaxBodySizeMB = mb
+	return b
+}
+
+// WithResponseBodyMultiplier overrides DefaultResponseBodyMultiplier (10) for tests
+// that need a precise, small max response body size (MaxBodySizeMB * multiplier).
+func (b *TestProxyBuilder) WithResponseBodyMultiplier(multiplier int) *TestProxyBuilder {
+	b.config.ResponseBodyMultiplier = multiplier
+	return b
+}
+
 // WithMaxProviderRetries sets the maximum number of same-type credential retries.
 // This mirrors the production Config.MaxProviderRetries (default: 2).
 // Use this in tests that need to validate retry/fallback behavior under realistic
@@ -236,6 +256,19 @@ func (b *TestProxyBuilder) WithDrainUpstreamOnAbort(v bool) *TestProxyBuilder {
 	return b
 }
 
+// WithTiktokenEnabled overrides the default (true) local tiktoken-based prompt/completion
+// token fallback estimation toggle. Use WithTiktokenEnabled(false) to test the codepath
+// where a provider's own usage is unavailable and no local estimate backfills it.
+func (b *TestProxyBuilder) WithTiktokenEnabled(v bool) *TestProxyBuilder {
+	b.config.TiktokenEnabled = v
+	return b
+}
+
+func (b *TestProxyBuilder) WithResponseHeaderMode(mode config.ResponseHeaderMode) *TestProxyBuilder {
+	b.config.ResponseHeaderMode = mode
+	return b
+}
+
 // Build creates and returns a Proxy instance with the configured settings.
 func (b *TestProxyBuilder) Build() *Proxy {
 	if b.config.RateLimiter == nil {
@@ -249,22 +282,25 @@ func (b *TestProxyBuilder) Build() *Proxy {
 		b.config.Balancer = balancer.New(b.config.Credentials, f2b, b.config.RateLimiter)
 	}
 	return New(&Config{
-		Balancer:             b.config.Balancer,
-		Logger:               b.config.Logger,
-		MaxBodySizeMB:        b.config.MaxBodySizeMB,
-		RequestTimeout:       b.config.RequestTimeout,
-		Metrics:              b.config.Metrics,
-		MasterKey:            b.config.MasterKey,
-		RateLimiter:          b.config.RateLimiter,
-		TokenManager:         b.config.TokenManager,
-		ModelManager:         b.config.ModelManager,
-		Version:              b.config.Version,
-		Commit:               b.config.Commit,
-		SessionStickyEnabled: b.config.SessionStickyEnabled,
-		SessionStoreTTL:      b.config.SessionStoreTTL,
-		MaxProviderRetries:   b.config.MaxProviderRetries,
-		MaxFallbackAttempts:  b.config.MaxFallbackAttempts,
-		DrainUpstreamOnAbort: b.config.DrainUpstreamOnAbort,
+		Balancer:               b.config.Balancer,
+		Logger:                 b.config.Logger,
+		MaxBodySizeMB:          b.config.MaxBodySizeMB,
+		ResponseBodyMultiplier: b.config.ResponseBodyMultiplier,
+		RequestTimeout:         b.config.RequestTimeout,
+		Metrics:                b.config.Metrics,
+		MasterKey:              b.config.MasterKey,
+		RateLimiter:            b.config.RateLimiter,
+		TokenManager:           b.config.TokenManager,
+		ModelManager:           b.config.ModelManager,
+		Version:                b.config.Version,
+		Commit:                 b.config.Commit,
+		SessionStickyEnabled:   b.config.SessionStickyEnabled,
+		SessionStoreTTL:        b.config.SessionStoreTTL,
+		MaxProviderRetries:     b.config.MaxProviderRetries,
+		MaxFallbackAttempts:    b.config.MaxFallbackAttempts,
+		DrainUpstreamOnAbort:   b.config.DrainUpstreamOnAbort,
+		TiktokenEnabled:        b.config.TiktokenEnabled,
+		ResponseHeaderMode:     b.config.ResponseHeaderMode,
 	})
 }
 

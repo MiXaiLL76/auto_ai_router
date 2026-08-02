@@ -2,10 +2,19 @@ package converter
 
 import (
 	"bytes"
-	"encoding/json"
 	"errors"
 	"io"
 	"strings"
+
+	// goccy/go-json instead of encoding/json: the only json.* use in this file
+	// is ExtractTokenUsageWithOptions/ExtractTotalTokensAndUsageWithOptions's
+	// Unmarshal below, called on every non-streaming response purely to pull
+	// a small "usage" object (and a couple of adjacent fields) out of a body
+	// that may carry a large unrelated payload. Benchmarked ~6.5x faster than
+	// encoding/json on that shape (skip-large-unwanted-array cost dominates,
+	// not reflection). Both entry points share one Unmarshal call per
+	// response (plan item G) rather than each running their own.
+	json "github.com/goccy/go-json"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/converter/anthropic"
@@ -332,6 +341,101 @@ func ExtractTokenUsage(body []byte) *TokenUsage {
 	return ExtractTokenUsageWithOptions(body, TokenUsageExtractionOptions{AudioInputIncludesCachedAudio: true})
 }
 
+// responsesUsageDetails covers the Responses API / image-generation usage
+// shape (input_tokens/output_tokens), nested both directly under "usage" and
+// under "response.usage" for the streaming response.completed event.
+// TotalTokens is only read by ExtractTotalTokensAndUsageWithOptions (the provider's own
+// literal "total_tokens", distinct from PromptTokens+CompletionTokens — see
+// that function's doc comment) — folded in here so it comes along for free
+// during the same decode instead of a second, separate Unmarshal.
+type responsesUsageDetails struct {
+	InputTokens              int `json:"input_tokens"`
+	OutputTokens             int `json:"output_tokens"`
+	TotalTokens              int `json:"total_tokens,omitempty"`
+	CacheReadInputTokens     int `json:"cache_read_input_tokens,omitempty"`
+	CacheCreationInputTokens int `json:"cache_creation_input_tokens,omitempty"`
+	CacheCreation            struct {
+		Ephemeral5mInputTokens int `json:"ephemeral_5m_input_tokens,omitempty"`
+		Ephemeral1hInputTokens int `json:"ephemeral_1h_input_tokens,omitempty"`
+	} `json:"cache_creation,omitempty"`
+	InputTokensDetails struct {
+		CachedTokens              int `json:"cached_tokens,omitempty"`
+		CachedAudioTokens         int `json:"cached_audio_tokens,omitempty"`
+		CacheCreationTokens       int `json:"cache_creation_tokens,omitempty"`
+		CacheWriteTokens          int `json:"cache_write_tokens,omitempty"`
+		CacheCreationTokenDetails struct {
+			Ephemeral5mInputTokens int `json:"ephemeral_5m_input_tokens,omitempty"`
+			Ephemeral1hInputTokens int `json:"ephemeral_1h_input_tokens,omitempty"`
+		} `json:"cache_creation_token_details,omitempty"`
+		ImageTokens int `json:"image_tokens,omitempty"`
+		TextTokens  int `json:"text_tokens,omitempty"`
+		AudioTokens int `json:"audio_tokens,omitempty"`
+	} `json:"input_tokens_details,omitempty"`
+	OutputTokensDetails struct {
+		AudioTokens     int `json:"audio_tokens,omitempty"`
+		CachedTokens    int `json:"cached_tokens,omitempty"`
+		ImageTokens     int `json:"image_tokens,omitempty"`
+		ReasoningTokens int `json:"reasoning_tokens,omitempty"`
+		TextTokens      int `json:"text_tokens,omitempty"`
+	} `json:"output_tokens_details,omitempty"`
+	ServerToolUse struct {
+		WebSearchRequests int `json:"web_search_requests,omitempty"`
+	} `json:"server_tool_use,omitempty"`
+	WebSearchRequests int `json:"web_search_requests,omitempty"`
+}
+
+// tokenUsageShapeUsage is the "usage" object shape read by
+// ExtractTokenUsageWithOptions/ExtractTotalTokensAndUsageWithOptions — Chat
+// Completions fields plus the embedded Responses API / image fields.
+type tokenUsageShapeUsage struct {
+	// Chat Completions format
+	PromptTokens     int `json:"prompt_tokens"`
+	CompletionTokens int `json:"completion_tokens"`
+	// TotalTokens is the provider's own literal "total_tokens" — see
+	// ExtractTotalTokensAndUsageWithOptions's doc comment for why this is kept separate
+	// from PromptTokens+CompletionTokens rather than derived from them.
+	TotalTokens         int `json:"total_tokens,omitempty"`
+	PromptTokensDetails struct {
+		CachedTokens              int `json:"cached_tokens,omitempty"`
+		CachedAudioTokens         int `json:"cached_audio_tokens,omitempty"`
+		CacheCreationTokens       int `json:"cache_creation_tokens,omitempty"`
+		CacheWriteTokens          int `json:"cache_write_tokens,omitempty"`
+		CacheCreationTokenDetails struct {
+			Ephemeral5mInputTokens int `json:"ephemeral_5m_input_tokens,omitempty"`
+			Ephemeral1hInputTokens int `json:"ephemeral_1h_input_tokens,omitempty"`
+		} `json:"cache_creation_token_details,omitempty"`
+		AudioTokens int `json:"audio_tokens,omitempty"`
+		TextTokens  int `json:"text_tokens,omitempty"`
+		ImageTokens int `json:"image_tokens,omitempty"`
+	} `json:"prompt_tokens_details,omitempty"`
+	CompletionTokensDetails struct {
+		AcceptedPredictionTokens int `json:"accepted_prediction_tokens,omitempty"`
+		RejectedPredictionTokens int `json:"rejected_prediction_tokens,omitempty"`
+		AudioTokens              int `json:"audio_tokens,omitempty"`
+		CachedTokens             int `json:"cached_tokens,omitempty"`
+		ImageTokens              int `json:"image_tokens,omitempty"`
+		ReasoningTokens          int `json:"reasoning_tokens,omitempty"`
+		TextTokens               int `json:"text_tokens,omitempty"`
+	} `json:"completion_tokens_details,omitempty"`
+	// Responses API / Image generation format (input_tokens/output_tokens)
+	responsesUsageDetails
+}
+
+// tokenUsageResponseShape is the full top-level shape read by both
+// ExtractTokenUsageWithOptions and ExtractTotalTokensAndUsageWithOptions.
+// Named (rather than a function-local anonymous struct) so both entry points
+// can share it and so tokenUsageFromShape can take it as a parameter.
+type tokenUsageResponseShape struct {
+	Usage   tokenUsageShapeUsage             `json:"usage"`
+	Choices []extractedChoiceWithAnnotations `json:"choices,omitempty"`
+	Output  []extractedOutputItem            `json:"output,omitempty"`
+	// Responses API streaming event format: {"type":"response.completed","response":{"usage":{...}}}
+	Response struct {
+		Usage  *responsesUsageDetails `json:"usage,omitempty"`
+		Output []extractedOutputItem  `json:"output,omitempty"`
+	} `json:"response,omitempty"`
+}
+
 // ExtractTokenUsageWithOptions is like ExtractTokenUsage, but lets callers
 // preserve provider-converted usage that already reports non-cached audio input.
 func ExtractTokenUsageWithOptions(body []byte, opts TokenUsageExtractionOptions) *TokenUsage {
@@ -339,79 +443,59 @@ func ExtractTokenUsageWithOptions(body []byte, opts TokenUsageExtractionOptions)
 		return nil
 	}
 
-	type responsesUsageDetails struct {
-		InputTokens        int `json:"input_tokens"`
-		OutputTokens       int `json:"output_tokens"`
-		InputTokensDetails struct {
-			CachedTokens              int `json:"cached_tokens,omitempty"`
-			CachedAudioTokens         int `json:"cached_audio_tokens,omitempty"`
-			CacheCreationTokens       int `json:"cache_creation_tokens,omitempty"`
-			CacheWriteTokens          int `json:"cache_write_tokens,omitempty"`
-			CacheCreationTokenDetails struct {
-				Ephemeral5mInputTokens int `json:"ephemeral_5m_input_tokens,omitempty"`
-				Ephemeral1hInputTokens int `json:"ephemeral_1h_input_tokens,omitempty"`
-			} `json:"cache_creation_token_details,omitempty"`
-			ImageTokens int `json:"image_tokens,omitempty"`
-			TextTokens  int `json:"text_tokens,omitempty"`
-			AudioTokens int `json:"audio_tokens,omitempty"`
-		} `json:"input_tokens_details,omitempty"`
-		OutputTokensDetails struct {
-			AudioTokens     int `json:"audio_tokens,omitempty"`
-			CachedTokens    int `json:"cached_tokens,omitempty"`
-			ImageTokens     int `json:"image_tokens,omitempty"`
-			ReasoningTokens int `json:"reasoning_tokens,omitempty"`
-			TextTokens      int `json:"text_tokens,omitempty"`
-		} `json:"output_tokens_details,omitempty"`
-		ServerToolUse struct {
-			WebSearchRequests int `json:"web_search_requests,omitempty"`
-		} `json:"server_tool_use,omitempty"`
-		WebSearchRequests int `json:"web_search_requests,omitempty"`
-	}
-
-	var resp struct {
-		Usage struct {
-			// Chat Completions format
-			PromptTokens        int `json:"prompt_tokens"`
-			CompletionTokens    int `json:"completion_tokens"`
-			PromptTokensDetails struct {
-				CachedTokens              int `json:"cached_tokens,omitempty"`
-				CachedAudioTokens         int `json:"cached_audio_tokens,omitempty"`
-				CacheCreationTokens       int `json:"cache_creation_tokens,omitempty"`
-				CacheWriteTokens          int `json:"cache_write_tokens,omitempty"`
-				CacheCreationTokenDetails struct {
-					Ephemeral5mInputTokens int `json:"ephemeral_5m_input_tokens,omitempty"`
-					Ephemeral1hInputTokens int `json:"ephemeral_1h_input_tokens,omitempty"`
-				} `json:"cache_creation_token_details,omitempty"`
-				AudioTokens int `json:"audio_tokens,omitempty"`
-				TextTokens  int `json:"text_tokens,omitempty"`
-				ImageTokens int `json:"image_tokens,omitempty"`
-			} `json:"prompt_tokens_details,omitempty"`
-			CompletionTokensDetails struct {
-				AcceptedPredictionTokens int `json:"accepted_prediction_tokens,omitempty"`
-				RejectedPredictionTokens int `json:"rejected_prediction_tokens,omitempty"`
-				AudioTokens              int `json:"audio_tokens,omitempty"`
-				CachedTokens             int `json:"cached_tokens,omitempty"`
-				ImageTokens              int `json:"image_tokens,omitempty"`
-				ReasoningTokens          int `json:"reasoning_tokens,omitempty"`
-				TextTokens               int `json:"text_tokens,omitempty"`
-			} `json:"completion_tokens_details,omitempty"`
-			// Responses API / Image generation format (input_tokens/output_tokens)
-			responsesUsageDetails
-		} `json:"usage"`
-		Choices []extractedChoiceWithAnnotations `json:"choices,omitempty"`
-		Output  []extractedOutputItem            `json:"output,omitempty"`
-		// Responses API streaming event format: {"type":"response.completed","response":{"usage":{...}}}
-		Response struct {
-			Usage  *responsesUsageDetails `json:"usage,omitempty"`
-			Output []extractedOutputItem  `json:"output,omitempty"`
-		} `json:"response,omitempty"`
-	}
-
+	var resp tokenUsageResponseShape
 	if err := json.Unmarshal(body, &resp); err != nil {
 		return nil
 	}
+	return tokenUsageFromShape(&resp, opts)
+}
 
+// ExtractTotalTokensAndUsageWithOptions decodes a non-streaming OpenAI-shaped
+// response body exactly once and returns both numbers two independent
+// call sites used to compute from two independent full-body decodes (plan
+// item G — proxy.go's proxy-credential and direct-provider branches,
+// retry.go's fallback branch):
+//
+//   - totalTokens: the provider's own literal "usage.total_tokens" (falling
+//     back to "response.usage.total_tokens" for the Responses API streaming
+//     event shape) — this is what feeds the rate limiter's RPM/TPM
+//     accounting (p.rateLimiter.ConsumeTokens/ConsumeModelTokens).
+//   - usage: the derived *TokenUsage (PromptTokens/CompletionTokens/detail
+//     breakdowns) used for spend logging and metrics.
+//
+// These are NOT guaranteed to be the same number — total_tokens is whatever
+// the upstream provider chose to report, while usage.Total() is our own
+// PromptTokens+CompletionTokens sum; a provider could in principle report a
+// total_tokens that folds in something not separately broken out into either
+// of those two fields. That's why TotalTokens was folded as an extra field
+// into tokenUsageShapeUsage/responsesUsageDetails instead of being derived
+// from the *TokenUsage this function also returns: only the decode is
+// shared, never the computation.
+func ExtractTotalTokensAndUsageWithOptions(body []byte, opts TokenUsageExtractionOptions) (int, *TokenUsage) {
+	if len(body) == 0 {
+		return 0, nil
+	}
+	var resp tokenUsageResponseShape
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return 0, nil
+	}
+
+	totalTokens := 0
+	if resp.Usage.TotalTokens > 0 {
+		totalTokens = resp.Usage.TotalTokens
+	} else if resp.Response.Usage != nil {
+		totalTokens = resp.Response.Usage.TotalTokens
+	}
+
+	return totalTokens, tokenUsageFromShape(&resp, opts)
+}
+
+// tokenUsageFromShape computes the final *TokenUsage from an already-decoded
+// tokenUsageResponseShape — the shared tail end of both
+// ExtractTokenUsageWithOptions and ExtractTotalTokensAndUsageWithOptions.
+func tokenUsageFromShape(resp *tokenUsageResponseShape, opts TokenUsageExtractionOptions) *TokenUsage {
 	// Prefer Chat Completions tokens; fall back to Responses API / image tokens
+	promptTokensFromInputTokens := resp.Usage.PromptTokens == 0
 	promptTokens := resp.Usage.PromptTokens
 	if promptTokens == 0 {
 		promptTokens = resp.Usage.InputTokens
@@ -438,9 +522,21 @@ func ExtractTokenUsageWithOptions(body []byte, opts TokenUsageExtractionOptions)
 
 	// Merge detail fields: Chat Completions uses completion_tokens_details,
 	// Responses API uses output_tokens_details. Pick whichever is populated.
+	// Anthropic's usage object reports cache tokens as flat fields (cache_read_input_tokens,
+	// cache_creation_input_tokens) and its input_tokens is EXCLUSIVE of them, unlike the
+	// nested OpenAI/Responses API detail fields where prompt_tokens/input_tokens is INCLUSIVE.
+	// Track whether the flat Anthropic fields supplied the cache figures so promptTokens can
+	// be corrected back to the inclusive total CalculateTokenCosts expects.
+	anthropicFlatCacheRead := false
+	anthropicFlatCacheCreation := false
+
 	cachedTokens := resp.Usage.PromptTokensDetails.CachedTokens
 	if cachedTokens == 0 {
 		cachedTokens = resp.Usage.InputTokensDetails.CachedTokens
+	}
+	if cachedTokens == 0 && resp.Usage.CacheReadInputTokens > 0 {
+		cachedTokens = resp.Usage.CacheReadInputTokens
+		anthropicFlatCacheRead = true
 	}
 	cacheCreationTokens := resp.Usage.PromptTokensDetails.CacheCreationTokens
 	cacheCreation5mTokens := resp.Usage.PromptTokensDetails.CacheCreationTokenDetails.Ephemeral5mInputTokens
@@ -456,6 +552,19 @@ func ExtractTokenUsageWithOptions(body []byte, opts TokenUsageExtractionOptions)
 	}
 	if cacheCreationTokens == 0 {
 		cacheCreationTokens = resp.Usage.InputTokensDetails.CacheWriteTokens
+	}
+	if cacheCreationTokens == 0 {
+		cacheCreationTokens = resp.Usage.CacheCreationInputTokens
+		if cacheCreationTokens > 0 {
+			anthropicFlatCacheCreation = true
+		}
+	}
+	if cacheCreation5mTokens == 0 && cacheCreation1hTokens == 0 {
+		cacheCreation5mTokens = resp.Usage.CacheCreation.Ephemeral5mInputTokens
+		cacheCreation1hTokens = resp.Usage.CacheCreation.Ephemeral1hInputTokens
+		if cacheCreation5mTokens > 0 || cacheCreation1hTokens > 0 {
+			anthropicFlatCacheCreation = true
+		}
 	}
 	if cachedAudioTokens == 0 {
 		cachedAudioTokens = resp.Usage.InputTokensDetails.CachedAudioTokens
@@ -526,6 +635,14 @@ func ExtractTokenUsageWithOptions(body []byte, opts TokenUsageExtractionOptions)
 	}
 	if cacheCreationTokens == 0 {
 		cacheCreationTokens = cacheCreation5mTokens + cacheCreation1hTokens
+	}
+	// Anthropic's input_tokens excludes cache tokens; add them back so promptTokens
+	// matches the inclusive-total semantics CalculateTokenCosts subtracts cache from.
+	if promptTokensFromInputTokens && anthropicFlatCacheRead {
+		promptTokens += cachedTokens
+	}
+	if promptTokensFromInputTokens && anthropicFlatCacheCreation {
+		promptTokens += cacheCreationTokens
 	}
 	cachedTokens, cachedAudioTokens = converterutil.NormalizeCachedAudioBreakdown(cachedTokens, cachedAudioTokens)
 	audioIn = converterutil.NormalizeAudioInputTokens(

@@ -24,6 +24,16 @@ var hopByHopHeaders = map[string]bool{
 	"Upgrade":             true,
 }
 
+var allowedResponseHeaders = map[string]bool{
+	"Cache-Control":       true,
+	"Content-Disposition": true,
+	"Content-Range":       true,
+	"Content-Type":        true,
+	"Last-Modified":       true,
+	"Location":            true,
+	"Retry-After":         true,
+}
+
 // privacyHeaders are headers that reveal client IP or routing information.
 // These are added by reverse proxies/load balancers and must not be forwarded
 // to upstream AI providers to protect user privacy.
@@ -142,15 +152,41 @@ func copyHeadersSkipAuth(dst *http.Request, src *http.Request) {
 // Note: Content-Encoding is always skipped because Go's http.Client automatically
 // decompresses gzip/deflate responses, so the body is already decompressed.
 // The caller should compress the body if needed and set Content-Encoding appropriately.
-func copyResponseHeaders(w http.ResponseWriter, src http.Header, cred *config.CredentialConfig) {
+func (p *Proxy) copyResponseHeaders(w http.ResponseWriter, src http.Header, cred *config.CredentialConfig, stripIntegrityHeaders bool) {
 	for key, values := range src {
-		if shouldSkipResponseHeaderForClient(key, cred) {
+		canonicalKey := http.CanonicalHeaderKey(key)
+		if p.shouldSkipResponseHeaderForClient(canonicalKey, cred) {
+			continue
+		}
+		if stripIntegrityHeaders && isRepresentationIntegrityHeader(canonicalKey) {
+			continue
+		}
+		if strings.EqualFold(canonicalKey, HeaderAIRUsageAudioTokens) && w.Header().Get(HeaderAIRUsageAudioTokens) != "" {
 			continue
 		}
 		for _, value := range values {
-			w.Header().Add(key, value)
+			w.Header().Add(canonicalKey, value)
 		}
 	}
+}
+
+func (p *Proxy) setCredentialResponseHeader(w http.ResponseWriter, logCtx *RequestLogContext, credentialName string) {
+	if credentialName == "" && logCtx != nil {
+		credentialName = logCtx.ActualCredentialName
+	}
+	if p.responseHeaderMode == config.ResponseHeaderModeAllowlist || logCtx == nil || !logCtx.IsProxyRequest || credentialName == "" {
+		w.Header().Del("X-Credential-Name")
+		return
+	}
+	w.Header().Set("X-Credential-Name", credentialName)
+}
+
+func (p *Proxy) shouldSkipResponseHeaderForClient(key string, cred *config.CredentialConfig) bool {
+	canonical := http.CanonicalHeaderKey(key)
+	if p.responseHeaderMode == config.ResponseHeaderModeAllowlist && !allowedResponseHeaders[canonical] {
+		return true
+	}
+	return shouldSkipResponseHeaderForClient(canonical, cred)
 }
 
 func shouldSkipResponseHeaderForClient(key string, cred *config.CredentialConfig) bool {
