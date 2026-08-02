@@ -48,44 +48,188 @@ func extractOpenAITotalTokens(payload []byte) int {
 	return openAIResp.Response.Usage.TotalTokens
 }
 
-func extractTokensFromStreamingChunk(chunk string) int {
-	// Look for usage information in streaming chunks
-	lines := strings.Split(chunk, "\n")
-	for _, line := range lines {
-		if strings.HasPrefix(line, "data: ") {
-			jsonData := strings.TrimPrefix(line, "data: ")
-			if jsonData == "[DONE]" {
-				continue
-			}
+// extractMessagesTotalTokens reads Anthropic Messages API streaming usage
+// (message_delta event) for the rate limiter's crude per-chunk token count.
+// Kept as a fallback behind extractOpenAITotalTokens in extractTokensFromPayloads
+// so the extra unmarshal only runs for the minority Anthropic-shaped traffic,
+// not on every chunk of the majority Chat Completions/Responses/Vertex/Bedrock
+// hot path.
+func extractMessagesTotalTokens(payload []byte) int {
+	var event struct {
+		Type  string `json:"type"`
+		Usage struct {
+			InputTokens              int `json:"input_tokens"`
+			OutputTokens             int `json:"output_tokens"`
+			CacheReadInputTokens     int `json:"cache_read_input_tokens"`
+			CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
+		} `json:"usage"`
+	}
+	if err := json.Unmarshal(payload, &event); err != nil || event.Type != "message_delta" {
+		return 0
+	}
+	return event.Usage.InputTokens +
+		event.Usage.OutputTokens +
+		event.Usage.CacheReadInputTokens +
+		event.Usage.CacheCreationInputTokens
+}
 
-			tokens := extractOpenAITotalTokens([]byte(jsonData))
-			if tokens > 0 {
-				return tokens
-			}
+// extractOpenAITokensAndUsage runs both non-streaming token-accounting
+// consumers off a single shared decode of body (converter.ExtractTotalTokensAndUsageWithOptions):
+// the plain "total_tokens" count consumed by the rate limiter (RPM/TPM
+// enforcement) and the full converter.TokenUsage consumed by spend
+// logging/metrics. Replaces two independent full-body decodes
+// (extractTokensFromResponse + converter.ExtractTokenUsageWithOptions) at
+// each non-streaming response call site (proxy.go's proxy-credential and
+// direct-provider branches, retry.go's fallback branch) with one — see
+// ExtractTotalTokensAndUsageWithOptions's doc comment for why the two
+// returned numbers are computed independently (not guaranteed equal) even
+// though the decode is shared. Only wired in for the OpenAI-shaped
+// (config.ProviderTypeOpenAI) path, matching all three call sites this
+// replaces — none of them ever passed a Vertex/Gemini credType to
+// extractTokensFromResponse.
+func extractOpenAITokensAndUsage(body []byte, opts converter.TokenUsageExtractionOptions) (int, *converter.TokenUsage) {
+	return converter.ExtractTotalTokensAndUsageWithOptions(body, opts)
+}
+
+// extractTokensFromStreamingChunk splits chunk via the shared zero-copy
+// splitSSEPayloads (plan item C — one parse, no string(chunk) copy) and looks
+// for usage information in the resulting payloads. Not on any hot per-chunk
+// path itself (callers that already split the chunk once use
+// extractTokensFromPayloads directly with the shared sub-slices instead), but
+// kept as a convenience wrapper for callers that only have a raw chunk.
+func extractTokensFromStreamingChunk(chunk []byte) int {
+	return extractTokensFromPayloads(splitSSEPayloads(chunk, nil))
+}
+
+// extractTokensFromPayloads is the split-once building block behind
+// extractTokensFromStreamingChunk — callers that already hold
+// splitSSEPayloads' result (e.g. tokenCapturingWriter.Write) call this
+// directly to avoid re-splitting the same chunk.
+func extractTokensFromPayloads(payloads [][]byte) int {
+	for _, payload := range payloads {
+		if tokens := extractOpenAITotalTokens(payload); tokens > 0 {
+			return tokens
+		}
+		if tokens := extractMessagesTotalTokens(payload); tokens > 0 {
+			return tokens
 		}
 	}
 	return 0
 }
 
-// extractTokenUsageFromStreamingChunk parses full TokenUsage (prompt+completion+details)
-// from an SSE chunk. Returns nil if no usage data is found.
-func extractTokenUsageFromStreamingChunk(chunk string) *converter.TokenUsage {
-	return extractTokenUsageFromStreamingChunkWithOptions(chunk, converter.TokenUsageExtractionOptions{AudioInputIncludesCachedAudio: true})
+func extractTokenUsageFromStreamingChunkWithOptions(chunk []byte, opts converter.TokenUsageExtractionOptions) *converter.TokenUsage {
+	return extractTokenUsageFromPayloads(splitSSEPayloads(chunk, nil), opts)
 }
 
-func extractTokenUsageFromStreamingChunkWithOptions(chunk string, opts converter.TokenUsageExtractionOptions) *converter.TokenUsage {
-	lines := strings.Split(chunk, "\n")
-	for _, line := range lines {
-		if strings.HasPrefix(line, "data: ") {
-			jsonData := strings.TrimPrefix(line, "data: ")
-			if jsonData == "[DONE]" {
-				continue
+// extractTokenUsageFromPayloads is the split-once building block behind
+// extractTokenUsageFromStreamingChunkWithOptions — callers that already hold
+// splitSSEPayloads' result call this directly instead of re-splitting the
+// same chunk (plan item C).
+//
+// Merges usage across every payload in the batch (via MergeNonZero) rather
+// than returning the first non-nil hit: a single Read can surface multiple
+// SSE frames (e.g. a web-search-only annotation frame followed by the final
+// usage frame), and returning early on the first would silently drop the
+// real prompt/completion tokens carried by a later frame in the same batch.
+func extractTokenUsageFromPayloads(payloads [][]byte, opts converter.TokenUsageExtractionOptions) *converter.TokenUsage {
+	var merged *converter.TokenUsage
+	for _, payload := range payloads {
+		if usage := converter.ExtractTokenUsageWithOptions(payload, opts); usage != nil {
+			if merged == nil {
+				merged = &converter.TokenUsage{}
 			}
-			if usage := converter.ExtractTokenUsageWithOptions([]byte(jsonData), opts); usage != nil {
-				return usage
+			merged.MergeNonZero(usage)
+		}
+	}
+	return merged
+}
+
+// rawJSONString mirrors a `.(string)` type assertion on a decoded
+// interface{}, but on a json.RawMessage sub-slice: it only succeeds if the
+// raw value is actually a JSON string, matching the exists+ok semantics the
+// old map[string]interface{} code relied on (e.g. a JSON null or number
+// under the same key must NOT be treated as a present string).
+func rawJSONString(raw goccyjson.RawMessage) (string, bool) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || trimmed[0] != '"' {
+		return "", false
+	}
+	var s string
+	if err := goccyjson.Unmarshal(raw, &s); err != nil {
+		return "", false
+	}
+	return s, true
+}
+
+// rawJSONBool is the bool counterpart of rawJSONString.
+func rawJSONBool(raw goccyjson.RawMessage) (bool, bool) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || (trimmed[0] != 't' && trimmed[0] != 'f') {
+		return false, false
+	}
+	var v bool
+	if err := goccyjson.Unmarshal(raw, &v); err != nil {
+		return false, false
+	}
+	return v, true
+}
+
+// extractSessionIDFromRawBody mirrors the extra_body/root-level session ID
+// lookup that used to run against a fully-decoded map[string]interface{}.
+// extra_body is small, so decoding it as its own map[string]RawMessage is
+// cheap; the large fields of reqBody (messages/input) are never touched.
+func extractSessionIDFromRawBody(reqBody map[string]goccyjson.RawMessage) string {
+	if extraRaw, ok := reqBody["extra_body"]; ok {
+		var extraBody map[string]goccyjson.RawMessage
+		if err := goccyjson.Unmarshal(extraRaw, &extraBody); err == nil {
+			if sid, ok := rawJSONString(extraBody["litellm_session_id"]); ok && sid != "" {
+				return sid
+			}
+			if cid, ok := rawJSONString(extraBody["chat_id"]); ok && cid != "" {
+				return cid
+			}
+			if sid, ok := rawJSONString(extraBody["session_id"]); ok && sid != "" {
+				return sid
 			}
 		}
 	}
+	if sid, ok := rawJSONString(reqBody["session_id"]); ok && sid != "" {
+		return sid
+	}
+	if uid, ok := rawJSONString(reqBody["user"]); ok && uid != "" {
+		return uid
+	}
+	if sid, ok := rawJSONString(reqBody["safety_identifier"]); ok && sid != "" {
+		return sid
+	}
+	if pck, ok := rawJSONString(reqBody["prompt_cache_key"]); ok && pck != "" {
+		return pck
+	}
+	return ""
+}
+
+var rawIncludeUsageTrue = goccyjson.RawMessage("true")
+
+// injectIncludeUsageRaw ensures reqBody["stream_options"]["include_usage"] is
+// true, operating entirely on RawMessage sub-slices so the rest of reqBody
+// (in particular messages/input) is never boxed into interface{}.
+func injectIncludeUsageRaw(reqBody map[string]goccyjson.RawMessage) error {
+	streamOptionsRaw, exists := reqBody["stream_options"]
+	var streamOptions map[string]goccyjson.RawMessage
+	if exists {
+		_ = goccyjson.Unmarshal(streamOptionsRaw, &streamOptions)
+	}
+	if streamOptions == nil {
+		streamOptions = map[string]goccyjson.RawMessage{"include_usage": rawIncludeUsageTrue}
+	} else {
+		streamOptions["include_usage"] = rawIncludeUsageTrue
+	}
+
+	marshaled, err := goccyjson.Marshal(streamOptions)
+	if err != nil {
+		return err
+	}
+	reqBody["stream_options"] = marshaled
 	return nil
 }
 
@@ -103,45 +247,25 @@ func extractMetadataFromBody(body []byte, contentType string) (string, bool, str
 		return model, false, sessionID, body
 	}
 
-	// Parse JSON body
-	var reqBody map[string]interface{}
-	if err := json.Unmarshal(body, &reqBody); err != nil {
+	// Parse JSON body — RawMessage sub-slices instead of interface{} boxing:
+	// only six scalar top-level fields are ever read, so the large
+	// messages/input field never needs to be decoded (see doc comment above).
+	var reqBody map[string]goccyjson.RawMessage
+	if err := goccyjson.Unmarshal(body, &reqBody); err != nil {
 		return "", false, "", body // Return original if parsing fails
 	}
 
-	model, ok := reqBody["model"].(string)
+	model, ok := rawJSONString(reqBody["model"])
 	if !ok {
 		return "", false, "", body // Return original if model is missing
 	}
 
 	// Extract session ID (check extra_body first, then root level)
 	// Priority: litellm_session_id > chat_id > session_id > user > safety_identifier > prompt_cache_key
-	sessionID := ""
-	if extraBody, ok := reqBody["extra_body"].(map[string]interface{}); ok {
-		// Check litellm_session_id
-		if sid, ok := extraBody["litellm_session_id"].(string); ok && sid != "" {
-			sessionID = sid
-		} else if cid, ok := extraBody["chat_id"].(string); ok && cid != "" {
-			sessionID = cid
-		} else if sid, ok := extraBody["session_id"].(string); ok && sid != "" {
-			sessionID = sid
-		}
-	}
-	// Check at root level if not found in extra_body
-	if sessionID == "" {
-		if sid, ok := reqBody["session_id"].(string); ok && sid != "" {
-			sessionID = sid
-		} else if uid, ok := reqBody["user"].(string); ok && uid != "" {
-			sessionID = uid
-		} else if sid, ok := reqBody["safety_identifier"].(string); ok && sid != "" {
-			sessionID = sid
-		} else if pck, ok := reqBody["prompt_cache_key"].(string); ok && pck != "" {
-			sessionID = pck
-		}
-	}
+	sessionID := extractSessionIDFromRawBody(reqBody)
 
 	// Check if this is a streaming request
-	stream, ok := reqBody["stream"].(bool)
+	stream, ok := rawJSONBool(reqBody["stream"])
 	if !ok || !stream {
 		return model, false, sessionID, body // Not a streaming request, return as-is
 	}
@@ -155,22 +279,14 @@ func extractMetadataFromBody(body []byte, contentType string) (string, bool, str
 
 	if !isResponsesAPI {
 		// Ensure stream_options exists and include_usage is true (Chat Completions only)
-		streamOptions, exists := reqBody["stream_options"]
-		if !exists {
-			reqBody["stream_options"] = map[string]interface{}{
-				"include_usage": true,
-			}
-		} else if streamOptionsMap, ok := streamOptions.(map[string]interface{}); ok {
-			streamOptionsMap["include_usage"] = true
-		} else {
-			reqBody["stream_options"] = map[string]interface{}{
-				"include_usage": true,
-			}
+		if err := injectIncludeUsageRaw(reqBody); err != nil {
+			return model, stream, sessionID, body // Return original if marshaling fails
 		}
 	}
 
-	// Marshal back to JSON
-	modifiedBody, err := json.Marshal(reqBody)
+	// Marshal back to JSON — untouched fields (messages/input, etc.) pass
+	// through as raw bytes, no re-encoding cost.
+	modifiedBody, err := goccyjson.Marshal(reqBody)
 	if err != nil {
 		return model, stream, sessionID, body // Return original if marshaling fails
 	}

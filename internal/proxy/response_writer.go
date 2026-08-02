@@ -72,10 +72,12 @@ func (c *proxyStreamErrorCapture) Observe(chunk []byte) string {
 		}
 		frame := c.pending[:frameEnd]
 		c.pending = c.pending[frameEnd:]
-		if payload := extractStreamErrorEvent(frame); payload != "" {
-			c.payload = payload
-			c.pending = nil
-			return payload
+		if frameMayCarryStreamError(frame) {
+			if payload := extractStreamErrorEvent(frame); payload != "" {
+				c.payload = payload
+				c.pending = nil
+				return payload
+			}
 		}
 	}
 
@@ -93,8 +95,10 @@ func (c *proxyStreamErrorCapture) Finalize() string {
 		}
 		return c.payload
 	}
-	if payload := extractStreamErrorEvent(c.pending); payload != "" {
-		c.payload = payload
+	if frameMayCarryStreamError(c.pending) {
+		if payload := extractStreamErrorEvent(c.pending); payload != "" {
+			c.payload = payload
+		}
 	}
 	c.pending = nil
 	return c.payload
@@ -311,20 +315,33 @@ func (p *Proxy) writeProxyStreamingResponseWithTokens(
 	w.WriteHeader(resp.StatusCode)
 
 	var lastUsage *converter.TokenUsage
-	completion := newCompletionTokenAccumulator(tokenizerModelID)
+	completion := p.newCompletionTokenAccumulator(tokenizerModelID)
 	detectProviderStreamError := resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices
 	providerStreamError := &proxyStreamErrorCapture{}
+	var payloadBuf [][]byte
 	onChunk := func(chunk []byte) {
 		if detectProviderStreamError {
 			providerStreamError.Observe(chunk)
 		}
-		if usage := extractTokenUsageFromStreamingChunkWithOptions(string(chunk), tokenUsageOptions); usage != nil {
-			lastUsage = usage
-			if logCtx != nil {
-				logCtx.UsageSource = "provider"
+		// One split per chunk (plan item C), reused for both usage
+		// extraction and the completion accumulator.
+		payloadBuf = splitSSEPayloads(chunk, payloadBuf)
+		if chunkMayCarryTokenUsage(chunk) {
+			if usage := extractTokenUsageFromPayloads(payloadBuf, tokenUsageOptions); usage != nil {
+				// Merge rather than replace: a web-search-only chunk (no
+				// prompt/completion tokens) arriving separately from the
+				// usage chunk must not have its WebSearchRequests clobbered
+				// back to zero by a later chunk's usage read.
+				if lastUsage == nil {
+					lastUsage = &converter.TokenUsage{}
+				}
+				lastUsage.MergeNonZero(usage)
+				if logCtx != nil {
+					logCtx.UsageSource = "provider"
+				}
 			}
 		}
-		completion.AddChunk(chunk)
+		completion.AddPayloads(payloadBuf)
 	}
 
 	buildFallbackUsage := func() *converter.TokenUsage {

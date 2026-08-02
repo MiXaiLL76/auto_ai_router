@@ -144,6 +144,46 @@ func TestInjectCacheControl_NoSystem(t *testing.T) {
 	assert.Equal(t, "Current", messages[2].(map[string]interface{})["content"])
 }
 
+func TestInjectCacheControl_NativeSystemField(t *testing.T) {
+	// Native Anthropic Messages API requests carry the system prompt in a
+	// top-level "system" field, not as a role=="system" message.
+	body := []byte(`{
+		"model": "claude-3-5-sonnet",
+		"system": "You are helpful.",
+		"messages": [
+			{"role": "user", "content": "First question"},
+			{"role": "assistant", "content": "First answer"},
+			{"role": "user", "content": "Second question"}
+		]
+	}`)
+
+	result := InjectCacheControl(body)
+	m := parseBody(t, result)
+
+	sysContent := m["system"].([]interface{})
+	require.Len(t, sysContent, 1)
+	block := sysContent[0].(map[string]interface{})
+	assert.Equal(t, map[string]interface{}{"type": "ephemeral"}, block["cache_control"])
+	assert.Equal(t, "You are helpful.", block["text"])
+
+	messages := m["messages"].([]interface{})
+	histUser := messages[0].(map[string]interface{})["content"].([]interface{})
+	assert.Equal(t, map[string]interface{}{"type": "ephemeral"}, histUser[0].(map[string]interface{})["cache_control"])
+	assert.Equal(t, "Second question", messages[2].(map[string]interface{})["content"], "current turn must stay unmarked")
+}
+
+func TestInjectCacheControl_NativeSystemFieldAlreadyMarked(t *testing.T) {
+	body := []byte(`{
+		"model": "claude-3-5-sonnet",
+		"system": [{"type": "text", "text": "Be concise.", "cache_control": {"type": "ephemeral"}}],
+		"messages": [
+			{"role": "user", "content": "Hello"}
+		]
+	}`)
+
+	assert.Equal(t, body, InjectCacheControl(body))
+}
+
 func TestInjectCacheControl_InvalidJSON(t *testing.T) {
 	body := []byte(`not json`)
 	assert.Equal(t, body, InjectCacheControl(body))

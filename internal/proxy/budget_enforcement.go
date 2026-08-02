@@ -137,8 +137,18 @@ func (p *Proxy) estimateRequestCost(logCtx *RequestLogContext, publicModelID, mo
 	if modelPrice == nil {
 		return 0, false
 	}
+	// PromptTokens is skipped (not the whole estimate) when tiktoken_enabled
+	// is off — this only undercounts the prompt-token portion of the budget
+	// reservation, which is the documented trade-off of disabling local
+	// tokenization; it must not also disable reservation entirely (costKnown
+	// stays true — see estimateCompletionTokens below, which never touches
+	// the tokenizer and so needs no such gate).
+	var promptTokens int
+	if p.tiktokenEnabled {
+		promptTokens = estimatePromptTokensForModel(body, realModelID)
+	}
 	usage := &converter.TokenUsage{
-		PromptTokens:     estimatePromptTokensForModel(body, realModelID),
+		PromptTokens:     promptTokens,
 		CompletionTokens: p.estimateCompletionTokens(body),
 	}
 	return modelPrice.CalculateCost(usage), true

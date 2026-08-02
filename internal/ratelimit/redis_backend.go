@@ -529,8 +529,16 @@ func (b *RedisBackend) tryAllowAll(
 
 // batchCurrentStats returns [rpm, tpm] for each key in a single pipeline round-trip.
 func (b *RedisBackend) batchCurrentStats(ctx context.Context, keys []string) map[string][2]int {
+	out, _ := b.batchCurrentStatsErr(ctx, keys)
+	return out
+}
+
+// batchCurrentStatsErr is like batchCurrentStats but also surfaces the first
+// Redis command error encountered, for callers that need connectivity
+// visibility (e.g. HybridBackend.doSync — see redis_todo.md item 3).
+func (b *RedisBackend) batchCurrentStatsErr(ctx context.Context, keys []string) (map[string][2]int, error) {
 	if len(keys) == 0 {
-		return nil
+		return nil, nil
 	}
 	now := nowMS()
 	nowStr := fmt.Sprintf("%d", now)
@@ -556,17 +564,22 @@ func (b *RedisBackend) batchCurrentStats(ctx context.Context, keys []string) map
 	results := b.client.DoMulti(cmdCtx, cmds...)
 
 	out := make(map[string][2]int, len(keys))
+	var firstErr error
 	for i, key := range keys {
 		var rpm, tpm int64
 		if v, err := results[i*2].AsInt64(); err == nil {
 			rpm = v
+		} else if firstErr == nil {
+			firstErr = err
 		}
 		if v, err := results[i*2+1].AsInt64(); err == nil {
 			tpm = v
+		} else if firstErr == nil {
+			firstErr = err
 		}
 		out[key] = [2]int{int(rpm), int(tpm)}
 	}
-	return out
+	return out, firstErr
 }
 
 // setCurrentUsage is a no-op for the Redis backend: all replicas write to the

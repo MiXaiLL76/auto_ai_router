@@ -29,6 +29,7 @@ var proxiedPublicPaths = map[string]struct{}{
 	"/v1/embeddings":         {},
 	"/v1/images/generations": {},
 	"/v1/images/edits":       {},
+	"/v1/messages":           {},
 	"/v1/responses":          {},
 }
 
@@ -183,7 +184,7 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		// Capture request body for logging (detects streaming requests)
 		reqBody, isStreaming, err := captureRequestBody(req)
 		if err != nil {
-			r.proxy.ProxyRequest(w, req)
+			r.proxyPublicRequest(w, req)
 			return
 		}
 
@@ -191,7 +192,7 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		rc := newResponseCapture(w)
 
 		// Proxy the request through captured response
-		r.proxy.ProxyRequest(rc, req)
+		r.proxyPublicRequest(rc, req)
 
 		// Log error responses if enabled and status is error (4xx or 5xx).
 		// Skip logging for streaming requests to avoid memory overhead with large responses.
@@ -204,7 +205,7 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 			}
 		}
 	} else {
-		r.proxy.ProxyRequest(w, req)
+		r.proxyPublicRequest(w, req)
 	}
 }
 
