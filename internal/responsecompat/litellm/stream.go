@@ -13,13 +13,14 @@ import (
 )
 
 type streamReader struct {
-	ctx      Context
-	source   *bufio.Reader
-	pending  bytes.Buffer
-	id       string
-	created  any
-	choices  map[int]*choiceStreamState
-	sentDone bool
+	ctx             Context
+	source          *bufio.Reader
+	pending         bytes.Buffer
+	id              string
+	created         any
+	choices         map[int]*choiceStreamState
+	sentChatPrelude bool
+	sentDone        bool
 }
 
 type choiceStreamState struct {
@@ -103,6 +104,9 @@ func (r *streamReader) readFrame() error {
 		if !r.normalizeChatChunk(body) {
 			return nil
 		}
+		if !r.sentChatPrelude {
+			r.writeChatPrelude()
+		}
 	case "/v1/completions":
 		if !r.normalizeTextChunk(body) {
 			return nil
@@ -183,19 +187,27 @@ func (r *streamReader) normalizeChatChunk(body map[string]any) bool {
 	}
 	body["created"] = r.created
 
-	if usage, ok := body["usage"].(map[string]any); ok {
-		normalizeUsage(usage)
+	if _, ok := body["usage"].(map[string]any); ok {
 		if !r.ctx.IncludeUsage {
 			delete(body, "usage")
+		} else {
+			body["usage"] = liteLLMStreamUsage()
+			for _, field := range []string{"latency_checkpoint", "obfuscation", "service_tier", "system_fingerprint"} {
+				delete(body, field)
+			}
 		}
 	}
 
 	choices, _ := body["choices"].([]any)
+	normalizedChoices := make([]any, 0, len(choices))
 	for index, rawChoice := range choices {
 		choice, ok := rawChoice.(map[string]any)
 		if !ok {
 			continue
 		}
+		hadContentFilter := choice["content_filter_results"] != nil || choice["content_filter_offsets"] != nil
+		delete(choice, "content_filter_results")
+		delete(choice, "content_filter_offsets")
 		if choice["index"] == nil {
 			choice["index"] = index
 		}
@@ -213,6 +225,9 @@ func (r *streamReader) normalizeChatChunk(body map[string]any) bool {
 			delete(delta, "reasoning")
 		}
 		hasDelta := hasStreamDelta(delta)
+		if hadContentFilter && !hasDelta && choice["finish_reason"] == nil {
+			continue
+		}
 		if toolCalls, ok := delta["tool_calls"].([]any); ok && len(toolCalls) > 0 {
 			state.sawTools = true
 		}
@@ -231,14 +246,57 @@ func (r *streamReader) normalizeChatChunk(body map[string]any) bool {
 			if hasDelta {
 				choice["finish_reason"] = nil
 				state.pendingFinish = reason
-				continue
+			} else {
+				choice["finish_reason"] = reason
+				state.sentFinish = true
 			}
-			choice["finish_reason"] = reason
-			state.sentFinish = true
 		}
+		normalizedChoices = append(normalizedChoices, choice)
 	}
+	choices = normalizedChoices
+	body["choices"] = choices
 	_, hasUsage := body["usage"]
+	if hasUsage {
+		body["choices"] = r.usageChoices()
+	}
 	return len(choices) > 0 || hasUsage
+}
+
+func (r *streamReader) writeChatPrelude() {
+	r.writeFrame("data: " + string(mustMarshal(map[string]any{
+		"id":      "",
+		"object":  "chat.completion.chunk",
+		"created": r.created,
+		"model":   r.ctx.RequestedModel,
+		"choices": []any{},
+	})))
+	r.sentChatPrelude = true
+}
+
+func (r *streamReader) usageChoices() []any {
+	indexes := r.choiceIndexes(func(state *choiceStreamState) bool { return state.sentRole })
+	if len(indexes) == 0 {
+		indexes = []int{0}
+	}
+	choices := make([]any, 0, len(indexes))
+	for _, index := range indexes {
+		choices = append(choices, map[string]any{"index": index, "delta": map[string]any{}})
+	}
+	return choices
+}
+
+func liteLLMStreamUsage() map[string]any {
+	return map[string]any{
+		"completion_tokens":         0,
+		"completion_tokens_details": map[string]any{"reasoning_tokens": 0},
+		"prompt_tokens":             0,
+		"total_tokens":              0,
+	}
+}
+
+func mustMarshal(value any) []byte {
+	encoded, _ := json.Marshal(value)
+	return encoded
 }
 
 func hasStreamDelta(delta map[string]any) bool {
