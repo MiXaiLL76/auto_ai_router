@@ -199,7 +199,6 @@ func (r *streamReader) normalizeChatChunk(body map[string]any) bool {
 	}
 
 	choices, _ := body["choices"].([]any)
-	normalizedChoices := make([]any, 0, len(choices))
 	for index, rawChoice := range choices {
 		choice, ok := rawChoice.(map[string]any)
 		if !ok {
@@ -226,7 +225,7 @@ func (r *streamReader) normalizeChatChunk(body map[string]any) bool {
 		}
 		hasDelta := hasStreamDelta(delta)
 		if hadContentFilter && !hasDelta && choice["finish_reason"] == nil {
-			continue
+			return false
 		}
 		if toolCalls, ok := delta["tool_calls"].([]any); ok && len(toolCalls) > 0 {
 			state.sawTools = true
@@ -251,10 +250,7 @@ func (r *streamReader) normalizeChatChunk(body map[string]any) bool {
 				state.sentFinish = true
 			}
 		}
-		normalizedChoices = append(normalizedChoices, choice)
 	}
-	choices = normalizedChoices
-	body["choices"] = choices
 	_, hasUsage := body["usage"]
 	if hasUsage {
 		body["choices"] = r.usageChoices()

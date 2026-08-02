@@ -136,7 +136,8 @@ func TestChatStreamTracksEachChoiceIndependently(t *testing.T) {
 
 func TestChatStreamMatchesLiteLLMFraming(t *testing.T) {
 	source := strings.NewReader(
-		"data: {\"id\":\"air-id\",\"created\":0,\"model\":\"provider-model\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"}}]}\n\n" +
+		"data: {\"id\":\"\",\"created\":10,\"model\":\"public-model\",\"object\":\"chat.completion.chunk\",\"choices\":[]}\n\n" +
+			"data: {\"id\":\"air-id\",\"created\":0,\"model\":\"provider-model\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"\"}}]}\n\n" +
 			"data: {\"id\":\"air-id\",\"created\":0,\"model\":\"provider-model\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"hello\"}}]}\n\n" +
 			"data: {\"id\":\"air-id\",\"created\":0,\"model\":\"provider-model\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n" +
 			"data: {\"id\":\"air-id\",\"created\":0,\"model\":\"provider-model\",\"choices\":[{\"index\":0,\"delta\":{},\"content_filter_results\":{\"hate\":{\"filtered\":false}},\"content_filter_offsets\":{\"start_offset\":0}}]}\n\n" +
@@ -158,6 +159,21 @@ func TestChatStreamMatchesLiteLLMFraming(t *testing.T) {
 	require.NoError(t, json.Unmarshal([]byte(frames[0]), &prelude))
 	assert.Empty(t, prelude["choices"])
 	assert.Equal(t, "", prelude["id"])
+
+	var roleChunk map[string]any
+	require.NoError(t, json.Unmarshal([]byte(frames[1]), &roleChunk))
+	roleChoice := roleChunk["choices"].([]any)[0].(map[string]any)
+	assert.Equal(t, map[string]any{"content": "", "role": "assistant"}, roleChoice["delta"])
+
+	var contentChunk map[string]any
+	require.NoError(t, json.Unmarshal([]byte(frames[2]), &contentChunk))
+	contentChoice := contentChunk["choices"].([]any)[0].(map[string]any)
+	assert.Equal(t, map[string]any{"content": "hello"}, contentChoice["delta"])
+
+	var finishChunk map[string]any
+	require.NoError(t, json.Unmarshal([]byte(frames[3]), &finishChunk))
+	finishChoice := finishChunk["choices"].([]any)[0].(map[string]any)
+	assert.Equal(t, "stop", finishChoice["finish_reason"])
 
 	assert.NotContains(t, string(output), "content_filter_results")
 	assert.NotContains(t, string(output), "content_filter_offsets")

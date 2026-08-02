@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -162,6 +163,46 @@ func TestProxyRequestLiteLLMCompatibility(t *testing.T) {
 	choice := body["choices"].([]any)[0].(map[string]any)
 	assert.Equal(t, float64(0), choice["index"])
 	assert.Equal(t, "stop", choice["finish_reason"])
+}
+
+func TestProxyRequestLiteLLMStreamingCompatibility(t *testing.T) {
+	upstream := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		frames := []string{
+			`data: {"id":"","created":10,"model":"public-model","object":"chat.completion.chunk","choices":[]}` + "\n\n",
+			`data: {"id":"provider-id","created":10,"model":"provider-model","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"","role":"assistant"}}]}` + "\n\n",
+			`data: {"id":"provider-id","created":10,"model":"provider-model","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"stream"}}]}` + "\n\n",
+			`data: {"id":"provider-id","created":10,"model":"provider-model","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":"-ok"}}]}` + "\n\n",
+			`data: {"id":"provider-id","created":10,"model":"provider-model","object":"chat.completion.chunk","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}` + "\n\n",
+			`data: {"id":"","created":10,"model":"public-model","object":"chat.completion.chunk","choices":[{"index":0,"delta":{}}],"usage":{"completion_tokens":0,"prompt_tokens":0,"total_tokens":0,"completion_tokens_details":{"reasoning_tokens":0}}}` + "\n\n",
+			"data: [DONE]\n\n",
+		}
+		for _, frame := range frames {
+			_, _ = io.WriteString(w, frame)
+			w.(http.Flusher).Flush()
+		}
+	}))
+	defer upstream.Close()
+
+	prx := NewTestProxyBuilder().
+		WithSingleCredential("openai", "openai", upstream.URL, "upstream-key").
+		Build()
+	prx.responseCompat = compatlitellm.New()
+
+	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(
+		`{"model":"public-model","messages":[{"role":"user","content":"hello"}],"stream":true,"stream_options":{"include_usage":true}}`,
+	))
+	request.Header.Set("Authorization", "Bearer master-key")
+	request.Header.Set("Content-Type", "application/json")
+	recorder := httptest.NewRecorder()
+
+	prx.ProxyRequest(recorder, request)
+
+	require.Equal(t, http.StatusOK, recorder.Code)
+	assert.Contains(t, recorder.Body.String(), `"content":"stream"`)
+	assert.Contains(t, recorder.Body.String(), `"content":"-ok"`)
+	assert.Contains(t, recorder.Body.String(), `"finish_reason":"stop"`)
 }
 
 type failingStreamReader struct {
