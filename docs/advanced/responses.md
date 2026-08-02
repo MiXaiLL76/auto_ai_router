@@ -49,8 +49,8 @@ All standard Responses API parameters are supported. The table below lists the f
 Not all providers support every parameter. See the [Provider Support](#provider-support) table below.
 
 !!! note "Service tier is router-controlled"
-    `service_tier` is ignored and removed by Auto AI Router. Clients cannot select an upstream
-    service tier. The effective tier is controlled by the router/provider configuration.
+`service_tier` is ignored and removed by Auto AI Router. Clients cannot select an upstream
+service tier. The effective tier is controlled by the router/provider configuration.
 
 ## Content Types
 
