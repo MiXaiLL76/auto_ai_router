@@ -41,13 +41,16 @@ All standard Responses API parameters are supported. The table below lists the f
 | `truncation`             | string           | Truncation mode (`"auto"` \| `"disabled"`)              |
 | `user`                   | string           | User identifier                                         |
 | `parallel_tool_calls`    | boolean          | Allow parallel tool calls                               |
-| `service_tier`           | string           | Service tier hint                                       |
 | `prompt_cache_key`       | string           | Cache key for prompt caching                            |
 | `prompt_cache_retention` | string           | Cache retention duration                                |
 | `conversation`           | interface        | Conversation context (passthrough)                      |
 
 !!! note "Provider coverage"
 Not all providers support every parameter. See the [Provider Support](#provider-support) table below.
+
+!!! note "Service tier is router-controlled"
+`service_tier` is ignored and removed by Auto AI Router. Clients cannot select an upstream
+service tier. The effective tier is controlled by the router/provider configuration.
 
 ## Content Types
 

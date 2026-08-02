@@ -5,18 +5,18 @@ import (
 	"compress/flate"
 	"compress/gzip"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"mime"
 	"mime/multipart"
+	"net/textproto"
 	"strconv"
 	"strings"
 
-	// Used only by extractTokensFromResponse/extractOpenAITotalTokens below:
-	// decoding a small typed struct out of a response body that may contain a
-	// large unrelated payload (e.g. a 1536-float embedding vector) is ~6.5x
-	// faster with goccy (benchmarked) — its skip-past-unwanted-fields path
-	// beats encoding/json's by more than the removed-reflection story alone
-	// would suggest. Every other json.* call in this file stays on stdlib.
+	// Also used by request ingress sanitization below. RawMessage keeps large
+	// numbers and provider-specific fields byte-for-byte while the request map
+	// is inspected and selectively rebuilt.
 	goccyjson "github.com/goccy/go-json"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
@@ -233,41 +233,131 @@ func injectIncludeUsageRaw(reqBody map[string]goccyjson.RawMessage) error {
 	return nil
 }
 
-// extractMetadataFromBody extracts the model ID and session ID from the request body
-// and ensures stream_options.include_usage is true for streaming requests
-// Returns: model, streaming, sessionID, body
-func extractMetadataFromBody(body []byte, contentType string) (string, bool, string, []byte) {
-	// Check for empty body
-	if len(body) == 0 {
-		return "", false, "", body
+// stripClientControlledServiceTier removes the two request locations through
+// which clients may select a more expensive upstream service tier. It is
+// intentionally not recursive: service_tier in metadata, messages, or tool
+// schemas is user data and must be preserved.
+func stripClientControlledServiceTier(reqBody map[string]goccyjson.RawMessage) (bool, error) {
+	changed := false
+	if _, exists := reqBody["service_tier"]; exists {
+		delete(reqBody, "service_tier")
+		changed = true
 	}
 
-	if strings.HasPrefix(strings.ToLower(contentType), "multipart/form-data") {
-		model, sessionID := extractMetadataFromMultipartBody(body, contentType)
-		return model, false, sessionID, body
+	extraBodyRaw, exists := reqBody["extra_body"]
+	if !exists {
+		return changed, nil
 	}
+	trimmed := bytes.TrimSpace(extraBodyRaw)
+	if len(trimmed) == 0 || trimmed[0] != '{' {
+		return changed, nil
+	}
+
+	var extraBody map[string]goccyjson.RawMessage
+	if err := goccyjson.Unmarshal(extraBodyRaw, &extraBody); err != nil {
+		return changed, err
+	}
+	if _, exists := extraBody["service_tier"]; !exists {
+		return changed, nil
+	}
+
+	delete(extraBody, "service_tier")
+	sanitizedExtraBody, err := goccyjson.Marshal(extraBody)
+	if err != nil {
+		return true, err
+	}
+	reqBody["extra_body"] = sanitizedExtraBody
+	return true, nil
+}
+
+type sanitizedRequestBody struct {
+	Body      []byte
+	ModelID   string
+	Streaming bool
+	SessionID string
+	Changed   bool
+}
+
+var errInvalidMultipartRequestBody = errors.New("invalid multipart request body")
+
+type requestMultipartPart struct {
+	header textproto.MIMEHeader
+	data   []byte
+}
+
+func cloneMIMEHeader(header textproto.MIMEHeader) textproto.MIMEHeader {
+	clone := make(textproto.MIMEHeader, len(header))
+	for key, values := range header {
+		clone[key] = append([]string(nil), values...)
+	}
+	return clone
+}
+
+func invalidMultipartError(err error) error {
+	if err == nil {
+		return errInvalidMultipartRequestBody
+	}
+	return fmt.Errorf("%w: %v", errInvalidMultipartRequestBody, err)
+}
+
+func declaredMediaType(contentType string) string {
+	base, _, _ := strings.Cut(contentType, ";")
+	return strings.TrimSpace(base)
+}
+
+// sanitizeAndExtractRequestBody sanitizes client-controlled request fields at
+// the common ingress boundary before any provider, retry, or fallback body is
+// derived. Multipart bodies are parsed to completion even when no rewrite is
+// needed so malformed input cannot pass through after an early model part.
+func sanitizeAndExtractRequestBody(body []byte, contentType string) (sanitizedRequestBody, error) {
+	result := sanitizedRequestBody{Body: body}
+	mediaType, params, mediaTypeErr := mime.ParseMediaType(contentType)
+	if mediaTypeErr != nil {
+		if strings.EqualFold(mediaType, "multipart/form-data") ||
+			strings.EqualFold(declaredMediaType(contentType), "multipart/form-data") {
+			return sanitizedRequestBody{}, invalidMultipartError(mediaTypeErr)
+		}
+	} else if strings.EqualFold(mediaType, "multipart/form-data") {
+		return sanitizeMultipartRequestBody(body, params)
+	}
+	if len(body) == 0 {
+		return result, nil
+	}
+
+	return sanitizeJSONRequestBody(body)
+}
+
+func sanitizeJSONRequestBody(body []byte) (sanitizedRequestBody, error) {
+	result := sanitizedRequestBody{Body: body}
 
 	// Parse JSON body — RawMessage sub-slices instead of interface{} boxing:
 	// only six scalar top-level fields are ever read, so the large
 	// messages/input field never needs to be decoded (see doc comment above).
 	var reqBody map[string]goccyjson.RawMessage
 	if err := goccyjson.Unmarshal(body, &reqBody); err != nil {
-		return "", false, "", body // Return original if parsing fails
+		return result, nil // Existing invalid-body handling reports missing model.
+	}
+
+	changed, err := stripClientControlledServiceTier(reqBody)
+	if err != nil {
+		return sanitizedRequestBody{}, err
 	}
 
 	model, ok := rawJSONString(reqBody["model"])
 	if !ok {
-		return "", false, "", body // Return original if model is missing
+		return result, nil
 	}
+	result.ModelID = model
 
 	// Extract session ID (check extra_body first, then root level)
 	// Priority: litellm_session_id > chat_id > session_id > user > safety_identifier > prompt_cache_key
-	sessionID := extractSessionIDFromRawBody(reqBody)
+	result.SessionID = extractSessionIDFromRawBody(reqBody)
 
 	// Check if this is a streaming request
-	stream, ok := rawJSONBool(reqBody["stream"])
-	if !ok || !stream {
-		return model, false, sessionID, body // Not a streaming request, return as-is
+	stream, _ := rawJSONBool(reqBody["stream"])
+	result.Streaming = stream
+	if !stream && !changed {
+		return result, nil
 	}
 
 	// Responses API (/v1/responses) uses "input" instead of "messages" and does NOT
@@ -277,61 +367,150 @@ func extractMetadataFromBody(body []byte, contentType string) (string, bool, str
 	_, hasMessages := reqBody["messages"]
 	isResponsesAPI := hasInput && !hasMessages
 
-	if !isResponsesAPI {
+	if stream && !isResponsesAPI {
 		// Ensure stream_options exists and include_usage is true (Chat Completions only)
 		if err := injectIncludeUsageRaw(reqBody); err != nil {
-			return model, stream, sessionID, body // Return original if marshaling fails
+			return sanitizedRequestBody{}, err
 		}
+		changed = true
 	}
 
+	if !changed {
+		return result, nil
+	}
 	// Marshal back to JSON — untouched fields (messages/input, etc.) pass
 	// through as raw bytes, no re-encoding cost.
 	modifiedBody, err := goccyjson.Marshal(reqBody)
 	if err != nil {
-		return model, stream, sessionID, body // Return original if marshaling fails
+		return sanitizedRequestBody{}, err
 	}
 
-	return model, stream, sessionID, modifiedBody
+	result.Body = modifiedBody
+	result.Changed = true
+	return result, nil
 }
 
-func extractMetadataFromMultipartBody(body []byte, contentType string) (string, string) {
-	_, params, err := mime.ParseMediaType(contentType)
-	if err != nil {
-		return "", ""
-	}
+func sanitizeMultipartRequestBody(body []byte, params map[string]string) (sanitizedRequestBody, error) {
 	boundary := params["boundary"]
 	if boundary == "" {
-		return "", ""
+		return sanitizedRequestBody{}, invalidMultipartError(errors.New("missing boundary"))
+	}
+	boundaryValidator := multipart.NewWriter(io.Discard)
+	if err := boundaryValidator.SetBoundary(boundary); err != nil {
+		return sanitizedRequestBody{}, invalidMultipartError(err)
+	}
+	if !hasMultipartClosingBoundary(body, boundary) {
+		return sanitizedRequestBody{}, invalidMultipartError(errors.New("missing closing boundary"))
 	}
 
 	reader := multipart.NewReader(bytes.NewReader(body), boundary)
-	var model, sessionID string
+	result := sanitizedRequestBody{Body: body}
+	parts := make([]requestMultipartPart, 0, 8)
 	for {
 		part, err := reader.NextPart()
-		if err != nil {
+		if err == io.EOF {
 			break
 		}
-		if part.FileName() != "" {
-			continue
-		}
-		data, err := io.ReadAll(io.LimitReader(part, 1024*1024))
 		if err != nil {
+			return sanitizedRequestBody{}, invalidMultipartError(err)
+		}
+
+		disposition, dispositionParams, err := mime.ParseMediaType(part.Header.Get("Content-Disposition"))
+		if err != nil || !strings.EqualFold(disposition, "form-data") {
+			_ = part.Close()
+			if err == nil {
+				err = errors.New("invalid content disposition")
+			}
+			return sanitizedRequestBody{}, invalidMultipartError(err)
+		}
+		name := dispositionParams["name"]
+		_, hasFilename := dispositionParams["filename"]
+		data, readErr := io.ReadAll(part)
+		closeErr := part.Close()
+		if readErr != nil {
+			return sanitizedRequestBody{}, invalidMultipartError(readErr)
+		}
+		if closeErr != nil {
+			return sanitizedRequestBody{}, invalidMultipartError(closeErr)
+		}
+
+		if name == "service_tier" || name == "extra_body[service_tier]" || name == "extra_body.service_tier" {
+			result.Changed = true
 			continue
 		}
-		value := strings.TrimSpace(string(data))
-		if value == "" {
-			continue
-		}
-		switch part.FormName() {
-		case "model":
-			model = value
-		case "session_id", "user":
-			if sessionID == "" {
-				sessionID = value
+
+		if name == "extra_body" && !hasFilename {
+			trimmed := bytes.TrimSpace(data)
+			if len(trimmed) > 0 && trimmed[0] == '{' {
+				var extraBody map[string]goccyjson.RawMessage
+				if err := goccyjson.Unmarshal(data, &extraBody); err != nil {
+					return sanitizedRequestBody{}, invalidMultipartError(err)
+				}
+				if _, exists := extraBody["service_tier"]; exists {
+					delete(extraBody, "service_tier")
+					data, err = goccyjson.Marshal(extraBody)
+					if err != nil {
+						return sanitizedRequestBody{}, invalidMultipartError(err)
+					}
+					result.Changed = true
+				}
 			}
 		}
+
+		if !hasFilename {
+			value := strings.TrimSpace(string(data))
+			switch name {
+			case "model":
+				result.ModelID = value
+			case "session_id", "user":
+				if result.SessionID == "" {
+					result.SessionID = value
+				}
+			}
+		}
+
+		parts = append(parts, requestMultipartPart{
+			header: cloneMIMEHeader(part.Header),
+			data:   data,
+		})
 	}
-	return model, sessionID
+
+	if !result.Changed {
+		return result, nil
+	}
+
+	var rewritten bytes.Buffer
+	writer := multipart.NewWriter(&rewritten)
+	if err := writer.SetBoundary(boundary); err != nil {
+		return sanitizedRequestBody{}, invalidMultipartError(err)
+	}
+	for _, part := range parts {
+		dst, err := writer.CreatePart(part.header)
+		if err != nil {
+			return sanitizedRequestBody{}, invalidMultipartError(err)
+		}
+		if _, err := dst.Write(part.data); err != nil {
+			return sanitizedRequestBody{}, invalidMultipartError(err)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		return sanitizedRequestBody{}, invalidMultipartError(err)
+	}
+	result.Body = rewritten.Bytes()
+	return result, nil
+}
+
+func hasMultipartClosingBoundary(body []byte, boundary string) bool {
+	marker := []byte("--" + boundary + "--")
+	index := bytes.LastIndex(body, marker)
+	if index < 0 {
+		return false
+	}
+	if index > 0 && (index < 2 || !bytes.Equal(body[index-2:index], []byte("\r\n"))) {
+		return false
+	}
+	after := body[index+len(marker):]
+	return len(after) == 0 || bytes.HasPrefix(after, []byte("\r\n"))
 }
 
 func extractImageCountFromBody(body []byte, contentType string) int {
@@ -525,7 +704,7 @@ func extractTokensFromResponse(body []byte, credType config.ProviderType) int {
 }
 
 // injectStreamOptions ensures stream_options.include_usage is set in a Chat Completions request body.
-// Used after Responses API conversion where extractMetadataFromBody skipped injection.
+// Used after Responses API conversion where ingress sanitization skipped injection.
 func injectStreamOptions(body []byte) []byte {
 	var raw map[string]interface{}
 	if err := json.Unmarshal(body, &raw); err != nil {
