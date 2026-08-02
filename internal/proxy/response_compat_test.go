@@ -1,7 +1,9 @@
 package proxy
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -51,6 +53,65 @@ func TestResponseCompatibilityWriterTransformsStream(t *testing.T) {
 	assert.Equal(t, 1, strings.Count(recorder.Body.String(), "data: [DONE]"))
 }
 
+func TestResponseCompatibilityWriterDoesNotCompleteFailedStream(t *testing.T) {
+	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	request, info := withResponseCompatRequest(request)
+	info.RequestedModel = "public-model"
+
+	recorder := httptest.NewRecorder()
+	writer := newResponseCompatibilityWriter(recorder, compatlitellm.New(), request)
+	writer.Header().Set("Content-Type", "text/event-stream")
+	writer.WriteHeader(http.StatusOK)
+
+	streamErr := errors.New("upstream stream failed")
+	reader := &failingStreamReader{
+		body: []byte("data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"partial\"}}]}\n\n"),
+		err:  streamErr,
+	}
+	prx := NewTestProxyBuilder().Build()
+	err := prx.streamToClient(
+		context.Background(),
+		writer,
+		reader,
+		"credential",
+		"model",
+		"/v1/chat/completions",
+		nil,
+		nil,
+		nil,
+	)
+	require.ErrorIs(t, err, streamErr)
+	require.ErrorIs(t, writer.Close(), streamErr)
+	assert.Contains(t, recorder.Body.String(), "partial")
+	assert.NotContains(t, recorder.Body.String(), "finish_reason")
+	assert.NotContains(t, recorder.Body.String(), "data: [DONE]")
+}
+
+func TestResponseCompatibilityWriterPreservesInitialHeaders(t *testing.T) {
+	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	request, _ = withResponseCompatRequest(request)
+
+	recorder := httptest.NewRecorder()
+	recorder.Header().Set("Content-Security-Policy", "frame-ancestors 'none'")
+	recorder.Header().Set("X-Frame-Options", "DENY")
+	recorder.Header().Set("X-Content-Type-Options", "nosniff")
+	writer := newResponseCompatibilityWriter(recorder, compatlitellm.New(), request)
+	writer.Header().Set("Content-Type", "application/json")
+	_, err := writer.Write([]byte(`{
+		"model":"provider-model",
+		"choices":[{"message":{"content":"hello"},"finish_reason":"stop"}]
+	}`))
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+
+	assert.Equal(t, "frame-ancestors 'none'", recorder.Header().Get("Content-Security-Policy"))
+	assert.Equal(t, "DENY", recorder.Header().Get("X-Frame-Options"))
+	assert.Equal(t, "nosniff", recorder.Header().Get("X-Content-Type-Options"))
+	assert.Empty(t, recorder.Header().Get("llm_provider-content-security-policy"))
+	assert.Empty(t, recorder.Header().Get("llm_provider-x-frame-options"))
+	assert.Empty(t, recorder.Header().Get("llm_provider-x-content-type-options"))
+}
+
 func TestProxyRequestLiteLLMCompatibility(t *testing.T) {
 	upstream := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -87,4 +148,18 @@ func TestProxyRequestLiteLLMCompatibility(t *testing.T) {
 	choice := body["choices"].([]any)[0].(map[string]any)
 	assert.Equal(t, float64(0), choice["index"])
 	assert.Equal(t, "stop", choice["finish_reason"])
+}
+
+type failingStreamReader struct {
+	body []byte
+	err  error
+	read bool
+}
+
+func (r *failingStreamReader) Read(target []byte) (int, error) {
+	if r.read {
+		return 0, r.err
+	}
+	r.read = true
+	return copy(target, r.body), r.err
 }

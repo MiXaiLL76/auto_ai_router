@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"sort"
 	"strings"
 	"time"
 
@@ -12,20 +13,28 @@ import (
 )
 
 type streamReader struct {
-	ctx           Context
-	source        *bufio.Reader
-	pending       bytes.Buffer
-	id            string
-	created       any
+	ctx      Context
+	source   *bufio.Reader
+	pending  bytes.Buffer
+	id       string
+	created  any
+	choices  map[int]*choiceStreamState
+	sentDone bool
+}
+
+type choiceStreamState struct {
 	sentRole      bool
 	sentFinish    bool
-	sentDone      bool
 	sawTools      bool
 	pendingFinish string
 }
 
 func newStreamReader(ctx Context, source io.Reader) io.Reader {
-	return &streamReader{ctx: ctx, source: bufio.NewReader(source)}
+	return &streamReader{
+		ctx:     ctx,
+		source:  bufio.NewReader(source),
+		choices: make(map[int]*choiceStreamState),
+	}
 }
 
 func (r *streamReader) Read(target []byte) (int, error) {
@@ -108,7 +117,7 @@ func (r *streamReader) readFrame() error {
 	}
 	lines[dataIndex] = "data: " + string(encoded)
 	r.writeFrame(strings.Join(lines, "\n"))
-	r.writePendingFinish()
+	r.writePendingFinishes()
 	return nil
 }
 
@@ -148,7 +157,6 @@ func (r *streamReader) normalizeTextChunk(body map[string]any) bool {
 		}
 		if reason, _ := choice["finish_reason"].(string); reason != "" {
 			choice["finish_reason"] = mapFinishReason(reason)
-			r.sentFinish = true
 		}
 	}
 	_, hasUsage := body["usage"]
@@ -191,6 +199,8 @@ func (r *streamReader) normalizeChatChunk(body map[string]any) bool {
 		if choice["index"] == nil {
 			choice["index"] = index
 		}
+		choiceIndex := streamChoiceIndex(choice, index)
+		state := r.choiceState(choiceIndex)
 		delta, ok := choice["delta"].(map[string]any)
 		if !ok {
 			delta = map[string]any{}
@@ -204,27 +214,27 @@ func (r *streamReader) normalizeChatChunk(body map[string]any) bool {
 		}
 		hasDelta := hasStreamDelta(delta)
 		if toolCalls, ok := delta["tool_calls"].([]any); ok && len(toolCalls) > 0 {
-			r.sawTools = true
+			state.sawTools = true
 		}
-		if !r.sentRole {
+		if !state.sentRole {
 			delta["role"] = "assistant"
-			r.sentRole = true
+			state.sentRole = true
 		} else {
 			delete(delta, "role")
 		}
 
 		if reason, _ := choice["finish_reason"].(string); reason != "" {
-			if reason == "stop" && r.sawTools {
+			if reason == "stop" && state.sawTools {
 				reason = "tool_calls"
 			}
 			reason = mapFinishReason(reason)
 			if hasDelta {
 				choice["finish_reason"] = nil
-				r.pendingFinish = reason
+				state.pendingFinish = reason
 				continue
 			}
 			choice["finish_reason"] = reason
-			r.sentFinish = true
+			state.sentFinish = true
 		}
 	}
 	_, hasUsage := body["usage"]
@@ -240,27 +250,42 @@ func hasStreamDelta(delta map[string]any) bool {
 	return false
 }
 
-func (r *streamReader) writePendingFinish() {
-	if r.pendingFinish == "" {
+func streamChoiceIndex(choice map[string]any, fallback int) int {
+	value, ok := choice["index"].(float64)
+	if !ok || value < 0 || value != float64(int(value)) {
+		return fallback
+	}
+	return int(value)
+}
+
+func (r *streamReader) choiceState(index int) *choiceStreamState {
+	state := r.choices[index]
+	if state == nil {
+		state = &choiceStreamState{}
+		r.choices[index] = state
+	}
+	return state
+}
+
+func (r *streamReader) writePendingFinishes() {
+	indexes := r.choiceIndexes(func(state *choiceStreamState) bool {
+		return state.pendingFinish != ""
+	})
+	if len(indexes) == 0 {
 		return
 	}
-	body := map[string]any{
-		"id":      r.id,
-		"object":  "chat.completion.chunk",
-		"created": r.created,
-		"model":   r.ctx.RequestedModel,
-		"choices": []any{
-			map[string]any{
-				"index":         0,
-				"delta":         map[string]any{"content": nil},
-				"finish_reason": r.pendingFinish,
-			},
-		},
+
+	choices := make([]any, 0, len(indexes))
+	for _, index := range indexes {
+		state := r.choices[index]
+		choices = append(choices, terminalChoice(index, state.pendingFinish))
+		state.pendingFinish = ""
+		state.sentFinish = true
 	}
+
+	body := r.terminalChunk(choices)
 	encoded, _ := json.Marshal(stripNulls(body, false))
 	r.writeFrame("data: " + string(encoded))
-	r.pendingFinish = ""
-	r.sentFinish = true
 }
 
 func (r *streamReader) normalizeResponsesChunk(body map[string]any) {
@@ -276,25 +301,51 @@ func (r *streamReader) finish() {
 	if r.sentDone {
 		return
 	}
-	if r.ctx.Endpoint == "/v1/chat/completions" && !r.sentFinish && r.sentRole {
-		body := map[string]any{
-			"id":      r.id,
-			"object":  "chat.completion.chunk",
-			"created": r.created,
-			"model":   r.ctx.RequestedModel,
-			"choices": []any{
-				map[string]any{
-					"index":         0,
-					"delta":         map[string]any{"content": nil},
-					"finish_reason": "stop",
-				},
-			},
+	if r.ctx.Endpoint == "/v1/chat/completions" {
+		indexes := r.choiceIndexes(func(state *choiceStreamState) bool {
+			return state.sentRole && !state.sentFinish
+		})
+		if len(indexes) > 0 {
+			choices := make([]any, 0, len(indexes))
+			for _, index := range indexes {
+				choices = append(choices, terminalChoice(index, "stop"))
+				r.choices[index].sentFinish = true
+			}
+			encoded, _ := json.Marshal(stripNulls(r.terminalChunk(choices), false))
+			r.writeFrame("data: " + string(encoded))
 		}
-		encoded, _ := json.Marshal(stripNulls(body, false))
-		r.writeFrame("data: " + string(encoded))
 	}
 	r.writeFrame("data: [DONE]")
 	r.sentDone = true
+}
+
+func (r *streamReader) choiceIndexes(include func(*choiceStreamState) bool) []int {
+	indexes := make([]int, 0, len(r.choices))
+	for index, state := range r.choices {
+		if include(state) {
+			indexes = append(indexes, index)
+		}
+	}
+	sort.Ints(indexes)
+	return indexes
+}
+
+func (r *streamReader) terminalChunk(choices []any) map[string]any {
+	return map[string]any{
+		"id":      r.id,
+		"object":  "chat.completion.chunk",
+		"created": r.created,
+		"model":   r.ctx.RequestedModel,
+		"choices": choices,
+	}
+}
+
+func terminalChoice(index int, finishReason string) map[string]any {
+	return map[string]any{
+		"index":         index,
+		"delta":         map[string]any{"content": nil},
+		"finish_reason": finishReason,
+	}
 }
 
 func (r *streamReader) writeFrame(frame string) {

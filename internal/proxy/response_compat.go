@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 
@@ -13,6 +14,10 @@ import (
 )
 
 type responseCompatContextKey struct{}
+
+type responseStreamErrorSink interface {
+	setStreamError(error)
+}
 
 type responseCompatRequest struct {
 	RequestID      string
@@ -41,17 +46,19 @@ func clientRequestedStreamUsage(body []byte) bool {
 }
 
 type responseCompatibilityWriter struct {
-	target      http.ResponseWriter
-	transformer *compatlitellm.Transformer
-	request     *http.Request
-	header      http.Header
-	body        bytes.Buffer
-	statusCode  int
-	stream      bool
-	streamPipe  *io.PipeWriter
-	streamDone  chan error
-	closeOnce   sync.Once
-	closeErr    error
+	target         http.ResponseWriter
+	transformer    *compatlitellm.Transformer
+	request        *http.Request
+	header         http.Header
+	initialHeaders http.Header
+	body           bytes.Buffer
+	statusCode     int
+	stream         bool
+	streamPipe     *io.PipeWriter
+	streamDone     chan error
+	streamErr      error
+	closeOnce      sync.Once
+	closeErr       error
 }
 
 func newResponseCompatibilityWriter(
@@ -59,11 +66,13 @@ func newResponseCompatibilityWriter(
 	transformer *compatlitellm.Transformer,
 	request *http.Request,
 ) *responseCompatibilityWriter {
+	initial := target.Header().Clone()
 	return &responseCompatibilityWriter{
-		target:      target,
-		transformer: transformer,
-		request:     request,
-		header:      target.Header().Clone(),
+		target:         target,
+		transformer:    transformer,
+		request:        request,
+		header:         initial.Clone(),
+		initialHeaders: initial,
 	}
 }
 
@@ -104,24 +113,36 @@ func (w *responseCompatibilityWriter) Unwrap() http.ResponseWriter {
 	return w.target
 }
 
+func (w *responseCompatibilityWriter) setStreamError(err error) {
+	if w.streamErr == nil {
+		w.streamErr = err
+	}
+}
+
 func (w *responseCompatibilityWriter) Close() error {
 	w.closeOnce.Do(func() {
 		if w.statusCode == 0 {
 			w.statusCode = http.StatusOK
 		}
 		if w.stream {
-			w.closeErr = w.streamPipe.Close()
+			if w.streamErr != nil {
+				w.closeErr = w.streamPipe.CloseWithError(w.streamErr)
+			} else {
+				w.closeErr = w.streamPipe.Close()
+			}
 			if streamErr := <-w.streamDone; w.closeErr == nil {
 				w.closeErr = streamErr
 			}
 			return
 		}
 
+		providerHeaders, preservedHeaders := w.splitHeaders()
 		result := w.transformer.Transform(w.compatContext(), compatlitellm.Response{
 			StatusCode: w.statusCode,
-			Headers:    w.header,
+			Headers:    providerHeaders,
 			Body:       w.body.Bytes(),
 		})
+		mergeHeaders(result.Headers, preservedHeaders)
 		copyHeaders(w.target.Header(), result.Headers)
 		w.target.Header().Set("Content-Length", itoa(len(result.Body)))
 		w.target.WriteHeader(result.StatusCode)
@@ -134,7 +155,9 @@ func (w *responseCompatibilityWriter) Close() error {
 
 func (w *responseCompatibilityWriter) startStream() {
 	w.stream = true
-	headers := w.transformer.TransformHeaders(w.compatContext(), w.header)
+	providerHeaders, preservedHeaders := w.splitHeaders()
+	headers := w.transformer.TransformHeaders(w.compatContext(), providerHeaders)
+	mergeHeaders(headers, preservedHeaders)
 	copyHeaders(w.target.Header(), headers)
 	w.target.WriteHeader(w.statusCode)
 
@@ -147,6 +170,18 @@ func (w *responseCompatibilityWriter) startStream() {
 		_ = reader.CloseWithError(err)
 		w.streamDone <- err
 	}()
+}
+
+func (w *responseCompatibilityWriter) splitHeaders() (http.Header, http.Header) {
+	provider := w.header.Clone()
+	preserved := make(http.Header)
+	for key, initialValues := range w.initialHeaders {
+		if slices.Equal(provider.Values(key), initialValues) {
+			preserved[key] = append([]string(nil), initialValues...)
+			provider.Del(key)
+		}
+	}
+	return provider, preserved
 }
 
 func (w *responseCompatibilityWriter) compatContext() compatlitellm.Context {
@@ -163,6 +198,12 @@ func copyHeaders(target, source http.Header) {
 	for key := range target {
 		target.Del(key)
 	}
+	for key, values := range source {
+		target[key] = append([]string(nil), values...)
+	}
+}
+
+func mergeHeaders(target, source http.Header) {
 	for key, values := range source {
 		target[key] = append([]string(nil), values...)
 	}

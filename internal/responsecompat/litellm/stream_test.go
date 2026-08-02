@@ -94,6 +94,46 @@ func TestChatStreamMovesFinishReasonToTerminalChunk(t *testing.T) {
 	assert.Equal(t, "[DONE]", frames[2])
 }
 
+func TestChatStreamTracksEachChoiceIndependently(t *testing.T) {
+	source := strings.NewReader(
+		"data: {\"model\":\"provider-model\",\"choices\":[" +
+			"{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{}\"}}]},\"finish_reason\":\"stop\"}," +
+			"{\"index\":1,\"delta\":{\"content\":\"alternative\"},\"finish_reason\":\"stop\"}" +
+			"]}\n\n" +
+			"data: [DONE]\n\n",
+	)
+	output, err := io.ReadAll(New().Stream(Context{
+		Endpoint:       "/v1/chat/completions",
+		RequestedModel: "public-model",
+	}, source))
+	require.NoError(t, err)
+
+	frames := splitDataFrames(string(output))
+	require.Len(t, frames, 3)
+
+	var content map[string]any
+	require.NoError(t, json.Unmarshal([]byte(frames[0]), &content))
+	contentChoices := content["choices"].([]any)
+	require.Len(t, contentChoices, 2)
+	for _, rawChoice := range contentChoices {
+		choice := rawChoice.(map[string]any)
+		assert.NotContains(t, choice, "finish_reason")
+		assert.Equal(t, "assistant", choice["delta"].(map[string]any)["role"])
+	}
+
+	var terminal map[string]any
+	require.NoError(t, json.Unmarshal([]byte(frames[1]), &terminal))
+	terminalChoices := terminal["choices"].([]any)
+	require.Len(t, terminalChoices, 2)
+	first := terminalChoices[0].(map[string]any)
+	second := terminalChoices[1].(map[string]any)
+	assert.Equal(t, float64(0), first["index"])
+	assert.Equal(t, "tool_calls", first["finish_reason"])
+	assert.Equal(t, float64(1), second["index"])
+	assert.Equal(t, "stop", second["finish_reason"])
+	assert.Equal(t, "[DONE]", frames[2])
+}
+
 func splitDataFrames(stream string) []string {
 	var frames []string
 	for _, frame := range strings.Split(strings.TrimSpace(stream), "\n\n") {

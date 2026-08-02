@@ -1341,6 +1341,9 @@ func (p *Proxy) streamToClient(
 				}
 			}
 			if err != io.EOF {
+				if sink, ok := w.(responseStreamErrorSink); ok {
+					sink.setStreamError(err)
+				}
 				p.logStreamHandlerError(ctx, "Streaming read error", err, "credential", credName)
 				return err
 			}
