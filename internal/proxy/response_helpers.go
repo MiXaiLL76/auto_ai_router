@@ -11,12 +11,9 @@ import (
 	"strconv"
 	"strings"
 
-	// Used only by extractTokensFromResponse/extractOpenAITotalTokens below:
-	// decoding a small typed struct out of a response body that may contain a
-	// large unrelated payload (e.g. a 1536-float embedding vector) is ~6.5x
-	// faster with goccy (benchmarked) — its skip-past-unwanted-fields path
-	// beats encoding/json's by more than the removed-reflection story alone
-	// would suggest. Every other json.* call in this file stays on stdlib.
+	// Also used by request ingress sanitization below. RawMessage keeps large
+	// numbers and provider-specific fields byte-for-byte while the request map
+	// is inspected and selectively rebuilt.
 	goccyjson "github.com/goccy/go-json"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
@@ -89,61 +86,113 @@ func extractTokenUsageFromStreamingChunkWithOptions(chunk string, opts converter
 	return nil
 }
 
-// extractMetadataFromBody extracts the model ID and session ID from the request body
-// and ensures stream_options.include_usage is true for streaming requests
-// Returns: model, streaming, sessionID, body
-func extractMetadataFromBody(body []byte, contentType string) (string, bool, string, []byte) {
+// stripClientControlledServiceTier removes the two request locations through
+// which clients may select a more expensive upstream service tier. It is
+// intentionally not recursive: service_tier in metadata, messages, or tool
+// schemas is user data and must be preserved.
+func stripClientControlledServiceTier(reqBody map[string]goccyjson.RawMessage) (bool, error) {
+	changed := false
+	if _, exists := reqBody["service_tier"]; exists {
+		delete(reqBody, "service_tier")
+		changed = true
+	}
+
+	extraBodyRaw, exists := reqBody["extra_body"]
+	if !exists {
+		return changed, nil
+	}
+	trimmed := bytes.TrimSpace(extraBodyRaw)
+	if len(trimmed) == 0 || trimmed[0] != '{' {
+		return changed, nil
+	}
+
+	var extraBody map[string]goccyjson.RawMessage
+	if err := goccyjson.Unmarshal(extraBodyRaw, &extraBody); err != nil {
+		return changed, err
+	}
+	if _, exists := extraBody["service_tier"]; !exists {
+		return changed, nil
+	}
+
+	delete(extraBody, "service_tier")
+	sanitizedExtraBody, err := goccyjson.Marshal(extraBody)
+	if err != nil {
+		return true, err
+	}
+	reqBody["extra_body"] = sanitizedExtraBody
+	return true, nil
+}
+
+func rawString(raw goccyjson.RawMessage) string {
+	var value string
+	if err := goccyjson.Unmarshal(raw, &value); err != nil {
+		return ""
+	}
+	return value
+}
+
+func rawBool(raw goccyjson.RawMessage) bool {
+	var value bool
+	return goccyjson.Unmarshal(raw, &value) == nil && value
+}
+
+func extractSessionID(reqBody map[string]goccyjson.RawMessage) string {
+	// Priority: litellm_session_id > chat_id > session_id > user >
+	// safety_identifier > prompt_cache_key.
+	if extraBodyRaw, exists := reqBody["extra_body"]; exists {
+		var extraBody map[string]goccyjson.RawMessage
+		if goccyjson.Unmarshal(extraBodyRaw, &extraBody) == nil {
+			for _, key := range []string{"litellm_session_id", "chat_id", "session_id"} {
+				if value := rawString(extraBody[key]); value != "" {
+					return value
+				}
+			}
+		}
+	}
+	for _, key := range []string{"session_id", "user", "safety_identifier", "prompt_cache_key"} {
+		if value := rawString(reqBody[key]); value != "" {
+			return value
+		}
+	}
+	return ""
+}
+
+// extractMetadataFromBody extracts the model ID and session ID, removes
+// client-controlled service_tier, and ensures stream_options.include_usage is
+// true for streaming Chat Completions requests.
+// Returns: model, streaming, sessionID, body, error.
+func extractMetadataFromBody(body []byte, contentType string) (string, bool, string, []byte, error) {
 	// Check for empty body
 	if len(body) == 0 {
-		return "", false, "", body
+		return "", false, "", body, nil
 	}
 
 	if strings.HasPrefix(strings.ToLower(contentType), "multipart/form-data") {
 		model, sessionID := extractMetadataFromMultipartBody(body, contentType)
-		return model, false, sessionID, body
+		return model, false, sessionID, body, nil
 	}
 
 	// Parse JSON body
-	var reqBody map[string]interface{}
-	if err := json.Unmarshal(body, &reqBody); err != nil {
-		return "", false, "", body // Return original if parsing fails
+	var reqBody map[string]goccyjson.RawMessage
+	if err := goccyjson.Unmarshal(body, &reqBody); err != nil {
+		return "", false, "", body, nil // Existing invalid-body handling reports missing model.
 	}
 
-	model, ok := reqBody["model"].(string)
-	if !ok {
-		return "", false, "", body // Return original if model is missing
+	changed, err := stripClientControlledServiceTier(reqBody)
+	if err != nil {
+		return "", false, "", nil, err
 	}
 
-	// Extract session ID (check extra_body first, then root level)
-	// Priority: litellm_session_id > chat_id > session_id > user > safety_identifier > prompt_cache_key
-	sessionID := ""
-	if extraBody, ok := reqBody["extra_body"].(map[string]interface{}); ok {
-		// Check litellm_session_id
-		if sid, ok := extraBody["litellm_session_id"].(string); ok && sid != "" {
-			sessionID = sid
-		} else if cid, ok := extraBody["chat_id"].(string); ok && cid != "" {
-			sessionID = cid
-		} else if sid, ok := extraBody["session_id"].(string); ok && sid != "" {
-			sessionID = sid
-		}
+	model := rawString(reqBody["model"])
+	if model == "" {
+		return "", false, "", body, nil
 	}
-	// Check at root level if not found in extra_body
-	if sessionID == "" {
-		if sid, ok := reqBody["session_id"].(string); ok && sid != "" {
-			sessionID = sid
-		} else if uid, ok := reqBody["user"].(string); ok && uid != "" {
-			sessionID = uid
-		} else if sid, ok := reqBody["safety_identifier"].(string); ok && sid != "" {
-			sessionID = sid
-		} else if pck, ok := reqBody["prompt_cache_key"].(string); ok && pck != "" {
-			sessionID = pck
-		}
-	}
+	sessionID := extractSessionID(reqBody)
 
 	// Check if this is a streaming request
-	stream, ok := reqBody["stream"].(bool)
-	if !ok || !stream {
-		return model, false, sessionID, body // Not a streaming request, return as-is
+	stream := rawBool(reqBody["stream"])
+	if !stream && !changed {
+		return model, false, sessionID, body, nil
 	}
 
 	// Responses API (/v1/responses) uses "input" instead of "messages" and does NOT
@@ -153,29 +202,31 @@ func extractMetadataFromBody(body []byte, contentType string) (string, bool, str
 	_, hasMessages := reqBody["messages"]
 	isResponsesAPI := hasInput && !hasMessages
 
-	if !isResponsesAPI {
+	if stream && !isResponsesAPI {
 		// Ensure stream_options exists and include_usage is true (Chat Completions only)
-		streamOptions, exists := reqBody["stream_options"]
-		if !exists {
-			reqBody["stream_options"] = map[string]interface{}{
-				"include_usage": true,
-			}
-		} else if streamOptionsMap, ok := streamOptions.(map[string]interface{}); ok {
-			streamOptionsMap["include_usage"] = true
-		} else {
-			reqBody["stream_options"] = map[string]interface{}{
-				"include_usage": true,
-			}
+		streamOptions := make(map[string]goccyjson.RawMessage)
+		streamOptionsRaw, exists := reqBody["stream_options"]
+		if !exists || goccyjson.Unmarshal(streamOptionsRaw, &streamOptions) != nil || streamOptions == nil {
+			streamOptions = make(map[string]goccyjson.RawMessage)
 		}
+		streamOptions["include_usage"] = goccyjson.RawMessage("true")
+		marshaledStreamOptions, marshalErr := goccyjson.Marshal(streamOptions)
+		if marshalErr != nil {
+			return model, stream, sessionID, nil, marshalErr
+		}
+		reqBody["stream_options"] = marshaledStreamOptions
+		changed = true
 	}
 
-	// Marshal back to JSON
-	modifiedBody, err := json.Marshal(reqBody)
+	if !changed {
+		return model, stream, sessionID, body, nil
+	}
+	modifiedBody, err := goccyjson.Marshal(reqBody)
 	if err != nil {
-		return model, stream, sessionID, body // Return original if marshaling fails
+		return model, stream, sessionID, nil, err
 	}
 
-	return model, stream, sessionID, modifiedBody
+	return model, stream, sessionID, modifiedBody, nil
 }
 
 func extractMetadataFromMultipartBody(body []byte, contentType string) (string, string) {

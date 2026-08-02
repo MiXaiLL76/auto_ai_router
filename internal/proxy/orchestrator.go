@@ -529,7 +529,16 @@ func (p *Proxy) readRequestBodyAndSelectModel(
 		return nil, "", "", false, false
 	}
 
-	modelID, streaming, sessionID, body := extractMetadataFromBody(body, r.Header.Get("Content-Type"))
+	modelID, streaming, sessionID, body, err := extractMetadataFromBody(body, r.Header.Get("Content-Type"))
+	if err != nil {
+		p.logger.WarnContext(r.Context(), "Failed to sanitize request body",
+			"error_code", http.StatusBadRequest, "error", err)
+		logCtx.Status = "failure"
+		logCtx.HTTPStatus = http.StatusBadRequest
+		logCtx.ErrorMsg = "Invalid request body: " + err.Error()
+		WriteErrorBadRequest(w, "Invalid request body")
+		return nil, "", "", false, false
+	}
 	logCtx.PublicModelID = modelID
 	logCtx.ModelID = modelID
 	logCtx.SessionID = sessionID

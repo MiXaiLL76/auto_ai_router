@@ -482,11 +482,12 @@ func TestExtractModelFromBody(t *testing.T) {
 	// Additional check: Responses API streaming must NOT have stream_options
 	t.Run("responses API streaming must not inject stream_options", func(t *testing.T) {
 		body := `{"model": "gpt-5", "stream": true, "input": "Hello"}`
-		_, stream, _, modifiedBody := extractMetadataFromBody([]byte(body), "application/json")
+		_, stream, _, modifiedBody, err := extractMetadataFromBody([]byte(body), "application/json")
+		assert.NoError(t, err)
 		assert.True(t, stream)
 
 		var bodyMap map[string]interface{}
-		err := json.Unmarshal(modifiedBody, &bodyMap)
+		err = json.Unmarshal(modifiedBody, &bodyMap)
 		assert.NoError(t, err)
 
 		_, hasStreamOptions := bodyMap["stream_options"]
@@ -495,7 +496,8 @@ func TestExtractModelFromBody(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			model, stream, _, modifiedBody := extractMetadataFromBody([]byte(tt.body), "application/json")
+			model, stream, _, modifiedBody, err := extractMetadataFromBody([]byte(tt.body), "application/json")
+			assert.NoError(t, err)
 			assert.Equal(t, tt.expectedModel, model)
 			assert.Equal(t, tt.expectedStream, stream)
 
@@ -526,7 +528,8 @@ func TestExtractModelFromBody(t *testing.T) {
 		assert.NoError(t, err)
 		assert.NoError(t, writer.Close())
 
-		model, stream, _, modifiedBody := extractMetadataFromBody(buf.Bytes(), writer.FormDataContentType())
+		model, stream, _, modifiedBody, err := extractMetadataFromBody(buf.Bytes(), writer.FormDataContentType())
+		assert.NoError(t, err)
 		assert.Equal(t, "gemini-2.5-flash-image-preview", model)
 		assert.False(t, stream)
 		assert.Equal(t, buf.Bytes(), modifiedBody)

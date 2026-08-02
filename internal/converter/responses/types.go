@@ -32,7 +32,6 @@ type Request struct {
 	Store                *bool             `json:"store,omitempty"`
 	PreviousResponseID   string            `json:"previous_response_id,omitempty"`
 	ParallelToolCalls    *bool             `json:"parallel_tool_calls,omitempty"`
-	ServiceTier          string            `json:"service_tier,omitempty"`
 	User                 string            `json:"user,omitempty"`
 	PromptCacheKey       string            `json:"prompt_cache_key,omitempty"`
 	PromptCacheRetention string            `json:"prompt_cache_retention,omitempty"`
