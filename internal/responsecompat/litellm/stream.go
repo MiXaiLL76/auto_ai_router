@@ -183,7 +183,7 @@ func (r *streamReader) normalizeTextChunk(body map[string]any) bool {
 
 func (r *streamReader) normalizeChatChunk(body map[string]any) (bool, bool) {
 	r.pendingUsage = nil
-	_, hadLatencyCheckpoint := body["latency_checkpoint"]
+	hadSystemFingerprint := body["system_fingerprint"] != nil
 	usage, hasUsage := body["usage"].(map[string]any)
 	hasUsage = hasUsage && usage != nil
 	choices, _ := body["choices"].([]any)
@@ -217,8 +217,13 @@ func (r *streamReader) normalizeChatChunk(body map[string]any) (bool, bool) {
 	}
 	body["created"] = r.created
 
-	for _, field := range []string{"latency_checkpoint", "obfuscation", "provider", "service_tier", "system_fingerprint"} {
+	for _, field := range []string{"latency_checkpoint", "provider"} {
 		delete(body, field)
+	}
+	if !hadSystemFingerprint {
+		for _, field := range []string{"obfuscation", "service_tier", "system_fingerprint"} {
+			delete(body, field)
+		}
 	}
 
 	if finalUsage {
@@ -226,10 +231,11 @@ func (r *streamReader) normalizeChatChunk(body map[string]any) (bool, bool) {
 			delete(body, "usage")
 			finalUsage = false
 		} else {
-			usage = liteLLMStreamUsage(usage, hadLatencyCheckpoint)
+			usage = liteLLMStreamUsage(usage, hadSystemFingerprint)
 		}
 	}
 
+	emittedChoices := make([]any, 0, len(choices))
 	for index, rawChoice := range choices {
 		choice, ok := rawChoice.(map[string]any)
 		if !ok {
@@ -238,6 +244,7 @@ func (r *streamReader) normalizeChatChunk(body map[string]any) (bool, bool) {
 		hadContentFilter := choice["content_filter_results"] != nil || choice["content_filter_offsets"] != nil
 		delete(choice, "content_filter_results")
 		delete(choice, "content_filter_offsets")
+		delete(choice, "matched_stop")
 		if choice["index"] == nil {
 			choice["index"] = index
 		}
@@ -257,12 +264,18 @@ func (r *streamReader) normalizeChatChunk(body map[string]any) (bool, bool) {
 		if delta["refusal"] == nil {
 			delete(delta, "refusal")
 		}
+		if delta["content"] == nil {
+			delete(delta, "content")
+		}
 		hasDelta := hasStreamDelta(delta)
 		if hadContentFilter && !hasDelta && choice["finish_reason"] == nil {
 			return false, false
 		}
 		if toolCalls, ok := delta["tool_calls"].([]any); ok && len(toolCalls) > 0 {
 			state.sawTools = true
+		}
+		if state.sentRole && isEmptyContentDelta(delta) && choice["finish_reason"] == nil {
+			continue
 		}
 		if !state.sentRole {
 			delta["role"] = "assistant"
@@ -285,7 +298,9 @@ func (r *streamReader) normalizeChatChunk(body map[string]any) (bool, bool) {
 				state.sentFinish = true
 			}
 		}
+		emittedChoices = append(emittedChoices, choice)
 	}
+	body["choices"] = emittedChoices
 	if finalUsage {
 		usageBody := r.usageChunk(usage)
 		if len(choices) == 0 {
@@ -300,7 +315,7 @@ func (r *streamReader) normalizeChatChunk(body map[string]any) (bool, bool) {
 		delete(body, "usage")
 		r.pendingUsage = usageBody
 	}
-	return len(choices) > 0 || finalUsage, false
+	return len(emittedChoices) > 0 || finalUsage, false
 }
 
 func (r *streamReader) writeChatPrelude() {
@@ -400,6 +415,11 @@ func hasStreamDelta(delta map[string]any) bool {
 	return false
 }
 
+func isEmptyContentDelta(delta map[string]any) bool {
+	content, ok := delta["content"].(string)
+	return ok && content == "" && len(delta) == 1
+}
+
 func streamChoiceIndex(choice map[string]any, fallback int) int {
 	value, ok := choice["index"].(float64)
 	if !ok || value < 0 || value != float64(int(value)) {
@@ -441,6 +461,9 @@ func (r *streamReader) writePendingFinishes() {
 func (r *streamReader) normalizeResponsesChunk(body map[string]any) {
 	if r.ctx.RequestedModel != "" {
 		body["model"] = r.ctx.RequestedModel
+	}
+	if response, ok := body["response"].(map[string]any); ok && r.ctx.ProviderModel != "" {
+		response["model"] = r.ctx.ProviderModel
 	}
 	if errorBody, ok := body["error"].(map[string]any); ok && errorBody["code"] == nil {
 		errorBody["code"] = "unknown_error"
@@ -499,7 +522,7 @@ func (r *streamReader) terminalChunk(choices []any) map[string]any {
 func terminalChoice(index int, finishReason string) map[string]any {
 	return map[string]any{
 		"index":         index,
-		"delta":         map[string]any{"content": nil},
+		"delta":         map[string]any{},
 		"finish_reason": finishReason,
 	}
 }

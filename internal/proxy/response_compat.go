@@ -22,6 +22,7 @@ type responseStreamErrorSink interface {
 type responseCompatRequest struct {
 	RequestID      string
 	RequestedModel string
+	ProviderModel  string
 	IncludeUsage   bool
 }
 
@@ -208,6 +209,7 @@ func (w *responseCompatibilityWriter) compatContext() compatlitellm.Context {
 	if info := responseCompatRequestFromContext(w.request.Context()); info != nil {
 		ctx.RequestID = info.RequestID
 		ctx.RequestedModel = info.RequestedModel
+		ctx.ProviderModel = info.ProviderModel
 		ctx.IncludeUsage = info.IncludeUsage
 	}
 	return ctx

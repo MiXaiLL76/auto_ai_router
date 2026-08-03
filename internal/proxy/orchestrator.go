@@ -687,6 +687,9 @@ func (p *Proxy) readRequestBodyAndSelectModel(
 		body = openai.ReplaceModelInBody(body, modelID, realName)
 		realModelID = realName
 	}
+	if info := responseCompatRequestFromContext(r.Context()); info != nil {
+		info.ProviderModel = realModelID
+	}
 
 	return body, modelID, realModelID, streaming, true
 }

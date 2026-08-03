@@ -8,6 +8,7 @@ import (
 type Context struct {
 	Endpoint       string
 	RequestedModel string
+	ProviderModel  string
 	RequestID      string
 	IncludeUsage   bool
 }
