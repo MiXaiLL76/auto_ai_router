@@ -13,16 +13,18 @@ import (
 )
 
 type streamReader struct {
-	ctx             Context
-	source          *bufio.Reader
-	pending         bytes.Buffer
-	id              string
-	created         any
-	choices         map[int]*choiceStreamState
-	pendingUsage    map[string]any
-	pendingPrelude  bool
-	sentChatPrelude bool
-	sentDone        bool
+	ctx              Context
+	source           *bufio.Reader
+	pending          bytes.Buffer
+	id               string
+	created          any
+	choices          map[int]*choiceStreamState
+	pendingUsage     map[string]any
+	pendingPrelude   bool
+	sentChatPrelude  bool
+	sentDone         bool
+	openAIStream     bool
+	sawContentFilter bool
 }
 
 type choiceStreamState struct {
@@ -85,6 +87,9 @@ func (r *streamReader) readFrame() error {
 		}
 	}
 	if dataIndex < 0 {
+		if commentOnlyFrame(lines) {
+			return nil
+		}
 		r.writeFrame(strings.Join(lines, "\n"))
 		return nil
 	}
@@ -183,6 +188,9 @@ func (r *streamReader) normalizeTextChunk(body map[string]any) bool {
 
 func (r *streamReader) normalizeChatChunk(body map[string]any) (bool, bool) {
 	r.pendingUsage = nil
+	if _, exists := body["system_fingerprint"]; exists {
+		r.openAIStream = true
+	}
 	hadSystemFingerprint := body["system_fingerprint"] != nil
 	usage, hasUsage := body["usage"].(map[string]any)
 	hasUsage = hasUsage && usage != nil
@@ -231,7 +239,8 @@ func (r *streamReader) normalizeChatChunk(body map[string]any) (bool, bool) {
 			delete(body, "usage")
 			finalUsage = false
 		} else {
-			usage = liteLLMStreamUsage(usage, hadSystemFingerprint)
+			forceZero := r.openAIStream && (hadSystemFingerprint || !r.sawContentFilter)
+			usage = liteLLMStreamUsage(usage, forceZero)
 		}
 	}
 
@@ -242,9 +251,13 @@ func (r *streamReader) normalizeChatChunk(body map[string]any) (bool, bool) {
 			continue
 		}
 		hadContentFilter := choice["content_filter_results"] != nil || choice["content_filter_offsets"] != nil
+		if results, ok := choice["content_filter_results"].(map[string]any); ok && len(results) > 0 {
+			r.sawContentFilter = true
+		}
 		delete(choice, "content_filter_results")
 		delete(choice, "content_filter_offsets")
 		delete(choice, "matched_stop")
+		delete(choice, "native_finish_reason")
 		if choice["index"] == nil {
 			choice["index"] = index
 		}
@@ -346,6 +359,9 @@ func liteLLMStreamUsage(usage map[string]any, forceZero bool) map[string]any {
 		return emptyLiteLLMStreamUsage()
 	}
 	normalizeUsage(usage)
+	delete(usage, "cost")
+	delete(usage, "cost_details")
+	delete(usage, "is_byok")
 	details, _ := usage["completion_tokens_details"].(map[string]any)
 	if details == nil {
 		details = make(map[string]any)
@@ -417,7 +433,24 @@ func hasStreamDelta(delta map[string]any) bool {
 
 func isEmptyContentDelta(delta map[string]any) bool {
 	content, ok := delta["content"].(string)
-	return ok && content == "" && len(delta) == 1
+	if !ok || content != "" {
+		return false
+	}
+	for field, value := range delta {
+		if field != "content" && value != nil {
+			return false
+		}
+	}
+	return true
+}
+
+func commentOnlyFrame(lines []string) bool {
+	for _, line := range lines {
+		if !strings.HasPrefix(strings.TrimSpace(line), ":") {
+			return false
+		}
+	}
+	return len(lines) > 0
 }
 
 func streamChoiceIndex(choice map[string]any, fallback int) int {
@@ -461,9 +494,6 @@ func (r *streamReader) writePendingFinishes() {
 func (r *streamReader) normalizeResponsesChunk(body map[string]any) {
 	if r.ctx.RequestedModel != "" {
 		body["model"] = r.ctx.RequestedModel
-	}
-	if response, ok := body["response"].(map[string]any); ok && r.ctx.ProviderModel != "" {
-		response["model"] = r.ctx.ProviderModel
 	}
 	if errorBody, ok := body["error"].(map[string]any); ok && errorBody["code"] == nil {
 		errorBody["code"] = "unknown_error"

@@ -101,18 +101,20 @@ func normalizeSuccessfulResponseModelStream(
 		return reader
 	}
 	return &responseModelStreamReader{
-		source:      bufio.NewReader(reader),
-		publicModel: publicModel,
+		source:                      bufio.NewReader(reader),
+		publicModel:                 publicModel,
+		preserveNestedResponseModel: responseCompatRequestFromContext(logCtx.Request.Context()) != nil,
 	}
 }
 
 type responseModelStreamReader struct {
-	source      *bufio.Reader
-	publicModel string
-	pending     []byte
-	pendingErr  error
-	line        []byte
-	passthrough bool
+	source                      *bufio.Reader
+	publicModel                 string
+	preserveNestedResponseModel bool
+	pending                     []byte
+	pendingErr                  error
+	line                        []byte
+	passthrough                 bool
 }
 
 func (r *responseModelStreamReader) Read(dst []byte) (int, error) {
@@ -152,7 +154,7 @@ func (r *responseModelStreamReader) Read(dst []byte) (int, error) {
 		if errors.Is(err, bufio.ErrBufferFull) {
 			continue
 		}
-		r.pending = normalizeSSEDataLineModel(r.line, r.publicModel)
+		r.pending = normalizeSSEDataLineModelWithOptions(r.line, r.publicModel, r.preserveNestedResponseModel)
 		r.line = nil
 		r.pendingErr = err
 	}
@@ -163,6 +165,10 @@ func (r *responseModelStreamReader) Read(dst []byte) (int, error) {
 }
 
 func normalizeSSEDataLineModel(line []byte, publicModel string) []byte {
+	return normalizeSSEDataLineModelWithOptions(line, publicModel, false)
+}
+
+func normalizeSSEDataLineModelWithOptions(line []byte, publicModel string, preserveNestedResponseModel bool) []byte {
 	newline := []byte(nil)
 	body := line
 	switch {
@@ -202,7 +208,7 @@ func normalizeSSEDataLineModel(line []byte, publicModel string) []byte {
 		event["model"] = publicModel
 		changed = true
 	}
-	if response, ok := event["response"].(map[string]interface{}); ok {
+	if response, ok := event["response"].(map[string]interface{}); ok && !preserveNestedResponseModel {
 		if response["model"] != publicModel {
 			response["model"] = publicModel
 			changed = true

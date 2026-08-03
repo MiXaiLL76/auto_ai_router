@@ -53,12 +53,11 @@ func TestChatStreamCompatibility(t *testing.T) {
 func TestResponsesStreamCompatibility(t *testing.T) {
 	source := strings.NewReader(
 		"event: response.completed\n" +
-			"data: {\"type\":\"response.completed\",\"model\":\"public-model\",\"response\":{\"id\":\"resp-1\",\"model\":\"public-model\"},\"error\":{\"code\":null}}\n\n",
+			"data: {\"type\":\"response.completed\",\"model\":\"public-model\",\"response\":{\"id\":\"resp-1\",\"model\":\"provider-model\"},\"error\":{\"code\":null}}\n\n",
 	)
 	output, err := io.ReadAll(New().Stream(Context{
 		Endpoint:       "/v1/responses",
 		RequestedModel: "public-model",
-		ProviderModel:  "provider-model",
 		IncludeUsage:   true,
 	}, source))
 	require.NoError(t, err)
@@ -76,8 +75,9 @@ func TestResponsesStreamCompatibility(t *testing.T) {
 
 func TestChatStreamDropsProviderOnlyChoiceFields(t *testing.T) {
 	source := strings.NewReader(
-		`data: {"id":"deepseek-id","created":10,"choices":[{"index":0,"delta":{"role":"assistant","reasoning":"think","content":null},"matched_stop":1}]}` + "\n\n" +
-			`data: {"id":"deepseek-id","created":10,"choices":[{"index":0,"delta":{"content":""}}]}` + "\n\n" +
+		": OPENROUTER PROCESSING\n\n" +
+			`data: {"id":"deepseek-id","created":10,"choices":[{"index":0,"delta":{"role":"assistant","reasoning":"think","content":null},"matched_stop":1}]}` + "\n\n" +
+			`data: {"id":"deepseek-id","created":10,"choices":[{"index":0,"delta":{"content":"","reasoning":null},"native_finish_reason":"stop"}]}` + "\n\n" +
 			`data: {"id":"deepseek-id","created":10,"choices":[{"index":0,"delta":{"content":null},"finish_reason":"stop","matched_stop":1}]}` + "\n\n" +
 			"data: [DONE]\n\n",
 	)
@@ -93,13 +93,15 @@ func TestChatStreamDropsProviderOnlyChoiceFields(t *testing.T) {
 	assert.Contains(t, frames[0], `"reasoning_content":"think"`)
 	assert.NotContains(t, frames[0], `"content"`)
 	assert.NotContains(t, string(output), "matched_stop")
+	assert.NotContains(t, string(output), "native_finish_reason")
+	assert.NotContains(t, string(output), "OPENROUTER PROCESSING")
 	assert.NotContains(t, string(output), `"content":null`)
 	assert.Equal(t, "[DONE]", frames[2])
 }
 
 func TestChatStreamPreservesUsageWithoutSystemFingerprint(t *testing.T) {
 	source := strings.NewReader(
-		`data: {"id":"gpt-id","created":10,"choices":[{"index":0,"delta":{"role":"assistant","content":"ok"}}]}` + "\n\n" +
+		`data: {"id":"gpt-id","created":10,"choices":[{"index":0,"delta":{"role":"assistant","content":"ok"},"content_filter_results":{"hate":{"filtered":false}}}]}` + "\n\n" +
 			`data: {"id":"gpt-id","created":10,"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}` + "\n\n" +
 			`data: {"id":"gpt-id","created":10,"choices":[],"latency_checkpoint":{"engine_ttft_ms":10},"obfuscation":"","service_tier":"default","system_fingerprint":null,"usage":{"prompt_tokens":12,"completion_tokens":6,"total_tokens":18}}` + "\n\n" +
 			"data: [DONE]\n\n",
