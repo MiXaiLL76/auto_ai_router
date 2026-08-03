@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -562,16 +563,40 @@ func (p *Proxy) readRequestBodyAndSelectModel(
 		return nil, "", "", false, false
 	}
 
-	if info := responseCompatRequestFromContext(r.Context()); info != nil {
-		var raw map[string]any
-		if json.Unmarshal(body, &raw) == nil {
-			info.RequestedModel, _ = raw["model"].(string)
+	sanitized, err := sanitizeAndExtractRequestBody(body, r.Header.Get("Content-Type"))
+	if err != nil {
+		p.logger.WarnContext(r.Context(), "Failed to sanitize request body",
+			"error_code", http.StatusBadRequest, "error", err)
+		logCtx.Status = "failure"
+		logCtx.HTTPStatus = http.StatusBadRequest
+		if errors.Is(err, errInvalidMultipartRequestBody) {
+			logCtx.ErrorMsg = "Invalid multipart request body: " + err.Error()
+			WriteErrorBadRequest(w, "Invalid multipart request body")
+		} else {
+			logCtx.ErrorMsg = "Invalid request body: " + err.Error()
+			WriteErrorBadRequest(w, "Invalid request body")
 		}
-		info.IncludeUsage = strings.Contains(r.URL.Path, "/responses") || clientRequestedStreamUsage(body)
-		body = applyLiteLLMRequestCompatibility(r.URL.Path, body)
+		return nil, "", "", false, false
 	}
-
-	modelID, streaming, sessionID, body := extractMetadataFromBody(body, r.Header.Get("Content-Type"))
+	body = sanitized.Body
+	if info := responseCompatRequestFromContext(r.Context()); info != nil {
+		info.RequestedModel = sanitized.ModelID
+		info.IncludeUsage = strings.Contains(r.URL.Path, "/responses") || clientRequestedStreamUsage(body)
+		compatibleBody := applyLiteLLMRequestCompatibility(r.URL.Path, body)
+		if !bytes.Equal(compatibleBody, body) {
+			body = compatibleBody
+			sanitized.Changed = true
+		}
+	}
+	modelID := sanitized.ModelID
+	streaming := sanitized.Streaming
+	sessionID := sanitized.SessionID
+	if sanitized.Changed {
+		r.ContentLength = int64(len(body))
+		r.Header.Del("Content-Length")
+		dropRepresentationIntegrityHeaders(r.Header)
+		r.Header.Del("Content-Encoding")
+	}
 	logCtx.PublicModelID = modelID
 	logCtx.ModelID = modelID
 	logCtx.SessionID = sessionID

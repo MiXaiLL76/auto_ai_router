@@ -520,6 +520,7 @@ func TestProviderConverter_UsageFromResponseProxyDefaultsToOpenAISemantics(t *te
 	proxyUsage := New(config.ProviderTypeProxy, RequestMode{}).UsageFromResponse(body)
 	if proxyUsage == nil {
 		t.Fatal("expected proxy usage")
+		return
 	}
 	if proxyUsage.AudioInputTokens != 60 {
 		t.Fatalf("generic proxy should default to raw OpenAI-compatible usage, got %+v", proxyUsage)
@@ -528,6 +529,7 @@ func TestProviderConverter_UsageFromResponseProxyDefaultsToOpenAISemantics(t *te
 	openAIUsage := New(config.ProviderTypeOpenAI, RequestMode{}).UsageFromResponse(body)
 	if openAIUsage == nil {
 		t.Fatal("expected OpenAI usage")
+		return
 	}
 	if openAIUsage.AudioInputTokens != 60 {
 		t.Fatalf("OpenAI-compatible raw usage should subtract cached audio, got %+v", openAIUsage)
@@ -588,6 +590,7 @@ func TestExtractTokenUsage_AnthropicFlatCacheFields(t *testing.T) {
 
 	if usage == nil {
 		t.Fatal("expected Anthropic usage")
+		return
 	}
 	if usage.PromptTokens != 100 || usage.CompletionTokens != 20 {
 		t.Fatalf("unexpected token counts: %+v", usage)
@@ -688,6 +691,7 @@ func TestExtractTokenUsage_CachedAudioIsExcludedFromAudioInput(t *testing.T) {
 
 			if usage == nil {
 				t.Fatal("expected usage")
+				return
 			}
 			if usage.CachedAudioInputTokens != 40 {
 				t.Fatalf("expected cached audio=40, got %+v", usage)
@@ -706,6 +710,7 @@ func TestExtractTokenUsage_PreservesAlreadyNormalizedAudioInput(t *testing.T) {
 
 	if usage == nil {
 		t.Fatal("expected usage")
+		return
 	}
 	if usage.AudioInputTokens != 60 {
 		t.Fatalf("expected already-normalized audio=60, got %+v", usage)
@@ -737,6 +742,7 @@ func TestExtractTokenUsage_NegativeCachedTokensDoNotIncreaseAudioInput(t *testin
 
 			if usage == nil {
 				t.Fatal("expected usage")
+				return
 			}
 			if usage.CachedInputTokens != 0 || usage.CachedAudioInputTokens != 0 {
 				t.Fatalf("expected cached fields to be sanitized, got %+v", usage)
@@ -838,6 +844,7 @@ func TestExtractTokenUsage_WebSearchRequests(t *testing.T) {
 			usage := ExtractTokenUsage([]byte(tt.body))
 			if usage == nil {
 				t.Fatalf("expected usage")
+				return
 			}
 			if usage.WebSearchRequests != tt.want {
 				t.Fatalf("expected web_search_requests=%d, got %d", tt.want, usage.WebSearchRequests)
