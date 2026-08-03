@@ -77,26 +77,30 @@ func TestChatStreamDropsProviderOnlyChoiceFields(t *testing.T) {
 	source := strings.NewReader(
 		": OPENROUTER PROCESSING\n\n" +
 			`data: {"id":"deepseek-id","created":10,"choices":[{"index":0,"delta":{"role":"assistant","reasoning":"think","content":null},"matched_stop":1}]}` + "\n\n" +
-			`data: {"id":"deepseek-id","created":10,"choices":[{"index":0,"delta":{"content":"","reasoning":null},"native_finish_reason":"stop"}]}` + "\n\n" +
-			`data: {"id":"deepseek-id","created":10,"choices":[{"index":0,"delta":{"content":null},"finish_reason":"stop","matched_stop":1}]}` + "\n\n" +
+			`data: {"id":"deepseek-id","created":10,"choices":[{"index":0,"delta":{"content":"","reasoning":null},"native_finish_reason":"length"}]}` + "\n\n" +
+			`data: {"id":"deepseek-id","created":10,"choices":[{"index":0,"delta":{"content":""},"finish_reason":"length","matched_stop":1}]}` + "\n\n" +
+			`data: {"id":"deepseek-id","created":10,"choices":[],"system_fingerprint":null,"usage":{"prompt_tokens":11,"completion_tokens":25,"total_tokens":36,"completion_tokens_details":{"reasoning_tokens":20}}}` + "\n\n" +
 			"data: [DONE]\n\n",
 	)
 
 	output, err := io.ReadAll(New().Stream(Context{
 		Endpoint:       "/v1/chat/completions",
 		RequestedModel: "deepseek/deepseek-v4-flash",
+		IncludeUsage:   true,
 	}, source))
 	require.NoError(t, err)
 
 	frames := splitDataFrames(string(output))
-	require.Len(t, frames, 3)
+	require.Len(t, frames, 4)
 	assert.Contains(t, frames[0], `"reasoning_content":"think"`)
 	assert.NotContains(t, frames[0], `"content"`)
 	assert.NotContains(t, string(output), "matched_stop")
 	assert.NotContains(t, string(output), "native_finish_reason")
 	assert.NotContains(t, string(output), "OPENROUTER PROCESSING")
 	assert.NotContains(t, string(output), `"content":null`)
-	assert.Equal(t, "[DONE]", frames[2])
+	assert.Contains(t, frames[1], `"finish_reason":"length"`)
+	assert.Contains(t, frames[2], `"total_tokens":36`)
+	assert.Equal(t, "[DONE]", frames[3])
 }
 
 func TestChatStreamPreservesUsageWithoutSystemFingerprint(t *testing.T) {

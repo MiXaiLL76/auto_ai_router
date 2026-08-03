@@ -13,18 +13,17 @@ import (
 )
 
 type streamReader struct {
-	ctx              Context
-	source           *bufio.Reader
-	pending          bytes.Buffer
-	id               string
-	created          any
-	choices          map[int]*choiceStreamState
-	pendingUsage     map[string]any
-	pendingPrelude   bool
-	sentChatPrelude  bool
-	sentDone         bool
-	openAIStream     bool
-	sawContentFilter bool
+	ctx             Context
+	source          *bufio.Reader
+	pending         bytes.Buffer
+	id              string
+	created         any
+	choices         map[int]*choiceStreamState
+	pendingUsage    map[string]any
+	pendingPrelude  bool
+	sentChatPrelude bool
+	sentDone        bool
+	openAIStream    bool
 }
 
 type choiceStreamState struct {
@@ -188,7 +187,10 @@ func (r *streamReader) normalizeTextChunk(body map[string]any) bool {
 
 func (r *streamReader) normalizeChatChunk(body map[string]any) (bool, bool) {
 	r.pendingUsage = nil
-	if _, exists := body["system_fingerprint"]; exists {
+	if _, exists := body["obfuscation"]; exists {
+		r.openAIStream = true
+	}
+	if _, exists := body["service_tier"]; exists {
 		r.openAIStream = true
 	}
 	hadSystemFingerprint := body["system_fingerprint"] != nil
@@ -239,7 +241,7 @@ func (r *streamReader) normalizeChatChunk(body map[string]any) (bool, bool) {
 			delete(body, "usage")
 			finalUsage = false
 		} else {
-			forceZero := r.openAIStream && (hadSystemFingerprint || !r.sawContentFilter)
+			forceZero := r.openAIStream && hadSystemFingerprint
 			usage = liteLLMStreamUsage(usage, forceZero)
 		}
 	}
@@ -251,9 +253,6 @@ func (r *streamReader) normalizeChatChunk(body map[string]any) (bool, bool) {
 			continue
 		}
 		hadContentFilter := choice["content_filter_results"] != nil || choice["content_filter_offsets"] != nil
-		if results, ok := choice["content_filter_results"].(map[string]any); ok && len(results) > 0 {
-			r.sawContentFilter = true
-		}
 		delete(choice, "content_filter_results")
 		delete(choice, "content_filter_offsets")
 		delete(choice, "matched_stop")
@@ -280,6 +279,9 @@ func (r *streamReader) normalizeChatChunk(body map[string]any) (bool, bool) {
 		if delta["content"] == nil {
 			delete(delta, "content")
 		}
+		if state.sentRole && isEmptyContentDelta(delta) {
+			delete(delta, "content")
+		}
 		hasDelta := hasStreamDelta(delta)
 		if hadContentFilter && !hasDelta && choice["finish_reason"] == nil {
 			return false, false
@@ -287,7 +289,7 @@ func (r *streamReader) normalizeChatChunk(body map[string]any) (bool, bool) {
 		if toolCalls, ok := delta["tool_calls"].([]any); ok && len(toolCalls) > 0 {
 			state.sawTools = true
 		}
-		if state.sentRole && isEmptyContentDelta(delta) && choice["finish_reason"] == nil {
+		if state.sentRole && !hasDelta && choice["finish_reason"] == nil {
 			continue
 		}
 		if !state.sentRole {
