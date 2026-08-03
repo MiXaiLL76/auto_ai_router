@@ -58,6 +58,27 @@ func TestNormalizeCompletionUsageReplacesNullTextTokens(t *testing.T) {
 	assert.Equal(t, float64(8), details["text_tokens"])
 }
 
+func TestNormalizeCompletionUsageReplacesZeroTextTokens(t *testing.T) {
+	body := []byte(`{"usage":{"completion_tokens":202.0,"completion_tokens_details":{"text_tokens":0,"reasoning_tokens":"194"}}}`)
+
+	normalized, changed := NormalizeCompletionUsage(body, "qwen3.7-plus")
+
+	require.True(t, changed)
+	var response map[string]any
+	require.NoError(t, json.Unmarshal(normalized, &response))
+	details := response["usage"].(map[string]any)["completion_tokens_details"].(map[string]any)
+	assert.Equal(t, float64(8), details["text_tokens"])
+}
+
+func TestNormalizeCompletionUsageUsesResponseModel(t *testing.T) {
+	body := []byte(`{"model":"qwen3.7-plus","usage":{"completion_tokens":202,"completion_tokens_details":{"text_tokens":202,"reasoning_tokens":194}}}`)
+
+	normalized, changed := NormalizeCompletionUsage(body, "provider-backend-alias")
+
+	require.True(t, changed)
+	assert.Contains(t, string(normalized), `"text_tokens":8`)
+}
+
 func TestUsageNormalizingReadCloser(t *testing.T) {
 	stream := "event: message\r\n" +
 		`data: {"usage":{"completion_tokens":134,"completion_tokens_details":{"text_tokens":134,"reasoning_tokens":127}}}` + "\r\n\r\n" +

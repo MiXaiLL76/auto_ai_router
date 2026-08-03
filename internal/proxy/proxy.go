@@ -31,6 +31,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/logger"
 	"github.com/mixaill76/auto_ai_router/internal/models"
 	"github.com/mixaill76/auto_ai_router/internal/monitoring"
+	"github.com/mixaill76/auto_ai_router/internal/proxy/modelutils"
 	"github.com/mixaill76/auto_ai_router/internal/ratelimit"
 	compatlitellm "github.com/mixaill76/auto_ai_router/internal/responsecompat/litellm"
 	"github.com/mixaill76/auto_ai_router/internal/responsestore"
@@ -1245,6 +1246,16 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 
+			if proxyResp.StatusCode >= http.StatusOK && proxyResp.StatusCode < http.StatusMultipleChoices {
+				modelIDs := []string{modelID, logCtx.PublicModelID, logCtx.RealModelID}
+				for _, usageModelID := range modelIDs {
+					if normalizedBody, changed := modelutils.NormalizeCompletionUsage(proxyResp.Body, usageModelID); changed {
+						proxyResp.Body = normalizedBody
+						break
+					}
+				}
+			}
+
 			p.setCredentialResponseHeader(w, logCtx, logCtx.ActualCredentialName)
 			p.writeProxyResponse(w, proxyResp, r, cred, modelID, logCtx, tokenUsageOptions)
 			tokens, usage := extractOpenAITokensAndUsage(proxyResp.Body, tokenUsageOptions)
@@ -1922,6 +1933,14 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 						resp.Header.Del(key)
 					}
 				}
+			}
+			if normalizedBody, changed := modelutils.NormalizeCompletionUsage(
+				finalResponseBody,
+				clientVisibleResponseModel(logCtx, modelID),
+			); changed {
+				finalResponseBody = normalizedBody
+				bodyForTokenExtraction = normalizedBody
+				dropRepresentationIntegrityHeaders(resp.Header)
 			}
 		}
 

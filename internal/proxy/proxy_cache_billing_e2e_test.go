@@ -81,6 +81,59 @@ func TestProxyRequest_CacheBillingLogsLiteLLMSpend(t *testing.T) {
 	}
 }
 
+func TestProxyRequest_QwenUsageIsNormalizedForResponseAndSpend(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "/v1/chat/completions", r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl-qwen","model":"qwen3.7-plus","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":202,"total_tokens":212,"completion_tokens_details":{"text_tokens":0,"reasoning_tokens":194}}}`))
+	}))
+	defer upstream.Close()
+
+	dbStub := &stubLiteLLMManager{}
+	credential := config.CredentialConfig{
+		Name: "qwen", Type: config.ProviderTypeOpenAI, BaseURL: upstream.URL,
+		APIKey: "upstream-key", RPM: 100, TPM: 10000,
+	}
+	builder := NewTestProxyBuilder().WithCredentials(credential).WithMasterKey("master-key")
+	builder.config.ModelManager = pricing.New(builder.config.Logger, 50, []config.ModelRPMConfig{
+		{Name: "qwen3.7-plus", Credential: "qwen"},
+	})
+	builder.config.ModelManager.LoadModelsFromConfig([]config.CredentialConfig{credential})
+	prx := builder.Build()
+	prx.LiteLLMDB = dbStub
+	registry := pricing.NewModelPriceRegistry()
+	registry.Update(map[string]*pricing.ModelPrice{
+		"qwen3.7-plus": {
+			InputCostPerToken:           1,
+			OutputCostPerToken:          2,
+			OutputCostPerReasoningToken: 20,
+		},
+	})
+	prx.priceRegistry = registry
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{
+		"model": "qwen3.7-plus",
+		"messages": [{"role": "user", "content": "hello"}]
+	}`))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	prx.ProxyRequest(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	var response map[string]any
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &response))
+	details := response["usage"].(map[string]any)["completion_tokens_details"].(map[string]any)
+	assert.Equal(t, float64(8), details["text_tokens"])
+	require.Len(t, dbStub.loggedEntries, 1)
+	metadata := decodeMetadata(t, dbStub.loggedEntries[0].Metadata)
+	loggedDetails := metadata["usage_object"].(map[string]any)["completion_tokens_details"].(map[string]any)
+	assert.Equal(t, float64(8), loggedDetails["text_tokens"])
+	assert.Equal(t, float64(194), loggedDetails["reasoning_tokens"])
+	assert.Equal(t, 3906.0, dbStub.loggedEntries[0].Spend)
+}
+
 func TestProxyRequest_StreamingCacheBillingLogsLiteLLMSpend(t *testing.T) {
 	tests := []struct {
 		name                  string

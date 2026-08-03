@@ -194,7 +194,10 @@ func (p *Proxy) writeProxyResponse(w http.ResponseWriter, resp *ProxyResponse, c
 			responseBody = normalizedModelBody
 			responseBodyChanged = true
 		}
-		if normalizedBody, changed := modelutils.NormalizeCompletionUsage(responseBody, modelID); changed {
+		if normalizedBody, changed := modelutils.NormalizeCompletionUsage(
+			responseBody,
+			clientVisibleResponseModel(logCtx, modelID),
+		); changed {
 			responseBody = normalizedBody
 			responseBodyChanged = true
 		}

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"math"
 	"strconv"
 	"strings"
 )
@@ -13,12 +14,15 @@ import (
 const maxSSEUsageLineBytes = 1 << 20
 
 func NormalizeCompletionUsage(body []byte, modelID string) ([]byte, bool) {
-	if !isQwenModel(modelID) {
-		return body, false
-	}
 	var response map[string]json.RawMessage
 	if json.Unmarshal(body, &response) != nil {
 		return body, false
+	}
+	if !isQwenModel(modelID) {
+		var responseModel string
+		if json.Unmarshal(response["model"], &responseModel) != nil || !isQwenModel(responseModel) {
+			return body, false
+		}
 	}
 
 	usageRaw, ok := response["usage"]
@@ -54,7 +58,7 @@ func NormalizeCompletionUsage(body []byte, modelID string) ([]byte, bool) {
 	expectedTextTokens := completionTokens - reasoningTokens
 	if textRaw, exists := details["text_tokens"]; exists && string(textRaw) != "null" {
 		textTokens, textOK := nonNegativeJSONInteger(textRaw)
-		if !textOK || textTokens <= expectedTextTokens {
+		if !textOK || (textTokens > 0 && textTokens <= expectedTextTokens) {
 			return body, false
 		}
 	}
@@ -83,8 +87,15 @@ func nonNegativeJSONInteger(raw json.RawMessage) (int64, bool) {
 	if len(raw) == 0 {
 		return 0, false
 	}
-	value, err := strconv.ParseInt(string(raw), 10, 64)
-	return value, err == nil && value >= 0
+	encoded := strings.Trim(string(raw), `"`)
+	if value, err := strconv.ParseInt(encoded, 10, 64); err == nil {
+		return value, value >= 0
+	}
+	value, err := strconv.ParseFloat(encoded, 64)
+	if err != nil || value < 0 || value > math.MaxInt64 || math.Trunc(value) != value {
+		return 0, false
+	}
+	return int64(value), true
 }
 
 func NewUsageNormalizingReadCloser(source io.ReadCloser, modelID string) (io.ReadCloser, bool) {

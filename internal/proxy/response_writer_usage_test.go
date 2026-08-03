@@ -112,6 +112,21 @@ func TestWriteProxyResponseAddsMissingQwenTextTokens(t *testing.T) {
 	assert.Contains(t, w.Body.String(), `"reasoning_tokens":194`)
 }
 
+func TestWriteProxyResponseUsesQwenResponseModel(t *testing.T) {
+	resp := &ProxyResponse{
+		StatusCode: http.StatusOK,
+		Headers:    http.Header{"Content-Type": []string{"application/json"}},
+		Body:       []byte(`{"model":"qwen3.7-plus","choices":[{"message":{"content":"ok"}}],"usage":{"completion_tokens":202,"completion_tokens_details":{"text_tokens":0,"reasoning_tokens":194}}}`),
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	w := httptest.NewRecorder()
+
+	logCtx := &RequestLogContext{PublicModelID: "qwen3.7-plus"}
+	NewTestProxyBuilder().Build().writeProxyResponse(w, resp, req, &config.CredentialConfig{Name: "test"}, "provider-backend-alias", logCtx)
+
+	assert.Contains(t, w.Body.String(), `"text_tokens":8`)
+}
+
 func TestWriteProxyResponseProManMasksErrorAndStripsHeaders(t *testing.T) {
 	rawBody := []byte(`{"error":{"message":"litellm.BadRequestError: Received Model Group=anthropic/claude-haiku-4-5-20251001/anthropic-direct-client-0dce8b1a Available Model Group Fallbacks=None"}}`)
 	resp := &ProxyResponse{
