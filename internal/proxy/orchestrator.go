@@ -582,6 +582,7 @@ func (p *Proxy) readRequestBodyAndSelectModel(
 	if info := responseCompatRequestFromContext(r.Context()); info != nil {
 		info.RequestedModel = sanitized.ModelID
 		info.IncludeUsage = strings.Contains(r.URL.Path, "/responses") || clientRequestedStreamUsage(body)
+		info.Streaming = sanitized.Streaming
 		compatibleBody := applyLiteLLMRequestCompatibility(r.URL.Path, body)
 		if !bytes.Equal(compatibleBody, body) {
 			body = compatibleBody

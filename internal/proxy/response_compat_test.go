@@ -54,6 +54,27 @@ func TestResponseCompatibilityWriterTransformsStream(t *testing.T) {
 	assert.Equal(t, 1, strings.Count(recorder.Body.String(), "data: [DONE]"))
 }
 
+func TestResponseCompatibilityWriterDetectsStreamWithWrongContentType(t *testing.T) {
+	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	request, info := withResponseCompatRequest(request)
+	info.RequestedModel = "anthropic/claude-opus-4.6"
+	info.Streaming = true
+
+	recorder := httptest.NewRecorder()
+	writer := newResponseCompatibilityWriter(recorder, compatlitellm.New(), request)
+	writer.Header().Set("Content-Type", "application/json")
+	writer.WriteHeader(http.StatusOK)
+	_, err := writer.Write([]byte("data: {\"model\":\"provider-model\",\"choices\":[{\"delta\":{\"content\":\"hello\"},\"finish_reason\":\"stop\"}]}\n\n"))
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+
+	assert.Equal(t, http.StatusOK, recorder.Code)
+	assert.Equal(t, "text/event-stream", recorder.Header().Get("Content-Type"))
+	assert.Contains(t, recorder.Body.String(), `"model":"anthropic/claude-opus-4.6"`)
+	assert.NotContains(t, recorder.Body.String(), "Unable to get json response")
+	assert.Equal(t, 1, strings.Count(recorder.Body.String(), "data: [DONE]"))
+}
+
 func TestLiteLLMRequestCompatibilityAddsEmbeddingEncodingFormat(t *testing.T) {
 	body := applyLiteLLMRequestCompatibility(
 		"/v1/embeddings",

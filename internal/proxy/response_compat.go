@@ -23,6 +23,7 @@ type responseCompatRequest struct {
 	RequestID      string
 	RequestedModel string
 	IncludeUsage   bool
+	Streaming      bool
 }
 
 func withResponseCompatRequest(r *http.Request) (*http.Request, *responseCompatRequest) {
@@ -117,7 +118,14 @@ func (w *responseCompatibilityWriter) Write(body []byte) (int, error) {
 	if w.stream {
 		return w.streamPipe.Write(body)
 	}
-	return w.body.Write(body)
+	n, err := w.body.Write(body)
+	if err != nil || !w.shouldDetectStream() || !looksLikeEventStream(w.body.Bytes()) {
+		return n, err
+	}
+	if err := w.startBufferedStream(); err != nil {
+		return 0, err
+	}
+	return n, nil
 }
 
 func (w *responseCompatibilityWriter) Flush() {
@@ -143,7 +151,13 @@ func (w *responseCompatibilityWriter) Close() error {
 		if w.statusCode == 0 {
 			w.statusCode = http.StatusOK
 		}
+		if !w.stream && w.shouldDetectStream() && looksLikeEventStream(w.body.Bytes()) {
+			w.closeErr = w.startBufferedStream()
+		}
 		if w.stream {
+			if w.closeErr != nil {
+				return
+			}
 			if w.streamErr != nil {
 				w.closeErr = w.streamPipe.CloseWithError(w.streamErr)
 			} else {
@@ -177,6 +191,7 @@ func (w *responseCompatibilityWriter) startStream() {
 	providerHeaders, preservedHeaders := w.splitHeaders()
 	headers := w.transformer.TransformHeaders(w.compatContext(), providerHeaders)
 	mergeHeaders(headers, preservedHeaders)
+	headers.Set("Content-Type", "text/event-stream")
 	copyHeaders(w.target.Header(), headers)
 	w.target.WriteHeader(w.statusCode)
 
@@ -189,6 +204,31 @@ func (w *responseCompatibilityWriter) startStream() {
 		_ = reader.CloseWithError(err)
 		w.streamDone <- err
 	}()
+}
+
+func (w *responseCompatibilityWriter) startBufferedStream() error {
+	body := bytes.Clone(w.body.Bytes())
+	w.body.Reset()
+	w.startStream()
+	_, err := w.streamPipe.Write(body)
+	return err
+}
+
+func (w *responseCompatibilityWriter) shouldDetectStream() bool {
+	if w.statusCode < http.StatusOK || w.statusCode >= http.StatusMultipleChoices {
+		return false
+	}
+	info := responseCompatRequestFromContext(w.request.Context())
+	return info != nil && info.Streaming
+}
+
+func looksLikeEventStream(body []byte) bool {
+	trimmed := bytes.TrimSpace(body)
+	return bytes.HasPrefix(trimmed, []byte("data:")) ||
+		bytes.HasPrefix(trimmed, []byte("event:")) ||
+		bytes.HasPrefix(trimmed, []byte("id:")) ||
+		bytes.HasPrefix(trimmed, []byte("retry:")) ||
+		bytes.HasPrefix(trimmed, []byte(":"))
 }
 
 func (w *responseCompatibilityWriter) splitHeaders() (http.Header, http.Header) {
