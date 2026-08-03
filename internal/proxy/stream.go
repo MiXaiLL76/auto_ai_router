@@ -19,6 +19,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
 	promanutils "github.com/mixaill76/auto_ai_router/internal/converter/proman/utils"
 	"github.com/mixaill76/auto_ai_router/internal/converter/responses"
+	"github.com/mixaill76/auto_ai_router/internal/proxy/modelutils"
 )
 
 // streamChunkWriteTimeout is the per-chunk write deadline for streaming responses.
@@ -618,6 +619,9 @@ func (p *Proxy) handleProviderStreaming(
 	case config.ProviderTypeBedrock:
 		return p.handleBedrockStreaming(w, resp, cred.Name, realModelID, publicModel, logCtx)
 	default:
+		if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
+			resp.Body, _ = modelutils.NewUsageNormalizingReadCloser(resp.Body, publicModel)
+		}
 		return p.handleStreamingWithTokens(w, resp, cred.Name, displayModelID, logCtx)
 	}
 }
