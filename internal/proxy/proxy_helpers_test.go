@@ -241,6 +241,7 @@ func TestBuildMetadata(t *testing.T) {
 		usage := &converter.TokenUsage{
 			PromptTokens:           -1,
 			CompletionTokens:       2,
+			OutputTextTokens:       1,
 			AudioInputTokens:       -3,
 			CachedInputTokens:      -80,
 			CachedAudioInputTokens: 40,
@@ -262,6 +263,8 @@ func TestBuildMetadata(t *testing.T) {
 		assert.Equal(t, float64(0), promptDetails["audio_tokens"])
 		assert.Equal(t, float64(0), promptDetails["cached_tokens"])
 		assert.Equal(t, float64(0), promptDetails["cached_audio_tokens"])
+		completionDetails := usageObject["completion_tokens_details"].(map[string]interface{})
+		assert.Equal(t, float64(1), completionDetails["text_tokens"])
 		ttlDetails := promptDetails["cache_creation_token_details"].(map[string]interface{})
 		assert.Equal(t, float64(8), ttlDetails["ephemeral_5m_input_tokens"])
 		assert.Equal(t, float64(2), ttlDetails["ephemeral_1h_input_tokens"])

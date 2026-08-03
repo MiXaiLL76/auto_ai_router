@@ -41,6 +41,7 @@ func CalculateTokenCosts(usage *converter.TokenUsage, price *ModelPrice) *conver
 	imageTokens := converterutil.NonNegativeTokenCount(usage.ImageTokens)
 	outputImageTokens := converterutil.NonNegativeTokenCount(usage.OutputImageTokens)
 	cachedOutputTokens := converterutil.NonNegativeTokenCount(usage.CachedOutputTokens)
+	outputTextTokens := converterutil.NonNegativeTokenCount(usage.OutputTextTokens)
 	reasoningTokens := converterutil.NonNegativeTokenCount(usage.ReasoningTokens)
 	acceptedPredictionTokens := converterutil.NonNegativeTokenCount(usage.AcceptedPredictionTokens)
 	rejectedPredictionTokens := converterutil.NonNegativeTokenCount(usage.RejectedPredictionTokens)
@@ -80,9 +81,12 @@ func CalculateTokenCosts(usage *converter.TokenUsage, price *ModelPrice) *conver
 		costs.InputCost = float64(regularInputTokens) * inputCostPerToken
 	}
 
-	// Calculate "regular" output tokens by subtracting specialized token types
-	regularOutputTokens := completionTokens - audioOutputTokens - reasoningTokens -
-		acceptedPredictionTokens - rejectedPredictionTokens - outputImageTokens
+	// Explicit text tokens are authoritative; otherwise derive them from the inclusive total.
+	regularOutputTokens := outputTextTokens
+	if regularOutputTokens == 0 {
+		regularOutputTokens = completionTokens - audioOutputTokens - reasoningTokens -
+			acceptedPredictionTokens - rejectedPredictionTokens - outputImageTokens
+	}
 	if regularOutputTokens < 0 {
 		regularOutputTokens = 0
 	}

@@ -15,6 +15,7 @@ type TokenUsage struct {
 	CacheCreation5mTokens    int
 	CacheCreation1hTokens    int
 	CachedOutputTokens       int
+	OutputTextTokens         int
 	ReasoningTokens          int
 	AcceptedPredictionTokens int
 	RejectedPredictionTokens int
@@ -50,6 +51,7 @@ func (tu *TokenUsage) Normalize() *TokenUsage {
 		tu.CacheCreation1hTokens = tu.CacheCreationTokens - tu.CacheCreation5mTokens
 	}
 	tu.CachedOutputTokens = converterutil.NonNegativeTokenCount(tu.CachedOutputTokens)
+	tu.OutputTextTokens = converterutil.NonNegativeTokenCount(tu.OutputTextTokens)
 	tu.ReasoningTokens = converterutil.NonNegativeTokenCount(tu.ReasoningTokens)
 	tu.AcceptedPredictionTokens = converterutil.NonNegativeTokenCount(tu.AcceptedPredictionTokens)
 	tu.RejectedPredictionTokens = converterutil.NonNegativeTokenCount(tu.RejectedPredictionTokens)
@@ -115,6 +117,9 @@ func (tu *TokenUsage) MergeNonZero(src *TokenUsage) {
 	}
 	if src.CachedOutputTokens != 0 {
 		tu.CachedOutputTokens = src.CachedOutputTokens
+	}
+	if src.OutputTextTokens != 0 {
+		tu.OutputTextTokens = src.OutputTextTokens
 	}
 	if src.ReasoningTokens != 0 {
 		tu.ReasoningTokens = src.ReasoningTokens

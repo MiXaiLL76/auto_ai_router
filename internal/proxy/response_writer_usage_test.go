@@ -18,7 +18,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestWriteProxyResponseNormalizesQwenUsageBeforeCompression(t *testing.T) {
+func TestWriteProxyResponsePreservesQwenUsageBeforeCompression(t *testing.T) {
 	originalBody := []byte(`{"id":"chatcmpl-1","choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":1370,"completion_tokens":4774,"completion_tokens_details":{"text_tokens":4774,"reasoning_tokens":4417,"provider_detail":"kept"}},"provider_metadata":{"trace":"kept"}}`)
 	resp := &ProxyResponse{
 		StatusCode: http.StatusOK,
@@ -74,7 +74,7 @@ func TestWriteProxyResponseNormalizesQwenUsageBeforeCompression(t *testing.T) {
 	require.Len(t, payload.Choices, 1)
 	assert.Equal(t, "ok", payload.Choices[0].Message.Content)
 	assert.Equal(t, 4774, payload.Usage.CompletionTokens)
-	assert.Equal(t, 357, payload.Usage.CompletionTokensDetails.TextTokens)
+	assert.Equal(t, 4774, payload.Usage.CompletionTokensDetails.TextTokens)
 	assert.Equal(t, 4417, payload.Usage.CompletionTokensDetails.ReasoningTokens)
 	assert.Equal(t, "kept", payload.Usage.CompletionTokensDetails.ProviderDetail)
 	assert.Equal(t, "kept", payload.ProviderMetadata.Trace)
@@ -189,7 +189,7 @@ func TestClientResponseBodyForProManMasksErrors(t *testing.T) {
 	assert.Contains(t, string(body), "Upstream provider error")
 }
 
-func TestWriteProxyStreamingResponseNormalizesQwenUsage(t *testing.T) {
+func TestWriteProxyStreamingResponsePreservesQwenUsage(t *testing.T) {
 	stream := "event: message\r\n" +
 		`data: {"choices":[],"usage":{"prompt_tokens":1370,"completion_tokens":4774,"completion_tokens_details":{"text_tokens":4774,"reasoning_tokens":4417,"provider_detail":"kept"}}}` + "\r\n\r\n" +
 		"data: [DONE]\r\n\r\n"
@@ -217,12 +217,13 @@ func TestWriteProxyStreamingResponseNormalizesQwenUsage(t *testing.T) {
 
 	require.NoError(t, err)
 	require.NotNil(t, usage)
-	assert.Empty(t, w.Header().Get("Digest"))
+	assert.Equal(t, "sha-256=:invalid-after-normalization=:", w.Header().Get("Digest"))
 	assert.Equal(t, 1370, usage.PromptTokens)
 	assert.Equal(t, 4774, usage.CompletionTokens)
+	assert.Equal(t, 4774, usage.OutputTextTokens)
 	assert.Equal(t, 4417, usage.ReasoningTokens)
 	assert.Contains(t, w.Body.String(), "event: message\r\n")
-	assert.Contains(t, w.Body.String(), `"text_tokens":357`)
+	assert.Contains(t, w.Body.String(), `"text_tokens":4774`)
 	assert.Contains(t, w.Body.String(), `"reasoning_tokens":4417`)
 	assert.Contains(t, w.Body.String(), `"provider_detail":"kept"`)
 	assert.Contains(t, w.Body.String(), "data: [DONE]\r\n\r\n")
@@ -333,5 +334,6 @@ func TestWriteProxyStreamingResponseQwenDrainCapturesUsage(t *testing.T) {
 	require.NotNil(t, usage)
 	assert.Equal(t, 1370, usage.PromptTokens)
 	assert.Equal(t, 4774, usage.CompletionTokens)
+	assert.Equal(t, 4774, usage.OutputTextTokens)
 	assert.Equal(t, 4417, usage.ReasoningTokens)
 }
