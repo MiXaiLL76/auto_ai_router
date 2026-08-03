@@ -46,15 +46,17 @@ func NormalizeCompletionUsage(body []byte, modelID string) ([]byte, bool) {
 		return body, false
 	}
 
-	textTokens, textOK := nonNegativeJSONInteger(details["text_tokens"])
 	reasoningTokens, reasoningOK := nonNegativeJSONInteger(details["reasoning_tokens"])
-	if !textOK || !reasoningOK || reasoningTokens > completionTokens {
+	if !reasoningOK || reasoningTokens > completionTokens {
 		return body, false
 	}
 
 	expectedTextTokens := completionTokens - reasoningTokens
-	if textTokens <= expectedTextTokens {
-		return body, false
+	if textRaw, exists := details["text_tokens"]; exists && string(textRaw) != "null" {
+		textTokens, textOK := nonNegativeJSONInteger(textRaw)
+		if !textOK || textTokens <= expectedTextTokens {
+			return body, false
+		}
 	}
 
 	details["text_tokens"] = json.RawMessage(strconv.AppendInt(nil, expectedTextTokens, 10))

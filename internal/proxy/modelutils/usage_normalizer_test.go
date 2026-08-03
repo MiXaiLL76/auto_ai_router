@@ -33,6 +33,31 @@ func TestNormalizeCompletionUsageLeavesValidPartitionUnchanged(t *testing.T) {
 	assert.Equal(t, body, normalized)
 }
 
+func TestNormalizeCompletionUsageAddsMissingTextTokens(t *testing.T) {
+	body := []byte(`{"usage":{"completion_tokens":202,"completion_tokens_details":{"reasoning_tokens":194}}}`)
+
+	normalized, changed := NormalizeCompletionUsage(body, "qwen3.7-plus")
+
+	require.True(t, changed)
+	var response map[string]any
+	require.NoError(t, json.Unmarshal(normalized, &response))
+	details := response["usage"].(map[string]any)["completion_tokens_details"].(map[string]any)
+	assert.Equal(t, float64(8), details["text_tokens"])
+	assert.Equal(t, float64(194), details["reasoning_tokens"])
+}
+
+func TestNormalizeCompletionUsageReplacesNullTextTokens(t *testing.T) {
+	body := []byte(`{"usage":{"completion_tokens":202,"completion_tokens_details":{"text_tokens":null,"reasoning_tokens":194}}}`)
+
+	normalized, changed := NormalizeCompletionUsage(body, "qwen3.7-plus")
+
+	require.True(t, changed)
+	var response map[string]any
+	require.NoError(t, json.Unmarshal(normalized, &response))
+	details := response["usage"].(map[string]any)["completion_tokens_details"].(map[string]any)
+	assert.Equal(t, float64(8), details["text_tokens"])
+}
+
 func TestUsageNormalizingReadCloser(t *testing.T) {
 	stream := "event: message\r\n" +
 		`data: {"usage":{"completion_tokens":134,"completion_tokens_details":{"text_tokens":134,"reasoning_tokens":127}}}` + "\r\n\r\n" +

@@ -97,6 +97,21 @@ func TestWriteProxyResponseDoesNotNormalizeError(t *testing.T) {
 	assert.Equal(t, `"unchanged-error-body"`, w.Header().Get("ETag"))
 }
 
+func TestWriteProxyResponseAddsMissingQwenTextTokens(t *testing.T) {
+	resp := &ProxyResponse{
+		StatusCode: http.StatusOK,
+		Headers:    http.Header{"Content-Type": []string{"application/json"}},
+		Body:       []byte(`{"choices":[{"message":{"content":"ok"}}],"usage":{"completion_tokens":202,"completion_tokens_details":{"reasoning_tokens":194}}}`),
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	w := httptest.NewRecorder()
+
+	NewTestProxyBuilder().Build().writeProxyResponse(w, resp, req, &config.CredentialConfig{Name: "test"}, "qwen3.7-plus", nil)
+
+	assert.Contains(t, w.Body.String(), `"text_tokens":8`)
+	assert.Contains(t, w.Body.String(), `"reasoning_tokens":194`)
+}
+
 func TestWriteProxyResponseProManMasksErrorAndStripsHeaders(t *testing.T) {
 	rawBody := []byte(`{"error":{"message":"litellm.BadRequestError: Received Model Group=anthropic/claude-haiku-4-5-20251001/anthropic-direct-client-0dce8b1a Available Model Group Fallbacks=None"}}`)
 	resp := &ProxyResponse{
