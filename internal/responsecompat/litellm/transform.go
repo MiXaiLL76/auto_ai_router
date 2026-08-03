@@ -43,6 +43,8 @@ func (t *Transformer) Transform(ctx Context, response Response) Response {
 	switch ctx.Endpoint {
 	case "/v1/models":
 		normalizeModels(body)
+	case "/v1/embeddings":
+		normalizeEmbedding(ctx, body)
 	case "/v1/chat/completions":
 		err = normalizeCompletion(ctx, body)
 	case "/v1/completions":
@@ -60,6 +62,18 @@ func (t *Transformer) Transform(ctx Context, response Response) Response {
 	}
 	response.Headers.Set("Content-Type", "application/json")
 	return response
+}
+
+func normalizeEmbedding(ctx Context, body map[string]any) {
+	overrideModel(ctx.RequestedModel, body)
+	delete(body, "id")
+	delete(body, "provider")
+	if usage, ok := body["usage"].(map[string]any); ok {
+		delete(usage, "cost")
+		delete(usage, "cost_details")
+		delete(usage, "is_byok")
+		normalizeUsage(usage)
+	}
 }
 
 func normalizeTextCompletion(ctx Context, body map[string]any) error {

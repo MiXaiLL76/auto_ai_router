@@ -19,6 +19,8 @@ type streamReader struct {
 	id              string
 	created         any
 	choices         map[int]*choiceStreamState
+	pendingUsage    map[string]any
+	pendingPrelude  bool
 	sentChatPrelude bool
 	sentDone        bool
 }
@@ -101,11 +103,15 @@ func (r *streamReader) readFrame() error {
 
 	switch r.ctx.Endpoint {
 	case "/v1/chat/completions":
-		if !r.normalizeChatChunk(body) {
+		emit, usageOnly := r.normalizeChatChunk(body)
+		if !emit {
 			return nil
 		}
-		if !r.sentChatPrelude {
+		if r.pendingPrelude && !r.sentChatPrelude {
 			r.writeChatPrelude()
+		}
+		if usageOnly {
+			r.writePendingFinishes()
 		}
 	case "/v1/completions":
 		if !r.normalizeTextChunk(body) {
@@ -120,8 +126,16 @@ func (r *streamReader) readFrame() error {
 		return err
 	}
 	lines[dataIndex] = "data: " + string(encoded)
+	if r.ctx.Endpoint == "/v1/responses" {
+		lines = []string{lines[dataIndex]}
+	}
 	r.writeFrame(strings.Join(lines, "\n"))
-	r.writePendingFinishes()
+	if r.pendingUsage != nil {
+		r.writePendingFinishes()
+		usage := r.pendingUsage
+		r.pendingUsage = nil
+		r.writeFrame("data: " + string(mustMarshal(stripNulls(usage, false))))
+	}
 	return nil
 }
 
@@ -167,15 +181,21 @@ func (r *streamReader) normalizeTextChunk(body map[string]any) bool {
 	return len(choices) > 0 || hasUsage
 }
 
-func (r *streamReader) normalizeChatChunk(body map[string]any) bool {
+func (r *streamReader) normalizeChatChunk(body map[string]any) (bool, bool) {
+	r.pendingUsage = nil
+	_, hadLatencyCheckpoint := body["latency_checkpoint"]
 	usage, hasUsage := body["usage"].(map[string]any)
 	hasUsage = hasUsage && usage != nil
-	if !hasUsage {
+	choices, _ := body["choices"].([]any)
+	finalUsage := hasUsage && (len(choices) == 0 || streamUsageHasTokens(usage) || !choicesHaveDelta(choices))
+	if !finalUsage {
 		delete(body, "usage")
 	}
-	choices, _ := body["choices"].([]any)
-	if len(choices) == 0 && !hasUsage {
-		return false
+	if len(choices) == 0 && !finalUsage {
+		if _, exists := body["prompt_filter_results"]; exists {
+			r.pendingPrelude = true
+		}
+		return false, false
 	}
 
 	body["object"] = "chat.completion.chunk"
@@ -197,15 +217,16 @@ func (r *streamReader) normalizeChatChunk(body map[string]any) bool {
 	}
 	body["created"] = r.created
 
-	if hasUsage {
+	for _, field := range []string{"latency_checkpoint", "obfuscation", "provider", "service_tier", "system_fingerprint"} {
+		delete(body, field)
+	}
+
+	if finalUsage {
 		if !r.ctx.IncludeUsage {
 			delete(body, "usage")
-			hasUsage = false
+			finalUsage = false
 		} else {
-			body["usage"] = liteLLMStreamUsage()
-			for _, field := range []string{"latency_checkpoint", "obfuscation", "service_tier", "system_fingerprint"} {
-				delete(body, field)
-			}
+			usage = liteLLMStreamUsage(usage, hadLatencyCheckpoint)
 		}
 	}
 
@@ -233,9 +254,12 @@ func (r *streamReader) normalizeChatChunk(body map[string]any) bool {
 			}
 			delete(delta, "reasoning")
 		}
+		if delta["refusal"] == nil {
+			delete(delta, "refusal")
+		}
 		hasDelta := hasStreamDelta(delta)
 		if hadContentFilter && !hasDelta && choice["finish_reason"] == nil {
-			return false
+			return false, false
 		}
 		if toolCalls, ok := delta["tool_calls"].([]any); ok && len(toolCalls) > 0 {
 			state.sawTools = true
@@ -257,14 +281,26 @@ func (r *streamReader) normalizeChatChunk(body map[string]any) bool {
 				state.pendingFinish = reason
 			} else {
 				choice["finish_reason"] = reason
+				state.pendingFinish = ""
 				state.sentFinish = true
 			}
 		}
 	}
-	if hasUsage {
-		body["choices"] = r.usageChoices()
+	if finalUsage {
+		usageBody := r.usageChunk(usage)
+		if len(choices) == 0 {
+			for key := range body {
+				delete(body, key)
+			}
+			for key, value := range usageBody {
+				body[key] = value
+			}
+			return true, true
+		}
+		delete(body, "usage")
+		r.pendingUsage = usageBody
 	}
-	return len(choices) > 0 || hasUsage
+	return len(choices) > 0 || finalUsage, false
 }
 
 func (r *streamReader) writeChatPrelude() {
@@ -290,7 +326,58 @@ func (r *streamReader) usageChoices() []any {
 	return choices
 }
 
-func liteLLMStreamUsage() map[string]any {
+func liteLLMStreamUsage(usage map[string]any, forceZero bool) map[string]any {
+	if forceZero {
+		return emptyLiteLLMStreamUsage()
+	}
+	normalizeUsage(usage)
+	details, _ := usage["completion_tokens_details"].(map[string]any)
+	if details == nil {
+		details = make(map[string]any)
+		usage["completion_tokens_details"] = details
+	}
+	if reasoning, exists := usage["reasoning_tokens"]; exists {
+		details["reasoning_tokens"] = reasoning
+		delete(usage, "reasoning_tokens")
+	}
+	if details["reasoning_tokens"] == nil {
+		details["reasoning_tokens"] = 0
+	}
+	return usage
+}
+
+func streamUsageHasTokens(usage map[string]any) bool {
+	for _, field := range []string{"prompt_tokens", "completion_tokens", "total_tokens"} {
+		if value, ok := usage[field].(float64); ok && value != 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func choicesHaveDelta(choices []any) bool {
+	for _, rawChoice := range choices {
+		choice, _ := rawChoice.(map[string]any)
+		delta, _ := choice["delta"].(map[string]any)
+		if hasStreamDelta(delta) {
+			return true
+		}
+	}
+	return false
+}
+
+func (r *streamReader) usageChunk(usage map[string]any) map[string]any {
+	return map[string]any{
+		"id":      r.id,
+		"created": r.created,
+		"model":   r.ctx.RequestedModel,
+		"object":  "chat.completion.chunk",
+		"choices": r.usageChoices(),
+		"usage":   usage,
+	}
+}
+
+func emptyLiteLLMStreamUsage() map[string]any {
 	return map[string]any{
 		"completion_tokens":         0,
 		"completion_tokens_details": map[string]any{"reasoning_tokens": 0},
@@ -352,8 +439,8 @@ func (r *streamReader) writePendingFinishes() {
 }
 
 func (r *streamReader) normalizeResponsesChunk(body map[string]any) {
-	if response, ok := body["response"].(map[string]any); ok && r.ctx.RequestedModel != "" {
-		response["model"] = r.ctx.RequestedModel
+	if r.ctx.RequestedModel != "" {
+		body["model"] = r.ctx.RequestedModel
 	}
 	if errorBody, ok := body["error"].(map[string]any); ok && errorBody["code"] == nil {
 		errorBody["code"] = "unknown_error"
@@ -365,13 +452,19 @@ func (r *streamReader) finish() {
 		return
 	}
 	if r.ctx.Endpoint == "/v1/chat/completions" {
+		r.writePendingFinishes()
 		indexes := r.choiceIndexes(func(state *choiceStreamState) bool {
 			return state.sentRole && !state.sentFinish
 		})
 		if len(indexes) > 0 {
 			choices := make([]any, 0, len(indexes))
 			for _, index := range indexes {
-				choices = append(choices, terminalChoice(index, "stop"))
+				reason := r.choices[index].pendingFinish
+				if reason == "" {
+					reason = "stop"
+				}
+				choices = append(choices, terminalChoice(index, reason))
+				r.choices[index].pendingFinish = ""
 				r.choices[index].sentFinish = true
 			}
 			encoded, _ := json.Marshal(stripNulls(r.terminalChunk(choices), false))

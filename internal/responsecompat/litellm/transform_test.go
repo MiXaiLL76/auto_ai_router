@@ -94,6 +94,36 @@ func TestTransformModelsUsesLiteLLMModelOwner(t *testing.T) {
 	assert.Equal(t, "openai", model["owned_by"])
 }
 
+func TestTransformEmbeddingDropsAIRMetadata(t *testing.T) {
+	result := New().Transform(Context{
+		Endpoint:       "/v1/embeddings",
+		RequestedModel: "qwen/qwen3-embedding-8b",
+	}, Response{
+		StatusCode: http.StatusOK,
+		Headers:    make(http.Header),
+		Body: []byte(`{
+			"id":"gen-emb-1",
+			"provider":"SiliconFlow",
+			"model":"provider-model",
+			"object":"list",
+			"data":[{"index":0,"object":"embedding","embedding":[0.1]}],
+			"usage":{"prompt_tokens":3,"total_tokens":3,"cost":0.00000012,"is_byok":false,"cost_details":{"upstream_inference_cost":0.00000012}}
+		}`),
+	})
+
+	require.Equal(t, http.StatusOK, result.StatusCode)
+	var body map[string]any
+	require.NoError(t, json.Unmarshal(result.Body, &body))
+	assert.NotContains(t, body, "id")
+	assert.NotContains(t, body, "provider")
+	assert.Equal(t, "qwen/qwen3-embedding-8b", body["model"])
+	usage := body["usage"].(map[string]any)
+	assert.Equal(t, float64(0), usage["completion_tokens"])
+	assert.NotContains(t, usage, "cost")
+	assert.NotContains(t, usage, "cost_details")
+	assert.NotContains(t, usage, "is_byok")
+}
+
 func TestTransformMissingChoices(t *testing.T) {
 	result := New().Transform(Context{
 		Endpoint:       "/v1/chat/completions",
