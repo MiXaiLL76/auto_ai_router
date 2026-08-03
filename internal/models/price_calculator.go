@@ -81,11 +81,10 @@ func CalculateTokenCosts(usage *converter.TokenUsage, price *ModelPrice) *conver
 		costs.InputCost = float64(regularInputTokens) * inputCostPerToken
 	}
 
-	// Explicit text tokens are authoritative; otherwise derive them from the inclusive total.
-	regularOutputTokens := outputTextTokens
-	if regularOutputTokens == 0 {
-		regularOutputTokens = completionTokens - audioOutputTokens - reasoningTokens -
-			acceptedPredictionTokens - rejectedPredictionTokens - outputImageTokens
+	regularOutputTokens := completionTokens - audioOutputTokens - reasoningTokens -
+		acceptedPredictionTokens - rejectedPredictionTokens - outputImageTokens
+	if outputTextTokens > 0 && outputTextTokens < regularOutputTokens {
+		regularOutputTokens = outputTextTokens
 	}
 	if regularOutputTokens < 0 {
 		regularOutputTokens = 0

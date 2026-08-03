@@ -10,6 +10,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/converter"
 	promanutils "github.com/mixaill76/auto_ai_router/internal/converter/proman/utils"
+	"github.com/mixaill76/auto_ai_router/internal/proxy/modelutils"
 )
 
 func clientResponseBodyForCredential(statusCode int, body []byte, cred *config.CredentialConfig, displayModel string) ([]byte, bool, bool) {
@@ -193,6 +194,10 @@ func (p *Proxy) writeProxyResponse(w http.ResponseWriter, resp *ProxyResponse, c
 			responseBody = normalizedModelBody
 			responseBodyChanged = true
 		}
+		if normalizedBody, changed := modelutils.NormalizeCompletionUsage(responseBody, modelID); changed {
+			responseBody = normalizedBody
+			responseBodyChanged = true
+		}
 	}
 
 	// Determine target encoding based on client's Accept-Encoding
@@ -278,6 +283,10 @@ func (p *Proxy) writeProxyStreamingResponseWithTokens(
 	}
 
 	streamBody := resp.StreamBody
+	normalizeUsageStream := false
+	if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
+		streamBody, normalizeUsageStream = modelutils.NewUsageNormalizingReadCloser(streamBody, modelID)
+	}
 	if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices && promanutils.ShouldSanitizeUpstreamSurface(cred) {
 		streamBody = promanutils.NewSanitizingSSEReadCloser(streamBody, modelID)
 	}
@@ -294,7 +303,7 @@ func (p *Proxy) writeProxyStreamingResponseWithTokens(
 		tokenUsageOptions = usageOptions[0]
 	}
 
-	p.copyResponseHeaders(w, resp.Headers, cred, normalizeResponseModel)
+	p.copyResponseHeaders(w, resp.Headers, cred, normalizeUsageStream || normalizeResponseModel)
 	if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
 		p.markAudioUsageContractForClient(w, logCtx, tokenUsageOptions.AudioInputIncludesCachedAudio)
 	}

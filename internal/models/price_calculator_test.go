@@ -150,8 +150,8 @@ func TestCalculateTokenCosts_WithExplicitOutputTextTokens(t *testing.T) {
 
 	assert.NotNil(t, costs)
 	assert.InDelta(t, 0.0000008, costs.InputCost, 1e-12)
-	assert.InDelta(t, 0.00022412, costs.OutputCost+costs.ReasoningCost, 1e-12)
-	assert.InDelta(t, 0.00022492, costs.TotalCost, 1e-12)
+	assert.InDelta(t, 0.00011388, costs.OutputCost+costs.ReasoningCost, 1e-12)
+	assert.InDelta(t, 0.00011468, costs.TotalCost, 1e-12)
 }
 
 func TestCalculateTokenCosts_WithPrediction(t *testing.T) {
