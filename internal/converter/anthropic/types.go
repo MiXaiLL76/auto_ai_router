@@ -87,7 +87,7 @@ type AnthropicTool struct {
 type AnthropicThinking struct {
 	Type         string `json:"type"`                    // "enabled", "adaptive", or "disabled"
 	BudgetTokens int    `json:"budget_tokens,omitempty"` // token budget (Claude 3.x only)
-	Display      string `json:"display,omitempty"`       // "full", "minimal", "none"
+	Display      string `json:"display,omitempty"`       // "summarized" or "omitted"
 }
 
 // AnthropicOutputConfig controls output-level settings for Claude 4+ models.
