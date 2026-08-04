@@ -80,13 +80,16 @@ ______________________________________________________________________
 
 ### Optional — Metadata & Billing
 
-| Parameter            | Type    | Default  | Description                                                   |
-| -------------------- | ------- | -------- | ------------------------------------------------------------- |
-| `user`               | string  | —        | Unique end-user identifier for abuse monitoring.              |
-| `metadata`           | object  | —        | Up to 16 key-value pairs for request tracking.                |
-| `store`              | boolean | false    | Store the completion for later retrieval/distillation.        |
-| `service_tier`       | string  | `"auto"` | `"auto"`, `"default"`, `"flex"`, `"priority"`.                |
-| `web_search_options` | object  | —        | Web search integration settings (for models that support it). |
+| Parameter            | Type    | Default | Description                                                   |
+| -------------------- | ------- | ------- | ------------------------------------------------------------- |
+| `user`               | string  | —       | Unique end-user identifier for abuse monitoring.              |
+| `metadata`           | object  | —       | Up to 16 key-value pairs for request tracking.                |
+| `store`              | boolean | false   | Store the completion for later retrieval/distillation.        |
+| `web_search_options` | object  | —       | Web search integration settings (for models that support it). |
+
+!!! note "Service tier is router-controlled"
+`service_tier` is ignored and removed by Auto AI Router. Clients cannot select an upstream
+service tier. The effective tier is controlled by the router/provider configuration.
 
 ______________________________________________________________________
 

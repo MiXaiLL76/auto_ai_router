@@ -559,7 +559,31 @@ func (p *Proxy) readRequestBodyAndSelectModel(
 		return nil, "", "", false, false
 	}
 
-	modelID, streaming, sessionID, body := extractMetadataFromBody(body, r.Header.Get("Content-Type"))
+	sanitized, err := sanitizeAndExtractRequestBody(body, r.Header.Get("Content-Type"))
+	if err != nil {
+		p.logger.WarnContext(r.Context(), "Failed to sanitize request body",
+			"error_code", http.StatusBadRequest, "error", err)
+		logCtx.Status = "failure"
+		logCtx.HTTPStatus = http.StatusBadRequest
+		if errors.Is(err, errInvalidMultipartRequestBody) {
+			logCtx.ErrorMsg = "Invalid multipart request body: " + err.Error()
+			WriteErrorBadRequest(w, "Invalid multipart request body")
+		} else {
+			logCtx.ErrorMsg = "Invalid request body: " + err.Error()
+			WriteErrorBadRequest(w, "Invalid request body")
+		}
+		return nil, "", "", false, false
+	}
+	body = sanitized.Body
+	modelID := sanitized.ModelID
+	streaming := sanitized.Streaming
+	sessionID := sanitized.SessionID
+	if sanitized.Changed {
+		r.ContentLength = int64(len(body))
+		r.Header.Del("Content-Length")
+		dropRepresentationIntegrityHeaders(r.Header)
+		r.Header.Del("Content-Encoding")
+	}
 	logCtx.PublicModelID = modelID
 	logCtx.ModelID = modelID
 	logCtx.SessionID = sessionID
