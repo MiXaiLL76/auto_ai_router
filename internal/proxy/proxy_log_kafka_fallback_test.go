@@ -167,6 +167,9 @@ func TestLogSpendToLiteLLMDB_UsesClientResponseID(t *testing.T) {
 	prx := NewTestProxyBuilder().Build()
 	dbStub := &stubLiteLLMManager{}
 	prx.LiteLLMDB = dbStub
+	setTestModelPrice(prx, "gpt-4o-mini", &routermodels.ModelPrice{
+		InputCostPerToken: 0.000001, OutputCostPerToken: 0.000002,
+	})
 
 	logCtx := testLogCtx(t)
 	logCtx.ClientResponseID = "chatcmpl-client-123"
