@@ -31,7 +31,9 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/logger"
 	"github.com/mixaill76/auto_ai_router/internal/models"
 	"github.com/mixaill76/auto_ai_router/internal/monitoring"
+	"github.com/mixaill76/auto_ai_router/internal/proxy/modelutils"
 	"github.com/mixaill76/auto_ai_router/internal/ratelimit"
+	compatlitellm "github.com/mixaill76/auto_ai_router/internal/responsecompat/litellm"
 	"github.com/mixaill76/auto_ai_router/internal/responsestore"
 	"github.com/mixaill76/auto_ai_router/internal/scope"
 	"github.com/mixaill76/auto_ai_router/internal/security"
@@ -241,7 +243,8 @@ func (logCtx *RequestLogContext) Context() context.Context {
 // RequestLogContext holds all data needed for logging a request to LiteLLM DB
 // Filled throughout request processing and logged at the end via defer
 type RequestLogContext struct {
-	RequestID            string                   // Request ID (UUID)
+	RequestID            string                   // Internal request UUID
+	ClientResponseID     string                   // ID returned to the client
 	StartTime            time.Time                // Request start time
 	CompletionStartTime  time.Time                // Timestamp of the first real content/tool/reasoning delta (TTFT), not just the first byte/chunk; zero if not streamed or never reached
 	Request              *http.Request            // HTTP request
@@ -353,7 +356,8 @@ type Config struct {
 	SessionStoreTTL            time.Duration
 	RouterID                   string // Human-readable name for this router (shown in /trace); defaults to hostname
 	DrainUpstreamOnAbort       bool   // When true, keep reading upstream after client disconnect to get real usage (default: false)
-	TiktokenEnabled            bool   // Local tiktoken-based prompt/completion token fallback estimation (default: true)
+	ResponseCompatibility      string
+	TiktokenEnabled            bool // Local tiktoken-based prompt/completion token fallback estimation (default: true)
 	StrictAllTeamModelsACL     bool
 	ResponseHeaderMode         config.ResponseHeaderMode
 
@@ -396,6 +400,7 @@ type Proxy struct {
 	budgetReservationEnabled         bool
 	keyRateLimitsEnabled             bool
 	defaultEstimatedCompletionTokens int
+	responseCompat                   *compatlitellm.Transformer
 	version                          string
 	commit                           string
 }
@@ -437,6 +442,11 @@ func New(cfg *Config) *Proxy {
 		sessionStore = NewSessionStore(ttl)
 	}
 
+	var responseCompat *compatlitellm.Transformer
+	if cfg.ResponseCompatibility == "litellm" {
+		responseCompat = compatlitellm.New()
+	}
+
 	return &Proxy{
 		routerID:                         routerID,
 		balancer:                         cfg.Balancer,
@@ -468,6 +478,7 @@ func New(cfg *Config) *Proxy {
 		budgetReservationEnabled:         cfg.BudgetReservationEnabled,
 		keyRateLimitsEnabled:             cfg.KeyRateLimitsEnabled,
 		defaultEstimatedCompletionTokens: cfg.DefaultEstimatedCompletionTokens,
+		responseCompat:                   responseCompat,
 		client:                           httputil.NewHTTPClient(httpClientCfg),
 		version:                          cfg.Version,
 		commit:                           cfg.Commit,
@@ -747,8 +758,34 @@ func (p *Proxy) forwardToProxy(
 }
 
 func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
+	p.WithResponseCompatibility(w, r, p.proxyRequest)
+}
+
+func (p *Proxy) WithResponseCompatibility(
+	w http.ResponseWriter,
+	r *http.Request,
+	next func(http.ResponseWriter, *http.Request),
+) {
+	if p.responseCompat == nil {
+		next(w, r)
+		return
+	}
+
+	r, _ = withResponseCompatRequest(r)
+	r.Header.Del("Accept-Encoding")
+	writer := newResponseCompatibilityWriter(w, p.responseCompat, r)
+	next(writer, r)
+	if err := writer.Close(); err != nil {
+		p.logger.DebugContext(r.Context(), "Failed to write LiteLLM-compatible response", "error", err)
+	}
+}
+
+func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 	start := utils.NowUTC()
 	requestID := uuid.New().String()
+	if info := responseCompatRequestFromContext(r.Context()); info != nil {
+		info.RequestID = requestID
+	}
 
 	// Save and strip internal proxy markers before normal request handling. Their
 	// value is trusted only after authentication proves this is a master-key AIR peer.
@@ -1221,6 +1258,16 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 					}
 					proxyResp.Body = responsesBody
 					tokenUsageOptions.AudioInputIncludesCachedAudio = false
+				}
+			}
+
+			if proxyResp.StatusCode >= http.StatusOK && proxyResp.StatusCode < http.StatusMultipleChoices {
+				modelIDs := []string{modelID, logCtx.PublicModelID, logCtx.RealModelID}
+				for _, usageModelID := range modelIDs {
+					if normalizedBody, changed := modelutils.NormalizeCompletionUsage(proxyResp.Body, usageModelID); changed {
+						proxyResp.Body = normalizedBody
+						break
+					}
 				}
 			}
 
@@ -1923,6 +1970,14 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 			}
+			if normalizedBody, changed := modelutils.NormalizeCompletionUsage(
+				finalResponseBody,
+				clientVisibleResponseModel(logCtx, modelID),
+			); changed {
+				finalResponseBody = normalizedBody
+				bodyForTokenExtraction = normalizedBody
+				dropRepresentationIntegrityHeaders(resp.Header)
+			}
 		}
 
 		rawErrorBody := finalResponseBody
@@ -1937,6 +1992,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 		if clientBodyMasked {
 			resp.Header.Set("Content-Type", "application/json")
 		}
+		logCtx.captureClientResponseID(finalResponseBody)
 
 		// Single shared decode of bodyForTokenExtraction for both token-accounting
 		// consumers (plan item G) — the rate-limiter's total-tokens count
@@ -1980,11 +2036,7 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 
 		if resp.StatusCode >= 400 {
 			logCtx.Status = "failure"
-			if shouldMaskUpstreamErrors(cred) {
-				logCtx.ErrorMsg = "Upstream provider error"
-			} else {
-				logCtx.ErrorMsg = extractErrorMessage(finalResponseBody)
-			}
+			logCtx.ErrorMsg = "Request failed"
 			// Final error returned to the client — single unified ERROR record
 			// with everything needed for debugging.
 			p.logUpstreamError(r.Context(), "Upstream request completed with error status", resp.StatusCode, cred, modelID, rawErrorBody,
@@ -2041,19 +2093,17 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 			p.logUpstreamError(r.Context(), "Upstream returned error status on streaming response", resp.StatusCode, cred, modelID, nil,
 				"url", targetURL,
 				"request_id", logCtx.RequestID)
-			if shouldMaskUpstreamErrors(cred) {
-				body := maskedUpstreamErrorBody(resp.StatusCode)
-				w.Header().Set("Content-Type", "application/json")
-				w.Header().Set("Content-Length", fmt.Sprintf("%d", len(body)))
-				dropRepresentationIntegrityHeaders(w.Header())
-				w.WriteHeader(resp.StatusCode)
-				_, _ = w.Write(body)
-				logCtx.Status = "failure"
-				logCtx.HTTPStatus = resp.StatusCode
-				logCtx.ErrorMsg = "Upstream provider error"
-				logCtx.TargetURL = targetURL
-				return
-			}
+			body := maskedUpstreamErrorBody(resp.StatusCode)
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Content-Length", fmt.Sprintf("%d", len(body)))
+			dropRepresentationIntegrityHeaders(w.Header())
+			w.WriteHeader(resp.StatusCode)
+			_, _ = w.Write(body)
+			logCtx.Status = "failure"
+			logCtx.HTTPStatus = resp.StatusCode
+			logCtx.ErrorMsg = "Request failed"
+			logCtx.TargetURL = targetURL
+			return
 		}
 		setSuccessfulSSEHeaders(w.Header(), resp.StatusCode)
 		w.WriteHeader(resp.StatusCode)

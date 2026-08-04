@@ -239,7 +239,7 @@ func TestSanitizingSSEReadCloserRemovesInternalFields(t *testing.T) {
 
 	assert.Contains(t, string(out), "event: response.output_text.delta")
 	assert.Contains(t, string(out), `"model":"claude-haiku-4.5"`)
-	assert.Contains(t, string(out), "Upstream provider error")
+	assert.Contains(t, string(out), "Request failed")
 	assert.NotContains(t, string(out), "provider_specific_fields")
 	assert.NotContains(t, string(out), "anthropic-direct-client")
 	assert.NotContains(t, string(out), "Model Group")

@@ -134,13 +134,13 @@ func TestLogSpendToLiteLLMDB_NormalizesTokenUsageBeforePersisting(t *testing.T) 
 	assert.Equal(t, float64(2), ttlDetails["ephemeral_1h_input_tokens"])
 }
 
-func TestLogSpendToLiteLLMDB_TeamIDFallback(t *testing.T) {
+func TestLogSpendToLiteLLMDB_PreservesTeamID(t *testing.T) {
 	tests := []struct {
 		name       string
 		teamID     string
 		expectedID string
 	}{
-		{name: "credential fallback", expectedID: "openai_primary"},
+		{name: "no team", expectedID: ""},
 		{name: "token team", teamID: "team-1", expectedID: "team-1"},
 	}
 
@@ -161,6 +161,22 @@ func TestLogSpendToLiteLLMDB_TeamIDFallback(t *testing.T) {
 			assert.Equal(t, tt.expectedID, dbStub.loggedEntries[0].TeamID)
 		})
 	}
+}
+
+func TestLogSpendToLiteLLMDB_UsesClientResponseID(t *testing.T) {
+	prx := NewTestProxyBuilder().Build()
+	dbStub := &stubLiteLLMManager{}
+	prx.LiteLLMDB = dbStub
+	setTestModelPrice(prx, "gpt-4o-mini", &routermodels.ModelPrice{
+		InputCostPerToken: 0.000001, OutputCostPerToken: 0.000002,
+	})
+
+	logCtx := testLogCtx(t)
+	logCtx.ClientResponseID = "chatcmpl-client-123"
+
+	require.NoError(t, prx.logSpendToLiteLLMDB(logCtx))
+	require.Len(t, dbStub.loggedEntries, 1)
+	assert.Equal(t, "chatcmpl-client-123", dbStub.loggedEntries[0].RequestID)
 }
 
 func TestLogSpendToLiteLLMDB_BillsAliasPriceBeforeRealModelPrice(t *testing.T) {

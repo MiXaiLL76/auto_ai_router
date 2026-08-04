@@ -133,8 +133,8 @@ func aggregateSpendUpdates(batch []*models.SpendLogEntry) *SpendUpdates {
 			updates.Tokens[entityModelKey{EntityID: entry.APIKey, Model: entry.Model}] += entry.Spend
 		}
 
-		// User (if present)
-		if entry.UserID != "" {
+		// Team spend is charged through team membership, not the personal balance.
+		if entry.UserID != "" && entry.TeamID == "" {
 			updates.Users[entityModelKey{EntityID: entry.UserID, Model: entry.Model}] += entry.Spend
 		}
 

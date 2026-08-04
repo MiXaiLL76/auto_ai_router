@@ -11,6 +11,7 @@ server:
   port: 8080
   max_body_size_mb: 100
   response_body_multiplier: 10
+  response_compatibility: native
   request_timeout: 60s
   write_timeout: 60s
   idle_timeout: 2m
@@ -103,6 +104,7 @@ litellm_db:
 | `port`                     | int      | 8080        | Listen port                                                                        |
 | `max_body_size_mb`         | int      | 100         | Maximum request body size (MB)                                                     |
 | `response_body_multiplier` | int      | 10          | Response body limit = max_body_size_mb * this value                                |
+| `response_compatibility`   | string   | native      | Response contract: `native` or LiteLLM-compatible `litellm`                        |
 | `request_timeout`          | duration | 60s         | Request timeout                                                                    |
 | `write_timeout`            | duration | 60s         | HTTP server write timeout                                                          |
 | `idle_timeout`             | duration | 2m          | HTTP server idle timeout (default: 2 * write_timeout)                              |

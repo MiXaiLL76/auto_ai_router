@@ -134,6 +134,49 @@ func TestCalculateTokenCosts_WithReasoning(t *testing.T) {
 	assert.InDelta(t, 4.9, costs.TotalCost, 0.0001)
 }
 
+func TestCalculateTokenCosts_WithExplicitOutputTextTokens(t *testing.T) {
+	usage := &converter.TokenUsage{
+		PromptTokens:     16,
+		CompletionTokens: 219,
+		OutputTextTokens: 219,
+		ReasoningTokens:  212,
+	}
+	price := &ModelPrice{
+		InputCostPerToken:  0.00000005,
+		OutputCostPerToken: 0.00000052,
+	}
+
+	costs := CalculateTokenCosts(usage, price)
+
+	assert.NotNil(t, costs)
+	assert.InDelta(t, 0.0000008, costs.InputCost, 1e-12)
+	assert.InDelta(t, 0.00011388, costs.OutputCost+costs.ReasoningCost, 1e-12)
+	assert.InDelta(t, 0.00011468, costs.TotalCost, 1e-12)
+}
+
+func TestCalculateTokenCosts_ClampsToExplicitOutputTextTokens(t *testing.T) {
+	// Derived regular tokens (300-50=250) overstate billable text tokens here;
+	// the smaller explicit OutputTextTokens must win.
+	usage := &converter.TokenUsage{
+		PromptTokens:     10,
+		CompletionTokens: 300,
+		OutputTextTokens: 100,
+		ReasoningTokens:  50,
+	}
+	price := &ModelPrice{
+		InputCostPerToken:  0.002,
+		OutputCostPerToken: 0.001,
+	}
+
+	costs := CalculateTokenCosts(usage, price)
+
+	assert.NotNil(t, costs)
+	assert.InDelta(t, 0.1, costs.OutputCost, 1e-12)
+	assert.InDelta(t, 0.05, costs.ReasoningCost, 1e-12)
+	assert.InDelta(t, 0.02, costs.InputCost, 1e-12)
+	assert.InDelta(t, 0.17, costs.TotalCost, 1e-12)
+}
+
 func TestCalculateTokenCosts_WithPrediction(t *testing.T) {
 	// Prediction tokens (accepted and rejected) are included in completion tokens
 	usage := &converter.TokenUsage{

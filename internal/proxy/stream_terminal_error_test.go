@@ -32,6 +32,7 @@ func TestStreamingHandlersDetectFragmentedTerminalErrorsAcrossReads(t *testing.T
 		input      []string
 		wantBody   string
 		wantMarker string
+		masked     bool
 	}{
 		{
 			name: "direct passthrough observes raw provider frames",
@@ -41,6 +42,7 @@ func TestStreamingHandlersDetectFragmentedTerminalErrorsAcrossReads(t *testing.T
 			input:      terminalChunks,
 			wantBody:   strings.Join(terminalChunks, ""),
 			wantMarker: "fragmented terminal failure",
+			masked:     true,
 		},
 		{
 			name: "transformed stream retains raw provider failure after normalization",
@@ -106,11 +108,57 @@ func TestStreamingHandlersDetectFragmentedTerminalErrorsAcrossReads(t *testing.T
 
 			var terminalErr proxyProviderStreamError
 			require.ErrorAs(t, err, &terminalErr)
-			assert.Equal(t, tt.wantBody, w.Body.String())
+			if tt.masked {
+				assert.Contains(t, w.Body.String(), "Request failed")
+				assert.NotContains(t, w.Body.String(), tt.wantMarker)
+			} else {
+				assert.Equal(t, tt.wantBody, w.Body.String())
+			}
 			assert.Equal(t, "failure", logCtx.Status)
 			assert.Equal(t, http.StatusOK, logCtx.HTTPStatus)
 			assert.Equal(t, "stream_error", logCtx.StreamOutcome)
 			assert.Contains(t, logCtx.ErrorMsg, tt.wantMarker)
+		})
+	}
+}
+
+// TestHandleAnthropicCompatibleStreamingMasksInStreamErrorForAllCredentialTypes
+// guards against the leak fixed alongside PR #111's review: an Anthropic-format
+// in-stream `error` event's raw message is folded by the converter into a plain
+// delta.content string, which the output-side sanitizer in handleTransformedStreaming
+// never inspects (it only masks structural error.message keys). The input-side
+// sanitizer in handleAnthropicCompatibleStreaming must run unconditionally — not
+// just for ProMan — since it's the only pass that still sees the message under its
+// original error.message key, before conversion moves it into content.
+func TestHandleAnthropicCompatibleStreamingMasksInStreamErrorForAllCredentialTypes(t *testing.T) {
+	rawStream := "event: error\n" +
+		`data: {"type":"error","error":{"type":"overloaded_error","message":"internal: credential anthropic-direct-client-0dce8b1a exhausted, litellm_call_id=abc123"}}` + "\n\n"
+
+	for _, credType := range []config.ProviderType{config.ProviderTypeAnthropic, config.ProviderTypeCometAPI, config.ProviderTypeProMan} {
+		t.Run(string(credType), func(t *testing.T) {
+			prx := NewTestProxyBuilder().Build()
+			request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+			cred := &config.CredentialConfig{Name: "cred", Type: credType}
+			logCtx := &RequestLogContext{
+				RequestID:   "anthropic-error-leak",
+				StartTime:   time.Now().UTC(),
+				Request:     request,
+				Credential:  cred,
+				ModelID:     "claude-haiku-4.5",
+				RealModelID: "claude-haiku-4.5",
+			}
+			resp := &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": {"text/event-stream"}},
+				Body:       io.NopCloser(strings.NewReader(rawStream)),
+			}
+			w := httptest.NewRecorder()
+
+			_ = prx.handleAnthropicCompatibleStreaming(w, resp, cred, "claude-haiku-4.5", "claude-haiku-4.5", credType, "label", logCtx)
+
+			assert.NotContains(t, w.Body.String(), "anthropic-direct-client")
+			assert.NotContains(t, w.Body.String(), "litellm_call_id")
+			assert.Contains(t, w.Body.String(), "Request failed")
 		})
 	}
 }

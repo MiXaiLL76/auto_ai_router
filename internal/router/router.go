@@ -153,7 +153,11 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 
 	// Handle GET /v1/models
 	if req.URL.Path == "/v1/models" && req.Method == "GET" {
-		r.handleModels(w, req)
+		if r.proxy == nil {
+			r.handleModels(w, req)
+		} else {
+			r.proxy.WithResponseCompatibility(w, req, r.handleModels)
+		}
 		return
 	}
 

@@ -25,6 +25,11 @@ const (
 // then add back specialized token costs. This works for both semantics:
 // - Vertex/OpenAI: 100 - 5 - 20 = 75 regular, then add audio and cached separately
 // - Anthropic: 100 - 0 - 0 = 100 regular (since those tokens are in separate fields)
+//
+// If the provider also reports an explicit OutputTextTokens count smaller than the
+// derived regular output tokens, that smaller value is used instead (e.g. Qwen's
+// completion_tokens can include tokens not captured by any of the other output
+// breakdowns, so the derived subtraction alone would overcount billable text tokens).
 func CalculateTokenCosts(usage *converter.TokenUsage, price *ModelPrice) *converter.TokenCosts {
 	if usage == nil || price == nil {
 		return nil
@@ -41,6 +46,7 @@ func CalculateTokenCosts(usage *converter.TokenUsage, price *ModelPrice) *conver
 	imageTokens := converterutil.NonNegativeTokenCount(usage.ImageTokens)
 	outputImageTokens := converterutil.NonNegativeTokenCount(usage.OutputImageTokens)
 	cachedOutputTokens := converterutil.NonNegativeTokenCount(usage.CachedOutputTokens)
+	outputTextTokens := converterutil.NonNegativeTokenCount(usage.OutputTextTokens)
 	reasoningTokens := converterutil.NonNegativeTokenCount(usage.ReasoningTokens)
 	acceptedPredictionTokens := converterutil.NonNegativeTokenCount(usage.AcceptedPredictionTokens)
 	rejectedPredictionTokens := converterutil.NonNegativeTokenCount(usage.RejectedPredictionTokens)
@@ -80,9 +86,12 @@ func CalculateTokenCosts(usage *converter.TokenUsage, price *ModelPrice) *conver
 		costs.InputCost = float64(regularInputTokens) * inputCostPerToken
 	}
 
-	// Calculate "regular" output tokens by subtracting specialized token types
 	regularOutputTokens := completionTokens - audioOutputTokens - reasoningTokens -
 		acceptedPredictionTokens - rejectedPredictionTokens - outputImageTokens
+	// Explicit text tokens, when smaller, cap the derived value (see doc comment above).
+	if outputTextTokens > 0 && outputTextTokens < regularOutputTokens {
+		regularOutputTokens = outputTextTokens
+	}
 	if regularOutputTokens < 0 {
 		regularOutputTokens = 0
 	}

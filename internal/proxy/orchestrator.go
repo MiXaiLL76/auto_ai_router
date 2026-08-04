@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -575,6 +576,16 @@ func (p *Proxy) readRequestBodyAndSelectModel(
 		return nil, "", "", false, false
 	}
 	body = sanitized.Body
+	if info := responseCompatRequestFromContext(r.Context()); info != nil {
+		info.RequestedModel = sanitized.ModelID
+		info.IncludeUsage = strings.Contains(r.URL.Path, "/responses") || clientRequestedStreamUsage(body)
+		info.Streaming = sanitized.Streaming
+		compatibleBody := applyLiteLLMRequestCompatibility(r.URL.Path, body)
+		if !bytes.Equal(compatibleBody, body) {
+			body = compatibleBody
+			sanitized.Changed = true
+		}
+	}
 	modelID := sanitized.ModelID
 	streaming := sanitized.Streaming
 	sessionID := sanitized.SessionID
@@ -674,7 +685,6 @@ func (p *Proxy) readRequestBodyAndSelectModel(
 		body = openai.ReplaceModelInBody(body, modelID, realName)
 		realModelID = realName
 	}
-
 	return body, modelID, realModelID, streaming, true
 }
 

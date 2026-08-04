@@ -593,6 +593,10 @@ func tokenUsageFromShape(resp *tokenUsageResponseShape, opts TokenUsageExtractio
 	if cachedOutputTokens == 0 {
 		cachedOutputTokens = resp.Usage.OutputTokensDetails.CachedTokens
 	}
+	outputTextTokens := resp.Usage.CompletionTokensDetails.TextTokens
+	if outputTextTokens == 0 {
+		outputTextTokens = resp.Usage.OutputTokensDetails.TextTokens
+	}
 
 	// If tokens came from the nested response.completed event, use its detail fields
 	if resp.Usage.PromptTokens == 0 && resp.Usage.InputTokens == 0 && resp.Response.Usage != nil {
@@ -632,6 +636,9 @@ func tokenUsageFromShape(resp *tokenUsageResponseShape, opts TokenUsageExtractio
 		if cachedOutputTokens == 0 {
 			cachedOutputTokens = u.OutputTokensDetails.CachedTokens
 		}
+		if outputTextTokens == 0 {
+			outputTextTokens = u.OutputTokensDetails.TextTokens
+		}
 	}
 	if cacheCreationTokens == 0 {
 		cacheCreationTokens = cacheCreation5mTokens + cacheCreation1hTokens
@@ -658,6 +665,7 @@ func tokenUsageFromShape(resp *tokenUsageResponseShape, opts TokenUsageExtractio
 		CachedInputTokens:        cachedTokens,
 		CachedAudioInputTokens:   cachedAudioTokens,
 		CachedOutputTokens:       cachedOutputTokens,
+		OutputTextTokens:         outputTextTokens,
 		CacheCreationTokens:      cacheCreationTokens,
 		CacheCreation5mTokens:    cacheCreation5mTokens,
 		CacheCreation1hTokens:    cacheCreation1hTokens,

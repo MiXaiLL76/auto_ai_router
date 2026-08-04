@@ -6,41 +6,23 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"math"
 	"strconv"
 	"strings"
 )
 
-const (
-	qwenReasoningUsageModel = "qwen3.6-35b-a3b"
-	maxQwenSSELineBytes     = 1 << 20
-)
+const maxSSEUsageLineBytes = 1 << 20
 
-// NormalizeCompletionUsage applies model-specific response usage fixes. It
-// intentionally fails open: malformed or ambiguous payloads are returned
-// byte-for-byte unchanged.
 func NormalizeCompletionUsage(body []byte, modelID string) ([]byte, bool) {
-	return normalizeQwenCompletionUsage(body, modelID)
-}
-
-// NewUsageNormalizingReadCloser wraps streaming responses when a model-specific
-// SSE usage normalizer exists.
-func NewUsageNormalizingReadCloser(source io.ReadCloser, modelID string) (io.ReadCloser, bool) {
-	if source == nil || !isQwenReasoningUsageModel(modelID) {
-		return source, false
-	}
-	return newQwenUsageNormalizingReadCloser(source, modelID), true
-}
-
-// normalizeQwenCompletionUsage fixes the overlapping text/reasoning token
-// breakdown observed for qwen3.6-35b-a3b.
-func normalizeQwenCompletionUsage(body []byte, modelID string) ([]byte, bool) {
-	if !isQwenReasoningUsageModel(modelID) {
-		return body, false
-	}
-
 	var response map[string]json.RawMessage
-	if err := json.Unmarshal(body, &response); err != nil {
+	if json.Unmarshal(body, &response) != nil {
 		return body, false
+	}
+	if !isQwenModel(modelID) {
+		var responseModel string
+		if json.Unmarshal(response["model"], &responseModel) != nil || !isQwenModel(responseModel) {
+			return body, false
+		}
 	}
 
 	usageRaw, ok := response["usage"]
@@ -49,11 +31,11 @@ func normalizeQwenCompletionUsage(body []byte, modelID string) ([]byte, bool) {
 	}
 
 	var usage map[string]json.RawMessage
-	if err := json.Unmarshal(usageRaw, &usage); err != nil {
+	if json.Unmarshal(usageRaw, &usage) != nil {
 		return body, false
 	}
 
-	completionTokens, ok := positiveJSONInteger(usage["completion_tokens"])
+	completionTokens, ok := nonNegativeJSONInteger(usage["completion_tokens"])
 	if !ok {
 		return body, false
 	}
@@ -64,27 +46,21 @@ func normalizeQwenCompletionUsage(body []byte, modelID string) ([]byte, bool) {
 	}
 
 	var details map[string]json.RawMessage
-	if err := json.Unmarshal(detailsRaw, &details); err != nil {
+	if json.Unmarshal(detailsRaw, &details) != nil {
 		return body, false
 	}
 
-	textRaw, textPresent := details["text_tokens"]
-	if !textPresent {
-		return body, false
-	}
-	textTokens, ok := positiveJSONInteger(textRaw)
-	if !ok {
-		return body, false
-	}
-
-	reasoningTokens, ok := positiveJSONInteger(details["reasoning_tokens"])
-	if !ok || reasoningTokens > completionTokens {
+	reasoningTokens, reasoningOK := nonNegativeJSONInteger(details["reasoning_tokens"])
+	if !reasoningOK || reasoningTokens > completionTokens {
 		return body, false
 	}
 
 	expectedTextTokens := completionTokens - reasoningTokens
-	if textTokens <= expectedTextTokens {
-		return body, false
+	if textRaw, exists := details["text_tokens"]; exists && string(textRaw) != "null" {
+		textTokens, textOK := nonNegativeJSONInteger(textRaw)
+		if !textOK || (textTokens > 0 && textTokens <= expectedTextTokens) {
+			return body, false
+		}
 	}
 
 	details["text_tokens"] = json.RawMessage(strconv.AppendInt(nil, expectedTextTokens, 10))
@@ -107,31 +83,41 @@ func normalizeQwenCompletionUsage(body []byte, modelID string) ([]byte, bool) {
 	return normalizedResponse, true
 }
 
-func positiveJSONInteger(raw json.RawMessage) (int64, bool) {
+func nonNegativeJSONInteger(raw json.RawMessage) (int64, bool) {
 	if len(raw) == 0 {
 		return 0, false
 	}
-
-	value, err := strconv.ParseInt(string(raw), 10, 64)
-	if err != nil || value <= 0 {
+	encoded := strings.Trim(string(raw), `"`)
+	if value, err := strconv.ParseInt(encoded, 10, 64); err == nil {
+		return value, value >= 0
+	}
+	value, err := strconv.ParseFloat(encoded, 64)
+	if err != nil || value < 0 || value > math.MaxInt64 || math.Trunc(value) != value {
 		return 0, false
 	}
-	return value, true
+	return int64(value), true
 }
 
-func isQwenReasoningUsageModel(modelID string) bool {
+func NewUsageNormalizingReadCloser(source io.ReadCloser, modelID string) (io.ReadCloser, bool) {
+	if source == nil || !isQwenModel(modelID) {
+		return source, false
+	}
+	return &usageNormalizingReadCloser{
+		source:  source,
+		reader:  bufio.NewReader(source),
+		modelID: modelID,
+	}, true
+}
+
+func isQwenModel(modelID string) bool {
 	modelName := strings.ToLower(strings.TrimSpace(modelID))
 	if slash := strings.LastIndexByte(modelName, '/'); slash >= 0 {
 		modelName = modelName[slash+1:]
 	}
-	return modelName == qwenReasoningUsageModel || strings.HasPrefix(modelName, qwenReasoningUsageModel+"-")
+	return strings.HasPrefix(modelName, "qwen")
 }
 
-// qwenUsageNormalizingReadCloser processes complete SSE lines. Using a
-// synchronous reader is important here: callers can continue draining this
-// exact reader after a downstream client disconnects without losing buffered
-// upstream bytes in a separate goroutine.
-type qwenUsageNormalizingReadCloser struct {
+type usageNormalizingReadCloser struct {
 	source      io.ReadCloser
 	reader      *bufio.Reader
 	modelID     string
@@ -141,22 +127,10 @@ type qwenUsageNormalizingReadCloser struct {
 	terminalErr error
 }
 
-func newQwenUsageNormalizingReadCloser(source io.ReadCloser, modelID string) io.ReadCloser {
-	if source == nil || !isQwenReasoningUsageModel(modelID) {
-		return source
-	}
-	return &qwenUsageNormalizingReadCloser{
-		source:  source,
-		reader:  bufio.NewReader(source),
-		modelID: modelID,
-	}
-}
-
-func (r *qwenUsageNormalizingReadCloser) Read(p []byte) (int, error) {
+func (r *usageNormalizingReadCloser) Read(p []byte) (int, error) {
 	if len(p) == 0 {
 		return 0, nil
 	}
-
 	for len(r.pending) == 0 {
 		if r.terminalErr != nil {
 			err := r.terminalErr
@@ -165,43 +139,36 @@ func (r *qwenUsageNormalizingReadCloser) Read(p []byte) (int, error) {
 			}
 			return 0, err
 		}
-
-		r.readNextSSEFragment()
+		r.readNextFragment()
 	}
-
 	n := copy(p, r.pending)
 	r.pending = r.pending[n:]
 	return n, nil
 }
 
-func (r *qwenUsageNormalizingReadCloser) readNextSSEFragment() {
+func (r *usageNormalizingReadCloser) readNextFragment() {
 	for len(r.pending) == 0 && r.terminalErr == nil {
 		fragment, err := r.reader.ReadSlice('\n')
-
 		if r.passthrough {
-			if len(fragment) > 0 {
-				r.pending = fragment
-			}
+			r.pending = fragment
 			if !errors.Is(err, bufio.ErrBufferFull) {
 				r.passthrough = false
 			}
 		} else {
-			r.consumeBufferedSSEFragment(fragment, err)
+			r.consumeFragment(fragment, err)
 		}
-
 		if err != nil && !errors.Is(err, bufio.ErrBufferFull) {
 			r.terminalErr = err
 		}
 	}
 }
 
-func (r *qwenUsageNormalizingReadCloser) consumeBufferedSSEFragment(fragment []byte, readErr error) {
+func (r *usageNormalizingReadCloser) consumeFragment(fragment []byte, readErr error) {
 	if errors.Is(readErr, bufio.ErrBufferFull) {
-		if len(r.line)+len(fragment) <= maxQwenSSELineBytes {
+		if len(r.line)+len(fragment) <= maxSSEUsageLineBytes {
 			r.line = append(r.line, fragment...)
 			return
 		}
-
 		r.pending = append(r.line, fragment...)
 		r.line = nil
 		r.passthrough = true
@@ -213,24 +180,18 @@ func (r *qwenUsageNormalizingReadCloser) consumeBufferedSSEFragment(fragment []b
 	if len(line) == 0 {
 		return
 	}
-
-	if readErr == nil || errors.Is(readErr, io.EOF) {
-		if len(line) <= maxQwenSSELineBytes {
-			r.pending = normalizeQwenSSELine(line, r.modelID)
-			return
-		}
+	if (readErr == nil || errors.Is(readErr, io.EOF)) && len(line) <= maxSSEUsageLineBytes {
+		r.pending = normalizeSSEUsageLine(line, r.modelID)
+		return
 	}
-
-	// A line above the limit or interrupted by a transport error is ambiguous.
-	// Preserve it exactly and resume normalization at the next complete line.
 	r.pending = line
 }
 
-func (r *qwenUsageNormalizingReadCloser) Close() error {
+func (r *usageNormalizingReadCloser) Close() error {
 	return r.source.Close()
 }
 
-func normalizeQwenSSELine(line []byte, modelID string) []byte {
+func normalizeSSEUsageLine(line []byte, modelID string) []byte {
 	content, ending := splitSSELineEnding(line)
 	if !bytes.HasPrefix(content, []byte("data:")) {
 		return line
@@ -242,7 +203,7 @@ func normalizeQwenSSELine(line []byte, modelID string) []byte {
 		return line
 	}
 
-	normalizedPayload, changed := normalizeQwenCompletionUsage(payload, modelID)
+	normalizedPayload, changed := NormalizeCompletionUsage(payload, modelID)
 	if !changed {
 		return line
 	}

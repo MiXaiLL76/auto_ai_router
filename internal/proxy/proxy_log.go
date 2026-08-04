@@ -286,10 +286,6 @@ func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
 		customLLMProvider = string(config.ProviderTypeOpenAI)
 	}
 
-	if teamID == "" {
-		teamID = credName
-	}
-
 	endTime := utils.NowUTC()
 
 	// Publish to Kafka *before* building/inserting the Postgres row (not
@@ -328,7 +324,7 @@ func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
 	var pgErr error
 	if litellmEnabled {
 		pgErr = p.LiteLLMDB.LogSpend(&litellmdb.SpendLogEntry{
-			RequestID:           logCtx.RequestID,
+			RequestID:           logCtx.spendRequestID(),
 			StartTime:           logCtx.StartTime,
 			EndTime:             endTime,
 			CompletionStartTime: completionStartTime,

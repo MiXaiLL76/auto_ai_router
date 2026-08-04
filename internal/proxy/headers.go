@@ -25,13 +25,17 @@ var hopByHopHeaders = map[string]bool{
 }
 
 var allowedResponseHeaders = map[string]bool{
-	"Cache-Control":       true,
-	"Content-Disposition": true,
-	"Content-Range":       true,
-	"Content-Type":        true,
-	"Last-Modified":       true,
-	"Location":            true,
-	"Retry-After":         true,
+	"Cache-Control":                  true,
+	"Content-Disposition":            true,
+	"Content-Range":                  true,
+	"Content-Type":                   true,
+	"Last-Modified":                  true,
+	"Location":                       true,
+	"Retry-After":                    true,
+	"X-Ratelimit-Limit-Requests":     true,
+	"X-Ratelimit-Limit-Tokens":       true,
+	"X-Ratelimit-Remaining-Requests": true,
+	"X-Ratelimit-Remaining-Tokens":   true,
 }
 
 // privacyHeaders are headers that reveal client IP or routing information.

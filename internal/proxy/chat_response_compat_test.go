@@ -41,6 +41,26 @@ func TestNormalizeSuccessfulResponseModelStreamPreservesLargeNumbers(t *testing.
 	assert.Contains(t, string(normalized), `"sequence":9007199254740993`)
 }
 
+func TestNormalizeSuccessfulResponseModelStreamPreservesNestedModelForLiteLLM(t *testing.T) {
+	stream := "data: {\"model\":\"backend\",\"response\":{\"model\":\"backend\"}}\n\n"
+	request := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	request, _ = withResponseCompatRequest(request)
+	logCtx := &RequestLogContext{Request: request, PublicModelID: "public"}
+
+	result, err := io.ReadAll(normalizeSuccessfulResponseModelStream(
+		strings.NewReader(stream),
+		http.StatusOK,
+		logCtx,
+		"backend",
+	))
+
+	require.NoError(t, err)
+	assert.JSONEq(t,
+		`{"model":"public","response":{"model":"backend"}}`,
+		strings.TrimSpace(strings.TrimPrefix(string(result), "data:")),
+	)
+}
+
 func TestNormalizeSuccessfulResponseModelStreamBoundsOversizedLines(t *testing.T) {
 	stream := "data: {\"model\":\"backend\",\"payload\":\"" +
 		strings.Repeat("x", maxSSEModelRewriteLineBytes) +

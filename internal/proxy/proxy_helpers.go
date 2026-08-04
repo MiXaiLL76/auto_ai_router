@@ -193,6 +193,9 @@ func buildMetadata(hashedToken string, tokenInfo *litellmdb.TokenInfo, errorMsg 
 			}
 		}
 		completionTokensDetails["audio_tokens"] = usage.AudioOutputTokens
+		if usage.OutputTextTokens > 0 {
+			completionTokensDetails["text_tokens"] = usage.OutputTextTokens
+		}
 		completionTokensDetails["image_tokens"] = usage.OutputImageTokens
 		completionTokensDetails["reasoning_tokens"] = usage.ReasoningTokens
 		completionTokensDetails["accepted_prediction_tokens"] = usage.AcceptedPredictionTokens
@@ -221,6 +224,7 @@ func buildMetadata(hashedToken string, tokenInfo *litellmdb.TokenInfo, errorMsg 
 			"cache_creation_token_details": promptTokensDetails["cache_creation_token_details"],
 		},
 		"completion_tokens_details": map[string]interface{}{
+			"text_tokens":                completionTokensDetails["text_tokens"],
 			"audio_tokens":               completionTokensDetails["audio_tokens"],
 			"image_tokens":               completionTokensDetails["image_tokens"],
 			"reasoning_tokens":           completionTokensDetails["reasoning_tokens"],

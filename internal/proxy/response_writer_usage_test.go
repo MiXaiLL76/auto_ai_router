@@ -76,11 +76,11 @@ func TestWriteProxyResponseNormalizesQwenUsageBeforeCompression(t *testing.T) {
 	assert.Equal(t, 4774, payload.Usage.CompletionTokens)
 	assert.Equal(t, 357, payload.Usage.CompletionTokensDetails.TextTokens)
 	assert.Equal(t, 4417, payload.Usage.CompletionTokensDetails.ReasoningTokens)
-	assert.Equal(t, "kept", payload.Usage.CompletionTokensDetails.ProviderDetail)
-	assert.Equal(t, "kept", payload.ProviderMetadata.Trace)
+	assert.Empty(t, payload.Usage.CompletionTokensDetails.ProviderDetail)
+	assert.Empty(t, payload.ProviderMetadata.Trace)
 }
 
-func TestWriteProxyResponseDoesNotNormalizeError(t *testing.T) {
+func TestWriteProxyResponseMasksError(t *testing.T) {
 	originalBody := []byte(`{"error":{"message":"upstream failed"},"usage":{"completion_tokens":4774,"completion_tokens_details":{"text_tokens":4774,"reasoning_tokens":4417}}}`)
 	resp := &ProxyResponse{
 		StatusCode: http.StatusBadGateway,
@@ -93,8 +93,39 @@ func TestWriteProxyResponseDoesNotNormalizeError(t *testing.T) {
 	NewTestProxyBuilder().Build().writeProxyResponse(w, resp, req, &config.CredentialConfig{Name: "test"}, "qwen3.6-35b-a3b", nil)
 
 	assert.Equal(t, http.StatusBadGateway, w.Code)
-	assert.Equal(t, originalBody, w.Body.Bytes())
-	assert.Equal(t, `"unchanged-error-body"`, w.Header().Get("ETag"))
+	assert.NotContains(t, w.Body.String(), "upstream failed")
+	assert.Contains(t, w.Body.String(), "Request failed")
+	assert.Empty(t, w.Header().Get("ETag"))
+}
+
+func TestWriteProxyResponseAddsMissingQwenTextTokens(t *testing.T) {
+	resp := &ProxyResponse{
+		StatusCode: http.StatusOK,
+		Headers:    http.Header{"Content-Type": []string{"application/json"}},
+		Body:       []byte(`{"choices":[{"message":{"content":"ok"}}],"usage":{"completion_tokens":202,"completion_tokens_details":{"reasoning_tokens":194}}}`),
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	w := httptest.NewRecorder()
+
+	NewTestProxyBuilder().Build().writeProxyResponse(w, resp, req, &config.CredentialConfig{Name: "test"}, "qwen3.7-plus", nil)
+
+	assert.Contains(t, w.Body.String(), `"text_tokens":8`)
+	assert.Contains(t, w.Body.String(), `"reasoning_tokens":194`)
+}
+
+func TestWriteProxyResponseUsesQwenResponseModel(t *testing.T) {
+	resp := &ProxyResponse{
+		StatusCode: http.StatusOK,
+		Headers:    http.Header{"Content-Type": []string{"application/json"}},
+		Body:       []byte(`{"model":"qwen3.7-plus","choices":[{"message":{"content":"ok"}}],"usage":{"completion_tokens":202,"completion_tokens_details":{"text_tokens":0,"reasoning_tokens":194}}}`),
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	w := httptest.NewRecorder()
+
+	logCtx := &RequestLogContext{PublicModelID: "qwen3.7-plus"}
+	NewTestProxyBuilder().Build().writeProxyResponse(w, resp, req, &config.CredentialConfig{Name: "test"}, "provider-backend-alias", logCtx)
+
+	assert.Contains(t, w.Body.String(), `"text_tokens":8`)
 }
 
 func TestWriteProxyResponseProManMasksErrorAndStripsHeaders(t *testing.T) {
@@ -124,7 +155,7 @@ func TestWriteProxyResponseProManMasksErrorAndStripsHeaders(t *testing.T) {
 	assert.Empty(t, w.Header().Get("ETag"))
 	assert.NotContains(t, w.Body.String(), "litellm")
 	assert.NotContains(t, w.Body.String(), "anthropic-direct-client")
-	assert.Contains(t, w.Body.String(), "Upstream provider error")
+	assert.Contains(t, w.Body.String(), "Request failed")
 	assert.Equal(t, rawBody, resp.Body, "raw upstream body should remain available to internal logging")
 }
 
@@ -152,7 +183,7 @@ func TestWriteProxyResponseProManSanitizesSuccessBody(t *testing.T) {
 	assert.NotContains(t, w.Body.String(), "anthropic-direct-client")
 }
 
-func TestWriteProxyResponseDoesNotSanitizeProviderLookingNameWithoutProManType(t *testing.T) {
+func TestWriteProxyResponseSanitizesAllCredentialTypes(t *testing.T) {
 	rawBody := []byte(`{"model":"anthropic/customer-choice","caller":"customer-app","provider_specific_fields":{"keep":"regular"},"choices":[{"message":{"content":"ok"}}]}`)
 	resp := &ProxyResponse{
 		StatusCode: http.StatusOK,
@@ -170,8 +201,8 @@ func TestWriteProxyResponseDoesNotSanitizeProviderLookingNameWithoutProManType(t
 
 	require.Equal(t, http.StatusOK, w.Code)
 	assert.Equal(t, "provider-server", w.Header().Get("Server"))
-	assert.Contains(t, w.Body.String(), `"caller":"customer-app"`)
-	assert.Contains(t, w.Body.String(), `"provider_specific_fields":{"keep":"regular"}`)
+	assert.NotContains(t, w.Body.String(), `"caller":"customer-app"`)
+	assert.NotContains(t, w.Body.String(), `"provider_specific_fields"`)
 	assert.NotContains(t, w.Body.String(), "anthropic-direct-client")
 }
 
@@ -186,7 +217,7 @@ func TestClientResponseBodyForProManMasksErrors(t *testing.T) {
 	assert.NotContains(t, string(body), "litellm")
 	assert.NotContains(t, string(body), "anthropic-direct-client")
 	assert.NotContains(t, string(body), "Model Group")
-	assert.Contains(t, string(body), "Upstream provider error")
+	assert.Contains(t, string(body), "Request failed")
 }
 
 func TestWriteProxyStreamingResponseNormalizesQwenUsage(t *testing.T) {
@@ -220,11 +251,12 @@ func TestWriteProxyStreamingResponseNormalizesQwenUsage(t *testing.T) {
 	assert.Empty(t, w.Header().Get("Digest"))
 	assert.Equal(t, 1370, usage.PromptTokens)
 	assert.Equal(t, 4774, usage.CompletionTokens)
+	assert.Equal(t, 357, usage.OutputTextTokens)
 	assert.Equal(t, 4417, usage.ReasoningTokens)
 	assert.Contains(t, w.Body.String(), "event: message\r\n")
 	assert.Contains(t, w.Body.String(), `"text_tokens":357`)
 	assert.Contains(t, w.Body.String(), `"reasoning_tokens":4417`)
-	assert.Contains(t, w.Body.String(), `"provider_detail":"kept"`)
+	assert.NotContains(t, w.Body.String(), `"provider_detail"`)
 	assert.Contains(t, w.Body.String(), "data: [DONE]\r\n\r\n")
 }
 
@@ -333,5 +365,6 @@ func TestWriteProxyStreamingResponseQwenDrainCapturesUsage(t *testing.T) {
 	require.NotNil(t, usage)
 	assert.Equal(t, 1370, usage.PromptTokens)
 	assert.Equal(t, 4774, usage.CompletionTokens)
+	assert.Equal(t, 357, usage.OutputTextTokens)
 	assert.Equal(t, 4417, usage.ReasoningTokens)
 }

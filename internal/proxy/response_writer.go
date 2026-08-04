@@ -13,12 +13,12 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/proxy/modelutils"
 )
 
-func clientResponseBodyForCredential(statusCode int, body []byte, cred *config.CredentialConfig, displayModel string) ([]byte, bool, bool) {
-	if statusCode >= 400 && shouldMaskUpstreamErrors(cred) {
+func clientResponseBodyForCredential(statusCode int, body []byte, _ *config.CredentialConfig, displayModel string) ([]byte, bool, bool) {
+	if statusCode >= 400 {
 		masked := maskedUpstreamErrorBody(statusCode)
 		return masked, !bytes.Equal(body, masked), true
 	}
-	if statusCode >= 200 && statusCode < 300 && promanutils.ShouldSanitizeUpstreamSurface(cred) {
+	if statusCode >= 200 && statusCode < 300 {
 		sanitized, changed := promanutils.SanitizeUpstreamJSONBody(body, displayModel)
 		return sanitized, changed, false
 	}
@@ -49,6 +49,11 @@ type proxyStreamErrorCapture struct {
 
 type proxyStreamErrorObserver struct {
 	capture *proxyStreamErrorCapture
+}
+
+type readerReadCloser struct {
+	io.Reader
+	io.Closer
 }
 
 func (w proxyStreamErrorObserver) Write(chunk []byte) (int, error) {
@@ -194,11 +199,15 @@ func (p *Proxy) writeProxyResponse(w http.ResponseWriter, resp *ProxyResponse, c
 			responseBody = normalizedModelBody
 			responseBodyChanged = true
 		}
-		if normalizedBody, changed := modelutils.NormalizeCompletionUsage(responseBody, modelID); changed {
+		if normalizedBody, changed := modelutils.NormalizeCompletionUsage(
+			responseBody,
+			clientVisibleResponseModel(logCtx, modelID),
+		); changed {
 			responseBody = normalizedBody
 			responseBodyChanged = true
 		}
 	}
+	logCtx.captureClientResponseID(responseBody)
 
 	// Determine target encoding based on client's Accept-Encoding
 	acceptEncoding := clientReq.Header.Get("Accept-Encoding")
@@ -282,15 +291,20 @@ func (p *Proxy) writeProxyStreamingResponseWithTokens(
 		credName = cred.Name
 	}
 
-	streamBody := resp.StreamBody
-	normalizeStream := false
-	if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
-		if normalizedStreamBody, wrapped := modelutils.NewUsageNormalizingReadCloser(streamBody, modelID); wrapped {
-			streamBody = normalizedStreamBody
-			normalizeStream = true
+	detectProviderStreamError := resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices
+	providerStreamError := &proxyStreamErrorCapture{}
+	streamBody := io.ReadCloser(resp.StreamBody)
+	if detectProviderStreamError {
+		streamBody = readerReadCloser{
+			Reader: io.TeeReader(streamBody, proxyStreamErrorObserver{capture: providerStreamError}),
+			Closer: streamBody,
 		}
 	}
-	if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices && promanutils.ShouldSanitizeUpstreamSurface(cred) {
+	normalizeUsageStream := false
+	if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
+		streamBody, normalizeUsageStream = modelutils.NewUsageNormalizingReadCloser(streamBody, modelID)
+	}
+	if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
 		streamBody = promanutils.NewSanitizingSSEReadCloser(streamBody, modelID)
 	}
 	normalizeResponseModel := resp.StatusCode >= http.StatusOK &&
@@ -306,7 +320,7 @@ func (p *Proxy) writeProxyStreamingResponseWithTokens(
 		tokenUsageOptions = usageOptions[0]
 	}
 
-	p.copyResponseHeaders(w, resp.Headers, cred, normalizeStream || normalizeResponseModel)
+	p.copyResponseHeaders(w, resp.Headers, cred, normalizeUsageStream || normalizeResponseModel)
 	if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
 		p.markAudioUsageContractForClient(w, logCtx, tokenUsageOptions.AudioInputIncludesCachedAudio)
 	}
@@ -316,13 +330,8 @@ func (p *Proxy) writeProxyStreamingResponseWithTokens(
 
 	var lastUsage *converter.TokenUsage
 	completion := p.newCompletionTokenAccumulator(tokenizerModelID)
-	detectProviderStreamError := resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices
-	providerStreamError := &proxyStreamErrorCapture{}
 	var payloadBuf [][]byte
 	onChunk := func(chunk []byte) {
-		if detectProviderStreamError {
-			providerStreamError.Observe(chunk)
-		}
 		// One split per chunk (plan item C), reused for both usage
 		// extraction and the completion accumulator.
 		payloadBuf = splitSSEPayloads(chunk, payloadBuf)
@@ -398,11 +407,9 @@ func (p *Proxy) writeProxyStreamingResponseWithTokens(
 	}
 
 	// Non-flushing fallback: copy as-is (token usage cannot be parsed reliably here).
-	streamReader := clientReader
-	if detectProviderStreamError {
-		streamReader = io.TeeReader(streamReader, proxyStreamErrorObserver{capture: providerStreamError})
-	}
-	if _, err := io.Copy(w, streamReader); err != nil {
+	var responseIDScanner clientResponseIDScanner
+	observedReader := io.TeeReader(clientReader, clientResponseIDObserver{scanner: &responseIDScanner, logCtx: logCtx})
+	if _, err := io.Copy(w, observedReader); err != nil {
 		if isClientDisconnectError(err) {
 			p.recordAbortedRequest(credName, endpointFromRequest(clientReq), modelID)
 		}

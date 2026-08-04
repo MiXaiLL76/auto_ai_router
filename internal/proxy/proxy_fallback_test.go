@@ -400,10 +400,12 @@ func TestProxy_429PreservedOverNetworkError(t *testing.T) {
 		"client must receive 429 from first credential, not 502 from the network error on retry")
 	assert.Equal(t, int32(1), atomic.LoadInt32(&cred1Calls), "cred1 should be called exactly once")
 
-	// Verify the response body still contains the original rate-limit error JSON.
+	// Verify the response body keeps the 429 semantics without provider details.
 	var respBody map[string]interface{}
 	require.NoError(t, json.NewDecoder(w.Body).Decode(&respBody))
-	assert.Equal(t, "rate_limit_exceeded", respBody["error"])
+	errorBody := respBody["error"].(map[string]interface{})
+	assert.Equal(t, "Rate limit exceeded", errorBody["message"])
+	assert.Equal(t, "rate_limit_error", errorBody["type"])
 }
 
 // TestProxy_429PreservedWhenNoFallbackAndNetworkError is similar but without any

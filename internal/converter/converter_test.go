@@ -544,7 +544,7 @@ func TestExtractTokenUsage(t *testing.T) {
 		t.Fatalf("expected nil for invalid json")
 	}
 
-	chatBody := []byte(`{"usage":{"prompt_tokens":15,"completion_tokens":7,"prompt_tokens_details":{"cached_tokens":5,"cached_audio_tokens":2,"cache_creation_tokens":4,"cache_creation_token_details":{"ephemeral_5m_input_tokens":1,"ephemeral_1h_input_tokens":3},"audio_tokens":3},"completion_tokens_details":{"accepted_prediction_tokens":3,"rejected_prediction_tokens":1,"audio_tokens":4,"cached_tokens":2,"reasoning_tokens":6,"image_tokens":2}}}`)
+	chatBody := []byte(`{"usage":{"prompt_tokens":15,"completion_tokens":7,"prompt_tokens_details":{"cached_tokens":5,"cached_audio_tokens":2,"cache_creation_tokens":4,"cache_creation_token_details":{"ephemeral_5m_input_tokens":1,"ephemeral_1h_input_tokens":3},"audio_tokens":3},"completion_tokens_details":{"accepted_prediction_tokens":3,"rejected_prediction_tokens":1,"audio_tokens":4,"cached_tokens":2,"reasoning_tokens":6,"image_tokens":2,"text_tokens":5}}}`)
 	usage := ExtractTokenUsage(chatBody)
 	if usage == nil {
 		t.Fatalf("expected usage for chat format")
@@ -553,7 +553,7 @@ func TestExtractTokenUsage(t *testing.T) {
 	if usage.PromptTokens != 15 || usage.CompletionTokens != 7 {
 		t.Fatalf("unexpected chat token counts: %+v", usage)
 	}
-	if usage.CachedInputTokens != 5 || usage.CachedAudioInputTokens != 2 || usage.CachedOutputTokens != 2 || usage.CacheCreationTokens != 4 || usage.CacheCreation5mTokens != 1 || usage.CacheCreation1hTokens != 3 || usage.AudioInputTokens != 1 || usage.AudioOutputTokens != 4 || usage.ReasoningTokens != 6 {
+	if usage.CachedInputTokens != 5 || usage.CachedAudioInputTokens != 2 || usage.CachedOutputTokens != 2 || usage.CacheCreationTokens != 4 || usage.CacheCreation5mTokens != 1 || usage.CacheCreation1hTokens != 3 || usage.AudioInputTokens != 1 || usage.AudioOutputTokens != 4 || usage.OutputTextTokens != 5 || usage.ReasoningTokens != 6 {
 		t.Fatalf("unexpected details: %+v", usage)
 	}
 	if usage.AcceptedPredictionTokens != 3 || usage.RejectedPredictionTokens != 1 {
@@ -569,7 +569,7 @@ func TestExtractTokenUsage(t *testing.T) {
 		t.Fatalf("expected usage for image format")
 		return
 	}
-	if usage.PromptTokens != 9 || usage.CompletionTokens != 10 || usage.ImageTokens != 8 || usage.OutputImageTokens != 6 {
+	if usage.PromptTokens != 9 || usage.CompletionTokens != 10 || usage.ImageTokens != 8 || usage.OutputImageTokens != 6 || usage.OutputTextTokens != 4 {
 		t.Fatalf("unexpected image token counts: %+v", usage)
 	}
 
@@ -637,7 +637,7 @@ func TestExtractTokenUsage_ImageFallback(t *testing.T) {
 func TestExtractTokenUsage_ResponsesAPI(t *testing.T) {
 	// Responses API format (GPT-5, /v1/responses) uses input_tokens/output_tokens
 	// with output_tokens_details instead of completion_tokens_details
-	body := []byte(`{"usage":{"input_tokens":150,"output_tokens":80,"total_tokens":230,"input_tokens_details":{"cached_tokens":30,"audio_tokens":10},"output_tokens_details":{"reasoning_tokens":25,"audio_tokens":5,"image_tokens":40}}}`)
+	body := []byte(`{"usage":{"input_tokens":150,"output_tokens":80,"total_tokens":230,"input_tokens_details":{"cached_tokens":30,"audio_tokens":10},"output_tokens_details":{"reasoning_tokens":25,"audio_tokens":5,"image_tokens":40,"text_tokens":10}}}`)
 	usage := ExtractTokenUsage(body)
 	if usage == nil {
 		t.Fatalf("expected usage for Responses API format")
@@ -660,6 +660,9 @@ func TestExtractTokenUsage_ResponsesAPI(t *testing.T) {
 	}
 	if usage.OutputImageTokens != 40 {
 		t.Fatalf("expected output_image_tokens=40, got %d", usage.OutputImageTokens)
+	}
+	if usage.OutputTextTokens != 10 {
+		t.Fatalf("expected output_text_tokens=10, got %d", usage.OutputTextTokens)
 	}
 }
 
