@@ -298,9 +298,10 @@ func errorStatus(value any) int {
 
 func normalizeError(status int, _ []byte) []byte {
 	message := "Request failed"
-	if status == http.StatusTooManyRequests {
+	switch status {
+	case http.StatusTooManyRequests:
 		message = "Rate limit exceeded"
-	} else if status == http.StatusRequestTimeout || status == http.StatusGatewayTimeout {
+	case http.StatusRequestTimeout, http.StatusGatewayTimeout:
 		message = "Request timed out"
 	}
 
