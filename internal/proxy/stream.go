@@ -1280,10 +1280,12 @@ func (p *Proxy) streamToClient(
 	// synchronization against concurrent Write() — deliberately out of scope
 	// here; see TestStreamToClient_FlushesTailOnMidStreamPause.
 	flushPending := false
+	var responseIDScanner clientResponseIDScanner
 
 	for {
 		n, err := reader.Read(*buf)
 		if n > 0 {
+			responseIDScanner.observe(logCtx, (*buf)[:n])
 			if ttftPending {
 				if ttftScan.observe((*buf)[:n]) {
 					logCtx.CompletionStartTime = time.Now()

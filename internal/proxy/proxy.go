@@ -234,7 +234,8 @@ func (logCtx *RequestLogContext) Context() context.Context {
 // RequestLogContext holds all data needed for logging a request to LiteLLM DB
 // Filled throughout request processing and logged at the end via defer
 type RequestLogContext struct {
-	RequestID            string                   // Request ID (UUID)
+	RequestID            string                   // Internal request UUID
+	ClientResponseID     string                   // ID returned to the client
 	StartTime            time.Time                // Request start time
 	CompletionStartTime  time.Time                // Timestamp of the first real content/tool/reasoning delta (TTFT), not just the first byte/chunk; zero if not streamed or never reached
 	Request              *http.Request            // HTTP request
@@ -1956,6 +1957,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 		if clientBodyMasked {
 			resp.Header.Set("Content-Type", "application/json")
 		}
+		logCtx.captureClientResponseID(finalResponseBody)
 
 		// Single shared decode of bodyForTokenExtraction for both token-accounting
 		// consumers (plan item G) — the rate-limiter's total-tokens count

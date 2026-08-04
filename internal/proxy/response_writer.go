@@ -207,6 +207,7 @@ func (p *Proxy) writeProxyResponse(w http.ResponseWriter, resp *ProxyResponse, c
 			responseBodyChanged = true
 		}
 	}
+	logCtx.captureClientResponseID(responseBody)
 
 	// Determine target encoding based on client's Accept-Encoding
 	acceptEncoding := clientReq.Header.Get("Accept-Encoding")
@@ -406,7 +407,9 @@ func (p *Proxy) writeProxyStreamingResponseWithTokens(
 	}
 
 	// Non-flushing fallback: copy as-is (token usage cannot be parsed reliably here).
-	if _, err := io.Copy(w, clientReader); err != nil {
+	var responseIDScanner clientResponseIDScanner
+	observedReader := io.TeeReader(clientReader, clientResponseIDObserver{scanner: &responseIDScanner, logCtx: logCtx})
+	if _, err := io.Copy(w, observedReader); err != nil {
 		if isClientDisconnectError(err) {
 			p.recordAbortedRequest(credName, endpointFromRequest(clientReq), modelID)
 		}

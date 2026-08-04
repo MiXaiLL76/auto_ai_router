@@ -105,6 +105,17 @@ func TestBuildKafkaSpendEvent_BasicMapping(t *testing.T) {
 	assert.Equal(t, 0, event.BodyResponseBytes)
 }
 
+func TestBuildKafkaSpendEvent_UsesClientResponseID(t *testing.T) {
+	prx := NewTestProxyBuilder().Build()
+	logCtx := testLogCtx(t)
+	logCtx.ClientResponseID = "chatcmpl-client-123"
+
+	event := prx.buildKafkaSpendEvent(logCtx, "cred", "cred:model", "hash",
+		"", "", "", "", "api.openai.com", "success", 0, nil, 0, logCtx.StartTime)
+
+	assert.Equal(t, "chatcmpl-client-123", event.RequestID)
+}
+
 func TestBuildKafkaSpendEvent_NilTokenUsage(t *testing.T) {
 	prx := NewTestProxyBuilder().Build()
 	logCtx := testLogCtx(t)
