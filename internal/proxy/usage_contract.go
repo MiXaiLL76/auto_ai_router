@@ -92,7 +92,7 @@ func markAudioUsageContract(headers http.Header, includesCachedAudio bool) {
 // router-internal signaling to plain external clients once allowlist mode
 // asks for exactly that.
 func (p *Proxy) markAudioUsageContractForClient(w http.ResponseWriter, logCtx *RequestLogContext, includesCachedAudio bool) {
-	if p.responseHeaderMode == config.ResponseHeaderModeAllowlist && (logCtx == nil || !logCtx.IsProxyRequest) {
+	if logCtx == nil || !logCtx.IsProxyRequest {
 		w.Header().Del(HeaderAIRUsageAudioTokens)
 		return
 	}

@@ -32,6 +32,7 @@ func TestStreamingHandlersDetectFragmentedTerminalErrorsAcrossReads(t *testing.T
 		input      []string
 		wantBody   string
 		wantMarker string
+		masked     bool
 	}{
 		{
 			name: "direct passthrough observes raw provider frames",
@@ -41,6 +42,7 @@ func TestStreamingHandlersDetectFragmentedTerminalErrorsAcrossReads(t *testing.T
 			input:      terminalChunks,
 			wantBody:   strings.Join(terminalChunks, ""),
 			wantMarker: "fragmented terminal failure",
+			masked:     true,
 		},
 		{
 			name: "transformed stream retains raw provider failure after normalization",
@@ -106,7 +108,12 @@ func TestStreamingHandlersDetectFragmentedTerminalErrorsAcrossReads(t *testing.T
 
 			var terminalErr proxyProviderStreamError
 			require.ErrorAs(t, err, &terminalErr)
-			assert.Equal(t, tt.wantBody, w.Body.String())
+			if tt.masked {
+				assert.Contains(t, w.Body.String(), "Request failed")
+				assert.NotContains(t, w.Body.String(), tt.wantMarker)
+			} else {
+				assert.Equal(t, tt.wantBody, w.Body.String())
+			}
 			assert.Equal(t, "failure", logCtx.Status)
 			assert.Equal(t, http.StatusOK, logCtx.HTTPStatus)
 			assert.Equal(t, "stream_error", logCtx.StreamOutcome)

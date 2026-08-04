@@ -55,6 +55,7 @@ func (t *Transformer) Transform(ctx Context, response Response) Response {
 	if err != nil {
 		return internalError(response.Headers, err.Error())
 	}
+	stripRoutingMetadata(body)
 
 	response.Body, err = json.Marshal(stripNulls(body, false))
 	if err != nil {
@@ -114,27 +115,20 @@ func (t *Transformer) TransformHeaders(ctx Context, source http.Header) http.Hea
 	for key, values := range source {
 		lowerKey := strings.ToLower(key)
 		switch lowerKey {
-		case "content-length", "content-encoding", "transfer-encoding":
-			continue
 		case "content-type":
 			for _, value := range values {
 				headers.Add(key, value)
 			}
-		}
-		for _, value := range values {
-			headers.Add("llm_provider-"+lowerKey, value)
+		case "retry-after":
+			for _, value := range values {
+				headers.Add(key, value)
+			}
 		}
 		if _, ok := rateLimitHeaders[lowerKey]; ok {
 			for _, value := range values {
 				headers.Add(lowerKey, value)
 			}
 		}
-	}
-	if ctx.RequestID != "" {
-		headers.Set("x-litellm-call-id", ctx.RequestID)
-	}
-	if ctx.RequestedModel != "" {
-		headers.Set("x-litellm-model-name", ctx.RequestedModel)
 	}
 	return headers
 }
@@ -302,39 +296,68 @@ func errorStatus(value any) int {
 	return http.StatusUnprocessableEntity
 }
 
-func normalizeError(status int, raw []byte) []byte {
-	message := strings.TrimSpace(string(raw))
-	errorType := errorTypeForStatus(status)
-	var param any
-
-	var body map[string]any
-	if json.Unmarshal(raw, &body) == nil {
-		switch value := body["error"].(type) {
-		case map[string]any:
-			if text, ok := value["message"].(string); ok && text != "" {
-				message = text
-			}
-			if text, ok := value["type"].(string); ok && text != "" {
-				errorType = text
-			}
-			param = value["param"]
-		case string:
-			message = value
-		}
-	}
-	if message == "" {
-		message = http.StatusText(status)
+func normalizeError(status int, _ []byte) []byte {
+	message := "Request failed"
+	if status == http.StatusTooManyRequests {
+		message = "Rate limit exceeded"
+	} else if status == http.StatusRequestTimeout || status == http.StatusGatewayTimeout {
+		message = "Request timed out"
 	}
 
 	result, _ := json.Marshal(map[string]any{
 		"error": map[string]any{
 			"message": message,
-			"type":    errorType,
-			"param":   param,
+			"type":    errorTypeForStatus(status),
+			"param":   nil,
 			"code":    fmt.Sprintf("%d", status),
 		},
 	})
 	return result
+}
+
+func stripRoutingMetadata(value any) {
+	switch typed := value.(type) {
+	case map[string]any:
+		for key, child := range typed {
+			if isRoutingMetadataField(key) {
+				delete(typed, key)
+				continue
+			}
+			stripRoutingMetadata(child)
+		}
+	case []any:
+		for _, child := range typed {
+			stripRoutingMetadata(child)
+		}
+	}
+}
+
+func isRoutingMetadataField(key string) bool {
+	lower := strings.ToLower(key)
+	if lower == "provider_specific_fields" {
+		return false
+	}
+	switch lower {
+	case "provider", "provider_id", "provider_name",
+		"credential", "credential_id", "credential_name",
+		"api_base", "base_url",
+		"router", "router_id", "route", "route_id",
+		"deployment", "deployment_id", "deployment_name",
+		"fallback", "fallbacks", "fallback_route",
+		"selected_provider", "selected_credential",
+		"upstream", "upstream_url",
+		"litellm_metadata", "litellm_params", "litellm_call_id",
+		"llm_provider", "llm_provider_id":
+		return true
+	}
+	return strings.HasPrefix(lower, "litellm_") ||
+		strings.HasPrefix(lower, "provider_") ||
+		strings.HasPrefix(lower, "credential_") ||
+		strings.HasPrefix(lower, "router_") ||
+		strings.HasPrefix(lower, "route_") ||
+		strings.HasPrefix(lower, "deployment_") ||
+		strings.HasPrefix(lower, "fallback_") ||
+		strings.HasPrefix(lower, "llm_provider")
 }
 
 func errorTypeForStatus(status int) string {

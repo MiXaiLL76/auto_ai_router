@@ -756,7 +756,12 @@ func (p *Proxy) handleTransformedStreaming(
 	// WaitGroup ensures the transform goroutine completes before we read
 	// lastChunk and totalTokens, preventing a data race.
 	var wg sync.WaitGroup
-	clientReader := normalizeSuccessfulResponseModelStream(pr, resp.StatusCode, logCtx, modelID)
+	clientReader := normalizeSuccessfulResponseModelStream(
+		promanutils.NewSanitizingSSEReader(pr, clientVisibleResponseModel(logCtx, modelID)),
+		resp.StatusCode,
+		logCtx,
+		modelID,
+	)
 	wg.Add(1)
 	chunkCount := 0
 	go func() {
@@ -869,14 +874,14 @@ func (p *Proxy) handleStreamingWithTokens(w http.ResponseWriter, resp *http.Resp
 	var lastChunk []byte
 	detectProviderStreamError := resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices
 	providerStreamError := &proxyStreamErrorCapture{}
+	providerReader := io.Reader(resp.Body)
+	if detectProviderStreamError {
+		providerReader = io.TeeReader(providerReader, proxyStreamErrorObserver{capture: providerStreamError})
+	}
 
 	var payloadBuf [][]byte
 	onChunk := func(chunk []byte) {
 		chunkCount++
-
-		if detectProviderStreamError {
-			providerStreamError.Observe(chunk)
-		}
 
 		// One split per chunk (plan item C), reused below for both usage and
 		// total-tokens extraction; the completion accumulator keeps its own
@@ -907,7 +912,12 @@ func (p *Proxy) handleStreamingWithTokens(w http.ResponseWriter, resp *http.Resp
 		rememberLastStreamDataChunk(&lastChunk, chunk)
 	}
 
-	clientReader := normalizeSuccessfulResponseModelStream(resp.Body, resp.StatusCode, logCtx, modelID)
+	clientReader := normalizeSuccessfulResponseModelStream(
+		promanutils.NewSanitizingSSEReader(providerReader, clientVisibleResponseModel(logCtx, modelID)),
+		resp.StatusCode,
+		logCtx,
+		modelID,
+	)
 	if err := p.streamToClient(respCtx(resp), w, clientReader, credName, metricModelID(modelID, logCtx), endpointFromLogContext(logCtx), onChunk, nil, logCtx); err != nil {
 		p.logStreamHandlerError(respCtx(resp), "streamToClient error in handleStreamingWithTokens", err,
 			"credential", credName, "model", modelID, "chunks_received", chunkCount)
@@ -1577,12 +1587,13 @@ func (p *Proxy) handlePassthroughResponsesStreaming(
 		detectStreamError     = resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices
 		providerStreamError   = &proxyStreamErrorCapture{}
 	)
+	providerReader := io.Reader(resp.Body)
+	if detectStreamError {
+		providerReader = io.TeeReader(providerReader, proxyStreamErrorObserver{capture: providerStreamError})
+	}
 
 	onChunk := func(chunk []byte) {
 		chunkCount++
-		if detectStreamError {
-			providerStreamError.Observe(chunk)
-		}
 		completion.AddChunk(chunk)
 		// Same [DONE]-skip as handleStreamingWithTokens: don't overwrite a useful
 		// lastRawChunk with the bare sentinel — keeps the usage event accessible.
@@ -1661,7 +1672,12 @@ func (p *Proxy) handlePassthroughResponsesStreaming(
 		}
 	}
 
-	clientReader := normalizeSuccessfulResponseModelStream(resp.Body, resp.StatusCode, logCtx, modelID)
+	clientReader := normalizeSuccessfulResponseModelStream(
+		promanutils.NewSanitizingSSEReader(providerReader, clientVisibleResponseModel(logCtx, modelID)),
+		resp.StatusCode,
+		logCtx,
+		modelID,
+	)
 	if err := p.streamToClient(respCtx(resp), w, clientReader, credName, metricModelID(modelID, logCtx), endpointFromLogContext(logCtx), onChunk, nil, logCtx); err != nil {
 		p.logStreamHandlerError(respCtx(resp), "streamToClient error in handlePassthroughResponsesStreaming", err,
 			"credential", credName, "model", modelID, "chunks_received", chunkCount)

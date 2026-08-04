@@ -8,12 +8,12 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func TestMarkAudioUsageContractForClient_PassthroughAlwaysSets(t *testing.T) {
+func TestMarkAudioUsageContractForClient_HidesFromUntrustedClient(t *testing.T) {
 	w := httptest.NewRecorder()
 
 	NewTestProxyBuilder().Build().markAudioUsageContractForClient(w, nil, true)
 
-	assert.Equal(t, "include-cached", w.Header().Get(HeaderAIRUsageAudioTokens))
+	assert.Empty(t, w.Header().Get(HeaderAIRUsageAudioTokens))
 }
 
 func TestMarkAudioUsageContractForClient_AllowlistHidesFromUntrustedClient(t *testing.T) {

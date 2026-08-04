@@ -55,7 +55,7 @@ func TestProxyRequest_CacheBillingLogsLiteLLMSpend(t *testing.T) {
 			prx.ProxyRequest(w, req)
 
 			require.Equal(t, http.StatusOK, w.Code)
-			assert.Equal(t, tt.expectedUsageHeader, w.Header().Get(HeaderAIRUsageAudioTokens))
+			assert.Empty(t, w.Header().Get(HeaderAIRUsageAudioTokens))
 			require.JSONEq(t, `{"role":"assistant","content":"ok"}`, extractMessage(t, w.Body.String()))
 			require.Len(t, dbStub.loggedEntries, 1)
 
@@ -232,7 +232,7 @@ func TestProxyRequest_StreamingCacheBillingLogsLiteLLMSpend(t *testing.T) {
 			prx.ProxyRequest(w, req)
 
 			require.Equal(t, http.StatusOK, w.Code)
-			assert.Equal(t, tt.expectedUsageHeader, w.Header().Get(HeaderAIRUsageAudioTokens))
+			assert.Empty(t, w.Header().Get(HeaderAIRUsageAudioTokens))
 			assert.Contains(t, w.Body.String(), "data: [DONE]")
 			require.Len(t, dbStub.loggedEntries, 1)
 
@@ -292,7 +292,7 @@ func TestProxyRequest_AIRCredentialCacheBillingUsesUsageContract(t *testing.T) {
 			prx.ProxyRequest(w, req)
 
 			require.Equal(t, http.StatusOK, w.Code)
-			assert.Equal(t, tt.upstreamUsageHeader, w.Header().Get(HeaderAIRUsageAudioTokens))
+			assert.Empty(t, w.Header().Get(HeaderAIRUsageAudioTokens))
 			require.Len(t, dbStub.loggedEntries, 1)
 
 			metadata := decodeMetadata(t, dbStub.loggedEntries[0].Metadata)
@@ -345,7 +345,7 @@ func TestProxyRequest_ConvertedResponsesEmitsNormalizedUsageHeaderAndLogsSpend(t
 	prx.ProxyRequest(w, req)
 
 	require.Equal(t, http.StatusOK, w.Code)
-	assert.Equal(t, airUsageAudioTokensExcludeCached, w.Header().Get(HeaderAIRUsageAudioTokens))
+	assert.Empty(t, w.Header().Get(HeaderAIRUsageAudioTokens))
 
 	var response struct {
 		Usage struct {

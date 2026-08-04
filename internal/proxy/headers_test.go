@@ -36,7 +36,7 @@ func TestGetHopByHopHeaders(t *testing.T) {
 	assert.False(t, hasCustom, "modifying returned map should not affect the original")
 }
 
-func TestCopyResponseHeaders_PassthroughByDefault(t *testing.T) {
+func TestCopyResponseHeaders_StripsProviderMetadataByDefault(t *testing.T) {
 	src := http.Header{
 		"Content-Type":       {"application/json"},
 		"X-Provider-Request": {"provider-request-id"},
@@ -50,7 +50,7 @@ func TestCopyResponseHeaders_PassthroughByDefault(t *testing.T) {
 	NewTestProxyBuilder().Build().copyResponseHeaders(w, src, nil, false)
 
 	assert.Equal(t, "application/json", w.Header().Get("Content-Type"))
-	assert.Equal(t, "provider-request-id", w.Header().Get("X-Provider-Request"))
+	assert.Empty(t, w.Header().Get("X-Provider-Request"))
 	assert.Empty(t, w.Header().Get("Content-Length"))
 	assert.Empty(t, w.Header().Get("Content-Encoding"))
 	assert.Empty(t, w.Header().Get("Connection"))
@@ -87,7 +87,7 @@ func TestCopyResponseHeaders_Allowlist(t *testing.T) {
 	assert.Equal(t, "application/json", w.Header().Get("Content-Type"))
 	assert.Empty(t, w.Header().Get("ETag"))
 	assert.Equal(t, "Sun, 19 Jul 2026 10:00:00 GMT", w.Header().Get("Last-Modified"))
-	assert.Equal(t, "/v1/files/result", w.Header().Get("Location"))
+	assert.Empty(t, w.Header().Get("Location"))
 	assert.Equal(t, []string{"30", "60"}, w.Header().Values("Retry-After"))
 	assert.Empty(t, w.Header().Get("Server"))
 	assert.Empty(t, w.Header().Get("Set-Cookie"))
@@ -199,7 +199,7 @@ func TestCopyResponseHeadersProManStripsInternalProviderHeaders(t *testing.T) {
 	}
 }
 
-func TestCopyResponseHeadersRegularCredentialKeepsNonStructuralHeaders(t *testing.T) {
+func TestCopyResponseHeadersRegularCredentialStripsProviderMetadata(t *testing.T) {
 	src := http.Header{
 		"Content-Type":      []string{"application/json"},
 		"X-Litellm-Version": []string{"debug-upstream"},
@@ -211,6 +211,6 @@ func TestCopyResponseHeadersRegularCredentialKeepsNonStructuralHeaders(t *testin
 	NewTestProxyBuilder().Build().copyResponseHeaders(w, src, cred, false)
 
 	assert.Equal(t, "application/json", w.Header().Get("Content-Type"))
-	assert.Equal(t, "debug-upstream", w.Header().Get("X-Litellm-Version"))
-	assert.Equal(t, "provider-server", w.Header().Get("Server"))
+	assert.Empty(t, w.Header().Get("X-Litellm-Version"))
+	assert.Empty(t, w.Header().Get("Server"))
 }

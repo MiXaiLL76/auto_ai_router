@@ -104,6 +104,16 @@ func (r *streamReader) readFrame() error {
 		r.writeFrame(strings.Join(lines, "\n"))
 		return nil
 	}
+	if errorValue, hasError := body["error"]; hasError && hasMeaningfulError(errorValue) {
+		body = genericStreamError(body)
+		encoded, err := json.Marshal(stripNulls(body, false))
+		if err != nil {
+			return err
+		}
+		lines[dataIndex] = "data: " + string(encoded)
+		r.writeFrame(strings.Join(lines, "\n"))
+		return nil
+	}
 
 	switch r.ctx.Endpoint {
 	case "/v1/chat/completions":
@@ -124,6 +134,7 @@ func (r *streamReader) readFrame() error {
 	default:
 		r.normalizeResponsesChunk(body)
 	}
+	stripRoutingMetadata(body)
 
 	encoded, err := json.Marshal(stripNulls(body, false))
 	if err != nil {
@@ -500,6 +511,20 @@ func (r *streamReader) normalizeResponsesChunk(body map[string]any) {
 	if errorBody, ok := body["error"].(map[string]any); ok && errorBody["code"] == nil {
 		errorBody["code"] = "unknown_error"
 	}
+}
+
+func genericStreamError(body map[string]any) map[string]any {
+	result := map[string]any{
+		"error": map[string]any{
+			"message": "Request failed",
+			"type":    "api_error",
+			"code":    "api_error",
+		},
+	}
+	if eventType, ok := body["type"].(string); ok && eventType != "" {
+		result["type"] = "error"
+	}
+	return result
 }
 
 func (r *streamReader) finish() {

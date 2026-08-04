@@ -1999,11 +1999,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 
 		if resp.StatusCode >= 400 {
 			logCtx.Status = "failure"
-			if shouldMaskUpstreamErrors(cred) {
-				logCtx.ErrorMsg = "Upstream provider error"
-			} else {
-				logCtx.ErrorMsg = extractErrorMessage(finalResponseBody)
-			}
+			logCtx.ErrorMsg = "Request failed"
 			// Final error returned to the client — single unified ERROR record
 			// with everything needed for debugging.
 			p.logUpstreamError(r.Context(), "Upstream request completed with error status", resp.StatusCode, cred, modelID, rawErrorBody,
@@ -2057,19 +2053,17 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 			p.logUpstreamError(r.Context(), "Upstream returned error status on streaming response", resp.StatusCode, cred, modelID, nil,
 				"url", targetURL,
 				"request_id", logCtx.RequestID)
-			if shouldMaskUpstreamErrors(cred) {
-				body := maskedUpstreamErrorBody(resp.StatusCode)
-				w.Header().Set("Content-Type", "application/json")
-				w.Header().Set("Content-Length", fmt.Sprintf("%d", len(body)))
-				dropRepresentationIntegrityHeaders(w.Header())
-				w.WriteHeader(resp.StatusCode)
-				_, _ = w.Write(body)
-				logCtx.Status = "failure"
-				logCtx.HTTPStatus = resp.StatusCode
-				logCtx.ErrorMsg = "Upstream provider error"
-				logCtx.TargetURL = targetURL
-				return
-			}
+			body := maskedUpstreamErrorBody(resp.StatusCode)
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Content-Length", fmt.Sprintf("%d", len(body)))
+			dropRepresentationIntegrityHeaders(w.Header())
+			w.WriteHeader(resp.StatusCode)
+			_, _ = w.Write(body)
+			logCtx.Status = "failure"
+			logCtx.HTTPStatus = resp.StatusCode
+			logCtx.ErrorMsg = "Request failed"
+			logCtx.TargetURL = targetURL
+			return
 		}
 		setSuccessfulSSEHeaders(w.Header(), resp.StatusCode)
 		w.WriteHeader(resp.StatusCode)

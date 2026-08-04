@@ -221,16 +221,18 @@ func sanitizeJSONEnvelope(value *any, displayModel string) bool {
 
 func sanitizeEnvelopeMap(obj map[string]any, displayModel string) bool {
 	changed := sanitizeEnvelopeFields(obj, displayModel)
-	if eventType, _ := obj["type"].(string); eventType == "error" {
-		if errObj, ok := obj["error"].(map[string]any); ok {
-			if _, hasMessage := errObj["message"]; hasMessage {
-				errObj["message"] = "Upstream provider error"
-				changed = true
-			}
+	if errObj, ok := obj["error"].(map[string]any); ok {
+		if _, hasMessage := errObj["message"]; hasMessage {
+			errObj["message"] = "Request failed"
+			changed = true
 		}
 	}
 
-	for _, key := range []string{"response", "message", "delta", "usage", "error"} {
+	for _, key := range []string{
+		"response", "message", "delta", "usage", "error",
+		"prompt_tokens_details", "completion_tokens_details",
+		"input_tokens_details", "output_tokens_details",
+	} {
 		if child, ok := obj[key].(map[string]any); ok {
 			if sanitizeEnvelopeMap(child, displayModel) {
 				changed = true
@@ -276,6 +278,28 @@ func isInternalJSONField(key string) bool {
 	switch lower {
 	case "provider_specific_fields",
 		"caller",
+		"provider",
+		"provider_id",
+		"provider_name",
+		"credential",
+		"credential_id",
+		"credential_name",
+		"api_base",
+		"base_url",
+		"router",
+		"router_id",
+		"route",
+		"route_id",
+		"deployment",
+		"deployment_id",
+		"deployment_name",
+		"fallback",
+		"fallbacks",
+		"fallback_route",
+		"selected_provider",
+		"selected_credential",
+		"upstream",
+		"upstream_url",
 		"litellm_metadata",
 		"litellm_params",
 		"litellm_call_id",
@@ -284,6 +308,12 @@ func isInternalJSONField(key string) bool {
 		return true
 	}
 	return strings.HasPrefix(lower, "litellm_") ||
+		strings.HasPrefix(lower, "provider_") ||
+		strings.HasPrefix(lower, "credential_") ||
+		strings.HasPrefix(lower, "router_") ||
+		strings.HasPrefix(lower, "route_") ||
+		strings.HasPrefix(lower, "deployment_") ||
+		strings.HasPrefix(lower, "fallback_") ||
 		strings.HasPrefix(lower, "x-litellm") ||
 		strings.HasPrefix(lower, "llm_provider")
 }

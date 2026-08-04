@@ -44,9 +44,9 @@ func TestTransformChatCompletion(t *testing.T) {
 	})
 
 	require.Equal(t, http.StatusOK, result.StatusCode)
-	assert.Equal(t, "request-1", result.Headers.Get("x-litellm-call-id"))
-	assert.Equal(t, "public-model", result.Headers.Get("x-litellm-model-name"))
-	assert.Equal(t, "provider-1", result.Headers.Get("llm_provider-x-provider-request-id"))
+	assert.Empty(t, result.Headers.Get("x-litellm-call-id"))
+	assert.Empty(t, result.Headers.Get("x-litellm-model-name"))
+	assert.Empty(t, result.Headers.Get("llm_provider-x-provider-request-id"))
 	assert.Equal(t, "7", result.Headers.Get("x-ratelimit-remaining-requests"))
 	assert.Empty(t, result.Headers.Get("X-Provider-Request-Id"))
 
@@ -138,7 +138,7 @@ func TestTransformMissingChoices(t *testing.T) {
 	var body map[string]any
 	require.NoError(t, json.Unmarshal(result.Body, &body))
 	errorBody := body["error"].(map[string]any)
-	assert.Contains(t, errorBody["message"], "no 'choices'")
+	assert.Equal(t, "Request failed", errorBody["message"])
 	assert.Equal(t, "500", errorBody["code"])
 }
 
@@ -146,17 +146,51 @@ func TestTransformError(t *testing.T) {
 	result := New().Transform(Context{}, Response{
 		StatusCode: http.StatusTooManyRequests,
 		Headers:    http.Header{"Content-Type": {"application/json"}},
-		Body:       []byte(`{"error":{"message":"provider throttled","type":"provider_error","code":"quota"}}`),
+		Body:       []byte(`{"error":{"message":"Alibaba credential prod-qwen throttled; see https://provider.internal/quota","type":"provider_error","code":"quota"}}`),
 	})
 
 	assert.Equal(t, http.StatusTooManyRequests, result.StatusCode)
 	var body map[string]any
 	require.NoError(t, json.Unmarshal(result.Body, &body))
 	errorBody := body["error"].(map[string]any)
-	assert.Equal(t, "provider throttled", errorBody["message"])
-	assert.Equal(t, "provider_error", errorBody["type"])
+	assert.Equal(t, "Rate limit exceeded", errorBody["message"])
+	assert.Equal(t, "rate_limit_error", errorBody["type"])
 	assert.Equal(t, "429", errorBody["code"])
 	assert.Contains(t, errorBody, "param")
+	assert.NotContains(t, string(result.Body), "Alibaba")
+	assert.NotContains(t, string(result.Body), "prod-qwen")
+	assert.NotContains(t, string(result.Body), "provider.internal")
+}
+
+func TestTransformDropsRoutingMetadata(t *testing.T) {
+	result := New().Transform(Context{
+		Endpoint:       "/v1/chat/completions",
+		RequestedModel: "public-model",
+	}, Response{
+		StatusCode: http.StatusOK,
+		Headers: http.Header{
+			"Content-Type":          {"application/json"},
+			"Server":                {"provider-gateway"},
+			"X-Provider-Request-Id": {"provider-request"},
+			"Llm_provider-Api-Base": {"https://provider.internal"},
+		},
+		Body: []byte(`{
+			"model":"provider-model",
+			"provider":"secret-provider",
+			"credential_name":"prod-credential",
+			"base_url":"https://provider.internal",
+			"fallback_route":"secondary-provider",
+			"choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]
+		}`),
+	})
+
+	require.Equal(t, http.StatusOK, result.StatusCode)
+	assert.Empty(t, result.Headers.Get("Server"))
+	assert.Empty(t, result.Headers.Get("X-Provider-Request-Id"))
+	assert.Empty(t, result.Headers.Get("Llm_provider-Api-Base"))
+	for _, secret := range []string{"secret-provider", "prod-credential", "provider.internal", "secondary-provider"} {
+		assert.NotContains(t, string(result.Body), secret)
+	}
 }
 
 func TestTransformTextCompletion(t *testing.T) {

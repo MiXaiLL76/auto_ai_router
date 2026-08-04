@@ -25,13 +25,16 @@ var hopByHopHeaders = map[string]bool{
 }
 
 var allowedResponseHeaders = map[string]bool{
-	"Cache-Control":       true,
-	"Content-Disposition": true,
-	"Content-Range":       true,
-	"Content-Type":        true,
-	"Last-Modified":       true,
-	"Location":            true,
-	"Retry-After":         true,
+	"Cache-Control":                  true,
+	"Content-Disposition":            true,
+	"Content-Range":                  true,
+	"Content-Type":                   true,
+	"Last-Modified":                  true,
+	"Retry-After":                    true,
+	"X-Ratelimit-Limit-Requests":     true,
+	"X-Ratelimit-Limit-Tokens":       true,
+	"X-Ratelimit-Remaining-Requests": true,
+	"X-Ratelimit-Remaining-Tokens":   true,
 }
 
 // privacyHeaders are headers that reveal client IP or routing information.
@@ -183,7 +186,7 @@ func (p *Proxy) setCredentialResponseHeader(w http.ResponseWriter, logCtx *Reque
 
 func (p *Proxy) shouldSkipResponseHeaderForClient(key string, cred *config.CredentialConfig) bool {
 	canonical := http.CanonicalHeaderKey(key)
-	if p.responseHeaderMode == config.ResponseHeaderModeAllowlist && !allowedResponseHeaders[canonical] {
+	if !allowedResponseHeaders[canonical] {
 		return true
 	}
 	return shouldSkipResponseHeaderForClient(canonical, cred)

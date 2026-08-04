@@ -30,7 +30,7 @@ func TestResponseCompatibilityWriterTransformsInternalError(t *testing.T) {
 	require.NoError(t, writer.Close())
 
 	assert.Equal(t, http.StatusBadRequest, recorder.Code)
-	assert.Equal(t, "request-1", recorder.Header().Get("x-litellm-call-id"))
+	assert.Empty(t, recorder.Header().Get("x-litellm-call-id"))
 	var body map[string]any
 	require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &body))
 	assert.Equal(t, "400", body["error"].(map[string]any)["code"])
@@ -176,8 +176,8 @@ func TestProxyRequestLiteLLMCompatibility(t *testing.T) {
 	prx.ProxyRequest(recorder, request)
 
 	require.Equal(t, http.StatusOK, recorder.Code)
-	assert.Equal(t, "provider-1", recorder.Header().Get("llm_provider-x-provider-request-id"))
-	assert.NotEmpty(t, recorder.Header().Get("x-litellm-call-id"))
+	assert.Empty(t, recorder.Header().Get("llm_provider-x-provider-request-id"))
+	assert.Empty(t, recorder.Header().Get("x-litellm-call-id"))
 	var body map[string]any
 	require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &body))
 	assert.Equal(t, "public-model", body["model"])

@@ -19,6 +19,7 @@ func TestWriteProxyStreamingResponseWithTokensDetectsFragmentedProviderTerminalE
 		name       string
 		chunks     []string
 		wantMarker string
+		masked     bool
 	}{
 		{
 			name: "openai error object",
@@ -30,6 +31,7 @@ func TestWriteProxyStreamingResponseWithTokensDetectsFragmentedProviderTerminalE
 				"data: [DONE]\n\n",
 			},
 			wantMarker: "provider exploded",
+			masked:     true,
 		},
 		{
 			name: "anthropic error event with CRLF framing",
@@ -40,6 +42,7 @@ func TestWriteProxyStreamingResponseWithTokensDetectsFragmentedProviderTerminalE
 				`pe":"error","error":{"type":"overloaded_error","message":"anthropic overloaded"}}` + "\r\n\r\n",
 			},
 			wantMarker: "anthropic overloaded",
+			masked:     true,
 		},
 		{
 			name: "responses failed event",
@@ -95,7 +98,12 @@ func TestWriteProxyStreamingResponseWithTokensDetectsFragmentedProviderTerminalE
 			var terminalErr proxyProviderStreamError
 			require.ErrorAs(t, err, &terminalErr)
 			assert.Equal(t, http.StatusOK, w.Code, "the already-started client response keeps its HTTP status")
-			assert.Equal(t, streamBody, w.Body.String(), "the provider event must be forwarded unchanged")
+			if tt.masked {
+				assert.Contains(t, w.Body.String(), "Request failed")
+				assert.NotContains(t, w.Body.String(), tt.wantMarker)
+			} else {
+				assert.Equal(t, streamBody, w.Body.String())
+			}
 			assert.Equal(t, "failure", logCtx.Status)
 			assert.Equal(t, http.StatusOK, logCtx.HTTPStatus)
 			assert.Equal(t, "stream_error", logCtx.StreamOutcome)
