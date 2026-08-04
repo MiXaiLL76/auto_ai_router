@@ -637,9 +637,13 @@ func (p *Proxy) handleVertexStreaming(w http.ResponseWriter, resp *http.Response
 func (p *Proxy) handleAnthropicCompatibleStreaming(w http.ResponseWriter, resp *http.Response, cred *config.CredentialConfig, modelID, displayModelID string, providerType config.ProviderType, providerLabel string, logCtx *RequestLogContext) error {
 	conv := converter.New(providerType, converter.RequestMode{ModelID: modelID, DisplayModelID: displayModelID, IsStreaming: true})
 	transformer := func(r io.Reader, id string, w io.Writer) error {
-		if promanutils.ShouldSanitizeUpstreamSurface(cred) {
-			r = promanutils.NewSanitizingSSEReader(r, displayModelID)
-		}
+		// Sanitize unconditionally, matching handleTransformedStreaming's output-side pass:
+		// the converter can fold a raw upstream error event's message into a plain
+		// delta.content string (see anthropic.TransformAnthropicStreamToOpenAI's "error"
+		// case), which the output-side sanitizer never inspects since it only masks
+		// structural error.message keys. Sanitizing here, before conversion, is the only
+		// place that still sees the message under its original "error.message" key.
+		r = promanutils.NewSanitizingSSEReader(r, displayModelID)
 		return conv.StreamTo(r, w)
 	}
 	return p.handleTransformedStreaming(w, resp, cred.Name, modelID, providerLabel, transformer, logCtx)

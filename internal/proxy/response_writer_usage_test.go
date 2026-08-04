@@ -41,7 +41,7 @@ func TestWriteProxyResponseNormalizesQwenUsageBeforeCompression(t *testing.T) {
 	assert.Equal(t, strconv.Itoa(w.Body.Len()), w.Header().Get("Content-Length"))
 	assert.Empty(t, w.Header().Get("ETag"))
 	assert.Empty(t, w.Header().Get("Content-Digest"))
-	assert.Empty(t, w.Header().Get("X-Provider"))
+	assert.Equal(t, "kept", w.Header().Get("X-Provider"))
 	assert.Equal(t, originalBody, resp.Body, "diagnostic upstream body must remain unchanged")
 
 	zr, err := gzip.NewReader(w.Body)
@@ -200,7 +200,7 @@ func TestWriteProxyResponseSanitizesAllCredentialTypes(t *testing.T) {
 	NewTestProxyBuilder().Build().writeProxyResponse(w, resp, req, cred, "claude-haiku-4.5", nil)
 
 	require.Equal(t, http.StatusOK, w.Code)
-	assert.Empty(t, w.Header().Get("Server"))
+	assert.Equal(t, "provider-server", w.Header().Get("Server"))
 	assert.NotContains(t, w.Body.String(), `"caller":"customer-app"`)
 	assert.NotContains(t, w.Body.String(), `"provider_specific_fields"`)
 	assert.NotContains(t, w.Body.String(), "anthropic-direct-client")

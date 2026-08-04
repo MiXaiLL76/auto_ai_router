@@ -30,6 +30,7 @@ var allowedResponseHeaders = map[string]bool{
 	"Content-Range":                  true,
 	"Content-Type":                   true,
 	"Last-Modified":                  true,
+	"Location":                       true,
 	"Retry-After":                    true,
 	"X-Ratelimit-Limit-Requests":     true,
 	"X-Ratelimit-Limit-Tokens":       true,
@@ -186,7 +187,7 @@ func (p *Proxy) setCredentialResponseHeader(w http.ResponseWriter, logCtx *Reque
 
 func (p *Proxy) shouldSkipResponseHeaderForClient(key string, cred *config.CredentialConfig) bool {
 	canonical := http.CanonicalHeaderKey(key)
-	if !allowedResponseHeaders[canonical] {
+	if p.responseHeaderMode == config.ResponseHeaderModeAllowlist && !allowedResponseHeaders[canonical] {
 		return true
 	}
 	return shouldSkipResponseHeaderForClient(canonical, cred)
