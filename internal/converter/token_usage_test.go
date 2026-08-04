@@ -42,6 +42,29 @@ func TestTokenUsageTotal_CacheCreationDoesNotAffect(t *testing.T) {
 	}
 }
 
+func TestTokenUsageIsZero(t *testing.T) {
+	var nilUsage *TokenUsage
+	if !nilUsage.IsZero() {
+		t.Fatal("expected nil receiver to be zero")
+	}
+
+	if !(&TokenUsage{}).IsZero() {
+		t.Fatal("expected empty struct to be zero")
+	}
+
+	if (&TokenUsage{PromptTokens: 1}).IsZero() {
+		t.Fatal("expected non-zero PromptTokens to make IsZero false")
+	}
+
+	if (&TokenUsage{ImageCount: 1}).IsZero() {
+		t.Fatal("expected non-zero ImageCount to make IsZero false")
+	}
+
+	if (&TokenUsage{WebSearchContextSize: "high"}).IsZero() {
+		t.Fatal("expected non-empty WebSearchContextSize to make IsZero false")
+	}
+}
+
 func TestTokenUsageNormalize(t *testing.T) {
 	tu := (&TokenUsage{
 		PromptTokens:             -1,

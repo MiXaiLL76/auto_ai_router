@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
+	pricingmodels "github.com/mixaill76/auto_ai_router/internal/models"
 	"github.com/mixaill76/auto_ai_router/internal/testhelpers"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -452,6 +453,9 @@ func TestFallbackStreamingSpendIsFinalizedOnce(t *testing.T) {
 	prx := NewTestProxyBuilder().Build()
 	db := &stubLiteLLMManager{}
 	prx.LiteLLMDB = db
+	setTestModelPrice(prx, "gpt-4", &pricingmodels.ModelPrice{
+		InputCostPerToken: 0.000001, OutputCostPerToken: 0.000002,
+	})
 
 	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 	credential := &config.CredentialConfig{

@@ -110,6 +110,15 @@ func (p *Proxy) applyCredentialCompatibilityRouting(
 		return true
 	}
 
+	// The price gate at the top of enforceBudgetAndRateLimits runs too late to
+	// cover this path: TryFallbackProxy can forward the request and return
+	// success below, at which point ProxyRequest returns without ever
+	// reaching enforceBudgetAndRateLimits. Gate here too so an unpriced model
+	// can't be served (and billed nothing) through the fallback-proxy path.
+	if !p.checkModelPriceAvailable(w, r, logCtx, modelID, prepared.realModelID) {
+		return false
+	}
+
 	success, fallbackReason := p.TryFallbackProxy(
 		w,
 		requestWithPath(r, prepared.proxyPath),
@@ -244,6 +253,8 @@ type RequestLogContext struct {
 	HTTPStatus           int                      // HTTP response status code
 	ErrorMsg             string                   // Error message (added to metadata on failure)
 	TokenUsage           *converter.TokenUsage    // Token usage with detailed breakdown
+	ModelPrice           *models.ModelPrice       // Price resolved before the provider request
+	PriceModelID         string                   // Model identifier used for price lookup
 	UsageSource          string                   // provider, estimated, request_parameters, or missing
 	StreamOutcome        string                   // completed, client_aborted, or stream_error
 	Credential           *config.CredentialConfig // Credential used
@@ -872,6 +883,9 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 	proxyBody = prepared.proxyBody
 	realModelID = prepared.realModelID
 	cred = prepared.cred
+	if !p.enforceBudgetAndRateLimits(w, r, logCtx, modelID, realModelID, body) {
+		return
+	}
 
 	// Handle proxy/AIR credential types with exact same-type retry + fallback.
 	if cred.IsProxyLike() {
@@ -1317,8 +1331,29 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 					prepared.stickyCacheEligible,
 				)
 				if prepErr == nil {
+					publicModelID := logCtx.PublicModelID
+					if publicModelID == "" {
+						publicModelID = modelID
+					}
+					retryPriceModelID, retryPrice := lookupBillingModelPrice(
+						p.priceRegistry, publicModelID, modelID, preparedRetry.realModelID,
+					)
+					if retryPrice == nil && p.spendTrackingEnabled() {
+						triedCreds[candidate.Name] = true
+						p.logger.ErrorContext(r.Context(), "Retry credential skipped: model price unavailable",
+							"credential", candidate.Name,
+							"model", modelID,
+							"real_model", preparedRetry.realModelID,
+							"request_id", logCtx.RequestID)
+						continue
+					}
 					nextCred = candidate
 					nextReq = preparedRetry
+					logCtx.ModelPrice = retryPrice
+					logCtx.PriceModelID = retryPriceModelID
+					logCtx.billingPriceResolved = true
+					logCtx.billingPriceModelID = retryPriceModelID
+					logCtx.billingPrice = retryPrice
 					retryReady = true
 					break
 				}
@@ -1961,7 +1996,10 @@ func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
 				logCtx.TokenUsage.ReasoningTokens, logCtx.TokenUsage.CachedInputTokens)
 		}
 
-		if logCtx.IsImageGeneration && logCtx.TokenUsage != nil {
+		if logCtx.IsImageGeneration && resp.StatusCode < 400 {
+			if logCtx.TokenUsage == nil {
+				logCtx.TokenUsage = &converter.TokenUsage{}
+			}
 			logCtx.TokenUsage.ImageCount = logCtx.ImageCount
 		}
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 {

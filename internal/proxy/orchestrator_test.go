@@ -167,6 +167,7 @@ func TestSelectCredentialForModelMarksDirectSpendLogComplete(t *testing.T) {
 	prx := NewTestProxyBuilder().Build()
 	kafka := &stubKafkaManager{enabled: true}
 	prx.kafkaLog = kafka
+	setTestModelPrice(prx, "gpt-4o-mini", &models.ModelPrice{})
 	logCtx := testLogCtx(t)
 	logCtx.Credential = nil
 
@@ -182,6 +183,39 @@ func TestSelectCredentialForModelMarksDirectSpendLogComplete(t *testing.T) {
 	require.Nil(t, credential)
 	require.True(t, logCtx.Logged)
 	require.Len(t, kafka.events, 1)
+}
+
+// TestSelectCredentialForModelLogsZeroCostRowWhenPriceUnavailable guards
+// against a regression of PR #96/#115 follow-up review TODO 2: the
+// "no credentials available" (429) branch logs an audit row before any
+// provider is contacted, so logCtx.ModelPrice is never pre-resolved. With
+// logSpendToLiteLLMDB now failing closed on an unresolved price, that audit
+// row used to be silently dropped whenever the rejected model had no price
+// entry. Since no usage was ever incurred here, the row must still be
+// written (with zero cost) instead of disappearing.
+func TestSelectCredentialForModelLogsZeroCostRowWhenPriceUnavailable(t *testing.T) {
+	prx := NewTestProxyBuilder().Build()
+	kafka := &stubKafkaManager{enabled: true}
+	prx.kafkaLog = kafka
+	prx.priceRegistry = models.NewModelPriceRegistry() // no price for "missing-model"
+	logCtx := testLogCtx(t)
+	logCtx.ModelID = "missing-model"
+	logCtx.TokenUsage = nil // no provider was ever contacted
+	logCtx.Credential = nil
+
+	credential, ok := prx.selectCredentialForModel(
+		httptest.NewRecorder(),
+		"missing-model",
+		"",
+		"",
+		logCtx,
+	)
+
+	require.False(t, ok)
+	require.Nil(t, credential)
+	require.True(t, logCtx.Logged)
+	require.Len(t, kafka.events, 1)
+	assert.Equal(t, 0.0, kafka.events[0].TotalCost)
 }
 
 func TestPrepareRequestForCredential_ProxyBodyKeepsOriginalParams(t *testing.T) {
@@ -495,6 +529,66 @@ func TestProxyRequest_UnsupportedProManRequestRoutesToFallbackProxy(t *testing.T
 	assert.Contains(t, w.Body.String(), "fallback ok")
 	assert.Equal(t, int32(0), atomic.LoadInt32(&promanCalls))
 	assert.Equal(t, int32(1), atomic.LoadInt32(&fallbackCalls))
+}
+
+// TestProxyRequest_UnsupportedProManRequestFallbackBlockedWhenPriceUnavailable
+// guards against a regression of PR #96/#115 follow-up review TODO 1:
+// applyCredentialCompatibilityRouting's TryFallbackProxy branch used to
+// forward the request to the fallback credential and return before
+// enforceBudgetAndRateLimits' price gate ever ran, so an unpriced model could
+// reach a real provider with zero billing trace. The price gate must now be
+// checked before the fallback proxy is actually contacted.
+func TestProxyRequest_UnsupportedProManRequestFallbackBlockedWhenPriceUnavailable(t *testing.T) {
+	var promanCalls int32
+	promanUpstream := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&promanCalls, 1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer promanUpstream.Close()
+
+	var fallbackCalls int32
+	fallback := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&fallbackCalls, 1)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":     "chatcmpl-fallback",
+			"object": "chat.completion",
+			"choices": []map[string]any{{
+				"message": map[string]string{"role": "assistant", "content": "fallback ok"},
+			}},
+		})
+	}))
+	defer fallback.Close()
+
+	prx := NewTestProxyBuilder().
+		WithCredentials(
+			config.CredentialConfig{Name: "proman", Type: config.ProviderTypeProMan, BaseURL: promanUpstream.URL, APIKey: "proman-key", RPM: 100, TPM: 10000},
+			config.CredentialConfig{Name: "fallback", Type: config.ProviderTypeProxy, BaseURL: fallback.URL, APIKey: "fallback-key", RPM: 100, TPM: 10000, IsFallback: true},
+		).
+		Build()
+	kafka := &stubKafkaManager{enabled: true}
+	prx.kafkaLog = kafka
+	prx.priceRegistry = models.NewModelPriceRegistry() // no price for claude-sonnet-4-6
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"claude-sonnet-4-6","messages":[{"role":"assistant","content":[{"type":"server_tool_use","name":"web_search"}]}]}`))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	prx.ProxyRequest(w, req)
+
+	require.Equal(t, http.StatusServiceUnavailable, w.Code)
+	assert.Equal(t, int32(0), atomic.LoadInt32(&promanCalls))
+	assert.Equal(t, int32(0), atomic.LoadInt32(&fallbackCalls))
+
+	// The rejection must still leave an audit trail — not just an app log —
+	// so a forgotten price-registry entry is visible in spend logs/Kafka,
+	// not just silently swallowed.
+	require.Len(t, kafka.events, 1)
+	assert.Equal(t, "failure", kafka.events[0].Status)
+	assert.Equal(t, http.StatusServiceUnavailable, kafka.events[0].HTTPStatus)
+	assert.Zero(t, kafka.events[0].TotalCost)
+	assert.Contains(t, kafka.events[0].ErrorMessage, "model pricing unavailable")
 }
 
 func TestProxyRequest_UnsupportedProManRequestWithoutFallbackReturnsLocalError(t *testing.T) {

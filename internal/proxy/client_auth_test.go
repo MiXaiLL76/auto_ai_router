@@ -32,6 +32,7 @@ type clientAuthTestDB struct {
 }
 
 func (m *clientAuthTestDB) IsEnabled() bool                        { return true }
+func (m *clientAuthTestDB) SpendLoggingEnabled() bool              { return false }
 func (m *clientAuthTestDB) IsHealthy() bool                        { return true }
 func (m *clientAuthTestDB) LogSpend(*dbmodels.SpendLogEntry) error { return nil }
 

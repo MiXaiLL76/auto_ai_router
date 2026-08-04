@@ -3,6 +3,7 @@ package proxy
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -167,10 +168,10 @@ func litellmCallType(path string) string {
 // publishes an expanded copy of the same event to Kafka for ClickHouse
 // analytics (internal/kafkalog). The two write-paths are independent: either
 // can be enabled/disabled on its own (see litellm_db.disable_spend_logs_write
-// and kafka.enabled). Returns error only for the Postgres write — Kafka
+// and kafka.enabled). Pricing and Postgres write errors are returned; Kafka
 // publish failures are logged but never affect the caller.
 func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
-	litellmEnabled := p.LiteLLMDB != nil && p.LiteLLMDB.IsEnabled()
+	litellmEnabled := p.postgresSpendTrackingEnabled()
 	kafkaEnabled := p.kafkaLog != nil && p.kafkaLog.IsEnabled()
 	if !litellmEnabled && !kafkaEnabled {
 		return nil
@@ -237,33 +238,44 @@ func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
 	if logCtx.TokenUsage == nil {
 		logCtx.TokenUsage = &converter.TokenUsage{}
 	}
+	if logCtx.IsImageGeneration && status == "success" && logCtx.TokenUsage.ImageCount <= 0 {
+		logCtx.TokenUsage.ImageCount = logCtx.ImageCount
+		if logCtx.TokenUsage.ImageCount <= 0 {
+			logCtx.TokenUsage.ImageCount = 1
+		}
+	}
 	logCtx.applyWebSearchUsageDefaults(status)
 	logCtx.TokenUsage.Normalize()
 
-	// Calculate cost based on the client-facing billing model first. If a
-	// provider-facing real model is the only priced entry, fall back to it.
-	var cost float64
-	var tokenCosts *converter.TokenCosts
 	logSpendCtx := logCtx.Context()
-	if p.priceRegistry == nil {
-		p.logger.WarnContext(logSpendCtx, "Price registry not available, using 0 cost for spend log")
+	modelPrice := logCtx.ModelPrice
+	priceModelID := logCtx.PriceModelID
+	if modelPrice == nil {
+		priceModelID, modelPrice = p.resolveBillingPrice(logCtx, logCtx.PublicModelID, logCtx.ModelID, logCtx.RealModelID)
+	}
+	var tokenCosts *converter.TokenCosts
+	if modelPrice == nil {
+		// No price and nothing was ever billable (e.g. rejected before any
+		// provider was contacted, such as the "no credentials available" 429
+		// path in selectCredentialForModel) — write a $0 audit row instead of
+		// dropping it silently. Only fail closed when real usage exists that
+		// we can't price, which is the actual billing-integrity risk.
+		if !logCtx.TokenUsage.IsZero() {
+			return fmt.Errorf("model price unavailable for %q", priceModelID)
+		}
+		tokenCosts = &converter.TokenCosts{}
 	} else {
-		priceModelID, modelPrice := p.resolveBillingPrice(logCtx, logCtx.PublicModelID, logCtx.ModelID, logCtx.RealModelID)
-		if modelPrice == nil {
-			p.logger.WarnContext(logSpendCtx, "Model price not found in registry, using 0 cost",
-				"model_name", priceModelID)
-		} else {
-			tokenCosts = modelPrice.CalculateCosts(logCtx.TokenUsage)
-			if tokenCosts != nil {
-				cost = tokenCosts.TotalCost
-			}
-			p.logger.DebugContext(logSpendCtx, "Calculated cost for model",
-				"model_name", priceModelID,
-				"cost", cost,
-				"prompt_tokens", logCtx.TokenUsage.PromptTokens,
-				"completion_tokens", logCtx.TokenUsage.CompletionTokens)
+		tokenCosts = modelPrice.CalculateCosts(logCtx.TokenUsage)
+		if tokenCosts == nil {
+			return fmt.Errorf("cost calculation failed for %q", priceModelID)
 		}
 	}
+	cost := tokenCosts.TotalCost
+	p.logger.DebugContext(logSpendCtx, "Calculated cost for model",
+		"model_name", priceModelID,
+		"cost", cost,
+		"prompt_tokens", logCtx.TokenUsage.PromptTokens,
+		"completion_tokens", logCtx.TokenUsage.CompletionTokens)
 
 	// Settle any Redis budget reservation / TPM usage against the real cost.
 	// Guarded so it runs exactly once even though a defer safety-net may also call it.
