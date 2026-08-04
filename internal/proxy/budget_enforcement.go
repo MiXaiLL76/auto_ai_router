@@ -170,13 +170,21 @@ func (p *Proxy) postgresSpendTrackingEnabled() bool {
 	return manager.SpendLoggingEnabled()
 }
 
-func (p *Proxy) enforceBudgetAndRateLimits(
+// checkModelPriceAvailable resolves and caches the billing price for modelID
+// on logCtx and, when spend tracking is enabled and no price exists, fails
+// the request closed with a 503 instead of letting it reach a provider.
+//
+// This must be called from every path that can actually forward a request to
+// a provider or a fallback proxy — not just from enforceBudgetAndRateLimits —
+// because applyCredentialCompatibilityRouting's TryFallbackProxy branch can
+// forward and return before enforceBudgetAndRateLimits ever runs. See PR
+// #96/#115 follow-up review TODO 1.
+func (p *Proxy) checkModelPriceAvailable(
 	w http.ResponseWriter,
 	r *http.Request,
 	logCtx *RequestLogContext,
 	modelID string,
 	realModelID string,
-	body []byte,
 ) bool {
 	publicModelID := modelID
 	if logCtx != nil && logCtx.PublicModelID != "" {
@@ -207,6 +215,20 @@ func (p *Proxy) enforceBudgetAndRateLimits(
 	if logCtx != nil {
 		logCtx.ModelPrice = modelPrice
 		logCtx.PriceModelID = priceModelID
+	}
+	return true
+}
+
+func (p *Proxy) enforceBudgetAndRateLimits(
+	w http.ResponseWriter,
+	r *http.Request,
+	logCtx *RequestLogContext,
+	modelID string,
+	realModelID string,
+	body []byte,
+) bool {
+	if !p.checkModelPriceAvailable(w, r, logCtx, modelID, realModelID) {
+		return false
 	}
 	if logCtx == nil || logCtx.Scope.Admin || logCtx.TokenInfo == nil {
 		return true

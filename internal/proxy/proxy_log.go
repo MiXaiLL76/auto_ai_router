@@ -253,12 +253,22 @@ func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
 	if modelPrice == nil {
 		priceModelID, modelPrice = p.resolveBillingPrice(logCtx, logCtx.PublicModelID, logCtx.ModelID, logCtx.RealModelID)
 	}
+	var tokenCosts *converter.TokenCosts
 	if modelPrice == nil {
-		return fmt.Errorf("model price unavailable for %q", priceModelID)
-	}
-	tokenCosts := modelPrice.CalculateCosts(logCtx.TokenUsage)
-	if tokenCosts == nil {
-		return fmt.Errorf("cost calculation failed for %q", priceModelID)
+		// No price and nothing was ever billable (e.g. rejected before any
+		// provider was contacted, such as the "no credentials available" 429
+		// path in selectCredentialForModel) — write a $0 audit row instead of
+		// dropping it silently. Only fail closed when real usage exists that
+		// we can't price, which is the actual billing-integrity risk.
+		if !logCtx.TokenUsage.IsZero() {
+			return fmt.Errorf("model price unavailable for %q", priceModelID)
+		}
+		tokenCosts = &converter.TokenCosts{}
+	} else {
+		tokenCosts = modelPrice.CalculateCosts(logCtx.TokenUsage)
+		if tokenCosts == nil {
+			return fmt.Errorf("cost calculation failed for %q", priceModelID)
+		}
 	}
 	cost := tokenCosts.TotalCost
 	p.logger.DebugContext(logSpendCtx, "Calculated cost for model",

@@ -217,6 +217,31 @@ func TestLogSpendToLiteLLMDB_RejectsUnknownPrice(t *testing.T) {
 	assert.Empty(t, dbStub.loggedEntries)
 }
 
+// TestLogSpendToLiteLLMDB_WritesZeroCostRowWhenNoUsageAndPriceUnavailable
+// guards against a regression of PR #96/#115 follow-up review TODO 2: rows
+// for requests rejected before any provider was contacted (e.g. the
+// "no credentials available" 429 path, which never resolves ModelPrice) used
+// to be silently dropped once price-lookup failure became a hard error. Since
+// no usage was ever incurred, a $0 row must still be written — this is
+// distinct from TestLogSpendToLiteLLMDB_RejectsUnknownPrice, which covers the
+// case where real, non-zero usage exists and pricing is genuinely missing.
+func TestLogSpendToLiteLLMDB_WritesZeroCostRowWhenNoUsageAndPriceUnavailable(t *testing.T) {
+	prx := NewTestProxyBuilder().Build()
+	dbStub := &stubLiteLLMManager{}
+	prx.LiteLLMDB = dbStub
+
+	logCtx := testLogCtx(t)
+	logCtx.TokenUsage = nil
+	logCtx.Status = "failure"
+	logCtx.HTTPStatus = http.StatusTooManyRequests
+
+	err := prx.logSpendToLiteLLMDB(logCtx)
+	require.NoError(t, err)
+
+	require.Len(t, dbStub.loggedEntries, 1)
+	assert.Zero(t, dbStub.loggedEntries[0].Spend)
+}
+
 func TestLogSpendToLiteLLMDB_ChargesImagesWithoutProviderUsage(t *testing.T) {
 	prx := NewTestProxyBuilder().Build()
 	dbStub := &stubLiteLLMManager{}

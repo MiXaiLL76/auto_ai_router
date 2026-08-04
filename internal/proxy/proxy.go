@@ -110,6 +110,15 @@ func (p *Proxy) applyCredentialCompatibilityRouting(
 		return true
 	}
 
+	// The price gate at the top of enforceBudgetAndRateLimits runs too late to
+	// cover this path: TryFallbackProxy can forward the request and return
+	// success below, at which point ProxyRequest returns without ever
+	// reaching enforceBudgetAndRateLimits. Gate here too so an unpriced model
+	// can't be served (and billed nothing) through the fallback-proxy path.
+	if !p.checkModelPriceAvailable(w, r, logCtx, modelID, prepared.realModelID) {
+		return false
+	}
+
 	success, fallbackReason := p.TryFallbackProxy(
 		w,
 		requestWithPath(r, prepared.proxyPath),

@@ -71,6 +71,18 @@ func (tu *TokenUsage) Total() int {
 	return tu.PromptTokens + tu.CompletionTokens
 }
 
+// IsZero reports whether every billable field is at its zero value, i.e. no
+// provider was ever actually contacted for this request (or its response
+// carried no usage at all). Used to distinguish "nothing to bill" from
+// "something was consumed but we can't price it" — only the latter should
+// fail closed when no price is available.
+func (tu *TokenUsage) IsZero() bool {
+	if tu == nil {
+		return true
+	}
+	return *tu == TokenUsage{}
+}
+
 // MergeNonZero copies every non-zero/non-empty field from src into tu,
 // leaving tu's existing value in place wherever src's is zero/empty.
 //
