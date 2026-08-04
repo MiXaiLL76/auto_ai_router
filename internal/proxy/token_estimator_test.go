@@ -163,6 +163,22 @@ func TestExtractCompletionDeltaText_IgnoresAudioBytes(t *testing.T) {
 	assert.Equal(t, "", extractCompletionDeltaText(chunk))
 }
 
+func TestExtractCompletionDeltaText_ChatCompletionsReasoningContent(t *testing.T) {
+	chunk := []byte(
+		`data: {"choices":[{"delta":{"reasoning_content":"thinking about this..."}}]}`+"\n\n"+
+		`data: {"choices":[{"delta":{"reasoning_content":" and more reasoning"}}]}`+"\n\n"+
+		`data: {"choices":[{"delta":{"content":"the answer"}}]}`+"\n\n")
+
+	assert.Equal(t, "thinking about this... and more reasoningthe answer", extractCompletionDeltaText(chunk))
+}
+
+func TestExtractCompletionDeltaText_ChatCompletionsReasoningOnly(t *testing.T) {
+	chunk := []byte(
+		`data: {"choices":[{"delta":{"reasoning_content":"only reasoning, no content"}}]}`+"\n\n")
+
+	assert.Equal(t, "only reasoning, no content", extractCompletionDeltaText(chunk))
+}
+
 // --- Fix A: lazy prompt-token estimate + tiktoken_enabled toggle ---
 
 func TestRequestLogContext_PromptTokensEstimate_MemoizedAfterFirstCall(t *testing.T) {

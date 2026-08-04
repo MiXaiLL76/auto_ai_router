@@ -487,8 +487,9 @@ func appendChatCompletionDeltaText(b *strings.Builder, payload []byte) {
 	var data struct {
 		Choices []struct {
 			Delta struct {
-				Content      interface{} `json:"content"`
-				Refusal      string      `json:"refusal"`
+				Content          interface{} `json:"content"`
+				Refusal          string      `json:"refusal"`
+				ReasoningContent string      `json:"reasoning_content"`
 				FunctionCall *struct {
 					Name      string `json:"name"`
 					Arguments string `json:"arguments"`
@@ -507,6 +508,7 @@ func appendChatCompletionDeltaText(b *strings.Builder, payload []byte) {
 	}
 	for _, choice := range data.Choices {
 		appendDeltaValueText(b, choice.Delta.Content)
+		b.WriteString(choice.Delta.ReasoningContent)
 		b.WriteString(choice.Delta.Refusal)
 		if choice.Delta.FunctionCall != nil {
 			b.WriteString(choice.Delta.FunctionCall.Name)
