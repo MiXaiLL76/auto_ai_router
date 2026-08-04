@@ -78,9 +78,6 @@ func (p *Proxy) orchestrateRequest(
 	if !ok {
 		return nil, false
 	}
-	if !p.enforceBudgetAndRateLimits(w, r, logCtx, modelID, realModelID, body) {
-		return nil, false
-	}
 
 	// proxyBody: body with the original alias restored.
 	// Proxy credentials handle their own model routing, so they must receive the

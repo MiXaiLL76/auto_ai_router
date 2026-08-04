@@ -14,7 +14,8 @@ type scopeTestDB struct {
 	info *dbmodels.TokenInfo
 }
 
-func (db scopeTestDB) IsEnabled() bool { return true }
+func (db scopeTestDB) IsEnabled() bool           { return true }
+func (db scopeTestDB) SpendLoggingEnabled() bool { return false }
 
 func (db scopeTestDB) IsHealthy() bool { return true }
 

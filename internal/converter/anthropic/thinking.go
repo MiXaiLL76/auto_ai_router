@@ -1,8 +1,14 @@
 package anthropic
 
-import "strings"
+import (
+	"regexp"
+	"strconv"
+	"strings"
+)
 
 const minTextTokensWithThinking = 1024
+
+var claudeVersionPattern = regexp.MustCompile(`claude-(?:opus|sonnet|haiku|fable)-([0-9]+)(?:[.-]([0-9]+))?`)
 
 // mapThinkingConfig maps OpenAI thinking / reasoning_effort parameters to an Anthropic
 // ThinkingConfig (and optional OutputConfig for Claude 4+ adaptive thinking).
@@ -19,12 +25,13 @@ func mapThinkingConfig(thinking interface{}, reasoningEffort string, modelName s
 	if thinking != nil {
 		if thinkingMap, ok := thinking.(map[string]interface{}); ok {
 			thinkingType, _ := thinkingMap["type"].(string)
+			display, _ := thinkingMap["display"].(string)
 			switch thinkingType {
 			case "enabled":
 				budgetTokens, _ := thinkingMap["budget_tokens"].(float64)
 				if budgetTokens > 0 {
 					if adaptive {
-						return &AnthropicThinking{Type: "adaptive"},
+						return &AnthropicThinking{Type: "adaptive", Display: "summarized"},
 							&AnthropicOutputConfig{Effort: budgetTokensToEffort(int(budgetTokens))}
 					}
 					return &AnthropicThinking{Type: "enabled", BudgetTokens: int(budgetTokens)}, nil
@@ -36,7 +43,7 @@ func mapThinkingConfig(thinking interface{}, reasoningEffort string, modelName s
 					effort = "medium"
 				}
 				if adaptive {
-					return &AnthropicThinking{Type: "adaptive"}, &AnthropicOutputConfig{Effort: effort}
+					return &AnthropicThinking{Type: "adaptive", Display: display}, &AnthropicOutputConfig{Effort: effort}
 				}
 				// Caller passed adaptive but model uses legacy format — convert effort→budget
 				budget := effortToBudgetTokens(effort)
@@ -53,7 +60,7 @@ func mapThinkingConfig(thinking interface{}, reasoningEffort string, modelName s
 		if adaptive {
 			effort := mapReasoningEffortToEffort(reasoningEffort)
 			if effort != "" {
-				return &AnthropicThinking{Type: "adaptive"}, &AnthropicOutputConfig{Effort: effort}
+				return &AnthropicThinking{Type: "adaptive", Display: "summarized"}, &AnthropicOutputConfig{Effort: effort}
 			}
 		} else {
 			budget := mapReasoningEffortToBudget(reasoningEffort)
@@ -95,20 +102,29 @@ func EnsureMaxTokensForThinking(maxTokens int, thinking *AnthropicThinking) int 
 	return thinking.BudgetTokens + minTextTokensWithThinking
 }
 
-// isAdaptiveThinkingModel reports whether the model uses the Claude 4+ adaptive thinking API
-// (thinking.type="adaptive" + output_config.effort) instead of the legacy enabled+budget_tokens.
-//
-// Only Opus-4 generation models and claude-mythos-preview use adaptive thinking.
-// Claude 3.x models use budget_tokens-based enabled thinking.
-// Claude 4 Sonnet/Haiku do not support extended thinking at all.
+// isAdaptiveThinkingModel reports whether the model uses adaptive thinking.
 func isAdaptiveThinkingModel(model string) bool {
-	if strings.Contains(model, "opus") {
+	lower := strings.ToLower(model)
+	if strings.Contains(lower, "mythos") {
 		return true
 	}
-	if strings.Contains(model, "mythos") {
+
+	match := claudeVersionPattern.FindStringSubmatch(lower)
+	if len(match) == 0 {
+		return false
+	}
+	major, err := strconv.Atoi(match[1])
+	if err != nil {
+		return false
+	}
+	if major >= 5 {
 		return true
 	}
-	return false
+	if major != 4 || len(match[2]) == 0 || len(match[2]) > 2 {
+		return false
+	}
+	minor, err := strconv.Atoi(match[2])
+	return err == nil && minor >= 6
 }
 
 // mapReasoningEffortToBudget maps an OpenAI reasoning_effort string to an Anthropic

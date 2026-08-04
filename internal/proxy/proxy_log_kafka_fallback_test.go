@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"encoding/json"
+	"net/http"
 	"testing"
 
 	"github.com/mixaill76/auto_ai_router/internal/converter"
@@ -22,6 +23,8 @@ type stubLiteLLMManager struct {
 }
 
 func (s *stubLiteLLMManager) IsEnabled() bool { return true }
+
+func (s *stubLiteLLMManager) SpendLoggingEnabled() bool { return true }
 
 func (s *stubLiteLLMManager) LogSpend(entry *dbmodels.SpendLogEntry) error {
 	s.loggedEntries = append(s.loggedEntries, entry)
@@ -44,6 +47,9 @@ func TestLogSpendToLiteLLMDB_FlagsKafkaFallbackOnQueueFull(t *testing.T) {
 
 	dbStub := &stubLiteLLMManager{}
 	prx.LiteLLMDB = dbStub
+	setTestModelPrice(prx, "gpt-4o-mini", &routermodels.ModelPrice{
+		InputCostPerToken: 0.000001, OutputCostPerToken: 0.000002,
+	})
 
 	logCtx := testLogCtx(t)
 
@@ -69,6 +75,9 @@ func TestLogSpendToLiteLLMDB_NoKafkaFallbackFlagOnSuccess(t *testing.T) {
 
 	dbStub := &stubLiteLLMManager{}
 	prx.LiteLLMDB = dbStub
+	setTestModelPrice(prx, "gpt-4o-mini", &routermodels.ModelPrice{
+		InputCostPerToken: 0.000001, OutputCostPerToken: 0.000002,
+	})
 
 	logCtx := testLogCtx(t)
 
@@ -88,6 +97,9 @@ func TestLogSpendToLiteLLMDB_NormalizesTokenUsageBeforePersisting(t *testing.T) 
 
 	dbStub := &stubLiteLLMManager{}
 	prx.LiteLLMDB = dbStub
+	setTestModelPrice(prx, "gpt-4o-mini", &routermodels.ModelPrice{
+		InputCostPerToken: 0.000001, OutputCostPerToken: 0.000002,
+	})
 
 	logCtx := testLogCtx(t)
 	logCtx.TokenUsage = &converter.TokenUsage{
@@ -137,6 +149,9 @@ func TestLogSpendToLiteLLMDB_PreservesTeamID(t *testing.T) {
 			prx := NewTestProxyBuilder().Build()
 			dbStub := &stubLiteLLMManager{}
 			prx.LiteLLMDB = dbStub
+			setTestModelPrice(prx, "gpt-4o-mini", &routermodels.ModelPrice{
+				InputCostPerToken: 0.000001, OutputCostPerToken: 0.000002,
+			})
 
 			logCtx := testLogCtx(t)
 			logCtx.TokenInfo = &litellmdb.TokenInfo{TeamID: tt.teamID}
@@ -202,4 +217,74 @@ func TestLogSpendToLiteLLMDB_BillsAliasPriceBeforeRealModelPrice(t *testing.T) {
 	assert.InDelta(t, 0.0032004, costBreakdown["output_cost"].(float64), 0.000000001)
 	assert.InDelta(t, 0.0008064, costBreakdown["reasoning_cost"].(float64), 0.000000001)
 	assert.InDelta(t, entry.Spend, costBreakdown["total_cost"].(float64), 0.000000001)
+}
+
+func TestLogSpendToLiteLLMDB_RejectsUnknownPrice(t *testing.T) {
+	prx := NewTestProxyBuilder().Build()
+	dbStub := &stubLiteLLMManager{}
+	prx.LiteLLMDB = dbStub
+
+	err := prx.logSpendToLiteLLMDB(testLogCtx(t))
+
+	require.ErrorContains(t, err, "model price unavailable")
+	assert.Empty(t, dbStub.loggedEntries)
+}
+
+// TestLogSpendToLiteLLMDB_WritesZeroCostRowWhenNoUsageAndPriceUnavailable
+// guards against a regression of PR #96/#115 follow-up review TODO 2: rows
+// for requests rejected before any provider was contacted (e.g. the
+// "no credentials available" 429 path, which never resolves ModelPrice) used
+// to be silently dropped once price-lookup failure became a hard error. Since
+// no usage was ever incurred, a $0 row must still be written — this is
+// distinct from TestLogSpendToLiteLLMDB_RejectsUnknownPrice, which covers the
+// case where real, non-zero usage exists and pricing is genuinely missing.
+func TestLogSpendToLiteLLMDB_WritesZeroCostRowWhenNoUsageAndPriceUnavailable(t *testing.T) {
+	prx := NewTestProxyBuilder().Build()
+	dbStub := &stubLiteLLMManager{}
+	prx.LiteLLMDB = dbStub
+
+	logCtx := testLogCtx(t)
+	logCtx.TokenUsage = nil
+	logCtx.Status = "failure"
+	logCtx.HTTPStatus = http.StatusTooManyRequests
+
+	err := prx.logSpendToLiteLLMDB(logCtx)
+	require.NoError(t, err)
+
+	require.Len(t, dbStub.loggedEntries, 1)
+	assert.Zero(t, dbStub.loggedEntries[0].Spend)
+}
+
+func TestLogSpendToLiteLLMDB_ChargesImagesWithoutProviderUsage(t *testing.T) {
+	prx := NewTestProxyBuilder().Build()
+	dbStub := &stubLiteLLMManager{}
+	prx.LiteLLMDB = dbStub
+	setTestModelPrice(prx, "gpt-4o-mini", &routermodels.ModelPrice{OutputCostPerImage: 0.04})
+	logCtx := testLogCtx(t)
+	logCtx.IsImageGeneration = true
+	logCtx.ImageCount = 2
+	logCtx.TokenUsage = nil
+
+	require.NoError(t, prx.logSpendToLiteLLMDB(logCtx))
+
+	require.Len(t, dbStub.loggedEntries, 1)
+	assert.InDelta(t, 0.08, dbStub.loggedEntries[0].Spend, 1e-12)
+}
+
+func TestLogSpendToLiteLLMDB_DoesNotChargeFailedImageRequest(t *testing.T) {
+	prx := NewTestProxyBuilder().Build()
+	dbStub := &stubLiteLLMManager{}
+	prx.LiteLLMDB = dbStub
+	setTestModelPrice(prx, "gpt-4o-mini", &routermodels.ModelPrice{OutputCostPerImage: 0.04})
+	logCtx := testLogCtx(t)
+	logCtx.IsImageGeneration = true
+	logCtx.ImageCount = 2
+	logCtx.TokenUsage = nil
+	logCtx.Status = "failure"
+	logCtx.HTTPStatus = http.StatusBadRequest
+
+	require.NoError(t, prx.logSpendToLiteLLMDB(logCtx))
+
+	require.Len(t, dbStub.loggedEntries, 1)
+	assert.Zero(t, dbStub.loggedEntries[0].Spend)
 }

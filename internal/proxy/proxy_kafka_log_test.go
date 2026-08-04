@@ -10,6 +10,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/converter"
 	"github.com/mixaill76/auto_ai_router/internal/kafkalog"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb"
+	pricingmodels "github.com/mixaill76/auto_ai_router/internal/models"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -57,6 +58,12 @@ func testLogCtx(t *testing.T) *RequestLogContext {
 		},
 		SessionID: "session-1",
 	}
+}
+
+func setTestModelPrice(prx *Proxy, modelID string, price *pricingmodels.ModelPrice) {
+	registry := pricingmodels.NewModelPriceRegistry()
+	registry.Update(map[string]*pricingmodels.ModelPrice{modelID: price})
+	prx.priceRegistry = registry
 }
 
 func TestBuildKafkaSpendEvent_BasicMapping(t *testing.T) {
