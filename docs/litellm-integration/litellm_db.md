@@ -2,6 +2,8 @@
 
 Auto AI Router can integrate with a LiteLLM PostgreSQL database for spend logging and API key authentication.
 
+Provider-based team attribution is controlled by the server-level `credential_name_as_team_id` setting, independently of the database connection settings below.
+
 ## Configuration
 
 ```yaml
