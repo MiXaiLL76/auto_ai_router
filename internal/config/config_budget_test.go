@@ -18,6 +18,12 @@ func TestLiteLLMDBBudgetEnforcementIsOptIn(t *testing.T) {
 	assert.Equal(t, 1000, cfg.DefaultEstimatedCompletionTokens)
 }
 
+func TestServerCredentialNameAsTeamIDParsesExplicitSetting(t *testing.T) {
+	var cfg ServerConfig
+	require.NoError(t, yaml.Unmarshal([]byte("credential_name_as_team_id: true\n"), &cfg))
+	assert.True(t, cfg.CredentialNameAsTeamID)
+}
+
 func TestLiteLLMDBBudgetEnforcementParsesExplicitSettings(t *testing.T) {
 	var cfg LiteLLMDBConfig
 	require.NoError(t, yaml.Unmarshal([]byte(`

@@ -21,6 +21,7 @@ server:
   logging_level: info
   master_key: "sk-your-master-key-here"
   default_models_rpm: -1
+  credential_name_as_team_id: false
   model_prices_link: ""
   response_headers:
     mode: passthrough
@@ -99,27 +100,30 @@ litellm_db:
 
 ## Server Parameters
 
-| Parameter                  | Type     | Default     | Description                                                                        |
-| -------------------------- | -------- | ----------- | ---------------------------------------------------------------------------------- |
-| `port`                     | int      | 8080        | Listen port                                                                        |
-| `max_body_size_mb`         | int      | 100         | Maximum request body size (MB)                                                     |
-| `response_body_multiplier` | int      | 10          | Response body limit = max_body_size_mb * this value                                |
-| `response_compatibility`   | string   | native      | Response contract: `native` or LiteLLM-compatible `litellm`                        |
-| `request_timeout`          | duration | 60s         | Request timeout                                                                    |
-| `write_timeout`            | duration | 60s         | HTTP server write timeout                                                          |
-| `idle_timeout`             | duration | 2m          | HTTP server idle timeout (default: 2 * write_timeout)                              |
-| `idle_conn_timeout`        | duration | 120s        | Idle connection timeout for keep-alive connections                                 |
-| `max_idle_conns`           | int      | 200         | Maximum idle connections                                                           |
-| `max_idle_conns_per_host`  | int      | 20          | Maximum idle connections per host                                                  |
-| `logging_level`            | string   | info        | Logging level: `info`, `debug`, `error`                                            |
-| `master_key`               | string   | —           | **Required.** Master key for client authentication                                 |
-| `default_models_rpm`       | int      | -1          | Default RPM limit for models (-1 = unlimited)                                      |
-| `model_prices_link`        | string   | —           | URL or file path to model prices JSON                                              |
-| `proxy_health_timeout`     | duration | 15s         | Timeout for fetching `/health` from remote proxy credentials                       |
-| `response_headers.mode`    | string   | passthrough | Response header policy. Supported values are `passthrough` and `allowlist`         |
-| `tiktoken_enabled`         | bool     | true        | Local tiktoken-based fallback token estimation for streaming responses (see below) |
+| Parameter                    | Type     | Default     | Description                                                                                           |
+| ---------------------------- | -------- | ----------- | ----------------------------------------------------------------------------------------------------- |
+| `port`                       | int      | 8080        | Listen port                                                                                           |
+| `max_body_size_mb`           | int      | 100         | Maximum request body size (MB)                                                                        |
+| `response_body_multiplier`   | int      | 10          | Response body limit = max_body_size_mb * this value                                                   |
+| `response_compatibility`     | string   | native      | Response contract: `native` or LiteLLM-compatible `litellm`                                           |
+| `request_timeout`            | duration | 60s         | Request timeout                                                                                       |
+| `write_timeout`              | duration | 60s         | HTTP server write timeout                                                                             |
+| `idle_timeout`               | duration | 2m          | HTTP server idle timeout (default: 2 * write_timeout)                                                 |
+| `idle_conn_timeout`          | duration | 120s        | Idle connection timeout for keep-alive connections                                                    |
+| `max_idle_conns`             | int      | 200         | Maximum idle connections                                                                              |
+| `max_idle_conns_per_host`    | int      | 20          | Maximum idle connections per host                                                                     |
+| `logging_level`              | string   | info        | Logging level: `info`, `debug`, `error`                                                               |
+| `master_key`                 | string   | —           | **Required.** Master key for client authentication                                                    |
+| `default_models_rpm`         | int      | -1          | Default RPM limit for models (-1 = unlimited)                                                         |
+| `credential_name_as_team_id` | bool     | false       | Use the selected provider credential name as `team_id` in spend logs when auth has no team assignment |
+| `model_prices_link`          | string   | —           | URL or file path to model prices JSON                                                                 |
+| `proxy_health_timeout`       | duration | 15s         | Timeout for fetching `/health` from remote proxy credentials                                          |
+| `response_headers.mode`      | string   | passthrough | Response header policy. Supported values are `passthrough` and `allowlist`                            |
+| `tiktoken_enabled`           | bool     | true        | Local tiktoken-based fallback token estimation for streaming responses (see below)                    |
 
 The `allowlist` mode forwards `Content-Type`, `Cache-Control`, `Retry-After`, `Content-Disposition`, `Content-Range`, `Last-Modified`, and `Location`. Transport headers are generated by the router. Other upstream response headers are removed.
+
+When `credential_name_as_team_id` is enabled, spend logs use the selected provider credential name as `team_id` only when the authenticated key does not provide a `team_id`. An explicit team assignment always takes precedence. This is intended for billing-aggregator AIR instances that group spend by provider credential; leave it disabled for embedded routers and migration helpers.
 
 When PostgreSQL or Kafka spend logging is enabled, every routed model must have a price entry. If neither its real provider name nor its alias can be priced, the router returns `503 Model pricing unavailable` before contacting the provider. Use an explicit zero-price entry for intentionally free models.
 

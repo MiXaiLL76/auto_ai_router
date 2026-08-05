@@ -85,6 +85,7 @@ func PrintConfig(logger *slog.Logger, cfg *Config) {
 		"idle_timeout", cfg.Server.IdleTimeout.String(),
 		"logging_level", cfg.Server.LoggingLevel,
 		"stdout_logs_enabled", cfg.Server.StdoutLogsEnabled,
+		"credential_name_as_team_id", cfg.Server.CredentialNameAsTeamID,
 		"master_key", "***REDACTED***",
 		"default_models_rpm", rpmToString(cfg.Server.DefaultModelsRPM),
 		"max_idle_conns", cfg.Server.MaxIdleConns,

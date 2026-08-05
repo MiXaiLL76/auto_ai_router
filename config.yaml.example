@@ -14,6 +14,7 @@ server:
   master_key: "sk-your-master-key-here"  # Required: Master key for authentication
   default_models_rpm: -1  # Default RPM limit for models (-1 for unlimited, default: -1)
   strict_all_team_models_acl: false  # Enforce key/team/user model ACLs (default: false)
+  credential_name_as_team_id: false  # Use provider credential name as team_id when auth has no team_id (default: false)
   tiktoken_enabled: true  # Local fallback token estimation when a provider omits usage (default: true)
   model_prices_link: ""  # Optional: URL or file path to model prices JSON (supports os.environ/VAR_NAME)
   response_headers:

@@ -360,6 +360,7 @@ type Config struct {
 	TiktokenEnabled            bool // Local tiktoken-based prompt/completion token fallback estimation (default: true)
 	StrictAllTeamModelsACL     bool
 	ResponseHeaderMode         config.ResponseHeaderMode
+	CredentialNameAsTeamID     bool
 
 	BudgetReserver                   *budget.Reserver      // Atomic Redis budget reservation (nil if Redis disabled — feature is a no-op)
 	KeyRateLimiter                   *ratelimit.RPMLimiter // Key/user/team/org RPM/TPM enforcement (nil if Redis disabled)
@@ -394,6 +395,7 @@ type Proxy struct {
 	tiktokenEnabled                  bool                       // Local tiktoken-based prompt/completion token fallback estimation
 	strictAllTeamModelsACL           bool
 	responseHeaderMode               config.ResponseHeaderMode
+	credentialNameAsTeamID           bool
 	bedrockDailyQuota                *bedrockDailyQuotaTracker
 	budgetReserver                   *budget.Reserver
 	keyRateLimiter                   *ratelimit.RPMLimiter
@@ -472,6 +474,7 @@ func New(cfg *Config) *Proxy {
 		tiktokenEnabled:                  cfg.TiktokenEnabled,
 		strictAllTeamModelsACL:           cfg.StrictAllTeamModelsACL,
 		responseHeaderMode:               cfg.ResponseHeaderMode,
+		credentialNameAsTeamID:           cfg.CredentialNameAsTeamID,
 		bedrockDailyQuota:                newBedrockDailyQuotaTracker(),
 		budgetReserver:                   cfg.BudgetReserver,
 		keyRateLimiter:                   cfg.KeyRateLimiter,
