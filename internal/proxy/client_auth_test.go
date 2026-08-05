@@ -108,6 +108,7 @@ func TestClientAuthenticationRejectsInvalidCredentialsWithoutChangingErrorContra
 			"invalid-key": litellmdb.ErrTokenNotFound,
 			"expired-key": litellmdb.ErrTokenExpired,
 			"blocked-key": litellmdb.ErrTokenBlocked,
+			"db-down-key": litellmdb.ErrConnectionFailed,
 		},
 	}
 	prx := newClientAuthTestProxy(t, db, "http://example.invalid", config.ProviderTypeOpenAI, "provider-key")
@@ -125,6 +126,7 @@ func TestClientAuthenticationRejectsInvalidCredentialsWithoutChangingErrorContra
 		{name: "invalid x api key", headers: map[string]string{"x-api-key": "invalid-key"}, wantStatus: http.StatusUnauthorized, wantText: "Invalid token"},
 		{name: "expired bearer", headers: map[string]string{"Authorization": "Bearer expired-key"}, wantStatus: http.StatusUnauthorized, wantText: "Token expired"},
 		{name: "blocked bearer preserves forbidden contract", headers: map[string]string{"Authorization": "Bearer blocked-key"}, wantStatus: http.StatusForbidden, wantText: "Token blocked"},
+		{name: "db connection failure fails closed with 503, not 401", headers: map[string]string{"Authorization": "Bearer db-down-key"}, wantStatus: http.StatusServiceUnavailable, wantText: "temporarily unavailable"},
 	}
 
 	for _, tt := range tests {
@@ -141,8 +143,35 @@ func TestClientAuthenticationRejectsInvalidCredentialsWithoutChangingErrorContra
 			assert.False(t, ok)
 			assertAuthErrorShape(t, w, tt.wantStatus)
 			assert.Contains(t, w.Body.String(), tt.wantText)
+			assert.Equal(t, tt.wantStatus, logCtx.HTTPStatus, "logCtx.HTTPStatus must match the response actually written")
 		})
 	}
+}
+
+// TestClientAuthenticationDBUnavailableFailsClosedNotSilent guards against the
+// regression where a LiteLLM DB connection failure during auth left the
+// ResponseWriter untouched: net/http then sent an implicit 200 with an empty
+// body to the client (and never called the provider), while the DB outage was
+// invisible in logs since nothing was ever written. DB unavailability must now
+// fail closed with an explicit 503 and a Retry-After hint instead.
+func TestClientAuthenticationDBUnavailableFailsClosedNotSilent(t *testing.T) {
+	db := &clientAuthTestDB{
+		errors: map[string]error{"db-down-key": litellmdb.ErrConnectionFailed},
+	}
+	prx := newClientAuthTestProxy(t, db, "http://example.invalid", config.ProviderTypeOpenAI, "provider-key")
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.Header.Set("Authorization", "Bearer db-down-key")
+	w := httptest.NewRecorder()
+	logCtx := &RequestLogContext{Request: req}
+
+	ok := prx.authenticateRequest(w, req, logCtx, true)
+
+	require.False(t, ok)
+	require.Equal(t, http.StatusServiceUnavailable, w.Code, "must fail closed with 503, not fall through to an implicit 200")
+	assert.NotEmpty(t, w.Body.String(), "response body must not be silently empty")
+	assert.NotEmpty(t, w.Header().Get("Retry-After"), "client needs a Retry-After hint to back off correctly")
+	assert.Equal(t, http.StatusServiceUnavailable, logCtx.HTTPStatus, "access log must reflect the real response status")
 }
 
 func TestAIRProxyMarkerRequiresMasterKeyPeer(t *testing.T) {

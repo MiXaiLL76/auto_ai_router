@@ -509,14 +509,7 @@ func (p *Proxy) authenticateRequest(
 		err = litellmdb.ErrTokenNotFound
 	}
 	if err != nil {
-		logCtx.Status = "failure"
-		logCtx.HTTPStatus = http.StatusUnauthorized
-
-		if p.handleLiteLLMAuthError(r.Context(), w, err, token) {
-			logCtx.ErrorMsg = "LiteLLM auth validation failed"
-		} else {
-			logCtx.ErrorMsg = "LiteLLM DB unavailable"
-		}
+		p.handleLiteLLMAuthError(r.Context(), w, logCtx, err, token)
 		return false
 	}
 	p.logger.DebugContext(r.Context(), "Token validated via LiteLLM DB",
