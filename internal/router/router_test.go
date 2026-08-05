@@ -435,6 +435,58 @@ func TestServeHTTP_ProxyRequest(t *testing.T) {
 	}
 }
 
+func TestCanonicalPublicPath(t *testing.T) {
+	tests := []struct {
+		path string
+		want string
+	}{
+		{"/chat/completions", "/v1/chat/completions"},
+		{"/chat/completions/", "/v1/chat/completions"},
+		{"/completions", "/v1/completions"},
+		{"/embeddings", "/v1/embeddings"},
+		{"/image/generations", "/v1/images/generations"},
+		{"/images/generations", "/v1/images/generations"},
+		{"/images/edits", "/v1/images/edits"},
+		{"/messages", "/v1/messages"},
+		{"/models", "/v1/models"},
+		{"/responses", "/v1/responses"},
+		{"/responses/resp_123", "/v1/responses/resp_123"},
+		{"/responses/resp_123/", "/v1/responses/resp_123/"},
+		{"/v1/chat/completions", "/v1/chat/completions"},
+		{"/health", "/health"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.path, func(t *testing.T) {
+			assert.Equal(t, tt.want, canonicalPublicPath(tt.path))
+		})
+	}
+}
+
+func TestServeHTTPLegacyChatCompletionsAlias(t *testing.T) {
+	upstream := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/v1/chat/completions", r.URL.Path)
+		assert.Equal(t, "value", r.URL.Query().Get("query"))
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"ok"}}]}`)
+	}))
+	defer upstream.Close()
+
+	prx := createProxyWithMockServer(upstream.URL)
+	router := New(prx, nil, testhelpers.NewTestMonitoringConfig("/health", false, ""), testhelpers.NewTestLogger(), nil)
+	req := httptest.NewRequest(http.MethodPost, "/chat/completions?query=value", strings.NewReader(`{
+		"model":"test-model",
+		"messages":[{"role":"user","content":"test"}]
+	}`))
+	req.Header.Set("Authorization", "Bearer test-key")
+	req.Header.Set("Content-Type", "application/json")
+	result := httptest.NewRecorder()
+
+	router.ServeHTTP(result, req)
+
+	require.Equal(t, http.StatusOK, result.Code)
+}
+
 func TestServeHTTP_Messages(t *testing.T) {
 	upstream := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, "/v1/chat/completions", r.URL.Path)

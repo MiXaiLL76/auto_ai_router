@@ -33,6 +33,38 @@ var proxiedPublicPaths = map[string]struct{}{
 	"/v1/responses":          {},
 }
 
+var legacyPublicPathAliases = map[string]string{
+	"/chat/completions":   "/v1/chat/completions",
+	"/completions":        "/v1/completions",
+	"/embeddings":         "/v1/embeddings",
+	"/image/generations":  "/v1/images/generations",
+	"/images/edits":       "/v1/images/edits",
+	"/images/generations": "/v1/images/generations",
+	"/messages":           "/v1/messages",
+	"/models":             "/v1/models",
+	"/responses":          "/v1/responses",
+}
+
+func canonicalPublicPath(path string) string {
+	canonicalPath := strings.TrimSuffix(path, "/")
+	if target, ok := legacyPublicPathAliases[canonicalPath]; ok {
+		return target
+	}
+	if strings.HasPrefix(path, "/responses/") {
+		return "/v1" + path
+	}
+	return path
+}
+
+func normalizePublicPath(req *http.Request) {
+	path := canonicalPublicPath(req.URL.Path)
+	if path == req.URL.Path {
+		return
+	}
+	req.URL.Path = path
+	req.URL.RawPath = ""
+}
+
 func publicPathAllowedMethod(req *http.Request) (string, bool) {
 	path := req.URL.Path
 	if path == "/v1/models" {
@@ -82,6 +114,7 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	w.Header().Set("Content-Security-Policy", "frame-ancestors 'none'")
 	w.Header().Set("X-Frame-Options", "DENY")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
+	normalizePublicPath(req)
 
 	// Recover from handler panics so they land in our logging system at ERROR
 	// (net/http's built-in recovery only prints to stderr) and the client gets
