@@ -108,10 +108,35 @@ func (p *Proxy) logTransformedResponse(ctx context.Context, credName, providerNa
 	}
 }
 
+// dbUnavailableRetryAfterSeconds is the Retry-After hint sent to clients when
+// LiteLLM DB is unreachable during auth. Kept short and fail-fast: AIR never
+// blocks the request waiting on the DB, it just tells the client when to try
+// again. Independent of litellm_db.health_check_interval — a fixed floor is
+// simpler to reason about than deriving it from the pool's reconnect backoff.
+const dbUnavailableRetryAfterSeconds = "5"
+
 // ==================== LiteLLM DB Integration ====================
-// handleLiteLLMAuthError handles LiteLLM authentication errors
-// Returns true if error was handled and response was written
-func (p *Proxy) handleLiteLLMAuthError(ctx context.Context, w http.ResponseWriter, err error, token string) bool {
+// handleLiteLLMAuthError handles a LiteLLM DB auth error: it always writes a
+// client response and updates logCtx (Status/HTTPStatus/ErrorMsg) to match,
+// so the access log and the actual response sent never disagree.
+func (p *Proxy) handleLiteLLMAuthError(ctx context.Context, w http.ResponseWriter, logCtx *RequestLogContext, err error, token string) {
+	logCtx.Status = "failure"
+
+	// Connection failure means AIR cannot confirm or deny the key - fail closed
+	// with 503, not 401. A 401 here would tell a client with a perfectly valid
+	// key that its credentials are bad; 503+Retry-After correctly signals a
+	// transient dependency outage that well-behaved clients retry on.
+	if errors.Is(err, litellmdb.ErrConnectionFailed) {
+		logCtx.HTTPStatus = http.StatusServiceUnavailable
+		logCtx.ErrorMsg = "LiteLLM DB unavailable"
+		p.logger.ErrorContext(ctx, "LiteLLM DB unavailable during auth",
+			"error_code", http.StatusServiceUnavailable,
+			"token_prefix", security.MaskAPIKey(token))
+		w.Header().Set("Retry-After", dbUnavailableRetryAfterSeconds)
+		WriteErrorServiceUnavailable(w, "Authentication service temporarily unavailable, please retry")
+		return
+	}
+
 	// Map error types to HTTP status and message
 	errorMap := map[error]struct {
 		status  int
@@ -125,15 +150,12 @@ func (p *Proxy) handleLiteLLMAuthError(ctx context.Context, w http.ResponseWrite
 		litellmdb.ErrBudgetExceeded: {http.StatusPaymentRequired, "Budget exceeded", "Budget exceeded"},
 	}
 
-	// Check for connection failure first (requires fallback, not an error response)
-	if errors.Is(err, litellmdb.ErrConnectionFailed) {
-		return false
-	}
-
 	// Check for known auth errors — client-side issues (bad/blocked/expired token,
 	// budget), not service failures, so they are logged at WARN.
 	for errType, info := range errorMap {
 		if errors.Is(err, errType) {
+			logCtx.HTTPStatus = info.status
+			logCtx.ErrorMsg = "LiteLLM auth validation failed"
 			p.logger.WarnContext(ctx, info.logMsg,
 				"error_code", info.status,
 				"token_prefix", security.MaskAPIKey(token))
@@ -145,17 +167,18 @@ func (p *Proxy) handleLiteLLMAuthError(ctx context.Context, w http.ResponseWrite
 			default:
 				WriteErrorUnauthorized(w, info.message)
 			}
-			return true
+			return
 		}
 	}
 
 	// Unknown error — unexpected server-side failure, keep at ERROR
+	logCtx.HTTPStatus = http.StatusInternalServerError
+	logCtx.ErrorMsg = "LiteLLM auth validation failed"
 	p.logger.ErrorContext(ctx, "Auth error",
 		"error_code", http.StatusInternalServerError,
 		"error", err,
 		"token_prefix", security.MaskAPIKey(token))
 	WriteErrorInternal(w, "Internal Server Error")
-	return true
 }
 
 // litellmCallType translates an AIR request path into the LiteLLM call_type.
