@@ -77,9 +77,3 @@ API_KEY=sk-... BASE_URL=https://example.ru docker compose up
 ```
 
 Все те же переменные (`TARGET_LOW/HIGH`, `RAMP/HOLD`, `W_STREAM/W_CHAT/W_RESP/W_EMBED`, `AUTH_HEADER/AUTH_VALUE`) пробрасываются в контейнер `k6` через `environment` в compose-файле и берутся из окружения хоста (с дефолтами, если не заданы).
-
-Остановить и убрать всё вместе с volume'ами:
-
-```bash
-docker compose down -v
-```
