@@ -205,6 +205,7 @@ func PrintConfig(logger *slog.Logger, cfg *Config) {
 			"log_flush_interval", cfg.LiteLLMDB.LogFlushInterval.String(),
 			"log_workers", cfg.LiteLLMDB.LogWorkers,
 			"disable_spend_logs_write", cfg.LiteLLMDB.DisableSpendLogsWrite,
+			"credential_name_as_team_id", cfg.LiteLLMDB.CredentialNameAsTeamID,
 			"enforce_budget_reservation", cfg.LiteLLMDB.EnforceBudgetReservation,
 			"budget_reservation_ttl", cfg.LiteLLMDB.BudgetReservationTTL.String(),
 			"enforce_key_rate_limits", cfg.LiteLLMDB.EnforceKeyRateLimits,

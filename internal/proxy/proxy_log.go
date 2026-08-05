@@ -208,6 +208,9 @@ func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
 		teamID = logCtx.TokenInfo.TeamID
 		organizationID = logCtx.TokenInfo.OrganizationID
 	}
+	if teamID == "" && p.credentialNameAsTeamID {
+		teamID = credName
+	}
 
 	// LiteLLM's end_user is the caller-supplied end-user identifier ("user" in
 	// the request body, X-End-User for AIR). The key owner's email must NOT be

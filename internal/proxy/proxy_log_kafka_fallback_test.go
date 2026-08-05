@@ -136,17 +136,21 @@ func TestLogSpendToLiteLLMDB_NormalizesTokenUsageBeforePersisting(t *testing.T) 
 
 func TestLogSpendToLiteLLMDB_PreservesTeamID(t *testing.T) {
 	tests := []struct {
-		name       string
-		teamID     string
-		expectedID string
+		name               string
+		teamID             string
+		actualCredential   string
+		credentialFallback bool
+		expectedID         string
 	}{
 		{name: "no team", expectedID: ""},
-		{name: "token team", teamID: "team-1", expectedID: "team-1"},
+		{name: "credential fallback", credentialFallback: true, expectedID: "openai_primary"},
+		{name: "actual credential fallback", actualCredential: "provider-1", credentialFallback: true, expectedID: "provider-1"},
+		{name: "token team", teamID: "team-1", credentialFallback: true, expectedID: "team-1"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			prx := NewTestProxyBuilder().Build()
+			prx := NewTestProxyBuilder().WithCredentialNameAsTeamID(tt.credentialFallback).Build()
 			dbStub := &stubLiteLLMManager{}
 			prx.LiteLLMDB = dbStub
 			setTestModelPrice(prx, "gpt-4o-mini", &routermodels.ModelPrice{
@@ -155,6 +159,7 @@ func TestLogSpendToLiteLLMDB_PreservesTeamID(t *testing.T) {
 
 			logCtx := testLogCtx(t)
 			logCtx.TokenInfo = &litellmdb.TokenInfo{TeamID: tt.teamID}
+			logCtx.ActualCredentialName = tt.actualCredential
 
 			require.NoError(t, prx.logSpendToLiteLLMDB(logCtx))
 			require.Len(t, dbStub.loggedEntries, 1)

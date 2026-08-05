@@ -859,7 +859,8 @@ type LiteLLMDBConfig struct {
 	// DisableSpendLogsWrite disables writing SpendLogEntry/Daily* aggregates to
 	// Postgres while leaving auth (ValidateToken) untouched. Intended for setups
 	// where Kafka (see KafkaConfig) is the sole spend-analytics write-path.
-	DisableSpendLogsWrite bool `yaml:"disable_spend_logs_write"` // default: false
+	DisableSpendLogsWrite  bool `yaml:"disable_spend_logs_write"`   // default: false
+	CredentialNameAsTeamID bool `yaml:"credential_name_as_team_id"` // default: false
 
 	// EnforceBudgetReservation enables atomic Redis-backed budget pre-reservation
 	// (prevents the overspend race described in todo_auth_billing.md P1.4).
@@ -1084,22 +1085,23 @@ func (m *MonitoringConfig) UnmarshalYAML(value *yaml.Node) error {
 // UnmarshalYAML implements custom unmarshaling for LiteLLMDBConfig with env variable support
 func (l *LiteLLMDBConfig) UnmarshalYAML(value *yaml.Node) error {
 	type tempConfig struct {
-		Enabled               string `yaml:"enabled"`
-		IsRequired            string `yaml:"is_required"`
-		LoadLitellmDBModels   string `yaml:"load_db_models"`
-		LitellmDBSyncInterval string `yaml:"db_model_sync_interval"`
-		DatabaseURL           string `yaml:"database_url"`
-		MaxConns              string `yaml:"max_conns"`
-		MinConns              string `yaml:"min_conns"`
-		HealthCheckInterval   string `yaml:"health_check_interval"`
-		ConnectTimeout        string `yaml:"connect_timeout"`
-		AuthCacheTTL          string `yaml:"auth_cache_ttl"`
-		AuthCacheSize         string `yaml:"auth_cache_size"`
-		LogQueueSize          string `yaml:"log_queue_size"`
-		LogBatchSize          string `yaml:"log_batch_size"`
-		LogFlushInterval      string `yaml:"log_flush_interval"`
-		LogWorkers            string `yaml:"log_workers"`
-		DisableSpendLogsWrite string `yaml:"disable_spend_logs_write"`
+		Enabled                string `yaml:"enabled"`
+		IsRequired             string `yaml:"is_required"`
+		LoadLitellmDBModels    string `yaml:"load_db_models"`
+		LitellmDBSyncInterval  string `yaml:"db_model_sync_interval"`
+		DatabaseURL            string `yaml:"database_url"`
+		MaxConns               string `yaml:"max_conns"`
+		MinConns               string `yaml:"min_conns"`
+		HealthCheckInterval    string `yaml:"health_check_interval"`
+		ConnectTimeout         string `yaml:"connect_timeout"`
+		AuthCacheTTL           string `yaml:"auth_cache_ttl"`
+		AuthCacheSize          string `yaml:"auth_cache_size"`
+		LogQueueSize           string `yaml:"log_queue_size"`
+		LogBatchSize           string `yaml:"log_batch_size"`
+		LogFlushInterval       string `yaml:"log_flush_interval"`
+		LogWorkers             string `yaml:"log_workers"`
+		DisableSpendLogsWrite  string `yaml:"disable_spend_logs_write"`
+		CredentialNameAsTeamID string `yaml:"credential_name_as_team_id"`
 
 		EnforceBudgetReservation         string `yaml:"enforce_budget_reservation"`
 		BudgetReservationTTL             string `yaml:"budget_reservation_ttl"`
@@ -1127,6 +1129,9 @@ func (l *LiteLLMDBConfig) UnmarshalYAML(value *yaml.Node) error {
 		return err
 	}
 	if l.DisableSpendLogsWrite, err = parseField(temp.DisableSpendLogsWrite, false, strconv.ParseBool, "litellm_db.disable_spend_logs_write"); err != nil {
+		return err
+	}
+	if l.CredentialNameAsTeamID, err = parseField(temp.CredentialNameAsTeamID, false, strconv.ParseBool, "litellm_db.credential_name_as_team_id"); err != nil {
 		return err
 	}
 	if l.EnforceBudgetReservation, err = parseField(temp.EnforceBudgetReservation, false, strconv.ParseBool, "litellm_db.enforce_budget_reservation"); err != nil {
@@ -1452,21 +1457,22 @@ func defaultRedisConfig() RedisConfig {
 
 func defaultLiteLLMDBConfig() LiteLLMDBConfig {
 	return LiteLLMDBConfig{
-		Enabled:               false,
-		IsRequired:            false,
-		LoadLitellmDBModels:   false,
-		LitellmDBSyncInterval: 1 * time.Minute,
-		DatabaseURL:           "",
-		MaxConns:              25,
-		MinConns:              5,
-		HealthCheckInterval:   10 * time.Second,
-		ConnectTimeout:        5 * time.Second,
-		AuthCacheTTL:          5 * time.Second,
-		AuthCacheSize:         10000,
-		LogQueueSize:          5000,
-		LogBatchSize:          100,
-		LogFlushInterval:      5 * time.Second,
-		LogWorkers:            4,
+		Enabled:                false,
+		IsRequired:             false,
+		LoadLitellmDBModels:    false,
+		LitellmDBSyncInterval:  1 * time.Minute,
+		DatabaseURL:            "",
+		MaxConns:               25,
+		MinConns:               5,
+		HealthCheckInterval:    10 * time.Second,
+		ConnectTimeout:         5 * time.Second,
+		AuthCacheTTL:           5 * time.Second,
+		AuthCacheSize:          10000,
+		LogQueueSize:           5000,
+		LogBatchSize:           100,
+		LogFlushInterval:       5 * time.Second,
+		LogWorkers:             4,
+		CredentialNameAsTeamID: false,
 
 		EnforceBudgetReservation:         false,
 		BudgetReservationTTL:             15 * time.Minute,

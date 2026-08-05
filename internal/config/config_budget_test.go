@@ -16,6 +16,13 @@ func TestLiteLLMDBBudgetEnforcementIsOptIn(t *testing.T) {
 	assert.False(t, cfg.EnforceKeyRateLimits)
 	assert.Equal(t, 15*time.Minute, cfg.BudgetReservationTTL)
 	assert.Equal(t, 1000, cfg.DefaultEstimatedCompletionTokens)
+	assert.False(t, cfg.CredentialNameAsTeamID)
+}
+
+func TestLiteLLMDBCredentialNameAsTeamIDParsesExplicitSetting(t *testing.T) {
+	var cfg LiteLLMDBConfig
+	require.NoError(t, yaml.Unmarshal([]byte("credential_name_as_team_id: true\n"), &cfg))
+	assert.True(t, cfg.CredentialNameAsTeamID)
 }
 
 func TestLiteLLMDBBudgetEnforcementParsesExplicitSettings(t *testing.T) {

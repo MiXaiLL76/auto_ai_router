@@ -248,6 +248,7 @@ func main() {
 		TiktokenEnabled:            cfg.Server.TiktokenEnabled,
 		StrictAllTeamModelsACL:     cfg.Server.StrictAllTeamModelsACL,
 		ResponseHeaderMode:         cfg.Server.ResponseHeaders.Mode,
+		CredentialNameAsTeamID:     cfg.LiteLLMDB.CredentialNameAsTeamID,
 
 		BudgetReserver:                   budgetReserver,
 		KeyRateLimiter:                   keyRateLimiter,

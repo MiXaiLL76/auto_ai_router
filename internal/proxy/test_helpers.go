@@ -108,6 +108,7 @@ type TestProxyConfig struct {
 	DrainUpstreamOnAbort   bool
 	TiktokenEnabled        bool
 	ResponseHeaderMode     config.ResponseHeaderMode
+	CredentialNameAsTeamID bool
 }
 
 // NewTestProxyBuilder creates a builder with default configuration.
@@ -269,6 +270,11 @@ func (b *TestProxyBuilder) WithResponseHeaderMode(mode config.ResponseHeaderMode
 	return b
 }
 
+func (b *TestProxyBuilder) WithCredentialNameAsTeamID(enabled bool) *TestProxyBuilder {
+	b.config.CredentialNameAsTeamID = enabled
+	return b
+}
+
 // Build creates and returns a Proxy instance with the configured settings.
 func (b *TestProxyBuilder) Build() *Proxy {
 	if b.config.RateLimiter == nil {
@@ -301,6 +307,7 @@ func (b *TestProxyBuilder) Build() *Proxy {
 		DrainUpstreamOnAbort:   b.config.DrainUpstreamOnAbort,
 		TiktokenEnabled:        b.config.TiktokenEnabled,
 		ResponseHeaderMode:     b.config.ResponseHeaderMode,
+		CredentialNameAsTeamID: b.config.CredentialNameAsTeamID,
 	})
 }
 
