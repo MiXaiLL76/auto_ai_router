@@ -1544,6 +1544,11 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 				targetURL += "?" + r.URL.RawQuery
 			}
 		}
+		var anthropicBetas []string
+		switch cred.Type {
+		case config.ProviderTypeAnthropic, config.ProviderTypeCometAPI, config.ProviderTypeProMan:
+			requestBody, anthropicBetas = anthropicconv.ExtractBetaHeader(requestBody)
+		}
 
 		// For Vertex AI, obtain OAuth2 token
 		var vertexToken string
@@ -1582,6 +1587,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 
 		// Copy headers and set auth
 		copyHeadersSkipAuth(proxyReq, r)
+		mergeAnthropicBetaHeader(proxyReq.Header, anthropicBetas)
 		// For passthrough providers (OpenAI/Proxy) with multipart/form-data requests
 		// (e.g. /v1/images/edits), preserve the original Content-Type so the boundary
 		// parameter is forwarded intact. All other paths (Vertex, Anthropic, Bedrock,

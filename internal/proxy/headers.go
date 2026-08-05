@@ -151,6 +151,33 @@ func copyHeadersSkipAuth(dst *http.Request, src *http.Request) {
 	}
 }
 
+func mergeAnthropicBetaHeader(header http.Header, betas []string) {
+	if len(betas) == 0 {
+		return
+	}
+	values := make([]string, 0, len(header.Values("anthropic-beta"))+len(betas))
+	values = append(values, header.Values("anthropic-beta")...)
+	values = append(values, betas...)
+	seen := make(map[string]struct{}, len(values))
+	merged := make([]string, 0, len(values))
+	for _, value := range values {
+		for beta := range strings.SplitSeq(value, ",") {
+			beta = strings.TrimSpace(beta)
+			if beta == "" {
+				continue
+			}
+			if _, ok := seen[beta]; ok {
+				continue
+			}
+			seen[beta] = struct{}{}
+			merged = append(merged, beta)
+		}
+	}
+	if len(merged) > 0 {
+		header.Set("anthropic-beta", strings.Join(merged, ","))
+	}
+}
+
 // copyResponseHeaders copies response headers to the response writer,
 // skipping hop-by-hop headers and transformation-related headers.
 // Note: Content-Encoding is always skipped because Go's http.Client automatically
