@@ -116,9 +116,9 @@ func TestProxyRequest_AIRChain_StripsAnthropicBetaFromForwardedBody(t *testing.T
 // as a top-level BODY field (rather than the "anthropic-beta" header). Unlike the
 // proxy-like chain case, this path is NOT a raw passthrough: prepareRequestForCredential
 // converts /v1/messages -> chat -> Anthropic (MessagesToChat + OpenAIToAnthropic)
-// for any non-proxy-like credential. This test checks what that round-trip does
-// with the field: does it survive (in body or header), or does it get silently
-// dropped by the intermediate OpenAI-chat representation?
+// for any non-proxy-like credential. MessagesToChat now folds anthropic_beta into
+// extra_body so OpenAIToAnthropic can pick it back up, instead of the field being
+// silently dropped by the intermediate OpenAI-chat representation.
 func TestProxyRequest_DirectAnthropic_MessagesBodyBetaField(t *testing.T) {
 	type capturedRequest struct {
 		header string
@@ -157,15 +157,10 @@ func TestProxyRequest_DirectAnthropic_MessagesBodyBetaField(t *testing.T) {
 	var body map[string]any
 	require.NoError(t, json.Unmarshal(outbound.body, &body))
 
-	// Current (verified) behavior: the /v1/messages -> chat -> Anthropic round-trip
-	// (MessagesToChat copies unknown top-level keys as-is; OpenAIToAnthropic only
-	// reads betas back out of a nested "extra_body" object) silently drops a
-	// body-level "anthropic_beta" field entirely — it reaches neither the outbound
-	// header nor the outbound body. This differs from the proxy/air chain case
-	// (see TestProxyRequest_AIRChain_StripsAnthropicBetaFromForwardedBody), where
-	// the same field survives unchanged in the body and can trigger a strict
-	// upstream's "anthropic_beta: Extra inputs are not permitted" rejection.
-	// So: no chain -> feature silently lost, not an upstream error.
-	assert.Empty(t, outbound.header)
+	// The body-level anthropic_beta field must survive the /v1/messages -> chat
+	// -> Anthropic round-trip as the anthropic-beta header, same contract as the
+	// proxy/air chain case (TestProxyRequest_AIRChain_StripsAnthropicBetaFromForwardedBody)
+	// and the extra_body-on-chat-completions case (TestProxyRequest_SendsAnthropicBetaAsHeader).
+	assert.Equal(t, "prompt-caching-2024-07-31", outbound.header)
 	assert.NotContains(t, body, "anthropic_beta")
 }

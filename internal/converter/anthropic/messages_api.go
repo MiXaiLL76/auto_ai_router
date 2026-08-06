@@ -54,7 +54,7 @@ func MessagesToChat(body []byte) ([]byte, MessagesAdapterMetadata, error) {
 	chat := make(map[string]interface{}, len(request)+1)
 	for key, value := range request {
 		switch key {
-		case "messages", "system", "metadata", "stop_sequences", "tools", "tool_choice", "thinking", "output_format", "output_config":
+		case "messages", "system", "metadata", "stop_sequences", "tools", "tool_choice", "thinking", "output_format", "output_config", "anthropic_beta":
 		default:
 			chat[key] = value
 		}
@@ -96,11 +96,54 @@ func MessagesToChat(body []byte) ([]byte, MessagesAdapterMetadata, error) {
 		chat["stream_options"] = map[string]interface{}{"include_usage": true}
 	}
 
+	// anthropic_beta has no Chat Completions equivalent field; fold it into
+	// extra_body so the reverse conversion (OpenAIToAnthropic) can pick it back
+	// up via req.ExtraBody["anthropic_beta"] instead of silently dropping it.
+	if betas := extractBetaStrings(request["anthropic_beta"]); len(betas) > 0 {
+		extraBody, _ := chat["extra_body"].(map[string]interface{})
+		if extraBody == nil {
+			extraBody = map[string]interface{}{}
+		}
+		if existing, ok := extraBody["anthropic_beta"]; ok {
+			betas = append(extractBetaStrings(existing), betas...)
+		}
+		extraBody["anthropic_beta"] = betas
+		chat["extra_body"] = extraBody
+	}
+
 	converted, err := json.Marshal(chat)
 	if err != nil {
 		return nil, MessagesAdapterMetadata{}, fmt.Errorf("failed to encode Chat Completions request: %w", err)
 	}
 	return converted, MessagesAdapterMetadata{ToolNames: toolNames}, nil
+}
+
+// extractBetaStrings normalizes an anthropic_beta value (string, []interface{}
+// of strings, or already-decoded []string) into a clean []string, trimming
+// whitespace and dropping empties. Unrecognized shapes yield nil.
+func extractBetaStrings(raw interface{}) []string {
+	var betas []string
+	switch v := raw.(type) {
+	case string:
+		if s := strings.TrimSpace(v); s != "" {
+			betas = append(betas, s)
+		}
+	case []interface{}:
+		for _, b := range v {
+			if s, ok := b.(string); ok {
+				if s = strings.TrimSpace(s); s != "" {
+					betas = append(betas, s)
+				}
+			}
+		}
+	case []string:
+		for _, s := range v {
+			if s = strings.TrimSpace(s); s != "" {
+				betas = append(betas, s)
+			}
+		}
+	}
+	return betas
 }
 
 func messagesToChatMessages(rawMessages []interface{}) ([]interface{}, error) {
