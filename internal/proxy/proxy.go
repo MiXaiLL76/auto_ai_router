@@ -629,19 +629,6 @@ func (p *Proxy) executeProxyRequest(
 			cancelUpstream()
 		}
 	}()
-	// Proxy-like credentials forward /v1/messages bodies as-is (see
-	// prepareRequestForCredential's IsProxyLike passthrough) without going
-	// through the anthropic converter's request path, so a client-set
-	// top-level "anthropic_beta" body field would otherwise reach the
-	// downstream peer unchanged. Move it to the anthropic-beta header here —
-	// harmless if the peer relays it onward again, but required if this peer
-	// (or one further down the chain) forwards straight to a server with
-	// strict body validation, including the real Anthropic API.
-	var anthropicBetas []string
-	if r.URL.Path == "/v1/messages" {
-		body, anthropicBetas = anthropicconv.ExtractBetaHeader(body)
-	}
-
 	proxyReq, err := http.NewRequestWithContext(upstreamCtx, r.Method, targetURL, bytes.NewReader(body))
 	if err != nil {
 		p.logger.ErrorContext(r.Context(), "Failed to create proxy request", "error", err, "url", targetURL)
@@ -650,7 +637,7 @@ func (p *Proxy) executeProxyRequest(
 
 	// Copy headers (skip hop-by-hop headers)
 	copyRequestHeaders(proxyReq, r, cred.APIKey)
-	mergeAnthropicBetaHeader(proxyReq.Header, anthropicBetas)
+	proxyReq.Header.Del("anthropic-beta")
 	// Mark request as coming from an internal proxy client so the upstream router
 	// knows to include the X-Credential-Name response header.
 	proxyReq.Header.Set(HeaderAIRProxyClient, "1")
@@ -1562,8 +1549,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		var anthropicBetas []string
-		switch cred.Type {
-		case config.ProviderTypeAnthropic, config.ProviderTypeCometAPI, config.ProviderTypeProMan:
+		if cred.Type == config.ProviderTypeCometAPI {
 			requestBody, anthropicBetas = anthropicconv.ExtractBetaHeader(requestBody)
 		}
 
@@ -1604,7 +1590,11 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 
 		// Copy headers and set auth
 		copyHeadersSkipAuth(proxyReq, r)
-		mergeAnthropicBetaHeader(proxyReq.Header, anthropicBetas)
+		if cred.Type == config.ProviderTypeCometAPI {
+			mergeAnthropicBetaHeader(proxyReq.Header, anthropicBetas)
+		} else {
+			proxyReq.Header.Del("anthropic-beta")
+		}
 		// For passthrough providers (OpenAI/Proxy) with multipart/form-data requests
 		// (e.g. /v1/images/edits), preserve the original Content-Type so the boundary
 		// parameter is forwarded intact. All other paths (Vertex, Anthropic, Bedrock,
