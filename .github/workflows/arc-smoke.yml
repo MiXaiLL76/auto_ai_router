@@ -1,0 +1,28 @@
+name: ARC smoke test
+
+# Проверка, что self-hosted раннеры на ARC живы: запускается вручную и должен
+# отработать на поде в namespace arc-runners, а не на раннере GitHub.
+# Если job висит в "Waiting for a runner" — раннеры не поднимаются, смотреть
+# логи listener'а: kubectl -n arc-systems logs -l app.kubernetes.io/component=runner-scale-set-listener
+on:
+  workflow_dispatch:
+
+jobs:
+  smoke:
+    name: Run on self-hosted runner
+    runs-on: arc-runner-set
+
+    steps:
+      - name: Where am I
+        run: |
+          echo "runner name : ${RUNNER_NAME}"
+          echo "hostname    : $(hostname)"
+          echo "user        : $(whoami)"
+          uname -a
+          cat /etc/os-release | head -2
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Network to GitHub API
+        run: curl -sS -o /dev/null -w 'api.github.com -> %{http_code}\n' https://api.github.com
