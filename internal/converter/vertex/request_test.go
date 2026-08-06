@@ -486,6 +486,74 @@ func TestOpenAIToVertex_DeveloperRole(t *testing.T) {
 	}
 }
 
+// TestOpenAIToVertex_EmptySystemMessage verifies that an empty leading system
+// message is dropped instead of producing a SystemInstruction with an empty
+// Part (which Vertex/Gemini rejects with 400 INVALID_ARGUMENT).
+func TestOpenAIToVertex_EmptySystemMessage(t *testing.T) {
+	req := openai.OpenAIRequest{
+		Model: "gemini-2.5-flash",
+		Messages: []openai.OpenAIMessage{
+			{Role: "system", Content: ""},
+			{Role: "user", Content: "Hi"},
+		},
+	}
+
+	body, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+
+	resultBytes, err := OpenAIToVertex(body, false, false, "gemini-2.5-flash", "application/json")
+	if err != nil {
+		t.Fatalf("OpenAIToVertex error: %v", err)
+	}
+
+	var vertexReq VertexRequest
+	if err := json.Unmarshal(resultBytes, &vertexReq); err != nil {
+		t.Fatalf("unmarshal vertex request: %v", err)
+	}
+
+	if vertexReq.SystemInstruction != nil {
+		t.Fatalf("expected nil SystemInstruction for empty system content, got %+v", vertexReq.SystemInstruction)
+	}
+}
+
+// TestOpenAIToVertex_EmptySystemMessage_FollowedByNonEmpty verifies that an
+// empty leading system message doesn't poison a later non-empty one.
+func TestOpenAIToVertex_EmptySystemMessage_FollowedByNonEmpty(t *testing.T) {
+	req := openai.OpenAIRequest{
+		Model: "gemini-2.5-flash",
+		Messages: []openai.OpenAIMessage{
+			{Role: "system", Content: ""},
+			{Role: "system", Content: "Be concise."},
+			{Role: "user", Content: "Hi"},
+		},
+	}
+
+	body, err := json.Marshal(req)
+	if err != nil {
+		t.Fatalf("marshal request: %v", err)
+	}
+
+	resultBytes, err := OpenAIToVertex(body, false, false, "gemini-2.5-flash", "application/json")
+	if err != nil {
+		t.Fatalf("OpenAIToVertex error: %v", err)
+	}
+
+	var vertexReq VertexRequest
+	if err := json.Unmarshal(resultBytes, &vertexReq); err != nil {
+		t.Fatalf("unmarshal vertex request: %v", err)
+	}
+
+	if vertexReq.SystemInstruction == nil {
+		t.Fatalf("expected SystemInstruction, got nil")
+		return
+	}
+	if vertexReq.SystemInstruction.Parts[0].Text != "Be concise." {
+		t.Fatalf("unexpected SystemInstruction text: %q", vertexReq.SystemInstruction.Parts[0].Text)
+	}
+}
+
 // TestOpenAIToVertex_ToolRoleMessage_JSONContent verifies that JSON content
 // in a tool result is parsed as a map, not wrapped in {"output": ...}.
 func TestOpenAIToVertex_ToolRoleMessage_JSONContent(t *testing.T) {
