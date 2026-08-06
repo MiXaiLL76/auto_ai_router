@@ -21,6 +21,7 @@ import (
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/converter"
+	"github.com/mixaill76/auto_ai_router/internal/converter/openai"
 )
 
 type usageTotalTokens struct {
@@ -498,6 +499,81 @@ func sanitizeMultipartRequestBody(body []byte, params map[string]string) (saniti
 	}
 	result.Body = rewritten.Bytes()
 	return result, nil
+}
+
+func replaceRequestModel(body []byte, contentType, modelID string) ([]byte, error) {
+	mediaType, params, err := mime.ParseMediaType(contentType)
+	if err == nil && strings.EqualFold(mediaType, "multipart/form-data") {
+		return replaceMultipartRequestModel(body, params["boundary"], modelID)
+	}
+
+	var request map[string]goccyjson.RawMessage
+	if err := goccyjson.Unmarshal(body, &request); err != nil {
+		return body, nil
+	}
+	currentModel, ok := rawJSONString(request["model"])
+	if !ok || currentModel == modelID {
+		return body, nil
+	}
+	return openai.ReplaceModelInBody(body, currentModel, modelID), nil
+}
+
+func replaceMultipartRequestModel(body []byte, boundary, modelID string) ([]byte, error) {
+	if boundary == "" {
+		return nil, invalidMultipartError(errors.New("missing boundary"))
+	}
+
+	reader := multipart.NewReader(bytes.NewReader(body), boundary)
+	parts := make([]requestMultipartPart, 0, 8)
+	changed := false
+	for {
+		part, err := reader.NextPart()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, invalidMultipartError(err)
+		}
+
+		name := part.FormName()
+		filename := part.FileName()
+		header := cloneMIMEHeader(part.Header)
+		data, readErr := io.ReadAll(part)
+		closeErr := part.Close()
+		if readErr != nil {
+			return nil, invalidMultipartError(readErr)
+		}
+		if closeErr != nil {
+			return nil, invalidMultipartError(closeErr)
+		}
+		if name == "model" && filename == "" && strings.TrimSpace(string(data)) != modelID {
+			data = []byte(modelID)
+			changed = true
+		}
+		parts = append(parts, requestMultipartPart{header: header, data: data})
+	}
+	if !changed {
+		return body, nil
+	}
+
+	var rewritten bytes.Buffer
+	writer := multipart.NewWriter(&rewritten)
+	if err := writer.SetBoundary(boundary); err != nil {
+		return nil, invalidMultipartError(err)
+	}
+	for _, part := range parts {
+		dst, err := writer.CreatePart(part.header)
+		if err != nil {
+			return nil, invalidMultipartError(err)
+		}
+		if _, err := dst.Write(part.data); err != nil {
+			return nil, invalidMultipartError(err)
+		}
+	}
+	if err := writer.Close(); err != nil {
+		return nil, invalidMultipartError(err)
+	}
+	return rewritten.Bytes(), nil
 }
 
 func hasMultipartClosingBoundary(body []byte, boundary string) bool {
