@@ -79,6 +79,13 @@ func (p *Proxy) orchestrateRequest(
 		return nil, false
 	}
 
+	routingExclusions := p.reasoningOnlyExclusions(body)
+	triedCreds := GetTried(r.Context())
+	for name := range routingExclusions {
+		triedCreds[name] = true
+	}
+	r = r.WithContext(SetTried(r.Context(), triedCreds))
+
 	// proxyBody: body with the original alias restored.
 	// Proxy credentials handle their own model routing, so they must receive the
 	// alias ("anthropic/claude-sonnet-4.6"), not the provider-specific real name
@@ -119,7 +126,7 @@ func (p *Proxy) orchestrateRequest(
 		}
 	}
 
-	cred, ok := p.selectCredentialForModel(w, modelID, logCtx.SessionID, preferredCredentialName, logCtx)
+	cred, ok := p.selectCredentialForModel(w, modelID, logCtx.SessionID, preferredCredentialName, routingExclusions, logCtx)
 	if !ok {
 		return nil, false
 	}
@@ -246,6 +253,13 @@ func (p *Proxy) prepareRequestForCredential(
 	body := baseBody
 	proxyBody := baseProxyBody
 	realModelID := baseRealModelID
+	if cred.Type == config.ProviderTypeAIR {
+		var err error
+		proxyBody, err = replaceRequestModel(proxyBody, r.Header.Get("Content-Type"), modelID)
+		if err != nil {
+			return credentialPreparedRequest{}, err
+		}
+	}
 	if !cred.IsProxyLike() && p.modelManager != nil {
 		if credRealName, ok := p.modelManager.GetRealModelNameForCredential(modelID, cred.Name); ok && credRealName != realModelID {
 			p.logger.DebugContext(r.Context(), "Re-resolved real model name for credential",
@@ -686,6 +700,7 @@ func (p *Proxy) selectCredentialForModel(
 	modelID string,
 	sessionID string,
 	preferredCredentialName string,
+	exclude map[string]bool,
 	logCtx *RequestLogContext,
 ) (*config.CredentialConfig, bool) {
 	if p.modelManager != nil && p.modelManager.IsEnabled() && len(p.modelManager.GetCredentialsForModel(modelID)) == 0 {
@@ -707,7 +722,7 @@ func (p *Proxy) selectCredentialForModel(
 		return nil, false
 	}
 
-	if preferredCredentialName != "" {
+	if preferredCredentialName != "" && !exclude[preferredCredentialName] {
 		cred, err := p.balancer.NextSpecificScoped(preferredCredentialName, modelID, logCtx.Scope)
 		if err == nil {
 			p.logger.DebugContext(logCtx.Context(), "Responses API sticky routing: using credential from previous_response_id",
@@ -725,7 +740,7 @@ func (p *Proxy) selectCredentialForModel(
 	}
 
 	if sessionID != "" && p.sessionStore != nil {
-		if credName, ok := p.sessionStore.Get(sessionID, modelID); ok {
+		if credName, ok := p.sessionStore.Get(sessionID, modelID); ok && !exclude[credName] {
 			cred, err := p.balancer.NextSpecificScoped(credName, modelID, logCtx.Scope)
 			if err == nil {
 				p.logger.DebugContext(logCtx.Context(), "Session-sticky routing: using cached credential",
@@ -745,13 +760,13 @@ func (p *Proxy) selectCredentialForModel(
 		}
 	}
 
-	cred, err := p.balancer.NextForModelScoped(modelID, logCtx.Scope)
+	cred, err := p.balancer.NextForModelExcludingScoped(modelID, exclude, logCtx.Scope)
 	if err == nil {
 		return cred, true
 	}
 
 	fallbackErr := error(nil)
-	cred, fallbackErr = p.balancer.NextFallbackForModelScoped(modelID, logCtx.Scope)
+	cred, fallbackErr = p.balancer.NextFallbackForModelExcludingScoped(modelID, exclude, logCtx.Scope)
 	if fallbackErr == nil {
 		return cred, true
 	}

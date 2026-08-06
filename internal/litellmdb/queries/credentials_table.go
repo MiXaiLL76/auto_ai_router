@@ -22,6 +22,7 @@ type CredentialLiteLLMInfo struct {
 	AirScopes          []string `json:"air_scopes,omitempty"`
 	AirDeniedScopes    []string `json:"air_denied_scopes,omitempty"`
 	AirForbiddenScopes []string `json:"air_forbidden_scopes,omitempty"`
+	AirReasoningOnly   bool     `json:"air_reasoning_only,omitempty"`
 }
 
 type CredentialTable struct {

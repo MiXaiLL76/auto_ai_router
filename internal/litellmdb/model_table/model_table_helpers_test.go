@@ -160,6 +160,21 @@ func TestConvertCredentialTableToConfig_ProviderTypes(t *testing.T) {
 	}
 }
 
+func TestConvertCredentialTableToConfig_ReasoningOnly(t *testing.T) {
+	name := "anthropic-reasoning"
+	provider := "anthropic"
+
+	cfg := convertCredentialTableToConfig(queries.CredentialTable{
+		CredentialName: &name,
+		CredentialInfo: &queries.CredentialLiteLLMInfo{
+			CustomLLMProvider: &provider,
+			AirReasoningOnly:  true,
+		},
+	})
+
+	assert.True(t, cfg.ReasoningOnly)
+}
+
 // Helper to create string pointer
 func ptr(s string) *string {
 	return &s

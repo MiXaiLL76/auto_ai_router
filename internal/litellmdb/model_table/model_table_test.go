@@ -160,8 +160,14 @@ func TestConvertPricingToModelPrice(t *testing.T) {
 func TestConvertPricingToModelPrice_AllFields(t *testing.T) {
 	input := 0.01
 	output := 0.02
+	inputAbove32k := 0.021
+	outputAbove32k := 0.022
+	inputAbove128k := 0.023
+	outputAbove128k := 0.024
 	inputAbove200k := 0.03
 	outputAbove200k := 0.04
+	inputAbove256k := 0.041
+	outputAbove256k := 0.042
 	inputAbove272k := 0.045
 	outputAbove272k := 0.047
 	inputAudio := 0.05
@@ -169,8 +175,14 @@ func TestConvertPricingToModelPrice_AllFields(t *testing.T) {
 	outputReasoning := 0.07
 	cacheRead := 0.08
 	cacheCreation := 0.085
+	cacheReadAbove32k := 0.0811
+	cacheCreationAbove32k := 0.0812
+	cacheReadAbove128k := 0.0821
+	cacheCreationAbove128k := 0.0822
 	cacheReadAbove200k := 0.084
 	cacheCreationAbove200k := 0.0845
+	cacheReadAbove256k := 0.0846
+	cacheCreationAbove256k := 0.0847
 	cacheCreationAbove1hr := 0.0855
 	cacheCreationAbove1hrAbove200k := 0.0857
 	cacheReadAbove272k := 0.086
@@ -188,8 +200,14 @@ func TestConvertPricingToModelPrice_AllFields(t *testing.T) {
 	price := convertPricingToModelPrice(&queries.CustomPricingLiteLLMParams{
 		InputCostPerToken:                                  &input,
 		OutputCostPerToken:                                 &output,
+		InputCostPerTokenAbove32kTokens:                    &inputAbove32k,
+		OutputCostPerTokenAbove32kTokens:                   &outputAbove32k,
+		InputCostPerTokenAbove128kTokens:                   &inputAbove128k,
+		OutputCostPerTokenAbove128kTokens:                  &outputAbove128k,
 		InputCostPerTokenAbove200kTokens:                   &inputAbove200k,
 		OutputCostPerTokenAbove200kTokens:                  &outputAbove200k,
+		InputCostPerTokenAbove256kTokens:                   &inputAbove256k,
+		OutputCostPerTokenAbove256kTokens:                  &outputAbove256k,
 		InputCostPerTokenAbove272kTokens:                   &inputAbove272k,
 		OutputCostPerTokenAbove272kTokens:                  &outputAbove272k,
 		InputCostPerAudioToken:                             &inputAudio,
@@ -197,8 +215,14 @@ func TestConvertPricingToModelPrice_AllFields(t *testing.T) {
 		OutputCostPerReasoningToken:                        &outputReasoning,
 		CacheReadInputTokenCost:                            &cacheRead,
 		CacheCreationInputTokenCost:                        &cacheCreation,
+		CacheReadInputTokenCostAbove32kTokens:              &cacheReadAbove32k,
+		CacheCreationInputTokenCostAbove32kTokens:          &cacheCreationAbove32k,
+		CacheReadInputTokenCostAbove128kTokens:             &cacheReadAbove128k,
+		CacheCreationInputTokenCostAbove128kTokens:         &cacheCreationAbove128k,
 		CacheReadInputTokenCostAbove200kTokens:             &cacheReadAbove200k,
 		CacheCreationInputTokenCostAbove200kTokens:         &cacheCreationAbove200k,
+		CacheReadInputTokenCostAbove256kTokens:             &cacheReadAbove256k,
+		CacheCreationInputTokenCostAbove256kTokens:         &cacheCreationAbove256k,
 		CacheCreationInputTokenCostAbove1hr:                &cacheCreationAbove1hr,
 		CacheCreationInputTokenCostAbove1hrAbove200kTokens: &cacheCreationAbove1hrAbove200k,
 		CacheReadInputTokenCostAbove272kTokens:             &cacheReadAbove272k,
@@ -213,8 +237,14 @@ func TestConvertPricingToModelPrice_AllFields(t *testing.T) {
 	assert.NotNil(t, price)
 	assert.Equal(t, input, price.InputCostPerToken)
 	assert.Equal(t, output, price.OutputCostPerToken)
+	assert.Equal(t, inputAbove32k, price.InputCostPerTokenAbove32k)
+	assert.Equal(t, outputAbove32k, price.OutputCostPerTokenAbove32k)
+	assert.Equal(t, inputAbove128k, price.InputCostPerTokenAbove128k)
+	assert.Equal(t, outputAbove128k, price.OutputCostPerTokenAbove128k)
 	assert.Equal(t, inputAbove200k, price.InputCostPerTokenAbove200k)
 	assert.Equal(t, outputAbove200k, price.OutputCostPerTokenAbove200k)
+	assert.Equal(t, inputAbove256k, price.InputCostPerTokenAbove256k)
+	assert.Equal(t, outputAbove256k, price.OutputCostPerTokenAbove256k)
 	assert.Equal(t, inputAbove272k, price.InputCostPerTokenAbove272k)
 	assert.Equal(t, outputAbove272k, price.OutputCostPerTokenAbove272k)
 	assert.Equal(t, inputAudio, price.InputCostPerAudioToken)
@@ -222,8 +252,14 @@ func TestConvertPricingToModelPrice_AllFields(t *testing.T) {
 	assert.Equal(t, outputReasoning, price.OutputCostPerReasoningToken)
 	assert.Equal(t, cacheRead, price.InputCostPerCachedToken)
 	assert.Equal(t, cacheCreation, price.CacheCreationInputTokenCost)
+	assert.Equal(t, cacheReadAbove32k, price.CacheReadInputTokenCostAbove32k)
+	assert.Equal(t, cacheCreationAbove32k, price.CacheCreationInputTokenCostAbove32k)
+	assert.Equal(t, cacheReadAbove128k, price.CacheReadInputTokenCostAbove128k)
+	assert.Equal(t, cacheCreationAbove128k, price.CacheCreationInputTokenCostAbove128k)
 	assert.Equal(t, cacheReadAbove200k, price.CacheReadInputTokenCostAbove200k)
 	assert.Equal(t, cacheCreationAbove200k, price.CacheCreationInputTokenCostAbove200k)
+	assert.Equal(t, cacheReadAbove256k, price.CacheReadInputTokenCostAbove256k)
+	assert.Equal(t, cacheCreationAbove256k, price.CacheCreationInputTokenCostAbove256k)
 	assert.Equal(t, cacheCreationAbove1hr, price.CacheCreationInputTokenCostAbove1hr)
 	assert.Equal(t, cacheCreationAbove1hrAbove200k, price.CacheCreationInputTokenCostAbove1hrAbove200k)
 	assert.Equal(t, cacheReadAbove272k, price.CacheReadInputTokenCostAbove272k)

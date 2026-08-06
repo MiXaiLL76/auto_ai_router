@@ -139,7 +139,7 @@ func (p *Proxy) TryFallbackProxy(
 		if logCtx != nil {
 			visibility = logCtx.Scope
 		}
-		fallbackCred, err := p.balancer.NextFallbackProxyForModelScoped(modelID, visibility)
+		fallbackCred, err := p.balancer.NextFallbackProxyForModelExcludingScoped(modelID, triedCreds, visibility)
 		if err != nil {
 			if attempt == 0 {
 				p.logger.DebugContext(r.Context(), "No fallback proxy available for retry",

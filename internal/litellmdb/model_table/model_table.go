@@ -347,6 +347,7 @@ func convertCredentialTableToConfig(cred queries.CredentialTable) config.Credent
 	if cred.CredentialInfo != nil {
 		cfg.Scopes = scope.NormalizeList(cred.CredentialInfo.AirScopes)
 		cfg.DeniedScopes = scope.NormalizeList(append(cred.CredentialInfo.AirDeniedScopes, cred.CredentialInfo.AirForbiddenScopes...))
+		cfg.ReasoningOnly = cred.CredentialInfo.AirReasoningOnly
 	}
 
 	fillCredentialFromParams(&cfg, cred.CredentialParams)
@@ -404,11 +405,29 @@ func convertPricingToModelPrice(p *queries.CustomPricingLiteLLMParams) *manager.
 	if p.OutputCostPerToken != nil {
 		price.OutputCostPerToken = *p.OutputCostPerToken
 	}
+	if p.InputCostPerTokenAbove32kTokens != nil {
+		price.InputCostPerTokenAbove32k = *p.InputCostPerTokenAbove32kTokens
+	}
+	if p.OutputCostPerTokenAbove32kTokens != nil {
+		price.OutputCostPerTokenAbove32k = *p.OutputCostPerTokenAbove32kTokens
+	}
+	if p.InputCostPerTokenAbove128kTokens != nil {
+		price.InputCostPerTokenAbove128k = *p.InputCostPerTokenAbove128kTokens
+	}
+	if p.OutputCostPerTokenAbove128kTokens != nil {
+		price.OutputCostPerTokenAbove128k = *p.OutputCostPerTokenAbove128kTokens
+	}
 	if p.InputCostPerTokenAbove200kTokens != nil {
 		price.InputCostPerTokenAbove200k = *p.InputCostPerTokenAbove200kTokens
 	}
 	if p.OutputCostPerTokenAbove200kTokens != nil {
 		price.OutputCostPerTokenAbove200k = *p.OutputCostPerTokenAbove200kTokens
+	}
+	if p.InputCostPerTokenAbove256kTokens != nil {
+		price.InputCostPerTokenAbove256k = *p.InputCostPerTokenAbove256kTokens
+	}
+	if p.OutputCostPerTokenAbove256kTokens != nil {
+		price.OutputCostPerTokenAbove256k = *p.OutputCostPerTokenAbove256kTokens
 	}
 	if p.InputCostPerTokenAbove272kTokens != nil {
 		price.InputCostPerTokenAbove272k = *p.InputCostPerTokenAbove272kTokens
@@ -431,11 +450,29 @@ func convertPricingToModelPrice(p *queries.CustomPricingLiteLLMParams) *manager.
 	if p.CacheCreationInputTokenCost != nil {
 		price.CacheCreationInputTokenCost = *p.CacheCreationInputTokenCost
 	}
+	if p.CacheReadInputTokenCostAbove32kTokens != nil {
+		price.CacheReadInputTokenCostAbove32k = *p.CacheReadInputTokenCostAbove32kTokens
+	}
+	if p.CacheCreationInputTokenCostAbove32kTokens != nil {
+		price.CacheCreationInputTokenCostAbove32k = *p.CacheCreationInputTokenCostAbove32kTokens
+	}
+	if p.CacheReadInputTokenCostAbove128kTokens != nil {
+		price.CacheReadInputTokenCostAbove128k = *p.CacheReadInputTokenCostAbove128kTokens
+	}
+	if p.CacheCreationInputTokenCostAbove128kTokens != nil {
+		price.CacheCreationInputTokenCostAbove128k = *p.CacheCreationInputTokenCostAbove128kTokens
+	}
 	if p.CacheReadInputTokenCostAbove200kTokens != nil {
 		price.CacheReadInputTokenCostAbove200k = *p.CacheReadInputTokenCostAbove200kTokens
 	}
 	if p.CacheCreationInputTokenCostAbove200kTokens != nil {
 		price.CacheCreationInputTokenCostAbove200k = *p.CacheCreationInputTokenCostAbove200kTokens
+	}
+	if p.CacheReadInputTokenCostAbove256kTokens != nil {
+		price.CacheReadInputTokenCostAbove256k = *p.CacheReadInputTokenCostAbove256kTokens
+	}
+	if p.CacheCreationInputTokenCostAbove256kTokens != nil {
+		price.CacheCreationInputTokenCostAbove256k = *p.CacheCreationInputTokenCostAbove256kTokens
 	}
 	if p.CacheCreationInputTokenCostAbove1hr != nil {
 		price.CacheCreationInputTokenCostAbove1hr = *p.CacheCreationInputTokenCostAbove1hr

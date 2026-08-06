@@ -19,7 +19,8 @@ const maxOpenAIToolNameLength = 64
 var invalidToolUseIDChar = regexp.MustCompile(`[^a-zA-Z0-9_-]`)
 
 type MessagesAdapterMetadata struct {
-	ToolNames map[string]string
+	ToolNames      map[string]string
+	AnthropicBetas []string
 }
 
 func MessagesToChat(body []byte) ([]byte, MessagesAdapterMetadata, error) {
@@ -54,7 +55,7 @@ func MessagesToChat(body []byte) ([]byte, MessagesAdapterMetadata, error) {
 	chat := make(map[string]interface{}, len(request)+1)
 	for key, value := range request {
 		switch key {
-		case "messages", "system", "metadata", "stop_sequences", "tools", "tool_choice", "thinking", "output_format", "output_config":
+		case "messages", "system", "metadata", "stop_sequences", "tools", "tool_choice", "thinking", "output_format", "output_config", "anthropic_beta":
 		default:
 			chat[key] = value
 		}
@@ -100,7 +101,35 @@ func MessagesToChat(body []byte) ([]byte, MessagesAdapterMetadata, error) {
 	if err != nil {
 		return nil, MessagesAdapterMetadata{}, fmt.Errorf("failed to encode Chat Completions request: %w", err)
 	}
-	return converted, MessagesAdapterMetadata{ToolNames: toolNames}, nil
+	return converted, MessagesAdapterMetadata{
+		ToolNames:      toolNames,
+		AnthropicBetas: extractBetaStrings(request["anthropic_beta"]),
+	}, nil
+}
+
+func extractBetaStrings(raw interface{}) []string {
+	var betas []string
+	switch v := raw.(type) {
+	case string:
+		if s := strings.TrimSpace(v); s != "" {
+			betas = append(betas, s)
+		}
+	case []interface{}:
+		for _, b := range v {
+			if s, ok := b.(string); ok {
+				if s = strings.TrimSpace(s); s != "" {
+					betas = append(betas, s)
+				}
+			}
+		}
+	case []string:
+		for _, s := range v {
+			if s = strings.TrimSpace(s); s != "" {
+				betas = append(betas, s)
+			}
+		}
+	}
+	return betas
 }
 
 func messagesToChatMessages(rawMessages []interface{}) ([]interface{}, error) {
