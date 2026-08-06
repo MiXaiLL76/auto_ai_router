@@ -183,8 +183,16 @@ func (r *RoundRobin) NextFallbackForModelScoped(modelID string, visibility scope
 	return r.nextScoped(modelID, true, false, visibility)
 }
 
+func (r *RoundRobin) NextFallbackForModelExcludingScoped(modelID string, exclude map[string]bool, visibility scope.Context) (*config.CredentialConfig, error) {
+	return r.nextExcludingScoped(modelID, true, false, "", exclude, visibility)
+}
+
 func (r *RoundRobin) NextFallbackProxyForModelScoped(modelID string, visibility scope.Context) (*config.CredentialConfig, error) {
 	return r.nextScoped(modelID, true, true, visibility)
+}
+
+func (r *RoundRobin) NextFallbackProxyForModelExcludingScoped(modelID string, exclude map[string]bool, visibility scope.Context) (*config.CredentialConfig, error) {
+	return r.nextExcludingScoped(modelID, true, true, "", exclude, visibility)
 }
 
 // NextSpecific tries to return a specific credential by name without advancing the

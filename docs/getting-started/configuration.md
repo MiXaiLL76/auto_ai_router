@@ -179,6 +179,7 @@ Common fields for all credentials:
 | `rpm`              | int    | Requests per minute limit (-1 = unlimited)                                                  |
 | `tpm`              | int    | Tokens per minute limit (-1 = unlimited)                                                    |
 | `is_fallback`      | bool   | Use as fallback when primary credentials are exhausted                                      |
+| `reasoning_only`   | bool   | Route only requests that explicitly enable reasoning/thinking                               |
 | `scopes`           | list   | Optional client scopes allowed to use and see this credential                               |
 | `denied_scopes`    | list   | Optional client scopes that must not use or see this credential                             |
 | `forbidden_scopes` | list   | Alias for `denied_scopes`                                                                   |
@@ -241,6 +242,23 @@ Scope filtering applies to routing, retry/fallback selection, `/health`, `/v1/mo
 
 In both LiteLLM API-key metadata and `LiteLLM_CredentialsTable.credential_info`,
 `air_forbidden_scopes` is accepted as an alias for `air_denied_scopes`.
+
+Set `reasoning_only: true` on a credential when its provider accepts only reasoning traffic:
+
+```yaml
+credentials:
+  - name: anthropic-reasoning
+    type: anthropic
+    api_key: "os.environ/ANTHROPIC_API_KEY"
+    base_url: "https://api.anthropic.com"
+    reasoning_only: true
+```
+
+The filter recognizes enabled `reasoning_effort`, `reasoning`, `thinking`,
+`thinking_budget`, and `thinking_level` parameters. Requests that omit reasoning or
+explicitly disable it skip the credential during initial selection, sticky routing,
+retries, and fallback selection. For DB-loaded credentials, use
+`"air_reasoning_only": true` in `credential_info`.
 
 ## Models
 

@@ -347,6 +347,7 @@ func convertCredentialTableToConfig(cred queries.CredentialTable) config.Credent
 	if cred.CredentialInfo != nil {
 		cfg.Scopes = scope.NormalizeList(cred.CredentialInfo.AirScopes)
 		cfg.DeniedScopes = scope.NormalizeList(append(cred.CredentialInfo.AirDeniedScopes, cred.CredentialInfo.AirForbiddenScopes...))
+		cfg.ReasoningOnly = cred.CredentialInfo.AirReasoningOnly
 	}
 
 	fillCredentialFromParams(&cfg, cred.CredentialParams)
