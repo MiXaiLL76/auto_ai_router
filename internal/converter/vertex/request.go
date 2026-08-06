@@ -68,6 +68,11 @@ func OpenAIToVertex(openAIBody []byte, isImageGeneration bool, isImageEdit bool,
 		case "system", "developer":
 			// concatenate multiple system messages instead of overwriting
 			content := extractTextContent(msg.Content)
+			if content == "" {
+				// Empty system/developer content would produce a Part{} with no
+				// union field set, which Vertex/Gemini rejects with 400.
+				continue
+			}
 			if vertexReq.SystemInstruction != nil && len(vertexReq.SystemInstruction.Parts) > 0 {
 				vertexReq.SystemInstruction.Parts[0].Text += "\n" + content
 			} else {
