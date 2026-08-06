@@ -179,7 +179,7 @@ Common fields for all credentials:
 | `rpm`              | int    | Requests per minute limit (-1 = unlimited)                                                  |
 | `tpm`              | int    | Tokens per minute limit (-1 = unlimited)                                                    |
 | `is_fallback`      | bool   | Use as fallback when primary credentials are exhausted                                      |
-| `reasoning_only`   | bool   | Route only requests that explicitly enable reasoning/thinking                                |
+| `reasoning_only`   | bool   | Route only requests that explicitly enable reasoning/thinking                               |
 | `scopes`           | list   | Optional client scopes allowed to use and see this credential                               |
 | `denied_scopes`    | list   | Optional client scopes that must not use or see this credential                             |
 | `forbidden_scopes` | list   | Alias for `denied_scopes`                                                                   |
