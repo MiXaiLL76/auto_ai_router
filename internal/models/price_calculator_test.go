@@ -906,3 +906,180 @@ func TestCalculateTokenCosts_WebSearchDefaultsToMedium(t *testing.T) {
 	assert.InDelta(t, 0.20, costs.WebSearchCost, 1e-9)
 	assert.InDelta(t, 0.20, costs.TotalCost, 1e-9)
 }
+
+// --- Alibaba Cloud style full-session tiers: 32k / 128k / 256k ---
+
+func TestCalculateTokenCosts_Above32kFullSession(t *testing.T) {
+	usage := &converter.TokenUsage{
+		PromptTokens:     40_000,
+		CompletionTokens: 1_000,
+	}
+	price := &ModelPrice{
+		InputCostPerToken:          0.01,
+		OutputCostPerToken:         0.02,
+		InputCostPerTokenAbove32k:  0.005,
+		OutputCostPerTokenAbove32k: 0.01,
+	}
+
+	costs := CalculateTokenCosts(usage, price)
+
+	require.NotNil(t, costs)
+	// Full session: the WHOLE prompt/completion is billed at the above-32k
+	// rate, not just the tokens beyond 32k.
+	assert.InDelta(t, 200.0, costs.InputCost, 1e-9) // 40_000 * 0.005
+	assert.InDelta(t, 10.0, costs.OutputCost, 1e-9) // 1_000 * 0.01
+	assert.InDelta(t, 210.0, costs.TotalCost, 1e-9)
+}
+
+func TestCalculateTokenCosts_32kThresholdIsExclusive(t *testing.T) {
+	usage := &converter.TokenUsage{
+		PromptTokens: tokenTiering32kThreshold,
+	}
+	price := &ModelPrice{
+		InputCostPerToken:         0.01,
+		InputCostPerTokenAbove32k: 0.005,
+	}
+
+	costs := CalculateTokenCosts(usage, price)
+
+	require.NotNil(t, costs)
+	// Exactly at the threshold: still base rate, tier only applies strictly above it.
+	assert.InDelta(t, 320.0, costs.InputCost, 1e-9) // 32_000 * 0.01
+}
+
+func TestCalculateTokenCosts_Above128kFullSession(t *testing.T) {
+	usage := &converter.TokenUsage{PromptTokens: 150_000}
+	price := &ModelPrice{
+		InputCostPerToken:          0.001,
+		InputCostPerTokenAbove128k: 0.0006,
+	}
+
+	costs := CalculateTokenCosts(usage, price)
+
+	require.NotNil(t, costs)
+	assert.InDelta(t, 90.0, costs.InputCost, 1e-9) // 150_000 * 0.0006
+}
+
+func TestCalculateTokenCosts_Above256kFullSession(t *testing.T) {
+	usage := &converter.TokenUsage{PromptTokens: 300_000}
+	price := &ModelPrice{
+		InputCostPerToken:          0.001,
+		InputCostPerTokenAbove256k: 0.0004,
+	}
+
+	costs := CalculateTokenCosts(usage, price)
+
+	require.NotNil(t, costs)
+	assert.InDelta(t, 120.0, costs.InputCost, 1e-9) // 300_000 * 0.0004
+}
+
+func TestCalculateTokenCosts_MultiTierLadder_128kAnd256k(t *testing.T) {
+	// Mirrors qwen3.5-plus: two brackets configured, base rate below both.
+	price := &ModelPrice{
+		InputCostPerToken:          0.002,
+		InputCostPerTokenAbove128k: 0.0015,
+		InputCostPerTokenAbove256k: 0.001,
+	}
+
+	tests := []struct {
+		name         string
+		promptTokens int
+		wantInput    float64
+	}{
+		{"below_128k_uses_base_rate", 100_000, 200.0},            // 100_000 * 0.002
+		{"between_128k_and_256k_uses_128k_rate", 150_000, 225.0}, // 150_000 * 0.0015
+		{"above_256k_uses_256k_rate", 300_000, 300.0},            // 300_000 * 0.001
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			costs := CalculateTokenCosts(&converter.TokenUsage{PromptTokens: tt.promptTokens}, price)
+			require.NotNil(t, costs)
+			assert.InDelta(t, tt.wantInput, costs.InputCost, 1e-9)
+		})
+	}
+}
+
+func TestCalculateTokenCosts_LadderSkipsUnconfiguredTier(t *testing.T) {
+	// Mirrors qwen3.7-flash: 32k and 256k configured, 128k intentionally left
+	// unset. A prompt between the two configured thresholds must still fall
+	// through to the 32k rate rather than the base rate.
+	price := &ModelPrice{
+		InputCostPerToken:          0.003,
+		InputCostPerTokenAbove32k:  0.0025,
+		InputCostPerTokenAbove256k: 0.001,
+	}
+
+	tests := []struct {
+		name         string
+		promptTokens int
+		wantInput    float64
+	}{
+		{"between_32k_and_256k_uses_32k_rate", 150_000, 375.0}, // 150_000 * 0.0025
+		{"above_256k_uses_256k_rate", 300_000, 300.0},          // 300_000 * 0.001
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			costs := CalculateTokenCosts(&converter.TokenUsage{PromptTokens: tt.promptTokens}, price)
+			require.NotNil(t, costs)
+			assert.InDelta(t, tt.wantInput, costs.InputCost, 1e-9)
+		})
+	}
+}
+
+func TestCalculateTokenCosts_272kTakesPrecedenceOver256k(t *testing.T) {
+	usage := &converter.TokenUsage{PromptTokens: 280_000} // above both 256k and 272k
+	price := &ModelPrice{
+		InputCostPerToken:          0.01,
+		InputCostPerTokenAbove256k: 0.001,
+		InputCostPerTokenAbove272k: 0.0009,
+	}
+
+	costs := CalculateTokenCosts(usage, price)
+
+	require.NotNil(t, costs)
+	assert.InDelta(t, 252.0, costs.InputCost, 1e-9) // 280_000 * 0.0009, not the 256k rate
+}
+
+func TestCalculateTokenCosts_CacheTierOverridesBaseCacheRate(t *testing.T) {
+	// Mirrors qwen3-vl-flash: a non-zero BASE cache_read rate is configured
+	// alongside a tiered one. The base rate must not "win" once the prompt
+	// crosses the threshold — the fallback-to-base-rate path only applies
+	// when no explicit cache rate is configured at all.
+	usage := &converter.TokenUsage{
+		PromptTokens:      40_000,
+		CachedInputTokens: 1_000,
+	}
+	price := &ModelPrice{
+		InputCostPerToken:               0.01,
+		CacheReadInputTokenCost:         0.0001, // base cache rate (non-zero)
+		CacheReadInputTokenCostAbove32k: 0.00005,
+	}
+
+	costs := CalculateTokenCosts(usage, price)
+
+	require.NotNil(t, costs)
+	assert.InDelta(t, 0.05, costs.CachedInputCost, 1e-9) // 1_000 * 0.00005, NOT 1_000 * 0.0001
+}
+
+func TestCalculateTokenCosts_CacheAbove32kFullSession(t *testing.T) {
+	usage := &converter.TokenUsage{
+		PromptTokens:        50_000,
+		CachedInputTokens:   1_000,
+		CacheCreationTokens: 500,
+	}
+	price := &ModelPrice{
+		InputCostPerToken:                   0.01,
+		CacheReadInputTokenCost:             0.001,
+		CacheReadInputTokenCostAbove32k:     0.0005,
+		CacheCreationInputTokenCost:         0.002,
+		CacheCreationInputTokenCostAbove32k: 0.0015,
+	}
+
+	costs := CalculateTokenCosts(usage, price)
+
+	require.NotNil(t, costs)
+	assert.InDelta(t, 0.5, costs.CachedInputCost, 1e-9)    // 1_000 * 0.0005
+	assert.InDelta(t, 0.75, costs.CacheCreationCost, 1e-9) // 500 * 0.0015
+}

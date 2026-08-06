@@ -36,6 +36,25 @@ type ModelPrice struct {
 	InputCostPerTokenAbove272k  float64 `json:"input_cost_per_token_above_272k_tokens,omitempty"`
 	OutputCostPerTokenAbove272k float64 `json:"output_cost_per_token_above_272k_tokens,omitempty"`
 
+	// Full-session tiered pricing (Alibaba Cloud style): once the prompt
+	// exceeds the threshold, the entire request is billed at that tier's
+	// rate rather than only the tokens beyond it. Same semantics as the
+	// 272k tier above, generalised to more brackets.
+	InputCostPerTokenAbove32k           float64 `json:"input_cost_per_token_above_32k_tokens,omitempty"`
+	OutputCostPerTokenAbove32k          float64 `json:"output_cost_per_token_above_32k_tokens,omitempty"`
+	CacheReadInputTokenCostAbove32k     float64 `json:"cache_read_input_token_cost_above_32k_tokens,omitempty"`
+	CacheCreationInputTokenCostAbove32k float64 `json:"cache_creation_input_token_cost_above_32k_tokens,omitempty"`
+
+	InputCostPerTokenAbove128k           float64 `json:"input_cost_per_token_above_128k_tokens,omitempty"`
+	OutputCostPerTokenAbove128k          float64 `json:"output_cost_per_token_above_128k_tokens,omitempty"`
+	CacheReadInputTokenCostAbove128k     float64 `json:"cache_read_input_token_cost_above_128k_tokens,omitempty"`
+	CacheCreationInputTokenCostAbove128k float64 `json:"cache_creation_input_token_cost_above_128k_tokens,omitempty"`
+
+	InputCostPerTokenAbove256k           float64 `json:"input_cost_per_token_above_256k_tokens,omitempty"`
+	OutputCostPerTokenAbove256k          float64 `json:"output_cost_per_token_above_256k_tokens,omitempty"`
+	CacheReadInputTokenCostAbove256k     float64 `json:"cache_read_input_token_cost_above_256k_tokens,omitempty"`
+	CacheCreationInputTokenCostAbove256k float64 `json:"cache_creation_input_token_cost_above_256k_tokens,omitempty"`
+
 	// Audio tokens (can be more specific than regular tokens)
 	InputCostPerAudioToken  float64 `json:"input_cost_per_audio_token,omitempty"`
 	OutputCostPerAudioToken float64 `json:"output_cost_per_audio_token,omitempty"`

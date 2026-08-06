@@ -9,8 +9,76 @@ import (
 
 const (
 	tokenTiering200kThreshold = 200_000
+	tokenTiering32kThreshold  = 32_000
+	tokenTiering128kThreshold = 128_000
+	tokenTiering256kThreshold = 256_000
 	tokenTiering272kThreshold = 272_000
 )
+
+// fullSessionTier describes one "Alibaba Cloud style" pricing bracket: once
+// the prompt exceeds threshold, the ENTIRE request (not just the excess) is
+// billed at this tier's rates. Zero-value rates mean "not configured for
+// this tier" and are skipped by fullSessionRate.
+type fullSessionTier struct {
+	threshold         int
+	inputRate         float64
+	outputRate        float64
+	cacheReadRate     float64
+	cacheCreationRate float64
+}
+
+// fullSessionTiers returns the configured full-session tiers in descending
+// threshold order, so the first matching entry is always the highest
+// (most specific) bracket the prompt has crossed.
+func fullSessionTiers(price *ModelPrice) []fullSessionTier {
+	return []fullSessionTier{
+		{
+			threshold:         tokenTiering272kThreshold,
+			inputRate:         price.InputCostPerTokenAbove272k,
+			outputRate:        price.OutputCostPerTokenAbove272k,
+			cacheReadRate:     price.CacheReadInputTokenCostAbove272k,
+			cacheCreationRate: price.CacheCreationInputTokenCostAbove272k,
+		},
+		{
+			threshold:         tokenTiering256kThreshold,
+			inputRate:         price.InputCostPerTokenAbove256k,
+			outputRate:        price.OutputCostPerTokenAbove256k,
+			cacheReadRate:     price.CacheReadInputTokenCostAbove256k,
+			cacheCreationRate: price.CacheCreationInputTokenCostAbove256k,
+		},
+		{
+			threshold:         tokenTiering128kThreshold,
+			inputRate:         price.InputCostPerTokenAbove128k,
+			outputRate:        price.OutputCostPerTokenAbove128k,
+			cacheReadRate:     price.CacheReadInputTokenCostAbove128k,
+			cacheCreationRate: price.CacheCreationInputTokenCostAbove128k,
+		},
+		{
+			threshold:         tokenTiering32kThreshold,
+			inputRate:         price.InputCostPerTokenAbove32k,
+			outputRate:        price.OutputCostPerTokenAbove32k,
+			cacheReadRate:     price.CacheReadInputTokenCostAbove32k,
+			cacheCreationRate: price.CacheCreationInputTokenCostAbove32k,
+		},
+	}
+}
+
+// fullSessionRate walks tiers (already sorted by descending threshold) and
+// returns the rate selected by pick for the first tier whose threshold is
+// exceeded by promptTokens and whose selected rate is actually configured
+// (non-zero). Returns ok=false when no full-session tier applies, in which
+// case callers should fall back to the existing 200k-proportional/base rate.
+func fullSessionRate(tiers []fullSessionTier, promptTokens int, pick func(fullSessionTier) float64) (rate float64, ok bool) {
+	for _, tier := range tiers {
+		if promptTokens <= tier.threshold {
+			continue
+		}
+		if r := pick(tier); r > 0 {
+			return r, true
+		}
+	}
+	return 0, false
+}
 
 // CalculateTokenCosts computes costs based on token usage and model pricing
 // Returns nil if price is nil (model not found in pricing database)
@@ -52,14 +120,23 @@ func CalculateTokenCosts(usage *converter.TokenUsage, price *ModelPrice) *conver
 	rejectedPredictionTokens := converterutil.NonNegativeTokenCount(usage.RejectedPredictionTokens)
 	imageCount := converterutil.NonNegativeTokenCount(usage.ImageCount)
 
-	longContext272k := promptTokens > tokenTiering272kThreshold
+	// Full-session tiers (32k/128k/256k/272k): the highest exceeded threshold
+	// whose rate is configured wins and applies to the WHOLE request, not
+	// just the excess. Falls back to the 200k proportional tier (unchanged
+	// below) when no full-session tier matches.
+	tiers := fullSessionTiers(price)
+	fullSessionInputRate, fullSessionInputMatched := fullSessionRate(tiers, promptTokens, func(t fullSessionTier) float64 { return t.inputRate })
+	fullSessionOutputRate, fullSessionOutputMatched := fullSessionRate(tiers, promptTokens, func(t fullSessionTier) float64 { return t.outputRate })
+	fullSessionCacheReadRate, fullSessionCacheReadMatched := fullSessionRate(tiers, promptTokens, func(t fullSessionTier) float64 { return t.cacheReadRate })
+	fullSessionCacheCreationRate, fullSessionCacheCreationMatched := fullSessionRate(tiers, promptTokens, func(t fullSessionTier) float64 { return t.cacheCreationRate })
+
 	inputCostPerToken := price.InputCostPerToken
-	if longContext272k && price.InputCostPerTokenAbove272k > 0 {
-		inputCostPerToken = price.InputCostPerTokenAbove272k
+	if fullSessionInputMatched {
+		inputCostPerToken = fullSessionInputRate
 	}
 	outputCostPerToken := price.OutputCostPerToken
-	if longContext272k && price.OutputCostPerTokenAbove272k > 0 {
-		outputCostPerToken = price.OutputCostPerTokenAbove272k
+	if fullSessionOutputMatched {
+		outputCostPerToken = fullSessionOutputRate
 	}
 
 	cachedInputTokens := converterutil.NonNegativeTokenCount(usage.CachedInputTokens)
@@ -72,8 +149,8 @@ func CalculateTokenCosts(usage *converter.TokenUsage, price *ModelPrice) *conver
 		regularInputTokens = 0
 	}
 
-	// Regular input with 200k tiering
-	if longContext272k && price.InputCostPerTokenAbove272k > 0 {
+	// Regular input with full-session or 200k tiering
+	if fullSessionInputMatched {
 		costs.InputCost = float64(regularInputTokens) * inputCostPerToken
 	} else if price.InputCostPerTokenAbove200k > 0 && promptTokens > tokenTiering200kThreshold {
 		above := promptTokens - tokenTiering200kThreshold
@@ -96,8 +173,8 @@ func CalculateTokenCosts(usage *converter.TokenUsage, price *ModelPrice) *conver
 		regularOutputTokens = 0
 	}
 
-	// Regular output with 200k tiering
-	if longContext272k && price.OutputCostPerTokenAbove272k > 0 {
+	// Regular output with full-session or 200k tiering
+	if fullSessionOutputMatched {
 		costs.OutputCost = float64(regularOutputTokens) * outputCostPerToken
 	} else if price.OutputCostPerTokenAbove200k > 0 && completionTokens > tokenTiering200kThreshold {
 		above := completionTokens - tokenTiering200kThreshold
@@ -129,8 +206,8 @@ func CalculateTokenCosts(usage *converter.TokenUsage, price *ModelPrice) *conver
 	if cachedInputCost == 0 {
 		cachedInputCost = price.CacheReadInputTokenCost
 	}
-	if longContext272k && price.CacheReadInputTokenCostAbove272k > 0 {
-		cachedInputCost = price.CacheReadInputTokenCostAbove272k
+	if fullSessionCacheReadMatched {
+		cachedInputCost = fullSessionCacheReadRate
 	} else if promptTokens > tokenTiering200kThreshold && price.CacheReadInputTokenCostAbove200k > 0 {
 		cachedInputCost = price.CacheReadInputTokenCostAbove200k
 	}
@@ -150,10 +227,10 @@ func CalculateTokenCosts(usage *converter.TokenUsage, price *ModelPrice) *conver
 		float64(cachedAudioTokens)*cachedAudioCost
 
 	cacheCreationCost := price.CacheCreationInputTokenCost
-	cacheCreationUses272kRate := false
-	if longContext272k && price.CacheCreationInputTokenCostAbove272k > 0 {
-		cacheCreationCost = price.CacheCreationInputTokenCostAbove272k
-		cacheCreationUses272kRate = true
+	cacheCreationFullSession := false
+	if fullSessionCacheCreationMatched {
+		cacheCreationCost = fullSessionCacheCreationRate
+		cacheCreationFullSession = true
 	} else if promptTokens > tokenTiering200kThreshold && price.CacheCreationInputTokenCostAbove200k > 0 {
 		cacheCreationCost = price.CacheCreationInputTokenCostAbove200k
 	}
@@ -161,7 +238,7 @@ func CalculateTokenCosts(usage *converter.TokenUsage, price *ModelPrice) *conver
 		cacheCreationCost = inputCostPerToken
 	}
 	cacheCreation1hCost := cacheCreationCost
-	if !cacheCreationUses272kRate {
+	if !cacheCreationFullSession {
 		cacheCreation1hCost = price.CacheCreationInputTokenCostAbove1hr
 		if promptTokens > tokenTiering200kThreshold && price.CacheCreationInputTokenCostAbove1hrAbove200k > 0 {
 			cacheCreation1hCost = price.CacheCreationInputTokenCostAbove1hrAbove200k
