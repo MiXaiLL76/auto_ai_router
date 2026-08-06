@@ -37,10 +37,14 @@ type fullSessionTier struct {
 // config.IsGoogleGeminiProvider (shared with LiteLLM DB provider-type
 // routing so the two can't drift apart on which aliases count as Gemini).
 // This differs from the default 200k tier semantics below, which bill only
-// the excess above 200k (Anthropic's documented Claude Sonnet behavior) —
-// the same *_above_200k_tokens price fields are reused for both, only the
-// billing style differs per provider. Otherwise 200k keeps its separate
-// proportional-only handling further down in CalculateTokenCosts.
+// the excess above 200k — the generic tier shape kept as a fallback for any
+// non-Gemini provider. It is not modeled on an observed real Claude Sonnet
+// billing rule: Sonnet 4.5 doesn't support >200k context via the standard
+// Anthropic API at all, and Sonnet 4.6 (up to 1M context) bills that
+// extended context at the regular rate with no above-200k surcharge. The
+// same *_above_200k_tokens price fields are reused by both tier shapes;
+// only the billing style differs per provider. Otherwise 200k keeps its
+// separate proportional-only handling further down in CalculateTokenCosts.
 func fullSessionTiers(price *ModelPrice) []fullSessionTier {
 	tiers := []fullSessionTier{
 		{

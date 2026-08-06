@@ -1118,9 +1118,14 @@ func TestCalculateTokenCosts_Gemini200k_FullSession(t *testing.T) {
 }
 
 func TestCalculateTokenCosts_Anthropic200k_StaysProportional(t *testing.T) {
-	// Anthropic's documented Claude Sonnet rule: only tokens beyond 200k bill
-	// at the higher rate. Same *_above_200k_tokens fields as Gemini, but must
-	// NOT flip to full-session just because they're configured.
+	// This is the generic (non-Gemini) proportional-200k tier shape, not an
+	// observed real Claude Sonnet billing rule: Sonnet 4.5 doesn't support
+	// >200k context via the standard Anthropic API at all, and Sonnet 4.6
+	// (which supports up to 1M context) bills it at the regular rate with no
+	// above-200k surcharge -- no real Anthropic model exercises this branch
+	// today. The scenario below is synthetic, only to confirm an
+	// Anthropic-tagged price doesn't accidentally flip to Gemini's
+	// full-session behavior just because *_above_200k_tokens is configured.
 	usage := &converter.TokenUsage{
 		PromptTokens:     300_000,
 		CompletionTokens: 50,
