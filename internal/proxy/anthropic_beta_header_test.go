@@ -109,3 +109,63 @@ func TestProxyRequest_AIRChain_StripsAnthropicBetaFromForwardedBody(t *testing.T
 	require.NoError(t, json.Unmarshal(outbound.body, &body))
 	assert.NotContains(t, body, "anthropic_beta")
 }
+
+// TestProxyRequest_DirectAnthropic_MessagesBodyBetaField probes the non-chained
+// case: a credential of type "anthropic" talked to directly (no proxy/air hop),
+// with the client sending a native /v1/messages request that has "anthropic_beta"
+// as a top-level BODY field (rather than the "anthropic-beta" header). Unlike the
+// proxy-like chain case, this path is NOT a raw passthrough: prepareRequestForCredential
+// converts /v1/messages -> chat -> Anthropic (MessagesToChat + OpenAIToAnthropic)
+// for any non-proxy-like credential. This test checks what that round-trip does
+// with the field: does it survive (in body or header), or does it get silently
+// dropped by the intermediate OpenAI-chat representation?
+func TestProxyRequest_DirectAnthropic_MessagesBodyBetaField(t *testing.T) {
+	type capturedRequest struct {
+		header string
+		body   []byte
+	}
+	captured := make(chan capturedRequest, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		captured <- capturedRequest{header: r.Header.Get("anthropic-beta"), body: body}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"id":"msg_test","type":"message","role":"assistant","model":"claude-opus-4-7",
+			"content":[{"type":"text","text":"answer"}],
+			"stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":5}
+		}`))
+	}))
+	defer upstream.Close()
+
+	proxy := NewTestProxyBuilder().
+		WithSingleCredential("anthropic-direct", config.ProviderTypeAnthropic, upstream.URL, "upstream-key").
+		Build()
+	req := httptest.NewRequest("POST", "/v1/messages", strings.NewReader(`{
+		"model":"claude-opus-4.7",
+		"max_tokens":100,
+		"messages":[{"role":"user","content":"hi"}],
+		"anthropic_beta":["prompt-caching-2024-07-31"]
+	}`))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	proxy.ProxyRequest(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	outbound := <-captured
+	var body map[string]any
+	require.NoError(t, json.Unmarshal(outbound.body, &body))
+
+	// Current (verified) behavior: the /v1/messages -> chat -> Anthropic round-trip
+	// (MessagesToChat copies unknown top-level keys as-is; OpenAIToAnthropic only
+	// reads betas back out of a nested "extra_body" object) silently drops a
+	// body-level "anthropic_beta" field entirely — it reaches neither the outbound
+	// header nor the outbound body. This differs from the proxy/air chain case
+	// (see TestProxyRequest_AIRChain_StripsAnthropicBetaFromForwardedBody), where
+	// the same field survives unchanged in the body and can trigger a strict
+	// upstream's "anthropic_beta: Extra inputs are not permitted" rejection.
+	// So: no chain -> feature silently lost, not an upstream error.
+	assert.Empty(t, outbound.header)
+	assert.NotContains(t, body, "anthropic_beta")
+}
