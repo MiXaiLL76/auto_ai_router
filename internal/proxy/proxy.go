@@ -629,6 +629,19 @@ func (p *Proxy) executeProxyRequest(
 			cancelUpstream()
 		}
 	}()
+	// Proxy-like credentials forward /v1/messages bodies as-is (see
+	// prepareRequestForCredential's IsProxyLike passthrough) without going
+	// through the anthropic converter's request path, so a client-set
+	// top-level "anthropic_beta" body field would otherwise reach the
+	// downstream peer unchanged. Move it to the anthropic-beta header here —
+	// harmless if the peer relays it onward again, but required if this peer
+	// (or one further down the chain) forwards straight to a server with
+	// strict body validation, including the real Anthropic API.
+	var anthropicBetas []string
+	if r.URL.Path == "/v1/messages" {
+		body, anthropicBetas = anthropicconv.ExtractBetaHeader(body)
+	}
+
 	proxyReq, err := http.NewRequestWithContext(upstreamCtx, r.Method, targetURL, bytes.NewReader(body))
 	if err != nil {
 		p.logger.ErrorContext(r.Context(), "Failed to create proxy request", "error", err, "url", targetURL)
@@ -637,6 +650,7 @@ func (p *Proxy) executeProxyRequest(
 
 	// Copy headers (skip hop-by-hop headers)
 	copyRequestHeaders(proxyReq, r, cred.APIKey)
+	mergeAnthropicBetaHeader(proxyReq.Header, anthropicBetas)
 	// Mark request as coming from an internal proxy client so the upstream router
 	// knows to include the X-Credential-Name response header.
 	proxyReq.Header.Set(HeaderAIRProxyClient, "1")
