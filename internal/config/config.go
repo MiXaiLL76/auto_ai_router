@@ -48,6 +48,30 @@ func (p ProviderType) IsValid() bool {
 	return false
 }
 
+// googleGeminiProviderAliases lists provider-identifier substrings
+// (custom_llm_provider from LiteLLM DB config, litellm_provider from price
+// files) that refer to Google's Gemini model family, regardless of which
+// auth mechanism reaches it: AI Studio ("gemini", "google",
+// "google_ai_studio") or Vertex AI ("vertex", "vertex_ai"). Kept as the
+// single source of truth so DB provider-type routing and Gemini-specific
+// billing rules can't silently drift apart, as they did before this list
+// existed (billing only recognized "gemini"/"vertex" while routing already
+// accepted "google"/"google_ai_studio").
+var googleGeminiProviderAliases = []string{"gemini", "vertex", "google"}
+
+// IsGoogleGeminiProvider reports whether provider matches any known Google
+// Gemini/Vertex AI alias. The match is a case-insensitive substring check
+// against googleGeminiProviderAliases.
+func IsGoogleGeminiProvider(provider string) bool {
+	p := strings.ToLower(provider)
+	for _, alias := range googleGeminiProviderAliases {
+		if strings.Contains(p, alias) {
+			return true
+		}
+	}
+	return false
+}
+
 // IsProxyLike reports whether the provider uses AIR's proxy forwarding path:
 // OpenAI-compatible request forwarding, remote /health model discovery, and
 // proxy-chain fallback semantics.

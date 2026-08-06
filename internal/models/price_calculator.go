@@ -3,6 +3,7 @@ package models
 import (
 	"strings"
 
+	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/converter"
 	"github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
 )
@@ -29,9 +30,23 @@ type fullSessionTier struct {
 
 // fullSessionTiers returns the configured full-session tiers in descending
 // threshold order, so the first matching entry is always the highest
-// (most specific) bracket the prompt has crossed.
+// (most specific) bracket the prompt has crossed. 200k is included only for
+// providers whose documented billing rule is "once input context exceeds
+// 200k tokens, the entire request (input, output, and cache) is billed at
+// the long-context rate" — Google's Gemini/Vertex AI family, detected via
+// config.IsGoogleGeminiProvider (shared with LiteLLM DB provider-type
+// routing so the two can't drift apart on which aliases count as Gemini).
+// This differs from the default 200k tier semantics below, which bill only
+// the excess above 200k — the generic tier shape kept as a fallback for any
+// non-Gemini provider. It is not modeled on an observed real Claude Sonnet
+// billing rule: Sonnet 4.5 doesn't support >200k context via the standard
+// Anthropic API at all, and Sonnet 4.6 (up to 1M context) bills that
+// extended context at the regular rate with no above-200k surcharge. The
+// same *_above_200k_tokens price fields are reused by both tier shapes;
+// only the billing style differs per provider. Otherwise 200k keeps its
+// separate proportional-only handling further down in CalculateTokenCosts.
 func fullSessionTiers(price *ModelPrice) []fullSessionTier {
-	return []fullSessionTier{
+	tiers := []fullSessionTier{
 		{
 			threshold:         tokenTiering272kThreshold,
 			inputRate:         price.InputCostPerTokenAbove272k,
@@ -46,21 +61,32 @@ func fullSessionTiers(price *ModelPrice) []fullSessionTier {
 			cacheReadRate:     price.CacheReadInputTokenCostAbove256k,
 			cacheCreationRate: price.CacheCreationInputTokenCostAbove256k,
 		},
-		{
+	}
+	if config.IsGoogleGeminiProvider(price.LiteLLMProvider) {
+		tiers = append(tiers, fullSessionTier{
+			threshold:         tokenTiering200kThreshold,
+			inputRate:         price.InputCostPerTokenAbove200k,
+			outputRate:        price.OutputCostPerTokenAbove200k,
+			cacheReadRate:     price.CacheReadInputTokenCostAbove200k,
+			cacheCreationRate: price.CacheCreationInputTokenCostAbove200k,
+		})
+	}
+	return append(tiers,
+		fullSessionTier{
 			threshold:         tokenTiering128kThreshold,
 			inputRate:         price.InputCostPerTokenAbove128k,
 			outputRate:        price.OutputCostPerTokenAbove128k,
 			cacheReadRate:     price.CacheReadInputTokenCostAbove128k,
 			cacheCreationRate: price.CacheCreationInputTokenCostAbove128k,
 		},
-		{
+		fullSessionTier{
 			threshold:         tokenTiering32kThreshold,
 			inputRate:         price.InputCostPerTokenAbove32k,
 			outputRate:        price.OutputCostPerTokenAbove32k,
 			cacheReadRate:     price.CacheReadInputTokenCostAbove32k,
 			cacheCreationRate: price.CacheCreationInputTokenCostAbove32k,
 		},
-	}
+	)
 }
 
 // fullSessionRate walks tiers (already sorted by descending threshold) and

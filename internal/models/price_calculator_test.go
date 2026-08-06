@@ -1083,3 +1083,148 @@ func TestCalculateTokenCosts_CacheAbove32kFullSession(t *testing.T) {
 	assert.InDelta(t, 0.5, costs.CachedInputCost, 1e-9)    // 1_000 * 0.0005
 	assert.InDelta(t, 0.75, costs.CacheCreationCost, 1e-9) // 500 * 0.0015
 }
+
+// --- Provider-specific 200k semantics: Gemini full-session vs Anthropic proportional ---
+
+func TestCalculateTokenCosts_Gemini200k_FullSession(t *testing.T) {
+	// Google's documented Gemini rule: once input context exceeds 200k tokens,
+	// the ENTIRE request (input, output, cache) bills at the long-context rate.
+	usage := &converter.TokenUsage{
+		PromptTokens:        300_000,
+		CompletionTokens:    1_000,
+		CachedInputTokens:   50_000,
+		CacheCreationTokens: 10_000,
+	}
+	price := &ModelPrice{
+		LiteLLMProvider:                      "gemini",
+		InputCostPerToken:                    0.000001625,
+		InputCostPerTokenAbove200k:           0.00000325,
+		OutputCostPerToken:                   0.000013,
+		OutputCostPerTokenAbove200k:          0.0000195,
+		CacheReadInputTokenCost:              0.000000125,
+		CacheReadInputTokenCostAbove200k:     0.00000025,
+		CacheCreationInputTokenCost:          0.0000015625,
+		CacheCreationInputTokenCostAbove200k: 0.00000025,
+	}
+
+	costs := CalculateTokenCosts(usage, price)
+
+	require.NotNil(t, costs)
+	// regular input = 300_000 - 50_000 (cached) - 10_000 (cache creation) = 240_000
+	assert.InDelta(t, 240_000*0.00000325, costs.InputCost, 1e-9, "ALL regular input tokens at the long-context rate, not just the excess")
+	assert.InDelta(t, 1_000*0.0000195, costs.OutputCost, 1e-9, "output also billed fully at the long-context rate")
+	assert.InDelta(t, 50_000*0.00000025, costs.CachedInputCost, 1e-9, "cache read also billed fully at the long-context rate")
+	assert.InDelta(t, 10_000*0.00000025, costs.CacheCreationCost, 1e-9, "cache creation also billed fully at the long-context rate")
+}
+
+func TestCalculateTokenCosts_Anthropic200k_StaysProportional(t *testing.T) {
+	// This is the generic (non-Gemini) proportional-200k tier shape, not an
+	// observed real Claude Sonnet billing rule: Sonnet 4.5 doesn't support
+	// >200k context via the standard Anthropic API at all, and Sonnet 4.6
+	// (which supports up to 1M context) bills it at the regular rate with no
+	// above-200k surcharge -- no real Anthropic model exercises this branch
+	// today. The scenario below is synthetic, only to confirm an
+	// Anthropic-tagged price doesn't accidentally flip to Gemini's
+	// full-session behavior just because *_above_200k_tokens is configured.
+	usage := &converter.TokenUsage{
+		PromptTokens:     300_000,
+		CompletionTokens: 50,
+	}
+	price := &ModelPrice{
+		LiteLLMProvider:            "anthropic",
+		InputCostPerToken:          0.001,
+		InputCostPerTokenAbove200k: 0.0005,
+	}
+
+	costs := CalculateTokenCosts(usage, price)
+
+	require.NotNil(t, costs)
+	// Unchanged from TestCalculateTokenCosts_Above200k_Input: 200_000*0.001 + 100_000*0.0005
+	assert.InDelta(t, 250.0, costs.InputCost, 1e-9, "Anthropic must keep proportional billing at 200k")
+}
+
+func TestCalculateTokenCosts_UnknownProvider200k_StaysProportional(t *testing.T) {
+	// No provider set at all (or a provider that isn't Gemini/Vertex): default
+	// to the existing proportional behavior, same as before this change.
+	usage := &converter.TokenUsage{
+		PromptTokens:     300_000,
+		CompletionTokens: 50,
+	}
+	price := &ModelPrice{
+		InputCostPerToken:          0.001,
+		InputCostPerTokenAbove200k: 0.0005,
+	}
+
+	costs := CalculateTokenCosts(usage, price)
+
+	require.NotNil(t, costs)
+	assert.InDelta(t, 250.0, costs.InputCost, 1e-9)
+}
+
+func TestCalculateTokenCosts_VertexProvider200k_FullSession(t *testing.T) {
+	// "vertex_ai" (Gemini served via Vertex) must also get full-session 200k.
+	usage := &converter.TokenUsage{PromptTokens: 250_000}
+	price := &ModelPrice{
+		LiteLLMProvider:            "vertex_ai",
+		InputCostPerToken:          0.000001625,
+		InputCostPerTokenAbove200k: 0.00000325,
+	}
+
+	costs := CalculateTokenCosts(usage, price)
+
+	require.NotNil(t, costs)
+	assert.InDelta(t, 250_000*0.00000325, costs.InputCost, 1e-9)
+}
+
+func TestCalculateTokenCosts_Gemini200kBelowThreshold_UsesBaseRate(t *testing.T) {
+	usage := &converter.TokenUsage{PromptTokens: 150_000}
+	price := &ModelPrice{
+		LiteLLMProvider:            "gemini",
+		InputCostPerToken:          0.000001625,
+		InputCostPerTokenAbove200k: 0.00000325,
+	}
+
+	costs := CalculateTokenCosts(usage, price)
+
+	require.NotNil(t, costs)
+	assert.InDelta(t, 150_000*0.000001625, costs.InputCost, 1e-9)
+}
+
+func TestCalculateTokenCosts_Gemini256kTakesPrecedenceOver200k(t *testing.T) {
+	// If a Gemini-family model ever also configures a 256k full-session tier,
+	// the higher (256k) threshold must still win over the provider-triggered
+	// 200k tier, matching the existing descending-priority ladder.
+	usage := &converter.TokenUsage{PromptTokens: 260_000}
+	price := &ModelPrice{
+		LiteLLMProvider:            "gemini",
+		InputCostPerToken:          0.000001625,
+		InputCostPerTokenAbove200k: 0.00000325,
+		InputCostPerTokenAbove256k: 0.000004,
+	}
+
+	costs := CalculateTokenCosts(usage, price)
+
+	require.NotNil(t, costs)
+	assert.InDelta(t, 260_000*0.000004, costs.InputCost, 1e-9)
+}
+
+func TestCalculateTokenCosts_GoogleProviderAlias200k_FullSession(t *testing.T) {
+	// LiteLLM DB config routes both "google" and "google_ai_studio" custom_llm_provider
+	// values to the Gemini provider type (see mapProviderType), so billing must
+	// recognize them too -- not just the literal "gemini"/"vertex" strings.
+	for _, provider := range []string{"google", "google_ai_studio", "GoogleAI"} {
+		t.Run(provider, func(t *testing.T) {
+			usage := &converter.TokenUsage{PromptTokens: 300_000}
+			price := &ModelPrice{
+				LiteLLMProvider:            provider,
+				InputCostPerToken:          0.000001625,
+				InputCostPerTokenAbove200k: 0.00000325,
+			}
+
+			costs := CalculateTokenCosts(usage, price)
+
+			require.NotNil(t, costs)
+			assert.InDelta(t, 300_000*0.00000325, costs.InputCost, 1e-9, "provider %q must bill full-session at 200k", provider)
+		})
+	}
+}

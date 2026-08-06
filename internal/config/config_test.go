@@ -851,6 +851,30 @@ func TestProviderType_IsProxyLike(t *testing.T) {
 	assert.False(t, ProviderTypeProMan.IsProxyLike())
 }
 
+func TestIsGoogleGeminiProvider(t *testing.T) {
+	tests := []struct {
+		name     string
+		provider string
+		want     bool
+	}{
+		{"gemini", "gemini", true},
+		{"vertex", "vertex", true},
+		{"vertex_ai", "vertex_ai", true},
+		{"google", "google", true},
+		{"google_ai_studio", "google_ai_studio", true},
+		{"mixed_case", "GoogleAI", true},
+		{"openai", "openai", false},
+		{"anthropic", "anthropic", false},
+		{"empty", "", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, IsGoogleGeminiProvider(tt.provider))
+		})
+	}
+}
+
 func TestCredentialConfig_NormalizeCometAPIProviderType(t *testing.T) {
 	var cred CredentialConfig
 	err := yaml.Unmarshal([]byte(`
