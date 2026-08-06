@@ -76,6 +76,12 @@ For reference:
 | `output_cost_per_token`                                       | Regular output tokens                                                        |
 | `input_cost_per_token_above_200k_tokens`                      | Input rate for tokens beyond the 200k threshold                              |
 | `output_cost_per_token_above_200k_tokens`                     | Output rate for tokens beyond the 200k threshold                             |
+| `input_cost_per_token_above_32k_tokens`                       | Full-session input rate when prompt exceeds 32k tokens                       |
+| `output_cost_per_token_above_32k_tokens`                      | Full-session output rate when prompt exceeds 32k tokens                      |
+| `input_cost_per_token_above_128k_tokens`                      | Full-session input rate when prompt exceeds 128k tokens                      |
+| `output_cost_per_token_above_128k_tokens`                     | Full-session output rate when prompt exceeds 128k tokens                     |
+| `input_cost_per_token_above_256k_tokens`                      | Full-session input rate when prompt exceeds 256k tokens                      |
+| `output_cost_per_token_above_256k_tokens`                     | Full-session output rate when prompt exceeds 256k tokens                     |
 | `input_cost_per_token_above_272k_tokens`                      | Full-session input rate when prompt exceeds 272k tokens                      |
 | `output_cost_per_token_above_272k_tokens`                     | Full-session output rate when prompt exceeds 272k tokens                     |
 | `input_cost_per_audio_token`                                  | Audio input tokens (falls back to `input_cost_per_token` if absent)          |
@@ -90,6 +96,12 @@ For reference:
 | `cache_creation_input_token_cost_above_200k_tokens`           | Full-session 5m/unclassified cache write rate above 200k                     |
 | `cache_creation_input_token_cost_above_1hr`                   | Anthropic 1h cache write rate (falls back to regular cache write rate)       |
 | `cache_creation_input_token_cost_above_1hr_above_200k_tokens` | Anthropic 1h cache write rate above 200k                                     |
+| `cache_read_input_token_cost_above_32k_tokens`                | Full-session cache read rate when prompt exceeds 32k tokens                  |
+| `cache_creation_input_token_cost_above_32k_tokens`            | Full-session cache write rate when prompt exceeds 32k tokens                 |
+| `cache_read_input_token_cost_above_128k_tokens`               | Full-session cache read rate when prompt exceeds 128k tokens                 |
+| `cache_creation_input_token_cost_above_128k_tokens`           | Full-session cache write rate when prompt exceeds 128k tokens                |
+| `cache_read_input_token_cost_above_256k_tokens`               | Full-session cache read rate when prompt exceeds 256k tokens                 |
+| `cache_creation_input_token_cost_above_256k_tokens`           | Full-session cache write rate when prompt exceeds 256k tokens                |
 | `cache_read_input_token_cost_above_272k_tokens`               | Full-session cache read rate when prompt exceeds 272k tokens                 |
 | `cache_creation_input_token_cost_above_272k_tokens`           | Full-session cache write rate when prompt exceeds 272k tokens                |
 | `cache_read_input_audio_token_cost`                           | Cached audio input rate (falls back to the selected cache read rate)         |
@@ -191,11 +203,17 @@ input_cost = regular_below × input_cost_per_token
 
 The same logic applies to output tokens using `output_cost_per_token_above_200k_tokens`.
 
-Cache prices follow LiteLLM's full-session semantics: when `prompt_tokens > 200_000`, all cache read/write tokens use the matching `*_above_200k_tokens` rate. The 272k cache fields take precedence when both tiers are configured.
+Cache prices follow LiteLLM's full-session semantics: when `prompt_tokens > 200_000`, all cache read/write tokens use the matching `*_above_200k_tokens` rate. The 32k/128k/256k/272k full-session cache fields take precedence over the 200k tier whenever configured, with the highest exceeded threshold winning (see "Long-context pricing" below).
 
-### Long-context pricing (272k threshold)
+### Long-context pricing (32k / 128k / 256k / 272k full-session tiers)
 
-When the prompt exceeds 272 000 tokens, models such as GPT-5.6 apply their `*_above_272k_tokens` rates to the full session rather than only the tokens beyond the threshold. The prompt size selects the tier for regular input, output, cache reads, and cache writes. At exactly 272 000 tokens, base rates still apply.
+When the prompt exceeds one of these thresholds, the matching `*_above_<N>k_tokens` rate applies to the **full session** rather than only the tokens beyond the threshold — the prompt size selects the tier for regular input, output, cache reads, and cache writes. At exactly the threshold, base rates still apply (the check is strictly "greater than").
+
+272k was added first for models such as GPT-5.6; 32k/128k/256k were added for Alibaba Cloud models (Qwen 3.x, GLM) whose published pricing is a flat rate per input-length bracket (e.g. 0–32k / 32k–128k / 128k–256k / >256k) rather than an incremental rate for the overflow.
+
+A price entry may configure any subset of these four thresholds (e.g. only 32k and 256k, skipping 128k). For each cost component (input, output, cache read, cache write) independently, AIR picks the **highest configured threshold that the prompt exceeds**, in descending order 272k → 256k → 128k → 32k, and skips any threshold whose rate field isn't set. If none of the four apply, cost calculation falls back to the 200k proportional tier described above, then to the base rate.
+
+Example: a model with only `input_cost_per_token_above_128k_tokens` and `input_cost_per_token_above_256k_tokens` set bills a 150k-token prompt at the 128k rate and a 300k-token prompt at the 256k rate; a 100k-token prompt still uses the base rate.
 
 ### Specialised token types
 
