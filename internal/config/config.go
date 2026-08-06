@@ -667,6 +667,7 @@ type CredentialConfig struct {
 	TPM                     int               `yaml:"tpm"`
 	Weight                  int               `yaml:"weight"` // Default weighted round-robin weight for this credential (0 = 1)
 	FallbackPriority        int               `yaml:"fallback_priority,omitempty"`
+	ReasoningOnly           bool              `yaml:"reasoning_only,omitempty"`
 	Scopes                  []string          `yaml:"scopes,omitempty"`
 	DeniedScopes            []string          `yaml:"denied_scopes,omitempty"`
 	ProviderScopes          []string          `yaml:"-"`
@@ -729,6 +730,7 @@ func (c *CredentialConfig) UnmarshalYAML(value *yaml.Node) error {
 		TPM              string           `yaml:"tpm"`
 		Weight           string           `yaml:"weight"`
 		FallbackPriority string           `yaml:"fallback_priority,omitempty"`
+		ReasoningOnly    string           `yaml:"reasoning_only,omitempty"`
 		Scopes           []string         `yaml:"scopes,omitempty"`
 		DeniedScopes     []string         `yaml:"denied_scopes,omitempty"`
 		ForbiddenScopes  []string         `yaml:"forbidden_scopes,omitempty"`
@@ -779,6 +781,9 @@ func (c *CredentialConfig) UnmarshalYAML(value *yaml.Node) error {
 		return err
 	}
 	if c.FallbackPriority, err = parseField(temp.FallbackPriority, 0, strconv.Atoi, "fallback_priority for credential '"+c.Name+"'"); err != nil {
+		return err
+	}
+	if c.ReasoningOnly, err = parseField(temp.ReasoningOnly, false, strconv.ParseBool, "reasoning_only for credential '"+c.Name+"'"); err != nil {
 		return err
 	}
 

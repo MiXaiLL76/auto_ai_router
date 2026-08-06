@@ -176,6 +176,7 @@ func TestSelectCredentialForModelMarksDirectSpendLogComplete(t *testing.T) {
 		"missing-model",
 		"",
 		"",
+		nil,
 		logCtx,
 	)
 
@@ -208,6 +209,7 @@ func TestSelectCredentialForModelLogsZeroCostRowWhenPriceUnavailable(t *testing.
 		"missing-model",
 		"",
 		"",
+		nil,
 		logCtx,
 	)
 

@@ -104,6 +104,22 @@ credentials:
 	assert.Equal(t, ResponseHeaderModeAllowlist, cfg.Server.ResponseHeaders.Mode)
 }
 
+func TestCredentialConfigReasoningOnly(t *testing.T) {
+	t.Setenv("TEST_REASONING_ONLY", "true")
+
+	var credential CredentialConfig
+	err := yaml.Unmarshal([]byte(`
+name: anthropic-reasoning
+type: anthropic
+api_key: key
+base_url: https://api.anthropic.com
+reasoning_only: os.environ/TEST_REASONING_ONLY
+`), &credential)
+
+	require.NoError(t, err)
+	assert.True(t, credential.ReasoningOnly)
+}
+
 func TestLoad_ResponseHeadersModeFromEnvironment(t *testing.T) {
 	t.Setenv("TEST_RESPONSE_HEADER_MODE", "ALLOWLIST")
 	configPath := filepath.Join(t.TempDir(), "config.yaml")
