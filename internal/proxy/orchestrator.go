@@ -253,6 +253,13 @@ func (p *Proxy) prepareRequestForCredential(
 	body := baseBody
 	proxyBody := baseProxyBody
 	realModelID := baseRealModelID
+	if cred.Type == config.ProviderTypeAIR {
+		var err error
+		proxyBody, err = replaceRequestModel(proxyBody, r.Header.Get("Content-Type"), modelID)
+		if err != nil {
+			return credentialPreparedRequest{}, err
+		}
+	}
 	if !cred.IsProxyLike() && p.modelManager != nil {
 		if credRealName, ok := p.modelManager.GetRealModelNameForCredential(modelID, cred.Name); ok && credRealName != realModelID {
 			p.logger.DebugContext(r.Context(), "Re-resolved real model name for credential",
