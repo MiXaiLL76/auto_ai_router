@@ -27,11 +27,35 @@ type fullSessionTier struct {
 	cacheCreationRate float64
 }
 
+// longContextFullSessionProviders lists litellm_provider substrings whose
+// documented billing rule is "once input context exceeds 200k tokens, the
+// entire request (input, output, and cache) is billed at the long-context
+// rate" (e.g. Google's Gemini pricing). This differs from the default 200k
+// tier semantics below, which bill only the excess above 200k (Anthropic's
+// documented Claude Sonnet behavior) — the same *_above_200k_tokens price
+// fields are reused for both, only the billing style differs per provider.
+var longContextFullSessionProviders = []string{"gemini", "vertex"}
+
+// isLongContextFullSessionProvider reports whether provider's documented 200k
+// context-length pricing bills the whole request rather than just the excess.
+func isLongContextFullSessionProvider(provider string) bool {
+	provider = strings.ToLower(provider)
+	for _, p := range longContextFullSessionProviders {
+		if strings.Contains(provider, p) {
+			return true
+		}
+	}
+	return false
+}
+
 // fullSessionTiers returns the configured full-session tiers in descending
 // threshold order, so the first matching entry is always the highest
-// (most specific) bracket the prompt has crossed.
+// (most specific) bracket the prompt has crossed. 200k is included only for
+// providers whose real billing rule is full-session at that threshold
+// (see isLongContextFullSessionProvider); otherwise 200k keeps its separate
+// proportional-only handling further down in CalculateTokenCosts.
 func fullSessionTiers(price *ModelPrice) []fullSessionTier {
-	return []fullSessionTier{
+	tiers := []fullSessionTier{
 		{
 			threshold:         tokenTiering272kThreshold,
 			inputRate:         price.InputCostPerTokenAbove272k,
@@ -46,21 +70,32 @@ func fullSessionTiers(price *ModelPrice) []fullSessionTier {
 			cacheReadRate:     price.CacheReadInputTokenCostAbove256k,
 			cacheCreationRate: price.CacheCreationInputTokenCostAbove256k,
 		},
-		{
+	}
+	if isLongContextFullSessionProvider(price.LiteLLMProvider) {
+		tiers = append(tiers, fullSessionTier{
+			threshold:         tokenTiering200kThreshold,
+			inputRate:         price.InputCostPerTokenAbove200k,
+			outputRate:        price.OutputCostPerTokenAbove200k,
+			cacheReadRate:     price.CacheReadInputTokenCostAbove200k,
+			cacheCreationRate: price.CacheCreationInputTokenCostAbove200k,
+		})
+	}
+	return append(tiers,
+		fullSessionTier{
 			threshold:         tokenTiering128kThreshold,
 			inputRate:         price.InputCostPerTokenAbove128k,
 			outputRate:        price.OutputCostPerTokenAbove128k,
 			cacheReadRate:     price.CacheReadInputTokenCostAbove128k,
 			cacheCreationRate: price.CacheCreationInputTokenCostAbove128k,
 		},
-		{
+		fullSessionTier{
 			threshold:         tokenTiering32kThreshold,
 			inputRate:         price.InputCostPerTokenAbove32k,
 			outputRate:        price.OutputCostPerTokenAbove32k,
 			cacheReadRate:     price.CacheReadInputTokenCostAbove32k,
 			cacheCreationRate: price.CacheCreationInputTokenCostAbove32k,
 		},
-	}
+	)
 }
 
 // fullSessionRate walks tiers (already sorted by descending threshold) and
