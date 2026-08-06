@@ -1548,8 +1548,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		var anthropicBetas []string
-		switch cred.Type {
-		case config.ProviderTypeAnthropic, config.ProviderTypeCometAPI, config.ProviderTypeProMan:
+		if cred.Type == config.ProviderTypeCometAPI {
 			requestBody, anthropicBetas = anthropicconv.ExtractBetaHeader(requestBody)
 		}
 
@@ -1590,7 +1589,11 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 
 		// Copy headers and set auth
 		copyHeadersSkipAuth(proxyReq, r)
-		mergeAnthropicBetaHeader(proxyReq.Header, anthropicBetas)
+		if cred.Type == config.ProviderTypeCometAPI {
+			mergeAnthropicBetaHeader(proxyReq.Header, anthropicBetas)
+		} else {
+			proxyReq.Header.Del("anthropic-beta")
+		}
 		// For passthrough providers (OpenAI/Proxy) with multipart/form-data requests
 		// (e.g. /v1/images/edits), preserve the original Content-Type so the boundary
 		// parameter is forwarded intact. All other paths (Vertex, Anthropic, Bedrock,

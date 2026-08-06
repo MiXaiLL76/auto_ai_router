@@ -58,3 +58,49 @@ func TestProxyRequest_SendsAnthropicBetaAsHeader(t *testing.T) {
 	assert.Equal(t, "high", body["output_config"].(map[string]any)["effort"])
 	assert.Contains(t, w.Body.String(), `"reasoning_content":"reasoning"`)
 }
+
+func TestProxyRequest_DoesNotSendAnthropicBetaHeaderToOtherProviders(t *testing.T) {
+	for _, providerType := range []config.ProviderType{config.ProviderTypeAnthropic, config.ProviderTypeProMan} {
+		t.Run(string(providerType), func(t *testing.T) {
+			type capturedRequest struct {
+				header string
+				body   []byte
+			}
+			captured := make(chan capturedRequest, 1)
+			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				body, _ := io.ReadAll(r.Body)
+				captured <- capturedRequest{header: r.Header.Get("anthropic-beta"), body: body}
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{
+					"id":"msg_test","type":"message","role":"assistant","model":"claude-opus-4-7",
+					"content":[{"type":"text","text":"answer"}],
+					"stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":5}
+				}`))
+			}))
+			defer upstream.Close()
+
+			proxy := NewTestProxyBuilder().
+				WithSingleCredential("provider", providerType, upstream.URL, "upstream-key").
+				Build()
+			req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{
+				"model":"claude-opus-4.7",
+				"messages":[{"role":"user","content":"think"}],
+				"reasoning_effort":"high",
+				"max_completion_tokens":2048
+			}`))
+			req.Header.Set("Authorization", "Bearer master-key")
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("anthropic-beta", "interleaved-thinking-2025-05-14")
+			w := httptest.NewRecorder()
+
+			proxy.ProxyRequest(w, req)
+
+			require.Equal(t, http.StatusOK, w.Code)
+			outbound := <-captured
+			assert.Empty(t, outbound.header)
+			var body map[string]any
+			require.NoError(t, json.Unmarshal(outbound.body, &body))
+			assert.Equal(t, []any{"effort-2025-11-24"}, body["anthropic_beta"])
+		})
+	}
+}
