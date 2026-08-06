@@ -18,6 +18,14 @@ func TestOpenAIToAnthropic_AdaptiveThinkingDisplay(t *testing.T) {
 			body: `{"model":"claude-opus-4-8","messages":[{"role":"user","content":"test"}],"reasoning_effort":"high"}`,
 		},
 		{
+			name: "reasoning object requests summary",
+			body: `{"model":"claude-opus-4-8","messages":[{"role":"user","content":"test"}],"reasoning":{"effort":"high"}}`,
+		},
+		{
+			name: "extra body reasoning requests summary",
+			body: `{"model":"claude-opus-4-8","messages":[{"role":"user","content":"test"}],"extra_body":{"reasoning":{"effort":"high"}}}`,
+		},
+		{
 			name: "native display is preserved",
 			body: `{"model":"claude-opus-4-8","messages":[{"role":"user","content":"test"}],"thinking":{"type":"adaptive","effort":"high","display":"summarized"}}`,
 		},
@@ -36,6 +44,36 @@ func TestOpenAIToAnthropic_AdaptiveThinkingDisplay(t *testing.T) {
 			assert.Equal(t, "high", request["output_config"].(map[string]interface{})["effort"])
 		})
 	}
+}
+
+func TestOpenAIToAnthropic_ReasoningEffortPrecedence(t *testing.T) {
+	result, err := OpenAIToAnthropic([]byte(`{
+		"model":"claude-opus-5",
+		"messages":[{"role":"user","content":"test"}],
+		"reasoning_effort":"low",
+		"extra_body":{"reasoning":{"effort":"medium"}},
+		"reasoning":{"effort":"high"}
+	}`), "claude-opus-5")
+	require.NoError(t, err)
+
+	var request map[string]interface{}
+	require.NoError(t, json.Unmarshal(result, &request))
+	assert.Equal(t, "high", request["output_config"].(map[string]interface{})["effort"])
+}
+
+func TestOpenAIToAnthropic_ReasoningObjectCanDisableTopLevelEffort(t *testing.T) {
+	result, err := OpenAIToAnthropic([]byte(`{
+		"model":"claude-opus-5",
+		"messages":[{"role":"user","content":"test"}],
+		"reasoning_effort":"high",
+		"reasoning":{"effort":"none"}
+	}`), "claude-opus-5")
+	require.NoError(t, err)
+
+	var request map[string]interface{}
+	require.NoError(t, json.Unmarshal(result, &request))
+	assert.NotContains(t, request, "thinking")
+	assert.NotContains(t, request, "output_config")
 }
 
 func TestExtractSystemBlocks(t *testing.T) {

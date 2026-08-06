@@ -81,7 +81,7 @@ func OpenAIToAnthropic(openAIBody []byte, model string) ([]byte, error) {
 
 	// Thinking / reasoning config.
 	// Prefer req.Thinking (direct Anthropic-style param), then extra_body["thinking"],
-	// then fall back to reasoning_effort mapping.
+	// then fall back to OpenAI reasoning effort mapping.
 	var thinkingParam interface{}
 	if req.ExtraBody != nil {
 		thinkingParam = req.ExtraBody["thinking"]
@@ -89,7 +89,8 @@ func OpenAIToAnthropic(openAIBody []byte, model string) ([]byte, error) {
 	if req.Thinking != nil {
 		thinkingParam = req.Thinking
 	}
-	if tc, oc := mapThinkingConfig(thinkingParam, req.ReasoningEffort, anthropicReq.Model); tc != nil {
+	reasoningEffort := openAIReasoningEffort(req)
+	if tc, oc := mapThinkingConfig(thinkingParam, reasoningEffort, anthropicReq.Model); tc != nil {
 		anthropicReq.Thinking = tc
 		anthropicReq.OutputConfig = oc
 		anthropicReq.MaxTokens = EnsureMaxTokensForThinking(anthropicReq.MaxTokens, tc)
@@ -166,6 +167,28 @@ func OpenAIToAnthropic(openAIBody []byte, model string) ([]byte, error) {
 	}
 
 	return json.Marshal(anthropicReq)
+}
+
+func openAIReasoningEffort(req openai.OpenAIRequest) string {
+	effort := req.ReasoningEffort
+	if req.ExtraBody != nil {
+		if nested := reasoningObjectEffort(req.ExtraBody["reasoning"]); nested != "" {
+			effort = nested
+		}
+	}
+	if nested := reasoningObjectEffort(req.Reasoning); nested != "" {
+		effort = nested
+	}
+	return effort
+}
+
+func reasoningObjectEffort(value interface{}) string {
+	reasoning, ok := value.(map[string]interface{})
+	if !ok {
+		return ""
+	}
+	effort, _ := reasoning["effort"].(string)
+	return strings.TrimSpace(effort)
 }
 
 // convertOpenAIMessagesToAnthropic converts the OpenAI messages array to Anthropic format.
