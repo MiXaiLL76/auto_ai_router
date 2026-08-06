@@ -629,6 +629,10 @@ func (p *Proxy) executeProxyRequest(
 			cancelUpstream()
 		}
 	}()
+	var anthropicBetas []string
+	if r.URL.Path == "/v1/messages" {
+		body, anthropicBetas = anthropicconv.ExtractBetaHeader(body)
+	}
 	proxyReq, err := http.NewRequestWithContext(upstreamCtx, r.Method, targetURL, bytes.NewReader(body))
 	if err != nil {
 		p.logger.ErrorContext(r.Context(), "Failed to create proxy request", "error", err, "url", targetURL)
@@ -637,7 +641,7 @@ func (p *Proxy) executeProxyRequest(
 
 	// Copy headers (skip hop-by-hop headers)
 	copyRequestHeaders(proxyReq, r, cred.APIKey)
-	proxyReq.Header.Del("anthropic-beta")
+	mergeAnthropicBetaHeader(proxyReq.Header, anthropicBetas)
 	// Mark request as coming from an internal proxy client so the upstream router
 	// knows to include the X-Credential-Name response header.
 	proxyReq.Header.Set(HeaderAIRProxyClient, "1")
@@ -1548,9 +1552,11 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 				targetURL += "?" + r.URL.RawQuery
 			}
 		}
-		var anthropicBetas []string
+		anthropicBetas := append([]string(nil), prepared.messagesMetadata.AnthropicBetas...)
 		if cred.Type == config.ProviderTypeCometAPI {
-			requestBody, anthropicBetas = anthropicconv.ExtractBetaHeader(requestBody)
+			var generatedBetas []string
+			requestBody, generatedBetas = anthropicconv.ExtractBetaHeader(requestBody)
+			anthropicBetas = append(anthropicBetas, generatedBetas...)
 		}
 
 		// For Vertex AI, obtain OAuth2 token
@@ -1590,11 +1596,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 
 		// Copy headers and set auth
 		copyHeadersSkipAuth(proxyReq, r)
-		if cred.Type == config.ProviderTypeCometAPI {
-			mergeAnthropicBetaHeader(proxyReq.Header, anthropicBetas)
-		} else {
-			proxyReq.Header.Del("anthropic-beta")
-		}
+		mergeAnthropicBetaHeader(proxyReq.Header, anthropicBetas)
 		// For passthrough providers (OpenAI/Proxy) with multipart/form-data requests
 		// (e.g. /v1/images/edits), preserve the original Content-Type so the boundary
 		// parameter is forwarded intact. All other paths (Vertex, Anthropic, Bedrock,

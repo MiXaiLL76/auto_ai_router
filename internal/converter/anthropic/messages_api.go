@@ -19,7 +19,8 @@ const maxOpenAIToolNameLength = 64
 var invalidToolUseIDChar = regexp.MustCompile(`[^a-zA-Z0-9_-]`)
 
 type MessagesAdapterMetadata struct {
-	ToolNames map[string]string
+	ToolNames      map[string]string
+	AnthropicBetas []string
 }
 
 func MessagesToChat(body []byte) ([]byte, MessagesAdapterMetadata, error) {
@@ -96,31 +97,16 @@ func MessagesToChat(body []byte) ([]byte, MessagesAdapterMetadata, error) {
 		chat["stream_options"] = map[string]interface{}{"include_usage": true}
 	}
 
-	// anthropic_beta has no Chat Completions equivalent field; fold it into
-	// extra_body so the reverse conversion (OpenAIToAnthropic) can pick it back
-	// up via req.ExtraBody["anthropic_beta"] instead of silently dropping it.
-	if betas := extractBetaStrings(request["anthropic_beta"]); len(betas) > 0 {
-		extraBody, _ := chat["extra_body"].(map[string]interface{})
-		if extraBody == nil {
-			extraBody = map[string]interface{}{}
-		}
-		if existing, ok := extraBody["anthropic_beta"]; ok {
-			betas = append(extractBetaStrings(existing), betas...)
-		}
-		extraBody["anthropic_beta"] = betas
-		chat["extra_body"] = extraBody
-	}
-
 	converted, err := json.Marshal(chat)
 	if err != nil {
 		return nil, MessagesAdapterMetadata{}, fmt.Errorf("failed to encode Chat Completions request: %w", err)
 	}
-	return converted, MessagesAdapterMetadata{ToolNames: toolNames}, nil
+	return converted, MessagesAdapterMetadata{
+		ToolNames:      toolNames,
+		AnthropicBetas: extractBetaStrings(request["anthropic_beta"]),
+	}, nil
 }
 
-// extractBetaStrings normalizes an anthropic_beta value (string, []interface{}
-// of strings, or already-decoded []string) into a clean []string, trimming
-// whitespace and dropping empties. Unrecognized shapes yield nil.
 func extractBetaStrings(raw interface{}) []string {
 	var betas []string
 	switch v := raw.(type) {

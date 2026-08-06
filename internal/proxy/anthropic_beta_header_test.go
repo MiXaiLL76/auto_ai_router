@@ -59,7 +59,7 @@ func TestProxyRequest_SendsAnthropicBetaAsHeader(t *testing.T) {
 	assert.Contains(t, w.Body.String(), `"reasoning_content":"reasoning"`)
 }
 
-func TestProxyRequest_DoesNotSendAnthropicBetaHeaderToOtherProviders(t *testing.T) {
+func TestProxyRequest_DoesNotAddReasoningBetaHeaderToOtherProviders(t *testing.T) {
 	for _, providerType := range []config.ProviderType{config.ProviderTypeAnthropic, config.ProviderTypeProMan} {
 		t.Run(string(providerType), func(t *testing.T) {
 			type capturedRequest struct {
@@ -90,7 +90,6 @@ func TestProxyRequest_DoesNotSendAnthropicBetaHeaderToOtherProviders(t *testing.
 			}`))
 			req.Header.Set("Authorization", "Bearer master-key")
 			req.Header.Set("Content-Type", "application/json")
-			req.Header.Set("anthropic-beta", "interleaved-thinking-2025-05-14")
 			w := httptest.NewRecorder()
 
 			proxy.ProxyRequest(w, req)
@@ -105,7 +104,7 @@ func TestProxyRequest_DoesNotSendAnthropicBetaHeaderToOtherProviders(t *testing.
 	}
 }
 
-func TestProxyRequest_MessagesBetaStaysInBodyOutsideComet(t *testing.T) {
+func TestProxyRequest_ForwardsMessagesBetaAsHeader(t *testing.T) {
 	for _, providerType := range []config.ProviderType{config.ProviderTypeAnthropic, config.ProviderTypeAIR} {
 		t.Run(string(providerType), func(t *testing.T) {
 			type capturedRequest struct {
@@ -132,6 +131,8 @@ func TestProxyRequest_MessagesBetaStaysInBodyOutsideComet(t *testing.T) {
 				"model":"claude-opus-4.7",
 				"max_tokens":100,
 				"messages":[{"role":"user","content":"hi"}],
+				"thinking":{"type":"adaptive"},
+				"output_config":{"effort":"high"},
 				"anthropic_beta":["prompt-caching-2024-07-31"]
 			}`))
 			req.Header.Set("Authorization", "Bearer master-key")
@@ -143,10 +144,14 @@ func TestProxyRequest_MessagesBetaStaysInBodyOutsideComet(t *testing.T) {
 
 			require.Equal(t, http.StatusOK, w.Code)
 			outbound := <-captured
-			assert.Empty(t, outbound.header)
+			assert.Equal(t, "client-beta,prompt-caching-2024-07-31", outbound.header)
 			var body map[string]any
 			require.NoError(t, json.Unmarshal(outbound.body, &body))
-			assert.Equal(t, []any{"prompt-caching-2024-07-31"}, body["anthropic_beta"])
+			if providerType == config.ProviderTypeAnthropic {
+				assert.Equal(t, []any{"effort-2025-11-24"}, body["anthropic_beta"])
+			} else {
+				assert.NotContains(t, body, "anthropic_beta")
+			}
 		})
 	}
 }
