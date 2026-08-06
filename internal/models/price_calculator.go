@@ -3,6 +3,7 @@ package models
 import (
 	"strings"
 
+	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/converter"
 	"github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
 )
@@ -27,32 +28,18 @@ type fullSessionTier struct {
 	cacheCreationRate float64
 }
 
-// longContextFullSessionProviders lists litellm_provider substrings whose
-// documented billing rule is "once input context exceeds 200k tokens, the
-// entire request (input, output, and cache) is billed at the long-context
-// rate" (e.g. Google's Gemini pricing). This differs from the default 200k
-// tier semantics below, which bill only the excess above 200k (Anthropic's
-// documented Claude Sonnet behavior) — the same *_above_200k_tokens price
-// fields are reused for both, only the billing style differs per provider.
-var longContextFullSessionProviders = []string{"gemini", "vertex"}
-
-// isLongContextFullSessionProvider reports whether provider's documented 200k
-// context-length pricing bills the whole request rather than just the excess.
-func isLongContextFullSessionProvider(provider string) bool {
-	provider = strings.ToLower(provider)
-	for _, p := range longContextFullSessionProviders {
-		if strings.Contains(provider, p) {
-			return true
-		}
-	}
-	return false
-}
-
 // fullSessionTiers returns the configured full-session tiers in descending
 // threshold order, so the first matching entry is always the highest
 // (most specific) bracket the prompt has crossed. 200k is included only for
-// providers whose real billing rule is full-session at that threshold
-// (see isLongContextFullSessionProvider); otherwise 200k keeps its separate
+// providers whose documented billing rule is "once input context exceeds
+// 200k tokens, the entire request (input, output, and cache) is billed at
+// the long-context rate" — Google's Gemini/Vertex AI family, detected via
+// config.IsGoogleGeminiProvider (shared with LiteLLM DB provider-type
+// routing so the two can't drift apart on which aliases count as Gemini).
+// This differs from the default 200k tier semantics below, which bill only
+// the excess above 200k (Anthropic's documented Claude Sonnet behavior) —
+// the same *_above_200k_tokens price fields are reused for both, only the
+// billing style differs per provider. Otherwise 200k keeps its separate
 // proportional-only handling further down in CalculateTokenCosts.
 func fullSessionTiers(price *ModelPrice) []fullSessionTier {
 	tiers := []fullSessionTier{
@@ -71,7 +58,7 @@ func fullSessionTiers(price *ModelPrice) []fullSessionTier {
 			cacheCreationRate: price.CacheCreationInputTokenCostAbove256k,
 		},
 	}
-	if isLongContextFullSessionProvider(price.LiteLLMProvider) {
+	if config.IsGoogleGeminiProvider(price.LiteLLMProvider) {
 		tiers = append(tiers, fullSessionTier{
 			threshold:         tokenTiering200kThreshold,
 			inputRate:         price.InputCostPerTokenAbove200k,

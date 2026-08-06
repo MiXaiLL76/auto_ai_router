@@ -296,7 +296,7 @@ func mapProviderType(provider string) config.ProviderType {
 		return config.ProviderTypeOpenAI
 	case strings.Contains(p, "vertex"):
 		return config.ProviderTypeVertexAI
-	case strings.Contains(p, "google"):
+	case config.IsGoogleGeminiProvider(p):
 		return config.ProviderTypeGemini
 	case strings.Contains(p, "cometapi") || strings.Contains(p, "comet-api"):
 		return config.ProviderTypeCometAPI

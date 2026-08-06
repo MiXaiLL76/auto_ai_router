@@ -1202,3 +1202,24 @@ func TestCalculateTokenCosts_Gemini256kTakesPrecedenceOver200k(t *testing.T) {
 	require.NotNil(t, costs)
 	assert.InDelta(t, 260_000*0.000004, costs.InputCost, 1e-9)
 }
+
+func TestCalculateTokenCosts_GoogleProviderAlias200k_FullSession(t *testing.T) {
+	// LiteLLM DB config routes both "google" and "google_ai_studio" custom_llm_provider
+	// values to the Gemini provider type (see mapProviderType), so billing must
+	// recognize them too -- not just the literal "gemini"/"vertex" strings.
+	for _, provider := range []string{"google", "google_ai_studio", "GoogleAI"} {
+		t.Run(provider, func(t *testing.T) {
+			usage := &converter.TokenUsage{PromptTokens: 300_000}
+			price := &ModelPrice{
+				LiteLLMProvider:            provider,
+				InputCostPerToken:          0.000001625,
+				InputCostPerTokenAbove200k: 0.00000325,
+			}
+
+			costs := CalculateTokenCosts(usage, price)
+
+			require.NotNil(t, costs)
+			assert.InDelta(t, 300_000*0.00000325, costs.InputCost, 1e-9, "provider %q must bill full-session at 200k", provider)
+		})
+	}
+}
