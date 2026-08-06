@@ -10,7 +10,7 @@ on:
 jobs:
   smoke:
     name: Run on self-hosted runner
-    runs-on: arc-runner-set
+    runs-on: arc-runner-set-auto-ai-router
 
     steps:
       - name: Where am I
