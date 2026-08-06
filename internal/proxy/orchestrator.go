@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -35,11 +36,14 @@ type orchestratedRequest struct {
 	streaming            bool
 	cred                 *config.CredentialConfig
 	isResponsesAPI       bool
+	isMessagesAPI        bool
 	convertedResp        bool
+	convertedMessages    bool
 	passthroughResponses bool // true for codex/OpenAI models: Responses API forwarded as-is (no conversion)
 	nativeResponses      bool // true when using Phase 4 ProviderResponses converter (Vertex/Anthropic)
 	responsesPrevHandled bool
 	responsesMetadata    *responses.ResponsesMetadata // non-nil for Responses API requests
+	messagesMetadata     anthropicconv.MessagesAdapterMetadata
 	stickyCacheEligible  bool
 }
 
@@ -50,8 +54,10 @@ type credentialPreparedRequest struct {
 	realModelID          string
 	path                 string
 	convertedResp        bool
+	convertedMessages    bool
 	passthroughResponses bool
 	nativeResponses      bool
+	messagesMetadata     anthropicconv.MessagesAdapterMetadata
 }
 
 // orchestrateRequest performs auth and credential selection for an incoming request.
@@ -73,36 +79,12 @@ func (p *Proxy) orchestrateRequest(
 		return nil, false
 	}
 
-	// Enforce the key's model allow-list now that the model is known. The master
-	// key (admin scope) bypasses this. Previously IsModelAllowed was never checked
-	// in prod because auth ran before the body/model was parsed (todo P0.3).
-	//
-	// Check every alias that resolves to the same provider-facing model, not just
-	// modelID: config.yaml commonly exposes one model under several route aliases
-	// (e.g. "claude-haiku-4.5" and "anthropic/claude-haiku-4.5" for the same
-	// credential+model), and a key restricted to one such alias is meant to allow
-	// the underlying model regardless of which spelling the client calls it by.
-	if !logCtx.Scope.Admin && logCtx.TokenInfo != nil {
-		aliases := []string{modelID}
-		if p.modelManager != nil {
-			aliases = p.modelManager.GetAliasesForModel(modelID, realModelID)
-		}
-		if !logCtx.TokenInfo.IsAnyModelAllowed(aliases) {
-			p.logger.WarnContext(r.Context(), "Model not allowed for this API key",
-				"error_code", http.StatusForbidden, "model", modelID)
-			logCtx.Status = "failure"
-			logCtx.HTTPStatus = http.StatusForbidden
-			logCtx.ErrorMsg = "model not allowed for this key"
-			WriteErrorForbidden(w, "Model not allowed for this API key")
-			return nil, false
-		}
+	routingExclusions := p.reasoningOnlyExclusions(body)
+	triedCreds := GetTried(r.Context())
+	for name := range routingExclusions {
+		triedCreds[name] = true
 	}
-
-	// Atomic Redis budget reservation + per-key/team/org RPM/TPM enforcement
-	// (no-op when Redis is disabled; admin bypasses). Runs after the model is known.
-	if !p.enforceBudgetAndRateLimits(w, r, logCtx, modelID, realModelID, body) {
-		return nil, false
-	}
+	r = r.WithContext(SetTried(r.Context(), triedCreds))
 
 	// proxyBody: body with the original alias restored.
 	// Proxy credentials handle their own model routing, so they must receive the
@@ -119,6 +101,7 @@ func (p *Proxy) orchestrateRequest(
 
 	// Detect Responses API requests and select credential before conversion.
 	isResponsesAPI := responses.IsResponsesAPI(body) && strings.Contains(r.URL.Path, "/responses")
+	isMessagesAPI := r.URL.Path == "/v1/messages"
 
 	var responsesMetadata *responses.ResponsesMetadata
 	var prevEntry *responsestore.StoredEntry
@@ -143,13 +126,14 @@ func (p *Proxy) orchestrateRequest(
 		}
 	}
 
-	cred, ok := p.selectCredentialForModel(w, modelID, logCtx.SessionID, preferredCredentialName, logCtx)
+	cred, ok := p.selectCredentialForModel(w, modelID, logCtx.SessionID, preferredCredentialName, routingExclusions, logCtx)
 	if !ok {
 		return nil, false
 	}
 
 	p.logger.DebugContext(r.Context(), "Responses API detection",
 		"is_responses_api", isResponsesAPI,
+		"is_messages_api", isMessagesAPI,
 		"provider", cred.Type,
 		"model", modelID,
 		"streaming", streaming,
@@ -202,6 +186,12 @@ func (p *Proxy) orchestrateRequest(
 		stickyCacheEligible,
 	)
 	if prepErr != nil {
+		apiName := "request"
+		if isResponsesAPI {
+			apiName = "Responses API request"
+		} else if isMessagesAPI {
+			apiName = "Messages API request"
+		}
 		p.logger.ErrorContext(r.Context(), "Failed to prepare request for credential",
 			"error_code", http.StatusBadRequest,
 			"credential", cred.Name, "provider", string(cred.Type),
@@ -209,8 +199,8 @@ func (p *Proxy) orchestrateRequest(
 			"request_id", logCtx.RequestID)
 		logCtx.Status = "failure"
 		logCtx.HTTPStatus = http.StatusBadRequest
-		logCtx.ErrorMsg = "Failed to convert Responses API request: " + prepErr.Error()
-		WriteErrorBadRequest(w, "Failed to convert Responses API request")
+		logCtx.ErrorMsg = "Failed to convert " + apiName + ": " + prepErr.Error()
+		WriteErrorBadRequest(w, "Failed to convert "+apiName)
 		return nil, false
 	}
 	body = credentialReq.body
@@ -235,11 +225,14 @@ func (p *Proxy) orchestrateRequest(
 		streaming:            streaming,
 		cred:                 cred,
 		isResponsesAPI:       isResponsesAPI,
+		isMessagesAPI:        isMessagesAPI,
 		convertedResp:        credentialReq.convertedResp,
+		convertedMessages:    credentialReq.convertedMessages,
 		passthroughResponses: credentialReq.passthroughResponses,
 		nativeResponses:      credentialReq.nativeResponses,
 		responsesPrevHandled: prevEntryHandled,
 		responsesMetadata:    responsesMetadata,
+		messagesMetadata:     credentialReq.messagesMetadata,
 		stickyCacheEligible:  stickyCacheEligible,
 	}, true
 }
@@ -260,7 +253,7 @@ func (p *Proxy) prepareRequestForCredential(
 	body := baseBody
 	proxyBody := baseProxyBody
 	realModelID := baseRealModelID
-	if cred.Type != config.ProviderTypeProxy && p.modelManager != nil {
+	if !cred.IsProxyLike() && p.modelManager != nil {
 		if credRealName, ok := p.modelManager.GetRealModelNameForCredential(modelID, cred.Name); ok && credRealName != realModelID {
 			p.logger.DebugContext(r.Context(), "Re-resolved real model name for credential",
 				"alias", modelID,
@@ -275,7 +268,7 @@ func (p *Proxy) prepareRequestForCredential(
 
 	if p.stickyAutoCacheCtrl &&
 		stickyCacheEligible &&
-		(cred.Type == config.ProviderTypeAnthropic || cred.Type == config.ProviderTypeCometAPI || cred.Type == config.ProviderTypeBedrock) {
+		(cred.Type == config.ProviderTypeAnthropic || cred.Type == config.ProviderTypeCometAPI || cred.Type == config.ProviderTypeProMan || cred.Type == config.ProviderTypeBedrock) {
 		body = anthropicconv.InjectCacheControl(body)
 	}
 
@@ -285,6 +278,23 @@ func (p *Proxy) prepareRequestForCredential(
 		proxyPath:   basePath,
 		realModelID: realModelID,
 		path:        basePath,
+	}
+	if basePath == "/v1/messages" {
+		if cred.IsProxyLike() {
+			// Proxy-like credentials (AIR-to-AIR chaining) forward the original
+			// Anthropic-shaped request/path as-is; the downstream peer does its
+			// own routing and conversion, same as the Responses API passthrough.
+			return req, nil
+		}
+		chatBody, metadata, err := anthropicconv.MessagesToChat(body)
+		if err != nil {
+			return req, err
+		}
+		req.body = openai.ReplaceBodyParam(realModelID, chatBody)
+		req.path = "/v1/chat/completions"
+		req.convertedMessages = true
+		req.messagesMetadata = metadata
+		return req, nil
 	}
 	if !isResponsesAPI {
 		req.body = openai.ReplaceBodyParam(realModelID, body)
@@ -298,7 +308,8 @@ func (p *Proxy) prepareRequestForCredential(
 		req.passthroughResponses = true
 		p.logger.DebugContext(r.Context(), "Native Responses API passthrough",
 			"model", modelID, "provider", cred.Type, "streaming", streaming)
-	case responses.HasNativeResponsesForModel(cred.Type, realModelID):
+	case responses.HasNativeResponsesForModel(cred.Type, realModelID) &&
+		(p.modelManager == nil || !p.modelManager.HasPassthroughResponsesOverride(modelID)):
 		req.nativeResponses = true
 		p.logger.DebugContext(r.Context(), "Native Responses converter path",
 			"model", modelID, "provider", cred.Type, "streaming", streaming)
@@ -344,14 +355,120 @@ func (p *Proxy) isLiteLLMHealthy() bool {
 	return p.LiteLLMDB.IsHealthy()
 }
 
+type clientCredentialState uint8
+
+const (
+	clientCredentialMissing clientCredentialState = iota
+	clientCredentialMalformed
+	clientCredentialPresent
+)
+
+// extractClientToken implements the public client-credential transport contract.
+// Authorization is authoritative whenever the header is present: a malformed
+// Bearer value must never fall through to a valid x-api-key value.
+func extractClientToken(r *http.Request) (string, clientCredentialState) {
+	if r == nil {
+		return "", clientCredentialMissing
+	}
+	authorizationValues, authorizationPresent := headerValuesFold(r.Header, "Authorization")
+	if authorizationPresent {
+		if len(authorizationValues) != 1 {
+			return "", clientCredentialMalformed
+		}
+		authHeader := strings.TrimSpace(authorizationValues[0])
+		if authHeader == "" {
+			return "", clientCredentialMissing
+		}
+		parts := strings.Fields(authHeader)
+		if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") || strings.ContainsRune(parts[1], ',') {
+			return "", clientCredentialMalformed
+		}
+		return parts[1], clientCredentialPresent
+	}
+	xAPIKeyValues, xAPIKeyPresent := headerValuesFold(r.Header, "X-Api-Key")
+	if !xAPIKeyPresent {
+		return "", clientCredentialMissing
+	}
+	if len(xAPIKeyValues) != 1 {
+		return "", clientCredentialMalformed
+	}
+	token := strings.TrimSpace(xAPIKeyValues[0])
+	if token == "" {
+		return "", clientCredentialMissing
+	}
+	if strings.ContainsAny(token, ", \t\r\n") {
+		return "", clientCredentialMalformed
+	}
+	return token, clientCredentialPresent
+}
+
+// headerValuesFold collects all values for a header name without relying on
+// canonical map keys. This keeps precedence and duplicate detection intact for
+// requests assembled by middleware that wrote directly to http.Header.
+func headerValuesFold(header http.Header, name string) ([]string, bool) {
+	var values []string
+	present := false
+	for key, currentValues := range header {
+		if !strings.EqualFold(key, name) {
+			continue
+		}
+		present = true
+		values = append(values, currentValues...)
+	}
+	return values, present
+}
+
+// AuthenticateClientRequest authenticates a non-inference public endpoint by
+// using the exact same master-key/LiteLLM validation path as ProxyRequest.
+func (p *Proxy) AuthenticateClientRequest(w http.ResponseWriter, r *http.Request) (*models.TokenInfo, bool) {
+	tokenInfo, _, ok := p.AuthenticateClientRequestScoped(w, r)
+	return tokenInfo, ok
+}
+
+// AuthenticateClientRequestScoped authenticates once and returns the exact
+// scope derived from that same credential. This keeps /v1/models visibility
+// identical for Authorization and x-api-key transports and avoids a second DB
+// validation with a different header parser.
+func (p *Proxy) AuthenticateClientRequestScoped(w http.ResponseWriter, r *http.Request) (*models.TokenInfo, scope.Context, bool) {
+	if p == nil {
+		WriteErrorServiceUnavailable(w, "Service unavailable")
+		return nil, scope.PublicContext(), false
+	}
+	logCtx := &RequestLogContext{Request: r}
+	if !p.authenticateRequest(w, r, logCtx, p.isLiteLLMHealthy()) {
+		return nil, scope.PublicContext(), false
+	}
+	return logCtx.TokenInfo, logCtx.Scope, true
+}
+
+func (p *Proxy) IsModelAllowedForToken(tokenInfo *models.TokenInfo, model string) bool {
+	if tokenInfo == nil || !p.strictAllTeamModelsACL {
+		return true
+	}
+	var matcher models.ModelScopeMatcher
+	if p.modelManager != nil {
+		matcher = p.modelManager.IsModelIDAllowedByScope
+	}
+	return tokenInfo.IsModelAllowedByPolicy(model, matcher, models.ModelAccessPolicy{
+		StrictAllTeamModelsACL: true,
+	})
+}
+
 func (p *Proxy) authenticateRequest(
 	w http.ResponseWriter,
 	r *http.Request,
 	logCtx *RequestLogContext,
 	isLiteLLMHealthy bool,
 ) bool {
-	authHeader := r.Header.Get("Authorization")
-	if authHeader == "" {
+	if trusted, ok := trustedClientAuthFromRequest(r); ok {
+		logCtx.Token = trusted.rawToken
+		logCtx.TokenInfo = trusted.tokenInfo
+		logCtx.Scope = scopeContextFromTokenInfo(trusted.tokenInfo)
+		return true
+	}
+
+	token, credentialState := extractClientToken(r)
+	if credentialState == clientCredentialMissing {
 		// Client-side error (bad request from the caller), not a service failure
 		p.logger.WarnContext(r.Context(), "Missing Authorization header",
 			"error_code", http.StatusUnauthorized, "path", r.URL.Path)
@@ -361,9 +478,7 @@ func (p *Proxy) authenticateRequest(
 		WriteErrorUnauthorized(w, "Missing Authorization header")
 		return false
 	}
-
-	token, ok := bearerToken(authHeader)
-	if !ok {
+	if credentialState == clientCredentialMalformed {
 		p.logger.WarnContext(r.Context(), "Invalid Authorization header format",
 			"error_code", http.StatusUnauthorized, "path", r.URL.Path)
 		logCtx.Status = "failure"
@@ -375,40 +490,41 @@ func (p *Proxy) authenticateRequest(
 	logCtx.Token = token
 
 	if p.isMasterKey(token) {
-		logCtx.TokenInfo = &models.TokenInfo{Token: auth.HashToken(p.masterKey), KeyName: "litellm-master-key", UserID: "litellm-master-key"}
+		logCtx.TokenInfo = &models.TokenInfo{
+			Token:       auth.HashToken(p.masterKey),
+			KeyName:     liteLLMMasterKeyIdentity,
+			UserID:      liteLLMMasterKeyIdentity,
+			IsMasterKey: true,
+		}
 		logCtx.Scope = scope.AdminContext()
 		return true
 	}
 
-	if isLiteLLMHealthy {
-		tokenInfo, err := p.LiteLLMDB.ValidateToken(r.Context(), token)
-		logCtx.TokenInfo = tokenInfo
-		if err != nil {
-			logCtx.Status = "failure"
-			logCtx.HTTPStatus = http.StatusUnauthorized
-
-			if p.handleLiteLLMAuthError(r.Context(), w, err, token) {
-				logCtx.ErrorMsg = "LiteLLM auth validation failed"
-			} else {
-				logCtx.ErrorMsg = "LiteLLM DB unavailable"
-			}
-			return false
-		} else if tokenInfo != nil {
-			p.logger.DebugContext(r.Context(), "Token validated via LiteLLM DB",
-				"user_id", tokenInfo.UserID,
-				"team_id", tokenInfo.TeamID,
-			)
-		}
-		logCtx.Scope = scopeContextFromTokenInfo(tokenInfo)
-		return true
-	} else {
+	if !isLiteLLMHealthy {
 		p.logger.WarnContext(r.Context(), "Invalid master key",
 			"error_code", http.StatusUnauthorized,
 			"provided_key_prefix", security.MaskAPIKey(token))
 		WriteErrorUnauthorized(w, "Invalid master key")
+		return false
 	}
 
-	return false
+	tokenInfo, err := p.LiteLLMDB.ValidateToken(r.Context(), token)
+	logCtx.TokenInfo = tokenInfo
+	if err == nil && tokenInfo == nil {
+		// A successful validation without identity is never an authenticated
+		// result. Fail closed if a manager implementation violates its contract.
+		err = litellmdb.ErrTokenNotFound
+	}
+	if err != nil {
+		p.handleLiteLLMAuthError(r.Context(), w, logCtx, err, token)
+		return false
+	}
+	p.logger.DebugContext(r.Context(), "Token validated via LiteLLM DB",
+		"user_id", tokenInfo.UserID,
+		"team_id", tokenInfo.TeamID,
+	)
+	logCtx.Scope = scopeContextFromTokenInfo(tokenInfo)
+	return true
 }
 
 func (p *Proxy) readRequestBodyAndSelectModel(
@@ -444,7 +560,42 @@ func (p *Proxy) readRequestBodyAndSelectModel(
 		return nil, "", "", false, false
 	}
 
-	modelID, streaming, sessionID, body := extractMetadataFromBody(body, r.Header.Get("Content-Type"))
+	sanitized, err := sanitizeAndExtractRequestBody(body, r.Header.Get("Content-Type"))
+	if err != nil {
+		p.logger.WarnContext(r.Context(), "Failed to sanitize request body",
+			"error_code", http.StatusBadRequest, "error", err)
+		logCtx.Status = "failure"
+		logCtx.HTTPStatus = http.StatusBadRequest
+		if errors.Is(err, errInvalidMultipartRequestBody) {
+			logCtx.ErrorMsg = "Invalid multipart request body: " + err.Error()
+			WriteErrorBadRequest(w, "Invalid multipart request body")
+		} else {
+			logCtx.ErrorMsg = "Invalid request body: " + err.Error()
+			WriteErrorBadRequest(w, "Invalid request body")
+		}
+		return nil, "", "", false, false
+	}
+	body = sanitized.Body
+	if info := responseCompatRequestFromContext(r.Context()); info != nil {
+		info.RequestedModel = sanitized.ModelID
+		info.IncludeUsage = strings.Contains(r.URL.Path, "/responses") || clientRequestedStreamUsage(body)
+		info.Streaming = sanitized.Streaming
+		compatibleBody := applyLiteLLMRequestCompatibility(r.URL.Path, body)
+		if !bytes.Equal(compatibleBody, body) {
+			body = compatibleBody
+			sanitized.Changed = true
+		}
+	}
+	modelID := sanitized.ModelID
+	streaming := sanitized.Streaming
+	sessionID := sanitized.SessionID
+	if sanitized.Changed {
+		r.ContentLength = int64(len(body))
+		r.Header.Del("Content-Length")
+		dropRepresentationIntegrityHeaders(r.Header)
+		r.Header.Del("Content-Encoding")
+	}
+	logCtx.PublicModelID = modelID
 	logCtx.ModelID = modelID
 	logCtx.SessionID = sessionID
 
@@ -456,6 +607,66 @@ func (p *Proxy) readRequestBodyAndSelectModel(
 		logCtx.ErrorMsg = "Model not specified in request body"
 		WriteErrorBadRequest(w, "model field is required")
 		return nil, "", "", false, false
+	}
+	// An unrestricted virtual key must still stay inside the configured product
+	// model surface. Provider backend IDs remain available to the trusted
+	// LiteLLM -> AIR hop authenticated with AIR's master key, but ordinary keys
+	// cannot discover or invoke them even when their DB model ACL is empty.
+	trustedInternalModelID := p.isMasterKey(logCtx.Token)
+	modelAllowed := p.IsModelAllowedForToken(logCtx.TokenInfo, modelID)
+	if !modelAllowed {
+		p.logger.WarnContext(r.Context(), "Model is not allowed for token",
+			"error_code", http.StatusForbidden,
+			"model", modelID,
+		)
+		logCtx.Status = "failure"
+		logCtx.HTTPStatus = http.StatusForbidden
+		logCtx.ErrorMsg = "Model not allowed"
+		WriteErrorForbidden(w, "Model not allowed")
+		return nil, "", "", false, false
+	}
+	if p.modelManager != nil && !trustedInternalModelID && !p.modelManager.IsClientModelIDRoutable(modelID) {
+		p.logger.WarnContext(r.Context(), "Client model identifier is not exposed",
+			"error_code", http.StatusNotFound,
+			"model", modelID,
+		)
+		logCtx.Status = "failure"
+		logCtx.HTTPStatus = http.StatusNotFound
+		logCtx.ErrorMsg = fmt.Sprintf("Model %s not found", modelID)
+		// Product-surface rejections happen before a provider attempt. Suppress
+		// the deferred zero-spend failure row just like an unknown model.
+		logCtx.Logged = true
+		WriteErrorNotFound(w, logCtx.ErrorMsg)
+		return nil, "", "", false, false
+	}
+
+	// Resolve additional client-visible names to one exact LiteLLM deployment
+	// identity first. The requested name remains in PublicModelID while routing
+	// continues through the canonical public model and provider-backend alias.
+	// A trusted LiteLLM hop may submit an exact configured backend whose string
+	// also exists in the client accepted-alias map. Preserve that exact internal
+	// route; non-master callers and non-routable aliases still use the fail-closed
+	// public resolver.
+	trustedExactModelID := trustedInternalModelID && len(p.modelManager.GetCredentialsForModel(modelID)) > 0
+	if trustedExactModelID {
+		p.logger.DebugContext(r.Context(), "Preserved trusted internal model identifier", "model", modelID)
+	} else if canonical, isPublicAlias, aliasErr := p.modelManager.ResolvePublicModelAlias(modelID); aliasErr != nil {
+		p.logger.WarnContext(r.Context(), "Public model alias is not uniquely routable",
+			"error_code", http.StatusNotFound,
+			"model", modelID,
+			"error", aliasErr,
+		)
+		logCtx.Status = "failure"
+		logCtx.HTTPStatus = http.StatusNotFound
+		logCtx.ErrorMsg = fmt.Sprintf("Model %s not found", modelID)
+		logCtx.Logged = true
+		WriteErrorNotFound(w, logCtx.ErrorMsg)
+		return nil, "", "", false, false
+	} else if isPublicAlias {
+		p.logger.DebugContext(r.Context(), "Resolved public model alias", "alias", modelID, "canonical", canonical)
+		body = openai.ReplaceModelInBody(body, modelID, canonical)
+		modelID = canonical
+		logCtx.ModelID = modelID
 	}
 
 	// Resolve model_alias entries (changes modelID to real name; credential lookup uses real name)
@@ -474,7 +685,6 @@ func (p *Proxy) readRequestBodyAndSelectModel(
 		body = openai.ReplaceModelInBody(body, modelID, realName)
 		realModelID = realName
 	}
-
 	return body, modelID, realModelID, streaming, true
 }
 
@@ -483,9 +693,29 @@ func (p *Proxy) selectCredentialForModel(
 	modelID string,
 	sessionID string,
 	preferredCredentialName string,
+	exclude map[string]bool,
 	logCtx *RequestLogContext,
 ) (*config.CredentialConfig, bool) {
-	if preferredCredentialName != "" {
+	if p.modelManager != nil && p.modelManager.IsEnabled() && len(p.modelManager.GetCredentialsForModel(modelID)) == 0 {
+		errorMsg := fmt.Sprintf("Model %s not found", modelID)
+		p.logger.WarnContext(logCtx.Context(), "Model is not configured",
+			"error_code", http.StatusNotFound,
+			"model", modelID,
+			"request_id", logCtx.RequestID,
+		)
+
+		logCtx.Status = "failure"
+		logCtx.HTTPStatus = http.StatusNotFound
+		logCtx.ErrorMsg = errorMsg
+		// Unknown models are rejected before a credential exists. Mark the
+		// request handled so the deferred logger cannot emit a zero-spend row.
+		logCtx.Logged = true
+
+		WriteErrorNotFound(w, errorMsg)
+		return nil, false
+	}
+
+	if preferredCredentialName != "" && !exclude[preferredCredentialName] {
 		cred, err := p.balancer.NextSpecificScoped(preferredCredentialName, modelID, logCtx.Scope)
 		if err == nil {
 			p.logger.DebugContext(logCtx.Context(), "Responses API sticky routing: using credential from previous_response_id",
@@ -503,7 +733,7 @@ func (p *Proxy) selectCredentialForModel(
 	}
 
 	if sessionID != "" && p.sessionStore != nil {
-		if credName, ok := p.sessionStore.Get(sessionID, modelID); ok {
+		if credName, ok := p.sessionStore.Get(sessionID, modelID); ok && !exclude[credName] {
 			cred, err := p.balancer.NextSpecificScoped(credName, modelID, logCtx.Scope)
 			if err == nil {
 				p.logger.DebugContext(logCtx.Context(), "Session-sticky routing: using cached credential",
@@ -523,13 +753,13 @@ func (p *Proxy) selectCredentialForModel(
 		}
 	}
 
-	cred, err := p.balancer.NextForModelScoped(modelID, logCtx.Scope)
+	cred, err := p.balancer.NextForModelExcludingScoped(modelID, exclude, logCtx.Scope)
 	if err == nil {
 		return cred, true
 	}
 
 	fallbackErr := error(nil)
-	cred, fallbackErr = p.balancer.NextFallbackForModelScoped(modelID, logCtx.Scope)
+	cred, fallbackErr = p.balancer.NextFallbackForModelExcludingScoped(modelID, exclude, logCtx.Scope)
 	if fallbackErr == nil {
 		return cred, true
 	}
@@ -565,7 +795,6 @@ func (p *Proxy) selectCredentialForModel(
 		)
 	}
 	logCtx.Logged = true
-
 	WriteErrorRateLimit(w, errorMsg)
 	return nil, false
 }

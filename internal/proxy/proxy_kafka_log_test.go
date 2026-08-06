@@ -10,6 +10,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/converter"
 	"github.com/mixaill76/auto_ai_router/internal/kafkalog"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb"
+	pricingmodels "github.com/mixaill76/auto_ai_router/internal/models"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -50,11 +51,19 @@ func testLogCtx(t *testing.T) *RequestLogContext {
 			BaseURL: "https://api.openai.com/v1",
 		},
 		TokenUsage: &converter.TokenUsage{
-			PromptTokens:     100,
-			CompletionTokens: 50,
+			PromptTokens:         100,
+			CompletionTokens:     50,
+			WebSearchRequests:    2,
+			WebSearchContextSize: "high",
 		},
 		SessionID: "session-1",
 	}
+}
+
+func setTestModelPrice(prx *Proxy, modelID string, price *pricingmodels.ModelPrice) {
+	registry := pricingmodels.NewModelPriceRegistry()
+	registry.Update(map[string]*pricingmodels.ModelPrice{modelID: price})
+	prx.priceRegistry = registry
 }
 
 func TestBuildKafkaSpendEvent_BasicMapping(t *testing.T) {
@@ -85,6 +94,8 @@ func TestBuildKafkaSpendEvent_BasicMapping(t *testing.T) {
 	assert.Equal(t, 100, event.PromptTokens)
 	assert.Equal(t, 50, event.CompletionTokens)
 	assert.Equal(t, 150, event.TotalTokens)
+	assert.Equal(t, 2, event.WebSearchRequests)
+	assert.Equal(t, "high", event.WebSearchContextSize)
 	assert.Equal(t, 0.00057, event.TotalCost)
 	assert.Equal(t, "hashed-token", event.APIKeyHash)
 	assert.Equal(t, "user-1", event.UserID)
@@ -101,6 +112,17 @@ func TestBuildKafkaSpendEvent_BasicMapping(t *testing.T) {
 	assert.Equal(t, 0, event.BodyResponseBytes)
 }
 
+func TestBuildKafkaSpendEvent_UsesClientResponseID(t *testing.T) {
+	prx := NewTestProxyBuilder().Build()
+	logCtx := testLogCtx(t)
+	logCtx.ClientResponseID = "chatcmpl-client-123"
+
+	event := prx.buildKafkaSpendEvent(logCtx, "cred", "cred:model", "hash",
+		"", "", "", "", "api.openai.com", "success", 0, nil, 0, logCtx.StartTime)
+
+	assert.Equal(t, "chatcmpl-client-123", event.RequestID)
+}
+
 func TestBuildKafkaSpendEvent_NilTokenUsage(t *testing.T) {
 	prx := NewTestProxyBuilder().Build()
 	logCtx := testLogCtx(t)
@@ -112,6 +134,57 @@ func TestBuildKafkaSpendEvent_NilTokenUsage(t *testing.T) {
 		assert.Equal(t, 0, event.PromptTokens)
 		assert.Equal(t, 0, event.TotalTokens)
 	})
+}
+
+func TestBuildKafkaSpendEvent_NormalizesTokenUsage(t *testing.T) {
+	prx := NewTestProxyBuilder().Build()
+	logCtx := testLogCtx(t)
+	logCtx.TokenUsage = &converter.TokenUsage{
+		PromptTokens:           -100,
+		CompletionTokens:       50,
+		AudioInputTokens:       -10,
+		CachedInputTokens:      -80,
+		CachedAudioInputTokens: 40,
+		CacheCreationTokens:    10,
+		CacheCreation5mTokens:  8,
+		CacheCreation1hTokens:  8,
+	}
+
+	event := prx.buildKafkaSpendEvent(logCtx, "cred", "cred:model", "hash",
+		"", "", "", "", "api.openai.com", "success", 0, nil, 0, logCtx.StartTime)
+
+	assert.Equal(t, 0, event.PromptTokens)
+	assert.Equal(t, 50, event.CompletionTokens)
+	assert.Equal(t, 50, event.TotalTokens)
+	assert.Equal(t, 0, event.AudioInputTokens)
+	assert.Equal(t, 0, event.CachedInputTokens)
+	assert.Equal(t, 0, event.CachedAudioInputTokens)
+	assert.Equal(t, 10, event.CacheCreationTokens)
+	assert.Equal(t, 8, event.CacheCreation5mTokens)
+	assert.Equal(t, 2, event.CacheCreation1hTokens)
+}
+
+func TestBuildKafkaSpendEvent_CacheBreakdownMapped(t *testing.T) {
+	prx := NewTestProxyBuilder().Build()
+	logCtx := testLogCtx(t)
+	logCtx.TokenUsage = &converter.TokenUsage{
+		PromptTokens:           200,
+		CompletionTokens:       50,
+		CachedInputTokens:      80,
+		CachedAudioInputTokens: 40,
+		CacheCreationTokens:    30,
+		CacheCreation5mTokens:  10,
+		CacheCreation1hTokens:  20,
+	}
+
+	event := prx.buildKafkaSpendEvent(logCtx, "cred", "cred:model", "hash",
+		"", "", "", "", "api.openai.com", "success", 0, nil, 0, logCtx.StartTime)
+
+	assert.Equal(t, 80, event.CachedInputTokens)
+	assert.Equal(t, 40, event.CachedAudioInputTokens)
+	assert.Equal(t, 30, event.CacheCreationTokens)
+	assert.Equal(t, 10, event.CacheCreation5mTokens)
+	assert.Equal(t, 20, event.CacheCreation1hTokens)
 }
 
 func TestBuildKafkaSpendEvent_TTFTComputedWhenStreamed(t *testing.T) {
@@ -133,9 +206,10 @@ func TestBuildKafkaSpendEvent_TokenCostsMapped(t *testing.T) {
 	prx := NewTestProxyBuilder().Build()
 	logCtx := testLogCtx(t)
 	costs := &converter.TokenCosts{
-		InputCost:  0.0003,
-		OutputCost: 0.00027,
-		TotalCost:  0.00057,
+		InputCost:     0.0003,
+		OutputCost:    0.00027,
+		WebSearchCost: 0.00011,
+		TotalCost:     0.00068,
 	}
 
 	event := prx.buildKafkaSpendEvent(logCtx, "cred", "cred:model", "hash",
@@ -143,7 +217,8 @@ func TestBuildKafkaSpendEvent_TokenCostsMapped(t *testing.T) {
 
 	assert.Equal(t, 0.0003, event.InputCost)
 	assert.Equal(t, 0.00027, event.OutputCost)
-	assert.Equal(t, 0.00057, event.TotalCost)
+	assert.Equal(t, 0.00011, event.WebSearchCost)
+	assert.Equal(t, 0.00068, event.TotalCost)
 }
 
 func TestBuildKafkaSpendEvent_ErrorClassOnlyOnFailure(t *testing.T) {

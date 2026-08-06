@@ -44,8 +44,8 @@ func TestAggregateSpendUpdates_AllEntities(t *testing.T) {
 	assert.Equal(t, 15.0, result.Tokens[entityModelKey{EntityID: "token-1", Model: "model-1"}])
 	assert.Equal(t, 3.0, result.Tokens[entityModelKey{EntityID: "token-2"}])
 
-	// User aggregation
-	assert.Equal(t, 15.0, result.Users[entityModelKey{EntityID: "user-1", Model: "model-1"}])
+	// Personal user aggregation
+	assert.NotContains(t, result.Users, entityModelKey{EntityID: "user-1", Model: "model-1"})
 	assert.Equal(t, 3.0, result.Users[entityModelKey{EntityID: "user-2"}])
 
 	// Team aggregation
@@ -138,6 +138,9 @@ func TestAggregateSpendUpdates_TeamMember(t *testing.T) {
 	}
 
 	result := aggregateSpendUpdates(batch)
+
+	assert.Empty(t, result.Users)
+	assert.Equal(t, 15.0, result.Teams[entityModelKey{EntityID: "team-1"}])
 
 	// Team membership should aggregate by team:user
 	assert.Equal(t, 10.0, result.TeamMembers[teamMemberKey{TeamID: "team-1", UserID: "user-1"}])
@@ -313,12 +316,12 @@ func TestAggregateSpendUpdatesPreservesZeroSpendModelAndCompositeIDs(t *testing.
 
 	for _, present := range []bool{
 		hasEntityModelKey(updates.Tokens, entityModelKey{EntityID: entry.APIKey, Model: entry.Model}),
-		hasEntityModelKey(updates.Users, entityModelKey{EntityID: entry.UserID, Model: entry.Model}),
 		hasEntityModelKey(updates.Teams, entityModelKey{EntityID: entry.TeamID, Model: entry.Model}),
 		hasEntityModelKey(updates.Orgs, entityModelKey{EntityID: entry.OrganizationID, Model: entry.Model}),
 	} {
 		assert.True(t, present, "zero-spend rows must still create their model counter key")
 	}
+	assert.False(t, hasEntityModelKey(updates.Users, entityModelKey{EntityID: entry.UserID, Model: entry.Model}))
 	_, teamMemberPresent := updates.TeamMembers[teamMemberKey{TeamID: entry.TeamID, UserID: entry.UserID}]
 	assert.True(t, teamMemberPresent)
 	_, organizationMemberPresent := updates.OrganizationMembers[organizationMemberKey{

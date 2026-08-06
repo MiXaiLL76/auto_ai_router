@@ -33,7 +33,7 @@ func errorTypeForStatus(statusCode int) string {
 		return "not_found_error"
 	case http.StatusMethodNotAllowed:
 		return "invalid_request_error"
-	case http.StatusRequestTimeout:
+	case http.StatusRequestTimeout, http.StatusGatewayTimeout:
 		return "timeout_error"
 	case http.StatusTooManyRequests:
 		return "rate_limit_error"
@@ -64,17 +64,20 @@ func WriteJSONError(w http.ResponseWriter, statusCode int, message, errorType st
 }
 
 func maskedUpstreamErrorBody(statusCode int) []byte {
-	code := "upstream_error"
+	message := "Request failed"
+	code := "api_error"
 	switch statusCode {
 	case http.StatusTooManyRequests:
-		code = "upstream_rate_limit"
-	case http.StatusRequestTimeout:
-		code = "upstream_timeout"
+		message = "Rate limit exceeded"
+		code = "rate_limit_error"
+	case http.StatusRequestTimeout, http.StatusGatewayTimeout:
+		message = "Request timed out"
+		code = "timeout_error"
 	}
 
 	resp := APIErrorResponse{
 		Error: APIError{
-			Message: "Upstream provider error",
+			Message: message,
 			Type:    errorTypeForStatus(statusCode),
 			Param:   nil,
 			Code:    &code,
@@ -82,7 +85,7 @@ func maskedUpstreamErrorBody(statusCode int) []byte {
 	}
 	body, err := json.Marshal(resp)
 	if err != nil {
-		return []byte(`{"error":{"message":"Upstream provider error","type":"api_error","param":null,"code":"upstream_error"}}`)
+		return []byte(`{"error":{"message":"Request failed","type":"api_error","param":null,"code":"api_error"}}`)
 	}
 	return append(body, '\n')
 }

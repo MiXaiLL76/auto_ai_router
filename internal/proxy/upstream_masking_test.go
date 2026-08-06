@@ -44,10 +44,10 @@ func TestMaskedUpstreamError_DirectImageErrorDoesNotLeakProviderBody(t *testing.
 
 	var got APIErrorResponse
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &got))
-	assert.Equal(t, "Upstream provider error", got.Error.Message)
+	assert.Equal(t, "Rate limit exceeded", got.Error.Message)
 	assert.Equal(t, "rate_limit_error", got.Error.Type)
 	require.NotNil(t, got.Error.Code)
-	assert.Equal(t, "upstream_rate_limit", *got.Error.Code)
+	assert.Equal(t, "rate_limit_error", *got.Error.Code)
 }
 
 func TestMaskedUpstreamError_ProxyChainActualCredentialDoesNotLeakProviderBody(t *testing.T) {
@@ -73,7 +73,7 @@ func TestMaskedUpstreamError_ProxyChainActualCredentialDoesNotLeakProviderBody(t
 	require.Equal(t, http.StatusInternalServerError, w.Code)
 	assert.NotContains(t, w.Body.String(), "Sasana")
 	assert.NotContains(t, w.Body.String(), "SASANA_500")
-	assert.Contains(t, w.Body.String(), "Upstream provider error")
+	assert.Contains(t, w.Body.String(), "Request failed")
 }
 
 func TestMaskedUpstreamError_ProxyChainStreamingErrorDoesNotLeakProviderBody(t *testing.T) {
@@ -99,5 +99,5 @@ func TestMaskedUpstreamError_ProxyChainStreamingErrorDoesNotLeakProviderBody(t *
 	require.Equal(t, http.StatusInternalServerError, w.Code)
 	assert.Equal(t, "application/json", w.Header().Get("Content-Type"))
 	assert.NotContains(t, w.Body.String(), "Sasana")
-	assert.Contains(t, w.Body.String(), "Upstream provider error")
+	assert.Contains(t, w.Body.String(), "Request failed")
 }

@@ -103,7 +103,7 @@ func TestProxyRequest_SosanaImageEditUsesProviderModelAlias(t *testing.T) {
 	defer upstream.Close()
 
 	prx := newSosanaTestProxy(upstream.URL, nil)
-	prx.modelManager = aimodels.New(prx.logger, 50, []config.ModelRPMConfig{
+	setSosanaTestModels(prx, []config.ModelRPMConfig{
 		{Name: "public-image", Model: "banana-2-1k-compliant", Credential: "sosana"},
 	})
 
@@ -154,7 +154,7 @@ func TestProxyRequest_SosanaImageGenerationLogsLiteLLMImageSpend(t *testing.T) {
 	prx := newSosanaTestProxy(upstream.URL, nil)
 	prx.LiteLLMDB = spendManager
 	prx.priceRegistry = priceRegistry
-	prx.modelManager = aimodels.New(prx.logger, 50, []config.ModelRPMConfig{
+	setSosanaTestModels(prx, []config.ModelRPMConfig{
 		{Name: "public-image", Model: "banana-2-1k-compliant", Credential: "sosana"},
 	})
 
@@ -216,7 +216,7 @@ func TestProxyRequest_SosanaImageGenerationUsesConcreteTierPrice(t *testing.T) {
 	prx := newSosanaTestProxy(upstream.URL, nil)
 	prx.LiteLLMDB = spendManager
 	prx.priceRegistry = priceRegistry
-	prx.modelManager = aimodels.New(prx.logger, 50, []config.ModelRPMConfig{
+	setSosanaTestModels(prx, []config.ModelRPMConfig{
 		{Name: "google/gemini-3.1-flash-image-preview", Model: "banana-2-{image_size}-compliant", Credential: "sosana"},
 	})
 
@@ -280,7 +280,7 @@ func TestProxyRequest_SosanaImageGenerationWritesLiteLLMSpendLogIntegration(t *t
 	prx := newSosanaTestProxy(upstream.URL, nil)
 	prx.LiteLLMDB = manager
 	prx.priceRegistry = priceRegistry
-	prx.modelManager = aimodels.New(prx.logger, 50, []config.ModelRPMConfig{
+	setSosanaTestModels(prx, []config.ModelRPMConfig{
 		{Name: alias, Model: "banana-2-1k-compliant", Credential: "sosana"},
 	})
 
@@ -345,7 +345,7 @@ func TestProxyRequest_SosanaRejectsNonImageEndpoint(t *testing.T) {
 	prx.ProxyRequest(w, req)
 
 	assert.Equal(t, http.StatusBadRequest, w.Code)
-	assert.Contains(t, w.Body.String(), unsupportedProviderEndpointMessage)
+	assert.Contains(t, w.Body.String(), unsupportedCredentialRequestMessage)
 	assert.NotContains(t, strings.ToLower(w.Body.String()), "sosana")
 	assert.False(t, called)
 }
@@ -367,7 +367,7 @@ func TestProxyRequest_SosanaRejectsURLResponseFormat(t *testing.T) {
 	prx.ProxyRequest(w, req)
 
 	assert.Equal(t, http.StatusBadRequest, w.Code)
-	assert.Contains(t, w.Body.String(), unsupportedImageProviderRequestMessage)
+	assert.Contains(t, w.Body.String(), unsupportedCredentialRequestMessage)
 	assert.NotContains(t, strings.ToLower(w.Body.String()), "sosana")
 	assert.False(t, called)
 }
@@ -389,7 +389,7 @@ func TestProxyRequest_IncompatibleImageRequestWithSosanaReturnsLocalError(t *tes
 	prx.ProxyRequest(w, req)
 
 	require.Equal(t, http.StatusBadRequest, w.Code)
-	assert.Contains(t, w.Body.String(), unsupportedImageProviderRequestMessage)
+	assert.Contains(t, w.Body.String(), unsupportedCredentialRequestMessage)
 	assert.NotContains(t, strings.ToLower(w.Body.String()), "sosana")
 	assert.False(t, called)
 }
@@ -417,7 +417,7 @@ func TestProxyRequest_IncompatibleImageEditJPEGWithSosanaReturnsLocalError(t *te
 	prx.ProxyRequest(w, req)
 
 	require.Equal(t, http.StatusBadRequest, w.Code)
-	assert.Contains(t, w.Body.String(), unsupportedImageProviderRequestMessage)
+	assert.Contains(t, w.Body.String(), unsupportedCredentialRequestMessage)
 	assert.NotContains(t, strings.ToLower(w.Body.String()), "sosana")
 	assert.False(t, called)
 }
@@ -485,6 +485,10 @@ func TestProxyRequest_IncompatibleSosanaRequestDoesNotCrossCredentialScope(t *te
 			config.CredentialConfig{Name: "hidden-primary", Type: config.ProviderTypeProxy, BaseURL: hiddenPrimary.URL, APIKey: "hidden-key", RPM: 100, TPM: 10000, Scopes: []string{"team-b"}},
 		).
 		Build()
+	setSosanaTestModels(prx, []config.ModelRPMConfig{
+		{Name: "banana-2-1k-compliant", Credential: "sosana"},
+		{Name: "banana-2-1k-compliant", Credential: "hidden-primary"},
+	})
 	prx.LiteLLMDB = scopeTestDB{
 		NoopManager: litellmdb.NewNoopManager(),
 		info: &litellmmodels.TokenInfo{Metadata: map[string]interface{}{
@@ -500,7 +504,7 @@ func TestProxyRequest_IncompatibleSosanaRequestDoesNotCrossCredentialScope(t *te
 	prx.ProxyRequest(w, req)
 
 	require.Equal(t, http.StatusBadRequest, w.Code)
-	assert.Contains(t, w.Body.String(), unsupportedImageProviderRequestMessage)
+	assert.Contains(t, w.Body.String(), unsupportedCredentialRequestMessage)
 	assert.False(t, sosanaCalled)
 	assert.False(t, hiddenPrimaryCalled)
 }
@@ -559,7 +563,7 @@ func TestProxyRequest_SosanaCreateHTTPErrorMasked(t *testing.T) {
 	prx.ProxyRequest(w, req)
 
 	assert.Equal(t, http.StatusPaymentRequired, w.Code)
-	assert.Contains(t, w.Body.String(), "Upstream provider error")
+	assert.Contains(t, w.Body.String(), "Request failed")
 	assert.NotContains(t, w.Body.String(), "balance secret")
 	assert.Contains(t, logBuf.String(), "response_body_masked=true")
 	assert.Contains(t, logBuf.String(), "balance secret")
@@ -602,7 +606,7 @@ func TestProxyRequest_SosanaRetriesCreateWithNextCredential(t *testing.T) {
 		).
 		WithMaxProviderRetries(1).
 		Build()
-	prx.modelManager = aimodels.New(prx.logger, 50, []config.ModelRPMConfig{
+	setSosanaTestModels(prx, []config.ModelRPMConfig{
 		{Name: "public-image", Model: "banana-2-1k-compliant", Credential: "sosana-a"},
 		{Name: "public-image", Model: "banana-2-2k-compliant", Credential: "sosana-b"},
 	})
@@ -645,6 +649,10 @@ func TestProxyRequest_SosanaRetryDoesNotCrossCredentialScope(t *testing.T) {
 		).
 		WithMaxProviderRetries(1).
 		Build()
+	setSosanaTestModels(prx, []config.ModelRPMConfig{
+		{Name: "banana-2-1k-compliant", Credential: "sosana-a"},
+		{Name: "banana-2-1k-compliant", Credential: "sosana-b"},
+	})
 	prx.LiteLLMDB = scopeTestDB{
 		NoopManager: litellmdb.NewNoopManager(),
 		info: &litellmmodels.TokenInfo{Metadata: map[string]interface{}{
@@ -661,7 +669,7 @@ func TestProxyRequest_SosanaRetryDoesNotCrossCredentialScope(t *testing.T) {
 
 	require.Equal(t, http.StatusTooManyRequests, w.Code)
 	assert.False(t, hiddenCredentialCalled)
-	assert.Contains(t, w.Body.String(), "Upstream provider error")
+	assert.Contains(t, w.Body.String(), "Rate limit exceeded")
 	assert.NotContains(t, w.Body.String(), "rate limited")
 }
 
@@ -694,7 +702,7 @@ func TestProxyRequest_SosanaDoesNotRetryCreateTransportError(t *testing.T) {
 
 	require.Equal(t, http.StatusBadGateway, w.Code)
 	assert.False(t, liveCalled)
-	assert.Contains(t, w.Body.String(), "Upstream provider error")
+	assert.Contains(t, w.Body.String(), "Request failed")
 	assert.NotContains(t, w.Body.String(), "unwanted.png")
 }
 
@@ -720,7 +728,7 @@ func TestProxyRequest_SosanaPollHTTPErrorMasked(t *testing.T) {
 	prx.ProxyRequest(w, req)
 
 	assert.Equal(t, http.StatusInternalServerError, w.Code)
-	assert.Contains(t, w.Body.String(), "Upstream provider error")
+	assert.Contains(t, w.Body.String(), "Request failed")
 	assert.NotContains(t, w.Body.String(), "poll secret")
 	assert.Contains(t, logBuf.String(), "response_body_masked=true")
 	assert.Contains(t, logBuf.String(), "poll secret")
@@ -752,7 +760,7 @@ func TestProxyRequest_SosanaImageResultHTTPErrorMasked(t *testing.T) {
 	prx.ProxyRequest(w, req)
 
 	assert.Equal(t, http.StatusBadGateway, w.Code)
-	assert.Contains(t, w.Body.String(), "Upstream provider error")
+	assert.Contains(t, w.Body.String(), "Request failed")
 	assert.NotContains(t, w.Body.String(), "storage secret")
 	assert.NotContains(t, w.Body.String(), imageServer.URL)
 	assert.Contains(t, logBuf.String(), "response_body_masked=true")
@@ -786,7 +794,7 @@ func TestProxyRequest_SosanaImageResultNonImageMasked(t *testing.T) {
 	prx.ProxyRequest(w, req)
 
 	assert.Equal(t, http.StatusBadGateway, w.Code)
-	assert.Contains(t, w.Body.String(), "Upstream provider error")
+	assert.Contains(t, w.Body.String(), "Request failed")
 	assert.NotContains(t, w.Body.String(), "not an image")
 	assert.NotContains(t, w.Body.String(), imageServer.URL)
 	assert.Contains(t, logBuf.String(), "non-PNG content")
@@ -820,7 +828,7 @@ func TestProxyRequest_SosanaImageResultJPEGMasked(t *testing.T) {
 	prx.ProxyRequest(w, req)
 
 	assert.Equal(t, http.StatusBadGateway, w.Code)
-	assert.Contains(t, w.Body.String(), "Upstream provider error")
+	assert.Contains(t, w.Body.String(), "Request failed")
 	assert.NotContains(t, w.Body.String(), imageServer.URL)
 	assert.Contains(t, logBuf.String(), "non-PNG content")
 	assert.NotContains(t, logBuf.String(), imageServer.URL)
@@ -864,7 +872,7 @@ func TestProxyRequest_SosanaImageResultRedirectMaskedAndNotFollowed(t *testing.T
 	prx.ProxyRequest(w, req)
 
 	assert.Equal(t, http.StatusBadGateway, w.Code)
-	assert.Contains(t, w.Body.String(), "Upstream provider error")
+	assert.Contains(t, w.Body.String(), "Request failed")
 	assert.False(t, targetCalled)
 	assert.NotContains(t, w.Body.String(), targetServer.URL)
 }
@@ -902,7 +910,7 @@ func TestProxyRequest_SosanaImageResultTimeoutMasked(t *testing.T) {
 	prx.ProxyRequest(w, req)
 
 	assert.Equal(t, http.StatusRequestTimeout, w.Code)
-	assert.Contains(t, w.Body.String(), "Upstream provider error")
+	assert.Contains(t, w.Body.String(), "Request timed out")
 	assert.NotContains(t, w.Body.String(), "slow.png")
 	assert.Contains(t, logBuf.String(), "result image download failed")
 	assert.Contains(t, logBuf.String(), "result_host=127.0.0.1")
@@ -944,7 +952,7 @@ func TestProxyRequest_SosanaDoesNotRetryAfterTaskCreated(t *testing.T) {
 	require.Equal(t, http.StatusInternalServerError, w.Code)
 	assert.Equal(t, 1, createCalls)
 	assert.NotContains(t, w.Body.String(), "poll failed")
-	assert.Contains(t, w.Body.String(), "Upstream provider error")
+	assert.Contains(t, w.Body.String(), "Request failed")
 }
 
 func TestProxyRequest_SosanaTaskFailedMasked(t *testing.T) {
@@ -968,7 +976,7 @@ func TestProxyRequest_SosanaTaskFailedMasked(t *testing.T) {
 	prx.ProxyRequest(w, req)
 
 	assert.Equal(t, http.StatusBadGateway, w.Code)
-	assert.Contains(t, w.Body.String(), "Upstream provider error")
+	assert.Contains(t, w.Body.String(), "Request failed")
 	assert.NotContains(t, w.Body.String(), "failed secret")
 	assert.Contains(t, logBuf.String(), "response_body_masked=true")
 	assert.Contains(t, logBuf.String(), "failed secret")
@@ -1018,7 +1026,7 @@ func TestProxyRequest_SosanaTimeoutMasked(t *testing.T) {
 	prx.ProxyRequest(w, req)
 
 	assert.Equal(t, http.StatusRequestTimeout, w.Code)
-	assert.Contains(t, w.Body.String(), "Upstream provider error")
+	assert.Contains(t, w.Body.String(), "Request timed out")
 	assert.NotContains(t, w.Body.String(), "task-1")
 	logText := logBuf.String()
 	assert.Contains(t, logText, "context deadline exceeded")
@@ -1079,6 +1087,12 @@ func newSosanaTestProxy(baseURL string, logBuf *bytes.Buffer) *Proxy {
 		Build()
 }
 
+func setSosanaTestModels(prx *Proxy, modelConfigs []config.ModelRPMConfig) {
+	prx.modelManager = aimodels.New(prx.logger, 50, modelConfigs)
+	prx.modelManager.LoadModelsFromConfig(prx.balancer.GetCredentialsSnapshot())
+	prx.balancer.SetModelChecker(prx.modelManager)
+}
+
 func (b *TestProxyBuilder) withLogger(logger *slog.Logger) *TestProxyBuilder {
 	b.config.Logger = logger
 	b.config.TokenManager = createTestTokenManager(logger)
@@ -1118,6 +1132,10 @@ func (m *capturedSpendManager) IsEnabled() bool {
 }
 
 func (m *capturedSpendManager) IsHealthy() bool {
+	return true
+}
+
+func (m *capturedSpendManager) SpendLoggingEnabled() bool {
 	return true
 }
 

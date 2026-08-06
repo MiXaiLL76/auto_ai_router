@@ -57,6 +57,14 @@ func LoadModelPrices(link string) (map[string]*ModelPrice, error) {
 	normalizedPrices := make(map[string]*ModelPrice)
 	normalizedSources := make(map[string]string) // normalized name -> original full name (for collision detection)
 	for fullName, price := range rawPrices {
+		if price == nil {
+			continue
+		}
+		if price.LiteLLMProvider == "" {
+			if slash := strings.IndexByte(fullName, '/'); slash > 0 {
+				price.LiteLLMProvider = fullName[:slash]
+			}
+		}
 		normalized := NormalizeModelName(fullName)
 		if existingFullName, exists := normalizedSources[normalized]; exists {
 			slog.Warn("normalized model name collision: entry will be overwritten",

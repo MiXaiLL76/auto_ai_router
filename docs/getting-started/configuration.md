@@ -11,6 +11,7 @@ server:
   port: 8080
   max_body_size_mb: 100
   response_body_multiplier: 10
+  response_compatibility: native
   request_timeout: 60s
   write_timeout: 60s
   idle_timeout: 2m
@@ -20,7 +21,10 @@ server:
   logging_level: info
   master_key: "sk-your-master-key-here"
   default_models_rpm: -1
+  credential_name_as_team_id: false
   model_prices_link: ""
+  response_headers:
+    mode: passthrough
 
 fail2ban:
   max_attempts: 3
@@ -59,8 +63,8 @@ credentials:
     rpm: 60
     tpm: -1
 
-  - name: "proxy_fallback"
-    type: "proxy"
+  - name: "air_fallback"
+    type: "air"
     base_url: "http://backup-router.local:8080"
     api_key: "sk-remote-master-key"
     rpm: 200
@@ -96,22 +100,36 @@ litellm_db:
 
 ## Server Parameters
 
-| Parameter                  | Type     | Default | Description                                                  |
-| -------------------------- | -------- | ------- | ------------------------------------------------------------ |
-| `port`                     | int      | 8080    | Listen port                                                  |
-| `max_body_size_mb`         | int      | 100     | Maximum request body size (MB)                               |
-| `response_body_multiplier` | int      | 10      | Response body limit = max_body_size_mb * this value          |
-| `request_timeout`          | duration | 60s     | Request timeout                                              |
-| `write_timeout`            | duration | 60s     | HTTP server write timeout                                    |
-| `idle_timeout`             | duration | 2m      | HTTP server idle timeout (default: 2 * write_timeout)        |
-| `idle_conn_timeout`        | duration | 120s    | Idle connection timeout for keep-alive connections           |
-| `max_idle_conns`           | int      | 200     | Maximum idle connections                                     |
-| `max_idle_conns_per_host`  | int      | 20      | Maximum idle connections per host                            |
-| `logging_level`            | string   | info    | Logging level: `info`, `debug`, `error`                      |
-| `master_key`               | string   | —       | **Required.** Master key for client authentication           |
-| `default_models_rpm`       | int      | -1      | Default RPM limit for models (-1 = unlimited)                |
-| `model_prices_link`        | string   | —       | URL or file path to model prices JSON                        |
-| `proxy_health_timeout`     | duration | 15s     | Timeout for fetching `/health` from remote proxy credentials |
+| Parameter                    | Type     | Default     | Description                                                                                           |
+| ---------------------------- | -------- | ----------- | ----------------------------------------------------------------------------------------------------- |
+| `port`                       | int      | 8080        | Listen port                                                                                           |
+| `max_body_size_mb`           | int      | 100         | Maximum request body size (MB)                                                                        |
+| `response_body_multiplier`   | int      | 10          | Response body limit = max_body_size_mb * this value                                                   |
+| `response_compatibility`     | string   | native      | Response contract: `native` or LiteLLM-compatible `litellm`                                           |
+| `request_timeout`            | duration | 60s         | Request timeout                                                                                       |
+| `write_timeout`              | duration | 60s         | HTTP server write timeout                                                                             |
+| `idle_timeout`               | duration | 2m          | HTTP server idle timeout (default: 2 * write_timeout)                                                 |
+| `idle_conn_timeout`          | duration | 120s        | Idle connection timeout for keep-alive connections                                                    |
+| `max_idle_conns`             | int      | 200         | Maximum idle connections                                                                              |
+| `max_idle_conns_per_host`    | int      | 20          | Maximum idle connections per host                                                                     |
+| `logging_level`              | string   | info        | Logging level: `info`, `debug`, `error`                                                               |
+| `master_key`                 | string   | —           | **Required.** Master key for client authentication                                                    |
+| `default_models_rpm`         | int      | -1          | Default RPM limit for models (-1 = unlimited)                                                         |
+| `credential_name_as_team_id` | bool     | false       | Use the selected provider credential name as `team_id` in spend logs when auth has no team assignment |
+| `model_prices_link`          | string   | —           | URL or file path to model prices JSON                                                                 |
+| `proxy_health_timeout`       | duration | 15s         | Timeout for fetching `/health` from remote proxy credentials                                          |
+| `response_headers.mode`      | string   | passthrough | Response header policy. Supported values are `passthrough` and `allowlist`                            |
+| `tiktoken_enabled`           | bool     | true        | Local tiktoken-based fallback token estimation for streaming responses (see below)                    |
+
+The `allowlist` mode forwards `Content-Type`, `Cache-Control`, `Retry-After`, `Content-Disposition`, `Content-Range`, `Last-Modified`, and `Location`. Transport headers are generated by the router. Other upstream response headers are removed.
+
+When `credential_name_as_team_id` is enabled, spend logs use the selected provider credential name as `team_id` only when the authenticated key does not provide a `team_id`. An explicit team assignment always takes precedence. This is intended for billing-aggregator AIR instances that group spend by provider credential; leave it disabled for embedded routers and migration helpers.
+
+When PostgreSQL or Kafka spend logging is enabled, every routed model must have a price entry. If neither its real provider name nor its alias can be priced, the router returns `503 Model pricing unavailable` before contacting the provider. Use an explicit zero-price entry for intentionally free models.
+
+`tiktoken_enabled` controls the local prompt/completion token estimator used as a fallback for streaming responses when a provider doesn't report usage (e.g. the stream is cut before the final usage chunk, or the provider omits token counts entirely), and for budget-reservation cost estimates ahead of the request. Two different costs apply while it's on: the **prompt-token estimate and the final completion-token BPE count are lazy** — computed only if a stream actually finishes without provider-reported usage — so they're free for providers that do report usage. However, **per-chunk delta-text accumulation runs on every streaming chunk of every stream** while this flag is on, regardless of whether the provider ultimately reports usage, since the accumulator has to keep pace with the stream in case it's needed at the end.
+
+Set to `false` to skip local estimation entirely if all your configured providers always report usage and you'd rather not carry any tiktoken-related per-chunk cost. This has three effects, not just spend logging: spend logs show `0` prompt/completion tokens (instead of an estimate) for streaming requests where a provider omits usage; the streaming-fallback total that feeds `rateLimiter.ConsumeTokens`/`ConsumeModelTokens` is zeroed the same way; and budget-reservation cost estimates (`server.litellm_db.enforce_budget_reservation`) undercount, reflecting only the completion-token portion — reservation itself still runs, it just can't account for prompt-token cost without local tokenization.
 
 ## Fail2Ban Parameters
 
@@ -154,16 +172,17 @@ Each credential defines a connection to an LLM provider. See [Providers](../prov
 
 Common fields for all credentials:
 
-| Field              | Type   | Description                                                                                           |
-| ------------------ | ------ | ----------------------------------------------------------------------------------------------------- |
-| `name`             | string | Unique credential identifier                                                                          |
-| `type`             | string | Provider type: `openai`, `anthropic`, `cometapi`, `sosana`, `vertex-ai`, `gemini`, `bedrock`, `proxy` |
-| `rpm`              | int    | Requests per minute limit (-1 = unlimited)                                                            |
-| `tpm`              | int    | Tokens per minute limit (-1 = unlimited)                                                              |
-| `is_fallback`      | bool   | Use as fallback when primary credentials are exhausted                                                |
-| `scopes`           | list   | Optional client scopes allowed to use and see this credential                                         |
-| `denied_scopes`    | list   | Optional client scopes that must not use or see this credential                                       |
-| `forbidden_scopes` | list   | Alias for `denied_scopes`                                                                             |
+| Field              | Type   | Description                                                                                 |
+| ------------------ | ------ | ------------------------------------------------------------------------------------------- |
+| `name`             | string | Unique credential identifier                                                                |
+| `type`             | string | Provider type: `openai`, `anthropic`, `cometapi`, `sosana`, `vertex-ai`, `gemini`, `bedrock`, `proxy`, `air`, `proman` |
+| `rpm`              | int    | Requests per minute limit (-1 = unlimited)                                                  |
+| `tpm`              | int    | Tokens per minute limit (-1 = unlimited)                                                    |
+| `is_fallback`      | bool   | Use as fallback when primary credentials are exhausted                                      |
+| `reasoning_only`   | bool   | Route only requests that explicitly enable reasoning/thinking                               |
+| `scopes`           | list   | Optional client scopes allowed to use and see this credential                               |
+| `denied_scopes`    | list   | Optional client scopes that must not use or see this credential                             |
+| `forbidden_scopes` | list   | Alias for `denied_scopes`                                                                   |
 
 ### Scoped credential visibility
 
@@ -223,6 +242,23 @@ Scope filtering applies to routing, retry/fallback selection, `/health`, `/v1/mo
 
 In both LiteLLM API-key metadata and `LiteLLM_CredentialsTable.credential_info`,
 `air_forbidden_scopes` is accepted as an alias for `air_denied_scopes`.
+
+Set `reasoning_only: true` on a credential when its provider accepts only reasoning traffic:
+
+```yaml
+credentials:
+  - name: anthropic-reasoning
+    type: anthropic
+    api_key: "os.environ/ANTHROPIC_API_KEY"
+    base_url: "https://api.anthropic.com"
+    reasoning_only: true
+```
+
+The filter recognizes enabled `reasoning_effort`, `reasoning`, `thinking`,
+`thinking_budget`, and `thinking_level` parameters. Requests that omit reasoning or
+explicitly disable it skip the credential during initial selection, sticky routing,
+retries, and fallback selection. For DB-loaded credentials, use
+`"air_reasoning_only": true` in `credential_info`.
 
 ## Models
 

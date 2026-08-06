@@ -149,6 +149,7 @@ sequenceDiagram
 - **Rate limits apply to the alias.** `rpm` and `tpm` under the alias entry are enforced per alias name.
 - **Real name resolution is logged** at DEBUG level: `Resolved model real name alias=aws/claude-haiku-4.5 real=global.anthropic...`
 - **Price lookup uses the real name** first (to match entries in the model prices JSON), then falls back to the alias.
+- **Missing prices fail closed when spend logging is enabled.** The router returns `503 Model pricing unavailable` before contacting the provider, so a billable request cannot be recorded with zero spend. A model with an explicit zero-price entry remains valid.
 
 ### Example: Multiple Bedrock Models
 

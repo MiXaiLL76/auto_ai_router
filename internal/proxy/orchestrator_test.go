@@ -12,6 +12,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/models"
 	"github.com/mixaill76/auto_ai_router/internal/testhelpers"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -90,12 +91,15 @@ func TestOrchestrateRequest_ResponsesAPI_ConvertedForOpenAIWhenPassthroughDisabl
 	builder := NewTestProxyBuilder().
 		WithSingleCredential("test", config.ProviderTypeOpenAI, "http://test.local", "upstream-key").
 		WithMasterKey("master-key")
-	builder.config.ModelManager = models.New(logger, 50, []config.ModelRPMConfig{
+	modelManager := models.New(logger, 50, []config.ModelRPMConfig{
 		{
 			Name:                 "qwen-5",
+			Credential:           "test",
 			PassthroughResponses: &passthroughResponses,
 		},
 	})
+	modelManager.LoadModelsFromConfig(builder.config.Credentials)
+	builder.config.ModelManager = modelManager
 	prx := builder.Build()
 	prx.logger = logger
 
@@ -159,6 +163,63 @@ func TestPrepareRequestForCredential_UsesCredentialSpecificRealModel(t *testing.
 	require.Contains(t, string(prepared.body), `"model":"global.anthropic.claude-sonnet-v1:0"`)
 }
 
+func TestSelectCredentialForModelMarksDirectSpendLogComplete(t *testing.T) {
+	prx := NewTestProxyBuilder().Build()
+	kafka := &stubKafkaManager{enabled: true}
+	prx.kafkaLog = kafka
+	setTestModelPrice(prx, "gpt-4o-mini", &models.ModelPrice{})
+	logCtx := testLogCtx(t)
+	logCtx.Credential = nil
+
+	credential, ok := prx.selectCredentialForModel(
+		httptest.NewRecorder(),
+		"missing-model",
+		"",
+		"",
+		nil,
+		logCtx,
+	)
+
+	require.False(t, ok)
+	require.Nil(t, credential)
+	require.True(t, logCtx.Logged)
+	require.Len(t, kafka.events, 1)
+}
+
+// TestSelectCredentialForModelLogsZeroCostRowWhenPriceUnavailable guards
+// against a regression of PR #96/#115 follow-up review TODO 2: the
+// "no credentials available" (429) branch logs an audit row before any
+// provider is contacted, so logCtx.ModelPrice is never pre-resolved. With
+// logSpendToLiteLLMDB now failing closed on an unresolved price, that audit
+// row used to be silently dropped whenever the rejected model had no price
+// entry. Since no usage was ever incurred here, the row must still be
+// written (with zero cost) instead of disappearing.
+func TestSelectCredentialForModelLogsZeroCostRowWhenPriceUnavailable(t *testing.T) {
+	prx := NewTestProxyBuilder().Build()
+	kafka := &stubKafkaManager{enabled: true}
+	prx.kafkaLog = kafka
+	prx.priceRegistry = models.NewModelPriceRegistry() // no price for "missing-model"
+	logCtx := testLogCtx(t)
+	logCtx.ModelID = "missing-model"
+	logCtx.TokenUsage = nil // no provider was ever contacted
+	logCtx.Credential = nil
+
+	credential, ok := prx.selectCredentialForModel(
+		httptest.NewRecorder(),
+		"missing-model",
+		"",
+		"",
+		nil,
+		logCtx,
+	)
+
+	require.False(t, ok)
+	require.Nil(t, credential)
+	require.True(t, logCtx.Logged)
+	require.Len(t, kafka.events, 1)
+	assert.Equal(t, 0.0, kafka.events[0].TotalCost)
+}
+
 func TestPrepareRequestForCredential_ProxyBodyKeepsOriginalParams(t *testing.T) {
 	prx := NewTestProxyBuilder().Build()
 	cred := config.CredentialConfig{Name: "openai", Type: config.ProviderTypeOpenAI, APIKey: "key", BaseURL: "http://openai.local", RPM: 100}
@@ -194,6 +255,67 @@ func TestPrepareRequestForCredential_ProxyBodyKeepsOriginalParams(t *testing.T) 
 	require.Contains(t, forwarded, "max_tokens")
 	require.NotContains(t, forwarded, "max_completion_tokens")
 	require.Contains(t, forwarded, "temperature")
+}
+
+func TestPrepareRequestForCredential_MessagesKeepsOriginalProxyRequest(t *testing.T) {
+	prx := NewTestProxyBuilder().Build()
+	cred := config.CredentialConfig{Name: "openai", Type: config.ProviderTypeOpenAI, APIKey: "key", BaseURL: "http://openai.local", RPM: 100}
+	req := httptest.NewRequest("POST", "/v1/messages", nil)
+	body := []byte(`{"model":"claude-sonnet","max_tokens":100,"messages":[{"role":"user","content":"hello"}]}`)
+	proxyBody := []byte(`{"model":"claude-alias","max_tokens":100,"messages":[{"role":"user","content":"hello"}]}`)
+
+	prepared, err := prx.prepareRequestForCredential(
+		req,
+		body,
+		proxyBody,
+		"claude-alias",
+		"claude-sonnet",
+		"/v1/messages",
+		false,
+		&cred,
+		false,
+		false,
+		false,
+	)
+
+	require.NoError(t, err)
+	require.Equal(t, "/v1/chat/completions", prepared.path)
+	require.Equal(t, "/v1/messages", prepared.proxyPath)
+	require.JSONEq(t, string(proxyBody), string(prepared.proxyBody))
+	require.Contains(t, string(prepared.body), `"model":"claude-sonnet"`)
+	require.True(t, prepared.convertedMessages)
+}
+
+func TestPrepareRequestForCredential_MessagesProxyLikeCredentialKeepsNativeFormat(t *testing.T) {
+	prx := NewTestProxyBuilder().Build()
+	cred := config.CredentialConfig{Name: "air-peer", Type: config.ProviderTypeAIR, APIKey: "key", BaseURL: "http://air-peer.local", RPM: 100}
+	req := httptest.NewRequest("POST", "/v1/messages", nil)
+	body := []byte(`{"model":"claude-sonnet","max_tokens":100,"messages":[{"role":"user","content":"hello"}]}`)
+	proxyBody := []byte(`{"model":"claude-alias","max_tokens":100,"messages":[{"role":"user","content":"hello"}]}`)
+
+	prepared, err := prx.prepareRequestForCredential(
+		req,
+		body,
+		proxyBody,
+		"claude-alias",
+		"claude-sonnet",
+		"/v1/messages",
+		false,
+		&cred,
+		false,
+		false,
+		false,
+	)
+
+	require.NoError(t, err)
+	// Proxy-like credentials (AIR-to-AIR chaining) must receive the original
+	// Anthropic-shaped request/path unchanged: the downstream peer does its own
+	// routing/conversion, same as the Responses API passthrough contract.
+	require.Equal(t, "/v1/messages", prepared.path)
+	require.Equal(t, "/v1/messages", prepared.proxyPath)
+	require.JSONEq(t, string(body), string(prepared.body))
+	require.JSONEq(t, string(proxyBody), string(prepared.proxyBody))
+	require.False(t, prepared.convertedMessages)
 }
 
 func TestPrepareRequestForCredential_ResponsesRecomputesProviderMode(t *testing.T) {
@@ -319,4 +441,179 @@ func TestProxyRequest_ResponsesRetryRecomputesProviderMode(t *testing.T) {
 	require.NoError(t, json.Unmarshal(anthropicBody, &raw))
 	require.Contains(t, raw, "messages")
 	require.NotContains(t, raw, "input")
+}
+
+func TestProxyRequest_UnsupportedProManRequestRoutesToNextPrimary(t *testing.T) {
+	var promanCalls int32
+	promanUpstream := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&promanCalls, 1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer promanUpstream.Close()
+
+	var nextPrimaryCalls int32
+	nextPrimary := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&nextPrimaryCalls, 1)
+		assert.Equal(t, "/v1/chat/completions", r.URL.Path)
+		assert.Equal(t, "Bearer next-key", r.Header.Get("Authorization"))
+		body, err := io.ReadAll(r.Body)
+		require.NoError(t, err)
+		assert.Contains(t, string(body), `"server_tool_use"`)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":     "chatcmpl-next",
+			"object": "chat.completion",
+			"choices": []map[string]any{{
+				"message": map[string]string{"role": "assistant", "content": "next primary"},
+			}},
+		})
+	}))
+	defer nextPrimary.Close()
+
+	prx := NewTestProxyBuilder().
+		WithCredentials(
+			config.CredentialConfig{Name: "proman", Type: config.ProviderTypeProMan, BaseURL: promanUpstream.URL, APIKey: "proman-key", RPM: 100, TPM: 10000},
+			config.CredentialConfig{Name: "next-primary", Type: config.ProviderTypeProxy, BaseURL: nextPrimary.URL, APIKey: "next-key", RPM: 100, TPM: 10000},
+		).
+		Build()
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"claude-sonnet-4-6","messages":[{"role":"assistant","content":[{"type":"server_tool_use","name":"web_search"}]}]}`))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	prx.ProxyRequest(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), "next primary")
+	assert.Equal(t, int32(0), atomic.LoadInt32(&promanCalls))
+	assert.Equal(t, int32(1), atomic.LoadInt32(&nextPrimaryCalls))
+}
+
+func TestProxyRequest_UnsupportedProManRequestRoutesToFallbackProxy(t *testing.T) {
+	var promanCalls int32
+	promanUpstream := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&promanCalls, 1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer promanUpstream.Close()
+
+	var fallbackCalls int32
+	fallback := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&fallbackCalls, 1)
+		assert.Equal(t, "/v1/chat/completions", r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":     "chatcmpl-fallback",
+			"object": "chat.completion",
+			"choices": []map[string]any{{
+				"message": map[string]string{"role": "assistant", "content": "fallback ok"},
+			}},
+		})
+	}))
+	defer fallback.Close()
+
+	prx := NewTestProxyBuilder().
+		WithCredentials(
+			config.CredentialConfig{Name: "proman", Type: config.ProviderTypeProMan, BaseURL: promanUpstream.URL, APIKey: "proman-key", RPM: 100, TPM: 10000},
+			config.CredentialConfig{Name: "fallback", Type: config.ProviderTypeProxy, BaseURL: fallback.URL, APIKey: "fallback-key", RPM: 100, TPM: 10000, IsFallback: true},
+		).
+		Build()
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"claude-sonnet-4-6","messages":[{"role":"assistant","content":[{"type":"server_tool_use","name":"web_search"}]}]}`))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	prx.ProxyRequest(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), "fallback ok")
+	assert.Equal(t, int32(0), atomic.LoadInt32(&promanCalls))
+	assert.Equal(t, int32(1), atomic.LoadInt32(&fallbackCalls))
+}
+
+// TestProxyRequest_UnsupportedProManRequestFallbackBlockedWhenPriceUnavailable
+// guards against a regression of PR #96/#115 follow-up review TODO 1:
+// applyCredentialCompatibilityRouting's TryFallbackProxy branch used to
+// forward the request to the fallback credential and return before
+// enforceBudgetAndRateLimits' price gate ever ran, so an unpriced model could
+// reach a real provider with zero billing trace. The price gate must now be
+// checked before the fallback proxy is actually contacted.
+func TestProxyRequest_UnsupportedProManRequestFallbackBlockedWhenPriceUnavailable(t *testing.T) {
+	var promanCalls int32
+	promanUpstream := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&promanCalls, 1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer promanUpstream.Close()
+
+	var fallbackCalls int32
+	fallback := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&fallbackCalls, 1)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"id":     "chatcmpl-fallback",
+			"object": "chat.completion",
+			"choices": []map[string]any{{
+				"message": map[string]string{"role": "assistant", "content": "fallback ok"},
+			}},
+		})
+	}))
+	defer fallback.Close()
+
+	prx := NewTestProxyBuilder().
+		WithCredentials(
+			config.CredentialConfig{Name: "proman", Type: config.ProviderTypeProMan, BaseURL: promanUpstream.URL, APIKey: "proman-key", RPM: 100, TPM: 10000},
+			config.CredentialConfig{Name: "fallback", Type: config.ProviderTypeProxy, BaseURL: fallback.URL, APIKey: "fallback-key", RPM: 100, TPM: 10000, IsFallback: true},
+		).
+		Build()
+	kafka := &stubKafkaManager{enabled: true}
+	prx.kafkaLog = kafka
+	prx.priceRegistry = models.NewModelPriceRegistry() // no price for claude-sonnet-4-6
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"claude-sonnet-4-6","messages":[{"role":"assistant","content":[{"type":"server_tool_use","name":"web_search"}]}]}`))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	prx.ProxyRequest(w, req)
+
+	require.Equal(t, http.StatusServiceUnavailable, w.Code)
+	assert.Equal(t, int32(0), atomic.LoadInt32(&promanCalls))
+	assert.Equal(t, int32(0), atomic.LoadInt32(&fallbackCalls))
+
+	// The rejection must still leave an audit trail — not just an app log —
+	// so a forgotten price-registry entry is visible in spend logs/Kafka,
+	// not just silently swallowed.
+	require.Len(t, kafka.events, 1)
+	assert.Equal(t, "failure", kafka.events[0].Status)
+	assert.Equal(t, http.StatusServiceUnavailable, kafka.events[0].HTTPStatus)
+	assert.Zero(t, kafka.events[0].TotalCost)
+	assert.Contains(t, kafka.events[0].ErrorMessage, "model pricing unavailable")
+}
+
+func TestProxyRequest_UnsupportedProManRequestWithoutFallbackReturnsLocalError(t *testing.T) {
+	var promanCalls int32
+	promanUpstream := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&promanCalls, 1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer promanUpstream.Close()
+
+	prx := NewTestProxyBuilder().
+		WithSingleCredential("proman", config.ProviderTypeProMan, promanUpstream.URL, "proman-key").
+		Build()
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"claude-sonnet-4-6","messages":[{"role":"assistant","content":[{"type":"server_tool_use","name":"web_search"}]}]}`))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	prx.ProxyRequest(w, req)
+
+	require.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Contains(t, w.Body.String(), unsupportedCredentialRequestMessage)
+	assert.NotContains(t, strings.ToLower(w.Body.String()), "proman")
+	assert.Equal(t, int32(0), atomic.LoadInt32(&promanCalls))
 }

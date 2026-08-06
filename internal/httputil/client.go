@@ -145,6 +145,20 @@ func FetchFromProxy(
 	path string,
 	logger *slog.Logger,
 ) ([]byte, error) {
+	body, _, err := FetchResponseFromProxy(ctx, cred, path, logger)
+	return body, err
+}
+
+// FetchResponseFromProxy makes an HTTP GET request to a proxy credential and
+// returns the response body together with response headers. It is useful for
+// callers that need AIR-specific response metadata while preserving the
+// FetchFromProxy body-only API for existing call sites.
+func FetchResponseFromProxy(
+	ctx context.Context,
+	cred *config.CredentialConfig,
+	path string,
+	logger *slog.Logger,
+) ([]byte, http.Header, error) {
 	// Create context with timeout if not already set
 	if _, ok := ctx.Deadline(); !ok {
 		var cancel context.CancelFunc
@@ -158,7 +172,7 @@ func FetchFromProxy(
 			"path", path,
 			"error", err,
 		)
-		return nil, fmt.Errorf("proxy fetch rate limited: %w", err)
+		return nil, nil, fmt.Errorf("proxy fetch rate limited: %w", err)
 	}
 
 	// Build URL
@@ -173,7 +187,7 @@ func FetchFromProxy(
 			"url", url,
 			"error", err,
 		)
-		return nil, fmt.Errorf("failed to create request: %w", err)
+		return nil, nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
 	// Add Authorization header if api_key is set
@@ -189,7 +203,7 @@ func FetchFromProxy(
 			"url", url,
 			"error", err,
 		)
-		return nil, fmt.Errorf("failed to fetch: %w", err)
+		return nil, nil, fmt.Errorf("failed to fetch: %w", err)
 	}
 	defer func() {
 		if closeErr := resp.Body.Close(); closeErr != nil {
@@ -206,7 +220,7 @@ func FetchFromProxy(
 			"status", resp.StatusCode,
 			"response_preview", preview,
 		)
-		return nil, &ProxyStatusError{StatusCode: resp.StatusCode}
+		return nil, resp.Header.Clone(), &ProxyStatusError{StatusCode: resp.StatusCode}
 	}
 
 	// Read body with size limit
@@ -216,10 +230,10 @@ func FetchFromProxy(
 			"credential", cred.Name,
 			"error", err,
 		)
-		return nil, fmt.Errorf("failed to read body: %w", err)
+		return nil, resp.Header.Clone(), fmt.Errorf("failed to read body: %w", err)
 	}
 
-	return body, nil
+	return body, resp.Header.Clone(), nil
 }
 
 // FetchJSONFromProxy fetches JSON from a proxy and unmarshals it

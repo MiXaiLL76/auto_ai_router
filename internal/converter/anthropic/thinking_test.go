@@ -96,19 +96,24 @@ func TestMapThinkingConfig_Classic(t *testing.T) {
 // Claude Opus 4+ and mythos-preview: expects type="adaptive" + output_config.effort, no budget_tokens.
 func TestMapThinkingConfig_Adaptive(t *testing.T) {
 	models := []string{
-		"claude-opus-4-7",
+		"claude-opus-4-8",
+		"claude-opus-4.7",
 		"claude-opus-4-6",
-		"claude-opus-4-5-20251101",
+		"claude-opus-5",
+		"claude-sonnet-4-6",
+		"claude-sonnet-5",
+		"claude-fable-5",
 		"claude-mythos-preview",
+		"global.anthropic.claude-opus-4-8",
 	}
 
 	for _, model := range models {
-		model := model
 		t.Run(model+"/reasoning_effort_high", func(t *testing.T) {
 			tc, oc := mapThinkingConfig(nil, "high", model)
 			assert.NotNil(t, tc)
 			assert.Equal(t, "adaptive", tc.Type)
 			assert.Equal(t, 0, tc.BudgetTokens)
+			assert.Equal(t, "summarized", tc.Display)
 			assert.NotNil(t, oc)
 			assert.Equal(t, "high", oc.Effort)
 		})
@@ -137,6 +142,7 @@ func TestMapThinkingConfig_Adaptive(t *testing.T) {
 			tc, oc := mapThinkingConfig(thinking, "", model)
 			assert.NotNil(t, tc)
 			assert.Equal(t, "adaptive", tc.Type)
+			assert.Equal(t, "summarized", tc.Display)
 			assert.NotNil(t, oc)
 			assert.Equal(t, "high", oc.Effort)
 		})
@@ -151,6 +157,20 @@ func TestMapThinkingConfig_Adaptive(t *testing.T) {
 			assert.Equal(t, "adaptive", tc.Type)
 			assert.NotNil(t, oc)
 			assert.Equal(t, "xhigh", oc.Effort)
+		})
+
+		t.Run(model+"/adaptive_display_passthrough", func(t *testing.T) {
+			thinking := map[string]interface{}{
+				"type":    "adaptive",
+				"effort":  "high",
+				"display": "summarized",
+			}
+			tc, oc := mapThinkingConfig(thinking, "", model)
+			assert.NotNil(t, tc)
+			assert.Equal(t, "adaptive", tc.Type)
+			assert.Equal(t, "summarized", tc.Display)
+			assert.NotNil(t, oc)
+			assert.Equal(t, "high", oc.Effort)
 		})
 
 		t.Run(model+"/disabled", func(t *testing.T) {
@@ -173,18 +193,23 @@ func TestIsAdaptiveThinkingModel(t *testing.T) {
 		model    string
 		adaptive bool
 	}{
-		// Opus 4 family → adaptive
+		// Claude 4.6+ and Claude 5 → adaptive
+		{"claude-opus-5", true},
+		{"claude-sonnet-5", true},
+		{"claude-fable-5", true},
 		{"claude-opus-4-7", true},
 		{"claude-opus-4-6", true},
-		{"claude-opus-4-5-20251101", true},
+		{"claude-sonnet-4-6", true},
+		{"global.anthropic.claude-opus-4-8", true},
 		{"claude-mythos-preview", true},
-		// Claude 4 Sonnet/Haiku → no thinking support, not adaptive
-		{"claude-sonnet-4-6", false},
+		// Claude 4.5 and earlier → legacy enabled thinking
+		{"claude-opus-4-5-20251101", false},
+		{"claude-opus-4-20250514", false},
+		{"claude-sonnet-4-5-20250929", false},
 		{"claude-haiku-4-5-20251001", false},
-		// Claude 3.x → legacy enabled+budget_tokens
 		{"claude-3-7-sonnet-20250219", false},
 		{"claude-3-5-sonnet-20241022", false},
-		// {"claude-3-opus-20240229", false},
+		{"claude-3-opus-20240229", false},
 		{"", false},
 	}
 	for _, tt := range tests {

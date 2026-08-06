@@ -127,13 +127,13 @@ func (r *RoundRobin) getCredentialByName(name string) *config.CredentialConfig {
 	return &r.credentials[idx]
 }
 
-// IsProxyCredential checks if a credential is a proxy type
+// IsProxyCredential checks if a credential uses proxy/AIR remote-router transport.
 func (r *RoundRobin) IsProxyCredential(credentialName string) bool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
 	cred := r.getCredentialByName(credentialName)
-	return cred != nil && cred.Type == config.ProviderTypeProxy
+	return cred != nil && cred.IsProxyLike()
 }
 
 // IsBanned checks if a specific credential+model pair is currently banned
@@ -146,14 +146,14 @@ func (r *RoundRobin) HasAnyBan(credentialName string) bool {
 	return r.fail2ban.HasAnyBan(credentialName)
 }
 
-// GetProxyCredentials returns all proxy type credentials
+// GetProxyCredentials returns all proxy/AIR remote-router credentials.
 func (r *RoundRobin) GetProxyCredentials() []config.CredentialConfig {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
 	var proxies []config.CredentialConfig
 	for _, cred := range r.credentials {
-		if cred.Type == config.ProviderTypeProxy {
+		if cred.IsProxyLike() {
 			proxies = append(proxies, cred)
 		}
 	}
@@ -183,8 +183,16 @@ func (r *RoundRobin) NextFallbackForModelScoped(modelID string, visibility scope
 	return r.nextScoped(modelID, true, false, visibility)
 }
 
+func (r *RoundRobin) NextFallbackForModelExcludingScoped(modelID string, exclude map[string]bool, visibility scope.Context) (*config.CredentialConfig, error) {
+	return r.nextExcludingScoped(modelID, true, false, "", exclude, visibility)
+}
+
 func (r *RoundRobin) NextFallbackProxyForModelScoped(modelID string, visibility scope.Context) (*config.CredentialConfig, error) {
 	return r.nextScoped(modelID, true, true, visibility)
+}
+
+func (r *RoundRobin) NextFallbackProxyForModelExcludingScoped(modelID string, exclude map[string]bool, visibility scope.Context) (*config.CredentialConfig, error) {
+	return r.nextExcludingScoped(modelID, true, true, "", exclude, visibility)
 }
 
 // NextSpecific tries to return a specific credential by name without advancing the
@@ -249,7 +257,7 @@ func (r *RoundRobin) nextExcludingScoped(modelID string, allowOnlyFallback, allo
 			continue
 		}
 
-		if allowOnlyProxy && cred.Type != config.ProviderTypeProxy {
+		if allowOnlyProxy && !cred.IsProxyLike() {
 			monitoring.CredentialSelectionRejected.WithLabelValues("type_not_allowed").Inc()
 			continue
 		}
@@ -409,10 +417,6 @@ func (r *RoundRobin) NextSameTypeForModelExcluding(modelID string, credType conf
 }
 
 func (r *RoundRobin) NextSameTypeForModelExcludingScoped(modelID string, credType config.ProviderType, exclude map[string]bool, visibility scope.Context) (*config.CredentialConfig, error) {
-	if credType == config.ProviderTypeProxy {
-		// allowOnlyProxy=true already restricts to proxy type
-		return r.nextExcludingScoped(modelID, false, true, "", exclude, visibility)
-	}
 	return r.nextExcludingScoped(modelID, false, false, credType, exclude, visibility)
 }
 
@@ -424,7 +428,7 @@ func (r *RoundRobin) NextRetryForModelExcludingScoped(modelID string, current *c
 	if current == nil {
 		return nil, ErrNoCredentialsAvailable
 	}
-	if current.Type == config.ProviderTypeProxy || current.IsFallback {
+	if current.IsProxyLike() || current.IsFallback {
 		return r.NextSameTypeForModelExcludingScoped(modelID, current.Type, exclude, visibility)
 	}
 	if current.FallbackPriority <= 0 {
@@ -464,7 +468,7 @@ func (r *RoundRobin) splitPriorityRetryCandidatesLocked(modelID string, minPrior
 		if len(exclude) > 0 && exclude[cred.Name] {
 			continue
 		}
-		if cred.Type == config.ProviderTypeProxy {
+		if cred.IsProxyLike() {
 			monitoring.CredentialSelectionRejected.WithLabelValues("type_not_allowed").Inc()
 			continue
 		}
@@ -569,7 +573,7 @@ func (r *RoundRobin) hasTriedPriorityCredential(exclude map[string]bool) bool {
 			continue
 		}
 		cred := r.getCredentialByName(name)
-		if cred != nil && cred.FallbackPriority > 0 && !cred.IsFallback && cred.Type != config.ProviderTypeProxy {
+		if cred != nil && cred.FallbackPriority > 0 && !cred.IsFallback && !cred.IsProxyLike() {
 			return true
 		}
 	}
@@ -673,7 +677,7 @@ func (r *RoundRobin) UpdateDBCredentials(dbCreds []config.CredentialConfig) {
 }
 
 func preserveProviderScopeMetadata(next *config.CredentialConfig, previous config.CredentialConfig) {
-	if next.Type != config.ProviderTypeProxy {
+	if !next.IsProxyLike() {
 		return
 	}
 	if next.SameProviderIdentity(previous) {

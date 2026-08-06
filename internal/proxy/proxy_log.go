@@ -3,6 +3,7 @@ package proxy
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/converter"
+	promanutils "github.com/mixaill76/auto_ai_router/internal/converter/proman/utils"
 	"github.com/mixaill76/auto_ai_router/internal/kafkalog"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb/spendlog"
@@ -54,7 +56,7 @@ func shouldMaskUpstreamErrors(cred *config.CredentialConfig) bool {
 	if cred == nil {
 		return false
 	}
-	return isCometAPICredential(cred) || isSosanaCredential(cred)
+	return isCometAPICredential(cred) || isSosanaCredential(cred) || promanutils.IsCredential(cred)
 }
 
 func isCometAPICredential(cred *config.CredentialConfig) bool {
@@ -65,29 +67,26 @@ func isCometAPICredential(cred *config.CredentialConfig) bool {
 		return true
 	}
 	name := strings.ToLower(cred.Name)
-	return isCometAPIHost(cred.BaseURL) ||
+	return isProviderHost(cred.BaseURL, "cometapi.com") ||
 		strings.Contains(name, "cometapi") ||
 		strings.Contains(name, "comet-api")
 }
 
-func isCometAPIHost(rawBaseURL string) bool {
-	host := normalizedHost(rawBaseURL)
-	return host == "cometapi.com" || strings.HasSuffix(host, ".cometapi.com")
-}
-
-func normalizedHost(rawBaseURL string) string {
+func isProviderHost(rawBaseURL, domain string) bool {
 	baseURL := strings.TrimSpace(rawBaseURL)
-	if baseURL == "" {
-		return ""
+	domain = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(domain)), ".")
+	if baseURL == "" || domain == "" {
+		return false
 	}
 	u, err := url.Parse(baseURL)
 	if err != nil || u.Hostname() == "" {
 		u, err = url.Parse("https://" + baseURL)
 		if err != nil {
-			return ""
+			return false
 		}
 	}
-	return strings.TrimSuffix(strings.ToLower(u.Hostname()), ".")
+	host := strings.TrimSuffix(strings.ToLower(u.Hostname()), ".")
+	return host == domain || strings.HasSuffix(host, "."+domain)
 }
 
 func isSosanaCredential(cred *config.CredentialConfig) bool {
@@ -98,15 +97,9 @@ func isSosanaCredential(cred *config.CredentialConfig) bool {
 		return true
 	}
 	name := strings.ToLower(cred.Name)
-	host := normalizedHost(cred.BaseURL)
-	return isSosanaHost(cred.BaseURL) ||
+	return isProviderHost(cred.BaseURL, "sosana.art") ||
 		containsSosanaMarker(name) ||
-		containsSosanaMarker(host)
-}
-
-func isSosanaHost(rawBaseURL string) bool {
-	host := normalizedHost(rawBaseURL)
-	return host == "sosana.art" || strings.HasSuffix(host, ".sosana.art")
+		containsSosanaMarker(cred.BaseURL)
 }
 
 // logStreamHandlerError logs a streaming handler failure. Client disconnects are
@@ -131,10 +124,35 @@ func (p *Proxy) logTransformedResponse(ctx context.Context, credName, providerNa
 	}
 }
 
+// dbUnavailableRetryAfterSeconds is the Retry-After hint sent to clients when
+// LiteLLM DB is unreachable during auth. Kept short and fail-fast: AIR never
+// blocks the request waiting on the DB, it just tells the client when to try
+// again. Independent of litellm_db.health_check_interval — a fixed floor is
+// simpler to reason about than deriving it from the pool's reconnect backoff.
+const dbUnavailableRetryAfterSeconds = "5"
+
 // ==================== LiteLLM DB Integration ====================
-// handleLiteLLMAuthError handles LiteLLM authentication errors
-// Returns true if error was handled and response was written
-func (p *Proxy) handleLiteLLMAuthError(ctx context.Context, w http.ResponseWriter, err error, token string) bool {
+// handleLiteLLMAuthError handles a LiteLLM DB auth error: it always writes a
+// client response and updates logCtx (Status/HTTPStatus/ErrorMsg) to match,
+// so the access log and the actual response sent never disagree.
+func (p *Proxy) handleLiteLLMAuthError(ctx context.Context, w http.ResponseWriter, logCtx *RequestLogContext, err error, token string) {
+	logCtx.Status = "failure"
+
+	// Connection failure means AIR cannot confirm or deny the key - fail closed
+	// with 503, not 401. A 401 here would tell a client with a perfectly valid
+	// key that its credentials are bad; 503+Retry-After correctly signals a
+	// transient dependency outage that well-behaved clients retry on.
+	if errors.Is(err, litellmdb.ErrConnectionFailed) {
+		logCtx.HTTPStatus = http.StatusServiceUnavailable
+		logCtx.ErrorMsg = "LiteLLM DB unavailable"
+		p.logger.ErrorContext(ctx, "LiteLLM DB unavailable during auth",
+			"error_code", http.StatusServiceUnavailable,
+			"token_prefix", security.MaskAPIKey(token))
+		w.Header().Set("Retry-After", dbUnavailableRetryAfterSeconds)
+		WriteErrorServiceUnavailable(w, "Authentication service temporarily unavailable, please retry")
+		return
+	}
+
 	// Map error types to HTTP status and message
 	errorMap := map[error]struct {
 		status  int
@@ -143,19 +161,17 @@ func (p *Proxy) handleLiteLLMAuthError(ctx context.Context, w http.ResponseWrite
 	}{
 		litellmdb.ErrTokenNotFound:  {http.StatusUnauthorized, "Invalid token", "Token not found"},
 		litellmdb.ErrTokenBlocked:   {http.StatusForbidden, "Token blocked", "Token blocked"},
+		litellmdb.ErrTeamBlocked:    {http.StatusForbidden, "Team blocked", "Team blocked"},
 		litellmdb.ErrTokenExpired:   {http.StatusUnauthorized, "Token expired", "Token expired"},
 		litellmdb.ErrBudgetExceeded: {http.StatusPaymentRequired, "Budget exceeded", "Budget exceeded"},
-	}
-
-	// Check for connection failure first (requires fallback, not an error response)
-	if errors.Is(err, litellmdb.ErrConnectionFailed) {
-		return false
 	}
 
 	// Check for known auth errors — client-side issues (bad/blocked/expired token,
 	// budget), not service failures, so they are logged at WARN.
 	for errType, info := range errorMap {
 		if errors.Is(err, errType) {
+			logCtx.HTTPStatus = info.status
+			logCtx.ErrorMsg = "LiteLLM auth validation failed"
 			p.logger.WarnContext(ctx, info.logMsg,
 				"error_code", info.status,
 				"token_prefix", security.MaskAPIKey(token))
@@ -167,17 +183,18 @@ func (p *Proxy) handleLiteLLMAuthError(ctx context.Context, w http.ResponseWrite
 			default:
 				WriteErrorUnauthorized(w, info.message)
 			}
-			return true
+			return
 		}
 	}
 
 	// Unknown error — unexpected server-side failure, keep at ERROR
+	logCtx.HTTPStatus = http.StatusInternalServerError
+	logCtx.ErrorMsg = "LiteLLM auth validation failed"
 	p.logger.ErrorContext(ctx, "Auth error",
 		"error_code", http.StatusInternalServerError,
 		"error", err,
 		"token_prefix", security.MaskAPIKey(token))
 	WriteErrorInternal(w, "Internal Server Error")
-	return true
 }
 
 // litellmCallType translates an AIR request path into the LiteLLM call_type.
@@ -190,10 +207,10 @@ func litellmCallType(path string) string {
 // publishes an expanded copy of the same event to Kafka for ClickHouse
 // analytics (internal/kafkalog). The two write-paths are independent: either
 // can be enabled/disabled on its own (see litellm_db.disable_spend_logs_write
-// and kafka.enabled). Returns error only for the Postgres write — Kafka
+// and kafka.enabled). Pricing and Postgres write errors are returned; Kafka
 // publish failures are logged but never affect the caller.
 func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
-	litellmEnabled := p.LiteLLMDB != nil && p.LiteLLMDB.IsEnabled()
+	litellmEnabled := p.postgresSpendTrackingEnabled()
 	kafkaEnabled := p.kafkaLog != nil && p.kafkaLog.IsEnabled()
 	if !litellmEnabled && !kafkaEnabled {
 		return nil
@@ -230,6 +247,9 @@ func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
 		teamID = logCtx.TokenInfo.TeamID
 		organizationID = logCtx.TokenInfo.OrganizationID
 	}
+	if teamID == "" && p.credentialNameAsTeamID {
+		teamID = credName
+	}
 
 	// LiteLLM's end_user is the caller-supplied end-user identifier ("user" in
 	// the request body, X-End-User for AIR). The key owner's email must NOT be
@@ -260,38 +280,44 @@ func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
 	if logCtx.TokenUsage == nil {
 		logCtx.TokenUsage = &converter.TokenUsage{}
 	}
-
-	// Calculate cost based on model pricing and token usage.
-	// Try real model name first (from models[].model), then alias name.
-	var cost float64
-	var tokenCosts *converter.TokenCosts
-	logSpendCtx := logCtx.Context()
-	if p.priceRegistry == nil {
-		p.logger.WarnContext(logSpendCtx, "Price registry not available, using 0 cost for spend log")
-	} else {
-		priceModelID := logCtx.ModelID
-		if logCtx.RealModelID != "" && logCtx.RealModelID != logCtx.ModelID {
-			priceModelID = logCtx.RealModelID
-		}
-		modelPrice := p.priceRegistry.GetPrice(priceModelID)
-		if modelPrice == nil && priceModelID != logCtx.ModelID {
-			modelPrice = p.priceRegistry.GetPrice(logCtx.ModelID)
-		}
-		if modelPrice == nil {
-			p.logger.WarnContext(logSpendCtx, "Model price not found in registry, using 0 cost",
-				"model_name", priceModelID)
-		} else {
-			tokenCosts = modelPrice.CalculateCosts(logCtx.TokenUsage)
-			if tokenCosts != nil {
-				cost = tokenCosts.TotalCost
-			}
-			p.logger.DebugContext(logSpendCtx, "Calculated cost for model",
-				"model_name", priceModelID,
-				"cost", cost,
-				"prompt_tokens", logCtx.TokenUsage.PromptTokens,
-				"completion_tokens", logCtx.TokenUsage.CompletionTokens)
+	if logCtx.IsImageGeneration && status == "success" && logCtx.TokenUsage.ImageCount <= 0 {
+		logCtx.TokenUsage.ImageCount = logCtx.ImageCount
+		if logCtx.TokenUsage.ImageCount <= 0 {
+			logCtx.TokenUsage.ImageCount = 1
 		}
 	}
+	logCtx.applyWebSearchUsageDefaults(status)
+	logCtx.TokenUsage.Normalize()
+
+	logSpendCtx := logCtx.Context()
+	modelPrice := logCtx.ModelPrice
+	priceModelID := logCtx.PriceModelID
+	if modelPrice == nil {
+		priceModelID, modelPrice = p.resolveBillingPrice(logCtx, logCtx.PublicModelID, logCtx.ModelID, logCtx.RealModelID)
+	}
+	var tokenCosts *converter.TokenCosts
+	if modelPrice == nil {
+		// No price and nothing was ever billable (e.g. rejected before any
+		// provider was contacted, such as the "no credentials available" 429
+		// path in selectCredentialForModel) — write a $0 audit row instead of
+		// dropping it silently. Only fail closed when real usage exists that
+		// we can't price, which is the actual billing-integrity risk.
+		if !logCtx.TokenUsage.IsZero() {
+			return fmt.Errorf("model price unavailable for %q", priceModelID)
+		}
+		tokenCosts = &converter.TokenCosts{}
+	} else {
+		tokenCosts = modelPrice.CalculateCosts(logCtx.TokenUsage)
+		if tokenCosts == nil {
+			return fmt.Errorf("cost calculation failed for %q", priceModelID)
+		}
+	}
+	cost := tokenCosts.TotalCost
+	p.logger.DebugContext(logSpendCtx, "Calculated cost for model",
+		"model_name", priceModelID,
+		"cost", cost,
+		"prompt_tokens", logCtx.TokenUsage.PromptTokens,
+		"completion_tokens", logCtx.TokenUsage.CompletionTokens)
 
 	// Settle any Redis budget reservation / TPM usage against the real cost.
 	// Guarded so it runs exactly once even though a defer safety-net may also call it.
@@ -301,11 +327,6 @@ func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
 	if customLLMProvider == "proxy" {
 		customLLMProvider = string(config.ProviderTypeOpenAI)
 	}
-
-	// teamID deliberately stays empty when the key has no team: LiteLLM writes
-	// team_id="" in that case, and inventing one (e.g. the credential name)
-	// would create daily/team rows that never merge with the primary accounting
-	// and UPDATEs against non-existent LiteLLM_TeamTable rows.
 
 	endTime := utils.NowUTC()
 
@@ -345,7 +366,7 @@ func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
 	var pgErr error
 	if litellmEnabled {
 		pgErr = p.LiteLLMDB.LogSpend(&litellmdb.SpendLogEntry{
-			RequestID:           logCtx.RequestID,
+			RequestID:           logCtx.spendRequestID(),
 			StartTime:           logCtx.StartTime,
 			EndTime:             endTime,
 			CompletionStartTime: completionStartTime,

@@ -200,20 +200,21 @@ func TestResponsesRequestToAnthropic_ToolChoiceFunction(t *testing.T) {
 
 func TestResponsesRequestToAnthropic_ReasoningEffortHigh(t *testing.T) {
 	body := `{
-		"model": "claude-opus-4-5",
+		"model": "claude-opus-4-8",
 		"input": "Think about this",
 		"reasoning": {"effort": "high"}
 	}`
 
-	result, err := ResponsesRequestToAnthropic([]byte(body), "claude-opus-4-5")
+	result, err := ResponsesRequestToAnthropic([]byte(body), "claude-opus-4-8")
 	require.NoError(t, err)
 
 	var ar map[string]interface{}
 	require.NoError(t, json.Unmarshal(result, &ar))
 
-	// claude-opus-4-5 uses adaptive thinking: type="adaptive", no budget_tokens
+	// claude-opus-4-8 uses adaptive thinking: type="adaptive", no budget_tokens
 	thinking := ar["thinking"].(map[string]interface{})
 	assert.Equal(t, "adaptive", thinking["type"])
+	assert.Equal(t, "summarized", thinking["display"])
 	assert.Nil(t, thinking["budget_tokens"])
 
 	// effort goes in output_config, not in thinking
@@ -226,12 +227,12 @@ func TestResponsesRequestToAnthropic_ReasoningEffortHigh(t *testing.T) {
 
 func TestResponsesRequestToAnthropic_ReasoningEffortLow(t *testing.T) {
 	body := `{
-		"model": "claude-opus-4-5",
+		"model": "claude-opus-4-8",
 		"input": "test",
 		"reasoning": {"effort": "low"}
 	}`
 
-	result, err := ResponsesRequestToAnthropic([]byte(body), "claude-opus-4-5")
+	result, err := ResponsesRequestToAnthropic([]byte(body), "claude-opus-4-8")
 	require.NoError(t, err)
 
 	var ar map[string]interface{}
@@ -239,6 +240,7 @@ func TestResponsesRequestToAnthropic_ReasoningEffortLow(t *testing.T) {
 
 	thinking := ar["thinking"].(map[string]interface{})
 	assert.Equal(t, "adaptive", thinking["type"])
+	assert.Equal(t, "summarized", thinking["display"])
 	assert.Nil(t, thinking["budget_tokens"])
 
 	outputConfig := ar["output_config"].(map[string]interface{})

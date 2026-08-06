@@ -169,11 +169,9 @@ func TestTokenInfo_IsModelAllowed(t *testing.T) {
 		assert.True(t, info.IsModelAllowed("claude-3"))
 	})
 
-	t.Run("all-team-models sentinel with no team - fail closed", func(t *testing.T) {
-		// LiteLLM fails closed when all-team-models is used without a team;
-		// the fail-open behavior from PR #82 is intentionally not carried over.
+	t.Run("all-team-models sentinel with no team - unrestricted", func(t *testing.T) {
 		info := &models.TokenInfo{Models: []string{"all-team-models"}, TeamID: ""}
-		assert.False(t, info.IsModelAllowed("gpt-4"))
+		assert.True(t, info.IsModelAllowed("gpt-4"))
 	})
 
 	t.Run("all-team-models sentinel - resolves against team allow-list", func(t *testing.T) {
@@ -301,6 +299,31 @@ func TestTokenInfo_Validate(t *testing.T) {
 		err := info.Validate("") // Empty model - skip check
 		assert.NoError(t, err)
 	})
+
+	t.Run("orphan user reference keeps optional user policy unrestricted", func(t *testing.T) {
+		// Production contains active tokens whose user_id no longer has a
+		// LiteLLM_UserTable row. LEFT JOIN fields therefore scan as nil while
+		// the token identity itself remains present and valid.
+		info := &models.TokenInfo{
+			UserID:     "deleted-owner",
+			UserModels: nil,
+		}
+		assert.NoError(t, info.Validate("gpt-4"))
+	})
+
+	t.Run("dangling team reference fails closed", func(t *testing.T) {
+		// Unlike an orphan user (intentionally unrestricted, see above), a
+		// team_id whose LiteLLM_TeamTable row is gone must deny: the team
+		// scope cannot be resolved, and an empty scope would otherwise be
+		// treated as unrestricted — a fail-open for all-team-models keys.
+		info := &models.TokenInfo{
+			Models:       []string{models.AllTeamModels},
+			TeamID:       "deleted-team",
+			TeamDangling: true,
+		}
+		assert.ErrorIs(t, info.Validate("gpt-4"), models.ErrModelNotAllowed)
+	})
+
 }
 
 func TestCache_Auth_SetGet(t *testing.T) {

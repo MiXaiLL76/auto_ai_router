@@ -2,11 +2,18 @@ package responses
 
 import (
 	"bufio"
-	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"strings"
+
+	// goccy/go-json instead of encoding/json: both json.* calls in this file run
+	// once per streamed chunk/event — chatStreamChunk unmarshal (benchmarked
+	// ~5.2x faster) and the outgoing SSE event map[string]interface{} marshal
+	// (~1.5x faster) in writeSSEWithSeq.
+	json "github.com/goccy/go-json"
+
+	"github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
 )
 
 // streamState tracks the current state of the Responses API stream transformer.
@@ -68,14 +75,19 @@ type accumulatedToolCall struct {
 
 // chatCompletionsUsage represents usage from a Chat Completions streaming chunk.
 type chatCompletionsUsage struct {
-	PromptTokens      int
-	CompletionTokens  int
-	TotalTokens       int
-	CachedTokens      int
-	ReasoningTokens   int
-	AudioInputTokens  int
-	AudioOutputTokens int
-	ImageOutputTokens int
+	PromptTokens          int
+	CompletionTokens      int
+	TotalTokens           int
+	CachedTokens          int
+	CachedAudioTokens     int
+	CacheCreationTokens   int
+	CacheCreation5mTokens int
+	CacheCreation1hTokens int
+	ReasoningTokens       int
+	AudioInputTokens      int
+	AudioOutputTokens     int
+	ImageOutputTokens     int
+	WebSearchRequests     int
 }
 
 // chatStreamChunk represents a parsed Chat Completions streaming chunk.
@@ -107,14 +119,24 @@ type chatStreamChunk struct {
 		CompletionTokens    int `json:"completion_tokens"`
 		TotalTokens         int `json:"total_tokens"`
 		PromptTokensDetails *struct {
-			CachedTokens int `json:"cached_tokens,omitempty"`
-			AudioTokens  int `json:"audio_tokens,omitempty"`
+			CachedTokens              int `json:"cached_tokens,omitempty"`
+			CachedAudioTokens         int `json:"cached_audio_tokens,omitempty"`
+			CacheCreationTokens       int `json:"cache_creation_tokens,omitempty"`
+			CacheWriteTokens          int `json:"cache_write_tokens,omitempty"`
+			CacheCreationTokenDetails *struct {
+				Ephemeral5mInputTokens int `json:"ephemeral_5m_input_tokens,omitempty"`
+				Ephemeral1hInputTokens int `json:"ephemeral_1h_input_tokens,omitempty"`
+			} `json:"cache_creation_token_details,omitempty"`
+			AudioTokens int `json:"audio_tokens,omitempty"`
 		} `json:"prompt_tokens_details,omitempty"`
 		CompletionTokensDetails *struct {
 			ReasoningTokens int `json:"reasoning_tokens,omitempty"`
 			AudioTokens     int `json:"audio_tokens,omitempty"`
 			ImageTokens     int `json:"image_tokens,omitempty"`
 		} `json:"completion_tokens_details,omitempty"`
+		ServerToolUse *struct {
+			WebSearchRequests int `json:"web_search_requests,omitempty"`
+		} `json:"server_tool_use,omitempty"`
 	} `json:"usage,omitempty"`
 }
 
@@ -125,17 +147,40 @@ type chatStreamChunk struct {
 // Pass a *ResponsesMetadata as the second variadic element to have store,
 // previous_response_id and metadata echoed back in all SSE response objects.
 func TransformChatStreamToResponses(reader io.Reader, writer io.Writer, model string, onComplete ...func(*Response)) error {
-	return transformChatStreamToResponsesInner(reader, writer, model, nil, onComplete...)
+	return transformChatStreamToResponsesInner(reader, writer, model, nil, true, onComplete...)
 }
 
 // TransformChatStreamToResponsesWithMeta is like TransformChatStreamToResponses but
 // additionally echoes request-side fields (store, previous_response_id, metadata) into
 // every emitted response object so the wire payload matches the stored record.
 func TransformChatStreamToResponsesWithMeta(reader io.Reader, writer io.Writer, model string, meta *ResponsesMetadata, onComplete ...func(*Response)) error {
-	return transformChatStreamToResponsesInner(reader, writer, model, meta, onComplete...)
+	return transformChatStreamToResponsesInner(reader, writer, model, meta, true, onComplete...)
 }
 
-func transformChatStreamToResponsesInner(reader io.Reader, writer io.Writer, model string, meta *ResponsesMetadata, onComplete ...func(*Response)) error {
+// TransformChatStreamToResponsesWithMetaAndUsage is like
+// TransformChatStreamToResponsesWithMeta but also defines whether the source
+// audio_tokens value includes cached audio.
+func TransformChatStreamToResponsesWithMetaAndUsage(
+	reader io.Reader,
+	writer io.Writer,
+	model string,
+	meta *ResponsesMetadata,
+	audioInputIncludesCachedAudio bool,
+	onComplete ...func(*Response),
+) error {
+	return transformChatStreamToResponsesInner(
+		reader, writer, model, meta, audioInputIncludesCachedAudio, onComplete...,
+	)
+}
+
+func transformChatStreamToResponsesInner(
+	reader io.Reader,
+	writer io.Writer,
+	model string,
+	meta *ResponsesMetadata,
+	audioInputIncludesCachedAudio bool,
+	onComplete ...func(*Response),
+) error {
 	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
 
@@ -216,13 +261,37 @@ func transformChatStreamToResponsesInner(reader io.Reader, writer io.Writer, mod
 				TotalTokens:      chunk.Usage.TotalTokens,
 			}
 			if chunk.Usage.PromptTokensDetails != nil {
-				acc.usage.CachedTokens = chunk.Usage.PromptTokensDetails.CachedTokens
-				acc.usage.AudioInputTokens = chunk.Usage.PromptTokensDetails.AudioTokens
+				cachedTokens, cachedAudioTokens := converterutil.NormalizeCachedAudioBreakdown(
+					chunk.Usage.PromptTokensDetails.CachedTokens,
+					chunk.Usage.PromptTokensDetails.CachedAudioTokens,
+				)
+				acc.usage.CachedTokens = cachedTokens
+				acc.usage.CachedAudioTokens = cachedAudioTokens
+				acc.usage.CacheCreationTokens = chunk.Usage.PromptTokensDetails.CacheCreationTokens
+				if acc.usage.CacheCreationTokens == 0 {
+					acc.usage.CacheCreationTokens = chunk.Usage.PromptTokensDetails.CacheWriteTokens
+				}
+				acc.usage.AudioInputTokens = normalizedAudioTokens(
+					chunk.Usage.PromptTokensDetails.AudioTokens,
+					cachedTokens,
+					cachedAudioTokens,
+					audioInputIncludesCachedAudio,
+				)
+				if details := chunk.Usage.PromptTokensDetails.CacheCreationTokenDetails; details != nil {
+					acc.usage.CacheCreation5mTokens = details.Ephemeral5mInputTokens
+					acc.usage.CacheCreation1hTokens = details.Ephemeral1hInputTokens
+					if acc.usage.CacheCreationTokens == 0 {
+						acc.usage.CacheCreationTokens = details.Ephemeral5mInputTokens + details.Ephemeral1hInputTokens
+					}
+				}
 			}
 			if chunk.Usage.CompletionTokensDetails != nil {
 				acc.usage.ReasoningTokens = chunk.Usage.CompletionTokensDetails.ReasoningTokens
 				acc.usage.AudioOutputTokens = chunk.Usage.CompletionTokensDetails.AudioTokens
 				acc.usage.ImageOutputTokens = chunk.Usage.CompletionTokensDetails.ImageTokens
+			}
+			if chunk.Usage.ServerToolUse != nil && chunk.Usage.ServerToolUse.WebSearchRequests > 0 {
+				acc.usage.WebSearchRequests = chunk.Usage.ServerToolUse.WebSearchRequests
 			}
 		}
 
@@ -452,11 +521,27 @@ func buildTypedCompletedResponse(acc *streamAccumulator) *Response {
 	var usage *Usage
 	if acc.usage != nil {
 		usage = &Usage{
-			InputTokens:         acc.usage.PromptTokens,
-			OutputTokens:        acc.usage.CompletionTokens,
-			TotalTokens:         acc.usage.TotalTokens,
-			InputTokensDetails:  InputDetails{CachedTokens: acc.usage.CachedTokens, AudioTokens: acc.usage.AudioInputTokens},
+			InputTokens:  acc.usage.PromptTokens,
+			OutputTokens: acc.usage.CompletionTokens,
+			TotalTokens:  acc.usage.TotalTokens,
+			InputTokensDetails: InputDetails{
+				CachedTokens:        acc.usage.CachedTokens,
+				CachedAudioTokens:   acc.usage.CachedAudioTokens,
+				CacheCreationTokens: acc.usage.CacheCreationTokens,
+				AudioTokens:         acc.usage.AudioInputTokens,
+			},
 			OutputTokensDetails: OutputDetails{ReasoningTokens: acc.usage.ReasoningTokens, AudioTokens: acc.usage.AudioOutputTokens, ImageTokens: acc.usage.ImageOutputTokens},
+		}
+		if acc.usage.WebSearchRequests > 0 {
+			usage.ServerToolUse = &ServerToolUseDetails{
+				WebSearchRequests: acc.usage.WebSearchRequests,
+			}
+		}
+		if acc.usage.CacheCreation5mTokens > 0 || acc.usage.CacheCreation1hTokens > 0 {
+			usage.InputTokensDetails.CacheCreationTokenDetails = &CacheCreationTokenDetails{
+				Ephemeral5mInputTokens: acc.usage.CacheCreation5mTokens,
+				Ephemeral1hInputTokens: acc.usage.CacheCreation1hTokens,
+			}
 		}
 	}
 
@@ -708,14 +793,27 @@ func buildCompletedResponse(acc *streamAccumulator) map[string]interface{} {
 			OutputTokens: acc.usage.CompletionTokens,
 			TotalTokens:  acc.usage.TotalTokens,
 			InputTokensDetails: InputDetails{
-				CachedTokens: acc.usage.CachedTokens,
-				AudioTokens:  acc.usage.AudioInputTokens,
+				CachedTokens:        acc.usage.CachedTokens,
+				CachedAudioTokens:   acc.usage.CachedAudioTokens,
+				CacheCreationTokens: acc.usage.CacheCreationTokens,
+				AudioTokens:         acc.usage.AudioInputTokens,
 			},
 			OutputTokensDetails: OutputDetails{
 				ReasoningTokens: acc.usage.ReasoningTokens,
 				AudioTokens:     acc.usage.AudioOutputTokens,
 				ImageTokens:     acc.usage.ImageOutputTokens,
 			},
+		}
+		if acc.usage.WebSearchRequests > 0 {
+			usageObj.ServerToolUse = &ServerToolUseDetails{
+				WebSearchRequests: acc.usage.WebSearchRequests,
+			}
+		}
+		if acc.usage.CacheCreation5mTokens > 0 || acc.usage.CacheCreation1hTokens > 0 {
+			usageObj.InputTokensDetails.CacheCreationTokenDetails = &CacheCreationTokenDetails{
+				Ephemeral5mInputTokens: acc.usage.CacheCreation5mTokens,
+				Ephemeral1hInputTokens: acc.usage.CacheCreation1hTokens,
+			}
 		}
 	}
 

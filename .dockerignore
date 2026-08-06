@@ -26,7 +26,6 @@ vendor/
 
 # Testing
 .test
-testdata/
 
 # CI/CD
 .travis.yml
@@ -36,9 +35,11 @@ testdata/
 Dockerfile
 .dockerignore
 docker-compose.yml
+docker-compose.litellm.yml
 
 # Misc
 .env
 .DS_Store
 *.log
+local/
 tmp/

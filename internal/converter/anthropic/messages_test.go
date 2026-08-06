@@ -1,10 +1,42 @@
 package anthropic
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
+
+func TestOpenAIToAnthropic_AdaptiveThinkingDisplay(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+	}{
+		{
+			name: "reasoning effort requests summary",
+			body: `{"model":"claude-opus-4-8","messages":[{"role":"user","content":"test"}],"reasoning_effort":"high"}`,
+		},
+		{
+			name: "native display is preserved",
+			body: `{"model":"claude-opus-4-8","messages":[{"role":"user","content":"test"}],"thinking":{"type":"adaptive","effort":"high","display":"summarized"}}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := OpenAIToAnthropic([]byte(tt.body), "claude-opus-4-8")
+			require.NoError(t, err)
+
+			var request map[string]interface{}
+			require.NoError(t, json.Unmarshal(result, &request))
+			thinking := request["thinking"].(map[string]interface{})
+			assert.Equal(t, "adaptive", thinking["type"])
+			assert.Equal(t, "summarized", thinking["display"])
+			assert.Equal(t, "high", request["output_config"].(map[string]interface{})["effort"])
+		})
+	}
+}
 
 func TestExtractSystemBlocks(t *testing.T) {
 	ephemeral := map[string]interface{}{"type": "ephemeral"}

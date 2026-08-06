@@ -133,6 +133,18 @@ func mapHTTPStatusToErrorClass(statusCode int) string {
 	}
 }
 
+func (logCtx *RequestLogContext) applyWebSearchUsageDefaults(status string) {
+	if logCtx == nil || status != "success" {
+		return
+	}
+	if logCtx.TokenUsage == nil {
+		logCtx.TokenUsage = &converter.TokenUsage{}
+	}
+	if logCtx.WebSearchContextSize != "" {
+		logCtx.TokenUsage.WebSearchContextSize = logCtx.WebSearchContextSize
+	}
+}
+
 // buildMetadata builds metadata JSON with user/team alias, usage, cost, and optional error info
 func buildMetadata(hashedToken string, tokenInfo *litellmdb.TokenInfo, errorMsg string, httpStatus int, usage *converter.TokenUsage, requesterIP string, costs *converter.TokenCosts, modelID string, overheadMs float64, kafkaFallbackReason string) string {
 	var userID, teamID, organizationID string
@@ -144,11 +156,13 @@ func buildMetadata(hashedToken string, tokenInfo *litellmdb.TokenInfo, errorMsg 
 
 	// Build usage_object and additional_usage_values
 	promptTokensDetails := map[string]interface{}{
-		"text_tokens":           nil,
-		"audio_tokens":          0,
-		"image_tokens":          nil,
-		"cached_tokens":         0,
-		"cache_creation_tokens": 0,
+		"text_tokens":                  nil,
+		"audio_tokens":                 0,
+		"image_tokens":                 nil,
+		"cached_tokens":                0,
+		"cached_audio_tokens":          0,
+		"cache_creation_tokens":        0,
+		"cache_creation_token_details": nil,
 	}
 	completionTokensDetails := map[string]interface{}{
 		"text_tokens":                nil,
@@ -158,18 +172,38 @@ func buildMetadata(hashedToken string, tokenInfo *litellmdb.TokenInfo, errorMsg 
 		"accepted_prediction_tokens": 0,
 		"rejected_prediction_tokens": 0,
 	}
+	serverToolUse := map[string]interface{}{
+		"web_search_requests":     0,
+		"web_search_context_size": nil,
+	}
 
 	var usageObject interface{}
 	if usage != nil {
+		normalizedUsage := *usage
+		usage = normalizedUsage.Normalize()
 		promptTokensDetails["audio_tokens"] = usage.AudioInputTokens
 		promptTokensDetails["image_tokens"] = usage.ImageTokens
 		promptTokensDetails["cached_tokens"] = usage.CachedInputTokens
+		promptTokensDetails["cached_audio_tokens"] = usage.CachedAudioInputTokens
 		promptTokensDetails["cache_creation_tokens"] = usage.CacheCreationTokens
+		if usage.CacheCreation5mTokens > 0 || usage.CacheCreation1hTokens > 0 {
+			promptTokensDetails["cache_creation_token_details"] = map[string]interface{}{
+				"ephemeral_5m_input_tokens": usage.CacheCreation5mTokens,
+				"ephemeral_1h_input_tokens": usage.CacheCreation1hTokens,
+			}
+		}
 		completionTokensDetails["audio_tokens"] = usage.AudioOutputTokens
+		if usage.OutputTextTokens > 0 {
+			completionTokensDetails["text_tokens"] = usage.OutputTextTokens
+		}
 		completionTokensDetails["image_tokens"] = usage.OutputImageTokens
 		completionTokensDetails["reasoning_tokens"] = usage.ReasoningTokens
 		completionTokensDetails["accepted_prediction_tokens"] = usage.AcceptedPredictionTokens
 		completionTokensDetails["rejected_prediction_tokens"] = usage.RejectedPredictionTokens
+		serverToolUse["web_search_requests"] = usage.WebSearchRequests
+		if usage.WebSearchRequests > 0 {
+			serverToolUse["web_search_context_size"] = usage.WebSearchContextSize
+		}
 		usageObject = map[string]interface{}{
 			"total_tokens":              usage.Total(),
 			"prompt_tokens":             usage.PromptTokens,
@@ -177,23 +211,28 @@ func buildMetadata(hashedToken string, tokenInfo *litellmdb.TokenInfo, errorMsg 
 			"image_count":               usage.ImageCount,
 			"prompt_tokens_details":     promptTokensDetails,
 			"completion_tokens_details": completionTokensDetails,
+			"server_tool_use":           serverToolUse,
 		}
 	}
 
 	additionalUsage := map[string]interface{}{
 		"prompt_tokens_details": map[string]interface{}{
-			"audio_tokens":          promptTokensDetails["audio_tokens"],
-			"image_tokens":          promptTokensDetails["image_tokens"],
-			"cached_tokens":         promptTokensDetails["cached_tokens"],
-			"cache_creation_tokens": promptTokensDetails["cache_creation_tokens"],
+			"audio_tokens":                 promptTokensDetails["audio_tokens"],
+			"image_tokens":                 promptTokensDetails["image_tokens"],
+			"cached_tokens":                promptTokensDetails["cached_tokens"],
+			"cached_audio_tokens":          promptTokensDetails["cached_audio_tokens"],
+			"cache_creation_tokens":        promptTokensDetails["cache_creation_tokens"],
+			"cache_creation_token_details": promptTokensDetails["cache_creation_token_details"],
 		},
 		"completion_tokens_details": map[string]interface{}{
+			"text_tokens":                completionTokensDetails["text_tokens"],
 			"audio_tokens":               completionTokensDetails["audio_tokens"],
 			"image_tokens":               completionTokensDetails["image_tokens"],
 			"reasoning_tokens":           completionTokensDetails["reasoning_tokens"],
 			"accepted_prediction_tokens": completionTokensDetails["accepted_prediction_tokens"],
 			"rejected_prediction_tokens": completionTokensDetails["rejected_prediction_tokens"],
 		},
+		"server_tool_use": serverToolUse,
 	}
 
 	// Build cost_breakdown
@@ -203,13 +242,15 @@ func buildMetadata(hashedToken string, tokenInfo *litellmdb.TokenInfo, errorMsg 
 			"input_cost":          costs.InputCost,
 			"output_cost":         costs.OutputCost,
 			"image_cost":          costs.ImageCost,
+			"reasoning_cost":      costs.ReasoningCost,
 			"cached_input_cost":   costs.CachedInputCost,
 			"cache_creation_cost": costs.CacheCreationCost,
 			"total_cost":          costs.TotalCost,
 			"original_cost":       costs.TotalCost,
 			"margin_percent":      0.0,
 			"discount_amount":     0.0,
-			"tool_usage_cost":     0.0,
+			"tool_usage_cost":     costs.WebSearchCost,
+			"web_search_cost":     costs.WebSearchCost,
 			"discount_percent":    0.0,
 			"margin_fixed_amount": 0.0,
 			"margin_total_amount": 0.0,

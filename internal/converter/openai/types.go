@@ -35,22 +35,36 @@ type OpenAIRequest struct {
 	Thinking             interface{}            `json:"thinking,omitempty"`        // Anthropic-style thinking param: {"type":"enabled","budget_tokens":N}
 	ThinkingBudget       interface{}            `json:"thinking_budget,omitempty"` // Gemini-style thinking budget: int (tokens) or -1 (dynamic)
 	ThinkingLevel        string                 `json:"thinking_level,omitempty"`  // Gemini-style thinking level: "low"/"medium"/"high"
-	ServiceTier          string                 `json:"service_tier,omitempty"`
 	StreamOptions        interface{}            `json:"stream_options,omitempty"`
 	Verbosity            string                 `json:"verbosity,omitempty"`
 	Prediction           interface{}            `json:"prediction,omitempty"`
 	WebSearchOptions     interface{}            `json:"web_search_options,omitempty"`
+	ImageConfig          map[string]interface{} `json:"imageConfig,omitempty"`
+	ImageConfigSnake     map[string]interface{} `json:"image_config,omitempty"`
+	AspectRatio          string                 `json:"aspectRatio,omitempty"`
+	AspectRatioSnake     string                 `json:"aspect_ratio,omitempty"`
+	ImageSize            string                 `json:"imageSize,omitempty"`
+	ImageSizeSnake       string                 `json:"image_size,omitempty"`
 	ExtraBody            map[string]interface{} `json:"extra_body,omitempty"`
 }
 
 type OpenAIMessage struct {
-	Role             string        `json:"role"`
-	Content          interface{}   `json:"content"`
-	Name             string        `json:"name,omitempty"`
-	ToolCallID       string        `json:"tool_call_id,omitempty"`
-	ToolCalls        []interface{} `json:"tool_calls,omitempty"`
-	Refusal          string        `json:"refusal,omitempty"`
-	ReasoningContent string        `json:"reasoning_content,omitempty"`
+	Role             string                `json:"role"`
+	Content          interface{}           `json:"content"`
+	Name             string                `json:"name,omitempty"`
+	ToolCallID       string                `json:"tool_call_id,omitempty"`
+	ToolCalls        []interface{}         `json:"tool_calls,omitempty"`
+	ThinkingBlocks   []OpenAIThinkingBlock `json:"thinking_blocks,omitempty"`
+	Refusal          string                `json:"refusal,omitempty"`
+	ReasoningContent string                `json:"reasoning_content,omitempty"`
+}
+
+type OpenAIThinkingBlock struct {
+	Type         string      `json:"type"`
+	Thinking     string      `json:"thinking,omitempty"`
+	Signature    string      `json:"signature,omitempty"`
+	Data         string      `json:"data,omitempty"`
+	CacheControl interface{} `json:"cache_control,omitempty"`
 }
 
 type ContentBlock struct {
@@ -123,9 +137,19 @@ type ImageData struct {
 }
 
 type TokenDetails struct {
-	CachedTokens        int `json:"cached_tokens,omitempty"`
-	CacheCreationTokens int `json:"cache_creation_tokens,omitempty"`
-	AudioTokens         int `json:"audio_tokens,omitempty"`
+	CachedTokens              int                        `json:"cached_tokens,omitempty"`
+	CachedAudioTokens         int                        `json:"cached_audio_tokens,omitempty"`
+	CacheCreationTokens       int                        `json:"cache_creation_tokens,omitempty"`
+	CacheCreationTokenDetails *CacheCreationTokenDetails `json:"cache_creation_token_details,omitempty"`
+	CacheWriteTokens          int                        `json:"cache_write_tokens,omitempty"`
+	AudioTokens               int                        `json:"audio_tokens,omitempty"`
+}
+
+// CacheCreationTokenDetails preserves Anthropic's cache-write TTL breakdown.
+// The enclosing CacheCreationTokens remains the aggregate for compatibility.
+type CacheCreationTokenDetails struct {
+	Ephemeral5mInputTokens int `json:"ephemeral_5m_input_tokens,omitempty"`
+	Ephemeral1hInputTokens int `json:"ephemeral_1h_input_tokens,omitempty"`
 }
 
 type CompletionTokenDetails struct {
@@ -142,6 +166,11 @@ type OpenAIUsage struct {
 	TotalTokens             int                     `json:"total_tokens"`
 	PromptTokensDetails     *TokenDetails           `json:"prompt_tokens_details,omitempty"`
 	CompletionTokensDetails *CompletionTokenDetails `json:"completion_tokens_details,omitempty"`
+	ServerToolUse           *ServerToolUseDetails   `json:"server_tool_use,omitempty"`
+}
+
+type ServerToolUseDetails struct {
+	WebSearchRequests int `json:"web_search_requests,omitempty"`
 }
 
 // Streaming types

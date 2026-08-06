@@ -107,27 +107,20 @@ func main() {
 
 	// ==================== Initialize Core Components ====================
 
+	// Record metrics whenever any sink consumes them — the pull /metrics
+	// endpoint (prometheus_enabled) and/or OTLP push (otel.enabled). The pull
+	// endpoint and the push pipeline are wired up separately below. Created
+	// early so the Redis connection attempt below can record fallback/error
+	// metrics.
+	metrics := monitoring.New(cfg.MetricsCollectionEnabled())
+
 	// Create a shared Redis/Valkey backend if enabled.
 	// The same underlying client is reused by both the rate limiter and the response store.
 	var redisBackend *ratelimit.RedisBackend
 	if cfg.Redis.Enabled {
-		rb, err := ratelimit.NewRedisBackend(cfg.Redis)
-		if err != nil {
-			log.Error("Failed to connect to Redis, falling back to local backends", "error", err)
-		} else {
-			// Verify Redis is responsive with a health check ping.
-			// Use explicit cancel (not defer) so the context is released immediately.
-			pingCtx, pingCancel := context.WithTimeout(context.Background(), 5*time.Second)
-			pingErr := rb.Ping(pingCtx)
-			pingCancel()
-			if pingErr != nil {
-				log.Warn("Redis health check failed, falling back to local backends", "error", pingErr)
-				rb.Close()
-			} else {
-				log.Info("Connected to Redis/Valkey", "addresses", cfg.Redis.InitAddresses)
-				redisBackend = rb
-				defer rb.Close()
-			}
+		redisBackend = connectRedisWithRetry(cfg.Redis, log, metrics)
+		if redisBackend != nil {
+			defer redisBackend.Close()
 		}
 	}
 
@@ -148,7 +141,7 @@ func main() {
 		if cfg.LiteLLMDB.EnforceKeyRateLimits {
 			authRedisBackend := ratelimit.NewRedisBackendFromClient(redisBackend.Client(), cfg.Redis.KeyPrefix+"litellmauth:")
 			if cfg.Redis.Hybrid {
-				hybridAuthBackend := ratelimit.NewHybridBackend(authRedisBackend, cfg.Redis.SyncInterval)
+				hybridAuthBackend := ratelimit.NewHybridBackend(authRedisBackend, cfg.Redis.SyncInterval, log, metrics)
 				defer hybridAuthBackend.Close()
 				keyRateLimiter = ratelimit.NewWithHybrid(hybridAuthBackend)
 			} else {
@@ -167,7 +160,10 @@ func main() {
 	// UpdateDBModels so that the sync loop can correctly add/remove DB-sourced entries.
 
 	priceRegistry := models.NewModelPriceRegistry()
-	_, rateLimiter, bal := initializeBalancer(cfg, log, redisBackend)
+	_, rateLimiter, bal, hybridBackend := initializeBalancer(cfg, log, redisBackend, metrics)
+	if hybridBackend != nil {
+		defer hybridBackend.Close()
+	}
 	modelManager := initializeModelManager(log, cfg, rateLimiter, bal)
 
 	// ==================== Apply Initial DB Model Table ====================
@@ -181,11 +177,6 @@ func main() {
 	}
 	tokenManager := auth.NewVertexTokenManager(log)
 	defer tokenManager.Stop()
-
-	// Record metrics whenever any sink consumes them — the pull /metrics
-	// endpoint (prometheus_enabled) and/or OTLP push (otel.enabled). The pull
-	// endpoint and the push pipeline are wired up separately below.
-	metrics := monitoring.New(cfg.MetricsCollectionEnabled())
 
 	// ==================== Initialize Model Pricing ====================
 	if cfg.Server.ModelPricesLink != "" {
@@ -253,10 +244,16 @@ func main() {
 		SessionStickyAutoCacheCtrl: cfg.Server.SessionStickyAutoCacheCtrl,
 		SessionStoreTTL:            time.Duration(cfg.Server.SessionStickyTTL) * time.Minute,
 		DrainUpstreamOnAbort:       cfg.Server.DrainUpstreamOnAbort,
+		ResponseCompatibility:      cfg.Server.ResponseCompatibility,
+		TiktokenEnabled:            cfg.Server.TiktokenEnabled,
+		StrictAllTeamModelsACL:     cfg.Server.StrictAllTeamModelsACL,
+		ResponseHeaderMode:         cfg.Server.ResponseHeaders.Mode,
+		CredentialNameAsTeamID:     cfg.Server.CredentialNameAsTeamID,
 
 		BudgetReserver:                   budgetReserver,
 		KeyRateLimiter:                   keyRateLimiter,
-		BudgetReservationEnabled:         cfg.LiteLLMDB.EnforceBudgetReservation || cfg.LiteLLMDB.EnforceKeyRateLimits,
+		BudgetReservationEnabled:         cfg.LiteLLMDB.EnforceBudgetReservation,
+		KeyRateLimitsEnabled:             cfg.LiteLLMDB.EnforceKeyRateLimits,
 		DefaultEstimatedCompletionTokens: cfg.LiteLLMDB.DefaultEstimatedCompletionTokens,
 	})
 
@@ -494,6 +491,77 @@ func main() {
 
 // ==================== Helper Functions ====================
 
+const (
+	redisConnectMaxAttempts = 5
+	redisConnectBaseDelay   = 2 * time.Second
+	redisConnectMaxDelay    = 5 * time.Second
+	// redisConnectOverallBound caps the total wall-clock time
+	// connectRedisWithRetry can spend before giving up and falling back to
+	// local backends. Without this, 5 attempts x up to (5s connect timeout +
+	// 5s ping timeout) plus backoff delays could block the HTTP listener for
+	// ~75s on a genuine Redis outage (not just a cold-start blip) — long
+	// enough to blow past most k8s startup/liveness probe budgets and cause a
+	// probe-driven restart loop, the opposite of this function's
+	// self-healing intent.
+	redisConnectOverallBound = 15 * time.Second
+)
+
+// connectRedisWithRetry attempts to establish and health-check a Redis/Valkey
+// connection, retrying with exponential backoff to survive transient
+// cold-start races (container up before DNS/CNI/Redis is actually reachable).
+// Without this, a 1-2s blip at startup silently degrades the process to
+// local-only rate limiting/response storage for its entire lifetime, with no
+// self-healing until the next restart. Bounded to redisConnectOverallBound
+// total wall-clock time (see its doc comment) — returns nil (and falls back
+// to local backends) once either that bound or redisConnectMaxAttempts is
+// reached, whichever comes first.
+func connectRedisWithRetry(cfg config.RedisConfig, log *slog.Logger, metrics *monitoring.Metrics) *ratelimit.RedisBackend {
+	deadline := time.Now().Add(redisConnectOverallBound)
+	delay := redisConnectBaseDelay
+	for attempt := 1; attempt <= redisConnectMaxAttempts; attempt++ {
+		// Always let attempt 1 run regardless of the deadline — this check
+		// only short-circuits *subsequent* attempts once we're already over
+		// budget, it never skips the first try.
+		if attempt > 1 && time.Now().After(deadline) {
+			log.Warn("Redis connect retry budget exhausted, falling back to local backends", "attempt", attempt, "max_attempts", redisConnectMaxAttempts)
+			break
+		}
+		rb, err := ratelimit.NewRedisBackend(cfg)
+		if err != nil {
+			metrics.RecordRedisConnectionError("connect")
+			log.Warn("Failed to connect to Redis, will retry", "error", err, "attempt", attempt, "max_attempts", redisConnectMaxAttempts)
+		} else {
+			// Verify Redis is responsive with a health check ping.
+			// Use explicit cancel (not defer) so the context is released immediately.
+			pingCtx, pingCancel := context.WithTimeout(context.Background(), 5*time.Second)
+			pingErr := rb.Ping(pingCtx)
+			pingCancel()
+			if pingErr == nil {
+				log.Info("Connected to Redis/Valkey", "addresses", cfg.InitAddresses, "attempt", attempt)
+				return rb
+			}
+			metrics.RecordRedisConnectionError("ping")
+			log.Warn("Redis health check failed, will retry", "error", pingErr, "attempt", attempt, "max_attempts", redisConnectMaxAttempts)
+			rb.Close()
+		}
+
+		if attempt < redisConnectMaxAttempts {
+			sleepFor := delay
+			if remaining := time.Until(deadline); remaining < sleepFor {
+				sleepFor = remaining // don't oversleep past the overall bound
+			}
+			if sleepFor > 0 {
+				time.Sleep(sleepFor)
+			}
+			delay = min(delay*2, redisConnectMaxDelay)
+		}
+	}
+
+	log.Error("Failed to connect to Redis after retries, falling back to local backends", "attempts", redisConnectMaxAttempts)
+	metrics.RecordRedisFallback()
+	return nil
+}
+
 func logCredentials(log *slog.Logger, credentials []config.CredentialConfig) {
 	log.Info("Loaded credentials", "count", len(credentials))
 	for i, cred := range credentials {
@@ -507,23 +575,30 @@ func logCredentials(log *slog.Logger, credentials []config.CredentialConfig) {
 	}
 }
 
+// initializeBalancer builds the fail2ban tracker, rate limiter, and balancer.
+// The returned *ratelimit.HybridBackend (nil unless cfg.Redis.Hybrid is set
+// with a non-nil redisBackend) must be Close()'d by the caller at process
+// shutdown — NOT from a defer inside this function, which would close it
+// (and kill its background writeWorker/syncWorker) within microseconds of
+// construction, before the server ever serves a request.
 func initializeBalancer(
 	cfg *config.Config,
 	log *slog.Logger,
 	redisBackend *ratelimit.RedisBackend,
-) (*fail2ban.Fail2Ban, *ratelimit.RPMLimiter, *balancer.RoundRobin) {
+	metrics *monitoring.Metrics,
+) (*fail2ban.Fail2Ban, *ratelimit.RPMLimiter, *balancer.RoundRobin, *ratelimit.HybridBackend) {
 	rules := convertFailBanRules(cfg.Fail2Ban.ErrorCodeRules, cfg.Fail2Ban.BanDuration, log)
 	f2b := fail2ban.NewWithRules(cfg.Fail2Ban.MaxAttempts, cfg.Fail2Ban.BanDuration,
 		cfg.Fail2Ban.ErrorCodes, rules)
 	f2b.SetLogger(log)
 
 	var rateLimiter *ratelimit.RPMLimiter
+	var hybridBackend *ratelimit.HybridBackend
 	if redisBackend != nil {
 		if cfg.Redis.Hybrid {
 			log.Info("Rate limiter: using hybrid backend (local decisions, async Redis sync)",
 				"sync_interval", cfg.Redis.SyncInterval)
-			hybridBackend := ratelimit.NewHybridBackend(redisBackend, cfg.Redis.SyncInterval)
-			defer hybridBackend.Close()
+			hybridBackend = ratelimit.NewHybridBackend(redisBackend, cfg.Redis.SyncInterval, log, metrics)
 			rateLimiter = ratelimit.NewWithHybrid(hybridBackend)
 		} else {
 			log.Info("Rate limiter: using Redis backend")
@@ -536,7 +611,7 @@ func initializeBalancer(
 	bal := balancer.New(cfg.Credentials, f2b, rateLimiter)
 	bal.SetLogger(log)
 
-	return f2b, rateLimiter, bal
+	return f2b, rateLimiter, bal, hybridBackend
 }
 
 func convertFailBanRules(
@@ -578,6 +653,19 @@ func initializeModelManager(
 	modelManager.SetCredentials(cfg.Credentials)
 	if len(cfg.ModelAlias) > 0 {
 		modelManager.SetModelAliases(cfg.ModelAlias)
+	}
+	// nil preserves legacy discovery; an explicit empty list denies all client IDs.
+	if cfg.ClientModelIDs != nil {
+		if len(cfg.ClientModelIDs) == 0 {
+			log.Warn("client_model_ids is explicitly empty: client model surface is deny-all")
+		}
+		modelManager.SetClientModelIDs(cfg.ClientModelIDs)
+	}
+	if len(cfg.PublicModelAlias) > 0 {
+		modelManager.SetPublicModelAliases(cfg.PublicModelAlias)
+	}
+	if len(cfg.AcceptedModelAlias) > 0 {
+		modelManager.SetAcceptedModelAliases(cfg.AcceptedModelAlias)
 	}
 
 	// Initialize rate limiters for each model
@@ -863,6 +951,7 @@ func initializeKafkaLog(cfg *config.Config, log *slog.Logger, litellmDBManager l
 		SASLMechanism:    cfg.Kafka.SASLMechanism,
 		SASLUsername:     cfg.Kafka.SASLUsername,
 		SASLPassword:     cfg.Kafka.SASLPassword,
+		TLSCACert:        cfg.Kafka.TLSCACert,
 		Logger:           log,
 		// Flags a batch's underlying LiteLLM_SpendLogs rows for later re-send
 		// when the batch is dropped from the in-memory DLQ after a sustained
@@ -1052,6 +1141,7 @@ func updateMetrics(
 		cs := credStats[name]
 		metrics.UpdateCredentialRPM(name, cs.RPM)
 		metrics.UpdateCredentialTPM(name, cs.TPM)
+		metrics.UpdateCredentialBanStatus(name, bal.HasAnyBan(name))
 	}
 
 	for _, p := range filteredPairs {

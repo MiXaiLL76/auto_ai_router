@@ -63,6 +63,8 @@ monitoring:
 	assert.Equal(t, "info", cfg.Server.LoggingLevel)
 	assert.Equal(t, "sk-test-master-key", cfg.Server.MasterKey)
 	assert.Equal(t, 50, cfg.Server.DefaultModelsRPM)
+	assert.Equal(t, "native", cfg.Server.ResponseCompatibility)
+	assert.Equal(t, ResponseHeaderModePassthrough, cfg.Server.ResponseHeaders.Mode)
 
 	// Validate fail2ban config
 	assert.Equal(t, 3, cfg.Fail2Ban.MaxAttempts)
@@ -78,6 +80,119 @@ monitoring:
 	// Validate monitoring
 	assert.True(t, cfg.Monitoring.PrometheusEnabled)
 	assert.Equal(t, "/health", cfg.Monitoring.HealthCheckPath)
+}
+
+func TestLoad_ResponseHeadersAllowlist(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	configContent := `
+server:
+  master_key: sk-test
+  response_headers:
+    mode: allowlist
+credentials:
+  - name: provider
+    type: openai
+    api_key: sk-provider
+    base_url: https://api.openai.com
+    rpm: 10
+`
+	require.NoError(t, os.WriteFile(configPath, []byte(configContent), 0600))
+
+	cfg, err := Load(configPath)
+
+	require.NoError(t, err)
+	assert.Equal(t, ResponseHeaderModeAllowlist, cfg.Server.ResponseHeaders.Mode)
+}
+
+func TestCredentialConfigReasoningOnly(t *testing.T) {
+	t.Setenv("TEST_REASONING_ONLY", "true")
+
+	var credential CredentialConfig
+	err := yaml.Unmarshal([]byte(`
+name: anthropic-reasoning
+type: anthropic
+api_key: key
+base_url: https://api.anthropic.com
+reasoning_only: os.environ/TEST_REASONING_ONLY
+`), &credential)
+
+	require.NoError(t, err)
+	assert.True(t, credential.ReasoningOnly)
+}
+
+func TestLoad_ResponseHeadersModeFromEnvironment(t *testing.T) {
+	t.Setenv("TEST_RESPONSE_HEADER_MODE", "ALLOWLIST")
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	configContent := `
+server:
+  master_key: sk-test
+  response_headers:
+    mode: os.environ/TEST_RESPONSE_HEADER_MODE
+credentials:
+  - name: provider
+    type: openai
+    api_key: sk-provider
+    base_url: https://api.openai.com
+    rpm: 10
+`
+	require.NoError(t, os.WriteFile(configPath, []byte(configContent), 0600))
+
+	cfg, err := Load(configPath)
+
+	require.NoError(t, err)
+	assert.Equal(t, ResponseHeaderModeAllowlist, cfg.Server.ResponseHeaders.Mode)
+}
+
+func TestLoad_ResponseHeadersModeFromUnsetEnvironment(t *testing.T) {
+	const envName = "UNSET_RESPONSE_HEADER_MODE"
+	previous, existed := os.LookupEnv(envName)
+	require.NoError(t, os.Unsetenv(envName))
+	t.Cleanup(func() {
+		if existed {
+			_ = os.Setenv(envName, previous)
+		}
+	})
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	configContent := `
+server:
+  master_key: sk-test
+  response_headers:
+    mode: os.environ/UNSET_RESPONSE_HEADER_MODE
+credentials:
+  - name: provider
+    type: openai
+    api_key: sk-provider
+    base_url: https://api.openai.com
+    rpm: 10
+`
+	require.NoError(t, os.WriteFile(configPath, []byte(configContent), 0600))
+
+	_, err := Load(configPath)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "UNSET_RESPONSE_HEADER_MODE")
+}
+
+func TestLoad_InvalidResponseHeadersMode(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	configContent := `
+server:
+  master_key: sk-test
+  response_headers:
+    mode: denylist
+credentials:
+  - name: provider
+    type: openai
+    api_key: sk-provider
+    base_url: https://api.openai.com
+    rpm: 10
+`
+	require.NoError(t, os.WriteFile(configPath, []byte(configContent), 0600))
+
+	_, err := Load(configPath)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "response_headers.mode")
 }
 
 func TestCredentialConfig_UnmarshalScopes(t *testing.T) {
@@ -97,6 +212,41 @@ forbidden_scopes: [blocked]
 	assert.Equal(t, []string{"premium", "blocked"}, cred.DeniedScopes)
 }
 
+func TestCredentialConfig_UnmarshalRejectsLegacyProxyUsageFormat(t *testing.T) {
+	var cred CredentialConfig
+	err := yaml.Unmarshal([]byte(`
+name: proxy
+type: proxy
+base_url: http://proxy.example
+proxy_usage_format: normalized
+`), &cred)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "proxy_usage_format is no longer supported")
+	assert.Contains(t, err.Error(), "type: air")
+}
+
+func TestConfig_ValidateAIRCredential(t *testing.T) {
+	cfg := &Config{
+		Server: ServerConfig{
+			Port:           8080,
+			MaxBodySizeMB:  10,
+			MasterKey:      "test-key",
+			RequestTimeout: 30 * time.Second,
+		},
+		Credentials: []CredentialConfig{{
+			Name:    "upstream-air",
+			Type:    ProviderTypeAIR,
+			BaseURL: "http://air.example",
+			RPM:     -1,
+			TPM:     -1,
+		}},
+		Fail2Ban: Fail2BanConfig{MaxAttempts: 3},
+	}
+
+	require.NoError(t, cfg.Validate())
+}
+
 func TestCredentialConfig_ScopeExpressionPreservesIndependentGroups(t *testing.T) {
 	cred := CredentialConfig{
 		Scopes:         []string{"team-a"},
@@ -106,6 +256,35 @@ func TestCredentialConfig_ScopeExpressionPreservesIndependentGroups(t *testing.T
 	expression := cred.ScopeExpression()
 	assert.True(t, scope.NewContext([]string{"team-a", "team-b"}, nil).AllowsExpression(expression))
 	assert.False(t, scope.NewContext([]string{"team-a"}, nil).AllowsExpression(expression))
+}
+
+func TestConfigResponseCompatibility(t *testing.T) {
+	cfg := &Config{
+		Server: ServerConfig{
+			Port:                  8080,
+			MaxBodySizeMB:         10,
+			MasterKey:             "test-key",
+			RequestTimeout:        30 * time.Second,
+			ResponseCompatibility: "litellm",
+		},
+		Fail2Ban: Fail2BanConfig{MaxAttempts: 3},
+		Credentials: []CredentialConfig{
+			{Name: "openai", Type: ProviderTypeOpenAI, APIKey: "key", BaseURL: "https://api.openai.com", RPM: 1},
+		},
+	}
+	require.NoError(t, cfg.Validate())
+	assert.Equal(t, "litellm", cfg.Server.ResponseCompatibility)
+
+	cfg.Server.ResponseCompatibility = "unknown"
+	err := cfg.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "response_compatibility")
+}
+
+func TestServerConfigUnmarshalResponseCompatibility(t *testing.T) {
+	var server ServerConfig
+	require.NoError(t, yaml.Unmarshal([]byte("response_compatibility: LiteLLM\n"), &server))
+	assert.Equal(t, "litellm", server.ResponseCompatibility)
 }
 
 func TestConfig_Validate_InvalidAuthType(t *testing.T) {
@@ -652,6 +831,8 @@ func TestProviderType_IsValid(t *testing.T) {
 		{"vertex-ai", ProviderTypeVertexAI, true},
 		{"cometapi", ProviderTypeCometAPI, true},
 		{"sosana", ProviderTypeSosana, true},
+		{"air", ProviderTypeAIR, true},
+		{"proman", ProviderTypeProMan, true},
 		{"invalid", ProviderType("azure"), false},
 		{"empty", ProviderType(""), false},
 	}
@@ -661,6 +842,14 @@ func TestProviderType_IsValid(t *testing.T) {
 			assert.Equal(t, tt.valid, tt.provider.IsValid())
 		})
 	}
+}
+
+func TestProviderType_IsProxyLike(t *testing.T) {
+	assert.True(t, ProviderTypeProxy.IsProxyLike())
+	assert.True(t, ProviderTypeAIR.IsProxyLike())
+	assert.False(t, ProviderTypeOpenAI.IsProxyLike())
+	assert.False(t, ProviderTypeVertexAI.IsProxyLike())
+	assert.False(t, ProviderTypeProMan.IsProxyLike())
 }
 
 func TestCredentialConfig_NormalizeCometAPIProviderType(t *testing.T) {
@@ -704,6 +893,34 @@ rpm: 60
 	}
 }
 
+func TestCredentialConfig_NormalizeAIRProviderTypeAliases(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+	}{
+		{name: "air", raw: "air"},
+		{name: "aar", raw: "aar"},
+		{name: "auto-ai-router", raw: "auto-ai-router"},
+		{name: "auto_ai_router", raw: "auto_ai_router"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var cred CredentialConfig
+			err := yaml.Unmarshal([]byte(`
+name: upstream
+type: `+tt.raw+`
+base_url: https://air.example
+rpm: 60
+`), &cred)
+
+			require.NoError(t, err)
+			assert.Equal(t, ProviderTypeAIR, cred.Type)
+			assert.True(t, cred.IsProxyLike())
+		})
+	}
+}
+
 func TestConfig_Validate_SosanaRequiresAPIKeyAndBaseURL(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -740,6 +957,20 @@ func TestConfig_Validate_SosanaRequiresAPIKeyAndBaseURL(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCredentialConfig_NormalizeProManProviderType(t *testing.T) {
+	var cred CredentialConfig
+	err := yaml.Unmarshal([]byte(`
+name: proman
+type: pro-man
+api_key: key
+base_url: https://api.proman.ai/v1
+rpm: 60
+`), &cred)
+
+	require.NoError(t, err)
+	assert.Equal(t, ProviderTypeProMan, cred.Type)
 }
 
 func TestConfig_Validate_VertexAI(t *testing.T) {
@@ -1316,6 +1547,85 @@ monitoring:
 	require.NoError(t, err)
 	assert.False(t, cfg.Server.SessionStickyEnabled)
 	assert.Equal(t, 15, cfg.Server.SessionStickyTTL)
+}
+
+func TestLoad_TiktokenEnabledDefault(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.yaml")
+
+	configContent := `
+server:
+  port: 8080
+  max_body_size_mb: 10
+  request_timeout: 30s
+  master_key: "sk-test"
+
+fail2ban:
+  max_attempts: 3
+  ban_duration: permanent
+  error_codes: [401]
+
+credentials:
+  - name: "test"
+    type: "openai"
+    api_key: "sk-test"
+    base_url: "https://api.openai.com"
+    rpm: 10
+
+monitoring:
+  prometheus_enabled: false
+`
+	err := os.WriteFile(configPath, []byte(configContent), 0644)
+	require.NoError(t, err)
+
+	cfg, err := Load(configPath)
+	require.NoError(t, err)
+	assert.True(t, cfg.Server.TiktokenEnabled)
+}
+
+func TestLoad_TiktokenEnabledExplicitFalse(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.yaml")
+
+	configContent := `
+server:
+  port: 8080
+  max_body_size_mb: 10
+  request_timeout: 30s
+  master_key: "sk-test"
+  tiktoken_enabled: false
+
+fail2ban:
+  max_attempts: 3
+  ban_duration: permanent
+  error_codes: [401]
+
+credentials:
+  - name: "test"
+    type: "openai"
+    api_key: "sk-test"
+    base_url: "https://api.openai.com"
+    rpm: 10
+
+monitoring:
+  prometheus_enabled: false
+`
+	err := os.WriteFile(configPath, []byte(configContent), 0644)
+	require.NoError(t, err)
+
+	cfg, err := Load(configPath)
+	require.NoError(t, err)
+	assert.False(t, cfg.Server.TiktokenEnabled)
+}
+
+func TestServerConfigStrictAllTeamModelsACL(t *testing.T) {
+	var defaults ServerConfig
+	require.NoError(t, yaml.Unmarshal([]byte("{}"), &defaults))
+	assert.False(t, defaults.StrictAllTeamModelsACL)
+
+	var strict ServerConfig
+	require.NoError(t, yaml.Unmarshal([]byte("strict_all_team_models_acl: true"), &strict))
+	assert.True(t, strict.StrictAllTeamModelsACL)
 }
 
 func TestLoad_ModelAlias(t *testing.T) {

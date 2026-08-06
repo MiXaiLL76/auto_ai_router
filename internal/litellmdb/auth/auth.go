@@ -57,9 +57,10 @@ func (a *Authenticator) FetchMasterKey(ctx context.Context, defaultKey string) e
 	}
 
 	info := models.TokenInfo{
-		Token:   HashToken(masterKey),
-		KeyName: "litellm-master-key",
-		UserID:  "litellm-master-key",
+		Token:       HashToken(masterKey),
+		KeyName:     "litellm-master-key",
+		UserID:      "litellm-master-key",
+		IsMasterKey: true,
 	}
 	a.cache.Set(info.Token, &info)
 
@@ -197,6 +198,7 @@ func (a *Authenticator) fetchTokenFromDB(ctx context.Context, hashedToken string
 	var userIDCheck, userAlias, userEmail *string
 	var userMaxBudget, userSpend *float64
 	var userTPMLimit, userRPMLimit *int64
+	var userModels []string
 
 	// ============ Team fields ============
 	var teamIDCheck, teamAlias *string
@@ -216,6 +218,7 @@ func (a *Authenticator) fetchTokenFromDB(ctx context.Context, hashedToken string
 	var teamMemberSpend *float64
 	var teamMemberMaxBudget *float64
 	var teamMemberTPMLimit, teamMemberRPMLimit *int64
+	var teamMemberModels []string
 
 	// ============ OrganizationMembership fields (with external budget) ============
 	var orgMemberSpend *float64
@@ -247,6 +250,7 @@ func (a *Authenticator) fetchTokenFromDB(ctx context.Context, hashedToken string
 		&userSpend,
 		&userTPMLimit,
 		&userRPMLimit,
+		&userModels,
 
 		// Team
 		&teamIDCheck,
@@ -271,6 +275,7 @@ func (a *Authenticator) fetchTokenFromDB(ctx context.Context, hashedToken string
 		&teamMemberMaxBudget,
 		&teamMemberTPMLimit,
 		&teamMemberRPMLimit,
+		&teamMemberModels,
 
 		// OrganizationMembership
 		&orgMemberSpend,
@@ -331,6 +336,7 @@ func (a *Authenticator) fetchTokenFromDB(ctx context.Context, hashedToken string
 	info.UserSpend = userSpend
 	info.UserTPMLimit = userTPMLimit
 	info.UserRPMLimit = userRPMLimit
+	info.UserModels = userModels
 
 	// Set Team fields (if team exists)
 	if teamAlias != nil {
@@ -343,6 +349,9 @@ func (a *Authenticator) fetchTokenFromDB(ctx context.Context, hashedToken string
 	info.TeamRPMLimit = teamRPMLimit
 	info.TeamModels = teamModels
 
+	// A missing referenced team denies instead of becoming unrestricted.
+	info.TeamDangling = teamID != nil && teamIDCheck == nil
+
 	// Set Organization fields (external budget from BudgetTable)
 	info.OrgSpend = orgSpend
 	info.OrgMaxBudget = orgMaxBudget
@@ -354,6 +363,7 @@ func (a *Authenticator) fetchTokenFromDB(ctx context.Context, hashedToken string
 	info.TeamMemberMaxBudget = teamMemberMaxBudget
 	info.TeamMemberTPMLimit = teamMemberTPMLimit
 	info.TeamMemberRPMLimit = teamMemberRPMLimit
+	info.TeamMemberModels = teamMemberModels
 
 	// Set OrganizationMembership fields (external budget from BudgetTable)
 	info.OrgMemberSpend = orgMemberSpend

@@ -348,6 +348,46 @@ func TestImageEditRequestToOpenAIChatRequest(t *testing.T) {
 		assert.Equal(t, float64(1), *chatReq.TopP)
 	})
 
+	t.Run("multipart edit preserves explicit image config fields", func(t *testing.T) {
+		body, contentType := buildMultipart(t, "gemini-3.1-flash-image-preview", "1024x1024", map[string]string{
+			"image_config": `{"aspect_ratio":"3:4","image_size":"2K"}`,
+		})
+		result, err := ImageEditRequestToOpenAIChatRequest(body, contentType)
+		require.NoError(t, err)
+
+		var chatReq openai.OpenAIRequest
+		require.NoError(t, json.Unmarshal(result, &chatReq))
+		genConfig := chatReq.ExtraBody["generation_config"].(map[string]interface{})
+		imageConfig := genConfig["image_config"].(map[string]interface{})
+		assert.Equal(t, "3:4", imageConfig["aspectRatio"])
+		assert.Equal(t, "2K", imageConfig["imageSize"])
+	})
+
+	t.Run("multipart edit explicit image config fields override size", func(t *testing.T) {
+		body, contentType := buildMultipart(t, "gemini-3.1-flash-image-preview", "1024x1024", map[string]string{
+			"aspect_ratio": "3:4",
+			"image_size":   "2K",
+		})
+		result, err := ImageEditRequestToOpenAIChatRequest(body, contentType)
+		require.NoError(t, err)
+
+		var chatReq openai.OpenAIRequest
+		require.NoError(t, json.Unmarshal(result, &chatReq))
+		genConfig := chatReq.ExtraBody["generation_config"].(map[string]interface{})
+		imageConfig := genConfig["image_config"].(map[string]interface{})
+		assert.Equal(t, "3:4", imageConfig["aspectRatio"])
+		assert.Equal(t, "2K", imageConfig["imageSize"])
+	})
+
+	t.Run("multipart edit rejects invalid image config json", func(t *testing.T) {
+		body, contentType := buildMultipart(t, "gemini-3.1-flash-image-preview", "1024x1024", map[string]string{
+			"image_config": `{"aspect_ratio":`,
+		})
+		_, err := ImageEditRequestToOpenAIChatRequest(body, contentType)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "invalid image edit image_config")
+	})
+
 	t.Run("omitted sampling parameters remain unset", func(t *testing.T) {
 		body, contentType := buildMultipart(t, "gemini-3.1-flash-image-preview", "1024x1024", nil)
 		result, err := ImageEditRequestToOpenAIChatRequest(body, contentType)

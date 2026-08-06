@@ -1,8 +1,7 @@
 package queries
 
-// SQL query for comprehensive token validation with budget hierarchy
-// Loads all related data in ONE query instead of 5-7 separate queries
-// Uses PostgreSQL JOINs and COALESCE for organization_id resolution
+// The positional SELECT list must match fetchTokenFromDB.Scan.
+// The *_check columns distinguish missing parents from unset references.
 
 const QueryValidateTokenWithHierarchy = `
 -- Main query with all JOINs
@@ -31,6 +30,7 @@ SELECT
   u.spend as user_spend,
   u.tpm_limit as user_tpm_limit,
   u.rpm_limit as user_rpm_limit,
+  u.models as user_models,
 
   -- ============ Team ============
   tm.team_id as team_id_check,
@@ -55,6 +55,7 @@ SELECT
   b_tmem.max_budget as team_member_max_budget,
   b_tmem.tpm_limit as team_member_tpm_limit,
   b_tmem.rpm_limit as team_member_rpm_limit,
+  b_tmem.allowed_models as team_member_models,
 
   -- ============ OrganizationMembership ============
   omem.spend as org_member_spend,

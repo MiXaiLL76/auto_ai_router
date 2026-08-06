@@ -23,6 +23,75 @@ type Router struct {
 	isReady          atomic.Bool
 }
 
+var proxiedPublicPaths = map[string]struct{}{
+	"/v1/chat/completions":   {},
+	"/v1/completions":        {},
+	"/v1/embeddings":         {},
+	"/v1/images/generations": {},
+	"/v1/images/edits":       {},
+	"/v1/messages":           {},
+	"/v1/responses":          {},
+}
+
+var legacyPublicPathAliases = map[string]string{
+	"/chat/completions":   "/v1/chat/completions",
+	"/completions":        "/v1/completions",
+	"/embeddings":         "/v1/embeddings",
+	"/image/generations":  "/v1/images/generations",
+	"/images/edits":       "/v1/images/edits",
+	"/images/generations": "/v1/images/generations",
+	"/messages":           "/v1/messages",
+	"/models":             "/v1/models",
+	"/responses":          "/v1/responses",
+}
+
+func canonicalPublicPath(path string) string {
+	canonicalPath := strings.TrimSuffix(path, "/")
+	if target, ok := legacyPublicPathAliases[canonicalPath]; ok {
+		return target
+	}
+	if strings.HasPrefix(path, "/responses/") {
+		return "/v1" + path
+	}
+	return path
+}
+
+func normalizePublicPath(req *http.Request) {
+	path := canonicalPublicPath(req.URL.Path)
+	if path == req.URL.Path {
+		return
+	}
+	req.URL.Path = path
+	req.URL.RawPath = ""
+}
+
+func publicPathAllowedMethod(req *http.Request) (string, bool) {
+	path := req.URL.Path
+	if path == "/v1/models" {
+		return http.MethodGet, true
+	}
+	if path == "/v1/responses" && req.Method == http.MethodGet && strings.EqualFold(req.Header.Get("Upgrade"), "websocket") {
+		return http.MethodGet, true
+	}
+	if path == "/v1/responses/compact" {
+		return http.MethodPost, true
+	}
+	if _, ok := proxiedPublicPaths[path]; ok {
+		return http.MethodPost, true
+	}
+	if strings.HasPrefix(path, "/v1/responses/") {
+		return http.MethodGet, true
+	}
+	return "", false
+}
+
+func writeMethodNotAllowed(w http.ResponseWriter, allowedMethod string) {
+	w.Header().Set("Allow", allowedMethod)
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusMethodNotAllowed)
+	_, _ = w.Write([]byte(`{"detail":"Method Not Allowed"}`))
+}
+
 // SetReady marks the router as ready (true) or not ready (false).
 // Called by main: true after the TCP listener is bound, false at shutdown start.
 func (r *Router) SetReady(v bool) {
@@ -40,6 +109,13 @@ func New(p *proxy.Proxy, modelManager *models.Manager, monitoringConfig *config.
 }
 
 func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
+	// Keep the public framing policy consistent for proxy successes and for
+	// locally generated auth/validation errors.
+	w.Header().Set("Content-Security-Policy", "frame-ancestors 'none'")
+	w.Header().Set("X-Frame-Options", "DENY")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	normalizePublicPath(req)
+
 	// Recover from handler panics so they land in our logging system at ERROR
 	// (net/http's built-in recovery only prints to stderr) and the client gets
 	// a proper JSON 500 instead of a dropped connection.
@@ -58,6 +134,11 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 			proxy.WriteErrorInternal(w, "Internal Server Error")
 		}
 	}()
+
+	if allowedMethod, public := publicPathAllowedMethod(req); public && req.Method != allowedMethod {
+		writeMethodNotAllowed(w, allowedMethod)
+		return
+	}
 
 	if req.URL.Path == r.monitoringConfig.HealthCheckPath {
 		r.handleHealth(w, req)
@@ -105,7 +186,11 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 
 	// Handle GET /v1/models
 	if req.URL.Path == "/v1/models" && req.Method == "GET" {
-		r.handleModels(w, req)
+		if r.proxy == nil {
+			r.handleModels(w, req)
+		} else {
+			r.proxy.WithResponseCompatibility(w, req, r.handleModels)
+		}
 		return
 	}
 
@@ -122,20 +207,12 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	}
 
 	// Handle WebSocket upgrade on /v1/responses
-	if req.URL.Path == "/v1/responses" && req.Header.Get("Upgrade") == "websocket" {
+	if req.URL.Path == "/v1/responses" && strings.EqualFold(req.Header.Get("Upgrade"), "websocket") {
 		r.proxy.HandleWebSocketResponses(w, req)
 		return
 	}
 
-	allowedPaths := map[string]bool{
-		"/v1/chat/completions":   true,
-		"/v1/completions":        true,
-		"/v1/embeddings":         true,
-		"/v1/images/generations": true,
-		"/v1/images/edits":       true,
-		"/v1/responses":          true,
-	}
-	if !allowedPaths[req.URL.Path] {
+	if _, allowed := proxiedPublicPaths[req.URL.Path]; !allowed {
 		proxy.WriteErrorNotFound(w, "Not Found")
 		return
 	}
@@ -144,7 +221,7 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		// Capture request body for logging (detects streaming requests)
 		reqBody, isStreaming, err := captureRequestBody(req)
 		if err != nil {
-			r.proxy.ProxyRequest(w, req)
+			r.proxyPublicRequest(w, req)
 			return
 		}
 
@@ -152,7 +229,7 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		rc := newResponseCapture(w)
 
 		// Proxy the request through captured response
-		r.proxy.ProxyRequest(rc, req)
+		r.proxyPublicRequest(rc, req)
 
 		// Log error responses if enabled and status is error (4xx or 5xx).
 		// Skip logging for streaming requests to avoid memory overhead with large responses.
@@ -165,12 +242,12 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 			}
 		}
 	} else {
-		r.proxy.ProxyRequest(w, req)
+		r.proxyPublicRequest(w, req)
 	}
 }
 
 func (r *Router) handleModels(w http.ResponseWriter, req *http.Request) {
-	visibility, ok := r.visibilityScope(w, req)
+	tokenInfo, visibility, ok := r.proxy.AuthenticateClientRequestScoped(w, req)
 	if !ok {
 		return
 	}
@@ -185,6 +262,15 @@ func (r *Router) handleModels(w http.ResponseWriter, req *http.Request) {
 		}
 	} else {
 		modelsResp = models.ModelsResponse{Object: "list", Data: []models.Model{}}
+	}
+	if tokenInfo != nil {
+		filtered := make([]models.Model, 0, len(modelsResp.Data))
+		for _, model := range modelsResp.Data {
+			if r.proxy.IsModelAllowedForToken(tokenInfo, model.ID) {
+				filtered = append(filtered, model)
+			}
+		}
+		modelsResp.Data = filtered
 	}
 
 	w.Header().Set("Content-Type", "application/json")

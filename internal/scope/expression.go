@@ -34,23 +34,63 @@ func NormalizeExpression(expression *Expression) *Expression {
 	if expression == nil {
 		return nil
 	}
+	return normalizeAlternatives(expression.Alternatives)
+}
 
-	alternatives := make([]Alternative, 0, len(expression.Alternatives))
-	seen := make(map[string]struct{}, len(expression.Alternatives))
-	for _, alternative := range expression.Alternatives {
-		normalized, ok := normalizeAlternative(alternative)
+func normalizeAlternatives(groups ...[]Alternative) *Expression {
+	// Hot path: CredentialConfig.ScopeExpression() calls into this on every
+	// balancer credential-selection scan, and FromScopes (the overwhelmingly
+	// common caller, invoked for both own and provider scopes) always passes
+	// exactly one alternative. Handle that shape without allocating the
+	// dedup map/slice at all — most credentials carry no scopes, so this
+	// skips a 256-capacity map+slice pair per call in the common case.
+	if len(groups) == 1 && len(groups[0]) == 1 {
+		normalized, ok := normalizeAlternative(groups[0][0])
 		if !ok {
-			continue
+			return &Expression{Alternatives: []Alternative{}}
 		}
-		key := alternativeKey(normalized)
-		if _, exists := seen[key]; exists {
-			continue
+		if isUnrestrictedAlternative(normalized) {
+			return unrestrictedExpression()
 		}
-		if len(alternatives) == maxExpressionAlternatives {
-			return FalseExpression()
+		return &Expression{Alternatives: []Alternative{normalized}}
+	}
+
+	total := 0
+	for _, group := range groups {
+		total += len(group)
+	}
+	capHint := min(total, maxExpressionAlternatives)
+	alternatives := make([]Alternative, 0, capHint)
+	seen := make(map[string]struct{}, capHint)
+	oversized := false
+	for _, group := range groups {
+		for _, alternative := range group {
+			normalized, ok := normalizeAlternative(alternative)
+			if !ok {
+				continue
+			}
+			if isUnrestrictedAlternative(normalized) {
+				return unrestrictedExpression()
+			}
+			if oversized {
+				continue
+			}
+			key := alternativeKey(normalized)
+			if _, exists := seen[key]; exists {
+				continue
+			}
+			if len(alternatives) == maxExpressionAlternatives {
+				// Continue scanning: a later unrestricted alternative still
+				// simplifies the entire OR expression to true.
+				oversized = true
+				continue
+			}
+			seen[key] = struct{}{}
+			alternatives = append(alternatives, normalized)
 		}
-		seen[key] = struct{}{}
-		alternatives = append(alternatives, normalized)
+	}
+	if oversized {
+		return FalseExpression()
 	}
 	return &Expression{Alternatives: alternatives}
 }
@@ -91,22 +131,14 @@ func Or(expressions ...*Expression) *Expression {
 	if len(expressions) == 0 {
 		return FalseExpression()
 	}
-	alternatives := make([]Alternative, 0)
+	groups := make([][]Alternative, 0, len(expressions))
 	for _, expression := range expressions {
 		if expression == nil {
-			if len(alternatives) == maxExpressionAlternatives {
-				return FalseExpression()
-			}
-			alternatives = append(alternatives, Alternative{})
-			continue
+			return unrestrictedExpression()
 		}
-		normalized := NormalizeExpression(expression)
-		if len(alternatives)+len(normalized.Alternatives) > maxExpressionAlternatives {
-			return FalseExpression()
-		}
-		alternatives = append(alternatives, normalized.Alternatives...)
+		groups = append(groups, expression.Alternatives)
 	}
-	return NormalizeExpression(&Expression{Alternatives: alternatives})
+	return normalizeAlternatives(groups...)
 }
 
 func (c Context) AllowsExpression(expression *Expression) bool {
@@ -201,6 +233,14 @@ func normalizeAlternative(alternative Alternative) (Alternative, bool) {
 	})
 
 	return Alternative{Requirements: requirements, DeniedScopes: deniedScopes}, true
+}
+
+func isUnrestrictedAlternative(alternative Alternative) bool {
+	return len(alternative.Requirements) == 0 && len(alternative.DeniedScopes) == 0
+}
+
+func unrestrictedExpression() *Expression {
+	return &Expression{Alternatives: []Alternative{{}}}
 }
 
 func appendRequirements(left, right [][]string) [][]string {

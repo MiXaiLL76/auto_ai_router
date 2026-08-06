@@ -89,6 +89,20 @@ func TestCache_TTLExpiration(t *testing.T) {
 	assert.Equal(t, 0, cache.Len())
 }
 
+func TestCache_MasterKeyMarkerControlsTTLExemption(t *testing.T) {
+	cache, err := NewCache(100, 10*time.Millisecond)
+	require.NoError(t, err)
+
+	cache.Set("forged-user-id", &models.TokenInfo{UserID: "litellm-master-key"})
+	cache.Set("master-key", &models.TokenInfo{IsMasterKey: true})
+	time.Sleep(30 * time.Millisecond)
+
+	_, forgedOK := cache.Get("forged-user-id")
+	_, masterOK := cache.Get("master-key")
+	assert.False(t, forgedOK, "reserved user_id must not bypass the cache TTL")
+	assert.True(t, masterOK, "a trusted master-key marker must remain exempt from the cache TTL")
+}
+
 func TestCache_Invalidate(t *testing.T) {
 	cache, err := NewCache(100, 60*time.Second)
 	require.NoError(t, err)

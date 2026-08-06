@@ -134,6 +134,49 @@ func TestCalculateTokenCosts_WithReasoning(t *testing.T) {
 	assert.InDelta(t, 4.9, costs.TotalCost, 0.0001)
 }
 
+func TestCalculateTokenCosts_WithExplicitOutputTextTokens(t *testing.T) {
+	usage := &converter.TokenUsage{
+		PromptTokens:     16,
+		CompletionTokens: 219,
+		OutputTextTokens: 219,
+		ReasoningTokens:  212,
+	}
+	price := &ModelPrice{
+		InputCostPerToken:  0.00000005,
+		OutputCostPerToken: 0.00000052,
+	}
+
+	costs := CalculateTokenCosts(usage, price)
+
+	assert.NotNil(t, costs)
+	assert.InDelta(t, 0.0000008, costs.InputCost, 1e-12)
+	assert.InDelta(t, 0.00011388, costs.OutputCost+costs.ReasoningCost, 1e-12)
+	assert.InDelta(t, 0.00011468, costs.TotalCost, 1e-12)
+}
+
+func TestCalculateTokenCosts_ClampsToExplicitOutputTextTokens(t *testing.T) {
+	// Derived regular tokens (300-50=250) overstate billable text tokens here;
+	// the smaller explicit OutputTextTokens must win.
+	usage := &converter.TokenUsage{
+		PromptTokens:     10,
+		CompletionTokens: 300,
+		OutputTextTokens: 100,
+		ReasoningTokens:  50,
+	}
+	price := &ModelPrice{
+		InputCostPerToken:  0.002,
+		OutputCostPerToken: 0.001,
+	}
+
+	costs := CalculateTokenCosts(usage, price)
+
+	assert.NotNil(t, costs)
+	assert.InDelta(t, 0.1, costs.OutputCost, 1e-12)
+	assert.InDelta(t, 0.05, costs.ReasoningCost, 1e-12)
+	assert.InDelta(t, 0.02, costs.InputCost, 1e-12)
+	assert.InDelta(t, 0.17, costs.TotalCost, 1e-12)
+}
+
 func TestCalculateTokenCosts_WithPrediction(t *testing.T) {
 	// Prediction tokens (accepted and rejected) are included in completion tokens
 	usage := &converter.TokenUsage{
@@ -244,6 +287,57 @@ func TestCalculateTokenCosts_SafetyNegativeTokens(t *testing.T) {
 	assert.Equal(t, 0.1, costs.CachedInputCost) // 10 * 0.01
 
 	assert.Equal(t, 0.7, costs.TotalCost)
+}
+
+func TestCalculateTokenCosts_NegativeBreakdownFieldsAreIgnored(t *testing.T) {
+	usage := &converter.TokenUsage{
+		PromptTokens:             10,
+		CompletionTokens:         20,
+		AudioInputTokens:         -10,
+		AudioOutputTokens:        -20,
+		CachedInputTokens:        -30,
+		CachedAudioInputTokens:   -40,
+		CacheCreationTokens:      -50,
+		CacheCreation5mTokens:    -60,
+		CacheCreation1hTokens:    -70,
+		CachedOutputTokens:       -80,
+		ReasoningTokens:          -90,
+		AcceptedPredictionTokens: -100,
+		RejectedPredictionTokens: -110,
+		ImageCount:               -1,
+		ImageTokens:              -120,
+		OutputImageTokens:        -130,
+	}
+	price := &ModelPrice{
+		InputCostPerToken:            1,
+		OutputCostPerToken:           2,
+		InputCostPerAudioToken:       3,
+		OutputCostPerAudioToken:      4,
+		InputCostPerCachedToken:      5,
+		CacheReadInputAudioTokenCost: 6,
+		CacheCreationInputTokenCost:  7,
+		OutputCostPerCachedToken:     8,
+		OutputCostPerReasoningToken:  9,
+		OutputCostPerPredictionToken: 10,
+		InputCostPerImageToken:       11,
+		OutputCostPerImageToken:      12,
+		OutputCostPerImage:           13,
+	}
+
+	costs := CalculateTokenCosts(usage, price)
+
+	require.NotNil(t, costs)
+	assert.Equal(t, 10.0, costs.InputCost)
+	assert.Equal(t, 40.0, costs.OutputCost)
+	assert.Zero(t, costs.AudioInputCost)
+	assert.Zero(t, costs.AudioOutputCost)
+	assert.Zero(t, costs.CachedInputCost)
+	assert.Zero(t, costs.CacheCreationCost)
+	assert.Zero(t, costs.CachedOutputCost)
+	assert.Zero(t, costs.ReasoningCost)
+	assert.Zero(t, costs.PredictionCost)
+	assert.Zero(t, costs.ImageCost)
+	assert.Equal(t, 50.0, costs.TotalCost)
 }
 
 func TestCalculateTokenCosts_NilUsage(t *testing.T) {
@@ -605,4 +699,265 @@ func TestCalculateTokenCosts_GPT56ThresholdIsExclusive(t *testing.T) {
 	assert.NotNil(t, costs)
 	assert.InDelta(t, 1.768, costs.InputCost, 1e-9)
 	assert.InDelta(t, 0.000039, costs.OutputCost, 1e-12)
+}
+
+func TestCalculateTokenCosts_CacheLongContextAbove200kAndTTL(t *testing.T) {
+	usage := &converter.TokenUsage{
+		PromptTokens:          210_000,
+		CachedInputTokens:     100,
+		CacheCreationTokens:   60,
+		CacheCreation5mTokens: 20,
+		CacheCreation1hTokens: 40,
+	}
+	price := &ModelPrice{
+		InputCostPerToken:                            0.01,
+		CacheReadInputTokenCost:                      1,
+		CacheReadInputTokenCostAbove200k:             2,
+		CacheCreationInputTokenCost:                  3,
+		CacheCreationInputTokenCostAbove200k:         4,
+		CacheCreationInputTokenCostAbove1hr:          5,
+		CacheCreationInputTokenCostAbove1hrAbove200k: 6,
+	}
+
+	costs := CalculateTokenCosts(usage, price)
+
+	assert.InDelta(t, 200, costs.CachedInputCost, 1e-9)
+	assert.InDelta(t, 320, costs.CacheCreationCost, 1e-9) // 20*4 (5m) + 40*6 (1h)
+}
+
+func TestCalculateTokenCosts_CacheAbove272kTakesPrecedence(t *testing.T) {
+	usage := &converter.TokenUsage{
+		PromptTokens:        300_000,
+		CachedInputTokens:   100,
+		CacheCreationTokens: 50,
+	}
+	price := &ModelPrice{
+		InputCostPerToken:                    0.01,
+		CacheReadInputTokenCost:              1,
+		CacheReadInputTokenCostAbove200k:     2,
+		CacheReadInputTokenCostAbove272k:     3,
+		CacheCreationInputTokenCost:          4,
+		CacheCreationInputTokenCostAbove200k: 5,
+		CacheCreationInputTokenCostAbove272k: 6,
+	}
+
+	costs := CalculateTokenCosts(usage, price)
+
+	assert.InDelta(t, 300, costs.CachedInputCost, 1e-9)
+	assert.InDelta(t, 300, costs.CacheCreationCost, 1e-9)
+}
+
+func TestCalculateTokenCosts_CacheCreationAbove272kOverrides1hTTLRate(t *testing.T) {
+	usage := &converter.TokenUsage{
+		PromptTokens:          300_000,
+		CacheCreationTokens:   50,
+		CacheCreation5mTokens: 20,
+		CacheCreation1hTokens: 30,
+	}
+	price := &ModelPrice{
+		InputCostPerToken:                            0.01,
+		CacheCreationInputTokenCost:                  4,
+		CacheCreationInputTokenCostAbove200k:         5,
+		CacheCreationInputTokenCostAbove272k:         6,
+		CacheCreationInputTokenCostAbove1hr:          7,
+		CacheCreationInputTokenCostAbove1hrAbove200k: 8,
+	}
+
+	costs := CalculateTokenCosts(usage, price)
+
+	assert.InDelta(t, 300, costs.CacheCreationCost, 1e-9) // 50*6, including 1h tokens
+}
+
+func TestCalculateTokenCosts_CacheThresholdIsExclusive(t *testing.T) {
+	usage := &converter.TokenUsage{
+		PromptTokens:        tokenTiering200kThreshold,
+		CachedInputTokens:   10,
+		CacheCreationTokens: 10,
+	}
+	price := &ModelPrice{
+		InputCostPerToken:                    0.01,
+		CacheReadInputTokenCost:              1,
+		CacheReadInputTokenCostAbove200k:     2,
+		CacheCreationInputTokenCost:          3,
+		CacheCreationInputTokenCostAbove200k: 4,
+	}
+
+	costs := CalculateTokenCosts(usage, price)
+
+	assert.InDelta(t, 10, costs.CachedInputCost, 1e-9)
+	assert.InDelta(t, 30, costs.CacheCreationCost, 1e-9)
+}
+
+func TestCalculateTokenCosts_CacheCreationTTLBreakdownIsCappedAtAggregate(t *testing.T) {
+	usage := &converter.TokenUsage{
+		PromptTokens:          100,
+		CacheCreationTokens:   10,
+		CacheCreation5mTokens: 8,
+		CacheCreation1hTokens: 8,
+	}
+	price := &ModelPrice{
+		InputCostPerToken:                   0.01,
+		CacheCreationInputTokenCost:         2,
+		CacheCreationInputTokenCostAbove1hr: 5,
+	}
+
+	costs := CalculateTokenCosts(usage, price)
+
+	assert.InDelta(t, 26, costs.CacheCreationCost, 1e-9) // 8*2 + capped 2*5
+}
+
+func TestCalculateTokenCosts_CacheCreationTTLBreakdownProvidesMissingAggregate(t *testing.T) {
+	usage := &converter.TokenUsage{
+		PromptTokens:          100,
+		CacheCreation5mTokens: 8,
+		CacheCreation1hTokens: 2,
+	}
+	price := &ModelPrice{
+		InputCostPerToken:                   0.01,
+		CacheCreationInputTokenCost:         2,
+		CacheCreationInputTokenCostAbove1hr: 5,
+	}
+
+	costs := CalculateTokenCosts(usage, price)
+
+	require.NotNil(t, costs)
+	assert.Zero(t, usage.CacheCreationTokens, "CalculateTokenCosts must not mutate caller-owned usage")
+	assert.InDelta(t, 26, costs.CacheCreationCost, 1e-9) // 8*2 + 2*5
+}
+
+func TestCalculateTokenCosts_CacheCreation1hCostsMoreThan5mForSameVolume(t *testing.T) {
+	price := &ModelPrice{
+		InputCostPerToken:                   0.000003,
+		CacheCreationInputTokenCost:         0.00000375,
+		CacheCreationInputTokenCostAbove1hr: 0.000006,
+	}
+	fiveMinutes := &converter.TokenUsage{
+		PromptTokens:          1_000,
+		CacheCreationTokens:   1_000,
+		CacheCreation5mTokens: 1_000,
+	}
+	oneHour := &converter.TokenUsage{
+		PromptTokens:          1_000,
+		CacheCreationTokens:   1_000,
+		CacheCreation1hTokens: 1_000,
+	}
+
+	fiveMinuteCosts := CalculateTokenCosts(fiveMinutes, price)
+	oneHourCosts := CalculateTokenCosts(oneHour, price)
+
+	assert.InDelta(t, 0.00375, fiveMinuteCosts.TotalCost, 1e-12)
+	assert.InDelta(t, 0.006, oneHourCosts.TotalCost, 1e-12)
+}
+
+func TestCalculateTokenCosts_CachedAudioUsesDedicatedRate(t *testing.T) {
+	usage := &converter.TokenUsage{
+		PromptTokens:           100,
+		CachedInputTokens:      80,
+		CachedAudioInputTokens: 30,
+	}
+	price := &ModelPrice{
+		InputCostPerToken:            1,
+		CacheReadInputTokenCost:      0.1,
+		CacheReadInputAudioTokenCost: 0.3,
+	}
+
+	costs := CalculateTokenCosts(usage, price)
+
+	assert.InDelta(t, 14, costs.CachedInputCost, 1e-9) // 50*0.1 + 30*0.3
+	assert.InDelta(t, 20, costs.InputCost, 1e-9)
+}
+
+func TestCalculateTokenCosts_WebSearchUsesContextPricing(t *testing.T) {
+	usage := &converter.TokenUsage{
+		PromptTokens:         10,
+		CompletionTokens:     5,
+		WebSearchRequests:    2,
+		WebSearchContextSize: "high",
+	}
+	price := &ModelPrice{
+		InputCostPerToken:  1,
+		OutputCostPerToken: 2,
+		SearchContextCostPerQuery: map[string]float64{
+			"search_context_size_low":    0.10,
+			"search_context_size_medium": 0.20,
+			"search_context_size_high":   0.30,
+		},
+	}
+
+	costs := CalculateTokenCosts(usage, price)
+
+	assert.InDelta(t, 10, costs.InputCost, 1e-9)
+	assert.InDelta(t, 10, costs.OutputCost, 1e-9)
+	assert.InDelta(t, 0.60, costs.WebSearchCost, 1e-9)
+	assert.InDelta(t, 20.60, costs.TotalCost, 1e-9)
+	assert.Equal(t, 15, usage.Total())
+}
+
+func TestCalculateTokenCosts_WebSearchBillingUnit(t *testing.T) {
+	tests := []struct {
+		name       string
+		price      ModelPrice
+		wantSearch float64
+	}{
+		{
+			name: "per query",
+			price: ModelPrice{
+				WebSearchBillingUnit: "per_query",
+			},
+			wantSearch: 0.60,
+		},
+		{
+			name: "per prompt",
+			price: ModelPrice{
+				WebSearchBillingUnit: "per_prompt",
+			},
+			wantSearch: 0.20,
+		},
+		{
+			name: "Gemini 2 pricing defaults to per prompt like LiteLLM",
+			price: ModelPrice{
+				LiteLLMProvider: "gemini",
+			},
+			wantSearch: 0.20,
+		},
+		{
+			name: "non Gemini pricing keeps per query default",
+			price: ModelPrice{
+				LiteLLMProvider: "anthropic",
+			},
+			wantSearch: 0.60,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tt.price.SearchContextCostPerQuery = map[string]float64{
+				"search_context_size_medium": 0.20,
+			}
+			costs := CalculateTokenCosts(&converter.TokenUsage{
+				WebSearchRequests: 3,
+			}, &tt.price)
+
+			assert.InDelta(t, tt.wantSearch, costs.WebSearchCost, 1e-9)
+			assert.InDelta(t, tt.wantSearch, costs.TotalCost, 1e-9)
+		})
+	}
+}
+
+func TestCalculateTokenCosts_WebSearchDefaultsToMedium(t *testing.T) {
+	usage := &converter.TokenUsage{
+		WebSearchRequests: 1,
+	}
+	price := &ModelPrice{
+		SearchContextCostPerQuery: map[string]float64{
+			"search_context_size_low":    0.10,
+			"search_context_size_medium": 0.20,
+			"search_context_size_high":   0.30,
+		},
+	}
+
+	costs := CalculateTokenCosts(usage, price)
+
+	assert.InDelta(t, 0.20, costs.WebSearchCost, 1e-9)
+	assert.InDelta(t, 0.20, costs.TotalCost, 1e-9)
 }

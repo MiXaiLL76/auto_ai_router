@@ -251,6 +251,39 @@ func TestBuildMetadata(t *testing.T) {
 		require.True(t, ok)
 		assert.InDelta(t, 0.088113, costBreakdown["image_cost"].(float64), 1e-12)
 	})
+
+	t.Run("normalizes_usage", func(t *testing.T) {
+		usage := &converter.TokenUsage{
+			PromptTokens:           -1,
+			CompletionTokens:       2,
+			OutputTextTokens:       1,
+			AudioInputTokens:       -3,
+			CachedInputTokens:      -80,
+			CachedAudioInputTokens: 40,
+			CacheCreationTokens:    10,
+			CacheCreation5mTokens:  8,
+			CacheCreation1hTokens:  8,
+		}
+
+		result := buildMetadata("hashed", nil, "", 0, usage, "", nil, "gpt-4o", 0, "")
+		var m map[string]interface{}
+		err := json.Unmarshal([]byte(result), &m)
+		require.NoError(t, err)
+
+		usageObject := m["usage_object"].(map[string]interface{})
+		assert.Equal(t, float64(0), usageObject["prompt_tokens"])
+		assert.Equal(t, float64(2), usageObject["completion_tokens"])
+		assert.Equal(t, float64(2), usageObject["total_tokens"])
+		promptDetails := usageObject["prompt_tokens_details"].(map[string]interface{})
+		assert.Equal(t, float64(0), promptDetails["audio_tokens"])
+		assert.Equal(t, float64(0), promptDetails["cached_tokens"])
+		assert.Equal(t, float64(0), promptDetails["cached_audio_tokens"])
+		completionDetails := usageObject["completion_tokens_details"].(map[string]interface{})
+		assert.Equal(t, float64(1), completionDetails["text_tokens"])
+		ttlDetails := promptDetails["cache_creation_token_details"].(map[string]interface{})
+		assert.Equal(t, float64(8), ttlDetails["ephemeral_5m_input_tokens"])
+		assert.Equal(t, float64(2), ttlDetails["ephemeral_1h_input_tokens"])
+	})
 }
 
 func TestExtractEndUser(t *testing.T) {

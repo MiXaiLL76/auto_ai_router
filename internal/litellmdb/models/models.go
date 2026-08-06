@@ -168,8 +168,13 @@ type TokenInfo struct {
 	// Access control
 	Models        []string // Key-level allowed models (empty = all)
 	AllowedRoutes []string // LiteLLM virtual-key routes (empty = unrestricted)
+	UserModels    []string // Personal-user allowed models (empty = all)
 	TeamModels    []string // Team-level allowed models (empty = all)
 	Blocked       bool     // Is token blocked
+	IsMasterKey   bool     // Internal provenance marker; never populated from a verification-token row
+
+	// A dangling team fails closed instead of becoming an unrestricted empty scope.
+	TeamDangling bool
 
 	// ==================== User Level (embedded budget) ====================
 	UserAlias     string   // User alias (optional) - user-friendly name
@@ -198,6 +203,7 @@ type TokenInfo struct {
 	TeamMemberMaxBudget *float64 // Team member's max budget from BudgetTable (nil = unlimited)
 	TeamMemberTPMLimit  *int64   // Team member's TPM limit from BudgetTable
 	TeamMemberRPMLimit  *int64   // Team member's RPM limit from BudgetTable
+	TeamMemberModels    []string // Team member's model scope from BudgetTable (empty = inherit team)
 
 	// ==================== OrganizationMembership Level (external budget) ====================
 	OrgMemberSpend     *float64 // Org member's spend within organization
@@ -209,10 +215,11 @@ type TokenInfo struct {
 	Metadata map[string]interface{}
 }
 
-// LiteLLM sentinel values stored in key model allowlists.
+// LiteLLM sentinel values stored in key or user model allowlists.
 const (
-	AllTeamModels  = "all-team-models"
-	AllProxyModels = "all-proxy-models"
+	AllTeamModels   = "all-team-models"
+	AllProxyModels  = "all-proxy-models"
+	NoDefaultModels = "no-default-models"
 )
 
 // ModelAccessScope identifies one independently enforced model allowlist.
@@ -228,6 +235,10 @@ type ModelAccessScope struct {
 // unrestricted. A custom matcher lets the routing layer apply LiteLLM's
 // directional request-alias expansion without coupling DB models to routing.
 type ModelScopeMatcher func(model string, allowedModels []string) bool
+
+type ModelAccessPolicy struct {
+	StrictAllTeamModelsACL bool
+}
 
 func clonePointer[T any](value *T) *T {
 	if value == nil {
@@ -273,8 +284,9 @@ func (t *TokenInfo) Clone() *TokenInfo {
 	}
 	clone := *t
 	clone.Models = append([]string(nil), t.Models...)
-	clone.AllowedRoutes = append([]string(nil), t.AllowedRoutes...)
+	clone.UserModels = append([]string(nil), t.UserModels...)
 	clone.TeamModels = append([]string(nil), t.TeamModels...)
+	clone.TeamMemberModels = append([]string(nil), t.TeamMemberModels...)
 	clone.Tags = append([]string(nil), t.Tags...)
 	if t.Metadata != nil {
 		clone.Metadata = cloneMetadataValue(t.Metadata).(map[string]interface{})
@@ -324,16 +336,19 @@ func (t *TokenInfo) IsBudgetExceeded() bool {
 	return t.Spend > *t.MaxBudget
 }
 
-// ModelAccessScopes returns the ordered set of allowlists applicable to this
-// token: the key scope plus the team scope for team keys.
+// ModelAccessScopes returns the independently enforced model allowlists.
 func (t *TokenInfo) ModelAccessScopes() []ModelAccessScope {
+	return t.ModelAccessScopesWithPolicy(ModelAccessPolicy{})
+}
+
+func (t *TokenInfo) ModelAccessScopesWithPolicy(policy ModelAccessPolicy) []ModelAccessScope {
 	keyModels := t.Models
 	for _, model := range t.Models {
 		if model == AllTeamModels {
-			// LiteLLM fails closed when all-team-models is used without a team.
-			// With a team it replaces, rather than extends, the key allowlist.
 			if t.TeamID != "" {
 				keyModels = t.TeamModels
+			} else if !policy.StrictAllTeamModelsACL {
+				keyModels = nil
 			}
 			break
 		}
@@ -341,7 +356,23 @@ func (t *TokenInfo) ModelAccessScopes() []ModelAccessScope {
 
 	scopes := []ModelAccessScope{{Name: "key", Models: keyModels}}
 	if t.TeamID != "" {
-		scopes = append(scopes, ModelAccessScope{Name: "team", Models: t.TeamModels})
+		if t.TeamDangling {
+			scopes = append(scopes, ModelAccessScope{Name: "team", DenyAll: true})
+		} else {
+			scopes = append(scopes, ModelAccessScope{Name: "team", Models: t.TeamModels})
+			if t.UserID != "" && len(t.TeamMemberModels) > 0 {
+				scopes = append(scopes, ModelAccessScope{Name: "team_member", Models: t.TeamMemberModels})
+			}
+		}
+	} else if t.UserID != "" {
+		userScope := ModelAccessScope{Name: "user", Models: t.UserModels}
+		for _, model := range t.UserModels {
+			if model == NoDefaultModels {
+				userScope.DenyAll = true
+				break
+			}
+		}
+		scopes = append(scopes, userScope)
 	}
 	return scopes
 }
@@ -379,10 +410,18 @@ func modelScopePatternMatches(pattern, model string) bool {
 
 // IsModelAllowedBy checks every applicable model scope with matcher.
 func (t *TokenInfo) IsModelAllowedBy(model string, matcher ModelScopeMatcher) bool {
+	return t.IsModelAllowedByPolicy(model, matcher, ModelAccessPolicy{})
+}
+
+func (t *TokenInfo) IsModelAllowedByPolicy(
+	model string,
+	matcher ModelScopeMatcher,
+	policy ModelAccessPolicy,
+) bool {
 	if matcher == nil {
 		matcher = exactModelScopeMatch
 	}
-	for _, scope := range t.ModelAccessScopes() {
+	for _, scope := range t.ModelAccessScopesWithPolicy(policy) {
 		if scope.DenyAll || !matcher(model, scope.Models) {
 			return false
 		}

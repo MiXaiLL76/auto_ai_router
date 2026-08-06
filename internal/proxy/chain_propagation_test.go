@@ -91,8 +91,15 @@ func TestRouterChain_ErrorStatusPropagatedThroughChain(t *testing.T) {
 
 			require.Equal(t, status, w.Code,
 				"status %d from the provider must reach the outermost client unchanged", status)
-			require.Contains(t, w.Body.String(), "provider_error_marker",
-				"provider error body must be preserved through the chain")
+			require.NotContains(t, w.Body.String(), "provider_error_marker")
+			switch status {
+			case http.StatusTooManyRequests:
+				require.Contains(t, w.Body.String(), "Rate limit exceeded")
+			case http.StatusRequestTimeout, http.StatusGatewayTimeout:
+				require.Contains(t, w.Body.String(), "Request timed out")
+			default:
+				require.Contains(t, w.Body.String(), "Request failed")
+			}
 		})
 	}
 }

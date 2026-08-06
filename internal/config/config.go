@@ -27,8 +27,10 @@ const (
 	ProviderTypeAnthropic ProviderType = "anthropic"
 	ProviderTypeCometAPI  ProviderType = "cometapi"
 	ProviderTypeSosana    ProviderType = "sosana"
+	ProviderTypeProMan    ProviderType = "proman"
 	ProviderTypeBedrock   ProviderType = "bedrock"
 	ProviderTypeProxy     ProviderType = "proxy"
+	ProviderTypeAIR       ProviderType = "air"
 )
 
 // LogValue implements slog.LogValuer so structured log backends (e.g. the
@@ -41,10 +43,17 @@ func (p ProviderType) LogValue() slog.Value {
 // IsValid checks if the provider type is valid
 func (p ProviderType) IsValid() bool {
 	switch p {
-	case ProviderTypeOpenAI, ProviderTypeVertexAI, ProviderTypeGemini, ProviderTypeAnthropic, ProviderTypeCometAPI, ProviderTypeSosana, ProviderTypeBedrock, ProviderTypeProxy:
+	case ProviderTypeOpenAI, ProviderTypeVertexAI, ProviderTypeGemini, ProviderTypeAnthropic, ProviderTypeCometAPI, ProviderTypeSosana, ProviderTypeProMan, ProviderTypeBedrock, ProviderTypeProxy, ProviderTypeAIR:
 		return true
 	}
 	return false
+}
+
+// IsProxyLike reports whether the provider uses AIR's proxy forwarding path:
+// OpenAI-compatible request forwarding, remote /health model discovery, and
+// proxy-chain fallback semantics.
+func (p ProviderType) IsProxyLike() bool {
+	return p == ProviderTypeProxy || p == ProviderTypeAIR
 }
 
 func normalizeProviderType(raw string) ProviderType {
@@ -53,6 +62,10 @@ func normalizeProviderType(raw string) ProviderType {
 		return ProviderTypeCometAPI
 	case "sosana-art", "sosana_art":
 		return ProviderTypeSosana
+	case "aar", "auto-ai-router", "auto_ai_router":
+		return ProviderTypeAIR
+	case "pro-man", "pro_man":
+		return ProviderTypeProMan
 	default:
 		return ProviderType(strings.ToLower(strings.TrimSpace(raw)))
 	}
@@ -435,29 +448,73 @@ func (r *RedisConfig) UnmarshalYAML(value *yaml.Node) error {
 }
 
 type ServerConfig struct {
-	Port                       int           `yaml:"port"`
-	MaxBodySizeMB              int           `yaml:"max_body_size_mb"`
-	ResponseBodyMultiplier     int           `yaml:"response_body_multiplier"` // Multiplier for response body size limit relative to max_body_size_mb (default: 10)
-	RequestTimeout             time.Duration `yaml:"request_timeout"`
-	LoggingLevel               string        `yaml:"logging_level"`
-	StdoutLogsEnabled          bool          `yaml:"stdout_logs_enabled"` // Write logs to stdout (default: true); disable to ship logs only via OTEL
-	MasterKey                  string        `yaml:"master_key"`
-	DefaultModelsRPM           int           `yaml:"default_models_rpm"`
-	MaxIdleConns               int           `yaml:"max_idle_conns"`
-	MaxIdleConnsPerHost        int           `yaml:"max_idle_conns_per_host"`
-	IdleConnTimeout            time.Duration `yaml:"idle_conn_timeout"`
-	ReadTimeout                time.Duration `yaml:"-"`                                 // HTTP server read timeout (equals request_timeout, not configurable via YAML)
-	WriteTimeout               time.Duration `yaml:"write_timeout"`                     // HTTP server write timeout (default: 60s)
-	IdleTimeout                time.Duration `yaml:"idle_timeout"`                      // HTTP server idle timeout (default: 2*write_timeout)
-	MaxProviderRetries         int           `yaml:"max_provider_retries"`              // Max same-type credential retries on provider errors (default: 2, meaning 3 total attempts)
-	MaxFallbackAttempts        int           `yaml:"max_fallback_attempts"`             // Max fallback proxy hops per request chain (default: 5)
-	SessionStickyEnabled       bool          `yaml:"session_sticky_enabled"`            // Enable session-sticky credential routing (default: true)
-	SessionStickyTTL           int           `yaml:"session_sticky_ttl_minutes"`        // Session binding TTL in minutes (0 = default 6)
-	SessionStickyAutoCacheCtrl bool          `yaml:"session_sticky_auto_cache_control"` // Auto-inject Anthropic cache_control when session is active (default: true)
-	ModelPricesLink            string        `yaml:"model_prices_link,omitempty"`       // URL or file path to model prices JSON - supports os.environ/VAR_NAME
-	ShutdownDelay              time.Duration `yaml:"shutdown_delay"`                    // Delay between readiness=false and server.Shutdown (default: 5s)
-	DrainUpstreamOnAbort       bool          `yaml:"drain_upstream_on_abort"`           // When true, keep reading upstream after client disconnect to capture real usage chunk (default: false — estimate from delta text)
-	ProxyHealthTimeout         time.Duration `yaml:"proxy_health_timeout"`              // Timeout for fetching /health from remote proxy credentials (default: 15s)
+	Port                       int                   `yaml:"port"`
+	MaxBodySizeMB              int                   `yaml:"max_body_size_mb"`
+	ResponseBodyMultiplier     int                   `yaml:"response_body_multiplier"` // Multiplier for response body size limit relative to max_body_size_mb (default: 10)
+	ResponseCompatibility      string                `yaml:"response_compatibility"`
+	RequestTimeout             time.Duration         `yaml:"request_timeout"`
+	LoggingLevel               string                `yaml:"logging_level"`
+	StdoutLogsEnabled          bool                  `yaml:"stdout_logs_enabled"` // Write logs to stdout (default: true); disable to ship logs only via OTEL
+	MasterKey                  string                `yaml:"master_key"`
+	DefaultModelsRPM           int                   `yaml:"default_models_rpm"`
+	MaxIdleConns               int                   `yaml:"max_idle_conns"`
+	MaxIdleConnsPerHost        int                   `yaml:"max_idle_conns_per_host"`
+	IdleConnTimeout            time.Duration         `yaml:"idle_conn_timeout"`
+	ReadTimeout                time.Duration         `yaml:"-"`                                 // HTTP server read timeout (equals request_timeout, not configurable via YAML)
+	WriteTimeout               time.Duration         `yaml:"write_timeout"`                     // HTTP server write timeout (default: 60s)
+	IdleTimeout                time.Duration         `yaml:"idle_timeout"`                      // HTTP server idle timeout (default: 2*write_timeout)
+	MaxProviderRetries         int                   `yaml:"max_provider_retries"`              // Max same-type credential retries on provider errors (default: 2, meaning 3 total attempts)
+	MaxFallbackAttempts        int                   `yaml:"max_fallback_attempts"`             // Max fallback proxy hops per request chain (default: 5)
+	SessionStickyEnabled       bool                  `yaml:"session_sticky_enabled"`            // Enable session-sticky credential routing (default: true)
+	SessionStickyTTL           int                   `yaml:"session_sticky_ttl_minutes"`        // Session binding TTL in minutes (0 = default 6)
+	SessionStickyAutoCacheCtrl bool                  `yaml:"session_sticky_auto_cache_control"` // Auto-inject Anthropic cache_control when session is active (default: true)
+	ModelPricesLink            string                `yaml:"model_prices_link,omitempty"`       // URL or file path to model prices JSON - supports os.environ/VAR_NAME
+	ShutdownDelay              time.Duration         `yaml:"shutdown_delay"`                    // Delay between readiness=false and server.Shutdown (default: 5s)
+	DrainUpstreamOnAbort       bool                  `yaml:"drain_upstream_on_abort"`           // When true, keep reading upstream after client disconnect to capture real usage chunk (default: false — estimate from delta text)
+	TiktokenEnabled            bool                  `yaml:"tiktoken_enabled"`                  // Enable local tiktoken-based prompt/completion token estimation as a fallback when a provider omits usage (default: true; disable if all configured providers always report usage)
+	StrictAllTeamModelsACL     bool                  `yaml:"strict_all_team_models_acl"`        // Enforce key/team/user model ACLs (default: false)
+	CredentialNameAsTeamID     bool                  `yaml:"credential_name_as_team_id"`        // Use provider credential name as team_id when auth has no team_id (default: false)
+	ProxyHealthTimeout         time.Duration         `yaml:"proxy_health_timeout"`              // Timeout for fetching /health from remote proxy credentials (default: 15s)
+	ResponseHeaders            ResponseHeadersConfig `yaml:"response_headers"`
+}
+
+type ResponseHeaderMode string
+
+const (
+	ResponseHeaderModePassthrough ResponseHeaderMode = "passthrough"
+	ResponseHeaderModeAllowlist   ResponseHeaderMode = "allowlist"
+)
+
+type ResponseHeadersConfig struct {
+	Mode ResponseHeaderMode `yaml:"mode"`
+}
+
+func (c *ResponseHeadersConfig) UnmarshalYAML(value *yaml.Node) error {
+	type rawConfig struct {
+		Mode string `yaml:"mode"`
+	}
+
+	var raw rawConfig
+	if err := value.Decode(&raw); err != nil {
+		return err
+	}
+
+	rawMode := strings.TrimSpace(raw.Mode)
+	if strings.HasPrefix(rawMode, "os.environ/") {
+		envName := strings.TrimPrefix(rawMode, "os.environ/")
+		envValue, ok := os.LookupEnv(envName)
+		if !ok || strings.TrimSpace(envValue) == "" {
+			return fmt.Errorf("environment variable %q is required for response_headers.mode", envName)
+		}
+		rawMode = envValue
+	}
+
+	mode := strings.ToLower(strings.TrimSpace(rawMode))
+	if mode == "" {
+		mode = string(ResponseHeaderModePassthrough)
+	}
+	c.Mode = ResponseHeaderMode(mode)
+	return nil
 }
 
 // ErrorCodeRuleConfig defines per-error-code ban rules
@@ -478,28 +535,33 @@ type Fail2BanConfig struct {
 func (s *ServerConfig) UnmarshalYAML(value *yaml.Node) error {
 	// Create a temporary struct with all string fields
 	type tempConfig struct {
-		Port                       string `yaml:"port"`
-		MaxBodySizeMB              string `yaml:"max_body_size_mb"`
-		ResponseBodyMultiplier     string `yaml:"response_body_multiplier"`
-		RequestTimeout             string `yaml:"request_timeout"`
-		LoggingLevel               string `yaml:"logging_level"`
-		StdoutLogsEnabled          string `yaml:"stdout_logs_enabled"`
-		MasterKey                  string `yaml:"master_key"`
-		DefaultModelsRPM           string `yaml:"default_models_rpm"`
-		MaxIdleConns               string `yaml:"max_idle_conns"`
-		MaxIdleConnsPerHost        string `yaml:"max_idle_conns_per_host"`
-		IdleConnTimeout            string `yaml:"idle_conn_timeout"`
-		WriteTimeout               string `yaml:"write_timeout"`
-		IdleTimeout                string `yaml:"idle_timeout"`
-		MaxProviderRetries         string `yaml:"max_provider_retries"`
-		MaxFallbackAttempts        string `yaml:"max_fallback_attempts"`
-		SessionStickyEnabled       string `yaml:"session_sticky_enabled"`
-		SessionStickyTTL           string `yaml:"session_sticky_ttl_minutes"`
-		SessionStickyAutoCacheCtrl string `yaml:"session_sticky_auto_cache_control"`
-		ModelPricesLink            string `yaml:"model_prices_link,omitempty"`
-		ShutdownDelay              string `yaml:"shutdown_delay"`
-		DrainUpstreamOnAbort       string `yaml:"drain_upstream_on_abort"`
-		ProxyHealthTimeout         string `yaml:"proxy_health_timeout"`
+		Port                       string                `yaml:"port"`
+		MaxBodySizeMB              string                `yaml:"max_body_size_mb"`
+		ResponseBodyMultiplier     string                `yaml:"response_body_multiplier"`
+		ResponseCompatibility      string                `yaml:"response_compatibility"`
+		RequestTimeout             string                `yaml:"request_timeout"`
+		LoggingLevel               string                `yaml:"logging_level"`
+		StdoutLogsEnabled          string                `yaml:"stdout_logs_enabled"`
+		MasterKey                  string                `yaml:"master_key"`
+		DefaultModelsRPM           string                `yaml:"default_models_rpm"`
+		MaxIdleConns               string                `yaml:"max_idle_conns"`
+		MaxIdleConnsPerHost        string                `yaml:"max_idle_conns_per_host"`
+		IdleConnTimeout            string                `yaml:"idle_conn_timeout"`
+		WriteTimeout               string                `yaml:"write_timeout"`
+		IdleTimeout                string                `yaml:"idle_timeout"`
+		MaxProviderRetries         string                `yaml:"max_provider_retries"`
+		MaxFallbackAttempts        string                `yaml:"max_fallback_attempts"`
+		SessionStickyEnabled       string                `yaml:"session_sticky_enabled"`
+		SessionStickyTTL           string                `yaml:"session_sticky_ttl_minutes"`
+		SessionStickyAutoCacheCtrl string                `yaml:"session_sticky_auto_cache_control"`
+		ModelPricesLink            string                `yaml:"model_prices_link,omitempty"`
+		ShutdownDelay              string                `yaml:"shutdown_delay"`
+		DrainUpstreamOnAbort       string                `yaml:"drain_upstream_on_abort"`
+		TiktokenEnabled            string                `yaml:"tiktoken_enabled"`
+		StrictAllTeamModelsACL     string                `yaml:"strict_all_team_models_acl"`
+		CredentialNameAsTeamID     string                `yaml:"credential_name_as_team_id"`
+		ProxyHealthTimeout         string                `yaml:"proxy_health_timeout"`
+		ResponseHeaders            ResponseHeadersConfig `yaml:"response_headers"`
 	}
 
 	var temp tempConfig
@@ -575,14 +637,25 @@ func (s *ServerConfig) UnmarshalYAML(value *yaml.Node) error {
 	if s.DrainUpstreamOnAbort, err = parseField(temp.DrainUpstreamOnAbort, false, strconv.ParseBool, "drain_upstream_on_abort"); err != nil {
 		return err
 	}
+	if s.TiktokenEnabled, err = parseField(temp.TiktokenEnabled, true, strconv.ParseBool, "tiktoken_enabled"); err != nil {
+		return err
+	}
+	if s.StrictAllTeamModelsACL, err = parseField(temp.StrictAllTeamModelsACL, false, strconv.ParseBool, "strict_all_team_models_acl"); err != nil {
+		return err
+	}
+	if s.CredentialNameAsTeamID, err = parseField(temp.CredentialNameAsTeamID, false, strconv.ParseBool, "credential_name_as_team_id"); err != nil {
+		return err
+	}
 	if s.ProxyHealthTimeout, err = parseField(temp.ProxyHealthTimeout, 15*time.Second, time.ParseDuration, "proxy_health_timeout"); err != nil {
 		return err
 	}
+	s.ResponseHeaders = temp.ResponseHeaders
 
 	// String fields
 	s.LoggingLevel = resolveEnvString(temp.LoggingLevel)
 	s.MasterKey = resolveEnvString(temp.MasterKey)
 	s.ModelPricesLink = resolveEnvString(temp.ModelPricesLink)
+	s.ResponseCompatibility = strings.ToLower(strings.TrimSpace(resolveEnvString(temp.ResponseCompatibility)))
 
 	return nil
 }
@@ -597,6 +670,7 @@ type CredentialConfig struct {
 	TPM                     int               `yaml:"tpm"`
 	Weight                  int               `yaml:"weight"` // Default weighted round-robin weight for this credential (0 = 1)
 	FallbackPriority        int               `yaml:"fallback_priority,omitempty"`
+	ReasoningOnly           bool              `yaml:"reasoning_only,omitempty"`
 	Scopes                  []string          `yaml:"scopes,omitempty"`
 	DeniedScopes            []string          `yaml:"denied_scopes,omitempty"`
 	ProviderScopes          []string          `yaml:"-"`
@@ -613,7 +687,7 @@ type CredentialConfig struct {
 	CredentialsFile string `yaml:"credentials_file,omitempty"`
 	CredentialsJSON string `yaml:"credentials_json,omitempty"`
 
-	// Proxy specific fields
+	// Proxy/AIR remote-router specific fields
 	IsFallback bool `yaml:"is_fallback,omitempty"`
 }
 
@@ -630,6 +704,10 @@ func (c CredentialConfig) ScopeExpression() *scope.Expression {
 		scope.FromScopes(c.Scopes, c.DeniedScopes),
 		providerExpression,
 	)
+}
+
+func (c CredentialConfig) IsProxyLike() bool {
+	return c.Type.IsProxyLike()
 }
 
 // SameProviderIdentity reports whether learned provider metadata can be reused.
@@ -655,6 +733,7 @@ func (c *CredentialConfig) UnmarshalYAML(value *yaml.Node) error {
 		TPM              string           `yaml:"tpm"`
 		Weight           string           `yaml:"weight"`
 		FallbackPriority string           `yaml:"fallback_priority,omitempty"`
+		ReasoningOnly    string           `yaml:"reasoning_only,omitempty"`
 		Scopes           []string         `yaml:"scopes,omitempty"`
 		DeniedScopes     []string         `yaml:"denied_scopes,omitempty"`
 		ForbiddenScopes  []string         `yaml:"forbidden_scopes,omitempty"`
@@ -669,6 +748,13 @@ func (c *CredentialConfig) UnmarshalYAML(value *yaml.Node) error {
 	var temp tempConfig
 	if err := value.Decode(&temp); err != nil {
 		return err
+	}
+	if hasYAMLKey(value, "proxy_usage_format") {
+		name := resolveEnvString(temp.Name)
+		if name == "" {
+			name = "<unnamed>"
+		}
+		return fmt.Errorf("credential %s: proxy_usage_format is no longer supported; use type: air for Auto AI Router upstreams or type: proxy for generic OpenAI-compatible APIs", name)
 	}
 
 	// Resolve string fields
@@ -700,6 +786,9 @@ func (c *CredentialConfig) UnmarshalYAML(value *yaml.Node) error {
 	if c.FallbackPriority, err = parseField(temp.FallbackPriority, 0, strconv.Atoi, "fallback_priority for credential '"+c.Name+"'"); err != nil {
 		return err
 	}
+	if c.ReasoningOnly, err = parseField(temp.ReasoningOnly, false, strconv.ParseBool, "reasoning_only for credential '"+c.Name+"'"); err != nil {
+		return err
+	}
 
 	// Resolve and parse boolean field
 	if c.IsFallback, err = parseField(temp.IsFallback, false, strconv.ParseBool, "is_fallback for credential '"+c.Name+"'"); err != nil {
@@ -716,6 +805,18 @@ func (c *CredentialConfig) UnmarshalYAML(value *yaml.Node) error {
 	}
 
 	return nil
+}
+
+func hasYAMLKey(value *yaml.Node, key string) bool {
+	if value == nil || value.Kind != yaml.MappingNode {
+		return false
+	}
+	for i := 0; i+1 < len(value.Content); i += 2 {
+		if value.Content[i].Value == key {
+			return true
+		}
+	}
+	return false
 }
 
 type MonitoringConfig struct {
@@ -817,6 +918,11 @@ type KafkaConfig struct {
 	SASLMechanism string `yaml:"sasl_mechanism,omitempty"` // "" | "PLAIN" | "SCRAM-SHA-256" | "SCRAM-SHA-512"
 	SASLUsername  string `yaml:"sasl_username,omitempty"`
 	SASLPassword  string `yaml:"sasl_password,omitempty"`
+	// TLSCACert is an optional path to a PEM-encoded CA certificate bundle
+	// used to verify the broker's TLS certificate (e.g. Yandex Managed
+	// Service for Kafka requires its own CA, not present in the OS default
+	// trust store). Empty means the OS default trust store is used.
+	TLSCACert string `yaml:"tls_ca_cert,omitempty"`
 }
 
 // OTELConfig holds OpenTelemetry export configuration for logs, traces and metrics.
@@ -1102,6 +1208,7 @@ func (k *KafkaConfig) UnmarshalYAML(value *yaml.Node) error {
 		SASLMechanism    string   `yaml:"sasl_mechanism,omitempty"`
 		SASLUsername     string   `yaml:"sasl_username,omitempty"`
 		SASLPassword     string   `yaml:"sasl_password,omitempty"`
+		TLSCACert        string   `yaml:"tls_ca_cert,omitempty"`
 	}
 
 	var temp tempConfig
@@ -1151,6 +1258,7 @@ func (k *KafkaConfig) UnmarshalYAML(value *yaml.Node) error {
 	k.SASLMechanism = resolveEnvString(temp.SASLMechanism)
 	k.SASLUsername = resolveEnvString(temp.SASLUsername)
 	k.SASLPassword = resolveEnvString(temp.SASLPassword)
+	k.TLSCACert = resolveEnvString(temp.TLSCACert)
 	return nil
 }
 
@@ -1356,22 +1464,21 @@ func defaultRedisConfig() RedisConfig {
 
 func defaultLiteLLMDBConfig() LiteLLMDBConfig {
 	return LiteLLMDBConfig{
-		Enabled:               false,
-		IsRequired:            false,
-		LoadLitellmDBModels:   false,
-		LitellmDBSyncInterval: 1 * time.Minute,
-		DatabaseURL:           "",
-		MaxConns:              25,
-		MinConns:              5,
-		HealthCheckInterval:   10 * time.Second,
-		ConnectTimeout:        5 * time.Second,
-		AuthCacheTTL:          5 * time.Second,
-		AuthCacheSize:         10000,
-		LogQueueSize:          5000,
-		LogBatchSize:          100,
-		LogFlushInterval:      5 * time.Second,
-		LogWorkers:            4,
-
+		Enabled:                          false,
+		IsRequired:                       false,
+		LoadLitellmDBModels:              false,
+		LitellmDBSyncInterval:            1 * time.Minute,
+		DatabaseURL:                      "",
+		MaxConns:                         25,
+		MinConns:                         5,
+		HealthCheckInterval:              10 * time.Second,
+		ConnectTimeout:                   5 * time.Second,
+		AuthCacheTTL:                     5 * time.Second,
+		AuthCacheSize:                    10000,
+		LogQueueSize:                     5000,
+		LogBatchSize:                     100,
+		LogFlushInterval:                 5 * time.Second,
+		LogWorkers:                       4,
 		EnforceBudgetReservation:         false,
 		BudgetReservationTTL:             15 * time.Minute,
 		EnforceKeyRateLimits:             false,
@@ -1453,6 +1560,20 @@ func (c *Config) Validate() error {
 	if c.Server.ResponseBodyMultiplier <= 0 {
 		c.Server.ResponseBodyMultiplier = 10
 	}
+	switch c.Server.ResponseCompatibility {
+	case "", "native":
+		c.Server.ResponseCompatibility = "native"
+	case "litellm":
+	default:
+		return fmt.Errorf("invalid response_compatibility: %s (must be native or litellm)", c.Server.ResponseCompatibility)
+	}
+
+	if c.Server.ResponseHeaders.Mode == "" {
+		c.Server.ResponseHeaders.Mode = ResponseHeaderModePassthrough
+	}
+	if c.Server.ResponseHeaders.Mode != ResponseHeaderModePassthrough && c.Server.ResponseHeaders.Mode != ResponseHeaderModeAllowlist {
+		return fmt.Errorf("response_headers.mode must be passthrough or allowlist, got %q", c.Server.ResponseHeaders.Mode)
+	}
 
 	// -1 means unlimited timeout
 	if c.Server.RequestTimeout < 0 && c.Server.RequestTimeout != -1 {
@@ -1527,7 +1648,7 @@ func (c *Config) Validate() error {
 
 		// Validate provider type
 		if !cred.Type.IsValid() {
-			return fmt.Errorf("credential %s: invalid type: %s (must be 'openai', 'vertex-ai', 'gemini', 'anthropic', 'cometapi', 'sosana', 'bedrock', or 'proxy')", cred.Name, cred.Type)
+			return fmt.Errorf("credential %s: invalid type: %s (must be 'openai', 'vertex-ai', 'gemini', 'anthropic', 'cometapi', 'sosana', 'proman', 'bedrock', 'proxy', or 'air')", cred.Name, cred.Type)
 		}
 		if cred.AuthType != "" && cred.AuthType != "bearer" && cred.AuthType != "x-api-key" {
 			return fmt.Errorf("credential %s: invalid auth_type: %s (must be 'bearer' or 'x-api-key')", cred.Name, cred.AuthType)
@@ -1535,16 +1656,16 @@ func (c *Config) Validate() error {
 
 		// Validate by provider type
 		switch cred.Type {
-		case ProviderTypeProxy:
-			// base_url is required for proxy
+		case ProviderTypeProxy, ProviderTypeAIR:
+			// base_url is required for remote router/proxy credentials
 			if cred.BaseURL == "" {
-				return fmt.Errorf("credential %s: base_url is required for proxy type", cred.Name)
+				return fmt.Errorf("credential %s: base_url is required for %s type", cred.Name, cred.Type)
 			}
 			// Validate base_url is a valid URL
 			if err := validateBaseURL(cred.Name, cred.BaseURL); err != nil {
 				return err
 			}
-			// api_key is optional for proxy
+			// api_key is optional for proxy/AIR
 
 		case ProviderTypeVertexAI:
 			// For Vertex AI, project_id and location are required

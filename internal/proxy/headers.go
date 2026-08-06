@@ -2,9 +2,13 @@ package proxy
 
 import (
 	"net/http"
+	"strings"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
+	promanutils "github.com/mixaill76/auto_ai_router/internal/converter/proman/utils"
 )
+
+const accelBufferingHeader = "X-Accel-Buffering"
 
 // hopByHopHeaders are headers that should not be proxied.
 // These are hop-by-hop headers as defined in RFC 7230 Section 6.1.
@@ -18,6 +22,20 @@ var hopByHopHeaders = map[string]bool{
 	"Trailer":             true,
 	"Transfer-Encoding":   true,
 	"Upgrade":             true,
+}
+
+var allowedResponseHeaders = map[string]bool{
+	"Cache-Control":                  true,
+	"Content-Disposition":            true,
+	"Content-Range":                  true,
+	"Content-Type":                   true,
+	"Last-Modified":                  true,
+	"Location":                       true,
+	"Retry-After":                    true,
+	"X-Ratelimit-Limit-Requests":     true,
+	"X-Ratelimit-Limit-Tokens":       true,
+	"X-Ratelimit-Remaining-Requests": true,
+	"X-Ratelimit-Remaining-Tokens":   true,
 }
 
 // privacyHeaders are headers that reveal client IP or routing information.
@@ -39,14 +57,35 @@ var privacyHeaders = map[string]bool{
 
 // isPrivacyHeader checks if a header reveals client IP or routing information.
 func isPrivacyHeader(key string) bool {
-	return privacyHeaders[key]
+	return privacyHeaders[http.CanonicalHeaderKey(key)]
 }
 
 // isHopByHopHeader checks if a header should not be proxied.
 // Returns true for hop-by-hop headers that must not be forwarded to upstream.
 // RFC 7230: https://tools.ietf.org/html/rfc7230#section-6.1
 func isHopByHopHeader(key string) bool {
-	return hopByHopHeaders[key]
+	return hopByHopHeaders[http.CanonicalHeaderKey(key)]
+}
+
+func isInternalAIRRequestHeader(key string) bool {
+	return strings.EqualFold(key, HeaderAIRProxyClient) ||
+		strings.EqualFold(key, HeaderLegacyAIRProxyClient) ||
+		strings.EqualFold(key, HeaderAIRUsageAudioTokens)
+}
+
+func isProxyOwnedResponseHeader(key string) bool {
+	return strings.EqualFold(key, accelBufferingHeader)
+}
+
+func isClientAuthHeader(key string) bool {
+	return strings.EqualFold(key, "Authorization") || strings.EqualFold(key, "X-Api-Key")
+}
+
+func setSuccessfulSSEHeaders(headers http.Header, statusCode int) {
+	if headers == nil || statusCode < http.StatusOK || statusCode >= http.StatusMultipleChoices {
+		return
+	}
+	headers.Set(accelBufferingHeader, "no")
 }
 
 // GetHopByHopHeaders returns a copy of the hop-by-hop headers map for reference.
@@ -65,32 +104,23 @@ func GetHopByHopHeaders() map[string]bool {
 // Accept-Encoding is also skipped (see copyHeadersSkipAuth for rationale).
 func copyRequestHeaders(dst *http.Request, src *http.Request, apiKey string) {
 	for key, values := range src.Header {
-		if isHopByHopHeader(key) || isPrivacyHeader(key) {
+		if isHopByHopHeader(key) || isPrivacyHeader(key) || isClientAuthHeader(key) {
 			continue
 		}
 		// Don't forward Accept-Encoding to upstream (proxy handles per-segment).
 		if key == "Accept-Encoding" {
 			continue
 		}
-		// Strip internal proxy marker — must not be forwarded to the actual provider.
-		if key == "X-Aar-Proxy-Client" {
+		// Strip internal AIR markers — they must not be forwarded to the actual provider.
+		if isInternalAIRRequestHeader(key) {
 			continue
 		}
-		if key == "Authorization" {
-			// Handle Authorization header: use credential API key if available, otherwise copy original
-			if apiKey != "" {
-				dst.Header.Set("Authorization", "Bearer "+apiKey)
-			} else {
-				// Copy original Authorization header if no API key configured
-				for _, value := range values {
-					dst.Header.Add(key, value)
-				}
-			}
-		} else {
-			for _, value := range values {
-				dst.Header.Add(key, value)
-			}
+		for _, value := range values {
+			dst.Header.Add(key, value)
 		}
+	}
+	if apiKey != "" {
+		dst.Header.Set("Authorization", "Bearer "+apiKey)
 	}
 }
 
@@ -102,7 +132,7 @@ func copyRequestHeaders(dst *http.Request, src *http.Request, apiKey string) {
 // bytes to flow through instead of decoded content.
 func copyHeadersSkipAuth(dst *http.Request, src *http.Request) {
 	for key, values := range src.Header {
-		if isHopByHopHeader(key) || isPrivacyHeader(key) || key == "Authorization" {
+		if isHopByHopHeader(key) || isPrivacyHeader(key) || isClientAuthHeader(key) {
 			continue
 		}
 		// Don't forward Accept-Encoding: proxy manages compression per connection segment.
@@ -111,8 +141,8 @@ func copyHeadersSkipAuth(dst *http.Request, src *http.Request) {
 		if key == "Accept-Encoding" {
 			continue
 		}
-		// Strip internal proxy marker — must not be forwarded to the actual provider.
-		if key == "X-Aar-Proxy-Client" {
+		// Strip internal AIR markers — they must not be forwarded to the actual provider.
+		if isInternalAIRRequestHeader(key) {
 			continue
 		}
 		for _, value := range values {
@@ -121,26 +151,100 @@ func copyHeadersSkipAuth(dst *http.Request, src *http.Request) {
 	}
 }
 
+func mergeAnthropicBetaHeader(header http.Header, betas []string) {
+	if len(betas) == 0 {
+		return
+	}
+	values := make([]string, 0, len(header.Values("anthropic-beta"))+len(betas))
+	values = append(values, header.Values("anthropic-beta")...)
+	values = append(values, betas...)
+	seen := make(map[string]struct{}, len(values))
+	merged := make([]string, 0, len(values))
+	for _, value := range values {
+		for beta := range strings.SplitSeq(value, ",") {
+			beta = strings.TrimSpace(beta)
+			if beta == "" {
+				continue
+			}
+			if _, ok := seen[beta]; ok {
+				continue
+			}
+			seen[beta] = struct{}{}
+			merged = append(merged, beta)
+		}
+	}
+	if len(merged) > 0 {
+		header.Set("anthropic-beta", strings.Join(merged, ","))
+	}
+}
+
 // copyResponseHeaders copies response headers to the response writer,
 // skipping hop-by-hop headers and transformation-related headers.
 // Note: Content-Encoding is always skipped because Go's http.Client automatically
 // decompresses gzip/deflate responses, so the body is already decompressed.
 // The caller should compress the body if needed and set Content-Encoding appropriately.
-func copyResponseHeaders(w http.ResponseWriter, src http.Header, credType config.ProviderType) {
+func (p *Proxy) copyResponseHeaders(w http.ResponseWriter, src http.Header, cred *config.CredentialConfig, stripIntegrityHeaders bool) {
 	for key, values := range src {
-		if isHopByHopHeader(key) {
+		canonicalKey := http.CanonicalHeaderKey(key)
+		if p.shouldSkipResponseHeaderForClient(canonicalKey, cred) {
 			continue
 		}
-		// Skip Content-Length and Content-Encoding for all response types
-		// - Content-Length will be set based on actual body size
-		// - Content-Encoding: Go's http.Client already decompressed the body,
-		//   so we skip upstream's Content-Encoding header and let caller set it if recompressing
-		// Skip X-Credential-Name — internal header for proxy-to-proxy routing, not exposed to end clients
-		if key == "Content-Length" || key == "Content-Encoding" || key == "X-Credential-Name" {
+		if stripIntegrityHeaders && isRepresentationIntegrityHeader(canonicalKey) {
+			continue
+		}
+		if strings.EqualFold(canonicalKey, HeaderAIRUsageAudioTokens) && w.Header().Get(HeaderAIRUsageAudioTokens) != "" {
 			continue
 		}
 		for _, value := range values {
-			w.Header().Add(key, value)
+			w.Header().Add(canonicalKey, value)
+		}
+	}
+}
+
+func (p *Proxy) setCredentialResponseHeader(w http.ResponseWriter, logCtx *RequestLogContext, credentialName string) {
+	if credentialName == "" && logCtx != nil {
+		credentialName = logCtx.ActualCredentialName
+	}
+	if p.responseHeaderMode == config.ResponseHeaderModeAllowlist || logCtx == nil || !logCtx.IsProxyRequest || credentialName == "" {
+		w.Header().Del("X-Credential-Name")
+		return
+	}
+	w.Header().Set("X-Credential-Name", credentialName)
+}
+
+func (p *Proxy) shouldSkipResponseHeaderForClient(key string, cred *config.CredentialConfig) bool {
+	canonical := http.CanonicalHeaderKey(key)
+	if p.responseHeaderMode == config.ResponseHeaderModeAllowlist && !allowedResponseHeaders[canonical] {
+		return true
+	}
+	return shouldSkipResponseHeaderForClient(canonical, cred)
+}
+
+func shouldSkipResponseHeaderForClient(key string, cred *config.CredentialConfig) bool {
+	canonical := http.CanonicalHeaderKey(key)
+	if isHopByHopHeader(canonical) || isProxyOwnedResponseHeader(canonical) {
+		return true
+	}
+	// Skip Content-Length and Content-Encoding for all response types:
+	// Content-Length is recalculated after conversion/compression, and Go's client
+	// has already decompressed gzip/deflate bodies when Content-Encoding is present.
+	switch canonical {
+	case "Content-Length", "Content-Encoding", "Transfer-Encoding", "X-Credential-Name":
+		return true
+	}
+	if strings.EqualFold(canonical, HeaderAIRUsageAudioTokens) && (cred == nil || !cred.IsProxyLike()) {
+		return true
+	}
+	if promanutils.ShouldSanitizeUpstreamSurface(cred) && promanutils.IsProviderInternalResponseHeader(canonical) {
+		return true
+	}
+	return false
+}
+
+func dropRepresentationIntegrityHeaders(headers http.Header) {
+	for key := range headers {
+		if isRepresentationIntegrityHeader(key) {
+			headers.Del(key)
 		}
 	}
 }

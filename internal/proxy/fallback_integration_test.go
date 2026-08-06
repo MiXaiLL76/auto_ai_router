@@ -509,7 +509,7 @@ func TestFallbackPath_HeadersPreserved(t *testing.T) {
 		).
 		Build()
 
-	reqBody := `{"model": "gpt-4", "messages": []}`
+	reqBody := `{"model":"gpt-4","messages":[{"role":"user","content":"test"}]}`
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(reqBody))
 	req.Header.Set("Authorization", "Bearer master-key")
 	req.Header.Set("Content-Type", "application/json")

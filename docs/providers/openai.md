@@ -73,15 +73,21 @@ See [Responses API documentation](../advanced/responses.md) for full details.
 
 ## Web Search Tools
 
-The `web_search` and `web_search_preview` tool types are only forwarded for models whose name contains `search-preview` (e.g. `gpt-4o-search-preview`). For all other models these tools are dropped before the request reaches the provider, since Chat Completions endpoints reject unrecognized tool types.
+Tool handling follows the outbound endpoint contract:
+
+- Native `/v1/responses` passthrough keeps built-in tools and `tool_choice` unchanged, including `web_search`, `file_search`, `computer_use`, and `code_interpreter`.
+- `/v1/chat/completions` converts `web_search` and `web_search_preview` to top-level `web_search_options` for models whose name contains `search-preview`, including `search_context_size` and `user_location`.
+- Chat Completions requests for other models drop the unsupported built-in web-search tool locally. Ordinary function tools in the same request remain unchanged.
 
 ```python
-# Works — model supports web search natively
+# Converted to web_search_options for Chat Completions
 client.chat.completions.create(
-    model="gpt-4o-search-preview", tools=[{"type": "web_search_preview"}], ...
+    model="gpt-4o-search-preview",
+    tools=[{"type": "web_search_preview", "search_context_size": "high"}],
+    ...,
 )
 
-# Tool is silently dropped for non-search models
+# Built-in tool is dropped for a non-search Chat Completions model
 client.chat.completions.create(
     model="gpt-4o-mini", tools=[{"type": "web_search"}], ...  # dropped
 )

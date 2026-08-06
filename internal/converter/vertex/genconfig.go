@@ -16,7 +16,8 @@ func buildGenerationConfig(req *openai.OpenAIRequest, model string) *VertexGener
 		req.FrequencyPenalty != nil || req.PresencePenalty != nil || req.Stop != nil ||
 		len(req.Modalities) > 0 || req.ReasoningEffort != "" || req.ResponseFormat != nil ||
 		req.Logprobs != nil || req.TopLogprobs != nil ||
-		req.Thinking != nil || req.ThinkingBudget != nil || req.ThinkingLevel != ""
+		req.Thinking != nil || req.ThinkingBudget != nil || req.ThinkingLevel != "" ||
+		hasTopLevelImageConfig(req)
 
 	if !hasParams {
 		return nil
@@ -100,6 +101,18 @@ func buildGenerationConfig(req *openai.OpenAIRequest, model string) *VertexGener
 	// ExtraBody overrides
 	if req.ExtraBody != nil {
 		cfg.ImageConfig = applyExtraBodyToConfig(cfg.GenerationConfig, req.ExtraBody, req.Model)
+	}
+	if topLevelImageConfig := parseTopLevelImageConfig(req); topLevelImageConfig != nil {
+		if cfg.ImageConfig == nil {
+			cfg.ImageConfig = topLevelImageConfig
+		} else {
+			if topLevelImageConfig.AspectRatio != "" {
+				cfg.ImageConfig.AspectRatio = topLevelImageConfig.AspectRatio
+			}
+			if topLevelImageConfig.ImageSize != "" {
+				cfg.ImageConfig.ImageSize = topLevelImageConfig.ImageSize
+			}
+		}
 	}
 
 	// Deduplicate ResponseModalities (modalities may be added from multiple sources:
@@ -273,6 +286,39 @@ func parseImageConfig(value interface{}) *genai.ImageConfig {
 		AspectRatio: aspectRatio,
 		ImageSize:   imageSize,
 	}
+}
+
+func hasTopLevelImageConfig(req *openai.OpenAIRequest) bool {
+	return len(req.ImageConfig) > 0 || len(req.ImageConfigSnake) > 0 ||
+		req.AspectRatio != "" || req.AspectRatioSnake != "" ||
+		req.ImageSize != "" || req.ImageSizeSnake != ""
+}
+
+func parseTopLevelImageConfig(req *openai.OpenAIRequest) *genai.ImageConfig {
+	params := make(map[string]interface{})
+	for key, value := range req.ImageConfig {
+		params[key] = value
+	}
+	for key, value := range req.ImageConfigSnake {
+		params[key] = value
+	}
+	if req.AspectRatio != "" {
+		params["aspectRatio"] = req.AspectRatio
+		delete(params, "aspect_ratio")
+	}
+	if req.AspectRatioSnake != "" {
+		params["aspectRatio"] = req.AspectRatioSnake
+		delete(params, "aspect_ratio")
+	}
+	if req.ImageSize != "" {
+		params["imageSize"] = req.ImageSize
+		delete(params, "image_size")
+	}
+	if req.ImageSizeSnake != "" {
+		params["imageSize"] = req.ImageSizeSnake
+		delete(params, "image_size")
+	}
+	return parseImageConfig(params)
 }
 
 // mapAudioParam converts OpenAI audio param to genai.SpeechConfig (Phase 4).
