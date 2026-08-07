@@ -194,6 +194,9 @@ func extractSessionIDFromRawBody(reqBody map[string]goccyjson.RawMessage) string
 			}
 		}
 	}
+	if sid, ok := rawJSONString(reqBody["litellm_session_id"]); ok && sid != "" {
+		return sid
+	}
 	if sid, ok := rawJSONString(reqBody["session_id"]); ok && sid != "" {
 		return sid
 	}
@@ -350,9 +353,12 @@ func sanitizeJSONRequestBody(body []byte) (sanitizedRequestBody, error) {
 	}
 	result.ModelID = model
 
-	// Extract session ID (check extra_body first, then root level)
-	// Priority: litellm_session_id > chat_id > session_id > user > safety_identifier > prompt_cache_key
+	// Extract session ID before removing LiteLLM-only request metadata.
 	result.SessionID = extractSessionIDFromRawBody(reqBody)
+	if _, exists := reqBody["litellm_session_id"]; exists {
+		delete(reqBody, "litellm_session_id")
+		changed = true
+	}
 
 	// Check if this is a streaming request
 	stream, _ := rawJSONBool(reqBody["stream"])

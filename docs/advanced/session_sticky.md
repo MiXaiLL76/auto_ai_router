@@ -143,6 +143,7 @@ The proxy extracts a session ID from the request body in the following priority 
 | Field                           | Location                          |
 | ------------------------------- | --------------------------------- |
 | `extra_body.litellm_session_id` | nested in `extra_body`            |
+| `litellm_session_id`            | top-level field                   |
 | `extra_body.chat_id`            | nested in `extra_body`            |
 | `extra_body.session_id`         | nested in `extra_body`            |
 | `session_id`                    | top-level field                   |
