@@ -101,6 +101,20 @@ func TestResponsesRequestToAnthropic_InputFileFileIDUnsupported(t *testing.T) {
 	assert.Equal(t, "file_id is not supported for this route", validationErr.Message)
 }
 
+func TestResponsesRequestToAnthropic_InputImageFileIDUnsupported(t *testing.T) {
+	body := `{
+		"model": "claude-sonnet-4-5",
+		"input": [{"role": "user", "content": [{"type": "input_image", "file_id": "file-abc"}]}]
+	}`
+
+	_, err := ResponsesRequestToAnthropic([]byte(body), "claude-sonnet-4-5")
+	require.Error(t, err)
+	var validationErr *converterutil.RequestValidationError
+	require.True(t, errors.As(err, &validationErr))
+	assert.Equal(t, "input_image.file_id", validationErr.Param)
+	assert.Equal(t, "file_id is not supported for this route", validationErr.Message)
+}
+
 func TestResponsesRequestToAnthropic_InputFileFileURL(t *testing.T) {
 	body := `{
 		"model": "claude-sonnet-4-5",

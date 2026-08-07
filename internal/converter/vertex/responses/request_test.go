@@ -307,6 +307,22 @@ func TestContentPartToVertexParts_InputFileFileIDUnsupported(t *testing.T) {
 	assert.Equal(t, "file_id is not supported for this route", validationErr.Message)
 }
 
+func TestContentPartToVertexParts_InputImageFileIDUnsupported(t *testing.T) {
+	part := map[string]interface{}{
+		"type":    "input_image",
+		"file_id": "file-abc",
+	}
+
+	parts, err := contentPartToVertexParts(part)
+
+	require.Error(t, err)
+	assert.Nil(t, parts)
+	var validationErr *converterutil.RequestValidationError
+	require.True(t, errors.As(err, &validationErr))
+	assert.Equal(t, "input_image.file_id", validationErr.Param)
+	assert.Equal(t, "file_id is not supported for this route", validationErr.Message)
+}
+
 func TestContentPartToVertexParts_UnknownType(t *testing.T) {
 	part := map[string]interface{}{"type": "unknown_type"}
 	parts, err := contentPartToVertexParts(part)

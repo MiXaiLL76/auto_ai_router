@@ -41,7 +41,10 @@ func convertInputImageParts(partMap map[string]interface{}) ([]*genai.Part, erro
 		imgURL, _ = v["url"].(string)
 	}
 	if imgURL == "" {
-		return nil, fmt.Errorf("input_image: missing image_url")
+		if fileID, _ := partMap["file_id"].(string); fileID != "" {
+			return nil, converterutil.NewRequestValidationError("input_image.file_id", "file_id is not supported for this route")
+		}
+		return nil, converterutil.NewRequestValidationError("input_image", "missing supported image source")
 	}
 
 	// Try data: URL first (inline base64)

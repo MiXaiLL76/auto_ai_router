@@ -372,13 +372,19 @@ func sourceToImageURL(raw interface{}) string {
 }
 
 func sourceToDocumentPart(raw interface{}) (map[string]interface{}, error) {
-	source, _ := raw.(map[string]interface{})
+	source, ok := raw.(map[string]interface{})
+	if !ok {
+		return nil, converterutil.NewRequestValidationError("messages.content.document.source", "missing document source")
+	}
 	switch source["type"] {
 	case "base64":
 		data := stringValue(source["data"])
 		mediaType := stringValue(source["media_type"])
-		if data == "" || mediaType == "" {
-			return nil, nil
+		if mediaType == "" {
+			return nil, converterutil.NewRequestValidationError("messages.content.document.source.media_type", "missing document media_type")
+		}
+		if data == "" {
+			return nil, converterutil.NewRequestValidationError("messages.content.document.source.data", "missing document base64 data")
 		}
 		return map[string]interface{}{
 			"type": "document",
@@ -391,7 +397,7 @@ func sourceToDocumentPart(raw interface{}) (map[string]interface{}, error) {
 	case "url":
 		url := stringValue(source["url"])
 		if url == "" {
-			return nil, nil
+			return nil, converterutil.NewRequestValidationError("messages.content.document.source.url", "missing document URL")
 		}
 		return map[string]interface{}{
 			"type": "document",
@@ -403,7 +409,7 @@ func sourceToDocumentPart(raw interface{}) (map[string]interface{}, error) {
 	case "file", "file_id", "provider_file":
 		return nil, converterutil.NewRequestValidationError("messages.content.document.source.file_id", "file_id is not supported for this route")
 	default:
-		return nil, nil
+		return nil, converterutil.NewRequestValidationError("messages.content.document.source.type", "unsupported document source type")
 	}
 }
 

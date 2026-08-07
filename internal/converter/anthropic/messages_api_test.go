@@ -95,6 +95,58 @@ func TestMessagesToChat_DocumentProviderFileIDRejected(t *testing.T) {
 	assert.NotContains(t, err.Error(), "Anthropic")
 }
 
+func TestMessagesToChat_MalformedDocumentSourceRejected(t *testing.T) {
+	tests := []struct {
+		name      string
+		source    string
+		wantParam string
+	}{
+		{
+			name:      "base64 missing data",
+			source:    `{"type":"base64","media_type":"application/pdf"}`,
+			wantParam: "messages.content.document.source.data",
+		},
+		{
+			name:      "base64 missing media type",
+			source:    `{"type":"base64","data":"JVBERi0="}`,
+			wantParam: "messages.content.document.source.media_type",
+		},
+		{
+			name:      "url missing url",
+			source:    `{"type":"url"}`,
+			wantParam: "messages.content.document.source.url",
+		},
+		{
+			name:      "unsupported source type",
+			source:    `{"type":"unknown"}`,
+			wantParam: "messages.content.document.source.type",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body := []byte(`{
+				"model":"claude-sonnet-4-5",
+				"max_tokens":128,
+				"messages":[{
+					"role":"user",
+					"content":[{
+						"type":"document",
+						"source":` + tt.source + `
+					}]
+				}]
+			}`)
+
+			_, _, err := MessagesToChat(body)
+
+			require.Error(t, err)
+			var validationErr *converterutil.RequestValidationError
+			require.True(t, errors.As(err, &validationErr))
+			assert.Equal(t, tt.wantParam, validationErr.Param)
+		})
+	}
+}
+
 func TestChatToMessages(t *testing.T) {
 	longName := strings.Repeat("tool", 20)
 	truncated := truncateToolName(longName)
