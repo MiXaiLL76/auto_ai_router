@@ -63,6 +63,8 @@ func LoadModelPrices(link string) (map[string]*ModelPrice, error) {
 		if price.LiteLLMProvider == "" {
 			if slash := strings.IndexByte(fullName, '/'); slash > 0 {
 				price.LiteLLMProvider = fullName[:slash]
+			} else {
+				price.LiteLLMProvider = inferProviderFromModelName(fullName)
 			}
 		}
 		normalized := NormalizeModelName(fullName)
@@ -182,4 +184,32 @@ func NormalizeModelName(fullName string) string {
 
 	// Convert to lowercase for case-insensitive matching
 	return strings.ToLower(modelName)
+}
+
+// modelNameProviderPrefixes maps well-known bare model-name prefixes to their
+// provider tag, for price files that key entries by plain model name (e.g.
+// "gemini-2.5-pro") rather than "provider/model" (e.g. "vertex_ai/gemini-2.5-pro")
+// and don't set litellm_provider explicitly. Only unambiguous, first-party
+// naming conventions are listed here to avoid misclassifying unrelated models.
+var modelNameProviderPrefixes = []struct {
+	prefix   string
+	provider string
+}{
+	{"gemini-", "gemini"},
+	{"vertex-", "vertex"},
+	{"google-", "google"},
+}
+
+// inferProviderFromModelName is a last-resort fallback for price entries that
+// have neither an explicit litellm_provider nor a "provider/model" key
+// convention. It only matches a known, unambiguous model-name prefix and
+// returns "" (no guess) otherwise.
+func inferProviderFromModelName(fullName string) string {
+	name := strings.ToLower(strings.TrimSpace(fullName))
+	for _, p := range modelNameProviderPrefixes {
+		if strings.HasPrefix(name, p.prefix) {
+			return p.provider
+		}
+	}
+	return ""
 }

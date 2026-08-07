@@ -118,6 +118,43 @@ func TestLoadModelPrices_InfersProviderFromPrefixedKey(t *testing.T) {
 	assert.Equal(t, "vertex_ai", prices["gemini-2.5-flash"].LiteLLMProvider)
 }
 
+func TestLoadModelPrices_InfersProviderFromBareModelName(t *testing.T) {
+	// Real-world case: a price file keys entries by plain model name (no
+	// "provider/model" convention) and never sets litellm_provider at all --
+	// the model-name prefix is the only signal available.
+	filePath := filepath.Join(t.TempDir(), "prices.json")
+	require.NoError(t, os.WriteFile(filePath, []byte(`{
+		"gemini-2.5-pro": {
+			"input_cost_per_token": 0.000001625,
+			"input_cost_per_token_above_200k_tokens": 0.00000325
+		},
+		"claude-sonnet-4.5": {
+			"input_cost_per_token": 0.0000039,
+			"input_cost_per_token_above_200k_tokens": 0.0000078
+		}
+	}`), 0o600))
+
+	prices, err := LoadModelPrices(filePath)
+	require.NoError(t, err)
+	assert.Equal(t, "gemini", prices["gemini-2.5-pro"].LiteLLMProvider)
+	// A bare name with no recognized prefix must stay empty, not guess wrong.
+	assert.Equal(t, "", prices["claude-sonnet-4.5"].LiteLLMProvider)
+}
+
+func TestLoadModelPrices_ExplicitProviderWinsOverNameInference(t *testing.T) {
+	filePath := filepath.Join(t.TempDir(), "prices.json")
+	require.NoError(t, os.WriteFile(filePath, []byte(`{
+		"gemini-2.5-pro": {
+			"input_cost_per_token": 0.000001625,
+			"litellm_provider": "vertex_ai"
+		}
+	}`), 0o600))
+
+	prices, err := LoadModelPrices(filePath)
+	require.NoError(t, err)
+	assert.Equal(t, "vertex_ai", prices["gemini-2.5-pro"].LiteLLMProvider)
+}
+
 func TestLoadModelPrices_FromFilePath(t *testing.T) {
 	// Create a temporary file with valid JSON
 	tmpDir := t.TempDir()
