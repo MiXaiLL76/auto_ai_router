@@ -3,10 +3,12 @@ package anthropic
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"unicode/utf8"
 
+	"github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -68,6 +70,29 @@ func TestMessagesToChat(t *testing.T) {
 	assert.Len(t, truncated, maxOpenAIToolNameLength)
 	assert.Equal(t, longName, metadata.ToolNames[truncated])
 	assert.Equal(t, truncated, got["tool_choice"].(map[string]interface{})["function"].(map[string]interface{})["name"])
+}
+
+func TestMessagesToChat_DocumentProviderFileIDRejected(t *testing.T) {
+	body := []byte(`{
+		"model":"claude-sonnet-4-5",
+		"max_tokens":128,
+		"messages":[{
+			"role":"user",
+			"content":[{
+				"type":"document",
+				"source":{"type":"file","file_id":"file_abc"}
+			}]
+		}]
+	}`)
+
+	_, _, err := MessagesToChat(body)
+
+	require.Error(t, err)
+	var validationErr *converterutil.RequestValidationError
+	require.True(t, errors.As(err, &validationErr))
+	assert.Equal(t, "messages.content.document.source.file_id", validationErr.Param)
+	assert.Equal(t, "file_id is not supported for this route", validationErr.Message)
+	assert.NotContains(t, err.Error(), "Anthropic")
 }
 
 func TestChatToMessages(t *testing.T) {

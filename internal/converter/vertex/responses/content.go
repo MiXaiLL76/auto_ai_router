@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
 	"google.golang.org/genai"
 )
 
@@ -77,15 +78,20 @@ func convertInputAudioPart(partMap map[string]interface{}) ([]*genai.Part, error
 
 func convertInputFilePart(partMap map[string]interface{}) ([]*genai.Part, error) {
 	fileURL, _ := partMap["file_url"].(string)
-	if fileURL == "" {
-		return nil, fmt.Errorf("input_file: missing file_url")
+	if fileURL != "" {
+		return []*genai.Part{{
+			FileData: &genai.FileData{
+				MIMEType: detectMIMEFromURL(fileURL),
+				FileURI:  fileURL,
+			},
+		}}, nil
 	}
-	return []*genai.Part{{
-		FileData: &genai.FileData{
-			MIMEType: detectMIMEFromURL(fileURL),
-			FileURI:  fileURL,
-		},
-	}}, nil
+
+	if fileID, _ := partMap["file_id"].(string); fileID != "" {
+		return nil, converterutil.NewRequestValidationError("input_file.file_id", "file_id is not supported for this route")
+	}
+
+	return nil, converterutil.NewRequestValidationError("input_file", "missing supported file source")
 }
 
 // parseDataURLToPart decodes a data: URL into an InlineData Part.

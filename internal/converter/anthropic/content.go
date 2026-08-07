@@ -273,7 +273,7 @@ func convertFileBlockToDocument(fileObj map[string]interface{}) (*ContentBlock, 
 		return ConvertDataURLToDocument(fileData, "messages.content.file.file_data")
 	}
 	if fileID, _ := fileObj["file_id"].(string); fileID != "" {
-		return nil, converterutil.NewRequestValidationError("messages.content.file.file_id", "file_id is not supported for Anthropic-backed models; send file_data or document source instead")
+		return nil, converterutil.NewRequestValidationError("messages.content.file.file_id", "file_id is not supported for this route")
 	}
 	return nil, converterutil.NewRequestValidationError("messages.content.file", "missing supported file source")
 }
@@ -346,7 +346,7 @@ func ConvertDocumentSourceToBlock(source map[string]interface{}, param string) (
 			},
 		}, nil
 	case "file", "file_id", "provider_file":
-		return nil, converterutil.NewRequestValidationError(param+".type", "document file_id/provider_file sources are not supported for Anthropic-backed models")
+		return nil, converterutil.NewRequestValidationError(param+".file_id", "file_id is not supported for this route")
 	default:
 		return nil, converterutil.NewRequestValidationError(param+".type", "unsupported document source type")
 	}

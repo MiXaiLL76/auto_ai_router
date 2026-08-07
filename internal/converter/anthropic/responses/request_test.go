@@ -98,6 +98,7 @@ func TestResponsesRequestToAnthropic_InputFileFileIDUnsupported(t *testing.T) {
 	var validationErr *converterutil.RequestValidationError
 	require.True(t, errors.As(err, &validationErr))
 	assert.Equal(t, "input_file.file_id", validationErr.Param)
+	assert.Equal(t, "file_id is not supported for this route", validationErr.Message)
 }
 
 func TestResponsesRequestToAnthropic_InputFileFileURL(t *testing.T) {

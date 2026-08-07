@@ -12,6 +12,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/balancer"
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	anthropicconv "github.com/mixaill76/auto_ai_router/internal/converter/anthropic"
+	"github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
 	"github.com/mixaill76/auto_ai_router/internal/converter/openai"
 	"github.com/mixaill76/auto_ai_router/internal/converter/responses"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb"
@@ -186,6 +187,7 @@ func (p *Proxy) orchestrateRequest(
 		stickyCacheEligible,
 	)
 	if prepErr != nil {
+		var validationErr *converterutil.RequestValidationError
 		apiName := "request"
 		if isResponsesAPI {
 			apiName = "Responses API request"
@@ -200,7 +202,11 @@ func (p *Proxy) orchestrateRequest(
 		logCtx.Status = "failure"
 		logCtx.HTTPStatus = http.StatusBadRequest
 		logCtx.ErrorMsg = "Failed to convert " + apiName + ": " + prepErr.Error()
-		WriteErrorBadRequest(w, "Failed to convert "+apiName)
+		if errors.As(prepErr, &validationErr) {
+			WriteErrorBadRequest(w, prepErr.Error())
+		} else {
+			WriteErrorBadRequest(w, "Failed to convert "+apiName)
+		}
 		return nil, false
 	}
 	body = credentialReq.body

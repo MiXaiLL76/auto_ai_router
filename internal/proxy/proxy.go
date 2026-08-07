@@ -79,7 +79,13 @@ func sanitizeRequestBodyForLog(body []byte) string {
 	if err := encoder.Encode(sanitized); err != nil {
 		return logger.TruncateLongFields(string(body), 500)
 	}
-	return logger.TruncateLongFields(strings.TrimSpace(buf.String()), 500)
+	return unescapeLogRedactionMarkers(logger.TruncateLongFields(strings.TrimSpace(buf.String()), 500))
+}
+
+func unescapeLogRedactionMarkers(value string) string {
+	value = strings.ReplaceAll(value, `\u003c`, "<")
+	value = strings.ReplaceAll(value, `\u003e`, ">")
+	return strings.ReplaceAll(value, `\u0026`, "&")
 }
 
 func sanitizePayloadForLog(value interface{}) interface{} {

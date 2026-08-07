@@ -97,7 +97,7 @@ func convertInputFileToAnthropic(partMap map[string]interface{}) (*anthropic.Con
 	}
 
 	if fileID, _ := partMap["file_id"].(string); fileID != "" {
-		return nil, converterutil.NewRequestValidationError("input_file.file_id", "input_file.file_id is not supported for Anthropic-backed models")
+		return nil, converterutil.NewRequestValidationError("input_file.file_id", "file_id is not supported for this route")
 	}
 
 	return nil, converterutil.NewRequestValidationError("input_file", "missing supported file source")

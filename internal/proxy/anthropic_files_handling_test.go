@@ -100,6 +100,8 @@ func TestProxyRequest_AnthropicResponsesInputFileValidation(t *testing.T) {
 			assert.Equal(t, tt.wantUpstream, atomic.LoadInt32(&upstreamCalls) > 0)
 			if tt.wantError != "" {
 				assert.Contains(t, w.Body.String(), tt.wantError)
+				assert.Contains(t, w.Body.String(), "file_id is not supported for this route")
+				assert.NotContains(t, w.Body.String(), "Anthropic")
 			}
 			if tt.wantSource != nil {
 				block := firstUpstreamContentBlock(t, upstreamBody)
@@ -259,7 +261,7 @@ func testInputFileSource(request map[string]interface{}) (map[string]interface{}
 		}, nil
 	}
 	if fileID, _ := filePart["file_id"].(string); fileID != "" {
-		return nil, converterutil.NewRequestValidationError("input_file.file_id", "input_file.file_id is not supported for Anthropic-backed models")
+		return nil, converterutil.NewRequestValidationError("input_file.file_id", "file_id is not supported for this route")
 	}
 	return nil, converterutil.NewRequestValidationError("input_file", "missing supported file source")
 }

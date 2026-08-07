@@ -2,8 +2,10 @@ package vertexresponses
 
 import (
 	"encoding/json"
+	"errors"
 	"testing"
 
+	"github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/genai"
@@ -287,6 +289,22 @@ func TestContentPartToVertexParts_InputImage_URL(t *testing.T) {
 	require.NotNil(t, parts[0].FileData)
 	assert.Equal(t, "image/jpeg", parts[0].FileData.MIMEType)
 	assert.Equal(t, "https://example.com/photo.jpg", parts[0].FileData.FileURI)
+}
+
+func TestContentPartToVertexParts_InputFileFileIDUnsupported(t *testing.T) {
+	part := map[string]interface{}{
+		"type":    "input_file",
+		"file_id": "file-abc",
+	}
+
+	parts, err := contentPartToVertexParts(part)
+
+	require.Error(t, err)
+	assert.Nil(t, parts)
+	var validationErr *converterutil.RequestValidationError
+	require.True(t, errors.As(err, &validationErr))
+	assert.Equal(t, "input_file.file_id", validationErr.Param)
+	assert.Equal(t, "file_id is not supported for this route", validationErr.Message)
 }
 
 func TestContentPartToVertexParts_UnknownType(t *testing.T) {

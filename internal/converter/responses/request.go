@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+
+	"github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
 )
 
 // ResponsesMetadata holds Responses-API-only fields that are extracted from
@@ -996,6 +998,9 @@ func convertContentParts(parts []interface{}) ([]interface{}, error) {
 			result = append(result, entry)
 
 		case "input_file":
+			if fileID, _ := partMap["file_id"].(string); fileID != "" {
+				return nil, converterutil.NewRequestValidationError("input_file.file_id", "file_id is not supported for this route")
+			}
 			return nil, fmt.Errorf("input_file is not supported in chat completions")
 
 		case "input_audio":

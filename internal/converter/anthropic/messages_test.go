@@ -112,6 +112,8 @@ func TestOpenAIToAnthropic_ChatFileFileIDUnsupported(t *testing.T) {
 	var validationErr *converterutil.RequestValidationError
 	require.True(t, errors.As(err, &validationErr))
 	assert.Equal(t, "messages.content.file.file_id", validationErr.Param)
+	assert.Equal(t, "file_id is not supported for this route", validationErr.Message)
+	assert.NotContains(t, err.Error(), "Anthropic")
 }
 
 func TestOpenAIToAnthropic_ChatPDFAsImageURLRejected(t *testing.T) {

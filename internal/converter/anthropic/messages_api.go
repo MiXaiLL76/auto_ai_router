@@ -11,6 +11,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/google/uuid"
+	"github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
 	"github.com/mixaill76/auto_ai_router/internal/converter/openai"
 )
 
@@ -142,7 +143,11 @@ func messagesToChatMessages(rawMessages []interface{}) ([]interface{}, error) {
 		role, _ := message["role"].(string)
 		switch role {
 		case "user":
-			converted = append(converted, userMessageToChat(message)...)
+			messages, err := userMessageToChat(message)
+			if err != nil {
+				return nil, err
+			}
+			converted = append(converted, messages...)
 		case "assistant":
 			if assistant := assistantMessageToChat(message); assistant != nil {
 				converted = append(converted, assistant)
@@ -154,10 +159,10 @@ func messagesToChatMessages(rawMessages []interface{}) ([]interface{}, error) {
 	return converted, nil
 }
 
-func userMessageToChat(message map[string]interface{}) []interface{} {
+func userMessageToChat(message map[string]interface{}) ([]interface{}, error) {
 	content := message["content"]
 	if text, ok := content.(string); ok {
-		return []interface{}{map[string]interface{}{"role": "user", "content": text}}
+		return []interface{}{map[string]interface{}{"role": "user", "content": text}}, nil
 	}
 	blocks, _ := content.([]interface{})
 	var userContent []interface{}
@@ -179,15 +184,23 @@ func userMessageToChat(message map[string]interface{}) []interface{} {
 				userContent = append(userContent, part)
 			}
 		case "document":
-			if part := sourceToDocumentPart(block["source"]); part != nil {
+			part, err := sourceToDocumentPart(block["source"])
+			if err != nil {
+				return nil, err
+			}
+			if part != nil {
 				copyCacheControl(block, part)
 				userContent = append(userContent, part)
 			}
 		case "tool_result":
+			content, err := toolResultContentToChat(block["content"])
+			if err != nil {
+				return nil, err
+			}
 			tool := map[string]interface{}{
 				"role":         "tool",
 				"tool_call_id": normalizeToolUseID(stringValue(block["tool_use_id"])),
-				"content":      toolResultContentToChat(block["content"]),
+				"content":      content,
 			}
 			copyCacheControl(block, tool)
 			toolMessages = append(toolMessages, tool)
@@ -196,7 +209,7 @@ func userMessageToChat(message map[string]interface{}) []interface{} {
 	if len(userContent) > 0 {
 		toolMessages = append(toolMessages, map[string]interface{}{"role": "user", "content": userContent})
 	}
-	return toolMessages
+	return toolMessages, nil
 }
 
 func assistantMessageToChat(message map[string]interface{}) interface{} {
@@ -358,14 +371,14 @@ func sourceToImageURL(raw interface{}) string {
 	}
 }
 
-func sourceToDocumentPart(raw interface{}) map[string]interface{} {
+func sourceToDocumentPart(raw interface{}) (map[string]interface{}, error) {
 	source, _ := raw.(map[string]interface{})
 	switch source["type"] {
 	case "base64":
 		data := stringValue(source["data"])
 		mediaType := stringValue(source["media_type"])
 		if data == "" || mediaType == "" {
-			return nil
+			return nil, nil
 		}
 		return map[string]interface{}{
 			"type": "document",
@@ -374,11 +387,11 @@ func sourceToDocumentPart(raw interface{}) map[string]interface{} {
 				"media_type": mediaType,
 				"data":       data,
 			},
-		}
+		}, nil
 	case "url":
 		url := stringValue(source["url"])
 		if url == "" {
-			return nil
+			return nil, nil
 		}
 		return map[string]interface{}{
 			"type": "document",
@@ -386,18 +399,20 @@ func sourceToDocumentPart(raw interface{}) map[string]interface{} {
 				"type": "url",
 				"url":  url,
 			},
-		}
+		}, nil
+	case "file", "file_id", "provider_file":
+		return nil, converterutil.NewRequestValidationError("messages.content.document.source.file_id", "file_id is not supported for this route")
 	default:
-		return nil
+		return nil, nil
 	}
 }
 
-func toolResultContentToChat(raw interface{}) interface{} {
+func toolResultContentToChat(raw interface{}) (interface{}, error) {
 	if raw == nil {
-		return ""
+		return "", nil
 	}
 	if text, ok := raw.(string); ok {
-		return text
+		return text, nil
 	}
 	blocks, _ := raw.([]interface{})
 	converted := make([]interface{}, 0, len(blocks))
@@ -418,17 +433,21 @@ func toolResultContentToChat(raw interface{}) interface{} {
 				converted = append(converted, map[string]interface{}{"type": "image_url", "image_url": map[string]interface{}{"url": imageURL}})
 			}
 		case "document":
-			if part := sourceToDocumentPart(block["source"]); part != nil {
+			part, err := sourceToDocumentPart(block["source"])
+			if err != nil {
+				return nil, err
+			}
+			if part != nil {
 				converted = append(converted, part)
 			}
 		}
 	}
 	if len(converted) == 1 {
 		if part, ok := converted[0].(map[string]interface{}); ok && part["type"] == "text" {
-			return part["text"]
+			return part["text"], nil
 		}
 	}
-	return converted
+	return converted, nil
 }
 
 func copyCacheControl(source, target map[string]interface{}) {
