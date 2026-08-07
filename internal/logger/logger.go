@@ -1,6 +1,7 @@
 package logger
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -299,12 +300,14 @@ func TruncateLongFields(body string, maxFieldLength int) string {
 
 	truncateValue(data, maxFieldLength)
 
-	truncated, err := json.Marshal(data)
-	if err != nil {
+	var buf bytes.Buffer
+	encoder := json.NewEncoder(&buf)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(data); err != nil {
 		return body // Return original if marshaling fails
 	}
 
-	return string(truncated)
+	return strings.TrimSpace(buf.String())
 }
 
 // truncateValue recursively truncates long string values in a map or slice

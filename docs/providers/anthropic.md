@@ -74,6 +74,18 @@ Anthropic is fully supported via the [Responses API](../advanced/responses.md). 
 
 Supported features: streaming, `store` / `previous_response_id` multi-turn, tools, thinking/reasoning.
 
+### Responses Files and Documents
+
+For Anthropic-backed routes, Responses `input_file` supports:
+
+| Input form | Anthropic mapping | Status |
+| ---------- | ----------------- | ------ |
+| `input_file.file_data: "data:application/pdf;base64,<BASE64>"` | `document/source:base64` with `media_type: application/pdf` | Supported |
+| `input_file.file_url: "https://..."` | `document/source:url` | Supported |
+| `input_file.file_id` | None | Unsupported; returns `400 Bad Request` |
+
+AIR does not resolve OpenAI/LiteLLM file IDs into Anthropic file IDs. Provider file IDs are credential/provider scoped, so clients must send PDF bytes via `file_data` or a provider-accessible URL via `file_url`.
+
 ## OpenAI-Compatible API
 
 The router accepts requests in **OpenAI Chat Completion format** and automatically converts them to Anthropic Messages API format. Responses are converted back to OpenAI format.
@@ -251,13 +263,17 @@ response = client.chat.completions.create(
 
 ### Content Types
 
-| Content Type      | Support     | Notes                                                                           |
-| ----------------- | ----------- | ------------------------------------------------------------------------------- |
-| Text              | Full        | String or `{"type": "text"}` blocks                                             |
-| Image (base64)    | Full        | `data:image/...;base64,...` → Anthropic base64 source                           |
-| Image (URL)       | Full        | HTTP/HTTPS URLs → Anthropic URL source                                          |
-| Document (base64) | Full        | `application/*` and `text/*` MIME types only                                    |
-| Audio             | Placeholder | Replaced with `[Audio input: <format> format - not supported by Anthropic API]` |
+| Content Type          | Support     | Notes                                                                           |
+| --------------------- | ----------- | ------------------------------------------------------------------------------- |
+| Text                  | Full        | String or `{"type": "text"}` blocks                                             |
+| Image (base64)        | Full        | `data:image/{jpeg,png,gif,webp};base64,...` → Anthropic base64 image source     |
+| Image (URL)           | Full        | HTTP/HTTPS URLs are downloaded and sent as Anthropic base64 image sources       |
+| PDF file data         | Full        | Chat `file.file_data` data URI → Anthropic `document/source:base64`             |
+| PDF document block    | Full        | Chat `{"type":"document","source":{"type":"base64","media_type":"application/pdf","data":"..."}}` is forwarded as an Anthropic document |
+| PDF document URL      | Full        | Chat native document `source.type:"url"` is forwarded as `document/source:url`  |
+| Chat `file.file_id`   | Unsupported | Returns `400 Bad Request`; AIR does not resolve OpenAI/LiteLLM file IDs         |
+| PDF via `image_url`   | Unsupported | Returns `400 Bad Request`; send PDFs as `file` or `document`                    |
+| Audio                 | Placeholder | Replaced with `[Audio input: <format> format - not supported by Anthropic API]` |
 | Video             | Placeholder | Replaced with `[Video: <url>]`                                                  |
 
 ### Streaming

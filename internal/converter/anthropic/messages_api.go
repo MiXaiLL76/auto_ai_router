@@ -172,9 +172,14 @@ func userMessageToChat(message map[string]interface{}) []interface{} {
 			part := map[string]interface{}{"type": "text", "text": stringValue(block["text"])}
 			copyCacheControl(block, part)
 			userContent = append(userContent, part)
-		case "image", "document":
+		case "image":
 			if imageURL := sourceToImageURL(block["source"]); imageURL != "" {
 				part := map[string]interface{}{"type": "image_url", "image_url": map[string]interface{}{"url": imageURL}}
+				copyCacheControl(block, part)
+				userContent = append(userContent, part)
+			}
+		case "document":
+			if part := sourceToDocumentPart(block["source"]); part != nil {
 				copyCacheControl(block, part)
 				userContent = append(userContent, part)
 			}
@@ -353,6 +358,40 @@ func sourceToImageURL(raw interface{}) string {
 	}
 }
 
+func sourceToDocumentPart(raw interface{}) map[string]interface{} {
+	source, _ := raw.(map[string]interface{})
+	switch source["type"] {
+	case "base64":
+		data := stringValue(source["data"])
+		mediaType := stringValue(source["media_type"])
+		if data == "" || mediaType == "" {
+			return nil
+		}
+		return map[string]interface{}{
+			"type": "document",
+			"source": map[string]interface{}{
+				"type":       "base64",
+				"media_type": mediaType,
+				"data":       data,
+			},
+		}
+	case "url":
+		url := stringValue(source["url"])
+		if url == "" {
+			return nil
+		}
+		return map[string]interface{}{
+			"type": "document",
+			"source": map[string]interface{}{
+				"type": "url",
+				"url":  url,
+			},
+		}
+	default:
+		return nil
+	}
+}
+
 func toolResultContentToChat(raw interface{}) interface{} {
 	if raw == nil {
 		return ""
@@ -374,9 +413,13 @@ func toolResultContentToChat(raw interface{}) interface{} {
 		switch block["type"] {
 		case "text":
 			converted = append(converted, map[string]interface{}{"type": "text", "text": stringValue(block["text"])})
-		case "image", "document":
+		case "image":
 			if imageURL := sourceToImageURL(block["source"]); imageURL != "" {
 				converted = append(converted, map[string]interface{}{"type": "image_url", "image_url": map[string]interface{}{"url": imageURL}})
+			}
+		case "document":
+			if part := sourceToDocumentPart(block["source"]); part != nil {
+				converted = append(converted, part)
 			}
 		}
 	}

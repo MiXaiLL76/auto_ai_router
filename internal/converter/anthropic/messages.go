@@ -160,7 +160,10 @@ func OpenAIToAnthropic(openAIBody []byte, model string) ([]byte, error) {
 	}
 
 	// Messages (system messages are extracted to the top-level system field)
-	systemContent, messages := convertOpenAIMessagesToAnthropic(req.Messages)
+	systemContent, messages, err := convertOpenAIMessagesToAnthropic(req.Messages)
+	if err != nil {
+		return nil, err
+	}
 	anthropicReq.Messages = messages
 	if systemContent != nil {
 		anthropicReq.System = systemContent
@@ -195,7 +198,7 @@ func reasoningObjectEffort(value interface{}) string {
 // System / developer messages are aggregated into the top-level system field.
 // Tool result messages become user-role messages containing tool_result blocks.
 // Returns (systemContent, messages).
-func convertOpenAIMessagesToAnthropic(openAIMessages []openai.OpenAIMessage) (interface{}, []AnthropicMessage) {
+func convertOpenAIMessagesToAnthropic(openAIMessages []openai.OpenAIMessage) (interface{}, []AnthropicMessage, error) {
 	var allSystemBlocks []ContentBlock
 	var messages []AnthropicMessage
 
@@ -206,7 +209,10 @@ func convertOpenAIMessagesToAnthropic(openAIMessages []openai.OpenAIMessage) (in
 			allSystemBlocks = append(allSystemBlocks, sysBlocks...)
 
 		case "user":
-			blocks := convertOpenAIContentToAnthropic(msg.Content)
+			blocks, err := convertOpenAIContentToAnthropic(msg.Content)
+			if err != nil {
+				return nil, nil, err
+			}
 			if len(blocks) > 0 {
 				messages = append(messages, AnthropicMessage{
 					Role:    "user",
@@ -228,7 +234,11 @@ func convertOpenAIMessagesToAnthropic(openAIMessages []openai.OpenAIMessage) (in
 					CacheControl: thinking.CacheControl,
 				})
 			}
-			if textBlocks := convertOpenAIContentToAnthropic(msg.Content); len(textBlocks) > 0 {
+			textBlocks, err := convertOpenAIContentToAnthropic(msg.Content)
+			if err != nil {
+				return nil, nil, err
+			}
+			if len(textBlocks) > 0 {
 				blocks = append(blocks, textBlocks...)
 			}
 			if len(msg.ToolCalls) > 0 {
@@ -249,7 +259,10 @@ func convertOpenAIMessagesToAnthropic(openAIMessages []openai.OpenAIMessage) (in
 			if toolUseID == "" {
 				toolUseID = msg.Name
 			}
-			resultContent := convertOpenAIContentToAnthropic(msg.Content)
+			resultContent, err := convertOpenAIContentToAnthropic(msg.Content)
+			if err != nil {
+				return nil, nil, err
+			}
 			if len(resultContent) == 0 {
 				resultContent = []ContentBlock{{Type: "text", Text: ""}}
 			}
@@ -292,7 +305,7 @@ func convertOpenAIMessagesToAnthropic(openAIMessages []openai.OpenAIMessage) (in
 	// Merge consecutive same-role messages into a single message.
 	messages = mergeConsecutiveSameRole(messages)
 
-	return systemContent, messages
+	return systemContent, messages, nil
 }
 
 // mergeConsecutiveSameRole merges consecutive messages with the same role
