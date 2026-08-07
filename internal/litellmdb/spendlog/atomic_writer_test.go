@@ -228,6 +228,19 @@ func TestAtomicWriterCollisionWithoutAirEventIDIsObservable(t *testing.T) {
 		"the unresolvable drop must be counted instead of silently discarded")
 }
 
+func TestAtomicWriterPersistsRawRowWithoutAccounting(t *testing.T) {
+	logger := newAtomicTestLogger()
+	entry := atomicProviderIDEntry("chatcmpl-relay", "air-event-relay")
+	entry.SkipAccounting = true
+	tx := &atomicTestTx{insertResults: [][]string{{"chatcmpl-relay"}}}
+
+	inserted, err := logger.commitBatchTransaction(context.Background(), tx, []*models.SpendLogEntry{entry})
+
+	require.NoError(t, err)
+	assert.Equal(t, []string{"chatcmpl-relay"}, inserted)
+	assert.Empty(t, tx.attemptedSQL)
+}
+
 func TestAtomicWriterProviderIDReplayDoesNotFeedAnyAccounting(t *testing.T) {
 	logger := newAtomicTestLogger()
 	entry := atomicProviderIDEntry("chatcmpl-replay", "air-event-replay")

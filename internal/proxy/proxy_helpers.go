@@ -315,6 +315,29 @@ func buildMetadata(hashedToken string, tokenInfo *litellmdb.TokenInfo, errorMsg 
 	return string(jsonBytes)
 }
 
+func addAIRSpendMetadata(metadata, eventID, providerResponseID string, isProxyRequest bool) string {
+	var doc map[string]interface{}
+	if json.Unmarshal([]byte(metadata), &doc) != nil {
+		doc = make(map[string]interface{})
+	}
+	spendMetadata, _ := doc["spend_logs_metadata"].(map[string]interface{})
+	if spendMetadata == nil {
+		spendMetadata = make(map[string]interface{})
+		doc["spend_logs_metadata"] = spendMetadata
+	}
+	spendMetadata["air_event_id"] = eventID
+	spendMetadata["accounting_eligible"] = !isProxyRequest
+	spendMetadata["is_proxy_request"] = isProxyRequest
+	if providerResponseID != "" {
+		spendMetadata["provider_response_id"] = providerResponseID
+	}
+	encoded, err := json.Marshal(doc)
+	if err != nil {
+		return metadata
+	}
+	return string(encoded)
+}
+
 // extractEndUser extracts end_user from request headers or body
 func extractEndUser(r *http.Request) string {
 	// Check X-End-User header first

@@ -693,7 +693,8 @@ func (sl *Logger) writeBatchInTransaction(ctx context.Context, tx pgx.Tx, batch 
 	if len(filteredBatch) != len(insertedIDs) {
 		return nil, fmt.Errorf("map inserted rows to batch: expected %d, mapped %d", len(insertedIDs), len(filteredBatch))
 	}
-	spendUpdates := aggregateSpendUpdates(insertedEntries(filteredBatch))
+	accountingBatch := accountingEntries(filteredBatch)
+	spendUpdates := aggregateSpendUpdates(insertedEntries(accountingBatch))
 	if err := executeSpendUpdates(ctx, tx, spendUpdates); err != nil {
 		return nil, fmt.Errorf("spend updates: %w", err)
 	}
@@ -701,7 +702,7 @@ func (sl *Logger) writeBatchInTransaction(ctx context.Context, tx pgx.Tx, batch 
 	// Daily aggregates are built from the in-memory entries. Re-reading the
 	// just-inserted rows from LiteLLM_SpendLogs is a heavy query on the LiteLLM
 	// schema, and everything it returned is already known to the writer.
-	records, err := buildSpendLogRecords(filteredBatch, sl.logger, "atomic")
+	records, err := buildSpendLogRecords(accountingBatch, sl.logger, "atomic")
 	if err != nil {
 		return nil, fmt.Errorf("build daily aggregation records: %w", err)
 	}
@@ -972,6 +973,16 @@ func insertedEntries(inserted []insertedSpendEntry) []*models.SpendLogEntry {
 	entries := make([]*models.SpendLogEntry, 0, len(inserted))
 	for _, item := range inserted {
 		entries = append(entries, item.entry)
+	}
+	return entries
+}
+
+func accountingEntries(inserted []insertedSpendEntry) []insertedSpendEntry {
+	entries := make([]insertedSpendEntry, 0, len(inserted))
+	for _, item := range inserted {
+		if item.entry != nil && !item.entry.SkipAccounting {
+			entries = append(entries, item)
+		}
 	}
 	return entries
 }
