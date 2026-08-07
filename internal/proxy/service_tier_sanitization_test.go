@@ -52,6 +52,11 @@ func TestExtractMetadataFromBodyStripsClientControlledServiceTier(t *testing.T) 
 			body:          `{"model":"gpt-4","messages":[],"service_tier":null,"extra_body":{"service_tier":[],"litellm_session_id":"session-1"}}`,
 			wantSessionID: "session-1",
 		},
+		{
+			name:          "top-level LiteLLM session ID",
+			body:          `{"model":"gpt-4","messages":[],"litellm_session_id":"session-1"}`,
+			wantSessionID: "session-1",
+		},
 	}
 
 	for _, tt := range tests {
@@ -65,6 +70,7 @@ func TestExtractMetadataFromBodyStripsClientControlledServiceTier(t *testing.T) 
 			var body map[string]json.RawMessage
 			require.NoError(t, json.Unmarshal(result.Body, &body))
 			assert.NotContains(t, body, "service_tier")
+			assert.NotContains(t, body, "litellm_session_id")
 			if extraRaw, exists := body["extra_body"]; exists {
 				var extra map[string]json.RawMessage
 				require.NoError(t, json.Unmarshal(extraRaw, &extra))
@@ -150,6 +156,7 @@ func TestProxyRequestNeverForwardsClientControlledServiceTier(t *testing.T) {
 		{name: "proxy chat", provider: config.ProviderTypeProxy, path: "/v1/chat/completions", body: `{"model":"gpt-4","messages":[{"role":"user","content":"test"}],"service_tier":"priority","extra_body":{"service_tier":"flex","keep":"yes"}}`},
 		{name: "AIR chat", provider: config.ProviderTypeAIR, path: "/v1/chat/completions", body: `{"model":"gpt-4","messages":[{"role":"user","content":"test"}],"service_tier":"priority"}`},
 		{name: "direct OpenAI chat", provider: config.ProviderTypeOpenAI, path: "/v1/chat/completions", body: `{"model":"gpt-4","messages":[{"role":"user","content":"test"}],"service_tier":"priority"}`},
+		{name: "direct OpenAI chat with LiteLLM session", provider: config.ProviderTypeOpenAI, path: "/v1/chat/completions", body: `{"model":"gpt-4","messages":[{"role":"user","content":"test"}],"litellm_session_id":"session-1"}`},
 		{name: "native responses passthrough", provider: config.ProviderTypeOpenAI, path: "/v1/responses", body: `{"model":"gpt-4","input":"test","service_tier":"priority"}`},
 		{name: "Anthropic messages proxy", provider: config.ProviderTypeProxy, path: "/v1/messages", body: `{"model":"gpt-4","max_tokens":16,"messages":[{"role":"user","content":"test"}],"service_tier":"priority"}`},
 	}
@@ -186,6 +193,7 @@ func TestProxyRequestNeverForwardsClientControlledServiceTier(t *testing.T) {
 
 			require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
 			assert.NotContains(t, outbound, "service_tier")
+			assert.NotContains(t, outbound, "litellm_session_id")
 			assert.Contains(t, outbound, "model")
 			if tt.path == "/v1/chat/completions" {
 				assert.Contains(t, outbound, "messages")
