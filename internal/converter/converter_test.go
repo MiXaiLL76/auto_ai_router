@@ -579,6 +579,32 @@ func TestExtractTokenUsage(t *testing.T) {
 	}
 }
 
+func TestExtractTokenUsageFromConvertedGeminiImage(t *testing.T) {
+	providerBody := []byte(`{
+		"candidates":[{"content":{"parts":[{"inlineData":{"mimeType":"image/png","data":"iVBORw=="}}]}}],
+		"usageMetadata":{"promptTokenCount":1128,"candidatesTokenCount":1357,"totalTokenCount":2485}
+	}`)
+	imageConverter := New(config.ProviderTypeGemini, RequestMode{
+		IsImageGeneration: true,
+		ModelID:           "gemini-3.1-flash-lite-image",
+	})
+	convertedBody, err := imageConverter.ResponseTo(providerBody)
+	if err != nil {
+		t.Fatalf("convert Gemini image response: %v", err)
+	}
+
+	usage := imageConverter.UsageFromResponse(convertedBody)
+	if usage == nil {
+		t.Fatal("expected usage")
+	}
+	if usage.PromptTokens != 1128 || usage.CompletionTokens != 1357 {
+		t.Fatalf("unexpected totals: %+v", usage)
+	}
+	if usage.OutputImageTokens != 1357 {
+		t.Fatalf("expected all 1357 generated tokens to be image tokens, got %d", usage.OutputImageTokens)
+	}
+}
+
 func TestExtractTokenUsage_AnthropicFlatCacheFields(t *testing.T) {
 	// Anthropic's input_tokens is EXCLUSIVE of cache tokens (unlike OpenAI's inclusive
 	// prompt_tokens), so PromptTokens must be corrected back to the inclusive total
