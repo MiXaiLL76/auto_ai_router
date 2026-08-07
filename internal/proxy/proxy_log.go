@@ -199,6 +199,9 @@ func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
 	if !litellmEnabled && !kafkaEnabled {
 		return nil
 	}
+	if logCtx != nil && logCtx.IsProxyRequest {
+		return nil
+	}
 
 	if logCtx == nil || logCtx.Credential == nil || logCtx.Request == nil {
 		return nil

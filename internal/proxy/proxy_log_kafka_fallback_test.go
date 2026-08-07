@@ -184,6 +184,21 @@ func TestLogSpendToLiteLLMDB_UsesClientResponseID(t *testing.T) {
 	assert.Equal(t, "chatcmpl-client-123", dbStub.loggedEntries[0].RequestID)
 }
 
+func TestLogSpendToLiteLLMDB_SkipsInternalAIRRequest(t *testing.T) {
+	prx := NewTestProxyBuilder().Build()
+	kafkaStub := &stubKafkaManager{enabled: true}
+	dbStub := &stubLiteLLMManager{}
+	prx.kafkaLog = kafkaStub
+	prx.LiteLLMDB = dbStub
+
+	logCtx := testLogCtx(t)
+	logCtx.IsProxyRequest = true
+
+	require.NoError(t, prx.logSpendToLiteLLMDB(logCtx))
+	assert.Empty(t, kafkaStub.events)
+	assert.Empty(t, dbStub.loggedEntries)
+}
+
 func TestLogSpendToLiteLLMDB_BillsAliasPriceBeforeRealModelPrice(t *testing.T) {
 	prx := NewTestProxyBuilder().Build()
 	registry := routermodels.NewModelPriceRegistry()
