@@ -599,6 +599,7 @@ type SpendLogEntry struct {
 	// Runtime-only observability flag; persisted inside Metadata rather than as
 	// a LiteLLM_SpendLogs column.
 	ComparisonEligible bool
+	SkipAccounting     bool
 }
 
 // ==================== Stats ====================

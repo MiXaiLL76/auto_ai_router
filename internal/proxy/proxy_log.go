@@ -199,10 +199,6 @@ func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
 	if !litellmEnabled && !kafkaEnabled {
 		return nil
 	}
-	if logCtx != nil && logCtx.IsProxyRequest {
-		return nil
-	}
-
 	if logCtx == nil || logCtx.Credential == nil || logCtx.Request == nil {
 		return nil
 	}
@@ -322,7 +318,7 @@ func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
 	// metadata at insert time, instead of needing a separate update later —
 	// see buildMetadata's kafkaFallbackReason parameter below.
 	var kafkaFallbackReason string
-	if kafkaEnabled {
+	if kafkaEnabled && !logCtx.IsProxyRequest {
 		// Deliberately distinct from the Postgres metadata's overheadMs (which
 		// measures full elapsed time since the request started, near-identical
 		// to duration_ms): kafkaOverheadMs measures only the cost of this
@@ -344,6 +340,7 @@ func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
 	requesterIP := getClientIP(logCtx.Request)
 	overheadMs := float64(time.Since(logCtx.StartTime).Microseconds()) / 1000.0
 	metadata := buildMetadata(hashedToken, logCtx.TokenInfo, logCtx.ErrorMsg, logCtx.HTTPStatus, logCtx.TokenUsage, requesterIP, tokenCosts, logCtx.ModelID, overheadMs, kafkaFallbackReason)
+	metadata = addAIRSpendMetadata(metadata, logCtx.RequestID, logCtx.ClientResponseID, logCtx.IsProxyRequest)
 
 	var completionStartTime *time.Time
 	if !logCtx.CompletionStartTime.IsZero() {
@@ -354,6 +351,7 @@ func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
 	if litellmEnabled {
 		pgErr = p.LiteLLMDB.LogSpend(&litellmdb.SpendLogEntry{
 			RequestID:           logCtx.spendRequestID(),
+			AirEventID:          logCtx.RequestID,
 			StartTime:           logCtx.StartTime,
 			EndTime:             endTime,
 			CompletionStartTime: completionStartTime,
@@ -376,6 +374,7 @@ func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
 			RequesterIP:         requesterIP,
 			Status:              status,
 			SessionID:           logCtx.SessionID,
+			SkipAccounting:      logCtx.IsProxyRequest,
 		})
 	}
 

@@ -181,22 +181,45 @@ func TestLogSpendToLiteLLMDB_UsesClientResponseID(t *testing.T) {
 
 	require.NoError(t, prx.logSpendToLiteLLMDB(logCtx))
 	require.Len(t, dbStub.loggedEntries, 1)
-	assert.Equal(t, "chatcmpl-client-123", dbStub.loggedEntries[0].RequestID)
+	entry := dbStub.loggedEntries[0]
+	assert.Equal(t, "chatcmpl-client-123", entry.RequestID)
+	assert.Equal(t, "req-123", entry.AirEventID)
+	assert.False(t, entry.SkipAccounting)
+
+	var metadata map[string]interface{}
+	require.NoError(t, json.Unmarshal([]byte(entry.Metadata), &metadata))
+	spendMetadata := metadata["spend_logs_metadata"].(map[string]interface{})
+	assert.Equal(t, "req-123", spendMetadata["air_event_id"])
+	assert.Equal(t, "chatcmpl-client-123", spendMetadata["provider_response_id"])
+	assert.Equal(t, true, spendMetadata["accounting_eligible"])
 }
 
-func TestLogSpendToLiteLLMDB_SkipsInternalAIRRequest(t *testing.T) {
+func TestLogSpendToLiteLLMDB_PersistsInternalAIRRequestWithoutKafkaAccounting(t *testing.T) {
 	prx := NewTestProxyBuilder().Build()
 	kafkaStub := &stubKafkaManager{enabled: true}
 	dbStub := &stubLiteLLMManager{}
 	prx.kafkaLog = kafkaStub
 	prx.LiteLLMDB = dbStub
+	setTestModelPrice(prx, "gpt-4o-mini", &routermodels.ModelPrice{
+		InputCostPerToken: 0.000001, OutputCostPerToken: 0.000002,
+	})
 
 	logCtx := testLogCtx(t)
 	logCtx.IsProxyRequest = true
 
 	require.NoError(t, prx.logSpendToLiteLLMDB(logCtx))
 	assert.Empty(t, kafkaStub.events)
-	assert.Empty(t, dbStub.loggedEntries)
+	require.Len(t, dbStub.loggedEntries, 1)
+	entry := dbStub.loggedEntries[0]
+	assert.Equal(t, "req-123", entry.AirEventID)
+	assert.True(t, entry.SkipAccounting)
+
+	var metadata map[string]interface{}
+	require.NoError(t, json.Unmarshal([]byte(entry.Metadata), &metadata))
+	spendMetadata := metadata["spend_logs_metadata"].(map[string]interface{})
+	assert.Equal(t, "req-123", spendMetadata["air_event_id"])
+	assert.Equal(t, false, spendMetadata["accounting_eligible"])
+	assert.Equal(t, true, spendMetadata["is_proxy_request"])
 }
 
 func TestLogSpendToLiteLLMDB_BillsAliasPriceBeforeRealModelPrice(t *testing.T) {
