@@ -393,13 +393,29 @@ func convertVertexUsageToImageUsage(meta *genai.GenerateContentResponseUsageMeta
 	}
 
 	outputTokens := int(meta.CandidatesTokenCount)
+	var outputTextTokens, outputImageTokens int
 	for _, detail := range meta.CandidatesTokensDetails {
 		if detail == nil {
 			continue
 		}
 		switch genai.MediaModality(detail.Modality) {
 		case genai.MediaModalityImage, genai.MediaModalityVideo:
-			// image output tokens counted in CandidatesTokenCount
+			outputImageTokens += int(detail.TokenCount)
+		default:
+			outputTextTokens += int(detail.TokenCount)
+		}
+	}
+
+	var outputDetails *openai.OpenAIImageOutputTokenDetails
+	if outputTextTokens > 0 || outputImageTokens > 0 {
+		// Gemini image models can return a text caption alongside the
+		// generated image within the same CandidatesTokenCount total (unlike
+		// OpenAI's gpt-image-1, whose output is always 100% image). Billing
+		// needs the split to price image output tokens at
+		// output_cost_per_image_token instead of the much lower text rate.
+		outputDetails = &openai.OpenAIImageOutputTokenDetails{
+			TextTokens:  outputTextTokens,
+			ImageTokens: outputImageTokens,
 		}
 	}
 
@@ -409,8 +425,9 @@ func convertVertexUsageToImageUsage(meta *genai.GenerateContentResponseUsageMeta
 			TextTokens:  textTokens,
 			ImageTokens: imageTokens,
 		},
-		OutputTokens: outputTokens,
-		TotalTokens:  inputTokens + outputTokens,
+		OutputTokens:        outputTokens,
+		OutputTokensDetails: outputDetails,
+		TotalTokens:         inputTokens + outputTokens,
 	}
 }
 

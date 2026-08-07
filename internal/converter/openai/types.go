@@ -247,13 +247,26 @@ type OpenAIImageInputTokenDetails struct {
 	ImageTokens int `json:"image_tokens"`
 }
 
+// OpenAIImageOutputTokenDetails breaks down output token counts for image API
+// responses. Not part of OpenAI's own gpt-image-1 schema (whose output is
+// always 100% image), but needed for Gemini-backed models, which can return
+// a text caption alongside the generated image within the same output token
+// count. Mirrors the same field the generic usage extractor
+// (converter.ExtractTokenUsageWithOptions) already reads from
+// output_tokens_details.image_tokens for the Responses API shape.
+type OpenAIImageOutputTokenDetails struct {
+	TextTokens  int `json:"text_tokens,omitempty"`
+	ImageTokens int `json:"image_tokens,omitempty"`
+}
+
 // OpenAIImageUsage is the usage format for the images API (gpt-image-1 style),
 // distinct from the chat-completions OpenAIUsage.
 type OpenAIImageUsage struct {
-	InputTokens        int                          `json:"input_tokens"`
-	InputTokensDetails OpenAIImageInputTokenDetails `json:"input_tokens_details"`
-	OutputTokens       int                          `json:"output_tokens"`
-	TotalTokens        int                          `json:"total_tokens"`
+	InputTokens         int                            `json:"input_tokens"`
+	InputTokensDetails  OpenAIImageInputTokenDetails   `json:"input_tokens_details"`
+	OutputTokens        int                            `json:"output_tokens"`
+	OutputTokensDetails *OpenAIImageOutputTokenDetails `json:"output_tokens_details,omitempty"`
+	TotalTokens         int                            `json:"total_tokens"`
 }
 
 // OpenAIImageResponse represents OpenAI image response

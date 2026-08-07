@@ -561,6 +561,68 @@ func TestConvertVertexUsageToImageUsage(t *testing.T) {
 		assert.Equal(t, 100, got.InputTokensDetails.ImageTokens)
 	})
 
+	t.Run("candidate modality details split output into text and image tokens", func(t *testing.T) {
+		// Gemini image models can return a text caption alongside the
+		// generated image within the same CandidatesTokenCount total (unlike
+		// OpenAI's gpt-image-1, whose output is always 100% image). Billing
+		// needs this split to price image output tokens at
+		// output_cost_per_image_token instead of the text rate.
+		meta := &genai.GenerateContentResponseUsageMetadata{
+			PromptTokenCount:     11,
+			CandidatesTokenCount: 1421,
+			CandidatesTokensDetails: []*genai.ModalityTokenCount{
+				{Modality: genai.MediaModality(genai.MediaModalityText), TokenCount: 301},
+				{Modality: genai.MediaModality(genai.MediaModalityImage), TokenCount: 1120},
+			},
+		}
+		got := convertVertexUsageToImageUsage(meta)
+		require.NotNil(t, got)
+		assert.Equal(t, 1421, got.OutputTokens)
+		require.NotNil(t, got.OutputTokensDetails)
+		assert.Equal(t, 301, got.OutputTokensDetails.TextTokens)
+		assert.Equal(t, 1120, got.OutputTokensDetails.ImageTokens)
+	})
+
+	t.Run("candidate video tokens counted as image tokens", func(t *testing.T) {
+		meta := &genai.GenerateContentResponseUsageMetadata{
+			CandidatesTokenCount: 900,
+			CandidatesTokensDetails: []*genai.ModalityTokenCount{
+				{Modality: genai.MediaModality(genai.MediaModalityText), TokenCount: 100},
+				{Modality: genai.MediaModality(genai.MediaModalityVideo), TokenCount: 800},
+			},
+		}
+		got := convertVertexUsageToImageUsage(meta)
+		require.NotNil(t, got)
+		require.NotNil(t, got.OutputTokensDetails)
+		assert.Equal(t, 100, got.OutputTokensDetails.TextTokens)
+		assert.Equal(t, 800, got.OutputTokensDetails.ImageTokens)
+	})
+
+	t.Run("no candidate modality details leaves OutputTokensDetails nil", func(t *testing.T) {
+		meta := &genai.GenerateContentResponseUsageMetadata{
+			PromptTokenCount:     268,
+			CandidatesTokenCount: 1024,
+		}
+		got := convertVertexUsageToImageUsage(meta)
+		require.NotNil(t, got)
+		assert.Nil(t, got.OutputTokensDetails)
+	})
+
+	t.Run("nil candidate modality detail entries are skipped", func(t *testing.T) {
+		meta := &genai.GenerateContentResponseUsageMetadata{
+			CandidatesTokenCount: 500,
+			CandidatesTokensDetails: []*genai.ModalityTokenCount{
+				nil,
+				{Modality: genai.MediaModality(genai.MediaModalityImage), TokenCount: 500},
+			},
+		}
+		got := convertVertexUsageToImageUsage(meta)
+		require.NotNil(t, got)
+		require.NotNil(t, got.OutputTokensDetails)
+		assert.Equal(t, 0, got.OutputTokensDetails.TextTokens)
+		assert.Equal(t, 500, got.OutputTokensDetails.ImageTokens)
+	})
+
 	t.Run("nil modality detail entries are skipped", func(t *testing.T) {
 		meta := &genai.GenerateContentResponseUsageMetadata{
 			PromptTokenCount:     100,
