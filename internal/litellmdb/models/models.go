@@ -584,11 +584,21 @@ type SpendLogEntry struct {
 	Spend float64 // Request cost in USD
 
 	// User identification
-	APIKey         string // sha256 hash of token
-	UserID         string // User ID
-	TeamID         string // Team ID
+	APIKey string // sha256 hash of token
+	UserID string // User ID
+	TeamID string // Team ID: real team, or provider credential name when
+	// credential_name_as_team_id substitutes one for attribution in spend
+	// logs/Kafka/DailyTeamSpend. NOT safe to use for billing decisions.
 	OrganizationID string // Organization ID
 	EndUser        string // End user ID (from metadata)
+
+	// BillingTeamID is the token's real team assignment only (empty when the
+	// key has no team), independent of any credential_name_as_team_id
+	// substitution in TeamID above. aggregateSpendUpdates must key off this
+	// field to decide whether spend goes to LiteLLM_UserTable (personal) or
+	// LiteLLM_TeamTable/LiteLLM_TeamMembership (team) — a synthetic TeamID
+	// used only for log attribution must never suppress the personal debit.
+	BillingTeamID string
 
 	// Status
 	Status string // "success" | "failure"

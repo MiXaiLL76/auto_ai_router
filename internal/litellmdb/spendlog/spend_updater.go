@@ -133,14 +133,18 @@ func aggregateSpendUpdates(batch []*models.SpendLogEntry) *SpendUpdates {
 			updates.Tokens[entityModelKey{EntityID: entry.APIKey, Model: entry.Model}] += entry.Spend
 		}
 
-		// Team spend is charged through team membership, not the personal balance.
-		if entry.UserID != "" && entry.TeamID == "" {
+		// Team spend is charged through team membership, not the personal
+		// balance. Routed on BillingTeamID, not TeamID: TeamID can hold a
+		// synthetic provider-credential name (credential_name_as_team_id)
+		// used only for log/DailyTeamSpend attribution, and that must not
+		// suppress the personal debit or be charged to a nonexistent team.
+		if entry.UserID != "" && entry.BillingTeamID == "" {
 			updates.Users[entityModelKey{EntityID: entry.UserID, Model: entry.Model}] += entry.Spend
 		}
 
 		// Team (if present)
-		if entry.TeamID != "" {
-			updates.Teams[entityModelKey{EntityID: entry.TeamID, Model: entry.Model}] += entry.Spend
+		if entry.BillingTeamID != "" {
+			updates.Teams[entityModelKey{EntityID: entry.BillingTeamID, Model: entry.Model}] += entry.Spend
 		}
 
 		// Organization (if present)
@@ -149,8 +153,8 @@ func aggregateSpendUpdates(batch []*models.SpendLogEntry) *SpendUpdates {
 		}
 
 		// TeamMembership (if User + Team)
-		if entry.UserID != "" && entry.TeamID != "" {
-			updates.TeamMembers[teamMemberKey{TeamID: entry.TeamID, UserID: entry.UserID}] += entry.Spend
+		if entry.UserID != "" && entry.BillingTeamID != "" {
+			updates.TeamMembers[teamMemberKey{TeamID: entry.BillingTeamID, UserID: entry.UserID}] += entry.Spend
 		}
 
 		if entry.UserID != "" && entry.OrganizationID != "" {
