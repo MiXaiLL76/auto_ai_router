@@ -399,7 +399,7 @@ func TestEntityUpdatesPersistSpendAndNumericModelSpendTogether(t *testing.T) {
 
 			call := execer.calls[0]
 			assert.Contains(t, call.query, "UPDATE "+tt.table)
-			assert.Contains(t, call.query, "SET spend = spend + $1")
+			assert.Contains(t, call.query, "SET spend = COALESCE(spend, 0) + $1")
 			assert.Contains(t, call.query, "model_spend = jsonb_set")
 			assert.Contains(t, call.query, "ARRAY[$2]::text[]")
 			assert.Contains(t, call.query, "to_jsonb")

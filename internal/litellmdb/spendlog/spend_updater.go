@@ -254,7 +254,6 @@ func updateTokens(ctx context.Context, tx spendUpdateExecer, tokens map[entityMo
 }
 
 // updateUsers updates LiteLLM_UserTable.spend and model_spend.
-// Checks spend IS NOT NULL to avoid accidentally updating null values.
 func updateUsers(ctx context.Context, tx spendUpdateExecer, users map[entityModelKey]float64) error {
 	for _, key := range sortedSpendKeys(users, compareEntityModelKey) {
 		amount := users[key]
@@ -270,7 +269,6 @@ func updateUsers(ctx context.Context, tx spendUpdateExecer, users map[entityMode
 }
 
 // updateTeams updates LiteLLM_TeamTable.spend and model_spend.
-// Checks spend IS NOT NULL to avoid accidentally updating null values.
 func updateTeams(ctx context.Context, tx spendUpdateExecer, teams map[entityModelKey]float64) error {
 	for _, key := range sortedSpendKeys(teams, compareEntityModelKey) {
 		amount := teams[key]
@@ -286,7 +284,6 @@ func updateTeams(ctx context.Context, tx spendUpdateExecer, teams map[entityMode
 }
 
 // updateOrgs updates LiteLLM_OrganizationTable.spend and model_spend.
-// Checks spend IS NOT NULL to avoid accidentally updating null values.
 func updateOrgs(ctx context.Context, tx spendUpdateExecer, orgs map[entityModelKey]float64) error {
 	for _, key := range sortedSpendKeys(orgs, compareEntityModelKey) {
 		amount := orgs[key]
