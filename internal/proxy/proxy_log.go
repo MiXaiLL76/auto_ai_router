@@ -230,6 +230,12 @@ func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
 		teamID = logCtx.TokenInfo.TeamID
 		organizationID = logCtx.TokenInfo.OrganizationID
 	}
+	// billingTeamID captures the token's real team assignment before the
+	// credential-name substitution below. That substitution exists only to
+	// attribute spend logs/Kafka/DailyTeamSpend by provider credential on
+	// billing-aggregator instances; it must never make aggregateSpendUpdates
+	// think a personal key belongs to a real, billable team.
+	billingTeamID := teamID
 	if teamID == "" && p.credentialNameAsTeamID {
 		teamID = credName
 	}
@@ -369,6 +375,7 @@ func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
 			APIKey:              hashedToken,
 			UserID:              userID,
 			TeamID:              teamID,
+			BillingTeamID:       billingTeamID,
 			OrganizationID:      organizationID,
 			EndUser:             endUser,
 			RequesterIP:         requesterIP,

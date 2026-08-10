@@ -133,14 +133,18 @@ func aggregateSpendUpdates(batch []*models.SpendLogEntry) *SpendUpdates {
 			updates.Tokens[entityModelKey{EntityID: entry.APIKey, Model: entry.Model}] += entry.Spend
 		}
 
-		// Team spend is charged through team membership, not the personal balance.
-		if entry.UserID != "" && entry.TeamID == "" {
+		// Team spend is charged through team membership, not the personal
+		// balance. Routed on BillingTeamID, not TeamID: TeamID can hold a
+		// synthetic provider-credential name (credential_name_as_team_id)
+		// used only for log/DailyTeamSpend attribution, and that must not
+		// suppress the personal debit or be charged to a nonexistent team.
+		if entry.UserID != "" && entry.BillingTeamID == "" {
 			updates.Users[entityModelKey{EntityID: entry.UserID, Model: entry.Model}] += entry.Spend
 		}
 
 		// Team (if present)
-		if entry.TeamID != "" {
-			updates.Teams[entityModelKey{EntityID: entry.TeamID, Model: entry.Model}] += entry.Spend
+		if entry.BillingTeamID != "" {
+			updates.Teams[entityModelKey{EntityID: entry.BillingTeamID, Model: entry.Model}] += entry.Spend
 		}
 
 		// Organization (if present)
@@ -149,8 +153,8 @@ func aggregateSpendUpdates(batch []*models.SpendLogEntry) *SpendUpdates {
 		}
 
 		// TeamMembership (if User + Team)
-		if entry.UserID != "" && entry.TeamID != "" {
-			updates.TeamMembers[teamMemberKey{TeamID: entry.TeamID, UserID: entry.UserID}] += entry.Spend
+		if entry.UserID != "" && entry.BillingTeamID != "" {
+			updates.TeamMembers[teamMemberKey{TeamID: entry.BillingTeamID, UserID: entry.UserID}] += entry.Spend
 		}
 
 		if entry.UserID != "" && entry.OrganizationID != "" {
@@ -254,7 +258,6 @@ func updateTokens(ctx context.Context, tx spendUpdateExecer, tokens map[entityMo
 }
 
 // updateUsers updates LiteLLM_UserTable.spend and model_spend.
-// Checks spend IS NOT NULL to avoid accidentally updating null values.
 func updateUsers(ctx context.Context, tx spendUpdateExecer, users map[entityModelKey]float64) error {
 	for _, key := range sortedSpendKeys(users, compareEntityModelKey) {
 		amount := users[key]
@@ -270,7 +273,6 @@ func updateUsers(ctx context.Context, tx spendUpdateExecer, users map[entityMode
 }
 
 // updateTeams updates LiteLLM_TeamTable.spend and model_spend.
-// Checks spend IS NOT NULL to avoid accidentally updating null values.
 func updateTeams(ctx context.Context, tx spendUpdateExecer, teams map[entityModelKey]float64) error {
 	for _, key := range sortedSpendKeys(teams, compareEntityModelKey) {
 		amount := teams[key]
@@ -286,7 +288,6 @@ func updateTeams(ctx context.Context, tx spendUpdateExecer, teams map[entityMode
 }
 
 // updateOrgs updates LiteLLM_OrganizationTable.spend and model_spend.
-// Checks spend IS NOT NULL to avoid accidentally updating null values.
 func updateOrgs(ctx context.Context, tx spendUpdateExecer, orgs map[entityModelKey]float64) error {
 	for _, key := range sortedSpendKeys(orgs, compareEntityModelKey) {
 		amount := orgs[key]

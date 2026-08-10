@@ -9,14 +9,14 @@ const (
 	// bumps last_active (schemas that already have the last_active column).
 	QueryUpdateTokenSpendWithLastActive = `
 		UPDATE "LiteLLM_VerificationToken"
-		SET spend = spend + $1, updated_at = NOW(), last_active = NOW()
-		WHERE token = $2 AND spend IS NOT NULL`
+		SET spend = COALESCE(spend, 0) + $1, updated_at = NOW(), last_active = NOW()
+		WHERE token = $2`
 
 	// QueryUpdateTokenModelSpendWithLastActive increments the scalar key spend
 	// and the per-model JSON counter, and bumps last_active.
 	QueryUpdateTokenModelSpendWithLastActive = `
 		UPDATE "LiteLLM_VerificationToken"
-		SET spend = spend + $1,
+		SET spend = COALESCE(spend, 0) + $1,
 		    model_spend = jsonb_set(
 		        COALESCE(model_spend, '{}'::jsonb),
 		        ARRAY[$2]::text[],
@@ -25,19 +25,19 @@ const (
 		    ),
 		    updated_at = NOW(),
 		    last_active = NOW()
-		WHERE token = $3 AND spend IS NOT NULL`
+		WHERE token = $3`
 
 	// QueryUpdateTokenSpend is the fallback for schemas without last_active.
 	QueryUpdateTokenSpend = `
 		UPDATE "LiteLLM_VerificationToken"
-		SET spend = spend + $1, updated_at = NOW()
-		WHERE token = $2 AND spend IS NOT NULL`
+		SET spend = COALESCE(spend, 0) + $1, updated_at = NOW()
+		WHERE token = $2`
 
 	// QueryUpdateTokenModelSpend is the model-counter fallback for schemas
 	// without last_active.
 	QueryUpdateTokenModelSpend = `
 		UPDATE "LiteLLM_VerificationToken"
-		SET spend = spend + $1,
+		SET spend = COALESCE(spend, 0) + $1,
 		    model_spend = jsonb_set(
 		        COALESCE(model_spend, '{}'::jsonb),
 		        ARRAY[$2]::text[],
@@ -45,21 +45,21 @@ const (
 		        true
 		    ),
 		    updated_at = NOW()
-		WHERE token = $3 AND spend IS NOT NULL`
+		WHERE token = $3`
 
 	// QueryUpdateEntitySpendTemplate builds an entity counter update without a
 	// model dimension. Table and ID column are compile-time constants supplied
 	// only by the spendlog wrappers.
 	QueryUpdateEntitySpendTemplate = `
 		UPDATE %s
-		SET spend = spend + $1, updated_at = NOW()
-		WHERE %s = $2 AND spend IS NOT NULL`
+		SET spend = COALESCE(spend, 0) + $1, updated_at = NOW()
+		WHERE %s = $2`
 
 	// QueryUpdateEntityModelSpendTemplate builds an entity counter update where
 	// scalar spend and the per-model JSON number change in one statement.
 	QueryUpdateEntityModelSpendTemplate = `
 		UPDATE %s
-		SET spend = spend + $1,
+		SET spend = COALESCE(spend, 0) + $1,
 		    model_spend = jsonb_set(
 		        COALESCE(model_spend, '{}'::jsonb),
 		        ARRAY[$2]::text[],
@@ -67,22 +67,22 @@ const (
 		        true
 		    ),
 		    updated_at = NOW()
-		WHERE %s = $3 AND spend IS NOT NULL`
+		WHERE %s = $3`
 
 	// QueryUpdateTeamMemberSpendWithTotal increments both spend and total_spend
 	// (schemas that already have the total_spend column).
-	QueryUpdateTeamMemberSpendWithTotal = `UPDATE "LiteLLM_TeamMembership" SET spend = spend + $1, total_spend = total_spend + $1 WHERE team_id = $2 AND user_id = $3 AND spend IS NOT NULL`
+	QueryUpdateTeamMemberSpendWithTotal = `UPDATE "LiteLLM_TeamMembership" SET spend = COALESCE(spend, 0) + $1, total_spend = COALESCE(total_spend, 0) + $1 WHERE team_id = $2 AND user_id = $3`
 
 	// QueryUpdateTeamMemberSpend is the fallback for schemas without
 	// total_spend.
-	QueryUpdateTeamMemberSpend = `UPDATE "LiteLLM_TeamMembership" SET spend = spend + $1 WHERE team_id = $2 AND user_id = $3 AND spend IS NOT NULL`
+	QueryUpdateTeamMemberSpend = `UPDATE "LiteLLM_TeamMembership" SET spend = COALESCE(spend, 0) + $1 WHERE team_id = $2 AND user_id = $3`
 
 	// QueryUpdateOrganizationMemberSpend increments the member's spend within
 	// the organization.
 	QueryUpdateOrganizationMemberSpend = `
 		UPDATE "LiteLLM_OrganizationMembership"
-		SET spend = spend + $1, updated_at = NOW()
-		WHERE organization_id = $2 AND user_id = $3 AND spend IS NOT NULL`
+		SET spend = COALESCE(spend, 0) + $1, updated_at = NOW()
+		WHERE organization_id = $2 AND user_id = $3`
 
 	// QueryUpsertEndUserSpend inserts or increments the end user's spend.
 	QueryUpsertEndUserSpend = `
