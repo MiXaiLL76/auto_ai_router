@@ -592,12 +592,9 @@ type SpendLogEntry struct {
 	OrganizationID string // Organization ID
 	EndUser        string // End user ID (from metadata)
 
-	// BillingTeamID is the token's real team assignment only (empty when the
-	// key has no team), independent of any credential_name_as_team_id
-	// substitution in TeamID above. aggregateSpendUpdates must key off this
-	// field to decide whether spend goes to LiteLLM_UserTable (personal) or
-	// LiteLLM_TeamTable/LiteLLM_TeamMembership (team) — a synthetic TeamID
-	// used only for log attribution must never suppress the personal debit.
+	// BillingTeamID is the token's real team assignment. It is independent of
+	// credential_name_as_team_id substitution in TeamID. Team and membership
+	// projections use this field so synthetic attribution cannot create a team.
 	BillingTeamID string
 
 	// Status

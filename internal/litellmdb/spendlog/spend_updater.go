@@ -133,12 +133,8 @@ func aggregateSpendUpdates(batch []*models.SpendLogEntry) *SpendUpdates {
 			updates.Tokens[entityModelKey{EntityID: entry.APIKey, Model: entry.Model}] += entry.Spend
 		}
 
-		// Team spend is charged through team membership, not the personal
-		// balance. Routed on BillingTeamID, not TeamID: TeamID can hold a
-		// synthetic provider-credential name (credential_name_as_team_id)
-		// used only for log/DailyTeamSpend attribution, and that must not
-		// suppress the personal debit or be charged to a nonexistent team.
-		if entry.UserID != "" && entry.BillingTeamID == "" {
+		// User spend is an independent cumulative projection.
+		if entry.UserID != "" {
 			updates.Users[entityModelKey{EntityID: entry.UserID, Model: entry.Model}] += entry.Spend
 		}
 
