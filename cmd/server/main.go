@@ -886,19 +886,20 @@ func initializeLiteLLMDB(cfg *config.Config, log *slog.Logger) litellmdb.Manager
 	log.Info("Initializing LiteLLM DB integration...", "is_required", cfg.LiteLLMDB.IsRequired)
 
 	litellmCfg := &litellmdb.Config{
-		DatabaseURL:           cfg.LiteLLMDB.DatabaseURL,
-		MaxConns:              int32(cfg.LiteLLMDB.MaxConns),
-		MinConns:              int32(cfg.LiteLLMDB.MinConns),
-		HealthCheckInterval:   cfg.LiteLLMDB.HealthCheckInterval,
-		ConnectTimeout:        cfg.LiteLLMDB.ConnectTimeout,
-		AuthCacheTTL:          cfg.LiteLLMDB.AuthCacheTTL,
-		AuthCacheSize:         cfg.LiteLLMDB.AuthCacheSize,
-		LogQueueSize:          cfg.LiteLLMDB.LogQueueSize,
-		LogBatchSize:          cfg.LiteLLMDB.LogBatchSize,
-		LogFlushInterval:      cfg.LiteLLMDB.LogFlushInterval,
-		LogWorkers:            cfg.LiteLLMDB.LogWorkers,
-		DisableSpendLogsWrite: cfg.LiteLLMDB.DisableSpendLogsWrite,
-		Logger:                log,
+		DatabaseURL:                 cfg.LiteLLMDB.DatabaseURL,
+		MaxConns:                    int32(cfg.LiteLLMDB.MaxConns),
+		MinConns:                    int32(cfg.LiteLLMDB.MinConns),
+		HealthCheckInterval:         cfg.LiteLLMDB.HealthCheckInterval,
+		ConnectTimeout:              cfg.LiteLLMDB.ConnectTimeout,
+		AuthCacheTTL:                cfg.LiteLLMDB.AuthCacheTTL,
+		AuthCacheSize:               cfg.LiteLLMDB.AuthCacheSize,
+		LogQueueSize:                cfg.LiteLLMDB.LogQueueSize,
+		LogBatchSize:                cfg.LiteLLMDB.LogBatchSize,
+		LogFlushInterval:            cfg.LiteLLMDB.LogFlushInterval,
+		LogWorkers:                  cfg.LiteLLMDB.LogWorkers,
+		DisableSpendLogsWrite:       cfg.LiteLLMDB.DisableSpendLogsWrite,
+		IncludeTeamSpendInUserSpend: &cfg.LiteLLMDB.IncludeTeamSpendInUserSpend,
+		Logger:                      log,
 	}
 
 	manager, err := litellmdb.New(litellmCfg)

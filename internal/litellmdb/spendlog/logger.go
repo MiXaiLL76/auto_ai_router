@@ -694,7 +694,10 @@ func (sl *Logger) writeBatchInTransaction(ctx context.Context, tx pgx.Tx, batch 
 		return nil, fmt.Errorf("map inserted rows to batch: expected %d, mapped %d", len(insertedIDs), len(filteredBatch))
 	}
 	accountingBatch := accountingEntries(filteredBatch)
-	spendUpdates := aggregateSpendUpdates(insertedEntries(accountingBatch))
+	spendUpdates := aggregateSpendUpdates(
+		insertedEntries(accountingBatch),
+		sl.config.TeamSpendUpdatesUserSpend(),
+	)
 	if err := executeSpendUpdates(ctx, tx, spendUpdates); err != nil {
 		return nil, fmt.Errorf("spend updates: %w", err)
 	}

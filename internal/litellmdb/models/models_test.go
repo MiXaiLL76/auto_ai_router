@@ -23,6 +23,7 @@ func TestDefaultConfig(t *testing.T) {
 	assert.Equal(t, 10000, cfg.LogQueueSize)
 	assert.Equal(t, 100, cfg.LogBatchSize)
 	assert.Equal(t, 5*time.Second, cfg.LogFlushInterval)
+	assert.True(t, cfg.TeamSpendUpdatesUserSpend())
 }
 
 // ==================== Config.ApplyDefaults Tests ====================
@@ -41,7 +42,22 @@ func TestConfig_ApplyDefaults_AllZero(t *testing.T) {
 	assert.Equal(t, defaults.LogQueueSize, cfg.LogQueueSize)
 	assert.Equal(t, defaults.LogBatchSize, cfg.LogBatchSize)
 	assert.Equal(t, defaults.LogFlushInterval, cfg.LogFlushInterval)
+	assert.True(t, cfg.TeamSpendUpdatesUserSpend())
 	assert.NotNil(t, cfg.Logger)
+}
+
+func TestConfig_ApplyDefaults_PreservesDisabledTeamSpendProjection(t *testing.T) {
+	disabled := false
+	cfg := &Config{IncludeTeamSpendInUserSpend: &disabled}
+
+	cfg.ApplyDefaults()
+
+	assert.False(t, cfg.TeamSpendUpdatesUserSpend())
+}
+
+func TestConfig_NilDefaultsTeamSpendProjectionToEnabled(t *testing.T) {
+	var cfg *Config
+	assert.True(t, cfg.TeamSpendUpdatesUserSpend())
 }
 
 func TestConfig_ApplyDefaults_KeepNonZero(t *testing.T) {
