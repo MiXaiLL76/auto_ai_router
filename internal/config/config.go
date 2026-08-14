@@ -895,6 +895,10 @@ type LiteLLMDBConfig struct {
 	// where Kafka (see KafkaConfig) is the sole spend-analytics write-path.
 	DisableSpendLogsWrite bool `yaml:"disable_spend_logs_write"` // default: false
 
+	// IncludeTeamSpendInUserSpend controls whether team-bound events update the
+	// cumulative LiteLLM_UserTable spend projection.
+	IncludeTeamSpendInUserSpend bool `yaml:"include_team_spend_in_user_spend"` // default: true
+
 	// EnforceBudgetReservation enables atomic Redis-backed budget pre-reservation
 	// (prevents the overspend race described in todo_auth_billing.md P1.4).
 	// Auto-disabled (safe no-op) if redis.enabled=false, regardless of this flag.
@@ -1118,22 +1122,23 @@ func (m *MonitoringConfig) UnmarshalYAML(value *yaml.Node) error {
 // UnmarshalYAML implements custom unmarshaling for LiteLLMDBConfig with env variable support
 func (l *LiteLLMDBConfig) UnmarshalYAML(value *yaml.Node) error {
 	type tempConfig struct {
-		Enabled               string `yaml:"enabled"`
-		IsRequired            string `yaml:"is_required"`
-		LoadLitellmDBModels   string `yaml:"load_db_models"`
-		LitellmDBSyncInterval string `yaml:"db_model_sync_interval"`
-		DatabaseURL           string `yaml:"database_url"`
-		MaxConns              string `yaml:"max_conns"`
-		MinConns              string `yaml:"min_conns"`
-		HealthCheckInterval   string `yaml:"health_check_interval"`
-		ConnectTimeout        string `yaml:"connect_timeout"`
-		AuthCacheTTL          string `yaml:"auth_cache_ttl"`
-		AuthCacheSize         string `yaml:"auth_cache_size"`
-		LogQueueSize          string `yaml:"log_queue_size"`
-		LogBatchSize          string `yaml:"log_batch_size"`
-		LogFlushInterval      string `yaml:"log_flush_interval"`
-		LogWorkers            string `yaml:"log_workers"`
-		DisableSpendLogsWrite string `yaml:"disable_spend_logs_write"`
+		Enabled                     string `yaml:"enabled"`
+		IsRequired                  string `yaml:"is_required"`
+		LoadLitellmDBModels         string `yaml:"load_db_models"`
+		LitellmDBSyncInterval       string `yaml:"db_model_sync_interval"`
+		DatabaseURL                 string `yaml:"database_url"`
+		MaxConns                    string `yaml:"max_conns"`
+		MinConns                    string `yaml:"min_conns"`
+		HealthCheckInterval         string `yaml:"health_check_interval"`
+		ConnectTimeout              string `yaml:"connect_timeout"`
+		AuthCacheTTL                string `yaml:"auth_cache_ttl"`
+		AuthCacheSize               string `yaml:"auth_cache_size"`
+		LogQueueSize                string `yaml:"log_queue_size"`
+		LogBatchSize                string `yaml:"log_batch_size"`
+		LogFlushInterval            string `yaml:"log_flush_interval"`
+		LogWorkers                  string `yaml:"log_workers"`
+		DisableSpendLogsWrite       string `yaml:"disable_spend_logs_write"`
+		IncludeTeamSpendInUserSpend string `yaml:"include_team_spend_in_user_spend"`
 
 		EnforceBudgetReservation         string `yaml:"enforce_budget_reservation"`
 		BudgetReservationTTL             string `yaml:"budget_reservation_ttl"`
@@ -1161,6 +1166,9 @@ func (l *LiteLLMDBConfig) UnmarshalYAML(value *yaml.Node) error {
 		return err
 	}
 	if l.DisableSpendLogsWrite, err = parseField(temp.DisableSpendLogsWrite, false, strconv.ParseBool, "litellm_db.disable_spend_logs_write"); err != nil {
+		return err
+	}
+	if l.IncludeTeamSpendInUserSpend, err = parseField(temp.IncludeTeamSpendInUserSpend, true, strconv.ParseBool, "litellm_db.include_team_spend_in_user_spend"); err != nil {
 		return err
 	}
 	if l.EnforceBudgetReservation, err = parseField(temp.EnforceBudgetReservation, false, strconv.ParseBool, "litellm_db.enforce_budget_reservation"); err != nil {
@@ -1501,6 +1509,7 @@ func defaultLiteLLMDBConfig() LiteLLMDBConfig {
 		LogBatchSize:                     100,
 		LogFlushInterval:                 5 * time.Second,
 		LogWorkers:                       4,
+		IncludeTeamSpendInUserSpend:      true,
 		EnforceBudgetReservation:         false,
 		BudgetReservationTTL:             15 * time.Minute,
 		EnforceKeyRateLimits:             false,

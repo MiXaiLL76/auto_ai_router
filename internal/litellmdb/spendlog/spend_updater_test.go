@@ -40,7 +40,7 @@ func TestAggregateSpendUpdates_AllEntities(t *testing.T) {
 		},
 	}
 
-	result := aggregateSpendUpdates(batch)
+	result := aggregateSpendUpdates(batch, true)
 
 	// Token aggregation
 	assert.Equal(t, 15.0, result.Tokens[entityModelKey{EntityID: "token-1", Model: "model-1"}])
@@ -66,7 +66,7 @@ func TestAggregateSpendUpdates_AllEntities(t *testing.T) {
 // TestAggregateSpendUpdates_EmptyBatch tests empty batch
 func TestAggregateSpendUpdates_EmptyBatch(t *testing.T) {
 	batch := []*models.SpendLogEntry{}
-	result := aggregateSpendUpdates(batch)
+	result := aggregateSpendUpdates(batch, true)
 
 	assert.Empty(t, result.Tokens)
 	assert.Empty(t, result.Users)
@@ -79,7 +79,7 @@ func TestAggregateSpendUpdates_EmptyBatch(t *testing.T) {
 
 // TestAggregateSpendUpdates_NilBatch tests nil batch
 func TestAggregateSpendUpdates_NilBatch(t *testing.T) {
-	result := aggregateSpendUpdates(nil)
+	result := aggregateSpendUpdates(nil, true)
 	// Function returns initialized empty map, not nil
 	assert.Empty(t, result.Tokens)
 }
@@ -107,7 +107,7 @@ func TestAggregateSpendUpdates_PartialEntities(t *testing.T) {
 		},
 	}
 
-	result := aggregateSpendUpdates(batch)
+	result := aggregateSpendUpdates(batch, true)
 
 	// Token aggregation works
 	assert.Equal(t, 15.0, result.Tokens[entityModelKey{EntityID: "token-1"}])
@@ -142,7 +142,7 @@ func TestAggregateSpendUpdates_TeamMember(t *testing.T) {
 		},
 	}
 
-	result := aggregateSpendUpdates(batch)
+	result := aggregateSpendUpdates(batch, true)
 
 	assert.Equal(t, 10.0, result.Users[entityModelKey{EntityID: "user-1"}])
 	assert.Equal(t, 5.0, result.Users[entityModelKey{EntityID: "user-2"}])
@@ -169,7 +169,7 @@ func TestAggregateSpendUpdates_OrganizationMembership(t *testing.T) {
 		},
 	}
 
-	result := aggregateSpendUpdates(batch)
+	result := aggregateSpendUpdates(batch, true)
 	assert.Equal(t, 15.0, result.Orgs[entityModelKey{EntityID: "org-1"}])
 	assert.Equal(t, 10.0, result.OrganizationMembers[organizationMemberKey{OrganizationID: "org-1", UserID: "user-1"}])
 	assert.Equal(t, 5.0, result.OrganizationMembers[organizationMemberKey{OrganizationID: "org-1", UserID: "user-2"}])
@@ -319,7 +319,7 @@ func TestAggregateSpendUpdatesPreservesZeroSpendModelAndCompositeIDs(t *testing.
 		Spend:          0,
 	}
 
-	updates := aggregateSpendUpdates([]*models.SpendLogEntry{entry})
+	updates := aggregateSpendUpdates([]*models.SpendLogEntry{entry}, true)
 
 	for _, present := range []bool{
 		hasEntityModelKey(updates.Tokens, entityModelKey{EntityID: entry.APIKey, Model: entry.Model}),
@@ -430,7 +430,7 @@ func TestAggregateSpendUpdates_BillingTeamIDDrivesRouting(t *testing.T) {
 				Spend:          tt.spend,
 			}}
 
-			result := aggregateSpendUpdates(batch)
+			result := aggregateSpendUpdates(batch, true)
 
 			userKey := entityModelKey{EntityID: tt.userID, Model: "model-1"}
 			if tt.wantUserUpdated {
@@ -482,7 +482,7 @@ func TestAggregateSpendUpdatesUpdatesUserAndTeamCounters(t *testing.T) {
 		},
 	}
 
-	result := aggregateSpendUpdates(batch)
+	result := aggregateSpendUpdates(batch, true)
 
 	assert.Equal(t, 7.0, result.Tokens[entityModelKey{EntityID: "token-synthetic", Model: "model-1"}])
 	assert.Equal(t, 4.0, result.Tokens[entityModelKey{EntityID: "token-team", Model: "model-1"}])
@@ -497,6 +497,33 @@ func TestAggregateSpendUpdatesUpdatesUserAndTeamCounters(t *testing.T) {
 
 	assert.Equal(t, 4.0, result.TeamMembers[teamMemberKey{TeamID: "team-real", UserID: "user-shared"}])
 	assert.Len(t, result.TeamMembers, 1)
+}
+
+func TestAggregateSpendUpdatesCanExcludeTeamSpendFromUserSpend(t *testing.T) {
+	batch := []*models.SpendLogEntry{
+		{
+			APIKey:        "token-team",
+			UserID:        "user-1",
+			TeamID:        "team-1",
+			BillingTeamID: "team-1",
+			Model:         "model-1",
+			Spend:         4.0,
+		},
+		{
+			APIKey: "token-personal",
+			UserID: "user-1",
+			Model:  "model-1",
+			Spend:  7.0,
+		},
+	}
+
+	result := aggregateSpendUpdates(batch, false)
+
+	assert.Equal(t, 4.0, result.Tokens[entityModelKey{EntityID: "token-team", Model: "model-1"}])
+	assert.Equal(t, 7.0, result.Tokens[entityModelKey{EntityID: "token-personal", Model: "model-1"}])
+	assert.Equal(t, 7.0, result.Users[entityModelKey{EntityID: "user-1", Model: "model-1"}])
+	assert.Equal(t, 4.0, result.Teams[entityModelKey{EntityID: "team-1", Model: "model-1"}])
+	assert.Equal(t, 4.0, result.TeamMembers[teamMemberKey{TeamID: "team-1", UserID: "user-1"}])
 }
 
 func hasEntityModelKey(updates map[entityModelKey]float64, key entityModelKey) bool {

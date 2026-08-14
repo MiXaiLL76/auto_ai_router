@@ -113,7 +113,7 @@ func compareOrganizationMemberKey(left, right organizationMemberKey) int {
 //	    Tokens: {"abc": 15},       ← 1 UPDATE instead of 2
 //	    Users: {"user1": 15},      ← 1 UPDATE instead of 2
 //	  }
-func aggregateSpendUpdates(batch []*models.SpendLogEntry) *SpendUpdates {
+func aggregateSpendUpdates(batch []*models.SpendLogEntry, includeTeamSpendInUserSpend bool) *SpendUpdates {
 	updates := &SpendUpdates{
 		Tokens:              make(map[entityModelKey]float64),
 		Users:               make(map[entityModelKey]float64),
@@ -133,8 +133,8 @@ func aggregateSpendUpdates(batch []*models.SpendLogEntry) *SpendUpdates {
 			updates.Tokens[entityModelKey{EntityID: entry.APIKey, Model: entry.Model}] += entry.Spend
 		}
 
-		// User spend is an independent cumulative projection.
-		if entry.UserID != "" {
+		// User spend includes team-bound events when configured.
+		if entry.UserID != "" && (includeTeamSpendInUserSpend || entry.BillingTeamID == "") {
 			updates.Users[entityModelKey{EntityID: entry.UserID, Model: entry.Model}] += entry.Spend
 		}
 

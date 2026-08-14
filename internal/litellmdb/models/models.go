@@ -69,23 +69,29 @@ type Config struct {
 	// Postgres while leaving auth (ValidateToken) untouched (default: false).
 	DisableSpendLogsWrite bool
 
+	// IncludeTeamSpendInUserSpend controls whether team-bound events update the
+	// cumulative LiteLLM_UserTable spend projection. Nil defaults to true.
+	IncludeTeamSpendInUserSpend *bool
+
 	// Logger
 	Logger *slog.Logger
 }
 
 // DefaultConfig returns configuration with default values
 func DefaultConfig() *Config {
+	includeTeamSpendInUserSpend := true
 	return &Config{
-		MaxConns:            10,
-		MinConns:            2,
-		HealthCheckInterval: 10 * time.Second,
-		ConnectTimeout:      5 * time.Second,
-		AuthCacheTTL:        5 * time.Second,
-		AuthCacheSize:       10000,
-		LogQueueSize:        10000,
-		LogBatchSize:        100,
-		LogFlushInterval:    5 * time.Second,
-		LogWorkers:          4,
+		MaxConns:                    10,
+		MinConns:                    2,
+		HealthCheckInterval:         10 * time.Second,
+		ConnectTimeout:              5 * time.Second,
+		AuthCacheTTL:                5 * time.Second,
+		AuthCacheSize:               10000,
+		LogQueueSize:                10000,
+		LogBatchSize:                100,
+		LogFlushInterval:            5 * time.Second,
+		LogWorkers:                  4,
+		IncludeTeamSpendInUserSpend: &includeTeamSpendInUserSpend,
 	}
 }
 
@@ -126,9 +132,17 @@ func (c *Config) ApplyDefaults() {
 	if c.LogWorkers == 0 {
 		c.LogWorkers = defaults.LogWorkers
 	}
+	if c.IncludeTeamSpendInUserSpend == nil {
+		c.IncludeTeamSpendInUserSpend = defaults.IncludeTeamSpendInUserSpend
+	}
 	if c.Logger == nil {
 		c.Logger = slog.Default()
 	}
+}
+
+// TeamSpendUpdatesUserSpend reports the configured user projection policy.
+func (c *Config) TeamSpendUpdatesUserSpend() bool {
+	return c == nil || c.IncludeTeamSpendInUserSpend == nil || *c.IncludeTeamSpendInUserSpend
 }
 
 // Validate checks configuration validity
