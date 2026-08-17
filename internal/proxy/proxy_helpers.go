@@ -315,7 +315,7 @@ func buildMetadata(hashedToken string, tokenInfo *litellmdb.TokenInfo, errorMsg 
 	return string(jsonBytes)
 }
 
-func addAIRSpendMetadata(metadata, eventID, providerResponseID string, isProxyRequest bool) string {
+func addAIRSpendMetadata(metadata, eventID, providerResponseID string, isProxyRequest bool, modelID, publicModelID string) string {
 	var doc map[string]interface{}
 	if json.Unmarshal([]byte(metadata), &doc) != nil {
 		doc = make(map[string]interface{})
@@ -330,6 +330,17 @@ func addAIRSpendMetadata(metadata, eventID, providerResponseID string, isProxyRe
 	spendMetadata["is_proxy_request"] = isProxyRequest
 	if providerResponseID != "" {
 		spendMetadata["provider_response_id"] = providerResponseID
+	}
+	// Only set when the client used a public alias (e.g. a "-highlimits"
+	// pricing tier) that differs from the model billing was resolved
+	// against, so spend rows for aliased models can be told apart after
+	// the fact. Deliberately kept out of model_map_information: in
+	// upstream LiteLLM that field's value is a model_info/pricing object
+	// resolved via litellm.model_cost, not an identifier string, and
+	// overloading it risks a type mismatch for any future consumer that
+	// parses it against that contract.
+	if publicModelID != "" && publicModelID != modelID {
+		spendMetadata["public_model_name"] = publicModelID
 	}
 	encoded, err := json.Marshal(doc)
 	if err != nil {
