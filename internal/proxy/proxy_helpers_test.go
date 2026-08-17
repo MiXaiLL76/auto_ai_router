@@ -271,6 +271,42 @@ func TestBuildMetadata(t *testing.T) {
 	})
 }
 
+func TestAddAIRSpendMetadata(t *testing.T) {
+	t.Run("no_alias", func(t *testing.T) {
+		result := addAIRSpendMetadata("{}", "event-1", "", false, "gpt-4o", "gpt-4o")
+		var m map[string]interface{}
+		err := json.Unmarshal([]byte(result), &m)
+		require.NoError(t, err)
+
+		spendMetadata, ok := m["spend_logs_metadata"].(map[string]interface{})
+		require.True(t, ok)
+		assert.Equal(t, "event-1", spendMetadata["air_event_id"])
+		assert.NotContains(t, spendMetadata, "public_model_name")
+	})
+
+	t.Run("with_public_alias", func(t *testing.T) {
+		result := addAIRSpendMetadata("{}", "event-2", "", false, "gemini-3-flash-preview", "google/gemini-3-flash-preview-highlimits")
+		var m map[string]interface{}
+		err := json.Unmarshal([]byte(result), &m)
+		require.NoError(t, err)
+
+		spendMetadata, ok := m["spend_logs_metadata"].(map[string]interface{})
+		require.True(t, ok)
+		assert.Equal(t, "google/gemini-3-flash-preview-highlimits", spendMetadata["public_model_name"])
+	})
+
+	t.Run("empty_public_model_id", func(t *testing.T) {
+		result := addAIRSpendMetadata("{}", "event-3", "", false, "gpt-4o", "")
+		var m map[string]interface{}
+		err := json.Unmarshal([]byte(result), &m)
+		require.NoError(t, err)
+
+		spendMetadata, ok := m["spend_logs_metadata"].(map[string]interface{})
+		require.True(t, ok)
+		assert.NotContains(t, spendMetadata, "public_model_name")
+	})
+}
+
 func TestExtractEndUser(t *testing.T) {
 	tests := []struct {
 		name    string
