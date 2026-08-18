@@ -67,6 +67,22 @@ func TestLoadModelPrices_GPT56LongContext(t *testing.T) {
 	assert.InDelta(t, 0.00001625, price.CacheCreationInputTokenCostAbove272k, 1e-12)
 }
 
+func TestLoadModelPrices_InputCostPerImage(t *testing.T) {
+	filePath := filepath.Join(t.TempDir(), "prices.json")
+	pricesJSON := `{
+		"gemini-3.1-flash-image-preview": {
+			"input_cost_per_image": 0.088113
+		}
+	}`
+	require.NoError(t, os.WriteFile(filePath, []byte(pricesJSON), 0o600))
+
+	prices, err := LoadModelPrices(filePath)
+	require.NoError(t, err)
+	price := prices["gemini-3.1-flash-image-preview"]
+	require.NotNil(t, price)
+	assert.InDelta(t, 0.088113, price.InputCostPerImage, 1e-12)
+}
+
 func TestLoadModelPrices_CachePricingExtensions(t *testing.T) {
 	filePath := filepath.Join(t.TempDir(), "prices.json")
 	pricesJSON := `{

@@ -26,6 +26,8 @@ func TestMapProviderType(t *testing.T) {
 		{"google_ai_studio", "google_ai_studio", config.ProviderTypeGemini},
 		{"cometapi", "cometapi", config.ProviderTypeCometAPI},
 		{"comet-api", "comet-api", config.ProviderTypeCometAPI},
+		{"sosana", "sosana", config.ProviderTypeSosana},
+		{"sosana-art", "sosana-art", config.ProviderTypeSosana},
 		{"proman", "proman", config.ProviderTypeProMan},
 		{"pro-man", "pro-man", config.ProviderTypeProMan},
 		{"xai", "xAI", config.ProviderTypeOpenAI},
@@ -129,6 +131,7 @@ func TestConvertPricingToModelPrice(t *testing.T) {
 	outputReasoning := 0.03
 	cacheRead := 0.04
 	cacheCreation := 0.05
+	inputImage := 0.4
 	outputImage := 0.5
 	outputImageToken := 0.6
 	inputAbove200k := 0.07
@@ -139,6 +142,7 @@ func TestConvertPricingToModelPrice(t *testing.T) {
 		OutputCostPerReasoningToken:       &outputReasoning,
 		CacheReadInputTokenCost:           &cacheRead,
 		CacheCreationInputTokenCost:       &cacheCreation,
+		InputCostPerImage:                 &inputImage,
 		OutputCostPerImage:                &outputImage,
 		OutputCostPerImageToken:           &outputImageToken,
 		InputCostPerTokenAbove200kTokens:  &inputAbove200k,
@@ -151,12 +155,39 @@ func TestConvertPricingToModelPrice(t *testing.T) {
 	assert.Equal(t, outputReasoning, price.OutputCostPerReasoningToken)
 	assert.Equal(t, cacheRead, price.InputCostPerCachedToken)
 	assert.Equal(t, cacheCreation, price.CacheCreationInputTokenCost)
+	assert.Equal(t, inputImage, price.InputCostPerImage)
 	assert.Equal(t, outputImage, price.OutputCostPerImage)
 	assert.Equal(t, outputImageToken, price.OutputCostPerImageToken)
 	assert.Equal(t, inputAbove200k, price.InputCostPerTokenAbove200k)
 
 	assert.Nil(t, convertPricingToModelPrice(&queries.CustomPricingLiteLLMParams{}))
 	assert.Nil(t, convertPricingToModelPrice(nil))
+}
+
+func TestConvertPricingToModelPrice_ImageOnly(t *testing.T) {
+	outputImage := 0.5
+
+	price := convertPricingToModelPrice(&queries.CustomPricingLiteLLMParams{
+		OutputCostPerImage: &outputImage,
+	})
+
+	require.NotNil(t, price)
+	assert.Equal(t, outputImage, price.OutputCostPerImage)
+	assert.Equal(t, 0.0, price.InputCostPerToken)
+	assert.Equal(t, 0.0, price.OutputCostPerToken)
+}
+
+func TestConvertPricingToModelPrice_InputImageOnly(t *testing.T) {
+	inputImage := 0.088113
+
+	price := convertPricingToModelPrice(&queries.CustomPricingLiteLLMParams{
+		InputCostPerImage: &inputImage,
+	})
+
+	require.NotNil(t, price)
+	assert.Equal(t, inputImage, price.InputCostPerImage)
+	assert.Equal(t, 0.0, price.InputCostPerToken)
+	assert.Equal(t, 0.0, price.OutputCostPerToken)
 }
 
 func TestConvertPricingToModelPrice_AllFields(t *testing.T) {
@@ -189,7 +220,8 @@ func TestConvertPricingToModelPrice_AllFields(t *testing.T) {
 	cacheCreationAbove1hrAbove200k := 0.0857
 	cacheReadAbove272k := 0.086
 	cacheCreationAbove272k := 0.087
-	cacheReadAudio := 0.088
+	inputImage := 0.088
+	cacheReadAudio := 0.089
 	outputImage := 0.09
 	outputImageToken := 0.10
 	searchContextCost := map[string]float64{
@@ -229,6 +261,7 @@ func TestConvertPricingToModelPrice_AllFields(t *testing.T) {
 		CacheCreationInputTokenCostAbove1hrAbove200kTokens: &cacheCreationAbove1hrAbove200k,
 		CacheReadInputTokenCostAbove272kTokens:             &cacheReadAbove272k,
 		CacheCreationInputTokenCostAbove272kTokens:         &cacheCreationAbove272k,
+		InputCostPerImage:                                  &inputImage,
 		CacheReadInputAudioTokenCost:                       &cacheReadAudio,
 		OutputCostPerImage:                                 &outputImage,
 		OutputCostPerImageToken:                            &outputImageToken,
@@ -266,6 +299,7 @@ func TestConvertPricingToModelPrice_AllFields(t *testing.T) {
 	assert.Equal(t, cacheCreationAbove1hrAbove200k, price.CacheCreationInputTokenCostAbove1hrAbove200k)
 	assert.Equal(t, cacheReadAbove272k, price.CacheReadInputTokenCostAbove272k)
 	assert.Equal(t, cacheCreationAbove272k, price.CacheCreationInputTokenCostAbove272k)
+	assert.Equal(t, inputImage, price.InputCostPerImage)
 	assert.Equal(t, cacheReadAudio, price.CacheReadInputAudioTokenCost)
 	assert.Equal(t, outputImage, price.OutputCostPerImage)
 	assert.Equal(t, outputImageToken, price.OutputCostPerImageToken)

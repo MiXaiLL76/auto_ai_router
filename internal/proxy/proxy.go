@@ -24,6 +24,7 @@ import (
 	anthropicconv "github.com/mixaill76/auto_ai_router/internal/converter/anthropic"
 	promanutils "github.com/mixaill76/auto_ai_router/internal/converter/proman/utils"
 	"github.com/mixaill76/auto_ai_router/internal/converter/responses"
+	"github.com/mixaill76/auto_ai_router/internal/converter/sosana"
 	"github.com/mixaill76/auto_ai_router/internal/httputil"
 	"github.com/mixaill76/auto_ai_router/internal/kafkalog"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb"
@@ -81,7 +82,7 @@ func (p *Proxy) applyCredentialCompatibilityRouting(
 		return true
 	}
 
-	reason, provider := unsupportedCredentialRequest(cred, prepared.body, modelID)
+	reason, provider := unsupportedCredentialRequest(cred, prepared.body, modelID, prepared.basePath, r.Header.Get("Content-Type"), prepared.realModelID)
 	if reason == "" {
 		return true
 	}
@@ -179,9 +180,6 @@ func (p *Proxy) nextPrimaryAfterUnsupportedCredential(
 			return nil, credentialPreparedRequest{}, false
 		}
 		triedCreds[candidate.Name] = true
-		if candidateReason, _ := unsupportedCredentialRequest(candidate, prepared.baseBody, modelID); candidateReason != "" {
-			continue
-		}
 
 		nextReq, prepErr := p.prepareRequestForCredential(
 			r,
@@ -205,6 +203,9 @@ func (p *Proxy) nextPrimaryAfterUnsupportedCredential(
 				"error", prepErr)
 			continue
 		}
+		if candidateReason, _ := unsupportedCredentialRequest(candidate, nextReq.body, modelID, prepared.basePath, r.Header.Get("Content-Type"), nextReq.realModelID); candidateReason != "" {
+			continue
+		}
 
 		p.logger.InfoContext(r.Context(), "Skipping incompatible credential for unsupported request",
 			"credential", currentCred.Name,
@@ -223,7 +224,13 @@ func (p *Proxy) nextPrimaryAfterUnsupportedCredential(
 	return nil, credentialPreparedRequest{}, false
 }
 
-func unsupportedCredentialRequest(cred *config.CredentialConfig, body []byte, selectedModel string) (string, string) {
+func unsupportedCredentialRequest(cred *config.CredentialConfig, body []byte, selectedModel string, path string, contentType string, realModelID string) (string, string) {
+	if cred != nil && cred.Type == config.ProviderTypeSosana {
+		if reason := sosana.UnsupportedModel(realModelID); reason != "" {
+			return reason, "Sosana"
+		}
+		return sosana.UnsupportedRequest(path, body, contentType), "Sosana"
+	}
 	if promanutils.IsCredential(cred) {
 		return promanutils.UnsupportedRequest(body, selectedModel), "ProMan"
 	}
@@ -928,7 +935,19 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 	proxyBody = prepared.proxyBody
 	realModelID = prepared.realModelID
 	cred = prepared.cred
+	if cred.Type == config.ProviderTypeSosana && (isImageGeneration || isImageEdit) {
+		if _, concreteModelID, err := p.buildSosanaCreateBody(body, r.Header.Get("Content-Type"), realModelID, isImageEdit); err == nil && concreteModelID != "" {
+			realModelID = concreteModelID
+			prepared.realModelID = concreteModelID
+			logCtx.RealModelID = concreteModelID
+		}
+	}
 	if !p.enforceBudgetAndRateLimits(w, r, logCtx, modelID, realModelID, body) {
+		return
+	}
+
+	if cred.Type == config.ProviderTypeSosana {
+		p.handleSosanaRequest(w, r, body, cred, modelID, realModelID, isImageGeneration, isImageEdit, logCtx, start)
 		return
 	}
 
@@ -1080,6 +1099,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 		p.metrics.RecordRequest(cred.Name, r.URL.Path, modelID, proxyResp.StatusCode, time.Since(start))
 
 		// Write response (streaming or non-streaming)
+		maskProxyError := proxyResp.StatusCode >= 400 && shouldMaskProxyResponseErrors(cred, proxyResp)
 		tokenUsageOptions := tokenUsageExtractionOptionsForResponse(cred, proxyResp.Headers)
 		// Populated in the non-streaming branch below via extractOpenAITokensAndUsage
 		// (plan item G — one shared decode of proxyResp.Body instead of the
@@ -1090,6 +1110,30 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 		if proxyResp.IsStreaming {
 			p.logger.DebugContext(r.Context(), "Response is streaming (no retry for streaming)",
 				"credential", cred.Name, "status", proxyResp.StatusCode)
+			if maskProxyError {
+				if proxyResp.StreamBody != nil {
+					_ = proxyResp.StreamBody.Close()
+				}
+				body := maskedUpstreamErrorBody(proxyResp.StatusCode)
+				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set("Content-Length", fmt.Sprintf("%d", len(body)))
+				if logCtx.IsProxyRequest && logCtx.ActualCredentialName != "" {
+					w.Header().Set("X-Credential-Name", logCtx.ActualCredentialName)
+				}
+				w.WriteHeader(proxyResp.StatusCode)
+				_, _ = w.Write(body)
+				logCtx.Status = "failure"
+				logCtx.HTTPStatus = proxyResp.StatusCode
+				logCtx.ErrorMsg = "Upstream provider error"
+				logCtx.TargetURL = cred.BaseURL
+				p.logUpstreamError(r.Context(), "Proxy request completed with masked streaming error status", proxyResp.StatusCode, cred, modelID, nil,
+					"url", cred.BaseURL,
+					"streaming", true,
+					"actual_credential", logCtx.ActualCredentialName,
+					"response_body_masked", true,
+					"request_id", logCtx.RequestID)
+				return
+			}
 			streamCompleted := false
 
 			if prepared.convertedMessages && proxyResp.StatusCode >= 200 && proxyResp.StatusCode < 300 {
@@ -1214,6 +1258,10 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 				p.setSessionBinding(logCtx.SessionID, modelID, cred.Name)
 			}
 		} else {
+			if proxyResp.StatusCode >= 400 && shouldMaskProxyResponseErrors(cred, proxyResp) {
+				maskProxyErrorResponse(proxyResp)
+			}
+
 			// Save passthrough Responses API response or convert Chat Completions response if needed
 			if prepared.convertedMessages && proxyResp.StatusCode >= 200 && proxyResp.StatusCode < 300 {
 				messagesBody, convErr := anthropicconv.ChatToMessages(proxyResp.Body, prepared.messagesMetadata)
@@ -1304,11 +1352,18 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 			// Final error returned to the client — single unified ERROR record.
 			// For streaming responses the body was forwarded to the client and is
 			// not available here (response_body is omitted).
-			p.logUpstreamError(r.Context(), "Proxy request completed with error status", proxyResp.StatusCode, cred, modelID, proxyResp.Body,
+			proxyErrorBody := proxyResp.Body
+			extra := []any{
 				"url", cred.BaseURL,
 				"streaming", proxyResp.IsStreaming,
 				"actual_credential", logCtx.ActualCredentialName,
-				"request_id", logCtx.RequestID)
+				"request_id", logCtx.RequestID,
+			}
+			if shouldMaskProxyResponseErrors(cred, proxyResp) {
+				proxyErrorBody = nil
+				extra = append(extra, "response_body_masked", true)
+			}
+			p.logUpstreamError(r.Context(), "Proxy request completed with error status", proxyResp.StatusCode, cred, modelID, proxyErrorBody, extra...)
 		}
 		logCtx.HTTPStatus = proxyResp.StatusCode
 		logCtx.TargetURL = cred.BaseURL
@@ -1865,7 +1920,13 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 				}
 				args = appendResponseBodyForLogs(args, cred, decodedBody)
 				p.logger.ErrorContext(r.Context(), "Failed to transform provider response to OpenAI format", args...)
-				finalResponseBody = []byte(decodedBody)
+				if shouldMaskUpstreamErrors(cred) {
+					resp.StatusCode = http.StatusBadGateway
+					finalResponseBody = maskedUpstreamErrorBody(resp.StatusCode)
+					resp.Header.Set("Content-Type", "application/json")
+				} else {
+					finalResponseBody = []byte(decodedBody)
+				}
 			} else {
 				finalResponseBody = convertedBody
 				tokenUsageOptions.AudioInputIncludesCachedAudio = false
@@ -1908,7 +1969,12 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 				}
 				args = appendResponseBodyForLogs(args, cred, decodedBody)
 				p.logger.ErrorContext(r.Context(), "Failed to convert native Responses API response", args...)
-				// finalResponseBody already holds decodedBody — return as-is
+				if shouldMaskUpstreamErrors(cred) {
+					resp.StatusCode = http.StatusBadGateway
+					finalResponseBody = maskedUpstreamErrorBody(resp.StatusCode)
+					bodyForTokenExtraction = finalResponseBody
+					resp.Header.Set("Content-Type", "application/json")
+				}
 			} else {
 				applyResponsesMetadata(nativeResp, prepared.responsesMetadata)
 				if enriched, marshalErr := json.Marshal(nativeResp); marshalErr == nil {
@@ -1945,7 +2011,12 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 				p.logger.ErrorContext(r.Context(), "Failed to convert to Responses API format",
 					"credential", cred.Name, "model", modelID, "error", convErr,
 					"request_id", logCtx.RequestID)
-				// fallback: use Chat Completions body
+				if shouldMaskUpstreamErrors(cred) {
+					resp.StatusCode = http.StatusBadGateway
+					finalResponseBody = maskedUpstreamErrorBody(resp.StatusCode)
+					bodyForTokenExtraction = finalResponseBody
+					resp.Header.Set("Content-Type", "application/json")
+				}
 			} else {
 				// Enrich the response with request-echoed fields (store, previous_response_id,
 				// metadata) for both the client payload and the store record.

@@ -34,7 +34,7 @@ graph LR
 
 ## Features
 
-- **Multi-provider routing** — OpenAI, Vertex AI, Gemini AI Studio, Anthropic, Comet API
+- **Multi-provider routing** — OpenAI, Vertex AI, Gemini AI Studio, Anthropic, Comet API, Sosana.art images
 - **AIR chains** — forward to other Auto AI Router instances as fallback
 - **Round-robin balancing** — distribute load across multiple credentials
 - **Two-level rate limiting** — per-credential RPM/TPM + per-model limits

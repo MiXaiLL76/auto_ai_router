@@ -46,14 +46,17 @@ func appendResponseBodyForLogs(args []any, cred *config.CredentialConfig, body s
 	if shouldMaskUpstreamErrors(cred) {
 		return append(args,
 			"response_body_masked", true,
-			"response_body", body,
+			"response_body", logger.TruncateLongFields(body, 500),
 		)
 	}
 	return append(args, "response_body", logger.TruncateLongFields(body, 500))
 }
 
 func shouldMaskUpstreamErrors(cred *config.CredentialConfig) bool {
-	return isCometAPICredential(cred) || promanutils.IsCredential(cred)
+	if cred == nil {
+		return false
+	}
+	return isCometAPICredential(cred) || isSosanaCredential(cred) || promanutils.IsCredential(cred)
 }
 
 func isCometAPICredential(cred *config.CredentialConfig) bool {
@@ -84,6 +87,19 @@ func isProviderHost(rawBaseURL, domain string) bool {
 	}
 	host := strings.TrimSuffix(strings.ToLower(u.Hostname()), ".")
 	return host == domain || strings.HasSuffix(host, "."+domain)
+}
+
+func isSosanaCredential(cred *config.CredentialConfig) bool {
+	if cred == nil {
+		return false
+	}
+	if cred.Type == config.ProviderTypeSosana {
+		return true
+	}
+	name := strings.ToLower(cred.Name)
+	return isProviderHost(cred.BaseURL, "sosana.art") ||
+		containsSosanaMarker(name) ||
+		containsSosanaMarker(cred.BaseURL)
 }
 
 // logStreamHandlerError logs a streaming handler failure. Client disconnects are

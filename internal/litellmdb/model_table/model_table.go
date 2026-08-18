@@ -300,6 +300,8 @@ func mapProviderType(provider string) config.ProviderType {
 		return config.ProviderTypeGemini
 	case strings.Contains(p, "cometapi") || strings.Contains(p, "comet-api"):
 		return config.ProviderTypeCometAPI
+	case strings.Contains(p, "sosana"):
+		return config.ProviderTypeSosana
 	case strings.Contains(p, "proman") || strings.Contains(p, "pro-man") || strings.Contains(p, "pro_man"):
 		return config.ProviderTypeProMan
 	case strings.Contains(p, "xai"):
@@ -394,7 +396,9 @@ func convertPricingToModelPrice(p *queries.CustomPricingLiteLLMParams) *manager.
 	if p == nil {
 		return nil
 	}
-	if p.InputCostPerToken == nil && p.OutputCostPerToken == nil && len(p.SearchContextCostPerQuery) == 0 {
+	if p.InputCostPerToken == nil && p.OutputCostPerToken == nil &&
+		p.InputCostPerImage == nil && p.OutputCostPerImage == nil && p.OutputCostPerImageToken == nil &&
+		len(p.SearchContextCostPerQuery) == 0 {
 		return nil
 	}
 
@@ -485,6 +489,9 @@ func convertPricingToModelPrice(p *queries.CustomPricingLiteLLMParams) *manager.
 	}
 	if p.CacheCreationInputTokenCostAbove272kTokens != nil {
 		price.CacheCreationInputTokenCostAbove272k = *p.CacheCreationInputTokenCostAbove272kTokens
+	}
+	if p.InputCostPerImage != nil {
+		price.InputCostPerImage = *p.InputCostPerImage
 	}
 	if p.CacheReadInputAudioTokenCost != nil {
 		price.CacheReadInputAudioTokenCost = *p.CacheReadInputAudioTokenCost

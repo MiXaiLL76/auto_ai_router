@@ -83,6 +83,15 @@ credentials:
     rpm: 60
     tpm: -1
 
+  # Sosana.art image generation API (OpenAI Images-compatible through the router)
+  # Async image tasks can run longer than short chat requests; keep request_timeout/write_timeout >= 2m.
+  - name: "sosana_images"
+    type: "sosana"
+    api_key: "os.environ/SOSANA_API_KEY"
+    base_url: "https://sosana.art"
+    rpm: 60
+    tpm: -1
+
   # CheapGPT / AIProductiv using the Anthropic-compatible Messages API
   - name: "cheapgpt_anthropic"
     type: "anthropic"
@@ -112,6 +121,14 @@ models:
     credential: vertex_ai
     rpm: 100
     tpm: 50000
+
+  # Sosana.art image model exposed through /v1/images/generations and /v1/images/edits.
+  # image_size selects banana-2-1k/2k/4k-compliant dynamically; default is 1K.
+  - name: "google/gemini-3.1-flash-image-preview"
+    model: "banana-2-{image_size}-compliant"
+    credential: sosana_images
+    rpm: 60
+    tpm: -1
 
   # Comet API Claude aliases for public model names.
   - name: "anthropic/claude-haiku-4.5"

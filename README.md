@@ -7,11 +7,11 @@
 [![GitHub Pages](https://img.shields.io/badge/docs-GitHub%20Pages-blue)](https://mixaill76.github.io/auto_ai_router/)
 [![license](https://img.shields.io/github/license/MiXaiLL76/auto_ai_router.svg)](https://github.com/MiXaiLL76/auto_ai_router/blob/main/LICENSE)
 
-High-performance proxy router for LLM APIs with automatic load balancing, rate limiting, and fail2ban protection. Routes requests to OpenAI, Vertex AI, Gemini AI Studio, Anthropic, Comet API, and other Auto AI Router instances.
+High-performance proxy router for LLM and image APIs with automatic load balancing, rate limiting, and fail2ban protection. Routes requests to OpenAI, Vertex AI, Gemini AI Studio, Anthropic, Comet API, Sosana.art images, and other Auto AI Router instances.
 
 ## Key Features
 
-- **Multi-provider support** — OpenAI, Vertex AI, Gemini, Anthropic, Comet API, Proxy chains
+- **Multi-provider support** — OpenAI, Vertex AI, Gemini, Anthropic, Comet API, Sosana.art images, Proxy chains
 - **Round-robin load balancing** — across multiple credentials per model
 - **Rate limiting** — per-credential and per-model RPM/TPM controls
 - **Fail2ban** — automatic provider banning on repeated errors

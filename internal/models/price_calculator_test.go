@@ -359,6 +359,61 @@ func TestCalculateTokenCosts_NilPrice(t *testing.T) {
 	assert.Nil(t, costs)
 }
 
+func TestCalculateTokenCosts_ImageCount(t *testing.T) {
+	usage := &converter.TokenUsage{
+		ImageCount: 2,
+	}
+	price := &ModelPrice{
+		OutputCostPerImage: 0.05,
+	}
+
+	costs := CalculateTokenCosts(usage, price)
+
+	assert.NotNil(t, costs)
+	assert.InDelta(t, 0.10, costs.ImageCost, 1e-9)
+	assert.InDelta(t, 0.10, costs.TotalCost, 1e-9)
+}
+
+func TestCalculateTokenCosts_ImageCountUsesInputImageFallback(t *testing.T) {
+	usage := &converter.TokenUsage{ImageCount: 1}
+	price := &ModelPrice{InputCostPerImage: 0.088113}
+
+	costs := CalculateTokenCosts(usage, price)
+
+	require.NotNil(t, costs)
+	assert.InDelta(t, 0.088113, costs.ImageCost, 1e-12)
+	assert.InDelta(t, 0.088113, costs.TotalCost, 1e-12)
+}
+
+func TestCalculateTokenCosts_OutputImagePriceTakesPriority(t *testing.T) {
+	usage := &converter.TokenUsage{ImageCount: 1}
+	price := &ModelPrice{
+		InputCostPerImage:  0.088113,
+		OutputCostPerImage: 0.09,
+	}
+
+	costs := CalculateTokenCosts(usage, price)
+
+	require.NotNil(t, costs)
+	assert.InDelta(t, 0.09, costs.ImageCost, 1e-12)
+	assert.InDelta(t, 0.09, costs.TotalCost, 1e-12)
+}
+
+func TestCalculateTokenCosts_ImageCountUsesImageTokenFallback(t *testing.T) {
+	usage := &converter.TokenUsage{
+		ImageCount: 3,
+	}
+	price := &ModelPrice{
+		OutputCostPerImageToken: 0.02,
+	}
+
+	costs := CalculateTokenCosts(usage, price)
+
+	assert.NotNil(t, costs)
+	assert.InDelta(t, 0.06, costs.ImageCost, 1e-9)
+	assert.InDelta(t, 0.06, costs.TotalCost, 1e-9)
+}
+
 func TestModelPrice_CalculateCost(t *testing.T) {
 	usage := &converter.TokenUsage{
 		PromptTokens:     100,

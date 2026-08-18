@@ -830,6 +830,7 @@ func TestProviderType_IsValid(t *testing.T) {
 		{"openai", ProviderTypeOpenAI, true},
 		{"vertex-ai", ProviderTypeVertexAI, true},
 		{"cometapi", ProviderTypeCometAPI, true},
+		{"sosana", ProviderTypeSosana, true},
 		{"air", ProviderTypeAIR, true},
 		{"proman", ProviderTypeProMan, true},
 		{"invalid", ProviderType("azure"), false},
@@ -889,6 +890,33 @@ rpm: 60
 	assert.Equal(t, ProviderTypeCometAPI, cred.Type)
 }
 
+func TestCredentialConfig_NormalizeSosanaProviderType(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+	}{
+		{"canonical", "sosana"},
+		{"dash alias", "sosana-art"},
+		{"underscore alias", "sosana_art"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var cred CredentialConfig
+			err := yaml.Unmarshal([]byte(`
+name: sosana
+type: `+tt.raw+`
+api_key: key
+base_url: https://sosana.art
+rpm: 60
+`), &cred)
+
+			require.NoError(t, err)
+			assert.Equal(t, ProviderTypeSosana, cred.Type)
+		})
+	}
+}
+
 func TestCredentialConfig_NormalizeAIRProviderTypeAliases(t *testing.T) {
 	tests := []struct {
 		name string
@@ -913,6 +941,44 @@ rpm: 60
 			require.NoError(t, err)
 			assert.Equal(t, ProviderTypeAIR, cred.Type)
 			assert.True(t, cred.IsProxyLike())
+		})
+	}
+}
+
+func TestConfig_Validate_SosanaRequiresAPIKeyAndBaseURL(t *testing.T) {
+	tests := []struct {
+		name    string
+		apiKey  string
+		baseURL string
+		wantErr string
+	}{
+		{name: "valid", apiKey: "key", baseURL: "https://sosana.art"},
+		{name: "missing api key", baseURL: "https://sosana.art", wantErr: "api_key is required"},
+		{name: "missing base url", apiKey: "key", wantErr: "base_url is required"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &Config{
+				Server: ServerConfig{
+					Port:           8080,
+					MaxBodySizeMB:  10,
+					MasterKey:      "test-key",
+					RequestTimeout: 30 * time.Second,
+				},
+				Credentials: []CredentialConfig{
+					{Name: "sosana", Type: ProviderTypeSosana, APIKey: tt.apiKey, BaseURL: tt.baseURL, RPM: 10},
+				},
+				Fail2Ban: Fail2BanConfig{MaxAttempts: 3},
+			}
+
+			err := cfg.Validate()
+			if tt.wantErr == "" {
+				assert.NoError(t, err)
+			} else {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.wantErr)
+			}
 		})
 	}
 }
@@ -1362,6 +1428,42 @@ monitoring:
 	cfg, err := Load(configPath)
 	require.NoError(t, err)
 	assert.Equal(t, 2, cfg.Server.MaxProviderRetries, "Default MaxProviderRetries should be 2")
+}
+
+func TestLoad_ServerTimeoutDefaults(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.yaml")
+
+	configContent := `
+server:
+  port: 8080
+  max_body_size_mb: 10
+  master_key: "sk-test"
+
+fail2ban:
+  max_attempts: 3
+  ban_duration: permanent
+  error_codes: [401]
+
+credentials:
+  - name: "test"
+    type: "openai"
+    api_key: "sk-test"
+    base_url: "https://api.openai.com"
+    rpm: 10
+
+monitoring:
+  prometheus_enabled: false
+`
+	err := os.WriteFile(configPath, []byte(configContent), 0644)
+	require.NoError(t, err)
+
+	cfg, err := Load(configPath)
+	require.NoError(t, err)
+	assert.Equal(t, 60*time.Second, cfg.Server.RequestTimeout)
+	assert.Equal(t, 60*time.Second, cfg.Server.ReadTimeout)
+	assert.Equal(t, 60*time.Second, cfg.Server.WriteTimeout)
+	assert.Equal(t, 2*time.Minute, cfg.Server.IdleTimeout)
 }
 
 func TestLoad_MaxProviderRetries_Custom(t *testing.T) {
