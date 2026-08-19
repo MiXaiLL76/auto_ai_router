@@ -14,6 +14,7 @@ import (
 	dbmodels "github.com/mixaill76/auto_ai_router/internal/litellmdb/models"
 	"github.com/mixaill76/auto_ai_router/internal/scope"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestNew(t *testing.T) {
@@ -1445,6 +1446,64 @@ func TestModelPriceRegistry_GetPrice_NotFound(t *testing.T) {
 
 	result = registry.GetPrice("claude-3-opus")
 	assert.Nil(t, result, "GetPrice should return nil for a model not in the registry")
+}
+
+func TestModelPriceRegistry_GetPriceAny_RawKeyedProviderPrefixWinsOverNormalizedSibling(t *testing.T) {
+	registry := NewModelPriceRegistry()
+
+	// Mirrors LoadModelPrices' output for a price file containing both
+	// "gpt-5-mini" and "openrouter/gpt-5-mini": the provider-prefixed entry
+	// is indexed under its own raw key in addition to the shared normalized
+	// key ("gpt-5-mini"), which the plain entry occupies.
+	registry.Update(map[string]*ModelPrice{
+		"gpt-5-mini":            {InputCostPerToken: 0.000000225},
+		"openrouter/gpt-5-mini": {InputCostPerToken: 0.000000325},
+	})
+
+	// publicModelID="openrouter/gpt-5-mini", modelID="gpt-5-mini-or", realModelID="gpt-5-mini"
+	matched, price := registry.GetPriceAny("openrouter/gpt-5-mini", "gpt-5-mini-or", "gpt-5-mini")
+	require.NotNil(t, price)
+	assert.Equal(t, "openrouter/gpt-5-mini", matched)
+	assert.Equal(t, 0.000000325, price.InputCostPerToken)
+}
+
+func TestModelPriceRegistry_GetPriceAny_NormalizedFallbackStillWinsWhenNoRawMatch(t *testing.T) {
+	registry := NewModelPriceRegistry()
+
+	// Mirrors the highlimits case: only the plain, normalized-form price
+	// entry exists. The first candidate ("gemini-3-flash-preview-highlimits")
+	// has no raw-keyed entry of its own, so it must fall through to the
+	// normalized form of the *second* candidate rather than matching nothing.
+	registry.Update(map[string]*ModelPrice{
+		"gemini-3-flash-preview": {InputCostPerToken: 0.00000045},
+	})
+
+	matched, price := registry.GetPriceAny("gemini-3-flash-preview-highlimits", "gemini-3-flash-preview", "gemini-3-flash-preview")
+	require.NotNil(t, price)
+	assert.Equal(t, "gemini-3-flash-preview", matched)
+	assert.Equal(t, 0.00000045, price.InputCostPerToken)
+}
+
+func TestModelPriceRegistry_GetPriceAny_SkipsEmptyCandidates(t *testing.T) {
+	registry := NewModelPriceRegistry()
+	registry.Update(map[string]*ModelPrice{
+		"gpt-4": {InputCostPerToken: 0.00003},
+	})
+
+	matched, price := registry.GetPriceAny("", "gpt-4", "")
+	require.NotNil(t, price)
+	assert.Equal(t, "gpt-4", matched)
+}
+
+func TestModelPriceRegistry_GetPriceAny_NoMatch(t *testing.T) {
+	registry := NewModelPriceRegistry()
+	registry.Update(map[string]*ModelPrice{
+		"gpt-4": {InputCostPerToken: 0.00003},
+	})
+
+	matched, price := registry.GetPriceAny("claude-3-opus", "unknown-model")
+	assert.Nil(t, price)
+	assert.Empty(t, matched)
 }
 
 func TestUpdateDBModels_PreservesStaticAndMapsDB(t *testing.T) {

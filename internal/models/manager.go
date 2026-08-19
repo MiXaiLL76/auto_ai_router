@@ -104,10 +104,28 @@ func NewModelPriceRegistry() *ModelPriceRegistry {
 	}
 }
 
-// GetPrice returns the price for a model, or nil if not found
+// GetPrice returns the price for a model, or nil if not found. Tries the raw
+// (case/whitespace-folded, unsplit) key before the normalized one — see
+// priceForCandidateLocked.
 func (r *ModelPriceRegistry) GetPrice(modelName string) *ModelPrice {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
+	return r.priceForCandidateLocked(modelName)
+}
+
+// priceForCandidateLocked resolves a single candidate against the registry.
+// It tries the raw form first (case/whitespace-folded only, "/" kept intact)
+// and falls back to the normalized form (provider prefix stripped). A price
+// entry deliberately keyed "provider/model" (e.g. "openrouter/gpt-5-mini")
+// is only reachable via its raw form, since its normalized form collides
+// with an unrelated sibling's own entry (e.g. plain "gpt-5-mini") — see
+// LoadModelPrices, which indexes such entries under both keys.
+func (r *ModelPriceRegistry) priceForCandidateLocked(modelName string) *ModelPrice {
+	if raw := strings.ToLower(strings.TrimSpace(modelName)); raw != "" {
+		if price := r.prices[raw]; price != nil {
+			return price
+		}
+	}
 	return r.prices[NormalizeModelName(modelName)]
 }
 
@@ -122,7 +140,7 @@ func (r *ModelPriceRegistry) GetPriceAny(modelNames ...string) (string, *ModelPr
 		if modelName == "" {
 			continue
 		}
-		if price := r.prices[NormalizeModelName(modelName)]; price != nil {
+		if price := r.priceForCandidateLocked(modelName); price != nil {
 			return modelName, price
 		}
 	}

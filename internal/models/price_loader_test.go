@@ -216,6 +216,61 @@ func TestLoadModelPrices_NormalizesModelNames(t *testing.T) {
 	assert.GreaterOrEqual(t, len(prices), 1)
 }
 
+func TestLoadModelPrices_IndexesProviderPrefixedEntryUnderRawKeyToo(t *testing.T) {
+	tmpDir := t.TempDir()
+	filePath := filepath.Join(tmpDir, "prices.json")
+
+	// "openrouter/gpt-5-mini" normalizes to the same bare name as the
+	// unrelated sibling entry "gpt-5-mini", so it must remain reachable
+	// under its own raw key as well.
+	pricesJSON := `{
+		"gpt-5-mini": {"input_cost_per_token": 0.000000225},
+		"openrouter/gpt-5-mini": {"input_cost_per_token": 0.000000325}
+	}`
+	err := os.WriteFile(filePath, []byte(pricesJSON), 0644)
+	require.NoError(t, err)
+
+	prices, err := LoadModelPrices("file://" + filePath)
+	require.NoError(t, err)
+
+	// The raw-keyed entry must always resolve to its own value, regardless
+	// of which entry the (unordered) JSON map is processed first.
+	raw := prices["openrouter/gpt-5-mini"]
+	require.NotNil(t, raw)
+	assert.Equal(t, 0.000000325, raw.InputCostPerToken)
+
+	// The shared normalized key ("gpt-5-mini") is last-writer-wins between
+	// the two colliding entries — pre-existing, order-dependent behavior
+	// this fix doesn't change — so only assert it's populated with one of
+	// the two known values, not which one.
+	bare := prices["gpt-5-mini"]
+	require.NotNil(t, bare)
+	assert.Contains(t, []float64{0.000000225, 0.000000325}, bare.InputCostPerToken)
+}
+
+func TestLoadModelPrices_RawKeyCollisionKeepsExistingEntry(t *testing.T) {
+	tmpDir := t.TempDir()
+	filePath := filepath.Join(tmpDir, "prices.json")
+
+	// Two raw JSON keys that fold to the same raw key must not panic or
+	// silently overwrite each other with a nil/inconsistent entry: exactly
+	// one of the two source values must win (map iteration order over the
+	// parsed JSON is unspecified, so we can't assert which).
+	pricesJSON := `{
+		"openrouter/gpt-5-mini": {"input_cost_per_token": 0.000000325},
+		"OpenRouter/GPT-5-Mini": {"input_cost_per_token": 0.000000999}
+	}`
+	err := os.WriteFile(filePath, []byte(pricesJSON), 0644)
+	require.NoError(t, err)
+
+	prices, err := LoadModelPrices("file://" + filePath)
+	require.NoError(t, err)
+
+	raw := prices["openrouter/gpt-5-mini"]
+	require.NotNil(t, raw)
+	assert.Contains(t, []float64{0.000000325, 0.000000999}, raw.InputCostPerToken)
+}
+
 func TestLoadFromFile_SizeLimit(t *testing.T) {
 	tmpDir := t.TempDir()
 	filePath := filepath.Join(tmpDir, "large.json")
