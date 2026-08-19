@@ -1506,6 +1506,86 @@ func TestModelPriceRegistry_GetPriceAny_NoMatch(t *testing.T) {
 	assert.Empty(t, matched)
 }
 
+// The following four tests use real production price values from
+// services' apps/prices/{client_a,default}.libsonnet (as of 2026-08-19) to
+// document two more live instances of the same alias-collision bug class as
+// openrouter/gpt-5-mini, found while auditing the full price lists:
+//   - client_a (Avito): openrouter/gpt-4.1 -> gpt-4.1-or
+//   - default (vsellm):  yandex/gpt-5.1 -> yandexgpt-5.1, which collides with
+//     OpenAI's own unrelated "gpt-5.1" entry in the same price file.
+//
+// Each pair has a "WithoutServicesFix" test proving the Go-side fix alone is
+// NOT sufficient — the price file also needs a raw-keyed entry matching the
+// exact public alias string — and a "OnceRawKeyAdded" test proving the fix
+// is complete once that entry exists.
+
+func TestModelPriceRegistry_GetPriceAny_OpenRouterGPT41CollidesWithPlainGPT41WithoutServicesFix(t *testing.T) {
+	registry := NewModelPriceRegistry()
+
+	// Real client_a.libsonnet values: 'gpt-4.1' (plain, discounted) vs
+	// 'gpt-4.1-or' (openrouter route, no discount, higher rate). No entry is
+	// keyed "openrouter/gpt-4.1" yet, so the raw-key lookup can't help.
+	registry.Update(map[string]*ModelPrice{
+		"gpt-4.1":    {InputCostPerToken: 0.0000018, OutputCostPerToken: 0.0000072, CacheReadInputTokenCost: 0.00000045},
+		"gpt-4.1-or": {InputCostPerToken: 0.0000026, OutputCostPerToken: 0.0000104, CacheReadInputTokenCost: 0.00000065},
+	})
+
+	matched, price := registry.GetPriceAny("openrouter/gpt-4.1", "gpt-4.1-or", "gpt-4.1-or")
+	require.NotNil(t, price)
+	assert.Equal(t, "openrouter/gpt-4.1", matched)
+	// Documents the bug: resolves to the wrong, plain gpt-4.1 price.
+	assert.Equal(t, 0.0000018, price.InputCostPerToken)
+}
+
+func TestModelPriceRegistry_GetPriceAny_OpenRouterGPT41ResolvesCorrectlyOnceRawKeyAdded(t *testing.T) {
+	registry := NewModelPriceRegistry()
+
+	registry.Update(map[string]*ModelPrice{
+		"gpt-4.1":            {InputCostPerToken: 0.0000018, OutputCostPerToken: 0.0000072, CacheReadInputTokenCost: 0.00000045},
+		"gpt-4.1-or":         {InputCostPerToken: 0.0000026, OutputCostPerToken: 0.0000104, CacheReadInputTokenCost: 0.00000065},
+		"openrouter/gpt-4.1": {InputCostPerToken: 0.0000026, OutputCostPerToken: 0.0000104, CacheReadInputTokenCost: 0.00000065},
+	})
+
+	matched, price := registry.GetPriceAny("openrouter/gpt-4.1", "gpt-4.1-or", "gpt-4.1-or")
+	require.NotNil(t, price)
+	assert.Equal(t, "openrouter/gpt-4.1", matched)
+	assert.Equal(t, 0.0000026, price.InputCostPerToken)
+}
+
+func TestModelPriceRegistry_GetPriceAny_YandexGPT51CollidesWithOpenAIGPT51WithoutServicesFix(t *testing.T) {
+	registry := NewModelPriceRegistry()
+
+	// Real default.libsonnet values: OpenAI's own 'gpt-5.1' (tiered
+	// input/output) vs Yandex's 'yandexgpt-5.1' (flat rate). No entry is
+	// keyed "yandex/gpt-5.1" yet.
+	registry.Update(map[string]*ModelPrice{
+		"gpt-5.1":       {InputCostPerToken: 0.000001625, OutputCostPerToken: 0.000013, CacheReadInputTokenCost: 0.0000001625},
+		"yandexgpt-5.1": {InputCostPerToken: 0.0000122353, OutputCostPerToken: 0.0000122353, CacheReadInputTokenCost: 0.0000122353},
+	})
+
+	matched, price := registry.GetPriceAny("yandex/gpt-5.1", "yandexgpt-5.1", "yandexgpt-5.1")
+	require.NotNil(t, price)
+	assert.Equal(t, "yandex/gpt-5.1", matched)
+	// Documents the bug: resolves to OpenAI's unrelated gpt-5.1 price —
+	// input cost alone is off by ~7.5x from the correct Yandex rate.
+	assert.Equal(t, 0.000001625, price.InputCostPerToken)
+}
+
+func TestModelPriceRegistry_GetPriceAny_YandexGPT51ResolvesCorrectlyOnceRawKeyAdded(t *testing.T) {
+	registry := NewModelPriceRegistry()
+
+	registry.Update(map[string]*ModelPrice{
+		"gpt-5.1":        {InputCostPerToken: 0.000001625, OutputCostPerToken: 0.000013, CacheReadInputTokenCost: 0.0000001625},
+		"yandexgpt-5.1":  {InputCostPerToken: 0.0000122353, OutputCostPerToken: 0.0000122353, CacheReadInputTokenCost: 0.0000122353},
+		"yandex/gpt-5.1": {InputCostPerToken: 0.0000122353, OutputCostPerToken: 0.0000122353, CacheReadInputTokenCost: 0.0000122353},
+	})
+
+	matched, price := registry.GetPriceAny("yandex/gpt-5.1", "yandexgpt-5.1", "yandexgpt-5.1")
+	require.NotNil(t, price)
+	assert.Equal(t, "yandex/gpt-5.1", matched)
+	assert.Equal(t, 0.0000122353, price.InputCostPerToken)
+}
+
 func TestUpdateDBModels_PreservesStaticAndMapsDB(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
 
