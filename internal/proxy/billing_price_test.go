@@ -7,7 +7,7 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func TestLookupBillingModelPrice_ModelIDFirst(t *testing.T) {
+func TestLookupBillingModelPrice_TwoPassLookup(t *testing.T) {
 	registry := models.NewModelPriceRegistry()
 	registry.Update(map[string]*models.ModelPrice{
 		"gpt-5-mini":    {InputCostPerToken: 2.25e-07, OutputCostPerToken: 1.8e-06},
@@ -15,15 +15,15 @@ func TestLookupBillingModelPrice_ModelIDFirst(t *testing.T) {
 	})
 
 	tests := []struct {
-		name           string
-		publicModelID  string
-		modelID        string
-		realModelID    string
-		wantModelID    string
-		wantInputCost  float64
+		name          string
+		publicModelID string
+		modelID       string
+		realModelID   string
+		wantModelID   string
+		wantInputCost float64
 	}{
 		{
-			name:          "openrouter/gpt-5-mini resolves to gpt-5-mini-or (not gpt-5-mini)",
+			name:          "openrouter/gpt-5-mini: raw miss on publicModelID, raw hit on modelID",
 			publicModelID: "openrouter/gpt-5-mini",
 			modelID:       "gpt-5-mini-or",
 			realModelID:   "gpt-5-mini",
@@ -31,7 +31,7 @@ func TestLookupBillingModelPrice_ModelIDFirst(t *testing.T) {
 			wantInputCost: 3.25e-07,
 		},
 		{
-			name:          "openai/gpt-5-mini resolves to gpt-5-mini",
+			name:          "openai/gpt-5-mini: raw miss, normalised hit on publicModelID",
 			publicModelID: "openai/gpt-5-mini",
 			modelID:       "gpt-5-mini",
 			realModelID:   "gpt-5-mini",
@@ -64,6 +64,25 @@ func TestLookupBillingModelPrice_ModelIDFirst(t *testing.T) {
 			assert.Equal(t, tt.wantInputCost, gotPrice.InputCostPerToken)
 		})
 	}
+}
+
+func TestLookupBillingModelPrice_RawEntryBeatsNormalised(t *testing.T) {
+	registry := models.NewModelPriceRegistry()
+	registry.Update(map[string]*models.ModelPrice{
+		"gemini-3-flash-preview":                   {InputCostPerToken: 4.5e-07, OutputCostPerToken: 2.7e-06},
+		"google/gemini-3-flash-preview-highlimits": {InputCostPerToken: 9e-07, OutputCostPerToken: 5.4e-06},
+	})
+
+	gotModelID, gotPrice := lookupBillingModelPrice(
+		registry,
+		"google/gemini-3-flash-preview-highlimits",
+		"gemini-3-flash-preview",
+		"",
+	)
+	// publicModelID raw key matches first — highlimits price wins.
+	assert.Equal(t, "google/gemini-3-flash-preview-highlimits", gotModelID)
+	assert.NotNil(t, gotPrice)
+	assert.Equal(t, 9e-07, gotPrice.InputCostPerToken)
 }
 
 func TestLookupBillingModelPrice_NilRegistry(t *testing.T) {

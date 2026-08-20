@@ -3,11 +3,19 @@ package proxy
 import "github.com/mixaill76/auto_ai_router/internal/models"
 
 // lookupBillingModelPrice resolves the price row to bill a request against.
-// Candidates are tried strictly in the order modelID, publicModelID,
-// realModelID — the alias-resolved canonical name takes priority over the
-// raw client-facing name, because provider-prefixed publicModelID values
-// (e.g. "openrouter/gpt-5-mini") normalise to a stripped key ("gpt-5-mini")
-// that may collide with a cheaper sibling entry, causing under-billing.
+// Candidates are tried strictly in the order publicModelID, modelID,
+// realModelID (client-facing alias first, provider deployment name last) —
+// callers must preserve this argument order, since it IS the priority
+// contract; passing the strings in a different order silently changes which
+// price wins.
+//
+// The underlying GetPriceAny uses a two-pass strategy: exact (raw lowercase)
+// keys are checked before normalised (prefix-stripped) keys. This ensures
+// that a provider-prefixed publicModelID whose normalised form collides
+// with a cheaper sibling (e.g. "openrouter/gpt-5-mini" → "gpt-5-mini")
+// never overshadows the correct modelID entry, while explicit raw entries
+// like "google/gemini-3-flash-preview-highlights" still win over the
+// normalised fallback.
 func lookupBillingModelPrice(registry *models.ModelPriceRegistry, publicModelID, modelID, realModelID string) (string, *models.ModelPrice) {
 	if registry == nil {
 		return modelID, nil
@@ -17,7 +25,7 @@ func lookupBillingModelPrice(registry *models.ModelPriceRegistry, publicModelID,
 		realModelID = ""
 	}
 
-	if matchedID, modelPrice := registry.GetPriceAny(modelID, publicModelID, realModelID); modelPrice != nil {
+	if matchedID, modelPrice := registry.GetPriceAny(publicModelID, modelID, realModelID); modelPrice != nil {
 		return matchedID, modelPrice
 	}
 

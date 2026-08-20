@@ -115,9 +115,37 @@ func (r *ModelPriceRegistry) GetPrice(modelName string) *ModelPrice {
 // single read lock, returning the first match in the given priority order.
 // This avoids a concurrent Update() straddling two map generations, which
 // can happen when callers issue separate GetPrice calls per candidate.
+//
+// The lookup uses a two-pass strategy to handle provider-prefixed model names
+// correctly:
+//
+//  1. Pass 1 (raw): try each candidate as a raw lowercase key (no prefix
+//     stripping). This ensures explicit entries like "google/gemini-3-flash-
+//     preview-highlimits" in the price file are found before any normalised
+//     fallback.
+//
+//  2. Pass 2 (normalised): try each candidate with NormalizeModelName (which
+//     strips provider prefixes). This is the legacy behaviour that matches
+//     bare model names like "gpt-5-mini-or".
+//
+// Raw matches always beat normalised matches, preserving the publicModelID >
+// modelID > realModelID priority contract.
 func (r *ModelPriceRegistry) GetPriceAny(modelNames ...string) (string, *ModelPrice) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
+
+	// Pass 1: raw lowercase keys (exact match, no prefix stripping)
+	for _, modelName := range modelNames {
+		if modelName == "" {
+			continue
+		}
+		raw := strings.ToLower(strings.TrimSpace(modelName))
+		if price := r.prices[raw]; price != nil {
+			return modelName, price
+		}
+	}
+
+	// Pass 2: normalised keys (prefix-stripped)
 	for _, modelName := range modelNames {
 		if modelName == "" {
 			continue
@@ -126,6 +154,7 @@ func (r *ModelPriceRegistry) GetPriceAny(modelNames ...string) (string, *ModelPr
 			return modelName, price
 		}
 	}
+
 	return "", nil
 }
 
@@ -136,6 +165,9 @@ func (r *ModelPriceRegistry) Update(prices map[string]*ModelPrice) {
 	r.prices = make(map[string]*ModelPrice)
 	for k, v := range prices {
 		r.prices[k] = v
+		// Also store raw lowercase key for two-pass billing lookup.
+		raw := strings.ToLower(strings.TrimSpace(k))
+		r.prices[raw] = v
 	}
 	r.lastUpdate = utils.NowUTC()
 }
@@ -148,6 +180,9 @@ func (r *ModelPriceRegistry) MergeDB(dbPrices map[string]*ModelPrice) {
 	defer r.mu.Unlock()
 	for k, v := range dbPrices {
 		r.prices[k] = v
+		// Also store raw lowercase key for two-pass billing lookup.
+		raw := strings.ToLower(strings.TrimSpace(k))
+		r.prices[raw] = v
 	}
 	r.lastUpdate = utils.NowUTC()
 }

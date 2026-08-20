@@ -53,7 +53,10 @@ func LoadModelPrices(link string) (map[string]*ModelPrice, error) {
 		return nil, fmt.Errorf("failed to parse model prices JSON: %w", err)
 	}
 
-	// Normalize model names (convert keys to normalized format)
+	// Normalize model names (convert keys to normalized format) and also
+	// store raw lowercase keys for two-pass billing lookup. Raw keys allow
+	// GetPriceAny to find exact matches (e.g. "google/gemini-3-flash-preview-
+	// highlimits") before falling back to normalised prefix-stripped names.
 	normalizedPrices := make(map[string]*ModelPrice)
 	normalizedSources := make(map[string]string) // normalized name -> original full name (for collision detection)
 	for fullName, price := range rawPrices {
@@ -67,6 +70,12 @@ func LoadModelPrices(link string) (map[string]*ModelPrice, error) {
 				price.LiteLLMProvider = inferProviderFromModelName(fullName)
 			}
 		}
+
+		// Store raw lowercase key so GetPriceAny pass-1 can find it.
+		raw := strings.ToLower(strings.TrimSpace(fullName))
+		normalizedPrices[raw] = price
+
+		// Store normalised key (prefix-stripped) for pass-2 fallback.
 		normalized := NormalizeModelName(fullName)
 		if existingFullName, exists := normalizedSources[normalized]; exists {
 			slog.Warn("normalized model name collision: entry will be overwritten",
