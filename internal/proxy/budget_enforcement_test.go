@@ -77,12 +77,13 @@ func TestEstimateRequestCostUsesPublicModelPriceBeforeRealModelPrice(t *testing.
 	assert.InDelta(t, 0.10, cost, 0.000000001)
 }
 
-// TestEstimateRequestCostPrefersPublicModelPriceOverDistinctModelIDPrice
-// covers the 3-way-divergent case (PublicModelID != ModelID != RealModelID,
-// all three priced) that the earlier two-ID-collision tests couldn't
-// distinguish: it proves PublicModelID wins specifically over ModelID, not
-// just over RealModelID.
-func TestEstimateRequestCostPrefersPublicModelPriceOverDistinctModelIDPrice(t *testing.T) {
+// TestEstimateRequestCostPrefersModelIDOverPublicModelPrice verifies that
+// modelID (the alias-resolved canonical name) takes billing priority over
+// publicModelID (the raw client-facing name). This is critical for
+// provider-prefixed models like "openrouter/gpt-5-mini" where
+// NormalizeModelName strips the prefix and collides with a cheaper sibling
+// entry ("gpt-5-mini" vs "gpt-5-mini-or").
+func TestEstimateRequestCostPrefersModelIDOverPublicModelPrice(t *testing.T) {
 	prx := NewTestProxyBuilder().Build()
 	registry := routermodels.NewModelPriceRegistry()
 	registry.Update(map[string]*routermodels.ModelPrice{
@@ -107,7 +108,8 @@ func TestEstimateRequestCostPrefersPublicModelPriceOverDistinctModelIDPrice(t *t
 	)
 
 	require.True(t, ok)
-	assert.InDelta(t, 0.10, cost, 0.000000001)
+	// modelID (gpt-5.2-chat, cost 0.5) is now preferred over publicModelID
+	assert.InDelta(t, 5.0, cost, 0.000000001)
 }
 
 // TestResolveBillingPriceCachesAcrossCalls verifies budget reservation and
