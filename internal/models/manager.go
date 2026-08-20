@@ -104,10 +104,18 @@ func NewModelPriceRegistry() *ModelPriceRegistry {
 	}
 }
 
-// GetPrice returns the price for a model, or nil if not found
+// GetPrice returns the price for a model, or nil if not found. Tries the
+// raw (case/whitespace-folded, unsplit) key before the normalized
+// (provider-prefix-stripped) one, matching GetPriceAny's two-pass priority
+// so the two functions never disagree about which entry a given name
+// resolves to.
 func (r *ModelPriceRegistry) GetPrice(modelName string) *ModelPrice {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
+	raw := strings.ToLower(strings.TrimSpace(modelName))
+	if price := r.prices[raw]; price != nil {
+		return price
+	}
 	return r.prices[NormalizeModelName(modelName)]
 }
 
@@ -115,9 +123,37 @@ func (r *ModelPriceRegistry) GetPrice(modelName string) *ModelPrice {
 // single read lock, returning the first match in the given priority order.
 // This avoids a concurrent Update() straddling two map generations, which
 // can happen when callers issue separate GetPrice calls per candidate.
+//
+// The lookup uses a two-pass strategy to handle provider-prefixed model names
+// correctly:
+//
+//  1. Pass 1 (raw): try each candidate as a raw lowercase key (no prefix
+//     stripping). This ensures explicit entries like "google/gemini-3-flash-
+//     preview-highlimits" in the price file are found before any normalised
+//     fallback.
+//
+//  2. Pass 2 (normalised): try each candidate with NormalizeModelName (which
+//     strips provider prefixes). This is the legacy behaviour that matches
+//     bare model names like "gpt-5-mini-or".
+//
+// Raw matches always beat normalised matches, preserving the publicModelID >
+// modelID > realModelID priority contract.
 func (r *ModelPriceRegistry) GetPriceAny(modelNames ...string) (string, *ModelPrice) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
+
+	// Pass 1: raw lowercase keys (exact match, no prefix stripping)
+	for _, modelName := range modelNames {
+		if modelName == "" {
+			continue
+		}
+		raw := strings.ToLower(strings.TrimSpace(modelName))
+		if price := r.prices[raw]; price != nil {
+			return modelName, price
+		}
+	}
+
+	// Pass 2: normalised keys (prefix-stripped)
 	for _, modelName := range modelNames {
 		if modelName == "" {
 			continue
@@ -126,6 +162,7 @@ func (r *ModelPriceRegistry) GetPriceAny(modelNames ...string) (string, *ModelPr
 			return modelName, price
 		}
 	}
+
 	return "", nil
 }
 
@@ -136,6 +173,11 @@ func (r *ModelPriceRegistry) Update(prices map[string]*ModelPrice) {
 	r.prices = make(map[string]*ModelPrice)
 	for k, v := range prices {
 		r.prices[k] = v
+		// Store raw lowercase key so that provider-prefixed model names
+		// (e.g. "openrouter/gpt-5-mini") can be matched in GetPriceAny's
+		// first pass before normalisation strips the prefix.
+		raw := strings.ToLower(strings.TrimSpace(k))
+		r.prices[raw] = v
 	}
 	r.lastUpdate = utils.NowUTC()
 }
@@ -143,11 +185,26 @@ func (r *ModelPriceRegistry) Update(prices map[string]*ModelPrice) {
 // MergeDB applies DB-sourced prices on top of the existing registry without
 // removing prices that came from the file-based price list.
 // DB prices take precedence for models that appear in both sources.
+//
+// A DB override only ever replaces the exact key it names (plus that key's
+// own raw/lowercased form) — it deliberately does NOT sweep the registry for
+// other keys that merely share a normalized form. A price entry deliberately
+// keyed "provider/model" (e.g. "openrouter/gpt-5-mini", or any alias that
+// needs a price distinct from its canonical model — see
+// "gemini-3-flash-preview-highlimits" in client_a.libsonnet) is independent
+// of the plain model it happens to normalize to; an override for the plain
+// model must not silently leak into it. If a DB-sourced override is meant
+// to apply to such an alias too, the DB record must name that alias's exact
+// key itself.
 func (r *ModelPriceRegistry) MergeDB(dbPrices map[string]*ModelPrice) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for k, v := range dbPrices {
 		r.prices[k] = v
+		// Store raw lowercase key (same logic as Update) so that DB-sourced
+		// provider-prefixed entries are also findable in GetPriceAny pass 1.
+		raw := strings.ToLower(strings.TrimSpace(k))
+		r.prices[raw] = v
 	}
 	r.lastUpdate = utils.NowUTC()
 }
