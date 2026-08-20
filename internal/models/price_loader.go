@@ -54,6 +54,9 @@ func LoadModelPrices(link string) (map[string]*ModelPrice, error) {
 	}
 
 	// Normalize model names (convert keys to normalized format)
+	// Also store raw lowercase keys so that provider-prefixed names like
+	// "google/gemini-3-flash-preview-highlimits" survive normalisation and
+	// can be matched in ModelPriceRegistry.GetPriceAny's first pass.
 	normalizedPrices := make(map[string]*ModelPrice)
 	normalizedSources := make(map[string]string) // normalized name -> original full name (for collision detection)
 	for fullName, price := range rawPrices {
@@ -69,6 +72,18 @@ func LoadModelPrices(link string) (map[string]*ModelPrice, error) {
 		}
 		normalized := NormalizeModelName(fullName)
 		if existingFullName, exists := normalizedSources[normalized]; exists {
+			existingIsBare := !strings.Contains(existingFullName, "/")
+			newIsBare := !strings.Contains(fullName, "/")
+
+			if existingIsBare && !newIsBare {
+				// Existing entry is a bare model name (e.g. "gpt-4") and
+				// the new entry has a provider prefix (e.g. "openai/gpt-4").
+				// Keep the bare entry — it is more specific in the two-pass
+				// lookup and avoids the bare key being silently overwritten
+				// by the prefixed entry due to random Go map iteration order.
+				continue
+			}
+
 			slog.Warn("normalized model name collision: entry will be overwritten",
 				"normalized_name", normalized,
 				"existing_entry", existingFullName,
@@ -77,6 +92,14 @@ func LoadModelPrices(link string) (map[string]*ModelPrice, error) {
 		}
 		normalizedSources[normalized] = fullName
 		normalizedPrices[normalized] = price
+
+		// Store the raw lowercase key alongside the normalised one so that
+		// Update/LoadPrices can put both into the registry, enabling the
+		// two-pass lookup in GetPriceAny.
+		raw := strings.ToLower(strings.TrimSpace(fullName))
+		if raw != normalized {
+			normalizedPrices[raw] = price
+		}
 	}
 
 	return normalizedPrices, nil

@@ -306,3 +306,31 @@ func TestLoadFromHTTP_UnsupportedScheme(t *testing.T) {
 	assert.Contains(t, err.Error(), "unsupported scheme")
 	assert.Nil(t, data)
 }
+
+func TestLoadModelPrices_BareKeyWinsOverPrefixed(t *testing.T) {
+	filePath := filepath.Join(t.TempDir(), "prices.json")
+	require.NoError(t, os.WriteFile(filePath, []byte(`{
+		"gpt-4":        {"input_cost_per_token": 1.0e-06, "output_cost_per_token": 4.0e-06},
+		"openai/gpt-4": {"input_cost_per_token": 2.0e-06, "output_cost_per_token": 8.0e-06}
+	}`), 0o600))
+
+	prices, err := LoadModelPrices(filePath)
+	require.NoError(t, err)
+
+	// Bare key must win over prefixed key
+	assert.Equal(t, 1.0e-06, prices["gpt-4"].InputCostPerToken)
+}
+
+func TestLoadModelPrices_BareKeyWinsOverPrefixed_ReverseOrder(t *testing.T) {
+	// Prefixed entry listed first in JSON — bare key must still win
+	filePath := filepath.Join(t.TempDir(), "prices.json")
+	require.NoError(t, os.WriteFile(filePath, []byte(`{
+		"openai/gpt-4": {"input_cost_per_token": 2.0e-06, "output_cost_per_token": 8.0e-06},
+		"gpt-4":        {"input_cost_per_token": 1.0e-06, "output_cost_per_token": 4.0e-06}
+	}`), 0o600))
+
+	prices, err := LoadModelPrices(filePath)
+	require.NoError(t, err)
+
+	assert.Equal(t, 1.0e-06, prices["gpt-4"].InputCostPerToken)
+}
