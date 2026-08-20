@@ -1448,37 +1448,94 @@ func TestModelPriceRegistry_GetPrice_NotFound(t *testing.T) {
 	assert.Nil(t, result, "GetPrice should return nil for a model not in the registry")
 }
 
-func TestModelPriceRegistry_GetPriceAny_RawKeyedProviderPrefixWinsOverNormalizedSibling(t *testing.T) {
+func TestModelPriceRegistry_GetPriceAny_RawKeyedProviderPrefixWinsEvenIfALowerPriorityCandidateAlsoHasARawMatch(t *testing.T) {
 	registry := NewModelPriceRegistry()
 
-	// Mirrors LoadModelPrices' output for a price file containing both
-	// "gpt-5-mini" and "openrouter/gpt-5-mini": the provider-prefixed entry
-	// is indexed under its own raw key in addition to the shared normalized
-	// key ("gpt-5-mini"), which the plain entry occupies.
+	// Both "openrouter/gpt-5-mini" (publicModelID, checked first) and
+	// "gpt-5-mini-or" (modelID, checked second) have their own raw entry
+	// here. Priority order among raw matches must still be preserved:
+	// publicModelID wins, since a public alias with its own deliberately
+	// distinct price must be able to override the canonical model's price.
 	registry.Update(map[string]*ModelPrice{
 		"gpt-5-mini":            {InputCostPerToken: 0.000000225},
-		"openrouter/gpt-5-mini": {InputCostPerToken: 0.000000325},
+		"gpt-5-mini-or":         {InputCostPerToken: 0.000000325},
+		"openrouter/gpt-5-mini": {InputCostPerToken: 0.000000999},
 	})
 
-	// publicModelID="openrouter/gpt-5-mini", modelID="gpt-5-mini-or", realModelID="gpt-5-mini"
 	matched, price := registry.GetPriceAny("openrouter/gpt-5-mini", "gpt-5-mini-or", "gpt-5-mini")
 	require.NotNil(t, price)
 	assert.Equal(t, "openrouter/gpt-5-mini", matched)
+	assert.Equal(t, 0.000000999, price.InputCostPerToken)
+}
+
+func TestModelPriceRegistry_GetPriceAny_ModelIDRawMatchWinsOverPublicModelIDNormalizedCollision(t *testing.T) {
+	registry := NewModelPriceRegistry()
+
+	// The core fix this test locks in: publicModelID ("openrouter/gpt-5-mini")
+	// has NO raw entry of its own and would normalize down to "gpt-5-mini",
+	// colliding with an unrelated sibling. modelID ("gpt-5-mini-or") has its
+	// own unambiguous raw entry. Raw matches are tried for every candidate
+	// (pass 1) before normalization is attempted for any of them (pass 2),
+	// so modelID's raw entry must win — without needing a dedicated
+	// raw-keyed price entry for "openrouter/gpt-5-mini" in the price file.
+	registry.Update(map[string]*ModelPrice{
+		"gpt-5-mini":    {InputCostPerToken: 0.000000225},
+		"gpt-5-mini-or": {InputCostPerToken: 0.000000325},
+	})
+
+	matched, price := registry.GetPriceAny("openrouter/gpt-5-mini", "gpt-5-mini-or", "gpt-5-mini")
+	require.NotNil(t, price)
+	assert.Equal(t, "gpt-5-mini-or", matched)
 	assert.Equal(t, 0.000000325, price.InputCostPerToken)
 }
 
-func TestModelPriceRegistry_GetPriceAny_NormalizedFallbackStillWinsWhenNoRawMatch(t *testing.T) {
+func TestModelPriceRegistry_GetPriceAny_NormalizedFallbackOnlyUsedWhenNoCandidateHasARawMatch(t *testing.T) {
 	registry := NewModelPriceRegistry()
 
-	// Mirrors the highlimits case: only the plain, normalized-form price
-	// entry exists. The first candidate ("gemini-3-flash-preview-highlimits")
-	// has no raw-keyed entry of its own, so it must fall through to the
-	// normalized form of the *second* candidate rather than matching nothing.
+	// None of the three candidates has its own raw entry; only pass 2
+	// (normalized, provider-prefix-stripped) finds anything, via realModelID.
+	registry.Update(map[string]*ModelPrice{
+		"gemini-2.5-pro": {InputCostPerToken: 0.00000045},
+	})
+
+	matched, price := registry.GetPriceAny("google/gemini-2.5-pro-alias", "gemini-2.5-pro-canonical", "vertex_ai/gemini-2.5-pro")
+	require.NotNil(t, price)
+	assert.Equal(t, "vertex_ai/gemini-2.5-pro", matched)
+	assert.Equal(t, 0.00000045, price.InputCostPerToken)
+}
+
+func TestModelPriceRegistry_GetPriceAny_HighlimitsStyleAliasNeedsItsOwnRawKeyToStayDistinctFromCanonicalModel(t *testing.T) {
+	registry := NewModelPriceRegistry()
+
+	// Mirrors gemini-3-flash-preview-highlimits: publicModelID is the
+	// client-facing exposedName, modelID is the alias-resolved canonical
+	// model. Without a raw entry for the exposedName itself, pass 1 would
+	// find modelID's own (generic, cheaper) entry first, silently losing
+	// the highlimits-specific price — this is exactly why services must
+	// carry a raw-keyed "google/gemini-3-flash-preview-highlimits" entry
+	// (see llmarena/services#278), not a code-only guarantee.
+	registry.Update(map[string]*ModelPrice{
+		"gemini-3-flash-preview":                   {InputCostPerToken: 0.00000045},
+		"google/gemini-3-flash-preview-highlimits": {InputCostPerToken: 0.00000099},
+	})
+
+	matched, price := registry.GetPriceAny("google/gemini-3-flash-preview-highlimits", "gemini-3-flash-preview", "gemini-3-flash-preview")
+	require.NotNil(t, price)
+	assert.Equal(t, "google/gemini-3-flash-preview-highlimits", matched)
+	assert.Equal(t, 0.00000099, price.InputCostPerToken)
+}
+
+func TestModelPriceRegistry_GetPriceAny_HighlimitsStyleAliasSilentlyLosesItsOwnPriceWithoutTheRawKey(t *testing.T) {
+	registry := NewModelPriceRegistry()
+
+	// Same setup as above but WITHOUT the raw-keyed exposedName entry —
+	// documents the regression this class of alias would hit if the
+	// companion services price-file change were ever skipped.
 	registry.Update(map[string]*ModelPrice{
 		"gemini-3-flash-preview": {InputCostPerToken: 0.00000045},
 	})
 
-	matched, price := registry.GetPriceAny("gemini-3-flash-preview-highlimits", "gemini-3-flash-preview", "gemini-3-flash-preview")
+	matched, price := registry.GetPriceAny("google/gemini-3-flash-preview-highlimits", "gemini-3-flash-preview", "gemini-3-flash-preview")
 	require.NotNil(t, price)
 	assert.Equal(t, "gemini-3-flash-preview", matched)
 	assert.Equal(t, 0.00000045, price.InputCostPerToken)
@@ -1506,25 +1563,25 @@ func TestModelPriceRegistry_GetPriceAny_NoMatch(t *testing.T) {
 	assert.Empty(t, matched)
 }
 
-// The following four tests use real production price values from
-// services' apps/prices/{client_a,default}.libsonnet (as of 2026-08-19) to
-// document two more live instances of the same alias-collision bug class as
+// The following two tests use real production price values from services'
+// apps/prices/{client_a,default}.libsonnet (as of 2026-08-19) to document
+// two more live instances of the same alias-collision bug class as
 // openrouter/gpt-5-mini, found while auditing the full price lists:
 //   - client_a (Avito): openrouter/gpt-4.1 -> gpt-4.1-or
-//   - default (vsellm):  yandex/gpt-5.1 -> yandexgpt-5.1, which collides with
-//     OpenAI's own unrelated "gpt-5.1" entry in the same price file.
+//   - default (vsellm):  yandex/gpt-5.1 -> yandexgpt-5.1, which collided
+//     with OpenAI's own unrelated "gpt-5.1" entry in the same price file.
 //
-// Each pair has a "WithoutServicesFix" test proving the Go-side fix alone is
-// NOT sufficient — the price file also needs a raw-keyed entry matching the
-// exact public alias string — and a "OnceRawKeyAdded" test proving the fix
-// is complete once that entry exists.
+// Unlike the earlier per-candidate raw-then-normalized design, the two-pass
+// scheme fixes both automatically — modelID's own raw entry is found in
+// pass 1 before publicModelID's colliding normalized form is ever tried in
+// pass 2 — with no companion services price-file change needed for either.
 
-func TestModelPriceRegistry_GetPriceAny_OpenRouterGPT41CollidesWithPlainGPT41WithoutServicesFix(t *testing.T) {
+func TestModelPriceRegistry_GetPriceAny_OpenRouterGPT41ResolvesCorrectlyWithNoServicesChangeNeeded(t *testing.T) {
 	registry := NewModelPriceRegistry()
 
 	// Real client_a.libsonnet values: 'gpt-4.1' (plain, discounted) vs
 	// 'gpt-4.1-or' (openrouter route, no discount, higher rate). No entry is
-	// keyed "openrouter/gpt-4.1" yet, so the raw-key lookup can't help.
+	// keyed "openrouter/gpt-4.1" — modelID's own raw entry resolves this.
 	registry.Update(map[string]*ModelPrice{
 		"gpt-4.1":    {InputCostPerToken: 0.0000018, OutputCostPerToken: 0.0000072, CacheReadInputTokenCost: 0.00000045},
 		"gpt-4.1-or": {InputCostPerToken: 0.0000026, OutputCostPerToken: 0.0000104, CacheReadInputTokenCost: 0.00000065},
@@ -1532,32 +1589,16 @@ func TestModelPriceRegistry_GetPriceAny_OpenRouterGPT41CollidesWithPlainGPT41Wit
 
 	matched, price := registry.GetPriceAny("openrouter/gpt-4.1", "gpt-4.1-or", "gpt-4.1-or")
 	require.NotNil(t, price)
-	assert.Equal(t, "openrouter/gpt-4.1", matched)
-	// Documents the bug: resolves to the wrong, plain gpt-4.1 price.
-	assert.Equal(t, 0.0000018, price.InputCostPerToken)
-}
-
-func TestModelPriceRegistry_GetPriceAny_OpenRouterGPT41ResolvesCorrectlyOnceRawKeyAdded(t *testing.T) {
-	registry := NewModelPriceRegistry()
-
-	registry.Update(map[string]*ModelPrice{
-		"gpt-4.1":            {InputCostPerToken: 0.0000018, OutputCostPerToken: 0.0000072, CacheReadInputTokenCost: 0.00000045},
-		"gpt-4.1-or":         {InputCostPerToken: 0.0000026, OutputCostPerToken: 0.0000104, CacheReadInputTokenCost: 0.00000065},
-		"openrouter/gpt-4.1": {InputCostPerToken: 0.0000026, OutputCostPerToken: 0.0000104, CacheReadInputTokenCost: 0.00000065},
-	})
-
-	matched, price := registry.GetPriceAny("openrouter/gpt-4.1", "gpt-4.1-or", "gpt-4.1-or")
-	require.NotNil(t, price)
-	assert.Equal(t, "openrouter/gpt-4.1", matched)
+	assert.Equal(t, "gpt-4.1-or", matched)
 	assert.Equal(t, 0.0000026, price.InputCostPerToken)
 }
 
-func TestModelPriceRegistry_GetPriceAny_YandexGPT51CollidesWithOpenAIGPT51WithoutServicesFix(t *testing.T) {
+func TestModelPriceRegistry_GetPriceAny_YandexGPT51ResolvesCorrectlyWithNoServicesChangeNeeded(t *testing.T) {
 	registry := NewModelPriceRegistry()
 
 	// Real default.libsonnet values: OpenAI's own 'gpt-5.1' (tiered
 	// input/output) vs Yandex's 'yandexgpt-5.1' (flat rate). No entry is
-	// keyed "yandex/gpt-5.1" yet.
+	// keyed "yandex/gpt-5.1" — modelID's own raw entry resolves this.
 	registry.Update(map[string]*ModelPrice{
 		"gpt-5.1":       {InputCostPerToken: 0.000001625, OutputCostPerToken: 0.000013, CacheReadInputTokenCost: 0.0000001625},
 		"yandexgpt-5.1": {InputCostPerToken: 0.0000122353, OutputCostPerToken: 0.0000122353, CacheReadInputTokenCost: 0.0000122353},
@@ -1565,24 +1606,7 @@ func TestModelPriceRegistry_GetPriceAny_YandexGPT51CollidesWithOpenAIGPT51Withou
 
 	matched, price := registry.GetPriceAny("yandex/gpt-5.1", "yandexgpt-5.1", "yandexgpt-5.1")
 	require.NotNil(t, price)
-	assert.Equal(t, "yandex/gpt-5.1", matched)
-	// Documents the bug: resolves to OpenAI's unrelated gpt-5.1 price —
-	// input cost alone is off by ~7.5x from the correct Yandex rate.
-	assert.Equal(t, 0.000001625, price.InputCostPerToken)
-}
-
-func TestModelPriceRegistry_GetPriceAny_YandexGPT51ResolvesCorrectlyOnceRawKeyAdded(t *testing.T) {
-	registry := NewModelPriceRegistry()
-
-	registry.Update(map[string]*ModelPrice{
-		"gpt-5.1":        {InputCostPerToken: 0.000001625, OutputCostPerToken: 0.000013, CacheReadInputTokenCost: 0.0000001625},
-		"yandexgpt-5.1":  {InputCostPerToken: 0.0000122353, OutputCostPerToken: 0.0000122353, CacheReadInputTokenCost: 0.0000122353},
-		"yandex/gpt-5.1": {InputCostPerToken: 0.0000122353, OutputCostPerToken: 0.0000122353, CacheReadInputTokenCost: 0.0000122353},
-	})
-
-	matched, price := registry.GetPriceAny("yandex/gpt-5.1", "yandexgpt-5.1", "yandexgpt-5.1")
-	require.NotNil(t, price)
-	assert.Equal(t, "yandex/gpt-5.1", matched)
+	assert.Equal(t, "yandexgpt-5.1", matched)
 	assert.Equal(t, 0.0000122353, price.InputCostPerToken)
 }
 

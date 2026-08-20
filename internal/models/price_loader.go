@@ -80,12 +80,15 @@ func LoadModelPrices(link string) (map[string]*ModelPrice, error) {
 
 		// A price entry deliberately keyed "provider/model" (e.g.
 		// "openrouter/gpt-5-mini") normalizes to the same bare name as an
-		// unrelated sibling model's own entry (e.g. plain "gpt-5-mini"),
-		// so GetPriceAny's normalized-only lookup can never reach it — the
-		// unrelated sibling always wins first. Keep it reachable by also
-		// indexing it under its raw (case/whitespace-folded, unsplit) key,
-		// which GetPriceAny tries before falling back to normalization.
-		// Never overwrites an existing entry under that raw key.
+		// unrelated sibling model's own entry (e.g. plain "gpt-5-mini").
+		// Index it under its raw (case/whitespace-folded, unsplit) key too
+		// so it stays reachable on its own terms: GetPriceAny tries an
+		// exact/raw match for every billing candidate before it ever falls
+		// back to normalization for any of them (see GetPriceAny), so a
+		// candidate whose raw form matches here always wins over one that
+		// only matches this entry's unrelated sibling by coincidence of
+		// normalization. Never overwrites an existing entry under that raw
+		// key.
 		if raw := strings.ToLower(strings.TrimSpace(fullName)); raw != normalized {
 			if _, exists := normalizedPrices[raw]; !exists {
 				normalizedPrices[raw] = price

@@ -105,45 +105,79 @@ func NewModelPriceRegistry() *ModelPriceRegistry {
 }
 
 // GetPrice returns the price for a model, or nil if not found. Tries the raw
-// (case/whitespace-folded, unsplit) key before the normalized one — see
-// priceForCandidateLocked.
+// (case/whitespace-folded, unsplit) key before the normalized one, so a
+// price entry deliberately keyed "provider/model" stays reachable under its
+// own name even when it would otherwise collide with an unrelated sibling's
+// normalized form — see rawPriceLocked / NormalizeModelName.
 func (r *ModelPriceRegistry) GetPrice(modelName string) *ModelPrice {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	return r.priceForCandidateLocked(modelName)
-}
-
-// priceForCandidateLocked resolves a single candidate against the registry.
-// It tries the raw form first (case/whitespace-folded only, "/" kept intact)
-// and falls back to the normalized form (provider prefix stripped). A price
-// entry deliberately keyed "provider/model" (e.g. "openrouter/gpt-5-mini")
-// is only reachable via its raw form, since its normalized form collides
-// with an unrelated sibling's own entry (e.g. plain "gpt-5-mini") — see
-// LoadModelPrices, which indexes such entries under both keys.
-func (r *ModelPriceRegistry) priceForCandidateLocked(modelName string) *ModelPrice {
-	if raw := strings.ToLower(strings.TrimSpace(modelName)); raw != "" {
-		if price := r.prices[raw]; price != nil {
-			return price
-		}
+	if price := r.rawPriceLocked(modelName); price != nil {
+		return price
 	}
 	return r.prices[NormalizeModelName(modelName)]
 }
 
+// rawPriceLocked resolves a candidate against its exact (case/whitespace-
+// folded, unsplit — "/" kept intact) key only. An exact match is
+// unambiguous evidence of a deliberately-created price entry: nobody names
+// a price key "provider/model" by coincidence.
+func (r *ModelPriceRegistry) rawPriceLocked(modelName string) *ModelPrice {
+	raw := strings.ToLower(strings.TrimSpace(modelName))
+	if raw == "" {
+		return nil
+	}
+	return r.prices[raw]
+}
+
 // GetPriceAny looks up prices for multiple candidate model names under a
-// single read lock, returning the first match in the given priority order.
-// This avoids a concurrent Update() straddling two map generations, which
-// can happen when callers issue separate GetPrice calls per candidate.
+// single read lock, returning the first match. This avoids a concurrent
+// Update() straddling two map generations, which can happen when callers
+// issue separate GetPrice calls per candidate.
+//
+// Matching runs in two passes across the full candidate list, not
+// raw-then-normalized per candidate:
+//
+//  1. Exact/raw match, trying every candidate in the given priority order.
+//  2. Provider-prefix-stripped (normalized) fallback, same priority order,
+//     only reached if no candidate had its own raw entry.
+//
+// This ordering matters: an earlier per-candidate "raw-then-normalized"
+// scheme let a higher-priority candidate's lossy normalized form (e.g.
+// publicModelID "openrouter/gpt-5-mini" stripping to "gpt-5-mini") win
+// over a lower-priority candidate's own unambiguous raw entry (modelID
+// "gpt-5-mini-or"), silently billing at an unrelated sibling model's price.
+// Trying raw matches for ALL candidates before ever falling back to
+// normalization for ANY of them closes that hole for every candidate at
+// once, without needing a dedicated raw-keyed price entry for every
+// provider-prefixed alias — the alias-resolved modelID's own entry is
+// reached directly. A public alias that must be billed differently from
+// its resolved modelID still needs its own explicit raw-keyed price entry
+// (there's no way to infer billing intent from a string alone) but that's
+// the correct, intentional case — see
+// "gemini-3-flash-preview-highlimits" in client_a.libsonnet.
 func (r *ModelPriceRegistry) GetPriceAny(modelNames ...string) (string, *ModelPrice) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
+
 	for _, modelName := range modelNames {
 		if modelName == "" {
 			continue
 		}
-		if price := r.priceForCandidateLocked(modelName); price != nil {
+		if price := r.rawPriceLocked(modelName); price != nil {
 			return modelName, price
 		}
 	}
+
+	for _, modelName := range modelNames {
+		if modelName == "" {
+			continue
+		}
+		if price := r.prices[NormalizeModelName(modelName)]; price != nil {
+			return modelName, price
+		}
+	}
+
 	return "", nil
 }
 
