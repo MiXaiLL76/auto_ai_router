@@ -1042,6 +1042,46 @@ func TestCalculateTokenCosts_272kTakesPrecedenceOver256k(t *testing.T) {
 	assert.InDelta(t, 252.0, costs.InputCost, 1e-9) // 280_000 * 0.0009, not the 256k rate
 }
 
+func TestCalculateTokenCosts_512kTakesPrecedenceOver272k(t *testing.T) {
+	usage := &converter.TokenUsage{PromptTokens: 600_000} // above both 272k and 512k
+	price := &ModelPrice{
+		InputCostPerToken:          0.01,
+		InputCostPerTokenAbove272k: 0.001,
+		InputCostPerTokenAbove512k: 0.0005,
+	}
+
+	costs := CalculateTokenCosts(usage, price)
+
+	require.NotNil(t, costs)
+	assert.InDelta(t, 300.0, costs.InputCost, 1e-9) // 600_000 * 0.0005, not the 272k rate
+}
+
+func TestCalculateTokenCosts_512kOnly(t *testing.T) {
+	// MiniMax-M3 style: only 512k tier configured, no 272k/256k/128k/32k
+	price := &ModelPrice{
+		InputCostPerToken:          0.002,
+		InputCostPerTokenAbove512k: 0.001,
+	}
+
+	tests := []struct {
+		name         string
+		promptTokens int
+		wantInput    float64
+	}{
+		{"below_512k_uses_base_rate", 400_000, 800.0},    // 400_000 * 0.002
+		{"above_512k_uses_512k_rate", 600_000, 600.0},    // 600_000 * 0.001
+		{"exactly_512k_uses_base_rate", 512_000, 1024.0}, // 512_000 * 0.002 (threshold is exclusive)
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			costs := CalculateTokenCosts(&converter.TokenUsage{PromptTokens: tt.promptTokens}, price)
+			require.NotNil(t, costs)
+			assert.InDelta(t, tt.wantInput, costs.InputCost, 1e-9)
+		})
+	}
+}
+
 func TestCalculateTokenCosts_CacheTierOverridesBaseCacheRate(t *testing.T) {
 	// Mirrors qwen3-vl-flash: a non-zero BASE cache_read rate is configured
 	// alongside a tiered one. The base rate must not "win" once the prompt

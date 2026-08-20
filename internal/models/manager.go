@@ -55,6 +55,11 @@ type ModelPrice struct {
 	CacheReadInputTokenCostAbove256k     float64 `json:"cache_read_input_token_cost_above_256k_tokens,omitempty"`
 	CacheCreationInputTokenCostAbove256k float64 `json:"cache_creation_input_token_cost_above_256k_tokens,omitempty"`
 
+	InputCostPerTokenAbove512k           float64 `json:"input_cost_per_token_above_512k_tokens,omitempty"`
+	OutputCostPerTokenAbove512k          float64 `json:"output_cost_per_token_above_512k_tokens,omitempty"`
+	CacheReadInputTokenCostAbove512k     float64 `json:"cache_read_input_token_cost_above_512k_tokens,omitempty"`
+	CacheCreationInputTokenCostAbove512k float64 `json:"cache_creation_input_token_cost_above_512k_tokens,omitempty"`
+
 	// Audio tokens (can be more specific than regular tokens)
 	InputCostPerAudioToken  float64 `json:"input_cost_per_audio_token,omitempty"`
 	OutputCostPerAudioToken float64 `json:"output_cost_per_audio_token,omitempty"`
