@@ -76,6 +76,46 @@ func TestOpenAIToAnthropic_ReasoningObjectCanDisableTopLevelEffort(t *testing.T)
 	assert.NotContains(t, request, "output_config")
 }
 
+// TestOpenAIToAnthropic_NonClaudeModelDefaultsThinkingDisabled verifies that
+// requests for a non-Claude model (reached through this same Anthropic-shaped
+// conversion path via a multi-vendor gateway like CometAPI/ProMan) get an
+// explicit "thinking":{"type":"disabled"} when the caller didn't ask for
+// reasoning. Unlike Claude, some backends (e.g. Gemini) default to
+// autonomous thinking when the field is simply absent, which silently burns
+// the max_tokens budget on invisible reasoning and truncates the visible
+// answer.
+func TestOpenAIToAnthropic_NonClaudeModelDefaultsThinkingDisabled(t *testing.T) {
+	result, err := OpenAIToAnthropic([]byte(`{
+		"model":"gemini-3.5-flash",
+		"messages":[{"role":"user","content":"test"}],
+		"max_tokens":100
+	}`), "gemini-3.5-flash")
+	require.NoError(t, err)
+
+	var request map[string]interface{}
+	require.NoError(t, json.Unmarshal(result, &request))
+	thinking, ok := request["thinking"].(map[string]interface{})
+	require.True(t, ok, "expected an explicit thinking config, got %v", request["thinking"])
+	assert.Equal(t, "disabled", thinking["type"])
+}
+
+// TestOpenAIToAnthropic_ClaudeModelOmitsThinkingByDefault verifies the
+// default-disable safeguard is scoped to non-Claude models only: real Claude
+// requests keep omitting "thinking" entirely when not requested, matching
+// existing Anthropic API behavior (see also
+// TestOpenAIToAnthropic_ReasoningObjectCanDisableTopLevelEffort).
+func TestOpenAIToAnthropic_ClaudeModelOmitsThinkingByDefault(t *testing.T) {
+	result, err := OpenAIToAnthropic([]byte(`{
+		"model":"claude-opus-5",
+		"messages":[{"role":"user","content":"test"}]
+	}`), "claude-opus-5")
+	require.NoError(t, err)
+
+	var request map[string]interface{}
+	require.NoError(t, json.Unmarshal(result, &request))
+	assert.NotContains(t, request, "thinking")
+}
+
 func TestExtractSystemBlocks(t *testing.T) {
 	ephemeral := map[string]interface{}{"type": "ephemeral"}
 

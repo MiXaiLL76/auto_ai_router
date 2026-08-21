@@ -2,6 +2,7 @@ package anthropicresponses
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -91,6 +92,104 @@ func TestAnthropicToResponsesResponse_ToolUse(t *testing.T) {
 	var args map[string]interface{}
 	require.NoError(t, json.Unmarshal([]byte(fc.Arguments), &args))
 	assert.Equal(t, "London", args["city"])
+}
+
+// TestAnthropicToResponsesResponse_WebSearch verifies that a server_tool_use
+// web_search block becomes a web_search_call output item (instead of being
+// silently dropped, as it used to be before switch-case web_search support
+// was added), and that citations on the following text block become
+// url_citation annotations with offsets recovered from the cited_text.
+func TestAnthropicToResponsesResponse_WebSearch(t *testing.T) {
+	body := `{
+		"id": "msg_05",
+		"type": "message",
+		"role": "assistant",
+		"model": "claude-opus-4-5",
+		"content": [
+			{
+				"type": "server_tool_use",
+				"id": "srvtoolu_01",
+				"name": "web_search",
+				"input": {"query": "claude shannon birth date"}
+			},
+			{
+				"type": "web_search_tool_result",
+				"tool_use_id": "srvtoolu_01",
+				"content": [
+					{"type": "web_search_result", "url": "https://en.wikipedia.org/wiki/Claude_Shannon", "title": "Claude Shannon - Wikipedia"}
+				]
+			},
+			{
+				"type": "text",
+				"text": "Claude Shannon was born on April 30, 1916.",
+				"citations": [
+					{
+						"type": "web_search_result_location",
+						"url": "https://en.wikipedia.org/wiki/Claude_Shannon",
+						"title": "Claude Shannon - Wikipedia",
+						"cited_text": "born on April 30, 1916"
+					}
+				]
+			}
+		],
+		"stop_reason": "end_turn",
+		"usage": {"input_tokens": 20, "output_tokens": 30}
+	}`
+
+	resp, err := AnthropicToResponsesResponse([]byte(body), "claude-opus-4-5", "", 0)
+	require.NoError(t, err)
+
+	require.Len(t, resp.Output, 2)
+
+	wsCall := resp.Output[0]
+	assert.Equal(t, "web_search_call", wsCall.Type)
+	assert.Equal(t, "completed", wsCall.Status)
+	require.Len(t, wsCall.Queries, 1)
+	assert.Equal(t, "claude shannon birth date", wsCall.Queries[0])
+
+	msg := resp.Output[1]
+	assert.Equal(t, "message", msg.Type)
+	require.Len(t, msg.Content, 1)
+	text := msg.Content[0]
+	assert.Equal(t, "Claude Shannon was born on April 30, 1916.", text.Text)
+	require.Len(t, text.Annotations, 1)
+	ann := text.Annotations[0]
+	assert.Equal(t, "url_citation", ann.Type)
+	assert.Equal(t, "https://en.wikipedia.org/wiki/Claude_Shannon", ann.URL)
+	assert.Equal(t, "Claude Shannon - Wikipedia", ann.Title)
+	wantStart := strings.Index(text.Text, "born on April 30, 1916")
+	assert.Equal(t, wantStart, ann.StartIndex)
+	assert.Equal(t, wantStart+len("born on April 30, 1916"), ann.EndIndex)
+}
+
+// TestAnthropicToResponsesResponse_WebSearchCitationNotFoundSkipped verifies
+// that a citation whose cited_text doesn't appear verbatim in the block's
+// text is skipped rather than emitted with a bogus zero offset.
+func TestAnthropicToResponsesResponse_WebSearchCitationNotFoundSkipped(t *testing.T) {
+	body := `{
+		"id": "msg_06",
+		"type": "message",
+		"role": "assistant",
+		"model": "claude-opus-4-5",
+		"content": [
+			{
+				"type": "text",
+				"text": "Some answer text.",
+				"citations": [
+					{"type": "web_search_result_location", "url": "https://example.com", "cited_text": "not present anywhere"}
+				]
+			}
+		],
+		"stop_reason": "end_turn",
+		"usage": {"input_tokens": 5, "output_tokens": 5}
+	}`
+
+	resp, err := AnthropicToResponsesResponse([]byte(body), "claude-opus-4-5", "", 0)
+	require.NoError(t, err)
+
+	require.Len(t, resp.Output, 1)
+	require.Len(t, resp.Output[0].Content, 1)
+	assert.Empty(t, resp.Output[0].Content[0].Annotations)
 }
 
 func TestAnthropicToResponsesResponse_Thinking(t *testing.T) {

@@ -2,6 +2,7 @@ package anthropic
 
 import (
 	"encoding/json"
+	"strings"
 
 	converterutil "github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
 )
@@ -105,16 +106,54 @@ func convertOpenAIToolsToAnthropic(openAITools []interface{}) []AnthropicTool {
 				Name: "bash",
 			})
 		case "web_search", "web_search_preview":
-			tools = append(tools, AnthropicTool{
+			tool := AnthropicTool{
 				Type: "web_search_20250305",
 				Name: "web_search",
-			})
+			}
+			applyWebSearchOptions(&tool, toolMap)
+			tools = append(tools, tool)
+		default:
+			// Anthropic-native versioned web search tool sent directly by the
+			// client (e.g. "web_search_20250305", "web_search_20260209",
+			// "web_search_20260318"): pass the exact version through instead
+			// of silently dropping it as an unrecognized built-in.
+			if strings.HasPrefix(toolType, "web_search_") {
+				tool := AnthropicTool{
+					Type: toolType,
+					Name: "web_search",
+				}
+				applyWebSearchOptions(&tool, toolMap)
+				tools = append(tools, tool)
+			}
 		}
 	}
 	if len(tools) == 0 {
 		return nil
 	}
 	return tools
+}
+
+// applyWebSearchOptions copies the web_search tool's optional fields (per the
+// Anthropic Tool definition: max_uses, allowed_domains, blocked_domains,
+// user_location, cache_control) from the client-supplied tool map onto the
+// converted Anthropic tool, whether it arrived as OpenAI's "web_search"/
+// "web_search_preview" shorthand or Anthropic's own versioned type.
+func applyWebSearchOptions(tool *AnthropicTool, toolMap map[string]interface{}) {
+	if v, ok := toolMap["max_uses"].(float64); ok {
+		tool.MaxUses = int(v)
+	}
+	if v, ok := toolMap["allowed_domains"]; ok {
+		tool.AllowedDomains = v
+	}
+	if v, ok := toolMap["blocked_domains"]; ok {
+		tool.BlockedDomains = v
+	}
+	if v, ok := toolMap["user_location"]; ok {
+		tool.UserLocation = v
+	}
+	if v, ok := toolMap["cache_control"]; ok {
+		tool.CacheControl = v
+	}
 }
 
 // expandAllowedTools converts an "allowed_tools" tool_choice into a supported Anthropic/Bedrock

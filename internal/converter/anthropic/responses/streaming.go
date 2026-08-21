@@ -196,6 +196,33 @@ func processAnthropicEvent(w io.Writer, acc *anthropicStreamAccumulator, event *
 			}, acc); err != nil {
 				return err
 			}
+
+		case "server_tool_use":
+			// Anthropic's hosted web_search tool call (the only server tool
+			// type Anthropic exposes today) — mirrors "tool_use" bookkeeping
+			// but surfaces as a web_search_call item instead of function_call.
+			if !acc.headerEmitted {
+				if err := emitAnthropicHeaderEvents(w, acc); err != nil {
+					return err
+				}
+			}
+			outputIdx := len(acc.outputItems)
+			if acc.messageStarted {
+				outputIdx++
+			}
+			acc.currentToolItemID = generateItemID("ws_")
+			acc.currentToolOutputIndex = outputIdx
+			if err := writeAnthropicSSE(w, "response.output_item.added", map[string]interface{}{
+				"type":         "response.output_item.added",
+				"output_index": outputIdx,
+				"item": map[string]interface{}{
+					"type":   "web_search_call",
+					"id":     acc.currentToolItemID,
+					"status": "in_progress",
+				},
+			}, acc); err != nil {
+				return err
+			}
 		}
 
 	case "content_block_delta":
@@ -213,7 +240,11 @@ func processAnthropicEvent(w io.Writer, acc *anthropicStreamAccumulator, event *
 			acc.currentThinking += event.Delta.Thinking
 		case "input_json_delta":
 			acc.currentToolArgs += event.Delta.PartialJSON
-			if event.Delta.PartialJSON != "" && acc.currentToolItemID != "" {
+			// Only function_call blocks stream argument deltas to the client
+			// this way; server_tool_use (web_search) accumulates silently
+			// into currentToolArgs and is parsed once at block_stop instead —
+			// OpenAI's own web_search_call doesn't stream partial queries.
+			if acc.currentBlockType == "tool_use" && event.Delta.PartialJSON != "" && acc.currentToolItemID != "" {
 				if err := writeAnthropicSSE(w, "response.function_call_arguments.delta", map[string]interface{}{
 					"type":         "response.function_call_arguments.delta",
 					"item_id":      acc.currentToolItemID,
@@ -378,6 +409,41 @@ func finalizeCurrentBlock(w io.Writer, acc *anthropicStreamAccumulator) error {
 			Arguments: argsJSON,
 		}
 		acc.outputItems = append(acc.outputItems, item)
+		acc.currentToolItemID = ""
+		acc.currentToolOutputIndex = 0
+
+	case "server_tool_use":
+		itemID := acc.currentToolItemID
+		if itemID == "" {
+			itemID = generateItemID("ws_")
+		}
+		var queries []string
+		if acc.currentToolArgs != "" {
+			var input map[string]interface{}
+			if err := json.Unmarshal([]byte(acc.currentToolArgs), &input); err == nil {
+				if q, ok := input["query"].(string); ok && q != "" {
+					queries = []string{q}
+				}
+			}
+		}
+		if err := writeAnthropicSSE(w, "response.output_item.done", map[string]interface{}{
+			"type":         "response.output_item.done",
+			"output_index": acc.currentToolOutputIndex,
+			"item": map[string]interface{}{
+				"type":    "web_search_call",
+				"id":      itemID,
+				"status":  "completed",
+				"queries": queries,
+			},
+		}, acc); err != nil {
+			return err
+		}
+		acc.outputItems = append(acc.outputItems, responses.OutputItem{
+			Type:    "web_search_call",
+			ID:      itemID,
+			Status:  "completed",
+			Queries: queries,
+		})
 		acc.currentToolItemID = ""
 		acc.currentToolOutputIndex = 0
 	}

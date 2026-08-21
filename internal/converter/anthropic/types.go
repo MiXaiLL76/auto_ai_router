@@ -31,7 +31,8 @@ type ContentBlock struct {
 	Type string `json:"type"`
 
 	// text block
-	Text string `json:"text,omitempty"`
+	Text      string              `json:"text,omitempty"`
+	Citations []AnthropicCitation `json:"citations,omitempty"`
 
 	// image / document block
 	Source *MediaSource `json:"source,omitempty"`
@@ -52,6 +53,15 @@ type ContentBlock struct {
 
 	// prompt caching (requests only)
 	CacheControl interface{} `json:"cache_control,omitempty"`
+}
+
+// AnthropicCitation is a citation attached to a text content block, e.g. a
+// web_search_result_location produced by the web_search server tool.
+type AnthropicCitation struct {
+	Type      string `json:"type"`
+	URL       string `json:"url,omitempty"`
+	Title     string `json:"title,omitempty"`
+	CitedText string `json:"cited_text,omitempty"`
 }
 
 // MediaSource describes the source of an image or document content block.
@@ -76,6 +86,13 @@ type AnthropicTool struct {
 	// computer_use specific dimensions
 	DisplayWidthPx  int `json:"display_width_px,omitempty"`
 	DisplayHeightPx int `json:"display_height_px,omitempty"`
+
+	// web_search tool options (Anthropic tool definition: max_uses,
+	// allowed_domains/blocked_domains are mutually exclusive, user_location)
+	MaxUses        int         `json:"max_uses,omitempty"`
+	AllowedDomains interface{} `json:"allowed_domains,omitempty"`
+	BlockedDomains interface{} `json:"blocked_domains,omitempty"`
+	UserLocation   interface{} `json:"user_location,omitempty"`
 
 	// prompt caching
 	CacheControl interface{} `json:"cache_control,omitempty"`

@@ -1,12 +1,15 @@
 package anthropicresponses
 
 import (
+	"strings"
+
 	"github.com/mixaill76/auto_ai_router/internal/converter/anthropic"
 	"github.com/mixaill76/auto_ai_router/internal/converter/responses"
 )
 
 // responsesToolsToAnthropic converts Responses API tools to Anthropic tool definitions.
-// Unsupported tool types (web_search, file_search, mcp, image_generation) are dropped.
+// Unsupported tool types (file_search, code_interpreter, mcp, image_generation) are
+// dropped — Anthropic has no equivalent. web_search variants are converted (see below).
 func responsesToolsToAnthropic(tools []responses.Tool) ([]anthropic.AnthropicTool, []string) {
 	var anthropicTools []anthropic.AnthropicTool
 	var betas []string
@@ -38,8 +41,31 @@ func responsesToolsToAnthropic(tools []responses.Tool) ([]anthropic.AnthropicToo
 			// Computer use requires the beta header.
 			betas = appendUnique(betas, "computer-use-2024-10-22")
 
-			// web_search, file_search, code_interpreter, mcp, image_generation are not
-			// supported by Anthropic — skip them.
+		case "web_search", "web_search_preview", "web_search_preview_2025_03_11":
+			// Responses API's built-in web search tool → Anthropic's own
+			// hosted web_search tool. search_context_size has no Anthropic
+			// equivalent and is dropped; user_location carries over as-is.
+			tool := anthropic.AnthropicTool{
+				Type: "web_search_20250305",
+				Name: "web_search",
+			}
+			if t.UserLocation != nil {
+				tool.UserLocation = t.UserLocation
+			}
+			anthropicTools = append(anthropicTools, tool)
+
+		default:
+			// A client may send Anthropic's own versioned web_search type
+			// directly (e.g. "web_search_20250305", "web_search_20260209"):
+			// pass it through instead of dropping it as unrecognized.
+			if strings.HasPrefix(t.Type, "web_search_") {
+				anthropicTools = append(anthropicTools, anthropic.AnthropicTool{
+					Type: t.Type,
+					Name: "web_search",
+				})
+			}
+			// file_search, code_interpreter, mcp, image_generation, etc. are
+			// not supported by Anthropic — skip them.
 		}
 	}
 
@@ -70,6 +96,15 @@ func responsesToolChoiceToAnthropic(toolChoice interface{}) interface{} {
 			return map[string]interface{}{
 				"type": "tool",
 				"name": name,
+			}
+		}
+		if tcType == "web_search" || tcType == "web_search_preview" || tcType == "web_search_preview_2025_03_11" ||
+			strings.HasPrefix(tcType, "web_search_") {
+			// Force the web_search built-in tool by name, same as Anthropic's
+			// {"type":"tool","name":"web_search"} tool_choice form.
+			return map[string]interface{}{
+				"type": "tool",
+				"name": "web_search",
 			}
 		}
 	}

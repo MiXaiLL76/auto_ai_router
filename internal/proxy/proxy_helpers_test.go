@@ -273,7 +273,7 @@ func TestBuildMetadata(t *testing.T) {
 
 func TestAddAIRSpendMetadata(t *testing.T) {
 	t.Run("no_alias", func(t *testing.T) {
-		result := addAIRSpendMetadata("{}", "event-1", "", false, "gpt-4o", "gpt-4o")
+		result := addAIRSpendMetadata("{}", "event-1", "", false, "gpt-4o", "gpt-4o", "gpt-4o")
 		var m map[string]interface{}
 		err := json.Unmarshal([]byte(result), &m)
 		require.NoError(t, err)
@@ -285,7 +285,7 @@ func TestAddAIRSpendMetadata(t *testing.T) {
 	})
 
 	t.Run("with_public_alias", func(t *testing.T) {
-		result := addAIRSpendMetadata("{}", "event-2", "", false, "gemini-3-flash-preview", "google/gemini-3-flash-preview-highlimits")
+		result := addAIRSpendMetadata("{}", "event-2", "", false, "gemini-3-flash-preview", "google/gemini-3-flash-preview-highlimits", "gemini-3-flash-preview")
 		var m map[string]interface{}
 		err := json.Unmarshal([]byte(result), &m)
 		require.NoError(t, err)
@@ -296,7 +296,7 @@ func TestAddAIRSpendMetadata(t *testing.T) {
 	})
 
 	t.Run("empty_public_model_id", func(t *testing.T) {
-		result := addAIRSpendMetadata("{}", "event-3", "", false, "gpt-4o", "")
+		result := addAIRSpendMetadata("{}", "event-3", "", false, "gpt-4o", "", "gpt-4o")
 		var m map[string]interface{}
 		err := json.Unmarshal([]byte(result), &m)
 		require.NoError(t, err)
@@ -304,6 +304,33 @@ func TestAddAIRSpendMetadata(t *testing.T) {
 		spendMetadata, ok := m["spend_logs_metadata"].(map[string]interface{})
 		require.True(t, ok)
 		assert.NotContains(t, spendMetadata, "public_model_name")
+	})
+
+	t.Run("alias_differs_from_model_id_but_not_from_resolved_price", func(t *testing.T) {
+		// publicModelID != modelID, but billing actually resolved against
+		// publicModelID itself (priceModelID == publicModelID) — the alias
+		// didn't change which price row was used, so this must NOT be flagged.
+		result := addAIRSpendMetadata("{}", "event-4", "", false, "internal-routing-id", "gpt-4o", "gpt-4o")
+		var m map[string]interface{}
+		err := json.Unmarshal([]byte(result), &m)
+		require.NoError(t, err)
+
+		spendMetadata, ok := m["spend_logs_metadata"].(map[string]interface{})
+		require.True(t, ok)
+		assert.NotContains(t, spendMetadata, "public_model_name")
+	})
+
+	t.Run("price_unresolved_falls_back_to_model_id", func(t *testing.T) {
+		// priceModelID empty (billing was never resolved for this request) —
+		// falls back to comparing against modelID, matching prior behavior.
+		result := addAIRSpendMetadata("{}", "event-5", "", false, "gpt-4o", "gpt-4o-alias", "")
+		var m map[string]interface{}
+		err := json.Unmarshal([]byte(result), &m)
+		require.NoError(t, err)
+
+		spendMetadata, ok := m["spend_logs_metadata"].(map[string]interface{})
+		require.True(t, ok)
+		assert.Equal(t, "gpt-4o-alias", spendMetadata["public_model_name"])
 	})
 }
 

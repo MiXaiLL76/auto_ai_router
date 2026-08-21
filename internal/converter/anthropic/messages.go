@@ -101,6 +101,18 @@ func OpenAIToAnthropic(openAIBody []byte, model string) ([]byte, error) {
 		// Anthropic requires temperature=1.0 when thinking is enabled.
 		temp := 1.0
 		anthropicReq.Temperature = &temp
+	} else if !isClaudeModel(anthropicReq.Model) {
+		// This Anthropic-shaped request may be handled by a real Claude model
+		// (ProviderTypeAnthropic) or proxied by a multi-vendor gateway
+		// (CometAPI, ProMan) to an entirely different backend model. For
+		// Claude, omitting "thinking" already means off. Other vendors don't
+		// share that convention — e.g. Gemini models default to autonomous
+		// "medium" thinking when no config is given, silently burning the
+		// token budget on invisible reasoning and truncating the visible
+		// answer (mirrors the same default-off safeguard the Vertex
+		// converter applies via disableThinkingConfig). Send an explicit
+		// disable so every backend gets the same unambiguous signal.
+		anthropicReq.Thinking = &AnthropicThinking{Type: "disabled"}
 	}
 
 	// Anthropic has no native response_format; we inject a JSON instruction

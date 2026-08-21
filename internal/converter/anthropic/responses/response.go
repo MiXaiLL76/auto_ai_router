@@ -3,6 +3,7 @@ package anthropicresponses
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/mixaill76/auto_ai_router/internal/converter/anthropic"
@@ -74,8 +75,27 @@ func anthropicContentToOutputItems(blocks []anthropic.ContentBlock) []responses.
 			msgContent = append(msgContent, responses.OutputContent{
 				Type:        "output_text",
 				Text:        block.Text,
-				Annotations: []responses.Annotation{},
+				Annotations: webSearchCitationsToAnnotations(block.Text, block.Citations),
 			})
+
+		case "server_tool_use":
+			// Flush accumulated text before a search call.
+			flushMessage()
+			if block.Name == "web_search" {
+				output = append(output, responses.OutputItem{
+					Type:    "web_search_call",
+					ID:      responses.GenerateItemID("ws_"),
+					Status:  "completed",
+					Queries: webSearchQueryFromInput(block.Input),
+				})
+			}
+			// Other server tools (if any are added in future) have no
+			// Responses API equivalent yet — skip them rather than guess.
+
+			// web_search_tool_result blocks carry no separate Responses API
+			// item (OpenAI's web_search_call doesn't expose raw results
+			// either); their content surfaces via the text block's
+			// citations above instead — nothing to do here.
 
 		case "thinking":
 			// Flush any accumulated text first.
@@ -148,6 +168,47 @@ func anthropicContentToOutputItems(blocks []anthropic.ContentBlock) []responses.
 	}
 
 	return output
+}
+
+// webSearchCitationsToAnnotations converts a text block's Anthropic web_search
+// citations into Responses API url_citation annotations. Anthropic citations
+// carry the quoted substring (cited_text) rather than character offsets, so
+// offsets are recovered with a best-effort substring search against the
+// block's own text; a citation whose cited_text can't be located (e.g. minor
+// whitespace differences) is skipped rather than emitted with a wrong range.
+func webSearchCitationsToAnnotations(text string, citations []anthropic.AnthropicCitation) []responses.Annotation {
+	annotations := []responses.Annotation{}
+	for _, c := range citations {
+		if c.Type != "web_search_result_location" || c.URL == "" || c.CitedText == "" {
+			continue
+		}
+		idx := strings.Index(text, c.CitedText)
+		if idx < 0 {
+			continue
+		}
+		annotations = append(annotations, responses.Annotation{
+			Type:       "url_citation",
+			URL:        c.URL,
+			Title:      c.Title,
+			StartIndex: idx,
+			EndIndex:   idx + len(c.CitedText),
+		})
+	}
+	return annotations
+}
+
+// webSearchQueryFromInput extracts the search query from a server_tool_use
+// block's input (e.g. {"query": "..."}) for the web_search_call item's
+// Queries field.
+func webSearchQueryFromInput(input interface{}) []string {
+	m, ok := input.(map[string]interface{})
+	if !ok {
+		return nil
+	}
+	if q, ok := m["query"].(string); ok && q != "" {
+		return []string{q}
+	}
+	return nil
 }
 
 // anthropicStopReasonToStatus maps Anthropic stop_reason to Responses API status.

@@ -346,7 +346,7 @@ func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
 	requesterIP := getClientIP(logCtx.Request)
 	overheadMs := float64(time.Since(logCtx.StartTime).Microseconds()) / 1000.0
 	metadata := buildMetadata(hashedToken, logCtx.TokenInfo, logCtx.ErrorMsg, logCtx.HTTPStatus, logCtx.TokenUsage, requesterIP, tokenCosts, logCtx.ModelID, overheadMs, kafkaFallbackReason)
-	metadata = addAIRSpendMetadata(metadata, logCtx.RequestID, logCtx.ClientResponseID, logCtx.IsProxyRequest, logCtx.ModelID, logCtx.PublicModelID)
+	metadata = addAIRSpendMetadata(metadata, logCtx.RequestID, logCtx.ClientResponseID, logCtx.IsProxyRequest, logCtx.ModelID, logCtx.PublicModelID, logCtx.billingPriceModelID)
 
 	var completionStartTime *time.Time
 	if !logCtx.CompletionStartTime.IsZero() {

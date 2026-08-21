@@ -353,6 +353,83 @@ func TestTransformAnthropicStreamToResponses_ToolUseBlock(t *testing.T) {
 	assert.Contains(t, fc["arguments"].(string), "NYC")
 }
 
+// TestTransformAnthropicStreamToResponses_ServerToolUseWebSearch verifies that
+// a streamed server_tool_use (Anthropic's hosted web_search) block becomes a
+// web_search_call output item, instead of being silently dropped (there was
+// previously no case for "server_tool_use" at all in the streaming switch).
+func TestTransformAnthropicStreamToResponses_ServerToolUseWebSearch(t *testing.T) {
+	stream := buildAnthropicSSEStream([]map[string]interface{}{
+		{
+			"type": "message_start",
+			"message": map[string]interface{}{
+				"usage": map[string]interface{}{"input_tokens": 15, "cache_read_input_tokens": 0},
+			},
+		},
+		{
+			"type": "content_block_start",
+			"content_block": map[string]interface{}{
+				"type": "server_tool_use",
+				"id":   "srvtoolu_01",
+				"name": "web_search",
+			},
+		},
+		{
+			"type":  "content_block_delta",
+			"delta": map[string]interface{}{"type": "input_json_delta", "partial_json": `{"query`},
+		},
+		{
+			"type":  "content_block_delta",
+			"delta": map[string]interface{}{"type": "input_json_delta", "partial_json": `": "weather NYC"}`},
+		},
+		{
+			"type": "content_block_stop",
+		},
+		{
+			"type":  "message_delta",
+			"delta": map[string]interface{}{"stop_reason": "end_turn"},
+			"usage": map[string]interface{}{"output_tokens": 20},
+		},
+		{"type": "message_stop"},
+	})
+
+	var out bytes.Buffer
+	err := TransformAnthropicStreamToResponses(
+		strings.NewReader(stream), &out, "claude-opus-4-5", "", nil, nil,
+	)
+	require.NoError(t, err)
+
+	events := parseSSEEvents(out.String())
+	var completedEvent map[string]interface{}
+	var itemDoneEvent map[string]interface{}
+	for _, e := range events {
+		if e["type"] == "response.completed" {
+			completedEvent = e
+		}
+		if e["type"] == "response.output_item.done" {
+			itemDoneEvent = e
+		}
+		// A web_search_call must never stream as a function_call_arguments event.
+		assert.NotEqual(t, "response.function_call_arguments.delta", e["type"])
+		assert.NotEqual(t, "response.function_call_arguments.done", e["type"])
+	}
+	require.NotNil(t, completedEvent)
+	require.NotNil(t, itemDoneEvent)
+	doneItem := itemDoneEvent["item"].(map[string]interface{})
+	assert.Equal(t, "web_search_call", doneItem["type"])
+	assert.Equal(t, "completed", doneItem["status"])
+
+	respObj := completedEvent["response"].(map[string]interface{})
+	output := respObj["output"].([]interface{})
+	require.NotEmpty(t, output)
+
+	wsCall := output[0].(map[string]interface{})
+	assert.Equal(t, "web_search_call", wsCall["type"])
+	assert.Equal(t, "completed", wsCall["status"])
+	queries := wsCall["queries"].([]interface{})
+	require.Len(t, queries, 1)
+	assert.Equal(t, "weather NYC", queries[0])
+}
+
 func TestTransformAnthropicStreamToResponses_EmptyStream(t *testing.T) {
 	// A minimal stream with no content
 	stream := buildAnthropicSSEStream([]map[string]interface{}{
