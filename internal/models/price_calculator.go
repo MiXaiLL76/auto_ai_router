@@ -14,6 +14,7 @@ const (
 	tokenTiering128kThreshold = 128_000
 	tokenTiering256kThreshold = 256_000
 	tokenTiering272kThreshold = 272_000
+	tokenTiering512kThreshold = 512_000
 )
 
 // fullSessionTier describes one "Alibaba Cloud style" pricing bracket: once
@@ -47,6 +48,13 @@ type fullSessionTier struct {
 // separate proportional-only handling further down in CalculateTokenCosts.
 func fullSessionTiers(price *ModelPrice) []fullSessionTier {
 	tiers := []fullSessionTier{
+		{
+			threshold:         tokenTiering512kThreshold,
+			inputRate:         price.InputCostPerTokenAbove512k,
+			outputRate:        price.OutputCostPerTokenAbove512k,
+			cacheReadRate:     price.CacheReadInputTokenCostAbove512k,
+			cacheCreationRate: price.CacheCreationInputTokenCostAbove512k,
+		},
 		{
 			threshold:         tokenTiering272kThreshold,
 			inputRate:         price.InputCostPerTokenAbove272k,
