@@ -2,6 +2,7 @@ package anthropic
 
 import (
 	"encoding/json"
+	"strings"
 
 	converterutil "github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
 )
@@ -109,12 +110,62 @@ func convertOpenAIToolsToAnthropic(openAITools []interface{}) []AnthropicTool {
 				Type: "web_search_20250305",
 				Name: "web_search",
 			})
+		default:
+			// Built-in tools that already carry their versioned Anthropic type identifier
+			// (e.g. "web_search_20250305") reach this switch whenever the request started
+			// life as an Anthropic Messages call: MessagesToChat keeps such tools verbatim
+			// in the intermediate chat body, so on the way back they match none of the
+			// unversioned aliases above. Dropping them leaves the provider with no tool at
+			// all and the model answers as if it had never been offered one.
+			if builtin, ok := anthropicBuiltinToolFromVersionedType(toolMap, toolType); ok {
+				tools = append(tools, builtin)
+			}
 		}
 	}
 	if len(tools) == 0 {
 		return nil
 	}
 	return tools
+}
+
+// anthropicBuiltinTypePrefixes lists the versioned type prefixes of Anthropic built-in
+// tools together with the canonical tool name Anthropic expects next to each type.
+var anthropicBuiltinTypePrefixes = []struct {
+	prefix string
+	name   string
+}{
+	{"computer_", "computer"},
+	{"bash_", "bash"},
+	{"text_editor_", "str_replace_editor"},
+	{"web_search_", "web_search"},
+}
+
+// anthropicBuiltinToolFromVersionedType rebuilds an Anthropic built-in tool from a
+// definition that already uses the versioned type identifier. It mirrors the set of
+// prefixes MessagesToChat passes through untouched. Returns ok=false for every other
+// type, so genuinely unknown tools keep being dropped as before.
+func anthropicBuiltinToolFromVersionedType(toolMap map[string]interface{}, toolType string) (AnthropicTool, bool) {
+	for _, builtin := range anthropicBuiltinTypePrefixes {
+		if !strings.HasPrefix(toolType, builtin.prefix) {
+			continue
+		}
+		tool := AnthropicTool{
+			Type: toolType,
+			Name: converterutil.GetString(toolMap, "name"),
+		}
+		if tool.Name == "" {
+			tool.Name = builtin.name
+		}
+		if width, ok := toolMap["display_width_px"].(float64); ok {
+			tool.DisplayWidthPx = int(width)
+		}
+		if height, ok := toolMap["display_height_px"].(float64); ok {
+			tool.DisplayHeightPx = int(height)
+		}
+		tool.CacheControl = toolMap["cache_control"]
+		return tool, true
+	}
+	return AnthropicTool{}, false
 }
 
 // expandAllowedTools converts an "allowed_tools" tool_choice into a supported Anthropic/Bedrock
