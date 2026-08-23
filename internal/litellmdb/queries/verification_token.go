@@ -20,6 +20,7 @@ SELECT
   t.expires,
   t.blocked as token_blocked,
   t.models as token_models,
+  t.allowed_routes as token_allowed_routes,
   t.metadata as token_metadata,
 
   -- ============ User ============

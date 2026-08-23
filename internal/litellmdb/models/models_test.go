@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // ==================== DefaultConfig Tests ====================
@@ -455,6 +456,17 @@ func TestTokenInfo_checkOrganizationMemberBudget_Exceeded(t *testing.T) {
 	}
 
 	assert.True(t, token.checkOrganizationMemberBudget())
+}
+
+func TestTokenInfoCloneCopiesAllowedRoutes(t *testing.T) {
+	original := &TokenInfo{AllowedRoutes: []string{"/v1/chat/completions", "/v1/models"}}
+
+	cloned := original.Clone()
+	require.NotNil(t, cloned)
+	require.Equal(t, original.AllowedRoutes, cloned.AllowedRoutes)
+
+	cloned.AllowedRoutes[0] = "/v1/embeddings"
+	assert.Equal(t, "/v1/chat/completions", original.AllowedRoutes[0])
 }
 
 // ==================== Validate Tests ====================

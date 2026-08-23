@@ -249,6 +249,7 @@ func main() {
 		StrictAllTeamModelsACL:     cfg.Server.StrictAllTeamModelsACL,
 		ResponseHeaderMode:         cfg.Server.ResponseHeaders.Mode,
 		CredentialNameAsTeamID:     cfg.Server.CredentialNameAsTeamID,
+		ProtectedTenants:           cfg.ProtectedTenants,
 
 		BudgetReserver:                   budgetReserver,
 		KeyRateLimiter:                   keyRateLimiter,
@@ -662,10 +663,10 @@ func initializeModelManager(
 		modelManager.SetClientModelIDs(cfg.ClientModelIDs)
 	}
 	if len(cfg.PublicModelAlias) > 0 {
-		modelManager.SetPublicModelAliases(cfg.PublicModelAlias)
+		modelManager.SetScopedPublicModelAliases(cfg.PublicModelAlias)
 	}
 	if len(cfg.AcceptedModelAlias) > 0 {
-		modelManager.SetAcceptedModelAliases(cfg.AcceptedModelAlias)
+		modelManager.SetScopedAcceptedModelAliases(cfg.AcceptedModelAlias)
 	}
 
 	// Initialize rate limiters for each model

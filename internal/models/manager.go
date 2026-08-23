@@ -282,6 +282,11 @@ const (
 	scopedAllModelsCacheSize = 256
 )
 
+type clientModelAlias struct {
+	target     string
+	expression *scope.Expression
+}
+
 // Manager handles model discovery and mapping
 type Manager struct {
 	mu                           sync.RWMutex
@@ -299,8 +304,8 @@ type Manager struct {
 	modelAliases                 map[string]string            // alias -> real model name (from model_alias config)
 	clientModelIDs               map[string]struct{}          // exact advertised canonical client IDs
 	clientModelSurfaceConfigured bool                         // distinguishes an omitted boundary from an explicit empty boundary
-	publicModelAliases           map[string]string            // client alias -> canonical LiteLLM public deployment identity
-	acceptedModelAliases         map[string]string            // accepted client alias -> canonical model, hidden from discovery
+	publicModelAliases           map[string]clientModelAlias  // visible client alias -> canonical public identity + tenant scope
+	acceptedModelAliases         map[string]clientModelAlias  // accepted client alias -> canonical model + tenant scope, hidden from discovery
 	modelRealNames               map[string]string            // alias name -> real model name (global, no specific credential)
 	modelRealNamesPerCred        map[string]map[string]string // credential -> alias -> real model name (for credential-specific entries)
 	credentialMappingsReady      bool                         // true after static/DB credential mappings have been initialized
@@ -327,8 +332,8 @@ func New(logger *slog.Logger, defaultModelsRPM int, staticModels []config.ModelR
 		dbModelNames:                make(map[string]bool),
 		modelAliases:                make(map[string]string),
 		clientModelIDs:              make(map[string]struct{}),
-		publicModelAliases:          make(map[string]string),
-		acceptedModelAliases:        make(map[string]string),
+		publicModelAliases:          make(map[string]clientModelAlias),
+		acceptedModelAliases:        make(map[string]clientModelAlias),
 		modelRealNames:              make(map[string]string),
 		modelRealNamesPerCred:       make(map[string]map[string]string),
 		modelPassthroughResponses:   make(map[string]*bool),
@@ -667,15 +672,29 @@ func (m *Manager) SetClientModelIDs(modelIDs []string) {
 // create cycles for common short backend names (for example
 // gpt-4.1 -> openai/gpt-4.1 -> gpt-4.1).
 func (m *Manager) SetPublicModelAliases(aliases map[string]string) {
+	definitions := make(map[string]config.ClientModelAliasConfig, len(aliases))
+	for alias, target := range aliases {
+		definitions[alias] = config.ClientModelAliasConfig{Target: target}
+	}
+	m.SetScopedPublicModelAliases(definitions)
+}
+
+// SetScopedPublicModelAliases installs public aliases with optional tenant
+// scope restrictions. SetPublicModelAliases is the legacy unrestricted wrapper.
+func (m *Manager) SetScopedPublicModelAliases(aliases map[string]config.ClientModelAliasConfig) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.publicModelAliases = make(map[string]string, len(aliases))
-	for alias, target := range aliases {
+	m.publicModelAliases = make(map[string]clientModelAlias, len(aliases))
+	for alias, definition := range aliases {
+		target := definition.Target
 		if alias == "" || target == "" || alias == target {
 			m.logger.Warn("Invalid public model alias, skipping", "alias", alias, "target", target)
 			continue
 		}
-		m.publicModelAliases[alias] = target
+		m.publicModelAliases[alias] = clientModelAlias{
+			target:     target,
+			expression: scope.NormalizeExpression(definition.ScopeExpression()),
+		}
 		m.logger.Info("Registered public model alias", "alias", alias, "target", target)
 	}
 	m.allModels = nil
@@ -683,15 +702,29 @@ func (m *Manager) SetPublicModelAliases(aliases map[string]string) {
 }
 
 func (m *Manager) SetAcceptedModelAliases(aliases map[string]string) {
+	definitions := make(map[string]config.ClientModelAliasConfig, len(aliases))
+	for alias, target := range aliases {
+		definitions[alias] = config.ClientModelAliasConfig{Target: target}
+	}
+	m.SetScopedAcceptedModelAliases(definitions)
+}
+
+// SetScopedAcceptedModelAliases installs hidden compatibility aliases with
+// optional tenant scope restrictions. The legacy setter is unrestricted.
+func (m *Manager) SetScopedAcceptedModelAliases(aliases map[string]config.ClientModelAliasConfig) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.acceptedModelAliases = make(map[string]string, len(aliases))
-	for alias, target := range aliases {
+	m.acceptedModelAliases = make(map[string]clientModelAlias, len(aliases))
+	for alias, definition := range aliases {
+		target := definition.Target
 		if alias == "" || target == "" || alias == target {
 			m.logger.Warn("Invalid accepted model alias, skipping", "alias", alias, "target", target)
 			continue
 		}
-		m.acceptedModelAliases[alias] = target
+		m.acceptedModelAliases[alias] = clientModelAlias{
+			target:     target,
+			expression: scope.NormalizeExpression(definition.ScopeExpression()),
+		}
 		m.logger.Info("Registered accepted model alias", "alias", alias, "target", target)
 	}
 	m.allModels = nil
@@ -699,25 +732,38 @@ func (m *Manager) SetAcceptedModelAliases(aliases map[string]string) {
 }
 
 func (m *Manager) clientAliasTargetLocked(modelID string) (string, bool, bool) {
-	publicTarget, publicConfigured := m.publicModelAliases[modelID]
-	acceptedTarget, acceptedConfigured := m.acceptedModelAliases[modelID]
-	if publicConfigured && acceptedConfigured && publicTarget != acceptedTarget {
+	return m.clientAliasTargetScopedLocked(modelID, scope.AdminContext())
+}
+
+func (m *Manager) clientAliasTargetScopedLocked(modelID string, visibility scope.Context) (string, bool, bool) {
+	publicAlias, publicConfigured := m.publicModelAliases[modelID]
+	acceptedAlias, acceptedConfigured := m.acceptedModelAliases[modelID]
+	if publicConfigured && acceptedConfigured && publicAlias.target != acceptedAlias.target {
 		return modelID, true, false
 	}
+	if publicConfigured && acceptedConfigured {
+		allowed := visibility.AllowsExpression(publicAlias.expression) ||
+			visibility.AllowsExpression(acceptedAlias.expression)
+		return publicAlias.target, true, allowed
+	}
 	if publicConfigured {
-		return publicTarget, true, true
+		return publicAlias.target, true, visibility.AllowsExpression(publicAlias.expression)
 	}
 	if acceptedConfigured {
-		return acceptedTarget, true, true
+		return acceptedAlias.target, true, visibility.AllowsExpression(acceptedAlias.expression)
 	}
 	return modelID, false, true
 }
 
 func (m *Manager) IsClientModelIDRoutable(modelID string) bool {
+	return m.IsClientModelIDRoutableScoped(modelID, scope.AdminContext())
+}
+
+func (m *Manager) IsClientModelIDRoutableScoped(modelID string, visibility scope.Context) bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	if target, aliased, unambiguous := m.clientAliasTargetLocked(modelID); aliased {
-		if !unambiguous || !m.publicModelAliasTargetActiveLocked(target) {
+	if target, aliased, allowed := m.clientAliasTargetScopedLocked(modelID, visibility); aliased {
+		if !allowed || !m.clientModelTargetVisibleLocked(target, visibility) {
 			return false
 		}
 		if m.clientModelSurfaceConfigured {
@@ -731,21 +777,44 @@ func (m *Manager) IsClientModelIDRoutable(modelID string) bool {
 			return false
 		}
 	}
-	_, routable := m.clientCanonicalRouteTargetLocked(modelID)
-	return routable
+	return m.clientModelTargetVisibleLocked(modelID, visibility)
 }
 
 func (m *Manager) ResolvePublicModelAlias(modelID string) (string, bool, error) {
+	return m.ResolvePublicModelAliasScoped(modelID, scope.AdminContext())
+}
+
+// ResolvePublicModelAliasScoped resolves a client alias only when both its
+// canonical target and its own tenant-scope expression are available.
+func (m *Manager) ResolvePublicModelAliasScoped(modelID string, visibility scope.Context) (string, bool, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	target, aliased, unambiguous := m.clientAliasTargetLocked(modelID)
+	target, aliased, allowed := m.clientAliasTargetScopedLocked(modelID, visibility)
 	if !aliased {
 		return modelID, false, nil
 	}
-	if !unambiguous || !m.publicModelAliasTargetActiveLocked(target) {
+	if !allowed || !m.clientModelTargetVisibleLocked(target, visibility) {
 		return modelID, false, fmt.Errorf("public model alias %q is not routable", modelID)
 	}
 	return target, true, nil
+}
+
+func (m *Manager) clientModelTargetVisibleLocked(modelID string, visibility scope.Context) bool {
+	routeTarget, active := m.clientCanonicalRouteTargetLocked(modelID)
+	if !active {
+		return false
+	}
+	visibleCredentials := m.visibleCredentialNamesLocked(visibility)
+	hasCredentialInventory := m.credentialsConfigured
+	for _, credentialName := range m.modelToCredentials[routeTarget] {
+		if hasCredentialInventory && !visibleCredentials[credentialName] {
+			continue
+		}
+		if m.modelScopeAllowsLocked(routeTarget, credentialName, visibility) {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *Manager) clientCanonicalRouteTargetLocked(modelID string) (string, bool) {
@@ -1439,7 +1508,7 @@ func (m *Manager) GetClientModels() ModelsResponse {
 	response := m.GetAllModels()
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	response.Data = m.projectClientModelCatalogLocked(response.Data)
+	response.Data = m.projectClientModelCatalogLocked(response.Data, scope.AdminContext())
 	return response
 }
 
@@ -1462,7 +1531,7 @@ func (m *Manager) GetAllModelsScoped(visibility scope.Context) ModelsResponse {
 	}
 	scopedResponse := ModelsResponse{
 		Object: response.Object,
-		Data:   m.projectClientModelCatalogLocked(filtered),
+		Data:   m.projectClientModelCatalogLocked(filtered, visibility),
 	}
 	m.scopedAllModelsCache.Add(m.scopedAllModelsCacheKeyLocked(visibility), allModelsCache{
 		response:  copyModelsResponse(scopedResponse),
@@ -1577,11 +1646,12 @@ func (m *Manager) currentModelsLocked(response ModelsResponse, visibleCredential
 // projectClientModelCatalogLocked is the single public boundary used by both
 // unscoped and key-scoped discovery. Its input must already contain only
 // internal models visible through the selected credentials/scopes.
-func (m *Manager) projectClientModelCatalogLocked(internalModels []Model) []Model {
+func (m *Manager) projectClientModelCatalogLocked(internalModels []Model, visibility scope.Context) []Model {
 	activePublicAliases := make(map[string]string, len(m.publicModelAliases))
-	for alias, target := range m.publicModelAliases {
-		if m.publicModelAliasTargetActiveLocked(target) {
-			activePublicAliases[alias] = target
+	for alias, definition := range m.publicModelAliases {
+		if visibility.AllowsExpression(definition.expression) &&
+			m.publicModelAliasTargetActiveLocked(definition.target) {
+			activePublicAliases[alias] = definition.target
 		}
 	}
 	var models []Model
@@ -1599,7 +1669,7 @@ func (m *Manager) projectClientModelCatalogLocked(internalModels []Model) []Mode
 	return hideAcceptedModelAliases(models, m.acceptedModelAliases)
 }
 
-func hideAcceptedModelAliases(models []Model, aliases map[string]string) []Model {
+func hideAcceptedModelAliases(models []Model, aliases map[string]clientModelAlias) []Model {
 	if len(aliases) == 0 {
 		return models
 	}
@@ -2490,9 +2560,10 @@ func (m *Manager) GetAllModelsWithAccessGroupsScoped(visibility scope.Context) M
 	}
 	activeAliases := activePublicModelAliases(availableTargets, m.modelAliases)
 	activeDeploymentAliases := make(map[string]string, len(m.publicModelAliases))
-	for alias, target := range m.publicModelAliases {
-		if m.publicModelAliasTargetActiveLocked(target) {
-			activeDeploymentAliases[alias] = target
+	for alias, definition := range m.publicModelAliases {
+		if visibility.AllowsExpression(definition.expression) &&
+			m.publicModelAliasTargetActiveLocked(definition.target) {
+			activeDeploymentAliases[alias] = definition.target
 		}
 	}
 

@@ -16,6 +16,7 @@ type trustedClientAuth struct {
 }
 
 type trustedClientAuthContextKey struct{}
+type trustedRouteAuthorizationContextKey struct{}
 
 func withTrustedClientAuth(req *http.Request, rawToken string, tokenInfo *dbmodels.TokenInfo) *http.Request {
 	if req == nil || tokenInfo == nil {
@@ -23,6 +24,21 @@ func withTrustedClientAuth(req *http.Request, rawToken string, tokenInfo *dbmode
 	}
 	value := trustedClientAuth{rawToken: rawToken, tokenInfo: tokenInfo.Clone()}
 	return req.WithContext(context.WithValue(req.Context(), trustedClientAuthContextKey{}, value))
+}
+
+func withTrustedRouteAuthorization(req *http.Request) *http.Request {
+	if req == nil {
+		return nil
+	}
+	return req.WithContext(context.WithValue(req.Context(), trustedRouteAuthorizationContextKey{}, true))
+}
+
+func hasTrustedRouteAuthorization(req *http.Request) bool {
+	if req == nil {
+		return false
+	}
+	trusted, _ := req.Context().Value(trustedRouteAuthorizationContextKey{}).(bool)
+	return trusted
 }
 
 func trustedClientAuthFromRequest(req *http.Request) (trustedClientAuth, bool) {

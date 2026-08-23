@@ -50,15 +50,81 @@ func (m *clientAuthTestDB) ValidateToken(_ context.Context, rawToken string) (*d
 	if info == nil {
 		return nil, litellmdb.ErrTokenNotFound
 	}
-	clone := *info
-	clone.Models = append([]string(nil), info.Models...)
-	clone.UserModels = append([]string(nil), info.UserModels...)
-	clone.TeamModels = append([]string(nil), info.TeamModels...)
-	clone.TeamMemberModels = append([]string(nil), info.TeamMemberModels...)
+	clone := info.Clone()
 	if err := clone.Validate(""); err != nil {
 		return nil, err
 	}
-	return &clone, nil
+	return clone, nil
+}
+
+func TestProtectedTenantAdmissionAndScopedAliasBeforeProvider(t *testing.T) {
+	var upstreamCalls atomic.Int32
+	upstream := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		upstreamCalls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl-cloud","object":"chat.completion","created":1,"model":"backend-chat","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+	}))
+	defer upstream.Close()
+
+	db := &clientAuthTestDB{tokens: map[string]*dbmodels.TokenInfo{
+		"cloud-key": {
+			Token:          "cloud-hash",
+			OrganizationID: "org-cloud",
+			Models:         []string{"cloud/legacy-chat"},
+			AllowedRoutes:  []string{"POST /v1/chat/completions"},
+			Metadata:       map[string]interface{}{"air_scopes": []string{"cloud-ru"}},
+		},
+		"other-key": {Token: "other-hash", OrganizationID: "org-other"},
+	}}
+	prx := newClientAuthTestProxy(t, db, upstream.URL, config.ProviderTypeOpenAI, "provider-key")
+	prx.protectedTenants = []config.ProtectedTenantConfig{{
+		Name:            "cloud-ru",
+		OrganizationIDs: []string{"org-cloud"},
+		Hostnames:       []string{"api.cloud.example"},
+		RequiredScopes:  []string{"cloud-ru"},
+		RequireModelACL: true,
+		RequireRouteACL: true,
+	}}
+	prx.modelManager.SetClientModelIDs([]string{"public/chat"})
+	prx.modelManager.SetScopedPublicModelAliases(map[string]config.ClientModelAliasConfig{
+		"cloud/legacy-chat": {Target: "public/chat", Scopes: []string{"cloud-ru"}},
+	})
+
+	request := func(key, host, path, body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "http://"+host+path, strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer "+key)
+		req.Header.Set("Content-Type", "application/json")
+		writer := httptest.NewRecorder()
+		prx.ProxyRequest(writer, req)
+		return writer
+	}
+
+	allowed := request("cloud-key", "api.cloud.example", "/v1/chat/completions", `{"model":"cloud/legacy-chat","messages":[{"role":"user","content":"hello"}]}`)
+	require.Equal(t, http.StatusOK, allowed.Code)
+	assert.Equal(t, int32(1), upstreamCalls.Load())
+
+	hiddenAlias := request("other-key", "router.example", "/v1/chat/completions", `{"model":"cloud/legacy-chat","messages":[{"role":"user","content":"hello"}]}`)
+	assert.Equal(t, http.StatusNotFound, hiddenAlias.Code)
+	assert.Equal(t, int32(1), upstreamCalls.Load())
+
+	foreignHost := request("other-key", "api.cloud.example", "/v1/chat/completions", `{"model":"public/chat","messages":[{"role":"user","content":"hello"}]}`)
+	assert.Equal(t, http.StatusForbidden, foreignHost.Code)
+	assert.Equal(t, int32(1), upstreamCalls.Load())
+
+	spoofedReq := httptest.NewRequest(http.MethodPost, "http://api.cloud.example/v1/chat/completions", strings.NewReader(
+		`{"model":"public/chat","messages":[{"role":"user","content":"hello"}]}`,
+	))
+	spoofedReq.Header.Set("Authorization", "Bearer other-key")
+	spoofedReq.Header.Set("Content-Type", "application/json")
+	spoofedReq.Header.Set("x-vsellm-request-auth-org-id", "org-cloud")
+	spoofedWriter := httptest.NewRecorder()
+	prx.ProxyRequest(spoofedWriter, spoofedReq)
+	assert.Equal(t, http.StatusForbidden, spoofedWriter.Code)
+	assert.Equal(t, int32(1), upstreamCalls.Load())
+
+	deniedRoute := request("cloud-key", "router.example", "/v1/embeddings", `{"model":"cloud/legacy-chat","input":"hello"}`)
+	assert.Equal(t, http.StatusForbidden, deniedRoute.Code)
+	assert.Equal(t, int32(1), upstreamCalls.Load())
 }
 
 func (m *clientAuthTestDB) seenTokens() []string {

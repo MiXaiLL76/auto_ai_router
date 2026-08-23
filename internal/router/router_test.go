@@ -50,15 +50,11 @@ func (m *routerAuthTestDB) ValidateToken(_ context.Context, rawToken string) (*d
 	if info == nil {
 		return nil, litellmdb.ErrTokenNotFound
 	}
-	clone := *info
-	clone.Models = append([]string(nil), info.Models...)
-	clone.UserModels = append([]string(nil), info.UserModels...)
-	clone.TeamModels = append([]string(nil), info.TeamModels...)
-	clone.TeamMemberModels = append([]string(nil), info.TeamMemberModels...)
+	clone := info.Clone()
 	if err := clone.Validate(""); err != nil {
 		return nil, err
 	}
-	return &clone, nil
+	return clone, nil
 }
 
 func newIPv4Server(t *testing.T, handler http.Handler) *httptest.Server {
@@ -81,6 +77,10 @@ func createTestProxy() *proxy.Proxy {
 }
 
 func createTestProxyWithStrictACL(strictAllTeamModelsACL bool) *proxy.Proxy {
+	return createTestProxyWithPolicies(strictAllTeamModelsACL, nil)
+}
+
+func createTestProxyWithPolicies(strictAllTeamModelsACL bool, protected []config.ProtectedTenantConfig) *proxy.Proxy {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
 	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
 	rl := ratelimit.New()
@@ -114,6 +114,7 @@ func createTestProxyWithStrictACL(strictAllTeamModelsACL bool) *proxy.Proxy {
 		Version:                "test-version",
 		Commit:                 "test-commit",
 		StrictAllTeamModelsACL: strictAllTeamModelsACL,
+		ProtectedTenants:       protected,
 	})
 }
 
@@ -887,6 +888,48 @@ func TestServeHTTPPublicPreflightDoesNotEnableWildcardCORS(t *testing.T) {
 	assert.Empty(t, w.Header().Get("Access-Control-Allow-Origin"))
 	assert.Empty(t, w.Header().Get("Access-Control-Allow-Headers"))
 	assert.Empty(t, w.Header().Get("Access-Control-Allow-Methods"))
+}
+
+type bodyReadCounter struct {
+	reads int
+}
+
+func (b *bodyReadCounter) Read([]byte) (int, error) {
+	b.reads++
+	return 0, io.EOF
+}
+
+func (b *bodyReadCounter) Close() error { return nil }
+
+func TestProtectedTenantAdmissionRunsBeforeDiagnosticBodyCapture(t *testing.T) {
+	prx := createTestProxyWithPolicies(false, []config.ProtectedTenantConfig{{
+		Name:            "cloud-ru",
+		OrganizationIDs: []string{"org-cloud"},
+		Hostnames:       []string{"api.cloud.example"},
+		RequiredScopes:  []string{"cloud-ru"},
+		RequireModelACL: true,
+		RequireRouteACL: true,
+	}})
+	prx.LiteLLMDB = &routerAuthTestDB{tokens: map[string]*dbmodels.TokenInfo{
+		"foreign-key": {Token: "foreign-hash", OrganizationID: "org-foreign"},
+	}}
+	router := New(
+		prx,
+		createTestModelManager(),
+		testhelpers.NewTestMonitoringConfig("/health", true, ""),
+		testhelpers.NewTestLogger(),
+		nil,
+	)
+	body := &bodyReadCounter{}
+	req := httptest.NewRequest(http.MethodPost, "http://api.cloud.example/v1/chat/completions", nil)
+	req.Body = body
+	req.Header.Set("Authorization", "Bearer foreign-key")
+	writer := httptest.NewRecorder()
+
+	router.ServeHTTP(writer, req)
+
+	assert.Equal(t, http.StatusForbidden, writer.Code)
+	assert.Zero(t, body.reads, "protected admission must reject before diagnostic body capture")
 }
 
 func TestServeHTTPWebSocketUpgradeIsCaseInsensitive(t *testing.T) {

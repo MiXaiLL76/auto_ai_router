@@ -99,6 +99,40 @@ func TestMaskToken(t *testing.T) {
 	}
 }
 
+func TestResolveOrganizationID(t *testing.T) {
+	tokenOrg := "org-from-token"
+	teamOrg := "org-from-team"
+
+	tests := []struct {
+		name     string
+		tokenOrg *string
+		teamOrg  *string
+		want     string
+	}{
+		{
+			name:     "token organization takes precedence",
+			tokenOrg: &tokenOrg,
+			teamOrg:  &teamOrg,
+			want:     tokenOrg,
+		},
+		{
+			name:    "team organization is the fallback",
+			teamOrg: &teamOrg,
+			want:    teamOrg,
+		},
+		{
+			name: "missing joined team has no organization fallback",
+			want: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, resolveOrganizationID(tt.tokenOrg, tt.teamOrg))
+		})
+	}
+}
+
 func TestTokenInfo_IsExpired(t *testing.T) {
 	t.Run("nil expires - not expired", func(t *testing.T) {
 		info := &models.TokenInfo{Expires: nil}

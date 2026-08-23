@@ -68,7 +68,10 @@ func isHopByHopHeader(key string) bool {
 }
 
 func isInternalAIRRequestHeader(key string) bool {
-	return strings.EqualFold(key, HeaderAIRProxyClient) ||
+	lowerKey := strings.ToLower(key)
+	return strings.HasPrefix(lowerKey, "x-vsellm-") ||
+		strings.HasPrefix(lowerKey, "x-auth-request-") ||
+		strings.EqualFold(key, HeaderAIRProxyClient) ||
 		strings.EqualFold(key, HeaderLegacyAIRProxyClient) ||
 		strings.EqualFold(key, HeaderAIRUsageAudioTokens)
 }
@@ -111,7 +114,9 @@ func copyRequestHeaders(dst *http.Request, src *http.Request, apiKey string) {
 		if key == "Accept-Encoding" {
 			continue
 		}
-		// Strip internal AIR markers — they must not be forwarded to the actual provider.
+		// Strip router-internal metadata, including Cloud.ru identity, routing,
+		// pricing, and provider credentials. AIR may consume these headers before
+		// this boundary, but they must never reach the selected provider.
 		if isInternalAIRRequestHeader(key) {
 			continue
 		}
@@ -141,7 +146,9 @@ func copyHeadersSkipAuth(dst *http.Request, src *http.Request) {
 		if key == "Accept-Encoding" {
 			continue
 		}
-		// Strip internal AIR markers — they must not be forwarded to the actual provider.
+		// Strip router-internal metadata, including Cloud.ru identity, routing,
+		// pricing, and provider credentials. AIR may consume these headers before
+		// this boundary, but they must never reach the selected provider.
 		if isInternalAIRRequestHeader(key) {
 			continue
 		}

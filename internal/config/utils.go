@@ -179,14 +179,29 @@ func PrintConfig(logger *slog.Logger, cfg *Config) {
 	}
 	if len(cfg.PublicModelAlias) > 0 {
 		logger.Info("public_model_alias", "total_count", len(cfg.PublicModelAlias))
-		for alias, target := range cfg.PublicModelAlias {
-			logger.Info("  public alias", "from", alias, "to", target)
+		for alias, definition := range cfg.PublicModelAlias {
+			logger.Info("  public alias", "from", alias, "to", definition.Target,
+				"scopes", definition.Scopes, "denied_scopes", definition.DeniedScopes)
 		}
 	}
 	if len(cfg.AcceptedModelAlias) > 0 {
 		logger.Info("accepted_model_alias", "total_count", len(cfg.AcceptedModelAlias))
-		for alias, target := range cfg.AcceptedModelAlias {
-			logger.Info("  accepted alias", "from", alias, "to", target)
+		for alias, definition := range cfg.AcceptedModelAlias {
+			logger.Info("  accepted alias", "from", alias, "to", definition.Target,
+				"scopes", definition.Scopes, "denied_scopes", definition.DeniedScopes)
+		}
+	}
+	if len(cfg.ProtectedTenants) > 0 {
+		logger.Info("protected_tenants", "total_count", len(cfg.ProtectedTenants))
+		for _, policy := range cfg.ProtectedTenants {
+			logger.Info("  protected tenant",
+				"name", policy.Name,
+				"organization_ids", policy.OrganizationIDs,
+				"hostnames", policy.Hostnames,
+				"required_scopes", policy.RequiredScopes,
+				"require_model_acl", policy.RequireModelACL,
+				"require_route_acl", policy.RequireRouteACL,
+			)
 		}
 	}
 

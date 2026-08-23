@@ -146,6 +146,93 @@ func TestAcceptedModelAliasRoutesWithoutDiscovery(t *testing.T) {
 	assert.Equal(t, []string{"openai/gpt-4.1"}, responseModelIDs(manager.GetClientModels()))
 }
 
+func TestScopedPublicModelAliasDoesNotHideCanonicalAvailability(t *testing.T) {
+	logger := slog.New(slog.DiscardHandler)
+	credential := config.CredentialConfig{Name: "provider", Type: config.ProviderTypeOpenAI}
+	manager := New(logger, 100, []config.ModelRPMConfig{{Name: "backend", Credential: credential.Name}})
+	manager.SetModelAliases(map[string]string{"public/chat": "backend"})
+	manager.SetClientModelIDs([]string{"public/chat"})
+	manager.SetScopedPublicModelAliases(map[string]config.ClientModelAliasConfig{
+		"cloud-chat": {Target: "public/chat", Scopes: []string{"cloud-ru"}},
+	})
+	manager.LoadModelsFromConfig([]config.CredentialConfig{credential})
+	manager.SetCredentials([]config.CredentialConfig{credential})
+
+	public := scope.PublicContext()
+	cloud := scope.NewContext([]string{"cloud-ru"}, nil)
+	assert.Equal(t, []string{"public/chat"}, responseModelIDs(manager.GetAllModelsScoped(public)))
+	assert.Equal(t, []string{"cloud-chat", "public/chat"}, responseModelIDs(manager.GetAllModelsScoped(cloud)))
+	assert.True(t, manager.IsClientModelIDRoutableScoped("public/chat", public))
+	assert.False(t, manager.IsClientModelIDRoutableScoped("cloud-chat", public))
+	assert.True(t, manager.IsClientModelIDRoutableScoped("cloud-chat", cloud))
+
+	canonical, aliased, err := manager.ResolvePublicModelAliasScoped("cloud-chat", public)
+	assert.Error(t, err)
+	assert.False(t, aliased)
+	assert.Equal(t, "cloud-chat", canonical)
+	canonical, aliased, err = manager.ResolvePublicModelAliasScoped("cloud-chat", cloud)
+	require.NoError(t, err)
+	assert.True(t, aliased)
+	assert.Equal(t, "public/chat", canonical)
+}
+
+func TestScopedPublicModelAliasRequiresVisibleTargetCredential(t *testing.T) {
+	logger := slog.New(slog.DiscardHandler)
+	credential := config.CredentialConfig{
+		Name: "provider", Type: config.ProviderTypeOpenAI, Scopes: []string{"provider-private"},
+	}
+	manager := New(logger, 100, []config.ModelRPMConfig{{Name: "backend", Credential: credential.Name}})
+	manager.SetModelAliases(map[string]string{"public/chat": "backend"})
+	manager.SetClientModelIDs([]string{"public/chat"})
+	manager.SetScopedPublicModelAliases(map[string]config.ClientModelAliasConfig{
+		"cloud-chat": {Target: "public/chat", Scopes: []string{"cloud-ru"}},
+	})
+	manager.LoadModelsFromConfig([]config.CredentialConfig{credential})
+	manager.SetCredentials([]config.CredentialConfig{credential})
+
+	aliasOnly := scope.NewContext([]string{"cloud-ru"}, nil)
+	assert.False(t, manager.IsClientModelIDRoutableScoped("public/chat", aliasOnly),
+		"canonical IDs must not bypass credential visibility")
+	assert.False(t, manager.IsClientModelIDRoutableScoped("cloud-chat", aliasOnly))
+	_, _, err := manager.ResolvePublicModelAliasScoped("cloud-chat", aliasOnly)
+	assert.Error(t, err)
+	assert.Empty(t, responseModelIDs(manager.GetAllModelsScoped(aliasOnly)))
+
+	fullyVisible := scope.NewContext([]string{"cloud-ru", "provider-private"}, nil)
+	assert.True(t, manager.IsClientModelIDRoutableScoped("public/chat", fullyVisible))
+	assert.True(t, manager.IsClientModelIDRoutableScoped("cloud-chat", fullyVisible))
+	_, aliased, err := manager.ResolvePublicModelAliasScoped("cloud-chat", fullyVisible)
+	require.NoError(t, err)
+	assert.True(t, aliased)
+
+	manager.SetCredentials([]config.CredentialConfig{})
+	assert.False(t, manager.IsClientModelIDRoutableScoped("cloud-chat", fullyVisible),
+		"an authoritative empty credential inventory must not reuse stale routes")
+	assert.Empty(t, responseModelIDs(manager.GetAllModelsScoped(fullyVisible)))
+}
+
+func TestScopedAcceptedModelAliasIsHiddenAndFailsClosedOutsideScope(t *testing.T) {
+	logger := slog.New(slog.DiscardHandler)
+	credential := config.CredentialConfig{Name: "provider", Type: config.ProviderTypeOpenAI}
+	manager := New(logger, 100, []config.ModelRPMConfig{{Name: "backend", Credential: credential.Name}})
+	manager.SetModelAliases(map[string]string{"public/chat": "backend"})
+	manager.SetClientModelIDs([]string{"public/chat"})
+	manager.SetScopedAcceptedModelAliases(map[string]config.ClientModelAliasConfig{
+		"legacy-chat": {Target: "public/chat", Scopes: []string{"cloud-ru"}},
+	})
+	manager.LoadModelsFromConfig([]config.CredentialConfig{credential})
+	manager.SetCredentials([]config.CredentialConfig{credential})
+
+	cloud := scope.NewContext([]string{"cloud-ru"}, nil)
+	other := scope.NewContext([]string{"other"}, nil)
+	assert.Equal(t, []string{"public/chat"}, responseModelIDs(manager.GetAllModelsScoped(cloud)))
+	assert.Equal(t, []string{"public/chat"}, responseModelIDs(manager.GetAllModelsScoped(other)))
+	assert.True(t, manager.IsClientModelIDRoutableScoped("legacy-chat", cloud))
+	assert.False(t, manager.IsClientModelIDRoutableScoped("legacy-chat", other))
+	_, _, err := manager.ResolvePublicModelAliasScoped("legacy-chat", other)
+	assert.Error(t, err)
+}
+
 func TestGetAllModelsWithAccessGroupsScoped_FiltersAliasesByScope(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
 	manager := New(logger, 100, []config.ModelRPMConfig{

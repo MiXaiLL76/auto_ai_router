@@ -361,6 +361,7 @@ type Config struct {
 	StrictAllTeamModelsACL     bool
 	ResponseHeaderMode         config.ResponseHeaderMode
 	CredentialNameAsTeamID     bool
+	ProtectedTenants           []config.ProtectedTenantConfig
 
 	BudgetReserver                   *budget.Reserver      // Atomic Redis budget reservation (nil if Redis disabled — feature is a no-op)
 	KeyRateLimiter                   *ratelimit.RPMLimiter // Key/user/team/org RPM/TPM enforcement (nil if Redis disabled)
@@ -396,6 +397,7 @@ type Proxy struct {
 	strictAllTeamModelsACL           bool
 	responseHeaderMode               config.ResponseHeaderMode
 	credentialNameAsTeamID           bool
+	protectedTenants                 []config.ProtectedTenantConfig
 	bedrockDailyQuota                *bedrockDailyQuotaTracker
 	budgetReserver                   *budget.Reserver
 	keyRateLimiter                   *ratelimit.RPMLimiter
@@ -475,6 +477,7 @@ func New(cfg *Config) *Proxy {
 		strictAllTeamModelsACL:           cfg.StrictAllTeamModelsACL,
 		responseHeaderMode:               cfg.ResponseHeaderMode,
 		credentialNameAsTeamID:           cfg.CredentialNameAsTeamID,
+		protectedTenants:                 append([]config.ProtectedTenantConfig(nil), cfg.ProtectedTenants...),
 		bedrockDailyQuota:                newBedrockDailyQuotaTracker(),
 		budgetReserver:                   cfg.BudgetReserver,
 		keyRateLimiter:                   cfg.KeyRateLimiter,
@@ -486,6 +489,15 @@ func New(cfg *Config) *Proxy {
 		version:                          cfg.Version,
 		commit:                           cfg.Commit,
 	}
+}
+
+// MaxRequestBodyBytes exposes the same request budget used by ProxyRequest so
+// router middleware cannot allocate an unbounded diagnostic copy first.
+func (p *Proxy) MaxRequestBodyBytes() int64 {
+	if p == nil || p.maxBodySizeMB <= 0 {
+		return 0
+	}
+	return int64(p.maxBodySizeMB) * 1024 * 1024
 }
 
 // Start launches background workers owned by Proxy.

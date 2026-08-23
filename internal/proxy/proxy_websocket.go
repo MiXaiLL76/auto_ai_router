@@ -366,8 +366,13 @@ outerLoop:
 			continue
 		}
 		internalReq.URL.Path = "/v1/responses"
+		internalReq.Host = r.Host
 		internalReq.Header = r.Header.Clone()
 		internalReq.Header.Set("Content-Type", "application/json")
+		// The WebSocket handshake already authorized the public GET operation.
+		// Per-turn requests still revalidate the key, parent budgets and model ACL,
+		// but must not reinterpret the internal POST as a second public route.
+		internalReq = withTrustedRouteAuthorization(internalReq)
 
 		wsWriter := newWSSSEWriter(conn)
 

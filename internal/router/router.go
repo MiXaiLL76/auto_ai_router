@@ -218,8 +218,29 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	}
 
 	if r.monitoringConfig.LogErrors {
+		// Admission must run before captureRequestBody, whose diagnostic copy is
+		// intentionally not the request-size enforcement boundary. ProxyRequest
+		// receives a private trusted handoff and does not query auth twice.
+		maxCaptureBytes := int64(0)
+		if r.proxy != nil {
+			maxCaptureBytes = r.proxy.MaxRequestBodyBytes()
+			var authorized bool
+			authorizationWriter := w
+			var messagesWriter *messagesErrorWriter
+			if req.URL.Path == "/v1/messages" {
+				messagesWriter = &messagesErrorWriter{ResponseWriter: w}
+				authorizationWriter = messagesWriter
+			}
+			req, authorized = r.proxy.AuthorizeAndTrustClientRequest(authorizationWriter, req)
+			if !authorized {
+				if messagesWriter != nil {
+					messagesWriter.finalize()
+				}
+				return
+			}
+		}
 		// Capture request body for logging (detects streaming requests)
-		reqBody, isStreaming, err := captureRequestBody(req)
+		reqBody, isStreaming, err := captureRequestBodyLimited(req, maxCaptureBytes)
 		if err != nil {
 			r.proxyPublicRequest(w, req)
 			return
@@ -266,7 +287,7 @@ func (r *Router) handleModels(w http.ResponseWriter, req *http.Request) {
 	if tokenInfo != nil {
 		filtered := make([]models.Model, 0, len(modelsResp.Data))
 		for _, model := range modelsResp.Data {
-			if r.proxy.IsModelAllowedForToken(tokenInfo, model.ID) {
+			if r.proxy.IsModelAllowedForRequest(req, tokenInfo, model.ID) {
 				filtered = append(filtered, model)
 			}
 		}

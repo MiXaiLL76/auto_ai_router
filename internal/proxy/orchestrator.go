@@ -432,6 +432,23 @@ func (p *Proxy) AuthenticateClientRequest(w http.ResponseWriter, r *http.Request
 	return tokenInfo, ok
 }
 
+// AuthorizeAndTrustClientRequest performs the public authentication/admission
+// phase once and returns an in-process trusted request for the same operation.
+// Router middleware uses it before optional body capture so a denied protected
+// tenant cannot force an unbounded pre-auth body read.
+func (p *Proxy) AuthorizeAndTrustClientRequest(w http.ResponseWriter, r *http.Request) (*http.Request, bool) {
+	tokenInfo, _, ok := p.AuthenticateClientRequestScoped(w, r)
+	if !ok {
+		return r, false
+	}
+	rawToken, state := extractClientToken(r)
+	if state != clientCredentialPresent || rawToken == "" {
+		WriteErrorUnauthorized(w, "Invalid Authorization header format")
+		return r, false
+	}
+	return withTrustedClientAuth(r, rawToken, tokenInfo), true
+}
+
 // AuthenticateClientRequestScoped authenticates once and returns the exact
 // scope derived from that same credential. This keeps /v1/models visibility
 // identical for Authorization and x-api-key transports and avoids a second DB
@@ -449,7 +466,19 @@ func (p *Proxy) AuthenticateClientRequestScoped(w http.ResponseWriter, r *http.R
 }
 
 func (p *Proxy) IsModelAllowedForToken(tokenInfo *models.TokenInfo, model string) bool {
-	if tokenInfo == nil || !p.strictAllTeamModelsACL {
+	return p.isModelAllowed(tokenInfo, model, p.strictAllTeamModelsACL)
+}
+
+func (p *Proxy) IsModelAllowedForRequest(r *http.Request, tokenInfo *models.TokenInfo, model string) bool {
+	strict := p.strictAllTeamModelsACL
+	if tokenInfo != nil && p.protectedTenantForOrganization(tokenInfo.OrganizationID) != nil {
+		strict = true
+	}
+	return p.isModelAllowed(tokenInfo, model, strict)
+}
+
+func (p *Proxy) isModelAllowed(tokenInfo *models.TokenInfo, model string, strict bool) bool {
+	if tokenInfo == nil || !strict {
 		return true
 	}
 	var matcher models.ModelScopeMatcher
@@ -531,6 +560,9 @@ func (p *Proxy) authenticateRequest(
 		"team_id", tokenInfo.TeamID,
 	)
 	logCtx.Scope = scopeContextFromTokenInfo(tokenInfo)
+	if !p.enforceProtectedTenantAdmission(w, r, logCtx) {
+		return false
+	}
 	return true
 }
 
@@ -620,7 +652,7 @@ func (p *Proxy) readRequestBodyAndSelectModel(
 	// LiteLLM -> AIR hop authenticated with AIR's master key, but ordinary keys
 	// cannot discover or invoke them even when their DB model ACL is empty.
 	trustedInternalModelID := p.isMasterKey(logCtx.Token)
-	modelAllowed := p.IsModelAllowedForToken(logCtx.TokenInfo, modelID)
+	modelAllowed := p.IsModelAllowedForRequest(r, logCtx.TokenInfo, modelID)
 	if !modelAllowed {
 		p.logger.WarnContext(r.Context(), "Model is not allowed for token",
 			"error_code", http.StatusForbidden,
@@ -632,7 +664,7 @@ func (p *Proxy) readRequestBodyAndSelectModel(
 		WriteErrorForbidden(w, "Model not allowed")
 		return nil, "", "", false, false
 	}
-	if p.modelManager != nil && !trustedInternalModelID && !p.modelManager.IsClientModelIDRoutable(modelID) {
+	if p.modelManager != nil && !trustedInternalModelID && !p.modelManager.IsClientModelIDRoutableScoped(modelID, logCtx.Scope) {
 		p.logger.WarnContext(r.Context(), "Client model identifier is not exposed",
 			"error_code", http.StatusNotFound,
 			"model", modelID,
@@ -657,7 +689,7 @@ func (p *Proxy) readRequestBodyAndSelectModel(
 	trustedExactModelID := trustedInternalModelID && len(p.modelManager.GetCredentialsForModel(modelID)) > 0
 	if trustedExactModelID {
 		p.logger.DebugContext(r.Context(), "Preserved trusted internal model identifier", "model", modelID)
-	} else if canonical, isPublicAlias, aliasErr := p.modelManager.ResolvePublicModelAlias(modelID); aliasErr != nil {
+	} else if canonical, isPublicAlias, aliasErr := p.modelManager.ResolvePublicModelAliasScoped(modelID, logCtx.Scope); aliasErr != nil {
 		p.logger.WarnContext(r.Context(), "Public model alias is not uniquely routable",
 			"error_code", http.StatusNotFound,
 			"model", modelID,

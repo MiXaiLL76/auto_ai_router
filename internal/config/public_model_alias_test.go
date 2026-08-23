@@ -34,7 +34,60 @@ public_model_alias:
 	require.NoError(t, err)
 	assert.Equal(t, map[string]string{"openai/gpt-4.1": "gpt-4.1"}, cfg.ModelAlias)
 	assert.Equal(t, []string{"openai/gpt-4.1"}, cfg.ClientModelIDs)
-	assert.Equal(t, map[string]string{"gpt-4.1": "openai/gpt-4.1"}, cfg.PublicModelAlias)
+	assert.Equal(t, map[string]ClientModelAliasConfig{
+		"gpt-4.1": {Target: "openai/gpt-4.1"},
+	}, cfg.PublicModelAlias)
+}
+
+func TestLoadScopedClientModelAliases(t *testing.T) {
+	t.Setenv("ALIAS_SCOPE", "Cloud-RU")
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(`
+server:
+  port: 8080
+  master_key: sk-test
+credentials:
+  - name: provider
+    type: openai
+    api_key: sk-provider
+    base_url: https://provider.invalid
+monitoring: {}
+client_model_ids: [public/chat]
+public_model_alias:
+  cloud-chat:
+    target: public/chat
+    scopes: [os.environ/ALIAS_SCOPE]
+    denied_scopes: [suspended]
+    forbidden_scopes: [legacy]
+accepted_model_alias:
+  old-chat: public/chat
+`), 0o600))
+
+	cfg, err := Load(path)
+	require.NoError(t, err)
+	assert.Equal(t, ClientModelAliasConfig{
+		Target:       "public/chat",
+		Scopes:       []string{"cloud-ru"},
+		DeniedScopes: []string{"suspended", "legacy"},
+	}, cfg.PublicModelAlias["cloud-chat"])
+	assert.Equal(t, ClientModelAliasConfig{Target: "public/chat"}, cfg.AcceptedModelAlias["old-chat"])
+}
+
+func TestLoadClientModelAliasObjectFailsFastWithoutTarget(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	require.NoError(t, os.WriteFile(path, []byte(`
+server:
+  port: 8080
+  master_key: sk-test
+credentials: []
+monitoring: {}
+public_model_alias:
+  broken:
+    scopes: [cloud-ru]
+`), 0o600))
+
+	_, err := Load(path)
+	require.ErrorContains(t, err, "model alias target must not be empty")
 }
 
 func TestClientModelIDsFailClosedOnDuplicateAndOutOfSurfaceAlias(t *testing.T) {

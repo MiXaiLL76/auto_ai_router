@@ -1,8 +1,10 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"strconv"
 	"strings"
@@ -160,23 +162,149 @@ func (m *ModelRPMConfig) UnmarshalYAML(value *yaml.Node) error {
 }
 
 type Config struct {
-	Server             ServerConfig       `yaml:"server"`
-	Fail2Ban           Fail2BanConfig     `yaml:"fail2ban,omitempty"`
-	Credentials        []CredentialConfig `yaml:"credentials"`
-	Monitoring         MonitoringConfig   `yaml:"monitoring"`
-	Models             []ModelRPMConfig   `yaml:"models,omitempty"`
-	ModelAlias         map[string]string  `yaml:"model_alias,omitempty"`
-	ClientModelIDs     []string           `yaml:"client_model_ids,omitempty"`
-	PublicModelAlias   map[string]string  `yaml:"public_model_alias,omitempty"`
-	AcceptedModelAlias map[string]string  `yaml:"accepted_model_alias,omitempty"`
-	LiteLLMDB          LiteLLMDBConfig    `yaml:"litellm_db,omitempty"`
-	Redis              RedisConfig        `yaml:"redis,omitempty"`
-	OTEL               OTELConfig         `yaml:"otel,omitempty"`
-	Kafka              KafkaConfig        `yaml:"kafka,omitempty"`
+	Server             ServerConfig                      `yaml:"server"`
+	Fail2Ban           Fail2BanConfig                    `yaml:"fail2ban,omitempty"`
+	Credentials        []CredentialConfig                `yaml:"credentials"`
+	Monitoring         MonitoringConfig                  `yaml:"monitoring"`
+	Models             []ModelRPMConfig                  `yaml:"models,omitempty"`
+	ModelAlias         map[string]string                 `yaml:"model_alias,omitempty"`
+	ClientModelIDs     []string                          `yaml:"client_model_ids,omitempty"`
+	PublicModelAlias   map[string]ClientModelAliasConfig `yaml:"public_model_alias,omitempty"`
+	AcceptedModelAlias map[string]ClientModelAliasConfig `yaml:"accepted_model_alias,omitempty"`
+	ProtectedTenants   []ProtectedTenantConfig           `yaml:"protected_tenants,omitempty"`
+	LiteLLMDB          LiteLLMDBConfig                   `yaml:"litellm_db,omitempty"`
+	Redis              RedisConfig                       `yaml:"redis,omitempty"`
+	OTEL               OTELConfig                        `yaml:"otel,omitempty"`
+	Kafka              KafkaConfig                       `yaml:"kafka,omitempty"`
 	// ModelTemplates stores x-model-templates entries as raw interface{} so that
 	// both single-model mappings and lists of models can be defined as YAML anchors
 	// without type errors. The actual model data is extracted via anchor expansion.
 	ModelTemplates map[string]interface{} `yaml:"x-model-templates,omitempty"`
+}
+
+// ProtectedTenantConfig enables fail-closed admission rules for selected
+// organizations without changing the legacy semantics of every other key.
+// Organization identity always comes from the verified LiteLLM hierarchy.
+type ProtectedTenantConfig struct {
+	Name            string   `yaml:"name"`
+	OrganizationIDs []string `yaml:"organization_ids"`
+	Hostnames       []string `yaml:"hostnames,omitempty"`
+	RequiredScopes  []string `yaml:"required_scopes,omitempty"`
+	RequireModelACL bool     `yaml:"require_model_acl,omitempty"`
+	RequireRouteACL bool     `yaml:"require_route_acl,omitempty"`
+}
+
+func (c *ProtectedTenantConfig) normalize() {
+	c.Name = strings.TrimSpace(resolveEnvString(c.Name))
+	c.OrganizationIDs = resolveEnvStringList(c.OrganizationIDs)
+	c.RequiredScopes = resolveEnvScopeList(c.RequiredScopes)
+	hostnames := make([]string, 0, len(c.Hostnames))
+	for _, hostname := range c.Hostnames {
+		hostname = normalizeProtectedTenantHostname(resolveEnvString(hostname))
+		if hostname != "" {
+			hostnames = append(hostnames, hostname)
+		}
+	}
+	c.Hostnames = scope.NormalizeList(hostnames)
+}
+
+func normalizeProtectedTenantHostname(hostport string) string {
+	hostport = strings.TrimSpace(hostport)
+	if host, _, err := net.SplitHostPort(hostport); err == nil {
+		hostport = host
+	}
+	hostport = strings.TrimPrefix(strings.TrimSuffix(hostport, "]"), "[")
+	return strings.ToLower(strings.TrimSuffix(hostport, "."))
+}
+
+func resolveEnvStringList(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	resolved := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(resolveEnvString(value))
+		if value == "" {
+			continue
+		}
+		if _, duplicate := seen[value]; duplicate {
+			continue
+		}
+		seen[value] = struct{}{}
+		resolved = append(resolved, value)
+	}
+	return resolved
+}
+
+func (c ProtectedTenantConfig) validate() error {
+	if strings.TrimSpace(c.Name) == "" {
+		return errors.New("protected tenant name is required")
+	}
+	if len(c.OrganizationIDs) == 0 {
+		return fmt.Errorf("protected tenant %q requires at least one organization_id", c.Name)
+	}
+	for _, organizationID := range c.OrganizationIDs {
+		if strings.TrimSpace(organizationID) == "" {
+			return fmt.Errorf("protected tenant %q contains an empty organization_id", c.Name)
+		}
+	}
+	return nil
+}
+
+// ClientModelAliasConfig describes an additional client-facing name for a
+// canonical public model. It accepts a legacy scalar target or a scoped object.
+type ClientModelAliasConfig struct {
+	Target       string   `yaml:"target"`
+	Scopes       []string `yaml:"scopes,omitempty"`
+	DeniedScopes []string `yaml:"denied_scopes,omitempty"`
+}
+
+func (a ClientModelAliasConfig) ScopeExpression() *scope.Expression {
+	return scope.FromScopes(a.Scopes, a.DeniedScopes)
+}
+
+// UnmarshalYAML keeps the old `alias: target` syntax backward compatible and
+// adds `target`, `scopes`, and `denied_scopes`/`forbidden_scopes` object fields.
+func (a *ClientModelAliasConfig) UnmarshalYAML(value *yaml.Node) error {
+	if value == nil {
+		return fmt.Errorf("model alias must be a target string or object")
+	}
+	switch value.Kind {
+	case yaml.ScalarNode:
+		if value.Tag != "!!str" {
+			return fmt.Errorf("model alias target must be a string")
+		}
+		a.Target = resolveEnvString(value.Value)
+	case yaml.MappingNode:
+		type rawAlias struct {
+			Target          string   `yaml:"target"`
+			Scopes          []string `yaml:"scopes,omitempty"`
+			DeniedScopes    []string `yaml:"denied_scopes,omitempty"`
+			ForbiddenScopes []string `yaml:"forbidden_scopes,omitempty"`
+		}
+		var raw rawAlias
+		if err := value.Decode(&raw); err != nil {
+			return err
+		}
+		a.Target = resolveEnvString(raw.Target)
+		a.Scopes = resolveEnvScopeList(raw.Scopes)
+		a.DeniedScopes = resolveEnvScopeList(append(raw.DeniedScopes, raw.ForbiddenScopes...))
+	default:
+		return fmt.Errorf("model alias must be a target string or object")
+	}
+	if a.Target == "" {
+		return fmt.Errorf("model alias target must not be empty")
+	}
+	return nil
+}
+
+func resolveEnvScopeList(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	resolved := make([]string, 0, len(values))
+	for _, value := range values {
+		resolved = append(resolved, resolveEnvString(value))
+	}
+	return scope.NormalizeList(resolved)
 }
 
 // UnmarshalYAML implements custom unmarshaling for Config with YAML anchor/alias support.
@@ -190,20 +318,21 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 
 	// Then unmarshal the resolved data into Config
 	type RawConfig struct {
-		Server             ServerConfig           `yaml:"server"`
-		Fail2Ban           Fail2BanConfig         `yaml:"fail2ban,omitempty"`
-		Credentials        []CredentialConfig     `yaml:"credentials"`
-		Monitoring         MonitoringConfig       `yaml:"monitoring"`
-		Models             []ModelRPMConfig       `yaml:"models,omitempty"`
-		ModelAlias         map[string]string      `yaml:"model_alias,omitempty"`
-		ClientModelIDs     []string               `yaml:"client_model_ids,omitempty"`
-		PublicModelAlias   map[string]string      `yaml:"public_model_alias,omitempty"`
-		AcceptedModelAlias map[string]string      `yaml:"accepted_model_alias,omitempty"`
-		LiteLLMDB          LiteLLMDBConfig        `yaml:"litellm_db,omitempty"`
-		Redis              RedisConfig            `yaml:"redis,omitempty"`
-		OTEL               OTELConfig             `yaml:"otel,omitempty"`
-		Kafka              KafkaConfig            `yaml:"kafka,omitempty"`
-		ModelTemplates     map[string]interface{} `yaml:"x-model-templates,omitempty"`
+		Server             ServerConfig                      `yaml:"server"`
+		Fail2Ban           Fail2BanConfig                    `yaml:"fail2ban,omitempty"`
+		Credentials        []CredentialConfig                `yaml:"credentials"`
+		Monitoring         MonitoringConfig                  `yaml:"monitoring"`
+		Models             []ModelRPMConfig                  `yaml:"models,omitempty"`
+		ModelAlias         map[string]string                 `yaml:"model_alias,omitempty"`
+		ClientModelIDs     []string                          `yaml:"client_model_ids,omitempty"`
+		PublicModelAlias   map[string]ClientModelAliasConfig `yaml:"public_model_alias,omitempty"`
+		AcceptedModelAlias map[string]ClientModelAliasConfig `yaml:"accepted_model_alias,omitempty"`
+		ProtectedTenants   []ProtectedTenantConfig           `yaml:"protected_tenants,omitempty"`
+		LiteLLMDB          LiteLLMDBConfig                   `yaml:"litellm_db,omitempty"`
+		Redis              RedisConfig                       `yaml:"redis,omitempty"`
+		OTEL               OTELConfig                        `yaml:"otel,omitempty"`
+		Kafka              KafkaConfig                       `yaml:"kafka,omitempty"`
+		ModelTemplates     map[string]interface{}            `yaml:"x-model-templates,omitempty"`
 	}
 
 	var raw RawConfig
@@ -221,6 +350,7 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 	c.ClientModelIDs = raw.ClientModelIDs
 	c.PublicModelAlias = raw.PublicModelAlias
 	c.AcceptedModelAlias = raw.AcceptedModelAlias
+	c.ProtectedTenants = raw.ProtectedTenants
 	c.LiteLLMDB = raw.LiteLLMDB
 	c.Redis = raw.Redis
 	c.OTEL = raw.OTEL
@@ -1390,18 +1520,27 @@ func Load(path string) (*Config, error) {
 		cfg.ClientModelIDs = resolved
 	}
 	if cfg.PublicModelAlias != nil {
-		resolved := make(map[string]string, len(cfg.PublicModelAlias))
-		for alias, target := range cfg.PublicModelAlias {
-			resolved[resolveEnvString(alias)] = resolveEnvString(target)
+		resolved := make(map[string]ClientModelAliasConfig, len(cfg.PublicModelAlias))
+		for alias, definition := range cfg.PublicModelAlias {
+			definition.Target = resolveEnvString(definition.Target)
+			definition.Scopes = resolveEnvScopeList(definition.Scopes)
+			definition.DeniedScopes = resolveEnvScopeList(definition.DeniedScopes)
+			resolved[resolveEnvString(alias)] = definition
 		}
 		cfg.PublicModelAlias = resolved
 	}
 	if cfg.AcceptedModelAlias != nil {
-		resolved := make(map[string]string, len(cfg.AcceptedModelAlias))
-		for alias, target := range cfg.AcceptedModelAlias {
-			resolved[resolveEnvString(alias)] = resolveEnvString(target)
+		resolved := make(map[string]ClientModelAliasConfig, len(cfg.AcceptedModelAlias))
+		for alias, definition := range cfg.AcceptedModelAlias {
+			definition.Target = resolveEnvString(definition.Target)
+			definition.Scopes = resolveEnvScopeList(definition.Scopes)
+			definition.DeniedScopes = resolveEnvScopeList(definition.DeniedScopes)
+			resolved[resolveEnvString(alias)] = definition
 		}
 		cfg.AcceptedModelAlias = resolved
+	}
+	for index := range cfg.ProtectedTenants {
+		cfg.ProtectedTenants[index].normalize()
 	}
 
 	if cfg.Credentials == nil {
@@ -1416,10 +1555,10 @@ func Load(path string) (*Config, error) {
 		cfg.ModelAlias = map[string]string{}
 	}
 	if cfg.PublicModelAlias == nil {
-		cfg.PublicModelAlias = map[string]string{}
+		cfg.PublicModelAlias = map[string]ClientModelAliasConfig{}
 	}
 	if cfg.AcceptedModelAlias == nil {
-		cfg.AcceptedModelAlias = map[string]string{}
+		cfg.AcceptedModelAlias = map[string]ClientModelAliasConfig{}
 	}
 
 	// Extract models from credentials and add to main Models list
@@ -1785,18 +1924,58 @@ func (c *Config) Validate() error {
 			}
 			clientIDs[modelID] = struct{}{}
 		}
-		for label, aliases := range map[string]map[string]string{
+		for label, aliases := range map[string]map[string]ClientModelAliasConfig{
 			"public_model_alias":   c.PublicModelAlias,
 			"accepted_model_alias": c.AcceptedModelAlias,
 		} {
-			for alias, target := range aliases {
-				if _, exists := clientIDs[target]; !exists {
-					return fmt.Errorf("%s %q targets %q outside client_model_ids", label, alias, target)
+			for alias, definition := range aliases {
+				if alias == "" {
+					return fmt.Errorf("%s must not contain an empty alias", label)
+				}
+				if definition.Target == "" {
+					return fmt.Errorf("%s %q has an empty target", label, alias)
+				}
+				if _, exists := clientIDs[definition.Target]; !exists {
+					return fmt.Errorf("%s %q targets %q outside client_model_ids", label, alias, definition.Target)
 				}
 				if _, collision := clientIDs[alias]; collision {
 					return fmt.Errorf("%s %q collides with client_model_ids", label, alias)
 				}
 			}
+		}
+	}
+
+	protectedNames := make(map[string]struct{}, len(c.ProtectedTenants))
+	protectedOrganizations := make(map[string]string)
+	protectedHostnames := make(map[string]string)
+	protectedScopes := make(map[string]string)
+	for index := range c.ProtectedTenants {
+		policy := &c.ProtectedTenants[index]
+		policy.normalize()
+		if err := policy.validate(); err != nil {
+			return err
+		}
+		if _, duplicate := protectedNames[policy.Name]; duplicate {
+			return fmt.Errorf("duplicate protected tenant name %q", policy.Name)
+		}
+		protectedNames[policy.Name] = struct{}{}
+		for _, organizationID := range policy.OrganizationIDs {
+			if owner, duplicate := protectedOrganizations[organizationID]; duplicate {
+				return fmt.Errorf("organization_id %q belongs to protected tenants %q and %q", organizationID, owner, policy.Name)
+			}
+			protectedOrganizations[organizationID] = policy.Name
+		}
+		for _, hostname := range policy.Hostnames {
+			if owner, duplicate := protectedHostnames[hostname]; duplicate {
+				return fmt.Errorf("hostname %q belongs to protected tenants %q and %q", hostname, owner, policy.Name)
+			}
+			protectedHostnames[hostname] = policy.Name
+		}
+		for _, requiredScope := range policy.RequiredScopes {
+			if owner, duplicate := protectedScopes[requiredScope]; duplicate {
+				return fmt.Errorf("required scope %q belongs to protected tenants %q and %q", requiredScope, owner, policy.Name)
+			}
+			protectedScopes[requiredScope] = policy.Name
 		}
 	}
 

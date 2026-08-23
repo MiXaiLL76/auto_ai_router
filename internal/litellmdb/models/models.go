@@ -298,6 +298,7 @@ func (t *TokenInfo) Clone() *TokenInfo {
 	}
 	clone := *t
 	clone.Models = append([]string(nil), t.Models...)
+	clone.AllowedRoutes = append([]string(nil), t.AllowedRoutes...)
 	clone.UserModels = append([]string(nil), t.UserModels...)
 	clone.TeamModels = append([]string(nil), t.TeamModels...)
 	clone.TeamMemberModels = append([]string(nil), t.TeamMemberModels...)

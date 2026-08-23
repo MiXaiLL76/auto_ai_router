@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestResponseCapture_WriteHeader(t *testing.T) {
@@ -130,6 +131,17 @@ func TestCaptureRequestBody_LargeBody(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, data, body)
 	assert.False(t, isStreaming)
+}
+
+func TestCaptureRequestBodyLimitedStopsAtCanonicalBudget(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader("123456789"))
+	body, streaming, err := captureRequestBodyLimited(req, 4)
+	require.Error(t, err)
+	assert.False(t, streaming)
+	assert.Equal(t, "12345", string(body), "capture reads only max+1 bytes")
+	restored, readErr := io.ReadAll(req.Body)
+	require.NoError(t, readErr)
+	assert.Equal(t, body, restored)
 }
 
 func TestLogErrorResponse_EmptyPath(t *testing.T) {

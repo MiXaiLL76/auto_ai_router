@@ -3,6 +3,7 @@ package router
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -193,20 +194,31 @@ func isErrorStatus(statusCode int) bool {
 // Returns (body, isStreaming, error) where isStreaming indicates if the request
 // has "stream": true in the JSON payload.
 func captureRequestBody(req *http.Request) ([]byte, bool, error) {
+	return captureRequestBodyLimited(req, 0)
+}
+
+func captureRequestBodyLimited(req *http.Request, maxBytes int64) ([]byte, bool, error) {
 	if req.Body == nil {
 		return []byte{}, false, nil
 	}
 
-	body, err := io.ReadAll(req.Body)
+	reader := io.Reader(req.Body)
+	if maxBytes > 0 {
+		reader = io.LimitReader(req.Body, maxBytes+1)
+	}
+	body, err := io.ReadAll(reader)
 	if err != nil {
 		return nil, false, err
+	}
+	// Restore even an oversized prefix. ProxyRequest then applies the canonical
+	// size error contract without diagnostic middleware retaining the full body.
+	req.Body = io.NopCloser(bytes.NewReader(body))
+	if maxBytes > 0 && int64(len(body)) > maxBytes {
+		return body, false, fmt.Errorf("request body exceeds diagnostic capture limit")
 	}
 
 	// Check if this is a streaming request by parsing "stream": true in JSON
 	isStreaming := isStreamingRequestBody(body)
-
-	// Restore body for further processing (necessary for proxy to read it)
-	req.Body = io.NopCloser(bytes.NewReader(body))
 
 	return body, isStreaming, nil
 }

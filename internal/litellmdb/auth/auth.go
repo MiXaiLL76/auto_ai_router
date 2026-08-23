@@ -191,7 +191,7 @@ func (a *Authenticator) fetchTokenFromDB(ctx context.Context, hashedToken string
 	var tokenTPMLimit, tokenRPMLimit *int64
 	var expires *time.Time
 	var blocked *bool
-	var tokenModels []string
+	var tokenModels, tokenAllowedRoutes []string
 	var tokenMetadata []byte
 
 	// ============ User fields ============
@@ -240,6 +240,7 @@ func (a *Authenticator) fetchTokenFromDB(ctx context.Context, hashedToken string
 		&expires,
 		&blocked,
 		&tokenModels,
+		&tokenAllowedRoutes,
 		&tokenMetadata,
 
 		// User
@@ -311,13 +312,12 @@ func (a *Authenticator) fetchTokenFromDB(ctx context.Context, hashedToken string
 	if teamID != nil {
 		info.TeamID = *teamID
 	}
-	if orgID != nil {
-		info.OrganizationID = *orgID
-	}
+	info.OrganizationID = resolveOrganizationID(orgID, teamOrganizationID)
 	if blocked != nil {
 		info.Blocked = *blocked
 	}
 	info.Models = tokenModels
+	info.AllowedRoutes = tokenAllowedRoutes
 	info.Metadata = decodeMetadata(tokenMetadata)
 
 	info.MaxBudget = tokenMaxBudget
@@ -379,6 +379,20 @@ func (a *Authenticator) fetchTokenFromDB(ctx context.Context, hashedToken string
 	)
 
 	return &info, nil
+}
+
+// resolveOrganizationID mirrors the hierarchy JOIN: an organization assigned
+// directly to the key wins, otherwise an existing team's organization is the
+// effective tenant. A dangling team contributes no organization because its
+// LEFT JOIN fields are nil.
+func resolveOrganizationID(tokenOrganizationID, teamOrganizationID *string) string {
+	if tokenOrganizationID != nil {
+		return *tokenOrganizationID
+	}
+	if teamOrganizationID != nil {
+		return *teamOrganizationID
+	}
+	return ""
 }
 
 func decodeMetadata(raw []byte) map[string]interface{} {

@@ -90,9 +90,11 @@ func TestInitializeModelManagerRegistersAcceptedModelAliases(t *testing.T) {
 		Models: []config.ModelRPMConfig{{
 			Name: "backend-chat", Credential: "provider", RPM: 7, TPM: 70,
 		}},
-		ModelAlias:         map[string]string{"public/chat": "backend-chat"},
-		ClientModelIDs:     []string{"public/chat"},
-		AcceptedModelAlias: map[string]string{"legacy-chat": "public/chat"},
+		ModelAlias:     map[string]string{"public/chat": "backend-chat"},
+		ClientModelIDs: []string{"public/chat"},
+		AcceptedModelAlias: map[string]config.ClientModelAliasConfig{
+			"legacy-chat": {Target: "public/chat"},
+		},
 	}
 	logger := slog.New(slog.DiscardHandler)
 	_, limiter, bal, _ := initializeBalancer(cfg, logger, nil, nil)

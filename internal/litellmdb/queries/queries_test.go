@@ -337,7 +337,7 @@ func TestQueryContainsRequiredFields(t *testing.T) {
 // with "number of field descriptions must equal number of destinations" when
 // the SELECT list and the Scan call drift apart, so any column added here has
 // to land in both places at once.
-const tokenHierarchyScanColumns = 45
+const tokenHierarchyScanColumns = 46
 
 func TestTokenValidationQueryColumnCountMatchesScan(t *testing.T) {
 	selectList := QueryValidateTokenWithHierarchy
@@ -361,5 +361,6 @@ func TestTokenValidationQueryColumnCountMatchesScan(t *testing.T) {
 func TestTokenValidationQueryLoadsModelAccessHierarchy(t *testing.T) {
 	assert.Contains(t, QueryValidateTokenWithHierarchy, `LEFT JOIN "LiteLLM_UserTable" u ON t.user_id = u.user_id`)
 	assert.Contains(t, QueryValidateTokenWithHierarchy, "t.models as token_models")
+	assert.Contains(t, QueryValidateTokenWithHierarchy, "t.allowed_routes as token_allowed_routes")
 	assert.Contains(t, QueryValidateTokenWithHierarchy, "t.metadata as token_metadata")
 }
