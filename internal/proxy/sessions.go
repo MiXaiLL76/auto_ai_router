@@ -17,39 +17,39 @@ type SessionEntry struct {
 }
 
 type SessionStore struct {
-	mu      sync.RWMutex
+	mu      sync.Mutex
 	entries map[sessionKey]*SessionEntry
 	ttl     time.Duration
+	now     func() time.Time
 }
 
 func NewSessionStore(ttl time.Duration) *SessionStore {
 	return &SessionStore{
 		entries: make(map[sessionKey]*SessionEntry),
 		ttl:     ttl,
+		now:     time.Now,
 	}
 }
 
 func (s *SessionStore) Get(sessionID, modelID string) (string, bool) {
 	key := sessionKey{sessionID: sessionID, modelID: modelID}
 
-	s.mu.RLock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	entry, ok := s.entries[key]
-	s.mu.RUnlock()
 	if !ok {
 		return "", false
 	}
 
-	if time.Since(entry.LastAccess) <= s.ttl {
-		return entry.CredentialName, true
+	now := s.now()
+	if now.Sub(entry.LastAccess) > s.ttl {
+		delete(s.entries, key)
+		return "", false
 	}
 
-	s.mu.Lock()
-	entry, ok = s.entries[key]
-	if ok && time.Since(entry.LastAccess) > s.ttl {
-		delete(s.entries, key)
-	}
-	s.mu.Unlock()
-	return "", false
+	entry.LastAccess = now
+	return entry.CredentialName, true
 }
 
 func (s *SessionStore) Set(sessionID, modelID, credentialName string) {
@@ -58,7 +58,7 @@ func (s *SessionStore) Set(sessionID, modelID, credentialName string) {
 
 	s.entries[sessionKey{sessionID: sessionID, modelID: modelID}] = &SessionEntry{
 		CredentialName: credentialName,
-		LastAccess:     time.Now(),
+		LastAccess:     s.now(),
 	}
 }
 
@@ -71,7 +71,7 @@ func (s *SessionStore) Delete(sessionID, modelID string) {
 func (s *SessionStore) Len() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.cleanupExpiredLocked(time.Now())
+	s.cleanupExpiredLocked(s.now())
 	return len(s.entries)
 }
 
@@ -83,9 +83,9 @@ func (s *SessionStore) StartCleanup(ctx context.Context, interval time.Duration)
 		select {
 		case <-ctx.Done():
 			return
-		case now := <-ticker.C:
+		case <-ticker.C:
 			s.mu.Lock()
-			s.cleanupExpiredLocked(now)
+			s.cleanupExpiredLocked(s.now())
 			s.mu.Unlock()
 		}
 	}
