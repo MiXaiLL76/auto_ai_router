@@ -155,10 +155,66 @@ func TestCopyRequestHeadersStripsInternalUsageContractHeader(t *testing.T) {
 	assert.Equal(t, "ok", dst.Header.Get("X-Regular"))
 }
 
+func TestRequestHeaderCopyStripsInternalNamespaces(t *testing.T) {
+	internalHeaders := http.Header{
+		"X-Vsellm-Provider-000-Api-Keys":    {"provider-key-id=provider-secret"},
+		"x-VsElLm-Model-Pricing-Json":       {`{"currency":"RUB"}`},
+		"X-Vsellm-Request-Auth-Org-Id":      {"organization-id"},
+		"x-vsellm-provider-000-route-id":    {"model:provider:key:"},
+		"X-AuTh-ReQuEsT-UsEr":               {"internal-user"},
+		"X-Auth-Request-Preferred-Username": {"internal-username"},
+		"X-Regular":                         {"preserved"},
+	}
+
+	tests := []struct {
+		name string
+		copy func(dst, src *http.Request)
+	}{
+		{
+			name: "provider request",
+			copy: func(dst, src *http.Request) {
+				copyRequestHeaders(dst, src, "configured-provider-key")
+			},
+		},
+		{
+			name: "passthrough request",
+			copy: func(dst, src *http.Request) {
+				copyHeadersSkipAuth(dst, src)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			src := httptestRequestWithHTTPHeaders(internalHeaders)
+			dst, err := http.NewRequest(http.MethodPost, "http://upstream.example/v1/chat/completions", nil)
+			assert.NoError(t, err)
+
+			tt.copy(dst, src)
+
+			for key := range internalHeaders {
+				if key == "X-Regular" {
+					continue
+				}
+				assert.Empty(t, dst.Header.Values(key), "internal header %s must not reach provider", key)
+			}
+			assert.Equal(t, "preserved", dst.Header.Get("X-Regular"))
+		})
+	}
+}
+
 func httptestRequestWithHeaders(headers map[string]string) *http.Request {
 	req, _ := http.NewRequest(http.MethodPost, "http://router.example/v1/chat/completions", nil)
 	for key, value := range headers {
 		req.Header.Set(key, value)
+	}
+	return req
+}
+
+func httptestRequestWithHTTPHeaders(headers http.Header) *http.Request {
+	req, _ := http.NewRequest(http.MethodPost, "http://router.example/v1/chat/completions", nil)
+	for key, values := range headers {
+		req.Header[key] = append([]string(nil), values...)
 	}
 	return req
 }
