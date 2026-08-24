@@ -1106,6 +1106,76 @@ func TestHandleStreamingWithTokens_CombinedUsageAndDone(t *testing.T) {
 	assert.Equal(t, 5, logCtx.TokenUsage.CompletionTokens, "CompletionTokens should be 5 (extracted from usage, not total_tokens = 105)")
 }
 
+// TestHandleStreamingWithTokens_PartialZeroUsage_FallsBackForMissingField verifies that when
+// a provider sends a usage object with some fields correctly populated and others as a bogus
+// zero (observed from CometAPI's Anthropic-compatible streaming: message_start carries
+// usage:{input_tokens:0,output_tokens:0} as a placeholder while output tokens land correctly
+// via message_delta), the local tiktoken estimate fills in only the missing field. Before this
+// fix, providerUsage was a single flag for "did any usage arrive at all", so a genuinely-sent
+// completion_tokens value silently suppressed the prompt-token fallback too, permanently
+// under-billing the request's input tokens.
+func TestHandleStreamingWithTokens_PartialZeroUsage_FallsBackForMissingField(t *testing.T) {
+	upstreamServer := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+
+		chunks := []string{
+			"data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n",
+			"data: {\"choices\":[],\"usage\":{\"prompt_tokens\":0,\"completion_tokens\":6,\"total_tokens\":6}}\n\n",
+			"data: [DONE]\n\n",
+		}
+
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			http.Error(w, "Streaming not supported", http.StatusInternalServerError)
+			return
+		}
+
+		for _, chunk := range chunks {
+			_, _ = fmt.Fprint(w, chunk)
+			flusher.Flush()
+			time.Sleep(1 * time.Millisecond)
+		}
+	}))
+	defer upstreamServer.Close()
+
+	prx := NewTestProxyBuilder().
+		WithSingleCredential("test", config.ProviderTypeProxy, upstreamServer.URL, "upstream-key-1").
+		WithRequestTimeout(5 * time.Second).
+		Build()
+
+	resp, err := http.Get(upstreamServer.URL)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+
+	w := httptest.NewRecorder()
+
+	logCtx := &RequestLogContext{
+		RequestID:              "test-request-partial-zero-usage",
+		promptTokensEstimateFn: func() int { return 12 }, // local tiktoken fallback estimate
+		TokenUsage:             &converter.TokenUsage{},
+		Credential: &config.CredentialConfig{
+			Name: "test",
+			Type: config.ProviderTypeOpenAI,
+		},
+		Request: httptest.NewRequest("POST", "/v1/chat/completions", nil),
+	}
+
+	err = prx.handleStreamingWithTokens(w, resp, "test", "gpt-4o-mini", logCtx)
+	require.NoError(t, err)
+
+	assert.True(t, logCtx.Logged, "logCtx should be marked as logged")
+	assert.NotNil(t, logCtx.TokenUsage, "TokenUsage should not be nil")
+
+	// PromptTokens: the provider reported 0, which is treated as "not reported" — the local
+	// estimate must fill it in instead of silently billing zero input tokens.
+	assert.Equal(t, 12, logCtx.TokenUsage.PromptTokens,
+		"PromptTokens should fall back to the local estimate when the provider's usage object reports 0")
+	// CompletionTokens: the provider genuinely reported 6 — must NOT be touched by the fallback.
+	assert.Equal(t, 6, logCtx.TokenUsage.CompletionTokens,
+		"CompletionTokens should keep the provider-reported value, not the fallback")
+}
+
 // TestTokenCapturingWriter_CumulativeTokens verifies that tokenCapturingWriter does NOT
 // accumulate total_tokens across chunks. Vertex/Gemini include a cumulative total_tokens in
 // every streaming chunk; naively adding them up multiplies the real count by N (the number of

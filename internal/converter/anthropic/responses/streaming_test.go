@@ -807,3 +807,126 @@ func TestTransformAnthropicStreamToResponses_ReturnsTerminalProviderError(t *tes
 	assert.False(t, completed)
 	assert.NotContains(t, out.String(), "response.completed")
 }
+
+// TestTransformAnthropicStreamToResponses_InputTokensFromMessageDelta covers Anthropic-
+// compatible providers that fill usage the other way round from Anthropic itself: they send
+// message_start with a placeholder usage:{input_tokens:0} and only report the real input
+// count in message_delta. The accumulator used to keep that placeholder and report the
+// cached count — or zero — as the whole input, under-billing every streamed Responses
+// request served by such a provider.
+func TestTransformAnthropicStreamToResponses_InputTokensFromMessageDelta(t *testing.T) {
+	t.Run("message_delta_supplies_input_tokens", func(t *testing.T) {
+		stream := buildAnthropicSSEStream([]map[string]interface{}{
+			{
+				"type": "message_start",
+				"message": map[string]interface{}{
+					"usage": map[string]interface{}{"input_tokens": 0, "output_tokens": 0},
+				},
+			},
+			{
+				"type":          "content_block_start",
+				"content_block": map[string]interface{}{"type": "text", "id": "", "name": ""},
+			},
+			{
+				"type":  "content_block_delta",
+				"delta": map[string]interface{}{"type": "text_delta", "text": "OK"},
+			},
+			{"type": "content_block_stop"},
+			{
+				"type":  "message_delta",
+				"delta": map[string]interface{}{"stop_reason": "end_turn"},
+				"usage": map[string]interface{}{"input_tokens": 3695, "output_tokens": 2},
+			},
+			{"type": "message_stop"},
+		})
+
+		var out bytes.Buffer
+		var completedResp *responses.Response
+		err := TransformAnthropicStreamToResponses(
+			strings.NewReader(stream), &out, "anthropic-compatible-model", "", nil,
+			func(r *responses.Response) { completedResp = r },
+		)
+		require.NoError(t, err)
+		require.NotNil(t, completedResp)
+
+		assert.Equal(t, 3695, completedResp.Usage.InputTokens, "input tokens must come from message_delta when message_start only carries a placeholder")
+		assert.Equal(t, 2, completedResp.Usage.OutputTokens)
+		assert.Equal(t, 3697, completedResp.Usage.TotalTokens)
+	})
+
+	t.Run("message_start_value_kept_when_delta_omits_input_tokens", func(t *testing.T) {
+		stream := buildAnthropicSSEStream([]map[string]interface{}{
+			{
+				"type": "message_start",
+				"message": map[string]interface{}{
+					"usage": map[string]interface{}{"input_tokens": 10, "cache_read_input_tokens": 0},
+				},
+			},
+			{
+				"type":          "content_block_start",
+				"content_block": map[string]interface{}{"type": "text", "id": "", "name": ""},
+			},
+			{
+				"type":  "content_block_delta",
+				"delta": map[string]interface{}{"type": "text_delta", "text": "Hello"},
+			},
+			{"type": "content_block_stop"},
+			{
+				"type":  "message_delta",
+				"delta": map[string]interface{}{"stop_reason": "end_turn"},
+				"usage": map[string]interface{}{"output_tokens": 5},
+			},
+			{"type": "message_stop"},
+		})
+
+		var out bytes.Buffer
+		var completedResp *responses.Response
+		err := TransformAnthropicStreamToResponses(
+			strings.NewReader(stream), &out, "claude-opus-4-5", "", nil,
+			func(r *responses.Response) { completedResp = r },
+		)
+		require.NoError(t, err)
+		require.NotNil(t, completedResp)
+
+		assert.Equal(t, 10, completedResp.Usage.InputTokens, "Anthropic reports input tokens in message_start and omits them later; that value must survive")
+		assert.Equal(t, 5, completedResp.Usage.OutputTokens)
+	})
+
+	t.Run("zero_in_message_delta_does_not_clobber_message_start", func(t *testing.T) {
+		stream := buildAnthropicSSEStream([]map[string]interface{}{
+			{
+				"type": "message_start",
+				"message": map[string]interface{}{
+					"usage": map[string]interface{}{"input_tokens": 42, "cache_read_input_tokens": 128},
+				},
+			},
+			{
+				"type":          "content_block_start",
+				"content_block": map[string]interface{}{"type": "text", "id": "", "name": ""},
+			},
+			{
+				"type":  "content_block_delta",
+				"delta": map[string]interface{}{"type": "text_delta", "text": "OK"},
+			},
+			{"type": "content_block_stop"},
+			{
+				"type":  "message_delta",
+				"delta": map[string]interface{}{"stop_reason": "end_turn"},
+				"usage": map[string]interface{}{"input_tokens": 0, "output_tokens": 2},
+			},
+			{"type": "message_stop"},
+		})
+
+		var out bytes.Buffer
+		var completedResp *responses.Response
+		err := TransformAnthropicStreamToResponses(
+			strings.NewReader(stream), &out, "claude-opus-4-5", "", nil,
+			func(r *responses.Response) { completedResp = r },
+		)
+		require.NoError(t, err)
+		require.NotNil(t, completedResp)
+
+		assert.Equal(t, 170, completedResp.Usage.InputTokens, "42 fresh + 128 cached; a zero in message_delta must not wipe the message_start count")
+		assert.Equal(t, 128, completedResp.Usage.InputTokensDetails.CachedTokens)
+	})
+}

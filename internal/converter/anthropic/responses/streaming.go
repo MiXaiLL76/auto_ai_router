@@ -266,6 +266,20 @@ func processAnthropicEvent(w io.Writer, acc *anthropicStreamAccumulator, event *
 			acc.stopReason = event.Delta.StopReason
 		}
 		if event.Usage != nil {
+			// Anthropic reports the real input_tokens in message_start and normally omits
+			// the field here. Some Anthropic-compatible providers invert that: their
+			// message_start carries a placeholder usage:{input_tokens:0,output_tokens:0}
+			// and the true input count only arrives in message_delta.
+			// Without this the accumulator keeps the placeholder and the final usage
+			// reports input_tokens as just the cached count — or zero — under-billing the
+			// request. Only a positive value overwrites what message_start reported, so a
+			// provider that legitimately ends at zero (and providers that omit the field
+			// altogether) keep their existing behaviour.
+			if event.Usage.InputTokens != nil {
+				if inputTokens := nonNegativeAnthropicStreamTokenCount(*event.Usage.InputTokens); inputTokens > 0 {
+					acc.inputTokens = inputTokens
+				}
+			}
 			if event.Usage.OutputTokens != nil {
 				acc.outputTokens = *event.Usage.OutputTokens
 			}
