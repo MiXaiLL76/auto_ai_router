@@ -67,67 +67,6 @@ func requestWithPath(r *http.Request, path string) *http.Request {
 	return clone
 }
 
-func sanitizeRequestBodyForLog(body []byte) string {
-	var decoded interface{}
-	if err := json.Unmarshal(body, &decoded); err != nil {
-		return logger.TruncateLongFields(string(body), 500)
-	}
-	sanitized := sanitizePayloadForLog(decoded)
-	var buf bytes.Buffer
-	encoder := json.NewEncoder(&buf)
-	encoder.SetEscapeHTML(false)
-	if err := encoder.Encode(sanitized); err != nil {
-		return logger.TruncateLongFields(string(body), 500)
-	}
-	return unescapeLogRedactionMarkers(logger.TruncateLongFields(strings.TrimSpace(buf.String()), 500))
-}
-
-func unescapeLogRedactionMarkers(value string) string {
-	value = strings.ReplaceAll(value, `\u003c`, "<")
-	value = strings.ReplaceAll(value, `\u003e`, ">")
-	return strings.ReplaceAll(value, `\u0026`, "&")
-}
-
-func sanitizePayloadForLog(value interface{}) interface{} {
-	switch v := value.(type) {
-	case map[string]interface{}:
-		isBase64Source := false
-		if typ, _ := v["type"].(string); typ == "base64" {
-			isBase64Source = true
-		}
-		out := make(map[string]interface{}, len(v))
-		for key, item := range v {
-			lowerKey := strings.ToLower(key)
-			if lowerKey == "file_data" {
-				out[key] = redactPayloadString(item)
-				continue
-			}
-			if lowerKey == "data" && isBase64Source {
-				out[key] = redactPayloadString(item)
-				continue
-			}
-			out[key] = sanitizePayloadForLog(item)
-		}
-		return out
-	case []interface{}:
-		out := make([]interface{}, 0, len(v))
-		for _, item := range v {
-			out = append(out, sanitizePayloadForLog(item))
-		}
-		return out
-	default:
-		return value
-	}
-}
-
-func redactPayloadString(value interface{}) interface{} {
-	raw, ok := value.(string)
-	if !ok || raw == "" {
-		return value
-	}
-	return fmt.Sprintf("<redacted bytes=%d>", len(raw))
-}
-
 const unsupportedCredentialRequestMessage = "request parameters are not supported by available providers"
 
 func (p *Proxy) applyCredentialCompatibilityRouting(
@@ -1723,7 +1662,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 		if p.logger.Enabled(context.Background(), slog.LevelDebug) {
 			p.logger.DebugContext(r.Context(), "Proxy request details",
 				"target_url", targetURL, "credential", cred.Name,
-				"request_body", sanitizeRequestBodyForLog(requestBody))
+				"request_body", logger.SanitizeRequestBodyForLog(requestBody, 500))
 		}
 
 		debugHeaders := make(map[string]string)

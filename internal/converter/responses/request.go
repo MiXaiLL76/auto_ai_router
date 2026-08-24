@@ -1001,7 +1001,7 @@ func convertContentParts(parts []interface{}) ([]interface{}, error) {
 			if fileID, _ := partMap["file_id"].(string); fileID != "" {
 				return nil, converterutil.NewRequestValidationError("input_file.file_id", "file_id is not supported for this route")
 			}
-			return nil, fmt.Errorf("input_file is not supported in chat completions")
+			return nil, converterutil.NewRequestValidationError("input_file", "input_file is not supported in chat completions")
 
 		case "input_audio":
 			entry := map[string]interface{}{

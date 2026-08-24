@@ -142,25 +142,6 @@ func TestProxyRequest_NativeResponsesInternalConversionErrorRemains500(t *testin
 	assert.Equal(t, int32(0), atomic.LoadInt32(&upstreamCalls))
 }
 
-func TestSanitizeRequestBodyForLogRedactsDocumentPayloads(t *testing.T) {
-	body := []byte(`{
-		"messages":[{
-			"content":[
-				{"type":"file","file":{"file_data":"data:application/pdf;base64,JVBERi0="}},
-				{"type":"document","source":{"type":"base64","media_type":"application/pdf","data":"JVBERi0="}}
-			]
-		}]
-	}`)
-
-	got := sanitizeRequestBodyForLog(body)
-
-	assert.NotContains(t, got, "data:application/pdf;base64,JVBERi0=")
-	assert.NotContains(t, got, `"data":"JVBERi0="`)
-	assert.Contains(t, got, `"file_data":"<redacted bytes=36>"`)
-	assert.Contains(t, got, `"data":"<redacted bytes=8>"`)
-	assert.Contains(t, got, `"media_type":"application/pdf"`)
-}
-
 type failingProviderResponses struct{}
 
 type testAnthropicProviderResponses struct {
