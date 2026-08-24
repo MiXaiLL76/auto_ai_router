@@ -56,16 +56,32 @@ func responsesToolsToAnthropic(tools []responses.Tool) ([]anthropic.AnthropicToo
 			anthropicTools = append(anthropicTools, tool)
 
 		default:
-			// A client may send Anthropic's own versioned web_search type
-			// directly (e.g. "web_search_20250305", "web_search_20260209"):
-			// pass it through instead of dropping it as unrecognized.
 			if strings.HasPrefix(t.Type, "web_search_") {
-				tool := anthropic.AnthropicTool{
-					Type: t.Type,
-					Name: "web_search",
+				if isAnthropicVersionedWebSearchType(t.Type) {
+					// A client may send Anthropic's own versioned web_search type
+					// directly (e.g. "web_search_20250305", "web_search_20260209"):
+					// pass it through instead of dropping it as unrecognized.
+					tool := anthropic.AnthropicTool{
+						Type: t.Type,
+						Name: "web_search",
+					}
+					applyResponsesWebSearchOptions(&tool, t)
+					anthropicTools = append(anthropicTools, tool)
+				} else {
+					// An OpenAI-origin web_search variant not covered by the
+					// explicit cases above (e.g. a newer dated Responses API
+					// release such as "web_search_2025_08_26"). Sending that
+					// string to Anthropic verbatim as "type" produces a 400 —
+					// Anthropic only recognizes its own versioned type
+					// identifiers — so map it to the current stable Anthropic
+					// web_search version instead of guessing at the OpenAI type.
+					tool := anthropic.AnthropicTool{
+						Type: "web_search_20250305",
+						Name: "web_search",
+					}
+					applyResponsesWebSearchOptions(&tool, t)
+					anthropicTools = append(anthropicTools, tool)
 				}
-				applyResponsesWebSearchOptions(&tool, t)
-				anthropicTools = append(anthropicTools, tool)
 			}
 			// file_search, code_interpreter, mcp, image_generation, etc. are
 			// not supported by Anthropic — skip them.
@@ -136,6 +152,27 @@ func responsesToolChoiceToAnthropic(toolChoice interface{}) interface{} {
 		}
 	}
 	return nil
+}
+
+// isAnthropicVersionedWebSearchType reports whether t is one of Anthropic's own
+// versioned web_search tool types (e.g. "web_search_20250305",
+// "web_search_20260209") — an 8-digit YYYYMMDD date directly after the
+// "web_search_" prefix. OpenAI's own dated Responses API web_search tool
+// types use underscore-separated date components instead (e.g.
+// "web_search_2025_08_26"), so this distinguishes the two without an
+// allowlist that needs updating every time Anthropic ships a new version.
+func isAnthropicVersionedWebSearchType(t string) bool {
+	const prefix = "web_search_"
+	suffix := strings.TrimPrefix(t, prefix)
+	if len(suffix) != 8 {
+		return false
+	}
+	for _, r := range suffix {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }
 
 func appendUnique(slice []string, s string) []string {

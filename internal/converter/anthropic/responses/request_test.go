@@ -198,6 +198,32 @@ func TestResponsesRequestToAnthropic_NativeWebSearchTypePreserved(t *testing.T) 
 	assert.Equal(t, "web_search_20260318", tools[0].(map[string]interface{})["type"])
 }
 
+// TestResponsesRequestToAnthropic_DatedOpenAIWebSearchTypeMapped verifies that
+// an OpenAI Responses API web_search tool type not covered by the explicit
+// cases (e.g. a newer dated release like "web_search_2025_08_26") is mapped
+// to Anthropic's stable web_search_20250305 rather than forwarded verbatim —
+// Anthropic doesn't recognize OpenAI's own dated type strings and would
+// reject them with a 400.
+func TestResponsesRequestToAnthropic_DatedOpenAIWebSearchTypeMapped(t *testing.T) {
+	body := `{
+		"model": "claude-opus-4-5",
+		"input": "test",
+		"tools": [{"type": "web_search_2025_08_26"}]
+	}`
+
+	result, err := ResponsesRequestToAnthropic([]byte(body), "claude-opus-4-5")
+	require.NoError(t, err)
+
+	var ar map[string]interface{}
+	require.NoError(t, json.Unmarshal(result, &ar))
+
+	tools := ar["tools"].([]interface{})
+	require.Len(t, tools, 1)
+	tool := tools[0].(map[string]interface{})
+	assert.Equal(t, "web_search_20250305", tool["type"])
+	assert.Equal(t, "web_search", tool["name"])
+}
+
 // TestResponsesRequestToAnthropic_WebSearchToolChoice verifies a tool_choice
 // forcing the web_search built-in maps to Anthropic's {"type":"tool","name":
 // "web_search"} instead of being dropped to the "auto" default.

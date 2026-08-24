@@ -375,8 +375,10 @@ func finalizeCurrentBlock(w io.Writer, acc *anthropicStreamAccumulator) error {
 		if itemID == "" {
 			itemID = generateItemID("rs_")
 		}
-		outputIdx := len(acc.outputItems)
 		if acc.currentThinking != "" {
+			// Appended here, closed once by emitAnthropicCompletionEvents (which
+			// walks acc.outputItems and emits one output_item.done per entry) —
+			// emitting it again here as well would duplicate the done event.
 			item := responses.OutputItem{
 				Type:   "reasoning",
 				ID:     itemID,
@@ -386,20 +388,24 @@ func finalizeCurrentBlock(w io.Writer, acc *anthropicStreamAccumulator) error {
 				},
 			}
 			acc.outputItems = append(acc.outputItems, item)
-		}
-		// Always emit output_item.done to close the added event emitted at block_start,
-		// even when the thinking block was empty (avoids a dangling added with no done).
-		if err := writeAnthropicSSE(w, "response.output_item.done", map[string]interface{}{
-			"type":         "response.output_item.done",
-			"output_index": outputIdx,
-			"item": map[string]interface{}{
-				"type":    "reasoning",
-				"id":      itemID,
-				"status":  "completed",
-				"summary": []interface{}{},
-			},
-		}, acc); err != nil {
-			return err
+		} else {
+			// Nothing gets appended above, so the completion-time loop will
+			// never close this item — emit its done event now instead, to
+			// avoid leaving the "added" event from content_block_start
+			// dangling with no matching "done".
+			outputIdx := len(acc.outputItems)
+			if err := writeAnthropicSSE(w, "response.output_item.done", map[string]interface{}{
+				"type":         "response.output_item.done",
+				"output_index": outputIdx,
+				"item": map[string]interface{}{
+					"type":    "reasoning",
+					"id":      itemID,
+					"status":  "completed",
+					"summary": []interface{}{},
+				},
+			}, acc); err != nil {
+				return err
+			}
 		}
 		acc.currentReasoningID = ""
 
@@ -438,30 +444,21 @@ func finalizeCurrentBlock(w io.Writer, acc *anthropicStreamAccumulator) error {
 		if itemID == "" {
 			itemID = generateItemID("ws_")
 		}
-		var queries []string
+		var action interface{}
 		if acc.currentToolArgs != "" {
 			var input map[string]interface{}
 			if err := json.Unmarshal([]byte(acc.currentToolArgs), &input); err == nil {
-				queries = webSearchQueryFromInput(input)
+				action = webSearchActionFromInput(input)
 			}
 		}
-		if err := writeAnthropicSSE(w, "response.output_item.done", map[string]interface{}{
-			"type":         "response.output_item.done",
-			"output_index": acc.currentToolOutputIndex,
-			"item": map[string]interface{}{
-				"type":    "web_search_call",
-				"id":      itemID,
-				"status":  "completed",
-				"queries": queries,
-			},
-		}, acc); err != nil {
-			return err
-		}
+		// Appended here, closed once by emitAnthropicCompletionEvents (which
+		// walks acc.outputItems and emits one output_item.done per entry) —
+		// emitting an output_item.done here too would duplicate the event.
 		acc.outputItems = append(acc.outputItems, responses.OutputItem{
-			Type:    "web_search_call",
-			ID:      itemID,
-			Status:  "completed",
-			Queries: queries,
+			Type:   "web_search_call",
+			ID:     itemID,
+			Status: "completed",
+			Action: action,
 		})
 		acc.currentToolItemID = ""
 		acc.currentToolOutputIndex = 0

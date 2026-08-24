@@ -167,10 +167,10 @@ func TestTransformAnthropicStreamToResponses_TextDeltaContent(t *testing.T) {
 func TestTransformAnthropicStreamToResponses_TextStreamWithCitations(t *testing.T) {
 	// Regression test: the streaming path must accumulate citations_delta events
 	// and attach them to output_text.annotations on block finalize, matching the
-	// non-streaming path's webSearchCitationsToAnnotations behavior. Two citations
-	// quote the same substring ("Paris") from two different places in the text, to
-	// also cover that each resolves to its own occurrence instead of both
-	// collapsing onto the first match.
+	// non-streaming path's webSearchCitationsToAnnotations behavior. Both
+	// citations resolve to an annotation spanning the whole text block —
+	// Anthropic's cited_text is an excerpt of the source page, not a located
+	// substring of the response text, so per-citation offsets aren't recoverable.
 	stream := buildAnthropicSSEStream([]map[string]interface{}{
 		{
 			"type": "message_start",
@@ -248,16 +248,18 @@ func TestTransformAnthropicStreamToResponses_TextStreamWithCitations(t *testing.
 	annotations := textContent["annotations"].([]interface{})
 	require.Len(t, annotations, 2)
 
+	wantEnd := len(textContent["text"].(string))
+
 	first := annotations[0].(map[string]interface{})
 	assert.Equal(t, "url_citation", first["type"])
 	assert.Equal(t, "https://example.com/paris-1", first["url"])
-	assert.EqualValues(t, 6, first["start_index"])
-	assert.EqualValues(t, 11, first["end_index"])
+	assert.Nil(t, first["start_index"], "start_index 0 is omitted by omitempty")
+	assert.EqualValues(t, wantEnd, first["end_index"])
 
 	second := annotations[1].(map[string]interface{})
 	assert.Equal(t, "https://example.com/paris-2", second["url"])
-	assert.EqualValues(t, 23, second["start_index"])
-	assert.EqualValues(t, 28, second["end_index"])
+	assert.Nil(t, second["start_index"], "start_index 0 is omitted by omitempty")
+	assert.EqualValues(t, wantEnd, second["end_index"])
 }
 
 func TestTransformAnthropicStreamToResponses_MessageEventsIncludeRequiredFields(t *testing.T) {
@@ -496,21 +498,24 @@ func TestTransformAnthropicStreamToResponses_ServerToolUseWebSearch(t *testing.T
 
 	events := parseSSEEvents(out.String())
 	var completedEvent map[string]interface{}
-	var itemDoneEvent map[string]interface{}
+	var itemDoneEvents []map[string]interface{}
 	for _, e := range events {
 		if e["type"] == "response.completed" {
 			completedEvent = e
 		}
 		if e["type"] == "response.output_item.done" {
-			itemDoneEvent = e
+			itemDoneEvents = append(itemDoneEvents, e)
 		}
 		// A web_search_call must never stream as a function_call_arguments event.
 		assert.NotEqual(t, "response.function_call_arguments.delta", e["type"])
 		assert.NotEqual(t, "response.function_call_arguments.done", e["type"])
 	}
 	require.NotNil(t, completedEvent)
-	require.NotNil(t, itemDoneEvent)
-	doneItem := itemDoneEvent["item"].(map[string]interface{})
+	// Exactly one output_item.done for the web_search_call item — it must not
+	// be emitted both at content_block_stop and again by the completion-time
+	// finalizer.
+	require.Len(t, itemDoneEvents, 1)
+	doneItem := itemDoneEvents[0]["item"].(map[string]interface{})
 	assert.Equal(t, "web_search_call", doneItem["type"])
 	assert.Equal(t, "completed", doneItem["status"])
 
@@ -521,9 +526,9 @@ func TestTransformAnthropicStreamToResponses_ServerToolUseWebSearch(t *testing.T
 	wsCall := output[0].(map[string]interface{})
 	assert.Equal(t, "web_search_call", wsCall["type"])
 	assert.Equal(t, "completed", wsCall["status"])
-	queries := wsCall["queries"].([]interface{})
-	require.Len(t, queries, 1)
-	assert.Equal(t, "weather NYC", queries[0])
+	action := wsCall["action"].(map[string]interface{})
+	assert.Equal(t, "search", action["type"])
+	assert.Equal(t, "weather NYC", action["query"])
 }
 
 func TestTransformAnthropicStreamToResponses_EmptyStream(t *testing.T) {
