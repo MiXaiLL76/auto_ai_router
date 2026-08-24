@@ -158,6 +158,11 @@ func applyWebSearchOptions(tool *AnthropicTool, toolMap map[string]interface{}) 
 
 // anthropicBuiltinTypePrefixes lists the versioned type prefixes of Anthropic built-in
 // tools together with the canonical tool name Anthropic expects next to each type.
+//
+// text_editor_'s canonical name changed with the Claude 4 tool version: types before
+// text_editor_20250429 (Claude 3.5/3.7) use "str_replace_editor", while
+// text_editor_20250429 and later (Claude 4+) use "str_replace_based_edit_tool" — sending
+// the old name with a new type produces a name/type mismatch Anthropic rejects.
 var anthropicBuiltinTypePrefixes = []struct {
 	prefix string
 	name   string
@@ -167,6 +172,8 @@ var anthropicBuiltinTypePrefixes = []struct {
 	{"text_editor_", "str_replace_editor"},
 	{"web_search_", "web_search"},
 }
+
+const textEditorBasedEditToolMinVersion = "text_editor_20250429"
 
 // anthropicBuiltinToolFromVersionedType rebuilds an Anthropic built-in tool from a
 // definition that already uses the versioned type identifier. It mirrors the set of
@@ -183,6 +190,9 @@ func anthropicBuiltinToolFromVersionedType(toolMap map[string]interface{}, toolT
 		}
 		if tool.Name == "" {
 			tool.Name = builtin.name
+			if builtin.prefix == "text_editor_" && toolType >= textEditorBasedEditToolMinVersion {
+				tool.Name = "str_replace_based_edit_tool"
+			}
 		}
 		if width, ok := toolMap["display_width_px"].(float64); ok {
 			tool.DisplayWidthPx = int(width)
