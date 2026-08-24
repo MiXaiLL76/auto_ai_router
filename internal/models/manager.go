@@ -129,25 +129,22 @@ func (r *ModelPriceRegistry) GetPrice(modelName string) *ModelPrice {
 // This avoids a concurrent Update() straddling two map generations, which
 // can happen when callers issue separate GetPrice calls per candidate.
 //
-// The lookup uses a two-pass strategy to handle provider-prefixed model names
-// correctly:
-//
-//  1. Pass 1 (raw): try each candidate as a raw lowercase key (no prefix
-//     stripping). This ensures explicit entries like "google/gemini-3-flash-
-//     preview-highlimits" in the price file are found before any normalised
-//     fallback.
-//
-//  2. Pass 2 (normalised): try each candidate with NormalizeModelName (which
-//     strips provider prefixes). This is the legacy behaviour that matches
-//     bare model names like "gpt-5-mini-or".
-//
-// Raw matches always beat normalised matches, preserving the publicModelID >
-// modelID > realModelID priority contract.
+// Each candidate is tried in full — raw lowercase key first (no prefix
+// stripping, so an explicit entry like "google/gemini-3-flash-preview-
+// highlimits" is found before any normalised fallback), then the
+// NormalizeModelName (provider-prefix-stripped) key — before moving on to
+// the next candidate. This preserves the caller's priority order (e.g.
+// publicModelID > modelID > realModelID) exactly: a higher-priority
+// candidate's normalised match always wins over a lower-priority candidate's
+// raw match. Trying every candidate's raw key before any candidate's
+// normalised key would let a coincidental raw hit on a low-priority
+// candidate (realModelID, the literal provider model name, is especially
+// likely to double as a raw price-file key) shadow the correct match on a
+// higher-priority one.
 func (r *ModelPriceRegistry) GetPriceAny(modelNames ...string) (string, *ModelPrice) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	// Pass 1: raw lowercase keys (exact match, no prefix stripping)
 	for _, modelName := range modelNames {
 		if modelName == "" {
 			continue
@@ -155,13 +152,6 @@ func (r *ModelPriceRegistry) GetPriceAny(modelNames ...string) (string, *ModelPr
 		raw := strings.ToLower(strings.TrimSpace(modelName))
 		if price := r.prices[raw]; price != nil {
 			return modelName, price
-		}
-	}
-
-	// Pass 2: normalised keys (prefix-stripped)
-	for _, modelName := range modelNames {
-		if modelName == "" {
-			continue
 		}
 		if price := r.prices[NormalizeModelName(modelName)]; price != nil {
 			return modelName, price

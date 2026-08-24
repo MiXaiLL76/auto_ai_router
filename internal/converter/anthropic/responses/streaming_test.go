@@ -164,6 +164,104 @@ func TestTransformAnthropicStreamToResponses_TextDeltaContent(t *testing.T) {
 	assert.Equal(t, "Part1Part2", fullText)
 }
 
+func TestTransformAnthropicStreamToResponses_TextStreamWithCitations(t *testing.T) {
+	// Regression test: the streaming path must accumulate citations_delta events
+	// and attach them to output_text.annotations on block finalize, matching the
+	// non-streaming path's webSearchCitationsToAnnotations behavior. Both
+	// citations resolve to an annotation spanning the whole text block —
+	// Anthropic's cited_text is an excerpt of the source page, not a located
+	// substring of the response text, so per-citation offsets aren't recoverable.
+	stream := buildAnthropicSSEStream([]map[string]interface{}{
+		{
+			"type": "message_start",
+			"message": map[string]interface{}{
+				"usage": map[string]interface{}{"input_tokens": 10, "cache_read_input_tokens": 0},
+			},
+		},
+		{
+			"type":          "content_block_start",
+			"content_block": map[string]interface{}{"type": "text"},
+		},
+		{
+			"type":  "content_block_delta",
+			"delta": map[string]interface{}{"type": "text_delta", "text": "Note: Paris is lovely. Paris is the capital of France."},
+		},
+		{
+			"type": "content_block_delta",
+			"delta": map[string]interface{}{
+				"type": "citations_delta",
+				"citation": map[string]interface{}{
+					"type":       "web_search_result_location",
+					"cited_text": "Paris",
+					"url":        "https://example.com/paris-1",
+					"title":      "Paris travel guide",
+				},
+			},
+		},
+		{
+			"type": "content_block_delta",
+			"delta": map[string]interface{}{
+				"type": "citations_delta",
+				"citation": map[string]interface{}{
+					"type":       "web_search_result_location",
+					"cited_text": "Paris",
+					"url":        "https://example.com/paris-2",
+					"title":      "Paris - capital of France",
+				},
+			},
+		},
+		{
+			"type": "content_block_stop",
+		},
+		{
+			"type":  "message_delta",
+			"delta": map[string]interface{}{"stop_reason": "end_turn"},
+			"usage": map[string]interface{}{"output_tokens": 12},
+		},
+		{"type": "message_stop"},
+	})
+
+	var out bytes.Buffer
+	err := TransformAnthropicStreamToResponses(
+		strings.NewReader(stream), &out, "claude-opus-4-5", "", nil, nil,
+	)
+	require.NoError(t, err)
+
+	events := parseSSEEvents(out.String())
+	var completedEvent map[string]interface{}
+	for _, e := range events {
+		if e["type"] == "response.completed" {
+			completedEvent = e
+		}
+	}
+	require.NotNil(t, completedEvent)
+
+	respObj := completedEvent["response"].(map[string]interface{})
+	output := respObj["output"].([]interface{})
+	require.NotEmpty(t, output)
+
+	msg := output[0].(map[string]interface{})
+	content := msg["content"].([]interface{})
+	require.NotEmpty(t, content)
+	textContent := content[0].(map[string]interface{})
+
+	annotations := textContent["annotations"].([]interface{})
+	require.Len(t, annotations, 2)
+
+	wantEnd := len(textContent["text"].(string))
+
+	first := annotations[0].(map[string]interface{})
+	assert.Equal(t, "url_citation", first["type"])
+	assert.Equal(t, "https://example.com/paris-1", first["url"])
+	assert.Nil(t, first["start_index"], "start_index 0 is omitted by omitempty")
+	assert.EqualValues(t, wantEnd, first["end_index"])
+
+	second := annotations[1].(map[string]interface{})
+	assert.Equal(t, "https://example.com/paris-2", second["url"])
+	assert.Nil(t, second["start_index"], "start_index 0 is omitted by omitempty")
+	assert.EqualValues(t, wantEnd, second["end_index"])
+}
+
 func TestTransformAnthropicStreamToResponses_MessageEventsIncludeRequiredFields(t *testing.T) {
 	stream := buildAnthropicSSEStream([]map[string]interface{}{
 		{
@@ -351,6 +449,86 @@ func TestTransformAnthropicStreamToResponses_ToolUseBlock(t *testing.T) {
 	assert.Equal(t, "call_xyz", fc["call_id"])
 	assert.Equal(t, "get_weather", fc["name"])
 	assert.Contains(t, fc["arguments"].(string), "NYC")
+}
+
+// TestTransformAnthropicStreamToResponses_ServerToolUseWebSearch verifies that
+// a streamed server_tool_use (Anthropic's hosted web_search) block becomes a
+// web_search_call output item, instead of being silently dropped (there was
+// previously no case for "server_tool_use" at all in the streaming switch).
+func TestTransformAnthropicStreamToResponses_ServerToolUseWebSearch(t *testing.T) {
+	stream := buildAnthropicSSEStream([]map[string]interface{}{
+		{
+			"type": "message_start",
+			"message": map[string]interface{}{
+				"usage": map[string]interface{}{"input_tokens": 15, "cache_read_input_tokens": 0},
+			},
+		},
+		{
+			"type": "content_block_start",
+			"content_block": map[string]interface{}{
+				"type": "server_tool_use",
+				"id":   "srvtoolu_01",
+				"name": "web_search",
+			},
+		},
+		{
+			"type":  "content_block_delta",
+			"delta": map[string]interface{}{"type": "input_json_delta", "partial_json": `{"query`},
+		},
+		{
+			"type":  "content_block_delta",
+			"delta": map[string]interface{}{"type": "input_json_delta", "partial_json": `": "weather NYC"}`},
+		},
+		{
+			"type": "content_block_stop",
+		},
+		{
+			"type":  "message_delta",
+			"delta": map[string]interface{}{"stop_reason": "end_turn"},
+			"usage": map[string]interface{}{"output_tokens": 20},
+		},
+		{"type": "message_stop"},
+	})
+
+	var out bytes.Buffer
+	err := TransformAnthropicStreamToResponses(
+		strings.NewReader(stream), &out, "claude-opus-4-5", "", nil, nil,
+	)
+	require.NoError(t, err)
+
+	events := parseSSEEvents(out.String())
+	var completedEvent map[string]interface{}
+	var itemDoneEvents []map[string]interface{}
+	for _, e := range events {
+		if e["type"] == "response.completed" {
+			completedEvent = e
+		}
+		if e["type"] == "response.output_item.done" {
+			itemDoneEvents = append(itemDoneEvents, e)
+		}
+		// A web_search_call must never stream as a function_call_arguments event.
+		assert.NotEqual(t, "response.function_call_arguments.delta", e["type"])
+		assert.NotEqual(t, "response.function_call_arguments.done", e["type"])
+	}
+	require.NotNil(t, completedEvent)
+	// Exactly one output_item.done for the web_search_call item — it must not
+	// be emitted both at content_block_stop and again by the completion-time
+	// finalizer.
+	require.Len(t, itemDoneEvents, 1)
+	doneItem := itemDoneEvents[0]["item"].(map[string]interface{})
+	assert.Equal(t, "web_search_call", doneItem["type"])
+	assert.Equal(t, "completed", doneItem["status"])
+
+	respObj := completedEvent["response"].(map[string]interface{})
+	output := respObj["output"].([]interface{})
+	require.NotEmpty(t, output)
+
+	wsCall := output[0].(map[string]interface{})
+	assert.Equal(t, "web_search_call", wsCall["type"])
+	assert.Equal(t, "completed", wsCall["status"])
+	action := wsCall["action"].(map[string]interface{})
+	assert.Equal(t, "search", action["type"])
+	assert.Equal(t, "weather NYC", action["query"])
 }
 
 func TestTransformAnthropicStreamToResponses_EmptyStream(t *testing.T) {

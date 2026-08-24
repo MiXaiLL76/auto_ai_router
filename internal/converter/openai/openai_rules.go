@@ -206,15 +206,24 @@ func ReplaceBodyParam(modelID string, body []byte) []byte {
 // ConvertWebSearchTools normalises non-function tools in an OpenAI Chat
 // Completions request body.
 //
-//   - web_search / web_search_preview are converted to the top-level
-//     web_search_options parameter for search-preview models. Supported options
-//     are copied from the built-in tool. For other models the tool is dropped,
-//     as documented for the Chat Completions compatibility path.
+//   - For OpenAI models specifically, web_search / web_search_preview are
+//     converted to the top-level web_search_options parameter for
+//     search-preview models (supported options copied from the built-in
+//     tool); for other OpenAI models the tool is dropped, as documented for
+//     the Chat Completions compatibility path.
+//   - For non-OpenAI models (e.g. xAI/Grok, reached through the same
+//     OpenAI-compatible provider slot), web_search / web_search_preview
+//     tools and any tool_choice referencing them are passed through
+//     unchanged instead — OpenAI's "-search-preview" naming convention and
+//     web_search_options rewrite are OpenAI-specific; other vendors run
+//     their own agentic search loop directly off the "type":"web_search"
+//     tool regardless of model name (e.g. xAI's Agent Tools API).
 //   - All other non-function tools (computer_use, google_search_retrieval,
-//     code_execution, etc.) are dropped; they have no Chat Completions
-//     equivalent and would cause a 400 from OpenAI.
+//     code_execution, etc.) are dropped for every vendor; they have no
+//     Chat Completions equivalent and would cause a 400 upstream.
 //   - If a non-function tool_choice remains after tools are filtered, it is
-//     also removed so the provider defaults to "auto".
+//     also removed so the provider defaults to "auto" (unless it references
+//     a web_search tool preserved for a non-OpenAI model, see above).
 func ConvertWebSearchTools(body []byte) []byte {
 	var data map[string]any
 	if err := json.Unmarshal(body, &data); err != nil {
@@ -222,11 +231,12 @@ func ConvertWebSearchTools(body []byte) []byte {
 	}
 
 	modelID, _ := data["model"].(string)
+	preserveWebSearch := !isOpenAIModel(modelID)
 
 	toolsRaw, ok := data["tools"]
 	if !ok {
 		// No tools array; still clean up a stray non-function tool_choice.
-		if dropNonFunctionToolChoice(data) {
+		if dropNonFunctionToolChoice(data, preserveWebSearch) {
 			result, err := json.Marshal(data)
 			if err != nil {
 				return body
@@ -254,6 +264,12 @@ func ConvertWebSearchTools(body []byte) []byte {
 		toolType, _ := toolMap["type"].(string)
 		switch toolType {
 		case "web_search", "web_search_preview":
+			if preserveWebSearch {
+				// Non-OpenAI vendor: leave the built-in tool as-is rather
+				// than assuming OpenAI's own naming/rewrite rules apply.
+				functionTools = append(functionTools, t)
+				continue
+			}
 			hasWebSearch = true
 			nonFunctionDropped = true
 			if webSearchOptions == nil {
@@ -300,7 +316,7 @@ func ConvertWebSearchTools(body []byte) []byte {
 	}
 
 	// If tool_choice still references a non-function built-in, remove it.
-	dropNonFunctionToolChoice(data)
+	dropNonFunctionToolChoice(data, preserveWebSearch)
 
 	result, err := json.Marshal(data)
 	if err != nil {
@@ -313,18 +329,50 @@ func isWebSearchModel(modelID string) bool {
 	return strings.Contains(strings.ToLower(modelID), "search-preview")
 }
 
+// isOpenAIModel reports whether modelID belongs to a real OpenAI model
+// family (gpt-*, chatgpt-*, o1/o3/o4). OpenAI-specific request quirks (the
+// web_search "-search-preview" naming convention, web_search_options
+// rewrite) only apply to these — every other model reaching this converter
+// is an OpenAI-compatible but otherwise unrelated vendor (xAI/Grok, etc.)
+// plugged into the same provider slot.
+func isOpenAIModel(modelID string) bool {
+	base := extractBaseModelName(modelID)
+	// "gpt-oss" is OpenAI's open-weight model family, commonly served by
+	// non-OpenAI inference providers (Groq, Together, etc.) through this same
+	// OpenAI-compatible converter slot — it must not be treated as a real
+	// OpenAI-hosted model just because its name starts with "gpt".
+	if strings.HasPrefix(base, "gpt-oss") {
+		return false
+	}
+	if strings.HasPrefix(base, "gpt") || strings.HasPrefix(base, "chatgpt") {
+		return true
+	}
+	for _, family := range []string{"o1", "o3", "o4"} {
+		if matchModelFamily(modelID, family) {
+			return true
+		}
+	}
+	return false
+}
+
 // dropNonFunctionToolChoice removes tool_choice from data if it is a
-// map-style object whose type is not "function".  Returns true if removed.
-func dropNonFunctionToolChoice(data map[string]any) bool {
+// map-style object whose type is not "function". When preserveWebSearch is
+// true, a tool_choice referencing web_search/web_search_preview is left in
+// place instead (non-OpenAI vendor). Returns true if removed.
+func dropNonFunctionToolChoice(data map[string]any, preserveWebSearch bool) bool {
 	tc, ok := data["tool_choice"].(map[string]any)
 	if !ok {
 		return false
 	}
-	if tcType, _ := tc["type"].(string); tcType != "function" {
-		delete(data, "tool_choice")
-		return true
+	tcType, _ := tc["type"].(string)
+	if tcType == "function" {
+		return false
 	}
-	return false
+	if preserveWebSearch && (tcType == "web_search" || tcType == "web_search_preview") {
+		return false
+	}
+	delete(data, "tool_choice")
+	return true
 }
 
 // IsGptImage1Model reports whether the given model ID belongs to the gpt-image-1 family.

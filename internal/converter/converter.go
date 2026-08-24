@@ -139,7 +139,7 @@ func (c *ProviderConverter) RequestFrom(body []byte) ([]byte, error) {
 		if c.mode.IsImageGeneration {
 			return nil, errors.New(string(c.providerType) + " does not support image generation")
 		}
-		return anthropic.OpenAIToAnthropic(body, c.mode.ModelID)
+		return anthropic.OpenAIToAnthropic(body, c.mode.ModelID, c.providerType == config.ProviderTypeAnthropic)
 	case config.ProviderTypeBedrock:
 		if c.mode.IsImageGeneration {
 			return nil, errors.New("bedrock does not support image generation")

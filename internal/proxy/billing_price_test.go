@@ -24,19 +24,24 @@ func TestLookupBillingModelPrice_TwoPassLookup(t *testing.T) {
 		wantInputCost float64
 	}{
 		{
-			name:          "openrouter/gpt-5-mini: raw miss on publicModelID, raw hit on modelID",
+			// publicModelID's normalised match (higher priority) wins over
+			// modelID's raw match (lower priority) — this is the priority
+			// inversion GetPriceAny used to have: trying every candidate's
+			// raw key before any candidate's normalised key let modelID's
+			// coincidental raw hit shadow the correct publicModelID match.
+			name:          "publicModelID's normalised match beats modelID's raw match",
 			publicModelID: "openrouter/gpt-5-mini",
 			modelID:       "gpt-5-mini-or",
 			realModelID:   "gpt-5-mini",
-			wantModelID:   "gpt-5-mini-or",
-			wantInputCost: 3.25e-07,
+			wantModelID:   "openrouter/gpt-5-mini",
+			wantInputCost: 2.25e-07,
 		},
 		{
 			name:          "openai/gpt-5-mini: raw miss, normalised hit on publicModelID",
 			publicModelID: "openai/gpt-5-mini",
 			modelID:       "gpt-5-mini",
 			realModelID:   "gpt-5-mini",
-			wantModelID:   "gpt-5-mini",
+			wantModelID:   "openai/gpt-5-mini",
 			wantInputCost: 2.25e-07,
 		},
 		{

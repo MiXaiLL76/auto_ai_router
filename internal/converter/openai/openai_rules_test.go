@@ -649,6 +649,37 @@ func TestConvertWebSearchTools_NonSearchModelWithFunctions(t *testing.T) {
 	}
 }
 
+// TestConvertWebSearchTools_NonOpenAIModelPreservesWebSearch verifies that
+// non-OpenAI models reached through the same OpenAI-compatible provider slot
+// (e.g. xAI/Grok) keep the web_search tool and its tool_choice untouched,
+// instead of having OpenAI's own "-search-preview" naming rule strip them.
+func TestConvertWebSearchTools_NonOpenAIModelPreservesWebSearch(t *testing.T) {
+	body := []byte(`{"model":"grok-4.5-latest","tools":[{"type":"web_search"}],"tool_choice":{"type":"web_search"}}`)
+	result := ConvertWebSearchTools(body)
+
+	if string(result) != string(body) {
+		t.Errorf("body should be unchanged for non-OpenAI model, got %s", result)
+	}
+}
+
+// TestConvertWebSearchTools_NonOpenAIModelPreservesWebSearchWithFunctions
+// verifies the web_search tool survives alongside ordinary function tools
+// for a non-OpenAI model, and web_search_options is never synthesized.
+func TestConvertWebSearchTools_NonOpenAIModelPreservesWebSearchWithFunctions(t *testing.T) {
+	body := []byte(`{"model":"grok-4.5-latest","tools":[{"type":"web_search"},{"type":"function","function":{"name":"get_weather"}}],"tool_choice":"required"}`)
+	result := bodyToMap(t, ConvertWebSearchTools(body))
+
+	assert.NotContains(t, result, "web_search_options")
+	tools, ok := result["tools"].([]interface{})
+	if !ok {
+		t.Fatal("tools should remain")
+	}
+	if len(tools) != 2 {
+		t.Errorf("expected both tools to survive, got %d", len(tools))
+	}
+	assert.Equal(t, "required", result["tool_choice"])
+}
+
 // TestConvertWebSearchTools_NoWebSearch verifies that bodies with only function
 // tools are returned unchanged.
 func TestConvertWebSearchTools_NoWebSearch(t *testing.T) {

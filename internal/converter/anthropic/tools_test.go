@@ -155,6 +155,47 @@ func TestConvertOpenAIToolsToAnthropic(t *testing.T) {
 		assert.Equal(t, "web_search", result[3].Name)
 	})
 
+	t.Run("native_versioned_web_search_preserved", func(t *testing.T) {
+		tools := []interface{}{
+			map[string]interface{}{
+				"type":     "web_search_20250305",
+				"name":     "web_search",
+				"max_uses": float64(5),
+			},
+		}
+		result := convertOpenAIToolsToAnthropic(tools)
+		require.Len(t, result, 1)
+		assert.Equal(t, "web_search_20250305", result[0].Type)
+		assert.Equal(t, "web_search", result[0].Name)
+		assert.Equal(t, 5, result[0].MaxUses)
+	})
+
+	t.Run("native_versioned_web_search_future_version_preserved", func(t *testing.T) {
+		tools := []interface{}{
+			map[string]interface{}{"type": "web_search_20260318", "name": "web_search"},
+		}
+		result := convertOpenAIToolsToAnthropic(tools)
+		require.Len(t, result, 1)
+		assert.Equal(t, "web_search_20260318", result[0].Type)
+	})
+
+	t.Run("web_search_options_copied", func(t *testing.T) {
+		tools := []interface{}{
+			map[string]interface{}{
+				"type":            "web_search",
+				"max_uses":        float64(3),
+				"allowed_domains": []interface{}{"example.com"},
+				"user_location":   map[string]interface{}{"type": "approximate", "city": "NYC"},
+			},
+		}
+		result := convertOpenAIToolsToAnthropic(tools)
+		require.Len(t, result, 1)
+		assert.Equal(t, "web_search_20250305", result[0].Type)
+		assert.Equal(t, 3, result[0].MaxUses)
+		assert.Equal(t, []interface{}{"example.com"}, result[0].AllowedDomains)
+		assert.Equal(t, "NYC", result[0].UserLocation.(map[string]interface{})["city"])
+	})
+
 	t.Run("function_without_name_skipped", func(t *testing.T) {
 		tools := []interface{}{
 			map[string]interface{}{
@@ -292,7 +333,7 @@ func TestOpenAIToAnthropic_AllowedToolsExpanded(t *testing.T) {
 		"max_tokens": 200
 	}`
 
-	out, err := OpenAIToAnthropic([]byte(body), "")
+	out, err := OpenAIToAnthropic([]byte(body), "", true)
 	require.NoError(t, err)
 
 	var req map[string]interface{}
@@ -331,7 +372,7 @@ func TestOpenAIToAnthropic_AllowedToolsViaExtraBody(t *testing.T) {
 		"max_tokens": 200
 	}`
 
-	out, err := OpenAIToAnthropic([]byte(body), "")
+	out, err := OpenAIToAnthropic([]byte(body), "", true)
 	require.NoError(t, err)
 
 	var req map[string]interface{}
@@ -360,7 +401,7 @@ func TestOpenAIToAnthropic_ExtraBodyToolChoiceOverridesRegular(t *testing.T) {
 		"max_tokens": 100
 	}`
 
-	out, err := OpenAIToAnthropic([]byte(body), "")
+	out, err := OpenAIToAnthropic([]byte(body), "", true)
 	require.NoError(t, err)
 
 	var req map[string]interface{}

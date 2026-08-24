@@ -61,6 +61,30 @@ func TestAnthropicToResponsesResponse_MaxTokens(t *testing.T) {
 	assert.Equal(t, "max_output_tokens", resp.IncompleteDetails.Reason)
 }
 
+// TestAnthropicToResponsesResponse_PauseTurn verifies that Anthropic's
+// pause_turn stop_reason (a long-running server-tool turn paused mid-flight,
+// not finished) maps to status "incomplete" rather than "completed" — the
+// client must know to send the paused content back to continue, not treat
+// the answer as final.
+func TestAnthropicToResponsesResponse_PauseTurn(t *testing.T) {
+	body := `{
+		"id": "msg_pt",
+		"type": "message",
+		"role": "assistant",
+		"model": "claude-opus-4-5",
+		"content": [{"type": "text", "text": "Still searching..."}],
+		"stop_reason": "pause_turn",
+		"usage": {"input_tokens": 10, "output_tokens": 5}
+	}`
+
+	resp, err := AnthropicToResponsesResponse([]byte(body), "claude-opus-4-5", "", 0)
+	require.NoError(t, err)
+
+	assert.Equal(t, "incomplete", resp.Status)
+	require.NotNil(t, resp.IncompleteDetails)
+	assert.Equal(t, "pause_turn", resp.IncompleteDetails.Reason)
+}
+
 func TestAnthropicToResponsesResponse_ToolUse(t *testing.T) {
 	body := `{
 		"id": "msg_03",
@@ -91,6 +115,113 @@ func TestAnthropicToResponsesResponse_ToolUse(t *testing.T) {
 	var args map[string]interface{}
 	require.NoError(t, json.Unmarshal([]byte(fc.Arguments), &args))
 	assert.Equal(t, "London", args["city"])
+}
+
+// TestAnthropicToResponsesResponse_WebSearch verifies that a server_tool_use
+// web_search block becomes a web_search_call output item with a
+// {"type":"search","query":...} action (instead of being silently dropped,
+// as it used to be before switch-case web_search support was added), and
+// that citations on the following text block become url_citation
+// annotations spanning the whole block (Anthropic's cited_text is an excerpt
+// of the source page, not a located substring of the response text).
+func TestAnthropicToResponsesResponse_WebSearch(t *testing.T) {
+	body := `{
+		"id": "msg_05",
+		"type": "message",
+		"role": "assistant",
+		"model": "claude-opus-4-5",
+		"content": [
+			{
+				"type": "server_tool_use",
+				"id": "srvtoolu_01",
+				"name": "web_search",
+				"input": {"query": "claude shannon birth date"}
+			},
+			{
+				"type": "web_search_tool_result",
+				"tool_use_id": "srvtoolu_01",
+				"content": [
+					{"type": "web_search_result", "url": "https://en.wikipedia.org/wiki/Claude_Shannon", "title": "Claude Shannon - Wikipedia"}
+				]
+			},
+			{
+				"type": "text",
+				"text": "Claude Shannon was born on April 30, 1916.",
+				"citations": [
+					{
+						"type": "web_search_result_location",
+						"url": "https://en.wikipedia.org/wiki/Claude_Shannon",
+						"title": "Claude Shannon - Wikipedia",
+						"cited_text": "born on April 30, 1916"
+					}
+				]
+			}
+		],
+		"stop_reason": "end_turn",
+		"usage": {"input_tokens": 20, "output_tokens": 30}
+	}`
+
+	resp, err := AnthropicToResponsesResponse([]byte(body), "claude-opus-4-5", "", 0)
+	require.NoError(t, err)
+
+	require.Len(t, resp.Output, 2)
+
+	wsCall := resp.Output[0]
+	assert.Equal(t, "web_search_call", wsCall.Type)
+	assert.Equal(t, "completed", wsCall.Status)
+	action, ok := wsCall.Action.(map[string]interface{})
+	require.True(t, ok, "Action must be a {type, query} map")
+	assert.Equal(t, "search", action["type"])
+	assert.Equal(t, "claude shannon birth date", action["query"])
+
+	msg := resp.Output[1]
+	assert.Equal(t, "message", msg.Type)
+	require.Len(t, msg.Content, 1)
+	text := msg.Content[0]
+	assert.Equal(t, "Claude Shannon was born on April 30, 1916.", text.Text)
+	require.Len(t, text.Annotations, 1)
+	ann := text.Annotations[0]
+	assert.Equal(t, "url_citation", ann.Type)
+	assert.Equal(t, "https://en.wikipedia.org/wiki/Claude_Shannon", ann.URL)
+	assert.Equal(t, "Claude Shannon - Wikipedia", ann.Title)
+	assert.Equal(t, 0, ann.StartIndex)
+	assert.Equal(t, len(text.Text), ann.EndIndex)
+}
+
+// TestAnthropicToResponsesResponse_WebSearchCitationSpansWholeBlock verifies
+// that a citation whose cited_text is an excerpt from the source page (not a
+// substring of the response text at all) still produces an annotation,
+// spanning the whole text block rather than being dropped or mis-offset.
+func TestAnthropicToResponsesResponse_WebSearchCitationSpansWholeBlock(t *testing.T) {
+	body := `{
+		"id": "msg_06",
+		"type": "message",
+		"role": "assistant",
+		"model": "claude-opus-4-5",
+		"content": [
+			{
+				"type": "text",
+				"text": "Some answer text.",
+				"citations": [
+					{"type": "web_search_result_location", "url": "https://example.com", "cited_text": "not present anywhere"}
+				]
+			}
+		],
+		"stop_reason": "end_turn",
+		"usage": {"input_tokens": 5, "output_tokens": 5}
+	}`
+
+	resp, err := AnthropicToResponsesResponse([]byte(body), "claude-opus-4-5", "", 0)
+	require.NoError(t, err)
+
+	require.Len(t, resp.Output, 1)
+	require.Len(t, resp.Output[0].Content, 1)
+	annotations := resp.Output[0].Content[0].Annotations
+	require.Len(t, annotations, 1)
+	assert.Equal(t, "url_citation", annotations[0].Type)
+	assert.Equal(t, "https://example.com", annotations[0].URL)
+	assert.Equal(t, 0, annotations[0].StartIndex)
+	assert.Equal(t, len("Some answer text."), annotations[0].EndIndex)
 }
 
 func TestAnthropicToResponsesResponse_Thinking(t *testing.T) {

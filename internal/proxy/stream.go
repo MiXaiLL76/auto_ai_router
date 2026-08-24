@@ -1085,18 +1085,20 @@ func (p *Proxy) finalizeStreamingLog(logCtx *RequestLogContext, totalTokens int,
 	// together (e.g. a filtered/cancelled request that legitimately produced nothing) — a
 	// coherent signal, trusted as-is, same as before this fix.
 	//
-	// Any other zero PromptTokens is distrusted and falls back to the local estimate:
+	// Any other zero PromptTokens/CompletionTokens is distrusted and falls back to the local
+	// estimate for that field specifically:
 	//   - no usage object arrived at all (original behavior, unchanged), or
-	//   - the usage object reported a genuine non-zero CompletionTokens alongside a zero
-	//     PromptTokens — internally inconsistent (a real completion cannot be produced from
-	//     zero input) and matches the CometAPI bug: message_start's placeholder
-	//     usage:{input_tokens:0,output_tokens:0} sometimes never gets a real input count even
-	//     though output tokens land correctly later via message_delta.
+	//   - the usage object reported a genuine non-zero value for the other field alongside a
+	//     zero one — internally inconsistent (a real completion cannot be produced from zero
+	//     input, nor can zero output tokens come with billed input) and matches the CometAPI
+	//     bug: message_start's placeholder usage:{input_tokens:0,output_tokens:0} sometimes
+	//     never gets a real count for one side even though the other lands correctly later
+	//     via message_delta.
 	explicitZeroUsage := providerUsage && !providerReportedPromptTokens && !providerReportedCompletionTokens
 	if !providerReportedPromptTokens && !explicitZeroUsage && logCtx.TokenUsage.PromptTokens == 0 {
 		logCtx.TokenUsage.PromptTokens = logCtx.promptTokensEstimate()
 	}
-	if !providerUsage && logCtx.TokenUsage.CompletionTokens == 0 {
+	if !providerReportedCompletionTokens && !explicitZeroUsage && logCtx.TokenUsage.CompletionTokens == 0 {
 		logCtx.TokenUsage.CompletionTokens = fallbackCompletion
 	}
 	logCtx.TokenUsage.Normalize()
