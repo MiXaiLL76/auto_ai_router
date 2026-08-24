@@ -178,7 +178,7 @@ When disabled, no `SessionStore` is created and all routing uses plain round-rob
 
 ### TTL
 
-The binding expires after the configured TTL of inactivity. After expiry, the next request starts a new binding via round-robin.
+The binding expires after the configured TTL of inactivity. Every successful lookup for the same session and model refreshes the TTL immediately, so an active conversation keeps its credential affinity even while a response is still in progress. After expiry, the next request starts a new binding via round-robin.
 
 ```yaml
 server:
