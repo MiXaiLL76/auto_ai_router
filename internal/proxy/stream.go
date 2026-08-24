@@ -1085,20 +1085,23 @@ func (p *Proxy) finalizeStreamingLog(logCtx *RequestLogContext, totalTokens int,
 	// together (e.g. a filtered/cancelled request that legitimately produced nothing) — a
 	// coherent signal, trusted as-is, same as before this fix.
 	//
-	// Any other zero PromptTokens/CompletionTokens is distrusted and falls back to the local
-	// estimate for that field specifically:
-	//   - no usage object arrived at all (original behavior, unchanged), or
-	//   - the usage object reported a genuine non-zero value for the other field alongside a
-	//     zero one — internally inconsistent (a real completion cannot be produced from zero
-	//     input, nor can zero output tokens come with billed input) and matches the CometAPI
-	//     bug: message_start's placeholder usage:{input_tokens:0,output_tokens:0} sometimes
-	//     never gets a real count for one side even though the other lands correctly later
-	//     via message_delta.
+	// A zero PromptTokens alongside a genuine non-zero CompletionTokens is distrusted and
+	// falls back to the local estimate for prompt tokens specifically: this is internally
+	// inconsistent (a real completion cannot be produced from zero input) and matches the
+	// CometAPI bug, where message_start's placeholder usage:{input_tokens:0,output_tokens:0}
+	// never gets a real input count even though output lands correctly later via
+	// message_delta.
+	//
+	// The reverse — a genuine non-zero PromptTokens alongside a zero CompletionTokens — is
+	// NOT distrusted: it's a normal, legitimate outcome (e.g. output filtered/stopped
+	// immediately), and no known provider bug produces a stuck-zero completion count while
+	// input is reported correctly. Completion only falls back to the local estimate when no
+	// provider usage object arrived at all.
 	explicitZeroUsage := providerUsage && !providerReportedPromptTokens && !providerReportedCompletionTokens
 	if !providerReportedPromptTokens && !explicitZeroUsage && logCtx.TokenUsage.PromptTokens == 0 {
 		logCtx.TokenUsage.PromptTokens = logCtx.promptTokensEstimate()
 	}
-	if !providerReportedCompletionTokens && !explicitZeroUsage && logCtx.TokenUsage.CompletionTokens == 0 {
+	if !providerUsage && logCtx.TokenUsage.CompletionTokens == 0 {
 		logCtx.TokenUsage.CompletionTokens = fallbackCompletion
 	}
 	logCtx.TokenUsage.Normalize()
