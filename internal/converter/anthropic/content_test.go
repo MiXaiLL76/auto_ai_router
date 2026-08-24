@@ -32,7 +32,8 @@ func TestExtractMediaType(t *testing.T) {
 func TestConvertImageURLToAnthropic(t *testing.T) {
 	t.Run("data_url", func(t *testing.T) {
 		url := "data:image/jpeg;base64,/9j/4AAQ"
-		result := convertImageURLToAnthropic(url)
+		result, err := convertImageURLToAnthropic(url)
+		require.NoError(t, err)
 		require.NotNil(t, result)
 		assert.Equal(t, "image", result.Type)
 		assert.Equal(t, "base64", result.Source.Type)
@@ -40,11 +41,11 @@ func TestConvertImageURLToAnthropic(t *testing.T) {
 		assert.Equal(t, "/9j/4AAQ", result.Source.Data)
 	})
 
-	t.Run("data_url_no_media_type", func(t *testing.T) {
+	t.Run("data_url_no_media_type_rejected", func(t *testing.T) {
 		url := "data:;base64,abc123"
-		result := convertImageURLToAnthropic(url)
-		require.NotNil(t, result)
-		assert.Equal(t, "image/jpeg", result.Source.MediaType) // falls back to jpeg
+		result, err := convertImageURLToAnthropic(url)
+		require.Error(t, err)
+		assert.Nil(t, result)
 	})
 
 	t.Run("http_url", func(t *testing.T) {
@@ -55,7 +56,8 @@ func TestConvertImageURLToAnthropic(t *testing.T) {
 		}))
 		defer server.Close()
 
-		result := convertImageURLToAnthropic(server.URL + "/image.jpg")
+		result, err := convertImageURLToAnthropic(server.URL + "/image.jpg")
+		require.NoError(t, err)
 		require.NotNil(t, result)
 		assert.Equal(t, "image", result.Type)
 		assert.Equal(t, "base64", result.Source.Type)
@@ -63,12 +65,20 @@ func TestConvertImageURLToAnthropic(t *testing.T) {
 	})
 
 	t.Run("invalid_data_url_no_comma", func(t *testing.T) {
-		result := convertImageURLToAnthropic("data:image/jpeg;base64")
+		result, err := convertImageURLToAnthropic("data:image/jpeg;base64")
+		require.Error(t, err)
 		assert.Nil(t, result)
 	})
 
 	t.Run("invalid_scheme", func(t *testing.T) {
-		result := convertImageURLToAnthropic("ftp://example.com/image.jpg")
+		result, err := convertImageURLToAnthropic("ftp://example.com/image.jpg")
+		require.Error(t, err)
+		assert.Nil(t, result)
+	})
+
+	t.Run("pdf_data_url_rejected", func(t *testing.T) {
+		result, err := convertImageURLToAnthropic("data:application/pdf;base64,JVBERi0=")
+		require.Error(t, err)
 		assert.Nil(t, result)
 	})
 }
@@ -76,7 +86,8 @@ func TestConvertImageURLToAnthropic(t *testing.T) {
 func TestConvertDataURLToDocument(t *testing.T) {
 	t.Run("pdf_data_url", func(t *testing.T) {
 		dataURL := "data:application/pdf;base64,JVBERi0="
-		result := convertDataURLToDocument(dataURL)
+		result, err := ConvertDataURLToDocument(dataURL, "file_data")
+		require.NoError(t, err)
 		require.NotNil(t, result)
 		assert.Equal(t, "document", result.Type)
 		assert.Equal(t, "base64", result.Source.Type)
@@ -84,22 +95,23 @@ func TestConvertDataURLToDocument(t *testing.T) {
 		assert.Equal(t, "JVBERi0=", result.Source.Data)
 	})
 
-	t.Run("text_data_url", func(t *testing.T) {
+	t.Run("text_data_url_rejected", func(t *testing.T) {
 		dataURL := "data:text/plain;base64,SGVsbG8="
-		result := convertDataURLToDocument(dataURL)
-		require.NotNil(t, result)
-		assert.Equal(t, "document", result.Type)
-		assert.Equal(t, "text/plain", result.Source.MediaType)
+		result, err := ConvertDataURLToDocument(dataURL, "file_data")
+		require.Error(t, err)
+		assert.Nil(t, result)
 	})
 
 	t.Run("image_rejected", func(t *testing.T) {
 		dataURL := "data:image/jpeg;base64,/9j/4AAQ"
-		result := convertDataURLToDocument(dataURL)
+		result, err := ConvertDataURLToDocument(dataURL, "file_data")
+		require.Error(t, err)
 		assert.Nil(t, result, "image/* should be rejected for document blocks")
 	})
 
 	t.Run("no_comma", func(t *testing.T) {
-		result := convertDataURLToDocument("data:application/pdf;base64")
+		result, err := ConvertDataURLToDocument("data:application/pdf;base64", "file_data")
+		require.Error(t, err)
 		assert.Nil(t, result)
 	})
 }

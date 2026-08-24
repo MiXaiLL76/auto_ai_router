@@ -41,6 +41,25 @@ func TestTruncateLongFields_InvalidJSON(t *testing.T) {
 	assert.Equal(t, body, result)
 }
 
+func TestSanitizeRequestBodyForLogRedactsDocumentPayloads(t *testing.T) {
+	body := []byte(`{
+		"messages":[{
+			"content":[
+				{"type":"file","file":{"file_data":"data:application/pdf;base64,JVBERi0="}},
+				{"type":"document","source":{"type":"base64","media_type":"application/pdf","data":"JVBERi0="}}
+			]
+		}]
+	}`)
+
+	got := SanitizeRequestBodyForLog(body, 500)
+
+	assert.NotContains(t, got, "data:application/pdf;base64,JVBERi0=")
+	assert.NotContains(t, got, `"data":"JVBERi0="`)
+	assert.Contains(t, got, `"file_data":"<redacted bytes=36>"`)
+	assert.Contains(t, got, `"data":"<redacted bytes=8>"`)
+	assert.Contains(t, got, `"media_type":"application/pdf"`)
+}
+
 func TestTruncateLongFields_EmbeddingField(t *testing.T) {
 	longEmbedding := strings.Repeat("x", 200)
 	input := `{"embedding":"` + longEmbedding + `"}`

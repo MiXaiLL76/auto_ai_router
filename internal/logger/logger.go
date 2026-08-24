@@ -1,6 +1,7 @@
 package logger
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -305,6 +306,66 @@ func TruncateLongFields(body string, maxFieldLength int) string {
 	}
 
 	return string(truncated)
+}
+
+// SanitizeRequestBodyForLog redacts file payloads before truncating a JSON request body.
+func SanitizeRequestBodyForLog(body []byte, maxFieldLength int) string {
+	var decoded interface{}
+	if err := json.Unmarshal(body, &decoded); err != nil {
+		return TruncateLongFields(string(body), maxFieldLength)
+	}
+
+	sanitized := sanitizePayloadForLog(decoded)
+	var buf bytes.Buffer
+	encoder := json.NewEncoder(&buf)
+	encoder.SetEscapeHTML(false)
+	if err := encoder.Encode(sanitized); err != nil {
+		return TruncateLongFields(string(body), maxFieldLength)
+	}
+
+	return unescapeLogRedactionMarkers(TruncateLongFields(strings.TrimSpace(buf.String()), maxFieldLength))
+}
+
+func sanitizePayloadForLog(value interface{}) interface{} {
+	switch v := value.(type) {
+	case map[string]interface{}:
+		isBase64Source := false
+		if typ, _ := v["type"].(string); typ == "base64" {
+			isBase64Source = true
+		}
+		out := make(map[string]interface{}, len(v))
+		for key, item := range v {
+			lowerKey := strings.ToLower(key)
+			if lowerKey == "file_data" || lowerKey == "data" && isBase64Source {
+				out[key] = redactPayloadString(item)
+				continue
+			}
+			out[key] = sanitizePayloadForLog(item)
+		}
+		return out
+	case []interface{}:
+		out := make([]interface{}, 0, len(v))
+		for _, item := range v {
+			out = append(out, sanitizePayloadForLog(item))
+		}
+		return out
+	default:
+		return value
+	}
+}
+
+func redactPayloadString(value interface{}) interface{} {
+	raw, ok := value.(string)
+	if !ok || raw == "" {
+		return value
+	}
+	return fmt.Sprintf("<redacted bytes=%d>", len(raw))
+}
+
+func unescapeLogRedactionMarkers(value string) string {
+	value = strings.ReplaceAll(value, `\u003c`, "<")
+	value = strings.ReplaceAll(value, `\u003e`, ">")
+	return strings.ReplaceAll(value, `\u0026`, "&")
 }
 
 // truncateValue recursively truncates long string values in a map or slice

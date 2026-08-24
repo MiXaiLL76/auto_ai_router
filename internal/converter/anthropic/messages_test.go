@@ -2,8 +2,10 @@ package anthropic
 
 import (
 	"encoding/json"
+	"errors"
 	"testing"
 
+	"github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -74,6 +76,120 @@ func TestOpenAIToAnthropic_ReasoningObjectCanDisableTopLevelEffort(t *testing.T)
 	require.NoError(t, json.Unmarshal(result, &request))
 	assert.NotContains(t, request, "thinking")
 	assert.NotContains(t, request, "output_config")
+}
+
+func TestOpenAIToAnthropic_ChatFileFileData(t *testing.T) {
+	body := []byte(`{
+		"model":"claude-sonnet-4-5",
+		"messages":[{
+			"role":"user",
+			"content":[{"type":"file","file":{"filename":"test.pdf","file_data":"data:application/pdf;base64,JVBERi0="}}]
+		}]
+	}`)
+
+	result, err := OpenAIToAnthropic(body, "claude-sonnet-4-5", true)
+	require.NoError(t, err)
+
+	block := firstAnthropicUserBlock(t, result)
+	assert.Equal(t, "document", block["type"])
+	source := block["source"].(map[string]interface{})
+	assert.Equal(t, "base64", source["type"])
+	assert.Equal(t, "application/pdf", source["media_type"])
+	assert.Equal(t, "JVBERi0=", source["data"])
+}
+
+func TestOpenAIToAnthropic_ChatFileFileIDUnsupported(t *testing.T) {
+	body := []byte(`{
+		"model":"claude-sonnet-4-5",
+		"messages":[{
+			"role":"user",
+			"content":[{"type":"file","file":{"file_id":"file-abc"}}]
+		}]
+	}`)
+
+	_, err := OpenAIToAnthropic(body, "claude-sonnet-4-5", true)
+	require.Error(t, err)
+	var validationErr *converterutil.RequestValidationError
+	require.True(t, errors.As(err, &validationErr))
+	assert.Equal(t, "messages.content.file.file_id", validationErr.Param)
+	assert.Equal(t, "file_id is not supported for this route", validationErr.Message)
+	assert.NotContains(t, err.Error(), "Anthropic")
+}
+
+func TestOpenAIToAnthropic_ChatPDFAsImageURLRejected(t *testing.T) {
+	body := []byte(`{
+		"model":"claude-sonnet-4-5",
+		"messages":[{
+			"role":"user",
+			"content":[{"type":"image_url","image_url":{"url":"data:application/pdf;base64,JVBERi0="}}]
+		}]
+	}`)
+
+	_, err := OpenAIToAnthropic(body, "claude-sonnet-4-5", true)
+	require.Error(t, err)
+	var validationErr *converterutil.RequestValidationError
+	require.True(t, errors.As(err, &validationErr))
+	assert.Equal(t, "messages.content.image_url.url", validationErr.Param)
+}
+
+func TestOpenAIToAnthropic_ChatImageURLJPEGStillWorks(t *testing.T) {
+	body := []byte(`{
+		"model":"claude-sonnet-4-5",
+		"messages":[{
+			"role":"user",
+			"content":[{"type":"image_url","image_url":{"url":"data:image/jpeg;base64,/9j/4AAQ"}}]
+		}]
+	}`)
+
+	result, err := OpenAIToAnthropic(body, "claude-sonnet-4-5", true)
+	require.NoError(t, err)
+
+	block := firstAnthropicUserBlock(t, result)
+	assert.Equal(t, "image", block["type"])
+	source := block["source"].(map[string]interface{})
+	assert.Equal(t, "base64", source["type"])
+	assert.Equal(t, "image/jpeg", source["media_type"])
+	assert.Equal(t, "/9j/4AAQ", source["data"])
+}
+
+func TestOpenAIToAnthropic_ChatImageURLPNGStillWorks(t *testing.T) {
+	body := []byte(`{
+		"model":"claude-sonnet-4-5",
+		"messages":[{
+			"role":"user",
+			"content":[{"type":"image_url","image_url":{"url":"data:image/png;base64,iVBORw0KGgo="}}]
+		}]
+	}`)
+
+	result, err := OpenAIToAnthropic(body, "claude-sonnet-4-5", true)
+	require.NoError(t, err)
+
+	block := firstAnthropicUserBlock(t, result)
+	assert.Equal(t, "image", block["type"])
+	source := block["source"].(map[string]interface{})
+	assert.Equal(t, "base64", source["type"])
+	assert.Equal(t, "image/png", source["media_type"])
+	assert.Equal(t, "iVBORw0KGgo=", source["data"])
+}
+
+func TestOpenAIToAnthropic_ChatNativeDocument(t *testing.T) {
+	body := []byte(`{
+		"model":"claude-sonnet-4-5",
+		"messages":[{
+			"role":"user",
+			"content":[{"type":"document","source":{"type":"base64","media_type":"application/pdf","data":"JVBERi0="}}]
+		}]
+	}`)
+
+	result, err := OpenAIToAnthropic(body, "claude-sonnet-4-5", true)
+	require.NoError(t, err)
+
+	block := firstAnthropicUserBlock(t, result)
+	assert.Equal(t, "document", block["type"])
+	source := block["source"].(map[string]interface{})
+	assert.Equal(t, "base64", source["type"])
+	assert.Equal(t, "application/pdf", source["media_type"])
+	assert.Equal(t, "JVBERi0=", source["data"])
 }
 
 // TestOpenAIToAnthropic_NonClaudeModelDefaultsThinkingDisabled verifies that
@@ -209,4 +325,16 @@ func TestExtractSystemBlocks(t *testing.T) {
 			assert.Equal(t, tt.want, got)
 		})
 	}
+}
+
+func firstAnthropicUserBlock(t *testing.T, body []byte) map[string]interface{} {
+	t.Helper()
+
+	var request map[string]interface{}
+	require.NoError(t, json.Unmarshal(body, &request))
+	messages := request["messages"].([]interface{})
+	require.NotEmpty(t, messages)
+	content := messages[0].(map[string]interface{})["content"].([]interface{})
+	require.NotEmpty(t, content)
+	return content[0].(map[string]interface{})
 }

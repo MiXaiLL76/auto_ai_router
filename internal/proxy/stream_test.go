@@ -1176,6 +1176,74 @@ func TestHandleStreamingWithTokens_PartialZeroUsage_FallsBackForMissingField(t *
 		"CompletionTokens should keep the provider-reported value, not the fallback")
 }
 
+// TestHandleStreamingWithTokens_LegitimateZeroCompletion_NotOverwritten verifies the reverse of
+// the partial-zero-usage case above: a genuine non-zero prompt_tokens alongside a genuine zero
+// completion_tokens (e.g. output filtered or stopped immediately) must NOT be distrusted. No
+// known provider bug leaves completion_tokens stuck at a placeholder zero while prompt_tokens is
+// reported correctly (the CometAPI bug goes the other way — see the test above), so overwriting
+// this legitimate zero with the local estimate would over-bill the request for output tokens it
+// never produced.
+func TestHandleStreamingWithTokens_LegitimateZeroCompletion_NotOverwritten(t *testing.T) {
+	upstreamServer := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+
+		chunks := []string{
+			"data: {\"choices\":[],\"usage\":{\"prompt_tokens\":500,\"completion_tokens\":0,\"total_tokens\":500}}\n\n",
+			"data: [DONE]\n\n",
+		}
+
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			http.Error(w, "Streaming not supported", http.StatusInternalServerError)
+			return
+		}
+
+		for _, chunk := range chunks {
+			_, _ = fmt.Fprint(w, chunk)
+			flusher.Flush()
+			time.Sleep(1 * time.Millisecond)
+		}
+	}))
+	defer upstreamServer.Close()
+
+	prx := NewTestProxyBuilder().
+		WithSingleCredential("test", config.ProviderTypeProxy, upstreamServer.URL, "upstream-key-1").
+		WithRequestTimeout(5 * time.Second).
+		Build()
+
+	resp, err := http.Get(upstreamServer.URL)
+	require.NoError(t, err)
+	defer func() { _ = resp.Body.Close() }()
+
+	w := httptest.NewRecorder()
+
+	logCtx := &RequestLogContext{
+		RequestID:              "test-request-legitimate-zero-completion",
+		promptTokensEstimateFn: func() int { return 12 }, // local tiktoken fallback estimate
+		TokenUsage:             &converter.TokenUsage{},
+		Credential: &config.CredentialConfig{
+			Name: "test",
+			Type: config.ProviderTypeOpenAI,
+		},
+		Request: httptest.NewRequest("POST", "/v1/chat/completions", nil),
+	}
+
+	err = prx.handleStreamingWithTokens(w, resp, "test", "gpt-4o-mini", logCtx)
+	require.NoError(t, err)
+
+	assert.True(t, logCtx.Logged, "logCtx should be marked as logged")
+	assert.NotNil(t, logCtx.TokenUsage, "TokenUsage should not be nil")
+
+	// PromptTokens: the provider genuinely reported 500 — must NOT be touched by the fallback.
+	assert.Equal(t, 500, logCtx.TokenUsage.PromptTokens,
+		"PromptTokens should keep the provider-reported value")
+	// CompletionTokens: the provider genuinely reported 0 — must be trusted as-is, not
+	// overwritten by the local estimate.
+	assert.Equal(t, 0, logCtx.TokenUsage.CompletionTokens,
+		"CompletionTokens should stay 0 when the provider reports it alongside a real prompt count")
+}
+
 // TestTokenCapturingWriter_CumulativeTokens verifies that tokenCapturingWriter does NOT
 // accumulate total_tokens across chunks. Vertex/Gemini include a cumulative total_tokens in
 // every streaming chunk; naively adding them up multiplies the real count by N (the number of

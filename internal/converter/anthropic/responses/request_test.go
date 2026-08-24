@@ -2,8 +2,10 @@ package anthropicresponses
 
 import (
 	"encoding/json"
+	"errors"
 	"testing"
 
+	"github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -60,6 +62,99 @@ func TestResponsesRequestToAnthropic_MaxTokensDefault(t *testing.T) {
 
 	// Default is 4096
 	assert.Equal(t, float64(4096), ar["max_tokens"])
+}
+
+func TestResponsesRequestToAnthropic_InputFileFileData(t *testing.T) {
+	body := `{
+		"model": "claude-sonnet-4-5",
+		"input": [{
+			"role": "user",
+			"content": [
+				{"type": "input_file", "filename": "test.pdf", "file_data": "data:application/pdf;base64,JVBERi0="},
+				{"type": "input_text", "text": "read it"}
+			]
+		}]
+	}`
+
+	result, err := ResponsesRequestToAnthropic([]byte(body), "claude-sonnet-4-5")
+	require.NoError(t, err)
+
+	block := firstUserContentBlock(t, result)
+	assert.Equal(t, "document", block["type"])
+	source := block["source"].(map[string]interface{})
+	assert.Equal(t, "base64", source["type"])
+	assert.Equal(t, "application/pdf", source["media_type"])
+	assert.Equal(t, "JVBERi0=", source["data"])
+}
+
+func TestResponsesRequestToAnthropic_InputFileFileIDUnsupported(t *testing.T) {
+	body := `{
+		"model": "claude-sonnet-4-5",
+		"input": [{"role": "user", "content": [{"type": "input_file", "file_id": "file-abc"}]}]
+	}`
+
+	_, err := ResponsesRequestToAnthropic([]byte(body), "claude-sonnet-4-5")
+	require.Error(t, err)
+	var validationErr *converterutil.RequestValidationError
+	require.True(t, errors.As(err, &validationErr))
+	assert.Equal(t, "input_file.file_id", validationErr.Param)
+	assert.Equal(t, "file_id is not supported for this route", validationErr.Message)
+}
+
+func TestResponsesRequestToAnthropic_InputImageFileIDUnsupported(t *testing.T) {
+	body := `{
+		"model": "claude-sonnet-4-5",
+		"input": [{"role": "user", "content": [{"type": "input_image", "file_id": "file-abc"}]}]
+	}`
+
+	_, err := ResponsesRequestToAnthropic([]byte(body), "claude-sonnet-4-5")
+	require.Error(t, err)
+	var validationErr *converterutil.RequestValidationError
+	require.True(t, errors.As(err, &validationErr))
+	assert.Equal(t, "input_image.file_id", validationErr.Param)
+	assert.Equal(t, "file_id is not supported for this route", validationErr.Message)
+}
+
+func TestResponsesRequestToAnthropic_InputFileFileURL(t *testing.T) {
+	body := `{
+		"model": "claude-sonnet-4-5",
+		"input": [{"role": "user", "content": [{"type": "input_file", "file_url": "https://example.com/document.pdf"}]}]
+	}`
+
+	result, err := ResponsesRequestToAnthropic([]byte(body), "claude-sonnet-4-5")
+	require.NoError(t, err)
+
+	block := firstUserContentBlock(t, result)
+	assert.Equal(t, "document", block["type"])
+	source := block["source"].(map[string]interface{})
+	assert.Equal(t, "url", source["type"])
+	assert.Equal(t, "https://example.com/document.pdf", source["url"])
+}
+
+func TestResponsesRequestToAnthropic_InputFileMalformedBase64(t *testing.T) {
+	body := `{
+		"model": "claude-sonnet-4-5",
+		"input": [{"role": "user", "content": [{"type": "input_file", "file_data": "data:application/pdf;base64,###"}]}]
+	}`
+
+	_, err := ResponsesRequestToAnthropic([]byte(body), "claude-sonnet-4-5")
+	require.Error(t, err)
+	var validationErr *converterutil.RequestValidationError
+	require.True(t, errors.As(err, &validationErr))
+	assert.Equal(t, "input_file.file_data", validationErr.Param)
+}
+
+func TestResponsesRequestToAnthropic_InputFileMissingSource(t *testing.T) {
+	body := `{
+		"model": "claude-sonnet-4-5",
+		"input": [{"role": "user", "content": [{"type": "input_file"}]}]
+	}`
+
+	_, err := ResponsesRequestToAnthropic([]byte(body), "claude-sonnet-4-5")
+	require.Error(t, err)
+	var validationErr *converterutil.RequestValidationError
+	require.True(t, errors.As(err, &validationErr))
+	assert.Equal(t, "input_file", validationErr.Param)
 }
 
 func TestResponsesRequestToAnthropic_FunctionTool(t *testing.T) {
@@ -632,6 +727,18 @@ func TestResponsesRequestToAnthropic_ComputerCallOutputHistory_Base64(t *testing
 		}
 	}
 	assert.True(t, foundToolResult, "expected tool_result with base64 image for computer_call_output")
+}
+
+func firstUserContentBlock(t *testing.T, body []byte) map[string]interface{} {
+	t.Helper()
+
+	var ar map[string]interface{}
+	require.NoError(t, json.Unmarshal(body, &ar))
+	messages := ar["messages"].([]interface{})
+	require.NotEmpty(t, messages)
+	content := messages[0].(map[string]interface{})["content"].([]interface{})
+	require.NotEmpty(t, content)
+	return content[0].(map[string]interface{})
 }
 
 func TestResponsesRequestToAnthropic_ReasoningItemWithEncryptedContent(t *testing.T) {
