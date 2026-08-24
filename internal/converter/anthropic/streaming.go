@@ -72,7 +72,15 @@ func (u *streamUsage) observeServerToolUse(name string) {
 
 func (u *streamUsage) openAI() *openai.OpenAIUsage {
 	if !u.present {
-		return nil
+		// The provider never reported usage at all, but if it opened web_search
+		// blocks it still did billable work — surface that via the fallback
+		// instead of shipping the response with no usage whatsoever.
+		if u.webSearchBlocks <= 0 {
+			return nil
+		}
+		usage := &openai.OpenAIUsage{}
+		applyWebSearchFallback(usage, u.webSearchBlocks)
+		return usage
 	}
 	usage := convertAnthropicUsageToOpenAI(&u.value)
 	applyWebSearchFallback(usage, u.webSearchBlocks)

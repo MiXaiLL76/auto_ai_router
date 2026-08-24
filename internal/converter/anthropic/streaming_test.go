@@ -7,6 +7,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/mixaill76/auto_ai_router/internal/converter/openai"
 )
 
@@ -417,4 +420,37 @@ func TestTransformAnthropicStreamToOpenAICountsWebSearchServerToolUse(t *testing
 			}
 		})
 	}
+}
+
+// TestTransformAnthropicStreamToOpenAICountsWebSearchWithoutAnyProviderUsage covers a provider
+// that never emits a usage field at all (no message_start usage, no message_delta usage): the
+// web_search fallback must still surface in the terminal chunk instead of the response shipping
+// with no usage whatsoever, which would leave the request completely unbilled.
+func TestTransformAnthropicStreamToOpenAICountsWebSearchWithoutAnyProviderUsage(t *testing.T) {
+	events := strings.Join([]string{
+		`data: {"type":"message_start","message":{"id":"msg_ws"}}`,
+		`data: {"type":"content_block_start","content_block":{"type":"server_tool_use","id":"call_1","name":"web_search"}}`,
+		`data: {"type":"content_block_stop"}`,
+		`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"}}`,
+		`data: {"type":"message_stop"}`,
+	}, "\n\n")
+
+	var output bytes.Buffer
+	require.NoError(t, TransformAnthropicStreamToOpenAI(strings.NewReader(events), "model", &output))
+
+	var gotUsage *openai.OpenAIUsage
+	for _, line := range strings.Split(output.String(), "\n") {
+		if !strings.HasPrefix(line, "data: ") || line == "data: [DONE]" {
+			continue
+		}
+		var chunk openai.OpenAIStreamingChunk
+		require.NoError(t, json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &chunk))
+		if chunk.Usage != nil {
+			gotUsage = chunk.Usage
+		}
+	}
+
+	require.NotNil(t, gotUsage, "terminal chunk must carry usage when web_search ran, even without any provider usage field")
+	require.NotNil(t, gotUsage.ServerToolUse)
+	assert.Equal(t, 1, gotUsage.ServerToolUse.WebSearchRequests)
 }
