@@ -346,7 +346,12 @@ func addAIRSpendMetadata(metadata, eventID, providerResponseID string, isProxyRe
 	if billedAgainst == "" {
 		billedAgainst = modelID
 	}
-	if publicModelID != "" && publicModelID != billedAgainst {
+	// publicModelID != modelID is required here: without it, a request that never
+	// used an alias (publicModelID == modelID) can still get flagged whenever price
+	// lookup resolves against realModelID instead of modelID — GetPriceAny may match
+	// realModelID's price entry when modelID itself has none, making billedAgainst
+	// diverge from publicModelID for a reason unrelated to aliasing.
+	if publicModelID != "" && publicModelID != modelID && publicModelID != billedAgainst {
 		spendMetadata["public_model_name"] = publicModelID
 	}
 	encoded, err := json.Marshal(doc)

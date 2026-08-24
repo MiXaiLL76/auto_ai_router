@@ -33,7 +33,7 @@ func TestOpenAIToAnthropic_AdaptiveThinkingDisplay(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result, err := OpenAIToAnthropic([]byte(tt.body), "claude-opus-4-8")
+			result, err := OpenAIToAnthropic([]byte(tt.body), "claude-opus-4-8", true)
 			require.NoError(t, err)
 
 			var request map[string]interface{}
@@ -53,7 +53,7 @@ func TestOpenAIToAnthropic_ReasoningEffortPrecedence(t *testing.T) {
 		"reasoning_effort":"low",
 		"extra_body":{"reasoning":{"effort":"medium"}},
 		"reasoning":{"effort":"high"}
-	}`), "claude-opus-5")
+	}`), "claude-opus-5", true)
 	require.NoError(t, err)
 
 	var request map[string]interface{}
@@ -67,7 +67,7 @@ func TestOpenAIToAnthropic_ReasoningObjectCanDisableTopLevelEffort(t *testing.T)
 		"messages":[{"role":"user","content":"test"}],
 		"reasoning_effort":"high",
 		"reasoning":{"effort":"none"}
-	}`), "claude-opus-5")
+	}`), "claude-opus-5", true)
 	require.NoError(t, err)
 
 	var request map[string]interface{}
@@ -89,7 +89,7 @@ func TestOpenAIToAnthropic_NonClaudeModelDefaultsThinkingDisabled(t *testing.T) 
 		"model":"gemini-3.5-flash",
 		"messages":[{"role":"user","content":"test"}],
 		"max_tokens":100
-	}`), "gemini-3.5-flash")
+	}`), "gemini-3.5-flash", false)
 	require.NoError(t, err)
 
 	var request map[string]interface{}
@@ -108,7 +108,7 @@ func TestOpenAIToAnthropic_ClaudeModelOmitsThinkingByDefault(t *testing.T) {
 	result, err := OpenAIToAnthropic([]byte(`{
 		"model":"claude-opus-5",
 		"messages":[{"role":"user","content":"test"}]
-	}`), "claude-opus-5")
+	}`), "claude-opus-5", true)
 	require.NoError(t, err)
 
 	var request map[string]interface{}

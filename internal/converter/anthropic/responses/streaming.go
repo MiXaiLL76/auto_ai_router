@@ -33,7 +33,8 @@ type anthropicStreamAccumulator struct {
 	currentText        string
 	currentThinking    string
 	currentToolArgs    string
-	currentReasoningID string // ID assigned at content_block_start for "thinking"
+	currentReasoningID string                        // ID assigned at content_block_start for "thinking"
+	currentCitations   []anthropic.AnthropicCitation // accumulated via citations_delta, consumed at block finalize
 
 	// Completed output items
 	msgContent  []responses.OutputContent
@@ -238,6 +239,10 @@ func processAnthropicEvent(w io.Writer, acc *anthropicStreamAccumulator, event *
 			}
 		case "thinking_delta":
 			acc.currentThinking += event.Delta.Thinking
+		case "citations_delta":
+			if event.Delta.Citation != nil {
+				acc.currentCitations = append(acc.currentCitations, *event.Delta.Citation)
+			}
 		case "input_json_delta":
 			acc.currentToolArgs += event.Delta.PartialJSON
 			// Only function_call blocks stream argument deltas to the client
@@ -355,13 +360,15 @@ func finalizeCurrentBlock(w io.Writer, acc *anthropicStreamAccumulator) error {
 	switch acc.currentBlockType {
 	case "text":
 		if acc.currentText != "" {
+			annotations := webSearchCitationsToAnnotations(acc.currentText, acc.currentCitations)
 			acc.msgContent = append(acc.msgContent, responses.OutputContent{
 				Type:        "output_text",
 				Text:        acc.currentText,
-				Annotations: []responses.Annotation{},
+				Annotations: annotations,
 			})
 		}
 		acc.currentText = ""
+		acc.currentCitations = nil
 
 	case "thinking":
 		itemID := acc.currentReasoningID
@@ -435,9 +442,7 @@ func finalizeCurrentBlock(w io.Writer, acc *anthropicStreamAccumulator) error {
 		if acc.currentToolArgs != "" {
 			var input map[string]interface{}
 			if err := json.Unmarshal([]byte(acc.currentToolArgs), &input); err == nil {
-				if q, ok := input["query"].(string); ok && q != "" {
-					queries = []string{q}
-				}
+				queries = webSearchQueryFromInput(input)
 			}
 		}
 		if err := writeAnthropicSSE(w, "response.output_item.done", map[string]interface{}{

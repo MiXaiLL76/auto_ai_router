@@ -228,6 +228,10 @@ type AnthropicStreamDelta struct {
 	// message_delta
 	StopReason   string `json:"stop_reason,omitempty"`
 	StopSequence string `json:"stop_sequence,omitempty"`
+
+	// citations_delta: one citation attached to the current text block (e.g. a
+	// web_search_result_location produced by the web_search server tool).
+	Citation *AnthropicCitation `json:"citation,omitempty"`
 }
 
 // AnthropicError represents an error object in Anthropic streaming error events.

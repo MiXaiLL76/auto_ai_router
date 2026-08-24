@@ -143,10 +143,10 @@ func applyWebSearchOptions(tool *AnthropicTool, toolMap map[string]interface{}) 
 		tool.MaxUses = int(v)
 	}
 	if v, ok := toolMap["allowed_domains"]; ok {
-		tool.AllowedDomains = v
+		tool.AllowedDomains = converterutil.OmitEmptySlice(v)
 	}
 	if v, ok := toolMap["blocked_domains"]; ok {
-		tool.BlockedDomains = v
+		tool.BlockedDomains = converterutil.OmitEmptySlice(v)
 	}
 	if v, ok := toolMap["user_location"]; ok {
 		tool.UserLocation = v

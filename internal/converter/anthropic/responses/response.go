@@ -176,16 +176,25 @@ func anthropicContentToOutputItems(blocks []anthropic.ContentBlock) []responses.
 // offsets are recovered with a best-effort substring search against the
 // block's own text; a citation whose cited_text can't be located (e.g. minor
 // whitespace differences) is skipped rather than emitted with a wrong range.
+//
+// The search cursor only moves forward as citations are consumed (rather than
+// always searching from the start of text) so that two citations quoting the
+// same substring — e.g. the same phrase cited from two different places in
+// the block — resolve to their own distinct occurrence instead of both
+// collapsing onto the first match.
 func webSearchCitationsToAnnotations(text string, citations []anthropic.AnthropicCitation) []responses.Annotation {
 	annotations := []responses.Annotation{}
+	searchFrom := 0
 	for _, c := range citations {
 		if c.Type != "web_search_result_location" || c.URL == "" || c.CitedText == "" {
 			continue
 		}
-		idx := strings.Index(text, c.CitedText)
-		if idx < 0 {
+		rel := strings.Index(text[searchFrom:], c.CitedText)
+		if rel < 0 {
 			continue
 		}
+		idx := searchFrom + rel
+		searchFrom = idx + len(c.CitedText)
 		annotations = append(annotations, responses.Annotation{
 			Type:       "url_citation",
 			URL:        c.URL,

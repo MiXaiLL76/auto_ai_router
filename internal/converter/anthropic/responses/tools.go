@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	"github.com/mixaill76/auto_ai_router/internal/converter/anthropic"
+	converterutil "github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
 	"github.com/mixaill76/auto_ai_router/internal/converter/responses"
 )
 
@@ -44,14 +45,14 @@ func responsesToolsToAnthropic(tools []responses.Tool) ([]anthropic.AnthropicToo
 		case "web_search", "web_search_preview", "web_search_preview_2025_03_11":
 			// Responses API's built-in web search tool → Anthropic's own
 			// hosted web_search tool. search_context_size has no Anthropic
-			// equivalent and is dropped; user_location carries over as-is.
+			// equivalent and is dropped; user_location and the Anthropic-only
+			// restriction fields (see applyResponsesWebSearchOptions) carry
+			// over as-is.
 			tool := anthropic.AnthropicTool{
 				Type: "web_search_20250305",
 				Name: "web_search",
 			}
-			if t.UserLocation != nil {
-				tool.UserLocation = t.UserLocation
-			}
+			applyResponsesWebSearchOptions(&tool, t)
 			anthropicTools = append(anthropicTools, tool)
 
 		default:
@@ -59,10 +60,12 @@ func responsesToolsToAnthropic(tools []responses.Tool) ([]anthropic.AnthropicToo
 			// directly (e.g. "web_search_20250305", "web_search_20260209"):
 			// pass it through instead of dropping it as unrecognized.
 			if strings.HasPrefix(t.Type, "web_search_") {
-				anthropicTools = append(anthropicTools, anthropic.AnthropicTool{
+				tool := anthropic.AnthropicTool{
 					Type: t.Type,
 					Name: "web_search",
-				})
+				}
+				applyResponsesWebSearchOptions(&tool, t)
+				anthropicTools = append(anthropicTools, tool)
 			}
 			// file_search, code_interpreter, mcp, image_generation, etc. are
 			// not supported by Anthropic — skip them.
@@ -70,6 +73,30 @@ func responsesToolsToAnthropic(tools []responses.Tool) ([]anthropic.AnthropicToo
 	}
 
 	return anthropicTools, betas
+}
+
+// applyResponsesWebSearchOptions copies the Anthropic-only web_search restriction
+// fields (max_uses, allowed_domains, blocked_domains, cache_control — no equivalent
+// in OpenAI's own Responses API web_search_preview schema, see responses.Tool) plus
+// user_location from a Responses API tool definition onto the converted Anthropic
+// tool. Mirrors anthropic.applyWebSearchOptions, which does the same for the Chat
+// Completions conversion path.
+func applyResponsesWebSearchOptions(tool *anthropic.AnthropicTool, t responses.Tool) {
+	if t.UserLocation != nil {
+		tool.UserLocation = t.UserLocation
+	}
+	if t.MaxUses != nil {
+		tool.MaxUses = *t.MaxUses
+	}
+	if t.AllowedDomains != nil {
+		tool.AllowedDomains = converterutil.OmitEmptySlice(t.AllowedDomains)
+	}
+	if t.BlockedDomains != nil {
+		tool.BlockedDomains = converterutil.OmitEmptySlice(t.BlockedDomains)
+	}
+	if t.CacheControl != nil {
+		tool.CacheControl = t.CacheControl
+	}
 }
 
 // responsesToolChoiceToAnthropic maps Responses API tool_choice to Anthropic tool_choice.

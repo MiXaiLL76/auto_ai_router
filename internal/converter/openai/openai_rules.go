@@ -337,6 +337,13 @@ func isWebSearchModel(modelID string) bool {
 // plugged into the same provider slot.
 func isOpenAIModel(modelID string) bool {
 	base := extractBaseModelName(modelID)
+	// "gpt-oss" is OpenAI's open-weight model family, commonly served by
+	// non-OpenAI inference providers (Groq, Together, etc.) through this same
+	// OpenAI-compatible converter slot — it must not be treated as a real
+	// OpenAI-hosted model just because its name starts with "gpt".
+	if strings.HasPrefix(base, "gpt-oss") {
+		return false
+	}
 	if strings.HasPrefix(base, "gpt") || strings.HasPrefix(base, "chatgpt") {
 		return true
 	}

@@ -332,6 +332,21 @@ func TestAddAIRSpendMetadata(t *testing.T) {
 		require.True(t, ok)
 		assert.Equal(t, "gpt-4o-alias", spendMetadata["public_model_name"])
 	})
+
+	t.Run("no_alias_but_price_resolved_against_real_model_id", func(t *testing.T) {
+		// publicModelID == modelID (client never used an alias), but price lookup
+		// matched realModelID's price entry instead of modelID's — priceModelID
+		// diverges from publicModelID for a reason unrelated to aliasing, so this
+		// must NOT be flagged.
+		result := addAIRSpendMetadata("{}", "event-6", "", false, "gpt-4o", "gpt-4o", "azure/gpt-4o-2024-08-06")
+		var m map[string]interface{}
+		err := json.Unmarshal([]byte(result), &m)
+		require.NoError(t, err)
+
+		spendMetadata, ok := m["spend_logs_metadata"].(map[string]interface{})
+		require.True(t, ok)
+		assert.NotContains(t, spendMetadata, "public_model_name")
+	})
 }
 
 func TestExtractEndUser(t *testing.T) {

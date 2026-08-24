@@ -164,6 +164,102 @@ func TestTransformAnthropicStreamToResponses_TextDeltaContent(t *testing.T) {
 	assert.Equal(t, "Part1Part2", fullText)
 }
 
+func TestTransformAnthropicStreamToResponses_TextStreamWithCitations(t *testing.T) {
+	// Regression test: the streaming path must accumulate citations_delta events
+	// and attach them to output_text.annotations on block finalize, matching the
+	// non-streaming path's webSearchCitationsToAnnotations behavior. Two citations
+	// quote the same substring ("Paris") from two different places in the text, to
+	// also cover that each resolves to its own occurrence instead of both
+	// collapsing onto the first match.
+	stream := buildAnthropicSSEStream([]map[string]interface{}{
+		{
+			"type": "message_start",
+			"message": map[string]interface{}{
+				"usage": map[string]interface{}{"input_tokens": 10, "cache_read_input_tokens": 0},
+			},
+		},
+		{
+			"type":          "content_block_start",
+			"content_block": map[string]interface{}{"type": "text"},
+		},
+		{
+			"type":  "content_block_delta",
+			"delta": map[string]interface{}{"type": "text_delta", "text": "Note: Paris is lovely. Paris is the capital of France."},
+		},
+		{
+			"type": "content_block_delta",
+			"delta": map[string]interface{}{
+				"type": "citations_delta",
+				"citation": map[string]interface{}{
+					"type":       "web_search_result_location",
+					"cited_text": "Paris",
+					"url":        "https://example.com/paris-1",
+					"title":      "Paris travel guide",
+				},
+			},
+		},
+		{
+			"type": "content_block_delta",
+			"delta": map[string]interface{}{
+				"type": "citations_delta",
+				"citation": map[string]interface{}{
+					"type":       "web_search_result_location",
+					"cited_text": "Paris",
+					"url":        "https://example.com/paris-2",
+					"title":      "Paris - capital of France",
+				},
+			},
+		},
+		{
+			"type": "content_block_stop",
+		},
+		{
+			"type":  "message_delta",
+			"delta": map[string]interface{}{"stop_reason": "end_turn"},
+			"usage": map[string]interface{}{"output_tokens": 12},
+		},
+		{"type": "message_stop"},
+	})
+
+	var out bytes.Buffer
+	err := TransformAnthropicStreamToResponses(
+		strings.NewReader(stream), &out, "claude-opus-4-5", "", nil, nil,
+	)
+	require.NoError(t, err)
+
+	events := parseSSEEvents(out.String())
+	var completedEvent map[string]interface{}
+	for _, e := range events {
+		if e["type"] == "response.completed" {
+			completedEvent = e
+		}
+	}
+	require.NotNil(t, completedEvent)
+
+	respObj := completedEvent["response"].(map[string]interface{})
+	output := respObj["output"].([]interface{})
+	require.NotEmpty(t, output)
+
+	msg := output[0].(map[string]interface{})
+	content := msg["content"].([]interface{})
+	require.NotEmpty(t, content)
+	textContent := content[0].(map[string]interface{})
+
+	annotations := textContent["annotations"].([]interface{})
+	require.Len(t, annotations, 2)
+
+	first := annotations[0].(map[string]interface{})
+	assert.Equal(t, "url_citation", first["type"])
+	assert.Equal(t, "https://example.com/paris-1", first["url"])
+	assert.EqualValues(t, 6, first["start_index"])
+	assert.EqualValues(t, 11, first["end_index"])
+
+	second := annotations[1].(map[string]interface{})
+	assert.Equal(t, "https://example.com/paris-2", second["url"])
+	assert.EqualValues(t, 23, second["start_index"])
+	assert.EqualValues(t, 28, second["end_index"])
+}
+
 func TestTransformAnthropicStreamToResponses_MessageEventsIncludeRequiredFields(t *testing.T) {
 	stream := buildAnthropicSSEStream([]map[string]interface{}{
 		{
