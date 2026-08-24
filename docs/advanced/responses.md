@@ -56,12 +56,26 @@ service tier. The effective tier is controlled by the router/provider configurat
 
 The `input` array accepts items of different types. Supported `ContentPart` types within messages:
 
-| `type`        | Fields                                                       | Description               |
-| ------------- | ------------------------------------------------------------ | ------------------------- |
-| `input_text`  | `text`                                                       | Plain text                |
-| `input_image` | `image_url` (string or `{url, detail}`), `file_id`, `detail` | Image from URL or file ID |
-| `input_audio` | `data` (base64), `format`                                    | Audio clip                |
-| `input_file`  | `file_id`, `filename`, `file_url`                            | File reference            |
+| `type`        | Fields                                                       | Description                                  |
+| ------------- | ------------------------------------------------------------ | -------------------------------------------- |
+| `input_text`  | `text`                                                       | Plain text                                   |
+| `input_image` | `image_url` (string or `{url, detail}`), `file_id`, `detail` | Image from URL or provider-supported file ID |
+| `input_audio` | `data` (base64), `format`                                    | Audio clip                                   |
+| `input_file`  | `file_data`, `file_url`, `file_id`, `filename`               | File/document input                          |
+
+### Anthropic-backed `input_file`
+
+For Anthropic, Comet API, and ProMan routes that use the Anthropic-compatible native Responses converter:
+
+| Form                                                                       | Status      | Provider mapping                                                      |
+| -------------------------------------------------------------------------- | ----------- | --------------------------------------------------------------------- |
+| `{"type":"input_file","file_data":"data:application/pdf;base64,<BASE64>"}` | Supported   | Anthropic `document/source:base64` with `media_type: application/pdf` |
+| `{"type":"input_file","file_url":"https://example.com/document.pdf"}`      | Supported   | Anthropic `document/source:url`                                       |
+| `{"type":"input_file","file_id":"file-abc"}`                               | Unsupported | Returns `400 Bad Request`                                             |
+
+AIR does not implement a Files API resolver or OpenAI/LiteLLM file ID to Anthropic file ID mapping. `file_id` values are provider/credential scoped and are not forwarded to Anthropic-backed routes.
+
+Malformed PDF data URIs, non-base64 encodings, empty document sources, and unsupported document source types are rejected as client request validation errors (`400 Bad Request`) rather than internal conversion failures.
 
 Input items can also be function call / function call output items for multi-turn tool use:
 

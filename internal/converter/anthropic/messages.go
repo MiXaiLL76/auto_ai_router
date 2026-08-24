@@ -10,6 +10,11 @@ import (
 
 // OpenAIToAnthropic converts an OpenAI Chat Completions request body to Anthropic Messages API
 // format.  The model parameter overrides the model field in the request body when non-empty.
+// isRealAnthropicBackend tells the thinking-disable safeguard below whether this request is
+// actually going to Anthropic (ProviderTypeAnthropic, including Bedrock) as opposed to a
+// multi-vendor gateway (CometAPI, ProMan) that may proxy the Anthropic-shaped request to an
+// entirely different backend model — the caller knows this from its own routing decision,
+// which is a reliable signal, unlike guessing from the model name.
 //
 // Unsupported OpenAI parameters (silently ignored):
 //   - n: Anthropic does not support multiple candidates per request
@@ -21,7 +26,7 @@ import (
 //   - service_tier / store: not supported
 //   - parallel_tool_calls: Anthropic always allows parallel tool calls
 //   - prediction / verbosity / prompt_cache_key: not supported
-func OpenAIToAnthropic(openAIBody []byte, model string) ([]byte, error) {
+func OpenAIToAnthropic(openAIBody []byte, model string, isRealAnthropicBackend bool) ([]byte, error) {
 	var req openai.OpenAIRequest
 	if err := json.Unmarshal(openAIBody, &req); err != nil {
 		return nil, fmt.Errorf("failed to parse OpenAI request: %w", err)
@@ -101,6 +106,18 @@ func OpenAIToAnthropic(openAIBody []byte, model string) ([]byte, error) {
 		// Anthropic requires temperature=1.0 when thinking is enabled.
 		temp := 1.0
 		anthropicReq.Temperature = &temp
+	} else if !isRealAnthropicBackend {
+		// This Anthropic-shaped request may be handled by a real Claude model
+		// (ProviderTypeAnthropic) or proxied by a multi-vendor gateway
+		// (CometAPI, ProMan) to an entirely different backend model. For
+		// Claude, omitting "thinking" already means off. Other vendors don't
+		// share that convention — e.g. Gemini models default to autonomous
+		// "medium" thinking when no config is given, silently burning the
+		// token budget on invisible reasoning and truncating the visible
+		// answer (mirrors the same default-off safeguard the Vertex
+		// converter applies via disableThinkingConfig). Send an explicit
+		// disable so every backend gets the same unambiguous signal.
+		anthropicReq.Thinking = &AnthropicThinking{Type: "disabled"}
 	}
 
 	// Anthropic has no native response_format; we inject a JSON instruction
@@ -160,7 +177,10 @@ func OpenAIToAnthropic(openAIBody []byte, model string) ([]byte, error) {
 	}
 
 	// Messages (system messages are extracted to the top-level system field)
-	systemContent, messages := convertOpenAIMessagesToAnthropic(req.Messages)
+	systemContent, messages, err := convertOpenAIMessagesToAnthropic(req.Messages)
+	if err != nil {
+		return nil, err
+	}
 	anthropicReq.Messages = messages
 	if systemContent != nil {
 		anthropicReq.System = systemContent
@@ -195,7 +215,7 @@ func reasoningObjectEffort(value interface{}) string {
 // System / developer messages are aggregated into the top-level system field.
 // Tool result messages become user-role messages containing tool_result blocks.
 // Returns (systemContent, messages).
-func convertOpenAIMessagesToAnthropic(openAIMessages []openai.OpenAIMessage) (interface{}, []AnthropicMessage) {
+func convertOpenAIMessagesToAnthropic(openAIMessages []openai.OpenAIMessage) (interface{}, []AnthropicMessage, error) {
 	var allSystemBlocks []ContentBlock
 	var messages []AnthropicMessage
 
@@ -206,7 +226,10 @@ func convertOpenAIMessagesToAnthropic(openAIMessages []openai.OpenAIMessage) (in
 			allSystemBlocks = append(allSystemBlocks, sysBlocks...)
 
 		case "user":
-			blocks := convertOpenAIContentToAnthropic(msg.Content)
+			blocks, err := convertOpenAIContentToAnthropic(msg.Content)
+			if err != nil {
+				return nil, nil, err
+			}
 			if len(blocks) > 0 {
 				messages = append(messages, AnthropicMessage{
 					Role:    "user",
@@ -228,7 +251,11 @@ func convertOpenAIMessagesToAnthropic(openAIMessages []openai.OpenAIMessage) (in
 					CacheControl: thinking.CacheControl,
 				})
 			}
-			if textBlocks := convertOpenAIContentToAnthropic(msg.Content); len(textBlocks) > 0 {
+			textBlocks, err := convertOpenAIContentToAnthropic(msg.Content)
+			if err != nil {
+				return nil, nil, err
+			}
+			if len(textBlocks) > 0 {
 				blocks = append(blocks, textBlocks...)
 			}
 			if len(msg.ToolCalls) > 0 {
@@ -249,7 +276,10 @@ func convertOpenAIMessagesToAnthropic(openAIMessages []openai.OpenAIMessage) (in
 			if toolUseID == "" {
 				toolUseID = msg.Name
 			}
-			resultContent := convertOpenAIContentToAnthropic(msg.Content)
+			resultContent, err := convertOpenAIContentToAnthropic(msg.Content)
+			if err != nil {
+				return nil, nil, err
+			}
 			if len(resultContent) == 0 {
 				resultContent = []ContentBlock{{Type: "text", Text: ""}}
 			}
@@ -292,7 +322,7 @@ func convertOpenAIMessagesToAnthropic(openAIMessages []openai.OpenAIMessage) (in
 	// Merge consecutive same-role messages into a single message.
 	messages = mergeConsecutiveSameRole(messages)
 
-	return systemContent, messages
+	return systemContent, messages, nil
 }
 
 // mergeConsecutiveSameRole merges consecutive messages with the same role
@@ -340,7 +370,10 @@ func toContentBlocks(content interface{}) []ContentBlock {
 //   - Removes the "model" field (Bedrock gets model from the URL path)
 //   - Adds "anthropic_version": "bedrock-2023-05-31"
 func OpenAIToBedrock(openAIBody []byte, model string) ([]byte, error) {
-	anthropicBody, err := OpenAIToAnthropic(openAIBody, model)
+	// Bedrock only ever serves Anthropic models here (converter.go gates this call
+	// behind isAnthropicBedrockModel), so the thinking-disable safeguard in
+	// OpenAIToAnthropic never needs to fire.
+	anthropicBody, err := OpenAIToAnthropic(openAIBody, model, true)
 	if err != nil {
 		return nil, err
 	}

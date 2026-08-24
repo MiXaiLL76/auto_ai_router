@@ -2,22 +2,25 @@ package anthropic
 
 import (
 	"encoding/base64"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
 )
 
 // convertOpenAIContentToAnthropic converts an OpenAI message content value (string or
 // []interface{} of content blocks) into a slice of Anthropic ContentBlocks.
-func convertOpenAIContentToAnthropic(content interface{}) []ContentBlock {
+func convertOpenAIContentToAnthropic(content interface{}) ([]ContentBlock, error) {
 	switch c := content.(type) {
 	case string:
 		if c == "" {
-			return nil
+			return nil, nil
 		}
-		return []ContentBlock{{Type: "text", Text: c}}
+		return []ContentBlock{{Type: "text", Text: c}}, nil
 
 	case []interface{}:
 		var blocks []ContentBlock
@@ -39,16 +42,18 @@ func convertOpenAIContentToAnthropic(content interface{}) []ContentBlock {
 			case "image_url":
 				imageURL, ok := blockMap["image_url"].(map[string]interface{})
 				if !ok {
-					continue
+					return nil, converterutil.NewRequestValidationError("messages.content.image_url", "missing image_url object")
 				}
 				url, _ := imageURL["url"].(string)
 				if url == "" {
-					continue
+					return nil, converterutil.NewRequestValidationError("messages.content.image_url.url", "missing image URL")
 				}
-				if cb := convertImageURLToAnthropic(url); cb != nil {
-					cb.CacheControl = blockMap["cache_control"]
-					blocks = append(blocks, *cb)
+				cb, err := convertImageURLToAnthropic(url)
+				if err != nil {
+					return nil, err
 				}
+				cb.CacheControl = blockMap["cache_control"]
+				blocks = append(blocks, *cb)
 
 			case "input_audio":
 				blocks = append(blocks, ContentBlock{
@@ -84,27 +89,27 @@ func convertOpenAIContentToAnthropic(content interface{}) []ContentBlock {
 			case "file":
 				fileObj, ok := blockMap["file"].(map[string]interface{})
 				if !ok {
-					continue
+					return nil, converterutil.NewRequestValidationError("messages.content.file", "missing file object")
 				}
-				fileID, _ := fileObj["file_id"].(string)
-				if fileID == "" {
-					continue
+				cb, err := convertFileBlockToDocument(fileObj)
+				if err != nil {
+					return nil, err
 				}
-				// Data-URL files can be forwarded as Anthropic document blocks.
-				if strings.HasPrefix(fileID, "data:") {
-					if cb := convertDataURLToDocument(fileID); cb != nil {
-						cb.CacheControl = blockMap["cache_control"]
-						blocks = append(blocks, *cb)
-					}
-				} else {
-					slog.Warn("unsupported file reference in Anthropic conversion, skipping",
-						"file_id", fileID)
+				cb.CacheControl = blockMap["cache_control"]
+				blocks = append(blocks, *cb)
+
+			case "document":
+				cb, err := convertDocumentBlockToAnthropic(blockMap)
+				if err != nil {
+					return nil, err
 				}
+				cb.CacheControl = blockMap["cache_control"]
+				blocks = append(blocks, *cb)
 			}
 		}
-		return blocks
+		return blocks, nil
 	}
-	return nil
+	return nil, nil
 }
 
 // mediaSourceFromMap rebuilds a MediaSource from a decoded content-block source object.
@@ -134,18 +139,17 @@ func mediaSourceFromMap(source map[string]interface{}) *MediaSource {
 
 // convertImageURLToAnthropic converts an OpenAI image_url value to an Anthropic image block.
 // Supports base64 data URLs and plain HTTPS/HTTP URLs.
-func convertImageURLToAnthropic(url string) *ContentBlock {
+func convertImageURLToAnthropic(url string) (*ContentBlock, error) {
 	if strings.HasPrefix(url, "data:") {
-		parts := strings.SplitN(url, ",", 2)
-		if len(parts) != 2 {
-			return nil
+		mediaType, data, err := ParseBase64DataURL(url, "messages.content.image_url.url")
+		if err != nil {
+			return nil, err
 		}
-		header := parts[0] // e.g. "data:image/jpeg;base64"
-		data := parts[1]
-
-		mediaType := extractMediaType(header)
-		if mediaType == "" {
-			mediaType = "image/jpeg"
+		if mediaType == "application/pdf" {
+			return nil, converterutil.NewRequestValidationError("messages.content.image_url.url", "PDF data URLs must be sent as file/document content, not image_url")
+		}
+		if !allowedImageMediaTypes[mediaType] {
+			return nil, converterutil.NewRequestValidationError("messages.content.image_url.url", fmt.Sprintf("unsupported image media type %q for Anthropic", mediaType))
 		}
 
 		return &ContentBlock{
@@ -155,14 +159,18 @@ func convertImageURLToAnthropic(url string) *ContentBlock {
 				MediaType: mediaType,
 				Data:      data,
 			},
-		}
+		}, nil
 	}
 
 	if strings.HasPrefix(url, "http://") || strings.HasPrefix(url, "https://") {
-		return DownloadAndEncodeImage(url)
+		block := DownloadAndEncodeImage(url)
+		if block == nil {
+			return nil, fmt.Errorf("image_url: failed to download image")
+		}
+		return block, nil
 	}
 
-	return nil
+	return nil, converterutil.NewRequestValidationError("messages.content.image_url.url", "unsupported image_url source")
 }
 
 var imageHTTPClient = &http.Client{Timeout: 15 * time.Second}
@@ -263,23 +271,73 @@ func detectImageMediaType(data []byte, imgURL string) string {
 	return ""
 }
 
-// convertDataURLToDocument converts a data URL into an Anthropic document block.
-// Only application/* and text/* MIME types are forwarded; others are ignored.
-func convertDataURLToDocument(dataURL string) *ContentBlock {
+// ParseBase64DataURL parses a data: URL and validates base64 encoding.
+// It returns the MIME type and raw base64 payload without the data URL prefix.
+func ParseBase64DataURL(dataURL, param string) (mimeType, b64data string, err error) {
+	if !strings.HasPrefix(dataURL, "data:") {
+		return "", "", converterutil.NewRequestValidationError(param, "expected data URL")
+	}
 	parts := strings.SplitN(dataURL, ",", 2)
 	if len(parts) != 2 {
-		return nil
+		return "", "", converterutil.NewRequestValidationError(param, "invalid data URL: missing comma")
 	}
 	header := parts[0]
 	data := parts[1]
+	if data == "" {
+		return "", "", converterutil.NewRequestValidationError(param, "invalid data URL: empty base64 payload")
+	}
 
 	mediaType := extractMediaType(header)
 	if mediaType == "" {
-		return nil
+		return "", "", converterutil.NewRequestValidationError(param, "invalid data URL: missing media type")
+	}
+	mediaType = strings.ToLower(mediaType)
+	if !dataURLHeaderHasBase64(header) {
+		return "", "", converterutil.NewRequestValidationError(param, "invalid data URL: expected base64 encoding")
+	}
+	if _, err := base64.StdEncoding.DecodeString(data); err != nil {
+		return "", "", converterutil.NewRequestValidationError(param, "invalid data URL: base64 payload is malformed")
 	}
 
-	if !strings.HasPrefix(mediaType, "application/") && !strings.HasPrefix(mediaType, "text/") {
-		return nil
+	return mediaType, data, nil
+}
+
+func dataURLHeaderHasBase64(header string) bool {
+	semi := strings.Split(header, ";")
+	for _, part := range semi[1:] {
+		if strings.EqualFold(strings.TrimSpace(part), "base64") {
+			return true
+		}
+	}
+	return false
+}
+
+func convertFileBlockToDocument(fileObj map[string]interface{}) (*ContentBlock, error) {
+	if fileData, _ := fileObj["file_data"].(string); fileData != "" {
+		return ConvertDataURLToDocument(fileData, "messages.content.file.file_data")
+	}
+	if fileID, _ := fileObj["file_id"].(string); fileID != "" {
+		return nil, converterutil.NewRequestValidationError("messages.content.file.file_id", "file_id is not supported for this route")
+	}
+	return nil, converterutil.NewRequestValidationError("messages.content.file", "missing supported file source")
+}
+
+func convertDocumentBlockToAnthropic(blockMap map[string]interface{}) (*ContentBlock, error) {
+	source, ok := blockMap["source"].(map[string]interface{})
+	if !ok {
+		return nil, converterutil.NewRequestValidationError("messages.content.document.source", "missing document source")
+	}
+	return ConvertDocumentSourceToBlock(source, "messages.content.document.source")
+}
+
+// ConvertDataURLToDocument converts a document data URL into an Anthropic document block.
+func ConvertDataURLToDocument(dataURL, param string) (*ContentBlock, error) {
+	mediaType, data, err := ParseBase64DataURL(dataURL, param)
+	if err != nil {
+		return nil, err
+	}
+	if !allowedDocumentMediaTypes[mediaType] {
+		return nil, converterutil.NewRequestValidationError(param, fmt.Sprintf("unsupported document media type %q for Anthropic", mediaType))
 	}
 
 	return &ContentBlock{
@@ -289,6 +347,52 @@ func convertDataURLToDocument(dataURL string) *ContentBlock {
 			MediaType: mediaType,
 			Data:      data,
 		},
+	}, nil
+}
+
+// ConvertDocumentSourceToBlock validates and converts an Anthropic document source map.
+func ConvertDocumentSourceToBlock(source map[string]interface{}, param string) (*ContentBlock, error) {
+	sourceType, _ := source["type"].(string)
+	switch sourceType {
+	case "base64":
+		mediaType, _ := source["media_type"].(string)
+		if mediaType == "" {
+			return nil, converterutil.NewRequestValidationError(param+".media_type", "missing document media_type")
+		}
+		if !allowedDocumentMediaTypes[mediaType] {
+			return nil, converterutil.NewRequestValidationError(param+".media_type", fmt.Sprintf("unsupported document media type %q for Anthropic", mediaType))
+		}
+		data, _ := source["data"].(string)
+		if data == "" {
+			return nil, converterutil.NewRequestValidationError(param+".data", "missing document base64 data")
+		}
+		if _, err := base64.StdEncoding.DecodeString(data); err != nil {
+			return nil, converterutil.NewRequestValidationError(param+".data", "document base64 data is malformed")
+		}
+		return &ContentBlock{
+			Type: "document",
+			Source: &MediaSource{
+				Type:      "base64",
+				MediaType: mediaType,
+				Data:      data,
+			},
+		}, nil
+	case "url":
+		url, _ := source["url"].(string)
+		if url == "" {
+			return nil, converterutil.NewRequestValidationError(param+".url", "missing document URL")
+		}
+		return &ContentBlock{
+			Type: "document",
+			Source: &MediaSource{
+				Type: "url",
+				URL:  url,
+			},
+		}, nil
+	case "file", "file_id", "provider_file":
+		return nil, converterutil.NewRequestValidationError(param+".file_id", "file_id is not supported for this route")
+	default:
+		return nil, converterutil.NewRequestValidationError(param+".type", "unsupported document source type")
 	}
 }
 
@@ -304,4 +408,8 @@ func extractMediaType(header string) string {
 		return rest[:idx2]
 	}
 	return rest
+}
+
+var allowedDocumentMediaTypes = map[string]bool{
+	"application/pdf": true,
 }

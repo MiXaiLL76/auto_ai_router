@@ -71,6 +71,19 @@ func LoadModelPrices(link string) (map[string]*ModelPrice, error) {
 			}
 		}
 		normalized := NormalizeModelName(fullName)
+
+		// Store the raw lowercase key alongside the normalised one so that
+		// Update/LoadPrices can put both into the registry, enabling the
+		// two-pass lookup in GetPriceAny. Done unconditionally, before the
+		// collision check below, so this entry's own distinct price is never
+		// lost even when it loses the shared normalized key — and so the
+		// outcome doesn't depend on which entry Go's randomized map
+		// iteration happens to visit first (see the collision branch below).
+		raw := strings.ToLower(strings.TrimSpace(fullName))
+		if raw != normalized {
+			normalizedPrices[raw] = price
+		}
+
 		if existingFullName, exists := normalizedSources[normalized]; exists {
 			existingIsBare := !strings.Contains(existingFullName, "/")
 			newIsBare := !strings.Contains(fullName, "/")
@@ -78,9 +91,10 @@ func LoadModelPrices(link string) (map[string]*ModelPrice, error) {
 			if existingIsBare && !newIsBare {
 				// Existing entry is a bare model name (e.g. "gpt-4") and
 				// the new entry has a provider prefix (e.g. "openai/gpt-4").
-				// Keep the bare entry — it is more specific in the two-pass
-				// lookup and avoids the bare key being silently overwritten
-				// by the prefixed entry due to random Go map iteration order.
+				// Keep the bare entry as owner of the shared normalized key
+				// — it is more specific in the two-pass lookup — regardless
+				// of iteration order. The prefixed entry's own raw key was
+				// already stored above, so it isn't lost.
 				continue
 			}
 
@@ -92,14 +106,6 @@ func LoadModelPrices(link string) (map[string]*ModelPrice, error) {
 		}
 		normalizedSources[normalized] = fullName
 		normalizedPrices[normalized] = price
-
-		// Store the raw lowercase key alongside the normalised one so that
-		// Update/LoadPrices can put both into the registry, enabling the
-		// two-pass lookup in GetPriceAny.
-		raw := strings.ToLower(strings.TrimSpace(fullName))
-		if raw != normalized {
-			normalizedPrices[raw] = price
-		}
 	}
 
 	return normalizedPrices, nil

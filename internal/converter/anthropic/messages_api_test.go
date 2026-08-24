@@ -3,10 +3,12 @@ package anthropic
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"unicode/utf8"
 
+	"github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -68,6 +70,81 @@ func TestMessagesToChat(t *testing.T) {
 	assert.Len(t, truncated, maxOpenAIToolNameLength)
 	assert.Equal(t, longName, metadata.ToolNames[truncated])
 	assert.Equal(t, truncated, got["tool_choice"].(map[string]interface{})["function"].(map[string]interface{})["name"])
+}
+
+func TestMessagesToChat_DocumentProviderFileIDRejected(t *testing.T) {
+	body := []byte(`{
+		"model":"claude-sonnet-4-5",
+		"max_tokens":128,
+		"messages":[{
+			"role":"user",
+			"content":[{
+				"type":"document",
+				"source":{"type":"file","file_id":"file_abc"}
+			}]
+		}]
+	}`)
+
+	_, _, err := MessagesToChat(body)
+
+	require.Error(t, err)
+	var validationErr *converterutil.RequestValidationError
+	require.True(t, errors.As(err, &validationErr))
+	assert.Equal(t, "messages.content.document.source.file_id", validationErr.Param)
+	assert.Equal(t, "file_id is not supported for this route", validationErr.Message)
+	assert.NotContains(t, err.Error(), "Anthropic")
+}
+
+func TestMessagesToChat_MalformedDocumentSourceRejected(t *testing.T) {
+	tests := []struct {
+		name      string
+		source    string
+		wantParam string
+	}{
+		{
+			name:      "base64 missing data",
+			source:    `{"type":"base64","media_type":"application/pdf"}`,
+			wantParam: "messages.content.document.source.data",
+		},
+		{
+			name:      "base64 missing media type",
+			source:    `{"type":"base64","data":"JVBERi0="}`,
+			wantParam: "messages.content.document.source.media_type",
+		},
+		{
+			name:      "url missing url",
+			source:    `{"type":"url"}`,
+			wantParam: "messages.content.document.source.url",
+		},
+		{
+			name:      "unsupported source type",
+			source:    `{"type":"unknown"}`,
+			wantParam: "messages.content.document.source.type",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body := []byte(`{
+				"model":"claude-sonnet-4-5",
+				"max_tokens":128,
+				"messages":[{
+					"role":"user",
+					"content":[{
+						"type":"document",
+						"source":` + tt.source + `
+					}]
+				}]
+			}`)
+
+			_, _, err := MessagesToChat(body)
+
+			require.Error(t, err)
+			var validationErr *converterutil.RequestValidationError
+			require.True(t, errors.As(err, &validationErr))
+			assert.Equal(t, tt.wantParam, validationErr.Param)
+		})
+	}
 }
 
 func TestChatToMessages(t *testing.T) {
@@ -136,7 +213,7 @@ func TestMessagesToChatPreservesThinkingForAnthropicProvider(t *testing.T) {
 
 	chat, _, err := MessagesToChat(body)
 	require.NoError(t, err)
-	roundTrip, err := OpenAIToAnthropic(chat, "claude-sonnet")
+	roundTrip, err := OpenAIToAnthropic(chat, "claude-sonnet", true)
 	require.NoError(t, err)
 
 	var got map[string]interface{}
@@ -148,6 +225,59 @@ func TestMessagesToChatPreservesThinkingForAnthropicProvider(t *testing.T) {
 	assert.Equal(t, "functions_weather_0", assistant[1].(map[string]interface{})["id"])
 	result := messages[1].(map[string]interface{})["content"].([]interface{})[0].(map[string]interface{})
 	assert.Equal(t, "functions_weather_0", result["tool_use_id"])
+}
+
+func TestMessagesDocumentBase64RoundTrip(t *testing.T) {
+	body := []byte(`{
+		"model":"claude-sonnet-4-5",
+		"max_tokens":128,
+		"messages":[{
+			"role":"user",
+			"content":[{"type":"document","source":{"type":"base64","media_type":"application/pdf","data":"JVBERi0="}}]
+		}]
+	}`)
+
+	block := roundTripFirstUserBlock(t, body)
+	assert.Equal(t, "document", block["type"])
+	source := block["source"].(map[string]interface{})
+	assert.Equal(t, "base64", source["type"])
+	assert.Equal(t, "application/pdf", source["media_type"])
+	assert.Equal(t, "JVBERi0=", source["data"])
+}
+
+func TestMessagesDocumentURLRoundTrip(t *testing.T) {
+	body := []byte(`{
+		"model":"claude-sonnet-4-5",
+		"max_tokens":128,
+		"messages":[{
+			"role":"user",
+			"content":[{"type":"document","source":{"type":"url","url":"https://example.com/document.pdf"}}]
+		}]
+	}`)
+
+	block := roundTripFirstUserBlock(t, body)
+	assert.Equal(t, "document", block["type"])
+	source := block["source"].(map[string]interface{})
+	assert.Equal(t, "url", source["type"])
+	assert.Equal(t, "https://example.com/document.pdf", source["url"])
+}
+
+func TestMessagesImageBase64RoundTrip(t *testing.T) {
+	body := []byte(`{
+		"model":"claude-sonnet-4-5",
+		"max_tokens":128,
+		"messages":[{
+			"role":"user",
+			"content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBORw0KGgo="}}]
+		}]
+	}`)
+
+	block := roundTripFirstUserBlock(t, body)
+	assert.Equal(t, "image", block["type"])
+	source := block["source"].(map[string]interface{})
+	assert.Equal(t, "base64", source["type"])
+	assert.Equal(t, "image/png", source["media_type"])
+	assert.Equal(t, "iVBORw0KGgo=", source["data"])
 }
 
 func TestTransformChatStreamToMessages(t *testing.T) {
@@ -247,4 +377,21 @@ func TestMessagesToChatDropsVideoBlockWithoutSource(t *testing.T) {
 	content := messages[0].(map[string]interface{})["content"].([]interface{})
 	require.Len(t, content, 1)
 	assert.Equal(t, "text", content[0].(map[string]interface{})["type"])
+}
+
+func roundTripFirstUserBlock(t *testing.T, messagesBody []byte) map[string]interface{} {
+	t.Helper()
+
+	chat, _, err := MessagesToChat(messagesBody)
+	require.NoError(t, err)
+	roundTrip, err := OpenAIToAnthropic(chat, "claude-sonnet-4-5", true)
+	require.NoError(t, err)
+
+	var got map[string]interface{}
+	require.NoError(t, json.Unmarshal(roundTrip, &got))
+	messages := got["messages"].([]interface{})
+	require.NotEmpty(t, messages)
+	content := messages[0].(map[string]interface{})["content"].([]interface{})
+	require.NotEmpty(t, content)
+	return content[0].(map[string]interface{})
 }

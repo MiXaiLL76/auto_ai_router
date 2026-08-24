@@ -1,11 +1,11 @@
 package anthropicresponses
 
 import (
-	"encoding/base64"
 	"fmt"
 	"strings"
 
 	"github.com/mixaill76/auto_ai_router/internal/converter/anthropic"
+	"github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
 )
 
 // contentPartToAnthropic converts a Responses API content part map to an Anthropic ContentBlock.
@@ -22,7 +22,7 @@ func contentPartToAnthropic(partMap map[string]interface{}) (*anthropic.ContentB
 
 	case "input_audio":
 		// Anthropic does not support audio input natively.
-		return nil, fmt.Errorf("input_audio is not supported by Anthropic")
+		return nil, converterutil.NewRequestValidationError("input_audio", "input_audio is not supported by Anthropic")
 
 	case "input_file":
 		return convertInputFileToAnthropic(partMap)
@@ -46,14 +46,23 @@ func convertInputImageToAnthropic(partMap map[string]interface{}) (*anthropic.Co
 	}
 
 	if imgURL == "" {
-		return nil, fmt.Errorf("input_image: missing image_url")
+		if fileID, _ := partMap["file_id"].(string); fileID != "" {
+			return nil, converterutil.NewRequestValidationError("input_image.file_id", "file_id is not supported for this route")
+		}
+		return nil, converterutil.NewRequestValidationError("input_image", "missing supported image source")
 	}
 
 	// data: URL → base64 inline
 	if strings.HasPrefix(imgURL, "data:") {
 		mimeType, data, err := parseDataURL(imgURL)
 		if err != nil {
-			return nil, fmt.Errorf("input_image: %w", err)
+			return nil, err
+		}
+		if mimeType == "application/pdf" {
+			return nil, converterutil.NewRequestValidationError("input_image.image_url", "PDF data URLs must be sent as input_file, not input_image")
+		}
+		if !isAllowedImageMediaType(mimeType) {
+			return nil, converterutil.NewRequestValidationError("input_image.image_url", fmt.Sprintf("unsupported image media type %q for Anthropic", mimeType))
 		}
 		return &anthropic.ContentBlock{
 			Type: "image",
@@ -74,35 +83,39 @@ func convertInputImageToAnthropic(partMap map[string]interface{}) (*anthropic.Co
 }
 
 func convertInputFileToAnthropic(partMap map[string]interface{}) (*anthropic.ContentBlock, error) {
-	fileURL, _ := partMap["file_url"].(string)
-	if fileURL == "" {
-		return nil, fmt.Errorf("input_file: missing file_url")
+	fileData, _ := partMap["file_data"].(string)
+	if fileData != "" {
+		return anthropic.ConvertDataURLToDocument(fileData, "input_file.file_data")
 	}
-	return &anthropic.ContentBlock{
-		Type: "document",
-		Source: &anthropic.MediaSource{
-			Type: "url",
-			URL:  fileURL,
-		},
-	}, nil
+
+	fileURL, _ := partMap["file_url"].(string)
+	if fileURL != "" {
+		return &anthropic.ContentBlock{
+			Type: "document",
+			Source: &anthropic.MediaSource{
+				Type: "url",
+				URL:  fileURL,
+			},
+		}, nil
+	}
+
+	if fileID, _ := partMap["file_id"].(string); fileID != "" {
+		return nil, converterutil.NewRequestValidationError("input_file.file_id", "file_id is not supported for this route")
+	}
+
+	return nil, converterutil.NewRequestValidationError("input_file", "missing supported file source")
 }
 
 // parseDataURL parses a data: URL into mimeType and base64-encoded data string.
 func parseDataURL(dataURL string) (mimeType, b64data string, err error) {
-	rest := strings.TrimPrefix(dataURL, "data:")
-	semi := strings.Index(rest, ";")
-	if semi < 0 {
-		return "", "", fmt.Errorf("invalid data URL: missing semicolon")
+	return anthropic.ParseBase64DataURL(dataURL, "input_image.image_url")
+}
+
+func isAllowedImageMediaType(mediaType string) bool {
+	switch strings.ToLower(mediaType) {
+	case "image/jpeg", "image/png", "image/gif", "image/webp":
+		return true
+	default:
+		return false
 	}
-	mimeType = rest[:semi]
-	after := rest[semi+1:]
-	if !strings.HasPrefix(after, "base64,") {
-		return "", "", fmt.Errorf("invalid data URL: expected base64 encoding")
-	}
-	raw := after[7:]
-	// Validate it's decodable but return raw base64 string (Anthropic wants the base64 string)
-	if _, err := base64.StdEncoding.DecodeString(raw); err != nil {
-		return "", "", fmt.Errorf("invalid base64 data: %w", err)
-	}
-	return mimeType, raw, nil
 }

@@ -22,6 +22,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/converter"
 	anthropicconv "github.com/mixaill76/auto_ai_router/internal/converter/anthropic"
+	"github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
 	promanutils "github.com/mixaill76/auto_ai_router/internal/converter/proman/utils"
 	"github.com/mixaill76/auto_ai_router/internal/converter/responses"
 	"github.com/mixaill76/auto_ai_router/internal/httputil"
@@ -1490,6 +1491,20 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 			var convErr error
 			requestBody, _, convErr = provResponses.RequestFrom(body)
 			if convErr != nil {
+				var validationErr *converterutil.RequestValidationError
+				if errors.As(convErr, &validationErr) {
+					p.logger.WarnContext(r.Context(), "Invalid Responses API request for provider format",
+						"error_code", http.StatusBadRequest,
+						"credential", cred.Name, "provider", string(cred.Type),
+						"model", modelID, "error", convErr,
+						"request_id", logCtx.RequestID)
+					logCtx.Status = "failure"
+					logCtx.HTTPStatus = http.StatusBadRequest
+					logCtx.ErrorMsg = convErr.Error()
+					logCtx.TargetURL = cred.BaseURL
+					WriteErrorBadRequest(w, convErr.Error())
+					return
+				}
 				p.logger.ErrorContext(r.Context(), "Failed to convert Responses API request to provider format",
 					"error_code", http.StatusInternalServerError,
 					"credential", cred.Name, "provider", string(cred.Type),
@@ -1519,6 +1534,20 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 			var convErr error
 			requestBody, convErr = conv.RequestFrom(body)
 			if convErr != nil {
+				var validationErr *converterutil.RequestValidationError
+				if errors.As(convErr, &validationErr) {
+					p.logger.WarnContext(r.Context(), "Invalid request for provider format",
+						"error_code", http.StatusBadRequest,
+						"credential", cred.Name, "provider", string(cred.Type),
+						"model", modelID, "error", convErr,
+						"request_id", logCtx.RequestID)
+					logCtx.Status = "failure"
+					logCtx.HTTPStatus = http.StatusBadRequest
+					logCtx.ErrorMsg = convErr.Error()
+					logCtx.TargetURL = cred.BaseURL
+					WriteErrorBadRequest(w, convErr.Error())
+					return
+				}
 				// Fatal: conversion error won't be fixed by another credential
 				p.logger.ErrorContext(r.Context(), "Failed to convert request to provider format",
 					"error_code", http.StatusInternalServerError,
@@ -1633,7 +1662,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 		if p.logger.Enabled(context.Background(), slog.LevelDebug) {
 			p.logger.DebugContext(r.Context(), "Proxy request details",
 				"target_url", targetURL, "credential", cred.Name,
-				"request_body", logger.TruncateLongFields(string(requestBody), 500))
+				"request_body", logger.SanitizeRequestBodyForLog(requestBody, 500))
 		}
 
 		debugHeaders := make(map[string]string)

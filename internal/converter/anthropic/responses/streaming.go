@@ -33,7 +33,8 @@ type anthropicStreamAccumulator struct {
 	currentText        string
 	currentThinking    string
 	currentToolArgs    string
-	currentReasoningID string // ID assigned at content_block_start for "thinking"
+	currentReasoningID string                        // ID assigned at content_block_start for "thinking"
+	currentCitations   []anthropic.AnthropicCitation // accumulated via citations_delta, consumed at block finalize
 
 	// Completed output items
 	msgContent  []responses.OutputContent
@@ -196,6 +197,33 @@ func processAnthropicEvent(w io.Writer, acc *anthropicStreamAccumulator, event *
 			}, acc); err != nil {
 				return err
 			}
+
+		case "server_tool_use":
+			// Anthropic's hosted web_search tool call (the only server tool
+			// type Anthropic exposes today) — mirrors "tool_use" bookkeeping
+			// but surfaces as a web_search_call item instead of function_call.
+			if !acc.headerEmitted {
+				if err := emitAnthropicHeaderEvents(w, acc); err != nil {
+					return err
+				}
+			}
+			outputIdx := len(acc.outputItems)
+			if acc.messageStarted {
+				outputIdx++
+			}
+			acc.currentToolItemID = generateItemID("ws_")
+			acc.currentToolOutputIndex = outputIdx
+			if err := writeAnthropicSSE(w, "response.output_item.added", map[string]interface{}{
+				"type":         "response.output_item.added",
+				"output_index": outputIdx,
+				"item": map[string]interface{}{
+					"type":   "web_search_call",
+					"id":     acc.currentToolItemID,
+					"status": "in_progress",
+				},
+			}, acc); err != nil {
+				return err
+			}
 		}
 
 	case "content_block_delta":
@@ -211,9 +239,17 @@ func processAnthropicEvent(w io.Writer, acc *anthropicStreamAccumulator, event *
 			}
 		case "thinking_delta":
 			acc.currentThinking += event.Delta.Thinking
+		case "citations_delta":
+			if event.Delta.Citation != nil {
+				acc.currentCitations = append(acc.currentCitations, *event.Delta.Citation)
+			}
 		case "input_json_delta":
 			acc.currentToolArgs += event.Delta.PartialJSON
-			if event.Delta.PartialJSON != "" && acc.currentToolItemID != "" {
+			// Only function_call blocks stream argument deltas to the client
+			// this way; server_tool_use (web_search) accumulates silently
+			// into currentToolArgs and is parsed once at block_stop instead —
+			// OpenAI's own web_search_call doesn't stream partial queries.
+			if acc.currentBlockType == "tool_use" && event.Delta.PartialJSON != "" && acc.currentToolItemID != "" {
 				if err := writeAnthropicSSE(w, "response.function_call_arguments.delta", map[string]interface{}{
 					"type":         "response.function_call_arguments.delta",
 					"item_id":      acc.currentToolItemID,
@@ -324,21 +360,25 @@ func finalizeCurrentBlock(w io.Writer, acc *anthropicStreamAccumulator) error {
 	switch acc.currentBlockType {
 	case "text":
 		if acc.currentText != "" {
+			annotations := webSearchCitationsToAnnotations(acc.currentText, acc.currentCitations)
 			acc.msgContent = append(acc.msgContent, responses.OutputContent{
 				Type:        "output_text",
 				Text:        acc.currentText,
-				Annotations: []responses.Annotation{},
+				Annotations: annotations,
 			})
 		}
 		acc.currentText = ""
+		acc.currentCitations = nil
 
 	case "thinking":
 		itemID := acc.currentReasoningID
 		if itemID == "" {
 			itemID = generateItemID("rs_")
 		}
-		outputIdx := len(acc.outputItems)
 		if acc.currentThinking != "" {
+			// Appended here, closed once by emitAnthropicCompletionEvents (which
+			// walks acc.outputItems and emits one output_item.done per entry) —
+			// emitting it again here as well would duplicate the done event.
 			item := responses.OutputItem{
 				Type:   "reasoning",
 				ID:     itemID,
@@ -348,20 +388,24 @@ func finalizeCurrentBlock(w io.Writer, acc *anthropicStreamAccumulator) error {
 				},
 			}
 			acc.outputItems = append(acc.outputItems, item)
-		}
-		// Always emit output_item.done to close the added event emitted at block_start,
-		// even when the thinking block was empty (avoids a dangling added with no done).
-		if err := writeAnthropicSSE(w, "response.output_item.done", map[string]interface{}{
-			"type":         "response.output_item.done",
-			"output_index": outputIdx,
-			"item": map[string]interface{}{
-				"type":    "reasoning",
-				"id":      itemID,
-				"status":  "completed",
-				"summary": []interface{}{},
-			},
-		}, acc); err != nil {
-			return err
+		} else {
+			// Nothing gets appended above, so the completion-time loop will
+			// never close this item — emit its done event now instead, to
+			// avoid leaving the "added" event from content_block_start
+			// dangling with no matching "done".
+			outputIdx := len(acc.outputItems)
+			if err := writeAnthropicSSE(w, "response.output_item.done", map[string]interface{}{
+				"type":         "response.output_item.done",
+				"output_index": outputIdx,
+				"item": map[string]interface{}{
+					"type":    "reasoning",
+					"id":      itemID,
+					"status":  "completed",
+					"summary": []interface{}{},
+				},
+			}, acc); err != nil {
+				return err
+			}
 		}
 		acc.currentReasoningID = ""
 
@@ -392,6 +436,30 @@ func finalizeCurrentBlock(w io.Writer, acc *anthropicStreamAccumulator) error {
 			Arguments: argsJSON,
 		}
 		acc.outputItems = append(acc.outputItems, item)
+		acc.currentToolItemID = ""
+		acc.currentToolOutputIndex = 0
+
+	case "server_tool_use":
+		itemID := acc.currentToolItemID
+		if itemID == "" {
+			itemID = generateItemID("ws_")
+		}
+		var action interface{}
+		if acc.currentToolArgs != "" {
+			var input map[string]interface{}
+			if err := json.Unmarshal([]byte(acc.currentToolArgs), &input); err == nil {
+				action = webSearchActionFromInput(input)
+			}
+		}
+		// Appended here, closed once by emitAnthropicCompletionEvents (which
+		// walks acc.outputItems and emits one output_item.done per entry) —
+		// emitting an output_item.done here too would duplicate the event.
+		acc.outputItems = append(acc.outputItems, responses.OutputItem{
+			Type:   "web_search_call",
+			ID:     itemID,
+			Status: "completed",
+			Action: action,
+		})
 		acc.currentToolItemID = ""
 		acc.currentToolOutputIndex = 0
 	}

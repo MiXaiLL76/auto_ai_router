@@ -334,3 +334,41 @@ func TestLoadModelPrices_BareKeyWinsOverPrefixed_ReverseOrder(t *testing.T) {
 
 	assert.Equal(t, 1.0e-06, prices["gpt-4"].InputCostPerToken)
 }
+
+// TestLoadModelPrices_PrefixedKeySurvivesBareCollision_BothOrders locks in the
+// fix for the bug where the prefixed sibling's own raw key ("openai/gpt-4")
+// was silently dropped from the registry whenever Go's randomized map
+// iteration happened to visit the bare entry ("gpt-4") first — a `continue`
+// on the collision branch skipped registering the prefixed entry's raw key
+// entirely, not just its (correctly bare-owned) normalized key. Since Go map
+// iteration order isn't controllable from a test, this checks both JSON
+// orderings directly against the same assertion to make sure neither one
+// depends on which entry the loader happens to see first.
+func TestLoadModelPrices_PrefixedKeySurvivesBareCollision_BothOrders(t *testing.T) {
+	orderings := map[string]string{
+		"bare_first": `{
+			"gpt-4":        {"input_cost_per_token": 1.0e-06, "output_cost_per_token": 4.0e-06},
+			"openai/gpt-4": {"input_cost_per_token": 2.0e-06, "output_cost_per_token": 8.0e-06}
+		}`,
+		"prefixed_first": `{
+			"openai/gpt-4": {"input_cost_per_token": 2.0e-06, "output_cost_per_token": 8.0e-06},
+			"gpt-4":        {"input_cost_per_token": 1.0e-06, "output_cost_per_token": 4.0e-06}
+		}`,
+	}
+
+	for name, jsonBody := range orderings {
+		t.Run(name, func(t *testing.T) {
+			filePath := filepath.Join(t.TempDir(), "prices.json")
+			require.NoError(t, os.WriteFile(filePath, []byte(jsonBody), 0o600))
+
+			prices, err := LoadModelPrices(filePath)
+			require.NoError(t, err)
+
+			require.Contains(t, prices, "gpt-4")
+			assert.Equal(t, 1.0e-06, prices["gpt-4"].InputCostPerToken, "bare key must own the shared normalized entry")
+
+			require.Contains(t, prices, "openai/gpt-4", "prefixed sibling's own raw key must survive the collision")
+			assert.Equal(t, 2.0e-06, prices["openai/gpt-4"].InputCostPerToken)
+		})
+	}
+}

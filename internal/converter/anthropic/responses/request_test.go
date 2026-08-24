@@ -2,8 +2,10 @@ package anthropicresponses
 
 import (
 	"encoding/json"
+	"errors"
 	"testing"
 
+	"github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -60,6 +62,99 @@ func TestResponsesRequestToAnthropic_MaxTokensDefault(t *testing.T) {
 
 	// Default is 4096
 	assert.Equal(t, float64(4096), ar["max_tokens"])
+}
+
+func TestResponsesRequestToAnthropic_InputFileFileData(t *testing.T) {
+	body := `{
+		"model": "claude-sonnet-4-5",
+		"input": [{
+			"role": "user",
+			"content": [
+				{"type": "input_file", "filename": "test.pdf", "file_data": "data:application/pdf;base64,JVBERi0="},
+				{"type": "input_text", "text": "read it"}
+			]
+		}]
+	}`
+
+	result, err := ResponsesRequestToAnthropic([]byte(body), "claude-sonnet-4-5")
+	require.NoError(t, err)
+
+	block := firstUserContentBlock(t, result)
+	assert.Equal(t, "document", block["type"])
+	source := block["source"].(map[string]interface{})
+	assert.Equal(t, "base64", source["type"])
+	assert.Equal(t, "application/pdf", source["media_type"])
+	assert.Equal(t, "JVBERi0=", source["data"])
+}
+
+func TestResponsesRequestToAnthropic_InputFileFileIDUnsupported(t *testing.T) {
+	body := `{
+		"model": "claude-sonnet-4-5",
+		"input": [{"role": "user", "content": [{"type": "input_file", "file_id": "file-abc"}]}]
+	}`
+
+	_, err := ResponsesRequestToAnthropic([]byte(body), "claude-sonnet-4-5")
+	require.Error(t, err)
+	var validationErr *converterutil.RequestValidationError
+	require.True(t, errors.As(err, &validationErr))
+	assert.Equal(t, "input_file.file_id", validationErr.Param)
+	assert.Equal(t, "file_id is not supported for this route", validationErr.Message)
+}
+
+func TestResponsesRequestToAnthropic_InputImageFileIDUnsupported(t *testing.T) {
+	body := `{
+		"model": "claude-sonnet-4-5",
+		"input": [{"role": "user", "content": [{"type": "input_image", "file_id": "file-abc"}]}]
+	}`
+
+	_, err := ResponsesRequestToAnthropic([]byte(body), "claude-sonnet-4-5")
+	require.Error(t, err)
+	var validationErr *converterutil.RequestValidationError
+	require.True(t, errors.As(err, &validationErr))
+	assert.Equal(t, "input_image.file_id", validationErr.Param)
+	assert.Equal(t, "file_id is not supported for this route", validationErr.Message)
+}
+
+func TestResponsesRequestToAnthropic_InputFileFileURL(t *testing.T) {
+	body := `{
+		"model": "claude-sonnet-4-5",
+		"input": [{"role": "user", "content": [{"type": "input_file", "file_url": "https://example.com/document.pdf"}]}]
+	}`
+
+	result, err := ResponsesRequestToAnthropic([]byte(body), "claude-sonnet-4-5")
+	require.NoError(t, err)
+
+	block := firstUserContentBlock(t, result)
+	assert.Equal(t, "document", block["type"])
+	source := block["source"].(map[string]interface{})
+	assert.Equal(t, "url", source["type"])
+	assert.Equal(t, "https://example.com/document.pdf", source["url"])
+}
+
+func TestResponsesRequestToAnthropic_InputFileMalformedBase64(t *testing.T) {
+	body := `{
+		"model": "claude-sonnet-4-5",
+		"input": [{"role": "user", "content": [{"type": "input_file", "file_data": "data:application/pdf;base64,###"}]}]
+	}`
+
+	_, err := ResponsesRequestToAnthropic([]byte(body), "claude-sonnet-4-5")
+	require.Error(t, err)
+	var validationErr *converterutil.RequestValidationError
+	require.True(t, errors.As(err, &validationErr))
+	assert.Equal(t, "input_file.file_data", validationErr.Param)
+}
+
+func TestResponsesRequestToAnthropic_InputFileMissingSource(t *testing.T) {
+	body := `{
+		"model": "claude-sonnet-4-5",
+		"input": [{"role": "user", "content": [{"type": "input_file"}]}]
+	}`
+
+	_, err := ResponsesRequestToAnthropic([]byte(body), "claude-sonnet-4-5")
+	require.Error(t, err)
+	var validationErr *converterutil.RequestValidationError
+	require.True(t, errors.As(err, &validationErr))
+	assert.Equal(t, "input_file", validationErr.Param)
 }
 
 func TestResponsesRequestToAnthropic_FunctionTool(t *testing.T) {
@@ -127,7 +222,6 @@ func TestResponsesRequestToAnthropic_UnsupportedToolsSkipped(t *testing.T) {
 		"model": "claude-opus-4-5",
 		"input": "test",
 		"tools": [
-			{"type": "web_search_preview"},
 			{"type": "file_search"},
 			{"type": "code_interpreter"}
 		]
@@ -144,6 +238,107 @@ func TestResponsesRequestToAnthropic_UnsupportedToolsSkipped(t *testing.T) {
 		tools, _ := toolsRaw.([]interface{})
 		assert.Len(t, tools, 0)
 	}
+}
+
+// TestResponsesRequestToAnthropic_WebSearchConverted verifies that the
+// Responses API's built-in web_search tool (in all its documented type
+// spellings) is converted to Anthropic's native web_search_20250305 tool
+// instead of being silently dropped — this used to be indistinguishable
+// from an unsupported tool like file_search/code_interpreter, so any web
+// search request through /v1/responses → Anthropic returned HTTP 200 with
+// no search ever performed.
+func TestResponsesRequestToAnthropic_WebSearchConverted(t *testing.T) {
+	for _, toolType := range []string{"web_search", "web_search_preview", "web_search_preview_2025_03_11"} {
+		t.Run(toolType, func(t *testing.T) {
+			body := `{
+				"model": "claude-opus-4-5",
+				"input": "test",
+				"tools": [{"type": "` + toolType + `"}]
+			}`
+
+			result, err := ResponsesRequestToAnthropic([]byte(body), "claude-opus-4-5")
+			require.NoError(t, err)
+
+			var ar map[string]interface{}
+			require.NoError(t, json.Unmarshal(result, &ar))
+
+			tools := ar["tools"].([]interface{})
+			require.Len(t, tools, 1)
+			tool := tools[0].(map[string]interface{})
+			assert.Equal(t, "web_search_20250305", tool["type"])
+			assert.Equal(t, "web_search", tool["name"])
+		})
+	}
+}
+
+// TestResponsesRequestToAnthropic_NativeWebSearchTypePreserved verifies that
+// Anthropic's own versioned web_search type, sent directly by a client, is
+// passed through unchanged rather than falling into the unsupported-tool
+// default branch.
+func TestResponsesRequestToAnthropic_NativeWebSearchTypePreserved(t *testing.T) {
+	body := `{
+		"model": "claude-opus-4-5",
+		"input": "test",
+		"tools": [{"type": "web_search_20260318", "name": "web_search"}]
+	}`
+
+	result, err := ResponsesRequestToAnthropic([]byte(body), "claude-opus-4-5")
+	require.NoError(t, err)
+
+	var ar map[string]interface{}
+	require.NoError(t, json.Unmarshal(result, &ar))
+
+	tools := ar["tools"].([]interface{})
+	require.Len(t, tools, 1)
+	assert.Equal(t, "web_search_20260318", tools[0].(map[string]interface{})["type"])
+}
+
+// TestResponsesRequestToAnthropic_DatedOpenAIWebSearchTypeMapped verifies that
+// an OpenAI Responses API web_search tool type not covered by the explicit
+// cases (e.g. a newer dated release like "web_search_2025_08_26") is mapped
+// to Anthropic's stable web_search_20250305 rather than forwarded verbatim —
+// Anthropic doesn't recognize OpenAI's own dated type strings and would
+// reject them with a 400.
+func TestResponsesRequestToAnthropic_DatedOpenAIWebSearchTypeMapped(t *testing.T) {
+	body := `{
+		"model": "claude-opus-4-5",
+		"input": "test",
+		"tools": [{"type": "web_search_2025_08_26"}]
+	}`
+
+	result, err := ResponsesRequestToAnthropic([]byte(body), "claude-opus-4-5")
+	require.NoError(t, err)
+
+	var ar map[string]interface{}
+	require.NoError(t, json.Unmarshal(result, &ar))
+
+	tools := ar["tools"].([]interface{})
+	require.Len(t, tools, 1)
+	tool := tools[0].(map[string]interface{})
+	assert.Equal(t, "web_search_20250305", tool["type"])
+	assert.Equal(t, "web_search", tool["name"])
+}
+
+// TestResponsesRequestToAnthropic_WebSearchToolChoice verifies a tool_choice
+// forcing the web_search built-in maps to Anthropic's {"type":"tool","name":
+// "web_search"} instead of being dropped to the "auto" default.
+func TestResponsesRequestToAnthropic_WebSearchToolChoice(t *testing.T) {
+	body := `{
+		"model": "claude-opus-4-5",
+		"input": "test",
+		"tools": [{"type": "web_search"}],
+		"tool_choice": {"type": "web_search"}
+	}`
+
+	result, err := ResponsesRequestToAnthropic([]byte(body), "claude-opus-4-5")
+	require.NoError(t, err)
+
+	var ar map[string]interface{}
+	require.NoError(t, json.Unmarshal(result, &ar))
+
+	toolChoice := ar["tool_choice"].(map[string]interface{})
+	assert.Equal(t, "tool", toolChoice["type"])
+	assert.Equal(t, "web_search", toolChoice["name"])
 }
 
 func TestResponsesRequestToAnthropic_ToolChoiceNone(t *testing.T) {
@@ -532,6 +727,18 @@ func TestResponsesRequestToAnthropic_ComputerCallOutputHistory_Base64(t *testing
 		}
 	}
 	assert.True(t, foundToolResult, "expected tool_result with base64 image for computer_call_output")
+}
+
+func firstUserContentBlock(t *testing.T, body []byte) map[string]interface{} {
+	t.Helper()
+
+	var ar map[string]interface{}
+	require.NoError(t, json.Unmarshal(body, &ar))
+	messages := ar["messages"].([]interface{})
+	require.NotEmpty(t, messages)
+	content := messages[0].(map[string]interface{})["content"].([]interface{})
+	require.NotEmpty(t, content)
+	return content[0].(map[string]interface{})
 }
 
 func TestResponsesRequestToAnthropic_ReasoningItemWithEncryptedContent(t *testing.T) {

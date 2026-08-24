@@ -2,8 +2,10 @@ package responses
 
 import (
 	"encoding/json"
+	"errors"
 	"testing"
 
+	"github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -678,6 +680,30 @@ func TestRequestToChat_InputFileUnsupported(t *testing.T) {
 	}`
 	_, err := RequestToChat([]byte(body))
 	require.Error(t, err)
+	var validationErr *converterutil.RequestValidationError
+	require.True(t, errors.As(err, &validationErr))
+	assert.Equal(t, "input_file.file_id", validationErr.Param)
+	assert.Equal(t, "file_id is not supported for this route", validationErr.Message)
+}
+
+func TestRequestToChat_InputFileDataUnsupported(t *testing.T) {
+	body := `{
+		"model": "gpt-4o",
+		"input": [
+			{
+				"role": "user",
+				"content": [
+					{"type": "input_file", "file_data": "data:application/pdf;base64,JVBERi0="}
+				]
+			}
+		]
+	}`
+	_, err := RequestToChat([]byte(body))
+	require.Error(t, err)
+	var validationErr *converterutil.RequestValidationError
+	require.True(t, errors.As(err, &validationErr))
+	assert.Equal(t, "input_file", validationErr.Param)
+	assert.Equal(t, "input_file is not supported in chat completions", validationErr.Message)
 }
 
 func TestRequestToChat_Reasoning(t *testing.T) {

@@ -61,7 +61,7 @@ func TestOrchestrateRequest_ResponsesAPI_PassthroughForOpenAI(t *testing.T) {
 		Build()
 	prx.logger = logger
 
-	body := `{"model":"qwen-5","input":"Hello","stream":false}`
+	body := `{"model":"qwen-5","input":[{"role":"user","content":[{"type":"input_file","file_id":"file-abc"},{"type":"input_text","text":"Hello"}]}],"stream":false}`
 	req := httptest.NewRequest("POST", "/v1/responses", strings.NewReader(body))
 	req.Header.Set("Authorization", "Bearer master-key")
 	w := httptest.NewRecorder()
@@ -81,6 +81,7 @@ func TestOrchestrateRequest_ResponsesAPI_PassthroughForOpenAI(t *testing.T) {
 
 	_, hasInput := raw["input"]
 	require.True(t, hasInput, "input should remain for native passthrough")
+	require.Contains(t, string(prepared.body), `"file_id":"file-abc"`)
 	_, hasMessages := raw["messages"]
 	require.False(t, hasMessages, "messages should not be injected for native passthrough")
 }
