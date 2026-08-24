@@ -171,3 +171,109 @@ func TestAnthropicToOpenAIPreservesOpaqueToolID(t *testing.T) {
 		t.Fatalf("opaque tool ID changed: got %q, want %q", got, toolID)
 	}
 }
+
+// TestAnthropicToOpenAICountsWebSearchServerToolUse covers providers that execute the
+// Anthropic web_search server tool but leave server_tool_use out of usage. The call is
+// billable, so the converter counts the server_tool_use blocks it can see in the response
+// instead of reporting no searches at all.
+func TestAnthropicToOpenAICountsWebSearchServerToolUse(t *testing.T) {
+	tests := []struct {
+		name              string
+		body              string
+		wantWebSearch     int
+		wantServerToolUse bool
+	}{
+		{
+			name: "counted from blocks when usage omits the counter",
+			body: `{
+				"id":"msg_search",
+				"type":"message",
+				"role":"assistant",
+				"content":[
+					{"type":"text","text":"Let me look that up."},
+					{"type":"server_tool_use","id":"call_1","name":"web_search","input":{"query":"weather"}},
+					{"type":"web_search_tool_result","tool_use_id":"call_1","content":[]},
+					{"type":"text","text":"It is sunny."}
+				],
+				"stop_reason":"end_turn",
+				"usage":{"input_tokens":10,"output_tokens":5}
+			}`,
+			wantWebSearch:     1,
+			wantServerToolUse: true,
+		},
+		{
+			name: "each server_tool_use block counts once",
+			body: `{
+				"id":"msg_two_searches",
+				"type":"message",
+				"role":"assistant",
+				"content":[
+					{"type":"server_tool_use","id":"call_1","name":"web_search","input":{"query":"a"}},
+					{"type":"server_tool_use","id":"call_2","name":"web_search","input":{"query":"b"}}
+				],
+				"stop_reason":"end_turn",
+				"usage":{"input_tokens":10,"output_tokens":5}
+			}`,
+			wantWebSearch:     2,
+			wantServerToolUse: true,
+		},
+		{
+			name: "provider counter wins over observed blocks",
+			body: `{
+				"id":"msg_provider_counter",
+				"type":"message",
+				"role":"assistant",
+				"content":[
+					{"type":"server_tool_use","id":"call_1","name":"web_search","input":{"query":"a"}}
+				],
+				"stop_reason":"end_turn",
+				"usage":{"input_tokens":10,"output_tokens":5,"server_tool_use":{"web_search_requests":3}}
+			}`,
+			wantWebSearch:     3,
+			wantServerToolUse: true,
+		},
+		{
+			name: "other server tools are not billed as web search",
+			body: `{
+				"id":"msg_other_tool",
+				"type":"message",
+				"role":"assistant",
+				"content":[
+					{"type":"server_tool_use","id":"call_1","name":"code_execution","input":{}}
+				],
+				"stop_reason":"end_turn",
+				"usage":{"input_tokens":10,"output_tokens":5}
+			}`,
+			wantServerToolUse: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			converted, err := AnthropicToOpenAI([]byte(tt.body), "claude-sonnet-4-5")
+			if err != nil {
+				t.Fatalf("convert Anthropic response: %v", err)
+			}
+			var resp openai.OpenAIResponse
+			if err := json.Unmarshal(converted, &resp); err != nil {
+				t.Fatalf("unmarshal converted response: %v", err)
+			}
+			if resp.Usage == nil {
+				t.Fatal("expected usage in converted response")
+			}
+			if !tt.wantServerToolUse {
+				if resp.Usage.ServerToolUse != nil {
+					t.Fatalf("expected no server_tool_use in usage, got %+v", resp.Usage.ServerToolUse)
+				}
+				return
+			}
+			if resp.Usage.ServerToolUse == nil {
+				t.Fatal("expected server_tool_use in usage")
+			}
+			if resp.Usage.ServerToolUse.WebSearchRequests != tt.wantWebSearch {
+				t.Fatalf("web_search_requests: got %d, want %d",
+					resp.Usage.ServerToolUse.WebSearchRequests, tt.wantWebSearch)
+			}
+		})
+	}
+}

@@ -30,6 +30,9 @@ type blockState struct {
 type streamUsage struct {
 	present bool
 	value   AnthropicUsage
+	// webSearchBlocks counts server_tool_use web_search blocks seen in the stream, used
+	// only when the provider reports no counter of its own.
+	webSearchBlocks int
 }
 
 func (u *streamUsage) observeStart(value *AnthropicUsage) {
@@ -59,11 +62,21 @@ func (u *streamUsage) observeDelta(value *AnthropicStreamUsage) {
 	}
 }
 
+// observeServerToolUse records a server_tool_use block opened in the stream. Providers that
+// execute web search but leave it out of usage would otherwise go unbilled for it.
+func (u *streamUsage) observeServerToolUse(name string) {
+	if isWebSearchToolName(name) {
+		u.webSearchBlocks++
+	}
+}
+
 func (u *streamUsage) openAI() *openai.OpenAIUsage {
 	if !u.present {
 		return nil
 	}
-	return convertAnthropicUsageToOpenAI(&u.value)
+	usage := convertAnthropicUsageToOpenAI(&u.value)
+	applyWebSearchFallback(usage, u.webSearchBlocks)
+	return usage
 }
 
 func setIfPresent(destination *int, value *int) {
@@ -144,6 +157,9 @@ func TransformAnthropicStreamToOpenAI(anthropicStream io.Reader, model string, o
 				id:          event.ContentBlock.ID,
 				name:        event.ContentBlock.Name,
 				toolCallIdx: toolCallIdx,
+			}
+			if current.blockType == "server_tool_use" {
+				usage.observeServerToolUse(current.name)
 			}
 			// For tool_use blocks: emit the opening chunk with id + name immediately so
 			// that OpenAI clients receive id/name before any argument deltas.

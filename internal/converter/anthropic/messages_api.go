@@ -178,6 +178,18 @@ func userMessageToChat(message map[string]interface{}) []interface{} {
 				copyCacheControl(block, part)
 				userContent = append(userContent, part)
 			}
+		case "video":
+			// Video is not part of Anthropic's own content-block set, but some
+			// Anthropic-compatible providers accept it. The block is kept verbatim so the
+			// request-side conversion can hand it back to the provider untouched: a client
+			// that deliberately sent a video block is targeting a provider that reads one,
+			// and silently dropping it here leaves the model answering about media it never
+			// received.
+			if source, ok := block["source"].(map[string]interface{}); ok && len(source) > 0 {
+				part := map[string]interface{}{"type": "video", "source": source}
+				copyCacheControl(block, part)
+				userContent = append(userContent, part)
+			}
 		case "tool_result":
 			tool := map[string]interface{}{
 				"role":         "tool",
