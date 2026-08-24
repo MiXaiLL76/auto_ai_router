@@ -115,3 +115,72 @@ func TestConvertDataURLToDocument(t *testing.T) {
 		assert.Nil(t, result)
 	})
 }
+
+// TestConvertOpenAIContentToAnthropicVideo covers the request side of the video round trip:
+// a block preserved by MessagesToChat is rebuilt as an Anthropic-shaped video block and
+// handed to the provider, while OpenAI's own video_url part — which has no Anthropic
+// equivalent to map onto — keeps its explicit placeholder.
+func TestConvertOpenAIContentToAnthropicVideo(t *testing.T) {
+	t.Run("url_source_forwarded", func(t *testing.T) {
+		content := []interface{}{
+			map[string]interface{}{"type": "text", "text": "Describe it"},
+			map[string]interface{}{
+				"type":   "video",
+				"source": map[string]interface{}{"type": "url", "url": "https://example.com/clip.mp4"},
+			},
+		}
+		blocks, err := convertOpenAIContentToAnthropic(content)
+		require.NoError(t, err)
+		require.Len(t, blocks, 2)
+		assert.Equal(t, "video", blocks[1].Type)
+		require.NotNil(t, blocks[1].Source)
+		assert.Equal(t, "url", blocks[1].Source.Type)
+		assert.Equal(t, "https://example.com/clip.mp4", blocks[1].Source.URL)
+	})
+
+	t.Run("base64_source_forwarded_with_cache_control", func(t *testing.T) {
+		content := []interface{}{
+			map[string]interface{}{
+				"type": "video",
+				"source": map[string]interface{}{
+					"type": "base64", "media_type": "video/mp4", "data": "AAAA",
+				},
+				"cache_control": map[string]interface{}{"type": "ephemeral"},
+			},
+		}
+		blocks, err := convertOpenAIContentToAnthropic(content)
+		require.NoError(t, err)
+		require.Len(t, blocks, 1)
+		require.NotNil(t, blocks[0].Source)
+		assert.Equal(t, "base64", blocks[0].Source.Type)
+		assert.Equal(t, "video/mp4", blocks[0].Source.MediaType)
+		assert.Equal(t, "AAAA", blocks[0].Source.Data)
+		assert.NotNil(t, blocks[0].CacheControl)
+	})
+
+	t.Run("unusable_sources_skipped", func(t *testing.T) {
+		content := []interface{}{
+			map[string]interface{}{"type": "video"},
+			map[string]interface{}{"type": "video", "source": map[string]interface{}{"type": "url"}},
+			map[string]interface{}{"type": "video", "source": map[string]interface{}{"type": "base64"}},
+			map[string]interface{}{"type": "video", "source": map[string]interface{}{"type": "file_id", "file_id": "x"}},
+		}
+		blocks, err := convertOpenAIContentToAnthropic(content)
+		require.NoError(t, err)
+		assert.Empty(t, blocks)
+	})
+
+	t.Run("openai_video_url_keeps_placeholder", func(t *testing.T) {
+		content := []interface{}{
+			map[string]interface{}{
+				"type":      "video_url",
+				"video_url": map[string]interface{}{"url": "https://example.com/clip.mp4"},
+			},
+		}
+		blocks, err := convertOpenAIContentToAnthropic(content)
+		require.NoError(t, err)
+		require.Len(t, blocks, 1)
+		assert.Equal(t, "text", blocks[0].Type)
+		assert.Contains(t, blocks[0].Text, "Video input not supported")
+	})
+}

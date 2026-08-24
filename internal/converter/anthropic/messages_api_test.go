@@ -316,6 +316,98 @@ func TestTransformChatStreamToMessages(t *testing.T) {
 	assert.True(t, strings.HasSuffix(got, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"))
 }
 
+// TestMessagesToChatPreservesVideoBlock covers the round trip for Anthropic-compatible
+// providers that accept video content. Anthropic itself has no video block, so a client
+// sending one is deliberately targeting a provider that reads it; the intermediate chat
+// body has to carry the block through unchanged, or the request reaches the provider with
+// the attachment missing and the model answers about media it never saw.
+func TestMessagesToChatPreservesVideoBlock(t *testing.T) {
+	body := []byte(`{
+		"model":"video-capable-model",
+		"max_tokens":128,
+		"messages":[
+			{"role":"user","content":[
+				{"type":"text","text":"What happens in this video?"},
+				{"type":"video","source":{"type":"url","url":"https://example.com/clip.mp4"}}
+			]}
+		]
+	}`)
+
+	converted, _, err := MessagesToChat(body)
+	require.NoError(t, err)
+
+	var got map[string]interface{}
+	require.NoError(t, json.Unmarshal(converted, &got))
+
+	messages := got["messages"].([]interface{})
+	require.Len(t, messages, 1)
+	content := messages[0].(map[string]interface{})["content"].([]interface{})
+	require.Len(t, content, 2)
+
+	video := content[1].(map[string]interface{})
+	assert.Equal(t, "video", video["type"])
+	source := video["source"].(map[string]interface{})
+	assert.Equal(t, "url", source["type"])
+	assert.Equal(t, "https://example.com/clip.mp4", source["url"])
+}
+
+// TestMessagesToChatDropsVideoBlockWithoutSource guards the conversion against a malformed
+// block: without a source there is nothing to forward, and emitting an empty attachment
+// would be worse than leaving the text alone.
+func TestMessagesToChatDropsVideoBlockWithoutSource(t *testing.T) {
+	body := []byte(`{
+		"model":"video-capable-model",
+		"max_tokens":128,
+		"messages":[
+			{"role":"user","content":[
+				{"type":"text","text":"Describe it"},
+				{"type":"video"}
+			]}
+		]
+	}`)
+
+	converted, _, err := MessagesToChat(body)
+	require.NoError(t, err)
+
+	var got map[string]interface{}
+	require.NoError(t, json.Unmarshal(converted, &got))
+
+	messages := got["messages"].([]interface{})
+	require.Len(t, messages, 1)
+	content := messages[0].(map[string]interface{})["content"].([]interface{})
+	require.Len(t, content, 1)
+	assert.Equal(t, "text", content[0].(map[string]interface{})["type"])
+}
+
+// TestMessagesToChatDropsVideoBlockWithUnrecognizedSource guards against forwarding a video
+// block that the later Anthropic-shape conversion (mediaSourceFromMap) can't reconstruct: a
+// source shape that isn't url/base64 would otherwise round-trip through chat only to be
+// silently dropped downstream instead of never being kept in the first place.
+func TestMessagesToChatDropsVideoBlockWithUnrecognizedSource(t *testing.T) {
+	body := []byte(`{
+		"model":"video-capable-model",
+		"max_tokens":128,
+		"messages":[
+			{"role":"user","content":[
+				{"type":"text","text":"Describe it"},
+				{"type":"video","source":{"type":"file_id","file_id":"abc"}}
+			]}
+		]
+	}`)
+
+	converted, _, err := MessagesToChat(body)
+	require.NoError(t, err)
+
+	var got map[string]interface{}
+	require.NoError(t, json.Unmarshal(converted, &got))
+
+	messages := got["messages"].([]interface{})
+	require.Len(t, messages, 1)
+	content := messages[0].(map[string]interface{})["content"].([]interface{})
+	require.Len(t, content, 1)
+	assert.Equal(t, "text", content[0].(map[string]interface{})["type"])
+}
+
 func roundTripFirstUserBlock(t *testing.T, messagesBody []byte) map[string]interface{} {
 	t.Helper()
 

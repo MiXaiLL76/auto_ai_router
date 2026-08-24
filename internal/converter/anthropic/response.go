@@ -29,6 +29,7 @@ func AnthropicToOpenAI(anthropicBody []byte, model string) ([]byte, error) {
 	var textParts []string // collect text parts separately, join with separator
 	var reasoningContent string
 	var toolCalls []openai.OpenAIToolCall
+	webSearchRequests := 0
 
 	for _, block := range anthropicResp.Content {
 		switch block.Type {
@@ -38,6 +39,13 @@ func AnthropicToOpenAI(anthropicBody []byte, model string) ([]byte, error) {
 			}
 		case "thinking":
 			reasoningContent += block.Thinking
+		case "server_tool_use":
+			// Server-side tool calls are executed by the provider and have no OpenAI
+			// equivalent to surface, but they are billable. Count them so a provider that
+			// omits server_tool_use from usage is still charged for the work it did.
+			if isWebSearchToolName(block.Name) {
+				webSearchRequests++
+			}
 		case "tool_use":
 			argsJSON := "{}"
 			if block.Input != nil {
@@ -84,8 +92,30 @@ func AnthropicToOpenAI(anthropicBody []byte, model string) ([]byte, error) {
 
 	// Usage
 	openAIResp.Usage = convertAnthropicUsageToOpenAI(anthropicResp.Usage)
+	applyWebSearchFallback(openAIResp.Usage, webSearchRequests)
 
 	return json.Marshal(openAIResp)
+}
+
+// isWebSearchToolName reports whether a server_tool_use block is a web search call.
+func isWebSearchToolName(name string) bool {
+	return strings.EqualFold(strings.TrimSpace(name), "web_search")
+}
+
+// applyWebSearchFallback fills the web-search counter from server_tool_use blocks observed
+// in the response when the provider does not report one in usage. A counter the provider
+// did report always wins: it is authoritative, and may count calls that never produced a
+// content block.
+func applyWebSearchFallback(usage *openai.OpenAIUsage, observed int) {
+	if usage == nil || observed <= 0 {
+		return
+	}
+	if usage.ServerToolUse == nil {
+		usage.ServerToolUse = &openai.ServerToolUseDetails{}
+	}
+	if usage.ServerToolUse.WebSearchRequests == 0 {
+		usage.ServerToolUse.WebSearchRequests = observed
+	}
 }
 
 // openAIChatCompletionID exposes an OpenAI-compatible response ID while keeping

@@ -61,7 +61,26 @@ func convertOpenAIContentToAnthropic(content interface{}) ([]ContentBlock, error
 					Text: "[Audio input not supported by Anthropic API]",
 				})
 
+			case "video":
+				// An Anthropic-shaped video block, preserved by MessagesToChat from a
+				// client request. Anthropic itself has no video block, but some
+				// Anthropic-compatible providers do, and the client picked that shape
+				// deliberately — forward it and let the provider accept or reject it.
+				source, ok := blockMap["source"].(map[string]interface{})
+				if !ok {
+					continue
+				}
+				mediaSource := mediaSourceFromMap(source)
+				if mediaSource == nil {
+					continue
+				}
+				cb := ContentBlock{Type: "video", Source: mediaSource}
+				cb.CacheControl = blockMap["cache_control"]
+				blocks = append(blocks, cb)
+
 			case "video_url":
+				// OpenAI's own video part has no Anthropic equivalent to map onto, so it
+				// stays an explicit marker rather than a silently missing attachment.
 				blocks = append(blocks, ContentBlock{
 					Type: "text",
 					Text: "[Video input not supported by Anthropic API]",
@@ -91,6 +110,31 @@ func convertOpenAIContentToAnthropic(content interface{}) ([]ContentBlock, error
 		return blocks, nil
 	}
 	return nil, nil
+}
+
+// mediaSourceFromMap rebuilds a MediaSource from a decoded content-block source object.
+// Returns nil when the source is neither a usable url nor base64 payload, so callers can
+// skip the block instead of forwarding an empty attachment.
+func mediaSourceFromMap(source map[string]interface{}) *MediaSource {
+	mediaSource := &MediaSource{
+		Type:      stringValue(source["type"]),
+		MediaType: stringValue(source["media_type"]),
+		Data:      stringValue(source["data"]),
+		URL:       stringValue(source["url"]),
+	}
+	switch mediaSource.Type {
+	case "url":
+		if mediaSource.URL == "" {
+			return nil
+		}
+	case "base64":
+		if mediaSource.Data == "" {
+			return nil
+		}
+	default:
+		return nil
+	}
+	return mediaSource
 }
 
 // convertImageURLToAnthropic converts an OpenAI image_url value to an Anthropic image block.

@@ -7,6 +7,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/mixaill76/auto_ai_router/internal/converter/openai"
 )
 
@@ -335,4 +338,119 @@ func parseOpenAIChatStream(t *testing.T, body string) ([]openai.OpenAIStreamingC
 		chunks = append(chunks, chunk)
 	}
 	return chunks, terminal
+}
+
+// TestTransformAnthropicStreamToOpenAICountsWebSearchServerToolUse covers the streaming
+// counterpart of the non-stream web-search accounting: a provider that runs the web_search
+// server tool but omits server_tool_use from usage is still billed for it, counted from the
+// server_tool_use blocks opened in the stream.
+func TestTransformAnthropicStreamToOpenAICountsWebSearchServerToolUse(t *testing.T) {
+	tests := []struct {
+		name          string
+		events        []string
+		wantWebSearch int
+	}{
+		{
+			name: "counted from stream blocks",
+			events: []string{
+				`data: {"type":"content_block_start","content_block":{"type":"server_tool_use","id":"call_1","name":"web_search"}}`,
+				`data: {"type":"content_block_stop"}`,
+				`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":4}}`,
+			},
+			wantWebSearch: 1,
+		},
+		{
+			name: "each block counts once",
+			events: []string{
+				`data: {"type":"content_block_start","content_block":{"type":"server_tool_use","id":"call_1","name":"web_search"}}`,
+				`data: {"type":"content_block_stop"}`,
+				`data: {"type":"content_block_start","content_block":{"type":"server_tool_use","id":"call_2","name":"web_search"}}`,
+				`data: {"type":"content_block_stop"}`,
+				`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":4}}`,
+			},
+			wantWebSearch: 2,
+		},
+		{
+			name: "provider counter wins over observed blocks",
+			events: []string{
+				`data: {"type":"content_block_start","content_block":{"type":"server_tool_use","id":"call_1","name":"web_search"}}`,
+				`data: {"type":"content_block_stop"}`,
+				`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":4,"server_tool_use":{"web_search_requests":3}}}`,
+			},
+			wantWebSearch: 3,
+		},
+		{
+			name: "other server tools are not billed as web search",
+			events: []string{
+				`data: {"type":"content_block_start","content_block":{"type":"server_tool_use","id":"call_1","name":"code_execution"}}`,
+				`data: {"type":"content_block_stop"}`,
+				`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":4}}`,
+			},
+			wantWebSearch: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			events := append([]string{
+				`data: {"type":"message_start","message":{"id":"msg_ws","usage":{"input_tokens":9}}}`,
+			}, tt.events...)
+			events = append(events, `data: {"type":"message_stop"}`)
+
+			var output bytes.Buffer
+			if err := TransformAnthropicStreamToOpenAI(strings.NewReader(strings.Join(events, "\n\n")), "model", &output); err != nil {
+				t.Fatalf("transform Anthropic stream: %v", err)
+			}
+
+			got := 0
+			for _, line := range strings.Split(output.String(), "\n") {
+				if !strings.HasPrefix(line, "data: ") || line == "data: [DONE]" {
+					continue
+				}
+				var chunk openai.OpenAIStreamingChunk
+				if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &chunk); err != nil {
+					t.Fatalf("unmarshal OpenAI stream chunk: %v", err)
+				}
+				if chunk.Usage != nil && chunk.Usage.ServerToolUse != nil {
+					got = chunk.Usage.ServerToolUse.WebSearchRequests
+				}
+			}
+			if got != tt.wantWebSearch {
+				t.Fatalf("web_search_requests in terminal usage chunk: got %d, want %d", got, tt.wantWebSearch)
+			}
+		})
+	}
+}
+
+// TestTransformAnthropicStreamToOpenAICountsWebSearchWithoutAnyProviderUsage covers a provider
+// that never emits a usage field at all (no message_start usage, no message_delta usage): the
+// web_search fallback must still surface in the terminal chunk instead of the response shipping
+// with no usage whatsoever, which would leave the request completely unbilled.
+func TestTransformAnthropicStreamToOpenAICountsWebSearchWithoutAnyProviderUsage(t *testing.T) {
+	events := strings.Join([]string{
+		`data: {"type":"message_start","message":{"id":"msg_ws"}}`,
+		`data: {"type":"content_block_start","content_block":{"type":"server_tool_use","id":"call_1","name":"web_search"}}`,
+		`data: {"type":"content_block_stop"}`,
+		`data: {"type":"message_delta","delta":{"stop_reason":"end_turn"}}`,
+		`data: {"type":"message_stop"}`,
+	}, "\n\n")
+
+	var output bytes.Buffer
+	require.NoError(t, TransformAnthropicStreamToOpenAI(strings.NewReader(events), "model", &output))
+
+	var gotUsage *openai.OpenAIUsage
+	for _, line := range strings.Split(output.String(), "\n") {
+		if !strings.HasPrefix(line, "data: ") || line == "data: [DONE]" {
+			continue
+		}
+		var chunk openai.OpenAIStreamingChunk
+		require.NoError(t, json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &chunk))
+		if chunk.Usage != nil {
+			gotUsage = chunk.Usage
+		}
+	}
+
+	require.NotNil(t, gotUsage, "terminal chunk must carry usage when web_search ran, even without any provider usage field")
+	require.NotNil(t, gotUsage.ServerToolUse)
+	assert.Equal(t, 1, gotUsage.ServerToolUse.WebSearchRequests)
 }

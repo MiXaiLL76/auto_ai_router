@@ -183,6 +183,20 @@ func userMessageToChat(message map[string]interface{}) ([]interface{}, error) {
 				copyCacheControl(block, part)
 				userContent = append(userContent, part)
 			}
+		case "video":
+			// Video is not part of Anthropic's own content-block set, but some
+			// Anthropic-compatible providers accept it. The block is kept verbatim so the
+			// request-side conversion can hand it back to the provider untouched: a client
+			// that deliberately sent a video block is targeting a provider that reads one,
+			// and silently dropping it here leaves the model answering about media it never
+			// received. The source shape is validated against the same url/base64 rules the
+			// later Anthropic-shape conversion enforces, so a block accepted here always
+			// survives the round trip instead of being dropped downstream.
+			if source := sourceToVideoSource(block["source"]); source != nil {
+				part := map[string]interface{}{"type": "video", "source": source}
+				copyCacheControl(block, part)
+				userContent = append(userContent, part)
+			}
 		case "document":
 			part, err := sourceToDocumentPart(block["source"])
 			if err != nil {
@@ -369,6 +383,29 @@ func sourceToImageURL(raw interface{}) string {
 	default:
 		return ""
 	}
+}
+
+// sourceToVideoSource validates a video block's source the same way mediaSourceFromMap
+// validates it on the outbound path, so a block accepted here is guaranteed to survive the
+// later conversion instead of being silently dropped after round-tripping through chat.
+func sourceToVideoSource(raw interface{}) map[string]interface{} {
+	source, ok := raw.(map[string]interface{})
+	if !ok {
+		return nil
+	}
+	switch source["type"] {
+	case "base64":
+		if stringValue(source["data"]) == "" {
+			return nil
+		}
+	case "url":
+		if stringValue(source["url"]) == "" {
+			return nil
+		}
+	default:
+		return nil
+	}
+	return source
 }
 
 func sourceToDocumentPart(raw interface{}) (map[string]interface{}, error) {
