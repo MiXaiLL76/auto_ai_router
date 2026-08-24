@@ -365,7 +365,7 @@ func VertexChatResponseToOpenAIImage(vertexBody []byte) ([]byte, error) {
 	}
 
 	if vertexResp.UsageMetadata != nil {
-		openAIResp.Usage = convertVertexUsageToImageUsage(vertexResp.UsageMetadata)
+		openAIResp.Usage = convertVertexUsageToImageUsage(vertexResp.UsageMetadata, len(openAIResp.Data))
 	}
 
 	return json.Marshal(openAIResp)
@@ -373,7 +373,7 @@ func VertexChatResponseToOpenAIImage(vertexBody []byte) ([]byte, error) {
 
 // convertVertexUsageToImageUsage maps Vertex UsageMetadata to the OpenAI images API usage format.
 // The images API uses input_tokens/output_tokens rather than the chat prompt_tokens/completion_tokens.
-func convertVertexUsageToImageUsage(meta *genai.GenerateContentResponseUsageMetadata) *openai.OpenAIImageUsage {
+func convertVertexUsageToImageUsage(meta *genai.GenerateContentResponseUsageMetadata, imageCount int) *openai.OpenAIImageUsage {
 	inputTokens := int(meta.PromptTokenCount)
 
 	var textTokens, imageTokens int
@@ -393,14 +393,26 @@ func convertVertexUsageToImageUsage(meta *genai.GenerateContentResponseUsageMeta
 	}
 
 	outputTokens := int(meta.CandidatesTokenCount)
+	outputImageTokens := 0
 	for _, detail := range meta.CandidatesTokensDetails {
 		if detail == nil {
 			continue
 		}
 		switch genai.MediaModality(detail.Modality) {
 		case genai.MediaModalityImage, genai.MediaModalityVideo:
-			// image output tokens counted in CandidatesTokenCount
+			outputImageTokens += int(detail.TokenCount)
 		}
+	}
+	if outputImageTokens == 0 && imageCount > 0 {
+		outputImageTokens = outputTokens
+	}
+	if outputImageTokens > outputTokens {
+		outputImageTokens = outputTokens
+	}
+
+	var outputTokensDetails *openai.OpenAIImageOutputTokenDetails
+	if outputImageTokens > 0 {
+		outputTokensDetails = &openai.OpenAIImageOutputTokenDetails{ImageTokens: outputImageTokens}
 	}
 
 	return &openai.OpenAIImageUsage{
@@ -409,8 +421,9 @@ func convertVertexUsageToImageUsage(meta *genai.GenerateContentResponseUsageMeta
 			TextTokens:  textTokens,
 			ImageTokens: imageTokens,
 		},
-		OutputTokens: outputTokens,
-		TotalTokens:  inputTokens + outputTokens,
+		OutputTokens:        outputTokens,
+		OutputTokensDetails: outputTokensDetails,
+		TotalTokens:         inputTokens + outputTokens,
 	}
 }
 

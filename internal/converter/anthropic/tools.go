@@ -2,6 +2,7 @@ package anthropic
 
 import (
 	"encoding/json"
+	"strings"
 
 	converterutil "github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
 )
@@ -105,16 +106,104 @@ func convertOpenAIToolsToAnthropic(openAITools []interface{}) []AnthropicTool {
 				Name: "bash",
 			})
 		case "web_search", "web_search_preview":
-			tools = append(tools, AnthropicTool{
+			tool := AnthropicTool{
 				Type: "web_search_20250305",
 				Name: "web_search",
-			})
+			}
+			applyWebSearchOptions(&tool, toolMap)
+			tools = append(tools, tool)
+		default:
+			// Built-in tools that already carry their versioned Anthropic type identifier
+			// (e.g. "web_search_20250305") reach this switch whenever the request started
+			// life as an Anthropic Messages call: MessagesToChat keeps such tools verbatim
+			// in the intermediate chat body, so on the way back they match none of the
+			// unversioned aliases above. Dropping them leaves the provider with no tool at
+			// all and the model answers as if it had never been offered one.
+			if builtin, ok := anthropicBuiltinToolFromVersionedType(toolMap, toolType); ok {
+				if strings.HasPrefix(toolType, "web_search_") {
+					applyWebSearchOptions(&builtin, toolMap)
+				}
+				tools = append(tools, builtin)
+			}
 		}
 	}
 	if len(tools) == 0 {
 		return nil
 	}
 	return tools
+}
+
+// applyWebSearchOptions copies the web_search tool's optional fields (per the
+// Anthropic Tool definition: max_uses, allowed_domains, blocked_domains,
+// user_location, cache_control) from the client-supplied tool map onto the
+// converted Anthropic tool, whether it arrived as OpenAI's "web_search"/
+// "web_search_preview" shorthand or Anthropic's own versioned type.
+func applyWebSearchOptions(tool *AnthropicTool, toolMap map[string]interface{}) {
+	if v, ok := toolMap["max_uses"].(float64); ok {
+		tool.MaxUses = int(v)
+	}
+	if v, ok := toolMap["allowed_domains"]; ok {
+		tool.AllowedDomains = converterutil.OmitEmptySlice(v)
+	}
+	if v, ok := toolMap["blocked_domains"]; ok {
+		tool.BlockedDomains = converterutil.OmitEmptySlice(v)
+	}
+	if v, ok := toolMap["user_location"]; ok {
+		tool.UserLocation = v
+	}
+	if v, ok := toolMap["cache_control"]; ok {
+		tool.CacheControl = v
+	}
+}
+
+// anthropicBuiltinTypePrefixes lists the versioned type prefixes of Anthropic built-in
+// tools together with the canonical tool name Anthropic expects next to each type.
+//
+// text_editor_'s canonical name changed with the Claude 4 tool version: types before
+// text_editor_20250429 (Claude 3.5/3.7) use "str_replace_editor", while
+// text_editor_20250429 and later (Claude 4+) use "str_replace_based_edit_tool" — sending
+// the old name with a new type produces a name/type mismatch Anthropic rejects.
+var anthropicBuiltinTypePrefixes = []struct {
+	prefix string
+	name   string
+}{
+	{"computer_", "computer"},
+	{"bash_", "bash"},
+	{"text_editor_", "str_replace_editor"},
+	{"web_search_", "web_search"},
+}
+
+const textEditorBasedEditToolMinVersion = "text_editor_20250429"
+
+// anthropicBuiltinToolFromVersionedType rebuilds an Anthropic built-in tool from a
+// definition that already uses the versioned type identifier. It mirrors the set of
+// prefixes MessagesToChat passes through untouched. Returns ok=false for every other
+// type, so genuinely unknown tools keep being dropped as before.
+func anthropicBuiltinToolFromVersionedType(toolMap map[string]interface{}, toolType string) (AnthropicTool, bool) {
+	for _, builtin := range anthropicBuiltinTypePrefixes {
+		if !strings.HasPrefix(toolType, builtin.prefix) {
+			continue
+		}
+		tool := AnthropicTool{
+			Type: toolType,
+			Name: converterutil.GetString(toolMap, "name"),
+		}
+		if tool.Name == "" {
+			tool.Name = builtin.name
+			if builtin.prefix == "text_editor_" && toolType >= textEditorBasedEditToolMinVersion {
+				tool.Name = "str_replace_based_edit_tool"
+			}
+		}
+		if width, ok := toolMap["display_width_px"].(float64); ok {
+			tool.DisplayWidthPx = int(width)
+		}
+		if height, ok := toolMap["display_height_px"].(float64); ok {
+			tool.DisplayHeightPx = int(height)
+		}
+		tool.CacheControl = toolMap["cache_control"]
+		return tool, true
+	}
+	return AnthropicTool{}, false
 }
 
 // expandAllowedTools converts an "allowed_tools" tool_choice into a supported Anthropic/Bedrock

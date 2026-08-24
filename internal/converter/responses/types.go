@@ -179,6 +179,15 @@ type Tool struct {
 	UserLocation      interface{} `json:"user_location,omitempty"`
 	SearchContextSize string      `json:"search_context_size,omitempty"`
 
+	// Anthropic-specific web_search restriction fields, carried through as-is
+	// for a Responses-shaped request that targets an Anthropic backend (see
+	// anthropicresponses.responsesToolsToAnthropic). No equivalent in OpenAI's
+	// own Responses API web_search_preview schema.
+	MaxUses        *int        `json:"max_uses,omitempty"`
+	AllowedDomains interface{} `json:"allowed_domains,omitempty"`
+	BlockedDomains interface{} `json:"blocked_domains,omitempty"`
+	CacheControl   interface{} `json:"cache_control,omitempty"`
+
 	// file_search
 	VectorStoreIDs []string    `json:"vector_store_ids,omitempty"`
 	MaxNumResults  *int        `json:"max_num_results,omitempty"`

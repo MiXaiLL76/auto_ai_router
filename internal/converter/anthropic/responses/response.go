@@ -74,8 +74,27 @@ func anthropicContentToOutputItems(blocks []anthropic.ContentBlock) []responses.
 			msgContent = append(msgContent, responses.OutputContent{
 				Type:        "output_text",
 				Text:        block.Text,
-				Annotations: []responses.Annotation{},
+				Annotations: webSearchCitationsToAnnotations(block.Text, block.Citations),
 			})
+
+		case "server_tool_use":
+			// Flush accumulated text before a search call.
+			flushMessage()
+			if block.Name == "web_search" {
+				output = append(output, responses.OutputItem{
+					Type:   "web_search_call",
+					ID:     responses.GenerateItemID("ws_"),
+					Status: "completed",
+					Action: webSearchActionFromInput(block.Input),
+				})
+			}
+			// Other server tools (if any are added in future) have no
+			// Responses API equivalent yet — skip them rather than guess.
+
+			// web_search_tool_result blocks carry no separate Responses API
+			// item (OpenAI's web_search_call doesn't expose raw results
+			// either); their content surfaces via the text block's
+			// citations above instead — nothing to do here.
 
 		case "thinking":
 			// Flush any accumulated text first.
@@ -150,6 +169,55 @@ func anthropicContentToOutputItems(blocks []anthropic.ContentBlock) []responses.
 	return output
 }
 
+// webSearchCitationsToAnnotations converts a text block's Anthropic web_search
+// citations into Responses API url_citation annotations.
+//
+// Anthropic's cited_text is an excerpt of the *source* page (up to 150 chars),
+// not a substring of Claude's own response text — the official example has a
+// text block "Claude Shannon was born on April 30, 1916, in Petoskey,
+// Michigan" cited by cited_text "Claude Elwood Shannon (April 30, 1916 –
+// February 24, 2001) was an American mathematician...", which never occurs
+// verbatim in the response. Anthropic also cites at whole-block granularity
+// (a text block is the minimal citable unit, not a substring within it), so
+// each citation is annotated over the entire block rather than a located
+// range.
+func webSearchCitationsToAnnotations(text string, citations []anthropic.AnthropicCitation) []responses.Annotation {
+	annotations := []responses.Annotation{}
+	textLen := len(text)
+	for _, c := range citations {
+		if c.Type != "web_search_result_location" || c.URL == "" {
+			continue
+		}
+		annotations = append(annotations, responses.Annotation{
+			Type:       "url_citation",
+			URL:        c.URL,
+			Title:      c.Title,
+			StartIndex: 0,
+			EndIndex:   textLen,
+		})
+	}
+	return annotations
+}
+
+// webSearchActionFromInput extracts the search query from a server_tool_use
+// block's input (e.g. {"query": "..."}) into the {"type":"search","query":...}
+// shape the Responses API's web_search_call.action field expects. Anthropic
+// only ever provides one query per server_tool_use call.
+func webSearchActionFromInput(input interface{}) interface{} {
+	m, ok := input.(map[string]interface{})
+	if !ok {
+		return nil
+	}
+	q, ok := m["query"].(string)
+	if !ok || q == "" {
+		return nil
+	}
+	return map[string]interface{}{
+		"type":  "search",
+		"query": q,
+	}
+}
+
 // anthropicStopReasonToStatus maps Anthropic stop_reason to Responses API status.
 func anthropicStopReasonToStatus(stopReason string) (string, *responses.IncompleteDetails) {
 	switch stopReason {
@@ -159,6 +227,13 @@ func anthropicStopReasonToStatus(stopReason string) (string, *responses.Incomple
 		return "incomplete", &responses.IncompleteDetails{Reason: "max_output_tokens"}
 	case "stop_sequence":
 		return "completed", nil
+	case "pause_turn":
+		// A long-running server-tool turn (e.g. an extended web_search loop)
+		// was paused mid-flight, not finished. Per Anthropic's docs, the
+		// paused assistant content must be sent back unchanged to continue —
+		// reporting "completed" here would tell the client the answer is
+		// final when more server-tool work remains.
+		return "incomplete", &responses.IncompleteDetails{Reason: "pause_turn"}
 	default:
 		return "completed", nil
 	}

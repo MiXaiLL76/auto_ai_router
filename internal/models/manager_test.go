@@ -14,6 +14,7 @@ import (
 	dbmodels "github.com/mixaill76/auto_ai_router/internal/litellmdb/models"
 	"github.com/mixaill76/auto_ai_router/internal/scope"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestNew(t *testing.T) {
@@ -1429,6 +1430,34 @@ func TestModelPriceRegistry_MergeDB(t *testing.T) {
 	// New DB entries should be added.
 	gemini := registry.GetPrice("gemini-1.5-pro")
 	assert.NotNil(t, gemini)
+}
+
+// TestModelPriceRegistry_MergeDB_ScopedToExactKey guards against an earlier
+// version of this fix that swept the whole registry for any key whose
+// NormalizeModelName matched the DB override's key, silently clobbering
+// unrelated aliases that happen to share a normalized form. A DB override
+// for the plain model must never leak into an independently, deliberately
+// priced alias like "yandex/gpt-5.1" (see llmarena/services default.libsonnet)
+// unless the DB record names that alias's own exact key.
+func TestModelPriceRegistry_MergeDB_ScopedToExactKey(t *testing.T) {
+	registry := NewModelPriceRegistry()
+
+	registry.Update(map[string]*ModelPrice{
+		"gpt-5.1":        {InputCostPerToken: 1.625e-06},
+		"yandex/gpt-5.1": {InputCostPerToken: 1.22353e-05},
+	})
+
+	registry.MergeDB(map[string]*ModelPrice{
+		"gpt-5.1": {InputCostPerToken: 9.99e-06},
+	})
+
+	plain := registry.GetPrice("gpt-5.1")
+	require.NotNil(t, plain)
+	assert.Equal(t, 9.99e-06, plain.InputCostPerToken, "plain gpt-5.1 should pick up the DB override")
+
+	yandex := registry.GetPrice("yandex/gpt-5.1")
+	require.NotNil(t, yandex)
+	assert.Equal(t, 1.22353e-05, yandex.InputCostPerToken, "yandex/gpt-5.1 must be untouched — the DB override didn't name it")
 }
 
 func TestModelPriceRegistry_GetPrice_NotFound(t *testing.T) {

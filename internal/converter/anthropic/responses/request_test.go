@@ -222,7 +222,6 @@ func TestResponsesRequestToAnthropic_UnsupportedToolsSkipped(t *testing.T) {
 		"model": "claude-opus-4-5",
 		"input": "test",
 		"tools": [
-			{"type": "web_search_preview"},
 			{"type": "file_search"},
 			{"type": "code_interpreter"}
 		]
@@ -239,6 +238,107 @@ func TestResponsesRequestToAnthropic_UnsupportedToolsSkipped(t *testing.T) {
 		tools, _ := toolsRaw.([]interface{})
 		assert.Len(t, tools, 0)
 	}
+}
+
+// TestResponsesRequestToAnthropic_WebSearchConverted verifies that the
+// Responses API's built-in web_search tool (in all its documented type
+// spellings) is converted to Anthropic's native web_search_20250305 tool
+// instead of being silently dropped — this used to be indistinguishable
+// from an unsupported tool like file_search/code_interpreter, so any web
+// search request through /v1/responses → Anthropic returned HTTP 200 with
+// no search ever performed.
+func TestResponsesRequestToAnthropic_WebSearchConverted(t *testing.T) {
+	for _, toolType := range []string{"web_search", "web_search_preview", "web_search_preview_2025_03_11"} {
+		t.Run(toolType, func(t *testing.T) {
+			body := `{
+				"model": "claude-opus-4-5",
+				"input": "test",
+				"tools": [{"type": "` + toolType + `"}]
+			}`
+
+			result, err := ResponsesRequestToAnthropic([]byte(body), "claude-opus-4-5")
+			require.NoError(t, err)
+
+			var ar map[string]interface{}
+			require.NoError(t, json.Unmarshal(result, &ar))
+
+			tools := ar["tools"].([]interface{})
+			require.Len(t, tools, 1)
+			tool := tools[0].(map[string]interface{})
+			assert.Equal(t, "web_search_20250305", tool["type"])
+			assert.Equal(t, "web_search", tool["name"])
+		})
+	}
+}
+
+// TestResponsesRequestToAnthropic_NativeWebSearchTypePreserved verifies that
+// Anthropic's own versioned web_search type, sent directly by a client, is
+// passed through unchanged rather than falling into the unsupported-tool
+// default branch.
+func TestResponsesRequestToAnthropic_NativeWebSearchTypePreserved(t *testing.T) {
+	body := `{
+		"model": "claude-opus-4-5",
+		"input": "test",
+		"tools": [{"type": "web_search_20260318", "name": "web_search"}]
+	}`
+
+	result, err := ResponsesRequestToAnthropic([]byte(body), "claude-opus-4-5")
+	require.NoError(t, err)
+
+	var ar map[string]interface{}
+	require.NoError(t, json.Unmarshal(result, &ar))
+
+	tools := ar["tools"].([]interface{})
+	require.Len(t, tools, 1)
+	assert.Equal(t, "web_search_20260318", tools[0].(map[string]interface{})["type"])
+}
+
+// TestResponsesRequestToAnthropic_DatedOpenAIWebSearchTypeMapped verifies that
+// an OpenAI Responses API web_search tool type not covered by the explicit
+// cases (e.g. a newer dated release like "web_search_2025_08_26") is mapped
+// to Anthropic's stable web_search_20250305 rather than forwarded verbatim —
+// Anthropic doesn't recognize OpenAI's own dated type strings and would
+// reject them with a 400.
+func TestResponsesRequestToAnthropic_DatedOpenAIWebSearchTypeMapped(t *testing.T) {
+	body := `{
+		"model": "claude-opus-4-5",
+		"input": "test",
+		"tools": [{"type": "web_search_2025_08_26"}]
+	}`
+
+	result, err := ResponsesRequestToAnthropic([]byte(body), "claude-opus-4-5")
+	require.NoError(t, err)
+
+	var ar map[string]interface{}
+	require.NoError(t, json.Unmarshal(result, &ar))
+
+	tools := ar["tools"].([]interface{})
+	require.Len(t, tools, 1)
+	tool := tools[0].(map[string]interface{})
+	assert.Equal(t, "web_search_20250305", tool["type"])
+	assert.Equal(t, "web_search", tool["name"])
+}
+
+// TestResponsesRequestToAnthropic_WebSearchToolChoice verifies a tool_choice
+// forcing the web_search built-in maps to Anthropic's {"type":"tool","name":
+// "web_search"} instead of being dropped to the "auto" default.
+func TestResponsesRequestToAnthropic_WebSearchToolChoice(t *testing.T) {
+	body := `{
+		"model": "claude-opus-4-5",
+		"input": "test",
+		"tools": [{"type": "web_search"}],
+		"tool_choice": {"type": "web_search"}
+	}`
+
+	result, err := ResponsesRequestToAnthropic([]byte(body), "claude-opus-4-5")
+	require.NoError(t, err)
+
+	var ar map[string]interface{}
+	require.NoError(t, json.Unmarshal(result, &ar))
+
+	toolChoice := ar["tool_choice"].(map[string]interface{})
+	assert.Equal(t, "tool", toolChoice["type"])
+	assert.Equal(t, "web_search", toolChoice["name"])
 }
 
 func TestResponsesRequestToAnthropic_ToolChoiceNone(t *testing.T) {

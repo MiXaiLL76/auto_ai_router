@@ -264,7 +264,14 @@ func (a *ProxyModelTable) FetchModelsForAIR(ctx context.Context, signingKey stri
 		// Build ModelPrice from CustomPricingLiteLLMParams
 		if price := convertPricingToModelPrice(&model.LlmParams.CustomPricingLiteLLMParams); price != nil {
 			price.LiteLLMProvider = pricingProviderName(model.LlmParams)
-			airPrices[manager.NormalizeModelName(modelName)] = price
+			// Key by the exact DB model name, not its normalized form: MergeDB
+			// treats each key as an exact override (plus that key's own
+			// lowercased form) specifically so a price for "gpt-5-mini" never
+			// leaks into a distinctly-keyed "openrouter/gpt-5-mini" alias or
+			// vice versa. Normalizing here would collapse both DB rows into
+			// the same map key before MergeDB ever sees them, silently
+			// dropping one price — defeating that protection entirely.
+			airPrices[modelName] = price
 		}
 	}
 
@@ -435,6 +442,12 @@ func convertPricingToModelPrice(p *queries.CustomPricingLiteLLMParams) *manager.
 	if p.OutputCostPerTokenAbove272kTokens != nil {
 		price.OutputCostPerTokenAbove272k = *p.OutputCostPerTokenAbove272kTokens
 	}
+	if p.InputCostPerTokenAbove512kTokens != nil {
+		price.InputCostPerTokenAbove512k = *p.InputCostPerTokenAbove512kTokens
+	}
+	if p.OutputCostPerTokenAbove512kTokens != nil {
+		price.OutputCostPerTokenAbove512k = *p.OutputCostPerTokenAbove512kTokens
+	}
 	if p.InputCostPerAudioToken != nil {
 		price.InputCostPerAudioToken = *p.InputCostPerAudioToken
 	}
@@ -485,6 +498,12 @@ func convertPricingToModelPrice(p *queries.CustomPricingLiteLLMParams) *manager.
 	}
 	if p.CacheCreationInputTokenCostAbove272kTokens != nil {
 		price.CacheCreationInputTokenCostAbove272k = *p.CacheCreationInputTokenCostAbove272kTokens
+	}
+	if p.CacheReadInputTokenCostAbove512kTokens != nil {
+		price.CacheReadInputTokenCostAbove512k = *p.CacheReadInputTokenCostAbove512kTokens
+	}
+	if p.CacheCreationInputTokenCostAbove512kTokens != nil {
+		price.CacheCreationInputTokenCostAbove512k = *p.CacheCreationInputTokenCostAbove512kTokens
 	}
 	if p.CacheReadInputAudioTokenCost != nil {
 		price.CacheReadInputAudioTokenCost = *p.CacheReadInputAudioTokenCost

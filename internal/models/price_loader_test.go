@@ -118,6 +118,43 @@ func TestLoadModelPrices_InfersProviderFromPrefixedKey(t *testing.T) {
 	assert.Equal(t, "vertex_ai", prices["gemini-2.5-flash"].LiteLLMProvider)
 }
 
+func TestLoadModelPrices_InfersProviderFromBareModelName(t *testing.T) {
+	// Real-world case: a price file keys entries by plain model name (no
+	// "provider/model" convention) and never sets litellm_provider at all --
+	// the model-name prefix is the only signal available.
+	filePath := filepath.Join(t.TempDir(), "prices.json")
+	require.NoError(t, os.WriteFile(filePath, []byte(`{
+		"gemini-2.5-pro": {
+			"input_cost_per_token": 0.000001625,
+			"input_cost_per_token_above_200k_tokens": 0.00000325
+		},
+		"claude-sonnet-4.5": {
+			"input_cost_per_token": 0.0000039,
+			"input_cost_per_token_above_200k_tokens": 0.0000078
+		}
+	}`), 0o600))
+
+	prices, err := LoadModelPrices(filePath)
+	require.NoError(t, err)
+	assert.Equal(t, "gemini", prices["gemini-2.5-pro"].LiteLLMProvider)
+	// A bare name with no recognized prefix must stay empty, not guess wrong.
+	assert.Equal(t, "", prices["claude-sonnet-4.5"].LiteLLMProvider)
+}
+
+func TestLoadModelPrices_ExplicitProviderWinsOverNameInference(t *testing.T) {
+	filePath := filepath.Join(t.TempDir(), "prices.json")
+	require.NoError(t, os.WriteFile(filePath, []byte(`{
+		"gemini-2.5-pro": {
+			"input_cost_per_token": 0.000001625,
+			"litellm_provider": "vertex_ai"
+		}
+	}`), 0o600))
+
+	prices, err := LoadModelPrices(filePath)
+	require.NoError(t, err)
+	assert.Equal(t, "vertex_ai", prices["gemini-2.5-pro"].LiteLLMProvider)
+}
+
 func TestLoadModelPrices_FromFilePath(t *testing.T) {
 	// Create a temporary file with valid JSON
 	tmpDir := t.TempDir()
@@ -268,4 +305,70 @@ func TestLoadFromHTTP_UnsupportedScheme(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unsupported scheme")
 	assert.Nil(t, data)
+}
+
+func TestLoadModelPrices_BareKeyWinsOverPrefixed(t *testing.T) {
+	filePath := filepath.Join(t.TempDir(), "prices.json")
+	require.NoError(t, os.WriteFile(filePath, []byte(`{
+		"gpt-4":        {"input_cost_per_token": 1.0e-06, "output_cost_per_token": 4.0e-06},
+		"openai/gpt-4": {"input_cost_per_token": 2.0e-06, "output_cost_per_token": 8.0e-06}
+	}`), 0o600))
+
+	prices, err := LoadModelPrices(filePath)
+	require.NoError(t, err)
+
+	// Bare key must win over prefixed key
+	assert.Equal(t, 1.0e-06, prices["gpt-4"].InputCostPerToken)
+}
+
+func TestLoadModelPrices_BareKeyWinsOverPrefixed_ReverseOrder(t *testing.T) {
+	// Prefixed entry listed first in JSON — bare key must still win
+	filePath := filepath.Join(t.TempDir(), "prices.json")
+	require.NoError(t, os.WriteFile(filePath, []byte(`{
+		"openai/gpt-4": {"input_cost_per_token": 2.0e-06, "output_cost_per_token": 8.0e-06},
+		"gpt-4":        {"input_cost_per_token": 1.0e-06, "output_cost_per_token": 4.0e-06}
+	}`), 0o600))
+
+	prices, err := LoadModelPrices(filePath)
+	require.NoError(t, err)
+
+	assert.Equal(t, 1.0e-06, prices["gpt-4"].InputCostPerToken)
+}
+
+// TestLoadModelPrices_PrefixedKeySurvivesBareCollision_BothOrders locks in the
+// fix for the bug where the prefixed sibling's own raw key ("openai/gpt-4")
+// was silently dropped from the registry whenever Go's randomized map
+// iteration happened to visit the bare entry ("gpt-4") first — a `continue`
+// on the collision branch skipped registering the prefixed entry's raw key
+// entirely, not just its (correctly bare-owned) normalized key. Since Go map
+// iteration order isn't controllable from a test, this checks both JSON
+// orderings directly against the same assertion to make sure neither one
+// depends on which entry the loader happens to see first.
+func TestLoadModelPrices_PrefixedKeySurvivesBareCollision_BothOrders(t *testing.T) {
+	orderings := map[string]string{
+		"bare_first": `{
+			"gpt-4":        {"input_cost_per_token": 1.0e-06, "output_cost_per_token": 4.0e-06},
+			"openai/gpt-4": {"input_cost_per_token": 2.0e-06, "output_cost_per_token": 8.0e-06}
+		}`,
+		"prefixed_first": `{
+			"openai/gpt-4": {"input_cost_per_token": 2.0e-06, "output_cost_per_token": 8.0e-06},
+			"gpt-4":        {"input_cost_per_token": 1.0e-06, "output_cost_per_token": 4.0e-06}
+		}`,
+	}
+
+	for name, jsonBody := range orderings {
+		t.Run(name, func(t *testing.T) {
+			filePath := filepath.Join(t.TempDir(), "prices.json")
+			require.NoError(t, os.WriteFile(filePath, []byte(jsonBody), 0o600))
+
+			prices, err := LoadModelPrices(filePath)
+			require.NoError(t, err)
+
+			require.Contains(t, prices, "gpt-4")
+			assert.Equal(t, 1.0e-06, prices["gpt-4"].InputCostPerToken, "bare key must own the shared normalized entry")
+
+			require.Contains(t, prices, "openai/gpt-4", "prefixed sibling's own raw key must survive the collision")
+			assert.Equal(t, 2.0e-06, prices["openai/gpt-4"].InputCostPerToken)
+		})
+	}
 }

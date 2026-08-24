@@ -32,6 +32,19 @@ func GetString(m map[string]interface{}, key string) string {
 	return ""
 }
 
+// OmitEmptySlice returns nil when v is a zero-length slice value (as produced by
+// unmarshaling a JSON "[]" into an interface{} field), so a struct field typed
+// interface{} with a `json:"...,omitempty"` tag actually omits it on re-marshal —
+// encoding/json's omitempty only checks IsNil() for interface-typed fields, so a
+// boxed empty slice is never treated as empty on its own. Any other value
+// (including nil) passes through unchanged.
+func OmitEmptySlice(v interface{}) interface{} {
+	if arr, ok := v.([]interface{}); ok && len(arr) == 0 {
+		return nil
+	}
+	return v
+}
+
 // ExtractTextBlocks returns all text content blocks found in the OpenAI content payload.
 // For plain string content, it returns a single-element slice with that string.
 func ExtractTextBlocks(content interface{}) []string {

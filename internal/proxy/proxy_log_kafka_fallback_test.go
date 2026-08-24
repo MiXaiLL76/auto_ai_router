@@ -134,18 +134,24 @@ func TestLogSpendToLiteLLMDB_NormalizesTokenUsageBeforePersisting(t *testing.T) 
 	assert.Equal(t, float64(2), ttlDetails["ephemeral_1h_input_tokens"])
 }
 
+// TestLogSpendToLiteLLMDB_PreservesTeamID also asserts BillingTeamID: it must
+// hold the token's real team only, never the credential-name substitution
+// used for log/DailyTeamSpend attribution — see BillingTeamID's doc comment
+// in models.SpendLogEntry for why aggregateSpendUpdates depends on that split.
 func TestLogSpendToLiteLLMDB_PreservesTeamID(t *testing.T) {
 	tests := []struct {
-		name               string
-		teamID             string
-		actualCredential   string
-		credentialFallback bool
-		expectedID         string
+		name                  string
+		teamID                string
+		actualCredential      string
+		credentialFallback    bool
+		expectedID            string
+		expectedBillingTeamID string
 	}{
-		{name: "no team", expectedID: ""},
-		{name: "credential fallback", credentialFallback: true, expectedID: "openai_primary"},
-		{name: "actual credential fallback", actualCredential: "provider-1", credentialFallback: true, expectedID: "provider-1"},
-		{name: "token team", teamID: "team-1", credentialFallback: true, expectedID: "team-1"},
+		{name: "no team, fallback disabled", expectedID: "", expectedBillingTeamID: ""},
+		{name: "no team, fallback enabled: credential name attributes the log, billing stays personal", credentialFallback: true, expectedID: "openai_primary", expectedBillingTeamID: ""},
+		{name: "no team, fallback enabled, actual credential name differs from key alias", actualCredential: "provider-1", credentialFallback: true, expectedID: "provider-1", expectedBillingTeamID: ""},
+		{name: "real team, fallback enabled: real team wins on both fields", teamID: "team-1", credentialFallback: true, expectedID: "team-1", expectedBillingTeamID: "team-1"},
+		{name: "real team, fallback disabled: unaffected either way", teamID: "team-1", credentialFallback: false, expectedID: "team-1", expectedBillingTeamID: "team-1"},
 	}
 
 	for _, tt := range tests {
@@ -164,6 +170,7 @@ func TestLogSpendToLiteLLMDB_PreservesTeamID(t *testing.T) {
 			require.NoError(t, prx.logSpendToLiteLLMDB(logCtx))
 			require.Len(t, dbStub.loggedEntries, 1)
 			assert.Equal(t, tt.expectedID, dbStub.loggedEntries[0].TeamID)
+			assert.Equal(t, tt.expectedBillingTeamID, dbStub.loggedEntries[0].BillingTeamID)
 		})
 	}
 }
@@ -181,7 +188,45 @@ func TestLogSpendToLiteLLMDB_UsesClientResponseID(t *testing.T) {
 
 	require.NoError(t, prx.logSpendToLiteLLMDB(logCtx))
 	require.Len(t, dbStub.loggedEntries, 1)
-	assert.Equal(t, "chatcmpl-client-123", dbStub.loggedEntries[0].RequestID)
+	entry := dbStub.loggedEntries[0]
+	assert.Equal(t, "chatcmpl-client-123", entry.RequestID)
+	assert.Equal(t, "req-123", entry.AirEventID)
+	assert.False(t, entry.SkipAccounting)
+
+	var metadata map[string]interface{}
+	require.NoError(t, json.Unmarshal([]byte(entry.Metadata), &metadata))
+	spendMetadata := metadata["spend_logs_metadata"].(map[string]interface{})
+	assert.Equal(t, "req-123", spendMetadata["air_event_id"])
+	assert.Equal(t, "chatcmpl-client-123", spendMetadata["provider_response_id"])
+	assert.Equal(t, true, spendMetadata["accounting_eligible"])
+}
+
+func TestLogSpendToLiteLLMDB_PersistsInternalAIRRequestWithoutKafkaAccounting(t *testing.T) {
+	prx := NewTestProxyBuilder().Build()
+	kafkaStub := &stubKafkaManager{enabled: true}
+	dbStub := &stubLiteLLMManager{}
+	prx.kafkaLog = kafkaStub
+	prx.LiteLLMDB = dbStub
+	setTestModelPrice(prx, "gpt-4o-mini", &routermodels.ModelPrice{
+		InputCostPerToken: 0.000001, OutputCostPerToken: 0.000002,
+	})
+
+	logCtx := testLogCtx(t)
+	logCtx.IsProxyRequest = true
+
+	require.NoError(t, prx.logSpendToLiteLLMDB(logCtx))
+	assert.Empty(t, kafkaStub.events)
+	require.Len(t, dbStub.loggedEntries, 1)
+	entry := dbStub.loggedEntries[0]
+	assert.Equal(t, "req-123", entry.AirEventID)
+	assert.True(t, entry.SkipAccounting)
+
+	var metadata map[string]interface{}
+	require.NoError(t, json.Unmarshal([]byte(entry.Metadata), &metadata))
+	spendMetadata := metadata["spend_logs_metadata"].(map[string]interface{})
+	assert.Equal(t, "req-123", spendMetadata["air_event_id"])
+	assert.Equal(t, false, spendMetadata["accounting_eligible"])
+	assert.Equal(t, true, spendMetadata["is_proxy_request"])
 }
 
 func TestLogSpendToLiteLLMDB_BillsAliasPriceBeforeRealModelPrice(t *testing.T) {

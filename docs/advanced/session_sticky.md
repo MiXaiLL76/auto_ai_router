@@ -143,6 +143,7 @@ The proxy extracts a session ID from the request body in the following priority 
 | Field                           | Location                          |
 | ------------------------------- | --------------------------------- |
 | `extra_body.litellm_session_id` | nested in `extra_body`            |
+| `litellm_session_id`            | top-level field                   |
 | `extra_body.chat_id`            | nested in `extra_body`            |
 | `extra_body.session_id`         | nested in `extra_body`            |
 | `session_id`                    | top-level field                   |
@@ -177,7 +178,7 @@ When disabled, no `SessionStore` is created and all routing uses plain round-rob
 
 ### TTL
 
-The binding expires after the configured TTL of inactivity. After expiry, the next request starts a new binding via round-robin.
+The binding expires after the configured TTL of inactivity. Every successful lookup for the same session and model refreshes the TTL immediately, so an active conversation keeps its credential affinity even while a response is still in progress. After expiry, the next request starts a new binding via round-robin.
 
 ```yaml
 server:

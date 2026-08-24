@@ -69,23 +69,29 @@ type Config struct {
 	// Postgres while leaving auth (ValidateToken) untouched (default: false).
 	DisableSpendLogsWrite bool
 
+	// IncludeTeamSpendInUserSpend controls whether team-bound events update the
+	// cumulative LiteLLM_UserTable spend projection. Nil defaults to true.
+	IncludeTeamSpendInUserSpend *bool
+
 	// Logger
 	Logger *slog.Logger
 }
 
 // DefaultConfig returns configuration with default values
 func DefaultConfig() *Config {
+	includeTeamSpendInUserSpend := true
 	return &Config{
-		MaxConns:            10,
-		MinConns:            2,
-		HealthCheckInterval: 10 * time.Second,
-		ConnectTimeout:      5 * time.Second,
-		AuthCacheTTL:        5 * time.Second,
-		AuthCacheSize:       10000,
-		LogQueueSize:        10000,
-		LogBatchSize:        100,
-		LogFlushInterval:    5 * time.Second,
-		LogWorkers:          4,
+		MaxConns:                    10,
+		MinConns:                    2,
+		HealthCheckInterval:         10 * time.Second,
+		ConnectTimeout:              5 * time.Second,
+		AuthCacheTTL:                5 * time.Second,
+		AuthCacheSize:               10000,
+		LogQueueSize:                10000,
+		LogBatchSize:                100,
+		LogFlushInterval:            5 * time.Second,
+		LogWorkers:                  4,
+		IncludeTeamSpendInUserSpend: &includeTeamSpendInUserSpend,
 	}
 }
 
@@ -126,9 +132,17 @@ func (c *Config) ApplyDefaults() {
 	if c.LogWorkers == 0 {
 		c.LogWorkers = defaults.LogWorkers
 	}
+	if c.IncludeTeamSpendInUserSpend == nil {
+		c.IncludeTeamSpendInUserSpend = defaults.IncludeTeamSpendInUserSpend
+	}
 	if c.Logger == nil {
 		c.Logger = slog.Default()
 	}
+}
+
+// TeamSpendUpdatesUserSpend reports the configured user projection policy.
+func (c *Config) TeamSpendUpdatesUserSpend() bool {
+	return c == nil || c.IncludeTeamSpendInUserSpend == nil || *c.IncludeTeamSpendInUserSpend
 }
 
 // Validate checks configuration validity
@@ -584,11 +598,18 @@ type SpendLogEntry struct {
 	Spend float64 // Request cost in USD
 
 	// User identification
-	APIKey         string // sha256 hash of token
-	UserID         string // User ID
-	TeamID         string // Team ID
+	APIKey string // sha256 hash of token
+	UserID string // User ID
+	TeamID string // Team ID: real team, or provider credential name when
+	// credential_name_as_team_id substitutes one for attribution in spend
+	// logs/Kafka/DailyTeamSpend. NOT safe to use for billing decisions.
 	OrganizationID string // Organization ID
 	EndUser        string // End user ID (from metadata)
+
+	// BillingTeamID is the token's real team assignment. It is independent of
+	// credential_name_as_team_id substitution in TeamID. Team and membership
+	// projections use this field so synthetic attribution cannot create a team.
+	BillingTeamID string
 
 	// Status
 	Status string // "success" | "failure"
@@ -599,6 +620,7 @@ type SpendLogEntry struct {
 	// Runtime-only observability flag; persisted inside Metadata rather than as
 	// a LiteLLM_SpendLogs column.
 	ComparisonEligible bool
+	SkipAccounting     bool
 }
 
 // ==================== Stats ====================

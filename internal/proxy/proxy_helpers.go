@@ -315,6 +315,52 @@ func buildMetadata(hashedToken string, tokenInfo *litellmdb.TokenInfo, errorMsg 
 	return string(jsonBytes)
 }
 
+func addAIRSpendMetadata(metadata, eventID, providerResponseID string, isProxyRequest bool, modelID, publicModelID, priceModelID string) string {
+	var doc map[string]interface{}
+	if json.Unmarshal([]byte(metadata), &doc) != nil {
+		doc = make(map[string]interface{})
+	}
+	spendMetadata, _ := doc["spend_logs_metadata"].(map[string]interface{})
+	if spendMetadata == nil {
+		spendMetadata = make(map[string]interface{})
+		doc["spend_logs_metadata"] = spendMetadata
+	}
+	spendMetadata["air_event_id"] = eventID
+	spendMetadata["accounting_eligible"] = !isProxyRequest
+	spendMetadata["is_proxy_request"] = isProxyRequest
+	if providerResponseID != "" {
+		spendMetadata["provider_response_id"] = providerResponseID
+	}
+	// Only set when the client used a public alias (e.g. a "-highlimits"
+	// pricing tier) that differs from the model billing was actually
+	// resolved against (priceModelID, from resolveBillingPrice — falls back
+	// to modelID when billing was never resolved for this request), so
+	// spend rows can be told apart specifically when the alias changed which
+	// price row was used, not merely whenever an alias was present.
+	// Deliberately kept out of model_map_information: in upstream LiteLLM
+	// that field's value is a model_info/pricing object resolved via
+	// litellm.model_cost, not an identifier string, and overloading it
+	// risks a type mismatch for any future consumer that parses it against
+	// that contract.
+	billedAgainst := priceModelID
+	if billedAgainst == "" {
+		billedAgainst = modelID
+	}
+	// publicModelID != modelID is required here: without it, a request that never
+	// used an alias (publicModelID == modelID) can still get flagged whenever price
+	// lookup resolves against realModelID instead of modelID — GetPriceAny may match
+	// realModelID's price entry when modelID itself has none, making billedAgainst
+	// diverge from publicModelID for a reason unrelated to aliasing.
+	if publicModelID != "" && publicModelID != modelID && publicModelID != billedAgainst {
+		spendMetadata["public_model_name"] = publicModelID
+	}
+	encoded, err := json.Marshal(doc)
+	if err != nil {
+		return metadata
+	}
+	return string(encoded)
+}
+
 // extractEndUser extracts end_user from request headers or body
 func extractEndUser(r *http.Request) string {
 	// Check X-End-User header first

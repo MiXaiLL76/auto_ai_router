@@ -35,7 +35,7 @@ func TestOpenAIToAnthropic_AdaptiveThinkingDisplay(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result, err := OpenAIToAnthropic([]byte(tt.body), "claude-opus-4-8")
+			result, err := OpenAIToAnthropic([]byte(tt.body), "claude-opus-4-8", true)
 			require.NoError(t, err)
 
 			var request map[string]interface{}
@@ -55,7 +55,7 @@ func TestOpenAIToAnthropic_ReasoningEffortPrecedence(t *testing.T) {
 		"reasoning_effort":"low",
 		"extra_body":{"reasoning":{"effort":"medium"}},
 		"reasoning":{"effort":"high"}
-	}`), "claude-opus-5")
+	}`), "claude-opus-5", true)
 	require.NoError(t, err)
 
 	var request map[string]interface{}
@@ -69,7 +69,7 @@ func TestOpenAIToAnthropic_ReasoningObjectCanDisableTopLevelEffort(t *testing.T)
 		"messages":[{"role":"user","content":"test"}],
 		"reasoning_effort":"high",
 		"reasoning":{"effort":"none"}
-	}`), "claude-opus-5")
+	}`), "claude-opus-5", true)
 	require.NoError(t, err)
 
 	var request map[string]interface{}
@@ -87,7 +87,7 @@ func TestOpenAIToAnthropic_ChatFileFileData(t *testing.T) {
 		}]
 	}`)
 
-	result, err := OpenAIToAnthropic(body, "claude-sonnet-4-5")
+	result, err := OpenAIToAnthropic(body, "claude-sonnet-4-5", true)
 	require.NoError(t, err)
 
 	block := firstAnthropicUserBlock(t, result)
@@ -107,7 +107,7 @@ func TestOpenAIToAnthropic_ChatFileFileIDUnsupported(t *testing.T) {
 		}]
 	}`)
 
-	_, err := OpenAIToAnthropic(body, "claude-sonnet-4-5")
+	_, err := OpenAIToAnthropic(body, "claude-sonnet-4-5", true)
 	require.Error(t, err)
 	var validationErr *converterutil.RequestValidationError
 	require.True(t, errors.As(err, &validationErr))
@@ -125,7 +125,7 @@ func TestOpenAIToAnthropic_ChatPDFAsImageURLRejected(t *testing.T) {
 		}]
 	}`)
 
-	_, err := OpenAIToAnthropic(body, "claude-sonnet-4-5")
+	_, err := OpenAIToAnthropic(body, "claude-sonnet-4-5", true)
 	require.Error(t, err)
 	var validationErr *converterutil.RequestValidationError
 	require.True(t, errors.As(err, &validationErr))
@@ -141,7 +141,7 @@ func TestOpenAIToAnthropic_ChatImageURLJPEGStillWorks(t *testing.T) {
 		}]
 	}`)
 
-	result, err := OpenAIToAnthropic(body, "claude-sonnet-4-5")
+	result, err := OpenAIToAnthropic(body, "claude-sonnet-4-5", true)
 	require.NoError(t, err)
 
 	block := firstAnthropicUserBlock(t, result)
@@ -161,7 +161,7 @@ func TestOpenAIToAnthropic_ChatImageURLPNGStillWorks(t *testing.T) {
 		}]
 	}`)
 
-	result, err := OpenAIToAnthropic(body, "claude-sonnet-4-5")
+	result, err := OpenAIToAnthropic(body, "claude-sonnet-4-5", true)
 	require.NoError(t, err)
 
 	block := firstAnthropicUserBlock(t, result)
@@ -181,7 +181,7 @@ func TestOpenAIToAnthropic_ChatNativeDocument(t *testing.T) {
 		}]
 	}`)
 
-	result, err := OpenAIToAnthropic(body, "claude-sonnet-4-5")
+	result, err := OpenAIToAnthropic(body, "claude-sonnet-4-5", true)
 	require.NoError(t, err)
 
 	block := firstAnthropicUserBlock(t, result)
@@ -190,6 +190,46 @@ func TestOpenAIToAnthropic_ChatNativeDocument(t *testing.T) {
 	assert.Equal(t, "base64", source["type"])
 	assert.Equal(t, "application/pdf", source["media_type"])
 	assert.Equal(t, "JVBERi0=", source["data"])
+}
+
+// TestOpenAIToAnthropic_NonClaudeModelDefaultsThinkingDisabled verifies that
+// requests for a non-Claude model (reached through this same Anthropic-shaped
+// conversion path via a multi-vendor gateway like CometAPI/ProMan) get an
+// explicit "thinking":{"type":"disabled"} when the caller didn't ask for
+// reasoning. Unlike Claude, some backends (e.g. Gemini) default to
+// autonomous thinking when the field is simply absent, which silently burns
+// the max_tokens budget on invisible reasoning and truncates the visible
+// answer.
+func TestOpenAIToAnthropic_NonClaudeModelDefaultsThinkingDisabled(t *testing.T) {
+	result, err := OpenAIToAnthropic([]byte(`{
+		"model":"gemini-3.5-flash",
+		"messages":[{"role":"user","content":"test"}],
+		"max_tokens":100
+	}`), "gemini-3.5-flash", false)
+	require.NoError(t, err)
+
+	var request map[string]interface{}
+	require.NoError(t, json.Unmarshal(result, &request))
+	thinking, ok := request["thinking"].(map[string]interface{})
+	require.True(t, ok, "expected an explicit thinking config, got %v", request["thinking"])
+	assert.Equal(t, "disabled", thinking["type"])
+}
+
+// TestOpenAIToAnthropic_ClaudeModelOmitsThinkingByDefault verifies the
+// default-disable safeguard is scoped to non-Claude models only: real Claude
+// requests keep omitting "thinking" entirely when not requested, matching
+// existing Anthropic API behavior (see also
+// TestOpenAIToAnthropic_ReasoningObjectCanDisableTopLevelEffort).
+func TestOpenAIToAnthropic_ClaudeModelOmitsThinkingByDefault(t *testing.T) {
+	result, err := OpenAIToAnthropic([]byte(`{
+		"model":"claude-opus-5",
+		"messages":[{"role":"user","content":"test"}]
+	}`), "claude-opus-5", true)
+	require.NoError(t, err)
+
+	var request map[string]interface{}
+	require.NoError(t, json.Unmarshal(result, &request))
+	assert.NotContains(t, request, "thinking")
 }
 
 func TestExtractSystemBlocks(t *testing.T) {

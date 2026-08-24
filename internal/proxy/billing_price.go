@@ -8,6 +8,16 @@ import "github.com/mixaill76/auto_ai_router/internal/models"
 // callers must preserve this argument order, since it IS the priority
 // contract; passing the strings in a different order silently changes which
 // price wins.
+//
+// The underlying GetPriceAny tries each candidate in full (exact raw-lowercase
+// key, then normalised/prefix-stripped key) before moving to the next
+// candidate, so a higher-priority candidate's normalised match always wins
+// over a lower-priority candidate's raw match — e.g. a provider-prefixed
+// publicModelID whose normalised form collides with a cheaper sibling (e.g.
+// "openrouter/gpt-5-mini" → "gpt-5-mini") is still found before falling
+// through to modelID, while explicit raw entries like
+// "google/gemini-3-flash-preview-highlimits" still win over the normalised
+// fallback for that same candidate.
 func lookupBillingModelPrice(registry *models.ModelPriceRegistry, publicModelID, modelID, realModelID string) (string, *models.ModelPrice) {
 	if registry == nil {
 		return modelID, nil

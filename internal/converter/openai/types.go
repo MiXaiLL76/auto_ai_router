@@ -247,13 +247,18 @@ type OpenAIImageInputTokenDetails struct {
 	ImageTokens int `json:"image_tokens"`
 }
 
+type OpenAIImageOutputTokenDetails struct {
+	ImageTokens int `json:"image_tokens"`
+}
+
 // OpenAIImageUsage is the usage format for the images API (gpt-image-1 style),
 // distinct from the chat-completions OpenAIUsage.
 type OpenAIImageUsage struct {
-	InputTokens        int                          `json:"input_tokens"`
-	InputTokensDetails OpenAIImageInputTokenDetails `json:"input_tokens_details"`
-	OutputTokens       int                          `json:"output_tokens"`
-	TotalTokens        int                          `json:"total_tokens"`
+	InputTokens         int                            `json:"input_tokens"`
+	InputTokensDetails  OpenAIImageInputTokenDetails   `json:"input_tokens_details"`
+	OutputTokens        int                            `json:"output_tokens"`
+	OutputTokensDetails *OpenAIImageOutputTokenDetails `json:"output_tokens_details,omitempty"`
+	TotalTokens         int                            `json:"total_tokens"`
 }
 
 // OpenAIImageResponse represents OpenAI image response

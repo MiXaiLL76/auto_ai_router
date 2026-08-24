@@ -54,6 +54,9 @@ func LoadModelPrices(link string) (map[string]*ModelPrice, error) {
 	}
 
 	// Normalize model names (convert keys to normalized format)
+	// Also store raw lowercase keys so that provider-prefixed names like
+	// "google/gemini-3-flash-preview-highlimits" survive normalisation and
+	// can be matched in ModelPriceRegistry.GetPriceAny's first pass.
 	normalizedPrices := make(map[string]*ModelPrice)
 	normalizedSources := make(map[string]string) // normalized name -> original full name (for collision detection)
 	for fullName, price := range rawPrices {
@@ -63,10 +66,38 @@ func LoadModelPrices(link string) (map[string]*ModelPrice, error) {
 		if price.LiteLLMProvider == "" {
 			if slash := strings.IndexByte(fullName, '/'); slash > 0 {
 				price.LiteLLMProvider = fullName[:slash]
+			} else {
+				price.LiteLLMProvider = inferProviderFromModelName(fullName)
 			}
 		}
 		normalized := NormalizeModelName(fullName)
+
+		// Store the raw lowercase key alongside the normalised one so that
+		// Update/LoadPrices can put both into the registry, enabling the
+		// two-pass lookup in GetPriceAny. Done unconditionally, before the
+		// collision check below, so this entry's own distinct price is never
+		// lost even when it loses the shared normalized key — and so the
+		// outcome doesn't depend on which entry Go's randomized map
+		// iteration happens to visit first (see the collision branch below).
+		raw := strings.ToLower(strings.TrimSpace(fullName))
+		if raw != normalized {
+			normalizedPrices[raw] = price
+		}
+
 		if existingFullName, exists := normalizedSources[normalized]; exists {
+			existingIsBare := !strings.Contains(existingFullName, "/")
+			newIsBare := !strings.Contains(fullName, "/")
+
+			if existingIsBare && !newIsBare {
+				// Existing entry is a bare model name (e.g. "gpt-4") and
+				// the new entry has a provider prefix (e.g. "openai/gpt-4").
+				// Keep the bare entry as owner of the shared normalized key
+				// — it is more specific in the two-pass lookup — regardless
+				// of iteration order. The prefixed entry's own raw key was
+				// already stored above, so it isn't lost.
+				continue
+			}
+
 			slog.Warn("normalized model name collision: entry will be overwritten",
 				"normalized_name", normalized,
 				"existing_entry", existingFullName,
@@ -182,4 +213,32 @@ func NormalizeModelName(fullName string) string {
 
 	// Convert to lowercase for case-insensitive matching
 	return strings.ToLower(modelName)
+}
+
+// modelNameProviderPrefixes maps well-known bare model-name prefixes to their
+// provider tag, for price files that key entries by plain model name (e.g.
+// "gemini-2.5-pro") rather than "provider/model" (e.g. "vertex_ai/gemini-2.5-pro")
+// and don't set litellm_provider explicitly. Only unambiguous, first-party
+// naming conventions are listed here to avoid misclassifying unrelated models.
+var modelNameProviderPrefixes = []struct {
+	prefix   string
+	provider string
+}{
+	{"gemini-", "gemini"},
+	{"vertex-", "vertex"},
+	{"google-", "google"},
+}
+
+// inferProviderFromModelName is a last-resort fallback for price entries that
+// have neither an explicit litellm_provider nor a "provider/model" key
+// convention. It only matches a known, unambiguous model-name prefix and
+// returns "" (no guess) otherwise.
+func inferProviderFromModelName(fullName string) string {
+	name := strings.ToLower(strings.TrimSpace(fullName))
+	for _, p := range modelNameProviderPrefixes {
+		if strings.HasPrefix(name, p.prefix) {
+			return p.provider
+		}
+	}
+	return ""
 }

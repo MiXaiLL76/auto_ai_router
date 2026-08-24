@@ -17,6 +17,7 @@ func TestAggregateSpendUpdates_AllEntities(t *testing.T) {
 			APIKey:         "token-1",
 			UserID:         "user-1",
 			TeamID:         "team-1",
+			BillingTeamID:  "team-1",
 			OrganizationID: "org-1",
 			Model:          "model-1",
 			EndUser:        "end-user-1",
@@ -26,6 +27,7 @@ func TestAggregateSpendUpdates_AllEntities(t *testing.T) {
 			APIKey:         "token-1",
 			UserID:         "user-1",
 			TeamID:         "team-1",
+			BillingTeamID:  "team-1",
 			OrganizationID: "org-1",
 			Model:          "model-1",
 			EndUser:        "end-user-1",
@@ -38,14 +40,14 @@ func TestAggregateSpendUpdates_AllEntities(t *testing.T) {
 		},
 	}
 
-	result := aggregateSpendUpdates(batch)
+	result := aggregateSpendUpdates(batch, true)
 
 	// Token aggregation
 	assert.Equal(t, 15.0, result.Tokens[entityModelKey{EntityID: "token-1", Model: "model-1"}])
 	assert.Equal(t, 3.0, result.Tokens[entityModelKey{EntityID: "token-2"}])
 
-	// Personal user aggregation
-	assert.NotContains(t, result.Users, entityModelKey{EntityID: "user-1", Model: "model-1"})
+	// User aggregation
+	assert.Equal(t, 15.0, result.Users[entityModelKey{EntityID: "user-1", Model: "model-1"}])
 	assert.Equal(t, 3.0, result.Users[entityModelKey{EntityID: "user-2"}])
 
 	// Team aggregation
@@ -64,7 +66,7 @@ func TestAggregateSpendUpdates_AllEntities(t *testing.T) {
 // TestAggregateSpendUpdates_EmptyBatch tests empty batch
 func TestAggregateSpendUpdates_EmptyBatch(t *testing.T) {
 	batch := []*models.SpendLogEntry{}
-	result := aggregateSpendUpdates(batch)
+	result := aggregateSpendUpdates(batch, true)
 
 	assert.Empty(t, result.Tokens)
 	assert.Empty(t, result.Users)
@@ -77,7 +79,7 @@ func TestAggregateSpendUpdates_EmptyBatch(t *testing.T) {
 
 // TestAggregateSpendUpdates_NilBatch tests nil batch
 func TestAggregateSpendUpdates_NilBatch(t *testing.T) {
-	result := aggregateSpendUpdates(nil)
+	result := aggregateSpendUpdates(nil, true)
 	// Function returns initialized empty map, not nil
 	assert.Empty(t, result.Tokens)
 }
@@ -97,14 +99,15 @@ func TestAggregateSpendUpdates_PartialEntities(t *testing.T) {
 			// No TeamID, OrganizationID
 		},
 		{
-			APIKey: "token-2",
-			TeamID: "team-1",
-			Spend:  3.0,
+			APIKey:        "token-2",
+			TeamID:        "team-1",
+			BillingTeamID: "team-1",
+			Spend:         3.0,
 			// No UserID, OrganizationID
 		},
 	}
 
-	result := aggregateSpendUpdates(batch)
+	result := aggregateSpendUpdates(batch, true)
 
 	// Token aggregation works
 	assert.Equal(t, 15.0, result.Tokens[entityModelKey{EntityID: "token-1"}])
@@ -124,22 +127,25 @@ func TestAggregateSpendUpdates_PartialEntities(t *testing.T) {
 func TestAggregateSpendUpdates_TeamMember(t *testing.T) {
 	batch := []*models.SpendLogEntry{
 		{
-			APIKey: "token-1",
-			UserID: "user-1",
-			TeamID: "team-1",
-			Spend:  10.0,
+			APIKey:        "token-1",
+			UserID:        "user-1",
+			TeamID:        "team-1",
+			BillingTeamID: "team-1",
+			Spend:         10.0,
 		},
 		{
-			APIKey: "token-1",
-			UserID: "user-2",
-			TeamID: "team-1",
-			Spend:  5.0,
+			APIKey:        "token-1",
+			UserID:        "user-2",
+			TeamID:        "team-1",
+			BillingTeamID: "team-1",
+			Spend:         5.0,
 		},
 	}
 
-	result := aggregateSpendUpdates(batch)
+	result := aggregateSpendUpdates(batch, true)
 
-	assert.Empty(t, result.Users)
+	assert.Equal(t, 10.0, result.Users[entityModelKey{EntityID: "user-1"}])
+	assert.Equal(t, 5.0, result.Users[entityModelKey{EntityID: "user-2"}])
 	assert.Equal(t, 15.0, result.Teams[entityModelKey{EntityID: "team-1"}])
 
 	// Team membership should aggregate by team:user
@@ -163,7 +169,7 @@ func TestAggregateSpendUpdates_OrganizationMembership(t *testing.T) {
 		},
 	}
 
-	result := aggregateSpendUpdates(batch)
+	result := aggregateSpendUpdates(batch, true)
 	assert.Equal(t, 15.0, result.Orgs[entityModelKey{EntityID: "org-1"}])
 	assert.Equal(t, 10.0, result.OrganizationMembers[organizationMemberKey{OrganizationID: "org-1", UserID: "user-1"}])
 	assert.Equal(t, 5.0, result.OrganizationMembers[organizationMemberKey{OrganizationID: "org-1", UserID: "user-2"}])
@@ -307,28 +313,217 @@ func TestAggregateSpendUpdatesPreservesZeroSpendModelAndCompositeIDs(t *testing.
 		APIKey:         "token:west",
 		UserID:         "user:east",
 		TeamID:         "team:blue",
+		BillingTeamID:  "team:blue",
 		OrganizationID: "org:green",
 		Model:          "provider:model:v1",
 		Spend:          0,
 	}
 
-	updates := aggregateSpendUpdates([]*models.SpendLogEntry{entry})
+	updates := aggregateSpendUpdates([]*models.SpendLogEntry{entry}, true)
 
 	for _, present := range []bool{
 		hasEntityModelKey(updates.Tokens, entityModelKey{EntityID: entry.APIKey, Model: entry.Model}),
-		hasEntityModelKey(updates.Teams, entityModelKey{EntityID: entry.TeamID, Model: entry.Model}),
+		hasEntityModelKey(updates.Teams, entityModelKey{EntityID: entry.BillingTeamID, Model: entry.Model}),
 		hasEntityModelKey(updates.Orgs, entityModelKey{EntityID: entry.OrganizationID, Model: entry.Model}),
 	} {
 		assert.True(t, present, "zero-spend rows must still create their model counter key")
 	}
-	assert.False(t, hasEntityModelKey(updates.Users, entityModelKey{EntityID: entry.UserID, Model: entry.Model}))
-	_, teamMemberPresent := updates.TeamMembers[teamMemberKey{TeamID: entry.TeamID, UserID: entry.UserID}]
+	assert.True(t, hasEntityModelKey(updates.Users, entityModelKey{EntityID: entry.UserID, Model: entry.Model}))
+	_, teamMemberPresent := updates.TeamMembers[teamMemberKey{TeamID: entry.BillingTeamID, UserID: entry.UserID}]
 	assert.True(t, teamMemberPresent)
 	_, organizationMemberPresent := updates.OrganizationMembers[organizationMemberKey{
 		OrganizationID: entry.OrganizationID,
 		UserID:         entry.UserID,
 	}]
 	assert.True(t, organizationMemberPresent)
+}
+
+// TestAggregateSpendUpdates_BillingTeamIDDrivesRouting reproduces the vsellm
+// incident and its neighboring cases: credential_name_as_team_id substitutes
+// the provider credential name into TeamID for log/DailyTeamSpend attribution
+// on keys that have no real team. That synthetic TeamID must never be mistaken
+// for a real team billing entity, in any combination with UserID/OrgID.
+func TestAggregateSpendUpdates_BillingTeamIDDrivesRouting(t *testing.T) {
+	tests := []struct {
+		name string
+
+		userID        string
+		teamID        string // raw attribution value written to the log
+		billingTeamID string // real team, drives the routing decision
+		orgID         string
+		spend         float64
+
+		wantUserUpdated       bool
+		wantTeamCharged       bool
+		wantTeamMemberCharged bool
+		wantOrgMemberCharged  bool
+	}{
+		{
+			name:            "no team",
+			userID:          "user-1",
+			teamID:          "",
+			billingTeamID:   "",
+			spend:           10,
+			wantUserUpdated: true,
+		},
+		{
+			name:            "synthetic team attribution",
+			userID:          "user-1",
+			teamID:          "air-ru01", // credential_name_as_team_id fallback
+			billingTeamID:   "",         // token has no real team
+			spend:           10,
+			wantUserUpdated: true,
+		},
+		{
+			name:                  "real team",
+			userID:                "user-1",
+			teamID:                "team-1",
+			billingTeamID:         "team-1",
+			spend:                 10,
+			wantUserUpdated:       true,
+			wantTeamCharged:       true,
+			wantTeamMemberCharged: true,
+		},
+		{
+			name:                  "real team with credential attribution enabled",
+			userID:                "user-1",
+			teamID:                "team-1", // TokenInfo.TeamID was non-empty, so proxy_log.go never substitutes credName
+			billingTeamID:         "team-1",
+			spend:                 10,
+			wantUserUpdated:       true,
+			wantTeamCharged:       true,
+			wantTeamMemberCharged: true,
+		},
+		{
+			name:                  "real team with organization membership",
+			userID:                "user-1",
+			teamID:                "team-1",
+			billingTeamID:         "team-1",
+			orgID:                 "org-1",
+			spend:                 10,
+			wantUserUpdated:       true,
+			wantTeamCharged:       true,
+			wantTeamMemberCharged: true,
+			wantOrgMemberCharged:  true,
+		},
+		{
+			name:                 "synthetic team attribution with organization membership",
+			userID:               "user-1",
+			teamID:               "air-ru01",
+			billingTeamID:        "",
+			orgID:                "org-1",
+			spend:                10,
+			wantUserUpdated:      true,
+			wantOrgMemberCharged: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			batch := []*models.SpendLogEntry{{
+				APIKey:         "token-1",
+				UserID:         tt.userID,
+				TeamID:         tt.teamID,
+				BillingTeamID:  tt.billingTeamID,
+				OrganizationID: tt.orgID,
+				Model:          "model-1",
+				Spend:          tt.spend,
+			}}
+
+			result := aggregateSpendUpdates(batch, true)
+
+			userKey := entityModelKey{EntityID: tt.userID, Model: "model-1"}
+			if tt.wantUserUpdated {
+				assert.Equal(t, tt.spend, result.Users[userKey])
+			} else {
+				assert.NotContains(t, result.Users, userKey)
+			}
+
+			teamKey := entityModelKey{EntityID: tt.billingTeamID, Model: "model-1"}
+			if tt.wantTeamCharged {
+				assert.Equal(t, tt.spend, result.Teams[teamKey])
+			} else {
+				assert.Empty(t, result.Teams, "must never charge the synthetic credential-name team")
+			}
+
+			teamMemberKey := teamMemberKey{TeamID: tt.billingTeamID, UserID: tt.userID}
+			if tt.wantTeamMemberCharged {
+				assert.Equal(t, tt.spend, result.TeamMembers[teamMemberKey])
+			} else {
+				assert.Empty(t, result.TeamMembers, "must never create a membership row for a nonexistent team")
+			}
+
+			orgMemberKey := organizationMemberKey{OrganizationID: tt.orgID, UserID: tt.userID}
+			if tt.wantOrgMemberCharged {
+				assert.Equal(t, tt.spend, result.OrganizationMembers[orgMemberKey])
+			} else {
+				assert.Empty(t, result.OrganizationMembers)
+			}
+		})
+	}
+}
+
+func TestAggregateSpendUpdatesUpdatesUserAndTeamCounters(t *testing.T) {
+	batch := []*models.SpendLogEntry{
+		{
+			APIKey: "token-synthetic",
+			UserID: "user-shared",
+			TeamID: "air-ru01",
+			Model:  "model-1",
+			Spend:  7.0,
+		},
+		{
+			APIKey:        "token-team",
+			UserID:        "user-shared",
+			TeamID:        "team-real",
+			BillingTeamID: "team-real",
+			Model:         "model-1",
+			Spend:         4.0,
+		},
+	}
+
+	result := aggregateSpendUpdates(batch, true)
+
+	assert.Equal(t, 7.0, result.Tokens[entityModelKey{EntityID: "token-synthetic", Model: "model-1"}])
+	assert.Equal(t, 4.0, result.Tokens[entityModelKey{EntityID: "token-team", Model: "model-1"}])
+	assert.Len(t, result.Tokens, 2)
+
+	assert.Equal(t, 11.0, result.Users[entityModelKey{EntityID: "user-shared", Model: "model-1"}])
+	assert.Len(t, result.Users, 1)
+
+	assert.NotContains(t, result.Teams, entityModelKey{EntityID: "air-ru01", Model: "model-1"})
+	assert.Equal(t, 4.0, result.Teams[entityModelKey{EntityID: "team-real", Model: "model-1"}])
+	assert.Len(t, result.Teams, 1)
+
+	assert.Equal(t, 4.0, result.TeamMembers[teamMemberKey{TeamID: "team-real", UserID: "user-shared"}])
+	assert.Len(t, result.TeamMembers, 1)
+}
+
+func TestAggregateSpendUpdatesCanExcludeTeamSpendFromUserSpend(t *testing.T) {
+	batch := []*models.SpendLogEntry{
+		{
+			APIKey:        "token-team",
+			UserID:        "user-1",
+			TeamID:        "team-1",
+			BillingTeamID: "team-1",
+			Model:         "model-1",
+			Spend:         4.0,
+		},
+		{
+			APIKey: "token-personal",
+			UserID: "user-1",
+			Model:  "model-1",
+			Spend:  7.0,
+		},
+	}
+
+	result := aggregateSpendUpdates(batch, false)
+
+	assert.Equal(t, 4.0, result.Tokens[entityModelKey{EntityID: "token-team", Model: "model-1"}])
+	assert.Equal(t, 7.0, result.Tokens[entityModelKey{EntityID: "token-personal", Model: "model-1"}])
+	assert.Equal(t, 7.0, result.Users[entityModelKey{EntityID: "user-1", Model: "model-1"}])
+	assert.Equal(t, 4.0, result.Teams[entityModelKey{EntityID: "team-1", Model: "model-1"}])
+	assert.Equal(t, 4.0, result.TeamMembers[teamMemberKey{TeamID: "team-1", UserID: "user-1"}])
 }
 
 func hasEntityModelKey(updates map[entityModelKey]float64, key entityModelKey) bool {
@@ -399,7 +594,7 @@ func TestEntityUpdatesPersistSpendAndNumericModelSpendTogether(t *testing.T) {
 
 			call := execer.calls[0]
 			assert.Contains(t, call.query, "UPDATE "+tt.table)
-			assert.Contains(t, call.query, "SET spend = spend + $1")
+			assert.Contains(t, call.query, "SET spend = COALESCE(spend, 0) + $1")
 			assert.Contains(t, call.query, "model_spend = jsonb_set")
 			assert.Contains(t, call.query, "ARRAY[$2]::text[]")
 			assert.Contains(t, call.query, "to_jsonb")

@@ -55,6 +55,11 @@ type ModelPrice struct {
 	CacheReadInputTokenCostAbove256k     float64 `json:"cache_read_input_token_cost_above_256k_tokens,omitempty"`
 	CacheCreationInputTokenCostAbove256k float64 `json:"cache_creation_input_token_cost_above_256k_tokens,omitempty"`
 
+	InputCostPerTokenAbove512k           float64 `json:"input_cost_per_token_above_512k_tokens,omitempty"`
+	OutputCostPerTokenAbove512k          float64 `json:"output_cost_per_token_above_512k_tokens,omitempty"`
+	CacheReadInputTokenCostAbove512k     float64 `json:"cache_read_input_token_cost_above_512k_tokens,omitempty"`
+	CacheCreationInputTokenCostAbove512k float64 `json:"cache_creation_input_token_cost_above_512k_tokens,omitempty"`
+
 	// Audio tokens (can be more specific than regular tokens)
 	InputCostPerAudioToken  float64 `json:"input_cost_per_audio_token,omitempty"`
 	OutputCostPerAudioToken float64 `json:"output_cost_per_audio_token,omitempty"`
@@ -104,10 +109,18 @@ func NewModelPriceRegistry() *ModelPriceRegistry {
 	}
 }
 
-// GetPrice returns the price for a model, or nil if not found
+// GetPrice returns the price for a model, or nil if not found. Tries the
+// raw (case/whitespace-folded, unsplit) key before the normalized
+// (provider-prefix-stripped) one, matching GetPriceAny's two-pass priority
+// so the two functions never disagree about which entry a given name
+// resolves to.
 func (r *ModelPriceRegistry) GetPrice(modelName string) *ModelPrice {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
+	raw := strings.ToLower(strings.TrimSpace(modelName))
+	if price := r.prices[raw]; price != nil {
+		return price
+	}
 	return r.prices[NormalizeModelName(modelName)]
 }
 
@@ -115,17 +128,36 @@ func (r *ModelPriceRegistry) GetPrice(modelName string) *ModelPrice {
 // single read lock, returning the first match in the given priority order.
 // This avoids a concurrent Update() straddling two map generations, which
 // can happen when callers issue separate GetPrice calls per candidate.
+//
+// Each candidate is tried in full — raw lowercase key first (no prefix
+// stripping, so an explicit entry like "google/gemini-3-flash-preview-
+// highlimits" is found before any normalised fallback), then the
+// NormalizeModelName (provider-prefix-stripped) key — before moving on to
+// the next candidate. This preserves the caller's priority order (e.g.
+// publicModelID > modelID > realModelID) exactly: a higher-priority
+// candidate's normalised match always wins over a lower-priority candidate's
+// raw match. Trying every candidate's raw key before any candidate's
+// normalised key would let a coincidental raw hit on a low-priority
+// candidate (realModelID, the literal provider model name, is especially
+// likely to double as a raw price-file key) shadow the correct match on a
+// higher-priority one.
 func (r *ModelPriceRegistry) GetPriceAny(modelNames ...string) (string, *ModelPrice) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
+
 	for _, modelName := range modelNames {
 		if modelName == "" {
 			continue
+		}
+		raw := strings.ToLower(strings.TrimSpace(modelName))
+		if price := r.prices[raw]; price != nil {
+			return modelName, price
 		}
 		if price := r.prices[NormalizeModelName(modelName)]; price != nil {
 			return modelName, price
 		}
 	}
+
 	return "", nil
 }
 
@@ -136,6 +168,11 @@ func (r *ModelPriceRegistry) Update(prices map[string]*ModelPrice) {
 	r.prices = make(map[string]*ModelPrice)
 	for k, v := range prices {
 		r.prices[k] = v
+		// Store raw lowercase key so that provider-prefixed model names
+		// (e.g. "openrouter/gpt-5-mini") can be matched in GetPriceAny's
+		// first pass before normalisation strips the prefix.
+		raw := strings.ToLower(strings.TrimSpace(k))
+		r.prices[raw] = v
 	}
 	r.lastUpdate = utils.NowUTC()
 }
@@ -143,11 +180,26 @@ func (r *ModelPriceRegistry) Update(prices map[string]*ModelPrice) {
 // MergeDB applies DB-sourced prices on top of the existing registry without
 // removing prices that came from the file-based price list.
 // DB prices take precedence for models that appear in both sources.
+//
+// A DB override only ever replaces the exact key it names (plus that key's
+// own raw/lowercased form) — it deliberately does NOT sweep the registry for
+// other keys that merely share a normalized form. A price entry deliberately
+// keyed "provider/model" (e.g. "openrouter/gpt-5-mini", or any alias that
+// needs a price distinct from its canonical model — see
+// "gemini-3-flash-preview-highlimits" in client_a.libsonnet) is independent
+// of the plain model it happens to normalize to; an override for the plain
+// model must not silently leak into it. If a DB-sourced override is meant
+// to apply to such an alias too, the DB record must name that alias's exact
+// key itself.
 func (r *ModelPriceRegistry) MergeDB(dbPrices map[string]*ModelPrice) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	for k, v := range dbPrices {
 		r.prices[k] = v
+		// Store raw lowercase key (same logic as Update) so that DB-sourced
+		// provider-prefixed entries are also findable in GetPriceAny pass 1.
+		raw := strings.ToLower(strings.TrimSpace(k))
+		r.prices[raw] = v
 	}
 	r.lastUpdate = utils.NowUTC()
 }

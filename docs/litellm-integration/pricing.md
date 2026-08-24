@@ -205,13 +205,13 @@ The same logic applies to output tokens using `output_cost_per_token_above_200k_
 
 Cache prices follow LiteLLM's full-session semantics: when `prompt_tokens > 200_000`, all cache read/write tokens use the matching `*_above_200k_tokens` rate. The 32k/128k/256k/272k full-session cache fields take precedence over the 200k tier whenever configured, with the highest exceeded threshold winning (see "Long-context pricing" below).
 
-### Long-context pricing (32k / 128k / 256k / 272k full-session tiers)
+### Long-context pricing (32k / 128k / 256k / 272k / 512k full-session tiers)
 
 When the prompt exceeds one of these thresholds, the matching `*_above_<N>k_tokens` rate applies to the **full session** rather than only the tokens beyond the threshold — the prompt size selects the tier for regular input, output, cache reads, and cache writes. At exactly the threshold, base rates still apply (the check is strictly "greater than").
 
-272k was added first for models such as GPT-5.6; 32k/128k/256k were added for Alibaba Cloud models (Qwen 3.x, GLM) whose published pricing is a flat rate per input-length bracket (e.g. 0–32k / 32k–128k / 128k–256k / >256k) rather than an incremental rate for the overflow.
+272k was added first for models such as GPT-5.6; 32k/128k/256k were added for Alibaba Cloud models (Qwen 3.x, GLM) whose published pricing is a flat rate per input-length bracket (e.g. 0–32k / 32k–128k / 128k–256k / >256k) rather than an incremental rate for the overflow. 512k was added for MiniMax-M3, whose pricing depends on total input token count with a 512k threshold.
 
-A price entry may configure any subset of these four thresholds (e.g. only 32k and 256k, skipping 128k). For each cost component (input, output, cache read, cache write) independently, AIR picks the **highest configured threshold that the prompt exceeds**, in descending order 272k → 256k → 128k → 32k, and skips any threshold whose rate field isn't set. If none of the four apply, cost calculation falls back to the 200k proportional tier described above, then to the base rate.
+A price entry may configure any subset of these five thresholds (e.g. only 32k and 256k, skipping 128k). For each cost component (input, output, cache read, cache write) independently, AIR picks the **highest configured threshold that the prompt exceeds**, in descending order 512k → 272k → 256k → 128k → 32k, and skips any threshold whose rate field isn't set. If none of the five apply, cost calculation falls back to the 200k proportional tier described above, then to the base rate.
 
 Example: a model with only `input_cost_per_token_above_128k_tokens` and `input_cost_per_token_above_256k_tokens` set bills a 150k-token prompt at the 128k rate and a 300k-token prompt at the 256k rate; a 100k-token prompt still uses the base rate.
 

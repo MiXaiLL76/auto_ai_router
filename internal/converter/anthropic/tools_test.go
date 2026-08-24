@@ -155,6 +155,47 @@ func TestConvertOpenAIToolsToAnthropic(t *testing.T) {
 		assert.Equal(t, "web_search", result[3].Name)
 	})
 
+	t.Run("native_versioned_web_search_preserved", func(t *testing.T) {
+		tools := []interface{}{
+			map[string]interface{}{
+				"type":     "web_search_20250305",
+				"name":     "web_search",
+				"max_uses": float64(5),
+			},
+		}
+		result := convertOpenAIToolsToAnthropic(tools)
+		require.Len(t, result, 1)
+		assert.Equal(t, "web_search_20250305", result[0].Type)
+		assert.Equal(t, "web_search", result[0].Name)
+		assert.Equal(t, 5, result[0].MaxUses)
+	})
+
+	t.Run("native_versioned_web_search_future_version_preserved", func(t *testing.T) {
+		tools := []interface{}{
+			map[string]interface{}{"type": "web_search_20260318", "name": "web_search"},
+		}
+		result := convertOpenAIToolsToAnthropic(tools)
+		require.Len(t, result, 1)
+		assert.Equal(t, "web_search_20260318", result[0].Type)
+	})
+
+	t.Run("web_search_options_copied", func(t *testing.T) {
+		tools := []interface{}{
+			map[string]interface{}{
+				"type":            "web_search",
+				"max_uses":        float64(3),
+				"allowed_domains": []interface{}{"example.com"},
+				"user_location":   map[string]interface{}{"type": "approximate", "city": "NYC"},
+			},
+		}
+		result := convertOpenAIToolsToAnthropic(tools)
+		require.Len(t, result, 1)
+		assert.Equal(t, "web_search_20250305", result[0].Type)
+		assert.Equal(t, 3, result[0].MaxUses)
+		assert.Equal(t, []interface{}{"example.com"}, result[0].AllowedDomains)
+		assert.Equal(t, "NYC", result[0].UserLocation.(map[string]interface{})["city"])
+	})
+
 	t.Run("function_without_name_skipped", func(t *testing.T) {
 		tools := []interface{}{
 			map[string]interface{}{
@@ -166,6 +207,61 @@ func TestConvertOpenAIToolsToAnthropic(t *testing.T) {
 		}
 		result := convertOpenAIToolsToAnthropic(tools)
 		assert.Nil(t, result)
+	})
+}
+
+// TestConvertOpenAIToolsToAnthropic_VersionedBuiltinTools covers built-in tools that already
+// carry their versioned Anthropic type. An Anthropic Messages request declaring
+// {"type":"web_search_20250305","name":"web_search"} keeps that exact shape through
+// MessagesToChat, so the conversion back has to recognise the versioned identifier — matching
+// only the unversioned aliases silently dropped the tool and the provider answered as if no
+// tool had been offered.
+func TestConvertOpenAIToolsToAnthropic_VersionedBuiltinTools(t *testing.T) {
+	t.Run("web_search_passes_through", func(t *testing.T) {
+		tools := []interface{}{
+			map[string]interface{}{"type": "web_search_20250305", "name": "web_search"},
+		}
+		result := convertOpenAIToolsToAnthropic(tools)
+		require.Len(t, result, 1)
+		assert.Equal(t, "web_search_20250305", result[0].Type)
+		assert.Equal(t, "web_search", result[0].Name)
+		assert.Nil(t, result[0].InputSchema, "server tools carry no input_schema")
+	})
+
+	t.Run("name_defaults_per_tool_family", func(t *testing.T) {
+		tools := []interface{}{
+			map[string]interface{}{"type": "web_search_20250305"},
+			map[string]interface{}{"type": "text_editor_20250124"},
+			map[string]interface{}{"type": "bash_20250124"},
+		}
+		result := convertOpenAIToolsToAnthropic(tools)
+		require.Len(t, result, 3)
+		assert.Equal(t, "web_search", result[0].Name)
+		assert.Equal(t, "str_replace_editor", result[1].Name)
+		assert.Equal(t, "bash", result[2].Name)
+	})
+
+	t.Run("computer_keeps_display_dimensions", func(t *testing.T) {
+		tools := []interface{}{
+			map[string]interface{}{
+				"type":              "computer_20250124",
+				"name":              "computer",
+				"display_width_px":  float64(1280),
+				"display_height_px": float64(800),
+			},
+		}
+		result := convertOpenAIToolsToAnthropic(tools)
+		require.Len(t, result, 1)
+		assert.Equal(t, "computer_20250124", result[0].Type)
+		assert.Equal(t, 1280, result[0].DisplayWidthPx)
+		assert.Equal(t, 800, result[0].DisplayHeightPx)
+	})
+
+	t.Run("unknown_type_still_dropped", func(t *testing.T) {
+		tools := []interface{}{
+			map[string]interface{}{"type": "file_search", "name": "file_search"},
+		}
+		assert.Nil(t, convertOpenAIToolsToAnthropic(tools))
 	})
 }
 
@@ -237,7 +333,7 @@ func TestOpenAIToAnthropic_AllowedToolsExpanded(t *testing.T) {
 		"max_tokens": 200
 	}`
 
-	out, err := OpenAIToAnthropic([]byte(body), "")
+	out, err := OpenAIToAnthropic([]byte(body), "", true)
 	require.NoError(t, err)
 
 	var req map[string]interface{}
@@ -276,7 +372,7 @@ func TestOpenAIToAnthropic_AllowedToolsViaExtraBody(t *testing.T) {
 		"max_tokens": 200
 	}`
 
-	out, err := OpenAIToAnthropic([]byte(body), "")
+	out, err := OpenAIToAnthropic([]byte(body), "", true)
 	require.NoError(t, err)
 
 	var req map[string]interface{}
@@ -305,7 +401,7 @@ func TestOpenAIToAnthropic_ExtraBodyToolChoiceOverridesRegular(t *testing.T) {
 		"max_tokens": 100
 	}`
 
-	out, err := OpenAIToAnthropic([]byte(body), "")
+	out, err := OpenAIToAnthropic([]byte(body), "", true)
 	require.NoError(t, err)
 
 	var req map[string]interface{}

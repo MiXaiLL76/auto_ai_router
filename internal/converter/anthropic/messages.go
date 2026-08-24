@@ -10,6 +10,11 @@ import (
 
 // OpenAIToAnthropic converts an OpenAI Chat Completions request body to Anthropic Messages API
 // format.  The model parameter overrides the model field in the request body when non-empty.
+// isRealAnthropicBackend tells the thinking-disable safeguard below whether this request is
+// actually going to Anthropic (ProviderTypeAnthropic, including Bedrock) as opposed to a
+// multi-vendor gateway (CometAPI, ProMan) that may proxy the Anthropic-shaped request to an
+// entirely different backend model — the caller knows this from its own routing decision,
+// which is a reliable signal, unlike guessing from the model name.
 //
 // Unsupported OpenAI parameters (silently ignored):
 //   - n: Anthropic does not support multiple candidates per request
@@ -21,7 +26,7 @@ import (
 //   - service_tier / store: not supported
 //   - parallel_tool_calls: Anthropic always allows parallel tool calls
 //   - prediction / verbosity / prompt_cache_key: not supported
-func OpenAIToAnthropic(openAIBody []byte, model string) ([]byte, error) {
+func OpenAIToAnthropic(openAIBody []byte, model string, isRealAnthropicBackend bool) ([]byte, error) {
 	var req openai.OpenAIRequest
 	if err := json.Unmarshal(openAIBody, &req); err != nil {
 		return nil, fmt.Errorf("failed to parse OpenAI request: %w", err)
@@ -101,6 +106,18 @@ func OpenAIToAnthropic(openAIBody []byte, model string) ([]byte, error) {
 		// Anthropic requires temperature=1.0 when thinking is enabled.
 		temp := 1.0
 		anthropicReq.Temperature = &temp
+	} else if !isRealAnthropicBackend {
+		// This Anthropic-shaped request may be handled by a real Claude model
+		// (ProviderTypeAnthropic) or proxied by a multi-vendor gateway
+		// (CometAPI, ProMan) to an entirely different backend model. For
+		// Claude, omitting "thinking" already means off. Other vendors don't
+		// share that convention — e.g. Gemini models default to autonomous
+		// "medium" thinking when no config is given, silently burning the
+		// token budget on invisible reasoning and truncating the visible
+		// answer (mirrors the same default-off safeguard the Vertex
+		// converter applies via disableThinkingConfig). Send an explicit
+		// disable so every backend gets the same unambiguous signal.
+		anthropicReq.Thinking = &AnthropicThinking{Type: "disabled"}
 	}
 
 	// Anthropic has no native response_format; we inject a JSON instruction
@@ -353,7 +370,10 @@ func toContentBlocks(content interface{}) []ContentBlock {
 //   - Removes the "model" field (Bedrock gets model from the URL path)
 //   - Adds "anthropic_version": "bedrock-2023-05-31"
 func OpenAIToBedrock(openAIBody []byte, model string) ([]byte, error) {
-	anthropicBody, err := OpenAIToAnthropic(openAIBody, model)
+	// Bedrock only ever serves Anthropic models here (converter.go gates this call
+	// behind isAnthropicBedrockModel), so the thinking-disable safeguard in
+	// OpenAIToAnthropic never needs to fire.
+	anthropicBody, err := OpenAIToAnthropic(openAIBody, model, true)
 	if err != nil {
 		return nil, err
 	}

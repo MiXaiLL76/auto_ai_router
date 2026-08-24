@@ -213,7 +213,7 @@ func TestMessagesToChatPreservesThinkingForAnthropicProvider(t *testing.T) {
 
 	chat, _, err := MessagesToChat(body)
 	require.NoError(t, err)
-	roundTrip, err := OpenAIToAnthropic(chat, "claude-sonnet")
+	roundTrip, err := OpenAIToAnthropic(chat, "claude-sonnet", true)
 	require.NoError(t, err)
 
 	var got map[string]interface{}
@@ -321,7 +321,7 @@ func roundTripFirstUserBlock(t *testing.T, messagesBody []byte) map[string]inter
 
 	chat, _, err := MessagesToChat(messagesBody)
 	require.NoError(t, err)
-	roundTrip, err := OpenAIToAnthropic(chat, "claude-sonnet-4-5")
+	roundTrip, err := OpenAIToAnthropic(chat, "claude-sonnet-4-5", true)
 	require.NoError(t, err)
 
 	var got map[string]interface{}
