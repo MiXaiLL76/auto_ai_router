@@ -1489,7 +1489,6 @@ func (p *Proxy) streamToClient(
 					return writeEarlyStreamError(payload)
 				}
 				w.WriteHeader(statusCode)
-				committed = true
 				if writeErr := writeStreamChunk(initialCommit.Release()); writeErr != nil {
 					return writeErr
 				}
