@@ -3,6 +3,7 @@ package proxy
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"strings"
@@ -25,14 +26,49 @@ func clientResponseBodyForCredential(statusCode int, body []byte, _ *config.Cred
 	return body, false, false
 }
 
+func statusCodeFromProviderBodyError(statusCode int, body []byte) (int, bool) {
+	if statusCode < http.StatusOK || statusCode >= http.StatusMultipleChoices || len(body) == 0 {
+		return 0, false
+	}
+
+	var evt struct {
+		Type     string          `json:"type"`
+		Status   string          `json:"status"`
+		Error    json.RawMessage `json:"error"`
+		Response struct {
+			Status string          `json:"status"`
+			Error  json.RawMessage `json:"error"`
+		} `json:"response"`
+	}
+	if err := json.Unmarshal(body, &evt); err != nil {
+		return 0, false
+	}
+
+	signals := []string{evt.Type, evt.Status, evt.Response.Status}
+	topErrorSignals, hasTopError := providerErrorSignals(evt.Error)
+	responseErrorSignals, hasResponseError := providerErrorSignals(evt.Response.Error)
+	signals = append(signals, topErrorSignals...)
+	signals = append(signals, responseErrorSignals...)
+
+	hasFailedStatus := strings.EqualFold(evt.Status, "failed") || strings.EqualFold(evt.Response.Status, "failed")
+	if !hasTopError && !hasResponseError && !hasFailedStatus {
+		return 0, false
+	}
+	return statusCodeFromErrorSignals(signals), true
+}
+
 const maxProxyStreamErrorCaptureBytes = 256 * 1024
 
 // proxyProviderStreamError reports an error event carried by an otherwise
-// successful HTTP/SSE response. The response has already been forwarded to the
-// client, so callers must not try to replace it with another HTTP response; the
-// error exists to drive terminal logging and session semantics.
+// successful HTTP/SSE response. Most instances are detected after the response
+// has already been forwarded to the client, so callers must not try to replace
+// that response. beforeCommit is set only when streamToClient catches the
+// terminal event before writing any downstream byte and has already replaced it
+// with a normal HTTP error response.
 type proxyProviderStreamError struct {
-	payload string
+	payload      string
+	statusCode   int
+	beforeCommit bool
 }
 
 func (e proxyProviderStreamError) Error() string {
@@ -131,11 +167,111 @@ func markProxyProviderStreamError(logCtx *RequestLogContext, statusCode int, pay
 	logCtx.ErrorMsg = payload
 }
 
+func statusCodeFromProviderStreamError(payload string) int {
+	var evt struct {
+		Type  string `json:"type"`
+		Error struct {
+			Type    string `json:"type"`
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+		Response struct {
+			Status string `json:"status"`
+			Error  struct {
+				Type    string `json:"type"`
+				Code    string `json:"code"`
+				Message string `json:"message"`
+			} `json:"error"`
+		} `json:"response"`
+	}
+	if err := json.Unmarshal([]byte(payload), &evt); err != nil {
+		return http.StatusBadGateway
+	}
+
+	signals := []string{
+		evt.Error.Code,
+		evt.Error.Type,
+		evt.Error.Message,
+		evt.Response.Error.Code,
+		evt.Response.Error.Type,
+		evt.Response.Error.Message,
+		evt.Type,
+	}
+	return statusCodeFromErrorSignals(signals)
+}
+
+func providerErrorSignals(raw json.RawMessage) ([]string, bool) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return nil, false
+	}
+
+	var text string
+	if err := json.Unmarshal(trimmed, &text); err == nil {
+		text = strings.TrimSpace(text)
+		if text == "" {
+			return nil, false
+		}
+		return []string{text}, true
+	}
+
+	var fields struct {
+		Type    string `json:"type"`
+		Code    string `json:"code"`
+		Message string `json:"message"`
+		Status  string `json:"status"`
+	}
+	if err := json.Unmarshal(trimmed, &fields); err == nil {
+		signals := []string{fields.Code, fields.Type, fields.Message, fields.Status}
+		for _, signal := range signals {
+			if strings.TrimSpace(signal) != "" {
+				return signals, true
+			}
+		}
+		return nil, false
+	}
+
+	return nil, false
+}
+
+func statusCodeFromErrorSignals(signals []string) int {
+	for _, signal := range signals {
+		signal = strings.ToLower(strings.TrimSpace(signal))
+		switch {
+		case signal == "":
+			continue
+		case strings.Contains(signal, "rate_limit") || strings.Contains(signal, "too_many_requests"):
+			return http.StatusTooManyRequests
+		case strings.Contains(signal, "timeout"):
+			return http.StatusRequestTimeout
+		case strings.Contains(signal, "overloaded") || strings.Contains(signal, "service_unavailable"):
+			return http.StatusServiceUnavailable
+		case strings.Contains(signal, "server_error") || strings.Contains(signal, "internal"):
+			return http.StatusInternalServerError
+		}
+	}
+	return http.StatusBadGateway
+}
+
+func writeProviderStreamErrorBeforeCommit(w http.ResponseWriter, statusCode int) {
+	body := maskedUpstreamErrorBody(statusCode)
+	header := w.Header()
+	header.Set("Content-Type", "application/json")
+	header.Set("Content-Length", itoa(len(body)))
+	header.Del(accelBufferingHeader)
+	dropRepresentationIntegrityHeaders(header)
+	w.WriteHeader(statusCode)
+	_, _ = w.Write(body)
+}
+
 // resolveCapturedProviderStreamError finalizes one or more bounded stream
-// observers after every upstream byte has already been forwarded. Raw provider
-// and transformed-output observers may both be supplied; the first decoded
-// terminal payload is retained as the authoritative error detail. A pre-existing
-// transport/client error keeps precedence for StreamOutcome classification.
+// observers once the stream ends — whether upstream bytes were already
+// forwarded to the client, or the terminal error was caught before any byte
+// was committed (see the beforeCommit case on proxyProviderStreamError). Raw
+// provider and transformed-output observers may both be supplied; the first
+// decoded terminal payload is retained as the authoritative error detail. A
+// pre-existing transport/client error keeps precedence for StreamOutcome
+// classification.
 func resolveCapturedProviderStreamError(
 	logCtx *RequestLogContext,
 	statusCode int,
@@ -144,6 +280,11 @@ func resolveCapturedProviderStreamError(
 ) error {
 	if statusCode < http.StatusOK || statusCode >= http.StatusMultipleChoices {
 		return streamErr
+	}
+
+	var earlyErr proxyProviderStreamError
+	if err, ok := streamErr.(proxyProviderStreamError); ok && err.beforeCommit {
+		earlyErr = err
 	}
 
 	payload := ""
@@ -155,13 +296,19 @@ func resolveCapturedProviderStreamError(
 			payload = captured
 		}
 	}
+	if payload == "" && earlyErr.payload != "" {
+		payload = earlyErr.payload
+	}
 	if payload == "" {
 		return streamErr
 	}
 
+	if earlyErr.statusCode >= http.StatusBadRequest {
+		statusCode = earlyErr.statusCode
+	}
 	markProxyProviderStreamError(logCtx, statusCode, payload)
 	if streamErr == nil {
-		return proxyProviderStreamError{payload: payload}
+		return proxyProviderStreamError{payload: payload, statusCode: statusCode}
 	}
 	return streamErr
 }
@@ -184,6 +331,9 @@ func (p *Proxy) writeProxyResponse(w http.ResponseWriter, resp *ProxyResponse, c
 		credName = cred.Name
 	}
 
+	if mappedStatus, ok := statusCodeFromProviderBodyError(resp.StatusCode, resp.Body); ok {
+		resp.StatusCode = mappedStatus
+	}
 	responseBody, responseBodyChanged, responseBodyMasked := clientResponseBodyForCredential(resp.StatusCode, resp.Body, cred, modelID)
 	if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
 		endpoint := endpointFromRequest(clientReq)
@@ -326,8 +476,6 @@ func (p *Proxy) writeProxyStreamingResponseWithTokens(
 	}
 	setSuccessfulSSEHeaders(w.Header(), resp.StatusCode)
 
-	w.WriteHeader(resp.StatusCode)
-
 	var lastUsage *converter.TokenUsage
 	completion := p.newCompletionTokenAccumulator(tokenizerModelID)
 	var payloadBuf [][]byte
@@ -387,6 +535,7 @@ func (p *Proxy) writeProxyStreamingResponseWithTokens(
 			credName,
 			modelID,
 			endpointFromRequest(clientReq),
+			resp.StatusCode,
 			onChunk,
 			nil,
 			logCtx,
@@ -407,6 +556,9 @@ func (p *Proxy) writeProxyStreamingResponseWithTokens(
 	}
 
 	// Non-flushing fallback: copy as-is (token usage cannot be parsed reliably here).
+	// Unlike the streamToClient path above, there's no preflight gate here to
+	// delay the header, so the real upstream status is committed immediately.
+	w.WriteHeader(resp.StatusCode)
 	var responseIDScanner clientResponseIDScanner
 	observedReader := io.TeeReader(clientReader, clientResponseIDObserver{scanner: &responseIDScanner, logCtx: logCtx})
 	if _, err := io.Copy(w, observedReader); err != nil {

@@ -58,7 +58,7 @@ func TestStreamToClientCapturesResponseID(t *testing.T) {
 
 	err := NewTestProxyBuilder().Build().streamToClient(
 		context.Background(), recorder, strings.NewReader(payload), "cred", "model",
-		"/v1/chat/completions", nil, nil, logCtx,
+		"/v1/chat/completions", http.StatusOK, nil, nil, logCtx,
 	)
 
 	require.NoError(t, err)

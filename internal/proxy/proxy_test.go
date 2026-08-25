@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"encoding/json"
+	"io"
 	"log/slog"
 	"mime/multipart"
 	"net/http"
@@ -110,6 +111,82 @@ func TestProxyRequest_ValidRequest(t *testing.T) {
 
 	assert.Equal(t, http.StatusOK, w.Code)
 	assert.Contains(t, w.Body.String(), "success")
+}
+
+func TestProxyRequest_StreamingImmediateRateLimitEventReturns429(t *testing.T) {
+	mockServer := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `data: {"type":"response.failed","response":{"id":"resp_1","status":"failed","error":{"code":"rate_limit_exceeded","message":"Request failed"}}}`+"\n\n")
+	}))
+	defer mockServer.Close()
+
+	prx := NewTestProxyBuilder().
+		WithSingleCredential("test", config.ProviderTypeProxy, mockServer.URL, "upstream-key-1").
+		Build()
+
+	reqBody := `{"model":"gpt-4","stream":true,"messages":[{"role":"user","content":"Hello"}]}`
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(reqBody))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	prx.ProxyRequest(w, req)
+
+	assert.Equal(t, http.StatusTooManyRequests, w.Code)
+	assert.Contains(t, w.Header().Get("Content-Type"), "application/json")
+	assert.Contains(t, w.Body.String(), "rate_limit_error")
+	assert.NotContains(t, w.Body.String(), "response.failed")
+}
+
+func TestProxyRequest_NonStreamingRateLimitBodyReturns429(t *testing.T) {
+	mockServer := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `{"error":{"code":"rate_limit_exceeded","message":"Request failed"}}`)
+	}))
+	defer mockServer.Close()
+
+	prx := NewTestProxyBuilder().
+		WithSingleCredential("test", config.ProviderTypeProxy, mockServer.URL, "upstream-key-1").
+		Build()
+
+	reqBody := `{"model":"gpt-4","messages":[{"role":"user","content":"Hello"}]}`
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(reqBody))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	prx.ProxyRequest(w, req)
+
+	assert.Equal(t, http.StatusTooManyRequests, w.Code)
+	assert.Contains(t, w.Body.String(), "rate_limit_error")
+	assert.NotContains(t, w.Body.String(), "rate_limit_exceeded")
+}
+
+func TestProxyRequest_NonStreamingFailedResponseBodyReturns500(t *testing.T) {
+	mockServer := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `{"id":"resp_1","object":"response","status":"failed","error":{"code":"server_error","message":"Request failed"}}`)
+	}))
+	defer mockServer.Close()
+
+	prx := NewTestProxyBuilder().
+		WithSingleCredential("openai", config.ProviderTypeOpenAI, mockServer.URL, "upstream-key-1").
+		Build()
+
+	reqBody := `{"model":"gpt-4","messages":[{"role":"user","content":"Hello"}]}`
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(reqBody))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	prx.ProxyRequest(w, req)
+
+	assert.Equal(t, http.StatusInternalServerError, w.Code)
+	assert.Contains(t, w.Body.String(), "server_error")
+	assert.NotContains(t, w.Body.String(), "resp_1")
 }
 
 func TestProxyRequest_WithModel(t *testing.T) {

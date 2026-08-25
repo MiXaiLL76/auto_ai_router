@@ -737,6 +737,17 @@ func (p *Proxy) executeProxyRequest(
 		return nil, err
 	}
 
+	if mappedStatus, ok := statusCodeFromProviderBodyError(resp.StatusCode, respBody); ok {
+		// resp.StatusCode != http.StatusOK already recorded this attempt as
+		// failed above; only record here when the original status was 200,
+		// to keep this at exactly one RecordCredentialAttemptError per
+		// failed attempt.
+		if resp.StatusCode == http.StatusOK {
+			p.metrics.RecordCredentialAttemptError(cred.Name)
+		}
+		resp.StatusCode = mappedStatus
+	}
+
 	// Return complete response information
 	return &ProxyResponse{
 		StatusCode:           resp.StatusCode,
@@ -1074,11 +1085,20 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 			logCtx.Credential = cred
 		}
 
-		// Client-facing outcome decided (this response — success or the last
-		// retryable error with no more attempts left — is what gets written to
-		// the client below) — record exactly once here with genuine end-to-end
-		// duration, not once per retry attempt.
-		p.metrics.RecordRequest(cred.Name, r.URL.Path, modelID, proxyResp.StatusCode, time.Since(start))
+		if !proxyResp.IsStreaming {
+			if mappedStatus, ok := statusCodeFromProviderBodyError(proxyResp.StatusCode, proxyResp.Body); ok {
+				proxyResp.StatusCode = mappedStatus
+			}
+		}
+
+		// Client-facing outcome metric (RecordRequest) is recorded further down,
+		// after the response has actually been written — see the "Log proxy
+		// response" block below. For streaming, the body/SSE-detected error
+		// remap (statusCodeFromProviderBodyError, above) only happens for
+		// non-streaming; a streaming request's real client-visible status isn't
+		// known until the stream write below has resolved it, so recording here
+		// with proxyResp.StatusCode would record the pre-remap status instead of
+		// what the client actually received.
 
 		// Write response (streaming or non-streaming)
 		tokenUsageOptions := tokenUsageExtractionOptionsForResponse(cred, proxyResp.Headers)
@@ -1104,7 +1124,6 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 				if logCtx.IsProxyRequest && logCtx.ActualCredentialName != "" {
 					w.Header().Set("X-Credential-Name", logCtx.ActualCredentialName)
 				}
-				w.WriteHeader(proxyResp.StatusCode)
 				p.setPromptTokensEstimate(logCtx, body, realModelID)
 				fakeResp := &http.Response{
 					StatusCode: proxyResp.StatusCode,
@@ -1130,7 +1149,6 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 				if proxyResp.StatusCode >= 200 && proxyResp.StatusCode < 300 {
 					p.markAudioUsageExcludesCachedForClient(w, logCtx)
 				}
-				w.WriteHeader(proxyResp.StatusCode)
 				p.setPromptTokensEstimate(logCtx, body, realModelID)
 				fakeResp := &http.Response{
 					StatusCode: proxyResp.StatusCode,
@@ -1156,7 +1174,6 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 				if proxyResp.StatusCode >= 200 && proxyResp.StatusCode < 300 {
 					p.markAudioUsageContractForClient(w, logCtx, tokenUsageOptions.AudioInputIncludesCachedAudio)
 				}
-				w.WriteHeader(proxyResp.StatusCode)
 				p.setPromptTokensEstimate(logCtx, body, realModelID)
 				fakeResp := &http.Response{
 					StatusCode: proxyResp.StatusCode,
@@ -1298,21 +1315,42 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		// Log proxy response
-		logCtx.Status = "success"
-		if proxyResp.StatusCode >= 400 {
-			logCtx.Status = "failure"
-			// Final error returned to the client — single unified ERROR record.
-			// For streaming responses the body was forwarded to the client and is
-			// not available here (response_body is omitted).
-			p.logUpstreamError(r.Context(), "Proxy request completed with error status", proxyResp.StatusCode, cred, modelID, proxyResp.Body,
-				"url", cred.BaseURL,
-				"streaming", proxyResp.IsStreaming,
-				"actual_credential", logCtx.ActualCredentialName,
-				"request_id", logCtx.RequestID)
+		// Log proxy response.
+		// For streaming, the write path above may already have classified this
+		// request as a terminal stream error or client abort (body-detected
+		// provider error remapped mid-stream, or the client disconnecting) and
+		// set logCtx.Status/HTTPStatus/ErrorMsg accordingly — via
+		// markProxyProviderStreamError / markStreamFailure / finalizeStreamingLog,
+		// all reached from the streaming handlers called above. proxyResp.StatusCode
+		// itself is never mutated for streaming (only the non-streaming branch
+		// remaps it), so blindly overwriting here would silently revert an
+		// already-correct 429/500/499 back to the original upstream 200.
+		streamTerminalErrorAlreadyLogged := proxyResp.IsStreaming &&
+			(logCtx.StreamOutcome == "stream_error" || logCtx.StreamOutcome == "client_aborted")
+		if !streamTerminalErrorAlreadyLogged {
+			logCtx.Status = "success"
+			if proxyResp.StatusCode >= 400 {
+				logCtx.Status = "failure"
+				// Final error returned to the client — single unified ERROR record.
+				// For streaming responses the body was forwarded to the client and is
+				// not available here (response_body is omitted).
+				p.logUpstreamError(r.Context(), "Proxy request completed with error status", proxyResp.StatusCode, cred, modelID, proxyResp.Body,
+					"url", cred.BaseURL,
+					"streaming", proxyResp.IsStreaming,
+					"actual_credential", logCtx.ActualCredentialName,
+					"request_id", logCtx.RequestID)
+			}
+			logCtx.HTTPStatus = proxyResp.StatusCode
 		}
-		logCtx.HTTPStatus = proxyResp.StatusCode
 		logCtx.TargetURL = cred.BaseURL
+
+		// Client-facing outcome decided (this response — success or the last
+		// retryable error with no more attempts left — is what gets written to
+		// the client; for streaming, logCtx.HTTPStatus reflects any body/SSE
+		// remap applied during the write above) — record exactly once here
+		// with genuine end-to-end duration, not once per retry attempt.
+		p.metrics.RecordRequest(cred.Name, r.URL.Path, modelID, logCtx.HTTPStatus, time.Since(start))
+
 		if !proxyResp.IsStreaming {
 			// Reuses the decode already done above (extractOpenAITokensAndUsage)
 			// instead of a second independent converter.ExtractTokenUsageWithOptions
@@ -1780,6 +1818,10 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
+		if mappedStatus, ok := statusCodeFromProviderBodyError(resp.StatusCode, responseBody); ok {
+			resp.StatusCode = mappedStatus
+		}
+
 		p.recordProviderResponse(r.Context(), cred, modelID, realModelID, resp.StatusCode, resp.Header, responseBody)
 
 		// Check if we should retry with another same-type credential
@@ -1862,11 +1904,28 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 		defer closeBody()
 	}
 
-	// Client-facing outcome decided (this response — success or the last
-	// retryable error with no more attempts left — is what gets written to
-	// the client below) — record exactly once here with genuine end-to-end
-	// duration, not once per retry attempt.
-	p.metrics.RecordRequest(cred.Name, r.URL.Path, modelID, resp.StatusCode, time.Since(start))
+	if isStreamingResp {
+		// Streaming: unlike the non-streaming branch below, resp.StatusCode here
+		// is never remapped from a body/SSE-detected provider error (that only
+		// resolves once the stream write below finishes, via finalizeStreamingLog).
+		// Record the metric at function return instead, using whatever
+		// logCtx.HTTPStatus is authoritative by then; fall back to resp.StatusCode
+		// if a streaming sub-path returns early without ever setting it.
+		fallbackStatus := resp.StatusCode
+		defer func() {
+			finalStatus := logCtx.HTTPStatus
+			if finalStatus == 0 {
+				finalStatus = fallbackStatus
+			}
+			p.metrics.RecordRequest(cred.Name, r.URL.Path, modelID, finalStatus, time.Since(start))
+		}()
+	} else {
+		// Client-facing outcome decided (this response — success or the last
+		// retryable error with no more attempts left — is what gets written to
+		// the client below) — record exactly once here with genuine end-to-end
+		// duration, not once per retry attempt.
+		p.metrics.RecordRequest(cred.Name, r.URL.Path, modelID, resp.StatusCode, time.Since(start))
+	}
 
 	// === Process final response ===
 	var finalResponseBody []byte
@@ -2024,6 +2083,9 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
+		if mappedStatus, ok := statusCodeFromProviderBodyError(resp.StatusCode, finalResponseBody); ok {
+			resp.StatusCode = mappedStatus
+		}
 		rawErrorBody := finalResponseBody
 		clientBody, clientBodyChanged, clientBodyMasked := clientResponseBodyForCredential(resp.StatusCode, finalResponseBody, cred, modelID)
 		if clientBodyChanged {
@@ -2150,7 +2212,6 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		setSuccessfulSSEHeaders(w.Header(), resp.StatusCode)
-		w.WriteHeader(resp.StatusCode)
 
 		// Arms the lazy fallback estimate; the actual json-decode + tiktoken pass only
 		// runs later, inside finalizeStreamingLog, and only if the provider never sent

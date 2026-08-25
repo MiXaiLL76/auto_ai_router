@@ -112,9 +112,7 @@ func TestResponseCompatibilityWriterDoesNotCompleteFailedStream(t *testing.T) {
 		"credential",
 		"model",
 		"/v1/chat/completions",
-		nil,
-		nil,
-		nil,
+		http.StatusOK, nil, nil, nil,
 	)
 	require.ErrorIs(t, err, streamErr)
 	require.ErrorIs(t, writer.Close(), streamErr)
