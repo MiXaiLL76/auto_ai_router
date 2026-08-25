@@ -211,6 +211,61 @@ func TestProxyStreamErrorCaptureFinalizesFragmentedBareJSON(t *testing.T) {
 	assert.Contains(t, capture.Finalize(), "bare failure")
 }
 
+func TestStatusCodeFromProviderBodyError(t *testing.T) {
+	tests := []struct {
+		name       string
+		statusCode int
+		body       string
+		wantStatus int
+		wantOK     bool
+	}{
+		{
+			name:       "top level rate limit error",
+			statusCode: http.StatusOK,
+			body:       `{"error":{"code":"rate_limit_exceeded","message":"Request failed"}}`,
+			wantStatus: http.StatusTooManyRequests,
+			wantOK:     true,
+		},
+		{
+			name:       "failed responses object",
+			statusCode: http.StatusOK,
+			body:       `{"id":"resp_1","status":"failed","error":{"code":"server_error","message":"Request failed"}}`,
+			wantStatus: http.StatusInternalServerError,
+			wantOK:     true,
+		},
+		{
+			name:       "nested failed response event body",
+			statusCode: http.StatusOK,
+			body:       `{"type":"response.failed","response":{"status":"failed","error":{"code":"rate_limit_exceeded"}}}`,
+			wantStatus: http.StatusTooManyRequests,
+			wantOK:     true,
+		},
+		{
+			name:       "normal success",
+			statusCode: http.StatusOK,
+			body:       `{"id":"chatcmpl-1","choices":[{"message":{"content":"ok"}}]}`,
+			wantOK:     false,
+		},
+		{
+			name:       "real error status not remapped",
+			statusCode: http.StatusBadGateway,
+			body:       `{"error":{"code":"rate_limit_exceeded"}}`,
+			wantOK:     false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotStatus, gotOK := statusCodeFromProviderBodyError(tt.statusCode, []byte(tt.body))
+
+			assert.Equal(t, tt.wantOK, gotOK)
+			if tt.wantOK {
+				assert.Equal(t, tt.wantStatus, gotStatus)
+			}
+		})
+	}
+}
+
 type fragmentedStreamReadCloser struct {
 	chunks [][]byte
 	index  int

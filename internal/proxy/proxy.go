@@ -737,6 +737,11 @@ func (p *Proxy) executeProxyRequest(
 		return nil, err
 	}
 
+	if mappedStatus, ok := statusCodeFromProviderBodyError(resp.StatusCode, respBody); ok {
+		resp.StatusCode = mappedStatus
+		p.metrics.RecordCredentialAttemptError(cred.Name)
+	}
+
 	// Return complete response information
 	return &ProxyResponse{
 		StatusCode:           resp.StatusCode,
@@ -1072,6 +1077,12 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 		if respCred != nil && respCred != cred {
 			cred = respCred
 			logCtx.Credential = cred
+		}
+
+		if !proxyResp.IsStreaming {
+			if mappedStatus, ok := statusCodeFromProviderBodyError(proxyResp.StatusCode, proxyResp.Body); ok {
+				proxyResp.StatusCode = mappedStatus
+			}
 		}
 
 		// Client-facing outcome decided (this response — success or the last
@@ -1777,6 +1788,10 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 
+		if mappedStatus, ok := statusCodeFromProviderBodyError(resp.StatusCode, responseBody); ok {
+			resp.StatusCode = mappedStatus
+		}
+
 		p.recordProviderResponse(r.Context(), cred, modelID, realModelID, resp.StatusCode, resp.Header, responseBody)
 
 		// Check if we should retry with another same-type credential
@@ -2021,6 +2036,9 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
+		if mappedStatus, ok := statusCodeFromProviderBodyError(resp.StatusCode, finalResponseBody); ok {
+			resp.StatusCode = mappedStatus
+		}
 		rawErrorBody := finalResponseBody
 		clientBody, clientBodyChanged, clientBodyMasked := clientResponseBodyForCredential(resp.StatusCode, finalResponseBody, cred, modelID)
 		if clientBodyChanged {

@@ -26,6 +26,37 @@ func clientResponseBodyForCredential(statusCode int, body []byte, _ *config.Cred
 	return body, false, false
 }
 
+func statusCodeFromProviderBodyError(statusCode int, body []byte) (int, bool) {
+	if statusCode < http.StatusOK || statusCode >= http.StatusMultipleChoices || len(body) == 0 {
+		return 0, false
+	}
+
+	var evt struct {
+		Type     string          `json:"type"`
+		Status   string          `json:"status"`
+		Error    json.RawMessage `json:"error"`
+		Response struct {
+			Status string          `json:"status"`
+			Error  json.RawMessage `json:"error"`
+		} `json:"response"`
+	}
+	if err := json.Unmarshal(body, &evt); err != nil {
+		return 0, false
+	}
+
+	signals := []string{evt.Type, evt.Status, evt.Response.Status}
+	topErrorSignals, hasTopError := providerErrorSignals(evt.Error)
+	responseErrorSignals, hasResponseError := providerErrorSignals(evt.Response.Error)
+	signals = append(signals, topErrorSignals...)
+	signals = append(signals, responseErrorSignals...)
+
+	hasFailedStatus := strings.EqualFold(evt.Status, "failed") || strings.EqualFold(evt.Response.Status, "failed")
+	if !hasTopError && !hasResponseError && !hasFailedStatus {
+		return 0, false
+	}
+	return statusCodeFromErrorSignals(signals), true
+}
+
 const maxProxyStreamErrorCaptureBytes = 256 * 1024
 
 // proxyProviderStreamError reports an error event carried by an otherwise
@@ -166,6 +197,44 @@ func statusCodeFromProviderStreamError(payload string) int {
 		evt.Response.Error.Message,
 		evt.Type,
 	}
+	return statusCodeFromErrorSignals(signals)
+}
+
+func providerErrorSignals(raw json.RawMessage) ([]string, bool) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return nil, false
+	}
+
+	var text string
+	if err := json.Unmarshal(trimmed, &text); err == nil {
+		text = strings.TrimSpace(text)
+		if text == "" {
+			return nil, false
+		}
+		return []string{text}, true
+	}
+
+	var fields struct {
+		Type    string `json:"type"`
+		Code    string `json:"code"`
+		Message string `json:"message"`
+		Status  string `json:"status"`
+	}
+	if err := json.Unmarshal(trimmed, &fields); err == nil {
+		signals := []string{fields.Code, fields.Type, fields.Message, fields.Status}
+		for _, signal := range signals {
+			if strings.TrimSpace(signal) != "" {
+				return signals, true
+			}
+		}
+		return nil, false
+	}
+
+	return nil, false
+}
+
+func statusCodeFromErrorSignals(signals []string) int {
 	for _, signal := range signals {
 		signal = strings.ToLower(strings.TrimSpace(signal))
 		switch {
@@ -259,6 +328,9 @@ func (p *Proxy) writeProxyResponse(w http.ResponseWriter, resp *ProxyResponse, c
 		credName = cred.Name
 	}
 
+	if mappedStatus, ok := statusCodeFromProviderBodyError(resp.StatusCode, resp.Body); ok {
+		resp.StatusCode = mappedStatus
+	}
 	responseBody, responseBodyChanged, responseBodyMasked := clientResponseBodyForCredential(resp.StatusCode, resp.Body, cred, modelID)
 	if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
 		endpoint := endpointFromRequest(clientReq)
