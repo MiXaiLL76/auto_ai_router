@@ -1118,7 +1118,7 @@ func (p *Proxy) finalizeStreamingLog(logCtx *RequestLogContext, totalTokens int,
 		logCtx.UsageSource = "estimated"
 	}
 
-	if !(logCtx.StreamOutcome == "stream_error" && logCtx.HTTPStatus >= http.StatusBadRequest) {
+	if logCtx.StreamOutcome != "stream_error" || logCtx.HTTPStatus < http.StatusBadRequest {
 		logCtx.HTTPStatus = statusCode
 	}
 	if logCtx.StreamOutcome == "client_aborted" || logCtx.StreamOutcome == "stream_error" {
@@ -1487,7 +1487,6 @@ func (p *Proxy) streamToClient(
 				if payload := initialCommit.FinalizeTerminalError(); payload != "" {
 					return writeEarlyStreamError(payload)
 				}
-				committed = true
 				if writeErr := writeStreamChunk(initialCommit.Release()); writeErr != nil {
 					return writeErr
 				}
