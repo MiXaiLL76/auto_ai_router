@@ -265,10 +265,13 @@ func writeProviderStreamErrorBeforeCommit(w http.ResponseWriter, statusCode int)
 }
 
 // resolveCapturedProviderStreamError finalizes one or more bounded stream
-// observers after every upstream byte has already been forwarded. Raw provider
-// and transformed-output observers may both be supplied; the first decoded
-// terminal payload is retained as the authoritative error detail. A pre-existing
-// transport/client error keeps precedence for StreamOutcome classification.
+// observers once the stream ends — whether upstream bytes were already
+// forwarded to the client, or the terminal error was caught before any byte
+// was committed (see the beforeCommit case on proxyProviderStreamError). Raw
+// provider and transformed-output observers may both be supplied; the first
+// decoded terminal payload is retained as the authoritative error detail. A
+// pre-existing transport/client error keeps precedence for StreamOutcome
+// classification.
 func resolveCapturedProviderStreamError(
 	logCtx *RequestLogContext,
 	statusCode int,
@@ -553,6 +556,9 @@ func (p *Proxy) writeProxyStreamingResponseWithTokens(
 	}
 
 	// Non-flushing fallback: copy as-is (token usage cannot be parsed reliably here).
+	// Unlike the streamToClient path above, there's no preflight gate here to
+	// delay the header, so the real upstream status is committed immediately.
+	w.WriteHeader(resp.StatusCode)
 	var responseIDScanner clientResponseIDScanner
 	observedReader := io.TeeReader(clientReader, clientResponseIDObserver{scanner: &responseIDScanner, logCtx: logCtx})
 	if _, err := io.Copy(w, observedReader); err != nil {

@@ -1473,6 +1473,7 @@ func (p *Proxy) streamToClient(
 					}
 				} else {
 					chunk = initialCommit.Release()
+					w.WriteHeader(statusCode)
 					committed = true
 				}
 			}
@@ -1487,6 +1488,8 @@ func (p *Proxy) streamToClient(
 				if payload := initialCommit.FinalizeTerminalError(); payload != "" {
 					return writeEarlyStreamError(payload)
 				}
+				w.WriteHeader(statusCode)
+				committed = true
 				if writeErr := writeStreamChunk(initialCommit.Release()); writeErr != nil {
 					return writeErr
 				}
