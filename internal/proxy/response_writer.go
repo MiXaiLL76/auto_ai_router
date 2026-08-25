@@ -3,6 +3,7 @@ package proxy
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
 	"net/http"
 	"strings"
@@ -28,11 +29,15 @@ func clientResponseBodyForCredential(statusCode int, body []byte, _ *config.Cred
 const maxProxyStreamErrorCaptureBytes = 256 * 1024
 
 // proxyProviderStreamError reports an error event carried by an otherwise
-// successful HTTP/SSE response. The response has already been forwarded to the
-// client, so callers must not try to replace it with another HTTP response; the
-// error exists to drive terminal logging and session semantics.
+// successful HTTP/SSE response. Most instances are detected after the response
+// has already been forwarded to the client, so callers must not try to replace
+// that response. beforeCommit is set only when streamToClient catches the
+// terminal event before writing any downstream byte and has already replaced it
+// with a normal HTTP error response.
 type proxyProviderStreamError struct {
-	payload string
+	payload      string
+	statusCode   int
+	beforeCommit bool
 }
 
 func (e proxyProviderStreamError) Error() string {
@@ -131,6 +136,65 @@ func markProxyProviderStreamError(logCtx *RequestLogContext, statusCode int, pay
 	logCtx.ErrorMsg = payload
 }
 
+func statusCodeFromProviderStreamError(payload string) int {
+	var evt struct {
+		Type  string `json:"type"`
+		Error struct {
+			Type    string `json:"type"`
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+		Response struct {
+			Status string `json:"status"`
+			Error  struct {
+				Type    string `json:"type"`
+				Code    string `json:"code"`
+				Message string `json:"message"`
+			} `json:"error"`
+		} `json:"response"`
+	}
+	if err := json.Unmarshal([]byte(payload), &evt); err != nil {
+		return http.StatusBadGateway
+	}
+
+	signals := []string{
+		evt.Error.Code,
+		evt.Error.Type,
+		evt.Error.Message,
+		evt.Response.Error.Code,
+		evt.Response.Error.Type,
+		evt.Response.Error.Message,
+		evt.Type,
+	}
+	for _, signal := range signals {
+		signal = strings.ToLower(strings.TrimSpace(signal))
+		switch {
+		case signal == "":
+			continue
+		case strings.Contains(signal, "rate_limit") || strings.Contains(signal, "too_many_requests"):
+			return http.StatusTooManyRequests
+		case strings.Contains(signal, "timeout"):
+			return http.StatusRequestTimeout
+		case strings.Contains(signal, "overloaded") || strings.Contains(signal, "service_unavailable"):
+			return http.StatusServiceUnavailable
+		case strings.Contains(signal, "server_error") || strings.Contains(signal, "internal"):
+			return http.StatusInternalServerError
+		}
+	}
+	return http.StatusBadGateway
+}
+
+func writeProviderStreamErrorBeforeCommit(w http.ResponseWriter, statusCode int) {
+	body := maskedUpstreamErrorBody(statusCode)
+	header := w.Header()
+	header.Set("Content-Type", "application/json")
+	header.Set("Content-Length", itoa(len(body)))
+	header.Del(accelBufferingHeader)
+	dropRepresentationIntegrityHeaders(header)
+	w.WriteHeader(statusCode)
+	_, _ = w.Write(body)
+}
+
 // resolveCapturedProviderStreamError finalizes one or more bounded stream
 // observers after every upstream byte has already been forwarded. Raw provider
 // and transformed-output observers may both be supplied; the first decoded
@@ -146,6 +210,11 @@ func resolveCapturedProviderStreamError(
 		return streamErr
 	}
 
+	var earlyErr proxyProviderStreamError
+	if err, ok := streamErr.(proxyProviderStreamError); ok && err.beforeCommit {
+		earlyErr = err
+	}
+
 	payload := ""
 	for _, capture := range captures {
 		if capture == nil {
@@ -155,13 +224,19 @@ func resolveCapturedProviderStreamError(
 			payload = captured
 		}
 	}
+	if payload == "" && earlyErr.payload != "" {
+		payload = earlyErr.payload
+	}
 	if payload == "" {
 		return streamErr
 	}
 
+	if earlyErr.statusCode >= http.StatusBadRequest {
+		statusCode = earlyErr.statusCode
+	}
 	markProxyProviderStreamError(logCtx, statusCode, payload)
 	if streamErr == nil {
-		return proxyProviderStreamError{payload: payload}
+		return proxyProviderStreamError{payload: payload, statusCode: statusCode}
 	}
 	return streamErr
 }
@@ -326,8 +401,6 @@ func (p *Proxy) writeProxyStreamingResponseWithTokens(
 	}
 	setSuccessfulSSEHeaders(w.Header(), resp.StatusCode)
 
-	w.WriteHeader(resp.StatusCode)
-
 	var lastUsage *converter.TokenUsage
 	completion := p.newCompletionTokenAccumulator(tokenizerModelID)
 	var payloadBuf [][]byte
@@ -387,6 +460,7 @@ func (p *Proxy) writeProxyStreamingResponseWithTokens(
 			credName,
 			modelID,
 			endpointFromRequest(clientReq),
+			resp.StatusCode,
 			onChunk,
 			nil,
 			logCtx,

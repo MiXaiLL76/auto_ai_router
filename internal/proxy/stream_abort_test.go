@@ -54,7 +54,7 @@ func TestStreamToClient_RecordAbortedMetric(t *testing.T) {
 	prx.metrics = monitoring.New(true)
 
 	w := newFailAfterNBytesWriter(0)
-	err := prx.streamToClient(context.Background(), w, strings.NewReader("data: hello\n\n"), "cred1", "gpt-4o", "/v1/chat/completions", nil, nil, nil)
+	err := prx.streamToClient(context.Background(), w, strings.NewReader("data: hello\n\n"), "cred1", "gpt-4o", "/v1/chat/completions", http.StatusOK, nil, nil, nil)
 	require.Error(t, err)
 
 	assert.Equal(t, 1.0, testutil.ToFloat64(monitoring.AbortedRequestsTotal.WithLabelValues("cred1", "gpt-4o", "/v1/chat/completions")))
@@ -83,9 +83,7 @@ func TestStreamToClientPropagatesUnexpectedReadError(t *testing.T) {
 		"cred1",
 		"gpt-4o",
 		"/v1/chat/completions",
-		nil,
-		nil,
-		nil,
+		http.StatusOK, nil, nil, nil,
 	)
 
 	require.ErrorIs(t, err, io.ErrUnexpectedEOF)

@@ -23,7 +23,7 @@ func TestStreamingHandlersDetectFragmentedTerminalErrorsAcrossReads(t *testing.T
 		"data: [DONE]\n\n"
 	outputErrorChunks := []string{
 		`data: {"type":"response.`,
-		`failed","response":{"id":"resp-output-failed","status":"failed"}}` + "\n\n",
+		`failed","response":{"id":"resp-output-failed","status":"failed","error":{"code":"rate_limit_exceeded","message":"Request failed"}}}` + "\n\n",
 	}
 
 	tests := []struct {
@@ -32,6 +32,7 @@ func TestStreamingHandlersDetectFragmentedTerminalErrorsAcrossReads(t *testing.T
 		input      []string
 		wantBody   string
 		wantMarker string
+		wantStatus int
 		masked     bool
 	}{
 		{
@@ -42,6 +43,7 @@ func TestStreamingHandlersDetectFragmentedTerminalErrorsAcrossReads(t *testing.T
 			input:      terminalChunks,
 			wantBody:   strings.Join(terminalChunks, ""),
 			wantMarker: "fragmented terminal failure",
+			wantStatus: http.StatusServiceUnavailable,
 			masked:     true,
 		},
 		{
@@ -59,6 +61,7 @@ func TestStreamingHandlersDetectFragmentedTerminalErrorsAcrossReads(t *testing.T
 			input:      terminalChunks,
 			wantBody:   normalOutput,
 			wantMarker: "fragmented terminal failure",
+			wantStatus: http.StatusOK,
 		},
 		{
 			name: "transformed stream observes fragmented emitted failure",
@@ -78,7 +81,9 @@ func TestStreamingHandlersDetectFragmentedTerminalErrorsAcrossReads(t *testing.T
 			},
 			input:      []string{"data: [DONE]\n\n"},
 			wantBody:   strings.Join(outputErrorChunks, ""),
-			wantMarker: "response.failed",
+			wantMarker: "rate_limit_exceeded",
+			wantStatus: http.StatusTooManyRequests,
+			masked:     true,
 		},
 	}
 
@@ -109,13 +114,18 @@ func TestStreamingHandlersDetectFragmentedTerminalErrorsAcrossReads(t *testing.T
 			var terminalErr proxyProviderStreamError
 			require.ErrorAs(t, err, &terminalErr)
 			if tt.masked {
-				assert.Contains(t, w.Body.String(), "Request failed")
+				if tt.wantStatus == http.StatusTooManyRequests {
+					assert.Contains(t, w.Body.String(), "Rate limit exceeded")
+					assert.Contains(t, w.Body.String(), "rate_limit_error")
+				} else {
+					assert.Contains(t, w.Body.String(), "Request failed")
+				}
 				assert.NotContains(t, w.Body.String(), tt.wantMarker)
 			} else {
 				assert.Equal(t, tt.wantBody, w.Body.String())
 			}
 			assert.Equal(t, "failure", logCtx.Status)
-			assert.Equal(t, http.StatusOK, logCtx.HTTPStatus)
+			assert.Equal(t, tt.wantStatus, logCtx.HTTPStatus)
 			assert.Equal(t, "stream_error", logCtx.StreamOutcome)
 			assert.Contains(t, logCtx.ErrorMsg, tt.wantMarker)
 		})

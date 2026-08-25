@@ -3,6 +3,7 @@ package proxy
 import (
 	"context"
 	"io"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -49,7 +50,7 @@ func TestStreamToClient_CapturesTTFT(t *testing.T) {
 			`data: {"choices":[{"delta":{"content":" world"}}]}` + "\n\n",
 	)
 
-	err := prx.streamToClient(context.Background(), w, reader, "cred1", "gpt-4o", "/v1/chat/completions", nil, nil, logCtx)
+	err := prx.streamToClient(context.Background(), w, reader, "cred1", "gpt-4o", "/v1/chat/completions", http.StatusOK, nil, nil, logCtx)
 	require.NoError(t, err)
 
 	assert.False(t, logCtx.CompletionStartTime.IsZero(), "CompletionStartTime should be set after a real content delta")
@@ -76,7 +77,7 @@ func TestStreamToClient_TTFTIgnoresContentFreeDeltas(t *testing.T) {
 		},
 	}
 
-	err := prx.streamToClient(context.Background(), w, reader, "cred1", "gpt-4o", "/v1/chat/completions", nil, nil, logCtx)
+	err := prx.streamToClient(context.Background(), w, reader, "cred1", "gpt-4o", "/v1/chat/completions", http.StatusOK, nil, nil, logCtx)
 	require.NoError(t, err)
 
 	require.False(t, logCtx.CompletionStartTime.IsZero(), "CompletionStartTime should be set once real content arrives")
@@ -95,7 +96,7 @@ func TestStreamToClient_TTFTNotOverwrittenOnSubsequentChunks(t *testing.T) {
 	logCtx := &RequestLogContext{StartTime: preset.Add(-time.Minute), CompletionStartTime: preset}
 	reader := strings.NewReader(`data: {"choices":[{"delta":{"content":"hello"}}]}` + "\n\n")
 
-	err := prx.streamToClient(context.Background(), w, reader, "cred1", "gpt-4o", "/v1/chat/completions", nil, nil, logCtx)
+	err := prx.streamToClient(context.Background(), w, reader, "cred1", "gpt-4o", "/v1/chat/completions", http.StatusOK, nil, nil, logCtx)
 	require.NoError(t, err)
 
 	assert.Equal(t, preset, logCtx.CompletionStartTime, "an already-set CompletionStartTime must not be overwritten")
@@ -110,7 +111,7 @@ func TestStreamToClient_NilLogCtx(t *testing.T) {
 	reader := strings.NewReader("data: hello\n\n")
 
 	assert.NotPanics(t, func() {
-		err := prx.streamToClient(context.Background(), w, reader, "cred1", "gpt-4o", "/v1/chat/completions", nil, nil, nil)
+		err := prx.streamToClient(context.Background(), w, reader, "cred1", "gpt-4o", "/v1/chat/completions", http.StatusOK, nil, nil, nil)
 		require.NoError(t, err)
 	})
 }

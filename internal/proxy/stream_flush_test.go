@@ -78,7 +78,7 @@ func TestStreamToClient_FlushesTailOnEOF(t *testing.T) {
 		delay: time.Millisecond,
 	}
 
-	err := prx.streamToClient(context.Background(), w, reader, "cred1", "gpt-4o", "/v1/chat/completions", nil, nil, nil)
+	err := prx.streamToClient(context.Background(), w, reader, "cred1", "gpt-4o", "/v1/chat/completions", http.StatusOK, nil, nil, nil)
 	require.NoError(t, err)
 
 	written, flushed := w.snapshot()
@@ -124,7 +124,7 @@ func TestStreamToClient_FlushesTailOnMidStreamPause(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		done <- prx.streamToClient(context.Background(), w, reader, "cred1", "gpt-4o", "/v1/chat/completions", nil, nil, nil)
+		done <- prx.streamToClient(context.Background(), w, reader, "cred1", "gpt-4o", "/v1/chat/completions", http.StatusOK, nil, nil, nil)
 	}()
 
 	// Sample mid-pause, well after "first" was written (~1ms in) but well

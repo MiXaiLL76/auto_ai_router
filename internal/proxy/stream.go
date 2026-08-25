@@ -38,6 +38,13 @@ const streamDrainTimeout = 60 * time.Second
 // stays zero, matching existing "never reached" semantics.
 const streamTTFTDetectionLimit = 64 * 1024
 
+// streamInitialCommitBufferLimit bounds how much of a successful upstream SSE
+// response we hold before committing downstream headers. This small preflight
+// window lets an immediate terminal SSE error (for example response.failed with
+// rate_limit_exceeded) become a real HTTP error status instead of an HTTP 200
+// stream whose first body event is failure.
+const streamInitialCommitBufferLimit = 64 * 1024
+
 // ttftScanState incrementally scans SSE lines for the first detectable content
 // delta, byte-for-byte equivalent to calling extractCompletionDeltaText on the
 // whole buffer accumulated so far after every Read — but each byte is scanned
@@ -809,7 +816,7 @@ func (p *Proxy) handleTransformedStreaming(
 		}
 	}()
 
-	if err := p.streamToClient(respCtx(resp), w, clientReader, credName, metricModelID(modelID, logCtx), endpointFromLogContext(logCtx), nil, func() { _ = pr.Close() }, logCtx); err != nil {
+	if err := p.streamToClient(respCtx(resp), w, clientReader, credName, metricModelID(modelID, logCtx), endpointFromLogContext(logCtx), resp.StatusCode, nil, func() { _ = pr.Close() }, logCtx); err != nil {
 		p.logStreamHandlerError(respCtx(resp), "streamToClient error in handleTransformedStreaming", err,
 			"credential", credName, "provider", providerName, "model", modelID)
 		wg.Wait()
@@ -922,7 +929,7 @@ func (p *Proxy) handleStreamingWithTokens(w http.ResponseWriter, resp *http.Resp
 		logCtx,
 		modelID,
 	)
-	if err := p.streamToClient(respCtx(resp), w, clientReader, credName, metricModelID(modelID, logCtx), endpointFromLogContext(logCtx), onChunk, nil, logCtx); err != nil {
+	if err := p.streamToClient(respCtx(resp), w, clientReader, credName, metricModelID(modelID, logCtx), endpointFromLogContext(logCtx), resp.StatusCode, onChunk, nil, logCtx); err != nil {
 		p.logStreamHandlerError(respCtx(resp), "streamToClient error in handleStreamingWithTokens", err,
 			"credential", credName, "model", modelID, "chunks_received", chunkCount)
 		if p.drainUpstreamOnAbort {
@@ -1111,7 +1118,9 @@ func (p *Proxy) finalizeStreamingLog(logCtx *RequestLogContext, totalTokens int,
 		logCtx.UsageSource = "estimated"
 	}
 
-	logCtx.HTTPStatus = statusCode
+	if !(logCtx.StreamOutcome == "stream_error" && logCtx.HTTPStatus >= http.StatusBadRequest) {
+		logCtx.HTTPStatus = statusCode
+	}
 	if logCtx.StreamOutcome == "client_aborted" || logCtx.StreamOutcome == "stream_error" {
 		logCtx.Status = "failure"
 		if logCtx.StreamOutcome == "client_aborted" {
@@ -1266,6 +1275,55 @@ func (p *Proxy) drainUpstream(ctx context.Context, body io.Reader, onChunk func(
 	}
 }
 
+type streamInitialCommitGate struct {
+	pending []byte
+	capture proxyStreamErrorCapture
+}
+
+func (g *streamInitialCommitGate) Observe(chunk []byte) (payload string, ready bool) {
+	if len(chunk) == 0 {
+		return "", false
+	}
+	g.pending = append(g.pending, chunk...)
+	if payload := g.capture.Observe(chunk); payload != "" {
+		return payload, false
+	}
+	if len(g.pending) > streamInitialCommitBufferLimit {
+		return "", true
+	}
+
+	trimmed := bytes.TrimSpace(g.pending)
+	if len(trimmed) == 0 {
+		return "", false
+	}
+	if looksLikeEventStream(trimmed) {
+		return "", nextSSEFrameEnd(g.pending) >= 0
+	}
+	if frameMayCarryStreamError(trimmed) {
+		if payload := extractStreamErrorEvent(trimmed); payload != "" {
+			return payload, false
+		}
+	}
+	return "", true
+}
+
+func (g *streamInitialCommitGate) FinalizeTerminalError() string {
+	if payload := g.capture.Finalize(); payload != "" {
+		return payload
+	}
+	trimmed := bytes.TrimSpace(g.pending)
+	if frameMayCarryStreamError(trimmed) {
+		return extractStreamErrorEvent(trimmed)
+	}
+	return ""
+}
+
+func (g *streamInitialCommitGate) Release() []byte {
+	pending := g.pending
+	g.pending = nil
+	return pending
+}
+
 func (p *Proxy) streamToClient(
 	ctx context.Context,
 	w http.ResponseWriter,
@@ -1273,6 +1331,7 @@ func (p *Proxy) streamToClient(
 	credName string,
 	modelID string,
 	endpoint string,
+	statusCode int,
 	onChunk func([]byte),
 	onWriteErr func(),
 	logCtx *RequestLogContext,
@@ -1313,13 +1372,83 @@ func (p *Proxy) streamToClient(
 	// here; see TestStreamToClient_FlushesTailOnMidStreamPause.
 	flushPending := false
 	var responseIDScanner clientResponseIDScanner
+	if statusCode == 0 {
+		statusCode = http.StatusOK
+	}
+	preflightEnabled := statusCode >= http.StatusOK && statusCode < http.StatusMultipleChoices
+	committed := !preflightEnabled
+	if !preflightEnabled {
+		w.WriteHeader(statusCode)
+	}
+	var initialCommit streamInitialCommitGate
+
+	writeStreamChunk := func(chunk []byte) error {
+		if len(chunk) == 0 {
+			return nil
+		}
+		// Set write deadline before each write — keeps active streams alive,
+		// terminates if client stops reading for streamChunkWriteTimeout.
+		_ = controller.SetWriteDeadline(time.Now().Add(streamChunkWriteTimeout))
+		if _, writeErr := w.Write(chunk); writeErr != nil {
+			if isClientDisconnectError(writeErr) {
+				p.logger.DebugContext(ctx, "Client disconnected during streaming", "error", writeErr, "credential", credName)
+				p.recordAbortedRequest(credName, endpoint, modelID)
+			} else {
+				p.logger.ErrorContext(ctx, "Failed to write streaming chunk", "error", writeErr, "credential", credName)
+			}
+			if onWriteErr != nil {
+				onWriteErr()
+			}
+			return writeErr
+		}
+		// Coalesce flushes within streamFlushCoalesceWindow: always flush the
+		// first chunk (TTFT); in between, skip a flush if the previous one was
+		// very recent — bursty reads (e.g. an upstream that batches several SSE
+		// frames per write) then cost one syscall, not N. Whatever gets skipped
+		// here is guaranteed to be flushed before this function returns (see
+		// the unconditional flushPending check below) — do NOT rely on "err !=
+		// nil" to force a flush from inside this block: a terminal Read()
+		// commonly returns (0, io.EOF), which never enters "if n > 0" at all.
+		now := time.Now()
+		if lastFlush.IsZero() || now.Sub(lastFlush) >= streamFlushCoalesceWindow {
+			if flushErr := p.flushStreaming(ctx, controller, credName); flushErr != nil {
+				if isClientDisconnectError(flushErr) {
+					p.logger.DebugContext(ctx, "Client disconnected during streaming flush", "error", flushErr, "credential", credName)
+					p.recordAbortedRequest(credName, endpoint, modelID)
+				}
+				if onWriteErr != nil {
+					onWriteErr()
+				}
+				return flushErr
+			}
+			lastFlush = now
+			flushPending = false
+		} else {
+			flushPending = true
+		}
+		return nil
+	}
+
+	writeEarlyStreamError := func(payload string) error {
+		statusCode := statusCodeFromProviderStreamError(payload)
+		markProxyProviderStreamError(logCtx, statusCode, payload)
+		if logCtx != nil {
+			logCtx.StreamOutcome = "stream_error"
+		}
+		writeProviderStreamErrorBeforeCommit(w, statusCode)
+		if onWriteErr != nil {
+			onWriteErr()
+		}
+		return proxyProviderStreamError{payload: payload, statusCode: statusCode, beforeCommit: true}
+	}
 
 	for {
 		n, err := reader.Read(*buf)
 		if n > 0 {
-			responseIDScanner.observe(logCtx, (*buf)[:n])
+			chunk := (*buf)[:n]
+			responseIDScanner.observe(logCtx, chunk)
 			if ttftPending {
-				if ttftScan.observe((*buf)[:n]) {
+				if ttftScan.observe(chunk) {
 					logCtx.CompletionStartTime = time.Now()
 					ttftPending = false
 				} else if ttftScan.total > streamTTFTDetectionLimit {
@@ -1330,50 +1459,39 @@ func (p *Proxy) streamToClient(
 				}
 			}
 			if onChunk != nil {
-				onChunk((*buf)[:n])
+				onChunk(chunk)
 			}
-			// Set write deadline before each write — keeps active streams alive,
-			// terminates if client stops reading for streamChunkWriteTimeout.
-			_ = controller.SetWriteDeadline(time.Now().Add(streamChunkWriteTimeout))
-			if _, writeErr := w.Write((*buf)[:n]); writeErr != nil {
-				if isClientDisconnectError(writeErr) {
-					p.logger.DebugContext(ctx, "Client disconnected during streaming", "error", writeErr, "credential", credName)
-					p.recordAbortedRequest(credName, endpoint, modelID)
+
+			if !committed {
+				payload, ready := initialCommit.Observe(chunk)
+				if payload != "" {
+					return writeEarlyStreamError(payload)
+				}
+				if !ready {
+					if err == nil {
+						continue
+					}
 				} else {
-					p.logger.ErrorContext(ctx, "Failed to write streaming chunk", "error", writeErr, "credential", credName)
+					chunk = initialCommit.Release()
+					committed = true
 				}
-				if onWriteErr != nil {
-					onWriteErr()
-				}
-				return writeErr
 			}
-			// Coalesce flushes within streamFlushCoalesceWindow: always flush the
-			// first chunk (TTFT); in between, skip a flush if the previous one was
-			// very recent — bursty reads (e.g. an upstream that batches several SSE
-			// frames per write) then cost one syscall, not N. Whatever gets skipped
-			// here is guaranteed to be flushed before this function returns (see
-			// the unconditional flushPending check below) — do NOT rely on "err !=
-			// nil" to force a flush from inside this block: a terminal Read()
-			// commonly returns (0, io.EOF), which never enters "if n > 0" at all.
-			now := time.Now()
-			if lastFlush.IsZero() || now.Sub(lastFlush) >= streamFlushCoalesceWindow {
-				if flushErr := p.flushStreaming(ctx, controller, credName); flushErr != nil {
-					if isClientDisconnectError(flushErr) {
-						p.logger.DebugContext(ctx, "Client disconnected during streaming flush", "error", flushErr, "credential", credName)
-						p.recordAbortedRequest(credName, endpoint, modelID)
-					}
-					if onWriteErr != nil {
-						onWriteErr()
-					}
-					return flushErr
+			if committed {
+				if writeErr := writeStreamChunk(chunk); writeErr != nil {
+					return writeErr
 				}
-				lastFlush = now
-				flushPending = false
-			} else {
-				flushPending = true
 			}
 		}
 		if err != nil {
+			if !committed {
+				if payload := initialCommit.FinalizeTerminalError(); payload != "" {
+					return writeEarlyStreamError(payload)
+				}
+				committed = true
+				if writeErr := writeStreamChunk(initialCommit.Release()); writeErr != nil {
+					return writeErr
+				}
+			}
 			if flushPending {
 				// No need to clear flushPending here — every path below
 				// returns immediately, so nothing would ever read it again.
@@ -1712,7 +1830,7 @@ func (p *Proxy) handlePassthroughResponsesStreaming(
 		logCtx,
 		modelID,
 	)
-	if err := p.streamToClient(respCtx(resp), w, clientReader, credName, metricModelID(modelID, logCtx), endpointFromLogContext(logCtx), onChunk, nil, logCtx); err != nil {
+	if err := p.streamToClient(respCtx(resp), w, clientReader, credName, metricModelID(modelID, logCtx), endpointFromLogContext(logCtx), resp.StatusCode, onChunk, nil, logCtx); err != nil {
 		p.logStreamHandlerError(respCtx(resp), "streamToClient error in handlePassthroughResponsesStreaming", err,
 			"credential", credName, "model", modelID, "chunks_received", chunkCount)
 		if p.drainUpstreamOnAbort {

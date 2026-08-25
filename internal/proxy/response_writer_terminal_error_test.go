@@ -19,6 +19,7 @@ func TestWriteProxyStreamingResponseWithTokensDetectsFragmentedProviderTerminalE
 		name       string
 		chunks     []string
 		wantMarker string
+		wantStatus int
 		masked     bool
 	}{
 		{
@@ -31,6 +32,7 @@ func TestWriteProxyStreamingResponseWithTokensDetectsFragmentedProviderTerminalE
 				"data: [DONE]\n\n",
 			},
 			wantMarker: "provider exploded",
+			wantStatus: http.StatusOK,
 			masked:     true,
 		},
 		{
@@ -42,16 +44,19 @@ func TestWriteProxyStreamingResponseWithTokensDetectsFragmentedProviderTerminalE
 				`pe":"error","error":{"type":"overloaded_error","message":"anthropic overloaded"}}` + "\r\n\r\n",
 			},
 			wantMarker: "anthropic overloaded",
+			wantStatus: http.StatusServiceUnavailable,
 			masked:     true,
 		},
 		{
 			name: "responses failed event",
 			chunks: []string{
 				`data: {"type":"response.`,
-				`failed","response":{"id":"resp_1","status":"failed"}}` + "\n",
+				`failed","response":{"id":"resp_1","status":"failed","error":{"code":"rate_limit_exceeded","message":"Request failed"}}}` + "\n",
 				"\n",
 			},
-			wantMarker: "response.failed",
+			wantMarker: "rate_limit_exceeded",
+			wantStatus: http.StatusTooManyRequests,
+			masked:     true,
 		},
 	}
 
@@ -97,20 +102,69 @@ func TestWriteProxyStreamingResponseWithTokensDetectsFragmentedProviderTerminalE
 
 			var terminalErr proxyProviderStreamError
 			require.ErrorAs(t, err, &terminalErr)
-			assert.Equal(t, http.StatusOK, w.Code, "the already-started client response keeps its HTTP status")
+			assert.Equal(t, tt.wantStatus, w.Code)
 			if tt.masked {
-				assert.Contains(t, w.Body.String(), "Request failed")
+				if tt.wantStatus == http.StatusTooManyRequests {
+					assert.Contains(t, w.Body.String(), "Rate limit exceeded")
+					assert.Contains(t, w.Body.String(), "rate_limit_error")
+				} else {
+					assert.Contains(t, w.Body.String(), "Request failed")
+				}
 				assert.NotContains(t, w.Body.String(), tt.wantMarker)
 			} else {
 				assert.Equal(t, streamBody, w.Body.String())
 			}
 			assert.Equal(t, "failure", logCtx.Status)
-			assert.Equal(t, http.StatusOK, logCtx.HTTPStatus)
+			assert.Equal(t, tt.wantStatus, logCtx.HTTPStatus)
 			assert.Equal(t, "stream_error", logCtx.StreamOutcome)
 			assert.Contains(t, logCtx.ErrorMsg, tt.wantMarker)
 
 		})
 	}
+}
+
+func TestWriteProxyStreamingResponseWithTokensKeepsStatusAfterStreamCommitted(t *testing.T) {
+	chunks := []string{
+		`data: {"id":"chatcmpl-1","choices":[{"delta":{"content":"partial"}}]}` + "\n\n",
+		`data: {"error":{"message":"provider exploded","type":"server_error"}}` + "\n\n",
+	}
+	prx := NewTestProxyBuilder().Build()
+	proxyResp := &ProxyResponse{
+		StatusCode: http.StatusOK,
+		Headers: http.Header{
+			"Content-Type": {"text/event-stream"},
+		},
+		StreamBody:  &fragmentedStreamReadCloser{chunks: stringChunks(chunks)},
+		IsStreaming: true,
+	}
+	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	logCtx := &RequestLogContext{
+		RequestID:   "event-terminal-error-after-content",
+		StartTime:   time.Now().UTC(),
+		Request:     request,
+		Status:      "unknown",
+		Credential:  &config.CredentialConfig{Name: "proxy-upstream"},
+		ModelID:     "gpt-4o-mini",
+		RealModelID: "gpt-4o-mini",
+	}
+	w := httptest.NewRecorder()
+
+	_, err := prx.writeProxyStreamingResponseWithTokens(
+		w,
+		proxyResp,
+		request,
+		logCtx.Credential,
+		logCtx.ModelID,
+		logCtx.RealModelID,
+		logCtx,
+	)
+
+	var terminalErr proxyProviderStreamError
+	require.ErrorAs(t, err, &terminalErr)
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), "partial")
+	assert.Contains(t, w.Body.String(), "Request failed")
+	assert.Equal(t, http.StatusOK, logCtx.HTTPStatus)
 }
 
 func TestWriteProxyStreamingResponseWithTokensKeepsNormalFragmentedStreamSuccessful(t *testing.T) {

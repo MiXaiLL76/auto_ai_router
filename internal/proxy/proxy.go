@@ -1104,7 +1104,6 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 				if logCtx.IsProxyRequest && logCtx.ActualCredentialName != "" {
 					w.Header().Set("X-Credential-Name", logCtx.ActualCredentialName)
 				}
-				w.WriteHeader(proxyResp.StatusCode)
 				p.setPromptTokensEstimate(logCtx, body, realModelID)
 				fakeResp := &http.Response{
 					StatusCode: proxyResp.StatusCode,
@@ -1130,7 +1129,6 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 				if proxyResp.StatusCode >= 200 && proxyResp.StatusCode < 300 {
 					p.markAudioUsageExcludesCachedForClient(w, logCtx)
 				}
-				w.WriteHeader(proxyResp.StatusCode)
 				p.setPromptTokensEstimate(logCtx, body, realModelID)
 				fakeResp := &http.Response{
 					StatusCode: proxyResp.StatusCode,
@@ -1156,7 +1154,6 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 				if proxyResp.StatusCode >= 200 && proxyResp.StatusCode < 300 {
 					p.markAudioUsageContractForClient(w, logCtx, tokenUsageOptions.AudioInputIncludesCachedAudio)
 				}
-				w.WriteHeader(proxyResp.StatusCode)
 				p.setPromptTokensEstimate(logCtx, body, realModelID)
 				fakeResp := &http.Response{
 					StatusCode: proxyResp.StatusCode,
@@ -2150,7 +2147,6 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		setSuccessfulSSEHeaders(w.Header(), resp.StatusCode)
-		w.WriteHeader(resp.StatusCode)
 
 		// Arms the lazy fallback estimate; the actual json-decode + tiktoken pass only
 		// runs later, inside finalizeStreamingLog, and only if the provider never sent
