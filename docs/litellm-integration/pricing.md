@@ -110,6 +110,7 @@ For reference:
 | `output_cost_per_image`                                       | Cost per generated image (takes priority over `output_cost_per_image_token`) |
 | `search_context_cost_per_query`                               | Web Search cost per request/call, keyed by `search_context_size_*`           |
 | `web_search_billing_unit`                                     | `per_query` or `per_prompt` Web Search charging mode                         |
+| `pricing_schedule`                                            | Per-model time-of-day tariffs; see the section below                         |
 
 ## Cost Calculation
 
@@ -215,6 +216,18 @@ A price entry may configure any subset of these five thresholds (e.g. only 32k a
 
 Example: a model with only `input_cost_per_token_above_128k_tokens` and `input_cost_per_token_above_256k_tokens` set bills a 150k-token prompt at the 128k rate and a 300k-token prompt at the 256k rate; a 100k-token prompt still uses the base rate.
 
+### Time-of-day pricing
+
+Some providers charge a different rate for the same model depending on the time of day — typically a peak period and a cheaper off-peak one. A price entry describes those tariffs with `pricing_schedule`.
+
+Windows are UTC, written as `HH:MM` or `HH:MM:SS` (`24:00` is accepted for end-of-day), and the interval is half-open `[start_utc, end_utc)`: the start second belongs to the window, the end second already belongs to the next one. A window whose end is earlier than its start wraps around midnight, and `start_utc == end_utc` covers the whole day. Hours no window covers, and models with no schedule at all, keep billing at the entry's base fields exactly as before.
+
+The tariff is picked by the time the request **started**, never by the time the last token arrived or the response completed: a request beginning at 13:59:59 UTC is billed at the peak rate even if it streams well past 14:00. A retry stays on the tariff the original request started on, and budget reservation and spend logging always agree, because the window is resolved once per request and cached on it.
+
+A window inherits every field it does not declare from the entry's base price — only the keys it actually spells out are overridden, so long-context tiers, cache rates and Web Search prices can be declared once and left out of the windows. Overlapping windows resolve to the first match in list order, with a warning logged at load time. A schedule that fails to parse drops that model's price entirely, so the model fails closed (503 while spend tracking is enabled) instead of being silently billed at base rates for half of every day; other models in the file are unaffected.
+
+Schedules are resolved once, when the price file is loaded, so a request only pays for a comparison against precomputed window bounds.
+
 ### Specialised token types
 
 | Type                | Formula                                                                                                                                             |
@@ -246,6 +259,8 @@ Loading is handled by `internal/models/price_loader.go`:
 ### DB price merging
 
 When the LiteLLM database is enabled, prices defined in `LiteLLM_ModelTable` are merged on top of the file-based registry via `MergeDB`. Database prices take precedence for any model that appears in both sources. The file-based prices remain intact for all other models.
+
+A DB price replaces the file entry whole, `pricing_schedule` included — `LiteLLM_ModelTable` has no schedule columns, so a DB override for a model priced per time of day switches it back to a single flat rate. That is the intended meaning of an explicit override, but it is easy to do by accident: if a scheduled model needs a custom price, change it in the price file rather than in the DB.
 
 Cache writes are read from `cache_creation_tokens` or the OpenAI-compatible `cache_write_tokens` alias in both Chat Completions and Responses API usage objects.
 Anthropic's `cache_creation_token_details` (`ephemeral_5m_input_tokens` and `ephemeral_1h_input_tokens`) is preserved in spend-log metadata while the existing aggregate cache-creation token columns remain backward-compatible. Gemini cached-audio counts are taken from `cacheTokensDetails` when the provider supplies a modality breakdown.

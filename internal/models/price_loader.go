@@ -70,6 +70,17 @@ func LoadModelPrices(link string) (map[string]*ModelPrice, error) {
 				price.LiteLLMProvider = inferProviderFromModelName(fullName)
 			}
 		}
+		// Must stay after the provider inference above: a window's price row is
+		// a copy of the model's fields, and billing reads LiteLLMProvider off
+		// that copy. An entry with a broken schedule is dropped, so the model
+		// fails closed instead of billing at base rates for half the day.
+		if err := price.compileSchedule(); err != nil {
+			slog.Error("invalid pricing_schedule: model price skipped",
+				"model", fullName,
+				"error", err,
+			)
+			continue
+		}
 		normalized := NormalizeModelName(fullName)
 
 		// Store the raw lowercase key alongside the normalised one so that

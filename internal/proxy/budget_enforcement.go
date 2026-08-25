@@ -190,7 +190,9 @@ func (p *Proxy) checkModelPriceAvailable(
 	if logCtx != nil && logCtx.PublicModelID != "" {
 		publicModelID = logCtx.PublicModelID
 	}
-	priceModelID, modelPrice := lookupBillingModelPrice(p.priceRegistry, publicModelID, modelID, realModelID)
+	priceModelID, modelPrice := lookupBillingModelPrice(
+		p.priceRegistry, billingInstant(logCtx), publicModelID, modelID, realModelID,
+	)
 	if logCtx != nil {
 		priceModelID, modelPrice = p.resolveBillingPrice(logCtx, publicModelID, modelID, realModelID)
 	}

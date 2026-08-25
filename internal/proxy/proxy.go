@@ -1391,8 +1391,9 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 					if publicModelID == "" {
 						publicModelID = modelID
 					}
+					// A retry stays on the tariff the original request started on.
 					retryPriceModelID, retryPrice := lookupBillingModelPrice(
-						p.priceRegistry, publicModelID, modelID, preparedRetry.realModelID,
+						p.priceRegistry, billingInstant(logCtx), publicModelID, modelID, preparedRetry.realModelID,
 					)
 					if retryPrice == nil && p.spendTrackingEnabled() {
 						triedCreds[candidate.Name] = true

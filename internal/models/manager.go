@@ -93,6 +93,16 @@ type ModelPrice struct {
 	SearchContextCostPerQuery map[string]float64 `json:"search_context_cost_per_query,omitempty"`
 	WebSearchBillingUnit      string             `json:"web_search_billing_unit,omitempty"`
 	LiteLLMProvider           string             `json:"litellm_provider,omitempty"`
+
+	// Per-model time-of-day tariffs (see price_schedule.go). Each window
+	// overrides the fields above while it is active; those fields stay in
+	// force for models without a schedule and for uncovered hours.
+	PricingSchedule []*PricingWindow `json:"pricing_schedule,omitempty"`
+
+	// Filled by compileSchedule at load time; windowName is set only on a
+	// window's own resolved row.
+	compiledSchedule []compiledPricingWindow
+	windowName       string
 }
 
 // ModelPriceRegistry stores and manages cached model prices

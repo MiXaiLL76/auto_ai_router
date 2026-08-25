@@ -137,7 +137,7 @@ func TestGPT52ChatContract_PreservesRoutingResponseAndBillingIdentity(t *testing
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &response))
 	assert.Equal(t, publicModel, response["model"], "provider identity must not replace the public model")
 
-	priceModel, price := lookupBillingModelPrice(registry, publicModel, publicModel, "gpt-chat-latest")
+	priceModel, price := lookupBillingModelPrice(registry, billingTestInstant, publicModel, publicModel, "gpt-chat-latest")
 	assert.Equal(t, publicModel, priceModel)
 	assert.Same(t, publicPrice, price)
 }

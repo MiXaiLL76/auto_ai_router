@@ -307,6 +307,13 @@ func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
 		"cost", cost,
 		"prompt_tokens", logCtx.TokenUsage.PromptTokens,
 		"completion_tokens", logCtx.TokenUsage.CompletionTokens)
+	// Which tariff was billed and the timestamp it was chosen by.
+	if pricingWindow := modelPrice.PricingWindowName(); pricingWindow != "" {
+		p.logger.DebugContext(logSpendCtx, "Time-of-day pricing window applied",
+			"model_name", priceModelID,
+			"pricing_window", pricingWindow,
+			"request_start_utc", logCtx.StartTime.UTC().Format(time.RFC3339))
+	}
 
 	// Settle any Redis budget reservation / TPM usage against the real cost.
 	// Guarded so it runs exactly once even though a defer safety-net may also call it.

@@ -1,12 +1,19 @@
 package proxy
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/mixaill76/auto_ai_router/internal/models"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+// billingTestInstant is the request-start timestamp for fixtures without a
+// time-of-day schedule.
+var billingTestInstant = time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
 
 func TestLookupBillingModelPrice_TwoPassLookup(t *testing.T) {
 	registry := models.NewModelPriceRegistry()
@@ -64,7 +71,7 @@ func TestLookupBillingModelPrice_TwoPassLookup(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			gotModelID, gotPrice := lookupBillingModelPrice(registry, tt.publicModelID, tt.modelID, tt.realModelID)
+			gotModelID, gotPrice := lookupBillingModelPrice(registry, billingTestInstant, tt.publicModelID, tt.modelID, tt.realModelID)
 			assert.Equal(t, tt.wantModelID, gotModelID)
 			assert.NotNil(t, gotPrice)
 			assert.Equal(t, tt.wantInputCost, gotPrice.InputCostPerToken)
@@ -81,6 +88,7 @@ func TestLookupBillingModelPrice_RawEntryBeatsNormalised(t *testing.T) {
 
 	gotModelID, gotPrice := lookupBillingModelPrice(
 		registry,
+		billingTestInstant,
 		"google/gemini-3-flash-preview-highlimits",
 		"gemini-3-flash-preview",
 		"",
@@ -92,7 +100,7 @@ func TestLookupBillingModelPrice_RawEntryBeatsNormalised(t *testing.T) {
 }
 
 func TestLookupBillingModelPrice_NilRegistry(t *testing.T) {
-	gotModelID, gotPrice := lookupBillingModelPrice(nil, "openrouter/gpt-5-mini", "gpt-5-mini-or", "")
+	gotModelID, gotPrice := lookupBillingModelPrice(nil, billingTestInstant, "openrouter/gpt-5-mini", "gpt-5-mini-or", "")
 	assert.Equal(t, "gpt-5-mini-or", gotModelID)
 	assert.Nil(t, gotPrice)
 }
@@ -103,7 +111,7 @@ func TestLookupBillingModelPrice_DeduplicatesModelIDAndRealModelID(t *testing.T)
 		"gpt-5-mini": {InputCostPerToken: 2.25e-07},
 	})
 
-	gotModelID, gotPrice := lookupBillingModelPrice(registry, "", "gpt-5-mini", "gpt-5-mini")
+	gotModelID, gotPrice := lookupBillingModelPrice(registry, billingTestInstant, "", "gpt-5-mini", "gpt-5-mini")
 	assert.Equal(t, "gpt-5-mini", gotModelID)
 	assert.NotNil(t, gotPrice)
 }
@@ -128,13 +136,13 @@ func TestLookupBillingModelPrice_MergeDBUpdatesExactKeyOnly(t *testing.T) {
 	})
 
 	// The plain model picks up the DB override...
-	_, plainPrice := lookupBillingModelPrice(registry, "", "gpt-5-mini", "")
+	_, plainPrice := lookupBillingModelPrice(registry, billingTestInstant, "", "gpt-5-mini", "")
 	require.NotNil(t, plainPrice)
 	assert.Equal(t, 5.0e-07, plainPrice.InputCostPerToken)
 
 	// ...but the deliberately distinct alias price is untouched, since the
 	// DB override didn't name it.
-	matched, aliasPrice := lookupBillingModelPrice(registry, "openrouter/gpt-5-mini", "gpt-5-mini-or", "")
+	matched, aliasPrice := lookupBillingModelPrice(registry, billingTestInstant, "openrouter/gpt-5-mini", "gpt-5-mini-or", "")
 	require.NotNil(t, aliasPrice)
 	assert.Equal(t, "openrouter/gpt-5-mini", matched)
 	assert.Equal(t, 9.99e-07, aliasPrice.InputCostPerToken)
@@ -151,8 +159,94 @@ func TestLookupBillingModelPrice_BareKeyWinsOverPrefixed(t *testing.T) {
 	})
 
 	// Bare key must be returned, not the prefixed one
-	gotModelID, gotPrice := lookupBillingModelPrice(registry, "", "gpt-4", "")
+	gotModelID, gotPrice := lookupBillingModelPrice(registry, billingTestInstant, "", "gpt-4", "")
 	assert.Equal(t, "gpt-4", gotModelID)
 	assert.NotNil(t, gotPrice)
 	assert.Equal(t, 1.0e-06, gotPrice.InputCostPerToken)
+}
+
+// scheduledPriceRegistry goes through the real loader: schedules only ever
+// come from JSON.
+func scheduledPriceRegistry(t *testing.T) *models.ModelPriceRegistry {
+	t.Helper()
+	filePath := filepath.Join(t.TempDir(), "prices.json")
+	require.NoError(t, os.WriteFile(filePath, []byte(`{
+		"scheduled-model": {
+			"input_cost_per_token": 2e-06,
+			"output_cost_per_token": 6e-06,
+			"pricing_schedule": [
+				{"name": "peak", "start_utc": "00:00", "end_utc": "14:00", "input_cost_per_token": 2e-06},
+				{"name": "off_peak", "start_utc": "14:00", "end_utc": "00:00", "input_cost_per_token": 1e-06}
+			]
+		}
+	}`), 0o600))
+
+	prices, err := models.LoadModelPrices(filePath)
+	require.NoError(t, err)
+	registry := models.NewModelPriceRegistry()
+	registry.Update(prices)
+	return registry
+}
+
+// The tariff follows the instant the request started, not the instant the
+// billing code runs.
+func TestResolveBillingPrice_TariffFollowsRequestStart(t *testing.T) {
+	registry := scheduledPriceRegistry(t)
+	proxy := &Proxy{priceRegistry: registry}
+
+	tests := []struct {
+		name       string
+		startTime  time.Time
+		wantWindow string
+		wantInput  float64
+	}{
+		{
+			name:       "request started one second before the boundary is Peak",
+			startTime:  time.Date(2026, 8, 25, 13, 59, 59, 0, time.UTC),
+			wantWindow: "peak",
+			wantInput:  2e-06,
+		},
+		{
+			name:       "request started on the boundary is Off-Peak",
+			startTime:  time.Date(2026, 8, 25, 14, 0, 0, 0, time.UTC),
+			wantWindow: "off_peak",
+			wantInput:  1e-06,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			logCtx := &RequestLogContext{StartTime: tt.startTime}
+			_, price := proxy.resolveBillingPrice(logCtx, "scheduled-model", "scheduled-model", "")
+			require.NotNil(t, price)
+			assert.Equal(t, tt.wantWindow, price.PricingWindowName())
+			assert.InDelta(t, tt.wantInput, price.InputCostPerToken, 1e-15)
+		})
+	}
+}
+
+// Budget reservation and spend logging must bill the same window even when the
+// request spans the boundary.
+func TestResolveBillingPrice_WindowIsPinnedForTheWholeRequest(t *testing.T) {
+	registry := scheduledPriceRegistry(t)
+	proxy := &Proxy{priceRegistry: registry}
+
+	logCtx := &RequestLogContext{StartTime: time.Date(2026, 8, 25, 13, 59, 59, 0, time.UTC)}
+
+	_, reserved := proxy.resolveBillingPrice(logCtx, "scheduled-model", "scheduled-model", "")
+	require.NotNil(t, reserved)
+	require.Equal(t, "peak", reserved.PricingWindowName())
+
+	// Second resolution, as logSpendToLiteLLMDB does after the response.
+	_, logged := proxy.resolveBillingPrice(logCtx, "scheduled-model", "scheduled-model", "")
+	assert.Same(t, reserved, logged, "a request must not switch tariff mid-flight")
+}
+
+func TestBillingInstant(t *testing.T) {
+	started := time.Date(2026, 8, 25, 13, 59, 59, 0, time.UTC)
+	assert.Equal(t, started, billingInstant(&RequestLogContext{StartTime: started}))
+
+	// Contexts without a start time fall back to "now".
+	assert.WithinDuration(t, time.Now().UTC(), billingInstant(&RequestLogContext{}), time.Minute)
+	assert.WithinDuration(t, time.Now().UTC(), billingInstant(nil), time.Minute)
 }
