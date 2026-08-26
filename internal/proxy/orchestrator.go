@@ -602,6 +602,9 @@ func (p *Proxy) readRequestBodyAndSelectModel(
 	modelID := sanitized.ModelID
 	streaming := sanitized.Streaming
 	sessionID := sanitized.SessionID
+	if sessionID == "" {
+		sessionID = extractSessionIDFromHeaders(r.Header)
+	}
 	if sanitized.Changed {
 		r.ContentLength = int64(len(body))
 		r.Header.Del("Content-Length")

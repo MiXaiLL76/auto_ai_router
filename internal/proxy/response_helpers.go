@@ -10,7 +10,10 @@ import (
 	"io"
 	"mime"
 	"mime/multipart"
+	"net/http"
 	"net/textproto"
+	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -208,6 +211,31 @@ func extractSessionIDFromRawBody(reqBody map[string]goccyjson.RawMessage) string
 	}
 	if pck, ok := rawJSONString(reqBody["prompt_cache_key"]); ok && pck != "" {
 		return pck
+	}
+	return ""
+}
+
+// sessionIDHeaderPattern matches header names agents commonly use to carry a
+// session identifier when they don't put one in the JSON body, e.g.
+// "Session-Id", "X-Session-Id", "X-Codex-Session-Id".
+var sessionIDHeaderPattern = regexp.MustCompile(`(?i)^(x-.+-)?session[-_]id$`)
+
+// extractSessionIDFromHeaders is the fallback used when the request body
+// carries no session identifier. Header iteration order is randomized by Go,
+// so matching keys are sorted for a deterministic pick: a bare "Session-Id"
+// sorts before any "X-...-Session-Id" variant and wins.
+func extractSessionIDFromHeaders(header http.Header) string {
+	var keys []string
+	for k := range header {
+		if sessionIDHeaderPattern.MatchString(k) {
+			keys = append(keys, k)
+		}
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		if v := header.Get(k); v != "" {
+			return v
+		}
 	}
 	return ""
 }
