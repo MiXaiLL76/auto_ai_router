@@ -25,6 +25,8 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/')
     name: Build Release Binaries
     runs-on: arc-air-runners
+    container:
+      image: ghcr.io/actions/actions-runner:latest
     strategy:
       matrix:
         goos: [linux]
@@ -133,6 +135,8 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/')
     needs: [build-binaries, build-docker]
     runs-on: arc-air-runners
+    container:
+      image: ghcr.io/actions/actions-runner:latest
     steps:
       - uses: actions/download-artifact@v8
         with:

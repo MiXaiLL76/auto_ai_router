@@ -11,6 +11,8 @@ jobs:
   smoke:
     name: Run on self-hosted runner
     runs-on: arc-air-runners
+    container:
+      image: ghcr.io/actions/actions-runner:latest
 
     steps:
       - name: Where am I

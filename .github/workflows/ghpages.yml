@@ -16,6 +16,8 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     runs-on: arc-air-runners
+    container:
+      image: ghcr.io/actions/actions-runner:latest
     steps:
       - uses: actions/configure-pages@v5
       - uses: actions/checkout@v6

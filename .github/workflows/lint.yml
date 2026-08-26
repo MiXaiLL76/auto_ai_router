@@ -26,6 +26,8 @@ jobs:
   lint:
     name: Lint Code
     runs-on: arc-air-runners
+    container:
+      image: ghcr.io/actions/actions-runner:latest
 
     steps:
     - name: Checkout code
@@ -73,6 +75,8 @@ jobs:
   test:
     name: Run Tests
     runs-on: arc-air-runners
+    container:
+      image: ghcr.io/actions/actions-runner:latest
 
     steps:
     - name: Checkout code
