@@ -1,14 +1,13 @@
 name: kaniko-build
 description: >
-  Build and push an image with kaniko, reading extra kaniko flags (one per
-  line) from /github/workspace/.kaniko-args written by the caller. Runs as a
-  Docker container action (no daemon needed — required under ARC's
-  containerMode: kubernetes, which has no dind). The flag count/values are
-  dynamic (variable number of tags/labels), and action.yml's args: is a
-  static YAML list, so instead of listing flags there we run a tiny shell
-  script (kaniko's -debug image ships busybox sh) that builds argv from the
-  file at runtime via `set --`. entrypoint is set explicitly rather than
-  left to the image default.
+  Build and push an image with kaniko.
+inputs:
+  args:
+    description: Kaniko flags, one per line (e.g. steps.x.outputs.args from a multiline GITHUB_OUTPUT)
+    required: true
+  registry-auth-json:
+    description: Contents of a docker config.json (auths section) for registry authentication
+    required: true
 runs:
   using: docker
   image: docker://gcr.io/kaniko-project/executor:v1.24.0-debug
@@ -20,5 +19,12 @@ runs:
       while IFS= read -r line; do
         [ -z "$line" ] && continue
         set -- "$@" "$line"
-      done < /github/workspace/.kaniko-args
+      done <<EOF
+      $INPUT_ARGS
+      EOF
+      mkdir -p /tmp/.docker-config
+      cat <<DOCKERCFG_EOF > /tmp/.docker-config/config.json
+      $INPUT_REGISTRY_AUTH_JSON
+      DOCKERCFG_EOF
+      export DOCKER_CONFIG=/tmp/.docker-config
       exec /kaniko/executor "$@"

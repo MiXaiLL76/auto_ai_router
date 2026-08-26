@@ -82,19 +82,21 @@ jobs:
             type=raw,value=${{ github.ref_name }}-latest,enable=${{ github.ref != 'refs/heads/main' && !startsWith(github.ref, 'refs/tags/') }}
             type=sha,prefix=sha-
 
-      - name: Write GHCR auth for kaniko
+      - name: Build GHCR auth for kaniko
+        id: ghcr-auth
         run: |
-          mkdir -p "${GITHUB_WORKSPACE}/.docker-config"
           auth=$(printf '%s:%s' "${{ github.actor }}" "${{ secrets.GITHUB_TOKEN }}" | base64 -w0)
-          printf '{"auths":{"ghcr.io":{"auth":"%s"}}}' "$auth" > "${GITHUB_WORKSPACE}/.docker-config/config.json"
+          echo "config={\"auths\":{\"ghcr.io\":{\"auth\":\"${auth}\"}}}" >> "$GITHUB_OUTPUT"
 
       - name: Build kaniko args
+        id: kaniko
         env:
           DESTINATIONS: ${{ steps.meta.outputs.tags }}
           LABELS: ${{ steps.meta.outputs.labels }}
         run: |
           version="${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'dev' }}"
           {
+            echo "args<<KANIKO_ARGS_EOF"
             echo "--context=dir:///github/workspace"
             echo "--dockerfile=/github/workspace/Dockerfile"
             printf '%s\n' "$DESTINATIONS" | while IFS= read -r tag; do
@@ -109,12 +111,14 @@ jobs:
             echo "--build-arg=COMMIT=${{ github.sha }}"
             echo "--cache=true"
             echo "--cache-repo=ghcr.io/${{ steps.repo.outputs.repository }}/cache"
-          } > "${GITHUB_WORKSPACE}/.kaniko-args"
+            echo "KANIKO_ARGS_EOF"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Build and push with kaniko
         uses: ./.github/actions/kaniko-build
-        env:
-          DOCKER_CONFIG: /github/workspace/.docker-config
+        with:
+          args: ${{ steps.kaniko.outputs.args }}
+          registry-auth-json: ${{ steps.ghcr-auth.outputs.config }}
 
   # 3. Загрузка assets в существующий релиз (только для тегов)
   upload-assets:
