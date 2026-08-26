@@ -18,6 +18,7 @@ type MockModelChecker struct {
 	credentialModels   map[string][]string       // credential -> models
 	modelToCredentials map[string][]string       // model -> credentials
 	modelWeights       map[string]map[string]int // model -> credential -> weight
+	modelPriorities    map[string]map[string]int // model -> credential -> priority
 }
 
 func NewMockModelChecker(enabled bool) *MockModelChecker {
@@ -26,6 +27,7 @@ func NewMockModelChecker(enabled bool) *MockModelChecker {
 		credentialModels:   make(map[string][]string),
 		modelToCredentials: make(map[string][]string),
 		modelWeights:       make(map[string]map[string]int),
+		modelPriorities:    make(map[string]map[string]int),
 	}
 }
 
@@ -66,6 +68,20 @@ func (m *MockModelChecker) SetModelWeight(modelID, credentialName string, weight
 		m.modelWeights[modelID] = make(map[string]int)
 	}
 	m.modelWeights[modelID][credentialName] = weight
+}
+
+func (m *MockModelChecker) GetModelPriorityForCredential(modelID, credentialName string) int {
+	if creds, ok := m.modelPriorities[modelID]; ok {
+		return creds[credentialName]
+	}
+	return 0
+}
+
+func (m *MockModelChecker) SetModelPriority(modelID, credentialName string, priority int) {
+	if m.modelPriorities[modelID] == nil {
+		m.modelPriorities[modelID] = make(map[string]int)
+	}
+	m.modelPriorities[modelID][credentialName] = priority
 }
 
 func (m *MockModelChecker) IsEnabled() bool {
@@ -1655,4 +1671,191 @@ func TestUpdateDBCredentials_PreservesSWRRState(t *testing.T) {
 	assert.Same(t, state, bal.swrr[key], "DB sync should not reset existing SWRR cycles")
 	assert.Equal(t, beforeYAML1, state.currentOf("yaml-1"))
 	assert.Equal(t, beforeYAML2, state.currentOf("yaml-2"))
+}
+
+// --- T2: priority-group primary selection tests ---
+
+// TestNextForModel_PriorityGroup_PartialAvailability verifies that when a priority group
+// still has at least one live member, the selector keeps serving that group instead of
+// cascading to the next one, even though most of the group is down.
+func TestNextForModel_PriorityGroup_PartialAvailability(t *testing.T) {
+	f2b := fail2ban.New(3, 0, []int{500})
+	rl := ratelimit.New()
+
+	credentials := []config.CredentialConfig{
+		{Name: "g100-a", Type: config.ProviderTypeOpenAI, APIKey: "k1", BaseURL: "http://a.com", RPM: 100, Priority: 100},
+		{Name: "g100-b", Type: config.ProviderTypeOpenAI, APIKey: "k2", BaseURL: "http://b.com", RPM: 1, Priority: 100},
+		{Name: "g100-c", Type: config.ProviderTypeOpenAI, APIKey: "k3", BaseURL: "http://c.com", RPM: 100, Priority: 100},
+		{Name: "g200", Type: config.ProviderTypeOpenAI, APIKey: "k4", BaseURL: "http://d.com", RPM: 100, Priority: 200},
+	}
+
+	bal := New(credentials, f2b, rl)
+
+	// Ban g100-a (3x 500 trips fail2ban).
+	for i := 0; i < 3; i++ {
+		bal.RecordResponse("g100-a", "", 500)
+	}
+	// Exhaust g100-b's RPM (limit is 1) directly against the shared rate limiter.
+	require.True(t, rl.Allow("g100-b"))
+
+	// The remaining live member of group 100 (g100-c) must keep being selected;
+	// group 200 must never be reached while group 100 has a live member.
+	for i := 0; i < 5; i++ {
+		cred, err := bal.NextForModel("")
+		require.NoError(t, err)
+		assert.Equal(t, "g100-c", cred.Name)
+	}
+}
+
+// TestNextForModel_PriorityGroup_CascadesWhenGroupFullyDown verifies that once every
+// member of the lowest priority group is down, selection cascades to the next group.
+func TestNextForModel_PriorityGroup_CascadesWhenGroupFullyDown(t *testing.T) {
+	f2b := fail2ban.New(3, 0, []int{500})
+	rl := ratelimit.New()
+
+	credentials := []config.CredentialConfig{
+		{Name: "g100-a", Type: config.ProviderTypeOpenAI, APIKey: "k1", BaseURL: "http://a.com", RPM: 100, Priority: 100},
+		{Name: "g100-b", Type: config.ProviderTypeOpenAI, APIKey: "k2", BaseURL: "http://b.com", RPM: 100, Priority: 100},
+		{Name: "g200", Type: config.ProviderTypeOpenAI, APIKey: "k3", BaseURL: "http://c.com", RPM: 100, Priority: 200},
+	}
+
+	bal := New(credentials, f2b, rl)
+
+	// Before banning anything, group 100 serves the request.
+	cred, err := bal.NextForModel("")
+	require.NoError(t, err)
+	assert.Equal(t, "g100-a", cred.Name)
+
+	// Ban both members of group 100.
+	for i := 0; i < 3; i++ {
+		bal.RecordResponse("g100-a", "", 500)
+		bal.RecordResponse("g100-b", "", 500)
+	}
+
+	// Group 100 is fully down now — selection must cascade to group 200.
+	cred, err = bal.NextForModel("")
+	require.NoError(t, err)
+	assert.Equal(t, "g200", cred.Name)
+}
+
+// TestNextForModel_PriorityGroup_DefaultGroupSelectedFirst verifies that credentials
+// without an explicit priority (group 0) are always tried before credentials with an
+// explicit, positive priority.
+func TestNextForModel_PriorityGroup_DefaultGroupSelectedFirst(t *testing.T) {
+	f2b := fail2ban.New(3, 0, []int{500})
+	rl := ratelimit.New()
+
+	credentials := []config.CredentialConfig{
+		{Name: "explicit-100", Type: config.ProviderTypeOpenAI, APIKey: "k1", BaseURL: "http://a.com", RPM: 100, Priority: 100},
+		{Name: "unprioritized", Type: config.ProviderTypeOpenAI, APIKey: "k2", BaseURL: "http://b.com", RPM: 100},
+	}
+
+	bal := New(credentials, f2b, rl)
+
+	for i := 0; i < 4; i++ {
+		cred, err := bal.NextForModel("")
+		require.NoError(t, err)
+		assert.Equal(t, "unprioritized", cred.Name)
+	}
+}
+
+// TestNextForModel_PriorityGroup_WeightedWithinGroup verifies SWRR by weight continues to
+// work as before, scoped to credentials inside a single priority group.
+func TestNextForModel_PriorityGroup_WeightedWithinGroup(t *testing.T) {
+	f2b := fail2ban.New(3, 0, []int{500})
+	rl := ratelimit.New()
+
+	credentials := []config.CredentialConfig{
+		{Name: "heavy", Type: config.ProviderTypeOpenAI, APIKey: "k1", BaseURL: "http://a.com", RPM: 1000, Priority: 100, Weight: 3},
+		{Name: "light", Type: config.ProviderTypeOpenAI, APIKey: "k2", BaseURL: "http://b.com", RPM: 1000, Priority: 100, Weight: 1},
+	}
+
+	bal := New(credentials, f2b, rl)
+
+	counts := map[string]int{}
+	const n = 400
+	for i := 0; i < n; i++ {
+		cred, err := bal.NextForModel("")
+		require.NoError(t, err)
+		counts[cred.Name]++
+	}
+
+	// With weights 3:1 the smooth weighted round-robin should distribute selections
+	// roughly proportionally; allow generous slack since this is a scheduling algorithm,
+	// not an exact statistical draw.
+	assert.InDelta(t, 300, counts["heavy"], 20)
+	assert.InDelta(t, 100, counts["light"], 20)
+}
+
+// TestNextForModel_PriorityGroup_ProxyCredentialUsesPerModelPriority verifies the T3
+// balancer-side piece: a proxy/AIR credential's priority group for a given model can be
+// overridden per-model via ModelChecker.GetModelPriorityForCredential — the mechanism
+// remote.go's updateModelLimits feeds via modelManager.ReplaceModelPrioritiesForCredential
+// after polling an upstream node's /health. Without this, every proxy credential would
+// collapse into one flat group (its own static EffectivePriority(), typically 0)
+// regardless of what priority is actually configured on the node it proxies to.
+func TestNextForModel_PriorityGroup_ProxyCredentialUsesPerModelPriority(t *testing.T) {
+	f2b := fail2ban.New(3, 0, []int{500})
+	rl := ratelimit.New()
+
+	credentials := []config.CredentialConfig{
+		{Name: "proxy-a", Type: config.ProviderTypeProxy, APIKey: "k1", BaseURL: "http://a.com", RPM: 100},
+		{Name: "proxy-b", Type: config.ProviderTypeProxy, APIKey: "k2", BaseURL: "http://b.com", RPM: 100},
+	}
+
+	bal := New(credentials, f2b, rl)
+
+	mc := NewMockModelChecker(true)
+	mc.AddModel("proxy-a", "shared-model")
+	mc.AddModel("proxy-b", "shared-model")
+	// Both credentials have no static Priority (EffectivePriority() == 0 for both), but
+	// the upstream nodes they proxy to report different priorities for this model.
+	mc.SetModelPriority("shared-model", "proxy-a", 200)
+	mc.SetModelPriority("shared-model", "proxy-b", 50)
+	bal.SetModelChecker(mc)
+
+	// proxy-b's learned priority (50) is lower than proxy-a's (200), so proxy-b's group
+	// must be selected exclusively while it's live — proxy-a is never reached.
+	for i := 0; i < 5; i++ {
+		cred, err := bal.NextForModel("shared-model")
+		require.NoError(t, err)
+		assert.Equal(t, "proxy-b", cred.Name)
+	}
+
+	// A request for a model with no learned per-model priority falls back to each
+	// credential's static EffectivePriority() (0 for both here) — flat group, SWRR
+	// alternates.
+	mc.AddModel("proxy-a", "other-model")
+	mc.AddModel("proxy-b", "other-model")
+	seen := map[string]bool{}
+	for i := 0; i < 4; i++ {
+		cred, err := bal.NextForModel("other-model")
+		require.NoError(t, err)
+		seen[cred.Name] = true
+	}
+	assert.True(t, seen["proxy-a"], "without a per-model override, proxy-a must be reachable")
+	assert.True(t, seen["proxy-b"], "without a per-model override, proxy-b must be reachable")
+}
+
+// TestNextForModel_NoPriorityFields_BehavesAsFlatPool is a backward-compatibility check:
+// a config without any priority/fallback_priority fields set must behave exactly like the
+// historical flat weighted round-robin pool (single implicit group 0).
+func TestNextForModel_NoPriorityFields_BehavesAsFlatPool(t *testing.T) {
+	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
+	rl := ratelimit.New()
+
+	credentials := []config.CredentialConfig{
+		{Name: "cred1", APIKey: "key1", BaseURL: "http://test1.com", RPM: 1000},
+		{Name: "cred2", APIKey: "key2", BaseURL: "http://test2.com", RPM: 1000},
+		{Name: "cred3", APIKey: "key3", BaseURL: "http://test3.com", RPM: 1000},
+	}
+
+	bal := New(credentials, f2b, rl)
+
+	expectedOrder := []string{"cred1", "cred2", "cred3", "cred1", "cred2", "cred3"}
+	for i, expectedName := range expectedOrder {
+		cred, err := bal.NextForModel("")
+		require.NoError(t, err, "Request %d failed", i+1)
+		assert.Equal(t, expectedName, cred.Name, "Request %d: expected %s, got %s", i+1, expectedName, cred.Name)
+	}
 }

@@ -104,6 +104,29 @@ func EffectiveWeight(modelWeight, credWeight int) int {
 
 // effectiveWeight resolves the weight for a (credential, model) pair, mirroring how RPM is
 // resolved: model-level override first, then the credential default, then 1.
+// effectivePriority resolves the priority group for cred, preferring a per-model
+// priority learned from an upstream /health poll (proxy/AIR credentials only, e.g.
+// ru01's "grant-pol01"/"comet-ger01" proxy credentials picking up per-model priority
+// from pol01/ger01) over the credential's own static EffectivePriority(). Non-proxy
+// credentials always use their static EffectivePriority() — there is no upstream to
+// poll for them.
+//
+// Note: like effectiveWeight/GetModelWeightForCredential, GetModelPriorityForCredential
+// cannot distinguish "no per-model data learned yet" from "upstream explicitly reported
+// priority 0" — both read back as 0, so a 0 result here falls through to
+// cred.EffectivePriority() rather than being treated as an authoritative override. That
+// is harmless: 0 is also the correct default group when nothing has been learned. See
+// internal/models/manager.go (GetModelPriorityForCredential) and
+// internal/httputil/types.go (EffectiveHealthPriority) for the matching contract notes.
+func (r *RoundRobin) effectivePriority(cred *config.CredentialConfig, modelID string) int {
+	if modelID != "" && cred.IsProxyLike() && r.modelChecker != nil && r.modelChecker.IsEnabled() {
+		if p := r.modelChecker.GetModelPriorityForCredential(modelID, cred.Name); p > 0 {
+			return p
+		}
+	}
+	return cred.EffectivePriority()
+}
+
 func (r *RoundRobin) effectiveWeight(cred *config.CredentialConfig, modelID string) int {
 	modelWeight := 0
 	if modelID != "" && r.modelChecker != nil && r.modelChecker.IsEnabled() {

@@ -1738,3 +1738,50 @@ func TestManager_GetModelWeightForCredential_DBSpecificUnsetFallsBackToStaticGlo
 	assert.Equal(t, 7, m.GetModelWeightForCredential("shared", "db-cred"),
 		"DB credential-specific unset weight must not block the global YAML weight")
 }
+
+func TestManager_SetModelPriorityForCredential(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+	m := New(logger, 50, nil)
+
+	assert.Equal(t, 0, m.GetModelPriorityForCredential("gpt-4o", "proxy-a"), "nothing learned yet")
+
+	m.SetModelPriorityForCredential("gpt-4o", "proxy-a", 200)
+	assert.Equal(t, 200, m.GetModelPriorityForCredential("gpt-4o", "proxy-a"))
+	// A different credential for the same model is unaffected.
+	assert.Equal(t, 0, m.GetModelPriorityForCredential("gpt-4o", "proxy-b"))
+
+	// Priority 0 (a valid default-group value, not a sentinel — see doc comment on
+	// SetModelPriorityForCredential) clears any previously learned entry, same as a
+	// negative value would.
+	m.SetModelPriorityForCredential("gpt-4o", "proxy-a", 0)
+	assert.Equal(t, 0, m.GetModelPriorityForCredential("gpt-4o", "proxy-a"))
+}
+
+func TestManager_ReplaceModelPrioritiesForCredential(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+	m := New(logger, 50, nil)
+
+	m.ReplaceModelPrioritiesForCredential("proxy-a", map[string]int{
+		"gpt-4o":         100,
+		"claude-3-opus":  200,
+		"unset-priority": 0, // must not be stored
+	})
+
+	assert.Equal(t, 100, m.GetModelPriorityForCredential("gpt-4o", "proxy-a"))
+	assert.Equal(t, 200, m.GetModelPriorityForCredential("claude-3-opus", "proxy-a"))
+	assert.Equal(t, 0, m.GetModelPriorityForCredential("unset-priority", "proxy-a"))
+
+	// A second poll cycle with a different snapshot fully replaces the first —
+	// "claude-3-opus" must be gone, not merged.
+	m.ReplaceModelPrioritiesForCredential("proxy-a", map[string]int{
+		"gpt-4o": 300,
+	})
+	assert.Equal(t, 300, m.GetModelPriorityForCredential("gpt-4o", "proxy-a"))
+	assert.Equal(t, 0, m.GetModelPriorityForCredential("claude-3-opus", "proxy-a"), "stale entry from the previous snapshot must be cleared")
+
+	// Another credential's priorities for the same model are untouched by proxy-a's replace.
+	m.SetModelPriorityForCredential("gpt-4o", "proxy-b", 50)
+	m.ReplaceModelPrioritiesForCredential("proxy-a", nil)
+	assert.Equal(t, 0, m.GetModelPriorityForCredential("gpt-4o", "proxy-a"))
+	assert.Equal(t, 50, m.GetModelPriorityForCredential("gpt-4o", "proxy-b"))
+}

@@ -209,6 +209,114 @@ func TestUpdateModelLimits_ZeroValues_TrackedInManagerOnly(t *testing.T) {
 	assert.Equal(t, 4, mockMM.GetModelWeightForCredential("claude-3-opus", "test_proxy"))
 }
 
+func TestUpdateModelLimits_PriorityDeliveredToModelManager(t *testing.T) {
+	health := &httputil.ProxyHealthResponse{
+		Credentials: map[string]httputil.CredentialHealthStats{
+			"remote": {Priority: 200},
+		},
+		Models: map[string]httputil.ModelHealthStats{
+			"model:remote": {
+				Model:      "gpt-4",
+				Credential: "remote",
+				Priority:   200,
+				LimitRPM:   100,
+				LimitTPM:   1000,
+			},
+		},
+	}
+
+	rateLimiter := ratelimit.New()
+	cred := &config.CredentialConfig{Name: "test_proxy"}
+	logger := testhelpers.NewTestLogger()
+	mockMM := NewMockModelManager()
+
+	updateModelLimits(health, cred, rateLimiter, logger, mockMM)
+
+	assert.Equal(t, 200, mockMM.GetModelPriorityForCredential("gpt-4", "test_proxy"),
+		"priority learned from the upstream credential's /health response must reach ReplaceModelPrioritiesForCredential")
+}
+
+// TestUpdateModelLimits_PriorityMinAggregation verifies that when several upstream
+// credentials in the remote proxy's /health response offer the same model at different
+// priorities (e.g. two grant credentials on the same node with different priority
+// groups), the local proxy credential's effective priority for that model is the MINIMUM
+// (highest-priority / tried-first group) — not a sum, unlike RPM/TPM limits.
+func TestUpdateModelLimits_PriorityMinAggregation(t *testing.T) {
+	health := &httputil.ProxyHealthResponse{
+		Credentials: map[string]httputil.CredentialHealthStats{
+			"grant-a": {Priority: 300},
+			"grant-b": {Priority: 100},
+			"grant-c": {Priority: 200},
+		},
+		Models: map[string]httputil.ModelHealthStats{
+			"model:a": {Model: "gpt-4", Credential: "grant-a", Priority: 300},
+			"model:b": {Model: "gpt-4", Credential: "grant-b", Priority: 100},
+			"model:c": {Model: "gpt-4", Credential: "grant-c", Priority: 200},
+		},
+	}
+
+	rateLimiter := ratelimit.New()
+	cred := &config.CredentialConfig{Name: "test_proxy"}
+	logger := testhelpers.NewTestLogger()
+	mockMM := NewMockModelManager()
+
+	updateModelLimits(health, cred, rateLimiter, logger, mockMM)
+
+	assert.Equal(t, 100, mockMM.GetModelPriorityForCredential("gpt-4", "test_proxy"))
+}
+
+// TestUpdateModelLimits_IsFallbackDoesNotDropPriority is a T3 regression test: an
+// upstream credential marked is_fallback still contributes its model+priority to the
+// proxy credential's aggregation instead of being skipped outright (the bug fixed in
+// updateModelLimits/updateCredentialLimits — see the _IsFallbackDoesNotSkipAggregation_
+// tests above for the limits-only version of this same fix). Here "grant-fallback"
+// (is_fallback on the upstream node) offers a model no other upstream credential offers,
+// at a high (deprioritized) priority number — it must still show up, not vanish.
+func TestUpdateModelLimits_IsFallbackDoesNotDropPriority(t *testing.T) {
+	health := &httputil.ProxyHealthResponse{
+		Credentials: map[string]httputil.CredentialHealthStats{
+			"grant-primary":  {IsFallback: false, Priority: 100},
+			"grant-fallback": {IsFallback: true, Priority: 999},
+		},
+		Models: map[string]httputil.ModelHealthStats{
+			"model:primary":  {Model: "gpt-4", Credential: "grant-primary", Priority: 100, LimitRPM: 50, LimitTPM: 500},
+			"model:fallback": {Model: "claude-3-opus", Credential: "grant-fallback", Priority: 999, LimitRPM: 20, LimitTPM: 200},
+		},
+	}
+
+	rateLimiter := ratelimit.New()
+	// The LOCAL proxy credential is not is_fallback — before the fix, this would have
+	// dropped "grant-fallback" (and claude-3-opus) entirely instead of just
+	// deprioritizing it.
+	cred := &config.CredentialConfig{Name: "test_proxy", IsFallback: false}
+	logger := testhelpers.NewTestLogger()
+	mockMM := NewMockModelManager()
+
+	updateModelLimits(health, cred, rateLimiter, logger, mockMM)
+
+	assert.True(t, mockMM.HasModel("test_proxy", "gpt-4"))
+	assert.True(t, mockMM.HasModel("test_proxy", "claude-3-opus"), "is_fallback upstream credential's model must not be dropped")
+	assert.Equal(t, 100, mockMM.GetModelPriorityForCredential("gpt-4", "test_proxy"))
+	assert.Equal(t, 999, mockMM.GetModelPriorityForCredential("claude-3-opus", "test_proxy"))
+	assert.Equal(t, 20, rateLimiter.GetModelLimitRPM("test_proxy", "claude-3-opus"), "limits for the is_fallback-served model must still be aggregated")
+}
+
+func TestUpdateModelLimits_NoModels_ClearsPriorities(t *testing.T) {
+	health := &httputil.ProxyHealthResponse{}
+
+	rateLimiter := ratelimit.New()
+	cred := &config.CredentialConfig{Name: "test_proxy"}
+	logger := testhelpers.NewTestLogger()
+	mockMM := NewMockModelManager()
+	// Pre-populate as if a previous poll cycle had learned a priority.
+	mockMM.ReplaceModelPrioritiesForCredential("test_proxy", map[string]int{"gpt-4": 200})
+	require.Equal(t, 200, mockMM.GetModelPriorityForCredential("gpt-4", "test_proxy"))
+
+	updateModelLimits(health, cred, rateLimiter, logger, mockMM)
+
+	assert.Equal(t, 0, mockMM.GetModelPriorityForCredential("gpt-4", "test_proxy"), "an empty health.Models response must clear stale learned priorities")
+}
+
 func TestUpdateModelLimits_NoCurrentUsage(t *testing.T) {
 	health := &httputil.ProxyHealthResponse{
 		Models: map[string]httputil.ModelHealthStats{
@@ -386,7 +494,8 @@ type MockModelManager struct {
 		credential string
 		model      string
 	}
-	weights map[string]map[string]int
+	weights    map[string]map[string]int
+	priorities map[string]map[string]int
 }
 
 func NewMockModelManager() *MockModelManager {
@@ -396,7 +505,8 @@ func NewMockModelManager() *MockModelManager {
 			credential string
 			model      string
 		}, 0),
-		weights: make(map[string]map[string]int),
+		weights:    make(map[string]map[string]int),
+		priorities: make(map[string]map[string]int),
 	}
 }
 
@@ -474,6 +584,53 @@ func (m *MockModelManager) ReplaceModelWeightsForCredential(credentialName strin
 		}
 		m.weights[modelID][credentialName] = weight
 	}
+}
+
+func (m *MockModelManager) SetModelPriorityForCredential(modelID, credentialName string, priority int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if priority <= 0 {
+		if priorities, ok := m.priorities[modelID]; ok {
+			delete(priorities, credentialName)
+			if len(priorities) == 0 {
+				delete(m.priorities, modelID)
+			}
+		}
+		return
+	}
+	if m.priorities[modelID] == nil {
+		m.priorities[modelID] = make(map[string]int)
+	}
+	m.priorities[modelID][credentialName] = priority
+}
+
+func (m *MockModelManager) ReplaceModelPrioritiesForCredential(credentialName string, priorities map[string]int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for modelID, credentialPriorities := range m.priorities {
+		delete(credentialPriorities, credentialName)
+		if len(credentialPriorities) == 0 {
+			delete(m.priorities, modelID)
+		}
+	}
+	for modelID, priority := range priorities {
+		if priority <= 0 {
+			continue
+		}
+		if m.priorities[modelID] == nil {
+			m.priorities[modelID] = make(map[string]int)
+		}
+		m.priorities[modelID][credentialName] = priority
+	}
+}
+
+func (m *MockModelManager) GetModelPriorityForCredential(modelID, credentialName string) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if priorities, ok := m.priorities[modelID]; ok {
+		return priorities[credentialName]
+	}
+	return 0
 }
 
 func (m *MockModelManager) HasModel(credentialName, modelID string) bool {
@@ -696,7 +853,18 @@ func TestUpdateStatsFromHealth_ClearsModelsWhenRemoteSnapshotIsEmpty(t *testing.
 	assert.Empty(t, rateLimiter.GetAllModelPairs())
 }
 
-func TestUpdateStatsFromHealth_FiltersByFallbackParity_Primary(t *testing.T) {
+// TestUpdateStatsFromHealth_IsFallbackDoesNotSkipAggregation_Primary is a regression
+// test for the T3 bug fix (see todo_round_robin.md T3): an upstream credential marked
+// is_fallback must never be dropped from a downstream proxy credential's aggregated
+// limits/models just because the proxy credential itself is not is_fallback.
+//
+// Previously `if !cred.IsFallback && credStats.IsFallback { continue }` in both
+// updateCredentialLimits and updateModelLimits skipped the fallback-flagged upstream
+// credential entirely, so "fallback-model" (served only by "upstream-fallback") vanished
+// completely from "proxy-primary" instead of just being deprioritized. That skip is gone:
+// the upstream credential's is_fallback status no longer affects aggregation at all —
+// deprioritizing it (without hiding it) is now priority's job, not this function's.
+func TestUpdateStatsFromHealth_IsFallbackDoesNotSkipAggregation_Primary(t *testing.T) {
 	mockMM := NewMockModelManager()
 	rateLimiter := ratelimit.New()
 	logger := testhelpers.NewTestLogger()
@@ -717,17 +885,24 @@ func TestUpdateStatsFromHealth_FiltersByFallbackParity_Primary(t *testing.T) {
 		IsFallback: false,
 	}, rateLimiter, logger, mockMM)
 
-	assert.Equal(t, 100, rateLimiter.GetLimitRPM("proxy-primary"))
-	assert.Equal(t, 1000, rateLimiter.GetLimitTPM("proxy-primary"))
+	// Both upstream credentials now contribute to the proxy's aggregated limits —
+	// is_fallback no longer excludes "upstream-fallback".
+	assert.Equal(t, 600, rateLimiter.GetLimitRPM("proxy-primary"))
+	assert.Equal(t, 6000, rateLimiter.GetLimitTPM("proxy-primary"))
 	assert.Equal(t, 20, rateLimiter.GetModelLimitRPM("proxy-primary", "primary-model"))
-	assert.Equal(t, -1, rateLimiter.GetModelLimitRPM("proxy-primary", "fallback-model"))
+	assert.Equal(t, 80, rateLimiter.GetModelLimitRPM("proxy-primary", "fallback-model"))
 
 	addedModels := mockMM.GetAddedModels()
-	assert.Len(t, addedModels, 1)
-	assert.Equal(t, "primary-model", addedModels[0].model)
+	assert.Len(t, addedModels, 2)
+	addedModelIDs := []string{addedModels[0].model, addedModels[1].model}
+	assert.ElementsMatch(t, []string{"primary-model", "fallback-model"}, addedModelIDs)
 }
 
-func TestUpdateStatsFromHealth_FiltersByFallbackParity_Fallback(t *testing.T) {
+// TestUpdateStatsFromHealth_IsFallbackDoesNotSkipAggregation_Fallback mirrors the
+// _Primary case above but with a locally is_fallback proxy credential — included mainly
+// to document that the aggregation behavior is now identical regardless of the proxy
+// credential's own is_fallback flag (that flag only ever affected the removed skip).
+func TestUpdateStatsFromHealth_IsFallbackDoesNotSkipAggregation_Fallback(t *testing.T) {
 	mockMM := NewMockModelManager()
 	rateLimiter := ratelimit.New()
 	logger := testhelpers.NewTestLogger()

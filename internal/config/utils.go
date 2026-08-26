@@ -132,6 +132,7 @@ func PrintConfig(logger *slog.Logger, cfg *Config) {
 			"tpm":               tpmToString(cred.TPM),
 			"is_fallback":       cred.IsFallback,
 			"fallback_priority": cred.FallbackPriority,
+			"priority":          cred.Priority,
 		}
 
 		// Add Vertex AI specific fields if present

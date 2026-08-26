@@ -116,6 +116,7 @@ func (p *Proxy) HealthCheckScoped(visibility scope.Context) (bool, *httputil.Pro
 			IsBanned:         p.balancer.HasAnyBan(cred.Name),
 			Weight:           balancer.EffectiveWeight(0, cred.Weight),
 			FallbackPriority: cred.FallbackPriority,
+			Priority:         cred.EffectivePriority(),
 			Scopes:           scopes,
 			DeniedScopes:     deniedScopes,
 			ScopeExpression:  expression,
@@ -237,6 +238,7 @@ func (p *Proxy) addModelHealthStats(
 ) {
 	modelKey := credentialName + ":" + modelID
 	credWeight := credentialWeight(creds, credentialName)
+	credPriority := credentialPriority(creds, credentialName)
 	modelWeight := 0
 	if p.modelManager != nil {
 		modelWeight = p.modelManager.GetModelWeightForCredential(modelID, credentialName)
@@ -244,10 +246,14 @@ func (p *Proxy) addModelHealthStats(
 	ms := stats[modelKey]
 	scopes, deniedScopes := expression.LegacyProjection()
 	modelsInfo[modelKey] = httputil.ModelHealthStats{
-		Credential:      credentialName,
-		Model:           modelID,
-		IsBanned:        p.balancer.IsBanned(credentialName, modelID),
-		Weight:          balancer.EffectiveWeight(modelWeight, credWeight),
+		Credential: credentialName,
+		Model:      modelID,
+		IsBanned:   p.balancer.IsBanned(credentialName, modelID),
+		Weight:     balancer.EffectiveWeight(modelWeight, credWeight),
+		// Per-model priority override is intentionally not modeled yet (see
+		// httputil.EffectiveHealthPriority) — Priority is a direct copy of the
+		// owning credential's EffectivePriority().
+		Priority:        credPriority,
 		CurrentRPM:      ms.RPM,
 		CurrentTPM:      ms.TPM,
 		LimitRPM:        p.rateLimiter.GetModelLimitRPM(credentialName, modelID),
@@ -284,6 +290,15 @@ func credentialWeight(creds []config.CredentialConfig, credentialName string) in
 	for _, cred := range creds {
 		if cred.Name == credentialName {
 			return cred.Weight
+		}
+	}
+	return 0
+}
+
+func credentialPriority(creds []config.CredentialConfig, credentialName string) int {
+	for _, cred := range creds {
+		if cred.Name == credentialName {
+			return cred.EffectivePriority()
 		}
 	}
 	return 0

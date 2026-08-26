@@ -254,6 +254,67 @@ func TestHealthCheck_ModelInfo(t *testing.T) {
 	assert.Equal(t, 4, status.Models["test_cred:claude-3-opus"].Weight)
 }
 
+func TestHealthCheck_CredentialAndModelPriority(t *testing.T) {
+	logger := testhelpers.NewTestLogger()
+	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
+	rl := ratelimit.New()
+
+	credentials := []config.CredentialConfig{
+		{
+			Name:    "default_group_cred",
+			Type:    config.ProviderTypeOpenAI,
+			APIKey:  "sk-test",
+			BaseURL: "http://openai.com",
+			RPM:     100,
+			// No Priority/FallbackPriority set: EffectivePriority() must resolve to 0
+			// (the default group), and /health must report that 0 explicitly rather
+			// than omitting it as "unset".
+		},
+		{
+			Name:     "explicit_priority_cred",
+			Type:     config.ProviderTypeOpenAI,
+			APIKey:   "sk-test-2",
+			BaseURL:  "http://openai2.com",
+			RPM:      100,
+			Priority: 200,
+		},
+		{
+			Name:             "legacy_fallback_priority_cred",
+			Type:             config.ProviderTypeOpenAI,
+			APIKey:           "sk-test-3",
+			BaseURL:          "http://openai3.com",
+			RPM:              100,
+			FallbackPriority: 300,
+		},
+	}
+
+	for _, cred := range credentials {
+		rl.AddCredentialWithTPM(cred.Name, cred.RPM, cred.TPM)
+		rl.AddModelWithTPM(cred.Name, "gpt-4", 50, 500)
+	}
+
+	bal := balancer.New(credentials, f2b, rl)
+	metrics := monitoring.New(false)
+	tm := auth.NewVertexTokenManager(logger)
+	mm := models.New(logger, 50, []config.ModelRPMConfig{})
+
+	prx := createProxyWithParams(bal, logger, 10, 30*time.Second, metrics, "test-key", rl, tm, mm, "test-version", "test-commit")
+
+	_, status := prx.HealthCheck()
+
+	// CredentialHealthStats.Priority mirrors CredentialConfig.EffectivePriority().
+	assert.Equal(t, 0, status.Credentials["default_group_cred"].Priority)
+	assert.Equal(t, 200, status.Credentials["explicit_priority_cred"].Priority)
+	assert.Equal(t, 300, status.Credentials["legacy_fallback_priority_cred"].Priority)
+
+	// ModelHealthStats.Priority is a direct copy of the owning credential's
+	// EffectivePriority() (see internal/httputil.EffectiveHealthPriority doc comment —
+	// no per-model override is modeled in this iteration).
+	assert.Equal(t, 0, status.Models["default_group_cred:gpt-4"].Priority)
+	assert.Equal(t, 200, status.Models["explicit_priority_cred:gpt-4"].Priority)
+	assert.Equal(t, 300, status.Models["legacy_fallback_priority_cred:gpt-4"].Priority)
+}
+
 func TestHealthCheck_ModelProviderErrorAndBanUntil(t *testing.T) {
 	logger := testhelpers.NewTestLogger()
 	f2b := fail2ban.New(100, 0, []int{429})

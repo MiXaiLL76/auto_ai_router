@@ -21,6 +21,7 @@ type ModelChecker interface {
 	HasModel(credentialName, modelID string) bool
 	GetCredentialsForModel(modelID string) []string
 	GetModelWeightForCredential(modelID, credentialName string) int
+	GetModelPriorityForCredential(modelID, credentialName string) int
 	IsEnabled() bool
 }
 
@@ -241,7 +242,8 @@ func (r *RoundRobin) nextScoped(modelID string, allowOnlyFallback, allowOnlyProx
 // The algorithm runs in three phases:
 //  1. Build a candidate list via structural filters (exclude, type/fallback, model availability).
 //     These are time-stable properties — they don't change between requests.
-//  2. Drop banned candidates, then pick by smooth weighted round-robin per selection cycle.
+//  2. Drop banned candidates, then pick by smooth weighted round-robin per selection cycle
+//     (grouped by EffectivePriority() for the primary pool — see selectPriorityGroupCandidate).
 //  3. Commit the highest-priority candidate that passes its rate limits.
 func (r *RoundRobin) nextExcludingScoped(modelID string, allowOnlyFallback, allowOnlyProxy bool, requiredType config.ProviderType, exclude map[string]bool, visibility scope.Context) (*config.CredentialConfig, error) {
 	r.mu.Lock()
@@ -297,9 +299,27 @@ func (r *RoundRobin) nextExcludingScoped(modelID string, allowOnlyFallback, allo
 		return nil, ErrNoCredentialsAvailable
 	}
 
-	key := r.schedKeyFor(modelID, allowOnlyFallback, allowOnlyProxy, requiredType, hasActiveExclusion(exclude), candidateCycleKey(candidates))
-	live, rateLimitHit := r.liveCandidates(modelID, candidates)
-	return r.selectWeightedLiveCandidate(modelID, live, key, rateLimitHit)
+	// The AIR Chain Fallback pool (allowOnlyFallback) and the proxy-only pool
+	// (allowOnlyProxy) are a separate mechanism from priority groups (see
+	// docs/advanced/balancing.md "AIR Chain Fallback") — they stay a flat weighted pool.
+	if allowOnlyFallback || allowOnlyProxy {
+		key := r.schedKeyFor(modelID, allowOnlyFallback, allowOnlyProxy, requiredType, hasActiveExclusion(exclude), candidateCycleKey(candidates))
+		live, rateLimitHit := r.liveCandidates(modelID, candidates)
+		return r.selectWeightedLiveCandidate(modelID, live, key, rateLimitHit)
+	}
+
+	// Primary pool: cascade through EffectivePriority() groups (ascending; credentials
+	// without an explicit priority all share group 0, which is tried first). SWRR runs
+	// within the lowest-numbered group that still has a live member.
+	keyBase := r.schedKeyFor(modelID, allowOnlyFallback, allowOnlyProxy, requiredType, hasActiveExclusion(exclude), "")
+	cred, found, rateLimitHit, err := r.selectPriorityGroupCandidate(modelID, candidates, keyBase)
+	if found || err != nil {
+		return cred, err
+	}
+	if rateLimitHit {
+		return nil, ErrRateLimitExceeded
+	}
+	return nil, ErrNoCredentialsAvailable
 }
 
 func (r *RoundRobin) liveCandidates(modelID string, candidates []candidateEntry) ([]candidateEntry, bool) {
@@ -431,13 +451,13 @@ func (r *RoundRobin) NextRetryForModelExcludingScoped(modelID string, current *c
 	if current.IsProxyLike() || current.IsFallback {
 		return r.NextSameTypeForModelExcludingScoped(modelID, current.Type, exclude, visibility)
 	}
-	if current.FallbackPriority <= 0 {
+	if current.EffectivePriority() <= 0 {
 		if r.hasTriedPriorityCredential(exclude) {
 			return r.nextUnprioritizedRetry(modelID, exclude, visibility)
 		}
 		return r.NextSameTypeForModelExcludingScoped(modelID, current.Type, exclude, visibility)
 	}
-	return r.nextPriorityRetry(modelID, current.FallbackPriority, exclude, visibility)
+	return r.nextPriorityRetry(modelID, current.EffectivePriority(), exclude, visibility)
 }
 
 func (r *RoundRobin) nextPriorityRetry(modelID string, minPriority int, exclude map[string]bool, visibility scope.Context) (*config.CredentialConfig, error) {
@@ -486,11 +506,12 @@ func (r *RoundRobin) splitPriorityRetryCandidatesLocked(modelID string, minPrior
 				continue
 			}
 		}
-		if cred.FallbackPriority <= 0 {
+		effPriority := cred.EffectivePriority()
+		if effPriority <= 0 {
 			unprioritizedCandidates = append(unprioritizedCandidates, candidateEntry{absIdx: i, cred: cred})
 			continue
 		}
-		if cred.FallbackPriority < minPriority {
+		if effPriority < minPriority {
 			monitoring.CredentialSelectionRejected.WithLabelValues("fallback_not_available").Inc()
 			continue
 		}
@@ -508,35 +529,68 @@ func (r *RoundRobin) hasModel(credentialName, modelID string, visibility scope.C
 	return r.modelChecker.HasModel(credentialName, modelID)
 }
 
-func (r *RoundRobin) selectPriorityRetryCandidateLocked(modelID string, candidates []candidateEntry) (*config.CredentialConfig, bool, bool, error) {
+// selectPriorityGroupCandidate picks a live candidate from candidates using priority-group
+// cascading: candidates are bucketed by EffectivePriority() (ascending), and SWRR runs
+// within the lowest-priority group that has at least one live (not banned, not
+// rate-limited) member. A group cascades to the next only when every member of the
+// current group is currently down — so partial degradation (some group members down)
+// keeps serving that same group instead of moving to the next one.
+//
+// keyBase supplies the non-priority, non-scope fields of the SWRR schedKey (model,
+// fallback/proxy-only flags, required type, excluding); this function fills in
+// keyBase.priority and keyBase.scopeKey per selected group so each priority tier gets its
+// own independent SWRR cycle, keyed by that tier's full (structural) membership so the
+// cycle survives transient bans/unbans within the tier.
+//
+// Returns (cred, found, rateLimitHit, err). found is true only on a successful pick;
+// when every group is fully down, found is false and err is nil (caller decides between
+// ErrRateLimitExceeded and ErrNoCredentialsAvailable using rateLimitHit).
+func (r *RoundRobin) selectPriorityGroupCandidate(modelID string, candidates []candidateEntry, keyBase schedKey) (*config.CredentialConfig, bool, bool, error) {
 	if len(candidates) == 0 {
 		return nil, false, false, nil
 	}
 
-	live, rateLimitHit := r.liveCandidates(modelID, candidates)
-	if len(live) == 0 {
-		return nil, false, rateLimitHit, nil
-	}
-
-	selectedPriority := live[0].cred.FallbackPriority
-	for _, c := range live[1:] {
-		if c.cred.FallbackPriority < selectedPriority {
-			selectedPriority = c.cred.FallbackPriority
+	groups := make(map[int][]candidateEntry, len(candidates))
+	priorities := make([]int, 0, len(candidates))
+	for _, c := range candidates {
+		// effectivePriority additionally resolves a per-model priority learned from an
+		// upstream /health poll for proxy/AIR credentials (see effectivePriority in
+		// weighted.go) — this is what lets a proxy credential's priority group reflect
+		// what's actually configured on the node it proxies to, instead of collapsing
+		// every proxy credential into one flat group.
+		p := r.effectivePriority(c.cred, modelID)
+		if _, ok := groups[p]; !ok {
+			priorities = append(priorities, p)
 		}
+		groups[p] = append(groups[p], c)
 	}
+	sort.Ints(priorities)
 
-	bucket := make([]candidateEntry, 0, len(live))
-	for _, c := range live {
-		if c.cred.FallbackPriority != selectedPriority {
+	rateLimitHit := false
+	for _, p := range priorities {
+		group := groups[p]
+		live, groupRateLimitHit := r.liveCandidates(modelID, group)
+		if groupRateLimitHit {
+			rateLimitHit = true
+		}
+		if len(live) == 0 {
+			// Whole group is currently down (banned or rate-limited) — cascade to the
+			// next priority group.
 			continue
 		}
-		bucket = append(bucket, c)
-	}
 
-	key := r.schedKeyFor(modelID, false, false, "", true, candidateCycleKey(bucket))
-	key.priority = selectedPriority
-	cred, err := r.selectWeightedLiveCandidate(modelID, bucket, key, rateLimitHit)
-	return cred, err == nil, rateLimitHit, err
+		key := keyBase
+		key.priority = p
+		key.scopeKey = candidateCycleKey(group)
+		cred, err := r.selectWeightedLiveCandidate(modelID, live, key, groupRateLimitHit)
+		return cred, err == nil, rateLimitHit, err
+	}
+	return nil, false, rateLimitHit, nil
+}
+
+func (r *RoundRobin) selectPriorityRetryCandidateLocked(modelID string, candidates []candidateEntry) (*config.CredentialConfig, bool, bool, error) {
+	keyBase := r.schedKeyFor(modelID, false, false, "", true, "")
+	return r.selectPriorityGroupCandidate(modelID, candidates, keyBase)
 }
 
 func (r *RoundRobin) selectUnprioritizedRetryCandidateLocked(modelID string, candidates []candidateEntry, priorRateLimitHit bool) (*config.CredentialConfig, error) {
@@ -573,7 +627,7 @@ func (r *RoundRobin) hasTriedPriorityCredential(exclude map[string]bool) bool {
 			continue
 		}
 		cred := r.getCredentialByName(name)
-		if cred != nil && cred.FallbackPriority > 0 && !cred.IsFallback && !cred.IsProxyLike() {
+		if cred != nil && cred.EffectivePriority() > 0 && !cred.IsFallback && !cred.IsProxyLike() {
 			return true
 		}
 	}

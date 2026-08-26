@@ -735,11 +735,14 @@ type CredentialConfig struct {
 	// Anthropic-compatible wire protocol (/v1/messages) to its
 	// OpenAI-compatible one (/v1/chat/completions). Only valid when
 	// Type == ProviderTypeCometAPI. See EffectiveProviderType.
-	OpenAIProtocol          bool              `yaml:"openai_proto,omitempty"`
-	RPM                     int               `yaml:"rpm"`
-	TPM                     int               `yaml:"tpm"`
-	Weight                  int               `yaml:"weight"` // Default weighted round-robin weight for this credential (0 = 1)
-	FallbackPriority        int               `yaml:"fallback_priority,omitempty"`
+	OpenAIProtocol   bool `yaml:"openai_proto,omitempty"`
+	RPM              int  `yaml:"rpm"`
+	TPM              int  `yaml:"tpm"`
+	Weight           int  `yaml:"weight"` // Default weighted round-robin weight for this credential (0 = 1)
+	FallbackPriority int  `yaml:"fallback_priority,omitempty"`
+	// Priority is the primary-selection priority group (lower selects first).
+	// See EffectivePriority for the resolution chain against FallbackPriority.
+	Priority                int               `yaml:"priority,omitempty"`
 	ReasoningOnly           bool              `yaml:"reasoning_only,omitempty"`
 	Scopes                  []string          `yaml:"scopes,omitempty"`
 	DeniedScopes            []string          `yaml:"denied_scopes,omitempty"`
@@ -778,6 +781,20 @@ func (c CredentialConfig) ScopeExpression() *scope.Expression {
 
 func (c CredentialConfig) IsProxyLike() bool {
 	return c.Type.IsProxyLike()
+}
+
+// EffectivePriority resolves the primary-selection priority group for this credential:
+// explicit Priority (if > 0), else FallbackPriority (if > 0, backward-compat with the
+// retry-only priority field), else 0 — the default group, equivalent to today's flat pool.
+// Lower values are selected before higher ones; see balancer priority-group selection.
+func (c CredentialConfig) EffectivePriority() int {
+	if c.Priority > 0 {
+		return c.Priority
+	}
+	if c.FallbackPriority > 0 {
+		return c.FallbackPriority
+	}
+	return 0
 }
 
 // EffectiveProviderType returns the ProviderType that should drive wire
@@ -821,6 +838,7 @@ func (c *CredentialConfig) UnmarshalYAML(value *yaml.Node) error {
 		TPM              string           `yaml:"tpm"`
 		Weight           string           `yaml:"weight"`
 		FallbackPriority string           `yaml:"fallback_priority,omitempty"`
+		Priority         string           `yaml:"priority,omitempty"`
 		ReasoningOnly    string           `yaml:"reasoning_only,omitempty"`
 		Scopes           []string         `yaml:"scopes,omitempty"`
 		DeniedScopes     []string         `yaml:"denied_scopes,omitempty"`
@@ -872,6 +890,9 @@ func (c *CredentialConfig) UnmarshalYAML(value *yaml.Node) error {
 		return err
 	}
 	if c.FallbackPriority, err = parseField(temp.FallbackPriority, 0, strconv.Atoi, "fallback_priority for credential '"+c.Name+"'"); err != nil {
+		return err
+	}
+	if c.Priority, err = parseField(temp.Priority, 0, strconv.Atoi, "priority for credential '"+c.Name+"'"); err != nil {
 		return err
 	}
 	if c.ReasoningOnly, err = parseField(temp.ReasoningOnly, false, strconv.ParseBool, "reasoning_only for credential '"+c.Name+"'"); err != nil {
@@ -1852,6 +1873,15 @@ func (c *Config) Validate() error {
 		}
 		if cred.IsFallback && cred.FallbackPriority > 0 {
 			return fmt.Errorf("credential %s: invalid fallback_priority: fallback credentials cannot set fallback_priority", cred.Name)
+		}
+		if cred.Priority < 0 {
+			return fmt.Errorf("credential %s: invalid priority: %d (must be >= 0)", cred.Name, cred.Priority)
+		}
+		if cred.Priority > 0 && cred.FallbackPriority > 0 {
+			return fmt.Errorf("credential %s: invalid priority: cannot set both priority and fallback_priority", cred.Name)
+		}
+		if cred.Priority > 0 && cred.IsFallback {
+			return fmt.Errorf("credential %s: invalid priority: fallback credentials cannot set priority", cred.Name)
 		}
 	}
 

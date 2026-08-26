@@ -296,6 +296,7 @@ type Manager struct {
 	modelPassthroughResponses    map[string]*bool             // model name -> explicit passthrough_responses override (nil = auto)
 	modelPassthroughMessages     map[string]*bool             // model name -> explicit passthrough_messages override (nil = provider default)
 	dynamicModelWeights          map[string]map[string]int    // model ID -> credential -> weight learned from upstream /health
+	dynamicModelPriorities       map[string]map[string]int    // model ID -> credential -> priority learned from upstream /health
 	dynamicModelScopes           map[string]map[string]ScopeMetadata
 	dbModelNames                 map[string]bool              // model names that were loaded from LiteLLM DB (for hot-reload diffing)
 	modelAliases                 map[string]string            // alias -> real model name (from model_alias config)
@@ -336,6 +337,7 @@ func New(logger *slog.Logger, defaultModelsRPM int, staticModels []config.ModelR
 		modelPassthroughResponses:   make(map[string]*bool),
 		modelPassthroughMessages:    make(map[string]*bool),
 		dynamicModelWeights:         make(map[string]map[string]int),
+		dynamicModelPriorities:      make(map[string]map[string]int),
 		dynamicModelScopes:          make(map[string]map[string]ScopeMetadata),
 		defaultModelsRPM:            defaultModelsRPM,
 		logger:                      logger,
@@ -2090,6 +2092,73 @@ func (m *Manager) replaceModelWeightsForCredentialLocked(credentialName string, 
 	}
 }
 
+// SetModelPriorityForCredential stores a dynamic model-level priority learned from a
+// proxy upstream's /health response (see EffectiveHealthPriority /
+// updateModelLimits in internal/proxy/remote.go). There is no static
+// config/DB per-model priority override to take precedence over (mirrors the
+// T1 decision against a per-model Priority override in config), so unlike
+// GetModelWeightForCredential this dynamic map is the sole source for a
+// learned per-(model, credential) priority.
+func (m *Manager) SetModelPriorityForCredential(modelID, credentialName string, priority int) {
+	if modelID == "" || credentialName == "" {
+		return
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	// Priority 0 is a valid, meaningful value (the default priority group), but it is
+	// also indistinguishable from "no dynamic priority has been learned" once read back
+	// via GetModelPriorityForCredential — see the contract note there. Since both cases
+	// resolve to the same default-group behavior, it is safe (and mirrors
+	// SetModelWeightForCredential's <= 0 handling) to simply not store a zero entry.
+	if priority <= 0 {
+		if priorities, ok := m.dynamicModelPriorities[modelID]; ok {
+			delete(priorities, credentialName)
+			if len(priorities) == 0 {
+				delete(m.dynamicModelPriorities, modelID)
+			}
+		}
+		return
+	}
+
+	if m.dynamicModelPriorities[modelID] == nil {
+		m.dynamicModelPriorities[modelID] = make(map[string]int)
+	}
+	m.dynamicModelPriorities[modelID][credentialName] = priority
+}
+
+// ReplaceModelPrioritiesForCredential replaces all dynamic health-derived priorities
+// for a credential with a fresh upstream snapshot.
+func (m *Manager) ReplaceModelPrioritiesForCredential(credentialName string, priorities map[string]int) {
+	if credentialName == "" {
+		return
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.replaceModelPrioritiesForCredentialLocked(credentialName, priorities)
+}
+
+func (m *Manager) replaceModelPrioritiesForCredentialLocked(credentialName string, priorities map[string]int) {
+	for modelID, credentialPriorities := range m.dynamicModelPriorities {
+		delete(credentialPriorities, credentialName)
+		if len(credentialPriorities) == 0 {
+			delete(m.dynamicModelPriorities, modelID)
+		}
+	}
+
+	for modelID, priority := range priorities {
+		if modelID == "" || priority <= 0 {
+			continue
+		}
+		if m.dynamicModelPriorities[modelID] == nil {
+			m.dynamicModelPriorities[modelID] = make(map[string]int)
+		}
+		m.dynamicModelPriorities[modelID][credentialName] = priority
+	}
+}
+
 func (m *Manager) ReplaceModelScopesForCredential(credentialName string, scopes map[string]ScopeMetadata) {
 	if credentialName == "" {
 		return
@@ -2418,6 +2487,28 @@ func (m *Manager) GetModelWeightForCredential(modelID, credentialName string) in
 		if weight := weights[credentialName]; weight > 0 {
 			return weight
 		}
+	}
+
+	return 0
+}
+
+// GetModelPriorityForCredential returns the dynamic (health-derived) priority for a
+// (model, credential) pair, learned from an upstream proxy's /health response.
+// Returns 0 when nothing has been learned for this pair.
+//
+// Note: this cannot distinguish "no per-model priority learned" from "upstream
+// explicitly reported priority 0" — both read back as 0 (see the contract note on
+// SetModelPriorityForCredential). That is intentional, not an oversight: 0 is also the
+// correct default priority group to fall back to, matching
+// CredentialConfig.EffectivePriority()'s own default. Callers (see
+// balancer.RoundRobin.effectivePriority) should therefore treat a 0 result as "use the
+// credential's own EffectivePriority()" rather than as an authoritative override.
+func (m *Manager) GetModelPriorityForCredential(modelID, credentialName string) int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	if priorities, ok := m.dynamicModelPriorities[modelID]; ok {
+		return priorities[credentialName]
 	}
 
 	return 0

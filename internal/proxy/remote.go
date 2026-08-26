@@ -19,6 +19,8 @@ type ModelManagerInterface interface {
 	SetModelWeightForCredential(modelID, credentialName string, weight int)
 	ReplaceModelsForCredential(credentialName string, modelIDs []string)
 	ReplaceModelWeightsForCredential(credentialName string, weights map[string]int)
+	SetModelPriorityForCredential(modelID, credentialName string, priority int)
+	ReplaceModelPrioritiesForCredential(credentialName string, priorities map[string]int)
 	HasModel(credentialName, modelID string) bool
 }
 
@@ -118,6 +120,8 @@ type limitAggregation struct {
 	rpm             int
 	tpm             int
 	weight          int
+	priority        int
+	hasPriority     bool
 	currentRPM      int
 	currentTPM      int
 	hasUnlimitedRPM bool
@@ -151,6 +155,19 @@ func (agg *limitAggregation) applySum(rpm, tpm, currentRPM, currentTPM int) {
 func (agg *limitAggregation) applyWeight(weight int) {
 	if weight > 0 {
 		agg.weight += weight
+	}
+}
+
+// applyPriorityMin folds another upstream credential's priority for this model into
+// the aggregate. Unlike weight/limits (summed), priority uses MIN: when several
+// upstream credentials offer the same model at different priorities (e.g. two grant
+// credentials on the same node with different priority groups), the resulting
+// proxy-local model priority is the lowest one — the group that would be tried first
+// — not a sum or average.
+func (agg *limitAggregation) applyPriorityMin(priority int) {
+	if !agg.hasPriority || priority < agg.priority {
+		agg.priority = priority
+		agg.hasPriority = true
 	}
 }
 
@@ -197,9 +214,14 @@ func updateCredentialLimits(
 	aggregation := newSumLimitAggregation()
 
 	for _, credStats := range health.Credentials {
-		if !cred.IsFallback && credStats.IsFallback {
-			continue
-		}
+		// Previously skipped upstream credentials marked is_fallback here unless our own
+		// proxy credential was also is_fallback — that dropped an upstream credential's
+		// entire RPM/TPM contribution instead of just deprioritizing it, which made
+		// models served only by a fallback-flagged upstream credential vanish from this
+		// proxy's aggregated limits. The upstream credential's is_fallback status has no
+		// bearing on our local proxy credential's capacity: it always counts toward the
+		// aggregate now. Ordering/deprioritization is handled separately by priority
+		// (see updateModelLimits below and EffectivePriority()).
 		aggregation.applySum(
 			credStats.LimitRPM,
 			credStats.LimitTPM,
@@ -246,6 +268,7 @@ func updateModelLimits(
 		if modelManager != nil {
 			modelManager.ReplaceModelsForCredential(cred.Name, nil)
 			modelManager.ReplaceModelWeightsForCredential(cred.Name, nil)
+			modelManager.ReplaceModelPrioritiesForCredential(cred.Name, nil)
 		}
 		removedModels := removeStaleModelLimits(cred.Name, map[string]bool{}, rateLimiter)
 		if removedModels > 0 {
@@ -262,15 +285,18 @@ func updateModelLimits(
 	modelIDs := make([]string, 0, len(health.Models))
 	modelIDSet := make(map[string]bool, len(health.Models))
 	modelWeights := make(map[string]int)
+	modelPriorities := make(map[string]int)
 
 	for _, modelStats_data := range health.Models {
 		credStats, ok := health.Credentials[modelStats_data.Credential]
 		if !ok {
 			continue
 		}
-		if !cred.IsFallback && credStats.IsFallback {
-			continue
-		}
+		// Previously skipped upstream credentials marked is_fallback here unless our own
+		// proxy credential was also is_fallback — see the matching comment in
+		// updateCredentialLimits above. The upstream credential (and its models) always
+		// participates in aggregation now; its priority (below) is what pushes it later
+		// in the selection order, not exclusion from the model/limit set.
 		modelID := modelStats_data.Model
 		if modelID == "" {
 			continue
@@ -286,6 +312,7 @@ func updateModelLimits(
 		curRPM := modelStats_data.CurrentRPM
 		curTPM := modelStats_data.CurrentTPM
 		weight := httputil.EffectiveHealthWeight(modelStats_data, credStats)
+		priority := httputil.EffectiveHealthPriority(modelStats_data, credStats)
 
 		aggregation, ok := modelStats[modelID]
 		if !ok {
@@ -297,11 +324,14 @@ func updateModelLimits(
 		}
 		aggregation.applyWeight(weight)
 		modelWeights[modelID] = aggregation.weight
+		aggregation.applyPriorityMin(priority)
+		modelPriorities[modelID] = aggregation.priority
 	}
 
 	if modelManager != nil {
 		modelManager.ReplaceModelsForCredential(cred.Name, modelIDs)
 		modelManager.ReplaceModelWeightsForCredential(cred.Name, modelWeights)
+		modelManager.ReplaceModelPrioritiesForCredential(cred.Name, modelPriorities)
 	}
 
 	// Update rate limiter with aggregated model limits
