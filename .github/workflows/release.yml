@@ -88,6 +88,12 @@ jobs:
           auth=$(printf '%s:%s' "${{ github.actor }}" "${{ secrets.GITHUB_TOKEN }}" | base64 -w0)
           printf '{"auths":{"ghcr.io":{"auth":"%s"}}}' "$auth" > "${GITHUB_WORKSPACE}/.docker-config/config.json"
 
+      # with.args для голого `uses: docker://image` — это строка, а не YAML-
+      # последовательность (fromJSON-массив туда не подставить, runner
+      # ругается "A sequence was not expected"). Раннер сам разбивает
+      # многострочный args построчно на отдельные argv-элементы — без
+      # пробел-сплита и без кавычек, так что просто пишем каждый флаг на
+      # своей строке в multiline-вывод GITHUB_OUTPUT.
       - name: Build kaniko args
         id: kaniko
         env:
@@ -95,32 +101,31 @@ jobs:
           LABELS: ${{ steps.meta.outputs.labels }}
         run: |
           version="${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'dev' }}"
-
-          json_escape() {
-            printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
-          }
-
-          args='["--context=dir:///github/workspace","--dockerfile=/github/workspace/Dockerfile"'
-          printf '%s\n' "$DESTINATIONS" > /tmp/kaniko-destinations.txt
-          while IFS= read -r tag; do
-            [ -z "$tag" ] && continue
-            args="${args},\"--destination=$(json_escape "$tag")\""
-          done < /tmp/kaniko-destinations.txt
-          printf '%s\n' "$LABELS" > /tmp/kaniko-labels.txt
-          while IFS= read -r label; do
-            [ -z "$label" ] && continue
-            args="${args},\"--label=$(json_escape "$label")\""
-          done < /tmp/kaniko-labels.txt
-          args="${args},\"--build-arg=VERSION=${version}\",\"--build-arg=COMMIT=${{ github.sha }}\""
-          args="${args},\"--cache=true\",\"--cache-repo=ghcr.io/${{ steps.repo.outputs.repository }}/cache\"]"
-          echo "args=${args}" >> "$GITHUB_OUTPUT"
+          {
+            echo "args<<KANIKO_ARGS_EOF"
+            echo "--context=dir:///github/workspace"
+            echo "--dockerfile=/github/workspace/Dockerfile"
+            printf '%s\n' "$DESTINATIONS" | while IFS= read -r tag; do
+              [ -z "$tag" ] && continue
+              echo "--destination=$tag"
+            done
+            printf '%s\n' "$LABELS" | while IFS= read -r label; do
+              [ -z "$label" ] && continue
+              echo "--label=$label"
+            done
+            echo "--build-arg=VERSION=${version}"
+            echo "--build-arg=COMMIT=${{ github.sha }}"
+            echo "--cache=true"
+            echo "--cache-repo=ghcr.io/${{ steps.repo.outputs.repository }}/cache"
+            echo "KANIKO_ARGS_EOF"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Build and push with kaniko
         uses: docker://gcr.io/kaniko-project/executor:v1.24.0
         env:
           DOCKER_CONFIG: /github/workspace/.docker-config
         with:
-          args: ${{ fromJSON(steps.kaniko.outputs.args) }}
+          args: ${{ steps.kaniko.outputs.args }}
 
   # 3. Загрузка assets в существующий релиз (только для тегов)
   upload-assets:
