@@ -41,6 +41,7 @@ func testLogCtx(t *testing.T) *RequestLogContext {
 	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
 	return &RequestLogContext{
 		RequestID: "req-123",
+		EventID:   "req-123",
 		StartTime: time.Date(2026, 7, 15, 10, 0, 0, 0, time.UTC),
 		Request:   req,
 		Token:     "sk-test",

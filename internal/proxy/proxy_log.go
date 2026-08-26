@@ -357,7 +357,7 @@ func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
 	if litellmEnabled {
 		pgErr = p.LiteLLMDB.LogSpend(&litellmdb.SpendLogEntry{
 			RequestID:           logCtx.spendRequestID(),
-			AirEventID:          logCtx.RequestID,
+			AirEventID:          logCtx.EventID,
 			StartTime:           logCtx.StartTime,
 			EndTime:             endTime,
 			CompletionStartTime: completionStartTime,

@@ -244,7 +244,8 @@ func (logCtx *RequestLogContext) Context() context.Context {
 // RequestLogContext holds all data needed for logging a request to LiteLLM DB
 // Filled throughout request processing and logged at the end via defer
 type RequestLogContext struct {
-	RequestID            string                   // Internal request UUID
+	RequestID            string                   // Internal request UUID; may be adopted from a trusted inbound traceparent (see requestid.Middleware), so two distinct requests can share this value
+	EventID              string                   // Always server-minted, never client-influenced; used as AirEventID so spend-log collision resolution stays meaningful even when RequestID collides
 	ClientResponseID     string                   // ID returned to the client
 	StartTime            time.Time                // Request start time
 	CompletionStartTime  time.Time                // Timestamp of the first real content/tool/reasoning delta (TTFT), not just the first byte/chunk; zero if not streamed or never reached
@@ -814,6 +815,11 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 	if info := responseCompatRequestFromContext(r.Context()); info != nil {
 		info.RequestID = requestID
 	}
+	// Minted fresh regardless of requestID's origin: when otel trusts an
+	// inbound traceparent, requestID can be client-supplied and shared across
+	// distinct requests (retry replay, or a malicious caller), which would
+	// otherwise defeat AirEventID's job as the spend-log collision fallback.
+	eventID := requestid.New()
 
 	// Save and strip internal proxy markers before normal request handling. Their
 	// value is trusted only after authentication proves this is a master-key AIR peer.
@@ -826,6 +832,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 	// and logged at the end via defer to ensure all requests are logged
 	logCtx := &RequestLogContext{
 		RequestID:      requestID,
+		EventID:        eventID,
 		StartTime:      start,
 		Request:        r,
 		Status:         "unknown",
