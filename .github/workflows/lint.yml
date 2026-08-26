@@ -43,23 +43,59 @@ jobs:
       run: go mod download
 
     - name: Run go fmt
+      id: gofmt
+      continue-on-error: true
       run: |
-        if [ "$(gofmt -s -l . | wc -l)" -gt 0 ]; then
-          echo "The following files are not formatted:"
-          gofmt -s -l .
-          exit 1
-        fi
+        set +e
+        gofmt -s -l . > gofmt.log
+        cat gofmt.log
+        files=$(wc -l < gofmt.log)
+        echo "files=${files}" >> "$GITHUB_OUTPUT"
+        if [ "$files" -gt 0 ]; then exit 1; fi
 
     - name: Run go vet
-      run: go vet ./...
+      id: vet
+      continue-on-error: true
+      run: |
+        set +e
+        go vet ./... > vet.log 2>&1
+        status=$?
+        cat vet.log
+        issues=$(wc -l < vet.log)
+        echo "issues=${issues}" >> "$GITHUB_OUTPUT"
+        exit $status
+
+    - name: Install golangci-lint
+      run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@${{ env.GOLANGCI_LINT_VERSION }}
 
     - name: Run golangci-lint
-      uses: golangci/golangci-lint-action@v9
-      with:
-        version: ${{ env.GOLANGCI_LINT_VERSION }}
-        args: --timeout=5m
-        skip-cache: true
-        skip-save-cache: true
+      id: golangci
+      continue-on-error: true
+      run: |
+        set +e
+        golangci-lint run --timeout=5m ./... > golangci.log 2>&1
+        status=$?
+        cat golangci.log
+        issues=$(grep -cE '^\S+\.go:[0-9]+:[0-9]+:' golangci.log || true)
+        gosec_issues=$(grep -cE '^\S+\.go:[0-9]+:[0-9]+:.*\(gosec\)' golangci.log || true)
+        echo "issues=${issues}" >> "$GITHUB_OUTPUT"
+        echo "gosec_issues=${gosec_issues}" >> "$GITHUB_OUTPUT"
+        exit $status
+
+    - name: Install govulncheck
+      run: go install golang.org/x/vuln/cmd/govulncheck@latest
+
+    - name: Run govulncheck
+      id: govulncheck
+      continue-on-error: true
+      run: |
+        set +e
+        govulncheck ./... > govulncheck.log 2>&1
+        status=$?
+        cat govulncheck.log
+        vulns=$(grep -cE '^Vulnerability #' govulncheck.log || true)
+        echo "vulns=${vulns}" >> "$GITHUB_OUTPUT"
+        exit $status
 
     - name: Set up Python
       uses: actions/setup-python@v6
@@ -70,7 +106,47 @@ jobs:
       run: pip install pre-commit
 
     - name: Run pre-commit
+      id: precommit
+      continue-on-error: true
       run: pre-commit run --all-files
+
+    - name: Summary
+      if: always()
+      run: |
+        set +e
+        gofmt_files=${{ steps.gofmt.outputs.files }}
+        vet_issues=${{ steps.vet.outputs.issues }}
+        golangci_issues=${{ steps.golangci.outputs.issues }}
+        gosec_issues=${{ steps.golangci.outputs.gosec_issues }}
+        govulncheck_vulns=${{ steps.govulncheck.outputs.vulns }}
+
+        score=100
+        score=$((score - gofmt_files))
+        score=$((score - vet_issues * 2))
+        score=$((score - (golangci_issues - gosec_issues) / 10))
+        score=$((score - gosec_issues * 3))
+        score=$((score - govulncheck_vulns * 10))
+        if [ "$score" -lt 0 ]; then score=0; fi
+
+        {
+          echo "## Code quality report"
+          echo
+          echo "| Check | Result | Findings |"
+          echo "|---|---|---|"
+          echo "| gofmt | ${{ steps.gofmt.outcome }} | ${gofmt_files} files |"
+          echo "| go vet | ${{ steps.vet.outcome }} | ${vet_issues} issues |"
+          echo "| golangci-lint | ${{ steps.golangci.outcome }} | ${golangci_issues} issues (${gosec_issues} gosec) |"
+          echo "| govulncheck | ${{ steps.govulncheck.outcome }} | ${govulncheck_vulns} vulnerabilities |"
+          echo "| pre-commit | ${{ steps.precommit.outcome }} | - |"
+          echo
+          echo "**Score: ${score}/100**"
+        } >> "$GITHUB_STEP_SUMMARY"
+
+        failed=0
+        for outcome in "${{ steps.gofmt.outcome }}" "${{ steps.vet.outcome }}" "${{ steps.golangci.outcome }}" "${{ steps.govulncheck.outcome }}" "${{ steps.precommit.outcome }}"; do
+          if [ "$outcome" = "failure" ]; then failed=1; fi
+        done
+        if [ "$failed" -eq 1 ]; then exit 1; fi
 
   test:
     name: Run Tests
