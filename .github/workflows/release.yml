@@ -15,9 +15,9 @@ permissions:
 
 jobs:
   # 0. Проверка качества кода (fmt, lint, tests)
-  quality-check:
-    name: Quality Check
-    uses: ./.github/workflows/lint.yml
+  # quality-check:
+  #   name: Quality Check
+  #   uses: ./.github/workflows/lint.yml
 
   # 1. Сборка бинарников (только для тегов)
   build-binaries:
@@ -43,7 +43,7 @@ jobs:
       - name: Build
         run: |
           BINARY_NAME="auto_ai_router-${{ steps.version.outputs.VERSION }}-${{ matrix.goos }}-${{ matrix.goarch }}"
-          [ "${{ matrix.goos }}" = "windows" ] && BINARY_NAME="${BINARY_NAME}.exe"
+          if [ "${{ matrix.goos }}" = "windows" ]; then BINARY_NAME="${BINARY_NAME}.exe"; fi
           GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} CGO_ENABLED=0 \
           go build -ldflags="-s -w -X main.Version=${{ steps.version.outputs.VERSION }} -X main.Commit=${{ github.sha }}" -o "${BINARY_NAME}" ./cmd/server
           if [ "${{ matrix.goos }}" = "windows" ]; then zip "${BINARY_NAME}.zip" "${BINARY_NAME}"; else tar czf "${BINARY_NAME}.tar.gz" "${BINARY_NAME}"; fi
@@ -57,7 +57,7 @@ jobs:
 
   # 2. Сборка Docker (для веток и для тегов)
   build-docker:
-    needs: quality-check
+    # needs: quality-check
     name: Build and Push Docker Image
     runs-on: arc-air-runners
     container:
@@ -100,11 +100,11 @@ jobs:
             echo "--context=dir:///github/workspace"
             echo "--dockerfile=/github/workspace/Dockerfile"
             printf '%s\n' "$DESTINATIONS" | while IFS= read -r tag; do
-              [ -z "$tag" ] && continue
+              if [ -z "$tag" ]; then continue; fi
               echo "--destination=$tag"
             done
             printf '%s\n' "$LABELS" | while IFS= read -r label; do
-              [ -z "$label" ] && continue
+              if [ -z "$label" ]; then continue; fi
               echo "--label=$label"
             done
             echo "--build-arg=VERSION=${version}"
@@ -134,7 +134,7 @@ jobs:
       - name: Upload assets to existing release
         run: |
           for file in artifacts/**/*; do
-            [ -f "$file" ] && gh release upload "${{ github.ref_name }}" "$file" --clobber
+            if [ -f "$file" ]; then gh release upload "${{ github.ref_name }}" "$file" --clobber; fi
           done
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

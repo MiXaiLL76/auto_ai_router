@@ -17,7 +17,7 @@ runs:
     - |
       set --
       while IFS= read -r line; do
-        [ -z "$line" ] && continue
+        if [ -z "$line" ]; then continue; fi
         set -- "$@" "$line"
       done <<EOF
       $INPUT_ARGS
