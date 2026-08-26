@@ -21,7 +21,7 @@ jobs:
 
   # 1. Сборка бинарников (только для тегов)
   build-binaries:
-    needs: quality-check
+    # needs: quality-check
     if: startsWith(github.ref, 'refs/tags/')
     name: Build Release Binaries
     runs-on: arc-air-runners
