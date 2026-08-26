@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/rand"
 
-	"github.com/google/uuid"
 	"github.com/mixaill76/auto_ai_router/internal/requestid"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -13,18 +12,19 @@ import (
 // application's request_id (internal/requestid), so the ID a client sees in
 // X-Request-Id resolves directly to its trace in the tracing backend.
 //
-// uuid.UUID and trace.TraceID are both [16]byte, so the request UUID is used
-// verbatim as the trace ID — no hashing or truncation needed. When no
-// request_id is present in ctx (background jobs, startup spans, requests
-// that continue an inbound traceparent) it falls back to a random trace ID,
-// matching the SDK's default IDGenerator.
+// request_id is produced by requestid.New as 16 uniformly random bytes, so
+// reusing it verbatim as the trace ID is safe for sdktrace's
+// TraceIDRatioBased sampler, which reads TraceID[8:16] to make its decision.
+//
+// When no request_id is present in ctx (background jobs, startup spans) it
+// falls back to a random trace ID, matching the SDK's default IDGenerator.
 type requestIDGenerator struct{}
 
 func (requestIDGenerator) NewIDs(ctx context.Context) (trace.TraceID, trace.SpanID) {
 	var tid trace.TraceID
 	if id := requestid.FromContext(ctx); id != "" {
-		if u, err := uuid.Parse(id); err == nil {
-			tid = trace.TraceID(u)
+		if parsed, err := trace.TraceIDFromHex(id); err == nil {
+			tid = parsed
 		}
 	}
 	if !tid.IsValid() {

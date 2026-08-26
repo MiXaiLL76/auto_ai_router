@@ -6,6 +6,7 @@ import (
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	promanutils "github.com/mixaill76/auto_ai_router/internal/converter/proman/utils"
+	"github.com/mixaill76/auto_ai_router/internal/requestid"
 )
 
 const accelBufferingHeader = "X-Accel-Buffering"
@@ -74,7 +75,11 @@ func isInternalAIRRequestHeader(key string) bool {
 }
 
 func isProxyOwnedResponseHeader(key string) bool {
-	return strings.EqualFold(key, accelBufferingHeader)
+	// requestid.Middleware already set our own X-Request-Id; an upstream
+	// provider's own request-id header (many set one) must not be appended
+	// alongside it via Header.Add, which would leave two values on the
+	// response for the same header name.
+	return strings.EqualFold(key, accelBufferingHeader) || strings.EqualFold(key, requestid.Header)
 }
 
 func isClientAuthHeader(key string) bool {

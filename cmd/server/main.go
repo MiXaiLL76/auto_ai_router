@@ -334,7 +334,14 @@ func main() {
 	// the server span, so the telemetry package's IDGenerator can reuse it as
 	// the span's trace_id. Also echoes the ID to the client via X-Request-Id,
 	// independently of whether tracing is enabled.
-	rootHandler = requestid.Middleware(rootHandler)
+	//
+	// trustIncomingTraceparent mirrors the otelhttp propagator override above:
+	// only trust an inbound traceparent's trace ID as our request ID when
+	// otelhttp will actually honor it (tracing enabled AND the config trusts
+	// it) — otherwise otelhttp starts a fresh root span and adopting the
+	// header's ID here would just be a second, uncorrelated fork.
+	trustIncomingTraceparent := otelSDK.TracesEnabled() && cfg.OTEL.TrustIncomingTraceparent
+	rootHandler = requestid.Middleware(trustIncomingTraceparent)(rootHandler)
 
 	server := &http.Server{
 		Addr:         fmt.Sprintf(":%d", cfg.Server.Port),
