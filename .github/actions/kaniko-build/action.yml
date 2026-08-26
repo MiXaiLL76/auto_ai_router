@@ -39,4 +39,7 @@ runs:
       mkdir -p /tmp/.docker-config
       printf '%s' "$INPUT_REGISTRY_AUTH_JSON" > /tmp/.docker-config/config.json
       export DOCKER_CONFIG=/tmp/.docker-config
+      echo "debug: config.json bytes: $(wc -c < /tmp/.docker-config/config.json)"
+      echo "debug: config.json has ghcr.io key: $(grep -c 'ghcr.io' /tmp/.docker-config/config.json || true)"
+      echo "debug: config.json auth value length: $(sed -n 's/.*"auth":"\([^"]*\)".*/\1/p' /tmp/.docker-config/config.json | wc -c)"
       exec /kaniko/executor "$@"
