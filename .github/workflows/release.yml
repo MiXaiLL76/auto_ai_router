@@ -66,7 +66,7 @@ jobs:
       - uses: actions/checkout@v6
       - name: Lowercase repo name
         id: repo
-        run: echo "repository=${GITHUB_REPOSITORY,,}" >> $GITHUB_OUTPUT
+        run: echo "repository=$(echo "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')" >> "$GITHUB_OUTPUT"
       - name: Extract metadata
         id: meta
         uses: docker/metadata-action@v6
@@ -97,21 +97,20 @@ jobs:
           version="${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'dev' }}"
 
           json_escape() {
-            local s=$1
-            s=${s//\\/\\\\}
-            s=${s//\"/\\\"}
-            printf '%s' "$s"
+            printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
           }
 
           args='["--context=dir:///github/workspace","--dockerfile=/github/workspace/Dockerfile"'
+          printf '%s\n' "$DESTINATIONS" > /tmp/kaniko-destinations.txt
           while IFS= read -r tag; do
             [ -z "$tag" ] && continue
             args="${args},\"--destination=$(json_escape "$tag")\""
-          done <<< "${DESTINATIONS}"
+          done < /tmp/kaniko-destinations.txt
+          printf '%s\n' "$LABELS" > /tmp/kaniko-labels.txt
           while IFS= read -r label; do
             [ -z "$label" ] && continue
             args="${args},\"--label=$(json_escape "$label")\""
-          done <<< "${LABELS}"
+          done < /tmp/kaniko-labels.txt
           args="${args},\"--build-arg=VERSION=${version}\",\"--build-arg=COMMIT=${{ github.sha }}\""
           args="${args},\"--cache=true\",\"--cache-repo=ghcr.io/${{ steps.repo.outputs.repository }}/cache\"]"
           echo "args=${args}" >> "$GITHUB_OUTPUT"
