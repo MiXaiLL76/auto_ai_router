@@ -107,7 +107,7 @@ func TestSanitizeMultipartRequestBodyRemovesEveryClientServiceTierForm(t *testin
 		multipartTestPart{disposition: `form-data; name="prompt"`, data: []byte("duplicate prompt")},
 	)
 
-	result, err := sanitizeAndExtractRequestBody(body, contentType)
+	result, err := sanitizeAndExtractRequestBody(body, contentType, false)
 	require.NoError(t, err)
 	require.True(t, result.Changed)
 	assert.Equal(t, "gpt-image-1", result.ModelID)
@@ -144,7 +144,7 @@ func TestSanitizeMultipartRequestBodyReturnsOriginalBytesWhenUnchanged(t *testin
 		multipartTestPart{disposition: `form-data; name="image"; filename="input.bin"`, contentType: "application/octet-stream", data: []byte(`{"service_tier":"priority"}`)},
 	)
 
-	result, err := sanitizeAndExtractRequestBody(body, contentType)
+	result, err := sanitizeAndExtractRequestBody(body, contentType, false)
 	require.NoError(t, err)
 	assert.False(t, result.Changed)
 	assert.Equal(t, body, result.Body)
@@ -183,7 +183,7 @@ func TestSanitizeMultipartRequestBodyRejectsMalformedInput(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result, err := sanitizeAndExtractRequestBody(tt.body, tt.contentType)
+			result, err := sanitizeAndExtractRequestBody(tt.body, tt.contentType, false)
 			assert.ErrorIs(t, err, errInvalidMultipartRequestBody)
 			assert.Empty(t, result.Body)
 		})
@@ -192,7 +192,7 @@ func TestSanitizeMultipartRequestBodyRejectsMalformedInput(t *testing.T) {
 
 func TestSanitizeRequestBodyUsesParsedMediaType(t *testing.T) {
 	body := []byte(`{"model":"gpt-4","service_tier":"priority"}`)
-	result, err := sanitizeAndExtractRequestBody(body, "application/json; profile=multipart/form-data")
+	result, err := sanitizeAndExtractRequestBody(body, "application/json; profile=multipart/form-data", false)
 	require.NoError(t, err)
 	assert.True(t, result.Changed)
 	assert.NotContains(t, string(result.Body), `"service_tier"`)
@@ -204,7 +204,7 @@ func TestMultipartPartNameMatchingIsNotRecursiveOrCaseInsensitive(t *testing.T) 
 		multipartTestPart{disposition: `form-data; name="metadata.service_tier"`, data: []byte("keep")},
 		multipartTestPart{disposition: `form-data; name="Service_Tier"`, data: []byte("keep-case")},
 	)
-	result, err := sanitizeAndExtractRequestBody(body, contentType)
+	result, err := sanitizeAndExtractRequestBody(body, contentType, false)
 	require.NoError(t, err)
 	assert.False(t, result.Changed)
 	_, parts := parseMultipartTestBody(t, result.Body, contentType)

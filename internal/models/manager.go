@@ -294,6 +294,7 @@ type Manager struct {
 	staticModelRealNames         map[string]string            // immutable snapshot of global real names from config.yaml
 	staticModelRealNamesPerCred  map[string]map[string]string // immutable snapshot of per-credential real names: credential -> alias -> real name
 	modelPassthroughResponses    map[string]*bool             // model name -> explicit passthrough_responses override (nil = auto)
+	modelPassthroughMessages     map[string]*bool             // model name -> explicit passthrough_messages override (nil = provider default)
 	dynamicModelWeights          map[string]map[string]int    // model ID -> credential -> weight learned from upstream /health
 	dynamicModelScopes           map[string]map[string]ScopeMetadata
 	dbModelNames                 map[string]bool              // model names that were loaded from LiteLLM DB (for hot-reload diffing)
@@ -333,6 +334,7 @@ func New(logger *slog.Logger, defaultModelsRPM int, staticModels []config.ModelR
 		modelRealNames:              make(map[string]string),
 		modelRealNamesPerCred:       make(map[string]map[string]string),
 		modelPassthroughResponses:   make(map[string]*bool),
+		modelPassthroughMessages:    make(map[string]*bool),
 		dynamicModelWeights:         make(map[string]map[string]int),
 		dynamicModelScopes:          make(map[string]map[string]ScopeMetadata),
 		defaultModelsRPM:            defaultModelsRPM,
@@ -376,6 +378,12 @@ func New(logger *slog.Logger, defaultModelsRPM int, staticModels []config.ModelR
 				m.modelPassthroughResponses[staticModel.Name] = staticModel.PassthroughResponses
 				logger.Debug("Registered passthrough_responses override",
 					"model", staticModel.Name, "value", *staticModel.PassthroughResponses)
+			}
+			// Register explicit passthrough_messages override if set
+			if staticModel.PassthroughMessages != nil {
+				m.modelPassthroughMessages[staticModel.Name] = staticModel.PassthroughMessages
+				logger.Debug("Registered passthrough_messages override",
+					"model", staticModel.Name, "value", *staticModel.PassthroughMessages)
 			}
 			logger.Debug("Added static model from config.yaml",
 				"model", staticModel.Name,
@@ -581,6 +589,31 @@ func (m *Manager) HasPassthroughResponsesOverride(modelID string) bool {
 	defer m.mu.RUnlock()
 	value, ok := m.modelPassthroughResponses[modelID]
 	return ok && value != nil
+}
+
+// IsPassthroughMessagesForProvider reports whether /v1/messages requests for modelID
+// on the given provider should be forwarded to the provider's native /v1/messages
+// endpoint as-is, instead of the Messages->Chat->Messages round trip.
+//
+// Priority:
+//  1. Explicit config override (passthrough_messages: true/false in models[])
+//  2. Provider default: true for Anthropic; true for CometAPI unless it's running in
+//     its OpenAI-compatible protocol mode (openai_proto), where /v1/messages already
+//     converts to the Chat Completions wire format it actually speaks; false otherwise.
+func (m *Manager) IsPassthroughMessagesForProvider(modelID string, providerType config.ProviderType, openAIProtocol bool) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if v, ok := m.modelPassthroughMessages[modelID]; ok && v != nil {
+		return *v
+	}
+	switch providerType {
+	case config.ProviderTypeAnthropic:
+		return true
+	case config.ProviderTypeCometAPI:
+		return !openAIProtocol
+	default:
+		return false
+	}
 }
 
 // SetCredentials sets the credentials for fetching remote models from proxies

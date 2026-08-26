@@ -9,6 +9,8 @@ import (
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/converter"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestTokenUsageExtractionOptionsForResponse(t *testing.T) {
@@ -254,6 +256,37 @@ func TestInjectStreamOptions_InvalidJSON(t *testing.T) {
 	if !bytes.Equal(modified, body) {
 		t.Fatalf("expected invalid json to be returned as-is")
 	}
+}
+
+// TestSanitizeAndExtractRequestBody_DoesNotInjectStreamOptionsForMessagesAPI guards
+// against a real production 400 ("stream_options: Extra inputs are not permitted"):
+// the ingress sanitizer's isResponsesAPI heuristic (hasInput && !hasMessages) treats
+// any streaming body with a "messages" field as Chat Completions and injects
+// stream_options — but a native Anthropic /v1/messages request also has "messages"
+// and has no stream_options concept at all, so it must be excluded explicitly.
+func TestSanitizeAndExtractRequestBody_DoesNotInjectStreamOptionsForMessagesAPI(t *testing.T) {
+	body := []byte(`{"model":"claude-opus-4-8","max_tokens":100,"stream":true,"messages":[{"role":"user","content":"hi"}]}`)
+
+	result, err := sanitizeAndExtractRequestBody(body, "application/json", true)
+	require.NoError(t, err)
+
+	var raw map[string]interface{}
+	require.NoError(t, json.Unmarshal(result.Body, &raw))
+	assert.NotContains(t, raw, "stream_options")
+}
+
+// TestSanitizeAndExtractRequestBody_InjectsStreamOptionsForChatCompletions is the
+// control case: the same shape (streaming, has "messages") on a Chat Completions
+// request (isMessagesAPI=false) still gets stream_options injected as before.
+func TestSanitizeAndExtractRequestBody_InjectsStreamOptionsForChatCompletions(t *testing.T) {
+	body := []byte(`{"model":"gpt-4","stream":true,"messages":[{"role":"user","content":"hi"}]}`)
+
+	result, err := sanitizeAndExtractRequestBody(body, "application/json", false)
+	require.NoError(t, err)
+
+	var raw map[string]interface{}
+	require.NoError(t, json.Unmarshal(result.Body, &raw))
+	assert.Contains(t, raw, "stream_options")
 }
 
 // TestExtractTokenUsageFromPayloads_BatchedSSEMergesUsage reproduces a
