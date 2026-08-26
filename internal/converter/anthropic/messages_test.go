@@ -48,6 +48,53 @@ func TestOpenAIToAnthropic_AdaptiveThinkingDisplay(t *testing.T) {
 	}
 }
 
+func TestOpenAIToAnthropic_ResponseFormatJSONSchemaIncludesSchema(t *testing.T) {
+	result, err := OpenAIToAnthropic([]byte(`{
+		"model":"claude-sonnet-4-6",
+		"messages":[{"role":"user","content":"Where do you live?"}],
+		"response_format":{
+			"type":"json_schema",
+			"json_schema":{
+				"name":"location_info",
+				"schema":{
+					"type":"object",
+					"properties":{"city":{"type":"string"}},
+					"required":["city"]
+				},
+				"strict":true
+			}
+		}
+	}`), "claude-sonnet-4-6", true)
+	require.NoError(t, err)
+
+	var request map[string]interface{}
+	require.NoError(t, json.Unmarshal(result, &request))
+	system, ok := request["system"].(string)
+	require.True(t, ok, "system prompt must be a string carrying the JSON instruction")
+
+	// The model must see the actual field name from the schema, not just a
+	// generic "respond with JSON" instruction - otherwise it invents its own
+	// field names (observed: "location" instead of the schema's "city").
+	assert.Contains(t, system, `"city"`)
+	assert.Contains(t, system, `"required"`)
+	assert.Contains(t, system, "no markdown code fences")
+}
+
+func TestOpenAIToAnthropic_ResponseFormatJSONObjectForbidsMarkdownFences(t *testing.T) {
+	result, err := OpenAIToAnthropic([]byte(`{
+		"model":"claude-sonnet-4-6",
+		"messages":[{"role":"user","content":"test"}],
+		"response_format":{"type":"json_object"}
+	}`), "claude-sonnet-4-6", true)
+	require.NoError(t, err)
+
+	var request map[string]interface{}
+	require.NoError(t, json.Unmarshal(result, &request))
+	system, ok := request["system"].(string)
+	require.True(t, ok)
+	assert.Contains(t, system, "no markdown code fences")
+}
+
 func TestOpenAIToAnthropic_ReasoningEffortPrecedence(t *testing.T) {
 	result, err := OpenAIToAnthropic([]byte(`{
 		"model":"claude-opus-5",

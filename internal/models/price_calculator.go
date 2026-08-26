@@ -197,7 +197,17 @@ func CalculateTokenCosts(usage *converter.TokenUsage, price *ModelPrice) *conver
 		costs.InputCost = float64(regularInputTokens) * inputCostPerToken
 	}
 
-	regularOutputTokens := completionTokens - audioOutputTokens - reasoningTokens -
+	// Reasoning tokens are subtracted back out here because, by default,
+	// CompletionTokens already includes them (see ModelPrice.ReasoningTokensAdditive
+	// doc comment). Providers that report reasoning on top of CompletionTokens
+	// instead (ReasoningTokensAdditive=true) must skip this subtraction, or these
+	// tokens would be double-excluded: once here and once by never having been
+	// part of CompletionTokens to begin with.
+	reasoningTokensToSubtract := reasoningTokens
+	if price.ReasoningTokensAdditive {
+		reasoningTokensToSubtract = 0
+	}
+	regularOutputTokens := completionTokens - audioOutputTokens - reasoningTokensToSubtract -
 		acceptedPredictionTokens - rejectedPredictionTokens - outputImageTokens
 	// Explicit text tokens, when smaller, cap the derived value (see doc comment above).
 	if outputTextTokens > 0 && outputTextTokens < regularOutputTokens {

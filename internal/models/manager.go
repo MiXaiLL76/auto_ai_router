@@ -71,6 +71,17 @@ type ModelPrice struct {
 	// Reasoning tokens (deep thinking models)
 	OutputCostPerReasoningToken float64 `json:"output_cost_per_reasoning_token,omitempty"`
 
+	// ReasoningTokensAdditive selects which reasoning-token counting semantics
+	// this model's upstream uses. Default (false) is "included": ReasoningTokens
+	// is already part of CompletionTokens, as OpenAI o-series and GLM report it
+	// (CalculateTokenCosts subtracts it back out before pricing the regular
+	// output tokens, then prices it again at the reasoning rate). true is
+	// "additive": the upstream reports ReasoningTokens on top of CompletionTokens
+	// (observed on Grok), so it must not be subtracted from CompletionTokens when
+	// deriving regular output tokens, or those tokens would be priced as neither
+	// output nor reasoning. Defaults to false so existing models are unaffected.
+	ReasoningTokensAdditive bool `json:"reasoning_tokens_additive,omitempty"`
+
 	// Cached/Prediction tokens
 	OutputCostPerCachedToken                     float64 `json:"output_cost_per_cached_token,omitempty"`
 	InputCostPerCachedToken                      float64 `json:"input_cost_per_cached_token,omitempty"`

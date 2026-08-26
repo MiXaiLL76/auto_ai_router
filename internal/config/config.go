@@ -550,6 +550,21 @@ type Fail2BanConfig struct {
 	BanDuration    time.Duration         `yaml:"ban_duration,omitempty"`
 	ErrorCodes     []int                 `yaml:"error_codes,omitempty"`
 	ErrorCodeRules []ErrorCodeRuleConfig `yaml:"error_code_rules,omitempty"`
+
+	// CredentialOverrides replaces error_codes/error_code_rules for one
+	// specific credential, keyed by CredentialConfig.Name. Use this when a
+	// single upstream behind a credential signals failure differently from
+	// the rest of the pool (e.g. a reseller returning 400 instead of 429/5xx
+	// on a blocked account) — without it, banning on that code globally would
+	// also ban unrelated credentials on an ordinary bad client request.
+	CredentialOverrides map[string]ErrorCodeOverrideConfig `yaml:"credential_overrides,omitempty"`
+}
+
+// ErrorCodeOverrideConfig is the per-credential form of Fail2BanConfig's
+// error_codes/error_code_rules — same shape, scoped to one credential.
+type ErrorCodeOverrideConfig struct {
+	ErrorCodes     []int                 `yaml:"error_codes,omitempty"`
+	ErrorCodeRules []ErrorCodeRuleConfig `yaml:"error_code_rules,omitempty"`
 }
 
 // UnmarshalYAML implements custom unmarshaling for ServerConfig with env variable support
@@ -1296,10 +1311,11 @@ func (k *KafkaConfig) UnmarshalYAML(value *yaml.Node) error {
 func (f *Fail2BanConfig) UnmarshalYAML(value *yaml.Node) error {
 	// Create a temporary struct with string ban_duration
 	type tempConfig struct {
-		MaxAttempts    string                `yaml:"max_attempts,omitempty"`
-		BanDuration    string                `yaml:"ban_duration,omitempty"`
-		ErrorCodes     []int                 `yaml:"error_codes,omitempty"`
-		ErrorCodeRules []ErrorCodeRuleConfig `yaml:"error_code_rules,omitempty"`
+		MaxAttempts         string                             `yaml:"max_attempts,omitempty"`
+		BanDuration         string                             `yaml:"ban_duration,omitempty"`
+		ErrorCodes          []int                              `yaml:"error_codes,omitempty"`
+		ErrorCodeRules      []ErrorCodeRuleConfig              `yaml:"error_code_rules,omitempty"`
+		CredentialOverrides map[string]ErrorCodeOverrideConfig `yaml:"credential_overrides,omitempty"`
 	}
 	var err error
 	var temp tempConfig
@@ -1325,6 +1341,7 @@ func (f *Fail2BanConfig) UnmarshalYAML(value *yaml.Node) error {
 	}
 
 	f.ErrorCodeRules = temp.ErrorCodeRules
+	f.CredentialOverrides = temp.CredentialOverrides
 
 	return nil
 }
@@ -1670,6 +1687,17 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("fail2ban: duplicate error_code_rules for code %d", rule.Code)
 		}
 		seenErrorCodes[rule.Code] = true
+	}
+
+	// Validate each credential's error_code_rules override for duplicates
+	for credName, override := range c.Fail2Ban.CredentialOverrides {
+		seen := make(map[int]bool)
+		for _, rule := range override.ErrorCodeRules {
+			if seen[rule.Code] {
+				return fmt.Errorf("fail2ban: duplicate error_code_rules for code %d in credential_overrides[%s]", rule.Code, credName)
+			}
+			seen[rule.Code] = true
+		}
 	}
 
 	for i, cred := range c.Credentials {

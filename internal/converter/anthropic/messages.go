@@ -121,11 +121,14 @@ func OpenAIToAnthropic(openAIBody []byte, model string, isRealAnthropicBackend b
 	}
 
 	// Anthropic has no native response_format; we inject a JSON instruction
-	// into the system prompt when the caller requests JSON output.
+	// into the system prompt when the caller requests JSON output. When a
+	// json_schema is present, the schema itself is serialized into the
+	// instruction — without it, Claude never sees the required field
+	// names/types and invents plausible-looking ones instead.
 	if req.ResponseFormat != nil {
 		if rfMap, ok := req.ResponseFormat.(map[string]interface{}); ok {
 			if rfType, _ := rfMap["type"].(string); rfType == "json_object" || rfType == "json_schema" {
-				jsonInstruction := "\n\nYou must respond with valid JSON only. Do not include any text outside of the JSON object."
+				jsonInstruction := buildJSONResponseInstruction(rfMap, rfType)
 				if systemContent, ok := anthropicReq.System.(string); ok {
 					anthropicReq.System = systemContent + jsonInstruction
 				} else if anthropicReq.System == nil {
@@ -187,6 +190,30 @@ func OpenAIToAnthropic(openAIBody []byte, model string, isRealAnthropicBackend b
 	}
 
 	return json.Marshal(anthropicReq)
+}
+
+// buildJSONResponseInstruction builds the system-prompt substitute for
+// OpenAI's response_format, which Anthropic has no native equivalent for.
+// For json_schema, the schema is serialized verbatim so the model has the
+// actual field names/types/required list to follow, not just "return JSON".
+func buildJSONResponseInstruction(rfMap map[string]interface{}, rfType string) string {
+	const noMarkdown = " Respond with raw JSON only: no markdown code fences (no ``` before or after " +
+		"the JSON), no commentary, no text outside the JSON object."
+
+	if rfType == "json_schema" {
+		if jsonSchema, ok := rfMap["json_schema"].(map[string]interface{}); ok {
+			if schema := jsonSchema["schema"]; schema != nil {
+				if schemaBytes, err := json.Marshal(schema); err == nil {
+					return "\n\nYour response must be valid JSON that strictly conforms to this JSON Schema:\n" +
+						string(schemaBytes) +
+						"\nUse exactly the field names, types, and required fields the schema defines." +
+						noMarkdown
+				}
+			}
+		}
+	}
+
+	return "\n\nYou must respond with valid JSON only." + noMarkdown
 }
 
 func openAIReasoningEffort(req openai.OpenAIRequest) string {

@@ -591,6 +591,16 @@ func initializeBalancer(
 	f2b := fail2ban.NewWithRules(cfg.Fail2Ban.MaxAttempts, cfg.Fail2Ban.BanDuration,
 		cfg.Fail2Ban.ErrorCodes, rules)
 	f2b.SetLogger(log)
+	if len(cfg.Fail2Ban.CredentialOverrides) > 0 {
+		overrides := make(map[string]fail2ban.CredentialOverride, len(cfg.Fail2Ban.CredentialOverrides))
+		for name, override := range cfg.Fail2Ban.CredentialOverrides {
+			overrides[name] = fail2ban.CredentialOverride{
+				ErrorCodes:     override.ErrorCodes,
+				ErrorCodeRules: convertFailBanRules(override.ErrorCodeRules, cfg.Fail2Ban.BanDuration, log),
+			}
+		}
+		f2b.SetCredentialOverrides(overrides)
+	}
 
 	var rateLimiter *ratelimit.RPMLimiter
 	var hybridBackend *ratelimit.HybridBackend

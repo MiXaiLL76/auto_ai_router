@@ -45,3 +45,4 @@ _LiteLLM_*.csv
 Locust_*.html
 air_mock_*.json
 mock-go
+router-api-pytest-*
