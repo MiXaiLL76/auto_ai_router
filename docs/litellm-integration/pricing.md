@@ -1,13 +1,23 @@
 # Model Pricing
 
-Auto AI Router supports per-model cost calculation for spend logging. Prices are loaded from a JSON file or remote URL at startup and merged with any prices stored in the LiteLLM database.
+Auto AI Router supports per-model cost calculation for spend logging. Prices are loaded from a JSON file or remote URL at startup, refreshed periodically in the background, and merged with any prices stored in the LiteLLM database.
 
 ## Configuration
 
 ```yaml
 server:
   model_prices_link: "file://price.json"
+  model_prices_sync_interval: 5m  # optional, default 5m
 ```
+
+| Setting                             | Type     | Default | Description                                                 |
+| ----------------------------------- | -------- | ------- | ----------------------------------------------------------- |
+| `server.model_prices_link`          | string   | —       | Source of the price file. Empty disables file-based pricing |
+| `server.model_prices_sync_interval` | duration | `5m`    | How often the source is re-read after startup               |
+
+Both settings support `os.environ/VAR_NAME` substitution.
+
+Accepted values for `model_prices_link`:
 
 | Value                                                                                         | Description                   |
 | --------------------------------------------------------------------------------------------- | ----------------------------- |
@@ -17,6 +27,41 @@ server:
 | `https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json` | LiteLLM's upstream prices     |
 
 The file must be valid JSON and must not exceed 100 MB.
+
+### Refresh interval
+
+Prices are read once at startup and then re-read in the background every `model_prices_sync_interval`. Set it to any Go duration string:
+
+```yaml
+server:
+  model_prices_link: "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
+  model_prices_sync_interval: 1h  # 30s, 15m, 1h, 24h ...
+```
+
+Behaviour:
+
+- The interval applies only when `model_prices_link` is set. With an empty link no sync loop is started.
+- The startup load happens immediately and does not wait for the first tick.
+- A failed refresh (unreachable URL, unreadable file, invalid JSON) is logged as a warning and the previously loaded prices stay in the registry. The next tick retries.
+- A successful refresh replaces the whole registry atomically; in-flight requests keep using the prices they already resolved.
+- A missing or non-positive value falls back to the `5m` default.
+
+Choosing a value:
+
+| Source                                | Suggested interval | Rationale                                                                            |
+| ------------------------------------- | ------------------ | ------------------------------------------------------------------------------------ |
+| Local file mounted into the container | `5m` (default)     | Cheap to re-read; picks up edits without a restart                                   |
+| Local file updated by an external job | `30s` – `1m`       | Shortens the window in which spend is logged with stale prices                       |
+| Remote HTTPS URL (own infrastructure) | `5m` – `15m`       | Balances freshness against request volume against the price host                     |
+| LiteLLM's upstream GitHub JSON        | `1h` – `24h`       | The file changes rarely, and frequent polling risks rate limiting on the remote host |
+
+The effective interval is printed at startup:
+
+```
+26.08.26 10:15:03 [INFO] » Using model prices from link=file://price.json sync_interval=5m0s
+```
+
+Each successful refresh is logged at `debug` level (`Model prices updated`), so raise `server.logging_level` to `debug` when verifying that a new price file is actually picked up.
 
 ## Price File Format
 
@@ -242,10 +287,13 @@ Loading is handled by `internal/models/price_loader.go`:
    - `"vertex_ai/gemini-2.5-pro"` → `"gemini-2.5-pro"`
    - If two keys normalise to the same string, the last one wins and a warning is logged.
 4. The resulting map is stored in a `ModelPriceRegistry` (thread-safe, `sync.RWMutex`).
+5. A background goroutine repeats steps 1-4 every `server.model_prices_sync_interval` until shutdown — see [Refresh interval](#refresh-interval).
 
 ### DB price merging
 
 When the LiteLLM database is enabled, prices defined in `LiteLLM_ModelTable` are merged on top of the file-based registry via `MergeDB`. Database prices take precedence for any model that appears in both sources. The file-based prices remain intact for all other models.
+
+Two independent loops write to the registry: the price-file refresh (`server.model_prices_sync_interval`, default `5m`) replaces the whole map, while the DB model-table sync (`litellm_db.db_model_sync_interval`, default `1m`) merges DB prices back on top. A model that exists only in the database is therefore absent from the registry between a file refresh and the next DB sync. With spend logging enabled such a request is rejected with `503 Model pricing unavailable`, so keep `model_prices_sync_interval` at or above `db_model_sync_interval` when DB-only models are in use.
 
 Cache writes are read from `cache_creation_tokens` or the OpenAI-compatible `cache_write_tokens` alias in both Chat Completions and Responses API usage objects.
 Anthropic's `cache_creation_token_details` (`ephemeral_5m_input_tokens` and `ephemeral_1h_input_tokens`) is preserved in spend-log metadata while the existing aggregate cache-creation token columns remain backward-compatible. Gemini cached-audio counts are taken from `cacheTokensDetails` when the provider supplies a modality breakdown.

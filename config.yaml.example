@@ -17,6 +17,7 @@ server:
   credential_name_as_team_id: false  # Use provider credential name as team_id when auth has no team_id (default: false)
   tiktoken_enabled: true  # Local fallback token estimation when a provider omits usage (default: true)
   model_prices_link: ""  # Optional: URL or file path to model prices JSON (supports os.environ/VAR_NAME)
+  model_prices_sync_interval: 5m  # How often model prices are re-fetched from model_prices_link (default: 5m)
   response_headers:
     mode: passthrough  # Use allowlist to expose only standard response metadata
 
