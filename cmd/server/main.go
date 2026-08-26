@@ -1194,6 +1194,7 @@ func startProxyStatsUpdater(
 	// arrive before credentialModels is populated, causing HasModel to fall through
 	// to the permissive fallback and routing requests to the wrong proxy.
 	modelupdate.UpdateAllProxyCredentials(bgCtx, bal, rateLimiter, log, modelManager, updateMutex)
+	updateFromRemoteHealth(bgCtx, bal, rateLimiter, log, modelManager, updateMutex)
 
 	wg.Add(1)
 	go func() {
@@ -1208,11 +1209,32 @@ func startProxyStatsUpdater(
 				return
 			case <-ticker.C:
 				modelupdate.UpdateAllProxyCredentials(bgCtx, bal, rateLimiter, log, modelManager, updateMutex)
+				updateFromRemoteHealth(bgCtx, bal, rateLimiter, log, modelManager, updateMutex)
 			}
 		}
 	}()
 
 	log.Info("Proxy stats updater started (updates every 30 seconds)")
+}
+
+// updateFromRemoteHealth is the proxy.UpdateAllFromRemoteHealth call, guarded by the
+// same updateMutex modelupdate.UpdateAllProxyCredentials uses — both write into the
+// shared rateLimiter/modelManager state, so they should not interleave. Called right
+// after modelupdate so that an upstream Auto AI Router's own self-reported /health
+// limits (more accurate, live) win over modelupdate's locally-configured rpm/tpm
+// fallback for the same (credential, model) pair — see the priority-propagation
+// entry in todo_round_robin.md for why this ordering was chosen and what to verify.
+func updateFromRemoteHealth(
+	ctx context.Context,
+	bal *balancer.RoundRobin,
+	rateLimiter *ratelimit.RPMLimiter,
+	log *slog.Logger,
+	modelManager *models.Manager,
+	updateMutex *sync.Mutex,
+) {
+	updateMutex.Lock()
+	defer updateMutex.Unlock()
+	proxy.UpdateAllFromRemoteHealth(ctx, bal, rateLimiter, log, modelManager)
 }
 
 func startDBHealthMonitor(

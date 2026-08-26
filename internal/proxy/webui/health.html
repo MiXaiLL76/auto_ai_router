@@ -27,7 +27,7 @@
       <div class="spacer"></div>
       <label class="pill" style="display:flex;gap:6px;align-items:center;">
         <span>api key</span>
-        <input id="apiKeyInput" type="password" autocomplete="off" style="width:180px;background:transparent;border:0;color:inherit;outline:0;">
+        <input id="apiKeyInput" class="wf-apikey-input" type="password" autocomplete="off">
       </label>
       <button class="pill" id="saveApiKey">use key</button>
       <button class="pill" id="clearApiKey">clear</button>
@@ -53,7 +53,7 @@
       </div>
 
       <div class="wf-section-title">overview</div>
-      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:var(--sp-3);">
+      <div class="wf-stats-grid">
         <div class="wf-stat">
           <span class="label">credentials</span>
           <span class="val" id="statTotal">—</span>
@@ -74,42 +74,30 @@
       </div>
 
       <div class="wf-section-title" id="credTitle">credentials</div>
-      <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:var(--sp-3);" id="credsGrid"></div>
+      <div class="wf-stats-grid" id="credsGrid"></div>
 
-      <div class="wf-section-title" id="modelsTitle">active models</div>
-      <div class="wf-card" style="padding:0;">
-        <div style="display:flex;gap:var(--sp-1);padding:var(--sp-2);border-bottom:1px solid var(--line);">
-          <button class="wf-btn" id="sortName" onclick="sortModels('name',this)">sort by name</button>
-          <button class="wf-btn" id="sortRpm" onclick="sortModels('rpm',this)">sort by RPM</button>
-          <button class="wf-btn primary" id="sortTpm" onclick="sortModels('tpm',this)">sort by TPM</button>
-          <button class="wf-btn" id="sortWeight" onclick="sortModels('weight',this)">sort by weight</button>
-          <button class="wf-btn" id="sortCred" onclick="sortModels('credential',this)">sort by cred</button>
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:var(--sp-3);flex-wrap:wrap;margin-top:var(--sp-6);">
+        <div class="wf-section-title" id="modelsTitle" style="margin:0;">models by priority</div>
+        <div style="display:flex;gap:var(--sp-2);align-items:center;">
+          <input class="wf-input" id="modelFilter" type="text" placeholder="filter models…" autocomplete="off">
+          <button class="wf-btn primary" id="sortTraffic" onclick="setModelSort('traffic',this)">busiest first</button>
+          <button class="wf-btn" id="sortName" onclick="setModelSort('name',this)">by name</button>
         </div>
-        <table class="wf-table">
-          <thead>
-            <tr>
-              <th>model</th>
-              <th>credential</th>
-              <th style="width:90px;">weight</th>
-              <th style="width:200px;">RPM</th>
-              <th style="width:200px;">TPM</th>
-              <th>status</th>
-            </tr>
-          </thead>
-          <tbody id="modelsTbody"></tbody>
-        </table>
       </div>
+      <p class="wf-sub" style="margin:0 0 var(--sp-3);">one card per model · groups are priority tiers (ascending, lowest tried first) · cards are laid out busiest → quietest, top-left to bottom-right</p>
+      <div id="modelsGrid" class="wf-cards-grid"></div>
     </main>
   </div>
 
   <script>
     'use strict';
 
-    let currentSort = 'tpm';
-    let sortAsc = false;
     let countdownSecs = 30;
     let countdownTimer = null;
     let modelsData = {};
+    let credentialsData = {};
+    let modelFilterText = '';
+    let modelSortMode = 'traffic';
     const API_KEY_STORAGE = 'air:webui:api_key';
 
     // ── theme ──────────────────────────────────────────────────────────────────
@@ -145,15 +133,6 @@
       input.addEventListener('keydown', e => {
         if (e.key === 'Enter') document.getElementById('saveApiKey').click();
       });
-    }
-
-    // ── model family extraction ────────────────────────────────────────────────
-    function modelFamily(name) {
-      if (!name) return '?';
-      const slashIdx = name.indexOf('/');
-      if (slashIdx > 0) return name.slice(0, slashIdx);
-      const match = name.match(/^[a-zA-Z]+/);
-      return match ? match[0] : name.split('-')[0];
     }
 
     // ── formatting helpers ─────────────────────────────────────────────────────
@@ -235,7 +214,7 @@
 
         return `<div class="wf-card${bannedCls}">
       <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;margin-bottom:12px;">
-        <span style="font-size:13px;word-break:break-all;">${esc(name)}</span>
+        <span style="font-size:13px;overflow-wrap:anywhere;">${esc(name)}</span>
         <div style="display:flex;gap:3px;flex-wrap:wrap;justify-content:flex-end;flex-shrink:0;">${badges}</div>
       </div>
       ${errHtml}
@@ -253,80 +232,143 @@
       }).join('');
     }
 
-    // ── render models table ────────────────────────────────────────────────────
-    function renderModels(models) {
-      modelsData = models;
-      document.getElementById('modelsTitle').textContent =
-        `active models · ${Object.keys(models).length}`;
-      applySort();
+    // ── router/node label for a credential ─────────────────────────────────────
+    // Direct provider credentials serve locally; AIR/proxy credentials forward to
+    // another node — show that node's host instead of "local" so a cascade that
+    // crosses nodes (e.g. ru01 → ger01) is visible at a glance.
+    // The real (leaf) credential doing the work, when this row is relayed
+    // through a proxy/AIR credential — e.g. main sees credential="router2",
+    // real_credential="mock2"; showing "router2" everywhere would hide which
+    // actual provider credential is being iterated. Falls back to `credential`
+    // for a non-relayed row (real_credential is empty there).
+    function displayCredential(m) {
+      return m.real_credential || m.credential;
     }
 
-    function applySort() {
-      const entries = Object.entries(modelsData);
+    function routerLabel(credName) {
+      const c = credentialsData[credName];
+      if (!c) return '—';
+      if (c.type !== 'air' && c.type !== 'proxy') return 'local';
+      const host = String(c.base_url || '').replace(/^https?:\/\//, '').replace(/\/.*$/, '');
+      return host || 'local';
+    }
 
-      entries.sort(([, a], [, b]) => {
-        let av, bv;
-        switch (currentSort) {
-          case 'name':
-            av = modelFamily(a.model) + '\x00' + a.model.toLowerCase();
-            bv = modelFamily(b.model) + '\x00' + b.model.toLowerCase();
-            break;
-          case 'credential': av = a.credential.toLowerCase(); bv = b.credential.toLowerCase(); break;
-          case 'weight': av = a.weight || 1; bv = b.weight || 1; break;
-          case 'rpm': av = pct(a.current_rpm, a.limit_rpm); bv = pct(b.current_rpm, b.limit_rpm); break;
-          default: av = pct(a.current_tpm, a.limit_tpm); bv = pct(b.current_tpm, b.limit_tpm);
+    // A row is "live" if it can take traffic right now: not banned, and neither
+    // its RPM nor TPM budget is currently exhausted.
+    function isRowLive(m) {
+      if (m.is_banned) return false;
+      if (m.limit_rpm > 0 && m.current_rpm >= m.limit_rpm) return false;
+      if (m.limit_tpm > 0 && m.current_tpm >= m.limit_tpm) return false;
+      return true;
+    }
+
+    function rowStatusBadge(m) {
+      if (m.is_banned) {
+        const errCounts = m.error_code_counts || {};
+        const errStr = Object.entries(errCounts).map(([c, n]) => `${n}×${c}`).join(' ');
+        return badge('err', errStr ? `banned · ${errStr}` : 'banned');
+      }
+      if (!isRowLive(m)) return badge('warn', 'limit reached');
+      return badge('ok', 'live');
+    }
+
+    // ── group models by name, then by priority tier ─────────────────────────────
+    // /health omits `priority` (omitempty) when it's the default group, so a
+    // missing value means priority 0 — same "tried first" tier as an explicit 0.
+    function groupModels(models) {
+      const byModel = new Map();
+      for (const m of Object.values(models)) {
+        if (!byModel.has(m.model)) byModel.set(m.model, { model: m.model, rpm: 0, tpm: 0, rows: [] });
+        const entry = byModel.get(m.model);
+        entry.rpm += m.current_rpm || 0;
+        entry.tpm += m.current_tpm || 0;
+        entry.rows.push(m);
+      }
+
+      const cards = [];
+      for (const entry of byModel.values()) {
+        const byPriority = new Map();
+        for (const row of entry.rows) {
+          const p = row.priority || 0;
+          if (!byPriority.has(p)) byPriority.set(p, []);
+          byPriority.get(p).push(row);
         }
-        if (av < bv) return sortAsc ? -1 : 1;
-        if (av > bv) return sortAsc ? 1 : -1;
-        return 0;
+        const priorities = [...byPriority.keys()].sort((a, b) => a - b);
+        let activeAssigned = false;
+        const groups = priorities.map(p => {
+          const rows = byPriority.get(p).sort((a, b) => displayCredential(a).localeCompare(displayCredential(b)));
+          const groupLive = rows.some(isRowLive);
+          const isServing = groupLive && !activeAssigned;
+          if (groupLive) activeAssigned = true;
+          return { priority: p, rows, isServing };
+        });
+        cards.push({ model: entry.model, rpm: entry.rpm, tpm: entry.tpm, groups });
+      }
+      return cards;
+    }
+
+    // ── render models-by-priority card grid ──────────────────────────────────────
+    function renderModelCards() {
+      const cards = groupModels(modelsData);
+      document.getElementById('modelsTitle').textContent = `models by priority · ${cards.length}`;
+
+      const filter = modelFilterText.trim().toLowerCase();
+      let visible = filter ? cards.filter(c => c.model.toLowerCase().includes(filter)) : cards;
+
+      visible = visible.slice().sort((a, b) => {
+        if (modelSortMode === 'name') return a.model.localeCompare(b.model);
+        // busiest first: top-left → bottom-right in the grid's reading order.
+        return (b.rpm + b.tpm) - (a.rpm + a.tpm);
       });
 
-      const useGrouping = currentSort === 'name' || currentSort === 'credential';
-      let lastGroupKey = null;
-      const rows = [];
+      document.getElementById('modelsGrid').innerHTML = visible.map(card => {
+        const groupsHtml = card.groups.map(g => {
+          const label = g.priority === 0 ? 'priority 0 (default)' : `priority ${g.priority}`;
+          const state = g.isServing ? 'serving now' : (g.rows.some(isRowLive) ? 'standby' : 'exhausted');
+          const rowsHtml = g.rows.map(m => `<tr>
+        <td>${esc(displayCredential(m))}</td>
+        <td class="dim">${esc(routerLabel(m.credential))}</td>
+        <td class="muted">${fmtNum(m.weight || 1)}</td>
+        <td>${renderBar(m.current_rpm, m.limit_rpm)}</td>
+        <td>${renderBar(m.current_tpm, m.limit_tpm)}</td>
+        <td>${rowStatusBadge(m)}</td>
+      </tr>`).join('');
+          return `<tr class="group-header${g.isServing ? ' is-serving' : ''}"><td colspan="6">${esc(label)} · ${esc(state)}</td></tr>${rowsHtml}`;
+        }).join('');
 
-      for (const [, m] of entries) {
-        if (useGrouping) {
-          const groupKey = currentSort === 'credential'
-            ? m.credential
-            : modelFamily(m.model);
-          if (groupKey !== lastGroupKey) {
-            lastGroupKey = groupKey;
-            rows.push(`<tr class="group-header"><td colspan="6">${esc(groupKey)}</td></tr>`);
-          }
-        }
+        return `<div class="wf-card">
+      <div class="wf-card-head">
+        <span class="model-name">${esc(card.model)}</span>
+        ${badge('info', `${fmtNum(card.rpm)} rpm`)}
+      </div>
+      <table class="wf-table">
+        <thead>
+          <tr>
+            <th>credential</th>
+            <th>router</th>
+            <th>weight</th>
+            <th>RPM</th>
+            <th>TPM</th>
+            <th>status</th>
+          </tr>
+        </thead>
+        <tbody>${groupsHtml}</tbody>
+      </table>
+    </div>`;
+      }).join('');
 
-        const errCounts = m.error_code_counts || {};
-        let statusBadge;
-        if (m.is_banned) {
-          const errStr = Object.entries(errCounts).map(([c, n]) => `${n}×${c}`).join(' ');
-          statusBadge = badge('err', errStr ? `banned · ${errStr}` : 'banned');
-        } else {
-          statusBadge = badge('ok', 'ok');
-        }
-        rows.push(`<tr>
-      <td>${esc(m.model)}</td>
-      <td class="muted">${esc(m.credential)}</td>
-      <td class="muted">${fmtNum(m.weight || 1)}</td>
-      <td>${renderBar(m.current_rpm, m.limit_rpm)}</td>
-      <td>${renderBar(m.current_tpm, m.limit_tpm)}</td>
-      <td>${statusBadge}</td>
-    </tr>`);
+      if (visible.length === 0) {
+        document.getElementById('modelsGrid').innerHTML = cards.length === 0
+          ? `<p class="wf-sub">no active models</p>`
+          : `<p class="wf-sub">no models match “${esc(filter)}”</p>`;
       }
-
-      document.getElementById('modelsTbody').innerHTML = rows.join('');
     }
 
-    function sortModels(type, btn) {
-      if (currentSort === type) {
-        sortAsc = !sortAsc;
-      } else {
-        sortAsc = (type === 'name' || type === 'credential');
-        currentSort = type;
-      }
-      document.querySelectorAll('.wf-btn[id^="sort"]').forEach(b => b.classList.remove('primary'));
+    function setModelSort(mode, btn) {
+      modelSortMode = mode;
+      document.querySelectorAll('#sortTraffic, #sortName').forEach(b => b.classList.remove('primary'));
       if (btn) btn.classList.add('primary');
-      applySort();
+      renderModelCards();
     }
 
     // ── data loading ───────────────────────────────────────────────────────────
@@ -335,7 +377,11 @@
 
       try {
         const resp = await fetch('/health', { headers: authHeaders() });
-        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        // /health returns a real body (and a real status: "degraded"/"unhealthy") even
+        // on a non-2xx status — that's exactly the state this dashboard exists to show
+        // (e.g. every credential currently banned), so render it instead of discarding
+        // it as an error. A non-JSON response (network failure, wrong auth proxy, etc.)
+        // still falls through to the catch block below via the resp.json() parse failure.
         const data = await resp.json();
 
         // version from header (added by router)
@@ -361,7 +407,7 @@
         const total = data.total_credentials ?? 0;
         const avail = data.credentials_available ?? 0;
         const banned = data.credentials_banned ?? 0;
-        const nModels = Object.keys(data.models || {}).length;
+        const nModels = new Set(Object.values(data.models || {}).map(m => m.model)).size;
         document.getElementById('statTotal').textContent = String(total).padStart(2, '0');
         document.getElementById('statAvail').textContent = String(avail).padStart(2, '0');
         document.getElementById('statBanned').textContent = String(banned).padStart(2, '0');
@@ -370,7 +416,9 @@
           total > 0 ? `${Math.round((avail / total) * 100)}% up` : '';
 
         renderCreds(data.credentials || {});
-        renderModels(data.models || {});
+        credentialsData = data.credentials || {};
+        modelsData = data.models || {};
+        renderModelCards();
       } catch (e) {
         document.getElementById('subtitle').textContent = `error: ${e.message}`;
       }
@@ -391,6 +439,11 @@
 
     document.addEventListener('keydown', e => {
       if ((e.key === 'r' || e.key === 'R') && !e.ctrlKey && !e.metaKey) load();
+    });
+
+    document.getElementById('modelFilter').addEventListener('input', e => {
+      modelFilterText = e.target.value;
+      renderModelCards();
     });
 
     initApiKeyControls();

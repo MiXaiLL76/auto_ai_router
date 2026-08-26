@@ -37,7 +37,13 @@ type CredentialHealthStats struct {
 
 // ModelHealthStats represents health stats for a single model
 type ModelHealthStats struct {
-	Credential      string            `json:"credential"`
+	Credential string `json:"credential"`
+	// RealCredential is the actual leaf credential serving this model behind a
+	// proxy/AIR credential (e.g. Credential="router2", RealCredential="mock2"),
+	// learned from that upstream's own /health response. Empty when Credential
+	// already is the real one (not a proxy/AIR relay) — display code should
+	// fall back to Credential in that case. Display-only, never used for routing.
+	RealCredential  string            `json:"real_credential,omitempty"`
 	Model           string            `json:"model"`
 	IsBanned        bool              `json:"is_banned"`
 	Weight          int               `json:"weight"`

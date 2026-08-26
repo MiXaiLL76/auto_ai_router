@@ -240,16 +240,19 @@ func (p *Proxy) addModelHealthStats(
 	credWeight := credentialWeight(creds, credentialName)
 	credPriority := credentialPriority(creds, credentialName)
 	modelWeight := 0
+	realCredential := ""
 	if p.modelManager != nil {
 		modelWeight = p.modelManager.GetModelWeightForCredential(modelID, credentialName)
+		realCredential = p.modelManager.GetModelSourceCredentialForCredential(modelID, credentialName)
 	}
 	ms := stats[modelKey]
 	scopes, deniedScopes := expression.LegacyProjection()
 	modelsInfo[modelKey] = httputil.ModelHealthStats{
-		Credential: credentialName,
-		Model:      modelID,
-		IsBanned:   p.balancer.IsBanned(credentialName, modelID),
-		Weight:     balancer.EffectiveWeight(modelWeight, credWeight),
+		Credential:     credentialName,
+		RealCredential: realCredential,
+		Model:          modelID,
+		IsBanned:       p.balancer.IsBanned(credentialName, modelID),
+		Weight:         balancer.EffectiveWeight(modelWeight, credWeight),
 		// Per-model priority override is intentionally not modeled yet (see
 		// httputil.EffectiveHealthPriority) — Priority is a direct copy of the
 		// owning credential's EffectivePriority().

@@ -1,0 +1,55 @@
+# Requires ghcr.io/mixaill76/auto_ai_router:latest to already exist locally —
+# build it from the repo root first: `make docker-build` (tag/retag to this
+# name if your local make target produces a different one). This file never
+# builds it itself, so re-run that build after any code change before
+# `docker compose up` picks it up.
+services:
+  mock:
+    image: nginx:alpine
+    volumes:
+      - ./mock/nginx.conf:/etc/nginx/nginx.conf:ro
+    networks: [chain]
+
+  router2:
+    image: ghcr.io/mixaill76/auto_ai_router:latest
+    volumes:
+      - ./router2/config.yaml:/app/config.yaml:ro
+    ports:
+      - "8082:8080"
+    depends_on: [mock]
+    networks: [chain]
+    restart: unless-stopped
+
+  router3:
+    image: ghcr.io/mixaill76/auto_ai_router:latest
+    volumes:
+      - ./router3/config.yaml:/app/config.yaml:ro
+    ports:
+      - "8083:8080"
+    depends_on: [mock]
+    networks: [chain]
+    restart: unless-stopped
+
+  router4:
+    image: ghcr.io/mixaill76/auto_ai_router:latest
+    volumes:
+      - ./router4/config.yaml:/app/config.yaml:ro
+    ports:
+      - "8084:8080"
+    depends_on: [mock]
+    networks: [chain]
+    restart: unless-stopped
+
+  main:
+    image: ghcr.io/mixaill76/auto_ai_router:latest
+    volumes:
+      - ./main/config.yaml:/app/config.yaml:ro
+    ports:
+      - "8080:8080"
+    depends_on: [router2, router3, router4]
+    networks: [chain]
+    restart: unless-stopped
+
+networks:
+  chain:
+    driver: bridge

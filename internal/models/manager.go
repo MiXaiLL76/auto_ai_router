@@ -297,6 +297,7 @@ type Manager struct {
 	modelPassthroughMessages     map[string]*bool             // model name -> explicit passthrough_messages override (nil = provider default)
 	dynamicModelWeights          map[string]map[string]int    // model ID -> credential -> weight learned from upstream /health
 	dynamicModelPriorities       map[string]map[string]int    // model ID -> credential -> priority learned from upstream /health
+	dynamicModelSourceCreds      map[string]map[string]string // model ID -> local (proxy/AIR) credential -> real upstream credential name learned from /health
 	dynamicModelScopes           map[string]map[string]ScopeMetadata
 	dbModelNames                 map[string]bool              // model names that were loaded from LiteLLM DB (for hot-reload diffing)
 	modelAliases                 map[string]string            // alias -> real model name (from model_alias config)
@@ -338,6 +339,7 @@ func New(logger *slog.Logger, defaultModelsRPM int, staticModels []config.ModelR
 		modelPassthroughMessages:    make(map[string]*bool),
 		dynamicModelWeights:         make(map[string]map[string]int),
 		dynamicModelPriorities:      make(map[string]map[string]int),
+		dynamicModelSourceCreds:     make(map[string]map[string]string),
 		dynamicModelScopes:          make(map[string]map[string]ScopeMetadata),
 		defaultModelsRPM:            defaultModelsRPM,
 		logger:                      logger,
@@ -2157,6 +2159,76 @@ func (m *Manager) replaceModelPrioritiesForCredentialLocked(credentialName strin
 		}
 		m.dynamicModelPriorities[modelID][credentialName] = priority
 	}
+}
+
+// SetModelSourceCredentialForCredential stores which real (leaf) credential is
+// actually serving a model behind a proxy/AIR credential, learned from that
+// upstream's own /health response (ModelHealthStats.Credential there). Purely
+// for display (e.g. the webui showing "mock2" instead of "router2" in the
+// credential column) — it never feeds routing decisions.
+func (m *Manager) SetModelSourceCredentialForCredential(modelID, credentialName, sourceCredential string) {
+	if modelID == "" || credentialName == "" {
+		return
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if sourceCredential == "" {
+		if creds, ok := m.dynamicModelSourceCreds[modelID]; ok {
+			delete(creds, credentialName)
+			if len(creds) == 0 {
+				delete(m.dynamicModelSourceCreds, modelID)
+			}
+		}
+		return
+	}
+
+	if m.dynamicModelSourceCreds[modelID] == nil {
+		m.dynamicModelSourceCreds[modelID] = make(map[string]string)
+	}
+	m.dynamicModelSourceCreds[modelID][credentialName] = sourceCredential
+}
+
+// ReplaceModelSourceCredentialsForCredential replaces all dynamic health-derived
+// source-credential names for a credential with a fresh upstream snapshot.
+func (m *Manager) ReplaceModelSourceCredentialsForCredential(credentialName string, sourceCredentials map[string]string) {
+	if credentialName == "" {
+		return
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	for modelID, creds := range m.dynamicModelSourceCreds {
+		delete(creds, credentialName)
+		if len(creds) == 0 {
+			delete(m.dynamicModelSourceCreds, modelID)
+		}
+	}
+
+	for modelID, sourceCredential := range sourceCredentials {
+		if modelID == "" || sourceCredential == "" {
+			continue
+		}
+		if m.dynamicModelSourceCreds[modelID] == nil {
+			m.dynamicModelSourceCreds[modelID] = make(map[string]string)
+		}
+		m.dynamicModelSourceCreds[modelID][credentialName] = sourceCredential
+	}
+}
+
+// GetModelSourceCredentialForCredential returns the real upstream credential name
+// learned for a (model, local credential) pair, or "" when nothing was learned
+// (e.g. credentialName isn't proxy-like, or no /health poll has landed yet).
+func (m *Manager) GetModelSourceCredentialForCredential(modelID, credentialName string) string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	if creds, ok := m.dynamicModelSourceCreds[modelID]; ok {
+		return creds[credentialName]
+	}
+	return ""
 }
 
 func (m *Manager) ReplaceModelScopesForCredential(credentialName string, scopes map[string]ScopeMetadata) {

@@ -4,7 +4,7 @@ services:
       context: .
       dockerfile: Dockerfile
 
-    image: ghcr.io/mixaill76/auto_ai_router:dev-latest
+    image: ghcr.io/mixaill76/auto_ai_router:latest
 
     deploy:
       replicas: 3

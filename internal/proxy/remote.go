@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"sync"
 
+	"github.com/mixaill76/auto_ai_router/internal/balancer"
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/httputil"
 	"github.com/mixaill76/auto_ai_router/internal/models"
@@ -21,12 +23,54 @@ type ModelManagerInterface interface {
 	ReplaceModelWeightsForCredential(credentialName string, weights map[string]int)
 	SetModelPriorityForCredential(modelID, credentialName string, priority int)
 	ReplaceModelPrioritiesForCredential(credentialName string, priorities map[string]int)
+	ReplaceModelSourceCredentialsForCredential(credentialName string, sourceCredentials map[string]string)
 	HasModel(credentialName, modelID string) bool
 }
 
 type modelScopeUpdater interface {
 	UpdateProviderScopesForCredential(credentialName string, metadata models.ScopeMetadata)
 	ReplaceModelScopesForCredential(credentialName string, scopes map[string]models.ScopeMetadata)
+}
+
+// UpdateAllFromRemoteHealth polls every proxy/AIR credential's own /health and syncs
+// weight, priority, limits, current usage, and (via ModelHealthStats.RealCredential)
+// which real leaf credential is actually serving each model — everything
+// UpdateStatsFromRemoteProxy/UpdateStatsFromHealth compute below.
+//
+// This is the counterpart to modelupdate.UpdateAllProxyCredentials, wired
+// alongside it in cmd/server/main.go's startProxyStatsUpdater, not a replacement for
+// it: that one discovers model *names* through a generic /v1/models-shaped call,
+// which works for any OpenAI-compatible upstream (type: proxy) whether or not it is
+// itself Auto AI Router. This one only has anything to sync when the upstream
+// exposes AIR's own /health JSON shape — for a plain type: proxy upstream that
+// doesn't, FetchHealthFromRemoteProxy's fetch just fails and is logged at Debug, so
+// calling this unconditionally for every proxy-like credential is safe.
+//
+// Until 2026-08-27 this whole sync path (UpdateStatsFromRemoteProxy and everything
+// under it) was fully implemented and tested but never called from production
+// wiring — see the priority-propagation entry in todo_round_robin.md for the story.
+func UpdateAllFromRemoteHealth(
+	ctx context.Context,
+	bal *balancer.RoundRobin,
+	rateLimiter *ratelimit.RPMLimiter,
+	logger *slog.Logger,
+	modelManager ModelManagerInterface,
+) {
+	credentials := bal.GetCredentialsSnapshot()
+
+	var wg sync.WaitGroup
+	for i := range credentials {
+		cred := &credentials[i]
+		if !cred.IsProxyLike() {
+			continue
+		}
+		wg.Add(1)
+		go func(c *config.CredentialConfig) {
+			defer wg.Done()
+			UpdateStatsFromRemoteProxy(ctx, c, rateLimiter, logger, modelManager)
+		}(cred)
+	}
+	wg.Wait()
 }
 
 // UpdateStatsFromRemoteProxy fetches and updates RPM/TPM limits from remote /health endpoint
@@ -269,6 +313,7 @@ func updateModelLimits(
 			modelManager.ReplaceModelsForCredential(cred.Name, nil)
 			modelManager.ReplaceModelWeightsForCredential(cred.Name, nil)
 			modelManager.ReplaceModelPrioritiesForCredential(cred.Name, nil)
+			modelManager.ReplaceModelSourceCredentialsForCredential(cred.Name, nil)
 		}
 		removedModels := removeStaleModelLimits(cred.Name, map[string]bool{}, rateLimiter)
 		if removedModels > 0 {
@@ -286,6 +331,11 @@ func updateModelLimits(
 	modelIDSet := make(map[string]bool, len(health.Models))
 	modelWeights := make(map[string]int)
 	modelPriorities := make(map[string]int)
+	// Display-only: which real upstream credential is serving each model. When
+	// several upstream credentials serve the same model behind this one proxy
+	// link, the last one seen wins — same simplification weight/priority
+	// aggregation already makes for "which one do we show," not a routing input.
+	modelSourceCreds := make(map[string]string)
 
 	for _, modelStats_data := range health.Models {
 		credStats, ok := health.Credentials[modelStats_data.Credential]
@@ -326,12 +376,16 @@ func updateModelLimits(
 		modelWeights[modelID] = aggregation.weight
 		aggregation.applyPriorityMin(priority)
 		modelPriorities[modelID] = aggregation.priority
+		if modelStats_data.Credential != "" {
+			modelSourceCreds[modelID] = modelStats_data.Credential
+		}
 	}
 
 	if modelManager != nil {
 		modelManager.ReplaceModelsForCredential(cred.Name, modelIDs)
 		modelManager.ReplaceModelWeightsForCredential(cred.Name, modelWeights)
 		modelManager.ReplaceModelPrioritiesForCredential(cred.Name, modelPriorities)
+		modelManager.ReplaceModelSourceCredentialsForCredential(cred.Name, modelSourceCreds)
 	}
 
 	// Update rate limiter with aggregated model limits

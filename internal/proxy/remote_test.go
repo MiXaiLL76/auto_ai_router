@@ -494,8 +494,9 @@ type MockModelManager struct {
 		credential string
 		model      string
 	}
-	weights    map[string]map[string]int
-	priorities map[string]map[string]int
+	weights     map[string]map[string]int
+	priorities  map[string]map[string]int
+	sourceCreds map[string]map[string]string
 }
 
 func NewMockModelManager() *MockModelManager {
@@ -505,8 +506,9 @@ func NewMockModelManager() *MockModelManager {
 			credential string
 			model      string
 		}, 0),
-		weights:    make(map[string]map[string]int),
-		priorities: make(map[string]map[string]int),
+		weights:     make(map[string]map[string]int),
+		priorities:  make(map[string]map[string]int),
+		sourceCreds: make(map[string]map[string]string),
 	}
 }
 
@@ -622,6 +624,35 @@ func (m *MockModelManager) ReplaceModelPrioritiesForCredential(credentialName st
 		}
 		m.priorities[modelID][credentialName] = priority
 	}
+}
+
+func (m *MockModelManager) ReplaceModelSourceCredentialsForCredential(credentialName string, sourceCredentials map[string]string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for modelID, creds := range m.sourceCreds {
+		delete(creds, credentialName)
+		if len(creds) == 0 {
+			delete(m.sourceCreds, modelID)
+		}
+	}
+	for modelID, sourceCredential := range sourceCredentials {
+		if sourceCredential == "" {
+			continue
+		}
+		if m.sourceCreds[modelID] == nil {
+			m.sourceCreds[modelID] = make(map[string]string)
+		}
+		m.sourceCreds[modelID][credentialName] = sourceCredential
+	}
+}
+
+func (m *MockModelManager) GetModelSourceCredentialForCredential(modelID, credentialName string) string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if creds, ok := m.sourceCreds[modelID]; ok {
+		return creds[credentialName]
+	}
+	return ""
 }
 
 func (m *MockModelManager) GetModelPriorityForCredential(modelID, credentialName string) int {
