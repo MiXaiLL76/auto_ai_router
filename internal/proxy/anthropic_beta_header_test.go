@@ -59,7 +59,13 @@ func TestProxyRequest_SendsAnthropicBetaAsHeader(t *testing.T) {
 	assert.Contains(t, w.Body.String(), `"reasoning_content":"reasoning"`)
 }
 
-func TestProxyRequest_DoesNotAddReasoningBetaHeaderToOtherProviders(t *testing.T) {
+// TestProxyRequest_SendsReasoningBetaAsHeaderForAnthropicFamily covers /v1/chat/completions
+// requests converted to Anthropic's wire format for a real Anthropic-compatible backend
+// (Anthropic, ProMan): the real Anthropic API rejects "anthropic_beta" as a body field
+// ("anthropic_beta: Extra inputs are not permitted"), so the synthesized effort-2025-11-24
+// beta — like any anthropic_beta — must always travel via the anthropic-beta HTTP header,
+// never left in the body.
+func TestProxyRequest_SendsReasoningBetaAsHeaderForAnthropicFamily(t *testing.T) {
 	for _, providerType := range []config.ProviderType{config.ProviderTypeAnthropic, config.ProviderTypeProMan} {
 		t.Run(string(providerType), func(t *testing.T) {
 			type capturedRequest struct {
@@ -96,10 +102,10 @@ func TestProxyRequest_DoesNotAddReasoningBetaHeaderToOtherProviders(t *testing.T
 
 			require.Equal(t, http.StatusOK, w.Code)
 			outbound := <-captured
-			assert.Empty(t, outbound.header)
+			assert.Equal(t, "effort-2025-11-24", outbound.header)
 			var body map[string]any
 			require.NoError(t, json.Unmarshal(outbound.body, &body))
-			assert.Equal(t, []any{"effort-2025-11-24"}, body["anthropic_beta"])
+			assert.NotContains(t, body, "anthropic_beta")
 		})
 	}
 }
@@ -144,14 +150,20 @@ func TestProxyRequest_ForwardsMessagesBetaAsHeader(t *testing.T) {
 
 			require.Equal(t, http.StatusOK, w.Code)
 			outbound := <-captured
-			assert.Equal(t, "client-beta,prompt-caching-2024-07-31", outbound.header)
 			var body map[string]any
 			require.NoError(t, json.Unmarshal(outbound.body, &body))
 			if providerType == config.ProviderTypeAnthropic {
-				assert.Equal(t, []any{"effort-2025-11-24"}, body["anthropic_beta"])
+				// Anthropic is passthrough-eligible by default (IsPassthroughMessagesForProvider):
+				// the request is forwarded natively, so the client's own body-level
+				// anthropic_beta survives (merged into the header) alongside the synthesized
+				// effort beta, instead of being discarded by the Messages->Chat->Messages
+				// round trip. The real Anthropic API rejects "anthropic_beta" as a body field
+				// outright, so ExtractBetaHeader must strip it from the body either way.
+				assert.Equal(t, "client-beta,prompt-caching-2024-07-31,effort-2025-11-24", outbound.header)
 			} else {
-				assert.NotContains(t, body, "anthropic_beta")
+				assert.Equal(t, "client-beta,prompt-caching-2024-07-31", outbound.header)
 			}
+			assert.NotContains(t, body, "anthropic_beta")
 		})
 	}
 }

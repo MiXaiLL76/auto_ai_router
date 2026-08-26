@@ -73,6 +73,26 @@ func mapThinkingConfig(thinking interface{}, reasoningEffort string, modelName s
 	return nil, nil
 }
 
+// applyThinkingSideEffects computes the max_tokens/anthropic_beta/temperature updates a
+// resolved thinking config (tc, oc as returned by mapThinkingConfig) requires. Shared by
+// OpenAIToAnthropic (messages.go) and NormalizeMessagesForPassthrough (messages_api.go) —
+// both already share mapThinkingConfig's resolution logic; this shares the "what follows
+// from that resolution" logic too, so a future change to Anthropic's thinking requirements
+// (a new required beta, a different temperature exception, ...) only needs updating here
+// instead of in two independently-maintained copies. Callers are responsible for writing
+// the returned values into whatever request representation they use (typed struct vs raw
+// JSON map) and for actually setting thinking/output_config themselves.
+func applyThinkingSideEffects(tc *AnthropicThinking, oc *AnthropicOutputConfig, maxTokens int, betas []string) (newMaxTokens int, newBetas []string, temperature float64) {
+	newMaxTokens = EnsureMaxTokensForThinking(maxTokens, tc)
+	newBetas = betas
+	if oc != nil {
+		// effort-based adaptive thinking requires the effort beta header
+		newBetas = appendBetaUnique(betas, "effort-2025-11-24")
+	}
+	// Anthropic requires temperature=1.0 when thinking is enabled.
+	return newMaxTokens, newBetas, 1.0
+}
+
 // appendBetaUnique appends s to slice only if it is not already present.
 func appendBetaUnique(slice []string, s string) []string {
 	for _, v := range slice {

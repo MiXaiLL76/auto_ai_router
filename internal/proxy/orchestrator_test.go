@@ -319,6 +319,98 @@ func TestPrepareRequestForCredential_MessagesProxyLikeCredentialKeepsNativeForma
 	require.False(t, prepared.convertedMessages)
 }
 
+func TestPrepareRequestForCredential_MessagesPassthroughForAnthropic(t *testing.T) {
+	prx := NewTestProxyBuilder().Build()
+	cred := config.CredentialConfig{Name: "anthropic", Type: config.ProviderTypeAnthropic, APIKey: "key", BaseURL: "http://anthropic.local", RPM: 100}
+	req := httptest.NewRequest("POST", "/v1/messages", nil)
+	// A document block referencing a provider-hosted file_id: MessagesToChat rejects this
+	// shape outright (no Chat Completions equivalent), but a real Anthropic Files API caller
+	// can use it — passthrough must forward it untouched instead of erroring.
+	body := []byte(`{"model":"claude-sonnet","max_tokens":100,"messages":[{"role":"user","content":[{"type":"document","source":{"type":"file","file_id":"file_abc"}}]}]}`)
+
+	prepared, err := prx.prepareRequestForCredential(
+		req,
+		body,
+		body,
+		"claude-alias",
+		"claude-sonnet",
+		"/v1/messages",
+		false,
+		&cred,
+		false,
+		false,
+		false,
+	)
+
+	require.NoError(t, err)
+	require.True(t, prepared.passthroughMessages)
+	require.True(t, prepared.convertedMessages)
+	require.Equal(t, "/v1/messages", prepared.path)
+	require.Contains(t, string(prepared.body), `"file_id":"file_abc"`)
+}
+
+func TestPrepareRequestForCredential_MessagesConvertedForCometAPIOpenAIProtocol(t *testing.T) {
+	prx := NewTestProxyBuilder().Build()
+	cred := config.CredentialConfig{Name: "comet", Type: config.ProviderTypeCometAPI, OpenAIProtocol: true, APIKey: "key", BaseURL: "http://comet.local", RPM: 100}
+	req := httptest.NewRequest("POST", "/v1/messages", nil)
+	body := []byte(`{"model":"claude-sonnet","max_tokens":100,"messages":[{"role":"user","content":"hello"}]}`)
+
+	prepared, err := prx.prepareRequestForCredential(
+		req,
+		body,
+		body,
+		"claude-alias",
+		"claude-sonnet",
+		"/v1/messages",
+		false,
+		&cred,
+		false,
+		false,
+		false,
+	)
+
+	require.NoError(t, err)
+	require.False(t, prepared.passthroughMessages)
+	require.True(t, prepared.convertedMessages)
+	require.Equal(t, "/v1/chat/completions", prepared.path)
+}
+
+func TestPrepareRequestForCredential_MessagesPassthroughDisabledByModelOverride(t *testing.T) {
+	logger := testhelpers.NewTestLogger()
+	cred := config.CredentialConfig{Name: "anthropic", Type: config.ProviderTypeAnthropic, APIKey: "key", BaseURL: "http://anthropic.local", RPM: 100}
+	disabled := false
+	mm := models.New(logger, 50, []config.ModelRPMConfig{
+		{Name: "claude-alias", PassthroughMessages: &disabled},
+	})
+	mm.LoadModelsFromConfig([]config.CredentialConfig{cred})
+
+	builder := NewTestProxyBuilder().WithCredentials(cred)
+	builder.config.ModelManager = mm
+	prx := builder.Build()
+
+	req := httptest.NewRequest("POST", "/v1/messages", nil)
+	body := []byte(`{"model":"claude-sonnet","max_tokens":100,"messages":[{"role":"user","content":"hello"}]}`)
+
+	prepared, err := prx.prepareRequestForCredential(
+		req,
+		body,
+		body,
+		"claude-alias",
+		"claude-sonnet",
+		"/v1/messages",
+		false,
+		&cred,
+		false,
+		false,
+		false,
+	)
+
+	require.NoError(t, err)
+	require.False(t, prepared.passthroughMessages)
+	require.True(t, prepared.convertedMessages)
+	require.Equal(t, "/v1/chat/completions", prepared.path)
+}
+
 func TestPrepareRequestForCredential_ResponsesRecomputesProviderMode(t *testing.T) {
 	logger := testhelpers.NewTestLogger()
 	openaiCred := config.CredentialConfig{Name: "openai", Type: config.ProviderTypeOpenAI, APIKey: "key", BaseURL: "http://openai.local", RPM: 100}

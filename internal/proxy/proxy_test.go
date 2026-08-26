@@ -559,7 +559,7 @@ func TestExtractModelFromBody(t *testing.T) {
 	// Additional check: Responses API streaming must NOT have stream_options
 	t.Run("responses API streaming must not inject stream_options", func(t *testing.T) {
 		body := `{"model": "gpt-5", "stream": true, "input": "Hello"}`
-		result, err := sanitizeAndExtractRequestBody([]byte(body), "application/json")
+		result, err := sanitizeAndExtractRequestBody([]byte(body), "application/json", false)
 		assert.NoError(t, err)
 		assert.True(t, result.Streaming)
 
@@ -573,7 +573,7 @@ func TestExtractModelFromBody(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result, err := sanitizeAndExtractRequestBody([]byte(tt.body), "application/json")
+			result, err := sanitizeAndExtractRequestBody([]byte(tt.body), "application/json", false)
 			assert.NoError(t, err)
 			assert.Equal(t, tt.expectedModel, result.ModelID)
 			assert.Equal(t, tt.expectedStream, result.Streaming)
@@ -605,7 +605,7 @@ func TestExtractModelFromBody(t *testing.T) {
 		assert.NoError(t, err)
 		assert.NoError(t, writer.Close())
 
-		result, err := sanitizeAndExtractRequestBody(buf.Bytes(), writer.FormDataContentType())
+		result, err := sanitizeAndExtractRequestBody(buf.Bytes(), writer.FormDataContentType(), false)
 		assert.NoError(t, err)
 		assert.Equal(t, "gemini-2.5-flash-image-preview", result.ModelID)
 		assert.False(t, result.Streaming)

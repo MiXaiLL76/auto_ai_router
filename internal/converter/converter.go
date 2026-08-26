@@ -25,14 +25,20 @@ import (
 
 // RequestMode holds context parameters for a conversion session.
 type RequestMode struct {
-	IsImageGeneration bool   // true for /images/generations requests
-	IsImageEdit       bool   // true for /images/edits requests
-	IsEmbeddings      bool   // true for /embeddings requests
-	IsStreaming       bool   // true for streaming (stream: true) requests
-	IsResponsesAPI    bool   // true when the outbound request uses /v1/responses
-	ModelID           string // real provider model name (URL construction, format detection)
-	DisplayModelID    string // alias to echo in responses; falls back to ModelID when empty
-	ContentType       string // original request content type (needed for multipart endpoints)
+	IsImageGeneration bool // true for /images/generations requests
+	IsImageEdit       bool // true for /images/edits requests
+	IsEmbeddings      bool // true for /embeddings requests
+	IsStreaming       bool // true for streaming (stream: true) requests
+	IsResponsesAPI    bool // true when the outbound request uses /v1/responses
+	// MessagesPassthrough is true when an incoming /v1/messages request is being
+	// forwarded to an Anthropic-wire-compatible provider (Anthropic itself, or CometAPI
+	// in its default Anthropic-protocol mode) without the Messages->Chat->Messages
+	// round trip: body is already native Anthropic Messages JSON, so RequestFrom must
+	// not run it back through OpenAIToAnthropic.
+	MessagesPassthrough bool
+	ModelID             string // real provider model name (URL construction, format detection)
+	DisplayModelID      string // alias to echo in responses; falls back to ModelID when empty
+	ContentType         string // original request content type (needed for multipart endpoints)
 }
 
 // responseModel returns the model name to embed in response/streaming output.
@@ -138,6 +144,11 @@ func (c *ProviderConverter) RequestFrom(body []byte) ([]byte, error) {
 		// Anthropic-compatible providers do not support image generation
 		if c.mode.IsImageGeneration {
 			return nil, errors.New(string(c.providerType) + " does not support image generation")
+		}
+		if c.mode.MessagesPassthrough {
+			// body is already native Anthropic Messages JSON (model field already
+			// resolved to c.mode.ModelID upstream) — forward as-is.
+			return body, nil
 		}
 		return anthropic.OpenAIToAnthropic(body, c.mode.ModelID, c.providerType == config.ProviderTypeAnthropic)
 	case config.ProviderTypeBedrock:

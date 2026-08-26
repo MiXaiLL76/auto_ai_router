@@ -41,6 +41,7 @@ type orchestratedRequest struct {
 	convertedResp        bool
 	convertedMessages    bool
 	passthroughResponses bool // true for codex/OpenAI models: Responses API forwarded as-is (no conversion)
+	passthroughMessages  bool // true when /v1/messages is forwarded natively (no Messages->Chat->Messages round trip)
 	nativeResponses      bool // true when using Phase 4 ProviderResponses converter (Vertex/Anthropic)
 	responsesPrevHandled bool
 	responsesMetadata    *responses.ResponsesMetadata // non-nil for Responses API requests
@@ -57,6 +58,7 @@ type credentialPreparedRequest struct {
 	convertedResp        bool
 	convertedMessages    bool
 	passthroughResponses bool
+	passthroughMessages  bool
 	nativeResponses      bool
 	messagesMetadata     anthropicconv.MessagesAdapterMetadata
 }
@@ -235,6 +237,7 @@ func (p *Proxy) orchestrateRequest(
 		convertedResp:        credentialReq.convertedResp,
 		convertedMessages:    credentialReq.convertedMessages,
 		passthroughResponses: credentialReq.passthroughResponses,
+		passthroughMessages:  credentialReq.passthroughMessages,
 		nativeResponses:      credentialReq.nativeResponses,
 		responsesPrevHandled: prevEntryHandled,
 		responsesMetadata:    responsesMetadata,
@@ -298,6 +301,33 @@ func (p *Proxy) prepareRequestForCredential(
 			// Proxy-like credentials (AIR-to-AIR chaining) forward the original
 			// Anthropic-shaped request/path as-is; the downstream peer does its
 			// own routing and conversion, same as the Responses API passthrough.
+			return req, nil
+		}
+		if p.modelManager != nil && p.modelManager.IsPassthroughMessagesForProvider(modelID, cred.Type, cred.OpenAIProtocol) {
+			// Anthropic-wire-compatible provider (Anthropic itself, or CometAPI in its
+			// default Anthropic-protocol mode): the client and the upstream already
+			// speak the same wire format, so skip the Messages->Chat->Messages round
+			// trip and forward body (already carrying realModelID) as-is, aside from
+			// the thinking/anthropic_beta normalization real Anthropic API requests
+			// still need (see NormalizeMessagesForPassthrough).
+			// The response is still converted back through ChatToMessages downstream
+			// (convertedMessages stays true) because ResponseTo/StreamTo for this
+			// provider always normalize the native Anthropic response to Chat shape
+			// first regardless of how the request was built.
+			passthroughBody, err := anthropicconv.NormalizeMessagesForPassthrough(body, realModelID, cred.Type == config.ProviderTypeAnthropic)
+			if err != nil {
+				return req, err
+			}
+			req.body = passthroughBody
+			req.convertedMessages = true
+			req.passthroughMessages = true
+			// messagesMetadata.AnthropicBetas is deliberately left unset here: RequestFrom
+			// forwards passthroughBody unchanged as requestBody, and proxy.go's dispatch
+			// loop unconditionally re-derives betas from that same body via
+			// ExtractBetaHeader moments later — populating it here would just be a second,
+			// thrown-away JSON unmarshal of the same field. (The non-passthrough branch
+			// below still needs to populate it: MessagesToChat drops anthropic_beta when
+			// building the Chat-shaped body, so that's the only place it survives.)
 			return req, nil
 		}
 		chatBody, metadata, err := anthropicconv.MessagesToChat(body)
@@ -574,7 +604,7 @@ func (p *Proxy) readRequestBodyAndSelectModel(
 		return nil, "", "", false, false
 	}
 
-	sanitized, err := sanitizeAndExtractRequestBody(body, r.Header.Get("Content-Type"))
+	sanitized, err := sanitizeAndExtractRequestBody(body, r.Header.Get("Content-Type"), r.URL.Path == "/v1/messages")
 	if err != nil {
 		p.logger.WarnContext(r.Context(), "Failed to sanitize request body",
 			"error_code", http.StatusBadRequest, "error", err)

@@ -98,6 +98,7 @@ func (p *Proxy) applyCredentialCompatibilityRouting(
 		prepared.convertedResp = nextReq.convertedResp
 		prepared.convertedMessages = nextReq.convertedMessages
 		prepared.passthroughResponses = nextReq.passthroughResponses
+		prepared.passthroughMessages = nextReq.passthroughMessages
 		prepared.nativeResponses = nextReq.nativeResponses
 		prepared.messagesMetadata = nextReq.messagesMetadata
 		logCtx.Credential = nextCred
@@ -1500,6 +1501,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 			prepared.convertedResp = nextReq.convertedResp
 			prepared.convertedMessages = nextReq.convertedMessages
 			prepared.passthroughResponses = nextReq.passthroughResponses
+			prepared.passthroughMessages = nextReq.passthroughMessages
 			prepared.nativeResponses = nextReq.nativeResponses
 			prepared.messagesMetadata = nextReq.messagesMetadata
 			logCtx.RealModelID = realModelID
@@ -1575,14 +1577,15 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 			// Use realModelID for URL construction and body conversion (provider-facing name).
 			// modelID (alias) is used for credential selection and rate limiting.
 			conv = converter.New(cred.EffectiveProviderType(), converter.RequestMode{
-				IsImageGeneration: logCtx.IsImageGeneration,
-				IsImageEdit:       isImageEdit,
-				IsEmbeddings:      isEmbeddings,
-				IsStreaming:       streaming,
-				IsResponsesAPI:    prepared.passthroughResponses,
-				ModelID:           realModelID,
-				DisplayModelID:    modelID,
-				ContentType:       r.Header.Get("Content-Type"),
+				IsImageGeneration:   logCtx.IsImageGeneration,
+				IsImageEdit:         isImageEdit,
+				IsEmbeddings:        isEmbeddings,
+				IsStreaming:         streaming,
+				IsResponsesAPI:      prepared.passthroughResponses,
+				MessagesPassthrough: prepared.passthroughMessages,
+				ModelID:             realModelID,
+				DisplayModelID:      modelID,
+				ContentType:         r.Header.Get("Content-Type"),
 			})
 			var convErr error
 			requestBody, convErr = conv.RequestFrom(body)
@@ -1635,7 +1638,13 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		anthropicBetas := append([]string(nil), prepared.messagesMetadata.AnthropicBetas...)
-		if cred.Type == config.ProviderTypeCometAPI && !cred.OpenAIProtocol {
+		// The real Anthropic API (and ProMan/CometAPI's own Anthropic-compatible backends)
+		// reject "anthropic_beta" as a body field outright ("Extra inputs are not
+		// permitted") — it must travel as the anthropic-beta HTTP header instead. This
+		// mirrors the unconditional strip forwardToProxy already does for proxy-like
+		// credentials on /v1/messages (see ExtractBetaHeader call there).
+		if cred.Type == config.ProviderTypeAnthropic || cred.Type == config.ProviderTypeProMan ||
+			(cred.Type == config.ProviderTypeCometAPI && !cred.OpenAIProtocol) {
 			var generatedBetas []string
 			requestBody, generatedBetas = anthropicconv.ExtractBetaHeader(requestBody)
 			anthropicBetas = append(anthropicBetas, generatedBetas...)

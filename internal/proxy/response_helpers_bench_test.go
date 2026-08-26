@@ -16,7 +16,7 @@ func extractMetadataFromBodyOld(body []byte, contentType string) (string, bool, 
 	}
 
 	if strings.HasPrefix(strings.ToLower(contentType), "multipart/form-data") {
-		result, _ := sanitizeAndExtractRequestBody(body, contentType)
+		result, _ := sanitizeAndExtractRequestBody(body, contentType, false)
 		return result.ModelID, false, result.SessionID, body
 	}
 
@@ -143,7 +143,7 @@ func BenchmarkExtractMetadataFromBody(b *testing.B) {
 		b.ReportAllocs()
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			if _, err := sanitizeAndExtractRequestBody(benchChatBodyStreaming, "application/json"); err != nil {
+			if _, err := sanitizeAndExtractRequestBody(benchChatBodyStreaming, "application/json", false); err != nil {
 				b.Fatal(err)
 			}
 		}
@@ -152,7 +152,7 @@ func BenchmarkExtractMetadataFromBody(b *testing.B) {
 		b.ReportAllocs()
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			if _, err := sanitizeAndExtractRequestBody(benchChatBodyNonStreaming, "application/json"); err != nil {
+			if _, err := sanitizeAndExtractRequestBody(benchChatBodyNonStreaming, "application/json", false); err != nil {
 				b.Fatal(err)
 			}
 		}

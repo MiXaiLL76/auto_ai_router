@@ -113,6 +113,14 @@ type ModelRPMConfig struct {
 	// nil (omitted in config) = auto-detect: true for codex models, false otherwise.
 	// Explicit true/false overrides the auto-detection.
 	PassthroughResponses *bool `yaml:"passthrough_responses,omitempty"`
+
+	// PassthroughMessages controls whether /v1/messages requests for this model are
+	// forwarded as-is to an Anthropic-wire-compatible provider's native /v1/messages
+	// endpoint instead of the Messages->Chat->Messages round trip.
+	// nil (omitted in config) = provider default: true for ProviderTypeAnthropic, and
+	// for ProviderTypeCometAPI when OpenAIProtocol is false; false otherwise.
+	// Explicit true/false overrides the default.
+	PassthroughMessages *bool `yaml:"passthrough_messages,omitempty"`
 }
 
 // UnmarshalYAML implements custom unmarshaling for ModelRPMConfig with env variable support.
@@ -125,6 +133,7 @@ func (m *ModelRPMConfig) UnmarshalYAML(value *yaml.Node) error {
 		Weight               string `yaml:"weight"`
 		Credential           string `yaml:"credential,omitempty"`
 		PassthroughResponses string `yaml:"passthrough_responses,omitempty"`
+		PassthroughMessages  string `yaml:"passthrough_messages,omitempty"`
 	}
 
 	var temp tempConfig
@@ -136,6 +145,7 @@ func (m *ModelRPMConfig) UnmarshalYAML(value *yaml.Node) error {
 	m.Model = resolveEnvString(temp.Model)
 	m.Credential = resolveEnvString(temp.Credential)
 	m.PassthroughResponses = nil
+	m.PassthroughMessages = nil
 
 	var err error
 	if m.RPM, err = parseField(temp.RPM, 0, strconv.Atoi, "rpm for model '"+m.Name+"'"); err != nil {
@@ -156,6 +166,17 @@ func (m *ModelRPMConfig) UnmarshalYAML(value *yaml.Node) error {
 				return fmt.Errorf("invalid passthrough_responses for model '%s': %w", m.Name, err)
 			}
 			m.PassthroughResponses = &passthroughResponses
+		}
+	}
+
+	if temp.PassthroughMessages != "" {
+		resolved := resolveEnvString(temp.PassthroughMessages)
+		if resolved != "" {
+			passthroughMessages, err := strconv.ParseBool(resolved)
+			if err != nil {
+				return fmt.Errorf("invalid passthrough_messages for model '%s': %w", m.Name, err)
+			}
+			m.PassthroughMessages = &passthroughMessages
 		}
 	}
 

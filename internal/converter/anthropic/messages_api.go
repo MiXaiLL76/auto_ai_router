@@ -108,6 +108,46 @@ func MessagesToChat(body []byte) ([]byte, MessagesAdapterMetadata, error) {
 	}, nil
 }
 
+// NormalizeMessagesForPassthrough applies the same thinking/output_config/anthropic_beta
+// normalization OpenAIToAnthropic performs during the Messages->Chat->Messages round trip,
+// directly to a raw native Anthropic Messages API request body — for the /v1/messages
+// passthrough path, which forwards the client's body to an Anthropic-wire-compatible
+// provider without going through Chat Completions shape at all. Mirrors
+// OpenAIToAnthropic's thinking handling (messages.go) exactly, so real API requirements
+// (the effort-2025-11-24 beta for adaptive thinking, temperature=1.0 while thinking is
+// enabled, upgrading legacy enabled+budget_tokens to adaptive+effort on adaptive-only
+// models, and disabling autonomous thinking by default on non-Anthropic backends behind
+// CometAPI/ProMan) keep working without paying for the full round trip.
+func NormalizeMessagesForPassthrough(body []byte, model string, isRealAnthropicBackend bool) ([]byte, error) {
+	var request map[string]interface{}
+	if err := json.Unmarshal(body, &request); err != nil {
+		return nil, fmt.Errorf("failed to parse Messages request: %w", err)
+	}
+
+	tc, oc := mapThinkingConfig(request["thinking"], "", model)
+	if tc != nil {
+		request["thinking"] = tc
+		existingMaxTokens, hasMaxTokens := request["max_tokens"].(float64)
+		maxTokens, betas, temp := applyThinkingSideEffects(tc, oc, int(existingMaxTokens), extractBetaStrings(request["anthropic_beta"]))
+		if hasMaxTokens {
+			request["max_tokens"] = maxTokens
+		}
+		if oc != nil {
+			if existing, ok := request["output_config"].(map[string]interface{}); ok {
+				existing["effort"] = oc.Effort
+			} else {
+				request["output_config"] = oc
+			}
+			request["anthropic_beta"] = betas
+		}
+		request["temperature"] = temp
+	} else if !isRealAnthropicBackend {
+		request["thinking"] = &AnthropicThinking{Type: "disabled"}
+	}
+
+	return json.Marshal(request)
+}
+
 func extractBetaStrings(raw interface{}) []string {
 	var betas []string
 	switch v := raw.(type) {
@@ -151,6 +191,16 @@ func messagesToChatMessages(rawMessages []interface{}) ([]interface{}, error) {
 		case "assistant":
 			if assistant := assistantMessageToChat(message); assistant != nil {
 				converted = append(converted, assistant)
+			}
+		case "system", "developer":
+			// The Messages API spec puts the system prompt in the top-level "system"
+			// field, never in "messages" — but some OpenAI-oriented clients pointed at
+			// this Anthropic-compatible endpoint send it as a role:"system"/"developer"
+			// message instead. Accept it the same way the reverse converter
+			// (convertOpenAIMessagesToAnthropic) already does, rather than rejecting an
+			// otherwise well-formed request.
+			if content := systemToChatContent(message["content"]); content != nil {
+				converted = append(converted, map[string]interface{}{"role": "system", "content": content})
 			}
 		default:
 			return nil, fmt.Errorf("unsupported message role %q", role)

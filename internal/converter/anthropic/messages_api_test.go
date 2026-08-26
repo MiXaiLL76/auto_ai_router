@@ -72,6 +72,33 @@ func TestMessagesToChat(t *testing.T) {
 	assert.Equal(t, truncated, got["tool_choice"].(map[string]interface{})["function"].(map[string]interface{})["name"])
 }
 
+// TestMessagesToChat_SystemRoleInMessagesArray covers clients that send the system
+// prompt as a role:"system"/"developer" message inside "messages" instead of using the
+// top-level "system" field the Messages API spec requires — accepted for compatibility
+// rather than rejected with "unsupported message role".
+func TestMessagesToChat_SystemRoleInMessagesArray(t *testing.T) {
+	body := []byte(`{
+		"model":"claude-opus-4-8",
+		"max_tokens":512,
+		"messages":[
+			{"role":"system","content":"Be concise"},
+			{"role":"user","content":"Hi"}
+		]
+	}`)
+
+	converted, _, err := MessagesToChat(body)
+	require.NoError(t, err)
+
+	var got map[string]interface{}
+	require.NoError(t, json.Unmarshal(converted, &got))
+	messages := got["messages"].([]interface{})
+	require.Len(t, messages, 2)
+	first := messages[0].(map[string]interface{})
+	assert.Equal(t, "system", first["role"])
+	assert.Equal(t, "Be concise", first["content"])
+	assert.Equal(t, "user", messages[1].(map[string]interface{})["role"])
+}
+
 func TestMessagesToChat_DocumentProviderFileIDRejected(t *testing.T) {
 	body := []byte(`{
 		"model":"claude-sonnet-4-5",
@@ -423,4 +450,90 @@ func roundTripFirstUserBlock(t *testing.T, messagesBody []byte) map[string]inter
 	content := messages[0].(map[string]interface{})["content"].([]interface{})
 	require.NotEmpty(t, content)
 	return content[0].(map[string]interface{})
+}
+
+// TestNormalizeMessagesForPassthrough_AdaptiveThinkingBeta covers the /v1/messages
+// native-passthrough path: a client sending native Anthropic "thinking":{"type":"adaptive"}
+// straight through still needs the effort-2025-11-24 beta and temperature=1.0 that
+// OpenAIToAnthropic would otherwise have added during the Messages->Chat->Messages round trip.
+func TestNormalizeMessagesForPassthrough_AdaptiveThinkingBeta(t *testing.T) {
+	body := []byte(`{
+		"model":"claude-opus-4.7",
+		"max_tokens":100,
+		"temperature":0.5,
+		"messages":[{"role":"user","content":"hi"}],
+		"thinking":{"type":"adaptive","effort":"high"},
+		"anthropic_beta":["prompt-caching-2024-07-31"]
+	}`)
+
+	out, err := NormalizeMessagesForPassthrough(body, "claude-opus-4.7", true)
+	require.NoError(t, err)
+
+	var got map[string]interface{}
+	require.NoError(t, json.Unmarshal(out, &got))
+	assert.Equal(t, "adaptive", got["thinking"].(map[string]interface{})["type"])
+	assert.Equal(t, 1.0, got["temperature"])
+	assert.Equal(t,
+		[]interface{}{"prompt-caching-2024-07-31", "effort-2025-11-24"},
+		got["anthropic_beta"])
+}
+
+// TestNormalizeMessagesForPassthrough_LegacyBudgetUpgradedOnAdaptiveModel covers a client
+// still sending the legacy Claude 3.x "enabled"+budget_tokens shape to a model that only
+// accepts the adaptive format — must be upgraded the same way OpenAIToAnthropic does, or the
+// real Anthropic API would reject it.
+func TestNormalizeMessagesForPassthrough_LegacyBudgetUpgradedOnAdaptiveModel(t *testing.T) {
+	body := []byte(`{
+		"model":"claude-opus-4.7",
+		"max_tokens":100,
+		"messages":[{"role":"user","content":"hi"}],
+		"thinking":{"type":"enabled","budget_tokens":20000}
+	}`)
+
+	out, err := NormalizeMessagesForPassthrough(body, "claude-opus-4.7", true)
+	require.NoError(t, err)
+
+	var got map[string]interface{}
+	require.NoError(t, json.Unmarshal(out, &got))
+	thinking := got["thinking"].(map[string]interface{})
+	assert.Equal(t, "adaptive", thinking["type"])
+	assert.Equal(t, "high", got["output_config"].(map[string]interface{})["effort"])
+	assert.Equal(t, []interface{}{"effort-2025-11-24"}, got["anthropic_beta"])
+}
+
+// TestNormalizeMessagesForPassthrough_DisablesThinkingForNonAnthropicBackend guards the
+// CometAPI/ProMan passthrough case: omitting "thinking" means off for real Claude models, but
+// other vendors behind these multi-vendor gateways default to autonomous thinking, silently
+// burning tokens and truncating the visible answer unless explicitly disabled.
+func TestNormalizeMessagesForPassthrough_DisablesThinkingForNonAnthropicBackend(t *testing.T) {
+	body := []byte(`{
+		"model":"claude-opus-4.7",
+		"max_tokens":100,
+		"messages":[{"role":"user","content":"hi"}]
+	}`)
+
+	out, err := NormalizeMessagesForPassthrough(body, "claude-opus-4.7", false)
+	require.NoError(t, err)
+
+	var got map[string]interface{}
+	require.NoError(t, json.Unmarshal(out, &got))
+	assert.Equal(t, "disabled", got["thinking"].(map[string]interface{})["type"])
+}
+
+// TestNormalizeMessagesForPassthrough_NoThinkingLeavesRealAnthropicBodyUntouched covers the
+// common case: a plain request with no thinking config going to real Anthropic needs no
+// normalization at all — omitting "thinking" already means off for Claude.
+func TestNormalizeMessagesForPassthrough_NoThinkingLeavesRealAnthropicBodyUntouched(t *testing.T) {
+	body := []byte(`{
+		"model":"claude-opus-4.7",
+		"max_tokens":100,
+		"messages":[{"role":"user","content":"hi"}]
+	}`)
+
+	out, err := NormalizeMessagesForPassthrough(body, "claude-opus-4.7", true)
+	require.NoError(t, err)
+
+	var got map[string]interface{}
+	require.NoError(t, json.Unmarshal(out, &got))
+	assert.NotContains(t, got, "thinking")
 }

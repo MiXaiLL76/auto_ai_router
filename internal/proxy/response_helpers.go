@@ -341,7 +341,7 @@ func declaredMediaType(contentType string) string {
 // the common ingress boundary before any provider, retry, or fallback body is
 // derived. Multipart bodies are parsed to completion even when no rewrite is
 // needed so malformed input cannot pass through after an early model part.
-func sanitizeAndExtractRequestBody(body []byte, contentType string) (sanitizedRequestBody, error) {
+func sanitizeAndExtractRequestBody(body []byte, contentType string, isMessagesAPI bool) (sanitizedRequestBody, error) {
 	result := sanitizedRequestBody{Body: body}
 	mediaType, params, mediaTypeErr := mime.ParseMediaType(contentType)
 	if mediaTypeErr != nil {
@@ -356,10 +356,10 @@ func sanitizeAndExtractRequestBody(body []byte, contentType string) (sanitizedRe
 		return result, nil
 	}
 
-	return sanitizeJSONRequestBody(body)
+	return sanitizeJSONRequestBody(body, isMessagesAPI)
 }
 
-func sanitizeJSONRequestBody(body []byte) (sanitizedRequestBody, error) {
+func sanitizeJSONRequestBody(body []byte, isMessagesAPI bool) (sanitizedRequestBody, error) {
 	result := sanitizedRequestBody{Body: body}
 
 	// Parse JSON body — RawMessage sub-slices instead of interface{} boxing:
@@ -396,13 +396,17 @@ func sanitizeJSONRequestBody(body []byte) (sanitizedRequestBody, error) {
 	}
 
 	// Responses API (/v1/responses) uses "input" instead of "messages" and does NOT
-	// support stream_options — it always returns usage in streaming.
+	// support stream_options — it always returns usage in streaming. The native
+	// Anthropic Messages API (/v1/messages) also has a "messages" field but has no
+	// stream_options concept at all — real api.anthropic.com rejects it outright
+	// ("stream_options: Extra inputs are not permitted"), so it must be excluded here
+	// too, not just detected by field shape.
 	// Only inject stream_options for Chat Completions API requests.
 	_, hasInput := reqBody["input"]
 	_, hasMessages := reqBody["messages"]
 	isResponsesAPI := hasInput && !hasMessages
 
-	if stream && !isResponsesAPI {
+	if stream && !isResponsesAPI && !isMessagesAPI {
 		// Ensure stream_options exists and include_usage is true (Chat Completions only)
 		if err := injectIncludeUsageRaw(reqBody); err != nil {
 			return sanitizedRequestBody{}, err
