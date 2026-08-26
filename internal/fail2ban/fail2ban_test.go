@@ -668,3 +668,117 @@ func TestGetBannedModelsForCredential(t *testing.T) {
 	models2 := f2b.GetBannedModelsForCredential("cred2")
 	assert.Len(t, models2, 0)
 }
+
+// --- CredentialOverride tests (BUG-001: CometAPI signals a blocked account
+// with 400, which the global error_codes list does not track) ---
+
+func TestCredentialOverride_UnaffectedCredentialKeepsGlobalBehavior(t *testing.T) {
+	f2b := New(3, 0, []int{429})
+	f2b.SetCredentialOverrides(map[string]CredentialOverride{
+		"cometapi-pool-1": {ErrorCodes: []int{400, 429}},
+	})
+
+	// A credential with no override still only tracks the global codes: 400 is ignored.
+	f2b.RecordResponse("other-cred", "claude-haiku-4-5", 400)
+	f2b.RecordResponse("other-cred", "claude-haiku-4-5", 400)
+	f2b.RecordResponse("other-cred", "claude-haiku-4-5", 400)
+
+	assert.Equal(t, 0, f2b.GetFailureCount("other-cred", "claude-haiku-4-5"))
+	assert.False(t, f2b.IsBanned("other-cred", "claude-haiku-4-5"))
+}
+
+func TestCredentialOverride_400NotBannedWithoutOverride(t *testing.T) {
+	// Regression guard: without any override installed, 400 must never ban
+	// (this was the root cause of BUG-001 — CometAPI's blocked-account 400
+	// was invisible to fail2ban and the route stayed in rotation forever).
+	f2b := New(3, 0, []int{429})
+
+	f2b.RecordResponse("cometapi-pool-1", "claude-haiku-4-5", 400)
+	f2b.RecordResponse("cometapi-pool-1", "claude-haiku-4-5", 400)
+	f2b.RecordResponse("cometapi-pool-1", "claude-haiku-4-5", 400)
+
+	assert.Equal(t, 0, f2b.GetFailureCount("cometapi-pool-1", "claude-haiku-4-5"))
+	assert.False(t, f2b.IsBanned("cometapi-pool-1", "claude-haiku-4-5"))
+}
+
+func TestCredentialOverride_400BansAfterMaxAttemptsWithOverride(t *testing.T) {
+	f2b := New(3, 0, []int{429})
+	f2b.SetCredentialOverrides(map[string]CredentialOverride{
+		"cometapi-pool-1": {ErrorCodes: []int{400, 429, 500, 502, 503, 504}},
+	})
+
+	f2b.RecordResponse("cometapi-pool-1", "claude-haiku-4-5", 400)
+	f2b.RecordResponse("cometapi-pool-1", "claude-haiku-4-5", 400)
+	assert.False(t, f2b.IsBanned("cometapi-pool-1", "claude-haiku-4-5"))
+
+	f2b.RecordResponse("cometapi-pool-1", "claude-haiku-4-5", 400)
+	assert.True(t, f2b.IsBanned("cometapi-pool-1", "claude-haiku-4-5"))
+	assert.Equal(t, 3, f2b.GetFailureCount("cometapi-pool-1", "claude-haiku-4-5"))
+}
+
+func TestCredentialOverride_DoesNotAffectOtherCredentialsWithSameCode(t *testing.T) {
+	f2b := New(3, 0, []int{429})
+	f2b.SetCredentialOverrides(map[string]CredentialOverride{
+		"cometapi-pool-1": {ErrorCodes: []int{400}},
+	})
+
+	// Ban the overridden credential on 400.
+	f2b.RecordResponse("cometapi-pool-1", "claude-haiku-4-5", 400)
+	f2b.RecordResponse("cometapi-pool-1", "claude-haiku-4-5", 400)
+	f2b.RecordResponse("cometapi-pool-1", "claude-haiku-4-5", 400)
+	assert.True(t, f2b.IsBanned("cometapi-pool-1", "claude-haiku-4-5"))
+
+	// A different credential, same model, same code: not affected, no override for it.
+	f2b.RecordResponse("direct-anthropic", "claude-haiku-4-5", 400)
+	f2b.RecordResponse("direct-anthropic", "claude-haiku-4-5", 400)
+	f2b.RecordResponse("direct-anthropic", "claude-haiku-4-5", 400)
+	assert.False(t, f2b.IsBanned("direct-anthropic", "claude-haiku-4-5"))
+	assert.Equal(t, 0, f2b.GetFailureCount("direct-anthropic", "claude-haiku-4-5"))
+}
+
+func TestCredentialOverride_PerCredentialRuleOverridesMaxAttempts(t *testing.T) {
+	// Global max_attempts is 3, but the override for this credential+code
+	// bans after a single failure — useful for a hard "account blocked" signal.
+	f2b := New(3, 0, []int{429})
+	f2b.SetCredentialOverrides(map[string]CredentialOverride{
+		"cometapi-pool-1": {
+			ErrorCodes: []int{400},
+			ErrorCodeRules: []ErrorCodeRule{
+				{Code: 400, MaxAttempts: 1, BanDuration: 0},
+			},
+		},
+	})
+
+	f2b.RecordResponse("cometapi-pool-1", "claude-haiku-4-5", 400)
+	assert.True(t, f2b.IsBanned("cometapi-pool-1", "claude-haiku-4-5"))
+}
+
+func TestCredentialOverride_FallsBackToGlobalRuleWhenCodeNotInOverrideRules(t *testing.T) {
+	// The override widens error_codes to include 429, but does not define its
+	// own rule for 429 — the global per-code rule for 429 should still apply.
+	f2b := NewWithRules(3, 0, []int{400}, []ErrorCodeRule{
+		{Code: 429, MaxAttempts: 1, BanDuration: 0},
+	})
+	f2b.SetCredentialOverrides(map[string]CredentialOverride{
+		"cometapi-pool-1": {ErrorCodes: []int{400, 429}},
+	})
+
+	f2b.RecordResponse("cometapi-pool-1", "claude-haiku-4-5", 429)
+	assert.True(t, f2b.IsBanned("cometapi-pool-1", "claude-haiku-4-5"))
+}
+
+func TestSetCredentialOverrides_ReplacesPreviousOverrides(t *testing.T) {
+	f2b := New(3, 0, []int{429})
+	f2b.SetCredentialOverrides(map[string]CredentialOverride{
+		"cometapi-pool-1": {ErrorCodes: []int{400}},
+	})
+	// Re-installing overrides (e.g. config reload) drops the previous set.
+	f2b.SetCredentialOverrides(map[string]CredentialOverride{
+		"some-other-cred": {ErrorCodes: []int{418}},
+	})
+
+	f2b.RecordResponse("cometapi-pool-1", "claude-haiku-4-5", 400)
+	f2b.RecordResponse("cometapi-pool-1", "claude-haiku-4-5", 400)
+	f2b.RecordResponse("cometapi-pool-1", "claude-haiku-4-5", 400)
+	assert.False(t, f2b.IsBanned("cometapi-pool-1", "claude-haiku-4-5"))
+}

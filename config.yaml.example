@@ -29,6 +29,14 @@ fail2ban:
   #   - code: 429
   #     max_attempts: 5
   #     ban_duration: 5m
+  # Optional: per-credential override of error_codes/error_code_rules above.
+  # Some upstreams sit behind a reseller/aggregator that signals a blocked
+  # account with a plain 400 instead of 429/5xx — without an override here,
+  # that route never gets banned and keeps eating its share of round-robin
+  # traffic forever. Keyed by the credential's `name` under `credentials:`.
+  # credential_overrides:
+  #   cometapi-pool-1:
+  #     error_codes: [400, 429, 500, 502, 503, 504]
 
 monitoring:
   prometheus_enabled: true

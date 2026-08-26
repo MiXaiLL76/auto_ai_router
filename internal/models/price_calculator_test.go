@@ -134,6 +134,61 @@ func TestCalculateTokenCosts_WithReasoning(t *testing.T) {
 	assert.InDelta(t, 4.9, costs.TotalCost, 0.0001)
 }
 
+func TestCalculateTokenCosts_ReasoningTokensAdditive_DefaultFalseUnchanged(t *testing.T) {
+	// ReasoningTokensAdditive defaults to the zero value (false), so a price
+	// entry that never sets it must price identically to the included-semantic
+	// case above: this is the regression guard for that default.
+	usage := &converter.TokenUsage{
+		PromptTokens:     50,
+		CompletionTokens: 100, // includes 30 reasoning tokens
+		ReasoningTokens:  30,
+	}
+
+	price := &ModelPrice{
+		InputCostPerToken:           0.01,
+		OutputCostPerToken:          0.02,
+		OutputCostPerReasoningToken: 0.1,
+		// ReasoningTokensAdditive intentionally left unset (false).
+	}
+
+	costs := CalculateTokenCosts(usage, price)
+
+	require.NotNil(t, costs)
+	assert.InDelta(t, 1.4, costs.OutputCost, 0.0001) // 100 - 30 = 70 tokens at $0.02
+	assert.Equal(t, 3.0, costs.ReasoningCost)        // 30 tokens at $0.1
+	assert.InDelta(t, 4.9, costs.TotalCost, 0.0001)
+}
+
+func TestCalculateTokenCosts_ReasoningTokensAdditive_NotSubtractedFromCompletion(t *testing.T) {
+	// Grok-style semantic: reasoning tokens are reported ON TOP OF completion
+	// tokens, not included in them. completionTokens=70 is the visible answer;
+	// reasoningTokens=30 is separate and must not shrink regularOutputTokens.
+	usage := &converter.TokenUsage{
+		PromptTokens:     50,
+		CompletionTokens: 70, // does NOT include the 30 reasoning tokens
+		ReasoningTokens:  30,
+	}
+
+	price := &ModelPrice{
+		InputCostPerToken:           0.01,
+		OutputCostPerToken:          0.02,
+		OutputCostPerReasoningToken: 0.1,
+		ReasoningTokensAdditive:     true,
+	}
+
+	costs := CalculateTokenCosts(usage, price)
+
+	require.NotNil(t, costs)
+	// Regular output: all 70 completion tokens at $0.02, reasoning tokens are
+	// not subtracted because they were never part of completionTokens.
+	assert.InDelta(t, 1.4, costs.OutputCost, 0.0001)
+	// Reasoning: 30 tokens at $0.1, billed on top instead of replacing output cost.
+	assert.Equal(t, 3.0, costs.ReasoningCost)
+	// Total: 0.5 (input) + 1.4 (output) + 3.0 (reasoning) = 4.9 — same shape as the
+	// included case, but here it reflects 100 real generated tokens (70+30), not 70.
+	assert.InDelta(t, 4.9, costs.TotalCost, 0.0001)
+}
+
 func TestCalculateTokenCosts_WithExplicitOutputTextTokens(t *testing.T) {
 	usage := &converter.TokenUsage{
 		PromptTokens:     16,

@@ -134,27 +134,7 @@ Set to `false` to skip local estimation entirely if all your configured provider
 
 ## Fail2Ban Parameters
 
-| Parameter          | Type   | Description                                                           |
-| ------------------ | ------ | --------------------------------------------------------------------- |
-| `max_attempts`     | int    | Maximum failed attempts before banning a credential                   |
-| `ban_duration`     | string | Ban duration (`permanent` for permanent, or duration like `5m`, `1h`) |
-| `error_codes`      | []int  | HTTP status codes that trigger ban counting                           |
-| `error_code_rules` | []rule | Per-error-code override rules (see example below)                     |
-
-### Per-Error-Code Rules
-
-Override `max_attempts` and `ban_duration` for specific error codes:
-
-```yaml
-fail2ban:
-  max_attempts: 3
-  ban_duration: permanent
-  error_codes: [401, 403, 429, 500, 502, 503, 504]
-  error_code_rules:
-    - code: 429      # Rate limit errors
-      max_attempts: 5
-      ban_duration: 5m
-```
+The `fail2ban` block bans a `credential + model` pair after repeated failures at configured HTTP status codes, so a broken or rate-limited upstream stops eating a share of round-robin traffic. See [Fail2Ban](../advanced/f2b.md) for the full parameter reference, per-error-code rules, and per-credential overrides (for upstreams — e.g. resellers/aggregators — that signal failure with a different status code than the rest of the pool).
 
 ## Monitoring Parameters
 

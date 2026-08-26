@@ -45,10 +45,29 @@ type Fail2Ban struct {
 	banDuration    time.Duration // 0 means permanent ban
 	errorCodes     map[int]bool
 	errorCodeRules map[int]*ErrorCodeRule // Per-code rules
-	failures       map[string]map[int]int // banKey -> code -> count
-	banned         map[string]*banInfo    // banKey -> banInfo
-	lastError      map[string]time.Time   // banKey -> last error time
-	logger         *slog.Logger
+
+	// Per-credential overrides. A credential name present here fully replaces
+	// the global errorCodes/errorCodeRules for that credential; a credential
+	// with no entry keeps using the global settings above. This exists
+	// because "what counts as a failure" is not universal: a reseller/
+	// aggregator upstream may signal a blocked account with a plain 400
+	// instead of 429/5xx, and banning on 400 globally would also ban any
+	// credential+model pair on an ordinary bad client request.
+	credentialErrorCodes     map[string]map[int]bool
+	credentialErrorCodeRules map[string]map[int]*ErrorCodeRule
+
+	failures  map[string]map[int]int // banKey -> code -> count
+	banned    map[string]*banInfo    // banKey -> banInfo
+	lastError map[string]time.Time   // banKey -> last error time
+	logger    *slog.Logger
+}
+
+// CredentialOverride replaces the global error_codes/error_code_rules for one
+// specific credential (matched by the credentialName passed to
+// RecordResponse). See SetCredentialOverrides.
+type CredentialOverride struct {
+	ErrorCodes     []int
+	ErrorCodeRules []ErrorCodeRule
 }
 
 // SetLogger sets the logger used for ban/unban events.
@@ -104,8 +123,46 @@ func NewWithRules(maxAttempts int, banDuration time.Duration, errorCodes []int, 
 	return f
 }
 
-// getRule returns the rule for an error code, or the default rule
-func (f *Fail2Ban) getRule(statusCode int) *ErrorCodeRule {
+// SetCredentialOverrides installs per-credential error-code overrides,
+// replacing any previously installed ones. Call it once during startup,
+// before serving traffic. A credential with no entry in overrides keeps
+// using the global error_codes/error_code_rules unchanged.
+func (f *Fail2Ban) SetCredentialOverrides(overrides map[string]CredentialOverride) {
+	credErrorCodes := make(map[string]map[int]bool, len(overrides))
+	credErrorCodeRules := make(map[string]map[int]*ErrorCodeRule, len(overrides))
+	for name, ov := range overrides {
+		if len(ov.ErrorCodes) > 0 {
+			codes := make(map[int]bool, len(ov.ErrorCodes))
+			for _, code := range ov.ErrorCodes {
+				codes[code] = true
+			}
+			credErrorCodes[name] = codes
+		}
+		if len(ov.ErrorCodeRules) > 0 {
+			rules := make(map[int]*ErrorCodeRule, len(ov.ErrorCodeRules))
+			for i := range ov.ErrorCodeRules {
+				rule := ov.ErrorCodeRules[i]
+				rules[rule.Code] = &rule
+			}
+			credErrorCodeRules[name] = rules
+		}
+	}
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.credentialErrorCodes = credErrorCodes
+	f.credentialErrorCodeRules = credErrorCodeRules
+}
+
+// getRule returns the rule for an error code, preferring a per-credential
+// override, then the global per-code rule, then the default rule.
+func (f *Fail2Ban) getRule(credentialName string, statusCode int) *ErrorCodeRule {
+	if rules, ok := f.credentialErrorCodeRules[credentialName]; ok {
+		if rule, exists := rules[statusCode]; exists {
+			return rule
+		}
+	}
+
 	if rule, exists := f.errorCodeRules[statusCode]; exists {
 		return rule
 	}
@@ -150,13 +207,18 @@ func (f *Fail2Ban) RecordResponse(credentialName, modelID string, statusCode int
 		return
 	}
 
-	// Only track configured error codes (if list is not empty)
-	if len(f.errorCodes) > 0 && !f.errorCodes[statusCode] {
+	// Only track configured error codes (if list is not empty). A
+	// per-credential override, if present, fully replaces the global set.
+	errorCodes := f.errorCodes
+	if credCodes, ok := f.credentialErrorCodes[credentialName]; ok {
+		errorCodes = credCodes
+	}
+	if len(errorCodes) > 0 && !errorCodes[statusCode] {
 		return
 	}
 
 	// Get rule for this error code
-	rule := f.getRule(statusCode)
+	rule := f.getRule(credentialName, statusCode)
 
 	// Initialize failure map for this pair if needed
 	if f.failures[key] == nil {
