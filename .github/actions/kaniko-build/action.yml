@@ -1,6 +1,19 @@
 name: kaniko-build
 description: >
-  Build and push an image with kaniko.
+  Build and push an image with kaniko. Runs as a Docker container action (no
+  daemon needed — required under ARC's containerMode: kubernetes, which has
+  no dind). Both inputs are passed as action inputs (INPUT_* env vars), not
+  files on the shared workspace: this container is a separate pod container
+  from whatever step computed the values, and there's no confirmed guarantee
+  every container in the pod sees the workspace PVC at the same path.
+  entrypoint is explicit rather than left to the image default: unset, this
+  ARC runner's k8s hook was observed injecting a spurious "proxy" positional
+  ahead of ours, which kaniko's executor (a cobra CLI) tried to run as a
+  subcommand. Heredocs (<<EOF) in the script were ALSO observed to break
+  ("syntax error: unexpected word (expecting done)") under this same hook —
+  a plain `< file` redirect parsed fine, so this avoids heredocs entirely:
+  args are split from INPUT_ARGS via IFS=newline (`set --`), and the docker
+  config is written with a plain `printf > file` redirect.
 inputs:
   args:
     description: Kaniko flags, one per line (e.g. steps.x.outputs.args from a multiline GITHUB_OUTPUT)
@@ -15,16 +28,15 @@ runs:
   args:
     - -c
     - |
-      set --
-      while IFS= read -r line; do
-        if [ -z "$line" ]; then continue; fi
-        set -- "$@" "$line"
-      done <<EOF
-      $INPUT_ARGS
-      EOF
+      INPUT_ARGS=$(printf '%s' "$INPUT_ARGS")
+      set -f
+      oldIFS=$IFS
+      IFS="$(printf '\nx')"
+      IFS="${IFS%x}"
+      set -- $INPUT_ARGS
+      IFS=$oldIFS
+      set +f
       mkdir -p /tmp/.docker-config
-      cat <<DOCKERCFG_EOF > /tmp/.docker-config/config.json
-      $INPUT_REGISTRY_AUTH_JSON
-      DOCKERCFG_EOF
+      printf '%s' "$INPUT_REGISTRY_AUTH_JSON" > /tmp/.docker-config/config.json
       export DOCKER_CONFIG=/tmp/.docker-config
       exec /kaniko/executor "$@"
