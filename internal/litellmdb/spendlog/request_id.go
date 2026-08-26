@@ -30,9 +30,12 @@ type requestIDGroup struct {
 // next READ COMMITTED statement sees the committed winner. No SpendLogs row is
 // ever read back.
 //
-// Callers do not populate AirEventID today, so a conflict on a row owned by
-// another transaction cannot be classified as replay vs genuine collision; the
-// entry is skipped but the drop is logged and counted in
+// AirEventID must be a value that is always distinct per logical HTTP
+// request, independent of RequestID (which, when otel trusts an inbound
+// traceparent, can be shared across distinct requests) — see
+// RequestLogContext.EventID. Without it, a conflict on a row owned by another
+// transaction cannot be classified as replay vs genuine collision; the entry
+// is skipped but the drop is logged and counted in
 // auto_ai_router_spend_collision_unresolved_total instead of staying silent.
 func insertSpendRowsCollisionSafe(ctx context.Context, tx pgx.Tx, batch []*models.SpendLogEntry, logger *slog.Logger) ([]string, error) {
 	groups := groupEntriesByPreferredRequestID(batch)

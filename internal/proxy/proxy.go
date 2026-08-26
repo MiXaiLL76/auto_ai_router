@@ -16,7 +16,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/mixaill76/auto_ai_router/internal/auth"
 	"github.com/mixaill76/auto_ai_router/internal/balancer"
 	"github.com/mixaill76/auto_ai_router/internal/config"
@@ -34,6 +33,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/monitoring"
 	"github.com/mixaill76/auto_ai_router/internal/proxy/modelutils"
 	"github.com/mixaill76/auto_ai_router/internal/ratelimit"
+	"github.com/mixaill76/auto_ai_router/internal/requestid"
 	compatlitellm "github.com/mixaill76/auto_ai_router/internal/responsecompat/litellm"
 	"github.com/mixaill76/auto_ai_router/internal/responsestore"
 	"github.com/mixaill76/auto_ai_router/internal/scope"
@@ -244,7 +244,8 @@ func (logCtx *RequestLogContext) Context() context.Context {
 // RequestLogContext holds all data needed for logging a request to LiteLLM DB
 // Filled throughout request processing and logged at the end via defer
 type RequestLogContext struct {
-	RequestID            string                   // Internal request UUID
+	RequestID            string                   // Internal request UUID; may be adopted from a trusted inbound traceparent (see requestid.Middleware), so two distinct requests can share this value
+	EventID              string                   // Always server-minted, never client-influenced; used as AirEventID so spend-log collision resolution stays meaningful even when RequestID collides
 	ClientResponseID     string                   // ID returned to the client
 	StartTime            time.Time                // Request start time
 	CompletionStartTime  time.Time                // Timestamp of the first real content/tool/reasoning delta (TTFT), not just the first byte/chunk; zero if not streamed or never reached
@@ -802,10 +803,23 @@ func (p *Proxy) WithResponseCompatibility(
 
 func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 	start := utils.NowUTC()
-	requestID := uuid.New().String()
+	// Reuse the ID assigned by requestid.Middleware (also used as the OTel
+	// trace_id, see internal/telemetry's IDGenerator) so request_id, trace_id,
+	// and the X-Request-Id header returned to the client are all identical.
+	// Falls back to minting one when the middleware didn't run (e.g. tests
+	// calling this handler directly).
+	requestID := requestid.FromContext(r.Context())
+	if requestID == "" {
+		requestID = requestid.New()
+	}
 	if info := responseCompatRequestFromContext(r.Context()); info != nil {
 		info.RequestID = requestID
 	}
+	// Minted fresh regardless of requestID's origin: when otel trusts an
+	// inbound traceparent, requestID can be client-supplied and shared across
+	// distinct requests (retry replay, or a malicious caller), which would
+	// otherwise defeat AirEventID's job as the spend-log collision fallback.
+	eventID := requestid.New()
 
 	// Save and strip internal proxy markers before normal request handling. Their
 	// value is trusted only after authentication proves this is a master-key AIR peer.
@@ -818,6 +832,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 	// and logged at the end via defer to ensure all requests are logged
 	logCtx := &RequestLogContext{
 		RequestID:      requestID,
+		EventID:        eventID,
 		StartTime:      start,
 		Request:        r,
 		Status:         "unknown",
