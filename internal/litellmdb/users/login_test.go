@@ -46,6 +46,28 @@ func TestCheckPassword(t *testing.T) {
 			stored:   "",
 			want:     true,
 		},
+		{
+			// Fixture generated with litellm's own hash_password() (litellm/proxy/utils.py):
+			//   salt = bytes.fromhex("000102030405060708090a0b0c0d0e0f")
+			//   dk = hashlib.scrypt(password.encode(), salt=salt, n=16384, r=8, p=1, dklen=32)
+			//   stored = "scrypt:" + base64.b64encode(salt + dk).decode()
+			name:     "scrypt_hash_match",
+			password: "correct horse battery staple",
+			stored:   "scrypt:AAECAwQFBgcICQoLDA0OD9dZCsosmAHPBu66dypp3DHOOGJZHZZSKsTmu6atHzGl",
+			want:     true,
+		},
+		{
+			name:     "scrypt_hash_wrong_password",
+			password: "wrong password",
+			stored:   "scrypt:AAECAwQFBgcICQoLDA0OD9dZCsosmAHPBu66dypp3DHOOGJZHZZSKsTmu6atHzGl",
+			want:     false,
+		},
+		{
+			name:     "scrypt_hash_malformed",
+			password: "correct horse battery staple",
+			stored:   "scrypt:not-valid-base64!!",
+			want:     false,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

@@ -4,13 +4,16 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"golang.org/x/crypto/scrypt"
 )
 
 var (
@@ -117,9 +120,28 @@ func AuthenticateUser(ctx context.Context, req LoginRequest, masterKey string, p
 	}, nil
 }
 
+// scryptPrefix marks a LiteLLM_UserTable.password value produced by litellm's
+// hash_password() (litellm/proxy/utils.py): "scrypt:" + base64(salt(16) || dk(32)),
+// derived with N=16384, r=8, p=1. Litellm rehashes legacy SHA256 passwords to
+// this format on next successful login (see _rehash_password_if_needed in
+// litellm/proxy/auth/login_utils.py), so both formats must stay supported here.
+const scryptPrefix = "scrypt:"
+
+const (
+	scryptN       = 16384
+	scryptR       = 8
+	scryptP       = 1
+	scryptSaltLen = 16
+	scryptKeyLen  = 32
+)
+
 // checkPassword compares the provided password against the stored password.
-// Supports plain text and SHA256 hex hash comparison.
+// Supports plain text, SHA256 hex hash, and litellm's scrypt format.
 func checkPassword(password, stored string) bool {
+	if encoded, ok := strings.CutPrefix(stored, scryptPrefix); ok {
+		return checkScryptPassword(password, encoded)
+	}
+
 	// Direct comparison
 	if constantTimeEqual(password, stored) {
 		return true
@@ -129,6 +151,22 @@ func checkPassword(password, stored string) bool {
 	hash := sha256.Sum256([]byte(password))
 	hashHex := hex.EncodeToString(hash[:])
 	return constantTimeEqual(hashHex, stored)
+}
+
+// checkScryptPassword verifies password against a litellm-format scrypt hash
+// (the part after the "scrypt:" prefix).
+func checkScryptPassword(password, encoded string) bool {
+	raw, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil || len(raw) != scryptSaltLen+scryptKeyLen {
+		return false
+	}
+	salt, want := raw[:scryptSaltLen], raw[scryptSaltLen:]
+
+	got, err := scrypt.Key([]byte(password), salt, scryptN, scryptR, scryptP, scryptKeyLen)
+	if err != nil {
+		return false
+	}
+	return subtle.ConstantTimeCompare(got, want) == 1
 }
 
 // constantTimeEqual performs a constant-time string comparison.
