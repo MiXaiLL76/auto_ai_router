@@ -82,15 +82,10 @@ jobs:
             type=raw,value=${{ github.ref_name }}-latest,enable=${{ github.ref != 'refs/heads/main' && !startsWith(github.ref, 'refs/tags/') }}
             type=sha,prefix=sha-
 
-      # secrets.GITHUB_TOKEN не пушит — см. обсуждение: либо репо стоит на
-      # read-only Workflow permissions, либо ещё что-то. Используем PAT из
-      # arc-github-app-air (k8s Secret контроллера ARC), заведённый отдельно
-      # как GitHub Actions secret GHCR_PUSH_TOKEN — это два разных хранилища
-      # секретов, воркфлоу не видит k8s Secret напрямую.
       - name: Build GHCR auth for kaniko
         id: ghcr-auth
         run: |
-          auth=$(printf '%s:%s' "${{ github.actor }}" "${{ secrets.GHCR_PUSH_TOKEN }}" | base64 -w0)
+          auth=$(printf '%s:%s' "${{ github.actor }}" "${{ secrets.GITHUB_TOKEN }}" | base64 -w0)
           echo "config={\"auths\":{\"ghcr.io\":{\"auth\":\"${auth}\"}}}" >> "$GITHUB_OUTPUT"
 
       - name: Build kaniko args
