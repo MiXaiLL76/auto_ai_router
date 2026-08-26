@@ -313,6 +313,10 @@ func (a *Authenticator) fetchTokenFromDB(ctx context.Context, hashedToken string
 	}
 	if orgID != nil {
 		info.OrganizationID = *orgID
+		info.DirectOrganizationID = *orgID
+	}
+	if teamOrganizationID != nil {
+		info.TeamOrganizationID = *teamOrganizationID
 	}
 	if blocked != nil {
 		info.Blocked = *blocked
@@ -351,6 +355,8 @@ func (a *Authenticator) fetchTokenFromDB(ctx context.Context, hashedToken string
 
 	// A missing referenced team denies instead of becoming unrestricted.
 	info.TeamDangling = teamID != nil && teamIDCheck == nil
+	info.DirectOrganizationDangling = orgID != nil && orgIDCheck == nil
+	info.TeamOrganizationDangling = orgID == nil && teamOrganizationID != nil && orgIDCheck == nil
 
 	// Set Organization fields (external budget from BudgetTable)
 	info.OrgSpend = orgSpend

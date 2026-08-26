@@ -253,9 +253,24 @@ func (r *Router) handleModels(w http.ResponseWriter, req *http.Request) {
 	}
 
 	var modelsResp models.ModelsResponse
+	var organizationPolicy *models.OrganizationPolicy
+	if r.proxy != nil {
+		var dangling bool
+		organizationPolicy, dangling = r.proxy.OrganizationPolicyForTokenInfo(tokenInfo)
+		if dangling {
+			proxy.WriteErrorForbidden(w, "Forbidden")
+			return
+		}
+	}
 	if r.modelManager != nil {
 		includeGroups := strings.EqualFold(req.URL.Query().Get("include_model_access_groups"), "true")
-		if includeGroups {
+		if organizationPolicy != nil {
+			if includeGroups {
+				modelsResp = r.modelManager.GetAllModelsWithAccessGroupsScopedForOrganization(visibility, organizationPolicy)
+			} else {
+				modelsResp = r.modelManager.GetAllModelsScopedForOrganization(visibility, organizationPolicy)
+			}
+		} else if includeGroups {
 			modelsResp = r.modelManager.GetAllModelsWithAccessGroupsScoped(visibility)
 		} else {
 			modelsResp = r.modelManager.GetAllModelsScoped(visibility)

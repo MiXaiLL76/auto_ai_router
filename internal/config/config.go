@@ -184,19 +184,20 @@ func (m *ModelRPMConfig) UnmarshalYAML(value *yaml.Node) error {
 }
 
 type Config struct {
-	Server             ServerConfig       `yaml:"server"`
-	Fail2Ban           Fail2BanConfig     `yaml:"fail2ban,omitempty"`
-	Credentials        []CredentialConfig `yaml:"credentials"`
-	Monitoring         MonitoringConfig   `yaml:"monitoring"`
-	Models             []ModelRPMConfig   `yaml:"models,omitempty"`
-	ModelAlias         map[string]string  `yaml:"model_alias,omitempty"`
-	ClientModelIDs     []string           `yaml:"client_model_ids,omitempty"`
-	PublicModelAlias   map[string]string  `yaml:"public_model_alias,omitempty"`
-	AcceptedModelAlias map[string]string  `yaml:"accepted_model_alias,omitempty"`
-	LiteLLMDB          LiteLLMDBConfig    `yaml:"litellm_db,omitempty"`
-	Redis              RedisConfig        `yaml:"redis,omitempty"`
-	OTEL               OTELConfig         `yaml:"otel,omitempty"`
-	Kafka              KafkaConfig        `yaml:"kafka,omitempty"`
+	Server               ServerConfig               `yaml:"server"`
+	Fail2Ban             Fail2BanConfig             `yaml:"fail2ban,omitempty"`
+	Credentials          []CredentialConfig         `yaml:"credentials"`
+	Monitoring           MonitoringConfig           `yaml:"monitoring"`
+	Models               []ModelRPMConfig           `yaml:"models,omitempty"`
+	ModelAlias           map[string]string          `yaml:"model_alias,omitempty"`
+	ClientModelIDs       []string                   `yaml:"client_model_ids,omitempty"`
+	PublicModelAlias     map[string]string          `yaml:"public_model_alias,omitempty"`
+	AcceptedModelAlias   map[string]string          `yaml:"accepted_model_alias,omitempty"`
+	OrganizationPolicies []OrganizationPolicyConfig `yaml:"organization_policies,omitempty"`
+	LiteLLMDB            LiteLLMDBConfig            `yaml:"litellm_db,omitempty"`
+	Redis                RedisConfig                `yaml:"redis,omitempty"`
+	OTEL                 OTELConfig                 `yaml:"otel,omitempty"`
+	Kafka                KafkaConfig                `yaml:"kafka,omitempty"`
 	// ModelTemplates stores x-model-templates entries as raw interface{} so that
 	// both single-model mappings and lists of models can be defined as YAML anchors
 	// without type errors. The actual model data is extracted via anchor expansion.
@@ -214,20 +215,21 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 
 	// Then unmarshal the resolved data into Config
 	type RawConfig struct {
-		Server             ServerConfig           `yaml:"server"`
-		Fail2Ban           Fail2BanConfig         `yaml:"fail2ban,omitempty"`
-		Credentials        []CredentialConfig     `yaml:"credentials"`
-		Monitoring         MonitoringConfig       `yaml:"monitoring"`
-		Models             []ModelRPMConfig       `yaml:"models,omitempty"`
-		ModelAlias         map[string]string      `yaml:"model_alias,omitempty"`
-		ClientModelIDs     []string               `yaml:"client_model_ids,omitempty"`
-		PublicModelAlias   map[string]string      `yaml:"public_model_alias,omitempty"`
-		AcceptedModelAlias map[string]string      `yaml:"accepted_model_alias,omitempty"`
-		LiteLLMDB          LiteLLMDBConfig        `yaml:"litellm_db,omitempty"`
-		Redis              RedisConfig            `yaml:"redis,omitempty"`
-		OTEL               OTELConfig             `yaml:"otel,omitempty"`
-		Kafka              KafkaConfig            `yaml:"kafka,omitempty"`
-		ModelTemplates     map[string]interface{} `yaml:"x-model-templates,omitempty"`
+		Server               ServerConfig               `yaml:"server"`
+		Fail2Ban             Fail2BanConfig             `yaml:"fail2ban,omitempty"`
+		Credentials          []CredentialConfig         `yaml:"credentials"`
+		Monitoring           MonitoringConfig           `yaml:"monitoring"`
+		Models               []ModelRPMConfig           `yaml:"models,omitempty"`
+		ModelAlias           map[string]string          `yaml:"model_alias,omitempty"`
+		ClientModelIDs       []string                   `yaml:"client_model_ids,omitempty"`
+		PublicModelAlias     map[string]string          `yaml:"public_model_alias,omitempty"`
+		AcceptedModelAlias   map[string]string          `yaml:"accepted_model_alias,omitempty"`
+		OrganizationPolicies []OrganizationPolicyConfig `yaml:"organization_policies,omitempty"`
+		LiteLLMDB            LiteLLMDBConfig            `yaml:"litellm_db,omitempty"`
+		Redis                RedisConfig                `yaml:"redis,omitempty"`
+		OTEL                 OTELConfig                 `yaml:"otel,omitempty"`
+		Kafka                KafkaConfig                `yaml:"kafka,omitempty"`
+		ModelTemplates       map[string]interface{}     `yaml:"x-model-templates,omitempty"`
 	}
 
 	var raw RawConfig
@@ -245,6 +247,7 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 	c.ClientModelIDs = raw.ClientModelIDs
 	c.PublicModelAlias = raw.PublicModelAlias
 	c.AcceptedModelAlias = raw.AcceptedModelAlias
+	c.OrganizationPolicies = raw.OrganizationPolicies
 	c.LiteLLMDB = raw.LiteLLMDB
 	c.Redis = raw.Redis
 	c.OTEL = raw.OTEL
@@ -1738,6 +1741,10 @@ func (c *Config) Validate() error {
 
 	if len(c.Credentials) == 0 && !c.LiteLLMDB.Enabled {
 		return fmt.Errorf("no credentials configured")
+	}
+
+	if err := ValidateOrganizationPolicies(c.OrganizationPolicies); err != nil {
+		return err
 	}
 
 	// Validate Fail2Ban error code rules for duplicates

@@ -176,6 +176,18 @@ func main() {
 	if litellmDBManager.IsEnabled() {
 		applyInitialDBModelTable(context.Background(), litellmDBManager, staticCreds, bal, modelManager, rateLimiter, priceRegistry, cfg, log)
 	}
+	organizationPolicies, err := models.LoadOrganizationPolicies(cfg.OrganizationPolicies, modelManager, models.OrganizationPolicyLoadOptions{
+		LiteLLMDBEnabled:      cfg.LiteLLMDB.Enabled,
+		LiteLLMDBRequired:     cfg.LiteLLMDB.IsRequired,
+		DisableSpendLogsWrite: cfg.LiteLLMDB.DisableSpendLogsWrite,
+	})
+	if err != nil {
+		log.Error("Failed to load organization policies", "error", err)
+		os.Exit(1)
+	}
+	if !organizationPolicies.Empty() {
+		log.Info("Organization policies loaded", "count", len(cfg.OrganizationPolicies))
+	}
 	tokenManager := auth.NewVertexTokenManager(log)
 	defer tokenManager.Stop()
 
@@ -238,6 +250,7 @@ func main() {
 		KafkaLog:                   kafkaLogManager,
 		HealthChecker:              healthChecker,
 		PriceRegistry:              priceRegistry,
+		OrganizationPolicies:       organizationPolicies,
 		MaxProviderRetries:         cfg.Server.MaxProviderRetries,
 		MaxFallbackAttempts:        cfg.Server.MaxFallbackAttempts,
 		ResponseStore:              respStore,

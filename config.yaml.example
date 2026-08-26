@@ -247,6 +247,20 @@ models:
 # accepted_model_alias:
 #   "legacy-gpt-4o-mini": "openai/gpt-4o-mini"
 
+# Optional: organization policy overlay for verified LiteLLM organizations.
+# Requires litellm_db.enabled=true, litellm_db.is_required=true, and
+# litellm_db.disable_spend_logs_write=false. Omit the section to keep legacy
+# global model and pricing behavior.
+# organization_policies:
+#   - organization_id: os.environ/CLOUD_RU_ORGANIZATION_ID
+#     price_profile_id: cloud-ru-2026-09
+#     model_prices_link: /app/organization-prices/cloud-ru-2026-09.json
+#     model_allowlist:
+#       - openai/gpt-5.5-pro
+#       - anthropic/claude-sonnet-4
+#     model_mappings:
+#       openai/gpt-5.5-pro: gpt-5.5-pro
+
 # Optional: Redis/Valkey backend for distributed rate limiting and response storage.
 # When enabled, all replicas share a single counter namespace — RPM/TPM limits are
 # enforced globally across the whole cluster instead of per-pod.

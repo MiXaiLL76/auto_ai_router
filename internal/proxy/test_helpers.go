@@ -109,6 +109,7 @@ type TestProxyConfig struct {
 	TiktokenEnabled        bool
 	ResponseHeaderMode     config.ResponseHeaderMode
 	CredentialNameAsTeamID bool
+	OrganizationPolicies   *models.OrganizationPolicyRegistry
 }
 
 // NewTestProxyBuilder creates a builder with default configuration.
@@ -308,6 +309,7 @@ func (b *TestProxyBuilder) Build() *Proxy {
 		TiktokenEnabled:        b.config.TiktokenEnabled,
 		ResponseHeaderMode:     b.config.ResponseHeaderMode,
 		CredentialNameAsTeamID: b.config.CredentialNameAsTeamID,
+		OrganizationPolicies:   b.config.OrganizationPolicies,
 	})
 }
 

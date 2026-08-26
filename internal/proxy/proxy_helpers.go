@@ -361,6 +361,32 @@ func addAIRSpendMetadata(metadata, eventID, providerResponseID string, isProxyRe
 	return string(encoded)
 }
 
+func addOrganizationPolicySpendMetadata(metadata string, logCtx *RequestLogContext) string {
+	if logCtx == nil || logCtx.OrganizationPolicy == nil {
+		return metadata
+	}
+	var doc map[string]interface{}
+	if json.Unmarshal([]byte(metadata), &doc) != nil {
+		doc = make(map[string]interface{})
+	}
+	spendMetadata, _ := doc["spend_logs_metadata"].(map[string]interface{})
+	if spendMetadata == nil {
+		spendMetadata = make(map[string]interface{})
+		doc["spend_logs_metadata"] = spendMetadata
+	}
+	spendMetadata["public_model_name"] = logCtx.PublicModelID
+	spendMetadata["canonical_model_name"] = logCtx.CanonicalModelID
+	spendMetadata["billing_profile_id"] = logCtx.BillingProfileID
+	spendMetadata["billing_profile_sha256"] = logCtx.BillingProfileSHA256
+	spendMetadata["billing_price_model_name"] = logCtx.PriceModelID
+	spendMetadata["billing_organization_id"] = logCtx.BillingOrganizationID
+	encoded, err := json.Marshal(doc)
+	if err != nil {
+		return metadata
+	}
+	return string(encoded)
+}
+
 // extractEndUser extracts end_user from request headers or body
 func extractEndUser(r *http.Request) string {
 	// Check X-End-User header first
