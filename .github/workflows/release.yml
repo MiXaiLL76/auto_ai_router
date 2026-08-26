@@ -123,7 +123,7 @@ jobs:
         uses: ./.github/actions/kaniko-build
         with:
           args: ${{ steps.kaniko.outputs.args }}
-          registry-auth-json: ${{ steps.ghcr-auth.outputs.config }}
+          registry_auth_json: ${{ steps.ghcr-auth.outputs.config }}
 
   # 3. Загрузка assets в существующий релиз (только для тегов)
   upload-assets:

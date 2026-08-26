@@ -18,8 +18,15 @@ inputs:
   args:
     description: Kaniko flags, one per line (e.g. steps.x.outputs.args from a multiline GITHUB_OUTPUT)
     required: true
-  registry-auth-json:
-    description: Contents of a docker config.json (auths section) for registry authentication
+  registry_auth_json:
+    description: >
+      Contents of a docker config.json (auths section) for registry
+      authentication. Underscores, not hyphens: a GH Actions input name maps
+      to env var INPUT_<NAME> with the name UPPERCASED but hyphens preserved
+      as literal hyphens (not turned into underscores) — INPUT_FOO-BAR isn't
+      referenceable as $INPUT_FOO-BAR in shell, silently reads as empty.
+      Learned this the hard way: with `registry-auth-json` the script read
+      $INPUT_REGISTRY_AUTH_JSON, which was simply never set (bytes: 0).
     required: true
 runs:
   using: docker
