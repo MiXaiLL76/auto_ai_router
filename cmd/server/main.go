@@ -180,7 +180,7 @@ func main() {
 
 	// ==================== Initialize Model Pricing ====================
 	if cfg.Server.ModelPricesLink != "" {
-		log.Info("Using model prices from", "link", cfg.Server.ModelPricesLink)
+		log.Info("Using model prices from", "link", cfg.Server.ModelPricesLink, "sync_interval", cfg.Server.ModelPricesSyncInterval.String())
 	} else {
 		log.Debug("Model prices not configured (model_prices_link empty)")
 	}
@@ -289,7 +289,7 @@ func main() {
 
 	// Start model price sync loop (only if configured)
 	if cfg.Server.ModelPricesLink != "" {
-		startPriceSyncLoop(cfg.Server.ModelPricesLink, priceRegistry, log, bgCtx, &wg)
+		startPriceSyncLoop(cfg.Server.ModelPricesLink, cfg.Server.ModelPricesSyncInterval, priceRegistry, log, bgCtx, &wg)
 	}
 
 	// ==================== HTTP Server Setup ====================
@@ -1019,6 +1019,7 @@ func loadAndUpdateModelPrices(
 // startPriceSyncLoop starts a background goroutine that periodically syncs model prices
 func startPriceSyncLoop(
 	modelPricesLink string,
+	syncInterval time.Duration,
 	registry *models.ModelPriceRegistry,
 	log *slog.Logger,
 	bgCtx context.Context,
@@ -1026,6 +1027,9 @@ func startPriceSyncLoop(
 ) {
 	if modelPricesLink == "" {
 		return
+	}
+	if syncInterval <= 0 {
+		syncInterval = config.DefaultModelPricesSyncInterval
 	}
 
 	wg.Add(1)
@@ -1035,8 +1039,8 @@ func startPriceSyncLoop(
 		// Load prices immediately on startup
 		_ = loadAndUpdateModelPrices(modelPricesLink, registry, log, "startup")
 
-		// Periodic update loop (every 5 minutes)
-		ticker := time.NewTicker(5 * time.Minute)
+		// Periodic update loop (every server.model_prices_sync_interval)
+		ticker := time.NewTicker(syncInterval)
 		defer ticker.Stop()
 
 		for {
@@ -1050,7 +1054,7 @@ func startPriceSyncLoop(
 		}
 	}()
 
-	log.Debug("Model price sync loop started", "interval", "5 minutes", "link", modelPricesLink)
+	log.Debug("Model price sync loop started", "interval", syncInterval.String(), "link", modelPricesLink)
 }
 
 func startMetricsUpdater(

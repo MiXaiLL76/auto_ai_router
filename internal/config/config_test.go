@@ -1145,6 +1145,44 @@ fail2ban:
 	assert.Equal(t, 20, cfg.Credentials[1].FallbackPriority)
 }
 
+func TestServerConfig_ModelPricesSyncInterval(t *testing.T) {
+	tests := []struct {
+		name     string
+		yamlLine string
+		expected time.Duration
+	}{
+		{name: "explicit", yamlLine: "  model_prices_sync_interval: 30s\n", expected: 30 * time.Second},
+		{name: "default when omitted", yamlLine: "", expected: DefaultModelPricesSyncInterval},
+		{name: "non-positive falls back to default", yamlLine: "  model_prices_sync_interval: 0s\n", expected: DefaultModelPricesSyncInterval},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			configPath := filepath.Join(tmpDir, "config.yaml")
+
+			configContent := `
+server:
+  port: 8080
+  max_body_size_mb: 10
+  master_key: "sk-test"
+  model_prices_link: "file://price.json"
+` + tt.yamlLine + `
+credentials:
+  - name: "test"
+    type: "openai"
+    api_key: "sk-test"
+    base_url: "https://api.openai.com"
+`
+			require.NoError(t, os.WriteFile(configPath, []byte(configContent), 0644))
+
+			cfg, err := Load(configPath)
+			require.NoError(t, err)
+			assert.Equal(t, tt.expected, cfg.Server.ModelPricesSyncInterval)
+		})
+	}
+}
+
 func TestConfig_UnmarshalYAML_ModelPricesLink(t *testing.T) {
 	tmpDir := t.TempDir()
 	configPath := filepath.Join(tmpDir, "config.yaml")

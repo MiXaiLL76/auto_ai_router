@@ -15,6 +15,9 @@ import (
 const DefaultMaxAttempts = 3
 const DefaultBanDuration time.Duration = 0
 
+// DefaultModelPricesSyncInterval is how often model prices are re-fetched from model_prices_link.
+const DefaultModelPricesSyncInterval = 5 * time.Minute
+
 var DefaultErrorCodes = []int{429}
 
 // ProviderType represents the type of AI provider
@@ -490,6 +493,7 @@ type ServerConfig struct {
 	SessionStickyTTL           int                   `yaml:"session_sticky_ttl_minutes"`        // Session binding TTL in minutes (0 = default 6)
 	SessionStickyAutoCacheCtrl bool                  `yaml:"session_sticky_auto_cache_control"` // Auto-inject Anthropic cache_control when session is active (default: true)
 	ModelPricesLink            string                `yaml:"model_prices_link,omitempty"`       // URL or file path to model prices JSON - supports os.environ/VAR_NAME
+	ModelPricesSyncInterval    time.Duration         `yaml:"model_prices_sync_interval"`        // How often model prices are re-fetched from model_prices_link (default: 5m)
 	ShutdownDelay              time.Duration         `yaml:"shutdown_delay"`                    // Delay between readiness=false and server.Shutdown (default: 5s)
 	DrainUpstreamOnAbort       bool                  `yaml:"drain_upstream_on_abort"`           // When true, keep reading upstream after client disconnect to capture real usage chunk (default: false — estimate from delta text)
 	TiktokenEnabled            bool                  `yaml:"tiktoken_enabled"`                  // Enable local tiktoken-based prompt/completion token estimation as a fallback when a provider omits usage (default: true; disable if all configured providers always report usage)
@@ -591,6 +595,7 @@ func (s *ServerConfig) UnmarshalYAML(value *yaml.Node) error {
 		SessionStickyTTL           string                `yaml:"session_sticky_ttl_minutes"`
 		SessionStickyAutoCacheCtrl string                `yaml:"session_sticky_auto_cache_control"`
 		ModelPricesLink            string                `yaml:"model_prices_link,omitempty"`
+		ModelPricesSyncInterval    string                `yaml:"model_prices_sync_interval"`
 		ShutdownDelay              string                `yaml:"shutdown_delay"`
 		DrainUpstreamOnAbort       string                `yaml:"drain_upstream_on_abort"`
 		TiktokenEnabled            string                `yaml:"tiktoken_enabled"`
@@ -683,6 +688,9 @@ func (s *ServerConfig) UnmarshalYAML(value *yaml.Node) error {
 		return err
 	}
 	if s.ProxyHealthTimeout, err = parseField(temp.ProxyHealthTimeout, 15*time.Second, time.ParseDuration, "proxy_health_timeout"); err != nil {
+		return err
+	}
+	if s.ModelPricesSyncInterval, err = parseField(temp.ModelPricesSyncInterval, DefaultModelPricesSyncInterval, time.ParseDuration, "model_prices_sync_interval"); err != nil {
 		return err
 	}
 	s.ResponseHeaders = temp.ResponseHeaders
@@ -1626,6 +1634,11 @@ func (c *Config) Validate() error {
 	// -1 means unlimited timeout
 	if c.Server.RequestTimeout < 0 && c.Server.RequestTimeout != -1 {
 		return fmt.Errorf("invalid request_timeout: %v", c.Server.RequestTimeout)
+	}
+
+	// A non-positive interval would make the ticker panic; fall back to the default.
+	if c.Server.ModelPricesSyncInterval <= 0 {
+		c.Server.ModelPricesSyncInterval = DefaultModelPricesSyncInterval
 	}
 
 	// Validate logging level
