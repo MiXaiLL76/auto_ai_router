@@ -130,7 +130,7 @@ func transformedProviderAudioUsageExcludesCached(cred *config.CredentialConfig) 
 	if cred == nil {
 		return false
 	}
-	switch cred.Type {
+	switch cred.EffectiveProviderType() {
 	case config.ProviderTypeVertexAI,
 		config.ProviderTypeGemini,
 		config.ProviderTypeAnthropic,

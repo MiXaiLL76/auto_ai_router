@@ -279,9 +279,10 @@ func (p *Proxy) prepareRequestForCredential(
 		}
 	}
 
+	effectiveType := cred.EffectiveProviderType()
 	if p.stickyAutoCacheCtrl &&
 		stickyCacheEligible &&
-		(cred.Type == config.ProviderTypeAnthropic || cred.Type == config.ProviderTypeCometAPI || cred.Type == config.ProviderTypeProMan || cred.Type == config.ProviderTypeBedrock) {
+		(effectiveType == config.ProviderTypeAnthropic || effectiveType == config.ProviderTypeCometAPI || effectiveType == config.ProviderTypeProMan || effectiveType == config.ProviderTypeBedrock) {
 		body = anthropicconv.InjectCacheControl(body)
 	}
 
@@ -321,7 +322,7 @@ func (p *Proxy) prepareRequestForCredential(
 		req.passthroughResponses = true
 		p.logger.DebugContext(r.Context(), "Native Responses API passthrough",
 			"model", modelID, "provider", cred.Type, "streaming", streaming)
-	case responses.HasNativeResponsesForModel(cred.Type, realModelID) &&
+	case responses.HasNativeResponsesForModel(effectiveType, realModelID) &&
 		(p.modelManager == nil || !p.modelManager.HasPassthroughResponsesOverride(modelID)):
 		req.nativeResponses = true
 		p.logger.DebugContext(r.Context(), "Native Responses converter path",

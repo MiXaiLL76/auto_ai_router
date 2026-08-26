@@ -69,15 +69,21 @@ func TestOpenAIToAnthropic_ResponseFormatJSONSchemaIncludesSchema(t *testing.T) 
 
 	var request map[string]interface{}
 	require.NoError(t, json.Unmarshal(result, &request))
-	system, ok := request["system"].(string)
-	require.True(t, ok, "system prompt must be a string carrying the JSON instruction")
+
+	// json_schema must go through native Structured Outputs (output_config.format),
+	// enforced by the API, not a system-prompt suggestion the model can ignore.
+	_, hasSystem := request["system"]
+	assert.False(t, hasSystem, "json_schema must not fall back to a system-prompt instruction")
+
+	format := request["output_config"].(map[string]interface{})["format"].(map[string]interface{})
+	assert.Equal(t, "json_schema", format["type"])
 
 	// The model must see the actual field name from the schema, not just a
 	// generic "respond with JSON" instruction - otherwise it invents its own
 	// field names (observed: "location" instead of the schema's "city").
-	assert.Contains(t, system, `"city"`)
-	assert.Contains(t, system, `"required"`)
-	assert.Contains(t, system, "no markdown code fences")
+	schema := format["schema"].(map[string]interface{})
+	assert.Equal(t, []interface{}{"city"}, schema["required"])
+	assert.Contains(t, schema["properties"], "city")
 }
 
 func TestOpenAIToAnthropic_ResponseFormatJSONObjectForbidsMarkdownFences(t *testing.T) {
@@ -93,6 +99,82 @@ func TestOpenAIToAnthropic_ResponseFormatJSONObjectForbidsMarkdownFences(t *test
 	system, ok := request["system"].(string)
 	require.True(t, ok)
 	assert.Contains(t, system, "no markdown code fences")
+}
+
+func TestOpenAIToAnthropic_ResponseFormatJSONObjectAppendsToExistingSystem(t *testing.T) {
+	// Regression test: the JSON instruction used to be injected before the real
+	// system message was assigned, so the unconditional `anthropicReq.System =
+	// systemContent` a few lines later silently discarded it whenever the
+	// request carried its own system message.
+	result, err := OpenAIToAnthropic([]byte(`{
+		"model":"claude-sonnet-4-6",
+		"messages":[
+			{"role":"system","content":"You are a helpful assistant."},
+			{"role":"user","content":"test"}
+		],
+		"response_format":{"type":"json_object"}
+	}`), "claude-sonnet-4-6", true)
+	require.NoError(t, err)
+
+	var request map[string]interface{}
+	require.NoError(t, json.Unmarshal(result, &request))
+	system, ok := request["system"].(string)
+	require.True(t, ok)
+	assert.Contains(t, system, "You are a helpful assistant.")
+	assert.Contains(t, system, "no markdown code fences")
+}
+
+func TestOpenAIToAnthropic_ResponseFormatJSONSchemaPreservesExistingSystem(t *testing.T) {
+	// json_schema now goes through output_config.format, not the system prompt,
+	// so an existing system message must survive untouched.
+	result, err := OpenAIToAnthropic([]byte(`{
+		"model":"claude-sonnet-4-6",
+		"messages":[
+			{"role":"system","content":"You are a helpful assistant."},
+			{"role":"user","content":"Where do you live?"}
+		],
+		"response_format":{
+			"type":"json_schema",
+			"json_schema":{
+				"name":"location_info",
+				"schema":{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]},
+				"strict":true
+			}
+		}
+	}`), "claude-sonnet-4-6", true)
+	require.NoError(t, err)
+
+	var request map[string]interface{}
+	require.NoError(t, json.Unmarshal(result, &request))
+	system, ok := request["system"].(string)
+	require.True(t, ok)
+	assert.Equal(t, "You are a helpful assistant.", system)
+	assert.Equal(t, "json_schema", request["output_config"].(map[string]interface{})["format"].(map[string]interface{})["type"])
+}
+
+func TestOpenAIToAnthropic_ResponseFormatJSONSchemaMergesWithThinkingEffort(t *testing.T) {
+	// Both live under output_config, so setting the schema format must not
+	// clobber an effort value already set by adaptive thinking, or vice versa.
+	result, err := OpenAIToAnthropic([]byte(`{
+		"model":"claude-opus-5",
+		"messages":[{"role":"user","content":"test"}],
+		"reasoning_effort":"high",
+		"response_format":{
+			"type":"json_schema",
+			"json_schema":{
+				"name":"location_info",
+				"schema":{"type":"object","properties":{"city":{"type":"string"}},"required":["city"]},
+				"strict":true
+			}
+		}
+	}`), "claude-opus-5", true)
+	require.NoError(t, err)
+
+	var request map[string]interface{}
+	require.NoError(t, json.Unmarshal(result, &request))
+	outputConfig := request["output_config"].(map[string]interface{})
+	assert.Equal(t, "high", outputConfig["effort"])
+	assert.Equal(t, "json_schema", outputConfig["format"].(map[string]interface{})["type"])
 }
 
 func TestOpenAIToAnthropic_ReasoningEffortPrecedence(t *testing.T) {

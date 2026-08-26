@@ -1,8 +1,11 @@
 # Comet API
 
 Comet API is supported as an Anthropic-compatible provider via the dedicated
-`cometapi` credential type. Requests are converted from OpenAI Chat Completions
-or Responses API format to Anthropic Messages API and sent to `/v1/messages`.
+`cometapi` credential type. By default, requests are converted from OpenAI
+Chat Completions or Responses API format to Anthropic Messages API and sent to
+`/v1/messages`. Comet also exposes an OpenAI-compatible `/v1/chat/completions`
+endpoint for the same models; set `openai_proto: true` on a credential to use
+that wire protocol instead (see [OpenAI Protocol Mode](#openai-protocol-mode)).
 
 ## Configuration
 
@@ -15,6 +18,45 @@ credentials:
     rpm: 60
     tpm: -1
 ```
+
+## OpenAI Protocol Mode
+
+Set `openai_proto: true` to switch a `cometapi` credential from Comet's
+Anthropic-compatible `/v1/messages` endpoint to its OpenAI-compatible
+`/v1/chat/completions` endpoint. Requests and responses are then passed
+through unconverted (the same code path used for `type: openai`), instead of
+being translated to/from Anthropic Messages format:
+
+```yaml
+credentials:
+  - name: "comet_openai"
+    type: "cometapi"
+    api_key: "os.environ/COMET_API_KEY"
+    base_url: "https://api.cometapi.com/v1"
+    openai_proto: true
+    rpm: 60
+    tpm: -1
+```
+
+`openai_proto` is only valid on `type: cometapi` credentials — setting it on
+any other provider type fails config validation.
+
+With `openai_proto: true`:
+
+- The upstream URL is built from `base_url` + the incoming request path
+  (typically `/v1/chat/completions`), not `/v1/messages`.
+- Auth is a plain `Authorization: Bearer <api_key>` header; `auth_type` and
+  the `anthropic-version` header are not used.
+- The [Claude Model Aliases](#claude-model-aliases) and
+  [Prompt Caching](#prompt-caching) sections below (Anthropic `cache_control`
+  format, the `anthropic-beta` header) do not apply — the request body is
+  never translated to Anthropic's shape.
+- [Error Masking](#error-masking) still applies, since it is keyed on the
+  credential's identity (`cometapi`), not its wire protocol.
+
+Use separate credentials (e.g. `comet_anthropic` and `comet_openai`) if you
+want some models routed via Anthropic protocol and others via OpenAI
+protocol at the same time.
 
 ## Claude Model Aliases
 
