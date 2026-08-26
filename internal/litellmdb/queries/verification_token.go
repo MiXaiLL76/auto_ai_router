@@ -2,7 +2,8 @@ package queries
 
 // The positional SELECT list must match fetchTokenFromDB.Scan.
 // The *_check columns distinguish missing parents from unset references.
-
+//
+//nolint:gosec // G101: false positive — SQL statement text, not a credential
 const QueryValidateTokenWithHierarchy = `
 -- Main query with all JOINs
 SELECT

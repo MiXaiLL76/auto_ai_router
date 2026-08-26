@@ -30,6 +30,7 @@ const (
 		WHERE token = $3`
 
 	// QueryUpdateTokenSpend is the fallback for schemas without last_active.
+	//nolint:gosec // G101: false positive — SQL statement text, not a credential
 	QueryUpdateTokenSpend = `
 		UPDATE "LiteLLM_VerificationToken"
 		SET spend = COALESCE(spend, 0) + $1, updated_at = NOW()
@@ -37,6 +38,7 @@ const (
 
 	// QueryUpdateTokenModelSpend is the model-counter fallback for schemas
 	// without last_active.
+	//nolint:gosec // G101: false positive — SQL statement text, not a credential
 	QueryUpdateTokenModelSpend = `
 		UPDATE "LiteLLM_VerificationToken"
 		SET spend = COALESCE(spend, 0) + $1,

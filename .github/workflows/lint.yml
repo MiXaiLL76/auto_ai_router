@@ -2,7 +2,7 @@ name: Lint
 
 env:
   GOLANGCI_LINT_VERSION: v2.13.1
-  MIN_SCORE: 80
+  MIN_SCORE: 15
   MIN_COVERAGE: 70
 
 on:

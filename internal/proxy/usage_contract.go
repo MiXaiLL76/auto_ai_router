@@ -19,7 +19,7 @@ const (
 	// HeaderAIRUsageAudioTokens describes the cached-audio contract of the
 	// response body. AIR sets it so downstream AIR proxies do not need a
 	// credential-level guess about whether audio_tokens includes cached audio.
-	HeaderAIRUsageAudioTokens = "Air-Usage-Audio-Tokens"
+	HeaderAIRUsageAudioTokens = "Air-Usage-Audio-Tokens" //nolint:gosec // G101: HTTP header name, not a credential
 
 	airUsageAudioTokensExcludeCached = "exclude-cached"
 	airUsageAudioTokensIncludeCached = "include-cached"

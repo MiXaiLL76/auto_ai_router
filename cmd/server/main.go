@@ -400,7 +400,7 @@ func main() {
 		pprofMux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
 		pprofMux.HandleFunc("/debug/pprof/trace", pprof.Trace)
 
-		pprofServer = &http.Server{
+		pprofServer = &http.Server{ //nolint:gosec // G112: internal-only debug listener, never exposed via Service/Ingress (see warning log below)
 			Addr:    fmt.Sprintf(":%d", cfg.Monitoring.PprofPort),
 			Handler: pprofMux,
 		}
