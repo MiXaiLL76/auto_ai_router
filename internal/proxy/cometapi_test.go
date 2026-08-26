@@ -20,6 +20,11 @@ func TestIsCometAPICredential(t *testing.T) {
 			want: true,
 		},
 		{
+			name: "dedicated provider type, openai protocol",
+			cred: &config.CredentialConfig{Type: config.ProviderTypeCometAPI, OpenAIProtocol: true},
+			want: true,
+		},
+		{
 			name: "comet host fallback",
 			cred: &config.CredentialConfig{Type: config.ProviderTypeAnthropic, BaseURL: "https://api.cometapi.com/v1"},
 			want: true,

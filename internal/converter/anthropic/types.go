@@ -109,7 +109,17 @@ type AnthropicThinking struct {
 
 // AnthropicOutputConfig controls output-level settings for Claude 4+ models.
 type AnthropicOutputConfig struct {
-	Effort string `json:"effort,omitempty"` // "low", "medium", "high", "xhigh", "max"
+	Effort string                     `json:"effort,omitempty"` // "low", "medium", "high", "xhigh", "max"
+	Format *AnthropicJSONOutputFormat `json:"format,omitempty"`
+}
+
+// AnthropicJSONOutputFormat requests native Structured Outputs: the API itself
+// constrains generation to match Schema, unlike the system-prompt instruction
+// used for plain "json_object" requests (see buildJSONResponseInstruction),
+// which is only ever a suggestion the model can ignore.
+type AnthropicJSONOutputFormat struct {
+	Type   string      `json:"type"` // always "json_schema"
+	Schema interface{} `json:"schema"`
 }
 
 // AnthropicMetadata carries per-request metadata sent to Anthropic.

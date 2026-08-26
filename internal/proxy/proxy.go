@@ -1527,7 +1527,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 				DisplayModelID: modelID,
 				IsStreaming:    streaming,
 			}
-			provResponses = responses.NewProviderResponses(cred.Type, mode)
+			provResponses = responses.NewProviderResponses(cred.EffectiveProviderType(), mode)
 			if provResponses == nil {
 				p.logger.ErrorContext(r.Context(), "Native Responses converter unavailable",
 					"error_code", http.StatusInternalServerError,
@@ -1574,7 +1574,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 		} else {
 			// Use realModelID for URL construction and body conversion (provider-facing name).
 			// modelID (alias) is used for credential selection and rate limiting.
-			conv = converter.New(cred.Type, converter.RequestMode{
+			conv = converter.New(cred.EffectiveProviderType(), converter.RequestMode{
 				IsImageGeneration: logCtx.IsImageGeneration,
 				IsImageEdit:       isImageEdit,
 				IsEmbeddings:      isEmbeddings,
@@ -1635,7 +1635,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		anthropicBetas := append([]string(nil), prepared.messagesMetadata.AnthropicBetas...)
-		if cred.Type == config.ProviderTypeCometAPI {
+		if cred.Type == config.ProviderTypeCometAPI && !cred.OpenAIProtocol {
 			var generatedBetas []string
 			requestBody, generatedBetas = anthropicconv.ExtractBetaHeader(requestBody)
 			anthropicBetas = append(anthropicBetas, generatedBetas...)
@@ -1694,7 +1694,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 			// Content-Type header to match the new boundary.
 			proxyReq.Header.Set("Content-Type", rewrittenCT)
 		}
-		switch cred.Type {
+		switch cred.EffectiveProviderType() {
 		case config.ProviderTypeVertexAI:
 			proxyReq.Header.Set("Authorization", "Bearer "+vertexToken)
 		case config.ProviderTypeGemini:

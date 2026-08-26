@@ -20,7 +20,8 @@ import (
 //   - n: Anthropic does not support multiple candidates per request
 //   - frequency_penalty / presence_penalty / logit_bias: no Anthropic equivalent
 //   - seed: no Anthropic equivalent
-//   - response_format: instruct via system prompt instead
+//   - response_format: json_schema uses native Structured Outputs (output_config.format);
+//     json_object falls back to a system-prompt instruction
 //   - logprobs: not supported
 //   - modalities: Anthropic is text-only
 //   - service_tier / store: not supported
@@ -120,24 +121,6 @@ func OpenAIToAnthropic(openAIBody []byte, model string, isRealAnthropicBackend b
 		anthropicReq.Thinking = &AnthropicThinking{Type: "disabled"}
 	}
 
-	// Anthropic has no native response_format; we inject a JSON instruction
-	// into the system prompt when the caller requests JSON output. When a
-	// json_schema is present, the schema itself is serialized into the
-	// instruction — without it, Claude never sees the required field
-	// names/types and invents plausible-looking ones instead.
-	if req.ResponseFormat != nil {
-		if rfMap, ok := req.ResponseFormat.(map[string]interface{}); ok {
-			if rfType, _ := rfMap["type"].(string); rfType == "json_object" || rfType == "json_schema" {
-				jsonInstruction := buildJSONResponseInstruction(rfMap, rfType)
-				if systemContent, ok := anthropicReq.System.(string); ok {
-					anthropicReq.System = systemContent + jsonInstruction
-				} else if anthropicReq.System == nil {
-					anthropicReq.System = strings.TrimPrefix(jsonInstruction, "\n\n")
-				}
-			}
-		}
-	}
-
 	// user → metadata.user_id
 	if req.User != "" {
 		anthropicReq.Metadata = &AnthropicMetadata{UserID: req.User}
@@ -189,31 +172,54 @@ func OpenAIToAnthropic(openAIBody []byte, model string, isRealAnthropicBackend b
 		anthropicReq.System = systemContent
 	}
 
-	return json.Marshal(anthropicReq)
-}
-
-// buildJSONResponseInstruction builds the system-prompt substitute for
-// OpenAI's response_format, which Anthropic has no native equivalent for.
-// For json_schema, the schema is serialized verbatim so the model has the
-// actual field names/types/required list to follow, not just "return JSON".
-func buildJSONResponseInstruction(rfMap map[string]interface{}, rfType string) string {
-	const noMarkdown = " Respond with raw JSON only: no markdown code fences (no ``` before or after " +
-		"the JSON), no commentary, no text outside the JSON object."
-
-	if rfType == "json_schema" {
-		if jsonSchema, ok := rfMap["json_schema"].(map[string]interface{}); ok {
-			if schema := jsonSchema["schema"]; schema != nil {
-				if schemaBytes, err := json.Marshal(schema); err == nil {
-					return "\n\nYour response must be valid JSON that strictly conforms to this JSON Schema:\n" +
-						string(schemaBytes) +
-						"\nUse exactly the field names, types, and required fields the schema defines." +
-						noMarkdown
+	// response_format is handled last, once System holds its final value, so
+	// the json_object fallback below can append to the real system prompt
+	// instead of being clobbered by it.
+	//
+	// json_schema uses Claude's native Structured Outputs (output_config.format):
+	// the API itself constrains generation to the schema, unlike a system-prompt
+	// instruction the model is merely asked to follow. json_object carries no
+	// schema for output_config to enforce, so it falls back to the same prompt
+	// instruction used when a json_schema request is missing its schema.
+	if req.ResponseFormat != nil {
+		if rfMap, ok := req.ResponseFormat.(map[string]interface{}); ok {
+			rfType, _ := rfMap["type"].(string)
+			applied := false
+			if rfType == "json_schema" {
+				if jsonSchema, ok := rfMap["json_schema"].(map[string]interface{}); ok {
+					if schema := jsonSchema["schema"]; schema != nil {
+						if anthropicReq.OutputConfig == nil {
+							anthropicReq.OutputConfig = &AnthropicOutputConfig{}
+						}
+						anthropicReq.OutputConfig.Format = &AnthropicJSONOutputFormat{
+							Type:   "json_schema",
+							Schema: schema,
+						}
+						applied = true
+					}
+				}
+			}
+			if !applied && (rfType == "json_object" || rfType == "json_schema") {
+				jsonInstruction := buildJSONResponseInstruction()
+				if systemContent, ok := anthropicReq.System.(string); ok {
+					anthropicReq.System = systemContent + jsonInstruction
+				} else if anthropicReq.System == nil {
+					anthropicReq.System = strings.TrimPrefix(jsonInstruction, "\n\n")
 				}
 			}
 		}
 	}
 
-	return "\n\nYou must respond with valid JSON only." + noMarkdown
+	return json.Marshal(anthropicReq)
+}
+
+// buildJSONResponseInstruction builds the system-prompt fallback for requests
+// with no schema to natively enforce: plain "json_object", or a malformed
+// json_schema request missing its schema.
+func buildJSONResponseInstruction() string {
+	return "\n\nYou must respond with valid JSON only." +
+		" Respond with raw JSON only: no markdown code fences (no ``` before or after " +
+		"the JSON), no commentary, no text outside the JSON object."
 }
 
 func openAIReasoningEffort(req openai.OpenAIRequest) string {

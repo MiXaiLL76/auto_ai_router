@@ -614,7 +614,7 @@ func (p *Proxy) handleProviderStreaming(
 	logCtx *RequestLogContext,
 ) error {
 	publicModel := clientVisibleResponseModel(logCtx, displayModelID)
-	switch cred.Type {
+	switch cred.EffectiveProviderType() {
 	case config.ProviderTypeVertexAI, config.ProviderTypeGemini:
 		return p.handleVertexStreaming(w, resp, cred.Name, realModelID, publicModel, logCtx)
 	case config.ProviderTypeAnthropic:
@@ -1569,7 +1569,7 @@ func (p *Proxy) handleResponsesAPIStreaming(
 	if logCtx != nil && logCtx.RealModelID != "" {
 		converterModelID = logCtx.RealModelID
 	}
-	conv := converter.New(cred.Type, converter.RequestMode{
+	conv := converter.New(cred.EffectiveProviderType(), converter.RequestMode{
 		ModelID:        converterModelID,
 		DisplayModelID: publicModel,
 		IsStreaming:    true,
@@ -1649,7 +1649,7 @@ func (p *Proxy) handleMessagesAPIStreaming(
 	if logCtx != nil && logCtx.RealModelID != "" {
 		converterModelID = logCtx.RealModelID
 	}
-	conv := converter.New(cred.Type, converter.RequestMode{
+	conv := converter.New(cred.EffectiveProviderType(), converter.RequestMode{
 		ModelID:        converterModelID,
 		DisplayModelID: publicModel,
 		IsStreaming:    true,

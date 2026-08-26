@@ -889,6 +889,86 @@ rpm: 60
 	assert.Equal(t, ProviderTypeCometAPI, cred.Type)
 }
 
+func TestCredentialConfig_ParsesOpenAIProtocol(t *testing.T) {
+	var cred CredentialConfig
+	err := yaml.Unmarshal([]byte(`
+name: comet
+type: cometapi
+api_key: key
+base_url: https://api.cometapi.com/v1
+rpm: 60
+openai_proto: true
+`), &cred)
+
+	require.NoError(t, err)
+	assert.True(t, cred.OpenAIProtocol)
+	assert.Equal(t, ProviderTypeOpenAI, cred.EffectiveProviderType())
+}
+
+func TestCredentialConfig_EffectiveProviderType(t *testing.T) {
+	tests := []struct {
+		name string
+		cred CredentialConfig
+		want ProviderType
+	}{
+		{
+			name: "cometapi default stays anthropic-compatible",
+			cred: CredentialConfig{Type: ProviderTypeCometAPI},
+			want: ProviderTypeCometAPI,
+		},
+		{
+			name: "cometapi with openai_proto becomes openai",
+			cred: CredentialConfig{Type: ProviderTypeCometAPI, OpenAIProtocol: true},
+			want: ProviderTypeOpenAI,
+		},
+		{
+			name: "other provider types are unaffected by OpenAIProtocol",
+			cred: CredentialConfig{Type: ProviderTypeAnthropic, OpenAIProtocol: true},
+			want: ProviderTypeAnthropic,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, tt.cred.EffectiveProviderType())
+		})
+	}
+}
+
+func TestConfig_Validate_OpenAIProtocolOnlyForCometAPI(t *testing.T) {
+	cfg := &Config{
+		Server: ServerConfig{
+			Port:           8080,
+			MaxBodySizeMB:  10,
+			MasterKey:      "test-key",
+			RequestTimeout: 30 * time.Second,
+		},
+		Credentials: []CredentialConfig{
+			{Name: "bad", Type: ProviderTypeAnthropic, APIKey: "key", BaseURL: "http://test.com", RPM: 60, OpenAIProtocol: true},
+		},
+		Fail2Ban: Fail2BanConfig{MaxAttempts: 3},
+	}
+	err := cfg.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "openai_proto is only supported for 'cometapi' type")
+}
+
+func TestConfig_Validate_OpenAIProtocolAllowedForCometAPI(t *testing.T) {
+	cfg := &Config{
+		Server: ServerConfig{
+			Port:           8080,
+			MaxBodySizeMB:  10,
+			MasterKey:      "test-key",
+			RequestTimeout: 30 * time.Second,
+		},
+		Credentials: []CredentialConfig{
+			{Name: "comet", Type: ProviderTypeCometAPI, APIKey: "key", BaseURL: "https://api.cometapi.com/v1", RPM: 60, OpenAIProtocol: true},
+		},
+		Fail2Ban: Fail2BanConfig{MaxAttempts: 3},
+	}
+	require.NoError(t, cfg.Validate())
+}
+
 func TestCredentialConfig_NormalizeAIRProviderTypeAliases(t *testing.T) {
 	tests := []struct {
 		name string

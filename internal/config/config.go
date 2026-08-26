@@ -705,11 +705,16 @@ func (s *ServerConfig) UnmarshalYAML(value *yaml.Node) error {
 }
 
 type CredentialConfig struct {
-	Name                    string            `yaml:"name"`
-	Type                    ProviderType      `yaml:"type"`
-	APIKey                  string            `yaml:"api_key"`
-	BaseURL                 string            `yaml:"base_url"`
-	AuthType                string            `yaml:"auth_type,omitempty"`
+	Name     string       `yaml:"name"`
+	Type     ProviderType `yaml:"type"`
+	APIKey   string       `yaml:"api_key"`
+	BaseURL  string       `yaml:"base_url"`
+	AuthType string       `yaml:"auth_type,omitempty"`
+	// OpenAIProtocol switches a cometapi credential from CometAPI's
+	// Anthropic-compatible wire protocol (/v1/messages) to its
+	// OpenAI-compatible one (/v1/chat/completions). Only valid when
+	// Type == ProviderTypeCometAPI. See EffectiveProviderType.
+	OpenAIProtocol          bool              `yaml:"openai_proto,omitempty"`
 	RPM                     int               `yaml:"rpm"`
 	TPM                     int               `yaml:"tpm"`
 	Weight                  int               `yaml:"weight"` // Default weighted round-robin weight for this credential (0 = 1)
@@ -754,6 +759,22 @@ func (c CredentialConfig) IsProxyLike() bool {
 	return c.Type.IsProxyLike()
 }
 
+// EffectiveProviderType returns the ProviderType that should drive wire
+// protocol decisions (converter selection, outbound URL/headers, streaming
+// handler, Responses-API registry lookup) for this credential. It differs
+// from Type only for a cometapi credential with OpenAIProtocol set, in which
+// case it reports ProviderTypeOpenAI so the credential reuses the existing
+// OpenAI-compatible request/response path instead of CometAPI's default
+// Anthropic-compatible one. Everything that identifies the credential as
+// CometAPI (billing, upstream error masking, model discovery) must keep
+// using Type directly, not this method.
+func (c CredentialConfig) EffectiveProviderType() ProviderType {
+	if c.Type == ProviderTypeCometAPI && c.OpenAIProtocol {
+		return ProviderTypeOpenAI
+	}
+	return c.Type
+}
+
 // SameProviderIdentity reports whether learned provider metadata can be reused.
 func (c CredentialConfig) SameProviderIdentity(other CredentialConfig) bool {
 	return c.Name == other.Name &&
@@ -761,6 +782,7 @@ func (c CredentialConfig) SameProviderIdentity(other CredentialConfig) bool {
 		c.BaseURL == other.BaseURL &&
 		c.APIKey == other.APIKey &&
 		c.AuthType == other.AuthType &&
+		c.OpenAIProtocol == other.OpenAIProtocol &&
 		c.IsFallback == other.IsFallback
 }
 
@@ -773,6 +795,7 @@ func (c *CredentialConfig) UnmarshalYAML(value *yaml.Node) error {
 		APIKey           string           `yaml:"api_key"`
 		BaseURL          string           `yaml:"base_url"`
 		AuthType         string           `yaml:"auth_type,omitempty"`
+		OpenAIProtocol   string           `yaml:"openai_proto,omitempty"`
 		RPM              string           `yaml:"rpm"`
 		TPM              string           `yaml:"tpm"`
 		Weight           string           `yaml:"weight"`
@@ -831,6 +854,9 @@ func (c *CredentialConfig) UnmarshalYAML(value *yaml.Node) error {
 		return err
 	}
 	if c.ReasoningOnly, err = parseField(temp.ReasoningOnly, false, strconv.ParseBool, "reasoning_only for credential '"+c.Name+"'"); err != nil {
+		return err
+	}
+	if c.OpenAIProtocol, err = parseField(temp.OpenAIProtocol, false, strconv.ParseBool, "openai_proto for credential '"+c.Name+"'"); err != nil {
 		return err
 	}
 
@@ -1724,6 +1750,9 @@ func (c *Config) Validate() error {
 		}
 		if cred.AuthType != "" && cred.AuthType != "bearer" && cred.AuthType != "x-api-key" {
 			return fmt.Errorf("credential %s: invalid auth_type: %s (must be 'bearer' or 'x-api-key')", cred.Name, cred.AuthType)
+		}
+		if cred.OpenAIProtocol && cred.Type != ProviderTypeCometAPI {
+			return fmt.Errorf("credential %s: openai_proto is only supported for 'cometapi' type, got: %s", cred.Name, cred.Type)
 		}
 
 		// Validate by provider type
