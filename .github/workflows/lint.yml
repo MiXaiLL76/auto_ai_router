@@ -145,7 +145,7 @@ jobs:
           echo "| govulncheck | ${{ steps.govulncheck.outcome }} | ${govulncheck_vulns} vulnerabilities |"
           echo "| pre-commit | ${{ steps.precommit.outcome }} | - |"
           echo
-          echo "**Score: ${score}/100 — ${score_verdict}** (threshold: ${min_score})"
+          echo "**Score: ${score}/100 - ${score_verdict}** (threshold: ${min_score})"
         } >> "$GITHUB_STEP_SUMMARY"
 
         if [ "$score" -lt "$min_score" ]; then exit 1; fi

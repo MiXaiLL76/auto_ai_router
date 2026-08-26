@@ -4,9 +4,7 @@ on:
   push:
     tags:
       - 'v*.*.*'
-    # Временно для тестов, надо удалить
-    branches:
-      - '**'
+
   workflow_dispatch:
 
 permissions:
