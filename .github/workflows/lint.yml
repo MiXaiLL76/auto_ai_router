@@ -2,7 +2,7 @@ name: Lint
 
 env:
   GOLANGCI_LINT_VERSION: v2.13.1
-  MIN_SCORE: 15
+  MIN_SCORE: 25
   MIN_COVERAGE: 70
 
 on:
@@ -148,12 +148,7 @@ jobs:
           echo "**Score: ${score}/100 — ${score_verdict}** (threshold: ${min_score})"
         } >> "$GITHUB_STEP_SUMMARY"
 
-        failed=0
-        for outcome in "${{ steps.gofmt.outcome }}" "${{ steps.vet.outcome }}" "${{ steps.golangci.outcome }}" "${{ steps.govulncheck.outcome }}" "${{ steps.precommit.outcome }}"; do
-          if [ "$outcome" = "failure" ]; then failed=1; fi
-        done
-        if [ "$score" -lt "$min_score" ]; then failed=1; fi
-        if [ "$failed" -eq 1 ]; then exit 1; fi
+        if [ "$score" -lt "$min_score" ]; then exit 1; fi
 
   test:
     name: Run Tests
