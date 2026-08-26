@@ -321,9 +321,13 @@ func (p *Proxy) prepareRequestForCredential(
 			req.body = passthroughBody
 			req.convertedMessages = true
 			req.passthroughMessages = true
-			req.messagesMetadata = anthropicconv.MessagesAdapterMetadata{
-				AnthropicBetas: anthropicconv.ExtractRequestBetas(passthroughBody),
-			}
+			// messagesMetadata.AnthropicBetas is deliberately left unset here: RequestFrom
+			// forwards passthroughBody unchanged as requestBody, and proxy.go's dispatch
+			// loop unconditionally re-derives betas from that same body via
+			// ExtractBetaHeader moments later — populating it here would just be a second,
+			// thrown-away JSON unmarshal of the same field. (The non-passthrough branch
+			// below still needs to populate it: MessagesToChat drops anthropic_beta when
+			// building the Chat-shaped body, so that's the only place it survives.)
 			return req, nil
 		}
 		chatBody, metadata, err := anthropicconv.MessagesToChat(body)

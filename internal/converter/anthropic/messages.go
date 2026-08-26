@@ -99,13 +99,9 @@ func OpenAIToAnthropic(openAIBody []byte, model string, isRealAnthropicBackend b
 	if tc, oc := mapThinkingConfig(thinkingParam, reasoningEffort, anthropicReq.Model); tc != nil {
 		anthropicReq.Thinking = tc
 		anthropicReq.OutputConfig = oc
-		anthropicReq.MaxTokens = EnsureMaxTokensForThinking(anthropicReq.MaxTokens, tc)
-		if oc != nil {
-			// effort-based adaptive thinking requires the effort beta header
-			anthropicReq.AnthropicBeta = appendBetaUnique(anthropicReq.AnthropicBeta, "effort-2025-11-24")
-		}
-		// Anthropic requires temperature=1.0 when thinking is enabled.
-		temp := 1.0
+		maxTokens, betas, temp := applyThinkingSideEffects(tc, oc, anthropicReq.MaxTokens, anthropicReq.AnthropicBeta)
+		anthropicReq.MaxTokens = maxTokens
+		anthropicReq.AnthropicBeta = betas
 		anthropicReq.Temperature = &temp
 	} else if !isRealAnthropicBackend {
 		// This Anthropic-shaped request may be handled by a real Claude model

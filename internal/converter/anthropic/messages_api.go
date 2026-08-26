@@ -127,8 +127,10 @@ func NormalizeMessagesForPassthrough(body []byte, model string, isRealAnthropicB
 	tc, oc := mapThinkingConfig(request["thinking"], "", model)
 	if tc != nil {
 		request["thinking"] = tc
-		if maxTokens, ok := request["max_tokens"].(float64); ok {
-			request["max_tokens"] = EnsureMaxTokensForThinking(int(maxTokens), tc)
+		existingMaxTokens, hasMaxTokens := request["max_tokens"].(float64)
+		maxTokens, betas, temp := applyThinkingSideEffects(tc, oc, int(existingMaxTokens), extractBetaStrings(request["anthropic_beta"]))
+		if hasMaxTokens {
+			request["max_tokens"] = maxTokens
 		}
 		if oc != nil {
 			if existing, ok := request["output_config"].(map[string]interface{}); ok {
@@ -136,27 +138,14 @@ func NormalizeMessagesForPassthrough(body []byte, model string, isRealAnthropicB
 			} else {
 				request["output_config"] = oc
 			}
-			betas := appendBetaUnique(extractBetaStrings(request["anthropic_beta"]), "effort-2025-11-24")
 			request["anthropic_beta"] = betas
 		}
-		temp := 1.0
 		request["temperature"] = temp
 	} else if !isRealAnthropicBackend {
 		request["thinking"] = &AnthropicThinking{Type: "disabled"}
 	}
 
 	return json.Marshal(request)
-}
-
-// ExtractRequestBetas reads the "anthropic_beta" field straight off a raw Messages
-// API request body, for callers (the /v1/messages native-passthrough path) that skip
-// MessagesToChat entirely and so never get MessagesAdapterMetadata.AnthropicBetas from it.
-func ExtractRequestBetas(body []byte) []string {
-	var request map[string]interface{}
-	if err := json.Unmarshal(body, &request); err != nil {
-		return nil
-	}
-	return extractBetaStrings(request["anthropic_beta"])
 }
 
 func extractBetaStrings(raw interface{}) []string {
