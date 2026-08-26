@@ -91,7 +91,12 @@ jobs:
     - name: Install dependencies
       run: go mod download
 
+    - name: Install C toolchain for -race
+      run: apt-get update && apt-get install -y --no-install-recommends gcc libc6-dev
+
     - name: Run tests
+      env:
+        CGO_ENABLED: 1
       run: go test -v -race -coverprofile=coverage.out -covermode=atomic ./...
 
     - name: Display coverage
