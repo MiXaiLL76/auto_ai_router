@@ -1,5 +1,5 @@
 # Build stage
-FROM golang:1.26-alpine AS builder
+FROM golang:1.27-alpine AS builder
 
 # CGO disabled explicitly: this builder has no C toolchain and the app has no
 # cgo dependencies, so the build already behaves this way implicitly today.
