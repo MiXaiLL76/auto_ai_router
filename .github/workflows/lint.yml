@@ -76,7 +76,7 @@ jobs:
     name: Run Tests
     runs-on: arc-air-runners
     container:
-      image: ghcr.io/actions/actions-runner:latest
+      image: golang:1.27
 
     steps:
     - name: Checkout code
@@ -90,9 +90,6 @@ jobs:
 
     - name: Install dependencies
       run: go mod download
-
-    - name: Install C toolchain for -race
-      run: apt-get update && apt-get install -y --no-install-recommends gcc libc6-dev
 
     - name: Run tests
       env:
