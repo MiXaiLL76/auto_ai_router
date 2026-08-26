@@ -163,6 +163,18 @@ response = client.chat.completions.create(
 
 For multipart requests the proxy reads `session_id` or `user` from the form fields.
 
+### Header Fallback
+
+If none of the body fields above yield a session ID, the proxy falls back to scanning request
+headers whose name matches `^(x-.+-)?session[-_]id$` (case-insensitive), e.g. `Session-Id`,
+`Session_Id`, or `X-Codex-Session-Id`. This covers agents/SDKs that attach a session identifier
+to a header instead of the JSON body. When multiple matching headers are present, a bare
+`Session-Id` takes priority over any `X-...-Session-Id` variant.
+
+Note: a plain `X-Session-Id` header (no segment between `x-` and `session-id`) does **not**
+match this pattern by design — use `Session-Id` or add a distinguishing segment (e.g.
+`X-Codex-Session-Id`).
+
 ## Configuration
 
 ### Enable / Disable
