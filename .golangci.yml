@@ -9,3 +9,11 @@ linters:
     - bodyclose
     - noctx
     - sqlclosecheck
+  exclusions:
+    rules:
+      # gosec on _test.go is mostly noise: weak file perms on throwaway test
+      # fixtures, test-only httptest servers without ReadHeaderTimeout, etc.
+      # None of it ships. Real gosec findings belong in production code.
+      - path: _test\.go
+        linters:
+          - gosec

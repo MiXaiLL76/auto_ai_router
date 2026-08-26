@@ -7,6 +7,7 @@ package queries
 const (
 	// QueryUpdateTokenSpendWithLastActive increments the scalar key spend and
 	// bumps last_active (schemas that already have the last_active column).
+	//nolint:gosec // G101: false positive — SQL statement text, not a credential
 	QueryUpdateTokenSpendWithLastActive = `
 		UPDATE "LiteLLM_VerificationToken"
 		SET spend = COALESCE(spend, 0) + $1, updated_at = NOW(), last_active = NOW()
@@ -14,6 +15,7 @@ const (
 
 	// QueryUpdateTokenModelSpendWithLastActive increments the scalar key spend
 	// and the per-model JSON counter, and bumps last_active.
+	//nolint:gosec // G101: false positive — SQL statement text, not a credential
 	QueryUpdateTokenModelSpendWithLastActive = `
 		UPDATE "LiteLLM_VerificationToken"
 		SET spend = COALESCE(spend, 0) + $1,

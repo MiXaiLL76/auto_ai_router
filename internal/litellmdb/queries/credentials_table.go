@@ -1,6 +1,6 @@
 package queries
 
-const QueryCredentialsTable = `SELECT credential_id, credential_name, credential_values, credential_info FROM public."LiteLLM_CredentialsTable"`
+const QueryCredentialsTable = `SELECT credential_id, credential_name, credential_values, credential_info FROM public."LiteLLM_CredentialsTable"` //nolint:gosec // G101: false positive — SQL statement text, not a credential
 
 // CredentialLiteLLMParams содержит параметры аутентификации для различных провайдеров
 type CredentialLiteLLMParams struct {
