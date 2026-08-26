@@ -16,7 +16,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/mixaill76/auto_ai_router/internal/auth"
 	"github.com/mixaill76/auto_ai_router/internal/balancer"
 	"github.com/mixaill76/auto_ai_router/internal/config"
@@ -34,6 +33,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/monitoring"
 	"github.com/mixaill76/auto_ai_router/internal/proxy/modelutils"
 	"github.com/mixaill76/auto_ai_router/internal/ratelimit"
+	"github.com/mixaill76/auto_ai_router/internal/requestid"
 	compatlitellm "github.com/mixaill76/auto_ai_router/internal/responsecompat/litellm"
 	"github.com/mixaill76/auto_ai_router/internal/responsestore"
 	"github.com/mixaill76/auto_ai_router/internal/scope"
@@ -802,7 +802,15 @@ func (p *Proxy) WithResponseCompatibility(
 
 func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 	start := utils.NowUTC()
-	requestID := uuid.New().String()
+	// Reuse the ID assigned by requestid.Middleware (also used as the OTel
+	// trace_id, see internal/telemetry's IDGenerator) so request_id, trace_id,
+	// and the X-Request-Id header returned to the client are all identical.
+	// Falls back to minting one when the middleware didn't run (e.g. tests
+	// calling this handler directly).
+	requestID := requestid.FromContext(r.Context())
+	if requestID == "" {
+		requestID = requestid.New()
+	}
 	if info := responseCompatRequestFromContext(r.Context()); info != nil {
 		info.RequestID = requestID
 	}

@@ -31,6 +31,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/monitoring"
 	"github.com/mixaill76/auto_ai_router/internal/proxy"
 	"github.com/mixaill76/auto_ai_router/internal/ratelimit"
+	"github.com/mixaill76/auto_ai_router/internal/requestid"
 	"github.com/mixaill76/auto_ai_router/internal/responsestore"
 	"github.com/mixaill76/auto_ai_router/internal/router"
 	"github.com/mixaill76/auto_ai_router/internal/startup"
@@ -328,6 +329,12 @@ func main() {
 		}
 		rootHandler = otelhttp.NewHandler(mux, "auto_ai_router", otelOpts...)
 	}
+	// Must wrap (run before) the otelhttp handler above, not be wrapped by it:
+	// the request ID needs to already be in context by the time otelhttp starts
+	// the server span, so the telemetry package's IDGenerator can reuse it as
+	// the span's trace_id. Also echoes the ID to the client via X-Request-Id,
+	// independently of whether tracing is enabled.
+	rootHandler = requestid.Middleware(rootHandler)
 
 	server := &http.Server{
 		Addr:         fmt.Sprintf(":%d", cfg.Server.Port),

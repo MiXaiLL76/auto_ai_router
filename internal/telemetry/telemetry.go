@@ -105,6 +105,7 @@ func Setup(ctx context.Context, cfg *config.OTELConfig, version, commit string, 
 			sdktrace.WithResource(res),
 			sdktrace.WithBatcher(&debugSpanExporter{inner: traceExporter, log: diag}),
 			sdktrace.WithSampler(sdktrace.ParentBased(sdktrace.TraceIDRatioBased(cfg.TraceSampleRatio))),
+			sdktrace.WithIDGenerator(requestIDGenerator{}),
 		)
 		otel.SetTracerProvider(t.tracerProvider)
 		otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(
