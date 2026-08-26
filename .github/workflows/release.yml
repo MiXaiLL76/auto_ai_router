@@ -4,6 +4,9 @@ on:
   push:
     tags:
       - 'v*.*.*'
+    # Временно для тестов, надо удалить
+    branches:
+      - '**'
   workflow_dispatch:
 
 permissions:
@@ -21,7 +24,7 @@ jobs:
     needs: quality-check
     if: startsWith(github.ref, 'refs/tags/')
     name: Build Release Binaries
-    runs-on: ubuntu-latest
+    runs-on: arc-air-runners
     strategy:
       matrix:
         goos: [linux]
@@ -54,16 +57,11 @@ jobs:
   build-docker:
     needs: quality-check
     name: Build and Push Docker Image
-    runs-on: ubuntu-latest
+    runs-on: arc-air-runners
+    container:
+      image: ghcr.io/actions/actions-runner:latest
     steps:
       - uses: actions/checkout@v6
-      - uses: docker/setup-buildx-action@v4
-      - name: Log in to GHCR
-        uses: docker/login-action@v4
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
       - name: Lowercase repo name
         id: repo
         run: echo "repository=${GITHUB_REPOSITORY,,}" >> $GITHUB_OUTPUT
@@ -81,25 +79,60 @@ jobs:
             type=raw,value=dev-latest,enable=${{ github.ref != 'refs/heads/main' && !startsWith(github.ref, 'refs/tags/') }}
             type=raw,value=${{ github.ref_name }}-latest,enable=${{ github.ref != 'refs/heads/main' && !startsWith(github.ref, 'refs/tags/') }}
             type=sha,prefix=sha-
-      - name: Build and push
-        uses: docker/build-push-action@v7
+
+      # arc-air-runners работает в ARC containerMode: kubernetes без dind,
+      # поэтому docker/build-push-action (нужен демон) здесь не запустится —
+      # см. operators/README.md. Собираем и пушим через kaniko, как в
+      # VSELLM_SITE/.github/actions/kaniko-build-*: он сам контейнерный
+      # action и не требует демона. Число тегов из meta.outputs.tags не
+      # фиксировано, поэтому не composite-action со статичными args, а
+      # fromJSON-массив, собранный на лету.
+      - name: Write GHCR auth for kaniko
+        run: |
+          mkdir -p "${GITHUB_WORKSPACE}/.docker-config"
+          auth=$(printf '%s:%s' "${{ github.actor }}" "${{ secrets.GITHUB_TOKEN }}" | base64 -w0)
+          printf '{"auths":{"ghcr.io":{"auth":"%s"}}}' "$auth" > "${GITHUB_WORKSPACE}/.docker-config/config.json"
+
+      - name: Build kaniko args
+        id: kaniko
+        env:
+          DESTINATIONS: ${{ steps.meta.outputs.tags }}
+          LABELS: ${{ steps.meta.outputs.labels }}
+        run: |
+          version="${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'dev' }}"
+
+          json_escape() {
+            local s=$1
+            s=${s//\\/\\\\}
+            s=${s//\"/\\\"}
+            printf '%s' "$s"
+          }
+
+          args='["--context=dir:///github/workspace","--dockerfile=/github/workspace/Dockerfile"'
+          while IFS= read -r tag; do
+            [ -z "$tag" ] && continue
+            args="${args},\"--destination=$(json_escape "$tag")\""
+          done <<< "${DESTINATIONS}"
+          while IFS= read -r label; do
+            [ -z "$label" ] && continue
+            args="${args},\"--label=$(json_escape "$label")\""
+          done <<< "${LABELS}"
+          args="${args},\"--build-arg=VERSION=${version}\",\"--build-arg=COMMIT=${{ github.sha }}\""
+          args="${args},\"--cache=true\",\"--cache-repo=ghcr.io/${{ steps.repo.outputs.repository }}/cache\"]"
+          echo "args=${args}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push with kaniko
+        uses: docker://gcr.io/kaniko-project/executor:v1.24.0
+        env:
+          DOCKER_CONFIG: /github/workspace/.docker-config
         with:
-          context: .
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-          platforms: linux/amd64
-          build-args: |
-            VERSION=${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'dev' }}
-            COMMIT=${{ github.sha }}
+          args: ${{ fromJSON(steps.kaniko.outputs.args) }}
 
   # 3. Загрузка assets в существующий релиз (только для тегов)
   upload-assets:
     if: startsWith(github.ref, 'refs/tags/')
     needs: [build-binaries, build-docker]
-    runs-on: ubuntu-latest
+    runs-on: arc-air-runners
     steps:
       - uses: actions/download-artifact@v8
         with:

@@ -15,7 +15,7 @@ jobs:
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
-    runs-on: ubuntu-latest
+    runs-on: arc-air-runners
     steps:
       - uses: actions/configure-pages@v5
       - uses: actions/checkout@v6
