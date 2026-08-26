@@ -86,7 +86,7 @@ func (p *Proxy) admitOrganizationModel(
 		return body, "", "", true
 	}
 
-	resolution, err := p.modelManager.ResolveOrganizationModel(policy, publicModelID)
+	resolution, err := p.modelManager.ResolveOrganizationModelScoped(policy, publicModelID, logCtx.Scope)
 	if err != nil {
 		logCtx.Status = "failure"
 		logCtx.HTTPStatus = http.StatusNotFound
@@ -134,6 +134,37 @@ func (p *Proxy) admitOrganizationModel(
 	logCtx.billingPrice = resolution.ModelPrice
 
 	return body, resolution.ModelID, resolution.RealModelID, true
+}
+
+func (p *Proxy) IsOrganizationModelAllowedForToken(
+	tokenInfo *dbmodels.TokenInfo,
+	policy *routermodels.OrganizationPolicy,
+	publicModelID string,
+) bool {
+	if p == nil || p.modelManager == nil || policy == nil {
+		return false
+	}
+	resolution, err := p.modelManager.ResolveOrganizationModel(policy, publicModelID)
+	if err != nil {
+		return false
+	}
+	return p.isAnyModelAllowedForToken(tokenInfo, []string{
+		resolution.PublicModelID,
+		resolution.CanonicalModelID,
+		resolution.ModelID,
+	})
+}
+
+func (p *Proxy) resolveRetryBillingPrice(
+	logCtx *RequestLogContext,
+	publicModelID string,
+	modelID string,
+	realModelID string,
+) (string, *routermodels.ModelPrice) {
+	if logCtx != nil && logCtx.OrganizationPolicy != nil {
+		return logCtx.PriceModelID, logCtx.ModelPrice
+	}
+	return lookupBillingModelPrice(p.priceRegistry, publicModelID, modelID, realModelID)
 }
 
 func replaceModelInBodyPreserveContentType(body []byte, contentType, oldModel, newModel string) []byte {

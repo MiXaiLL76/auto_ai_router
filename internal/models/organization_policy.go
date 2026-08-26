@@ -229,6 +229,23 @@ func (m *Manager) ResolveOrganizationModel(policy *OrganizationPolicy, publicID 
 	}, nil
 }
 
+func (m *Manager) ResolveOrganizationModelScoped(
+	policy *OrganizationPolicy,
+	publicID string,
+	visibility scope.Context,
+) (OrganizationModelResolution, error) {
+	resolution, err := m.ResolveOrganizationModel(policy, publicID)
+	if err != nil {
+		return OrganizationModelResolution{}, err
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if !m.modelVisibleInScopeLocked(resolution.ModelID, visibility) {
+		return OrganizationModelResolution{}, ErrOrganizationModelNotFound
+	}
+	return resolution, nil
+}
+
 func (m *Manager) ResolveOrganizationMappingTarget(target string) (string, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()

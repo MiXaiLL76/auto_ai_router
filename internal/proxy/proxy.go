@@ -1453,8 +1453,8 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 					if publicModelID == "" {
 						publicModelID = modelID
 					}
-					retryPriceModelID, retryPrice := lookupBillingModelPrice(
-						p.priceRegistry, publicModelID, modelID, preparedRetry.realModelID,
+					retryPriceModelID, retryPrice := p.resolveRetryBillingPrice(
+						logCtx, publicModelID, modelID, preparedRetry.realModelID,
 					)
 					if retryPrice == nil && p.spendTrackingEnabled() {
 						triedCreds[candidate.Name] = true

@@ -52,10 +52,20 @@ func writeProxyPolicyPrices(t *testing.T, body string) string {
 
 func newOrganizationPolicyProxy(t *testing.T, upstreamURL string, db *organizationPolicyTestDB, policies []config.OrganizationPolicyConfig) *Proxy {
 	t.Helper()
-	logger := testhelpers.NewTestLogger()
 	credential := config.CredentialConfig{
 		Name: "provider", Type: config.ProviderTypeOpenAI, BaseURL: upstreamURL, APIKey: "provider-key", RPM: 100, TPM: 10000,
 	}
+	return newOrganizationPolicyProxyWithCredential(t, db, policies, credential)
+}
+
+func newOrganizationPolicyProxyWithCredential(
+	t *testing.T,
+	db *organizationPolicyTestDB,
+	policies []config.OrganizationPolicyConfig,
+	credential config.CredentialConfig,
+) *Proxy {
+	t.Helper()
+	logger := testhelpers.NewTestLogger()
 	manager := routermodels.New(logger, 100, []config.ModelRPMConfig{
 		{Name: "route-a", Credential: credential.Name},
 		{Name: "route-b", Credential: credential.Name},
@@ -326,9 +336,49 @@ func TestOrganizationPolicy_FrozenPriceSurvivesDefaultRegistryChange(t *testing.
 	registry.Update(map[string]*routermodels.ModelPrice{"route-b": {InputCostPerToken: 9}})
 	prx.priceRegistry = registry
 
-	_, resolved := prx.resolveBillingPrice(logCtx, "public/shared", "route-b", "route-b")
+	resolvedID, resolved := prx.resolveRetryBillingPrice(logCtx, "public/shared", "route-b", "route-b")
 
+	assert.Equal(t, "public/shared", resolvedID)
 	assert.Same(t, price, resolved)
+}
+
+func TestOrganizationPolicy_InvisibleTargetRejectsBeforePriceAndProvider(t *testing.T) {
+	var calls atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer upstream.Close()
+
+	db := &organizationPolicyTestDB{tokens: map[string]*dbmodels.TokenInfo{
+		"token": {
+			Token:                "token-hash",
+			UserID:               "user-1",
+			KeyName:              "scope-b",
+			DirectOrganizationID: "org-1",
+			OrganizationID:       "org-1",
+		},
+	}}
+	credential := config.CredentialConfig{
+		Name: "provider", Type: config.ProviderTypeOpenAI, BaseURL: upstream.URL, APIKey: "provider-key",
+		RPM: 100, TPM: 10000, Scopes: []string{"scope-a"},
+	}
+	prx := newOrganizationPolicyProxyWithCredential(t, db, []config.OrganizationPolicyConfig{{
+		OrganizationID:  "org-1",
+		PriceProfileID:  "profile-1",
+		ModelPricesLink: writeProxyPolicyPrices(t, `{"public/shared":{"input_cost_per_token":0.001}}`),
+		ModelMappings:   map[string]string{"public/shared": "route-b"},
+	}}, credential)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", stringsReader(`{"model":"public/shared","messages":[]}`))
+	req.Header.Set("Authorization", "Bearer token")
+	w := httptest.NewRecorder()
+
+	prx.ProxyRequest(w, req)
+
+	assert.Equal(t, http.StatusNotFound, w.Code)
+	assert.Equal(t, int32(0), calls.Load())
+	assert.Empty(t, db.logs)
 }
 
 func stringsReader(value string) *strings.Reader {
