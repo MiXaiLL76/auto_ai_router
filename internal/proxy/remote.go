@@ -49,14 +49,29 @@ type modelScopeUpdater interface {
 // Until 2026-08-27 this whole sync path (UpdateStatsFromRemoteProxy and everything
 // under it) was fully implemented and tested but never called from production
 // wiring — see the priority-propagation entry in todo_round_robin.md for the story.
+//
+// updateMutex is only held around each credential's write (UpdateStatsFromHealth),
+// never around the network fetch — mirrors modelupdate.UpdateAllProxyCredentials,
+// which uses the same *sync.Mutex to keep the two updaters' writes to the shared
+// rateLimiter/modelManager state from interleaving, without letting a slow or
+// hanging upstream /health response hold up unrelated lock users (e.g. the metrics
+// updater ticking every 10s). See todo_round_robin.md section 5.1 for the story of
+// why this used to hold the lock for the whole call.
 func UpdateAllFromRemoteHealth(
 	ctx context.Context,
 	bal *balancer.RoundRobin,
 	rateLimiter *ratelimit.RPMLimiter,
 	logger *slog.Logger,
 	modelManager ModelManagerInterface,
+	updateMutex *sync.Mutex,
 ) {
 	credentials := bal.GetCredentialsSnapshot()
+
+	type fetchResult struct {
+		cred   *config.CredentialConfig
+		health *httputil.ProxyHealthResponse
+	}
+	resultsChan := make(chan fetchResult, len(credentials))
 
 	var wg sync.WaitGroup
 	for i := range credentials {
@@ -67,13 +82,30 @@ func UpdateAllFromRemoteHealth(
 		wg.Add(1)
 		go func(c *config.CredentialConfig) {
 			defer wg.Done()
-			UpdateStatsFromRemoteProxy(ctx, c, rateLimiter, logger, modelManager)
+			health, err := FetchHealthFromRemoteProxy(ctx, c, logger)
+			if err != nil {
+				return
+			}
+			resultsChan <- fetchResult{cred: c, health: health}
 		}(cred)
 	}
-	wg.Wait()
+
+	go func() {
+		wg.Wait()
+		close(resultsChan)
+	}()
+
+	for res := range resultsChan {
+		updateMutex.Lock()
+		UpdateStatsFromHealth(res.health, res.cred, rateLimiter, logger, modelManager)
+		updateMutex.Unlock()
+	}
 }
 
-// UpdateStatsFromRemoteProxy fetches and updates RPM/TPM limits from remote /health endpoint
+// UpdateStatsFromRemoteProxy fetches and updates RPM/TPM limits from remote /health
+// endpoint in one call — kept as a single-credential convenience for tests and any
+// future caller that doesn't need the fetch/write split UpdateAllFromRemoteHealth
+// uses; production's periodic sync no longer calls this directly (see above).
 func UpdateStatsFromRemoteProxy(
 	ctx context.Context,
 	cred *config.CredentialConfig,
@@ -165,6 +197,7 @@ type limitAggregation struct {
 	tpm             int
 	weight          int
 	priority        int
+	priorityHigh    int
 	hasPriority     bool
 	currentRPM      int
 	currentTPM      int
@@ -215,11 +248,20 @@ func (agg *limitAggregation) applyWeight(weight int) {
 // upstream can't serve traffic anymore. This function itself has no notion of ban
 // status — it folds in whatever priority it's given — so the filtering lives entirely
 // in the caller.
+//
+// Also tracks the highest live priority seen (priorityHigh) alongside the lowest
+// (priority): the gap between them is exactly the risk updateModelLimits warns about
+// below — if the credential currently holding the low end ever stops being live
+// (banned, removed), the aggregate jumps straight to priorityHigh with no
+// intermediate warning at that moment, since a ticking sync loses no history.
 func (agg *limitAggregation) applyPriorityMin(priority int) {
 	if !agg.hasPriority || priority < agg.priority {
 		agg.priority = priority
-		agg.hasPriority = true
 	}
+	if !agg.hasPriority || priority > agg.priorityHigh {
+		agg.priorityHigh = priority
+	}
+	agg.hasPriority = true
 }
 
 func (agg *limitAggregation) finalizeLimits() (int, int) {
@@ -394,6 +436,23 @@ func updateModelLimits(
 		}
 		if modelStats_data.Credential != "" {
 			modelSourceCreds[modelID] = modelStats_data.Credential
+		}
+	}
+
+	// Surface a heterogeneous priority group before it turns into a silent cost
+	// surprise: if this model's live upstream credentials (behind this one proxy
+	// link) don't all report the same priority, the aggregate MIN above is riding
+	// on the cheapest one staying live. The moment it bans/exhausts, routing jumps
+	// straight to the pricier group with no further warning at that instant — see
+	// todo_round_robin.md section 6 for the pol01/uk01/usa01 scenario this guards.
+	for modelID, stats := range modelStats {
+		if stats.hasPriority && stats.priority != stats.priorityHigh {
+			logger.Warn("Model has upstream credentials in different priority groups behind one proxy credential — routing rides on the cheaper group staying live",
+				"proxy", cred.Name,
+				"model", modelID,
+				"current_effective_priority", stats.priority,
+				"priority_if_cheaper_credential_stops_being_live", stats.priorityHigh,
+			)
 		}
 	}
 

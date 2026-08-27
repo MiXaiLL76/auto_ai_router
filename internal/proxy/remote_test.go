@@ -1,13 +1,18 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"sync"
 	"testing"
+	"time"
 
+	"github.com/mixaill76/auto_ai_router/internal/balancer"
 	"github.com/mixaill76/auto_ai_router/internal/config"
+	"github.com/mixaill76/auto_ai_router/internal/fail2ban"
 	"github.com/mixaill76/auto_ai_router/internal/httputil"
 	"github.com/mixaill76/auto_ai_router/internal/ratelimit"
 	"github.com/mixaill76/auto_ai_router/internal/testhelpers"
@@ -319,6 +324,97 @@ func TestUpdateModelLimits_PriorityMinAggregation_NonBannedLowerStillWins(t *tes
 	updateModelLimits(health, cred, rateLimiter, logger, mockMM)
 
 	assert.Equal(t, 100, mockMM.GetModelPriorityForCredential("gpt-4", "test_proxy"))
+}
+
+// TestUpdateModelLimits_WarnsOnPriorityMismatchAcrossLiveUpstreamCredentials covers
+// todo_round_robin.md section 6 (the pol01/uk01/usa01 money-risk scenario reported after
+// live testing): when a model's live (non-banned) upstream credentials behind one proxy
+// credential report different priority groups, the MIN aggregation is riding on the
+// cheaper one staying live — routing silently jumps to the pricier group the instant it
+// isn't, with no warning at that exact moment since a 30s poll loop keeps no history. This
+// asserts the Warn fires while both are still live, naming both the current effective
+// priority and what it'll become if the cheaper credential stops being live.
+func TestUpdateModelLimits_WarnsOnPriorityMismatchAcrossLiveUpstreamCredentials(t *testing.T) {
+	health := &httputil.ProxyHealthResponse{
+		Credentials: map[string]httputil.CredentialHealthStats{
+			"cheapgpt": {Priority: 100},
+			"grant":    {Priority: 200},
+		},
+		Models: map[string]httputil.ModelHealthStats{
+			"model:cheapgpt": {Model: "gpt-4", Credential: "cheapgpt", Priority: 100, IsBanned: false},
+			"model:grant":    {Model: "gpt-4", Credential: "grant", Priority: 200, IsBanned: false},
+		},
+	}
+
+	rateLimiter := ratelimit.New()
+	cred := &config.CredentialConfig{Name: "grant-pol01"}
+	mockMM := NewMockModelManager()
+
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	updateModelLimits(health, cred, rateLimiter, logger, mockMM)
+
+	logOutput := logBuf.String()
+	assert.Contains(t, logOutput, "different priority groups")
+	assert.Contains(t, logOutput, "proxy=grant-pol01")
+	assert.Contains(t, logOutput, "model=gpt-4")
+	assert.Contains(t, logOutput, "current_effective_priority=100")
+	assert.Contains(t, logOutput, "priority_if_cheaper_credential_stops_being_live=200")
+}
+
+// TestUpdateModelLimits_NoPriorityMismatchWarning_WhenCheapCredentialIsBanned checks the
+// warning doesn't double up with the 6.1 fix: once the cheap credential is actually banned
+// (not just still live at a lower priority), applyPriorityMin already excludes it, so
+// priority == priorityHigh (both 200) and there's nothing heterogeneous left to warn about.
+func TestUpdateModelLimits_NoPriorityMismatchWarning_WhenCheapCredentialIsBanned(t *testing.T) {
+	health := &httputil.ProxyHealthResponse{
+		Credentials: map[string]httputil.CredentialHealthStats{
+			"cheapgpt": {Priority: 100},
+			"grant":    {Priority: 200},
+		},
+		Models: map[string]httputil.ModelHealthStats{
+			"model:cheapgpt": {Model: "gpt-4", Credential: "cheapgpt", Priority: 100, IsBanned: true},
+			"model:grant":    {Model: "gpt-4", Credential: "grant", Priority: 200, IsBanned: false},
+		},
+	}
+
+	rateLimiter := ratelimit.New()
+	cred := &config.CredentialConfig{Name: "grant-pol01"}
+	mockMM := NewMockModelManager()
+
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	updateModelLimits(health, cred, rateLimiter, logger, mockMM)
+
+	assert.NotContains(t, logBuf.String(), "different priority groups")
+}
+
+// TestUpdateModelLimits_NoPriorityMismatchWarning_WhenPrioritiesMatch is the base
+// no-false-positive case: two live upstream credentials at the same priority never warn.
+func TestUpdateModelLimits_NoPriorityMismatchWarning_WhenPrioritiesMatch(t *testing.T) {
+	health := &httputil.ProxyHealthResponse{
+		Credentials: map[string]httputil.CredentialHealthStats{
+			"grant-a": {Priority: 200},
+			"grant-b": {Priority: 200},
+		},
+		Models: map[string]httputil.ModelHealthStats{
+			"model:a": {Model: "gpt-4", Credential: "grant-a", Priority: 200, IsBanned: false},
+			"model:b": {Model: "gpt-4", Credential: "grant-b", Priority: 200, IsBanned: false},
+		},
+	}
+
+	rateLimiter := ratelimit.New()
+	cred := &config.CredentialConfig{Name: "grant-pol01"}
+	mockMM := NewMockModelManager()
+
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	updateModelLimits(health, cred, rateLimiter, logger, mockMM)
+
+	assert.NotContains(t, logBuf.String(), "different priority groups")
 }
 
 // TestUpdateModelLimits_IsFallbackDoesNotDropPriority is a T3 regression test: an
@@ -1021,4 +1117,77 @@ func TestUpdateStatsFromHealth_IsFallbackDoesNotSkipAggregation_Fallback(t *test
 	assert.Len(t, addedModels, 2)
 	addedModelIDs := []string{addedModels[0].model, addedModels[1].model}
 	assert.ElementsMatch(t, []string{"primary-model", "fallback-model"}, addedModelIDs)
+}
+
+// TestUpdateAllFromRemoteHealth_DoesNotHoldLockDuringFetch is the regression guard
+// for todo_round_robin.md section 5.1: UpdateAllFromRemoteHealth used to hold
+// updateMutex for the whole call, including the network fetch to every proxy
+// credential's /health endpoint, so a slow or hanging upstream could stall unrelated
+// lock users (e.g. the metrics updater). It now locks only around each credential's
+// write. This test blocks the mock /health handler mid-request and asserts the lock
+// is free (TryLock succeeds) while that fetch is still in flight.
+func TestUpdateAllFromRemoteHealth_DoesNotHoldLockDuringFetch(t *testing.T) {
+	reached := make(chan struct{})
+	release := make(chan struct{})
+
+	server := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/health" {
+			http.NotFound(w, r)
+			return
+		}
+		close(reached)
+		<-release
+
+		health := createMockProxyHealthResponse()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(health)
+	}))
+	defer server.Close()
+
+	cred := config.CredentialConfig{
+		Name:    "slow-proxy",
+		Type:    config.ProviderTypeProxy,
+		BaseURL: server.URL,
+		APIKey:  "unused",
+	}
+
+	rateLimiter := ratelimit.New()
+	logger := testhelpers.NewTestLogger()
+	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
+	bal := balancer.New([]config.CredentialConfig{cred}, f2b, rateLimiter)
+	mockMM := NewMockModelManager()
+	updateMutex := &sync.Mutex{}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		UpdateAllFromRemoteHealth(context.Background(), bal, rateLimiter, logger, mockMM, updateMutex)
+	}()
+
+	select {
+	case <-reached:
+	case <-time.After(2 * time.Second):
+		close(release) // unblock the handler so server.Close() in the deferred cleanup doesn't hang
+		t.Fatal("mock /health handler was never reached")
+	}
+
+	// The fetch is now blocked on `release`, i.e. genuinely in flight. The lock
+	// must be free during this window. Use assert (not require/Fatal) so that even
+	// on failure execution falls through to close(release) below — t.Fatal would
+	// Goexit this goroutine first, leaving the handler blocked forever and hanging
+	// the deferred server.Close() (httptest.Server.Close waits for in-flight requests).
+	locked := updateMutex.TryLock()
+	if locked {
+		updateMutex.Unlock()
+	}
+
+	close(release)
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("UpdateAllFromRemoteHealth did not complete after the fetch was released")
+	}
+
+	assert.True(t, locked, "updateMutex was held during the network fetch, expected it to be free")
 }
