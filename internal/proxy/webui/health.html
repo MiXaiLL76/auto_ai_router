@@ -80,11 +80,11 @@
         <div class="wf-section-title" id="modelsTitle" style="margin:0;">models by priority</div>
         <div style="display:flex;gap:var(--sp-2);align-items:center;">
           <input class="wf-input" id="modelFilter" type="text" placeholder="filter models…" autocomplete="off">
-          <button class="wf-btn primary" id="sortTraffic" onclick="setModelSort('traffic',this)">busiest first</button>
-          <button class="wf-btn" id="sortName" onclick="setModelSort('name',this)">by name</button>
+          <button class="wf-btn" id="sortTraffic" onclick="setModelSort('traffic',this)">busiest first</button>
+          <button class="wf-btn primary" id="sortName" onclick="setModelSort('name',this)">by name</button>
         </div>
       </div>
-      <p class="wf-sub" style="margin:0 0 var(--sp-3);">one card per model · groups are priority tiers (ascending, lowest tried first) · cards are laid out busiest → quietest, top-left to bottom-right</p>
+      <p class="wf-sub" style="margin:0 0 var(--sp-3);">one card per model · groups are priority tiers (ascending, lowest tried first) · sorted alphabetically by default so the grid stays put on refresh — switch to "busiest first" to lay cards out by traffic, top-left to bottom-right</p>
       <div id="modelsGrid" class="wf-cards-grid"></div>
     </main>
   </div>
@@ -97,7 +97,9 @@
     let modelsData = {};
     let credentialsData = {};
     let modelFilterText = '';
-    let modelSortMode = 'traffic';
+    // Default to alphabetical: unlike 'traffic', card order doesn't reshuffle on every
+    // auto-refresh as usage changes, so the grid doesn't jump around under the cursor.
+    let modelSortMode = 'name';
     const API_KEY_STORAGE = 'air:webui:api_key';
 
     // ── theme ──────────────────────────────────────────────────────────────────

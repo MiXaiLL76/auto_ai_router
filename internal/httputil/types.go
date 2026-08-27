@@ -74,27 +74,6 @@ func EffectiveHealthWeight(modelStats ModelHealthStats, credStats CredentialHeal
 
 // EffectiveHealthPriority resolves the priority group for a model on this
 // credential's connection.
-//
-// Design choice (see todo_round_robin.md T3/6.2): this function itself does
-// NOT layer a per-model override on top of the credential-level value —
-// credStats.Priority (this connection's own owning-credential priority, as
-// reported by the remote /health response) is authoritative here. Note this
-// is a different concern from ModelHealthStats.Priority's own population on
-// the *serving* side: internal/proxy/health.go addModelHealthStats resolves
-// that field per (credential, model) using the dynamic per-model priority
-// learned from an upstream proxy/AIR credential's own /health poll when
-// known, falling back to the owning credential's static
-// CredentialConfig.EffectivePriority() otherwise — see that function's
-// comment for the resolution order. modelStats is still accepted here so the
-// signature stays symmetric with EffectiveHealthWeight and so a future
-// per-model override can be added to this aggregation step too without an
-// API-breaking change.
-//
-// Contract: 0 is a valid, meaningful value (the default priority group), not
-// a sentinel for "not configured" — CredentialConfig.EffectivePriority()
-// already collapses "no priority/fallback_priority set" to 0 before it ever
-// reaches CredStats.Priority, so there is no separate "unset" case to detect
-// here (unlike Weight, where 0 genuinely means "no override").
 func EffectiveHealthPriority(modelStats ModelHealthStats, credStats CredentialHealthStats) int {
-	return credStats.Priority
+	return modelStats.Priority
 }

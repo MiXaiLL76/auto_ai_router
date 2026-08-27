@@ -583,7 +583,21 @@ func (r *RoundRobin) selectPriorityGroupCandidate(modelID string, candidates []c
 		key.priority = p
 		key.scopeKey = candidateCycleKey(group)
 		cred, err := r.selectWeightedLiveCandidate(modelID, live, key, groupRateLimitHit)
-		return cred, err == nil, rateLimitHit, err
+		if err == nil {
+			return cred, true, rateLimitHit, nil
+		}
+		// live is non-empty here, so selectWeightedLiveCandidate's only failure mode
+		// is every member losing the atomic TryAllowAll race in its Phase 3 loop (the
+		// len(live)==0 short-circuit at its top can't fire) — always ErrRateLimitExceeded,
+		// never ErrNoCredentialsAvailable. That's a real possibility near RPM/TPM limits
+		// under concurrency: liveCandidates' non-recording precheck can pass for several
+		// candidates that then all fail the atomic recheck. Previously this returned
+		// immediately with that error, which surfaced as a 429 to the caller even when a
+		// lower-priority group had full untouched capacity — the flat pool this cascade
+		// replaced would have kept trying other candidates instead. Record the hit and
+		// keep cascading; the caller falls back to ErrNoCredentialsAvailable only if
+		// rateLimitHit never got set at all.
+		rateLimitHit = true
 	}
 	return nil, false, rateLimitHit, nil
 }

@@ -1,6 +1,10 @@
 package balancer
 
-import "github.com/mixaill76/auto_ai_router/internal/config"
+import (
+	"time"
+
+	"github.com/mixaill76/auto_ai_router/internal/config"
+)
 
 // swrrNode holds the smooth weighted round-robin state for a single credential.
 type swrrNode struct {
@@ -22,11 +26,12 @@ type schedKey struct {
 // swrrState is the SWRR scheduler for one schedKey. Nodes are keyed by credential name so
 // the live set can be reconciled cheaply on every request.
 type swrrState struct {
-	nodes map[string]*swrrNode
+	nodes    map[string]*swrrNode
+	lastUsed time.Time // updated on every swrrStateFor lookup; see PruneStaleSWRRState
 }
 
 func newSWRRState() *swrrState {
-	return &swrrState{nodes: make(map[string]*swrrNode)}
+	return &swrrState{nodes: make(map[string]*swrrNode), lastUsed: time.Now()}
 }
 
 // advance reconciles the live node set, accumulates effective weight into each live node's
@@ -81,13 +86,43 @@ func (r *RoundRobin) schedKeyFor(modelID string, allowOnlyFallback, allowOnlyPro
 
 // swrrStateFor returns (creating if needed) the SWRR scheduler for a selection cycle.
 // Must be called with r.mu held.
+//
+// r.swrr is never pruned by removing unreachable keys as they go stale, only by
+// PruneStaleSWRRState — schedKey.priority and .scopeKey (candidateCycleKey, the sorted
+// membership of a priority group) are both derived from effectivePriority(), which for
+// proxy/AIR credentials can fluctuate as an upstream's health-learned priority changes
+// (sub-credentials banning/unbanning). Each distinct (priority, membership) combination
+// ever observed leaves its own entry behind once priority moves on, so a caller that
+// only touches lastUsed here and never removes entries would grow this map without
+// bound over a long-running process's lifetime.
 func (r *RoundRobin) swrrStateFor(key schedKey) *swrrState {
 	st, ok := r.swrr[key]
 	if !ok {
 		st = newSWRRState()
 		r.swrr[key] = st
 	}
+	st.lastUsed = time.Now()
 	return st
+}
+
+// PruneStaleSWRRState removes SWRR scheduler entries not looked up (via swrrStateFor)
+// within maxAge, returning the count removed. Intended to be called periodically from a
+// background updater (see cmd/server/main.go's startProxyStatsUpdater) — selection
+// itself never prunes, so without a periodic external caller r.swrr grows unbounded per
+// swrrStateFor's doc comment.
+func (r *RoundRobin) PruneStaleSWRRState(maxAge time.Duration) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	cutoff := time.Now().Add(-maxAge)
+	removed := 0
+	for key, st := range r.swrr {
+		if st.lastUsed.Before(cutoff) {
+			delete(r.swrr, key)
+			removed++
+		}
+	}
+	return removed
 }
 
 // EffectiveWeight resolves the weighted round-robin fallback chain: model-level override,

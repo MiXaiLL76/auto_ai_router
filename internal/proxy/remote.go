@@ -45,18 +45,6 @@ type modelScopeUpdater interface {
 // exposes AIR's own /health JSON shape — for a plain type: proxy upstream that
 // doesn't, FetchHealthFromRemoteProxy's fetch just fails and is logged at Debug, so
 // calling this unconditionally for every proxy-like credential is safe.
-//
-// Until 2026-08-27 this whole sync path (UpdateStatsFromRemoteProxy and everything
-// under it) was fully implemented and tested but never called from production
-// wiring — see the priority-propagation entry in todo_round_robin.md for the story.
-//
-// updateMutex is only held around each credential's write (UpdateStatsFromHealth),
-// never around the network fetch — mirrors modelupdate.UpdateAllProxyCredentials,
-// which uses the same *sync.Mutex to keep the two updaters' writes to the shared
-// rateLimiter/modelManager state from interleaving, without letting a slow or
-// hanging upstream /health response hold up unrelated lock users (e.g. the metrics
-// updater ticking every 10s). See todo_round_robin.md section 5.1 for the story of
-// why this used to hold the lock for the whole call.
 func UpdateAllFromRemoteHealth(
 	ctx context.Context,
 	bal *balancer.RoundRobin,
@@ -98,6 +86,19 @@ func UpdateAllFromRemoteHealth(
 	for res := range resultsChan {
 		updateMutex.Lock()
 		UpdateStatsFromHealth(res.health, res.cred, rateLimiter, logger, modelManager)
+		// UpdateStatsFromHealth (via updateModelScopes) only mutates res.cred, which is a
+		// pointer into this function's own bal.GetCredentialsSnapshot() copy — never
+		// written back to the live balancer, unlike modelupdate.UpdateAllProxyCredentials's
+		// matching bal.UpdateProviderScopes call. Without this, the provider scope this
+		// credential learned from its upstream /health never reaches bal's own credential
+		// state, so VisibleTo()/scope-based routing decisions never see it.
+		bal.UpdateProviderScopes(
+			*res.cred,
+			res.cred.ProviderScopes,
+			res.cred.ProviderDeniedScopes,
+			res.cred.ProviderScopeExpression,
+			res.cred.ProviderScopeKnown,
+		)
 		updateMutex.Unlock()
 	}
 }
@@ -180,7 +181,15 @@ func updateModelScopes(
 	cred *config.CredentialConfig,
 	modelManager ModelManagerInterface,
 ) {
-	providerScopes := models.AggregateProviderScopesFromHealth(health, cred.IsFallback)
+	// includeFallback: true, always — unlike updateCredentialLimits/updateModelLimits's
+	// own is_fallback skip (already removed there, see their comments), this pair of
+	// Aggregate*FromHealth calls still had the is_fallback skip baked in via
+	// cred.IsFallback (our own connection's flag, not the upstream credential's). Left
+	// as cred.IsFallback here, a model offered only through an is_fallback-marked
+	// upstream credential got its RPM/TPM/priority registered (by the limits calls
+	// above) but no scope metadata (silently dropped by the skip below), leaking it
+	// past whatever scope restriction that upstream credential carried.
+	providerScopes := models.AggregateProviderScopesFromHealth(health, true)
 	cred.ProviderScopes = providerScopes.Scopes
 	cred.ProviderDeniedScopes = providerScopes.DeniedScopes
 	cred.ProviderScopeExpression = scope.NormalizeExpression(providerScopes.ScopeExpression)
@@ -188,22 +197,27 @@ func updateModelScopes(
 
 	if updater, ok := modelManager.(modelScopeUpdater); ok {
 		updater.UpdateProviderScopesForCredential(cred.Name, providerScopes)
-		updater.ReplaceModelScopesForCredential(cred.Name, models.AggregateModelScopesFromHealth(health, cred.IsFallback))
+		updater.ReplaceModelScopesForCredential(cred.Name, models.AggregateModelScopesFromHealth(health, true))
 	}
 }
 
 type limitAggregation struct {
-	rpm             int
-	tpm             int
-	weight          int
-	priority        int
-	priorityHigh    int
-	hasPriority     bool
-	currentRPM      int
-	currentTPM      int
-	hasUnlimitedRPM bool
-	hasUnlimitedTPM bool
-	hasLimitOrUsage bool
+	rpm          int
+	tpm          int
+	weight       int
+	priority     int
+	priorityHigh int
+	hasPriority  bool
+	// priorityWorst/hasPriorityWorst track the highest priority seen across ALL entries
+	// for this model, banned included — the fallback used when every entry is banned
+	// (hasPriority ends up false). See trackWorstPriority's doc comment.
+	priorityWorst    int
+	hasPriorityWorst bool
+	currentRPM       int
+	currentTPM       int
+	hasUnlimitedRPM  bool
+	hasUnlimitedTPM  bool
+	hasLimitOrUsage  bool
 }
 
 func newSumLimitAggregation() *limitAggregation {
@@ -262,6 +276,16 @@ func (agg *limitAggregation) applyPriorityMin(priority int) {
 		agg.priorityHigh = priority
 	}
 	agg.hasPriority = true
+}
+
+// trackWorstPriority records the highest priority seen across ALL entries for this
+// model, banned included — unlike applyPriorityMin, callers must call this
+// unconditionally, before any ban filtering.
+func (agg *limitAggregation) trackWorstPriority(priority int) {
+	if !agg.hasPriorityWorst || priority > agg.priorityWorst {
+		agg.priorityWorst = priority
+		agg.hasPriorityWorst = true
+	}
 }
 
 func (agg *limitAggregation) finalizeLimits() (int, int) {
@@ -423,6 +447,8 @@ func updateModelLimits(
 		}
 		aggregation.applyWeight(weight)
 		modelWeights[modelID] = aggregation.weight
+		// Unconditional, banned entries included — see trackWorstPriority's doc comment.
+		aggregation.trackWorstPriority(priority)
 		// Skip folding this entry's priority into the MIN aggregation when the upstream
 		// credential is banned/exhausted for this model: it can no longer actually serve
 		// the model, so its static priority must not pull down the priority we expose for
@@ -432,27 +458,37 @@ func updateModelLimits(
 		// those aren't affected by the same "which group gets tried first" concern.
 		if !modelStats_data.IsBanned {
 			aggregation.applyPriorityMin(priority)
-			modelPriorities[modelID] = aggregation.priority
 		}
 		if modelStats_data.Credential != "" {
 			modelSourceCreds[modelID] = modelStats_data.Credential
 		}
 	}
 
-	// Surface a heterogeneous priority group before it turns into a silent cost
-	// surprise: if this model's live upstream credentials (behind this one proxy
-	// link) don't all report the same priority, the aggregate MIN above is riding
-	// on the cheapest one staying live. The moment it bans/exhausts, routing jumps
-	// straight to the pricier group with no further warning at that instant — see
-	// todo_round_robin.md section 6 for the pol01/uk01/usa01 scenario this guards.
+	// Resolve each model's exposed priority now that every entry has been folded in,
+	// and surface a heterogeneous priority group before it turns into a silent cost
+	// surprise.
 	for modelID, stats := range modelStats {
-		if stats.hasPriority && stats.priority != stats.priorityHigh {
-			logger.Warn("Model has upstream credentials in different priority groups behind one proxy credential — routing rides on the cheaper group staying live",
-				"proxy", cred.Name,
-				"model", modelID,
-				"current_effective_priority", stats.priority,
-				"priority_if_cheaper_credential_stops_being_live", stats.priorityHigh,
-			)
+		switch {
+		case stats.hasPriority:
+			// At least one live (non-banned) entry — MIN aggregation as usual.
+			modelPriorities[modelID] = stats.priority
+
+			if stats.priority != stats.priorityHigh {
+				logger.Warn("Model has upstream credentials in different priority groups behind one proxy credential — routing rides on the cheaper group staying live",
+					"proxy", cred.Name,
+					"model", modelID,
+					"current_effective_priority", stats.priority,
+					"priority_if_cheaper_credential_stops_being_live", stats.priorityHigh,
+				)
+			}
+		case stats.hasPriorityWorst:
+			// Every entry for this model is currently banned/exhausted — expose the
+			// worst (highest) priority ever seen rather than leaving the model out of
+			// modelPriorities, which ReplaceModelPrioritiesForCredential reads as
+			// "nothing learned" and falls back to this proxy credential's own static
+			// EffectivePriority() — commonly 0, the *best* group. See
+			// trackWorstPriority's doc comment.
+			modelPriorities[modelID] = stats.priorityWorst
 		}
 	}
 

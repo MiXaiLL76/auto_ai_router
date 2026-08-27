@@ -1,7 +1,5 @@
 package proxy
 
-// Integration Tests for T3: priority propagation through AIR/proxy credential chains.
-//
 // These tests exercise the FULL real path end-to-end with actual HTTP round-trips
 // between "nodes" (httptest.Server, not mocked interfaces):
 //
@@ -16,8 +14,6 @@ package proxy
 //	4. → balancer.RoundRobin.effectivePriority resolves it via ModelChecker (T3)
 //	5. → nextExcludingScoped/selectPriorityGroupCandidate picks a credential
 //	6. POST completion request is actually proxied to the winning node's mock server
-//
-// See todo_round_robin.md T3 for the design this validates.
 
 import (
 	"context"

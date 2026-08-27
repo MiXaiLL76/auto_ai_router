@@ -1,6 +1,7 @@
 package balancer
 
 import (
+	"sync"
 	"testing"
 	"time"
 
@@ -1736,6 +1737,46 @@ func TestNextForModel_PriorityGroup_CascadesWhenGroupFullyDown(t *testing.T) {
 	cred, err = bal.NextForModel("")
 	require.NoError(t, err)
 	assert.Equal(t, "g200", cred.Name)
+}
+
+func TestSelectPriorityGroupCandidate_ConcurrentRateLimitRaceCascadesToNextGroup(t *testing.T) {
+	const trials = 300
+
+	for i := 0; i < trials; i++ {
+		f2b := fail2ban.New(3, 0, []int{500})
+		rl := ratelimit.New()
+
+		credentials := []config.CredentialConfig{
+			{Name: "g100", Type: config.ProviderTypeOpenAI, APIKey: "k1", BaseURL: "http://a.com", RPM: 1, Priority: 100},
+			{Name: "g200", Type: config.ProviderTypeOpenAI, APIKey: "k2", BaseURL: "http://b.com", RPM: 10, Priority: 200},
+		}
+		r := New(credentials, f2b, rl)
+
+		candidates := []candidateEntry{
+			{absIdx: 0, cred: &r.credentials[0]},
+			{absIdx: 1, cred: &r.credentials[1]},
+		}
+		keyBase := r.schedKeyFor("", false, false, "", false, "")
+
+		var victimCred *config.CredentialConfig
+		var victimErr error
+
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			victimCred, _, _, victimErr = r.selectPriorityGroupCandidate("", candidates, keyBase)
+		}()
+		go func() {
+			defer wg.Done()
+			rl.TryAllowAll("g100", "") // the "other process" racing for g100's only unit
+		}()
+		wg.Wait()
+
+		require.NoError(t, victimErr, "trial %d: g200 has spare capacity, must never surface ErrRateLimitExceeded", i)
+		require.NotNil(t, victimCred)
+		assert.Contains(t, []string{"g100", "g200"}, victimCred.Name)
+	}
 }
 
 // TestNextForModel_PriorityGroup_DefaultGroupSelectedFirst verifies that credentials

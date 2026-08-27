@@ -317,13 +317,6 @@ func TestHealthCheck_CredentialAndModelPriority(t *testing.T) {
 	assert.Equal(t, 300, status.Models["legacy_fallback_priority_cred:gpt-4"].Priority)
 }
 
-// TestHealthCheck_ModelHealthStats_PriorityPrefersDynamicOverStatic covers the
-// bug fixed in addModelHealthStats (internal/proxy/health.go, todo_round_robin.md
-// 6.2): for a proxy/AIR credential, /health must report the dynamic per-model
-// priority learned from the upstream's own /health poll
-// (modelManager.GetModelPriorityForCredential), not the credential's static
-// config-level EffectivePriority() — mirroring what
-// balancer.RoundRobin.effectivePriority actually routes on.
 func TestHealthCheck_ModelHealthStats_PriorityPrefersDynamicOverStatic(t *testing.T) {
 	logger := testhelpers.NewTestLogger()
 	f2b := fail2ban.New(3, 0, []int{401, 403, 500})

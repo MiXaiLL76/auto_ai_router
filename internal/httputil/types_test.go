@@ -22,11 +22,11 @@ func TestEffectiveHealthPriority(t *testing.T) {
 			want:       0,
 		},
 		{
-			name: "credStats.Priority is authoritative even if modelStats disagrees " +
-				"(per-model override intentionally not modeled — see doc comment)",
+			name: "modelStats.Priority is authoritative even if credStats disagrees " +
+				"further downstream in a proxy-of-proxy chain, e.g. ru01 -> pol01 -> ... -> cheapgpt)",
 			modelStats: ModelHealthStats{Priority: 999},
 			credStats:  CredentialHealthStats{Priority: 300},
-			want:       300,
+			want:       999,
 		},
 	}
 

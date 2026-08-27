@@ -1189,12 +1189,17 @@ func startProxyStatsUpdater(
 	wg *sync.WaitGroup,
 	updateMutex *sync.Mutex,
 ) {
-	// Run initial update synchronously so proxy model lists are populated before
-	// the HTTP server starts accepting requests. Without this, the first few requests
-	// arrive before credentialModels is populated, causing HasModel to fall through
-	// to the permissive fallback and routing requests to the wrong proxy.
-	modelupdate.UpdateAllProxyCredentials(bgCtx, bal, rateLimiter, log, modelManager, updateMutex)
-	updateFromRemoteHealth(bgCtx, bal, rateLimiter, log, modelManager, updateMutex)
+	var startupWG sync.WaitGroup
+	startupWG.Add(2)
+	go func() {
+		defer startupWG.Done()
+		modelupdate.UpdateAllProxyCredentials(bgCtx, bal, rateLimiter, log, modelManager, updateMutex)
+	}()
+	go func() {
+		defer startupWG.Done()
+		updateFromRemoteHealth(bgCtx, bal, rateLimiter, log, modelManager, updateMutex)
+	}()
+	startupWG.Wait()
 
 	wg.Add(1)
 	go func() {
@@ -1210,6 +1215,12 @@ func startProxyStatsUpdater(
 			case <-ticker.C:
 				modelupdate.UpdateAllProxyCredentials(bgCtx, bal, rateLimiter, log, modelManager, updateMutex)
 				updateFromRemoteHealth(bgCtx, bal, rateLimiter, log, modelManager, updateMutex)
+				// Unrelated to the two calls above beyond sharing this tick: piggybacked
+				// here rather than a dedicated ticker since a proxy/AIR credential's
+				// health-learned priority (updated just above) is exactly what makes
+				// r.swrr's SWRR-cycle-per-(priority,membership) keys churn over time — see
+				// PruneStaleSWRRState's doc comment for why this map is otherwise unbounded.
+				bal.PruneStaleSWRRState(10 * time.Minute)
 			}
 		}
 	}()
@@ -1217,20 +1228,6 @@ func startProxyStatsUpdater(
 	log.Info("Proxy stats updater started (updates every 30 seconds)")
 }
 
-// updateFromRemoteHealth is the proxy.UpdateAllFromRemoteHealth call, sharing the
-// same updateMutex modelupdate.UpdateAllProxyCredentials uses — both write into the
-// shared rateLimiter/modelManager state, so their writes should not interleave.
-// Called right after modelupdate so that an upstream Auto AI Router's own
-// self-reported /health limits (more accurate, live) win over modelupdate's
-// locally-configured rpm/tpm fallback for the same (credential, model) pair — see
-// the priority-propagation entry in todo_round_robin.md for why this ordering was
-// chosen and what to verify.
-//
-// Unlike modelupdate's caller, this function no longer locks updateMutex itself:
-// UpdateAllFromRemoteHealth takes it and locks only around each credential's write,
-// never around the network fetch — see its doc comment and todo_round_robin.md
-// section 5.1 for why that split matters (a slow/hanging upstream /health used to
-// hold this lock for the whole batch).
 func updateFromRemoteHealth(
 	ctx context.Context,
 	bal *balancer.RoundRobin,

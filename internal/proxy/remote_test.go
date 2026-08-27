@@ -15,6 +15,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/fail2ban"
 	"github.com/mixaill76/auto_ai_router/internal/httputil"
 	"github.com/mixaill76/auto_ai_router/internal/ratelimit"
+	"github.com/mixaill76/auto_ai_router/internal/scope"
 	"github.com/mixaill76/auto_ai_router/internal/testhelpers"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -241,6 +242,31 @@ func TestUpdateModelLimits_PriorityDeliveredToModelManager(t *testing.T) {
 		"priority learned from the upstream credential's /health response must reach ReplaceModelPrioritiesForCredential")
 }
 
+func TestUpdateModelLimits_PropagatesLearnedPriorityThroughProxyOfProxyChain(t *testing.T) {
+	health := &httputil.ProxyHealthResponse{
+		Credentials: map[string]httputil.CredentialHealthStats{
+			"pol01-proxy-cred": {Priority: 0},
+		},
+		Models: map[string]httputil.ModelHealthStats{
+			"model:pol01": {
+				Model:      "gpt-4",
+				Credential: "pol01-proxy-cred",
+				Priority:   300,
+			},
+		},
+	}
+
+	rateLimiter := ratelimit.New()
+	cred := &config.CredentialConfig{Name: "ru01-proxy-cred"}
+	logger := testhelpers.NewTestLogger()
+	mockMM := NewMockModelManager()
+
+	updateModelLimits(health, cred, rateLimiter, logger, mockMM)
+
+	assert.Equal(t, 300, mockMM.GetModelPriorityForCredential("gpt-4", "ru01-proxy-cred"),
+		"pol01's dynamically-learned per-model priority must reach ru01, not pol01-proxy-cred's static (unset) priority")
+}
+
 // TestUpdateModelLimits_PriorityMinAggregation verifies that when several upstream
 // credentials in the remote proxy's /health response offer the same model at different
 // priorities (e.g. two grant credentials on the same node with different priority
@@ -270,13 +296,6 @@ func TestUpdateModelLimits_PriorityMinAggregation(t *testing.T) {
 	assert.Equal(t, 100, mockMM.GetModelPriorityForCredential("gpt-4", "test_proxy"))
 }
 
-// TestUpdateModelLimits_PriorityMinAggregation_SkipsBannedEntries is a regression test
-// for todo_round_robin.md section 6.1: a banned/exhausted upstream credential's static
-// priority must not pull down (via MIN) the priority exposed for the local proxy
-// credential + model pair, since that upstream can no longer actually serve the model.
-// "cheapgpt" (priority 100) is banned for gpt-4 on this node while "grant" (priority
-// 200) is still live — the aggregated priority must reflect "grant" (200), not the
-// banned "cheapgpt" (100).
 func TestUpdateModelLimits_PriorityMinAggregation_SkipsBannedEntries(t *testing.T) {
 	health := &httputil.ProxyHealthResponse{
 		Credentials: map[string]httputil.CredentialHealthStats{
@@ -298,6 +317,37 @@ func TestUpdateModelLimits_PriorityMinAggregation_SkipsBannedEntries(t *testing.
 
 	assert.Equal(t, 200, mockMM.GetModelPriorityForCredential("gpt-4", "test_proxy"),
 		"banned upstream credential's priority must be excluded from the MIN aggregation")
+}
+
+// TestUpdateModelLimits_AllEntriesBanned_FallsBackToWorstSeenNotZero is a regression
+// test: when EVERY upstream entry for a model is banned, the model must not be left
+// out of modelPriorities (which ReplaceModelPrioritiesForCredential reads as "clear
+// any learned priority" — GetModelPriorityForCredential then returns 0, and
+// effectivePriority falls back to this proxy credential's own static
+// EffectivePriority(), commonly 0/unset — the *best*, tried-first group). A fully-down
+// node must be pushed to the worst priority ever seen among its entries instead,
+// so it doesn't rank ahead of a healthy alternative at a real priority like 50.
+func TestUpdateModelLimits_AllEntriesBanned_FallsBackToWorstSeenNotZero(t *testing.T) {
+	health := &httputil.ProxyHealthResponse{
+		Credentials: map[string]httputil.CredentialHealthStats{
+			"cheapgpt": {Priority: 100},
+			"grant":    {Priority: 200},
+		},
+		Models: map[string]httputil.ModelHealthStats{
+			"model:cheapgpt": {Model: "gpt-4", Credential: "cheapgpt", Priority: 100, IsBanned: true},
+			"model:grant":    {Model: "gpt-4", Credential: "grant", Priority: 200, IsBanned: true},
+		},
+	}
+
+	rateLimiter := ratelimit.New()
+	cred := &config.CredentialConfig{Name: "test_proxy"}
+	logger := testhelpers.NewTestLogger()
+	mockMM := NewMockModelManager()
+
+	updateModelLimits(health, cred, rateLimiter, logger, mockMM)
+
+	assert.Equal(t, 200, mockMM.GetModelPriorityForCredential("gpt-4", "test_proxy"),
+		"a fully-down model must expose the worst priority seen (200), not fall through to the proxy credential's own static priority (0 here, which would rank it ahead of a healthy priority-50 alternative)")
 }
 
 // TestUpdateModelLimits_PriorityMinAggregation_NonBannedLowerStillWins is a regression
@@ -326,14 +376,6 @@ func TestUpdateModelLimits_PriorityMinAggregation_NonBannedLowerStillWins(t *tes
 	assert.Equal(t, 100, mockMM.GetModelPriorityForCredential("gpt-4", "test_proxy"))
 }
 
-// TestUpdateModelLimits_WarnsOnPriorityMismatchAcrossLiveUpstreamCredentials covers
-// todo_round_robin.md section 6 (the pol01/uk01/usa01 money-risk scenario reported after
-// live testing): when a model's live (non-banned) upstream credentials behind one proxy
-// credential report different priority groups, the MIN aggregation is riding on the
-// cheaper one staying live — routing silently jumps to the pricier group the instant it
-// isn't, with no warning at that exact moment since a 30s poll loop keeps no history. This
-// asserts the Warn fires while both are still live, naming both the current effective
-// priority and what it'll become if the cheaper credential stops being live.
 func TestUpdateModelLimits_WarnsOnPriorityMismatchAcrossLiveUpstreamCredentials(t *testing.T) {
 	health := &httputil.ProxyHealthResponse{
 		Credentials: map[string]httputil.CredentialHealthStats{
@@ -451,6 +493,37 @@ func TestUpdateModelLimits_IsFallbackDoesNotDropPriority(t *testing.T) {
 	assert.Equal(t, 100, mockMM.GetModelPriorityForCredential("gpt-4", "test_proxy"))
 	assert.Equal(t, 999, mockMM.GetModelPriorityForCredential("claude-3-opus", "test_proxy"))
 	assert.Equal(t, 20, rateLimiter.GetModelLimitRPM("test_proxy", "claude-3-opus"), "limits for the is_fallback-served model must still be aggregated")
+}
+
+// TestUpdateModelScopes_IncludesFallbackMarkedUpstreamCredential is the scope-side
+// counterpart to TestUpdateModelLimits_IsFallbackDoesNotDropPriority above: the same
+// "upstream is_fallback must not cause exclusion" fix was applied to limits/priority
+// but updateModelScopes still passed cred.IsFallback (our own connection's flag, not
+// the upstream credential's) into Aggregate*FromHealth, which skips is_fallback
+// upstream credentials whenever that's false. A model offered only through such a
+// credential got its RPM/TPM/priority registered (by updateModelLimits) but no scope
+// metadata — silently open to any caller, defeating whatever scope that upstream
+// credential carried.
+func TestUpdateModelScopes_IncludesFallbackMarkedUpstreamCredential(t *testing.T) {
+	health := &httputil.ProxyHealthResponse{
+		Credentials: map[string]httputil.CredentialHealthStats{
+			"grant-fallback": {IsFallback: true, Scopes: []string{"team-a"}},
+		},
+		Models: map[string]httputil.ModelHealthStats{
+			"model:fallback": {Model: "claude-3-opus", Credential: "grant-fallback"},
+		},
+	}
+
+	cred := &config.CredentialConfig{Name: "test_proxy", IsFallback: false}
+	mockMM := NewMockModelManager()
+
+	updateModelScopes(health, cred, mockMM)
+
+	require.NotNil(t, cred.ProviderScopeExpression)
+	assert.True(t, scope.NewContext([]string{"team-a"}, nil).AllowsExpression(cred.ProviderScopeExpression),
+		"team-a caller must still be allowed")
+	assert.False(t, scope.NewContext(nil, nil).AllowsExpression(cred.ProviderScopeExpression),
+		"a caller outside team-a must not be silently let in just because the only upstream serving this model is is_fallback")
 }
 
 func TestUpdateModelLimits_NoModels_ClearsPriorities(t *testing.T) {
@@ -1036,17 +1109,6 @@ func TestUpdateStatsFromHealth_ClearsModelsWhenRemoteSnapshotIsEmpty(t *testing.
 	assert.Empty(t, rateLimiter.GetAllModelPairs())
 }
 
-// TestUpdateStatsFromHealth_IsFallbackDoesNotSkipAggregation_Primary is a regression
-// test for the T3 bug fix (see todo_round_robin.md T3): an upstream credential marked
-// is_fallback must never be dropped from a downstream proxy credential's aggregated
-// limits/models just because the proxy credential itself is not is_fallback.
-//
-// Previously `if !cred.IsFallback && credStats.IsFallback { continue }` in both
-// updateCredentialLimits and updateModelLimits skipped the fallback-flagged upstream
-// credential entirely, so "fallback-model" (served only by "upstream-fallback") vanished
-// completely from "proxy-primary" instead of just being deprioritized. That skip is gone:
-// the upstream credential's is_fallback status no longer affects aggregation at all —
-// deprioritizing it (without hiding it) is now priority's job, not this function's.
 func TestUpdateStatsFromHealth_IsFallbackDoesNotSkipAggregation_Primary(t *testing.T) {
 	mockMM := NewMockModelManager()
 	rateLimiter := ratelimit.New()
@@ -1119,13 +1181,6 @@ func TestUpdateStatsFromHealth_IsFallbackDoesNotSkipAggregation_Fallback(t *test
 	assert.ElementsMatch(t, []string{"primary-model", "fallback-model"}, addedModelIDs)
 }
 
-// TestUpdateAllFromRemoteHealth_DoesNotHoldLockDuringFetch is the regression guard
-// for todo_round_robin.md section 5.1: UpdateAllFromRemoteHealth used to hold
-// updateMutex for the whole call, including the network fetch to every proxy
-// credential's /health endpoint, so a slow or hanging upstream could stall unrelated
-// lock users (e.g. the metrics updater). It now locks only around each credential's
-// write. This test blocks the mock /health handler mid-request and asserts the lock
-// is free (TryLock succeeds) while that fetch is still in flight.
 func TestUpdateAllFromRemoteHealth_DoesNotHoldLockDuringFetch(t *testing.T) {
 	reached := make(chan struct{})
 	release := make(chan struct{})
@@ -1190,4 +1245,58 @@ func TestUpdateAllFromRemoteHealth_DoesNotHoldLockDuringFetch(t *testing.T) {
 	}
 
 	assert.True(t, locked, "updateMutex was held during the network fetch, expected it to be free")
+}
+
+// TestUpdateAllFromRemoteHealth_WritesProviderScopesBackToBalancer covers the gap
+// where UpdateAllFromRemoteHealth mutates only its own bal.GetCredentialsSnapshot()
+// copy (updateModelScopes sets cred.ProviderScopes/ProviderScopeExpression/
+// ProviderScopeKnown on that throwaway struct) without ever calling
+// bal.UpdateProviderScopes, unlike the parallel modelupdate.UpdateAllProxyCredentials.
+// The learned provider scope must actually reach the live balancer's own credential
+// state (what VisibleTo()/scope-based routing and /health reporting read from), not
+// just a copy that gets discarded at the end of the loop iteration.
+func TestUpdateAllFromRemoteHealth_WritesProviderScopesBackToBalancer(t *testing.T) {
+	server := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/health" {
+			http.NotFound(w, r)
+			return
+		}
+		health := &httputil.ProxyHealthResponse{
+			Credentials: map[string]httputil.CredentialHealthStats{
+				"cheapgpt": {Scopes: []string{"team-a"}},
+			},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(health)
+	}))
+	defer server.Close()
+
+	cred := config.CredentialConfig{
+		Name:    "grant-pol01",
+		Type:    config.ProviderTypeProxy,
+		BaseURL: server.URL,
+		APIKey:  "unused",
+	}
+
+	rateLimiter := ratelimit.New()
+	logger := testhelpers.NewTestLogger()
+	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
+	bal := balancer.New([]config.CredentialConfig{cred}, f2b, rateLimiter)
+	mockMM := NewMockModelManager()
+	updateMutex := &sync.Mutex{}
+
+	UpdateAllFromRemoteHealth(context.Background(), bal, rateLimiter, logger, mockMM, updateMutex)
+
+	var got *config.CredentialConfig
+	for _, c := range bal.GetCredentialsSnapshot() {
+		if c.Name == "grant-pol01" {
+			cCopy := c
+			got = &cCopy
+		}
+	}
+	require.NotNil(t, got, "credential must still be present in the balancer")
+	assert.True(t, got.ProviderScopeKnown, "learned provider scope must reach the live balancer, not just the throwaway snapshot copy")
+	require.NotNil(t, got.ProviderScopeExpression)
+	assert.True(t, scope.NewContext([]string{"team-a"}, nil).AllowsExpression(got.ProviderScopeExpression))
+	assert.False(t, scope.NewContext(nil, nil).AllowsExpression(got.ProviderScopeExpression))
 }
