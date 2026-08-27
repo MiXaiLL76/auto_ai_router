@@ -265,6 +265,62 @@ func TestUpdateModelLimits_PriorityMinAggregation(t *testing.T) {
 	assert.Equal(t, 100, mockMM.GetModelPriorityForCredential("gpt-4", "test_proxy"))
 }
 
+// TestUpdateModelLimits_PriorityMinAggregation_SkipsBannedEntries is a regression test
+// for todo_round_robin.md section 6.1: a banned/exhausted upstream credential's static
+// priority must not pull down (via MIN) the priority exposed for the local proxy
+// credential + model pair, since that upstream can no longer actually serve the model.
+// "cheapgpt" (priority 100) is banned for gpt-4 on this node while "grant" (priority
+// 200) is still live — the aggregated priority must reflect "grant" (200), not the
+// banned "cheapgpt" (100).
+func TestUpdateModelLimits_PriorityMinAggregation_SkipsBannedEntries(t *testing.T) {
+	health := &httputil.ProxyHealthResponse{
+		Credentials: map[string]httputil.CredentialHealthStats{
+			"cheapgpt": {Priority: 100},
+			"grant":    {Priority: 200},
+		},
+		Models: map[string]httputil.ModelHealthStats{
+			"model:cheapgpt": {Model: "gpt-4", Credential: "cheapgpt", Priority: 100, IsBanned: true},
+			"model:grant":    {Model: "gpt-4", Credential: "grant", Priority: 200, IsBanned: false},
+		},
+	}
+
+	rateLimiter := ratelimit.New()
+	cred := &config.CredentialConfig{Name: "test_proxy"}
+	logger := testhelpers.NewTestLogger()
+	mockMM := NewMockModelManager()
+
+	updateModelLimits(health, cred, rateLimiter, logger, mockMM)
+
+	assert.Equal(t, 200, mockMM.GetModelPriorityForCredential("gpt-4", "test_proxy"),
+		"banned upstream credential's priority must be excluded from the MIN aggregation")
+}
+
+// TestUpdateModelLimits_PriorityMinAggregation_NonBannedLowerStillWins is a regression
+// guard alongside the fix above: when neither upstream credential is banned, the MIN
+// aggregation still picks the lower (higher-priority / tried-first) value as before —
+// the banned-skip logic must not accidentally change the base MIN case.
+func TestUpdateModelLimits_PriorityMinAggregation_NonBannedLowerStillWins(t *testing.T) {
+	health := &httputil.ProxyHealthResponse{
+		Credentials: map[string]httputil.CredentialHealthStats{
+			"grant-a": {Priority: 100},
+			"grant-b": {Priority: 200},
+		},
+		Models: map[string]httputil.ModelHealthStats{
+			"model:a": {Model: "gpt-4", Credential: "grant-a", Priority: 100, IsBanned: false},
+			"model:b": {Model: "gpt-4", Credential: "grant-b", Priority: 200, IsBanned: false},
+		},
+	}
+
+	rateLimiter := ratelimit.New()
+	cred := &config.CredentialConfig{Name: "test_proxy"}
+	logger := testhelpers.NewTestLogger()
+	mockMM := NewMockModelManager()
+
+	updateModelLimits(health, cred, rateLimiter, logger, mockMM)
+
+	assert.Equal(t, 100, mockMM.GetModelPriorityForCredential("gpt-4", "test_proxy"))
+}
+
 // TestUpdateModelLimits_IsFallbackDoesNotDropPriority is a T3 regression test: an
 // upstream credential marked is_fallback still contributes its model+priority to the
 // proxy credential's aggregation instead of being skipped outright (the bug fixed in

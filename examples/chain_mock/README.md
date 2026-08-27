@@ -7,11 +7,11 @@ A throwaway 5-container playground for watching the priority-group cascade actua
 ```mermaid
 graph LR
     Client["you / load.sh"] --> Main{{"<b>main router</b><br/>cascade: 100→200→300"}}
-    
+
     Main --> R2["router2<br/>🟢 priority 100\n\n🔴 priority 300"]
     Main --> R3["router3<br/>🟢 priority 100\n🟡 priority 200\n🔴 priority 300"]
     Main --> R4["router4<br/>\n🟡 priority 200\n🔴 priority 300"]
-    
+
     R2 --> M2[("mock:9002")]
     R3 --> M3[("mock:9003")]
     R4 --> M4[("mock:9004")]
@@ -23,9 +23,9 @@ real ru01→pol01/uk01/ger01 deployment uses). Model-to-router map:
 
 | model   | router2 (100) | router3 (200) | router4 (300) |
 | ------- | :-----------: | :-----------: | :-----------: |
-| model-a |       ✅      |       ✅       |               |
-| model-b |               |       ✅       |       ✅       |
-| model-c |       ✅       |       ✅       |       ✅       |
+| model-a |      ✅       |      ✅       |               |
+| model-b |               |      ✅       |      ✅       |
+| model-c |      ✅       |      ✅       |      ✅       |
 
 So `model-a` cascades router2→router3, `model-b` cascades router3→router4,
 and `model-c` walks the full three-tier chain.

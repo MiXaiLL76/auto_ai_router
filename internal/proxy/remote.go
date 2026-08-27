@@ -208,6 +208,13 @@ func (agg *limitAggregation) applyWeight(weight int) {
 // credentials on the same node with different priority groups), the resulting
 // proxy-local model priority is the lowest one — the group that would be tried first
 // — not a sum or average.
+//
+// Callers must only invoke this for upstream credentials that can actually still serve
+// the model (see updateModelLimits, which skips banned entries): a banned upstream's
+// static priority has no business dragging the aggregate down via MIN when that
+// upstream can't serve traffic anymore. This function itself has no notion of ban
+// status — it folds in whatever priority it's given — so the filtering lives entirely
+// in the caller.
 func (agg *limitAggregation) applyPriorityMin(priority int) {
 	if !agg.hasPriority || priority < agg.priority {
 		agg.priority = priority
@@ -374,8 +381,17 @@ func updateModelLimits(
 		}
 		aggregation.applyWeight(weight)
 		modelWeights[modelID] = aggregation.weight
-		aggregation.applyPriorityMin(priority)
-		modelPriorities[modelID] = aggregation.priority
+		// Skip folding this entry's priority into the MIN aggregation when the upstream
+		// credential is banned/exhausted for this model: it can no longer actually serve
+		// the model, so its static priority must not pull down the priority we expose for
+		// this proxy credential + model pair (see applyPriorityMin's doc comment). This is
+		// scoped to priority only — rpm/tpm/current-usage aggregation (applySum above) and
+		// weight (applyWeight above) still fold in banned entries unconditionally, since
+		// those aren't affected by the same "which group gets tried first" concern.
+		if !modelStats_data.IsBanned {
+			aggregation.applyPriorityMin(priority)
+			modelPriorities[modelID] = aggregation.priority
+		}
 		if modelStats_data.Credential != "" {
 			modelSourceCreds[modelID] = modelStats_data.Credential
 		}

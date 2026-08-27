@@ -240,23 +240,35 @@ func (p *Proxy) addModelHealthStats(
 	credWeight := credentialWeight(creds, credentialName)
 	credPriority := credentialPriority(creds, credentialName)
 	modelWeight := 0
+	modelPriority := 0
 	realCredential := ""
 	if p.modelManager != nil {
 		modelWeight = p.modelManager.GetModelWeightForCredential(modelID, credentialName)
+		modelPriority = p.modelManager.GetModelPriorityForCredential(modelID, credentialName)
 		realCredential = p.modelManager.GetModelSourceCredentialForCredential(modelID, credentialName)
+	}
+	// Priority resolution mirrors balancer.RoundRobin.effectivePriority
+	// (internal/balancer/weighted.go): prefer the dynamic per-model priority
+	// learned from an upstream proxy/AIR credential's own /health poll
+	// (modelManager.GetModelPriorityForCredential), falling back to the owning
+	// credential's static EffectivePriority() when nothing has been learned yet
+	// (modelPriority == 0 — see the "0 means unset" contract note on
+	// models.Manager.GetModelPriorityForCredential). This keeps the dashboard's
+	// Priority in sync with the number the balancer actually routes on, instead
+	// of always showing the credential's local config value.
+	priority := credPriority
+	if modelPriority > 0 {
+		priority = modelPriority
 	}
 	ms := stats[modelKey]
 	scopes, deniedScopes := expression.LegacyProjection()
 	modelsInfo[modelKey] = httputil.ModelHealthStats{
-		Credential:     credentialName,
-		RealCredential: realCredential,
-		Model:          modelID,
-		IsBanned:       p.balancer.IsBanned(credentialName, modelID),
-		Weight:         balancer.EffectiveWeight(modelWeight, credWeight),
-		// Per-model priority override is intentionally not modeled yet (see
-		// httputil.EffectiveHealthPriority) — Priority is a direct copy of the
-		// owning credential's EffectivePriority().
-		Priority:        credPriority,
+		Credential:      credentialName,
+		RealCredential:  realCredential,
+		Model:           modelID,
+		IsBanned:        p.balancer.IsBanned(credentialName, modelID),
+		Weight:          balancer.EffectiveWeight(modelWeight, credWeight),
+		Priority:        priority,
 		CurrentRPM:      ms.RPM,
 		CurrentTPM:      ms.TPM,
 		LimitRPM:        p.rateLimiter.GetModelLimitRPM(credentialName, modelID),

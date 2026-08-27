@@ -75,16 +75,20 @@ func EffectiveHealthWeight(modelStats ModelHealthStats, credStats CredentialHeal
 // EffectiveHealthPriority resolves the priority group for a model on this
 // credential's connection.
 //
-// Design choice (see todo_round_robin.md T3): unlike EffectiveHealthWeight,
-// this intentionally does NOT layer a per-model override on top of the
-// credential-level value. That mirrors the T1 decision not to add a
-// per-model Priority override to config in this iteration — the same
-// simplification applies to the /health wire format. ModelHealthStats.Priority
-// is populated (see internal/proxy/health.go addModelHealthStats) purely as a
-// direct copy of the owning credential's CredentialConfig.EffectivePriority(),
-// so credStats.Priority is authoritative today. modelStats is still accepted
-// so the signature stays symmetric with EffectiveHealthWeight and so a future
-// per-model override can be added here without an API-breaking change.
+// Design choice (see todo_round_robin.md T3/6.2): this function itself does
+// NOT layer a per-model override on top of the credential-level value —
+// credStats.Priority (this connection's own owning-credential priority, as
+// reported by the remote /health response) is authoritative here. Note this
+// is a different concern from ModelHealthStats.Priority's own population on
+// the *serving* side: internal/proxy/health.go addModelHealthStats resolves
+// that field per (credential, model) using the dynamic per-model priority
+// learned from an upstream proxy/AIR credential's own /health poll when
+// known, falling back to the owning credential's static
+// CredentialConfig.EffectivePriority() otherwise — see that function's
+// comment for the resolution order. modelStats is still accepted here so the
+// signature stays symmetric with EffectiveHealthWeight and so a future
+// per-model override can be added to this aggregation step too without an
+// API-breaking change.
 //
 // Contract: 0 is a valid, meaningful value (the default priority group), not
 // a sentinel for "not configured" — CredentialConfig.EffectivePriority()
