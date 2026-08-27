@@ -117,7 +117,10 @@ func (r *RoundRobin) PruneStaleSWRRState(maxAge time.Duration) int {
 	cutoff := time.Now().Add(-maxAge)
 	removed := 0
 	for key, st := range r.swrr {
-		if st.lastUsed.Before(cutoff) {
+		// !After rather than Before so maxAge:0 honestly means "prune everything":
+		// with a coarse monotonic clock (Windows, ~500µs steps) lastUsed and cutoff
+		// can land in the same tick, and a strict Before would spare the entry.
+		if !st.lastUsed.After(cutoff) {
 			delete(r.swrr, key)
 			removed++
 		}
