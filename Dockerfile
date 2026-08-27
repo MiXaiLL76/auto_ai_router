@@ -47,10 +47,11 @@ FROM gcr.io/distroless/static-debian12:nonroot
 
 WORKDIR /app
 
-# COPY --chown isn't needed: distroless/static-debian12:nonroot's default
-# COPY destination ownership is already root, but the nonroot user (65532)
-# has read+execute on it since Go binaries are world-readable/executable by
-# default — same as it worked with the alpine appuser before.
+# COPY --chown isn't needed: the copied binaries land as root:root 0755, and
+# every uid has read+execute on them — the removed `chown -R appuser:appuser`
+# was never what made them runnable. The /app directory itself is a different
+# story: WORKDIR above creates it owned by 65532, so writes under /app work
+# for the default user only (see the uid note above).
 COPY --from=builder /app/auto_ai_router .
 COPY --from=builder /app/healthcheck .
 
@@ -76,6 +77,8 @@ EXPOSE 8080
 # here for clarity only; never publish it (-p / k8s Service) to anything but
 # an internal debug path (kubectl port-forward).
 EXPOSE 6060
+
+ENV HEALTHCHECK_PORT=8080
 
 # Health check — exec form, not "CMD wget ... || exit 1": there's no shell
 # to interpret "||" here, and ./healthcheck already returns 0/1 on its own.
