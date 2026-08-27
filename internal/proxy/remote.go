@@ -83,23 +83,39 @@ func UpdateAllFromRemoteHealth(
 		close(resultsChan)
 	}()
 
-	for res := range resultsChan {
-		updateMutex.Lock()
-		UpdateStatsFromHealth(res.health, res.cred, rateLimiter, logger, modelManager)
-		// UpdateStatsFromHealth (via updateModelScopes) only mutates res.cred, which is a
-		// pointer into this function's own bal.GetCredentialsSnapshot() copy — never
-		// written back to the live balancer, unlike modelupdate.UpdateAllProxyCredentials's
-		// matching bal.UpdateProviderScopes call. Without this, the provider scope this
-		// credential learned from its upstream /health never reaches bal's own credential
-		// state, so VisibleTo()/scope-based routing decisions never see it.
-		bal.UpdateProviderScopes(
-			*res.cred,
-			res.cred.ProviderScopes,
-			res.cred.ProviderDeniedScopes,
-			res.cred.ProviderScopeExpression,
-			res.cred.ProviderScopeKnown,
-		)
-		updateMutex.Unlock()
+	// Each fetch above is already bounded (FetchHealthFromRemoteProxy threads ctx
+	// through to the HTTP request, and httputil.FetchResponseFromProxy applies
+	// proxyFetchTimeout when ctx has no deadline of its own), so this loop can't
+	// hang forever. But without watching ctx.Done() here too, a caller that
+	// cancels ctx to shut down promptly (e.g. the periodic ticker's bgCtx in
+	// cmd/server/main.go) still has to wait out whatever's left of that bound
+	// before this function returns, instead of exiting as soon as the goroutines
+	// observe the cancellation.
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case res, ok := <-resultsChan:
+			if !ok {
+				return
+			}
+			updateMutex.Lock()
+			UpdateStatsFromHealth(res.health, res.cred, rateLimiter, logger, modelManager)
+			// UpdateStatsFromHealth (via updateModelScopes) only mutates res.cred, which is a
+			// pointer into this function's own bal.GetCredentialsSnapshot() copy — never
+			// written back to the live balancer, unlike modelupdate.UpdateAllProxyCredentials's
+			// matching bal.UpdateProviderScopes call. Without this, the provider scope this
+			// credential learned from its upstream /health never reaches bal's own credential
+			// state, so VisibleTo()/scope-based routing decisions never see it.
+			bal.UpdateProviderScopes(
+				*res.cred,
+				res.cred.ProviderScopes,
+				res.cred.ProviderDeniedScopes,
+				res.cred.ProviderScopeExpression,
+				res.cred.ProviderScopeKnown,
+			)
+			updateMutex.Unlock()
+		}
 	}
 }
 

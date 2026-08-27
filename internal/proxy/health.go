@@ -237,25 +237,39 @@ func (p *Proxy) addModelHealthStats(
 	expression *scope.Expression,
 ) {
 	modelKey := credentialName + ":" + modelID
-	credWeight := credentialWeight(creds, credentialName)
-	credPriority := credentialPriority(creds, credentialName)
+	cred := findCredential(creds, credentialName)
+	credWeight := 0
+	credPriority := 0
+	isProxyLike := false
+	if cred != nil {
+		credWeight = cred.Weight
+		credPriority = cred.EffectivePriority()
+		isProxyLike = cred.IsProxyLike()
+	}
 	modelWeight := 0
 	modelPriority := 0
 	realCredential := ""
 	if p.modelManager != nil {
 		modelWeight = p.modelManager.GetModelWeightForCredential(modelID, credentialName)
-		modelPriority = p.modelManager.GetModelPriorityForCredential(modelID, credentialName)
+		// Dynamic per-model priority is only ever learned from an upstream
+		// proxy/AIR credential's own /health poll (see
+		// ModelManagerInterface.ReplaceModelPrioritiesForCredential callers in
+		// remote.go, gated on cred.IsProxyLike()) — restricting the lookup here
+		// too mirrors balancer.RoundRobin.effectivePriority
+		// (internal/balancer/weighted.go) exactly, instead of relying on the
+		// caller-side invariant that non-proxy credentials never have data to
+		// return.
+		if isProxyLike {
+			modelPriority = p.modelManager.GetModelPriorityForCredential(modelID, credentialName)
+		}
 		realCredential = p.modelManager.GetModelSourceCredentialForCredential(modelID, credentialName)
 	}
-	// Priority resolution mirrors balancer.RoundRobin.effectivePriority
-	// (internal/balancer/weighted.go): prefer the dynamic per-model priority
-	// learned from an upstream proxy/AIR credential's own /health poll
-	// (modelManager.GetModelPriorityForCredential), falling back to the owning
-	// credential's static EffectivePriority() when nothing has been learned yet
-	// (modelPriority == 0 — see the "0 means unset" contract note on
-	// models.Manager.GetModelPriorityForCredential). This keeps the dashboard's
-	// Priority in sync with the number the balancer actually routes on, instead
-	// of always showing the credential's local config value.
+	// Falls back to the owning credential's static EffectivePriority() when
+	// nothing has been learned yet (modelPriority == 0 — see the "0 means
+	// unset" contract note on models.Manager.GetModelPriorityForCredential).
+	// This keeps the dashboard's Priority in sync with the number the
+	// balancer actually routes on, instead of always showing the
+	// credential's local config value.
 	priority := credPriority
 	if modelPriority > 0 {
 		priority = modelPriority
@@ -280,14 +294,7 @@ func (p *Proxy) addModelHealthStats(
 }
 
 func (p *Proxy) modelScopeExpression(creds []config.CredentialConfig, credentialName, modelID string) *scope.Expression {
-	var credential *config.CredentialConfig
-	for _, cred := range creds {
-		if cred.Name == credentialName {
-			credentialCopy := cred
-			credential = &credentialCopy
-			break
-		}
-	}
+	credential := findCredential(creds, credentialName)
 	if credential == nil {
 		return scope.FalseExpression()
 	}
@@ -301,22 +308,16 @@ func (p *Proxy) modelScopeExpression(creds []config.CredentialConfig, credential
 	return scope.And(scope.FromScopes(credential.Scopes, credential.DeniedScopes), modelExpression)
 }
 
-func credentialWeight(creds []config.CredentialConfig, credentialName string) int {
-	for _, cred := range creds {
-		if cred.Name == credentialName {
-			return cred.Weight
+// findCredential returns a pointer to the credential named credentialName
+// within creds, or nil if not found. The returned pointer aliases the slice
+// element — callers must treat it as read-only.
+func findCredential(creds []config.CredentialConfig, credentialName string) *config.CredentialConfig {
+	for i := range creds {
+		if creds[i].Name == credentialName {
+			return &creds[i]
 		}
 	}
-	return 0
-}
-
-func credentialPriority(creds []config.CredentialConfig, credentialName string) int {
-	for _, cred := range creds {
-		if cred.Name == credentialName {
-			return cred.EffectivePriority()
-		}
-	}
-	return 0
+	return nil
 }
 
 // VisualHealthCheck serves the static health dashboard HTML.
