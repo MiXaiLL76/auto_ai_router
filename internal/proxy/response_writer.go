@@ -16,7 +16,7 @@ import (
 
 func clientResponseBodyForCredential(statusCode int, body []byte, _ *config.CredentialConfig, displayModel string) ([]byte, bool, bool) {
 	if statusCode >= 400 {
-		masked := maskedUpstreamErrorBody(statusCode)
+		masked := maskedUpstreamErrorBody(statusCode, body)
 		return masked, !bytes.Equal(body, masked), true
 	}
 	if statusCode >= 200 && statusCode < 300 {

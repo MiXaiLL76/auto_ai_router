@@ -1,8 +1,10 @@
 package proxy
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
+	"strings"
 )
 
 // APIErrorResponse represents an OpenAI-compatible error response.
@@ -63,10 +65,16 @@ func WriteJSONError(w http.ResponseWriter, statusCode int, message, errorType st
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
-func maskedUpstreamErrorBody(statusCode int) []byte {
+func maskedUpstreamErrorBody(statusCode int, rawBodies ...[]byte) []byte {
 	message := "Request failed"
 	code := "api_error"
+	param := (*string)(nil)
 	switch statusCode {
+	case http.StatusBadRequest:
+		detail := classifiedBadRequestError(rawBodies...)
+		message = detail.Message
+		code = *detail.Code
+		param = detail.Param
 	case http.StatusTooManyRequests:
 		message = "Rate limit exceeded"
 		code = "rate_limit_error"
@@ -79,7 +87,7 @@ func maskedUpstreamErrorBody(statusCode int) []byte {
 		Error: APIError{
 			Message: message,
 			Type:    errorTypeForStatus(statusCode),
-			Param:   nil,
+			Param:   param,
 			Code:    &code,
 		},
 	}
@@ -88,6 +96,229 @@ func maskedUpstreamErrorBody(statusCode int) []byte {
 		return []byte(`{"error":{"message":"Request failed","type":"api_error","param":null,"code":"api_error"}}`)
 	}
 	return append(body, '\n')
+}
+
+func classifiedBadRequestError(rawBodies ...[]byte) APIError {
+	errorCode := "invalid_request"
+	result := APIError{
+		Message: "Invalid request",
+		Type:    errorTypeForStatus(http.StatusBadRequest),
+		Param:   nil,
+		Code:    &errorCode,
+	}
+	if len(rawBodies) == 0 || len(rawBodies[0]) == 0 {
+		return result
+	}
+
+	signals, providerParam := providerErrorSignalsFromBody(rawBodies[0])
+	joined := strings.ToLower(strings.Join(signals, " "))
+
+	switch {
+	case hasSignal(joined, "tool_choice", "tool choice", "toolchoice"):
+		param := "tool_choice"
+		code := "invalid_tool_choice"
+		result.Message = "Invalid tool_choice"
+		result.Param = &param
+		result.Code = &code
+	case hasSignal(joined, "max_completion_tokens", "max_output_tokens", "max_tokens", "max tokens", "maximum tokens", "output tokens"):
+		param := inferBadRequestParam(joined, providerParam)
+		if param == nil || !strings.Contains(*param, "token") {
+			v := inferMaxTokensParam(joined)
+			param = &v
+		}
+		code := "invalid_max_tokens"
+		result.Message = "Invalid " + *param
+		result.Param = param
+		result.Code = &code
+	case hasSignal(joined, "context length", "context window", "context limit", "too many tokens", "input too long", "prompt too long", "token limit"):
+		code := "context_length_exceeded"
+		result.Message = "Context length exceeded"
+		result.Param = inferBadRequestParam(joined, providerParam)
+		result.Code = &code
+	case hasSignal(joined, "model group", "model not found", "model does not exist", "unsupported model", "invalid model", "model not supported"):
+		param := "model"
+		code := "invalid_model"
+		result.Message = "Invalid model"
+		result.Param = &param
+		result.Code = &code
+	case hasSignal(joined, "invalid argument", "invalid parameter", "invalid value", "unsupported parameter", "unknown parameter", "unrecognized parameter", "missing required", "required field", "must be", "should be", "does not support"):
+		code := "invalid_parameter"
+		result.Message = "Invalid request parameter"
+		result.Param = inferBadRequestParam(joined, providerParam)
+		result.Code = &code
+	default:
+		result.Param = providerParam
+	}
+
+	return result
+}
+
+const maxProviderErrorSignalBytes = 8 * 1024
+
+func providerErrorSignalsFromBody(body []byte) ([]string, *string) {
+	if len(body) > maxProviderErrorSignalBytes {
+		body = body[:maxProviderErrorSignalBytes]
+	}
+	trimmed := bytes.TrimSpace(body)
+	if len(trimmed) == 0 {
+		return nil, nil
+	}
+
+	signals := make([]string, 0, 8)
+	var param *string
+	var value any
+	if err := json.Unmarshal(trimmed, &value); err == nil {
+		collectProviderErrorSignals(value, 0, &signals, &param)
+	} else {
+		signals = append(signals, string(trimmed))
+	}
+	return signals, param
+}
+
+func collectProviderErrorSignals(value any, depth int, signals *[]string, param **string) {
+	if depth > 5 || len(*signals) >= 32 {
+		return
+	}
+	switch v := value.(type) {
+	case map[string]any:
+		for _, key := range []string{"message", "type", "code", "status", "reason", "error"} {
+			raw, exists := mapValueFold(v, key)
+			if !exists {
+				continue
+			}
+			text, ok := raw.(string)
+			if ok {
+				if s := cleanProviderErrorSignal(text); s != "" {
+					*signals = append(*signals, s)
+				}
+			}
+		}
+		if *param == nil {
+			for _, key := range []string{"param", "parameter", "field"} {
+				raw, exists := mapValueFold(v, key)
+				if !exists {
+					continue
+				}
+				if text, ok := raw.(string); ok {
+					if p := cleanProviderErrorParam(text); p != "" {
+						*param = &p
+						break
+					}
+				}
+			}
+		}
+		for _, key := range []string{"error", "response", "details", "detail", "violations"} {
+			raw, exists := mapValueFold(v, key)
+			if exists {
+				collectProviderErrorSignals(raw, depth+1, signals, param)
+			}
+		}
+	case []any:
+		for _, item := range v {
+			collectProviderErrorSignals(item, depth+1, signals, param)
+		}
+	case string:
+		if s := cleanProviderErrorSignal(v); s != "" {
+			*signals = append(*signals, s)
+		}
+	}
+}
+
+func mapValueFold(values map[string]any, key string) (any, bool) {
+	if raw, exists := values[key]; exists {
+		return raw, true
+	}
+	for k, raw := range values {
+		if strings.EqualFold(k, key) {
+			return raw, true
+		}
+	}
+	return nil, false
+}
+
+func cleanProviderErrorSignal(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+	if len(s) > 512 {
+		s = s[:512]
+	}
+	return s
+}
+
+func cleanProviderErrorParam(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" || len(s) > 80 {
+		return ""
+	}
+	for _, r := range s {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' {
+			continue
+		}
+		switch r {
+		case '_', '.', '-', '[', ']':
+			continue
+		default:
+			return ""
+		}
+	}
+	return s
+}
+
+func hasSignal(value string, needles ...string) bool {
+	for _, needle := range needles {
+		if strings.Contains(value, needle) {
+			return true
+		}
+	}
+	return false
+}
+
+func inferBadRequestParam(joined string, providerParam *string) *string {
+	if providerParam != nil {
+		return providerParam
+	}
+	for _, param := range []string{
+		"max_completion_tokens",
+		"max_output_tokens",
+		"max_tokens",
+		"tool_choice",
+		"parallel_tool_calls",
+		"response_format",
+		"reasoning_effort",
+		"service_tier",
+		"stream_options",
+		"temperature",
+		"top_p",
+		"messages",
+		"input",
+		"tools",
+		"model",
+		"stop",
+		"metadata",
+		"audio",
+		"image",
+		"prompt",
+		"n",
+	} {
+		if strings.Contains(joined, param) {
+			p := param
+			return &p
+		}
+	}
+	return nil
+}
+
+func inferMaxTokensParam(joined string) string {
+	switch {
+	case strings.Contains(joined, "max_completion_tokens"):
+		return "max_completion_tokens"
+	case strings.Contains(joined, "max_output_tokens"):
+		return "max_output_tokens"
+	default:
+		return "max_tokens"
+	}
 }
 
 // WriteErrorBadRequest writes a 400 Bad Request JSON error.
