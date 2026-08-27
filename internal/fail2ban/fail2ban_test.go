@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestNew(t *testing.T) {
@@ -643,6 +644,46 @@ func TestIsBanned_TOCTOU_ReturnsCorrectAfterLockUpgrade(t *testing.T) {
 	// Verify that a new ban can be triggered after cleanup
 	f2b.RecordResponse("cred1", "gpt-4", 401)
 	assert.True(t, f2b.IsBanned("cred1", "gpt-4"))
+}
+
+func TestMinRemainingBanForModel_ReturnsShortestAcrossCredentials(t *testing.T) {
+	f2b := NewWithRules(1, 0, []int{401, 429}, []ErrorCodeRule{
+		{Code: 401, MaxAttempts: 1, BanDuration: 10 * time.Second},
+		{Code: 429, MaxAttempts: 1, BanDuration: 2 * time.Second},
+	})
+
+	f2b.RecordResponse("cred-slow", "shared-model", 401) // banned for 10s
+	f2b.RecordResponse("cred-fast", "shared-model", 429) // banned for 2s
+
+	remaining, ok := f2b.MinRemainingBanForModel("shared-model")
+	require.True(t, ok)
+	assert.Greater(t, remaining, time.Duration(0))
+	assert.LessOrEqual(t, remaining, 2*time.Second)
+}
+
+func TestMinRemainingBanForModel_IgnoresPermanentBans(t *testing.T) {
+	f2b := New(1, 0, []int{401}) // banDuration 0 == permanent
+
+	f2b.RecordResponse("cred1", "model-a", 401)
+
+	_, ok := f2b.MinRemainingBanForModel("model-a")
+	assert.False(t, ok, "permanent ban has no finite ETA to report")
+}
+
+func TestMinRemainingBanForModel_IgnoresOtherModels(t *testing.T) {
+	f2b := New(1, 5*time.Second, []int{401})
+
+	f2b.RecordResponse("cred1", "model-a", 401)
+
+	_, ok := f2b.MinRemainingBanForModel("model-b")
+	assert.False(t, ok)
+}
+
+func TestMinRemainingBanForModel_NoActiveBan_ReturnsFalse(t *testing.T) {
+	f2b := New(3, 5*time.Second, []int{401})
+
+	_, ok := f2b.MinRemainingBanForModel("anything")
+	assert.False(t, ok)
 }
 
 func TestGetBannedModelsForCredential(t *testing.T) {

@@ -147,6 +147,12 @@ func (r *RoundRobin) HasAnyBan(credentialName string) bool {
 	return r.fail2ban.HasAnyBan(credentialName)
 }
 
+// MinRemainingBanForModel returns the shortest time remaining until any
+// fail2ban-banned credential for modelID becomes available again.
+func (r *RoundRobin) MinRemainingBanForModel(modelID string) (time.Duration, bool) {
+	return r.fail2ban.MinRemainingBanForModel(modelID)
+}
+
 // GetProxyCredentials returns all proxy/AIR remote-router credentials.
 func (r *RoundRobin) GetProxyCredentials() []config.CredentialConfig {
 	r.mu.RLock()

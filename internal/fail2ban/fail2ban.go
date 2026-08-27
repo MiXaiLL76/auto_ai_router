@@ -470,6 +470,39 @@ func banUntil(ban *banInfo) time.Time {
 	return ban.banTime.Add(ban.banDuration).UTC()
 }
 
+// MinRemainingBanForModel returns the shortest time remaining until any
+// credential currently banned for modelID becomes available again. Used to
+// build a Retry-After hint on a synthesized 429 when no credential is
+// available for a request. Permanent bans (banDuration == 0) are skipped —
+// there is no finite ETA to report for those. Returns (0, false) if no
+// temporary ban is currently active for this model.
+func (f *Fail2Ban) MinRemainingBanForModel(modelID string) (time.Duration, bool) {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+
+	now := utils.NowUTC()
+	suffix := "|" + modelID
+	var min time.Duration
+	found := false
+	for key, ban := range f.banned {
+		if !strings.HasSuffix(key, suffix) {
+			continue
+		}
+		if ban.banDuration == 0 {
+			continue
+		}
+		remaining := ban.banTime.Add(ban.banDuration).Sub(now)
+		if remaining <= 0 {
+			continue
+		}
+		if !found || remaining < min {
+			min = remaining
+			found = true
+		}
+	}
+	return min, found
+}
+
 // GetBannedCount returns the count of currently active (non-expired) banned credential+model pairs
 func (f *Fail2Ban) GetBannedCount() int {
 	f.mu.RLock()
