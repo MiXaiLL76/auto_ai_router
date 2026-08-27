@@ -13,6 +13,13 @@ import (
 )
 
 func main() {
+	os.Exit(run())
+}
+
+// run keeps os.Exit out of the function that holds the deferred Close: Exit
+// never runs deferred calls, so calling it directly here would skip closing
+// resp.Body on the unhealthy-status path.
+func run() int {
 	url := flag.String("url", "http://localhost:8080/health", "health endpoint to probe")
 	timeout := flag.Duration("timeout", 3*time.Second, "request timeout")
 	flag.Parse()
@@ -21,12 +28,17 @@ func main() {
 	resp, err := client.Get(*url)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "healthcheck: ", err)
-		os.Exit(1)
+		return 1
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if cerr := resp.Body.Close(); cerr != nil {
+			fmt.Fprintln(os.Stderr, "healthcheck: closing response body: ", cerr)
+		}
+	}()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		fmt.Fprintln(os.Stderr, "healthcheck: unhealthy status", resp.StatusCode)
-		os.Exit(1)
+		return 1
 	}
+	return 0
 }
