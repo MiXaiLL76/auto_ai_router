@@ -1,3 +1,4 @@
+// Package models manages the router's model catalog, aliases, pricing and routing metadata.
 package models
 
 import (
@@ -408,8 +409,8 @@ func New(logger *slog.Logger, defaultModelsRPM int, staticModels []config.ModelR
 	}
 	for cred, names := range m.modelRealNamesPerCred {
 		snapshot := make(map[string]string, len(names))
-		for alias, real := range names {
-			snapshot[alias] = real
+		for alias, realName := range names {
+			snapshot[alias] = realName
 		}
 		m.staticModelRealNamesPerCred[cred] = snapshot
 	}
@@ -422,8 +423,8 @@ func New(logger *slog.Logger, defaultModelsRPM int, staticModels []config.ModelR
 func (m *Manager) GetRealModelName(alias string) (string, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	if real, ok := m.modelRealNames[alias]; ok {
-		return real, true
+	if realName, ok := m.modelRealNames[alias]; ok {
+		return realName, true
 	}
 	return alias, false
 }
@@ -436,12 +437,12 @@ func (m *Manager) GetRealModelNameForCredential(alias, credential string) (strin
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	if names, ok := m.modelRealNamesPerCred[credential]; ok {
-		if real, ok := names[alias]; ok {
-			return real, true
+		if realName, ok := names[alias]; ok {
+			return realName, true
 		}
 	}
-	if real, ok := m.modelRealNames[alias]; ok {
-		return real, true
+	if realName, ok := m.modelRealNames[alias]; ok {
+		return realName, true
 	}
 	return alias, false
 }
@@ -462,14 +463,14 @@ func (m *Manager) GetAliasesForCredentialRealModel(credential, realModel string)
 		resolved := alias
 		resolvedPerCredential := false
 		if names, ok := m.modelRealNamesPerCred[credential]; ok {
-			if real, ok := names[alias]; ok {
-				resolved = real
+			if realName, ok := names[alias]; ok {
+				resolved = realName
 				resolvedPerCredential = true
 			}
 		}
 		if !resolvedPerCredential {
-			if real, ok := m.modelRealNames[alias]; ok {
-				resolved = real
+			if realName, ok := m.modelRealNames[alias]; ok {
+				resolved = realName
 			}
 		}
 		if resolved != realModel {
@@ -601,20 +602,20 @@ func (m *Manager) HasPassthroughResponsesOverride(modelID string) bool {
 //
 // Priority:
 //  1. Explicit config override (passthrough_messages: true/false in models[])
-//  2. Provider default: true for Anthropic; true for CometAPI unless it's running in
-//     its OpenAI-compatible protocol mode (openai_proto), where /v1/messages already
-//     converts to the Chat Completions wire format it actually speaks; false otherwise.
-func (m *Manager) IsPassthroughMessagesForProvider(modelID string, providerType config.ProviderType, openAIProtocol bool) bool {
+//  2. Provider default: true for Anthropic and for a plain CometAPI credential.
+//     Callers pass cred.EffectiveProviderType(), so a CometAPI credential running
+//     in openai_proto (ProviderTypeOpenAI) or google_proto (ProviderTypeGemini)
+//     mode already reports a non-Anthropic wire protocol here and defaults to
+//     false — /v1/messages is converted to that provider's format instead.
+func (m *Manager) IsPassthroughMessagesForProvider(modelID string, providerType config.ProviderType) bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	if v, ok := m.modelPassthroughMessages[modelID]; ok && v != nil {
 		return *v
 	}
 	switch providerType {
-	case config.ProviderTypeAnthropic:
+	case config.ProviderTypeAnthropic, config.ProviderTypeCometAPI:
 		return true
-	case config.ProviderTypeCometAPI:
-		return !openAIProtocol
 	default:
 		return false
 	}
@@ -1154,8 +1155,8 @@ func (m *Manager) UpdateDBModels(dbModels []config.ModelRPMConfig, staticCreds [
 	newRealNamesPerCred := make(map[string]map[string]string, len(m.staticModelRealNamesPerCred))
 	for cred, names := range m.staticModelRealNamesPerCred {
 		snapshot := make(map[string]string, len(names))
-		for alias, real := range names {
-			snapshot[alias] = real
+		for alias, realName := range names {
+			snapshot[alias] = realName
 		}
 		newRealNamesPerCred[cred] = snapshot
 	}
@@ -2881,6 +2882,7 @@ func (m *Manager) GetModelsForCredential(credentialName string) []Model {
 }
 
 // GetRemoteModels fetches models from a remote proxy credential with caching.
+//
 // Deprecated: use GetRemoteModelsWithError to handle upstream fetch errors explicitly.
 func (m *Manager) GetRemoteModels(cred *config.CredentialConfig) []Model {
 	models, err := m.GetRemoteModelsWithError(context.Background(), cred)

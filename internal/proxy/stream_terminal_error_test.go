@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -130,6 +131,51 @@ func TestStreamingHandlersDetectFragmentedTerminalErrorsAcrossReads(t *testing.T
 			assert.Contains(t, logCtx.ErrorMsg, tt.wantMarker)
 		})
 	}
+}
+
+// TestEarlyStreamErrorBodyCarriesRequestIDFromLogContext guards the fix for the
+// PR #165 review: writeProviderStreamErrorBeforeCommit must take the request ID
+// from the in-scope RequestLogContext, not from w.Header(). The recorder here
+// has no X-Request-Id header set, yet the masked error body must still echo the
+// canonical trace ID so a client can correlate an early stream failure.
+func TestEarlyStreamErrorBodyCarriesRequestIDFromLogContext(t *testing.T) {
+	const requestID = "0123456789abcdef0123456789abcdef"
+	terminalChunks := []string{
+		"event: error\n",
+		`data: {"type":"error","error":{"type":"overloaded_error","message":"early terminal failure"}}` + "\n\n",
+	}
+
+	prx := NewTestProxyBuilder().Build()
+	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	credential := &config.CredentialConfig{Name: "terminal-provider", Type: config.ProviderTypeOpenAI, BaseURL: "https://provider.invalid"}
+	logCtx := &RequestLogContext{
+		RequestID:   requestID,
+		StartTime:   time.Now().UTC(),
+		Request:     request,
+		Credential:  credential,
+		ModelID:     "gpt-4o-mini",
+		RealModelID: "gpt-4o-mini",
+		TargetURL:   credential.BaseURL,
+	}
+	resp := &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": {"text/event-stream"}},
+		Body:       &fragmentedStreamReadCloser{chunks: stringChunks(terminalChunks)},
+		Request:    request,
+	}
+	w := httptest.NewRecorder()
+
+	err := prx.handleStreamingWithTokens(w, resp, "direct-openai", "gpt-4o-mini", logCtx)
+
+	var terminalErr proxyProviderStreamError
+	require.ErrorAs(t, err, &terminalErr)
+	require.True(t, terminalErr.beforeCommit, "error must be caught before the stream is committed")
+	assert.Empty(t, w.Header().Get("X-Request-Id"), "recorder intentionally has no request-id header")
+
+	var body APIErrorResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	assert.Equal(t, requestID, body.RequestID)
+	assert.NotContains(t, w.Body.String(), "early terminal failure")
 }
 
 // TestHandleAnthropicCompatibleStreamingMasksInStreamErrorForAllCredentialTypes

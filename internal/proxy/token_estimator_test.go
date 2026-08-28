@@ -156,6 +156,38 @@ func TestExtractCompletionDeltaText_MessagesAPI(t *testing.T) {
 	assert.Equal(t, `hellothink{"city":"Moscow"}`, extractCompletionDeltaText(chunk))
 }
 
+func TestExtractCompletionDeltaText_ChatCompletionsReasoning(t *testing.T) {
+	chunk := []byte(
+		`data: {"choices":[{"delta":{"reasoning_content":"think"}}]}` + "\n\n" +
+			`data: {"choices":[{"delta":{"content":"hello"}}]}` + "\n\n")
+
+	assert.Equal(t, "thinkhello", extractCompletionDeltaText(chunk))
+}
+
+// Some OpenAI-compatible providers stream reasoning under "reasoning" instead of
+// "reasoning_content"; the raw payload reaches the estimator before responsecompat
+// folds the two together, so both spellings have to count.
+func TestExtractCompletionDeltaText_ChatCompletionsReasoningAlias(t *testing.T) {
+	chunk := []byte(`data: {"choices":[{"delta":{"reasoning":"think"}}]}` + "\n\n")
+
+	assert.Equal(t, "think", extractCompletionDeltaText(chunk))
+}
+
+// A provider that sends both spellings must not have the same text billed twice.
+func TestExtractCompletionDeltaText_ChatCompletionsReasoningNotDoubleCounted(t *testing.T) {
+	chunk := []byte(`data: {"choices":[{"delta":{"reasoning_content":"think","reasoning":"think"}}]}` + "\n\n")
+
+	assert.Equal(t, "think", extractCompletionDeltaText(chunk))
+}
+
+// Reasoning must not cost the content text: decoded as a string, a non-string
+// reasoning field would fail the whole unmarshal and drop the content with it.
+func TestExtractCompletionDeltaText_ChatCompletionsReasoningNonString(t *testing.T) {
+	chunk := []byte(`data: {"choices":[{"delta":{"content":"hello","reasoning_content":[{"text":"think"}]}}]}` + "\n\n")
+
+	assert.Equal(t, "hellothink", extractCompletionDeltaText(chunk))
+}
+
 func TestExtractCompletionDeltaText_IgnoresAudioBytes(t *testing.T) {
 	chunk := []byte(`data: {"type":"response.output_audio.delta","delta":"QUJDREVGRw=="}` + "\n\n" +
 		`data: {"type":"response.audio.delta","delta":"QUJDREVGRw=="}` + "\n\n")

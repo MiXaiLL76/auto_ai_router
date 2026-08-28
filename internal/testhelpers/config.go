@@ -1,3 +1,4 @@
+// Package testhelpers provides shared fixtures for tests.
 package testhelpers
 
 import (

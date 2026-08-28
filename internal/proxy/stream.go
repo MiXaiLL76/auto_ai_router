@@ -635,7 +635,7 @@ func (p *Proxy) handleProviderStreaming(
 
 func (p *Proxy) handleVertexStreaming(w http.ResponseWriter, resp *http.Response, credName, modelID, displayModelID string, logCtx *RequestLogContext) error {
 	conv := converter.New(config.ProviderTypeVertexAI, converter.RequestMode{ModelID: modelID, DisplayModelID: displayModelID, IsStreaming: true})
-	transformer := func(r io.Reader, id string, w io.Writer) error {
+	transformer := func(r io.Reader, _ string, w io.Writer) error {
 		return conv.StreamTo(r, w)
 	}
 	return p.handleTransformedStreaming(w, resp, credName, modelID, "Vertex AI", transformer, logCtx)
@@ -643,7 +643,7 @@ func (p *Proxy) handleVertexStreaming(w http.ResponseWriter, resp *http.Response
 
 func (p *Proxy) handleAnthropicCompatibleStreaming(w http.ResponseWriter, resp *http.Response, cred *config.CredentialConfig, modelID, displayModelID string, providerType config.ProviderType, providerLabel string, logCtx *RequestLogContext) error {
 	conv := converter.New(providerType, converter.RequestMode{ModelID: modelID, DisplayModelID: displayModelID, IsStreaming: true})
-	transformer := func(r io.Reader, id string, w io.Writer) error {
+	transformer := func(r io.Reader, _ string, w io.Writer) error {
 		// Sanitize unconditionally, matching handleTransformedStreaming's output-side pass:
 		// the converter can fold a raw upstream error event's message into a plain
 		// delta.content string (see anthropic.TransformAnthropicStreamToOpenAI's "error"
@@ -658,7 +658,7 @@ func (p *Proxy) handleAnthropicCompatibleStreaming(w http.ResponseWriter, resp *
 
 func (p *Proxy) handleBedrockStreaming(w http.ResponseWriter, resp *http.Response, credName, modelID, displayModelID string, logCtx *RequestLogContext) error {
 	conv := converter.New(config.ProviderTypeBedrock, converter.RequestMode{ModelID: modelID, DisplayModelID: displayModelID, IsStreaming: true})
-	transformer := func(r io.Reader, id string, w io.Writer) error {
+	transformer := func(r io.Reader, _ string, w io.Writer) error {
 		return conv.StreamTo(r, w)
 	}
 	return p.handleTransformedStreaming(w, resp, credName, modelID, "Bedrock", transformer, logCtx)
@@ -1435,7 +1435,7 @@ func (p *Proxy) streamToClient(
 		if logCtx != nil {
 			logCtx.StreamOutcome = "stream_error"
 		}
-		writeProviderStreamErrorBeforeCommit(w, statusCode)
+		writeProviderStreamErrorBeforeCommit(w, statusCode, logContextRequestID(logCtx))
 		if onWriteErr != nil {
 			onWriteErr()
 		}
@@ -1583,7 +1583,7 @@ func (p *Proxy) handleResponsesAPIStreaming(
 
 	// Create a wrapper transformer that chains:
 	// Provider SSE -> Chat Completions SSE -> Responses API SSE
-	transformer := func(r io.Reader, id string, w io.Writer) error {
+	transformer := func(r io.Reader, _ string, w io.Writer) error {
 		if conv.IsPassthrough() {
 			p.logger.DebugContext(respCtx(resp), "Responses API streaming: passthrough mode (Chat Completions SSE → Responses SSE)",
 				"model", modelID, "provider", cred.Type)

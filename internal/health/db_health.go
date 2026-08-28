@@ -1,3 +1,4 @@
+// Package health tracks the readiness of external dependencies such as the database.
 package health
 
 import (

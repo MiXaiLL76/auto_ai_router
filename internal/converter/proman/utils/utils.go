@@ -1,3 +1,4 @@
+// Package utils holds helpers for sanitizing upstream provider responses.
 package utils
 
 import (
@@ -6,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"slices"
 	"strings"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
@@ -181,13 +183,13 @@ func (r *sanitizingSSEReader) consumeSanitizingSSEFragment(fragment []byte, read
 			return
 		}
 
-		r.pending = append(r.line, fragment...)
+		r.pending = slices.Concat(r.line, fragment)
 		r.line = nil
 		r.passthrough = true
 		return
 	}
 
-	line := append(r.line, fragment...)
+	line := slices.Concat(r.line, fragment)
 	r.line = nil
 	if len(line) == 0 {
 		return

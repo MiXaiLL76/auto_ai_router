@@ -226,3 +226,38 @@ A client sending `"model": "haiku"`:
 
 1. `model_alias` resolves `haiku` → `aws/claude-haiku-4.5` (credential lookup uses `aws/claude-haiku-4.5`)
 2. `models[].model` replaces body model field with `global.anthropic.claude-haiku-4-5-20251001-v1:0`
+
+______________________________________________________________________
+
+## Organization Model Policies
+
+`organization_policies` adds a scoped public model surface for verified LiteLLM organizations. It is an overlay on top of the global surface.
+
+```yaml
+organization_policies:
+  - organization_id: os.environ/CLOUD_RU_ORGANIZATION_ID
+    price_profile_id: cloud-ru-2026-09
+    model_prices_link: /app/organization-prices/cloud-ru-2026-09.json
+    model_allowlist:
+      - openai/gpt-5.5-pro
+    model_mappings:
+      openai/gpt-5.5-pro: gpt-5.5-pro
+```
+
+For a mapped organization request AIR keeps separate identifiers:
+
+| Field              | Value                                                     |
+| ------------------ | --------------------------------------------------------- |
+| `PublicModelID`    | Exact model string from the client request                |
+| `CanonicalModelID` | Organization mapping target or global canonical public ID |
+| `ModelID`          | Final routable AIR ID after global `model_alias`          |
+| `RealModelID`      | Provider-facing model ID                                  |
+| `PriceModelID`     | Exact public model ID from the client request             |
+
+An organization mapping shadows every global meaning of the same request ID only for that organization. The mapping target must be a direct active route or one active global `model_alias` key. It cannot target another organization entry, `public_model_alias`, or `accepted_model_alias`.
+
+`model_allowlist` controls the effective organization surface. When omitted, AIR exposes the global callable surface plus organization mappings. When present and empty, the organization has no callable models. When present and non-empty, entries are exact public request IDs.
+
+Database model ACLs still run after organization surface admission. For an organization-mapped request, AIR tests the ordered candidate set `PublicModelID`, `CanonicalModelID`, and `ModelID` against the applicable key, team, user, and membership allowlists. A direct request for a canonical or routed target does not inherit permission from an organization public ID.
+
+`GET /v1/models?include_model_access_groups=true` returns the same curated organization surface as the plain listing. The provider access-group projection is an administrative view over internal routes and is intentionally suppressed for organization-scoped keys so backend IDs are not re-introduced through a query parameter.

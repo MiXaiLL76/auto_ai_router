@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"math/rand"
+	"math/rand/v2"
 	"net/http"
 	"time"
 
@@ -194,7 +194,7 @@ func (p *Proxy) TryFallbackProxy(
 		r = r.WithContext(ctx)
 
 		// Add jitter (0-50ms) to prevent thundering herd when multiple requests fail simultaneously
-		jitter := time.Duration(rand.Intn(50)) * time.Millisecond
+		jitter := time.Duration(rand.IntN(50)) * time.Millisecond
 		time.Sleep(jitter)
 		proxyResp, fwdErr := p.forwardToProxy(w, r, modelID, fallbackCred, body, start)
 		if fwdErr != nil {

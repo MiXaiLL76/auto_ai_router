@@ -1,3 +1,4 @@
+// Package vertex converts requests and responses between the router's internal form and Google Vertex AI.
 package vertex
 
 import (

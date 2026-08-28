@@ -14,9 +14,9 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/proxy/modelutils"
 )
 
-func clientResponseBodyForCredential(statusCode int, body []byte, _ *config.CredentialConfig, displayModel string) ([]byte, bool, bool) {
+func clientResponseBodyForCredential(statusCode int, body []byte, _ *config.CredentialConfig, displayModel, requestID string) ([]byte, bool, bool) {
 	if statusCode >= 400 {
-		masked := maskedUpstreamErrorBody(statusCode)
+		masked := maskedUpstreamErrorBody(statusCode, requestID, body)
 		return masked, !bytes.Equal(body, masked), true
 	}
 	if statusCode >= 200 && statusCode < 300 {
@@ -27,13 +27,15 @@ func clientResponseBodyForCredential(statusCode int, body []byte, _ *config.Cred
 }
 
 func statusCodeFromProviderBodyError(statusCode int, body []byte) (int, bool) {
-	if statusCode < http.StatusOK || statusCode >= http.StatusMultipleChoices || len(body) == 0 {
+	if len(body) == 0 {
 		return 0, false
 	}
 
 	var evt struct {
 		Type     string          `json:"type"`
 		Status   string          `json:"status"`
+		Code     string          `json:"code"`
+		Message  string          `json:"message"`
 		Error    json.RawMessage `json:"error"`
 		Response struct {
 			Status string          `json:"status"`
@@ -44,17 +46,33 @@ func statusCodeFromProviderBodyError(statusCode int, body []byte) (int, bool) {
 		return 0, false
 	}
 
-	signals := []string{evt.Type, evt.Status, evt.Response.Status}
+	signals := []string{evt.Type, evt.Status, evt.Code, evt.Message, evt.Response.Status}
 	topErrorSignals, hasTopError := providerErrorSignals(evt.Error)
 	responseErrorSignals, hasResponseError := providerErrorSignals(evt.Response.Error)
 	signals = append(signals, topErrorSignals...)
 	signals = append(signals, responseErrorSignals...)
 
 	hasFailedStatus := strings.EqualFold(evt.Status, "failed") || strings.EqualFold(evt.Response.Status, "failed")
-	if !hasTopError && !hasResponseError && !hasFailedStatus {
-		return 0, false
+	hasTopLevelError := strings.TrimSpace(evt.Code) != "" || strings.TrimSpace(evt.Message) != ""
+
+	if statusCode >= http.StatusOK && statusCode < http.StatusMultipleChoices {
+		if !hasTopError && !hasResponseError && !hasFailedStatus {
+			return 0, false
+		}
+		return statusCodeFromErrorSignals(signals), true
 	}
-	return statusCodeFromErrorSignals(signals), true
+
+	if statusCode >= http.StatusBadRequest {
+		if !hasTopError && !hasResponseError && !hasTopLevelError && !hasFailedStatus {
+			return 0, false
+		}
+		mappedStatus := statusCodeFromErrorSignals(signals)
+		if mappedStatus == http.StatusTooManyRequests && statusCode != http.StatusTooManyRequests {
+			return mappedStatus, true
+		}
+	}
+
+	return 0, false
 }
 
 const maxProxyStreamErrorCaptureBytes = 256 * 1024
@@ -253,15 +271,26 @@ func statusCodeFromErrorSignals(signals []string) int {
 	return http.StatusBadGateway
 }
 
-func writeProviderStreamErrorBeforeCommit(w http.ResponseWriter, statusCode int) {
-	body := maskedUpstreamErrorBody(statusCode)
+func writeProviderStreamErrorBeforeCommit(w http.ResponseWriter, statusCode int, requestID string) {
+	body := maskedUpstreamErrorBody(statusCode, requestID)
 	header := w.Header()
 	header.Set("Content-Type", "application/json")
 	header.Set("Content-Length", itoa(len(body)))
 	header.Del(accelBufferingHeader)
 	dropRepresentationIntegrityHeaders(header)
 	w.WriteHeader(statusCode)
-	_, _ = w.Write(body)
+	_, _ = w.Write(body) //nolint:gosec // G705: body is our own application/json (maskedUpstreamErrorBody), not attacker-controlled HTML
+}
+
+// logContextRequestID returns the raw request ID from logCtx (nil-safe). The
+// value is canonicalized at the sink (errorBodyRequestID), so callers pass it
+// through unnormalized — matching the other clientResponseBodyForCredential /
+// maskedUpstreamErrorBody call sites in proxy.go.
+func logContextRequestID(logCtx *RequestLogContext) string {
+	if logCtx == nil {
+		return ""
+	}
+	return logCtx.RequestID
 }
 
 // resolveCapturedProviderStreamError finalizes one or more bounded stream
@@ -334,7 +363,7 @@ func (p *Proxy) writeProxyResponse(w http.ResponseWriter, resp *ProxyResponse, c
 	if mappedStatus, ok := statusCodeFromProviderBodyError(resp.StatusCode, resp.Body); ok {
 		resp.StatusCode = mappedStatus
 	}
-	responseBody, responseBodyChanged, responseBodyMasked := clientResponseBodyForCredential(resp.StatusCode, resp.Body, cred, modelID)
+	responseBody, responseBodyChanged, responseBodyMasked := clientResponseBodyForCredential(resp.StatusCode, resp.Body, cred, modelID, logContextRequestID(logCtx))
 	if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
 		endpoint := endpointFromRequest(clientReq)
 		if logCtx != nil && logCtx.Request != nil {
@@ -409,7 +438,7 @@ func (p *Proxy) writeProxyResponse(w http.ResponseWriter, resp *ProxyResponse, c
 
 	w.Header().Set("Content-Length", itoa(len(responseBody)))
 	w.WriteHeader(resp.StatusCode)
-	if _, err := w.Write(responseBody); err != nil {
+	if _, err := w.Write(responseBody); err != nil { //nolint:gosec // G705: proxied upstream body / our own masked JSON error, forwarded verbatim by design; not HTML we render
 		if isClientDisconnectError(err) {
 			p.logger.DebugContext(clientReq.Context(), "Client disconnected during proxy response write", "error", err)
 			p.recordAbortedRequest(credName, endpointFromRequest(clientReq), modelID)

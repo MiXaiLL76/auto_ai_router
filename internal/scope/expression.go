@@ -1,3 +1,4 @@
+// Package scope evaluates visibility scope expressions for credentials and keys.
 package scope
 
 import (

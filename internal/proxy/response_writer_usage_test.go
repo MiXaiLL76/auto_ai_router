@@ -98,6 +98,28 @@ func TestWriteProxyResponseMasksError(t *testing.T) {
 	assert.Empty(t, w.Header().Get("ETag"))
 }
 
+func TestWriteProxyResponseClassifiesBadRequestError(t *testing.T) {
+	originalBody := []byte(`{"error":{"message":"tool_choice type must be one of auto, none, required","param":"tool_choice","code":"invalid_request_error"}}`)
+	resp := &ProxyResponse{
+		StatusCode: http.StatusBadRequest,
+		Headers:    http.Header{"ETag": []string{`"raw-error"`}},
+		Body:       originalBody,
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	w := httptest.NewRecorder()
+
+	NewTestProxyBuilder().Build().writeProxyResponse(w, resp, req, &config.CredentialConfig{Name: "test"}, "gpt-4o", nil)
+
+	require.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Equal(t, "application/json", w.Header().Get("Content-Type"))
+	assert.Empty(t, w.Header().Get("ETag"))
+	assert.NotContains(t, w.Body.String(), "must be one of")
+	assert.Contains(t, w.Body.String(), `"message":"Invalid tool_choice"`)
+	assert.Contains(t, w.Body.String(), `"code":"invalid_tool_choice"`)
+	assert.Contains(t, w.Body.String(), `"param":"tool_choice"`)
+	assert.Equal(t, originalBody, resp.Body)
+}
+
 func TestWriteProxyResponseAddsMissingQwenTextTokens(t *testing.T) {
 	resp := &ProxyResponse{
 		StatusCode: http.StatusOK,
@@ -155,7 +177,7 @@ func TestWriteProxyResponseProManMasksErrorAndStripsHeaders(t *testing.T) {
 	assert.Empty(t, w.Header().Get("ETag"))
 	assert.NotContains(t, w.Body.String(), "litellm")
 	assert.NotContains(t, w.Body.String(), "anthropic-direct-client")
-	assert.Contains(t, w.Body.String(), "Request failed")
+	assert.Contains(t, w.Body.String(), "Invalid model")
 	assert.Equal(t, rawBody, resp.Body, "raw upstream body should remain available to internal logging")
 }
 
@@ -210,14 +232,15 @@ func TestClientResponseBodyForProManMasksErrors(t *testing.T) {
 	cred := &config.CredentialConfig{Name: "proman", Type: config.ProviderTypeProMan}
 	raw := []byte(`{"error":{"message":"litellm.BadRequestError: Received Model Group=anthropic/claude/anthropic-direct-client-0dce8b1a Available Model Group Fallbacks=None"}}`)
 
-	body, changed, masked := clientResponseBodyForCredential(400, raw, cred, "claude-haiku-4.5")
+	body, changed, masked := clientResponseBodyForCredential(400, raw, cred, "claude-haiku-4.5", "0123456789abcdef0123456789abcdef")
 
 	require.True(t, changed)
 	require.True(t, masked)
 	assert.NotContains(t, string(body), "litellm")
 	assert.NotContains(t, string(body), "anthropic-direct-client")
 	assert.NotContains(t, string(body), "Model Group")
-	assert.Contains(t, string(body), "Request failed")
+	assert.Contains(t, string(body), "Invalid model")
+	assert.Contains(t, string(body), `"request_id":"0123456789abcdef0123456789abcdef"`)
 }
 
 func TestWriteProxyStreamingResponseNormalizesQwenUsage(t *testing.T) {

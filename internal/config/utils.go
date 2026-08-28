@@ -191,6 +191,9 @@ func PrintConfig(logger *slog.Logger, cfg *Config) {
 			logger.Info("  accepted alias", "from", alias, "to", target)
 		}
 	}
+	if len(cfg.OrganizationPolicies) > 0 {
+		logger.Info("organization_policies", "total_count", len(cfg.OrganizationPolicies))
+	}
 
 	// LiteLLM DB config
 	if cfg.LiteLLMDB.Enabled {

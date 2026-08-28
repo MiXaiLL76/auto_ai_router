@@ -110,7 +110,7 @@ func normalizeTextCompletion(ctx Context, body map[string]any) error {
 	return nil
 }
 
-func (t *Transformer) TransformHeaders(ctx Context, source http.Header) http.Header {
+func (t *Transformer) TransformHeaders(_ Context, source http.Header) http.Header {
 	headers := make(http.Header)
 	for key, values := range source {
 		lowerKey := strings.ToLower(key)

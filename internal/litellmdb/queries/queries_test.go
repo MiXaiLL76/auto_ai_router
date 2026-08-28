@@ -66,13 +66,13 @@ func TestCredentialTableFields(t *testing.T) {
 	}
 
 	table := CredentialTable{
-		CredentialId:     credIDPtr,
+		CredentialID:     credIDPtr,
 		CredentialName:   credNamePtr,
 		CredentialParams: &params,
 		CredentialInfo:   &info,
 	}
 
-	assert.Equal(t, "cred-001", *table.CredentialId)
+	assert.Equal(t, "cred-001", *table.CredentialID)
 	assert.Equal(t, "my-credential", *table.CredentialName)
 	assert.NotNil(t, table.CredentialParams)
 	assert.NotNil(t, table.CredentialInfo)
@@ -82,7 +82,7 @@ func TestCredentialTableFields(t *testing.T) {
 func TestCredentialTable_NilFields(t *testing.T) {
 	table := CredentialTable{}
 
-	assert.Nil(t, table.CredentialId)
+	assert.Nil(t, table.CredentialID)
 	assert.Nil(t, table.CredentialName)
 	assert.Nil(t, table.CredentialParams)
 	assert.Nil(t, table.CredentialInfo)
@@ -257,13 +257,13 @@ func TestModelTableFields(t *testing.T) {
 	}
 
 	table := ModelTable{
-		ModelId:   modelIDPtr,
+		ModelID:   modelIDPtr,
 		ModelName: modelNamePtr,
 		LlmParams: &params,
 		ModelInfo: modelInfo,
 	}
 
-	assert.Equal(t, "gpt-4", *table.ModelId)
+	assert.Equal(t, "gpt-4", *table.ModelID)
 	assert.Equal(t, "gpt-4", *table.ModelName)
 	assert.NotNil(t, table.LlmParams)
 	assert.NotNil(t, table.ModelInfo)
@@ -273,7 +273,7 @@ func TestModelTableFields(t *testing.T) {
 func TestModelTable_NilFields(t *testing.T) {
 	table := ModelTable{}
 
-	assert.Nil(t, table.ModelId)
+	assert.Nil(t, table.ModelID)
 	assert.Nil(t, table.ModelName)
 	assert.Nil(t, table.LlmParams)
 	assert.Nil(t, table.ModelInfo)

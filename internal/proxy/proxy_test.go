@@ -22,6 +22,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/models"
 	"github.com/mixaill76/auto_ai_router/internal/monitoring"
 	"github.com/mixaill76/auto_ai_router/internal/ratelimit"
+	"github.com/mixaill76/auto_ai_router/internal/requestid"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -143,6 +144,34 @@ func TestProxyRequest_NonStreamingRateLimitBodyReturns429(t *testing.T) {
 	mockServer := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `{"error":{"code":"rate_limit_exceeded","message":"Request failed"}}`)
+	}))
+	defer mockServer.Close()
+
+	prx := NewTestProxyBuilder().
+		WithSingleCredential("test", config.ProviderTypeProxy, mockServer.URL, "upstream-key-1").
+		Build()
+
+	reqBody := `{"model":"gpt-4","messages":[{"role":"user","content":"Hello"}]}`
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(reqBody))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	prx.ProxyRequest(w, req)
+
+	assert.Equal(t, http.StatusTooManyRequests, w.Code)
+	id := w.Header().Get(requestid.Header)
+	assert.NotEmpty(t, id)
+	assert.Contains(t, w.Body.String(), "rate_limit_error")
+	assert.Contains(t, w.Body.String(), `"request_id":"`+id+`"`)
+	assert.NotContains(t, w.Body.String(), "rate_limit_exceeded")
+}
+
+func TestProxyRequest_NonStreamingBadRequestRateLimitBodyReturns429(t *testing.T) {
+	mockServer := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
 		_, _ = io.WriteString(w, `{"error":{"code":"rate_limit_exceeded","message":"Request failed"}}`)
 	}))
 	defer mockServer.Close()

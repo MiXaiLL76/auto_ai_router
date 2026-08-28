@@ -1,3 +1,4 @@
+// Package monitoring exposes Prometheus metrics for the router.
 package monitoring
 
 import (

@@ -426,8 +426,8 @@ func updateModelLimits(
 	// aggregation already makes for "which one do we show," not a routing input.
 	modelSourceCreds := make(map[string]string)
 
-	for _, modelStats_data := range health.Models {
-		credStats, ok := health.Credentials[modelStats_data.Credential]
+	for _, modelStatsData := range health.Models {
+		credStats, ok := health.Credentials[modelStatsData.Credential]
 		if !ok {
 			continue
 		}
@@ -436,7 +436,7 @@ func updateModelLimits(
 		// updateCredentialLimits above. The upstream credential (and its models) always
 		// participates in aggregation now; its priority (below) is what pushes it later
 		// in the selection order, not exclusion from the model/limit set.
-		modelID := modelStats_data.Model
+		modelID := modelStatsData.Model
 		if modelID == "" {
 			continue
 		}
@@ -446,19 +446,19 @@ func updateModelLimits(
 		}
 
 		// Aggregate (sum) limits and current usage for this model
-		rpm := modelStats_data.LimitRPM
-		tpm := modelStats_data.LimitTPM
-		curRPM := modelStats_data.CurrentRPM
-		curTPM := modelStats_data.CurrentTPM
-		weight := httputil.EffectiveHealthWeight(modelStats_data, credStats)
-		priority := httputil.EffectiveHealthPriority(modelStats_data, credStats)
+		rpm := modelStatsData.LimitRPM
+		tpm := modelStatsData.LimitTPM
+		curRPM := modelStatsData.CurrentRPM
+		curTPM := modelStatsData.CurrentTPM
+		weight := httputil.EffectiveHealthWeight(modelStatsData, credStats)
+		priority := httputil.EffectiveHealthPriority(modelStatsData, credStats)
 
 		aggregation, ok := modelStats[modelID]
 		if !ok {
 			aggregation = newSumLimitAggregation()
 			modelStats[modelID] = aggregation
 		}
-		if hasRemoteModelLimitOrUsage(modelStats_data) {
+		if hasRemoteModelLimitOrUsage(modelStatsData) {
 			aggregation.applySum(rpm, tpm, curRPM, curTPM)
 		}
 		aggregation.applyWeight(weight)
@@ -472,11 +472,11 @@ func updateModelLimits(
 		// scoped to priority only — rpm/tpm/current-usage aggregation (applySum above) and
 		// weight (applyWeight above) still fold in banned entries unconditionally, since
 		// those aren't affected by the same "which group gets tried first" concern.
-		if !modelStats_data.IsBanned {
+		if !modelStatsData.IsBanned {
 			aggregation.applyPriorityMin(priority)
 		}
-		if modelStats_data.Credential != "" {
-			modelSourceCreds[modelID] = modelStats_data.Credential
+		if modelStatsData.Credential != "" {
+			modelSourceCreds[modelID] = modelStatsData.Credential
 		}
 	}
 

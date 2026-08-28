@@ -1,3 +1,4 @@
+// Package config loads, validates and represents the router's YAML configuration.
 package config
 
 import (
@@ -118,7 +119,8 @@ type ModelRPMConfig struct {
 	// forwarded as-is to an Anthropic-wire-compatible provider's native /v1/messages
 	// endpoint instead of the Messages->Chat->Messages round trip.
 	// nil (omitted in config) = provider default: true for ProviderTypeAnthropic, and
-	// for ProviderTypeCometAPI when OpenAIProtocol is false; false otherwise.
+	// for a plain ProviderTypeCometAPI credential (neither openai_proto nor
+	// google_proto set); false otherwise.
 	// Explicit true/false overrides the default.
 	PassthroughMessages *bool `yaml:"passthrough_messages,omitempty"`
 }
@@ -184,19 +186,20 @@ func (m *ModelRPMConfig) UnmarshalYAML(value *yaml.Node) error {
 }
 
 type Config struct {
-	Server             ServerConfig       `yaml:"server"`
-	Fail2Ban           Fail2BanConfig     `yaml:"fail2ban,omitempty"`
-	Credentials        []CredentialConfig `yaml:"credentials"`
-	Monitoring         MonitoringConfig   `yaml:"monitoring"`
-	Models             []ModelRPMConfig   `yaml:"models,omitempty"`
-	ModelAlias         map[string]string  `yaml:"model_alias,omitempty"`
-	ClientModelIDs     []string           `yaml:"client_model_ids,omitempty"`
-	PublicModelAlias   map[string]string  `yaml:"public_model_alias,omitempty"`
-	AcceptedModelAlias map[string]string  `yaml:"accepted_model_alias,omitempty"`
-	LiteLLMDB          LiteLLMDBConfig    `yaml:"litellm_db,omitempty"`
-	Redis              RedisConfig        `yaml:"redis,omitempty"`
-	OTEL               OTELConfig         `yaml:"otel,omitempty"`
-	Kafka              KafkaConfig        `yaml:"kafka,omitempty"`
+	Server               ServerConfig               `yaml:"server"`
+	Fail2Ban             Fail2BanConfig             `yaml:"fail2ban,omitempty"`
+	Credentials          []CredentialConfig         `yaml:"credentials"`
+	Monitoring           MonitoringConfig           `yaml:"monitoring"`
+	Models               []ModelRPMConfig           `yaml:"models,omitempty"`
+	ModelAlias           map[string]string          `yaml:"model_alias,omitempty"`
+	ClientModelIDs       []string                   `yaml:"client_model_ids,omitempty"`
+	PublicModelAlias     map[string]string          `yaml:"public_model_alias,omitempty"`
+	AcceptedModelAlias   map[string]string          `yaml:"accepted_model_alias,omitempty"`
+	OrganizationPolicies []OrganizationPolicyConfig `yaml:"organization_policies,omitempty"`
+	LiteLLMDB            LiteLLMDBConfig            `yaml:"litellm_db,omitempty"`
+	Redis                RedisConfig                `yaml:"redis,omitempty"`
+	OTEL                 OTELConfig                 `yaml:"otel,omitempty"`
+	Kafka                KafkaConfig                `yaml:"kafka,omitempty"`
 	// ModelTemplates stores x-model-templates entries as raw interface{} so that
 	// both single-model mappings and lists of models can be defined as YAML anchors
 	// without type errors. The actual model data is extracted via anchor expansion.
@@ -214,20 +217,21 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 
 	// Then unmarshal the resolved data into Config
 	type RawConfig struct {
-		Server             ServerConfig           `yaml:"server"`
-		Fail2Ban           Fail2BanConfig         `yaml:"fail2ban,omitempty"`
-		Credentials        []CredentialConfig     `yaml:"credentials"`
-		Monitoring         MonitoringConfig       `yaml:"monitoring"`
-		Models             []ModelRPMConfig       `yaml:"models,omitempty"`
-		ModelAlias         map[string]string      `yaml:"model_alias,omitempty"`
-		ClientModelIDs     []string               `yaml:"client_model_ids,omitempty"`
-		PublicModelAlias   map[string]string      `yaml:"public_model_alias,omitempty"`
-		AcceptedModelAlias map[string]string      `yaml:"accepted_model_alias,omitempty"`
-		LiteLLMDB          LiteLLMDBConfig        `yaml:"litellm_db,omitempty"`
-		Redis              RedisConfig            `yaml:"redis,omitempty"`
-		OTEL               OTELConfig             `yaml:"otel,omitempty"`
-		Kafka              KafkaConfig            `yaml:"kafka,omitempty"`
-		ModelTemplates     map[string]interface{} `yaml:"x-model-templates,omitempty"`
+		Server               ServerConfig               `yaml:"server"`
+		Fail2Ban             Fail2BanConfig             `yaml:"fail2ban,omitempty"`
+		Credentials          []CredentialConfig         `yaml:"credentials"`
+		Monitoring           MonitoringConfig           `yaml:"monitoring"`
+		Models               []ModelRPMConfig           `yaml:"models,omitempty"`
+		ModelAlias           map[string]string          `yaml:"model_alias,omitempty"`
+		ClientModelIDs       []string                   `yaml:"client_model_ids,omitempty"`
+		PublicModelAlias     map[string]string          `yaml:"public_model_alias,omitempty"`
+		AcceptedModelAlias   map[string]string          `yaml:"accepted_model_alias,omitempty"`
+		OrganizationPolicies []OrganizationPolicyConfig `yaml:"organization_policies,omitempty"`
+		LiteLLMDB            LiteLLMDBConfig            `yaml:"litellm_db,omitempty"`
+		Redis                RedisConfig                `yaml:"redis,omitempty"`
+		OTEL                 OTELConfig                 `yaml:"otel,omitempty"`
+		Kafka                KafkaConfig                `yaml:"kafka,omitempty"`
+		ModelTemplates       map[string]interface{}     `yaml:"x-model-templates,omitempty"`
 	}
 
 	var raw RawConfig
@@ -245,6 +249,7 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 	c.ClientModelIDs = raw.ClientModelIDs
 	c.PublicModelAlias = raw.PublicModelAlias
 	c.AcceptedModelAlias = raw.AcceptedModelAlias
+	c.OrganizationPolicies = raw.OrganizationPolicies
 	c.LiteLLMDB = raw.LiteLLMDB
 	c.Redis = raw.Redis
 	c.OTEL = raw.OTEL
@@ -735,14 +740,21 @@ type CredentialConfig struct {
 	// Anthropic-compatible wire protocol (/v1/messages) to its
 	// OpenAI-compatible one (/v1/chat/completions). Only valid when
 	// Type == ProviderTypeCometAPI. See EffectiveProviderType.
-	OpenAIProtocol   bool `yaml:"openai_proto,omitempty"`
+	OpenAIProtocol bool `yaml:"openai_proto,omitempty"`
+	// GoogleProtocol switches a cometapi credential from CometAPI's
+	// Anthropic-compatible wire protocol (/v1/messages) to its Google
+	// GenAI-compatible one (/v1beta/models/{model}:generateContent).
+	// Only valid when Type == ProviderTypeCometAPI and mutually exclusive
+	// with OpenAIProtocol. See EffectiveProviderType.
+	GoogleProtocol   bool `yaml:"google_proto,omitempty"`
 	RPM              int  `yaml:"rpm"`
 	TPM              int  `yaml:"tpm"`
 	Weight           int  `yaml:"weight"` // Default weighted round-robin weight for this credential (0 = 1)
 	FallbackPriority int  `yaml:"fallback_priority,omitempty"`
 	// Priority is the primary-selection priority group (lower selects first).
 	// See EffectivePriority for the resolution chain against FallbackPriority.
-	Priority                int               `yaml:"priority,omitempty"`
+	Priority int `yaml:"priority,omitempty"`
+
 	ReasoningOnly           bool              `yaml:"reasoning_only,omitempty"`
 	Scopes                  []string          `yaml:"scopes,omitempty"`
 	DeniedScopes            []string          `yaml:"denied_scopes,omitempty"`
@@ -800,15 +812,19 @@ func (c CredentialConfig) EffectivePriority() int {
 // EffectiveProviderType returns the ProviderType that should drive wire
 // protocol decisions (converter selection, outbound URL/headers, streaming
 // handler, Responses-API registry lookup) for this credential. It differs
-// from Type only for a cometapi credential with OpenAIProtocol set, in which
-// case it reports ProviderTypeOpenAI so the credential reuses the existing
-// OpenAI-compatible request/response path instead of CometAPI's default
-// Anthropic-compatible one. Everything that identifies the credential as
-// CometAPI (billing, upstream error masking, model discovery) must keep
-// using Type directly, not this method.
+// from Type only for a cometapi credential with OpenAIProtocol set (reports
+// ProviderTypeOpenAI) or GoogleProtocol set (reports ProviderTypeGemini), so
+// the credential reuses the existing OpenAI- or Google-compatible
+// request/response path instead of CometAPI's default Anthropic-compatible
+// one. Everything that identifies the credential as CometAPI (billing,
+// upstream error masking, model discovery) must keep using Type directly, not
+// this method.
 func (c CredentialConfig) EffectiveProviderType() ProviderType {
 	if c.Type == ProviderTypeCometAPI && c.OpenAIProtocol {
 		return ProviderTypeOpenAI
+	}
+	if c.Type == ProviderTypeCometAPI && c.GoogleProtocol {
+		return ProviderTypeGemini
 	}
 	return c.Type
 }
@@ -821,6 +837,7 @@ func (c CredentialConfig) SameProviderIdentity(other CredentialConfig) bool {
 		c.APIKey == other.APIKey &&
 		c.AuthType == other.AuthType &&
 		c.OpenAIProtocol == other.OpenAIProtocol &&
+		c.GoogleProtocol == other.GoogleProtocol &&
 		c.IsFallback == other.IsFallback
 }
 
@@ -834,6 +851,7 @@ func (c *CredentialConfig) UnmarshalYAML(value *yaml.Node) error {
 		BaseURL          string           `yaml:"base_url"`
 		AuthType         string           `yaml:"auth_type,omitempty"`
 		OpenAIProtocol   string           `yaml:"openai_proto,omitempty"`
+		GoogleProtocol   string           `yaml:"google_proto,omitempty"`
 		RPM              string           `yaml:"rpm"`
 		TPM              string           `yaml:"tpm"`
 		Weight           string           `yaml:"weight"`
@@ -899,6 +917,9 @@ func (c *CredentialConfig) UnmarshalYAML(value *yaml.Node) error {
 		return err
 	}
 	if c.OpenAIProtocol, err = parseField(temp.OpenAIProtocol, false, strconv.ParseBool, "openai_proto for credential '"+c.Name+"'"); err != nil {
+		return err
+	}
+	if c.GoogleProtocol, err = parseField(temp.GoogleProtocol, false, strconv.ParseBool, "google_proto for credential '"+c.Name+"'"); err != nil {
 		return err
 	}
 
@@ -1423,7 +1444,7 @@ func (f *Fail2BanConfig) UnmarshalYAML(value *yaml.Node) error {
 }
 
 func Load(path string) (*Config, error) {
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) // #nosec G304 -- config path is operator-supplied (CLI flag / env)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read config file: %w", err)
 	}
@@ -1761,6 +1782,10 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("no credentials configured")
 	}
 
+	if err := ValidateOrganizationPolicies(c.OrganizationPolicies); err != nil {
+		return err
+	}
+
 	// Validate Fail2Ban error code rules for duplicates
 	seenErrorCodes := make(map[int]bool)
 	for _, rule := range c.Fail2Ban.ErrorCodeRules {
@@ -1795,6 +1820,12 @@ func (c *Config) Validate() error {
 		}
 		if cred.OpenAIProtocol && cred.Type != ProviderTypeCometAPI {
 			return fmt.Errorf("credential %s: openai_proto is only supported for 'cometapi' type, got: %s", cred.Name, cred.Type)
+		}
+		if cred.GoogleProtocol && cred.Type != ProviderTypeCometAPI {
+			return fmt.Errorf("credential %s: google_proto is only supported for 'cometapi' type, got: %s", cred.Name, cred.Type)
+		}
+		if cred.OpenAIProtocol && cred.GoogleProtocol {
+			return fmt.Errorf("credential %s: openai_proto and google_proto are mutually exclusive", cred.Name)
 		}
 
 		// Validate by provider type

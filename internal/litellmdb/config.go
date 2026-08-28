@@ -1,3 +1,4 @@
+// Package litellmdb integrates the router with an external LiteLLM database for auth, spend and model data.
 package litellmdb
 
 // This file re-exports configuration types from the models package

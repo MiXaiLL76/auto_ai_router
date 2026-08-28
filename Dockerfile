@@ -5,6 +5,7 @@ FROM golang:1.27-alpine AS builder
 # cgo dependencies, so the build already behaves this way implicitly today.
 # Pinning it guarantees a fully static binary (pure-Go DNS resolver, portable
 # across libc flavors) even if a future base image or dependency adds gcc.
+# Also required for the final stage: distroless/static has no libc at all.
 ENV CGO_ENABLED=0
 # GOAMD64=v3 targets Haswell+ (AVX2, BMI2, ...) — every mainstream cloud
 # instance since ~2015. Lets the compiler/stdlib (encoding/json, compress/*,
@@ -33,26 +34,26 @@ ARG VERSION=dev
 ARG COMMIT=unknown
 RUN go build -ldflags="-s -w -X main.Version=${VERSION} -X main.Commit=${COMMIT}" -o auto_ai_router ./cmd/server
 
-# Final stage
-FROM alpine:latest
+# distroless/static has no shell/wget/curl, so HEALTHCHECK below execs this
+# tiny binary directly instead — see cmd/healthcheck.
+RUN go build -ldflags="-s -w" -o healthcheck ./cmd/healthcheck
 
-# Install ca-certificates for HTTPS
-RUN apk add --no-cache ca-certificates wget curl
-
-# Create non-root user
-RUN addgroup -g 1000 appuser && \
-    adduser -D -u 1000 -G appuser appuser
+# Final stage — distroless/static: no shell, no package manager, no libc,
+# just ca-certificates + tzdata + a nonroot user (uid/gid 65532) baked in.
+# That's why there's no apk/addgroup/chown here anymore: none of those
+# tools exist in this image, and the ownership/user setup they used to do
+# is already done for us by the :nonroot tag.
+FROM gcr.io/distroless/static-debian12:nonroot
 
 WORKDIR /app
 
-# Copy binary from builder
+# COPY --chown isn't needed: the copied binaries land as root:root 0755, and
+# every uid has read+execute on them — the removed `chown -R appuser:appuser`
+# was never what made them runnable. The /app directory itself is a different
+# story: WORKDIR above creates it owned by 65532, so writes under /app work
+# for the default user only (see the uid note above).
 COPY --from=builder /app/auto_ai_router .
-
-# Change ownership
-RUN chown -R appuser:appuser /app
-
-# Switch to non-root user
-USER appuser
+COPY --from=builder /app/healthcheck .
 
 # Go runtime tuning defaults — overridable via env in the actual deployment
 # manifest (e.g. if a pod's memory limit differs from the value assumed here).
@@ -77,9 +78,12 @@ EXPOSE 8080
 # an internal debug path (kubectl port-forward).
 EXPOSE 6060
 
-# Health check
+ENV HEALTHCHECK_PORT=8080
+
+# Health check — exec form, not "CMD wget ... || exit 1": there's no shell
+# to interpret "||" here, and ./healthcheck already returns 0/1 on its own.
 HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
-  CMD wget --no-verbose --tries=1 --spider http://localhost:8080/health || exit 1
+  CMD ["/app/healthcheck"]
 
 # Run the application
-CMD ["./auto_ai_router"]
+CMD ["/app/auto_ai_router"]

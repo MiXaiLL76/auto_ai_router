@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"errors"
 	"io"
+	"slices"
 
 	// goccy/go-json instead of encoding/json: rewriteJSONResponseModel decodes
 	// into map[string]json.RawMessage on every non-streaming passthrough
@@ -97,13 +98,13 @@ func (r *modelAliasSSEReader) consumeFragment(fragment []byte, readErr error) {
 			r.line = append(r.line, fragment...)
 			return
 		}
-		r.pending = append(r.line, fragment...)
+		r.pending = slices.Concat(r.line, fragment)
 		r.line = nil
 		r.passthrough = true
 		return
 	}
 
-	line := append(r.line, fragment...)
+	line := slices.Concat(r.line, fragment)
 	r.line = nil
 	if len(line) == 0 {
 		return

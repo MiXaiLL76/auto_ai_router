@@ -305,7 +305,7 @@ func hasLongWord(text string) bool {
 	return isLongWord(text, wordStart, len(text))
 }
 
-func isLongWord(text string, start, end int) bool {
+func isLongWord(_ string, start, end int) bool {
 	return start >= 0 && end-start > tokenizerMaxExactWordBytes
 }
 
@@ -487,9 +487,28 @@ func appendChatCompletionDeltaText(b *strings.Builder, payload []byte) {
 	var data struct {
 		Choices []struct {
 			Delta struct {
-				Content      interface{} `json:"content"`
-				Refusal      string      `json:"refusal"`
-				FunctionCall *struct {
+				Content interface{} `json:"content"`
+				// Reasoning text is billed as completion tokens, so an aborted stream has
+				// to account for it the same way the Responses shape already counts
+				// "response.reasoning_text.delta" and the Messages shape counts
+				// "thinking_delta". Without it a reasoning model that streamed nothing but
+				// reasoning before the abort is billed for no completion at all.
+				//
+				// Counting it also aligns the TTFT scan (ttftScanState.observe in stream.go
+				// shares this decoder): a reasoning model now stamps CompletionStartTime at
+				// its first reasoning delta, which is when the client really starts
+				// receiving tokens, and which is already how the other two shapes behave.
+				//
+				// OpenAI-compatible providers spell the field either way, so both are read
+				// here: the raw upstream payload reaches this decoder before
+				// internal/responsecompat folds "reasoning" into "reasoning_content".
+				// They are decoded as interface{} rather than string for the same reason
+				// Content is: a provider sending a non-string here would otherwise fail the
+				// whole unmarshal and silently drop the content text along with it.
+				ReasoningContent interface{} `json:"reasoning_content"`
+				Reasoning        interface{} `json:"reasoning"`
+				Refusal          string      `json:"refusal"`
+				FunctionCall     *struct {
 					Name      string `json:"name"`
 					Arguments string `json:"arguments"`
 				} `json:"function_call,omitempty"`
@@ -507,6 +526,11 @@ func appendChatCompletionDeltaText(b *strings.Builder, payload []byte) {
 	}
 	for _, choice := range data.Choices {
 		appendDeltaValueText(b, choice.Delta.Content)
+		if choice.Delta.ReasoningContent != nil {
+			appendDeltaValueText(b, choice.Delta.ReasoningContent)
+		} else {
+			appendDeltaValueText(b, choice.Delta.Reasoning)
+		}
 		b.WriteString(choice.Delta.Refusal)
 		if choice.Delta.FunctionCall != nil {
 			b.WriteString(choice.Delta.FunctionCall.Name)

@@ -1,3 +1,4 @@
+// Package responsestore persists Responses API state in bbolt or Redis.
 package responsestore
 
 import (

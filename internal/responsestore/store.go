@@ -77,7 +77,7 @@ func New() (Store, error) {
 	if _, err := os.Stat(dir); os.IsNotExist(err) {
 		dir = "/tmp/auto_ai_router"
 	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return nil, fmt.Errorf("responsestore: failed to create dir %s: %w", dir, err)
 	}
 	dbPath := filepath.Join(dir, "responses.db")

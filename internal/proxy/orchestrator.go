@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/mixaill76/auto_ai_router/internal/balancer"
 	"github.com/mixaill76/auto_ai_router/internal/config"
@@ -303,7 +304,7 @@ func (p *Proxy) prepareRequestForCredential(
 			// own routing and conversion, same as the Responses API passthrough.
 			return req, nil
 		}
-		if p.modelManager != nil && p.modelManager.IsPassthroughMessagesForProvider(modelID, cred.Type, cred.OpenAIProtocol) {
+		if p.modelManager != nil && p.modelManager.IsPassthroughMessagesForProvider(modelID, cred.EffectiveProviderType()) {
 			// Anthropic-wire-compatible provider (Anthropic itself, or CometAPI in its
 			// default Anthropic-protocol mode): the client and the upstream already
 			// speak the same wire format, so skip the Messages->Chat->Messages round
@@ -643,6 +644,7 @@ func (p *Proxy) readRequestBodyAndSelectModel(
 		r.Header.Del("Content-Encoding")
 	}
 	logCtx.PublicModelID = modelID
+	logCtx.CanonicalModelID = modelID
 	logCtx.ModelID = modelID
 	logCtx.SessionID = sessionID
 
@@ -654,6 +656,15 @@ func (p *Proxy) readRequestBodyAndSelectModel(
 		logCtx.ErrorMsg = "Model not specified in request body"
 		WriteErrorBadRequest(w, "model field is required")
 		return nil, "", "", false, false
+	}
+	if p.modelManager != nil {
+		policyBody, policyModelID, policyRealModelID, ok := p.admitOrganizationModel(w, r, body, modelID, logCtx)
+		if !ok {
+			return nil, "", "", false, false
+		}
+		if logCtx.OrganizationPolicy != nil {
+			return policyBody, policyModelID, policyRealModelID, streaming, true
+		}
 	}
 	// An unrestricted virtual key must still stay inside the configured product
 	// model surface. Provider backend IDs remain available to the trusted
@@ -842,6 +853,13 @@ func (p *Proxy) selectCredentialForModel(
 		)
 	}
 	logCtx.Logged = true
+	if remaining, ok := p.balancer.MinRemainingBanForModel(modelID, exclude, logCtx.Scope); ok {
+		seconds := int(remaining / time.Second)
+		if remaining%time.Second != 0 {
+			seconds++
+		}
+		w.Header().Set("Retry-After", fmt.Sprintf("%d", seconds))
+	}
 	WriteErrorRateLimit(w, errorMsg)
 	return nil, false
 }

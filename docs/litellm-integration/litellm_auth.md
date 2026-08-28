@@ -57,6 +57,22 @@ sequenceDiagram
 - Cache invalidation is TTL-only (`auth_cache_ttl`, default 5s). There is no push invalidation from LiteLLM admin actions (`InvalidateToken`/`InvalidateAll` exist but nothing calls them yet) — a blocked/rebudgeted key can stay valid in a hot cache for up to `auth_cache_ttl`.
 - The cache is per-instance, not shared across replicas.
 
+### Verified organization policy identity
+
+When `organization_policies` is configured, AIR selects policy identity only from verified LiteLLM database relationships. Request headers and request body metadata cannot select an organization.
+
+Selection order:
+
+1. Direct `LiteLLM_VerificationToken.organization_id`.
+2. Team organization from an existing `LiteLLM_TeamTable` row when the direct organization is absent.
+3. No organization policy.
+
+A configured direct organization never falls back to the team organization. If the selected configured organization is dangling, AIR returns `403 Forbidden` before credential selection and spend logging. An unmatched dangling organization keeps legacy behavior.
+
+For mapped team fallback requests, AIR writes the effective organization into budget and rate-limit entities, SpendLog organization fields, Kafka `organization_id`, and organization aggregate projections. Unmapped requests keep the legacy direct-only accounting identity.
+
+AIR does not propagate organization policy identity through AIR scope headers. A downstream AIR hop authenticated with the master key remains audit-only and does not select an organization policy.
+
 ## 2. Model resolution + allow-list + budget/rate-limit enforcement (`orchestrateRequest`)
 
 Once auth succeeds, the body is parsed and the model alias resolved to its real provider-facing name, then three checks run in order.
