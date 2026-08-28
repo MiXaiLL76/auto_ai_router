@@ -27,13 +27,15 @@ func clientResponseBodyForCredential(statusCode int, body []byte, _ *config.Cred
 }
 
 func statusCodeFromProviderBodyError(statusCode int, body []byte) (int, bool) {
-	if statusCode < http.StatusOK || statusCode >= http.StatusMultipleChoices || len(body) == 0 {
+	if len(body) == 0 {
 		return 0, false
 	}
 
 	var evt struct {
 		Type     string          `json:"type"`
 		Status   string          `json:"status"`
+		Code     string          `json:"code"`
+		Message  string          `json:"message"`
 		Error    json.RawMessage `json:"error"`
 		Response struct {
 			Status string          `json:"status"`
@@ -44,17 +46,33 @@ func statusCodeFromProviderBodyError(statusCode int, body []byte) (int, bool) {
 		return 0, false
 	}
 
-	signals := []string{evt.Type, evt.Status, evt.Response.Status}
+	signals := []string{evt.Type, evt.Status, evt.Code, evt.Message, evt.Response.Status}
 	topErrorSignals, hasTopError := providerErrorSignals(evt.Error)
 	responseErrorSignals, hasResponseError := providerErrorSignals(evt.Response.Error)
 	signals = append(signals, topErrorSignals...)
 	signals = append(signals, responseErrorSignals...)
 
 	hasFailedStatus := strings.EqualFold(evt.Status, "failed") || strings.EqualFold(evt.Response.Status, "failed")
-	if !hasTopError && !hasResponseError && !hasFailedStatus {
-		return 0, false
+	hasTopLevelError := strings.TrimSpace(evt.Code) != "" || strings.TrimSpace(evt.Message) != ""
+
+	if statusCode >= http.StatusOK && statusCode < http.StatusMultipleChoices {
+		if !hasTopError && !hasResponseError && !hasFailedStatus {
+			return 0, false
+		}
+		return statusCodeFromErrorSignals(signals), true
 	}
-	return statusCodeFromErrorSignals(signals), true
+
+	if statusCode >= http.StatusBadRequest {
+		if !hasTopError && !hasResponseError && !hasTopLevelError && !hasFailedStatus {
+			return 0, false
+		}
+		mappedStatus := statusCodeFromErrorSignals(signals)
+		if mappedStatus == http.StatusTooManyRequests && statusCode != http.StatusTooManyRequests {
+			return mappedStatus, true
+		}
+	}
+
+	return 0, false
 }
 
 const maxProxyStreamErrorCaptureBytes = 256 * 1024

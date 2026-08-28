@@ -247,9 +247,23 @@ func TestStatusCodeFromProviderBodyError(t *testing.T) {
 			wantOK:     false,
 		},
 		{
-			name:       "real error status not remapped",
-			statusCode: http.StatusBadGateway,
+			name:       "error status rate limit body",
+			statusCode: http.StatusBadRequest,
 			body:       `{"error":{"code":"rate_limit_exceeded"}}`,
+			wantStatus: http.StatusTooManyRequests,
+			wantOK:     true,
+		},
+		{
+			name:       "error status top level rate limit body",
+			statusCode: http.StatusInternalServerError,
+			body:       `{"code":"rate_limit_exceeded","message":"rate limited"}`,
+			wantStatus: http.StatusTooManyRequests,
+			wantOK:     true,
+		},
+		{
+			name:       "non rate limit error status not remapped",
+			statusCode: http.StatusBadRequest,
+			body:       `{"error":{"code":"invalid_request_error","message":"invalid parameter"}}`,
 			wantOK:     false,
 		},
 	}
