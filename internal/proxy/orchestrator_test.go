@@ -5,9 +5,11 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/models"
@@ -219,6 +221,51 @@ func TestSelectCredentialForModelLogsZeroCostRowWhenPriceUnavailable(t *testing.
 	require.True(t, logCtx.Logged)
 	require.Len(t, kafka.events, 1)
 	assert.Equal(t, 0.0, kafka.events[0].TotalCost)
+}
+
+// TestSelectCredentialForModelSetsRetryAfterFromBan verifies the synthesized
+// 429 ("no credentials available") carries a Retry-After header computed
+// from the shortest remaining fail2ban ban for the requested model, instead
+// of omitting the header entirely.
+func TestSelectCredentialForModelSetsRetryAfterFromBan(t *testing.T) {
+	cred := config.CredentialConfig{
+		Name:    "banned-cred",
+		Type:    config.ProviderTypeOpenAI,
+		BaseURL: "http://openai.local",
+		APIKey:  "key",
+		RPM:     -1,
+	}
+	prx := NewTestProxyBuilder().WithCredentials(cred).Build()
+	setTestModelPrice(prx, "banned-model", &models.ModelPrice{})
+
+	// Ban the only credential serving this model for 3s, bypassing the
+	// attempt-threshold rules (same mechanism used for provider-supplied
+	// quota-retry hints) so the ban has a known, finite remaining duration.
+	prx.balancer.BanUntil("banned-cred", "banned-model", http.StatusTooManyRequests, time.Now().Add(3*time.Second), "test-ban")
+
+	logCtx := testLogCtx(t)
+	logCtx.Credential = nil
+
+	w := httptest.NewRecorder()
+	credential, ok := prx.selectCredentialForModel(
+		w,
+		"banned-model",
+		"",
+		"",
+		nil,
+		logCtx,
+	)
+
+	require.False(t, ok)
+	require.Nil(t, credential)
+	require.Equal(t, http.StatusTooManyRequests, w.Code)
+
+	retryAfter := w.Header().Get("Retry-After")
+	require.NotEmpty(t, retryAfter, "expected Retry-After header derived from the active ban")
+	seconds, err := strconv.Atoi(retryAfter)
+	require.NoError(t, err)
+	assert.GreaterOrEqual(t, seconds, 1)
+	assert.LessOrEqual(t, seconds, 3)
 }
 
 func TestPrepareRequestForCredential_ProxyBodyKeepsOriginalParams(t *testing.T) {

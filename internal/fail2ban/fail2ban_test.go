@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestNew(t *testing.T) {
@@ -643,6 +644,53 @@ func TestIsBanned_TOCTOU_ReturnsCorrectAfterLockUpgrade(t *testing.T) {
 	// Verify that a new ban can be triggered after cleanup
 	f2b.RecordResponse("cred1", "gpt-4", 401)
 	assert.True(t, f2b.IsBanned("cred1", "gpt-4"))
+}
+
+func TestRemainingBan_ReturnsRemainingDuration(t *testing.T) {
+	f2b := NewWithRules(1, 0, []int{429}, []ErrorCodeRule{
+		{Code: 429, MaxAttempts: 1, BanDuration: 2 * time.Second},
+	})
+
+	f2b.RecordResponse("cred1", "model-a", 429) // banned for 2s
+
+	remaining, ok := f2b.RemainingBan("cred1", "model-a")
+	require.True(t, ok)
+	assert.Greater(t, remaining, time.Duration(0))
+	assert.LessOrEqual(t, remaining, 2*time.Second)
+}
+
+func TestRemainingBan_IgnoresPermanentBan(t *testing.T) {
+	f2b := New(1, 0, []int{401}) // banDuration 0 == permanent
+
+	f2b.RecordResponse("cred1", "model-a", 401)
+
+	_, ok := f2b.RemainingBan("cred1", "model-a")
+	assert.False(t, ok, "permanent ban has no finite ETA to report")
+}
+
+func TestRemainingBan_IgnoresOtherModelOnSameCredential(t *testing.T) {
+	f2b := New(1, 5*time.Second, []int{401})
+
+	f2b.RecordResponse("cred1", "model-a", 401)
+
+	_, ok := f2b.RemainingBan("cred1", "model-b")
+	assert.False(t, ok)
+}
+
+func TestRemainingBan_IgnoresOtherCredentialForSameModel(t *testing.T) {
+	f2b := New(1, 5*time.Second, []int{401})
+
+	f2b.RecordResponse("cred1", "model-a", 401)
+
+	_, ok := f2b.RemainingBan("cred2", "model-a")
+	assert.False(t, ok, "a ban on a different credential must not leak into this pair's lookup")
+}
+
+func TestRemainingBan_NoActiveBan_ReturnsFalse(t *testing.T) {
+	f2b := New(3, 5*time.Second, []int{401})
+
+	_, ok := f2b.RemainingBan("cred1", "anything")
+	assert.False(t, ok)
 }
 
 func TestGetBannedModelsForCredential(t *testing.T) {
