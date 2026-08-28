@@ -51,6 +51,21 @@ func FromContext(ctx context.Context) string {
 	return id
 }
 
+// Canonical returns id as a normalized trace ID, or "" when invalid. A valid
+// ID is exactly 32 lowercase hex chars and not all-zero (see New / the OTel
+// trace ID contract).
+func Canonical(id string) string {
+	tid, err := trace.TraceIDFromHex(id)
+	if err != nil || !tid.IsValid() {
+		return ""
+	}
+	canonical := tid.String()
+	if canonical != id {
+		return ""
+	}
+	return canonical
+}
+
 var traceparentPropagator = propagation.TraceContext{}
 
 // fromTraceparent extracts the trace ID from a trusted inbound W3C

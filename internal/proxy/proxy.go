@@ -821,6 +821,10 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 	if requestID == "" {
 		requestID = requestid.New()
 	}
+	// Normally requestid.Middleware already set this header to the same value;
+	// re-set it so the fallback-minted ID (middleware didn't run) still reaches
+	// the client and stays consistent with what we log below.
+	w.Header().Set(requestid.Header, requestID)
 	if info := responseCompatRequestFromContext(r.Context()); info != nil {
 		info.RequestID = requestID
 	}
@@ -2119,7 +2123,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 			resp.StatusCode = mappedStatus
 		}
 		rawErrorBody := finalResponseBody
-		clientBody, clientBodyChanged, clientBodyMasked := clientResponseBodyForCredential(resp.StatusCode, finalResponseBody, cred, modelID)
+		clientBody, clientBodyChanged, clientBodyMasked := clientResponseBodyForCredential(resp.StatusCode, finalResponseBody, cred, modelID, logCtx.RequestID)
 		if clientBodyChanged {
 			finalResponseBody = clientBody
 			bodyForTokenExtraction = clientBody
@@ -2231,7 +2235,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 			p.logUpstreamError(r.Context(), "Upstream returned error status on streaming response", resp.StatusCode, cred, modelID, nil,
 				"url", targetURL,
 				"request_id", logCtx.RequestID)
-			body := maskedUpstreamErrorBody(resp.StatusCode)
+			body := maskedUpstreamErrorBody(resp.StatusCode, logCtx.RequestID)
 			w.Header().Set("Content-Type", "application/json")
 			w.Header().Set("Content-Length", fmt.Sprintf("%d", len(body)))
 			dropRepresentationIntegrityHeaders(w.Header())

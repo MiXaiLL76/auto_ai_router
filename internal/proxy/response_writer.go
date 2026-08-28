@@ -14,9 +14,9 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/proxy/modelutils"
 )
 
-func clientResponseBodyForCredential(statusCode int, body []byte, _ *config.CredentialConfig, displayModel string) ([]byte, bool, bool) {
+func clientResponseBodyForCredential(statusCode int, body []byte, _ *config.CredentialConfig, displayModel, requestID string) ([]byte, bool, bool) {
 	if statusCode >= 400 {
-		masked := maskedUpstreamErrorBody(statusCode, body)
+		masked := maskedUpstreamErrorBody(statusCode, requestID, body)
 		return masked, !bytes.Equal(body, masked), true
 	}
 	if statusCode >= 200 && statusCode < 300 {
@@ -271,15 +271,26 @@ func statusCodeFromErrorSignals(signals []string) int {
 	return http.StatusBadGateway
 }
 
-func writeProviderStreamErrorBeforeCommit(w http.ResponseWriter, statusCode int) {
-	body := maskedUpstreamErrorBody(statusCode)
+func writeProviderStreamErrorBeforeCommit(w http.ResponseWriter, statusCode int, requestID string) {
+	body := maskedUpstreamErrorBody(statusCode, requestID)
 	header := w.Header()
 	header.Set("Content-Type", "application/json")
 	header.Set("Content-Length", itoa(len(body)))
 	header.Del(accelBufferingHeader)
 	dropRepresentationIntegrityHeaders(header)
 	w.WriteHeader(statusCode)
-	_, _ = w.Write(body)
+	_, _ = w.Write(body) //nolint:gosec // G705: body is our own application/json (maskedUpstreamErrorBody), not attacker-controlled HTML
+}
+
+// logContextRequestID returns the raw request ID from logCtx (nil-safe). The
+// value is canonicalized at the sink (errorBodyRequestID), so callers pass it
+// through unnormalized — matching the other clientResponseBodyForCredential /
+// maskedUpstreamErrorBody call sites in proxy.go.
+func logContextRequestID(logCtx *RequestLogContext) string {
+	if logCtx == nil {
+		return ""
+	}
+	return logCtx.RequestID
 }
 
 // resolveCapturedProviderStreamError finalizes one or more bounded stream
@@ -352,7 +363,7 @@ func (p *Proxy) writeProxyResponse(w http.ResponseWriter, resp *ProxyResponse, c
 	if mappedStatus, ok := statusCodeFromProviderBodyError(resp.StatusCode, resp.Body); ok {
 		resp.StatusCode = mappedStatus
 	}
-	responseBody, responseBodyChanged, responseBodyMasked := clientResponseBodyForCredential(resp.StatusCode, resp.Body, cred, modelID)
+	responseBody, responseBodyChanged, responseBodyMasked := clientResponseBodyForCredential(resp.StatusCode, resp.Body, cred, modelID, logContextRequestID(logCtx))
 	if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
 		endpoint := endpointFromRequest(clientReq)
 		if logCtx != nil && logCtx.Request != nil {
@@ -427,7 +438,7 @@ func (p *Proxy) writeProxyResponse(w http.ResponseWriter, resp *ProxyResponse, c
 
 	w.Header().Set("Content-Length", itoa(len(responseBody)))
 	w.WriteHeader(resp.StatusCode)
-	if _, err := w.Write(responseBody); err != nil {
+	if _, err := w.Write(responseBody); err != nil { //nolint:gosec // G705: proxied upstream body / our own masked JSON error, forwarded verbatim by design; not HTML we render
 		if isClientDisconnectError(err) {
 			p.logger.DebugContext(clientReq.Context(), "Client disconnected during proxy response write", "error", err)
 			p.recordAbortedRequest(credName, endpointFromRequest(clientReq), modelID)
