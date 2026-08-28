@@ -12,11 +12,12 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/converter"
 	promanutils "github.com/mixaill76/auto_ai_router/internal/converter/proman/utils"
 	"github.com/mixaill76/auto_ai_router/internal/proxy/modelutils"
+	"github.com/mixaill76/auto_ai_router/internal/requestid"
 )
 
-func clientResponseBodyForCredential(statusCode int, body []byte, _ *config.CredentialConfig, displayModel string) ([]byte, bool, bool) {
+func clientResponseBodyForCredential(statusCode int, body []byte, _ *config.CredentialConfig, displayModel, requestID string) ([]byte, bool, bool) {
 	if statusCode >= 400 {
-		masked := maskedUpstreamErrorBody(statusCode, body)
+		masked := maskedUpstreamErrorBody(statusCode, requestID, body)
 		return masked, !bytes.Equal(body, masked), true
 	}
 	if statusCode >= 200 && statusCode < 300 {
@@ -272,14 +273,21 @@ func statusCodeFromErrorSignals(signals []string) int {
 }
 
 func writeProviderStreamErrorBeforeCommit(w http.ResponseWriter, statusCode int) {
-	body := maskedUpstreamErrorBody(statusCode)
+	body := maskedUpstreamErrorBody(statusCode, w.Header().Get(requestid.Header))
 	header := w.Header()
 	header.Set("Content-Type", "application/json")
 	header.Set("Content-Length", itoa(len(body)))
 	header.Del(accelBufferingHeader)
 	dropRepresentationIntegrityHeaders(header)
 	w.WriteHeader(statusCode)
-	_, _ = w.Write(body)
+	_, _ = w.Write(body) //nolint:gosec // G705 body is JSON with a canonical trace id only
+}
+
+func responseRequestID(logCtx *RequestLogContext) string {
+	if logCtx == nil {
+		return ""
+	}
+	return errorBodyRequestID(logCtx.RequestID)
 }
 
 // resolveCapturedProviderStreamError finalizes one or more bounded stream
@@ -352,7 +360,7 @@ func (p *Proxy) writeProxyResponse(w http.ResponseWriter, resp *ProxyResponse, c
 	if mappedStatus, ok := statusCodeFromProviderBodyError(resp.StatusCode, resp.Body); ok {
 		resp.StatusCode = mappedStatus
 	}
-	responseBody, responseBodyChanged, responseBodyMasked := clientResponseBodyForCredential(resp.StatusCode, resp.Body, cred, modelID)
+	responseBody, responseBodyChanged, responseBodyMasked := clientResponseBodyForCredential(resp.StatusCode, resp.Body, cred, modelID, responseRequestID(logCtx))
 	if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
 		endpoint := endpointFromRequest(clientReq)
 		if logCtx != nil && logCtx.Request != nil {
@@ -427,7 +435,7 @@ func (p *Proxy) writeProxyResponse(w http.ResponseWriter, resp *ProxyResponse, c
 
 	w.Header().Set("Content-Length", itoa(len(responseBody)))
 	w.WriteHeader(resp.StatusCode)
-	if _, err := w.Write(responseBody); err != nil {
+	if _, err := w.Write(responseBody); err != nil { //nolint:gosec // G705 response body is proxied or JSON with a canonical trace id only
 		if isClientDisconnectError(err) {
 			p.logger.DebugContext(clientReq.Context(), "Client disconnected during proxy response write", "error", err)
 			p.recordAbortedRequest(credName, endpointFromRequest(clientReq), modelID)

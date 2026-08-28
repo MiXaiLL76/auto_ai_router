@@ -22,6 +22,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/models"
 	"github.com/mixaill76/auto_ai_router/internal/monitoring"
 	"github.com/mixaill76/auto_ai_router/internal/ratelimit"
+	"github.com/mixaill76/auto_ai_router/internal/requestid"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -160,7 +161,10 @@ func TestProxyRequest_NonStreamingRateLimitBodyReturns429(t *testing.T) {
 	prx.ProxyRequest(w, req)
 
 	assert.Equal(t, http.StatusTooManyRequests, w.Code)
+	id := w.Header().Get(requestid.Header)
+	assert.NotEmpty(t, id)
 	assert.Contains(t, w.Body.String(), "rate_limit_error")
+	assert.Contains(t, w.Body.String(), `"request_id":"`+id+`"`)
 	assert.NotContains(t, w.Body.String(), "rate_limit_exceeded")
 }
 

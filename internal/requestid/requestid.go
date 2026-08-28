@@ -51,6 +51,24 @@ func FromContext(ctx context.Context) string {
 	return id
 }
 
+// Valid reports whether id is a valid lowercase 32-hex trace ID.
+func Valid(id string) bool {
+	return Canonical(id) != ""
+}
+
+// Canonical returns id as a normalized trace ID, or "" when invalid.
+func Canonical(id string) string {
+	tid, err := trace.TraceIDFromHex(id)
+	if err != nil || !tid.IsValid() {
+		return ""
+	}
+	canonical := tid.String()
+	if canonical != id {
+		return ""
+	}
+	return canonical
+}
+
 var traceparentPropagator = propagation.TraceContext{}
 
 // fromTraceparent extracts the trace ID from a trusted inbound W3C

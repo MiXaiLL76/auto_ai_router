@@ -63,6 +63,14 @@ func TestMiddlewareIgnoresIncomingTraceparentWhenNotTrusted(t *testing.T) {
 	assert.NotEqual(t, "4bf92f3577b34da6a3ce929d0e0e4736", rec.Header().Get(Header))
 }
 
+func TestValid(t *testing.T) {
+	assert.True(t, Valid("4bf92f3577b34da6a3ce929d0e0e4736"))
+	assert.False(t, Valid(""))
+	assert.False(t, Valid("4BF92F3577B34DA6A3CE929D0E0E4736"))
+	assert.False(t, Valid("zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"))
+	assert.False(t, Valid("00000000000000000000000000000000"))
+}
+
 func TestFromContextEmptyWhenUnset(t *testing.T) {
 	assert.Empty(t, FromContext(context.TODO()))
 	assert.Empty(t, FromContext(httptest.NewRequest(http.MethodGet, "/", nil).Context()))

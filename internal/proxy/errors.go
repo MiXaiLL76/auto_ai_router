@@ -5,11 +5,14 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+
+	"github.com/mixaill76/auto_ai_router/internal/requestid"
 )
 
 // APIErrorResponse represents an OpenAI-compatible error response.
 type APIErrorResponse struct {
-	Error APIError `json:"error"`
+	Error     APIError `json:"error"`
+	RequestID string   `json:"request_id,omitempty"`
 }
 
 // APIError represents the error object inside an OpenAI-compatible error response.
@@ -61,11 +64,16 @@ func WriteJSONError(w http.ResponseWriter, statusCode int, message, errorType st
 			Param:   param,
 			Code:    code,
 		},
+		RequestID: errorBodyRequestID(w.Header().Get(requestid.Header)),
 	}
 	_ = json.NewEncoder(w).Encode(resp)
 }
 
-func maskedUpstreamErrorBody(statusCode int, rawBodies ...[]byte) []byte {
+func errorBodyRequestID(id string) string {
+	return requestid.Canonical(id)
+}
+
+func maskedUpstreamErrorBody(statusCode int, requestID string, rawBodies ...[]byte) []byte {
 	message := "Request failed"
 	code := "api_error"
 	param := (*string)(nil)
@@ -91,6 +99,7 @@ func maskedUpstreamErrorBody(statusCode int, rawBodies ...[]byte) []byte {
 			Code:    &code,
 		},
 	}
+	resp.RequestID = errorBodyRequestID(requestID)
 	body, err := json.Marshal(resp)
 	if err != nil {
 		return []byte(`{"error":{"message":"Request failed","type":"api_error","param":null,"code":"api_error"}}`)

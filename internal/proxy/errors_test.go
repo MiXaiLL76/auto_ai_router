@@ -7,7 +7,10 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/mixaill76/auto_ai_router/internal/requestid"
 	"github.com/mixaill76/auto_ai_router/internal/testhelpers"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestWriteJSONError(t *testing.T) {
@@ -38,6 +41,26 @@ func TestWriteJSONError(t *testing.T) {
 			testhelpers.AssertJSONErrorResponse(t, recorder, tt.statusCode, tt.wantType, "test message")
 		})
 	}
+}
+
+func TestWriteJSONErrorIncludesRequestIDFromHeader(t *testing.T) {
+	const id = "0123456789abcdef0123456789abcdef"
+	recorder := httptest.NewRecorder()
+	recorder.Header().Set(requestid.Header, id)
+
+	WriteJSONError(recorder, http.StatusTooManyRequests, "test message", errorTypeForStatus(http.StatusTooManyRequests), nil, nil)
+
+	var response APIErrorResponse
+	require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &response))
+	assert.Equal(t, id, response.RequestID)
+}
+
+func TestMaskedUpstreamErrorBodyIncludesRequestID(t *testing.T) {
+	const id = "0123456789abcdef0123456789abcdef"
+
+	var response APIErrorResponse
+	require.NoError(t, json.Unmarshal(maskedUpstreamErrorBody(http.StatusTooManyRequests, id), &response))
+	assert.Equal(t, id, response.RequestID)
 }
 
 func TestWriteErrorConvenienceFunctions(t *testing.T) {
@@ -126,7 +149,7 @@ func TestMaskedUpstreamErrorBodyClassifiesBadRequest(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			body := maskedUpstreamErrorBody(http.StatusBadRequest, []byte(tt.body))
+			body := maskedUpstreamErrorBody(http.StatusBadRequest, "", []byte(tt.body))
 
 			var resp APIErrorResponse
 			err := json.Unmarshal(body, &resp)
@@ -155,7 +178,7 @@ func TestMaskedUpstreamErrorBodyClassifiesBadRequest(t *testing.T) {
 }
 
 func TestMaskedUpstreamErrorBodyKeepsGenericNonBadRequest(t *testing.T) {
-	body := maskedUpstreamErrorBody(http.StatusBadGateway, []byte(`{"error":{"message":"upstream failed"}}`))
+	body := maskedUpstreamErrorBody(http.StatusBadGateway, "", []byte(`{"error":{"message":"upstream failed"}}`))
 
 	var resp APIErrorResponse
 	if err := json.Unmarshal(body, &resp); err != nil {
