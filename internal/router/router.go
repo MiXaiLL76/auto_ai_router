@@ -264,15 +264,14 @@ func (r *Router) handleModels(w http.ResponseWriter, req *http.Request) {
 	}
 	if r.modelManager != nil {
 		includeGroups := strings.EqualFold(req.URL.Query().Get("include_model_access_groups"), "true")
-		if organizationPolicy != nil {
-			if includeGroups {
-				modelsResp = r.modelManager.GetAllModelsWithAccessGroupsScopedForOrganization(visibility, organizationPolicy)
-			} else {
-				modelsResp = r.modelManager.GetAllModelsScopedForOrganization(visibility, organizationPolicy)
-			}
-		} else if includeGroups {
+		switch {
+		case organizationPolicy != nil && includeGroups:
+			modelsResp = r.modelManager.GetAllModelsWithAccessGroupsScopedForOrganization(visibility, organizationPolicy)
+		case organizationPolicy != nil:
+			modelsResp = r.modelManager.GetAllModelsScopedForOrganization(visibility, organizationPolicy)
+		case includeGroups:
 			modelsResp = r.modelManager.GetAllModelsWithAccessGroupsScoped(visibility)
-		} else {
+		default:
 			modelsResp = r.modelManager.GetAllModelsScoped(visibility)
 		}
 	} else {
