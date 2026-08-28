@@ -1656,3 +1656,67 @@ func TestUpdateDBCredentials_PreservesSWRRState(t *testing.T) {
 	assert.Equal(t, beforeYAML1, state.currentOf("yaml-1"))
 	assert.Equal(t, beforeYAML2, state.currentOf("yaml-2"))
 }
+
+func TestMinRemainingBanForModel_IgnoresExcludedCredential(t *testing.T) {
+	f2b := fail2ban.New(3, 0, []int{429})
+	rl := ratelimit.New()
+
+	credentials := []config.CredentialConfig{
+		{Name: "cred-excluded", APIKey: "key1", BaseURL: "http://test1.com", RPM: -1},
+		{Name: "cred-relevant", APIKey: "key2", BaseURL: "http://test2.com", RPM: -1},
+	}
+	bal := New(credentials, f2b, rl)
+
+	// cred-excluded is banned much longer, but has already been tried and
+	// rejected earlier in this same request (e.g. a 500) — it must not
+	// influence the Retry-After hint at all.
+	bal.BanUntil("cred-excluded", "shared-model", 429, time.Now().Add(time.Hour), "test")
+	bal.BanUntil("cred-relevant", "shared-model", 429, time.Now().Add(2*time.Second), "test")
+
+	exclude := map[string]bool{"cred-excluded": true}
+	remaining, ok := bal.MinRemainingBanForModel("shared-model", exclude, scope.AdminContext())
+
+	require.True(t, ok)
+	assert.Greater(t, remaining, time.Duration(0))
+	assert.LessOrEqual(t, remaining, 2*time.Second, "must report the excluded candidate's ban, not the 1h one from the excluded credential")
+}
+
+func TestMinRemainingBanForModel_IgnoresCredentialOutOfScope(t *testing.T) {
+	f2b := fail2ban.New(3, 0, []int{429})
+	rl := ratelimit.New()
+
+	credentials := []config.CredentialConfig{
+		{Name: "cred-out-of-scope", APIKey: "key1", BaseURL: "http://test1.com", RPM: -1, ProviderScopeExpression: scope.FalseExpression()},
+		{Name: "cred-in-scope", APIKey: "key2", BaseURL: "http://test2.com", RPM: -1},
+	}
+	bal := New(credentials, f2b, rl)
+
+	// The out-of-scope credential has the shortest ban of the two — if scope
+	// filtering were missing, it would incorrectly win the "shortest" pick
+	// even though this caller can never route to it.
+	bal.BanUntil("cred-out-of-scope", "shared-model", 429, time.Now().Add(1*time.Second), "test")
+	bal.BanUntil("cred-in-scope", "shared-model", 429, time.Now().Add(5*time.Second), "test")
+
+	remaining, ok := bal.MinRemainingBanForModel("shared-model", nil, scope.AdminContext())
+
+	require.True(t, ok)
+	assert.Greater(t, remaining, 2*time.Second, "must report the in-scope candidate's ban, not the shorter out-of-scope one")
+	assert.LessOrEqual(t, remaining, 5*time.Second)
+}
+
+func TestMinRemainingBanForModel_NoRelevantCandidateBanned_ReturnsFalse(t *testing.T) {
+	f2b := fail2ban.New(3, 0, []int{429})
+	rl := ratelimit.New()
+
+	credentials := []config.CredentialConfig{
+		{Name: "cred-excluded", APIKey: "key1", BaseURL: "http://test1.com", RPM: -1},
+	}
+	bal := New(credentials, f2b, rl)
+
+	bal.BanUntil("cred-excluded", "shared-model", 429, time.Now().Add(time.Hour), "test")
+
+	exclude := map[string]bool{"cred-excluded": true}
+	_, ok := bal.MinRemainingBanForModel("shared-model", exclude, scope.AdminContext())
+
+	assert.False(t, ok, "no relevant candidate is banned once the only one is excluded — must not fall back to guessing")
+}
