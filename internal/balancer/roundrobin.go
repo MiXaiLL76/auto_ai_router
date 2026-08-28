@@ -158,7 +158,7 @@ func (r *RoundRobin) MinRemainingBanForModel(modelID string, exclude map[string]
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	var min time.Duration
+	var shortest time.Duration
 	found := false
 	for i := range r.credentials {
 		cred := &r.credentials[i]
@@ -175,12 +175,12 @@ func (r *RoundRobin) MinRemainingBanForModel(modelID string, exclude map[string]
 		if !ok {
 			continue
 		}
-		if !found || remaining < min {
-			min = remaining
+		if !found || remaining < shortest {
+			shortest = remaining
 			found = true
 		}
 	}
-	return min, found
+	return shortest, found
 }
 
 // GetProxyCredentials returns all proxy/AIR remote-router credentials.
