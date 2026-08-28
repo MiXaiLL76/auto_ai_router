@@ -87,6 +87,8 @@ return 1
 
 // Lua script: record token consumption.
 // ARGV[4] = "uuid:count" member
+//
+//nolint:gosec // G101: false positive — Lua script text, not a credential
 const luaConsumeTokens = `
 local key    = KEYS[1]
 local now    = tonumber(ARGV[1])

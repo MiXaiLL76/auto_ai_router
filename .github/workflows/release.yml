@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - 'v*.*.*'
+
   workflow_dispatch:
 
 permissions:
@@ -21,7 +22,9 @@ jobs:
     needs: quality-check
     if: startsWith(github.ref, 'refs/tags/')
     name: Build Release Binaries
-    runs-on: ubuntu-latest
+    runs-on: arc-air-runners
+    container:
+      image: ghcr.io/actions/actions-runner:latest
     strategy:
       matrix:
         goos: [linux]
@@ -38,7 +41,7 @@ jobs:
       - name: Build
         run: |
           BINARY_NAME="auto_ai_router-${{ steps.version.outputs.VERSION }}-${{ matrix.goos }}-${{ matrix.goarch }}"
-          [ "${{ matrix.goos }}" = "windows" ] && BINARY_NAME="${BINARY_NAME}.exe"
+          if [ "${{ matrix.goos }}" = "windows" ]; then BINARY_NAME="${BINARY_NAME}.exe"; fi
           GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} CGO_ENABLED=0 \
           go build -ldflags="-s -w -X main.Version=${{ steps.version.outputs.VERSION }} -X main.Commit=${{ github.sha }}" -o "${BINARY_NAME}" ./cmd/server
           if [ "${{ matrix.goos }}" = "windows" ]; then zip "${BINARY_NAME}.zip" "${BINARY_NAME}"; else tar czf "${BINARY_NAME}.tar.gz" "${BINARY_NAME}"; fi
@@ -99,7 +102,9 @@ jobs:
   upload-assets:
     if: startsWith(github.ref, 'refs/tags/')
     needs: [build-binaries, build-docker]
-    runs-on: ubuntu-latest
+    runs-on: arc-air-runners
+    container:
+      image: ghcr.io/actions/actions-runner:latest
     steps:
       - uses: actions/download-artifact@v8
         with:
@@ -107,7 +112,7 @@ jobs:
       - name: Upload assets to existing release
         run: |
           for file in artifacts/**/*; do
-            [ -f "$file" ] && gh release upload "${{ github.ref_name }}" "$file" --clobber
+            if [ -f "$file" ]; then gh release upload "${{ github.ref_name }}" "$file" --clobber; fi
           done
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

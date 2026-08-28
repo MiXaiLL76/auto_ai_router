@@ -57,7 +57,7 @@ services:
       - LOG_LEVEL=debug
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/health"]
+      test: ["CMD", "/app/healthcheck"]
       interval: 30s
       timeout: 3s
       retries: 3
@@ -74,6 +74,34 @@ Then run:
 
 ```bash
 docker-compose up -d
+```
+
+## Runtime user and persistent data
+
+If you mount a volume at `/data/auto_ai_router`, it must be writable by uid
+65532:
+
+```yaml
+# Kubernetes
+securityContext:
+  fsGroup: 65532
+```
+
+```bash
+# Docker / compose bind mount
+chown -R 65532:65532 ./data
+```
+
+## Non-default port
+
+`HEALTHCHECK` runs `/app/healthcheck`, which probes `http://localhost:8080/health`
+by default. If you override `server.port`, set the matching env var or the
+container will report `unhealthy` while the server is actually fine:
+
+```bash
+docker run -e HEALTHCHECK_PORT=9090 ...
+# or, when the whole URL differs:
+docker run -e HEALTHCHECK_URL=http://127.0.0.1:9090/health ...
 ```
 
 ## Verify
