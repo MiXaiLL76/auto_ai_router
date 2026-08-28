@@ -6,6 +6,9 @@ Chat Completions or Responses API format to Anthropic Messages API and sent to
 `/v1/messages`. Comet also exposes an OpenAI-compatible `/v1/chat/completions`
 endpoint for the same models; set `openai_proto: true` on a credential to use
 that wire protocol instead (see [OpenAI Protocol Mode](#openai-protocol-mode)).
+For Google/Gemini models Comet additionally exposes a Google GenAI-compatible
+`/v1beta/models/{model}:generateContent` endpoint; set `google_proto: true` to
+use it (see [Google Protocol Mode](#google-protocol-mode)).
 
 ## Configuration
 
@@ -39,7 +42,8 @@ credentials:
 ```
 
 `openai_proto` is only valid on `type: cometapi` credentials — setting it on
-any other provider type fails config validation.
+any other provider type fails config validation. It is also mutually exclusive
+with `google_proto`.
 
 With `openai_proto: true`:
 
@@ -57,6 +61,57 @@ With `openai_proto: true`:
 Use separate credentials (e.g. `comet_anthropic` and `comet_openai`) if you
 want some models routed via Anthropic protocol and others via OpenAI
 protocol at the same time.
+
+## Google Protocol Mode
+
+Set `google_proto: true` to switch a `cometapi` credential from Comet's
+Anthropic-compatible `/v1/messages` endpoint to its Google GenAI-compatible
+`/v1beta/models/{model}:generateContent` (and `:streamGenerateContent?alt=sse`)
+endpoint. This reuses the exact same request/response path as `type: gemini`
+(Google AI Studio): incoming OpenAI Chat Completions / Responses / embeddings
+requests are translated to Google's `contents` / `generationConfig` shape and
+the Gemini response is translated back to OpenAI format.
+
+```yaml
+credentials:
+  - name: "comet_google"
+    type: "cometapi"
+    api_key: "os.environ/COMET_API_KEY"
+    base_url: "https://api.cometapi.com"
+    google_proto: true
+    rpm: 60
+    tpm: -1
+
+models:
+  - name: "gemini-3.1-flash"
+    credential: comet_google
+  - name: "gemini-3.1-flash-image-preview"
+    credential: comet_google
+```
+
+Note the `base_url` has **no `/v1` suffix** — the `/v1beta/models/...` path is
+appended by the router (matching the `google-genai` SDK's
+`base_url="https://api.cometapi.com"`, `api_version="v1beta"`).
+
+With `google_proto: true`:
+
+- The upstream URL is `base_url` + `/v1beta/models/<model>:generateContent`
+  (streaming: `:streamGenerateContent?alt=sse`), not `/v1/messages`.
+- Auth travels as the `x-goog-api-key: <api_key>` header (the CometAPI key);
+  `auth_type` and the `anthropic-version` header are not used.
+- Image generation (`responseModalities`, `imageConfig`), streaming, and
+  `/v1/responses` all work exactly as they do for `type: gemini`.
+- The [Claude Model Aliases](#claude-model-aliases) and
+  [Prompt Caching](#prompt-caching) sections below (Anthropic `cache_control`
+  format, the `anthropic-beta` header) do not apply — the request body is
+  never translated to Anthropic's shape.
+- [Error Masking](#error-masking) still applies, since it is keyed on the
+  credential's identity (`cometapi`), not its wire protocol.
+
+`google_proto` is only valid on `type: cometapi` credentials and is mutually
+exclusive with `openai_proto`. Use separate credentials (e.g. `comet_anthropic`,
+`comet_openai`, `comet_google`) to route different models through different
+protocols at the same time.
 
 ## Claude Model Aliases
 

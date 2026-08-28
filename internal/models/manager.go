@@ -598,20 +598,20 @@ func (m *Manager) HasPassthroughResponsesOverride(modelID string) bool {
 //
 // Priority:
 //  1. Explicit config override (passthrough_messages: true/false in models[])
-//  2. Provider default: true for Anthropic; true for CometAPI unless it's running in
-//     its OpenAI-compatible protocol mode (openai_proto), where /v1/messages already
-//     converts to the Chat Completions wire format it actually speaks; false otherwise.
-func (m *Manager) IsPassthroughMessagesForProvider(modelID string, providerType config.ProviderType, openAIProtocol bool) bool {
+//  2. Provider default: true for Anthropic and for a plain CometAPI credential.
+//     Callers pass cred.EffectiveProviderType(), so a CometAPI credential running
+//     in openai_proto (ProviderTypeOpenAI) or google_proto (ProviderTypeGemini)
+//     mode already reports a non-Anthropic wire protocol here and defaults to
+//     false — /v1/messages is converted to that provider's format instead.
+func (m *Manager) IsPassthroughMessagesForProvider(modelID string, providerType config.ProviderType) bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	if v, ok := m.modelPassthroughMessages[modelID]; ok && v != nil {
 		return *v
 	}
 	switch providerType {
-	case config.ProviderTypeAnthropic:
+	case config.ProviderTypeAnthropic, config.ProviderTypeCometAPI:
 		return true
-	case config.ProviderTypeCometAPI:
-		return !openAIProtocol
 	default:
 		return false
 	}

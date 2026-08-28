@@ -304,7 +304,7 @@ func (p *Proxy) prepareRequestForCredential(
 			// own routing and conversion, same as the Responses API passthrough.
 			return req, nil
 		}
-		if p.modelManager != nil && p.modelManager.IsPassthroughMessagesForProvider(modelID, cred.Type, cred.OpenAIProtocol) {
+		if p.modelManager != nil && p.modelManager.IsPassthroughMessagesForProvider(modelID, cred.EffectiveProviderType()) {
 			// Anthropic-wire-compatible provider (Anthropic itself, or CometAPI in its
 			// default Anthropic-protocol mode): the client and the upstream already
 			// speak the same wire format, so skip the Messages->Chat->Messages round
