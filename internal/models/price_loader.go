@@ -25,6 +25,25 @@ func LoadModelPrices(link string) (map[string]*ModelPrice, error) {
 		return nil, fmt.Errorf("empty link")
 	}
 
+	data, err := LoadModelPriceBytes(link)
+	if err != nil {
+		return nil, err
+	}
+
+	// Parse JSON
+	var rawPrices map[string]*ModelPrice
+	if err := json.Unmarshal(data, &rawPrices); err != nil {
+		return nil, fmt.Errorf("failed to parse model prices JSON: %w", err)
+	}
+
+	return normalizeModelPrices(rawPrices), nil
+}
+
+func LoadModelPriceBytes(link string) ([]byte, error) {
+	if link == "" {
+		return nil, fmt.Errorf("empty link")
+	}
+
 	var data []byte
 	var err error
 
@@ -46,13 +65,10 @@ func LoadModelPrices(link string) (map[string]*ModelPrice, error) {
 	if err != nil {
 		return nil, err
 	}
+	return data, nil
+}
 
-	// Parse JSON
-	var rawPrices map[string]*ModelPrice
-	if err := json.Unmarshal(data, &rawPrices); err != nil {
-		return nil, fmt.Errorf("failed to parse model prices JSON: %w", err)
-	}
-
+func normalizeModelPrices(rawPrices map[string]*ModelPrice) map[string]*ModelPrice {
 	// Normalize model names (convert keys to normalized format)
 	// Also store raw lowercase keys so that provider-prefixed names like
 	// "google/gemini-3-flash-preview-highlimits" survive normalisation and
@@ -108,7 +124,7 @@ func LoadModelPrices(link string) (map[string]*ModelPrice, error) {
 		normalizedPrices[normalized] = price
 	}
 
-	return normalizedPrices, nil
+	return normalizedPrices
 }
 
 // loadFromFile reads model prices from a file

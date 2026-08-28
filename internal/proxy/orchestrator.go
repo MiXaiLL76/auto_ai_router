@@ -643,6 +643,7 @@ func (p *Proxy) readRequestBodyAndSelectModel(
 		r.Header.Del("Content-Encoding")
 	}
 	logCtx.PublicModelID = modelID
+	logCtx.CanonicalModelID = modelID
 	logCtx.ModelID = modelID
 	logCtx.SessionID = sessionID
 
@@ -654,6 +655,15 @@ func (p *Proxy) readRequestBodyAndSelectModel(
 		logCtx.ErrorMsg = "Model not specified in request body"
 		WriteErrorBadRequest(w, "model field is required")
 		return nil, "", "", false, false
+	}
+	if p.modelManager != nil {
+		policyBody, policyModelID, policyRealModelID, ok := p.admitOrganizationModel(w, r, body, modelID, logCtx)
+		if !ok {
+			return nil, "", "", false, false
+		}
+		if logCtx.OrganizationPolicy != nil {
+			return policyBody, policyModelID, policyRealModelID, streaming, true
+		}
 	}
 	// An unrestricted virtual key must still stay inside the configured product
 	// model surface. Provider backend IDs remain available to the trusted

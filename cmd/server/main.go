@@ -176,6 +176,10 @@ func main() {
 	if litellmDBManager.IsEnabled() {
 		applyInitialDBModelTable(context.Background(), litellmDBManager, staticCreds, bal, modelManager, rateLimiter, priceRegistry, cfg, log)
 	}
+	organizationPolicies := loadOrganizationPoliciesOrExit(log, cfg, modelManager)
+	if !organizationPolicies.Empty() {
+		log.Info("Organization policies loaded", "count", len(cfg.OrganizationPolicies))
+	}
 	tokenManager := auth.NewVertexTokenManager(log)
 	defer tokenManager.Stop()
 
@@ -238,6 +242,7 @@ func main() {
 		KafkaLog:                   kafkaLogManager,
 		HealthChecker:              healthChecker,
 		PriceRegistry:              priceRegistry,
+		OrganizationPolicies:       organizationPolicies,
 		MaxProviderRetries:         cfg.Server.MaxProviderRetries,
 		MaxFallbackAttempts:        cfg.Server.MaxFallbackAttempts,
 		ResponseStore:              respStore,
@@ -522,6 +527,24 @@ const (
 // defer hasn't bought anything to skip yet (no background work has produced
 // anything worth draining before the listener is even bound), so moving the
 // exit into its own defer-free function is the correct fix, not a workaround.
+// loadOrganizationPoliciesOrExit is its own defer-free function for the same
+// reason as bindOrExit: by this point main holds `defer hybridBackend.Close()`,
+// and gocritic's exitAfterDefer flags any os.Exit that would skip it. A failed
+// policy load is a fatal startup misconfiguration, before any background work
+// worth draining exists.
+func loadOrganizationPoliciesOrExit(log *slog.Logger, cfg *config.Config, modelManager *models.Manager) *models.OrganizationPolicyRegistry {
+	policies, err := models.LoadOrganizationPolicies(cfg.OrganizationPolicies, modelManager, models.OrganizationPolicyLoadOptions{
+		LiteLLMDBEnabled:      cfg.LiteLLMDB.Enabled,
+		LiteLLMDBRequired:     cfg.LiteLLMDB.IsRequired,
+		DisableSpendLogsWrite: cfg.LiteLLMDB.DisableSpendLogsWrite,
+	})
+	if err != nil {
+		log.Error("Failed to load organization policies", "error", err)
+		os.Exit(1)
+	}
+	return policies
+}
+
 func bindOrExit(log *slog.Logger, what string, port int) net.Listener {
 	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
 	if err != nil {
