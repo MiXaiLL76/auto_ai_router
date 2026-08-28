@@ -13,10 +13,12 @@ func (p *Proxy) effectiveOrganizationPolicy(info *dbmodels.TokenInfo) (*routermo
 		return nil, "", false
 	}
 
+	// Only the token's own organization counts as a direct organization here.
+	// info.OrganizationID is documented as "resolved from token or team", so it
+	// must not be used as a fallback: a team-derived organization would then be
+	// admitted through the direct branch and skip the TeamDangling /
+	// TeamOrganizationDangling checks below.
 	directOrg := info.DirectOrganizationID
-	if directOrg == "" {
-		directOrg = info.OrganizationID
-	}
 	if directOrg != "" {
 		policy, ok := p.organizationPolicies.Policy(directOrg)
 		if !ok {
@@ -113,14 +115,11 @@ func (p *Proxy) admitOrganizationModel(
 		return nil, "", "", false
 	}
 
-	if resolution.CanonicalModelID != publicModelID {
-		body = replaceModelInBodyPreserveContentType(body, r.Header.Get("Content-Type"), publicModelID, resolution.CanonicalModelID)
-	}
-	if resolution.ModelID != resolution.CanonicalModelID {
-		body = replaceModelInBodyPreserveContentType(body, r.Header.Get("Content-Type"), resolution.CanonicalModelID, resolution.ModelID)
-	}
-	if resolution.RealModelID != resolution.ModelID {
-		body = replaceModelInBodyPreserveContentType(body, r.Header.Get("Content-Type"), resolution.ModelID, resolution.RealModelID)
+	// The public → canonical → model → real chain always lands on RealModelID
+	// (each replacement overwrites the model field unconditionally), so rewrite
+	// the body once instead of parsing and re-serializing it up to three times.
+	if resolution.RealModelID != publicModelID {
+		body = replaceModelInBodyPreserveContentType(body, r.Header.Get("Content-Type"), publicModelID, resolution.RealModelID)
 	}
 
 	logCtx.PublicModelID = resolution.PublicModelID

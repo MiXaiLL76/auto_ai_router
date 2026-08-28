@@ -317,7 +317,9 @@ func buildMetadata(hashedToken string, tokenInfo *litellmdb.TokenInfo, errorMsg 
 
 func addAIRSpendMetadata(metadata, eventID, providerResponseID string, isProxyRequest bool, modelID, publicModelID, priceModelID string) string {
 	var doc map[string]interface{}
-	if json.Unmarshal([]byte(metadata), &doc) != nil {
+	if json.Unmarshal([]byte(metadata), &doc) != nil || doc == nil {
+		// Unmarshal leaves doc nil for a decode error and also for the literal
+		// "null"; either way a fresh map is needed before assigning into it.
 		doc = make(map[string]interface{})
 	}
 	spendMetadata, _ := doc["spend_logs_metadata"].(map[string]interface{})
@@ -366,7 +368,9 @@ func addOrganizationPolicySpendMetadata(metadata string, logCtx *RequestLogConte
 		return metadata
 	}
 	var doc map[string]interface{}
-	if json.Unmarshal([]byte(metadata), &doc) != nil {
+	if json.Unmarshal([]byte(metadata), &doc) != nil || doc == nil {
+		// Unmarshal leaves doc nil for a decode error and also for the literal
+		// "null"; either way a fresh map is needed before assigning into it.
 		doc = make(map[string]interface{})
 	}
 	spendMetadata, _ := doc["spend_logs_metadata"].(map[string]interface{})

@@ -48,6 +48,15 @@ type OrganizationPolicyLoadOptions struct {
 	DisableSpendLogsWrite bool
 }
 
+// Several organizations routinely share one model_prices_link / price
+// profile. Load, parse, duplicate-key scan and SHA-256 each distinct link
+// only once; the resulting price map is read-only after construction, so it
+// is safe to share across policies.
+type loadedProfile struct {
+	prices   map[string]*ModelPrice
+	identity profileIdentity
+}
+
 func NewOrganizationPolicyRegistry() *OrganizationPolicyRegistry {
 	return &OrganizationPolicyRegistry{byOrganization: make(map[string]*OrganizationPolicy)}
 }
@@ -68,12 +77,22 @@ func LoadOrganizationPolicies(
 		return nil, fmt.Errorf("organization policies require a model manager")
 	}
 
+	profileByLink := make(map[string]loadedProfile, len(policies))
+
 	profiles := make(map[string]profileIdentity)
 	for _, cfg := range policies {
-		priceRows, identity, err := loadStrictOrganizationPriceProfile(cfg.PriceProfileID, cfg.ModelPricesLink)
-		if err != nil {
-			return nil, fmt.Errorf("organization policy %q: %w", cfg.OrganizationID, err)
+		loaded, cached := profileByLink[cfg.ModelPricesLink]
+		if !cached {
+			priceRows, identity, err := loadStrictOrganizationPriceProfile(cfg.PriceProfileID, cfg.ModelPricesLink)
+			if err != nil {
+				return nil, fmt.Errorf("organization policy %q: %w", cfg.OrganizationID, err)
+			}
+			loaded = loadedProfile{prices: priceRows, identity: identity}
+			profileByLink[cfg.ModelPricesLink] = loaded
 		}
+		priceRows := loaded.prices
+		identity := loaded.identity
+		identity.id = cfg.PriceProfileID
 		if previous, exists := profiles[cfg.PriceProfileID]; exists && previous != identity {
 			return nil, fmt.Errorf("organization policy %q: profile %q has conflicting source or digest", cfg.OrganizationID, cfg.PriceProfileID)
 		}
@@ -285,6 +304,13 @@ func (m *Manager) GetAllModelsScopedForOrganization(visibility scope.Context, po
 	return projected
 }
 
+// GetAllModelsWithAccessGroupsScopedForOrganization deliberately ignores
+// include_model_access_groups for organization-scoped keys: the access-group
+// projection is an administrative view over internal routes, and an
+// organization catalog is an explicit curated surface (allowlist + mappings +
+// prices). Returning access-group pseudo-models would re-introduce backend IDs
+// through a query parameter, exactly as GetAllModelsWithAccessGroupsScoped
+// already suppresses them once a client model surface is configured.
 func (m *Manager) GetAllModelsWithAccessGroupsScopedForOrganization(visibility scope.Context, policy *OrganizationPolicy) ModelsResponse {
 	return m.GetAllModelsScopedForOrganization(visibility, policy)
 }
@@ -314,9 +340,25 @@ func (m *Manager) projectOrganizationCatalog(response ModelsResponse, visibility
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
+	// globalByID indexes every model reachable in this scope by its real
+	// internal id so a mapped entry can borrow created/owned_by from the route
+	// it points at. response.Data is keyed by public/client id, which is not
+	// the route id returned by resolveOrganizationMappingTargetLocked.
+	globalByID := make(map[string]Model, len(m.allModels)+len(response.Data))
+	for _, model := range m.allModels {
+		if model.ID != "" {
+			globalByID[model.ID] = model
+		}
+	}
+	for _, model := range response.Data {
+		if model.ID != "" {
+			globalByID[model.ID] = model
+		}
+	}
+
 	publicByID := make(map[string]Model, len(response.Data)+len(policy.mappings))
 	for _, model := range response.Data {
-		if !policy.inSurfaceLocked(model.ID) {
+		if !policy.allowlistAdmitsLocked(model.ID) {
 			continue
 		}
 		if _, priced := policy.prices[model.ID]; !priced {
@@ -338,9 +380,15 @@ func (m *Manager) projectOrganizationCatalog(response ModelsResponse, visibility
 			continue
 		}
 		model := Model{ID: source, Object: "model", OwnedBy: "system"}
-		if sourceModel, ok := publicByID[routeID]; ok {
+		if sourceModel, ok := globalByID[routeID]; ok {
 			model = sourceModel
 			model.ID = source
+		} else if sourceModel, ok := globalByID[target]; ok {
+			model = sourceModel
+			model.ID = source
+		}
+		if model.Object == "" {
+			model.Object = "model"
 		}
 		publicByID[source] = model
 	}
@@ -355,7 +403,12 @@ func (m *Manager) projectOrganizationCatalog(response ModelsResponse, visibility
 	return ModelsResponse{Object: response.Object, Data: result}
 }
 
-func (p *OrganizationPolicy) inSurfaceLocked(publicID string) bool {
+// allowlistAdmitsLocked is only the allowlist gate: it returns true for any id
+// when no allowlist is configured. It is NOT a lock-held twin of inSurface and
+// performs no mapping/routability check, so callers must pass ids that are
+// already known to be routable (projectOrganizationCatalog feeds it entries
+// straight from the routable global catalog).
+func (p *OrganizationPolicy) allowlistAdmitsLocked(publicID string) bool {
 	if p.AllowlistSet {
 		_, ok := p.allowlist[publicID]
 		return ok

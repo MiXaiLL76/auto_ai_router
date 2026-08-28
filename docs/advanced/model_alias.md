@@ -259,3 +259,5 @@ An organization mapping shadows every global meaning of the same request ID only
 `model_allowlist` controls the effective organization surface. When omitted, AIR exposes the global callable surface plus organization mappings. When present and empty, the organization has no callable models. When present and non-empty, entries are exact public request IDs.
 
 Database model ACLs still run after organization surface admission. For an organization-mapped request, AIR tests the ordered candidate set `PublicModelID`, `CanonicalModelID`, and `ModelID` against the applicable key, team, user, and membership allowlists. A direct request for a canonical or routed target does not inherit permission from an organization public ID.
+
+`GET /v1/models?include_model_access_groups=true` returns the same curated organization surface as the plain listing. The provider access-group projection is an administrative view over internal routes and is intentionally suppressed for organization-scoped keys so backend IDs are not re-introduced through a query parameter.
