@@ -51,12 +51,9 @@ func FromContext(ctx context.Context) string {
 	return id
 }
 
-// Valid reports whether id is a valid lowercase 32-hex trace ID.
-func Valid(id string) bool {
-	return Canonical(id) != ""
-}
-
-// Canonical returns id as a normalized trace ID, or "" when invalid.
+// Canonical returns id as a normalized trace ID, or "" when invalid. A valid
+// ID is exactly 32 lowercase hex chars and not all-zero (see New / the OTel
+// trace ID contract).
 func Canonical(id string) string {
 	tid, err := trace.TraceIDFromHex(id)
 	if err != nil || !tid.IsValid() {

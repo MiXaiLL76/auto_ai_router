@@ -63,12 +63,13 @@ func TestMiddlewareIgnoresIncomingTraceparentWhenNotTrusted(t *testing.T) {
 	assert.NotEqual(t, "4bf92f3577b34da6a3ce929d0e0e4736", rec.Header().Get(Header))
 }
 
-func TestValid(t *testing.T) {
-	assert.True(t, Valid("4bf92f3577b34da6a3ce929d0e0e4736"))
-	assert.False(t, Valid(""))
-	assert.False(t, Valid("4BF92F3577B34DA6A3CE929D0E0E4736"))
-	assert.False(t, Valid("zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"))
-	assert.False(t, Valid("00000000000000000000000000000000"))
+func TestCanonical(t *testing.T) {
+	assert.Equal(t, "4bf92f3577b34da6a3ce929d0e0e4736", Canonical("4bf92f3577b34da6a3ce929d0e0e4736"))
+	assert.Empty(t, Canonical(""))
+	assert.Empty(t, Canonical("4BF92F3577B34DA6A3CE929D0E0E4736"), "uppercase is not canonical")
+	assert.Empty(t, Canonical("zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"), "non-hex is rejected")
+	assert.Empty(t, Canonical("00000000000000000000000000000000"), "all-zero trace ID is invalid")
+	assert.Empty(t, Canonical("4bf92f3577b34da6"), "short input is rejected")
 }
 
 func TestFromContextEmptyWhenUnset(t *testing.T) {

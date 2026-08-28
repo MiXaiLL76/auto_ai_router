@@ -821,6 +821,9 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 	if requestID == "" {
 		requestID = requestid.New()
 	}
+	// Normally requestid.Middleware already set this header to the same value;
+	// re-set it so the fallback-minted ID (middleware didn't run) still reaches
+	// the client and stays consistent with what we log below.
 	w.Header().Set(requestid.Header, requestID)
 	if info := responseCompatRequestFromContext(r.Context()); info != nil {
 		info.RequestID = requestID

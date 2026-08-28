@@ -1435,7 +1435,7 @@ func (p *Proxy) streamToClient(
 		if logCtx != nil {
 			logCtx.StreamOutcome = "stream_error"
 		}
-		writeProviderStreamErrorBeforeCommit(w, statusCode)
+		writeProviderStreamErrorBeforeCommit(w, statusCode, logContextRequestID(logCtx))
 		if onWriteErr != nil {
 			onWriteErr()
 		}
