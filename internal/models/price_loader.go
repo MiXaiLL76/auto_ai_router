@@ -1,6 +1,7 @@
 package models
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -48,17 +49,18 @@ func LoadModelPriceBytes(link string) ([]byte, error) {
 	var err error
 
 	// Parse the link to determine source type
-	if strings.HasPrefix(link, "file://") {
+	switch {
+	case strings.HasPrefix(link, "file://"):
 		// File source
 		filePath := strings.TrimPrefix(link, "file://")
 		data, err = loadFromFile(filePath)
-	} else if strings.HasPrefix(link, "http://") || strings.HasPrefix(link, "https://") {
+	case strings.HasPrefix(link, "http://") || strings.HasPrefix(link, "https://"):
 		// HTTP source
 		data, err = loadFromHTTP(link)
-	} else if !strings.Contains(link, "://") {
+	case !strings.Contains(link, "://"):
 		// Treat as file path without file:// prefix
 		data, err = loadFromFile(link)
-	} else {
+	default:
 		return nil, fmt.Errorf("unsupported link format: %s", link)
 	}
 
@@ -179,7 +181,11 @@ func loadFromHTTP(link string) ([]byte, error) {
 	// Create HTTP client with timeout
 	client := httputil.NewHTTPClient(nil)
 
-	resp, err := client.Get(link)
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, link, nil)
+	if err != nil {
+		return nil, fmt.Errorf("invalid URL: %w", err)
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch from URL: %w", err)
 	}

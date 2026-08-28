@@ -1,3 +1,4 @@
+// Package startup runs configuration and environment checks before the server accepts traffic.
 package startup
 
 import (

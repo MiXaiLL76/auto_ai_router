@@ -1,3 +1,4 @@
+// Package queries holds the SQL queries used against the LiteLLM database.
 package queries
 
 const QueryCredentialsTable = `SELECT credential_id, credential_name, credential_values, credential_info FROM public."LiteLLM_CredentialsTable"` //nolint:gosec // G101: false positive — SQL statement text, not a credential
@@ -26,7 +27,7 @@ type CredentialLiteLLMInfo struct {
 }
 
 type CredentialTable struct {
-	CredentialId     *string                  `json:"credential_id,omitempty"`
+	CredentialID     *string                  `json:"credential_id,omitempty"`
 	CredentialName   *string                  `json:"credential_name,omitempty"`
 	CredentialParams *CredentialLiteLLMParams `json:"credential_values,omitempty"`
 	CredentialInfo   *CredentialLiteLLMInfo   `json:"credential_info,omitempty"`

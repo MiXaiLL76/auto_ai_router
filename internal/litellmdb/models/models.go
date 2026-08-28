@@ -1,3 +1,4 @@
+// Package models defines the data types shared across the LiteLLM database integration.
 package models
 
 import (

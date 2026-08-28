@@ -16,7 +16,7 @@ import (
 
 // Manager is the main interface for the litellmdb module
 type Manager interface {
-	FetchMasterKey(ctx context.Context, default_key string) error
+	FetchMasterKey(ctx context.Context, defaultKey string) error
 
 	// Auth - synchronous authentication
 	ValidateToken(ctx context.Context, rawToken string) (*models.TokenInfo, error)
@@ -65,7 +65,7 @@ func NewNoopManager() *NoopManager {
 }
 
 // FetchMasterKey validates a token
-func (m *NoopManager) FetchMasterKey(ctx context.Context, default_key string) error {
+func (n *NoopManager) FetchMasterKey(_ context.Context, _ string) error {
 	return nil
 }
 
@@ -73,15 +73,15 @@ func (n *NoopManager) FetchModelsForAIR(_ context.Context, _ string) ([]config.C
 	return nil, nil, nil, nil
 }
 
-func (n *NoopManager) ValidateToken(ctx context.Context, rawToken string) (*models.TokenInfo, error) {
+func (n *NoopManager) ValidateToken(_ context.Context, _ string) (*models.TokenInfo, error) {
 	return nil, models.ErrModuleDisabled
 }
 
-func (n *NoopManager) ValidateTokenForModel(ctx context.Context, rawToken, model string) (*models.TokenInfo, error) {
+func (n *NoopManager) ValidateTokenForModel(_ context.Context, _, _ string) (*models.TokenInfo, error) {
 	return nil, models.ErrModuleDisabled
 }
 
-func (n *NoopManager) LogSpend(entry *models.SpendLogEntry) error {
+func (n *NoopManager) LogSpend(_ *models.SpendLogEntry) error {
 	// no-op
 	return nil
 }
@@ -91,7 +91,7 @@ func (n *NoopManager) SpendLoggingEnabled() bool {
 	return false
 }
 
-func (n *NoopManager) MarkSpendLogKafkaFallback(ctx context.Context, requestID, reason string) error {
+func (n *NoopManager) MarkSpendLogKafkaFallback(_ context.Context, _, _ string) error {
 	// no-op
 	return nil
 }
@@ -120,7 +120,7 @@ func (n *NoopManager) GetPool() *pgxpool.Pool {
 	return nil
 }
 
-func (n *NoopManager) Shutdown(ctx context.Context) error {
+func (n *NoopManager) Shutdown(_ context.Context) error {
 	return nil
 }
 
@@ -195,8 +195,8 @@ func New(cfg *models.Config) (Manager, error) {
 }
 
 // FetchMasterKey validates a token
-func (m *DefaultManager) FetchMasterKey(ctx context.Context, default_key string) error {
-	return m.auth.FetchMasterKey(ctx, default_key)
+func (m *DefaultManager) FetchMasterKey(ctx context.Context, defaultKey string) error {
+	return m.auth.FetchMasterKey(ctx, defaultKey)
 }
 
 // FetchModelsForAIR loads credentials, model RPM configs and prices from LiteLLM DB

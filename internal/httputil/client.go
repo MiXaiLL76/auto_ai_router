@@ -1,3 +1,4 @@
+// Package httputil provides shared HTTP client construction and helpers.
 package httputil
 
 import (
@@ -97,7 +98,7 @@ func NewHTTPClient(cfg *HTTPClientConfig) *http.Client {
 		// requests (providers and chained routers). It uses the global
 		// TracerProvider, which is a no-op unless OTEL is enabled in config.
 		Transport: otelhttp.NewTransport(transport),
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
 			return http.ErrUseLastResponse
 		},
 	}

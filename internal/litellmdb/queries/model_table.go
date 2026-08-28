@@ -80,7 +80,7 @@ type GenericLiteLLMParams struct {
 }
 
 type ModelTable struct {
-	ModelId   *string                `json:"model_id,omitempty"`
+	ModelID   *string                `json:"model_id,omitempty"`
 	ModelName *string                `json:"model_name,omitempty"`
 	LlmParams *GenericLiteLLMParams  `json:"litellm_params,omitempty"`
 	ModelInfo map[string]interface{} `json:"model_info,omitempty"`

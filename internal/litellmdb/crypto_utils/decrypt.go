@@ -1,3 +1,4 @@
+// Package cryptoutils decrypts LiteLLM-encrypted credential values.
 package cryptoutils
 
 import (

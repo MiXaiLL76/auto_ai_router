@@ -239,8 +239,7 @@ func convertVertexUsageMetadata(meta *genai.GenerateContentResponseUsageMetadata
 			if detail == nil {
 				continue
 			}
-			switch genai.MediaModality(detail.Modality) {
-			case genai.MediaModalityAudio:
+			if genai.MediaModality(detail.Modality) == genai.MediaModalityAudio {
 				usage.PromptTokensDetails.AudioTokens += int(detail.TokenCount)
 			}
 		}
@@ -254,8 +253,7 @@ func convertVertexUsageMetadata(meta *genai.GenerateContentResponseUsageMetadata
 			if detail == nil {
 				continue
 			}
-			switch genai.MediaModality(detail.Modality) {
-			case genai.MediaModalityAudio:
+			if genai.MediaModality(detail.Modality) == genai.MediaModalityAudio {
 				usage.PromptTokensDetails.AudioTokens += int(detail.TokenCount)
 			}
 		}
@@ -268,8 +266,7 @@ func convertVertexUsageMetadata(meta *genai.GenerateContentResponseUsageMetadata
 			if detail == nil {
 				continue
 			}
-			switch genai.MediaModality(detail.Modality) {
-			case genai.MediaModalityAudio:
+			if genai.MediaModality(detail.Modality) == genai.MediaModalityAudio {
 				usage.PromptTokensDetails.CachedAudioTokens += int(detail.TokenCount)
 				usage.PromptTokensDetails.AudioTokens -= int(detail.TokenCount)
 				if usage.PromptTokensDetails.AudioTokens < 0 {

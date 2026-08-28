@@ -1,3 +1,4 @@
+// Package fail2ban tracks abusive clients and bans them for a cooldown period.
 package fail2ban
 
 import (

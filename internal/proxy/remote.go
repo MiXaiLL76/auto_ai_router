@@ -263,15 +263,15 @@ func updateModelLimits(
 	modelIDSet := make(map[string]bool, len(health.Models))
 	modelWeights := make(map[string]int)
 
-	for _, modelStats_data := range health.Models {
-		credStats, ok := health.Credentials[modelStats_data.Credential]
+	for _, modelStatsData := range health.Models {
+		credStats, ok := health.Credentials[modelStatsData.Credential]
 		if !ok {
 			continue
 		}
 		if !cred.IsFallback && credStats.IsFallback {
 			continue
 		}
-		modelID := modelStats_data.Model
+		modelID := modelStatsData.Model
 		if modelID == "" {
 			continue
 		}
@@ -281,18 +281,18 @@ func updateModelLimits(
 		}
 
 		// Aggregate (sum) limits and current usage for this model
-		rpm := modelStats_data.LimitRPM
-		tpm := modelStats_data.LimitTPM
-		curRPM := modelStats_data.CurrentRPM
-		curTPM := modelStats_data.CurrentTPM
-		weight := httputil.EffectiveHealthWeight(modelStats_data, credStats)
+		rpm := modelStatsData.LimitRPM
+		tpm := modelStatsData.LimitTPM
+		curRPM := modelStatsData.CurrentRPM
+		curTPM := modelStatsData.CurrentTPM
+		weight := httputil.EffectiveHealthWeight(modelStatsData, credStats)
 
 		aggregation, ok := modelStats[modelID]
 		if !ok {
 			aggregation = newSumLimitAggregation()
 			modelStats[modelID] = aggregation
 		}
-		if hasRemoteModelLimitOrUsage(modelStats_data) {
+		if hasRemoteModelLimitOrUsage(modelStatsData) {
 			aggregation.applySum(rpm, tpm, curRPM, curTPM)
 		}
 		aggregation.applyWeight(weight)
