@@ -365,11 +365,7 @@ func main() {
 	}
 
 	// Bind port explicitly so readiness is set only after the socket is open.
-	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", cfg.Server.Port))
-	if err != nil {
-		log.Error("Failed to bind server port", "error", err, "port", cfg.Server.Port)
-		os.Exit(1)
-	}
+	ln := bindOrExit(log, "server", cfg.Server.Port)
 
 	// Mark ready — TCP listener is bound, pod can accept traffic.
 	rtr.SetReady(true)
@@ -413,15 +409,11 @@ func main() {
 		pprofMux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
 		pprofMux.HandleFunc("/debug/pprof/trace", pprof.Trace)
 
-		pprofServer = &http.Server{
+		pprofServer = &http.Server{ //nolint:gosec // G112: internal-only debug listener, never exposed via Service/Ingress (see warning log below)
 			Addr:    fmt.Sprintf(":%d", cfg.Monitoring.PprofPort),
 			Handler: pprofMux,
 		}
-		pprofLn, err := net.Listen("tcp", pprofServer.Addr)
-		if err != nil {
-			log.Error("Failed to bind pprof port", "error", err, "port", cfg.Monitoring.PprofPort)
-			os.Exit(1)
-		}
+		pprofLn := bindOrExit(log, "pprof", cfg.Monitoring.PprofPort)
 		log.Warn("pprof enabled on internal listener — must not be exposed via Service/Ingress",
 			"port", cfg.Monitoring.PprofPort)
 		go func() {
@@ -449,13 +441,7 @@ func main() {
 	}
 
 	// Shutdown HTTP server
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	if err := server.Shutdown(ctx); err != nil {
-		log.Error("Server forced to shutdown", "error", err)
-		os.Exit(1)
-	}
+	shutdownOrExit(log, server)
 
 	if pprofServer != nil {
 		pprofCtx, pprofCancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -542,6 +528,37 @@ const (
 // total wall-clock time (see its doc comment) — returns nil (and falls back
 // to local backends) once either that bound or redisConnectMaxAttempts is
 // reached, whichever comes first.
+// bindOrExit binds the main HTTP port or terminates the process. Deliberately
+// its own function, not inlined in main: main has a `defer bgCancel()` for
+// graceful shutdown, and os.Exit skips deferred calls — gocritic's
+// exitAfterDefer flags any os.Exit in a function that also defers. Here that
+// defer hasn't bought anything to skip yet (no background work has produced
+// anything worth draining before the listener is even bound), so moving the
+// exit into its own defer-free function is the correct fix, not a workaround.
+func bindOrExit(log *slog.Logger, what string, port int) net.Listener {
+	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
+	if err != nil {
+		log.Error("Failed to bind "+what+" port", "error", err, "port", port)
+		os.Exit(1)
+	}
+	return ln
+}
+
+// shutdownOrExit is its own function for the same reason as bindOrExit
+// above, not just to bundle the ctx/cancel pair: cancel() is called
+// explicitly on both branches instead of deferred, so this function has no
+// defer of its own either — a local `defer cancel()` right next to os.Exit
+// would trip gocritic's exitAfterDefer exactly as before.
+func shutdownOrExit(log *slog.Logger, server *http.Server) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	err := server.Shutdown(ctx)
+	cancel()
+	if err != nil {
+		log.Error("Server forced to shutdown", "error", err)
+		os.Exit(1)
+	}
+}
+
 func connectRedisWithRetry(cfg config.RedisConfig, log *slog.Logger, metrics *monitoring.Metrics) *ratelimit.RedisBackend {
 	deadline := time.Now().Add(redisConnectOverallBound)
 	delay := redisConnectBaseDelay

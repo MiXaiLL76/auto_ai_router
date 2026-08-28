@@ -69,7 +69,7 @@ func createTestBalancer(baseURL string) (*balancer.RoundRobin, *ratelimit.RPMLim
 			RPM:     100,
 			TPM:     10000,
 		},
-		{
+		{ //nolint:gosec // G101: fake test fixture, not a real credential — this file only backs *_test.go callers
 			Name:    "test2",
 			Type:    config.ProviderTypeProxy,
 			BaseURL: baseURL,
@@ -354,7 +354,7 @@ func createMockProxyHealthResponse() *httputil.ProxyHealthResponse {
 				CurrentRPM: 10,
 				CurrentTPM: 100,
 			},
-			"gpt4_cred2": {
+			"gpt4_cred2": { //nolint:gosec // G101: fake test fixture, not a real credential — this file only backs *_test.go callers
 				Credential: "remote_cred_2",
 				Model:      "gpt-4",
 				Weight:     7,
