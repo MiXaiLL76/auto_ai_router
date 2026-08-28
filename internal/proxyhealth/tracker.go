@@ -1,3 +1,4 @@
+// Package proxyhealth tracks per-credential upstream health for the proxy.
 package proxyhealth
 
 import (

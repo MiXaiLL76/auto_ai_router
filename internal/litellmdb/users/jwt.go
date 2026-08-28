@@ -1,3 +1,4 @@
+// Package users resolves LiteLLM user identity, including JWT parsing.
 package users
 
 import (

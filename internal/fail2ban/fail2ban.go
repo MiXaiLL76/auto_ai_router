@@ -1,3 +1,4 @@
+// Package fail2ban tracks abusive clients and bans them for a cooldown period.
 package fail2ban
 
 import (
@@ -467,6 +468,29 @@ func banUntil(ban *banInfo) time.Time {
 		return time.Time{}
 	}
 	return ban.banTime.Add(ban.banDuration).UTC()
+}
+
+// RemainingBan returns the time remaining until credentialName becomes
+// available again for modelID, if it is currently under a temporary ban.
+// Used to build a Retry-After hint on a synthesized 429. Permanent bans
+// (banDuration == 0) return (0, false) — there is no finite ETA to report.
+func (f *Fail2Ban) RemainingBan(credentialName, modelID string) (time.Duration, bool) {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+
+	ban, exists := f.banned[banKey(credentialName, modelID)]
+	if !exists {
+		return 0, false
+	}
+	until := banUntil(ban)
+	if until.IsZero() {
+		return 0, false // permanent ban — no finite ETA
+	}
+	remaining := until.Sub(utils.NowUTC())
+	if remaining <= 0 {
+		return 0, false
+	}
+	return remaining, true
 }
 
 // GetBannedCount returns the count of currently active (non-expired) banned credential+model pairs

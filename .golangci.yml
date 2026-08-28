@@ -1,0 +1,42 @@
+version: "2"
+
+linters:
+  default: standard
+  enable:
+    - gosec
+    - revive
+    - gocritic
+    - bodyclose
+    - noctx
+    - sqlclosecheck
+  settings:
+    gosec:
+      excludes:
+        # Every call site is non-cryptographic scheduling jitter (retry/backoff
+        # desync). Switching these to crypto/rand buys nothing and adds error
+        # handling to hot paths.
+        - G404
+    gocritic:
+      disabled-checks:
+        # Style-only. The remaining call sites are long multi-branch response
+        # dispatchers where a switch over 30-line bodies reads no better than
+        # the if/else-if chain.
+        - ifElseChain
+  exclusions:
+    rules:
+      # Requiring a doc comment on every exported identifier would mean ~300
+      # filler comments across the existing surface. The other revive rules
+      # (naming, package comments, builtin shadowing, ctx placement) stay on.
+      - linters:
+          - revive
+        text: "^exported:"
+      # Test files exercise HTTP/net paths, throwaway fixtures and table-driven
+      # closures where context plumbing, body-close bookkeeping and doc comments
+      # add noise without catching anything that ships.
+      - path: _test\.go
+        linters:
+          - gosec
+          - noctx
+          - bodyclose
+          - gocritic
+          - revive

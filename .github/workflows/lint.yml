@@ -2,6 +2,11 @@ name: Lint
 
 env:
   GOLANGCI_LINT_VERSION: v2.13.1
+  # The branch is clean (0 gofmt / vet / golangci-lint / govulncheck findings),
+  # so those are hard-gated at zero below. MIN_SCORE stays as a secondary
+  # backstop for anything that slips past the individual gates.
+  MIN_SCORE: 90
+  MIN_COVERAGE: 72
 
 on:
   push:
@@ -25,7 +30,9 @@ on:
 jobs:
   lint:
     name: Lint Code
-    runs-on: ubuntu-latest
+    runs-on: arc-air-runners
+    container:
+      image: ghcr.io/actions/actions-runner:latest
 
     steps:
     - name: Checkout code
@@ -41,38 +48,206 @@ jobs:
       run: go mod download
 
     - name: Run go fmt
+      id: gofmt
+      continue-on-error: true
       run: |
-        if [ "$(gofmt -s -l . | wc -l)" -gt 0 ]; then
-          echo "The following files are not formatted:"
-          gofmt -s -l .
-          exit 1
-        fi
+        set +e
+        gofmt -s -l . > gofmt.log
+        cat gofmt.log
+        files=$(wc -l < gofmt.log)
+        echo "files=${files}" >> "$GITHUB_OUTPUT"
+        if [ "$files" -gt 0 ]; then exit 1; fi
 
     - name: Run go vet
-      run: go vet ./...
+      id: vet
+      continue-on-error: true
+      run: |
+        set +e
+        go vet ./... > vet.log 2>&1
+        status=$?
+        cat vet.log
+        issues=$(wc -l < vet.log)
+        echo "issues=${issues}" >> "$GITHUB_OUTPUT"
+        exit $status
+
+    # The install/setup steps below are continue-on-error so that a transient
+    # download failure doesn't skip every later step: skipped steps produce no
+    # outputs, and empty outputs used to blow up the Summary's arithmetic with
+    # a bash syntax error, hiding the actual cause. They still fail the job —
+    # see the setup gate at the end of Summary.
+    - name: Install golangci-lint
+      id: install_golangci
+      continue-on-error: true
+      run: go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@${{ env.GOLANGCI_LINT_VERSION }}
 
     - name: Run golangci-lint
-      uses: golangci/golangci-lint-action@v9
-      with:
-        version: ${{ env.GOLANGCI_LINT_VERSION }}
-        args: --timeout=5m
-        skip-cache: true
-        skip-save-cache: true
+      id: golangci
+      continue-on-error: true
+      run: |
+        set +e
+        golangci-lint run --timeout=5m --max-issues-per-linter=0 --max-same-issues=0 ./... > golangci.log 2>&1
+        status=$?
+        cat golangci.log
+        issues=$(grep -cE '^\S+\.go:[0-9]+:[0-9]+:' golangci.log || true)
+        gosec_issues=$(grep -cE '^\S+\.go:[0-9]+:[0-9]+:.*\(gosec\)' golangci.log || true)
+        echo "issues=${issues}" >> "$GITHUB_OUTPUT"
+        echo "gosec_issues=${gosec_issues}" >> "$GITHUB_OUTPUT"
+        exit $status
+
+    - name: Install govulncheck
+      id: install_govulncheck
+      continue-on-error: true
+      run: go install golang.org/x/vuln/cmd/govulncheck@latest
+
+    - name: Run govulncheck
+      id: govulncheck
+      continue-on-error: true
+      run: |
+        set +e
+        govulncheck ./... > govulncheck.log 2>&1
+        status=$?
+        cat govulncheck.log
+        vulns=$(grep -cE '^Vulnerability #' govulncheck.log || true)
+        echo "vulns=${vulns}" >> "$GITHUB_OUTPUT"
+        exit $status
 
     - name: Set up Python
+      id: setup_python
+      continue-on-error: true
       uses: actions/setup-python@v6
       with:
         python-version: '3.x'
 
     - name: Install pre-commit
+      id: install_precommit
+      continue-on-error: true
       run: pip install pre-commit
 
     - name: Run pre-commit
+      id: precommit
+      continue-on-error: true
       run: pre-commit run --all-files
+
+    - name: Summary
+      if: always()
+      # Step outputs go through env instead of being interpolated straight into
+      # the script: a skipped or failed step yields an empty string, and
+      # `score=$((score - ${{ ... }} * 10))` expands to `$((score -  * 10))`,
+      # which is a bash syntax error rather than a report.
+      env:
+        GOFMT_FILES: ${{ steps.gofmt.outputs.files }}
+        VET_ISSUES: ${{ steps.vet.outputs.issues }}
+        GOLANGCI_ISSUES: ${{ steps.golangci.outputs.issues }}
+        GOSEC_ISSUES: ${{ steps.golangci.outputs.gosec_issues }}
+        GOVULNCHECK_VULNS: ${{ steps.govulncheck.outputs.vulns }}
+        GOFMT_OUTCOME: ${{ steps.gofmt.outcome }}
+        VET_OUTCOME: ${{ steps.vet.outcome }}
+        GOLANGCI_OUTCOME: ${{ steps.golangci.outcome }}
+        GOVULNCHECK_OUTCOME: ${{ steps.govulncheck.outcome }}
+        PRECOMMIT_OUTCOME: ${{ steps.precommit.outcome }}
+        INSTALL_GOLANGCI_OUTCOME: ${{ steps.install_golangci.outcome }}
+        INSTALL_GOVULNCHECK_OUTCOME: ${{ steps.install_govulncheck.outcome }}
+        SETUP_PYTHON_OUTCOME: ${{ steps.setup_python.outcome }}
+        INSTALL_PRECOMMIT_OUTCOME: ${{ steps.install_precommit.outcome }}
+        MIN_SCORE: ${{ env.MIN_SCORE }}
+      run: |
+        set +e
+
+        # A check that never ran reports an empty count. Treat anything that
+        # isn't a plain non-negative integer as 0 so the score arithmetic below
+        # can't die on it — the setup gate at the end is what turns a missing
+        # tool into a job failure, with the reason visible in the summary.
+        num() {
+          case "$1" in
+            ''|*[!0-9]*) echo 0 ;;
+            *) echo "$1" ;;
+          esac
+        }
+
+        gofmt_files=$(num "$GOFMT_FILES")
+        vet_issues=$(num "$VET_ISSUES")
+        golangci_issues=$(num "$GOLANGCI_ISSUES")
+        gosec_issues=$(num "$GOSEC_ISSUES")
+        govulncheck_vulns=$(num "$GOVULNCHECK_VULNS")
+
+        score=100
+        score=$((score - gofmt_files))
+        score=$((score - vet_issues * 2))
+        score=$((score - (golangci_issues - gosec_issues) / 10))
+        score=$((score - gosec_issues * 3))
+        score=$((score - govulncheck_vulns * 10))
+        if [ "$score" -lt 0 ]; then score=0; fi
+
+        min_score=$(num "$MIN_SCORE")
+        score_verdict="OK"
+        if [ "$score" -lt "$min_score" ]; then score_verdict="BELOW THRESHOLD (< ${min_score})"; fi
+
+        # Collect setup failures: without this a broken toolchain install would
+        # read as "0 findings everywhere, score 100, green build".
+        setup_failed=0
+        setup_notes=""
+        note_setup() {
+          if [ "$2" != "success" ] && [ "$2" != "skipped" ]; then
+            setup_failed=1
+            setup_notes="${setup_notes}- ${1} did not install (${2}) — its checks below are NOT meaningful"$'\n'
+          fi
+        }
+        note_setup "golangci-lint" "$INSTALL_GOLANGCI_OUTCOME"
+        note_setup "govulncheck" "$INSTALL_GOVULNCHECK_OUTCOME"
+        note_setup "Python" "$SETUP_PYTHON_OUTCOME"
+        note_setup "pre-commit" "$INSTALL_PRECOMMIT_OUTCOME"
+
+        {
+          echo "## Code quality report"
+          echo
+          echo "| Check | Result | Findings |"
+          echo "|---|---|---|"
+          echo "| gofmt | ${GOFMT_OUTCOME} | ${gofmt_files} files |"
+          echo "| go vet | ${VET_OUTCOME} | ${vet_issues} issues |"
+          echo "| golangci-lint | ${GOLANGCI_OUTCOME} | ${golangci_issues} issues (${gosec_issues} gosec) |"
+          echo "| govulncheck | ${GOVULNCHECK_OUTCOME} | ${govulncheck_vulns} vulnerabilities |"
+          echo "| pre-commit | ${PRECOMMIT_OUTCOME} | - |"
+          echo
+          echo "**Score: ${score}/100 - ${score_verdict}** (threshold: ${min_score})"
+          if [ "$setup_failed" -eq 1 ]; then
+            echo
+            echo "### Toolchain setup failed"
+            echo
+            printf '%s' "$setup_notes"
+          fi
+        } >> "$GITHUB_STEP_SUMMARY"
+
+        if [ "$setup_failed" -eq 1 ]; then
+          echo "::error::toolchain setup failed — score is not trustworthy"
+          exit 1
+        fi
+
+        # Hard gates: gofmt / go vet / golangci-lint / govulncheck are all green
+        # on the branch and must stay that way. A regression — or a check that
+        # could not complete — fails the job regardless of the overall score.
+        gate_failed=0
+        gate() { echo "::error::$1"; gate_failed=1; }
+
+        [ "$gofmt_files" -gt 0 ] && gate "gofmt: ${gofmt_files} unformatted file(s) — run 'make format'"
+
+        if [ "$VET_OUTCOME" != "success" ]; then gate "go vet did not complete (${VET_OUTCOME})"
+        elif [ "$vet_issues" -gt 0 ]; then gate "go vet: ${vet_issues} issue(s)"; fi
+
+        if [ "$GOLANGCI_OUTCOME" != "success" ]; then gate "golangci-lint reported issues or did not complete (${GOLANGCI_OUTCOME}) — see log above; run 'make lint'"
+        elif [ "$golangci_issues" -gt 0 ]; then gate "golangci-lint: ${golangci_issues} issue(s) — run 'make lint'"; fi
+
+        if [ "$GOVULNCHECK_OUTCOME" != "success" ]; then gate "govulncheck reported vulnerabilities or did not complete (${GOVULNCHECK_OUTCOME}) — see log above"
+        elif [ "$govulncheck_vulns" -gt 0 ]; then gate "govulncheck: ${govulncheck_vulns} called vulnerabilit(y/ies) — bump the affected module(s)"; fi
+
+        if [ "$gate_failed" -eq 1 ]; then exit 1; fi
+
+        if [ "$score" -lt "$min_score" ]; then exit 1; fi
 
   test:
     name: Run Tests
-    runs-on: ubuntu-latest
+    runs-on: arc-air-runners
+    container:
+      image: golang:1.27
 
     steps:
     - name: Checkout code
@@ -88,7 +263,73 @@ jobs:
       run: go mod download
 
     - name: Run tests
-      run: go test -v -race -coverprofile=coverage.out -covermode=atomic ./...
+      id: tests
+      continue-on-error: true
+      env:
+        CGO_ENABLED: 1
+      run: |
+        set +e
+        go test -v -race -coverprofile=coverage.out -covermode=atomic ./... > test.log 2>&1
+        status=$?
+        cat test.log
+        exit $status
 
-    - name: Display coverage
-      run: go tool cover -func=coverage.out
+    - name: Coverage
+      id: coverage
+      continue-on-error: true
+      run: |
+        set +e
+        if [ ! -f coverage.out ]; then
+          echo "coverage.out not found (tests likely failed before writing it)"
+          echo "percent=0" >> "$GITHUB_OUTPUT"
+          exit 1
+        fi
+        go tool cover -func=coverage.out > coverage.log
+        cat coverage.log
+        pct=$(grep '^total:' coverage.log | sed -E 's/.*[[:space:]]([0-9]+\.[0-9]+)%$/\1/')
+        if [ -z "$pct" ]; then pct=0; fi
+        echo "percent=${pct}" >> "$GITHUB_OUTPUT"
+
+    - name: Summary
+      if: always()
+      # Same reasoning as the lint job: a skipped Coverage step leaves
+      # steps.coverage.outputs.percent empty, and `[ "" -lt 70 ]` fails with
+      # "integer expression expected" instead of reporting anything.
+      env:
+        MIN_COVERAGE: ${{ env.MIN_COVERAGE }}
+        COVERAGE_PCT: ${{ steps.coverage.outputs.percent }}
+        TESTS_OUTCOME: ${{ steps.tests.outcome }}
+        COVERAGE_OUTCOME: ${{ steps.coverage.outcome }}
+      run: |
+        set +e
+
+        min_coverage="$MIN_COVERAGE"
+        case "$min_coverage" in ''|*[!0-9]*) min_coverage=0 ;; esac
+
+        # Missing/garbled coverage counts as 0%: below any sane threshold, so
+        # the job fails loudly rather than dividing by an empty string.
+        coverage_pct="$COVERAGE_PCT"
+        case "$coverage_pct" in
+          ''|*[!0-9.]*) coverage_pct=0 ;;
+        esac
+        coverage_int=${coverage_pct%.*}
+        case "$coverage_int" in ''|*[!0-9]*) coverage_int=0 ;; esac
+
+        verdict="OK"
+        if [ "$coverage_int" -lt "$min_coverage" ]; then verdict="BELOW THRESHOLD (< ${min_coverage}%)"; fi
+
+        {
+          echo "## Test coverage report"
+          echo
+          echo "| Check | Result |"
+          echo "|---|---|"
+          echo "| go test | ${TESTS_OUTCOME} |"
+          echo "| coverage | ${COVERAGE_OUTCOME} - ${verdict} |"
+          echo
+          echo "**Total coverage: ${coverage_pct}%** (threshold: ${min_coverage}%)"
+        } >> "$GITHUB_STEP_SUMMARY"
+
+        failed=0
+        if [ "$TESTS_OUTCOME" != "success" ]; then failed=1; fi
+        if [ "$coverage_int" -lt "$min_coverage" ]; then failed=1; fi
+        if [ "$failed" -eq 1 ]; then exit 1; fi

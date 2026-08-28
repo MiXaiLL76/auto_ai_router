@@ -1,3 +1,4 @@
+// Package main is the entrypoint for the auto_ai_router proxy server.
 package main
 
 import (
@@ -5,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"math"
 	"net"
 	"net/http"
 	"net/http/pprof"
@@ -176,6 +178,10 @@ func main() {
 	if litellmDBManager.IsEnabled() {
 		applyInitialDBModelTable(context.Background(), litellmDBManager, staticCreds, bal, modelManager, rateLimiter, priceRegistry, cfg, log)
 	}
+	organizationPolicies := loadOrganizationPoliciesOrExit(log, cfg, modelManager)
+	if !organizationPolicies.Empty() {
+		log.Info("Organization policies loaded", "count", len(cfg.OrganizationPolicies))
+	}
 	tokenManager := auth.NewVertexTokenManager(log)
 	defer tokenManager.Stop()
 
@@ -238,6 +244,7 @@ func main() {
 		KafkaLog:                   kafkaLogManager,
 		HealthChecker:              healthChecker,
 		PriceRegistry:              priceRegistry,
+		OrganizationPolicies:       organizationPolicies,
 		MaxProviderRetries:         cfg.Server.MaxProviderRetries,
 		MaxFallbackAttempts:        cfg.Server.MaxFallbackAttempts,
 		ResponseStore:              respStore,
@@ -267,30 +274,30 @@ func main() {
 	var wg sync.WaitGroup
 	var updateMutex sync.Mutex
 
-	startMetricsUpdater(cfg, log, bgCtx, bal, rateLimiter, metrics, &wg, &updateMutex)
-	startProxyStatsUpdater(log, bgCtx, bal, rateLimiter, modelManager, &wg, &updateMutex)
+	startMetricsUpdater(bgCtx, cfg, log, bal, rateLimiter, metrics, &wg, &updateMutex)
+	startProxyStatsUpdater(bgCtx, log, bal, rateLimiter, modelManager, &wg, &updateMutex)
 	if kafkaLogManager.IsEnabled() {
-		startKafkaMetricsUpdater(cfg, log, bgCtx, kafkaLogManager, metrics, &wg)
+		startKafkaMetricsUpdater(bgCtx, cfg, log, kafkaLogManager, metrics, &wg)
 	}
 
 	if respStore != nil {
-		startResponseStoreCleanup(log, bgCtx, respStore, &wg)
+		startResponseStoreCleanup(bgCtx, log, respStore, &wg)
 	}
 
 	if litellmDBManager.IsEnabled() {
-		startDBHealthMonitor(log, bgCtx, litellmDBManager, healthChecker, &wg)
+		startDBHealthMonitor(bgCtx, log, litellmDBManager, healthChecker, &wg)
 		if err := litellmDBManager.FetchMasterKey(bgCtx, cfg.Server.MasterKey); err != nil {
 			log.Warn("Failed to fetch master key from LiteLLM DB.", "error", err)
 		}
 		if cfg.LiteLLMDB.LoadLitellmDBModels {
-			startDBModelTableSyncLoop(log, bgCtx, litellmDBManager, staticCreds,
+			startDBModelTableSyncLoop(bgCtx, log, litellmDBManager, staticCreds,
 				bal, modelManager, rateLimiter, priceRegistry, cfg, cfg.LiteLLMDB.LitellmDBSyncInterval, &wg)
 		}
 	}
 
 	// Start model price sync loop (only if configured)
 	if cfg.Server.ModelPricesLink != "" {
-		startPriceSyncLoop(cfg.Server.ModelPricesLink, cfg.Server.ModelPricesSyncInterval, priceRegistry, log, bgCtx, &wg)
+		startPriceSyncLoop(bgCtx, cfg.Server.ModelPricesLink, cfg.Server.ModelPricesSyncInterval, priceRegistry, log, &wg)
 	}
 
 	// ==================== HTTP Server Setup ====================
@@ -315,7 +322,7 @@ func main() {
 				}
 				return true
 			}),
-			otelhttp.WithSpanNameFormatter(func(operation string, r *http.Request) string {
+			otelhttp.WithSpanNameFormatter(func(_ string, r *http.Request) string {
 				return r.Method + " " + r.URL.Path
 			}),
 		}
@@ -352,11 +359,7 @@ func main() {
 	}
 
 	// Bind port explicitly so readiness is set only after the socket is open.
-	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", cfg.Server.Port))
-	if err != nil {
-		log.Error("Failed to bind server port", "error", err, "port", cfg.Server.Port)
-		os.Exit(1)
-	}
+	ln := bindOrExit(log, "server", cfg.Server.Port)
 
 	// Mark ready — TCP listener is bound, pod can accept traffic.
 	rtr.SetReady(true)
@@ -400,15 +403,11 @@ func main() {
 		pprofMux.HandleFunc("/debug/pprof/symbol", pprof.Symbol)
 		pprofMux.HandleFunc("/debug/pprof/trace", pprof.Trace)
 
-		pprofServer = &http.Server{
+		pprofServer = &http.Server{ //nolint:gosec // G112: internal-only debug listener, never exposed via Service/Ingress (see warning log below)
 			Addr:    fmt.Sprintf(":%d", cfg.Monitoring.PprofPort),
 			Handler: pprofMux,
 		}
-		pprofLn, err := net.Listen("tcp", pprofServer.Addr)
-		if err != nil {
-			log.Error("Failed to bind pprof port", "error", err, "port", cfg.Monitoring.PprofPort)
-			os.Exit(1)
-		}
+		pprofLn := bindOrExit(log, "pprof", cfg.Monitoring.PprofPort)
 		log.Warn("pprof enabled on internal listener — must not be exposed via Service/Ingress",
 			"port", cfg.Monitoring.PprofPort)
 		go func() {
@@ -436,13 +435,7 @@ func main() {
 	}
 
 	// Shutdown HTTP server
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	if err := server.Shutdown(ctx); err != nil {
-		log.Error("Server forced to shutdown", "error", err)
-		os.Exit(1)
-	}
+	shutdownOrExit(log, server)
 
 	if pprofServer != nil {
 		pprofCtx, pprofCancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -529,6 +522,67 @@ const (
 // total wall-clock time (see its doc comment) — returns nil (and falls back
 // to local backends) once either that bound or redisConnectMaxAttempts is
 // reached, whichever comes first.
+// bindOrExit binds the main HTTP port or terminates the process. Deliberately
+// its own function, not inlined in main: main has a `defer bgCancel()` for
+// graceful shutdown, and os.Exit skips deferred calls — gocritic's
+// exitAfterDefer flags any os.Exit in a function that also defers. Here that
+// defer hasn't bought anything to skip yet (no background work has produced
+// anything worth draining before the listener is even bound), so moving the
+// exit into its own defer-free function is the correct fix, not a workaround.
+// loadOrganizationPoliciesOrExit is its own defer-free function for the same
+// reason as bindOrExit: by this point main holds `defer hybridBackend.Close()`,
+// and gocritic's exitAfterDefer flags any os.Exit that would skip it. A failed
+// policy load is a fatal startup misconfiguration, before any background work
+// worth draining exists.
+func loadOrganizationPoliciesOrExit(log *slog.Logger, cfg *config.Config, modelManager *models.Manager) *models.OrganizationPolicyRegistry {
+	policies, err := models.LoadOrganizationPolicies(cfg.OrganizationPolicies, modelManager, models.OrganizationPolicyLoadOptions{
+		LiteLLMDBEnabled:      cfg.LiteLLMDB.Enabled,
+		LiteLLMDBRequired:     cfg.LiteLLMDB.IsRequired,
+		DisableSpendLogsWrite: cfg.LiteLLMDB.DisableSpendLogsWrite,
+	})
+	if err != nil {
+		log.Error("Failed to load organization policies", "error", err)
+		os.Exit(1)
+	}
+	return policies
+}
+
+// poolConns narrows a configured pool size to the int32 pgxpool expects,
+// saturating rather than wrapping on a nonsensical value.
+func poolConns(v int) int32 {
+	if v > math.MaxInt32 {
+		return math.MaxInt32
+	}
+	if v < 0 {
+		return 0
+	}
+	return int32(v)
+}
+
+func bindOrExit(log *slog.Logger, what string, port int) net.Listener {
+	ln, err := (&net.ListenConfig{}).Listen(context.Background(), "tcp", fmt.Sprintf(":%d", port))
+	if err != nil {
+		log.Error("Failed to bind "+what+" port", "error", err, "port", port)
+		os.Exit(1)
+	}
+	return ln
+}
+
+// shutdownOrExit is its own function for the same reason as bindOrExit
+// above, not just to bundle the ctx/cancel pair: cancel() is called
+// explicitly on both branches instead of deferred, so this function has no
+// defer of its own either — a local `defer cancel()` right next to os.Exit
+// would trip gocritic's exitAfterDefer exactly as before.
+func shutdownOrExit(log *slog.Logger, server *http.Server) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	err := server.Shutdown(ctx)
+	cancel()
+	if err != nil {
+		log.Error("Server forced to shutdown", "error", err)
+		os.Exit(1)
+	}
+}
+
 func connectRedisWithRetry(cfg config.RedisConfig, log *slog.Logger, metrics *monitoring.Metrics) *ratelimit.RedisBackend {
 	deadline := time.Now().Add(redisConnectOverallBound)
 	delay := redisConnectBaseDelay
@@ -730,8 +784,8 @@ func initializeModelManager(
 // - New/changed model limits are reflected immediately in the model manager.
 // - Static (YAML) credentials and models are never modified.
 func startDBModelTableSyncLoop(
-	log *slog.Logger,
 	bgCtx context.Context,
+	log *slog.Logger,
 	dbManager litellmdb.Manager,
 	staticCreds []config.CredentialConfig,
 	bal *balancer.RoundRobin,
@@ -911,8 +965,8 @@ func initializeLiteLLMDB(cfg *config.Config, log *slog.Logger) litellmdb.Manager
 
 	litellmCfg := &litellmdb.Config{
 		DatabaseURL:                 cfg.LiteLLMDB.DatabaseURL,
-		MaxConns:                    int32(cfg.LiteLLMDB.MaxConns),
-		MinConns:                    int32(cfg.LiteLLMDB.MinConns),
+		MaxConns:                    poolConns(cfg.LiteLLMDB.MaxConns),
+		MinConns:                    poolConns(cfg.LiteLLMDB.MinConns),
 		HealthCheckInterval:         cfg.LiteLLMDB.HealthCheckInterval,
 		ConnectTimeout:              cfg.LiteLLMDB.ConnectTimeout,
 		AuthCacheTTL:                cfg.LiteLLMDB.AuthCacheTTL,
@@ -1032,11 +1086,11 @@ func loadAndUpdateModelPrices(
 
 // startPriceSyncLoop starts a background goroutine that periodically syncs model prices
 func startPriceSyncLoop(
+	bgCtx context.Context,
 	modelPricesLink string,
 	syncInterval time.Duration,
 	registry *models.ModelPriceRegistry,
 	log *slog.Logger,
-	bgCtx context.Context,
 	wg *sync.WaitGroup,
 ) {
 	if modelPricesLink == "" {
@@ -1072,9 +1126,9 @@ func startPriceSyncLoop(
 }
 
 func startMetricsUpdater(
+	bgCtx context.Context,
 	cfg *config.Config,
 	log *slog.Logger,
-	bgCtx context.Context,
 	bal *balancer.RoundRobin,
 	rateLimiter *ratelimit.RPMLimiter,
 	metrics *monitoring.Metrics,
@@ -1111,9 +1165,9 @@ func startMetricsUpdater(
 // Without this, kafkalog.Manager.Stats()/IsHealthy() are only reachable from
 // tests — this is what makes them observable in production.
 func startKafkaMetricsUpdater(
+	bgCtx context.Context,
 	cfg *config.Config,
 	log *slog.Logger,
-	bgCtx context.Context,
 	kafkaLogManager kafkalog.Manager,
 	metrics *monitoring.Metrics,
 	wg *sync.WaitGroup,
@@ -1181,8 +1235,8 @@ func updateMetrics(
 }
 
 func startProxyStatsUpdater(
-	log *slog.Logger,
 	bgCtx context.Context,
+	log *slog.Logger,
 	bal *balancer.RoundRobin,
 	rateLimiter *ratelimit.RPMLimiter,
 	modelManager *models.Manager,
@@ -1216,8 +1270,8 @@ func startProxyStatsUpdater(
 }
 
 func startDBHealthMonitor(
-	log *slog.Logger,
 	bgCtx context.Context,
+	log *slog.Logger,
 	dbManager litellmdb.Manager,
 	healthChecker *health.DBHealthChecker,
 	wg *sync.WaitGroup,
@@ -1240,8 +1294,8 @@ func startDBHealthMonitor(
 }
 
 func startResponseStoreCleanup(
-	log *slog.Logger,
 	bgCtx context.Context,
+	log *slog.Logger,
 	store responsestore.Store,
 	wg *sync.WaitGroup,
 ) {

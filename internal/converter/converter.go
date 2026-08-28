@@ -1,3 +1,4 @@
+// Package converter defines the shared request and response conversion contracts between provider dialects.
 package converter
 
 import (

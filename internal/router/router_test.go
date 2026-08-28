@@ -872,6 +872,65 @@ func TestServeHTTPV1ModelsAuthAndModelACLPolicy(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, compatibilityRequest("blocked-team-key").Code)
 }
 
+func TestServeHTTPV1ModelsOrganizationPolicyUsesMappedACLTarget(t *testing.T) {
+	logger := testhelpers.NewTestLogger()
+	credential := config.CredentialConfig{Name: "catalog", Type: config.ProviderTypeOpenAI, RPM: 100}
+	modelManager := models.New(logger, 100, []config.ModelRPMConfig{{Name: "route-b", Credential: credential.Name}})
+	modelManager.SetCredentials([]config.CredentialConfig{credential})
+	modelManager.LoadModelsFromConfig([]config.CredentialConfig{credential})
+	pricePath := t.TempDir() + "/prices.json"
+	require.NoError(t, os.WriteFile(pricePath, []byte(`{"public/shared":{"input_cost_per_token":0.001}}`), 0600))
+	policies, err := models.LoadOrganizationPolicies([]config.OrganizationPolicyConfig{{
+		OrganizationID:  "org-1",
+		PriceProfileID:  "profile-1",
+		ModelPricesLink: pricePath,
+		ModelMappings:   map[string]string{"public/shared": "route-b"},
+	}}, modelManager, models.OrganizationPolicyLoadOptions{
+		LiteLLMDBEnabled: true, LiteLLMDBRequired: true, DisableSpendLogsWrite: false,
+	})
+	require.NoError(t, err)
+
+	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
+	rl := ratelimit.New()
+	rl.AddCredential(credential.Name, credential.RPM)
+	tokenManager := auth.NewVertexTokenManager(logger)
+	defer tokenManager.Stop()
+	prx := proxy.New(&proxy.Config{
+		Balancer:               balancer.New([]config.CredentialConfig{credential}, f2b, rl),
+		Logger:                 logger,
+		MaxBodySizeMB:          10,
+		RequestTimeout:         30 * time.Second,
+		Metrics:                monitoring.New(false),
+		MasterKey:              "test-master-key",
+		RateLimiter:            rl,
+		TokenManager:           tokenManager,
+		ModelManager:           modelManager,
+		StrictAllTeamModelsACL: true,
+		OrganizationPolicies:   policies,
+	})
+	prx.LiteLLMDB = &routerAuthTestDB{tokens: map[string]*dbmodels.TokenInfo{
+		"organization-key": {
+			Token: "organization-hash", DirectOrganizationID: "org-1", OrganizationID: "org-1",
+			Models: []string{"route-b"},
+		},
+	}}
+	router := New(prx, modelManager, testhelpers.NewTestMonitoringConfig("/health", false, ""), logger, nil)
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	req.Header.Set("Authorization", "Bearer organization-key")
+	w := httptest.NewRecorder()
+
+	router.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	var response models.ModelsResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &response))
+	ids := make([]string, 0, len(response.Data))
+	for _, model := range response.Data {
+		ids = append(ids, model.ID)
+	}
+	assert.Contains(t, ids, "public/shared")
+}
+
 func TestServeHTTPPublicPreflightDoesNotEnableWildcardCORS(t *testing.T) {
 	router := New(nil, nil, testhelpers.NewTestMonitoringConfig("/health", false, ""), testhelpers.NewTestLogger(), nil)
 	req := httptest.NewRequest(http.MethodOptions, "/v1/chat/completions", nil)

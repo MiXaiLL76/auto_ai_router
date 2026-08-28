@@ -1,6 +1,7 @@
 package anthropic
 
 import (
+	"context"
 	"encoding/base64"
 	"fmt"
 	"io"
@@ -186,7 +187,7 @@ var allowedImageMediaTypes = map[string]bool{
 // DownloadAndEncodeImage fetches an image from an HTTP/HTTPS URL and returns a base64
 // ContentBlock. Anthropic does not support URL sources, so we must download and encode.
 func DownloadAndEncodeImage(imgURL string) *ContentBlock {
-	req, err := http.NewRequest(http.MethodGet, imgURL, nil)
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, imgURL, nil)
 	if err != nil {
 		slog.Warn("Failed to create image download request for Anthropic", "url", imgURL, "error", err)
 		return nil

@@ -121,7 +121,7 @@ type MultiHandler struct {
 }
 
 // Enabled reports whether at least one destination handles the level.
-func (m *MultiHandler) Enabled(ctx context.Context, level slog.Level) bool {
+func (m *MultiHandler) Enabled(_ context.Context, level slog.Level) bool {
 	return level >= m.level
 }
 
@@ -200,7 +200,7 @@ type PrettyHandler struct {
 }
 
 // Handle implements the slog.Handler interface
-func (h *PrettyHandler) Handle(ctx context.Context, record slog.Record) error {
+func (h *PrettyHandler) Handle(_ context.Context, record slog.Record) error {
 	// Get level with color
 	levelColor := getLevelColor(record.Level)
 	levelStr := strings.ToUpper(record.Level.String())
@@ -270,7 +270,7 @@ func (h *PrettyHandler) WithGroup(name string) slog.Handler {
 }
 
 // Enabled reports whether the handler handles records at the given level
-func (h *PrettyHandler) Enabled(ctx context.Context, level slog.Level) bool {
+func (h *PrettyHandler) Enabled(_ context.Context, level slog.Level) bool {
 	return level >= h.opts.Level.Level()
 }
 

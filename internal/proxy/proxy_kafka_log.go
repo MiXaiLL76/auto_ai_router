@@ -46,7 +46,7 @@ func (p *Proxy) logSpendToKafka(
 // decided in the ТЗ (section 4) so ClickHouse can query it directly.
 func (p *Proxy) buildKafkaSpendEvent(
 	logCtx *RequestLogContext,
-	credName, modelIDFormatted, hashedToken string,
+	_, modelIDFormatted, hashedToken string,
 	userID, teamID, organizationID, endUser, apiBase, status string,
 	cost float64,
 	tokenCosts *converter.TokenCosts,

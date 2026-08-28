@@ -167,12 +167,12 @@ func TransformVertexStreamToOpenAI(vertexStream io.Reader, model string, output 
 
 		// Convert usage metadata if present
 		if vertexChunk.UsageMetadata != nil {
-			//slog.Error("STREAMING_VERTEX_USAGE_CHUNK",
-			//	"prompt_tokens", vertexChunk.UsageMetadata.PromptTokenCount,
-			//	"candidates_tokens", vertexChunk.UsageMetadata.CandidatesTokenCount,
-			//	"total_tokens", vertexChunk.UsageMetadata.TotalTokenCount,
-			//	"cached_tokens", vertexChunk.UsageMetadata.CachedContentTokenCount,
-			//)
+			// slog.Error("STREAMING_VERTEX_USAGE_CHUNK",
+			// 	"prompt_tokens", vertexChunk.UsageMetadata.PromptTokenCount,
+			// 	"candidates_tokens", vertexChunk.UsageMetadata.CandidatesTokenCount,
+			// 	"total_tokens", vertexChunk.UsageMetadata.TotalTokenCount,
+			// 	"cached_tokens", vertexChunk.UsageMetadata.CachedContentTokenCount,
+			// )
 			openAIChunk.Usage = convertVertexUsageMetadata(vertexChunk.UsageMetadata)
 			setVertexWebSearchUsage(openAIChunk.Usage, webSearchRequests)
 		}

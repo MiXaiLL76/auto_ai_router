@@ -1,3 +1,4 @@
+// Package utils holds small general-purpose helpers.
 package utils
 
 import "time"

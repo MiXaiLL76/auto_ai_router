@@ -1,3 +1,4 @@
+// Package worker runs bounded background worker pools.
 package worker
 
 import (

@@ -1,3 +1,4 @@
+// Package modelupdate periodically refreshes model data from external sources.
 package modelupdate
 
 import (

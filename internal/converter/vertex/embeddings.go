@@ -145,7 +145,7 @@ func OpenAIEmbeddingToGemini(body []byte, model string) ([]byte, error) {
 			},
 		}
 		if req.Dimensions != nil {
-			dim := int32(*req.Dimensions)
+			dim := ClampInt32(*req.Dimensions)
 			gr.OutputDimensionality = &dim
 		}
 		requests[i] = gr

@@ -1,3 +1,4 @@
+// Package models defines the data types shared across the LiteLLM database integration.
 package models
 
 import (
@@ -169,6 +170,11 @@ type TokenInfo struct {
 	TeamID         string   // Team ID (optional)
 	OrganizationID string   // Organization ID (optional, resolved from token or team)
 	Tags           []string // Request tags from token metadata
+
+	DirectOrganizationID       string
+	DirectOrganizationDangling bool
+	TeamOrganizationID         string
+	TeamOrganizationDangling   bool
 
 	// Token budget (embedded)
 	Spend     float64  // Current spend

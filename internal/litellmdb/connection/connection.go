@@ -1,3 +1,4 @@
+// Package connection manages the pooled connection to the LiteLLM database.
 package connection
 
 import (
@@ -71,7 +72,7 @@ func NewConnectionPool(cfg *models.Config) (*ConnectionPool, error) {
 	poolConfig.ConnConfig.ConnectTimeout = cfg.ConnectTimeout
 
 	// Notice callback
-	poolConfig.ConnConfig.OnNotice = func(c *pgconn.PgConn, n *pgconn.Notice) {
+	poolConfig.ConnConfig.OnNotice = func(_ *pgconn.PgConn, n *pgconn.Notice) {
 		cp.logger.Debug("PostgreSQL notice",
 			"severity", n.Severity,
 			"message", n.Message,

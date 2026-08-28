@@ -1,3 +1,4 @@
+// Package auth resolves and refreshes provider credentials, including Google Vertex AI access tokens.
 package auth
 
 import (
@@ -395,8 +396,9 @@ func (tm *VertexTokenManager) loadCredentials(credentialName, credentialsFile, c
 	var err error
 
 	// Load credentials from file or JSON string
-	if credentialsFile != "" {
-		credBytes, err = os.ReadFile(credentialsFile)
+	switch {
+	case credentialsFile != "":
+		credBytes, err = os.ReadFile(credentialsFile) // #nosec G304 -- path is operator-supplied credential config
 		if err != nil {
 			return nil, fmt.Errorf("failed to read credentials file %s: %w", credentialsFile, err)
 		}
@@ -404,10 +406,10 @@ func (tm *VertexTokenManager) loadCredentials(credentialName, credentialsFile, c
 			"credential", credentialName,
 			"file", credentialsFile,
 		)
-	} else if credentialsJSON != "" {
+	case credentialsJSON != "":
 		credBytes = []byte(credentialsJSON)
 		tm.logger.Debug("Using credentials from config", "credential", credentialName)
-	} else {
+	default:
 		return nil, fmt.Errorf("no credentials provided for %s", credentialName)
 	}
 

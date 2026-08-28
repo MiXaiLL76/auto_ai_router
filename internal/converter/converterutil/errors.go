@@ -1,3 +1,4 @@
+// Package converterutil holds helpers shared by the provider converters.
 package converterutil
 
 import "fmt"

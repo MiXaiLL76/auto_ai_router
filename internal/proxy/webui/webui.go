@@ -1,3 +1,4 @@
+// Package webui serves the embedded web UI.
 package webui
 
 import (
@@ -98,18 +99,18 @@ func init() {
 	)
 }
 
-func ServeCSS(w http.ResponseWriter, r *http.Request) {
+func ServeCSS(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "text/css; charset=utf-8")
 	w.Header().Set("Cache-Control", "public, max-age=3600")
 	_, _ = w.Write(styleCSS)
 }
 
-func ServeHealth(w http.ResponseWriter, r *http.Request) {
+func ServeHealth(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_, _ = w.Write(healthHTML)
 }
 
-func ServeTrace(w http.ResponseWriter, r *http.Request) {
+func ServeTrace(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_, _ = w.Write(traceHTML)
 }

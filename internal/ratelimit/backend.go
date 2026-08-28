@@ -1,3 +1,4 @@
+// Package ratelimit enforces request and token rate limits, locally or via a shared backend.
 package ratelimit
 
 import "context"

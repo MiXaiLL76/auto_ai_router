@@ -44,21 +44,21 @@ func buildGenerationConfig(req *openai.OpenAIRequest, model string) *VertexGener
 		cfg.Temperature = &t
 	}
 	if req.MaxTokens != nil {
-		cfg.MaxOutputTokens = int32(*req.MaxTokens)
+		cfg.MaxOutputTokens = ClampInt32(*req.MaxTokens)
 	}
 	// max_completion_tokens takes precedence over max_tokens
 	if req.MaxCompletionTokens != nil {
-		cfg.MaxOutputTokens = int32(*req.MaxCompletionTokens)
+		cfg.MaxOutputTokens = ClampInt32(*req.MaxCompletionTokens)
 	}
 	if req.TopP != nil {
 		v := float32(*req.TopP)
 		cfg.TopP = &v
 	}
 	if req.N != nil {
-		cfg.CandidateCount = int32(*req.N)
+		cfg.CandidateCount = ClampInt32(*req.N)
 	}
 	if req.Seed != nil {
-		v := int32(*req.Seed)
+		v := ClampInt32(*req.Seed)
 		cfg.Seed = &v
 	}
 	if req.FrequencyPenalty != nil {
@@ -75,7 +75,7 @@ func buildGenerationConfig(req *openai.OpenAIRequest, model string) *VertexGener
 		cfg.ResponseLogprobs = true
 	}
 	if req.TopLogprobs != nil && *req.TopLogprobs > 0 {
-		v := int32(*req.TopLogprobs)
+		v := ClampInt32(*req.TopLogprobs)
 		cfg.Logprobs = &v
 	}
 

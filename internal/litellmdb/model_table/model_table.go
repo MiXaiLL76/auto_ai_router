@@ -1,3 +1,4 @@
+// Package modeltable reads model deployments from the LiteLLM database.
 package modeltable
 
 import (
@@ -55,7 +56,7 @@ func (a *ProxyModelTable) FetchModels(ctx context.Context) ([]queries.ModelTable
 	for rows.Next() {
 		var m queries.ModelTable
 		err := rows.Scan(
-			&m.ModelId,
+			&m.ModelID,
 			&m.ModelName,
 			&m.LlmParams,
 			&m.ModelInfo,
@@ -99,7 +100,7 @@ func (a *ProxyModelTable) FetchCredentials(ctx context.Context) ([]queries.Crede
 	for rows.Next() {
 		var m queries.CredentialTable
 		err := rows.Scan(
-			&m.CredentialId,
+			&m.CredentialID,
 			&m.CredentialName,
 			&m.CredentialParams,
 			&m.CredentialInfo,
@@ -222,7 +223,7 @@ func (a *ProxyModelTable) FetchModelsForAIR(ctx context.Context, signingKey stri
 			}
 		} else if hasInlineCredentials(&model.LlmParams.CredentialLiteLLMParams) {
 			// Create synthetic credential from model inline params
-			syntheticName := fmt.Sprintf("db-model-%s", derefStr(model.ModelId, modelName))
+			syntheticName := fmt.Sprintf("db-model-%s", derefStr(model.ModelID, modelName))
 			if !credByName[syntheticName] {
 				syntheticCred := convertInlineCredToConfig(syntheticName, model.LlmParams)
 				if syntheticCred.Type == "" {

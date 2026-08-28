@@ -40,7 +40,7 @@ type Readiness struct {
 	Cache               string   `json:"cache"`
 	LitellmVersion      string   `json:"litellm_version"`
 	SuccessCallbacks    []string `json:"success_callbacks"`
-	UseAioHttpTransport bool     `json:"use_aiohttp_transport"`
+	UseAioHTTPTransport bool     `json:"use_aiohttp_transport"`
 	LastUpdated         string   `json:"last_updated"`
 }
 

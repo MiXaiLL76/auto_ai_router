@@ -1,7 +1,9 @@
 package vertex
 
 import (
+	"context"
 	"encoding/base64"
+	"math"
 	"net"
 	"net/url"
 	"strings"
@@ -10,6 +12,20 @@ import (
 )
 
 const maxBase64Size = 20 * 1024 * 1024 // 20MB encoded ≈ 15MB decoded
+
+// ClampInt32 narrows a caller-supplied integer to int32, saturating instead of
+// wrapping on out-of-range values. The genai SDK takes int32 for token counts,
+// candidate counts and similar fields; a client sending an absurd value should
+// be capped, never silently turned negative.
+func ClampInt32[T int | int64](v T) int32 {
+	if v > T(math.MaxInt32) {
+		return math.MaxInt32
+	}
+	if v < T(math.MinInt32) {
+		return math.MinInt32
+	}
+	return int32(v)
+}
 
 // parseDataURLToPart converts a data URL string to a genai.Part with inline data
 // Handles formats like: data:image/jpeg;base64,/9j/4AAQ...
@@ -125,11 +141,11 @@ func isPrivateURL(rawURL string) bool {
 	ip := net.ParseIP(hostname)
 	if ip == nil {
 		// Could be a hostname — resolve it
-		ips, err := net.LookupIP(hostname)
+		ips, err := net.DefaultResolver.LookupIPAddr(context.Background(), hostname)
 		if err != nil || len(ips) == 0 {
 			return false // can't resolve, let Vertex handle it
 		}
-		ip = ips[0]
+		ip = ips[0].IP
 	}
 
 	// Private IP ranges

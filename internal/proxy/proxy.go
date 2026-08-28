@@ -9,7 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"math/rand"
+	"math/rand/v2"
 	"net/http"
 	"os"
 	"strings"
@@ -245,38 +245,43 @@ func (logCtx *RequestLogContext) Context() context.Context {
 // RequestLogContext holds all data needed for logging a request to LiteLLM DB
 // Filled throughout request processing and logged at the end via defer
 type RequestLogContext struct {
-	RequestID            string                   // Internal request UUID; may be adopted from a trusted inbound traceparent (see requestid.Middleware), so two distinct requests can share this value
-	EventID              string                   // Always server-minted, never client-influenced; used as AirEventID so spend-log collision resolution stays meaningful even when RequestID collides
-	ClientResponseID     string                   // ID returned to the client
-	StartTime            time.Time                // Request start time
-	CompletionStartTime  time.Time                // Timestamp of the first real content/tool/reasoning delta (TTFT), not just the first byte/chunk; zero if not streamed or never reached
-	Request              *http.Request            // HTTP request
-	Token                string                   // Auth token (raw, will be hashed)
-	PublicModelID        string                   // Client-facing model before alias resolution
-	ModelID              string                   // Model alias name (what client requested)
-	RealModelID          string                   // Real model name sent to provider (for price lookup; equals ModelID if no alias)
-	Status               string                   // "success" or "failure"
-	HTTPStatus           int                      // HTTP response status code
-	ErrorMsg             string                   // Error message (added to metadata on failure)
-	TokenUsage           *converter.TokenUsage    // Token usage with detailed breakdown
-	ModelPrice           *models.ModelPrice       // Price resolved before the provider request
-	PriceModelID         string                   // Model identifier used for price lookup
-	UsageSource          string                   // provider, estimated, request_parameters, or missing
-	StreamOutcome        string                   // completed, client_aborted, or stream_error
-	Credential           *config.CredentialConfig // Credential used
-	SessionID            string                   // Session ID
-	TargetURL            string                   // Target URL (for APIBase extraction)
-	TokenInfo            *litellmdb.TokenInfo     // User/team/org info
-	IsImageGeneration    bool                     // True if this is an image generation request
-	ImageCount           int                      // Number of images to generate (from 'n' param)
-	WebSearchRequested   bool                     // True when the request enabled the built-in web search tool
-	WebSearchContextSize string                   // low|medium|high from web_search_options/tool config
-	Logged               bool                     // True if already logged (prevents duplicate logging)
-	IsResponsesAPI       bool                     // True if this is a Responses API request (converted to Chat Completions)
-	RequestCompleted     bool                     // True only after the response was fully and successfully delivered
-	ActualCredentialName string                   // Real credential name from upstream when Credential.Type == ProviderTypeProxy
-	IsProxyRequest       bool                     // True when this request came from another auto_ai_router (HeaderAIRProxyClient)
-	Scope                scope.Context
+	RequestID             string                   // Internal request UUID; may be adopted from a trusted inbound traceparent (see requestid.Middleware), so two distinct requests can share this value
+	EventID               string                   // Always server-minted, never client-influenced; used as AirEventID so spend-log collision resolution stays meaningful even when RequestID collides
+	ClientResponseID      string                   // ID returned to the client
+	StartTime             time.Time                // Request start time
+	CompletionStartTime   time.Time                // Timestamp of the first real content/tool/reasoning delta (TTFT), not just the first byte/chunk; zero if not streamed or never reached
+	Request               *http.Request            // HTTP request
+	Token                 string                   // Auth token (raw, will be hashed)
+	PublicModelID         string                   // Client-facing model before alias resolution
+	CanonicalModelID      string                   // Organization canonical public model after scoped admission
+	ModelID               string                   // Model alias name (what client requested)
+	RealModelID           string                   // Real model name sent to provider (for price lookup; equals ModelID if no alias)
+	Status                string                   // "success" or "failure"
+	HTTPStatus            int                      // HTTP response status code
+	ErrorMsg              string                   // Error message (added to metadata on failure)
+	TokenUsage            *converter.TokenUsage    // Token usage with detailed breakdown
+	ModelPrice            *models.ModelPrice       // Price resolved before the provider request
+	PriceModelID          string                   // Model identifier used for price lookup
+	UsageSource           string                   // provider, estimated, request_parameters, or missing
+	StreamOutcome         string                   // completed, client_aborted, or stream_error
+	Credential            *config.CredentialConfig // Credential used
+	SessionID             string                   // Session ID
+	TargetURL             string                   // Target URL (for APIBase extraction)
+	TokenInfo             *litellmdb.TokenInfo     // User/team/org info
+	IsImageGeneration     bool                     // True if this is an image generation request
+	ImageCount            int                      // Number of images to generate (from 'n' param)
+	WebSearchRequested    bool                     // True when the request enabled the built-in web search tool
+	WebSearchContextSize  string                   // low|medium|high from web_search_options/tool config
+	Logged                bool                     // True if already logged (prevents duplicate logging)
+	IsResponsesAPI        bool                     // True if this is a Responses API request (converted to Chat Completions)
+	RequestCompleted      bool                     // True only after the response was fully and successfully delivered
+	ActualCredentialName  string                   // Real credential name from upstream when Credential.Type == ProviderTypeProxy
+	IsProxyRequest        bool                     // True when this request came from another auto_ai_router (HeaderAIRProxyClient)
+	Scope                 scope.Context
+	OrganizationPolicy    *models.OrganizationPolicy
+	BillingProfileID      string
+	BillingProfileSHA256  string
+	BillingOrganizationID string
 
 	reservedEntities       []reservedEntity
 	rateLimitedTPMEntities []string
@@ -351,9 +356,10 @@ type Config struct {
 	KafkaLog                   kafkalog.Manager           // Kafka spend-log publishing (optional, analytics write-path)
 	HealthChecker              HealthChecker              // Optional: cached DB health status (updated by health monitor)
 	PriceRegistry              *models.ModelPriceRegistry // Model pricing information (optional)
-	MaxProviderRetries         int                        // Max same-type credential retries (default: 2)
-	MaxFallbackAttempts        int                        // Max fallback proxy hops per request chain (default: 5)
-	ResponseStore              responsestore.Store        // Optional: Responses API store (bbolt or Redis)
+	OrganizationPolicies       *models.OrganizationPolicyRegistry
+	MaxProviderRetries         int                 // Max same-type credential retries (default: 2)
+	MaxFallbackAttempts        int                 // Max fallback proxy hops per request chain (default: 5)
+	ResponseStore              responsestore.Store // Optional: Responses API store (bbolt or Redis)
 	SessionStickyEnabled       bool
 	SessionStickyAutoCacheCtrl bool // Auto-inject Anthropic cache_control markers when session is active (default: true)
 	SessionStoreTTL            time.Duration
@@ -389,13 +395,14 @@ type Proxy struct {
 	kafkaLog                         kafkalog.Manager           // Kafka spend-log publishing (optional, analytics write-path)
 	healthChecker                    HealthChecker              // Cached DB health status (optional)
 	priceRegistry                    *models.ModelPriceRegistry // Model pricing information (optional)
-	maxProviderRetries               int                        // Max same-type credential retries on provider errors
-	maxFallbackAttempts              int                        // Max fallback proxy hops per request chain
-	responseStore                    responsestore.Store        // Optional: Responses API store (bbolt or Redis)
-	sessionStore                     *SessionStore              // Optional: session-sticky credential routing
-	stickyAutoCacheCtrl              bool                       // Auto-inject Anthropic cache_control when session is active
-	drainUpstreamOnAbort             bool                       // Keep reading upstream after client disconnect to get real usage chunk
-	tiktokenEnabled                  bool                       // Local tiktoken-based prompt/completion token fallback estimation
+	organizationPolicies             *models.OrganizationPolicyRegistry
+	maxProviderRetries               int                 // Max same-type credential retries on provider errors
+	maxFallbackAttempts              int                 // Max fallback proxy hops per request chain
+	responseStore                    responsestore.Store // Optional: Responses API store (bbolt or Redis)
+	sessionStore                     *SessionStore       // Optional: session-sticky credential routing
+	stickyAutoCacheCtrl              bool                // Auto-inject Anthropic cache_control when session is active
+	drainUpstreamOnAbort             bool                // Keep reading upstream after client disconnect to get real usage chunk
+	tiktokenEnabled                  bool                // Local tiktoken-based prompt/completion token fallback estimation
 	strictAllTeamModelsACL           bool
 	responseHeaderMode               config.ResponseHeaderMode
 	credentialNameAsTeamID           bool
@@ -468,6 +475,7 @@ func New(cfg *Config) *Proxy {
 		kafkaLog:                         cfg.KafkaLog,
 		healthChecker:                    cfg.HealthChecker,
 		priceRegistry:                    cfg.PriceRegistry,
+		organizationPolicies:             cfg.OrganizationPolicies,
 		maxProviderRetries:               cfg.MaxProviderRetries,
 		maxFallbackAttempts:              cfg.MaxFallbackAttempts,
 		responseStore:                    cfg.ResponseStore,
@@ -636,7 +644,7 @@ func (p *Proxy) executeProxyRequest(
 	if r.URL.Path == "/v1/messages" {
 		body, anthropicBetas = anthropicconv.ExtractBetaHeader(body)
 	}
-	proxyReq, err := http.NewRequestWithContext(upstreamCtx, r.Method, targetURL, bytes.NewReader(body))
+	proxyReq, err := http.NewRequestWithContext(upstreamCtx, r.Method, targetURL, bytes.NewReader(body)) //nolint:gosec // G704: targetURL's host is proxyBaseURL from a configured credential, not attacker-controlled — only the path/query comes from the incoming request
 	if err != nil {
 		p.logger.ErrorContext(r.Context(), "Failed to create proxy request", "error", err, "url", targetURL)
 		return nil, err
@@ -651,7 +659,7 @@ func (p *Proxy) executeProxyRequest(
 	proxyReq.Header.Set(HeaderLegacyAIRProxyClient, "1")
 
 	// Send request
-	resp, err := p.client.Do(proxyReq)
+	resp, err := p.client.Do(proxyReq) //nolint:gosec // G704: same targetURL as above, host isn't attacker-controlled
 	if err != nil {
 		// Transport failure on one credential — the caller retries with another
 		// credential or fallback, so this is WARN; the final outcome (success or
@@ -769,7 +777,7 @@ func (p *Proxy) executeProxyRequest(
 // - This ensures each credential (fallback or not) is tried only once per request chain
 // - Streaming responses are not retried (architectural limitation)
 func (p *Proxy) forwardToProxy(
-	w http.ResponseWriter,
+	_ http.ResponseWriter,
 	r *http.Request,
 	modelID string,
 	cred *config.CredentialConfig,
@@ -992,7 +1000,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 					"credential", cred.Name, "model", modelID,
 					"attempt", attempt+1, "max_attempts", p.maxProviderRetries+1,
 					"retry_reason", retryReason)
-				time.Sleep(time.Duration(rand.Intn(50)) * time.Millisecond)
+				time.Sleep(time.Duration(rand.IntN(50)) * time.Millisecond)
 			}
 
 			shouldRetry = false
@@ -1445,8 +1453,8 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 					if publicModelID == "" {
 						publicModelID = modelID
 					}
-					retryPriceModelID, retryPrice := lookupBillingModelPrice(
-						p.priceRegistry, publicModelID, modelID, preparedRetry.realModelID,
+					retryPriceModelID, retryPrice := p.resolveRetryBillingPrice(
+						logCtx, publicModelID, modelID, preparedRetry.realModelID,
 					)
 					if retryPrice == nil && p.spendTrackingEnabled() {
 						triedCreds[candidate.Name] = true
@@ -1511,7 +1519,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 				"attempt", attempt+1, "max_attempts", p.maxProviderRetries+1,
 				"retry_reason", retryReason)
 
-			time.Sleep(time.Duration(rand.Intn(50)) * time.Millisecond)
+			time.Sleep(time.Duration(rand.IntN(50)) * time.Millisecond)
 		}
 
 		// Reset retry state for this attempt
@@ -1673,7 +1681,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 
 		upstreamCtx, cancelUpstream := p.upstreamRequestContext(r)
 		defer cancelUpstream()
-		proxyReq, reqErr := http.NewRequestWithContext(upstreamCtx, r.Method, targetURL, bytes.NewReader(requestBody))
+		proxyReq, reqErr := http.NewRequestWithContext(upstreamCtx, r.Method, targetURL, bytes.NewReader(requestBody)) //nolint:gosec // G704: targetURL's host comes from the matched credential's base URL, not the incoming request
 		if reqErr != nil {
 			// Fatal: request creation error
 			p.logger.ErrorContext(r.Context(), "Failed to create proxy request", "error", reqErr, "url", targetURL)
@@ -1738,7 +1746,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 
 		// Execute HTTP request
 		var doErr error
-		resp, doErr = p.client.Do(proxyReq)
+		resp, doErr = p.client.Do(proxyReq) //nolint:gosec // G704: same targetURL as the request built above, host isn't attacker-controlled
 		if doErr != nil {
 			// Transport failure on one credential — retried with the next one;
 			// the final failure is logged at ERROR after the retry loop.

@@ -1,6 +1,7 @@
 package models
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -25,24 +26,7 @@ func LoadModelPrices(link string) (map[string]*ModelPrice, error) {
 		return nil, fmt.Errorf("empty link")
 	}
 
-	var data []byte
-	var err error
-
-	// Parse the link to determine source type
-	if strings.HasPrefix(link, "file://") {
-		// File source
-		filePath := strings.TrimPrefix(link, "file://")
-		data, err = loadFromFile(filePath)
-	} else if strings.HasPrefix(link, "http://") || strings.HasPrefix(link, "https://") {
-		// HTTP source
-		data, err = loadFromHTTP(link)
-	} else if !strings.Contains(link, "://") {
-		// Treat as file path without file:// prefix
-		data, err = loadFromFile(link)
-	} else {
-		return nil, fmt.Errorf("unsupported link format: %s", link)
-	}
-
+	data, err := LoadModelPriceBytes(link)
 	if err != nil {
 		return nil, err
 	}
@@ -53,6 +37,40 @@ func LoadModelPrices(link string) (map[string]*ModelPrice, error) {
 		return nil, fmt.Errorf("failed to parse model prices JSON: %w", err)
 	}
 
+	return normalizeModelPrices(rawPrices), nil
+}
+
+func LoadModelPriceBytes(link string) ([]byte, error) {
+	if link == "" {
+		return nil, fmt.Errorf("empty link")
+	}
+
+	var data []byte
+	var err error
+
+	// Parse the link to determine source type
+	switch {
+	case strings.HasPrefix(link, "file://"):
+		// File source
+		filePath := strings.TrimPrefix(link, "file://")
+		data, err = loadFromFile(filePath)
+	case strings.HasPrefix(link, "http://") || strings.HasPrefix(link, "https://"):
+		// HTTP source
+		data, err = loadFromHTTP(link)
+	case !strings.Contains(link, "://"):
+		// Treat as file path without file:// prefix
+		data, err = loadFromFile(link)
+	default:
+		return nil, fmt.Errorf("unsupported link format: %s", link)
+	}
+
+	if err != nil {
+		return nil, err
+	}
+	return data, nil
+}
+
+func normalizeModelPrices(rawPrices map[string]*ModelPrice) map[string]*ModelPrice {
 	// Normalize model names (convert keys to normalized format)
 	// Also store raw lowercase keys so that provider-prefixed names like
 	// "google/gemini-3-flash-preview-highlimits" survive normalisation and
@@ -108,7 +126,7 @@ func LoadModelPrices(link string) (map[string]*ModelPrice, error) {
 		normalizedPrices[normalized] = price
 	}
 
-	return normalizedPrices, nil
+	return normalizedPrices
 }
 
 // loadFromFile reads model prices from a file
@@ -163,7 +181,11 @@ func loadFromHTTP(link string) ([]byte, error) {
 	// Create HTTP client with timeout
 	client := httputil.NewHTTPClient(nil)
 
-	resp, err := client.Get(link)
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, link, nil)
+	if err != nil {
+		return nil, fmt.Errorf("invalid URL: %w", err)
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch from URL: %w", err)
 	}

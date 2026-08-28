@@ -279,8 +279,7 @@ func convertOpenAIResponseFormatToGenaiSchema(responseFormat interface{}) *genai
 		return nil
 	}
 
-	switch rf := responseFormat.(type) {
-	case map[string]interface{}:
+	if rf, ok := responseFormat.(map[string]interface{}); ok {
 		// Check if it's json_schema type
 		if rfType, ok := rf["type"].(string); ok {
 			switch rfType {
