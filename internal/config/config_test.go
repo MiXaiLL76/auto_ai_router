@@ -905,6 +905,22 @@ openai_proto: true
 	assert.Equal(t, ProviderTypeOpenAI, cred.EffectiveProviderType())
 }
 
+func TestCredentialConfig_ParsesGoogleProtocol(t *testing.T) {
+	var cred CredentialConfig
+	err := yaml.Unmarshal([]byte(`
+name: comet
+type: cometapi
+api_key: key
+base_url: https://api.cometapi.com
+rpm: 60
+google_proto: true
+`), &cred)
+
+	require.NoError(t, err)
+	assert.True(t, cred.GoogleProtocol)
+	assert.Equal(t, ProviderTypeGemini, cred.EffectiveProviderType())
+}
+
 func TestCredentialConfig_EffectiveProviderType(t *testing.T) {
 	tests := []struct {
 		name string
@@ -924,6 +940,16 @@ func TestCredentialConfig_EffectiveProviderType(t *testing.T) {
 		{
 			name: "other provider types are unaffected by OpenAIProtocol",
 			cred: CredentialConfig{Type: ProviderTypeAnthropic, OpenAIProtocol: true},
+			want: ProviderTypeAnthropic,
+		},
+		{
+			name: "cometapi with google_proto becomes gemini",
+			cred: CredentialConfig{Type: ProviderTypeCometAPI, GoogleProtocol: true},
+			want: ProviderTypeGemini,
+		},
+		{
+			name: "other provider types are unaffected by GoogleProtocol",
+			cred: CredentialConfig{Type: ProviderTypeAnthropic, GoogleProtocol: true},
 			want: ProviderTypeAnthropic,
 		},
 	}
@@ -967,6 +993,58 @@ func TestConfig_Validate_OpenAIProtocolAllowedForCometAPI(t *testing.T) {
 		Fail2Ban: Fail2BanConfig{MaxAttempts: 3},
 	}
 	require.NoError(t, cfg.Validate())
+}
+
+func TestConfig_Validate_GoogleProtocolOnlyForCometAPI(t *testing.T) {
+	cfg := &Config{
+		Server: ServerConfig{
+			Port:           8080,
+			MaxBodySizeMB:  10,
+			MasterKey:      "test-key",
+			RequestTimeout: 30 * time.Second,
+		},
+		Credentials: []CredentialConfig{
+			{Name: "bad", Type: ProviderTypeAnthropic, APIKey: "key", BaseURL: "http://test.com", RPM: 60, GoogleProtocol: true},
+		},
+		Fail2Ban: Fail2BanConfig{MaxAttempts: 3},
+	}
+	err := cfg.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "google_proto is only supported for 'cometapi' type")
+}
+
+func TestConfig_Validate_GoogleProtocolAllowedForCometAPI(t *testing.T) {
+	cfg := &Config{
+		Server: ServerConfig{
+			Port:           8080,
+			MaxBodySizeMB:  10,
+			MasterKey:      "test-key",
+			RequestTimeout: 30 * time.Second,
+		},
+		Credentials: []CredentialConfig{
+			{Name: "comet", Type: ProviderTypeCometAPI, APIKey: "key", BaseURL: "https://api.cometapi.com", RPM: 60, GoogleProtocol: true},
+		},
+		Fail2Ban: Fail2BanConfig{MaxAttempts: 3},
+	}
+	require.NoError(t, cfg.Validate())
+}
+
+func TestConfig_Validate_OpenAIAndGoogleProtocolMutuallyExclusive(t *testing.T) {
+	cfg := &Config{
+		Server: ServerConfig{
+			Port:           8080,
+			MaxBodySizeMB:  10,
+			MasterKey:      "test-key",
+			RequestTimeout: 30 * time.Second,
+		},
+		Credentials: []CredentialConfig{
+			{Name: "comet", Type: ProviderTypeCometAPI, APIKey: "key", BaseURL: "https://api.cometapi.com", RPM: 60, OpenAIProtocol: true, GoogleProtocol: true},
+		},
+		Fail2Ban: Fail2BanConfig{MaxAttempts: 3},
+	}
+	err := cfg.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "mutually exclusive")
 }
 
 func TestCredentialConfig_NormalizeAIRProviderTypeAliases(t *testing.T) {

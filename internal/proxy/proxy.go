@@ -1655,8 +1655,8 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 		// permitted") — it must travel as the anthropic-beta HTTP header instead. This
 		// mirrors the unconditional strip forwardToProxy already does for proxy-like
 		// credentials on /v1/messages (see ExtractBetaHeader call there).
-		if cred.Type == config.ProviderTypeAnthropic || cred.Type == config.ProviderTypeProMan ||
-			(cred.Type == config.ProviderTypeCometAPI && !cred.OpenAIProtocol) {
+		switch cred.EffectiveProviderType() {
+		case config.ProviderTypeAnthropic, config.ProviderTypeProMan, config.ProviderTypeCometAPI:
 			var generatedBetas []string
 			requestBody, generatedBetas = anthropicconv.ExtractBetaHeader(requestBody)
 			anthropicBetas = append(anthropicBetas, generatedBetas...)
