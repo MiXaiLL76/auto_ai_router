@@ -1,3 +1,4 @@
+// Package config loads, validates and represents the router's YAML configuration.
 package config
 
 import (
@@ -1405,7 +1406,7 @@ func (f *Fail2BanConfig) UnmarshalYAML(value *yaml.Node) error {
 }
 
 func Load(path string) (*Config, error) {
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) // #nosec G304 -- config path is operator-supplied (CLI flag / env)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read config file: %w", err)
 	}

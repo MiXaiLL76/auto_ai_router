@@ -184,16 +184,17 @@ func CalculateTokenCosts(usage *converter.TokenUsage, price *ModelPrice) *conver
 	}
 
 	// Regular input with full-session or 200k tiering
-	if fullSessionInputMatched {
+	switch {
+	case fullSessionInputMatched:
 		costs.InputCost = float64(regularInputTokens) * inputCostPerToken
-	} else if price.InputCostPerTokenAbove200k > 0 && promptTokens > tokenTiering200kThreshold {
+	case price.InputCostPerTokenAbove200k > 0 && promptTokens > tokenTiering200kThreshold:
 		above := promptTokens - tokenTiering200kThreshold
 		// Distribute regular tokens proportionally between below/above threshold
 		regularAbove := int(int64(regularInputTokens) * int64(above) / int64(promptTokens))
 		regularBelow := regularInputTokens - regularAbove
 		costs.InputCost = float64(regularBelow)*price.InputCostPerToken +
 			float64(regularAbove)*price.InputCostPerTokenAbove200k
-	} else {
+	default:
 		costs.InputCost = float64(regularInputTokens) * inputCostPerToken
 	}
 
@@ -218,16 +219,17 @@ func CalculateTokenCosts(usage *converter.TokenUsage, price *ModelPrice) *conver
 	}
 
 	// Regular output with full-session or 200k tiering
-	if fullSessionOutputMatched {
+	switch {
+	case fullSessionOutputMatched:
 		costs.OutputCost = float64(regularOutputTokens) * outputCostPerToken
-	} else if price.OutputCostPerTokenAbove200k > 0 && completionTokens > tokenTiering200kThreshold {
+	case price.OutputCostPerTokenAbove200k > 0 && completionTokens > tokenTiering200kThreshold:
 		above := completionTokens - tokenTiering200kThreshold
 		// Distribute regular tokens proportionally between below/above threshold
 		regularAbove := int(int64(regularOutputTokens) * int64(above) / int64(completionTokens))
 		regularBelow := regularOutputTokens - regularAbove
 		costs.OutputCost = float64(regularBelow)*price.OutputCostPerToken +
 			float64(regularAbove)*price.OutputCostPerTokenAbove200k
-	} else {
+	default:
 		costs.OutputCost = float64(regularOutputTokens) * outputCostPerToken
 	}
 

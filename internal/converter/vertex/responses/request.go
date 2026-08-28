@@ -278,7 +278,7 @@ func buildGenConfig(req *responses.Request, model string) *genai.GenerationConfi
 	}
 
 	if req.MaxOutputTokens != nil {
-		cfg.MaxOutputTokens = int32(*req.MaxOutputTokens)
+		cfg.MaxOutputTokens = vertex.ClampInt32(*req.MaxOutputTokens)
 		hasParams = true
 	}
 	if req.Temperature != nil {

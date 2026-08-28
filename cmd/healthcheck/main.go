@@ -5,6 +5,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"net/http"
@@ -48,7 +49,12 @@ func run() int {
 	flag.Parse()
 
 	client := &http.Client{Timeout: *timeout}
-	resp, err := client.Get(*url)
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, *url, nil)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "healthcheck: ", err)
+		return 1
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "healthcheck: ", err)
 		return 1

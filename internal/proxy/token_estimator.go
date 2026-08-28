@@ -305,7 +305,7 @@ func hasLongWord(text string) bool {
 	return isLongWord(text, wordStart, len(text))
 }
 
-func isLongWord(text string, start, end int) bool {
+func isLongWord(_ string, start, end int) bool {
 	return start >= 0 && end-start > tokenizerMaxExactWordBytes
 }
 

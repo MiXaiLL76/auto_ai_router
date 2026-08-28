@@ -1,3 +1,4 @@
+// Package openai converts requests and responses between the router's internal form and the OpenAI API.
 package openai
 
 import (

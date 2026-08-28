@@ -1,3 +1,4 @@
+// Package auth authenticates API tokens against the LiteLLM database.
 package auth
 
 import (

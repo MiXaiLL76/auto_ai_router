@@ -1,3 +1,4 @@
+// Package balancer selects an upstream credential for each request across the configured providers.
 package balancer
 
 import (

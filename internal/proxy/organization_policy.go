@@ -182,7 +182,7 @@ func (p *Proxy) isAnyModelAllowedForToken(tokenInfo *dbmodels.TokenInfo, candida
 	}
 	var matcher dbmodels.ModelScopeMatcher
 	if p.modelManager != nil {
-		matcher = func(model string, allowedModels []string) bool {
+		matcher = func(_ string, allowedModels []string) bool {
 			return p.modelManager.IsAnyModelIDAllowedByScope(candidates, allowedModels)
 		}
 	}

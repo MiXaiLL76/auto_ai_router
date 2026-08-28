@@ -37,7 +37,7 @@ func (c *errorLogFileCache) getOrCreate(path string) (*logFileHandle, error) {
 		return file, nil
 	}
 
-	file, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	file, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600) // #nosec G304 -- log path is operator-supplied config
 	if err != nil {
 		return nil, err
 	}

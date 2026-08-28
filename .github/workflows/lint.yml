@@ -2,8 +2,11 @@ name: Lint
 
 env:
   GOLANGCI_LINT_VERSION: v2.13.1
-  MIN_SCORE: 25
-  MIN_COVERAGE: 70
+  # The branch is clean (0 gofmt / vet / golangci-lint / govulncheck findings),
+  # so those are hard-gated at zero below. MIN_SCORE stays as a secondary
+  # backstop for anything that slips past the individual gates.
+  MIN_SCORE: 90
+  MIN_COVERAGE: 72
 
 on:
   push:
@@ -82,7 +85,7 @@ jobs:
       continue-on-error: true
       run: |
         set +e
-        golangci-lint run --timeout=5m ./... > golangci.log 2>&1
+        golangci-lint run --timeout=5m --max-issues-per-linter=0 --max-same-issues=0 ./... > golangci.log 2>&1
         status=$?
         cat golangci.log
         issues=$(grep -cE '^\S+\.go:[0-9]+:[0-9]+:' golangci.log || true)
@@ -218,6 +221,26 @@ jobs:
           echo "::error::toolchain setup failed — score is not trustworthy"
           exit 1
         fi
+
+        # Hard gates: gofmt / go vet / golangci-lint / govulncheck are all green
+        # on the branch and must stay that way. A regression — or a check that
+        # could not complete — fails the job regardless of the overall score.
+        gate_failed=0
+        gate() { echo "::error::$1"; gate_failed=1; }
+
+        [ "$gofmt_files" -gt 0 ] && gate "gofmt: ${gofmt_files} unformatted file(s) — run 'make format'"
+
+        if [ "$VET_OUTCOME" != "success" ]; then gate "go vet did not complete (${VET_OUTCOME})"
+        elif [ "$vet_issues" -gt 0 ]; then gate "go vet: ${vet_issues} issue(s)"; fi
+
+        if [ "$GOLANGCI_OUTCOME" != "success" ]; then gate "golangci-lint reported issues or did not complete (${GOLANGCI_OUTCOME}) — see log above; run 'make lint'"
+        elif [ "$golangci_issues" -gt 0 ]; then gate "golangci-lint: ${golangci_issues} issue(s) — run 'make lint'"; fi
+
+        if [ "$GOVULNCHECK_OUTCOME" != "success" ]; then gate "govulncheck reported vulnerabilities or did not complete (${GOVULNCHECK_OUTCOME}) — see log above"
+        elif [ "$govulncheck_vulns" -gt 0 ]; then gate "govulncheck: ${govulncheck_vulns} called vulnerabilit(y/ies) — bump the affected module(s)"; fi
+
+        if [ "$gate_failed" -eq 1 ]; then exit 1; fi
+
         if [ "$score" -lt "$min_score" ]; then exit 1; fi
 
   test:

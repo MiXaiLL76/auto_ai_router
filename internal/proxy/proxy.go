@@ -9,7 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"math/rand"
+	"math/rand/v2"
 	"net/http"
 	"os"
 	"strings"
@@ -777,7 +777,7 @@ func (p *Proxy) executeProxyRequest(
 // - This ensures each credential (fallback or not) is tried only once per request chain
 // - Streaming responses are not retried (architectural limitation)
 func (p *Proxy) forwardToProxy(
-	w http.ResponseWriter,
+	_ http.ResponseWriter,
 	r *http.Request,
 	modelID string,
 	cred *config.CredentialConfig,
@@ -1000,7 +1000,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 					"credential", cred.Name, "model", modelID,
 					"attempt", attempt+1, "max_attempts", p.maxProviderRetries+1,
 					"retry_reason", retryReason)
-				time.Sleep(time.Duration(rand.Intn(50)) * time.Millisecond)
+				time.Sleep(time.Duration(rand.IntN(50)) * time.Millisecond)
 			}
 
 			shouldRetry = false
@@ -1519,7 +1519,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 				"attempt", attempt+1, "max_attempts", p.maxProviderRetries+1,
 				"retry_reason", retryReason)
 
-			time.Sleep(time.Duration(rand.Intn(50)) * time.Millisecond)
+			time.Sleep(time.Duration(rand.IntN(50)) * time.Millisecond)
 		}
 
 		// Reset retry state for this attempt

@@ -70,7 +70,7 @@ type Telemetry struct {
 // log export through the OTEL pipeline would generate a new record per export
 // batch and feed the pipeline forever. Pass a stdout-only logger; nil disables
 // diagnostics.
-func Setup(ctx context.Context, cfg *config.OTELConfig, version, commit string, diag *slog.Logger) (*Telemetry, error) {
+func Setup(ctx context.Context, cfg *config.OTELConfig, version, _ string, diag *slog.Logger) (*Telemetry, error) {
 	if cfg == nil || !cfg.Enabled {
 		return nil, nil
 	}

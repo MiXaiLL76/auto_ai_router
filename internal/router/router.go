@@ -1,3 +1,4 @@
+// Package router maps incoming HTTP routes to proxy and management handlers.
 package router
 
 import (

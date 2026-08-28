@@ -1,3 +1,4 @@
+// Package litellm reshapes responses for compatibility with LiteLLM clients.
 package litellm
 
 import (

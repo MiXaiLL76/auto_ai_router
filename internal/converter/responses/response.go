@@ -299,8 +299,7 @@ func convertChatMessageContent(content interface{}) []OutputContent {
 				continue
 			}
 			partType, _ := partMap["type"].(string)
-			switch partType {
-			case "text":
+			if partType == "text" {
 				text, _ := partMap["text"].(string)
 				out = append(out, OutputContent{
 					Type:        "output_text",

@@ -1,3 +1,4 @@
+// Package modelutils normalizes model usage and token accounting data.
 package modelutils
 
 import (
@@ -7,6 +8,7 @@ import (
 	"errors"
 	"io"
 	"math"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -169,13 +171,13 @@ func (r *usageNormalizingReadCloser) consumeFragment(fragment []byte, readErr er
 			r.line = append(r.line, fragment...)
 			return
 		}
-		r.pending = append(r.line, fragment...)
+		r.pending = slices.Concat(r.line, fragment)
 		r.line = nil
 		r.passthrough = true
 		return
 	}
 
-	line := append(r.line, fragment...)
+	line := slices.Concat(r.line, fragment)
 	r.line = nil
 	if len(line) == 0 {
 		return

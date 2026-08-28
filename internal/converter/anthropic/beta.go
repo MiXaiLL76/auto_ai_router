@@ -1,3 +1,4 @@
+// Package anthropic converts requests and responses between the router's internal form and the Anthropic API.
 package anthropic
 
 import (

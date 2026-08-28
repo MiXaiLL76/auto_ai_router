@@ -81,7 +81,10 @@ func (r *Router) handleLogin(w http.ResponseWriter, req *http.Request) {
 	// Set cookies
 	maxAge := int(users.SessionJWTDuration.Seconds())
 
-	http.SetCookie(w, &http.Cookie{
+	// Secure is deliberately left unset: the router is commonly served over
+	// plain HTTP behind a TLS-terminating reverse proxy, where a Secure cookie
+	// would never be sent back and login would silently fail.
+	http.SetCookie(w, &http.Cookie{ //nolint:gosec // G124: Secure omitted for reverse-proxy/HTTP deployments; see comment above
 		Name:     "session",
 		Value:    sessionJWT,
 		Path:     "/",
@@ -89,17 +92,21 @@ func (r *Router) handleLogin(w http.ResponseWriter, req *http.Request) {
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
 	})
-	http.SetCookie(w, &http.Cookie{
-		Name:   "username",
-		Value:  loginReq.Username,
-		Path:   "/",
-		MaxAge: maxAge,
+	http.SetCookie(w, &http.Cookie{ //nolint:gosec // G124: Secure omitted for reverse-proxy/HTTP deployments; see comment above
+		Name:     "username",
+		Value:    loginReq.Username,
+		Path:     "/",
+		MaxAge:   maxAge,
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
 	})
-	http.SetCookie(w, &http.Cookie{
-		Name:   "authenticated",
-		Value:  "true",
-		Path:   "/",
-		MaxAge: maxAge,
+	http.SetCookie(w, &http.Cookie{ //nolint:gosec // G124: Secure omitted for reverse-proxy/HTTP deployments; see comment above
+		Name:     "authenticated",
+		Value:    "true",
+		Path:     "/",
+		MaxAge:   maxAge,
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
 	})
 
 	r.logger.InfoContext(req.Context(), "Login successful", "username", loginReq.Username, "role", result.UserRole)
