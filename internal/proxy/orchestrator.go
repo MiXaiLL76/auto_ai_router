@@ -853,13 +853,10 @@ func (p *Proxy) selectCredentialForModel(
 		)
 	}
 	logCtx.Logged = true
-	if remaining, ok := p.balancer.MinRemainingBanForModel(modelID); ok {
+	if remaining, ok := p.balancer.MinRemainingBanForModel(modelID, exclude, logCtx.Scope); ok {
 		seconds := int(remaining / time.Second)
 		if remaining%time.Second != 0 {
 			seconds++
-		}
-		if seconds < 1 {
-			seconds = 1
 		}
 		w.Header().Set("Retry-After", fmt.Sprintf("%d", seconds))
 	}

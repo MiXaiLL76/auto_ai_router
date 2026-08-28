@@ -148,9 +148,39 @@ func (r *RoundRobin) HasAnyBan(credentialName string) bool {
 }
 
 // MinRemainingBanForModel returns the shortest time remaining until any
-// fail2ban-banned credential for modelID becomes available again.
-func (r *RoundRobin) MinRemainingBanForModel(modelID string) (time.Duration, bool) {
-	return r.fail2ban.MinRemainingBanForModel(modelID)
+// fail2ban-banned credential for modelID becomes available again, scoped to
+// the candidates actually relevant to this request: credentials visible
+// under visibility that serve modelID, minus exclude (credentials already
+// tried and rejected earlier in this same request). A ban on a credential
+// outside that set can never affect when this caller will next succeed, so
+// including it would report a Retry-After that's meaningless to them.
+func (r *RoundRobin) MinRemainingBanForModel(modelID string, exclude map[string]bool, visibility scope.Context) (time.Duration, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	var min time.Duration
+	found := false
+	for i := range r.credentials {
+		cred := &r.credentials[i]
+		if exclude[cred.Name] {
+			continue
+		}
+		if !cred.VisibleTo(visibility) {
+			continue
+		}
+		if modelID != "" && r.modelChecker != nil && r.modelChecker.IsEnabled() && !r.hasModel(cred.Name, modelID, visibility) {
+			continue
+		}
+		remaining, ok := r.fail2ban.RemainingBan(cred.Name, modelID)
+		if !ok {
+			continue
+		}
+		if !found || remaining < min {
+			min = remaining
+			found = true
+		}
+	}
+	return min, found
 }
 
 // GetProxyCredentials returns all proxy/AIR remote-router credentials.

@@ -646,43 +646,50 @@ func TestIsBanned_TOCTOU_ReturnsCorrectAfterLockUpgrade(t *testing.T) {
 	assert.True(t, f2b.IsBanned("cred1", "gpt-4"))
 }
 
-func TestMinRemainingBanForModel_ReturnsShortestAcrossCredentials(t *testing.T) {
-	f2b := NewWithRules(1, 0, []int{401, 429}, []ErrorCodeRule{
-		{Code: 401, MaxAttempts: 1, BanDuration: 10 * time.Second},
+func TestRemainingBan_ReturnsRemainingDuration(t *testing.T) {
+	f2b := NewWithRules(1, 0, []int{429}, []ErrorCodeRule{
 		{Code: 429, MaxAttempts: 1, BanDuration: 2 * time.Second},
 	})
 
-	f2b.RecordResponse("cred-slow", "shared-model", 401) // banned for 10s
-	f2b.RecordResponse("cred-fast", "shared-model", 429) // banned for 2s
+	f2b.RecordResponse("cred1", "model-a", 429) // banned for 2s
 
-	remaining, ok := f2b.MinRemainingBanForModel("shared-model")
+	remaining, ok := f2b.RemainingBan("cred1", "model-a")
 	require.True(t, ok)
 	assert.Greater(t, remaining, time.Duration(0))
 	assert.LessOrEqual(t, remaining, 2*time.Second)
 }
 
-func TestMinRemainingBanForModel_IgnoresPermanentBans(t *testing.T) {
+func TestRemainingBan_IgnoresPermanentBan(t *testing.T) {
 	f2b := New(1, 0, []int{401}) // banDuration 0 == permanent
 
 	f2b.RecordResponse("cred1", "model-a", 401)
 
-	_, ok := f2b.MinRemainingBanForModel("model-a")
+	_, ok := f2b.RemainingBan("cred1", "model-a")
 	assert.False(t, ok, "permanent ban has no finite ETA to report")
 }
 
-func TestMinRemainingBanForModel_IgnoresOtherModels(t *testing.T) {
+func TestRemainingBan_IgnoresOtherModelOnSameCredential(t *testing.T) {
 	f2b := New(1, 5*time.Second, []int{401})
 
 	f2b.RecordResponse("cred1", "model-a", 401)
 
-	_, ok := f2b.MinRemainingBanForModel("model-b")
+	_, ok := f2b.RemainingBan("cred1", "model-b")
 	assert.False(t, ok)
 }
 
-func TestMinRemainingBanForModel_NoActiveBan_ReturnsFalse(t *testing.T) {
+func TestRemainingBan_IgnoresOtherCredentialForSameModel(t *testing.T) {
+	f2b := New(1, 5*time.Second, []int{401})
+
+	f2b.RecordResponse("cred1", "model-a", 401)
+
+	_, ok := f2b.RemainingBan("cred2", "model-a")
+	assert.False(t, ok, "a ban on a different credential must not leak into this pair's lookup")
+}
+
+func TestRemainingBan_NoActiveBan_ReturnsFalse(t *testing.T) {
 	f2b := New(3, 5*time.Second, []int{401})
 
-	_, ok := f2b.MinRemainingBanForModel("anything")
+	_, ok := f2b.RemainingBan("cred1", "anything")
 	assert.False(t, ok)
 }
 

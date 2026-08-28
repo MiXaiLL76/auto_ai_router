@@ -470,37 +470,27 @@ func banUntil(ban *banInfo) time.Time {
 	return ban.banTime.Add(ban.banDuration).UTC()
 }
 
-// MinRemainingBanForModel returns the shortest time remaining until any
-// credential currently banned for modelID becomes available again. Used to
-// build a Retry-After hint on a synthesized 429 when no credential is
-// available for a request. Permanent bans (banDuration == 0) are skipped —
-// there is no finite ETA to report for those. Returns (0, false) if no
-// temporary ban is currently active for this model.
-func (f *Fail2Ban) MinRemainingBanForModel(modelID string) (time.Duration, bool) {
+// RemainingBan returns the time remaining until credentialName becomes
+// available again for modelID, if it is currently under a temporary ban.
+// Used to build a Retry-After hint on a synthesized 429. Permanent bans
+// (banDuration == 0) return (0, false) — there is no finite ETA to report.
+func (f *Fail2Ban) RemainingBan(credentialName, modelID string) (time.Duration, bool) {
 	f.mu.RLock()
 	defer f.mu.RUnlock()
 
-	now := utils.NowUTC()
-	suffix := "|" + modelID
-	var min time.Duration
-	found := false
-	for key, ban := range f.banned {
-		if !strings.HasSuffix(key, suffix) {
-			continue
-		}
-		if ban.banDuration == 0 {
-			continue
-		}
-		remaining := ban.banTime.Add(ban.banDuration).Sub(now)
-		if remaining <= 0 {
-			continue
-		}
-		if !found || remaining < min {
-			min = remaining
-			found = true
-		}
+	ban, exists := f.banned[banKey(credentialName, modelID)]
+	if !exists {
+		return 0, false
 	}
-	return min, found
+	until := banUntil(ban)
+	if until.IsZero() {
+		return 0, false // permanent ban — no finite ETA
+	}
+	remaining := until.Sub(utils.NowUTC())
+	if remaining <= 0 {
+		return 0, false
+	}
+	return remaining, true
 }
 
 // GetBannedCount returns the count of currently active (non-expired) banned credential+model pairs
