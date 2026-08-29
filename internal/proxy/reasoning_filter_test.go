@@ -11,32 +11,37 @@ import (
 
 func TestRequestUsesReasoning(t *testing.T) {
 	tests := []struct {
-		name       string
-		body       string
-		want       bool
-		wantSource string
+		name             string
+		body             string
+		want             bool
+		wantSource       string
+		wantThinkingMode string
 	}{
-		{name: "absent", body: `{"model":"claude","messages":[]}`},
-		{name: "effort", body: `{"reasoning_effort":"high"}`, want: true, wantSource: "reasoning_effort"},
-		{name: "disabled effort", body: `{"reasoning_effort":"none"}`},
-		{name: "responses reasoning", body: `{"reasoning":{"effort":"medium"}}`, want: true, wantSource: "reasoning"},
-		{name: "responses default effort", body: `{"reasoning":{"effort":null,"summary":"auto"}}`, want: true, wantSource: "reasoning"},
-		{name: "anthropic thinking", body: `{"thinking":{"type":"enabled","budget_tokens":1024}}`, want: true, wantSource: "thinking"},
-		{name: "adaptive thinking", body: `{"thinking":{"type":"adaptive"}}`, want: true, wantSource: "thinking"},
-		{name: "disabled thinking", body: `{"thinking":{"type":"disabled"}}`},
-		{name: "gemini budget", body: `{"thinking_budget":-1}`, want: true, wantSource: "thinking_budget"},
-		{name: "gemini disabled budget", body: `{"thinking_budget":0}`},
-		{name: "nested extra body", body: `{"extra_body":{"reasoning_effort":"low"}}`, want: true, wantSource: "extra_body.reasoning_effort"},
-		{name: "nested thinking config", body: `{"thinking_config":{"thinking_level":"high"}}`, want: true, wantSource: "thinking_config.thinking_level"},
-		{name: "include thoughts only", body: `{"thinking_config":{"include_thoughts":true}}`},
-		{name: "invalid json", body: `{`},
+		{name: "absent", body: `{"model":"claude","messages":[]}`, wantThinkingMode: thinkingModeUnspecified},
+		{name: "effort", body: `{"reasoning_effort":"high"}`, want: true, wantSource: "reasoning_effort", wantThinkingMode: thinkingModeUnspecified},
+		{name: "disabled effort", body: `{"reasoning_effort":"none"}`, wantThinkingMode: thinkingModeUnspecified},
+		{name: "responses reasoning", body: `{"reasoning":{"effort":"medium"}}`, want: true, wantSource: "reasoning", wantThinkingMode: thinkingModeUnspecified},
+		{name: "responses default effort", body: `{"reasoning":{"effort":null,"summary":"auto"}}`, want: true, wantSource: "reasoning", wantThinkingMode: thinkingModeUnspecified},
+		{name: "anthropic thinking", body: `{"thinking":{"type":"enabled","budget_tokens":1024}}`, want: true, wantSource: "thinking", wantThinkingMode: thinkingModeEnabled},
+		{name: "adaptive thinking", body: `{"thinking":{"type":"adaptive"}}`, want: true, wantSource: "thinking", wantThinkingMode: thinkingModeAdaptive},
+		{name: "disabled thinking", body: `{"thinking":{"type":"disabled"}}`, wantThinkingMode: thinkingModeDisabled},
+		{name: "unknown thinking", body: `{"thinking":{"type":"automatic"}}`, want: true, wantSource: "thinking", wantThinkingMode: thinkingModeUnknown},
+		{name: "missing thinking type", body: `{"thinking":{"display":"summarized"}}`, want: true, wantSource: "thinking", wantThinkingMode: thinkingModeUnknown},
+		{name: "gemini budget", body: `{"thinking_budget":-1}`, want: true, wantSource: "thinking_budget", wantThinkingMode: thinkingModeUnspecified},
+		{name: "gemini disabled budget", body: `{"thinking_budget":0}`, wantThinkingMode: thinkingModeUnspecified},
+		{name: "nested extra body", body: `{"extra_body":{"reasoning_effort":"low"}}`, want: true, wantSource: "extra_body.reasoning_effort", wantThinkingMode: thinkingModeUnspecified},
+		{name: "nested extra body thinking", body: `{"extra_body":{"thinking":{"type":"adaptive"}}}`, want: true, wantSource: "extra_body.thinking", wantThinkingMode: thinkingModeAdaptive},
+		{name: "nested thinking config", body: `{"thinking_config":{"thinking_level":"high"}}`, want: true, wantSource: "thinking_config.thinking_level", wantThinkingMode: thinkingModeUnspecified},
+		{name: "include thoughts only", body: `{"thinking_config":{"include_thoughts":true}}`, wantThinkingMode: thinkingModeUnspecified},
+		{name: "invalid json", body: `{`, wantThinkingMode: thinkingModeUnspecified},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			requested, source := requestReasoning([]byte(tt.body))
+			requested, source, thinkingMode := requestReasoningDetails([]byte(tt.body))
 			assert.Equal(t, tt.want, requested)
 			assert.Equal(t, tt.wantSource, source)
+			assert.Equal(t, tt.wantThinkingMode, thinkingMode)
 			assert.Equal(t, tt.want, requestUsesReasoning([]byte(tt.body)))
 		})
 	}

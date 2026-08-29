@@ -186,8 +186,9 @@ func TestLogSpendToLiteLLMDB_UsesClientResponseID(t *testing.T) {
 	logCtx := testLogCtx(t)
 	logCtx.ClientResponseID = "chatcmpl-client-123"
 	logCtx.ReasoningRequested = true
-	logCtx.ReasoningSource = "reasoning_effort"
-	logCtx.RequestEndpoint = "/v1/chat/completions"
+	logCtx.ReasoningSource = "thinking"
+	logCtx.ThinkingMode = thinkingModeAdaptive
+	logCtx.RequestEndpoint = "/v1/messages"
 
 	require.NoError(t, prx.logSpendToLiteLLMDB(logCtx))
 	require.Len(t, dbStub.loggedEntries, 1)
@@ -203,8 +204,9 @@ func TestLogSpendToLiteLLMDB_UsesClientResponseID(t *testing.T) {
 	assert.Equal(t, "chatcmpl-client-123", spendMetadata["provider_response_id"])
 	assert.Equal(t, true, spendMetadata["accounting_eligible"])
 	assert.Equal(t, true, spendMetadata["reasoning_requested"])
-	assert.Equal(t, "reasoning_effort", spendMetadata["reasoning_source"])
-	assert.Equal(t, "/v1/chat/completions", spendMetadata["request_endpoint"])
+	assert.Equal(t, "thinking", spendMetadata["reasoning_source"])
+	assert.Equal(t, thinkingModeAdaptive, spendMetadata["thinking_mode"])
+	assert.Equal(t, "/v1/messages", spendMetadata["request_endpoint"])
 }
 
 func TestLogSpendToLiteLLMDB_PersistsInternalAIRRequestWithoutKafkaAccounting(t *testing.T) {

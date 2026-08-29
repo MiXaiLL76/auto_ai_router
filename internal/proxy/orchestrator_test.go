@@ -57,32 +57,54 @@ func TestOrchestrateRequest_ResponsesAPIStreaming(t *testing.T) {
 
 func TestOrchestrateRequest_RecordsReasoningRequestMetadata(t *testing.T) {
 	tests := []struct {
-		name     string
-		path     string
-		body     string
-		source   string
-		endpoint string
+		name         string
+		path         string
+		body         string
+		requested    bool
+		source       string
+		thinkingMode string
+		endpoint     string
 	}{
 		{
-			name:     "chat completions",
-			path:     "/v1/chat/completions",
-			body:     `{"model":"claude-opus-4-8","messages":[{"role":"user","content":"test"}],"reasoning_effort":"high"}`,
-			source:   "reasoning_effort",
-			endpoint: "/v1/chat/completions",
+			name:         "chat completions",
+			path:         "/v1/chat/completions",
+			body:         `{"model":"claude-opus-4-8","messages":[{"role":"user","content":"test"}],"reasoning_effort":"high"}`,
+			requested:    true,
+			source:       "reasoning_effort",
+			thinkingMode: thinkingModeUnspecified,
+			endpoint:     "/v1/chat/completions",
 		},
 		{
-			name:     "responses",
-			path:     "/v1/responses",
-			body:     `{"model":"claude-opus-4-8","input":"test","reasoning":{"effort":"high"}}`,
-			source:   "reasoning",
-			endpoint: "/v1/responses",
+			name:         "responses",
+			path:         "/v1/responses",
+			body:         `{"model":"claude-opus-4-8","input":"test","reasoning":{"effort":"high"}}`,
+			requested:    true,
+			source:       "reasoning",
+			thinkingMode: thinkingModeUnspecified,
+			endpoint:     "/v1/responses",
 		},
 		{
-			name:     "messages",
-			path:     "/v1/messages",
-			body:     `{"model":"claude-opus-4-8","max_tokens":4096,"thinking":{"type":"adaptive"},"messages":[{"role":"user","content":"test"}]}`,
-			source:   "thinking",
-			endpoint: "/v1/messages",
+			name:         "messages",
+			path:         "/v1/messages",
+			body:         `{"model":"claude-opus-4-8","max_tokens":4096,"thinking":{"type":"adaptive"},"messages":[{"role":"user","content":"test"}]}`,
+			requested:    true,
+			source:       "thinking",
+			thinkingMode: thinkingModeAdaptive,
+			endpoint:     "/v1/messages",
+		},
+		{
+			name:         "messages disabled",
+			path:         "/v1/messages",
+			body:         `{"model":"claude-opus-5","max_tokens":4096,"thinking":{"type":"disabled"},"messages":[{"role":"user","content":"test"}]}`,
+			thinkingMode: thinkingModeDisabled,
+			endpoint:     "/v1/messages",
+		},
+		{
+			name:         "messages unspecified",
+			path:         "/v1/messages",
+			body:         `{"model":"claude-opus-5","max_tokens":4096,"messages":[{"role":"user","content":"test"}]}`,
+			thinkingMode: thinkingModeUnspecified,
+			endpoint:     "/v1/messages",
 		},
 	}
 
@@ -100,8 +122,9 @@ func TestOrchestrateRequest_RecordsReasoningRequestMetadata(t *testing.T) {
 
 			require.True(t, ok)
 			require.NotNil(t, prepared)
-			assert.True(t, logCtx.ReasoningRequested)
+			assert.Equal(t, tt.requested, logCtx.ReasoningRequested)
 			assert.Equal(t, tt.source, logCtx.ReasoningSource)
+			assert.Equal(t, tt.thinkingMode, logCtx.ThinkingMode)
 			assert.Equal(t, tt.endpoint, logCtx.RequestEndpoint)
 		})
 	}

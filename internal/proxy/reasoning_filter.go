@@ -8,6 +8,14 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/monitoring"
 )
 
+const (
+	thinkingModeAdaptive    = "adaptive"
+	thinkingModeDisabled    = "disabled"
+	thinkingModeEnabled     = "enabled"
+	thinkingModeUnknown     = "unknown"
+	thinkingModeUnspecified = "unspecified"
+)
+
 func (p *Proxy) reasoningOnlyExclusions(reasoningRequested bool) map[string]bool {
 	if reasoningRequested {
 		return nil
@@ -29,11 +37,50 @@ func requestUsesReasoning(body []byte) bool {
 }
 
 func requestReasoning(body []byte) (bool, string) {
+	requested, source, _ := requestReasoningDetails(body)
+	return requested, source
+}
+
+func requestReasoningDetails(body []byte) (bool, string, string) {
 	var request map[string]interface{}
 	if json.Unmarshal(body, &request) != nil {
-		return false, ""
+		return false, "", thinkingModeUnspecified
 	}
-	return mapReasoningSource(request, "")
+	requested, source := mapReasoningSource(request, "")
+	return requested, source, mapThinkingMode(request)
+}
+
+func mapThinkingMode(fields map[string]interface{}) string {
+	if value, ok := fields["thinking"]; ok {
+		return normalizeThinkingMode(value)
+	}
+	if nested, ok := fields["extra_body"].(map[string]interface{}); ok {
+		return mapThinkingMode(nested)
+	}
+	return thinkingModeUnspecified
+}
+
+func normalizeThinkingMode(value interface{}) string {
+	if fields, ok := value.(map[string]interface{}); ok {
+		value, ok = fields["type"]
+		if !ok {
+			return thinkingModeUnknown
+		}
+	}
+	kind, ok := value.(string)
+	if !ok {
+		return thinkingModeUnknown
+	}
+	switch strings.ToLower(strings.TrimSpace(kind)) {
+	case thinkingModeAdaptive:
+		return thinkingModeAdaptive
+	case thinkingModeDisabled:
+		return thinkingModeDisabled
+	case thinkingModeEnabled:
+		return thinkingModeEnabled
+	default:
+		return thinkingModeUnknown
+	}
 }
 
 func mapReasoningSource(fields map[string]interface{}, prefix string) (bool, string) {

@@ -84,7 +84,7 @@ func (p *Proxy) orchestrateRequest(
 	}
 
 	logCtx.RequestEndpoint = r.URL.Path
-	logCtx.ReasoningRequested, logCtx.ReasoningSource = requestReasoning(body)
+	logCtx.ReasoningRequested, logCtx.ReasoningSource, logCtx.ThinkingMode = requestReasoningDetails(body)
 	routingExclusions := p.reasoningOnlyExclusions(logCtx.ReasoningRequested)
 	triedCreds := GetTried(r.Context())
 	for name := range routingExclusions {
