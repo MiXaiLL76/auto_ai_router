@@ -272,11 +272,14 @@ type RequestLogContext struct {
 	ImageCount            int                      // Number of images to generate (from 'n' param)
 	WebSearchRequested    bool                     // True when the request enabled the built-in web search tool
 	WebSearchContextSize  string                   // low|medium|high from web_search_options/tool config
-	Logged                bool                     // True if already logged (prevents duplicate logging)
-	IsResponsesAPI        bool                     // True if this is a Responses API request (converted to Chat Completions)
-	RequestCompleted      bool                     // True only after the response was fully and successfully delivered
-	ActualCredentialName  string                   // Real credential name from upstream when Credential.Type == ProviderTypeProxy
-	IsProxyRequest        bool                     // True when this request came from another auto_ai_router (HeaderAIRProxyClient)
+	ReasoningRequested    bool
+	ReasoningSource       string
+	RequestEndpoint       string
+	Logged                bool   // True if already logged (prevents duplicate logging)
+	IsResponsesAPI        bool   // True if this is a Responses API request (converted to Chat Completions)
+	RequestCompleted      bool   // True only after the response was fully and successfully delivered
+	ActualCredentialName  string // Real credential name from upstream when Credential.Type == ProviderTypeProxy
+	IsProxyRequest        bool   // True when this request came from another auto_ai_router (HeaderAIRProxyClient)
 	Scope                 scope.Context
 	OrganizationPolicy    *models.OrganizationPolicy
 	BillingProfileID      string
