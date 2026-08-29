@@ -55,6 +55,58 @@ func TestOrchestrateRequest_ResponsesAPIStreaming(t *testing.T) {
 	require.Equal(t, true, streamOptions["include_usage"])
 }
 
+func TestOrchestrateRequest_RecordsReasoningRequestMetadata(t *testing.T) {
+	tests := []struct {
+		name     string
+		path     string
+		body     string
+		source   string
+		endpoint string
+	}{
+		{
+			name:     "chat completions",
+			path:     "/v1/chat/completions",
+			body:     `{"model":"claude-opus-4-8","messages":[{"role":"user","content":"test"}],"reasoning_effort":"high"}`,
+			source:   "reasoning_effort",
+			endpoint: "/v1/chat/completions",
+		},
+		{
+			name:     "responses",
+			path:     "/v1/responses",
+			body:     `{"model":"claude-opus-4-8","input":"test","reasoning":{"effort":"high"}}`,
+			source:   "reasoning",
+			endpoint: "/v1/responses",
+		},
+		{
+			name:     "messages",
+			path:     "/v1/messages",
+			body:     `{"model":"claude-opus-4-8","max_tokens":4096,"thinking":{"type":"adaptive"},"messages":[{"role":"user","content":"test"}]}`,
+			source:   "thinking",
+			endpoint: "/v1/messages",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			prx := NewTestProxyBuilder().
+				WithSingleCredential("test", config.ProviderTypeAnthropic, "http://test.local", "upstream-key").
+				WithMasterKey("master-key").
+				Build()
+			req := httptest.NewRequest(http.MethodPost, tt.path, strings.NewReader(tt.body))
+			req.Header.Set("Authorization", "Bearer master-key")
+			logCtx := &RequestLogContext{}
+
+			prepared, ok := prx.orchestrateRequest(httptest.NewRecorder(), req, logCtx)
+
+			require.True(t, ok)
+			require.NotNil(t, prepared)
+			assert.True(t, logCtx.ReasoningRequested)
+			assert.Equal(t, tt.source, logCtx.ReasoningSource)
+			assert.Equal(t, tt.endpoint, logCtx.RequestEndpoint)
+		})
+	}
+}
+
 func TestOrchestrateRequest_ResponsesAPI_PassthroughForOpenAI(t *testing.T) {
 	logger := testhelpers.NewTestLogger()
 	prx := NewTestProxyBuilder().

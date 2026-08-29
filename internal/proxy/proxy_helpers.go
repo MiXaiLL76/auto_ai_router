@@ -363,6 +363,33 @@ func addAIRSpendMetadata(metadata, eventID, providerResponseID string, isProxyRe
 	return string(encoded)
 }
 
+func addRequestSpendMetadata(metadata string, logCtx *RequestLogContext) string {
+	if logCtx == nil {
+		return metadata
+	}
+	var doc map[string]interface{}
+	if json.Unmarshal([]byte(metadata), &doc) != nil || doc == nil {
+		doc = make(map[string]interface{})
+	}
+	spendMetadata, _ := doc["spend_logs_metadata"].(map[string]interface{})
+	if spendMetadata == nil {
+		spendMetadata = make(map[string]interface{})
+		doc["spend_logs_metadata"] = spendMetadata
+	}
+	spendMetadata["reasoning_requested"] = logCtx.ReasoningRequested
+	if logCtx.ReasoningSource != "" {
+		spendMetadata["reasoning_source"] = logCtx.ReasoningSource
+	}
+	if logCtx.RequestEndpoint != "" {
+		spendMetadata["request_endpoint"] = logCtx.RequestEndpoint
+	}
+	encoded, err := json.Marshal(doc)
+	if err != nil {
+		return metadata
+	}
+	return string(encoded)
+}
+
 func addOrganizationPolicySpendMetadata(metadata string, logCtx *RequestLogContext) string {
 	if logCtx == nil || logCtx.OrganizationPolicy == nil {
 		return metadata

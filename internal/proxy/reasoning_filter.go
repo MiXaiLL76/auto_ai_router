@@ -8,8 +8,8 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/monitoring"
 )
 
-func (p *Proxy) reasoningOnlyExclusions(body []byte) map[string]bool {
-	if requestUsesReasoning(body) {
+func (p *Proxy) reasoningOnlyExclusions(reasoningRequested bool) map[string]bool {
+	if reasoningRequested {
 		return nil
 	}
 
@@ -24,36 +24,45 @@ func (p *Proxy) reasoningOnlyExclusions(body []byte) map[string]bool {
 }
 
 func requestUsesReasoning(body []byte) bool {
-	var request map[string]interface{}
-	if json.Unmarshal(body, &request) != nil {
-		return false
-	}
-	return mapUsesReasoning(request)
+	requested, _ := requestReasoning(body)
+	return requested
 }
 
-func mapUsesReasoning(fields map[string]interface{}) bool {
+func requestReasoning(body []byte) (bool, string) {
+	var request map[string]interface{}
+	if json.Unmarshal(body, &request) != nil {
+		return false, ""
+	}
+	return mapReasoningSource(request, "")
+}
+
+func mapReasoningSource(fields map[string]interface{}, prefix string) (bool, string) {
 	if value, ok := fields["reasoning_effort"]; ok && reasoningValueEnabled(value) {
-		return true
+		return true, prefix + "reasoning_effort"
 	}
 	if value, ok := fields["reasoning"]; ok && reasoningValueEnabled(value) {
-		return true
+		return true, prefix + "reasoning"
 	}
 	if value, ok := fields["thinking"]; ok && reasoningValueEnabled(value) {
-		return true
+		return true, prefix + "thinking"
 	}
 	if value, ok := fields["thinking_budget"]; ok && reasoningBudgetEnabled(value) {
-		return true
+		return true, prefix + "thinking_budget"
 	}
 	if value, ok := fields["thinking_level"]; ok && reasoningValueEnabled(value) {
-		return true
+		return true, prefix + "thinking_level"
 	}
-	if nested, ok := fields["thinking_config"].(map[string]interface{}); ok && mapUsesReasoning(nested) {
-		return true
+	if nested, ok := fields["thinking_config"].(map[string]interface{}); ok {
+		if requested, source := mapReasoningSource(nested, prefix+"thinking_config."); requested {
+			return true, source
+		}
 	}
-	if nested, ok := fields["extra_body"].(map[string]interface{}); ok && mapUsesReasoning(nested) {
-		return true
+	if nested, ok := fields["extra_body"].(map[string]interface{}); ok {
+		if requested, source := mapReasoningSource(nested, prefix+"extra_body."); requested {
+			return true, source
+		}
 	}
-	return false
+	return false, ""
 }
 
 func reasoningValueEnabled(value interface{}) bool {
