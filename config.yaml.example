@@ -68,6 +68,8 @@ credentials:
     rpm: 100
     tpm: 50000
     weight: 100  # Optional: weighted round-robin share (default 1). See docs/advanced/balancing.md
+    # priority: 1  # Optional: primary-selection tier (lower tried first; default 0 = flat pool).
+                   # Mutually exclusive with fallback_priority. See docs/advanced/balancing.md
 
   - name: "vertex_ai"
     type: "vertex-ai"

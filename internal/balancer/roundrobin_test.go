@@ -1765,7 +1765,7 @@ func TestSelectPriorityGroupCandidate_ConcurrentRateLimitRaceCascadesToNextGroup
 		wg.Add(2)
 		go func() {
 			defer wg.Done()
-			victimCred, _, _, victimErr = r.selectPriorityGroupCandidate("", candidates, keyBase)
+			victimCred, _, _, victimErr = r.selectPriorityGroupCandidate("", candidates, keyBase, r.primaryPriority)
 		}()
 		go func() {
 			defer wg.Done()
@@ -1899,6 +1899,33 @@ func TestNextForModel_NoPriorityFields_BehavesAsFlatPool(t *testing.T) {
 		require.NoError(t, err, "Request %d failed", i+1)
 		assert.Equal(t, expectedName, cred.Name, "Request %d: expected %s, got %s", i+1, expectedName, cred.Name)
 	}
+}
+
+// TestNextForModel_FallbackPriorityOnly_StaysFlatPrimaryPool is the #3 regression guard:
+// fallback_priority is a retry-only ordering knob. A config that sets fallback_priority
+// but never the explicit priority: field must keep serving primary traffic as one flat
+// weighted pool (matching pre-priority-groups behavior), NOT as hard exclusive tiers.
+func TestNextForModel_FallbackPriorityOnly_StaysFlatPrimaryPool(t *testing.T) {
+	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
+	rl := ratelimit.New()
+
+	credentials := []config.CredentialConfig{
+		{Name: "cred1", APIKey: "key1", BaseURL: "http://test1.com", RPM: 1000, FallbackPriority: 10},
+		{Name: "cred2", APIKey: "key2", BaseURL: "http://test2.com", RPM: 1000, FallbackPriority: 20},
+		{Name: "cred3", APIKey: "key3", BaseURL: "http://test3.com", RPM: 1000, FallbackPriority: 30},
+	}
+
+	bal := New(credentials, f2b, rl)
+
+	counts := map[string]int{}
+	for i := 0; i < 30; i++ {
+		cred, err := bal.NextForModel("")
+		require.NoError(t, err, "request %d", i)
+		counts[cred.Name]++
+	}
+
+	assert.Equal(t, map[string]int{"cred1": 10, "cred2": 10, "cred3": 10}, counts,
+		"fallback_priority must not create primary-pool priority steps — expected an even flat split")
 }
 
 func TestMinRemainingBanForModel_IgnoresExcludedCredential(t *testing.T) {

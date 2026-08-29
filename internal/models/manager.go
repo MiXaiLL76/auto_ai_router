@@ -263,7 +263,12 @@ type remoteModelCache struct {
 	credential    config.CredentialConfig
 	models        []Model
 	scopeSnapshot *remoteScopeSnapshot
-	expiresAt     time.Time
+	// health is the raw upstream /health response this snapshot was built from, kept
+	// so the single periodic poller (modelupdate.UpdateAllProxyCredentials) can run
+	// limit/priority sync (proxy.UpdateStatsFromHealth) off the same fetch instead of
+	// polling /health a second time. nil for the /v1/models legacy fallback path.
+	health    *httputil.ProxyHealthResponse
+	expiresAt time.Time
 }
 
 type remoteScopeSnapshot struct {
@@ -2328,6 +2333,7 @@ func (m *Manager) applyRemoteScopeSnapshotAndCache(
 	cred *config.CredentialConfig,
 	models []Model,
 	snapshot *remoteScopeSnapshot,
+	health *httputil.ProxyHealthResponse,
 ) bool {
 	cloned := cloneRemoteScopeSnapshot(snapshot)
 	cachedModels := append([]Model(nil), models...)
@@ -2340,9 +2346,24 @@ func (m *Manager) applyRemoteScopeSnapshotAndCache(
 		credential:    *cred,
 		models:        cachedModels,
 		scopeSnapshot: cloneRemoteScopeSnapshot(cloned),
+		health:        health,
 		expiresAt:     utils.NowUTC().Add(m.cacheExpiration),
 	}
 	return true
+}
+
+// CachedRemoteHealth returns the raw upstream /health response last fetched for a
+// proxy/AIR credential, or nil when nothing is cached (or the last refresh used the
+// /v1/models legacy fallback). Used by modelupdate.UpdateAllProxyCredentials to run
+// proxy.UpdateStatsFromHealth off the same fetch that populated the model snapshot,
+// so the periodic sync hits each upstream's /health exactly once per cycle.
+func (m *Manager) CachedRemoteHealth(credentialName string) *httputil.ProxyHealthResponse {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if cached, ok := m.remoteModelsCache[credentialName]; ok {
+		return cached.health
+	}
+	return nil
 }
 
 func (m *Manager) applyRemoteScopeSnapshotLocked(
@@ -2895,13 +2916,27 @@ func (m *Manager) GetRemoteModels(cred *config.CredentialConfig) []Model {
 // GetRemoteModelsWithError fetches models from a remote proxy credential with caching.
 // Returns explicit error when remote fetch fails.
 func (m *Manager) GetRemoteModelsWithError(ctx context.Context, cred *config.CredentialConfig) ([]Model, error) {
+	return m.getRemoteModelsWithError(ctx, cred, false)
+}
+
+// RefreshRemoteModelsWithError is the periodic poller's entry point
+// (modelupdate.UpdateAllProxyCredentials): it always re-fetches the upstream /health,
+// bypassing the read-through cache that GetRemoteModelsWithError serves request-path
+// callers from, so limits / current usage / learned priority stay fresh on every 30s
+// tick rather than only every cache-TTL. The freshly fetched /health is still written to
+// the cache (and exposed via CachedRemoteHealth for the limit/priority sync).
+func (m *Manager) RefreshRemoteModelsWithError(ctx context.Context, cred *config.CredentialConfig) ([]Model, error) {
+	return m.getRemoteModelsWithError(ctx, cred, true)
+}
+
+func (m *Manager) getRemoteModelsWithError(ctx context.Context, cred *config.CredentialConfig, skipCache bool) ([]Model, error) {
 	if !cred.IsProxyLike() {
 		return nil, nil
 	}
 
-	// Check cache first
+	// Check cache first (request-path callers only; the periodic poller forces a refresh).
 	m.mu.RLock()
-	if cached, ok := m.remoteModelsCache[cred.Name]; ok && cred.SameProviderIdentity(cached.credential) &&
+	if cached, ok := m.remoteModelsCache[cred.Name]; !skipCache && ok && cred.SameProviderIdentity(cached.credential) &&
 		!cached.expiresAt.IsZero() && utils.NowUTC().Before(cached.expiresAt) {
 		cachedModels := append([]Model(nil), cached.models...)
 		cachedSnapshot := cloneRemoteScopeSnapshot(cached.scopeSnapshot)
@@ -2925,7 +2960,7 @@ func (m *Manager) GetRemoteModelsWithError(ctx context.Context, cred *config.Cre
 		"base_url", cred.BaseURL,
 	)
 
-	models, snapshot, err := m.fetchRemoteModelsFromHealth(ctx, cred)
+	models, snapshot, health, err := m.fetchRemoteModelsFromHealth(ctx, cred)
 	if err != nil {
 		if !isLegacyProxyHealthError(err) || !m.providerScopeAllowsLegacyFallback(cred) {
 			m.failClosedUnknownRemoteScope(cred)
@@ -2952,9 +2987,10 @@ func (m *Manager) GetRemoteModelsWithError(ctx context.Context, cred *config.Cre
 			modelWeights:   map[string]int{},
 			scopeKnown:     true,
 		}
+		health = nil
 	}
 
-	if !m.applyRemoteScopeSnapshotAndCache(cred, models, snapshot) {
+	if !m.applyRemoteScopeSnapshotAndCache(cred, models, snapshot, health) {
 		return nil, errProxyCredentialChanged
 	}
 
@@ -2970,14 +3006,14 @@ func (m *Manager) GetRemoteModelsWithError(ctx context.Context, cred *config.Cre
 func (m *Manager) fetchRemoteModelsFromHealth(
 	ctx context.Context,
 	cred *config.CredentialConfig,
-) ([]Model, *remoteScopeSnapshot, error) {
+) ([]Model, *remoteScopeSnapshot, *httputil.ProxyHealthResponse, error) {
 	var health httputil.ProxyHealthResponse
 	if err := httputil.FetchJSONFromProxy(ctx, cred, "/health", m.logger, &health); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	if health.Credentials == nil || health.Models == nil {
-		return nil, nil, errProxyHealthModelMetadataUnavailable
+		return nil, nil, nil, errProxyHealthModelMetadataUnavailable
 	}
 
 	providerScopes := AggregateProviderScopesFromHealth(&health, cred.IsFallback)
@@ -3024,7 +3060,7 @@ func (m *Manager) fetchRemoteModelsFromHealth(
 		modelScopes:    modelScopes,
 		modelWeights:   modelWeightsByID,
 		scopeKnown:     true,
-	}, nil
+	}, &health, nil
 }
 
 func isLegacyProxyHealthError(err error) bool {

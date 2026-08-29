@@ -250,7 +250,7 @@
     function routerLabel(credName) {
       const c = credentialsData[credName];
       if (!c) return '—';
-      if (c.type !== 'air' && c.type !== 'proxy') return 'local';
+      if (!c.is_proxy_like) return 'local';
       const host = String(c.base_url || '').replace(/^https?:\/\//, '').replace(/\/.*$/, '');
       return host || 'local';
     }
@@ -385,6 +385,14 @@
         // it as an error. A non-JSON response (network failure, wrong auth proxy, etc.)
         // still falls through to the catch block below via the resp.json() parse failure.
         const data = await resp.json();
+
+        // An auth failure (bad/expired api key) also comes back as valid JSON —
+        // {"error": ...} with a 401/403 and none of the health fields — and would
+        // otherwise render as "0 credentials / 0% up". Surface it as the error it is.
+        if (resp.status === 401 || resp.status === 403 || (data && data.error && data.status === undefined && data.credentials === undefined)) {
+          const detail = (data && (typeof data.error === 'string' ? data.error : data.error && data.error.message)) || `HTTP ${resp.status}`;
+          throw new Error(`authorization failed — ${detail}`);
+        }
 
         // version from header (added by router)
         const ver = resp.headers.get('X-Router-Version') || '';

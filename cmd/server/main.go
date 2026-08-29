@@ -1243,15 +1243,24 @@ func startProxyStatsUpdater(
 	wg *sync.WaitGroup,
 	updateMutex *sync.Mutex,
 ) {
+	// syncFromHealth folds the per-credential /health stats sync (limits, current usage,
+	// per-model weight/priority, scopes, model set) into the single proxy poller below,
+	// off the same /health response GetRemoteModelsWithError cached — so each upstream is
+	// polled once per cycle. Replaces the removed second poller (proxy.UpdateAllFromRemoteHealth).
+	syncFromHealth := func(cred *config.CredentialConfig) bool {
+		health := modelManager.CachedRemoteHealth(cred.Name)
+		if health == nil {
+			return false
+		}
+		proxy.UpdateStatsFromHealth(health, cred, rateLimiter, log, modelManager)
+		return true
+	}
+
 	var startupWG sync.WaitGroup
-	startupWG.Add(2)
+	startupWG.Add(1)
 	go func() {
 		defer startupWG.Done()
-		modelupdate.UpdateAllProxyCredentials(bgCtx, bal, rateLimiter, log, modelManager, updateMutex)
-	}()
-	go func() {
-		defer startupWG.Done()
-		updateFromRemoteHealth(bgCtx, bal, rateLimiter, log, modelManager, updateMutex)
+		modelupdate.UpdateAllProxyCredentials(bgCtx, bal, rateLimiter, log, modelManager, updateMutex, syncFromHealth)
 	}()
 	startupWG.Wait()
 
@@ -1267,9 +1276,8 @@ func startProxyStatsUpdater(
 			case <-bgCtx.Done():
 				return
 			case <-ticker.C:
-				modelupdate.UpdateAllProxyCredentials(bgCtx, bal, rateLimiter, log, modelManager, updateMutex)
-				updateFromRemoteHealth(bgCtx, bal, rateLimiter, log, modelManager, updateMutex)
-				// Unrelated to the two calls above beyond sharing this tick: piggybacked
+				modelupdate.UpdateAllProxyCredentials(bgCtx, bal, rateLimiter, log, modelManager, updateMutex, syncFromHealth)
+				// Unrelated to the call above beyond sharing this tick: piggybacked
 				// here rather than a dedicated ticker since a proxy/AIR credential's
 				// health-learned priority (updated just above) is exactly what makes
 				// r.swrr's SWRR-cycle-per-(priority,membership) keys churn over time — see
@@ -1280,17 +1288,6 @@ func startProxyStatsUpdater(
 	}()
 
 	log.Info("Proxy stats updater started (updates every 30 seconds)")
-}
-
-func updateFromRemoteHealth(
-	ctx context.Context,
-	bal *balancer.RoundRobin,
-	rateLimiter *ratelimit.RPMLimiter,
-	log *slog.Logger,
-	modelManager *models.Manager,
-	updateMutex *sync.Mutex,
-) {
-	proxy.UpdateAllFromRemoteHealth(ctx, bal, rateLimiter, log, modelManager, updateMutex)
 }
 
 func startDBHealthMonitor(

@@ -155,17 +155,15 @@ func TestPriorityGroupCascade_ThreeRouterTopology(t *testing.T) {
 	assert.EqualValues(t, 3, atomic.LoadInt32(&router3CompletionCalls), "requests must cascade to router3's group once router2's is down")
 }
 
-// TestPriorityGroupCascade_UpstreamIsFallbackCredentialStillParticipates is the T3
-// is_fallback bug-fix regression test (see updateCredentialLimits/updateModelLimits in
-// remote.go), exercised through a real end-to-end HTTP round-trip rather than only the
-// remote.go unit tests. router2's own upstream node has TWO credentials: one regular
-// (serves "model-a") and one is_fallback (serves "model-b" only). The main router's
-// "router2" proxy credential is itself NOT is_fallback. Before the fix, model-b would
-// have been dropped entirely from router2's aggregation (the
-// `if !cred.IsFallback && credStats.IsFallback { continue }` skip) and every request for
-// it would 503 with "no credentials available". After the fix it must still be
-// selectable and routable, just at its (higher/deprioritized) reported priority.
-func TestPriorityGroupCascade_UpstreamIsFallbackCredentialStillParticipates(t *testing.T) {
+// TestPriorityGroupCascade_UpstreamIsFallbackCredentialExcludedForPrimaryConnection:
+// router2's own upstream node has TWO credentials — one regular (serves "model-a") and
+// one is_fallback (serves "model-b" only). The main router's "router2" proxy credential
+// is itself NOT is_fallback, so the single poller applies the same rule as the old
+// model-snapshot path: an is_fallback upstream credential (reserved capacity for the
+// upstream's own fallback traffic) is excluded from a primary connection's aggregation.
+// model-b must NOT surface on router2, and a request for it must fail rather than be
+// silently routed onto reserved fallback capacity.
+func TestPriorityGroupCascade_UpstreamIsFallbackCredentialExcludedForPrimaryConnection(t *testing.T) {
 	var router2CompletionCalls int32
 
 	router2Health := func() *httputil.ProxyHealthResponse {
@@ -185,9 +183,6 @@ func TestPriorityGroupCascade_UpstreamIsFallbackCredentialStillParticipates(t *t
 	router2 := mockHealthAndCompletionServer(t, &router2CompletionCalls, router2Health, "response from router2")
 	defer router2.Close()
 
-	// The LOCAL proxy credential is not is_fallback — before the fix this dropped
-	// "router2-fallback" (and model-b) from aggregation entirely instead of just
-	// deprioritizing it.
 	credRouter2 := config.CredentialConfig{Name: "router2", Type: config.ProviderTypeProxy, IsFallback: false, APIKey: "router2-key", BaseURL: router2.URL, RPM: 1000, TPM: 1000000}
 
 	builder := NewTestProxyBuilder().WithCredentials(credRouter2)
@@ -201,15 +196,19 @@ func TestPriorityGroupCascade_UpstreamIsFallbackCredentialStillParticipates(t *t
 	c2 := credRouter2
 	UpdateStatsFromRemoteProxy(ctx, &c2, rl, logger, mm)
 
-	// Bookkeeping: model-b must be present, not dropped, and carry the deprioritized
-	// (higher) priority reported by the is_fallback upstream credential.
-	require.True(t, mm.HasModel("router2", "model-b"), "an is_fallback upstream credential's model must not be dropped from aggregation")
-	require.Equal(t, 5, mm.GetModelPriorityForCredential("model-b", "router2"))
+	// model-a (regular upstream credential) surfaces; model-b (is_fallback-only) does not.
+	require.True(t, mm.HasModel("router2", "model-a"))
 	require.Equal(t, 1, mm.GetModelPriorityForCredential("model-a", "router2"))
+	require.False(t, mm.HasModel("router2", "model-b"), "a model served only via an is_fallback upstream credential must not surface on a primary connection")
+	require.Equal(t, 0, mm.GetModelPriorityForCredential("model-b", "router2"))
 
-	// End-to-end: model-b must actually be routable, not just present in bookkeeping maps.
-	w := doPriorityTestRequest(t, prx, "model-b")
-	require.Equal(t, http.StatusOK, w.Code, "model-b must be selectable and routable even though its only upstream credential is is_fallback")
+	// End-to-end: model-a routes; model-b has no live credential and must fail.
+	w := doPriorityTestRequest(t, prx, "model-a")
+	require.Equal(t, http.StatusOK, w.Code)
 	require.Contains(t, w.Body.String(), "response from router2")
+	assert.EqualValues(t, 1, atomic.LoadInt32(&router2CompletionCalls))
+
+	wb := doPriorityTestRequest(t, prx, "model-b")
+	require.NotEqual(t, http.StatusOK, wb.Code, "model-b must not be routable via a primary connection to an is_fallback-only upstream credential")
 	assert.EqualValues(t, 1, atomic.LoadInt32(&router2CompletionCalls))
 }

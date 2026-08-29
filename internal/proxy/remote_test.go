@@ -8,11 +8,8 @@ import (
 	"net/http"
 	"sync"
 	"testing"
-	"time"
 
-	"github.com/mixaill76/auto_ai_router/internal/balancer"
 	"github.com/mixaill76/auto_ai_router/internal/config"
-	"github.com/mixaill76/auto_ai_router/internal/fail2ban"
 	"github.com/mixaill76/auto_ai_router/internal/httputil"
 	"github.com/mixaill76/auto_ai_router/internal/ratelimit"
 	"github.com/mixaill76/auto_ai_router/internal/scope"
@@ -459,14 +456,14 @@ func TestUpdateModelLimits_NoPriorityMismatchWarning_WhenPrioritiesMatch(t *test
 	assert.NotContains(t, logBuf.String(), "different priority groups")
 }
 
-// TestUpdateModelLimits_IsFallbackDoesNotDropPriority is a T3 regression test: an
-// upstream credential marked is_fallback still contributes its model+priority to the
-// proxy credential's aggregation instead of being skipped outright (the bug fixed in
-// updateModelLimits/updateCredentialLimits — see the _IsFallbackDoesNotSkipAggregation_
-// tests above for the limits-only version of this same fix). Here "grant-fallback"
-// (is_fallback on the upstream node) offers a model no other upstream credential offers,
-// at a high (deprioritized) priority number — it must still show up, not vanish.
-func TestUpdateModelLimits_IsFallbackDoesNotDropPriority(t *testing.T) {
+// TestUpdateModelLimits_SkipsFallbackUpstreamForPrimaryConnection: for a non-fallback
+// local proxy credential, an upstream credential marked is_fallback (reserved for
+// fallback traffic on the upstream node) is excluded from aggregation — its models,
+// priorities and limits must NOT surface on this proxy credential's primary pool. This
+// mirrors the old model-snapshot path (models.fetchRemoteModelsFromHealth) so the single
+// poller applies one consistent rule. A model offered ONLY through such a credential
+// simply is not routable via this proxy credential for primary traffic.
+func TestUpdateModelLimits_SkipsFallbackUpstreamForPrimaryConnection(t *testing.T) {
 	health := &httputil.ProxyHealthResponse{
 		Credentials: map[string]httputil.CredentialHealthStats{
 			"grant-primary":  {IsFallback: false, Priority: 100},
@@ -479,9 +476,6 @@ func TestUpdateModelLimits_IsFallbackDoesNotDropPriority(t *testing.T) {
 	}
 
 	rateLimiter := ratelimit.New()
-	// The LOCAL proxy credential is not is_fallback — before the fix, this would have
-	// dropped "grant-fallback" (and claude-3-opus) entirely instead of just
-	// deprioritizing it.
 	cred := &config.CredentialConfig{Name: "test_proxy", IsFallback: false}
 	logger := testhelpers.NewTestLogger()
 	mockMM := NewMockModelManager()
@@ -489,28 +483,55 @@ func TestUpdateModelLimits_IsFallbackDoesNotDropPriority(t *testing.T) {
 	updateModelLimits(health, cred, rateLimiter, logger, mockMM)
 
 	assert.True(t, mockMM.HasModel("test_proxy", "gpt-4"))
-	assert.True(t, mockMM.HasModel("test_proxy", "claude-3-opus"), "is_fallback upstream credential's model must not be dropped")
+	assert.False(t, mockMM.HasModel("test_proxy", "claude-3-opus"), "model served only via an is_fallback upstream credential must not surface on a primary connection")
 	assert.Equal(t, 100, mockMM.GetModelPriorityForCredential("gpt-4", "test_proxy"))
-	assert.Equal(t, 999, mockMM.GetModelPriorityForCredential("claude-3-opus", "test_proxy"))
-	assert.Equal(t, 20, rateLimiter.GetModelLimitRPM("test_proxy", "claude-3-opus"), "limits for the is_fallback-served model must still be aggregated")
+	assert.Equal(t, 0, mockMM.GetModelPriorityForCredential("claude-3-opus", "test_proxy"))
+	assert.Equal(t, -1, rateLimiter.GetModelLimitRPM("test_proxy", "claude-3-opus"), "no rate-limiter entry for an excluded model")
 }
 
-// TestUpdateModelScopes_IncludesFallbackMarkedUpstreamCredential is the scope-side
-// counterpart to TestUpdateModelLimits_IsFallbackDoesNotDropPriority above: the same
-// "upstream is_fallback must not cause exclusion" fix was applied to limits/priority
-// but updateModelScopes still passed cred.IsFallback (our own connection's flag, not
-// the upstream credential's) into Aggregate*FromHealth, which skips is_fallback
-// upstream credentials whenever that's false. A model offered only through such a
-// credential got its RPM/TPM/priority registered (by updateModelLimits) but no scope
-// metadata — silently open to any caller, defeating whatever scope that upstream
-// credential carried.
-func TestUpdateModelScopes_IncludesFallbackMarkedUpstreamCredential(t *testing.T) {
+// TestUpdateModelLimits_IncludesFallbackUpstreamForFallbackConnection: a locally
+// is_fallback proxy credential is a last resort — it includes every upstream credential
+// regardless of the upstream's own is_fallback flag.
+func TestUpdateModelLimits_IncludesFallbackUpstreamForFallbackConnection(t *testing.T) {
 	health := &httputil.ProxyHealthResponse{
 		Credentials: map[string]httputil.CredentialHealthStats{
-			"grant-fallback": {IsFallback: true, Scopes: []string{"team-a"}},
+			"grant-primary":  {IsFallback: false, Priority: 100},
+			"grant-fallback": {IsFallback: true, Priority: 999},
 		},
 		Models: map[string]httputil.ModelHealthStats{
-			"model:fallback": {Model: "claude-3-opus", Credential: "grant-fallback"},
+			"model:primary":  {Model: "gpt-4", Credential: "grant-primary", Priority: 100, LimitRPM: 50, LimitTPM: 500},
+			"model:fallback": {Model: "claude-3-opus", Credential: "grant-fallback", Priority: 999, LimitRPM: 20, LimitTPM: 200},
+		},
+	}
+
+	rateLimiter := ratelimit.New()
+	cred := &config.CredentialConfig{Name: "test_proxy", IsFallback: true}
+	logger := testhelpers.NewTestLogger()
+	mockMM := NewMockModelManager()
+
+	updateModelLimits(health, cred, rateLimiter, logger, mockMM)
+
+	assert.True(t, mockMM.HasModel("test_proxy", "gpt-4"))
+	assert.True(t, mockMM.HasModel("test_proxy", "claude-3-opus"))
+	assert.Equal(t, 999, mockMM.GetModelPriorityForCredential("claude-3-opus", "test_proxy"))
+	assert.Equal(t, 20, rateLimiter.GetModelLimitRPM("test_proxy", "claude-3-opus"))
+}
+
+// TestUpdateModelScopes_SkipsFallbackUpstreamForPrimaryConnection: for a non-fallback
+// local proxy credential, an unrestricted is_fallback upstream credential must NOT be
+// OR'd into the aggregate — otherwise its lack of scope restriction erases a restricted
+// primary upstream credential's scope (an access-control regression). Here the model is
+// served by a restricted primary credential (team-a) and an unrestricted fallback one;
+// the resulting proxy-credential scope must stay team-a-only.
+func TestUpdateModelScopes_SkipsFallbackUpstreamForPrimaryConnection(t *testing.T) {
+	health := &httputil.ProxyHealthResponse{
+		Credentials: map[string]httputil.CredentialHealthStats{
+			"grant-primary":  {IsFallback: false, Scopes: []string{"team-a"}},
+			"grant-fallback": {IsFallback: true},
+		},
+		Models: map[string]httputil.ModelHealthStats{
+			"model:primary":  {Model: "gpt-4", Credential: "grant-primary"},
+			"model:fallback": {Model: "gpt-4", Credential: "grant-fallback"},
 		},
 	}
 
@@ -521,9 +542,31 @@ func TestUpdateModelScopes_IncludesFallbackMarkedUpstreamCredential(t *testing.T
 
 	require.NotNil(t, cred.ProviderScopeExpression)
 	assert.True(t, scope.NewContext([]string{"team-a"}, nil).AllowsExpression(cred.ProviderScopeExpression),
-		"team-a caller must still be allowed")
+		"team-a caller must be allowed")
 	assert.False(t, scope.NewContext(nil, nil).AllowsExpression(cred.ProviderScopeExpression),
-		"a caller outside team-a must not be silently let in just because the only upstream serving this model is is_fallback")
+		"an unrestricted is_fallback upstream credential must not erase the primary credential's team-a restriction")
+}
+
+// TestUpdateModelScopes_IncludesFallbackUpstreamForFallbackConnection: a locally
+// is_fallback proxy credential aggregates every upstream credential, is_fallback or not.
+func TestUpdateModelScopes_IncludesFallbackUpstreamForFallbackConnection(t *testing.T) {
+	health := &httputil.ProxyHealthResponse{
+		Credentials: map[string]httputil.CredentialHealthStats{
+			"grant-fallback": {IsFallback: true, Scopes: []string{"team-a"}},
+		},
+		Models: map[string]httputil.ModelHealthStats{
+			"model:fallback": {Model: "claude-3-opus", Credential: "grant-fallback"},
+		},
+	}
+
+	cred := &config.CredentialConfig{Name: "test_proxy", IsFallback: true}
+	mockMM := NewMockModelManager()
+
+	updateModelScopes(health, cred, mockMM)
+
+	require.NotNil(t, cred.ProviderScopeExpression)
+	assert.True(t, scope.NewContext([]string{"team-a"}, nil).AllowsExpression(cred.ProviderScopeExpression))
+	assert.False(t, scope.NewContext(nil, nil).AllowsExpression(cred.ProviderScopeExpression))
 }
 
 func TestUpdateModelLimits_NoModels_ClearsPriorities(t *testing.T) {
@@ -1109,7 +1152,12 @@ func TestUpdateStatsFromHealth_ClearsModelsWhenRemoteSnapshotIsEmpty(t *testing.
 	assert.Empty(t, rateLimiter.GetAllModelPairs())
 }
 
-func TestUpdateStatsFromHealth_IsFallbackDoesNotSkipAggregation_Primary(t *testing.T) {
+// TestUpdateStatsFromHealth_SkipsFallbackUpstreamForPrimaryConnection: for a non-fallback
+// local proxy credential, is_fallback upstream credentials are excluded from the
+// aggregated RPM/TPM ceiling — folding their reserved capacity into the primary ceiling
+// would let the client rate limiter admit primary traffic past what the upstream serves
+// on its primary credentials. Only "upstream-primary" counts here.
+func TestUpdateStatsFromHealth_SkipsFallbackUpstreamForPrimaryConnection(t *testing.T) {
 	mockMM := NewMockModelManager()
 	rateLimiter := ratelimit.New()
 	logger := testhelpers.NewTestLogger()
@@ -1130,24 +1178,22 @@ func TestUpdateStatsFromHealth_IsFallbackDoesNotSkipAggregation_Primary(t *testi
 		IsFallback: false,
 	}, rateLimiter, logger, mockMM)
 
-	// Both upstream credentials now contribute to the proxy's aggregated limits —
-	// is_fallback no longer excludes "upstream-fallback".
-	assert.Equal(t, 600, rateLimiter.GetLimitRPM("proxy-primary"))
-	assert.Equal(t, 6000, rateLimiter.GetLimitTPM("proxy-primary"))
+	assert.Equal(t, 100, rateLimiter.GetLimitRPM("proxy-primary"))
+	assert.Equal(t, 1000, rateLimiter.GetLimitTPM("proxy-primary"))
 	assert.Equal(t, 20, rateLimiter.GetModelLimitRPM("proxy-primary", "primary-model"))
-	assert.Equal(t, 80, rateLimiter.GetModelLimitRPM("proxy-primary", "fallback-model"))
+	assert.Equal(t, -1, rateLimiter.GetModelLimitRPM("proxy-primary", "fallback-model"))
 
 	addedModels := mockMM.GetAddedModels()
-	assert.Len(t, addedModels, 2)
-	addedModelIDs := []string{addedModels[0].model, addedModels[1].model}
-	assert.ElementsMatch(t, []string{"primary-model", "fallback-model"}, addedModelIDs)
+	addedModelIDs := make([]string, 0, len(addedModels))
+	for _, m := range addedModels {
+		addedModelIDs = append(addedModelIDs, m.model)
+	}
+	assert.Equal(t, []string{"primary-model"}, addedModelIDs)
 }
 
-// TestUpdateStatsFromHealth_IsFallbackDoesNotSkipAggregation_Fallback mirrors the
-// _Primary case above but with a locally is_fallback proxy credential — included mainly
-// to document that the aggregation behavior is now identical regardless of the proxy
-// credential's own is_fallback flag (that flag only ever affected the removed skip).
-func TestUpdateStatsFromHealth_IsFallbackDoesNotSkipAggregation_Fallback(t *testing.T) {
+// TestUpdateStatsFromHealth_IncludesFallbackUpstreamForFallbackConnection: a locally
+// is_fallback proxy credential is a last resort and includes ALL upstream credentials.
+func TestUpdateStatsFromHealth_IncludesFallbackUpstreamForFallbackConnection(t *testing.T) {
 	mockMM := NewMockModelManager()
 	rateLimiter := ratelimit.New()
 	logger := testhelpers.NewTestLogger()
@@ -1179,124 +1225,4 @@ func TestUpdateStatsFromHealth_IsFallbackDoesNotSkipAggregation_Fallback(t *test
 	assert.Len(t, addedModels, 2)
 	addedModelIDs := []string{addedModels[0].model, addedModels[1].model}
 	assert.ElementsMatch(t, []string{"primary-model", "fallback-model"}, addedModelIDs)
-}
-
-func TestUpdateAllFromRemoteHealth_DoesNotHoldLockDuringFetch(t *testing.T) {
-	reached := make(chan struct{})
-	release := make(chan struct{})
-
-	server := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/health" {
-			http.NotFound(w, r)
-			return
-		}
-		close(reached)
-		<-release
-
-		health := createMockProxyHealthResponse()
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(health)
-	}))
-	defer server.Close()
-
-	cred := config.CredentialConfig{
-		Name:    "slow-proxy",
-		Type:    config.ProviderTypeProxy,
-		BaseURL: server.URL,
-		APIKey:  "unused",
-	}
-
-	rateLimiter := ratelimit.New()
-	logger := testhelpers.NewTestLogger()
-	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
-	bal := balancer.New([]config.CredentialConfig{cred}, f2b, rateLimiter)
-	mockMM := NewMockModelManager()
-	updateMutex := &sync.Mutex{}
-
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		UpdateAllFromRemoteHealth(context.Background(), bal, rateLimiter, logger, mockMM, updateMutex)
-	}()
-
-	select {
-	case <-reached:
-	case <-time.After(2 * time.Second):
-		close(release) // unblock the handler so server.Close() in the deferred cleanup doesn't hang
-		t.Fatal("mock /health handler was never reached")
-	}
-
-	// The fetch is now blocked on `release`, i.e. genuinely in flight. The lock
-	// must be free during this window. Use assert (not require/Fatal) so that even
-	// on failure execution falls through to close(release) below — t.Fatal would
-	// Goexit this goroutine first, leaving the handler blocked forever and hanging
-	// the deferred server.Close() (httptest.Server.Close waits for in-flight requests).
-	locked := updateMutex.TryLock()
-	if locked {
-		updateMutex.Unlock()
-	}
-
-	close(release)
-
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("UpdateAllFromRemoteHealth did not complete after the fetch was released")
-	}
-
-	assert.True(t, locked, "updateMutex was held during the network fetch, expected it to be free")
-}
-
-// TestUpdateAllFromRemoteHealth_WritesProviderScopesBackToBalancer covers the gap
-// where UpdateAllFromRemoteHealth mutates only its own bal.GetCredentialsSnapshot()
-// copy (updateModelScopes sets cred.ProviderScopes/ProviderScopeExpression/
-// ProviderScopeKnown on that throwaway struct) without ever calling
-// bal.UpdateProviderScopes, unlike the parallel modelupdate.UpdateAllProxyCredentials.
-// The learned provider scope must actually reach the live balancer's own credential
-// state (what VisibleTo()/scope-based routing and /health reporting read from), not
-// just a copy that gets discarded at the end of the loop iteration.
-func TestUpdateAllFromRemoteHealth_WritesProviderScopesBackToBalancer(t *testing.T) {
-	server := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/health" {
-			http.NotFound(w, r)
-			return
-		}
-		health := &httputil.ProxyHealthResponse{
-			Credentials: map[string]httputil.CredentialHealthStats{
-				"cheapgpt": {Scopes: []string{"team-a"}},
-			},
-		}
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(health)
-	}))
-	defer server.Close()
-
-	cred := config.CredentialConfig{
-		Name:    "grant-pol01",
-		Type:    config.ProviderTypeProxy,
-		BaseURL: server.URL,
-		APIKey:  "unused",
-	}
-
-	rateLimiter := ratelimit.New()
-	logger := testhelpers.NewTestLogger()
-	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
-	bal := balancer.New([]config.CredentialConfig{cred}, f2b, rateLimiter)
-	mockMM := NewMockModelManager()
-	updateMutex := &sync.Mutex{}
-
-	UpdateAllFromRemoteHealth(context.Background(), bal, rateLimiter, logger, mockMM, updateMutex)
-
-	var got *config.CredentialConfig
-	for _, c := range bal.GetCredentialsSnapshot() {
-		if c.Name == "grant-pol01" {
-			cCopy := c
-			got = &cCopy
-		}
-	}
-	require.NotNil(t, got, "credential must still be present in the balancer")
-	assert.True(t, got.ProviderScopeKnown, "learned provider scope must reach the live balancer, not just the throwaway snapshot copy")
-	require.NotNil(t, got.ProviderScopeExpression)
-	assert.True(t, scope.NewContext([]string{"team-a"}, nil).AllowsExpression(got.ProviderScopeExpression))
-	assert.False(t, scope.NewContext(nil, nil).AllowsExpression(got.ProviderScopeExpression))
 }

@@ -5,9 +5,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
-	"sync"
 
-	"github.com/mixaill76/auto_ai_router/internal/balancer"
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/httputil"
 	"github.com/mixaill76/auto_ai_router/internal/models"
@@ -32,97 +30,10 @@ type modelScopeUpdater interface {
 	ReplaceModelScopesForCredential(credentialName string, scopes map[string]models.ScopeMetadata)
 }
 
-// UpdateAllFromRemoteHealth polls every proxy/AIR credential's own /health and syncs
-// weight, priority, limits, current usage, and (via ModelHealthStats.RealCredential)
-// which real leaf credential is actually serving each model — everything
-// UpdateStatsFromRemoteProxy/UpdateStatsFromHealth compute below.
-//
-// This is the counterpart to modelupdate.UpdateAllProxyCredentials, wired
-// alongside it in cmd/server/main.go's startProxyStatsUpdater, not a replacement for
-// it: that one discovers model *names* through a generic /v1/models-shaped call,
-// which works for any OpenAI-compatible upstream (type: proxy) whether or not it is
-// itself Auto AI Router. This one only has anything to sync when the upstream
-// exposes AIR's own /health JSON shape — for a plain type: proxy upstream that
-// doesn't, FetchHealthFromRemoteProxy's fetch just fails and is logged at Debug, so
-// calling this unconditionally for every proxy-like credential is safe.
-func UpdateAllFromRemoteHealth(
-	ctx context.Context,
-	bal *balancer.RoundRobin,
-	rateLimiter *ratelimit.RPMLimiter,
-	logger *slog.Logger,
-	modelManager ModelManagerInterface,
-	updateMutex *sync.Mutex,
-) {
-	credentials := bal.GetCredentialsSnapshot()
-
-	type fetchResult struct {
-		cred   *config.CredentialConfig
-		health *httputil.ProxyHealthResponse
-	}
-	resultsChan := make(chan fetchResult, len(credentials))
-
-	var wg sync.WaitGroup
-	for i := range credentials {
-		cred := &credentials[i]
-		if !cred.IsProxyLike() {
-			continue
-		}
-		wg.Add(1)
-		go func(c *config.CredentialConfig) {
-			defer wg.Done()
-			health, err := FetchHealthFromRemoteProxy(ctx, c, logger)
-			if err != nil {
-				return
-			}
-			resultsChan <- fetchResult{cred: c, health: health}
-		}(cred)
-	}
-
-	go func() {
-		wg.Wait()
-		close(resultsChan)
-	}()
-
-	// Each fetch above is already bounded (FetchHealthFromRemoteProxy threads ctx
-	// through to the HTTP request, and httputil.FetchResponseFromProxy applies
-	// proxyFetchTimeout when ctx has no deadline of its own), so this loop can't
-	// hang forever. But without watching ctx.Done() here too, a caller that
-	// cancels ctx to shut down promptly (e.g. the periodic ticker's bgCtx in
-	// cmd/server/main.go) still has to wait out whatever's left of that bound
-	// before this function returns, instead of exiting as soon as the goroutines
-	// observe the cancellation.
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case res, ok := <-resultsChan:
-			if !ok {
-				return
-			}
-			updateMutex.Lock()
-			UpdateStatsFromHealth(res.health, res.cred, rateLimiter, logger, modelManager)
-			// UpdateStatsFromHealth (via updateModelScopes) only mutates res.cred, which is a
-			// pointer into this function's own bal.GetCredentialsSnapshot() copy — never
-			// written back to the live balancer, unlike modelupdate.UpdateAllProxyCredentials's
-			// matching bal.UpdateProviderScopes call. Without this, the provider scope this
-			// credential learned from its upstream /health never reaches bal's own credential
-			// state, so VisibleTo()/scope-based routing decisions never see it.
-			bal.UpdateProviderScopes(
-				*res.cred,
-				res.cred.ProviderScopes,
-				res.cred.ProviderDeniedScopes,
-				res.cred.ProviderScopeExpression,
-				res.cred.ProviderScopeKnown,
-			)
-			updateMutex.Unlock()
-		}
-	}
-}
-
 // UpdateStatsFromRemoteProxy fetches and updates RPM/TPM limits from remote /health
 // endpoint in one call — kept as a single-credential convenience for tests and any
-// future caller that doesn't need the fetch/write split UpdateAllFromRemoteHealth
-// uses; production's periodic sync no longer calls this directly (see above).
+// future caller that doesn't need the fetch/write split the periodic poller uses;
+// production's periodic sync no longer calls this directly (see UpdateStatsFromHealth).
 func UpdateStatsFromRemoteProxy(
 	ctx context.Context,
 	cred *config.CredentialConfig,
@@ -175,7 +86,14 @@ func FetchHealthResponseFromRemoteProxy(
 	return &health, headers, nil
 }
 
-// UpdateStatsFromHealth updates RPM/TPM limits from already-fetched health data.
+// UpdateStatsFromHealth is the single sync point for everything a proxy/AIR credential
+// learns from its upstream's own /health JSON: aggregated RPM/TPM limits, current usage,
+// per-model weight/priority, provider/model scopes, and which real leaf credential is
+// serving each model. It runs once per cycle from the sole periodic poller,
+// modelupdate.UpdateAllProxyCredentials, fed the same /health response that populated the
+// model-name snapshot (models.Manager.CachedRemoteHealth) so each upstream is polled once.
+// A plain type: proxy upstream that doesn't expose AIR's /health shape has no health
+// cached and this is simply not called for it.
 func UpdateStatsFromHealth(
 	health *httputil.ProxyHealthResponse,
 	cred *config.CredentialConfig,
@@ -197,15 +115,17 @@ func updateModelScopes(
 	cred *config.CredentialConfig,
 	modelManager ModelManagerInterface,
 ) {
-	// includeFallback: true, always — unlike updateCredentialLimits/updateModelLimits's
-	// own is_fallback skip (already removed there, see their comments), this pair of
-	// Aggregate*FromHealth calls still had the is_fallback skip baked in via
-	// cred.IsFallback (our own connection's flag, not the upstream credential's). Left
-	// as cred.IsFallback here, a model offered only through an is_fallback-marked
-	// upstream credential got its RPM/TPM/priority registered (by the limits calls
-	// above) but no scope metadata (silently dropped by the skip below), leaking it
-	// past whatever scope restriction that upstream credential carried.
-	providerScopes := models.AggregateProviderScopesFromHealth(health, true)
+	// is_fallback rules mirror the old model-snapshot path (models.fetchRemoteModelsFromHealth):
+	// for a non-fallback connection, upstream credentials marked is_fallback are excluded
+	// from aggregation (updateModelLimits below drops their models from the set entirely,
+	// so there is nothing to scope), and for a fallback connection every upstream
+	// credential is included as a last resort. Passing `true` unconditionally here (a) let
+	// an unrestricted is_fallback upstream credential OR its lack-of-scope into the
+	// aggregate and erase a restricted primary credential's scope, and (b) diverged from
+	// the old path, which re-applies its own snapshot every 30s and would flip the state
+	// back. Both paths now use the same rule.
+	includeFallback := cred.IsFallback
+	providerScopes := models.AggregateProviderScopesFromHealth(health, includeFallback)
 	cred.ProviderScopes = providerScopes.Scopes
 	cred.ProviderDeniedScopes = providerScopes.DeniedScopes
 	cred.ProviderScopeExpression = scope.NormalizeExpression(providerScopes.ScopeExpression)
@@ -213,7 +133,7 @@ func updateModelScopes(
 
 	if updater, ok := modelManager.(modelScopeUpdater); ok {
 		updater.UpdateProviderScopesForCredential(cred.Name, providerScopes)
-		updater.ReplaceModelScopesForCredential(cred.Name, models.AggregateModelScopesFromHealth(health, true))
+		updater.ReplaceModelScopesForCredential(cred.Name, models.AggregateModelScopesFromHealth(health, includeFallback))
 	}
 }
 
@@ -346,15 +266,21 @@ func updateCredentialLimits(
 	// when total usage exceeded the highest single credential's limit.
 	aggregation := newSumLimitAggregation()
 
-	for _, credStats := range health.Credentials {
-		// Previously skipped upstream credentials marked is_fallback here unless our own
-		// proxy credential was also is_fallback — that dropped an upstream credential's
-		// entire RPM/TPM contribution instead of just deprioritizing it, which made
-		// models served only by a fallback-flagged upstream credential vanish from this
-		// proxy's aggregated limits. The upstream credential's is_fallback status has no
-		// bearing on our local proxy credential's capacity: it always counts toward the
-		// aggregate now. Ordering/deprioritization is handled separately by priority
-		// (see updateModelLimits below and EffectivePriority()).
+	for credName, credStats := range health.Credentials {
+		// For a non-fallback connection, skip upstream credentials marked is_fallback:
+		// their RPM/TPM is reserved capacity for fallback traffic, and folding it into
+		// this proxy credential's primary ceiling lets the client rate limiter admit
+		// primary traffic past what the upstream will actually serve on its primary
+		// credentials (upstream then 429s / burns reserved fallback capacity). For a
+		// fallback connection, include every upstream credential. Mirrors the old
+		// model-snapshot path's rule so the two 30s pollers agree.
+		if !cred.IsFallback && credStats.IsFallback {
+			logger.Debug("Skipping is_fallback upstream credential in primary limit aggregation",
+				"proxy", cred.Name,
+				"upstream_credential", credName,
+			)
+			continue
+		}
 		aggregation.applySum(
 			credStats.LimitRPM,
 			credStats.LimitTPM,
@@ -431,11 +357,14 @@ func updateModelLimits(
 		if !ok {
 			continue
 		}
-		// Previously skipped upstream credentials marked is_fallback here unless our own
-		// proxy credential was also is_fallback — see the matching comment in
-		// updateCredentialLimits above. The upstream credential (and its models) always
-		// participates in aggregation now; its priority (below) is what pushes it later
-		// in the selection order, not exclusion from the model/limit set.
+		// For a non-fallback connection: skip upstream credentials marked is_fallback
+		// (reserved for fallback traffic, must not serve primary requests). For a
+		// fallback connection: include ALL upstream credentials as a last resort.
+		// Mirrors the old model-snapshot path (models.fetchRemoteModelsFromHealth) so
+		// the two 30s pollers write the same model set / weights / priorities.
+		if !cred.IsFallback && credStats.IsFallback {
+			continue
+		}
 		modelID := modelStatsData.Model
 		if modelID == "" {
 			continue

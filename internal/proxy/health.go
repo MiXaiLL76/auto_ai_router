@@ -113,17 +113,22 @@ func (p *Proxy) HealthCheckScoped(visibility scope.Context) (bool, *httputil.Pro
 			Type:             string(cred.Type),
 			BaseURL:          cleanBaseURL(cred.BaseURL),
 			IsFallback:       cred.IsFallback,
+			IsProxyLike:      cred.IsProxyLike(),
 			IsBanned:         p.balancer.HasAnyBan(cred.Name),
 			Weight:           balancer.EffectiveWeight(0, cred.Weight),
 			FallbackPriority: cred.FallbackPriority,
-			Priority:         cred.EffectivePriority(),
-			Scopes:           scopes,
-			DeniedScopes:     deniedScopes,
-			ScopeExpression:  expression,
-			CurrentRPM:       cs.RPM,
-			CurrentTPM:       cs.TPM,
-			LimitRPM:         limitRPM,
-			LimitTPM:         limitTPM,
+			// Priority carries only the explicit priority: field, not EffectivePriority():
+			// a downstream proxy folds this into its own primary-pool grouping via
+			// EffectiveHealthPriority, and fallback_priority (reported separately above)
+			// must not leak in as a hard primary tier there.
+			Priority:        cred.Priority,
+			Scopes:          scopes,
+			DeniedScopes:    deniedScopes,
+			ScopeExpression: expression,
+			CurrentRPM:      cs.RPM,
+			CurrentTPM:      cs.TPM,
+			LimitRPM:        limitRPM,
+			LimitTPM:        limitTPM,
 		}
 	}
 
@@ -237,13 +242,16 @@ func (p *Proxy) addModelHealthStats(
 	expression *scope.Expression,
 ) {
 	modelKey := credentialName + ":" + modelID
-	cred := findCredential(creds, credentialName)
+	cred, credFound := findCredential(creds, credentialName)
 	credWeight := 0
 	credPriority := 0
 	isProxyLike := false
-	if cred != nil {
+	if credFound {
 		credWeight = cred.Weight
-		credPriority = cred.EffectivePriority()
+		// cred.Priority (not EffectivePriority()) — the balancer's primary-pool grouping
+		// keys off the explicit priority: field only (balancer.primaryPriority);
+		// fallback_priority is a retry-only knob and must not show here as a primary tier.
+		credPriority = cred.Priority
 		isProxyLike = cred.IsProxyLike()
 	}
 	modelWeight := 0
@@ -251,25 +259,20 @@ func (p *Proxy) addModelHealthStats(
 	realCredential := ""
 	if p.modelManager != nil {
 		modelWeight = p.modelManager.GetModelWeightForCredential(modelID, credentialName)
-		// Dynamic per-model priority is only ever learned from an upstream
-		// proxy/AIR credential's own /health poll (see
-		// ModelManagerInterface.ReplaceModelPrioritiesForCredential callers in
-		// remote.go, gated on cred.IsProxyLike()) — restricting the lookup here
-		// too mirrors balancer.RoundRobin.effectivePriority
-		// (internal/balancer/weighted.go) exactly, instead of relying on the
-		// caller-side invariant that non-proxy credentials never have data to
-		// return.
-		if isProxyLike {
+		// Dynamic per-model priority is learned from an upstream proxy/AIR credential's
+		// own /health poll. Gate the lookup on exactly what balancer.learnedProxyPriority
+		// (internal/balancer/weighted.go) checks — proxy-like AND the model checker being
+		// enabled — so the dashboard never shows a learned priority the balancer would not
+		// actually route on (it falls back to the static field when the checker is off).
+		if isProxyLike && p.modelManager.IsEnabled() {
 			modelPriority = p.modelManager.GetModelPriorityForCredential(modelID, credentialName)
 		}
 		realCredential = p.modelManager.GetModelSourceCredentialForCredential(modelID, credentialName)
 	}
-	// Falls back to the owning credential's static EffectivePriority() when
-	// nothing has been learned yet (modelPriority == 0 — see the "0 means
-	// unset" contract note on models.Manager.GetModelPriorityForCredential).
-	// This keeps the dashboard's Priority in sync with the number the
-	// balancer actually routes on, instead of always showing the
-	// credential's local config value.
+	// Falls back to the owning credential's static priority: field when nothing has been
+	// learned yet (modelPriority == 0 — see the "0 means unset" contract note on
+	// models.Manager.GetModelPriorityForCredential). Keeps the dashboard's Priority in
+	// sync with the number the balancer actually routes on.
 	priority := credPriority
 	if modelPriority > 0 {
 		priority = modelPriority
@@ -294,8 +297,8 @@ func (p *Proxy) addModelHealthStats(
 }
 
 func (p *Proxy) modelScopeExpression(creds []config.CredentialConfig, credentialName, modelID string) *scope.Expression {
-	credential := findCredential(creds, credentialName)
-	if credential == nil {
+	credential, ok := findCredential(creds, credentialName)
+	if !ok {
 		return scope.FalseExpression()
 	}
 	if p.modelManager == nil {
@@ -308,16 +311,18 @@ func (p *Proxy) modelScopeExpression(creds []config.CredentialConfig, credential
 	return scope.And(scope.FromScopes(credential.Scopes, credential.DeniedScopes), modelExpression)
 }
 
-// findCredential returns a pointer to the credential named credentialName
-// within creds, or nil if not found. The returned pointer aliases the slice
-// element — callers must treat it as read-only.
-func findCredential(creds []config.CredentialConfig, credentialName string) *config.CredentialConfig {
+// findCredential returns a copy of the credential named credentialName within creds
+// (ok=false when not found). Returned by value rather than as a pointer into creds so a
+// caller cannot accidentally mutate shared balancer state through it — creds is only a
+// shallow snapshot, so its CredentialConfig scalar fields are safe to hand out by value
+// but writes through an aliasing pointer would not be.
+func findCredential(creds []config.CredentialConfig, credentialName string) (config.CredentialConfig, bool) {
 	for i := range creds {
 		if creds[i].Name == credentialName {
-			return &creds[i]
+			return creds[i], true
 		}
 	}
-	return nil
+	return config.CredentialConfig{}, false
 }
 
 // VisualHealthCheck serves the static health dashboard HTML.

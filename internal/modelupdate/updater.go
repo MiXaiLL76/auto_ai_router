@@ -13,6 +13,17 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/ratelimit"
 )
 
+// ProxyHealthSync syncs a proxy/AIR credential's aggregated limits, current usage,
+// per-model weight/priority, scopes and model set from the upstream /health response that
+// RefreshRemoteModelsWithError just fetched and cached (models.Manager.CachedRemoteHealth).
+// It returns true when it handled the credential (an AIR-shaped /health was cached), in
+// which case UpdateAllProxyCredentials skips its legacy per-model default-limit pass.
+//
+// Injected as a callback (wired to proxy.UpdateStatsFromHealth in cmd/server) rather
+// than called directly so this package does not import internal/proxy — internal/proxy's
+// own tests import this package, which would be a cycle.
+type ProxyHealthSync func(cred *config.CredentialConfig) (handled bool)
+
 // UpdateAllProxyCredentials fetches the latest models from all proxy credentials
 // and updates the balancer, rate limiter, and model manager with the results.
 // This function is designed to be called periodically in a background goroutine.
@@ -24,6 +35,8 @@ import (
 //   - log: Logger for operation details
 //   - modelManager: Model manager for storing fetched models
 //   - updateMutex: Synchronizes updates (prevents race conditions with metrics)
+//   - syncFromHealth: optional; when set, owns limit/weight/priority/scope sync for
+//     AIR-shaped upstreams (see ProxyHealthSync). nil disables health-stats sync.
 func UpdateAllProxyCredentials(
 	ctx context.Context,
 	bal *balancer.RoundRobin,
@@ -31,6 +44,7 @@ func UpdateAllProxyCredentials(
 	log *slog.Logger,
 	modelManager *models.Manager,
 	updateMutex *sync.Mutex,
+	syncFromHealth ProxyHealthSync,
 ) {
 	// Get all proxy credentials
 	credentials := bal.GetCredentialsSnapshot()
@@ -61,7 +75,7 @@ func UpdateAllProxyCredentials(
 		go func(c *config.CredentialConfig) {
 			defer wg.Done()
 
-			remoteModels, err := modelManager.GetRemoteModelsWithError(ctx, c)
+			remoteModels, err := modelManager.RefreshRemoteModelsWithError(ctx, c)
 			modelManager.CopyProviderScopeMetadata(c)
 
 			resultsChan <- proxyResult{
@@ -83,14 +97,14 @@ func UpdateAllProxyCredentials(
 	failedCount := 0
 
 	for result := range resultsChan {
-		bal.UpdateProviderScopes(
-			*result.credential,
-			result.credential.ProviderScopes,
-			result.credential.ProviderDeniedScopes,
-			result.credential.ProviderScopeExpression,
-			result.credential.ProviderScopeKnown,
-		)
 		if result.err != nil {
+			bal.UpdateProviderScopes(
+				*result.credential,
+				result.credential.ProviderScopes,
+				result.credential.ProviderDeniedScopes,
+				result.credential.ProviderScopeExpression,
+				result.credential.ProviderScopeKnown,
+			)
 			log.Warn("Failed to fetch models from proxy",
 				"credential", result.credential.Name,
 				"error", result.err,
@@ -99,36 +113,56 @@ func UpdateAllProxyCredentials(
 			continue
 		}
 
-		// Update rate limiter and model manager with fetched models
 		addedCount := 0
-		modelIDSet := make(map[string]bool, len(result.models))
-		for _, model := range result.models {
-			if model.ID == "" || modelIDSet[model.ID] {
-				continue
-			}
-			modelIDSet[model.ID] = true
-		}
 
 		updateMutex.Lock()
-		for _, pair := range rateLimiter.GetAllModelPairs() {
-			if pair.Credential != result.credential.Name || modelIDSet[pair.Model] {
-				continue
+		if syncFromHealth != nil && syncFromHealth(result.credential) {
+			// AIR-shaped upstream: syncFromHealth (proxy.UpdateStatsFromHealth) is the
+			// single sync point for this credential's model set, weights, priorities,
+			// scopes, aggregated RPM/TPM limits and current usage — all derived from the
+			// same /health response that RefreshRemoteModelsWithError just fetched and cached.
+			// This is the only periodic poller now; proxy.UpdateAllFromRemoteHealth was
+			// removed.
+			addedCount = len(result.models)
+		} else {
+			// Legacy /v1/models fallback (non-AIR upstream): only model names were
+			// discovered, so apply model-manager default RPM/TPM and prune names that
+			// disappeared upstream.
+			modelIDSet := make(map[string]bool, len(result.models))
+			for _, model := range result.models {
+				if model.ID == "" || modelIDSet[model.ID] {
+					continue
+				}
+				modelIDSet[model.ID] = true
 			}
-			if modelManager.HasModel(pair.Credential, pair.Model) {
-				continue
+			for _, pair := range rateLimiter.GetAllModelPairs() {
+				if pair.Credential != result.credential.Name || modelIDSet[pair.Model] {
+					continue
+				}
+				if modelManager.HasModel(pair.Credential, pair.Model) {
+					continue
+				}
+				rateLimiter.RemoveModel(pair.Credential, pair.Model)
 			}
-			rateLimiter.RemoveModel(pair.Credential, pair.Model)
-		}
-		for _, model := range result.models {
-			// Get default RPM/TPM from model manager
-			modelRPM := modelManager.GetModelRPMForCredential(model.ID, result.credential.Name)
-			modelTPM := modelManager.GetModelTPMForCredential(model.ID, result.credential.Name)
-
-			// AddModelWithTPM handles duplicates internally (overwrites existing)
-			rateLimiter.AddModelWithTPM(result.credential.Name, model.ID, modelRPM, modelTPM)
-			addedCount++
+			for _, model := range result.models {
+				modelRPM := modelManager.GetModelRPMForCredential(model.ID, result.credential.Name)
+				modelTPM := modelManager.GetModelTPMForCredential(model.ID, result.credential.Name)
+				rateLimiter.AddModelWithTPM(result.credential.Name, model.ID, modelRPM, modelTPM)
+				addedCount++
+			}
 		}
 		updateMutex.Unlock()
+
+		// Push the provider scope this credential learned from its upstream /health into
+		// the live balancer state after UpdateStatsFromHealth has run, so scope-based
+		// routing / VisibleTo() see the current value.
+		bal.UpdateProviderScopes(
+			*result.credential,
+			result.credential.ProviderScopes,
+			result.credential.ProviderDeniedScopes,
+			result.credential.ProviderScopeExpression,
+			result.credential.ProviderScopeKnown,
+		)
 
 		if addedCount > 0 {
 			log.Info("Updated proxy models",

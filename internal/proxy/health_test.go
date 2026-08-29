@@ -17,6 +17,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/scope"
 	"github.com/mixaill76/auto_ai_router/internal/testhelpers"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func createHealthTestProxy(credentialsCount int) *Proxy {
@@ -111,6 +112,7 @@ func TestHealthCheck_CredentialsInfo(t *testing.T) {
 	assert.Equal(t, "openai", openaiStats.Type)
 	assert.Equal(t, "http://openai.com", openaiStats.BaseURL)
 	assert.Equal(t, false, openaiStats.IsFallback)
+	assert.Equal(t, false, openaiStats.IsProxyLike, "a plain openai credential is not proxy-like")
 	assert.Equal(t, 7, openaiStats.Weight)
 	assert.Equal(t, 100, openaiStats.LimitRPM)
 	assert.Equal(t, 2000, openaiStats.LimitTPM)
@@ -302,19 +304,21 @@ func TestHealthCheck_CredentialAndModelPriority(t *testing.T) {
 
 	_, status := prx.HealthCheck()
 
-	// CredentialHealthStats.Priority mirrors CredentialConfig.EffectivePriority().
+	// CredentialHealthStats.Priority carries only the explicit priority: field — the
+	// primary-pool grouping key. fallback_priority is reported separately and must not
+	// show up as a Priority tier (a downstream proxy folds Priority into its own grouping).
 	assert.Equal(t, 0, status.Credentials["default_group_cred"].Priority)
 	assert.Equal(t, 200, status.Credentials["explicit_priority_cred"].Priority)
-	assert.Equal(t, 300, status.Credentials["legacy_fallback_priority_cred"].Priority)
+	assert.Equal(t, 0, status.Credentials["legacy_fallback_priority_cred"].Priority)
+	assert.Equal(t, 300, status.Credentials["legacy_fallback_priority_cred"].FallbackPriority)
 
-	// None of these credentials are proxy-like, so modelManager has no dynamic
-	// per-model priority learned for them: ModelHealthStats.Priority falls back
-	// to the owning credential's static EffectivePriority() (see
-	// TestHealthCheck_ModelHealthStats_PriorityPrefersDynamicOverStatic for the
-	// proxy-credential case where the dynamic value takes precedence).
+	// None of these credentials are proxy-like, so modelManager has no dynamic per-model
+	// priority learned for them: ModelHealthStats.Priority falls back to the owning
+	// credential's static priority: field (0 for the fallback_priority-only credential,
+	// matching how the balancer's primary pool actually routes it).
 	assert.Equal(t, 0, status.Models["default_group_cred:gpt-4"].Priority)
 	assert.Equal(t, 200, status.Models["explicit_priority_cred:gpt-4"].Priority)
-	assert.Equal(t, 300, status.Models["legacy_fallback_priority_cred:gpt-4"].Priority)
+	assert.Equal(t, 0, status.Models["legacy_fallback_priority_cred:gpt-4"].Priority)
 }
 
 func TestHealthCheck_ModelHealthStats_PriorityPrefersDynamicOverStatic(t *testing.T) {
@@ -349,9 +353,9 @@ func TestHealthCheck_ModelHealthStats_PriorityPrefersDynamicOverStatic(t *testin
 	assert.True(t, ok)
 	assert.Equal(t, 100, stats.Priority, "should report the dynamic per-model priority, not the static credential priority")
 
-	// The credential-level entry is unaffected: it still reports the static
-	// config-level priority, matching CredentialConfig.EffectivePriority().
+	// The credential-level entry reports the static config-level priority: field.
 	assert.Equal(t, 200, status.Credentials["grant-pol01"].Priority)
+	assert.True(t, status.Credentials["grant-pol01"].IsProxyLike)
 }
 
 // TestHealthCheck_ModelHealthStats_PriorityFallsBackWhenDynamicUnknown covers the
@@ -390,6 +394,45 @@ func TestHealthCheck_ModelHealthStats_PriorityFallsBackWhenDynamicUnknown(t *tes
 	stats, ok := status.Models["grant-pol01:gpt-4"]
 	assert.True(t, ok)
 	assert.Equal(t, 200, stats.Priority, "should fall back to the static credential priority when nothing dynamic is known")
+}
+
+// TestHealthCheck_ModelHealthStats_PriorityIgnoresDynamicWhenModelCheckerDisabled is the
+// #7 regression guard: balancer.learnedProxyPriority only consults the learned per-model
+// priority when the model checker is enabled — otherwise the balancer routes on the
+// static field. /health must gate the same way, or the dashboard shows a learned
+// priority the balancer never actually uses.
+func TestHealthCheck_ModelHealthStats_PriorityIgnoresDynamicWhenModelCheckerDisabled(t *testing.T) {
+	logger := testhelpers.NewTestLogger()
+	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
+	rl := ratelimit.New()
+
+	cred := config.CredentialConfig{
+		Name:     "grant-pol01",
+		Type:     config.ProviderTypeProxy,
+		APIKey:   "sk-test",
+		BaseURL:  "http://pol01.example",
+		RPM:      100,
+		Priority: 200,
+	}
+
+	rl.AddCredential(cred.Name, 100)
+	rl.AddModelWithTPM(cred.Name, "gpt-4", 50, 500)
+	bal := balancer.New([]config.CredentialConfig{cred}, f2b, rl)
+	metrics := monitoring.New(false)
+	tm := auth.NewVertexTokenManager(logger)
+	mm := models.New(logger, 50, []config.ModelRPMConfig{})
+	// A learned priority lingers, but no models/limits are registered, so
+	// mm.IsEnabled() is false — model filtering (and learned-priority routing) is off.
+	mm.ReplaceModelPrioritiesForCredential(cred.Name, map[string]int{"gpt-4": 100})
+	require.False(t, mm.IsEnabled())
+
+	prx := createProxyWithParams(bal, logger, 10, 30*time.Second, metrics, "test-key", rl, tm, mm, "test-version", "test-commit")
+
+	_, status := prx.HealthCheck()
+
+	stats, ok := status.Models["grant-pol01:gpt-4"]
+	require.True(t, ok)
+	assert.Equal(t, 200, stats.Priority, "must show the static priority the balancer routes on, not the inert learned value")
 }
 
 func TestHealthCheck_ModelProviderErrorAndBanUntil(t *testing.T) {

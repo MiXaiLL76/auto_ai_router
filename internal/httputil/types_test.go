@@ -28,6 +28,18 @@ func TestEffectiveHealthPriority(t *testing.T) {
 			credStats:  CredentialHealthStats{Priority: 300},
 			want:       999,
 		},
+		{
+			name:       "falls back to credential priority when the model entry has none",
+			modelStats: ModelHealthStats{Priority: 0},
+			credStats:  CredentialHealthStats{Priority: 150},
+			want:       150,
+		},
+		{
+			name:       "fallback_priority is ignored — retry-only, must not reach primary grouping",
+			modelStats: ModelHealthStats{Priority: 0},
+			credStats:  CredentialHealthStats{FallbackPriority: 40},
+			want:       0,
+		},
 	}
 
 	for _, tt := range tests {
