@@ -84,7 +84,7 @@
           <button class="wf-btn primary" id="sortName" onclick="setModelSort('name',this)">by name</button>
         </div>
       </div>
-      <p class="wf-sub" style="margin:0 0 var(--sp-3);">one card per model · groups are priority tiers (ascending, lowest tried first) · sorted alphabetically by default so the grid stays put on refresh — switch to "busiest first" to lay cards out by traffic, top-left to bottom-right</p>
+      <p class="wf-sub" style="margin:0 0 var(--sp-3);">one card per model · groups are priority tiers (ascending, lowest tried first); fallback credentials form their own tiers below the primary pool · RPM/TPM are shown as % of limit (hover for the raw count) · sorted alphabetically by default so the grid stays put on refresh — switch to "busiest first" to lay cards out by traffic, top-left to bottom-right</p>
       <div id="modelsGrid" class="wf-cards-grid"></div>
     </main>
   </div>
@@ -180,6 +180,17 @@
   </div>`;
     }
 
+    // Plain "42%" cell for the models table — no progress bar. Title shows the
+    // raw cur/limit on hover. No limit → raw current count; nothing → em dash.
+    function renderUsage(cur, lim) {
+      if (lim > 0) {
+        const p = pct(cur, lim);
+        return `<span class="usage-pct ${barFillClass(p)}" title="${esc(fmtNum(cur) + ' / ' + fmtNum(lim))}">${p}%</span>`;
+      }
+      if (cur > 0) return `<span class="usage-pct" title="no limit">${esc(fmtNum(cur))}</span>`;
+      return `<span class="usage-pct dim">—</span>`;
+    }
+
     // ── credential type → badge class ─────────────────────────────────────────
     const TYPE_CLASS = {
       'proxy': 'info',
@@ -270,13 +281,20 @@
         const errStr = Object.entries(errCounts).map(([c, n]) => `${n}×${c}`).join(' ');
         return badge('err', errStr ? `banned · ${errStr}` : 'banned');
       }
-      if (!isRowLive(m)) return badge('warn', 'limit reached');
+      if (!isRowLive(m)) return badge('warn', 'limit');
       return badge('ok', 'live');
     }
 
     // ── group models by name, then by priority tier ─────────────────────────────
     // /health omits `priority` (omitempty) when it's the default group, so a
     // missing value means priority 0 — same "tried first" tier as an explicit 0.
+    //
+    // Fallback credentials are split into one "fallback" group below every primary
+    // tier: the fallback pool is a separate mechanism tried only after the whole
+    // primary pool is exhausted, so mixing its rows into a numbered priority tier
+    // would misrepresent when they actually serve. (The backend pins every
+    // is_fallback credential to priority group 999 — FallbackPriorityGroup — so it
+    // also sorts last anywhere the raw number is shown.)
     function groupModels(models) {
       const byModel = new Map();
       for (const m of Object.values(models)) {
@@ -289,20 +307,30 @@
 
       const cards = [];
       for (const entry of byModel.values()) {
-        const byPriority = new Map();
+        const buckets = new Map();
         for (const row of entry.rows) {
-          const p = row.priority || 0;
-          if (!byPriority.has(p)) byPriority.set(p, []);
-          byPriority.get(p).push(row);
+          const cred = credentialsData[row.credential] || {};
+          const fb = !!cred.is_fallback;
+          // All fallback rows collapse into one group; primary rows bucket by priority.
+          const tier = fb ? 0 : (row.priority || 0);
+          const key = (fb ? 'F' : 'P:' + tier);
+          if (!buckets.has(key)) buckets.set(key, { isFallback: fb, priority: tier, rows: [] });
+          buckets.get(key).rows.push(row);
         }
-        const priorities = [...byPriority.keys()].sort((a, b) => a - b);
+
+        // primary tiers ascending, then fallback tiers ascending.
+        const ordered = [...buckets.values()].sort((a, b) => {
+          if (a.isFallback !== b.isFallback) return a.isFallback ? 1 : -1;
+          return a.priority - b.priority;
+        });
+
         let activeAssigned = false;
-        const groups = priorities.map(p => {
-          const rows = byPriority.get(p).sort((a, b) => displayCredential(a).localeCompare(displayCredential(b)));
+        const groups = ordered.map(b => {
+          const rows = b.rows.slice().sort((x, y) => displayCredential(x).localeCompare(displayCredential(y)));
           const groupLive = rows.some(isRowLive);
           const isServing = groupLive && !activeAssigned;
           if (groupLive) activeAssigned = true;
-          return { priority: p, rows, isServing };
+          return { priority: b.priority, isFallback: b.isFallback, rows, isServing };
         });
         cards.push({ model: entry.model, rpm: entry.rpm, tpm: entry.tpm, groups });
       }
@@ -325,17 +353,24 @@
 
       document.getElementById('modelsGrid').innerHTML = visible.map(card => {
         const groupsHtml = card.groups.map(g => {
-          const label = g.priority === 0 ? 'priority 0 (default)' : `priority ${g.priority}`;
+          const label = g.isFallback
+            ? 'fallback · last resort'
+            : (g.priority === 0 ? 'priority 0 (default)' : `priority ${g.priority}`);
           const state = g.isServing ? 'serving now' : (g.rows.some(isRowLive) ? 'standby' : 'exhausted');
-          const rowsHtml = g.rows.map(m => `<tr>
-        <td>${esc(displayCredential(m))}</td>
-        <td class="dim">${esc(routerLabel(m.credential))}</td>
+          const rowsHtml = g.rows.map(m => {
+            const cred = displayCredential(m);
+            const router = routerLabel(m.credential);
+            const fbTag = g.isFallback ? '<span class="fb-tag" title="fallback credential — used only after the primary pool is exhausted">fallback</span>' : '';
+            return `<tr>
+        <td class="cred-cell" title="${esc(cred)}">${esc(cred)}${fbTag}</td>
+        <td class="dim cred-cell" title="${esc(router)}">${esc(router)}</td>
         <td class="muted">${fmtNum(m.weight || 1)}</td>
-        <td>${renderBar(m.current_rpm, m.limit_rpm)}</td>
-        <td>${renderBar(m.current_tpm, m.limit_tpm)}</td>
+        <td>${renderUsage(m.current_rpm, m.limit_rpm)}</td>
+        <td>${renderUsage(m.current_tpm, m.limit_tpm)}</td>
         <td>${rowStatusBadge(m)}</td>
-      </tr>`).join('');
-          return `<tr class="group-header${g.isServing ? ' is-serving' : ''}"><td colspan="6">${esc(label)} · ${esc(state)}</td></tr>${rowsHtml}`;
+      </tr>`;
+          }).join('');
+          return `<tr class="group-header${g.isServing ? ' is-serving' : ''}${g.isFallback ? ' is-fallback' : ''}"><td colspan="6">${esc(label)} · ${esc(state)}</td></tr>${rowsHtml}`;
         }).join('');
 
         return `<div class="wf-card">

@@ -1,30 +1,42 @@
 #!/usr/bin/env bash
-# Hammers the main router across the 3 demo models so you can watch, live on
-# /vhealth, credentials get eaten through their token budget, get banned by
-# fail2ban once the mock starts answering 429, and the priority cascade move
-# traffic to the next router. See README.md for the full picture.
+# Drives the gateway across the demo models so you can watch, live on /vhealth,
+# the per-tier priority cascade move traffic: within one primary group by SWRR
+# weight, then group -> group as each tier's local cumulative cap fills, then
+# regional AIR credentials getting banned by fail2ban once the sub-routers
+# start answering 429, then recovery back up the tiers after the windows clear.
+# See README.md for the full picture.
 set -euo pipefail
 
-MAIN_URL="${MAIN_URL:-http://localhost:8080}"
-MASTER_KEY="${MASTER_KEY:-sk-main}"
-DURATION="${DURATION:-90}"
-MODELS=(model-a model-b model-c)
+GATEWAY_URL="${GATEWAY_URL:-http://localhost:8080}"
+MASTER_KEY="${MASTER_KEY:-sk-gateway}"
+DURATION="${DURATION:-120}"          # seconds
+SLEEP="${SLEEP:-0.15}"               # delay between requests (≈ 1/SLEEP req/s)
+# Override to focus load, e.g. MODELS="chat-smart" ./load.sh
+MODELS_STR="${MODELS:-chat-smart chat-fast chat-reason embed-v1}"
+read -r -a MODELS <<< "$MODELS_STR"
 
-echo "hammering $MAIN_URL for ${DURATION}s across: ${MODELS[*]}"
-echo "watch it live at $MAIN_URL/vhealth"
+echo "hammering $GATEWAY_URL for ${DURATION}s @ ~$(awk "BEGIN{printf \"%.0f\", 1/$SLEEP}")/s across: ${MODELS[*]}"
+echo "watch it live:  $GATEWAY_URL/vhealth   (regions: :8081 :8082 :8083 /vhealth)"
 echo
 
+declare -A ok fail
 end=$((SECONDS + DURATION))
 i=0
 while [ "$SECONDS" -lt "$end" ]; do
   model="${MODELS[$((i % ${#MODELS[@]}))]}"
   i=$((i + 1))
   status=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 \
-    -X POST "$MAIN_URL/v1/chat/completions" \
+    -X POST "$GATEWAY_URL/v1/chat/completions" \
     -H "Authorization: Bearer $MASTER_KEY" \
     -H "Content-Type: application/json" \
     -d "{\"model\":\"$model\",\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}]}")
-  printf '%(%H:%M:%S)T  %-10s -> %s\n' -1 "$model" "$status"
-  sleep 0.2
+  if [ "$status" = "200" ]; then ok[$model]=$(( ${ok[$model]:-0} + 1 )); else fail[$model]=$(( ${fail[$model]:-0} + 1 )); fi
+  printf '%(%H:%M:%S)T  %-12s -> %s\n' -1 "$model" "$status"
+  sleep "$SLEEP"
 done
-echo "done"
+
+echo
+echo "── summary ──"
+for m in "${MODELS[@]}"; do
+  printf '  %-12s  ok=%-4s  non-200=%-4s\n' "$m" "${ok[$m]:-0}" "${fail[$m]:-0}"
+done

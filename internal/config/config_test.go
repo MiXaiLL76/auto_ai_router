@@ -1317,6 +1317,7 @@ func TestConfig_ValidatePriority(t *testing.T) {
 		{name: "negative", priority: -1, wantErr: true, wantErrSubstr: "invalid priority"},
 		{name: "conflicts with fallback_priority", priority: 100, fallbackPriority: 20, wantErr: true, wantErrSubstr: "cannot set both priority and fallback_priority"},
 		{name: "conflicts with is_fallback", priority: 100, isFallback: true, wantErr: true, wantErrSubstr: "fallback credentials cannot set priority"},
+		{name: "is_fallback without explicit priority is fine", priority: 0, isFallback: true, wantErr: false},
 	}
 
 	for _, tt := range tests {
@@ -1343,6 +1344,50 @@ func TestConfig_ValidatePriority(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestConfig_ValidatePinsFallbackToLastPriorityGroup(t *testing.T) {
+	cfg := &Config{
+		Server: ServerConfig{Port: 8080, MaxBodySizeMB: 10, MasterKey: "test-key", RequestTimeout: 30 * time.Second},
+		Credentials: []CredentialConfig{
+			{Name: "primary", Type: "openai", APIKey: "k", BaseURL: "http://a.com", RPM: 10, Priority: 5},
+			{Name: "reserve", Type: "openai", APIKey: "k", BaseURL: "http://b.com", RPM: 10, IsFallback: true},
+		},
+		Fail2Ban: Fail2BanConfig{MaxAttempts: 3},
+	}
+
+	require.NoError(t, cfg.Validate())
+	assert.Equal(t, 5, cfg.Credentials[0].Priority, "explicit priority untouched")
+	assert.Equal(t, FallbackPriorityGroup, cfg.Credentials[1].Priority, "fallback credential pinned to the last priority group")
+	assert.Equal(t, FallbackPriorityGroup, cfg.Credentials[1].EffectivePriority())
+
+	// Idempotent: a second Validate() must not error on the now-999 fallback cred.
+	require.NoError(t, cfg.Validate())
+	assert.Equal(t, FallbackPriorityGroup, cfg.Credentials[1].Priority)
+}
+
+func TestCredentialConfig_UnmarshalYAML_RejectsExplicitPriorityOnFallback(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	require.NoError(t, os.WriteFile(configPath, []byte(`
+server:
+  port: 8080
+  max_body_size_mb: 10
+  master_key: "test-key"
+  request_timeout: 30s
+credentials:
+  - name: "reserve"
+    type: "openai"
+    api_key: "k"
+    base_url: "http://b.com"
+    rpm: 100
+    is_fallback: true
+    priority: 7
+`), 0644))
+
+	_, err := Load(configPath)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "fallback credentials")
 }
 
 func TestCredentialConfig_UnmarshalYAML_Priority(t *testing.T) {

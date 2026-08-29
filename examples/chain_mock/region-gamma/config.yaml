@@ -1,0 +1,62 @@
+server:
+  port: 8080
+  max_body_size_mb: 10
+  request_timeout: 15s
+  logging_level: info
+  master_key: "sk-gamma"
+  default_models_rpm: 100000
+
+fail2ban:
+  max_attempts: 2
+  ban_duration: 20s
+  error_codes: [429, 500, 502, 503, 504]
+
+monitoring:
+  prometheus_enabled: false
+  health_check_path: "/health"
+  pprof_enabled: false
+
+# region-gamma serves `chat-smart` as a capped tier 1 + uncapped tier 9 (same
+# backstop pattern as region-beta) and `chat-reason` as a single tier 2. It
+# also has an is_fallback credential for `chat-smart` — from the gateway's
+# (non-fallback) point of view that credential must be EXCLUDED from
+# region-gamma's learned tiers and limits, so `gamma-reserve`'s capacity does
+# not inflate what the gateway thinks region-gamma can serve on its primary
+# path. Verify:
+#   curl -s -H 'Authorization: Bearer sk-gateway' localhost:8080/health \
+#     | jq '.models["region-gamma:chat-smart"] | {limit_tpm, priority_tiers}'
+#   # limit_tpm -> 120 (not 2120); tiers -> [p1 cap 120, p9 uncapped]
+credentials:
+  - name: "gamma-1"
+    type: "openai"
+    api_key: "sk-mock"
+    base_url: "http://mock:9100"
+    rpm: 100000
+    priority: 1
+
+  - name: "gamma-bulk-1"
+    type: "openai"
+    api_key: "sk-mock"
+    base_url: "http://mock:9100"
+    rpm: 100000
+    priority: 9
+
+  - name: "gamma-reason-1"
+    type: "openai"
+    api_key: "sk-mock"
+    base_url: "http://mock:9100"
+    rpm: 100000
+    priority: 2
+
+  - name: "gamma-reserve"
+    type: "openai"
+    api_key: "sk-mock"
+    base_url: "http://mock:9100"
+    rpm: 100000
+    is_fallback: true
+
+models:
+  - { name: chat-smart, credential: gamma-1, tpm: 120 }
+  - { name: chat-smart, credential: gamma-bulk-1, tpm: -1 }
+  - { name: chat-smart, credential: gamma-reserve, tpm: 2000 }
+  - { name: chat-reason, credential: gamma-reason-1, tpm: 150 }

@@ -16,6 +16,13 @@ import (
 const DefaultMaxAttempts = 3
 const DefaultBanDuration time.Duration = 0
 
+// FallbackPriorityGroup is the primary-selection priority group assigned to every
+// is_fallback credential. It is intentionally a large number so fallback credentials
+// always sort into the last priority group (tried after every explicit tier) and read
+// that way on the dashboard. Credentials may not set an explicit `priority:` alongside
+// `is_fallback: true` — this value is assigned automatically (see Config.Validate).
+const FallbackPriorityGroup = 999
+
 // DefaultModelPricesSyncInterval is how often model prices are re-fetched from model_prices_link.
 const DefaultModelPricesSyncInterval = 5 * time.Minute
 
@@ -927,7 +934,9 @@ func (c *CredentialConfig) UnmarshalYAML(value *yaml.Node) error {
 	if c.IsFallback, err = parseField(temp.IsFallback, false, strconv.ParseBool, "is_fallback for credential '"+c.Name+"'"); err != nil {
 		return err
 	}
-
+	if c.IsFallback && c.Priority > 0 {
+		return fmt.Errorf("priority for credential '%s': fallback credentials are always tried last and cannot set an explicit priority", c.Name)
+	}
 	// Copy models decoded via YAML anchors / inline definitions
 	c.Models = temp.Models
 
@@ -1911,8 +1920,15 @@ func (c *Config) Validate() error {
 		if cred.Priority > 0 && cred.FallbackPriority > 0 {
 			return fmt.Errorf("credential %s: invalid priority: cannot set both priority and fallback_priority", cred.Name)
 		}
-		if cred.Priority > 0 && cred.IsFallback {
-			return fmt.Errorf("credential %s: invalid priority: fallback credentials cannot set priority", cred.Name)
+		if cred.IsFallback && cred.Priority > 0 && cred.Priority != FallbackPriorityGroup {
+			return fmt.Errorf("credential %s: invalid priority: fallback credentials cannot set priority (always tried last, pinned to group %d)", cred.Name, FallbackPriorityGroup)
+		}
+		// Every fallback credential is pinned to the last priority group so it sorts
+		// after every explicit tier in the primary cascade and on the dashboard. The
+		// fallback pool itself is still a separate, flat weighted pool (see the balancer)
+		// — this only fixes the group *number* the credential carries.
+		if cred.IsFallback {
+			c.Credentials[i].Priority = FallbackPriorityGroup
 		}
 	}
 

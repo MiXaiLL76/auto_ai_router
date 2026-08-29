@@ -1456,6 +1456,34 @@ details.diagram-section > summary {
 /* priority group row that is currently serving traffic (vs. standby groups) */
 .wf-table tr.group-header.is-serving td { color: var(--status-ok); }
 
+/* fallback-credential tier: rendered below the primary pool, dimmed, with a
+   neutral left rail instead of the accent one so it reads as last-resort. */
+.wf-table tr.group-header.is-fallback td {
+  background: var(--bg-2);
+  color: var(--fg-muted);
+  border-left-color: var(--fg-dim);
+  border-top-color: var(--line);
+  border-bottom-color: var(--line);
+}
+.wf-table tr.group-header.is-fallback:hover td { background: var(--bg-2); }
+.wf-table tr.group-header.is-fallback.is-serving td { color: var(--status-warn); }
+
+/* per-row "fallback" marker next to the credential name */
+.fb-tag {
+  display: inline-block;
+  margin-left: 4px;
+  padding: 0 4px;
+  font-size: 10px;
+  line-height: 1.5;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--fg-dim);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  vertical-align: middle;
+  white-space: nowrap;
+}
+
 /* Generic tile grid (overview stats, credential cards): settles at 4/2/1
    columns on its own as the viewport narrows instead of overflowing at a
    fixed repeat(4,1fr). auto-fit (not auto-fill) so a short list — e.g. one
@@ -1476,12 +1504,18 @@ details.diagram-section > summary {
    document order to keep that meaning intact. */
 .wf-cards-grid {
   display: grid;
-  /* min(420px, 100%) instead of a bare 420px floor: on a viewport narrower
-     than 420px the track shrinks to fit instead of forcing the card (and
-     its fixed-layout table) past the edge of the screen. */
-  grid-template-columns: repeat(auto-fill, minmax(min(420px, 100%), 1fr));
+  /* Fixed 3-up by default, never more (a wide monitor kept fitting 4-5 tiny
+     cards otherwise). Steps down to 2, then 1, as the viewport narrows so the
+     fixed-layout table inside each card never gets crushed. */
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: var(--sp-3);
   align-items: start;
+}
+@media (max-width: 1280px) {
+  .wf-cards-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 760px) {
+  .wf-cards-grid { grid-template-columns: minmax(0, 1fr); }
 }
 .wf-cards-grid .wf-card {
   padding: 0;
@@ -1500,7 +1534,7 @@ details.diagram-section > summary {
 }
 .wf-cards-grid .wf-card-head .model-name {
   font-size: var(--fs-sm);
-  word-break: break-all;
+  overflow-wrap: anywhere;
 }
 .wf-cards-grid .wf-table th, .wf-cards-grid .wf-table td { padding: 6px var(--sp-3); }
 
@@ -1520,30 +1554,44 @@ details.diagram-section > summary {
    (cramped/overlapping small, oddly sparse large). Percent-only keeps the
    ratio correct at every width in that range. */
 .wf-cards-grid .wf-table th:nth-child(1),
-.wf-cards-grid .wf-table td:nth-child(1) { width: 18%; }
+.wf-cards-grid .wf-table td:nth-child(1) { width: 30%; }
 .wf-cards-grid .wf-table th:nth-child(2),
-.wf-cards-grid .wf-table td:nth-child(2) { width: 14%; }
+.wf-cards-grid .wf-table td:nth-child(2) { width: 20%; }
 .wf-cards-grid .wf-table th:nth-child(3),
 .wf-cards-grid .wf-table td:nth-child(3) { width: 8%; }
 .wf-cards-grid .wf-table th:nth-child(4),
-.wf-cards-grid .wf-table td:nth-child(4) { width: 20%; }
+.wf-cards-grid .wf-table td:nth-child(4) { width: 13%; }
 .wf-cards-grid .wf-table th:nth-child(5),
-.wf-cards-grid .wf-table td:nth-child(5) { width: 20%; }
+.wf-cards-grid .wf-table td:nth-child(5) { width: 13%; }
 .wf-cards-grid .wf-table th:nth-child(6),
-.wf-cards-grid .wf-table td:nth-child(6) { width: 20%; }
-.wf-cards-grid .wf-table th,
-.wf-cards-grid .wf-table td:nth-child(1),
-.wf-cards-grid .wf-table td:nth-child(2) {
+.wf-cards-grid .wf-table td:nth-child(6) { width: 16%; }
+/* headers stay single-line; the credential/router cells wrap onto as many
+   lines as they need so the full name is always readable (a `title` on the
+   cell still gives the value on hover). */
+.wf-cards-grid .wf-table th {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-/* the RPM/TPM cells' flex row (bar + "cur / lim" label) needs min-width:0 on
-   the flex item itself, or a long label still forces the fixed column wider. */
-.wf-cards-grid .wf-table td:nth-child(4) > div,
-.wf-cards-grid .wf-table td:nth-child(5) > div { min-width: 0; }
-.wf-cards-grid .wf-table td:nth-child(4) .wf-bar,
-.wf-cards-grid .wf-table td:nth-child(5) .wf-bar { min-width: 24px; }
+.wf-cards-grid .wf-table td.cred-cell {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  white-space: normal;
+  line-height: 1.35;
+}
+/* RPM/TPM are now a plain percentage, no bar — keep the number on one line. */
+.wf-cards-grid .wf-table td:nth-child(4),
+.wf-cards-grid .wf-table td:nth-child(5) {
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+/* status badge can be long ("banned · 3×429") — clip it to the column rather
+   than let it shove the table wider. */
+.wf-cards-grid .wf-table td:nth-child(6) { overflow: hidden; }
+.usage-pct { font-size: var(--fs-sm); color: var(--fg); }
+.usage-pct.warn { color: var(--status-warn); }
+.usage-pct.err  { color: var(--status-err); }
+.usage-pct.dim  { color: var(--fg-dim); }
 
 .wf-input {
   background: transparent;

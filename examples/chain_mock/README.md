@@ -1,86 +1,144 @@
-# chain_mock — live priority-cascade demo
+# chain_mock — multi-region AIR chain with per-priority-tier grouping
 
-A throwaway 5-container playground for watching the priority-group cascade actually move traffic between routers, in real time, on `/vhealth`.
+A throwaway 5-container playground for watching **Design B** (per-priority-tier
+grouping of a proxy/AIR credential) actually move traffic, live, on `/vhealth`.
+
+It reproduces the shape of a real `edge -> regional-AIR` fleet: one `gateway`
+router fronting three regional routers, each with its own direct leaf
+credentials at different `priority` tiers. The gateway never sees the leaf
+credentials — it learns each region's per-tier capacity breakdown from that
+region's own `/health` and expands the single regional AIR credential into one
+balancer candidate per tier.
 
 ## Topology
 
 ```mermaid
 graph LR
-    Client["you / load.sh"] --> Main{{"<b>main router</b><br/>cascade: 100→200→300"}}
+    Client["you / load.sh"] --> GW{{"gateway :8080"}}
 
-    Main --> R2["router2<br/>🟢 priority 100\n\n🔴 priority 300"]
-    Main --> R3["router3<br/>🟢 priority 100\n🟡 priority 200\n🔴 priority 300"]
-    Main --> R4["router4<br/>\n🟡 priority 200\n🔴 priority 300"]
+    GW -->|learned tiers| A["region-alpha :8081"]
+    GW -->|learned tiers| B["region-beta :8082"]
+    GW -->|learned tiers| C["region-gamma :8083"]
+    GW -->|"priority 50 (region-down fallback)"| MK[("mock :9100")]
 
-    R2 --> M2[("mock:9002")]
-    R3 --> M3[("mock:9003")]
-    R4 --> M4[("mock:9004")]
+    A --> MK
+    B --> MK
+    C --> MK
 ```
 
-`main` doesn't know about mock/model config directly — it discovers models
-dynamically from each sub-router's own `/health` (the same AIR sync path a
-real ru01→pol01/uk01/ger01 deployment uses). Model-to-router map:
+Every leaf credential points at the same deliberately-dumb nginx mock
+(`mock/nginx.conf`): static `200`, `usage.total_tokens: 10`, no rate limiting,
+no scripting. **All** the interesting behaviour — tier grouping, local
+cumulative caps, cascade, `429`, fail2ban bans, recovery — is the real router
+reacting to the `rpm`/`tpm` budgets in the `*/config.yaml` files.
 
-| model   | router2 (100) | router3 (200) | router4 (300) |
-| ------- | :-----------: | :-----------: | :-----------: |
-| model-a |      ✅       |      ✅       |               |
-| model-b |               |      ✅       |      ✅       |
-| model-c |      ✅       |      ✅       |      ✅       |
+## Model → tier map
 
-So `model-a` cascades router2→router3, `model-b` cascades router3→router4,
-and `model-c` walks the full three-tier chain.
+| model         | region-alpha                        | region-beta                   | region-gamma           |
+| ------------- | ----------------------------------- | ----------------------------- | ---------------------- |
+| `chat-smart`  | **p1 ×2, p2, p3**, p9 (uncapped)    | **p1**, p9 (uncapped)         | **p1** (+ is_fallback) |
+| `chat-fast`   | p1 ×2 (weighted 2:1), p9 (uncapped) | **p1**, **p2**                | —                      |
+| `chat-reason` | —                                   | **p1**, **p3**, p9 (uncapped) | p2                     |
+| `embed-v1`    | p1 (unlimited)                      | —                             | —                      |
 
-## Why credentials actually get *banned*, not just soft-limited
+Bold = a credential set that spans **more than one** `priority` behind a single
+regional router — the case that produces a learned `priority_tiers` array and
+candidate expansion at the gateway. Single-tier models (`embed-v1`, `chat-fast`
+on region-alpha) stay on the plain scalar path, unchanged.
 
-The mock is genuinely dumb — every request gets a static 200 with
-`usage.total_tokens: 10`, nginx does no rate limiting or scripting at all
-(see `mock/nginx.conf`). Everything interesting happens in the real router:
+Every model under load has an **uncapped tier `p9`** in at least one region, so
+the cascade always has somewhere to land and a metered run stays 100% `200`
+while you watch the cheaper tiers fill and go on standby. Drop that tier (or
+crank `SLEEP` right down) to instead watch regions get fail2banned.
 
-1. Each sub-router's mock-credential has `tpm: 200` (20 requests). Once
-   `load.sh`'s traffic burns through that, the router's own rate limiter
-   refuses to select it and answers `429` — that's the TPM bar you'll watch
-   fill up on each sub-router's `/vhealth`.
-2. `main` sees that `429` come back from the sub-router (e.g. router2) as a
-   retryable error. Its `fail2ban` (`max_attempts: 2`, `ban_duration: 20s`)
-   really bans that credential — you'll see a `banned` badge on `main`'s
-   dashboard, not just "limit reached".
-3. With router2 banned, the priority cascade moves to router3 (200), then
-   router4 (300) if that also fills up.
+### What the gateway does with `chat-smart`
 
-Bans and TPM windows both clear after they expire with no traffic, so a
-longer run shows recovery back to the top priority tier too, not just
-one-way decay.
+`region-alpha`'s `/health` reports `chat-smart` served by five credentials at
+priorities 1/1/2/3/9. `updateModelLimits` buckets them into four tiers and the
+gateway stores that breakdown for the `region-alpha` credential. `region-beta`
+and `region-gamma` report a capped `p1` plus an uncapped `p9`. Selection then
+cascades through:
+
+```
+group 1 : region-alpha@t1 (cum cap 300 tpm)   \
+          region-beta@t1  (150 tpm)            }  weighted round-robin
+          region-gamma@t1 (120 tpm)           /   (gamma-reserve is is_fallback → excluded)
+group 2 : region-alpha@t2 (cum cap 420 tpm)
+group 3 : region-alpha@t3 (cum cap 500 tpm)
+group 9 : region-alpha@t9 / region-beta@t9 / region-gamma@t9   (uncapped backstop)
+group 50: house-direct                        (only if a whole region is fail2banned)
+```
+
+Under load on `chat-smart`:
+
+1. Group 1 serves. The gateway meters its **own** committed requests to each
+   region against that tier's cumulative cap — **no `/health` poll needed**.
+   Once `region-alpha`'s tier-1 cap is hit locally it drops out of group 1;
+   same for `region-beta@t1` / `region-gamma@t1`.
+2. Group 1 empty → cascade to **group 2** (`region-alpha@t2`), then **group 3**,
+   then **group 9** (the uncapped backstop), which absorbs the rest.
+3. `house-direct` (`priority 50`) is the last resort for when a whole region is
+   *fail2banned* (not just tier-capped) — e.g. after you remove the `p9` tiers
+   and the regions start returning `429`.
+4. Bans (`ban_duration: 20s`) and tpm windows clear with no traffic, so a
+   longer run also shows recovery back **up** the tiers.
+
+> The per-tier `current_tpm` / `banned` fields on `/health` come from the last
+> upstream poll, so on `/vhealth` the tiers snap between *serving* / *standby*
+> on the ~30s poll cadence. The **routing** reacts instantly to the gateway's
+> own send rate — that's the whole point of the local cumulative cap.
 
 ## Run it
 
 ```sh
-# from the repo root — builds/tags ghcr.io/mixaill76/auto_ai_router:latest locally
+# from the repo root — builds/tags auto-ai-router:latest locally
 make docker-build
 
 cd examples/chain_mock
 docker compose up -d
-./load.sh                    # hammers main across model-a/b/c for ~90s
+./load.sh                     # ~120s across all four models
 ```
 
 Re-run `make docker-build` after any code change — this compose file never
-builds the image itself, it just expects
-`ghcr.io/mixaill76/auto_ai_router:latest` to already exist locally.
+builds the image itself.
 
-Then open, in a browser, while `load.sh` is running:
+While `load.sh` runs, open:
 
-- `http://localhost:8080/vhealth` — **main**: watch the AIR credentials
-  (router2/router3/router4) move between "serving now" / "standby" /
-  "exhausted" per model, in the "models by priority" cards.
-- `http://localhost:8082/vhealth`, `:8083`, `:8084` — each sub-router's own
-  view of its single mock credential getting banned and recovering.
+- `http://localhost:8080/vhealth` — **gateway**: the "models by priority" cards
+  show `region-alpha` appearing in several tiers for `chat-smart`, moving
+  between *serving now* / *standby* as each cap fills.
+- `http://localhost:8081/vhealth`, `:8082`, `:8083` — each region's own view of
+  its leaf credentials burning through their tpm budget and recovering.
 
-`load.sh` also prints a live `model -> HTTP status` line per request in the
-terminal, so you can watch the cascade two ways at once.
+`load.sh` prints a live `model -> HTTP status` line per request and a per-model
+`ok / non-200` summary at the end.
 
-Env overrides: `MAIN_URL`, `MASTER_KEY`, `DURATION` (seconds, default 90).
+Knobs (env): `GATEWAY_URL`, `MASTER_KEY`, `DURATION` (s, default 120),
+`SLEEP` (s between requests, default 0.15), `MODELS` (space-separated; e.g.
+`MODELS="chat-smart" ./load.sh` to drive the cascade on one model fast).
+
+## Inspect the learned tiers directly
+
+```sh
+curl -s -H 'Authorization: Bearer sk-gateway' localhost:8080/health \
+  | jq '.models["region-alpha:chat-smart"].priority_tiers'
+
+# is_fallback exclusion: region-gamma's chat-smart limit is 120, not 2120
+curl -s -H 'Authorization: Bearer sk-gateway' localhost:8080/health \
+  | jq '.models["region-gamma:chat-smart"].limit_tpm'
+```
 
 ## Tear down
 
 ```sh
 docker compose down
 ```
+
+## Notes
+
+- The `tpm` numbers in `*/config.yaml` are tuned so the full cascade is visible
+  within one `./load.sh` run — adjust them or `SLEEP` to taste.
+- Recursion (a region that itself fronts another AIR router, so tiers fold
+  across 3+ hops) is covered by the unit test
+  `TestUpdateModelLimits_PriorityTiers_RecursesUpstreamTiers`; to see it here,
+  point one region's credential at another router instead of the mock.
