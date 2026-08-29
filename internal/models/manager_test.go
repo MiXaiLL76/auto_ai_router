@@ -1785,3 +1785,49 @@ func TestManager_ReplaceModelPrioritiesForCredential(t *testing.T) {
 	assert.Equal(t, 0, m.GetModelPriorityForCredential("gpt-4o", "proxy-a"))
 	assert.Equal(t, 50, m.GetModelPriorityForCredential("gpt-4o", "proxy-b"))
 }
+
+func TestManager_ReplaceModelPriorityTiersForCredential(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+	m := New(logger, 50, nil)
+
+	m.ReplaceModelPriorityTiersForCredential("usa03", map[string][]httputil.ModelPriorityTier{
+		"gemini-2.5-flash": {
+			{Priority: 2, Weight: 1, LimitRPM: 500, CurrentRPM: 10},
+			{Priority: 1, Weight: 40, LimitRPM: 200, CurrentRPM: 5},
+		},
+	})
+
+	tiers := m.GetModelPriorityTiersForCredential("gemini-2.5-flash", "usa03")
+	require.Len(t, tiers, 2)
+	assert.Equal(t, 1, tiers[0].Priority, "returned sorted ascending by priority")
+	assert.Equal(t, 2, tiers[1].Priority)
+
+	// Scalar getter derives MIN over the live tiers.
+	assert.Equal(t, 1, m.GetModelPriorityForCredential("gemini-2.5-flash", "usa03"))
+
+	// tier 1 saturated → scalar lifts to the next live tier.
+	m.ReplaceModelPriorityTiersForCredential("usa03", map[string][]httputil.ModelPriorityTier{
+		"gemini-2.5-flash": {
+			{Priority: 1, Weight: 40, LimitRPM: 200, CurrentRPM: 200},
+			{Priority: 2, Weight: 1, LimitRPM: 500, CurrentRPM: 10},
+		},
+	})
+	assert.Equal(t, 2, m.GetModelPriorityForCredential("gemini-2.5-flash", "usa03"))
+
+	// every tier banned → scalar exposes the lowest overall, never 0.
+	m.ReplaceModelPriorityTiersForCredential("usa03", map[string][]httputil.ModelPriorityTier{
+		"gemini-2.5-flash": {
+			{Priority: 1, Banned: true},
+			{Priority: 2, Banned: true},
+		},
+	})
+	assert.Equal(t, 1, m.GetModelPriorityForCredential("gemini-2.5-flash", "usa03"))
+
+	// nil snapshot clears; a different credential is untouched.
+	m.ReplaceModelPriorityTiersForCredential("ger01", map[string][]httputil.ModelPriorityTier{
+		"gpt-5": {{Priority: 1}, {Priority: 3}},
+	})
+	m.ReplaceModelPriorityTiersForCredential("usa03", nil)
+	assert.Nil(t, m.GetModelPriorityTiersForCredential("gemini-2.5-flash", "usa03"))
+	assert.Len(t, m.GetModelPriorityTiersForCredential("gpt-5", "ger01"), 2)
+}

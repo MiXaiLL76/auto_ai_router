@@ -145,6 +145,28 @@ For a `proxy`/`air` credential, the per-model priority learned from the upstream
 `priority` set here, so a proxy credential's tier reflects what the node it proxies to is
 actually configured with.
 
+When one upstream node serves the same model from several priority groups behind a single
+proxy credential, that credential **expands into one local candidate per tier**. Each tier
+becomes its own primary priority group (using the upstream's priority values), with the
+summed RPM/TPM capacity and summed weight of the upstream credentials in that group, and
+its own *cumulative* local rate-limit gate: tier 1's gate is tier 1's capacity, tier 2's
+gate is tier 1 + tier 2, and so on.
+
+Consequences:
+
+- Selection cascades **immediately** off this router's own contribution — once the
+  requests this router has sent to the proxy credential reach tier 1's cumulative
+  capacity, tier 1 stops being offered and a genuinely lower-priority alternative (this
+  router's own tier-2/3 credentials) is preferred over the proxy credential's tier-2
+  group. No `/health` poll is needed for that step.
+- Only the *cross-fleet* part of the signal — other routers also filling the same
+  upstream tier — still arrives via the 30s `/health` poll, so a tier can briefly look
+  live here while it is actually full upstream.
+- The tier breakdown is re-published on this router's own `/health`, so it survives
+  additional chain hops (a router fronting this one re-expands it).
+- A single-group upstream (the common case) is unaffected — no expansion, one candidate,
+  the scalar `priority` above.
+
 > `fallback_priority` is **not** folded into primary-tier grouping — it only affects retry
 > order (next section). A credential that sets only `fallback_priority` stays in primary
 > tier `0`.

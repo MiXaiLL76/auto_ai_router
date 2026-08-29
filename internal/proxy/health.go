@@ -256,6 +256,7 @@ func (p *Proxy) addModelHealthStats(
 	}
 	modelWeight := 0
 	modelPriority := 0
+	var priorityTiers []httputil.ModelPriorityTier
 	realCredential := ""
 	if p.modelManager != nil {
 		modelWeight = p.modelManager.GetModelWeightForCredential(modelID, credentialName)
@@ -266,6 +267,11 @@ func (p *Proxy) addModelHealthStats(
 		// actually route on (it falls back to the static field when the checker is off).
 		if isProxyLike && p.modelManager.IsEnabled() {
 			modelPriority = p.modelManager.GetModelPriorityForCredential(modelID, credentialName)
+			// Re-emit the learned per-tier breakdown (Design B) so a router fronting this
+			// one keeps the tier structure across the chain hop. Per-tier current usage is
+			// the last upstream-poll value; the downstream adds its own local contribution
+			// via its aggregate counter, same as the scalar current_rpm above.
+			priorityTiers = p.modelManager.GetModelPriorityTiersForCredential(modelID, credentialName)
 		}
 		realCredential = p.modelManager.GetModelSourceCredentialForCredential(modelID, credentialName)
 	}
@@ -286,6 +292,7 @@ func (p *Proxy) addModelHealthStats(
 		IsBanned:        p.balancer.IsBanned(credentialName, modelID),
 		Weight:          balancer.EffectiveWeight(modelWeight, credWeight),
 		Priority:        priority,
+		PriorityTiers:   priorityTiers,
 		CurrentRPM:      ms.RPM,
 		CurrentTPM:      ms.TPM,
 		LimitRPM:        p.rateLimiter.GetModelLimitRPM(credentialName, modelID),

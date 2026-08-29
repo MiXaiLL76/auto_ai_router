@@ -155,6 +155,96 @@ func TestPriorityGroupCascade_ThreeRouterTopology(t *testing.T) {
 	assert.EqualValues(t, 3, atomic.LoadInt32(&router3CompletionCalls), "requests must cascade to router3's group once router2's is down")
 }
 
+// TestPriorityGroupCascade_MixedTierUpstreamLocalCascade is the review_158 #3 Design-B
+// regression: one proxy credential ("router2") fronts an upstream whose /health lists the
+// same model at TWO priority tiers — "r2-cheap" (tier 1, RPM budget 4) and "r2-expensive"
+// (tier 5, large budget). The main router also has a direct mid-priced alternative
+// ("routerMid", tier 3).
+//
+// router2 expands into two balancer candidates: router2@tier-1 (cumulative RPM cap 4) in
+// primary group 1, and router2@tier-5 in group 5. routerMid is a single implicit tier in
+// group 3. While the local aggregate usage for (router2, shared-model) is below 4, group 1
+// serves. Once THIS router has itself sent 4 requests to router2 the tier-1 cumulative cap
+// is hit locally — no /health poll needed — and selection cascades straight to group 3
+// (routerMid), NOT to router2@tier-5, because tier 3 < tier 5.
+func TestPriorityGroupCascade_MixedTierUpstreamLocalCascade(t *testing.T) {
+	var router2Calls, routerMidCalls int32
+
+	router2Health := func() *httputil.ProxyHealthResponse {
+		return &httputil.ProxyHealthResponse{
+			Status: "healthy",
+			Credentials: map[string]httputil.CredentialHealthStats{
+				"r2-cheap":     {Type: "openai", Priority: 1, LimitRPM: 4, LimitTPM: 1000000},
+				"r2-expensive": {Type: "openai", Priority: 5, LimitRPM: 1000, LimitTPM: 1000000},
+			},
+			Models: map[string]httputil.ModelHealthStats{
+				"c": {Credential: "r2-cheap", Model: "shared-model", Priority: 1, LimitRPM: 4, LimitTPM: 1000000},
+				"e": {Credential: "r2-expensive", Model: "shared-model", Priority: 5, LimitRPM: 1000, LimitTPM: 1000000},
+			},
+		}
+	}
+	routerMidHealth := func() *httputil.ProxyHealthResponse {
+		return &httputil.ProxyHealthResponse{
+			Status: "healthy",
+			Credentials: map[string]httputil.CredentialHealthStats{
+				"mid-upstream": {Type: "openai", Priority: 3, LimitRPM: 1000, LimitTPM: 1000000},
+			},
+			Models: map[string]httputil.ModelHealthStats{
+				"m": {Credential: "mid-upstream", Model: "shared-model", Priority: 3, LimitRPM: 1000, LimitTPM: 1000000},
+			},
+		}
+	}
+
+	router2 := mockHealthAndCompletionServer(t, &router2Calls, router2Health, "response from router2")
+	defer router2.Close()
+	routerMid := mockHealthAndCompletionServer(t, &routerMidCalls, routerMidHealth, "response from routerMid")
+	defer routerMid.Close()
+
+	credRouter2 := config.CredentialConfig{Name: "router2", Type: config.ProviderTypeProxy, APIKey: "k2", BaseURL: router2.URL, RPM: 10000, TPM: 100000000}
+	credRouterMid := config.CredentialConfig{Name: "routerMid", Type: config.ProviderTypeProxy, APIKey: "km", BaseURL: routerMid.URL, RPM: 10000, TPM: 100000000}
+
+	builder := NewTestProxyBuilder().WithCredentials(credRouter2, credRouterMid)
+	rl := ratelimit.New()
+	builder.config.RateLimiter = rl
+	mm := builder.config.ModelManager
+	logger := builder.config.Logger
+	prx := builder.Build()
+
+	ctx := context.Background()
+	c2, cm := credRouter2, credRouterMid
+	UpdateStatsFromRemoteProxy(ctx, &c2, rl, logger, mm)
+	UpdateStatsFromRemoteProxy(ctx, &cm, rl, logger, mm)
+
+	// router2 learned a 2-tier breakdown; routerMid is a single implicit tier.
+	tiers := mm.GetModelPriorityTiersForCredential("shared-model", "router2")
+	require.Len(t, tiers, 2)
+	require.Equal(t, 1, tiers[0].Priority)
+	require.Equal(t, 4, tiers[0].LimitRPM)
+	require.Equal(t, 5, tiers[1].Priority)
+	require.Nil(t, mm.GetModelPriorityTiersForCredential("shared-model", "routerMid"))
+	require.Equal(t, 1, mm.GetModelPriorityForCredential("shared-model", "router2"))
+	require.Equal(t, 3, mm.GetModelPriorityForCredential("shared-model", "routerMid"))
+
+	// First 4 requests fill router2's tier-1 cumulative cap (4) — all served by router2.
+	for i := 0; i < 4; i++ {
+		w := doPriorityTestRequest(t, prx, "shared-model")
+		require.Equal(t, http.StatusOK, w.Code, "request %d", i)
+		require.Contains(t, w.Body.String(), "response from router2")
+	}
+	require.EqualValues(t, 4, atomic.LoadInt32(&router2Calls))
+	require.EqualValues(t, 0, atomic.LoadInt32(&routerMidCalls))
+
+	// No re-poll. tier-1 is now locally saturated, so the next requests cascade to
+	// group 3 (routerMid) — never to router2's tier-5 group.
+	for i := 0; i < 5; i++ {
+		w := doPriorityTestRequest(t, prx, "shared-model")
+		require.Equal(t, http.StatusOK, w.Code, "cascade request %d", i)
+		require.Contains(t, w.Body.String(), "response from routerMid")
+	}
+	assert.EqualValues(t, 4, atomic.LoadInt32(&router2Calls), "router2 must stop once its tier-1 cumulative cap is hit locally — no poll lag")
+	assert.EqualValues(t, 5, atomic.LoadInt32(&routerMidCalls), "traffic cascades to the tier-3 alternative, not router2's tier-5")
+}
+
 // TestPriorityGroupCascade_UpstreamIsFallbackCredentialExcludedForPrimaryConnection:
 // router2's own upstream node has TWO credentials — one regular (serves "model-a") and
 // one is_fallback (serves "model-b" only). The main router's "router2" proxy credential

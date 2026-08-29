@@ -12,6 +12,7 @@ import (
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/fail2ban"
+	"github.com/mixaill76/auto_ai_router/internal/httputil"
 	"github.com/mixaill76/auto_ai_router/internal/monitoring"
 	"github.com/mixaill76/auto_ai_router/internal/ratelimit"
 	"github.com/mixaill76/auto_ai_router/internal/scope"
@@ -23,6 +24,12 @@ type ModelChecker interface {
 	GetCredentialsForModel(modelID string) []string
 	GetModelWeightForCredential(modelID, credentialName string) int
 	GetModelPriorityForCredential(modelID, credentialName string) int
+	// GetModelPriorityTiersForCredential returns the learned per-priority-tier breakdown
+	// for a proxy/AIR credential serving modelID (sorted ascending by priority), or nil
+	// when the credential is a single implicit tier. Design B (review_158 item 3): a
+	// proxy credential fronting an upstream that spans several priority groups expands
+	// into one balancer candidate per tier.
+	GetModelPriorityTiersForCredential(modelID, credentialName string) []httputil.ModelPriorityTier
 	IsEnabled() bool
 }
 
@@ -34,6 +41,24 @@ var (
 type candidateEntry struct {
 	absIdx int
 	cred   *config.CredentialConfig
+	// tier is set only when this entry is one learned primary-priority tier of a
+	// proxy/AIR credential for the request model (Design B). Picking a tier candidate
+	// still routes the real request to cred — the tier only governs which primary
+	// priority group the candidate sits in, its SWRR weight, and a local cumulative
+	// rate-limit gate so this router cascades off its own tier-1 saturation without
+	// waiting for the next /health poll.
+	tier *tierCandidate
+}
+
+type tierCandidate struct {
+	priority int
+	weight   int
+	// cumLimitRPM/TPM: this tier's own aggregate cap plus every lower-priority tier's,
+	// so "current model usage >= cumLimitRPM" means tiers <= this one are full and the
+	// candidate should be skipped in favour of the next group. <= 0 means uncapped.
+	cumLimitRPM int
+	cumLimitTPM int
+	banned      bool // every upstream leaf credential in this tier is currently banned
 }
 
 type RoundRobin struct {
@@ -348,7 +373,10 @@ func (r *RoundRobin) nextExcludingScoped(modelID string, allowOnlyFallback, allo
 	// Primary pool: cascade through primaryPriority() groups (ascending; credentials
 	// without an explicit priority: all share group 0, which is tried first — a config
 	// that never sets priority: stays one flat weighted pool). SWRR runs within the
-	// lowest-numbered group that still has a live member.
+	// lowest-numbered group that still has a live member. Proxy/AIR credentials whose
+	// upstream spans several priority groups for this model are first expanded into one
+	// candidate per learned tier (Design B).
+	candidates = r.expandTierCandidates(candidates, modelID)
 	keyBase := r.schedKeyFor(modelID, allowOnlyFallback, allowOnlyProxy, requiredType, hasActiveExclusion(exclude), "")
 	cred, found, rateLimitHit, err := r.selectPriorityGroupCandidate(modelID, candidates, keyBase, r.primaryPriority)
 	if found || err != nil {
@@ -360,12 +388,81 @@ func (r *RoundRobin) nextExcludingScoped(modelID string, allowOnlyFallback, allo
 	return nil, ErrNoCredentialsAvailable
 }
 
+// expandTierCandidates replaces each proxy/AIR candidate that has a learned multi-tier
+// breakdown for modelID with one candidate per tier (Design B). Everything else passes
+// through unchanged, so the common single-tier / direct-provider case is a no-op.
+func (r *RoundRobin) expandTierCandidates(candidates []candidateEntry, modelID string) []candidateEntry {
+	if modelID == "" || r.modelChecker == nil || !r.modelChecker.IsEnabled() {
+		return candidates
+	}
+	breakdowns := make([][]httputil.ModelPriorityTier, len(candidates))
+	needExpand := false
+	for i, c := range candidates {
+		if c.cred.IsProxyLike() {
+			if tiers := r.modelChecker.GetModelPriorityTiersForCredential(modelID, c.cred.Name); len(tiers) >= 2 {
+				breakdowns[i] = tiers
+				needExpand = true
+			}
+		}
+	}
+	if !needExpand {
+		return candidates
+	}
+
+	out := make([]candidateEntry, 0, len(candidates)*2)
+	for i, c := range candidates {
+		tiers := breakdowns[i]
+		if len(tiers) < 2 {
+			out = append(out, c)
+			continue
+		}
+		cumRPM, cumTPM := 0, 0
+		uncappedRPM, uncappedTPM := false, false
+		for _, t := range tiers { // already sorted ascending by priority
+			tc := &tierCandidate{priority: t.Priority, weight: t.Weight, banned: t.Banned}
+			if t.LimitRPM <= 0 {
+				uncappedRPM = true
+			}
+			if uncappedRPM {
+				tc.cumLimitRPM = -1
+			} else {
+				cumRPM += t.LimitRPM
+				tc.cumLimitRPM = cumRPM
+			}
+			if t.LimitTPM <= 0 {
+				uncappedTPM = true
+			}
+			if uncappedTPM {
+				tc.cumLimitTPM = -1
+			} else {
+				cumTPM += t.LimitTPM
+				tc.cumLimitTPM = cumTPM
+			}
+			out = append(out, candidateEntry{absIdx: c.absIdx, cred: c.cred, tier: tc})
+		}
+	}
+	return out
+}
+
 func (r *RoundRobin) liveCandidates(modelID string, candidates []candidateEntry) ([]candidateEntry, bool) {
 	live := make([]candidateEntry, 0, len(candidates))
 	rateLimitHit := false
 	for _, c := range candidates {
+		if c.tier != nil && c.tier.banned {
+			// Upstream /health reports every leaf credential in this tier banned.
+			monitoring.CredentialSelectionRejected.WithLabelValues("banned").Inc()
+			continue
+		}
 		if r.fail2ban.IsBanned(c.cred.Name, modelID) {
 			monitoring.CredentialSelectionRejected.WithLabelValues("banned").Inc()
+			continue
+		}
+		if c.tier != nil && !r.tierHasHeadroom(c.cred.Name, modelID, c.tier) {
+			// Local cumulative gate: tiers up to and including this one are full, so the
+			// upstream has cascaded to a pricier group — cascade locally too rather than
+			// keep pouring tier-1-priced traffic at a proxy serving it at tier-N cost.
+			monitoring.CredentialSelectionRejected.WithLabelValues("rate_limit").Inc()
+			rateLimitHit = true
 			continue
 		}
 		if !r.canPassRateLimits(c.cred.Name, modelID) {
@@ -376,6 +473,20 @@ func (r *RoundRobin) liveCandidates(modelID string, candidates []candidateEntry)
 		live = append(live, c)
 	}
 	return live, rateLimitHit
+}
+
+// tierHasHeadroom reports whether the current recorded usage for (credentialName, modelID)
+// is still below this tier's cumulative RPM/TPM cap. Reads the same aggregate counter that
+// selectWeightedLiveCandidate's TryAllowAll records into, so this router's own committed
+// requests move the cascade forward with no /health-poll lag.
+func (r *RoundRobin) tierHasHeadroom(credentialName, modelID string, tc *tierCandidate) bool {
+	if tc.cumLimitRPM > 0 && r.rateLimiter.GetCurrentModelRPM(credentialName, modelID) >= tc.cumLimitRPM {
+		return false
+	}
+	if tc.cumLimitTPM > 0 && r.rateLimiter.GetCurrentModelTPM(credentialName, modelID) >= tc.cumLimitTPM {
+		return false
+	}
+	return true
 }
 
 func (r *RoundRobin) selectWeightedLiveCandidate(modelID string, live []candidateEntry, key schedKey, rateLimitHit bool) (*config.CredentialConfig, error) {
@@ -393,7 +504,7 @@ func (r *RoundRobin) selectWeightedLiveCandidate(modelID string, live []candidat
 	state := r.swrrStateFor(key)
 	liveWeights := make(map[string]int, len(live))
 	for _, c := range live {
-		liveWeights[c.cred.Name] = r.effectiveWeight(c.cred, modelID)
+		liveWeights[c.cred.Name] = r.candidateWeight(c, modelID)
 	}
 	total := state.advance(liveWeights)
 
@@ -594,12 +705,14 @@ func (r *RoundRobin) selectPriorityGroupCandidate(modelID string, candidates []c
 	groups := make(map[int][]candidateEntry, len(candidates))
 	priorities := make([]int, 0, len(candidates))
 	for _, c := range candidates {
-		// priorityOf resolves a per-model priority learned from an upstream /health poll
-		// for proxy/AIR credentials (see learnedProxyPriority in weighted.go) — this is
-		// what lets a proxy credential's priority group reflect what's actually configured
-		// on the node it proxies to, instead of collapsing every proxy credential into one
-		// flat group.
+		// A tier candidate (Design B) carries its own priority — the tier the upstream
+		// serves this model from. Otherwise priorityOf resolves the credential's group:
+		// a per-model priority learned from an upstream /health poll for proxy/AIR
+		// credentials (learnedProxyPriority in weighted.go), else its static priority:.
 		p := priorityOf(c.cred, modelID)
+		if c.tier != nil {
+			p = c.tier.priority
+		}
 		if _, ok := groups[p]; !ok {
 			priorities = append(priorities, p)
 		}

@@ -39,9 +39,31 @@ type CredentialHealthStats struct {
 	BannedErrorCounts map[int]int       `json:"banned_error_counts,omitempty"` // aggregated error counts from banned models
 }
 
+// ModelPriorityTier is one learned primary-priority tier of a proxy/AIR credential for a
+// model: the aggregate (summed) capacity + weight of all the upstream leaf credentials
+// that serve the model at that priority. A proxy credential expands into one balancer
+// candidate per tier (see internal/balancer candidate expansion), each in its own
+// primary priority group with its own local rate-limit bucket, so this router can
+// cascade off its own tier-1 saturation without waiting for the next /health poll.
+type ModelPriorityTier struct {
+	Priority   int  `json:"priority"`
+	Weight     int  `json:"weight"`
+	LimitRPM   int  `json:"limit_rpm"`
+	LimitTPM   int  `json:"limit_tpm"`
+	CurrentRPM int  `json:"current_rpm"`
+	CurrentTPM int  `json:"current_tpm"`
+	Banned     bool `json:"banned"` // every upstream leaf credential in this tier is currently banned
+}
+
 // ModelHealthStats represents health stats for a single model
 type ModelHealthStats struct {
 	Credential string `json:"credential"`
+	// PriorityTiers is the per-tier breakdown for a proxy/AIR credential serving this
+	// model from an upstream that itself spans several priority groups. Empty for a
+	// direct provider credential (or an upstream with a single tier) — callers then fall
+	// back to the scalar Priority/Weight/Limit* fields below as one implicit tier. A
+	// downstream router reads this to keep the tier structure across chain hops.
+	PriorityTiers []ModelPriorityTier `json:"priority_tiers,omitempty"`
 	// RealCredential is the actual leaf credential serving this model behind a
 	// proxy/AIR credential (e.g. Credential="router2", RealCredential="mock2"),
 	// learned from that upstream's own /health response. Empty when Credential
@@ -90,4 +112,43 @@ func EffectiveHealthPriority(modelStats ModelHealthStats, credStats CredentialHe
 		return credStats.Priority
 	}
 	return 0
+}
+
+// ModelHealthEntryLive reports whether the upstream leaf credential behind this
+// /health model entry can take traffic for the model right now: not banned, and
+// neither its RPM nor TPM budget currently exhausted. Mirrors the webui dashboard's
+// isRowLive().
+//
+// A proxy credential learns a single scalar priority per model by MIN-folding its
+// upstream's per-tier entries (internal/proxy/remote.go updateModelLimits). Folding in
+// only *live* entries keeps that scalar tracking the tier the upstream is actually
+// serving from: when the cheap tier is saturated the upstream has already cascaded to a
+// pricier one, and MIN must rise with it so the local balancer can prefer a mid-priced
+// alternative instead of over-sending to a proxy that only looks cheap.
+func ModelHealthEntryLive(s ModelHealthStats) bool {
+	if s.IsBanned {
+		return false
+	}
+	if s.LimitRPM > 0 && s.CurrentRPM >= s.LimitRPM {
+		return false
+	}
+	if s.LimitTPM > 0 && s.CurrentTPM >= s.LimitTPM {
+		return false
+	}
+	return true
+}
+
+// ModelPriorityTierLive mirrors ModelHealthEntryLive for a single learned tier: not
+// fully banned, and neither its aggregate RPM nor TPM budget exhausted.
+func ModelPriorityTierLive(t ModelPriorityTier) bool {
+	if t.Banned {
+		return false
+	}
+	if t.LimitRPM > 0 && t.CurrentRPM >= t.LimitRPM {
+		return false
+	}
+	if t.LimitTPM > 0 && t.CurrentTPM >= t.LimitTPM {
+		return false
+	}
+	return true
 }

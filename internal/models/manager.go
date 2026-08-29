@@ -292,18 +292,19 @@ const (
 // Manager handles model discovery and mapping
 type Manager struct {
 	mu                           sync.RWMutex
-	credentialModels             map[string][]string          // credential name -> list of model IDs
-	allModels                    []Model                      // deduplicated list of all models
-	modelToCredentials           map[string][]string          // model ID -> list of credential names
-	modelLimits                  map[string][]ModelLimits     // model ID -> limits (may have multiple entries for different credentials)
-	staticModelLimits            map[string][]ModelLimits     // immutable snapshot of limits from config.yaml (never modified after New())
-	staticModelRealNames         map[string]string            // immutable snapshot of global real names from config.yaml
-	staticModelRealNamesPerCred  map[string]map[string]string // immutable snapshot of per-credential real names: credential -> alias -> real name
-	modelPassthroughResponses    map[string]*bool             // model name -> explicit passthrough_responses override (nil = auto)
-	modelPassthroughMessages     map[string]*bool             // model name -> explicit passthrough_messages override (nil = provider default)
-	dynamicModelWeights          map[string]map[string]int    // model ID -> credential -> weight learned from upstream /health
-	dynamicModelPriorities       map[string]map[string]int    // model ID -> credential -> priority learned from upstream /health
-	dynamicModelSourceCreds      map[string]map[string]string // model ID -> local (proxy/AIR) credential -> real upstream credential name learned from /health
+	credentialModels             map[string][]string                                // credential name -> list of model IDs
+	allModels                    []Model                                            // deduplicated list of all models
+	modelToCredentials           map[string][]string                                // model ID -> list of credential names
+	modelLimits                  map[string][]ModelLimits                           // model ID -> limits (may have multiple entries for different credentials)
+	staticModelLimits            map[string][]ModelLimits                           // immutable snapshot of limits from config.yaml (never modified after New())
+	staticModelRealNames         map[string]string                                  // immutable snapshot of global real names from config.yaml
+	staticModelRealNamesPerCred  map[string]map[string]string                       // immutable snapshot of per-credential real names: credential -> alias -> real name
+	modelPassthroughResponses    map[string]*bool                                   // model name -> explicit passthrough_responses override (nil = auto)
+	modelPassthroughMessages     map[string]*bool                                   // model name -> explicit passthrough_messages override (nil = provider default)
+	dynamicModelWeights          map[string]map[string]int                          // model ID -> credential -> weight learned from upstream /health
+	dynamicModelPriorities       map[string]map[string]int                          // model ID -> credential -> priority learned from upstream /health (scalar; MIN of live tiers when tiers exist)
+	dynamicModelPriorityTiers    map[string]map[string][]httputil.ModelPriorityTier // model ID -> proxy/AIR credential -> per-priority-tier breakdown learned from upstream /health
+	dynamicModelSourceCreds      map[string]map[string]string                       // model ID -> local (proxy/AIR) credential -> real upstream credential name learned from /health
 	dynamicModelScopes           map[string]map[string]ScopeMetadata
 	dbModelNames                 map[string]bool              // model names that were loaded from LiteLLM DB (for hot-reload diffing)
 	modelAliases                 map[string]string            // alias -> real model name (from model_alias config)
@@ -345,6 +346,7 @@ func New(logger *slog.Logger, defaultModelsRPM int, staticModels []config.ModelR
 		modelPassthroughMessages:    make(map[string]*bool),
 		dynamicModelWeights:         make(map[string]map[string]int),
 		dynamicModelPriorities:      make(map[string]map[string]int),
+		dynamicModelPriorityTiers:   make(map[string]map[string][]httputil.ModelPriorityTier),
 		dynamicModelSourceCreds:     make(map[string]map[string]string),
 		dynamicModelScopes:          make(map[string]map[string]ScopeMetadata),
 		defaultModelsRPM:            defaultModelsRPM,
@@ -2167,6 +2169,61 @@ func (m *Manager) replaceModelPrioritiesForCredentialLocked(credentialName strin
 	}
 }
 
+// ReplaceModelPriorityTiersForCredential replaces the per-priority-tier breakdown a
+// proxy/AIR credential learned from its upstream /health with a fresh snapshot. The
+// balancer expands a proxy credential into one candidate per tier (each its own primary
+// priority group + local cumulative-capacity gate); Design B, review_158 item 3.
+func (m *Manager) ReplaceModelPriorityTiersForCredential(credentialName string, tiers map[string][]httputil.ModelPriorityTier) {
+	if credentialName == "" {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.replaceModelPriorityTiersForCredentialLocked(credentialName, tiers)
+}
+
+func (m *Manager) replaceModelPriorityTiersForCredentialLocked(credentialName string, tiers map[string][]httputil.ModelPriorityTier) {
+	for modelID, credTiers := range m.dynamicModelPriorityTiers {
+		delete(credTiers, credentialName)
+		if len(credTiers) == 0 {
+			delete(m.dynamicModelPriorityTiers, modelID)
+		}
+	}
+
+	for modelID, list := range tiers {
+		if modelID == "" || len(list) == 0 {
+			continue
+		}
+		cp := make([]httputil.ModelPriorityTier, len(list))
+		copy(cp, list)
+		if m.dynamicModelPriorityTiers[modelID] == nil {
+			m.dynamicModelPriorityTiers[modelID] = make(map[string][]httputil.ModelPriorityTier)
+		}
+		m.dynamicModelPriorityTiers[modelID][credentialName] = cp
+	}
+}
+
+// GetModelPriorityTiersForCredential returns the learned per-priority-tier breakdown for
+// a (model, proxy/AIR credential) pair, sorted ascending by priority, or nil when none
+// has been learned (the caller then treats the credential as a single implicit tier from
+// its scalar priority). The returned slice is a copy — safe for the caller to hold.
+func (m *Manager) GetModelPriorityTiersForCredential(modelID, credentialName string) []httputil.ModelPriorityTier {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	byCred, ok := m.dynamicModelPriorityTiers[modelID]
+	if !ok {
+		return nil
+	}
+	list, ok := byCred[credentialName]
+	if !ok || len(list) == 0 {
+		return nil
+	}
+	cp := make([]httputil.ModelPriorityTier, len(list))
+	copy(cp, list)
+	slices.SortFunc(cp, func(a, b httputil.ModelPriorityTier) int { return a.Priority - b.Priority })
+	return cp
+}
+
 // SetModelSourceCredentialForCredential stores which real (leaf) credential is
 // actually serving a model behind a proxy/AIR credential, learned from that
 // upstream's own /health response (ModelHealthStats.Credential there). Purely
@@ -2597,9 +2654,33 @@ func (m *Manager) GetModelWeightForCredential(modelID, credentialName string) in
 // CredentialConfig.EffectivePriority()'s own default. Callers (see
 // balancer.RoundRobin.effectivePriority) should therefore treat a 0 result as "use the
 // credential's own EffectivePriority()" rather than as an authoritative override.
+//
+// When a per-tier breakdown exists (GetModelPriorityTiersForCredential) this returns the
+// lowest priority among the tiers that are currently live, else the lowest across all
+// tiers — the tier the upstream is effectively serving from. The balancer itself uses the
+// full tier list (candidate expansion); this scalar is for the dashboard and the
+// pre-Design-B fallback path.
 func (m *Manager) GetModelPriorityForCredential(modelID, credentialName string) int {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
+
+	if byCred, ok := m.dynamicModelPriorityTiers[modelID]; ok {
+		if tiers, ok := byCred[credentialName]; ok && len(tiers) > 0 {
+			bestLive, haveLive, bestAny := 0, false, 0
+			for i, t := range tiers {
+				if i == 0 || t.Priority < bestAny {
+					bestAny = t.Priority
+				}
+				if httputil.ModelPriorityTierLive(t) && (!haveLive || t.Priority < bestLive) {
+					bestLive, haveLive = t.Priority, true
+				}
+			}
+			if haveLive {
+				return bestLive
+			}
+			return bestAny
+		}
+	}
 
 	if priorities, ok := m.dynamicModelPriorities[modelID]; ok {
 		return priorities[credentialName]

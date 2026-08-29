@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"slices"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/httputil"
@@ -21,6 +22,11 @@ type ModelManagerInterface interface {
 	ReplaceModelWeightsForCredential(credentialName string, weights map[string]int)
 	SetModelPriorityForCredential(modelID, credentialName string, priority int)
 	ReplaceModelPrioritiesForCredential(credentialName string, priorities map[string]int)
+	// ReplaceModelPriorityTiersForCredential replaces the per-priority-tier breakdown a
+	// proxy/AIR credential learned from its upstream /health (Design B). A model with
+	// fewer than two distinct tiers is omitted — callers treat it as one implicit tier
+	// from the scalar priority set via ReplaceModelPrioritiesForCredential.
+	ReplaceModelPriorityTiersForCredential(credentialName string, tiers map[string][]httputil.ModelPriorityTier)
 	ReplaceModelSourceCredentialsForCredential(credentialName string, sourceCredentials map[string]string)
 	HasModel(credentialName, modelID string) bool
 }
@@ -145,7 +151,7 @@ type limitAggregation struct {
 	priorityHigh int
 	hasPriority  bool
 	// priorityWorst/hasPriorityWorst track the highest priority seen across ALL entries
-	// for this model, banned included — the fallback used when every entry is banned
+	// for this model, non-live entries included — the fallback used when no entry is live
 	// (hasPriority ends up false). See trackWorstPriority's doc comment.
 	priorityWorst    int
 	hasPriorityWorst bool
@@ -158,6 +164,53 @@ type limitAggregation struct {
 
 func newSumLimitAggregation() *limitAggregation {
 	return &limitAggregation{}
+}
+
+// tierAccumulator sums one primary-priority tier's worth of upstream leaf credentials
+// (Design B). agg reuses the SUM/unlimited handling of limitAggregation; anyLive records
+// whether at least one contributor can serve right now (else the tier is exposed Banned).
+type tierAccumulator struct {
+	agg     *limitAggregation
+	anyLive bool
+}
+
+func accumulateTier(byPriority map[int]*tierAccumulator, priority, weight, rpm, tpm, curRPM, curTPM int, live bool) {
+	ta := byPriority[priority]
+	if ta == nil {
+		ta = &tierAccumulator{agg: newSumLimitAggregation()}
+		byPriority[priority] = ta
+	}
+	// Capacity/usage always fold in — a saturated or banned tier still has real capacity
+	// that will free up, and the balancer needs the cumulative cap to be right.
+	ta.agg.applySum(rpm, tpm, curRPM, curTPM)
+	ta.agg.applyWeight(weight)
+	if live {
+		ta.anyLive = true
+	}
+}
+
+// buildModelPriorityTiers turns the per-priority accumulators for one model into a
+// sorted []ModelPriorityTier, or nil when the model has fewer than two distinct tiers
+// (the caller keeps it on the scalar priority path in that case).
+func buildModelPriorityTiers(byPriority map[int]*tierAccumulator) []httputil.ModelPriorityTier {
+	if len(byPriority) < 2 {
+		return nil
+	}
+	tiers := make([]httputil.ModelPriorityTier, 0, len(byPriority))
+	for p, ta := range byPriority {
+		lrpm, ltpm := ta.agg.finalizeLimits()
+		tiers = append(tiers, httputil.ModelPriorityTier{
+			Priority:   p,
+			Weight:     ta.agg.weight,
+			LimitRPM:   lrpm,
+			LimitTPM:   ltpm,
+			CurrentRPM: ta.agg.currentRPM,
+			CurrentTPM: ta.agg.currentTPM,
+			Banned:     !ta.anyLive,
+		})
+	}
+	slices.SortFunc(tiers, func(a, b httputil.ModelPriorityTier) int { return a.Priority - b.Priority })
+	return tiers
 }
 
 func (agg *limitAggregation) applySum(rpm, tpm, currentRPM, currentTPM int) {
@@ -192,17 +245,17 @@ func (agg *limitAggregation) applyWeight(weight int) {
 // proxy-local model priority is the lowest one — the group that would be tried first
 // — not a sum or average.
 //
-// Callers must only invoke this for upstream credentials that can actually still serve
-// the model (see updateModelLimits, which skips banned entries): a banned upstream's
-// static priority has no business dragging the aggregate down via MIN when that
-// upstream can't serve traffic anymore. This function itself has no notion of ban
-// status — it folds in whatever priority it's given — so the filtering lives entirely
-// in the caller.
+// Callers must only invoke this for upstream credentials that can actually serve the
+// model right now (see updateModelLimits, which folds in only httputil.ModelHealthEntryLive
+// entries — not banned and not RPM/TPM-exhausted): a down or saturated upstream's static
+// priority has no business dragging the aggregate down via MIN when the upstream has in
+// fact already cascaded past it. This function itself has no notion of live status — it
+// folds in whatever priority it's given — so the filtering lives entirely in the caller.
 //
 // Also tracks the highest live priority seen (priorityHigh) alongside the lowest
 // (priority): the gap between them is exactly the risk updateModelLimits warns about
 // below — if the credential currently holding the low end ever stops being live
-// (banned, removed), the aggregate jumps straight to priorityHigh with no
+// (banned, saturated, removed), the aggregate jumps straight to priorityHigh with no
 // intermediate warning at that moment, since a ticking sync loses no history.
 func (agg *limitAggregation) applyPriorityMin(priority int) {
 	if !agg.hasPriority || priority < agg.priority {
@@ -215,8 +268,10 @@ func (agg *limitAggregation) applyPriorityMin(priority int) {
 }
 
 // trackWorstPriority records the highest priority seen across ALL entries for this
-// model, banned included — unlike applyPriorityMin, callers must call this
-// unconditionally, before any ban filtering.
+// model, non-live (banned / saturated) included — unlike applyPriorityMin, callers must
+// call this unconditionally, before any live-status filtering. It is the fallback the
+// caller exposes when no entry is live at all, so the proxy credential still lands in a
+// real (worst-case) tier rather than defaulting to the tried-first group.
 func (agg *limitAggregation) trackWorstPriority(priority int) {
 	if !agg.hasPriorityWorst || priority > agg.priorityWorst {
 		agg.priorityWorst = priority
@@ -328,6 +383,7 @@ func updateModelLimits(
 			modelManager.ReplaceModelsForCredential(cred.Name, nil)
 			modelManager.ReplaceModelWeightsForCredential(cred.Name, nil)
 			modelManager.ReplaceModelPrioritiesForCredential(cred.Name, nil)
+			modelManager.ReplaceModelPriorityTiersForCredential(cred.Name, nil)
 			modelManager.ReplaceModelSourceCredentialsForCredential(cred.Name, nil)
 		}
 		removedModels := removeStaleModelLimits(cred.Name, map[string]bool{}, rateLimiter)
@@ -346,6 +402,11 @@ func updateModelLimits(
 	modelIDSet := make(map[string]bool, len(health.Models))
 	modelWeights := make(map[string]int)
 	modelPriorities := make(map[string]int)
+	// Design B: per-priority-tier accumulation. modelID -> priority -> summed capacity of
+	// the upstream leaf credentials serving that model at that priority. Emitted as
+	// []ModelPriorityTier only when a model spans >= 2 distinct priorities behind this one
+	// proxy credential; the single-tier case stays on the scalar path above.
+	modelTierAcc := make(map[string]map[int]*tierAccumulator)
 	// Display-only: which real upstream credential is serving each model. When
 	// several upstream credentials serve the same model behind this one proxy
 	// link, the last one seen wins — same simplification weight/priority
@@ -392,16 +453,37 @@ func updateModelLimits(
 		}
 		aggregation.applyWeight(weight)
 		modelWeights[modelID] = aggregation.weight
-		// Unconditional, banned entries included — see trackWorstPriority's doc comment.
+
+		// Per-tier accumulation. If this upstream entry itself carries a tier breakdown
+		// (a proxy-of-proxy hop — the upstream is also fronting a multi-tier node), fold
+		// each of its tiers in at its own priority; otherwise the entry is one implicit
+		// tier at EffectiveHealthPriority.
+		byP := modelTierAcc[modelID]
+		if byP == nil {
+			byP = make(map[int]*tierAccumulator)
+			modelTierAcc[modelID] = byP
+		}
+		if len(modelStatsData.PriorityTiers) > 0 {
+			for _, st := range modelStatsData.PriorityTiers {
+				accumulateTier(byP, st.Priority, st.Weight, st.LimitRPM, st.LimitTPM, st.CurrentRPM, st.CurrentTPM, httputil.ModelPriorityTierLive(st))
+			}
+		} else {
+			accumulateTier(byP, priority, weight, rpm, tpm, curRPM, curTPM, httputil.ModelHealthEntryLive(modelStatsData))
+		}
+
+		// Unconditional, non-live entries included — see trackWorstPriority's doc comment.
 		aggregation.trackWorstPriority(priority)
-		// Skip folding this entry's priority into the MIN aggregation when the upstream
-		// credential is banned/exhausted for this model: it can no longer actually serve
-		// the model, so its static priority must not pull down the priority we expose for
-		// this proxy credential + model pair (see applyPriorityMin's doc comment). This is
-		// scoped to priority only — rpm/tpm/current-usage aggregation (applySum above) and
-		// weight (applyWeight above) still fold in banned entries unconditionally, since
-		// those aren't affected by the same "which group gets tried first" concern.
-		if !modelStatsData.IsBanned {
+		// Fold this entry's priority into the MIN aggregation only when the upstream
+		// credential can actually serve this model right now — not banned AND not
+		// RPM/TPM-exhausted (httputil.ModelHealthEntryLive, mirroring the webui's
+		// isRowLive). A saturated cheap tier must not keep pinning this proxy credential's
+		// exposed priority to its lowest value while the upstream has in fact already
+		// cascaded to a pricier tier; excluding it lets MIN rise to whichever tier is
+		// live, so the local balancer can prefer a mid-priced alternative instead of
+		// over-sending to a proxy that only looks cheap. Scoped to priority only:
+		// rpm/tpm/current-usage (applySum) and weight (applyWeight) still fold in every
+		// entry — total capacity and share don't hinge on "which tier is tried first".
+		if httputil.ModelHealthEntryLive(modelStatsData) {
 			aggregation.applyPriorityMin(priority)
 		}
 		if modelStatsData.Credential != "" {
@@ -415,11 +497,12 @@ func updateModelLimits(
 	for modelID, stats := range modelStats {
 		switch {
 		case stats.hasPriority:
-			// At least one live (non-banned) entry — MIN aggregation as usual.
+			// At least one live (not banned, not saturated) entry — MIN over the live
+			// entries, i.e. the tier the upstream is actually serving from right now.
 			modelPriorities[modelID] = stats.priority
 
 			if stats.priority != stats.priorityHigh {
-				logger.Warn("Model has upstream credentials in different priority groups behind one proxy credential — routing rides on the cheaper group staying live",
+				logger.Info("Model has upstream credentials in different priority groups behind one proxy credential — expanded into local priority tiers, capacity enforced per tier",
 					"proxy", cred.Name,
 					"model", modelID,
 					"current_effective_priority", stats.priority,
@@ -427,13 +510,19 @@ func updateModelLimits(
 				)
 			}
 		case stats.hasPriorityWorst:
-			// Every entry for this model is currently banned/exhausted — expose the
-			// worst (highest) priority ever seen rather than leaving the model out of
+			// No entry for this model is live right now (all banned or saturated) — expose
+			// the worst (highest) priority ever seen rather than leaving the model out of
 			// modelPriorities, which ReplaceModelPrioritiesForCredential reads as
 			// "nothing learned" and falls back to this proxy credential's own static
-			// EffectivePriority() — commonly 0, the *best* group. See
-			// trackWorstPriority's doc comment.
+			// priority: field — commonly 0, the *best* group. See trackWorstPriority.
 			modelPriorities[modelID] = stats.priorityWorst
+		}
+	}
+
+	modelTiers := make(map[string][]httputil.ModelPriorityTier)
+	for modelID, byPriority := range modelTierAcc {
+		if tiers := buildModelPriorityTiers(byPriority); tiers != nil {
+			modelTiers[modelID] = tiers
 		}
 	}
 
@@ -441,6 +530,7 @@ func updateModelLimits(
 		modelManager.ReplaceModelsForCredential(cred.Name, modelIDs)
 		modelManager.ReplaceModelWeightsForCredential(cred.Name, modelWeights)
 		modelManager.ReplaceModelPrioritiesForCredential(cred.Name, modelPriorities)
+		modelManager.ReplaceModelPriorityTiersForCredential(cred.Name, modelTiers)
 		modelManager.ReplaceModelSourceCredentialsForCredential(cred.Name, modelSourceCreds)
 	}
 

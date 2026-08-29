@@ -8,6 +8,7 @@ import (
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/fail2ban"
+	"github.com/mixaill76/auto_ai_router/internal/httputil"
 	"github.com/mixaill76/auto_ai_router/internal/ratelimit"
 	"github.com/mixaill76/auto_ai_router/internal/scope"
 	"github.com/stretchr/testify/assert"
@@ -21,6 +22,7 @@ type MockModelChecker struct {
 	modelToCredentials map[string][]string       // model -> credentials
 	modelWeights       map[string]map[string]int // model -> credential -> weight
 	modelPriorities    map[string]map[string]int // model -> credential -> priority
+	modelTiers         map[string]map[string][]httputil.ModelPriorityTier
 }
 
 func NewMockModelChecker(enabled bool) *MockModelChecker {
@@ -30,6 +32,7 @@ func NewMockModelChecker(enabled bool) *MockModelChecker {
 		modelToCredentials: make(map[string][]string),
 		modelWeights:       make(map[string]map[string]int),
 		modelPriorities:    make(map[string]map[string]int),
+		modelTiers:         make(map[string]map[string][]httputil.ModelPriorityTier),
 	}
 }
 
@@ -79,6 +82,20 @@ func (m *MockModelChecker) SetModelPriority(modelID, credentialName string, prio
 		m.modelPriorities[modelID] = make(map[string]int)
 	}
 	m.modelPriorities[modelID][credentialName] = priority
+}
+
+func (m *MockModelChecker) GetModelPriorityTiersForCredential(modelID, credentialName string) []httputil.ModelPriorityTier {
+	if creds, ok := m.modelTiers[modelID]; ok {
+		return creds[credentialName]
+	}
+	return nil
+}
+
+func (m *MockModelChecker) SetModelTiers(modelID, credentialName string, tiers []httputil.ModelPriorityTier) {
+	if m.modelTiers[modelID] == nil {
+		m.modelTiers[modelID] = make(map[string][]httputil.ModelPriorityTier)
+	}
+	m.modelTiers[modelID][credentialName] = tiers
 }
 
 func (m *MockModelChecker) IsEnabled() bool {
@@ -1872,6 +1889,86 @@ func TestNextForModel_PriorityGroup_ProxyCredentialUsesPerModelPriority(t *testi
 	}
 	assert.True(t, seen["proxy-a"], "without a per-model override, proxy-a must be reachable")
 	assert.True(t, seen["proxy-b"], "without a per-model override, proxy-b must be reachable")
+}
+
+// TestNextForModel_TierCandidateExpansion_LocalCumulativeCascade is the Design B
+// balancer piece (review_158 item 3): a proxy credential with a learned multi-tier
+// breakdown for a model expands into one candidate per tier, each in its own primary
+// priority group with its own cumulative local RPM cap. When this router's own recorded
+// usage crosses the tier-1 cap, selection cascades to the next group immediately — with
+// no /health poll — and lands on a genuinely lower-priority alternative rather than the
+// same proxy's tier-5 group.
+func TestNextForModel_TierCandidateExpansion_LocalCumulativeCascade(t *testing.T) {
+	f2b := fail2ban.New(3, 0, []int{500})
+	rl := ratelimit.New()
+
+	credentials := []config.CredentialConfig{
+		{Name: "px", Type: config.ProviderTypeProxy, APIKey: "k1", BaseURL: "http://a.com", RPM: -1},
+		{Name: "alt", Type: config.ProviderTypeOpenAI, APIKey: "k2", BaseURL: "http://b.com", RPM: -1, Priority: 3},
+	}
+	rl.AddCredential("px", -1)
+	rl.AddCredential("alt", -1)
+	// Aggregate (cred,model) bucket = grand total of all tiers, so TryAllowAll records
+	// into the counter that tierHasHeadroom reads.
+	rl.AddModelWithTPM("px", "m", 3+100, -1)
+
+	bal := New(credentials, f2b, rl)
+	mc := NewMockModelChecker(true)
+	mc.AddModel("px", "m")
+	mc.AddModel("alt", "m")
+	mc.SetModelTiers("m", "px", []httputil.ModelPriorityTier{
+		{Priority: 1, Weight: 1, LimitRPM: 3},
+		{Priority: 5, Weight: 1, LimitRPM: 100},
+	})
+	bal.SetModelChecker(mc)
+
+	// First 3 requests: px@tier-1 (group 1) has cumulative headroom (cap 3).
+	for i := 0; i < 3; i++ {
+		cred, err := bal.NextForModel("m")
+		require.NoError(t, err, "request %d", i)
+		assert.Equal(t, "px", cred.Name, "request %d", i)
+	}
+	// tier-1 cumulative cap now reached locally — cascade to group 3 (alt), never px@tier-5.
+	for i := 0; i < 4; i++ {
+		cred, err := bal.NextForModel("m")
+		require.NoError(t, err, "cascade request %d", i)
+		assert.Equal(t, "alt", cred.Name, "cascade request %d must land on the tier-3 alternative, not px@tier-5", i)
+	}
+}
+
+// TestNextForModel_TierCandidate_SWRRWeightWithinGroup: a tier candidate and a plain
+// credential sharing a priority group split traffic by the tier's learned weight.
+func TestNextForModel_TierCandidate_SWRRWeightWithinGroup(t *testing.T) {
+	f2b := fail2ban.New(3, 0, []int{500})
+	rl := ratelimit.New()
+
+	credentials := []config.CredentialConfig{
+		{Name: "px", Type: config.ProviderTypeProxy, APIKey: "k1", BaseURL: "http://a.com", RPM: -1},
+		{Name: "alt", Type: config.ProviderTypeOpenAI, APIKey: "k2", BaseURL: "http://b.com", RPM: -1, Priority: 1},
+	}
+	rl.AddCredential("px", -1)
+	rl.AddCredential("alt", -1)
+	rl.AddModelWithTPM("px", "m", -1, -1)
+
+	bal := New(credentials, f2b, rl)
+	mc := NewMockModelChecker(true)
+	mc.AddModel("px", "m")
+	mc.AddModel("alt", "m")
+	mc.SetModelTiers("m", "px", []httputil.ModelPriorityTier{
+		{Priority: 1, Weight: 3, LimitRPM: -1},
+		{Priority: 9, Weight: 1, LimitRPM: -1},
+	})
+	bal.SetModelChecker(mc)
+
+	counts := map[string]int{}
+	for i := 0; i < 8; i++ {
+		cred, err := bal.NextForModel("m")
+		require.NoError(t, err)
+		counts[cred.Name]++
+	}
+	// group 1 = {px@tier-1 weight 3, alt weight 1} → 3:1 over 8 picks.
+	assert.Equal(t, 6, counts["px"])
+	assert.Equal(t, 2, counts["alt"])
 }
 
 // TestNextForModel_NoPriorityFields_BehavesAsFlatPool is a backward-compatibility check:

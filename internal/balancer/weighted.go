@@ -186,6 +186,16 @@ func (r *RoundRobin) effectivePriority(cred *config.CredentialConfig, modelID st
 	return cred.EffectivePriority()
 }
 
+// candidateWeight is the SWRR weight for one selection candidate: a tier candidate
+// (Design B) uses its learned tier weight (the summed weight of the upstream leaf
+// credentials in that tier), everything else falls through to effectiveWeight.
+func (r *RoundRobin) candidateWeight(c candidateEntry, modelID string) int {
+	if c.tier != nil && c.tier.weight > 0 {
+		return c.tier.weight
+	}
+	return r.effectiveWeight(c.cred, modelID)
+}
+
 // effectiveWeight resolves the weight for a (credential, model) pair, mirroring how RPM
 // is resolved: model-level override first, then the credential default, then 1.
 func (r *RoundRobin) effectiveWeight(cred *config.CredentialConfig, modelID string) int {
