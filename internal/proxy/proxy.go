@@ -274,6 +274,7 @@ type RequestLogContext struct {
 	WebSearchContextSize  string                   // low|medium|high from web_search_options/tool config
 	ReasoningRequested    bool
 	ReasoningSource       string
+	ThinkingMode          string
 	RequestEndpoint       string
 	Logged                bool   // True if already logged (prevents duplicate logging)
 	IsResponsesAPI        bool   // True if this is a Responses API request (converted to Chat Completions)

@@ -380,6 +380,9 @@ func addRequestSpendMetadata(metadata string, logCtx *RequestLogContext) string 
 	if logCtx.ReasoningSource != "" {
 		spendMetadata["reasoning_source"] = logCtx.ReasoningSource
 	}
+	if logCtx.ThinkingMode != "" {
+		spendMetadata["thinking_mode"] = logCtx.ThinkingMode
+	}
 	if logCtx.RequestEndpoint != "" {
 		spendMetadata["request_endpoint"] = logCtx.RequestEndpoint
 	}

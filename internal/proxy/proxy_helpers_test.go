@@ -353,8 +353,9 @@ func TestAddRequestSpendMetadata(t *testing.T) {
 	t.Run("reasoning requested", func(t *testing.T) {
 		metadata := addRequestSpendMetadata(`{"spend_logs_metadata":{"air_event_id":"event-1"}}`, &RequestLogContext{
 			ReasoningRequested: true,
-			ReasoningSource:    "extra_body.reasoning_effort",
-			RequestEndpoint:    "/v1/chat/completions",
+			ReasoningSource:    "extra_body.thinking",
+			ThinkingMode:       thinkingModeAdaptive,
+			RequestEndpoint:    "/v1/messages",
 		})
 
 		var doc map[string]interface{}
@@ -362,18 +363,36 @@ func TestAddRequestSpendMetadata(t *testing.T) {
 		spendMetadata := doc["spend_logs_metadata"].(map[string]interface{})
 		assert.Equal(t, "event-1", spendMetadata["air_event_id"])
 		assert.Equal(t, true, spendMetadata["reasoning_requested"])
-		assert.Equal(t, "extra_body.reasoning_effort", spendMetadata["reasoning_source"])
-		assert.Equal(t, "/v1/chat/completions", spendMetadata["request_endpoint"])
+		assert.Equal(t, "extra_body.thinking", spendMetadata["reasoning_source"])
+		assert.Equal(t, thinkingModeAdaptive, spendMetadata["thinking_mode"])
+		assert.Equal(t, "/v1/messages", spendMetadata["request_endpoint"])
+	})
+
+	t.Run("thinking explicitly disabled", func(t *testing.T) {
+		metadata := addRequestSpendMetadata("{}", &RequestLogContext{
+			ThinkingMode:    thinkingModeDisabled,
+			RequestEndpoint: "/v1/messages",
+		})
+
+		var doc map[string]interface{}
+		require.NoError(t, json.Unmarshal([]byte(metadata), &doc))
+		spendMetadata := doc["spend_logs_metadata"].(map[string]interface{})
+		assert.Equal(t, false, spendMetadata["reasoning_requested"])
+		assert.Equal(t, thinkingModeDisabled, spendMetadata["thinking_mode"])
 	})
 
 	t.Run("reasoning absent", func(t *testing.T) {
-		metadata := addRequestSpendMetadata("{}", &RequestLogContext{RequestEndpoint: "/v1/messages"})
+		metadata := addRequestSpendMetadata("{}", &RequestLogContext{
+			ThinkingMode:    thinkingModeUnspecified,
+			RequestEndpoint: "/v1/messages",
+		})
 
 		var doc map[string]interface{}
 		require.NoError(t, json.Unmarshal([]byte(metadata), &doc))
 		spendMetadata := doc["spend_logs_metadata"].(map[string]interface{})
 		assert.Equal(t, false, spendMetadata["reasoning_requested"])
 		assert.NotContains(t, spendMetadata, "reasoning_source")
+		assert.Equal(t, thinkingModeUnspecified, spendMetadata["thinking_mode"])
 		assert.Equal(t, "/v1/messages", spendMetadata["request_endpoint"])
 	})
 }
