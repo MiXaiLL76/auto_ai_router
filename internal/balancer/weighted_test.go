@@ -16,7 +16,7 @@ import (
 func drawN(t *testing.T, bal *RoundRobin, model string, count int) []string {
 	t.Helper()
 	seq := make([]string, 0, count)
-	for i := 0; i < count; i++ {
+	for i := range count {
 		cred, err := bal.NextForModel(model)
 		require.NoError(t, err, "pick %d", i)
 		seq = append(seq, cred.Name)
@@ -95,7 +95,7 @@ func TestWeighted_DisabledModelCheckerSharesOneCycle(t *testing.T) {
 	}
 	bal := New(credentials, f2b, rl) // no model checker → filtering disabled
 
-	for i := 0; i < 1000; i++ {
+	for i := range 1000 {
 		_, err := bal.NextForModel(fmt.Sprintf("ghost-model-%d", i))
 		require.NoError(t, err)
 	}
@@ -287,7 +287,7 @@ func TestWeighted_NoBurstAfterUnban(t *testing.T) {
 	drawN(t, bal, "gpt-4o", 22)
 
 	// Ban heavy (3 × 401 reaches the threshold).
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		bal.RecordResponse("heavy", "gpt-4o", 401)
 	}
 	require.True(t, bal.IsBanned("heavy", "gpt-4o"))

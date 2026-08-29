@@ -1,6 +1,7 @@
 package balancer
 
 import (
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -42,12 +43,7 @@ func (m *MockModelChecker) HasModel(credentialName, modelID string) bool {
 		// If credentialModels are empty, allow all (backward compatibility)
 		return len(m.credentialModels) == 0
 	}
-	for _, model := range models {
-		if model == modelID {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(models, modelID)
 }
 
 func (m *MockModelChecker) GetCredentialsForModel(modelID string) []string {
@@ -380,7 +376,7 @@ func TestNextForModel_SkipsFallback(t *testing.T) {
 
 	// Should only return non-fallback credentials
 	seen := make(map[string]bool)
-	for i := 0; i < 4; i++ {
+	for range 4 {
 		cred, err := bal.NextForModel("gpt-4o")
 		require.NoError(t, err)
 		assert.False(t, cred.IsFallback)
@@ -427,7 +423,7 @@ func TestNextForModel_AllBanned(t *testing.T) {
 	bal := New(credentials, f2b, rl)
 
 	// Ban all credentials
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		bal.RecordResponse("cred1", "", 401)
 		bal.RecordResponse("cred2", "", 401)
 	}
@@ -784,9 +780,9 @@ func TestRoundRobin_GetCredentialsSnapshot_NoRace(t *testing.T) {
 	done := make(chan bool, numReaders)
 
 	// Start multiple concurrent readers
-	for i := 0; i < numReaders; i++ {
+	for range numReaders {
 		go func() {
-			for j := 0; j < 1000; j++ {
+			for range 1000 {
 				snap := bal.GetCredentialsSnapshot()
 				assert.Len(t, snap, 3)
 				// Verify snapshot is a copy (modifying it shouldn't affect balancer)
@@ -800,7 +796,7 @@ func TestRoundRobin_GetCredentialsSnapshot_NoRace(t *testing.T) {
 
 	// Start a writer that performs operations that acquire the lock
 	go func() {
-		for j := 0; j < numWriteOps; j++ {
+		for j := range numWriteOps {
 			// These operations acquire locks internally
 			bal.GetAvailableCount()
 			bal.GetBannedCount()
@@ -1213,7 +1209,7 @@ func TestRoundRobin_MultipleCredentialsSameModel(t *testing.T) {
 		"spatial-shore-482315-p6",
 	}
 
-	for i := 0; i < 8; i++ {
+	for i := range 8 {
 		cred, err := bal.NextForModel("gemini-2.5-flash")
 		require.NoError(t, err)
 		requests[i] = cred.Name
@@ -1226,7 +1222,7 @@ func TestRoundRobin_MultipleCredentialsSameModel(t *testing.T) {
 
 	// Verify distribution: each vertex credential should appear at least once in first 4 requests
 	firstFourCreds := make(map[string]int)
-	for i := 0; i < 4; i++ {
+	for i := range 4 {
 		firstFourCreds[requests[i]]++
 	}
 	assert.Equal(t, 4, len(firstFourCreds), "First 4 requests should use 4 different credentials")
@@ -1412,7 +1408,7 @@ func TestNextForModelScoped_FiltersCredentialScopes(t *testing.T) {
 	bal := New(credentials, f2b, rl)
 	teamAScope := scope.NewContext([]string{"team-a"}, nil)
 
-	for i := 0; i < 8; i++ {
+	for range 8 {
 		cred, err := bal.NextForModelScoped("", teamAScope)
 		require.NoError(t, err)
 		assert.Contains(t, []string{"shared", "team-a"}, cred.Name)
@@ -1556,9 +1552,9 @@ func TestRoundRobin_MixedTypeTrafficIndependence(t *testing.T) {
 	// Without per-type counters, OpenAI requests reset r.current to 0-1,
 	// causing every Vertex request to always pick vertex-1.
 	vertexResults := make([]string, 0, 8)
-	for i := 0; i < 8; i++ {
+	for range 8 {
 		// 10 OpenAI requests between each Vertex request (simulates ~500 RPM)
-		for j := 0; j < 10; j++ {
+		for range 10 {
 			_, err := bal.NextForModel("gpt-4o")
 			require.NoError(t, err)
 		}
@@ -1693,7 +1689,7 @@ func TestNextForModel_PriorityGroup_PartialAvailability(t *testing.T) {
 	bal := New(credentials, f2b, rl)
 
 	// Ban g100-a (3x 500 trips fail2ban).
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		bal.RecordResponse("g100-a", "", 500)
 	}
 	// Exhaust g100-b's RPM (limit is 1) directly against the shared rate limiter.
@@ -1701,7 +1697,7 @@ func TestNextForModel_PriorityGroup_PartialAvailability(t *testing.T) {
 
 	// The remaining live member of group 100 (g100-c) must keep being selected;
 	// group 200 must never be reached while group 100 has a live member.
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		cred, err := bal.NextForModel("")
 		require.NoError(t, err)
 		assert.Equal(t, "g100-c", cred.Name)
@@ -1728,7 +1724,7 @@ func TestNextForModel_PriorityGroup_CascadesWhenGroupFullyDown(t *testing.T) {
 	assert.Equal(t, "g100-a", cred.Name)
 
 	// Ban both members of group 100.
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		bal.RecordResponse("g100-a", "", 500)
 		bal.RecordResponse("g100-b", "", 500)
 	}
@@ -1742,7 +1738,7 @@ func TestNextForModel_PriorityGroup_CascadesWhenGroupFullyDown(t *testing.T) {
 func TestSelectPriorityGroupCandidate_ConcurrentRateLimitRaceCascadesToNextGroup(t *testing.T) {
 	const trials = 300
 
-	for i := 0; i < trials; i++ {
+	for i := range trials {
 		f2b := fail2ban.New(3, 0, []int{500})
 		rl := ratelimit.New()
 
@@ -1793,7 +1789,7 @@ func TestNextForModel_PriorityGroup_DefaultGroupSelectedFirst(t *testing.T) {
 
 	bal := New(credentials, f2b, rl)
 
-	for i := 0; i < 4; i++ {
+	for range 4 {
 		cred, err := bal.NextForModel("")
 		require.NoError(t, err)
 		assert.Equal(t, "unprioritized", cred.Name)
@@ -1815,7 +1811,7 @@ func TestNextForModel_PriorityGroup_WeightedWithinGroup(t *testing.T) {
 
 	counts := map[string]int{}
 	const n = 400
-	for i := 0; i < n; i++ {
+	for range n {
 		cred, err := bal.NextForModel("")
 		require.NoError(t, err)
 		counts[cred.Name]++
@@ -1857,7 +1853,7 @@ func TestNextForModel_PriorityGroup_ProxyCredentialUsesPerModelPriority(t *testi
 
 	// proxy-b's learned priority (50) is lower than proxy-a's (200), so proxy-b's group
 	// must be selected exclusively while it's live — proxy-a is never reached.
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		cred, err := bal.NextForModel("shared-model")
 		require.NoError(t, err)
 		assert.Equal(t, "proxy-b", cred.Name)
@@ -1869,7 +1865,7 @@ func TestNextForModel_PriorityGroup_ProxyCredentialUsesPerModelPriority(t *testi
 	mc.AddModel("proxy-a", "other-model")
 	mc.AddModel("proxy-b", "other-model")
 	seen := map[string]bool{}
-	for i := 0; i < 4; i++ {
+	for range 4 {
 		cred, err := bal.NextForModel("other-model")
 		require.NoError(t, err)
 		seen[cred.Name] = true
@@ -1918,7 +1914,7 @@ func TestNextForModel_FallbackPriorityOnly_StaysFlatPrimaryPool(t *testing.T) {
 	bal := New(credentials, f2b, rl)
 
 	counts := map[string]int{}
-	for i := 0; i < 30; i++ {
+	for i := range 30 {
 		cred, err := bal.NextForModel("")
 		require.NoError(t, err, "request %d", i)
 		counts[cred.Name]++
