@@ -28,9 +28,10 @@ type OrganizationPolicy struct {
 	ProfileSHA256   string
 	AllowlistSet    bool
 
-	allowlist map[string]struct{}
-	mappings  map[string]string
-	prices    map[string]*ModelPrice
+	allowlist          map[string]struct{}
+	mappings           map[string]string
+	prices             map[string]*ModelPrice
+	credentialDenylist []string
 }
 
 type OrganizationModelResolution struct {
@@ -99,14 +100,15 @@ func LoadOrganizationPolicies(
 		profiles[cfg.PriceProfileID] = identity
 
 		policy := &OrganizationPolicy{
-			OrganizationID:  cfg.OrganizationID,
-			PriceProfileID:  cfg.PriceProfileID,
-			ModelPricesLink: cfg.ModelPricesLink,
-			ProfileSHA256:   identity.sha256,
-			AllowlistSet:    cfg.AllowlistSet,
-			allowlist:       make(map[string]struct{}, len(cfg.ModelAllowlist)),
-			mappings:        make(map[string]string, len(cfg.ModelMappings)),
-			prices:          priceRows,
+			OrganizationID:     cfg.OrganizationID,
+			PriceProfileID:     cfg.PriceProfileID,
+			ModelPricesLink:    cfg.ModelPricesLink,
+			ProfileSHA256:      identity.sha256,
+			AllowlistSet:       cfg.AllowlistSet,
+			allowlist:          make(map[string]struct{}, len(cfg.ModelAllowlist)),
+			mappings:           make(map[string]string, len(cfg.ModelMappings)),
+			prices:             priceRows,
+			credentialDenylist: append([]string(nil), cfg.CredentialDenylist...),
 		}
 		for _, modelID := range cfg.ModelAllowlist {
 			policy.allowlist[modelID] = struct{}{}
@@ -130,6 +132,13 @@ func LoadOrganizationPolicies(
 		registry.byOrganization[policy.OrganizationID] = policy
 	}
 	return registry, nil
+}
+
+func (p *OrganizationPolicy) CredentialDenylist() []string {
+	if p == nil || len(p.credentialDenylist) == 0 {
+		return nil
+	}
+	return append([]string(nil), p.credentialDenylist...)
 }
 
 func (r *OrganizationPolicyRegistry) Empty() bool {

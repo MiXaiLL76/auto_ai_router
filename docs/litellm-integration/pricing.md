@@ -41,6 +41,8 @@ organization_policies:
       - openai/gpt-5.5-pro
     model_mappings:
       openai/gpt-5.5-pro: gpt-5.5-pro
+    credential_denylist:
+      - untrusted-provider-credential
 ```
 
 The section is disabled when omitted. When present, it requires `litellm_db.enabled: true`, `litellm_db.is_required: true`, and `litellm_db.disable_spend_logs_write: false`.
@@ -50,6 +52,12 @@ Organization profile lookup is exact and case-sensitive. AIR prices mapped reque
 The organization tariff JSON is strict. Duplicate exact keys, unknown row fields, `null` rows, and empty price objects fail startup. An explicit free model must still include at least one recognized price field with a zero value.
 
 When `model_allowlist` is omitted, the organization sees the global callable surface plus organization mapping keys, subject to exact profile prices in `/v1/models`. A callable request without an exact profile row returns `503` before provider selection. When `model_allowlist` is present and empty, the organization surface is empty. When present and non-empty, every listed ID must be routable and have an exact profile row at startup.
+
+### Provider credential exclusion
+
+`credential_denylist` contains exact case-sensitive provider credential names. Matching provider credentials are excluded from initial selection, session affinity, retries, and fallback. Router credentials remain eligible. The restriction follows a request through chained AIR routers. Unknown names are ignored locally and remain available to downstream routers.
+
+The list accepts up to 128 names and 4096 encoded bytes. Each name may contain up to 256 bytes. Empty names, duplicate names, and control characters fail configuration loading. An omitted or empty list preserves standard routing.
 
 ### Refresh interval
 

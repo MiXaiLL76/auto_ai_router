@@ -77,6 +77,22 @@ func (p *Proxy) orchestrateRequest(
 	if !p.authenticateRequest(w, r, logCtx, isLiteLLMHealthy) {
 		return nil, false
 	}
+	markerPresent := credentialDenylistState(r.Context()).markerPresent
+	masterKeyAuthenticated := p.isMasterKey(logCtx.Token)
+	logCtx.IsProxyRequest = markerPresent && masterKeyAuthenticated
+	if markerPresent && !masterKeyAuthenticated {
+		p.logger.WarnContext(r.Context(), "Ignoring untrusted AIR proxy marker",
+			"request_id", logCtx.RequestID,
+		)
+	}
+	inboundDenylist, err := trustedInboundCredentialDenylist(r.Context(), masterKeyAuthenticated)
+	if err != nil {
+		logCtx.Status = "failure"
+		logCtx.HTTPStatus = http.StatusBadRequest
+		logCtx.ErrorMsg = "Invalid internal routing policy"
+		WriteErrorBadRequest(w, "Invalid internal routing policy")
+		return nil, false
+	}
 
 	body, modelID, realModelID, streaming, ok := p.readRequestBodyAndSelectModel(w, r, logCtx)
 	if !ok {
@@ -85,7 +101,22 @@ func (p *Proxy) orchestrateRequest(
 
 	logCtx.RequestEndpoint = r.URL.Path
 	logCtx.ReasoningRequested, logCtx.ReasoningSource, logCtx.ThinkingMode = requestReasoningDetails(body)
+	var policyDenylist []string
+	if logCtx.OrganizationPolicy != nil {
+		policyDenylist = logCtx.OrganizationPolicy.CredentialDenylist()
+	}
+	effectiveDenylist := mergeCredentialDenylists(inboundDenylist, policyDenylist)
+	r = withEffectiveCredentialDenylist(r, effectiveDenylist)
 	routingExclusions := p.reasoningOnlyExclusions(logCtx.ReasoningRequested)
+	for _, credentialName := range effectiveDenylist {
+		if p.balancer.IsProxyCredential(credentialName) {
+			continue
+		}
+		if routingExclusions == nil {
+			routingExclusions = make(map[string]bool)
+		}
+		routingExclusions[credentialName] = true
+	}
 	triedCreds := GetTried(r.Context())
 	for name := range routingExclusions {
 		triedCreds[name] = true

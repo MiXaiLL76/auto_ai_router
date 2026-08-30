@@ -1,6 +1,7 @@
 package config
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -18,6 +19,9 @@ organization_policies:
     model_allowlist: []
     model_mappings:
       public/model: route-model
+    credential_denylist:
+      - " provider-a "
+      - provider-b
 `), &cfg)
 
 	require.NoError(t, err)
@@ -27,6 +31,7 @@ organization_policies:
 	assert.True(t, policy.AllowlistSet)
 	assert.Empty(t, policy.ModelAllowlist)
 	assert.Equal(t, map[string]string{"public/model": "route-model"}, policy.ModelMappings)
+	assert.Equal(t, []string{"provider-a", "provider-b"}, policy.CredentialDenylist)
 }
 
 func TestOrganizationPolicyConfig_RejectsUnknownField(t *testing.T) {
@@ -59,6 +64,22 @@ organization_policies:
 	assert.Contains(t, err.Error(), "duplicate model mapping key")
 }
 
+func TestOrganizationPolicyConfig_RejectsDuplicateCredentialDenylistEntry(t *testing.T) {
+	var cfg Config
+	err := yaml.Unmarshal([]byte(`
+organization_policies:
+  - organization_id: org-1
+    price_profile_id: profile-1
+    model_prices_link: /tmp/prices.json
+    credential_denylist:
+      - provider-a
+      - " provider-a "
+`), &cfg)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "duplicate credential_denylist entry")
+}
+
 func TestValidateOrganizationPolicies(t *testing.T) {
 	err := ValidateOrganizationPolicies([]OrganizationPolicyConfig{
 		{
@@ -85,4 +106,26 @@ func TestValidateOrganizationPolicies(t *testing.T) {
 	}})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "outside model_allowlist")
+
+	err = ValidateOrganizationPolicies([]OrganizationPolicyConfig{{
+		OrganizationID:     "org-1",
+		PriceProfileID:     "profile-1",
+		ModelPricesLink:    "/tmp/prices.json",
+		CredentialDenylist: []string{""},
+	}})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "empty credential name")
+
+	largeDenylist := make([]string, 20)
+	for index := range largeDenylist {
+		largeDenylist[index] = strings.Repeat(string(rune('a'+index)), maxOrganizationCredentialNameBytes)
+	}
+	err = ValidateOrganizationPolicies([]OrganizationPolicyConfig{{
+		OrganizationID:     "org-1",
+		PriceProfileID:     "profile-1",
+		ModelPricesLink:    "/tmp/prices.json",
+		CredentialDenylist: largeDenylist,
+	}})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "credential_denylist exceeds 4096 bytes")
 }
