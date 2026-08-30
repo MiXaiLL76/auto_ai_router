@@ -142,23 +142,18 @@ func EffectiveWeight(modelWeight, credWeight int) int {
 
 // learnedProxyPriority returns the per-model priority learned from an upstream /health
 // poll for a proxy/AIR credential (e.g. ru01's "grant-pol01"/"comet-ger01" proxy
-// credentials picking up per-model priority from pol01/ger01), or 0 when there is no
-// upstream to poll or nothing has been learned yet.
+// credentials picking up per-model priority from pol01/ger01). ok is false when there is
+// no upstream to poll, the model checker is off, or nothing has been learned yet.
 //
-// Note: like effectiveWeight/GetModelWeightForCredential, GetModelPriorityForCredential
-// cannot distinguish "no per-model data learned yet" from "upstream explicitly reported
-// priority 0" — both read back as 0, so a 0 result falls through to the static field
-// rather than being treated as an authoritative override. That is harmless: 0 is also
-// the correct default group when nothing has been learned. See
-// internal/models/manager.go (GetModelPriorityForCredential) and
-// internal/httputil/types.go (EffectiveHealthPriority) for the matching contract notes.
-func (r *RoundRobin) learnedProxyPriority(cred *config.CredentialConfig, modelID string) int {
+// A learned priority of 0 (the upstream serves the model in its best group) is a real,
+// authoritative value — ok is true and callers must use it, not fall through to the
+// credential's static priority: field. See internal/models/manager.go
+// (LearnedModelPriorityForCredential) for the matching contract note.
+func (r *RoundRobin) learnedProxyPriority(cred *config.CredentialConfig, modelID string) (int, bool) {
 	if modelID != "" && cred.IsProxyLike() && r.modelChecker != nil && r.modelChecker.IsEnabled() {
-		if p := r.modelChecker.GetModelPriorityForCredential(modelID, cred.Name); p > 0 {
-			return p
-		}
+		return r.modelChecker.LearnedModelPriorityForCredential(modelID, cred.Name)
 	}
-	return 0
+	return 0, false
 }
 
 // primaryPriority resolves the primary-pool priority group for cred: the learned
@@ -169,7 +164,7 @@ func (r *RoundRobin) learnedProxyPriority(cred *config.CredentialConfig, modelID
 // into hard primary priority steps on upgrade (a flat weighted pool becomes exclusive
 // tiers). Primary-pool grouping opts in only via the explicit priority: field.
 func (r *RoundRobin) primaryPriority(cred *config.CredentialConfig, modelID string) int {
-	if p := r.learnedProxyPriority(cred, modelID); p > 0 {
+	if p, ok := r.learnedProxyPriority(cred, modelID); ok {
 		return p
 	}
 	return cred.Priority
@@ -180,7 +175,7 @@ func (r *RoundRobin) primaryPriority(cred *config.CredentialConfig, modelID stri
 // (which does include fallback_priority — retry ordering is exactly what that field was
 // always for).
 func (r *RoundRobin) effectivePriority(cred *config.CredentialConfig, modelID string) int {
-	if p := r.learnedProxyPriority(cred, modelID); p > 0 {
+	if p, ok := r.learnedProxyPriority(cred, modelID); ok {
 		return p
 	}
 	return cred.EffectivePriority()

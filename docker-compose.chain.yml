@@ -1,6 +1,6 @@
 services:
   auto-ai-router-01:
-    image: ghcr.io/mixaill76/auto_ai_router:latest
+    image: ghcr.io/mixaill76/auto_ai_router:dev-latest
     restart: unless-stopped
 
     ports:
@@ -17,7 +17,7 @@ services:
         condition: service_healthy
 
   ger01:
-    image: ghcr.io/mixaill76/auto_ai_router:latest
+    image: ghcr.io/mixaill76/auto_ai_router:dev-latest
     restart: unless-stopped
     configs:
       - source: ger01-config
@@ -28,14 +28,14 @@ services:
         condition: service_healthy
 
   fin01:
-    image: ghcr.io/mixaill76/auto_ai_router:latest
+    image: ghcr.io/mixaill76/auto_ai_router:dev-latest
     restart: unless-stopped
     configs:
       - source: fin01-config
         target: /app/config.yaml
 
   fra01:
-    image: ghcr.io/mixaill76/auto_ai_router:latest
+    image: ghcr.io/mixaill76/auto_ai_router:dev-latest
     restart: unless-stopped
     configs:
       - source: fra01-config

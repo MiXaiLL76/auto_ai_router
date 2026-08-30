@@ -2117,11 +2117,11 @@ func (m *Manager) SetModelPriorityForCredential(modelID, credentialName string, 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// Priority 0 is a valid, meaningful value (the default priority group), but it is
-	// also indistinguishable from "no dynamic priority has been learned" once read back
-	// via GetModelPriorityForCredential — see the contract note there. Since both cases
-	// resolve to the same default-group behavior, it is safe (and mirrors
-	// SetModelWeightForCredential's <= 0 handling) to simply not store a zero entry.
+	// This per-key setter (no production caller today — the poller uses
+	// ReplaceModelPrioritiesForCredential, which DOES store a learned 0) keeps its
+	// historical "<= 0 clears the entry" behavior: without a companion "unset" call there
+	// is no other way to drop a stale entry through this path. Callers that need to tell
+	// "learned 0" from "nothing learned" use LearnedModelPriorityForCredential.
 	if priority <= 0 {
 		if priorities, ok := m.dynamicModelPriorities[modelID]; ok {
 			delete(priorities, credentialName)
@@ -2139,7 +2139,10 @@ func (m *Manager) SetModelPriorityForCredential(modelID, credentialName string, 
 }
 
 // ReplaceModelPrioritiesForCredential replaces all dynamic health-derived priorities
-// for a credential with a fresh upstream snapshot.
+// for a credential with a fresh upstream snapshot. A learned priority of 0 (the upstream
+// serves the model in its best group) is a real, authoritative value and IS stored —
+// only a missing entry means "nothing learned" (read back via
+// LearnedModelPriorityForCredential's ok flag).
 func (m *Manager) ReplaceModelPrioritiesForCredential(credentialName string, priorities map[string]int) {
 	if credentialName == "" {
 		return
@@ -2159,7 +2162,10 @@ func (m *Manager) replaceModelPrioritiesForCredentialLocked(credentialName strin
 	}
 
 	for modelID, priority := range priorities {
-		if modelID == "" || priority <= 0 {
+		// priority 0 is a real learned value (best group) and is kept — only a genuinely
+		// invalid negative priority is dropped. "Nothing learned" is the absence of an
+		// entry, not a zero.
+		if modelID == "" || priority < 0 {
 			continue
 		}
 		if m.dynamicModelPriorities[modelID] == nil {
@@ -2207,6 +2213,9 @@ func (m *Manager) replaceModelPriorityTiersForCredentialLocked(credentialName st
 // a (model, proxy/AIR credential) pair, sorted ascending by priority, or nil when none
 // has been learned (the caller then treats the credential as a single implicit tier from
 // its scalar priority). The returned slice is a copy — safe for the caller to hold.
+//
+// The stored slice is already sorted ascending by priority at build time
+// (proxy.buildModelPriorityTiers), so this only needs to copy for isolation, not re-sort.
 func (m *Manager) GetModelPriorityTiersForCredential(modelID, credentialName string) []httputil.ModelPriorityTier {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -2220,7 +2229,6 @@ func (m *Manager) GetModelPriorityTiersForCredential(modelID, credentialName str
 	}
 	cp := make([]httputil.ModelPriorityTier, len(list))
 	copy(cp, list)
-	slices.SortFunc(cp, func(a, b httputil.ModelPriorityTier) int { return a.Priority - b.Priority })
 	return cp
 }
 
@@ -2644,49 +2652,61 @@ func (m *Manager) GetModelWeightForCredential(modelID, credentialName string) in
 }
 
 // GetModelPriorityForCredential returns the dynamic (health-derived) priority for a
-// (model, credential) pair, learned from an upstream proxy's /health response.
-// Returns 0 when nothing has been learned for this pair.
-//
-// Note: this cannot distinguish "no per-model priority learned" from "upstream
-// explicitly reported priority 0" — both read back as 0 (see the contract note on
-// SetModelPriorityForCredential). That is intentional, not an oversight: 0 is also the
-// correct default priority group to fall back to, matching
-// CredentialConfig.EffectivePriority()'s own default. Callers (see
-// balancer.RoundRobin.effectivePriority) should therefore treat a 0 result as "use the
-// credential's own EffectivePriority()" rather than as an authoritative override.
-//
-// When a per-tier breakdown exists (GetModelPriorityTiersForCredential) this returns the
-// lowest priority among the tiers that are currently live, else the lowest across all
-// tiers — the tier the upstream is effectively serving from. The balancer itself uses the
-// full tier list (candidate expansion); this scalar is for the dashboard and the
-// pre-Design-B fallback path.
+// (model, credential) pair, learned from an upstream proxy's /health response, or 0 when
+// nothing has been learned. It cannot distinguish "nothing learned" from "learned 0" —
+// callers that must tell the two apart (to choose between the learned value and the
+// credential's own static priority: field) use LearnedModelPriorityForCredential instead.
+// This variant stays for the dashboard's display fallback and existing call sites where
+// 0-either-way is acceptable.
 func (m *Manager) GetModelPriorityForCredential(modelID, credentialName string) int {
+	p, _ := m.LearnedModelPriorityForCredential(modelID, credentialName)
+	return p
+}
+
+// LearnedModelPriorityForCredential is GetModelPriorityForCredential plus an explicit
+// "was anything learned" flag. A proxy/AIR credential can legitimately learn priority 0
+// (its upstream serves the model in the best group), and that is authoritative: callers
+// choosing between the learned value and the credential's static priority: field
+// (balancer.primaryPriority / effectivePriority, and the /health dashboard) must use the
+// learned 0 and NOT fall through to the static field. ok is false only when neither a
+// scalar priority nor a per-tier breakdown has been learned for this pair.
+//
+// When a per-tier breakdown exists (GetModelPriorityTiersForCredential) the value is the
+// lowest priority among the tiers currently live; when no tier is live it is the WORST
+// (highest) priority across all tiers, matching the scalar path's trackWorstPriority
+// (internal/proxy/remote.go) so a fully-exhausted multi-tier proxy does not advertise its
+// cheapest tier to the local balancer or the next router in the chain. The balancer itself
+// uses the full tier list (candidate expansion); this scalar is for the dashboard and the
+// pre-Design-B fallback path.
+func (m *Manager) LearnedModelPriorityForCredential(modelID, credentialName string) (int, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
 	if byCred, ok := m.dynamicModelPriorityTiers[modelID]; ok {
 		if tiers, ok := byCred[credentialName]; ok && len(tiers) > 0 {
-			bestLive, haveLive, bestAny := 0, false, 0
+			bestLive, haveLive, worstAny := 0, false, 0
 			for i, t := range tiers {
-				if i == 0 || t.Priority < bestAny {
-					bestAny = t.Priority
+				if i == 0 || t.Priority > worstAny {
+					worstAny = t.Priority
 				}
 				if httputil.ModelPriorityTierLive(t) && (!haveLive || t.Priority < bestLive) {
 					bestLive, haveLive = t.Priority, true
 				}
 			}
 			if haveLive {
-				return bestLive
+				return bestLive, true
 			}
-			return bestAny
+			return worstAny, true
 		}
 	}
 
 	if priorities, ok := m.dynamicModelPriorities[modelID]; ok {
-		return priorities[credentialName]
+		if p, ok := priorities[credentialName]; ok {
+			return p, true
+		}
 	}
 
-	return 0
+	return 0, false
 }
 
 // findTPMLimit searches for TPM limit with optional credential filtering

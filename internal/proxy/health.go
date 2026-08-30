@@ -256,8 +256,10 @@ func (p *Proxy) addModelHealthStats(
 	}
 	modelWeight := 0
 	modelPriority := 0
+	hasLearnedPriority := false
 	var priorityTiers []httputil.ModelPriorityTier
 	realCredential := ""
+	locallyBanned := p.balancer.IsBanned(credentialName, modelID)
 	if p.modelManager != nil {
 		modelWeight = p.modelManager.GetModelWeightForCredential(modelID, credentialName)
 		// Dynamic per-model priority is learned from an upstream proxy/AIR credential's
@@ -266,21 +268,34 @@ func (p *Proxy) addModelHealthStats(
 		// enabled — so the dashboard never shows a learned priority the balancer would not
 		// actually route on (it falls back to the static field when the checker is off).
 		if isProxyLike && p.modelManager.IsEnabled() {
-			modelPriority = p.modelManager.GetModelPriorityForCredential(modelID, credentialName)
+			modelPriority, hasLearnedPriority = p.modelManager.LearnedModelPriorityForCredential(modelID, credentialName)
 			// Re-emit the learned per-tier breakdown (Design B) so a router fronting this
 			// one keeps the tier structure across the chain hop. Per-tier current usage is
 			// the last upstream-poll value; the downstream adds its own local contribution
 			// via its aggregate counter, same as the scalar current_rpm above.
 			priorityTiers = p.modelManager.GetModelPriorityTiersForCredential(modelID, credentialName)
+			if len(priorityTiers) > 0 && locallyBanned {
+				// Second hop: this router has locally fail2ban-ed the (credential, model)
+				// pair. Fold that into every re-emitted tier — the scalar IsBanned below
+				// is not enough, a Design B downstream rebuilds live tier-candidates from
+				// PriorityTiers and would keep routing primary traffic at a path we have
+				// closed. Copy first: GetModelPriorityTiersForCredential may share backing.
+				tiersCopy := make([]httputil.ModelPriorityTier, len(priorityTiers))
+				copy(tiersCopy, priorityTiers)
+				for i := range tiersCopy {
+					tiersCopy[i].Banned = true
+				}
+				priorityTiers = tiersCopy
+			}
 		}
 		realCredential = p.modelManager.GetModelSourceCredentialForCredential(modelID, credentialName)
 	}
 	// Falls back to the owning credential's static priority: field when nothing has been
-	// learned yet (modelPriority == 0 — see the "0 means unset" contract note on
-	// models.Manager.GetModelPriorityForCredential). Keeps the dashboard's Priority in
-	// sync with the number the balancer actually routes on.
+	// learned yet (see LearnedModelPriorityForCredential — a learned 0 is authoritative
+	// and does not fall through). Keeps the dashboard's Priority in sync with the number
+	// the balancer actually routes on.
 	priority := credPriority
-	if modelPriority > 0 {
+	if hasLearnedPriority {
 		priority = modelPriority
 	}
 	ms := stats[modelKey]
@@ -289,7 +304,7 @@ func (p *Proxy) addModelHealthStats(
 		Credential:      credentialName,
 		RealCredential:  realCredential,
 		Model:           modelID,
-		IsBanned:        p.balancer.IsBanned(credentialName, modelID),
+		IsBanned:        locallyBanned,
 		Weight:          balancer.EffectiveWeight(modelWeight, credWeight),
 		Priority:        priority,
 		PriorityTiers:   priorityTiers,

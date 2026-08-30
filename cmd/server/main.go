@@ -1256,13 +1256,9 @@ func startProxyStatsUpdater(
 		return true
 	}
 
-	var startupWG sync.WaitGroup
-	startupWG.Add(1)
-	go func() {
-		defer startupWG.Done()
-		modelupdate.UpdateAllProxyCredentials(bgCtx, bal, rateLimiter, log, modelManager, updateMutex, syncFromHealth)
-	}()
-	startupWG.Wait()
+	// Block startup on the first poll so credential limits/scopes/model sets are populated
+	// before the HTTP server starts serving (synchronous by design).
+	modelupdate.UpdateAllProxyCredentials(bgCtx, bal, rateLimiter, log, modelManager, updateMutex, syncFromHealth)
 
 	wg.Add(1)
 	go func() {

@@ -167,14 +167,21 @@ func newSumLimitAggregation() *limitAggregation {
 }
 
 // tierAccumulator sums one primary-priority tier's worth of upstream leaf credentials
-// (Design B). agg reuses the SUM/unlimited handling of limitAggregation; anyLive records
-// whether at least one contributor can serve right now (else the tier is exposed Banned).
+// (Design B). agg reuses the SUM/unlimited handling of limitAggregation. anyNotBanned
+// records whether at least one contributor is not *actually* banned. The emitted tier's
+// Banned flag means only a real ban (every contributor banned) — RPM/TPM saturation is
+// left to the tier's Current/Limit fields so the balancer can tell a 429 (rate-limited)
+// from a 503 (banned).
 type tierAccumulator struct {
-	agg     *limitAggregation
-	anyLive bool
+	agg          *limitAggregation
+	anyNotBanned bool
 }
 
-func accumulateTier(byPriority map[int]*tierAccumulator, priority, weight, rpm, tpm, curRPM, curTPM int, live bool) {
+// accumulateTier folds one upstream leaf (or sub-tier) into the per-priority bucket.
+// banned is the contributor's *real* ban state (ModelHealthStats.IsBanned /
+// ModelPriorityTier.Banned), not its live status — a contributor that is merely
+// RPM/TPM-saturated is not banned.
+func accumulateTier(byPriority map[int]*tierAccumulator, priority, weight, rpm, tpm, curRPM, curTPM int, banned bool) {
 	ta := byPriority[priority]
 	if ta == nil {
 		ta = &tierAccumulator{agg: newSumLimitAggregation()}
@@ -184,8 +191,8 @@ func accumulateTier(byPriority map[int]*tierAccumulator, priority, weight, rpm, 
 	// that will free up, and the balancer needs the cumulative cap to be right.
 	ta.agg.applySum(rpm, tpm, curRPM, curTPM)
 	ta.agg.applyWeight(weight)
-	if live {
-		ta.anyLive = true
+	if !banned {
+		ta.anyNotBanned = true
 	}
 }
 
@@ -206,7 +213,7 @@ func buildModelPriorityTiers(byPriority map[int]*tierAccumulator) []httputil.Mod
 			LimitTPM:   ltpm,
 			CurrentRPM: ta.agg.currentRPM,
 			CurrentTPM: ta.agg.currentTPM,
-			Banned:     !ta.anyLive,
+			Banned:     !ta.anyNotBanned,
 		})
 	}
 	slices.SortFunc(tiers, func(a, b httputil.ModelPriorityTier) int { return a.Priority - b.Priority })
@@ -465,10 +472,10 @@ func updateModelLimits(
 		}
 		if len(modelStatsData.PriorityTiers) > 0 {
 			for _, st := range modelStatsData.PriorityTiers {
-				accumulateTier(byP, st.Priority, st.Weight, st.LimitRPM, st.LimitTPM, st.CurrentRPM, st.CurrentTPM, httputil.ModelPriorityTierLive(st))
+				accumulateTier(byP, st.Priority, st.Weight, st.LimitRPM, st.LimitTPM, st.CurrentRPM, st.CurrentTPM, st.Banned)
 			}
 		} else {
-			accumulateTier(byP, priority, weight, rpm, tpm, curRPM, curTPM, httputil.ModelHealthEntryLive(modelStatsData))
+			accumulateTier(byP, priority, weight, rpm, tpm, curRPM, curTPM, modelStatsData.IsBanned)
 		}
 
 		// Unconditional, non-live entries included — see trackWorstPriority's doc comment.
@@ -502,11 +509,18 @@ func updateModelLimits(
 			modelPriorities[modelID] = stats.priority
 
 			if stats.priority != stats.priorityHigh {
-				logger.Info("Model has upstream credentials in different priority groups behind one proxy credential — expanded into local priority tiers, capacity enforced per tier",
+				// Debug, not Info: a proxy credential whose upstream spans several priority
+				// groups for one model is a fully-supported config (it expands into local
+				// priority tiers, capacity enforced per tier), and this fires every poll —
+				// once per such model, plus unconditionally for every is_fallback proxy
+				// credential (pinned to group 999 vs the primary 0). lowest/highest are the
+				// MIN and MAX over the currently-live tiers; with 3+ live tiers the priority
+				// after the cheapest dies is the second-lowest, not highest_live_priority.
+				logger.Debug("Model has upstream credentials in different priority groups behind one proxy credential — expanded into local priority tiers, capacity enforced per tier",
 					"proxy", cred.Name,
 					"model", modelID,
-					"current_effective_priority", stats.priority,
-					"priority_if_cheaper_credential_stops_being_live", stats.priorityHigh,
+					"lowest_live_priority", stats.priority,
+					"highest_live_priority", stats.priorityHigh,
 				)
 			}
 		case stats.hasPriorityWorst:

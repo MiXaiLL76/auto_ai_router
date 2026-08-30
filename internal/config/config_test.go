@@ -1366,6 +1366,18 @@ func TestConfig_ValidatePinsFallbackToLastPriorityGroup(t *testing.T) {
 	assert.Equal(t, FallbackPriorityGroup, cfg.Credentials[1].Priority)
 }
 
+func TestNormalizeFallbackPriorities(t *testing.T) {
+	creds := []CredentialConfig{
+		{Name: "primary", Priority: 5},
+		{Name: "fallback", IsFallback: true},
+		{Name: "default"},
+	}
+	NormalizeFallbackPriorities(creds)
+	assert.Equal(t, 5, creds[0].Priority, "explicit priority untouched")
+	assert.Equal(t, FallbackPriorityGroup, creds[1].Priority, "is_fallback pinned to last group")
+	assert.Equal(t, 0, creds[2].Priority, "non-fallback default left at 0")
+}
+
 func TestCredentialConfig_UnmarshalYAML_RejectsExplicitPriorityOnFallback(t *testing.T) {
 	tmpDir := t.TempDir()
 	configPath := filepath.Join(tmpDir, "config.yaml")

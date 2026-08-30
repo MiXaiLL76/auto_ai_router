@@ -11,6 +11,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/balancer"
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/fail2ban"
+	"github.com/mixaill76/auto_ai_router/internal/httputil"
 	"github.com/mixaill76/auto_ai_router/internal/models"
 	"github.com/mixaill76/auto_ai_router/internal/monitoring"
 	"github.com/mixaill76/auto_ai_router/internal/ratelimit"
@@ -356,6 +357,59 @@ func TestHealthCheck_ModelHealthStats_PriorityPrefersDynamicOverStatic(t *testin
 	// The credential-level entry reports the static config-level priority: field.
 	assert.Equal(t, 200, status.Credentials["grant-pol01"].Priority)
 	assert.True(t, status.Credentials["grant-pol01"].IsProxyLike)
+}
+
+// TestHealthCheck_ModelHealthStats_LocalBanFoldedIntoReEmittedTiers is the review_158 #23
+// guard: when this router has locally fail2ban-ed a (proxy credential, model) pair, the
+// re-emitted priority_tiers must all carry Banned:true — not just the scalar IsBanned —
+// so a Design B downstream router does not rebuild live tier-candidates for a path this
+// hop has closed.
+func TestHealthCheck_ModelHealthStats_LocalBanFoldedIntoReEmittedTiers(t *testing.T) {
+	logger := testhelpers.NewTestLogger()
+	f2b := fail2ban.New(1, time.Hour, []int{500})
+	rl := ratelimit.New()
+
+	cred := config.CredentialConfig{
+		Name:    "grant-pol01",
+		Type:    config.ProviderTypeProxy,
+		APIKey:  "sk-test",
+		BaseURL: "http://pol01.example",
+		RPM:     100,
+	}
+
+	rl.AddCredential(cred.Name, 100)
+	bal := balancer.New([]config.CredentialConfig{cred}, f2b, rl)
+	metrics := monitoring.New(false)
+	tm := auth.NewVertexTokenManager(logger)
+	mm := models.New(logger, 50, []config.ModelRPMConfig{})
+	mm.ReplaceModelsForCredential(cred.Name, []string{"gpt-4"})
+	mm.ReplaceModelPriorityTiersForCredential(cred.Name, map[string][]httputil.ModelPriorityTier{
+		"gpt-4": {
+			{Priority: 1, Weight: 1, LimitRPM: 100, CurrentRPM: 0},
+			{Priority: 5, Weight: 1, LimitRPM: 500, CurrentRPM: 0},
+		},
+	})
+
+	// Local fail2ban of the whole (credential, model) pair.
+	f2b.BanUntil(cred.Name, "gpt-4", http.StatusInternalServerError, time.Now().Add(time.Hour), "local errors")
+	require.True(t, bal.IsBanned(cred.Name, "gpt-4"))
+
+	prx := createProxyWithParams(bal, logger, 10, 30*time.Second, metrics, "test-key", rl, tm, mm, "test-version", "test-commit")
+
+	_, status := prx.HealthCheck()
+
+	stats, ok := status.Models["grant-pol01:gpt-4"]
+	require.True(t, ok)
+	assert.True(t, stats.IsBanned)
+	require.Len(t, stats.PriorityTiers, 2)
+	for _, tier := range stats.PriorityTiers {
+		assert.True(t, tier.Banned, "locally banned pair must mark every re-emitted tier Banned (priority %d)", tier.Priority)
+	}
+
+	// The manager's stored tier snapshot must NOT have been mutated by the re-emit.
+	for _, tier := range mm.GetModelPriorityTiersForCredential("gpt-4", "grant-pol01") {
+		assert.False(t, tier.Banned, "stored snapshot must stay unmutated (priority %d)", tier.Priority)
+	}
 }
 
 // TestHealthCheck_ModelHealthStats_PriorityFallsBackWhenDynamicUnknown covers the

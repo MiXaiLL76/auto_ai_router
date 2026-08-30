@@ -330,6 +330,37 @@ func TestUpdateModelLimits_EmitsPriorityTiers_WhenUpstreamSpansMultipleGroups(t 
 	assert.Equal(t, 700, rateLimiter.GetModelLimitRPM("usa03", "gemini-2.5-flash"))
 }
 
+// TestUpdateModelLimits_TierBanned_OnlyRealBanNotSaturation is the review_158 item 12
+// poll-side piece: a tier's Banned flag must reflect a real upstream ban, not mere
+// RPM/TPM saturation. A saturated-but-not-banned tier keeps Banned=false and reports its
+// usage via Current* so the downstream balancer surfaces 429 (rate limit), not 503.
+func TestUpdateModelLimits_TierBanned_OnlyRealBanNotSaturation(t *testing.T) {
+	health := &httputil.ProxyHealthResponse{
+		Credentials: map[string]httputil.CredentialHealthStats{
+			"c1": {Priority: 1}, "c2": {Priority: 2},
+		},
+		Models: map[string]httputil.ModelHealthStats{
+			// tier 1: not banned, but RPM budget fully consumed upstream.
+			"a": {Model: "m", Credential: "c1", Priority: 1, LimitRPM: 100, CurrentRPM: 100},
+			// tier 2: really banned.
+			"b": {Model: "m", Credential: "c2", Priority: 2, LimitRPM: 500, CurrentRPM: 0, IsBanned: true},
+		},
+	}
+	rateLimiter := ratelimit.New()
+	cred := &config.CredentialConfig{Name: "px"}
+	mockMM := NewMockModelManager()
+	updateModelLimits(health, cred, rateLimiter, testhelpers.NewTestLogger(), mockMM)
+
+	tiers := mockMM.GetModelPriorityTiersForCredential("m", "px")
+	require.Len(t, tiers, 2)
+	assert.Equal(t, 1, tiers[0].Priority)
+	assert.False(t, tiers[0].Banned, "saturated-but-not-banned tier must keep Banned=false")
+	assert.Equal(t, 100, tiers[0].CurrentRPM)
+	assert.Equal(t, 100, tiers[0].LimitRPM)
+	assert.Equal(t, 2, tiers[1].Priority)
+	assert.True(t, tiers[1].Banned, "tier whose only contributor is IsBanned must be Banned=true")
+}
+
 // TestUpdateModelLimits_NoPriorityTiers_ForSingleGroupUpstream: a model served from one
 // priority group stays on the scalar path — no tier breakdown emitted.
 func TestUpdateModelLimits_NoPriorityTiers_ForSingleGroupUpstream(t *testing.T) {
@@ -624,8 +655,11 @@ func TestUpdateModelLimits_WarnsOnPriorityMismatchAcrossLiveUpstreamCredentials(
 	assert.Contains(t, logOutput, "different priority groups")
 	assert.Contains(t, logOutput, "proxy=grant-pol01")
 	assert.Contains(t, logOutput, "model=gpt-4")
-	assert.Contains(t, logOutput, "current_effective_priority=100")
-	assert.Contains(t, logOutput, "priority_if_cheaper_credential_stops_being_live=200")
+	// Logged at Debug (a fully-supported config, fires every poll), with honest field
+	// names — the old "priority_if_cheaper_credential_stops_being_live" over-promised.
+	assert.Contains(t, logOutput, "level=DEBUG")
+	assert.Contains(t, logOutput, "lowest_live_priority=100")
+	assert.Contains(t, logOutput, "highest_live_priority=200")
 }
 
 // TestUpdateModelLimits_NoPriorityMismatchWarning_WhenCheapCredentialIsBanned checks the
@@ -1112,7 +1146,9 @@ func (m *MockModelManager) ReplaceModelPrioritiesForCredential(credentialName st
 		}
 	}
 	for modelID, priority := range priorities {
-		if priority <= 0 {
+		// Mirror models.Manager: a learned priority of 0 (best group) is a real value and
+		// is stored; only genuinely invalid negatives are dropped.
+		if priority < 0 {
 			continue
 		}
 		if m.priorities[modelID] == nil {

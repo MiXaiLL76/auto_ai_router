@@ -125,6 +125,18 @@ func UpdateAllProxyCredentials(
 			// removed.
 			addedCount = len(result.models)
 		} else {
+			if syncFromHealth != nil {
+				// This credential's upstream is no longer serving an AIR-shaped /health
+				// (legacy 404/405 fallback to /v1/models — a genuine non-AIR downgrade, not
+				// a transient error: those set result.err and are handled above with
+				// continue, leaving the last snapshot intact). Clear the frozen per-model
+				// tier / priority / weight snapshot so the balancer stops expanding this
+				// credential into stale (possibly Banned) priority tiers and stale
+				// cumulative caps that would otherwise live until process restart.
+				modelManager.ReplaceModelPriorityTiersForCredential(result.credential.Name, nil)
+				modelManager.ReplaceModelPrioritiesForCredential(result.credential.Name, nil)
+				modelManager.ReplaceModelWeightsForCredential(result.credential.Name, nil)
+			}
 			// Legacy /v1/models fallback (non-AIR upstream): only model names were
 			// discovered, so apply model-manager default RPM/TPM and prune names that
 			// disappeared upstream.

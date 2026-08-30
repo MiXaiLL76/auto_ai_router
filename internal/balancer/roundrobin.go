@@ -23,7 +23,11 @@ type ModelChecker interface {
 	HasModel(credentialName, modelID string) bool
 	GetCredentialsForModel(modelID string) []string
 	GetModelWeightForCredential(modelID, credentialName string) int
-	GetModelPriorityForCredential(modelID, credentialName string) int
+	// LearnedModelPriorityForCredential returns the per-model priority learned from an
+	// upstream /health poll for a proxy/AIR credential, plus a flag that is false only
+	// when nothing has been learned. A learned 0 (upstream's best group) is authoritative
+	// and must not fall through to the credential's static priority: field.
+	LearnedModelPriorityForCredential(modelID, credentialName string) (int, bool)
 	// GetModelPriorityTiersForCredential returns the learned per-priority-tier breakdown
 	// for a proxy/AIR credential serving modelID (sorted ascending by priority), or nil
 	// when the credential is a single implicit tier. Design B (review_158 item 3): a
@@ -58,7 +62,17 @@ type tierCandidate struct {
 	// candidate should be skipped in favour of the next group. <= 0 means uncapped.
 	cumLimitRPM int
 	cumLimitTPM int
-	banned      bool // every upstream leaf credential in this tier is currently banned
+	// ownLimitRPM/TPM and ownCurrentRPM/TPM are this tier's own aggregate cap and the
+	// upstream's last-polled usage against it. tierHasHeadroom gates on these (the
+	// upstream's own view of this specific tier) in addition to the cumulative-cap check
+	// against this router's local aggregate counter — the two can disagree when the
+	// upstream does not consume capacity strictly in priority order. <= 0 limit means
+	// uncapped.
+	ownLimitRPM   int
+	ownCurrentRPM int
+	ownLimitTPM   int
+	ownCurrentTPM int
+	banned        bool // every upstream leaf credential in this tier is really banned (not merely saturated)
 }
 
 type RoundRobin struct {
@@ -378,9 +392,9 @@ func (r *RoundRobin) nextExcludingScoped(modelID string, allowOnlyFallback, allo
 	// candidate per learned tier (Design B).
 	candidates = r.expandTierCandidates(candidates, modelID)
 	keyBase := r.schedKeyFor(modelID, allowOnlyFallback, allowOnlyProxy, requiredType, hasActiveExclusion(exclude), "")
-	cred, found, rateLimitHit, err := r.selectPriorityGroupCandidate(modelID, candidates, keyBase, r.primaryPriority)
-	if found || err != nil {
-		return cred, err
+	cred, found, rateLimitHit := r.selectPriorityGroupCandidate(modelID, candidates, keyBase, r.primaryPriority)
+	if found {
+		return cred, nil
 	}
 	if rateLimitHit {
 		return nil, ErrRateLimitExceeded
@@ -395,17 +409,21 @@ func (r *RoundRobin) expandTierCandidates(candidates []candidateEntry, modelID s
 	if modelID == "" || r.modelChecker == nil || !r.modelChecker.IsEnabled() {
 		return candidates
 	}
-	breakdowns := make([][]httputil.ModelPriorityTier, len(candidates))
-	needExpand := false
+	// Allocate the per-candidate breakdown slice lazily — the overwhelmingly common case
+	// is that nothing expands (no proxy candidate, or none multi-tier), and this runs on
+	// every primary selection under r.mu.
+	var breakdowns [][]httputil.ModelPriorityTier
 	for i, c := range candidates {
 		if c.cred.IsProxyLike() {
 			if tiers := r.modelChecker.GetModelPriorityTiersForCredential(modelID, c.cred.Name); len(tiers) >= 2 {
+				if breakdowns == nil {
+					breakdowns = make([][]httputil.ModelPriorityTier, len(candidates))
+				}
 				breakdowns[i] = tiers
-				needExpand = true
 			}
 		}
 	}
-	if !needExpand {
+	if breakdowns == nil {
 		return candidates
 	}
 
@@ -419,7 +437,15 @@ func (r *RoundRobin) expandTierCandidates(candidates []candidateEntry, modelID s
 		cumRPM, cumTPM := 0, 0
 		uncappedRPM, uncappedTPM := false, false
 		for _, t := range tiers { // already sorted ascending by priority
-			tc := &tierCandidate{priority: t.Priority, weight: t.Weight, banned: t.Banned}
+			tc := &tierCandidate{
+				priority:      t.Priority,
+				weight:        t.Weight,
+				banned:        t.Banned,
+				ownLimitRPM:   t.LimitRPM,
+				ownCurrentRPM: t.CurrentRPM,
+				ownLimitTPM:   t.LimitTPM,
+				ownCurrentTPM: t.CurrentTPM,
+			}
 			if t.LimitRPM <= 0 {
 				uncappedRPM = true
 			}
@@ -449,7 +475,9 @@ func (r *RoundRobin) liveCandidates(modelID string, candidates []candidateEntry)
 	rateLimitHit := false
 	for _, c := range candidates {
 		if c.tier != nil && c.tier.banned {
-			// Upstream /health reports every leaf credential in this tier banned.
+			// Upstream /health reports every leaf credential in this tier really banned
+			// (not merely RPM/TPM-saturated — that is handled by tierHasHeadroom below,
+			// which sets rateLimitHit so the caller surfaces 429, not 503).
 			monitoring.CredentialSelectionRejected.WithLabelValues("banned").Inc()
 			continue
 		}
@@ -475,11 +503,24 @@ func (r *RoundRobin) liveCandidates(modelID string, candidates []candidateEntry)
 	return live, rateLimitHit
 }
 
-// tierHasHeadroom reports whether the current recorded usage for (credentialName, modelID)
-// is still below this tier's cumulative RPM/TPM cap. Reads the same aggregate counter that
-// selectWeightedLiveCandidate's TryAllowAll records into, so this router's own committed
-// requests move the cascade forward with no /health-poll lag.
+// tierHasHeadroom reports whether this tier can still take traffic. Two independent gates,
+// either of which closing the tier:
+//
+//  1. The upstream's own last-polled view of THIS tier: ownCurrentRPM/TPM >= ownLimitRPM/TPM.
+//     The upstream may consume capacity out of priority order (a pricier tier filled while
+//     a cheaper one recovered), so its per-tier counters are not reconstructable from this
+//     router's single aggregate (cred, model) counter.
+//  2. This router's own committed usage against the cumulative cap (this tier's cap plus
+//     every cheaper tier's): reads the same aggregate counter that
+//     selectWeightedLiveCandidate's TryAllowAll records into, so this router's own traffic
+//     moves the cascade forward with no /health-poll lag.
 func (r *RoundRobin) tierHasHeadroom(credentialName, modelID string, tc *tierCandidate) bool {
+	if tc.ownLimitRPM > 0 && tc.ownCurrentRPM >= tc.ownLimitRPM {
+		return false
+	}
+	if tc.ownLimitTPM > 0 && tc.ownCurrentTPM >= tc.ownLimitTPM {
+		return false
+	}
 	if tc.cumLimitRPM > 0 && r.rateLimiter.GetCurrentModelRPM(credentialName, modelID) >= tc.cumLimitRPM {
 		return false
 	}
@@ -614,9 +655,9 @@ func (r *RoundRobin) nextPriorityRetry(modelID string, minPriority int, exclude 
 	defer r.mu.Unlock()
 
 	priorityCandidates, unprioritizedCandidates := r.splitPriorityRetryCandidatesLocked(modelID, minPriority, exclude, visibility)
-	cred, found, priorityRateLimitHit, err := r.selectPriorityRetryCandidateLocked(modelID, priorityCandidates)
-	if err != nil || found {
-		return cred, err
+	cred, found, priorityRateLimitHit := r.selectPriorityRetryCandidateLocked(modelID, priorityCandidates)
+	if found {
+		return cred, nil
 	}
 	return r.selectUnprioritizedRetryCandidateLocked(modelID, unprioritizedCandidates, priorityRateLimitHit)
 }
@@ -694,12 +735,12 @@ func (r *RoundRobin) hasModel(credentialName, modelID string, visibility scope.C
 // own independent SWRR cycle, keyed by that tier's full (structural) membership so the
 // cycle survives transient bans/unbans within the tier.
 //
-// Returns (cred, found, rateLimitHit, err). found is true only on a successful pick;
-// when every group is fully down, found is false and err is nil (caller decides between
-// ErrRateLimitExceeded and ErrNoCredentialsAvailable using rateLimitHit).
-func (r *RoundRobin) selectPriorityGroupCandidate(modelID string, candidates []candidateEntry, keyBase schedKey, priorityOf func(*config.CredentialConfig, string) int) (*config.CredentialConfig, bool, bool, error) {
+// Returns (cred, found, rateLimitHit). found is true only on a successful pick; when every
+// group is fully down, found is false and the caller decides between ErrRateLimitExceeded
+// and ErrNoCredentialsAvailable using rateLimitHit.
+func (r *RoundRobin) selectPriorityGroupCandidate(modelID string, candidates []candidateEntry, keyBase schedKey, priorityOf func(*config.CredentialConfig, string) int) (*config.CredentialConfig, bool, bool) {
 	if len(candidates) == 0 {
-		return nil, false, false, nil
+		return nil, false, false
 	}
 
 	groups := make(map[int][]candidateEntry, len(candidates))
@@ -738,7 +779,7 @@ func (r *RoundRobin) selectPriorityGroupCandidate(modelID string, candidates []c
 		key.scopeKey = candidateCycleKey(group)
 		cred, err := r.selectWeightedLiveCandidate(modelID, live, key, groupRateLimitHit)
 		if err == nil {
-			return cred, true, rateLimitHit, nil
+			return cred, true, rateLimitHit
 		}
 		// live is non-empty here, so selectWeightedLiveCandidate's only failure mode
 		// is every member losing the atomic TryAllowAll race in its Phase 3 loop (the
@@ -753,10 +794,10 @@ func (r *RoundRobin) selectPriorityGroupCandidate(modelID string, candidates []c
 		// rateLimitHit never got set at all.
 		rateLimitHit = true
 	}
-	return nil, false, rateLimitHit, nil
+	return nil, false, rateLimitHit
 }
 
-func (r *RoundRobin) selectPriorityRetryCandidateLocked(modelID string, candidates []candidateEntry) (*config.CredentialConfig, bool, bool, error) {
+func (r *RoundRobin) selectPriorityRetryCandidateLocked(modelID string, candidates []candidateEntry) (*config.CredentialConfig, bool, bool) {
 	keyBase := r.schedKeyFor(modelID, false, false, "", true, "")
 	return r.selectPriorityGroupCandidate(modelID, candidates, keyBase, r.effectivePriority)
 }
@@ -866,6 +907,10 @@ func (r *RoundRobin) UpdateDBCredentials(dbCreds []config.CredentialConfig) {
 			filtered = append(filtered, c)
 		}
 	}
+
+	// DB credentials never pass through config.Validate, so apply the same
+	// is_fallback → FallbackPriorityGroup pinning here.
+	config.NormalizeFallbackPriorities(filtered)
 
 	// Merge static + new DB creds.
 	newCreds := append(append([]config.CredentialConfig(nil), r.staticCreds...), filtered...)

@@ -70,11 +70,13 @@ func (m *MockModelChecker) SetModelWeight(modelID, credentialName string, weight
 	m.modelWeights[modelID][credentialName] = weight
 }
 
-func (m *MockModelChecker) GetModelPriorityForCredential(modelID, credentialName string) int {
+func (m *MockModelChecker) LearnedModelPriorityForCredential(modelID, credentialName string) (int, bool) {
 	if creds, ok := m.modelPriorities[modelID]; ok {
-		return creds[credentialName]
+		if p, ok := creds[credentialName]; ok {
+			return p, true
+		}
 	}
-	return 0
+	return 0, false
 }
 
 func (m *MockModelChecker) SetModelPriority(modelID, credentialName string, priority int) {
@@ -1624,6 +1626,26 @@ func TestUpdateDBCredentials(t *testing.T) {
 	assert.True(t, bal.rateLimiter.AllowTokens("db-2"))
 }
 
+// TestUpdateDBCredentials_FallbackPinnedToGroup999 verifies that a DB-sourced credential
+// with IsFallback set is pinned to FallbackPriorityGroup even though DB credentials never
+// pass through config.Validate (review_158 item 24).
+func TestUpdateDBCredentials_FallbackPinnedToGroup999(t *testing.T) {
+	f2b := fail2ban.New(3, 0, []int{500})
+	rl := ratelimit.New()
+	bal := New([]config.CredentialConfig{
+		{Name: "yaml-1", APIKey: "key1", BaseURL: "http://test1.com", RPM: 100},
+	}, f2b, rl)
+
+	bal.UpdateDBCredentials([]config.CredentialConfig{
+		{Name: "db-fallback", APIKey: "k", RPM: 10, IsFallback: true},
+		{Name: "db-primary", APIKey: "k", RPM: 10},
+	})
+
+	idx := bal.credentialIndex["db-fallback"]
+	assert.Equal(t, config.FallbackPriorityGroup, bal.credentials[idx].Priority)
+	assert.Equal(t, 0, bal.credentials[bal.credentialIndex["db-primary"]].Priority)
+}
+
 func TestUpdateDBCredentials_PreservesProviderScopeMetadata(t *testing.T) {
 	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
 	rl := ratelimit.New()
@@ -1772,13 +1794,13 @@ func TestSelectPriorityGroupCandidate_ConcurrentRateLimitRaceCascadesToNextGroup
 		keyBase := r.schedKeyFor("", false, false, "", false, "")
 
 		var victimCred *config.CredentialConfig
-		var victimErr error
+		var victimFound bool
 
 		var wg sync.WaitGroup
 		wg.Add(2)
 		go func() {
 			defer wg.Done()
-			victimCred, _, _, victimErr = r.selectPriorityGroupCandidate("", candidates, keyBase, r.primaryPriority)
+			victimCred, victimFound, _ = r.selectPriorityGroupCandidate("", candidates, keyBase, r.primaryPriority)
 		}()
 		go func() {
 			defer wg.Done()
@@ -1786,7 +1808,7 @@ func TestSelectPriorityGroupCandidate_ConcurrentRateLimitRaceCascadesToNextGroup
 		}()
 		wg.Wait()
 
-		require.NoError(t, victimErr, "trial %d: g200 has spare capacity, must never surface ErrRateLimitExceeded", i)
+		require.True(t, victimFound, "trial %d: g200 has spare capacity, must never surface ErrRateLimitExceeded", i)
 		require.NotNil(t, victimCred)
 		assert.Contains(t, []string{"g100", "g200"}, victimCred.Name)
 	}
@@ -1843,7 +1865,7 @@ func TestNextForModel_PriorityGroup_WeightedWithinGroup(t *testing.T) {
 
 // TestNextForModel_PriorityGroup_ProxyCredentialUsesPerModelPriority verifies the T3
 // balancer-side piece: a proxy/AIR credential's priority group for a given model can be
-// overridden per-model via ModelChecker.GetModelPriorityForCredential — the mechanism
+// overridden per-model via ModelChecker.LearnedModelPriorityForCredential — the mechanism
 // remote.go's updateModelLimits feeds via modelManager.ReplaceModelPrioritiesForCredential
 // after polling an upstream node's /health. Without this, every proxy credential would
 // collapse into one flat group (its own static EffectivePriority(), typically 0)
@@ -1889,6 +1911,37 @@ func TestNextForModel_PriorityGroup_ProxyCredentialUsesPerModelPriority(t *testi
 	}
 	assert.True(t, seen["proxy-a"], "without a per-model override, proxy-a must be reachable")
 	assert.True(t, seen["proxy-b"], "without a per-model override, proxy-b must be reachable")
+}
+
+// TestNextForModel_PriorityGroup_LearnedZeroIsAuthoritative is the review_158 #14
+// balancer piece: a proxy credential with a static priority: field but whose upstream
+// serves a model in its best group (learned priority 0) must route in group 0, not fall
+// back to the static field. Before the fix a learned 0 was indistinguishable from
+// "nothing learned" and the static field won — so a better upstream tier produced a
+// worse local group.
+func TestNextForModel_PriorityGroup_LearnedZeroIsAuthoritative(t *testing.T) {
+	f2b := fail2ban.New(3, 0, []int{500})
+	rl := ratelimit.New()
+
+	credentials := []config.CredentialConfig{
+		{Name: "proxy-slow", Type: config.ProviderTypeProxy, APIKey: "k1", BaseURL: "http://a.com", RPM: 100, Priority: 50},
+		{Name: "direct-mid", Type: config.ProviderTypeOpenAI, APIKey: "k2", BaseURL: "http://b.com", RPM: 100, Priority: 10},
+	}
+	bal := New(credentials, f2b, rl)
+
+	mc := NewMockModelChecker(true)
+	mc.AddModel("proxy-slow", "shared-model")
+	mc.AddModel("direct-mid", "shared-model")
+	// Upstream reports the model in its best group.
+	mc.SetModelPriority("shared-model", "proxy-slow", 0)
+	bal.SetModelChecker(mc)
+
+	// proxy-slow's learned 0 beats direct-mid's static 10 — it is served exclusively.
+	for range 5 {
+		cred, err := bal.NextForModel("shared-model")
+		require.NoError(t, err)
+		assert.Equal(t, "proxy-slow", cred.Name, "learned priority 0 must place the proxy in group 0, ahead of the static-10 direct credential")
+	}
 }
 
 // TestNextForModel_TierCandidateExpansion_LocalCumulativeCascade is the Design B
@@ -1969,6 +2022,101 @@ func TestNextForModel_TierCandidate_SWRRWeightWithinGroup(t *testing.T) {
 	// group 1 = {px@tier-1 weight 3, alt weight 1} → 3:1 over 8 picks.
 	assert.Equal(t, 6, counts["px"])
 	assert.Equal(t, 2, counts["alt"])
+}
+
+// TestNextForModel_AllTiersSaturated_Returns429NotNoCredentials is review_158 item 12:
+// when the only candidate is a proxy whose every learned tier is RPM-saturated upstream
+// (Banned=false, CurrentRPM>=LimitRPM), selection must fail with ErrRateLimitExceeded so
+// the caller does rate-limit backoff — not ErrNoCredentialsAvailable (503).
+func TestNextForModel_AllTiersSaturated_Returns429NotNoCredentials(t *testing.T) {
+	f2b := fail2ban.New(3, 0, []int{500})
+	rl := ratelimit.New()
+
+	credentials := []config.CredentialConfig{
+		{Name: "px", Type: config.ProviderTypeProxy, APIKey: "k1", BaseURL: "http://a.com", RPM: -1},
+	}
+	rl.AddCredential("px", -1)
+	rl.AddModelWithTPM("px", "m", -1, -1) // aggregate bucket unlimited — per-tier gate is what trips
+
+	bal := New(credentials, f2b, rl)
+	mc := NewMockModelChecker(true)
+	mc.AddModel("px", "m")
+	mc.SetModelTiers("m", "px", []httputil.ModelPriorityTier{
+		{Priority: 1, Weight: 1, LimitRPM: 10, CurrentRPM: 10},
+		{Priority: 2, Weight: 1, LimitRPM: 20, CurrentRPM: 20},
+	})
+	bal.SetModelChecker(mc)
+
+	_, err := bal.NextForModel("m")
+	assert.ErrorIs(t, err, ErrRateLimitExceeded)
+}
+
+// TestNextForModel_AllTiersReallyBanned_ReturnsNoCredentials is the item 12 counterpart:
+// a real upstream ban on every tier is not a rate-limit condition — it must still surface
+// as ErrNoCredentialsAvailable.
+func TestNextForModel_AllTiersReallyBanned_ReturnsNoCredentials(t *testing.T) {
+	f2b := fail2ban.New(3, 0, []int{500})
+	rl := ratelimit.New()
+
+	credentials := []config.CredentialConfig{
+		{Name: "px", Type: config.ProviderTypeProxy, APIKey: "k1", BaseURL: "http://a.com", RPM: -1},
+	}
+	rl.AddCredential("px", -1)
+	rl.AddModelWithTPM("px", "m", -1, -1)
+
+	bal := New(credentials, f2b, rl)
+	mc := NewMockModelChecker(true)
+	mc.AddModel("px", "m")
+	mc.SetModelTiers("m", "px", []httputil.ModelPriorityTier{
+		{Priority: 1, Weight: 1, LimitRPM: -1, Banned: true},
+		{Priority: 2, Weight: 1, LimitRPM: -1, Banned: true},
+	})
+	bal.SetModelChecker(mc)
+
+	_, err := bal.NextForModel("m")
+	assert.ErrorIs(t, err, ErrNoCredentialsAvailable)
+}
+
+// TestNextForModel_TierHeadroom_GatesOnUpstreamPerTierUsage is review_158 item 13: the
+// cumulative-cap check reads a single aggregate (cred,model) counter that cannot see
+// which tier the upstream actually consumed. When the upstream's own per-tier view shows
+// the cheap tier saturated while the local aggregate counter is still low, the per-tier
+// gate must drop that tier candidate and let selection cascade to the next group.
+func TestNextForModel_TierHeadroom_GatesOnUpstreamPerTierUsage(t *testing.T) {
+	f2b := fail2ban.New(3, 0, []int{500})
+	rl := ratelimit.New()
+
+	credentials := []config.CredentialConfig{
+		{Name: "px", Type: config.ProviderTypeProxy, APIKey: "k1", BaseURL: "http://a.com", RPM: -1},
+		// A direct alternative sharing priority group 1 with px's cheap tier.
+		{Name: "alt", Type: config.ProviderTypeOpenAI, APIKey: "k2", BaseURL: "http://b.com", RPM: -1, Priority: 1},
+	}
+	rl.AddCredential("px", -1)
+	rl.AddCredential("alt", -1)
+	rl.AddModelWithTPM("px", "m", -1, -1) // local aggregate counter stays 0 in this test
+	rl.AddModelWithTPM("alt", "m", -1, -1)
+
+	bal := New(credentials, f2b, rl)
+	mc := NewMockModelChecker(true)
+	mc.AddModel("px", "m")
+	mc.AddModel("alt", "m")
+	mc.SetModelTiers("m", "px", []httputil.ModelPriorityTier{
+		// tier 1: upstream reports it fully consumed (100/100) — not banned.
+		{Priority: 1, Weight: 1, LimitRPM: 100, CurrentRPM: 100},
+		// tier 2: free.
+		{Priority: 2, Weight: 1, LimitRPM: 900, CurrentRPM: 0},
+	})
+	bal.SetModelChecker(mc)
+
+	// The local aggregate counter is 0 (< tier-1 cumulative cap 100), so the cumulative
+	// gate alone would keep px@tier-1 in group 1 and SWRR would split traffic with alt.
+	// The per-tier gate sees the upstream's 100/100 and drops px@tier-1: group 1 now has
+	// only alt, and px@tier-2 (group 2) is never reached.
+	for i := 0; i < 6; i++ {
+		cred, err := bal.NextForModel("m")
+		require.NoError(t, err, "request %d", i)
+		assert.Equal(t, "alt", cred.Name, "request %d must route to alt, not px's saturated tier-1 or its tier-2", i)
+	}
 }
 
 // TestNextForModel_NoPriorityFields_BehavesAsFlatPool is a backward-compatibility check:

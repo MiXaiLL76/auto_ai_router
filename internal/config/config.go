@@ -816,6 +816,29 @@ func (c CredentialConfig) EffectivePriority() int {
 	return 0
 }
 
+// NormalizeFallbackPriority pins an is_fallback credential to the last priority group
+// (FallbackPriorityGroup) so it sorts after every explicit tier in the primary cascade
+// and on the dashboard. The fallback pool itself is still a separate, flat weighted pool
+// (see the balancer) — this only fixes the group *number* the credential carries.
+//
+// Config.Validate calls this after its priority/fallback_priority validation; callers
+// that build credentials outside YAML (e.g. DB-sourced credentials that never pass
+// through Validate) must call it themselves before handing the credential to the
+// balancer — see NormalizeFallbackPriorities.
+func (c *CredentialConfig) NormalizeFallbackPriority() {
+	if c.IsFallback {
+		c.Priority = FallbackPriorityGroup
+	}
+}
+
+// NormalizeFallbackPriorities applies NormalizeFallbackPriority to every credential in
+// the slice in place.
+func NormalizeFallbackPriorities(creds []CredentialConfig) {
+	for i := range creds {
+		creds[i].NormalizeFallbackPriority()
+	}
+}
+
 // EffectiveProviderType returns the ProviderType that should drive wire
 // protocol decisions (converter selection, outbound URL/headers, streaming
 // handler, Responses-API registry lookup) for this credential. It differs
@@ -1923,13 +1946,9 @@ func (c *Config) Validate() error {
 		if cred.IsFallback && cred.Priority > 0 && cred.Priority != FallbackPriorityGroup {
 			return fmt.Errorf("credential %s: invalid priority: fallback credentials cannot set priority (always tried last, pinned to group %d)", cred.Name, FallbackPriorityGroup)
 		}
-		// Every fallback credential is pinned to the last priority group so it sorts
-		// after every explicit tier in the primary cascade and on the dashboard. The
-		// fallback pool itself is still a separate, flat weighted pool (see the balancer)
-		// — this only fixes the group *number* the credential carries.
-		if cred.IsFallback {
-			c.Credentials[i].Priority = FallbackPriorityGroup
-		}
+		// Pin every fallback credential to the last priority group (shared with the
+		// DB-credential path via NormalizeFallbackPriority).
+		c.Credentials[i].NormalizeFallbackPriority()
 	}
 
 	for _, model := range c.Models {

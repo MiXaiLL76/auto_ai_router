@@ -295,6 +295,27 @@
     // would misrepresent when they actually serve. (The backend pins every
     // is_fallback credential to priority group 999 — FallbackPriorityGroup — so it
     // also sorts last anywhere the raw number is shown.)
+    //
+    // A proxy/AIR row can carry `priority_tiers` (Design B): its upstream spans
+    // several priority groups and the balancer expands the credential into one
+    // candidate per tier. Such a row is split into one virtual row per tier, each
+    // placed in its own priority group and carrying that tier's weight / rpm / tpm /
+    // banned — mirroring what the balancer's expandTierCandidates does.
+    function expandRowTiers(row) {
+      const tiers = Array.isArray(row.priority_tiers) ? row.priority_tiers : [];
+      if (tiers.length < 2) return [row];
+      return tiers.map(t => ({
+        ...row,
+        priority: t.priority || 0,
+        weight: t.weight,
+        current_rpm: t.current_rpm || 0,
+        limit_rpm: t.limit_rpm || 0,
+        current_tpm: t.current_tpm || 0,
+        limit_tpm: t.limit_tpm || 0,
+        is_banned: row.is_banned || !!t.banned,
+      }));
+    }
+
     function groupModels(models) {
       const byModel = new Map();
       for (const m of Object.values(models)) {
@@ -311,11 +332,15 @@
         for (const row of entry.rows) {
           const cred = credentialsData[row.credential] || {};
           const fb = !!cred.is_fallback;
-          // All fallback rows collapse into one group; primary rows bucket by priority.
-          const tier = fb ? 0 : (row.priority || 0);
-          const key = (fb ? 'F' : 'P:' + tier);
-          if (!buckets.has(key)) buckets.set(key, { isFallback: fb, priority: tier, rows: [] });
-          buckets.get(key).rows.push(row);
+          // All fallback rows collapse into one group; primary rows bucket by
+          // priority, splitting a multi-tier proxy row into one row per tier.
+          const expanded = fb ? [row] : expandRowTiers(row);
+          for (const r of expanded) {
+            const tier = fb ? 0 : (r.priority || 0);
+            const key = (fb ? 'F' : 'P:' + tier);
+            if (!buckets.has(key)) buckets.set(key, { isFallback: fb, priority: tier, rows: [] });
+            buckets.get(key).rows.push(r);
+          }
         }
 
         // primary tiers ascending, then fallback tiers ascending.
