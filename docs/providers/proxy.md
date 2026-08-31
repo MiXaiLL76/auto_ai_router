@@ -23,10 +23,10 @@ credentials:
 
 ## Optional Fields
 
-| Field         | Description                                                                       |
-| ------------- | --------------------------------------------------------------------------------- |
-| `api_key`     | Remote master key (if the target requires authentication)                         |
-| `priority`    | Selection-order group (lower first). `999` = last-resort. `is_fallback: true` is a deprecated alias for `priority: 999` |
+| Field      | Description                                                                                                             |
+| ---------- | ----------------------------------------------------------------------------------------------------------------------- |
+| `api_key`  | Remote master key (if the target requires authentication)                                                               |
+| `priority` | Selection-order group (lower first). `999` = last-resort. `is_fallback: true` is a deprecated alias for `priority: 999` |
 
 ## Usage Contract
 

@@ -142,8 +142,7 @@ last-resort group.
 
 The retired `is_fallback: true` and `fallback_priority: N` YAML keys are still accepted
 as deprecated input aliases: `is_fallback: true` folds to `priority: 999`,
-`fallback_priority: N` folds to `priority: N`. The router logs a warning; `is_fallback:
-true` combined with a *lower* explicit `priority` is rejected as contradictory.
+`fallback_priority: N` folds to `priority: N`. The router logs a warning; `is_fallback: true` combined with a *lower* explicit `priority` is rejected as contradictory.
 
 For a `proxy`/`air` credential, the per-model priority learned from the upstream's own
 `/health` (its upstream credentials' `priority` values) takes precedence over the static
@@ -204,8 +203,7 @@ credential — order is entirely `priority`.
 
 ## AIR Chain Last-Resort
 
-When using chained routers (e.g. router01 → router02 in tier 0, router03 at `priority:
-999`), the last-resort credential works across the chain:
+When using chained routers (e.g. router01 → router02 in tier 0, router03 at `priority: 999`), the last-resort credential works across the chain:
 
 ```
 router01 receives request
