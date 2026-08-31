@@ -661,6 +661,11 @@ func (p *Proxy) executeProxyRequest(
 	// knows to include the X-Credential-Name response header.
 	proxyReq.Header.Set(HeaderAIRProxyClient, "1")
 	proxyReq.Header.Set(HeaderLegacyAIRProxyClient, "1")
+	if carriesCredentialDenylist(cred) {
+		if err := setCredentialDenylistHeader(proxyReq.Header, effectiveCredentialDenylist(r.Context())); err != nil {
+			return nil, err
+		}
+	}
 
 	// Send request
 	resp, err := p.client.Do(proxyReq) //nolint:gosec // G704: same targetURL as above, host isn't attacker-controlled
@@ -844,6 +849,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 		r.Header.Get(HeaderLegacyAIRProxyClient) == "1"
 	r.Header.Del(HeaderAIRProxyClient)
 	r.Header.Del(HeaderLegacyAIRProxyClient)
+	r = captureCredentialDenylist(r, proxyMarkerPresent)
 
 	// Create logging context that will be filled throughout request processing
 	// and logged at the end via defer to ensure all requests are logged
@@ -884,15 +890,6 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if proxyMarkerPresent {
-		logCtx.IsProxyRequest = p.isMasterKey(logCtx.Token)
-		if !logCtx.IsProxyRequest {
-			p.logger.WarnContext(r.Context(), "Ignoring untrusted AIR proxy marker",
-				"request_id", requestID,
-			)
-		}
-	}
-
 	r = prepared.request
 	logCtx.Request = r
 	body := prepared.body

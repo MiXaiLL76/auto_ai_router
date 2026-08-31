@@ -262,6 +262,8 @@ models:
 #       - anthropic/claude-sonnet-4
 #     model_mappings:
 #       openai/gpt-5.5-pro: gpt-5.5-pro
+#     credential_denylist:
+#       - untrusted-provider-credential
 
 # Optional: Redis/Valkey backend for distributed rate limiting and response storage.
 # When enabled, all replicas share a single counter namespace — RPM/TPM limits are
