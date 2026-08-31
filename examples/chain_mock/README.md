@@ -36,7 +36,7 @@ reacting to the `rpm`/`tpm` budgets in the `*/config.yaml` files.
 
 | model         | region-alpha                            | region-beta                   | region-gamma                           |
 | ------------- | --------------------------------------- | ----------------------------- | -------------------------------------- |
-| `chat-smart`  | **p1 ×2, p2, p3**, p9 (uncapped)        | **p1**, p9 (uncapped)         | **p1**, p9 (uncapped, was is_fallback) |
+| `chat-smart`  | **p1 ×2, p2, p3**, p9 (uncapped)        | **p1**, p9 (uncapped)         | **p1**, p9 (uncapped, `priority: 999`) |
 | `chat-fast`   | **p1 ×2 (weighted 2:1), p9 (uncapped)** | **p1**, **p2**                | —                                      |
 | `chat-reason` | —                                       | **p1**, **p3**, p9 (uncapped) | p2                                     |
 | `embed-v1`    | p1 (unlimited)                          | —                             | —                                      |

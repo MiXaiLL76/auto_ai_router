@@ -86,9 +86,9 @@ credentials:
 
 When `openai_main` exhausts its rate limits, requests automatically route to `backup_router`.
 
-### Multiple Fallbacks
+### Multiple Last-Resort Credentials
 
-You can configure multiple fallback proxy/AIR credentials — they are also load-balanced using round-robin:
+Several credentials can share `priority: 999` — they are load-balanced against each other (weighted round-robin) once the request reaches the last-resort tier:
 
 ```yaml
 credentials:

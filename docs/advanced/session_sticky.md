@@ -103,13 +103,10 @@ flowchart TD
     BindingOK -->|yes| UseBinding([Use session-bound credential])
     BindingOK -->|no| RoundRobin
 
-    TrySession -->|no| RoundRobin[NextForModel<br/>round-robin]
+    TrySession -->|no| RoundRobin[NextForModel<br/>priority cascade 0→999]
     RoundRobin --> RROk{Found?}
-    RROk -->|yes| UseRR([Use round-robin credential])
-    RROk -->|no| Fallback[NextFallbackForModel]
-    Fallback --> FbOk{Found?}
-    FbOk -->|yes| UseFb([Use fallback credential])
-    FbOk -->|no| Error([503 No credentials available])
+    RROk -->|yes| UseRR([Use selected credential])
+    RROk -->|no| Error([503 No credentials available])
 ```
 
 ### Binding Lifecycle
@@ -134,7 +131,7 @@ Key consequences:
 
 - A binding points to a credential that **successfully completed at least one request** and is therefore likely to have a warm cache.
 - If a credential gets banned or rate-limited between turns, the sticky lookup fails gracefully and the proxy falls back to normal selection — no request is dropped.
-- On same-type retry or fallback proxy success, the binding is updated to the **winning** credential, not the original one.
+- When a retry (any tier, any provider type) succeeds on a different credential, the binding is updated to the **winning** credential, not the original one.
 
 ## Sources of Session ID
 
@@ -318,8 +315,7 @@ r2 = client.responses.create(
 | Bound credential removed from config | `NextSpecific` returns not-found; fallback to round-robin                               |
 | Request fails (5xx / disconnect)     | Binding is cleared by `defer` in `ProxyRequest`                                         |
 | Streaming failure mid-stream         | `streamCompleted = false` → binding cleared                                             |
-| Same-type retry succeeds on cred B   | Binding updated to cred B                                                               |
-| Fallback proxy succeeds              | Binding updated to fallback credential                                                  |
+| Retry succeeds on cred B             | Binding updated to cred B (any tier / provider type)                                    |
 | TTL expired between turns            | Binding treated as absent; next round-robin result starts a new binding                 |
 | One `sessionID`, multiple models     | Independent bindings per `{sessionID, modelID}` pair                                    |
 

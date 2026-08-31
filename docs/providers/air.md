@@ -2,7 +2,7 @@
 
 Use `type: air` when the upstream is another Auto AI Router instance.
 
-It uses the same HTTP forwarding, `/health` discovery, dynamic model sync, and fallback behavior as `type: proxy`, but declares a narrower product contract: the remote endpoint is AIR, not a generic OpenAI-compatible API.
+It uses the same HTTP forwarding, `/health` discovery, dynamic model sync, and priority-cascade behavior as `type: proxy`, but declares a narrower product contract: the remote endpoint is AIR, not a generic OpenAI-compatible API.
 
 ## Configuration
 

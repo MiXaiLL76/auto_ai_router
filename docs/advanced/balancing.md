@@ -142,17 +142,17 @@ last-resort group.
 
 The retired `is_fallback: true` and `fallback_priority: N` YAML keys are still accepted
 as deprecated input aliases: `is_fallback: true` folds to `priority: 999`,
-`fallback_priority: N` folds to `priority: N`. The router logs a warning; `is_fallback: true` combined with a *lower* explicit `priority` is rejected as contradictory.
+`fallback_priority: N` folds to `priority: N`. The router logs a warning; `is_fallback:
+true` combined with a *lower* explicit `priority` is rejected as contradictory.
 
 For a `proxy`/`air` credential, the per-model priority learned from the upstream's own
 `/health` (its upstream credentials' `priority` values) takes precedence over the static
 `priority` set here, so a proxy credential's tier reflects what the node it proxies to is
 actually configured with. Models that the upstream serves **only** from its last-resort
-group (`priority: 999` / `is_fallback`) are no longer hidden from a non-`is_fallback`
-proxy credential: they are discovered and placed in this router's local last-resort tier.
-When the model checker is disabled there is no learned priority, so a proxy credential
-fronting an all-last-resort upstream node should itself set `priority: 999` (or
-`is_fallback: true`) to keep those models out of the primary pool.
+group (`priority: 999`) are still discovered and placed in this router's local
+last-resort tier — an all-last-resort upstream node is not hidden. When the model checker
+is disabled there is no learned priority, so give a credential fronting such a node
+`priority: 999` itself.
 
 When one upstream node serves the same model from several priority groups behind a single
 proxy credential, that credential **expands into one local candidate per tier**. Each tier
