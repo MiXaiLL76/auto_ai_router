@@ -133,8 +133,10 @@ func TestRequestToChat_Instructions(t *testing.T) {
 	messages := parsed["messages"].([]interface{})
 	assert.Len(t, messages, 2)
 
-	// First message should be developer
-	assert.Equal(t, "developer", messages[0].(map[string]interface{})["role"])
+	// First message is "system", not "developer": most Chat Completions
+	// providers reached through this converter (DeepSeek, etc.) only
+	// recognize the classic role set and reject "developer" outright.
+	assert.Equal(t, "system", messages[0].(map[string]interface{})["role"])
 	assert.Equal(t, "You are a pirate.", messages[0].(map[string]interface{})["content"])
 
 	// Second should be user
@@ -142,6 +144,28 @@ func TestRequestToChat_Instructions(t *testing.T) {
 
 	// instructions should be removed
 	assert.NotContains(t, parsed, "instructions")
+}
+
+func TestRequestToChat_DeveloperRoleNormalizedToSystem(t *testing.T) {
+	body := `{
+		"model": "deepseek-v4-flash",
+		"input": [
+			{"role": "developer", "content": "You are a pirate."},
+			{"role": "user", "content": "Hello"}
+		]
+	}`
+	result, err := RequestToChat([]byte(body))
+	require.NoError(t, err)
+
+	var parsed map[string]interface{}
+	require.NoError(t, json.Unmarshal(result, &parsed))
+
+	messages := parsed["messages"].([]interface{})
+	require.Len(t, messages, 2)
+
+	assert.Equal(t, "system", messages[0].(map[string]interface{})["role"])
+	assert.Equal(t, "You are a pirate.", messages[0].(map[string]interface{})["content"])
+	assert.Equal(t, "user", messages[1].(map[string]interface{})["role"])
 }
 
 func TestRequestToChat_InstructionsArray(t *testing.T) {

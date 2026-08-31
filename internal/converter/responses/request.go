@@ -920,8 +920,17 @@ func convertInputValue(input interface{}) ([]interface{}, error) {
 // Responses-API-only fields (type, phase, status) are intentionally dropped here because
 // Chat Completions providers reject unknown parameters on message objects.
 func convertMessage(item map[string]interface{}) (map[string]interface{}, error) {
+	role := item["role"]
+	if role == "developer" {
+		// "developer" is the Responses API's rename of "system" (also emitted by the
+		// official OpenAI SDK). Most Chat Completions providers reached through this
+		// generic converter (e.g. DeepSeek and other OpenAI-compatible backends) only
+		// recognize the classic role set and reject "developer" outright, so downgrade
+		// it to the universally-supported "system" — the two are semantically identical.
+		role = "system"
+	}
 	msg := map[string]interface{}{
-		"role": item["role"],
+		"role": role,
 	}
 
 	content := item["content"]
@@ -1051,7 +1060,8 @@ func convertInstructions(instructions interface{}) ([]interface{}, error) {
 		}
 		return []interface{}{
 			map[string]interface{}{
-				"role":    "developer",
+				// "system", not "developer": see convertMessage for why.
+				"role":    "system",
 				"content": s,
 			},
 		}, nil
