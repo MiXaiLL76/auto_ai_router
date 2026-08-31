@@ -1,0 +1,81 @@
+version: "3.8"
+
+services:
+  influxdb:
+    image: influxdb:1.8
+    container_name: k6-influxdb
+    restart: unless-stopped
+    ports:
+      - "8086:8086"
+    environment:
+      INFLUXDB_DB: k6
+      INFLUXDB_HTTP_MAX_BODY_SIZE: 0
+    volumes:
+      - influxdb-data:/var/lib/influxdb
+    networks:
+      - k6-net
+    healthcheck:
+      test: ["CMD", "influx", "-execute", "SHOW DATABASES"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 10s
+
+  grafana:
+    image: grafana/grafana:10.4.2
+    container_name: k6-grafana
+    restart: unless-stopped
+    depends_on:
+      influxdb:
+        condition: service_healthy
+    ports:
+      - "3000:3000"
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Admin
+      GF_AUTH_DISABLE_LOGIN_FORM: "true"
+      GF_INSTALL_PLUGINS: grafana-piechart-panel
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+    networks:
+      - k6-net
+
+  k6:
+    image: grafana/k6:latest
+    container_name: k6-runner
+    depends_on:
+      influxdb:
+        condition: service_healthy
+    volumes:
+      - ./ramping-vus.js:/scripts/load-test.js:ro
+    working_dir: /scripts
+    ulimits:
+      nofile:
+        soft: 1048576
+        hard: 1048576
+    environment:
+      K6_OUT: influxdb=http://influxdb:8086/k6
+      BASE_URL: ${BASE_URL:-https://example.ru}
+      API_KEY: ${API_KEY:-}
+      AUTH_HEADER: ${AUTH_HEADER:-}
+      AUTH_VALUE: ${AUTH_VALUE:-}
+      TARGET_LOW: ${TARGET_LOW:-500}
+      TARGET_HIGH: ${TARGET_HIGH:-1000}
+      RAMP: ${RAMP:-1m}
+      HOLD: ${HOLD:-3m}
+      W_STREAM: ${W_STREAM:-30}
+      W_CHAT: ${W_CHAT:-30}
+      W_RESP: ${W_RESP:-30}
+      W_EMBED: ${W_EMBED:-10}
+    command: run /scripts/load-test.js
+    networks:
+      - k6-net
+
+networks:
+  k6-net:
+    driver: bridge
+
+volumes:
+  influxdb-data:
+  grafana-data:
