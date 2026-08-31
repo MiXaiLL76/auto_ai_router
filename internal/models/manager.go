@@ -3117,8 +3117,8 @@ func (m *Manager) fetchRemoteModelsFromHealth(
 		return nil, nil, nil, errProxyHealthModelMetadataUnavailable
 	}
 
-	providerScopes := AggregateProviderScopesFromHealth(&health, cred.IsFallback)
-	modelScopes := AggregateModelScopesFromHealth(&health, cred.IsFallback)
+	providerScopes := AggregateProviderScopesFromHealth(&health)
+	modelScopes := AggregateModelScopesFromHealth(&health)
 
 	modelsByID := make(map[string]Model)
 	modelWeightsByID := make(map[string]int)
@@ -3127,13 +3127,12 @@ func (m *Manager) fetchRemoteModelsFromHealth(
 		if !ok {
 			continue
 		}
-		// For a non-fallback connection: skip upstream credentials marked as fallback
-		// (they are reserved for fallback traffic and must not serve primary requests).
-		// For a fallback connection: include ALL upstream credentials regardless of their
-		// fallback status — use whatever the upstream can offer as a last resort.
-		if !cred.IsFallback && credStats.IsFallback {
-			continue
-		}
+		// Every upstream credential is ingested regardless of its priority tier. A
+		// last-resort upstream credential (priority: 999 / is_fallback) is NOT dropped
+		// here: the balancer expands this proxy credential into one candidate per learned
+		// tier (Design B), so those models land in the local last-resort tier instead of
+		// vanishing. Pre-unification this path skipped them for a non-fallback connection,
+		// which silently hid every model of an all-fallback upstream node.
 		if modelStats.Model == "" {
 			continue
 		}

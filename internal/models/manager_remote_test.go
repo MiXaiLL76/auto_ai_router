@@ -264,7 +264,7 @@ func TestGetRemoteModels_CachingMultipleCredentials(t *testing.T) {
 	assert.Equal(t, 1, requestCountProxy2, "Should still be 1 - using cache")
 }
 
-func TestGetRemoteModelsWithError_FiltersRemoteHealthByFallbackParity(t *testing.T) {
+func TestGetRemoteModelsWithError_IngestsAllUpstreamTiersRegardlessOfFallback(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelError}))
 
 	server := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -291,6 +291,9 @@ func TestGetRemoteModelsWithError_FiltersRemoteHealthByFallbackParity(t *testing
 
 	m := New(logger, 100, []config.ModelRPMConfig{})
 
+	// Post-unification both a primary and a last-resort connection discover the upstream's
+	// full catalogue. The balancer tiers the last-resort models locally (Design B); the
+	// model-snapshot path no longer hides them from a non-fallback connection.
 	primaryModels, err := m.GetRemoteModelsWithError(context.Background(), &config.CredentialConfig{
 		Name:       "proxy-primary",
 		Type:       config.ProviderTypeProxy,
@@ -298,7 +301,7 @@ func TestGetRemoteModelsWithError_FiltersRemoteHealthByFallbackParity(t *testing
 		IsFallback: false,
 	})
 	require.NoError(t, err)
-	assert.Equal(t, []string{"primary-only", "shared-model"}, modelIDs(primaryModels))
+	assert.ElementsMatch(t, []string{"fallback-only", "primary-only", "shared-model"}, modelIDs(primaryModels))
 
 	fallbackModels, err := m.GetRemoteModelsWithError(context.Background(), &config.CredentialConfig{
 		Name:       "proxy-fallback",
@@ -307,8 +310,6 @@ func TestGetRemoteModelsWithError_FiltersRemoteHealthByFallbackParity(t *testing
 		IsFallback: true,
 	})
 	require.NoError(t, err)
-	// Fallback gateway includes ALL upstream credentials (both primary and fallback),
-	// so it sees all models: primary-only, fallback-only, and shared-model (deduplicated).
 	assert.ElementsMatch(t, []string{"fallback-only", "primary-only", "shared-model"}, modelIDs(fallbackModels))
 }
 
@@ -349,7 +350,9 @@ func TestGetRemoteModelsWithError_AggregatesRemoteHealthWeights(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Equal(t, []string{"gpt-4"}, modelIDs(primaryModels))
-	assert.Equal(t, 26, m.GetModelWeightForCredential("gpt-4", "proxy-primary"))
+	// Post-unification the last-resort upstream credential's weight is summed in too
+	// (20 + 5 + 1 + 100), same as the fallback connection below.
+	assert.Equal(t, 126, m.GetModelWeightForCredential("gpt-4", "proxy-primary"))
 
 	fallbackModels, err := m.GetRemoteModelsWithError(context.Background(), &config.CredentialConfig{
 		Name:       "proxy-fallback",

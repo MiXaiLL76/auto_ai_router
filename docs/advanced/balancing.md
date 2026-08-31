@@ -138,12 +138,22 @@ credentials:
 Credentials that omit `priority` (or set it to `0`) all share the default tier `0`, which
 is tried first — so a config that never sets `priority` behaves exactly like the flat
 weighted pool described above. `priority` and `fallback_priority` are mutually exclusive
-on a single credential, and `is_fallback: true` credentials cannot set `priority`.
+on a single credential.
+
+`is_fallback: true` is now just sugar for `priority: 999` — the two are fully
+interchangeable and the last-resort group (`999`) is the canonical spelling. Setting
+`is_fallback: true` together with a *lower* explicit `priority` is rejected as
+contradictory; `is_fallback: true` + `priority: 999` is allowed (redundant).
 
 For a `proxy`/`air` credential, the per-model priority learned from the upstream's own
 `/health` (its upstream credentials' `priority` values) takes precedence over the static
 `priority` set here, so a proxy credential's tier reflects what the node it proxies to is
-actually configured with.
+actually configured with. Models that the upstream serves **only** from its last-resort
+group (`priority: 999` / `is_fallback`) are no longer hidden from a non-`is_fallback`
+proxy credential: they are discovered and placed in this router's local last-resort tier.
+When the model checker is disabled there is no learned priority, so a proxy credential
+fronting an all-last-resort upstream node should itself set `priority: 999` (or
+`is_fallback: true`) to keep those models out of the primary pool.
 
 When one upstream node serves the same model from several priority groups behind a single
 proxy credential, that credential **expands into one local candidate per tier**. Each tier

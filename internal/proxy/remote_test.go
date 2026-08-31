@@ -741,14 +741,13 @@ func TestUpdateModelLimits_NoPriorityMismatchWarning_WhenPrioritiesMatch(t *test
 	assert.NotContains(t, logBuf.String(), "different priority groups")
 }
 
-// TestUpdateModelLimits_SkipsFallbackUpstreamForPrimaryConnection: for a non-fallback
-// local proxy credential, an upstream credential marked is_fallback (reserved for
-// fallback traffic on the upstream node) is excluded from aggregation — its models,
-// priorities and limits must NOT surface on this proxy credential's primary pool. This
-// mirrors the old model-snapshot path (models.fetchRemoteModelsFromHealth) so the single
-// poller applies one consistent rule. A model offered ONLY through such a credential
-// simply is not routable via this proxy credential for primary traffic.
-func TestUpdateModelLimits_SkipsFallbackUpstreamForPrimaryConnection(t *testing.T) {
+// TestUpdateModelLimits_IngestsFallbackUpstreamAsLastResortTierForPrimaryConnection:
+// post-unification a non-fallback local proxy credential also ingests models served only
+// by a last-resort (priority: 999 / is_fallback) upstream credential. They surface on the
+// proxy credential at priority 999, so the balancer expands them into a local last-resort
+// tier (Design B) — no longer hidden. This is what fixes an all-last-resort upstream node
+// contributing zero routable models to a primary chain link.
+func TestUpdateModelLimits_IngestsFallbackUpstreamAsLastResortTierForPrimaryConnection(t *testing.T) {
 	health := &httputil.ProxyHealthResponse{
 		Credentials: map[string]httputil.CredentialHealthStats{
 			"grant-primary":  {IsFallback: false, Priority: 100},
@@ -768,10 +767,10 @@ func TestUpdateModelLimits_SkipsFallbackUpstreamForPrimaryConnection(t *testing.
 	updateModelLimits(health, cred, rateLimiter, logger, mockMM)
 
 	assert.True(t, mockMM.HasModel("test_proxy", "gpt-4"))
-	assert.False(t, mockMM.HasModel("test_proxy", "claude-3-opus"), "model served only via an is_fallback upstream credential must not surface on a primary connection")
+	assert.True(t, mockMM.HasModel("test_proxy", "claude-3-opus"), "model served only via a last-resort upstream credential now surfaces (tiered locally)")
 	assert.Equal(t, 100, mockMM.GetModelPriorityForCredential("gpt-4", "test_proxy"))
-	assert.Equal(t, 0, mockMM.GetModelPriorityForCredential("claude-3-opus", "test_proxy"))
-	assert.Equal(t, -1, rateLimiter.GetModelLimitRPM("test_proxy", "claude-3-opus"), "no rate-limiter entry for an excluded model")
+	assert.Equal(t, 999, mockMM.GetModelPriorityForCredential("claude-3-opus", "test_proxy"))
+	assert.Equal(t, 20, rateLimiter.GetModelLimitRPM("test_proxy", "claude-3-opus"))
 }
 
 // TestUpdateModelLimits_IncludesFallbackUpstreamForFallbackConnection: a locally
@@ -802,13 +801,15 @@ func TestUpdateModelLimits_IncludesFallbackUpstreamForFallbackConnection(t *test
 	assert.Equal(t, 20, rateLimiter.GetModelLimitRPM("test_proxy", "claude-3-opus"))
 }
 
-// TestUpdateModelScopes_SkipsFallbackUpstreamForPrimaryConnection: for a non-fallback
-// local proxy credential, an unrestricted is_fallback upstream credential must NOT be
-// OR'd into the aggregate — otherwise its lack of scope restriction erases a restricted
-// primary upstream credential's scope (an access-control regression). Here the model is
-// served by a restricted primary credential (team-a) and an unrestricted fallback one;
-// the resulting proxy-credential scope must stay team-a-only.
-func TestUpdateModelScopes_SkipsFallbackUpstreamForPrimaryConnection(t *testing.T) {
+// TestUpdateModelScopes_AggregatesAllUpstreamTiersForPrimaryConnection: post-unification
+// every upstream credential is OR'd into the proxy credential's scope aggregate,
+// last-resort tiers included. REVIEW POINT: for a MIXED upstream (a restricted primary
+// credential plus an unrestricted last-resort one, both serving the same model) this
+// widens the proxy credential's apparent scope — the model IS reachable through the
+// upstream's last-resort path, so exposing it is consistent with "discover everything,
+// tier it locally", but a deployment relying on the old narrowing must move the hard
+// block to router/model-level denied_scopes.
+func TestUpdateModelScopes_AggregatesAllUpstreamTiersForPrimaryConnection(t *testing.T) {
 	health := &httputil.ProxyHealthResponse{
 		Credentials: map[string]httputil.CredentialHealthStats{
 			"grant-primary":  {IsFallback: false, Scopes: []string{"team-a"}},
@@ -827,9 +828,9 @@ func TestUpdateModelScopes_SkipsFallbackUpstreamForPrimaryConnection(t *testing.
 
 	require.NotNil(t, cred.ProviderScopeExpression)
 	assert.True(t, scope.NewContext([]string{"team-a"}, nil).AllowsExpression(cred.ProviderScopeExpression),
-		"team-a caller must be allowed")
-	assert.False(t, scope.NewContext(nil, nil).AllowsExpression(cred.ProviderScopeExpression),
-		"an unrestricted is_fallback upstream credential must not erase the primary credential's team-a restriction")
+		"team-a caller allowed via the primary tier")
+	assert.True(t, scope.NewContext(nil, nil).AllowsExpression(cred.ProviderScopeExpression),
+		"unrestricted last-resort upstream tier is now part of the aggregate")
 }
 
 // TestUpdateModelScopes_IncludesFallbackUpstreamForFallbackConnection: a locally
@@ -1472,12 +1473,12 @@ func TestUpdateStatsFromHealth_ClearsModelsWhenRemoteSnapshotIsEmpty(t *testing.
 	assert.Empty(t, rateLimiter.GetAllModelPairs())
 }
 
-// TestUpdateStatsFromHealth_SkipsFallbackUpstreamForPrimaryConnection: for a non-fallback
-// local proxy credential, is_fallback upstream credentials are excluded from the
-// aggregated RPM/TPM ceiling — folding their reserved capacity into the primary ceiling
-// would let the client rate limiter admit primary traffic past what the upstream serves
-// on its primary credentials. Only "upstream-primary" counts here.
-func TestUpdateStatsFromHealth_SkipsFallbackUpstreamForPrimaryConnection(t *testing.T) {
+// TestUpdateStatsFromHealth_IngestsAllUpstreamTiersForPrimaryConnection: post-unification
+// a non-fallback local proxy credential sums every upstream credential's capacity into
+// its scalar ceiling and discovers every upstream model, last-resort tiers included. The
+// scalar ceiling is a coarse backstop; per-model per-tier gates keep primary traffic off
+// a last-resort tier's budget. Same result as the fallback-connection case below.
+func TestUpdateStatsFromHealth_IngestsAllUpstreamTiersForPrimaryConnection(t *testing.T) {
 	mockMM := NewMockModelManager()
 	rateLimiter := ratelimit.New()
 	logger := testhelpers.NewTestLogger()
@@ -1498,17 +1499,17 @@ func TestUpdateStatsFromHealth_SkipsFallbackUpstreamForPrimaryConnection(t *test
 		IsFallback: false,
 	}, rateLimiter, logger, mockMM)
 
-	assert.Equal(t, 100, rateLimiter.GetLimitRPM("proxy-primary"))
-	assert.Equal(t, 1000, rateLimiter.GetLimitTPM("proxy-primary"))
+	assert.Equal(t, 600, rateLimiter.GetLimitRPM("proxy-primary"))
+	assert.Equal(t, 6000, rateLimiter.GetLimitTPM("proxy-primary"))
 	assert.Equal(t, 20, rateLimiter.GetModelLimitRPM("proxy-primary", "primary-model"))
-	assert.Equal(t, -1, rateLimiter.GetModelLimitRPM("proxy-primary", "fallback-model"))
+	assert.Equal(t, 80, rateLimiter.GetModelLimitRPM("proxy-primary", "fallback-model"))
 
 	addedModels := mockMM.GetAddedModels()
 	addedModelIDs := make([]string, 0, len(addedModels))
 	for _, m := range addedModels {
 		addedModelIDs = append(addedModelIDs, m.model)
 	}
-	assert.Equal(t, []string{"primary-model"}, addedModelIDs)
+	assert.ElementsMatch(t, []string{"primary-model", "fallback-model"}, addedModelIDs)
 }
 
 // TestUpdateStatsFromHealth_IncludesFallbackUpstreamForFallbackConnection: a locally
