@@ -150,7 +150,10 @@ proxy credential, that credential **expands into one local candidate per tier**.
 becomes its own primary priority group (using the upstream's priority values), with the
 summed RPM/TPM capacity and summed weight of the upstream credentials in that group, and
 its own *cumulative* local rate-limit gate: tier 1's gate is tier 1's capacity, tier 2's
-gate is tier 1 + tier 2, and so on.
+gate is tier 1 + tier 2, and so on. A tier the upstream reports **banned** contributes no
+capacity to that cumulative gate, and its own per-tier usage counter (from `/health`) is
+also checked, so a cheap tier that has recovered upstream is not held closed by load the
+upstream is serving from a pricier tier.
 
 Consequences:
 
@@ -165,7 +168,10 @@ Consequences:
 - The tier breakdown is re-published on this router's own `/health`, so it survives
   additional chain hops (a router fronting this one re-expands it).
 - A single-group upstream (the common case) is unaffected — no expansion, one candidate,
-  the scalar `priority` above.
+  the scalar `priority` above. The one exception: if that single group is **banned**
+  upstream, the ban is published as a one-tier breakdown so this router (and the next one
+  in the chain) drops the credential — the scalar `priority` number alone carries no ban
+  state.
 
 > `fallback_priority` is **not** folded into primary-tier grouping — it only affects retry
 > order (next section). A credential that sets only `fallback_priority` stays in primary

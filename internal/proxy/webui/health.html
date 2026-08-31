@@ -303,7 +303,12 @@
     // banned — mirroring what the balancer's expandTierCandidates does.
     function expandRowTiers(row) {
       const tiers = Array.isArray(row.priority_tiers) ? row.priority_tiers : [];
-      if (tiers.length < 2) return [row];
+      if (tiers.length < 2) {
+        // A lone tier is only ever emitted when it is banned (the backend keeps
+        // non-banned single-tier models on the scalar path) — surface that ban.
+        if (tiers.length === 1 && tiers[0].banned) return [{ ...row, is_banned: true }];
+        return [row];
+      }
       return tiers.map(t => ({
         ...row,
         priority: t.priority || 0,

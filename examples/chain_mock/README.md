@@ -34,17 +34,17 @@ reacting to the `rpm`/`tpm` budgets in the `*/config.yaml` files.
 
 ## Model → tier map
 
-| model         | region-alpha                        | region-beta                   | region-gamma           |
-| ------------- | ----------------------------------- | ----------------------------- | ---------------------- |
-| `chat-smart`  | **p1 ×2, p2, p3**, p9 (uncapped)    | **p1**, p9 (uncapped)         | **p1** (+ is_fallback) |
-| `chat-fast`   | p1 ×2 (weighted 2:1), p9 (uncapped) | **p1**, **p2**                | —                      |
-| `chat-reason` | —                                   | **p1**, **p3**, p9 (uncapped) | p2                     |
-| `embed-v1`    | p1 (unlimited)                      | —                             | —                      |
+| model         | region-alpha                            | region-beta                   | region-gamma           |
+| ------------- | --------------------------------------- | ----------------------------- | ---------------------- |
+| `chat-smart`  | **p1 ×2, p2, p3**, p9 (uncapped)        | **p1**, p9 (uncapped)         | **p1** (+ is_fallback) |
+| `chat-fast`   | **p1 ×2 (weighted 2:1), p9 (uncapped)** | **p1**, **p2**                | —                      |
+| `chat-reason` | —                                       | **p1**, **p3**, p9 (uncapped) | p2                     |
+| `embed-v1`    | p1 (unlimited)                          | —                             | —                      |
 
 Bold = a credential set that spans **more than one** `priority` behind a single
 regional router — the case that produces a learned `priority_tiers` array and
-candidate expansion at the gateway. Single-tier models (`embed-v1`, `chat-fast`
-on region-alpha) stay on the plain scalar path, unchanged.
+candidate expansion at the gateway. Single-tier models (`embed-v1`) stay on the
+plain scalar path, unchanged.
 
 Every model under load has an **uncapped tier `p9`** in at least one region, so
 the cascade always has somewhere to land and a metered run stays 100% `200`

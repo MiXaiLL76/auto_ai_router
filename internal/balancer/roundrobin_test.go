@@ -2119,6 +2119,113 @@ func TestNextForModel_TierHeadroom_GatesOnUpstreamPerTierUsage(t *testing.T) {
 	}
 }
 
+// TestNextForModel_TierHeadroom_PricierTierUsageDoesNotCloseRecoveredCheapTier is
+// review_158 round 3 item 1: the cumulative-cap gate reads a single aggregate
+// (cred, model) counter with no tier attribution. Load the upstream serves from a pricier
+// fallback tier must not count against a cheaper tier's small cumulative cap and evict it
+// once it has recovered.
+func TestNextForModel_TierHeadroom_PricierTierUsageDoesNotCloseRecoveredCheapTier(t *testing.T) {
+	f2b := fail2ban.New(3, 0, []int{500})
+	rl := ratelimit.New()
+
+	credentials := []config.CredentialConfig{
+		{Name: "px", Type: config.ProviderTypeProxy, APIKey: "k1", BaseURL: "http://a.com", RPM: -1},
+		{Name: "alt", Type: config.ProviderTypeOpenAI, APIKey: "k2", BaseURL: "http://b.com", RPM: -1, Priority: 3},
+	}
+	rl.AddCredential("px", -1)
+	rl.AddCredential("alt", -1)
+	rl.AddModelWithTPM("px", "m", -1, -1)
+	rl.AddModelWithTPM("alt", "m", -1, -1)
+
+	// 50 requests this router already sent to px for m — the upstream served them all from
+	// its pricier tier 5; its cheap tier 1 window has since reset to 0/10.
+	for i := 0; i < 50; i++ {
+		require.True(t, rl.TryAllowAll("px", "m"))
+	}
+
+	bal := New(credentials, f2b, rl)
+	mc := NewMockModelChecker(true)
+	mc.AddModel("px", "m")
+	mc.AddModel("alt", "m")
+	mc.SetModelTiers("m", "px", []httputil.ModelPriorityTier{
+		{Priority: 1, Weight: 1, LimitRPM: 10, CurrentRPM: 0},
+		{Priority: 5, Weight: 1, LimitRPM: 100, CurrentRPM: 50},
+	})
+	bal.SetModelChecker(mc)
+
+	// px@tier-1 (group 1) is free upstream; its cumulative cap (10), net of the 50
+	// requests the upstream attributes to tier 5, still has headroom — px wins over the
+	// group-3 alternative instead of being wrongly cascaded past.
+	for i := 0; i < 5; i++ {
+		cred, err := bal.NextForModel("m")
+		require.NoError(t, err, "request %d", i)
+		assert.Equal(t, "px", cred.Name, "request %d must stay on px@tier-1, not cascade to alt", i)
+	}
+}
+
+// TestNextForModel_BannedTierCapacityDoesNotInflateLiveTierCap is review_158 round 3
+// item 2: a really-banned tier's recoverable capacity must not fold into a live tier's
+// cumulative cap, or the live tier over-admits past the capacity actually available now.
+func TestNextForModel_BannedTierCapacityDoesNotInflateLiveTierCap(t *testing.T) {
+	f2b := fail2ban.New(3, 0, []int{500})
+	rl := ratelimit.New()
+
+	credentials := []config.CredentialConfig{
+		{Name: "px", Type: config.ProviderTypeProxy, APIKey: "k1", BaseURL: "http://a.com", RPM: -1},
+	}
+	rl.AddCredential("px", -1)
+	rl.AddModelWithTPM("px", "m", -1, -1)
+
+	bal := New(credentials, f2b, rl)
+	mc := NewMockModelChecker(true)
+	mc.AddModel("px", "m")
+	mc.SetModelTiers("m", "px", []httputil.ModelPriorityTier{
+		{Priority: 1, Weight: 1, LimitRPM: 100, Banned: true},
+		{Priority: 2, Weight: 1, LimitRPM: 10, CurrentRPM: 0},
+	})
+	bal.SetModelChecker(mc)
+
+	// tier 2's cumulative cap is its own 10, not 110 (the banned tier 1 contributes none).
+	for i := 0; i < 10; i++ {
+		cred, err := bal.NextForModel("m")
+		require.NoError(t, err, "request %d", i)
+		assert.Equal(t, "px", cred.Name)
+	}
+	_, err := bal.NextForModel("m")
+	assert.ErrorIs(t, err, ErrRateLimitExceeded)
+}
+
+// TestNextForModel_SingleBannedTier_CredentialDropped is review_158 round 3 item 3: a
+// proxy whose sole learned upstream tier is banned must not stay a live candidate.
+func TestNextForModel_SingleBannedTier_CredentialDropped(t *testing.T) {
+	f2b := fail2ban.New(3, 0, []int{500})
+	rl := ratelimit.New()
+
+	credentials := []config.CredentialConfig{
+		{Name: "px", Type: config.ProviderTypeProxy, APIKey: "k1", BaseURL: "http://a.com", RPM: -1},
+		{Name: "alt", Type: config.ProviderTypeOpenAI, APIKey: "k2", BaseURL: "http://b.com", RPM: -1, Priority: 5},
+	}
+	rl.AddCredential("px", -1)
+	rl.AddCredential("alt", -1)
+	rl.AddModelWithTPM("px", "m", -1, -1)
+	rl.AddModelWithTPM("alt", "m", -1, -1)
+
+	bal := New(credentials, f2b, rl)
+	mc := NewMockModelChecker(true)
+	mc.AddModel("px", "m")
+	mc.AddModel("alt", "m")
+	mc.SetModelTiers("m", "px", []httputil.ModelPriorityTier{
+		{Priority: 1, Weight: 1, LimitRPM: -1, Banned: true},
+	})
+	bal.SetModelChecker(mc)
+
+	for i := 0; i < 5; i++ {
+		cred, err := bal.NextForModel("m")
+		require.NoError(t, err, "request %d", i)
+		assert.Equal(t, "alt", cred.Name, "request %d must skip the single-banned-tier proxy", i)
+	}
+}
+
 // TestNextForModel_NoPriorityFields_BehavesAsFlatPool is a backward-compatibility check:
 // a config without any priority/fallback_priority fields set must behave exactly like the
 // historical flat weighted round-robin pool (single implicit group 0).

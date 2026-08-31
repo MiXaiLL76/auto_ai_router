@@ -60,8 +60,18 @@ type tierCandidate struct {
 	// cumLimitRPM/TPM: this tier's own aggregate cap plus every lower-priority tier's,
 	// so "current model usage >= cumLimitRPM" means tiers <= this one are full and the
 	// candidate should be skipped in favour of the next group. <= 0 means uncapped.
+	// Capacity of tiers the upstream reports really banned is left out — a banned
+	// contributor's limit is not available right now and must not inflate a live tier's cap.
 	cumLimitRPM int
 	cumLimitTPM int
+	// pricierCurrentRPM/TPM: summed upstream-reported usage of every tier with a strictly
+	// higher priority number (a costlier fallback group). This router keeps a single
+	// aggregate (cred, model) counter with no tier attribution; before comparing it with a
+	// cheaper tier's cumulative cap we subtract the usage the upstream attributes to
+	// pricier tiers, so fallback-tier load cannot spuriously close a cheaper tier that has
+	// in fact recovered.
+	pricierCurrentRPM int
+	pricierCurrentTPM int
 	// ownLimitRPM/TPM and ownCurrentRPM/TPM are this tier's own aggregate cap and the
 	// upstream's last-polled usage against it. tierHasHeadroom gates on these (the
 	// upstream's own view of this specific tier) in addition to the cumulative-cap check
@@ -415,7 +425,7 @@ func (r *RoundRobin) expandTierCandidates(candidates []candidateEntry, modelID s
 	var breakdowns [][]httputil.ModelPriorityTier
 	for i, c := range candidates {
 		if c.cred.IsProxyLike() {
-			if tiers := r.modelChecker.GetModelPriorityTiersForCredential(modelID, c.cred.Name); len(tiers) >= 2 {
+			if tiers := r.modelChecker.GetModelPriorityTiersForCredential(modelID, c.cred.Name); tiersRoutable(tiers) {
 				if breakdowns == nil {
 					breakdowns = make([][]httputil.ModelPriorityTier, len(candidates))
 				}
@@ -430,12 +440,21 @@ func (r *RoundRobin) expandTierCandidates(candidates []candidateEntry, modelID s
 	out := make([]candidateEntry, 0, len(candidates)*2)
 	for i, c := range candidates {
 		tiers := breakdowns[i]
-		if len(tiers) < 2 {
+		if !tiersRoutable(tiers) {
 			out = append(out, c)
 			continue
 		}
+		// Grand total of the upstream's per-tier usage, so each tier can subtract the
+		// share the upstream attributes to strictly-pricier tiers from this router's
+		// tier-blind aggregate counter (see tierCandidate.pricierCurrentRPM).
+		totalCurRPM, totalCurTPM := 0, 0
+		for _, t := range tiers {
+			totalCurRPM += t.CurrentRPM
+			totalCurTPM += t.CurrentTPM
+		}
 		cumRPM, cumTPM := 0, 0
 		uncappedRPM, uncappedTPM := false, false
+		seenCurRPM, seenCurTPM := 0, 0
 		for _, t := range tiers { // already sorted ascending by priority
 			tc := &tierCandidate{
 				priority:      t.Priority,
@@ -446,28 +465,53 @@ func (r *RoundRobin) expandTierCandidates(candidates []candidateEntry, modelID s
 				ownLimitTPM:   t.LimitTPM,
 				ownCurrentTPM: t.CurrentTPM,
 			}
-			if t.LimitRPM <= 0 {
-				uncappedRPM = true
+			seenCurRPM += t.CurrentRPM
+			seenCurTPM += t.CurrentTPM
+			tc.pricierCurrentRPM = totalCurRPM - seenCurRPM
+			tc.pricierCurrentTPM = totalCurTPM - seenCurTPM
+			// A really-banned tier's capacity is not available right now — keep its limit
+			// out of this and every cheaper live tier's cumulative cap (a banned cheap
+			// tier must not let a live pricier tier over-admit). Its own candidate is
+			// dropped in liveCandidates regardless.
+			if !t.Banned {
+				if t.LimitRPM <= 0 {
+					uncappedRPM = true
+				} else if !uncappedRPM {
+					cumRPM += t.LimitRPM
+				}
+				if t.LimitTPM <= 0 {
+					uncappedTPM = true
+				} else if !uncappedTPM {
+					cumTPM += t.LimitTPM
+				}
 			}
 			if uncappedRPM {
 				tc.cumLimitRPM = -1
 			} else {
-				cumRPM += t.LimitRPM
 				tc.cumLimitRPM = cumRPM
-			}
-			if t.LimitTPM <= 0 {
-				uncappedTPM = true
 			}
 			if uncappedTPM {
 				tc.cumLimitTPM = -1
 			} else {
-				cumTPM += t.LimitTPM
 				tc.cumLimitTPM = cumTPM
 			}
 			out = append(out, candidateEntry{absIdx: c.absIdx, cred: c.cred, tier: tc})
 		}
 	}
 	return out
+}
+
+// tiersRoutable reports whether a learned per-tier breakdown should drive candidate
+// expansion. A 2+ tier breakdown always does. A single tier only does when it carries a
+// real upstream ban — otherwise the credential stays on the scalar priority path
+// unchanged, but a lone banned tier still has to reach the balancer so the credential is
+// dropped for a model its sole upstream tier has banned (scalar priority holds no ban
+// state, so the ban would otherwise be invisible to this router and the next one).
+func tiersRoutable(tiers []httputil.ModelPriorityTier) bool {
+	if len(tiers) >= 2 {
+		return true
+	}
+	return len(tiers) == 1 && tiers[0].Banned
 }
 
 func (r *RoundRobin) liveCandidates(modelID string, candidates []candidateEntry) ([]candidateEntry, bool) {
@@ -513,7 +557,10 @@ func (r *RoundRobin) liveCandidates(modelID string, candidates []candidateEntry)
 //  2. This router's own committed usage against the cumulative cap (this tier's cap plus
 //     every cheaper tier's): reads the same aggregate counter that
 //     selectWeightedLiveCandidate's TryAllowAll records into, so this router's own traffic
-//     moves the cascade forward with no /health-poll lag.
+//     moves the cascade forward with no /health-poll lag. The counter has no tier
+//     attribution, so usage the upstream reports against strictly-pricier tiers
+//     (tc.pricierCurrent*) is subtracted first — otherwise fallback-tier load would count
+//     against a cheaper tier's small cap and close it even after it recovered.
 func (r *RoundRobin) tierHasHeadroom(credentialName, modelID string, tc *tierCandidate) bool {
 	if tc.ownLimitRPM > 0 && tc.ownCurrentRPM >= tc.ownLimitRPM {
 		return false
@@ -521,11 +568,17 @@ func (r *RoundRobin) tierHasHeadroom(credentialName, modelID string, tc *tierCan
 	if tc.ownLimitTPM > 0 && tc.ownCurrentTPM >= tc.ownLimitTPM {
 		return false
 	}
-	if tc.cumLimitRPM > 0 && r.rateLimiter.GetCurrentModelRPM(credentialName, modelID) >= tc.cumLimitRPM {
-		return false
+	if tc.cumLimitRPM > 0 {
+		localRPM := r.rateLimiter.GetCurrentModelRPM(credentialName, modelID) - tc.pricierCurrentRPM
+		if localRPM >= tc.cumLimitRPM {
+			return false
+		}
 	}
-	if tc.cumLimitTPM > 0 && r.rateLimiter.GetCurrentModelTPM(credentialName, modelID) >= tc.cumLimitTPM {
-		return false
+	if tc.cumLimitTPM > 0 {
+		localTPM := r.rateLimiter.GetCurrentModelTPM(credentialName, modelID) - tc.pricierCurrentTPM
+		if localTPM >= tc.cumLimitTPM {
+			return false
+		}
 	}
 	return true
 }

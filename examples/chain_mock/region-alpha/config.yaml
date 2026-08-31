@@ -22,8 +22,10 @@ monitoring:
 # `region-alpha` AIR credential into one balancer candidate per tier (Design B).
 # Tier 9 (`alpha-bulk-1`) is intentionally uncapped, so the cascade always has
 # somewhere to land and a metered load run stays 100% 200s while you watch the
-# lower tiers fill and go on standby. `chat-fast` is a single tier, `embed-v1` a
-# single unlimited credential — the gateway keeps those on the plain scalar path.
+# lower tiers fill and go on standby. `chat-fast` is a smaller two-tier case here
+# (p1 ×2 weighted 2:1 + an uncapped p9 backstop), also expanded by the gateway.
+# `embed-v1` is a single unlimited credential — the gateway keeps that one on the
+# plain scalar path.
 #
 # Only model-level `tpm` is set (10 tokens/request from the mock) — that is the
 # number region-alpha's /health reports and the gateway meters its own traffic

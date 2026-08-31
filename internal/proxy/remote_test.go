@@ -382,6 +382,31 @@ func TestUpdateModelLimits_NoPriorityTiers_ForSingleGroupUpstream(t *testing.T) 
 	assert.Equal(t, 1, mockMM.GetModelPriorityForCredential("gpt-4", "px"))
 }
 
+// TestUpdateModelLimits_SingleGroupUpstream_BannedStillEmitsTier is review_158 round 3
+// item 3: a single-group upstream normally stays on the scalar path, but when that lone
+// group is banned the tier must be emitted anyway — the scalar priority number carries no
+// ban state, so without this the proxy credential stays a live candidate here and on the
+// next router until local fail2ban trips.
+func TestUpdateModelLimits_SingleGroupUpstream_BannedStillEmitsTier(t *testing.T) {
+	health := &httputil.ProxyHealthResponse{
+		Credentials: map[string]httputil.CredentialHealthStats{
+			"c1": {Priority: 1}, "c2": {Priority: 1},
+		},
+		Models: map[string]httputil.ModelHealthStats{
+			"a": {Model: "gpt-4", Credential: "c1", Priority: 1, LimitRPM: 100, IsBanned: true},
+			"b": {Model: "gpt-4", Credential: "c2", Priority: 1, LimitRPM: 100, IsBanned: true},
+		},
+	}
+	rateLimiter := ratelimit.New()
+	cred := &config.CredentialConfig{Name: "px"}
+	mockMM := NewMockModelManager()
+	updateModelLimits(health, cred, rateLimiter, testhelpers.NewTestLogger(), mockMM)
+
+	tiers := mockMM.GetModelPriorityTiersForCredential("gpt-4", "px")
+	require.Len(t, tiers, 1)
+	assert.True(t, tiers[0].Banned)
+}
+
 // TestUpdateModelLimits_PriorityTiers_RecursesUpstreamTiers: when an upstream model entry
 // itself carries a PriorityTiers array (proxy-of-proxy), those tiers fold into this
 // router's own per-priority buckets at their own priorities.

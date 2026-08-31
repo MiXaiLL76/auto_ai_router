@@ -197,10 +197,13 @@ func accumulateTier(byPriority map[int]*tierAccumulator, priority, weight, rpm, 
 }
 
 // buildModelPriorityTiers turns the per-priority accumulators for one model into a
-// sorted []ModelPriorityTier, or nil when the model has fewer than two distinct tiers
-// (the caller keeps it on the scalar priority path in that case).
+// sorted []ModelPriorityTier. It returns nil for the common single-tier case (the caller
+// keeps the model on the scalar priority path) — EXCEPT when that sole tier is banned:
+// scalar priority carries no ban state, so a single banned upstream tier would leave this
+// credential a live candidate here and on the next router in the chain until local
+// fail2ban trips. A lone banned tier is surfaced so the balancer drops it.
 func buildModelPriorityTiers(byPriority map[int]*tierAccumulator) []httputil.ModelPriorityTier {
-	if len(byPriority) < 2 {
+	if len(byPriority) == 0 {
 		return nil
 	}
 	tiers := make([]httputil.ModelPriorityTier, 0, len(byPriority))
@@ -215,6 +218,9 @@ func buildModelPriorityTiers(byPriority map[int]*tierAccumulator) []httputil.Mod
 			CurrentTPM: ta.agg.currentTPM,
 			Banned:     !ta.anyNotBanned,
 		})
+	}
+	if len(tiers) < 2 && !tiers[0].Banned {
+		return nil
 	}
 	slices.SortFunc(tiers, func(a, b httputil.ModelPriorityTier) int { return a.Priority - b.Priority })
 	return tiers
