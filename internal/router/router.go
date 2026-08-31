@@ -278,12 +278,22 @@ func (r *Router) handleModels(w http.ResponseWriter, req *http.Request) {
 	} else {
 		modelsResp = models.ModelsResponse{Object: "list", Data: []models.Model{}}
 	}
-	if tokenInfo != nil {
+	if r.proxy != nil {
 		filtered := make([]models.Model, 0, len(modelsResp.Data))
 		for _, model := range modelsResp.Data {
-			allowed := r.proxy.IsModelAllowedForToken(tokenInfo, model.ID)
-			if organizationPolicy != nil {
-				allowed = r.proxy.IsOrganizationModelAllowedForToken(tokenInfo, organizationPolicy, model.ID)
+			// Organization catalogs already project only allowlisted, priced
+			// models (projectOrganizationCatalog), so the extra gates below
+			// apply to the default surface only.
+			if organizationPolicy == nil && !r.proxy.IsModelListablePrice(model.ID) {
+				continue
+			}
+			allowed := true
+			if tokenInfo != nil {
+				if organizationPolicy != nil {
+					allowed = r.proxy.IsOrganizationModelAllowedForToken(tokenInfo, organizationPolicy, model.ID)
+				} else {
+					allowed = r.proxy.IsModelAllowedForTokenListing(tokenInfo, model.ID)
+				}
 			}
 			if allowed {
 				filtered = append(filtered, model)

@@ -537,6 +537,25 @@ func (p *Proxy) IsModelAllowedForToken(tokenInfo *models.TokenInfo, model string
 	})
 }
 
+// IsModelAllowedForTokenListing decides whether model should be visible to
+// tokenInfo in GET /v1/models. Unlike IsModelAllowedForToken — which governs
+// inference admission and is a deliberate no-op unless strictAllTeamModelsACL is
+// set — listing visibility always honours the token's explicit key/team/user
+// allowlists so a key never sees a model it was not granted. The default
+// (non-strict) access policy is used, so an unrestricted "all-team-models" key
+// without a team still sees the whole catalog, exactly as inference would admit
+// it.
+func (p *Proxy) IsModelAllowedForTokenListing(tokenInfo *models.TokenInfo, model string) bool {
+	if tokenInfo == nil {
+		return true
+	}
+	var matcher models.ModelScopeMatcher
+	if p.modelManager != nil {
+		matcher = p.modelManager.IsModelIDAllowedByScope
+	}
+	return tokenInfo.IsModelAllowedByPolicy(model, matcher, models.ModelAccessPolicy{})
+}
+
 func (p *Proxy) authenticateRequest(
 	w http.ResponseWriter,
 	r *http.Request,

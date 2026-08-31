@@ -841,6 +841,9 @@ func TestServeHTTPV1ModelsAuthAndModelACLPolicy(t *testing.T) {
 		modelIDs(t, unrestrictedGroups),
 	)
 
+	// GET /v1/models honours a key's explicit allowlist regardless of
+	// strict_all_team_models_acl: the listing must never advertise a model the
+	// caller was not granted, even where inference admission stays permissive.
 	compatibilityProxy := createTestProxy()
 	compatibilityProxy.LiteLLMDB = prx.LiteLLMDB
 	compatibilityRouter := New(
@@ -857,19 +860,76 @@ func TestServeHTTPV1ModelsAuthAndModelACLPolicy(t *testing.T) {
 		compatibilityRouter.ServeHTTP(w, req)
 		return w
 	}
-	allModels := []string{"openai/a-public", "openai/z-public"}
-	for _, key := range []string{
-		"restricted-key",
-		"no-default-user-key",
-		"dangling-team-key",
-		"wildcard-key",
-		"regex-looking-key",
-	} {
+	compatibilityExpected := map[string][]string{
+		"restricted-key":      {"openai/a-public"},
+		"no-default-user-key": {},
+		"dangling-team-key":   {},
+		"wildcard-key":        {"openai/a-public"},
+		"regex-looking-key":   {},
+	}
+	for key, expected := range compatibilityExpected {
 		response := compatibilityRequest(key)
 		require.Equal(t, http.StatusOK, response.Code)
-		assert.Equal(t, allModels, modelIDs(t, response))
+		assert.Equal(t, expected, modelIDs(t, response), "key %s", key)
 	}
 	assert.Equal(t, http.StatusForbidden, compatibilityRequest("blocked-team-key").Code)
+}
+
+func TestServeHTTPV1ModelsHidesUnpricedModels(t *testing.T) {
+	logger := testhelpers.NewTestLogger()
+	modelManager := models.New(logger, 100, []config.ModelRPMConfig{
+		{Name: "priced-backend", RPM: 100},
+		{Name: "unpriced-backend", RPM: 100},
+	})
+	modelManager.SetModelAliases(map[string]string{
+		"openai/priced":   "priced-backend",
+		"openai/unpriced": "unpriced-backend",
+	})
+	modelManager.SetClientModelIDs([]string{"openai/priced", "openai/unpriced"})
+	catalogCredentials := []config.CredentialConfig{{Name: "catalog", Type: config.ProviderTypeOpenAI}}
+	modelManager.SetCredentials(catalogCredentials)
+	modelManager.LoadModelsFromConfig(catalogCredentials)
+
+	registry := models.NewModelPriceRegistry()
+	registry.Update(map[string]*models.ModelPrice{
+		"openai/priced": {InputCostPerToken: 0.001},
+	})
+
+	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
+	rl := ratelimit.New()
+	tokenManager := auth.NewVertexTokenManager(logger)
+	defer tokenManager.Stop()
+	prx := proxy.New(&proxy.Config{
+		Balancer:       balancer.New(nil, f2b, rl),
+		Logger:         logger,
+		MaxBodySizeMB:  10,
+		RequestTimeout: 30 * time.Second,
+		Metrics:        monitoring.New(false),
+		MasterKey:      "test-master-key",
+		RateLimiter:    rl,
+		TokenManager:   tokenManager,
+		ModelManager:   modelManager,
+		PriceRegistry:  registry,
+	})
+	// routerAuthTestDB reports IsEnabled()==true and no SpendLoggingEnabled, so
+	// postgres spend tracking is on — the gate that makes unpriced models fatal.
+	prx.LiteLLMDB = &routerAuthTestDB{tokens: map[string]*dbmodels.TokenInfo{}}
+	router := New(prx, modelManager, testhelpers.NewTestMonitoringConfig("/health", false, ""), logger, nil)
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	req.Header.Set("Authorization", "Bearer test-master-key")
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code)
+
+	var response models.ModelsResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &response))
+	ids := make([]string, 0, len(response.Data))
+	for _, model := range response.Data {
+		ids = append(ids, model.ID)
+	}
+	assert.Equal(t, []string{"openai/priced"}, ids,
+		"a model without a resolvable price must not be advertised while spend tracking is on")
 }
 
 func TestServeHTTPV1ModelsOrganizationPolicyUsesMappedACLTarget(t *testing.T) {
