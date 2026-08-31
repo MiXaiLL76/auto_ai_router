@@ -57,7 +57,7 @@ When `model_allowlist` is omitted, the organization sees the global callable sur
 
 `credential_denylist` contains exact case-sensitive provider credential names. Matching provider credentials are excluded from initial selection, session affinity, retries, and fallback. Router credentials remain eligible. The restriction follows a request through chained AIR routers. Unknown names are ignored locally and remain available to downstream routers.
 
-The list accepts up to 128 names and 4096 encoded bytes. Each name may contain up to 256 bytes. Empty names, duplicate names, and control characters fail configuration loading. An omitted or empty list preserves standard routing.
+The list accepts up to 1024 names and 65536 encoded bytes. Each name may contain up to 256 bytes. Empty names, duplicate names, and control characters fail configuration loading. An omitted or empty list preserves standard routing.
 
 ### Refresh interval
 

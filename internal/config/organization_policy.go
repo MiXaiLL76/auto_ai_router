@@ -11,9 +11,9 @@ import (
 )
 
 const (
-	maxOrganizationCredentialDenylistEntries = 128
+	maxOrganizationCredentialDenylistEntries = 1024
 	maxOrganizationCredentialNameBytes       = 256
-	maxOrganizationCredentialDenylistBytes   = 4096
+	maxOrganizationCredentialDenylistBytes   = 64 * 1024
 )
 
 type OrganizationPolicyConfig struct {

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -116,9 +117,31 @@ func TestValidateOrganizationPolicies(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "empty credential name")
 
-	largeDenylist := make([]string, 20)
+	validDenylist := make([]string, maxOrganizationCredentialDenylistEntries)
+	for index := range validDenylist {
+		validDenylist[index] = fmt.Sprintf("credential-%04d", index)
+	}
+	err = ValidateOrganizationPolicies([]OrganizationPolicyConfig{{
+		OrganizationID:     "org-1",
+		PriceProfileID:     "profile-1",
+		ModelPricesLink:    "/tmp/prices.json",
+		CredentialDenylist: validDenylist,
+	}})
+	require.NoError(t, err)
+
+	err = ValidateOrganizationPolicies([]OrganizationPolicyConfig{{
+		OrganizationID:     "org-1",
+		PriceProfileID:     "profile-1",
+		ModelPricesLink:    "/tmp/prices.json",
+		CredentialDenylist: append(validDenylist, "credential-overflow"),
+	}})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "credential_denylist exceeds 1024 entries")
+
+	largeDenylist := make([]string, 300)
 	for index := range largeDenylist {
-		largeDenylist[index] = strings.Repeat(string(rune('a'+index)), maxOrganizationCredentialNameBytes)
+		prefix := fmt.Sprintf("%03d-", index)
+		largeDenylist[index] = prefix + strings.Repeat("x", maxOrganizationCredentialNameBytes-len(prefix))
 	}
 	err = ValidateOrganizationPolicies([]OrganizationPolicyConfig{{
 		OrganizationID:     "org-1",
@@ -127,5 +150,5 @@ func TestValidateOrganizationPolicies(t *testing.T) {
 		CredentialDenylist: largeDenylist,
 	}})
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "credential_denylist exceeds 4096 bytes")
+	assert.Contains(t, err.Error(), "credential_denylist exceeds 65536 bytes")
 }

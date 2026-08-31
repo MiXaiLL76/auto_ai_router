@@ -1,7 +1,10 @@
 package proxy
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -303,8 +306,11 @@ func TestOrganizationCredentialDenylistRejectsMalformedTrustedHeader(t *testing.
 	credential := directDenylistCredential("provider", provider.URL)
 	leaf := NewTestProxyBuilder().WithCredentials(credential).WithMasterKey("master-key").Build()
 	registerTestModel(leaf, credential.Name, "route-a")
+	var logs bytes.Buffer
+	leaf.logger = slog.New(slog.NewJSONHandler(&logs, nil))
 
-	for _, value := range []string{`{"not":"a-list"}`, strings.Repeat("x", maxCredentialDenylistBytes+1)} {
+	const privateHeaderValue = `{"private-review-marker":"not-a-list"}`
+	for _, value := range []string{privateHeaderValue, strings.Repeat("x", maxCredentialDenylistBytes+1)} {
 		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(
 			`{"model":"route-a","messages":[]}`,
 		))
@@ -331,11 +337,11 @@ func TestOrganizationCredentialDenylistRejectsMalformedTrustedHeader(t *testing.
 
 	assert.Zero(t, calls.Load())
 	assert.False(t, receivedHeader.Load())
+	assert.Contains(t, logs.String(), "Rejected invalid internal routing policy")
+	assert.NotContains(t, logs.String(), "private-review-marker")
 }
 
 func TestParseCredentialDenylistRejectsInvalidValues(t *testing.T) {
-	tooMany, err := json.Marshal(make([]string, maxCredentialDenylistEntries+1))
-	require.NoError(t, err)
 	oversizedName, err := json.Marshal([]string{strings.Repeat("x", maxCredentialNameBytes+1)})
 	require.NoError(t, err)
 
@@ -344,7 +350,6 @@ func TestParseCredentialDenylistRejectsInvalidValues(t *testing.T) {
 		`["provider"] trailing`,
 		`[" provider"]`,
 		`["provider\n"]`,
-		string(tooMany),
 		string(oversizedName),
 	} {
 		_, err := parseCredentialDenylist(value)
@@ -354,6 +359,36 @@ func TestParseCredentialDenylistRejectsInvalidValues(t *testing.T) {
 	parsed, err := parseCredentialDenylist(`["provider","provider"]`)
 	require.NoError(t, err)
 	assert.Equal(t, []string{"provider"}, parsed)
+}
+
+func TestCredentialDenylistCodecLimits(t *testing.T) {
+	names := make([]string, maxCredentialDenylistEntries)
+	for index := range names {
+		names[index] = fmt.Sprintf("credential-%04d", index)
+	}
+	header := make(http.Header)
+	require.NoError(t, setCredentialDenylistHeader(header, names))
+	parsed, err := parseCredentialDenylist(header.Get(HeaderAIRCredentialDenylist))
+	require.NoError(t, err)
+	assert.Equal(t, names, parsed)
+
+	overflow := append(names, "credential-overflow")
+	header = make(http.Header)
+	require.ErrorIs(t, setCredentialDenylistHeader(header, overflow), errInvalidCredentialDenylist)
+	assert.Empty(t, header.Get(HeaderAIRCredentialDenylist))
+	encoded, err := json.Marshal(overflow)
+	require.NoError(t, err)
+	_, err = parseCredentialDenylist(string(encoded))
+	require.ErrorIs(t, err, errInvalidCredentialDenylist)
+
+	large := make([]string, 300)
+	for index := range large {
+		prefix := fmt.Sprintf("%03d-", index)
+		large[index] = prefix + strings.Repeat("x", maxCredentialNameBytes-len(prefix))
+	}
+	header = make(http.Header)
+	require.Error(t, setCredentialDenylistHeader(header, large))
+	assert.Empty(t, header.Get(HeaderAIRCredentialDenylist))
 }
 
 func TestOrganizationCredentialDenylistOverridesSessionBinding(t *testing.T) {

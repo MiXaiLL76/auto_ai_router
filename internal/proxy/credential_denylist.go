@@ -19,9 +19,9 @@ import (
 const (
 	HeaderAIRCredentialDenylist = "Air-Credential-Denylist" //nolint:gosec // G101 header name
 
-	maxCredentialDenylistEntries = 128
+	maxCredentialDenylistEntries = 1024
 	maxCredentialNameBytes       = 256
-	maxCredentialDenylistBytes   = 4096
+	maxCredentialDenylistBytes   = 64 * 1024
 )
 
 var errInvalidCredentialDenylist = errors.New("invalid AIR credential denylist")
@@ -132,6 +132,14 @@ func mergeCredentialDenylists(lists ...[]string) []string {
 func setCredentialDenylistHeader(header http.Header, denylist []string) error {
 	if len(denylist) == 0 {
 		return nil
+	}
+	if len(denylist) > maxCredentialDenylistEntries {
+		return errInvalidCredentialDenylist
+	}
+	for _, name := range denylist {
+		if !validCredentialDenylistName(name) {
+			return errInvalidCredentialDenylist
+		}
 	}
 	value, err := json.Marshal(denylist)
 	if err != nil || len(value) > maxCredentialDenylistBytes || bytes.ContainsAny(value, "\r\n") {

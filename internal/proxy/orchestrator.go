@@ -90,6 +90,11 @@ func (p *Proxy) orchestrateRequest(
 		logCtx.Status = "failure"
 		logCtx.HTTPStatus = http.StatusBadRequest
 		logCtx.ErrorMsg = "Invalid internal routing policy"
+		p.logger.WarnContext(r.Context(), "Rejected invalid internal routing policy",
+			"error_code", http.StatusBadRequest,
+			"error", err,
+			"request_id", logCtx.RequestID,
+		)
 		WriteErrorBadRequest(w, "Invalid internal routing policy")
 		return nil, false
 	}
