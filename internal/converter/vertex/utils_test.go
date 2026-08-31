@@ -2,8 +2,12 @@ package vertex
 
 import (
 	"encoding/base64"
+	"errors"
+	"net/http"
+	"strings"
 	"testing"
 
+	"github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -78,7 +82,8 @@ func TestParseDataURLToPart(t *testing.T) {
 		encoded := base64.StdEncoding.EncodeToString(rawData)
 		dataURL := "data:image/jpeg;base64," + encoded
 
-		part := parseDataURLToPart(dataURL)
+		part, err := parseDataURLToPart(dataURL)
+		require.NoError(t, err)
 		require.NotNil(t, part)
 		require.NotNil(t, part.InlineData)
 		assert.Equal(t, "image/jpeg", part.InlineData.MIMEType)
@@ -86,32 +91,58 @@ func TestParseDataURLToPart(t *testing.T) {
 	})
 
 	t.Run("not_data_url", func(t *testing.T) {
-		result := parseDataURLToPart("https://upload.wikimedia.org/wikipedia/commons/thumb/e/ea/Van_Gogh_-_Starry_Night_-_Google_Art_Project.jpg/1280px-Van_Gogh_-_Starry_Night_-_Google_Art_Project.jpg")
+		result, err := parseDataURLToPart("https://upload.wikimedia.org/wikipedia/commons/thumb/e/ea/Van_Gogh_-_Starry_Night_-_Google_Art_Project.jpg/1280px-Van_Gogh_-_Starry_Night_-_Google_Art_Project.jpg")
+		require.NoError(t, err)
 		assert.Nil(t, result)
 	})
 
 	t.Run("invalid_base64", func(t *testing.T) {
-		result := parseDataURLToPart("data:image/jpeg;base64,!!!invalid!!!")
+		result, err := parseDataURLToPart("data:image/jpeg;base64,!!!invalid!!!")
+		require.NoError(t, err)
 		assert.Nil(t, result)
 	})
 
 	t.Run("no_comma", func(t *testing.T) {
-		result := parseDataURLToPart("data:image/jpeg;base64")
+		result, err := parseDataURLToPart("data:image/jpeg;base64")
+		require.NoError(t, err)
 		assert.Nil(t, result)
 	})
 
 	t.Run("multiple_commas", func(t *testing.T) {
 		// With Split (not SplitN), "data:image/jpeg;base64,abc,def" splits to 3 parts
-		result := parseDataURLToPart("data:image/jpeg;base64,abc,def")
+		result, err := parseDataURLToPart("data:image/jpeg;base64,abc,def")
+		require.NoError(t, err)
 		assert.Nil(t, result)
 	})
 
 	t.Run("empty_mime_type_returns_semicolon_prefix", func(t *testing.T) {
 		// "data:;base64" → extractMimeType returns ";base64" (end==0 falls through)
 		// so parseDataURLToPart still produces a part with that as MIMEType
-		result := parseDataURLToPart("data:;base64," + base64.StdEncoding.EncodeToString([]byte("test")))
+		result, err := parseDataURLToPart("data:;base64," + base64.StdEncoding.EncodeToString([]byte("test")))
+		require.NoError(t, err)
 		require.NotNil(t, result)
 		assert.Equal(t, ";base64", result.InlineData.MIMEType)
+	})
+
+	t.Run("oversized_payload_returns_413_error", func(t *testing.T) {
+		// One byte over the limit is enough; no need to allocate a real 100MB+ string twice over.
+		oversized := strings.Repeat("A", maxBase64Size+1)
+		result, err := parseDataURLToPart("data:image/jpeg;base64," + oversized)
+		require.Nil(t, result)
+		require.Error(t, err)
+		var validationErr *converterutil.RequestValidationError
+		require.ErrorAs(t, err, &validationErr)
+		assert.Equal(t, http.StatusRequestEntityTooLarge, validationErr.StatusCode)
+	})
+
+	t.Run("payload_at_limit_is_accepted", func(t *testing.T) {
+		atLimit := strings.Repeat("A", maxBase64Size)
+		_, err := parseDataURLToPart("data:image/jpeg;base64," + atLimit)
+		// "A" repeated isn't valid base64 padding at this length necessarily; we only
+		// care that the size gate itself doesn't reject it — a decode error (if any)
+		// surfaces as (nil, nil), never as the 413 error.
+		var validationErr *converterutil.RequestValidationError
+		assert.False(t, errors.As(err, &validationErr), "size check must not trigger exactly at the limit")
 	})
 }
 

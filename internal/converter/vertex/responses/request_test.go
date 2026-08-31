@@ -3,6 +3,8 @@ package vertexresponses
 import (
 	"encoding/json"
 	"errors"
+	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
@@ -276,6 +278,20 @@ func TestContentPartToVertexParts_InputImage_DataURL(t *testing.T) {
 	require.Len(t, parts, 1)
 	require.NotNil(t, parts[0].InlineData)
 	assert.Equal(t, "image/png", parts[0].InlineData.MIMEType)
+}
+
+func TestContentPartToVertexParts_InputImage_DataURLOversized(t *testing.T) {
+	oversized := strings.Repeat("A", maxInlineBase64Size+1)
+	part := map[string]interface{}{
+		"type":      "input_image",
+		"image_url": "data:image/png;base64," + oversized,
+	}
+	parts, err := contentPartToVertexParts(part)
+	require.Nil(t, parts)
+	require.Error(t, err)
+	var validationErr *converterutil.RequestValidationError
+	require.ErrorAs(t, err, &validationErr)
+	assert.Equal(t, http.StatusRequestEntityTooLarge, validationErr.StatusCode)
 }
 
 func TestContentPartToVertexParts_InputImage_URL(t *testing.T) {

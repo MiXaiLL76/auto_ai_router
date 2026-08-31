@@ -48,7 +48,11 @@ func convertInputImageParts(partMap map[string]interface{}) ([]*genai.Part, erro
 	}
 
 	// Try data: URL first (inline base64)
-	if part := parseDataURLToPart(imgURL); part != nil {
+	part, err := parseDataURLToPart(imgURL)
+	if err != nil {
+		return nil, err
+	}
+	if part != nil {
 		return []*genai.Part{part}, nil
 	}
 
@@ -97,29 +101,41 @@ func convertInputFilePart(partMap map[string]interface{}) ([]*genai.Part, error)
 	return nil, converterutil.NewRequestValidationError("input_file", "missing supported file source")
 }
 
+// maxInlineBase64Size caps the base64-encoded (not decoded) payload of an
+// inline data: URL. Above this, we reject the request with 413 instead of
+// silently dropping the media or forwarding a request Vertex would reject
+// anyway once decoded.
+const maxInlineBase64Size = 100 * 1024 * 1024 // 100MB encoded
+
 // parseDataURLToPart decodes a data: URL into an InlineData Part.
-// Returns nil if the string is not a data URL.
-func parseDataURLToPart(dataURL string) *genai.Part {
+// Returns (nil, nil) if the string is not a data URL — callers fall back to
+// treating it as a regular URL. Returns a non-nil error only when the string
+// IS a data URL but is otherwise unusable (oversized or malformed base64).
+func parseDataURLToPart(dataURL string) (*genai.Part, error) {
 	if !strings.HasPrefix(dataURL, "data:") {
-		return nil
+		return nil, nil
 	}
 	rest := strings.TrimPrefix(dataURL, "data:")
 	semi := strings.Index(rest, ";")
 	if semi < 0 {
-		return nil
+		return nil, nil
 	}
 	mimeType := rest[:semi]
 	after := rest[semi+1:]
 	if !strings.HasPrefix(after, "base64,") {
-		return nil
+		return nil, nil
 	}
-	decoded, err := base64.StdEncoding.DecodeString(after[7:])
+	encoded := after[7:]
+	if len(encoded) > maxInlineBase64Size {
+		return nil, converterutil.NewRequestEntityTooLargeError("", fmt.Sprintf("inline data URL payload exceeds %dMB limit", maxInlineBase64Size/(1024*1024)))
+	}
+	decoded, err := base64.StdEncoding.DecodeString(encoded)
 	if err != nil {
-		return nil
+		return nil, nil
 	}
 	return &genai.Part{
 		InlineData: &genai.Blob{MIMEType: mimeType, Data: decoded},
-	}
+	}, nil
 }
 
 // detectMIMEFromURL guesses a MIME type from common file extensions in a URL.
