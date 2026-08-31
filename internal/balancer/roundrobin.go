@@ -128,8 +128,7 @@ func New(credentials []config.CredentialConfig, f2b *fail2ban.Fail2Ban, rl *rate
 		logger:          slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelInfo})),
 	}
 
-	// Validate fallback configuration (cycle detection and unused fallback detection)
-	rr.validateFallbackConfiguration()
+	rr.logCredentialTiers()
 
 	return rr
 }
@@ -252,34 +251,8 @@ func (r *RoundRobin) NextForModel(modelID string) (*config.CredentialConfig, err
 	return r.NextForModelScoped(modelID, scope.AdminContext())
 }
 
-// NextFallbackForModel returns the next available fallback credential
-func (r *RoundRobin) NextFallbackForModel(modelID string) (*config.CredentialConfig, error) {
-	return r.NextFallbackForModelScoped(modelID, scope.AdminContext())
-}
-
-// NextFallbackProxyForModel returns the next available fallback proxy credential
-func (r *RoundRobin) NextFallbackProxyForModel(modelID string) (*config.CredentialConfig, error) {
-	return r.NextFallbackProxyForModelScoped(modelID, scope.AdminContext())
-}
-
 func (r *RoundRobin) NextForModelScoped(modelID string, visibility scope.Context) (*config.CredentialConfig, error) {
-	return r.nextScoped(modelID, false, false, visibility)
-}
-
-func (r *RoundRobin) NextFallbackForModelScoped(modelID string, visibility scope.Context) (*config.CredentialConfig, error) {
-	return r.nextScoped(modelID, true, false, visibility)
-}
-
-func (r *RoundRobin) NextFallbackForModelExcludingScoped(modelID string, exclude map[string]bool, visibility scope.Context) (*config.CredentialConfig, error) {
-	return r.nextExcludingScoped(modelID, true, false, "", exclude, visibility)
-}
-
-func (r *RoundRobin) NextFallbackProxyForModelScoped(modelID string, visibility scope.Context) (*config.CredentialConfig, error) {
-	return r.nextScoped(modelID, true, true, visibility)
-}
-
-func (r *RoundRobin) NextFallbackProxyForModelExcludingScoped(modelID string, exclude map[string]bool, visibility scope.Context) (*config.CredentialConfig, error) {
-	return r.nextExcludingScoped(modelID, true, true, "", exclude, visibility)
+	return r.nextExcludingScoped(modelID, "", nil, visibility)
 }
 
 // NextSpecific tries to return a specific credential by name without advancing the
@@ -318,24 +291,24 @@ func (r *RoundRobin) NextSpecificScoped(credentialName, modelID string, visibili
 	return cred, nil
 }
 
-func (r *RoundRobin) nextScoped(modelID string, allowOnlyFallback, allowOnlyProxy bool, visibility scope.Context) (*config.CredentialConfig, error) {
-	return r.nextExcludingScoped(modelID, allowOnlyFallback, allowOnlyProxy, "", nil, visibility)
-}
-
-// nextExcluding is the core credential selection logic with optional exclude set.
-// Excluded credentials are skipped entirely and don't count as candidates.
+// nextExcludingScoped is the single credential selection path (initial pick and every
+// retry). Excluded credentials are skipped entirely and don't count as candidates.
 //
-// The algorithm runs in three phases:
-//  1. Build a candidate list via structural filters (exclude, type/fallback, model availability).
-//     These are time-stable properties — they don't change between requests.
-//  2. Drop banned candidates, then pick by smooth weighted round-robin per selection cycle
-//     (grouped by the explicit priority: field for the primary pool — see selectPriorityGroupCandidate).
-//  3. Commit the highest-priority candidate that passes its rate limits.
-func (r *RoundRobin) nextExcludingScoped(modelID string, allowOnlyFallback, allowOnlyProxy bool, requiredType config.ProviderType, exclude map[string]bool, visibility scope.Context) (*config.CredentialConfig, error) {
+//  1. Build a candidate list via structural filters (exclude, requiredType, scope, model
+//     availability) — time-stable properties that don't change between requests.
+//  2. Expand proxy/AIR candidates whose upstream spans several priority groups into one
+//     candidate per learned tier (Design B).
+//  3. Cascade through priority groups ascending (credentials without an explicit
+//     priority: share group 0, tried first; a last-resort credential sits at group 999).
+//     SWRR runs within the lowest-numbered group that still has a live member; the
+//     cascade drops to the next group only when the current one is fully banned or
+//     rate-limited. Commit the first candidate that passes its rate limits.
+//
+// requiredType != "" restricts the pool to one provider type (proxy same-type retry).
+func (r *RoundRobin) nextExcludingScoped(modelID string, requiredType config.ProviderType, exclude map[string]bool, visibility scope.Context) (*config.CredentialConfig, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	// Phase 1: Build candidate list using only structural (time-stable) filters.
 	var candidates []candidateEntry
 
 	for i := range r.credentials {
@@ -345,25 +318,11 @@ func (r *RoundRobin) nextExcludingScoped(modelID string, allowOnlyFallback, allo
 			continue
 		}
 
-		if allowOnlyProxy && !cred.IsProxyLike() {
-			monitoring.CredentialSelectionRejected.WithLabelValues("type_not_allowed").Inc()
-			continue
-		}
-
 		if requiredType != "" && cred.Type != requiredType {
 			monitoring.CredentialSelectionRejected.WithLabelValues("type_mismatch").Inc()
 			continue
 		}
 
-		if allowOnlyFallback {
-			if !cred.IsFallback {
-				monitoring.CredentialSelectionRejected.WithLabelValues("fallback_not_available").Inc()
-				continue
-			}
-		} else if cred.IsFallback {
-			monitoring.CredentialSelectionRejected.WithLabelValues("fallback_only").Inc()
-			continue
-		}
 		if !cred.VisibleTo(visibility) {
 			monitoring.CredentialSelectionRejected.WithLabelValues("scope_not_allowed").Inc()
 			continue
@@ -385,23 +344,8 @@ func (r *RoundRobin) nextExcludingScoped(modelID string, allowOnlyFallback, allo
 		return nil, ErrNoCredentialsAvailable
 	}
 
-	// The AIR Chain Fallback pool (allowOnlyFallback) and the proxy-only pool
-	// (allowOnlyProxy) are a separate mechanism from priority groups (see
-	// docs/advanced/balancing.md "AIR Chain Fallback") — they stay a flat weighted pool.
-	if allowOnlyFallback || allowOnlyProxy {
-		key := r.schedKeyFor(modelID, allowOnlyFallback, allowOnlyProxy, requiredType, hasActiveExclusion(exclude), candidateCycleKey(candidates))
-		live, rateLimitHit := r.liveCandidates(modelID, candidates)
-		return r.selectWeightedLiveCandidate(modelID, live, key, rateLimitHit)
-	}
-
-	// Primary pool: cascade through primaryPriority() groups (ascending; credentials
-	// without an explicit priority: all share group 0, which is tried first — a config
-	// that never sets priority: stays one flat weighted pool). SWRR runs within the
-	// lowest-numbered group that still has a live member. Proxy/AIR credentials whose
-	// upstream spans several priority groups for this model are first expanded into one
-	// candidate per learned tier (Design B).
 	candidates = r.expandTierCandidates(candidates, modelID)
-	keyBase := r.schedKeyFor(modelID, allowOnlyFallback, allowOnlyProxy, requiredType, hasActiveExclusion(exclude), "")
+	keyBase := r.schedKeyFor(modelID, requiredType, hasActiveExclusion(exclude), "")
 	cred, found, rateLimitHit := r.selectPriorityGroupCandidate(modelID, candidates, keyBase, r.primaryPriority)
 	if found {
 		return cred, nil
@@ -669,7 +613,7 @@ func (r *RoundRobin) NextForModelExcluding(modelID string, exclude map[string]bo
 }
 
 func (r *RoundRobin) NextForModelExcludingScoped(modelID string, exclude map[string]bool, visibility scope.Context) (*config.CredentialConfig, error) {
-	return r.nextExcludingScoped(modelID, false, false, "", exclude, visibility)
+	return r.nextExcludingScoped(modelID, "", exclude, visibility)
 }
 
 // NextSameTypeForModelExcluding returns the next available non-fallback credential of the
@@ -680,87 +624,44 @@ func (r *RoundRobin) NextSameTypeForModelExcluding(modelID string, credType conf
 }
 
 func (r *RoundRobin) NextSameTypeForModelExcludingScoped(modelID string, credType config.ProviderType, exclude map[string]bool, visibility scope.Context) (*config.CredentialConfig, error) {
-	return r.nextExcludingScoped(modelID, false, false, credType, exclude, visibility)
+	return r.nextExcludingScoped(modelID, credType, exclude, visibility)
+}
+
+// NextProxyForModelExcludingScoped returns the next untried proxy/AIR credential in the
+// priority cascade for modelID. The extended retry phase forwards through the proxy path
+// and cannot accept a direct-provider credential, so it walks past any non-proxy-like
+// candidate (marking it tried) and keeps cascading.
+func (r *RoundRobin) NextProxyForModelExcludingScoped(modelID string, exclude map[string]bool, visibility scope.Context) (*config.CredentialConfig, error) {
+	local := make(map[string]bool, len(exclude))
+	for k, v := range exclude {
+		local[k] = v
+	}
+	for {
+		cred, err := r.nextExcludingScoped(modelID, "", local, visibility)
+		if err != nil {
+			return nil, err
+		}
+		if cred.IsProxyLike() {
+			return cred, nil
+		}
+		local[cred.Name] = true
+	}
 }
 
 func (r *RoundRobin) NextRetryForModelExcluding(modelID string, current *config.CredentialConfig, exclude map[string]bool) (*config.CredentialConfig, error) {
 	return r.NextRetryForModelExcludingScoped(modelID, current, exclude, scope.AdminContext())
 }
 
+// NextRetryForModelExcludingScoped picks the next credential after a retryable error.
+// Post-unification this is just the normal selection cascade over the untried
+// credentials: it continues through the ascending priority tiers (cross-provider-type),
+// so a retry naturally walks from the current tier down to the last-resort group. The
+// `current` credential is informational only.
 func (r *RoundRobin) NextRetryForModelExcludingScoped(modelID string, current *config.CredentialConfig, exclude map[string]bool, visibility scope.Context) (*config.CredentialConfig, error) {
 	if current == nil {
 		return nil, ErrNoCredentialsAvailable
 	}
-	if current.IsProxyLike() || current.IsFallback {
-		return r.NextSameTypeForModelExcludingScoped(modelID, current.Type, exclude, visibility)
-	}
-	if current.EffectivePriority() <= 0 {
-		if r.hasTriedPriorityCredential(exclude) {
-			return r.nextUnprioritizedRetry(modelID, exclude, visibility)
-		}
-		return r.NextSameTypeForModelExcludingScoped(modelID, current.Type, exclude, visibility)
-	}
-	return r.nextPriorityRetry(modelID, current.EffectivePriority(), exclude, visibility)
-}
-
-func (r *RoundRobin) nextPriorityRetry(modelID string, minPriority int, exclude map[string]bool, visibility scope.Context) (*config.CredentialConfig, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	priorityCandidates, unprioritizedCandidates := r.splitPriorityRetryCandidatesLocked(modelID, minPriority, exclude, visibility)
-	cred, found, priorityRateLimitHit := r.selectPriorityRetryCandidateLocked(modelID, priorityCandidates)
-	if found {
-		return cred, nil
-	}
-	return r.selectUnprioritizedRetryCandidateLocked(modelID, unprioritizedCandidates, priorityRateLimitHit)
-}
-
-func (r *RoundRobin) nextUnprioritizedRetry(modelID string, exclude map[string]bool, visibility scope.Context) (*config.CredentialConfig, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	_, candidates := r.splitPriorityRetryCandidatesLocked(modelID, 1, exclude, visibility)
-	return r.selectUnprioritizedRetryCandidateLocked(modelID, candidates, false)
-}
-
-func (r *RoundRobin) splitPriorityRetryCandidatesLocked(modelID string, minPriority int, exclude map[string]bool, visibility scope.Context) ([]candidateEntry, []candidateEntry) {
-	priorityCandidates := make([]candidateEntry, 0, len(r.credentials))
-	unprioritizedCandidates := make([]candidateEntry, 0, len(r.credentials))
-	for i := range r.credentials {
-		cred := &r.credentials[i]
-		if len(exclude) > 0 && exclude[cred.Name] {
-			continue
-		}
-		if cred.IsProxyLike() {
-			monitoring.CredentialSelectionRejected.WithLabelValues("type_not_allowed").Inc()
-			continue
-		}
-		if cred.IsFallback {
-			monitoring.CredentialSelectionRejected.WithLabelValues("fallback_only").Inc()
-			continue
-		}
-		if !cred.VisibleTo(visibility) {
-			monitoring.CredentialSelectionRejected.WithLabelValues("scope_not_allowed").Inc()
-			continue
-		}
-		if modelID != "" && r.modelChecker != nil && r.modelChecker.IsEnabled() {
-			if !r.hasModel(cred.Name, modelID, visibility) {
-				monitoring.CredentialSelectionRejected.WithLabelValues("model_not_available").Inc()
-				continue
-			}
-		}
-		effPriority := cred.EffectivePriority()
-		if effPriority <= 0 {
-			unprioritizedCandidates = append(unprioritizedCandidates, candidateEntry{absIdx: i, cred: cred})
-			continue
-		}
-		if effPriority < minPriority {
-			monitoring.CredentialSelectionRejected.WithLabelValues("fallback_not_available").Inc()
-			continue
-		}
-		priorityCandidates = append(priorityCandidates, candidateEntry{absIdx: i, cred: cred})
-	}
-	return priorityCandidates, unprioritizedCandidates
+	return r.nextExcludingScoped(modelID, "", exclude, visibility)
 }
 
 func (r *RoundRobin) hasModel(credentialName, modelID string, visibility scope.Context) bool {
@@ -779,11 +680,11 @@ func (r *RoundRobin) hasModel(credentialName, modelID string, visibility scope.C
 // down — so partial degradation (some group members down) keeps serving that same group
 // instead of moving to the next one.
 //
-// priorityOf selects the grouping key: primaryPriority for the primary pool (explicit
-// priority: field only), effectivePriority for the retry cascade (also fallback_priority).
+// priorityOf is always primaryPriority: the learned per-model proxy tier if any, else the
+// static priority: field. Initial pick and retry share it.
 //
 // keyBase supplies the non-priority, non-scope fields of the SWRR schedKey (model,
-// fallback/proxy-only flags, required type, excluding); this function fills in
+// required type, excluding); this function fills in
 // keyBase.priority and keyBase.scopeKey per selected group so each priority tier gets its
 // own independent SWRR cycle, keyed by that tier's full (structural) membership so the
 // cycle survives transient bans/unbans within the tier.
@@ -848,52 +749,6 @@ func (r *RoundRobin) selectPriorityGroupCandidate(modelID string, candidates []c
 		rateLimitHit = true
 	}
 	return nil, false, rateLimitHit
-}
-
-func (r *RoundRobin) selectPriorityRetryCandidateLocked(modelID string, candidates []candidateEntry) (*config.CredentialConfig, bool, bool) {
-	keyBase := r.schedKeyFor(modelID, false, false, "", true, "")
-	return r.selectPriorityGroupCandidate(modelID, candidates, keyBase, r.effectivePriority)
-}
-
-func (r *RoundRobin) selectUnprioritizedRetryCandidateLocked(modelID string, candidates []candidateEntry, priorRateLimitHit bool) (*config.CredentialConfig, error) {
-	if len(candidates) == 0 {
-		if priorRateLimitHit {
-			return nil, ErrRateLimitExceeded
-		}
-		return nil, ErrNoCredentialsAvailable
-	}
-
-	live, rateLimitHit := r.liveCandidates(modelID, candidates)
-	rateLimitHit = rateLimitHit || priorRateLimitHit
-	if len(live) == 0 {
-		if rateLimitHit {
-			return nil, ErrRateLimitExceeded
-		}
-		return nil, ErrNoCredentialsAvailable
-	}
-
-	key := r.schedKeyFor(modelID, false, false, "", true, candidateCycleKey(candidates))
-	key.priority = -1
-	return r.selectWeightedLiveCandidate(modelID, live, key, rateLimitHit)
-}
-
-func (r *RoundRobin) hasTriedPriorityCredential(exclude map[string]bool) bool {
-	if len(exclude) == 0 {
-		return false
-	}
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-
-	for name, tried := range exclude {
-		if !tried {
-			continue
-		}
-		cred := r.getCredentialByName(name)
-		if cred != nil && cred.EffectivePriority() > 0 && !cred.IsFallback && !cred.IsProxyLike() {
-			return true
-		}
-	}
-	return false
 }
 
 func (r *RoundRobin) RecordResponse(credentialName, modelID string, statusCode int) {
@@ -961,10 +816,6 @@ func (r *RoundRobin) UpdateDBCredentials(dbCreds []config.CredentialConfig) {
 		}
 	}
 
-	// DB credentials never pass through config.Validate, so apply the same
-	// is_fallback → FallbackPriorityGroup pinning here.
-	config.NormalizeFallbackPriorities(filtered)
-
 	// Merge static + new DB creds.
 	newCreds := append(append([]config.CredentialConfig(nil), r.staticCreds...), filtered...)
 	if len(newCreds) == 0 {
@@ -1012,22 +863,21 @@ func preserveProviderScopeMetadata(next *config.CredentialConfig, previous confi
 	}
 }
 
-// validateFallbackConfiguration validates fallback credential configuration
-// Logs count of fallback credentials
-func (r *RoundRobin) validateFallbackConfiguration() {
-	fallbackCount := 0
+// logCredentialTiers logs how the credential pool is split across priority tiers.
+func (r *RoundRobin) logCredentialTiers() {
+	lastResort := 0
+	tiered := 0
 	for _, cred := range r.credentials {
-		if cred.IsFallback {
-			fallbackCount++
+		switch {
+		case cred.IsLastResort():
+			lastResort++
+		case cred.Priority > 0:
+			tiered++
 		}
 	}
-
-	if fallbackCount == 0 {
-		r.logger.Info("No fallback credentials configured")
-	} else {
-		r.logger.Info("Fallback credential validation completed",
-			"total_credentials", len(r.credentials),
-			"fallback_credentials", fallbackCount,
-		)
-	}
+	r.logger.Info("Credential priority tiers",
+		"total_credentials", len(r.credentials),
+		"explicit_tier_credentials", tiered,
+		"last_resort_credentials", lastResort,
+	)
 }

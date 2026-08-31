@@ -3,7 +3,6 @@ package httputil
 import (
 	"time"
 
-	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/scope"
 )
 
@@ -19,16 +18,17 @@ type ProxyHealthResponse struct {
 
 // CredentialHealthStats represents health stats for a single credential
 type CredentialHealthStats struct {
-	Type       string `json:"type"`
+	Type string `json:"type"`
+	// LastResort mirrors the backend's cred.IsLastResort() (priority >= 999). It is a
+	// convenience for dashboards; routing uses Priority. Replaces the retired is_fallback.
+	LastResort bool   `json:"last_resort,omitempty"`
 	BaseURL    string `json:"base_url,omitempty"`
-	IsFallback bool   `json:"is_fallback"`
 	// IsProxyLike is the backend's own cred.IsProxyLike() verdict (proxy or air today),
 	// exposed so dashboard code does not have to hardcode the list of proxy-like types
 	// and drift when a new one is added.
 	IsProxyLike       bool              `json:"is_proxy_like"`
 	IsBanned          bool              `json:"is_banned"`
 	Weight            int               `json:"weight"`
-	FallbackPriority  int               `json:"fallback_priority,omitempty"`
 	Priority          int               `json:"priority,omitempty"`
 	Scopes            []string          `json:"scopes,omitempty"`
 	DeniedScopes      []string          `json:"denied_scopes,omitempty"`
@@ -99,28 +99,18 @@ func EffectiveHealthWeight(modelStats ModelHealthStats, credStats CredentialHeal
 	return 1
 }
 
-// EffectiveHealthPriority resolves the priority-group fallback chain for a model on this
-// credential's connection, mirroring EffectiveHealthWeight: model-level priority, then
-// the credential-level priority, then 0 (the default group). Only the explicit priority
-// field is consulted — never fallback_priority — so a value learned here can safely drive
-// a downstream proxy credential's primary-pool grouping (see balancer.primaryPriority);
-// folding fallback_priority in would turn a retry-only knob into hard primary tiers.
-//
-// Compatibility shim: an older upstream router emits is_fallback: true together with
-// priority: 0 (it never normalized the fallback flag into a priority number). Treat that
-// as the last-resort group so a chained downstream tiers those models correctly instead
-// of merging them into its primary pool.
+// EffectiveHealthPriority resolves the priority group for a model on this credential's
+// connection, mirroring EffectiveHealthWeight: model-level priority, then the
+// credential-level priority, then 0 (the default group). The value learned here drives a
+// downstream proxy credential's priority grouping (see balancer.primaryPriority).
 func EffectiveHealthPriority(modelStats ModelHealthStats, credStats CredentialHealthStats) int {
-	priority := 0
 	if modelStats.Priority > 0 {
-		priority = modelStats.Priority
-	} else if credStats.Priority > 0 {
-		priority = credStats.Priority
+		return modelStats.Priority
 	}
-	if credStats.IsFallback && priority < config.FallbackPriorityGroup {
-		priority = config.FallbackPriorityGroup
+	if credStats.Priority > 0 {
+		return credStats.Priority
 	}
-	return priority
+	return 0
 }
 
 // ModelHealthEntryLive reports whether the upstream leaf credential behind this

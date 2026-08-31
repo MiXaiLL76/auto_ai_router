@@ -12,7 +12,7 @@ credentials:
     api_key: "sk-upstream-key" # Optional
     rpm: 200
     tpm: 100000
-    is_fallback: true
+    priority: 999   # last-resort tier (is_fallback: true is a deprecated alias)
 ```
 
 ## Required Fields
@@ -26,7 +26,7 @@ credentials:
 | Field         | Description                                                                       |
 | ------------- | --------------------------------------------------------------------------------- |
 | `api_key`     | Remote master key (if the target requires authentication)                         |
-| `is_fallback` | When `true`, this credential is only used after primary credentials are exhausted |
+| `priority`    | Selection-order group (lower first). `999` = last-resort. `is_fallback: true` is a deprecated alias for `priority: 999` |
 
 ## Usage Contract
 
@@ -50,16 +50,19 @@ Downstream AIR reads this header automatically.
 
 For AIR-to-AIR chained routing, switch credentials to `type: air`. Roll out the upstream AIR first. During the transition, current AIR releases read and write both the current `Air-Proxy-Client` marker and the legacy `X-Aar-Proxy-Client` marker.
 
-## Fallback Behavior
+## Last-Resort Behavior
 
-When `is_fallback: true`, the proxy credential activates only after all primary credentials for the requested model are unavailable (rate-limited or banned).
+A proxy credential at `priority: 999` (the last-resort group; `is_fallback: true` is a
+deprecated alias) is only selected after every lower-numbered priority tier for the
+requested model is unavailable (rate-limited or banned). It is part of the same weighted
+priority cascade as every other tier — there is no separate fallback pool.
 
 ### Processing Chain
 
 1. Request arrives for a model (e.g., `gpt-4o`)
-2. Router tries primary credentials in round-robin order
-3. If all primary credentials are exhausted → router tries fallback proxies
-4. If fallback proxy is also unavailable → client receives `503 Service Unavailable`
+2. Router cascades through priority tiers ascending, weighted round-robin within a tier
+3. It drops to the next tier only when the current one is fully banned or rate-limited
+4. If even the last-resort tier is exhausted → client receives `503 Service Unavailable`
 
 ### Example: Router Chain
 
@@ -78,7 +81,7 @@ credentials:
     type: "air"
     base_url: "http://10.0.1.50:8080"
     api_key: "sk-remote-key"
-    is_fallback: true
+    priority: 999   # last-resort tier (is_fallback: true is a deprecated alias)
 ```
 
 When `openai_main` exhausts its rate limits, requests automatically route to `backup_router`.
@@ -98,10 +101,9 @@ credentials:
   - name: "backup_1"
     type: "air"
     base_url: "http://router-1:8080"
-    is_fallback: true
-
+    priority: 999   # last-resort tier (is_fallback: true is a deprecated alias)
   - name: "backup_2"
     type: "air"
     base_url: "http://router-2:8080"
-    is_fallback: true
+    priority: 999   # last-resort tier (is_fallback: true is a deprecated alias)
 ```

@@ -26,4 +26,4 @@ All credential types share these fields:
 | `rpm`         | int    | Requests per minute limit (-1 = unlimited)       |
 | `tpm`         | int    | Tokens per minute limit (-1 = unlimited)         |
 | `auth_type`   | string | Optional auth override (`bearer` or `x-api-key`) |
-| `is_fallback` | bool   | Use only when primary credentials are exhausted  |
+| `priority`    | int    | Selection-order group; `999` = last-resort (`is_fallback` is a deprecated alias) |

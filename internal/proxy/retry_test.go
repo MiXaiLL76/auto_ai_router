@@ -559,13 +559,12 @@ func TestTryFallbackProxy_SameCredentialAsOriginal(t *testing.T) {
 	prx := NewTestProxyBuilder().
 		WithCredentials(
 			config.CredentialConfig{
-				Name:       "primary",
-				Type:       config.ProviderTypeProxy,
-				APIKey:     "pkey",
-				BaseURL:    "http://primary.local",
-				RPM:        100,
-				TPM:        10000,
-				IsFallback: true, // Edge case: marked as fallback
+				Name:    "primary",
+				Type:    config.ProviderTypeProxy,
+				APIKey:  "pkey",
+				BaseURL: "http://primary.local",
+				RPM:     100,
+				TPM:     10000, Priority: config.FallbackPriorityGroup, // Edge case: marked as fallback
 			},
 		).
 		Build()
@@ -595,5 +594,5 @@ func TestTryFallbackProxy_SameCredentialAsOriginal(t *testing.T) {
 
 	// Assertions
 	assert.False(t, success, "TryFallbackProxy should return success=false when fallback is same credential")
-	assert.Equal(t, "fallback_is_same_credential", reason, "Should return fallback_is_same_credential reason")
+	assert.Equal(t, "no_fallback_available", reason, "no other credential to retry on")
 }

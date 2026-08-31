@@ -73,23 +73,21 @@ func TestHealthCheck_CredentialsInfo(t *testing.T) {
 
 	credentials := []config.CredentialConfig{
 		{
-			Name:       "openai_cred",
-			Type:       config.ProviderTypeOpenAI,
-			APIKey:     "sk-test",
-			BaseURL:    "http://openai.com",
-			RPM:        100,
-			TPM:        2000,
-			Weight:     7,
-			IsFallback: false,
+			Name:    "openai_cred",
+			Type:    config.ProviderTypeOpenAI,
+			APIKey:  "sk-test",
+			BaseURL: "http://openai.com",
+			RPM:     100,
+			TPM:     2000,
+			Weight:  7,
 		},
 		{
-			Name:       "fallback_cred",
-			Type:       config.ProviderTypeOpenAI,
-			APIKey:     "sk-fallback",
-			BaseURL:    "http://fallback.com",
-			RPM:        50,
-			TPM:        1000,
-			IsFallback: true,
+			Name:    "fallback_cred",
+			Type:    config.ProviderTypeOpenAI,
+			APIKey:  "sk-fallback",
+			BaseURL: "http://fallback.com",
+			RPM:     50,
+			TPM:     1000, Priority: config.FallbackPriorityGroup,
 		},
 	}
 
@@ -112,7 +110,7 @@ func TestHealthCheck_CredentialsInfo(t *testing.T) {
 	openaiStats := status.Credentials["openai_cred"]
 	assert.Equal(t, "openai", openaiStats.Type)
 	assert.Equal(t, "http://openai.com", openaiStats.BaseURL)
-	assert.Equal(t, false, openaiStats.IsFallback)
+	assert.Equal(t, false, openaiStats.LastResort)
 	assert.Equal(t, false, openaiStats.IsProxyLike, "a plain openai credential is not proxy-like")
 	assert.Equal(t, 7, openaiStats.Weight)
 	assert.Equal(t, 100, openaiStats.LimitRPM)
@@ -120,7 +118,7 @@ func TestHealthCheck_CredentialsInfo(t *testing.T) {
 
 	fallbackStats := status.Credentials["fallback_cred"]
 	assert.Equal(t, "http://fallback.com", fallbackStats.BaseURL)
-	assert.Equal(t, true, fallbackStats.IsFallback)
+	assert.Equal(t, true, fallbackStats.LastResort)
 }
 
 func TestHealthCheckScoped_FiltersCredentials(t *testing.T) {
@@ -269,9 +267,8 @@ func TestHealthCheck_CredentialAndModelPriority(t *testing.T) {
 			APIKey:  "sk-test",
 			BaseURL: "http://openai.com",
 			RPM:     100,
-			// No Priority/FallbackPriority set: EffectivePriority() must resolve to 0
-			// (the default group), and /health must report that 0 explicitly rather
-			// than omitting it as "unset".
+			// No priority set: the default group (0), reported explicitly rather
+			// than omitted as "unset".
 		},
 		{
 			Name:     "explicit_priority_cred",
@@ -282,12 +279,12 @@ func TestHealthCheck_CredentialAndModelPriority(t *testing.T) {
 			Priority: 200,
 		},
 		{
-			Name:             "legacy_fallback_priority_cred",
-			Type:             config.ProviderTypeOpenAI,
-			APIKey:           "sk-test-3",
-			BaseURL:          "http://openai3.com",
-			RPM:              100,
-			FallbackPriority: 300,
+			Name:     "last_resort_cred",
+			Type:     config.ProviderTypeOpenAI,
+			APIKey:   "sk-test-3",
+			BaseURL:  "http://openai3.com",
+			RPM:      100,
+			Priority: config.FallbackPriorityGroup,
 		},
 	}
 
@@ -305,21 +302,19 @@ func TestHealthCheck_CredentialAndModelPriority(t *testing.T) {
 
 	_, status := prx.HealthCheck()
 
-	// CredentialHealthStats.Priority carries only the explicit priority: field — the
-	// primary-pool grouping key. fallback_priority is reported separately and must not
-	// show up as a Priority tier (a downstream proxy folds Priority into its own grouping).
+	// CredentialHealthStats.Priority is the single selection-order axis; a downstream
+	// proxy folds it into its own grouping. A last-resort credential carries 999.
 	assert.Equal(t, 0, status.Credentials["default_group_cred"].Priority)
 	assert.Equal(t, 200, status.Credentials["explicit_priority_cred"].Priority)
-	assert.Equal(t, 0, status.Credentials["legacy_fallback_priority_cred"].Priority)
-	assert.Equal(t, 300, status.Credentials["legacy_fallback_priority_cred"].FallbackPriority)
+	assert.Equal(t, config.FallbackPriorityGroup, status.Credentials["last_resort_cred"].Priority)
+	assert.True(t, status.Credentials["last_resort_cred"].LastResort)
 
 	// None of these credentials are proxy-like, so modelManager has no dynamic per-model
 	// priority learned for them: ModelHealthStats.Priority falls back to the owning
-	// credential's static priority: field (0 for the fallback_priority-only credential,
-	// matching how the balancer's primary pool actually routes it).
+	// credential's static priority: field.
 	assert.Equal(t, 0, status.Models["default_group_cred:gpt-4"].Priority)
 	assert.Equal(t, 200, status.Models["explicit_priority_cred:gpt-4"].Priority)
-	assert.Equal(t, 0, status.Models["legacy_fallback_priority_cred:gpt-4"].Priority)
+	assert.Equal(t, config.FallbackPriorityGroup, status.Models["last_resort_cred:gpt-4"].Priority)
 }
 
 func TestHealthCheck_ModelHealthStats_PriorityPrefersDynamicOverStatic(t *testing.T) {
@@ -783,12 +778,11 @@ func TestHealthCheck_ProxyCredentialLimitsFromRateLimiter(t *testing.T) {
 
 	// Create proxy credential with default/invalid config values
 	proxyCred := config.CredentialConfig{
-		Name:       "gateway_proxy",
-		Type:       config.ProviderTypeProxy,
-		BaseURL:    "http://remote-proxy.com",
-		RPM:        -1,
-		TPM:        -1,
-		IsFallback: false,
+		Name:    "gateway_proxy",
+		Type:    config.ProviderTypeProxy,
+		BaseURL: "http://remote-proxy.com",
+		RPM:     -1,
+		TPM:     -1,
 	}
 
 	// Register proxy credential without limits initially

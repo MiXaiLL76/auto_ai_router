@@ -73,22 +73,20 @@ func TestFallbackPath_PrimaryReturns429(t *testing.T) {
 	prx := NewTestProxyBuilder().
 		WithCredentials(
 			config.CredentialConfig{
-				Name:       "primary",
-				Type:       config.ProviderTypeProxy,
-				APIKey:     "primary-key",
-				BaseURL:    primaryServer.URL,
-				RPM:        100,
-				TPM:        10000,
-				IsFallback: false,
+				Name:    "primary",
+				Type:    config.ProviderTypeProxy,
+				APIKey:  "primary-key",
+				BaseURL: primaryServer.URL,
+				RPM:     100,
+				TPM:     10000,
 			},
 			config.CredentialConfig{
-				Name:       "fallback",
-				Type:       config.ProviderTypeProxy,
-				APIKey:     "fallback-key",
-				BaseURL:    fallbackServer.URL,
-				RPM:        100,
-				TPM:        10000,
-				IsFallback: true,
+				Name:    "fallback",
+				Type:    config.ProviderTypeProxy,
+				APIKey:  "fallback-key",
+				BaseURL: fallbackServer.URL,
+				RPM:     100,
+				TPM:     10000, Priority: config.FallbackPriorityGroup,
 			},
 		).
 		Build()
@@ -141,22 +139,20 @@ func TestFallbackPath_PrimaryReturns500(t *testing.T) {
 	prx := NewTestProxyBuilder().
 		WithCredentials(
 			config.CredentialConfig{
-				Name:       "primary",
-				Type:       config.ProviderTypeProxy,
-				APIKey:     "primary-key",
-				BaseURL:    primaryServer.URL,
-				RPM:        100,
-				TPM:        10000,
-				IsFallback: false,
+				Name:    "primary",
+				Type:    config.ProviderTypeProxy,
+				APIKey:  "primary-key",
+				BaseURL: primaryServer.URL,
+				RPM:     100,
+				TPM:     10000,
 			},
 			config.CredentialConfig{
-				Name:       "fallback",
-				Type:       config.ProviderTypeProxy,
-				APIKey:     "fallback-key",
-				BaseURL:    fallbackServer.URL,
-				RPM:        100,
-				TPM:        10000,
-				IsFallback: true,
+				Name:    "fallback",
+				Type:    config.ProviderTypeProxy,
+				APIKey:  "fallback-key",
+				BaseURL: fallbackServer.URL,
+				RPM:     100,
+				TPM:     10000, Priority: config.FallbackPriorityGroup,
 			},
 		).
 		Build()
@@ -191,13 +187,12 @@ func TestFallbackPath_NoFallbackAvailable(t *testing.T) {
 	prx := NewTestProxyBuilder().
 		WithCredentials(
 			config.CredentialConfig{
-				Name:       "primary",
-				Type:       config.ProviderTypeProxy,
-				APIKey:     "primary-key",
-				BaseURL:    primaryServer.URL,
-				RPM:        100,
-				TPM:        10000,
-				IsFallback: false,
+				Name:    "primary",
+				Type:    config.ProviderTypeProxy,
+				APIKey:  "primary-key",
+				BaseURL: primaryServer.URL,
+				RPM:     100,
+				TPM:     10000,
 			},
 		).
 		Build()
@@ -238,22 +233,20 @@ func TestFallbackPath_FallbackAlsoFails(t *testing.T) {
 	prx := NewTestProxyBuilder().
 		WithCredentials(
 			config.CredentialConfig{
-				Name:       "primary",
-				Type:       config.ProviderTypeProxy,
-				APIKey:     "primary-key",
-				BaseURL:    primaryServer.URL,
-				RPM:        100,
-				TPM:        10000,
-				IsFallback: false,
+				Name:    "primary",
+				Type:    config.ProviderTypeProxy,
+				APIKey:  "primary-key",
+				BaseURL: primaryServer.URL,
+				RPM:     100,
+				TPM:     10000,
 			},
 			config.CredentialConfig{
-				Name:       "fallback",
-				Type:       config.ProviderTypeProxy,
-				APIKey:     "fallback-key",
-				BaseURL:    fallbackServer.URL,
-				RPM:        100,
-				TPM:        10000,
-				IsFallback: true,
+				Name:    "fallback",
+				Type:    config.ProviderTypeProxy,
+				APIKey:  "fallback-key",
+				BaseURL: fallbackServer.URL,
+				RPM:     100,
+				TPM:     10000, Priority: config.FallbackPriorityGroup,
 			},
 		).
 		Build()
@@ -294,22 +287,20 @@ func TestFallbackPath_NonRetryableError(t *testing.T) {
 	prx := NewTestProxyBuilder().
 		WithCredentials(
 			config.CredentialConfig{
-				Name:       "primary",
-				Type:       config.ProviderTypeProxy,
-				APIKey:     "primary-key",
-				BaseURL:    primaryServer.URL,
-				RPM:        100,
-				TPM:        10000,
-				IsFallback: false,
+				Name:    "primary",
+				Type:    config.ProviderTypeProxy,
+				APIKey:  "primary-key",
+				BaseURL: primaryServer.URL,
+				RPM:     100,
+				TPM:     10000,
 			},
 			config.CredentialConfig{
-				Name:       "fallback",
-				Type:       config.ProviderTypeProxy,
-				APIKey:     "fallback-key",
-				BaseURL:    fallbackServer.URL,
-				RPM:        100,
-				TPM:        10000,
-				IsFallback: true,
+				Name:    "fallback",
+				Type:    config.ProviderTypeProxy,
+				APIKey:  "fallback-key",
+				BaseURL: fallbackServer.URL,
+				RPM:     100,
+				TPM:     10000, Priority: config.FallbackPriorityGroup,
 			},
 		).
 		Build()
@@ -358,22 +349,20 @@ func TestFallbackPath_Streaming_NotSupported(t *testing.T) {
 	prx := NewTestProxyBuilder().
 		WithCredentials(
 			config.CredentialConfig{
-				Name:       "primary",
-				Type:       config.ProviderTypeProxy,
-				APIKey:     "primary-key",
-				BaseURL:    primaryServer.URL,
-				RPM:        100,
-				TPM:        10000,
-				IsFallback: false,
+				Name:    "primary",
+				Type:    config.ProviderTypeProxy,
+				APIKey:  "primary-key",
+				BaseURL: primaryServer.URL,
+				RPM:     100,
+				TPM:     10000,
 			},
 			config.CredentialConfig{
-				Name:       "fallback",
-				Type:       config.ProviderTypeProxy,
-				APIKey:     "fallback-key",
-				BaseURL:    fallbackServer.URL,
-				RPM:        100,
-				TPM:        10000,
-				IsFallback: true,
+				Name:    "fallback",
+				Type:    config.ProviderTypeProxy,
+				APIKey:  "fallback-key",
+				BaseURL: fallbackServer.URL,
+				RPM:     100,
+				TPM:     10000, Priority: config.FallbackPriorityGroup,
 			},
 		).
 		Build()
@@ -429,22 +418,20 @@ func TestFallbackPath_RequestBodyIntegrity(t *testing.T) {
 	prx := NewTestProxyBuilder().
 		WithCredentials(
 			config.CredentialConfig{
-				Name:       "primary",
-				Type:       config.ProviderTypeProxy,
-				APIKey:     "primary-key",
-				BaseURL:    primaryServer.URL,
-				RPM:        100,
-				TPM:        10000,
-				IsFallback: false,
+				Name:    "primary",
+				Type:    config.ProviderTypeProxy,
+				APIKey:  "primary-key",
+				BaseURL: primaryServer.URL,
+				RPM:     100,
+				TPM:     10000,
 			},
 			config.CredentialConfig{
-				Name:       "fallback",
-				Type:       config.ProviderTypeProxy,
-				APIKey:     "fallback-key",
-				BaseURL:    fallbackServer.URL,
-				RPM:        100,
-				TPM:        10000,
-				IsFallback: true,
+				Name:    "fallback",
+				Type:    config.ProviderTypeProxy,
+				APIKey:  "fallback-key",
+				BaseURL: fallbackServer.URL,
+				RPM:     100,
+				TPM:     10000, Priority: config.FallbackPriorityGroup,
 			},
 		).
 		Build()
@@ -489,22 +476,20 @@ func TestFallbackPath_HeadersPreserved(t *testing.T) {
 	prx := NewTestProxyBuilder().
 		WithCredentials(
 			config.CredentialConfig{
-				Name:       "primary",
-				Type:       config.ProviderTypeProxy,
-				APIKey:     "primary-key",
-				BaseURL:    primaryServer.URL,
-				RPM:        100,
-				TPM:        10000,
-				IsFallback: false,
+				Name:    "primary",
+				Type:    config.ProviderTypeProxy,
+				APIKey:  "primary-key",
+				BaseURL: primaryServer.URL,
+				RPM:     100,
+				TPM:     10000,
 			},
 			config.CredentialConfig{
-				Name:       "fallback",
-				Type:       config.ProviderTypeProxy,
-				APIKey:     "fallback-key",
-				BaseURL:    fallbackServer.URL,
-				RPM:        100,
-				TPM:        10000,
-				IsFallback: true,
+				Name:    "fallback",
+				Type:    config.ProviderTypeProxy,
+				APIKey:  "fallback-key",
+				BaseURL: fallbackServer.URL,
+				RPM:     100,
+				TPM:     10000, Priority: config.FallbackPriorityGroup,
 			},
 		).
 		Build()
@@ -576,22 +561,20 @@ func buildProxyChain(t *testing.T, rec *callRecorder, primaryStatus int, maxRetr
 	prx := NewTestProxyBuilder().
 		WithCredentials(
 			config.CredentialConfig{
-				Name:       "router02",
-				Type:       config.ProviderTypeProxy,
-				APIKey:     "router02-key",
-				BaseURL:    primary.URL,
-				RPM:        100,
-				TPM:        10000,
-				IsFallback: false,
+				Name:    "router02",
+				Type:    config.ProviderTypeProxy,
+				APIKey:  "router02-key",
+				BaseURL: primary.URL,
+				RPM:     100,
+				TPM:     10000,
 			},
 			config.CredentialConfig{
-				Name:       "router03",
-				Type:       config.ProviderTypeProxy,
-				APIKey:     "router03-key",
-				BaseURL:    fallback.URL,
-				RPM:        100,
-				TPM:        10000,
-				IsFallback: true,
+				Name:    "router03",
+				Type:    config.ProviderTypeProxy,
+				APIKey:  "router03-key",
+				BaseURL: fallback.URL,
+				RPM:     100,
+				TPM:     10000, Priority: config.FallbackPriorityGroup,
 			},
 		).
 		WithMaxProviderRetries(maxRetries).
@@ -684,13 +667,12 @@ func TestProxyChain_NoFallback_ErrorPropagated(t *testing.T) {
 
 	prx := NewTestProxyBuilder().
 		WithCredentials(config.CredentialConfig{
-			Name:       "router02",
-			Type:       config.ProviderTypeProxy,
-			APIKey:     "router02-key",
-			BaseURL:    primary.URL,
-			RPM:        100,
-			TPM:        10000,
-			IsFallback: false,
+			Name:    "router02",
+			Type:    config.ProviderTypeProxy,
+			APIKey:  "router02-key",
+			BaseURL: primary.URL,
+			RPM:     100,
+			TPM:     10000,
 		}).
 		WithMaxProviderRetries(2).
 		Build()

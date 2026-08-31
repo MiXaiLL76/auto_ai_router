@@ -247,11 +247,10 @@ func TestPriorityGroupCascade_MixedTierUpstreamLocalCascade(t *testing.T) {
 
 // TestPriorityGroupCascade_UpstreamFallbackCredentialSurfacesAsLastResortTier:
 // router2's own upstream node has TWO credentials — one regular (serves "model-a") and
-// one last-resort / is_fallback (serves "model-b" only). The main router's "router2"
-// proxy credential is itself NOT is_fallback. Post-unification model-b is NOT hidden: it
-// surfaces on router2 at priority 999 (EffectiveHealthPriority folds the upstream
-// fallback flag into the last-resort group) and is routable via the local last-resort
-// tier — an all-last-resort upstream node no longer contributes zero routable models.
+// one last-resort (serves "model-b" only, priority 999). Post-unification model-b is NOT
+// hidden: it surfaces on router2 at priority 999 and is routable via the local
+// last-resort tier — an all-last-resort upstream node no longer contributes zero
+// routable models.
 func TestPriorityGroupCascade_UpstreamFallbackCredentialSurfacesAsLastResortTier(t *testing.T) {
 	var router2CompletionCalls int32
 
@@ -259,12 +258,12 @@ func TestPriorityGroupCascade_UpstreamFallbackCredentialSurfacesAsLastResortTier
 		return &httputil.ProxyHealthResponse{
 			Status: "healthy",
 			Credentials: map[string]httputil.CredentialHealthStats{
-				"router2-regular":  {Type: "openai", IsFallback: false, Priority: 1, LimitRPM: 1000, LimitTPM: 1000000},
-				"router2-fallback": {Type: "openai", IsFallback: true, Priority: 5, LimitRPM: 1000, LimitTPM: 1000000},
+				"router2-regular":  {Type: "openai", Priority: 1, LimitRPM: 1000, LimitTPM: 1000000},
+				"router2-fallback": {Type: "openai", Priority: config.FallbackPriorityGroup, LastResort: true, LimitRPM: 1000, LimitTPM: 1000000},
 			},
 			Models: map[string]httputil.ModelHealthStats{
 				"a": {Credential: "router2-regular", Model: "model-a", Priority: 1, LimitRPM: 1000, LimitTPM: 1000000},
-				"b": {Credential: "router2-fallback", Model: "model-b", Priority: 5, LimitRPM: 1000, LimitTPM: 1000000},
+				"b": {Credential: "router2-fallback", Model: "model-b", Priority: config.FallbackPriorityGroup, LimitRPM: 1000, LimitTPM: 1000000},
 			},
 		}
 	}
@@ -272,7 +271,7 @@ func TestPriorityGroupCascade_UpstreamFallbackCredentialSurfacesAsLastResortTier
 	router2 := mockHealthAndCompletionServer(t, &router2CompletionCalls, router2Health, "response from router2")
 	defer router2.Close()
 
-	credRouter2 := config.CredentialConfig{Name: "router2", Type: config.ProviderTypeProxy, IsFallback: false, APIKey: "router2-key", BaseURL: router2.URL, RPM: 1000, TPM: 1000000}
+	credRouter2 := config.CredentialConfig{Name: "router2", Type: config.ProviderTypeProxy, APIKey: "router2-key", BaseURL: router2.URL, RPM: 1000, TPM: 1000000}
 
 	builder := NewTestProxyBuilder().WithCredentials(credRouter2)
 	rl := ratelimit.New()

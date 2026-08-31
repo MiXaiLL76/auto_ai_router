@@ -14,7 +14,7 @@ credentials:
     api_key: "sk-remote-master-key" # Optional
     rpm: 200
     tpm: 100000
-    is_fallback: true
+    priority: 999   # last-resort tier (is_fallback: true is a deprecated alias)
 ```
 
 ## Usage Contract

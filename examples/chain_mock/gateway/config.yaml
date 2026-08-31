@@ -25,7 +25,7 @@ monitoring:
 #
 #   chat-smart : region-alpha -> 4 local tiers (t1 cap 300, t2 cum 420,
 #                t3 cum 500, t9 uncapped), region-beta -> t1 (150) + t9 uncapped,
-#                region-gamma -> t1 (120) + t9 uncapped (its is_fallback cred
+#                region-gamma -> t1 (120) + t9 uncapped (its priority: 999 cred
 #                excluded). Primary groups the gateway cascades through:
 #                  1  {alpha@t1, beta@t1, gamma@t1}   weighted round-robin
 #                  2  {alpha@t2}
@@ -71,7 +71,7 @@ credentials:
     api_key: "sk-mock"
     base_url: "http://mock:9100"
     rpm: 100000
-    is_fallback: true
+    priority: 999
 
 models:
   - { name: chat-smart, credential: house-direct, tpm: -1 }

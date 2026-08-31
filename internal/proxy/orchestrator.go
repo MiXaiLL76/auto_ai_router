@@ -813,30 +813,25 @@ func (p *Proxy) selectCredentialForModel(
 		}
 	}
 
+	// One unified cascade: NextForModelExcludingScoped walks every priority tier
+	// ascending, last-resort (priority 999) included. There is no separate fallback pool.
 	cred, err := p.balancer.NextForModelExcludingScoped(modelID, exclude, logCtx.Scope)
 	if err == nil {
 		return cred, true
 	}
 
-	fallbackErr := error(nil)
-	cred, fallbackErr = p.balancer.NextFallbackForModelExcludingScoped(modelID, exclude, logCtx.Scope)
-	if fallbackErr == nil {
-		return cred, true
-	}
-
 	errCode := http.StatusTooManyRequests
 	var errorMsg string
-	if errors.Is(err, balancer.ErrRateLimitExceeded) || errors.Is(fallbackErr, balancer.ErrRateLimitExceeded) {
+	if errors.Is(err, balancer.ErrRateLimitExceeded) {
 		errorMsg = "Rate limit exceeded"
 	} else {
 		errorMsg = fmt.Sprintf("No credentials available for model %s", modelID)
 	}
 
-	p.logger.ErrorContext(logCtx.Context(), "No credentials available (regular and fallback)",
+	p.logger.ErrorContext(logCtx.Context(), "No credentials available for model",
 		"error_code", errCode,
 		"model", modelID,
-		"primary_error", err,
-		"fallback_error", fallbackErr,
+		"error", err,
 		"request_id", logCtx.RequestID,
 	)
 

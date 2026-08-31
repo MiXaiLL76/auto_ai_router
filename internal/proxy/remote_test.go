@@ -750,8 +750,8 @@ func TestUpdateModelLimits_NoPriorityMismatchWarning_WhenPrioritiesMatch(t *test
 func TestUpdateModelLimits_IngestsFallbackUpstreamAsLastResortTierForPrimaryConnection(t *testing.T) {
 	health := &httputil.ProxyHealthResponse{
 		Credentials: map[string]httputil.CredentialHealthStats{
-			"grant-primary":  {IsFallback: false, Priority: 100},
-			"grant-fallback": {IsFallback: true, Priority: 999},
+			"grant-primary":  {Priority: 100},
+			"grant-fallback": {Priority: 999},
 		},
 		Models: map[string]httputil.ModelHealthStats{
 			"model:primary":  {Model: "gpt-4", Credential: "grant-primary", Priority: 100, LimitRPM: 50, LimitTPM: 500},
@@ -760,7 +760,7 @@ func TestUpdateModelLimits_IngestsFallbackUpstreamAsLastResortTierForPrimaryConn
 	}
 
 	rateLimiter := ratelimit.New()
-	cred := &config.CredentialConfig{Name: "test_proxy", IsFallback: false}
+	cred := &config.CredentialConfig{Name: "test_proxy"}
 	logger := testhelpers.NewTestLogger()
 	mockMM := NewMockModelManager()
 
@@ -779,8 +779,8 @@ func TestUpdateModelLimits_IngestsFallbackUpstreamAsLastResortTierForPrimaryConn
 func TestUpdateModelLimits_IncludesFallbackUpstreamForFallbackConnection(t *testing.T) {
 	health := &httputil.ProxyHealthResponse{
 		Credentials: map[string]httputil.CredentialHealthStats{
-			"grant-primary":  {IsFallback: false, Priority: 100},
-			"grant-fallback": {IsFallback: true, Priority: 999},
+			"grant-primary":  {Priority: 100},
+			"grant-fallback": {Priority: 999},
 		},
 		Models: map[string]httputil.ModelHealthStats{
 			"model:primary":  {Model: "gpt-4", Credential: "grant-primary", Priority: 100, LimitRPM: 50, LimitTPM: 500},
@@ -789,7 +789,7 @@ func TestUpdateModelLimits_IncludesFallbackUpstreamForFallbackConnection(t *test
 	}
 
 	rateLimiter := ratelimit.New()
-	cred := &config.CredentialConfig{Name: "test_proxy", IsFallback: true}
+	cred := &config.CredentialConfig{Name: "test_proxy", Priority: config.FallbackPriorityGroup}
 	logger := testhelpers.NewTestLogger()
 	mockMM := NewMockModelManager()
 
@@ -812,8 +812,8 @@ func TestUpdateModelLimits_IncludesFallbackUpstreamForFallbackConnection(t *test
 func TestUpdateModelScopes_AggregatesAllUpstreamTiersForPrimaryConnection(t *testing.T) {
 	health := &httputil.ProxyHealthResponse{
 		Credentials: map[string]httputil.CredentialHealthStats{
-			"grant-primary":  {IsFallback: false, Scopes: []string{"team-a"}},
-			"grant-fallback": {IsFallback: true},
+			"grant-primary":  {Scopes: []string{"team-a"}},
+			"grant-fallback": {Priority: config.FallbackPriorityGroup},
 		},
 		Models: map[string]httputil.ModelHealthStats{
 			"model:primary":  {Model: "gpt-4", Credential: "grant-primary"},
@@ -821,7 +821,7 @@ func TestUpdateModelScopes_AggregatesAllUpstreamTiersForPrimaryConnection(t *tes
 		},
 	}
 
-	cred := &config.CredentialConfig{Name: "test_proxy", IsFallback: false}
+	cred := &config.CredentialConfig{Name: "test_proxy"}
 	mockMM := NewMockModelManager()
 
 	updateModelScopes(health, cred, mockMM)
@@ -838,14 +838,14 @@ func TestUpdateModelScopes_AggregatesAllUpstreamTiersForPrimaryConnection(t *tes
 func TestUpdateModelScopes_IncludesFallbackUpstreamForFallbackConnection(t *testing.T) {
 	health := &httputil.ProxyHealthResponse{
 		Credentials: map[string]httputil.CredentialHealthStats{
-			"grant-fallback": {IsFallback: true, Scopes: []string{"team-a"}},
+			"grant-fallback": {Priority: config.FallbackPriorityGroup, Scopes: []string{"team-a"}},
 		},
 		Models: map[string]httputil.ModelHealthStats{
 			"model:fallback": {Model: "claude-3-opus", Credential: "grant-fallback"},
 		},
 	}
 
-	cred := &config.CredentialConfig{Name: "test_proxy", IsFallback: true}
+	cred := &config.CredentialConfig{Name: "test_proxy", Priority: config.FallbackPriorityGroup}
 	mockMM := NewMockModelManager()
 
 	updateModelScopes(health, cred, mockMM)
@@ -1485,8 +1485,8 @@ func TestUpdateStatsFromHealth_IngestsAllUpstreamTiersForPrimaryConnection(t *te
 
 	health := &httputil.ProxyHealthResponse{
 		Credentials: map[string]httputil.CredentialHealthStats{
-			"upstream-primary":  {IsFallback: false, LimitRPM: 100, LimitTPM: 1000, CurrentRPM: 10, CurrentTPM: 100},
-			"upstream-fallback": {IsFallback: true, LimitRPM: 500, LimitTPM: 5000, CurrentRPM: 50, CurrentTPM: 500},
+			"upstream-primary":  {LimitRPM: 100, LimitTPM: 1000, CurrentRPM: 10, CurrentTPM: 100},
+			"upstream-fallback": {Priority: config.FallbackPriorityGroup, LimitRPM: 500, LimitTPM: 5000, CurrentRPM: 50, CurrentTPM: 500},
 		},
 		Models: map[string]httputil.ModelHealthStats{
 			"p1": {Credential: "upstream-primary", Model: "primary-model", LimitRPM: 20, LimitTPM: 200, CurrentRPM: 2, CurrentTPM: 20},
@@ -1495,8 +1495,7 @@ func TestUpdateStatsFromHealth_IngestsAllUpstreamTiersForPrimaryConnection(t *te
 	}
 
 	UpdateStatsFromHealth(health, &config.CredentialConfig{
-		Name:       "proxy-primary",
-		IsFallback: false,
+		Name: "proxy-primary",
 	}, rateLimiter, logger, mockMM)
 
 	assert.Equal(t, 600, rateLimiter.GetLimitRPM("proxy-primary"))
@@ -1521,8 +1520,8 @@ func TestUpdateStatsFromHealth_IncludesFallbackUpstreamForFallbackConnection(t *
 
 	health := &httputil.ProxyHealthResponse{
 		Credentials: map[string]httputil.CredentialHealthStats{
-			"upstream-primary":  {IsFallback: false, LimitRPM: 100, LimitTPM: 1000, CurrentRPM: 10, CurrentTPM: 100},
-			"upstream-fallback": {IsFallback: true, LimitRPM: 500, LimitTPM: 5000, CurrentRPM: 50, CurrentTPM: 500},
+			"upstream-primary":  {LimitRPM: 100, LimitTPM: 1000, CurrentRPM: 10, CurrentTPM: 100},
+			"upstream-fallback": {Priority: config.FallbackPriorityGroup, LimitRPM: 500, LimitTPM: 5000, CurrentRPM: 50, CurrentTPM: 500},
 		},
 		Models: map[string]httputil.ModelHealthStats{
 			"p1": {Credential: "upstream-primary", Model: "primary-model", LimitRPM: 20, LimitTPM: 200, CurrentRPM: 2, CurrentTPM: 20},
@@ -1531,8 +1530,7 @@ func TestUpdateStatsFromHealth_IncludesFallbackUpstreamForFallbackConnection(t *
 	}
 
 	UpdateStatsFromHealth(health, &config.CredentialConfig{
-		Name:       "proxy-fallback",
-		IsFallback: true,
+		Name: "proxy-fallback", Priority: config.FallbackPriorityGroup,
 	}, rateLimiter, logger, mockMM)
 
 	// Fallback gateway includes ALL upstream credentials (primary + fallback),

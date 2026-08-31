@@ -36,7 +36,7 @@ reacting to the `rpm`/`tpm` budgets in the `*/config.yaml` files.
 
 | model         | region-alpha                            | region-beta                   | region-gamma           |
 | ------------- | --------------------------------------- | ----------------------------- | ---------------------- |
-| `chat-smart`  | **p1 ×2, p2, p3**, p9 (uncapped)        | **p1**, p9 (uncapped)         | **p1** (+ is_fallback) |
+| `chat-smart`  | **p1 ×2, p2, p3**, p9 (uncapped)        | **p1**, p9 (uncapped)         | **p1**, p9 (uncapped, was is_fallback) |
 | `chat-fast`   | **p1 ×2 (weighted 2:1), p9 (uncapped)** | **p1**, **p2**                | —                      |
 | `chat-reason` | —                                       | **p1**, **p3**, p9 (uncapped) | p2                     |
 | `embed-v1`    | p1 (unlimited)                          | —                             | —                      |
@@ -62,7 +62,7 @@ cascades through:
 ```
 group 1 : region-alpha@t1 (cum cap 300 tpm)   \
           region-beta@t1  (150 tpm)            }  weighted round-robin
-          region-gamma@t1 (120 tpm)           /   (gamma-reserve is is_fallback → excluded)
+          region-gamma@t1 (120 tpm)           /   (gamma-reserve now tiered at p9, not excluded)
 group 2 : region-alpha@t2 (cum cap 420 tpm)
 group 3 : region-alpha@t3 (cum cap 500 tpm)
 group 9 : region-alpha@t9 / region-beta@t9 / region-gamma@t9   (uncapped backstop)
@@ -123,7 +123,7 @@ Knobs (env): `GATEWAY_URL`, `MASTER_KEY`, `DURATION` (s, default 120),
 curl -s -H 'Authorization: Bearer sk-gateway' localhost:8080/health \
   | jq '.models["region-alpha:chat-smart"].priority_tiers'
 
-# is_fallback exclusion: region-gamma's chat-smart limit is 120, not 2120
+# region-gamma chat-smart p1 limit is 120; gamma-reserve capacity now shows at p9
 curl -s -H 'Authorization: Bearer sk-gateway' localhost:8080/health \
   | jq '.models["region-gamma:chat-smart"].limit_tpm'
 ```

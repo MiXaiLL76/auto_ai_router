@@ -42,7 +42,7 @@ curl http://localhost:8080/health | jq '.credentials'
 
 ## Fallback Behavior
 
-Fallback proxies (`is_fallback: true`) activate when:
+Last-resort credentials (`priority: 999`) activate when:
 
 - Primary credentials exhaust their RPM/TPM limits
 - Primary providers return errors (`401`, `403`, `429`, `500`, `502`, `503`, `504`)

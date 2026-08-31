@@ -102,7 +102,7 @@ func TestTryFallbackProxy_NoFallback(t *testing.T) {
 //
 // Test Case B: Fallback credential is same as original
 // - Balancer returns a fallback credential with the same Name as originalCredName
-// - Function should return (false, "fallback_is_same_credential") immediately
+// - Function should return (false, "no_fallback_available") — nothing else to try
 // - Function should NOT attempt to forward the request to avoid infinite loops
 //
 // This test validates that TryFallbackProxy includes safety checks to prevent
@@ -112,13 +112,12 @@ func TestTryFallbackProxy_SameCredential(t *testing.T) {
 	prx := NewTestProxyBuilder().
 		WithCredentials(
 			config.CredentialConfig{
-				Name:       "primary",
-				Type:       config.ProviderTypeProxy,
-				APIKey:     "api-key",
-				BaseURL:    "http://primary.example.com",
-				RPM:        100,
-				TPM:        10000,
-				IsFallback: true, // Edge case: marked as fallback
+				Name:    "primary",
+				Type:    config.ProviderTypeProxy,
+				APIKey:  "api-key",
+				BaseURL: "http://primary.example.com",
+				RPM:     100,
+				TPM:     10000, Priority: config.FallbackPriorityGroup, // Edge case: marked as fallback
 			},
 		).
 		Build()
@@ -170,9 +169,8 @@ func TestTryFallbackProxy_SameCredential(t *testing.T) {
 	assert.False(t, success,
 		"TryFallbackProxy should return success=false when fallback is same credential")
 
-	// ✓ Assert: Reason should indicate fallback is the same credential
-	assert.Equal(t, "fallback_is_same_credential", reason,
-		"Should return reason='fallback_is_same_credential' when names match")
+	// ✓ Assert: no other credential to retry on
+	assert.Equal(t, "no_fallback_available", reason, "no other credential to retry on")
 
 	// ✓ Assert: Response writer should be empty (request was never forwarded)
 	// Since the function detected the same credential, it returns early without

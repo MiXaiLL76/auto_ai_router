@@ -242,22 +242,20 @@ func TestProxyFallbackOn429_CredentialAPIKeysPreserved(t *testing.T) {
 	prx := NewTestProxyBuilder().
 		WithCredentials(
 			config.CredentialConfig{
-				Name:       "primary",
-				Type:       config.ProviderTypeProxy,
-				APIKey:     "primary-api-key",
-				BaseURL:    primaryServer.URL,
-				RPM:        100,
-				TPM:        10000,
-				IsFallback: false,
+				Name:    "primary",
+				Type:    config.ProviderTypeProxy,
+				APIKey:  "primary-api-key",
+				BaseURL: primaryServer.URL,
+				RPM:     100,
+				TPM:     10000,
 			},
 			config.CredentialConfig{
-				Name:       "fallback",
-				Type:       config.ProviderTypeProxy,
-				APIKey:     "fallback-api-key",
-				BaseURL:    fallbackServer.URL,
-				RPM:        100,
-				TPM:        10000,
-				IsFallback: true,
+				Name:    "fallback",
+				Type:    config.ProviderTypeProxy,
+				APIKey:  "fallback-api-key",
+				BaseURL: fallbackServer.URL,
+				RPM:     100,
+				TPM:     10000, Priority: config.FallbackPriorityGroup,
 			},
 		).
 		Build()
@@ -365,22 +363,20 @@ func TestProxy_429PreservedOverNetworkError(t *testing.T) {
 	prx := NewTestProxyBuilder().
 		WithCredentials(
 			config.CredentialConfig{
-				Name:       "cred1",
-				Type:       config.ProviderTypeProxy,
-				APIKey:     "key1",
-				BaseURL:    cred1Server.URL,
-				RPM:        100,
-				TPM:        10000,
-				IsFallback: false,
+				Name:    "cred1",
+				Type:    config.ProviderTypeProxy,
+				APIKey:  "key1",
+				BaseURL: cred1Server.URL,
+				RPM:     100,
+				TPM:     10000,
 			},
 			config.CredentialConfig{
-				Name:       "cred2",
-				Type:       config.ProviderTypeProxy,
-				APIKey:     "key2",
-				BaseURL:    deadURL,
-				RPM:        100,
-				TPM:        10000,
-				IsFallback: false,
+				Name:    "cred2",
+				Type:    config.ProviderTypeProxy,
+				APIKey:  "key2",
+				BaseURL: deadURL,
+				RPM:     100,
+				TPM:     10000,
 			},
 		).
 		WithMasterKey("master-key").
@@ -431,22 +427,20 @@ func TestProxy_429PreservedWhenNoFallbackAndNetworkError(t *testing.T) {
 	prx := NewTestProxyBuilder().
 		WithCredentials(
 			config.CredentialConfig{
-				Name:       "primary",
-				Type:       config.ProviderTypeProxy,
-				APIKey:     "key",
-				BaseURL:    cred1Server.URL,
-				RPM:        100,
-				TPM:        10000,
-				IsFallback: false,
+				Name:    "primary",
+				Type:    config.ProviderTypeProxy,
+				APIKey:  "key",
+				BaseURL: cred1Server.URL,
+				RPM:     100,
+				TPM:     10000,
 			},
 			config.CredentialConfig{
-				Name:       "secondary",
-				Type:       config.ProviderTypeProxy,
-				APIKey:     "key2",
-				BaseURL:    deadURL,
-				RPM:        100,
-				TPM:        10000,
-				IsFallback: false,
+				Name:    "secondary",
+				Type:    config.ProviderTypeProxy,
+				APIKey:  "key2",
+				BaseURL: deadURL,
+				RPM:     100,
+				TPM:     10000,
 			},
 		).
 		WithMasterKey("master-key").
@@ -494,11 +488,11 @@ func TestProxy_MetricsAttributeToRespondingCredentialNotLastAttempted(t *testing
 		WithCredentials(
 			config.CredentialConfig{
 				Name: "primary", Type: config.ProviderTypeProxy, APIKey: "key1",
-				BaseURL: primaryServer.URL, RPM: 100, TPM: 10000, IsFallback: false,
+				BaseURL: primaryServer.URL, RPM: 100, TPM: 10000,
 			},
 			config.CredentialConfig{
 				Name: "secondary", Type: config.ProviderTypeProxy, APIKey: "key2",
-				BaseURL: deadURL, RPM: 100, TPM: 10000, IsFallback: false,
+				BaseURL: deadURL, RPM: 100, TPM: 10000,
 			},
 		).
 		WithMasterKey("master-key").
