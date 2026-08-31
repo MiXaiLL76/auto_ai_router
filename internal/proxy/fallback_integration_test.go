@@ -272,9 +272,7 @@ func TestFallbackPath_FallbackAlsoFails(t *testing.T) {
 	assert.Equal(t, int32(1), fallbackCalls)
 }
 
-// TestFallbackPath_NonRetryableError tests that errors like "model not found" are NOT retried
-// even if other conditions would trigger fallback.
-func TestFallbackPath_NonRetryableError(t *testing.T) {
+func TestFallbackPath_NotFoundModelErrorUsesFallback(t *testing.T) {
 	var primaryCalls, fallbackCalls int32
 
 	primaryServer := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -288,6 +286,7 @@ func TestFallbackPath_NonRetryableError(t *testing.T) {
 	fallbackServer := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&fallbackCalls, 1)
 		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(createMockChatCompletionResponse("chatcmpl-fallback", "gpt-4", "fallback response"))
 	}))
 	defer fallbackServer.Close()
 
@@ -322,10 +321,10 @@ func TestFallbackPath_NonRetryableError(t *testing.T) {
 
 	prx.ProxyRequest(w, req)
 
-	// Original error returned (no retry attempted)
-	assert.Equal(t, http.StatusNotFound, w.Code)
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), "fallback response")
 	assert.Equal(t, int32(1), primaryCalls)
-	assert.Equal(t, int32(0), fallbackCalls, "Fallback should NOT be called for non-retryable error")
+	assert.Equal(t, int32(1), fallbackCalls)
 }
 
 // TestFallbackPath_Streaming_NotSupported tests the current limitation that

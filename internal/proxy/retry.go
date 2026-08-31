@@ -40,7 +40,7 @@ func ShouldRetryWithFallback(statusCode int, respBody []byte) (bool, RetryReason
 	// Determine if status code is retryable
 	var retryReason RetryReason
 	switch {
-	case statusCode == http.StatusBadRequest:
+	case statusCode == http.StatusBadRequest || statusCode == http.StatusNotFound:
 		retryReason = RetryReasonServerErr
 	case statusCode == http.StatusUnauthorized || statusCode == http.StatusForbidden:
 		retryReason = RetryReasonAuthErr
@@ -74,13 +74,6 @@ func isRetryableContent(respBody []byte) bool {
 	if bytes.Contains(bodyLower, []byte("content policy")) ||
 		bytes.Contains(bodyLower, []byte("content management policy")) ||
 		bytes.Contains(bodyLower, []byte("policy violation")) {
-		return false
-	}
-
-	// Don't retry if it's a model-specific error that won't be fixed by retrying
-	if bytes.Contains(bodyLower, []byte("model not found")) ||
-		bytes.Contains(bodyLower, []byte("model does not exist")) ||
-		bytes.Contains(bodyLower, []byte("unsupported model")) {
 		return false
 	}
 

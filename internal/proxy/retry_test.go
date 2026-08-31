@@ -79,7 +79,6 @@ func TestShouldRetryWithFallback_NonRetryableStatus(t *testing.T) {
 	}{
 		{"200 OK", http.StatusOK},
 		{"201 Created", http.StatusCreated},
-		{"404 Not Found", http.StatusNotFound},
 	}
 
 	for _, tt := range tests {
@@ -95,6 +94,13 @@ func TestShouldRetryWithFallback_NonRetryableStatus(t *testing.T) {
 func TestShouldRetryWithFallback_BadRequest(t *testing.T) {
 	// 400 Bad Request is retried — a different credential may not produce the same error
 	shouldRetry, reason := ShouldRetryWithFallback(http.StatusBadRequest, []byte("bad request"))
+
+	assert.True(t, shouldRetry)
+	assert.Equal(t, RetryReasonServerErr, reason)
+}
+
+func TestShouldRetryWithFallback_NotFound(t *testing.T) {
+	shouldRetry, reason := ShouldRetryWithFallback(http.StatusNotFound, []byte("not found"))
 
 	assert.True(t, shouldRetry)
 	assert.Equal(t, RetryReasonServerErr, reason)
@@ -126,8 +132,7 @@ func TestShouldRetryWithFallback_ContentPolicyViolation(t *testing.T) {
 	}
 }
 
-func TestShouldRetryWithFallback_ModelNotFound(t *testing.T) {
-	// Model-specific errors should not be retried
+func TestShouldRetryWithFallback_ModelErrors(t *testing.T) {
 	tests := []struct {
 		name     string
 		respBody string
@@ -147,8 +152,8 @@ func TestShouldRetryWithFallback_ModelNotFound(t *testing.T) {
 				[]byte(tt.respBody),
 			)
 
-			assert.False(t, shouldRetry)
-			assert.Equal(t, RetryReason(""), reason)
+			assert.True(t, shouldRetry)
+			assert.Equal(t, RetryReasonServerErr, reason)
 		})
 	}
 }
@@ -216,12 +221,12 @@ func TestIsRetryableContent_ModelErrors(t *testing.T) {
 		content  string
 		expected bool
 	}{
-		{"model not found", "model not found", false},
-		{"Model Not Found uppercase", "MODEL NOT FOUND", false},
-		{"model does not exist", "model does not exist", false},
-		{"Model Does Not Exist", "MODEL DOES NOT EXIST", false},
-		{"unsupported model", "unsupported model gpt-4", false},
-		{"Unsupported Model", "UNSUPPORTED MODEL", false},
+		{"model not found", "model not found", true},
+		{"Model Not Found uppercase", "MODEL NOT FOUND", true},
+		{"model does not exist", "model does not exist", true},
+		{"Model Does Not Exist", "MODEL DOES NOT EXIST", true},
+		{"unsupported model", "unsupported model gpt-4", true},
+		{"Unsupported Model", "UNSUPPORTED MODEL", true},
 		{"other error", "validation error", true},
 		{"empty", "", true},
 	}
@@ -231,21 +236,6 @@ func TestIsRetryableContent_ModelErrors(t *testing.T) {
 			result := isRetryableContent([]byte(tt.content))
 			assert.Equal(t, tt.expected, result)
 		})
-	}
-}
-
-func TestIsRetryableContent_CaseInsensitive(t *testing.T) {
-	// Verify case-insensitive matching works for model-not-found patterns
-	testCases := []string{
-		"Model not Found",
-		"MODEL NOT FOUND",
-		"Unsupported MODEL",
-		"MODEL DOES NOT EXIST",
-	}
-
-	for _, tc := range testCases {
-		result := isRetryableContent([]byte(tc))
-		assert.False(t, result, "should not be retryable for: %s", tc)
 	}
 }
 
