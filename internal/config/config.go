@@ -16,11 +16,12 @@ import (
 const DefaultMaxAttempts = 3
 const DefaultBanDuration time.Duration = 0
 
-// FallbackPriorityGroup is the primary-selection priority group assigned to every
-// is_fallback credential. It is intentionally a large number so fallback credentials
-// always sort into the last priority group (tried after every explicit tier) and read
-// that way on the dashboard. Credentials may not set an explicit `priority:` alongside
-// `is_fallback: true` — this value is assigned automatically (see Config.Validate).
+// FallbackPriorityGroup is the priority group that means "last resort". It is the single
+// canonical spelling of what used to be a separate is_fallback flag: `is_fallback: true`
+// and `priority: 999` are now fully interchangeable — NormalizeFallbackPriority keeps the
+// two representations in sync in both directions. A credential in this group (or higher)
+// is tried only after every lower-numbered tier is exhausted, and reads as "fallback" on
+// the dashboard and across a router chain.
 const FallbackPriorityGroup = 999
 
 // DefaultModelPricesSyncInterval is how often model prices are re-fetched from model_prices_link.
@@ -758,8 +759,10 @@ type CredentialConfig struct {
 	TPM              int  `yaml:"tpm"`
 	Weight           int  `yaml:"weight"` // Default weighted round-robin weight for this credential (0 = 1)
 	FallbackPriority int  `yaml:"fallback_priority,omitempty"`
-	// Priority is the primary-selection priority group (lower selects first).
-	// See EffectivePriority for the resolution chain against FallbackPriority.
+	// Priority is the primary-selection priority group (lower selects first). 0 is the
+	// default group (flat pool). FallbackPriorityGroup (999) is the last-resort group and
+	// is the canonical spelling of `is_fallback: true` — the two are interchangeable and
+	// NormalizeFallbackPriority keeps them in sync. See EffectivePriority / IsFallbackTier.
 	Priority int `yaml:"priority,omitempty"`
 
 	ReasoningOnly           bool              `yaml:"reasoning_only,omitempty"`
@@ -779,7 +782,9 @@ type CredentialConfig struct {
 	CredentialsFile string `yaml:"credentials_file,omitempty"`
 	CredentialsJSON string `yaml:"credentials_json,omitempty"`
 
-	// Proxy/AIR remote-router specific fields
+	// IsFallback is input sugar for `priority: 999` (FallbackPriorityGroup). After
+	// NormalizeFallbackPriority it is always kept consistent with Priority >= 999 in both
+	// directions. Prefer CredentialConfig.IsFallbackTier() over reading this field.
 	IsFallback bool `yaml:"is_fallback,omitempty"`
 }
 
@@ -806,6 +811,10 @@ func (c CredentialConfig) IsProxyLike() bool {
 // explicit Priority (if > 0), else FallbackPriority (if > 0, backward-compat with the
 // retry-only priority field), else 0 — the default group, equivalent to today's flat pool.
 // Lower values are selected before higher ones; see balancer priority-group selection.
+//
+// Call NormalizeFallbackPriority first (Config.Validate and the DB path both do): after
+// normalization an is_fallback credential already carries Priority == FallbackPriorityGroup,
+// so the fallback case falls out of the first branch.
 func (c CredentialConfig) EffectivePriority() int {
 	if c.Priority > 0 {
 		return c.Priority
@@ -816,18 +825,30 @@ func (c CredentialConfig) EffectivePriority() int {
 	return 0
 }
 
-// NormalizeFallbackPriority pins an is_fallback credential to the last priority group
-// (FallbackPriorityGroup) so it sorts after every explicit tier in the primary cascade
-// and on the dashboard. The fallback pool itself is still a separate, flat weighted pool
-// (see the balancer) — this only fixes the group *number* the credential carries.
+// IsFallbackTier reports whether this credential sits in the last-resort priority group
+// (FallbackPriorityGroup or higher) — the post-unification replacement for reading the
+// raw IsFallback flag. Callers should prefer this over c.IsFallback so `priority: 999`
+// and `is_fallback: true` behave identically. Valid only after NormalizeFallbackPriority.
+func (c CredentialConfig) IsFallbackTier() bool {
+	return c.IsFallback || c.Priority >= FallbackPriorityGroup
+}
+
+// NormalizeFallbackPriority reconciles the two spellings of "last-resort credential":
+// `is_fallback: true` and `priority: 999` (FallbackPriorityGroup). After it runs, a
+// credential that used either spelling carries BOTH IsFallback == true AND
+// Priority == FallbackPriorityGroup, so every downstream consumer (balancer priority
+// grouping, /health emission, chain propagation) sees one consistent representation.
 //
 // Config.Validate calls this after its priority/fallback_priority validation; callers
 // that build credentials outside YAML (e.g. DB-sourced credentials that never pass
 // through Validate) must call it themselves before handing the credential to the
 // balancer — see NormalizeFallbackPriorities.
 func (c *CredentialConfig) NormalizeFallbackPriority() {
-	if c.IsFallback {
+	if c.IsFallback && c.Priority < FallbackPriorityGroup {
 		c.Priority = FallbackPriorityGroup
+	}
+	if c.Priority >= FallbackPriorityGroup {
+		c.IsFallback = true
 	}
 }
 
@@ -1943,11 +1964,14 @@ func (c *Config) Validate() error {
 		if cred.Priority > 0 && cred.FallbackPriority > 0 {
 			return fmt.Errorf("credential %s: invalid priority: cannot set both priority and fallback_priority", cred.Name)
 		}
-		if cred.IsFallback && cred.Priority > 0 && cred.Priority != FallbackPriorityGroup {
-			return fmt.Errorf("credential %s: invalid priority: fallback credentials cannot set priority (always tried last, pinned to group %d)", cred.Name, FallbackPriorityGroup)
+		// is_fallback: true is now exactly priority: 999 (FallbackPriorityGroup). Setting a
+		// lower explicit priority alongside it is contradictory; priority >= 999 is
+		// redundant but allowed (NormalizeFallbackPriority keeps the two in sync).
+		if cred.IsFallback && cred.Priority > 0 && cred.Priority < FallbackPriorityGroup {
+			return fmt.Errorf("credential %s: invalid priority: is_fallback: true is equivalent to priority: %d, cannot also set a lower priority (%d)", cred.Name, FallbackPriorityGroup, cred.Priority)
 		}
-		// Pin every fallback credential to the last priority group (shared with the
-		// DB-credential path via NormalizeFallbackPriority).
+		// Reconcile is_fallback <-> priority: 999 in both directions (shared with the
+		// DB-credential path via NormalizeFallbackPriorities).
 		c.Credentials[i].NormalizeFallbackPriority()
 	}
 

@@ -112,15 +112,16 @@ func (p *Proxy) HealthCheckScoped(visibility scope.Context) (bool, *httputil.Pro
 		credentialsInfo[cred.Name] = httputil.CredentialHealthStats{
 			Type:             string(cred.Type),
 			BaseURL:          cleanBaseURL(cred.BaseURL),
-			IsFallback:       cred.IsFallback,
+			IsFallback:       cred.IsFallbackTier(),
 			IsProxyLike:      cred.IsProxyLike(),
 			IsBanned:         p.balancer.HasAnyBan(cred.Name),
 			Weight:           balancer.EffectiveWeight(0, cred.Weight),
 			FallbackPriority: cred.FallbackPriority,
-			// Priority carries only the explicit priority: field, not EffectivePriority():
-			// a downstream proxy folds this into its own primary-pool grouping via
-			// EffectiveHealthPriority, and fallback_priority (reported separately above)
-			// must not leak in as a hard primary tier there.
+			// Priority carries the explicit priority: field (or FallbackPriorityGroup for an
+			// is_fallback credential — NormalizeFallbackPriority already folded the flag into
+			// the number), not EffectivePriority(): a downstream proxy folds this into its
+			// own primary-pool grouping via EffectiveHealthPriority, and fallback_priority
+			// (reported separately above) must not leak in as a hard primary tier there.
 			Priority:        cred.Priority,
 			Scopes:          scopes,
 			DeniedScopes:    deniedScopes,

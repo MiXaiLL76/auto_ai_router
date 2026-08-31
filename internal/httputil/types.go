@@ -3,6 +3,7 @@ package httputil
 import (
 	"time"
 
+	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/scope"
 )
 
@@ -104,14 +105,22 @@ func EffectiveHealthWeight(modelStats ModelHealthStats, credStats CredentialHeal
 // field is consulted — never fallback_priority — so a value learned here can safely drive
 // a downstream proxy credential's primary-pool grouping (see balancer.primaryPriority);
 // folding fallback_priority in would turn a retry-only knob into hard primary tiers.
+//
+// Compatibility shim: an older upstream router emits is_fallback: true together with
+// priority: 0 (it never normalized the fallback flag into a priority number). Treat that
+// as the last-resort group so a chained downstream tiers those models correctly instead
+// of merging them into its primary pool.
 func EffectiveHealthPriority(modelStats ModelHealthStats, credStats CredentialHealthStats) int {
+	priority := 0
 	if modelStats.Priority > 0 {
-		return modelStats.Priority
+		priority = modelStats.Priority
+	} else if credStats.Priority > 0 {
+		priority = credStats.Priority
 	}
-	if credStats.Priority > 0 {
-		return credStats.Priority
+	if credStats.IsFallback && priority < config.FallbackPriorityGroup {
+		priority = config.FallbackPriorityGroup
 	}
-	return 0
+	return priority
 }
 
 // ModelHealthEntryLive reports whether the upstream leaf credential behind this

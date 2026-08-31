@@ -1316,8 +1316,9 @@ func TestConfig_ValidatePriority(t *testing.T) {
 		{name: "positive", priority: 100, wantErr: false},
 		{name: "negative", priority: -1, wantErr: true, wantErrSubstr: "invalid priority"},
 		{name: "conflicts with fallback_priority", priority: 100, fallbackPriority: 20, wantErr: true, wantErrSubstr: "cannot set both priority and fallback_priority"},
-		{name: "conflicts with is_fallback", priority: 100, isFallback: true, wantErr: true, wantErrSubstr: "fallback credentials cannot set priority"},
+		{name: "conflicts with is_fallback", priority: 100, isFallback: true, wantErr: true, wantErrSubstr: "cannot also set a lower priority"},
 		{name: "is_fallback without explicit priority is fine", priority: 0, isFallback: true, wantErr: false},
+		{name: "is_fallback with redundant priority 999 is fine", priority: FallbackPriorityGroup, isFallback: true, wantErr: false},
 	}
 
 	for _, tt := range tests {
@@ -1371,11 +1372,17 @@ func TestNormalizeFallbackPriorities(t *testing.T) {
 		{Name: "primary", Priority: 5},
 		{Name: "fallback", IsFallback: true},
 		{Name: "default"},
+		{Name: "priority-999", Priority: FallbackPriorityGroup},
 	}
 	NormalizeFallbackPriorities(creds)
 	assert.Equal(t, 5, creds[0].Priority, "explicit priority untouched")
 	assert.Equal(t, FallbackPriorityGroup, creds[1].Priority, "is_fallback pinned to last group")
+	assert.True(t, creds[1].IsFallback)
 	assert.Equal(t, 0, creds[2].Priority, "non-fallback default left at 0")
+	assert.False(t, creds[2].IsFallback)
+	// priority: 999 is the canonical spelling of is_fallback: true — the flag is set too.
+	assert.True(t, creds[3].IsFallback, "priority >= 999 implies IsFallback")
+	assert.True(t, creds[3].IsFallbackTier())
 }
 
 func TestCredentialConfig_UnmarshalYAML_RejectsExplicitPriorityOnFallback(t *testing.T) {
