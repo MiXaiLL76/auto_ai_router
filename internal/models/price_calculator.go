@@ -183,6 +183,19 @@ func CalculateTokenCosts(usage *converter.TokenUsage, price *ModelPrice) *conver
 		regularInputTokens = 0
 	}
 
+	// Image tokens live inside PromptTokens, but a provider that serves a cached
+	// image reports the same tokens inside CachedInputTokens as well (some model
+	// does: prompt=340, cached=320, image=81). Charging the whole image bucket on
+	// top of the cached one then bills the overlap twice -- once at the cache-read
+	// rate and once at the image rate -- and the negative clamp above hides it.
+	billableImageTokens := imageTokens
+	if promptTokens > 0 {
+		overlap := audioInputTokens + cachedInputTokens + cacheCreationTokens + imageTokens - promptTokens
+		if overlap > 0 {
+			billableImageTokens = converterutil.NonNegativeTokenCount(imageTokens - overlap)
+		}
+	}
+
 	// Regular input with full-session or 200k tiering
 	switch {
 	case fullSessionInputMatched:
@@ -337,7 +350,7 @@ func CalculateTokenCosts(usage *converter.TokenUsage, price *ModelPrice) *conver
 	if inputImageCost == 0 {
 		inputImageCost = inputCostPerToken
 	}
-	costs.ImageCost = float64(imageTokens) * inputImageCost
+	costs.ImageCost = float64(billableImageTokens) * inputImageCost
 
 	// Generated image tokens are part of CompletionTokens and must not also be
 	// charged as text. Prefer the token-based image rate when the provider reports

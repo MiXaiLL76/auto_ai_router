@@ -1323,3 +1323,73 @@ func TestCalculateTokenCosts_GoogleProviderAlias200k_FullSession(t *testing.T) {
 		})
 	}
 }
+
+func TestCalculateTokenCosts_CachedImageTokensAreNotBilledTwice(t *testing.T) {
+	usage := &converter.TokenUsage{
+		PromptTokens:      340,
+		CompletionTokens:  80,
+		ImageTokens:       81,
+		CachedInputTokens: 320,
+	}
+	price := &ModelPrice{
+		InputCostPerToken:       0.000000182,
+		OutputCostPerToken:      0.000000364,
+		CacheReadInputTokenCost: 0.00000000364,
+	}
+
+	costs := CalculateTokenCosts(usage, price)
+
+	require.NotNil(t, costs)
+	wantInputSide := float64(340-320)*price.InputCostPerToken +
+		float64(320)*price.CacheReadInputTokenCost
+	gotInputSide := costs.InputCost + costs.CachedInputCost + costs.ImageCost
+	assert.InDelta(t, wantInputSide, gotInputSide, 1e-18)
+	assert.Equal(t, 0.0, costs.InputCost)
+	assert.InDelta(t, float64(20)*price.InputCostPerToken, costs.ImageCost, 1e-18)
+	assert.InDelta(t, wantInputSide+float64(80)*price.OutputCostPerToken, costs.TotalCost, 1e-18)
+}
+
+func TestCalculateTokenCosts_UncachedImageTokensBilledInFull(t *testing.T) {
+	usage := &converter.TokenUsage{
+		PromptTokens:      375,
+		CompletionTokens:  80,
+		ImageTokens:       81,
+		CachedInputTokens: 192,
+	}
+	price := &ModelPrice{
+		InputCostPerToken:       0.000000182,
+		OutputCostPerToken:      0.000000364,
+		CacheReadInputTokenCost: 0.00000000364,
+	}
+
+	costs := CalculateTokenCosts(usage, price)
+
+	require.NotNil(t, costs)
+	assert.InDelta(t, float64(375-192-81)*price.InputCostPerToken, costs.InputCost, 1e-18)
+	assert.InDelta(t, float64(81)*price.InputCostPerToken, costs.ImageCost, 1e-18)
+	wantInputSide := float64(375-192)*price.InputCostPerToken +
+		float64(192)*price.CacheReadInputTokenCost
+	assert.InDelta(t, wantInputSide, costs.InputCost+costs.CachedInputCost+costs.ImageCost, 1e-18)
+}
+
+func TestCalculateTokenCosts_CachedImageOverlapKeepsDedicatedImageRate(t *testing.T) {
+	usage := &converter.TokenUsage{
+		PromptTokens:      100,
+		CompletionTokens:  0,
+		ImageTokens:       50,
+		CachedInputTokens: 80,
+	}
+	price := &ModelPrice{
+		InputCostPerToken:       0.001,
+		OutputCostPerToken:      0.002,
+		CacheReadInputTokenCost: 0.0001,
+		InputCostPerImageToken:  0.005,
+	}
+
+	costs := CalculateTokenCosts(usage, price)
+
+	require.NotNil(t, costs)
+	assert.Equal(t, 0.0, costs.InputCost)
+	assert.InDelta(t, float64(20)*price.InputCostPerImageToken, costs.ImageCost, 1e-12)
+	assert.InDelta(t, float64(80)*price.CacheReadInputTokenCost, costs.CachedInputCost, 1e-12)
+}
