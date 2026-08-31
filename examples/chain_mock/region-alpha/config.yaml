@@ -1,0 +1,83 @@
+server:
+  port: 8080
+  max_body_size_mb: 10
+  request_timeout: 15s
+  logging_level: info
+  master_key: "sk-alpha"
+  default_models_rpm: 100000
+
+fail2ban:
+  max_attempts: 2
+  ban_duration: 20s
+  error_codes: [429, 500, 502, 503, 504]
+
+monitoring:
+  prometheus_enabled: false
+  health_check_path: "/health"
+  pprof_enabled: false
+
+# region-alpha is the interesting one: for `chat-smart` it has leaf credentials
+# in FOUR priority tiers (1 / 2 / 3 / 9). The gateway learns this whole
+# breakdown from region-alpha's own /health and expands the single
+# `region-alpha` AIR credential into one balancer candidate per tier (Design B).
+# Tier 9 (`alpha-bulk-1`) is intentionally uncapped, so the cascade always has
+# somewhere to land and a metered load run stays 100% 200s while you watch the
+# lower tiers fill and go on standby. `chat-fast` is a smaller two-tier case here
+# (p1 ×2 weighted 2:1 + an uncapped p9 backstop), also expanded by the gateway.
+# `embed-v1` is a single unlimited credential — the gateway keeps that one on the
+# plain scalar path.
+#
+# Only model-level `tpm` is set (10 tokens/request from the mock) — that is the
+# number region-alpha's /health reports and the gateway meters its own traffic
+# against, per tier.
+credentials:
+  - name: "alpha-premium-1"
+    type: "openai"
+    api_key: "sk-mock"
+    base_url: "http://mock:9100"
+    rpm: 100000
+    priority: 1
+    weight: 2
+
+  - name: "alpha-premium-2"
+    type: "openai"
+    api_key: "sk-mock"
+    base_url: "http://mock:9100"
+    rpm: 100000
+    priority: 1
+    weight: 1
+
+  - name: "alpha-standard-1"
+    type: "openai"
+    api_key: "sk-mock"
+    base_url: "http://mock:9100"
+    rpm: 100000
+    priority: 2
+
+  - name: "alpha-spot-1"
+    type: "openai"
+    api_key: "sk-mock"
+    base_url: "http://mock:9100"
+    rpm: 100000
+    priority: 3
+
+  - name: "alpha-bulk-1"
+    type: "openai"
+    api_key: "sk-mock"
+    base_url: "http://mock:9100"
+    rpm: 100000
+    priority: 9
+
+models:
+  # chat-smart — 4 tiers. gateway tier caps: t1=300, t2(cum)=420, t3(cum)=500, t9=uncapped.
+  - { name: chat-smart, credential: alpha-premium-1, tpm: 150 }
+  - { name: chat-smart, credential: alpha-premium-2, tpm: 150 }
+  - { name: chat-smart, credential: alpha-standard-1, tpm: 120 }
+  - { name: chat-smart, credential: alpha-spot-1, tpm: 80 }
+  - { name: chat-smart, credential: alpha-bulk-1, tpm: -1 }
+  # chat-fast — tier 1 (two weighted credentials 2:1) + uncapped tier 9 backstop
+  - { name: chat-fast, credential: alpha-premium-1, tpm: 250 }
+  - { name: chat-fast, credential: alpha-premium-2, tpm: 250 }
+  - { name: chat-fast, credential: alpha-bulk-1, tpm: -1 }
+  # embed-v1 — single unlimited credential (plain scalar path)
+  - { name: embed-v1, credential: alpha-premium-1, tpm: -1 }

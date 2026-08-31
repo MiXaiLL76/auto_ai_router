@@ -1,0 +1,56 @@
+# Multi-region AIR chain with per-priority-tier grouping (Design B).
+#
+# Requires the router image to already exist locally as auto-ai-router:latest —
+# build it from the repo root first:  make docker-build
+# This file never builds it itself, so re-run that build after any code change
+# before `docker compose up` picks it up.
+services:
+  mock:
+    image: nginx:alpine
+    volumes:
+      - ./mock/nginx.conf:/etc/nginx/nginx.conf:ro
+    networks: [chain]
+
+  region-alpha:
+    image: auto-ai-router:latest
+    volumes:
+      - ./region-alpha/config.yaml:/app/config.yaml:ro
+    ports:
+      - "8081:8080"
+    depends_on: [mock]
+    networks: [chain]
+    restart: unless-stopped
+
+  region-beta:
+    image: auto-ai-router:latest
+    volumes:
+      - ./region-beta/config.yaml:/app/config.yaml:ro
+    ports:
+      - "8082:8080"
+    depends_on: [mock]
+    networks: [chain]
+    restart: unless-stopped
+
+  region-gamma:
+    image: auto-ai-router:latest
+    volumes:
+      - ./region-gamma/config.yaml:/app/config.yaml:ro
+    ports:
+      - "8083:8080"
+    depends_on: [mock]
+    networks: [chain]
+    restart: unless-stopped
+
+  gateway:
+    image: auto-ai-router:latest
+    volumes:
+      - ./gateway/config.yaml:/app/config.yaml:ro
+    ports:
+      - "8080:8080"
+    depends_on: [region-alpha, region-beta, region-gamma]
+    networks: [chain]
+    restart: unless-stopped
+
+networks:
+  chain:
+    driver: bridge

@@ -16,6 +16,13 @@ import (
 const DefaultMaxAttempts = 3
 const DefaultBanDuration time.Duration = 0
 
+// FallbackPriorityGroup is the primary-selection priority group assigned to every
+// is_fallback credential. It is intentionally a large number so fallback credentials
+// always sort into the last priority group (tried after every explicit tier) and read
+// that way on the dashboard. Credentials may not set an explicit `priority:` alongside
+// `is_fallback: true` — this value is assigned automatically (see Config.Validate).
+const FallbackPriorityGroup = 999
+
 // DefaultModelPricesSyncInterval is how often model prices are re-fetched from model_prices_link.
 const DefaultModelPricesSyncInterval = 5 * time.Minute
 
@@ -746,11 +753,15 @@ type CredentialConfig struct {
 	// GenAI-compatible one (/v1beta/models/{model}:generateContent).
 	// Only valid when Type == ProviderTypeCometAPI and mutually exclusive
 	// with OpenAIProtocol. See EffectiveProviderType.
-	GoogleProtocol          bool              `yaml:"google_proto,omitempty"`
-	RPM                     int               `yaml:"rpm"`
-	TPM                     int               `yaml:"tpm"`
-	Weight                  int               `yaml:"weight"` // Default weighted round-robin weight for this credential (0 = 1)
-	FallbackPriority        int               `yaml:"fallback_priority,omitempty"`
+	GoogleProtocol   bool `yaml:"google_proto,omitempty"`
+	RPM              int  `yaml:"rpm"`
+	TPM              int  `yaml:"tpm"`
+	Weight           int  `yaml:"weight"` // Default weighted round-robin weight for this credential (0 = 1)
+	FallbackPriority int  `yaml:"fallback_priority,omitempty"`
+	// Priority is the primary-selection priority group (lower selects first).
+	// See EffectivePriority for the resolution chain against FallbackPriority.
+	Priority int `yaml:"priority,omitempty"`
+
 	ReasoningOnly           bool              `yaml:"reasoning_only,omitempty"`
 	Scopes                  []string          `yaml:"scopes,omitempty"`
 	DeniedScopes            []string          `yaml:"denied_scopes,omitempty"`
@@ -789,6 +800,43 @@ func (c CredentialConfig) ScopeExpression() *scope.Expression {
 
 func (c CredentialConfig) IsProxyLike() bool {
 	return c.Type.IsProxyLike()
+}
+
+// EffectivePriority resolves the primary-selection priority group for this credential:
+// explicit Priority (if > 0), else FallbackPriority (if > 0, backward-compat with the
+// retry-only priority field), else 0 — the default group, equivalent to today's flat pool.
+// Lower values are selected before higher ones; see balancer priority-group selection.
+func (c CredentialConfig) EffectivePriority() int {
+	if c.Priority > 0 {
+		return c.Priority
+	}
+	if c.FallbackPriority > 0 {
+		return c.FallbackPriority
+	}
+	return 0
+}
+
+// NormalizeFallbackPriority pins an is_fallback credential to the last priority group
+// (FallbackPriorityGroup) so it sorts after every explicit tier in the primary cascade
+// and on the dashboard. The fallback pool itself is still a separate, flat weighted pool
+// (see the balancer) — this only fixes the group *number* the credential carries.
+//
+// Config.Validate calls this after its priority/fallback_priority validation; callers
+// that build credentials outside YAML (e.g. DB-sourced credentials that never pass
+// through Validate) must call it themselves before handing the credential to the
+// balancer — see NormalizeFallbackPriorities.
+func (c *CredentialConfig) NormalizeFallbackPriority() {
+	if c.IsFallback {
+		c.Priority = FallbackPriorityGroup
+	}
+}
+
+// NormalizeFallbackPriorities applies NormalizeFallbackPriority to every credential in
+// the slice in place.
+func NormalizeFallbackPriorities(creds []CredentialConfig) {
+	for i := range creds {
+		creds[i].NormalizeFallbackPriority()
+	}
 }
 
 // EffectiveProviderType returns the ProviderType that should drive wire
@@ -838,6 +886,7 @@ func (c *CredentialConfig) UnmarshalYAML(value *yaml.Node) error {
 		TPM              string           `yaml:"tpm"`
 		Weight           string           `yaml:"weight"`
 		FallbackPriority string           `yaml:"fallback_priority,omitempty"`
+		Priority         string           `yaml:"priority,omitempty"`
 		ReasoningOnly    string           `yaml:"reasoning_only,omitempty"`
 		Scopes           []string         `yaml:"scopes,omitempty"`
 		DeniedScopes     []string         `yaml:"denied_scopes,omitempty"`
@@ -891,6 +940,9 @@ func (c *CredentialConfig) UnmarshalYAML(value *yaml.Node) error {
 	if c.FallbackPriority, err = parseField(temp.FallbackPriority, 0, strconv.Atoi, "fallback_priority for credential '"+c.Name+"'"); err != nil {
 		return err
 	}
+	if c.Priority, err = parseField(temp.Priority, 0, strconv.Atoi, "priority for credential '"+c.Name+"'"); err != nil {
+		return err
+	}
 	if c.ReasoningOnly, err = parseField(temp.ReasoningOnly, false, strconv.ParseBool, "reasoning_only for credential '"+c.Name+"'"); err != nil {
 		return err
 	}
@@ -905,7 +957,9 @@ func (c *CredentialConfig) UnmarshalYAML(value *yaml.Node) error {
 	if c.IsFallback, err = parseField(temp.IsFallback, false, strconv.ParseBool, "is_fallback for credential '"+c.Name+"'"); err != nil {
 		return err
 	}
-
+	if c.IsFallback && c.Priority > 0 {
+		return fmt.Errorf("priority for credential '%s': fallback credentials are always tried last and cannot set an explicit priority", c.Name)
+	}
 	// Copy models decoded via YAML anchors / inline definitions
 	c.Models = temp.Models
 
@@ -1883,6 +1937,18 @@ func (c *Config) Validate() error {
 		if cred.IsFallback && cred.FallbackPriority > 0 {
 			return fmt.Errorf("credential %s: invalid fallback_priority: fallback credentials cannot set fallback_priority", cred.Name)
 		}
+		if cred.Priority < 0 {
+			return fmt.Errorf("credential %s: invalid priority: %d (must be >= 0)", cred.Name, cred.Priority)
+		}
+		if cred.Priority > 0 && cred.FallbackPriority > 0 {
+			return fmt.Errorf("credential %s: invalid priority: cannot set both priority and fallback_priority", cred.Name)
+		}
+		if cred.IsFallback && cred.Priority > 0 && cred.Priority != FallbackPriorityGroup {
+			return fmt.Errorf("credential %s: invalid priority: fallback credentials cannot set priority (always tried last, pinned to group %d)", cred.Name, FallbackPriorityGroup)
+		}
+		// Pin every fallback credential to the last priority group (shared with the
+		// DB-credential path via NormalizeFallbackPriority).
+		c.Credentials[i].NormalizeFallbackPriority()
 	}
 
 	for _, model := range c.Models {

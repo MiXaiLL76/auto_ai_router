@@ -1,0 +1,73 @@
+server:
+  port: 8080
+  max_body_size_mb: 10
+  request_timeout: 15s
+  logging_level: info
+  master_key: "sk-beta"
+  default_models_rpm: 100000
+
+fail2ban:
+  max_attempts: 2
+  ban_duration: 20s
+  error_codes: [429, 500, 502, 503, 504]
+
+monitoring:
+  prometheus_enabled: false
+  health_check_path: "/health"
+  pprof_enabled: false
+
+# region-beta has a DIFFERENT tier shape than region-alpha for the same model:
+# `chat-fast` is 2 tiers here (1 / 2) but a single tier on alpha, and it owns
+# `chat-reason` with a wide gap (tier 1 -> tier 3). For `chat-smart` it is a
+# capped tier 1 plus an uncapped tier 9 — so region-beta@tier-1 shares the
+# gateway's primary group 1 with region-alpha@tier-1 (weighted round-robin) and
+# drops out of it once its own 150 tpm is spent, while region-beta@tier-9 sits
+# far down the cascade as a always-available backstop.
+credentials:
+  - name: "beta-main-1"
+    type: "openai"
+    api_key: "sk-mock"
+    base_url: "http://mock:9100"
+    rpm: 100000
+    priority: 1
+
+  - name: "beta-backup-1"
+    type: "openai"
+    api_key: "sk-mock"
+    base_url: "http://mock:9100"
+    rpm: 100000
+    priority: 2
+
+  - name: "beta-bulk-1"
+    type: "openai"
+    api_key: "sk-mock"
+    base_url: "http://mock:9100"
+    rpm: 100000
+    priority: 9
+
+  - name: "beta-reason-1"
+    type: "openai"
+    api_key: "sk-mock"
+    base_url: "http://mock:9100"
+    rpm: 100000
+    priority: 1
+
+  - name: "beta-reason-2"
+    type: "openai"
+    api_key: "sk-mock"
+    base_url: "http://mock:9100"
+    rpm: 100000
+    priority: 3
+
+models:
+  # chat-fast — 2 tiers
+  - { name: chat-fast, credential: beta-main-1, tpm: 180 }
+  - { name: chat-fast, credential: beta-backup-1, tpm: 120 }
+  # chat-smart — capped tier 1 + uncapped tier 9
+  - { name: chat-smart, credential: beta-main-1, tpm: 150 }
+  - { name: chat-smart, credential: beta-bulk-1, tpm: -1 }
+  # chat-reason — 2 capped tiers with a wide priority gap (1 then 3) + uncapped
+  # tier 9 backstop
+  - { name: chat-reason, credential: beta-reason-1, tpm: 120 }
+  - { name: chat-reason, credential: beta-reason-2, tpm: 200 }
+  - { name: chat-reason, credential: beta-bulk-1, tpm: -1 }

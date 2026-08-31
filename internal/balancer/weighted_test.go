@@ -16,7 +16,7 @@ import (
 func drawN(t *testing.T, bal *RoundRobin, model string, count int) []string {
 	t.Helper()
 	seq := make([]string, 0, count)
-	for i := 0; i < count; i++ {
+	for i := range count {
 		cred, err := bal.NextForModel(model)
 		require.NoError(t, err, "pick %d", i)
 		seq = append(seq, cred.Name)
@@ -95,7 +95,7 @@ func TestWeighted_DisabledModelCheckerSharesOneCycle(t *testing.T) {
 	}
 	bal := New(credentials, f2b, rl) // no model checker → filtering disabled
 
-	for i := 0; i < 1000; i++ {
+	for i := range 1000 {
 		_, err := bal.NextForModel(fmt.Sprintf("ghost-model-%d", i))
 		require.NoError(t, err)
 	}
@@ -287,7 +287,7 @@ func TestWeighted_NoBurstAfterUnban(t *testing.T) {
 	drawN(t, bal, "gpt-4o", 22)
 
 	// Ban heavy (3 × 401 reaches the threshold).
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		bal.RecordResponse("heavy", "gpt-4o", 401)
 	}
 	require.True(t, bal.IsBanned("heavy", "gpt-4o"))
@@ -305,4 +305,41 @@ func TestWeighted_NoBurstAfterUnban(t *testing.T) {
 	// that heavy did not bank ~300 weight while banned and burst on return.
 	after := drawN(t, bal, "gpt-4o", 11)
 	assert.GreaterOrEqual(t, tally(after)["light"], 1, "heavy burst after unban: %v", after)
+}
+
+func TestPruneStaleSWRRState(t *testing.T) {
+	f2b := fail2ban.New(3, 0, []int{500})
+	rl := ratelimit.New()
+	credentials := []config.CredentialConfig{
+		{Name: "a", APIKey: "k1", BaseURL: "http://1", RPM: -1},
+		{Name: "b", APIKey: "k2", BaseURL: "http://2", RPM: -1},
+	}
+	bal := New(credentials, f2b, rl)
+
+	_, err := bal.NextForModel("")
+	require.NoError(t, err)
+
+	bal.mu.RLock()
+	before := len(bal.swrr)
+	bal.mu.RUnlock()
+	require.Greater(t, before, 0, "selection must have created at least one SWRR cycle entry")
+
+	removed := bal.PruneStaleSWRRState(0)
+	assert.Equal(t, before, removed, "an entry last used before the cutoff must be pruned")
+
+	bal.mu.RLock()
+	after := len(bal.swrr)
+	bal.mu.RUnlock()
+	assert.Zero(t, after)
+
+	// A lookup right before pruning must survive a generous maxAge.
+	_, err = bal.NextForModel("")
+	require.NoError(t, err)
+	removed = bal.PruneStaleSWRRState(time.Hour)
+	assert.Zero(t, removed, "a recently-used entry must not be pruned")
+
+	bal.mu.RLock()
+	stillThere := len(bal.swrr)
+	bal.mu.RUnlock()
+	assert.Greater(t, stillThere, 0)
 }

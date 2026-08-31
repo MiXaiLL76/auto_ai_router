@@ -266,7 +266,7 @@ func TestChainPolling_RootUsesDownstreamProviderScopes(t *testing.T) {
 	root.modelManager.SetCredentials([]config.CredentialConfig{rootCred})
 
 	var updateMutex sync.Mutex
-	modelupdate.UpdateAllProxyCredentials(context.Background(), root.balancer, root.rateLimiter, root.logger, root.modelManager, &updateMutex)
+	modelupdate.UpdateAllProxyCredentials(context.Background(), root.balancer, root.rateLimiter, root.logger, root.modelManager, &updateMutex, nil)
 
 	teamAModels := modelIDSet(root.modelManager.GetAllModelsScoped(scope.NewContext([]string{"team-a"}, nil)))
 	assert.True(t, teamAModels["gpt-4"])
@@ -316,7 +316,7 @@ func TestThreeHopChain_PreservesCredentialAndModelScopeExpressions(t *testing.T)
 	middle := NewTestProxyBuilder().WithCredentials(middleCredential).Build()
 	middle.modelManager.SetCredentials([]config.CredentialConfig{middleCredential})
 	var middleUpdateMutex sync.Mutex
-	modelupdate.UpdateAllProxyCredentials(context.Background(), middle.balancer, middle.rateLimiter, middle.logger, middle.modelManager, &middleUpdateMutex)
+	modelupdate.UpdateAllProxyCredentials(context.Background(), middle.balancer, middle.rateLimiter, middle.logger, middle.modelManager, &middleUpdateMutex, nil)
 	middleServer := serveProxyWithHealth(t, middle)
 	defer middleServer.Close()
 
@@ -324,7 +324,7 @@ func TestThreeHopChain_PreservesCredentialAndModelScopeExpressions(t *testing.T)
 	root := NewTestProxyBuilder().WithCredentials(rootCredential).Build()
 	root.modelManager.SetCredentials([]config.CredentialConfig{rootCredential})
 	var rootUpdateMutex sync.Mutex
-	modelupdate.UpdateAllProxyCredentials(context.Background(), root.balancer, root.rateLimiter, root.logger, root.modelManager, &rootUpdateMutex)
+	modelupdate.UpdateAllProxyCredentials(context.Background(), root.balancer, root.rateLimiter, root.logger, root.modelManager, &rootUpdateMutex, nil)
 
 	teamA := modelIDSet(root.modelManager.GetAllModelsScoped(scope.NewContext([]string{"gateway", "team-a"}, nil)))
 	assert.True(t, teamA["gpt-4"])

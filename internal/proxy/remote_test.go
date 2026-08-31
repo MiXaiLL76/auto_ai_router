@@ -1,8 +1,10 @@
 package proxy
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"sync"
 	"testing"
@@ -10,6 +12,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/httputil"
 	"github.com/mixaill76/auto_ai_router/internal/ratelimit"
+	"github.com/mixaill76/auto_ai_router/internal/scope"
 	"github.com/mixaill76/auto_ai_router/internal/testhelpers"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -209,6 +212,664 @@ func TestUpdateModelLimits_ZeroValues_TrackedInManagerOnly(t *testing.T) {
 	assert.Equal(t, 4, mockMM.GetModelWeightForCredential("claude-3-opus", "test_proxy"))
 }
 
+func TestUpdateModelLimits_PriorityDeliveredToModelManager(t *testing.T) {
+	health := &httputil.ProxyHealthResponse{
+		Credentials: map[string]httputil.CredentialHealthStats{
+			"remote": {Priority: 200},
+		},
+		Models: map[string]httputil.ModelHealthStats{
+			"model:remote": {
+				Model:      "gpt-4",
+				Credential: "remote",
+				Priority:   200,
+				LimitRPM:   100,
+				LimitTPM:   1000,
+			},
+		},
+	}
+
+	rateLimiter := ratelimit.New()
+	cred := &config.CredentialConfig{Name: "test_proxy"}
+	logger := testhelpers.NewTestLogger()
+	mockMM := NewMockModelManager()
+
+	updateModelLimits(health, cred, rateLimiter, logger, mockMM)
+
+	assert.Equal(t, 200, mockMM.GetModelPriorityForCredential("gpt-4", "test_proxy"),
+		"priority learned from the upstream credential's /health response must reach ReplaceModelPrioritiesForCredential")
+}
+
+func TestUpdateModelLimits_PropagatesLearnedPriorityThroughProxyOfProxyChain(t *testing.T) {
+	health := &httputil.ProxyHealthResponse{
+		Credentials: map[string]httputil.CredentialHealthStats{
+			"pol01-proxy-cred": {Priority: 0},
+		},
+		Models: map[string]httputil.ModelHealthStats{
+			"model:pol01": {
+				Model:      "gpt-4",
+				Credential: "pol01-proxy-cred",
+				Priority:   300,
+			},
+		},
+	}
+
+	rateLimiter := ratelimit.New()
+	cred := &config.CredentialConfig{Name: "ru01-proxy-cred"}
+	logger := testhelpers.NewTestLogger()
+	mockMM := NewMockModelManager()
+
+	updateModelLimits(health, cred, rateLimiter, logger, mockMM)
+
+	assert.Equal(t, 300, mockMM.GetModelPriorityForCredential("gpt-4", "ru01-proxy-cred"),
+		"pol01's dynamically-learned per-model priority must reach ru01, not pol01-proxy-cred's static (unset) priority")
+}
+
+// TestUpdateModelLimits_PriorityMinAggregation verifies that when several upstream
+// credentials in the remote proxy's /health response offer the same model at different
+// priorities (e.g. two grant credentials on the same node with different priority
+// groups), the local proxy credential's effective priority for that model is the MINIMUM
+// (highest-priority / tried-first group) — not a sum, unlike RPM/TPM limits.
+func TestUpdateModelLimits_PriorityMinAggregation(t *testing.T) {
+	health := &httputil.ProxyHealthResponse{
+		Credentials: map[string]httputil.CredentialHealthStats{
+			"grant-a": {Priority: 300},
+			"grant-b": {Priority: 100},
+			"grant-c": {Priority: 200},
+		},
+		Models: map[string]httputil.ModelHealthStats{
+			"model:a": {Model: "gpt-4", Credential: "grant-a", Priority: 300},
+			"model:b": {Model: "gpt-4", Credential: "grant-b", Priority: 100},
+			"model:c": {Model: "gpt-4", Credential: "grant-c", Priority: 200},
+		},
+	}
+
+	rateLimiter := ratelimit.New()
+	cred := &config.CredentialConfig{Name: "test_proxy"}
+	logger := testhelpers.NewTestLogger()
+	mockMM := NewMockModelManager()
+
+	updateModelLimits(health, cred, rateLimiter, logger, mockMM)
+
+	assert.Equal(t, 100, mockMM.GetModelPriorityForCredential("gpt-4", "test_proxy"))
+}
+
+// TestUpdateModelLimits_EmitsPriorityTiers_WhenUpstreamSpansMultipleGroups is the
+// Design B poll-side piece: an upstream serving one model from >= 2 priority groups
+// produces a per-tier breakdown (summed capacity + weight per tier), sorted ascending.
+func TestUpdateModelLimits_EmitsPriorityTiers_WhenUpstreamSpansMultipleGroups(t *testing.T) {
+	health := &httputil.ProxyHealthResponse{
+		Credentials: map[string]httputil.CredentialHealthStats{
+			"vertex-1": {Priority: 1}, "vertex-2": {Priority: 1},
+			"gemini-fallback": {Priority: 2},
+		},
+		Models: map[string]httputil.ModelHealthStats{
+			"a": {Model: "gemini-2.5-flash", Credential: "vertex-1", Priority: 1, Weight: 20, LimitRPM: 100, LimitTPM: 1000, CurrentRPM: 5, CurrentTPM: 50},
+			"b": {Model: "gemini-2.5-flash", Credential: "vertex-2", Priority: 1, Weight: 20, LimitRPM: 100, LimitTPM: 1000, CurrentRPM: 3, CurrentTPM: 30},
+			"c": {Model: "gemini-2.5-flash", Credential: "gemini-fallback", Priority: 2, Weight: 1, LimitRPM: 500, LimitTPM: 5000, CurrentRPM: 1, CurrentTPM: 10},
+		},
+	}
+
+	rateLimiter := ratelimit.New()
+	cred := &config.CredentialConfig{Name: "usa03"}
+	logger := testhelpers.NewTestLogger()
+	mockMM := NewMockModelManager()
+
+	updateModelLimits(health, cred, rateLimiter, logger, mockMM)
+
+	tiers := mockMM.GetModelPriorityTiersForCredential("gemini-2.5-flash", "usa03")
+	require.Len(t, tiers, 2)
+	assert.Equal(t, 1, tiers[0].Priority)
+	assert.Equal(t, 40, tiers[0].Weight, "tier 1 weight = 20 + 20")
+	assert.Equal(t, 200, tiers[0].LimitRPM, "tier 1 RPM = 100 + 100")
+	assert.Equal(t, 8, tiers[0].CurrentRPM, "tier 1 current = 5 + 3")
+	assert.False(t, tiers[0].Banned)
+	assert.Equal(t, 2, tiers[1].Priority)
+	assert.Equal(t, 500, tiers[1].LimitRPM)
+
+	// Aggregate (cred,model) bucket is still the grand total.
+	assert.Equal(t, 700, rateLimiter.GetModelLimitRPM("usa03", "gemini-2.5-flash"))
+}
+
+// TestUpdateModelLimits_TierBanned_OnlyRealBanNotSaturation is the review_158 item 12
+// poll-side piece: a tier's Banned flag must reflect a real upstream ban, not mere
+// RPM/TPM saturation. A saturated-but-not-banned tier keeps Banned=false and reports its
+// usage via Current* so the downstream balancer surfaces 429 (rate limit), not 503.
+func TestUpdateModelLimits_TierBanned_OnlyRealBanNotSaturation(t *testing.T) {
+	health := &httputil.ProxyHealthResponse{
+		Credentials: map[string]httputil.CredentialHealthStats{
+			"c1": {Priority: 1}, "c2": {Priority: 2},
+		},
+		Models: map[string]httputil.ModelHealthStats{
+			// tier 1: not banned, but RPM budget fully consumed upstream.
+			"a": {Model: "m", Credential: "c1", Priority: 1, LimitRPM: 100, CurrentRPM: 100},
+			// tier 2: really banned.
+			"b": {Model: "m", Credential: "c2", Priority: 2, LimitRPM: 500, CurrentRPM: 0, IsBanned: true},
+		},
+	}
+	rateLimiter := ratelimit.New()
+	cred := &config.CredentialConfig{Name: "px"}
+	mockMM := NewMockModelManager()
+	updateModelLimits(health, cred, rateLimiter, testhelpers.NewTestLogger(), mockMM)
+
+	tiers := mockMM.GetModelPriorityTiersForCredential("m", "px")
+	require.Len(t, tiers, 2)
+	assert.Equal(t, 1, tiers[0].Priority)
+	assert.False(t, tiers[0].Banned, "saturated-but-not-banned tier must keep Banned=false")
+	assert.Equal(t, 100, tiers[0].CurrentRPM)
+	assert.Equal(t, 100, tiers[0].LimitRPM)
+	assert.Equal(t, 2, tiers[1].Priority)
+	assert.True(t, tiers[1].Banned, "tier whose only contributor is IsBanned must be Banned=true")
+}
+
+// TestUpdateModelLimits_NoPriorityTiers_ForSingleGroupUpstream: a model served from one
+// priority group stays on the scalar path — no tier breakdown emitted.
+func TestUpdateModelLimits_NoPriorityTiers_ForSingleGroupUpstream(t *testing.T) {
+	health := &httputil.ProxyHealthResponse{
+		Credentials: map[string]httputil.CredentialHealthStats{
+			"c1": {Priority: 1}, "c2": {Priority: 1},
+		},
+		Models: map[string]httputil.ModelHealthStats{
+			"a": {Model: "gpt-4", Credential: "c1", Priority: 1, LimitRPM: 100},
+			"b": {Model: "gpt-4", Credential: "c2", Priority: 1, LimitRPM: 100},
+		},
+	}
+	rateLimiter := ratelimit.New()
+	cred := &config.CredentialConfig{Name: "px"}
+	mockMM := NewMockModelManager()
+	updateModelLimits(health, cred, rateLimiter, testhelpers.NewTestLogger(), mockMM)
+
+	assert.Nil(t, mockMM.GetModelPriorityTiersForCredential("gpt-4", "px"))
+	assert.Equal(t, 1, mockMM.GetModelPriorityForCredential("gpt-4", "px"))
+}
+
+// TestUpdateModelLimits_SingleGroupUpstream_BannedStillEmitsTier is review_158 round 3
+// item 3: a single-group upstream normally stays on the scalar path, but when that lone
+// group is banned the tier must be emitted anyway — the scalar priority number carries no
+// ban state, so without this the proxy credential stays a live candidate here and on the
+// next router until local fail2ban trips.
+func TestUpdateModelLimits_SingleGroupUpstream_BannedStillEmitsTier(t *testing.T) {
+	health := &httputil.ProxyHealthResponse{
+		Credentials: map[string]httputil.CredentialHealthStats{
+			"c1": {Priority: 1}, "c2": {Priority: 1},
+		},
+		Models: map[string]httputil.ModelHealthStats{
+			"a": {Model: "gpt-4", Credential: "c1", Priority: 1, LimitRPM: 100, IsBanned: true},
+			"b": {Model: "gpt-4", Credential: "c2", Priority: 1, LimitRPM: 100, IsBanned: true},
+		},
+	}
+	rateLimiter := ratelimit.New()
+	cred := &config.CredentialConfig{Name: "px"}
+	mockMM := NewMockModelManager()
+	updateModelLimits(health, cred, rateLimiter, testhelpers.NewTestLogger(), mockMM)
+
+	tiers := mockMM.GetModelPriorityTiersForCredential("gpt-4", "px")
+	require.Len(t, tiers, 1)
+	assert.True(t, tiers[0].Banned)
+}
+
+// TestUpdateModelLimits_PriorityTiers_RecursesUpstreamTiers: when an upstream model entry
+// itself carries a PriorityTiers array (proxy-of-proxy), those tiers fold into this
+// router's own per-priority buckets at their own priorities.
+func TestUpdateModelLimits_PriorityTiers_RecursesUpstreamTiers(t *testing.T) {
+	health := &httputil.ProxyHealthResponse{
+		Credentials: map[string]httputil.CredentialHealthStats{
+			"downstream-proxy": {Priority: 0},
+			"direct":           {Priority: 9},
+		},
+		Models: map[string]httputil.ModelHealthStats{
+			"a": {
+				Model: "m", Credential: "downstream-proxy",
+				PriorityTiers: []httputil.ModelPriorityTier{
+					{Priority: 1, Weight: 5, LimitRPM: 50},
+					{Priority: 4, Weight: 2, LimitRPM: 400},
+				},
+			},
+			"b": {Model: "m", Credential: "direct", Priority: 9, Weight: 1, LimitRPM: 10},
+		},
+	}
+	rateLimiter := ratelimit.New()
+	cred := &config.CredentialConfig{Name: "top"}
+	mockMM := NewMockModelManager()
+	updateModelLimits(health, cred, rateLimiter, testhelpers.NewTestLogger(), mockMM)
+
+	tiers := mockMM.GetModelPriorityTiersForCredential("m", "top")
+	require.Len(t, tiers, 3)
+	assert.Equal(t, []int{1, 4, 9}, []int{tiers[0].Priority, tiers[1].Priority, tiers[2].Priority})
+	assert.Equal(t, 50, tiers[0].LimitRPM)
+	assert.Equal(t, 400, tiers[1].LimitRPM)
+	assert.Equal(t, 10, tiers[2].LimitRPM)
+}
+
+func TestUpdateModelLimits_PriorityMinAggregation_SkipsBannedEntries(t *testing.T) {
+	health := &httputil.ProxyHealthResponse{
+		Credentials: map[string]httputil.CredentialHealthStats{
+			"cheapgpt": {Priority: 100},
+			"grant":    {Priority: 200},
+		},
+		Models: map[string]httputil.ModelHealthStats{
+			"model:cheapgpt": {Model: "gpt-4", Credential: "cheapgpt", Priority: 100, IsBanned: true},
+			"model:grant":    {Model: "gpt-4", Credential: "grant", Priority: 200, IsBanned: false},
+		},
+	}
+
+	rateLimiter := ratelimit.New()
+	cred := &config.CredentialConfig{Name: "test_proxy"}
+	logger := testhelpers.NewTestLogger()
+	mockMM := NewMockModelManager()
+
+	updateModelLimits(health, cred, rateLimiter, logger, mockMM)
+
+	assert.Equal(t, 200, mockMM.GetModelPriorityForCredential("gpt-4", "test_proxy"),
+		"banned upstream credential's priority must be excluded from the MIN aggregation")
+}
+
+// TestUpdateModelLimits_AllEntriesBanned_FallsBackToWorstSeenNotZero is a regression
+// test: when EVERY upstream entry for a model is banned, the model must not be left
+// out of modelPriorities (which ReplaceModelPrioritiesForCredential reads as "clear
+// any learned priority" — GetModelPriorityForCredential then returns 0, and
+// effectivePriority falls back to this proxy credential's own static
+// EffectivePriority(), commonly 0/unset — the *best*, tried-first group). A fully-down
+// node must be pushed to the worst priority ever seen among its entries instead,
+// so it doesn't rank ahead of a healthy alternative at a real priority like 50.
+func TestUpdateModelLimits_AllEntriesBanned_FallsBackToWorstSeenNotZero(t *testing.T) {
+	health := &httputil.ProxyHealthResponse{
+		Credentials: map[string]httputil.CredentialHealthStats{
+			"cheapgpt": {Priority: 100},
+			"grant":    {Priority: 200},
+		},
+		Models: map[string]httputil.ModelHealthStats{
+			"model:cheapgpt": {Model: "gpt-4", Credential: "cheapgpt", Priority: 100, IsBanned: true},
+			"model:grant":    {Model: "gpt-4", Credential: "grant", Priority: 200, IsBanned: true},
+		},
+	}
+
+	rateLimiter := ratelimit.New()
+	cred := &config.CredentialConfig{Name: "test_proxy"}
+	logger := testhelpers.NewTestLogger()
+	mockMM := NewMockModelManager()
+
+	updateModelLimits(health, cred, rateLimiter, logger, mockMM)
+
+	assert.Equal(t, 200, mockMM.GetModelPriorityForCredential("gpt-4", "test_proxy"),
+		"a fully-down model must expose the worst priority seen (200), not fall through to the proxy credential's own static priority (0 here, which would rank it ahead of a healthy priority-50 alternative)")
+}
+
+// TestUpdateModelLimits_PriorityMinAggregation_NonBannedLowerStillWins is a regression
+// guard alongside the fix above: when neither upstream credential is banned, the MIN
+// aggregation still picks the lower (higher-priority / tried-first) value as before —
+// the banned-skip logic must not accidentally change the base MIN case.
+func TestUpdateModelLimits_PriorityMinAggregation_NonBannedLowerStillWins(t *testing.T) {
+	health := &httputil.ProxyHealthResponse{
+		Credentials: map[string]httputil.CredentialHealthStats{
+			"grant-a": {Priority: 100},
+			"grant-b": {Priority: 200},
+		},
+		Models: map[string]httputil.ModelHealthStats{
+			"model:a": {Model: "gpt-4", Credential: "grant-a", Priority: 100, IsBanned: false},
+			"model:b": {Model: "gpt-4", Credential: "grant-b", Priority: 200, IsBanned: false},
+		},
+	}
+
+	rateLimiter := ratelimit.New()
+	cred := &config.CredentialConfig{Name: "test_proxy"}
+	logger := testhelpers.NewTestLogger()
+	mockMM := NewMockModelManager()
+
+	updateModelLimits(health, cred, rateLimiter, logger, mockMM)
+
+	assert.Equal(t, 100, mockMM.GetModelPriorityForCredential("gpt-4", "test_proxy"))
+}
+
+// TestUpdateModelLimits_PriorityMin_ExcludesRateLimitedCheapTier is the review_158 #3-
+// deferred fix: when several upstream credentials front one proxy credential at different
+// priorities and the cheap (lowest-number) tier is currently RPM-exhausted, the upstream
+// has already cascaded to the pricier tier — so the proxy credential's learned per-model
+// priority must rise to that live tier, not stay pinned to the saturated cheap one.
+// Otherwise the local balancer keeps treating the proxy as tier-1 and over-sends to it
+// while a genuinely mid-priced alternative sits idle.
+func TestUpdateModelLimits_PriorityMin_ExcludesRateLimitedCheapTier(t *testing.T) {
+	health := &httputil.ProxyHealthResponse{
+		Credentials: map[string]httputil.CredentialHealthStats{
+			"grant-cheap":     {Priority: 1},
+			"grant-expensive": {Priority: 5},
+		},
+		Models: map[string]httputil.ModelHealthStats{
+			// cheap tier is at its RPM limit → not live
+			"model:cheap":     {Model: "gpt-4", Credential: "grant-cheap", Priority: 1, LimitRPM: 10, CurrentRPM: 10},
+			"model:expensive": {Model: "gpt-4", Credential: "grant-expensive", Priority: 5, LimitRPM: 1000, CurrentRPM: 3},
+		},
+	}
+
+	rateLimiter := ratelimit.New()
+	cred := &config.CredentialConfig{Name: "test_proxy"}
+	logger := testhelpers.NewTestLogger()
+	mockMM := NewMockModelManager()
+
+	updateModelLimits(health, cred, rateLimiter, logger, mockMM)
+
+	assert.Equal(t, 5, mockMM.GetModelPriorityForCredential("gpt-4", "test_proxy"),
+		"a saturated cheap tier must not keep pinning the learned priority to 1")
+	// Capacity is still the SUM of both tiers — only the priority scalar tracks the live tier.
+	assert.Equal(t, 1010, rateLimiter.GetModelLimitRPM("test_proxy", "gpt-4"))
+}
+
+// TestUpdateModelLimits_PriorityMin_RateLimitedCheapTierRecovers is the paired
+// recovery case: once the cheap tier drops back under its limit it is live again and
+// MIN returns to 1.
+func TestUpdateModelLimits_PriorityMin_RateLimitedCheapTierRecovers(t *testing.T) {
+	health := &httputil.ProxyHealthResponse{
+		Credentials: map[string]httputil.CredentialHealthStats{
+			"grant-cheap":     {Priority: 1},
+			"grant-expensive": {Priority: 5},
+		},
+		Models: map[string]httputil.ModelHealthStats{
+			"model:cheap":     {Model: "gpt-4", Credential: "grant-cheap", Priority: 1, LimitRPM: 10, CurrentRPM: 4},
+			"model:expensive": {Model: "gpt-4", Credential: "grant-expensive", Priority: 5, LimitRPM: 1000, CurrentRPM: 3},
+		},
+	}
+
+	rateLimiter := ratelimit.New()
+	cred := &config.CredentialConfig{Name: "test_proxy"}
+	logger := testhelpers.NewTestLogger()
+	mockMM := NewMockModelManager()
+
+	updateModelLimits(health, cred, rateLimiter, logger, mockMM)
+
+	assert.Equal(t, 1, mockMM.GetModelPriorityForCredential("gpt-4", "test_proxy"))
+}
+
+// TestUpdateModelLimits_PriorityMin_TPMExhaustedCheapTierExcluded mirrors the RPM case
+// for the TPM budget.
+func TestUpdateModelLimits_PriorityMin_TPMExhaustedCheapTierExcluded(t *testing.T) {
+	health := &httputil.ProxyHealthResponse{
+		Credentials: map[string]httputil.CredentialHealthStats{
+			"grant-cheap":     {Priority: 1},
+			"grant-expensive": {Priority: 5},
+		},
+		Models: map[string]httputil.ModelHealthStats{
+			"model:cheap":     {Model: "gpt-4", Credential: "grant-cheap", Priority: 1, LimitTPM: 5000, CurrentTPM: 5000},
+			"model:expensive": {Model: "gpt-4", Credential: "grant-expensive", Priority: 5, LimitTPM: 500000, CurrentTPM: 100},
+		},
+	}
+
+	rateLimiter := ratelimit.New()
+	cred := &config.CredentialConfig{Name: "test_proxy"}
+	logger := testhelpers.NewTestLogger()
+	mockMM := NewMockModelManager()
+
+	updateModelLimits(health, cred, rateLimiter, logger, mockMM)
+
+	assert.Equal(t, 5, mockMM.GetModelPriorityForCredential("gpt-4", "test_proxy"))
+}
+
+// TestUpdateModelLimits_PriorityMin_AllTiersSaturated_FallsBackToWorst: when every tier
+// is saturated the model still exposes the worst tier seen (5), never falling through
+// to the proxy credential's own default group.
+func TestUpdateModelLimits_PriorityMin_AllTiersSaturated_FallsBackToWorst(t *testing.T) {
+	health := &httputil.ProxyHealthResponse{
+		Credentials: map[string]httputil.CredentialHealthStats{
+			"grant-cheap":     {Priority: 1},
+			"grant-expensive": {Priority: 5},
+		},
+		Models: map[string]httputil.ModelHealthStats{
+			"model:cheap":     {Model: "gpt-4", Credential: "grant-cheap", Priority: 1, LimitRPM: 10, CurrentRPM: 10},
+			"model:expensive": {Model: "gpt-4", Credential: "grant-expensive", Priority: 5, LimitRPM: 1000, CurrentRPM: 1000},
+		},
+	}
+
+	rateLimiter := ratelimit.New()
+	cred := &config.CredentialConfig{Name: "test_proxy"}
+	logger := testhelpers.NewTestLogger()
+	mockMM := NewMockModelManager()
+
+	updateModelLimits(health, cred, rateLimiter, logger, mockMM)
+
+	assert.Equal(t, 5, mockMM.GetModelPriorityForCredential("gpt-4", "test_proxy"))
+}
+
+// TestUpdateModelLimits_NoPriorityMismatchWarning_WhenCheapTierSaturated: like the
+// _WhenCheapCredentialIsBanned case — once the cheap tier is saturated it is excluded
+// from the MIN, so priority == priorityHigh and there is nothing heterogeneous to warn
+// about right now.
+func TestUpdateModelLimits_NoPriorityMismatchWarning_WhenCheapTierSaturated(t *testing.T) {
+	health := &httputil.ProxyHealthResponse{
+		Credentials: map[string]httputil.CredentialHealthStats{
+			"grant-cheap":     {Priority: 100},
+			"grant-expensive": {Priority: 200},
+		},
+		Models: map[string]httputil.ModelHealthStats{
+			"model:cheap":     {Model: "gpt-4", Credential: "grant-cheap", Priority: 100, LimitRPM: 10, CurrentRPM: 10},
+			"model:expensive": {Model: "gpt-4", Credential: "grant-expensive", Priority: 200, LimitRPM: 1000, CurrentRPM: 1},
+		},
+	}
+
+	rateLimiter := ratelimit.New()
+	cred := &config.CredentialConfig{Name: "grant-pol01"}
+	mockMM := NewMockModelManager()
+
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	updateModelLimits(health, cred, rateLimiter, logger, mockMM)
+
+	assert.NotContains(t, logBuf.String(), "different priority groups")
+}
+
+func TestUpdateModelLimits_WarnsOnPriorityMismatchAcrossLiveUpstreamCredentials(t *testing.T) {
+	health := &httputil.ProxyHealthResponse{
+		Credentials: map[string]httputil.CredentialHealthStats{
+			"cheapgpt": {Priority: 100},
+			"grant":    {Priority: 200},
+		},
+		Models: map[string]httputil.ModelHealthStats{
+			"model:cheapgpt": {Model: "gpt-4", Credential: "cheapgpt", Priority: 100, IsBanned: false},
+			"model:grant":    {Model: "gpt-4", Credential: "grant", Priority: 200, IsBanned: false},
+		},
+	}
+
+	rateLimiter := ratelimit.New()
+	cred := &config.CredentialConfig{Name: "grant-pol01"}
+	mockMM := NewMockModelManager()
+
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	updateModelLimits(health, cred, rateLimiter, logger, mockMM)
+
+	logOutput := logBuf.String()
+	assert.Contains(t, logOutput, "different priority groups")
+	assert.Contains(t, logOutput, "proxy=grant-pol01")
+	assert.Contains(t, logOutput, "model=gpt-4")
+	// Logged at Debug (a fully-supported config, fires every poll), with honest field
+	// names — the old "priority_if_cheaper_credential_stops_being_live" over-promised.
+	assert.Contains(t, logOutput, "level=DEBUG")
+	assert.Contains(t, logOutput, "lowest_live_priority=100")
+	assert.Contains(t, logOutput, "highest_live_priority=200")
+}
+
+// TestUpdateModelLimits_NoPriorityMismatchWarning_WhenCheapCredentialIsBanned checks the
+// warning doesn't double up with the 6.1 fix: once the cheap credential is actually banned
+// (not just still live at a lower priority), applyPriorityMin already excludes it, so
+// priority == priorityHigh (both 200) and there's nothing heterogeneous left to warn about.
+func TestUpdateModelLimits_NoPriorityMismatchWarning_WhenCheapCredentialIsBanned(t *testing.T) {
+	health := &httputil.ProxyHealthResponse{
+		Credentials: map[string]httputil.CredentialHealthStats{
+			"cheapgpt": {Priority: 100},
+			"grant":    {Priority: 200},
+		},
+		Models: map[string]httputil.ModelHealthStats{
+			"model:cheapgpt": {Model: "gpt-4", Credential: "cheapgpt", Priority: 100, IsBanned: true},
+			"model:grant":    {Model: "gpt-4", Credential: "grant", Priority: 200, IsBanned: false},
+		},
+	}
+
+	rateLimiter := ratelimit.New()
+	cred := &config.CredentialConfig{Name: "grant-pol01"}
+	mockMM := NewMockModelManager()
+
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	updateModelLimits(health, cred, rateLimiter, logger, mockMM)
+
+	assert.NotContains(t, logBuf.String(), "different priority groups")
+}
+
+// TestUpdateModelLimits_NoPriorityMismatchWarning_WhenPrioritiesMatch is the base
+// no-false-positive case: two live upstream credentials at the same priority never warn.
+func TestUpdateModelLimits_NoPriorityMismatchWarning_WhenPrioritiesMatch(t *testing.T) {
+	health := &httputil.ProxyHealthResponse{
+		Credentials: map[string]httputil.CredentialHealthStats{
+			"grant-a": {Priority: 200},
+			"grant-b": {Priority: 200},
+		},
+		Models: map[string]httputil.ModelHealthStats{
+			"model:a": {Model: "gpt-4", Credential: "grant-a", Priority: 200, IsBanned: false},
+			"model:b": {Model: "gpt-4", Credential: "grant-b", Priority: 200, IsBanned: false},
+		},
+	}
+
+	rateLimiter := ratelimit.New()
+	cred := &config.CredentialConfig{Name: "grant-pol01"}
+	mockMM := NewMockModelManager()
+
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+
+	updateModelLimits(health, cred, rateLimiter, logger, mockMM)
+
+	assert.NotContains(t, logBuf.String(), "different priority groups")
+}
+
+// TestUpdateModelLimits_SkipsFallbackUpstreamForPrimaryConnection: for a non-fallback
+// local proxy credential, an upstream credential marked is_fallback (reserved for
+// fallback traffic on the upstream node) is excluded from aggregation — its models,
+// priorities and limits must NOT surface on this proxy credential's primary pool. This
+// mirrors the old model-snapshot path (models.fetchRemoteModelsFromHealth) so the single
+// poller applies one consistent rule. A model offered ONLY through such a credential
+// simply is not routable via this proxy credential for primary traffic.
+func TestUpdateModelLimits_SkipsFallbackUpstreamForPrimaryConnection(t *testing.T) {
+	health := &httputil.ProxyHealthResponse{
+		Credentials: map[string]httputil.CredentialHealthStats{
+			"grant-primary":  {IsFallback: false, Priority: 100},
+			"grant-fallback": {IsFallback: true, Priority: 999},
+		},
+		Models: map[string]httputil.ModelHealthStats{
+			"model:primary":  {Model: "gpt-4", Credential: "grant-primary", Priority: 100, LimitRPM: 50, LimitTPM: 500},
+			"model:fallback": {Model: "claude-3-opus", Credential: "grant-fallback", Priority: 999, LimitRPM: 20, LimitTPM: 200},
+		},
+	}
+
+	rateLimiter := ratelimit.New()
+	cred := &config.CredentialConfig{Name: "test_proxy", IsFallback: false}
+	logger := testhelpers.NewTestLogger()
+	mockMM := NewMockModelManager()
+
+	updateModelLimits(health, cred, rateLimiter, logger, mockMM)
+
+	assert.True(t, mockMM.HasModel("test_proxy", "gpt-4"))
+	assert.False(t, mockMM.HasModel("test_proxy", "claude-3-opus"), "model served only via an is_fallback upstream credential must not surface on a primary connection")
+	assert.Equal(t, 100, mockMM.GetModelPriorityForCredential("gpt-4", "test_proxy"))
+	assert.Equal(t, 0, mockMM.GetModelPriorityForCredential("claude-3-opus", "test_proxy"))
+	assert.Equal(t, -1, rateLimiter.GetModelLimitRPM("test_proxy", "claude-3-opus"), "no rate-limiter entry for an excluded model")
+}
+
+// TestUpdateModelLimits_IncludesFallbackUpstreamForFallbackConnection: a locally
+// is_fallback proxy credential is a last resort — it includes every upstream credential
+// regardless of the upstream's own is_fallback flag.
+func TestUpdateModelLimits_IncludesFallbackUpstreamForFallbackConnection(t *testing.T) {
+	health := &httputil.ProxyHealthResponse{
+		Credentials: map[string]httputil.CredentialHealthStats{
+			"grant-primary":  {IsFallback: false, Priority: 100},
+			"grant-fallback": {IsFallback: true, Priority: 999},
+		},
+		Models: map[string]httputil.ModelHealthStats{
+			"model:primary":  {Model: "gpt-4", Credential: "grant-primary", Priority: 100, LimitRPM: 50, LimitTPM: 500},
+			"model:fallback": {Model: "claude-3-opus", Credential: "grant-fallback", Priority: 999, LimitRPM: 20, LimitTPM: 200},
+		},
+	}
+
+	rateLimiter := ratelimit.New()
+	cred := &config.CredentialConfig{Name: "test_proxy", IsFallback: true}
+	logger := testhelpers.NewTestLogger()
+	mockMM := NewMockModelManager()
+
+	updateModelLimits(health, cred, rateLimiter, logger, mockMM)
+
+	assert.True(t, mockMM.HasModel("test_proxy", "gpt-4"))
+	assert.True(t, mockMM.HasModel("test_proxy", "claude-3-opus"))
+	assert.Equal(t, 999, mockMM.GetModelPriorityForCredential("claude-3-opus", "test_proxy"))
+	assert.Equal(t, 20, rateLimiter.GetModelLimitRPM("test_proxy", "claude-3-opus"))
+}
+
+// TestUpdateModelScopes_SkipsFallbackUpstreamForPrimaryConnection: for a non-fallback
+// local proxy credential, an unrestricted is_fallback upstream credential must NOT be
+// OR'd into the aggregate — otherwise its lack of scope restriction erases a restricted
+// primary upstream credential's scope (an access-control regression). Here the model is
+// served by a restricted primary credential (team-a) and an unrestricted fallback one;
+// the resulting proxy-credential scope must stay team-a-only.
+func TestUpdateModelScopes_SkipsFallbackUpstreamForPrimaryConnection(t *testing.T) {
+	health := &httputil.ProxyHealthResponse{
+		Credentials: map[string]httputil.CredentialHealthStats{
+			"grant-primary":  {IsFallback: false, Scopes: []string{"team-a"}},
+			"grant-fallback": {IsFallback: true},
+		},
+		Models: map[string]httputil.ModelHealthStats{
+			"model:primary":  {Model: "gpt-4", Credential: "grant-primary"},
+			"model:fallback": {Model: "gpt-4", Credential: "grant-fallback"},
+		},
+	}
+
+	cred := &config.CredentialConfig{Name: "test_proxy", IsFallback: false}
+	mockMM := NewMockModelManager()
+
+	updateModelScopes(health, cred, mockMM)
+
+	require.NotNil(t, cred.ProviderScopeExpression)
+	assert.True(t, scope.NewContext([]string{"team-a"}, nil).AllowsExpression(cred.ProviderScopeExpression),
+		"team-a caller must be allowed")
+	assert.False(t, scope.NewContext(nil, nil).AllowsExpression(cred.ProviderScopeExpression),
+		"an unrestricted is_fallback upstream credential must not erase the primary credential's team-a restriction")
+}
+
+// TestUpdateModelScopes_IncludesFallbackUpstreamForFallbackConnection: a locally
+// is_fallback proxy credential aggregates every upstream credential, is_fallback or not.
+func TestUpdateModelScopes_IncludesFallbackUpstreamForFallbackConnection(t *testing.T) {
+	health := &httputil.ProxyHealthResponse{
+		Credentials: map[string]httputil.CredentialHealthStats{
+			"grant-fallback": {IsFallback: true, Scopes: []string{"team-a"}},
+		},
+		Models: map[string]httputil.ModelHealthStats{
+			"model:fallback": {Model: "claude-3-opus", Credential: "grant-fallback"},
+		},
+	}
+
+	cred := &config.CredentialConfig{Name: "test_proxy", IsFallback: true}
+	mockMM := NewMockModelManager()
+
+	updateModelScopes(health, cred, mockMM)
+
+	require.NotNil(t, cred.ProviderScopeExpression)
+	assert.True(t, scope.NewContext([]string{"team-a"}, nil).AllowsExpression(cred.ProviderScopeExpression))
+	assert.False(t, scope.NewContext(nil, nil).AllowsExpression(cred.ProviderScopeExpression))
+}
+
+func TestUpdateModelLimits_NoModels_ClearsPriorities(t *testing.T) {
+	health := &httputil.ProxyHealthResponse{}
+
+	rateLimiter := ratelimit.New()
+	cred := &config.CredentialConfig{Name: "test_proxy"}
+	logger := testhelpers.NewTestLogger()
+	mockMM := NewMockModelManager()
+	// Pre-populate as if a previous poll cycle had learned a priority.
+	mockMM.ReplaceModelPrioritiesForCredential("test_proxy", map[string]int{"gpt-4": 200})
+	require.Equal(t, 200, mockMM.GetModelPriorityForCredential("gpt-4", "test_proxy"))
+
+	updateModelLimits(health, cred, rateLimiter, logger, mockMM)
+
+	assert.Equal(t, 0, mockMM.GetModelPriorityForCredential("gpt-4", "test_proxy"), "an empty health.Models response must clear stale learned priorities")
+}
+
 func TestUpdateModelLimits_NoCurrentUsage(t *testing.T) {
 	health := &httputil.ProxyHealthResponse{
 		Models: map[string]httputil.ModelHealthStats{
@@ -386,7 +1047,10 @@ type MockModelManager struct {
 		credential string
 		model      string
 	}
-	weights map[string]map[string]int
+	weights       map[string]map[string]int
+	priorities    map[string]map[string]int
+	priorityTiers map[string]map[string][]httputil.ModelPriorityTier
+	sourceCreds   map[string]map[string]string
 }
 
 func NewMockModelManager() *MockModelManager {
@@ -396,7 +1060,10 @@ func NewMockModelManager() *MockModelManager {
 			credential string
 			model      string
 		}, 0),
-		weights: make(map[string]map[string]int),
+		weights:       make(map[string]map[string]int),
+		priorities:    make(map[string]map[string]int),
+		priorityTiers: make(map[string]map[string][]httputil.ModelPriorityTier),
+		sourceCreds:   make(map[string]map[string]string),
 	}
 }
 
@@ -474,6 +1141,115 @@ func (m *MockModelManager) ReplaceModelWeightsForCredential(credentialName strin
 		}
 		m.weights[modelID][credentialName] = weight
 	}
+}
+
+func (m *MockModelManager) SetModelPriorityForCredential(modelID, credentialName string, priority int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if priority <= 0 {
+		if priorities, ok := m.priorities[modelID]; ok {
+			delete(priorities, credentialName)
+			if len(priorities) == 0 {
+				delete(m.priorities, modelID)
+			}
+		}
+		return
+	}
+	if m.priorities[modelID] == nil {
+		m.priorities[modelID] = make(map[string]int)
+	}
+	m.priorities[modelID][credentialName] = priority
+}
+
+func (m *MockModelManager) ReplaceModelPrioritiesForCredential(credentialName string, priorities map[string]int) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for modelID, credentialPriorities := range m.priorities {
+		delete(credentialPriorities, credentialName)
+		if len(credentialPriorities) == 0 {
+			delete(m.priorities, modelID)
+		}
+	}
+	for modelID, priority := range priorities {
+		// Mirror models.Manager: a learned priority of 0 (best group) is a real value and
+		// is stored; only genuinely invalid negatives are dropped.
+		if priority < 0 {
+			continue
+		}
+		if m.priorities[modelID] == nil {
+			m.priorities[modelID] = make(map[string]int)
+		}
+		m.priorities[modelID][credentialName] = priority
+	}
+}
+
+func (m *MockModelManager) ReplaceModelPriorityTiersForCredential(credentialName string, tiers map[string][]httputil.ModelPriorityTier) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for modelID, byCred := range m.priorityTiers {
+		delete(byCred, credentialName)
+		if len(byCred) == 0 {
+			delete(m.priorityTiers, modelID)
+		}
+	}
+	for modelID, list := range tiers {
+		if len(list) == 0 {
+			continue
+		}
+		if m.priorityTiers[modelID] == nil {
+			m.priorityTiers[modelID] = make(map[string][]httputil.ModelPriorityTier)
+		}
+		cp := make([]httputil.ModelPriorityTier, len(list))
+		copy(cp, list)
+		m.priorityTiers[modelID][credentialName] = cp
+	}
+}
+
+func (m *MockModelManager) GetModelPriorityTiersForCredential(modelID, credentialName string) []httputil.ModelPriorityTier {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if byCred, ok := m.priorityTiers[modelID]; ok {
+		return byCred[credentialName]
+	}
+	return nil
+}
+
+func (m *MockModelManager) ReplaceModelSourceCredentialsForCredential(credentialName string, sourceCredentials map[string]string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for modelID, creds := range m.sourceCreds {
+		delete(creds, credentialName)
+		if len(creds) == 0 {
+			delete(m.sourceCreds, modelID)
+		}
+	}
+	for modelID, sourceCredential := range sourceCredentials {
+		if sourceCredential == "" {
+			continue
+		}
+		if m.sourceCreds[modelID] == nil {
+			m.sourceCreds[modelID] = make(map[string]string)
+		}
+		m.sourceCreds[modelID][credentialName] = sourceCredential
+	}
+}
+
+func (m *MockModelManager) GetModelSourceCredentialForCredential(modelID, credentialName string) string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if creds, ok := m.sourceCreds[modelID]; ok {
+		return creds[credentialName]
+	}
+	return ""
+}
+
+func (m *MockModelManager) GetModelPriorityForCredential(modelID, credentialName string) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if priorities, ok := m.priorities[modelID]; ok {
+		return priorities[credentialName]
+	}
+	return 0
 }
 
 func (m *MockModelManager) HasModel(credentialName, modelID string) bool {
@@ -696,7 +1472,12 @@ func TestUpdateStatsFromHealth_ClearsModelsWhenRemoteSnapshotIsEmpty(t *testing.
 	assert.Empty(t, rateLimiter.GetAllModelPairs())
 }
 
-func TestUpdateStatsFromHealth_FiltersByFallbackParity_Primary(t *testing.T) {
+// TestUpdateStatsFromHealth_SkipsFallbackUpstreamForPrimaryConnection: for a non-fallback
+// local proxy credential, is_fallback upstream credentials are excluded from the
+// aggregated RPM/TPM ceiling — folding their reserved capacity into the primary ceiling
+// would let the client rate limiter admit primary traffic past what the upstream serves
+// on its primary credentials. Only "upstream-primary" counts here.
+func TestUpdateStatsFromHealth_SkipsFallbackUpstreamForPrimaryConnection(t *testing.T) {
 	mockMM := NewMockModelManager()
 	rateLimiter := ratelimit.New()
 	logger := testhelpers.NewTestLogger()
@@ -723,11 +1504,16 @@ func TestUpdateStatsFromHealth_FiltersByFallbackParity_Primary(t *testing.T) {
 	assert.Equal(t, -1, rateLimiter.GetModelLimitRPM("proxy-primary", "fallback-model"))
 
 	addedModels := mockMM.GetAddedModels()
-	assert.Len(t, addedModels, 1)
-	assert.Equal(t, "primary-model", addedModels[0].model)
+	addedModelIDs := make([]string, 0, len(addedModels))
+	for _, m := range addedModels {
+		addedModelIDs = append(addedModelIDs, m.model)
+	}
+	assert.Equal(t, []string{"primary-model"}, addedModelIDs)
 }
 
-func TestUpdateStatsFromHealth_FiltersByFallbackParity_Fallback(t *testing.T) {
+// TestUpdateStatsFromHealth_IncludesFallbackUpstreamForFallbackConnection: a locally
+// is_fallback proxy credential is a last resort and includes ALL upstream credentials.
+func TestUpdateStatsFromHealth_IncludesFallbackUpstreamForFallbackConnection(t *testing.T) {
 	mockMM := NewMockModelManager()
 	rateLimiter := ratelimit.New()
 	logger := testhelpers.NewTestLogger()

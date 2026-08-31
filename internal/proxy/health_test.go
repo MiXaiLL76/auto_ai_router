@@ -11,12 +11,14 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/balancer"
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/fail2ban"
+	"github.com/mixaill76/auto_ai_router/internal/httputil"
 	"github.com/mixaill76/auto_ai_router/internal/models"
 	"github.com/mixaill76/auto_ai_router/internal/monitoring"
 	"github.com/mixaill76/auto_ai_router/internal/ratelimit"
 	"github.com/mixaill76/auto_ai_router/internal/scope"
 	"github.com/mixaill76/auto_ai_router/internal/testhelpers"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func createHealthTestProxy(credentialsCount int) *Proxy {
@@ -111,6 +113,7 @@ func TestHealthCheck_CredentialsInfo(t *testing.T) {
 	assert.Equal(t, "openai", openaiStats.Type)
 	assert.Equal(t, "http://openai.com", openaiStats.BaseURL)
 	assert.Equal(t, false, openaiStats.IsFallback)
+	assert.Equal(t, false, openaiStats.IsProxyLike, "a plain openai credential is not proxy-like")
 	assert.Equal(t, 7, openaiStats.Weight)
 	assert.Equal(t, 100, openaiStats.LimitRPM)
 	assert.Equal(t, 2000, openaiStats.LimitTPM)
@@ -252,6 +255,238 @@ func TestHealthCheck_ModelInfo(t *testing.T) {
 	assert.NotNil(t, status.Models)
 	assert.Equal(t, 9, status.Models["test_cred:gpt-4"].Weight)
 	assert.Equal(t, 4, status.Models["test_cred:claude-3-opus"].Weight)
+}
+
+func TestHealthCheck_CredentialAndModelPriority(t *testing.T) {
+	logger := testhelpers.NewTestLogger()
+	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
+	rl := ratelimit.New()
+
+	credentials := []config.CredentialConfig{
+		{
+			Name:    "default_group_cred",
+			Type:    config.ProviderTypeOpenAI,
+			APIKey:  "sk-test",
+			BaseURL: "http://openai.com",
+			RPM:     100,
+			// No Priority/FallbackPriority set: EffectivePriority() must resolve to 0
+			// (the default group), and /health must report that 0 explicitly rather
+			// than omitting it as "unset".
+		},
+		{
+			Name:     "explicit_priority_cred",
+			Type:     config.ProviderTypeOpenAI,
+			APIKey:   "sk-test-2",
+			BaseURL:  "http://openai2.com",
+			RPM:      100,
+			Priority: 200,
+		},
+		{
+			Name:             "legacy_fallback_priority_cred",
+			Type:             config.ProviderTypeOpenAI,
+			APIKey:           "sk-test-3",
+			BaseURL:          "http://openai3.com",
+			RPM:              100,
+			FallbackPriority: 300,
+		},
+	}
+
+	for _, cred := range credentials {
+		rl.AddCredentialWithTPM(cred.Name, cred.RPM, cred.TPM)
+		rl.AddModelWithTPM(cred.Name, "gpt-4", 50, 500)
+	}
+
+	bal := balancer.New(credentials, f2b, rl)
+	metrics := monitoring.New(false)
+	tm := auth.NewVertexTokenManager(logger)
+	mm := models.New(logger, 50, []config.ModelRPMConfig{})
+
+	prx := createProxyWithParams(bal, logger, 10, 30*time.Second, metrics, "test-key", rl, tm, mm, "test-version", "test-commit")
+
+	_, status := prx.HealthCheck()
+
+	// CredentialHealthStats.Priority carries only the explicit priority: field — the
+	// primary-pool grouping key. fallback_priority is reported separately and must not
+	// show up as a Priority tier (a downstream proxy folds Priority into its own grouping).
+	assert.Equal(t, 0, status.Credentials["default_group_cred"].Priority)
+	assert.Equal(t, 200, status.Credentials["explicit_priority_cred"].Priority)
+	assert.Equal(t, 0, status.Credentials["legacy_fallback_priority_cred"].Priority)
+	assert.Equal(t, 300, status.Credentials["legacy_fallback_priority_cred"].FallbackPriority)
+
+	// None of these credentials are proxy-like, so modelManager has no dynamic per-model
+	// priority learned for them: ModelHealthStats.Priority falls back to the owning
+	// credential's static priority: field (0 for the fallback_priority-only credential,
+	// matching how the balancer's primary pool actually routes it).
+	assert.Equal(t, 0, status.Models["default_group_cred:gpt-4"].Priority)
+	assert.Equal(t, 200, status.Models["explicit_priority_cred:gpt-4"].Priority)
+	assert.Equal(t, 0, status.Models["legacy_fallback_priority_cred:gpt-4"].Priority)
+}
+
+func TestHealthCheck_ModelHealthStats_PriorityPrefersDynamicOverStatic(t *testing.T) {
+	logger := testhelpers.NewTestLogger()
+	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
+	rl := ratelimit.New()
+
+	cred := config.CredentialConfig{
+		Name:     "grant-pol01",
+		Type:     config.ProviderTypeProxy,
+		APIKey:   "sk-test",
+		BaseURL:  "http://pol01.example",
+		RPM:      100,
+		Priority: 200, // static config-level priority
+	}
+
+	rl.AddCredential(cred.Name, 100)
+	bal := balancer.New([]config.CredentialConfig{cred}, f2b, rl)
+	metrics := monitoring.New(false)
+	tm := auth.NewVertexTokenManager(logger)
+	mm := models.New(logger, 50, []config.ModelRPMConfig{})
+	mm.ReplaceModelsForCredential(cred.Name, []string{"gpt-4"})
+	// Dynamic priority learned from the upstream's own /health, MIN-aggregated —
+	// different from (and lower than) the credential's static Priority above.
+	mm.ReplaceModelPrioritiesForCredential(cred.Name, map[string]int{"gpt-4": 100})
+
+	prx := createProxyWithParams(bal, logger, 10, 30*time.Second, metrics, "test-key", rl, tm, mm, "test-version", "test-commit")
+
+	_, status := prx.HealthCheck()
+
+	stats, ok := status.Models["grant-pol01:gpt-4"]
+	assert.True(t, ok)
+	assert.Equal(t, 100, stats.Priority, "should report the dynamic per-model priority, not the static credential priority")
+
+	// The credential-level entry reports the static config-level priority: field.
+	assert.Equal(t, 200, status.Credentials["grant-pol01"].Priority)
+	assert.True(t, status.Credentials["grant-pol01"].IsProxyLike)
+}
+
+// TestHealthCheck_ModelHealthStats_LocalBanFoldedIntoReEmittedTiers is the review_158 #23
+// guard: when this router has locally fail2ban-ed a (proxy credential, model) pair, the
+// re-emitted priority_tiers must all carry Banned:true — not just the scalar IsBanned —
+// so a Design B downstream router does not rebuild live tier-candidates for a path this
+// hop has closed.
+func TestHealthCheck_ModelHealthStats_LocalBanFoldedIntoReEmittedTiers(t *testing.T) {
+	logger := testhelpers.NewTestLogger()
+	f2b := fail2ban.New(1, time.Hour, []int{500})
+	rl := ratelimit.New()
+
+	cred := config.CredentialConfig{
+		Name:    "grant-pol01",
+		Type:    config.ProviderTypeProxy,
+		APIKey:  "sk-test",
+		BaseURL: "http://pol01.example",
+		RPM:     100,
+	}
+
+	rl.AddCredential(cred.Name, 100)
+	bal := balancer.New([]config.CredentialConfig{cred}, f2b, rl)
+	metrics := monitoring.New(false)
+	tm := auth.NewVertexTokenManager(logger)
+	mm := models.New(logger, 50, []config.ModelRPMConfig{})
+	mm.ReplaceModelsForCredential(cred.Name, []string{"gpt-4"})
+	mm.ReplaceModelPriorityTiersForCredential(cred.Name, map[string][]httputil.ModelPriorityTier{
+		"gpt-4": {
+			{Priority: 1, Weight: 1, LimitRPM: 100, CurrentRPM: 0},
+			{Priority: 5, Weight: 1, LimitRPM: 500, CurrentRPM: 0},
+		},
+	})
+
+	// Local fail2ban of the whole (credential, model) pair.
+	f2b.BanUntil(cred.Name, "gpt-4", http.StatusInternalServerError, time.Now().Add(time.Hour), "local errors")
+	require.True(t, bal.IsBanned(cred.Name, "gpt-4"))
+
+	prx := createProxyWithParams(bal, logger, 10, 30*time.Second, metrics, "test-key", rl, tm, mm, "test-version", "test-commit")
+
+	_, status := prx.HealthCheck()
+
+	stats, ok := status.Models["grant-pol01:gpt-4"]
+	require.True(t, ok)
+	assert.True(t, stats.IsBanned)
+	require.Len(t, stats.PriorityTiers, 2)
+	for _, tier := range stats.PriorityTiers {
+		assert.True(t, tier.Banned, "locally banned pair must mark every re-emitted tier Banned (priority %d)", tier.Priority)
+	}
+
+	// The manager's stored tier snapshot must NOT have been mutated by the re-emit.
+	for _, tier := range mm.GetModelPriorityTiersForCredential("gpt-4", "grant-pol01") {
+		assert.False(t, tier.Banned, "stored snapshot must stay unmutated (priority %d)", tier.Priority)
+	}
+}
+
+// TestHealthCheck_ModelHealthStats_PriorityFallsBackWhenDynamicUnknown covers the
+// fallback branch of the same fix: when the model manager has no dynamic
+// priority learned for this (credential, model) pair yet (0 is the "unset"
+// sentinel — see models.Manager.GetModelPriorityForCredential's doc comment),
+// /health must still fall back to the credential's static EffectivePriority(),
+// exactly like balancer.RoundRobin.effectivePriority does.
+func TestHealthCheck_ModelHealthStats_PriorityFallsBackWhenDynamicUnknown(t *testing.T) {
+	logger := testhelpers.NewTestLogger()
+	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
+	rl := ratelimit.New()
+
+	cred := config.CredentialConfig{
+		Name:     "grant-pol01",
+		Type:     config.ProviderTypeProxy,
+		APIKey:   "sk-test",
+		BaseURL:  "http://pol01.example",
+		RPM:      100,
+		Priority: 200,
+	}
+
+	rl.AddCredential(cred.Name, 100)
+	bal := balancer.New([]config.CredentialConfig{cred}, f2b, rl)
+	metrics := monitoring.New(false)
+	tm := auth.NewVertexTokenManager(logger)
+	mm := models.New(logger, 50, []config.ModelRPMConfig{})
+	mm.ReplaceModelsForCredential(cred.Name, []string{"gpt-4"})
+	// No ReplaceModelPrioritiesForCredential call at all: no poll cycle has
+	// reported a priority for this model yet.
+
+	prx := createProxyWithParams(bal, logger, 10, 30*time.Second, metrics, "test-key", rl, tm, mm, "test-version", "test-commit")
+
+	_, status := prx.HealthCheck()
+
+	stats, ok := status.Models["grant-pol01:gpt-4"]
+	assert.True(t, ok)
+	assert.Equal(t, 200, stats.Priority, "should fall back to the static credential priority when nothing dynamic is known")
+}
+
+// TestHealthCheck_ModelHealthStats_PriorityIgnoresDynamicWhenModelCheckerDisabled is the
+// #7 regression guard: balancer.learnedProxyPriority only consults the learned per-model
+// priority when the model checker is enabled — otherwise the balancer routes on the
+// static field. /health must gate the same way, or the dashboard shows a learned
+// priority the balancer never actually uses.
+func TestHealthCheck_ModelHealthStats_PriorityIgnoresDynamicWhenModelCheckerDisabled(t *testing.T) {
+	logger := testhelpers.NewTestLogger()
+	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
+	rl := ratelimit.New()
+
+	cred := config.CredentialConfig{
+		Name:     "grant-pol01",
+		Type:     config.ProviderTypeProxy,
+		APIKey:   "sk-test",
+		BaseURL:  "http://pol01.example",
+		RPM:      100,
+		Priority: 200,
+	}
+
+	rl.AddCredential(cred.Name, 100)
+	rl.AddModelWithTPM(cred.Name, "gpt-4", 50, 500)
+	bal := balancer.New([]config.CredentialConfig{cred}, f2b, rl)
+	metrics := monitoring.New(false)
+	tm := auth.NewVertexTokenManager(logger)
+	mm := models.New(logger, 50, []config.ModelRPMConfig{})
+	// A learned priority lingers, but no models/limits are registered, so
+	// mm.IsEnabled() is false — model filtering (and learned-priority routing) is off.
+	mm.ReplaceModelPrioritiesForCredential(cred.Name, map[string]int{"gpt-4": 100})
+	require.False(t, mm.IsEnabled())
+
+	prx := createProxyWithParams(bal, logger, 10, 30*time.Second, metrics, "test-key", rl, tm, mm, "test-version", "test-commit")
+
+	_, status := prx.HealthCheck()
+
+	stats, ok := status.Models["grant-pol01:gpt-4"]
+	require.True(t, ok)
+	assert.Equal(t, 200, stats.Priority, "must show the static priority the balancer routes on, not the inert learned value")
 }
 
 func TestHealthCheck_ModelProviderErrorAndBanUntil(t *testing.T) {

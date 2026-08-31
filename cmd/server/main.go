@@ -1243,11 +1243,22 @@ func startProxyStatsUpdater(
 	wg *sync.WaitGroup,
 	updateMutex *sync.Mutex,
 ) {
-	// Run initial update synchronously so proxy model lists are populated before
-	// the HTTP server starts accepting requests. Without this, the first few requests
-	// arrive before credentialModels is populated, causing HasModel to fall through
-	// to the permissive fallback and routing requests to the wrong proxy.
-	modelupdate.UpdateAllProxyCredentials(bgCtx, bal, rateLimiter, log, modelManager, updateMutex)
+	// syncFromHealth folds the per-credential /health stats sync (limits, current usage,
+	// per-model weight/priority, scopes, model set) into the single proxy poller below,
+	// off the same /health response GetRemoteModelsWithError cached — so each upstream is
+	// polled once per cycle. Replaces the removed second poller (proxy.UpdateAllFromRemoteHealth).
+	syncFromHealth := func(cred *config.CredentialConfig) bool {
+		health := modelManager.CachedRemoteHealth(cred.Name)
+		if health == nil {
+			return false
+		}
+		proxy.UpdateStatsFromHealth(health, cred, rateLimiter, log, modelManager)
+		return true
+	}
+
+	// Block startup on the first poll so credential limits/scopes/model sets are populated
+	// before the HTTP server starts serving (synchronous by design).
+	modelupdate.UpdateAllProxyCredentials(bgCtx, bal, rateLimiter, log, modelManager, updateMutex, syncFromHealth)
 
 	wg.Add(1)
 	go func() {
@@ -1261,7 +1272,13 @@ func startProxyStatsUpdater(
 			case <-bgCtx.Done():
 				return
 			case <-ticker.C:
-				modelupdate.UpdateAllProxyCredentials(bgCtx, bal, rateLimiter, log, modelManager, updateMutex)
+				modelupdate.UpdateAllProxyCredentials(bgCtx, bal, rateLimiter, log, modelManager, updateMutex, syncFromHealth)
+				// Unrelated to the call above beyond sharing this tick: piggybacked
+				// here rather than a dedicated ticker since a proxy/AIR credential's
+				// health-learned priority (updated just above) is exactly what makes
+				// r.swrr's SWRR-cycle-per-(priority,membership) keys churn over time — see
+				// PruneStaleSWRRState's doc comment for why this map is otherwise unbounded.
+				bal.PruneStaleSWRRState(10 * time.Minute)
 			}
 		}
 	}()

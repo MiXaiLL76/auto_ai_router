@@ -1738,3 +1738,114 @@ func TestManager_GetModelWeightForCredential_DBSpecificUnsetFallsBackToStaticGlo
 	assert.Equal(t, 7, m.GetModelWeightForCredential("shared", "db-cred"),
 		"DB credential-specific unset weight must not block the global YAML weight")
 }
+
+func TestManager_SetModelPriorityForCredential(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+	m := New(logger, 50, nil)
+
+	assert.Equal(t, 0, m.GetModelPriorityForCredential("gpt-4o", "proxy-a"), "nothing learned yet")
+
+	m.SetModelPriorityForCredential("gpt-4o", "proxy-a", 200)
+	assert.Equal(t, 200, m.GetModelPriorityForCredential("gpt-4o", "proxy-a"))
+	// A different credential for the same model is unaffected.
+	assert.Equal(t, 0, m.GetModelPriorityForCredential("gpt-4o", "proxy-b"))
+
+	// Priority 0 (a valid default-group value, not a sentinel — see doc comment on
+	// SetModelPriorityForCredential) clears any previously learned entry, same as a
+	// negative value would.
+	m.SetModelPriorityForCredential("gpt-4o", "proxy-a", 0)
+	assert.Equal(t, 0, m.GetModelPriorityForCredential("gpt-4o", "proxy-a"))
+}
+
+func TestManager_ReplaceModelPrioritiesForCredential(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+	m := New(logger, 50, nil)
+
+	m.ReplaceModelPrioritiesForCredential("proxy-a", map[string]int{
+		"gpt-4o":           100,
+		"claude-3-opus":    200,
+		"best-group":       0,  // review_158 #14: a learned 0 IS a real, stored value
+		"invalid-negative": -1, // still dropped
+	})
+
+	assert.Equal(t, 100, m.GetModelPriorityForCredential("gpt-4o", "proxy-a"))
+	assert.Equal(t, 200, m.GetModelPriorityForCredential("claude-3-opus", "proxy-a"))
+
+	// review_158 #14: "upstream serves this model in its best group (0)" must be
+	// distinguishable from "nothing learned" — LearnedModelPriorityForCredential's ok flag
+	// carries that. A learned 0 is authoritative and must not fall through to the
+	// credential's static priority: field.
+	p, ok := m.LearnedModelPriorityForCredential("best-group", "proxy-a")
+	assert.Equal(t, 0, p)
+	assert.True(t, ok, "learned priority 0 must read back as learned")
+
+	_, ok = m.LearnedModelPriorityForCredential("invalid-negative", "proxy-a")
+	assert.False(t, ok, "a negative priority is dropped, not stored")
+
+	_, ok = m.LearnedModelPriorityForCredential("never-seen", "proxy-a")
+	assert.False(t, ok, "a model no poll ever reported reads back as not-learned")
+
+	// A second poll cycle with a different snapshot fully replaces the first —
+	// "claude-3-opus" must be gone, not merged.
+	m.ReplaceModelPrioritiesForCredential("proxy-a", map[string]int{
+		"gpt-4o": 300,
+	})
+	assert.Equal(t, 300, m.GetModelPriorityForCredential("gpt-4o", "proxy-a"))
+	assert.Equal(t, 0, m.GetModelPriorityForCredential("claude-3-opus", "proxy-a"), "stale entry from the previous snapshot must be cleared")
+
+	// Another credential's priorities for the same model are untouched by proxy-a's replace.
+	m.SetModelPriorityForCredential("gpt-4o", "proxy-b", 50)
+	m.ReplaceModelPrioritiesForCredential("proxy-a", nil)
+	assert.Equal(t, 0, m.GetModelPriorityForCredential("gpt-4o", "proxy-a"))
+	assert.Equal(t, 50, m.GetModelPriorityForCredential("gpt-4o", "proxy-b"))
+}
+
+func TestManager_ReplaceModelPriorityTiersForCredential(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+	m := New(logger, 50, nil)
+
+	// The stored slice is sorted ascending by priority at build time
+	// (proxy.buildModelPriorityTiers); the getter preserves that order.
+	m.ReplaceModelPriorityTiersForCredential("usa03", map[string][]httputil.ModelPriorityTier{
+		"gemini-2.5-flash": {
+			{Priority: 1, Weight: 40, LimitRPM: 200, CurrentRPM: 5},
+			{Priority: 2, Weight: 1, LimitRPM: 500, CurrentRPM: 10},
+		},
+	})
+
+	tiers := m.GetModelPriorityTiersForCredential("gemini-2.5-flash", "usa03")
+	require.Len(t, tiers, 2)
+	assert.Equal(t, 1, tiers[0].Priority, "returned in stored (ascending) order")
+	assert.Equal(t, 2, tiers[1].Priority)
+
+	// Scalar getter derives MIN over the live tiers.
+	assert.Equal(t, 1, m.GetModelPriorityForCredential("gemini-2.5-flash", "usa03"))
+
+	// tier 1 saturated → scalar lifts to the next live tier.
+	m.ReplaceModelPriorityTiersForCredential("usa03", map[string][]httputil.ModelPriorityTier{
+		"gemini-2.5-flash": {
+			{Priority: 1, Weight: 40, LimitRPM: 200, CurrentRPM: 200},
+			{Priority: 2, Weight: 1, LimitRPM: 500, CurrentRPM: 10},
+		},
+	})
+	assert.Equal(t, 2, m.GetModelPriorityForCredential("gemini-2.5-flash", "usa03"))
+
+	// no tier live → scalar exposes the WORST (highest) priority overall, never 0 and
+	// never the cheapest — matches the scalar path's trackWorstPriority so a fully
+	// exhausted multi-tier proxy does not advertise itself as cheap down the chain.
+	m.ReplaceModelPriorityTiersForCredential("usa03", map[string][]httputil.ModelPriorityTier{
+		"gemini-2.5-flash": {
+			{Priority: 1, Banned: true},
+			{Priority: 2, Banned: true},
+		},
+	})
+	assert.Equal(t, 2, m.GetModelPriorityForCredential("gemini-2.5-flash", "usa03"))
+
+	// nil snapshot clears; a different credential is untouched.
+	m.ReplaceModelPriorityTiersForCredential("ger01", map[string][]httputil.ModelPriorityTier{
+		"gpt-5": {{Priority: 1}, {Priority: 3}},
+	})
+	m.ReplaceModelPriorityTiersForCredential("usa03", nil)
+	assert.Nil(t, m.GetModelPriorityTiersForCredential("gemini-2.5-flash", "usa03"))
+	assert.Len(t, m.GetModelPriorityTiersForCredential("gpt-5", "ger01"), 2)
+}

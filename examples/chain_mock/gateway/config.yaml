@@ -1,0 +1,81 @@
+server:
+  port: 8080
+  max_body_size_mb: 10
+  request_timeout: 15s
+  logging_level: info
+  master_key: "sk-gateway"
+  default_models_rpm: 100000
+
+fail2ban:
+  max_attempts: 2
+  ban_duration: 20s
+  error_codes: [429, 500, 502, 503, 504]
+
+monitoring:
+  prometheus_enabled: false
+  health_check_path: "/health"
+  pprof_enabled: false
+
+# The gateway lists NO models — each `air` credential syncs its model list,
+# per-model weights, limits AND the per-priority-tier breakdown from the
+# region's own /health every ~30s (the same sync path a real edge -> regional
+# AIR fleet uses).
+#
+# What the gateway learns and how it routes each model:
+#
+#   chat-smart : region-alpha -> 4 local tiers (t1 cap 300, t2 cum 420,
+#                t3 cum 500, t9 uncapped), region-beta -> t1 (150) + t9 uncapped,
+#                region-gamma -> t1 (120) + t9 uncapped (its is_fallback cred
+#                excluded). Primary groups the gateway cascades through:
+#                  1  {alpha@t1, beta@t1, gamma@t1}   weighted round-robin
+#                  2  {alpha@t2}
+#                  3  {alpha@t3}
+#                  9  {alpha@t9, beta@t9, gamma@t9}   uncapped backstop
+#                 50  {house-direct}                  used only if a whole
+#                                                     region is fail2banned
+#   chat-fast  : region-alpha 1 tier (p1), region-beta 2 tiers (p1/p2).
+#   chat-reason: region-beta 2 tiers (p1/p3), region-gamma 1 tier (p2).
+#   embed-v1   : region-alpha only, single unlimited tier — plain scalar path.
+#
+# house-direct (priority 50) is the always-up, deprioritised last resort so a
+# load run never fully fails once every regional tier is exhausted/banned.
+# house-reserve is the fallback pool (only the fallback mechanism uses it).
+credentials:
+  - name: "region-alpha"
+    type: "air"
+    base_url: "http://region-alpha:8080"
+    api_key: "sk-alpha"
+    rpm: 100000
+
+  - name: "region-beta"
+    type: "air"
+    base_url: "http://region-beta:8080"
+    api_key: "sk-beta"
+    rpm: 100000
+
+  - name: "region-gamma"
+    type: "air"
+    base_url: "http://region-gamma:8080"
+    api_key: "sk-gamma"
+    rpm: 100000
+
+  - name: "house-direct"
+    type: "openai"
+    api_key: "sk-mock"
+    base_url: "http://mock:9100"
+    rpm: 100000
+    priority: 50
+
+  - name: "house-reserve"
+    type: "openai"
+    api_key: "sk-mock"
+    base_url: "http://mock:9100"
+    rpm: 100000
+    is_fallback: true
+
+models:
+  - { name: chat-smart, credential: house-direct, tpm: -1 }
+  - { name: chat-fast, credential: house-direct, tpm: -1 }
+  - { name: chat-reason, credential: house-direct, tpm: -1 }
+  - { name: embed-v1, credential: house-direct, tpm: -1 }
+  - { name: chat-smart, credential: house-reserve, tpm: -1 }

@@ -103,6 +103,80 @@ models:
 
 This gives you an effective 200 RPM for `gpt-4o`.
 
+## Primary Priority Groups
+
+`priority` (distinct from `fallback_priority` below) groups **primary** credentials into
+tiers for the *initial* request selection. Credentials are bucketed by `priority` value
+(ascending); the balancer runs weighted round-robin inside the lowest-numbered tier that
+still has a live member, and only cascades to the next tier when every member of the
+current one is banned or rate-limited.
+
+```yaml
+credentials:
+  - name: "cheap-a"
+    type: "openai"
+    api_key: "os.environ/CHEAP_A"
+    base_url: "https://a.example.com"
+    rpm: 100
+    priority: 1        # tier 1 — tried first
+
+  - name: "cheap-b"
+    type: "openai"
+    api_key: "os.environ/CHEAP_B"
+    base_url: "https://b.example.com"
+    rpm: 100
+    priority: 1        # tier 1 — shares traffic with cheap-a via weighted round-robin
+
+  - name: "expensive"
+    type: "openai"
+    api_key: "os.environ/EXPENSIVE"
+    base_url: "https://c.example.com"
+    rpm: 1000
+    priority: 2        # tier 2 — only used while both tier-1 credentials are down
+```
+
+Credentials that omit `priority` (or set it to `0`) all share the default tier `0`, which
+is tried first — so a config that never sets `priority` behaves exactly like the flat
+weighted pool described above. `priority` and `fallback_priority` are mutually exclusive
+on a single credential, and `is_fallback: true` credentials cannot set `priority`.
+
+For a `proxy`/`air` credential, the per-model priority learned from the upstream's own
+`/health` (its upstream credentials' `priority` values) takes precedence over the static
+`priority` set here, so a proxy credential's tier reflects what the node it proxies to is
+actually configured with.
+
+When one upstream node serves the same model from several priority groups behind a single
+proxy credential, that credential **expands into one local candidate per tier**. Each tier
+becomes its own primary priority group (using the upstream's priority values), with the
+summed RPM/TPM capacity and summed weight of the upstream credentials in that group, and
+its own *cumulative* local rate-limit gate: tier 1's gate is tier 1's capacity, tier 2's
+gate is tier 1 + tier 2, and so on. A tier the upstream reports **banned** contributes no
+capacity to that cumulative gate, and its own per-tier usage counter (from `/health`) is
+also checked, so a cheap tier that has recovered upstream is not held closed by load the
+upstream is serving from a pricier tier.
+
+Consequences:
+
+- Selection cascades **immediately** off this router's own contribution — once the
+  requests this router has sent to the proxy credential reach tier 1's cumulative
+  capacity, tier 1 stops being offered and a genuinely lower-priority alternative (this
+  router's own tier-2/3 credentials) is preferred over the proxy credential's tier-2
+  group. No `/health` poll is needed for that step.
+- Only the *cross-fleet* part of the signal — other routers also filling the same
+  upstream tier — still arrives via the 30s `/health` poll, so a tier can briefly look
+  live here while it is actually full upstream.
+- The tier breakdown is re-published on this router's own `/health`, so it survives
+  additional chain hops (a router fronting this one re-expands it).
+- A single-group upstream (the common case) is unaffected — no expansion, one candidate,
+  the scalar `priority` above. The one exception: if that single group is **banned**
+  upstream, the ban is published as a one-tier breakdown so this router (and the next one
+  in the chain) drops the credential — the scalar `priority` number alone carries no ban
+  state.
+
+> `fallback_priority` is **not** folded into primary-tier grouping — it only affects retry
+> order (next section). A credential that sets only `fallback_priority` stays in primary
+> tier `0`.
+
 ## Fallback Priority
 
 Primary credentials (non-fallback) are used for the initial request. By default provider retry

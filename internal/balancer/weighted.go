@@ -1,6 +1,10 @@
 package balancer
 
-import "github.com/mixaill76/auto_ai_router/internal/config"
+import (
+	"time"
+
+	"github.com/mixaill76/auto_ai_router/internal/config"
+)
 
 // swrrNode holds the smooth weighted round-robin state for a single credential.
 type swrrNode struct {
@@ -22,11 +26,12 @@ type schedKey struct {
 // swrrState is the SWRR scheduler for one schedKey. Nodes are keyed by credential name so
 // the live set can be reconciled cheaply on every request.
 type swrrState struct {
-	nodes map[string]*swrrNode
+	nodes    map[string]*swrrNode
+	lastUsed time.Time // updated on every swrrStateFor lookup; see PruneStaleSWRRState
 }
 
 func newSWRRState() *swrrState {
-	return &swrrState{nodes: make(map[string]*swrrNode)}
+	return &swrrState{nodes: make(map[string]*swrrNode), lastUsed: time.Now()}
 }
 
 // advance reconciles the live node set, accumulates effective weight into each live node's
@@ -81,13 +86,46 @@ func (r *RoundRobin) schedKeyFor(modelID string, allowOnlyFallback, allowOnlyPro
 
 // swrrStateFor returns (creating if needed) the SWRR scheduler for a selection cycle.
 // Must be called with r.mu held.
+//
+// r.swrr is never pruned by removing unreachable keys as they go stale, only by
+// PruneStaleSWRRState — schedKey.priority and .scopeKey (candidateCycleKey, the sorted
+// membership of a priority group) are both derived from effectivePriority(), which for
+// proxy/AIR credentials can fluctuate as an upstream's health-learned priority changes
+// (sub-credentials banning/unbanning). Each distinct (priority, membership) combination
+// ever observed leaves its own entry behind once priority moves on, so a caller that
+// only touches lastUsed here and never removes entries would grow this map without
+// bound over a long-running process's lifetime.
 func (r *RoundRobin) swrrStateFor(key schedKey) *swrrState {
 	st, ok := r.swrr[key]
 	if !ok {
 		st = newSWRRState()
 		r.swrr[key] = st
 	}
+	st.lastUsed = time.Now()
 	return st
+}
+
+// PruneStaleSWRRState removes SWRR scheduler entries not looked up (via swrrStateFor)
+// within maxAge, returning the count removed. Intended to be called periodically from a
+// background updater (see cmd/server/main.go's startProxyStatsUpdater) — selection
+// itself never prunes, so without a periodic external caller r.swrr grows unbounded per
+// swrrStateFor's doc comment.
+func (r *RoundRobin) PruneStaleSWRRState(maxAge time.Duration) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	cutoff := time.Now().Add(-maxAge)
+	removed := 0
+	for key, st := range r.swrr {
+		// !After rather than Before so maxAge:0 honestly means "prune everything":
+		// with a coarse monotonic clock (Windows, ~500µs steps) lastUsed and cutoff
+		// can land in the same tick, and a strict Before would spare the entry.
+		if !st.lastUsed.After(cutoff) {
+			delete(r.swrr, key)
+			removed++
+		}
+	}
+	return removed
 }
 
 // EffectiveWeight resolves the weighted round-robin fallback chain: model-level override,
@@ -102,8 +140,59 @@ func EffectiveWeight(modelWeight, credWeight int) int {
 	return 1
 }
 
-// effectiveWeight resolves the weight for a (credential, model) pair, mirroring how RPM is
-// resolved: model-level override first, then the credential default, then 1.
+// learnedProxyPriority returns the per-model priority learned from an upstream /health
+// poll for a proxy/AIR credential (e.g. ru01's "grant-pol01"/"comet-ger01" proxy
+// credentials picking up per-model priority from pol01/ger01). ok is false when there is
+// no upstream to poll, the model checker is off, or nothing has been learned yet.
+//
+// A learned priority of 0 (the upstream serves the model in its best group) is a real,
+// authoritative value — ok is true and callers must use it, not fall through to the
+// credential's static priority: field. See internal/models/manager.go
+// (LearnedModelPriorityForCredential) for the matching contract note.
+func (r *RoundRobin) learnedProxyPriority(cred *config.CredentialConfig, modelID string) (int, bool) {
+	if modelID != "" && cred.IsProxyLike() && r.modelChecker != nil && r.modelChecker.IsEnabled() {
+		return r.modelChecker.LearnedModelPriorityForCredential(modelID, cred.Name)
+	}
+	return 0, false
+}
+
+// primaryPriority resolves the primary-pool priority group for cred: the learned
+// per-model proxy priority if any, else the explicit `priority:` field (Priority).
+// Unlike effectivePriority it never falls back to fallback_priority — that field is a
+// retry-only ordering knob (docs/advanced/balancing.md "fallback_priority"), and folding
+// it into primary-pool grouping silently turns every existing fallback_priority config
+// into hard primary priority steps on upgrade (a flat weighted pool becomes exclusive
+// tiers). Primary-pool grouping opts in only via the explicit priority: field.
+func (r *RoundRobin) primaryPriority(cred *config.CredentialConfig, modelID string) int {
+	if p, ok := r.learnedProxyPriority(cred, modelID); ok {
+		return p
+	}
+	return cred.Priority
+}
+
+// effectivePriority resolves the priority tier for the retry cascade: the learned
+// per-model proxy priority if any, else the credential's static EffectivePriority()
+// (which does include fallback_priority — retry ordering is exactly what that field was
+// always for).
+func (r *RoundRobin) effectivePriority(cred *config.CredentialConfig, modelID string) int {
+	if p, ok := r.learnedProxyPriority(cred, modelID); ok {
+		return p
+	}
+	return cred.EffectivePriority()
+}
+
+// candidateWeight is the SWRR weight for one selection candidate: a tier candidate
+// (Design B) uses its learned tier weight (the summed weight of the upstream leaf
+// credentials in that tier), everything else falls through to effectiveWeight.
+func (r *RoundRobin) candidateWeight(c candidateEntry, modelID string) int {
+	if c.tier != nil && c.tier.weight > 0 {
+		return c.tier.weight
+	}
+	return r.effectiveWeight(c.cred, modelID)
+}
+
+// effectiveWeight resolves the weight for a (credential, model) pair, mirroring how RPM
+// is resolved: model-level override first, then the credential default, then 1.
 func (r *RoundRobin) effectiveWeight(cred *config.CredentialConfig, modelID string) int {
 	modelWeight := 0
 	if modelID != "" && r.modelChecker != nil && r.modelChecker.IsEnabled() {

@@ -144,6 +144,39 @@ func TestGetRemoteModelsWithError_AIRCredentialUsesRemoteHealth(t *testing.T) {
 	models, err := m.GetRemoteModelsWithError(context.Background(), cred)
 	require.NoError(t, err)
 	assert.Equal(t, []string{"gpt-air"}, modelIDs(models))
+
+	// The raw /health response is cached so the single poller
+	// (modelupdate.UpdateAllProxyCredentials) can run proxy.UpdateStatsFromHealth off
+	// the same fetch instead of polling /health a second time.
+	cachedHealth := m.CachedRemoteHealth("air-1")
+	require.NotNil(t, cachedHealth)
+	assert.Contains(t, cachedHealth.Models, "m1")
+	assert.Nil(t, m.CachedRemoteHealth("unknown-cred"))
+}
+
+func TestCachedRemoteHealth_NilForLegacyV1ModelsFallback(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelError}))
+
+	server := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/health":
+			http.Error(w, "not found", http.StatusNotFound)
+		case "/v1/models":
+			_ = json.NewEncoder(w).Encode(ModelsResponse{Data: []Model{{ID: "legacy-model"}}})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	m := New(logger, 100, []config.ModelRPMConfig{})
+	cred := &config.CredentialConfig{Name: "proxy-1", Type: config.ProviderTypeProxy, BaseURL: server.URL}
+
+	models, err := m.GetRemoteModelsWithError(context.Background(), cred)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"legacy-model"}, modelIDs(models))
+	assert.Nil(t, m.CachedRemoteHealth("proxy-1"), "no AIR /health means nothing for the stats poller to sync")
 }
 
 func TestGetRemoteModels_CachingMultipleCredentials(t *testing.T) {

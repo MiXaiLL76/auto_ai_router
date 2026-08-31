@@ -224,6 +224,55 @@ body {
   padding: var(--sp-5);
 }
 
+/* Shared api-key control in the topbar (health.html and trace.html both use
+   it) — a class instead of each page repeating the same inline width:180px,
+   so the responsive override below only has to live in one place. */
+.wf-apikey-input {
+  width: 180px;
+  background: transparent;
+  border: 0;
+  color: inherit;
+  outline: 0;
+}
+
+/* Below ~860px there isn't room for a 210px fixed sidebar next to real
+   content — stack logo/topbar/nav/main instead of leaving nav as a
+   permanently-too-narrow left column. Nav becomes a horizontal, wrapping
+   strip rather than a vertical list; nothing here needs JS (no toggle to
+   wire up), it's pure reflow. */
+@media (max-width: 860px) {
+  .wf {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto auto auto 1fr;
+    grid-template-areas:
+      "logo"
+      "topbar"
+      "nav"
+      "main";
+    height: auto;
+    min-height: 100%;
+    overflow: visible;
+  }
+  .wf-logo { border-right: none; }
+  .wf-topbar { flex-wrap: wrap; row-gap: var(--sp-2); padding: var(--sp-2) var(--sp-4); }
+  .wf-topbar .crumbs { flex-basis: 100%; }
+  .wf-topbar .spacer { display: none; }
+  .wf-nav {
+    flex-direction: row;
+    flex-wrap: wrap;
+    border-right: none;
+    border-bottom: 1px solid var(--line);
+    overflow: visible;
+  }
+  .wf-nav .group { padding-top: var(--sp-1); }
+  .wf-apikey-input { width: 120px; }
+}
+
+@media (max-width: 520px) {
+  .wf-main { padding: var(--sp-3); }
+  .wf-apikey-input { width: 90px; }
+}
+
 /* ============================================================
    Components
    ============================================================ */
@@ -1403,6 +1452,158 @@ details.diagram-section > summary {
   border-left: 2px solid var(--accent);
 }
 .wf-table tr.group-header:hover td { background: var(--accent-bg); }
+
+/* priority group row that is currently serving traffic (vs. standby groups) */
+.wf-table tr.group-header.is-serving td { color: var(--status-ok); }
+
+/* fallback-credential tier: rendered below the primary pool, dimmed, with a
+   neutral left rail instead of the accent one so it reads as last-resort. */
+.wf-table tr.group-header.is-fallback td {
+  background: var(--bg-2);
+  color: var(--fg-muted);
+  border-left-color: var(--fg-dim);
+  border-top-color: var(--line);
+  border-bottom-color: var(--line);
+}
+.wf-table tr.group-header.is-fallback:hover td { background: var(--bg-2); }
+.wf-table tr.group-header.is-fallback.is-serving td { color: var(--status-warn); }
+
+/* per-row "fallback" marker next to the credential name */
+.fb-tag {
+  display: inline-block;
+  margin-left: 4px;
+  padding: 0 4px;
+  font-size: 10px;
+  line-height: 1.5;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--fg-dim);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  vertical-align: middle;
+  white-space: nowrap;
+}
+
+/* Generic tile grid (overview stats, credential cards): settles at 4/2/1
+   columns on its own as the viewport narrows instead of overflowing at a
+   fixed repeat(4,1fr). auto-fit (not auto-fill) so a short list — e.g. one
+   credential on a wide screen — doesn't sit stranded in a 220px track next
+   to a wall of empty ones; its track absorbs the freed space instead. A
+   per-tile max-width then stops that same case from overcorrecting into one
+   card stretched edge-to-edge. */
+.wf-stats-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr));
+  gap: var(--sp-3);
+}
+.wf-stats-grid > * { max-width: 420px; }
+
+/* models-by-priority card grid: reading order (left-to-right, top-to-bottom)
+   carries the sort — highest-traffic model card first (top-left), lowest last
+   (bottom-right). Do not reorder via CSS (order/flex-direction); JS controls
+   document order to keep that meaning intact. */
+.wf-cards-grid {
+  display: grid;
+  /* Fixed 3-up by default, never more (a wide monitor kept fitting 4-5 tiny
+     cards otherwise). Steps down to 2, then 1, as the viewport narrows so the
+     fixed-layout table inside each card never gets crushed. */
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--sp-3);
+  align-items: start;
+}
+@media (max-width: 1280px) {
+  .wf-cards-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 760px) {
+  .wf-cards-grid { grid-template-columns: minmax(0, 1fr); }
+}
+.wf-cards-grid .wf-card {
+  padding: 0;
+  /* 1fr keeps stretching a lone card across a wide viewport otherwise —
+     past a few hundred px extra the table's fixed columns just look
+     sparse/mismatched rather than useful. Excess width becomes grid gap. */
+  max-width: 640px;
+}
+.wf-cards-grid .wf-card-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-3) var(--sp-4);
+  border-bottom: 1px solid var(--line);
+}
+.wf-cards-grid .wf-card-head .model-name {
+  font-size: var(--fs-sm);
+  overflow-wrap: anywhere;
+}
+.wf-cards-grid .wf-table th, .wf-cards-grid .wf-table td { padding: 6px var(--sp-3); }
+
+/* table-layout:auto lets an unconstrained cell (a long credential name, a
+   long router hostname, a wide "banned · N×NNN" badge) grow the whole table
+   past the card/grid-cell width — the "rows spill out of the table" bug.
+   Fixed layout makes column widths a hard contract from the header row,
+   and every cell truncates instead of pushing outward. */
+.wf-cards-grid .wf-table {
+  table-layout: fixed;
+}
+/* All-% widths on purpose, no mixed px columns: the card (and so this
+   table) can legitimately render anywhere from ~280px (narrow viewport,
+   grid track shrunk to container width) to 640px (the card's max-width) —
+   a fixed-px column stays constant while the %-columns scale with it, so
+   the two kinds of units drift out of proportion at the size extremes
+   (cramped/overlapping small, oddly sparse large). Percent-only keeps the
+   ratio correct at every width in that range. */
+.wf-cards-grid .wf-table th:nth-child(1),
+.wf-cards-grid .wf-table td:nth-child(1) { width: 30%; }
+.wf-cards-grid .wf-table th:nth-child(2),
+.wf-cards-grid .wf-table td:nth-child(2) { width: 20%; }
+.wf-cards-grid .wf-table th:nth-child(3),
+.wf-cards-grid .wf-table td:nth-child(3) { width: 8%; }
+.wf-cards-grid .wf-table th:nth-child(4),
+.wf-cards-grid .wf-table td:nth-child(4) { width: 13%; }
+.wf-cards-grid .wf-table th:nth-child(5),
+.wf-cards-grid .wf-table td:nth-child(5) { width: 13%; }
+.wf-cards-grid .wf-table th:nth-child(6),
+.wf-cards-grid .wf-table td:nth-child(6) { width: 16%; }
+/* headers stay single-line; the credential/router cells wrap onto as many
+   lines as they need so the full name is always readable (a `title` on the
+   cell still gives the value on hover). */
+.wf-cards-grid .wf-table th {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.wf-cards-grid .wf-table td.cred-cell {
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  white-space: normal;
+  line-height: 1.35;
+}
+/* RPM/TPM are now a plain percentage, no bar — keep the number on one line. */
+.wf-cards-grid .wf-table td:nth-child(4),
+.wf-cards-grid .wf-table td:nth-child(5) {
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+/* status badge can be long ("banned · 3×429") — clip it to the column rather
+   than let it shove the table wider. */
+.wf-cards-grid .wf-table td:nth-child(6) { overflow: hidden; }
+.usage-pct { font-size: var(--fs-sm); color: var(--fg); }
+.usage-pct.warn { color: var(--status-warn); }
+.usage-pct.err  { color: var(--status-err); }
+.usage-pct.dim  { color: var(--fg-dim); }
+
+.wf-input {
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  padding: 4px var(--sp-3);
+  color: inherit;
+  font: inherit;
+  outline: 0;
+  min-width: 220px;
+}
+.wf-input:focus { border-color: var(--line-strong); }
 
 /* scrollbar */
 ::-webkit-scrollbar { width: 4px; height: 4px; }

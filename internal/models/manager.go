@@ -263,7 +263,12 @@ type remoteModelCache struct {
 	credential    config.CredentialConfig
 	models        []Model
 	scopeSnapshot *remoteScopeSnapshot
-	expiresAt     time.Time
+	// health is the raw upstream /health response this snapshot was built from, kept
+	// so the single periodic poller (modelupdate.UpdateAllProxyCredentials) can run
+	// limit/priority sync (proxy.UpdateStatsFromHealth) off the same fetch instead of
+	// polling /health a second time. nil for the /v1/models legacy fallback path.
+	health    *httputil.ProxyHealthResponse
+	expiresAt time.Time
 }
 
 type remoteScopeSnapshot struct {
@@ -287,16 +292,19 @@ const (
 // Manager handles model discovery and mapping
 type Manager struct {
 	mu                           sync.RWMutex
-	credentialModels             map[string][]string          // credential name -> list of model IDs
-	allModels                    []Model                      // deduplicated list of all models
-	modelToCredentials           map[string][]string          // model ID -> list of credential names
-	modelLimits                  map[string][]ModelLimits     // model ID -> limits (may have multiple entries for different credentials)
-	staticModelLimits            map[string][]ModelLimits     // immutable snapshot of limits from config.yaml (never modified after New())
-	staticModelRealNames         map[string]string            // immutable snapshot of global real names from config.yaml
-	staticModelRealNamesPerCred  map[string]map[string]string // immutable snapshot of per-credential real names: credential -> alias -> real name
-	modelPassthroughResponses    map[string]*bool             // model name -> explicit passthrough_responses override (nil = auto)
-	modelPassthroughMessages     map[string]*bool             // model name -> explicit passthrough_messages override (nil = provider default)
-	dynamicModelWeights          map[string]map[string]int    // model ID -> credential -> weight learned from upstream /health
+	credentialModels             map[string][]string                                // credential name -> list of model IDs
+	allModels                    []Model                                            // deduplicated list of all models
+	modelToCredentials           map[string][]string                                // model ID -> list of credential names
+	modelLimits                  map[string][]ModelLimits                           // model ID -> limits (may have multiple entries for different credentials)
+	staticModelLimits            map[string][]ModelLimits                           // immutable snapshot of limits from config.yaml (never modified after New())
+	staticModelRealNames         map[string]string                                  // immutable snapshot of global real names from config.yaml
+	staticModelRealNamesPerCred  map[string]map[string]string                       // immutable snapshot of per-credential real names: credential -> alias -> real name
+	modelPassthroughResponses    map[string]*bool                                   // model name -> explicit passthrough_responses override (nil = auto)
+	modelPassthroughMessages     map[string]*bool                                   // model name -> explicit passthrough_messages override (nil = provider default)
+	dynamicModelWeights          map[string]map[string]int                          // model ID -> credential -> weight learned from upstream /health
+	dynamicModelPriorities       map[string]map[string]int                          // model ID -> credential -> priority learned from upstream /health (scalar; MIN of live tiers when tiers exist)
+	dynamicModelPriorityTiers    map[string]map[string][]httputil.ModelPriorityTier // model ID -> proxy/AIR credential -> per-priority-tier breakdown learned from upstream /health
+	dynamicModelSourceCreds      map[string]map[string]string                       // model ID -> local (proxy/AIR) credential -> real upstream credential name learned from /health
 	dynamicModelScopes           map[string]map[string]ScopeMetadata
 	dbModelNames                 map[string]bool              // model names that were loaded from LiteLLM DB (for hot-reload diffing)
 	modelAliases                 map[string]string            // alias -> real model name (from model_alias config)
@@ -337,6 +345,9 @@ func New(logger *slog.Logger, defaultModelsRPM int, staticModels []config.ModelR
 		modelPassthroughResponses:   make(map[string]*bool),
 		modelPassthroughMessages:    make(map[string]*bool),
 		dynamicModelWeights:         make(map[string]map[string]int),
+		dynamicModelPriorities:      make(map[string]map[string]int),
+		dynamicModelPriorityTiers:   make(map[string]map[string][]httputil.ModelPriorityTier),
+		dynamicModelSourceCreds:     make(map[string]map[string]string),
 		dynamicModelScopes:          make(map[string]map[string]ScopeMetadata),
 		defaultModelsRPM:            defaultModelsRPM,
 		logger:                      logger,
@@ -2091,6 +2102,206 @@ func (m *Manager) replaceModelWeightsForCredentialLocked(credentialName string, 
 	}
 }
 
+// SetModelPriorityForCredential stores a dynamic model-level priority learned from a
+// proxy upstream's /health response (see EffectiveHealthPriority /
+// updateModelLimits in internal/proxy/remote.go). There is no static
+// config/DB per-model priority override to take precedence over (mirrors the
+// T1 decision against a per-model Priority override in config), so unlike
+// GetModelWeightForCredential this dynamic map is the sole source for a
+// learned per-(model, credential) priority.
+func (m *Manager) SetModelPriorityForCredential(modelID, credentialName string, priority int) {
+	if modelID == "" || credentialName == "" {
+		return
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	// This per-key setter (no production caller today — the poller uses
+	// ReplaceModelPrioritiesForCredential, which DOES store a learned 0) keeps its
+	// historical "<= 0 clears the entry" behavior: without a companion "unset" call there
+	// is no other way to drop a stale entry through this path. Callers that need to tell
+	// "learned 0" from "nothing learned" use LearnedModelPriorityForCredential.
+	if priority <= 0 {
+		if priorities, ok := m.dynamicModelPriorities[modelID]; ok {
+			delete(priorities, credentialName)
+			if len(priorities) == 0 {
+				delete(m.dynamicModelPriorities, modelID)
+			}
+		}
+		return
+	}
+
+	if m.dynamicModelPriorities[modelID] == nil {
+		m.dynamicModelPriorities[modelID] = make(map[string]int)
+	}
+	m.dynamicModelPriorities[modelID][credentialName] = priority
+}
+
+// ReplaceModelPrioritiesForCredential replaces all dynamic health-derived priorities
+// for a credential with a fresh upstream snapshot. A learned priority of 0 (the upstream
+// serves the model in its best group) is a real, authoritative value and IS stored —
+// only a missing entry means "nothing learned" (read back via
+// LearnedModelPriorityForCredential's ok flag).
+func (m *Manager) ReplaceModelPrioritiesForCredential(credentialName string, priorities map[string]int) {
+	if credentialName == "" {
+		return
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.replaceModelPrioritiesForCredentialLocked(credentialName, priorities)
+}
+
+func (m *Manager) replaceModelPrioritiesForCredentialLocked(credentialName string, priorities map[string]int) {
+	for modelID, credentialPriorities := range m.dynamicModelPriorities {
+		delete(credentialPriorities, credentialName)
+		if len(credentialPriorities) == 0 {
+			delete(m.dynamicModelPriorities, modelID)
+		}
+	}
+
+	for modelID, priority := range priorities {
+		// priority 0 is a real learned value (best group) and is kept — only a genuinely
+		// invalid negative priority is dropped. "Nothing learned" is the absence of an
+		// entry, not a zero.
+		if modelID == "" || priority < 0 {
+			continue
+		}
+		if m.dynamicModelPriorities[modelID] == nil {
+			m.dynamicModelPriorities[modelID] = make(map[string]int)
+		}
+		m.dynamicModelPriorities[modelID][credentialName] = priority
+	}
+}
+
+// ReplaceModelPriorityTiersForCredential replaces the per-priority-tier breakdown a
+// proxy/AIR credential learned from its upstream /health with a fresh snapshot. The
+// balancer expands a proxy credential into one candidate per tier (each its own primary
+// priority group + local cumulative-capacity gate); Design B, review_158 item 3.
+func (m *Manager) ReplaceModelPriorityTiersForCredential(credentialName string, tiers map[string][]httputil.ModelPriorityTier) {
+	if credentialName == "" {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.replaceModelPriorityTiersForCredentialLocked(credentialName, tiers)
+}
+
+func (m *Manager) replaceModelPriorityTiersForCredentialLocked(credentialName string, tiers map[string][]httputil.ModelPriorityTier) {
+	for modelID, credTiers := range m.dynamicModelPriorityTiers {
+		delete(credTiers, credentialName)
+		if len(credTiers) == 0 {
+			delete(m.dynamicModelPriorityTiers, modelID)
+		}
+	}
+
+	for modelID, list := range tiers {
+		if modelID == "" || len(list) == 0 {
+			continue
+		}
+		cp := make([]httputil.ModelPriorityTier, len(list))
+		copy(cp, list)
+		if m.dynamicModelPriorityTiers[modelID] == nil {
+			m.dynamicModelPriorityTiers[modelID] = make(map[string][]httputil.ModelPriorityTier)
+		}
+		m.dynamicModelPriorityTiers[modelID][credentialName] = cp
+	}
+}
+
+// GetModelPriorityTiersForCredential returns the learned per-priority-tier breakdown for
+// a (model, proxy/AIR credential) pair, sorted ascending by priority, or nil when none
+// has been learned (the caller then treats the credential as a single implicit tier from
+// its scalar priority). The returned slice is a copy — safe for the caller to hold.
+//
+// The stored slice is already sorted ascending by priority at build time
+// (proxy.buildModelPriorityTiers), so this only needs to copy for isolation, not re-sort.
+func (m *Manager) GetModelPriorityTiersForCredential(modelID, credentialName string) []httputil.ModelPriorityTier {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	byCred, ok := m.dynamicModelPriorityTiers[modelID]
+	if !ok {
+		return nil
+	}
+	list, ok := byCred[credentialName]
+	if !ok || len(list) == 0 {
+		return nil
+	}
+	cp := make([]httputil.ModelPriorityTier, len(list))
+	copy(cp, list)
+	return cp
+}
+
+// SetModelSourceCredentialForCredential stores which real (leaf) credential is
+// actually serving a model behind a proxy/AIR credential, learned from that
+// upstream's own /health response (ModelHealthStats.Credential there). Purely
+// for display (e.g. the webui showing "mock2" instead of "router2" in the
+// credential column) — it never feeds routing decisions.
+func (m *Manager) SetModelSourceCredentialForCredential(modelID, credentialName, sourceCredential string) {
+	if modelID == "" || credentialName == "" {
+		return
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if sourceCredential == "" {
+		if creds, ok := m.dynamicModelSourceCreds[modelID]; ok {
+			delete(creds, credentialName)
+			if len(creds) == 0 {
+				delete(m.dynamicModelSourceCreds, modelID)
+			}
+		}
+		return
+	}
+
+	if m.dynamicModelSourceCreds[modelID] == nil {
+		m.dynamicModelSourceCreds[modelID] = make(map[string]string)
+	}
+	m.dynamicModelSourceCreds[modelID][credentialName] = sourceCredential
+}
+
+// ReplaceModelSourceCredentialsForCredential replaces all dynamic health-derived
+// source-credential names for a credential with a fresh upstream snapshot.
+func (m *Manager) ReplaceModelSourceCredentialsForCredential(credentialName string, sourceCredentials map[string]string) {
+	if credentialName == "" {
+		return
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	for modelID, creds := range m.dynamicModelSourceCreds {
+		delete(creds, credentialName)
+		if len(creds) == 0 {
+			delete(m.dynamicModelSourceCreds, modelID)
+		}
+	}
+
+	for modelID, sourceCredential := range sourceCredentials {
+		if modelID == "" || sourceCredential == "" {
+			continue
+		}
+		if m.dynamicModelSourceCreds[modelID] == nil {
+			m.dynamicModelSourceCreds[modelID] = make(map[string]string)
+		}
+		m.dynamicModelSourceCreds[modelID][credentialName] = sourceCredential
+	}
+}
+
+// GetModelSourceCredentialForCredential returns the real upstream credential name
+// learned for a (model, local credential) pair, or "" when nothing was learned
+// (e.g. credentialName isn't proxy-like, or no /health poll has landed yet).
+func (m *Manager) GetModelSourceCredentialForCredential(modelID, credentialName string) string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	if creds, ok := m.dynamicModelSourceCreds[modelID]; ok {
+		return creds[credentialName]
+	}
+	return ""
+}
+
 func (m *Manager) ReplaceModelScopesForCredential(credentialName string, scopes map[string]ScopeMetadata) {
 	if credentialName == "" {
 		return
@@ -2187,6 +2398,7 @@ func (m *Manager) applyRemoteScopeSnapshotAndCache(
 	cred *config.CredentialConfig,
 	models []Model,
 	snapshot *remoteScopeSnapshot,
+	health *httputil.ProxyHealthResponse,
 ) bool {
 	cloned := cloneRemoteScopeSnapshot(snapshot)
 	cachedModels := append([]Model(nil), models...)
@@ -2199,9 +2411,24 @@ func (m *Manager) applyRemoteScopeSnapshotAndCache(
 		credential:    *cred,
 		models:        cachedModels,
 		scopeSnapshot: cloneRemoteScopeSnapshot(cloned),
+		health:        health,
 		expiresAt:     utils.NowUTC().Add(m.cacheExpiration),
 	}
 	return true
+}
+
+// CachedRemoteHealth returns the raw upstream /health response last fetched for a
+// proxy/AIR credential, or nil when nothing is cached (or the last refresh used the
+// /v1/models legacy fallback). Used by modelupdate.UpdateAllProxyCredentials to run
+// proxy.UpdateStatsFromHealth off the same fetch that populated the model snapshot,
+// so the periodic sync hits each upstream's /health exactly once per cycle.
+func (m *Manager) CachedRemoteHealth(credentialName string) *httputil.ProxyHealthResponse {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if cached, ok := m.remoteModelsCache[credentialName]; ok {
+		return cached.health
+	}
+	return nil
 }
 
 func (m *Manager) applyRemoteScopeSnapshotLocked(
@@ -2422,6 +2649,64 @@ func (m *Manager) GetModelWeightForCredential(modelID, credentialName string) in
 	}
 
 	return 0
+}
+
+// GetModelPriorityForCredential returns the dynamic (health-derived) priority for a
+// (model, credential) pair, learned from an upstream proxy's /health response, or 0 when
+// nothing has been learned. It cannot distinguish "nothing learned" from "learned 0" —
+// callers that must tell the two apart (to choose between the learned value and the
+// credential's own static priority: field) use LearnedModelPriorityForCredential instead.
+// This variant stays for the dashboard's display fallback and existing call sites where
+// 0-either-way is acceptable.
+func (m *Manager) GetModelPriorityForCredential(modelID, credentialName string) int {
+	p, _ := m.LearnedModelPriorityForCredential(modelID, credentialName)
+	return p
+}
+
+// LearnedModelPriorityForCredential is GetModelPriorityForCredential plus an explicit
+// "was anything learned" flag. A proxy/AIR credential can legitimately learn priority 0
+// (its upstream serves the model in the best group), and that is authoritative: callers
+// choosing between the learned value and the credential's static priority: field
+// (balancer.primaryPriority / effectivePriority, and the /health dashboard) must use the
+// learned 0 and NOT fall through to the static field. ok is false only when neither a
+// scalar priority nor a per-tier breakdown has been learned for this pair.
+//
+// When a per-tier breakdown exists (GetModelPriorityTiersForCredential) the value is the
+// lowest priority among the tiers currently live; when no tier is live it is the WORST
+// (highest) priority across all tiers, matching the scalar path's trackWorstPriority
+// (internal/proxy/remote.go) so a fully-exhausted multi-tier proxy does not advertise its
+// cheapest tier to the local balancer or the next router in the chain. The balancer itself
+// uses the full tier list (candidate expansion); this scalar is for the dashboard and the
+// pre-Design-B fallback path.
+func (m *Manager) LearnedModelPriorityForCredential(modelID, credentialName string) (int, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	if byCred, ok := m.dynamicModelPriorityTiers[modelID]; ok {
+		if tiers, ok := byCred[credentialName]; ok && len(tiers) > 0 {
+			bestLive, haveLive, worstAny := 0, false, 0
+			for i, t := range tiers {
+				if i == 0 || t.Priority > worstAny {
+					worstAny = t.Priority
+				}
+				if httputil.ModelPriorityTierLive(t) && (!haveLive || t.Priority < bestLive) {
+					bestLive, haveLive = t.Priority, true
+				}
+			}
+			if haveLive {
+				return bestLive, true
+			}
+			return worstAny, true
+		}
+	}
+
+	if priorities, ok := m.dynamicModelPriorities[modelID]; ok {
+		if p, ok := priorities[credentialName]; ok {
+			return p, true
+		}
+	}
+
+	return 0, false
 }
 
 // findTPMLimit searches for TPM limit with optional credential filtering
@@ -2732,13 +3017,27 @@ func (m *Manager) GetRemoteModels(cred *config.CredentialConfig) []Model {
 // GetRemoteModelsWithError fetches models from a remote proxy credential with caching.
 // Returns explicit error when remote fetch fails.
 func (m *Manager) GetRemoteModelsWithError(ctx context.Context, cred *config.CredentialConfig) ([]Model, error) {
+	return m.getRemoteModelsWithError(ctx, cred, false)
+}
+
+// RefreshRemoteModelsWithError is the periodic poller's entry point
+// (modelupdate.UpdateAllProxyCredentials): it always re-fetches the upstream /health,
+// bypassing the read-through cache that GetRemoteModelsWithError serves request-path
+// callers from, so limits / current usage / learned priority stay fresh on every 30s
+// tick rather than only every cache-TTL. The freshly fetched /health is still written to
+// the cache (and exposed via CachedRemoteHealth for the limit/priority sync).
+func (m *Manager) RefreshRemoteModelsWithError(ctx context.Context, cred *config.CredentialConfig) ([]Model, error) {
+	return m.getRemoteModelsWithError(ctx, cred, true)
+}
+
+func (m *Manager) getRemoteModelsWithError(ctx context.Context, cred *config.CredentialConfig, skipCache bool) ([]Model, error) {
 	if !cred.IsProxyLike() {
 		return nil, nil
 	}
 
-	// Check cache first
+	// Check cache first (request-path callers only; the periodic poller forces a refresh).
 	m.mu.RLock()
-	if cached, ok := m.remoteModelsCache[cred.Name]; ok && cred.SameProviderIdentity(cached.credential) &&
+	if cached, ok := m.remoteModelsCache[cred.Name]; !skipCache && ok && cred.SameProviderIdentity(cached.credential) &&
 		!cached.expiresAt.IsZero() && utils.NowUTC().Before(cached.expiresAt) {
 		cachedModels := append([]Model(nil), cached.models...)
 		cachedSnapshot := cloneRemoteScopeSnapshot(cached.scopeSnapshot)
@@ -2762,7 +3061,7 @@ func (m *Manager) GetRemoteModelsWithError(ctx context.Context, cred *config.Cre
 		"base_url", cred.BaseURL,
 	)
 
-	models, snapshot, err := m.fetchRemoteModelsFromHealth(ctx, cred)
+	models, snapshot, health, err := m.fetchRemoteModelsFromHealth(ctx, cred)
 	if err != nil {
 		if !isLegacyProxyHealthError(err) || !m.providerScopeAllowsLegacyFallback(cred) {
 			m.failClosedUnknownRemoteScope(cred)
@@ -2789,9 +3088,10 @@ func (m *Manager) GetRemoteModelsWithError(ctx context.Context, cred *config.Cre
 			modelWeights:   map[string]int{},
 			scopeKnown:     true,
 		}
+		health = nil
 	}
 
-	if !m.applyRemoteScopeSnapshotAndCache(cred, models, snapshot) {
+	if !m.applyRemoteScopeSnapshotAndCache(cred, models, snapshot, health) {
 		return nil, errProxyCredentialChanged
 	}
 
@@ -2807,14 +3107,14 @@ func (m *Manager) GetRemoteModelsWithError(ctx context.Context, cred *config.Cre
 func (m *Manager) fetchRemoteModelsFromHealth(
 	ctx context.Context,
 	cred *config.CredentialConfig,
-) ([]Model, *remoteScopeSnapshot, error) {
+) ([]Model, *remoteScopeSnapshot, *httputil.ProxyHealthResponse, error) {
 	var health httputil.ProxyHealthResponse
 	if err := httputil.FetchJSONFromProxy(ctx, cred, "/health", m.logger, &health); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 
 	if health.Credentials == nil || health.Models == nil {
-		return nil, nil, errProxyHealthModelMetadataUnavailable
+		return nil, nil, nil, errProxyHealthModelMetadataUnavailable
 	}
 
 	providerScopes := AggregateProviderScopesFromHealth(&health, cred.IsFallback)
@@ -2861,7 +3161,7 @@ func (m *Manager) fetchRemoteModelsFromHealth(
 		modelScopes:    modelScopes,
 		modelWeights:   modelWeightsByID,
 		scopeKnown:     true,
-	}, nil
+	}, &health, nil
 }
 
 func isLegacyProxyHealthError(err error) bool {
