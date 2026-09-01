@@ -80,6 +80,21 @@ func isRetryableContent(respBody []byte) bool {
 	return true
 }
 
+// setRetryAfterFromBan sets the Retry-After header to the shortest remaining
+// fail2ban ban among modelID's eligible credentials, rounded up to whole
+// seconds. No-op if none of them are currently banned.
+func (p *Proxy) setRetryAfterFromBan(w http.ResponseWriter, modelID string, exclude map[string]bool, visibility scope.Context) {
+	remaining, ok := p.balancer.MinRemainingBanForModel(modelID, exclude, visibility)
+	if !ok {
+		return
+	}
+	seconds := int(remaining / time.Second)
+	if remaining%time.Second != 0 {
+		seconds++
+	}
+	w.Header().Set("Retry-After", fmt.Sprintf("%d", seconds))
+}
+
 // GetTried gets the set of tried credentials from context.
 // Returns an empty map if not found (new request without context).
 func GetTried(ctx context.Context) map[string]bool {
@@ -281,6 +296,19 @@ func (p *Proxy) writeFallbackResponse(
 	// Computed once: both branches below need the same audio-usage-contract
 	// derived from the fallback upstream's response, regardless of streaming.
 	usageOptions := tokenUsageExtractionOptionsForResponse(fallbackCred, proxyResp.Headers)
+
+	// The fallback chain is exhausted and this 429 is a real upstream response
+	// being relayed as-is — unlike the self-generated "no credentials available"
+	// 429 in selectCredentialForModel, nothing here has computed a Retry-After
+	// hint yet. Add one from the shortest active ban, but only if the upstream
+	// didn't already send its own (never override a provider's own guidance).
+	if proxyResp.StatusCode == http.StatusTooManyRequests && proxyResp.Headers.Get("Retry-After") == "" {
+		visibility := scope.PublicContext()
+		if logCtx != nil {
+			visibility = logCtx.Scope
+		}
+		p.setRetryAfterFromBan(w, modelID, nil, visibility)
+	}
 
 	if proxyResp.IsStreaming {
 		p.setCredentialResponseHeader(w, logCtx, "")

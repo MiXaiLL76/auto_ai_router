@@ -8,7 +8,6 @@ import (
 	"io"
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/mixaill76/auto_ai_router/internal/balancer"
 	"github.com/mixaill76/auto_ai_router/internal/config"
@@ -891,13 +890,7 @@ func (p *Proxy) selectCredentialForModel(
 		)
 	}
 	logCtx.Logged = true
-	if remaining, ok := p.balancer.MinRemainingBanForModel(modelID, exclude, logCtx.Scope); ok {
-		seconds := int(remaining / time.Second)
-		if remaining%time.Second != 0 {
-			seconds++
-		}
-		w.Header().Set("Retry-After", fmt.Sprintf("%d", seconds))
-	}
+	p.setRetryAfterFromBan(w, modelID, exclude, logCtx.Scope)
 	WriteErrorRateLimit(w, errorMsg)
 	return nil, false
 }

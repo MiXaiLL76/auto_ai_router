@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -327,6 +328,79 @@ func TestTryFallbackProxy_Success(t *testing.T) {
 	require.NoError(t, err, "Failed to unmarshal response")
 	assert.Equal(t, "chatcmpl-test-fallback", respData["id"])
 	assert.Equal(t, "gpt-4", respData["model"])
+}
+
+// TestTryFallbackProxy_ExhaustedSetsRetryAfterFromBan verifies that a real
+// upstream 429 relayed after the fallback chain is exhausted still carries a
+// Retry-After hint derived from the shortest active ban, not just the
+// self-generated "no credentials available" 429 in selectCredentialForModel.
+func TestTryFallbackProxy_ExhaustedSetsRetryAfterFromBan(t *testing.T) {
+	fallbackServer := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"error":{"message":"rate limited"}}`))
+	}))
+	defer fallbackServer.Close()
+
+	prx := NewTestProxyBuilder().
+		WithPrimaryAndFallback("http://primary.local", fallbackServer.URL).
+		Build()
+
+	// The original credential is banned by the time the fallback chain
+	// exhausts; MinRemainingBanForModel should still find it (exclude=nil).
+	prx.balancer.BanUntil("primary", "gpt-4", http.StatusTooManyRequests, time.Now().Add(3*time.Second), "test-ban")
+
+	bodyBytes := []byte(`{"model":"gpt-4","messages":[]}`)
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(string(bodyBytes)))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+
+	w := httptest.NewRecorder()
+	success, _ := prx.TryFallbackProxy(
+		w, req, "gpt-4", "primary", http.StatusTooManyRequests, RetryReasonRateLimit,
+		bodyBytes, time.Now().UTC(), nil,
+	)
+
+	assert.True(t, success)
+	assert.Equal(t, http.StatusTooManyRequests, w.Code)
+
+	retryAfter := w.Header().Get("Retry-After")
+	require.NotEmpty(t, retryAfter, "expected Retry-After derived from the active ban on the exhausted fallback response")
+	seconds, err := strconv.Atoi(retryAfter)
+	require.NoError(t, err)
+	assert.GreaterOrEqual(t, seconds, 1)
+	assert.LessOrEqual(t, seconds, 3)
+}
+
+// TestTryFallbackProxy_ExhaustedPreservesUpstreamRetryAfter verifies that a
+// Retry-After the upstream itself sent is never overridden by our own
+// ban-derived guess.
+func TestTryFallbackProxy_ExhaustedPreservesUpstreamRetryAfter(t *testing.T) {
+	fallbackServer := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", "42")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"error":{"message":"rate limited"}}`))
+	}))
+	defer fallbackServer.Close()
+
+	prx := NewTestProxyBuilder().
+		WithPrimaryAndFallback("http://primary.local", fallbackServer.URL).
+		Build()
+	prx.balancer.BanUntil("primary", "gpt-4", http.StatusTooManyRequests, time.Now().Add(3*time.Second), "test-ban")
+
+	bodyBytes := []byte(`{"model":"gpt-4","messages":[]}`)
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(string(bodyBytes)))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+
+	w := httptest.NewRecorder()
+	_, _ = prx.TryFallbackProxy(
+		w, req, "gpt-4", "primary", http.StatusTooManyRequests, RetryReasonRateLimit,
+		bodyBytes, time.Now().UTC(), nil,
+	)
+
+	assert.Equal(t, "42", w.Header().Get("Retry-After"), "must not override the upstream's own Retry-After")
 }
 
 func TestWriteFallbackResponseUsesAIRUsageContractForNonStreaming(t *testing.T) {
