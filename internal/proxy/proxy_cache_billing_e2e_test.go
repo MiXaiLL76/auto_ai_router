@@ -375,6 +375,83 @@ func TestProxyRequest_ConvertedResponsesEmitsNormalizedUsageHeaderAndLogsSpend(t
 	assert.Equal(t, float64(40), inputDetails["cached_audio_tokens"])
 }
 
+func TestProxyRequest_PassthroughResponsesPreservesCacheWriteTokens(t *testing.T) {
+	const upstreamBody = `{
+		"id": "resp_passthrough",
+		"object": "response",
+		"created_at": 1,
+		"status": "completed",
+		"model": "gpt-cache",
+		"output": [{"type":"message","id":"msg_1","status":"completed","role":"assistant","content":[{"type":"output_text","text":"ok"}]}],
+		"usage": {
+			"input_tokens": 200,
+			"output_tokens": 50,
+			"total_tokens": 250,
+			"input_tokens_details": {"cached_tokens": 0, "cache_write_tokens": 120},
+			"output_tokens_details": {"reasoning_tokens": 0}
+		}
+	}`
+
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.Equal(t, "/v1/responses", r.URL.Path)
+		require.Equal(t, "Bearer upstream-key", r.Header.Get("Authorization"))
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(upstreamBody))
+	}))
+	defer upstream.Close()
+
+	passthroughResponses := true
+	dbStub := &stubLiteLLMManager{}
+	builder := NewTestProxyBuilder().
+		WithCredentials(config.CredentialConfig{
+			Name:    "openai-cache",
+			Type:    config.ProviderTypeOpenAI,
+			BaseURL: upstream.URL,
+			APIKey:  "upstream-key",
+			RPM:     100,
+			TPM:     10000,
+		}).
+		WithMasterKey("master-key")
+	builder.config.ModelManager = pricing.New(builder.config.Logger, 50, []config.ModelRPMConfig{
+		{Name: "gpt-cache", Credential: "openai-cache", PassthroughResponses: &passthroughResponses},
+	})
+	builder.config.ModelManager.LoadModelsFromConfig(builder.config.Credentials)
+	prx := builder.Build()
+	prx.LiteLLMDB = dbStub
+	installCacheBillingPrices(prx)
+
+	req := httptest.NewRequest("POST", "/v1/responses", strings.NewReader(`{"model":"gpt-cache","input":"hello"}`))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	prx.ProxyRequest(w, req)
+	require.Equal(t, http.StatusOK, w.Code)
+
+	var response struct {
+		Usage struct {
+			InputTokensDetails struct {
+				CachedTokens     int `json:"cached_tokens"`
+				CacheWriteTokens int `json:"cache_write_tokens"`
+			} `json:"input_tokens_details"`
+		} `json:"usage"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &response))
+	assert.Equal(t, 120, response.Usage.InputTokensDetails.CacheWriteTokens,
+		"cache_write_tokens must survive the passthrough re-serialization")
+
+	require.Len(t, dbStub.loggedEntries, 1)
+	entry := dbStub.loggedEntries[0]
+
+	metadata := decodeMetadata(t, entry.Metadata)
+	usageObject := metadata["usage_object"].(map[string]interface{})
+	inputDetails := usageObject["prompt_tokens_details"].(map[string]interface{})
+	assert.Equal(t, float64(120), inputDetails["cache_creation_tokens"],
+		"cache writes must reach the spend log")
+
+	assert.Equal(t, 540.0, entry.Spend)
+}
+
 func newCacheBillingProxy(t *testing.T, upstreamURL string, dbStub *stubLiteLLMManager) *Proxy {
 	t.Helper()
 
