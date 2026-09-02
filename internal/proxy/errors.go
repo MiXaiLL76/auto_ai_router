@@ -375,13 +375,13 @@ func statusForValidationError(e *converterutil.RequestValidationError) int {
 
 // writeValidationError writes the client-facing response for a converter
 // RequestValidationError, honoring its StatusCode when set instead of always
-// answering 400.
+// answering 400. Generic over the status rather than special-casing 413:
+// statusForValidationError is also what callers log as error_code/HTTPStatus,
+// so any future non-413 StatusCode must reach the client as the same status
+// it was logged under, not silently collapse to 400.
 func writeValidationError(w http.ResponseWriter, e *converterutil.RequestValidationError, message string) {
-	if statusForValidationError(e) == http.StatusRequestEntityTooLarge {
-		WriteErrorTooLarge(w, message)
-		return
-	}
-	WriteErrorBadRequest(w, message)
+	status := statusForValidationError(e)
+	WriteJSONError(w, status, message, errorTypeForStatus(status), nil, nil)
 }
 
 // WriteErrorRateLimit writes a 429 Too Many Requests JSON error.
