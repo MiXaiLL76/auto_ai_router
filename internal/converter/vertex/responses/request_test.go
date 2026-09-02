@@ -1,6 +1,7 @@
 package vertexresponses
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -292,6 +293,54 @@ func TestContentPartToVertexParts_InputImage_DataURLOversized(t *testing.T) {
 	var validationErr *converterutil.RequestValidationError
 	require.ErrorAs(t, err, &validationErr)
 	assert.Equal(t, http.StatusRequestEntityTooLarge, validationErr.StatusCode)
+}
+
+func TestContentPartToVertexParts_InputImage_DataURLWithExtraParams(t *testing.T) {
+	// A data: URL carrying an extra parameter before ";base64," (e.g. charset,
+	// as browsers commonly emit for SVGs) must still decode as inline data —
+	// not fall through and leak the whole data: URL into FileURI (see the
+	// "unsupported scheme" test below for what used to happen instead).
+	raw := []byte("<svg></svg>")
+	encoded := base64.StdEncoding.EncodeToString(raw)
+	part := map[string]interface{}{
+		"type":      "input_image",
+		"image_url": "data:image/svg+xml;charset=utf-8;base64," + encoded,
+	}
+	parts, err := contentPartToVertexParts(part)
+	require.NoError(t, err)
+	require.Len(t, parts, 1)
+	require.NotNil(t, parts[0].InlineData)
+	assert.Equal(t, "image/svg+xml", parts[0].InlineData.MIMEType)
+	assert.Equal(t, raw, parts[0].InlineData.Data)
+}
+
+func TestContentPartToVertexParts_InputImage_UnsupportedSchemeRejected(t *testing.T) {
+	// A data: URL that fails to parse (e.g. non-base64 payload) must be
+	// rejected outright, not forwarded to Vertex as a literal FileURI
+	// containing the entire (potentially multi-megabyte) string.
+	part := map[string]interface{}{
+		"type":      "input_image",
+		"image_url": "data:image/png,not-valid-base64!!!",
+	}
+	parts, err := contentPartToVertexParts(part)
+	require.Error(t, err)
+	assert.Nil(t, parts)
+	var validationErr *converterutil.RequestValidationError
+	require.ErrorAs(t, err, &validationErr)
+	assert.Equal(t, "input_image.image_url", validationErr.Param)
+}
+
+func TestContentPartToVertexParts_InputFile_UnsupportedSchemeRejected(t *testing.T) {
+	part := map[string]interface{}{
+		"type":     "input_file",
+		"file_url": "ftp://example.com/doc.pdf",
+	}
+	parts, err := contentPartToVertexParts(part)
+	require.Error(t, err)
+	assert.Nil(t, parts)
+	var validationErr *converterutil.RequestValidationError
+	require.ErrorAs(t, err, &validationErr)
+	assert.Equal(t, "input_file.file_url", validationErr.Param)
 }
 
 func TestContentPartToVertexParts_InputImage_URL(t *testing.T) {

@@ -56,7 +56,13 @@ func convertInputImageParts(partMap map[string]interface{}) ([]*genai.Part, erro
 		return []*genai.Part{part}, nil
 	}
 
-	// Regular https:// URL → fileData
+	// Regular https:// URL → fileData. Reject anything else — most notably a
+	// data: URL that failed to parse above (unrecognized encoding, no comma,
+	// non-base64 payload) — instead of forwarding it to Vertex as a literal,
+	// potentially multi-megabyte FileURI.
+	if !isRemoteFileScheme(imgURL) {
+		return nil, converterutil.NewRequestValidationError("input_image.image_url", "unsupported image URL scheme")
+	}
 	return []*genai.Part{{
 		FileData: &genai.FileData{
 			MIMEType: detectMIMEFromURL(imgURL),
@@ -86,6 +92,9 @@ func convertInputAudioPart(partMap map[string]interface{}) ([]*genai.Part, error
 func convertInputFilePart(partMap map[string]interface{}) ([]*genai.Part, error) {
 	fileURL, _ := partMap["file_url"].(string)
 	if fileURL != "" {
+		if !isRemoteFileScheme(fileURL) {
+			return nil, converterutil.NewRequestValidationError("input_file.file_url", "unsupported file URL scheme")
+		}
 		return []*genai.Part{{
 			FileData: &genai.FileData{
 				MIMEType: detectMIMEFromURL(fileURL),
@@ -107,25 +116,46 @@ func convertInputFilePart(partMap map[string]interface{}) ([]*genai.Part, error)
 // anyway once decoded.
 const maxInlineBase64Size = 100 * 1024 * 1024 // 100MB encoded
 
+// isRemoteFileScheme reports whether rawURL uses a scheme Vertex can actually
+// fetch as a FileData reference. Anything else — including a data: URL that
+// failed to parse as inline data above — must never be forwarded as a
+// FileURI: Vertex would receive it as a literal, potentially multi-megabyte
+// string instead of the image/file it names.
+func isRemoteFileScheme(rawURL string) bool {
+	return strings.HasPrefix(rawURL, "http://") ||
+		strings.HasPrefix(rawURL, "https://") ||
+		strings.HasPrefix(rawURL, "gs://")
+}
+
 // parseDataURLToPart decodes a data: URL into an InlineData Part.
 // Returns (nil, nil) if the string is not a data URL — callers fall back to
 // treating it as a regular URL. Returns a non-nil error only when the string
 // IS a data URL but is otherwise unusable (oversized or malformed base64).
+//
+// Splits on the first comma rather than requiring a literal ";base64," marker
+// right after the MIME type: real-world data URLs commonly carry extra
+// parameters first (e.g. "data:image/svg+xml;charset=utf-8;base64,...."),
+// which the stricter form used to misdetect as "not a data URL" and forward
+// to the caller's FileURI fallback (an mp3-sized string as a "URL").
 func parseDataURLToPart(dataURL string) (*genai.Part, error) {
 	if !strings.HasPrefix(dataURL, "data:") {
 		return nil, nil
 	}
-	rest := strings.TrimPrefix(dataURL, "data:")
-	semi := strings.Index(rest, ";")
-	if semi < 0 {
+	parts := strings.SplitN(dataURL, ",", 2) // SplitN to handle base64 with commas
+	if len(parts) != 2 {
 		return nil, nil
 	}
-	mimeType := rest[:semi]
-	after := rest[semi+1:]
-	if !strings.HasPrefix(after, "base64,") {
+	header := strings.TrimPrefix(parts[0], "data:")
+	encoded := parts[1]
+
+	mimeType := header
+	if semi := strings.Index(header, ";"); semi >= 0 {
+		mimeType = header[:semi]
+	}
+	if mimeType == "" {
 		return nil, nil
 	}
-	encoded := after[7:]
+
 	if len(encoded) > maxInlineBase64Size {
 		return nil, converterutil.NewRequestEntityTooLargeError("", fmt.Sprintf("inline data URL payload exceeds %dMB limit", maxInlineBase64Size/(1024*1024)))
 	}
