@@ -78,6 +78,13 @@ func convertInputAudioPart(partMap map[string]interface{}) ([]*genai.Part, error
 	if data == "" {
 		return nil, fmt.Errorf("input_audio: missing data")
 	}
+	// Same limit and same explicit 413 as input_image: Vertex/Gemini's real
+	// inline-data cap is a single, media-agnostic 100MB (base64-encoded), and
+	// this path previously had no size check at all — any payload, however
+	// large, was decoded in full before this fix.
+	if len(data) > maxInlineBase64Size {
+		return nil, converterutil.NewRequestEntityTooLargeError("input_audio.data", fmt.Sprintf("inline audio payload exceeds %dMB limit", maxInlineBase64Size/(1024*1024)))
+	}
 	decoded, err := base64.StdEncoding.DecodeString(data)
 	if err != nil {
 		return nil, fmt.Errorf("input_audio: base64 decode: %w", err)

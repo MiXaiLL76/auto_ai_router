@@ -69,9 +69,12 @@ func convertContentToParts(content interface{}) ([]*genai.Part, error) {
 					return nil, nil
 				}
 
-				// check base64 payload size before decoding
-				if len(data) > 20*1024*1024 {
-					return nil, nil
+				// check base64 payload size before decoding — same limit and
+				// same explicit 413 (rather than a silent drop) as images,
+				// for the same reason: Vertex/Gemini's real inline-data cap
+				// is a single, media-agnostic 100MB (base64-encoded).
+				if len(data) > maxBase64Size {
+					return nil, converterutil.NewRequestEntityTooLargeError("input_audio.data", fmt.Sprintf("inline audio payload exceeds %dMB limit", maxBase64Size/(1024*1024)))
 				}
 
 				// Decode base64 audio data

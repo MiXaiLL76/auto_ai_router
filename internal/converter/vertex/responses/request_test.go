@@ -330,6 +330,36 @@ func TestContentPartToVertexParts_InputImage_UnsupportedSchemeRejected(t *testin
 	assert.Equal(t, "input_image.image_url", validationErr.Param)
 }
 
+func TestContentPartToVertexParts_InputAudio_OversizedReturns413(t *testing.T) {
+	oversized := strings.Repeat("A", maxInlineBase64Size+1)
+	part := map[string]interface{}{
+		"type":   "input_audio",
+		"data":   oversized,
+		"format": "wav",
+	}
+	parts, err := contentPartToVertexParts(part)
+	require.Nil(t, parts)
+	require.Error(t, err)
+	var validationErr *converterutil.RequestValidationError
+	require.ErrorAs(t, err, &validationErr)
+	assert.Equal(t, http.StatusRequestEntityTooLarge, validationErr.StatusCode)
+}
+
+func TestContentPartToVertexParts_InputAudio_ValidDecodes(t *testing.T) {
+	raw := []byte("fake wav bytes")
+	encoded := base64.StdEncoding.EncodeToString(raw)
+	part := map[string]interface{}{
+		"type":   "input_audio",
+		"data":   encoded,
+		"format": "wav",
+	}
+	parts, err := contentPartToVertexParts(part)
+	require.NoError(t, err)
+	require.Len(t, parts, 1)
+	require.NotNil(t, parts[0].InlineData)
+	assert.Equal(t, raw, parts[0].InlineData.Data)
+}
+
 func TestContentPartToVertexParts_InputImage_PrivateURLRejected(t *testing.T) {
 	// http(s) is an allowed scheme, but a private/internal address must still
 	// be blocked (SSRF) — matching the chat-completions path's parseURLToPart.
