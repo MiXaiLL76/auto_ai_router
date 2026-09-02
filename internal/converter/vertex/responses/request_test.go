@@ -282,7 +282,8 @@ func TestContentPartToVertexParts_InputImage_DataURL(t *testing.T) {
 }
 
 func TestContentPartToVertexParts_InputImage_DataURLOversized(t *testing.T) {
-	oversized := strings.Repeat("A", maxInlineBase64Size+1)
+	withMaxInlineBase64Size(t, 16)
+	oversized := strings.Repeat("A", 17)
 	part := map[string]interface{}{
 		"type":      "input_image",
 		"image_url": "data:image/png;base64," + oversized,
@@ -331,7 +332,8 @@ func TestContentPartToVertexParts_InputImage_UnsupportedSchemeRejected(t *testin
 }
 
 func TestContentPartToVertexParts_InputAudio_OversizedReturns413(t *testing.T) {
-	oversized := strings.Repeat("A", maxInlineBase64Size+1)
+	withMaxInlineBase64Size(t, 16)
+	oversized := strings.Repeat("A", 17)
 	part := map[string]interface{}{
 		"type":   "input_audio",
 		"data":   oversized,
@@ -524,4 +526,16 @@ func TestVertexSchemaConversion(t *testing.T) {
 	require.NotNil(t, schema)
 	assert.Equal(t, genai.TypeObject, schema.Type)
 	assert.Contains(t, schema.Properties, "city")
+}
+
+// withMaxInlineBase64Size temporarily shrinks the package-level
+// maxInlineBase64Size for the duration of the calling test, restoring it on
+// cleanup. Lets boundary tests exercise the ">" comparison without allocating
+// and base64-decoding a real ~100MB/~75MB string. Not safe under
+// t.Parallel() — this package's tests don't use it.
+func withMaxInlineBase64Size(t *testing.T, n int) {
+	t.Helper()
+	orig := maxInlineBase64Size
+	maxInlineBase64Size = n
+	t.Cleanup(func() { maxInlineBase64Size = orig })
 }

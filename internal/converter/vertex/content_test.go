@@ -12,7 +12,8 @@ import (
 )
 
 func TestConvertContentToParts_InputAudioOversizedReturns413(t *testing.T) {
-	oversized := strings.Repeat("A", maxBase64Size+1)
+	withMaxBase64Size(t, 16)
+	oversized := strings.Repeat("A", 17)
 	content := []interface{}{
 		map[string]interface{}{
 			"type": "input_audio",

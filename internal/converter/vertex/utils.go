@@ -18,7 +18,11 @@ import (
 // silently dropping the media or (the previous behaviour) falling through to
 // parseURLToPart, which would treat the same giant base64 string as if it
 // were a plain http(s) URL and forward a malformed request to Vertex.
-const maxBase64Size = 100 * 1024 * 1024 // 100MB encoded
+//
+// A var, not a const: tests shrink it (see withMaxBase64Size in
+// utils_test.go) so boundary cases don't have to allocate and base64-decode
+// real ~100MB/~75MB strings just to exercise the ">" comparison.
+var maxBase64Size = 100 * 1024 * 1024 // 100MB encoded
 
 // ClampInt32 narrows a caller-supplied integer to int32, saturating instead of
 // wrapping on out-of-range values. The genai SDK takes int32 for token counts,

@@ -125,8 +125,8 @@ func TestParseDataURLToPart(t *testing.T) {
 	})
 
 	t.Run("oversized_payload_returns_413_error", func(t *testing.T) {
-		// One byte over the limit is enough; no need to allocate a real 100MB+ string twice over.
-		oversized := strings.Repeat("A", maxBase64Size+1)
+		withMaxBase64Size(t, 16)
+		oversized := strings.Repeat("A", 17) // one byte over the (test-shrunk) limit
 		result, err := parseDataURLToPart("data:image/jpeg;base64," + oversized)
 		require.Nil(t, result)
 		require.Error(t, err)
@@ -136,7 +136,8 @@ func TestParseDataURLToPart(t *testing.T) {
 	})
 
 	t.Run("payload_at_limit_is_accepted", func(t *testing.T) {
-		atLimit := strings.Repeat("A", maxBase64Size)
+		withMaxBase64Size(t, 16)
+		atLimit := strings.Repeat("A", 16)
 		_, err := parseDataURLToPart("data:image/jpeg;base64," + atLimit)
 		// "A" repeated isn't valid base64 padding at this length necessarily; we only
 		// care that the size gate itself doesn't reject it — a decode error (if any)
@@ -144,6 +145,18 @@ func TestParseDataURLToPart(t *testing.T) {
 		var validationErr *converterutil.RequestValidationError
 		assert.False(t, errors.As(err, &validationErr), "size check must not trigger exactly at the limit")
 	})
+}
+
+// withMaxBase64Size temporarily shrinks the package-level maxBase64Size for
+// the duration of the calling test, restoring it on cleanup. Lets boundary
+// tests exercise the ">" comparison without allocating and base64-decoding a
+// real ~100MB/~75MB string. Not safe under t.Parallel() — this package's
+// tests don't use it.
+func withMaxBase64Size(t *testing.T, n int) {
+	t.Helper()
+	orig := maxBase64Size
+	maxBase64Size = n
+	t.Cleanup(func() { maxBase64Size = orig })
 }
 
 func TestParseURLToPart(t *testing.T) {

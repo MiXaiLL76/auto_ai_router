@@ -122,7 +122,11 @@ func convertInputFilePart(partMap map[string]interface{}) ([]*genai.Part, error)
 // inline data: URL. Above this, we reject the request with 413 instead of
 // silently dropping the media or forwarding a request Vertex would reject
 // anyway once decoded.
-const maxInlineBase64Size = 100 * 1024 * 1024 // 100MB encoded
+//
+// A var, not a const: tests shrink it (see withMaxInlineBase64Size in
+// request_test.go) so boundary cases don't have to allocate and base64-decode
+// real ~100MB/~75MB strings just to exercise the ">" comparison.
+var maxInlineBase64Size = 100 * 1024 * 1024 // 100MB encoded
 
 // isAllowedFileURL reports whether rawURL is safe to forward to Vertex as a
 // FileData reference: an allowed scheme (http/https/gs — anything else,
