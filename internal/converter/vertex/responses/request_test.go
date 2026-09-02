@@ -330,6 +330,21 @@ func TestContentPartToVertexParts_InputImage_UnsupportedSchemeRejected(t *testin
 	assert.Equal(t, "input_image.image_url", validationErr.Param)
 }
 
+func TestContentPartToVertexParts_InputImage_PrivateURLRejected(t *testing.T) {
+	// http(s) is an allowed scheme, but a private/internal address must still
+	// be blocked (SSRF) — matching the chat-completions path's parseURLToPart.
+	part := map[string]interface{}{
+		"type":      "input_image",
+		"image_url": "http://169.254.169.254/latest/meta-data/",
+	}
+	parts, err := contentPartToVertexParts(part)
+	require.Error(t, err)
+	assert.Nil(t, parts)
+	var validationErr *converterutil.RequestValidationError
+	require.ErrorAs(t, err, &validationErr)
+	assert.Equal(t, "input_image.image_url", validationErr.Param)
+}
+
 func TestContentPartToVertexParts_InputFile_UnsupportedSchemeRejected(t *testing.T) {
 	part := map[string]interface{}{
 		"type":     "input_file",

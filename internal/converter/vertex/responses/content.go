@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
+	"github.com/mixaill76/auto_ai_router/internal/converter/vertex"
 	"google.golang.org/genai"
 )
 
@@ -60,8 +61,8 @@ func convertInputImageParts(partMap map[string]interface{}) ([]*genai.Part, erro
 	// data: URL that failed to parse above (unrecognized encoding, no comma,
 	// non-base64 payload) — instead of forwarding it to Vertex as a literal,
 	// potentially multi-megabyte FileURI.
-	if !isRemoteFileScheme(imgURL) {
-		return nil, converterutil.NewRequestValidationError("input_image.image_url", "unsupported image URL scheme")
+	if !isAllowedFileURL(imgURL) {
+		return nil, converterutil.NewRequestValidationError("input_image.image_url", "unsupported or blocked image URL")
 	}
 	return []*genai.Part{{
 		FileData: &genai.FileData{
@@ -92,8 +93,8 @@ func convertInputAudioPart(partMap map[string]interface{}) ([]*genai.Part, error
 func convertInputFilePart(partMap map[string]interface{}) ([]*genai.Part, error) {
 	fileURL, _ := partMap["file_url"].(string)
 	if fileURL != "" {
-		if !isRemoteFileScheme(fileURL) {
-			return nil, converterutil.NewRequestValidationError("input_file.file_url", "unsupported file URL scheme")
+		if !isAllowedFileURL(fileURL) {
+			return nil, converterutil.NewRequestValidationError("input_file.file_url", "unsupported or blocked file URL")
 		}
 		return []*genai.Part{{
 			FileData: &genai.FileData{
@@ -116,15 +117,26 @@ func convertInputFilePart(partMap map[string]interface{}) ([]*genai.Part, error)
 // anyway once decoded.
 const maxInlineBase64Size = 100 * 1024 * 1024 // 100MB encoded
 
-// isRemoteFileScheme reports whether rawURL uses a scheme Vertex can actually
-// fetch as a FileData reference. Anything else — including a data: URL that
-// failed to parse as inline data above — must never be forwarded as a
-// FileURI: Vertex would receive it as a literal, potentially multi-megabyte
-// string instead of the image/file it names.
-func isRemoteFileScheme(rawURL string) bool {
-	return strings.HasPrefix(rawURL, "http://") ||
+// isAllowedFileURL reports whether rawURL is safe to forward to Vertex as a
+// FileData reference: an allowed scheme (http/https/gs — anything else,
+// including a data: URL that failed to parse as inline data above, must
+// never be forwarded as a FileURI, since Vertex would receive it as a
+// literal, potentially multi-megabyte string instead of the image/file it
+// names), and — for http(s) — not a private/internal network address.
+// Mirrors the chat-completions path's parseURLToPart guard (vertex package);
+// duplicated here rather than shared because this package already imports
+// vertex for other reasons and the check is a handful of lines.
+func isAllowedFileURL(rawURL string) bool {
+	allowedScheme := strings.HasPrefix(rawURL, "http://") ||
 		strings.HasPrefix(rawURL, "https://") ||
 		strings.HasPrefix(rawURL, "gs://")
+	if !allowedScheme {
+		return false
+	}
+	if strings.HasPrefix(rawURL, "http://") || strings.HasPrefix(rawURL, "https://") {
+		return !vertex.IsPrivateURL(rawURL)
+	}
+	return true
 }
 
 // parseDataURLToPart decodes a data: URL into an InlineData Part.

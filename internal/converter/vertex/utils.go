@@ -116,7 +116,9 @@ var mimeTypeMap = map[string]string{
 	"txt":  "text/plain",
 }
 
-// isPrivateURL checks if a URL points to a private/internal network address.
+// IsPrivateURL checks if a URL points to a private/internal network address.
+// Exported so the Responses API converter package (vertexresponses) can apply
+// the same SSRF guard to its own FileData URL fallback.
 //
 // When the hostname is not a literal IP, it is resolved once via net.LookupIP
 // and the result is checked against private ranges.  This is vulnerable to DNS
@@ -126,7 +128,7 @@ var mimeTypeMap = map[string]string{
 // may apply its own protections, and (b) exploitation requires the attacker to
 // control DNS with a very short TTL.  Do not rely on this function as the sole
 // SSRF defence in higher-trust environments.
-func isPrivateURL(rawURL string) bool {
+func IsPrivateURL(rawURL string) bool {
 	parsed, err := url.Parse(rawURL)
 	if err != nil {
 		return true // block unparseable URLs
@@ -194,7 +196,7 @@ func parseURLToPart(rawURL string, fileObj map[string]interface{}) *genai.Part {
 	}
 
 	//  block private/internal network URLs
-	if (strings.HasPrefix(rawURL, "http://") || strings.HasPrefix(rawURL, "https://")) && isPrivateURL(rawURL) {
+	if (strings.HasPrefix(rawURL, "http://") || strings.HasPrefix(rawURL, "https://")) && IsPrivateURL(rawURL) {
 		return nil
 	}
 

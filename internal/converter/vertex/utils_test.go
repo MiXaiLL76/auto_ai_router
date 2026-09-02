@@ -222,15 +222,15 @@ func TestParseURLToPart_PublicIP(t *testing.T) {
 }
 
 func TestIsPrivateURL(t *testing.T) {
-	assert.True(t, isPrivateURL("http://127.0.0.1/"))
-	assert.True(t, isPrivateURL("http://10.0.0.1/"))
-	assert.True(t, isPrivateURL("http://192.168.1.1/"))
-	assert.True(t, isPrivateURL("http://172.16.0.1/"))
-	assert.True(t, isPrivateURL("http://169.254.169.254/"))
-	assert.True(t, isPrivateURL("http://localhost/"))
-	assert.True(t, isPrivateURL("http://metadata.google.internal/"))
-	assert.False(t, isPrivateURL("http://93.184.216.34/"))
-	assert.False(t, isPrivateURL("https://8.8.8.8/"))
+	assert.True(t, IsPrivateURL("http://127.0.0.1/"))
+	assert.True(t, IsPrivateURL("http://10.0.0.1/"))
+	assert.True(t, IsPrivateURL("http://192.168.1.1/"))
+	assert.True(t, IsPrivateURL("http://172.16.0.1/"))
+	assert.True(t, IsPrivateURL("http://169.254.169.254/"))
+	assert.True(t, IsPrivateURL("http://localhost/"))
+	assert.True(t, IsPrivateURL("http://metadata.google.internal/"))
+	assert.False(t, IsPrivateURL("http://93.184.216.34/"))
+	assert.False(t, IsPrivateURL("https://8.8.8.8/"))
 	// Note: url.Parse is very lenient — "not-a-valid-url" parses with empty host,
 	// which resolves to false (not private). This is acceptable since parseURLToPart
 	// rejects non-http/https/gs URLs before calling isPrivateURL.
