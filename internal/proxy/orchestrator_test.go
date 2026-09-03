@@ -616,8 +616,13 @@ func TestPrepareRequestForCredential_ResponsesRecomputesProviderMode(t *testing.
 	require.Equal(t, "/v1/responses", anthropicReq.proxyPath)
 	require.Contains(t, string(anthropicReq.body), `"messages"`)
 	require.NotContains(t, string(anthropicReq.body), `"input"`)
-	require.Contains(t, string(anthropicReq.proxyBody), `"input"`)
-	require.NotContains(t, string(anthropicReq.proxyBody), `"messages"`)
+	// proxyBody must be converted too, not just body: TryFallbackProxy forwards
+	// proxyBody to fallback credentials, and a Chat-Completions-only fallback
+	// receiving the original Responses-shaped "input" body rejects it outright
+	// ("specify prompt or messages") instead of the converted request the
+	// primary attempt used.
+	require.Contains(t, string(anthropicReq.proxyBody), `"messages"`)
+	require.NotContains(t, string(anthropicReq.proxyBody), `"input"`)
 }
 
 func TestProxyRequest_ResponsesRetryRecomputesProviderMode(t *testing.T) {

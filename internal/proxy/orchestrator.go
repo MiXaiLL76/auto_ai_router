@@ -401,9 +401,17 @@ func (p *Proxy) prepareRequestForCredential(
 			return req, err
 		}
 		req.body = openai.ReplaceBodyParam(realModelID, chatBody)
+		// proxyBody must stay in sync with body: TryFallbackProxy forwards
+		// proxyBody, not body, to fallback credentials. Left as the original
+		// Responses-API-shaped bytes (still keyed on "input", not "messages"),
+		// a fallback to any Chat-Completions-only backend would reject the
+		// request outright ("specify prompt or messages") instead of the
+		// converted body the primary attempt used.
+		req.proxyBody = openai.ReplaceBodyParam(modelID, chatBody)
 		req.convertedResp = true
 		if streaming {
 			req.body = injectStreamOptions(req.body)
+			req.proxyBody = injectStreamOptions(req.proxyBody)
 		}
 		req.path = strings.Replace(basePath, "/responses", "/chat/completions", 1)
 		p.logger.DebugContext(r.Context(), "Converted Responses API request to Chat Completions format",
