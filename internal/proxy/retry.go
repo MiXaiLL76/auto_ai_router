@@ -98,6 +98,23 @@ func (p *Proxy) setRetryAfterFromBan(w http.ResponseWriter, modelID string, excl
 	w.Header().Set("Retry-After", fmt.Sprintf("%d", seconds))
 }
 
+// ensureRetryAfterOn429 sets a Retry-After header on the client response for
+// a 429 that is about to be relayed WITHOUT going through writeFallbackResponse
+// — specifically, when TryFallbackProxy found no fallback credential to even
+// attempt (e.g. the model has none configured), so the original upstream 429
+// falls straight through to the normal response-writing path instead. Same
+// guarantee as writeFallbackResponse's inline check: never override a
+// Retry-After the upstream already sent, and never omit one.
+func (p *Proxy) ensureRetryAfterOn429(w http.ResponseWriter, statusCode int, upstreamHeaders http.Header, modelID string, visibility scope.Context) {
+	if statusCode != http.StatusTooManyRequests {
+		return
+	}
+	if upstreamHeaders != nil && upstreamHeaders.Get("Retry-After") != "" {
+		return
+	}
+	p.setRetryAfterFromBan(w, modelID, nil, visibility)
+}
+
 // GetTried gets the set of tried credentials from context.
 // Returns an empty map if not found (new request without context).
 func GetTried(ctx context.Context) map[string]bool {
