@@ -772,6 +772,40 @@ func TestProxyRequest_HeadersForwarding(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w.Code)
 }
 
+// TestProxyRequest_ForwardsCredentialExtraHeaders verifies a credential's
+// configured ExtraHeaders (e.g. Alibaba DashScope's X-DashScope-Wait-Timeout,
+// which asks the provider to hold the connection open and retry internally on
+// a burst instead of returning 429 immediately) are sent on every outbound
+// request to that credential's provider.
+func TestProxyRequest_ForwardsCredentialExtraHeaders(t *testing.T) {
+	mockServer := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "30", r.Header.Get("X-Dashscope-Wait-Timeout"))
+		w.WriteHeader(http.StatusOK)
+		_ = json.NewEncoder(w).Encode(map[string]string{"result": "ok"})
+	}))
+	defer mockServer.Close()
+
+	cred := config.CredentialConfig{
+		Name:         "alibabacloud",
+		Type:         config.ProviderTypeOpenAI,
+		BaseURL:      mockServer.URL,
+		APIKey:       "upstream-key-1",
+		RPM:          100,
+		TPM:          10000,
+		ExtraHeaders: map[string]string{"X-DashScope-Wait-Timeout": "30"},
+	}
+	prx := NewTestProxyBuilder().WithCredentials(cred).Build()
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"gpt-4","messages":[{"role":"user","content":"test"}]}`))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	prx.ProxyRequest(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+}
+
 func TestProxyRequest_MultipartImageEditConvertedToJSON(t *testing.T) {
 	mockServer := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, "application/json", r.Header.Get("Content-Type"))

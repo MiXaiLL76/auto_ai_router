@@ -170,6 +170,7 @@ Common fields for all credentials:
 | `forbidden_scopes` | list   | Alias for `denied_scopes`                                                                                                        |
 | `openai_proto`     | bool   | `cometapi` only: use CometAPI's OpenAI-compatible wire protocol ([details](../providers/cometapi.md#openai-protocol-mode))       |
 | `google_proto`     | bool   | `cometapi` only: use CometAPI's Google GenAI-compatible wire protocol ([details](../providers/cometapi.md#google-protocol-mode)) |
+| `extra_headers`    | map    | Static HTTP headers merged onto every outbound request to this credential's provider, applied after auth headers — e.g. `X-DashScope-Wait-Timeout` on an Alibaba DashScope credential, to have the provider hold the connection and retry internally on a burst instead of returning 429 immediately |
 
 ### Scoped credential visibility
 

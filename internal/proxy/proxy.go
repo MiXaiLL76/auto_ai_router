@@ -1733,6 +1733,9 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 		default:
 			proxyReq.Header.Set("Authorization", "Bearer "+cred.APIKey)
 		}
+		for key, value := range cred.ExtraHeaders {
+			proxyReq.Header.Set(key, value)
+		}
 
 		if p.logger.Enabled(context.Background(), slog.LevelDebug) {
 			p.logger.DebugContext(r.Context(), "Proxy request details",

@@ -781,6 +781,16 @@ type CredentialConfig struct {
 
 	// Proxy/AIR remote-router specific fields
 	IsFallback bool `yaml:"is_fallback,omitempty"`
+
+	// ExtraHeaders are static HTTP headers merged onto every outbound request
+	// to this credential's provider, applied after the protocol's own auth
+	// headers (Authorization, X-Api-Key, anthropic-version, etc.) — a key
+	// colliding with one of those overrides it, so avoid reusing those names
+	// here. Intended for provider-specific tuning headers the router has no
+	// built-in knowledge of, e.g. Alibaba DashScope's X-DashScope-Wait-Timeout
+	// (has the provider hold the connection open and retry internally instead
+	// of returning 429 immediately on a burst).
+	ExtraHeaders map[string]string `yaml:"extra_headers,omitempty"`
 }
 
 func (c CredentialConfig) VisibleTo(visibility scope.Context) bool {
