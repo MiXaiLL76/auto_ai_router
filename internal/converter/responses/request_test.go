@@ -778,6 +778,151 @@ func TestPrepareCodexPassthrough_DropsReasoningNone(t *testing.T) {
 	assert.NotContains(t, parsed, "reasoning", "reasoning.effort='none' should be dropped for native passthrough")
 }
 
+// TestPrepareCodexPassthrough_RecoversReasoningSummaryFromContent reproduces the
+// reported bug: a synthetic/replayed reasoning item shaped like
+// {"content": [{"type": "reasoning_text", "text": "..."}]} instead of the
+// documented {"summary": [{"type": "summary_text", "text": "..."}]} reaches the
+// provider unmodified in passthrough mode and gets rejected with
+// "Invalid 'summary': summary is required and must be a list for reasoning."
+// The fix recovers a valid summary from "content" instead of forwarding it as-is.
+func TestPrepareCodexPassthrough_RecoversReasoningSummaryFromContent(t *testing.T) {
+	body := []byte(`{
+		"model": "deepseek/deepseek-v4-flash-0731",
+		"input": [
+			{"role": "user", "content": "hi"},
+			{"type": "reasoning", "content": [{"type": "reasoning_text", "text": "Размышляю."}]},
+			{"role": "assistant", "content": "ok"}
+		]
+	}`)
+
+	result := PrepareCodexPassthrough(body, false)
+
+	var parsed map[string]interface{}
+	require.NoError(t, json.Unmarshal(result, &parsed))
+
+	input := parsed["input"].([]interface{})
+	require.Len(t, input, 3, "reasoning item should be recovered, not dropped")
+
+	reasoningItem := input[1].(map[string]interface{})
+	assert.Equal(t, "reasoning", reasoningItem["type"])
+	assert.NotContains(t, reasoningItem, "content", "non-standard content field must not reach the provider")
+
+	summary, ok := reasoningItem["summary"].([]interface{})
+	require.True(t, ok, "summary must be present and be a list")
+	require.Len(t, summary, 1)
+	summaryItem := summary[0].(map[string]interface{})
+	assert.Equal(t, "summary_text", summaryItem["type"])
+	assert.Equal(t, "Размышляю.", summaryItem["text"])
+}
+
+// TestPrepareCodexPassthrough_KeepsValidReasoningSummary verifies that a
+// reasoning item which already carries a proper non-empty "summary" list is
+// passed through unchanged (no double-processing of already-valid items).
+func TestPrepareCodexPassthrough_KeepsValidReasoningSummary(t *testing.T) {
+	body := []byte(`{
+		"model": "gpt-5",
+		"input": [
+			{"type": "reasoning", "id": "rs_1", "summary": [{"type": "summary_text", "text": "Already valid."}]}
+		]
+	}`)
+
+	result := PrepareCodexPassthrough(body, false)
+
+	var parsed map[string]interface{}
+	require.NoError(t, json.Unmarshal(result, &parsed))
+
+	input := parsed["input"].([]interface{})
+	require.Len(t, input, 1)
+	reasoningItem := input[0].(map[string]interface{})
+	summary := reasoningItem["summary"].([]interface{})
+	require.Len(t, summary, 1)
+	assert.Equal(t, "Already valid.", summary[0].(map[string]interface{})["text"])
+}
+
+// TestPrepareCodexPassthrough_DropsUnrecoverableReasoning verifies that a
+// reasoning item with neither a valid "summary" nor a recoverable "content" is
+// dropped entirely, rather than forwarded with a missing/invalid summary.
+func TestPrepareCodexPassthrough_DropsUnrecoverableReasoning(t *testing.T) {
+	body := []byte(`{
+		"model": "deepseek/deepseek-v4-flash-0731",
+		"input": [
+			{"role": "user", "content": "hi"},
+			{"type": "reasoning", "id": "rs_empty"},
+			{"role": "assistant", "content": "ok"}
+		]
+	}`)
+
+	result := PrepareCodexPassthrough(body, false)
+
+	var parsed map[string]interface{}
+	require.NoError(t, json.Unmarshal(result, &parsed))
+
+	input := parsed["input"].([]interface{})
+	require.Len(t, input, 2, "unrecoverable reasoning item should be dropped, surrounding messages kept")
+	for _, item := range input {
+		itemMap := item.(map[string]interface{})
+		assert.NotEqual(t, "reasoning", itemMap["type"])
+	}
+}
+
+// TestPrepareCodexPassthrough_KeepsEncryptedContentOnlyReasoning verifies that
+// a reasoning item with no "summary" key at all but a non-empty
+// "encrypted_content" is left untouched rather than dropped. This is exactly
+// the shape this router's own outputToInputItems produces when round-tripping
+// encrypted reasoning with an empty summary (see the "reasoning" case there:
+// the "summary" key is omitted entirely when there's no summary text, but
+// encrypted_content is preserved) — that shape already passes through fine
+// today, so normalization must not start discarding it.
+func TestPrepareCodexPassthrough_KeepsEncryptedContentOnlyReasoning(t *testing.T) {
+	body := []byte(`{
+		"model": "gpt-5",
+		"input": [
+			{"role": "user", "content": "hi"},
+			{"type": "reasoning", "id": "rs_enc", "encrypted_content": "opaque-blob"},
+			{"role": "assistant", "content": "ok"}
+		]
+	}`)
+
+	result := PrepareCodexPassthrough(body, false)
+
+	var parsed map[string]interface{}
+	require.NoError(t, json.Unmarshal(result, &parsed))
+
+	input := parsed["input"].([]interface{})
+	require.Len(t, input, 3, "encrypted_content-only reasoning item must be kept, not dropped")
+
+	reasoningItem := input[1].(map[string]interface{})
+	assert.Equal(t, "reasoning", reasoningItem["type"])
+	assert.Equal(t, "opaque-blob", reasoningItem["encrypted_content"])
+	assert.NotContains(t, reasoningItem, "summary", "must not fabricate a summary key that wasn't there")
+}
+
+// TestPrepareCodexPassthrough_KeepsEmptyValidSummary verifies that a
+// reasoning item whose "summary" is already a list — even an empty one —
+// is left untouched. An empty list still satisfies OpenAI's "summary is
+// required and must be a list for reasoning" validation, so treating it as
+// something to recover/drop would be an unnecessary mutation.
+func TestPrepareCodexPassthrough_KeepsEmptyValidSummary(t *testing.T) {
+	body := []byte(`{
+		"model": "gpt-5",
+		"input": [
+			{"type": "reasoning", "id": "rs_empty_summary", "summary": []}
+		]
+	}`)
+
+	result := PrepareCodexPassthrough(body, false)
+
+	var parsed map[string]interface{}
+	require.NoError(t, json.Unmarshal(result, &parsed))
+
+	input := parsed["input"].([]interface{})
+	require.Len(t, input, 1, "item with an already-valid (even empty) summary list must not be dropped")
+	reasoningItem := input[0].(map[string]interface{})
+	summary, ok := reasoningItem["summary"].([]interface{})
+	require.True(t, ok)
+	assert.Empty(t, summary)
+}
+
 func TestRequestToChat_TextFormat(t *testing.T) {
 	body := `{
 		"model": "gpt-4o",
