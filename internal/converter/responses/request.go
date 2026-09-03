@@ -377,6 +377,9 @@ func outputToInputItems(output []OutputItem) []interface{} {
 //  4. instructions: array of messages → content joined as a plain string.
 //  5. tools: nested Chat Completions format ({function:{name:...}}) →
 //     flat Responses API format ({name:...}) for function-type tools.
+//  6. compaction items → synthetic user messages (native API has no compaction type).
+//  7. reasoning items missing a valid "summary" list → recovered from a
+//     non-standard "content" field, or dropped if nothing is recoverable.
 func PrepareCodexPassthrough(body []byte, prevEntryHandled bool) []byte {
 	var raw map[string]interface{}
 	if err := json.Unmarshal(body, &raw); err != nil {
@@ -490,6 +493,60 @@ func PrepareCodexPassthrough(body []byte, prevEntryHandled bool) []byte {
 					})
 				}
 				// Skip empty compaction items
+			}
+			if changed {
+				raw["input"] = out
+			}
+		}
+	}
+
+	// 7. Normalize reasoning items so they satisfy OpenAI's native validation
+	// ("Invalid 'summary': summary is required and must be a list for reasoning").
+	// Some upstream client SDKs / synthetic replays echo reasoning items back using
+	// a non-standard {"content": [{"type": "reasoning_text", "text": "..."}]} shape
+	// instead of the documented {"summary": [{"type": "summary_text", "text": "..."}]}
+	// shape. Passthrough forwards the body mostly as-is, so without this the
+	// malformed item reaches the provider unmodified and the whole request is
+	// rejected — recover a valid summary from "content" when possible, otherwise
+	// drop the item (an empty/malformed reasoning item carries nothing useful).
+	if inputVal, ok := raw["input"]; ok {
+		if inputArr, ok := inputVal.([]interface{}); ok {
+			out := make([]interface{}, 0, len(inputArr))
+			changed := false
+			for _, item := range inputArr {
+				itemMap, ok := item.(map[string]interface{})
+				if !ok || itemMap["type"] != "reasoning" {
+					out = append(out, item)
+					continue
+				}
+				if summary, ok := itemMap["summary"].([]interface{}); ok && len(summary) > 0 {
+					out = append(out, item)
+					continue
+				}
+				changed = true
+				var recovered []interface{}
+				if content, ok := itemMap["content"].([]interface{}); ok {
+					for _, c := range content {
+						cm, ok := c.(map[string]interface{})
+						if !ok {
+							continue
+						}
+						if text, _ := cm["text"].(string); text != "" {
+							recovered = append(recovered, map[string]interface{}{
+								"type": "summary_text",
+								"text": text,
+							})
+						}
+					}
+				}
+				if len(recovered) == 0 {
+					// Nothing recoverable — drop the item rather than forward it
+					// with a missing/invalid summary.
+					continue
+				}
+				itemMap["summary"] = recovered
+				delete(itemMap, "content")
+				out = append(out, itemMap)
 			}
 			if changed {
 				raw["input"] = out
