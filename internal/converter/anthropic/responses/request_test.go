@@ -35,6 +35,31 @@ func TestResponsesRequestToAnthropic_StringInput(t *testing.T) {
 	assert.Equal(t, "Hello, world!", msg["content"])
 }
 
+func TestResponsesRequestToAnthropic_SamplingRemoved(t *testing.T) {
+	body := `{"model":"M","input":"hi","temperature":0.7,"top_p":0.9,"max_output_tokens":128}`
+
+	// Opus 4.7+ reject sampling params -> temperature/top_p must be dropped.
+	for _, m := range []string{"claude-opus-4-7", "claude-opus-4-8", "claude-opus-5", "claude-sonnet-5", "claude-fable-5"} {
+		result, err := ResponsesRequestToAnthropic([]byte(body), m)
+		require.NoError(t, err)
+		var ar map[string]interface{}
+		require.NoError(t, json.Unmarshal(result, &ar))
+		_, hasTemp := ar["temperature"]
+		_, hasTopP := ar["top_p"]
+		assert.False(t, hasTemp, "temperature must be dropped for %s", m)
+		assert.False(t, hasTopP, "top_p must be dropped for %s", m)
+	}
+
+	// Older models still accept them.
+	for _, m := range []string{"claude-opus-4-6", "claude-sonnet-4-5"} {
+		result, err := ResponsesRequestToAnthropic([]byte(body), m)
+		require.NoError(t, err)
+		var ar map[string]interface{}
+		require.NoError(t, json.Unmarshal(result, &ar))
+		assert.Equal(t, float64(0.7), ar["temperature"], "temperature must be preserved for %s", m)
+	}
+}
+
 func TestResponsesRequestToAnthropic_Instructions(t *testing.T) {
 	body := `{
 		"model": "claude-opus-4-5",

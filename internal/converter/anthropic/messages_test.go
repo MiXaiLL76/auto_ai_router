@@ -48,6 +48,79 @@ func TestOpenAIToAnthropic_AdaptiveThinkingDisplay(t *testing.T) {
 	}
 }
 
+func TestOpenAIToAnthropic_SamplingParamsDroppedForNewModels(t *testing.T) {
+	// temperature / top_p / top_k must be stripped for models that reject them
+	// (Claude Opus 4.7+), so an OpenAI-style temperature=0 does not 400 on an
+	// Anthropic-wire route (CometAPI / Bedrock). Older models keep them.
+	body := `{"model":"M","messages":[{"role":"user","content":"hi"}],"temperature":0,"top_p":0.5,"extra_body":{"top_k":10}}`
+
+	dropped := []string{
+		"claude-opus-4-7", "claude-opus-4-8", "claude-opus-5",
+		"claude-sonnet-5", "claude-fable-5", "claude-fable-5-1",
+		"claude-mythos-5",
+		// Future minors/families must be covered automatically by the version parser,
+		// without editing the classifier (this is the whole point of not hardcoding a list).
+		"claude-opus-4-9", "claude-opus-4-10", "claude-haiku-5",
+	}
+	for _, m := range dropped {
+		t.Run("dropped/"+m, func(t *testing.T) {
+			result, err := OpenAIToAnthropic([]byte(body), m, false)
+			require.NoError(t, err)
+			var req map[string]interface{}
+			require.NoError(t, json.Unmarshal(result, &req))
+			_, hasTemp := req["temperature"]
+			_, hasTopP := req["top_p"]
+			_, hasTopK := req["top_k"]
+			assert.False(t, hasTemp, "temperature must be dropped for %s", m)
+			assert.False(t, hasTopP, "top_p must be dropped for %s", m)
+			assert.False(t, hasTopK, "top_k must be dropped for %s", m)
+		})
+	}
+
+	kept := []string{"claude-opus-4-6", "claude-sonnet-4-6", "claude-sonnet-4-5", "claude-haiku-4-5"}
+	for _, m := range kept {
+		t.Run("kept/"+m, func(t *testing.T) {
+			result, err := OpenAIToAnthropic([]byte(body), m, false)
+			require.NoError(t, err)
+			var req map[string]interface{}
+			require.NoError(t, json.Unmarshal(result, &req))
+			assert.Equal(t, float64(0), req["temperature"], "temperature must be preserved for %s", m)
+			assert.Equal(t, 0.5, req["top_p"], "top_p must be preserved for %s", m)
+			assert.Equal(t, float64(10), req["top_k"], "top_k (from extra_body) must be preserved for %s", m)
+		})
+	}
+}
+
+// TestSamplingRemoved locks the model-classification boundary directly, so the version
+// parser cannot silently drift from the "Opus 4.7+" spec or from isAdaptiveThinkingModel.
+func TestSamplingRemoved(t *testing.T) {
+	drop := []string{
+		// current shipping models
+		"claude-opus-4-7", "claude-opus-4-8", "claude-opus-5",
+		"claude-sonnet-5", "claude-fable-5", "claude-fable-5-1", "claude-mythos-5",
+		// dotted (CometAPI) and platform/date-suffixed forms
+		"claude-opus-4.7", "us.anthropic.claude-opus-4-7-20250101-v1:0",
+		"global.anthropic.claude-opus-4-8",
+		// future minors/families the parser must catch without a code edit
+		"claude-opus-4-9", "claude-opus-4-10", "claude-haiku-5", "claude-sonnet-6",
+		// bare / preview Mythos (no claude-...-5 form) — still new-gen
+		"mythos-5", "mythos-5-preview", "claude-mythos-preview",
+	}
+	for _, m := range drop {
+		assert.True(t, SamplingRemoved(m), "SamplingRemoved(%q) should be true", m)
+	}
+
+	keep := []string{
+		"claude-opus-4-6", "claude-sonnet-4-6", "claude-opus-4-5", "claude-sonnet-4-5",
+		"claude-haiku-4-5", "claude-3-5-sonnet-20241022", "claude-3-opus-20240229",
+		"claude-opus-4-20250514", // bare 4.x base with a date suffix, not a real 4.6+ minor
+		"gpt-5", "deepseek-v4-flash", "",
+	}
+	for _, m := range keep {
+		assert.False(t, SamplingRemoved(m), "SamplingRemoved(%q) should be false", m)
+	}
+}
+
 func TestOpenAIToAnthropic_ResponseFormatJSONSchemaIncludesSchema(t *testing.T) {
 	result, err := OpenAIToAnthropic([]byte(`{
 		"model":"claude-sonnet-4-6",

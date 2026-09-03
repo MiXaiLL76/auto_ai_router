@@ -3,10 +3,52 @@ package anthropic
 import (
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/mixaill76/auto_ai_router/internal/converter/openai"
 )
+
+// SamplingRemoved reports whether the Claude model rejects the sampling parameters
+// temperature / top_p / top_k. Anthropic removed these starting with Claude Opus 4.7 —
+// setting any of them to a non-default value returns a 400 (see the Claude migration
+// guide, "Remove sampling parameters"). Opus 4.6 / Sonnet 4.6 and earlier still accept
+// them. We drop them for the affected models so an OpenAI-style temperature=0 does not
+// break the request on an Anthropic-wire route (e.g. a CometAPI / Bedrock backend).
+//
+// The version test mirrors isAdaptiveThinkingModel (same claudeVersionPattern) so the two
+// classifiers stay in lockstep as new models ship. This matters because adaptive thinking
+// forces temperature=1.0: any model new enough for adaptive thinking must also drop
+// sampling, or that forced temperature would 400. The one exception is the 4.6 generation,
+// which is adaptive yet still accepts sampling — hence the 4.7 threshold here vs 4.6 in
+// isAdaptiveThinkingModel. We drop for major >= 5 (any family), Opus/Sonnet/Haiku/Fable
+// 4.7+, and every Mythos.
+func SamplingRemoved(model string) bool {
+	lower := strings.ToLower(model)
+	// Mythos carries no numeric version in claudeVersionPattern; treat every Mythos as
+	// new-gen, matching isAdaptiveThinkingModel's short-circuit.
+	if strings.Contains(lower, "mythos") {
+		return true
+	}
+	match := claudeVersionPattern.FindStringSubmatch(lower)
+	if match == nil {
+		return false
+	}
+	major, err := strconv.Atoi(match[1])
+	if err != nil {
+		return false
+	}
+	if major >= 5 {
+		return true
+	}
+	// 4.x: sampling removed from 4.7 onward (4.6 still accepts it). A long trailing number
+	// (a date suffix, len > 2) is not a real minor, so such a bare-4 id is treated as old.
+	if major != 4 || len(match[2]) == 0 || len(match[2]) > 2 {
+		return false
+	}
+	minor, err := strconv.Atoi(match[2])
+	return err == nil && minor >= 7
+}
 
 // OpenAIToAnthropic converts an OpenAI Chat Completions request body to Anthropic Messages API
 // format.  The model parameter overrides the model field in the request body when non-empty.
@@ -53,18 +95,22 @@ func OpenAIToAnthropic(openAIBody []byte, model string, isRealAnthropicBackend b
 		Stream:    req.Stream,
 	}
 
+	// Sampling params (temperature / top_p / top_k) are dropped for models that
+	// no longer accept them (Claude Opus 4.7+ — see SamplingRemoved).
+	dropSampling := SamplingRemoved(model)
+
 	// Temperature
-	if req.Temperature != nil {
+	if req.Temperature != nil && !dropSampling {
 		anthropicReq.Temperature = req.Temperature
 	}
 
 	// TopP
-	if req.TopP != nil {
+	if req.TopP != nil && !dropSampling {
 		anthropicReq.TopP = req.TopP
 	}
 
 	// TopK (Anthropic extension, passed via extra_body)
-	if req.ExtraBody != nil {
+	if req.ExtraBody != nil && !dropSampling {
 		if topK, ok := req.ExtraBody["top_k"].(float64); ok {
 			v := int(topK)
 			anthropicReq.TopK = &v
@@ -102,7 +148,10 @@ func OpenAIToAnthropic(openAIBody []byte, model string, isRealAnthropicBackend b
 		maxTokens, betas, temp := applyThinkingSideEffects(tc, oc, anthropicReq.MaxTokens, anthropicReq.AnthropicBeta)
 		anthropicReq.MaxTokens = maxTokens
 		anthropicReq.AnthropicBeta = betas
-		anthropicReq.Temperature = &temp
+		// Do not re-introduce temperature on models that reject sampling params.
+		if !dropSampling {
+			anthropicReq.Temperature = &temp
+		}
 	} else if !isRealAnthropicBackend {
 		// This Anthropic-shaped request may be handled by a real Claude model
 		// (ProviderTypeAnthropic) or proxied by a multi-vendor gateway
