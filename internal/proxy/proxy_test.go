@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"net/textproto"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -24,6 +25,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/ratelimit"
 	"github.com/mixaill76/auto_ai_router/internal/requestid"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestNew(t *testing.T) {
@@ -322,6 +324,42 @@ func TestProxyRequest_UpstreamError(t *testing.T) {
 	prx.ProxyRequest(w, req)
 
 	assert.Equal(t, http.StatusInternalServerError, w.Code)
+}
+
+// TestProxyRequest_SingleCredentialNoFallback_Real429SetsRetryAfter reproduces
+// the exact production scenario reported for deepseek-v4-flash-0731: a model
+// with a single direct-provider credential and zero fallback credentials
+// configured. TryFallbackProxy has nothing to even attempt (NextFallbackProxy...
+// finds no candidate), so it returns early without ever calling
+// writeFallbackResponse — the real upstream 429 falls straight through to the
+// normal response-writing path instead. That path must still guarantee
+// Retry-After via ensureRetryAfterOn429.
+func TestProxyRequest_SingleCredentialNoFallback_Real429SetsRetryAfter(t *testing.T) {
+	mockServer := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = io.WriteString(w, `{"error":{"code":"429","message":"Rate limit exceeded","param":null,"type":"rate_limit_error"}}`)
+	}))
+	defer mockServer.Close()
+
+	prx := NewTestProxyBuilder().
+		WithSingleCredential("alibabacloud-ru-international", config.ProviderTypeOpenAI, mockServer.URL, "upstream-key-1").
+		Build()
+
+	reqBody := `{"model":"deepseek-v4-flash-0731","messages":[{"role":"user","content":"Hello"}]}`
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(reqBody))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	prx.ProxyRequest(w, req)
+
+	assert.Equal(t, http.StatusTooManyRequests, w.Code)
+	retryAfter := w.Header().Get("Retry-After")
+	require.NotEmpty(t, retryAfter, "a model with a single credential and no fallback must still get Retry-After on a real relayed 429")
+	seconds, err := strconv.Atoi(retryAfter)
+	require.NoError(t, err)
+	assert.GreaterOrEqual(t, seconds, 1)
 }
 
 func TestProxyRequest_Streaming(t *testing.T) {

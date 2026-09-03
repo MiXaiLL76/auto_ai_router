@@ -1069,6 +1069,13 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 			}
 			p.logger.DebugContext(r.Context(), "Fallback retry failed, using original response",
 				"credential", cred.Name, "fallback_reason", fallbackReason)
+			if proxyResp != nil {
+				visibility := scope.PublicContext()
+				if logCtx != nil {
+					visibility = logCtx.Scope
+				}
+				p.ensureRetryAfterOn429(w, proxyResp.StatusCode, proxyResp.Headers, modelID, visibility)
+			}
 		}
 
 		// Handle transport error (no successful response at all).
@@ -1904,6 +1911,13 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 		}
 		p.logger.DebugContext(r.Context(), "Fallback retry failed, using original response",
 			"credential", cred.Name, "fallback_reason", fallbackReason)
+		if resp != nil {
+			visibility := scope.PublicContext()
+			if logCtx != nil {
+				visibility = logCtx.Scope
+			}
+			p.ensureRetryAfterOn429(w, resp.StatusCode, resp.Header, modelID, visibility)
+		}
 	}
 
 	// Handle case where all attempts were transport errors (no response at all)

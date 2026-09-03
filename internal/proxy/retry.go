@@ -80,19 +80,39 @@ func isRetryableContent(respBody []byte) bool {
 	return true
 }
 
-// setRetryAfterFromBan sets the Retry-After header to the shortest remaining
-// fail2ban ban among modelID's eligible credentials, rounded up to whole
-// seconds. No-op if none of them are currently banned.
+// setRetryAfterFromBan sets the Retry-After header for a 429 response to
+// modelID's caller. It prefers the shortest remaining fail2ban ban among
+// modelID's eligible credentials (a precise ETA); if none of them are
+// currently banned it falls back to a configured or default duration via
+// DefaultRetryAfterForModel, so a 429 reaching the client always carries a
+// Retry-After header.
 func (p *Proxy) setRetryAfterFromBan(w http.ResponseWriter, modelID string, exclude map[string]bool, visibility scope.Context) {
-	remaining, ok := p.balancer.MinRemainingBanForModel(modelID, exclude, visibility)
-	if !ok {
-		return
-	}
+	remaining := p.balancer.DefaultRetryAfterForModel(modelID, exclude, visibility)
 	seconds := int(remaining / time.Second)
 	if remaining%time.Second != 0 {
 		seconds++
 	}
+	if seconds < 1 {
+		seconds = 1
+	}
 	w.Header().Set("Retry-After", fmt.Sprintf("%d", seconds))
+}
+
+// ensureRetryAfterOn429 sets a Retry-After header on the client response for
+// a 429 that is about to be relayed WITHOUT going through writeFallbackResponse
+// — specifically, when TryFallbackProxy found no fallback credential to even
+// attempt (e.g. the model has none configured), so the original upstream 429
+// falls straight through to the normal response-writing path instead. Same
+// guarantee as writeFallbackResponse's inline check: never override a
+// Retry-After the upstream already sent, and never omit one.
+func (p *Proxy) ensureRetryAfterOn429(w http.ResponseWriter, statusCode int, upstreamHeaders http.Header, modelID string, visibility scope.Context) {
+	if statusCode != http.StatusTooManyRequests {
+		return
+	}
+	if upstreamHeaders != nil && upstreamHeaders.Get("Retry-After") != "" {
+		return
+	}
+	p.setRetryAfterFromBan(w, modelID, nil, visibility)
 }
 
 // GetTried gets the set of tried credentials from context.
