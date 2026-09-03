@@ -2,8 +2,12 @@ package vertex
 
 import (
 	"encoding/base64"
+	"errors"
+	"net/http"
+	"strings"
 	"testing"
 
+	"github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -78,7 +82,8 @@ func TestParseDataURLToPart(t *testing.T) {
 		encoded := base64.StdEncoding.EncodeToString(rawData)
 		dataURL := "data:image/jpeg;base64," + encoded
 
-		part := parseDataURLToPart(dataURL)
+		part, err := parseDataURLToPart(dataURL)
+		require.NoError(t, err)
 		require.NotNil(t, part)
 		require.NotNil(t, part.InlineData)
 		assert.Equal(t, "image/jpeg", part.InlineData.MIMEType)
@@ -86,33 +91,72 @@ func TestParseDataURLToPart(t *testing.T) {
 	})
 
 	t.Run("not_data_url", func(t *testing.T) {
-		result := parseDataURLToPart("https://upload.wikimedia.org/wikipedia/commons/thumb/e/ea/Van_Gogh_-_Starry_Night_-_Google_Art_Project.jpg/1280px-Van_Gogh_-_Starry_Night_-_Google_Art_Project.jpg")
+		result, err := parseDataURLToPart("https://upload.wikimedia.org/wikipedia/commons/thumb/e/ea/Van_Gogh_-_Starry_Night_-_Google_Art_Project.jpg/1280px-Van_Gogh_-_Starry_Night_-_Google_Art_Project.jpg")
+		require.NoError(t, err)
 		assert.Nil(t, result)
 	})
 
 	t.Run("invalid_base64", func(t *testing.T) {
-		result := parseDataURLToPart("data:image/jpeg;base64,!!!invalid!!!")
+		result, err := parseDataURLToPart("data:image/jpeg;base64,!!!invalid!!!")
+		require.NoError(t, err)
 		assert.Nil(t, result)
 	})
 
 	t.Run("no_comma", func(t *testing.T) {
-		result := parseDataURLToPart("data:image/jpeg;base64")
+		result, err := parseDataURLToPart("data:image/jpeg;base64")
+		require.NoError(t, err)
 		assert.Nil(t, result)
 	})
 
 	t.Run("multiple_commas", func(t *testing.T) {
 		// With Split (not SplitN), "data:image/jpeg;base64,abc,def" splits to 3 parts
-		result := parseDataURLToPart("data:image/jpeg;base64,abc,def")
+		result, err := parseDataURLToPart("data:image/jpeg;base64,abc,def")
+		require.NoError(t, err)
 		assert.Nil(t, result)
 	})
 
 	t.Run("empty_mime_type_returns_semicolon_prefix", func(t *testing.T) {
 		// "data:;base64" → extractMimeType returns ";base64" (end==0 falls through)
 		// so parseDataURLToPart still produces a part with that as MIMEType
-		result := parseDataURLToPart("data:;base64," + base64.StdEncoding.EncodeToString([]byte("test")))
+		result, err := parseDataURLToPart("data:;base64," + base64.StdEncoding.EncodeToString([]byte("test")))
+		require.NoError(t, err)
 		require.NotNil(t, result)
 		assert.Equal(t, ";base64", result.InlineData.MIMEType)
 	})
+
+	t.Run("oversized_payload_returns_413_error", func(t *testing.T) {
+		withMaxBase64Size(t, 16)
+		oversized := strings.Repeat("A", 17) // one byte over the (test-shrunk) limit
+		result, err := parseDataURLToPart("data:image/jpeg;base64," + oversized)
+		require.Nil(t, result)
+		require.Error(t, err)
+		var validationErr *converterutil.RequestValidationError
+		require.ErrorAs(t, err, &validationErr)
+		assert.Equal(t, http.StatusRequestEntityTooLarge, validationErr.StatusCode)
+	})
+
+	t.Run("payload_at_limit_is_accepted", func(t *testing.T) {
+		withMaxBase64Size(t, 16)
+		atLimit := strings.Repeat("A", 16)
+		_, err := parseDataURLToPart("data:image/jpeg;base64," + atLimit)
+		// "A" repeated isn't valid base64 padding at this length necessarily; we only
+		// care that the size gate itself doesn't reject it — a decode error (if any)
+		// surfaces as (nil, nil), never as the 413 error.
+		var validationErr *converterutil.RequestValidationError
+		assert.False(t, errors.As(err, &validationErr), "size check must not trigger exactly at the limit")
+	})
+}
+
+// withMaxBase64Size temporarily shrinks the package-level maxBase64Size for
+// the duration of the calling test, restoring it on cleanup. Lets boundary
+// tests exercise the ">" comparison without allocating and base64-decoding a
+// real ~100MB/~75MB string. Not safe under t.Parallel() — this package's
+// tests don't use it.
+func withMaxBase64Size(t *testing.T, n int) {
+	t.Helper()
+	orig := maxBase64Size
+	maxBase64Size = n
+	t.Cleanup(func() { maxBase64Size = orig })
 }
 
 func TestParseURLToPart(t *testing.T) {
@@ -191,15 +235,15 @@ func TestParseURLToPart_PublicIP(t *testing.T) {
 }
 
 func TestIsPrivateURL(t *testing.T) {
-	assert.True(t, isPrivateURL("http://127.0.0.1/"))
-	assert.True(t, isPrivateURL("http://10.0.0.1/"))
-	assert.True(t, isPrivateURL("http://192.168.1.1/"))
-	assert.True(t, isPrivateURL("http://172.16.0.1/"))
-	assert.True(t, isPrivateURL("http://169.254.169.254/"))
-	assert.True(t, isPrivateURL("http://localhost/"))
-	assert.True(t, isPrivateURL("http://metadata.google.internal/"))
-	assert.False(t, isPrivateURL("http://93.184.216.34/"))
-	assert.False(t, isPrivateURL("https://8.8.8.8/"))
+	assert.True(t, IsPrivateURL("http://127.0.0.1/"))
+	assert.True(t, IsPrivateURL("http://10.0.0.1/"))
+	assert.True(t, IsPrivateURL("http://192.168.1.1/"))
+	assert.True(t, IsPrivateURL("http://172.16.0.1/"))
+	assert.True(t, IsPrivateURL("http://169.254.169.254/"))
+	assert.True(t, IsPrivateURL("http://localhost/"))
+	assert.True(t, IsPrivateURL("http://metadata.google.internal/"))
+	assert.False(t, IsPrivateURL("http://93.184.216.34/"))
+	assert.False(t, IsPrivateURL("https://8.8.8.8/"))
 	// Note: url.Parse is very lenient — "not-a-valid-url" parses with empty host,
 	// which resolves to false (not private). This is acceptable since parseURLToPart
 	// rejects non-http/https/gs URLs before calling isPrivateURL.

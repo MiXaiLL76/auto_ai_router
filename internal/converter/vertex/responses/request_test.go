@@ -1,8 +1,11 @@
 package vertexresponses
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
@@ -278,6 +281,115 @@ func TestContentPartToVertexParts_InputImage_DataURL(t *testing.T) {
 	assert.Equal(t, "image/png", parts[0].InlineData.MIMEType)
 }
 
+func TestContentPartToVertexParts_InputImage_DataURLOversized(t *testing.T) {
+	withMaxInlineBase64Size(t, 16)
+	oversized := strings.Repeat("A", 17)
+	part := map[string]interface{}{
+		"type":      "input_image",
+		"image_url": "data:image/png;base64," + oversized,
+	}
+	parts, err := contentPartToVertexParts(part)
+	require.Nil(t, parts)
+	require.Error(t, err)
+	var validationErr *converterutil.RequestValidationError
+	require.ErrorAs(t, err, &validationErr)
+	assert.Equal(t, http.StatusRequestEntityTooLarge, validationErr.StatusCode)
+}
+
+func TestContentPartToVertexParts_InputImage_DataURLWithExtraParams(t *testing.T) {
+	// A data: URL carrying an extra parameter before ";base64," (e.g. charset,
+	// as browsers commonly emit for SVGs) must still decode as inline data —
+	// not fall through and leak the whole data: URL into FileURI (see the
+	// "unsupported scheme" test below for what used to happen instead).
+	raw := []byte("<svg></svg>")
+	encoded := base64.StdEncoding.EncodeToString(raw)
+	part := map[string]interface{}{
+		"type":      "input_image",
+		"image_url": "data:image/svg+xml;charset=utf-8;base64," + encoded,
+	}
+	parts, err := contentPartToVertexParts(part)
+	require.NoError(t, err)
+	require.Len(t, parts, 1)
+	require.NotNil(t, parts[0].InlineData)
+	assert.Equal(t, "image/svg+xml", parts[0].InlineData.MIMEType)
+	assert.Equal(t, raw, parts[0].InlineData.Data)
+}
+
+func TestContentPartToVertexParts_InputImage_UnsupportedSchemeRejected(t *testing.T) {
+	// A data: URL that fails to parse (e.g. non-base64 payload) must be
+	// rejected outright, not forwarded to Vertex as a literal FileURI
+	// containing the entire (potentially multi-megabyte) string.
+	part := map[string]interface{}{
+		"type":      "input_image",
+		"image_url": "data:image/png,not-valid-base64!!!",
+	}
+	parts, err := contentPartToVertexParts(part)
+	require.Error(t, err)
+	assert.Nil(t, parts)
+	var validationErr *converterutil.RequestValidationError
+	require.ErrorAs(t, err, &validationErr)
+	assert.Equal(t, "input_image.image_url", validationErr.Param)
+}
+
+func TestContentPartToVertexParts_InputAudio_OversizedReturns413(t *testing.T) {
+	withMaxInlineBase64Size(t, 16)
+	oversized := strings.Repeat("A", 17)
+	part := map[string]interface{}{
+		"type":   "input_audio",
+		"data":   oversized,
+		"format": "wav",
+	}
+	parts, err := contentPartToVertexParts(part)
+	require.Nil(t, parts)
+	require.Error(t, err)
+	var validationErr *converterutil.RequestValidationError
+	require.ErrorAs(t, err, &validationErr)
+	assert.Equal(t, http.StatusRequestEntityTooLarge, validationErr.StatusCode)
+}
+
+func TestContentPartToVertexParts_InputAudio_ValidDecodes(t *testing.T) {
+	raw := []byte("fake wav bytes")
+	encoded := base64.StdEncoding.EncodeToString(raw)
+	part := map[string]interface{}{
+		"type":   "input_audio",
+		"data":   encoded,
+		"format": "wav",
+	}
+	parts, err := contentPartToVertexParts(part)
+	require.NoError(t, err)
+	require.Len(t, parts, 1)
+	require.NotNil(t, parts[0].InlineData)
+	assert.Equal(t, raw, parts[0].InlineData.Data)
+}
+
+func TestContentPartToVertexParts_InputImage_PrivateURLRejected(t *testing.T) {
+	// http(s) is an allowed scheme, but a private/internal address must still
+	// be blocked (SSRF) — matching the chat-completions path's parseURLToPart.
+	part := map[string]interface{}{
+		"type":      "input_image",
+		"image_url": "http://169.254.169.254/latest/meta-data/",
+	}
+	parts, err := contentPartToVertexParts(part)
+	require.Error(t, err)
+	assert.Nil(t, parts)
+	var validationErr *converterutil.RequestValidationError
+	require.ErrorAs(t, err, &validationErr)
+	assert.Equal(t, "input_image.image_url", validationErr.Param)
+}
+
+func TestContentPartToVertexParts_InputFile_UnsupportedSchemeRejected(t *testing.T) {
+	part := map[string]interface{}{
+		"type":     "input_file",
+		"file_url": "ftp://example.com/doc.pdf",
+	}
+	parts, err := contentPartToVertexParts(part)
+	require.Error(t, err)
+	assert.Nil(t, parts)
+	var validationErr *converterutil.RequestValidationError
+	require.ErrorAs(t, err, &validationErr)
+	assert.Equal(t, "input_file.file_url", validationErr.Param)
+}
+
 func TestContentPartToVertexParts_InputImage_URL(t *testing.T) {
 	part := map[string]interface{}{
 		"type":      "input_image",
@@ -414,4 +526,16 @@ func TestVertexSchemaConversion(t *testing.T) {
 	require.NotNil(t, schema)
 	assert.Equal(t, genai.TypeObject, schema.Type)
 	assert.Contains(t, schema.Properties, "city")
+}
+
+// withMaxInlineBase64Size temporarily shrinks the package-level
+// maxInlineBase64Size for the duration of the calling test, restoring it on
+// cleanup. Lets boundary tests exercise the ">" comparison without allocating
+// and base64-decoding a real ~100MB/~75MB string. Not safe under
+// t.Parallel() — this package's tests don't use it.
+func withMaxInlineBase64Size(t *testing.T, n int) {
+	t.Helper()
+	orig := maxInlineBase64Size
+	maxInlineBase64Size = n
+	t.Cleanup(func() { maxInlineBase64Size = orig })
 }

@@ -133,7 +133,11 @@ func OpenAIToVertex(openAIBody []byte, isImageGeneration bool, isImageEdit bool,
 			// which would produce a "<nil>" text part via fmt.Sprintf.
 			if msg.Content != nil {
 				if s, ok := msg.Content.(string); !ok || s != "" {
-					parts = append(parts, convertContentToParts(msg.Content)...)
+					contentParts, err := convertContentToParts(msg.Content)
+					if err != nil {
+						return nil, err
+					}
+					parts = append(parts, contentParts...)
 				}
 			}
 			if len(msg.ToolCalls) > 0 && role == "model" {

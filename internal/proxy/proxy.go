@@ -1568,16 +1568,17 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 			if convErr != nil {
 				var validationErr *converterutil.RequestValidationError
 				if errors.As(convErr, &validationErr) {
+					status := statusForValidationError(validationErr)
 					p.logger.WarnContext(r.Context(), "Invalid Responses API request for provider format",
-						"error_code", http.StatusBadRequest,
+						"error_code", status,
 						"credential", cred.Name, "provider", string(cred.Type),
 						"model", modelID, "error", convErr,
 						"request_id", logCtx.RequestID)
 					logCtx.Status = "failure"
-					logCtx.HTTPStatus = http.StatusBadRequest
+					logCtx.HTTPStatus = status
 					logCtx.ErrorMsg = convErr.Error()
 					logCtx.TargetURL = cred.BaseURL
-					WriteErrorBadRequest(w, convErr.Error())
+					writeValidationError(w, validationErr, convErr.Error())
 					return
 				}
 				p.logger.ErrorContext(r.Context(), "Failed to convert Responses API request to provider format",
@@ -1612,16 +1613,17 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 			if convErr != nil {
 				var validationErr *converterutil.RequestValidationError
 				if errors.As(convErr, &validationErr) {
+					status := statusForValidationError(validationErr)
 					p.logger.WarnContext(r.Context(), "Invalid request for provider format",
-						"error_code", http.StatusBadRequest,
+						"error_code", status,
 						"credential", cred.Name, "provider", string(cred.Type),
 						"model", modelID, "error", convErr,
 						"request_id", logCtx.RequestID)
 					logCtx.Status = "failure"
-					logCtx.HTTPStatus = http.StatusBadRequest
+					logCtx.HTTPStatus = status
 					logCtx.ErrorMsg = convErr.Error()
 					logCtx.TargetURL = cred.BaseURL
-					WriteErrorBadRequest(w, convErr.Error())
+					writeValidationError(w, validationErr, convErr.Error())
 					return
 				}
 				// Fatal: conversion error won't be fixed by another credential

@@ -228,6 +228,11 @@ func (p *Proxy) orchestrateRequest(
 	)
 	if prepErr != nil {
 		var validationErr *converterutil.RequestValidationError
+		isValidationErr := errors.As(prepErr, &validationErr)
+		status := http.StatusBadRequest
+		if isValidationErr {
+			status = statusForValidationError(validationErr)
+		}
 		apiName := "request"
 		if isResponsesAPI {
 			apiName = "Responses API request"
@@ -235,15 +240,15 @@ func (p *Proxy) orchestrateRequest(
 			apiName = "Messages API request"
 		}
 		p.logger.ErrorContext(r.Context(), "Failed to prepare request for credential",
-			"error_code", http.StatusBadRequest,
+			"error_code", status,
 			"credential", cred.Name, "provider", string(cred.Type),
 			"model", modelID, "error", prepErr,
 			"request_id", logCtx.RequestID)
 		logCtx.Status = "failure"
-		logCtx.HTTPStatus = http.StatusBadRequest
+		logCtx.HTTPStatus = status
 		logCtx.ErrorMsg = "Failed to convert " + apiName + ": " + prepErr.Error()
-		if errors.As(prepErr, &validationErr) {
-			WriteErrorBadRequest(w, prepErr.Error())
+		if isValidationErr {
+			writeValidationError(w, validationErr, prepErr.Error())
 		} else {
 			WriteErrorBadRequest(w, "Failed to convert "+apiName)
 		}
