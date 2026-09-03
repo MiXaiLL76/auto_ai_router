@@ -77,7 +77,7 @@ Tool handling follows the outbound endpoint contract:
 
 - Native `/v1/responses` passthrough keeps built-in tools and `tool_choice` unchanged, including `web_search`, `file_search`, `computer_use`, and `code_interpreter`.
 - `/v1/chat/completions` converts `web_search` and `web_search_preview` to top-level `web_search_options` for models whose name contains `search-preview`, including `search_context_size` and `user_location`.
-- Chat Completions requests for other models drop the unsupported built-in web-search tool locally. Ordinary function tools in the same request remain unchanged.
+- Chat Completions requests for other models preserve `web_search`, `web_search_preview`, and matching `tool_choice` values for upstream validation. Ordinary function tools in the same request also remain unchanged.
 
 ```python
 # Converted to web_search_options for Chat Completions
@@ -87,9 +87,9 @@ client.chat.completions.create(
     ...,
 )
 
-# Built-in tool is dropped for a non-search Chat Completions model
+# Built-in tool is preserved for upstream validation
 client.chat.completions.create(
-    model="gpt-4o-mini", tools=[{"type": "web_search"}], ...  # dropped
+    model="gpt-5.6-sol", tools=[{"type": "web_search"}], ...
 )
 ```
 
