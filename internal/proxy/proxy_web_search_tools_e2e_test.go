@@ -76,6 +76,7 @@ func TestProxyRequest_ChatCompletionsNormalizesWebSearchTools(t *testing.T) {
 		model                string
 		tools                string
 		wantWebSearchOptions bool
+		wantWebSearch        bool
 		wantFunction         bool
 	}{
 		{
@@ -92,10 +93,11 @@ func TestProxyRequest_ChatCompletionsNormalizesWebSearchTools(t *testing.T) {
 			wantFunction:         true,
 		},
 		{
-			name:         "unsupported model follows documented drop policy",
-			model:        "gpt-4o-mini",
-			tools:        `[{"type":"web_search"},{"type":"function","function":{"name":"get_weather","parameters":{"type":"object"}}}]`,
-			wantFunction: true,
+			name:          "ordinary model preserves web search for upstream",
+			model:         "gpt-5.6-sol",
+			tools:         `[{"type":"web_search"},{"type":"function","function":{"name":"get_weather","parameters":{"type":"object"}}}]`,
+			wantWebSearch: true,
+			wantFunction:  true,
 		},
 	}
 
@@ -140,10 +142,26 @@ func TestProxyRequest_ChatCompletionsNormalizesWebSearchTools(t *testing.T) {
 				assert.Equal(t, "RU", options["user_location"].(map[string]interface{})["country"])
 			}
 			tools, hasTools := outbound["tools"].([]interface{})
-			assert.Equal(t, tt.wantFunction, hasTools)
-			if tt.wantFunction {
-				require.Len(t, tools, 1)
-				assert.Equal(t, "function", tools[0].(map[string]interface{})["type"])
+			assert.Equal(t, tt.wantFunction || tt.wantWebSearch, hasTools)
+			if hasTools {
+				wantCount := 0
+				if tt.wantWebSearch {
+					wantCount++
+				}
+				if tt.wantFunction {
+					wantCount++
+				}
+				require.Len(t, tools, wantCount)
+				toolTypes := make([]string, 0, len(tools))
+				for _, tool := range tools {
+					toolTypes = append(toolTypes, tool.(map[string]interface{})["type"].(string))
+				}
+				if tt.wantWebSearch {
+					assert.Contains(t, toolTypes, "web_search")
+				}
+				if tt.wantFunction {
+					assert.Contains(t, toolTypes, "function")
+				}
 			}
 		})
 	}
