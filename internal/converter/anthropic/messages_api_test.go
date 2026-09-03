@@ -454,8 +454,9 @@ func roundTripFirstUserBlock(t *testing.T, messagesBody []byte) map[string]inter
 
 // TestNormalizeMessagesForPassthrough_AdaptiveThinkingBeta covers the /v1/messages
 // native-passthrough path: a client sending native Anthropic "thinking":{"type":"adaptive"}
-// straight through still needs the effort-2025-11-24 beta and temperature=1.0 that
-// OpenAIToAnthropic would otherwise have added during the Messages->Chat->Messages round trip.
+// straight through still needs the effort-2025-11-24 beta. On Opus 4.7+ the sampling params
+// (temperature/top_p/top_k) are dropped because those models reject them, so the client's
+// temperature must not survive and the thinking side-effect must not re-add it.
 func TestNormalizeMessagesForPassthrough_AdaptiveThinkingBeta(t *testing.T) {
 	body := []byte(`{
 		"model":"claude-opus-4.7",
@@ -472,10 +473,53 @@ func TestNormalizeMessagesForPassthrough_AdaptiveThinkingBeta(t *testing.T) {
 	var got map[string]interface{}
 	require.NoError(t, json.Unmarshal(out, &got))
 	assert.Equal(t, "adaptive", got["thinking"].(map[string]interface{})["type"])
-	assert.Equal(t, 1.0, got["temperature"])
+	_, hasTemp := got["temperature"]
+	assert.False(t, hasTemp, "temperature must be dropped for Opus 4.7+")
 	assert.Equal(t,
 		[]interface{}{"prompt-caching-2024-07-31", "effort-2025-11-24"},
 		got["anthropic_beta"])
+}
+
+// TestNormalizeMessagesForPassthrough_SamplingRemoved verifies the native /v1/messages
+// passthrough strips temperature/top_p/top_k for models that reject them (Opus 4.7+),
+// even with no thinking config, and preserves them for older models.
+func TestNormalizeMessagesForPassthrough_SamplingRemoved(t *testing.T) {
+	body := `{"model":"M","max_tokens":100,"temperature":0.3,"top_p":0.9,"top_k":40,"messages":[{"role":"user","content":"hi"}]}`
+
+	for _, m := range []string{"claude-opus-4-7", "claude-opus-4-8", "claude-opus-5", "claude-sonnet-5", "claude-fable-5"} {
+		out, err := NormalizeMessagesForPassthrough([]byte(body), m, true)
+		require.NoError(t, err)
+		var got map[string]interface{}
+		require.NoError(t, json.Unmarshal(out, &got))
+		for _, k := range []string{"temperature", "top_p", "top_k"} {
+			_, ok := got[k]
+			assert.False(t, ok, "%s must be dropped for %s", k, m)
+		}
+	}
+	for _, m := range []string{"claude-opus-4-6", "claude-sonnet-4-6", "claude-haiku-4-5"} {
+		out, err := NormalizeMessagesForPassthrough([]byte(body), m, true)
+		require.NoError(t, err)
+		var got map[string]interface{}
+		require.NoError(t, json.Unmarshal(out, &got))
+		_, ok := got["temperature"]
+		assert.True(t, ok, "temperature must be preserved for %s", m)
+	}
+}
+
+// TestNormalizeMessagesForPassthrough_ThinkingForcesTempOnKeptModel guards the branch that
+// re-adds temperature=1.0 when thinking is enabled on a model that still accepts sampling
+// (Claude Sonnet 4.6 is adaptive-thinking but pre-4.7, so sampling is kept). Without this
+// case, deleting that branch would silently omit the required temperature and no test fails.
+func TestNormalizeMessagesForPassthrough_ThinkingForcesTempOnKeptModel(t *testing.T) {
+	body := []byte(`{"model":"claude-sonnet-4-6","max_tokens":100,
+		"messages":[{"role":"user","content":"hi"}],
+		"thinking":{"type":"adaptive","effort":"high"}}`)
+
+	out, err := NormalizeMessagesForPassthrough(body, "claude-sonnet-4-6", true)
+	require.NoError(t, err)
+	var got map[string]interface{}
+	require.NoError(t, json.Unmarshal(out, &got))
+	assert.Equal(t, 1.0, got["temperature"], "thinking must force temperature=1.0 on a sampling-accepting model")
 }
 
 // TestNormalizeMessagesForPassthrough_LegacyBudgetUpgradedOnAdaptiveModel covers a client
