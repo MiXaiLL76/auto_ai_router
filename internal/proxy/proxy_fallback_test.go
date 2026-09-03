@@ -122,12 +122,9 @@ func TestProxyFallbackOn429(t *testing.T) {
 	assert.True(t, hasUsage, "Response should contain 'usage' field for token tracking")
 }
 
-// TestProxyFallbackOn429_ModelNotFoundBody tests that when primary returns 429
-// with a model-not-found body, fallback is NOT attempted (model errors are non-retryable).
 func TestProxyFallbackOn429_ModelNotFoundBody(t *testing.T) {
 	var primaryCalls, fallbackCalls int32
 
-	// Primary returns 429 with model not found (non-retryable)
 	primaryServer := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&primaryCalls, 1)
 		w.Header().Set("Content-Type", "application/json")
@@ -139,11 +136,16 @@ func TestProxyFallbackOn429_ModelNotFoundBody(t *testing.T) {
 	}))
 	defer primaryServer.Close()
 
-	// Fallback server (should NOT be called)
 	fallbackServer := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&fallbackCalls, 1)
-		w.WriteHeader(http.StatusOK)
-		_ = json.NewEncoder(w).Encode(map[string]string{"result": "ok"})
+		_ = testhelpers.NewResponseBuilder().
+			WithStatus(http.StatusOK).
+			WithJSONBody(createMockChatCompletionResponse(
+				"chatcmpl-fallback",
+				"gpt-4",
+				"fallback response",
+			)).
+			Write(w)
 	}))
 	defer fallbackServer.Close()
 
@@ -160,8 +162,9 @@ func TestProxyFallbackOn429_ModelNotFoundBody(t *testing.T) {
 	prx.ProxyRequest(w, req)
 
 	assert.Equal(t, int32(1), atomic.LoadInt32(&primaryCalls), "Primary should be called")
-	assert.Equal(t, int32(0), atomic.LoadInt32(&fallbackCalls), "Fallback should NOT be called for model-not-found")
-	assert.Equal(t, http.StatusTooManyRequests, w.Code, "Original error code should be returned")
+	assert.Equal(t, int32(1), atomic.LoadInt32(&fallbackCalls), "Fallback should be called")
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), "fallback response")
 }
 
 // TestProxyFallbackOn429_RequestBodyPreserved tests that the exact request body

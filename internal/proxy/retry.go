@@ -40,7 +40,7 @@ func ShouldRetryWithFallback(statusCode int, respBody []byte) (bool, RetryReason
 	// Determine if status code is retryable
 	var retryReason RetryReason
 	switch {
-	case statusCode == http.StatusBadRequest:
+	case statusCode == http.StatusBadRequest || statusCode == http.StatusNotFound:
 		retryReason = RetryReasonServerErr
 	case statusCode == http.StatusUnauthorized || statusCode == http.StatusForbidden:
 		retryReason = RetryReasonAuthErr
@@ -77,14 +77,42 @@ func isRetryableContent(respBody []byte) bool {
 		return false
 	}
 
-	// Don't retry if it's a model-specific error that won't be fixed by retrying
-	if bytes.Contains(bodyLower, []byte("model not found")) ||
-		bytes.Contains(bodyLower, []byte("model does not exist")) ||
-		bytes.Contains(bodyLower, []byte("unsupported model")) {
-		return false
-	}
-
 	return true
+}
+
+// setRetryAfterFromBan sets the Retry-After header for a 429 response to
+// modelID's caller. It prefers the shortest remaining fail2ban ban among
+// modelID's eligible credentials (a precise ETA); if none of them are
+// currently banned it falls back to a configured or default duration via
+// DefaultRetryAfterForModel, so a 429 reaching the client always carries a
+// Retry-After header.
+func (p *Proxy) setRetryAfterFromBan(w http.ResponseWriter, modelID string, exclude map[string]bool, visibility scope.Context) {
+	remaining := p.balancer.DefaultRetryAfterForModel(modelID, exclude, visibility)
+	seconds := int(remaining / time.Second)
+	if remaining%time.Second != 0 {
+		seconds++
+	}
+	if seconds < 1 {
+		seconds = 1
+	}
+	w.Header().Set("Retry-After", fmt.Sprintf("%d", seconds))
+}
+
+// ensureRetryAfterOn429 sets a Retry-After header on the client response for
+// a 429 that is about to be relayed WITHOUT going through writeFallbackResponse
+// — specifically, when TryFallbackProxy found no fallback credential to even
+// attempt (e.g. the model has none configured), so the original upstream 429
+// falls straight through to the normal response-writing path instead. Same
+// guarantee as writeFallbackResponse's inline check: never override a
+// Retry-After the upstream already sent, and never omit one.
+func (p *Proxy) ensureRetryAfterOn429(w http.ResponseWriter, statusCode int, upstreamHeaders http.Header, modelID string, visibility scope.Context) {
+	if statusCode != http.StatusTooManyRequests {
+		return
+	}
+	if upstreamHeaders != nil && upstreamHeaders.Get("Retry-After") != "" {
+		return
+	}
+	p.setRetryAfterFromBan(w, modelID, nil, visibility)
 }
 
 // GetTried gets the set of tried credentials from context.
@@ -286,6 +314,19 @@ func (p *Proxy) writeFallbackResponse(
 	// Computed once: both branches below need the same audio-usage-contract
 	// derived from the fallback upstream's response, regardless of streaming.
 	usageOptions := tokenUsageExtractionOptionsForResponse(fallbackCred, proxyResp.Headers)
+
+	// The fallback chain is exhausted and this 429 is a real upstream response
+	// being relayed as-is — unlike the self-generated "no credentials available"
+	// 429 in selectCredentialForModel, nothing here has computed a Retry-After
+	// hint yet. Add one from the shortest active ban, but only if the upstream
+	// didn't already send its own (never override a provider's own guidance).
+	if proxyResp.StatusCode == http.StatusTooManyRequests && proxyResp.Headers.Get("Retry-After") == "" {
+		visibility := scope.PublicContext()
+		if logCtx != nil {
+			visibility = logCtx.Scope
+		}
+		p.setRetryAfterFromBan(w, modelID, nil, visibility)
+	}
 
 	if proxyResp.IsStreaming {
 		p.setCredentialResponseHeader(w, logCtx, "")

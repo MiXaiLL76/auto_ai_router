@@ -248,6 +248,7 @@ type InputDetails struct {
 	CachedTokens              int                        `json:"cached_tokens"`
 	CachedAudioTokens         int                        `json:"cached_audio_tokens,omitempty"`
 	CacheCreationTokens       int                        `json:"cache_creation_tokens,omitempty"` // extension: prompt cache writes
+	CacheWriteTokens          int                        `json:"cache_write_tokens,omitempty"`    // extension: OpenAI/Azure name for the same counter
 	CacheCreationTokenDetails *CacheCreationTokenDetails `json:"cache_creation_token_details,omitempty"`
 	AudioTokens               int                        `json:"audio_tokens,omitempty"` // extension: audio input tokens
 }

@@ -2010,3 +2010,68 @@ func TestMinRemainingBanForModel_NoRelevantCandidateBanned_ReturnsFalse(t *testi
 
 	assert.False(t, ok, "no relevant candidate is banned once the only one is excluded — must not fall back to guessing")
 }
+
+func TestDefaultRetryAfterForModel_PrefersActiveBanOverConfiguredDefault(t *testing.T) {
+	f2b := fail2ban.NewWithRules(3, 0, []int{429}, []fail2ban.ErrorCodeRule{
+		{Code: 429, MaxAttempts: 3, BanDuration: 30 * time.Second},
+	})
+	rl := ratelimit.New()
+
+	credentials := []config.CredentialConfig{
+		{Name: "cred1", APIKey: "key1", BaseURL: "http://test1.com", RPM: -1},
+	}
+	bal := New(credentials, f2b, rl)
+
+	bal.BanUntil("cred1", "shared-model", 429, time.Now().Add(2*time.Second), "test")
+
+	remaining := bal.DefaultRetryAfterForModel("shared-model", nil, scope.AdminContext())
+	assert.Greater(t, remaining, time.Duration(0))
+	assert.LessOrEqual(t, remaining, 2*time.Second, "an active ban's precise ETA must win over the configured default")
+}
+
+func TestDefaultRetryAfterForModel_NoActiveBan_FallsBackToConfiguredRuleDuration(t *testing.T) {
+	f2b := fail2ban.NewWithRules(3, 0, []int{429}, []fail2ban.ErrorCodeRule{
+		{Code: 429, MaxAttempts: 3, BanDuration: 45 * time.Second},
+	})
+	rl := ratelimit.New()
+
+	credentials := []config.CredentialConfig{
+		{Name: "cred1", APIKey: "key1", BaseURL: "http://test1.com", RPM: -1},
+	}
+	bal := New(credentials, f2b, rl)
+
+	// No RecordResponse/BanUntil at all — nothing is actively banned.
+	remaining := bal.DefaultRetryAfterForModel("shared-model", nil, scope.AdminContext())
+	assert.Equal(t, 45*time.Second, remaining,
+		"with no active ban, must still report the model's configured 429 ban duration rather than omitting a hint")
+}
+
+func TestDefaultRetryAfterForModel_NoEligibleCredentials_ReturnsHardcodedFallback(t *testing.T) {
+	f2b := fail2ban.New(3, 10*time.Second, []int{429})
+	rl := ratelimit.New()
+
+	// No credentials at all for this model.
+	bal := New(nil, f2b, rl)
+
+	remaining := bal.DefaultRetryAfterForModel("nonexistent-model", nil, scope.AdminContext())
+	assert.Equal(t, defaultRetryAfterFallback, remaining,
+		"must never return a zero/empty duration — a 429 must always carry some Retry-After hint")
+}
+
+func TestDefaultRetryAfterForModel_IgnoresExcludedAndOutOfScopeCredentials(t *testing.T) {
+	f2b := fail2ban.NewWithRules(3, 0, []int{429}, []fail2ban.ErrorCodeRule{
+		{Code: 429, MaxAttempts: 3, BanDuration: 5 * time.Second},
+	})
+	rl := ratelimit.New()
+
+	credentials := []config.CredentialConfig{
+		{Name: "cred-excluded", APIKey: "key1", BaseURL: "http://test1.com", RPM: -1},
+		{Name: "cred-out-of-scope", APIKey: "key2", BaseURL: "http://test2.com", RPM: -1, ProviderScopeExpression: scope.FalseExpression()},
+	}
+	bal := New(credentials, f2b, rl)
+
+	exclude := map[string]bool{"cred-excluded": true}
+	remaining := bal.DefaultRetryAfterForModel("shared-model", exclude, scope.AdminContext())
+	assert.Equal(t, defaultRetryAfterFallback, remaining,
+		"once the only credentials are excluded or out of scope, must land on the hardcoded fallback, not a bogus rule from an ineligible credential")
+}

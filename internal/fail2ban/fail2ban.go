@@ -493,6 +493,24 @@ func (f *Fail2Ban) RemainingBan(credentialName, modelID string) (time.Duration, 
 	return remaining, true
 }
 
+// DefaultBanDuration returns the configured ban duration that would apply to
+// credentialName if it were banned for statusCode right now, regardless of
+// whether it is actually banned. Used to build a Retry-After hint on a 429
+// even when no credential has crossed the failure threshold yet — a 429
+// reaching the client must always carry a Retry-After. Returns (0, false)
+// for a permanent-ban rule (BanDuration == 0), since there is no finite ETA
+// to report.
+func (f *Fail2Ban) DefaultBanDuration(credentialName string, statusCode int) (time.Duration, bool) {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+
+	rule := f.getRule(credentialName, statusCode)
+	if rule.BanDuration <= 0 {
+		return 0, false
+	}
+	return rule.BanDuration, true
+}
+
 // GetBannedCount returns the count of currently active (non-expired) banned credential+model pairs
 func (f *Fail2Ban) GetBannedCount() int {
 	f.mu.RLock()

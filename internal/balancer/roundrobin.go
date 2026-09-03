@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net/http"
 	"sort"
 	"strings"
 	"sync"
@@ -230,6 +231,58 @@ func (r *RoundRobin) MinRemainingBanForModel(modelID string, exclude map[string]
 		}
 	}
 	return shortest, found
+}
+
+// defaultRetryAfterFallback is the last-resort Retry-After hint used when no
+// active ban and no per-credential 429 ban-duration rule can be found for a
+// model (e.g. the model has no eligible credentials left to inspect). A 429
+// reaching the client must always carry a Retry-After, so this constant
+// exists purely to guarantee that — it is never a precise ETA.
+const defaultRetryAfterFallback = 30 * time.Second
+
+// DefaultRetryAfterForModel returns a Retry-After duration to report on a 429
+// for modelID, scoped to the same candidate set as MinRemainingBanForModel.
+// It first tries an active ban (a precise ETA); if none is active, it falls
+// back to the shortest *configured* 429 ban duration among eligible
+// credentials, so the header is still meaningful; if that also yields
+// nothing (no eligible credentials, or all have permanent-ban rules),
+// it returns defaultRetryAfterFallback. This method never reports "no
+// Retry-After" — callers use it precisely to guarantee the header is always
+// present on a 429.
+func (r *RoundRobin) DefaultRetryAfterForModel(modelID string, exclude map[string]bool, visibility scope.Context) time.Duration {
+	if remaining, ok := r.MinRemainingBanForModel(modelID, exclude, visibility); ok {
+		return remaining
+	}
+
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	var shortest time.Duration
+	found := false
+	for i := range r.credentials {
+		cred := &r.credentials[i]
+		if exclude[cred.Name] {
+			continue
+		}
+		if !cred.VisibleTo(visibility) {
+			continue
+		}
+		if modelID != "" && r.modelChecker != nil && r.modelChecker.IsEnabled() && !r.hasModel(cred.Name, modelID, visibility) {
+			continue
+		}
+		duration, ok := r.fail2ban.DefaultBanDuration(cred.Name, http.StatusTooManyRequests)
+		if !ok {
+			continue
+		}
+		if !found || duration < shortest {
+			shortest = duration
+			found = true
+		}
+	}
+	if !found {
+		return defaultRetryAfterFallback
+	}
+	return shortest
 }
 
 // GetProxyCredentials returns all proxy/AIR remote-router credentials.

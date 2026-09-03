@@ -626,9 +626,8 @@ func TestConvertWebSearchTools_WebSearchWithFunctions(t *testing.T) {
 	assert.Equal(t, "function", tools[0].(map[string]interface{})["type"])
 }
 
-// TestConvertWebSearchTools_NonSearchModelWithFunctions documents the local
-// compatibility policy: unsupported Chat Completions models lose the built-in
-// web-search tool while ordinary functions remain available.
+// TestConvertWebSearchTools_NonSearchModelWithFunctions verifies that ordinary
+// models keep both web-search and function tools for upstream validation.
 func TestConvertWebSearchTools_NonSearchModelWithFunctions(t *testing.T) {
 	body := []byte(`{"model":"gpt-4o-mini","tools":[{"type":"web_search_preview"},{"type":"function","function":{"name":"get_weather"}}],"tool_choice":"auto"}`)
 	result := bodyToMap(t, ConvertWebSearchTools(body))
@@ -640,12 +639,26 @@ func TestConvertWebSearchTools_NonSearchModelWithFunctions(t *testing.T) {
 	if !ok {
 		t.Fatal("tools should remain")
 	}
-	if len(tools) != 1 {
-		t.Errorf("expected one function tool, got %d", len(tools))
+	if len(tools) != 2 {
+		t.Errorf("expected web-search and function tools, got %d", len(tools))
 	}
-	assert.Equal(t, "function", tools[0].(map[string]interface{})["type"])
+	assert.Equal(t, "web_search_preview", tools[0].(map[string]interface{})["type"])
+	assert.Equal(t, "function", tools[1].(map[string]interface{})["type"])
 	if _, ok := result["tool_choice"]; !ok {
 		t.Error("tool_choice should remain")
+	}
+}
+
+func TestConvertWebSearchTools_ModernOpenAIModelsPreserveWebSearch(t *testing.T) {
+	for _, model := range []string{"gpt-5.5", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"} {
+		t.Run(model, func(t *testing.T) {
+			body := []byte(`{"model":"` + model + `","tools":[{"type":"web_search","search_context_size":"high","user_location":{"type":"approximate","country":"RU"}}],"tool_choice":{"type":"web_search"}}`)
+			result := ConvertWebSearchTools(body)
+
+			if string(result) != string(body) {
+				t.Errorf("body should be unchanged, got %s", result)
+			}
+		})
 	}
 }
 
@@ -724,24 +737,21 @@ func TestConvertWebSearchTools_PreservesExistingWebSearchOptions(t *testing.T) {
 	}
 }
 
-// TestConvertWebSearchTools_OtherNonFunctionToolsDropped: non-web-search
-// non-function tools (computer_use, code_execution, etc.) must be dropped
-// for OpenAI Chat Completions.
+// TestConvertWebSearchTools_OtherNonFunctionToolsDropped verifies that removing
+// unrelated built-ins does not also remove a preserved web-search tool.
 func TestConvertWebSearchTools_OtherNonFunctionToolsDropped(t *testing.T) {
-	body := []byte(`{"model":"gpt-4o","tools":[{"type":"computer_use"},{"type":"code_execution"},{"type":"function","function":{"name":"my_func"}}]}`)
+	body := []byte(`{"model":"gpt-5.6-sol","tools":[{"type":"web_search"},{"type":"computer_use"},{"type":"code_execution"},{"type":"function","function":{"name":"my_func"}}]}`)
 	result := bodyToMap(t, ConvertWebSearchTools(body))
 
 	tools, ok := result["tools"].([]interface{})
 	if !ok {
 		t.Fatal("tools should remain (function tool must be kept)")
 	}
-	if len(tools) != 1 {
-		t.Errorf("expected 1 function tool, got %d (non-function tools must be dropped)", len(tools))
+	if len(tools) != 2 {
+		t.Errorf("expected web-search and function tools, got %d", len(tools))
 	}
-	toolMap := tools[0].(map[string]interface{})
-	if toolMap["type"] != "function" {
-		t.Errorf("expected function tool, got %v", toolMap["type"])
-	}
+	assert.Equal(t, "web_search", tools[0].(map[string]interface{})["type"])
+	assert.Equal(t, "function", tools[1].(map[string]interface{})["type"])
 	if _, ok := result["web_search_options"]; ok {
 		t.Error("web_search_options must NOT be added (no web_search tools)")
 	}

@@ -661,6 +661,11 @@ func (p *Proxy) executeProxyRequest(
 	// knows to include the X-Credential-Name response header.
 	proxyReq.Header.Set(HeaderAIRProxyClient, "1")
 	proxyReq.Header.Set(HeaderLegacyAIRProxyClient, "1")
+	if carriesCredentialDenylist(cred) {
+		if err := setCredentialDenylistHeader(proxyReq.Header, effectiveCredentialDenylist(r.Context())); err != nil {
+			return nil, err
+		}
+	}
 
 	// Send request
 	resp, err := p.client.Do(proxyReq) //nolint:gosec // G704: same targetURL as above, host isn't attacker-controlled
@@ -844,6 +849,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 		r.Header.Get(HeaderLegacyAIRProxyClient) == "1"
 	r.Header.Del(HeaderAIRProxyClient)
 	r.Header.Del(HeaderLegacyAIRProxyClient)
+	r = captureCredentialDenylist(r, proxyMarkerPresent)
 
 	// Create logging context that will be filled throughout request processing
 	// and logged at the end via defer to ensure all requests are logged
@@ -884,15 +890,6 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if proxyMarkerPresent {
-		logCtx.IsProxyRequest = p.isMasterKey(logCtx.Token)
-		if !logCtx.IsProxyRequest {
-			p.logger.WarnContext(r.Context(), "Ignoring untrusted AIR proxy marker",
-				"request_id", requestID,
-			)
-		}
-	}
-
 	r = prepared.request
 	logCtx.Request = r
 	body := prepared.body
@@ -1070,6 +1067,13 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 			}
 			p.logger.DebugContext(r.Context(), "Fallback retry failed, using original response",
 				"credential", cred.Name, "fallback_reason", fallbackReason)
+			if proxyResp != nil {
+				visibility := scope.PublicContext()
+				if logCtx != nil {
+					visibility = logCtx.Scope
+				}
+				p.ensureRetryAfterOn429(w, proxyResp.StatusCode, proxyResp.Headers, modelID, visibility)
+			}
 		}
 
 		// Handle transport error (no successful response at all).
@@ -1562,16 +1566,17 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 			if convErr != nil {
 				var validationErr *converterutil.RequestValidationError
 				if errors.As(convErr, &validationErr) {
+					status := statusForValidationError(validationErr)
 					p.logger.WarnContext(r.Context(), "Invalid Responses API request for provider format",
-						"error_code", http.StatusBadRequest,
+						"error_code", status,
 						"credential", cred.Name, "provider", string(cred.Type),
 						"model", modelID, "error", convErr,
 						"request_id", logCtx.RequestID)
 					logCtx.Status = "failure"
-					logCtx.HTTPStatus = http.StatusBadRequest
+					logCtx.HTTPStatus = status
 					logCtx.ErrorMsg = convErr.Error()
 					logCtx.TargetURL = cred.BaseURL
-					WriteErrorBadRequest(w, convErr.Error())
+					writeValidationError(w, validationErr, convErr.Error())
 					return
 				}
 				p.logger.ErrorContext(r.Context(), "Failed to convert Responses API request to provider format",
@@ -1606,16 +1611,17 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 			if convErr != nil {
 				var validationErr *converterutil.RequestValidationError
 				if errors.As(convErr, &validationErr) {
+					status := statusForValidationError(validationErr)
 					p.logger.WarnContext(r.Context(), "Invalid request for provider format",
-						"error_code", http.StatusBadRequest,
+						"error_code", status,
 						"credential", cred.Name, "provider", string(cred.Type),
 						"model", modelID, "error", convErr,
 						"request_id", logCtx.RequestID)
 					logCtx.Status = "failure"
-					logCtx.HTTPStatus = http.StatusBadRequest
+					logCtx.HTTPStatus = status
 					logCtx.ErrorMsg = convErr.Error()
 					logCtx.TargetURL = cred.BaseURL
-					WriteErrorBadRequest(w, convErr.Error())
+					writeValidationError(w, validationErr, convErr.Error())
 					return
 				}
 				// Fatal: conversion error won't be fixed by another credential
@@ -1905,6 +1911,13 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 		}
 		p.logger.DebugContext(r.Context(), "Fallback retry failed, using original response",
 			"credential", cred.Name, "fallback_reason", fallbackReason)
+		if resp != nil {
+			visibility := scope.PublicContext()
+			if logCtx != nil {
+				visibility = logCtx.Scope
+			}
+			p.ensureRetryAfterOn429(w, resp.StatusCode, resp.Header, modelID, visibility)
+		}
 	}
 
 	// Handle case where all attempts were transport errors (no response at all)

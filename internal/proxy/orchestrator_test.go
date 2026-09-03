@@ -343,6 +343,38 @@ func TestSelectCredentialForModelSetsRetryAfterFromBan(t *testing.T) {
 	assert.LessOrEqual(t, seconds, 3)
 }
 
+// TestSelectCredentialForModelSetsRetryAfter_EvenWithoutActiveBan verifies
+// the core guarantee: the synthesized "no credentials available" 429 must
+// always carry a Retry-After header, even when there is no credential at
+// all for the model (so no active ban exists to derive a precise ETA from).
+func TestSelectCredentialForModelSetsRetryAfter_EvenWithoutActiveBan(t *testing.T) {
+	prx := NewTestProxyBuilder().Build() // no credentials configured at all
+	setTestModelPrice(prx, "nonexistent-model", &models.ModelPrice{})
+
+	logCtx := testLogCtx(t)
+	logCtx.Credential = nil
+
+	w := httptest.NewRecorder()
+	credential, ok := prx.selectCredentialForModel(
+		w,
+		"nonexistent-model",
+		"",
+		"",
+		nil,
+		logCtx,
+	)
+
+	require.False(t, ok)
+	require.Nil(t, credential)
+	require.Equal(t, http.StatusTooManyRequests, w.Code)
+
+	retryAfter := w.Header().Get("Retry-After")
+	require.NotEmpty(t, retryAfter, "a 429 reaching the client must always carry a Retry-After header, even with no active ban")
+	seconds, err := strconv.Atoi(retryAfter)
+	require.NoError(t, err)
+	assert.GreaterOrEqual(t, seconds, 1)
+}
+
 func TestPrepareRequestForCredential_ProxyBodyKeepsOriginalParams(t *testing.T) {
 	prx := NewTestProxyBuilder().Build()
 	cred := config.CredentialConfig{Name: "openai", Type: config.ProviderTypeOpenAI, APIKey: "key", BaseURL: "http://openai.local", RPM: 100}
@@ -584,8 +616,13 @@ func TestPrepareRequestForCredential_ResponsesRecomputesProviderMode(t *testing.
 	require.Equal(t, "/v1/responses", anthropicReq.proxyPath)
 	require.Contains(t, string(anthropicReq.body), `"messages"`)
 	require.NotContains(t, string(anthropicReq.body), `"input"`)
-	require.Contains(t, string(anthropicReq.proxyBody), `"input"`)
-	require.NotContains(t, string(anthropicReq.proxyBody), `"messages"`)
+	// proxyBody must be converted too, not just body: TryFallbackProxy forwards
+	// proxyBody to fallback credentials, and a Chat-Completions-only fallback
+	// receiving the original Responses-shaped "input" body rejects it outright
+	// ("specify prompt or messages") instead of the converted request the
+	// primary attempt used.
+	require.Contains(t, string(anthropicReq.proxyBody), `"messages"`)
+	require.NotContains(t, string(anthropicReq.proxyBody), `"input"`)
 }
 
 func TestProxyRequest_ResponsesRetryRecomputesProviderMode(t *testing.T) {

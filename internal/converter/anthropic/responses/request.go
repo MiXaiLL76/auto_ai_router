@@ -46,11 +46,13 @@ func buildAnthropicRequest(req *responses.Request, model string) (*anthropic.Ant
 		Stream:    req.Stream,
 	}
 
-	// Scalar params
-	if req.Temperature != nil {
+	// Scalar params. Drop temperature/top_p for models that no longer accept
+	// sampling params (Claude Opus 4.7+ — see anthropic.SamplingRemoved).
+	dropSampling := anthropic.SamplingRemoved(model)
+	if req.Temperature != nil && !dropSampling {
 		ar.Temperature = req.Temperature
 	}
-	if req.TopP != nil {
+	if req.TopP != nil && !dropSampling {
 		ar.TopP = req.TopP
 	}
 

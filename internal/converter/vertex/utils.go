@@ -3,15 +3,26 @@ package vertex
 import (
 	"context"
 	"encoding/base64"
+	"fmt"
 	"math"
 	"net"
 	"net/url"
 	"strings"
 
+	"github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
 	"google.golang.org/genai"
 )
 
-const maxBase64Size = 20 * 1024 * 1024 // 20MB encoded ≈ 15MB decoded
+// maxBase64Size caps the base64-encoded (not decoded) payload of an inline
+// data: URL. Above this, the request is rejected with 413 instead of either
+// silently dropping the media or (the previous behaviour) falling through to
+// parseURLToPart, which would treat the same giant base64 string as if it
+// were a plain http(s) URL and forward a malformed request to Vertex.
+//
+// A var, not a const: tests shrink it (see withMaxBase64Size in
+// utils_test.go) so boundary cases don't have to allocate and base64-decode
+// real ~100MB/~75MB strings just to exercise the ">" comparison.
+var maxBase64Size = 100 * 1024 * 1024 // 100MB encoded
 
 // ClampInt32 narrows a caller-supplied integer to int32, saturating instead of
 // wrapping on out-of-range values. The genai SDK takes int32 for token counts,
@@ -29,15 +40,18 @@ func ClampInt32[T int | int64](v T) int32 {
 
 // parseDataURLToPart converts a data URL string to a genai.Part with inline data
 // Handles formats like: data:image/jpeg;base64,/9j/4AAQ...
-func parseDataURLToPart(dataURL string) *genai.Part {
+// Returns (nil, nil) if dataURL is not a data: URL at all — callers fall back
+// to treating it as a regular URL. Returns a non-nil error only when the
+// string IS a data URL but is otherwise unusable (oversized payload).
+func parseDataURLToPart(dataURL string) (*genai.Part, error) {
 	if !strings.HasPrefix(dataURL, "data:") {
-		return nil
+		return nil, nil
 	}
 
 	// Split: data:image/jpeg;base64,<data>
 	parts := strings.SplitN(dataURL, ",", 2) // SplitN to handle base64 with commas
 	if len(parts) != 2 {
-		return nil
+		return nil, nil
 	}
 
 	header := parts[0]  // data:image/jpeg;base64
@@ -46,18 +60,18 @@ func parseDataURLToPart(dataURL string) *genai.Part {
 	// Extract mime type from header
 	mimeType := extractMimeType(header)
 	if mimeType == "" {
-		return nil
+		return nil, nil
 	}
 
 	// check base64 payload size before decoding
 	if len(b64Data) > maxBase64Size {
-		return nil
+		return nil, converterutil.NewRequestEntityTooLargeError("", fmt.Sprintf("inline data URL payload exceeds %dMB limit", maxBase64Size/(1024*1024)))
 	}
 
 	// Decode base64 data to binary
 	decodedData, err := base64.StdEncoding.DecodeString(b64Data)
 	if err != nil {
-		return nil
+		return nil, nil
 	}
 
 	return &genai.Part{
@@ -65,7 +79,7 @@ func parseDataURLToPart(dataURL string) *genai.Part {
 			MIMEType: mimeType,
 			Data:     decodedData,
 		},
-	}
+	}, nil
 }
 
 // extractMimeType extracts MIME type from data URL header
@@ -106,7 +120,9 @@ var mimeTypeMap = map[string]string{
 	"txt":  "text/plain",
 }
 
-// isPrivateURL checks if a URL points to a private/internal network address.
+// IsPrivateURL checks if a URL points to a private/internal network address.
+// Exported so the Responses API converter package (vertexresponses) can apply
+// the same SSRF guard to its own FileData URL fallback.
 //
 // When the hostname is not a literal IP, it is resolved once via net.LookupIP
 // and the result is checked against private ranges.  This is vulnerable to DNS
@@ -116,7 +132,7 @@ var mimeTypeMap = map[string]string{
 // may apply its own protections, and (b) exploitation requires the attacker to
 // control DNS with a very short TTL.  Do not rely on this function as the sole
 // SSRF defence in higher-trust environments.
-func isPrivateURL(rawURL string) bool {
+func IsPrivateURL(rawURL string) bool {
 	parsed, err := url.Parse(rawURL)
 	if err != nil {
 		return true // block unparseable URLs
@@ -184,7 +200,7 @@ func parseURLToPart(rawURL string, fileObj map[string]interface{}) *genai.Part {
 	}
 
 	//  block private/internal network URLs
-	if (strings.HasPrefix(rawURL, "http://") || strings.HasPrefix(rawURL, "https://")) && isPrivateURL(rawURL) {
+	if (strings.HasPrefix(rawURL, "http://") || strings.HasPrefix(rawURL, "https://")) && IsPrivateURL(rawURL) {
 		return nil
 	}
 

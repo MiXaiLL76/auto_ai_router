@@ -124,6 +124,16 @@ func NormalizeMessagesForPassthrough(body []byte, model string, isRealAnthropicB
 		return nil, fmt.Errorf("failed to parse Messages request: %w", err)
 	}
 
+	// Models that no longer accept sampling params (Claude Opus 4.7+ — see
+	// SamplingRemoved) reject temperature/top_p/top_k. Drop any client-supplied
+	// values so the native /v1/messages passthrough body does not 400.
+	dropSampling := SamplingRemoved(model)
+	if dropSampling {
+		delete(request, "temperature")
+		delete(request, "top_p")
+		delete(request, "top_k")
+	}
+
 	tc, oc := mapThinkingConfig(request["thinking"], "", model)
 	if tc != nil {
 		request["thinking"] = tc
@@ -140,7 +150,9 @@ func NormalizeMessagesForPassthrough(body []byte, model string, isRealAnthropicB
 			}
 			request["anthropic_beta"] = betas
 		}
-		request["temperature"] = temp
+		if !dropSampling {
+			request["temperature"] = temp
+		}
 	} else if !isRealAnthropicBackend {
 		request["thinking"] = &AnthropicThinking{Type: "disabled"}
 	}

@@ -377,6 +377,10 @@ func outputToInputItems(output []OutputItem) []interface{} {
 //  4. instructions: array of messages → content joined as a plain string.
 //  5. tools: nested Chat Completions format ({function:{name:...}}) →
 //     flat Responses API format ({name:...}) for function-type tools.
+//  6. compaction items → synthetic user messages (native API has no compaction type).
+//  7. reasoning items missing a valid "summary" list → recovered from a
+//     non-standard "content" field; kept as-is if they carry encrypted_content
+//     instead; dropped only if nothing usable remains.
 func PrepareCodexPassthrough(body []byte, prevEntryHandled bool) []byte {
 	var raw map[string]interface{}
 	if err := json.Unmarshal(body, &raw); err != nil {
@@ -490,6 +494,75 @@ func PrepareCodexPassthrough(body []byte, prevEntryHandled bool) []byte {
 					})
 				}
 				// Skip empty compaction items
+			}
+			if changed {
+				raw["input"] = out
+			}
+		}
+	}
+
+	// 7. Normalize reasoning items so they satisfy OpenAI's native validation
+	// ("Invalid 'summary': summary is required and must be a list for reasoning").
+	// Some upstream client SDKs / synthetic replays echo reasoning items back using
+	// a non-standard {"content": [{"type": "reasoning_text", "text": "..."}]} shape
+	// instead of the documented {"summary": [{"type": "summary_text", "text": "..."}]}
+	// shape. Passthrough forwards the body mostly as-is, so without this the
+	// malformed item reaches the provider unmodified and the whole request is
+	// rejected — recover a valid summary from "content" when possible.
+	//
+	// A "summary" key that is already a list — even an empty one — already
+	// satisfies "must be a list" and is left untouched. If it's absent (or
+	// unrecoverable) but the item still carries encrypted_content, keep the
+	// item as-is rather than drop it: this router's own outputToInputItems
+	// produces exactly that shape (no "summary" key at all) for round-tripped
+	// encrypted reasoning, and it already passes through fine without one —
+	// dropping it here would just be a self-inflicted regression. Only an item
+	// with neither a usable summary nor encrypted_content carries nothing
+	// useful for the next turn and gets dropped.
+	if inputVal, ok := raw["input"]; ok {
+		if inputArr, ok := inputVal.([]interface{}); ok {
+			out := make([]interface{}, 0, len(inputArr))
+			changed := false
+			for _, item := range inputArr {
+				itemMap, ok := item.(map[string]interface{})
+				if !ok || itemMap["type"] != "reasoning" {
+					out = append(out, item)
+					continue
+				}
+				if _, ok := itemMap["summary"].([]interface{}); ok {
+					out = append(out, item)
+					continue
+				}
+				var recovered []interface{}
+				if content, ok := itemMap["content"].([]interface{}); ok {
+					for _, c := range content {
+						cm, ok := c.(map[string]interface{})
+						if !ok {
+							continue
+						}
+						if text, _ := cm["text"].(string); text != "" {
+							recovered = append(recovered, map[string]interface{}{
+								"type": "summary_text",
+								"text": text,
+							})
+						}
+					}
+				}
+				if len(recovered) > 0 {
+					changed = true
+					itemMap["summary"] = recovered
+					delete(itemMap, "content")
+					out = append(out, itemMap)
+					continue
+				}
+				if ec, ok := itemMap["encrypted_content"].(string); ok && ec != "" {
+					// No summary to recover, but encrypted_content alone is
+					// known-good today — leave the item exactly as-is.
+					out = append(out, item)
+					continue
+				}
+				// Genuinely nothing useful — drop rather than forward broken.
+				changed = true
 			}
 			if changed {
 				raw["input"] = out
@@ -920,8 +993,17 @@ func convertInputValue(input interface{}) ([]interface{}, error) {
 // Responses-API-only fields (type, phase, status) are intentionally dropped here because
 // Chat Completions providers reject unknown parameters on message objects.
 func convertMessage(item map[string]interface{}) (map[string]interface{}, error) {
+	role := item["role"]
+	if role == "developer" {
+		// "developer" is the Responses API's rename of "system" (also emitted by the
+		// official OpenAI SDK). Most Chat Completions providers reached through this
+		// generic converter (e.g. DeepSeek and other OpenAI-compatible backends) only
+		// recognize the classic role set and reject "developer" outright, so downgrade
+		// it to the universally-supported "system" — the two are semantically identical.
+		role = "system"
+	}
 	msg := map[string]interface{}{
-		"role": item["role"],
+		"role": role,
 	}
 
 	content := item["content"]
@@ -1051,7 +1133,8 @@ func convertInstructions(instructions interface{}) ([]interface{}, error) {
 		}
 		return []interface{}{
 			map[string]interface{}{
-				"role":    "developer",
+				// "system", not "developer": see convertMessage for why.
+				"role":    "system",
 				"content": s,
 			},
 		}, nil

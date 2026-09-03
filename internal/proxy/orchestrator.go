@@ -8,7 +8,6 @@ import (
 	"io"
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/mixaill76/auto_ai_router/internal/balancer"
 	"github.com/mixaill76/auto_ai_router/internal/config"
@@ -77,6 +76,27 @@ func (p *Proxy) orchestrateRequest(
 	if !p.authenticateRequest(w, r, logCtx, isLiteLLMHealthy) {
 		return nil, false
 	}
+	markerPresent := credentialDenylistState(r.Context()).markerPresent
+	masterKeyAuthenticated := p.isMasterKey(logCtx.Token)
+	logCtx.IsProxyRequest = markerPresent && masterKeyAuthenticated
+	if markerPresent && !masterKeyAuthenticated {
+		p.logger.WarnContext(r.Context(), "Ignoring untrusted AIR proxy marker",
+			"request_id", logCtx.RequestID,
+		)
+	}
+	inboundDenylist, err := trustedInboundCredentialDenylist(r.Context(), masterKeyAuthenticated)
+	if err != nil {
+		logCtx.Status = "failure"
+		logCtx.HTTPStatus = http.StatusBadRequest
+		logCtx.ErrorMsg = "Invalid internal routing policy"
+		p.logger.WarnContext(r.Context(), "Rejected invalid internal routing policy",
+			"error_code", http.StatusBadRequest,
+			"error", err,
+			"request_id", logCtx.RequestID,
+		)
+		WriteErrorBadRequest(w, "Invalid internal routing policy")
+		return nil, false
+	}
 
 	body, modelID, realModelID, streaming, ok := p.readRequestBodyAndSelectModel(w, r, logCtx)
 	if !ok {
@@ -85,7 +105,22 @@ func (p *Proxy) orchestrateRequest(
 
 	logCtx.RequestEndpoint = r.URL.Path
 	logCtx.ReasoningRequested, logCtx.ReasoningSource, logCtx.ThinkingMode = requestReasoningDetails(body)
+	var policyDenylist []string
+	if logCtx.OrganizationPolicy != nil {
+		policyDenylist = logCtx.OrganizationPolicy.CredentialDenylist()
+	}
+	effectiveDenylist := mergeCredentialDenylists(inboundDenylist, policyDenylist)
+	r = withEffectiveCredentialDenylist(r, effectiveDenylist)
 	routingExclusions := p.reasoningOnlyExclusions(logCtx.ReasoningRequested)
+	for _, credentialName := range effectiveDenylist {
+		if p.balancer.IsProxyCredential(credentialName) {
+			continue
+		}
+		if routingExclusions == nil {
+			routingExclusions = make(map[string]bool)
+		}
+		routingExclusions[credentialName] = true
+	}
 	triedCreds := GetTried(r.Context())
 	for name := range routingExclusions {
 		triedCreds[name] = true
@@ -193,6 +228,11 @@ func (p *Proxy) orchestrateRequest(
 	)
 	if prepErr != nil {
 		var validationErr *converterutil.RequestValidationError
+		isValidationErr := errors.As(prepErr, &validationErr)
+		status := http.StatusBadRequest
+		if isValidationErr {
+			status = statusForValidationError(validationErr)
+		}
 		apiName := "request"
 		if isResponsesAPI {
 			apiName = "Responses API request"
@@ -200,15 +240,15 @@ func (p *Proxy) orchestrateRequest(
 			apiName = "Messages API request"
 		}
 		p.logger.ErrorContext(r.Context(), "Failed to prepare request for credential",
-			"error_code", http.StatusBadRequest,
+			"error_code", status,
 			"credential", cred.Name, "provider", string(cred.Type),
 			"model", modelID, "error", prepErr,
 			"request_id", logCtx.RequestID)
 		logCtx.Status = "failure"
-		logCtx.HTTPStatus = http.StatusBadRequest
+		logCtx.HTTPStatus = status
 		logCtx.ErrorMsg = "Failed to convert " + apiName + ": " + prepErr.Error()
-		if errors.As(prepErr, &validationErr) {
-			WriteErrorBadRequest(w, prepErr.Error())
+		if isValidationErr {
+			writeValidationError(w, validationErr, prepErr.Error())
 		} else {
 			WriteErrorBadRequest(w, "Failed to convert "+apiName)
 		}
@@ -366,9 +406,17 @@ func (p *Proxy) prepareRequestForCredential(
 			return req, err
 		}
 		req.body = openai.ReplaceBodyParam(realModelID, chatBody)
+		// proxyBody must stay in sync with body: TryFallbackProxy forwards
+		// proxyBody, not body, to fallback credentials. Left as the original
+		// Responses-API-shaped bytes (still keyed on "input", not "messages"),
+		// a fallback to any Chat-Completions-only backend would reject the
+		// request outright ("specify prompt or messages") instead of the
+		// converted body the primary attempt used.
+		req.proxyBody = openai.ReplaceBodyParam(modelID, chatBody)
 		req.convertedResp = true
 		if streaming {
 			req.body = injectStreamOptions(req.body)
+			req.proxyBody = injectStreamOptions(req.proxyBody)
 		}
 		req.path = strings.Replace(basePath, "/responses", "/chat/completions", 1)
 		p.logger.DebugContext(r.Context(), "Converted Responses API request to Chat Completions format",
@@ -850,13 +898,7 @@ func (p *Proxy) selectCredentialForModel(
 		)
 	}
 	logCtx.Logged = true
-	if remaining, ok := p.balancer.MinRemainingBanForModel(modelID, exclude, logCtx.Scope); ok {
-		seconds := int(remaining / time.Second)
-		if remaining%time.Second != 0 {
-			seconds++
-		}
-		w.Header().Set("Retry-After", fmt.Sprintf("%d", seconds))
-	}
+	p.setRetryAfterFromBan(w, modelID, exclude, logCtx.Scope)
 	WriteErrorRateLimit(w, errorMsg)
 	return nil, false
 }

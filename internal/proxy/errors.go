@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
 	"github.com/mixaill76/auto_ai_router/internal/requestid"
 )
 
@@ -358,6 +359,29 @@ func WriteErrorNotFound(w http.ResponseWriter, message string) {
 // WriteErrorTooLarge writes a 413 Request Entity Too Large JSON error.
 func WriteErrorTooLarge(w http.ResponseWriter, message string) {
 	WriteJSONError(w, http.StatusRequestEntityTooLarge, message, errorTypeForStatus(http.StatusRequestEntityTooLarge), nil, nil)
+}
+
+// statusForValidationError returns the HTTP status a converter-reported
+// RequestValidationError should be surfaced as. Most validation errors don't
+// specify one (StatusCode == 0) and default to 400, as they always have; a
+// few (e.g. an inline base64 payload too large to forward) carry their own,
+// more specific status.
+func statusForValidationError(e *converterutil.RequestValidationError) int {
+	if e.StatusCode != 0 {
+		return e.StatusCode
+	}
+	return http.StatusBadRequest
+}
+
+// writeValidationError writes the client-facing response for a converter
+// RequestValidationError, honoring its StatusCode when set instead of always
+// answering 400. Generic over the status rather than special-casing 413:
+// statusForValidationError is also what callers log as error_code/HTTPStatus,
+// so any future non-413 StatusCode must reach the client as the same status
+// it was logged under, not silently collapse to 400.
+func writeValidationError(w http.ResponseWriter, e *converterutil.RequestValidationError, message string) {
+	status := statusForValidationError(e)
+	WriteJSONError(w, status, message, errorTypeForStatus(status), nil, nil)
 }
 
 // WriteErrorRateLimit writes a 429 Too Many Requests JSON error.

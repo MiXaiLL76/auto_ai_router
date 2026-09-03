@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
 	"github.com/mixaill76/auto_ai_router/internal/requestid"
 	"github.com/mixaill76/auto_ai_router/internal/testhelpers"
 	"github.com/stretchr/testify/assert"
@@ -190,6 +191,52 @@ func TestMaskedUpstreamErrorBodyKeepsGenericNonBadRequest(t *testing.T) {
 	if resp.Error.Code == nil || *resp.Error.Code != "api_error" {
 		t.Fatalf("code = %v", resp.Error.Code)
 	}
+}
+
+// TestWriteValidationError_HonorsArbitraryStatusCode guards against
+// writeValidationError silently collapsing a future non-413 StatusCode (e.g.
+// 415) to 400 while statusForValidationError — what callers log as
+// error_code/HTTPStatus — reports the real value. The client-facing status
+// must match what got logged, for any StatusCode, not just 0/413.
+func TestWriteValidationError_HonorsArbitraryStatusCode(t *testing.T) {
+	e := &converterutil.RequestValidationError{
+		Param:      "content_type",
+		Message:    "unsupported media type",
+		StatusCode: http.StatusUnsupportedMediaType,
+	}
+	require.Equal(t, http.StatusUnsupportedMediaType, statusForValidationError(e),
+		"sanity check: this is what orchestrator/proxy log as error_code/HTTPStatus")
+
+	w := httptest.NewRecorder()
+	writeValidationError(w, e, e.Message)
+
+	assert.Equal(t, http.StatusUnsupportedMediaType, w.Code,
+		"client-facing status must match statusForValidationError, not silently fall back to 400")
+
+	var resp APIErrorResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	assert.Equal(t, "unsupported media type", resp.Error.Message)
+}
+
+func TestWriteValidationError_DefaultsToBadRequest(t *testing.T) {
+	e := &converterutil.RequestValidationError{Param: "model", Message: "missing model"}
+
+	w := httptest.NewRecorder()
+	writeValidationError(w, e, e.Message)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+func TestWriteValidationError_TooLarge(t *testing.T) {
+	e := &converterutil.RequestValidationError{
+		Message:    "payload too large",
+		StatusCode: http.StatusRequestEntityTooLarge,
+	}
+
+	w := httptest.NewRecorder()
+	writeValidationError(w, e, e.Message)
+
+	assert.Equal(t, http.StatusRequestEntityTooLarge, w.Code)
 }
 
 func stringPtr(s string) *string {
