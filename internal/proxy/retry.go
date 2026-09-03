@@ -80,17 +80,20 @@ func isRetryableContent(respBody []byte) bool {
 	return true
 }
 
-// setRetryAfterFromBan sets the Retry-After header to the shortest remaining
-// fail2ban ban among modelID's eligible credentials, rounded up to whole
-// seconds. No-op if none of them are currently banned.
+// setRetryAfterFromBan sets the Retry-After header for a 429 response to
+// modelID's caller. It prefers the shortest remaining fail2ban ban among
+// modelID's eligible credentials (a precise ETA); if none of them are
+// currently banned it falls back to a configured or default duration via
+// DefaultRetryAfterForModel, so a 429 reaching the client always carries a
+// Retry-After header.
 func (p *Proxy) setRetryAfterFromBan(w http.ResponseWriter, modelID string, exclude map[string]bool, visibility scope.Context) {
-	remaining, ok := p.balancer.MinRemainingBanForModel(modelID, exclude, visibility)
-	if !ok {
-		return
-	}
+	remaining := p.balancer.DefaultRetryAfterForModel(modelID, exclude, visibility)
 	seconds := int(remaining / time.Second)
 	if remaining%time.Second != 0 {
 		seconds++
+	}
+	if seconds < 1 {
+		seconds = 1
 	}
 	w.Header().Set("Retry-After", fmt.Sprintf("%d", seconds))
 }

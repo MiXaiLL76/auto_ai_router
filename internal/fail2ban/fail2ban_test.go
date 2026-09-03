@@ -693,6 +693,44 @@ func TestRemainingBan_NoActiveBan_ReturnsFalse(t *testing.T) {
 	assert.False(t, ok)
 }
 
+func TestDefaultBanDuration_ReturnsConfiguredRuleDuration_WithNoPriorFailures(t *testing.T) {
+	f2b := NewWithRules(3, 0, []int{429}, []ErrorCodeRule{
+		{Code: 429, MaxAttempts: 3, BanDuration: 30 * time.Second},
+	})
+
+	// No RecordResponse call at all — credential has never failed and is not banned.
+	duration, ok := f2b.DefaultBanDuration("cred1", 429)
+	require.True(t, ok, "the configured rule duration must be reported even without an active ban")
+	assert.Equal(t, 30*time.Second, duration)
+}
+
+func TestDefaultBanDuration_FallsBackToGlobalDefault(t *testing.T) {
+	f2b := New(3, 10*time.Second, []int{429})
+
+	duration, ok := f2b.DefaultBanDuration("cred1", 429)
+	require.True(t, ok)
+	assert.Equal(t, 10*time.Second, duration)
+}
+
+func TestDefaultBanDuration_PermanentBanRule_ReturnsFalse(t *testing.T) {
+	f2b := New(1, 0, []int{401}) // banDuration 0 == permanent
+
+	_, ok := f2b.DefaultBanDuration("cred1", 401)
+	assert.False(t, ok, "permanent ban rule has no finite ETA to report")
+}
+
+func TestDefaultBanDuration_UnaffectedByActiveBanState(t *testing.T) {
+	f2b := NewWithRules(1, 0, []int{429}, []ErrorCodeRule{
+		{Code: 429, MaxAttempts: 1, BanDuration: 5 * time.Second},
+	})
+
+	f2b.RecordResponse("cred1", "model-a", 429) // now actively banned for 5s
+
+	duration, ok := f2b.DefaultBanDuration("cred1", 429)
+	require.True(t, ok)
+	assert.Equal(t, 5*time.Second, duration, "reports the configured rule regardless of active-ban state")
+}
+
 func TestGetBannedModelsForCredential(t *testing.T) {
 	f2b := New(3, 0, []int{401, 403, 500})
 

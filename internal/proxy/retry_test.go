@@ -372,6 +372,46 @@ func TestTryFallbackProxy_ExhaustedSetsRetryAfterFromBan(t *testing.T) {
 	assert.LessOrEqual(t, seconds, 3)
 }
 
+// TestTryFallbackProxy_ExhaustedSetsRetryAfter_EvenWithoutActiveBan verifies
+// the core guarantee: a 429 relayed to the client after the fallback chain
+// is exhausted must always carry a Retry-After header, even when zero prior
+// failures mean fail2ban has no active ban to report a precise ETA from.
+func TestTryFallbackProxy_ExhaustedSetsRetryAfter_EvenWithoutActiveBan(t *testing.T) {
+	fallbackServer := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"error":{"message":"rate limited"}}`))
+	}))
+	defer fallbackServer.Close()
+
+	prx := NewTestProxyBuilder().
+		WithPrimaryAndFallback("http://primary.local", fallbackServer.URL).
+		Build()
+
+	// Deliberately no BanUntil/RecordResponse call — this credential has
+	// never failed before and is not, and has never been, banned.
+
+	bodyBytes := []byte(`{"model":"gpt-4","messages":[]}`)
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(string(bodyBytes)))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+
+	w := httptest.NewRecorder()
+	success, _ := prx.TryFallbackProxy(
+		w, req, "gpt-4", "primary", http.StatusTooManyRequests, RetryReasonRateLimit,
+		bodyBytes, time.Now().UTC(), nil,
+	)
+
+	assert.True(t, success)
+	assert.Equal(t, http.StatusTooManyRequests, w.Code)
+
+	retryAfter := w.Header().Get("Retry-After")
+	require.NotEmpty(t, retryAfter, "a 429 reaching the client must always carry a Retry-After header, even with no active ban")
+	seconds, err := strconv.Atoi(retryAfter)
+	require.NoError(t, err)
+	assert.GreaterOrEqual(t, seconds, 1)
+}
+
 // TestTryFallbackProxy_ExhaustedPreservesUpstreamRetryAfter verifies that a
 // Retry-After the upstream itself sent is never overridden by our own
 // ban-derived guess.
