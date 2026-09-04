@@ -54,6 +54,51 @@ func TestIsCometAPICredential(t *testing.T) {
 	}
 }
 
+func TestIsRealOpenAICredential(t *testing.T) {
+	tests := []struct {
+		name string
+		cred *config.CredentialConfig
+		want bool
+	}{
+		{
+			name: "real openai host",
+			cred: &config.CredentialConfig{Type: config.ProviderTypeOpenAI, BaseURL: "https://api.openai.com/v1"},
+			want: true,
+		},
+		{
+			name: "real openai host without scheme",
+			cred: &config.CredentialConfig{Type: config.ProviderTypeOpenAI, BaseURL: "api.openai.com"},
+			want: true,
+		},
+		{
+			name: "openai-compatible third party (openrouter)",
+			cred: &config.CredentialConfig{Type: config.ProviderTypeOpenAI, BaseURL: "https://openrouter.ai/api/v1"},
+			want: false,
+		},
+		{
+			name: "openai-compatible third party (deepinfra)",
+			cred: &config.CredentialConfig{Type: config.ProviderTypeOpenAI, BaseURL: "https://api.deepinfra.com/v1"},
+			want: false,
+		},
+		{
+			name: "wrong provider type on openai.com host",
+			cred: &config.CredentialConfig{Type: config.ProviderTypeAnthropic, BaseURL: "https://api.openai.com/v1"},
+			want: false,
+		},
+		{
+			name: "nil credential",
+			cred: nil,
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, isRealOpenAICredential(tt.cred))
+		})
+	}
+}
+
 func TestAppendResponseBodyForLogs_CometKeepsMaskedFlagAndLogsBody(t *testing.T) {
 	cred := &config.CredentialConfig{Type: config.ProviderTypeCometAPI}
 	body := `{"error":{"code":"permission_denied","message":"` + strings.Repeat("model access denied ", 50) + `","type":"comet_api_error"}}`

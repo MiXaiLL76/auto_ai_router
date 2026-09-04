@@ -456,6 +456,46 @@ func TestPrepareRequestForCredential_ChatCompletionsNormalizesDeveloperRole(t *t
 		"proxyBody must also be normalized, or a fallback credential would hit the same rejection")
 }
 
+// TestPrepareRequestForCredential_ChatCompletionsPreservesDeveloperRoleForRealOpenAI
+// verifies the normalization is skipped for a genuine OpenAI credential
+// (api.openai.com): "developer" exists specifically for OpenAI's own
+// reasoning models, so a client that deliberately sent it must not have it
+// silently rewritten to "system" for that destination.
+func TestPrepareRequestForCredential_ChatCompletionsPreservesDeveloperRoleForRealOpenAI(t *testing.T) {
+	prx := NewTestProxyBuilder().Build()
+	cred := config.CredentialConfig{Name: "openai-real", Type: config.ProviderTypeOpenAI, APIKey: "key", BaseURL: "https://api.openai.com/v1", RPM: 100}
+	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	body := []byte(`{"model":"gpt-5.6-sol","messages":[{"role":"developer","content":"You are a pirate."},{"role":"user","content":"Hello"}]}`)
+	proxyBody := []byte(`{"model":"gpt-5.6-sol-alias","messages":[{"role":"developer","content":"You are a pirate."},{"role":"user","content":"Hello"}]}`)
+
+	prepared, err := prx.prepareRequestForCredential(
+		req,
+		body,
+		proxyBody,
+		"gpt-5.6-sol-alias",
+		"gpt-5.6-sol",
+		"/v1/chat/completions",
+		false,
+		&cred,
+		false,
+		false,
+		false,
+	)
+
+	require.NoError(t, err)
+
+	var direct map[string]interface{}
+	require.NoError(t, json.Unmarshal(prepared.body, &direct))
+	directMessages := direct["messages"].([]interface{})
+	require.Equal(t, "developer", directMessages[0].(map[string]interface{})["role"],
+		"a real OpenAI destination must keep the client's own developer role untouched")
+
+	var forwarded map[string]interface{}
+	require.NoError(t, json.Unmarshal(prepared.proxyBody, &forwarded))
+	forwardedMessages := forwarded["messages"].([]interface{})
+	require.Equal(t, "developer", forwardedMessages[0].(map[string]interface{})["role"])
+}
+
 func TestPrepareRequestForCredential_MessagesKeepsOriginalProxyRequest(t *testing.T) {
 	prx := NewTestProxyBuilder().Build()
 	cred := config.CredentialConfig{Name: "openai", Type: config.ProviderTypeOpenAI, APIKey: "key", BaseURL: "http://openai.local", RPM: 100}

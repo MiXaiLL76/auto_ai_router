@@ -69,6 +69,17 @@ func isCometAPICredential(cred *config.CredentialConfig) bool {
 		strings.Contains(name, "comet-api")
 }
 
+// isRealOpenAICredential reports whether cred talks to OpenAI's own API
+// (api.openai.com), as opposed to a third-party backend merely using
+// ProviderTypeOpenAI's wire-compatible protocol (DeepSeek via OpenRouter/
+// Requesty/DeepInfra, Alibaba DashScope's compatible-mode endpoint, etc.).
+func isRealOpenAICredential(cred *config.CredentialConfig) bool {
+	if cred == nil || cred.Type != config.ProviderTypeOpenAI {
+		return false
+	}
+	return isProviderHost(cred.BaseURL, "openai.com")
+}
+
 func isProviderHost(rawBaseURL, domain string) bool {
 	baseURL := strings.TrimSpace(rawBaseURL)
 	domain = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(domain)), ".")
