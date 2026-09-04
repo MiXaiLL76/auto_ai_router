@@ -136,7 +136,7 @@ func (p *Proxy) HealthCheckScoped(visibility scope.Context) (bool, *httputil.Pro
 	modelsInfo := make(map[string]httputil.ModelHealthStats, len(allModelPairs))
 	for _, pair := range allModelPairs {
 		modelKey := pair.Credential + ":" + pair.Model
-		p.addModelHealthStats(modelsInfo, creds, pair.Credential, pair.Model, modelStats, modelScopeExpressions[modelKey])
+		p.addModelHealthStats(modelsInfo, creds, pair.Credential, pair.Model, modelStats, modelScopeExpressions[modelKey], visibility)
 	}
 
 	// Enrich models and credentials with error code counts from banned pairs
@@ -240,6 +240,7 @@ func (p *Proxy) addModelHealthStats(
 	modelID string,
 	stats map[string]ratelimit.KeyStats,
 	expression *scope.Expression,
+	visibility scope.Context,
 ) {
 	modelKey := credentialName + ":" + modelID
 	cred, credFound := findCredential(creds, credentialName)
@@ -267,7 +268,7 @@ func (p *Proxy) addModelHealthStats(
 		// (internal/balancer/weighted.go) checks — proxy-like AND the model checker being
 		// enabled — so the dashboard never shows a learned priority the balancer would not
 		// actually route on (it falls back to the static field when the checker is off).
-		if isProxyLike && p.modelManager.IsEnabled() {
+		if isProxyLike && p.modelManager != nil {
 			modelPriority, hasLearnedPriority = p.modelManager.LearnedModelPriorityForCredential(modelID, credentialName)
 			// Re-emit the learned per-tier breakdown (Design B) so a router fronting this
 			// one keeps the tier structure across the chain hop. Per-tier current usage is
@@ -300,8 +301,20 @@ func (p *Proxy) addModelHealthStats(
 	}
 	ms := stats[modelKey]
 	scopes, deniedScopes := expression.LegacyProjection()
+	providerRoutes := map[string]*scope.Expression{"": expression}
+	if credFound && !isProxyLike {
+		providerRoutes = map[string]*scope.Expression{credentialName: expression}
+	} else if credFound && carriesCredentialDenylist(&cred) && p.modelManager != nil {
+		providerRoutes = p.modelManager.ProviderRoutesForModel(&cred, modelID)
+	}
+	for name, pathScope := range providerRoutes {
+		if !visibility.AllowsExpression(pathScope) {
+			delete(providerRoutes, name)
+		}
+	}
 	modelsInfo[modelKey] = httputil.ModelHealthStats{
 		Credential:      credentialName,
+		ProviderRoutes:  providerRoutes,
 		RealCredential:  realCredential,
 		Model:           modelID,
 		IsBanned:        locallyBanned,

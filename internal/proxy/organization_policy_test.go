@@ -15,6 +15,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb"
 	dbmodels "github.com/mixaill76/auto_ai_router/internal/litellmdb/models"
 	routermodels "github.com/mixaill76/auto_ai_router/internal/models"
+	"github.com/mixaill76/auto_ai_router/internal/scope"
 	"github.com/mixaill76/auto_ai_router/internal/testhelpers"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -85,6 +86,11 @@ func newOrganizationPolicyProxyWithCredential(
 	builder.config.OrganizationPolicies = registry
 	prx := builder.Build()
 	prx.LiteLLMDB = db
+	prx.priceRegistry = routermodels.NewModelPriceRegistry()
+	prx.priceRegistry.ReplaceFilePrices(map[string]*routermodels.ModelPrice{
+		"route-a": {InputCostPerToken: 0.001},
+		"route-b": {InputCostPerToken: 0.001},
+	})
 	return prx
 }
 
@@ -110,6 +116,12 @@ func TestOrganizationPolicy_ShadowMappingUsesExactPriceAndMetadata(t *testing.T)
 		ModelPricesLink: writeProxyPolicyPrices(t, `{"public/shared":{"input_cost_per_token":0.001,"output_cost_per_token":0.002}}`),
 		ModelMappings:   map[string]string{"public/shared": "route-b"},
 	}})
+	// The exact organization tariff suffices without any default-registry prices.
+	prx.priceRegistry.ReplaceFilePrices(nil)
+	listed, err := prx.ListModelsForToken(db.tokens["token"], scope.PublicContext())
+	require.NoError(t, err)
+	require.Len(t, listed.Data, 1)
+	assert.Equal(t, "public/shared", listed.Data[0].ID)
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", stringsReader(`{"model":"public/shared","messages":[{"role":"user","content":"hi"}]}`))
 	req.Header.Set("Authorization", "Bearer token")
@@ -122,6 +134,7 @@ func TestOrganizationPolicy_ShadowMappingUsesExactPriceAndMetadata(t *testing.T)
 	assert.Equal(t, "route-b", upstreamModel)
 	require.Len(t, db.logs, 1)
 	log := db.logs[0]
+	assert.InDelta(t, 0.02, log.Spend, 1e-9)
 	assert.Equal(t, "route-b", log.Model)
 	assert.Equal(t, "route-b", log.ModelGroup)
 	assert.Equal(t, "provider:route-b", log.ModelID)
@@ -161,9 +174,26 @@ func TestOrganizationPolicy_MissingExactPriceRejectsBeforeProvider(t *testing.T)
 
 	prx.ProxyRequest(w, req)
 
-	assert.Equal(t, http.StatusServiceUnavailable, w.Code)
+	assert.Equal(t, http.StatusNotFound, w.Code)
 	assert.Equal(t, int32(0), calls.Load())
 	assert.Empty(t, db.logs)
+}
+
+func TestOrganizationPolicy_MissingExactPriceIsAbsentFromListing(t *testing.T) {
+	db := &organizationPolicyTestDB{tokens: map[string]*dbmodels.TokenInfo{}}
+	prx := newOrganizationPolicyProxy(t, "http://provider.invalid", db, []config.OrganizationPolicyConfig{{
+		OrganizationID:  "org-1",
+		PriceProfileID:  "profile-1",
+		ModelPricesLink: writeProxyPolicyPrices(t, `{"route-b":{"input_cost_per_token":0.001}}`),
+		ModelMappings:   map[string]string{"public/shared": "route-b"},
+	}})
+	token := &dbmodels.TokenInfo{DirectOrganizationID: "org-1", OrganizationID: "org-1"}
+
+	response, err := prx.ListModelsForToken(token, scope.PublicContext())
+	require.NoError(t, err)
+	for _, model := range response.Data {
+		assert.NotEqual(t, "public/shared", model.ID)
+	}
 }
 
 func TestOrganizationPolicy_ACLDenialPrecedesMissingPrice(t *testing.T) {
@@ -333,7 +363,7 @@ func TestOrganizationPolicy_FrozenPriceSurvivesDefaultRegistryChange(t *testing.
 		billingPrice:         price,
 	}
 	registry := routermodels.NewModelPriceRegistry()
-	registry.Update(map[string]*routermodels.ModelPrice{"route-b": {InputCostPerToken: 9}})
+	registry.ReplaceFilePrices(map[string]*routermodels.ModelPrice{"route-b": {InputCostPerToken: 9}})
 	prx.priceRegistry = registry
 
 	resolvedID, resolved := prx.resolveRetryBillingPrice(logCtx, "public/shared", "route-b", "route-b")

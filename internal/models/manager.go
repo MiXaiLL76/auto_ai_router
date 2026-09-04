@@ -110,109 +110,85 @@ type ModelPrice struct {
 // ModelPriceRegistry stores and manages cached model prices
 type ModelPriceRegistry struct {
 	mu         sync.RWMutex
-	prices     map[string]*ModelPrice // key: normalized model name
+	filePrices map[string]*ModelPrice
+	dbPrices   map[string]*ModelPrice
 	lastUpdate time.Time
 }
 
 // NewModelPriceRegistry creates a new price registry
 func NewModelPriceRegistry() *ModelPriceRegistry {
 	return &ModelPriceRegistry{
-		prices: make(map[string]*ModelPrice),
+		filePrices: make(map[string]*ModelPrice),
+		dbPrices:   make(map[string]*ModelPrice),
 	}
 }
 
-// GetPrice returns the price for a model, or nil if not found. Tries the
-// raw (case/whitespace-folded, unsplit) key before the normalized
-// (provider-prefix-stripped) one, matching GetPriceAny's two-pass priority
-// so the two functions never disagree about which entry a given name
-// resolves to.
-func (r *ModelPriceRegistry) GetPrice(modelName string) *ModelPrice {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	raw := strings.ToLower(strings.TrimSpace(modelName))
-	if price := r.prices[raw]; price != nil {
+func normalizeModelPriceIndex(prices map[string]*ModelPrice) map[string]*ModelPrice {
+	normalized := make(map[string]*ModelPrice, len(prices))
+	for modelID, price := range prices {
+		normalized[strings.ToLower(strings.TrimSpace(modelID))] = price
+	}
+	return normalized
+}
+
+func (r *ModelPriceRegistry) lookupPriceFromTwoSourcesLocked(modelID string) *ModelPrice {
+	if price := r.dbPrices[modelID]; price != nil {
 		return price
 	}
-	return r.prices[NormalizeModelName(modelName)]
+	return r.filePrices[modelID]
 }
 
-// GetPriceAny looks up prices for multiple candidate model names under a
-// single read lock, returning the first match in the given priority order.
-// This avoids a concurrent Update() straddling two map generations, which
-// can happen when callers issue separate GetPrice calls per candidate.
-//
-// Each candidate is tried in full — raw lowercase key first (no prefix
-// stripping, so an explicit entry like "google/gemini-3-flash-preview-
-// highlimits" is found before any normalised fallback), then the
-// NormalizeModelName (provider-prefix-stripped) key — before moving on to
-// the next candidate. This preserves the caller's priority order (e.g.
-// publicModelID > modelID > realModelID) exactly: a higher-priority
-// candidate's normalised match always wins over a lower-priority candidate's
-// raw match. Trying every candidate's raw key before any candidate's
-// normalised key would let a coincidental raw hit on a low-priority
-// candidate (realModelID, the literal provider model name, is especially
-// likely to double as a raw price-file key) shadow the correct match on a
-// higher-priority one.
-func (r *ModelPriceRegistry) GetPriceAny(modelNames ...string) (string, *ModelPrice) {
+func (r *ModelPriceRegistry) resolvePriceLocked(modelID string) *ModelPrice {
+	exact := strings.ToLower(strings.TrimSpace(modelID))
+
+	if price := r.lookupPriceFromTwoSourcesLocked(exact); price != nil {
+		return price
+	}
+
+	fallback := NormalizeModelName(modelID)
+	if fallback == exact {
+		return nil
+	}
+	return r.lookupPriceFromTwoSourcesLocked(fallback)
+}
+
+// TODO(mmskv): replace modelName with modelID, we don't need two names for one thing
+// TOOD(mmskv): currently price can change on a retry when a credential changes
+// TOOD(mmskv): requre prices to be set on a model, remove ability to set prices on a credential
+
+// GetPriceAny returns first found price for a modelID
+// For every name price is searched with model id, then normalized modelID
+// Normalized modelID is modelID.split('/')[-1], so 'gpt-5.2' when given 'openai/gpt-5.2'
+func (r *ModelPriceRegistry) GetPriceAny(modelIDs ...string) (string, *ModelPrice) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	for _, modelName := range modelNames {
-		if modelName == "" {
+	for _, modelID := range modelIDs {
+		if modelID == "" {
 			continue
 		}
-		raw := strings.ToLower(strings.TrimSpace(modelName))
-		if price := r.prices[raw]; price != nil {
-			return modelName, price
-		}
-		if price := r.prices[NormalizeModelName(modelName)]; price != nil {
-			return modelName, price
+
+		if price := r.resolvePriceLocked(modelID); price != nil {
+			return modelID, price
 		}
 	}
 
 	return "", nil
 }
 
-// Update safely updates the registry with new prices
-func (r *ModelPriceRegistry) Update(prices map[string]*ModelPrice) {
+// ReplaceFilePrices atomically replaces the file-backed price index
+func (r *ModelPriceRegistry) ReplaceFilePrices(prices map[string]*ModelPrice) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.prices = make(map[string]*ModelPrice)
-	for k, v := range prices {
-		r.prices[k] = v
-		// Store raw lowercase key so that provider-prefixed model names
-		// (e.g. "openrouter/gpt-5-mini") can be matched in GetPriceAny's
-		// first pass before normalisation strips the prefix.
-		raw := strings.ToLower(strings.TrimSpace(k))
-		r.prices[raw] = v
-	}
+	r.filePrices = normalizeModelPriceIndex(prices)
 	r.lastUpdate = utils.NowUTC()
 }
 
-// MergeDB applies DB-sourced prices on top of the existing registry without
-// removing prices that came from the file-based price list.
-// DB prices take precedence for models that appear in both sources.
-//
-// A DB override only ever replaces the exact key it names (plus that key's
-// own raw/lowercased form) — it deliberately does NOT sweep the registry for
-// other keys that merely share a normalized form. A price entry deliberately
-// keyed "provider/model" (e.g. "openrouter/gpt-5-mini", or any alias that
-// needs a price distinct from its canonical model — see
-// "gemini-3-flash-preview-highlimits" in client_a.libsonnet) is independent
-// of the plain model it happens to normalize to; an override for the plain
-// model must not silently leak into it. If a DB-sourced override is meant
-// to apply to such an alias too, the DB record must name that alias's exact
-// key itself.
-func (r *ModelPriceRegistry) MergeDB(dbPrices map[string]*ModelPrice) {
+// ReplaceDBPrices atomically replaces the DB-backed price index
+func (r *ModelPriceRegistry) ReplaceDBPrices(prices map[string]*ModelPrice) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	for k, v := range dbPrices {
-		r.prices[k] = v
-		// Store raw lowercase key (same logic as Update) so that DB-sourced
-		// provider-prefixed entries are also findable in GetPriceAny pass 1.
-		raw := strings.ToLower(strings.TrimSpace(k))
-		r.prices[raw] = v
-	}
+	r.dbPrices = normalizeModelPriceIndex(prices)
 	r.lastUpdate = utils.NowUTC()
 }
 
@@ -227,7 +203,14 @@ func (r *ModelPriceRegistry) LastUpdate() time.Time {
 func (r *ModelPriceRegistry) Count() int {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	return len(r.prices)
+
+	count := len(r.filePrices)
+	for modelID := range r.dbPrices {
+		if _, exists := r.filePrices[modelID]; !exists {
+			count++
+		}
+	}
+	return count
 }
 
 // Model represents a single model from OpenAI API
@@ -292,9 +275,9 @@ const (
 // Manager handles model discovery and mapping
 type Manager struct {
 	mu                           sync.RWMutex
-	credentialModels             map[string][]string                                // credential name -> list of model IDs
+	credentialModels             map[string][]string                                // reverse index: credential name -> list of model IDs
 	allModels                    []Model                                            // deduplicated list of all models
-	modelToCredentials           map[string][]string                                // model ID -> list of credential names
+	modelToCredentials           map[string][]string                                // authoritative routing index: model ID -> credential names
 	modelLimits                  map[string][]ModelLimits                           // model ID -> limits (may have multiple entries for different credentials)
 	staticModelLimits            map[string][]ModelLimits                           // immutable snapshot of limits from config.yaml (never modified after New())
 	staticModelRealNames         map[string]string                                  // immutable snapshot of global real names from config.yaml
@@ -310,11 +293,9 @@ type Manager struct {
 	modelAliases                 map[string]string            // alias -> real model name (from model_alias config)
 	clientModelIDs               map[string]struct{}          // exact advertised canonical client IDs
 	clientModelSurfaceConfigured bool                         // distinguishes an omitted boundary from an explicit empty boundary
-	publicModelAliases           map[string]string            // client alias -> canonical LiteLLM public deployment identity
-	acceptedModelAliases         map[string]string            // accepted client alias -> canonical model, hidden from discovery
+	acceptedModelAliases         map[string]string            // accepted alias -> canonical LiteLLM public deployment identity
 	modelRealNames               map[string]string            // alias name -> real model name (global, no specific credential)
 	modelRealNamesPerCred        map[string]map[string]string // credential -> alias -> real model name (for credential-specific entries)
-	credentialMappingsReady      bool                         // true after static/DB credential mappings have been initialized
 	defaultModelsRPM             int                          // default RPM for models
 	logger                       *slog.Logger
 	credentials                  []config.CredentialConfig // credentials for fetching remote models
@@ -338,7 +319,6 @@ func New(logger *slog.Logger, defaultModelsRPM int, staticModels []config.ModelR
 		dbModelNames:                make(map[string]bool),
 		modelAliases:                make(map[string]string),
 		clientModelIDs:              make(map[string]struct{}),
-		publicModelAliases:          make(map[string]string),
 		acceptedModelAliases:        make(map[string]string),
 		modelRealNames:              make(map[string]string),
 		modelRealNamesPerCred:       make(map[string]map[string]string),
@@ -405,6 +385,8 @@ func New(logger *slog.Logger, defaultModelsRPM int, staticModels []config.ModelR
 				"tpm", staticModel.TPM)
 		}
 	}
+
+	// TODO(mmskv): remove the code that's responsible for loading models/creds from litellm db
 
 	// Snapshot the static-only model limits so UpdateDBModels can always
 	// restore them when rebuilding after a DB sync cycle.
@@ -516,7 +498,7 @@ func (m *Manager) GetAliasesForModel(modelID, realModelID string) []string {
 	return aliases
 }
 
-func (m *Manager) publicModelAliasTargetActiveLocked(target string) bool {
+func (m *Manager) acceptedModelAliasTargetActiveLocked(target string) bool {
 	_, active := m.clientCanonicalRouteTargetLocked(target)
 	return active
 }
@@ -705,29 +687,13 @@ func (m *Manager) SetClientModelIDs(modelIDs []string) {
 	m.invalidateAllModelsCachesLocked()
 }
 
-// SetPublicModelAliases configures client-visible aliases that share the
+// SetAcceptedModelAliases configures accepted aliases that share the
 // deployment identity of an exact LiteLLM public model. This mapping is kept
 // separate from model_alias: model_alias translates a routable public model to
-// its provider backend, while public_model_alias translates an additional
-// client name to that canonical public model. Combining the two maps would
+// its provider backend, while an accepted alias translates an additional client
+// name to that canonical public model. Combining the two maps would
 // create cycles for common short backend names (for example
 // gpt-4.1 -> openai/gpt-4.1 -> gpt-4.1).
-func (m *Manager) SetPublicModelAliases(aliases map[string]string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.publicModelAliases = make(map[string]string, len(aliases))
-	for alias, target := range aliases {
-		if alias == "" || target == "" || alias == target {
-			m.logger.Warn("Invalid public model alias, skipping", "alias", alias, "target", target)
-			continue
-		}
-		m.publicModelAliases[alias] = target
-		m.logger.Info("Registered public model alias", "alias", alias, "target", target)
-	}
-	m.allModels = nil
-	m.invalidateAllModelsCachesLocked()
-}
-
 func (m *Manager) SetAcceptedModelAliases(aliases map[string]string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -744,53 +710,23 @@ func (m *Manager) SetAcceptedModelAliases(aliases map[string]string) {
 	m.invalidateAllModelsCachesLocked()
 }
 
-func (m *Manager) clientAliasTargetLocked(modelID string) (string, bool, bool) {
-	publicTarget, publicConfigured := m.publicModelAliases[modelID]
-	acceptedTarget, acceptedConfigured := m.acceptedModelAliases[modelID]
-	if publicConfigured && acceptedConfigured && publicTarget != acceptedTarget {
-		return modelID, true, false
-	}
-	if publicConfigured {
-		return publicTarget, true, true
-	}
-	if acceptedConfigured {
-		return acceptedTarget, true, true
-	}
-	return modelID, false, true
-}
-
 func (m *Manager) IsClientModelIDRoutable(modelID string) bool {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	if target, aliased, unambiguous := m.clientAliasTargetLocked(modelID); aliased {
-		if !unambiguous || !m.publicModelAliasTargetActiveLocked(target) {
-			return false
-		}
-		if m.clientModelSurfaceConfigured {
-			_, allowed := m.clientModelIDs[target]
-			return allowed
-		}
-		return true
-	}
-	if m.clientModelSurfaceConfigured {
-		if _, allowed := m.clientModelIDs[modelID]; !allowed {
-			return false
-		}
-	}
-	_, routable := m.clientCanonicalRouteTargetLocked(modelID)
+	_, routable := m.ResolveModel(modelID, nil, false)
 	return routable
 }
 
-func (m *Manager) ResolvePublicModelAlias(modelID string) (string, bool, error) {
+func (m *Manager) ResolveAcceptedModelAlias(modelID string) (string, bool, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	target, aliased, unambiguous := m.clientAliasTargetLocked(modelID)
+	target, aliased := m.acceptedModelAliases[modelID]
+
 	if !aliased {
 		return modelID, false, nil
 	}
-	if !unambiguous || !m.publicModelAliasTargetActiveLocked(target) {
-		return modelID, false, fmt.Errorf("public model alias %q is not routable", modelID)
+	if !m.acceptedModelAliasTargetActiveLocked(target) {
+		return modelID, false, fmt.Errorf("accepted model alias %q is not routable", modelID)
 	}
+
 	return target, true, nil
 }
 
@@ -912,6 +848,13 @@ func (m *Manager) liteLLMProviderPrefixForShortModelLocked(modelID string) (stri
 		if backendModel != modelID {
 			continue
 		}
+		canonicalID := publicModel
+		if target, accepted := m.acceptedModelAliases[publicModel]; accepted {
+			canonicalID = target
+		}
+		if target, active := m.clientCanonicalRouteTargetLocked(canonicalID); !active || target != modelID {
+			continue // A shadowed alias cannot supply this route's provider identity.
+		}
 		candidate, ok := modelScopeProviderPrefix(publicModel)
 		if !ok {
 			continue
@@ -962,18 +905,12 @@ func (m *Manager) IsModelIDAllowedByScope(modelID string, allowedModelIDs []stri
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	requestIDs := []string{modelID}
-	if target, isClientAlias, unambiguous := m.clientAliasTargetLocked(modelID); isClientAlias {
-		if !unambiguous || !m.publicModelAliasTargetActiveLocked(target) {
+	if target, isAcceptedAlias := m.acceptedModelAliases[modelID]; isAcceptedAlias {
+		if !m.acceptedModelAliasTargetActiveLocked(target) {
 			return false
 		}
 		requestIDs = append(requestIDs, target)
-	}
-	if target, isAlias := m.modelAliases[modelID]; isAlias && isActiveModelAlias(
-		modelID,
-		target,
-		len(m.modelToCredentials[target]) > 0,
-		m.modelAliases,
-	) {
+	} else if target, active := m.clientCanonicalRouteTargetLocked(modelID); active && target != modelID {
 		requestIDs = append(requestIDs, target)
 	}
 	if scopeAllowsAnyModelID(requestIDs, allowedModelIDs) {
@@ -1033,7 +970,6 @@ func addModelToMaps(
 func (m *Manager) LoadModelsFromConfig(credentials []config.CredentialConfig) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.credentialMappingsReady = true
 
 	if len(m.modelLimits) == 0 {
 		m.allModels = nil
@@ -1102,24 +1038,6 @@ func (m *Manager) LoadModelsFromConfig(credentials []config.CredentialConfig) {
 					"model", modelName,
 				)
 			}
-		}
-	}
-
-	// Register non-proxy credentials that have no models with an explicit empty list.
-	// HasModel has a fallback "return true" for credentials not present in credentialModels;
-	// that fallback is intentional for proxy credentials whose model list is fetched dynamically,
-	// but it incorrectly allows non-proxy credentials (e.g. openai_backup with no models:)
-	// to match any model when static models are configured for other credentials.
-	for _, cred := range credentials {
-		if cred.IsProxyLike() {
-			continue // proxy/AIR models are fetched dynamically via GetAllModels
-		}
-		if _, exists := m.credentialModels[cred.Name]; !exists {
-			m.credentialModels[cred.Name] = []string{}
-			m.logger.Debug("Registered non-proxy credential with no models",
-				"credential", cred.Name,
-				"type", cred.Type,
-			)
 		}
 	}
 
@@ -1257,16 +1175,6 @@ func (m *Manager) UpdateDBModels(dbModels []config.ModelRPMConfig, staticCreds [
 		}
 	}
 
-	// Register non-proxy credentials with no models — same logic as in LoadModelsFromConfig.
-	for _, c := range allCreds {
-		if c.IsProxyLike() {
-			continue
-		}
-		if _, exists := newCredentialModels[c.Name]; !exists {
-			newCredentialModels[c.Name] = []string{}
-		}
-	}
-
 	// Preserve proxy credential model entries populated by AddModel/UpdateAllProxyCredentials.
 	// Proxy models are not in modelLimits so the rebuild above omits them. Without this,
 	// every DB sync cycle wipes dynamically-fetched proxy model data and causes routing gaps
@@ -1292,7 +1200,6 @@ func (m *Manager) UpdateDBModels(dbModels []config.ModelRPMConfig, staticCreds [
 
 	m.credentialModels = newCredentialModels
 	m.modelToCredentials = newModelToCredentials
-	m.credentialMappingsReady = true
 
 	// 5. Invalidate caches so next GetAllModels rebuilds from the updated modelLimits.
 	m.allModels = nil
@@ -1329,15 +1236,12 @@ func (m *Manager) GetAllModels() ModelsResponse {
 			routableModels[modelID] = struct{}{}
 		}
 	}
-	credentialMappingsReady := m.credentialMappingsReady
 	// Add static models first (configured in model_limits)
 	if len(m.modelLimits) > 0 {
 		models = make([]Model, 0, len(m.modelLimits)+len(allModelsSnapshot))
 		for modelName := range m.modelLimits {
-			if credentialMappingsReady {
-				if _, routable := routableModels[modelName]; !routable {
-					continue
-				}
+			if _, routable := routableModels[modelName]; !routable {
+				continue
 			}
 			models = append(models, Model{
 				ID:      modelName,
@@ -1353,10 +1257,8 @@ func (m *Manager) GetAllModels() ModelsResponse {
 
 	// Also add models from credential config (allModels)
 	for _, model := range allModelsSnapshot {
-		if credentialMappingsReady {
-			if _, routable := routableModels[model.ID]; !routable {
-				continue
-			}
+		if _, routable := routableModels[model.ID]; !routable {
+			continue
 		}
 		if !modelMap[model.ID] {
 			models = append(models, model)
@@ -1517,6 +1419,33 @@ func (m *Manager) GetAllModelsScoped(visibility scope.Context) ModelsResponse {
 	return scopedResponse
 }
 
+// GetAllModelsScopedIncludingInternal returns the scoped route catalog before
+// client_model_ids hides provider-facing route IDs. It is used only for
+// trusted master-key discovery.
+// TODO(mmskv): keep only GetAllModelsScoped, add master key flag to the scope.Context
+func (m *Manager) GetAllModelsScopedIncludingInternal(visibility scope.Context) ModelsResponse {
+	response := m.getAllModelsScoped(visibility)
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	visibleCreds := m.visibleCredentialNamesLocked(visibility)
+	response = m.currentModelsLocked(response, visibleCreds)
+	filtered := make([]Model, 0, len(response.Data))
+	for _, model := range response.Data {
+		if m.modelVisibleLocked(model.ID, visibleCreds, visibility) {
+			filtered = append(filtered, model)
+		}
+	}
+	result := projectPublicModelCatalog(filtered, m.modelAliases)
+	activeAliases := make(map[string]string, len(m.acceptedModelAliases))
+	for alias, target := range m.acceptedModelAliases {
+		if m.acceptedModelAliasTargetActiveLocked(target) {
+			activeAliases[alias] = target
+		}
+	}
+	result = projectCanonicalAcceptedAliases(result, activeAliases)
+	return ModelsResponse{Object: response.Object, Data: result}
+}
+
 func (m *Manager) getCachedScopedAllModels(visibility scope.Context) (ModelsResponse, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -1579,17 +1508,15 @@ func (m *Manager) currentModelsLocked(response ModelsResponse, visibleCredential
 		if modelID == "" {
 			return
 		}
-		if m.credentialMappingsReady {
-			visible := false
-			for _, credentialName := range m.modelToCredentials[modelID] {
-				if visibleCredentials[credentialName] {
-					visible = true
-					break
-				}
+		visible := false
+		for _, credentialName := range m.modelToCredentials[modelID] {
+			if visibleCredentials[credentialName] {
+				visible = true
+				break
 			}
-			if !visible {
-				return
-			}
+		}
+		if !visible {
+			return
 		}
 		candidateIDs[modelID] = struct{}{}
 	}
@@ -1624,10 +1551,10 @@ func (m *Manager) currentModelsLocked(response ModelsResponse, visibleCredential
 // unscoped and key-scoped discovery. Its input must already contain only
 // internal models visible through the selected credentials/scopes.
 func (m *Manager) projectClientModelCatalogLocked(internalModels []Model) []Model {
-	activePublicAliases := make(map[string]string, len(m.publicModelAliases))
-	for alias, target := range m.publicModelAliases {
-		if m.publicModelAliasTargetActiveLocked(target) {
-			activePublicAliases[alias] = target
+	activeAcceptedAliases := make(map[string]string, len(m.acceptedModelAliases))
+	for alias, target := range m.acceptedModelAliases {
+		if m.acceptedModelAliasTargetActiveLocked(target) {
+			activeAcceptedAliases[alias] = target
 		}
 	}
 	var models []Model
@@ -1636,26 +1563,13 @@ func (m *Manager) projectClientModelCatalogLocked(internalModels []Model) []Mode
 			internalModels,
 			m.clientModelIDs,
 			m.modelAliases,
-			activePublicAliases,
+			activeAcceptedAliases,
 		)
 	} else {
 		models = projectPublicModelCatalog(internalModels, m.modelAliases)
-		models = projectCanonicalPublicAliases(models, activePublicAliases)
+		models = projectCanonicalAcceptedAliases(models, activeAcceptedAliases)
 	}
-	return hideAcceptedModelAliases(models, m.acceptedModelAliases)
-}
-
-func hideAcceptedModelAliases(models []Model, aliases map[string]string) []Model {
-	if len(aliases) == 0 {
-		return models
-	}
-	visible := make([]Model, 0, len(models))
-	for _, model := range models {
-		if _, hidden := aliases[model.ID]; !hidden {
-			visible = append(visible, model)
-		}
-	}
-	return visible
+	return models
 }
 
 func (m *Manager) invalidateAllModelsCachesLocked() {
@@ -1722,12 +1636,12 @@ func (m *Manager) getAllModelsScoped(visibility scope.Context) ModelsResponse {
 	return ModelsResponse{Object: "list", Data: models}
 }
 
-// projectConfiguredClientModelCatalog emits only configured client IDs and active public aliases.
+// projectConfiguredClientModelCatalog emits only configured client IDs and active accepted aliases.
 func projectConfiguredClientModelCatalog(
 	internalModels []Model,
 	clientModelIDs map[string]struct{},
 	modelAliases map[string]string,
-	publicModelAliases map[string]string,
+	acceptedModelAliases map[string]string,
 ) []Model {
 	internalByID := make(map[string]Model, len(internalModels))
 	availableTargets := make(map[string]struct{}, len(internalModels))
@@ -1740,8 +1654,8 @@ func projectConfiguredClientModelCatalog(
 			availableTargets[model.ID] = struct{}{}
 		}
 	}
-	activeAliases := activePublicModelAliases(availableTargets, modelAliases)
-	publicByID := make(map[string]Model, len(clientModelIDs)+len(publicModelAliases))
+	activeAliases := activeRoutableModelAliases(availableTargets, modelAliases)
+	publicByID := make(map[string]Model, len(clientModelIDs)+len(acceptedModelAliases))
 	for modelID := range clientModelIDs {
 		model, direct := internalByID[modelID]
 		if !direct {
@@ -1754,7 +1668,7 @@ func projectConfiguredClientModelCatalog(
 		model.ID = modelID
 		publicByID[modelID] = model
 	}
-	for alias, target := range publicModelAliases {
+	for alias, target := range acceptedModelAliases {
 		targetModel, targetVisible := publicByID[target]
 		if !targetVisible {
 			continue
@@ -1772,7 +1686,7 @@ func projectConfiguredClientModelCatalog(
 	return result
 }
 
-func projectCanonicalPublicAliases(models []Model, aliases map[string]string) []Model {
+func projectCanonicalAcceptedAliases(models []Model, aliases map[string]string) []Model {
 	byID := make(map[string]Model, len(models)+len(aliases))
 	for _, model := range models {
 		if model.ID != "" {
@@ -1820,7 +1734,7 @@ func projectPublicModelCatalog(internalModels []Model, aliases map[string]string
 		}
 	}
 
-	activeAliases := activePublicModelAliases(availableTargets, aliases)
+	activeAliases := activeRoutableModelAliases(availableTargets, aliases)
 
 	publicByID := make(map[string]Model, len(internalByID)+len(aliases))
 	for id, model := range internalByID {
@@ -1842,10 +1756,10 @@ func projectPublicModelCatalog(internalModels []Model, aliases map[string]string
 	return publicModels
 }
 
-// activePublicModelAliases applies the shared public-catalog rule used by both
+// activeRoutableModelAliases applies the shared public-catalog rule used by both
 // /v1/models variants: empty/orphan aliases are ignored, and only aliases for
 // already-routable targets are activated.
-func activePublicModelAliases(availableTargets map[string]struct{}, aliases map[string]string) map[string]string {
+func activeRoutableModelAliases(availableTargets map[string]struct{}, aliases map[string]string) map[string]string {
 	activeAliases := make(map[string]string, len(aliases))
 	for alias, target := range aliases {
 		_, targetRoutable := availableTargets[target]
@@ -1873,22 +1787,6 @@ func (m *Manager) GetCredentialsForModel(modelID string) []string {
 	result := make([]string, len(creds))
 	copy(result, creds)
 	return result
-}
-
-// hasModelInCredentials checks if modelID is assigned to credentialName in modelToCredentials map
-func hasModelInCredentials(modelToCredentials map[string][]string, modelID, credentialName string) (bool, bool) {
-	creds, modelExists := modelToCredentials[modelID]
-	if !modelExists {
-		return false, false // Model doesn't exist in map
-	}
-
-	for _, cred := range creds {
-		if cred == credentialName {
-			return true, true // Model exists and credential matches
-		}
-	}
-
-	return false, true // Model exists but credential doesn't match
 }
 
 // HasModel checks if a credential supports a specific model
@@ -1923,46 +1821,7 @@ func (m *Manager) GetModelScopeExpressionForCredential(modelID, credentialName s
 }
 
 func (m *Manager) hasModelLocked(credentialName, modelID string) bool {
-	// Check modelToCredentials map
-	hasModel, modelExists := hasModelInCredentials(m.modelToCredentials, modelID, credentialName)
-	if hasModel {
-		return true
-	}
-	if modelExists {
-		// Model exists but not for this credential
-		return false
-	}
-
-	// Model not found in modelToCredentials
-	// Check if we have any models configured
-	hasStaticModels := len(m.modelLimits) > 0
-	credentialExists := false
-
-	// Check credentialModels map
-	if models, ok := m.credentialModels[credentialName]; ok {
-		credentialExists = true
-		for _, model := range models {
-			if model == modelID {
-				return true
-			}
-		}
-		// Credential has a non-empty registered model list (static or dynamic via AddModel)
-		// but the requested model isn't in it — deny authoritatively.
-		if len(models) > 0 {
-			return false
-		}
-		// len==0: credential was registered with an explicit empty list (non-proxy cred with
-		// no model config); fall through to the hasStaticModels check below.
-	}
-
-	// If we have static models configured and credential exists but model not found - deny
-	if hasStaticModels && credentialExists {
-		return false
-	}
-
-	// If credential doesn't exist, allow (fallback behavior)
-	// If no models configured, allow all (fallback behavior)
-	return true
+	return slices.Contains(m.modelToCredentials[modelID], credentialName)
 }
 
 // AddModel adds a model to the credential mapping (used for dynamically loaded models from proxy)
@@ -1979,7 +1838,6 @@ func (m *Manager) AddModel(credentialName, modelID string) {
 	if !m.contains(m.modelToCredentials[modelID], credentialName) {
 		m.modelToCredentials[modelID] = append(m.modelToCredentials[modelID], credentialName)
 	}
-	m.credentialMappingsReady = true
 	m.invalidateScopedAllModelsCacheLocked()
 }
 
@@ -2039,7 +1897,6 @@ func (m *Manager) replaceModelsForCredentialLocked(credentialName string, modelI
 			m.modelToCredentials[modelID] = append(m.modelToCredentials[modelID], credentialName)
 		}
 	}
-	m.credentialMappingsReady = true
 
 	m.allModels = nil
 	m.invalidateAllModelsCachesLocked()
@@ -2512,18 +2369,6 @@ func (m *Manager) contains(slice []string, value string) bool {
 	return false
 }
 
-// IsEnabled returns whether model filtering should be used.
-// Returns true when static model limits are configured OR when dynamic proxy
-// model data has been fetched (modelToCredentials is non-empty). This ensures
-// that chain setups without a static models: section still benefit from
-// per-credential model filtering once proxy model lists are discovered.
-func (m *Manager) IsEnabled() bool {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	return len(m.modelLimits) > 0 || len(m.modelToCredentials) > 0
-}
-
 // findLimit searches for a limit value with optional credential filtering
 // The fieldFunc extracts the value from ModelLimits (e.g., func(ml) ml.RPM)
 // The convertFunc optionally transforms the value (e.g., convert 0 to -1 for TPM)
@@ -2755,144 +2600,6 @@ func (m *Manager) GetModelTPMForCredential(modelID, credentialName string) int {
 	return -1
 }
 
-// providerTypeLiteLLMPrefix maps our provider type to the LiteLLM-compatible model prefix.
-// vertex-ai uses underscore to match LiteLLM's "vertex_ai/model" convention.
-var providerTypeLiteLLMPrefix = map[config.ProviderType]string{
-	config.ProviderTypeOpenAI:    "openai",
-	config.ProviderTypeVertexAI:  "vertex_ai",
-	config.ProviderTypeGemini:    "gemini",
-	config.ProviderTypeAnthropic: "anthropic",
-	config.ProviderTypeCometAPI:  "cometapi",
-	config.ProviderTypeProMan:    "proman",
-	config.ProviderTypeBedrock:   "bedrock",
-	config.ProviderTypeProxy:     "openai",
-	config.ProviderTypeAIR:       "openai",
-}
-
-// GetAllModelsWithAccessGroups returns all models in "provider/model-id" format,
-// used when the caller requests ?include_model_access_groups=True.
-// Each (provider, model) pair appears at most once in the response.
-func (m *Manager) GetAllModelsWithAccessGroups() ModelsResponse {
-	return m.GetAllModelsWithAccessGroupsScoped(scope.AdminContext())
-}
-
-func (m *Manager) GetAllModelsWithAccessGroupsScoped(visibility scope.Context) ModelsResponse {
-	m.mu.RLock()
-	explicitClientSurface := m.clientModelSurfaceConfigured
-	m.mu.RUnlock()
-	if explicitClientSurface {
-		// Provider access-group projection is an administrative view over
-		// internal routes. Once a product surface is explicit, returning that
-		// projection would re-introduce backend IDs through a query parameter.
-		return m.GetAllModelsScoped(visibility)
-	}
-
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-
-	credProvider := make(map[string]string, len(m.credentials))
-	for _, cred := range m.credentials {
-		if !cred.VisibleTo(visibility) {
-			continue
-		}
-		prefix, ok := providerTypeLiteLLMPrefix[cred.Type]
-		if !ok {
-			prefix = string(cred.Type)
-		}
-		credProvider[cred.Name] = prefix
-	}
-
-	availableTargets := make(map[string]struct{}, len(m.modelToCredentials))
-	for modelID, credentialNames := range m.modelToCredentials {
-		if len(credentialNames) > 0 {
-			availableTargets[modelID] = struct{}{}
-		}
-	}
-	activeAliases := activePublicModelAliases(availableTargets, m.modelAliases)
-	activeDeploymentAliases := make(map[string]string, len(m.publicModelAliases))
-	for alias, target := range m.publicModelAliases {
-		if m.publicModelAliasTargetActiveLocked(target) {
-			activeDeploymentAliases[alias] = target
-		}
-	}
-
-	// An alias is listed for a key only when the key could see the alias target
-	// itself: the alias must not widen the scoped view onto foreign models.
-	aliasTargetVisible := func(target string) bool {
-		routeTarget, active := m.clientCanonicalRouteTargetLocked(target)
-		if !active {
-			return false
-		}
-		for _, credName := range m.modelToCredentials[routeTarget] {
-			if _, visible := credProvider[credName]; !visible {
-				continue
-			}
-			if m.modelScopeAllowsLocked(routeTarget, credName, visibility) {
-				return true
-			}
-		}
-		return false
-	}
-
-	seen := make(map[string]bool)
-	result := make([]Model, 0, len(m.modelToCredentials)+len(activeAliases)+len(activeDeploymentAliases))
-
-	for modelID, creds := range m.modelToCredentials {
-		for _, credName := range creds {
-			prefix, ok := credProvider[credName]
-			if !ok {
-				continue
-			}
-			if !m.modelScopeAllowsLocked(modelID, credName, visibility) {
-				continue
-			}
-			prefixedID := modelID
-			if !strings.HasPrefix(modelID, prefix+"/") {
-				prefixedID = prefix + "/" + modelID
-			}
-			if seen[prefixedID] {
-				continue
-			}
-			seen[prefixedID] = true
-			result = append(result, Model{
-				ID:      prefixedID,
-				Object:  "model",
-				Created: converterutil.GetCurrentTimestamp(),
-				OwnedBy: prefix,
-			})
-		}
-	}
-	for alias, target := range activeAliases {
-		if seen[alias] || !aliasTargetVisible(target) {
-			continue
-		}
-		seen[alias] = true
-		result = append(result, Model{
-			ID:      alias,
-			Object:  "model",
-			Created: converterutil.GetCurrentTimestamp(),
-			OwnedBy: "system",
-		})
-	}
-	for alias, target := range activeDeploymentAliases {
-		if seen[alias] || !aliasTargetVisible(target) {
-			continue
-		}
-		seen[alias] = true
-		result = append(result, Model{
-			ID:      alias,
-			Object:  "model",
-			Created: converterutil.GetCurrentTimestamp(),
-			OwnedBy: "system",
-		})
-	}
-	slices.SortFunc(result, func(left, right Model) int {
-		return strings.Compare(left.ID, right.ID)
-	})
-
-	return ModelsResponse{Object: "list", Data: result}
-}
-
 func (m *Manager) visibleCredentialNamesLocked(visibility scope.Context) map[string]bool {
 	result := make(map[string]bool, len(m.credentials))
 	for _, cred := range m.credentials {
@@ -2907,10 +2614,7 @@ func (m *Manager) modelVisibleLocked(modelID string, visibleCreds map[string]boo
 	if len(visibleCreds) == 0 {
 		return false
 	}
-	creds, ok := m.modelToCredentials[modelID]
-	if !ok {
-		return true
-	}
+	creds := m.modelToCredentials[modelID]
 	for _, cred := range creds {
 		if visibleCreds[cred] && m.modelScopeAllowsLocked(modelID, cred, visibility) {
 			return true
@@ -2933,15 +2637,8 @@ func (m *Manager) modelScopeAllowsLocked(modelID, credentialName string, visibil
 
 // GetModelsForCredential returns all models available for a specific credential.
 //
-// Behavior:
-//   - If the credential has explicitly configured models, returns those models
-//   - If the credential is unknown but global models exist (with empty Credential field),
-//     returns global models as a fallback for backward compatibility
-//   - Returns empty slice if no models are found for the credential
-//
-// Note: This fallback behavior (returning global models for unknown credentials)
-// differs from HasModel() which does not have this fallback behavior.
-// For new code, prefer using HasModel() for stricter credential validation.
+// Unknown credentials and credentials without an explicit topology mapping
+// return no models.
 func (m *Manager) GetModelsForCredential(credentialName string) []Model {
 	m.mu.RLock()
 	modelIDs := make([]string, 0)
@@ -2954,21 +2651,6 @@ func (m *Manager) GetModelsForCredential(credentialName string) []Model {
 					seen[modelID] = true
 				}
 				break
-			}
-		}
-	}
-
-	// Preserve legacy behavior: unknown credentials still get global models
-	if len(modelIDs) == 0 && len(m.modelLimits) > 0 {
-		for modelName, limits := range m.modelLimits {
-			for _, limit := range limits {
-				if limit.Credential == "" {
-					if !seen[modelName] {
-						modelIDs = append(modelIDs, modelName)
-						seen[modelName] = true
-					}
-					break
-				}
 			}
 		}
 	}

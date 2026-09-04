@@ -200,8 +200,7 @@ type Config struct {
 	Models               []ModelRPMConfig           `yaml:"models,omitempty"`
 	ModelAlias           map[string]string          `yaml:"model_alias,omitempty"`
 	ClientModelIDs       []string                   `yaml:"client_model_ids,omitempty"`
-	PublicModelAlias     map[string]string          `yaml:"public_model_alias,omitempty"`
-	AcceptedModelAlias   map[string]string          `yaml:"accepted_model_alias,omitempty"`
+	AcceptedModelAliases map[string]string          `yaml:"accepted_model_alias,omitempty"`
 	OrganizationPolicies []OrganizationPolicyConfig `yaml:"organization_policies,omitempty"`
 	LiteLLMDB            LiteLLMDBConfig            `yaml:"litellm_db,omitempty"`
 	Redis                RedisConfig                `yaml:"redis,omitempty"`
@@ -231,8 +230,7 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 		Models               []ModelRPMConfig           `yaml:"models,omitempty"`
 		ModelAlias           map[string]string          `yaml:"model_alias,omitempty"`
 		ClientModelIDs       []string                   `yaml:"client_model_ids,omitempty"`
-		PublicModelAlias     map[string]string          `yaml:"public_model_alias,omitempty"`
-		AcceptedModelAlias   map[string]string          `yaml:"accepted_model_alias,omitempty"`
+		AcceptedModelAliases map[string]string          `yaml:"accepted_model_alias,omitempty"`
 		OrganizationPolicies []OrganizationPolicyConfig `yaml:"organization_policies,omitempty"`
 		LiteLLMDB            LiteLLMDBConfig            `yaml:"litellm_db,omitempty"`
 		Redis                RedisConfig                `yaml:"redis,omitempty"`
@@ -254,8 +252,7 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 	c.Models = raw.Models
 	c.ModelAlias = raw.ModelAlias
 	c.ClientModelIDs = raw.ClientModelIDs
-	c.PublicModelAlias = raw.PublicModelAlias
-	c.AcceptedModelAlias = raw.AcceptedModelAlias
+	c.AcceptedModelAliases = raw.AcceptedModelAliases
 	c.OrganizationPolicies = raw.OrganizationPolicies
 	c.LiteLLMDB = raw.LiteLLMDB
 	c.Redis = raw.Redis
@@ -1535,19 +1532,12 @@ func Load(path string) (*Config, error) {
 		}
 		cfg.ClientModelIDs = resolved
 	}
-	if cfg.PublicModelAlias != nil {
-		resolved := make(map[string]string, len(cfg.PublicModelAlias))
-		for alias, target := range cfg.PublicModelAlias {
+	if cfg.AcceptedModelAliases != nil {
+		resolved := make(map[string]string, len(cfg.AcceptedModelAliases))
+		for alias, target := range cfg.AcceptedModelAliases {
 			resolved[resolveEnvString(alias)] = resolveEnvString(target)
 		}
-		cfg.PublicModelAlias = resolved
-	}
-	if cfg.AcceptedModelAlias != nil {
-		resolved := make(map[string]string, len(cfg.AcceptedModelAlias))
-		for alias, target := range cfg.AcceptedModelAlias {
-			resolved[resolveEnvString(alias)] = resolveEnvString(target)
-		}
-		cfg.AcceptedModelAlias = resolved
+		cfg.AcceptedModelAliases = resolved
 	}
 
 	if cfg.Credentials == nil {
@@ -1561,11 +1551,8 @@ func Load(path string) (*Config, error) {
 	if cfg.ModelAlias == nil {
 		cfg.ModelAlias = map[string]string{}
 	}
-	if cfg.PublicModelAlias == nil {
-		cfg.PublicModelAlias = map[string]string{}
-	}
-	if cfg.AcceptedModelAlias == nil {
-		cfg.AcceptedModelAlias = map[string]string{}
+	if cfg.AcceptedModelAliases == nil {
+		cfg.AcceptedModelAliases = map[string]string{}
 	}
 
 	// Extract models from credentials and add to main Models list
@@ -1972,17 +1959,12 @@ func (c *Config) Validate() error {
 			}
 			clientIDs[modelID] = struct{}{}
 		}
-		for label, aliases := range map[string]map[string]string{
-			"public_model_alias":   c.PublicModelAlias,
-			"accepted_model_alias": c.AcceptedModelAlias,
-		} {
-			for alias, target := range aliases {
-				if _, exists := clientIDs[target]; !exists {
-					return fmt.Errorf("%s %q targets %q outside client_model_ids", label, alias, target)
-				}
-				if _, collision := clientIDs[alias]; collision {
-					return fmt.Errorf("%s %q collides with client_model_ids", label, alias)
-				}
+		for alias, target := range c.AcceptedModelAliases {
+			if _, exists := clientIDs[target]; !exists {
+				return fmt.Errorf("accepted_model_alias %q targets %q outside client_model_ids", alias, target)
+			}
+			if _, collision := clientIDs[alias]; collision {
+				return fmt.Errorf("accepted_model_alias %q collides with client_model_ids", alias)
 			}
 		}
 	}

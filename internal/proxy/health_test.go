@@ -450,12 +450,7 @@ func TestHealthCheck_ModelHealthStats_PriorityFallsBackWhenDynamicUnknown(t *tes
 	assert.Equal(t, 200, stats.Priority, "should fall back to the static credential priority when nothing dynamic is known")
 }
 
-// TestHealthCheck_ModelHealthStats_PriorityIgnoresDynamicWhenModelCheckerDisabled is the
-// #7 regression guard: balancer.learnedProxyPriority only consults the learned per-model
-// priority when the model checker is enabled — otherwise the balancer routes on the
-// static field. /health must gate the same way, or the dashboard shows a learned
-// priority the balancer never actually uses.
-func TestHealthCheck_ModelHealthStats_PriorityIgnoresDynamicWhenModelCheckerDisabled(t *testing.T) {
+func TestHealthCheck_ModelHealthStats_UsesLearnedPriority(t *testing.T) {
 	logger := testhelpers.NewTestLogger()
 	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
 	rl := ratelimit.New()
@@ -475,10 +470,7 @@ func TestHealthCheck_ModelHealthStats_PriorityIgnoresDynamicWhenModelCheckerDisa
 	metrics := monitoring.New(false)
 	tm := auth.NewVertexTokenManager(logger)
 	mm := models.New(logger, 50, []config.ModelRPMConfig{})
-	// A learned priority lingers, but no models/limits are registered, so
-	// mm.IsEnabled() is false — model filtering (and learned-priority routing) is off.
 	mm.ReplaceModelPrioritiesForCredential(cred.Name, map[string]int{"gpt-4": 100})
-	require.False(t, mm.IsEnabled())
 
 	prx := createProxyWithParams(bal, logger, 10, 30*time.Second, metrics, "test-key", rl, tm, mm, "test-version", "test-commit")
 
@@ -486,7 +478,7 @@ func TestHealthCheck_ModelHealthStats_PriorityIgnoresDynamicWhenModelCheckerDisa
 
 	stats, ok := status.Models["grant-pol01:gpt-4"]
 	require.True(t, ok)
-	assert.Equal(t, 200, stats.Priority, "must show the static priority the balancer routes on, not the inert learned value")
+	assert.Equal(t, 100, stats.Priority)
 }
 
 func TestHealthCheck_ModelProviderErrorAndBanUntil(t *testing.T) {

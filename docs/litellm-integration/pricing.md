@@ -51,11 +51,13 @@ Organization profile lookup is exact and case-sensitive. AIR prices mapped reque
 
 The organization tariff JSON is strict. Duplicate exact keys, unknown row fields, `null` rows, and empty price objects fail startup. An explicit free model must still include at least one recognized price field with a zero value.
 
-When `model_allowlist` is omitted, the organization sees the global callable surface plus organization mapping keys, subject to exact profile prices in `/v1/models`. A callable request without an exact profile row returns `503` before provider selection. When `model_allowlist` is present and empty, the organization surface is empty. When present and non-empty, every listed ID must be routable and have an exact profile row at startup.
+When `model_allowlist` is omitted, the organization sees the global callable surface plus organization mapping keys, subject to exact profile prices in `/v1/models`. A request without an exact profile row is treated as stably unavailable and returns `404` before provider selection. When `model_allowlist` is present and empty, the organization surface is empty. When present and non-empty, every listed ID must be routable and have an exact profile row at startup.
 
 ### Provider credential exclusion
 
-`credential_denylist` contains exact case-sensitive provider credential names. Matching provider credentials are excluded from initial selection, session affinity, retries, and fallback. Router credentials remain eligible. The restriction follows a request through chained AIR routers. Unknown names are ignored locally and remain available to downstream routers.
+`credential_denylist` contains exact case-sensitive provider credential names. Matching provider credentials are excluded from initial selection, session affinity, retries, and fallback. A router credential is not excluded merely because its own name appears in the list, but it is excluded for a model when cached health metadata shows that all its visible leaf providers are denied. If no eligible serving route remains, the model is omitted from `/v1/models` and inference returns `404` at admission.
+
+The restriction follows requests through `type: air` credentials and recognized internal AIR `type: proxy` connections. Complete multi-hop discovery filtering requires intermediate routers to propagate `provider_routes` metadata and health snapshots to refresh. Unknown names are retained for downstream enforcement. If legacy relay metadata does not identify the leaf providers, a model can still be listed and rejected downstream; provider denylist enforcement remains in place.
 
 The list accepts up to 1024 names and 65536 encoded bytes. Each name may contain up to 256 bytes. Empty names, duplicate names, and control characters fail configuration loading. An omitted or empty list preserves standard routing.
 
@@ -74,7 +76,7 @@ Behaviour:
 - The interval applies only when `model_prices_link` is set. With an empty link no sync loop is started.
 - The startup load happens immediately and does not wait for the first tick.
 - A failed refresh (unreachable URL, unreadable file, invalid JSON) is logged as a warning and the previously loaded prices stay in the registry. The next tick retries.
-- A successful refresh replaces the whole registry atomically; in-flight requests keep using the prices they already resolved.
+- A successful refresh atomically replaces the file-source snapshot; database overrides remain intact. The current attempt retains its resolved billing price, but non-organization retries resolve again and can pick up a changed price or fail with `503` if it disappeared. Organization tariffs remain pinned across retries.
 - A missing or non-positive value falls back to the `5m` default.
 
 Choosing a value:
@@ -313,18 +315,18 @@ Loading is handled by `internal/models/price_loader.go`:
    - Paths starting with `file://` or containing no `://` are read from disk.
    - Paths starting with `http://` or `https://` are fetched via HTTP with a 100 MB limit.
 2. The JSON is parsed into a `map[string]*ModelPrice`.
-3. Every key is **normalised**: the provider prefix is stripped and the name is lowercased.
-   - `"openai/gpt-4-turbo"` → `"gpt-4-turbo"`
-   - `"vertex_ai/gemini-2.5-pro"` → `"gemini-2.5-pro"`
-   - If two keys normalise to the same string, the last one wins and a warning is logged.
+3. Keys are trimmed and lowercased. Provider-prefixed keys are retained alongside a **normalised fallback** with the prefix stripped.
+   - `"openai/gpt-4-turbo"` is stored under both `"openai/gpt-4-turbo"` and `"gpt-4-turbo"`.
+   - `"vertex_ai/gemini-2.5-pro"` is stored under both `"vertex_ai/gemini-2.5-pro"` and `"gemini-2.5-pro"`.
+   - An explicit bare key owns its shared normalised key regardless of JSON order; prefixed entries retain their own prices under their full keys. Other normalisation collisions depend on Go map iteration, not JSON order, so do not rely on ordering to choose a fallback price.
 4. The resulting map is stored in a `ModelPriceRegistry` (thread-safe, `sync.RWMutex`).
 5. A background goroutine repeats steps 1-4 every `server.model_prices_sync_interval` until shutdown — see [Refresh interval](#refresh-interval).
 
 ### DB price merging
 
-When the LiteLLM database is enabled, prices defined in `LiteLLM_ModelTable` are merged on top of the file-based registry via `MergeDB`. Database prices take precedence for any model that appears in both sources. The file-based prices remain intact for all other models.
+When the LiteLLM database is enabled, the registry keeps file and database snapshots as independent layers. Database prices take precedence for any model that appears in both sources. File-based prices remain available for all other models.
 
-Two independent loops write to the registry: the price-file refresh (`server.model_prices_sync_interval`, default `5m`) replaces the whole map, while the DB model-table sync (`litellm_db.db_model_sync_interval`, default `1m`) merges DB prices back on top. A model that exists only in the database is therefore absent from the registry between a file refresh and the next DB sync. With spend logging enabled such a request is rejected with `503 Model pricing unavailable`, so keep `model_prices_sync_interval` at or above `db_model_sync_interval` when DB-only models are in use.
+Two independent loops replace their own snapshots: the price-file refresh (`server.model_prices_sync_interval`, default `5m`) cannot erase database-only rows, and the DB model-table sync (`litellm_db.db_model_sync_interval`, default `1m`) cannot erase file-only rows. A successful empty DB sync clears the previous DB layer. A failed refresh leaves that source's previous snapshot intact.
 
 Cache writes are read from `cache_creation_tokens` or the OpenAI-compatible `cache_write_tokens` alias in both Chat Completions and Responses API usage objects.
 Anthropic's `cache_creation_token_details` (`ephemeral_5m_input_tokens` and `ephemeral_1h_input_tokens`) is preserved in spend-log metadata while the existing aggregate cache-creation token columns remain backward-compatible. Gemini cached-audio counts are taken from `cacheTokensDetails` when the provider supplies a modality breakdown.
@@ -337,4 +339,6 @@ Kafka and ClickHouse expose the same breakdown as typed fields, including `web_s
 
 ### Lookup
 
-When a request completes, the router calls `GetPrice(modelName)` which normalises the name and returns the `*ModelPrice`. If no entry is found, cost calculation is skipped, `spend` is stored as `0`, and the metadata cost breakdown is omitted.
+When spend tracking is enabled, admission requires a resolvable billing price for at least one serving credential. Non-organization requests try the public model ID, logical route ID, then the selected credential's effective real model ID, using the same lookup as billing. Credentials with no matching billing price are excluded. An exact organization tariff suffices for organization requests; a separate base price is not required.
+
+Models with no billable routes are omitted from `/v1/models` and return `404`. After selection, the router resolves and caches the billing row; if none can be resolved, it returns `503` before forwarding. Non-organization retries resolve the billing price for the new attempt. Organization retries retain the request's resolved tariff even if the default price registry changes.

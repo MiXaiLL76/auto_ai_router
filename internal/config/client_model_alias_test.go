@@ -9,7 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestLoadPublicModelAliasesSeparatelyFromProviderAliases(t *testing.T) {
+func TestLoadAcceptedModelAliasesSeparatelyFromProviderAliases(t *testing.T) {
 	t.Setenv("CANONICAL_PUBLIC_MODEL", "openai/gpt-4.1")
 	path := filepath.Join(t.TempDir(), "config.yaml")
 	require.NoError(t, os.WriteFile(path, []byte(`
@@ -26,7 +26,7 @@ model_alias:
   openai/gpt-4.1: gpt-4.1
 client_model_ids:
   - os.environ/CANONICAL_PUBLIC_MODEL
-public_model_alias:
+accepted_model_alias:
   gpt-4.1: os.environ/CANONICAL_PUBLIC_MODEL
 `), 0o600))
 
@@ -34,7 +34,7 @@ public_model_alias:
 	require.NoError(t, err)
 	assert.Equal(t, map[string]string{"openai/gpt-4.1": "gpt-4.1"}, cfg.ModelAlias)
 	assert.Equal(t, []string{"openai/gpt-4.1"}, cfg.ClientModelIDs)
-	assert.Equal(t, map[string]string{"gpt-4.1": "openai/gpt-4.1"}, cfg.PublicModelAlias)
+	assert.Equal(t, map[string]string{"gpt-4.1": "openai/gpt-4.1"}, cfg.AcceptedModelAliases)
 }
 
 func TestClientModelIDsFailClosedOnDuplicateAndOutOfSurfaceAlias(t *testing.T) {
@@ -50,11 +50,11 @@ func TestClientModelIDsFailClosedOnDuplicateAndOutOfSurfaceAlias(t *testing.T) {
 			wantError: `duplicate model ID "openai/gpt-4.1"`,
 		},
 		{
-			name:     "public alias target outside boundary",
+			name:     "accepted alias target outside boundary",
 			boundary: "  - openai/gpt-4.1",
-			aliases: `public_model_alias:
+			aliases: `accepted_model_alias:
   gpt-5: openai/gpt-5`,
-			wantError: `public_model_alias "gpt-5" targets "openai/gpt-5" outside client_model_ids`,
+			wantError: `accepted_model_alias "gpt-5" targets "openai/gpt-5" outside client_model_ids`,
 		},
 	}
 	for _, tt := range tests {

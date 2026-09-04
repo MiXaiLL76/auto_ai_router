@@ -10,7 +10,7 @@ import (
 
 func TestLookupBillingModelPrice_TwoPassLookup(t *testing.T) {
 	registry := models.NewModelPriceRegistry()
-	registry.Update(map[string]*models.ModelPrice{
+	registry.ReplaceFilePrices(map[string]*models.ModelPrice{
 		"gpt-5-mini":    {InputCostPerToken: 2.25e-07, OutputCostPerToken: 1.8e-06},
 		"gpt-5-mini-or": {InputCostPerToken: 3.25e-07, OutputCostPerToken: 2.6e-06},
 	})
@@ -74,7 +74,7 @@ func TestLookupBillingModelPrice_TwoPassLookup(t *testing.T) {
 
 func TestLookupBillingModelPrice_RawEntryBeatsNormalised(t *testing.T) {
 	registry := models.NewModelPriceRegistry()
-	registry.Update(map[string]*models.ModelPrice{
+	registry.ReplaceFilePrices(map[string]*models.ModelPrice{
 		"gemini-3-flash-preview":                   {InputCostPerToken: 4.5e-07, OutputCostPerToken: 2.7e-06},
 		"google/gemini-3-flash-preview-highlimits": {InputCostPerToken: 9e-07, OutputCostPerToken: 5.4e-06},
 	})
@@ -99,7 +99,7 @@ func TestLookupBillingModelPrice_NilRegistry(t *testing.T) {
 
 func TestLookupBillingModelPrice_DeduplicatesModelIDAndRealModelID(t *testing.T) {
 	registry := models.NewModelPriceRegistry()
-	registry.Update(map[string]*models.ModelPrice{
+	registry.ReplaceFilePrices(map[string]*models.ModelPrice{
 		"gpt-5-mini": {InputCostPerToken: 2.25e-07},
 	})
 
@@ -108,22 +108,22 @@ func TestLookupBillingModelPrice_DeduplicatesModelIDAndRealModelID(t *testing.T)
 	assert.NotNil(t, gotPrice)
 }
 
-// MergeDB must update the exact key it names (and that key's own raw form)
+// ReplaceDBPrices must update the exact key it names (and that key's own raw form)
 // but must NOT leak into an unrelated raw-keyed entry just because it
-// shares a normalized form — see TestModelPriceRegistry_MergeDB_ScopedToExactKey
+// shares a normalized form — see TestModelPriceRegistry_ReplaceDBPricesScopedToExactKey
 // in internal/models for the direct regression test (a DB override for
 // "gpt-5.1" clobbering the independently-priced "yandex/gpt-5.1" alias was
 // caught here during review of an earlier version of this fix that swept
 // the whole registry by normalized form).
-func TestLookupBillingModelPrice_MergeDBUpdatesExactKeyOnly(t *testing.T) {
+func TestLookupBillingModelPrice_DBReplacementUpdatesExactKeyOnly(t *testing.T) {
 	registry := models.NewModelPriceRegistry()
 
-	registry.Update(map[string]*models.ModelPrice{
+	registry.ReplaceFilePrices(map[string]*models.ModelPrice{
 		"gpt-5-mini":            {InputCostPerToken: 2.25e-07},
 		"openrouter/gpt-5-mini": {InputCostPerToken: 9.99e-07}, // deliberately distinct alias price
 	})
 
-	registry.MergeDB(map[string]*models.ModelPrice{
+	registry.ReplaceDBPrices(map[string]*models.ModelPrice{
 		"gpt-5-mini": {InputCostPerToken: 5.0e-07},
 	})
 
@@ -145,7 +145,7 @@ func TestLookupBillingModelPrice_BareKeyWinsOverPrefixed(t *testing.T) {
 	// Simulate what LoadModelPrices returns when both "gpt-4" and
 	// "openai/gpt-4" exist in the price file: the bare key must win.
 	registry := models.NewModelPriceRegistry()
-	registry.Update(map[string]*models.ModelPrice{
+	registry.ReplaceFilePrices(map[string]*models.ModelPrice{
 		"gpt-4":        {InputCostPerToken: 1.0e-06},
 		"openai/gpt-4": {InputCostPerToken: 2.0e-06},
 	})

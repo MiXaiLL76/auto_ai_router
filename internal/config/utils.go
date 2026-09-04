@@ -179,15 +179,9 @@ func PrintConfig(logger *slog.Logger, cfg *Config) {
 			logger.Info("  alias", "from", alias, "to", target)
 		}
 	}
-	if len(cfg.PublicModelAlias) > 0 {
-		logger.Info("public_model_alias", "total_count", len(cfg.PublicModelAlias))
-		for alias, target := range cfg.PublicModelAlias {
-			logger.Info("  public alias", "from", alias, "to", target)
-		}
-	}
-	if len(cfg.AcceptedModelAlias) > 0 {
-		logger.Info("accepted_model_alias", "total_count", len(cfg.AcceptedModelAlias))
-		for alias, target := range cfg.AcceptedModelAlias {
+	if len(cfg.AcceptedModelAliases) > 0 {
+		logger.Info("accepted_model_alias", "total_count", len(cfg.AcceptedModelAliases))
+		for alias, target := range cfg.AcceptedModelAliases {
 			logger.Info("  accepted alias", "from", alias, "to", target)
 		}
 	}

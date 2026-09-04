@@ -1,14 +1,14 @@
 # Model Aliases and Model Name Mapping
 
-There are two independent mechanisms for mapping model names in Auto AI Router. Choose the right one depending on your use case.
+There are three independent mechanisms for mapping model names in Auto AI Router. Choose the right one depending on your use case.
 
-|                               | `model_alias`                | `models[].model`                               |
-| ----------------------------- | ---------------------------- | ---------------------------------------------- |
-| Config section                | Top-level `model_alias:` map | Per-entry `model:` field inside `models:`      |
-| Alias visible in `/v1/models` | No                           | Yes                                            |
-| Credential bound to alias     | No (binds to real name)      | Yes (binds to alias)                           |
-| Rate limiting                 | By real name                 | By alias                                       |
-| Use case                      | Short name for any model     | Provider-specific internal name per credential |
+|                               | `model_alias`                | `accepted_model_alias`              | `models[].model`                               |
+| ----------------------------- | ---------------------------- | ----------------------------------- | ---------------------------------------------- |
+| Config section                | Top-level `model_alias:` map | Top-level client-alias map          | Per-entry `model:` field inside `models:`      |
+| Alias visible in `/v1/models` | Yes                          | Yes                                 | Yes                                            |
+| Credential bound to alias     | No (binds to real name)      | No (binds to canonical public name) | Yes (binds to alias)                           |
+| Rate limiting                 | By real name                 | By canonical route                  | By alias                                       |
+| Use case                      | Short name for any model     | Additional client-facing names      | Provider-specific internal name per credential |
 
 ______________________________________________________________________
 
@@ -66,11 +66,12 @@ sequenceDiagram
 ### Behavior
 
 - **Non-alias models pass through unchanged.** A request with `"model": "gpt-4o"` (not an alias) is not modified.
-- **Aliases are not shown in `/v1/models`.** The model list returns only real model names.
+- **Active aliases are shown in `/v1/models`.** An alias is listed only while its target has a stable serving route, matching inference admission.
+- **Registered direct routes take precedence over `model_alias`.** If the alias name already has a credential mapping, requests use that direct route instead of the alias target.
 - **Self-referencing aliases are ignored.** An alias like `gpt-4: gpt-4` is skipped with a warning.
 - **Alias resolution is logged** at DEBUG level: `Resolved model alias alias=claude resolved=claude-sonnet-4-...`
 
-### Example: Zero-Downtime Model Upgrade
+### Example: Model Upgrade Without Client Changes
 
 Switch all clients from GPT-4 to GPT-4o without any client-side changes:
 
@@ -84,7 +85,7 @@ model_alias:
   gpt-4: gpt-4o
 ```
 
-Restart the proxy to apply — all existing clients automatically use the new model.
+For the after configuration, ensure `gpt-4o` has a serving credential mapping and remove the old direct `gpt-4` mappings, including any supplied by the database or remote discovery. Otherwise, the direct `gpt-4` route still wins and changing the alias alone does not switch models. Restart the proxy to apply the configuration; clients can continue sending `gpt-4`.
 
 ______________________________________________________________________
 
@@ -148,8 +149,8 @@ sequenceDiagram
 - **Credential is bound to the alias.** The `credential:` field maps the alias to a specific credential.
 - **Rate limits apply to the alias.** `rpm` and `tpm` under the alias entry are enforced per alias name.
 - **Real name resolution is logged** at DEBUG level: `Resolved model real name alias=aws/claude-haiku-4.5 real=global.anthropic...`
-- **Price lookup uses the real name** first (to match entries in the model prices JSON), then falls back to the alias.
-- **Missing prices fail closed when spend logging is enabled.** The router returns `503 Model pricing unavailable` before contacting the provider, so a billable request cannot be recorded with zero spend. A model with an explicit zero-price entry remains valid.
+- **Price lookup tries the public model ID, logical route ID, then effective provider model ID.** Organization requests use their exact organization tariff. No separate base price is required.
+- **Missing billing prices fail closed when spend logging is enabled.** A model with no billable routes is absent from `/v1/models` and returns `404`; failure to resolve a billing price at the final check before forwarding returns `503`. A model with an explicit zero-price entry remains valid.
 
 ### Example: Multiple Bedrock Models
 
@@ -254,10 +255,8 @@ For a mapped organization request AIR keeps separate identifiers:
 | `RealModelID`      | Provider-facing model ID                                  |
 | `PriceModelID`     | Exact public model ID from the client request             |
 
-An organization mapping shadows every global meaning of the same request ID only for that organization. The mapping target must be a direct active route or one active global `model_alias` key. It cannot target another organization entry, `public_model_alias`, or `accepted_model_alias`.
+An organization mapping shadows every global meaning of the same request ID only for that organization. The mapping target must be a direct active route or one active global `model_alias` key. It cannot target another organization entry or `accepted_model_alias`.
 
 `model_allowlist` controls the effective organization surface. When omitted, AIR exposes the global callable surface plus organization mappings. When present and empty, the organization has no callable models. When present and non-empty, entries are exact public request IDs.
 
-Database model ACLs still run after organization surface admission. For an organization-mapped request, AIR tests the ordered candidate set `PublicModelID`, `CanonicalModelID`, and `ModelID` against the applicable key, team, user, and membership allowlists. A direct request for a canonical or routed target does not inherit permission from an organization public ID.
-
-`GET /v1/models?include_model_access_groups=true` returns the same curated organization surface as the plain listing. The provider access-group projection is an administrative view over internal routes and is intentionally suppressed for organization-scoped keys so backend IDs are not re-introduced through a query parameter.
+When `server.strict_all_team_models_acl: true`, database model ACLs run after organization surface admission. For an organization-mapped request, AIR tests the ordered candidate set `PublicModelID`, `CanonicalModelID`, and `ModelID` against the applicable key, team, user, and membership allowlists. A direct request for a canonical or routed target does not inherit permission from an organization public ID. With the default `false`, these database model ACLs are bypassed for both listing and inference; organization policy restrictions still apply.
