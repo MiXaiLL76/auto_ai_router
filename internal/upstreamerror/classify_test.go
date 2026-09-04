@@ -190,3 +190,49 @@ func TestClassifyBadRequest_NeverEchoesRawSensitiveText(t *testing.T) {
 		assert.NotContains(t, string(serialized), s)
 	}
 }
+
+// TestClassifyBadRequest_IsIdempotent guards the property litellm
+// compatibility mode's normalizeError depends on: Transform only ever sees
+// the router's own already-classified body (see
+// responseCompatibilityWriter.Close), so it re-runs ClassifyBadRequest on
+// that body rather than trusting it blindly. Every branch's own canonical
+// output must re-classify back into itself — message and code identical,
+// param preserved — or a fix like PR #187 silently regresses back to the
+// generic default despite having classified correctly the first time (this
+// is exactly what happened before "invalid_parameter" was added as a
+// needle: the "invalid_parameter" code round-tripped to the generic
+// default because "Invalid request parameter" doesn't itself contain
+// "invalid parameter" as a substring — "request" sits in between).
+func TestClassifyBadRequest_IsIdempotent(t *testing.T) {
+	rawBodies := []string{
+		`{"error":{"message":"Provider rejected tool_choice.","param":"tool_choice"}}`,
+		`{"error":{"message":"max_completion_tokens must be less than 8192","param":"max_completion_tokens"}}`,
+		`{"error":{"message":"Input is too long for the context window"}}`,
+		`{"error":{"message":"litellm.BadRequestError: Received Model Group=x"}}`,
+		`{"error":{"message":"The parameters logprobs is not supported.","code":"invalid_parameter_error"}}`,
+		`{"error":{"message":"Invalid 'output[1].type': 'input_file'.","type":"InvalidParameter"}}`,
+		`vendor stack id 012345`,
+	}
+
+	for _, raw := range rawBodies {
+		t.Run(raw, func(t *testing.T) {
+			first := ClassifyBadRequest([]byte(raw))
+
+			routerBody, err := json.Marshal(map[string]any{
+				"error": map[string]any{
+					"message": first.Message,
+					"type":    "invalid_request_error",
+					"param":   first.Param,
+					"code":    first.Code,
+				},
+			})
+			require.NoError(t, err)
+
+			second := ClassifyBadRequest(routerBody)
+
+			assert.Equal(t, first.Message, second.Message, "message must survive a second classification pass")
+			assert.Equal(t, first.Code, second.Code, "code must survive a second classification pass")
+			assert.True(t, equalStringPtr(first.Param, second.Param), "param must survive a second classification pass: first=%v second=%v", first.Param, second.Param)
+		})
+	}
+}
