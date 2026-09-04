@@ -239,8 +239,11 @@ func convertVertexUsageMetadata(meta *genai.GenerateContentResponseUsageMetadata
 			if detail == nil {
 				continue
 			}
-			if genai.MediaModality(detail.Modality) == genai.MediaModalityAudio {
+			switch genai.MediaModality(detail.Modality) {
+			case genai.MediaModalityAudio:
 				usage.PromptTokensDetails.AudioTokens += int(detail.TokenCount)
+			case genai.MediaModalityImage, genai.MediaModalityVideo:
+				usage.PromptTokensDetails.ImageTokens += int(detail.TokenCount)
 			}
 		}
 	}
@@ -253,24 +256,33 @@ func convertVertexUsageMetadata(meta *genai.GenerateContentResponseUsageMetadata
 			if detail == nil {
 				continue
 			}
-			if genai.MediaModality(detail.Modality) == genai.MediaModalityAudio {
+			switch genai.MediaModality(detail.Modality) {
+			case genai.MediaModalityAudio:
 				usage.PromptTokensDetails.AudioTokens += int(detail.TokenCount)
+			case genai.MediaModalityImage, genai.MediaModalityVideo:
+				usage.PromptTokensDetails.ImageTokens += int(detail.TokenCount)
 			}
 		}
 	}
 
-	// Avoid double-charging cached modality tokens as regular audio.
+	// Avoid double-charging cached modality tokens as regular audio/image input.
 	// Cached tokens are billed separately via CachedTokens.
 	if len(meta.CacheTokensDetails) > 0 && usage.PromptTokensDetails != nil {
 		for _, detail := range meta.CacheTokensDetails {
 			if detail == nil {
 				continue
 			}
-			if genai.MediaModality(detail.Modality) == genai.MediaModalityAudio {
+			switch genai.MediaModality(detail.Modality) {
+			case genai.MediaModalityAudio:
 				usage.PromptTokensDetails.CachedAudioTokens += int(detail.TokenCount)
 				usage.PromptTokensDetails.AudioTokens -= int(detail.TokenCount)
 				if usage.PromptTokensDetails.AudioTokens < 0 {
 					usage.PromptTokensDetails.AudioTokens = 0
+				}
+			case genai.MediaModalityImage, genai.MediaModalityVideo:
+				usage.PromptTokensDetails.ImageTokens -= int(detail.TokenCount)
+				if usage.PromptTokensDetails.ImageTokens < 0 {
+					usage.PromptTokensDetails.ImageTokens = 0
 				}
 			}
 		}

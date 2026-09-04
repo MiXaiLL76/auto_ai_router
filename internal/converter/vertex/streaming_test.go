@@ -2,10 +2,12 @@ package vertex
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"strings"
 	"testing"
 
+	"github.com/mixaill76/auto_ai_router/internal/converter/openai"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/genai"
@@ -79,6 +81,48 @@ func TestTransformVertexStreamToOpenAI_AccumulatesDistinctSearchesAcrossChunks(t
 	))
 
 	assert.Contains(t, out.String(), `"server_tool_use":{"web_search_requests":2}`)
+}
+
+func TestTransformVertexStreamToOpenAI_PreservesLargeInlineImage(t *testing.T) {
+	imageBytes := bytes.Repeat([]byte{0xab}, 900*1024) // base64 makes the SSE line exceed 1 MiB
+	chunk := &genai.GenerateContentResponse{
+		Candidates: []*genai.Candidate{{
+			Content: &genai.Content{Role: "model", Parts: []*genai.Part{{
+				InlineData: &genai.Blob{MIMEType: "image/png", Data: imageBytes},
+			}}},
+		}},
+		UsageMetadata: &genai.GenerateContentResponseUsageMetadata{
+			PromptTokenCount:     10,
+			CandidatesTokenCount: 1120,
+			CandidatesTokensDetails: []*genai.ModalityTokenCount{{
+				Modality: genai.MediaModalityImage, TokenCount: 1120,
+			}},
+		},
+	}
+	data, err := json.Marshal(chunk)
+	require.NoError(t, err)
+	require.Greater(t, len(data), 1024*1024)
+
+	var out bytes.Buffer
+	require.NoError(t, TransformVertexStreamToOpenAI(
+		strings.NewReader("data: "+string(data)+"\n\ndata: [DONE]\n\n"),
+		"gemini-image",
+		&out,
+	))
+
+	line := strings.Split(out.String(), "\n")[0]
+	var converted openai.OpenAIStreamingChunk
+	require.NoError(t, json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &converted))
+	require.Len(t, converted.Choices, 1)
+	require.Len(t, converted.Choices[0].Delta.Images, 1)
+	require.NotNil(t, converted.Choices[0].Delta.Images[0].ImageURL)
+	assert.Equal(t,
+		"data:image/png;base64,"+base64.StdEncoding.EncodeToString(imageBytes),
+		converted.Choices[0].Delta.Images[0].ImageURL.URL,
+	)
+	require.NotNil(t, converted.Usage)
+	require.NotNil(t, converted.Usage.CompletionTokensDetails)
+	assert.Equal(t, 1120, converted.Usage.CompletionTokensDetails.ImageTokens)
 }
 
 func TestConvertVertexFunctionCallToStreamingOpenAI(t *testing.T) {

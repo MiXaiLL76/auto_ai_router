@@ -47,3 +47,43 @@ func TestGeminiFlashLiteImageBillingFromProviderResponse(t *testing.T) {
 	assert.InDelta(t, 0.036891, costs.ImageCost, 1e-12)
 	assert.InDelta(t, 0.0368928, costs.TotalCost, 1e-12)
 }
+
+func TestGeminiChatCachedImageBillingFromProviderResponse(t *testing.T) {
+	providerBody := []byte(`{
+		"candidates":[{"content":{"parts":[{"text":"ok"}]}}],
+		"usageMetadata":{
+			"promptTokenCount":1000,
+			"cachedContentTokenCount":500,
+			"candidatesTokenCount":0,
+			"totalTokenCount":1000,
+			"promptTokensDetails":[
+				{"modality":"TEXT","tokenCount":700},
+				{"modality":"IMAGE","tokenCount":300}
+			],
+			"cacheTokensDetails":[
+				{"modality":"TEXT","tokenCount":300},
+				{"modality":"IMAGE","tokenCount":200}
+			]
+		}
+	}`)
+	chatConverter := converter.New(config.ProviderTypeGemini, converter.RequestMode{ModelID: "gemini-image"})
+	convertedBody, err := chatConverter.ResponseTo(providerBody)
+	require.NoError(t, err)
+
+	usage := chatConverter.UsageFromResponse(convertedBody)
+	require.NotNil(t, usage)
+	assert.Equal(t, 500, usage.CachedInputTokens)
+	assert.Equal(t, 100, usage.ImageTokens)
+
+	price := &models.ModelPrice{
+		InputCostPerToken:        0.001,
+		InputCostPerImageToken:   0.005,
+		CacheReadInputTokensFree: true,
+	}
+	costs := price.CalculateCosts(usage)
+	require.NotNil(t, costs)
+	assert.InDelta(t, 400*0.001, costs.InputCost, 1e-12)
+	assert.InDelta(t, 100*0.005, costs.ImageCost, 1e-12)
+	assert.Zero(t, costs.CachedInputCost)
+	assert.InDelta(t, 0.9, costs.TotalCost, 1e-12)
+}

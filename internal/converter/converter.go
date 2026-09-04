@@ -213,7 +213,7 @@ func (c *ProviderConverter) ResponseTo(body []byte) ([]byte, error) {
 		if c.mode.IsImageGeneration {
 			if strings.Contains(strings.ToLower(c.mode.ModelID), "gemini") {
 				// Gemini image generation goes through chat API
-				return vertex.VertexChatResponseToOpenAIImage(body)
+				return vertex.VertexChatResponseToOpenAIImageWithModel(body, c.mode.responseModel())
 			}
 			// Imagen: native image generation endpoint
 			return vertex.VertexImageToOpenAI(body)

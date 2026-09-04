@@ -18,11 +18,16 @@ import (
 	goccyjson "github.com/goccy/go-json"
 )
 
-const maxSSEModelRewriteLineBytes = 1024 * 1024
+const maxSSEModelRewriteLineBytes = 64 * 1024 * 1024
+
+var existingModelOnlyResponseRoutes = map[string]struct{}{
+	"/v1/images/generations": {},
+	"/v1/images/edits":       {},
+}
 
 // modelBearingResponseRoutes is the product surface whose successful response
-// schema exposes a client-visible model. Image responses intentionally do not
-// participate because their OpenAI schema has no model field.
+// schema exposes a client-visible model and may receive one when absent. Images
+// use existingModelOnlyResponseRoutes above so GPT passthrough shapes stay unchanged.
 var modelBearingResponseRoutes = map[string]struct{}{
 	"/v1/chat/completions": {},
 	"/v1/completions":      {},
@@ -40,7 +45,9 @@ func normalizeSuccessfulResponseModel(body []byte, endpoint, publicModel string)
 	if publicModel == "" {
 		return body
 	}
-	if _, ok := modelBearingResponseRoutes[endpoint]; !ok {
+	_, modelBearing := modelBearingResponseRoutes[endpoint]
+	_, existingModelOnly := existingModelOnlyResponseRoutes[endpoint]
+	if !modelBearing && !existingModelOnly {
 		return body
 	}
 
@@ -53,6 +60,8 @@ func normalizeSuccessfulResponseModel(body []byte, endpoint, publicModel string)
 		if err := goccyjson.Unmarshal(rawModel, &currentModel); err == nil && currentModel == publicModel {
 			return body
 		}
+	} else if existingModelOnly {
+		return body
 	}
 	modelJSON, err := goccyjson.Marshal(publicModel)
 	if err != nil {
@@ -104,6 +113,7 @@ func normalizeSuccessfulResponseModelStream(
 		source:                      bufio.NewReader(reader),
 		publicModel:                 publicModel,
 		preserveNestedResponseModel: responseCompatRequestFromContext(logCtx.Request.Context()) != nil,
+		maxLineBytes:                maxSSEModelRewriteLineBytes,
 	}
 }
 
@@ -115,6 +125,7 @@ type responseModelStreamReader struct {
 	pendingErr                  error
 	line                        []byte
 	passthrough                 bool
+	maxLineBytes                int
 }
 
 func (r *responseModelStreamReader) Read(dst []byte) (int, error) {
@@ -139,7 +150,11 @@ func (r *responseModelStreamReader) Read(dst []byte) (int, error) {
 			}
 			continue
 		}
-		if len(r.line)+len(fragment) > maxSSEModelRewriteLineBytes {
+		maxLineBytes := r.maxLineBytes
+		if maxLineBytes <= 0 {
+			maxLineBytes = maxSSEModelRewriteLineBytes
+		}
+		if len(r.line)+len(fragment) > maxLineBytes {
 			r.pending = append(r.pending, r.line...)
 			r.pending = append(r.pending, fragment...)
 			r.line = r.line[:0]

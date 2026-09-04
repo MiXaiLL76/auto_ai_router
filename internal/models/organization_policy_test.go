@@ -102,7 +102,7 @@ func TestLoadOrganizationPolicies_FreePriceAndScopedCatalog(t *testing.T) {
 	registry, err := LoadOrganizationPolicies([]config.OrganizationPolicyConfig{{
 		OrganizationID:  "org-1",
 		PriceProfileID:  "profile-1",
-		ModelPricesLink: writePolicyPrices(t, `{"public/a":{"input_cost_per_token":0},"org/model":{"input_cost_per_token":0.5}}`),
+		ModelPricesLink: writePolicyPrices(t, `{"public/a":{"input_cost_per_token":0},"org/model":{"input_cost_per_token":0.5,"cache_read_input_tokens_free":true}}`),
 		ModelMappings:   map[string]string{"org/model": "route-b"},
 	}}, manager, validPolicyOptions())
 	require.NoError(t, err)
@@ -118,4 +118,6 @@ func TestLoadOrganizationPolicies_FreePriceAndScopedCatalog(t *testing.T) {
 	assert.Equal(t, "route-b", resolution.CanonicalModelID)
 	assert.Equal(t, "route-b", resolution.ModelID)
 	assert.Equal(t, "org/model", resolution.PriceModelID)
+	require.NotNil(t, resolution.ModelPrice)
+	assert.True(t, resolution.ModelPrice.CacheReadInputTokensFree)
 }

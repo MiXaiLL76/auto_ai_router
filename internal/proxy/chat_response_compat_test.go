@@ -1,10 +1,12 @@
 package proxy
 
 import (
+	"bufio"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -61,22 +63,66 @@ func TestNormalizeSuccessfulResponseModelStreamPreservesNestedModelForLiteLLM(t 
 	)
 }
 
-func TestNormalizeSuccessfulResponseModelStreamBoundsOversizedLines(t *testing.T) {
-	stream := "data: {\"model\":\"backend\",\"payload\":\"" +
-		strings.Repeat("x", maxSSEModelRewriteLineBytes) +
-		"\"}\n\n"
+func TestNormalizeSuccessfulResponseModelStreamRewritesImageSizedLines(t *testing.T) {
+	imageURL := "data:image/png;base64," + strings.Repeat("x", 2*1024*1024)
+	stream := "data: {\"model\":\"canonical\",\"choices\":[{\"delta\":{\"images\":[{\"image_url\":{\"url\":" +
+		strconv.Quote(imageURL) + "}}]}}]}\n\n"
 	request := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
-	logCtx := &RequestLogContext{Request: request, PublicModelID: "public"}
+	logCtx := &RequestLogContext{Request: request, PublicModelID: "google/gemini-3-pro-image-preview"}
 
 	result, err := io.ReadAll(normalizeSuccessfulResponseModelStream(
 		strings.NewReader(stream),
 		http.StatusOK,
 		logCtx,
-		"backend",
+		"canonical",
 	))
 
 	require.NoError(t, err)
+	line := strings.TrimSpace(strings.TrimPrefix(string(result), "data:"))
+	var payload struct {
+		Model   string `json:"model"`
+		Choices []struct {
+			Delta struct {
+				Images []struct {
+					ImageURL struct {
+						URL string `json:"url"`
+					} `json:"image_url"`
+				} `json:"images"`
+			} `json:"delta"`
+		} `json:"choices"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(line), &payload))
+	assert.Equal(t, "google/gemini-3-pro-image-preview", payload.Model)
+	require.Len(t, payload.Choices, 1)
+	require.Len(t, payload.Choices[0].Delta.Images, 1)
+	assert.Equal(t, imageURL, payload.Choices[0].Delta.Images[0].ImageURL.URL)
+}
+
+func TestResponseModelStreamReaderBoundsOversizedLines(t *testing.T) {
+	stream := "data: {\"model\":\"backend\",\"payload\":\"" + strings.Repeat("x", 2048) + "\"}\n\n"
+	reader := &responseModelStreamReader{
+		source:       bufio.NewReader(strings.NewReader(stream)),
+		publicModel:  "public",
+		maxLineBytes: 1024,
+	}
+
+	result, err := io.ReadAll(reader)
+
+	require.NoError(t, err)
 	assert.Equal(t, stream, string(result))
+}
+
+func TestNormalizeSuccessfulResponseModel_RewritesExistingImageModelOnly(t *testing.T) {
+	withModel := []byte(`{"created":1,"data":[],"model":"canonical"}`)
+	withoutModel := []byte(`{"created":1,"data":[]}`)
+
+	assert.JSONEq(t,
+		`{"created":1,"data":[],"model":"google/gemini-3-pro-image-preview"}`,
+		string(normalizeSuccessfulResponseModel(withModel, "/v1/images/generations", "google/gemini-3-pro-image-preview")),
+	)
+	assert.Equal(t, withoutModel,
+		normalizeSuccessfulResponseModel(withoutModel, "/v1/images/generations", "openai/gpt-image-1"),
+	)
 }
 
 func TestNormalizeSuccessfulResponseModelStreamPreservesErrorEventsAndFraming(t *testing.T) {

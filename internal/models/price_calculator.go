@@ -261,17 +261,20 @@ func CalculateTokenCosts(usage *converter.TokenUsage, price *ModelPrice) *conver
 
 	// Cached read tokens: prefer explicit cached price, fall back to LiteLLM alias,
 	// then fall back to regular rate (no discount known).
-	cachedInputCost := price.InputCostPerCachedToken
-	if cachedInputCost == 0 {
-		cachedInputCost = price.CacheReadInputTokenCost
-	}
-	if fullSessionCacheReadMatched {
-		cachedInputCost = fullSessionCacheReadRate
-	} else if promptTokens > tokenTiering200kThreshold && price.CacheReadInputTokenCostAbove200k > 0 {
-		cachedInputCost = price.CacheReadInputTokenCostAbove200k
-	}
-	if cachedInputCost == 0 {
-		cachedInputCost = inputCostPerToken
+	cachedInputCost := 0.0
+	if !price.CacheReadInputTokensFree {
+		cachedInputCost = price.InputCostPerCachedToken
+		if cachedInputCost == 0 {
+			cachedInputCost = price.CacheReadInputTokenCost
+		}
+		if fullSessionCacheReadMatched {
+			cachedInputCost = fullSessionCacheReadRate
+		} else if promptTokens > tokenTiering200kThreshold && price.CacheReadInputTokenCostAbove200k > 0 {
+			cachedInputCost = price.CacheReadInputTokenCostAbove200k
+		}
+		if cachedInputCost == 0 {
+			cachedInputCost = inputCostPerToken
+		}
 	}
 	cachedAudioTokens := converterutil.NonNegativeTokenCount(usage.CachedAudioInputTokens)
 	if cachedAudioTokens > cachedInputTokens {

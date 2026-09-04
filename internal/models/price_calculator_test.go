@@ -1372,6 +1372,35 @@ func TestCalculateTokenCosts_UncachedImageTokensBilledInFull(t *testing.T) {
 	assert.InDelta(t, wantInputSide, costs.InputCost+costs.CachedInputCost+costs.ImageCost, 1e-18)
 }
 
+func TestCalculateTokenCosts_ExplicitFreeCacheSuppressesFallbacks(t *testing.T) {
+	usage := &converter.TokenUsage{PromptTokens: 40_000, CachedInputTokens: 10_000}
+	price := &ModelPrice{
+		InputCostPerToken:               0.001,
+		InputCostPerTokenAbove32k:       0.002,
+		InputCostPerCachedToken:         0.0005,
+		CacheReadInputTokenCost:         0.0004,
+		CacheReadInputTokenCostAbove32k: 0.0002,
+		CacheReadInputTokensFree:        true,
+	}
+
+	costs := CalculateTokenCosts(usage, price)
+
+	require.NotNil(t, costs)
+	assert.InDelta(t, 30_000*0.002, costs.InputCost, 1e-12)
+	assert.Zero(t, costs.CachedInputCost)
+}
+
+func TestCalculateTokenCosts_MissingFreeFlagKeepsCacheFallback(t *testing.T) {
+	usage := &converter.TokenUsage{PromptTokens: 100, CachedInputTokens: 80}
+	price := &ModelPrice{InputCostPerToken: 0.001}
+
+	costs := CalculateTokenCosts(usage, price)
+
+	require.NotNil(t, costs)
+	assert.InDelta(t, 20*0.001, costs.InputCost, 1e-12)
+	assert.InDelta(t, 80*0.001, costs.CachedInputCost, 1e-12)
+}
+
 func TestCalculateTokenCosts_CachedImageOverlapKeepsDedicatedImageRate(t *testing.T) {
 	usage := &converter.TokenUsage{
 		PromptTokens:      100,
