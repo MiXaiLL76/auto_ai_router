@@ -151,7 +151,7 @@ func classifiedBadRequestError(rawBodies ...[]byte) APIError {
 		result.Message = "Invalid model"
 		result.Param = &param
 		result.Code = &code
-	case hasSignal(joined, "invalid argument", "invalid parameter", "invalid value", "unsupported parameter", "unknown parameter", "unrecognized parameter", "missing required", "required field", "must be", "should be", "does not support"):
+	case hasSignal(joined, "invalid argument", "invalid parameter", "invalid value", "unsupported parameter", "unknown parameter", "unrecognized parameter", "missing required", "required field", "must be", "should be", "does not support", "is not supported"):
 		code := "invalid_parameter"
 		result.Message = "Invalid request parameter"
 		result.Param = inferBadRequestParam(joined, providerParam)
@@ -301,6 +301,7 @@ func inferBadRequestParam(joined string, providerParam *string) *string {
 		"stream_options",
 		"temperature",
 		"top_p",
+		"logprobs",
 		"messages",
 		"input",
 		"tools",

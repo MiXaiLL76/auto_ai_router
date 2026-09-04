@@ -140,6 +140,19 @@ func TestMaskedUpstreamErrorBodyClassifiesBadRequest(t *testing.T) {
 			notContains: []string{"unsupported parameter", "this model"},
 		},
 		{
+			// Reproduces a real production body: DeepInfra-style
+			// "is not supported" phrasing (not "does not support") with an
+			// underscore-style error code ("invalid_parameter_error", not a
+			// literal "invalid parameter" substring) — both must still land
+			// in the invalid_parameter bucket instead of the generic fallback.
+			name:        "is not supported phrasing with underscore error code",
+			body:        "{\"error\":{\"code\":\"invalid_parameter_error\",\"message\":\"The parameters `logprobs` is not supported.\",\"param\":null,\"type\":\"invalid_request_error\"},\"id\":\"chatcmpl-c851a2c6-8a54-9ca4-9561-b3ff6163be27\"}",
+			wantMessage: "Invalid request parameter",
+			wantCode:    "invalid_parameter",
+			wantParam:   stringPtr("logprobs"),
+			notContains: []string{"chatcmpl", "c851a2c6"},
+		},
+		{
 			name:        "plain text fallback",
 			body:        `vendor stack id 012345`,
 			wantMessage: "Invalid request",
