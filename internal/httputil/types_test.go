@@ -35,10 +35,10 @@ func TestEffectiveHealthPriority(t *testing.T) {
 			want:       150,
 		},
 		{
-			name:       "fallback_priority is ignored — retry-only, must not reach primary grouping",
+			name:       "last-resort credential priority (999) propagates",
 			modelStats: ModelHealthStats{Priority: 0},
-			credStats:  CredentialHealthStats{FallbackPriority: 40},
-			want:       0,
+			credStats:  CredentialHealthStats{Priority: 999, LastResort: true},
+			want:       999,
 		},
 	}
 

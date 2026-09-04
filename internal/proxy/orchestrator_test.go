@@ -656,20 +656,18 @@ func TestProxyRequest_ResponsesRetryRecomputesProviderMode(t *testing.T) {
 	defer anthropicSrv.Close()
 
 	openaiCred := config.CredentialConfig{
-		Name:             "openai",
-		Type:             config.ProviderTypeOpenAI,
-		APIKey:           "key",
-		BaseURL:          openaiSrv.URL,
-		RPM:              100,
-		FallbackPriority: 10,
+		Name:    "openai",
+		Type:    config.ProviderTypeOpenAI,
+		APIKey:  "key",
+		BaseURL: openaiSrv.URL,
+		RPM:     100, Priority: 10,
 	}
 	anthropicCred := config.CredentialConfig{
-		Name:             "anthropic",
-		Type:             config.ProviderTypeAnthropic,
-		APIKey:           "key2",
-		BaseURL:          anthropicSrv.URL,
-		RPM:              100,
-		FallbackPriority: 20,
+		Name:    "anthropic",
+		Type:    config.ProviderTypeAnthropic,
+		APIKey:  "key2",
+		BaseURL: anthropicSrv.URL,
+		RPM:     100, Priority: 20,
 	}
 	prx := NewTestProxyBuilder().
 		WithCredentials(openaiCred, anthropicCred).
@@ -768,7 +766,7 @@ func TestProxyRequest_UnsupportedProManRequestRoutesToFallbackProxy(t *testing.T
 	prx := NewTestProxyBuilder().
 		WithCredentials(
 			config.CredentialConfig{Name: "proman", Type: config.ProviderTypeProMan, BaseURL: promanUpstream.URL, APIKey: "proman-key", RPM: 100, TPM: 10000},
-			config.CredentialConfig{Name: "fallback", Type: config.ProviderTypeProxy, BaseURL: fallback.URL, APIKey: "fallback-key", RPM: 100, TPM: 10000, IsFallback: true},
+			config.CredentialConfig{Name: "fallback", Type: config.ProviderTypeProxy, BaseURL: fallback.URL, APIKey: "fallback-key", RPM: 100, TPM: 10000, Priority: config.FallbackPriorityGroup},
 		).
 		Build()
 
@@ -817,7 +815,7 @@ func TestProxyRequest_UnsupportedProManRequestFallbackBlockedWhenPriceUnavailabl
 	prx := NewTestProxyBuilder().
 		WithCredentials(
 			config.CredentialConfig{Name: "proman", Type: config.ProviderTypeProMan, BaseURL: promanUpstream.URL, APIKey: "proman-key", RPM: 100, TPM: 10000},
-			config.CredentialConfig{Name: "fallback", Type: config.ProviderTypeProxy, BaseURL: fallback.URL, APIKey: "fallback-key", RPM: 100, TPM: 10000, IsFallback: true},
+			config.CredentialConfig{Name: "fallback", Type: config.ProviderTypeProxy, BaseURL: fallback.URL, APIKey: "fallback-key", RPM: 100, TPM: 10000, Priority: config.FallbackPriorityGroup},
 		).
 		Build()
 	kafka := &stubKafkaManager{enabled: true}

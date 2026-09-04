@@ -100,14 +100,18 @@ func TestProxyRequest_ResponsesAPIPreviousResponseIDUsesStoredCredential(t *test
 	assert.NotContains(t, w.Body.String(), "from-cred-1")
 }
 
-func testProxyCredential(name, baseURL string, isFallback bool) config.CredentialConfig {
+func testProxyCredential(name, baseURL string, lastResort bool) config.CredentialConfig {
+	priority := 0
+	if lastResort {
+		priority = config.FallbackPriorityGroup
+	}
 	return config.CredentialConfig{
-		Name:       name,
-		Type:       config.ProviderTypeProxy,
-		BaseURL:    baseURL,
-		APIKey:     "upstream-key-" + name,
-		RPM:        100,
-		TPM:        10000,
-		IsFallback: isFallback,
+		Name:     name,
+		Type:     config.ProviderTypeProxy,
+		BaseURL:  baseURL,
+		APIKey:   "upstream-key-" + name,
+		RPM:      100,
+		TPM:      10000,
+		Priority: priority,
 	}
 }

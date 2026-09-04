@@ -442,7 +442,7 @@
         const entry = {
           name,
           type: cred.type || 'unknown',
-          isFallback: !!cred.is_fallback,
+          isFallback: !!cred.last_resort || (cred.priority || 0) >= 999,
           isBanned: !!cred.is_banned,
           currentRPM: Number(cred.current_rpm || 0),
           currentTPM: Number(cred.current_tpm || 0),

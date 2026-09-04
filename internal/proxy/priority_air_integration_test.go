@@ -245,27 +245,25 @@ func TestPriorityGroupCascade_MixedTierUpstreamLocalCascade(t *testing.T) {
 	assert.EqualValues(t, 5, atomic.LoadInt32(&routerMidCalls), "traffic cascades to the tier-3 alternative, not router2's tier-5")
 }
 
-// TestPriorityGroupCascade_UpstreamIsFallbackCredentialExcludedForPrimaryConnection:
+// TestPriorityGroupCascade_UpstreamFallbackCredentialSurfacesAsLastResortTier:
 // router2's own upstream node has TWO credentials — one regular (serves "model-a") and
-// one is_fallback (serves "model-b" only). The main router's "router2" proxy credential
-// is itself NOT is_fallback, so the single poller applies the same rule as the old
-// model-snapshot path: an is_fallback upstream credential (reserved capacity for the
-// upstream's own fallback traffic) is excluded from a primary connection's aggregation.
-// model-b must NOT surface on router2, and a request for it must fail rather than be
-// silently routed onto reserved fallback capacity.
-func TestPriorityGroupCascade_UpstreamIsFallbackCredentialExcludedForPrimaryConnection(t *testing.T) {
+// one last-resort (serves "model-b" only, priority 999). Post-unification model-b is NOT
+// hidden: it surfaces on router2 at priority 999 and is routable via the local
+// last-resort tier — an all-last-resort upstream node no longer contributes zero
+// routable models.
+func TestPriorityGroupCascade_UpstreamFallbackCredentialSurfacesAsLastResortTier(t *testing.T) {
 	var router2CompletionCalls int32
 
 	router2Health := func() *httputil.ProxyHealthResponse {
 		return &httputil.ProxyHealthResponse{
 			Status: "healthy",
 			Credentials: map[string]httputil.CredentialHealthStats{
-				"router2-regular":  {Type: "openai", IsFallback: false, Priority: 1, LimitRPM: 1000, LimitTPM: 1000000},
-				"router2-fallback": {Type: "openai", IsFallback: true, Priority: 5, LimitRPM: 1000, LimitTPM: 1000000},
+				"router2-regular":  {Type: "openai", Priority: 1, LimitRPM: 1000, LimitTPM: 1000000},
+				"router2-fallback": {Type: "openai", Priority: config.FallbackPriorityGroup, LastResort: true, LimitRPM: 1000, LimitTPM: 1000000},
 			},
 			Models: map[string]httputil.ModelHealthStats{
 				"a": {Credential: "router2-regular", Model: "model-a", Priority: 1, LimitRPM: 1000, LimitTPM: 1000000},
-				"b": {Credential: "router2-fallback", Model: "model-b", Priority: 5, LimitRPM: 1000, LimitTPM: 1000000},
+				"b": {Credential: "router2-fallback", Model: "model-b", Priority: config.FallbackPriorityGroup, LimitRPM: 1000, LimitTPM: 1000000},
 			},
 		}
 	}
@@ -273,7 +271,7 @@ func TestPriorityGroupCascade_UpstreamIsFallbackCredentialExcludedForPrimaryConn
 	router2 := mockHealthAndCompletionServer(t, &router2CompletionCalls, router2Health, "response from router2")
 	defer router2.Close()
 
-	credRouter2 := config.CredentialConfig{Name: "router2", Type: config.ProviderTypeProxy, IsFallback: false, APIKey: "router2-key", BaseURL: router2.URL, RPM: 1000, TPM: 1000000}
+	credRouter2 := config.CredentialConfig{Name: "router2", Type: config.ProviderTypeProxy, APIKey: "router2-key", BaseURL: router2.URL, RPM: 1000, TPM: 1000000}
 
 	builder := NewTestProxyBuilder().WithCredentials(credRouter2)
 	rl := ratelimit.New()
@@ -286,19 +284,21 @@ func TestPriorityGroupCascade_UpstreamIsFallbackCredentialExcludedForPrimaryConn
 	c2 := credRouter2
 	UpdateStatsFromRemoteProxy(ctx, &c2, rl, logger, mm)
 
-	// model-a (regular upstream credential) surfaces; model-b (is_fallback-only) does not.
+	// model-a (regular upstream credential) surfaces at its tier; model-b (served only via
+	// the last-resort upstream credential) now surfaces too, at the last-resort group.
 	require.True(t, mm.HasModel("router2", "model-a"))
 	require.Equal(t, 1, mm.GetModelPriorityForCredential("model-a", "router2"))
-	require.False(t, mm.HasModel("router2", "model-b"), "a model served only via an is_fallback upstream credential must not surface on a primary connection")
-	require.Equal(t, 0, mm.GetModelPriorityForCredential("model-b", "router2"))
+	require.True(t, mm.HasModel("router2", "model-b"), "a model served only via a last-resort upstream credential now surfaces, tiered locally")
+	require.Equal(t, config.FallbackPriorityGroup, mm.GetModelPriorityForCredential("model-b", "router2"))
 
-	// End-to-end: model-a routes; model-b has no live credential and must fail.
+	// End-to-end: both route through router2. model-b via the local last-resort tier.
 	w := doPriorityTestRequest(t, prx, "model-a")
 	require.Equal(t, http.StatusOK, w.Code)
 	require.Contains(t, w.Body.String(), "response from router2")
 	assert.EqualValues(t, 1, atomic.LoadInt32(&router2CompletionCalls))
 
 	wb := doPriorityTestRequest(t, prx, "model-b")
-	require.NotEqual(t, http.StatusOK, wb.Code, "model-b must not be routable via a primary connection to an is_fallback-only upstream credential")
-	assert.EqualValues(t, 1, atomic.LoadInt32(&router2CompletionCalls))
+	require.Equal(t, http.StatusOK, wb.Code, "model-b routes via the local last-resort tier")
+	require.Contains(t, wb.Body.String(), "response from router2")
+	assert.EqualValues(t, 2, atomic.LoadInt32(&router2CompletionCalls))
 }

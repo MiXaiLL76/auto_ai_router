@@ -479,7 +479,7 @@ func TestOrganizationCredentialDenylistAllowsFallback(t *testing.T) {
 
 	deniedCredential := directDenylistCredential("denied-provider", deniedProvider.URL)
 	fallbackCredential := directDenylistCredential("fallback-provider", fallbackProvider.URL)
-	fallbackCredential.IsFallback = true
+	fallbackCredential.Priority = config.FallbackPriorityGroup
 	leaf := NewTestProxyBuilder().
 		WithCredentials(deniedCredential, fallbackCredential).
 		WithMasterKey("master-key").

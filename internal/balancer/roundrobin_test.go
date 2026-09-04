@@ -381,30 +381,35 @@ func TestRoundRobinCycling(t *testing.T) {
 	}
 }
 
-func TestNextForModel_SkipsFallback(t *testing.T) {
+func TestNextForModel_LastResortTierTriedAfterPrimary(t *testing.T) {
 	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
 	rl := ratelimit.New()
 
 	credentials := []config.CredentialConfig{
-		{Name: "primary1", Type: config.ProviderTypeOpenAI, IsFallback: false, RPM: 100, TPM: 10000},
-		{Name: "fallback1", Type: config.ProviderTypeOpenAI, IsFallback: true, RPM: 100, TPM: 10000},
-		{Name: "primary2", Type: config.ProviderTypeAnthropic, IsFallback: false, RPM: 100, TPM: 10000},
+		{Name: "primary1", Type: config.ProviderTypeOpenAI, RPM: 100, TPM: 10000},
+		{Name: "reserve1", Type: config.ProviderTypeOpenAI, Priority: config.FallbackPriorityGroup, RPM: 100, TPM: 10000},
+		{Name: "primary2", Type: config.ProviderTypeAnthropic, RPM: 100, TPM: 10000},
 	}
 
 	bal := New(credentials, f2b, rl)
 
-	// Should only return non-fallback credentials
+	// While tier 0 has live members, the last-resort credential is never picked.
 	seen := make(map[string]bool)
 	for range 4 {
 		cred, err := bal.NextForModel("gpt-4o")
 		require.NoError(t, err)
-		assert.False(t, cred.IsFallback)
 		seen[cred.Name] = true
 	}
-
 	assert.True(t, seen["primary1"])
 	assert.True(t, seen["primary2"])
-	assert.False(t, seen["fallback1"])
+	assert.False(t, seen["reserve1"], "last-resort tier not used while tier 0 is live")
+
+	// Ban both tier-0 credentials; the cascade drops to the last-resort tier.
+	bal.BanUntil("primary1", "gpt-4o", 500, time.Now().Add(time.Minute), "test")
+	bal.BanUntil("primary2", "gpt-4o", 500, time.Now().Add(time.Minute), "test")
+	cred, err := bal.NextForModel("gpt-4o")
+	require.NoError(t, err)
+	assert.Equal(t, "reserve1", cred.Name)
 }
 
 func TestNextForModel_BannedCredential(t *testing.T) {
@@ -551,234 +556,22 @@ func TestNextForModel_EmptyModelID(t *testing.T) {
 	assert.NotNil(t, cred)
 }
 
-func TestNextFallbackForModel_Success(t *testing.T) {
-	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
-	rl := ratelimit.New()
-
-	credentials := []config.CredentialConfig{
-		{Name: "proxy1", Type: config.ProviderTypeProxy, IsFallback: true, RPM: 100, TPM: 10000},
-	}
-
-	bal := New(credentials, f2b, rl)
-
-	cred, err := bal.NextFallbackForModel("gpt-4o")
-
-	assert.NoError(t, err)
-	assert.NotNil(t, cred)
-	assert.Equal(t, "proxy1", cred.Name)
-	assert.True(t, cred.IsFallback)
-}
-
-func TestNextFallbackForModel_SkipsNonFallback(t *testing.T) {
-	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
-	rl := ratelimit.New()
-
-	credentials := []config.CredentialConfig{
-		{Name: "proxy1", Type: config.ProviderTypeProxy, IsFallback: false, RPM: 100, TPM: 10000},
-		{Name: "proxy2", Type: config.ProviderTypeProxy, IsFallback: true, RPM: 100, TPM: 10000},
-	}
-
-	bal := New(credentials, f2b, rl)
-
-	cred, err := bal.NextFallbackForModel("gpt-4o")
-
-	assert.NoError(t, err)
-	assert.Equal(t, "proxy2", cred.Name)
-	assert.True(t, cred.IsFallback)
-}
-
-func TestNextFallbackForModel_AllowsNonProxyTypes(t *testing.T) {
-	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
-	rl := ratelimit.New()
-
-	credentials := []config.CredentialConfig{
-		{Name: "openai1", Type: config.ProviderTypeOpenAI, IsFallback: true, RPM: 100, TPM: 10000},
-		{Name: "proxy1", Type: config.ProviderTypeProxy, IsFallback: true, RPM: 100, TPM: 10000},
-	}
-
-	bal := New(credentials, f2b, rl)
-
-	cred, err := bal.NextFallbackForModel("gpt-4o")
-
-	assert.NoError(t, err)
-	assert.Equal(t, "openai1", cred.Name)
-	assert.Equal(t, config.ProviderTypeOpenAI, cred.Type)
-}
-
-func TestNextFallbackForModel_NoFallbacksAvailable(t *testing.T) {
-	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
-	rl := ratelimit.New()
-
-	credentials := []config.CredentialConfig{
-		{Name: "cred1", Type: config.ProviderTypeOpenAI, RPM: 100, TPM: 10000},
-	}
-
-	bal := New(credentials, f2b, rl)
-
-	cred, err := bal.NextFallbackForModel("gpt-4o")
-
-	assert.Error(t, err)
-	assert.Nil(t, cred)
-	assert.Equal(t, ErrNoCredentialsAvailable, err)
-}
-
-func TestNextFallbackProxyForModel_SkipsNonProxyTypes(t *testing.T) {
-	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
-	rl := ratelimit.New()
-
-	credentials := []config.CredentialConfig{
-		{Name: "openai1", Type: config.ProviderTypeOpenAI, IsFallback: true, RPM: 100, TPM: 10000},
-		{Name: "proxy1", Type: config.ProviderTypeProxy, IsFallback: true, RPM: 100, TPM: 10000},
-	}
-
-	bal := New(credentials, f2b, rl)
-
-	cred, err := bal.NextFallbackProxyForModel("gpt-4o")
-
-	assert.NoError(t, err)
-	assert.Equal(t, "proxy1", cred.Name)
-	assert.Equal(t, config.ProviderTypeProxy, cred.Type)
-}
-
-func TestNextFallbackForModel_SkipsBannedFallback(t *testing.T) {
-	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
-	rl := ratelimit.New()
-
-	credentials := []config.CredentialConfig{
-		{Name: "proxy1", Type: config.ProviderTypeProxy, IsFallback: true, RPM: 100, TPM: 10000},
-		{Name: "proxy2", Type: config.ProviderTypeProxy, IsFallback: true, RPM: 100, TPM: 10000},
-	}
-
-	bal := New(credentials, f2b, rl)
-
-	// Ban first proxy
-	bal.RecordResponse("proxy1", "gpt-4o", 500)
-	bal.RecordResponse("proxy1", "gpt-4o", 500)
-	bal.RecordResponse("proxy1", "gpt-4o", 500)
-
-	cred, err := bal.NextFallbackForModel("gpt-4o")
-
-	assert.NoError(t, err)
-	assert.Equal(t, "proxy2", cred.Name)
-}
-
-func TestNextFallbackForModel_RoundRobinFallbacks(t *testing.T) {
-	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
-	rl := ratelimit.New()
-
-	credentials := []config.CredentialConfig{
-		{Name: "proxy1", Type: config.ProviderTypeProxy, IsFallback: true, RPM: 100, TPM: 10000},
-		{Name: "proxy2", Type: config.ProviderTypeProxy, IsFallback: true, RPM: 100, TPM: 10000},
-		{Name: "openai1", Type: config.ProviderTypeOpenAI, RPM: 100, TPM: 10000},
-	}
-
-	bal := New(credentials, f2b, rl)
-
-	// First call should return proxy1
-	cred, err := bal.NextFallbackForModel("gpt-4o")
-	require.NoError(t, err)
-	assert.Equal(t, "proxy1", cred.Name)
-
-	// Second call should return proxy2
-	cred, err = bal.NextFallbackForModel("gpt-4o")
-	require.NoError(t, err)
-	assert.Equal(t, "proxy2", cred.Name)
-
-	// Third call should return proxy1 again (round robin)
-	cred, err = bal.NextFallbackForModel("gpt-4o")
-	require.NoError(t, err)
-	assert.Equal(t, "proxy1", cred.Name)
-}
-
-func TestNextFallbackForModel_RPMLimitExceeded(t *testing.T) {
-	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
-	rl := ratelimit.New()
-
-	credentials := []config.CredentialConfig{
-		{Name: "proxy1", Type: config.ProviderTypeProxy, IsFallback: true, RPM: 1, TPM: 10000},
-	}
-
-	bal := New(credentials, f2b, rl)
-
-	// First call succeeds
-	cred, err := bal.NextFallbackForModel("gpt-4o")
-	require.NoError(t, err)
-	assert.Equal(t, "proxy1", cred.Name)
-
-	// Second call should fail with rate limit exceeded
-	cred, err = bal.NextFallbackForModel("gpt-4o")
-	assert.Error(t, err)
-	assert.Nil(t, cred)
-	assert.Equal(t, ErrRateLimitExceeded, err)
-}
-
-func TestNextFallbackForModel_TPMLimitExceeded(t *testing.T) {
-	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
-	rl := ratelimit.New()
-
-	credentials := []config.CredentialConfig{
-		{Name: "proxy1", Type: config.ProviderTypeProxy, IsFallback: true, RPM: 100, TPM: 100},
-		{Name: "proxy2", Type: config.ProviderTypeProxy, IsFallback: true, RPM: 100, TPM: 100},
-	}
-
-	bal := New(credentials, f2b, rl)
-
-	// Consume TPM tokens to exceed the limit
-	rl.ConsumeTokens("proxy1", 100)
-	rl.ConsumeTokens("proxy2", 100)
-
-	// Both proxies should be exhausted
-	cred, err := bal.NextFallbackForModel("gpt-4o")
-	assert.Error(t, err)
-	assert.Nil(t, cred)
-	assert.Equal(t, ErrRateLimitExceeded, err)
-}
-
-// TestNextForModel_MixedPrimaryFallback_RateLimit verifies that when primary credentials
-// are TPM-exhausted and fallback credentials also are TPM-exhausted, ErrRateLimitExceeded
-// is returned (not ErrNoCredentialsAvailable). This was a bug where filtering out fallback
-// credentials set otherReasonsHit=true, masking the actual rate limit error.
-func TestNextForModel_MixedPrimaryFallback_RateLimit(t *testing.T) {
+func TestNextForModel_LastResortRateLimitPropagates(t *testing.T) {
 	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
 	rl := ratelimit.New()
 
 	credentials := []config.CredentialConfig{
 		{Name: "primary1", Type: config.ProviderTypeOpenAI, RPM: 100, TPM: 100},
-		{Name: "fallback1", Type: config.ProviderTypeProxy, IsFallback: true, RPM: 100, TPM: 100},
+		{Name: "reserve1", Type: config.ProviderTypeProxy, Priority: config.FallbackPriorityGroup, RPM: 100, TPM: 100},
 	}
 
 	bal := New(credentials, f2b, rl)
 	rl.ConsumeTokens("primary1", 100)
+	rl.ConsumeTokens("reserve1", 100)
 
-	// Primary is TPM-exhausted, but fallback exists → should get ErrRateLimitExceeded (not ErrNoCredentialsAvailable)
+	// Every tier is TPM-exhausted → ErrRateLimitExceeded, not ErrNoCredentialsAvailable.
 	_, err := bal.NextForModel("gpt-4o")
 	assert.Equal(t, ErrRateLimitExceeded, err)
-
-	// Fallback path: fallback TPM also exhausted → should still get ErrRateLimitExceeded
-	rl.ConsumeTokens("fallback1", 100)
-	_, err = bal.NextFallbackForModel("gpt-4o")
-	assert.Equal(t, ErrRateLimitExceeded, err)
-}
-
-func TestNextFallbackForModel_WithModelChecker(t *testing.T) {
-	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
-	rl := ratelimit.New()
-
-	credentials := []config.CredentialConfig{
-		{Name: "proxy1", Type: config.ProviderTypeProxy, IsFallback: true, RPM: 100, TPM: 10000},
-	}
-
-	bal := New(credentials, f2b, rl)
-
-	// Set model checker - should still return proxy (proxies ignore model checker)
-	mc := NewMockModelChecker(true)
-	mc.AddModel("proxy1", "gpt-4o")
-	bal.SetModelChecker(mc)
-
-	cred, err := bal.NextFallbackForModel("gpt-4o")
-
-	assert.NoError(t, err)
-	assert.Equal(t, "proxy1", cred.Name)
 }
 
 func TestRoundRobin_GetCredentialsSnapshot_NoRace(t *testing.T) {
@@ -837,82 +630,6 @@ func TestRoundRobin_GetCredentialsSnapshot_NoRace(t *testing.T) {
 	assert.Equal(t, "key1", finalSnapshot[0].APIKey)
 	assert.Equal(t, "key2", finalSnapshot[1].APIKey)
 	assert.Equal(t, "key3", finalSnapshot[2].APIKey)
-}
-
-// Fallback Configuration Validation Tests
-
-func TestValidateFallbackConfiguration_WithFallbacks(t *testing.T) {
-	// Test that balancer correctly counts fallback credentials
-	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
-	rl := ratelimit.New()
-
-	credentials := []config.CredentialConfig{
-		{
-			Name:       "proxy-a",
-			Type:       config.ProviderTypeProxy,
-			BaseURL:    "http://a.com",
-			RPM:        100,
-			IsFallback: false,
-		},
-		{
-			Name:       "proxy-b",
-			Type:       config.ProviderTypeProxy,
-			BaseURL:    "http://b.com",
-			RPM:        100,
-			IsFallback: true,
-		},
-		{
-			Name:       "proxy-c",
-			Type:       config.ProviderTypeProxy,
-			BaseURL:    "http://c.com",
-			RPM:        100,
-			IsFallback: true,
-		},
-	}
-
-	// Should initialize successfully with fallback credentials
-	bal := New(credentials, f2b, rl)
-	require.NotNil(t, bal)
-	assert.Equal(t, 3, len(bal.credentials))
-
-	// Verify fallback count
-	fallbackCount := 0
-	for _, cred := range bal.credentials {
-		if cred.IsFallback {
-			fallbackCount++
-		}
-	}
-	assert.Equal(t, 2, fallbackCount, "Should have 2 fallback credentials")
-}
-
-func TestValidateFallbackConfiguration_NoFallbacks(t *testing.T) {
-	// Test configuration with no fallbacks (normal case)
-	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
-	rl := ratelimit.New()
-
-	credentials := []config.CredentialConfig{
-		{
-			Name:    "proxy-a",
-			Type:    config.ProviderTypeProxy,
-			BaseURL: "http://a.com",
-			RPM:     100,
-		},
-		{
-			Name:    "proxy-b",
-			Type:    config.ProviderTypeProxy,
-			BaseURL: "http://b.com",
-			RPM:     100,
-		},
-	}
-
-	// Initialize balancer - no fallbacks to validate
-	bal := New(credentials, f2b, rl)
-	require.NotNil(t, bal)
-
-	// No credentials should have IsFallback set
-	for _, cred := range bal.credentials {
-		assert.False(t, cred.IsFallback, "No credentials should be marked as fallback")
-	}
 }
 
 func TestNextForModelExcluding_Basic(t *testing.T) {
@@ -996,33 +713,33 @@ func TestNextForModelExcluding_RoundRobin(t *testing.T) {
 	assert.Equal(t, "cred3", cred.Name)
 }
 
-func TestNextForModelExcluding_SkipsFallback(t *testing.T) {
+func TestNextForModelExcluding_PrefersLowerTierOverLastResort(t *testing.T) {
 	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
 	rl := ratelimit.New()
 
 	credentials := []config.CredentialConfig{
 		{Name: "cred1", APIKey: "key1", BaseURL: "http://test1.com", RPM: 100},
-		{Name: "fallback1", Type: config.ProviderTypeProxy, IsFallback: true, RPM: 100, TPM: 10000},
+		{Name: "reserve1", Type: config.ProviderTypeProxy, Priority: config.FallbackPriorityGroup, RPM: 100, TPM: 10000},
 		{Name: "cred2", APIKey: "key2", BaseURL: "http://test2.com", RPM: 100},
 	}
 
 	bal := New(credentials, f2b, rl)
 
-	// Exclude cred1, should skip fallback1 and return cred2
+	// Exclude cred1: cred2 (tier 0) still wins over reserve1 (tier 999).
 	exclude := map[string]bool{"cred1": true}
 	cred, err := bal.NextForModelExcluding("", exclude)
 	require.NoError(t, err)
 	assert.Equal(t, "cred2", cred.Name)
 }
 
-func TestNextRetryForModelExcluding_FallbackPriorityOrder(t *testing.T) {
+func TestNextRetryForModelExcluding_PriorityCascadeOrder(t *testing.T) {
 	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
 	rl := ratelimit.New()
 
 	credentials := []config.CredentialConfig{
-		{Name: "cheapgpt", Type: config.ProviderTypeAnthropic, APIKey: "key1", BaseURL: "http://cheapgpt.com", RPM: 100, FallbackPriority: 10},
-		{Name: "grant", Type: config.ProviderTypeBedrock, APIKey: "key2", BaseURL: "http://grant.com", RPM: 100, FallbackPriority: 30, Weight: 100},
-		{Name: "cometapi", Type: config.ProviderTypeAnthropic, APIKey: "key3", BaseURL: "http://cometapi.com", RPM: 100, FallbackPriority: 20},
+		{Name: "cheapgpt", Type: config.ProviderTypeAnthropic, APIKey: "key1", BaseURL: "http://cheapgpt.com", RPM: 100, Priority: 10},
+		{Name: "grant", Type: config.ProviderTypeBedrock, APIKey: "key2", BaseURL: "http://grant.com", RPM: 100, Priority: 30, Weight: 100},
+		{Name: "cometapi", Type: config.ProviderTypeAnthropic, APIKey: "key3", BaseURL: "http://cometapi.com", RPM: 100, Priority: 20},
 	}
 
 	bal := New(credentials, f2b, rl)
@@ -1043,85 +760,67 @@ func TestNextRetryForModelExcluding_FallbackPriorityOrder(t *testing.T) {
 	assert.Equal(t, "grant", cred.Name)
 }
 
-func TestNextRetryForModelExcluding_FallbackPriorityFallsBackToUnprioritized(t *testing.T) {
+func TestNextRetryForModelExcluding_CascadesToLowestLiveTier(t *testing.T) {
 	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
 	rl := ratelimit.New()
 
 	credentials := []config.CredentialConfig{
-		{Name: "cheapgpt", Type: config.ProviderTypeAnthropic, APIKey: "key1", BaseURL: "http://cheapgpt.com", RPM: 100, FallbackPriority: 10},
-		{Name: "cometapi", Type: config.ProviderTypeCometAPI, APIKey: "key2", BaseURL: "http://cometapi.com", RPM: 100, FallbackPriority: 20},
-		{Name: "cloudru", Type: config.ProviderTypeOpenAI, APIKey: "key3", BaseURL: "http://cloudru.com", RPM: 100},
+		{Name: "cheapgpt", Type: config.ProviderTypeAnthropic, APIKey: "key1", BaseURL: "http://cheapgpt.com", RPM: 100, Priority: 10},
+		{Name: "cometapi", Type: config.ProviderTypeCometAPI, APIKey: "key2", BaseURL: "http://cometapi.com", RPM: 100, Priority: 20},
+		{Name: "cloudru", Type: config.ProviderTypeOpenAI, APIKey: "key3", BaseURL: "http://cloudru.com", RPM: 100, Priority: 20},
 	}
 
 	bal := New(credentials, f2b, rl)
 
+	// tier 10 tried → the cascade moves to the next tier (20).
 	tried := map[string]bool{"cheapgpt": true}
 	cred, err := bal.NextRetryForModelExcluding("", &credentials[0], tried)
 	require.NoError(t, err)
-	assert.Equal(t, "cometapi", cred.Name)
+	assert.Contains(t, []string{"cometapi", "cloudru"}, cred.Name)
 
-	tried["cometapi"] = true
-	cred, err = bal.NextRetryForModelExcluding("", cred, tried)
+	tried[cred.Name] = true
+	next, err := bal.NextRetryForModelExcluding("", cred, tried)
 	require.NoError(t, err)
-	assert.Equal(t, "cloudru", cred.Name)
+	assert.Contains(t, []string{"cometapi", "cloudru"}, next.Name)
+	assert.NotEqual(t, cred.Name, next.Name)
 }
 
-func TestNextRetryForModelExcluding_UnprioritizedTailContinuesAcrossTypes(t *testing.T) {
-	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
-	rl := ratelimit.New()
-
-	credentials := []config.CredentialConfig{
-		{Name: "cheapgpt", Type: config.ProviderTypeAnthropic, APIKey: "key1", BaseURL: "http://cheapgpt.com", RPM: 100, FallbackPriority: 10},
-		{Name: "cometapi", Type: config.ProviderTypeCometAPI, APIKey: "key2", BaseURL: "http://cometapi.com", RPM: 100, FallbackPriority: 20},
-		{Name: "cloudru", Type: config.ProviderTypeOpenAI, APIKey: "key3", BaseURL: "http://cloudru.com", RPM: 100},
-		{Name: "yandex", Type: config.ProviderTypeAnthropic, APIKey: "key4", BaseURL: "http://yandex.com", RPM: 100},
-	}
-
-	bal := New(credentials, f2b, rl)
-
-	tried := map[string]bool{"cheapgpt": true, "cometapi": true}
-	cred, err := bal.NextRetryForModelExcluding("", &credentials[1], tried)
-	require.NoError(t, err)
-	assert.Equal(t, "cloudru", cred.Name)
-
-	tried["cloudru"] = true
-	cred, err = bal.NextRetryForModelExcluding("", cred, tried)
-	require.NoError(t, err)
-	assert.Equal(t, "yandex", cred.Name)
-}
-
-func TestNextRetryForModelExcluding_DefaultsToSameType(t *testing.T) {
+func TestNextRetryForModelExcluding_CrossesProviderTypes(t *testing.T) {
 	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
 	rl := ratelimit.New()
 
 	credentials := []config.CredentialConfig{
 		{Name: "openai-a", Type: config.ProviderTypeOpenAI, APIKey: "key1", BaseURL: "http://a.com", RPM: 100},
 		{Name: "anthropic-a", Type: config.ProviderTypeAnthropic, APIKey: "key2", BaseURL: "http://b.com", RPM: 100},
-		{Name: "openai-b", Type: config.ProviderTypeOpenAI, APIKey: "key3", BaseURL: "http://c.com", RPM: 100},
 	}
 
 	bal := New(credentials, f2b, rl)
 
+	// Same tier, different type: the retry may cross provider types now.
 	cred, err := bal.NextRetryForModelExcluding("", &credentials[0], map[string]bool{"openai-a": true})
 	require.NoError(t, err)
-	assert.Equal(t, "openai-b", cred.Name)
+	assert.Equal(t, "anthropic-a", cred.Name)
 }
 
-func TestNextRetryForModelExcluding_FallbackPrioritySkipsFallbackCredentials(t *testing.T) {
+func TestNextRetryForModelExcluding_LastResortAfterEveryTier(t *testing.T) {
 	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
 	rl := ratelimit.New()
 
 	credentials := []config.CredentialConfig{
-		{Name: "primary-a", Type: config.ProviderTypeOpenAI, APIKey: "key1", BaseURL: "http://a.com", RPM: 100, FallbackPriority: 10},
-		{Name: "reserve", Type: config.ProviderTypeAnthropic, APIKey: "key2", BaseURL: "http://b.com", RPM: 100, IsFallback: true, FallbackPriority: 20},
-		{Name: "primary-b", Type: config.ProviderTypeBedrock, APIKey: "key3", BaseURL: "http://c.com", RPM: 100, FallbackPriority: 30},
+		{Name: "primary-a", Type: config.ProviderTypeOpenAI, APIKey: "key1", BaseURL: "http://a.com", RPM: 100, Priority: 10},
+		{Name: "reserve", Type: config.ProviderTypeAnthropic, APIKey: "key2", BaseURL: "http://b.com", RPM: 100, Priority: config.FallbackPriorityGroup},
+		{Name: "primary-b", Type: config.ProviderTypeBedrock, APIKey: "key3", BaseURL: "http://c.com", RPM: 100, Priority: 30},
 	}
 
 	bal := New(credentials, f2b, rl)
 
 	cred, err := bal.NextRetryForModelExcluding("", &credentials[0], map[string]bool{"primary-a": true})
 	require.NoError(t, err)
-	assert.Equal(t, "primary-b", cred.Name)
+	assert.Equal(t, "primary-b", cred.Name, "tier 30 tried before the last-resort tier 999")
+
+	cred, err = bal.NextRetryForModelExcluding("", cred, map[string]bool{"primary-a": true, "primary-b": true})
+	require.NoError(t, err)
+	assert.Equal(t, "reserve", cred.Name)
 }
 
 func TestNextRetryForModelExcluding_UsesSeparateSWRRStatePerPriority(t *testing.T) {
@@ -1129,11 +828,11 @@ func TestNextRetryForModelExcluding_UsesSeparateSWRRStatePerPriority(t *testing.
 	rl := ratelimit.New()
 
 	credentials := []config.CredentialConfig{
-		{Name: "primary-a", Type: config.ProviderTypeOpenAI, APIKey: "key1", BaseURL: "http://a.com", RPM: 100, FallbackPriority: 10},
-		{Name: "tier-20-a", Type: config.ProviderTypeOpenAI, APIKey: "key2", BaseURL: "http://b.com", RPM: 100, FallbackPriority: 20, Weight: 2},
-		{Name: "tier-20-b", Type: config.ProviderTypeOpenAI, APIKey: "key3", BaseURL: "http://c.com", RPM: 100, FallbackPriority: 20},
-		{Name: "tier-30-a", Type: config.ProviderTypeBedrock, APIKey: "key4", BaseURL: "http://d.com", RPM: 100, FallbackPriority: 30, Weight: 3},
-		{Name: "tier-30-b", Type: config.ProviderTypeBedrock, APIKey: "key5", BaseURL: "http://e.com", RPM: 100, FallbackPriority: 30},
+		{Name: "primary-a", Type: config.ProviderTypeOpenAI, APIKey: "key1", BaseURL: "http://a.com", RPM: 100, Priority: 10},
+		{Name: "tier-20-a", Type: config.ProviderTypeOpenAI, APIKey: "key2", BaseURL: "http://b.com", RPM: 100, Priority: 20, Weight: 2},
+		{Name: "tier-20-b", Type: config.ProviderTypeOpenAI, APIKey: "key3", BaseURL: "http://c.com", RPM: 100, Priority: 20},
+		{Name: "tier-30-a", Type: config.ProviderTypeBedrock, APIKey: "key4", BaseURL: "http://d.com", RPM: 100, Priority: 30, Weight: 3},
+		{Name: "tier-30-b", Type: config.ProviderTypeBedrock, APIKey: "key5", BaseURL: "http://e.com", RPM: 100, Priority: 30},
 	}
 
 	bal := New(credentials, f2b, rl)
@@ -1298,7 +997,7 @@ func TestNextSameTypeForModelExcluding_AIRDoesNotReturnGenericProxy(t *testing.T
 	require.ErrorIs(t, err, ErrNoCredentialsAvailable)
 }
 
-func TestNextRetryForModelExcluding_ProxyLikeRetriesStayExactType(t *testing.T) {
+func TestNextRetryForModelExcluding_ProxyLikeRetryCrossesProxyTypes(t *testing.T) {
 	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
 	rl := ratelimit.New()
 
@@ -1309,11 +1008,10 @@ func TestNextRetryForModelExcluding_ProxyLikeRetriesStayExactType(t *testing.T) 
 
 	bal := New(credentials, f2b, rl)
 
-	_, err := bal.NextRetryForModelExcluding("gpt-cache", &credentials[0], map[string]bool{"air1": true})
-	require.ErrorIs(t, err, ErrNoCredentialsAvailable)
-
-	_, err = bal.NextRetryForModelExcluding("gpt-cache", &credentials[1], map[string]bool{"proxy1": true})
-	require.ErrorIs(t, err, ErrNoCredentialsAvailable)
+	// air1 tried → the retry cascade continues to proxy1 (a different proxy-like type).
+	cred, err := bal.NextRetryForModelExcluding("gpt-cache", &credentials[0], map[string]bool{"air1": true})
+	require.NoError(t, err)
+	assert.Equal(t, "proxy1", cred.Name)
 }
 
 // TestNextSameTypeForModelExcluding_VertexAIDoesNotReturnProxy verifies that same-type
@@ -1637,7 +1335,7 @@ func TestUpdateDBCredentials_FallbackPinnedToGroup999(t *testing.T) {
 	}, f2b, rl)
 
 	bal.UpdateDBCredentials([]config.CredentialConfig{
-		{Name: "db-fallback", APIKey: "k", RPM: 10, IsFallback: true},
+		{Name: "db-fallback", APIKey: "k", RPM: 10, Priority: config.FallbackPriorityGroup},
 		{Name: "db-primary", APIKey: "k", RPM: 10},
 	})
 
@@ -1674,7 +1372,7 @@ func TestUpdateDBCredentials_PreservesProviderScopeMetadata(t *testing.T) {
 	assert.True(t, dbSnapshot.ProviderScopeKnown)
 	assert.True(t, scope.NewContext([]string{"team-a"}, nil).AllowsExpression(dbSnapshot.ProviderScopeExpression))
 
-	dbProxy.IsFallback = true
+	dbProxy.APIKey = "rotated-key"
 	bal.UpdateDBCredentials([]config.CredentialConfig{dbProxy})
 	dbSnapshot = bal.GetCredentialsSnapshot()[1]
 	assert.False(t, dbSnapshot.ProviderScopeKnown)
@@ -1791,7 +1489,7 @@ func TestSelectPriorityGroupCandidate_ConcurrentRateLimitRaceCascadesToNextGroup
 			{absIdx: 0, cred: &r.credentials[0]},
 			{absIdx: 1, cred: &r.credentials[1]},
 		}
-		keyBase := r.schedKeyFor("", false, false, "", false, "")
+		keyBase := r.schedKeyFor("", "", false, "")
 
 		var victimCred *config.CredentialConfig
 		var victimFound bool
@@ -2247,33 +1945,6 @@ func TestNextForModel_NoPriorityFields_BehavesAsFlatPool(t *testing.T) {
 		require.NoError(t, err, "Request %d failed", i+1)
 		assert.Equal(t, expectedName, cred.Name, "Request %d: expected %s, got %s", i+1, expectedName, cred.Name)
 	}
-}
-
-// TestNextForModel_FallbackPriorityOnly_StaysFlatPrimaryPool is the #3 regression guard:
-// fallback_priority is a retry-only ordering knob. A config that sets fallback_priority
-// but never the explicit priority: field must keep serving primary traffic as one flat
-// weighted pool (matching pre-priority-groups behavior), NOT as hard exclusive tiers.
-func TestNextForModel_FallbackPriorityOnly_StaysFlatPrimaryPool(t *testing.T) {
-	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
-	rl := ratelimit.New()
-
-	credentials := []config.CredentialConfig{
-		{Name: "cred1", APIKey: "key1", BaseURL: "http://test1.com", RPM: 1000, FallbackPriority: 10},
-		{Name: "cred2", APIKey: "key2", BaseURL: "http://test2.com", RPM: 1000, FallbackPriority: 20},
-		{Name: "cred3", APIKey: "key3", BaseURL: "http://test3.com", RPM: 1000, FallbackPriority: 30},
-	}
-
-	bal := New(credentials, f2b, rl)
-
-	counts := map[string]int{}
-	for i := range 30 {
-		cred, err := bal.NextForModel("")
-		require.NoError(t, err, "request %d", i)
-		counts[cred.Name]++
-	}
-
-	assert.Equal(t, map[string]int{"cred1": 10, "cred2": 10, "cred3": 10}, counts,
-		"fallback_priority must not create primary-pool priority steps — expected an even flat split")
 }
 
 func TestMinRemainingBanForModel_IgnoresExcludedCredential(t *testing.T) {

@@ -129,16 +129,17 @@ func SetTried(ctx context.Context, tried map[string]bool) context.Context {
 	return context.WithValue(ctx, TriedCredentialsKey{}, tried)
 }
 
-// TryFallbackProxy attempts to retry the request on fallback proxy credentials.
-// Returns (success, fallbackReason) where fallbackReason explains why all fallbacks failed.
+// TryFallbackProxy is the extended retry phase for the proxy-forward path: after the
+// bounded same-request retry loop gives up, it keeps walking the priority cascade (every
+// remaining untried proxy/AIR credential, last-resort tiers included) up to
+// MaxFallbackAttempts hops. There is no separate fallback pool — this just continues the
+// one cascade with a larger attempt budget and owns writing the final response.
+// Returns (success, reason) where reason explains why the chain stopped.
 //
 // Protection against infinite loops:
 // - Tracks attempted credentials in request context (triedCreds)
 // - Prevents circular retries (proxy-a -> proxy-b -> proxy-a)
 // - Enforces MaxFallbackAttempts as an upper bound
-//
-// When a fallback returns a retryable error (429, 5xx), the next configured fallback
-// is tried automatically, exhausting the full chain before writing the final response.
 func (p *Proxy) TryFallbackProxy(
 	w http.ResponseWriter,
 	r *http.Request,
@@ -152,6 +153,14 @@ func (p *Proxy) TryFallbackProxy(
 ) (bool, string) {
 	ctx := r.Context()
 	triedCreds := GetTried(ctx)
+	// The credential we are retrying away from is never a candidate for the extended
+	// phase (the bounded loop already exhausted it). Mark it tried so the cascade skips
+	// straight to the next one instead of re-selecting it and bailing out.
+	if originalCredName != "" {
+		triedCreds[originalCredName] = true
+		ctx = SetTried(ctx, triedCreds)
+		r = r.WithContext(ctx)
+	}
 
 	maxAttempts := p.maxFallbackAttempts
 	if maxAttempts <= 0 {
@@ -167,10 +176,10 @@ func (p *Proxy) TryFallbackProxy(
 		if logCtx != nil {
 			visibility = logCtx.Scope
 		}
-		fallbackCred, err := p.balancer.NextFallbackProxyForModelExcludingScoped(modelID, triedCreds, visibility)
+		fallbackCred, err := p.balancer.NextProxyForModelExcludingScoped(modelID, triedCreds, visibility)
 		if err != nil {
 			if attempt == 0 {
-				p.logger.DebugContext(r.Context(), "No fallback proxy available for retry",
+				p.logger.DebugContext(r.Context(), "No further proxy credential available for retry",
 					"original_credential", originalCredName,
 					"model", modelID,
 					"original_status", originalStatus,
@@ -185,17 +194,6 @@ func (p *Proxy) TryFallbackProxy(
 				"model", modelID,
 				"original_credential", originalCredName,
 			)
-			break
-		}
-
-		if fallbackCred.Name == originalCredName {
-			if attempt == 0 {
-				p.logger.WarnContext(r.Context(), "Fallback credential is the same as original, skipping retry",
-					"credential", fallbackCred.Name,
-					"model", modelID,
-				)
-				exitReason = "fallback_is_same_credential"
-			}
 			break
 		}
 

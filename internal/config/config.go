@@ -16,11 +16,11 @@ import (
 const DefaultMaxAttempts = 3
 const DefaultBanDuration time.Duration = 0
 
-// FallbackPriorityGroup is the primary-selection priority group assigned to every
-// is_fallback credential. It is intentionally a large number so fallback credentials
-// always sort into the last priority group (tried after every explicit tier) and read
-// that way on the dashboard. Credentials may not set an explicit `priority:` alongside
-// `is_fallback: true` — this value is assigned automatically (see Config.Validate).
+// FallbackPriorityGroup is the priority group that means "last resort" — a credential
+// with priority >= this value is tried only after every lower-numbered tier is exhausted.
+// It is what the retired `is_fallback: true` YAML key folds into. There is no separate
+// fallback pool: a last-resort credential is just the tail of the weighted priority
+// cascade. `is_fallback` on the /health wire and in config YAML are deprecated aliases.
 const FallbackPriorityGroup = 999
 
 // DefaultModelPricesSyncInterval is how often model prices are re-fetched from model_prices_link.
@@ -753,13 +753,14 @@ type CredentialConfig struct {
 	// GenAI-compatible one (/v1beta/models/{model}:generateContent).
 	// Only valid when Type == ProviderTypeCometAPI and mutually exclusive
 	// with OpenAIProtocol. See EffectiveProviderType.
-	GoogleProtocol   bool `yaml:"google_proto,omitempty"`
-	RPM              int  `yaml:"rpm"`
-	TPM              int  `yaml:"tpm"`
-	Weight           int  `yaml:"weight"` // Default weighted round-robin weight for this credential (0 = 1)
-	FallbackPriority int  `yaml:"fallback_priority,omitempty"`
-	// Priority is the primary-selection priority group (lower selects first).
-	// See EffectivePriority for the resolution chain against FallbackPriority.
+	GoogleProtocol bool `yaml:"google_proto,omitempty"`
+	RPM            int  `yaml:"rpm"`
+	TPM            int  `yaml:"tpm"`
+	Weight         int  `yaml:"weight"` // Default weighted round-robin weight for this credential (0 = 1)
+	// Priority is the one and only selection-order axis (lower selects first). 0 is the
+	// default group (flat weighted pool). FallbackPriorityGroup (999) is the last-resort
+	// group. The retired `is_fallback: true` and `fallback_priority: N` YAML keys are
+	// accepted as deprecated input aliases (see UnmarshalYAML) that fold into this field.
 	Priority int `yaml:"priority,omitempty"`
 
 	ReasoningOnly           bool              `yaml:"reasoning_only,omitempty"`
@@ -778,9 +779,6 @@ type CredentialConfig struct {
 	Location        string `yaml:"location,omitempty"`
 	CredentialsFile string `yaml:"credentials_file,omitempty"`
 	CredentialsJSON string `yaml:"credentials_json,omitempty"`
-
-	// Proxy/AIR remote-router specific fields
-	IsFallback bool `yaml:"is_fallback,omitempty"`
 }
 
 func (c CredentialConfig) VisibleTo(visibility scope.Context) bool {
@@ -802,41 +800,45 @@ func (c CredentialConfig) IsProxyLike() bool {
 	return c.Type.IsProxyLike()
 }
 
-// EffectivePriority resolves the primary-selection priority group for this credential:
-// explicit Priority (if > 0), else FallbackPriority (if > 0, backward-compat with the
-// retry-only priority field), else 0 — the default group, equivalent to today's flat pool.
-// Lower values are selected before higher ones; see balancer priority-group selection.
-func (c CredentialConfig) EffectivePriority() int {
-	if c.Priority > 0 {
-		return c.Priority
-	}
-	if c.FallbackPriority > 0 {
-		return c.FallbackPriority
-	}
-	return 0
+// IsLastResort reports whether this credential sits in the last-resort priority group
+// (FallbackPriorityGroup or higher) — i.e. it is only tried after every lower-numbered
+// tier is exhausted. This is the post-unification replacement for the old is_fallback
+// flag; there is no separate fallback pool any more, a last-resort credential is just the
+// tail of the same weighted priority cascade.
+func (c CredentialConfig) IsLastResort() bool {
+	return c.Priority >= FallbackPriorityGroup
 }
 
-// NormalizeFallbackPriority pins an is_fallback credential to the last priority group
-// (FallbackPriorityGroup) so it sorts after every explicit tier in the primary cascade
-// and on the dashboard. The fallback pool itself is still a separate, flat weighted pool
-// (see the balancer) — this only fixes the group *number* the credential carries.
-//
-// Config.Validate calls this after its priority/fallback_priority validation; callers
-// that build credentials outside YAML (e.g. DB-sourced credentials that never pass
-// through Validate) must call it themselves before handing the credential to the
-// balancer — see NormalizeFallbackPriorities.
-func (c *CredentialConfig) NormalizeFallbackPriority() {
-	if c.IsFallback {
+// applyDeprecatedPriorityAliases folds the retired `is_fallback: true` and
+// `fallback_priority: N` YAML keys into Priority and logs a one-time deprecation warning.
+// priority is now the single selection-order axis:
+//   - is_fallback: true          => priority: 999 (FallbackPriorityGroup)
+//   - fallback_priority: N       => priority: N   (N now also grouped as a hard tier for
+//     the initial selection, not only retry ordering)
+func (c *CredentialConfig) applyDeprecatedPriorityAliases(isFallback bool, fallbackPriority int) error {
+	if fallbackPriority < 0 {
+		return fmt.Errorf("fallback_priority for credential '%s': must be >= 0", c.Name)
+	}
+	if isFallback && fallbackPriority > 0 {
+		return fmt.Errorf("credential '%s': is_fallback and fallback_priority are both deprecated aliases for priority and cannot be combined", c.Name)
+	}
+	switch {
+	case isFallback:
+		if c.Priority > 0 && c.Priority < FallbackPriorityGroup {
+			return fmt.Errorf("credential '%s': is_fallback: true is deprecated sugar for priority: %d and cannot be combined with a lower priority (%d)", c.Name, FallbackPriorityGroup, c.Priority)
+		}
 		c.Priority = FallbackPriorityGroup
+		slog.Warn("credential uses deprecated is_fallback: true — use priority: 999 instead",
+			"credential", c.Name, "applied_priority", FallbackPriorityGroup)
+	case fallbackPriority > 0:
+		if c.Priority > 0 {
+			return fmt.Errorf("credential '%s': cannot set both priority and the deprecated fallback_priority alias", c.Name)
+		}
+		c.Priority = fallbackPriority
+		slog.Warn("credential uses deprecated fallback_priority — use priority instead (it now also groups the initial selection into a hard tier)",
+			"credential", c.Name, "applied_priority", fallbackPriority)
 	}
-}
-
-// NormalizeFallbackPriorities applies NormalizeFallbackPriority to every credential in
-// the slice in place.
-func NormalizeFallbackPriorities(creds []CredentialConfig) {
-	for i := range creds {
-		creds[i].NormalizeFallbackPriority()
-	}
+	return nil
 }
 
 // EffectiveProviderType returns the ProviderType that should drive wire
@@ -867,8 +869,7 @@ func (c CredentialConfig) SameProviderIdentity(other CredentialConfig) bool {
 		c.APIKey == other.APIKey &&
 		c.AuthType == other.AuthType &&
 		c.OpenAIProtocol == other.OpenAIProtocol &&
-		c.GoogleProtocol == other.GoogleProtocol &&
-		c.IsFallback == other.IsFallback
+		c.GoogleProtocol == other.GoogleProtocol
 }
 
 // UnmarshalYAML implements custom unmarshaling for CredentialConfig with env variable support
@@ -937,10 +938,15 @@ func (c *CredentialConfig) UnmarshalYAML(value *yaml.Node) error {
 	if c.Weight, err = parseField(temp.Weight, 0, strconv.Atoi, "weight for credential '"+c.Name+"'"); err != nil {
 		return err
 	}
-	if c.FallbackPriority, err = parseField(temp.FallbackPriority, 0, strconv.Atoi, "fallback_priority for credential '"+c.Name+"'"); err != nil {
+	if c.Priority, err = parseField(temp.Priority, 0, strconv.Atoi, "priority for credential '"+c.Name+"'"); err != nil {
 		return err
 	}
-	if c.Priority, err = parseField(temp.Priority, 0, strconv.Atoi, "priority for credential '"+c.Name+"'"); err != nil {
+	deprecatedFallbackPriority, err := parseField(temp.FallbackPriority, 0, strconv.Atoi, "fallback_priority for credential '"+c.Name+"'")
+	if err != nil {
+		return err
+	}
+	deprecatedIsFallback, err := parseField(temp.IsFallback, false, strconv.ParseBool, "is_fallback for credential '"+c.Name+"'")
+	if err != nil {
 		return err
 	}
 	if c.ReasoningOnly, err = parseField(temp.ReasoningOnly, false, strconv.ParseBool, "reasoning_only for credential '"+c.Name+"'"); err != nil {
@@ -953,13 +959,12 @@ func (c *CredentialConfig) UnmarshalYAML(value *yaml.Node) error {
 		return err
 	}
 
-	// Resolve and parse boolean field
-	if c.IsFallback, err = parseField(temp.IsFallback, false, strconv.ParseBool, "is_fallback for credential '"+c.Name+"'"); err != nil {
+	// Fold the retired is_fallback / fallback_priority keys into Priority. Both are
+	// deprecated input aliases now — priority is the single selection-order axis.
+	if err := c.applyDeprecatedPriorityAliases(deprecatedIsFallback, deprecatedFallbackPriority); err != nil {
 		return err
 	}
-	if c.IsFallback && c.Priority > 0 {
-		return fmt.Errorf("priority for credential '%s': fallback credentials are always tried last and cannot set an explicit priority", c.Name)
-	}
+
 	// Copy models decoded via YAML anchors / inline definitions
 	c.Models = temp.Models
 
@@ -1931,24 +1936,9 @@ func (c *Config) Validate() error {
 		if cred.Weight < 0 {
 			return fmt.Errorf("credential %s: invalid weight: %d (must be 0 for default or positive number)", cred.Name, cred.Weight)
 		}
-		if cred.FallbackPriority < 0 {
-			return fmt.Errorf("credential %s: invalid fallback_priority: %d (must be >= 0)", cred.Name, cred.FallbackPriority)
-		}
-		if cred.IsFallback && cred.FallbackPriority > 0 {
-			return fmt.Errorf("credential %s: invalid fallback_priority: fallback credentials cannot set fallback_priority", cred.Name)
-		}
 		if cred.Priority < 0 {
 			return fmt.Errorf("credential %s: invalid priority: %d (must be >= 0)", cred.Name, cred.Priority)
 		}
-		if cred.Priority > 0 && cred.FallbackPriority > 0 {
-			return fmt.Errorf("credential %s: invalid priority: cannot set both priority and fallback_priority", cred.Name)
-		}
-		if cred.IsFallback && cred.Priority > 0 && cred.Priority != FallbackPriorityGroup {
-			return fmt.Errorf("credential %s: invalid priority: fallback credentials cannot set priority (always tried last, pinned to group %d)", cred.Name, FallbackPriorityGroup)
-		}
-		// Pin every fallback credential to the last priority group (shared with the
-		// DB-credential path via NormalizeFallbackPriority).
-		c.Credentials[i].NormalizeFallbackPriority()
 	}
 
 	for _, model := range c.Models {

@@ -21,7 +21,7 @@ func TestAggregateModelScopesFromHealth(t *testing.T) {
 		},
 	}
 
-	scopes := AggregateModelScopesFromHealth(health, false)
+	scopes := AggregateModelScopesFromHealth(health)
 
 	assert.True(t, scope.NewContext([]string{"team-a"}, nil).AllowsExpression(scopes["gpt-4"].ScopeExpression))
 	assert.False(t, scope.NewContext([]string{"team-b"}, nil).AllowsExpression(scopes["gpt-4"].ScopeExpression))
@@ -35,7 +35,7 @@ func TestAggregateProviderScopes_PreservesPathSpecificDeniedScopes(t *testing.T)
 		},
 	}
 
-	metadata := AggregateProviderScopesFromHealth(health, false)
+	metadata := AggregateProviderScopesFromHealth(health)
 
 	assert.True(t, scope.NewContext([]string{"team-a"}, nil).AllowsExpression(metadata.ScopeExpression))
 	assert.False(t, scope.NewContext([]string{"team-a", "blocked"}, nil).AllowsExpression(metadata.ScopeExpression))
@@ -52,7 +52,7 @@ func TestAggregateProviderScopes_PreservesChainedRequirements(t *testing.T) {
 		},
 	}
 
-	metadata := AggregateProviderScopesFromHealth(health, false)
+	metadata := AggregateProviderScopesFromHealth(health)
 
 	assert.True(t, scope.NewContext([]string{"team-a", "premium"}, nil).AllowsExpression(metadata.ScopeExpression))
 	assert.False(t, scope.NewContext([]string{"team-a"}, nil).AllowsExpression(metadata.ScopeExpression))
@@ -73,7 +73,7 @@ func TestAggregateModelScopes_PrefersModelExpression(t *testing.T) {
 		},
 	}
 
-	metadata := AggregateModelScopesFromHealth(health, false)["claude"]
+	metadata := AggregateModelScopesFromHealth(health)["claude"]
 
 	assert.False(t, scope.NewContext([]string{"team-a"}, nil).AllowsExpression(metadata.ScopeExpression))
 	assert.True(t, scope.NewContext([]string{"team-b"}, nil).AllowsExpression(metadata.ScopeExpression))
@@ -91,8 +91,8 @@ func TestAggregateProviderScopes_DistinguishesFalseAndUnrestricted(t *testing.T)
 		},
 	}
 
-	blocked := AggregateProviderScopesFromHealth(falseHealth, false)
-	unrestricted := AggregateProviderScopesFromHealth(unrestrictedHealth, false)
+	blocked := AggregateProviderScopesFromHealth(falseHealth)
+	unrestricted := AggregateProviderScopesFromHealth(unrestrictedHealth)
 
 	assert.False(t, scope.PublicContext().AllowsExpression(blocked.ScopeExpression))
 	assert.True(t, scope.PublicContext().AllowsExpression(unrestricted.ScopeExpression))
@@ -106,7 +106,7 @@ func TestAggregateProviderScopes_ManyUnrestrictedCredentialsRemainVisible(t *tes
 		health.Credentials[fmt.Sprintf("credential-%d", i)] = httputil.CredentialHealthStats{}
 	}
 
-	metadata := AggregateProviderScopesFromHealth(health, false)
+	metadata := AggregateProviderScopesFromHealth(health)
 
 	assert.True(t, scope.PublicContext().AllowsExpression(metadata.ScopeExpression))
 	assert.Len(t, metadata.ScopeExpression.Alternatives, 1)

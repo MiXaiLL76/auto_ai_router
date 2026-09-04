@@ -51,7 +51,7 @@ func TestGetRemoteModels_Caching(t *testing.T) {
 			}
 			_ = json.NewEncoder(w).Encode(&httputil.ProxyHealthResponse{
 				Credentials: map[string]httputil.CredentialHealthStats{
-					"upstream-primary": {Type: "openai", IsFallback: false},
+					"upstream-primary": {Type: "openai"},
 				},
 				Models: map[string]httputil.ModelHealthStats{
 					"m1": {Credential: "upstream-primary", Model: modelID},
@@ -125,7 +125,7 @@ func TestGetRemoteModelsWithError_AIRCredentialUsesRemoteHealth(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(&httputil.ProxyHealthResponse{
 			Credentials: map[string]httputil.CredentialHealthStats{
-				"upstream-air-openai": {Type: "openai", IsFallback: false},
+				"upstream-air-openai": {Type: "openai"},
 			},
 			Models: map[string]httputil.ModelHealthStats{
 				"m1": {Credential: "upstream-air-openai", Model: "gpt-air"},
@@ -193,7 +193,7 @@ func TestGetRemoteModels_CachingMultipleCredentials(t *testing.T) {
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(&httputil.ProxyHealthResponse{
 				Credentials: map[string]httputil.CredentialHealthStats{
-					"upstream-primary": {Type: "openai", IsFallback: false},
+					"upstream-primary": {Type: "openai"},
 				},
 				Models: map[string]httputil.ModelHealthStats{
 					"m1": {Credential: "upstream-primary", Model: "proxy1-model"},
@@ -213,7 +213,7 @@ func TestGetRemoteModels_CachingMultipleCredentials(t *testing.T) {
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(&httputil.ProxyHealthResponse{
 				Credentials: map[string]httputil.CredentialHealthStats{
-					"upstream-primary": {Type: "openai", IsFallback: false},
+					"upstream-primary": {Type: "openai"},
 				},
 				Models: map[string]httputil.ModelHealthStats{
 					"m1": {Credential: "upstream-primary", Model: "proxy2-model"},
@@ -264,7 +264,7 @@ func TestGetRemoteModels_CachingMultipleCredentials(t *testing.T) {
 	assert.Equal(t, 1, requestCountProxy2, "Should still be 1 - using cache")
 }
 
-func TestGetRemoteModelsWithError_FiltersRemoteHealthByFallbackParity(t *testing.T) {
+func TestGetRemoteModelsWithError_IngestsAllUpstreamTiersRegardlessOfFallback(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelError}))
 
 	server := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -273,8 +273,8 @@ func TestGetRemoteModelsWithError_FiltersRemoteHealthByFallbackParity(t *testing
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(&httputil.ProxyHealthResponse{
 				Credentials: map[string]httputil.CredentialHealthStats{
-					"primary-upstream":  {Type: "openai", IsFallback: false},
-					"fallback-upstream": {Type: "openai", IsFallback: true},
+					"primary-upstream":  {Type: "openai"},
+					"fallback-upstream": {Type: "openai", Priority: config.FallbackPriorityGroup},
 				},
 				Models: map[string]httputil.ModelHealthStats{
 					"m1": {Credential: "primary-upstream", Model: "primary-only"},
@@ -291,24 +291,23 @@ func TestGetRemoteModelsWithError_FiltersRemoteHealthByFallbackParity(t *testing
 
 	m := New(logger, 100, []config.ModelRPMConfig{})
 
+	// Post-unification both a primary and a last-resort connection discover the upstream's
+	// full catalogue. The balancer tiers the last-resort models locally (Design B); the
+	// model-snapshot path no longer hides them from a non-fallback connection.
 	primaryModels, err := m.GetRemoteModelsWithError(context.Background(), &config.CredentialConfig{
-		Name:       "proxy-primary",
-		Type:       config.ProviderTypeProxy,
-		BaseURL:    server.URL,
-		IsFallback: false,
+		Name:    "proxy-primary",
+		Type:    config.ProviderTypeProxy,
+		BaseURL: server.URL,
 	})
 	require.NoError(t, err)
-	assert.Equal(t, []string{"primary-only", "shared-model"}, modelIDs(primaryModels))
+	assert.ElementsMatch(t, []string{"fallback-only", "primary-only", "shared-model"}, modelIDs(primaryModels))
 
 	fallbackModels, err := m.GetRemoteModelsWithError(context.Background(), &config.CredentialConfig{
-		Name:       "proxy-fallback",
-		Type:       config.ProviderTypeProxy,
-		BaseURL:    server.URL,
-		IsFallback: true,
+		Name:    "proxy-fallback",
+		Type:    config.ProviderTypeProxy,
+		BaseURL: server.URL, Priority: config.FallbackPriorityGroup,
 	})
 	require.NoError(t, err)
-	// Fallback gateway includes ALL upstream credentials (both primary and fallback),
-	// so it sees all models: primary-only, fallback-only, and shared-model (deduplicated).
 	assert.ElementsMatch(t, []string{"fallback-only", "primary-only", "shared-model"}, modelIDs(fallbackModels))
 }
 
@@ -321,10 +320,10 @@ func TestGetRemoteModelsWithError_AggregatesRemoteHealthWeights(t *testing.T) {
 			w.Header().Set("Content-Type", "application/json")
 			_ = json.NewEncoder(w).Encode(&httputil.ProxyHealthResponse{
 				Credentials: map[string]httputil.CredentialHealthStats{
-					"primary-heavy":  {Type: "openai", IsFallback: false, Weight: 20},
-					"primary-model":  {Type: "openai", IsFallback: false, Weight: 3},
-					"primary-legacy": {Type: "openai", IsFallback: false},
-					"fallback":       {Type: "openai", IsFallback: true, Weight: 100},
+					"primary-heavy":  {Type: "openai", Weight: 20},
+					"primary-model":  {Type: "openai", Weight: 3},
+					"primary-legacy": {Type: "openai"},
+					"fallback":       {Type: "openai", Priority: config.FallbackPriorityGroup, Weight: 100},
 				},
 				Models: map[string]httputil.ModelHealthStats{
 					"m1": {Credential: "primary-heavy", Model: "gpt-4"},
@@ -342,20 +341,20 @@ func TestGetRemoteModelsWithError_AggregatesRemoteHealthWeights(t *testing.T) {
 	m := New(logger, 100, []config.ModelRPMConfig{})
 
 	primaryModels, err := m.GetRemoteModelsWithError(context.Background(), &config.CredentialConfig{
-		Name:       "proxy-primary",
-		Type:       config.ProviderTypeProxy,
-		BaseURL:    server.URL,
-		IsFallback: false,
+		Name:    "proxy-primary",
+		Type:    config.ProviderTypeProxy,
+		BaseURL: server.URL,
 	})
 	require.NoError(t, err)
 	assert.Equal(t, []string{"gpt-4"}, modelIDs(primaryModels))
-	assert.Equal(t, 26, m.GetModelWeightForCredential("gpt-4", "proxy-primary"))
+	// Post-unification the last-resort upstream credential's weight is summed in too
+	// (20 + 5 + 1 + 100), same as the fallback connection below.
+	assert.Equal(t, 126, m.GetModelWeightForCredential("gpt-4", "proxy-primary"))
 
 	fallbackModels, err := m.GetRemoteModelsWithError(context.Background(), &config.CredentialConfig{
-		Name:       "proxy-fallback",
-		Type:       config.ProviderTypeProxy,
-		BaseURL:    server.URL,
-		IsFallback: true,
+		Name:    "proxy-fallback",
+		Type:    config.ProviderTypeProxy,
+		BaseURL: server.URL, Priority: config.FallbackPriorityGroup,
 	})
 	require.NoError(t, err)
 	assert.Equal(t, []string{"gpt-4"}, modelIDs(fallbackModels))
@@ -376,7 +375,7 @@ func TestGetRemoteModelsWithError_ReplacesStaleHealthModelsAndWeights(t *testing
 		w.Header().Set("Content-Type", "application/json")
 		health := &httputil.ProxyHealthResponse{
 			Credentials: map[string]httputil.CredentialHealthStats{
-				"upstream": {Type: "openai", IsFallback: false, Weight: 2},
+				"upstream": {Type: "openai", Weight: 2},
 			},
 			Models: map[string]httputil.ModelHealthStats{
 				"fresh": {Credential: "upstream", Model: "fresh-model", Weight: 7},

@@ -18,7 +18,7 @@ monitoring:
 
 # region-gamma serves `chat-smart` as a capped tier 1 + uncapped tier 9 (same
 # backstop pattern as region-beta) and `chat-reason` as a single tier 2. It
-# also has an is_fallback credential for `chat-smart` — from the gateway's
+# also has a priority: 999 credential for `chat-smart` — from the gateway's
 # (non-fallback) point of view that credential must be EXCLUDED from
 # region-gamma's learned tiers and limits, so `gamma-reserve`'s capacity does
 # not inflate what the gateway thinks region-gamma can serve on its primary
@@ -53,7 +53,7 @@ credentials:
     api_key: "sk-mock"
     base_url: "http://mock:9100"
     rpm: 100000
-    is_fallback: true
+    priority: 999
 
 models:
   - { name: chat-smart, credential: gamma-1, tpm: 120 }
