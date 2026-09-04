@@ -388,16 +388,17 @@ func (p *Proxy) prepareRequestForCredential(
 		// converter: a client can send an already Chat-Completions-shaped body
 		// straight to /v1/chat/completions (or an SDK can emit "developer" for
 		// reasoning models), and this path never goes through that converter.
-		// Skip real OpenAI destinations: "developer" exists specifically for
-		// OpenAI's own reasoning models, and reports on whether OpenAI treats
-		// a plain "system" as a true equivalent for them are inconsistent —
-		// only rewrite it for OpenAI-wire-compatible third-party backends
-		// (DeepSeek via OpenRouter/Requesty/etc.) that reject "developer"
-		// outright and have no stake in preserving the distinction.
+		// Scoped to DeepSeek specifically (by model ID, not credential — the
+		// same OpenRouter/Requesty/DeepInfra/etc. credential also serves many
+		// other models): that's the only backend this rejection has actually
+		// been confirmed on. "developer" exists for OpenAI's own reasoning
+		// models in the first place, and reports on whether OpenAI treats a
+		// plain "system" as a true equivalent for them are inconsistent, so
+		// nothing else is touched until confirmed to need it too.
 		// proxyBody must stay in sync with body: TryFallbackProxy forwards
 		// proxyBody, not body, to fallback credentials.
 		normalizedBody, normalizedProxyBody := body, proxyBody
-		if !isRealOpenAICredential(cred) {
+		if isDeepSeekModel(realModelID) || isDeepSeekModel(modelID) {
 			normalizedBody = openai.NormalizeDeveloperRole(body)
 			normalizedProxyBody = openai.NormalizeDeveloperRole(proxyBody)
 		}

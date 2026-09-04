@@ -54,47 +54,52 @@ func TestIsCometAPICredential(t *testing.T) {
 	}
 }
 
-func TestIsRealOpenAICredential(t *testing.T) {
+func TestIsDeepSeekModel(t *testing.T) {
 	tests := []struct {
-		name string
-		cred *config.CredentialConfig
-		want bool
+		name    string
+		modelID string
+		want    bool
 	}{
 		{
-			name: "real openai host",
-			cred: &config.CredentialConfig{Type: config.ProviderTypeOpenAI, BaseURL: "https://api.openai.com/v1"},
-			want: true,
+			name:    "plain client-facing alias",
+			modelID: "deepseek-v4-flash-0731",
+			want:    true,
 		},
 		{
-			name: "real openai host without scheme",
-			cred: &config.CredentialConfig{Type: config.ProviderTypeOpenAI, BaseURL: "api.openai.com"},
-			want: true,
+			name:    "vendor-prefixed on openrouter",
+			modelID: "deepseek/deepseek-v4-flash-0731",
+			want:    true,
 		},
 		{
-			name: "openai-compatible third party (openrouter)",
-			cred: &config.CredentialConfig{Type: config.ProviderTypeOpenAI, BaseURL: "https://openrouter.ai/api/v1"},
-			want: false,
+			name:    "policy-aliased on requesty",
+			modelID: "policy/deepseek-v4-flash-0731-ateam",
+			want:    true,
 		},
 		{
-			name: "openai-compatible third party (deepinfra)",
-			cred: &config.CredentialConfig{Type: config.ProviderTypeOpenAI, BaseURL: "https://api.deepinfra.com/v1"},
-			want: false,
+			name:    "differently-cased on deepinfra",
+			modelID: "deepseek-ai/DeepSeek-V4-Flash-0731",
+			want:    true,
 		},
 		{
-			name: "wrong provider type on openai.com host",
-			cred: &config.CredentialConfig{Type: config.ProviderTypeAnthropic, BaseURL: "https://api.openai.com/v1"},
-			want: false,
+			name:    "unrelated model on the same OpenAI-compatible credential",
+			modelID: "glm-5.3",
+			want:    false,
 		},
 		{
-			name: "nil credential",
-			cred: nil,
-			want: false,
+			name:    "real openai model",
+			modelID: "gpt-5.6-sol",
+			want:    false,
+		},
+		{
+			name:    "empty",
+			modelID: "",
+			want:    false,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, isRealOpenAICredential(tt.cred))
+			assert.Equal(t, tt.want, isDeepSeekModel(tt.modelID))
 		})
 	}
 }

@@ -457,10 +457,10 @@ func TestPrepareRequestForCredential_ChatCompletionsNormalizesDeveloperRole(t *t
 }
 
 // TestPrepareRequestForCredential_ChatCompletionsPreservesDeveloperRoleForRealOpenAI
-// verifies the normalization is skipped for a genuine OpenAI credential
-// (api.openai.com): "developer" exists specifically for OpenAI's own
-// reasoning models, so a client that deliberately sent it must not have it
-// silently rewritten to "system" for that destination.
+// verifies the normalization is skipped for a genuine OpenAI model
+// (gpt-5.6-sol, not DeepSeek): "developer" exists specifically for OpenAI's
+// own reasoning models, so a client that deliberately sent it must not have
+// it silently rewritten to "system".
 func TestPrepareRequestForCredential_ChatCompletionsPreservesDeveloperRoleForRealOpenAI(t *testing.T) {
 	prx := NewTestProxyBuilder().Build()
 	cred := config.CredentialConfig{Name: "openai-real", Type: config.ProviderTypeOpenAI, APIKey: "key", BaseURL: "https://api.openai.com/v1", RPM: 100}
@@ -494,6 +494,39 @@ func TestPrepareRequestForCredential_ChatCompletionsPreservesDeveloperRoleForRea
 	require.NoError(t, json.Unmarshal(prepared.proxyBody, &forwarded))
 	forwardedMessages := forwarded["messages"].([]interface{})
 	require.Equal(t, "developer", forwardedMessages[0].(map[string]interface{})["role"])
+}
+
+// TestPrepareRequestForCredential_ChatCompletionsPreservesDeveloperRoleForNonDeepSeekModel
+// verifies the fix is scoped to DeepSeek specifically, not to "anything
+// that isn't real OpenAI": another model (glm-5.3) reached through the very
+// same OpenAI-compatible OpenRouter credential must keep "developer"
+// untouched too, since this rejection has only been confirmed for DeepSeek.
+func TestPrepareRequestForCredential_ChatCompletionsPreservesDeveloperRoleForNonDeepSeekModel(t *testing.T) {
+	prx := NewTestProxyBuilder().Build()
+	cred := config.CredentialConfig{Name: "openrouter", Type: config.ProviderTypeOpenAI, APIKey: "key", BaseURL: "https://openrouter.ai/api/v1", RPM: 100}
+	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	body := []byte(`{"model":"glm-5.3","messages":[{"role":"developer","content":"You are a pirate."},{"role":"user","content":"Hello"}]}`)
+
+	prepared, err := prx.prepareRequestForCredential(
+		req,
+		body,
+		body,
+		"z-ai/glm-5.3",
+		"z-ai/glm-5.3",
+		"/v1/chat/completions",
+		false,
+		&cred,
+		false,
+		false,
+		false,
+	)
+
+	require.NoError(t, err)
+
+	var direct map[string]interface{}
+	require.NoError(t, json.Unmarshal(prepared.body, &direct))
+	directMessages := direct["messages"].([]interface{})
+	require.Equal(t, "developer", directMessages[0].(map[string]interface{})["role"])
 }
 
 func TestPrepareRequestForCredential_MessagesKeepsOriginalProxyRequest(t *testing.T) {
