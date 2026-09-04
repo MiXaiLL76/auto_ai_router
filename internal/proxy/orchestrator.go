@@ -384,7 +384,14 @@ func (p *Proxy) prepareRequestForCredential(
 		return req, nil
 	}
 	if !isResponsesAPI {
-		req.body = openai.ReplaceBodyParam(realModelID, body)
+		// Normalize "developer" role here too, not just in the Responses→Chat
+		// converter: a client can send an already Chat-Completions-shaped body
+		// straight to /v1/chat/completions (or an SDK can emit "developer" for
+		// reasoning models), and this path never goes through that converter.
+		// proxyBody must stay in sync with body: TryFallbackProxy forwards
+		// proxyBody, not body, to fallback credentials.
+		req.body = openai.NormalizeDeveloperRole(openai.ReplaceBodyParam(realModelID, body))
+		req.proxyBody = openai.NormalizeDeveloperRole(proxyBody)
 		return req, nil
 	}
 

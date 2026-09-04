@@ -203,6 +203,53 @@ func ReplaceBodyParam(modelID string, body []byte) []byte {
 	return body
 }
 
+// NormalizeDeveloperRole downgrades a "developer"-role Chat Completions message
+// to "system" — the same rename the Responses→Chat converter already applies
+// (see converter/responses.convertMessage), but for requests that arrive
+// already Chat-Completions-shaped and never go through that converter (a
+// client calling /v1/chat/completions directly, or one of the OpenAI SDKs
+// that emits "developer" for reasoning models). "developer" is OpenAI's own
+// rename of "system"; most Chat Completions providers reached through this
+// generic path (DeepSeek and other OpenAI-compatible backends) only
+// recognize the classic role set and reject "developer" outright. Returns
+// body unchanged if there's no "messages" array or nothing to rename.
+func NormalizeDeveloperRole(body []byte) []byte {
+	var data map[string]any
+	if err := json.Unmarshal(body, &data); err != nil {
+		return body
+	}
+
+	messagesRaw, ok := data["messages"]
+	if !ok {
+		return body
+	}
+	messages, ok := messagesRaw.([]any)
+	if !ok {
+		return body
+	}
+
+	changed := false
+	for _, m := range messages {
+		msg, ok := m.(map[string]any)
+		if !ok {
+			continue
+		}
+		if role, ok := msg["role"].(string); ok && role == "developer" {
+			msg["role"] = "system"
+			changed = true
+		}
+	}
+	if !changed {
+		return body
+	}
+
+	result, err := json.Marshal(data)
+	if err != nil {
+		return body
+	}
+	return result
+}
+
 // ConvertWebSearchTools normalises non-function tools in an OpenAI Chat
 // Completions request body.
 //
