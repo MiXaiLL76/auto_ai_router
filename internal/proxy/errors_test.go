@@ -221,54 +221,6 @@ func TestMaskedUpstreamErrorBodyKeepsGenericNonBadRequest(t *testing.T) {
 	}
 }
 
-func TestExtractQuotedInvalidField(t *testing.T) {
-	tests := []struct {
-		name    string
-		signals []string
-		want    *string
-	}{
-		{
-			name:    "dynamic nested path",
-			signals: []string{"Invalid 'output[1].type': 'input_file'. Supported values are: 'input_text', 'input_image'."},
-			want:    stringPtr("output[1].type"),
-		},
-		{
-			name:    "case-insensitive marker",
-			signals: []string{"invalid 'tool_choice.type': unsupported value"},
-			want:    stringPtr("tool_choice.type"),
-		},
-		{
-			name:    "picks first matching signal",
-			signals: []string{"generic failure", "Invalid 'foo': bar"},
-			want:    stringPtr("foo"),
-		},
-		{
-			name:    "no marker present",
-			signals: []string{"something else went wrong"},
-			want:    nil,
-		},
-		{
-			name:    "marker with no closing quote",
-			signals: []string{"Invalid 'unterminated"},
-			want:    nil,
-		},
-		{
-			name:    "empty quoted field",
-			signals: []string{"Invalid '': something"},
-			want:    nil,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := extractQuotedInvalidField(tt.signals)
-			if !equalStringPtr(got, tt.want) {
-				t.Fatalf("got %v, want %v", got, tt.want)
-			}
-		})
-	}
-}
-
 // TestWriteValidationError_HonorsArbitraryStatusCode guards against
 // writeValidationError silently collapsing a future non-413 StatusCode (e.g.
 // 415) to 400 while statusForValidationError — what callers log as

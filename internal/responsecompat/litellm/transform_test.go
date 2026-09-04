@@ -162,6 +162,45 @@ func TestTransformError(t *testing.T) {
 	assert.NotContains(t, string(result.Body), "provider.internal")
 }
 
+// TestTransformError_BadRequestPreservesRouterClassification reproduces the
+// real production gap: the router's own already-classified 400 body (what
+// maskedUpstreamErrorBody produces natively, e.g. for a rejected "logprobs"
+// parameter) must survive this compatibility layer with its message/code/
+// param intact, instead of being discarded for the old hardcoded generic
+// "Request failed" / param:null / code:"400".
+func TestTransformError_BadRequestPreservesRouterClassification(t *testing.T) {
+	result := New().Transform(Context{}, Response{
+		StatusCode: http.StatusBadRequest,
+		Headers:    http.Header{"Content-Type": {"application/json"}},
+		Body:       []byte(`{"error":{"message":"Invalid request parameter","type":"invalid_request_error","param":"logprobs","code":"invalid_parameter"}}`),
+	})
+
+	assert.Equal(t, http.StatusBadRequest, result.StatusCode)
+	var body map[string]any
+	require.NoError(t, json.Unmarshal(result.Body, &body))
+	errorBody := body["error"].(map[string]any)
+	assert.Equal(t, "Invalid request parameter", errorBody["message"])
+	assert.Equal(t, "invalid_parameter", errorBody["code"])
+	assert.Equal(t, "logprobs", errorBody["param"])
+}
+
+// TestTransformError_BadRequestNeverLeaksRawUpstreamText guards the security
+// property TestTransformError already checks for 429: a raw, untrusted
+// upstream 400 body must never reach the client verbatim either, even
+// though 400 is now classified instead of always-generic.
+func TestTransformError_BadRequestNeverLeaksRawUpstreamText(t *testing.T) {
+	result := New().Transform(Context{}, Response{
+		StatusCode: http.StatusBadRequest,
+		Headers:    http.Header{"Content-Type": {"application/json"}},
+		Body:       []byte(`{"error":{"message":"Alibaba credential prod-qwen misconfigured; see https://provider.internal/setup","type":"provider_error"}}`),
+	})
+
+	assert.Equal(t, http.StatusBadRequest, result.StatusCode)
+	assert.NotContains(t, string(result.Body), "Alibaba")
+	assert.NotContains(t, string(result.Body), "prod-qwen")
+	assert.NotContains(t, string(result.Body), "provider.internal")
+}
+
 func TestTransformDropsRoutingMetadata(t *testing.T) {
 	result := New().Transform(Context{
 		Endpoint:       "/v1/chat/completions",

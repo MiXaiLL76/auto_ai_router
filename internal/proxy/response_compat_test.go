@@ -33,7 +33,15 @@ func TestResponseCompatibilityWriterTransformsInternalError(t *testing.T) {
 	assert.Empty(t, recorder.Header().Get("x-litellm-call-id"))
 	var body map[string]any
 	require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &body))
-	assert.Equal(t, "400", body["error"].(map[string]any)["code"])
+	// A 400 now goes through the same signal-based classifier as native mode
+	// (see upstreamerror.ClassifyBadRequest); this body's text doesn't match
+	// any known pattern, so it lands on the same generic default native mode
+	// would also produce for it — "invalid_request", not the old hardcoded
+	// "400" — and the raw "bad request" text must never leak into the
+	// client-facing message either way.
+	assert.Equal(t, "invalid_request", body["error"].(map[string]any)["code"])
+	assert.Equal(t, "Invalid request", body["error"].(map[string]any)["message"])
+	assert.NotContains(t, recorder.Body.String(), "bad request")
 }
 
 func TestResponseCompatibilityWriterTransformsStream(t *testing.T) {
