@@ -3,6 +3,7 @@ package router
 
 import (
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"runtime/debug"
@@ -10,14 +11,12 @@ import (
 	"sync/atomic"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
-	"github.com/mixaill76/auto_ai_router/internal/models"
 	"github.com/mixaill76/auto_ai_router/internal/proxy"
 	"github.com/mixaill76/auto_ai_router/internal/proxy/webui"
 )
 
 type Router struct {
 	proxy            *proxy.Proxy
-	modelManager     *models.Manager
 	monitoringConfig *config.MonitoringConfig
 	appConfig        *config.Config
 	logger           *slog.Logger
@@ -99,10 +98,9 @@ func (r *Router) SetReady(v bool) {
 	r.isReady.Store(v)
 }
 
-func New(p *proxy.Proxy, modelManager *models.Manager, monitoringConfig *config.MonitoringConfig, logger *slog.Logger, appConfig *config.Config) *Router {
+func New(p *proxy.Proxy, monitoringConfig *config.MonitoringConfig, logger *slog.Logger, appConfig *config.Config) *Router {
 	return &Router{
 		proxy:            p,
-		modelManager:     modelManager,
 		monitoringConfig: monitoringConfig,
 		appConfig:        appConfig,
 		logger:           logger,
@@ -247,72 +245,32 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	}
 }
 
+// XXX(mmskv): what's the point of limiting what can be seen here if /health exposes all topology
 func (r *Router) handleModels(w http.ResponseWriter, req *http.Request) {
+	if r.proxy == nil {
+		proxy.WriteErrorServiceUnavailable(w, "Service unavailable")
+		return
+	}
 	tokenInfo, visibility, ok := r.proxy.AuthenticateClientRequestScoped(w, req)
 	if !ok {
 		return
 	}
 
-	var modelsResp models.ModelsResponse
-	var organizationPolicy *models.OrganizationPolicy
-	if r.proxy != nil {
-		var dangling bool
-		organizationPolicy, dangling = r.proxy.OrganizationPolicyForTokenInfo(tokenInfo)
-		if dangling {
-			proxy.WriteErrorForbidden(w, "Forbidden")
-			return
-		}
+	modelsResp, err := r.proxy.ListModelsForToken(tokenInfo, visibility)
+	if errors.Is(err, proxy.ErrOrganizationGone) {
+		proxy.WriteErrorForbidden(w, "Forbidden")
+		return
 	}
-	if r.modelManager != nil {
-		includeGroups := strings.EqualFold(req.URL.Query().Get("include_model_access_groups"), "true")
-		switch {
-		case organizationPolicy != nil && includeGroups:
-			modelsResp = r.modelManager.GetAllModelsWithAccessGroupsScopedForOrganization(visibility, organizationPolicy)
-		case organizationPolicy != nil:
-			modelsResp = r.modelManager.GetAllModelsScopedForOrganization(visibility, organizationPolicy)
-		case includeGroups:
-			modelsResp = r.modelManager.GetAllModelsWithAccessGroupsScoped(visibility)
-		default:
-			modelsResp = r.modelManager.GetAllModelsScoped(visibility)
-		}
-	} else {
-		modelsResp = models.ModelsResponse{Object: "list", Data: []models.Model{}}
-	}
-	if r.proxy != nil {
-		filtered := make([]models.Model, 0, len(modelsResp.Data))
-		for _, model := range modelsResp.Data {
-			// Organization catalogs already project only allowlisted, priced
-			// models (projectOrganizationCatalog), so the extra gates below
-			// apply to the default surface only.
-			if organizationPolicy == nil && !r.proxy.IsModelListablePrice(model.ID) {
-				continue
-			}
-			allowed := true
-			if tokenInfo != nil {
-				if organizationPolicy != nil {
-					allowed = r.proxy.IsOrganizationModelAllowedForToken(tokenInfo, organizationPolicy, model.ID)
-				} else {
-					allowed = r.proxy.IsModelAllowedForTokenListing(tokenInfo, model.ID)
-				}
-			}
-			if allowed {
-				filtered = append(filtered, model)
-			}
-		}
-		modelsResp.Data = filtered
+	if err != nil {
+		proxy.WriteErrorInternal(w, "Internal Server Error")
+		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 
-	if err := json.NewEncoder(w).Encode(modelsResp); err != nil {
-		if r.logger != nil {
-			r.logger.ErrorContext(req.Context(), "Failed to encode models response",
-				"endpoint", "/v1/models",
-				"error", err.Error(),
-			)
-		}
-		// Headers already sent, cannot send http.Error
-		return
+	if err := json.NewEncoder(w).Encode(modelsResp); err != nil && r.logger != nil {
+		r.logger.ErrorContext(req.Context(), "Failed to encode models response",
+			"endpoint", "/v1/models", "error", err)
 	}
 }

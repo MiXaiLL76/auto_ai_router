@@ -102,7 +102,7 @@ func TestProxyRequest_QwenUsageIsNormalizedForResponseAndSpend(t *testing.T) {
 	prx := builder.Build()
 	prx.LiteLLMDB = dbStub
 	registry := pricing.NewModelPriceRegistry()
-	registry.Update(map[string]*pricing.ModelPrice{
+	registry.ReplaceFilePrices(map[string]*pricing.ModelPrice{
 		"qwen3.7-plus": {
 			InputCostPerToken:           1,
 			OutputCostPerToken:          2,
@@ -157,7 +157,7 @@ func TestProxyRequest_StreamingQwenUsageIsNormalizedForResponseAndSpend(t *testi
 	prx := builder.Build()
 	prx.LiteLLMDB = dbStub
 	registry := pricing.NewModelPriceRegistry()
-	registry.Update(map[string]*pricing.ModelPrice{
+	registry.ReplaceFilePrices(map[string]*pricing.ModelPrice{
 		"qwen3.7-plus": {
 			InputCostPerToken:           1,
 			OutputCostPerToken:          2,
@@ -404,7 +404,7 @@ func newCacheBillingProxyWithType(t *testing.T, providerType config.ProviderType
 
 func installCacheBillingPrices(prx *Proxy) {
 	registry := pricing.NewModelPriceRegistry()
-	registry.Update(map[string]*pricing.ModelPrice{
+	registry.ReplaceFilePrices(map[string]*pricing.ModelPrice{
 		"gpt-cache": {
 			InputCostPerToken:                   1,
 			OutputCostPerToken:                  2,

@@ -34,7 +34,6 @@ type ModelChecker interface {
 	// proxy credential fronting an upstream that spans several priority groups expands
 	// into one balancer candidate per tier.
 	GetModelPriorityTiersForCredential(modelID, credentialName string) []httputil.ModelPriorityTier
-	IsEnabled() bool
 }
 
 var (
@@ -218,7 +217,7 @@ func (r *RoundRobin) MinRemainingBanForModel(modelID string, exclude map[string]
 		if !cred.VisibleTo(visibility) {
 			continue
 		}
-		if modelID != "" && r.modelChecker != nil && r.modelChecker.IsEnabled() && !r.hasModel(cred.Name, modelID, visibility) {
+		if modelID != "" && r.modelChecker != nil && !r.hasModel(cred.Name, modelID, visibility) {
 			continue
 		}
 		remaining, ok := r.fail2ban.RemainingBan(cred.Name, modelID)
@@ -301,7 +300,7 @@ func (r *RoundRobin) NextSpecificScoped(credentialName, modelID string, visibili
 	if !cred.VisibleTo(visibility) {
 		return nil, ErrNoCredentialsAvailable
 	}
-	if modelID != "" && r.modelChecker != nil && r.modelChecker.IsEnabled() {
+	if modelID != "" && r.modelChecker != nil {
 		if !r.hasModel(credentialName, modelID, visibility) {
 			return nil, ErrNoCredentialsAvailable
 		}
@@ -371,7 +370,7 @@ func (r *RoundRobin) nextExcludingScoped(modelID string, allowOnlyFallback, allo
 
 		// Check model availability before ban/rate checks.
 		// model_not_available is a structural property, not a temporary issue.
-		if modelID != "" && r.modelChecker != nil && r.modelChecker.IsEnabled() {
+		if modelID != "" && r.modelChecker != nil {
 			if !r.hasModel(cred.Name, modelID, visibility) {
 				monitoring.CredentialSelectionRejected.WithLabelValues("model_not_available").Inc()
 				continue
@@ -416,7 +415,7 @@ func (r *RoundRobin) nextExcludingScoped(modelID string, allowOnlyFallback, allo
 // breakdown for modelID with one candidate per tier (Design B). Everything else passes
 // through unchanged, so the common single-tier / direct-provider case is a no-op.
 func (r *RoundRobin) expandTierCandidates(candidates []candidateEntry, modelID string) []candidateEntry {
-	if modelID == "" || r.modelChecker == nil || !r.modelChecker.IsEnabled() {
+	if modelID == "" || r.modelChecker == nil {
 		return candidates
 	}
 	// Allocate the per-candidate breakdown slice lazily — the overwhelmingly common case
@@ -743,7 +742,7 @@ func (r *RoundRobin) splitPriorityRetryCandidatesLocked(modelID string, minPrior
 			monitoring.CredentialSelectionRejected.WithLabelValues("scope_not_allowed").Inc()
 			continue
 		}
-		if modelID != "" && r.modelChecker != nil && r.modelChecker.IsEnabled() {
+		if modelID != "" && r.modelChecker != nil {
 			if !r.hasModel(cred.Name, modelID, visibility) {
 				monitoring.CredentialSelectionRejected.WithLabelValues("model_not_available").Inc()
 				continue

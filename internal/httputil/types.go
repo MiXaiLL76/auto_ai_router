@@ -58,6 +58,10 @@ type ModelPriorityTier struct {
 // ModelHealthStats represents health stats for a single model
 type ModelHealthStats struct {
 	Credential string `json:"credential"`
+	// ProviderRoutes maps each reachable leaf credential to its path's scope.
+	// It ignores transient bans/usage. An empty name is an unknown legacy relay;
+	// nil means older metadata, while an empty map means no provider route.
+	ProviderRoutes map[string]*scope.Expression `json:"provider_routes"`
 	// PriorityTiers is the per-tier breakdown for a proxy/AIR credential serving this
 	// model from an upstream that itself spans several priority groups. Empty for a
 	// direct provider credential (or an upstream with a single tier) — callers then fall

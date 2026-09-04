@@ -40,11 +40,13 @@ func (unavailableScopeDB) IsHealthy() bool { return false }
 
 type routerAuthTestDB struct {
 	litellmdb.Manager
-	tokens map[string]*dbmodels.TokenInfo
+	tokens       map[string]*dbmodels.TokenInfo
+	spendLogging bool
 }
 
-func (m *routerAuthTestDB) IsEnabled() bool { return true }
-func (m *routerAuthTestDB) IsHealthy() bool { return true }
+func (m *routerAuthTestDB) IsEnabled() bool           { return true }
+func (m *routerAuthTestDB) IsHealthy() bool           { return true }
+func (m *routerAuthTestDB) SpendLoggingEnabled() bool { return m.spendLogging }
 func (m *routerAuthTestDB) ValidateToken(_ context.Context, rawToken string) (*dbmodels.TokenInfo, error) {
 	info := m.tokens[rawToken]
 	if info == nil {
@@ -97,6 +99,10 @@ func createTestProxyWithStrictACL(strictAllTeamModelsACL bool) *proxy.Proxy {
 	bal := balancer.New(credentials, f2b, rl)
 	metrics := monitoring.New(false)
 	tokenManager := auth.NewVertexTokenManager(logger)
+	manager := createTestModelManager()
+	for i := range credentials {
+		manager.AddModel(credentials[i].Name, "test-model")
+	}
 
 	return proxy.New(&proxy.Config{
 		Balancer:               bal,
@@ -110,7 +116,7 @@ func createTestProxyWithStrictACL(strictAllTeamModelsACL bool) *proxy.Proxy {
 		MasterKey:              "test-master-key",
 		RateLimiter:            rl,
 		TokenManager:           tokenManager,
-		ModelManager:           createTestModelManager(),
+		ModelManager:           manager,
 		Version:                "test-version",
 		Commit:                 "test-commit",
 		StrictAllTeamModelsACL: strictAllTeamModelsACL,
@@ -184,6 +190,8 @@ func createProxyWithMockServer(mockServerURL string) *proxy.Proxy {
 	bal := balancer.New(credentials, f2b, rl)
 	metrics := monitoring.New(false)
 	tm := auth.NewVertexTokenManager(logger)
+	manager := createTestModelManager()
+	manager.AddModel("test1", "test-model")
 	return proxy.New(&proxy.Config{
 		Balancer:            bal,
 		Logger:              logger,
@@ -196,33 +204,51 @@ func createProxyWithMockServer(mockServerURL string) *proxy.Proxy {
 		MasterKey:           "test-key",
 		RateLimiter:         rl,
 		TokenManager:        tm,
-		ModelManager:        createTestModelManager(),
+		ModelManager:        manager,
 		Version:             "test-version",
 		Commit:              "test-commit",
 	})
 }
 
+func createProxyWithModelManager(modelManager *models.Manager, credentials []config.CredentialConfig, strict bool) *proxy.Proxy {
+	logger := testhelpers.NewTestLogger()
+	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
+	rl := ratelimit.New()
+	for i := range credentials {
+		rl.AddCredential(credentials[i].Name, credentials[i].RPM)
+	}
+	return proxy.New(&proxy.Config{
+		Balancer:               balancer.New(credentials, f2b, rl),
+		Logger:                 logger,
+		MaxBodySizeMB:          10,
+		RequestTimeout:         30 * time.Second,
+		Metrics:                monitoring.New(false),
+		MasterKey:              "test-master-key",
+		RateLimiter:            rl,
+		TokenManager:           auth.NewVertexTokenManager(logger),
+		ModelManager:           modelManager,
+		StrictAllTeamModelsACL: strict,
+	})
+}
+
 func TestNew(t *testing.T) {
 	prx := createTestProxy()
-	modelManager := createTestModelManager()
 	monConfig := testhelpers.NewTestMonitoringConfig("/health", false, "")
 	logger := testhelpers.NewTestLogger()
 
-	r := New(nil, modelManager, monConfig, logger, nil)
+	r := New(nil, monConfig, logger, nil)
 
 	assert.NotNil(t, r)
 	assert.Equal(t, "/health", r.monitoringConfig.HealthCheckPath)
-	assert.Equal(t, modelManager, r.modelManager)
-
 	monConfig2 := testhelpers.NewTestMonitoringConfig("/status", false, "")
-	r2 := New(prx, nil, monConfig2, logger, nil)
+	r2 := New(prx, monConfig2, logger, nil)
 	assert.NotNil(t, r2)
 	assert.Equal(t, "/status", r2.monitoringConfig.HealthCheckPath)
 }
 
 func TestServeHTTP_HealthCheck(t *testing.T) {
 	prx := createTestProxy()
-	router := New(prx, nil, testhelpers.NewTestMonitoringConfig("/health", false, ""), testhelpers.NewTestLogger(), nil)
+	router := New(prx, testhelpers.NewTestMonitoringConfig("/health", false, ""), testhelpers.NewTestLogger(), nil)
 
 	req := httptest.NewRequest("GET", "/health", nil)
 	w := httptest.NewRecorder()
@@ -243,7 +269,7 @@ func TestServeHTTP_HealthCheck_Unhealthy(t *testing.T) {
 		{Name: "test1", APIKey: "key1", BaseURL: "http://test1.com", RPM: 100},
 	}
 	prx := createProxyWithConfig(credentials, []string{"test1"})
-	router := New(prx, nil, testhelpers.NewTestMonitoringConfig("/health", false, ""), testhelpers.NewTestLogger(), nil)
+	router := New(prx, testhelpers.NewTestMonitoringConfig("/health", false, ""), testhelpers.NewTestLogger(), nil)
 
 	req := httptest.NewRequest("GET", "/health", nil)
 	w := httptest.NewRecorder()
@@ -264,7 +290,7 @@ func TestServeHTTP_HealthCheck_NoProviderRouteIsUnavailable(t *testing.T) {
 		{Name: "no-route", RPM: 100, ProviderScopeExpression: scope.FalseExpression()},
 	}
 	prx := createProxyWithConfig(credentials, nil)
-	router := New(prx, nil, testhelpers.NewTestMonitoringConfig("/health", false, ""), testhelpers.NewTestLogger(), nil)
+	router := New(prx, testhelpers.NewTestMonitoringConfig("/health", false, ""), testhelpers.NewTestLogger(), nil)
 
 	req := httptest.NewRequest("GET", "/health", nil)
 	w := httptest.NewRecorder()
@@ -279,7 +305,7 @@ func TestServeHTTP_HealthCheck_ScopedViewDoesNotDriveStatusCode(t *testing.T) {
 		{Name: "team-a", APIKey: "key1", BaseURL: "http://team-a.example", RPM: 100, Scopes: []string{"team-a"}},
 	}
 	prx := createProxyWithConfig(credentials, nil)
-	router := New(prx, nil, testhelpers.NewTestMonitoringConfig("/health", false, ""), testhelpers.NewTestLogger(), nil)
+	router := New(prx, testhelpers.NewTestMonitoringConfig("/health", false, ""), testhelpers.NewTestLogger(), nil)
 
 	req := httptest.NewRequest("GET", "/health", nil)
 	w := httptest.NewRecorder()
@@ -301,7 +327,7 @@ func TestServeHTTP_HealthCheck_UnverifiableTokenFallsBackToPublic(t *testing.T) 
 	}
 	prx := createProxyWithConfig(credentials, nil)
 	prx.LiteLLMDB = unavailableScopeDB{NoopManager: litellmdb.NewNoopManager()}
-	router := New(prx, nil, testhelpers.NewTestMonitoringConfig("/health", false, ""), testhelpers.NewTestLogger(), nil)
+	router := New(prx, testhelpers.NewTestMonitoringConfig("/health", false, ""), testhelpers.NewTestLogger(), nil)
 
 	req := httptest.NewRequest("GET", "/health", nil)
 	req.Header.Set("Authorization", "Bearer stale-key")
@@ -321,7 +347,7 @@ func TestServeHTTP_HealthCheck_UnverifiableTokenFallsBackToPublic(t *testing.T) 
 func TestServeHTTP_V1Models_UnverifiableTokenRemainsUnauthorized(t *testing.T) {
 	prx := createTestProxy()
 	prx.LiteLLMDB = unavailableScopeDB{NoopManager: litellmdb.NewNoopManager()}
-	router := New(prx, createEnabledTestModelManager(), testhelpers.NewTestMonitoringConfig("/health", false, ""), testhelpers.NewTestLogger(), nil)
+	router := New(prx, testhelpers.NewTestMonitoringConfig("/health", false, ""), testhelpers.NewTestLogger(), nil)
 
 	req := httptest.NewRequest("GET", "/v1/models", nil)
 	req.Header.Set("Authorization", "Bearer stale-key")
@@ -333,10 +359,8 @@ func TestServeHTTP_V1Models_UnverifiableTokenRemainsUnauthorized(t *testing.T) {
 }
 
 func TestServeHTTP_V1Models_Enabled(t *testing.T) {
-	modelManager := createEnabledTestModelManager()
-
 	prx := createTestProxy()
-	router := New(prx, modelManager, testhelpers.NewTestMonitoringConfig("/health", false, ""), testhelpers.NewTestLogger(), nil)
+	router := New(prx, testhelpers.NewTestMonitoringConfig("/health", false, ""), testhelpers.NewTestLogger(), nil)
 
 	req := httptest.NewRequest("GET", "/v1/models", nil)
 	req.Header.Set("Authorization", "Bearer test-master-key")
@@ -363,8 +387,7 @@ func TestServeHTTP_V1Models_Disabled(t *testing.T) {
 	defer mockServer.Close()
 
 	prx := createProxyWithMockServer(mockServer.URL)
-	modelManager := createTestModelManager() // disabled (no static models)
-	router := New(prx, modelManager, testhelpers.NewTestMonitoringConfig("/health", false, ""), testhelpers.NewTestLogger(), nil)
+	router := New(prx, testhelpers.NewTestMonitoringConfig("/health", false, ""), testhelpers.NewTestLogger(), nil)
 
 	req := httptest.NewRequest("GET", "/v1/models", nil)
 	req.Header.Set("Authorization", "Bearer test-key")
@@ -385,7 +408,7 @@ func TestServeHTTP_V1Models_NilManager(t *testing.T) {
 	defer mockServer.Close()
 
 	prx := createProxyWithMockServer(mockServer.URL)
-	router := New(prx, nil, testhelpers.NewTestMonitoringConfig("/health", false, ""), testhelpers.NewTestLogger(), nil)
+	router := New(prx, testhelpers.NewTestMonitoringConfig("/health", false, ""), testhelpers.NewTestLogger(), nil)
 
 	req := httptest.NewRequest("GET", "/v1/models", nil)
 	req.Header.Set("Authorization", "Bearer test-key")
@@ -406,7 +429,7 @@ func TestServeHTTP_ProxyRequest(t *testing.T) {
 	defer mockServer.Close()
 
 	prx := createProxyWithMockServer(mockServer.URL)
-	router := New(prx, nil, testhelpers.NewTestMonitoringConfig("/health", false, ""), testhelpers.NewTestLogger(), nil)
+	router := New(prx, testhelpers.NewTestMonitoringConfig("/health", false, ""), testhelpers.NewTestLogger(), nil)
 
 	tests := []struct {
 		name string
@@ -473,7 +496,7 @@ func TestServeHTTPLegacyChatCompletionsAlias(t *testing.T) {
 	defer upstream.Close()
 
 	prx := createProxyWithMockServer(upstream.URL)
-	router := New(prx, nil, testhelpers.NewTestMonitoringConfig("/health", false, ""), testhelpers.NewTestLogger(), nil)
+	router := New(prx, testhelpers.NewTestMonitoringConfig("/health", false, ""), testhelpers.NewTestLogger(), nil)
 	req := httptest.NewRequest(http.MethodPost, "/chat/completions?query=value", strings.NewReader(`{
 		"model":"test-model",
 		"messages":[{"role":"user","content":"test"}]
@@ -510,7 +533,7 @@ func TestServeHTTP_Messages(t *testing.T) {
 	defer upstream.Close()
 
 	prx := createProxyWithMockServer(upstream.URL)
-	router := New(prx, nil, testhelpers.NewTestMonitoringConfig("/health", false, ""), testhelpers.NewTestLogger(), nil)
+	router := New(prx, testhelpers.NewTestMonitoringConfig("/health", false, ""), testhelpers.NewTestLogger(), nil)
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{
 		"model":"test-model",
 		"max_tokens":64,
@@ -550,7 +573,7 @@ func TestServeHTTP_MessagesStreaming(t *testing.T) {
 	defer upstream.Close()
 
 	prx := createProxyWithMockServer(upstream.URL)
-	router := New(prx, nil, testhelpers.NewTestMonitoringConfig("/health", false, ""), testhelpers.NewTestLogger(), nil)
+	router := New(prx, testhelpers.NewTestMonitoringConfig("/health", false, ""), testhelpers.NewTestLogger(), nil)
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{
 		"model":"test-model",
 		"max_tokens":64,
@@ -573,7 +596,7 @@ func TestServeHTTP_MessagesStreaming(t *testing.T) {
 
 func TestServeHTTP_MessagesUsesAnthropicErrorShape(t *testing.T) {
 	prx := createTestProxy()
-	router := New(prx, nil, testhelpers.NewTestMonitoringConfig("/health", false, ""), testhelpers.NewTestLogger(), nil)
+	router := New(prx, testhelpers.NewTestMonitoringConfig("/health", false, ""), testhelpers.NewTestLogger(), nil)
 	req := httptest.NewRequest(http.MethodPost, "/v1/messages", strings.NewReader(`{
 		"model":"test-model",
 		"max_tokens":64,
@@ -593,7 +616,7 @@ func TestServeHTTP_MessagesUsesAnthropicErrorShape(t *testing.T) {
 
 func TestServeHTTP_NotFound(t *testing.T) {
 	prx := createTestProxy()
-	router := New(prx, nil, testhelpers.NewTestMonitoringConfig("/health", false, ""), testhelpers.NewTestLogger(), nil)
+	router := New(prx, testhelpers.NewTestMonitoringConfig("/health", false, ""), testhelpers.NewTestLogger(), nil)
 
 	tests := []struct {
 		name string
@@ -619,7 +642,7 @@ func TestServeHTTP_NotFound(t *testing.T) {
 
 func TestServeHTTPAddsSecurityHeadersToLocalErrors(t *testing.T) {
 	prx := createTestProxy()
-	router := New(prx, nil, testhelpers.NewTestMonitoringConfig("/health", false, ""), testhelpers.NewTestLogger(), nil)
+	router := New(prx, testhelpers.NewTestMonitoringConfig("/health", false, ""), testhelpers.NewTestLogger(), nil)
 	req := httptest.NewRequest(http.MethodPost, "/not-found", nil)
 	w := httptest.NewRecorder()
 
@@ -661,7 +684,7 @@ func TestHandleHealth(t *testing.T) {
 				{Name: "test2", APIKey: "key2", BaseURL: "http://test2.com", RPM: 100},
 			}
 			prx := createProxyWithConfig(credentials, tt.bannedCreds)
-			router := New(prx, nil, testhelpers.NewTestMonitoringConfig("/health", false, ""), testhelpers.NewTestLogger(), nil)
+			router := New(prx, testhelpers.NewTestMonitoringConfig("/health", false, ""), testhelpers.NewTestLogger(), nil)
 
 			req := httptest.NewRequest("GET", "/health", nil)
 			w := httptest.NewRecorder()
@@ -685,10 +708,9 @@ func TestHandleHealth(t *testing.T) {
 }
 
 func TestHandleModels(t *testing.T) {
-	modelManager := createEnabledTestModelManager()
 	prx := createTestProxy()
 
-	router := New(prx, modelManager, testhelpers.NewTestMonitoringConfig("/health", false, ""), testhelpers.NewTestLogger(), nil)
+	router := New(prx, testhelpers.NewTestMonitoringConfig("/health", false, ""), testhelpers.NewTestLogger(), nil)
 
 	req := httptest.NewRequest("GET", "/v1/models", nil)
 	req.Header.Set("Authorization", "Bearer test-master-key")
@@ -721,7 +743,7 @@ func TestServeHTTPV1ModelsAuthAndModelACLPolicy(t *testing.T) {
 	catalogCredentials := []config.CredentialConfig{{Name: "catalog", Type: config.ProviderTypeOpenAI}}
 	modelManager.SetCredentials(catalogCredentials)
 	modelManager.LoadModelsFromConfig(catalogCredentials)
-	prx := createTestProxyWithStrictACL(true)
+	prx := createProxyWithModelManager(modelManager, catalogCredentials, true)
 	blocked := true
 	prx.LiteLLMDB = &routerAuthTestDB{tokens: map[string]*dbmodels.TokenInfo{
 		"unrestricted-key": {Token: "unrestricted-hash"},
@@ -759,7 +781,7 @@ func TestServeHTTPV1ModelsAuthAndModelACLPolicy(t *testing.T) {
 			Models: []string{"openai/a.public*"},
 		},
 	}}
-	router := New(prx, modelManager, testhelpers.NewTestMonitoringConfig("/health", false, ""), logger, nil)
+	router := New(prx, testhelpers.NewTestMonitoringConfig("/health", false, ""), logger, nil)
 
 	request := func(headers map[string]string) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
@@ -822,33 +844,18 @@ func TestServeHTTPV1ModelsAuthAndModelACLPolicy(t *testing.T) {
 
 	master := request(map[string]string{"Authorization": "Bearer test-master-key"})
 	require.Equal(t, http.StatusOK, master.Code)
-	assert.Equal(t, modelIDs(t, unrestricted), modelIDs(t, master))
-
-	restrictedGroupsReq := httptest.NewRequest(http.MethodGet, "/v1/models?include_model_access_groups=true", nil)
-	restrictedGroupsReq.Header.Set("Authorization", "Bearer restricted-key")
-	restrictedGroups := httptest.NewRecorder()
-	router.ServeHTTP(restrictedGroups, restrictedGroupsReq)
-	require.Equal(t, http.StatusOK, restrictedGroups.Code)
-	assert.Equal(t, []string{"openai/a-public"}, modelIDs(t, restrictedGroups))
-
-	unrestrictedGroupsReq := httptest.NewRequest(http.MethodGet, "/v1/models?include_model_access_groups=true", nil)
-	unrestrictedGroupsReq.Header.Set("x-api-key", "unrestricted-key")
-	unrestrictedGroups := httptest.NewRecorder()
-	router.ServeHTTP(unrestrictedGroups, unrestrictedGroupsReq)
-	require.Equal(t, http.StatusOK, unrestrictedGroups.Code)
 	assert.Equal(t,
-		[]string{"openai/a-public", "openai/z-public"},
-		modelIDs(t, unrestrictedGroups),
+		[]string{"a-backend", "openai/a-premium", "openai/a-public", "openai/z-public", "z-backend"},
+		modelIDs(t, master),
 	)
 
 	// GET /v1/models honours a key's explicit allowlist regardless of
 	// strict_all_team_models_acl: the listing must never advertise a model the
 	// caller was not granted, even where inference admission stays permissive.
-	compatibilityProxy := createTestProxy()
+	compatibilityProxy := createProxyWithModelManager(modelManager, catalogCredentials, false)
 	compatibilityProxy.LiteLLMDB = prx.LiteLLMDB
 	compatibilityRouter := New(
 		compatibilityProxy,
-		modelManager,
 		testhelpers.NewTestMonitoringConfig("/health", false, ""),
 		logger,
 		nil,
@@ -861,11 +868,11 @@ func TestServeHTTPV1ModelsAuthAndModelACLPolicy(t *testing.T) {
 		return w
 	}
 	compatibilityExpected := map[string][]string{
-		"restricted-key":      {"openai/a-public"},
-		"no-default-user-key": {},
-		"dangling-team-key":   {},
-		"wildcard-key":        {"openai/a-public"},
-		"regex-looking-key":   {},
+		"restricted-key":      {"openai/a-public", "openai/z-public"},
+		"no-default-user-key": {"openai/a-public", "openai/z-public"},
+		"dangling-team-key":   {"openai/a-public", "openai/z-public"},
+		"wildcard-key":        {"openai/a-public", "openai/z-public"},
+		"regex-looking-key":   {"openai/a-public", "openai/z-public"},
 	}
 	for key, expected := range compatibilityExpected {
 		response := compatibilityRequest(key)
@@ -891,8 +898,9 @@ func TestServeHTTPV1ModelsHidesUnpricedModels(t *testing.T) {
 	modelManager.LoadModelsFromConfig(catalogCredentials)
 
 	registry := models.NewModelPriceRegistry()
-	registry.Update(map[string]*models.ModelPrice{
-		"openai/priced": {InputCostPerToken: 0.001},
+	registry.ReplaceFilePrices(map[string]*models.ModelPrice{
+		"openai/priced":  {InputCostPerToken: 0.001},
+		"priced-backend": {InputCostPerToken: 0.001},
 	})
 
 	f2b := fail2ban.New(3, 0, []int{401, 403, 500})
@@ -900,7 +908,7 @@ func TestServeHTTPV1ModelsHidesUnpricedModels(t *testing.T) {
 	tokenManager := auth.NewVertexTokenManager(logger)
 	defer tokenManager.Stop()
 	prx := proxy.New(&proxy.Config{
-		Balancer:       balancer.New(nil, f2b, rl),
+		Balancer:       balancer.New(catalogCredentials, f2b, rl),
 		Logger:         logger,
 		MaxBodySizeMB:  10,
 		RequestTimeout: 30 * time.Second,
@@ -913,8 +921,8 @@ func TestServeHTTPV1ModelsHidesUnpricedModels(t *testing.T) {
 	})
 	// routerAuthTestDB reports IsEnabled()==true and no SpendLoggingEnabled, so
 	// postgres spend tracking is on — the gate that makes unpriced models fatal.
-	prx.LiteLLMDB = &routerAuthTestDB{tokens: map[string]*dbmodels.TokenInfo{}}
-	router := New(prx, modelManager, testhelpers.NewTestMonitoringConfig("/health", false, ""), logger, nil)
+	prx.LiteLLMDB = &routerAuthTestDB{tokens: map[string]*dbmodels.TokenInfo{}, spendLogging: true}
+	router := New(prx, testhelpers.NewTestMonitoringConfig("/health", false, ""), logger, nil)
 
 	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
 	req.Header.Set("Authorization", "Bearer test-master-key")
@@ -928,7 +936,7 @@ func TestServeHTTPV1ModelsHidesUnpricedModels(t *testing.T) {
 	for _, model := range response.Data {
 		ids = append(ids, model.ID)
 	}
-	assert.Equal(t, []string{"openai/priced"}, ids,
+	assert.Equal(t, []string{"openai/priced", "priced-backend"}, ids,
 		"a model without a resolvable price must not be advertised while spend tracking is on")
 }
 
@@ -974,7 +982,7 @@ func TestServeHTTPV1ModelsOrganizationPolicyUsesMappedACLTarget(t *testing.T) {
 			Models: []string{"route-b"},
 		},
 	}}
-	router := New(prx, modelManager, testhelpers.NewTestMonitoringConfig("/health", false, ""), logger, nil)
+	router := New(prx, testhelpers.NewTestMonitoringConfig("/health", false, ""), logger, nil)
 	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
 	req.Header.Set("Authorization", "Bearer organization-key")
 	w := httptest.NewRecorder()
@@ -992,7 +1000,7 @@ func TestServeHTTPV1ModelsOrganizationPolicyUsesMappedACLTarget(t *testing.T) {
 }
 
 func TestServeHTTPPublicPreflightDoesNotEnableWildcardCORS(t *testing.T) {
-	router := New(nil, nil, testhelpers.NewTestMonitoringConfig("/health", false, ""), testhelpers.NewTestLogger(), nil)
+	router := New(nil, testhelpers.NewTestMonitoringConfig("/health", false, ""), testhelpers.NewTestLogger(), nil)
 	req := httptest.NewRequest(http.MethodOptions, "/v1/chat/completions", nil)
 	req.Header.Set("Origin", "https://client.example.invalid")
 	req.Header.Set("Access-Control-Request-Method", http.MethodPost)
@@ -1010,7 +1018,7 @@ func TestServeHTTPPublicPreflightDoesNotEnableWildcardCORS(t *testing.T) {
 
 func TestServeHTTPWebSocketUpgradeIsCaseInsensitive(t *testing.T) {
 	prx := createTestProxy()
-	router := New(prx, nil, testhelpers.NewTestMonitoringConfig("/health", false, ""), testhelpers.NewTestLogger(), nil)
+	router := New(prx, testhelpers.NewTestMonitoringConfig("/health", false, ""), testhelpers.NewTestLogger(), nil)
 	server := newIPv4Server(t, router)
 	defer server.Close()
 
@@ -1035,7 +1043,7 @@ func TestServeHTTPWebSocketUpgradeIsCaseInsensitive(t *testing.T) {
 }
 
 func TestServeHTTPRejectsUnsupportedMethodsBeforeAuth(t *testing.T) {
-	router := New(nil, nil, testhelpers.NewTestMonitoringConfig("/health", false, ""), testhelpers.NewTestLogger(), nil)
+	router := New(nil, testhelpers.NewTestMonitoringConfig("/health", false, ""), testhelpers.NewTestLogger(), nil)
 
 	chatReq := httptest.NewRequest(http.MethodGet, "/v1/chat/completions", nil)
 	chat := httptest.NewRecorder()
@@ -1061,7 +1069,7 @@ func TestServeHTTPRejectsUnsupportedMethodsBeforeAuth(t *testing.T) {
 }
 
 func TestServeHTTPV1ModelsWithNilProxyFailsClosed(t *testing.T) {
-	router := New(nil, createEnabledTestModelManager(), testhelpers.NewTestMonitoringConfig("/health", false, ""), testhelpers.NewTestLogger(), nil)
+	router := New(nil, testhelpers.NewTestMonitoringConfig("/health", false, ""), testhelpers.NewTestLogger(), nil)
 	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
 	req.Header.Set("Authorization", "Bearer should-not-be-accepted")
 	w := httptest.NewRecorder()
@@ -1074,7 +1082,7 @@ func TestServeHTTPV1ModelsWithNilProxyFailsClosed(t *testing.T) {
 
 func TestHandleVisualHealth(t *testing.T) {
 	prx := createTestProxy()
-	router := New(prx, nil, testhelpers.NewTestMonitoringConfig("/health", false, ""), testhelpers.NewTestLogger(), nil)
+	router := New(prx, testhelpers.NewTestMonitoringConfig("/health", false, ""), testhelpers.NewTestLogger(), nil)
 
 	req := httptest.NewRequest("GET", "/vhealth", nil)
 	w := httptest.NewRecorder()
@@ -1090,7 +1098,7 @@ func TestHandleVisualHealth(t *testing.T) {
 
 func TestServeHTTP_VisualHealth(t *testing.T) {
 	prx := createTestProxy()
-	router := New(prx, nil, testhelpers.NewTestMonitoringConfig("/health", false, ""), testhelpers.NewTestLogger(), nil)
+	router := New(prx, testhelpers.NewTestMonitoringConfig("/health", false, ""), testhelpers.NewTestLogger(), nil)
 
 	req := httptest.NewRequest("GET", "/vhealth", nil)
 	w := httptest.NewRecorder()
@@ -1112,7 +1120,7 @@ func TestServeHTTP_StreamingRequestNotLogged(t *testing.T) {
 	defer mockServer.Close()
 
 	prx := createProxyWithMockServer(mockServer.URL)
-	router := New(prx, nil, testhelpers.NewTestMonitoringConfig("/health", true, tmpDir+"/errors.log"), testhelpers.NewTestLogger(), nil)
+	router := New(prx, testhelpers.NewTestMonitoringConfig("/health", true, tmpDir+"/errors.log"), testhelpers.NewTestLogger(), nil)
 
 	// Test: Streaming request should NOT be logged even if status is 500
 	streamingBody := []byte(`{"stream":true,"model":"test-model","messages":[{"role":"user","content":"test"}]}`)
@@ -1148,7 +1156,7 @@ func TestServeHTTP_NonStreamingErrorIsLogged(t *testing.T) {
 	defer mockServer.Close()
 
 	prx := createProxyWithMockServer(mockServer.URL)
-	router := New(prx, nil, testhelpers.NewTestMonitoringConfig("/health", true, logPath), testhelpers.NewTestLogger(), nil)
+	router := New(prx, testhelpers.NewTestMonitoringConfig("/health", true, logPath), testhelpers.NewTestLogger(), nil)
 
 	// Test: Non-streaming request SHOULD be logged when status is error
 	nonStreamingBody := []byte(`{"stream": false, "model": "test-model"}`)

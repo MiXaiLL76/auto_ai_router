@@ -113,6 +113,12 @@ func (p *Proxy) orchestrateRequest(
 	effectiveDenylist := mergeCredentialDenylists(inboundDenylist, policyDenylist)
 	r = withEffectiveCredentialDenylist(r, effectiveDenylist)
 	routingExclusions := p.reasoningOnlyExclusions(logCtx.ReasoningRequested)
+	for credentialName := range logCtx.modelRouteExclusions {
+		if routingExclusions == nil {
+			routingExclusions = make(map[string]bool)
+		}
+		routingExclusions[credentialName] = true
+	}
 	for _, credentialName := range effectiveDenylist {
 		if p.balancer.IsProxyCredential(credentialName) {
 			continue
@@ -134,7 +140,9 @@ func (p *Proxy) orchestrateRequest(
 	// ("global.anthropic.claude-sonnet-4-6") that was substituted for direct providers.
 	proxyBody := body
 	if modelID != realModelID {
-		proxyBody = openai.ReplaceModelInBody(body, realModelID, modelID)
+		proxyBody = replaceModelInBodyPreserveContentType(
+			body, r.Header.Get("Content-Type"), realModelID, modelID,
+		)
 	}
 	baseBody := body
 	baseProxyBody := proxyBody
@@ -537,25 +545,6 @@ func (p *Proxy) IsModelAllowedForToken(tokenInfo *models.TokenInfo, model string
 	})
 }
 
-// IsModelAllowedForTokenListing decides whether model should be visible to
-// tokenInfo in GET /v1/models. Unlike IsModelAllowedForToken — which governs
-// inference admission and is a deliberate no-op unless strictAllTeamModelsACL is
-// set — listing visibility always honours the token's explicit key/team/user
-// allowlists so a key never sees a model it was not granted. The default
-// (non-strict) access policy is used, so an unrestricted "all-team-models" key
-// without a team still sees the whole catalog, exactly as inference would admit
-// it.
-func (p *Proxy) IsModelAllowedForTokenListing(tokenInfo *models.TokenInfo, model string) bool {
-	if tokenInfo == nil {
-		return true
-	}
-	var matcher models.ModelScopeMatcher
-	if p.modelManager != nil {
-		matcher = p.modelManager.IsModelIDAllowedByScope
-	}
-	return tokenInfo.IsModelAllowedByPolicy(model, matcher, models.ModelAccessPolicy{})
-}
-
 func (p *Proxy) authenticateRequest(
 	w http.ResponseWriter,
 	r *http.Request,
@@ -714,22 +703,14 @@ func (p *Proxy) readRequestBodyAndSelectModel(
 		WriteErrorBadRequest(w, "model field is required")
 		return nil, "", "", false, false
 	}
-	if p.modelManager != nil {
-		policyBody, policyModelID, policyRealModelID, ok := p.admitOrganizationModel(w, r, body, modelID, logCtx)
-		if !ok {
-			return nil, "", "", false, false
-		}
-		if logCtx.OrganizationPolicy != nil {
-			return policyBody, policyModelID, policyRealModelID, streaming, true
-		}
+	policy, ok := p.selectOrganizationPolicy(w, logCtx)
+	if !ok {
+		return nil, "", "", false, false
 	}
-	// An unrestricted virtual key must still stay inside the configured product
-	// model surface. Provider backend IDs remain available to the trusted
-	// LiteLLM -> AIR hop authenticated with AIR's master key, but ordinary keys
-	// cannot discover or invoke them even when their DB model ACL is empty.
-	trustedInternalModelID := p.isMasterKey(logCtx.Token)
-	modelAllowed := p.IsModelAllowedForToken(logCtx.TokenInfo, modelID)
-	if !modelAllowed {
+	admission, err := p.resolveModelAdmission(
+		logCtx.TokenInfo, logCtx.Scope, policy, modelID, p.isMasterKey(logCtx.Token),
+	)
+	if errors.Is(err, errModelNotAllowed) {
 		p.logger.WarnContext(r.Context(), "Model is not allowed for token",
 			"error_code", http.StatusForbidden,
 			"model", modelID,
@@ -740,10 +721,11 @@ func (p *Proxy) readRequestBodyAndSelectModel(
 		WriteErrorForbidden(w, "Model not allowed")
 		return nil, "", "", false, false
 	}
-	if p.modelManager != nil && !trustedInternalModelID && !p.modelManager.IsClientModelIDRoutable(modelID) {
-		p.logger.WarnContext(r.Context(), "Client model identifier is not exposed",
+	if err != nil {
+		p.logger.WarnContext(r.Context(), "Model is not available",
 			"error_code", http.StatusNotFound,
 			"model", modelID,
+			"error", err,
 		)
 		logCtx.Status = "failure"
 		logCtx.HTTPStatus = http.StatusNotFound
@@ -754,53 +736,22 @@ func (p *Proxy) readRequestBodyAndSelectModel(
 		WriteErrorNotFound(w, logCtx.ErrorMsg)
 		return nil, "", "", false, false
 	}
-
-	// Resolve additional client-visible names to one exact LiteLLM deployment
-	// identity first. The requested name remains in PublicModelID while routing
-	// continues through the canonical public model and provider-backend alias.
-	// A trusted LiteLLM hop may submit an exact configured backend whose string
-	// also exists in the client accepted-alias map. Preserve that exact internal
-	// route; non-master callers and non-routable aliases still use the fail-closed
-	// public resolver.
-	trustedExactModelID := trustedInternalModelID && len(p.modelManager.GetCredentialsForModel(modelID)) > 0
-	if trustedExactModelID {
-		p.logger.DebugContext(r.Context(), "Preserved trusted internal model identifier", "model", modelID)
-	} else if canonical, isPublicAlias, aliasErr := p.modelManager.ResolvePublicModelAlias(modelID); aliasErr != nil {
-		p.logger.WarnContext(r.Context(), "Public model alias is not uniquely routable",
-			"error_code", http.StatusNotFound,
-			"model", modelID,
-			"error", aliasErr,
-		)
-		logCtx.Status = "failure"
-		logCtx.HTTPStatus = http.StatusNotFound
-		logCtx.ErrorMsg = fmt.Sprintf("Model %s not found", modelID)
-		logCtx.Logged = true
-		WriteErrorNotFound(w, logCtx.ErrorMsg)
-		return nil, "", "", false, false
-	} else if isPublicAlias {
-		p.logger.DebugContext(r.Context(), "Resolved public model alias", "alias", modelID, "canonical", canonical)
-		body = openai.ReplaceModelInBody(body, modelID, canonical)
-		modelID = canonical
-		logCtx.ModelID = modelID
+	if admission.realModelID != modelID {
+		body = replaceModelInBodyPreserveContentType(body, r.Header.Get("Content-Type"), modelID, admission.realModelID)
 	}
-
-	// Resolve model_alias entries (changes modelID to real name; credential lookup uses real name)
-	if resolved, isAlias := p.modelManager.ResolveAlias(modelID); isAlias {
-		p.logger.DebugContext(r.Context(), "Resolved model alias", "alias", modelID, "resolved", resolved)
-		body = openai.ReplaceModelInBody(body, modelID, resolved)
-		modelID = resolved
-		logCtx.ModelID = modelID
+	logCtx.PublicModelID = admission.publicModelID
+	logCtx.CanonicalModelID = admission.canonicalModelID
+	logCtx.ModelID = admission.modelID
+	logCtx.RealModelID = admission.realModelID
+	logCtx.modelRouteExclusions = admission.excluded
+	if policy != nil {
+		logCtx.PriceModelID = admission.priceModelID
+		logCtx.ModelPrice = admission.modelPrice
+		logCtx.billingPriceResolved = true
+		logCtx.billingPriceModelID = admission.priceModelID
+		logCtx.billingPrice = admission.modelPrice
 	}
-
-	// Resolve models[].model field: replace model in body for provider but keep alias as modelID
-	// for rate limiting and credential lookup.
-	realModelID := modelID
-	if realName, hasReal := p.modelManager.GetRealModelName(modelID); hasReal {
-		p.logger.DebugContext(r.Context(), "Resolved model real name", "alias", modelID, "real", realName)
-		body = openai.ReplaceModelInBody(body, modelID, realName)
-		realModelID = realName
-	}
-	return body, modelID, realModelID, streaming, true
+	return body, admission.modelID, admission.realModelID, streaming, true
 }
 
 func (p *Proxy) selectCredentialForModel(
@@ -811,7 +762,7 @@ func (p *Proxy) selectCredentialForModel(
 	exclude map[string]bool,
 	logCtx *RequestLogContext,
 ) (*config.CredentialConfig, bool) {
-	if p.modelManager != nil && p.modelManager.IsEnabled() && len(p.modelManager.GetCredentialsForModel(modelID)) == 0 {
+	if p.modelManager == nil || len(p.modelManager.GetCredentialsForModel(modelID)) == 0 {
 		errorMsg := fmt.Sprintf("Model %s not found", modelID)
 		p.logger.WarnContext(logCtx.Context(), "Model is not configured",
 			"error_code", http.StatusNotFound,

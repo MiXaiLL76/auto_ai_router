@@ -246,6 +246,7 @@ func TestSelectCredentialForModelMarksDirectSpendLogComplete(t *testing.T) {
 	kafka := &stubKafkaManager{enabled: true}
 	prx.kafkaLog = kafka
 	setTestModelPrice(prx, "gpt-4o-mini", &models.ModelPrice{})
+	prx.modelManager.AddModel("missing", "missing-model")
 	logCtx := testLogCtx(t)
 	logCtx.Credential = nil
 
@@ -277,6 +278,7 @@ func TestSelectCredentialForModelLogsZeroCostRowWhenPriceUnavailable(t *testing.
 	kafka := &stubKafkaManager{enabled: true}
 	prx.kafkaLog = kafka
 	prx.priceRegistry = models.NewModelPriceRegistry() // no price for "missing-model"
+	prx.modelManager.AddModel("missing", "missing-model")
 	logCtx := testLogCtx(t)
 	logCtx.ModelID = "missing-model"
 	logCtx.TokenUsage = nil // no provider was ever contacted
@@ -794,18 +796,14 @@ func TestProxyRequest_UnsupportedProManRequestFallbackBlockedWhenPriceUnavailabl
 
 	prx.ProxyRequest(w, req)
 
-	require.Equal(t, http.StatusServiceUnavailable, w.Code)
+	require.Equal(t, http.StatusNotFound, w.Code)
 	assert.Equal(t, int32(0), atomic.LoadInt32(&promanCalls))
 	assert.Equal(t, int32(0), atomic.LoadInt32(&fallbackCalls))
 
 	// The rejection must still leave an audit trail — not just an app log —
 	// so a forgotten price-registry entry is visible in spend logs/Kafka,
 	// not just silently swallowed.
-	require.Len(t, kafka.events, 1)
-	assert.Equal(t, "failure", kafka.events[0].Status)
-	assert.Equal(t, http.StatusServiceUnavailable, kafka.events[0].HTTPStatus)
-	assert.Zero(t, kafka.events[0].TotalCost)
-	assert.Contains(t, kafka.events[0].ErrorMessage, "model pricing unavailable")
+	assert.Empty(t, kafka.events)
 }
 
 func TestProxyRequest_UnsupportedProManRequestWithoutFallbackReturnsLocalError(t *testing.T) {

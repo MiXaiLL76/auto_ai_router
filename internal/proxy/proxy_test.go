@@ -261,7 +261,9 @@ func TestProxyRequest_NoCredentialsAvailable(t *testing.T) {
 
 	metrics := monitoring.New(false)
 	tm := createTestTokenManager(logger)
-	prx := createProxyWithParams(bal, logger, 10, 30*time.Second, metrics, "master-key", rl, tm, createTestModelManager(logger), "test-version", "test-commit")
+	manager := createTestModelManager(logger)
+	manager.AddModel("test1", "gpt-4")
+	prx := createProxyWithParams(bal, logger, 10, 30*time.Second, metrics, "master-key", rl, tm, manager, "test-version", "test-commit")
 
 	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"gpt-4","messages":[{"role":"user","content":"test"}]}`))
 	req.Header.Set("Authorization", "Bearer master-key")
@@ -288,7 +290,9 @@ func TestProxyRequest_RateLimitExceeded(t *testing.T) {
 	bal := balancer.New(credentials, f2b, rl)
 	metrics := monitoring.New(false)
 	tm := createTestTokenManager(logger)
-	prx := createProxyWithParams(bal, logger, 10, 30*time.Second, metrics, "master-key", rl, tm, createTestModelManager(logger), "test-version", "test-commit")
+	manager := createTestModelManager(logger)
+	manager.AddModel("test1", "gpt-4")
+	prx := createProxyWithParams(bal, logger, 10, 30*time.Second, metrics, "master-key", rl, tm, manager, "test-version", "test-commit")
 
 	// Manually trigger rate limiter to exhaust the limit
 	rl.Allow("test1")

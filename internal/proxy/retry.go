@@ -185,6 +185,11 @@ func (p *Proxy) TryFallbackProxy(
 		triedCreds[fallbackCred.Name] = true
 		ctx = SetTried(ctx, triedCreds)
 		r = r.WithContext(ctx)
+		if !p.checkRetryCredentialPriceAvailable(
+			w, r, logCtx, fallbackCred, modelID, p.globalRealModelID(modelID),
+		) {
+			return true, "pricing_unavailable"
+		}
 
 		// Add jitter (0-50ms) to prevent thundering herd when multiple requests fail simultaneously
 		jitter := time.Duration(rand.IntN(50)) * time.Millisecond

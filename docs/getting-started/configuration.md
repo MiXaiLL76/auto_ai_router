@@ -130,7 +130,7 @@ When `credential_name_as_team_id` is enabled, spend logs use the selected provid
 
 `model_prices_sync_interval` controls how often the price source is re-read after the initial startup load. It accepts any Go duration string (`30s`, `15m`, `1h`) and is ignored when `model_prices_link` is empty. A failed refresh keeps the previously loaded prices and is retried on the next tick; a missing or non-positive value falls back to `5m`. See [Model Pricing](../litellm-integration/pricing.md#refresh-interval) for guidance on picking a value.
 
-When PostgreSQL or Kafka spend logging is enabled, every routed model must have a price entry. If neither its real provider name nor its alias can be priced, the router returns `503 Model pricing unavailable` before contacting the provider. Use an explicit zero-price entry for intentionally free models. `GET /v1/models` mirrors this: while spend logging is enabled and a price registry is loaded, a model with no resolvable price is omitted from the listing so callers only see models they can actually invoke.
+When PostgreSQL or Kafka spend logging is enabled, every serving route needs a resolvable billing price. Non-organization requests try the public model ID, logical route ID, then that credential's effective provider model ID. Organization requests use their exact organization tariff. No separate base price is required. Models with no billable routes are omitted from `GET /v1/models` and return `404` for inference; an explicit zero-price row is valid. If no billing price can be resolved at the final check before contacting the provider, the request returns `503 Model pricing unavailable`. A resolved organization tariff is retained across retries.
 
 `tiktoken_enabled` controls the local prompt/completion token estimator used as a fallback for streaming responses when a provider doesn't report usage (e.g. the stream is cut before the final usage chunk, or the provider omits token counts entirely), and for budget-reservation cost estimates ahead of the request. Two different costs apply while it's on: the **prompt-token estimate and the final completion-token BPE count are lazy** — computed only if a stream actually finishes without provider-reported usage — so they're free for providers that do report usage. However, **per-chunk delta-text accumulation runs on every streaming chunk of every stream** while this flag is on, regardless of whether the provider ultimately reports usage, since the accumulator has to keep pace with the stream in case it's needed at the end.
 
@@ -227,10 +227,11 @@ For DB-loaded credentials, add the same fields to `LiteLLM_CredentialsTable.cred
 Scope filtering applies to routing, retry/fallback selection, `/health`, `/v1/models`,
 `/trace`, `/vhealth`, and `/vtrace`.
 
-`GET /v1/models` additionally hides any model the authenticated key is not granted
-by its own key/team/user allowlist, independent of `strict_all_team_models_acl`
-(that flag still governs whether the allowlist is *enforced* at inference time).
-The listing never advertises a model the caller cannot see.
+`GET /v1/models` uses the same key/team/user model ACL checks as inference.
+Set `server.strict_all_team_models_acl: true` to enforce those allowlists for both.
+With the default `false`, neither listing nor inference enforces those model
+allowlists. Credential/model scope visibility and organization policies still apply
+independently; temporary bans and current RPM/TPM exhaustion do not hide models.
 
 In both LiteLLM API-key metadata and `LiteLLM_CredentialsTable.credential_info`,
 `air_forbidden_scopes` is accepted as an alias for `air_denied_scopes`.
@@ -264,7 +265,7 @@ models:
     tpm: 50000
 ```
 
-By default, all models are available through all credentials. Use the `models` section to restrict which credentials serve which models.
+Routing requires a static, DB-loaded, or discovered mapping between a model and a credential. Credentials without a mapping for the requested model cannot serve it; proxy/AIR credentials acquire mappings through remote discovery. With no mappings, `GET /v1/models` is empty and inference returns `404` for unknown models. Use the `models` section to declare static mappings.
 
 By default, models can also be declared directly inside a credential via the `models:` field — they are automatically extracted and added to the global models list with the credential name pre-filled.
 

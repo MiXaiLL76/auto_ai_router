@@ -38,6 +38,36 @@ func createProxyWithParams(bal *balancer.RoundRobin, logger *slog.Logger, maxBod
 	})
 }
 
+// registerLegacyTestFixtureModels gives broad, non-scope-focused proxy tests an
+// explicit topology now that production routing is closed-world. Admission and
+// topology tests replace the builder's default manager and install exact models.
+func registerLegacyTestFixtureModels(manager *models.Manager, bal *balancer.RoundRobin) {
+	if manager == nil || bal == nil {
+		return
+	}
+	credentials := bal.GetCredentialsSnapshot()
+	for i := range credentials {
+		if len(credentials[i].Scopes) > 0 || len(credentials[i].DeniedScopes) > 0 {
+			return
+		}
+	}
+	modelIDs := []string{
+		"Xpt-5", "any", "backend", "banned-model", "claude", "claude-e2e", "claude-haiku-4-5", "claude-opus",
+		"claude-opus-4-8", "claude-opus-4.7", "claude-opus-5", "claude-sonnet-4-5",
+		"claude-sonnet-4-6", "gemini", "gemini-2.5-flash",
+		"gemini-2.5-flash-image-preview", "gemini-3.1-flash", "gemini-3.1-flash-image-preview", "gpt-4", "gpt-4o",
+		"gpt-4o-audio", "gpt-4o-mini", "gpt-4o-search-preview", "gpt-5", "gpt-cache",
+		"gpt-5.2-chat", "gpt-chat-latest", "gpt-collide", "gpt-image-1", "gpt-test", "gpt-web-search", "o3-mini", "provider-model",
+		"public", "public-model", "qwen-5", "real-model", "route-a", "route-b",
+		"test-model", "text-embedding-3-small",
+	}
+	for _, cred := range credentials {
+		for _, modelID := range modelIDs {
+			manager.AddModel(cred.Name, modelID)
+		}
+	}
+}
+
 // createTestProxyMetrics creates a metrics instance for testing.
 func createTestProxyMetrics() *monitoring.Metrics {
 	return monitoring.New(false)
@@ -115,12 +145,13 @@ type TestProxyConfig struct {
 // NewTestProxyBuilder creates a builder with default configuration.
 func NewTestProxyBuilder() *TestProxyBuilder {
 	logger := testhelpers.NewTestLogger()
+	manager := createTestModelManager(logger)
 	return &TestProxyBuilder{
 		config: &TestProxyConfig{
 			Logger:          logger,
 			Metrics:         createTestProxyMetrics(),
 			TokenManager:    createTestTokenManager(logger),
-			ModelManager:    createTestModelManager(logger),
+			ModelManager:    manager,
 			MasterKey:       "master-key",
 			MaxBodySizeMB:   10,
 			RequestTimeout:  30 * time.Second,
@@ -128,12 +159,14 @@ func NewTestProxyBuilder() *TestProxyBuilder {
 			Commit:          "test-commit",
 			TiktokenEnabled: true, // matches production default (server.tiktoken_enabled: true)
 		},
+		defaultModelManager: manager,
 	}
 }
 
 // TestProxyBuilder is a fluent builder for creating test proxy instances.
 type TestProxyBuilder struct {
-	config *TestProxyConfig
+	config              *TestProxyConfig
+	defaultModelManager *models.Manager
 }
 
 // WithCredentials sets the credentials for the proxy.
@@ -287,6 +320,9 @@ func (b *TestProxyBuilder) Build() *Proxy {
 	if b.config.Balancer == nil {
 		f2b := fail2ban.New(3, 0, []int{401, 403, 500})
 		b.config.Balancer = balancer.New(b.config.Credentials, f2b, b.config.RateLimiter)
+	}
+	if b.config.ModelManager == b.defaultModelManager {
+		registerLegacyTestFixtureModels(b.config.ModelManager, b.config.Balancer)
 	}
 	return New(&Config{
 		Balancer:               b.config.Balancer,

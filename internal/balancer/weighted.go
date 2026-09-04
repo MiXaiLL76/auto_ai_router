@@ -78,7 +78,7 @@ func (s *swrrState) currentOf(name string) int {
 // names. Must be called with r.mu held.
 func (r *RoundRobin) schedKeyFor(modelID string, allowOnlyFallback, allowOnlyProxy bool, requiredType config.ProviderType, excluding bool, scopeKey string) schedKey {
 	model := modelID
-	if model == "" || r.modelChecker == nil || !r.modelChecker.IsEnabled() {
+	if model == "" || r.modelChecker == nil {
 		model = ""
 	}
 	return schedKey{model: model, fallbackOnly: allowOnlyFallback, proxyOnly: allowOnlyProxy, reqType: requiredType, excluding: excluding, scopeKey: scopeKey}
@@ -150,7 +150,7 @@ func EffectiveWeight(modelWeight, credWeight int) int {
 // credential's static priority: field. See internal/models/manager.go
 // (LearnedModelPriorityForCredential) for the matching contract note.
 func (r *RoundRobin) learnedProxyPriority(cred *config.CredentialConfig, modelID string) (int, bool) {
-	if modelID != "" && cred.IsProxyLike() && r.modelChecker != nil && r.modelChecker.IsEnabled() {
+	if modelID != "" && cred.IsProxyLike() && r.modelChecker != nil {
 		return r.modelChecker.LearnedModelPriorityForCredential(modelID, cred.Name)
 	}
 	return 0, false
@@ -195,7 +195,7 @@ func (r *RoundRobin) candidateWeight(c candidateEntry, modelID string) int {
 // is resolved: model-level override first, then the credential default, then 1.
 func (r *RoundRobin) effectiveWeight(cred *config.CredentialConfig, modelID string) int {
 	modelWeight := 0
-	if modelID != "" && r.modelChecker != nil && r.modelChecker.IsEnabled() {
+	if modelID != "" && r.modelChecker != nil {
 		modelWeight = r.modelChecker.GetModelWeightForCredential(modelID, cred.Name)
 	}
 	return EffectiveWeight(modelWeight, cred.Weight)

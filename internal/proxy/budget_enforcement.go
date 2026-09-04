@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/converter"
 	dbmodels "github.com/mixaill76/auto_ai_router/internal/litellmdb/models"
 )
@@ -217,6 +218,28 @@ func (p *Proxy) checkModelPriceAvailable(
 		logCtx.PriceModelID = priceModelID
 	}
 	return true
+}
+
+func (p *Proxy) checkRetryCredentialPriceAvailable(
+	w http.ResponseWriter,
+	r *http.Request,
+	logCtx *RequestLogContext,
+	credential *config.CredentialConfig,
+	modelID string,
+	realModelID string,
+) bool {
+	priceContext := logCtx
+	if priceContext == nil {
+		priceContext = &RequestLogContext{}
+	}
+	priceContext.Credential = credential
+	priceContext.RealModelID = realModelID
+	if priceContext.OrganizationPolicy == nil {
+		priceContext.billingPriceResolved = false
+		priceContext.billingPriceModelID = ""
+		priceContext.billingPrice = nil
+	}
+	return p.checkModelPriceAvailable(w, r, priceContext, modelID, realModelID)
 }
 
 func (p *Proxy) enforceBudgetAndRateLimits(

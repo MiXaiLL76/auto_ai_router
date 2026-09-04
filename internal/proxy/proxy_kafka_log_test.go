@@ -63,7 +63,7 @@ func testLogCtx(t *testing.T) *RequestLogContext {
 
 func setTestModelPrice(prx *Proxy, modelID string, price *pricingmodels.ModelPrice) {
 	registry := pricingmodels.NewModelPriceRegistry()
-	registry.Update(map[string]*pricingmodels.ModelPrice{modelID: price})
+	registry.ReplaceFilePrices(map[string]*pricingmodels.ModelPrice{modelID: price})
 	prx.priceRegistry = registry
 }
 
