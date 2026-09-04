@@ -151,10 +151,24 @@ func classifiedBadRequestError(rawBodies ...[]byte) APIError {
 		result.Message = "Invalid model"
 		result.Param = &param
 		result.Code = &code
-	case hasSignal(joined, "invalid argument", "invalid parameter", "invalid value", "unsupported parameter", "unknown parameter", "unrecognized parameter", "missing required", "required field", "must be", "should be", "does not support"):
+	case hasSignal(joined, "invalid argument", "invalid parameter", "invalidparameter", "invalid value", "unsupported parameter", "unknown parameter", "unrecognized parameter", "missing required", "required field", "must be", "should be", "does not support", "is not supported"):
 		code := "invalid_parameter"
 		result.Message = "Invalid request parameter"
-		result.Param = inferBadRequestParam(joined, providerParam)
+		// Precedence: an explicit "param" from the provider's own JSON is
+		// authoritative; next, a field path quoted directly in the message
+		// ("Invalid 'output[1].type': 'input_file'. Supported values are:
+		// ...") is precise even for dynamic/nested paths a fixed list can't
+		// cover; only fall back to the generic keyword list last — it does
+		// broad substring matching (e.g. "input") that a quoted path like
+		// "input_file" would otherwise shadow.
+		param := providerParam
+		if param == nil {
+			param = extractQuotedInvalidField(signals)
+		}
+		if param == nil {
+			param = inferBadRequestParam(joined, nil)
+		}
+		result.Param = param
 		result.Code = &code
 	default:
 		result.Param = providerParam
@@ -301,6 +315,7 @@ func inferBadRequestParam(joined string, providerParam *string) *string {
 		"stream_options",
 		"temperature",
 		"top_p",
+		"logprobs",
 		"messages",
 		"input",
 		"tools",
@@ -316,6 +331,31 @@ func inferBadRequestParam(joined string, providerParam *string) *string {
 			p := param
 			return &p
 		}
+	}
+	return nil
+}
+
+// extractQuotedInvalidField pulls the field path out of a provider message
+// shaped like `Invalid 'output[1].type': 'input_file'. Supported values
+// are: ...` — the quoted token right after "Invalid " is the offending
+// field/parameter path. Fixed param-name lists can't cover these because
+// the path is dynamic (array index, nested field), so this is checked as a
+// fallback once the static list in inferBadRequestParam comes up empty.
+// Tries each raw (pre-lowercased) signal in turn and returns the first hit.
+func extractQuotedInvalidField(signals []string) *string {
+	const marker = "invalid '"
+	for _, s := range signals {
+		idx := strings.Index(strings.ToLower(s), marker)
+		if idx == -1 {
+			continue
+		}
+		rest := s[idx+len(marker):]
+		end := strings.IndexByte(rest, '\'')
+		if end <= 0 {
+			continue
+		}
+		field := rest[:end]
+		return &field
 	}
 	return nil
 }

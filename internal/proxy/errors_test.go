@@ -140,6 +140,34 @@ func TestMaskedUpstreamErrorBodyClassifiesBadRequest(t *testing.T) {
 			notContains: []string{"unsupported parameter", "this model"},
 		},
 		{
+			// Reproduces a real production body: DeepInfra-style
+			// "is not supported" phrasing (not "does not support") with an
+			// underscore-style error code ("invalid_parameter_error", not a
+			// literal "invalid parameter" substring) — both must still land
+			// in the invalid_parameter bucket instead of the generic fallback.
+			name:        "is not supported phrasing with underscore error code",
+			body:        "{\"error\":{\"code\":\"invalid_parameter_error\",\"message\":\"The parameters `logprobs` is not supported.\",\"param\":null,\"type\":\"invalid_request_error\"},\"id\":\"chatcmpl-c851a2c6-8a54-9ca4-9561-b3ff6163be27\"}",
+			wantMessage: "Invalid request parameter",
+			wantCode:    "invalid_parameter",
+			wantParam:   stringPtr("logprobs"),
+			notContains: []string{"chatcmpl", "c851a2c6"},
+		},
+		{
+			// Reproduces another real production body: a PascalCase
+			// "InvalidParameter" type (lowercases to "invalidparameter",
+			// no space — doesn't match the "invalid parameter" needle) with
+			// no "param" field of its own, and a dynamic/nested offending
+			// field path ("output[1].type") that a fixed param-name list can
+			// never enumerate in advance. Must extract the path quoted right
+			// after "Invalid " in the message instead of leaving param null.
+			name:        "PascalCase InvalidParameter with quoted dynamic field path",
+			body:        `{"error":{"message":"Invalid 'output[1].type': 'input_file'. Supported values are: 'input_text', 'input_image'.","type":"InvalidParameter"}}`,
+			wantMessage: "Invalid request parameter",
+			wantCode:    "invalid_parameter",
+			wantParam:   stringPtr("output[1].type"),
+			notContains: []string{"Supported values are"},
+		},
+		{
 			name:        "plain text fallback",
 			body:        `vendor stack id 012345`,
 			wantMessage: "Invalid request",
@@ -190,6 +218,54 @@ func TestMaskedUpstreamErrorBodyKeepsGenericNonBadRequest(t *testing.T) {
 	}
 	if resp.Error.Code == nil || *resp.Error.Code != "api_error" {
 		t.Fatalf("code = %v", resp.Error.Code)
+	}
+}
+
+func TestExtractQuotedInvalidField(t *testing.T) {
+	tests := []struct {
+		name    string
+		signals []string
+		want    *string
+	}{
+		{
+			name:    "dynamic nested path",
+			signals: []string{"Invalid 'output[1].type': 'input_file'. Supported values are: 'input_text', 'input_image'."},
+			want:    stringPtr("output[1].type"),
+		},
+		{
+			name:    "case-insensitive marker",
+			signals: []string{"invalid 'tool_choice.type': unsupported value"},
+			want:    stringPtr("tool_choice.type"),
+		},
+		{
+			name:    "picks first matching signal",
+			signals: []string{"generic failure", "Invalid 'foo': bar"},
+			want:    stringPtr("foo"),
+		},
+		{
+			name:    "no marker present",
+			signals: []string{"something else went wrong"},
+			want:    nil,
+		},
+		{
+			name:    "marker with no closing quote",
+			signals: []string{"Invalid 'unterminated"},
+			want:    nil,
+		},
+		{
+			name:    "empty quoted field",
+			signals: []string{"Invalid '': something"},
+			want:    nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := extractQuotedInvalidField(tt.signals)
+			if !equalStringPtr(got, tt.want) {
+				t.Fatalf("got %v, want %v", got, tt.want)
+			}
+		})
 	}
 }
 
