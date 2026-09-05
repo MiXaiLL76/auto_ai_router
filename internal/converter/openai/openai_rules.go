@@ -142,6 +142,11 @@ var gpt5Mapping = ModelParamsMapping{
 	},
 }
 
+var gpt6Mapping = ModelParamsMapping{
+	KeysToReplace: map[string]string{"max_tokens": "max_completion_tokens"},
+	KeysToRemove:  []string{"temperature", "top_p", "logprobs", "top_logprobs"},
+}
+
 // modelMappings maps model family prefixes to their parameter transformations.
 // Order matters: longer prefixes are checked first via matchModelFamily.
 var modelMappings = []struct {
@@ -152,6 +157,7 @@ var modelMappings = []struct {
 	{"o3", o3Mapping},
 	{"o4", o4Mapping},
 	{"gpt-5", gpt5Mapping},
+	{"gpt-6", gpt6Mapping},
 }
 
 // extractBaseModelName strips provider prefixes and known suffixes from a model ID.
@@ -382,4 +388,42 @@ func StripResponseFormat(body []byte) []byte {
 	return UpdateJSONField(body, ModelParamsMapping{
 		KeysToRemove: []string{"response_format"},
 	})
+}
+
+func ReplaceResponsesBodyParam(modelID string, body []byte) []byte {
+	if !matchModelFamily(modelID, "gpt-6") {
+		return body
+	}
+	var data map[string]json.RawMessage
+	if json.Unmarshal(body, &data) != nil {
+		return body
+	}
+	for _, key := range []string{"temperature", "top_p", "top_logprobs"} {
+		delete(data, key)
+	}
+	var include []string
+	if json.Unmarshal(data["include"], &include) == nil {
+		filtered := make([]string, 0, len(include))
+		for _, item := range include {
+			if item != "message.output_text.logprobs" {
+				filtered = append(filtered, item)
+			}
+		}
+		if len(filtered) != len(include) {
+			if len(filtered) == 0 {
+				delete(data, "include")
+			} else {
+				encoded, err := json.Marshal(filtered)
+				if err != nil {
+					return body
+				}
+				data["include"] = encoded
+			}
+		}
+	}
+	updated, err := json.Marshal(data)
+	if err != nil {
+		return body
+	}
+	return updated
 }

@@ -11,6 +11,34 @@ Auto AI Router implements the [OpenAI Responses API](../refs/openai_responses_ap
 | `GET`  | `/v1/responses/{id}`    | Retrieve a stored response by ID               |
 | `POST` | `/v1/responses/compact` | Compact a conversation into a summary item     |
 
+## GPT-6 Astra over HTTP
+
+Configure `gpt-6-astra` on an existing OpenAI-compatible credential. OpenAI credentials
+forward Responses requests directly to `/v1/responses`. For example, with an existing
+credential named `openai_main`:
+
+```yaml
+models:
+  - name: gpt-6-astra
+    credential: openai_main
+```
+
+For GPT-6 requests, the router removes `temperature`, `top_p`, and `top_logprobs`.
+Responses requests also drop `message.output_text.logprobs` from `include`, preserving
+other include values. Chat Completions requests drop `logprobs` and use the existing
+`max_tokens` to `max_completion_tokens` conversion. `max_output_tokens` is preserved.
+See the [OpenAI migration guide](https://developers.openai.com/api/docs/guides/latest-model).
+
+Use Responses for tool calling. Native HTTP forwarding preserves `async` tool flags,
+`additional_tools` with required or named `tool_choice`, `configuration_update` input
+items, `prompt_cache_breakpoint`, and `prompt_cache_options`. Reasoning values such as
+`max` and `pro` are forwarded for the upstream to interpret; the router does not add
+provider-specific reasoning aliases. Cache options do not guarantee a cache hit.
+
+Prices still come from `server.model_prices_link` or the LiteLLM database. Add the
+model's applicable rates there before using budget enforcement. Input, output, cache
+read/write, and reasoning usage use the existing billing pipeline.
+
 ## Request Parameters
 
 All standard Responses API parameters are supported. The table below lists the full set recognized by the router:

@@ -390,8 +390,8 @@ func (p *Proxy) prepareRequestForCredential(
 
 	switch {
 	case p.modelManager != nil && p.modelManager.IsPassthroughResponsesForProvider(modelID, cred.Type):
-		req.body = responses.PrepareCodexPassthrough(body, prevEntryHandled)
-		req.proxyBody = responses.PrepareCodexPassthrough(proxyBody, prevEntryHandled)
+		req.body = openai.ReplaceResponsesBodyParam(realModelID, responses.PrepareCodexPassthrough(body, prevEntryHandled))
+		req.proxyBody = openai.ReplaceResponsesBodyParam(realModelID, responses.PrepareCodexPassthrough(proxyBody, prevEntryHandled))
 		req.passthroughResponses = true
 		p.logger.DebugContext(r.Context(), "Native Responses API passthrough",
 			"model", modelID, "provider", cred.Type, "streaming", streaming)
