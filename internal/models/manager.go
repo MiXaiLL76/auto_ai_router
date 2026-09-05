@@ -292,13 +292,14 @@ const (
 // Manager handles model discovery and mapping
 type Manager struct {
 	mu                           sync.RWMutex
-	credentialModels             map[string][]string                                // credential name -> list of model IDs
-	allModels                    []Model                                            // deduplicated list of all models
-	modelToCredentials           map[string][]string                                // model ID -> list of credential names
-	modelLimits                  map[string][]ModelLimits                           // model ID -> limits (may have multiple entries for different credentials)
-	staticModelLimits            map[string][]ModelLimits                           // immutable snapshot of limits from config.yaml (never modified after New())
-	staticModelRealNames         map[string]string                                  // immutable snapshot of global real names from config.yaml
-	staticModelRealNamesPerCred  map[string]map[string]string                       // immutable snapshot of per-credential real names: credential -> alias -> real name
+	credentialModels             map[string][]string          // credential name -> list of model IDs
+	allModels                    []Model                      // deduplicated list of all models
+	modelToCredentials           map[string][]string          // model ID -> list of credential names
+	modelLimits                  map[string][]ModelLimits     // model ID -> limits (may have multiple entries for different credentials)
+	staticModelLimits            map[string][]ModelLimits     // immutable snapshot of limits from config.yaml (never modified after New())
+	staticModelRealNames         map[string]string            // immutable snapshot of global real names from config.yaml
+	staticModelRealNamesPerCred  map[string]map[string]string // immutable snapshot of per-credential real names: credential -> alias -> real name
+	modelWebSocketResponses      map[string]bool
 	modelPassthroughResponses    map[string]*bool                                   // model name -> explicit passthrough_responses override (nil = auto)
 	modelPassthroughMessages     map[string]*bool                                   // model name -> explicit passthrough_messages override (nil = provider default)
 	dynamicModelWeights          map[string]map[string]int                          // model ID -> credential -> weight learned from upstream /health
@@ -342,6 +343,7 @@ func New(logger *slog.Logger, defaultModelsRPM int, staticModels []config.ModelR
 		acceptedModelAliases:        make(map[string]string),
 		modelRealNames:              make(map[string]string),
 		modelRealNamesPerCred:       make(map[string]map[string]string),
+		modelWebSocketResponses:     make(map[string]bool),
 		modelPassthroughResponses:   make(map[string]*bool),
 		modelPassthroughMessages:    make(map[string]*bool),
 		dynamicModelWeights:         make(map[string]map[string]int),
@@ -361,6 +363,9 @@ func New(logger *slog.Logger, defaultModelsRPM int, staticModels []config.ModelR
 	if len(staticModels) > 0 {
 		logger.Info("Loading static models from config.yaml", "models_count", len(staticModels))
 		for _, staticModel := range staticModels {
+			if staticModel.WebSocketResponses {
+				m.modelWebSocketResponses[staticModel.Name] = true
+			}
 			m.modelLimits[staticModel.Name] = append(m.modelLimits[staticModel.Name], ModelLimits{
 				RPM:        staticModel.RPM,
 				TPM:        staticModel.TPM,
@@ -560,6 +565,18 @@ var providerPassthroughDefaults = map[config.ProviderType]bool{
 	config.ProviderTypeCometAPI:  false,
 	config.ProviderTypeProMan:    false,
 	config.ProviderTypeBedrock:   false,
+}
+
+func (m *Manager) IsWebSocketResponses(modelID string) bool {
+	if canonical, alias, err := m.ResolvePublicModelAlias(modelID); err == nil && alias {
+		modelID = canonical
+	}
+	if resolved, alias := m.ResolveAlias(modelID); alias {
+		modelID = resolved
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.modelWebSocketResponses[modelID]
 }
 
 // IsPassthroughResponses reports whether Responses API requests for modelID

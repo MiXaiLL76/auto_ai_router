@@ -11,7 +11,7 @@ Auto AI Router implements the [OpenAI Responses API](../refs/openai_responses_ap
 | `GET`  | `/v1/responses/{id}`    | Retrieve a stored response by ID               |
 | `POST` | `/v1/responses/compact` | Compact a conversation into a summary item     |
 
-## GPT-6 Astra over HTTP
+## GPT-6 Astra
 
 Configure `gpt-6-astra` on an existing OpenAI-compatible credential. OpenAI credentials
 forward Responses requests directly to `/v1/responses`. For example, with an existing
@@ -177,7 +177,52 @@ for event in stream:
 
 ## WebSocket Protocol
 
-The router accepts WebSocket connections on `GET /v1/responses` (with `Upgrade: websocket` header). This allows multiple request-response turns on a single persistent connection.
+The router accepts WebSocket connections on `GET /v1/responses` (with `Upgrade: websocket` header). By default, each turn uses the existing HTTP/SSE provider path. Enable native upstream WebSockets for models whose providers support them:
+
+```yaml
+models:
+  - name: gpt-6-astra
+    credential: openai_main
+    websocket_responses: true
+```
+
+### Native Upstream Mode
+
+Native mode connects directly to the configured provider's WebSocket Responses endpoint.
+It supports OpenAI and existing `proxy`/`air` credentials with native Responses passthrough.
+All credentials serving an opted-in model must support WebSockets. For a custom deployment
+name, also set `passthrough_responses: true` if native Responses is not auto-detected.
+
+Send `response.create` to begin. Once `response.created` arrives, GPT-6 Astra accepts
+`response.steer` during generation:
+
+```json
+{"type":"response.steer","previous_response_id":"resp_1","input":"Keep the answer shorter."}
+```
+
+Steering accepts user input, and the upstream creates its successor response automatically.
+The router tracks and bills each response separately. If `response.steer.pending` requests
+a tool result, send another `response.create` with the original `previous_response_id`
+and the required `function_call_output`. Async tool flags, cache options, and
+`configuration_update` items in `response.create.input` follow the HTTP passthrough rules.
+Support for these features still depends on the provider; Azure WebSocket transport does
+not imply Azure supports steering. See [OpenAI steering](https://developers.openai.com/api/docs/guides/steering).
+
+Native sessions use one model and credential, one active response, and at most one queued
+steer. Authentication, model access, credential scope, rate limits, and budget checks run
+for each create/steer request. Provider usage, including cache usage, feeds the existing
+billing pipeline; continuation reservations include an estimate of prior context.
+
+`stream` and `background` are removed and `store` is forced to `false`. Responses remain
+on the upstream connection: router HTTP retrieval and cross-connection continuation are
+unavailable. Reconnect with full input history after an upstream disconnect, credential
+change, one hour, or 128 admitted responses. There is no automatic provider fallback
+inside an established session. By default, disconnecting closes the upstream and uses estimated usage for unfinished
+responses. With `drain_upstream_on_abort: true`, the router keeps reading for the existing
+drain grace period to collect final provider usage.
+
+The remaining examples also apply to the default HTTP/SSE bridge; its local and persistent
+response-store behavior is described separately below.
 
 ### Connection
 
@@ -200,7 +245,7 @@ Send a JSON message with `"type": "response.create"` and any standard Responses 
 }
 ```
 
-The `type` field is stripped before forwarding to the provider.
+In the default bridge, `type` is stripped before forwarding HTTP. Native mode sends `response.create` over the upstream WebSocket.
 
 ### Receiving Events
 
@@ -236,7 +281,7 @@ HTTP errors are converted to structured WebSocket error events:
 }
 ```
 
-### Connection-Local Cache
+### Connection-Local Cache (HTTP/SSE Bridge)
 
 When `store: false` is explicitly set, completed responses are cached in connection-local memory for the duration of the WebSocket connection. This allows `previous_response_id` continuations within the same session without a persistent store. The cache is cleared on reconnect.
 

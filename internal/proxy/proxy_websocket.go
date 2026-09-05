@@ -271,6 +271,11 @@ outerLoop:
 			continue
 		}
 
+		if model, _ := reqMap["model"].(string); p.modelManager != nil && p.modelManager.IsWebSocketResponses(model) {
+			p.handleNativeResponsesWebSocket(conn, r, msg)
+			return
+		}
+
 		// Remove the protocol-level "type" field before forwarding.
 		delete(reqMap, "type")
 

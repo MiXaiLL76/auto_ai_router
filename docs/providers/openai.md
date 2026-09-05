@@ -28,10 +28,26 @@ credentials:
   - name: "azure_openai"
     type: "openai"
     api_key: "os.environ/AZURE_OPENAI_KEY"
-    base_url: "https://your-resource.openai.azure.com"
+    base_url: "https://your-resource.openai.azure.com/openai/v1"
     rpm: 100
     tpm: 50000
 ```
+
+For native Responses WebSockets, configure the deployment name and enable the transport:
+
+```yaml
+models:
+  - name: gpt-6-astra
+    model: your-astra-deployment
+    credential: azure_openai
+    passthrough_responses: true
+    websocket_responses: true
+```
+
+The router connects to `wss://your-resource.openai.azure.com/openai/v1/responses`
+with the credential's API key as a Bearer token. See the
+[Azure WebSocket guide](https://learn.microsoft.com/en-us/azure/foundry/openai/how-to/websockets)
+and [router session limits](../advanced/responses.md#native-upstream-mode).
 
 ## Per-Model Configuration
 

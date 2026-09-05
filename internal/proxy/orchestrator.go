@@ -154,7 +154,7 @@ func (p *Proxy) orchestrateRequest(
 		meta := responses.ExtractResponsesMetadata(body)
 		responsesMetadata = &meta
 
-		if meta.PreviousResponseID != "" && p.responseStore != nil {
+		if meta.PreviousResponseID != "" && p.responseStore != nil && nativeWSRoutingFromContext(r.Context()) == nil {
 			apiKeyHash := litellmdb.HashToken(logCtx.Token)
 			entry, loadErr := p.responseStore.GetEntry(r.Context(), meta.PreviousResponseID, apiKeyHash)
 			if loadErr != nil {
@@ -820,6 +820,19 @@ func (p *Proxy) selectCredentialForModel(
 		logCtx.Logged = true
 
 		WriteErrorNotFound(w, errorMsg)
+		return nil, false
+	}
+
+	if routing := nativeWSRoutingFromContext(logCtx.Context()); routing != nil && routing.credential != "" {
+		if !exclude[routing.credential] {
+			if cred, err := p.balancer.NextSpecificScoped(routing.credential, modelID, logCtx.Scope); err == nil {
+				return cred, true
+			}
+		}
+		logCtx.Status = "failure"
+		logCtx.HTTPStatus = http.StatusTooManyRequests
+		logCtx.ErrorMsg = "WebSocket credential unavailable; reconnect to select another credential"
+		WriteErrorRateLimit(w, logCtx.ErrorMsg)
 		return nil, false
 	}
 
