@@ -19,10 +19,10 @@ func TestEstimatePromptTokensForModel_OpenAIChatUsesTokenizer(t *testing.T) {
 	assert.Equal(t, 8, got)
 }
 
-func TestEstimatePromptTokensForModel_GPT5FamilyUsesTokenizer(t *testing.T) {
+func TestEstimatePromptTokensForModel_GPTReasoningFamiliesUseTokenizer(t *testing.T) {
 	body := []byte(`{"messages":[{"role":"user","content":"hello"}]}`)
 
-	for _, model := range []string{"gpt-5", "gpt-5-mini", "gpt-5.5"} {
+	for _, model := range []string{"gpt-5", "gpt-5-mini", "gpt-5.5", "gpt-6-astra", "openai/gpt-6-astra"} {
 		t.Run(model, func(t *testing.T) {
 			got := estimatePromptTokensForModel(body, model)
 
@@ -97,8 +97,8 @@ func TestCountTextTokens_IsNotAdditiveAcrossSubstrings(t *testing.T) {
 	assert.NotEqual(t, full, parts)
 }
 
-func TestCompletionTokenAccumulator_GPT5FamilyUsesTokenizer(t *testing.T) {
-	for _, model := range []string{"gpt-5", "gpt-5-mini", "gpt-5.5"} {
+func TestCompletionTokenAccumulator_GPTReasoningFamiliesUseTokenizer(t *testing.T) {
+	for _, model := range []string{"gpt-5", "gpt-5-mini", "gpt-5.5", "gpt-6-astra", "openai/gpt-6-astra"} {
 		t.Run(model, func(t *testing.T) {
 			acc := newCompletionTokenAccumulator(model)
 			acc.AddChunk([]byte(`data: {"choices":[{"delta":{"content":"hello"}}]}` + "\n\n"))

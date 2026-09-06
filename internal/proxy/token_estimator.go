@@ -335,7 +335,8 @@ func tokenizerForModel(model string) tokenizer.Codec {
 	}
 
 	switch {
-	case strings.HasPrefix(normalized, "gpt-5"),
+	case strings.HasPrefix(normalized, "gpt-6"),
+		strings.HasPrefix(normalized, "gpt-5"),
 		strings.HasPrefix(normalized, "gpt-4.1"),
 		strings.HasPrefix(normalized, "gpt-4.5"),
 		strings.HasPrefix(normalized, "gpt-4o"),
@@ -409,7 +410,11 @@ func (p *Proxy) setPromptTokensEstimate(logCtx *RequestLogContext, body []byte, 
 		return
 	}
 	logCtx.promptTokensEstimateFn = func() int {
-		return estimatePromptTokensForModel(body, model)
+		tokens := estimatePromptTokensForModel(body, model)
+		if routing := nativeWSRoutingFromContext(logCtx.Context()); routing != nil {
+			tokens += routing.historyTokens
+		}
+		return tokens
 	}
 }
 
