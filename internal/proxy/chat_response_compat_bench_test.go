@@ -8,9 +8,9 @@ import (
 	"testing"
 )
 
-// decodeJSONObjectStdlib mirrors decodeJSONObject (chat_response_compat.go,
-// now on goccy) exactly, on stdlib json, kept only to isolate the engine
-// swap's own effect in the benchmarks below.
+// decodeJSONObjectStdlib is the old full map[string]interface{} decode on
+// stdlib json, kept as a baseline for the benchmarks below (production now
+// shallow-decodes into map[string]RawMessage via goccy).
 func decodeJSONObjectStdlib(data []byte) (map[string]interface{}, error) {
 	decoder := stdjson.NewDecoder(bytes.NewReader(data))
 	decoder.UseNumber()
@@ -28,8 +28,9 @@ func decodeJSONObjectStdlib(data []byte) (map[string]interface{}, error) {
 	return object, nil
 }
 
-// normalizeSSEDataLineModelStdlib mirrors normalizeSSEDataLineModel exactly,
-// using decodeJSONObjectStdlib + stdjson.Marshal instead of goccy.
+// normalizeSSEDataLineModelStdlib is the old deep-decode implementation
+// (decodeJSONObjectStdlib + stdjson.Marshal), kept as a benchmark baseline
+// against the current shallow production path.
 func normalizeSSEDataLineModelStdlib(line []byte, publicModel string) []byte {
 	newline := []byte(nil)
 	body := line
