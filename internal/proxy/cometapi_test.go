@@ -54,6 +54,56 @@ func TestIsCometAPICredential(t *testing.T) {
 	}
 }
 
+func TestIsDeepSeekModel(t *testing.T) {
+	tests := []struct {
+		name    string
+		modelID string
+		want    bool
+	}{
+		{
+			name:    "plain client-facing alias",
+			modelID: "deepseek-v4-flash-0731",
+			want:    true,
+		},
+		{
+			name:    "vendor-prefixed on openrouter",
+			modelID: "deepseek/deepseek-v4-flash-0731",
+			want:    true,
+		},
+		{
+			name:    "policy-aliased on requesty",
+			modelID: "policy/deepseek-v4-flash-0731-ateam",
+			want:    true,
+		},
+		{
+			name:    "differently-cased on deepinfra",
+			modelID: "deepseek-ai/DeepSeek-V4-Flash-0731",
+			want:    true,
+		},
+		{
+			name:    "unrelated model on the same OpenAI-compatible credential",
+			modelID: "glm-5.3",
+			want:    false,
+		},
+		{
+			name:    "real openai model",
+			modelID: "gpt-5.6-sol",
+			want:    false,
+		},
+		{
+			name:    "empty",
+			modelID: "",
+			want:    false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, isDeepSeekModel(tt.modelID))
+		})
+	}
+}
+
 func TestAppendResponseBodyForLogs_CometKeepsMaskedFlagAndLogsBody(t *testing.T) {
 	cred := &config.CredentialConfig{Type: config.ProviderTypeCometAPI}
 	body := `{"error":{"code":"permission_denied","message":"` + strings.Repeat("model access denied ", 50) + `","type":"comet_api_error"}}`

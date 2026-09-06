@@ -384,7 +384,26 @@ func (p *Proxy) prepareRequestForCredential(
 		return req, nil
 	}
 	if !isResponsesAPI {
-		req.body = openai.ReplaceBodyParam(realModelID, body)
+		// Normalize "developer" role here too, not just in the Responses→Chat
+		// converter: a client can send an already Chat-Completions-shaped body
+		// straight to /v1/chat/completions (or an SDK can emit "developer" for
+		// reasoning models), and this path never goes through that converter.
+		// Scoped to DeepSeek specifically (by model ID, not credential — the
+		// same OpenRouter/Requesty/DeepInfra/etc. credential also serves many
+		// other models): that's the only backend this rejection has actually
+		// been confirmed on. "developer" exists for OpenAI's own reasoning
+		// models in the first place, and reports on whether OpenAI treats a
+		// plain "system" as a true equivalent for them are inconsistent, so
+		// nothing else is touched until confirmed to need it too.
+		// proxyBody must stay in sync with body: TryFallbackProxy forwards
+		// proxyBody, not body, to fallback credentials.
+		normalizedBody, normalizedProxyBody := body, proxyBody
+		if isDeepSeekModel(realModelID) || isDeepSeekModel(modelID) {
+			normalizedBody = openai.NormalizeDeveloperRole(body)
+			normalizedProxyBody = openai.NormalizeDeveloperRole(proxyBody)
+		}
+		req.body = openai.ReplaceBodyParam(realModelID, normalizedBody)
+		req.proxyBody = normalizedProxyBody
 		return req, nil
 	}
 

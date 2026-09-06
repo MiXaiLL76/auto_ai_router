@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // helper: unmarshal body into map for assertions
@@ -755,4 +756,40 @@ func TestConvertWebSearchTools_OtherNonFunctionToolsDropped(t *testing.T) {
 	if _, ok := result["web_search_options"]; ok {
 		t.Error("web_search_options must NOT be added (no web_search tools)")
 	}
+}
+
+// TestNormalizeDeveloperRole_DowngradesToSystem reproduces a real production
+// failure: a client sends an already Chat-Completions-shaped body with a
+// "developer"-role message straight to /v1/chat/completions (this path never
+// goes through the Responses→Chat converter, which already handles this rename
+// — see converter/responses.convertMessage). Most OpenAI-compatible backends
+// reached this way (DeepSeek, etc.) reject "developer" outright.
+func TestNormalizeDeveloperRole_DowngradesToSystem(t *testing.T) {
+	body := []byte(`{"model":"deepseek-v4-flash-0731","messages":[{"role":"developer","content":"You are a pirate."},{"role":"user","content":"Hello"}]}`)
+	result := bodyToMap(t, NormalizeDeveloperRole(body))
+
+	messages := result["messages"].([]interface{})
+	require.Len(t, messages, 2)
+	assert.Equal(t, "system", messages[0].(map[string]interface{})["role"])
+	assert.Equal(t, "You are a pirate.", messages[0].(map[string]interface{})["content"])
+	assert.Equal(t, "user", messages[1].(map[string]interface{})["role"])
+}
+
+// TestNormalizeDeveloperRole_LeavesOtherRolesUntouched verifies messages with
+// roles other than "developer" (including the already-correct "system") pass
+// through unchanged, and no rewrite/re-marshal happens when there's nothing
+// to rename.
+func TestNormalizeDeveloperRole_LeavesOtherRolesUntouched(t *testing.T) {
+	body := []byte(`{"model":"gpt-4o","messages":[{"role":"system","content":"sys"},{"role":"user","content":"hi"},{"role":"assistant","content":"hey"}]}`)
+	result := NormalizeDeveloperRole(body)
+	assert.JSONEq(t, string(body), string(result))
+}
+
+// TestNormalizeDeveloperRole_NoMessagesArray verifies bodies without a
+// "messages" field (e.g. a malformed or non-chat request) are returned as-is
+// instead of erroring or fabricating a messages array.
+func TestNormalizeDeveloperRole_NoMessagesArray(t *testing.T) {
+	body := []byte(`{"model":"gpt-4o","input":"hi"}`)
+	result := NormalizeDeveloperRole(body)
+	assert.JSONEq(t, string(body), string(result))
 }

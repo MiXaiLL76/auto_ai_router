@@ -69,6 +69,19 @@ func isCometAPICredential(cred *config.CredentialConfig) bool {
 		strings.Contains(name, "comet-api")
 }
 
+// isDeepSeekModel reports whether modelID identifies a DeepSeek model,
+// regardless of which OpenAI-compatible backend it's reached through —
+// vendor-prefixed ("deepseek/deepseek-v4-flash-0731" on OpenRouter),
+// policy-aliased ("policy/deepseek-v4-flash-0731-ateam" on Requesty),
+// differently-cased ("deepseek-ai/DeepSeek-V4-Flash-0731" on DeepInfra), or
+// a plain client-facing alias ("deepseek-v4-flash-0731"). The "developer"
+// role rejection this gates has only been confirmed reproduced for
+// DeepSeek; other models reached through the same generic OpenAI-compatible
+// credentials are left untouched until confirmed to need it too.
+func isDeepSeekModel(modelID string) bool {
+	return strings.Contains(strings.ToLower(modelID), "deepseek")
+}
+
 func isProviderHost(rawBaseURL, domain string) bool {
 	baseURL := strings.TrimSpace(rawBaseURL)
 	domain = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(domain)), ".")
