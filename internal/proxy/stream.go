@@ -891,13 +891,9 @@ func (p *Proxy) handleStreamingWithTokens(w http.ResponseWriter, resp *http.Resp
 	}
 
 	var payloadBuf [][]byte
-	onChunk := func(chunk []byte) {
-		chunkCount++
-
-		// One split per chunk (plan item C), reused below for both usage and
-		// total-tokens extraction; the completion accumulator keeps its own
-		// reused buffer (see completionTokenAccumulator.payloadBuf) since it
-		// also has to run on hasUsage==false chunks.
+	onLine := func(chunk []byte) {
+		// Parse complete SSE lines, not individual HTTP reads: a large image
+		// event may carry its usage after several stream buffer boundaries.
 		payloadBuf = splitSSEPayloads(chunk, payloadBuf)
 		if hasUsage := chunkMayCarryTokenUsage(chunk); hasUsage {
 			if logCtx != nil {
@@ -922,6 +918,11 @@ func (p *Proxy) handleStreamingWithTokens(w http.ResponseWriter, resp *http.Resp
 		// Don't let a bare [DONE] sentinel or empty chunks overwrite a lastChunk that carries usage data.
 		rememberLastStreamDataChunk(&lastChunk, chunk)
 	}
+	var usageLines streamUsageLines
+	onChunk := func(chunk []byte) {
+		chunkCount++
+		usageLines.Observe(chunk, onLine)
+	}
 
 	clientReader := normalizeSuccessfulResponseModelStream(
 		promanutils.NewSanitizingSSEReader(providerReader, clientVisibleResponseModel(logCtx, modelID)),
@@ -939,6 +940,7 @@ func (p *Proxy) handleStreamingWithTokens(w http.ResponseWriter, resp *http.Resp
 			defer cancel()
 			p.drainUpstream(drainCtx, clientReader, onChunk, credName)
 		}
+		usageLines.Finalize(onLine)
 		estimated := totalTokens
 		if estimated == 0 {
 			estimated = completion.TokenCount()
@@ -951,6 +953,7 @@ func (p *Proxy) handleStreamingWithTokens(w http.ResponseWriter, resp *http.Resp
 		return err
 	}
 
+	usageLines.Finalize(onLine)
 	var streamErr error
 	if detectProviderStreamError {
 		streamErr = resolveCapturedProviderStreamError(logCtx, resp.StatusCode, nil, providerStreamError)
