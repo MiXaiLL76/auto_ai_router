@@ -49,6 +49,43 @@ func TestStreamUsageLinesSplitAtEveryBoundary(t *testing.T) {
 	}
 }
 
+func TestProxyHopStreamingUsageInLargeImageFrame(t *testing.T) {
+	for _, mode := range []string{"complete", "drain after disconnect", "EOF without newline"} {
+		t.Run(mode, func(t *testing.T) {
+			prx := NewTestProxyBuilder().WithDrainUpstreamOnAbort(true).Build()
+			image := "data:image/png;base64," + strings.Repeat("A", 2*1024*1024)
+			body := `data: {"choices":[{"delta":{"images":[{"image_url":{"url":"` + image + `"}}]}}],"usage":{"prompt_tokens":14,"completion_tokens":1301,"total_tokens":1315,"completion_tokens_details":{"image_tokens":1290}}}` + "\n\ndata: [DONE]\n\n"
+			if mode == "EOF without newline" {
+				body = strings.TrimSuffix(body, "\n\ndata: [DONE]\n\n")
+			}
+			resp := &ProxyResponse{StatusCode: 200, Headers: http.Header{"Content-Type": []string{"text/event-stream"}}, StreamBody: io.NopCloser(strings.NewReader(body))}
+			logCtx := &RequestLogContext{RequestID: "image-usage", Credential: &config.CredentialConfig{Name: "test", Type: config.ProviderTypeAIR}}
+			recorder := httptest.NewRecorder()
+			var writer http.ResponseWriter = recorder
+			if mode == "drain after disconnect" {
+				writer = newFailAfterNBytesWriter(10)
+			}
+			usage, err := prx.writeProxyStreamingResponseWithTokens(writer, resp, httptest.NewRequest("POST", "/v1/chat/completions", nil), logCtx.Credential, "google/gemini-2.5-flash-image", "google/gemini-2.5-flash-image", logCtx)
+			if mode == "drain after disconnect" {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+				require.Contains(t, recorder.Body.String(), image)
+			}
+			require.NotNil(t, usage)
+			require.Equal(t, 14, usage.PromptTokens)
+			require.Equal(t, 1301, usage.CompletionTokens)
+			require.Equal(t, 1290, usage.OutputImageTokens)
+			require.Equal(t, "provider", logCtx.UsageSource)
+			cost := models.CalculateTokenCosts(usage, &models.ModelPrice{
+				InputCostPerToken: 0.0000005124, OutputCostPerToken: 0.00000427,
+				OutputCostPerImageToken: 0.00005124, CacheReadInputTokensFree: true,
+			})
+			require.InDelta(t, 0.0661537436, cost.TotalCost, 1e-12)
+		})
+	}
+}
+
 func TestStreamUsageLinesFinalize(t *testing.T) {
 	var capture streamUsageLines
 	var lines []string
@@ -59,11 +96,11 @@ func TestStreamUsageLinesFinalize(t *testing.T) {
 }
 
 func TestStreamUsageLinesBoundAndRecovery(t *testing.T) {
-	var capture streamUsageLines
+	capture := streamUsageLines{maxLineBytes: 64}
 	var lines []string
 	consume := func(line []byte) { lines = append(lines, string(line)) }
-	chunk := []byte(strings.Repeat("A", 8192))
-	for size := 0; size <= maxSSEModelRewriteLineBytes; size += len(chunk) {
+	chunk := []byte(strings.Repeat("A", 8))
+	for size := 0; size <= capture.maxLineBytes; size += len(chunk) {
 		capture.Observe(chunk, consume)
 	}
 	require.True(t, capture.discard)

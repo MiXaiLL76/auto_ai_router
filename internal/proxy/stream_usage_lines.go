@@ -6,11 +6,16 @@ import "bytes"
 // from an HTTP body may split JSON anywhere, including inside an image-bearing
 // event that also carries usage. The bound matches image stream model rewriting.
 type streamUsageLines struct {
-	pending []byte
-	discard bool
+	pending      []byte
+	discard      bool
+	maxLineBytes int
 }
 
 func (s *streamUsageLines) Observe(chunk []byte, consume func([]byte)) {
+	limit := s.maxLineBytes
+	if limit <= 0 {
+		limit = maxSSEModelRewriteLineBytes
+	}
 	for len(chunk) > 0 {
 		end := bytes.IndexByte(chunk, '\n')
 		length := len(chunk)
@@ -20,7 +25,7 @@ func (s *streamUsageLines) Observe(chunk []byte, consume func([]byte)) {
 		part := chunk[:length]
 		chunk = chunk[length:]
 		if !s.discard {
-			if len(s.pending)+len(part) > maxSSEModelRewriteLineBytes {
+			if len(s.pending)+len(part) > limit {
 				s.pending = nil
 				s.discard = true
 			} else if len(s.pending) == 0 && end >= 0 {

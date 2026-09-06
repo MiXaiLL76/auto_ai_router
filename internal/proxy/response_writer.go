@@ -508,9 +508,8 @@ func (p *Proxy) writeProxyStreamingResponseWithTokens(
 	var lastUsage *converter.TokenUsage
 	completion := p.newCompletionTokenAccumulator(tokenizerModelID)
 	var payloadBuf [][]byte
-	onChunk := func(chunk []byte) {
-		// One split per chunk (plan item C), reused for both usage
-		// extraction and the completion accumulator.
+	onLine := func(chunk []byte) {
+		// Image-bearing usage events can span several HTTP reads.
 		payloadBuf = splitSSEPayloads(chunk, payloadBuf)
 		if chunkMayCarryTokenUsage(chunk) {
 			if usage := extractTokenUsageFromPayloads(payloadBuf, tokenUsageOptions); usage != nil {
@@ -529,6 +528,10 @@ func (p *Proxy) writeProxyStreamingResponseWithTokens(
 		}
 		completion.AddPayloads(payloadBuf)
 	}
+	var usageLines streamUsageLines
+	onChunk := func(chunk []byte) {
+		usageLines.Observe(chunk, onLine)
+	}
 
 	buildFallbackUsage := func() *converter.TokenUsage {
 		if lastUsage != nil {
@@ -543,6 +546,7 @@ func (p *Proxy) writeProxyStreamingResponseWithTokens(
 		return nil
 	}
 	finalize := func(streamErr error) (*converter.TokenUsage, error) {
+		usageLines.Finalize(onLine)
 		if detectProviderStreamError {
 			streamErr = resolveCapturedProviderStreamError(logCtx, resp.StatusCode, streamErr, providerStreamError)
 		}
