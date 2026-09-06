@@ -83,6 +83,14 @@ func convertContentToParts(content interface{}) ([]*genai.Part, error) {
 					return nil, nil
 				}
 
+				// Empty audio decodes without error but produces a blob with no
+				// bytes, which Gemini rejects with 400 INVALID_ARGUMENT
+				// ("parts[N].data: required oneof field 'data' must have one
+				// initialized field"). Skip it like undecodable data above.
+				if len(decodedData) == 0 {
+					return nil, nil
+				}
+
 				// Determine MIME type from format field or default to wav
 				mimeType := "audio/wav"
 				if format, ok := audioData["format"].(string); ok && format != "" {

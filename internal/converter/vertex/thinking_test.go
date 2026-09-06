@@ -424,3 +424,49 @@ func TestMapNativeThinkingConfig(t *testing.T) {
 		assert.Equal(t, genai.ThinkingLevelLow, result.ThinkingLevel)
 	})
 }
+
+func TestLowestThinkingLevel(t *testing.T) {
+	tests := []struct {
+		name  string
+		model string
+		want  genai.ThinkingLevel
+	}{
+		// Flash variants that still accept MINIMAL keep the cheaper floor.
+		{"flash preview", "gemini-3-flash-preview", genai.ThinkingLevelMinimal},
+		{"flash lite", "gemini-3.5-flash-lite", genai.ThinkingLevelMinimal},
+		{"flash 3.6", "gemini-3.6-flash", genai.ThinkingLevelMinimal},
+		// Observed in production rejecting MINIMAL with 400 INVALID_ARGUMENT.
+		{"flash 3.7", "gemini-3.7-flash", genai.ThinkingLevelLow},
+		{"flash 3.8", "gemini-3.8-flash", genai.ThinkingLevelLow},
+		{"flash 3.7 dated", "gemini-3.7-flash-001", genai.ThinkingLevelLow},
+		{"flash 3.7 mixed case", "Gemini-3.7-Flash", genai.ThinkingLevelLow},
+		// Pro variants never supported MINIMAL.
+		{"pro", "gemini-3.1-pro-preview", genai.ThinkingLevelLow},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, lowestThinkingLevel(tt.model))
+		})
+	}
+}
+
+func TestDisableThinkingConfig_MinimalRejectingFlash(t *testing.T) {
+	for _, model := range []string{"gemini-3.7-flash", "gemini-3.8-flash"} {
+		t.Run(model, func(t *testing.T) {
+			cfg := disableThinkingConfig(model)
+			require.NotNil(t, cfg)
+			assert.Equal(t, genai.ThinkingLevelLow, cfg.ThinkingLevel)
+			assert.False(t, cfg.IncludeThoughts)
+		})
+	}
+}
+
+func TestMapReasoningEffort_MinimalOnRejectingFlash(t *testing.T) {
+	cfg := mapReasoningEffort("minimal", "gemini-3.7-flash")
+	require.NotNil(t, cfg)
+	assert.Equal(t, genai.ThinkingLevelLow, cfg.ThinkingLevel)
+
+	cfg = mapReasoningEffort("minimal", "gemini-3-flash-preview")
+	require.NotNil(t, cfg)
+	assert.Equal(t, genai.ThinkingLevelMinimal, cfg.ThinkingLevel)
+}
