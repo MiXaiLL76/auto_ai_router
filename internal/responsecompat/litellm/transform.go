@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/mixaill76/auto_ai_router/internal/upstreamerror"
 )
 
 var rateLimitHeaders = map[string]struct{}{
@@ -296,9 +297,26 @@ func errorStatus(value any) int {
 	return http.StatusUnprocessableEntity
 }
 
-func normalizeError(status int, _ []byte) []byte {
+// normalizeError builds the litellm-compatible error body for a non-2xx
+// response. Status 400 is run through the same signal-based classifier as
+// native mode's maskedUpstreamErrorBody (see upstreamerror.ClassifyBadRequest)
+// to surface which parameter was rejected — this only ever extracts a short,
+// pre-vetted message from a small fixed set plus a narrow field/param name,
+// never the raw provider message text, so it's safe to run on a body that
+// hasn't been trusted yet (see TestTransformError: raw provider bodies with
+// embedded credential names or internal URLs must never reach the client
+// verbatim, for 429 or otherwise). Other statuses keep their fixed generic
+// message, matching native mode exactly.
+func normalizeError(status int, body []byte) []byte {
 	message := "Request failed"
+	code := fmt.Sprintf("%d", status)
+	var param *string
 	switch status {
+	case http.StatusBadRequest:
+		classified := upstreamerror.ClassifyBadRequest(body)
+		message = classified.Message
+		code = classified.Code
+		param = classified.Param
 	case http.StatusTooManyRequests:
 		message = "Rate limit exceeded"
 	case http.StatusRequestTimeout, http.StatusGatewayTimeout:
@@ -309,8 +327,8 @@ func normalizeError(status int, _ []byte) []byte {
 		"error": map[string]any{
 			"message": message,
 			"type":    errorTypeForStatus(status),
-			"param":   nil,
-			"code":    fmt.Sprintf("%d", status),
+			"param":   param,
+			"code":    code,
 		},
 	})
 	return result
