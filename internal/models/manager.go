@@ -87,6 +87,7 @@ type ModelPrice struct {
 	OutputCostPerCachedToken                     float64 `json:"output_cost_per_cached_token,omitempty"`
 	InputCostPerCachedToken                      float64 `json:"input_cost_per_cached_token,omitempty"`
 	CacheReadInputTokenCost                      float64 `json:"cache_read_input_token_cost,omitempty"`
+	CacheReadInputTokensFree                     bool    `json:"cache_read_input_tokens_free,omitempty"`
 	CacheCreationInputTokenCost                  float64 `json:"cache_creation_input_token_cost,omitempty"`
 	CacheReadInputTokenCostAbove200k             float64 `json:"cache_read_input_token_cost_above_200k_tokens,omitempty"`
 	CacheCreationInputTokenCostAbove200k         float64 `json:"cache_creation_input_token_cost_above_200k_tokens,omitempty"`

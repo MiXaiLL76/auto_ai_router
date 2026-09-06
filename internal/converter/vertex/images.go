@@ -337,6 +337,12 @@ func imageEditRequestToOpenAIChatRequest(openAIBody []byte, contentType, provide
 // VertexChatResponseToOpenAIImage converts Vertex AI chat response with image to OpenAI image format
 // Extracts inline image data from chat response and returns it in OpenAI image generation format
 func VertexChatResponseToOpenAIImage(vertexBody []byte) ([]byte, error) {
+	return VertexChatResponseToOpenAIImageWithModel(vertexBody, "")
+}
+
+// VertexChatResponseToOpenAIImageWithModel preserves the client-visible model
+// on transformed Gemini Images responses.
+func VertexChatResponseToOpenAIImageWithModel(vertexBody []byte, model string) ([]byte, error) {
 	var vertexResp genai.GenerateContentResponse
 	if err := json.Unmarshal(vertexBody, &vertexResp); err != nil {
 		return nil, fmt.Errorf("failed to parse Vertex chat response: %w", err)
@@ -345,6 +351,7 @@ func VertexChatResponseToOpenAIImage(vertexBody []byte) ([]byte, error) {
 	openAIResp := openai.OpenAIImageResponse{
 		Created: converterutil.GetCurrentTimestamp(),
 		Data:    make([]openai.OpenAIImageData, 0),
+		Model:   model,
 	}
 
 	// Extract images from candidates

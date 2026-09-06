@@ -612,6 +612,16 @@ func TestConvertVertexUsageToImageUsage(t *testing.T) {
 }
 
 func TestVertexChatResponseToOpenAIImage_UsageFormat(t *testing.T) {
+	t.Run("preserves requested model", func(t *testing.T) {
+		body := `{"candidates":[{"content":{"parts":[{"inlineData":{"mimeType":"image/png","data":"iVBORw=="}}]}}]}`
+		result, err := VertexChatResponseToOpenAIImageWithModel([]byte(body), "google/gemini-3-pro-image-preview")
+		require.NoError(t, err)
+
+		var resp openai.OpenAIImageResponse
+		require.NoError(t, json.Unmarshal(result, &resp))
+		assert.Equal(t, "google/gemini-3-pro-image-preview", resp.Model)
+	})
+
 	t.Run("response without usage metadata omits usage field", func(t *testing.T) {
 		body := `{"candidates":[{"content":{"parts":[{"inlineData":{"mimeType":"image/png","data":"iVBORw=="}}]}}]}`
 		result, err := VertexChatResponseToOpenAIImage([]byte(body))

@@ -9,20 +9,32 @@ import (
 	// goccy/go-json for every JSON call in this file: normalizeSuccessfulResponseModel
 	// full-body-decodes+remarshals every non-streaming response (benchmarked
 	// ~1.66x faster than encoding/json against a real embedding body, 1536-float
-	// vector). normalizeSSEDataLineModel/decodeJSONObject were originally left on
-	// stdlib on the assumption that small per-SSE-chunk map[string]interface{}
-	// decodes wouldn't show the same win — re-benchmarked after the
+	// vector). normalizeSSEDataLineModel/decodeShallowJSONObject were originally
+	// left on stdlib on the assumption that small per-SSE-chunk map decodes
+	// wouldn't show the same win — re-benchmarked after the
 	// token_estimator.go streaming fixes proved that assumption wrong even for
 	// tiny typed-struct payloads; goccy measured ~1.5x faster here too
 	// (map[string]interface{} decode+encode, not just typed structs).
 	goccyjson "github.com/goccy/go-json"
 )
 
-const maxSSEModelRewriteLineBytes = 1024 * 1024
+const maxSSEModelRewriteLineBytes = 64 * 1024 * 1024
+
+// existingModelOnlyResponseRoutes are surfaces where a top-level "model" is
+// rewritten to the client alias when the backend already emits one, but is
+// never added when absent. This keeps schema-less image passthrough shapes
+// (OpenAI gpt-image-1, Imagen) byte-identical while still presenting the alias
+// for backends that do echo a model (canonical Gemini image, and any other
+// OpenAI-compatible image provider that returns "model") — matching the alias
+// every other route reports.
+var existingModelOnlyResponseRoutes = map[string]struct{}{
+	"/v1/images/generations": {},
+	"/v1/images/edits":       {},
+}
 
 // modelBearingResponseRoutes is the product surface whose successful response
-// schema exposes a client-visible model. Image responses intentionally do not
-// participate because their OpenAI schema has no model field.
+// schema exposes a client-visible model and may receive one when absent. Images
+// use existingModelOnlyResponseRoutes above so GPT passthrough shapes stay unchanged.
 var modelBearingResponseRoutes = map[string]struct{}{
 	"/v1/chat/completions": {},
 	"/v1/completions":      {},
@@ -40,7 +52,14 @@ func normalizeSuccessfulResponseModel(body []byte, endpoint, publicModel string)
 	if publicModel == "" {
 		return body
 	}
-	if _, ok := modelBearingResponseRoutes[endpoint]; !ok {
+	_, modelBearing := modelBearingResponseRoutes[endpoint]
+	_, existingModelOnly := existingModelOnlyResponseRoutes[endpoint]
+	if !modelBearing && !existingModelOnly {
+		return body
+	}
+	// existing-model-only routes never add "model"; skip the unmarshal entirely
+	// when the body can't contain the field (gpt-image-1 / Imagen passthrough).
+	if existingModelOnly && !modelBearing && !bytes.Contains(body, []byte(`"model"`)) {
 		return body
 	}
 
@@ -53,6 +72,8 @@ func normalizeSuccessfulResponseModel(body []byte, endpoint, publicModel string)
 		if err := goccyjson.Unmarshal(rawModel, &currentModel); err == nil && currentModel == publicModel {
 			return body
 		}
+	} else if existingModelOnly {
+		return body
 	}
 	modelJSON, err := goccyjson.Marshal(publicModel)
 	if err != nil {
@@ -104,6 +125,7 @@ func normalizeSuccessfulResponseModelStream(
 		source:                      bufio.NewReader(reader),
 		publicModel:                 publicModel,
 		preserveNestedResponseModel: responseCompatRequestFromContext(logCtx.Request.Context()) != nil,
+		maxLineBytes:                maxSSEModelRewriteLineBytes,
 	}
 }
 
@@ -115,6 +137,7 @@ type responseModelStreamReader struct {
 	pendingErr                  error
 	line                        []byte
 	passthrough                 bool
+	maxLineBytes                int
 }
 
 func (r *responseModelStreamReader) Read(dst []byte) (int, error) {
@@ -139,7 +162,11 @@ func (r *responseModelStreamReader) Read(dst []byte) (int, error) {
 			}
 			continue
 		}
-		if len(r.line)+len(fragment) > maxSSEModelRewriteLineBytes {
+		maxLineBytes := r.maxLineBytes
+		if maxLineBytes <= 0 {
+			maxLineBytes = maxSSEModelRewriteLineBytes
+		}
+		if len(r.line)+len(fragment) > maxLineBytes {
 			r.pending = append(r.pending, r.line...)
 			r.pending = append(r.pending, fragment...)
 			r.line = r.line[:0]
@@ -188,29 +215,33 @@ func normalizeSSEDataLineModelWithOptions(line []byte, publicModel string, prese
 	if len(payload) == 0 || bytes.Equal(payload, []byte("[DONE]")) {
 		return line
 	}
-	event, err := decodeJSONObject(payload)
+	// Shallow decode: every field but "model" (and, on /v1/responses, the
+	// nested response object) is kept as opaque bytes so a multi-MB base64
+	// image delta is never expanded into a map[string]interface{} tree and
+	// re-marshaled — same technique as normalizeSuccessfulResponseModel.
+	event, err := decodeShallowJSONObject(payload)
 	if err != nil || event == nil {
 		return line
 	}
 	rawError, hasError := event["error"]
-	eventType, _ := event["type"].(string)
-	if isStreamErrorEvent(eventType, hasError && rawError != nil) {
+	eventType := rawMessageString(event["type"])
+	if isStreamErrorEvent(eventType, hasError && !isJSONNull(rawError)) {
 		return line
 	}
 
 	changed := false
-	if current, exists := event["model"]; exists {
-		if current != publicModel {
-			event["model"] = publicModel
+	if _, exists := event["model"]; exists {
+		if rawMessageString(event["model"]) != publicModel {
+			event["model"] = marshalJSONString(publicModel)
 			changed = true
 		}
-	} else if object, _ := event["object"].(string); object == "chat.completion.chunk" || object == "text_completion" {
-		event["model"] = publicModel
+	} else if object := rawMessageString(event["object"]); object == "chat.completion.chunk" || object == "text_completion" {
+		event["model"] = marshalJSONString(publicModel)
 		changed = true
 	}
-	if response, ok := event["response"].(map[string]interface{}); ok && !preserveNestedResponseModel {
-		if response["model"] != publicModel {
-			response["model"] = publicModel
+	if rawResponse, ok := event["response"]; ok && !preserveNestedResponseModel {
+		if updated, nestedChanged := rewriteNestedResponseModel(rawResponse, publicModel); nestedChanged {
+			event["response"] = updated
 			changed = true
 		}
 	}
@@ -231,10 +262,11 @@ func normalizeSSEDataLineModelWithOptions(line []byte, publicModel string, prese
 	return result
 }
 
-func decodeJSONObject(data []byte) (map[string]interface{}, error) {
+// decodeShallowJSONObject decodes exactly one JSON object, keeping each value as
+// raw bytes, and rejects trailing content after it.
+func decodeShallowJSONObject(data []byte) (map[string]goccyjson.RawMessage, error) {
 	decoder := goccyjson.NewDecoder(bytes.NewReader(data))
-	decoder.UseNumber()
-	var object map[string]interface{}
+	var object map[string]goccyjson.RawMessage
 	if err := decoder.Decode(&object); err != nil {
 		return nil, err
 	}
@@ -246,4 +278,52 @@ func decodeJSONObject(data []byte) (map[string]interface{}, error) {
 		return nil, err
 	}
 	return object, nil
+}
+
+// rewriteNestedResponseModel mirrors the /v1/responses handling of the old deep
+// decode: if "response" is a JSON object it is given the client-visible model
+// (added when absent), touching only that one nested field.
+func rewriteNestedResponseModel(raw goccyjson.RawMessage, publicModel string) (goccyjson.RawMessage, bool) {
+	var nested map[string]goccyjson.RawMessage
+	if err := goccyjson.Unmarshal(raw, &nested); err != nil || nested == nil {
+		return raw, false
+	}
+	if _, ok := nested["model"]; ok && rawMessageString(nested["model"]) == publicModel {
+		return raw, false
+	}
+	nested["model"] = marshalJSONString(publicModel)
+	updated, err := goccyjson.Marshal(nested)
+	if err != nil {
+		return raw, false
+	}
+	return updated, true
+}
+
+// rawMessageString returns the string value of a JSON raw message, or "" if it
+// is absent or not a JSON string.
+func rawMessageString(raw goccyjson.RawMessage) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var s string
+	if err := goccyjson.Unmarshal(raw, &s); err != nil {
+		return ""
+	}
+	return s
+}
+
+// isJSONNull reports whether a raw message is absent or the JSON literal null.
+func isJSONNull(raw goccyjson.RawMessage) bool {
+	trimmed := bytes.TrimSpace(raw)
+	return len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null"))
+}
+
+// marshalJSONString encodes s as a JSON string, falling back to "" on the
+// (practically impossible) marshal error.
+func marshalJSONString(s string) goccyjson.RawMessage {
+	encoded, err := goccyjson.Marshal(s)
+	if err != nil {
+		return goccyjson.RawMessage(`""`)
+	}
+	return encoded
 }

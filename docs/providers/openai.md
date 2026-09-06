@@ -88,9 +88,7 @@ client.chat.completions.create(
 )
 
 # Built-in tool is preserved for upstream validation
-client.chat.completions.create(
-    model="gpt-5.6-sol", tools=[{"type": "web_search"}], ...
-)
+client.chat.completions.create(model="gpt-5.6-sol", tools=[{"type": "web_search"}], ...)
 ```
 
 Other non-function tool types (e.g. `computer_use`, `code_execution`) are also dropped for OpenAI Chat Completions requests. They are handled by their respective providers (Vertex AI, Anthropic) when those backends are configured.

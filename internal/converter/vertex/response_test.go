@@ -402,8 +402,9 @@ func TestConvertVertexUsageMetadata_NilModalityEntries(t *testing.T) {
 // are exposed through LiteLLM's completion_tokens_details.image_tokens extension.
 func TestConvertVertexUsageMetadata_ImageVideoTokens(t *testing.T) {
 	meta := &genai.GenerateContentResponseUsageMetadata{
-		PromptTokenCount:     200,
-		CandidatesTokenCount: 50,
+		PromptTokenCount:        200,
+		ToolUsePromptTokenCount: 30,
+		CandidatesTokenCount:    50,
 		PromptTokensDetails: []*genai.ModalityTokenCount{
 			{Modality: genai.MediaModalityImage, TokenCount: 100},
 			{Modality: genai.MediaModalityVideo, TokenCount: 50},
@@ -413,14 +414,24 @@ func TestConvertVertexUsageMetadata_ImageVideoTokens(t *testing.T) {
 			{Modality: genai.MediaModalityImage, TokenCount: 30},
 			{Modality: genai.MediaModalityVideo, TokenCount: 20},
 		},
+		ToolUsePromptTokensDetails: []*genai.ModalityTokenCount{
+			{Modality: genai.MediaModalityImage, TokenCount: 20},
+			{Modality: genai.MediaModalityVideo, TokenCount: 10},
+		},
+		CachedContentTokenCount: 80,
+		CacheTokensDetails: []*genai.ModalityTokenCount{
+			{Modality: genai.MediaModalityImage, TokenCount: 60},
+			{Modality: genai.MediaModalityVideo, TokenCount: 20},
+		},
 	}
 
 	usage := convertVertexUsageMetadata(meta)
 
-	// Input image/video details remain part of PromptTokens; this converter only
-	// exposes the generated media breakdown needed for output billing.
-	if usage.PromptTokensDetails != nil && usage.PromptTokensDetails.AudioTokens != 0 {
-		t.Fatalf("expected no audio tokens from image/video, got %d", usage.PromptTokensDetails.AudioTokens)
+	if usage.PromptTokensDetails == nil || usage.PromptTokensDetails.ImageTokens != 100 {
+		t.Fatalf("expected 100 uncached input image/video tokens, got %v", usage.PromptTokensDetails)
+	}
+	if usage.PromptTokensDetails.CachedTokens != 80 {
+		t.Fatalf("expected 80 cached tokens, got %v", usage.PromptTokensDetails)
 	}
 	if usage.CompletionTokensDetails == nil {
 		t.Fatal("expected completion token details for generated media")
@@ -429,7 +440,7 @@ func TestConvertVertexUsageMetadata_ImageVideoTokens(t *testing.T) {
 		t.Fatalf("expected 50 image/video output tokens, got %d", usage.CompletionTokensDetails.ImageTokens)
 	}
 	// Total tokens still correct
-	if usage.PromptTokens != 200 || usage.CompletionTokens != 50 {
+	if usage.PromptTokens != 230 || usage.CompletionTokens != 50 {
 		t.Fatalf("token totals wrong: prompt=%d completion=%d", usage.PromptTokens, usage.CompletionTokens)
 	}
 }

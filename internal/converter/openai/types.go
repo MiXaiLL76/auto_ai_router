@@ -143,6 +143,7 @@ type TokenDetails struct {
 	CacheCreationTokenDetails *CacheCreationTokenDetails `json:"cache_creation_token_details,omitempty"`
 	CacheWriteTokens          int                        `json:"cache_write_tokens,omitempty"`
 	AudioTokens               int                        `json:"audio_tokens,omitempty"`
+	ImageTokens               int                        `json:"image_tokens,omitempty"`
 }
 
 // CacheCreationTokenDetails preserves Anthropic's cache-write TTL breakdown.
@@ -199,6 +200,7 @@ type OpenAIStreamingDelta struct {
 	ToolCalls        []OpenAIStreamingToolCall `json:"tool_calls,omitempty"`
 	Refusal          string                    `json:"refusal,omitempty"`
 	ReasoningContent string                    `json:"reasoning_content,omitempty"`
+	Images           []ImageData               `json:"images,omitempty"`
 }
 
 type OpenAIStreamingToolCall struct {
@@ -265,6 +267,7 @@ type OpenAIImageUsage struct {
 type OpenAIImageResponse struct {
 	Created int64             `json:"created"`
 	Data    []OpenAIImageData `json:"data"`
+	Model   string            `json:"model,omitempty"`
 	Usage   *OpenAIImageUsage `json:"usage,omitempty"`
 }
 
