@@ -437,7 +437,7 @@ func mustMarshal(value any) []byte {
 }
 
 func hasStreamDelta(delta map[string]any) bool {
-	for _, field := range []string{"content", "tool_calls", "function_call", "reasoning_content", "audio"} {
+	for _, field := range []string{"content", "tool_calls", "function_call", "reasoning_content", "audio", "images"} {
 		if value, ok := delta[field]; ok && value != nil {
 			return true
 		}
