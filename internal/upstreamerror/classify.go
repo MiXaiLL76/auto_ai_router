@@ -11,6 +11,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"strings"
+	"unicode"
 )
 
 // BadRequest is the result of classifying a raw 400 body: always one of a
@@ -33,6 +34,9 @@ func ClassifyBadRequest(rawBody []byte) BadRequest {
 
 	signals, providerParam := providerErrorSignalsFromBody(rawBody)
 	joined := strings.ToLower(strings.Join(signals, " "))
+	if classified, ok := classifyValidationError(joined, providerParam, signals); ok {
+		return classified
+	}
 
 	switch {
 	case hasSignal(joined, "tool_choice", "tool choice", "toolchoice"):
@@ -282,4 +286,54 @@ func inferMaxTokensParam(joined string) string {
 	default:
 		return "max_tokens"
 	}
+}
+
+func classifyValidationError(joined string, param *string, signals []string) (BadRequest, bool) {
+	result := BadRequest{Param: param}
+	switch {
+	case hasSignal(joined, "invalid_image_size", "invalid image size"):
+		result.Message, result.Code = "Invalid image size", "invalid_image_size"
+		if result.Param == nil {
+			field := "size"
+			result.Param = &field
+		}
+	case hasSignal(joined, "invalid_image", "invalid image", "could not decode image", "unable to decode image", "failed to decode image", "image is not valid", "image is invalid", "image_parse_error", "image file could not be processed", "unable to process input image", "unable to process the input image"):
+		result.Message, result.Code = "Invalid image data", "invalid_image"
+		if result.Param == nil {
+			field := "image"
+			result.Param = &field
+		}
+	case hasSignal(joined, "missing_required_parameter", "missing required parameter", "missing required argument"):
+		result.Message, result.Code = "Missing required parameter", "missing_required_parameter"
+	case hasSignal(joined, "invalid_type", "invalid type", "invalid parameter type"):
+		result.Message, result.Code = "Invalid parameter type", "invalid_type"
+	case hasSignal(joined, "invalid_json", "invalid json"):
+		result.Message, result.Code = "Invalid JSON", "invalid_json"
+	case hasSignal(joined, "invalid_multipart", "invalid multipart"):
+		result.Message, result.Code = "Invalid multipart form data", "invalid_multipart"
+	case hasSignal(joined, "invalid_value", "invalid value", "invalid parameter value"):
+		result.Message, result.Code = "Invalid parameter value", "invalid_value"
+	default:
+		return BadRequest{}, false
+	}
+	if result.Param == nil {
+		if field := extractQuotedInvalidField(signals); field != nil {
+			if cleaned := cleanProviderErrorParam(*field); cleaned != "" {
+				result.Param = &cleaned
+			}
+		}
+	}
+	if result.Param == nil {
+		for _, word := range strings.FieldsFunc(joined, func(r rune) bool {
+			return !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '_'
+		}) {
+			switch word {
+			case "prompt", "size", "n", "image", "mask", "seed", "quality", "output_format", "output_compression", "background", "moderation", "response_format", "image_config", "aspect_ratio", "image_size":
+				field := word
+				result.Param = &field
+				return result, true
+			}
+		}
+	}
+	return result, true
 }

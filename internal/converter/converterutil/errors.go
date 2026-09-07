@@ -13,6 +13,7 @@ import (
 // which 4xx applies, regardless of which proxy call site catches it.
 type RequestValidationError struct {
 	Param      string
+	Code       string
 	Message    string
 	StatusCode int
 }

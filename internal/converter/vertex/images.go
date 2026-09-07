@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -69,7 +70,7 @@ func BuildVertexImageURL(cred *config.CredentialConfig, modelID string) string {
 func OpenAIImageToVertex(openAIBody []byte) ([]byte, error) {
 	var openAIReq openai.OpenAIImageRequest
 	if err := json.Unmarshal(openAIBody, &openAIReq); err != nil {
-		return nil, fmt.Errorf("failed to parse OpenAI image request: %w", err)
+		return nil, imageJSONValidationError(err)
 	}
 
 	// Convert size to aspect ratio
@@ -146,7 +147,14 @@ func ImageRequestToOpenAIChatRequest(openAIBody []byte) ([]byte, error) {
 func imageRequestToOpenAIChatRequest(openAIBody []byte, providerModel string) ([]byte, error) {
 	var imageReq openai.OpenAIImageRequest
 	if err := json.Unmarshal(openAIBody, &imageReq); err != nil {
-		return nil, fmt.Errorf("failed to parse OpenAI image request: %w", err)
+		return nil, imageJSONValidationError(err)
+	}
+
+	if strings.TrimSpace(imageReq.Prompt) == "" {
+		return nil, imageValidationError("prompt", "Missing required parameter", "missing_required_parameter")
+	}
+	if imageReq.N != nil && *imageReq.N <= 0 {
+		return nil, imageValidationError("n", "Invalid parameter value", "invalid_value")
 	}
 
 	genConfig := map[string]interface{}{
@@ -176,7 +184,7 @@ func imageRequestToOpenAIChatRequest(openAIBody []byte, providerModel string) ([
 	}
 	if imageReq.Seed != nil {
 		if *imageReq.Seed < math.MinInt32 || *imageReq.Seed > math.MaxInt32 {
-			return nil, fmt.Errorf("invalid image generation seed %d", *imageReq.Seed)
+			return nil, imageValidationError("seed", "Invalid parameter value", "invalid_value")
 		}
 		chatReq.Seed = imageReq.Seed
 	}
@@ -197,15 +205,15 @@ func ImageEditRequestToOpenAIChatRequest(openAIBody []byte, contentType string) 
 func imageEditRequestToOpenAIChatRequest(openAIBody []byte, contentType, providerModel string) ([]byte, error) {
 	mediaType, params, err := mime.ParseMediaType(contentType)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse image edit content type: %w", err)
+		return nil, imageValidationError("content_type", "Invalid parameter value", "invalid_value")
 	}
 	if !strings.HasPrefix(mediaType, "multipart/form-data") {
-		return nil, fmt.Errorf("image edits require multipart/form-data content type")
+		return nil, imageValidationError("content_type", "Invalid parameter value", "invalid_value")
 	}
 
 	boundary := params["boundary"]
 	if boundary == "" {
-		return nil, fmt.Errorf("missing multipart boundary in content type")
+		return nil, imageValidationError("content_type", "Invalid parameter value", "invalid_value")
 	}
 
 	reader := multipart.NewReader(bytes.NewReader(openAIBody), boundary)
@@ -219,7 +227,7 @@ func imageEditRequestToOpenAIChatRequest(openAIBody []byte, contentType, provide
 			break
 		}
 		if err != nil {
-			return nil, fmt.Errorf("failed to read multipart image edit payload: %w", err)
+			return nil, imageValidationError("image", "Invalid multipart form data", "invalid_multipart")
 		}
 
 		formName := part.FormName()
@@ -239,7 +247,7 @@ func imageEditRequestToOpenAIChatRequest(openAIBody []byte, contentType, provide
 
 		mimeType, mimeErr := detectImageMIMEType(part.Header.Get("Content-Type"), data)
 		if mimeErr != nil {
-			return nil, fmt.Errorf("invalid multipart part %q: %w", formName, mimeErr)
+			return nil, imageValidationError(formName, "Invalid image data", "invalid_image")
 		}
 
 		block := map[string]interface{}{
@@ -259,11 +267,15 @@ func imageEditRequestToOpenAIChatRequest(openAIBody []byte, contentType, provide
 
 	model := strings.TrimSpace(fields["model"])
 	if model == "" {
-		return nil, fmt.Errorf("image edit request missing model field")
+		return nil, imageValidationError("model", "Missing required parameter", "missing_required_parameter")
 	}
 	prompt := strings.TrimSpace(fields["prompt"])
 	if prompt == "" {
-		return nil, fmt.Errorf("image edit request missing prompt field")
+		return nil, imageValidationError("prompt", "Missing required parameter", "missing_required_parameter")
+	}
+
+	if len(contentBlocks) == 0 {
+		return nil, imageValidationError("image", "Missing required parameter", "missing_required_parameter")
 	}
 
 	messageBlocks := make([]map[string]interface{}, 0, 1+len(contentBlocks)+len(maskBlocks))
@@ -308,7 +320,7 @@ func imageEditRequestToOpenAIChatRequest(openAIBody []byte, contentType, provide
 	if rawSeed := strings.TrimSpace(fields["seed"]); rawSeed != "" {
 		seed, err := strconv.ParseInt(rawSeed, 10, 32)
 		if err != nil {
-			return nil, fmt.Errorf("invalid image edit seed %q", rawSeed)
+			return nil, imageValidationError("seed", "Invalid parameter value", "invalid_value")
 		}
 		chatReq.Seed = &seed
 	}
@@ -326,7 +338,14 @@ func imageEditRequestToOpenAIChatRequest(openAIBody []byte, contentType, provide
 		}
 		chatReq.TopP = &topP
 	}
-	if n := parsePositiveInt(fields["n"]); n > 0 {
+	if rawN := strings.TrimSpace(fields["n"]); rawN != "" {
+		n, err := strconv.Atoi(rawN)
+		if err != nil {
+			return nil, imageValidationError("n", "Invalid parameter type", "invalid_type")
+		}
+		if n <= 0 {
+			return nil, imageValidationError("n", "Invalid parameter value", "invalid_value")
+		}
 		n = clampImageCount(n)
 		chatReq.N = &n
 	}
@@ -434,21 +453,10 @@ func convertVertexUsageToImageUsage(meta *genai.GenerateContentResponseUsageMeta
 	}
 }
 
-func parsePositiveInt(raw string) int {
-	if raw == "" {
-		return 0
-	}
-	n, err := strconv.Atoi(strings.TrimSpace(raw))
-	if err != nil || n <= 0 {
-		return 0
-	}
-	return n
-}
-
 func parseImageEditFloat(raw, name string) (float64, error) {
 	value, err := strconv.ParseFloat(raw, 64)
 	if err != nil || math.IsNaN(value) || math.IsInf(value, 0) {
-		return 0, fmt.Errorf("invalid image edit %s %q", name, raw)
+		return 0, imageValidationError(name, "Invalid parameter value", "invalid_value")
 	}
 	return value, nil
 }
@@ -468,7 +476,7 @@ func applyGeminiImageConfigFields(genConfig map[string]interface{}, fields map[s
 		}
 		var parsed map[string]interface{}
 		if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
-			return fmt.Errorf("invalid image edit %s %q", name, raw)
+			return imageValidationError(name, "Invalid JSON", "invalid_json")
 		}
 		for key, value := range parsed {
 			imageConfig[key] = value
@@ -511,10 +519,10 @@ func firstNonEmptyField(fields map[string]string, names ...string) string {
 func readMultipartPartLimit(part *multipart.Part, maxBytes int64) ([]byte, error) {
 	data, err := io.ReadAll(io.LimitReader(part, maxBytes+1))
 	if err != nil {
-		return nil, fmt.Errorf("failed to read multipart part %q: %w", part.FormName(), err)
+		return nil, imageValidationError(part.FormName(), "Invalid multipart form data", "invalid_multipart")
 	}
 	if int64(len(data)) > maxBytes {
-		return nil, fmt.Errorf("multipart part %q exceeds %d bytes", part.FormName(), maxBytes)
+		return nil, converterutil.NewRequestEntityTooLargeError(part.FormName(), "Image exceeds the multipart size limit")
 	}
 	return data, nil
 }
@@ -538,4 +546,16 @@ func clampImageCount(n int) int {
 		return 10
 	}
 	return n
+}
+
+func imageValidationError(param, message, code string) error {
+	return &converterutil.RequestValidationError{Param: param, Message: message, Code: code}
+}
+
+func imageJSONValidationError(err error) error {
+	var typeErr *json.UnmarshalTypeError
+	if errors.As(err, &typeErr) {
+		return imageValidationError(typeErr.Field, "Invalid parameter type", "invalid_type")
+	}
+	return imageValidationError("", "Invalid JSON", "invalid_json")
 }

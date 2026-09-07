@@ -175,7 +175,15 @@ func statusForValidationError(e *converterutil.RequestValidationError) int {
 // it was logged under, not silently collapse to 400.
 func writeValidationError(w http.ResponseWriter, e *converterutil.RequestValidationError, message string) {
 	status := statusForValidationError(e)
-	WriteJSONError(w, status, message, errorTypeForStatus(status), nil, nil)
+	var param, code *string
+	if e.Param != "" {
+		param = &e.Param
+	}
+	if e.Code != "" {
+		code = &e.Code
+		message = e.Message
+	}
+	WriteJSONError(w, status, message, errorTypeForStatus(status), param, code)
 }
 
 // WriteErrorRateLimit writes a 429 Too Many Requests JSON error.

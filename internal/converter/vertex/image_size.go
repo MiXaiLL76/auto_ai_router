@@ -1,7 +1,6 @@
 package vertex
 
 import (
-	"fmt"
 	"math"
 	"strconv"
 	"strings"
@@ -183,12 +182,12 @@ func parseGeminiImageSize(size string) (int, int, bool, error) {
 
 	left, right, ok := strings.Cut(normalized, separator)
 	if !ok || strings.Contains(right, separator) {
-		return 0, 0, false, fmt.Errorf("invalid image size %q: expected WxH or W:H", size)
+		return 0, 0, false, imageValidationError("size", "Invalid image size", "invalid_image_size")
 	}
 	width, widthErr := strconv.Atoi(strings.TrimSpace(left))
 	height, heightErr := strconv.Atoi(strings.TrimSpace(right))
 	if widthErr != nil || heightErr != nil || width <= 0 || height <= 0 {
-		return 0, 0, false, fmt.Errorf("invalid image size %q: dimensions must be positive integers", size)
+		return 0, 0, false, imageValidationError("size", "Invalid image size", "invalid_image_size")
 	}
 	if separator == "x" && width <= 32 && height <= 32 {
 		ratioOnly = true
