@@ -1236,6 +1236,15 @@ func convertToolChoice(raw map[string]interface{}) error {
 		return nil
 	}
 
+	// Responses API "required" and "any" mean "force any tool call" with no
+	// specific function preference.  Chat Completions expresses the same intent
+	// with the plain string "required".  DeepSeek (and possibly other
+	// OpenAI-compatible backends) reject the object form outright.
+	if tcType == "required" || tcType == "any" {
+		raw["tool_choice"] = "required"
+		return nil
+	}
+
 	// Non-function tool_choice types (e.g. web_search_preview, file_search) reference
 	// Responses-API built-in tools.  Pass them through: provider-specific converters
 	// downstream (Vertex, Anthropic, OpenAI) handle what they support and ignore
