@@ -49,7 +49,7 @@ func ClassifyBadRequest(rawBody []byte) BadRequest {
 		result.Message = "Invalid " + *param
 		result.Code = "invalid_max_tokens"
 		result.Param = param
-	case hasSignal(joined, "context length", "context window", "context limit", "too many tokens", "input too long", "prompt too long", "token limit"):
+	case hasSignal(joined, "context length", "context window", "context limit", "too many tokens", "input too long", "prompt too long", "prompt is too long", "token limit"):
 		result.Message = "Context length exceeded"
 		result.Code = "context_length_exceeded"
 		result.Param = inferBadRequestParam(joined, providerParam)
