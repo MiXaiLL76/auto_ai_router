@@ -196,7 +196,7 @@ func imageRequestToOpenAIChatRequest(openAIBody []byte, providerModel string) ([
 	return json.Marshal(chatReq)
 }
 
-// ImageEditRequestToOpenAIChatRequest converts OpenAI multipart images.edit payload
+// ImageEditRequestToOpenAIChatRequest converts JSON or multipart image edit requests
 // to an OpenAI chat request for Gemini image-capable models.
 func ImageEditRequestToOpenAIChatRequest(openAIBody []byte, contentType string) ([]byte, error) {
 	return imageEditRequestToOpenAIChatRequest(openAIBody, contentType, "")
@@ -207,8 +207,11 @@ func imageEditRequestToOpenAIChatRequest(openAIBody []byte, contentType, provide
 	if err != nil {
 		return nil, imageValidationError("content_type", "Invalid parameter value", "invalid_value")
 	}
-	if !strings.HasPrefix(mediaType, "multipart/form-data") {
-		return nil, imageValidationError("content_type", "Invalid parameter value", "invalid_value")
+	if mediaType == "application/json" {
+		return imageEditJSONToOpenAIChatRequest(openAIBody, providerModel)
+	}
+	if mediaType != "multipart/form-data" {
+		return nil, &converterutil.RequestValidationError{Param: "content_type", Message: "Image edits require JSON or multipart form data", StatusCode: http.StatusUnsupportedMediaType}
 	}
 
 	boundary := params["boundary"]

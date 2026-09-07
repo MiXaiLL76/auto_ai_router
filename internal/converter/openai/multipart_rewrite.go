@@ -132,6 +132,15 @@ func RewriteImageEditMultipart(body []byte, contentType, modelID string, stripRe
 			partData = []byte(modelID)
 		}
 
+		if IsGptImage1MiniModel(modelID) && filename == "" {
+			if fieldName == "input_fidelity" {
+				continue
+			}
+			if fieldName == "quality" {
+				partData = []byte(normalizeImageMiniQuality(string(partData)))
+			}
+		}
+
 		// Skip response_format field when requested.
 		if stripResponseFormat && fieldName == "response_format" {
 			continue

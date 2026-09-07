@@ -169,6 +169,10 @@ func (c *ProviderConverter) RequestFrom(body []byte) ([]byte, error) {
 			body = openaiconv.ConvertWebSearchTools(body)
 		}
 
+		if c.mode.IsImageGeneration || c.mode.IsImageEdit {
+			body = openaiconv.RewriteImageMiniJSON(body, c.mode.ModelID, c.mode.IsImageEdit)
+		}
+
 		// gpt-image-1 family does not support the response_format parameter in
 		// /v1/images/generations — strip it before forwarding to avoid a 400.
 		if c.mode.IsImageGeneration && openaiconv.IsGptImage1Model(c.mode.ModelID) {
