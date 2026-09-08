@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sort"
 
 	"github.com/jackc/pgx/v5"
@@ -154,22 +155,22 @@ func insertSpendRowsReturningIDs(ctx context.Context, tx pgx.Tx, entries []*mode
 	if len(entries) == 0 {
 		return nil, nil
 	}
-	rows, err := tx.Query(ctx, queries.BuildBatchInsertQuery(len(entries), logCredentialName), GetBatchParams(entries, logCredentialName)...)
-	if err != nil {
-		return nil, err
+	const maxPostgresParameters = 65535
+	paramsPerEntry := queries.SpendLogParamCount
+	if logCredentialName {
+		paramsPerEntry++
 	}
-	defer rows.Close()
 
 	insertedIDs := make([]string, 0, len(entries))
-	for rows.Next() {
-		var requestID string
-		if err := rows.Scan(&requestID); err != nil {
-			return nil, fmt.Errorf("scan returning request_id: %w", err)
+	for chunk := range slices.Chunk(entries, maxPostgresParameters/paramsPerEntry) {
+		rows, err := tx.Query(ctx, queries.BuildBatchInsertQuery(len(chunk), logCredentialName), GetBatchParams(chunk, logCredentialName)...)
+		if err != nil {
+			return nil, err
 		}
-		insertedIDs = append(insertedIDs, requestID)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate returning rows: %w", err)
+		insertedIDs, err = pgx.AppendRows(insertedIDs, rows, pgx.RowTo[string])
+		if err != nil {
+			return nil, fmt.Errorf("collect returning request_id: %w", err)
+		}
 	}
 	return insertedIDs, nil
 }

@@ -2,6 +2,7 @@ package spendlog
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"testing"
 	"time"
@@ -24,7 +25,7 @@ func TestCredentialNamePostgres(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { _ = conn.Close(ctx) }()
 	_, err = conn.Exec(ctx, `CREATE TEMP TABLE "LiteLLM_SpendLogs" (
-		request_id TEXT PRIMARY KEY, call_type TEXT, api_key TEXT, spend DOUBLE PRECISION,
+		request_id TEXT PRIMARY KEY, call_type TEXT, api_key TEXT, spend DOUBLE PRECISION CHECK (spend >= 0),
 		total_tokens INTEGER, prompt_tokens INTEGER, completion_tokens INTEGER,
 		"startTime" TIMESTAMP, "endTime" TIMESTAMP, request_duration_ms INTEGER,
 		"completionStartTime" TIMESTAMP, model TEXT, model_id TEXT, model_group TEXT,
@@ -114,4 +115,51 @@ func TestCredentialNamePostgres(t *testing.T) {
 	err = conn.QueryRow(ctx, `SELECT credential_name FROM "LiteLLM_SpendLogs" WHERE request_id = 'first'`).Scan(&credential)
 	require.NoError(t, err)
 	assert.Equal(t, "grant'); DROP TABLE anything; --", credential)
+
+	for _, enabled := range []bool{false, true} {
+		for _, count := range []int{2500, 5000} {
+			t.Run(fmt.Sprintf("enabled=%t/count=%d", enabled, count), func(t *testing.T) {
+				prefix := fmt.Sprintf("bulk-%t-%d-", enabled, count)
+				batch := make([]*models.SpendLogEntry, count)
+				wantIDs := make([]string, count)
+				for i := range batch {
+					wantIDs[i] = fmt.Sprintf("%s%04d", prefix, i)
+					batch[i] = atomicTestEntry(wantIDs[i])
+					batch[i].CredentialName = "provider-1"
+				}
+				ids, err := insert(enabled, batch...)
+				require.NoError(t, err)
+				assert.Equal(t, wantIDs, ids)
+				ids, err = insert(enabled, batch...)
+				require.NoError(t, err)
+				assert.Empty(t, ids)
+
+				var stored, attributed int
+				var spend float64
+				err = conn.QueryRow(ctx, `SELECT count(*), count(*) FILTER (WHERE credential_name = 'provider-1'), sum(spend)
+					FROM "LiteLLM_SpendLogs" WHERE request_id LIKE $1`, prefix+"%").Scan(&stored, &attributed, &spend)
+				require.NoError(t, err)
+				assert.Equal(t, count, stored)
+				assert.Equal(t, float64(count)*1.25, spend)
+				if enabled {
+					assert.Equal(t, count, attributed)
+				} else {
+					assert.Zero(t, attributed)
+				}
+
+				for _, entry := range batch {
+					entry.RequestID = "rollback-" + entry.RequestID
+				}
+				batch[len(batch)-1].Spend = -1
+				ids, err = insert(enabled, batch...)
+				var constraintErr *pgconn.PgError
+				require.ErrorAs(t, err, &constraintErr)
+				assert.Equal(t, "23514", constraintErr.Code)
+				assert.Nil(t, ids)
+				err = conn.QueryRow(ctx, `SELECT count(*) FROM "LiteLLM_SpendLogs" WHERE request_id LIKE $1`, "rollback-"+prefix+"%").Scan(&stored)
+				require.NoError(t, err)
+				assert.Zero(t, stored)
+			})
+		}
+	}
 }
