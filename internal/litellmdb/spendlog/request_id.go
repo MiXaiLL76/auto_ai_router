@@ -37,7 +37,7 @@ type requestIDGroup struct {
 // transaction cannot be classified as replay vs genuine collision; the entry
 // is skipped but the drop is logged and counted in
 // auto_ai_router_spend_collision_unresolved_total instead of staying silent.
-func insertSpendRowsCollisionSafe(ctx context.Context, tx pgx.Tx, batch []*models.SpendLogEntry, logger *slog.Logger) ([]string, error) {
+func insertSpendRowsCollisionSafe(ctx context.Context, tx pgx.Tx, batch []*models.SpendLogEntry, logger *slog.Logger, logCredentialName bool) ([]string, error) {
 	groups := groupEntriesByPreferredRequestID(batch)
 	if len(groups) == 0 {
 		return nil, nil
@@ -47,7 +47,7 @@ func insertSpendRowsCollisionSafe(ctx context.Context, tx pgx.Tx, batch []*model
 	for _, group := range groups {
 		representatives = append(representatives, cloneEntryWithRequestID(group.representative, group.preferredID))
 	}
-	preferredInserted, err := insertSpendRowsReturningIDs(ctx, tx, representatives)
+	preferredInserted, err := insertSpendRowsReturningIDs(ctx, tx, representatives, logCredentialName)
 	if err != nil {
 		return nil, fmt.Errorf("batch insert preferred request IDs: %w", err)
 	}
@@ -109,7 +109,7 @@ func insertSpendRowsCollisionSafe(ctx context.Context, tx pgx.Tx, batch []*model
 		return fallbacks[i].RequestID < fallbacks[j].RequestID
 	})
 
-	fallbackInserted, err := insertSpendRowsReturningIDs(ctx, tx, fallbacks)
+	fallbackInserted, err := insertSpendRowsReturningIDs(ctx, tx, fallbacks, logCredentialName)
 	if err != nil {
 		return nil, fmt.Errorf("batch insert AIR event ID fallbacks: %w", err)
 	}
@@ -150,11 +150,11 @@ func cloneEntryWithRequestID(entry *models.SpendLogEntry, requestID string) *mod
 	return &clone
 }
 
-func insertSpendRowsReturningIDs(ctx context.Context, tx pgx.Tx, entries []*models.SpendLogEntry) ([]string, error) {
+func insertSpendRowsReturningIDs(ctx context.Context, tx pgx.Tx, entries []*models.SpendLogEntry, logCredentialName bool) ([]string, error) {
 	if len(entries) == 0 {
 		return nil, nil
 	}
-	rows, err := tx.Query(ctx, queries.BuildBatchInsertQuery(len(entries)), GetBatchParams(entries)...)
+	rows, err := tx.Query(ctx, queries.BuildBatchInsertQuery(len(entries), logCredentialName), GetBatchParams(entries, logCredentialName)...)
 	if err != nil {
 		return nil, err
 	}

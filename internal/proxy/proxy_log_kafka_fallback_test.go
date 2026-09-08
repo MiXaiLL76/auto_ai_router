@@ -171,6 +171,12 @@ func TestLogSpendToLiteLLMDB_PreservesTeamID(t *testing.T) {
 			require.Len(t, dbStub.loggedEntries, 1)
 			assert.Equal(t, tt.expectedID, dbStub.loggedEntries[0].TeamID)
 			assert.Equal(t, tt.expectedBillingTeamID, dbStub.loggedEntries[0].BillingTeamID)
+			credentialName := logCtx.Credential.Name
+			if tt.actualCredential != "" {
+				credentialName = tt.actualCredential
+			}
+			assert.Equal(t, credentialName, dbStub.loggedEntries[0].CredentialName)
+			assert.Equal(t, credentialName+":"+logCtx.ModelID, dbStub.loggedEntries[0].ModelID)
 		})
 	}
 }

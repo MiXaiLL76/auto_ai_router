@@ -44,10 +44,21 @@ func GetSpendLogParams(entry *models.SpendLogEntry) []interface{} {
 }
 
 // GetBatchParams returns all parameters for batch insert
-func GetBatchParams(entries []*models.SpendLogEntry) []interface{} {
-	params := make([]interface{}, 0, len(entries)*queries.SpendLogParamCount)
+func GetBatchParams(entries []*models.SpendLogEntry, logCredentialName bool) []interface{} {
+	paramCount := queries.SpendLogParamCount
+	if logCredentialName {
+		paramCount++
+	}
+	params := make([]interface{}, 0, len(entries)*paramCount)
 	for _, entry := range entries {
 		params = append(params, GetSpendLogParams(entry)...)
+		if logCredentialName {
+			var credentialName any
+			if entry.CredentialName != "" {
+				credentialName = entry.CredentialName
+			}
+			params = append(params, credentialName)
+		}
 	}
 	return params
 }

@@ -382,6 +382,7 @@ func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
 			ModelID:             modelIDFormatted,  // credential.name:model_name
 			ModelGroup:          logCtx.ModelID,    // Model name
 			CustomLLMProvider:   customLLMProvider, // Provider type as string
+			CredentialName:      credName,
 			PromptTokens:        logCtx.TokenUsage.PromptTokens,
 			CompletionTokens:    logCtx.TokenUsage.CompletionTokens,
 			TotalTokens:         logCtx.TokenUsage.Total(),
