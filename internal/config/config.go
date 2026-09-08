@@ -742,6 +742,7 @@ type CredentialConfig struct {
 	Type     ProviderType `yaml:"type"`
 	APIKey   string       `yaml:"api_key"`
 	BaseURL  string       `yaml:"base_url"`
+	ProxyURL string       `yaml:"proxy_url,omitempty"`
 	AuthType string       `yaml:"auth_type,omitempty"`
 	// OpenAIProtocol switches a cometapi credential from CometAPI's
 	// Anthropic-compatible wire protocol (/v1/messages) to its
@@ -864,6 +865,7 @@ func (c CredentialConfig) SameProviderIdentity(other CredentialConfig) bool {
 	return c.Name == other.Name &&
 		c.Type == other.Type &&
 		c.BaseURL == other.BaseURL &&
+		c.ProxyURL == other.ProxyURL &&
 		c.APIKey == other.APIKey &&
 		c.AuthType == other.AuthType &&
 		c.OpenAIProtocol == other.OpenAIProtocol &&
@@ -879,6 +881,7 @@ func (c *CredentialConfig) UnmarshalYAML(value *yaml.Node) error {
 		Type             string           `yaml:"type"`
 		APIKey           string           `yaml:"api_key"`
 		BaseURL          string           `yaml:"base_url"`
+		ProxyURL         string           `yaml:"proxy_url,omitempty"`
 		AuthType         string           `yaml:"auth_type,omitempty"`
 		OpenAIProtocol   string           `yaml:"openai_proto,omitempty"`
 		GoogleProtocol   string           `yaml:"google_proto,omitempty"`
@@ -916,6 +919,7 @@ func (c *CredentialConfig) UnmarshalYAML(value *yaml.Node) error {
 	c.Type = normalizeProviderType(resolveEnvString(temp.Type))
 	c.APIKey = resolveEnvString(temp.APIKey)
 	c.BaseURL = resolveEnvString(temp.BaseURL)
+	c.ProxyURL = resolveEnvString(temp.ProxyURL)
 	c.AuthType = strings.ToLower(resolveEnvString(temp.AuthType))
 	c.Scopes = scope.NormalizeList(temp.Scopes)
 	c.DeniedScopes = scope.NormalizeList(append(temp.DeniedScopes, temp.ForbiddenScopes...))
@@ -962,6 +966,10 @@ func (c *CredentialConfig) UnmarshalYAML(value *yaml.Node) error {
 	}
 	// Copy models decoded via YAML anchors / inline definitions
 	c.Models = temp.Models
+
+	if _, err := ParseProxyURL(c.ProxyURL); err != nil {
+		return fmt.Errorf("credential %s: %w", c.Name, err)
+	}
 
 	// Validate base_url for proxy and other provider types that require it
 	if c.BaseURL != "" {
@@ -1841,6 +1849,10 @@ func (c *Config) Validate() error {
 	for i, cred := range c.Credentials {
 		if cred.Name == "" {
 			return fmt.Errorf("credential %d: name is required", i)
+		}
+
+		if _, err := ParseProxyURL(cred.ProxyURL); err != nil {
+			return fmt.Errorf("credential %s: %w", cred.Name, err)
 		}
 
 		// Validate provider type

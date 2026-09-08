@@ -65,6 +65,7 @@ credentials:
     type: "openai"
     api_key: "sk-proj-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
     base_url: "https://api.openai.com"
+    # proxy_url: "os.environ/OPENAI_PROXY_URL"  # Optional: http(s):// or socks5(h)://[user:password@]host:port
     rpm: 100
     tpm: 50000
     weight: 100  # Optional: weighted round-robin share (default 1). See docs/advanced/balancing.md

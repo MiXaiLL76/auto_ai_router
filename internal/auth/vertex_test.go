@@ -66,7 +66,7 @@ func TestGetToken_InvalidJSON(t *testing.T) {
 	tm := NewVertexTokenManager(logger)
 	defer tm.Stop()
 
-	_, err := tm.GetToken("test", "", "invalid-json")
+	_, err := tm.GetToken("test", "", "invalid-json", "")
 	if err == nil {
 		t.Error("expected error for invalid JSON, got nil")
 	}
@@ -85,7 +85,7 @@ func TestGetToken_InvalidServiceAccountType(t *testing.T) {
 	}
 	b, _ := json.Marshal(invalidSA)
 
-	_, err := tm.GetToken("test", "", string(b))
+	_, err := tm.GetToken("test", "", string(b), "")
 	if err == nil {
 		t.Error("expected error for non-service-account type, got nil")
 	}
@@ -96,7 +96,7 @@ func TestGetToken_NoCredentials(t *testing.T) {
 	tm := NewVertexTokenManager(logger)
 	defer tm.Stop()
 
-	_, err := tm.GetToken("test", "", "")
+	_, err := tm.GetToken("test", "", "", "")
 	if err == nil {
 		t.Error("expected error for missing credentials, got nil")
 	}
@@ -110,7 +110,7 @@ func TestGetToken_FileNotFound(t *testing.T) {
 	tm := NewVertexTokenManager(logger)
 	defer tm.Stop()
 
-	_, err := tm.GetToken("test", "/nonexistent/path.json", "")
+	_, err := tm.GetToken("test", "/nonexistent/path.json", "", "")
 	if err == nil {
 		t.Error("expected error for non-existent file, got nil")
 	}
@@ -236,7 +236,7 @@ func TestGetToken_CachedTokenReuse(t *testing.T) {
 
 	// Get the same token - should reuse cached token (valid for 1 hour)
 	// No credentials needed if cached token is still valid
-	token, err := tm.GetToken("test", "", "")
+	token, err := tm.GetToken("test", "", "", "")
 	if err != nil {
 		t.Errorf("expected no error for cached valid token, got: %v", err)
 	}
@@ -304,7 +304,7 @@ func TestGetToken_TokenRefreshError(t *testing.T) {
 	tm.mu.Unlock()
 
 	// Attempt to get expired token - should trigger refresh and fail
-	_, err := tm.GetToken("test", "", "")
+	_, err := tm.GetToken("test", "", "", "")
 	if err == nil {
 		t.Error("expected error when token refresh fails")
 	}
@@ -341,7 +341,7 @@ func TestGetToken_NearExpiry(t *testing.T) {
 	tm.mu.Unlock()
 
 	// Get token - should trigger refresh since token expires in 3 min (within 5 min buffer)
-	token, err := tm.GetToken("test", "", "")
+	token, err := tm.GetToken("test", "", "", "")
 	if err != nil {
 		t.Errorf("expected no error, got: %v", err)
 	}
@@ -380,7 +380,7 @@ func TestGetToken_ConcurrentRefresh(t *testing.T) {
 	results := make(chan string, numGoroutines)
 	for i := 0; i < numGoroutines; i++ {
 		go func() {
-			token, err := tm.GetToken("test", "", "")
+			token, err := tm.GetToken("test", "", "", "")
 			if err != nil {
 				t.Errorf("GetToken failed: %v", err)
 			}
@@ -433,7 +433,7 @@ func TestGetToken_RequestCoalescing(t *testing.T) {
 	results := make(chan string, numGoroutines)
 	for i := 0; i < numGoroutines; i++ {
 		go func() {
-			token, err := tm.GetToken("test", "", "")
+			token, err := tm.GetToken("test", "", "", "")
 			if err != nil {
 				t.Errorf("GetToken failed: %v", err)
 				results <- ""
@@ -497,7 +497,7 @@ func TestGetToken_TimeoutDuringRefresh(t *testing.T) {
 	tm.mu.Unlock()
 
 	// GetToken should timeout
-	_, err := tm.GetToken("slow", "", "")
+	_, err := tm.GetToken("slow", "", "", "")
 	if err == nil {
 		t.Error("expected timeout error, got nil")
 	}
@@ -539,7 +539,7 @@ func TestGetToken_ParallelDifferentCredentials(t *testing.T) {
 
 	for _, cred := range credentials {
 		go func(credName string) {
-			token, err := tm.GetToken(credName, "", "")
+			token, err := tm.GetToken(credName, "", "", "")
 			if err != nil {
 				t.Errorf("GetToken(%s) failed: %v", credName, err)
 				results <- struct{ name, token string }{credName, ""}
@@ -595,7 +595,7 @@ func TestGetToken_CoalescingWithTimeout(t *testing.T) {
 
 	for i := 0; i < numGoroutines; i++ {
 		go func() {
-			_, err := tm.GetToken("test", "", "")
+			_, err := tm.GetToken("test", "", "", "")
 			results <- err
 		}()
 	}
@@ -681,7 +681,7 @@ func TestGetToken_CoalescingCallerTimeout(t *testing.T) {
 			if idx > 0 {
 				time.Sleep(5 * time.Millisecond)
 			}
-			_, err := tm.GetToken("test", "", "")
+			_, err := tm.GetToken("test", "", "", "")
 			results <- struct {
 				idx int
 				err error
@@ -725,7 +725,7 @@ func TestGetToken_CoalescingCallerTimeout(t *testing.T) {
 	tm.mu.Unlock()
 
 	// This should succeed
-	token, err := tm.GetToken("test", "", "")
+	token, err := tm.GetToken("test", "", "", "")
 	if err != nil {
 		t.Errorf("Recovery GetToken failed: %v", err)
 	}
@@ -763,7 +763,7 @@ func TestGetToken_ChannelLeakOnTimeout(t *testing.T) {
 	defer func() { tm.tokenRefreshTimeout = originalTimeout }()
 
 	// Fire a request that will timeout
-	_, err := tm.GetToken("test", "", "")
+	_, err := tm.GetToken("test", "", "", "")
 	if err == nil {
 		t.Error("Expected timeout error")
 	}
@@ -817,7 +817,7 @@ func TestGetToken_FirstCallerTimeoutRemovesFromMap(t *testing.T) {
 	defer func() { tm.tokenRefreshTimeout = originalTimeout }()
 
 	// Get token - will timeout
-	_, err := tm.GetToken("test", "", "")
+	_, err := tm.GetToken("test", "", "", "")
 	if err == nil {
 		t.Error("Expected timeout")
 	}
@@ -863,7 +863,7 @@ func TestGetToken_MultipleTimeoutsSequential(t *testing.T) {
 	}
 	tm.mu.Unlock()
 
-	_, err := tm.GetToken("test", "", "")
+	_, err := tm.GetToken("test", "", "", "")
 	if err == nil {
 		t.Error("Expected first timeout")
 	}
@@ -885,7 +885,7 @@ func TestGetToken_MultipleTimeoutsSequential(t *testing.T) {
 	}
 	tm.mu.Unlock()
 
-	_, err = tm.GetToken("test", "", "")
+	_, err = tm.GetToken("test", "", "", "")
 	if err == nil {
 		t.Error("Expected second timeout")
 	}
@@ -905,7 +905,7 @@ func TestGetToken_MultipleTimeoutsSequential(t *testing.T) {
 	}
 	tm.mu.Unlock()
 
-	token, err := tm.GetToken("test", "", "")
+	token, err := tm.GetToken("test", "", "", "")
 	if err != nil {
 		t.Errorf("Expected success after timeouts, got error: %v", err)
 	}
@@ -945,7 +945,7 @@ func TestGetToken_ProcessRefreshRequestRobustness(t *testing.T) {
 	// Launch 20 concurrent requests
 	for i := 0; i < 20; i++ {
 		go func() {
-			token, err := tm.GetToken("test", "", "")
+			token, err := tm.GetToken("test", "", "", "")
 			results <- struct {
 				token string
 				err   error
@@ -996,7 +996,7 @@ func TestGetToken_RefreshingMapStateAfterCompletion(t *testing.T) {
 	tm.mu.Unlock()
 
 	// Make request
-	token, err := tm.GetToken("test", "", "")
+	token, err := tm.GetToken("test", "", "", "")
 	if err != nil {
 		t.Errorf("Expected success, got error: %v", err)
 	}
@@ -1061,7 +1061,7 @@ func TestGetToken_ConcurrentDifferentCredentialsWithTimeout(t *testing.T) {
 		// Each credential gets 2 concurrent requests
 		for i := 0; i < 2; i++ {
 			go func(name string) {
-				token, err := tm.GetToken(name, "", "")
+				token, err := tm.GetToken(name, "", "", "")
 				results <- struct {
 					cred  string
 					token string

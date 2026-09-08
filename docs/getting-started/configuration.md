@@ -161,6 +161,7 @@ Common fields for all credentials:
 | ------------------ | ------ | -------------------------------------------------------------------------------------------------------------------------------- |
 | `name`             | string | Unique credential identifier                                                                                                     |
 | `type`             | string | Provider type: `openai`, `anthropic`, `cometapi`, `vertex-ai`, `gemini`, `bedrock`, `proxy`                                      |
+| `proxy_url`        | string | Optional outbound proxy URL for this credential (HTTP, HTTPS, SOCKS5)                       |
 | `rpm`              | int    | Requests per minute limit (-1 = unlimited)                                                                                       |
 | `tpm`              | int    | Tokens per minute limit (-1 = unlimited)                                                                                         |
 | `is_fallback`      | bool   | Use as fallback when primary credentials are exhausted                                                                           |
@@ -170,6 +171,33 @@ Common fields for all credentials:
 | `forbidden_scopes` | list   | Alias for `denied_scopes`                                                                                                        |
 | `openai_proto`     | bool   | `cometapi` only: use CometAPI's OpenAI-compatible wire protocol ([details](../providers/cometapi.md#openai-protocol-mode))       |
 | `google_proto`     | bool   | `cometapi` only: use CometAPI's Google GenAI-compatible wire protocol ([details](../providers/cometapi.md#google-protocol-mode)) |
+
+### Outbound proxy per credential
+
+Set one `proxy_url` on a credential to route its upstream requests through a fixed proxy:
+
+```yaml
+credentials:
+  - name: openai_main
+    type: openai
+    api_key: os.environ/OPENAI_API_KEY
+    base_url: https://api.openai.com
+    proxy_url: os.environ/OPENAI_PROXY_URL
+```
+
+For example, set `OPENAI_PROXY_URL=http://user:password@proxy.example.com:3128`.
+Supported schemes: `http`, `https`, `socks5`, and `socks5h`. Percent-encode special
+characters in usernames and passwords. Both SOCKS5 schemes resolve destination
+hostnames through the proxy.
+
+The setting applies to ordinary and streaming provider requests, Vertex AI OAuth
+token acquisition and refresh, and `/health` and `/v1/models` discovery for `air`
+and `proxy` credentials. An explicit URL overrides `HTTP_PROXY`, `HTTPS_PROXY`,
+and `NO_PROXY`. When omitted or empty, the existing environment-based behavior
+is preserved. Invalid URLs are rejected during config loading without exposing
+proxy credentials in the error. If the proxy fails, the request fails through
+the usual credential retry/fallback flow; it does not retry the same credential
+directly. Proxy lists and rotation are not supported.
 
 ### Scoped credential visibility
 

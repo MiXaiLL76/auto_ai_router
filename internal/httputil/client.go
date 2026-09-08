@@ -81,9 +81,9 @@ func NewHTTPClient(cfg *HTTPClientConfig) *http.Client {
 	}
 
 	transport := &http.Transport{
-		Proxy:                 http.ProxyFromEnvironment, // Support HTTP_PROXY, HTTPS_PROXY, NO_PROXY
-		TLSHandshakeTimeout:   timeout,                   // Timeout for TLS handshake phase
-		ResponseHeaderTimeout: timeout,                   // Timeout for connect + response headers only
+		Proxy:                 proxyFromRequest,
+		TLSHandshakeTimeout:   timeout, // Timeout for TLS handshake phase
+		ResponseHeaderTimeout: timeout, // Timeout for connect + response headers only
 		MaxIdleConns:          maxIdleConns,
 		MaxIdleConnsPerHost:   maxIdleConnsPerHost,
 		IdleConnTimeout:       idleConnTimeout,
@@ -181,7 +181,7 @@ func FetchResponseFromProxy(
 	url := baseURL + path
 
 	// Create request
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	req, err := http.NewRequestWithContext(WithProxyURL(ctx, cred.ProxyURL), "GET", url, nil)
 	if err != nil {
 		logger.Error("Failed to create request",
 			"credential", cred.Name,
