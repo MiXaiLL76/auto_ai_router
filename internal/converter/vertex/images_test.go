@@ -8,6 +8,7 @@ import (
 	"net/textproto"
 	"testing"
 
+	"github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
 	"github.com/mixaill76/auto_ai_router/internal/converter/openai"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -137,7 +138,7 @@ func TestMapGeminiImageSizeRejectsInvalidValue(t *testing.T) {
 	config, err := mapGeminiImageSize("gemini-3.1-flash-image", "not-a-size")
 	assert.Error(t, err)
 	assert.Nil(t, config)
-	assert.Contains(t, err.Error(), "expected WxH or W:H")
+	assertImageValidationError(t, err, "size", "invalid_image_size")
 }
 
 func TestImageRequestToOpenAIChatRequest(t *testing.T) {
@@ -203,7 +204,7 @@ func TestImageRequestToOpenAIChatRequest(t *testing.T) {
 			result, err := ImageRequestToOpenAIChatRequest([]byte(input))
 			assert.Error(t, err)
 			assert.Nil(t, result)
-			assert.Contains(t, err.Error(), "invalid image generation seed")
+			assertImageValidationError(t, err, "seed", "invalid_value")
 		})
 	}
 
@@ -252,7 +253,7 @@ func TestImageRequestToOpenAIChatRequest(t *testing.T) {
 		result, err := ImageRequestToOpenAIChatRequest([]byte("not json"))
 		assert.Error(t, err)
 		assert.Nil(t, result)
-		assert.Contains(t, err.Error(), "failed to parse OpenAI image request")
+		assertImageValidationError(t, err, "", "invalid_json")
 	})
 }
 
@@ -280,6 +281,18 @@ func TestImageEditRequestToOpenAIChatRequest(t *testing.T) {
 
 		require.NoError(t, writer.Close())
 		return buf.Bytes(), writer.FormDataContentType()
+	}
+
+	for _, count := range []string{"invalid-count", "0", "-1"} {
+		t.Run("invalid image count "+count, func(t *testing.T) {
+			body, contentType := buildMultipart(t, "gemini-3.1-flash-image", "1024x1024", map[string]string{"n": count})
+			_, err := ImageEditRequestToOpenAIChatRequest(body, contentType)
+			code := "invalid_value"
+			if count == "invalid-count" {
+				code = "invalid_type"
+			}
+			assertImageValidationError(t, err, "n", code)
+		})
 	}
 
 	t.Run("multipart edit request converts to multimodal chat request", func(t *testing.T) {
@@ -385,7 +398,7 @@ func TestImageEditRequestToOpenAIChatRequest(t *testing.T) {
 		})
 		_, err := ImageEditRequestToOpenAIChatRequest(body, contentType)
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "invalid image edit image_config")
+		assertImageValidationError(t, err, "image_config", "invalid_json")
 	})
 
 	t.Run("omitted sampling parameters remain unset", func(t *testing.T) {
@@ -406,7 +419,7 @@ func TestImageEditRequestToOpenAIChatRequest(t *testing.T) {
 		result, err := ImageEditRequestToOpenAIChatRequest(body, contentType)
 		assert.Error(t, err)
 		assert.Nil(t, result)
-		assert.Contains(t, err.Error(), "invalid image edit seed")
+		assertImageValidationError(t, err, "seed", "invalid_value")
 	})
 
 	for _, test := range []struct {
@@ -428,7 +441,7 @@ func TestImageEditRequestToOpenAIChatRequest(t *testing.T) {
 			result, err := ImageEditRequestToOpenAIChatRequest(body, contentType)
 			assert.Error(t, err)
 			assert.Nil(t, result)
-			assert.Contains(t, err.Error(), "invalid image edit "+test.field)
+			assertImageValidationError(t, err, test.field, "invalid_value")
 		})
 	}
 
@@ -441,7 +454,7 @@ func TestImageEditRequestToOpenAIChatRequest(t *testing.T) {
 		result, err := ImageEditRequestToOpenAIChatRequest(buf.Bytes(), writer.FormDataContentType())
 		assert.Error(t, err)
 		assert.Nil(t, result)
-		assert.Contains(t, err.Error(), "missing model")
+		assertImageValidationError(t, err, "model", "missing_required_parameter")
 	})
 
 	t.Run("mask image is included in content blocks", func(t *testing.T) {
@@ -505,7 +518,7 @@ func TestImageEditRequestToOpenAIChatRequest(t *testing.T) {
 		result, err := ImageEditRequestToOpenAIChatRequest(buf.Bytes(), writer.FormDataContentType())
 		assert.Error(t, err)
 		assert.Nil(t, result)
-		assert.Contains(t, err.Error(), "unsupported MIME type")
+		assertImageValidationError(t, err, "image", "invalid_image")
 	})
 }
 
@@ -715,4 +728,29 @@ func TestVertexChatResponseToOpenAIImage_UsageFormat(t *testing.T) {
 		require.NoError(t, json.Unmarshal(result, &resp))
 		assert.Empty(t, resp.Data)
 	})
+}
+
+func assertImageValidationError(t *testing.T, err error, param, code string) {
+	t.Helper()
+	var validationErr *converterutil.RequestValidationError
+	require.ErrorAs(t, err, &validationErr)
+	assert.Equal(t, param, validationErr.Param)
+	assert.Equal(t, code, validationErr.Code)
+}
+
+func TestImageMultipartSizeLimit(t *testing.T) {
+	var body bytes.Buffer
+	form := multipart.NewWriter(&body)
+	file, err := form.CreateFormFile("image", "test.png")
+	require.NoError(t, err)
+	_, err = file.Write([]byte("oversized"))
+	require.NoError(t, err)
+	require.NoError(t, form.Close())
+	part, err := multipart.NewReader(&body, form.Boundary()).NextPart()
+	require.NoError(t, err)
+	_, err = readMultipartPartLimit(part, 4)
+	var validationErr *converterutil.RequestValidationError
+	require.ErrorAs(t, err, &validationErr)
+	assert.Equal(t, "image", validationErr.Param)
+	assert.Equal(t, 413, validationErr.StatusCode)
 }
