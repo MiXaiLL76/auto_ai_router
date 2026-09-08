@@ -69,7 +69,6 @@ type Config struct {
 	// DisableSpendLogsWrite disables writing SpendLogEntry/Daily* aggregates to
 	// Postgres while leaving auth (ValidateToken) untouched (default: false).
 	DisableSpendLogsWrite bool
-	LogCredentialName     bool
 
 	// IncludeTeamSpendInUserSpend controls whether team-bound events update the
 	// cumulative LiteLLM_UserTable spend projection. Nil defaults to true.
@@ -588,7 +587,6 @@ type SpendLogEntry struct {
 
 	// LLM Provider
 	CustomLLMProvider string // Provider type: openai, vertex-ai, anthropic, proxy
-	CredentialName    string
 
 	// Session tracking
 	SessionID string // Session ID from request metadata (chat_id, litellm_session_id, session_id, or request_id)

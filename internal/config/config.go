@@ -1046,7 +1046,6 @@ type LiteLLMDBConfig struct {
 	// Postgres while leaving auth (ValidateToken) untouched. Intended for setups
 	// where Kafka (see KafkaConfig) is the sole spend-analytics write-path.
 	DisableSpendLogsWrite bool `yaml:"disable_spend_logs_write"` // default: false
-	LogCredentialName     bool `yaml:"log_credential_name"`
 
 	// IncludeTeamSpendInUserSpend controls whether team-bound events update the
 	// cumulative LiteLLM_UserTable spend projection.
@@ -1291,7 +1290,6 @@ func (l *LiteLLMDBConfig) UnmarshalYAML(value *yaml.Node) error {
 		LogFlushInterval            string `yaml:"log_flush_interval"`
 		LogWorkers                  string `yaml:"log_workers"`
 		DisableSpendLogsWrite       string `yaml:"disable_spend_logs_write"`
-		LogCredentialName           string `yaml:"log_credential_name"`
 		IncludeTeamSpendInUserSpend string `yaml:"include_team_spend_in_user_spend"`
 
 		EnforceBudgetReservation         string `yaml:"enforce_budget_reservation"`
@@ -1320,9 +1318,6 @@ func (l *LiteLLMDBConfig) UnmarshalYAML(value *yaml.Node) error {
 		return err
 	}
 	if l.DisableSpendLogsWrite, err = parseField(temp.DisableSpendLogsWrite, false, strconv.ParseBool, "litellm_db.disable_spend_logs_write"); err != nil {
-		return err
-	}
-	if l.LogCredentialName, err = parseField(temp.LogCredentialName, false, strconv.ParseBool, "litellm_db.log_credential_name"); err != nil {
 		return err
 	}
 	if l.IncludeTeamSpendInUserSpend, err = parseField(temp.IncludeTeamSpendInUserSpend, true, strconv.ParseBool, "litellm_db.include_team_spend_in_user_spend"); err != nil {

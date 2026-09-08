@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"slices"
 	"sort"
 
 	"github.com/jackc/pgx/v5"
@@ -38,7 +37,7 @@ type requestIDGroup struct {
 // transaction cannot be classified as replay vs genuine collision; the entry
 // is skipped but the drop is logged and counted in
 // auto_ai_router_spend_collision_unresolved_total instead of staying silent.
-func insertSpendRowsCollisionSafe(ctx context.Context, tx pgx.Tx, batch []*models.SpendLogEntry, logger *slog.Logger, logCredentialName bool) ([]string, error) {
+func insertSpendRowsCollisionSafe(ctx context.Context, tx pgx.Tx, batch []*models.SpendLogEntry, logger *slog.Logger) ([]string, error) {
 	groups := groupEntriesByPreferredRequestID(batch)
 	if len(groups) == 0 {
 		return nil, nil
@@ -48,7 +47,7 @@ func insertSpendRowsCollisionSafe(ctx context.Context, tx pgx.Tx, batch []*model
 	for _, group := range groups {
 		representatives = append(representatives, cloneEntryWithRequestID(group.representative, group.preferredID))
 	}
-	preferredInserted, err := insertSpendRowsReturningIDs(ctx, tx, representatives, logCredentialName)
+	preferredInserted, err := insertSpendRowsReturningIDs(ctx, tx, representatives)
 	if err != nil {
 		return nil, fmt.Errorf("batch insert preferred request IDs: %w", err)
 	}
@@ -110,7 +109,7 @@ func insertSpendRowsCollisionSafe(ctx context.Context, tx pgx.Tx, batch []*model
 		return fallbacks[i].RequestID < fallbacks[j].RequestID
 	})
 
-	fallbackInserted, err := insertSpendRowsReturningIDs(ctx, tx, fallbacks, logCredentialName)
+	fallbackInserted, err := insertSpendRowsReturningIDs(ctx, tx, fallbacks)
 	if err != nil {
 		return nil, fmt.Errorf("batch insert AIR event ID fallbacks: %w", err)
 	}
@@ -151,26 +150,26 @@ func cloneEntryWithRequestID(entry *models.SpendLogEntry, requestID string) *mod
 	return &clone
 }
 
-func insertSpendRowsReturningIDs(ctx context.Context, tx pgx.Tx, entries []*models.SpendLogEntry, logCredentialName bool) ([]string, error) {
+func insertSpendRowsReturningIDs(ctx context.Context, tx pgx.Tx, entries []*models.SpendLogEntry) ([]string, error) {
 	if len(entries) == 0 {
 		return nil, nil
 	}
-	const maxPostgresParameters = 65535
+	rows, err := tx.Query(ctx, queries.BuildBatchInsertQuery(len(entries)), GetBatchParams(entries)...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
 
 	insertedIDs := make([]string, 0, len(entries))
-	for chunk := range slices.Chunk(entries, maxPostgresParameters/queries.SpendLogParamCount) {
-		params, err := GetBatchParams(chunk, logCredentialName)
-		if err != nil {
-			return nil, err
+	for rows.Next() {
+		var requestID string
+		if err := rows.Scan(&requestID); err != nil {
+			return nil, fmt.Errorf("scan returning request_id: %w", err)
 		}
-		rows, err := tx.Query(ctx, queries.BuildBatchInsertQuery(len(chunk)), params...)
-		if err != nil {
-			return nil, err
-		}
-		insertedIDs, err = pgx.AppendRows(insertedIDs, rows, pgx.RowTo[string])
-		if err != nil {
-			return nil, fmt.Errorf("collect returning request_id: %w", err)
-		}
+		insertedIDs = append(insertedIDs, requestID)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate returning rows: %w", err)
 	}
 	return insertedIDs, nil
 }

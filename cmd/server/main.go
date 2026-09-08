@@ -976,7 +976,6 @@ func initializeLiteLLMDB(cfg *config.Config, log *slog.Logger) litellmdb.Manager
 		LogFlushInterval:            cfg.LiteLLMDB.LogFlushInterval,
 		LogWorkers:                  cfg.LiteLLMDB.LogWorkers,
 		DisableSpendLogsWrite:       cfg.LiteLLMDB.DisableSpendLogsWrite,
-		LogCredentialName:           cfg.LiteLLMDB.LogCredentialName,
 		IncludeTeamSpendInUserSpend: &cfg.LiteLLMDB.IncludeTeamSpendInUserSpend,
 		Logger:                      log,
 	}

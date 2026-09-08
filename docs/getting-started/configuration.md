@@ -95,7 +95,6 @@ litellm_db:
   log_queue_size: 5000
   log_batch_size: 100
   log_flush_interval: 5s
-  log_credential_name: false
   include_team_spend_in_user_spend: true
   log_retry_attempts: 3
   log_retry_delay: 1s

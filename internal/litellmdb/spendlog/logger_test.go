@@ -9,7 +9,6 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb/models"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb/queries"
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 func TestLogger_Log_NonBlocking(t *testing.T) {
@@ -240,8 +239,7 @@ func TestGetBatchParams(t *testing.T) {
 		{RequestID: "req-2", Status: "failure"},
 	}
 
-	params, err := GetBatchParams(entries, false)
-	require.NoError(t, err)
+	params := GetBatchParams(entries)
 
 	assert.Len(t, params, 2*queries.SpendLogParamCount)
 	assert.Equal(t, "req-1", params[0])
@@ -499,8 +497,7 @@ func TestLogger_SQLInjectionPrevention(t *testing.T) {
 
 					// Verify batch params work with multiple entries
 					batch := []*models.SpendLogEntry{entry}
-					batchParams, err := GetBatchParams(batch, false)
-					require.NoError(t, err)
+					batchParams := GetBatchParams(batch)
 					assert.NotNil(t, batchParams)
 					assert.Len(t, batchParams, queries.SpendLogParamCount)
 
@@ -573,8 +570,7 @@ func TestLogger_SQLInjectionPrevention(t *testing.T) {
 				assert.NotContains(t, query, "$53")
 
 				// Get batch params
-				params, err := GetBatchParams(entries, false)
-				require.NoError(t, err)
+				params := GetBatchParams(entries)
 				assert.Len(t, params, 2*queries.SpendLogParamCount)
 
 				// Verify malicious strings are present and unchanged
@@ -693,8 +689,7 @@ func TestLogger_SQLInjectionPrevention_ParameterEscaping(t *testing.T) {
 			assert.Equal(t, testValue, params[17])
 
 			// When used in batch, values should remain unchanged
-			batchParams, err := GetBatchParams([]*models.SpendLogEntry{entry}, false)
-			require.NoError(t, err)
+			batchParams := GetBatchParams([]*models.SpendLogEntry{entry})
 			assert.Equal(t, testValue, batchParams[0])  // RequestID from first entry
 			assert.Equal(t, testValue, batchParams[17]) // Metadata from first entry
 		})

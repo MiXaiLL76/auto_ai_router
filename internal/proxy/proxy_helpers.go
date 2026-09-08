@@ -371,6 +371,12 @@ func addRequestSpendMetadata(metadata string, logCtx *RequestLogContext) string 
 	if json.Unmarshal([]byte(metadata), &doc) != nil || doc == nil {
 		doc = make(map[string]interface{})
 	}
+	if logCtx.Credential != nil {
+		doc["credential_name"] = logCtx.Credential.Name
+	}
+	if logCtx.ActualCredentialName != "" {
+		doc["credential_name"] = logCtx.ActualCredentialName
+	}
 	spendMetadata, _ := doc["spend_logs_metadata"].(map[string]interface{})
 	if spendMetadata == nil {
 		spendMetadata = make(map[string]interface{})
