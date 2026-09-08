@@ -59,7 +59,49 @@ func ShouldRetryWithFallback(statusCode int, respBody []byte) (bool, RetryReason
 		return false, ""
 	}
 
+	// A 400 that describes the request rather than the credential fails identically
+	// everywhere, so retrying it only multiplies the damage.
+	if statusCode == http.StatusBadRequest && isDeterministicBadRequest(respBody) {
+		return false, ""
+	}
+
 	return true, retryReason
+}
+
+// deterministicBadRequestMarkers are upstream 400 texts that fault the request
+// itself — a parameter the target model does not implement, a media part it cannot
+// use — rather than anything about the credential that served it. Replaying such a
+// request on the next credential returns the identical 400, so the retry chain turns
+// one malformed client request into one failure per credential, each billed as an
+// error against a different upstream account.
+//
+// Kept deliberately narrow: only messages that are a property of the request and the
+// model belong here. Anything that could plausibly differ between credentials — a
+// model missing from one account, a disabled API, a quota — must stay retryable,
+// since moving to another credential is exactly what fixes those.
+var deterministicBadRequestMarkers = [][]byte{
+	[]byte("penalty is not enabled"),
+	[]byte("thinking level is unsupported"),
+	[]byte("thinking level minimal is not supported"),
+	[]byte("unsupported mime type"),
+	[]byte("required oneof field"),
+	[]byte("but the supported range is from"),
+}
+
+// isDeterministicBadRequest reports whether a 400 body matches a known
+// request-fault marker. Scans the same bounded prefix as isRetryableContent.
+func isDeterministicBadRequest(respBody []byte) bool {
+	const maxRetryBodyScan = 8 * 1024
+	if len(respBody) > maxRetryBodyScan {
+		respBody = respBody[:maxRetryBodyScan]
+	}
+	bodyLower := bytes.ToLower(respBody)
+	for _, marker := range deterministicBadRequestMarkers {
+		if bytes.Contains(bodyLower, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 // isRetryableContent checks if response body contains errors that shouldn't be retried.

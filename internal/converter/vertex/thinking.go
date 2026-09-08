@@ -33,6 +33,42 @@ func isFlashModel(model string) bool {
 	return strings.Contains(strings.ToLower(model), "flash")
 }
 
+// modelsRejectingMinimalThinking lists Gemini 3 flash models that reject
+// ThinkingLevel=MINIMAL with 400 INVALID_ARGUMENT ("Thinking level MINIMAL is not
+// supported for this model" on the AI Studio endpoint, "Thinking level is
+// unsupported: THINKING_LEVEL_MINIMAL" on Vertex). MINIMAL is the documented floor
+// for Gemini 3 flash in general and is still accepted by the earlier flash variants,
+// so this is a deny-list of the models observed to reject it rather than an
+// allow-list — a new flash model keeps the cheaper MINIMAL default until it is
+// proven to refuse it.
+//
+// Matched as substrings so that dated/suffixed ids (e.g. "gemini-3.7-flash-001")
+// resolve to the same floor as the base name.
+var modelsRejectingMinimalThinking = []string{
+	"gemini-3.7-flash",
+	"gemini-3.8-flash",
+}
+
+// lowestThinkingLevel returns the lowest ThinkingLevel the given Gemini 3 model
+// actually accepts: MINIMAL for flash variants that support it, LOW otherwise
+// (pro variants never supported MINIMAL, and some flash variants dropped it).
+//
+// Every "minimal thinking" decision routes through here so the floor is defined
+// in one place instead of being re-derived at each call site.
+func lowestThinkingLevel(model string) genai.ThinkingLevel {
+	if !isFlashModel(model) {
+		// Pro variants: MINIMAL is not supported, LOW is the minimum.
+		return genai.ThinkingLevelLow
+	}
+	lower := strings.ToLower(model)
+	for _, rejected := range modelsRejectingMinimalThinking {
+		if strings.Contains(lower, rejected) {
+			return genai.ThinkingLevelLow
+		}
+	}
+	return genai.ThinkingLevelMinimal
+}
+
 // isGeminiImageModel returns true for Gemini image generation/editing models.
 // These models do not support ThinkingConfig.
 func isGeminiImageModel(model string) bool {
@@ -64,20 +100,12 @@ func isGemini25ProModel(model string) bool {
 //
 //	so we use dynamic mode which lets the model decide the budget.
 //
-// Gemini 3 flash: ThinkingLevel=Minimal (lowest level supported).
-// Gemini 3 non-flash: ThinkingLevel=Low (Minimal is not supported on pro variants).
+// Gemini 3: the lowest level the specific model accepts — see lowestThinkingLevel.
 func disableThinkingConfig(model string) *genai.ThinkingConfig {
 	if isGemini3Model(model) {
-		if isFlashModel(model) {
-			return &genai.ThinkingConfig{
-				IncludeThoughts: false,
-				ThinkingLevel:   genai.ThinkingLevelMinimal,
-			}
-		}
-		// Gemini 3 pro: Minimal is not supported, Low is the minimum.
 		return &genai.ThinkingConfig{
 			IncludeThoughts: false,
-			ThinkingLevel:   genai.ThinkingLevelLow,
+			ThinkingLevel:   lowestThinkingLevel(model),
 		}
 	}
 	// Gemini 2.5 pro: budget=0 is not supported; use dynamic (-1) instead.
@@ -103,15 +131,11 @@ func mapReasoningEffort(effort string, model string) *genai.ThinkingConfig {
 
 	if isGemini3Model(model) {
 		// Gemini 3+: ThinkingLevel enum.
-		// Flash supports MINIMAL/LOW/MEDIUM/HIGH.
+		// Flash supports LOW/MEDIUM/HIGH plus, on most variants, MINIMAL.
 		// Pro supports LOW/HIGH only (MINIMAL and MEDIUM are unsupported).
 		switch effort {
 		case "minimal":
-			if isFlashModel(model) {
-				config.ThinkingLevel = genai.ThinkingLevelMinimal
-			} else {
-				config.ThinkingLevel = genai.ThinkingLevelLow
-			}
+			config.ThinkingLevel = lowestThinkingLevel(model)
 		case "low":
 			config.ThinkingLevel = genai.ThinkingLevelLow
 		case "medium":
@@ -180,11 +204,7 @@ func mapNativeThinkingConfig(tcMap map[string]interface{}, model string) *genai.
 		if levelStr, ok := tcMap["thinking_level"].(string); ok {
 			switch levelStr {
 			case "minimal":
-				if isFlashModel(model) {
-					config.ThinkingLevel = genai.ThinkingLevelMinimal
-				} else {
-					config.ThinkingLevel = genai.ThinkingLevelLow
-				}
+				config.ThinkingLevel = lowestThinkingLevel(model)
 			case "low":
 				config.ThinkingLevel = genai.ThinkingLevelLow
 			case "medium":
@@ -201,11 +221,7 @@ func mapNativeThinkingConfig(tcMap map[string]interface{}, model string) *genai.
 			}
 		} else {
 			// No thinking_level specified: use default for model type.
-			if isFlashModel(model) {
-				config.ThinkingLevel = genai.ThinkingLevelMinimal
-			} else {
-				config.ThinkingLevel = genai.ThinkingLevelLow
-			}
+			config.ThinkingLevel = lowestThinkingLevel(model)
 		}
 	} else {
 		// Gemini 2.5: use thinking_budget if provided.
@@ -259,7 +275,7 @@ func mapAnthropicThinking(thinking map[string]interface{}, model string) *genai.
 
 	if isGemini3Model(model) {
 		// Map Anthropic budget_tokens to Gemini 3 ThinkingLevel.
-		// Flash supports MINIMAL/LOW/MEDIUM/HIGH.
+		// Flash supports LOW/MEDIUM/HIGH plus, on most variants, MINIMAL.
 		// Pro supports LOW/HIGH only (MEDIUM is unsupported on pro variants).
 		switch {
 		case budgetTokens >= 15000:
@@ -272,12 +288,7 @@ func mapAnthropicThinking(thinking map[string]interface{}, model string) *genai.
 				config.ThinkingLevel = genai.ThinkingLevelHigh
 			}
 		default:
-			// Flash supports Minimal; pro minimum is Low.
-			if isFlashModel(model) {
-				config.ThinkingLevel = genai.ThinkingLevelMinimal
-			} else {
-				config.ThinkingLevel = genai.ThinkingLevelLow
-			}
+			config.ThinkingLevel = lowestThinkingLevel(model)
 		}
 	} else {
 		budget := int32(budgetTokens)

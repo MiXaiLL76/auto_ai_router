@@ -61,13 +61,16 @@ func buildGenerationConfig(req *openai.OpenAIRequest, model string) *VertexGener
 		v := ClampInt32(*req.Seed)
 		cfg.Seed = &v
 	}
-	if req.FrequencyPenalty != nil {
-		v := float32(*req.FrequencyPenalty)
-		cfg.FrequencyPenalty = &v
-	}
-	if req.PresencePenalty != nil {
-		v := float32(*req.PresencePenalty)
-		cfg.PresencePenalty = &v
+	// Dropped for models that reject them outright — see supportsPenalty.
+	if supportsPenalty(model) {
+		if req.FrequencyPenalty != nil {
+			v := float32(*req.FrequencyPenalty)
+			cfg.FrequencyPenalty = &v
+		}
+		if req.PresencePenalty != nil {
+			v := float32(*req.PresencePenalty)
+			cfg.PresencePenalty = &v
+		}
 	}
 
 	// Phase 5: LogProbs

@@ -701,3 +701,53 @@ func TestTryFallbackProxy_SameCredentialAsOriginal(t *testing.T) {
 	assert.False(t, success, "TryFallbackProxy should return success=false when fallback is same credential")
 	assert.Equal(t, "fallback_is_same_credential", reason, "Should return fallback_is_same_credential reason")
 }
+
+func TestShouldRetryWithFallback_DeterministicBadRequest(t *testing.T) {
+	// 400s that fault the request itself fail identically on every credential, so
+	// retrying them only multiplies one client mistake into one upstream error per
+	// account in the rotation.
+	bodies := []string{
+		`{"error":{"code":400,"message":"Penalty is not enabled for this model","status":"INVALID_ARGUMENT"}}`,
+		`{"error":{"code":400,"message":"Thinking level MINIMAL is not supported for this model.","status":"INVALID_ARGUMENT"}}`,
+		`{"error":{"code":400,"message":"Thinking level is unsupported: THINKING_LEVEL_MINIMAL","status":"INVALID_ARGUMENT"}}`,
+		`{"error":{"code":400,"message":"Unsupported MIME type: application/octet-stream","status":"INVALID_ARGUMENT"}}`,
+		`{"error":{"code":400,"message":"* GenerateContentRequest.contents[2].parts[0].data: required oneof field 'data' must have one initialized field","status":"INVALID_ARGUMENT"}}`,
+		`{"error":{"code":400,"message":"Unable to submit request because it has a maxOutputTokens value of 100000 but the supported range is from 1 (inclusive) to 65537 (exclusive)."}}`,
+	}
+	for _, body := range bodies {
+		t.Run(body[:60], func(t *testing.T) {
+			shouldRetry, _ := ShouldRetryWithFallback(http.StatusBadRequest, []byte(body))
+			if shouldRetry {
+				t.Errorf("expected no retry for deterministic bad request, got retry")
+			}
+		})
+	}
+}
+
+func TestShouldRetryWithFallback_CredentialSpecific400StillRetries(t *testing.T) {
+	// The opposite case must keep working: a 400 that can differ between accounts
+	// is exactly what moving to the next credential fixes.
+	bodies := []string{
+		`{"error":{"code":400,"message":"API key not valid. Please pass a valid API key.","status":"INVALID_ARGUMENT"}}`,
+		`{"error":{"code":400,"message":"model not found","status":"INVALID_ARGUMENT"}}`,
+		`{"error":{"code":400,"message":"User location is not supported for the API use.","status":"FAILED_PRECONDITION"}}`,
+	}
+	for _, body := range bodies {
+		t.Run(body[:50], func(t *testing.T) {
+			shouldRetry, _ := ShouldRetryWithFallback(http.StatusBadRequest, []byte(body))
+			if !shouldRetry {
+				t.Errorf("expected retry for credential-specific 400, got none")
+			}
+		})
+	}
+}
+
+func TestShouldRetryWithFallback_MarkersOnlyApplyTo400(t *testing.T) {
+	// The markers describe bad requests; the same text arriving with a 5xx is a
+	// server fault and must stay retryable.
+	body := []byte(`{"error":{"message":"Penalty is not enabled for this model"}}`)
+	shouldRetry, _ := ShouldRetryWithFallback(http.StatusInternalServerError, body)
+	if !shouldRetry {
+		t.Errorf("expected retry for 500 regardless of body text")
+	}
+}

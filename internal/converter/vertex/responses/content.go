@@ -64,9 +64,13 @@ func convertInputImageParts(partMap map[string]interface{}) ([]*genai.Part, erro
 	if !isAllowedFileURL(imgURL) {
 		return nil, converterutil.NewRequestValidationError("input_image.image_url", "unsupported or blocked image URL")
 	}
+	mimeType := detectMIMEFromURL(imgURL)
+	if mimeType == "" {
+		return nil, converterutil.NewRequestValidationError("input_image.image_url", "cannot determine image MIME type from URL")
+	}
 	return []*genai.Part{{
 		FileData: &genai.FileData{
-			MIMEType: detectMIMEFromURL(imgURL),
+			MIMEType: mimeType,
 			FileURI:  imgURL,
 		},
 	}}, nil
@@ -89,6 +93,11 @@ func convertInputAudioPart(partMap map[string]interface{}) ([]*genai.Part, error
 	if err != nil {
 		return nil, fmt.Errorf("input_audio: base64 decode: %w", err)
 	}
+	// Padding-only input (e.g. "====") decodes to zero bytes without erroring;
+	// a blob with no bytes is rejected by Gemini with 400 INVALID_ARGUMENT.
+	if len(decoded) == 0 {
+		return nil, fmt.Errorf("input_audio: empty data")
+	}
 	return []*genai.Part{{
 		InlineData: &genai.Blob{
 			MIMEType: audioFormatToMIME(format),
@@ -103,9 +112,13 @@ func convertInputFilePart(partMap map[string]interface{}) ([]*genai.Part, error)
 		if !isAllowedFileURL(fileURL) {
 			return nil, converterutil.NewRequestValidationError("input_file.file_url", "unsupported or blocked file URL")
 		}
+		mimeType := detectMIMEFromURL(fileURL)
+		if mimeType == "" {
+			return nil, converterutil.NewRequestValidationError("input_file.file_url", "cannot determine file MIME type from URL")
+		}
 		return []*genai.Part{{
 			FileData: &genai.FileData{
-				MIMEType: detectMIMEFromURL(fileURL),
+				MIMEType: mimeType,
 				FileURI:  fileURL,
 			},
 		}}, nil
@@ -186,12 +199,24 @@ func parseDataURLToPart(dataURL string) (*genai.Part, error) {
 	if err != nil {
 		return nil, nil
 	}
+	// An empty payload decodes cleanly but yields a blob with no bytes, which
+	// Gemini rejects with 400 INVALID_ARGUMENT ("required oneof field 'data' must
+	// have one initialized field"). Treat it as not a usable data URL.
+	if len(decoded) == 0 {
+		return nil, nil
+	}
 	return &genai.Part{
 		InlineData: &genai.Blob{MIMEType: mimeType, Data: decoded},
 	}, nil
 }
 
 // detectMIMEFromURL guesses a MIME type from common file extensions in a URL.
+// Returns "" when nothing matches: the bytes are not in hand here (Gemini fetches
+// the URI itself), so there is nothing to sniff, and the previous
+// "application/octet-stream" default was a guaranteed 400 INVALID_ARGUMENT
+// ("Unsupported MIME type: application/octet-stream") that — being retryable —
+// was then replayed across every credential. Callers turn "" into a client-visible
+// validation error instead.
 func detectMIMEFromURL(url string) string {
 	lower := strings.ToLower(url)
 	switch {
@@ -212,7 +237,7 @@ func detectMIMEFromURL(url string) string {
 	case strings.Contains(lower, ".wav"):
 		return "audio/wav"
 	default:
-		return "application/octet-stream"
+		return ""
 	}
 }
 

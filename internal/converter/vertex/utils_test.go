@@ -227,10 +227,18 @@ func TestParseURLToPart_PublicIP(t *testing.T) {
 		assert.Equal(t, "image/png", result.FileData.MIMEType)
 	})
 
-	t.Run("URL with public IP without extension", func(t *testing.T) {
+	t.Run("URL with public IP without extension is skipped", func(t *testing.T) {
+		// Nothing declares a type: no extension, no explicit format, and the bytes
+		// are not in hand to sniff. The part is dropped rather than forwarded with
+		// an "application/octet-stream" placeholder, which Gemini rejects with a
+		// 400 that — being retryable — was replayed across every credential.
 		result := parseURLToPart("https://93.184.216.34/noext", map[string]interface{}{})
-		require.NotNil(t, result)
-		assert.Equal(t, "application/octet-stream", result.FileData.MIMEType)
+		assert.Nil(t, result)
+	})
+
+	t.Run("explicit octet-stream format is skipped", func(t *testing.T) {
+		result := parseURLToPart("https://93.184.216.34/file", map[string]interface{}{"format": "application/octet-stream"})
+		assert.Nil(t, result)
 	})
 }
 
@@ -247,4 +255,31 @@ func TestIsPrivateURL(t *testing.T) {
 	// Note: url.Parse is very lenient — "not-a-valid-url" parses with empty host,
 	// which resolves to false (not private). This is acceptable since parseURLToPart
 	// rejects non-http/https/gs URLs before calling isPrivateURL.
+}
+
+func TestParseDataURLToPart_EmptyPayload(t *testing.T) {
+	// Base64 of "" is "" and decodes without error, so an empty attachment used to
+	// reach Gemini as a blob with no bytes and come back as 400 INVALID_ARGUMENT
+	// ("required oneof field 'data' must have one initialized field").
+	t.Run("empty base64", func(t *testing.T) {
+		part, err := parseDataURLToPart("data:image/png;base64,")
+		require.NoError(t, err)
+		assert.Nil(t, part)
+	})
+
+	t.Run("padding only", func(t *testing.T) {
+		part, err := parseDataURLToPart("data:image/png;base64,====")
+		require.NoError(t, err)
+		assert.Nil(t, part)
+	})
+
+	t.Run("non-empty payload still parsed", func(t *testing.T) {
+		// "AAAA" decodes to three zero bytes.
+		part, err := parseDataURLToPart("data:image/png;base64,AAAA")
+		require.NoError(t, err)
+		require.NotNil(t, part)
+		require.NotNil(t, part.InlineData)
+		assert.Equal(t, "image/png", part.InlineData.MIMEType)
+		assert.Len(t, part.InlineData.Data, 3)
+	})
 }

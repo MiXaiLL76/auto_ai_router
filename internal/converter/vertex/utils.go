@@ -74,6 +74,15 @@ func parseDataURLToPart(dataURL string) (*genai.Part, error) {
 		return nil, nil
 	}
 
+	// An empty payload decodes cleanly — base64 of "" is "" and DecodeString
+	// returns (empty, nil) — but an InlineData blob carrying no bytes is rejected
+	// by Gemini with 400 INVALID_ARGUMENT ("contents[N].parts[0].data: required
+	// oneof field 'data' must have one initialized field"). Skip the part, the
+	// same way undecodable data is skipped just above.
+	if len(decodedData) == 0 {
+		return nil, nil
+	}
+
 	return &genai.Part{
 		InlineData: &genai.Blob{
 			MIMEType: mimeType,
@@ -212,8 +221,15 @@ func parseURLToPart(rawURL string, fileObj map[string]interface{}) *genai.Part {
 		mimeType = getMimeTypeFromURL(rawURL)
 	}
 
-	if mimeType == "" {
-		mimeType = "application/octet-stream"
+	// Nothing usable to declare. Unlike the multipart path (detectImageMIMEType),
+	// the bytes are not in hand here — Gemini fetches the URI itself — so the type
+	// cannot be sniffed. Sending "application/octet-stream" as a placeholder, as
+	// this did before, is a guaranteed 400 INVALID_ARGUMENT ("Unsupported MIME
+	// type: application/octet-stream"), and since 400 is retryable that one part
+	// took the whole request down across every credential in the rotation. Skip it
+	// instead, as with the other unusable URLs above.
+	if mimeType == "" || strings.EqualFold(mimeType, "application/octet-stream") {
+		return nil
 	}
 
 	return &genai.Part{
