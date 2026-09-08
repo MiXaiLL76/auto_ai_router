@@ -648,7 +648,7 @@ func (p *Proxy) executeProxyRequest(
 	if r.URL.Path == "/v1/messages" {
 		body, anthropicBetas = anthropicconv.ExtractBetaHeader(body)
 	}
-	proxyReq, err := http.NewRequestWithContext(upstreamCtx, r.Method, targetURL, bytes.NewReader(body)) //nolint:gosec // G704: targetURL's host is proxyBaseURL from a configured credential, not attacker-controlled — only the path/query comes from the incoming request
+	proxyReq, err := http.NewRequestWithContext(httputil.WithProxyURL(upstreamCtx, cred.ProxyURL), r.Method, targetURL, bytes.NewReader(body)) //nolint:gosec // G704: targetURL's host is proxyBaseURL from a configured credential, not attacker-controlled — only the path/query comes from the incoming request
 	if err != nil {
 		p.logger.ErrorContext(r.Context(), "Failed to create proxy request", "error", err, "url", targetURL)
 		return nil, err
@@ -1676,7 +1676,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 		var vertexToken string
 		if cred.Type == config.ProviderTypeVertexAI {
 			var tokenErr error
-			vertexToken, tokenErr = p.tokenManager.GetToken(cred.Name, cred.CredentialsFile, cred.CredentialsJSON)
+			vertexToken, tokenErr = p.tokenManager.GetToken(cred.Name, cred.CredentialsFile, cred.CredentialsJSON, cred.ProxyURL)
 			if tokenErr != nil {
 				p.logger.ErrorContext(r.Context(), "Failed to get Vertex AI token",
 					"error_code", http.StatusInternalServerError,
@@ -1695,7 +1695,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 
 		upstreamCtx, cancelUpstream := p.upstreamRequestContext(r)
 		defer cancelUpstream()
-		proxyReq, reqErr := http.NewRequestWithContext(upstreamCtx, r.Method, targetURL, bytes.NewReader(requestBody)) //nolint:gosec // G704: targetURL's host comes from the matched credential's base URL, not the incoming request
+		proxyReq, reqErr := http.NewRequestWithContext(httputil.WithProxyURL(upstreamCtx, cred.ProxyURL), r.Method, targetURL, bytes.NewReader(requestBody)) //nolint:gosec // G704: targetURL's host comes from the matched credential's base URL, not the incoming request
 		if reqErr != nil {
 			// Fatal: request creation error
 			p.logger.ErrorContext(r.Context(), "Failed to create proxy request", "error", reqErr, "url", targetURL)

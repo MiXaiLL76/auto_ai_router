@@ -242,6 +242,10 @@
                 <td>base url</td>
                 <td><span class="masked">{{ maskURL .BaseURL }}</span></td>
               </tr>{{ end }}
+              {{ if .ProxyURL }}<tr>
+                <td>proxy url</td>
+                <td><span class="masked">{{ maskURL .ProxyURL }}</span></td>
+              </tr>{{ end }}
               {{ if .ProjectID }}<tr>
                 <td>project id</td>
                 <td>{{ .ProjectID }}</td>

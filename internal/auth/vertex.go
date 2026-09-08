@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"sync"
 	"sync/atomic"
@@ -14,6 +15,7 @@ import (
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
 
+	"github.com/mixaill76/auto_ai_router/internal/httputil"
 	"github.com/mixaill76/auto_ai_router/internal/utils"
 )
 
@@ -22,6 +24,7 @@ type tokenRefreshRequest struct {
 	credentialName  string
 	credentialsFile string
 	credentialsJSON string
+	proxyURL        string
 	responseChan    chan tokenRefreshResponse
 }
 
@@ -33,6 +36,7 @@ type tokenRefreshResponse struct {
 
 // VertexTokenManager manages OAuth2 tokens for Vertex AI credentials
 type VertexTokenManager struct {
+	httpClient          *http.Client
 	mu                  sync.RWMutex
 	tokens              map[string]*cachedToken
 	credentials         map[string][]byte // Cache for credentials
@@ -53,11 +57,13 @@ type cachedToken struct {
 	token       *oauth2.Token
 	tokenSource oauth2.TokenSource
 	expiresAt   time.Time
+	proxyURL    string
 }
 
 // NewVertexTokenManager creates a new token manager
 func NewVertexTokenManager(logger *slog.Logger) *VertexTokenManager {
 	tm := &VertexTokenManager{
+		httpClient:          httputil.NewHTTPClient(&httputil.HTTPClientConfig{Timeout: 30 * time.Second}),
 		tokens:              make(map[string]*cachedToken),
 		credentials:         make(map[string][]byte),
 		logger:              logger,
@@ -67,6 +73,7 @@ func NewVertexTokenManager(logger *slog.Logger) *VertexTokenManager {
 		stopChan:            make(chan struct{}),
 		refreshing:          make(map[string][]chan tokenRefreshResponse),
 	}
+	tm.httpClient.Timeout = tm.tokenRefreshTimeout
 	tm.wg.Add(1)
 	go tm.refreshWorker()
 	return tm
@@ -91,14 +98,14 @@ func NewVertexTokenManager(logger *slog.Logger) *VertexTokenManager {
 // Response channel buffering: Each response channel has a buffer size of 1, which allows
 // the worker to send responses non-blocking. If a waiter has already given up due to timeout,
 // the response will still be sent but go unread.
-func (tm *VertexTokenManager) GetToken(credentialName, credentialsFile, credentialsJSON string) (string, error) {
+func (tm *VertexTokenManager) GetToken(credentialName, credentialsFile, credentialsJSON, proxyURL string) (string, error) {
 	if tm.stopped.Load() {
 		return "", fmt.Errorf("token manager is stopped")
 	}
 
 	// Fast path: check if we have a valid cached token (read-only)
 	tm.mu.RLock()
-	if cached, exists := tm.tokens[credentialName]; exists {
+	if cached, exists := tm.tokens[credentialName]; exists && cached.proxyURL == proxyURL {
 		if utils.NowUTC().Before(cached.expiresAt.Add(-tm.tokenRefresh)) {
 			token := cached.token.AccessToken
 			tm.mu.RUnlock()
@@ -115,7 +122,7 @@ func (tm *VertexTokenManager) GetToken(credentialName, credentialsFile, credenti
 
 	// Double-check cache to prevent race condition: cache may have been updated
 	// after our first check and before acquiring this lock
-	if cached, exists := tm.tokens[credentialName]; exists {
+	if cached, exists := tm.tokens[credentialName]; exists && cached.proxyURL == proxyURL {
 		if utils.NowUTC().Before(cached.expiresAt.Add(-tm.tokenRefresh)) {
 			token := cached.token.AccessToken
 			tm.mu.RUnlock()
@@ -141,6 +148,7 @@ func (tm *VertexTokenManager) GetToken(credentialName, credentialsFile, credenti
 			credentialName:  credentialName,
 			credentialsFile: credentialsFile,
 			credentialsJSON: credentialsJSON,
+			proxyURL:        proxyURL,
 			responseChan:    responseChan,
 		}
 		select {
@@ -249,7 +257,7 @@ func (tm *VertexTokenManager) processRefreshRequest(req tokenRefreshRequest) {
 	tm.mu.RLock()
 	cached, exists := tm.tokens[req.credentialName]
 	tm.mu.RUnlock()
-	if exists {
+	if exists && cached.proxyURL == req.proxyURL {
 		// Token exists, refresh it
 		token, err = tm.refreshToken(req.credentialName, cached)
 		// If refresh fails, try to create a new token immediately instead of returning error
@@ -257,11 +265,11 @@ func (tm *VertexTokenManager) processRefreshRequest(req tokenRefreshRequest) {
 			tm.mu.Lock()
 			delete(tm.tokens, req.credentialName)
 			tm.mu.Unlock()
-			token, err = tm.createNewToken(req.credentialName, req.credentialsFile, req.credentialsJSON)
+			token, err = tm.createNewToken(req.credentialName, req.credentialsFile, req.credentialsJSON, req.proxyURL)
 		}
 	} else {
 		// No cached token, create a new one
-		token, err = tm.createNewToken(req.credentialName, req.credentialsFile, req.credentialsJSON)
+		token, err = tm.createNewToken(req.credentialName, req.credentialsFile, req.credentialsJSON, req.proxyURL)
 	}
 
 	// Send response to all waiting goroutines
@@ -316,7 +324,7 @@ func (tm *VertexTokenManager) refreshToken(credentialName string, cached *cached
 	return newToken.AccessToken, nil
 }
 
-func (tm *VertexTokenManager) createNewToken(credentialName, credentialsFile, credentialsJSON string) (string, error) {
+func (tm *VertexTokenManager) createNewToken(credentialName, credentialsFile, credentialsJSON, proxyURL string) (string, error) {
 	tm.logger.Debug("Creating new Vertex AI token", "credential", credentialName)
 
 	credBytes, err := tm.loadCredentials(credentialName, credentialsFile, credentialsJSON)
@@ -336,8 +344,13 @@ func (tm *VertexTokenManager) createNewToken(credentialName, credentialsFile, cr
 	}
 
 	// Create credentials with Vertex AI scope (ServiceAccount type is validated above)
+	ctx := context.Background()
+	if proxyURL != "" {
+		// JWT token exchange uses PostForm without propagating its context.
+		ctx = context.WithValue(ctx, oauth2.HTTPClient, httputil.WithClientProxy(tm.httpClient, proxyURL))
+	}
 	creds, err := google.CredentialsFromJSONWithType(
-		context.Background(),
+		ctx,
 		credBytes,
 		google.ServiceAccount,
 		"https://www.googleapis.com/auth/cloud-platform",
@@ -358,6 +371,7 @@ func (tm *VertexTokenManager) createNewToken(credentialName, credentialsFile, cr
 		token:       token,
 		tokenSource: creds.TokenSource,
 		expiresAt:   token.Expiry,
+		proxyURL:    proxyURL,
 	}
 	tm.mu.Unlock()
 
