@@ -581,6 +581,14 @@ func TestOpenAIStreamUsageExtractor(t *testing.T) {
 			},
 		},
 		{
+			name:      "responses API - response.incomplete event carries usage",
+			chunk:     []byte(`{"type":"response.incomplete","response":{"id":"resp_456","status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"usage":{"input_tokens":5000,"output_tokens":30,"total_tokens":5030,"output_tokens_details":{"reasoning_tokens":30}}}}`),
+			expectNil: false,
+			expectUsage: func(u *StreamUsageInfo) bool {
+				return u.PromptTokens == 5000 && u.CompletionTokens == 30 && u.ReasoningTokens == 30
+			},
+		},
+		{
 			name:      "responses API - completed output items provide web search count",
 			chunk:     []byte(`{"type":"response.completed","response":{"output":[{"type":"web_search_call","status":"completed"},{"type":"web_search_call","status":"completed"}],"usage":{"input_tokens":20,"output_tokens":5,"total_tokens":25}}}`),
 			expectNil: false,
