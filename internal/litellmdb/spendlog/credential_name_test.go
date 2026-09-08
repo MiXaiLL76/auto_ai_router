@@ -2,6 +2,7 @@ package spendlog
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"testing"
@@ -16,20 +17,51 @@ import (
 func TestCredentialNameBatchParameters(t *testing.T) {
 	first := atomicTestEntry("first")
 	first.CredentialName = "grant'); DROP TABLE anything; --"
+	first.Metadata = `{"spend_logs_metadata":{"air_event_id":"event-1"},"large_id":9007199254740993,"credential_name":"stale"}`
 	second := atomicTestEntry("second")
 	entries := []*models.SpendLogEntry{first, second}
 
-	legacy := GetBatchParams(entries, false)
+	legacy, err := GetBatchParams(entries, false)
+	require.NoError(t, err)
 	require.Len(t, legacy, 52)
 	assert.NotContains(t, legacy, first.CredentialName)
 
-	params := GetBatchParams(entries, true)
-	require.Len(t, params, 54)
-	assert.Equal(t, legacy[:26], params[:26])
-	assert.Equal(t, first.CredentialName, params[26])
-	assert.Equal(t, legacy[26:], params[27:53])
-	assert.Nil(t, params[53])
-	assert.NotContains(t, queries.BuildBatchInsertQuery(2, true), first.CredentialName)
+	params, err := GetBatchParams(entries, true)
+	require.NoError(t, err)
+	require.Len(t, params, 52)
+	assert.Equal(t, legacy[:17], params[:17])
+	assert.Equal(t, legacy[18:], params[18:])
+	var metadata map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal([]byte(params[17].(string)), &metadata))
+	var credential string
+	require.NoError(t, json.Unmarshal(metadata["credential_name"], &credential))
+	assert.Equal(t, first.CredentialName, credential)
+	assert.Equal(t, "9007199254740993", string(metadata["large_id"]))
+	assert.JSONEq(t, `{"air_event_id":"event-1"}`, string(metadata["spend_logs_metadata"]))
+	assert.Equal(t, first.Metadata, legacy[17])
+	assert.Contains(t, first.Metadata, `"credential_name":"stale"`)
+	assert.NotContains(t, queries.BuildBatchInsertQuery(2), "credential_name")
+}
+
+func TestCredentialNameMetadataValidation(t *testing.T) {
+	for _, metadata := range []string{"", "null", "{}"} {
+		entry := atomicTestEntry("empty-metadata")
+		entry.CredentialName = "provider-1"
+		entry.Metadata = metadata
+		params, err := GetBatchParams([]*models.SpendLogEntry{entry}, true)
+		require.NoError(t, err)
+		assert.JSONEq(t, `{"credential_name":"provider-1"}`, params[17].(string))
+		assert.Equal(t, metadata, entry.Metadata)
+	}
+	for _, metadata := range []string{`{"broken":`, `[]`, `{} {}`} {
+		entry := atomicTestEntry("invalid-metadata")
+		entry.CredentialName = "provider-1"
+		entry.Metadata = metadata
+		params, err := GetBatchParams([]*models.SpendLogEntry{entry}, true)
+		require.ErrorContains(t, err, "invalid-metadata")
+		assert.Nil(t, params)
+		assert.Equal(t, metadata, entry.Metadata)
+	}
 }
 
 func TestCredentialNameSurvivesRequestIDCollision(t *testing.T) {
@@ -50,13 +82,15 @@ func TestCredentialNameSurvivesRequestIDCollision(t *testing.T) {
 			assert.Equal(t, []string{"chatcmpl-shared", "air-event-2"}, inserted)
 			require.Len(t, tx.queryArgs, 2)
 			for i, credential := range []string{"grant-1", "grant-2"} {
+				assert.NotContains(t, tx.queries[i], "credential_name")
+				require.Len(t, tx.queryArgs[i], 26)
+				var metadata map[string]any
+				require.NoError(t, json.Unmarshal([]byte(tx.queryArgs[i][17].(string)), &metadata))
+				assert.Equal(t, fmt.Sprintf("air-event-%d", i+1), metadata["spend_logs_metadata"].(map[string]any)["air_event_id"])
 				if enabled {
-					assert.Contains(t, tx.queries[i], "credential_name")
-					require.Len(t, tx.queryArgs[i], 27)
-					assert.Equal(t, credential, tx.queryArgs[i][26])
+					assert.Equal(t, credential, metadata["credential_name"])
 				} else {
-					assert.NotContains(t, tx.queries[i], "credential_name")
-					assert.Len(t, tx.queryArgs[i], 26)
+					assert.NotContains(t, metadata, "credential_name")
 				}
 			}
 			assert.Equal(t, 4, countSQLContaining(tx.committedSQL, `INSERT INTO "LiteLLM_Daily`))
@@ -86,9 +120,6 @@ func TestCredentialNameLargeBatch(t *testing.T) {
 						wantIDs[0] = "shared-provider-id"
 					}
 					tx := &parameterLimitedSpendTx{paramsPerEntry: 26}
-					if enabled {
-						tx.paramsPerEntry++
-					}
 					if failLast {
 						tx.failRequestID = wantIDs[len(wantIDs)-1]
 					}

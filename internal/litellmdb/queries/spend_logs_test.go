@@ -8,7 +8,7 @@ import (
 )
 
 func TestSpendLogInsertPrivacyColumnsAreExplicitEmptyObjects(t *testing.T) {
-	for _, query := range []string{QueryInsertSpendLog, BuildBatchInsertQuery(2, false)} {
+	for _, query := range []string{QueryInsertSpendLog, BuildBatchInsertQuery(2)} {
 		assert.Contains(t, query, "messages")
 		assert.Contains(t, query, "response")
 		assert.Contains(t, query, "proxy_server_request")
@@ -69,7 +69,7 @@ func TestBuildBatchInsertQuery(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := BuildBatchInsertQuery(tt.count, false)
+			result := BuildBatchInsertQuery(tt.count)
 
 			if tt.expectEmpty {
 				if result != "" {
@@ -95,7 +95,7 @@ func TestBuildBatchInsertQuery(t *testing.T) {
 func TestBuildBatchInsertQuery_ParameterCount(t *testing.T) {
 	// Test that the query has correct number of parameter placeholders
 	for _, count := range []int{1, 2, 5, 10, 100} {
-		result := BuildBatchInsertQuery(count, false)
+		result := BuildBatchInsertQuery(count)
 		if result == "" {
 			t.Fatalf("expected non-empty string for count=%d", count)
 		}
@@ -128,7 +128,7 @@ func TestBuildBatchInsertQuery_ParameterCount(t *testing.T) {
 
 func TestBuildBatchInsertQuery_Format(t *testing.T) {
 	// Test that the query is properly formatted with commas between rows
-	result := BuildBatchInsertQuery(3, false)
+	result := BuildBatchInsertQuery(3)
 	if result == "" {
 		t.Fatal("expected non-empty string")
 	}

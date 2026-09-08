@@ -225,7 +225,7 @@ const (
 )
 
 // BuildBatchInsertQuery builds a query for batch INSERT
-func BuildBatchInsertQuery(count int, logCredentialName bool) string {
+func BuildBatchInsertQuery(count int) string {
 	if count <= 0 {
 		return ""
 	}
@@ -241,13 +241,7 @@ func BuildBatchInsertQuery(count int, logCredentialName bool) string {
 			model, model_id, model_group, custom_llm_provider, api_base,
 			"user", "metadata", cache_hit, cache_key,
 			team_id, organization_id, end_user, requester_ip_address,
-			session_id, status`)
-	paramCount := spendLogParamCount
-	if logCredentialName {
-		b.WriteString(", credential_name")
-		paramCount++
-	}
-	b.WriteString(`,
+			session_id, status,
 			messages, response, proxy_server_request
 		) VALUES `)
 
@@ -257,7 +251,7 @@ func BuildBatchInsertQuery(count int, logCredentialName bool) string {
 			b.WriteString(", ")
 		}
 		b.WriteString("(")
-		for j := 0; j < paramCount; j++ {
+		for j := 0; j < spendLogParamCount; j++ {
 			if j > 0 {
 				b.WriteString(", ")
 			}

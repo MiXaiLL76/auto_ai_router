@@ -156,14 +156,14 @@ func insertSpendRowsReturningIDs(ctx context.Context, tx pgx.Tx, entries []*mode
 		return nil, nil
 	}
 	const maxPostgresParameters = 65535
-	paramsPerEntry := queries.SpendLogParamCount
-	if logCredentialName {
-		paramsPerEntry++
-	}
 
 	insertedIDs := make([]string, 0, len(entries))
-	for chunk := range slices.Chunk(entries, maxPostgresParameters/paramsPerEntry) {
-		rows, err := tx.Query(ctx, queries.BuildBatchInsertQuery(len(chunk), logCredentialName), GetBatchParams(chunk, logCredentialName)...)
+	for chunk := range slices.Chunk(entries, maxPostgresParameters/queries.SpendLogParamCount) {
+		params, err := GetBatchParams(chunk, logCredentialName)
+		if err != nil {
+			return nil, err
+		}
+		rows, err := tx.Query(ctx, queries.BuildBatchInsertQuery(len(chunk)), params...)
 		if err != nil {
 			return nil, err
 		}

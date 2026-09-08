@@ -56,17 +56,7 @@ func TestCredentialNamePostgres(t *testing.T) {
 
 	first := atomicTestEntry("first")
 	first.CredentialName = "grant'); DROP TABLE anything; --"
-	_, err = insert(true, first)
-	var pgErr *pgconn.PgError
-	require.ErrorAs(t, err, &pgErr)
-	assert.Equal(t, "42703", pgErr.Code)
-
-	migration, err := os.ReadFile("../migrations/add_spend_log_credential_name.sql")
-	require.NoError(t, err)
-	for range 2 {
-		_, err = conn.Exec(ctx, string(migration))
-		require.NoError(t, err)
-	}
+	first.Metadata = `{"spend_logs_metadata":{"air_event_id":"event-1"},"large_id":9007199254740993}`
 
 	second := atomicTestEntry("second")
 	second.CredentialName = "grant-2"
@@ -78,7 +68,7 @@ func TestCredentialNamePostgres(t *testing.T) {
 		var credential, team string
 		var spend float64
 		var tokens int
-		err = conn.QueryRow(ctx, `SELECT credential_name, team_id, spend, total_tokens
+		err = conn.QueryRow(ctx, `SELECT metadata->>'credential_name', team_id, spend, total_tokens
 			FROM "LiteLLM_SpendLogs" WHERE request_id = $1`, entry.RequestID).Scan(&credential, &team, &spend, &tokens)
 		require.NoError(t, err)
 		assert.Equal(t, entry.CredentialName, credential)
@@ -86,6 +76,12 @@ func TestCredentialNamePostgres(t *testing.T) {
 		assert.Equal(t, entry.Spend, spend)
 		assert.Equal(t, entry.TotalTokens, tokens)
 	}
+	var largeID, eventID string
+	err = conn.QueryRow(ctx, `SELECT metadata->>'large_id', metadata #>> '{spend_logs_metadata,air_event_id}'
+		FROM "LiteLLM_SpendLogs" WHERE request_id = 'first'`).Scan(&largeID, &eventID)
+	require.NoError(t, err)
+	assert.Equal(t, "9007199254740993", largeID)
+	assert.Equal(t, "event-1", eventID)
 
 	ids, err = insert(true, first, second)
 	require.NoError(t, err)
@@ -105,14 +101,14 @@ func TestCredentialNamePostgres(t *testing.T) {
 
 	var rowCount, attributedCount int
 	var totalSpend float64
-	err = conn.QueryRow(ctx, `SELECT count(*), count(credential_name), sum(spend)
+	err = conn.QueryRow(ctx, `SELECT count(*), count(metadata->>'credential_name'), sum(spend)
 		FROM "LiteLLM_SpendLogs"`).Scan(&rowCount, &attributedCount, &totalSpend)
 	require.NoError(t, err)
 	assert.Equal(t, 5, rowCount)
 	assert.Equal(t, 2, attributedCount)
 	assert.Equal(t, 6.25, totalSpend)
 	var credential string
-	err = conn.QueryRow(ctx, `SELECT credential_name FROM "LiteLLM_SpendLogs" WHERE request_id = 'first'`).Scan(&credential)
+	err = conn.QueryRow(ctx, `SELECT metadata->>'credential_name' FROM "LiteLLM_SpendLogs" WHERE request_id = 'first'`).Scan(&credential)
 	require.NoError(t, err)
 	assert.Equal(t, "grant'); DROP TABLE anything; --", credential)
 
@@ -136,7 +132,7 @@ func TestCredentialNamePostgres(t *testing.T) {
 
 				var stored, attributed int
 				var spend float64
-				err = conn.QueryRow(ctx, `SELECT count(*), count(*) FILTER (WHERE credential_name = 'provider-1'), sum(spend)
+				err = conn.QueryRow(ctx, `SELECT count(*), count(*) FILTER (WHERE metadata->>'credential_name' = 'provider-1'), sum(spend)
 					FROM "LiteLLM_SpendLogs" WHERE request_id LIKE $1`, prefix+"%").Scan(&stored, &attributed, &spend)
 				require.NoError(t, err)
 				assert.Equal(t, count, stored)

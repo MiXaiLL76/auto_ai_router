@@ -33,7 +33,7 @@ litellm_db:
 | `log_queue_size`                   | int      | 5000    | Spend log queue size                                              |
 | `log_batch_size`                   | int      | 100     | Spend log batch size                                              |
 | `log_flush_interval`               | duration | 5s      | Spend log flush interval                                          |
-| `log_credential_name`             | bool     | false   | Write the resolved provider name to the optional `credential_name` column |
+| `log_credential_name`             | bool     | false   | Write the resolved provider name to `metadata.credential_name` |
 | `include_team_spend_in_user_spend` | bool     | true    | Include team-bound events in the cumulative user spend projection |
 | `log_retry_attempts`               | int      | 3       | Retry attempts on log insert failure                              |
 | `log_retry_delay`                  | duration | 1s      | Delay between retry attempts                                      |
@@ -65,21 +65,11 @@ litellm_db:
 export LITELLM_DATABASE_URL="postgresql://user:password@localhost:5432/litellm"
 ```
 
-## Provider credential column
+## Provider credential metadata
 
-Enable `litellm_db.log_credential_name` to record the selected provider credential in
-`LiteLLM_SpendLogs.credential_name`, independently of the client's `team_id`.
-AIR uses the same resolved credential name as the prefix of `model_id`: the actual
-upstream credential when available, otherwise the selected local credential.
-Grants use their existing credential names and the existing spend calculation.
-
-Apply [the column migration](../../internal/litellmdb/migrations/add_spend_log_credential_name.sql)
-to each target database before enabling the flag:
-
-```sql
-ALTER TABLE "LiteLLM_SpendLogs"
-    ADD COLUMN IF NOT EXISTS credential_name TEXT;
-```
+Enable `litellm_db.log_credential_name` to record the selected provider credential
+as `credential_name` inside `LiteLLM_SpendLogs.metadata`. This uses the existing
+LiteLLM schema and requires no migration.
 
 ```yaml
 litellm_db:
@@ -88,19 +78,24 @@ litellm_db:
   log_credential_name: true
 ```
 
-AIR does not run the migration automatically. With the flag disabled (the default),
-INSERT statements omit the column entirely and work with the original LiteLLM schema.
-Enabling it before adding the column causes spend writes to fail through the existing
-retry/DLQ path; it does not silently discard the requested attribution.
-Disabling the flag again leaves previously recorded values intact.
+AIR uses the same resolved credential name as the prefix of `model_id`: the actual
+upstream credential when available, otherwise the selected local credential.
+Existing metadata fields are preserved; the resolved name replaces any existing
+`metadata.credential_name` value for the new event. When disabled (the default),
+metadata is passed through unchanged. An unknown credential adds no field.
+Previously stored rows are not rewritten when the flag changes or an event is replayed.
 
 Client teams, model IDs, usage, spend, and daily aggregation remain unchanged.
-For reports by provider, group the raw spend logs by `credential_name` and model.
-The existing daily tables do not gain a provider-credential dimension.
+For reports by provider, group the raw spend logs by `metadata->>'credential_name'`
+and model. For example, with a bounded reporting window:
 
-Historical attribution can be backfilled asynchronously from a Test database after
-verifying the shared request identifiers and resolving conflicting matches. Update
-only rows where `credential_name IS NULL`, using bounded batches and a resumable
-cursor. Do not reinsert spend logs or replay accounting updates. Preserve the source
-until reconciliation is complete; unmatched rows remain NULL. Backfill is a separate
-operation and does not block new writes.
+```sql
+SELECT metadata->>'credential_name' AS credential_name, model, SUM(spend) AS spend
+FROM "LiteLLM_SpendLogs"
+WHERE "startTime" >= $1 AND "startTime" < $2
+GROUP BY metadata->>'credential_name', model;
+```
+
+The existing daily tables do not gain a provider-credential dimension. Kafka
+already records the local credential in `credential_name` and the upstream name
+in `credential_actual_credential_name`, independently of this PostgreSQL option.

@@ -1,6 +1,9 @@
 package spendlog
 
 import (
+	"encoding/json"
+	"fmt"
+
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb/models"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb/queries"
 )
@@ -44,21 +47,38 @@ func GetSpendLogParams(entry *models.SpendLogEntry) []interface{} {
 }
 
 // GetBatchParams returns all parameters for batch insert
-func GetBatchParams(entries []*models.SpendLogEntry, logCredentialName bool) []interface{} {
-	paramCount := queries.SpendLogParamCount
-	if logCredentialName {
-		paramCount++
-	}
-	params := make([]interface{}, 0, len(entries)*paramCount)
+func GetBatchParams(entries []*models.SpendLogEntry, logCredentialName bool) ([]interface{}, error) {
+	params := make([]interface{}, 0, len(entries)*queries.SpendLogParamCount)
 	for _, entry := range entries {
-		params = append(params, GetSpendLogParams(entry)...)
-		if logCredentialName {
-			var credentialName any
-			if entry.CredentialName != "" {
-				credentialName = entry.CredentialName
+		if logCredentialName && entry.CredentialName != "" {
+			clone := *entry
+			metadata, err := addCredentialNameMetadata(entry.Metadata, entry.CredentialName)
+			if err != nil {
+				return nil, fmt.Errorf("credential metadata for request %q: %w", entry.RequestID, err)
 			}
-			params = append(params, credentialName)
+			clone.Metadata = metadata
+			entry = &clone
+		}
+		params = append(params, GetSpendLogParams(entry)...)
+	}
+	return params, nil
+}
+
+func addCredentialNameMetadata(metadata, credentialName string) (string, error) {
+	var fields map[string]json.RawMessage
+	if metadata != "" {
+		if err := json.Unmarshal([]byte(metadata), &fields); err != nil {
+			return "", err
 		}
 	}
-	return params
+	if fields == nil {
+		fields = make(map[string]json.RawMessage)
+	}
+	encodedName, err := json.Marshal(credentialName)
+	if err != nil {
+		return "", err
+	}
+	fields["credential_name"] = encodedName
+	encoded, err := json.Marshal(fields)
+	return string(encoded), err
 }

@@ -9,6 +9,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb/models"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb/queries"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestLogger_Log_NonBlocking(t *testing.T) {
@@ -159,7 +160,7 @@ func TestLogger_Stats(t *testing.T) {
 
 func TestBuildBatchInsertQuery(t *testing.T) {
 	t.Run("single entry", func(t *testing.T) {
-		query := queries.BuildBatchInsertQuery(1, false)
+		query := queries.BuildBatchInsertQuery(1)
 		assert.Contains(t, query, "INSERT INTO")
 		assert.Contains(t, query, "$1")
 		assert.Contains(t, query, "$26")
@@ -168,7 +169,7 @@ func TestBuildBatchInsertQuery(t *testing.T) {
 	})
 
 	t.Run("multiple entries", func(t *testing.T) {
-		query := queries.BuildBatchInsertQuery(3, false)
+		query := queries.BuildBatchInsertQuery(3)
 		assert.Contains(t, query, "$1")
 		assert.Contains(t, query, "$26") // First entry
 		assert.Contains(t, query, "$27") // Second entry start
@@ -177,12 +178,12 @@ func TestBuildBatchInsertQuery(t *testing.T) {
 	})
 
 	t.Run("zero entries", func(t *testing.T) {
-		query := queries.BuildBatchInsertQuery(0, false)
+		query := queries.BuildBatchInsertQuery(0)
 		assert.Empty(t, query)
 	})
 
 	t.Run("negative entries", func(t *testing.T) {
-		query := queries.BuildBatchInsertQuery(-1, false)
+		query := queries.BuildBatchInsertQuery(-1)
 		assert.Empty(t, query)
 	})
 }
@@ -239,7 +240,8 @@ func TestGetBatchParams(t *testing.T) {
 		{RequestID: "req-2", Status: "failure"},
 	}
 
-	params := GetBatchParams(entries, false)
+	params, err := GetBatchParams(entries, false)
+	require.NoError(t, err)
 
 	assert.Len(t, params, 2*queries.SpendLogParamCount)
 	assert.Equal(t, "req-1", params[0])
@@ -490,14 +492,15 @@ func TestLogger_SQLInjectionPrevention(t *testing.T) {
 					assert.True(t, found, "Malicious payload should be present in params unchanged")
 
 					// Verify batch query building doesn't error
-					query := queries.BuildBatchInsertQuery(1, false)
+					query := queries.BuildBatchInsertQuery(1)
 					assert.NotEmpty(t, query)
 					assert.Contains(t, query, "INSERT INTO")
 					assert.Contains(t, query, "ON CONFLICT (request_id) DO NOTHING")
 
 					// Verify batch params work with multiple entries
 					batch := []*models.SpendLogEntry{entry}
-					batchParams := GetBatchParams(batch, false)
+					batchParams, err := GetBatchParams(batch, false)
+					require.NoError(t, err)
 					assert.NotNil(t, batchParams)
 					assert.Len(t, batchParams, queries.SpendLogParamCount)
 
@@ -563,14 +566,15 @@ func TestLogger_SQLInjectionPrevention(t *testing.T) {
 				}
 
 				// Build batch query for 2 entries
-				query := queries.BuildBatchInsertQuery(2, false)
+				query := queries.BuildBatchInsertQuery(2)
 				assert.NotEmpty(t, query)
 				assert.Contains(t, query, "$1")
 				assert.Contains(t, query, "$52") // 2 * 26 parameters
 				assert.NotContains(t, query, "$53")
 
 				// Get batch params
-				params := GetBatchParams(entries, false)
+				params, err := GetBatchParams(entries, false)
+				require.NoError(t, err)
 				assert.Len(t, params, 2*queries.SpendLogParamCount)
 
 				// Verify malicious strings are present and unchanged
@@ -606,7 +610,7 @@ func TestLogger_SQLInjectionPrevention_QueryBuilding(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.description, func(t *testing.T) {
-			query := queries.BuildBatchInsertQuery(tc.count, false)
+			query := queries.BuildBatchInsertQuery(tc.count)
 
 			// Verify no user-controlled data in query string
 			assert.NotContains(t, query, "'; DROP")
@@ -689,7 +693,8 @@ func TestLogger_SQLInjectionPrevention_ParameterEscaping(t *testing.T) {
 			assert.Equal(t, testValue, params[17])
 
 			// When used in batch, values should remain unchanged
-			batchParams := GetBatchParams([]*models.SpendLogEntry{entry}, false)
+			batchParams, err := GetBatchParams([]*models.SpendLogEntry{entry}, false)
+			require.NoError(t, err)
 			assert.Equal(t, testValue, batchParams[0])  // RequestID from first entry
 			assert.Equal(t, testValue, batchParams[17]) // Metadata from first entry
 		})
