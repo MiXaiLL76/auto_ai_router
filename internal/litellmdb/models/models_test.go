@@ -179,7 +179,18 @@ func TestTokenInfo_IsBudgetExceeded_SpendEqualToMax(t *testing.T) {
 		MaxBudget: &maxBudget,
 	}
 
-	assert.False(t, token.IsBudgetExceeded())
+	assert.True(t, token.IsBudgetExceeded())
+}
+
+// A max_budget of 0 must allow no spend at all; unlimited is a nil MaxBudget.
+func TestTokenInfo_IsBudgetExceeded_ZeroBudget(t *testing.T) {
+	maxBudget := 0.0
+	token := &TokenInfo{
+		Spend:     0,
+		MaxBudget: &maxBudget,
+	}
+
+	assert.True(t, token.IsBudgetExceeded())
 }
 
 func TestTokenInfo_IsBudgetExceeded_SpendGreaterThanMax(t *testing.T) {
@@ -372,6 +383,19 @@ func TestTokenInfo_checkUserBudget_NilBudget(t *testing.T) {
 	assert.False(t, token.checkUserBudget())
 }
 
+func TestTokenInfo_checkUserBudget_ZeroBudget(t *testing.T) {
+	userBudget := 0.0
+	userSpend := 0.0
+	token := &TokenInfo{
+		UserID:        "user1",
+		TeamID:        "",
+		UserMaxBudget: &userBudget,
+		UserSpend:     &userSpend,
+	}
+
+	assert.True(t, token.checkUserBudget())
+}
+
 func TestTokenInfo_checkTeamBudget_ExceededEmbedded(t *testing.T) {
 	teamBudget := 100.0
 	teamSpend := 150.0
@@ -392,6 +416,17 @@ func TestTokenInfo_checkTeamBudget_NotExceeded(t *testing.T) {
 	}
 
 	assert.False(t, token.checkTeamBudget())
+}
+
+func TestTokenInfo_checkTeamBudget_ZeroBudget(t *testing.T) {
+	teamBudget := 0.0
+	teamSpend := 0.0
+	token := &TokenInfo{
+		TeamMaxBudget: &teamBudget,
+		TeamSpend:     &teamSpend,
+	}
+
+	assert.True(t, token.checkTeamBudget())
 }
 
 func TestTokenInfo_checkTeamMemberBudget_ExceededExternal(t *testing.T) {
@@ -432,12 +467,24 @@ func TestTokenInfo_checkOrganizationBudget_Exceeded(t *testing.T) {
 	assert.True(t, token.checkOrganizationBudget())
 }
 
+// A 0 max_budget is an explicit limit; unlimited is a missing budget row (nil).
 func TestTokenInfo_checkOrganizationBudget_ZeroMaxBudget(t *testing.T) {
 	orgBudget := 0.0
 	orgSpend := 50.0
 	token := &TokenInfo{
 		OrganizationID: "org1",
 		OrgMaxBudget:   &orgBudget,
+		OrgSpend:       &orgSpend,
+	}
+
+	assert.True(t, token.checkOrganizationBudget())
+}
+
+func TestTokenInfo_checkOrganizationBudget_NilMaxBudget(t *testing.T) {
+	orgSpend := 50.0
+	token := &TokenInfo{
+		OrganizationID: "org1",
+		OrgMaxBudget:   nil,
 		OrgSpend:       &orgSpend,
 	}
 
