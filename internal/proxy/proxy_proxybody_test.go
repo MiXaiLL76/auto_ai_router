@@ -23,6 +23,8 @@ func buildProxyBodyTestProxyWithMM(credURL string, mm *models.Manager) *Proxy {
 		WithSingleCredential("upstream", config.ProviderTypeProxy, credURL, "upstream-key").
 		WithMasterKey("master-key")
 	mm.LoadModelsFromConfig(builder.config.Credentials)
+	mm.AddModel("upstream", "gpt-4")
+	mm.AddModel("upstream", "backend-gpt-4o-mini")
 	builder.config.ModelManager = mm
 	return builder.Build()
 }
@@ -33,6 +35,9 @@ func buildProxyBodyTestProxyWithFallbackMM(primaryURL, fallbackURL string, mm *m
 		WithPrimaryAndFallback(primaryURL, fallbackURL).
 		WithMasterKey("master-key")
 	mm.LoadModelsFromConfig(builder.config.Credentials)
+	for _, credential := range builder.config.Credentials {
+		mm.AddModel(credential.Name, "gpt-4")
+	}
 	builder.config.ModelManager = mm
 	return builder.Build()
 }
@@ -116,7 +121,7 @@ func TestGPT52ChatContract_PreservesRoutingResponseAndBillingIdentity(t *testing
 
 	registry := models.NewModelPriceRegistry()
 	publicPrice := &models.ModelPrice{InputCostPerToken: 0.000001575, OutputCostPerToken: 0.0000126}
-	registry.Update(map[string]*models.ModelPrice{
+	registry.ReplaceFilePrices(map[string]*models.ModelPrice{
 		publicModel:       publicPrice,
 		"gpt-chat-latest": {InputCostPerToken: 0.0000045, OutputCostPerToken: 0.000027},
 	})
@@ -360,6 +365,7 @@ func TestProxyBody_OrchestratedRequest_ProxyBodySet(t *testing.T) {
 			WithSingleCredential("c", config.ProviderTypeProxy, "http://nowhere.invalid", "k").
 			WithMasterKey("master-key")
 		mm.LoadModelsFromConfig(builder.config.Credentials)
+		mm.AddModel("c", "gpt-4")
 		builder.config.ModelManager = mm
 		prx := builder.Build()
 

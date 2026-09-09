@@ -265,12 +265,12 @@ func (a *ProxyModelTable) FetchModelsForAIR(ctx context.Context, signingKey stri
 		// Build ModelPrice from CustomPricingLiteLLMParams
 		if price := convertPricingToModelPrice(&model.LlmParams.CustomPricingLiteLLMParams); price != nil {
 			price.LiteLLMProvider = pricingProviderName(model.LlmParams)
-			// Key by the exact DB model name, not its normalized form: MergeDB
+			// Key by the exact DB model name, not its normalized form: the registry
 			// treats each key as an exact override (plus that key's own
 			// lowercased form) specifically so a price for "gpt-5-mini" never
 			// leaks into a distinctly-keyed "openrouter/gpt-5-mini" alias or
 			// vice versa. Normalizing here would collapse both DB rows into
-			// the same map key before MergeDB ever sees them, silently
+			// the same map key before the registry ever sees them, silently
 			// dropping one price — defeating that protection entirely.
 			airPrices[modelName] = price
 		}

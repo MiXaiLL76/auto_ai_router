@@ -18,7 +18,7 @@ import (
 // and returns HTTP 200 with application/json content type.
 func TestServeHTTP_Trace_Route(t *testing.T) {
 	prx := createTestProxy()
-	r := New(prx, nil, testhelpers.NewTestMonitoringConfig("/health", false, ""), testhelpers.NewTestLogger(), nil)
+	r := New(prx, testhelpers.NewTestMonitoringConfig("/health", false, ""), testhelpers.NewTestLogger(), nil)
 
 	req := httptest.NewRequest("GET", "/trace", nil)
 	w := httptest.NewRecorder()
@@ -34,7 +34,7 @@ func TestServeHTTP_Trace_Route(t *testing.T) {
 // ProxyTraceResponse JSON body (not 404 and not empty).
 func TestServeHTTP_Trace_ValidJSON(t *testing.T) {
 	prx := createTestProxy()
-	r := New(prx, nil, testhelpers.NewTestMonitoringConfig("/health", false, ""), testhelpers.NewTestLogger(), nil)
+	r := New(prx, testhelpers.NewTestMonitoringConfig("/health", false, ""), testhelpers.NewTestLogger(), nil)
 
 	req := httptest.NewRequest("GET", "/trace", nil)
 	w := httptest.NewRecorder()
@@ -55,7 +55,7 @@ func TestServeHTTP_Trace_UnverifiableTokenFallsBackToPublic(t *testing.T) {
 		{Name: "team-a", APIKey: "key1", BaseURL: "http://team-a.example", RPM: 100, Scopes: []string{"team-a"}},
 	}, nil)
 	prx.LiteLLMDB = unavailableScopeDB{NoopManager: litellmdb.NewNoopManager()}
-	r := New(prx, nil, testhelpers.NewTestMonitoringConfig("/health", false, ""), testhelpers.NewTestLogger(), nil)
+	r := New(prx, testhelpers.NewTestMonitoringConfig("/health", false, ""), testhelpers.NewTestLogger(), nil)
 
 	req := httptest.NewRequest("GET", "/trace", nil)
 	req.Header.Set("Authorization", "Bearer stale-key")
@@ -74,7 +74,7 @@ func TestServeHTTP_Trace_UnverifiableTokenFallsBackToPublic(t *testing.T) {
 // accepted without error (router must not return 404 or 400).
 func TestServeHTTP_Trace_DepthQueryParam(t *testing.T) {
 	prx := createTestProxy()
-	r := New(prx, nil, testhelpers.NewTestMonitoringConfig("/health", false, ""), testhelpers.NewTestLogger(), nil)
+	r := New(prx, testhelpers.NewTestMonitoringConfig("/health", false, ""), testhelpers.NewTestLogger(), nil)
 
 	for _, depth := range []string{"0", "1", "10"} {
 		t.Run("depth="+depth, func(t *testing.T) {
@@ -93,7 +93,7 @@ func TestServeHTTP_Trace_DepthQueryParam(t *testing.T) {
 // trace handler and returns HTTP 200 with text/html content type.
 func TestServeHTTP_VisualTrace_Route(t *testing.T) {
 	prx := createTestProxy()
-	r := New(prx, nil, testhelpers.NewTestMonitoringConfig("/health", false, ""), testhelpers.NewTestLogger(), nil)
+	r := New(prx, testhelpers.NewTestMonitoringConfig("/health", false, ""), testhelpers.NewTestLogger(), nil)
 
 	req := httptest.NewRequest("GET", "/vtrace", nil)
 	w := httptest.NewRecorder()
@@ -117,7 +117,7 @@ func TestServeHTTP_VisualTrace_Route(t *testing.T) {
 // were not explicitly registered still return 404 (no accidental broad prefix match).
 func TestServeHTTP_Trace_NotFound_OtherPaths(t *testing.T) {
 	prx := createTestProxy()
-	r := New(prx, nil, testhelpers.NewTestMonitoringConfig("/health", false, ""), testhelpers.NewTestLogger(), nil)
+	r := New(prx, testhelpers.NewTestMonitoringConfig("/health", false, ""), testhelpers.NewTestLogger(), nil)
 
 	paths := []string{"/trace/extra", "/vtrace/extra", "/traces"}
 
@@ -138,7 +138,7 @@ func TestServeHTTP_Trace_NotFound_OtherPaths(t *testing.T) {
 // returns a valid JSON trace response (unit-tests the thin router handler).
 func TestHandleTrace_DirectHandler(t *testing.T) {
 	prx := createTestProxy()
-	r := New(prx, nil, testhelpers.NewTestMonitoringConfig("/health", false, ""), testhelpers.NewTestLogger(), nil)
+	r := New(prx, testhelpers.NewTestMonitoringConfig("/health", false, ""), testhelpers.NewTestLogger(), nil)
 
 	req := httptest.NewRequest("GET", "/trace", nil)
 	w := httptest.NewRecorder()
@@ -157,7 +157,7 @@ func TestHandleTrace_DirectHandler(t *testing.T) {
 // returns an HTML response (unit-tests the thin router handler).
 func TestHandleVisualTrace_DirectHandler(t *testing.T) {
 	prx := createTestProxy()
-	r := New(prx, nil, testhelpers.NewTestMonitoringConfig("/health", false, ""), testhelpers.NewTestLogger(), nil)
+	r := New(prx, testhelpers.NewTestMonitoringConfig("/health", false, ""), testhelpers.NewTestLogger(), nil)
 
 	req := httptest.NewRequest("GET", "/vtrace", nil)
 	w := httptest.NewRecorder()

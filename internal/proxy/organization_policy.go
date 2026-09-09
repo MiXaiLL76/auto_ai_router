@@ -1,7 +1,6 @@
 package proxy
 
 import (
-	"fmt"
 	"net/http"
 
 	dbmodels "github.com/mixaill76/auto_ai_router/internal/litellmdb/models"
@@ -44,11 +43,6 @@ func (p *Proxy) effectiveOrganizationPolicy(info *dbmodels.TokenInfo) (*routermo
 	return policy, teamOrg, false
 }
 
-func (p *Proxy) OrganizationPolicyForTokenInfo(info *dbmodels.TokenInfo) (*routermodels.OrganizationPolicy, bool) {
-	policy, _, dangling := p.effectiveOrganizationPolicy(info)
-	return policy, dangling
-}
-
 func (p *Proxy) selectOrganizationPolicy(w http.ResponseWriter, logCtx *RequestLogContext) (*routermodels.OrganizationPolicy, bool) {
 	policy, organizationID, dangling := p.effectiveOrganizationPolicy(logCtx.TokenInfo)
 	if dangling {
@@ -71,87 +65,6 @@ func (p *Proxy) selectOrganizationPolicy(w http.ResponseWriter, logCtx *RequestL
 		logCtx.TokenInfo.OrganizationID = organizationID
 	}
 	return policy, true
-}
-
-func (p *Proxy) admitOrganizationModel(
-	w http.ResponseWriter,
-	r *http.Request,
-	body []byte,
-	publicModelID string,
-	logCtx *RequestLogContext,
-) ([]byte, string, string, bool) {
-	policy, ok := p.selectOrganizationPolicy(w, logCtx)
-	if !ok {
-		return nil, "", "", false
-	}
-	if policy == nil {
-		return body, "", "", true
-	}
-
-	resolution, err := p.modelManager.ResolveOrganizationModelScoped(policy, publicModelID, logCtx.Scope)
-	if err != nil {
-		logCtx.Status = "failure"
-		logCtx.HTTPStatus = http.StatusNotFound
-		logCtx.ErrorMsg = fmt.Sprintf("Model %s not found", publicModelID)
-		logCtx.Logged = true
-		WriteErrorNotFound(w, logCtx.ErrorMsg)
-		return nil, "", "", false
-	}
-
-	candidates := []string{resolution.PublicModelID, resolution.CanonicalModelID, resolution.ModelID}
-	if !p.isAnyModelAllowedForToken(logCtx.TokenInfo, candidates) {
-		logCtx.Status = "failure"
-		logCtx.HTTPStatus = http.StatusForbidden
-		logCtx.ErrorMsg = "Model not allowed"
-		WriteErrorForbidden(w, "Model not allowed")
-		return nil, "", "", false
-	}
-	if resolution.ModelPrice == nil {
-		logCtx.Status = "failure"
-		logCtx.HTTPStatus = http.StatusServiceUnavailable
-		logCtx.ErrorMsg = "model pricing unavailable"
-		logCtx.Logged = true
-		WriteErrorServiceUnavailable(w, "Model pricing unavailable")
-		return nil, "", "", false
-	}
-
-	// The public → canonical → model → real chain always lands on RealModelID
-	// (each replacement overwrites the model field unconditionally), so rewrite
-	// the body once instead of parsing and re-serializing it up to three times.
-	if resolution.RealModelID != publicModelID {
-		body = replaceModelInBodyPreserveContentType(body, r.Header.Get("Content-Type"), publicModelID, resolution.RealModelID)
-	}
-
-	logCtx.PublicModelID = resolution.PublicModelID
-	logCtx.CanonicalModelID = resolution.CanonicalModelID
-	logCtx.ModelID = resolution.ModelID
-	logCtx.RealModelID = resolution.RealModelID
-	logCtx.PriceModelID = resolution.PriceModelID
-	logCtx.ModelPrice = resolution.ModelPrice
-	logCtx.billingPriceResolved = true
-	logCtx.billingPriceModelID = resolution.PriceModelID
-	logCtx.billingPrice = resolution.ModelPrice
-
-	return body, resolution.ModelID, resolution.RealModelID, true
-}
-
-func (p *Proxy) IsOrganizationModelAllowedForToken(
-	tokenInfo *dbmodels.TokenInfo,
-	policy *routermodels.OrganizationPolicy,
-	publicModelID string,
-) bool {
-	if p == nil || p.modelManager == nil || policy == nil {
-		return false
-	}
-	resolution, err := p.modelManager.ResolveOrganizationModel(policy, publicModelID)
-	if err != nil {
-		return false
-	}
-	return p.isAnyModelAllowedForToken(tokenInfo, []string{
-		resolution.PublicModelID,
-		resolution.CanonicalModelID,
-		resolution.ModelID,
-	})
 }
 
 func (p *Proxy) resolveRetryBillingPrice(

@@ -27,7 +27,7 @@ func testPolicyManager() *Manager {
 		{Name: "route-b", Credential: credential.Name},
 	})
 	manager.SetModelAliases(map[string]string{"public/a": "route-a"})
-	manager.SetPublicModelAliases(map[string]string{"alias/a": "public/a"})
+	manager.SetAcceptedModelAliases(map[string]string{"alias/a": "public/a"})
 	manager.LoadModelsFromConfig([]config.CredentialConfig{credential})
 	manager.SetCredentials([]config.CredentialConfig{credential})
 	return manager
@@ -111,7 +111,7 @@ func TestLoadOrganizationPolicies_FreePriceAndScopedCatalog(t *testing.T) {
 
 	catalog := manager.GetAllModelsScopedForOrganization(scope.PublicContext(), policy)
 
-	assert.Equal(t, []string{"org/model", "public/a"}, responseModelIDs(catalog))
+	assert.Equal(t, []string{"alias/a", "org/model", "public/a", "route-a", "route-b"}, responseModelIDs(catalog))
 	resolution, err := manager.ResolveOrganizationModel(policy, "org/model")
 	require.NoError(t, err)
 	assert.Equal(t, "org/model", resolution.PublicModelID)

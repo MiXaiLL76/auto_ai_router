@@ -301,7 +301,7 @@ func main() {
 	}
 
 	// ==================== HTTP Server Setup ====================
-	rtr := router.New(prx, modelManager, &cfg.Monitoring, log, cfg)
+	rtr := router.New(prx, &cfg.Monitoring, log, cfg)
 	mux := http.NewServeMux()
 	mux.Handle("/", rtr)
 
@@ -729,21 +729,16 @@ func initializeModelManager(
 	modelManager := models.New(log, cfg.Server.DefaultModelsRPM, cfg.Models)
 	modelManager.LoadModelsFromConfig(cfg.Credentials)
 	modelManager.SetCredentials(cfg.Credentials)
-	if len(cfg.ModelAlias) > 0 {
-		modelManager.SetModelAliases(cfg.ModelAlias)
-	}
+	modelManager.SetModelAliases(cfg.ModelAlias)
+	modelManager.SetAcceptedModelAliases(cfg.AcceptedModelAliases)
+
+	// XXX(mmskv): this isn't 'legacy' if it's actually used
 	// nil preserves legacy discovery; an explicit empty list denies all client IDs.
 	if cfg.ClientModelIDs != nil {
 		if len(cfg.ClientModelIDs) == 0 {
 			log.Warn("client_model_ids is explicitly empty: client model surface is deny-all")
 		}
 		modelManager.SetClientModelIDs(cfg.ClientModelIDs)
-	}
-	if len(cfg.PublicModelAlias) > 0 {
-		modelManager.SetPublicModelAliases(cfg.PublicModelAlias)
-	}
-	if len(cfg.AcceptedModelAlias) > 0 {
-		modelManager.SetAcceptedModelAliases(cfg.AcceptedModelAlias)
 	}
 
 	// Initialize rate limiters for each model
@@ -876,11 +871,7 @@ func syncDBModelTable(
 		}
 	}
 
-	// Merge DB prices into the price registry (does not replace file-loaded prices for
-	// models that are absent from the DB).
-	if len(dbPrices) > 0 {
-		priceRegistry.MergeDB(dbPrices)
-	}
+	priceRegistry.ReplaceDBPrices(dbPrices)
 
 	log.Debug("DB model table sync completed",
 		"credentials", len(dbCreds),
@@ -944,9 +935,7 @@ func applyInitialDBModelTable(
 		}
 	}
 
-	if len(dbPrices) > 0 {
-		priceRegistry.MergeDB(dbPrices)
-	}
+	priceRegistry.ReplaceDBPrices(dbPrices)
 
 	log.Info("Applied initial DB model table",
 		"credentials", len(dbCreds),
@@ -1066,7 +1055,7 @@ func loadAndUpdateModelPrices(
 	log *slog.Logger,
 	context string, // "startup" or "update" for logging
 ) error {
-	prices, err := models.LoadModelPrices(link)
+	filePrices, err := models.LoadModelPrices(link)
 	if err != nil {
 		logMessage := "Failed to load model prices"
 		if context != "" {
@@ -1075,11 +1064,11 @@ func loadAndUpdateModelPrices(
 		log.Warn(logMessage, "error", err)
 		return err
 	}
-	registry.Update(prices)
+	registry.ReplaceFilePrices(filePrices)
 	if context == "startup" {
-		log.Info("Model prices loaded on startup", "count", len(prices), "link", link)
+		log.Info("Model prices loaded on startup", "count", len(filePrices), "link", link)
 	} else {
-		log.Debug("Model prices updated", "count", len(prices))
+		log.Debug("Model prices updated", "count", len(filePrices))
 	}
 	return nil
 }

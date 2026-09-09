@@ -37,9 +37,11 @@ func TestNew_WithStaticModels(t *testing.T) {
 	}
 
 	manager := New(logger, 50, staticModels)
+	credentials := []config.CredentialConfig{{Name: "openai", Type: config.ProviderTypeOpenAI}}
+	manager.LoadModelsFromConfig(credentials)
+	manager.SetCredentials(credentials)
 
 	assert.NotNil(t, manager)
-	assert.True(t, manager.IsEnabled())
 
 	// Check that static models are loaded
 	models := manager.GetAllModels()
@@ -54,6 +56,9 @@ func TestGetAllModels_WithStaticModels(t *testing.T) {
 		{Name: "gpt-3.5-turbo", RPM: 200},
 	}
 	manager := New(logger, 100, staticModels)
+	credentials := []config.CredentialConfig{{Name: "openai", Type: config.ProviderTypeOpenAI}}
+	manager.LoadModelsFromConfig(credentials)
+	manager.SetCredentials(credentials)
 
 	result := manager.GetAllModels()
 
@@ -106,7 +111,6 @@ func TestGetAllModelsScoped_ProjectsExplicitClientSurfaceAfterVisibility(t *test
 
 	visibility := scope.NewContext([]string{"team-a"}, nil)
 	assert.Equal(t, []string{"public/a"}, responseModelIDs(manager.GetAllModelsScoped(visibility)))
-	assert.Equal(t, []string{"public/a"}, responseModelIDs(manager.GetAllModelsWithAccessGroupsScoped(visibility)))
 }
 
 func TestClientCatalogActivatesPublicAliasThroughCanonicalRouteAlias(t *testing.T) {
@@ -118,7 +122,7 @@ func TestClientCatalogActivatesPublicAliasThroughCanonicalRouteAlias(t *testing.
 	}})
 	manager.SetModelAliases(map[string]string{"openai/gpt-4.1": "gpt-4.1"})
 	manager.SetClientModelIDs([]string{"openai/gpt-4.1"})
-	manager.SetPublicModelAliases(map[string]string{"gpt-4.1": "openai/gpt-4.1"})
+	manager.SetAcceptedModelAliases(map[string]string{"gpt-4.1": "openai/gpt-4.1"})
 	manager.LoadModelsFromConfig([]config.CredentialConfig{credential})
 
 	assert.Equal(t, []string{"gpt-4.1"}, responseModelIDs(manager.GetAllModels()))
@@ -126,7 +130,7 @@ func TestClientCatalogActivatesPublicAliasThroughCanonicalRouteAlias(t *testing.
 	assert.True(t, manager.IsModelIDAllowedByScope("gpt-4.1", []string{"openai/gpt-4.1"}))
 }
 
-func TestAcceptedModelAliasRoutesWithoutDiscovery(t *testing.T) {
+func TestAcceptedModelAliasIsRoutableAndDiscoverable(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
 	credential := config.CredentialConfig{Name: "openai", Type: config.ProviderTypeOpenAI}
 	manager := New(logger, 100, []config.ModelRPMConfig{{
@@ -139,40 +143,11 @@ func TestAcceptedModelAliasRoutesWithoutDiscovery(t *testing.T) {
 	manager.LoadModelsFromConfig([]config.CredentialConfig{credential})
 
 	assert.True(t, manager.IsClientModelIDRoutable("legacy-gpt-4.1"))
-	canonical, alias, err := manager.ResolvePublicModelAlias("legacy-gpt-4.1")
+	canonical, alias, err := manager.ResolveAcceptedModelAlias("legacy-gpt-4.1")
 	assert.NoError(t, err)
 	assert.True(t, alias)
 	assert.Equal(t, "openai/gpt-4.1", canonical)
-	assert.Equal(t, []string{"openai/gpt-4.1"}, responseModelIDs(manager.GetClientModels()))
-}
-
-func TestGetAllModelsWithAccessGroupsScoped_FiltersAliasesByScope(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-	manager := New(logger, 100, []config.ModelRPMConfig{
-		{Name: "team-a-model", Credential: "team-a-cred"},
-		{Name: "team-b-model", Credential: "team-b-cred"},
-	})
-	credentials := []config.CredentialConfig{
-		{Name: "team-a-cred", Type: config.ProviderTypeOpenAI, Scopes: []string{"team-a"}},
-		{Name: "team-b-cred", Type: config.ProviderTypeOpenAI, Scopes: []string{"team-b"}},
-	}
-	manager.LoadModelsFromConfig(credentials)
-	manager.SetCredentials(credentials)
-	manager.SetModelAliases(map[string]string{
-		"team-a-alias": "team-a-model",
-		"team-b-alias": "team-b-model",
-	})
-	manager.SetPublicModelAliases(map[string]string{
-		"team-a-public": "team-a-model",
-		"team-b-public": "team-b-model",
-	})
-
-	visibility := scope.NewContext([]string{"team-a"}, nil)
-	ids := responseModelIDs(manager.GetAllModelsWithAccessGroupsScoped(visibility))
-
-	// Aliases inherit the scope visibility of their target: a team-a key must
-	// not discover team-b models through either alias mechanism.
-	assert.Equal(t, []string{"openai/team-a-model", "team-a-alias", "team-a-public"}, ids)
+	assert.Equal(t, []string{"legacy-gpt-4.1", "openai/gpt-4.1"}, responseModelIDs(manager.GetClientModels()))
 }
 
 func TestSetClientModelIDsInvalidatesScopedCatalogCache(t *testing.T) {
@@ -401,6 +376,9 @@ func TestGetAllModelsPublishesConfiguredAliasesAlongsideTargetsInDeterministicOr
 		"openai/a-public-secondary": "a-backend",
 		"orphan/alias":              "missing-backend",
 	})
+	credentials := []config.CredentialConfig{{Name: "openai", Type: config.ProviderTypeOpenAI}}
+	manager.LoadModelsFromConfig(credentials)
+	manager.SetCredentials(credentials)
 
 	first := manager.GetClientModels()
 	second := manager.GetClientModels()
@@ -441,6 +419,9 @@ func TestGetAllModelsIncludesConfiguredMigrationShortAliasesOnly(t *testing.T) {
 		"chatgpt-4o-latest":             "openai/gpt-4o",
 		"must-not-leak-orphan":          "unconfigured/backend-model",
 	})
+	credentials := []config.CredentialConfig{{Name: "openai", Type: config.ProviderTypeOpenAI}}
+	manager.LoadModelsFromConfig(credentials)
+	manager.SetCredentials(credentials)
 
 	response := manager.GetClientModels()
 	ids := make([]string, 0, len(response.Data))
@@ -591,7 +572,7 @@ func TestModelScopeWildcardMatchingIsProviderAwareAndTreatsRegexSyntaxLiterally(
 		"provider-qualified wildcard matching must fail closed for ambiguous short models")
 }
 
-func TestPublicModelAliasInheritsCanonicalPermissionAcrossHierarchy(t *testing.T) {
+func TestAcceptedModelAliasInheritsCanonicalPermissionAcrossHierarchy(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
 	credential := config.CredentialConfig{Name: "openai-provider", Type: config.ProviderTypeOpenAI}
 	manager := New(logger, 100, []config.ModelRPMConfig{{
@@ -603,7 +584,7 @@ func TestPublicModelAliasInheritsCanonicalPermissionAcrossHierarchy(t *testing.T
 	manager.SetModelAliases(map[string]string{
 		"openai/gpt-4o-mini": "gpt-4o-mini",
 	})
-	manager.SetPublicModelAliases(map[string]string{
+	manager.SetAcceptedModelAliases(map[string]string{
 		"gpt-4o-mini": "openai/gpt-4o-mini",
 	})
 	manager.UpdateDBModels([]config.ModelRPMConfig{{
@@ -648,7 +629,7 @@ func TestGetAllModelsExcludesModelsWithoutCredentialMapping(t *testing.T) {
 	assert.NotContains(t, ids, "public/ghost")
 }
 
-func TestActivePublicModelAliasesUsesRoutabilityAsTheOneHopTerminalBoundary(t *testing.T) {
+func TestActiveRoutableModelAliasesUsesOneHopTerminalBoundary(t *testing.T) {
 	availableTargets := map[string]struct{}{
 		"openai/gpt-4o": {},
 		"cycle/a":       {},
@@ -665,7 +646,7 @@ func TestActivePublicModelAliasesUsesRoutabilityAsTheOneHopTerminalBoundary(t *t
 		"cycle/b":                  "cycle/a",
 	}
 
-	active := activePublicModelAliases(availableTargets, aliases)
+	active := activeRoutableModelAliases(availableTargets, aliases)
 
 	assert.Equal(t, map[string]string{
 		"chatgpt-4o-latest":        "openai/gpt-4o",
@@ -677,53 +658,6 @@ func TestActivePublicModelAliasesUsesRoutabilityAsTheOneHopTerminalBoundary(t *t
 	assert.NotContains(t, active, "orphan/public")
 	assert.NotContains(t, active, "cycle/a")
 	assert.NotContains(t, active, "cycle/b")
-}
-
-func TestGetAllModelsWithAccessGroupsPreservesQualifiedPublicModelID(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-	manager := New(logger, 100, []config.ModelRPMConfig{{
-		Name:       "openai/gpt-4o",
-		Model:      "gpt-4o",
-		Credential: "openai-provider",
-	}})
-	manager.SetModelAliases(map[string]string{
-		"chatgpt-4o-latest": "openai/gpt-4o",
-		"openai/gpt-4o":     "gpt-4o",
-	})
-	credentials := []config.CredentialConfig{{Name: "openai-provider", Type: config.ProviderTypeOpenAI}}
-	manager.SetCredentials(credentials)
-	manager.LoadModelsFromConfig(credentials)
-
-	response := manager.GetAllModelsWithAccessGroups()
-	ids := make([]string, 0, len(response.Data))
-	for _, model := range response.Data {
-		ids = append(ids, model.ID)
-	}
-
-	assert.Equal(t, []string{"chatgpt-4o-latest", "openai/gpt-4o"}, ids)
-	assert.NotContains(t, ids, "openai/openai/gpt-4o")
-}
-
-func TestGetAllModelsWithAccessGroupsDeduplicatesAliasMatchingGroupedID(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-	manager := New(logger, 100, []config.ModelRPMConfig{
-		{Name: "gpt-4o-mini", Credential: "openai-provider", RPM: 100},
-		{Name: "standalone", Credential: "openai-provider", RPM: 100},
-	})
-	manager.SetModelAliases(map[string]string{
-		"openai/gpt-4o-mini": "gpt-4o-mini",
-	})
-	credentials := []config.CredentialConfig{{Name: "openai-provider", Type: config.ProviderTypeOpenAI}}
-	manager.SetCredentials(credentials)
-	manager.LoadModelsFromConfig(credentials)
-
-	response := manager.GetAllModelsWithAccessGroups()
-	ids := make([]string, 0, len(response.Data))
-	for _, model := range response.Data {
-		ids = append(ids, model.ID)
-	}
-
-	assert.Equal(t, []string{"openai/gpt-4o-mini", "openai/standalone"}, ids)
 }
 
 func TestGetCredentialsForModel(t *testing.T) {
@@ -815,31 +749,15 @@ func TestHasModel(t *testing.T) {
 	// Test non-existing credential with configured model (should return false - model exists but not for this cred)
 	assert.False(t, manager.HasModel("non-existing", "gpt-4"))
 
-	// Test non-existing credential with non-configured model (fallback - allow)
-	assert.True(t, manager.HasModel("non-existing", "some-unknown-model"))
+	assert.False(t, manager.HasModel("non-existing", "some-unknown-model"))
 }
 
 func TestHasModel_NoStaticModels(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
 	manager := New(logger, 100, []config.ModelRPMConfig{})
 
-	// Should return true when no models configured (allow all)
-	assert.True(t, manager.HasModel("test1", "gpt-4"))
-	assert.True(t, manager.HasModel("test1", "any-model"))
-}
-
-func TestIsEnabled(t *testing.T) {
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
-
-	// Test 1: No static models -> IsEnabled=false
-	manager1 := New(logger, 100, []config.ModelRPMConfig{})
-	assert.False(t, manager1.IsEnabled(), "Should be disabled when no static models configured")
-
-	// Test 2: With static models -> IsEnabled=true
-	manager2 := New(logger, 100, []config.ModelRPMConfig{
-		{Name: "gpt-4", RPM: 100},
-	})
-	assert.True(t, manager2.IsEnabled(), "Should be enabled when static models are configured")
+	assert.False(t, manager.HasModel("test1", "gpt-4"))
+	assert.False(t, manager.HasModel("test1", "any-model"))
 }
 
 func TestGetModelRPM(t *testing.T) {
@@ -1031,10 +949,9 @@ func TestGetModelsForCredential(t *testing.T) {
 	assert.True(t, modelIDs2["claude-3"], "test2 should have claude-3")
 	assert.True(t, modelIDs2["gemini-pro"], "test2 should have gemini-pro (global)")
 
-	// Test non-existent credential - should still get global models
+	// Unknown credentials are outside the closed topology.
 	models3 := manager.GetModelsForCredential("non-existent")
-	assert.Equal(t, 1, len(models3), "non-existent credential should have 1 global model")
-	assert.Equal(t, "gemini-pro", models3[0].ID, "should have gemini-pro (global)")
+	assert.Empty(t, models3)
 }
 
 func TestGetModelsForCredential_NoStaticModels(t *testing.T) {
@@ -1099,6 +1016,9 @@ func TestConcurrentGetAllModels(t *testing.T) {
 		{Name: "gpt-3.5-turbo", RPM: 200},
 	}
 	manager := New(logger, 50, staticModels)
+	credentials := []config.CredentialConfig{{Name: "openai", Type: config.ProviderTypeOpenAI}}
+	manager.LoadModelsFromConfig(credentials)
+	manager.SetCredentials(credentials)
 
 	// Run concurrent reads
 	done := make(chan bool, 10)
@@ -1222,6 +1142,9 @@ func TestGetAllModels_CacheExpiryRace(t *testing.T) {
 		{Name: "gpt-3.5-turbo", RPM: 200},
 	}
 	manager := New(logger, 50, staticModels)
+	credentials := []config.CredentialConfig{{Name: "openai", Type: config.ProviderTypeOpenAI}}
+	manager.LoadModelsFromConfig(credentials)
+	manager.SetCredentials(credentials)
 
 	// Run concurrent reads to populate cache
 	done := make(chan bool, 100)
@@ -1340,7 +1263,12 @@ func TestNewModelPriceRegistry(t *testing.T) {
 	assert.True(t, registry.LastUpdate().IsZero(), "LastUpdate should be zero for a new registry")
 }
 
-func TestModelPriceRegistry_UpdateAndGetPrice(t *testing.T) {
+func modelPriceForTest(registry *ModelPriceRegistry, modelID string) *ModelPrice {
+	_, price := registry.GetPriceAny(modelID)
+	return price
+}
+
+func TestModelPriceRegistry_ReplaceFilePricesAndGetPriceAny(t *testing.T) {
 	registry := NewModelPriceRegistry()
 
 	prices := map[string]*ModelPrice{
@@ -1359,7 +1287,7 @@ func TestModelPriceRegistry_UpdateAndGetPrice(t *testing.T) {
 		},
 	}
 
-	registry.Update(prices)
+	registry.ReplaceFilePrices(prices)
 
 	// Verify Count matches
 	assert.Equal(t, 3, registry.Count())
@@ -1368,23 +1296,23 @@ func TestModelPriceRegistry_UpdateAndGetPrice(t *testing.T) {
 	assert.False(t, registry.LastUpdate().IsZero(), "LastUpdate should not be zero after Update")
 	assert.WithinDuration(t, time.Now().UTC(), registry.LastUpdate(), 5*time.Second)
 
-	// Verify GetPrice returns correct values
-	gpt4Price := registry.GetPrice("gpt-4")
+	// Verify GetPriceAny returns correct values.
+	gpt4Price := modelPriceForTest(registry, "gpt-4")
 	assert.NotNil(t, gpt4Price)
 	assert.Equal(t, 0.00003, gpt4Price.InputCostPerToken)
 	assert.Equal(t, 0.00006, gpt4Price.OutputCostPerToken)
 
-	claudePrice := registry.GetPrice("claude-3-opus")
+	claudePrice := modelPriceForTest(registry, "claude-3-opus")
 	assert.NotNil(t, claudePrice)
 	assert.Equal(t, 0.000015, claudePrice.InputCostPerToken)
 	assert.Equal(t, 0.000075, claudePrice.OutputCostPerToken)
 
-	geminiPrice := registry.GetPrice("gemini-1.5-pro")
+	geminiPrice := modelPriceForTest(registry, "gemini-1.5-pro")
 	assert.NotNil(t, geminiPrice)
 	assert.Equal(t, 0.000014, geminiPrice.OutputCostPerReasoningToken)
 }
 
-func TestModelPriceRegistry_MergeDB(t *testing.T) {
+func TestModelPriceRegistry_ReplaceDBPrices(t *testing.T) {
 	registry := NewModelPriceRegistry()
 
 	initial := map[string]*ModelPrice{
@@ -1397,7 +1325,7 @@ func TestModelPriceRegistry_MergeDB(t *testing.T) {
 			OutputCostPerToken: 0.000075,
 		},
 	}
-	registry.Update(initial)
+	registry.ReplaceFilePrices(initial)
 	prevUpdate := registry.LastUpdate()
 
 	dbPrices := map[string]*ModelPrice{
@@ -1410,70 +1338,92 @@ func TestModelPriceRegistry_MergeDB(t *testing.T) {
 			OutputCostPerToken: 0.0000105,
 		},
 	}
-	registry.MergeDB(dbPrices)
+	registry.ReplaceDBPrices(dbPrices)
 
 	assert.Equal(t, 3, registry.Count())
 	assert.WithinDuration(t, time.Now().UTC(), registry.LastUpdate(), 5*time.Second)
 	assert.True(t, registry.LastUpdate().After(prevUpdate) || registry.LastUpdate().Equal(prevUpdate))
 
 	// DB prices should override existing entries.
-	updated := registry.GetPrice("gpt-4")
+	updated := modelPriceForTest(registry, "gpt-4")
 	assert.NotNil(t, updated)
 	assert.Equal(t, 0.000031, updated.InputCostPerToken)
 	assert.Equal(t, 0.000061, updated.OutputCostPerToken)
 
 	// Existing non-DB entries should remain.
-	claude := registry.GetPrice("claude-3-opus")
+	claude := modelPriceForTest(registry, "claude-3-opus")
 	assert.NotNil(t, claude)
 	assert.Equal(t, 0.000015, claude.InputCostPerToken)
 
 	// New DB entries should be added.
-	gemini := registry.GetPrice("gemini-1.5-pro")
+	gemini := modelPriceForTest(registry, "gemini-1.5-pro")
 	assert.NotNil(t, gemini)
 }
 
-// TestModelPriceRegistry_MergeDB_ScopedToExactKey guards against an earlier
+// TestModelPriceRegistry_ReplaceDBPricesScopedToExactKey guards against an earlier
 // version of this fix that swept the whole registry for any key whose
 // NormalizeModelName matched the DB override's key, silently clobbering
 // unrelated aliases that happen to share a normalized form. A DB override
 // for the plain model must never leak into an independently, deliberately
 // priced alias like "yandex/gpt-5.1" (see llmarena/services default.libsonnet)
 // unless the DB record names that alias's own exact key.
-func TestModelPriceRegistry_MergeDB_ScopedToExactKey(t *testing.T) {
+func TestModelPriceRegistry_ReplaceDBPricesScopedToExactKey(t *testing.T) {
 	registry := NewModelPriceRegistry()
 
-	registry.Update(map[string]*ModelPrice{
+	registry.ReplaceFilePrices(map[string]*ModelPrice{
 		"gpt-5.1":        {InputCostPerToken: 1.625e-06},
 		"yandex/gpt-5.1": {InputCostPerToken: 1.22353e-05},
 	})
 
-	registry.MergeDB(map[string]*ModelPrice{
+	registry.ReplaceDBPrices(map[string]*ModelPrice{
 		"gpt-5.1": {InputCostPerToken: 9.99e-06},
 	})
 
-	plain := registry.GetPrice("gpt-5.1")
+	plain := modelPriceForTest(registry, "gpt-5.1")
 	require.NotNil(t, plain)
 	assert.Equal(t, 9.99e-06, plain.InputCostPerToken, "plain gpt-5.1 should pick up the DB override")
 
-	yandex := registry.GetPrice("yandex/gpt-5.1")
+	yandex := modelPriceForTest(registry, "yandex/gpt-5.1")
 	require.NotNil(t, yandex)
 	assert.Equal(t, 1.22353e-05, yandex.InputCostPerToken, "yandex/gpt-5.1 must be untouched — the DB override didn't name it")
 }
 
-func TestModelPriceRegistry_GetPrice_NotFound(t *testing.T) {
+func TestModelPriceRegistryReplacesSourcesIndependently(t *testing.T) {
+	registry := NewModelPriceRegistry()
+	fileA := &ModelPrice{InputCostPerToken: 1}
+	fileB := &ModelPrice{InputCostPerToken: 2}
+	dbA := &ModelPrice{InputCostPerToken: 3}
+	fileC := &ModelPrice{InputCostPerToken: 4}
+
+	registry.ReplaceFilePrices(map[string]*ModelPrice{"a": fileA, "b": fileB})
+	registry.ReplaceDBPrices(map[string]*ModelPrice{"a": dbA})
+	assert.Same(t, dbA, modelPriceForTest(registry, "a"))
+	assert.Same(t, fileB, modelPriceForTest(registry, "b"))
+
+	registry.ReplaceFilePrices(map[string]*ModelPrice{"c": fileC})
+	assert.Same(t, dbA, modelPriceForTest(registry, "a"), "a file refresh must preserve DB overrides")
+	assert.Nil(t, modelPriceForTest(registry, "b"), "a file replacement must remove stale file rows")
+	assert.Same(t, fileC, modelPriceForTest(registry, "c"))
+
+	registry.ReplaceDBPrices(nil)
+	assert.Nil(t, modelPriceForTest(registry, "a"), "an empty successful DB snapshot must remove stale DB rows")
+	assert.Same(t, fileC, modelPriceForTest(registry, "c"))
+}
+
+func TestModelPriceRegistry_GetPriceAny_NotFound(t *testing.T) {
 	registry := NewModelPriceRegistry()
 
 	// Empty registry
-	result := registry.GetPrice("nonexistent-model")
+	result := modelPriceForTest(registry, "nonexistent-model")
 	assert.Nil(t, result)
 
 	// After adding some prices, lookup a model that doesn't exist
-	registry.Update(map[string]*ModelPrice{
+	registry.ReplaceFilePrices(map[string]*ModelPrice{
 		"gpt-4": {InputCostPerToken: 0.00003},
 	})
 
-	result = registry.GetPrice("claude-3-opus")
-	assert.Nil(t, result, "GetPrice should return nil for a model not in the registry")
+	result = modelPriceForTest(registry, "claude-3-opus")
+	assert.Nil(t, result, "GetPriceAny should return nil for a model not in the registry")
 }
 
 func TestUpdateDBModels_PreservesStaticAndMapsDB(t *testing.T) {

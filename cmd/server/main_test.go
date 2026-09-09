@@ -81,7 +81,7 @@ func TestInitializeModelManagerKeepsBackendRateLimitsBehindClientSurface(t *test
 	}
 }
 
-func TestInitializeModelManagerRegistersAcceptedModelAliases(t *testing.T) {
+func TestInitializeModelManagerConfiguresAcceptedClientAliases(t *testing.T) {
 	cfg := &config.Config{
 		Server: config.ServerConfig{DefaultModelsRPM: -1},
 		Credentials: []config.CredentialConfig{{
@@ -90,23 +90,24 @@ func TestInitializeModelManagerRegistersAcceptedModelAliases(t *testing.T) {
 		Models: []config.ModelRPMConfig{{
 			Name: "backend-chat", Credential: "provider", RPM: 7, TPM: 70,
 		}},
-		ModelAlias:         map[string]string{"public/chat": "backend-chat"},
-		ClientModelIDs:     []string{"public/chat"},
-		AcceptedModelAlias: map[string]string{"legacy-chat": "public/chat"},
+		ModelAlias:           map[string]string{"public/chat": "backend-chat"},
+		ClientModelIDs:       []string{"public/chat"},
+		AcceptedModelAliases: map[string]string{"legacy-chat": "public/chat"},
 	}
 	logger := slog.New(slog.DiscardHandler)
 	_, limiter, bal, _ := initializeBalancer(cfg, logger, nil, nil)
 	manager := initializeModelManager(logger, cfg, limiter, bal)
 
 	assert.True(t, manager.IsClientModelIDRoutable("legacy-chat"))
-	canonical, alias, err := manager.ResolvePublicModelAlias("legacy-chat")
+	canonical, alias, err := manager.ResolveAcceptedModelAlias("legacy-chat")
 	require.NoError(t, err)
 	assert.True(t, alias)
 	assert.Equal(t, "public/chat", canonical)
 
 	models := manager.GetClientModels()
-	require.Len(t, models.Data, 1)
-	assert.Equal(t, "public/chat", models.Data[0].ID)
+	require.Len(t, models.Data, 2)
+	assert.Equal(t, "legacy-chat", models.Data[0].ID)
+	assert.Equal(t, "public/chat", models.Data[1].ID)
 }
 
 // TestInitializeBalancerReturnsHybridBackendForCallerToClose is a regression

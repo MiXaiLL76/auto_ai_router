@@ -10,7 +10,7 @@ import "github.com/mixaill76/auto_ai_router/internal/models"
 // price wins.
 //
 // The underlying GetPriceAny tries each candidate in full (exact raw-lowercase
-// key, then normalised/prefix-stripped key) before moving to the next
+// key, then normalised/provider-prefix-stripped key) before moving to the next
 // candidate, so a higher-priority candidate's normalised match always wins
 // over a lower-priority candidate's raw match — e.g. a provider-prefixed
 // publicModelID whose normalised form collides with a cheaper sibling (e.g.

@@ -222,6 +222,10 @@ func TestRecordProviderResponseBansOnlyBedrockCredentialModelPair(t *testing.T) 
 		{Name: "bedrock-b", Type: config.ProviderTypeBedrock, BaseURL: "https://bedrock-b.example", APIKey: "b", RPM: 100},
 	}
 	proxy := NewTestProxyBuilder().WithCredentials(credentials...).Build()
+	for i := range credentials {
+		proxy.modelManager.AddModel(credentials[i].Name, "claude-opus")
+		proxy.modelManager.AddModel(credentials[i].Name, "claude-sonnet")
+	}
 	body := []byte(`{"__type":"ThrottlingException","message":"Too many tokens per day"}`)
 
 	matched := proxy.recordProviderResponse(context.Background(), &credentials[0], "claude-opus", "anthropic.claude-opus-v1:0", http.StatusTooManyRequests,

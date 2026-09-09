@@ -55,7 +55,7 @@ func TestEstimateCompletionTokensUsesRequestLimitThenSafeDefault(t *testing.T) {
 func TestEstimateRequestCostUsesPublicModelPriceBeforeRealModelPrice(t *testing.T) {
 	prx := NewTestProxyBuilder().Build()
 	registry := routermodels.NewModelPriceRegistry()
-	registry.Update(map[string]*routermodels.ModelPrice{
+	registry.ReplaceFilePrices(map[string]*routermodels.ModelPrice{
 		"gpt-5.2-chat": {
 			OutputCostPerToken: 0.01,
 		},
@@ -85,7 +85,7 @@ func TestEstimateRequestCostUsesPublicModelPriceBeforeRealModelPrice(t *testing.
 func TestEstimateRequestCostPrefersPublicModelPriceOverDistinctModelIDPrice(t *testing.T) {
 	prx := NewTestProxyBuilder().Build()
 	registry := routermodels.NewModelPriceRegistry()
-	registry.Update(map[string]*routermodels.ModelPrice{
+	registry.ReplaceFilePrices(map[string]*routermodels.ModelPrice{
 		"gpt-5.2-chat-alias": { // PublicModelID: client-facing alias
 			OutputCostPerToken: 0.01,
 		},
@@ -116,7 +116,7 @@ func TestEstimateRequestCostPrefersPublicModelPriceOverDistinctModelIDPrice(t *t
 func TestResolveBillingPriceCachesAcrossCalls(t *testing.T) {
 	prx := NewTestProxyBuilder().Build()
 	registry := routermodels.NewModelPriceRegistry()
-	registry.Update(map[string]*routermodels.ModelPrice{
+	registry.ReplaceFilePrices(map[string]*routermodels.ModelPrice{
 		"gpt-5.2-chat": {OutputCostPerToken: 0.01},
 	})
 	prx.priceRegistry = registry
@@ -128,7 +128,7 @@ func TestResolveBillingPriceCachesAcrossCalls(t *testing.T) {
 
 	// Simulate a background price-registry reload landing between the two
 	// call sites (estimateRequestCost, then logSpendToLiteLLMDB).
-	registry.Update(map[string]*routermodels.ModelPrice{
+	registry.ReplaceFilePrices(map[string]*routermodels.ModelPrice{
 		"gpt-chat-latest": {OutputCostPerToken: 1.00},
 	})
 
@@ -173,7 +173,7 @@ func TestEnforceBudgetAndRateLimitsCachesResolvedAliasPrice(t *testing.T) {
 	assert.Equal(t, "model-alias", logCtx.PriceModelID)
 }
 
-func TestProxyRequestRejectsUnknownPriceBeforeProvider(t *testing.T) {
+func TestProxyRequestTreatsUnpricedRouteAsUnavailable(t *testing.T) {
 	var providerCalls atomic.Int32
 	provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		providerCalls.Add(1)
@@ -194,7 +194,7 @@ func TestProxyRequestRejectsUnknownPriceBeforeProvider(t *testing.T) {
 
 	prx.ProxyRequest(recorder, request)
 
-	assert.Equal(t, http.StatusServiceUnavailable, recorder.Code)
+	assert.Equal(t, http.StatusNotFound, recorder.Code)
 	assert.Zero(t, providerCalls.Load())
 }
 
@@ -208,7 +208,7 @@ func TestProxyRequestRejectsUnknownPriceBeforeProvider(t *testing.T) {
 // portion of the estimate is used).
 func TestEstimateRequestCostSkipsPromptTokenEstimateWhenTiktokenDisabled(t *testing.T) {
 	registry := routermodels.NewModelPriceRegistry()
-	registry.Update(map[string]*routermodels.ModelPrice{
+	registry.ReplaceFilePrices(map[string]*routermodels.ModelPrice{
 		"gpt-5.2-chat": {InputCostPerToken: 0.01, OutputCostPerToken: 0.02},
 	})
 	body := []byte(`{"messages":[{"role":"user","content":"this is a real prompt with several words in it"}],"max_completion_tokens":10}`)
@@ -237,7 +237,8 @@ func TestEstimateRequestCostSkipsPromptTokenEstimateWhenTiktokenDisabled(t *test
 
 		promptOnlyTokens := estimatePromptTokensForModel(body, "gpt-5.2-chat")
 		require.Greater(t, promptOnlyTokens, 0, "test setup: body must yield a non-zero prompt-token estimate")
-		assert.Greater(t, cost, modelPriceCompletionOnlyCost(t, registry.GetPrice("gpt-5.2-chat"), prx.estimateCompletionTokens(body)))
+		_, modelPrice := registry.GetPriceAny("gpt-5.2-chat")
+		assert.Greater(t, cost, modelPriceCompletionOnlyCost(t, modelPrice, prx.estimateCompletionTokens(body)))
 	})
 }
 

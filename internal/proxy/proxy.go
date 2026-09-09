@@ -286,6 +286,7 @@ type RequestLogContext struct {
 	BillingProfileID      string
 	BillingProfileSHA256  string
 	BillingOrganizationID string
+	modelRouteExclusions  map[string]bool
 
 	reservedEntities       []reservedEntity
 	rateLimitedTPMEntities []string
@@ -423,6 +424,7 @@ type Proxy struct {
 
 func New(cfg *Config) *Proxy {
 	if cfg.Balancer != nil && cfg.ModelManager != nil {
+		cfg.ModelManager.SetCredentials(cfg.Balancer.GetCredentialsSnapshot())
 		cfg.Balancer.SetModelChecker(cfg.ModelManager)
 	}
 
@@ -1000,7 +1002,9 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 				}
 				cred = nextCred
 				triedCreds[cred.Name] = true
-				logCtx.Credential = cred
+				if !p.checkRetryCredentialPriceAvailable(w, r, logCtx, cred, modelID, realModelID) {
+					return
+				}
 				p.logger.WarnContext(r.Context(), "Retrying with next same-type proxy credential",
 					"credential", cred.Name, "model", modelID,
 					"attempt", attempt+1, "max_attempts", p.maxProviderRetries+1,

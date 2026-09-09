@@ -46,7 +46,7 @@ func TestProxyRequest_MessagesPassthroughStillLogsUsageAndCost(t *testing.T) {
 	prx.LiteLLMDB = dbStub
 
 	registry := pricing.NewModelPriceRegistry()
-	registry.Update(map[string]*pricing.ModelPrice{
+	registry.ReplaceFilePrices(map[string]*pricing.ModelPrice{
 		"claude-e2e": {
 			InputCostPerToken:           1,
 			OutputCostPerToken:          2,
@@ -141,7 +141,7 @@ data: {"type":"message_stop"}
 	prx.LiteLLMDB = dbStub
 
 	registry := pricing.NewModelPriceRegistry()
-	registry.Update(map[string]*pricing.ModelPrice{
+	registry.ReplaceFilePrices(map[string]*pricing.ModelPrice{
 		"claude-e2e": {
 			InputCostPerToken:           1,
 			OutputCostPerToken:          2,

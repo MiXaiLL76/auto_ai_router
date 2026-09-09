@@ -16,6 +16,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	dbmodels "github.com/mixaill76/auto_ai_router/internal/litellmdb/models"
 	routermodels "github.com/mixaill76/auto_ai_router/internal/models"
+	"github.com/mixaill76/auto_ai_router/internal/scope"
 	"github.com/mixaill76/auto_ai_router/internal/testhelpers"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -97,6 +98,7 @@ func newDenylistRootProxy(
 	builder.config.OrganizationPolicies = registry
 	root := builder.Build()
 	root.LiteLLMDB = db
+	setTestModelPrice(root, "route-a", &routermodels.ModelPrice{})
 	return root
 }
 
@@ -177,6 +179,36 @@ func TestOrganizationCredentialDenylistIsOrganizationScopedAndAppliesLocally(t *
 
 	require.Equal(t, http.StatusOK, request("control-token").Code)
 	assert.Equal(t, int32(1), deniedCalls.Load())
+}
+
+func TestOrganizationCredentialDenylistWithNoDirectCandidateIsStableNotFound(t *testing.T) {
+	var calls atomic.Int32
+	var receivedHeader atomic.Bool
+	provider := denylistProvider(t, &calls, &receivedHeader)
+	defer provider.Close()
+	credential := directDenylistCredential("denied-provider", provider.URL)
+	db := &organizationPolicyTestDB{tokens: map[string]*dbmodels.TokenInfo{
+		"restricted-token": {
+			Token: "restricted-hash", UserID: "restricted-user",
+			DirectOrganizationID: "org-1", OrganizationID: "org-1",
+		},
+	}}
+	prx := newLocalDenylistPolicyProxy(t, []config.CredentialConfig{credential}, db, []string{credential.Name})
+	setTestModelPrice(prx, "route-a", &routermodels.ModelPrice{})
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(
+		`{"model":"route-a","messages":[]}`,
+	))
+	req.Header.Set("Authorization", "Bearer restricted-token")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	prx.ProxyRequest(w, req)
+
+	assert.Equal(t, http.StatusNotFound, w.Code)
+	assert.Zero(t, calls.Load())
+	listed, err := prx.ListModelsForToken(db.tokens["restricted-token"], scope.PublicContext())
+	require.NoError(t, err)
+	assert.Empty(t, listed.Data)
 }
 
 func TestOrganizationCredentialDenylistPropagatesAndKeepsRouterEligible(t *testing.T) {

@@ -51,7 +51,7 @@ func TestProxyRequest_WebSearchEnabledButUnusedDoesNotBillToolCost(t *testing.T)
 		Build()
 	prx.LiteLLMDB = dbStub
 	registry := pricing.NewModelPriceRegistry()
-	registry.Update(map[string]*pricing.ModelPrice{
+	registry.ReplaceFilePrices(map[string]*pricing.ModelPrice{
 		"gpt-web-search": {
 			InputCostPerToken:  1,
 			OutputCostPerToken: 2,
@@ -138,7 +138,7 @@ func TestProxyRequest_ResponsesWebSearchCallsOverrideRequestFallback(t *testing.
 		Build()
 	prx.LiteLLMDB = dbStub
 	registry := pricing.NewModelPriceRegistry()
-	registry.Update(map[string]*pricing.ModelPrice{
+	registry.ReplaceFilePrices(map[string]*pricing.ModelPrice{
 		"gpt-web-search": {
 			InputCostPerToken:  1,
 			OutputCostPerToken: 2,
@@ -247,7 +247,7 @@ func TestProxyRequest_StreamingWebSearchBillingUsesCompletedResponse(t *testing.
 				Build()
 			prx.LiteLLMDB = dbStub
 			registry := pricing.NewModelPriceRegistry()
-			registry.Update(map[string]*pricing.ModelPrice{
+			registry.ReplaceFilePrices(map[string]*pricing.ModelPrice{
 				"gpt-web-search": {
 					InputCostPerToken:    1,
 					OutputCostPerToken:   2,
@@ -309,7 +309,7 @@ func TestProxyRequest_InterruptedStreamingSearchIsNotBilledWithoutConfirmation(t
 		Build()
 	prx.LiteLLMDB = dbStub
 	registry := pricing.NewModelPriceRegistry()
-	registry.Update(map[string]*pricing.ModelPrice{
+	registry.ReplaceFilePrices(map[string]*pricing.ModelPrice{
 		"gpt-web-search": {
 			SearchContextCostPerQuery: map[string]float64{"search_context_size_medium": 5},
 		},

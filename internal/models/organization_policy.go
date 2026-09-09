@@ -34,15 +34,6 @@ type OrganizationPolicy struct {
 	credentialDenylist []string
 }
 
-type OrganizationModelResolution struct {
-	PublicModelID    string
-	CanonicalModelID string
-	ModelID          string
-	RealModelID      string
-	PriceModelID     string
-	ModelPrice       *ModelPrice
-}
-
 type OrganizationPolicyLoadOptions struct {
 	LiteLLMDBEnabled      bool
 	LiteLLMDBRequired     bool
@@ -199,77 +190,30 @@ func (p *OrganizationPolicy) inSurface(manager *Manager, publicID string) bool {
 	return manager.IsClientModelIDRoutable(publicID)
 }
 
-func (m *Manager) ResolveOrganizationModel(policy *OrganizationPolicy, publicID string) (OrganizationModelResolution, error) {
+func (m *Manager) ResolveOrganizationModel(policy *OrganizationPolicy, publicID string) (ModelResolution, error) {
 	if policy == nil {
-		return OrganizationModelResolution{}, fmt.Errorf("organization policy is required")
+		return ModelResolution{}, fmt.Errorf("organization policy is required")
 	}
-	publicID = strings.TrimSpace(publicID)
-	if !policy.inSurface(m, publicID) {
-		return OrganizationModelResolution{}, ErrOrganizationModelNotFound
+	resolution, ok := m.ResolveModel(strings.TrimSpace(publicID), policy, false)
+	if !ok {
+		return ModelResolution{}, ErrOrganizationModelNotFound
 	}
-
-	canonicalID := publicID
-	if target, mapped := policy.MappingTarget(publicID); mapped {
-		resolved, active := m.ResolveOrganizationMappingTarget(target)
-		if !active {
-			return OrganizationModelResolution{}, ErrOrganizationModelNotFound
-		}
-		canonicalID = target
-		publicRouteID := resolved
-		realID := publicRouteID
-		if realName, ok := m.GetRealModelName(publicRouteID); ok {
-			realID = realName
-		}
-		price, _ := policy.Price(publicID)
-		return OrganizationModelResolution{
-			PublicModelID:    publicID,
-			CanonicalModelID: canonicalID,
-			ModelID:          publicRouteID,
-			RealModelID:      realID,
-			PriceModelID:     publicID,
-			ModelPrice:       price,
-		}, nil
-	}
-
-	resolvedCanonical, isAlias, err := m.ResolvePublicModelAlias(publicID)
-	if err != nil {
-		return OrganizationModelResolution{}, ErrOrganizationModelNotFound
-	}
-	if isAlias {
-		canonicalID = resolvedCanonical
-	}
-	modelID := canonicalID
-	if resolved, isModelAlias := m.ResolveAlias(modelID); isModelAlias {
-		modelID = resolved
-	}
-	realID := modelID
-	if realName, ok := m.GetRealModelName(modelID); ok {
-		realID = realName
-	}
-	price, _ := policy.Price(publicID)
-	return OrganizationModelResolution{
-		PublicModelID:    publicID,
-		CanonicalModelID: canonicalID,
-		ModelID:          modelID,
-		RealModelID:      realID,
-		PriceModelID:     publicID,
-		ModelPrice:       price,
-	}, nil
+	return resolution, nil
 }
 
 func (m *Manager) ResolveOrganizationModelScoped(
 	policy *OrganizationPolicy,
 	publicID string,
 	visibility scope.Context,
-) (OrganizationModelResolution, error) {
+) (ModelResolution, error) {
 	resolution, err := m.ResolveOrganizationModel(policy, publicID)
 	if err != nil {
-		return OrganizationModelResolution{}, err
+		return ModelResolution{}, err
 	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	if !m.modelVisibleInScopeLocked(resolution.ModelID, visibility) {
-		return OrganizationModelResolution{}, ErrOrganizationModelNotFound
+		return ModelResolution{}, ErrOrganizationModelNotFound
 	}
 	return resolution, nil
 }
@@ -277,9 +221,6 @@ func (m *Manager) ResolveOrganizationModelScoped(
 func (m *Manager) ResolveOrganizationMappingTarget(target string) (string, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	if _, ok := m.publicModelAliases[target]; ok {
-		return "", false
-	}
 	if _, ok := m.acceptedModelAliases[target]; ok {
 		return "", false
 	}
@@ -311,17 +252,6 @@ func (m *Manager) GetAllModelsScopedForOrganization(visibility scope.Context, po
 		expiresAt: utils.NowUTC().Add(allModelsCacheTTL),
 	})
 	return projected
-}
-
-// GetAllModelsWithAccessGroupsScopedForOrganization deliberately ignores
-// include_model_access_groups for organization-scoped keys: the access-group
-// projection is an administrative view over internal routes, and an
-// organization catalog is an explicit curated surface (allowlist + mappings +
-// prices). Returning access-group pseudo-models would re-introduce backend IDs
-// through a query parameter, exactly as GetAllModelsWithAccessGroupsScoped
-// already suppresses them once a client model surface is configured.
-func (m *Manager) GetAllModelsWithAccessGroupsScopedForOrganization(visibility scope.Context, policy *OrganizationPolicy) ModelsResponse {
-	return m.GetAllModelsScopedForOrganization(visibility, policy)
 }
 
 func (m *Manager) getCachedScopedAllModelsForOrganization(visibility scope.Context, policy *OrganizationPolicy) (ModelsResponse, bool) {
@@ -370,9 +300,6 @@ func (m *Manager) projectOrganizationCatalog(response ModelsResponse, visibility
 		if !policy.allowlistAdmitsLocked(model.ID) {
 			continue
 		}
-		if _, priced := policy.prices[model.ID]; !priced {
-			continue
-		}
 		publicByID[model.ID] = model
 	}
 	for source, target := range policy.mappings {
@@ -380,9 +307,6 @@ func (m *Manager) projectOrganizationCatalog(response ModelsResponse, visibility
 			if _, ok := policy.allowlist[source]; !ok {
 				continue
 			}
-		}
-		if _, priced := policy.prices[source]; !priced {
-			continue
 		}
 		routeID, active := m.resolveOrganizationMappingTargetLocked(target)
 		if !active || !m.modelVisibleInScopeLocked(routeID, visibility) {
@@ -426,9 +350,6 @@ func (p *OrganizationPolicy) allowlistAdmitsLocked(publicID string) bool {
 }
 
 func (m *Manager) resolveOrganizationMappingTargetLocked(target string) (string, bool) {
-	if _, ok := m.publicModelAliases[target]; ok {
-		return "", false
-	}
 	if _, ok := m.acceptedModelAliases[target]; ok {
 		return "", false
 	}

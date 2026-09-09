@@ -240,7 +240,7 @@ func TestLogSpendToLiteLLMDB_PersistsInternalAIRRequestWithoutKafkaAccounting(t 
 func TestLogSpendToLiteLLMDB_BillsAliasPriceBeforeRealModelPrice(t *testing.T) {
 	prx := NewTestProxyBuilder().Build()
 	registry := routermodels.NewModelPriceRegistry()
-	registry.Update(map[string]*routermodels.ModelPrice{
+	registry.ReplaceFilePrices(map[string]*routermodels.ModelPrice{
 		"gpt-5.2-chat": {
 			InputCostPerToken:       0.000001575,
 			OutputCostPerToken:      0.0000126,

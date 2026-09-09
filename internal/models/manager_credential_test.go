@@ -128,9 +128,7 @@ func TestHasModel_InvalidCredentialInConfig(t *testing.T) {
 	// Invalid model should not be accessible from configured credential
 	assert.False(t, manager.HasModel("openai-1", "invalid-model"))
 
-	// For non-existent credential, fallback to allow (no data available)
-	// This is the expected behavior when credential doesn't exist
-	assert.True(t, manager.HasModel("non-existent-cred", "invalid-model"))
+	assert.False(t, manager.HasModel("non-existent-cred", "invalid-model"))
 }
 
 // TestHasModel_EmptyCredentialField tests models without credential field (global models)
@@ -405,8 +403,7 @@ func TestHasModel_NonProxyCredentialWithNoModels(t *testing.T) {
 	assert.False(t, manager.HasModel("openai_backup", "gpt-4o"), "openai_backup must not match unfetched proxy models")
 	assert.False(t, manager.HasModel("openai_backup", "some-random-model"), "openai_backup must not match any model")
 
-	// Proxy credential without fetched models should still be allowed (dynamic fetch pending).
-	assert.True(t, manager.HasModel("pol1_proxy", "gpt-4o"), "proxy credential must be allowed for unfetched models")
+	assert.False(t, manager.HasModel("pol1_proxy", "gpt-4o"), "unfetched proxy topology must fail closed")
 
 	// After proxy models are registered via AddModel, the mapping should be respected.
 	manager.AddModel("pol1_proxy", "gpt-4o")

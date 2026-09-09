@@ -35,6 +35,8 @@ func TestLogMasking_MasterKeyNotExposed(t *testing.T) {
 		"sk_test_valid_master_key_12345", // Real master key
 		rl, tm, mm, "test-version", "test-commit",
 	)
+	prx.modelManager.AddModel("test", "gpt-4")
+	prx.modelManager.AddModel("test2", "gpt-4")
 
 	// Create request with wrong token
 	invalidToken := "sk_test_invalid_token_abcdefghijklmnop"
@@ -89,6 +91,8 @@ func TestLogMasking_HeadersNotExposed(t *testing.T) {
 		bal, logger, 10, 30*time.Second, metrics,
 		"master-key", rl, tm, mm, "test-version", "test-commit",
 	)
+	prx.modelManager.AddModel("test", "gpt-4")
+	prx.modelManager.AddModel("test2", "gpt-4")
 
 	// Create request
 	req := httptest.NewRequest("POST", "/v1/chat/completions",
