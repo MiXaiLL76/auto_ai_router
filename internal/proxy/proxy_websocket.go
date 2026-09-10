@@ -235,8 +235,11 @@ func (p *Proxy) HandleWebSocketResponses(w http.ResponseWriter, r *http.Request)
 		}
 	}()
 
-	// Connection-local cache: response ID → completed Response
-	localCache := make(map[string]*responses.Response)
+	type cachedResponse struct {
+		response *responses.Response
+		input    json.RawMessage
+	}
+	localCache := make(map[string]cachedResponse)
 	var cacheMu sync.Mutex
 
 outerLoop:
@@ -290,7 +293,7 @@ outerLoop:
 		// handles previous_response_id via the persistent response store.
 		if prevRespID != "" && isStoreFalse {
 			cacheMu.Lock()
-			prevResp, found := localCache[prevRespID]
+			previous, found := localCache[prevRespID]
 			cacheMu.Unlock()
 
 			if !found {
@@ -306,7 +309,7 @@ outerLoop:
 			if inputRaw, ok := reqMap["input"]; ok {
 				if inputArr, ok := inputRaw.([]interface{}); ok {
 					allowedCallIDs := make(map[string]bool)
-					for _, outItem := range prevResp.Output {
+					for _, outItem := range previous.response.Output {
 						if outItem.Type == "function_call" && outItem.CallID != "" {
 							allowedCallIDs[outItem.CallID] = true
 						}
@@ -331,16 +334,21 @@ outerLoop:
 				}
 			}
 
-			// Prepend the previous response output to current input and strip
-			// previous_response_id so the proxy doesn't attempt its own store lookup.
+			// Restore input and output locally; store:false has no persistent history.
 			delete(reqMap, "previous_response_id")
-			if bodyTmp, err := json.Marshal(reqMap); err == nil {
-				if merged, err := responses.PrependOutputToInput(bodyTmp, prevResp.Output); err == nil {
-					var mergedMap map[string]interface{}
-					if json.Unmarshal(merged, &mergedMap) == nil {
-						reqMap = mergedMap
-					}
-				}
+			bodyTmp, err := json.Marshal(reqMap)
+			if err != nil {
+				sendWSError(conn, "internal_error", "Failed to marshal request")
+				continue
+			}
+			merged, err := responses.PrependHistoryToInput(bodyTmp, previous.input, previous.response.Output)
+			if err != nil {
+				sendWSError(conn, "invalid_request_error", "Failed to restore conversation input")
+				continue
+			}
+			if err := json.Unmarshal(merged, &reqMap); err != nil {
+				sendWSError(conn, "internal_error", "Failed to decode conversation input")
+				continue
 			}
 		}
 
@@ -411,7 +419,10 @@ outerLoop:
 		if isStoreFalse {
 			cacheMu.Lock()
 			if wsWriter.finalResp != nil {
-				localCache[wsWriter.finalResp.ID] = wsWriter.finalResp
+				localCache[wsWriter.finalResp.ID] = cachedResponse{
+					response: wsWriter.finalResp,
+					input:    responses.ExtractInputArray(bodyBytes),
+				}
 			}
 			// Evict the previous response when a continuation fails so that
 			// a subsequent retry correctly returns previous_response_not_found.
