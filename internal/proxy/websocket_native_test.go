@@ -210,6 +210,23 @@ func TestNativeWebSocketPendingToolSteer(t *testing.T) {
 	f.entry(t)
 	wsWrite(t, upstream, `{"type":"response.steer.pending","steer":{"previous_response_id":"resp_1"},"required_input":[{"type":"function_call_output","call_id":"call_1"}]}`)
 	wsEvent(t, f.client, "response.steer.pending")
+	f.db.mu.Lock()
+	info := *f.db.tokens["client-key"]
+	info.Spend = 10
+	info.MaxBudget = pointerTo(1.0)
+	f.db.tokens["client-key"] = &info
+	f.db.mu.Unlock()
+	wsWrite(t, f.client, `{"type":"response.create","model":"astra","previous_response_id":"resp_1","input":[{"type":"function_call_output","call_id":"call_1","output":"42"}]}`)
+	wsEvent(t, f.client, "error")
+	f.db.mu.Lock()
+	restored := info
+	restored.Spend = 0
+	restored.MaxBudget = nil
+	f.db.tokens["client-key"] = &restored
+	f.db.mu.Unlock()
+	wsWrite(t, f.client, `{"type":"response.create","model":"astra","input":"wrong continuation"}`)
+	invalid := wsEvent(t, f.client, "error")
+	assert.Contains(t, string(invalid["error"]), "Return tool results")
 	wsWrite(t, f.client, `{"type":"response.create","model":"astra","previous_response_id":"resp_1","input":[{"type":"function_call_output","call_id":"call_1","output":"42"}]}`)
 	resumed := wsEvent(t, upstream, "response.create")
 	assert.JSONEq(t, `[{"type":"function_call_output","call_id":"call_1","output":"42"}]`, string(resumed["input"]))
@@ -321,11 +338,13 @@ func TestNativeWebSocketSteerFailureAllowsRetry(t *testing.T) {
 	wsWrite(t, upstream, wsCreated("resp_1"))
 	wsEvent(t, f.client, "response.created")
 	steer := `{"type":"response.steer","previous_response_id":"resp_1","input":"shorter"}`
-	wsWrite(t, f.client, steer)
-	wsEvent(t, upstream, "response.steer")
-	wsWrite(t, upstream, `{"type":"response.steer.failed","steer":{"previous_response_id":"resp_1"},"error":{"code":"invalid_input","message":"upstream private details"}}`)
-	event := wsEvent(t, f.client, "response.steer.failed")
-	assert.NotContains(t, string(event["error"]), "upstream private details")
+	for range nativeWSMaxResponses + 1 {
+		wsWrite(t, f.client, steer)
+		wsEvent(t, upstream, "response.steer")
+		wsWrite(t, upstream, `{"type":"response.steer.failed","steer":{"previous_response_id":"resp_1"},"error":{"code":"invalid_input","message":"upstream private details"}}`)
+		event := wsEvent(t, f.client, "response.steer.failed")
+		assert.NotContains(t, string(event["error"]), "upstream private details")
+	}
 	wsWrite(t, f.client, steer)
 	wsEvent(t, upstream, "response.steer")
 	wsWrite(t, upstream, wsCompleted("resp_1"))
@@ -466,5 +485,101 @@ func TestNativeWebSocketDisconnectUsesUsageEstimate(t *testing.T) {
 	case <-f.accepted:
 		t.Fatal("unexpected automatic reconnect")
 	default:
+	}
+}
+
+func TestNativeWebSocketOverlappingSteer(t *testing.T) {
+	for _, newerFinishesFirst := range []bool{false, true} {
+		t.Run(fmt.Sprint(newerFinishesFirst), func(t *testing.T) {
+			f := newNativeWSFixture(t, config.ProviderTypeOpenAI, "")
+			wsWrite(t, f.client, `{"type":"response.create","model":"astra","input":"hi"}`)
+			upstream := f.upstream(t)
+			wsEvent(t, upstream, "response.create")
+			wsWrite(t, upstream, wsCreated("resp_1"))
+			wsEvent(t, f.client, "response.created")
+			wsWrite(t, f.client, `{"type":"response.steer","previous_response_id":"resp_1","input":"shorter"}`)
+			wsEvent(t, upstream, "response.steer")
+			wsWrite(t, upstream, wsCreated("resp_2"))
+			wsEvent(t, f.client, "response.created")
+			for _, id := range []string{"resp_1", "resp_2"} {
+				wsWrite(t, upstream, fmt.Sprintf(`{"type":"response.output_text.delta","response_id":%q,"delta":"Hello"}`, id))
+				wsEvent(t, f.client, "response.output_text.delta")
+			}
+			ids := []string{"resp_1", "resp_2"}
+			if newerFinishesFirst {
+				ids = []string{"resp_2", "resp_1"}
+			}
+			for _, id := range ids {
+				wsWrite(t, upstream, wsCompleted(id))
+				wsEvent(t, f.client, "response.completed")
+				entry := f.entry(t)
+				assert.Equal(t, 100, entry.PromptTokens)
+				assert.Equal(t, 20, entry.CompletionTokens)
+			}
+			wsWrite(t, f.client, `{"type":"response.create","previous_response_id":"resp_2","input":"continue"}`)
+			wsEvent(t, upstream, "response.create")
+			wsWrite(t, upstream, wsCreated("resp_3"))
+			wsEvent(t, f.client, "response.created")
+			wsWrite(t, upstream, wsCompleted("resp_3"))
+			wsEvent(t, f.client, "response.completed")
+			f.entry(t)
+		})
+	}
+}
+
+func TestNativeWebSocketPrepareStripsHandshakeHeaders(t *testing.T) {
+	f := newNativeWSFixture(t, config.ProviderTypeOpenAI, "")
+	req := httptest.NewRequest(http.MethodGet, "/v1/responses", nil)
+	req.Header = http.Header{
+		"Authorization":            {"Bearer client-key"},
+		"Connection":               {"Upgrade, X-Hop"},
+		"Upgrade":                  {"websocket"},
+		"X-Hop":                    {"private"},
+		"Sec-Websocket-Key":        {"key"},
+		"Sec-Websocket-Version":    {"13"},
+		"Sec-Websocket-Protocol":   {"test"},
+		"Sec-Websocket-Extensions": {"permessage-deflate"},
+	}
+	s := &nativeWSSession{proxy: f.proxy, request: req, client: f.client}
+	turn, _, ok := s.prepare(map[string]json.RawMessage{"model": json.RawMessage(`"astra"`), "input": json.RawMessage(`"hi"`)}, 0)
+	require.True(t, ok)
+	t.Cleanup(func() { f.proxy.reconcileBudgetAndRateLimits(turn.log, 0) })
+	assert.False(t, websocket.IsWebSocketUpgrade(turn.log.Request))
+	for _, key := range []string{"Connection", "Upgrade", "X-Hop", "Sec-WebSocket-Key", "Sec-WebSocket-Version", "Sec-WebSocket-Protocol", "Sec-WebSocket-Extensions"} {
+		assert.Empty(t, turn.log.Request.Header.Get(key), key)
+	}
+	assert.Equal(t, "Bearer client-key", turn.log.Request.Header.Get("Authorization"))
+	assert.Equal(t, "websocket", req.Header.Get("Upgrade"))
+}
+
+func TestNativeWebSocketInvalidPreparedBodyReportsError(t *testing.T) {
+	for _, body := range []string{"invalid JSON", "[]", "null"} {
+		t.Run(body, func(t *testing.T) {
+			prx := NewTestProxyBuilder().Build()
+			reconciled := make(chan bool, 1)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				conn, err := wsUpgrader.Upgrade(w, r, nil)
+				if err != nil {
+					t.Error(err)
+					return
+				}
+				defer func() { _ = conn.Close() }()
+				s := &nativeWSSession{proxy: prx, client: conn}
+				logCtx := &RequestLogContext{}
+				wire, ok := s.prepareWireBody(logCtx, []byte(body))
+				assert.False(t, ok)
+				assert.Nil(t, wire)
+				reconciled <- logCtx.budgetReconciled
+			}))
+			defer server.Close()
+			conn, response, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http"), nil)
+			require.NoError(t, err)
+			defer func() { _ = conn.Close() }()
+			defer func() { _ = response.Body.Close() }()
+			event := wsEvent(t, conn, "error")
+			assert.Contains(t, string(event["error"]), "internal_error")
+			assert.Contains(t, string(event["error"]), "Failed to prepare upstream request")
+			assert.True(t, <-reconciled)
+		})
 	}
 }

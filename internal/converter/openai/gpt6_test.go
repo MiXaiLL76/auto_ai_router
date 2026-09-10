@@ -51,3 +51,16 @@ func TestGPT6RulesLeaveOtherModelsUnchanged(t *testing.T) {
 		assert.Equal(t, body, ReplaceBodyParam(model, body), model)
 	}
 }
+
+func TestGPT6ResponsesPreservesUnchangedBody(t *testing.T) {
+	for _, raw := range []string{
+		`{ "model": "gpt-6-astra", "input": "hi" }`,
+		`{ "model": "gpt-6-astra", "include": ["reasoning.encrypted_content"], "input": "hi" }`,
+		`{ "model": "gpt-6-astra", "include": [], "input": "hi" }`,
+	} {
+		body := []byte(raw)
+		got := ReplaceResponsesBodyParam("gpt-6-astra", body)
+		assert.Equal(t, raw, string(got))
+		assert.Same(t, &body[0], &got[0])
+	}
+}

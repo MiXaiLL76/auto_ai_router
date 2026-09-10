@@ -54,6 +54,7 @@ type nativeWSSession struct {
 	denylist         []string
 	realModel        string
 	active, pending  *nativeWSTurn
+	retiring         map[string]*nativeWSTurn
 	waitingForTools  bool
 	clientAborted    bool
 	template         map[string]json.RawMessage
@@ -124,7 +125,7 @@ func (p *Proxy) handleNativeResponsesWebSocket(client *websocket.Conn, r *http.R
 		case msg := <-clientMessages:
 			if msg.err != nil {
 				s.clientAborted = true
-				if p.drainUpstreamOnAbort && (s.active != nil || s.pending != nil) {
+				if p.drainUpstreamOnAbort && (s.active != nil || s.pending != nil || len(s.retiring) != 0) {
 					startDrain()
 					continue
 				}
@@ -142,7 +143,7 @@ func (p *Proxy) handleNativeResponsesWebSocket(client *websocket.Conn, r *http.R
 				return
 			}
 			if s.clientAborted {
-				if !p.drainUpstreamOnAbort || (s.active == nil && s.pending == nil) {
+				if !p.drainUpstreamOnAbort || (s.active == nil && s.pending == nil && len(s.retiring) == 0) {
 					return
 				}
 				startDrain()
@@ -156,18 +157,27 @@ func (s *nativeWSSession) sendError(code, message string) {
 	sendWSError(s.client, code, message)
 }
 
+func (s *nativeWSSession) sendHTTPError(recorder *captureResponseWriter) {
+	_ = s.client.SetWriteDeadline(time.Now().Add(nativeWSWriteTimeout))
+	sendWSHTTPError(s.client, recorder.body.Bytes(), recorder.statusCode)
+}
+
 func (s *nativeWSSession) close() {
 	if s.upstream != nil {
 		_ = s.upstream.Close()
 	}
 	_ = s.client.Close()
+	outcome := "stream_error"
+	if s.clientAborted {
+		outcome = "client_aborted"
+	}
 	if s.active != nil {
-		outcome := "stream_error"
-		if s.clientAborted {
-			outcome = "client_aborted"
-		}
 		s.finish(s.active, nil, outcome)
 		s.active = nil
+	}
+	for id, turn := range s.retiring {
+		s.finish(turn, nil, outcome)
+		delete(s.retiring, id)
 	}
 	s.releasePending()
 }
@@ -227,11 +237,14 @@ func (s *nativeWSSession) create(event map[string]json.RawMessage) bool {
 			return true
 		}
 		historyTokens = max(historyTokens, s.pending.log.promptTokensEstimate())
-		s.releasePending()
+		s.proxy.reconcileBudgetAndRateLimits(s.pending.log, 0)
 	}
 	turn, wire, ok := s.prepare(event, historyTokens)
 	if !ok {
-		return s.upstream != nil && !resuming
+		return s.upstream != nil
+	}
+	if resuming {
+		s.releasePending()
 	}
 	if s.upstream == nil {
 		if err := s.connect(turn.log); err != nil {
@@ -320,6 +333,19 @@ func (s *nativeWSSession) prepare(event map[string]json.RawMessage, historyToken
 		return nil, nil, false
 	}
 	req.Header = s.request.Header.Clone()
+	for _, value := range req.Header.Values("Connection") {
+		for _, key := range strings.Split(value, ",") {
+			req.Header.Del(strings.TrimSpace(key))
+		}
+	}
+	for key := range req.Header {
+		if strings.HasPrefix(strings.ToLower(key), "sec-websocket-") {
+			req.Header.Del(key)
+		}
+	}
+	for _, key := range []string{"Connection", "Upgrade", "Keep-Alive", "Proxy-Connection", "Transfer-Encoding", "TE", "Trailer"} {
+		req.Header.Del(key)
+	}
 	req.Header.Set("Content-Type", "application/json")
 	req.RemoteAddr = s.request.RemoteAddr
 	marker := req.Header.Get(HeaderAIRProxyClient) == "1" || req.Header.Get(HeaderLegacyAIRProxyClient) == "1"
@@ -344,27 +370,21 @@ func (s *nativeWSSession) prepare(event map[string]json.RawMessage, historyToken
 	}
 	if !ok {
 		s.proxy.reconcileBudgetAndRateLimits(logCtx, 0)
-		_ = s.client.SetWriteDeadline(time.Now().Add(nativeWSWriteTimeout))
-		sendWSHTTPError(s.client, recorder.body.Bytes(), recorder.statusCode)
+		s.sendHTTPError(recorder)
 		return nil, nil, false
 	}
 	wireBody := prepared.body
 	if prepared.cred.IsProxyLike() {
 		wireBody = prepared.proxyBody
 	}
-	var wire map[string]json.RawMessage
-	if json.Unmarshal(wireBody, &wire) != nil {
-		s.proxy.reconcileBudgetAndRateLimits(logCtx, 0)
+	wire, ok := s.prepareWireBody(logCtx, wireBody)
+	if !ok {
 		return nil, nil, false
 	}
-	delete(wire, "stream")
-	delete(wire, "background")
-	wire["store"] = json.RawMessage(`false`)
 	logCtx.TargetURL = s.targetURL
 	logCtx.WebSearchRequested, logCtx.WebSearchContextSize = extractWebSearchRequestUsage(prepared.body, "application/json")
 	s.proxy.setPromptTokensEstimate(logCtx, prepared.body, prepared.realModelID)
 	logCtx.ActualCredentialName = s.actualCredential
-	s.turns++
 	return &nativeWSTurn{log: logCtx, body: prepared.body, accumulator: s.proxy.newCompletionTokenAccumulator(prepared.realModelID)}, wire, true
 }
 
@@ -424,11 +444,7 @@ func (s *nativeWSSession) connect(logCtx *RequestLogContext) error {
 	if err != nil {
 		return err
 	}
-	limit := int64(s.proxy.maxBodySizeMB) * 1024 * 1024
-	if limit <= 0 {
-		limit = 1024 * 1024
-	}
-	conn.SetReadLimit(limit)
+	conn.SetReadLimit(s.proxy.websocketReadLimit())
 	s.upstream = conn
 	snapshot := *cred
 	s.credential = &snapshot
@@ -463,7 +479,17 @@ func (s *nativeWSSession) upstreamEvent(body []byte) bool {
 		return true
 	}
 	if event.Type == "response.created" {
-		if s.active == nil && s.pending != nil {
+		if s.retiring[id] != nil {
+			s.sendError("upstream_protocol_error", "Unexpected response.created")
+			return false
+		}
+		if s.pending != nil && id != "" && (s.active == nil || (s.active.id != "" && s.active.id != id)) {
+			if s.active != nil {
+				if s.retiring == nil {
+					s.retiring = make(map[string]*nativeWSTurn)
+				}
+				s.retiring[s.active.id] = s.active
+			}
 			s.active = s.pending
 			s.active.id = ""
 			s.pending = nil
@@ -473,6 +499,7 @@ func (s *nativeWSSession) upstreamEvent(body []byte) bool {
 			s.sendError("upstream_protocol_error", "Unexpected response.created")
 			return false
 		}
+		s.turns++
 		s.active.id = id
 		s.active.log.ClientResponseID = id
 	}
@@ -482,18 +509,22 @@ func (s *nativeWSSession) upstreamEvent(body []byte) bool {
 	if event.Type == "response.steer.failed" {
 		s.releasePending()
 	}
-	if s.active != nil {
-		if id != "" && s.active.id != "" && id != s.active.id {
+	turn := s.active
+	if retiring := s.retiring[id]; retiring != nil {
+		turn = retiring
+	}
+	if turn != nil {
+		if id != "" && turn.id != "" && id != turn.id {
 			s.sendError("upstream_protocol_error", "Unexpected response ID")
 			return false
 		}
-		chunk := append(append([]byte("data: "), body...), '\n', '\n')
-		s.active.accumulator.AddChunk(chunk)
-		if strings.HasSuffix(event.Type, ".delta") && s.active.log.CompletionStartTime.IsZero() {
-			s.active.log.CompletionStartTime = time.Now()
+		chunk := sseDataFrame(body)
+		turn.accumulator.AddChunk(chunk)
+		if strings.HasSuffix(event.Type, ".delta") && turn.log.CompletionStartTime.IsZero() {
+			turn.log.CompletionStartTime = time.Now()
 		}
 		if event.Response.Model != "" {
-			body = openai.ReplaceModelInBody(body, event.Response.Model, s.active.log.PublicModelID)
+			body = openai.ReplaceModelInBody(body, event.Response.Model, turn.log.PublicModelID)
 		}
 	}
 	original := body
@@ -504,13 +535,13 @@ func (s *nativeWSSession) upstreamEvent(body []byte) bool {
 	}
 	switch event.Type {
 	case "response.completed", "response.done", "response.incomplete", "response.failed":
-		if s.active == nil || id == "" {
+		if turn == nil || id == "" {
 			return false
 		}
-		s.active.log.RequestCompleted = delivered
-		s.finish(s.active, original, "completed")
-		s.completed[id] = s.active.log.TokenUsage.PromptTokens + s.active.log.TokenUsage.CompletionTokens
-		if s.pending != nil {
+		turn.log.RequestCompleted = delivered
+		s.finish(turn, original, "completed")
+		s.completed[id] = turn.log.TokenUsage.PromptTokens + turn.log.TokenUsage.CompletionTokens
+		if s.pending != nil && turn == s.active {
 			var output []struct {
 				Type  string `json:"type"`
 				Async bool   `json:"async"`
@@ -522,11 +553,17 @@ func (s *nativeWSSession) upstreamEvent(body []byte) bool {
 				}
 			}
 		}
-		s.active = nil
-	case "error", "response.error":
-		if s.active != nil {
-			s.finish(s.active, original, "stream_error")
+		if turn == s.active {
 			s.active = nil
+		}
+		delete(s.retiring, id)
+	case "error", "response.error":
+		if turn != nil {
+			s.finish(turn, original, "stream_error")
+			if turn == s.active {
+				s.active = nil
+			}
+			delete(s.retiring, id)
 		}
 		return false
 	}
@@ -546,7 +583,7 @@ func (s *nativeWSSession) finish(turn *nativeWSTurn, event []byte, outcome strin
 	if outcome == "stream_error" {
 		status = http.StatusBadGateway
 	}
-	chunk := append(append([]byte("data: "), event...), '\n', '\n')
+	chunk := sseDataFrame(event)
 	s.proxy.finalizeStreamingLog(turn.log, turn.accumulator.TokenCount(), chunk, "openai", status, false)
 	if turn.log.Credential != nil && turn.log.TokenUsage != nil {
 		tokens := turn.log.TokenUsage.PromptTokens + turn.log.TokenUsage.CompletionTokens
@@ -559,4 +596,28 @@ func (s *nativeWSSession) finish(turn *nativeWSTurn, event []byte, outcome strin
 func (s *nativeWSSession) hasCompleted(id string) bool {
 	_, ok := s.completed[id]
 	return ok
+}
+
+func sseDataFrame(body []byte) []byte {
+	return append(append([]byte("data: "), body...), '\n', '\n')
+}
+
+func addNativeWSHistoryTokens(ctx context.Context, tokens int) int {
+	if routing := nativeWSRoutingFromContext(ctx); routing != nil {
+		tokens += routing.historyTokens
+	}
+	return tokens
+}
+
+func (s *nativeWSSession) prepareWireBody(logCtx *RequestLogContext, wireBody []byte) (map[string]json.RawMessage, bool) {
+	var wire map[string]json.RawMessage
+	if json.Unmarshal(wireBody, &wire) != nil || wire == nil {
+		s.proxy.reconcileBudgetAndRateLimits(logCtx, 0)
+		s.sendError("internal_error", "Failed to prepare upstream request")
+		return nil, false
+	}
+	delete(wire, "stream")
+	delete(wire, "background")
+	wire["store"] = json.RawMessage(`false`)
+	return wire, true
 }

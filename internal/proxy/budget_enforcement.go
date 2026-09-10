@@ -146,9 +146,7 @@ func (p *Proxy) estimateRequestCost(logCtx *RequestLogContext, publicModelID, mo
 	var promptTokens int
 	if p.tiktokenEnabled {
 		promptTokens = estimatePromptTokensForModel(body, realModelID)
-		if routing := nativeWSRoutingFromContext(logCtx.Context()); routing != nil {
-			promptTokens += routing.historyTokens
-		}
+		promptTokens = addNativeWSHistoryTokens(logCtx.Context(), promptTokens)
 	}
 	usage := &converter.TokenUsage{
 		PromptTokens:     promptTokens,

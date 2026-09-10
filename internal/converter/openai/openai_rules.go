@@ -398,8 +398,12 @@ func ReplaceResponsesBodyParam(modelID string, body []byte) []byte {
 	if json.Unmarshal(body, &data) != nil {
 		return body
 	}
+	changed := false
 	for _, key := range []string{"temperature", "top_p", "top_logprobs"} {
-		delete(data, key)
+		if _, exists := data[key]; exists {
+			delete(data, key)
+			changed = true
+		}
 	}
 	var include []string
 	if json.Unmarshal(data["include"], &include) == nil {
@@ -410,6 +414,7 @@ func ReplaceResponsesBodyParam(modelID string, body []byte) []byte {
 			}
 		}
 		if len(filtered) != len(include) {
+			changed = true
 			if len(filtered) == 0 {
 				delete(data, "include")
 			} else {
@@ -420,6 +425,9 @@ func ReplaceResponsesBodyParam(modelID string, body []byte) []byte {
 				data["include"] = encoded
 			}
 		}
+	}
+	if !changed {
+		return body
 	}
 	updated, err := json.Marshal(data)
 	if err != nil {

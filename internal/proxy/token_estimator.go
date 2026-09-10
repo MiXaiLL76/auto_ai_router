@@ -411,9 +411,7 @@ func (p *Proxy) setPromptTokensEstimate(logCtx *RequestLogContext, body []byte, 
 	}
 	logCtx.promptTokensEstimateFn = func() int {
 		tokens := estimatePromptTokensForModel(body, model)
-		if routing := nativeWSRoutingFromContext(logCtx.Context()); routing != nil {
-			tokens += routing.historyTokens
-		}
+		tokens = addNativeWSHistoryTokens(logCtx.Context(), tokens)
 		return tokens
 	}
 }
