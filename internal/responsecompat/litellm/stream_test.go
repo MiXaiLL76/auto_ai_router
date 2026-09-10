@@ -346,10 +346,10 @@ func TestChatStreamMatchesLiteLLMFraming(t *testing.T) {
 	var usage map[string]any
 	require.NoError(t, json.Unmarshal([]byte(frames[4]), &usage))
 	assert.Equal(t, map[string]any{
-		"completion_tokens":         float64(0),
+		"completion_tokens":         float64(3),
 		"completion_tokens_details": map[string]any{"reasoning_tokens": float64(0)},
-		"prompt_tokens":             float64(0),
-		"total_tokens":              float64(0),
+		"prompt_tokens":             float64(13),
+		"total_tokens":              float64(16),
 	}, usage["usage"])
 	usageChoices := usage["choices"].([]any)
 	require.Len(t, usageChoices, 1)
