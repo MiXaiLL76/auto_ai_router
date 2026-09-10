@@ -440,7 +440,10 @@ func PrepareCodexPassthrough(body []byte, prevEntryHandled bool) []byte {
 		if toolsArr, ok := toolsVal.([]interface{}); ok {
 			if len(toolsArr) == 0 {
 				delete(raw, "tools")
-				delete(raw, "tool_choice")
+				additionalTools, _ := raw["additional_tools"].([]interface{})
+				if len(additionalTools) == 0 {
+					delete(raw, "tool_choice")
+				}
 			} else {
 				normalized := make([]interface{}, len(toolsArr))
 				for i, t := range toolsArr {
@@ -451,7 +454,12 @@ func PrepareCodexPassthrough(body []byte, prevEntryHandled bool) []byte {
 					}
 					if toolMap["type"] == "function" {
 						if funcDef, ok := toolMap["function"].(map[string]interface{}); ok {
-							flat := map[string]interface{}{"type": "function"}
+							flat := make(map[string]interface{}, len(toolMap)+len(funcDef))
+							for k, v := range toolMap {
+								if k != "function" {
+									flat[k] = v
+								}
+							}
 							for k, v := range funcDef {
 								flat[k] = v
 							}

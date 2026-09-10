@@ -228,11 +228,7 @@ func (p *Proxy) HandleWebSocketResponses(w http.ResponseWriter, r *http.Request)
 		p.logger.DebugContext(r.Context(), "ws: upgrade failed", "error", err)
 		return
 	}
-	readLimit := int64(p.maxBodySizeMB) * 1024 * 1024
-	if readLimit <= 0 {
-		readLimit = 1024 * 1024
-	}
-	conn.SetReadLimit(readLimit)
+	conn.SetReadLimit(p.websocketReadLimit())
 	defer func() {
 		if closeErr := conn.Close(); closeErr != nil && p.logger != nil {
 			p.logger.DebugContext(r.Context(), "ws: close failed", "error", closeErr)
@@ -269,6 +265,11 @@ outerLoop:
 			p.logger.WarnContext(r.Context(), "ws: unexpected message type from client", "type", msgType)
 			sendWSError(conn, "invalid_request", "Expected type: response.create")
 			continue
+		}
+
+		if model, _ := reqMap["model"].(string); p.modelManager != nil && p.modelManager.IsWebSocketResponses(model) {
+			p.handleNativeResponsesWebSocket(conn, r, msg)
+			return
 		}
 
 		// Remove the protocol-level "type" field before forwarding.
@@ -431,4 +432,12 @@ func waitForWSTurn(turnDone, streamDone, requestDone <-chan struct{}) bool {
 	}
 	<-turnDone
 	return true
+}
+
+func (p *Proxy) websocketReadLimit() int64 {
+	limit := int64(p.maxBodySizeMB) * 1024 * 1024
+	if limit <= 0 {
+		return 1024 * 1024
+	}
+	return limit
 }

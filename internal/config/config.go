@@ -121,6 +121,7 @@ type ModelRPMConfig struct {
 	// nil (omitted in config) = auto-detect: true for codex models, false otherwise.
 	// Explicit true/false overrides the auto-detection.
 	PassthroughResponses *bool `yaml:"passthrough_responses,omitempty"`
+	WebSocketResponses   bool  `yaml:"websocket_responses,omitempty"`
 
 	// PassthroughMessages controls whether /v1/messages requests for this model are
 	// forwarded as-is to an Anthropic-wire-compatible provider's native /v1/messages
@@ -142,6 +143,7 @@ func (m *ModelRPMConfig) UnmarshalYAML(value *yaml.Node) error {
 		Weight               string `yaml:"weight"`
 		Credential           string `yaml:"credential,omitempty"`
 		PassthroughResponses string `yaml:"passthrough_responses,omitempty"`
+		WebSocketResponses   string `yaml:"websocket_responses,omitempty"`
 		PassthroughMessages  string `yaml:"passthrough_messages,omitempty"`
 	}
 
@@ -157,6 +159,9 @@ func (m *ModelRPMConfig) UnmarshalYAML(value *yaml.Node) error {
 	m.PassthroughMessages = nil
 
 	var err error
+	if m.WebSocketResponses, err = parseField(temp.WebSocketResponses, false, strconv.ParseBool, "websocket_responses"); err != nil {
+		return err
+	}
 	if m.RPM, err = parseField(temp.RPM, 0, strconv.Atoi, "rpm for model '"+m.Name+"'"); err != nil {
 		return err
 	}
