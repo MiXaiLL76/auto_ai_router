@@ -70,8 +70,7 @@ credentials:
     api_key: "sk-remote-master-key"
     rpm: 200
     tpm: 100000
-    is_fallback: true
-
+    priority: 999   # last-resort tier (is_fallback: true is a deprecated alias)
 models:
   - name: "gpt-4o"
     credential: openai_main
@@ -164,7 +163,7 @@ Common fields for all credentials:
 | `proxy_url`        | string | Optional outbound proxy URL for this credential (HTTP, HTTPS, SOCKS5)                       |
 | `rpm`              | int    | Requests per minute limit (-1 = unlimited)                                                                                       |
 | `tpm`              | int    | Tokens per minute limit (-1 = unlimited)                                                                                         |
-| `is_fallback`      | bool   | Use as fallback when primary credentials are exhausted                                                                           |
+| `priority`         | int    | Selection-order group (lower first); `999` = last-resort. `is_fallback: true` / `fallback_priority: N` are deprecated aliases    |
 | `reasoning_only`   | bool   | Route only requests that explicitly enable reasoning/thinking                                                                    |
 | `scopes`           | list   | Optional client scopes allowed to use and see this credential                                                                    |
 | `denied_scopes`    | list   | Optional client scopes that must not use or see this credential                                                                  |

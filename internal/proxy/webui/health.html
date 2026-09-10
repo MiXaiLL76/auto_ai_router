@@ -213,7 +213,7 @@
 
         let badges = badge(TYPE_CLASS[c.type] || '', c.type);
         badges += badge('info', `w:${fmtNum(c.weight || 1)}`);
-        if (c.is_fallback) badges += badge('', 'fallback');
+        if (c.last_resort || (c.priority || 0) >= 999) badges += badge('', 'last-resort');
         if (c.is_banned) badges += badge('err', 'banned');
 
         let errHtml = '';
@@ -336,7 +336,7 @@
         const buckets = new Map();
         for (const row of entry.rows) {
           const cred = credentialsData[row.credential] || {};
-          const fb = !!cred.is_fallback;
+          const fb = !!cred.last_resort || (cred.priority || 0) >= 999;
           // All fallback rows collapse into one group; primary rows bucket by
           // priority, splitting a multi-tier proxy row into one row per tier.
           const expanded = fb ? [row] : expandRowTiers(row);

@@ -46,3 +46,12 @@ Locust_*.html
 air_mock_*.json
 mock-go
 router-api-pytest-*
+google_proto.md
+trace.json
+
+# example chain configs are committed on purpose (no secrets) despite the
+# global config.yaml ignore above
+!examples/chain_mock/**/config.yaml
+*_trace.json
+*_health.json
+review_*.md

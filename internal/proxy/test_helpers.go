@@ -145,13 +145,12 @@ func (b *TestProxyBuilder) WithCredentials(creds ...config.CredentialConfig) *Te
 // WithSingleCredential is a convenience method for adding a single credential.
 func (b *TestProxyBuilder) WithSingleCredential(name string, credType config.ProviderType, baseURL, apiKey string) *TestProxyBuilder {
 	cred := config.CredentialConfig{
-		Name:       name,
-		Type:       credType,
-		BaseURL:    baseURL,
-		APIKey:     apiKey,
-		RPM:        100,
-		TPM:        10000,
-		IsFallback: false,
+		Name:    name,
+		Type:    credType,
+		BaseURL: baseURL,
+		APIKey:  apiKey,
+		RPM:     100,
+		TPM:     10000,
 	}
 	return b.WithCredentials(cred)
 }
@@ -160,22 +159,21 @@ func (b *TestProxyBuilder) WithSingleCredential(name string, credType config.Pro
 func (b *TestProxyBuilder) WithPrimaryAndFallback(primaryURL, fallbackURL string) *TestProxyBuilder {
 	creds := []config.CredentialConfig{
 		{
-			Name:       "primary",
-			Type:       config.ProviderTypeProxy,
-			APIKey:     "pkey",
-			BaseURL:    primaryURL,
-			RPM:        100,
-			TPM:        10000,
-			IsFallback: false,
+			Name:    "primary",
+			Type:    config.ProviderTypeProxy,
+			APIKey:  "pkey",
+			BaseURL: primaryURL,
+			RPM:     100,
+			TPM:     10000,
 		},
 		{
-			Name:       "fallback",
-			Type:       config.ProviderTypeProxy,
-			APIKey:     "",
-			BaseURL:    fallbackURL,
-			RPM:        100,
-			TPM:        10000,
-			IsFallback: true,
+			Name:     "fallback",
+			Type:     config.ProviderTypeProxy,
+			APIKey:   "",
+			BaseURL:  fallbackURL,
+			RPM:      100,
+			TPM:      10000,
+			Priority: config.FallbackPriorityGroup,
 		},
 	}
 	return b.WithCredentials(creds...)
@@ -185,24 +183,23 @@ func (b *TestProxyBuilder) WithPrimaryAndFallback(primaryURL, fallbackURL string
 func (b *TestProxyBuilder) WithMultipleFallbacks(primaryURL string, fallbackURLs ...string) *TestProxyBuilder {
 	creds := []config.CredentialConfig{
 		{
-			Name:       "primary",
-			Type:       config.ProviderTypeProxy,
-			APIKey:     "pkey",
-			BaseURL:    primaryURL,
-			RPM:        100,
-			TPM:        10000,
-			IsFallback: false,
+			Name:    "primary",
+			Type:    config.ProviderTypeProxy,
+			APIKey:  "pkey",
+			BaseURL: primaryURL,
+			RPM:     100,
+			TPM:     10000,
 		},
 	}
 	for i, url := range fallbackURLs {
 		creds = append(creds, config.CredentialConfig{
-			Name:       "fallback" + string(rune('1'+i)),
-			Type:       config.ProviderTypeProxy,
-			APIKey:     "",
-			BaseURL:    url,
-			RPM:        100,
-			TPM:        10000,
-			IsFallback: true,
+			Name:     "fallback" + string(rune('1'+i)),
+			Type:     config.ProviderTypeProxy,
+			APIKey:   "",
+			BaseURL:  url,
+			RPM:      100,
+			TPM:      10000,
+			Priority: config.FallbackPriorityGroup,
 		})
 	}
 	return b.WithCredentials(creds...)
@@ -327,7 +324,6 @@ func createMockProxyHealthResponse() *httputil.ProxyHealthResponse {
 		Credentials: map[string]httputil.CredentialHealthStats{
 			"remote_cred_1": {
 				Type:       "openai",
-				IsFallback: false,
 				Weight:     3,
 				LimitRPM:   100,
 				LimitTPM:   1000,
@@ -336,7 +332,6 @@ func createMockProxyHealthResponse() *httputil.ProxyHealthResponse {
 			},
 			"remote_cred_2": {
 				Type:       "openai",
-				IsFallback: false,
 				Weight:     2,
 				LimitRPM:   200,
 				LimitTPM:   2000,

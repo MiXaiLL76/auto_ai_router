@@ -48,13 +48,12 @@ func TestPrintConfig(t *testing.T) {
 		},
 		Credentials: []CredentialConfig{
 			{
-				Name:       "test-provider",
-				Type:       ProviderTypeOpenAI,
-				BaseURL:    "https://api.openai.com",
-				APIKey:     "sk-test",
-				RPM:        60,
-				TPM:        10000,
-				IsFallback: false,
+				Name:    "test-provider",
+				Type:    ProviderTypeOpenAI,
+				BaseURL: "https://api.openai.com",
+				APIKey:  "sk-test",
+				RPM:     60,
+				TPM:     10000,
 			},
 		},
 		Models: []ModelRPMConfig{

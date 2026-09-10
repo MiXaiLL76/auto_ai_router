@@ -9,9 +9,9 @@ The router uses two-level rate limiting:
 
 When a limit is reached:
 
-1. Router tries another credential for the same model (round-robin)
-2. If no credentials are available, returns `429 Too Many Requests`
-3. If fallback proxies are configured, routes to them automatically
+1. Router cascades to the next credential in the priority order for that model
+2. Last-resort credentials (`priority: 999`) are tried after every lower tier
+3. If every tier is exhausted, returns `429 Too Many Requests`
 
 ### Check Current Usage
 
@@ -23,8 +23,7 @@ curl http://localhost:8080/health | jq '.credentials'
 
 ### 503 Service Unavailable
 
-- All credentials have exhausted their rate limits
-- All fallback proxies are unavailable
+- Every credential for the model — including the last-resort tier — is banned or rate-limited
 - **Fix**: increase RPM/TPM limits, add more credentials, or wait for the next minute reset
 
 ### 429 Too Many Requests
@@ -40,20 +39,21 @@ curl http://localhost:8080/health | jq '.credentials'
 - API key revoked by the provider
 - **Fix**: check your config, update the API key
 
-## Fallback Behavior
+## Last-Resort Behavior
 
-Fallback proxies (`is_fallback: true`) activate when:
+Last-resort credentials (`priority: 999`) are reached when every lower priority tier for
+the model is unavailable because it:
 
-- Primary credentials exhaust their RPM/TPM limits
-- Primary providers return errors (`401`, `403`, `429`, `500`, `502`, `503`, `504`)
-- Network errors or timeouts occur
+- exhausted its RPM/TPM limits, or
+- returned a retryable error (`401`, `403`, `429`, `500`, `502`, `503`, `504`), or
+- hit a network error or timeout.
 
-### Fallback Chain
+### Cascade
 
-1. Request sent to primary credential
-2. Primary fails → try fallback proxy
-3. Fallback proxy handles the request with its own credential pool
-4. If fallback is also unavailable → `503 Service Unavailable`
+1. Request selected from the lowest live priority tier
+2. Retryable failure → the router continues the same cascade over the untried credentials
+   (crossing provider types), tier by tier, up to `priority: 999`
+3. If even the last-resort tier is exhausted → `503 Service Unavailable`
 
 ## Debug Logging
 

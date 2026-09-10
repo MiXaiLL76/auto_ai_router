@@ -105,11 +105,11 @@ This gives you an effective 200 RPM for `gpt-4o`.
 
 ## Primary Priority Groups
 
-`priority` (distinct from `fallback_priority` below) groups **primary** credentials into
-tiers for the *initial* request selection. Credentials are bucketed by `priority` value
-(ascending); the balancer runs weighted round-robin inside the lowest-numbered tier that
-still has a live member, and only cascades to the next tier when every member of the
-current one is banned or rate-limited.
+`priority` is the single selection-order axis, used for both the initial request and
+every retry. Credentials are bucketed by `priority` value (ascending); the balancer runs
+weighted round-robin inside the lowest-numbered tier that still has a live member, and
+only cascades to the next tier when every member of the current one is banned or
+rate-limited.
 
 ```yaml
 credentials:
@@ -137,13 +137,21 @@ credentials:
 
 Credentials that omit `priority` (or set it to `0`) all share the default tier `0`, which
 is tried first — so a config that never sets `priority` behaves exactly like the flat
-weighted pool described above. `priority` and `fallback_priority` are mutually exclusive
-on a single credential, and `is_fallback: true` credentials cannot set `priority`.
+weighted pool described above. `priority: 999` (`FallbackPriorityGroup`) is the
+last-resort group.
+
+The retired `is_fallback: true` and `fallback_priority: N` YAML keys are still accepted
+as deprecated input aliases: `is_fallback: true` folds to `priority: 999`,
+`fallback_priority: N` folds to `priority: N`. The router logs a warning; `is_fallback: true` combined with a *lower* explicit `priority` is rejected as contradictory.
 
 For a `proxy`/`air` credential, the per-model priority learned from the upstream's own
 `/health` (its upstream credentials' `priority` values) takes precedence over the static
 `priority` set here, so a proxy credential's tier reflects what the node it proxies to is
-actually configured with.
+actually configured with. Models that the upstream serves **only** from its last-resort
+group (`priority: 999`) are still discovered and placed in this router's local
+last-resort tier — an all-last-resort upstream node is not hidden. When the model checker
+is disabled there is no learned priority, so give a credential fronting such a node
+`priority: 999` itself.
 
 When one upstream node serves the same model from several priority groups behind a single
 proxy credential, that credential **expands into one local candidate per tier**. Each tier
@@ -173,82 +181,49 @@ Consequences:
   in the chain) drops the credential — the scalar `priority` number alone carries no ban
   state.
 
-> `fallback_priority` is **not** folded into primary-tier grouping — it only affects retry
-> order (next section). A credential that sets only `fallback_priority` stays in primary
-> tier `0`.
+## Retry Order
 
-## Fallback Priority
+After the initially selected credential returns a retryable error (`429`, `5xx`, auth
+error), the router continues the **same priority cascade** over the credentials it has not
+tried yet: it walks the ascending priority tiers, weighted round-robin within a tier, and
+crosses provider types freely. When the next credential has a credential-specific real
+model mapping, the router re-resolves the model before sending the retry request, so an
+Anthropic model alias can safely move onto a Bedrock credential.
 
-Primary credentials (non-fallback) are used for the initial request. By default provider retry
-stays within the same provider type: if an OpenAI credential returns `429` or `5xx`, the router
-tries another OpenAI credential for the same model.
+`max_provider_retries` bounds the same-request retry loop; a proxy-forward path then has
+an extended phase bounded by `max_fallback_attempts` that keeps walking the cascade
+through any remaining proxy/AIR credential. There is no separate retry knob per
+credential — order is entirely `priority`.
 
-Set `fallback_priority` when the retry order must be explicit and may cross provider types.
-Lower numbers are tried first after the initially selected credential returns a retryable error.
-The field is applied to regular primary credentials; `is_fallback: true` credentials stay reserved
-for the fallback phase and cannot set `fallback_priority`.
+> **Deprecated:** `fallback_priority: N` and `is_fallback: true` are still accepted as
+> input aliases. `is_fallback: true` becomes `priority: 999`; `fallback_priority: N`
+> becomes `priority: N` (which now also groups the *initial* selection into a hard tier,
+> not only the retry order). The router logs a warning; migrate to `priority`.
 
-```yaml
-credentials:
-  - name: "primary-anthropic"
-    type: "anthropic"
-    api_key: "os.environ/PRIMARY_ANTHROPIC_KEY"
-    base_url: "https://anthropic-primary.example.com"
-    rpm: 400
-    fallback_priority: 10
+## AIR Chain Last-Resort
 
-  - name: "backup-anthropic"
-    type: "anthropic"
-    api_key: "os.environ/BACKUP_ANTHROPIC_KEY"
-    base_url: "https://anthropic-backup.example.com"
-    rpm: 500
-    fallback_priority: 20
-
-  - name: "bedrock-reserve"
-    type: "bedrock"
-    api_key: "os.environ/BEDROCK_RESERVE_KEY"
-    base_url: "https://bedrock-reserve.example.com"
-    rpm: 1000
-    fallback_priority: 30
-```
-
-With this configuration, if `primary-anthropic` returns a retryable error for `claude`, the router
-tries `backup-anthropic` next. If `backup-anthropic` is also unavailable, it tries
-`bedrock-reserve`. When the next credential has a credential-specific real model mapping, the
-router re-resolves the model before sending the retry request, so an Anthropic model alias can
-safely move to a Bedrock credential.
-
-If `fallback_priority` is omitted or set to `0`, the old same-type retry behavior is preserved
-when that credential starts the retry chain. When a retry chain starts from a credential with
-`fallback_priority > 0`, the router tries all configured priority tiers first, then continues
-with regular credentials that do not set `fallback_priority`. Fallback credentials
-(`is_fallback: true`) are still used only by the fallback mechanism. See
-[Proxy — Fallback Behavior](../providers/proxy.md#fallback-behavior) for details.
-
-## AIR Chain Fallback
-
-When using chained routers (e.g. router01 → router02 as primary, router03 as fallback), fallback works across the chain:
+When using chained routers (e.g. router01 → router02 in tier 0, router03 at `priority: 999`), the last-resort credential works across the chain:
 
 ```
 router01 receives request
-  └─► router02 (primary AIR) → router02 returns 429/5xx
-      └─► router01 detects retryable error
-          └─► router03 (fallback AIR) → success
+  └─► router02 (tier 0 AIR) → router02 returns 429/5xx
+      └─► router01 detects retryable error, marks router02 tried
+          └─► cascade continues → router03 (priority 999 AIR) → success
 ```
-
-router01 marks router02 as "tried" immediately on the first attempt, so same-type retries
-never re-select router02. After all primary AIR credentials are exhausted, `TryFallbackProxy`
-selects the next `is_fallback: true` credential (router03).
 
 ```yaml
 credentials:
   - name: "router02"
     type: "air"
     base_url: "https://router02.example.com"
-    is_fallback: false
 
   - name: "router03"
     type: "air"
     base_url: "https://router03.example.com"
-    is_fallback: true
+    priority: 999
 ```
+
+Models that router03's upstream serves only from its own last-resort tier are still
+discovered by router01 and placed in router01's local last-resort tier — an all-last-resort
+upstream node is not hidden. (With the model checker disabled there is no learned tier, so
+give the fronting credential `priority: 999` itself.)

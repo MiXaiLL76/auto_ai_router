@@ -14,13 +14,11 @@ type swrrNode struct {
 // schedKey identifies an independent SWRR cycle. Using a comparable struct (rather than a
 // formatted string) keeps it allocation-free on the selection hot path.
 type schedKey struct {
-	model        string
-	fallbackOnly bool
-	proxyOnly    bool
-	reqType      config.ProviderType
-	excluding    bool
-	priority     int
-	scopeKey     string
+	model     string
+	reqType   config.ProviderType
+	excluding bool
+	priority  int
+	scopeKey  string
 }
 
 // swrrState is the SWRR scheduler for one schedKey. Nodes are keyed by credential name so
@@ -76,12 +74,12 @@ func (s *swrrState) currentOf(name string) int {
 // filtering is active; otherwise every model shares one candidate set, so they must share
 // one cycle too — keeping the key out avoids unbounded map growth from arbitrary model
 // names. Must be called with r.mu held.
-func (r *RoundRobin) schedKeyFor(modelID string, allowOnlyFallback, allowOnlyProxy bool, requiredType config.ProviderType, excluding bool, scopeKey string) schedKey {
+func (r *RoundRobin) schedKeyFor(modelID string, requiredType config.ProviderType, excluding bool, scopeKey string) schedKey {
 	model := modelID
 	if model == "" || r.modelChecker == nil || !r.modelChecker.IsEnabled() {
 		model = ""
 	}
-	return schedKey{model: model, fallbackOnly: allowOnlyFallback, proxyOnly: allowOnlyProxy, reqType: requiredType, excluding: excluding, scopeKey: scopeKey}
+	return schedKey{model: model, reqType: requiredType, excluding: excluding, scopeKey: scopeKey}
 }
 
 // swrrStateFor returns (creating if needed) the SWRR scheduler for a selection cycle.
@@ -156,29 +154,15 @@ func (r *RoundRobin) learnedProxyPriority(cred *config.CredentialConfig, modelID
 	return 0, false
 }
 
-// primaryPriority resolves the primary-pool priority group for cred: the learned
-// per-model proxy priority if any, else the explicit `priority:` field (Priority).
-// Unlike effectivePriority it never falls back to fallback_priority — that field is a
-// retry-only ordering knob (docs/advanced/balancing.md "fallback_priority"), and folding
-// it into primary-pool grouping silently turns every existing fallback_priority config
-// into hard primary priority steps on upgrade (a flat weighted pool becomes exclusive
-// tiers). Primary-pool grouping opts in only via the explicit priority: field.
+// primaryPriority resolves the priority group for cred on the selection cascade: the
+// learned per-model proxy priority if any (an upstream proxy/AIR credential inherits the
+// tier its upstream actually serves the model from), else the static `priority:` field.
+// This is the only priority resolver now — initial pick and retry both use it.
 func (r *RoundRobin) primaryPriority(cred *config.CredentialConfig, modelID string) int {
 	if p, ok := r.learnedProxyPriority(cred, modelID); ok {
 		return p
 	}
 	return cred.Priority
-}
-
-// effectivePriority resolves the priority tier for the retry cascade: the learned
-// per-model proxy priority if any, else the credential's static EffectivePriority()
-// (which does include fallback_priority — retry ordering is exactly what that field was
-// always for).
-func (r *RoundRobin) effectivePriority(cred *config.CredentialConfig, modelID string) int {
-	if p, ok := r.learnedProxyPriority(cred, modelID); ok {
-		return p
-	}
-	return cred.EffectivePriority()
 }
 
 // candidateWeight is the SWRR weight for one selection candidate: a tier candidate

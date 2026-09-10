@@ -63,13 +63,13 @@ configs:
 
       - name: "fin01"
         type: "air"
-        is_fallback: true
+        priority: 999
         api_key: sk-fin01-key
         base_url: http://fin01:8080
 
       - name: "fra01"
         type: "air"
-        is_fallback: true
+        priority: 999
         api_key: sk-fra01-key
         base_url: http://fra01:8080
 

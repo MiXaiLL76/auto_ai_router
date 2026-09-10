@@ -63,10 +63,10 @@ func TestBanDurationToString(t *testing.T) {
 
 func TestConvertMapToArgs(t *testing.T) {
 	m := map[string]any{
-		"name":        "test-cred",
-		"type":        "openai",
-		"is_fallback": false,
-		"base_url":    "https://api.example.com",
+		"name":     "test-cred",
+		"type":     "openai",
+		"priority": 0,
+		"base_url": "https://api.example.com",
 	}
 
 	args := convertMapToArgs(m)
@@ -74,7 +74,7 @@ func TestConvertMapToArgs(t *testing.T) {
 	// Must contain all key-value pairs
 	assert.Len(t, args, 8) // 4 keys * 2
 
-	// Verify preferred order: name, type, base_url come before is_fallback
+	// Verify preferred order: name, type, base_url come before priority
 	foundKeys := make([]string, 0)
 	for i := 0; i < len(args); i += 2 {
 		foundKeys = append(foundKeys, args[i].(string))

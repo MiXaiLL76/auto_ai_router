@@ -124,15 +124,13 @@ func PrintConfig(logger *slog.Logger, cfg *Config) {
 	)
 	for i, cred := range cfg.Credentials {
 		credLog := map[string]any{
-			"name":              cred.Name,
-			"type":              cred.Type,
-			"base_url":          cred.BaseURL,
-			"auth_type":         cred.AuthType,
-			"rpm":               rpmToString(cred.RPM),
-			"tpm":               tpmToString(cred.TPM),
-			"is_fallback":       cred.IsFallback,
-			"fallback_priority": cred.FallbackPriority,
-			"priority":          cred.Priority,
+			"name":      cred.Name,
+			"type":      cred.Type,
+			"base_url":  cred.BaseURL,
+			"auth_type": cred.AuthType,
+			"rpm":       rpmToString(cred.RPM),
+			"tpm":       tpmToString(cred.TPM),
+			"priority":  cred.Priority,
 		}
 
 		// Add Vertex AI specific fields if present
@@ -293,7 +291,7 @@ func convertMapToArgs(m map[string]any) []any {
 	// Define preferred order of keys
 	keyOrder := []string{
 		"name", "type", "base_url", "auth_type", "api_key", "project_id", "location",
-		"credentials_file", "credentials_json", "rpm", "tpm", "is_fallback",
+		"credentials_file", "credentials_json", "rpm", "tpm", "priority",
 	}
 
 	args := make([]any, 0, len(m)*2)

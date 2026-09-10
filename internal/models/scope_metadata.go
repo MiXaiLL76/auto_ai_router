@@ -5,18 +5,21 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/scope"
 )
 
-func AggregateProviderScopesFromHealth(health *httputil.ProxyHealthResponse, includeFallback bool) ScopeMetadata {
+// AggregateProviderScopesFromHealth ORs the scope expressions of every upstream
+// credential in the /health response. All credentials are included regardless of their
+// priority tier: a chained downstream discovers the upstream's full catalogue and tiers
+// last-resort (priority: 999 / is_fallback) models locally rather than dropping them.
+func AggregateProviderScopesFromHealth(health *httputil.ProxyHealthResponse) ScopeMetadata {
 	expressions := make([]*scope.Expression, 0, len(health.Credentials))
 	for _, stats := range health.Credentials {
-		if !includeFallback && stats.IsFallback {
-			continue
-		}
 		expressions = append(expressions, credentialScopeExpression(stats))
 	}
 	return scopeMetadataFromExpression(scope.Or(expressions...))
 }
 
-func AggregateModelScopesFromHealth(health *httputil.ProxyHealthResponse, includeFallback bool) map[string]ScopeMetadata {
+// AggregateModelScopesFromHealth builds the per-model scope expression from every
+// upstream credential serving it. See AggregateProviderScopesFromHealth on tier handling.
+func AggregateModelScopesFromHealth(health *httputil.ProxyHealthResponse) map[string]ScopeMetadata {
 	expressions := make(map[string][]*scope.Expression)
 	for _, modelStats := range health.Models {
 		if modelStats.Model == "" {
@@ -24,9 +27,6 @@ func AggregateModelScopesFromHealth(health *httputil.ProxyHealthResponse, includ
 		}
 		credStats, ok := health.Credentials[modelStats.Credential]
 		if !ok {
-			continue
-		}
-		if !includeFallback && credStats.IsFallback {
 			continue
 		}
 		expressions[modelStats.Model] = append(expressions[modelStats.Model], modelScopeExpression(modelStats, credStats))

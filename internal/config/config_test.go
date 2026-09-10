@@ -1199,138 +1199,42 @@ func TestConfig_Validate_TPM(t *testing.T) {
 	}
 }
 
-// Fallback Configuration Tests
+// Priority / deprecated-alias Tests
 
-func TestConfig_ValidateFallback_AllowsFallbackOnAnyType(t *testing.T) {
-	// Valid: is_fallback can be set on any credential type
+func TestConfig_DeprecatedIsFallbackAlias_FoldsToLastResortPriority(t *testing.T) {
 	cfg := &Config{
-		Server: ServerConfig{
-			Port:           8080,
-			MaxBodySizeMB:  10,
-			MasterKey:      "test-key",
-			RequestTimeout: 30 * time.Second,
-		},
+		Server: ServerConfig{Port: 8080, MaxBodySizeMB: 10, MasterKey: "test-key", RequestTimeout: 30 * time.Second},
 		Credentials: []CredentialConfig{
-			{Name: "openai-primary", Type: "openai", BaseURL: "http://a.com", APIKey: "key", RPM: 10, IsFallback: false},
-			{Name: "openai-fallback", Type: "openai", BaseURL: "http://b.com", APIKey: "key", RPM: 10, IsFallback: true},
+			{Name: "openai-primary", Type: "openai", BaseURL: "http://a.com", APIKey: "key", RPM: 10},
+			{Name: "openai-reserve", Type: "openai", BaseURL: "http://b.com", APIKey: "key", RPM: 10, Priority: FallbackPriorityGroup},
 		},
 		Fail2Ban: Fail2BanConfig{MaxAttempts: 3},
 	}
 
-	err := cfg.Validate()
-	assert.NoError(t, err, "is_fallback should be allowed on any credential type")
-}
-
-func TestConfig_ValidateFallbackPriority(t *testing.T) {
-	tests := []struct {
-		name       string
-		priority   int
-		isFallback bool
-		wantErr    bool
-	}{
-		{name: "unset", priority: 0, wantErr: false},
-		{name: "positive", priority: 10, wantErr: false},
-		{name: "negative", priority: -1, wantErr: true},
-		{name: "fallback with priority", priority: 10, isFallback: true, wantErr: true},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			cfg := &Config{
-				Server: ServerConfig{
-					Port:           8080,
-					MaxBodySizeMB:  10,
-					MasterKey:      "test-key",
-					RequestTimeout: 30 * time.Second,
-				},
-				Credentials: []CredentialConfig{
-					{Name: "test", Type: "openai", APIKey: "key", BaseURL: "http://test.com", RPM: 10, IsFallback: tt.isFallback, FallbackPriority: tt.priority},
-				},
-				Fail2Ban: Fail2BanConfig{MaxAttempts: 3},
-			}
-
-			err := cfg.Validate()
-			if tt.wantErr {
-				assert.Error(t, err)
-				assert.Contains(t, err.Error(), "invalid fallback_priority")
-			} else {
-				assert.NoError(t, err)
-			}
-		})
-	}
-}
-
-func TestCredentialConfig_UnmarshalYAML_FallbackPriority(t *testing.T) {
-	t.Setenv("TEST_FALLBACK_PRIORITY", "20")
-
-	tmpDir := t.TempDir()
-	configPath := filepath.Join(tmpDir, "config.yaml")
-
-	configContent := `
-server:
-  port: 8080
-  max_body_size_mb: 10
-  master_key: "test-key"
-  request_timeout: 30s
-
-credentials:
-  - name: "cheapgpt"
-    type: "anthropic"
-    api_key: "key"
-    base_url: "http://cheapgpt.com"
-    rpm: 100
-    fallback_priority: 10
-  - name: "cometapi"
-    type: "anthropic"
-    api_key: "key2"
-    base_url: "http://cometapi.com"
-    rpm: 100
-    fallback_priority: os.environ/TEST_FALLBACK_PRIORITY
-
-fail2ban:
-  max_attempts: 3
-  ban_duration: permanent
-  error_codes: [429]
-`
-
-	err := os.WriteFile(configPath, []byte(configContent), 0644)
-	require.NoError(t, err)
-
-	cfg, err := Load(configPath)
-	require.NoError(t, err)
-	require.Len(t, cfg.Credentials, 2)
-	assert.Equal(t, 10, cfg.Credentials[0].FallbackPriority)
-	assert.Equal(t, 20, cfg.Credentials[1].FallbackPriority)
+	require.NoError(t, cfg.Validate())
+	assert.False(t, cfg.Credentials[0].IsLastResort())
+	assert.True(t, cfg.Credentials[1].IsLastResort())
 }
 
 func TestConfig_ValidatePriority(t *testing.T) {
 	tests := []struct {
-		name             string
-		priority         int
-		fallbackPriority int
-		isFallback       bool
-		wantErr          bool
-		wantErrSubstr    string
+		name          string
+		priority      int
+		wantErr       bool
+		wantErrSubstr string
 	}{
 		{name: "unset", priority: 0, wantErr: false},
 		{name: "positive", priority: 100, wantErr: false},
+		{name: "last-resort group", priority: FallbackPriorityGroup, wantErr: false},
 		{name: "negative", priority: -1, wantErr: true, wantErrSubstr: "invalid priority"},
-		{name: "conflicts with fallback_priority", priority: 100, fallbackPriority: 20, wantErr: true, wantErrSubstr: "cannot set both priority and fallback_priority"},
-		{name: "conflicts with is_fallback", priority: 100, isFallback: true, wantErr: true, wantErrSubstr: "fallback credentials cannot set priority"},
-		{name: "is_fallback without explicit priority is fine", priority: 0, isFallback: true, wantErr: false},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := &Config{
-				Server: ServerConfig{
-					Port:           8080,
-					MaxBodySizeMB:  10,
-					MasterKey:      "test-key",
-					RequestTimeout: 30 * time.Second,
-				},
+				Server: ServerConfig{Port: 8080, MaxBodySizeMB: 10, MasterKey: "test-key", RequestTimeout: 30 * time.Second},
 				Credentials: []CredentialConfig{
-					{Name: "test", Type: "openai", APIKey: "key", BaseURL: "http://test.com", RPM: 10, IsFallback: tt.isFallback, Priority: tt.priority, FallbackPriority: tt.fallbackPriority},
+					{Name: "test", Type: "openai", APIKey: "key", BaseURL: "http://test.com", RPM: 10, Priority: tt.priority},
 				},
 				Fail2Ban: Fail2BanConfig{MaxAttempts: 3},
 			}
@@ -1346,39 +1250,43 @@ func TestConfig_ValidatePriority(t *testing.T) {
 	}
 }
 
-func TestConfig_ValidatePinsFallbackToLastPriorityGroup(t *testing.T) {
-	cfg := &Config{
-		Server: ServerConfig{Port: 8080, MaxBodySizeMB: 10, MasterKey: "test-key", RequestTimeout: 30 * time.Second},
-		Credentials: []CredentialConfig{
-			{Name: "primary", Type: "openai", APIKey: "k", BaseURL: "http://a.com", RPM: 10, Priority: 5},
-			{Name: "reserve", Type: "openai", APIKey: "k", BaseURL: "http://b.com", RPM: 10, IsFallback: true},
-		},
-		Fail2Ban: Fail2BanConfig{MaxAttempts: 3},
-	}
+// The retired is_fallback: true / fallback_priority: N YAML keys are still accepted as
+// deprecated input aliases that fold into priority.
+func TestCredentialConfig_UnmarshalYAML_DeprecatedAliases(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.yaml")
+	require.NoError(t, os.WriteFile(configPath, []byte(`
+server:
+  port: 8080
+  max_body_size_mb: 10
+  master_key: "test-key"
+  request_timeout: 30s
+credentials:
+  - name: "reserve"
+    type: "openai"
+    api_key: "k"
+    base_url: "http://b.com"
+    rpm: 100
+    is_fallback: true
+  - name: "mid"
+    type: "openai"
+    api_key: "k"
+    base_url: "http://c.com"
+    rpm: 100
+    fallback_priority: 30
+fail2ban:
+  max_attempts: 3
+`), 0644))
 
-	require.NoError(t, cfg.Validate())
-	assert.Equal(t, 5, cfg.Credentials[0].Priority, "explicit priority untouched")
-	assert.Equal(t, FallbackPriorityGroup, cfg.Credentials[1].Priority, "fallback credential pinned to the last priority group")
-	assert.Equal(t, FallbackPriorityGroup, cfg.Credentials[1].EffectivePriority())
-
-	// Idempotent: a second Validate() must not error on the now-999 fallback cred.
-	require.NoError(t, cfg.Validate())
-	assert.Equal(t, FallbackPriorityGroup, cfg.Credentials[1].Priority)
+	cfg, err := Load(configPath)
+	require.NoError(t, err)
+	require.Len(t, cfg.Credentials, 2)
+	assert.Equal(t, FallbackPriorityGroup, cfg.Credentials[0].Priority, "is_fallback: true -> priority: 999")
+	assert.True(t, cfg.Credentials[0].IsLastResort())
+	assert.Equal(t, 30, cfg.Credentials[1].Priority, "fallback_priority: 30 -> priority: 30")
 }
 
-func TestNormalizeFallbackPriorities(t *testing.T) {
-	creds := []CredentialConfig{
-		{Name: "primary", Priority: 5},
-		{Name: "fallback", IsFallback: true},
-		{Name: "default"},
-	}
-	NormalizeFallbackPriorities(creds)
-	assert.Equal(t, 5, creds[0].Priority, "explicit priority untouched")
-	assert.Equal(t, FallbackPriorityGroup, creds[1].Priority, "is_fallback pinned to last group")
-	assert.Equal(t, 0, creds[2].Priority, "non-fallback default left at 0")
-}
-
-func TestCredentialConfig_UnmarshalYAML_RejectsExplicitPriorityOnFallback(t *testing.T) {
+func TestCredentialConfig_UnmarshalYAML_RejectsContradictoryAliases(t *testing.T) {
 	tmpDir := t.TempDir()
 	configPath := filepath.Join(tmpDir, "config.yaml")
 	require.NoError(t, os.WriteFile(configPath, []byte(`
@@ -1395,11 +1303,13 @@ credentials:
     rpm: 100
     is_fallback: true
     priority: 7
+fail2ban:
+  max_attempts: 3
 `), 0644))
 
 	_, err := Load(configPath)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "fallback credentials")
+	assert.Contains(t, err.Error(), "is_fallback")
 }
 
 func TestCredentialConfig_UnmarshalYAML_Priority(t *testing.T) {
@@ -1445,25 +1355,11 @@ fail2ban:
 	assert.Equal(t, 200, cfg.Credentials[1].Priority)
 }
 
-func TestCredentialConfig_EffectivePriority(t *testing.T) {
-	tests := []struct {
-		name             string
-		priority         int
-		fallbackPriority int
-		want             int
-	}{
-		{name: "neither set defaults to group 0", priority: 0, fallbackPriority: 0, want: 0},
-		{name: "explicit priority wins", priority: 100, fallbackPriority: 0, want: 100},
-		{name: "falls back to fallback_priority when priority unset", priority: 0, fallbackPriority: 20, want: 20},
-		{name: "explicit priority takes precedence over fallback_priority", priority: 100, fallbackPriority: 20, want: 100},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			cred := CredentialConfig{Priority: tt.priority, FallbackPriority: tt.fallbackPriority}
-			assert.Equal(t, tt.want, cred.EffectivePriority())
-		})
-	}
+func TestCredentialConfig_IsLastResort(t *testing.T) {
+	assert.False(t, CredentialConfig{Priority: 0}.IsLastResort())
+	assert.False(t, CredentialConfig{Priority: 998}.IsLastResort())
+	assert.True(t, CredentialConfig{Priority: FallbackPriorityGroup}.IsLastResort())
+	assert.True(t, CredentialConfig{Priority: 1000}.IsLastResort())
 }
 
 func TestServerConfig_ModelPricesSyncInterval(t *testing.T) {

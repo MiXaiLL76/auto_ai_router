@@ -110,17 +110,15 @@ func (p *Proxy) HealthCheckScoped(visibility scope.Context) (bool, *httputil.Pro
 		expression := cred.ScopeExpression()
 		scopes, deniedScopes := expression.LegacyProjection()
 		credentialsInfo[cred.Name] = httputil.CredentialHealthStats{
-			Type:             string(cred.Type),
-			BaseURL:          cleanBaseURL(cred.BaseURL),
-			IsFallback:       cred.IsFallback,
-			IsProxyLike:      cred.IsProxyLike(),
-			IsBanned:         p.balancer.HasAnyBan(cred.Name),
-			Weight:           balancer.EffectiveWeight(0, cred.Weight),
-			FallbackPriority: cred.FallbackPriority,
-			// Priority carries only the explicit priority: field, not EffectivePriority():
-			// a downstream proxy folds this into its own primary-pool grouping via
-			// EffectiveHealthPriority, and fallback_priority (reported separately above)
-			// must not leak in as a hard primary tier there.
+			Type:        string(cred.Type),
+			BaseURL:     cleanBaseURL(cred.BaseURL),
+			LastResort:  cred.IsLastResort(),
+			IsProxyLike: cred.IsProxyLike(),
+			IsBanned:    p.balancer.HasAnyBan(cred.Name),
+			Weight:      balancer.EffectiveWeight(0, cred.Weight),
+			// Priority is the single selection-order axis. A downstream proxy folds it into
+			// its own priority grouping via EffectiveHealthPriority; a last-resort
+			// credential already carries priority 999 here.
 			Priority:        cred.Priority,
 			Scopes:          scopes,
 			DeniedScopes:    deniedScopes,
@@ -248,9 +246,8 @@ func (p *Proxy) addModelHealthStats(
 	isProxyLike := false
 	if credFound {
 		credWeight = cred.Weight
-		// cred.Priority (not EffectivePriority()) — the balancer's primary-pool grouping
-		// keys off the explicit priority: field only (balancer.primaryPriority);
-		// fallback_priority is a retry-only knob and must not show here as a primary tier.
+		// cred.Priority is the single selection-order axis (balancer.primaryPriority
+		// resolves the learned per-model proxy tier, else this static value).
 		credPriority = cred.Priority
 		isProxyLike = cred.IsProxyLike()
 	}

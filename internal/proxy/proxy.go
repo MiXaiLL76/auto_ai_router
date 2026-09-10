@@ -992,16 +992,16 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 
 		for attempt := 0; attempt <= p.maxProviderRetries; attempt++ {
 			if attempt > 0 {
-				nextCred, err := p.balancer.NextSameTypeForModelExcludingScoped(modelID, cred.Type, triedCreds, logCtx.Scope)
+				nextCred, err := p.balancer.NextRetryForModelExcludingScoped(modelID, cred, triedCreds, logCtx.Scope)
 				if err != nil {
-					p.logger.DebugContext(r.Context(), "No more same-type remote-router credentials for retry",
+					p.logger.DebugContext(r.Context(), "No more credentials for retry",
 						"model", modelID, "attempt", attempt, "error", err)
 					break
 				}
 				cred = nextCred
 				triedCreds[cred.Name] = true
 				logCtx.Credential = cred
-				p.logger.WarnContext(r.Context(), "Retrying with next same-type proxy credential",
+				p.logger.WarnContext(r.Context(), "Retrying with next credential in the priority cascade",
 					"credential", cred.Name, "model", modelID,
 					"attempt", attempt+1, "max_attempts", p.maxProviderRetries+1,
 					"retry_reason", retryReason)
@@ -1027,9 +1027,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 				break // can't retry streaming
 			}
 
-			if !cred.IsFallback {
-				shouldRetry, retryReason = ShouldRetryWithFallback(proxyResp.StatusCode, proxyResp.Body)
-			}
+			shouldRetry, retryReason = ShouldRetryWithFallback(proxyResp.StatusCode, proxyResp.Body)
 
 			if !shouldRetry {
 				break
@@ -1417,7 +1415,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 	// Track embeddings requests (once, before retry loop)
 	isEmbeddings := strings.Contains(r.URL.Path, "/embeddings")
 
-	// Retry loop: try same-type credentials by default, or fallback_priority tiers when configured.
+	// Retry loop: continue the priority cascade over untried credentials (cross-type).
 	triedCreds := GetTried(r.Context())
 	var (
 		resp            *http.Response

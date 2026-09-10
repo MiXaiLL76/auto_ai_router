@@ -121,17 +121,17 @@ func updateModelScopes(
 	cred *config.CredentialConfig,
 	modelManager ModelManagerInterface,
 ) {
-	// is_fallback rules mirror the old model-snapshot path (models.fetchRemoteModelsFromHealth):
-	// for a non-fallback connection, upstream credentials marked is_fallback are excluded
-	// from aggregation (updateModelLimits below drops their models from the set entirely,
-	// so there is nothing to scope), and for a fallback connection every upstream
-	// credential is included as a last resort. Passing `true` unconditionally here (a) let
-	// an unrestricted is_fallback upstream credential OR its lack-of-scope into the
-	// aggregate and erase a restricted primary credential's scope, and (b) diverged from
-	// the old path, which re-applies its own snapshot every 30s and would flip the state
-	// back. Both paths now use the same rule.
-	includeFallback := cred.IsFallback
-	providerScopes := models.AggregateProviderScopesFromHealth(health, includeFallback)
+	// Every upstream credential is aggregated regardless of its priority tier, matching
+	// the model-snapshot path (models.fetchRemoteModelsFromHealth). Last-resort upstream
+	// credentials (priority: 999 / is_fallback) contribute their scope too — the models
+	// they serve are discovered and tiered locally, not dropped.
+	//
+	// NOTE (review point): for a MIXED upstream this widens the proxy credential's scope
+	// to the union of every tier's scope, so an unrestricted last-resort upstream
+	// credential can broaden what this proxy credential appears to serve. For an
+	// all-last-resort upstream node (the ger02/uk02 chain case) there is nothing to
+	// widen. Router/model-level denied_scopes remain the right place to hard-block a team.
+	providerScopes := models.AggregateProviderScopesFromHealth(health)
 	cred.ProviderScopes = providerScopes.Scopes
 	cred.ProviderDeniedScopes = providerScopes.DeniedScopes
 	cred.ProviderScopeExpression = scope.NormalizeExpression(providerScopes.ScopeExpression)
@@ -139,7 +139,7 @@ func updateModelScopes(
 
 	if updater, ok := modelManager.(modelScopeUpdater); ok {
 		updater.UpdateProviderScopesForCredential(cred.Name, providerScopes)
-		updater.ReplaceModelScopesForCredential(cred.Name, models.AggregateModelScopesFromHealth(health, includeFallback))
+		updater.ReplaceModelScopesForCredential(cred.Name, models.AggregateModelScopesFromHealth(health))
 	}
 }
 
@@ -334,21 +334,13 @@ func updateCredentialLimits(
 	// when total usage exceeded the highest single credential's limit.
 	aggregation := newSumLimitAggregation()
 
-	for credName, credStats := range health.Credentials {
-		// For a non-fallback connection, skip upstream credentials marked is_fallback:
-		// their RPM/TPM is reserved capacity for fallback traffic, and folding it into
-		// this proxy credential's primary ceiling lets the client rate limiter admit
-		// primary traffic past what the upstream will actually serve on its primary
-		// credentials (upstream then 429s / burns reserved fallback capacity). For a
-		// fallback connection, include every upstream credential. Mirrors the old
-		// model-snapshot path's rule so the two 30s pollers agree.
-		if !cred.IsFallback && credStats.IsFallback {
-			logger.Debug("Skipping is_fallback upstream credential in primary limit aggregation",
-				"proxy", cred.Name,
-				"upstream_credential", credName,
-			)
-			continue
-		}
+	for _, credStats := range health.Credentials {
+		// Every upstream credential's capacity is summed into this proxy credential's
+		// scalar ceiling, last-resort tiers included. The scalar ceiling is a coarse
+		// backstop; the per-model, per-tier gates (updateModelLimits' modelTierAcc /
+		// Design B) enforce that primary traffic does not spend a last-resort tier's
+		// budget. Pre-unification a non-fallback connection skipped is_fallback upstream
+		// credentials here.
 		aggregation.applySum(
 			credStats.LimitRPM,
 			credStats.LimitTPM,
@@ -431,14 +423,11 @@ func updateModelLimits(
 		if !ok {
 			continue
 		}
-		// For a non-fallback connection: skip upstream credentials marked is_fallback
-		// (reserved for fallback traffic, must not serve primary requests). For a
-		// fallback connection: include ALL upstream credentials as a last resort.
-		// Mirrors the old model-snapshot path (models.fetchRemoteModelsFromHealth) so
-		// the two 30s pollers write the same model set / weights / priorities.
-		if !cred.IsFallback && credStats.IsFallback {
-			continue
-		}
+		// Every upstream credential is folded in regardless of its priority tier, matching
+		// models.fetchRemoteModelsFromHealth. A last-resort upstream entry contributes its
+		// model at EffectiveHealthPriority == FallbackPriorityGroup (999), so the model is
+		// discovered and gets a local last-resort tier via Design B tier expansion rather
+		// than being hidden. Pre-unification a non-fallback connection skipped these.
 		modelID := modelStatsData.Model
 		if modelID == "" {
 			continue
