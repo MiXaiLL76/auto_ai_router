@@ -1419,6 +1419,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 
 	// Retry loop: try same-type credentials by default, or fallback_priority tiers when configured.
 	triedCreds := GetTried(r.Context())
+	attemptedCreds := make(map[string]bool)
 	var (
 		resp            *http.Response
 		responseBody    []byte
@@ -1441,7 +1442,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 			var nextReq credentialPreparedRequest
 			retryReady := false
 			for {
-				candidate, err := p.balancer.NextRetryForModelExcludingScoped(modelID, cred, triedCreds, logCtx.Scope)
+				candidate, err := p.balancer.NextRetryForModelExcludingScoped(modelID, cred, triedCreds, attemptedCreds, logCtx.Scope)
 				if err != nil {
 					p.logger.DebugContext(r.Context(), "No more retry credentials available",
 						"model", modelID, "attempt", attempt, "error", err)
@@ -1760,6 +1761,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 
 		// Execute HTTP request
 		var doErr error
+		attemptedCreds[cred.Name] = true
 		resp, doErr = p.client.Do(proxyReq) //nolint:gosec // G704: same targetURL as the request built above, host isn't attacker-controlled
 		if doErr != nil {
 			// Transport failure on one credential — retried with the next one;

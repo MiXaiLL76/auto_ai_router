@@ -736,11 +736,12 @@ func (r *RoundRobin) NextSameTypeForModelExcludingScoped(modelID string, credTyp
 	return r.nextExcludingScoped(modelID, false, false, credType, exclude, visibility)
 }
 
-func (r *RoundRobin) NextRetryForModelExcluding(modelID string, current *config.CredentialConfig, exclude map[string]bool) (*config.CredentialConfig, error) {
-	return r.NextRetryForModelExcludingScoped(modelID, current, exclude, scope.AdminContext())
+func (r *RoundRobin) NextRetryForModelExcluding(modelID string, current *config.CredentialConfig, exclude, attempted map[string]bool) (*config.CredentialConfig, error) {
+	return r.NextRetryForModelExcludingScoped(modelID, current, exclude, attempted, scope.AdminContext())
 }
 
-func (r *RoundRobin) NextRetryForModelExcludingScoped(modelID string, current *config.CredentialConfig, exclude map[string]bool, visibility scope.Context) (*config.CredentialConfig, error) {
+// Exclusions restrict selection. Only dispatched attempts advance retry history.
+func (r *RoundRobin) NextRetryForModelExcludingScoped(modelID string, current *config.CredentialConfig, exclude, attempted map[string]bool, visibility scope.Context) (*config.CredentialConfig, error) {
 	if current == nil {
 		return nil, ErrNoCredentialsAvailable
 	}
@@ -748,7 +749,7 @@ func (r *RoundRobin) NextRetryForModelExcludingScoped(modelID string, current *c
 		return r.NextSameTypeForModelExcludingScoped(modelID, current.Type, exclude, visibility)
 	}
 	if current.EffectivePriority() <= 0 {
-		if r.hasTriedPriorityCredential(exclude) {
+		if r.hasTriedPriorityCredential(attempted) {
 			return r.nextUnprioritizedRetry(modelID, exclude, visibility)
 		}
 		return r.NextSameTypeForModelExcludingScoped(modelID, current.Type, exclude, visibility)
@@ -930,14 +931,14 @@ func (r *RoundRobin) selectUnprioritizedRetryCandidateLocked(modelID string, can
 	return r.selectWeightedLiveCandidate(modelID, live, key, rateLimitHit)
 }
 
-func (r *RoundRobin) hasTriedPriorityCredential(exclude map[string]bool) bool {
-	if len(exclude) == 0 {
+func (r *RoundRobin) hasTriedPriorityCredential(attempted map[string]bool) bool {
+	if len(attempted) == 0 {
 		return false
 	}
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	for name, tried := range exclude {
+	for name, tried := range attempted {
 		if !tried {
 			continue
 		}

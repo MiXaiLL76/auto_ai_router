@@ -1033,12 +1033,12 @@ func TestNextRetryForModelExcluding_FallbackPriorityOrder(t *testing.T) {
 	bal.SetModelChecker(mc)
 
 	tried := map[string]bool{"cheapgpt": true}
-	cred, err := bal.NextRetryForModelExcluding("claude", &credentials[0], tried)
+	cred, err := bal.NextRetryForModelExcluding("claude", &credentials[0], tried, tried)
 	require.NoError(t, err)
 	assert.Equal(t, "cometapi", cred.Name)
 
 	tried["cometapi"] = true
-	cred, err = bal.NextRetryForModelExcluding("claude", cred, tried)
+	cred, err = bal.NextRetryForModelExcluding("claude", cred, tried, tried)
 	require.NoError(t, err)
 	assert.Equal(t, "grant", cred.Name)
 }
@@ -1056,12 +1056,12 @@ func TestNextRetryForModelExcluding_FallbackPriorityFallsBackToUnprioritized(t *
 	bal := New(credentials, f2b, rl)
 
 	tried := map[string]bool{"cheapgpt": true}
-	cred, err := bal.NextRetryForModelExcluding("", &credentials[0], tried)
+	cred, err := bal.NextRetryForModelExcluding("", &credentials[0], tried, tried)
 	require.NoError(t, err)
 	assert.Equal(t, "cometapi", cred.Name)
 
 	tried["cometapi"] = true
-	cred, err = bal.NextRetryForModelExcluding("", cred, tried)
+	cred, err = bal.NextRetryForModelExcluding("", cred, tried, tried)
 	require.NoError(t, err)
 	assert.Equal(t, "cloudru", cred.Name)
 }
@@ -1080,12 +1080,12 @@ func TestNextRetryForModelExcluding_UnprioritizedTailContinuesAcrossTypes(t *tes
 	bal := New(credentials, f2b, rl)
 
 	tried := map[string]bool{"cheapgpt": true, "cometapi": true}
-	cred, err := bal.NextRetryForModelExcluding("", &credentials[1], tried)
+	cred, err := bal.NextRetryForModelExcluding("", &credentials[1], tried, tried)
 	require.NoError(t, err)
 	assert.Equal(t, "cloudru", cred.Name)
 
 	tried["cloudru"] = true
-	cred, err = bal.NextRetryForModelExcluding("", cred, tried)
+	cred, err = bal.NextRetryForModelExcluding("", cred, tried, tried)
 	require.NoError(t, err)
 	assert.Equal(t, "yandex", cred.Name)
 }
@@ -1102,7 +1102,8 @@ func TestNextRetryForModelExcluding_DefaultsToSameType(t *testing.T) {
 
 	bal := New(credentials, f2b, rl)
 
-	cred, err := bal.NextRetryForModelExcluding("", &credentials[0], map[string]bool{"openai-a": true})
+	tried := map[string]bool{"openai-a": true}
+	cred, err := bal.NextRetryForModelExcluding("", &credentials[0], tried, tried)
 	require.NoError(t, err)
 	assert.Equal(t, "openai-b", cred.Name)
 }
@@ -1119,7 +1120,8 @@ func TestNextRetryForModelExcluding_FallbackPrioritySkipsFallbackCredentials(t *
 
 	bal := New(credentials, f2b, rl)
 
-	cred, err := bal.NextRetryForModelExcluding("", &credentials[0], map[string]bool{"primary-a": true})
+	tried := map[string]bool{"primary-a": true}
+	cred, err := bal.NextRetryForModelExcluding("", &credentials[0], tried, tried)
 	require.NoError(t, err)
 	assert.Equal(t, "primary-b", cred.Name)
 }
@@ -1138,13 +1140,12 @@ func TestNextRetryForModelExcluding_UsesSeparateSWRRStatePerPriority(t *testing.
 
 	bal := New(credentials, f2b, rl)
 
-	_, err := bal.NextRetryForModelExcluding("", &credentials[0], map[string]bool{"primary-a": true})
+	tried := map[string]bool{"primary-a": true}
+	_, err := bal.NextRetryForModelExcluding("", &credentials[0], tried, tried)
 	require.NoError(t, err)
-	_, err = bal.NextRetryForModelExcluding("", &credentials[0], map[string]bool{
-		"primary-a": true,
-		"tier-20-a": true,
-		"tier-20-b": true,
-	})
+	tried["tier-20-a"] = true
+	tried["tier-20-b"] = true
+	_, err = bal.NextRetryForModelExcluding("", &credentials[0], tried, tried)
 	require.NoError(t, err)
 
 	priorities := make(map[int]bool)
@@ -1309,10 +1310,12 @@ func TestNextRetryForModelExcluding_ProxyLikeRetriesStayExactType(t *testing.T) 
 
 	bal := New(credentials, f2b, rl)
 
-	_, err := bal.NextRetryForModelExcluding("gpt-cache", &credentials[0], map[string]bool{"air1": true})
+	tried := map[string]bool{"air1": true}
+	_, err := bal.NextRetryForModelExcluding("gpt-cache", &credentials[0], tried, tried)
 	require.ErrorIs(t, err, ErrNoCredentialsAvailable)
 
-	_, err = bal.NextRetryForModelExcluding("gpt-cache", &credentials[1], map[string]bool{"proxy1": true})
+	tried = map[string]bool{"proxy1": true}
+	_, err = bal.NextRetryForModelExcluding("gpt-cache", &credentials[1], tried, tried)
 	require.ErrorIs(t, err, ErrNoCredentialsAvailable)
 }
 
