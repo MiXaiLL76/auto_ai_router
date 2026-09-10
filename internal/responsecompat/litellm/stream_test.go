@@ -128,11 +128,11 @@ func TestChatStreamPreservesUsageWithoutSystemFingerprint(t *testing.T) {
 	assert.NotContains(t, string(output), "service_tier")
 }
 
-func TestChatStreamKeepsOpenAIMetadataAndZeroUsage(t *testing.T) {
+func TestChatStreamKeepsOpenAIMetadataAndUsage(t *testing.T) {
 	source := strings.NewReader(
 		`data: {"id":"gpt-id","created":10,"choices":[{"index":0,"delta":{"role":"assistant","content":"ok"}}],"obfuscation":"abc","service_tier":"default","system_fingerprint":"fp-1"}` + "\n\n" +
 			`data: {"id":"gpt-id","created":10,"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"obfuscation":"abc","service_tier":"default","system_fingerprint":"fp-1"}` + "\n\n" +
-			`data: {"id":"gpt-id","created":10,"choices":[],"latency_checkpoint":{"engine_ttft_ms":10},"obfuscation":"abc","service_tier":"default","system_fingerprint":"fp-1","usage":{"prompt_tokens":13,"completion_tokens":3,"total_tokens":16}}` + "\n\n" +
+			`data: {"id":"gpt-id","created":10,"choices":[],"latency_checkpoint":{"engine_ttft_ms":10},"obfuscation":"abc","service_tier":"default","system_fingerprint":"fp-1","usage":{"prompt_tokens":13,"completion_tokens":3,"total_tokens":16,"prompt_tokens_details":{"cached_tokens":4},"completion_tokens_details":{"reasoning_tokens":1}}}` + "\n\n" +
 			"data: [DONE]\n\n",
 	)
 
@@ -151,8 +151,30 @@ func TestChatStreamKeepsOpenAIMetadataAndZeroUsage(t *testing.T) {
 	var usageChunk map[string]any
 	require.NoError(t, json.Unmarshal([]byte(frames[2]), &usageChunk))
 	usage := usageChunk["usage"].(map[string]any)
-	assert.Equal(t, float64(0), usage["total_tokens"])
+	assert.Equal(t, map[string]any{
+		"prompt_tokens":             float64(13),
+		"completion_tokens":         float64(3),
+		"total_tokens":              float64(16),
+		"prompt_tokens_details":     map[string]any{"cached_tokens": float64(4)},
+		"completion_tokens_details": map[string]any{"reasoning_tokens": float64(1)},
+	}, usage)
 	assert.NotContains(t, frames[2], "service_tier")
+	assert.Contains(t, frames[1], `"finish_reason":"stop"`)
+	assert.Equal(t, "[DONE]", frames[3])
+
+	_, err = source.Seek(0, io.SeekStart)
+	require.NoError(t, err)
+	output, err = io.ReadAll(New().Stream(Context{
+		Endpoint:       "/v1/chat/completions",
+		RequestedModel: "openai/gpt-4.1-mini",
+		IncludeUsage:   false,
+	}, source))
+	require.NoError(t, err)
+	frames = splitDataFrames(string(output))
+	require.Len(t, frames, 3)
+	assert.NotContains(t, string(output), `"usage"`)
+	assert.Contains(t, frames[1], `"finish_reason":"stop"`)
+	assert.Equal(t, "[DONE]", frames[2])
 }
 
 func TestChatStreamMovesFinishReasonToTerminalChunk(t *testing.T) {
