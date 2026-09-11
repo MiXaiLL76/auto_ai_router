@@ -1787,7 +1787,7 @@ func (p *Proxy) handlePassthroughResponsesStreaming(
 				Type     string             `json:"type"`
 				Response responses.Response `json:"response"`
 			}
-			if json.Unmarshal([]byte(jsonData), &event) == nil && event.Type == "response.completed" {
+			if json.Unmarshal([]byte(jsonData), &event) == nil && (event.Type == "response.completed" || event.Type == "response.incomplete") {
 				if event.Response.Usage != nil {
 					totalTokens = event.Response.Usage.TotalTokens
 					if logCtx != nil {
