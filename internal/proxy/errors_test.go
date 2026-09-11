@@ -267,6 +267,69 @@ func TestWriteValidationError_TooLarge(t *testing.T) {
 	assert.Equal(t, http.StatusRequestEntityTooLarge, w.Code)
 }
 
+// TestClassifiedErrorMessage_MatchesClientBody guards against
+// logCtx.ErrorMsg (and, downstream, the spend-log/analytics
+// metadata.error_information.error_message column) silently drifting back to
+// a generic placeholder while the client-facing body stays classified — the
+// exact regression this function was introduced to fix (see proxy.go's two
+// logCtx.ErrorMsg call sites, which used to hardcode "Request failed").
+func TestClassifiedErrorMessage_MatchesClientBody(t *testing.T) {
+	tests := []struct {
+		name       string
+		statusCode int
+		rawBody    []byte
+		want       string
+	}{
+		{
+			name:       "400 with recognizable signal is classified, not generic",
+			statusCode: http.StatusBadRequest,
+			rawBody:    []byte(`{"error":{"message":"missing required parameter: 'messages'"}}`),
+			want:       "Missing required parameter",
+		},
+		{
+			name:       "400 with no recognizable signal falls to the classifier's own default",
+			statusCode: http.StatusBadRequest,
+			rawBody:    []byte(`{"error":{"message":"something went sideways"}}`),
+			want:       "Invalid request",
+		},
+		{"429 rate limit", http.StatusTooManyRequests, nil, "Rate limit exceeded"},
+		{"408 request timeout", http.StatusRequestTimeout, nil, "Request timed out"},
+		{"504 gateway timeout", http.StatusGatewayTimeout, nil, "Request timed out"},
+		{"401 unauthorized stays generic (never classified, by design)", http.StatusUnauthorized, nil, "Request failed"},
+		{"403 forbidden stays generic (never classified, by design)", http.StatusForbidden, nil, "Request failed"},
+		{"404 not found stays generic (never classified, by design)", http.StatusNotFound, nil, "Request failed"},
+		{"500 server error stays generic (never classified, by design)", http.StatusInternalServerError, nil, "Request failed"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, classifiedErrorMessage(tt.statusCode, tt.rawBody))
+		})
+	}
+}
+
+// TestClassifiedErrorMessage_ConsistentWithMaskedUpstreamErrorBody asserts
+// classifiedErrorMessage always returns exactly the "message" field that
+// maskedUpstreamErrorBody puts in the body the client actually receives —
+// the property the spend-log fix depends on.
+func TestClassifiedErrorMessage_ConsistentWithMaskedUpstreamErrorBody(t *testing.T) {
+	statuses := []int{
+		http.StatusBadRequest, http.StatusTooManyRequests,
+		http.StatusRequestTimeout, http.StatusGatewayTimeout,
+		http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound,
+	}
+	rawBody := []byte(`{"error":{"message":"max_tokens must be a positive integer"}}`)
+
+	for _, status := range statuses {
+		clientBody := maskedUpstreamErrorBody(status, "req-1", rawBody)
+		var decoded APIErrorResponse
+		require.NoError(t, json.Unmarshal(clientBody, &decoded))
+
+		assert.Equal(t, decoded.Error.Message, classifiedErrorMessage(status, rawBody),
+			"status %d: logCtx.ErrorMsg would drift from what the client saw", status)
+	}
+}
+
 func stringPtr(s string) *string {
 	return &s
 }
