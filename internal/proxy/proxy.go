@@ -1709,6 +1709,10 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 
 		// Copy headers and set auth
 		copyHeadersSkipAuth(proxyReq, r)
+		if cred.Type == config.ProviderTypeAnthropic {
+			// Client Origin would trigger Anthropic browser CORS authentication.
+			proxyReq.Header.Del("Origin")
+		}
 		mergeAnthropicBetaHeader(proxyReq.Header, anthropicBetas)
 		// For passthrough providers (OpenAI/Proxy) with multipart/form-data requests
 		// (e.g. /v1/images/edits), preserve the original Content-Type so the boundary
