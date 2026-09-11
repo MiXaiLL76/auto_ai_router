@@ -107,6 +107,25 @@ func maskedUpstreamErrorBody(statusCode int, requestID string, rawBodies ...[]by
 	return append(body, '\n')
 }
 
+// classifiedErrorMessage returns the same "message" maskedUpstreamErrorBody
+// would put in the client-facing body for statusCode — used to keep
+// logCtx.ErrorMsg (and, downstream, the spend-log/analytics
+// metadata.error_information.error_message column) in sync with what the
+// client actually saw, instead of the historical hardcoded "Request failed"
+// placeholder (see internal/proxy/proxy.go's two logCtx.ErrorMsg call sites).
+func classifiedErrorMessage(statusCode int, rawBody []byte) string {
+	switch statusCode {
+	case http.StatusBadRequest:
+		return classifiedBadRequestError(rawBody).Message
+	case http.StatusTooManyRequests:
+		return "Rate limit exceeded"
+	case http.StatusRequestTimeout, http.StatusGatewayTimeout:
+		return "Request timed out"
+	default:
+		return "Request failed"
+	}
+}
+
 // classifiedBadRequestError delegates to the shared upstreamerror classifier
 // (also used by litellm compatibility mode's normalizeError) so both modes
 // surface the same classification instead of one discarding it.

@@ -2199,7 +2199,11 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 
 		if resp.StatusCode >= 400 {
 			logCtx.Status = "failure"
-			logCtx.ErrorMsg = "Request failed"
+			// Same classification the client's own response body already went
+			// through (clientResponseBodyForCredential -> maskedUpstreamErrorBody)
+			// — keeps the spend-log/analytics record in sync with what the client
+			// actually saw instead of a generic placeholder.
+			logCtx.ErrorMsg = classifiedErrorMessage(resp.StatusCode, rawErrorBody)
 			// Final error returned to the client — single unified ERROR record
 			// with everything needed for debugging.
 			p.logUpstreamError(r.Context(), "Upstream request completed with error status", resp.StatusCode, cred, modelID, rawErrorBody,
@@ -2264,7 +2268,10 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 			_, _ = w.Write(body)
 			logCtx.Status = "failure"
 			logCtx.HTTPStatus = resp.StatusCode
-			logCtx.ErrorMsg = "Request failed"
+			// No raw body captured here (streamed, not buffered) — same limitation
+			// maskedUpstreamErrorBody above already has, so this stays consistent
+			// with what the client just received.
+			logCtx.ErrorMsg = classifiedErrorMessage(resp.StatusCode, nil)
 			logCtx.TargetURL = targetURL
 			return
 		}
