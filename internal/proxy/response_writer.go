@@ -511,6 +511,9 @@ func (p *Proxy) writeProxyStreamingResponseWithTokens(
 	onLine := func(chunk []byte) {
 		// Image-bearing usage events can span several HTTP reads.
 		payloadBuf = splitSSEPayloads(chunk, payloadBuf)
+		if logCtx != nil && logCtx.IsImageGeneration {
+			logCtx.observeImageStreamPayloads(payloadBuf)
+		}
 		if chunkMayCarryTokenUsage(chunk) {
 			if usage := extractTokenUsageFromPayloads(payloadBuf, tokenUsageOptions); usage != nil {
 				// Merge rather than replace: a web-search-only chunk (no

@@ -101,6 +101,17 @@ type ModelPrice struct {
 	// Vision/Images cost per image (not per token)
 	OutputCostPerImage float64 `json:"output_cost_per_image,omitempty"`
 
+	// Per-image pricing refinements for /v1/images/generations and /v1/images/edits.
+	// OutputCostPerImageTiers prices each delivered image by the first tier
+	// matching the operation, request parameters and image size;
+	// OutputCostPerImage remains the price when no tier matches.
+	OutputCostPerImageTiers ImagePriceTiers `json:"output_cost_per_image_tiers,omitempty"`
+	// ImageRequestDefaults are the values assumed for request parameters the
+	// client omitted (e.g. the provider's default resolution or quality).
+	ImageRequestDefaults ImageRequestParams `json:"image_request_defaults,omitempty"`
+	InputCostPerImage         float64 `json:"input_cost_per_image,omitempty"`
+	InputImagesFreePerRequest int     `json:"input_images_free_per_request,omitempty"`
+
 	// Built-in web search tool pricing. Values are per query/call, keyed by
 	// search_context_size_low|medium|high in LiteLLM's price format.
 	SearchContextCostPerQuery map[string]float64 `json:"search_context_cost_per_query,omitempty"`

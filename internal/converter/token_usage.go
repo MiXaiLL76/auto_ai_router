@@ -24,6 +24,30 @@ type TokenUsage struct {
 	OutputImageTokens        int // Generated image/video tokens
 	WebSearchRequests        int // Built-in web search tool calls/requests
 	WebSearchContextSize     string
+	// ImageBilling carries per-image pricing inputs for image generation/edit
+	// requests (nil otherwise). A pointer keeps TokenUsage comparable.
+	ImageBilling *ImageBillingDetails
+}
+
+// Image request operations used by per-image price tiers.
+const (
+	ImageOperationGeneration = "generation"
+	ImageOperationEdit       = "edit"
+)
+
+// ImageBillingDetails holds the request and response facts that per-image
+// price tiers depend on, beyond the plain ImageCount.
+type ImageBillingDetails struct {
+	// Operation is ImageOperationGeneration or ImageOperationEdit.
+	Operation string
+	// RequestParams are the request's short scalar parameters (e.g.
+	// "resolution", "quality", "layer_decomposition"), keys and values lower-cased.
+	RequestParams map[string]string
+	// OutputPixels lists width×height of each delivered image in response
+	// order; 0 means that image's size is unknown.
+	OutputPixels []int64
+	// InputImages is the number of source images the request carried.
+	InputImages int
 }
 
 func (tu *TokenUsage) Normalize() *TokenUsage {
@@ -156,6 +180,9 @@ func (tu *TokenUsage) MergeNonZero(src *TokenUsage) {
 	}
 	if src.WebSearchContextSize != "" {
 		tu.WebSearchContextSize = src.WebSearchContextSize
+	}
+	if src.ImageBilling != nil {
+		tu.ImageBilling = src.ImageBilling
 	}
 }
 

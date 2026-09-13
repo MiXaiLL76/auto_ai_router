@@ -50,6 +50,8 @@ func (t *Transformer) Transform(ctx Context, response Response) Response {
 		err = normalizeCompletion(ctx, body)
 	case "/v1/completions":
 		err = normalizeTextCompletion(ctx, body)
+	case "/v1/images/generations", "/v1/images/edits":
+		normalizeImage(ctx, body)
 	default:
 		overrideModel(ctx.RequestedModel, body)
 	}
@@ -75,6 +77,23 @@ func normalizeEmbedding(ctx Context, body map[string]any) {
 		delete(usage, "cost_details")
 		delete(usage, "is_byok")
 		normalizeUsage(usage)
+	}
+}
+
+// normalizeImage leaves the image payload untouched but drops provider-side
+// cost figures from usage: they expose the upstream price, while the client is
+// billed by the router. Token and image counts are kept.
+func normalizeImage(ctx Context, body map[string]any) {
+	overrideModel(ctx.RequestedModel, body)
+	usage, ok := body["usage"].(map[string]any)
+	if !ok {
+		return
+	}
+	for _, field := range []string{"cost", "cost_details", "cost_in_usd_ticks", "is_byok"} {
+		delete(usage, field)
+	}
+	if len(usage) == 0 {
+		delete(body, "usage")
 	}
 }
 

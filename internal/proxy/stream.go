@@ -1148,6 +1148,9 @@ func (p *Proxy) finalizeStreamingLog(logCtx *RequestLogContext, totalTokens int,
 			"request_id", logCtx.RequestID)
 	} else {
 		logCtx.Status = "success"
+		if logCtx.IsImageGeneration {
+			logCtx.setImageCountFromStreamChunk(lastChunk)
+		}
 		if logCtx.Credential != nil {
 			p.metrics.RecordTokenUsage(logCtx.Credential.Name, logCtx.ModelID,
 				logCtx.TokenUsage.PromptTokens, logCtx.TokenUsage.CompletionTokens,

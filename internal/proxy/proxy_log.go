@@ -282,11 +282,22 @@ func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
 	if logCtx.TokenUsage == nil {
 		logCtx.TokenUsage = &converter.TokenUsage{}
 	}
-	if logCtx.IsImageGeneration && status == "success" && logCtx.TokenUsage.ImageCount <= 0 {
+	// Streams relayed through a proxy credential report image usage while they
+	// are copied; it only counts once the request is known to have succeeded.
+	if logCtx.IsImageGeneration && status == "success" && !logCtx.ImageCountReported && logCtx.imageStreamFacts != nil {
+		logCtx.applyImageStreamFacts(*logCtx.imageStreamFacts)
+	}
+	// A zero count read from the provider response (nothing delivered) is final;
+	// only fall back to the request's "n" when no response count was recorded.
+	if logCtx.IsImageGeneration && status == "success" && logCtx.TokenUsage.ImageCount <= 0 && !logCtx.ImageCountReported {
 		logCtx.TokenUsage.ImageCount = logCtx.ImageCount
 		if logCtx.TokenUsage.ImageCount <= 0 {
 			logCtx.TokenUsage.ImageCount = 1
 		}
+	}
+	// Paths that never saw a response body still price images by the request.
+	if logCtx.IsImageGeneration && status == "success" && logCtx.TokenUsage.ImageBilling == nil {
+		logCtx.TokenUsage.ImageBilling = logCtx.imageBillingDetails()
 	}
 	logCtx.applyWebSearchUsageDefaults(status)
 	logCtx.TokenUsage.Normalize()

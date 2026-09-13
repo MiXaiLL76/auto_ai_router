@@ -364,8 +364,12 @@ func CalculateTokenCosts(usage *converter.TokenUsage, price *ModelPrice) *conver
 			outputImageCost = outputCostPerToken
 		}
 		costs.ImageCost += float64(outputImageTokens) * outputImageCost
-	} else if imageCount > 0 && price.OutputCostPerImage > 0 {
-		costs.ImageCost += float64(imageCount) * price.OutputCostPerImage
+	} else if imageCount > 0 {
+		costs.ImageCost += price.outputImageCost(imageCount, usage.ImageBilling)
+	}
+	// Source images are only billed when the request actually produced output.
+	if imageCount > 0 || outputImageTokens > 0 {
+		costs.ImageCost += price.inputImageCost(usage.ImageBilling)
 	}
 
 	webSearchRequests := converterutil.NonNegativeTokenCount(usage.WebSearchRequests)
