@@ -447,7 +447,7 @@ func (p *Proxy) writeFallbackResponse(
 		if logCtx != nil {
 			logCtx.TokenUsage = usage
 			if logCtx.IsImageGeneration && proxyResp.StatusCode < http.StatusBadRequest {
-				logCtx.setImageCountFromBody(proxyResp.Body)
+				logCtx.observeImageResponseBody(proxyResp.Body)
 			}
 		}
 		if tokens > 0 {

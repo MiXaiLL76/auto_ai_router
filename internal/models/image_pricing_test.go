@@ -384,3 +384,113 @@ func TestImagePricing_MalformedTierWarnsOnce(t *testing.T) {
 	assert.Equal(t, 1, strings.Count(logs.String(), "Ignoring malformed image price tier"))
 	assert.Contains(t, logs.String(), "max_pixel")
 }
+
+// Tiers are matched first-wins, but a tier listed after one that covers all
+// of its images could never match. Such a tier is moved ahead of the tier
+// covering it, so a natural "base price, then discounts" order still bills
+// the discounts.
+func TestImagePriceTiers_ShadowedTiersAreMovedAhead(t *testing.T) {
+	var logs bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	var prices map[string]*ModelPrice
+	require.NoError(t, json.Unmarshal([]byte(`{"m":{"output_cost_per_image":0.2,"output_cost_per_image_tiers":[
+		{"output_cost_per_image": 0.117},
+		{"max_pixels": 2000000, "output_cost_per_image": 0.0585},
+		{"when": {"quality": "low"}, "output_cost_per_image": 0.05},
+		{"when": {"quality": "low"}, "max_pixels": 1000000, "output_cost_per_image": 0.02},
+		{"operation": "edit", "output_cost_per_image": 0.3}
+	]}}`), &prices))
+	price := prices["m"]
+
+	low := canon(map[string]any{"quality": "low"})
+	for _, tt := range []struct {
+		name    string
+		billing *converter.ImageBillingDetails
+		want    float64
+	}{
+		{"large image", generation(nil, []int64{4000000}, 0), 0.117},
+		{"small image", generation(nil, []int64{1500000}, 0), 0.0585},
+		{"unknown size", generation(nil, nil, 0), 0.117},
+		{"low quality large image", generation(low, []int64{4000000}, 0), 0.05},
+		// Both the pixel and the quality tier match; neither covers the other,
+		// so the one listed first still wins.
+		{"low quality small image", generation(low, []int64{1500000}, 0), 0.0585},
+		{"low quality tiny image", generation(low, []int64{800000}, 0), 0.02},
+		{"edit", &converter.ImageBillingDetails{Operation: converter.ImageOperationEdit}, 0.3},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.InDelta(t, tt.want, imageCost(t, price, converter.TokenUsage{ImageCount: 1, ImageBilling: tt.billing}), 1e-12)
+		})
+	}
+	assert.Contains(t, logs.String(), "Image price tier moved ahead of a tier that covers it")
+}
+
+// Tiers that don't cover one another keep their listed order, including when
+// they overlap: the first listed one still wins for images both match.
+func TestImagePriceTiers_OverlappingTiersKeepOrder(t *testing.T) {
+	var prices map[string]*ModelPrice
+	require.NoError(t, json.Unmarshal([]byte(`{"m":{"output_cost_per_image":0.2,"output_cost_per_image_tiers":[
+		{"when": {"quality": "low"}, "output_cost_per_image": 0.05},
+		{"max_pixels": 2000000, "output_cost_per_image": 0.0585},
+		{"operation": "generation", "output_cost_per_image": 0.1},
+		{"when": {"resolution": "1k"}, "output_cost_per_image": 0.07}
+	]}}`), &prices))
+	price := prices["m"]
+	require.Len(t, price.OutputCostPerImageTiers, 4)
+	assert.InDelta(t, 0.05, price.OutputCostPerImageTiers[0].OutputCostPerImage, 1e-12)
+	assert.InDelta(t, 0.0585, price.OutputCostPerImageTiers[1].OutputCostPerImage, 1e-12)
+	assert.InDelta(t, 0.1, price.OutputCostPerImageTiers[2].OutputCostPerImage, 1e-12)
+	assert.InDelta(t, 0.07, price.OutputCostPerImageTiers[3].OutputCostPerImage, 1e-12)
+
+	low := canon(map[string]any{"quality": "low"})
+	assert.InDelta(t, 0.05, imageCost(t, price, converter.TokenUsage{ImageCount: 1, ImageBilling: generation(low, []int64{1500000}, 0)}), 1e-12)
+	assert.InDelta(t, 0.0585, imageCost(t, price, converter.TokenUsage{ImageCount: 1, ImageBilling: generation(nil, []int64{1500000}, 0)}), 1e-12)
+}
+
+// A tier with exactly the conditions of an earlier one can never match and
+// has no unambiguous place to move to: it is dropped and the first one kept.
+func TestImagePriceTiers_DuplicateConditionsKeepFirst(t *testing.T) {
+	var prices map[string]*ModelPrice
+	require.NoError(t, json.Unmarshal([]byte(`{"m":{"output_cost_per_image":0.2,"output_cost_per_image_tiers":[
+		{"operation": "edit", "when": {"quality": "low", "n": 2}, "max_pixels": 1000, "output_cost_per_image": 0.05},
+		{"operation": "EDIT", "when": {"n": 2, "quality": "LOW"}, "max_pixels": 1000, "output_cost_per_image": 0.01}
+	]}}`), &prices))
+	price := prices["m"]
+	require.Len(t, price.OutputCostPerImageTiers, 1)
+	assert.InDelta(t, 0.05, price.OutputCostPerImageTiers[0].OutputCostPerImage, 1e-12)
+}
+
+// ImageRequestDefaults don't change which tier covers which: a request can
+// always set a parameter to a value other than the default.
+func TestImagePriceTiers_DefaultsDoNotCreateCoverage(t *testing.T) {
+	var prices map[string]*ModelPrice
+	require.NoError(t, json.Unmarshal([]byte(`{"m":{"output_cost_per_image":0.2,"image_request_defaults":{"resolution":"1k"},"output_cost_per_image_tiers":[
+		{"when": {"resolution": "1k"}, "output_cost_per_image": 0.05},
+		{"output_cost_per_image": 0.1}
+	]}}`), &prices))
+	price := prices["m"]
+	require.Len(t, price.OutputCostPerImageTiers, 2)
+	assert.InDelta(t, 0.05, imageCost(t, price, converter.TokenUsage{ImageCount: 1, ImageBilling: generation(nil, nil, 0)}), 1e-12)
+	assert.InDelta(t, 0.1, imageCost(t, price, converter.TokenUsage{ImageCount: 1, ImageBilling: generation(canon(map[string]any{"resolution": "2k"}), nil, 0)}), 1e-12)
+}
+
+// Organization tariffs fail closed instead of being reordered.
+func TestDecodeStrictPriceRow_RejectsUnreachableTiers(t *testing.T) {
+	for name, row := range map[string]string{
+		"catch-all first":      `{"output_cost_per_image":0.117,"output_cost_per_image_tiers":[{"output_cost_per_image":0.117},{"max_pixels":2000000,"output_cost_per_image":0.0585}]}`,
+		"wider pixel limit":    `{"output_cost_per_image":0.117,"output_cost_per_image_tiers":[{"max_pixels":4000000,"output_cost_per_image":0.1},{"max_pixels":2000000,"output_cost_per_image":0.0585}]}`,
+		"duplicate conditions": `{"output_cost_per_image":0.117,"output_cost_per_image_tiers":[{"when":{"quality":"low"},"output_cost_per_image":0.1},{"when":{"quality":"Low"},"output_cost_per_image":0.05}]}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := decodeStrictPriceRow("image-model", json.RawMessage(row))
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "output_cost_per_image_tiers[1]")
+		})
+	}
+
+	_, err := decodeStrictPriceRow("image-model", json.RawMessage(`{"output_cost_per_image":0.117,"output_cost_per_image_tiers":[{"max_pixels":2000000,"output_cost_per_image":0.0585},{"output_cost_per_image":0.117}]}`))
+	assert.NoError(t, err)
+}

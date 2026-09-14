@@ -81,10 +81,20 @@ func normalizeEmbedding(ctx Context, body map[string]any) {
 }
 
 // normalizeImage leaves the image payload untouched but drops provider-side
-// cost figures from usage: they expose the upstream price, while the client is
-// billed by the router. Token and image counts are kept.
+// cost figures from usage (see dropProviderImageCost).
 func normalizeImage(ctx Context, body map[string]any) {
 	overrideModel(ctx.RequestedModel, body)
+	dropProviderImageCost(body)
+}
+
+func isImageEndpoint(endpoint string) bool {
+	return endpoint == "/v1/images/generations" || endpoint == "/v1/images/edits"
+}
+
+// dropProviderImageCost removes provider-side cost figures from an image
+// response or stream event's usage: they expose the upstream price, while the
+// client is billed by the router. Token and image counts are kept.
+func dropProviderImageCost(body map[string]any) {
 	usage, ok := body["usage"].(map[string]any)
 	if !ok {
 		return

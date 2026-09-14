@@ -269,8 +269,7 @@ type RequestLogContext struct {
 	TargetURL             string                   // Target URL (for APIBase extraction)
 	TokenInfo             *litellmdb.TokenInfo     // User/team/org info
 	IsImageGeneration     bool                     // True if this is an image generation request
-	ImageCount            int                      // Number of images to generate (from 'n' param)
-	ImageCountReported    bool                     // TokenUsage.ImageCount was read from the provider response, not from 'n'
+	ImageCount            int                      // Number of images requested ('n' param, at least 1)
 	WebSearchRequested    bool                     // True when the request enabled the built-in web search tool
 	WebSearchContextSize  string                   // low|medium|high from web_search_options/tool config
 	ReasoningRequested    bool
@@ -296,11 +295,11 @@ type RequestLogContext struct {
 	budgetReconciled bool
 
 	// imageBillingRequest holds the request-side facts per-image price tiers
-	// need (operation, parameters, edit source images); response facts are
-	// layered on a copy of it when the provider answers. imageStreamFacts is the
-	// latest image usage observed while relaying a proxied stream.
+	// need (operation, parameters, edit source images); imageResponse is what
+	// the provider response reported, nil until one is observed. Both are
+	// combined into TokenUsage by finalizeImageUsage (see image_billing.go).
 	imageBillingRequest *converter.ImageBillingDetails
-	imageStreamFacts    *imageResponseFacts
+	imageResponse       *imageResponseFacts
 
 	// billingPriceResolved/billingPriceModelID/billingPrice cache the result of
 	// resolveBillingPrice so budget reservation (estimateRequestCost, at request
@@ -960,11 +959,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 	isImageEdit := strings.Contains(r.URL.Path, "/images/edits")
 	logCtx.IsImageGeneration = isImageGeneration || isImageEdit
 	if logCtx.IsImageGeneration {
-		logCtx.ImageCount = extractImageCountFromBody(body, r.Header.Get("Content-Type"))
-		if logCtx.ImageCount <= 0 {
-			logCtx.ImageCount = 1
-		}
-		logCtx.imageBillingRequest = imageBillingRequestFromBody(body, r.Header.Get("Content-Type"), isImageEdit)
+		logCtx.ImageCount, logCtx.imageBillingRequest = imageRequestFromBody(body, r.Header.Get("Content-Type"), isImageEdit)
 	}
 	if webSearchRequested, webSearchContextSize := extractWebSearchRequestUsage(body, r.Header.Get("Content-Type")); webSearchRequested {
 		logCtx.WebSearchRequested = true
@@ -1406,11 +1401,10 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 					logCtx.TokenUsage.PromptTokens, logCtx.TokenUsage.CompletionTokens,
 					logCtx.TokenUsage.ReasoningTokens, logCtx.TokenUsage.CachedInputTokens)
 			}
-			// Image generation responses have no usage field, so ExtractTokenUsage returns nil.
-			// Ensure ImageCount is always propagated for cost calculation, preferring
-			// the number of images the response actually delivered over the request's "n".
+			// Image responses are billed per image, not by token usage: record what
+			// the response delivered for finalizeImageUsage.
 			if logCtx.IsImageGeneration && proxyResp.StatusCode < 400 {
-				logCtx.setImageCountFromBody(proxyResp.Body)
+				logCtx.observeImageResponseBody(proxyResp.Body)
 			}
 			if proxyResp.StatusCode >= 400 {
 				logCtx.ErrorMsg = extractErrorMessage(proxyResp.Body)
@@ -2225,7 +2219,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if logCtx.IsImageGeneration && resp.StatusCode < 400 {
-			logCtx.setImageCountFromBody(bodyForTokenExtraction)
+			logCtx.observeImageResponseBody(bodyForTokenExtraction)
 		}
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 			if tokenUsageOptions.AudioInputIncludesCachedAudio {

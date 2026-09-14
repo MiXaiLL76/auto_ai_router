@@ -72,6 +72,9 @@ type collectedPart struct {
 //  4. Renames multiple "image" fields to "image[]" — when the client sends
 //     more than one image using the same field name "image", OpenAI requires
 //     the array syntax "image[]" instead.
+//  5. Forces "watermark=false" for model families that watermark their output
+//     by default (see AddsImageWatermark), replacing any client-sent value —
+//     the multipart counterpart of DisableImageWatermark.
 //
 // Returns the rewritten body bytes and the new Content-Type header value
 // (multipart/form-data with updated boundary).  On any parse error the original
@@ -123,6 +126,7 @@ func RewriteImageEditMultipart(body []byte, contentType, modelID string, stripRe
 	// --- Second pass: write rewritten parts. ---
 	var buf bytes.Buffer
 	writer := multipart.NewWriter(&buf)
+	disableWatermark := AddsImageWatermark(modelID)
 
 	for _, p := range parts {
 		fieldName := p.fieldName
@@ -143,6 +147,11 @@ func RewriteImageEditMultipart(body []byte, contentType, modelID string, stripRe
 
 		// Skip response_format field when requested.
 		if stripResponseFormat && fieldName == "response_format" {
+			continue
+		}
+
+		// The client's watermark value is replaced by the opt-out written below.
+		if disableWatermark && fieldName == "watermark" {
 			continue
 		}
 
@@ -193,6 +202,12 @@ func RewriteImageEditMultipart(body []byte, contentType, modelID string, stripRe
 			return body, contentType
 		}
 		if _, writeErr := pw.Write(partData); writeErr != nil {
+			return body, contentType
+		}
+	}
+
+	if disableWatermark {
+		if err := writer.WriteField("watermark", "false"); err != nil {
 			return body, contentType
 		}
 	}

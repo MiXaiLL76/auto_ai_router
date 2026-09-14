@@ -569,3 +569,89 @@ func TestRewriteImageEditMultipart_NewBoundaryDiffersFromOriginal(t *testing.T) 
 		t.Errorf("new Content-Type should be multipart/form-data, got %q", newCT)
 	}
 }
+
+// ---------------------------------------------------------------------------
+// RewriteImageEditMultipart — watermark opt-out
+// ---------------------------------------------------------------------------
+
+func TestRewriteImageEditMultipart_DisablesWatermark(t *testing.T) {
+	watermarkValues := func(t *testing.T, body []byte, contentType string) []string {
+		t.Helper()
+		_, params, err := mime.ParseMediaType(contentType)
+		if err != nil {
+			t.Fatalf("ParseMediaType: %v", err)
+		}
+		var values []string
+		r := multipart.NewReader(bytes.NewReader(body), params["boundary"])
+		for {
+			p, err := r.NextPart()
+			if err == io.EOF {
+				return values
+			}
+			if err != nil {
+				t.Fatalf("NextPart: %v", err)
+			}
+			if p.FormName() == "watermark" {
+				data, _ := io.ReadAll(p)
+				values = append(values, string(data))
+			}
+			_ = p.Close()
+		}
+	}
+
+	for _, tt := range []struct {
+		name      string
+		modelID   string
+		watermark []string
+		want      []string
+	}{
+		{"client value replaced", "seededit-3-0-i2i-250628", []string{"true"}, []string{"false"}},
+		{"repeated client values collapse to one", "seedream-4-5-251128", []string{"true", "1"}, []string{"false"}},
+		{"added when absent", "dola-seedream-5-0-pro-260628", nil, []string{"false"}},
+		{"other families untouched", "gpt-image-1", []string{"true"}, []string{"true"}},
+		{"other families get none added", "gpt-image-1", nil, nil},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			fields := []struct {
+				name        string
+				contentType string
+				filename    string
+				data        []byte
+			}{
+				{"model", "", "", []byte("alias")},
+				{"prompt", "", "", []byte("make it blue")},
+			}
+			for _, value := range tt.watermark {
+				fields = append(fields, struct {
+					name        string
+					contentType string
+					filename    string
+					data        []byte
+				}{"watermark", "", "", []byte(value)})
+			}
+			fields = append(fields, struct {
+				name        string
+				contentType string
+				filename    string
+				data        []byte
+			}{"image", "image/png", "in.png", makePNG()})
+			body, ct := buildMultipart(t, fields)
+
+			newBody, newCT := RewriteImageEditMultipart(body, ct, tt.modelID, false)
+
+			if got := watermarkValues(t, newBody, newCT); strings.Join(got, ",") != strings.Join(tt.want, ",") {
+				t.Errorf("watermark values = %q, want %q", got, tt.want)
+			}
+			parts := parseResult(t, newBody, newCT)
+			if string(parts["model"].data) != tt.modelID {
+				t.Errorf("model = %q, want %q", parts["model"].data, tt.modelID)
+			}
+			if string(parts["prompt"].data) != "make it blue" {
+				t.Errorf("prompt corrupted: %q", parts["prompt"].data)
+			}
+			if !bytes.Equal(parts["image"].data, makePNG()) {
+				t.Errorf("image corrupted: %v", parts["image"].data)
+			}
+		})
+	}
+}

@@ -133,6 +133,9 @@ func (r *streamReader) readFrame() error {
 		}
 	default:
 		r.normalizeResponsesChunk(body)
+		if isImageEndpoint(r.ctx.Endpoint) {
+			dropProviderImageCost(body)
+		}
 	}
 	stripRoutingMetadata(body)
 

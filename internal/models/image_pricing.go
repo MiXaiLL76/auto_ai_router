@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -38,6 +39,14 @@ type ImagePriceTier struct {
 
 // ImagePriceTiers is an ordered tier list; the first matching tier wins.
 //
+// A tier listed after one that covers it (see ImagePriceTier.covers) could
+// never match, so a list written as "base price, then discounts" would bill
+// every image at the base price. Such a tier is moved just ahead of the first
+// tier covering it, which only changes the price of the images it was written
+// for; a tier with exactly the conditions of an earlier one is dropped, and the
+// earlier one keeps winning. Tiers that merely overlap keep their listed order.
+// Both repairs are logged so the price map can be fixed.
+//
 // It unmarshals leniently: the whole price map is decoded in one pass, so a
 // malformed tier must not take every other model's price down with it. A tier
 // that fails validation is dropped as a whole (never just its bad condition,
@@ -53,16 +62,57 @@ func (t *ImagePriceTiers) UnmarshalJSON(data []byte) error {
 		return nil
 	}
 	tiers := make(ImagePriceTiers, 0, len(raw))
+	// kept[i] is the JSON of tiers[i], quoted when a later tier conflicts with it.
+	kept := make([]json.RawMessage, 0, len(raw))
 	for _, item := range raw {
 		tier, err := decodeImagePriceTier(item)
 		if err != nil {
 			warnImagePricingOnce("Ignoring malformed image price tier", item, err)
 			continue
 		}
-		tiers = append(tiers, tier)
+		index := tiers.firstCovering(tier)
+		switch {
+		case index < 0:
+			tiers = append(tiers, tier)
+			kept = append(kept, item)
+		case tier.covers(tiers[index]):
+			warnImagePricingOnce("Ignoring image price tier with the same conditions as an earlier tier", item,
+				fmt.Errorf("same conditions as %s", bytes.TrimSpace(kept[index])))
+		default:
+			warnImagePricingOnce("Image price tier moved ahead of a tier that covers it", item,
+				fmt.Errorf("listed after %s, which matches every image it does", bytes.TrimSpace(kept[index])))
+			tiers = slices.Insert(tiers, index, tier)
+			kept = slices.Insert(kept, index, item)
+		}
 	}
 	*t = tiers
 	return nil
+}
+
+// covers reports whether t matches every image other matches, whatever the
+// request and image size — so other, listed after t, could never be reached.
+// Request defaults don't widen coverage: a request can always set a parameter
+// to something other than its default.
+func (t ImagePriceTier) covers(other ImagePriceTier) bool {
+	if t.Operation != "" && t.Operation != other.Operation {
+		return false
+	}
+	for key, want := range t.When {
+		if got, ok := other.When[key]; !ok || got != want {
+			return false
+		}
+	}
+	return t.MaxPixels == 0 || (other.MaxPixels > 0 && other.MaxPixels <= t.MaxPixels)
+}
+
+// firstCovering returns the index of the first tier covering tier, or -1.
+func (t ImagePriceTiers) firstCovering(tier ImagePriceTier) int {
+	for i, candidate := range t {
+		if candidate.covers(tier) {
+			return i
+		}
+	}
+	return -1
 }
 
 var errImageTierInvalid = errors.New("invalid image price tier")
@@ -72,8 +122,8 @@ var errImageTierInvalid = errors.New("invalid image price tier")
 // flood the log.
 var imagePricingWarnings sync.Map
 
-// warnImagePricingOnce logs a dropped image pricing value once per process,
-// quoting the offending JSON so it can be found in the price map.
+// warnImagePricingOnce logs a dropped or repaired image pricing value once per
+// process, quoting the offending JSON so it can be found in the price map.
 func warnImagePricingOnce(msg string, raw []byte, err error) {
 	snippet := string(bytes.TrimSpace(raw))
 	if len(snippet) > 200 {
@@ -234,18 +284,25 @@ func NormalizeImageFormValue(value string) (string, bool) {
 }
 
 // validateStrictImagePricing rejects image pricing fields that the lenient
-// decoders above would have partly dropped, for loaders that must fail closed
-// on any malformed tariff.
+// decoders above would have partly dropped or reordered, for loaders that must
+// fail closed on any malformed tariff.
 func validateStrictImagePricing(fields map[string]json.RawMessage, price *ModelPrice) error {
 	if raw, ok := fields["output_cost_per_image_tiers"]; ok && !bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
 		var items []json.RawMessage
 		if err := json.Unmarshal(raw, &items); err != nil {
 			return errors.New("output_cost_per_image_tiers must be an array")
 		}
+		tiers := make(ImagePriceTiers, 0, len(items))
 		for i, item := range items {
-			if _, err := decodeImagePriceTier(item); err != nil {
+			tier, err := decodeImagePriceTier(item)
+			if err != nil {
 				return fmt.Errorf("output_cost_per_image_tiers[%d]: %w", i, err)
 			}
+			if covering := tiers.firstCovering(tier); covering >= 0 {
+				return fmt.Errorf("output_cost_per_image_tiers[%d]: %w: output_cost_per_image_tiers[%d] matches every image it does, so it can never apply; list tiers from most to least specific",
+					i, errImageTierInvalid, covering)
+			}
+			tiers = append(tiers, tier)
 		}
 	}
 	if raw, ok := fields["image_request_defaults"]; ok && !bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {

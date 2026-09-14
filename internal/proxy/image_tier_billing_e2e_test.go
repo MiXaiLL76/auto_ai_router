@@ -124,9 +124,23 @@ func TestProxyRequest_ImageTieredBilling(t *testing.T) {
 			name:         "quality tiers: nothing delivered bills neither output nor input",
 			path:         "/v1/images/edits",
 			requestBody:  `{"model":"quality-model","prompt":"merge","images":[{"url":"https://img.example/a.png"},{"url":"https://img.example/b.png"}]}`,
+			upstreamBody: `{"created":1,"data":[]}`,
+			want:         0,
+		},
+		{
+			name:         "quality tiers: unreadable response bills the request",
+			path:         "/v1/images/edits",
+			requestBody:  `{"model":"quality-model","prompt":"merge","images":[{"url":"https://img.example/a.png"},{"url":"https://img.example/b.png"}]}`,
 			upstreamType: "text/html",
 			upstreamBody: `<html>not an image response</html>`,
-			want:         0,
+			want:         0.078 + 2*0.013,
+		},
+		{
+			name:         "pixel tiers: recognized sizes survive an unrecognized entry",
+			path:         "/v1/images/generations",
+			requestBody:  `{"model":"pixel-model","prompt":"a cat","n":3}`,
+			upstreamBody: `{"data":[{"url":"https://img.example/1.jpeg","size":"1424x800"},{"image":"https://img.example/2.jpeg"},{"url":"https://img.example/3.jpeg","size":"2496x1664"}]}`,
+			want:         0.0585 + 0.117 + 0.117,
 		},
 	}
 

@@ -34,7 +34,8 @@ func AddsImageWatermark(modelID string) bool {
 
 // DisableImageWatermark forces "watermark": false on a JSON image request,
 // overriding any client-supplied value. Other fields are forwarded byte-for-byte;
-// bodies that are not a JSON object (e.g. multipart) are returned unchanged.
+// bodies that are not a JSON object are returned unchanged — multipart edits get
+// the same opt-out from RewriteImageEditMultipart.
 func DisableImageWatermark(body []byte) []byte {
 	var fields map[string]json.RawMessage
 	if json.Unmarshal(body, &fields) != nil || fields == nil {

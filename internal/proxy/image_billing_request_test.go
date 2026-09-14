@@ -26,7 +26,8 @@ func TestImageBillingRequestFromBody_JSON(t *testing.T) {
 		"long": "` + strings.Repeat("x", 300) + `"
 	}`
 
-	edit := imageBillingRequestFromBody([]byte(body), "application/json", true)
+	requested, edit := imageRequestFromBody([]byte(body), "application/json", true)
+	assert.Equal(t, 2, requested)
 	assert.Equal(t, "edit", edit.Operation)
 	assert.Equal(t, 3, edit.InputImages, "two usable image entries plus one images object")
 	assert.Equal(t, map[string]string{
@@ -37,7 +38,7 @@ func TestImageBillingRequestFromBody_JSON(t *testing.T) {
 		"n":                   "2",
 	}, edit.RequestParams)
 
-	generation := imageBillingRequestFromBody([]byte(body), "application/json", false)
+	_, generation := imageRequestFromBody([]byte(body), "application/json", false)
 	assert.Equal(t, "generation", generation.Operation)
 	assert.Zero(t, generation.InputImages, "generation reports source images through the response")
 	assert.NotContains(t, generation.RequestParams, "image")
@@ -61,13 +62,55 @@ func TestImageBillingRequestFromBody_Multipart(t *testing.T) {
 	}
 	require.NoError(t, form.Close())
 
-	details := imageBillingRequestFromBody(buf.Bytes(), form.FormDataContentType(), true)
+	requested, details := imageRequestFromBody(buf.Bytes(), form.FormDataContentType(), true)
+	assert.Equal(t, 2, requested)
 	assert.Equal(t, 3, details.InputImages, "image, image[] and images[] count; mask does not")
 	assert.Equal(t, map[string]string{
 		"quality":             `"medium"`,
 		"n":                   "2",
 		"layer_decomposition": "true",
 	}, details.RequestParams)
+}
+
+// The requested count ("n") is read in the same pass as the pricing inputs.
+func TestImageRequestFromBody_RequestedCount(t *testing.T) {
+	for body, want := range map[string]int{
+		`{"model":"m","n":3}`:    3,
+		`{"model":"m"}`:          1,
+		`{"model":"m","n":0}`:    1,
+		`{"model":"m","n":-2}`:   1,
+		`{"model":"m","n":2.5}`:  1,
+		`{"model":"m","n":"2"}`:  1,
+		`{"model":"m","n":null}`: 1,
+		`not json`:               1,
+		``:                       1,
+	} {
+		requested, _ := imageRequestFromBody([]byte(body), "application/json", false)
+		assert.Equal(t, want, requested, body)
+	}
+
+	multipartCount := func(values ...string) int {
+		var buf bytes.Buffer
+		form := multipart.NewWriter(&buf)
+		part, err := form.CreateFormFile("n", "n.txt") // a file named "n" is not the parameter
+		require.NoError(t, err)
+		_, err = part.Write([]byte("7"))
+		require.NoError(t, err)
+		for _, value := range values {
+			require.NoError(t, form.WriteField("n", value))
+		}
+		require.NoError(t, form.Close())
+		requested, _ := imageRequestFromBody(buf.Bytes(), form.FormDataContentType(), true)
+		return requested
+	}
+	assert.Equal(t, 4, multipartCount(" 4 "))
+	assert.Equal(t, 1, multipartCount())
+	assert.Equal(t, 1, multipartCount("zero"))
+	assert.Equal(t, 1, multipartCount("0", "5"), "only the first n field is read")
+	assert.Equal(t, 2, multipartCount("2", "5"))
+
+	requested, _ := imageRequestFromBody([]byte("n=3"), "multipart/form-data", true)
+	assert.Equal(t, 1, requested, "multipart without a boundary")
 }
 
 func TestImagePixels(t *testing.T) {
@@ -80,6 +123,8 @@ func TestImagePixels(t *testing.T) {
 		"-5x100":                  0,
 		"100x":                    0,
 		"99999999999x99999999999": 0,
+		"1024 × 768":              786432,
+		"16:9":                    0,
 	} {
 		assert.Equal(t, want, imagePixels(size), size)
 	}

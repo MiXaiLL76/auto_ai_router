@@ -133,3 +133,41 @@ func TestExtractNamedParameterField_InvalidUTF8(t *testing.T) {
 	body := []byte("\xff\xfe\xfd The parameter size specified in the request is not valid")
 	require.NotPanics(t, func() { ClassifyBadRequest(body) })
 }
+
+// The keyword fallback matches parameter names as whole words only. A plural
+// in prose ("reasoning models", "these models") describes the request, not the
+// rejected field, so it must not surface as param "model"; a message that is
+// about the model itself is classified by the model branch instead.
+func TestClassifyBadRequest_PluralProseIsNotAParameter(t *testing.T) {
+	for _, tt := range []struct {
+		name, body, message, param string
+	}{
+		{
+			name:    "plural models in a parameter message",
+			body:    `{"error":{"message":"This value is not supported for reasoning models."}}`,
+			message: "Invalid request parameter",
+		},
+		{
+			name:    "plural models in a context length message",
+			body:    `{"error":{"message":"Context length exceeded for these models"}}`,
+			message: "Context length exceeded",
+		},
+		{
+			name:    "unsupported models is a model error",
+			body:    `{"error":{"message":"unsupported models requested"}}`,
+			message: "Invalid model",
+			param:   "model",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ClassifyBadRequest([]byte(tt.body))
+			assert.Equal(t, tt.message, got.Message)
+			if tt.param == "" {
+				assert.Nil(t, got.Param)
+				return
+			}
+			require.NotNil(t, got.Param)
+			assert.Equal(t, tt.param, *got.Param)
+		})
+	}
+}
