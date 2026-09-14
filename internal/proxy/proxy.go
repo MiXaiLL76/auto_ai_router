@@ -259,7 +259,8 @@ type RequestLogContext struct {
 	Status                string                   // "success" or "failure"
 	HTTPStatus            int                      // HTTP response status code
 	ErrorMsg              string                   // Error message (added to metadata on failure)
-	ErrorBodyRaw          string                   // Untruncated upstream provider error body; only ever set on failure paths, never for a successful response
+	ErrorBodyRaw          string                   // Untruncated upstream provider error body; only ever set on failure paths, never for a successful response. Feeds kafkalog.ErrorBodyEvent.ResponseBody (see buildErrorBodyEvent), not SpendEvent.
+	RequestBodyRaw        []byte                   // Client-facing request body (post-read, pre per-provider conversion): a slice-header alias of the []byte already read in readRequestBodyAndSelectModel, so stashing it here is just a pointer copy, not a byte copy. Sanitized/capped/converted to string only in buildErrorBodyEvent, which runs only on failure.
 	TokenUsage            *converter.TokenUsage    // Token usage with detailed breakdown
 	ModelPrice            *models.ModelPrice       // Price resolved before the provider request
 	PriceModelID          string                   // Model identifier used for price lookup
@@ -359,6 +360,7 @@ type Config struct {
 	Commit                     string
 	LiteLLMDB                  litellmdb.Manager          // LiteLLM database integration (optional)
 	KafkaLog                   kafkalog.Manager           // Kafka spend-log publishing (optional, analytics write-path)
+	ErrorBodyLog               kafkalog.ErrorBodyManager  // Kafka raw-error-body publishing (optional, separate topic, failure-only)
 	HealthChecker              HealthChecker              // Optional: cached DB health status (updated by health monitor)
 	PriceRegistry              *models.ModelPriceRegistry // Model pricing information (optional)
 	OrganizationPolicies       *models.OrganizationPolicyRegistry
@@ -398,6 +400,7 @@ type Proxy struct {
 	modelManager                     *models.Manager            // Model manager for getting configured models
 	LiteLLMDB                        litellmdb.Manager          // LiteLLM database integration
 	kafkaLog                         kafkalog.Manager           // Kafka spend-log publishing (optional, analytics write-path)
+	errorBodyLog                     kafkalog.ErrorBodyManager  // Kafka raw-error-body publishing (optional, separate topic, failure-only)
 	healthChecker                    HealthChecker              // Cached DB health status (optional)
 	priceRegistry                    *models.ModelPriceRegistry // Model pricing information (optional)
 	organizationPolicies             *models.OrganizationPolicyRegistry
@@ -478,6 +481,7 @@ func New(cfg *Config) *Proxy {
 		modelManager:                     cfg.ModelManager,
 		LiteLLMDB:                        cfg.LiteLLMDB,
 		kafkaLog:                         cfg.KafkaLog,
+		errorBodyLog:                     cfg.ErrorBodyLog,
 		healthChecker:                    cfg.HealthChecker,
 		priceRegistry:                    cfg.PriceRegistry,
 		organizationPolicies:             cfg.OrganizationPolicies,

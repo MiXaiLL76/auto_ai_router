@@ -38,7 +38,6 @@ CREATE TABLE air.spend_logs_kafka
     http_status UInt16,
     error_message Nullable(String),
     error_class LowCardinality(Nullable(String)),
-    error_body_raw Nullable(String),
 
     model String,
     real_model String,
@@ -153,7 +152,6 @@ CREATE TABLE air.spend_logs
     http_status UInt16,
     error_message Nullable(String),
     error_class LowCardinality(Nullable(String)),
-    error_body_raw Nullable(String),
 
     model String,
     real_model String,
@@ -228,3 +226,65 @@ TTL toDateTime(start_time) + INTERVAL 90 DAY;  -- пример; конкретн
 
 CREATE MATERIALIZED VIEW air.spend_logs_mv TO air.spend_logs AS
 SELECT * FROM air.spend_logs_kafka;
+
+-- Separate, independently-toggleable write-path (kafka.error_bodies): raw
+-- request/response bodies for a *failed* request only, on their own topic so
+-- retention/enablement can be managed independently of air.spend_logs (see
+-- docs/litellm-integration/kafka_spend_log.md, "Error bodies").
+CREATE TABLE air.error_bodies_kafka
+(
+    request_id String,
+    server_router_id String,
+    start_time DateTime64(3),
+    http_status UInt16,
+    error_class Nullable(String),
+    request_body Nullable(String),
+    response_body Nullable(String)
+)
+ENGINE = Kafka
+SETTINGS
+    kafka_broker_list = 'kafka:29092',
+    kafka_topic_list = 'error-bodies',
+    kafka_group_name = 'clickhouse_error_bodies',
+    kafka_format = 'JSONEachRow',
+    date_time_input_format = 'best_effort',
+    kafka_num_consumers = 2,
+    kafka_handle_error_mode = 'stream';
+
+-- Plain MergeTree for the same single-node-docker-compose reason as
+-- air.spend_logs above; swap for ReplicatedMergeTree in a real cluster.
+CREATE TABLE air.error_bodies
+(
+    request_id String,
+    server_router_id String,
+    start_time DateTime64(3),
+    http_status UInt16,
+    error_class Nullable(String),
+    request_body Nullable(String),
+    response_body Nullable(String)
+)
+ENGINE = MergeTree
+PARTITION BY toYYYYMM(start_time)
+-- server_router_id is part of the key, not just request_id: request_id is
+-- derived from the upstream provider's own response id and is echoed back
+-- unchanged through every hop of a chained deployment, so two different
+-- hops logging the same logical request in the same millisecond can share a
+-- request_id -- see air.logs' ORDER BY for the identical reasoning.
+ORDER BY (start_time, request_id, server_router_id)
+-- Short, independent retention: this is bulky debugging data, not
+-- billing/analytics -- pick whatever window your incident/debugging process
+-- actually needs, it has no bearing on air.spend_logs' own TTL.
+TTL toDateTime(start_time) + INTERVAL 14 DAY;  -- пример; на усмотрение DBA/CH-кластера
+
+CREATE MATERIALIZED VIEW air.error_bodies_mv TO air.error_bodies AS
+SELECT * FROM air.error_bodies_kafka;
+
+-- Join back to the matching air.spend_logs / air.errors row on
+-- (request_id, server_router_id), not request_id alone, for the same
+-- collision reason as the ORDER BY above.
+CREATE VIEW air.spend_logs_with_raw_errors AS
+SELECT s.*, b.request_body, b.response_body
+FROM air.spend_logs AS s
+LEFT JOIN air.error_bodies AS b
+    ON s.request_id = b.request_id AND s.server_router_id = b.server_router_id
+WHERE s.status = 'failure';

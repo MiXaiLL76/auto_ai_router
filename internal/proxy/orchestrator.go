@@ -102,6 +102,10 @@ func (p *Proxy) orchestrateRequest(
 	if !ok {
 		return nil, false
 	}
+	// Stashed for a possible kafkalog.ErrorBodyEvent later (see
+	// buildErrorBodyEvent) -- a slice-header alias of body, not a copy, so
+	// this costs nothing on the (much more common) success path.
+	logCtx.RequestBodyRaw = body
 
 	logCtx.RequestEndpoint = r.URL.Path
 	logCtx.ReasoningRequested, logCtx.ReasoningSource, logCtx.ThinkingMode = requestReasoningDetails(body)

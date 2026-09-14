@@ -36,6 +36,27 @@ func (s *stubKafkaManager) Shutdown(context.Context) error {
 
 var _ kafkalog.Manager = (*stubKafkaManager)(nil)
 
+// stubKafkaErrorBodyManager mirrors stubKafkaManager for the separate
+// error-bodies write-path (kafkalog.ErrorBodyManager).
+type stubKafkaErrorBodyManager struct {
+	events  []*kafkalog.ErrorBodyEvent
+	err     error
+	enabled bool
+}
+
+func (s *stubKafkaErrorBodyManager) LogErrorBody(event *kafkalog.ErrorBodyEvent) error {
+	s.events = append(s.events, event)
+	return s.err
+}
+func (s *stubKafkaErrorBodyManager) IsEnabled() bool       { return s.enabled }
+func (s *stubKafkaErrorBodyManager) IsHealthy() bool       { return true }
+func (s *stubKafkaErrorBodyManager) Stats() kafkalog.Stats { return kafkalog.Stats{} }
+func (s *stubKafkaErrorBodyManager) Shutdown(context.Context) error {
+	return nil
+}
+
+var _ kafkalog.ErrorBodyManager = (*stubKafkaErrorBodyManager)(nil)
+
 func testLogCtx(t *testing.T) *RequestLogContext {
 	t.Helper()
 	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
@@ -238,28 +259,49 @@ func TestBuildKafkaSpendEvent_ErrorClassOnlyOnFailure(t *testing.T) {
 	assert.Empty(t, eventOK.ErrorClass)
 }
 
-// TestBuildKafkaSpendEvent_ErrorBodyRawOnlyOnFailure mirrors
-// TestBuildKafkaSpendEvent_ErrorClassOnlyOnFailure: ErrorBodyRaw must survive
-// onto a failed event but must never leak onto a successful one, even if
-// logCtx.ErrorBodyRaw was left set from a prior attempt on the same logCtx
-// (e.g. a retried request that ultimately succeeded).
-func TestBuildKafkaSpendEvent_ErrorBodyRawOnlyOnFailure(t *testing.T) {
+// TestBuildErrorBodyEvent_MapsRawBodies checks that buildErrorBodyEvent (the
+// separate error-bodies write-path, see kafkalog.ErrorBodyEvent) carries the
+// raw response body through untouched and sanitizes the request body via
+// buildRequestBodyForErrorLog, keyed on the same request_id/server_router_id
+// a matching air.errors row would have so the two can be joined.
+func TestBuildErrorBodyEvent_MapsRawBodies(t *testing.T) {
 	prx := NewTestProxyBuilder().Build()
-	rawBody := `{"error":{"message":"the model produced invalid content","type":"invalid_request_error"}}`
+	rawResponse := `{"error":{"message":"the model produced invalid content","type":"invalid_request_error"}}`
 
 	logCtx := testLogCtx(t)
 	logCtx.HTTPStatus = 400
-	logCtx.ErrorBodyRaw = rawBody
-	eventFail := prx.buildKafkaSpendEvent(logCtx, "cred", "cred:model", "hash",
-		"", "", "", "", "api.openai.com", "failure", 0, nil, 0, logCtx.StartTime)
-	assert.Equal(t, rawBody, eventFail.ErrorBodyRaw)
+	logCtx.ErrorBodyRaw = rawResponse
+	logCtx.RequestBodyRaw = []byte(`{"model":"gpt-4o-mini","messages":[{"role":"user","content":"hi"}]}`)
 
-	logCtx2 := testLogCtx(t)
-	logCtx2.HTTPStatus = 200
-	logCtx2.ErrorBodyRaw = rawBody // stale leftover from an earlier retry; must not be logged as success
-	eventOK := prx.buildKafkaSpendEvent(logCtx2, "cred", "cred:model", "hash",
-		"", "", "", "", "api.openai.com", "success", 0, nil, 0, logCtx2.StartTime)
-	assert.Empty(t, eventOK.ErrorBodyRaw)
+	event := prx.buildErrorBodyEvent(logCtx)
+
+	assert.Equal(t, logCtx.spendRequestID(), event.RequestID)
+	assert.Equal(t, prx.routerID, event.ServerRouterID)
+	assert.Equal(t, "BadRequestError", event.ErrorClass)
+	assert.Equal(t, rawResponse, event.ResponseBody)
+	assert.JSONEq(t, string(logCtx.RequestBodyRaw), event.RequestBody)
+}
+
+// TestLogErrorBodyToKafka_OnlyCalledOnFailure guards the gate in
+// logSpendToLiteLLMDB: the error-bodies write-path must never publish for a
+// successful request, even when logCtx.ErrorBodyRaw/RequestBodyRaw are
+// non-empty leftovers from an earlier failed attempt on a retried request
+// that ultimately succeeded (mirrors TestBuildKafkaSpendEvent_ErrorClassOnlyOnFailure's
+// stale-retry concern, but at the call-site gate instead of inside the
+// builder, since ErrorBodyEvent has no "status" field of its own to gate on).
+func TestLogErrorBodyToKafka_OnlyCalledOnFailure(t *testing.T) {
+	stub := &stubKafkaErrorBodyManager{enabled: true}
+	prx := NewTestProxyBuilder().Build()
+	prx.errorBodyLog = stub
+
+	logCtx := testLogCtx(t)
+	logCtx.HTTPStatus = 400
+	logCtx.ErrorBodyRaw = `{"error":"bad request"}`
+	logCtx.RequestBodyRaw = []byte(`{"model":"gpt-4o-mini"}`)
+
+	prx.logErrorBodyToKafka(logCtx) // simulates what logSpendToLiteLLMDB does when status == "failure"
+	require.Len(t, stub.events, 1)
+	assert.Equal(t, `{"error":"bad request"}`, stub.events[0].ResponseBody)
 }
 
 func TestBuildKafkaSpendEvent_RealModelIDPreserved(t *testing.T) {

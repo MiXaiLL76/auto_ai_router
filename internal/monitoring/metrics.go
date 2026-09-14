@@ -239,6 +239,50 @@ var (
 		},
 	)
 
+	// Error-body logger stats mirror the spend-logger gauges above for the
+	// separate, independently-toggleable raw-error-body write-path.
+	KafkaErrorBodyLoggerQueuedTotal = promauto.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "auto_ai_router_kafka_error_body_logger_queued_total",
+			Help: "Cumulative number of error-body events queued for Kafka publishing",
+		},
+	)
+
+	KafkaErrorBodyLoggerProducedTotal = promauto.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "auto_ai_router_kafka_error_body_logger_produced_total",
+			Help: "Cumulative number of error-body events successfully produced to Kafka",
+		},
+	)
+
+	KafkaErrorBodyLoggerDroppedTotal = promauto.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "auto_ai_router_kafka_error_body_logger_dropped_total",
+			Help: "Cumulative number of error-body events dropped because the producer queue was full",
+		},
+	)
+
+	KafkaErrorBodyLoggerErrorsTotal = promauto.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "auto_ai_router_kafka_error_body_logger_errors_total",
+			Help: "Cumulative number of error-body events that failed to produce after all retries",
+		},
+	)
+
+	KafkaErrorBodyLoggerDLQSize = promauto.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "auto_ai_router_kafka_error_body_logger_dlq_size",
+			Help: "Current number of batches held in the Kafka error-body logger dead letter queue",
+		},
+	)
+
+	KafkaErrorBodyLoggerHealthy = promauto.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "auto_ai_router_kafka_error_body_logger_healthy",
+			Help: "Kafka broker connectivity for error-body publishing (1 = healthy, 0 = unhealthy)",
+		},
+	)
+
 	SpendQueueDepth = promauto.NewGauge(
 		prometheus.GaugeOpts{
 			Name: "auto_ai_router_spend_queue_depth",
@@ -575,4 +619,22 @@ func (m *Metrics) UpdateKafkaSpendLoggerStats(queued, produced, dropped, errors 
 		h = 1.0
 	}
 	KafkaSpendLoggerHealthy.Set(h)
+}
+
+// UpdateKafkaErrorBodyLoggerStats mirrors UpdateKafkaSpendLoggerStats for the
+// separate error-body write-path.
+func (m *Metrics) UpdateKafkaErrorBodyLoggerStats(queued, produced, dropped, errors uint64, dlqSize int, healthy bool) {
+	if !m.isEnabled() {
+		return
+	}
+	KafkaErrorBodyLoggerQueuedTotal.Set(float64(queued))
+	KafkaErrorBodyLoggerProducedTotal.Set(float64(produced))
+	KafkaErrorBodyLoggerDroppedTotal.Set(float64(dropped))
+	KafkaErrorBodyLoggerErrorsTotal.Set(float64(errors))
+	KafkaErrorBodyLoggerDLQSize.Set(float64(dlqSize))
+	h := 0.0
+	if healthy {
+		h = 1.0
+	}
+	KafkaErrorBodyLoggerHealthy.Set(h)
 }

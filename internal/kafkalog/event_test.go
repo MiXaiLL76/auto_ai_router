@@ -43,6 +43,58 @@ func TestSpendEvent_JSONMarshal_OmitsNilOptionalFields(t *testing.T) {
 	assert.Equal(t, float64(0), raw["body_response_bytes"])
 }
 
+func TestErrorBodyEvent_Key(t *testing.T) {
+	e := &ErrorBodyEvent{RequestID: "req-123"}
+	assert.Equal(t, []byte("req-123"), e.Key())
+
+	var nilEvent *ErrorBodyEvent
+	assert.Nil(t, nilEvent.Key())
+}
+
+func TestErrorBodyEvent_JSONMarshal_OmitsEmptyOptionalFields(t *testing.T) {
+	e := &ErrorBodyEvent{
+		RequestID:      "req-123",
+		ServerRouterID: "air-ru02-abc123",
+		StartTime:      time.Date(2026, 7, 15, 10, 0, 0, 0, time.UTC),
+		HTTPStatus:     429,
+	}
+
+	data, err := json.Marshal(e)
+	require.NoError(t, err)
+
+	var raw map[string]interface{}
+	require.NoError(t, json.Unmarshal(data, &raw))
+
+	assert.Equal(t, "req-123", raw["request_id"])
+	assert.Equal(t, "air-ru02-abc123", raw["server_router_id"])
+	assert.Equal(t, float64(429), raw["http_status"])
+	_, hasErrorClass := raw["error_class"]
+	assert.False(t, hasErrorClass)
+	_, hasRequestBody := raw["request_body"]
+	assert.False(t, hasRequestBody)
+	_, hasResponseBody := raw["response_body"]
+	assert.False(t, hasResponseBody)
+}
+
+func TestErrorBodyEvent_JSONMarshal_IncludesBodiesWhenSet(t *testing.T) {
+	e := &ErrorBodyEvent{
+		RequestID:    "req-123",
+		ErrorClass:   "RateLimitError",
+		RequestBody:  `{"model":"gpt-5"}`,
+		ResponseBody: `{"error":{"message":"rate limited"}}`,
+	}
+
+	data, err := json.Marshal(e)
+	require.NoError(t, err)
+
+	var raw map[string]interface{}
+	require.NoError(t, json.Unmarshal(data, &raw))
+
+	assert.Equal(t, "RateLimitError", raw["error_class"])
+	assert.Equal(t, `{"model":"gpt-5"}`, raw["request_body"])
+	assert.Equal(t, `{"error":{"message":"rate limited"}}`, raw["response_body"])
+}
+
 func TestSpendEvent_JSONMarshal_IncludesTTFTWhenSet(t *testing.T) {
 	completionStart := time.Date(2026, 7, 15, 10, 0, 0, 300, time.UTC)
 	ttft := int64(300)

@@ -172,6 +172,112 @@ func TestConfig_Validate_Kafka(t *testing.T) {
 	}
 }
 
+func TestConfig_Validate_KafkaErrorBodies(t *testing.T) {
+	baseKafka := KafkaConfig{
+		Enabled:          true,
+		Brokers:          []string{"kafka:9092"},
+		Topic:            "air.spend_logs",
+		LogQueueSize:     5000,
+		LogBatchSize:     100,
+		LogFlushInterval: 5 * time.Second,
+		LogWorkers:       4,
+	}
+
+	tests := []struct {
+		name        string
+		mutate      func(k *KafkaConfig)
+		wantErr     bool
+		errContains string
+	}{
+		{
+			name:    "disabled error_bodies is always valid",
+			mutate:  func(k *KafkaConfig) {},
+			wantErr: false,
+		},
+		{
+			name: "enabled with distinct topic passes",
+			mutate: func(k *KafkaConfig) {
+				k.ErrorBodies = KafkaErrorBodiesConfig{Enabled: true, Topic: "error-bodies"}
+			},
+			wantErr: false,
+		},
+		{
+			name: "enabled without kafka.enabled fails",
+			mutate: func(k *KafkaConfig) {
+				k.Enabled = false
+				k.ErrorBodies = KafkaErrorBodiesConfig{Enabled: true, Topic: "error-bodies"}
+			},
+			wantErr:     true,
+			errContains: "kafka.error_bodies.enabled requires kafka.enabled=true",
+		},
+		{
+			name: "enabled without topic fails",
+			mutate: func(k *KafkaConfig) {
+				k.ErrorBodies = KafkaErrorBodiesConfig{Enabled: true}
+			},
+			wantErr:     true,
+			errContains: "kafka.error_bodies.topic is required",
+		},
+		{
+			name: "enabled with topic same as spend topic fails",
+			mutate: func(k *KafkaConfig) {
+				k.ErrorBodies = KafkaErrorBodiesConfig{Enabled: true, Topic: "air.spend_logs"}
+			},
+			wantErr:     true,
+			errContains: "kafka.error_bodies.topic must differ from kafka.topic",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			kafka := baseKafka
+			tt.mutate(&kafka)
+			cfg := baseValidConfigForKafkaTests()
+			cfg.Kafka = kafka
+			err := cfg.Validate()
+			if tt.wantErr {
+				assert.Error(t, err)
+				assert.Contains(t, err.Error(), tt.errContains)
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestKafkaConfig_UnmarshalYAML_ErrorBodies(t *testing.T) {
+	t.Setenv("KAFKA_ERROR_BODIES_ENABLED_TEST", "true")
+
+	yamlDoc := `
+enabled: true
+brokers:
+  - "kafka:9092"
+topic: air.spend_logs
+error_bodies:
+  enabled: "os.environ/KAFKA_ERROR_BODIES_ENABLED_TEST"
+  topic: error-bodies
+`
+	var kafkaCfg KafkaConfig
+	a := assert.New(t)
+	a.NoError(yaml.Unmarshal([]byte(yamlDoc), &kafkaCfg))
+	a.True(kafkaCfg.ErrorBodies.Enabled)
+	a.Equal("error-bodies", kafkaCfg.ErrorBodies.Topic)
+}
+
+func TestKafkaConfig_UnmarshalYAML_ErrorBodiesDefaultsToDisabled(t *testing.T) {
+	yamlDoc := `
+enabled: true
+brokers:
+  - "kafka:9092"
+topic: air.spend_logs
+`
+	var kafkaCfg KafkaConfig
+	a := assert.New(t)
+	a.NoError(yaml.Unmarshal([]byte(yamlDoc), &kafkaCfg))
+	a.False(kafkaCfg.ErrorBodies.Enabled)
+	a.Empty(kafkaCfg.ErrorBodies.Topic)
+}
+
 func TestConfig_Validate_KafkaOnlyModeRequiresKafka(t *testing.T) {
 	cfg := baseValidConfigForKafkaTests()
 	cfg.LiteLLMDB.DisableSpendLogsWrite = true

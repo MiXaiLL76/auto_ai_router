@@ -12,6 +12,7 @@ import (
 
 	"github.com/mixaill76/auto_ai_router/internal/converter"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb"
+	"github.com/mixaill76/auto_ai_router/internal/logger"
 )
 
 // ErrResponseBodyTooLarge is returned when a response body exceeds the configured size limit.
@@ -120,6 +121,35 @@ func extractErrorBodyRaw(body []byte) string {
 		return string(body[:maxErrorBodyRawBytes]) + "..."
 	}
 	return string(body)
+}
+
+// maxRequestBodyRawBytes bounds kafkalog.ErrorBodyEvent.RequestBody overall,
+// after per-field sanitization. Larger than maxErrorBodyRawBytes because
+// request bodies (prompts, message history) are routinely bigger than
+// provider error bodies, and the whole point of shipping this alongside the
+// response body is to reproduce the failure.
+const maxRequestBodyRawBytes = 32 * 1024
+
+// maxRequestBodyFieldLength is the per-JSON-field cap passed to
+// logger.SanitizeRequestBodyForLog: long individual fields (a huge system
+// prompt, a base64 image) are collapsed before the overall-size cap below
+// even applies, so a single oversized field can't crowd out the rest of the
+// request shape.
+const maxRequestBodyFieldLength = 2000
+
+// buildRequestBodyForErrorLog sanitizes and caps a client request body for
+// inclusion in a kafkalog.ErrorBodyEvent: per-field truncation first (base64
+// images, huge prompts), then an overall byte cap as a backstop, mirroring
+// extractErrorBodyRaw's shape. Only ever called on a failure path.
+func buildRequestBodyForErrorLog(body []byte) string {
+	if len(body) == 0 {
+		return ""
+	}
+	sanitized := logger.SanitizeRequestBodyForLog(body, maxRequestBodyFieldLength)
+	if len(sanitized) > maxRequestBodyRawBytes {
+		return sanitized[:maxRequestBodyRawBytes] + "..."
+	}
+	return sanitized
 }
 
 // mapHTTPStatusToErrorClass maps HTTP status codes to LiteLLM exception class names

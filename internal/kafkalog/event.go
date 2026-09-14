@@ -26,12 +26,6 @@ type SpendEvent struct {
 	HTTPStatus   int    `json:"http_status"`
 	ErrorMessage string `json:"error_message,omitempty"`
 	ErrorClass   string `json:"error_class,omitempty"`
-	// ErrorBodyRaw is the untruncated upstream provider error body. Unlike
-	// ErrorMessage (capped at 512 bytes), this is meant to be read in full
-	// when debugging a failure. Only ever populated on failure — see
-	// buildKafkaSpendEvent, which sets it in the same status=="failure"
-	// branch as ErrorClass.
-	ErrorBodyRaw string `json:"error_body_raw,omitempty"`
 
 	Model      string `json:"model"`      // Model alias, as requested by the client
 	RealModel  string `json:"real_model"` // Real upstream model name (price lookup key)
@@ -104,6 +98,44 @@ type SpendEvent struct {
 // Key returns the Kafka record key (request_id), guaranteeing all events for
 // the same request land on the same partition.
 func (e *SpendEvent) Key() []byte {
+	if e == nil {
+		return nil
+	}
+	return []byte(e.RequestID)
+}
+
+// ErrorBodyEvent is a separate, independently-toggleable event published to
+// its own Kafka topic (default "error-bodies", see KafkaErrorBodiesConfig)
+// carrying the untruncated request/response bodies for a *failed* request
+// only. Deliberately not part of SpendEvent/air.spend_logs: those rows are
+// kept far longer (billing/analytics) and are meant to stay light, while raw
+// bodies are bulky, only useful for a short debugging window, and need their
+// own, independently configurable retention. Join back to the matching
+// SpendEvent/air.errors row on (request_id, server_router_id) -- request_id
+// alone can collide across hops of a chained request that land in the same
+// millisecond (see air.logs' ORDER BY, which includes server_router_id for
+// the same reason).
+type ErrorBodyEvent struct {
+	RequestID      string    `json:"request_id"`
+	ServerRouterID string    `json:"server_router_id"`
+	StartTime      time.Time `json:"start_time"`
+	HTTPStatus     int       `json:"http_status"`
+	ErrorClass     string    `json:"error_class,omitempty"`
+	// RequestBody is the client-facing request body (post-read, pre
+	// per-provider conversion), sanitized via logger.SanitizeRequestBodyForLog
+	// to collapse large base64 payloads, capped at maxRequestBodyRawBytes.
+	RequestBody string `json:"request_body,omitempty"`
+	// ResponseBody is the raw upstream provider error body, capped at
+	// maxErrorBodyRawBytes. Same capture sites as SpendEvent.ErrorMessage
+	// used to populate before this event type existed, just uncapped at 512
+	// bytes.
+	ResponseBody string `json:"response_body,omitempty"`
+}
+
+// Key returns the Kafka record key (request_id), matching SpendEvent's
+// partitioning so a request's spend event and error-body event -- when both
+// are published -- land on the same partition and stay orderable.
+func (e *ErrorBodyEvent) Key() []byte {
 	if e == nil {
 		return nil
 	}
