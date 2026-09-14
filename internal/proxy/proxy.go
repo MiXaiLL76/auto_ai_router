@@ -2211,6 +2211,13 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 			// — keeps the spend-log/analytics record in sync with what the client
 			// actually saw instead of a generic placeholder.
 			logCtx.ErrorMsg = classifiedErrorMessage(resp.StatusCode, rawErrorBody)
+			// This is the main non-streaming, non-retried direct-provider-error
+			// path -- found missing its ErrorBodyRaw capture via an actual
+			// end-to-end smoke test (docker-compose.kafka.yml): a request that
+			// gets a real upstream error and isn't retried lands here, and
+			// air.error_bodies.response_body came back NULL for it despite the
+			// other 4 capture sites all being covered.
+			logCtx.ErrorBodyRaw = extractErrorBodyRaw(rawErrorBody)
 			// Final error returned to the client — single unified ERROR record
 			// with everything needed for debugging.
 			p.logUpstreamError(r.Context(), "Upstream request completed with error status", resp.StatusCode, cred, modelID, rawErrorBody,
