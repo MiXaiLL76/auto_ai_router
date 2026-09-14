@@ -96,6 +96,21 @@ func TestClassifyBadRequest(t *testing.T) {
 			notContains: []string{"Supported values are"},
 		},
 		{
+			// Reproduces two real production cases (temperature out of range,
+			// negative n) where the provider's own JSON names the offending
+			// param explicitly but phrases the message in a way none of the
+			// switch's keyword signals recognize. The structured param field
+			// is still trustworthy — it's not a text guess — so this should
+			// surface "Invalid <param>" instead of falling all the way to the
+			// fully generic "Invalid request".
+			name:        "known param, unrecognized message phrasing",
+			body:        `{"error":{"message":"5 is greater than the maximum of 2","param":"temperature","code":"decimal_above_max_value"}}`,
+			wantMessage: "Invalid temperature",
+			wantCode:    "invalid_field",
+			wantParam:   stringPtr("temperature"),
+			notContains: []string{"is greater than", "decimal_above_max_value"},
+		},
+		{
 			name:        "plain text fallback",
 			body:        `vendor stack id 012345`,
 			wantMessage: "Invalid request",
@@ -211,6 +226,7 @@ func TestClassifyBadRequest_IsIdempotent(t *testing.T) {
 		`{"error":{"message":"litellm.BadRequestError: Received Model Group=x"}}`,
 		`{"error":{"message":"The parameters logprobs is not supported.","code":"invalid_parameter_error"}}`,
 		`{"error":{"message":"Invalid 'output[1].type': 'input_file'.","type":"InvalidParameter"}}`,
+		`{"error":{"message":"5 is greater than the maximum of 2","param":"temperature","code":"decimal_above_max_value"}}`,
 		`vendor stack id 012345`,
 	}
 

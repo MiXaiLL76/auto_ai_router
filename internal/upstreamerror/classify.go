@@ -93,6 +93,30 @@ func ClassifyBadRequest(rawBody []byte) BadRequest {
 		}
 		result.Param = param
 	default:
+		// providerParam comes from a structured "param"/"parameter"/"field" key
+		// in the provider's own JSON (see collectProviderErrorSignals) — not a
+		// text-substring guess — so it's trustworthy even when none of the
+		// message-shape branches above recognize the provider's wording (e.g.
+		// "temperature must be between 0 and 2" doesn't contain any of this
+		// switch's keyword signals, yet the provider still told us exactly
+		// which field was rejected). Surfacing "Invalid <param>" instead of
+		// the fully generic "Invalid request" costs nothing in safety — it's
+		// still one of a fixed, pre-vetted shape, never provider free text —
+		// and gives callers something actionable instead of a blank message.
+		if providerParam != nil {
+			result.Message = "Invalid " + *providerParam
+			// "invalid_field", not "invalid_value" — that string is
+			// classifyValidationError's own signal for a different, more
+			// specific bucket. A status code is itself fed back into the
+			// joined signal text on re-classification (see
+			// providerErrorSignalsFromBody collecting "code"), so reusing
+			// that phrase would send this package's own re-classification of
+			// its output into the wrong bucket — the exact idempotency
+			// failure TestClassifyBadRequest_IsIdempotent guards against.
+			// "invalid_field" matches no hasSignal list in this file, so a
+			// second pass falls through to this same default branch again.
+			result.Code = "invalid_field"
+		}
 		result.Param = providerParam
 	}
 

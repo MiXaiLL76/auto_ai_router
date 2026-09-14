@@ -162,6 +162,21 @@ func TestTransformError(t *testing.T) {
 	assert.NotContains(t, string(result.Body), "provider.internal")
 }
 
+func TestTransformError_RequestEntityTooLarge(t *testing.T) {
+	result := New().Transform(Context{}, Response{
+		StatusCode: http.StatusRequestEntityTooLarge,
+		Headers:    http.Header{"Content-Type": {"application/json"}},
+		Body:       []byte(`{"error":{"message":"payload exceeds the 32MB limit for credential internal-vertex-01"}}`),
+	})
+
+	assert.Equal(t, http.StatusRequestEntityTooLarge, result.StatusCode)
+	var body map[string]any
+	require.NoError(t, json.Unmarshal(result.Body, &body))
+	errorBody := body["error"].(map[string]any)
+	assert.Equal(t, "Request entity too large", errorBody["message"])
+	assert.NotContains(t, string(result.Body), "internal-vertex-01")
+}
+
 // TestTransformError_BadRequestPreservesRouterClassification reproduces the
 // real production gap: the router's own already-classified 400 body (what
 // maskedUpstreamErrorBody produces natively, e.g. for a rejected "logprobs"

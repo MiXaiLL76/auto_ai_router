@@ -295,6 +295,7 @@ func TestClassifiedErrorMessage_MatchesClientBody(t *testing.T) {
 		{"429 rate limit", http.StatusTooManyRequests, nil, "Rate limit exceeded"},
 		{"408 request timeout", http.StatusRequestTimeout, nil, "Request timed out"},
 		{"504 gateway timeout", http.StatusGatewayTimeout, nil, "Request timed out"},
+		{"413 request entity too large", http.StatusRequestEntityTooLarge, nil, "Request entity too large"},
 		{"401 unauthorized stays generic (never classified, by design)", http.StatusUnauthorized, nil, "Request failed"},
 		{"403 forbidden stays generic (never classified, by design)", http.StatusForbidden, nil, "Request failed"},
 		{"404 not found stays generic (never classified, by design)", http.StatusNotFound, nil, "Request failed"},
@@ -316,6 +317,7 @@ func TestClassifiedErrorMessage_ConsistentWithMaskedUpstreamErrorBody(t *testing
 	statuses := []int{
 		http.StatusBadRequest, http.StatusTooManyRequests,
 		http.StatusRequestTimeout, http.StatusGatewayTimeout,
+		http.StatusRequestEntityTooLarge,
 		http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound,
 	}
 	rawBody := []byte(`{"error":{"message":"max_tokens must be a positive integer"}}`)

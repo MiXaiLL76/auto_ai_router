@@ -342,6 +342,34 @@ func TestRequestToChat_ToolChoiceNonFunctionPassthrough(t *testing.T) {
 	assert.Equal(t, "file_search", tc["type"])
 }
 
+func TestRequestToChat_ToolChoiceRequiredObject(t *testing.T) {
+	// Responses API accepts {"type":"required"} as an object-form equivalent of
+	// the string "required".  DeepSeek (and other OpenAI-compatible backends)
+	// reject the object form, so the converter must normalize it to the plain
+	// string "required" that Chat Completions providers accept.
+	body := `{"model":"gpt-4o","input":"hi","tool_choice":{"type":"required"}}`
+	result, err := RequestToChat([]byte(body))
+	require.NoError(t, err)
+
+	var parsed map[string]interface{}
+	require.NoError(t, json.Unmarshal(result, &parsed))
+
+	assert.Equal(t, "required", parsed["tool_choice"])
+}
+
+func TestRequestToChat_ToolChoiceAnyObject(t *testing.T) {
+	// Responses API accepts {"type":"any"} as an object-form equivalent of
+	// "required" (force any tool call).  Same normalization as "required".
+	body := `{"model":"gpt-4o","input":"hi","tool_choice":{"type":"any"}}`
+	result, err := RequestToChat([]byte(body))
+	require.NoError(t, err)
+
+	var parsed map[string]interface{}
+	require.NoError(t, json.Unmarshal(result, &parsed))
+
+	assert.Equal(t, "required", parsed["tool_choice"])
+}
+
 func TestRequestToChat_FunctionCallOutput(t *testing.T) {
 	body := `{
 		"model": "gpt-4o",

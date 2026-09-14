@@ -348,12 +348,15 @@ func (t *TokenInfo) IsExpired() bool {
 	return utils.NowUTC().After(*t.Expires)
 }
 
-// IsBudgetExceeded checks if token budget is exceeded (embedded, use >)
+// IsBudgetExceeded checks if token budget is exceeded (embedded, use >=).
+// Unlimited is a nil MaxBudget, never 0: with a strict > a max_budget=0 key
+// passed its first request (0 > 0 is false) and only started failing once that
+// request's spend had been written back to the DB.
 func (t *TokenInfo) IsBudgetExceeded() bool {
 	if t.MaxBudget == nil {
 		return false
 	}
-	return t.Spend > *t.MaxBudget
+	return t.Spend >= *t.MaxBudget
 }
 
 // ModelAccessScopes returns the independently enforced model allowlists.
@@ -469,7 +472,7 @@ func (t *TokenInfo) IsAnyModelAllowed(candidates []string) bool {
 	return false
 }
 
-// checkUserBudget checks user budget (personal key only - embedded, use >)
+// checkUserBudget checks user budget (personal key only - embedded, use >=)
 func (t *TokenInfo) checkUserBudget() bool {
 	// Only check user budget for personal keys (no team)
 	if t.TeamID != "" {
@@ -478,15 +481,15 @@ func (t *TokenInfo) checkUserBudget() bool {
 	if t.UserMaxBudget == nil || t.UserSpend == nil {
 		return false
 	}
-	return *t.UserSpend > *t.UserMaxBudget
+	return *t.UserSpend >= *t.UserMaxBudget
 }
 
-// checkTeamBudget checks team budget (embedded, use >)
+// checkTeamBudget checks team budget (embedded, use >=)
 func (t *TokenInfo) checkTeamBudget() bool {
 	if t.TeamMaxBudget == nil || t.TeamSpend == nil {
 		return false
 	}
-	return *t.TeamSpend > *t.TeamMaxBudget
+	return *t.TeamSpend >= *t.TeamMaxBudget
 }
 
 // checkTeamMemberBudget checks team member budget (external, use >=)
@@ -497,9 +500,12 @@ func (t *TokenInfo) checkTeamMemberBudget() bool {
 	return *t.TeamMemberSpend >= *t.TeamMemberMaxBudget
 }
 
-// checkOrganizationBudget checks organization budget (external, use >=)
+// checkOrganizationBudget checks organization budget (external, use >=).
+// A 0 max_budget is a real "no spend allowed" limit, not unlimited: an
+// organization without a budget has no LiteLLM_BudgetTable row at all, so the
+// query leaves OrgMaxBudget nil.
 func (t *TokenInfo) checkOrganizationBudget() bool {
-	if t.OrgMaxBudget == nil || *t.OrgMaxBudget <= 0 || t.OrgSpend == nil {
+	if t.OrgMaxBudget == nil || t.OrgSpend == nil {
 		return false
 	}
 	return *t.OrgSpend >= *t.OrgMaxBudget

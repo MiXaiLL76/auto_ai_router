@@ -89,6 +89,9 @@ func maskedUpstreamErrorBody(statusCode int, requestID string, rawBodies ...[]by
 	case http.StatusRequestTimeout, http.StatusGatewayTimeout:
 		message = "Request timed out"
 		code = "timeout_error"
+	case http.StatusRequestEntityTooLarge:
+		message = "Request entity too large"
+		code = "request_entity_too_large"
 	}
 
 	resp := APIErrorResponse{
@@ -121,6 +124,8 @@ func classifiedErrorMessage(statusCode int, rawBody []byte) string {
 		return "Rate limit exceeded"
 	case http.StatusRequestTimeout, http.StatusGatewayTimeout:
 		return "Request timed out"
+	case http.StatusRequestEntityTooLarge:
+		return "Request entity too large"
 	default:
 		return "Request failed"
 	}

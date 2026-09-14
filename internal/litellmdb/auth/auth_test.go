@@ -130,10 +130,16 @@ func TestTokenInfo_IsBudgetExceeded(t *testing.T) {
 		assert.False(t, info.IsBudgetExceeded())
 	})
 
-	t.Run("spend == max_budget - not exceeded (embedded uses >)", func(t *testing.T) {
+	t.Run("spend == max_budget - exceeded (embedded uses >=)", func(t *testing.T) {
 		maxBudget := 100.0
 		info := &models.TokenInfo{Spend: 100, MaxBudget: &maxBudget}
-		assert.False(t, info.IsBudgetExceeded())
+		assert.True(t, info.IsBudgetExceeded())
+	})
+
+	t.Run("zero max_budget - exceeded before any spend", func(t *testing.T) {
+		maxBudget := 0.0
+		info := &models.TokenInfo{Spend: 0, MaxBudget: &maxBudget}
+		assert.True(t, info.IsBudgetExceeded())
 	})
 
 	t.Run("spend > max_budget - exceeded", func(t *testing.T) {
@@ -215,7 +221,7 @@ func TestTokenInfo_Validate(t *testing.T) {
 		assert.ErrorIs(t, err, models.ErrBudgetExceeded)
 	})
 
-	t.Run("team budget exceeded (embedded, >)", func(t *testing.T) {
+	t.Run("team budget exceeded (embedded, >=)", func(t *testing.T) {
 		teamBudget := 100.0
 		teamSpend := 150.0
 		info := &models.TokenInfo{
@@ -226,7 +232,7 @@ func TestTokenInfo_Validate(t *testing.T) {
 		assert.ErrorIs(t, err, models.ErrBudgetExceeded)
 	})
 
-	t.Run("team budget at limit - not exceeded (embedded uses >)", func(t *testing.T) {
+	t.Run("team budget at limit - exceeded (embedded uses >=)", func(t *testing.T) {
 		teamBudget := 100.0
 		teamSpend := 100.0
 		info := &models.TokenInfo{
@@ -234,7 +240,27 @@ func TestTokenInfo_Validate(t *testing.T) {
 			TeamSpend:     &teamSpend,
 		}
 		err := info.Validate("")
-		assert.NoError(t, err)
+		assert.ErrorIs(t, err, models.ErrBudgetExceeded)
+	})
+
+	t.Run("zero token budget - rejected on the first request", func(t *testing.T) {
+		maxBudget := 0.0
+		info := &models.TokenInfo{Spend: 0, MaxBudget: &maxBudget}
+		err := info.Validate("")
+		assert.ErrorIs(t, err, models.ErrBudgetExceeded)
+	})
+
+	t.Run("zero user budget - rejected on the first request", func(t *testing.T) {
+		userBudget := 0.0
+		userSpend := 0.0
+		info := &models.TokenInfo{
+			UserID:        "user1",
+			TeamID:        "",
+			UserMaxBudget: &userBudget,
+			UserSpend:     &userSpend,
+		}
+		err := info.Validate("")
+		assert.ErrorIs(t, err, models.ErrBudgetExceeded)
 	})
 
 	t.Run("team member budget exceeded (external, >=)", func(t *testing.T) {
@@ -262,7 +288,7 @@ func TestTokenInfo_Validate(t *testing.T) {
 		assert.ErrorIs(t, err, models.ErrBudgetExceeded)
 	})
 
-	t.Run("user budget exceeded (personal key, embedded, >)", func(t *testing.T) {
+	t.Run("user budget exceeded (personal key, embedded, >=)", func(t *testing.T) {
 		userBudget := 100.0
 		userSpend := 150.0
 		info := &models.TokenInfo{

@@ -340,6 +340,8 @@ func normalizeError(status int, body []byte) []byte {
 		message = "Rate limit exceeded"
 	case http.StatusRequestTimeout, http.StatusGatewayTimeout:
 		message = "Request timed out"
+	case http.StatusRequestEntityTooLarge:
+		message = "Request entity too large"
 	}
 
 	result, _ := json.Marshal(map[string]any{

@@ -24,7 +24,6 @@ type streamReader struct {
 	pendingPrelude  bool
 	sentChatPrelude bool
 	sentDone        bool
-	openAIStream    bool
 }
 
 type choiceStreamState struct {
@@ -199,12 +198,6 @@ func (r *streamReader) normalizeTextChunk(body map[string]any) bool {
 
 func (r *streamReader) normalizeChatChunk(body map[string]any) (bool, bool) {
 	r.pendingUsage = nil
-	if _, exists := body["obfuscation"]; exists {
-		r.openAIStream = true
-	}
-	if _, exists := body["service_tier"]; exists {
-		r.openAIStream = true
-	}
 	hadSystemFingerprint := body["system_fingerprint"] != nil
 	usage, hasUsage := body["usage"].(map[string]any)
 	hasUsage = hasUsage && usage != nil
@@ -253,8 +246,7 @@ func (r *streamReader) normalizeChatChunk(body map[string]any) (bool, bool) {
 			delete(body, "usage")
 			finalUsage = false
 		} else {
-			forceZero := r.openAIStream && hadSystemFingerprint
-			usage = liteLLMStreamUsage(usage, forceZero)
+			usage = liteLLMStreamUsage(usage)
 		}
 	}
 
@@ -368,10 +360,7 @@ func (r *streamReader) usageChoices() []any {
 	return choices
 }
 
-func liteLLMStreamUsage(usage map[string]any, forceZero bool) map[string]any {
-	if forceZero {
-		return emptyLiteLLMStreamUsage()
-	}
+func liteLLMStreamUsage(usage map[string]any) map[string]any {
 	normalizeUsage(usage)
 	delete(usage, "cost")
 	delete(usage, "cost_details")
@@ -419,15 +408,6 @@ func (r *streamReader) usageChunk(usage map[string]any) map[string]any {
 		"object":  "chat.completion.chunk",
 		"choices": r.usageChoices(),
 		"usage":   usage,
-	}
-}
-
-func emptyLiteLLMStreamUsage() map[string]any {
-	return map[string]any{
-		"completion_tokens":         0,
-		"completion_tokens_details": map[string]any{"reasoning_tokens": 0},
-		"prompt_tokens":             0,
-		"total_tokens":              0,
 	}
 }
 

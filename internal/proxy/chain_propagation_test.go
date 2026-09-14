@@ -99,6 +99,8 @@ func TestRouterChain_ErrorStatusPropagatedThroughChain(t *testing.T) {
 				require.Contains(t, w.Body.String(), "Rate limit exceeded")
 			case http.StatusRequestTimeout, http.StatusGatewayTimeout:
 				require.Contains(t, w.Body.String(), "Request timed out")
+			case http.StatusRequestEntityTooLarge:
+				require.Contains(t, w.Body.String(), "Request entity too large")
 			default:
 				require.Contains(t, w.Body.String(), "Request failed")
 			}

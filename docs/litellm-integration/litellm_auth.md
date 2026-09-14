@@ -52,7 +52,7 @@ sequenceDiagram
 ```
 
 - The hash (never the raw key) is what's stored in Postgres and used as the cache key.
-- `Validate()` checks, in order: `Blocked` → `Expires` → token budget → team → team-member → org → user → org-member budget (embedded budgets compare `Spend > MaxBudget`; org uses `LiteLLM_BudgetTable`).
+- `Validate()` checks, in order: `Blocked` → `Expires` → token budget → team → team-member → org → user → org-member budget (every level compares `Spend >= MaxBudget`; org uses `LiteLLM_BudgetTable`). A `max_budget` of `0` therefore allows no spend at all — unlimited is a `NULL` `max_budget` (for an organization, a missing budget row), never `0`.
 - The model isn't known yet at this point (`Validate("")` — model check is skipped), so the pre-check here is deliberately budget/expiry-only.
 - Cache invalidation is TTL-only (`auth_cache_ttl`, default 5s). There is no push invalidation from LiteLLM admin actions (`InvalidateToken`/`InvalidateAll` exist but nothing calls them yet) — a blocked/rebudgeted key can stay valid in a hot cache for up to `auth_cache_ttl`.
 - The cache is per-instance, not shared across replicas.
