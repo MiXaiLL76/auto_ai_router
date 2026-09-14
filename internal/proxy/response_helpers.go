@@ -14,7 +14,6 @@ import (
 	"net/textproto"
 	"regexp"
 	"sort"
-	"strconv"
 	"strings"
 
 	// Also used by request ingress sanitization below. RawMessage keeps large
@@ -625,47 +624,6 @@ func hasMultipartClosingBoundary(body []byte, boundary string) bool {
 	}
 	after := body[index+len(marker):]
 	return len(after) == 0 || bytes.HasPrefix(after, []byte("\r\n"))
-}
-
-func extractImageCountFromBody(body []byte, contentType string) int {
-	if strings.HasPrefix(strings.ToLower(contentType), "multipart/form-data") {
-		_, params, err := mime.ParseMediaType(contentType)
-		if err != nil {
-			return 1
-		}
-		boundary := params["boundary"]
-		if boundary == "" {
-			return 1
-		}
-		reader := multipart.NewReader(bytes.NewReader(body), boundary)
-		for {
-			part, err := reader.NextPart()
-			if err != nil {
-				break
-			}
-			if part.FileName() != "" || part.FormName() != "n" {
-				continue
-			}
-			data, err := io.ReadAll(io.LimitReader(part, 64))
-			if err != nil {
-				break
-			}
-			n, err := strconv.Atoi(strings.TrimSpace(string(data)))
-			if err == nil && n > 0 {
-				return n
-			}
-			break
-		}
-		return 1
-	}
-
-	var imgReq struct {
-		N *int `json:"n"`
-	}
-	if err := json.Unmarshal(body, &imgReq); err == nil && imgReq.N != nil && *imgReq.N > 0 {
-		return *imgReq.N
-	}
-	return 1
 }
 
 func extractWebSearchRequestUsage(body []byte, contentType string) (bool, string) {

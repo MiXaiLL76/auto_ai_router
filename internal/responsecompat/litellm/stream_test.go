@@ -368,3 +368,47 @@ func splitDataFrames(stream string) []string {
 	}
 	return frames
 }
+
+// Image streams drop provider-side cost figures from usage events, like
+// non-streaming image responses do; event framing and counts are kept.
+func TestImageStreamDropsProviderCost(t *testing.T) {
+	for _, endpoint := range []string{"/v1/images/generations", "/v1/images/edits"} {
+		t.Run(endpoint, func(t *testing.T) {
+			source := strings.NewReader(
+				"event: image_generation.partial_succeeded\n" +
+					`data: {"type":"image_generation.partial_succeeded","model":"provider-model","image_index":0,"url":"https://img.example/1.png"}` + "\n\n" +
+					"event: image_generation.completed\n" +
+					`data: {"type":"image_generation.completed","model":"provider-model","usage":{"generated_images":1,"output_tokens":16384,"total_tokens":16384,"cost":0.04,"cost_details":{"upstream_inference_cost":0.04},"cost_in_usd_ticks":400000000,"is_byok":false}}` + "\n\n" +
+					"event: image_generation.billing\n" +
+					`data: {"type":"image_generation.billing","usage":{"cost_in_usd_ticks":400000000}}` + "\n\n" +
+					"data: [DONE]\n\n",
+			)
+
+			output, err := io.ReadAll(New().Stream(Context{Endpoint: endpoint, RequestedModel: "vendor/image-model"}, source))
+			require.NoError(t, err)
+			assert.NotContains(t, string(output), "cost")
+			assert.NotContains(t, string(output), "is_byok")
+			assert.Contains(t, string(output), "event: image_generation.completed\n")
+
+			frames := splitDataFrames(string(output))
+			require.Len(t, frames, 4)
+			var partial map[string]any
+			require.NoError(t, json.Unmarshal([]byte(frames[0]), &partial))
+			assert.Equal(t, "https://img.example/1.png", partial["url"])
+			assert.Equal(t, "vendor/image-model", partial["model"])
+
+			var completed map[string]any
+			require.NoError(t, json.Unmarshal([]byte(frames[1]), &completed))
+			assert.Equal(t, map[string]any{
+				"generated_images": float64(1),
+				"output_tokens":    float64(16384),
+				"total_tokens":     float64(16384),
+			}, completed["usage"])
+
+			var billing map[string]any
+			require.NoError(t, json.Unmarshal([]byte(frames[2]), &billing))
+			assert.NotContains(t, billing, "usage")
+			assert.Equal(t, "[DONE]", frames[3])
+		})
+	}
+}

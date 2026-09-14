@@ -789,6 +789,9 @@ func (p *Proxy) handleTransformedStreaming(
 					outputStreamError.Observe(chunk)
 				}
 				if logCtx != nil && hasUsage {
+					if logCtx.IsImageGeneration {
+						logCtx.observeImageStreamPayloads(payloads)
+					}
 					if usage := extractTokenUsageFromPayloads(payloads, converter.TokenUsageExtractionOptions{}); usage != nil {
 						if logCtx.TokenUsage == nil {
 							logCtx.TokenUsage = &converter.TokenUsage{}
@@ -897,6 +900,11 @@ func (p *Proxy) handleStreamingWithTokens(w http.ResponseWriter, resp *http.Resp
 		payloadBuf = splitSSEPayloads(chunk, payloadBuf)
 		if hasUsage := chunkMayCarryTokenUsage(chunk); hasUsage {
 			if logCtx != nil {
+				// The image usage event isn't necessarily the stream's last data
+				// frame, so it is recorded as it passes rather than from lastChunk.
+				if logCtx.IsImageGeneration {
+					logCtx.observeImageStreamPayloads(payloadBuf)
+				}
 				if usage := extractTokenUsageFromPayloads(payloadBuf, converter.TokenUsageExtractionOptions{AudioInputIncludesCachedAudio: true}); usage != nil {
 					if logCtx.TokenUsage == nil {
 						logCtx.TokenUsage = &converter.TokenUsage{}

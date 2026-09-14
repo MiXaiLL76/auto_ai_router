@@ -173,6 +173,13 @@ func (c *ProviderConverter) RequestFrom(body []byte) ([]byte, error) {
 			body = openaiconv.RewriteImageMiniJSON(body, c.mode.ModelID, c.mode.IsImageEdit)
 		}
 
+		// Some image families watermark their output unless told otherwise;
+		// images served through the router are always requested without one.
+		// JSON bodies are handled here, multipart edits by RewriteImageEditMultipart.
+		if (c.mode.IsImageGeneration || c.mode.IsImageEdit) && openaiconv.AddsImageWatermark(c.mode.ModelID) {
+			body = openaiconv.DisableImageWatermark(body)
+		}
+
 		// gpt-image-1 family does not support the response_format parameter in
 		// /v1/images/generations — strip it before forwarding to avoid a 400.
 		if c.mode.IsImageGeneration && openaiconv.IsGptImage1Model(c.mode.ModelID) {
@@ -183,6 +190,7 @@ func (c *ProviderConverter) RequestFrom(body []byte) ([]byte, error) {
 		//   1. Replace model aliases with the provider-facing model name.
 		//   2. Fix image parts sent as application/octet-stream (detect real MIME from magic bytes).
 		//   3. Strip the response_format field for gpt-image-1 (JSON stripping won't work on multipart).
+		//   4. Force watermark=false for watermarking families, as for JSON above.
 		if c.mode.IsImageEdit && strings.Contains(strings.ToLower(c.mode.ContentType), "multipart/form-data") {
 			stripRF := openaiconv.IsGptImage1Model(c.mode.ModelID)
 			newBody, newCT := openaiconv.RewriteImageEditMultipart(body, c.mode.ContentType, c.mode.ModelID, stripRF)

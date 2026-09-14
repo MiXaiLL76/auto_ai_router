@@ -515,6 +515,9 @@ func decodeStrictPriceRow(modelID string, row json.RawMessage) (*ModelPrice, err
 	if err := decoder.Decode(&price); err != nil {
 		return nil, fmt.Errorf("organization tariff %q: %w", modelID, err)
 	}
+	if err := validateStrictImagePricing(fields, &price); err != nil {
+		return nil, fmt.Errorf("organization tariff %q: %w", modelID, err)
+	}
 	hasPriceField := false
 	for field := range fields {
 		if known[field] {
@@ -537,7 +540,8 @@ func modelPriceJSONFields() map[string]bool {
 		if name == "" || name == "-" {
 			continue
 		}
-		isPriceField := name != "litellm_provider" && name != "reasoning_tokens_additive" && name != "web_search_billing_unit"
+		isPriceField := name != "litellm_provider" && name != "reasoning_tokens_additive" && name != "web_search_billing_unit" &&
+			name != "image_request_defaults" && name != "input_images_free_per_request"
 		result[name] = isPriceField
 	}
 	return result

@@ -17,6 +17,41 @@ func normalizeImageMiniQuality(quality string) string {
 	}
 }
 
+// watermarkingImageFamilies are image model families that stamp a visible
+// watermark on generated images unless the request explicitly opts out.
+var watermarkingImageFamilies = []string{"seedream", "dola-seedream", "seededit"}
+
+// AddsImageWatermark reports whether modelID belongs to an image family that
+// watermarks its output by default.
+func AddsImageWatermark(modelID string) bool {
+	for _, family := range watermarkingImageFamilies {
+		if matchModelFamily(modelID, family) {
+			return true
+		}
+	}
+	return false
+}
+
+// DisableImageWatermark forces "watermark": false on a JSON image request,
+// overriding any client-supplied value. Other fields are forwarded byte-for-byte;
+// bodies that are not a JSON object are returned unchanged — multipart edits get
+// the same opt-out from RewriteImageEditMultipart.
+func DisableImageWatermark(body []byte) []byte {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(body, &fields) != nil || fields == nil {
+		return body
+	}
+	if current, exists := fields["watermark"]; exists && string(current) == "false" {
+		return body
+	}
+	fields["watermark"] = json.RawMessage("false")
+	result, err := json.Marshal(fields)
+	if err != nil {
+		return body
+	}
+	return result
+}
+
 func RewriteImageMiniJSON(body []byte, modelID string, edit bool) []byte {
 	if !IsGptImage1MiniModel(modelID) {
 		return body

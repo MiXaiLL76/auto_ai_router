@@ -282,12 +282,7 @@ func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
 	if logCtx.TokenUsage == nil {
 		logCtx.TokenUsage = &converter.TokenUsage{}
 	}
-	if logCtx.IsImageGeneration && status == "success" && logCtx.TokenUsage.ImageCount <= 0 {
-		logCtx.TokenUsage.ImageCount = logCtx.ImageCount
-		if logCtx.TokenUsage.ImageCount <= 0 {
-			logCtx.TokenUsage.ImageCount = 1
-		}
-	}
+	logCtx.finalizeImageUsage(status)
 	logCtx.applyWebSearchUsageDefaults(status)
 	logCtx.TokenUsage.Normalize()
 

@@ -446,6 +446,9 @@ func (p *Proxy) writeFallbackResponse(
 		tokens, usage := extractOpenAITokensAndUsage(proxyResp.Body, usageOptions)
 		if logCtx != nil {
 			logCtx.TokenUsage = usage
+			if logCtx.IsImageGeneration && proxyResp.StatusCode < http.StatusBadRequest {
+				logCtx.observeImageResponseBody(proxyResp.Body)
+			}
 		}
 		if tokens > 0 {
 			p.rateLimiter.ConsumeTokens(fallbackCred.Name, tokens)
