@@ -259,6 +259,7 @@ type RequestLogContext struct {
 	Status                string                   // "success" or "failure"
 	HTTPStatus            int                      // HTTP response status code
 	ErrorMsg              string                   // Error message (added to metadata on failure)
+	ErrorBodyRaw          string                   // Untruncated upstream provider error body; only ever set on failure paths, never for a successful response
 	TokenUsage            *converter.TokenUsage    // Token usage with detailed breakdown
 	ModelPrice            *models.ModelPrice       // Price resolved before the provider request
 	PriceModelID          string                   // Model identifier used for price lookup
@@ -1407,6 +1408,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 			}
 			if proxyResp.StatusCode >= 400 {
 				logCtx.ErrorMsg = extractErrorMessage(proxyResp.Body)
+				logCtx.ErrorBodyRaw = extractErrorBodyRaw(proxyResp.Body)
 			}
 		}
 		return

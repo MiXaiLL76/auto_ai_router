@@ -38,6 +38,7 @@ CREATE TABLE air.spend_logs_kafka
     http_status UInt16,
     error_message Nullable(String),
     error_class LowCardinality(Nullable(String)),
+    error_body_raw Nullable(String),
 
     model String,
     real_model String,
@@ -152,6 +153,7 @@ CREATE TABLE air.spend_logs
     http_status UInt16,
     error_message Nullable(String),
     error_class LowCardinality(Nullable(String)),
+    error_body_raw Nullable(String),
 
     model String,
     real_model String,

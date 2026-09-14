@@ -238,6 +238,30 @@ func TestBuildKafkaSpendEvent_ErrorClassOnlyOnFailure(t *testing.T) {
 	assert.Empty(t, eventOK.ErrorClass)
 }
 
+// TestBuildKafkaSpendEvent_ErrorBodyRawOnlyOnFailure mirrors
+// TestBuildKafkaSpendEvent_ErrorClassOnlyOnFailure: ErrorBodyRaw must survive
+// onto a failed event but must never leak onto a successful one, even if
+// logCtx.ErrorBodyRaw was left set from a prior attempt on the same logCtx
+// (e.g. a retried request that ultimately succeeded).
+func TestBuildKafkaSpendEvent_ErrorBodyRawOnlyOnFailure(t *testing.T) {
+	prx := NewTestProxyBuilder().Build()
+	rawBody := `{"error":{"message":"the model produced invalid content","type":"invalid_request_error"}}`
+
+	logCtx := testLogCtx(t)
+	logCtx.HTTPStatus = 400
+	logCtx.ErrorBodyRaw = rawBody
+	eventFail := prx.buildKafkaSpendEvent(logCtx, "cred", "cred:model", "hash",
+		"", "", "", "", "api.openai.com", "failure", 0, nil, 0, logCtx.StartTime)
+	assert.Equal(t, rawBody, eventFail.ErrorBodyRaw)
+
+	logCtx2 := testLogCtx(t)
+	logCtx2.HTTPStatus = 200
+	logCtx2.ErrorBodyRaw = rawBody // stale leftover from an earlier retry; must not be logged as success
+	eventOK := prx.buildKafkaSpendEvent(logCtx2, "cred", "cred:model", "hash",
+		"", "", "", "", "api.openai.com", "success", 0, nil, 0, logCtx2.StartTime)
+	assert.Empty(t, eventOK.ErrorBodyRaw)
+}
+
 func TestBuildKafkaSpendEvent_RealModelIDPreserved(t *testing.T) {
 	prx := NewTestProxyBuilder().Build()
 	logCtx := testLogCtx(t)

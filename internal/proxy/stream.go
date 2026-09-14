@@ -1137,12 +1137,16 @@ func (p *Proxy) finalizeStreamingLog(logCtx *RequestLogContext, totalTokens int,
 		if logCtx.ErrorMsg == "" {
 			logCtx.ErrorMsg = extractErrorMessage(lastChunk)
 		}
+		if logCtx.ErrorBodyRaw == "" {
+			logCtx.ErrorBodyRaw = extractErrorBodyRaw(lastChunk)
+		}
 	} else if streamErr := extractStreamErrorEvent(lastChunk); streamErr != "" {
 		// Provider returned HTTP 2xx but sent an error event inside the stream
 		// (e.g. `data: {"error":...}`, `event: error`, response.failed). Without
 		// this check such requests are logged as success and never hit ERROR.
 		logCtx.Status = "failure"
 		logCtx.ErrorMsg = streamErr
+		logCtx.ErrorBodyRaw = extractErrorBodyRaw([]byte(streamErr))
 		p.logUpstreamError(logCtx.Context(), "Provider sent error event in stream", statusCode,
 			logCtx.Credential, logCtx.ModelID, []byte(streamErr),
 			"request_id", logCtx.RequestID)

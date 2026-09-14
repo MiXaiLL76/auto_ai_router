@@ -26,6 +26,12 @@ type SpendEvent struct {
 	HTTPStatus   int    `json:"http_status"`
 	ErrorMessage string `json:"error_message,omitempty"`
 	ErrorClass   string `json:"error_class,omitempty"`
+	// ErrorBodyRaw is the untruncated upstream provider error body. Unlike
+	// ErrorMessage (capped at 512 bytes), this is meant to be read in full
+	// when debugging a failure. Only ever populated on failure — see
+	// buildKafkaSpendEvent, which sets it in the same status=="failure"
+	// branch as ErrorClass.
+	ErrorBodyRaw string `json:"error_body_raw,omitempty"`
 
 	Model      string `json:"model"`      // Model alias, as requested by the client
 	RealModel  string `json:"real_model"` // Real upstream model name (price lookup key)

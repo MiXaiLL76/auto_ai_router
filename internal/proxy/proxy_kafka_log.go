@@ -163,6 +163,7 @@ func (p *Proxy) buildKafkaSpendEvent(
 
 	if status == "failure" {
 		event.ErrorClass = mapHTTPStatusToErrorClass(logCtx.HTTPStatus)
+		event.ErrorBodyRaw = logCtx.ErrorBodyRaw
 	}
 
 	return event

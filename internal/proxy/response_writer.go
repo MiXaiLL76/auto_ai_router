@@ -183,6 +183,7 @@ func markProxyProviderStreamError(logCtx *RequestLogContext, statusCode int, pay
 	logCtx.Status = "failure"
 	logCtx.HTTPStatus = statusCode
 	logCtx.ErrorMsg = payload
+	logCtx.ErrorBodyRaw = extractErrorBodyRaw([]byte(payload))
 }
 
 func statusCodeFromProviderStreamError(payload string) int {
