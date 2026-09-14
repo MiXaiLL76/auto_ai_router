@@ -102,10 +102,11 @@ func (p *Proxy) orchestrateRequest(
 	if !ok {
 		return nil, false
 	}
-	// Stashed for a possible kafkalog.ErrorBodyEvent later (see
-	// buildErrorBodyEvent) -- a slice-header alias of body, not a copy, so
-	// this costs nothing on the (much more common) success path.
-	logCtx.RequestBodyRaw = body
+	// logCtx.RequestBodyRaw is already set (readRequestBodyAndSelectModel
+	// captures it internally, both as early as possible for its own
+	// validation failures and again here on success with the fully
+	// normalized body) -- see that function for why it isn't done at this
+	// call site.
 
 	logCtx.RequestEndpoint = r.URL.Path
 	logCtx.ReasoningRequested, logCtx.ReasoningSource, logCtx.ThinkingMode = requestReasoningDetails(body)
@@ -652,6 +653,17 @@ func (p *Proxy) readRequestBodyAndSelectModel(
 ) ([]byte, string, string, bool, bool) {
 	maxBodyBytes := int64(p.maxBodySizeMB) * 1024 * 1024
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxBodyBytes+1))
+	// Captured as early as possible, before any of the validation branches
+	// below can return early: a request rejected here (oversized, malformed
+	// JSON, no model field, ...) is still a "failure" the defer safety net in
+	// ProxyRequest logs via logSpendToLiteLLMDB, and seeing exactly what the
+	// client sent is often the whole point for these -- a validation error
+	// is a much more common failure mode than a provider-side one, so
+	// capturing only from the success path here would leave RequestBodyRaw
+	// empty for a large share of real failures. Reassigned below once
+	// sanitizeAndExtractRequestBody succeeds, so the common (provider-error)
+	// case gets the normalized body instead of the raw pre-sanitization bytes.
+	logCtx.RequestBodyRaw = body
 	if err != nil {
 		// Client-side transport problem while sending the body
 		p.logger.WarnContext(r.Context(), "Failed to read request body",
@@ -816,6 +828,11 @@ func (p *Proxy) readRequestBodyAndSelectModel(
 		body = openai.ReplaceModelInBody(body, modelID, realName)
 		realModelID = realName
 	}
+	// Supersedes the early raw-bytes capture above now that validation
+	// passed: this is the fully normalized body actually used downstream,
+	// more useful for reproducing a provider-side failure than the
+	// pre-sanitization bytes.
+	logCtx.RequestBodyRaw = body
 	return body, modelID, realModelID, streaming, true
 }
 

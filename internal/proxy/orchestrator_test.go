@@ -986,3 +986,81 @@ func TestProxyRequest_UnsupportedProManRequestWithoutFallbackReturnsLocalError(t
 	assert.NotContains(t, strings.ToLower(w.Body.String()), "proman")
 	assert.Equal(t, int32(0), atomic.LoadInt32(&promanCalls))
 }
+
+// TestReadRequestBodyAndSelectModel_CapturesRequestBodyRawOnEarlyFailure
+// guards a real gap: RequestBodyRaw used to only be set by the caller after
+// this function returned ok==true, so every one of its own early-rejection
+// branches (oversized body, malformed JSON, missing model field) -- which
+// the ProxyRequest defer safety net still logs as a "failure" via
+// logSpendToLiteLLMDB -- shipped an empty request_body in the error-bodies
+// event despite the bytes being sitting right there in scope. Validation
+// failures are a much more common failure mode than provider-side ones, so
+// this covers a large share of what the feature exists for.
+func TestReadRequestBodyAndSelectModel_CapturesRequestBodyRawOnEarlyFailure(t *testing.T) {
+	t.Run("oversized body", func(t *testing.T) {
+		prx := NewTestProxyBuilder().WithMaxBodySizeMB(1).Build()
+		oversized := strings.Repeat("x", 2*1024*1024)
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(oversized))
+		w := httptest.NewRecorder()
+		logCtx := testLogCtx(t)
+
+		_, _, _, _, ok := prx.readRequestBodyAndSelectModel(w, req, logCtx)
+
+		require.False(t, ok)
+		require.Equal(t, http.StatusRequestEntityTooLarge, w.Code)
+		assert.NotEmpty(t, logCtx.RequestBodyRaw, "the oversized bytes should still be captured for debugging")
+	})
+
+	t.Run("malformed JSON", func(t *testing.T) {
+		prx := NewTestProxyBuilder().Build()
+		malformed := `{"model": "gpt-4o-mini", "messages": [}`
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(malformed))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		logCtx := testLogCtx(t)
+
+		_, _, _, _, ok := prx.readRequestBodyAndSelectModel(w, req, logCtx)
+
+		require.False(t, ok)
+		require.Equal(t, http.StatusBadRequest, w.Code)
+		assert.Equal(t, malformed, string(logCtx.RequestBodyRaw))
+	})
+
+	t.Run("missing model field", func(t *testing.T) {
+		prx := NewTestProxyBuilder().Build()
+		noModel := `{"messages":[{"role":"user","content":"hi"}]}`
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(noModel))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		logCtx := testLogCtx(t)
+
+		_, _, _, _, ok := prx.readRequestBodyAndSelectModel(w, req, logCtx)
+
+		require.False(t, ok)
+		require.Equal(t, http.StatusBadRequest, w.Code)
+		assert.NotEmpty(t, logCtx.RequestBodyRaw)
+	})
+
+	t.Run("success gets the normalized body", func(t *testing.T) {
+		logger := testhelpers.NewTestLogger()
+		cred := config.CredentialConfig{Name: "test", Type: config.ProviderTypeOpenAI, BaseURL: "http://test.local", APIKey: "upstream-key", RPM: 100}
+		mm := models.New(logger, 50, []config.ModelRPMConfig{
+			{Name: "test", Model: "test", Credential: cred.Name},
+		})
+		mm.LoadModelsFromConfig([]config.CredentialConfig{cred})
+
+		builder := NewTestProxyBuilder().WithCredentials(cred)
+		builder.config.ModelManager = mm
+		prx := builder.Build()
+		body := `{"model":"test","messages":[{"role":"user","content":"hi"}]}`
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		logCtx := testLogCtx(t)
+
+		_, _, _, _, ok := prx.readRequestBodyAndSelectModel(w, req, logCtx)
+
+		require.True(t, ok)
+		assert.JSONEq(t, body, string(logCtx.RequestBodyRaw))
+	})
+}
