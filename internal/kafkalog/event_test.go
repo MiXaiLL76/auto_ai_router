@@ -70,17 +70,24 @@ func TestErrorBodyEvent_JSONMarshal_OmitsEmptyOptionalFields(t *testing.T) {
 	assert.Equal(t, float64(429), raw["http_status"])
 	_, hasErrorClass := raw["error_class"]
 	assert.False(t, hasErrorClass)
-	_, hasRequestBody := raw["request_body"]
-	assert.False(t, hasRequestBody)
 	_, hasResponseBody := raw["response_body"]
 	assert.False(t, hasResponseBody)
+}
+
+// TestErrorBodyEvent_HasNoRequestBodyField locks in a deliberate design
+// choice: this event only ever carries the provider's response, never the
+// client's request (the user's prompt) -- see the type's doc comment.
+func TestErrorBodyEvent_HasNoRequestBodyField(t *testing.T) {
+	e := ErrorBodyEvent{}
+	data, err := json.Marshal(&e)
+	require.NoError(t, err)
+	assert.NotContains(t, string(data), "request_body")
 }
 
 func TestErrorBodyEvent_JSONMarshal_IncludesBodiesWhenSet(t *testing.T) {
 	e := &ErrorBodyEvent{
 		RequestID:    "req-123",
 		ErrorClass:   "RateLimitError",
-		RequestBody:  `{"model":"gpt-5"}`,
 		ResponseBody: `{"error":{"message":"rate limited"}}`,
 	}
 
@@ -91,7 +98,6 @@ func TestErrorBodyEvent_JSONMarshal_IncludesBodiesWhenSet(t *testing.T) {
 	require.NoError(t, json.Unmarshal(data, &raw))
 
 	assert.Equal(t, "RateLimitError", raw["error_class"])
-	assert.Equal(t, `{"model":"gpt-5"}`, raw["request_body"])
 	assert.Equal(t, `{"error":{"message":"rate limited"}}`, raw["response_body"])
 }
 

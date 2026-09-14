@@ -121,14 +121,17 @@ type ErrorBodyEvent struct {
 	StartTime      time.Time `json:"start_time"`
 	HTTPStatus     int       `json:"http_status"`
 	ErrorClass     string    `json:"error_class,omitempty"`
-	// RequestBody is the client-facing request body (post-read, pre
-	// per-provider conversion), sanitized via logger.SanitizeRequestBodyForLog
-	// to collapse large base64 payloads, capped at maxRequestBodyRawBytes.
-	RequestBody string `json:"request_body,omitempty"`
 	// ResponseBody is the raw upstream provider error body, capped at
 	// maxErrorBodyRawBytes. Same capture sites as SpendEvent.ErrorMessage
 	// used to populate before this event type existed, just uncapped at 512
 	// bytes.
+	//
+	// Deliberately no RequestBody field: the client-facing request body is
+	// the user's prompt, and shipping that into a queryable analytics table
+	// is a meaningfully different (and worse) privacy posture than shipping
+	// a provider's own error text -- not something to introduce as a side
+	// effect of an error-debugging feature. This event only ever carries the
+	// provider's response.
 	ResponseBody string `json:"response_body,omitempty"`
 }
 

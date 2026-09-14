@@ -238,7 +238,6 @@ CREATE TABLE air.error_bodies_kafka
     start_time DateTime64(3),
     http_status UInt16,
     error_class Nullable(String),
-    request_body Nullable(String),
     response_body Nullable(String)
 )
 ENGINE = Kafka
@@ -260,7 +259,6 @@ CREATE TABLE air.error_bodies
     start_time DateTime64(3),
     http_status UInt16,
     error_class Nullable(String),
-    request_body Nullable(String),
     response_body Nullable(String)
 )
 ENGINE = MergeTree
@@ -283,7 +281,7 @@ SELECT * FROM air.error_bodies_kafka;
 -- (request_id, server_router_id), not request_id alone, for the same
 -- collision reason as the ORDER BY above.
 CREATE VIEW air.spend_logs_with_raw_errors AS
-SELECT s.*, b.request_body, b.response_body
+SELECT s.*, b.response_body
 FROM air.spend_logs AS s
 LEFT JOIN air.error_bodies AS b
     ON s.request_id = b.request_id AND s.server_router_id = b.server_router_id

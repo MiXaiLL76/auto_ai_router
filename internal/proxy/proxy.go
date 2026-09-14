@@ -260,7 +260,6 @@ type RequestLogContext struct {
 	HTTPStatus            int                      // HTTP response status code
 	ErrorMsg              string                   // Error message (added to metadata on failure)
 	ErrorBodyRaw          string                   // Untruncated upstream provider error body; only ever set on failure paths, never for a successful response. Feeds kafkalog.ErrorBodyEvent.ResponseBody (see buildErrorBodyEvent), not SpendEvent.
-	RequestBodyRaw        []byte                   // Client-facing request body (post-read, pre per-provider conversion): a slice-header alias of the []byte already read in readRequestBodyAndSelectModel, so stashing it here is just a pointer copy, not a byte copy. Sanitized/capped/converted to string only in buildErrorBodyEvent, which runs only on failure.
 	TokenUsage            *converter.TokenUsage    // Token usage with detailed breakdown
 	ModelPrice            *models.ModelPrice       // Price resolved before the provider request
 	PriceModelID          string                   // Model identifier used for price lookup

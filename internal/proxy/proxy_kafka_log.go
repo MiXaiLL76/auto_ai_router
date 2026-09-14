@@ -195,7 +195,6 @@ func (p *Proxy) buildErrorBodyEvent(logCtx *RequestLogContext) *kafkalog.ErrorBo
 		StartTime:      logCtx.StartTime,
 		HTTPStatus:     logCtx.HTTPStatus,
 		ErrorClass:     mapHTTPStatusToErrorClass(logCtx.HTTPStatus),
-		RequestBody:    buildRequestBodyForErrorLog(logCtx.RequestBodyRaw),
 		ResponseBody:   logCtx.ErrorBodyRaw,
 	}
 }

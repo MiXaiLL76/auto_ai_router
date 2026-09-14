@@ -113,7 +113,7 @@ Capturing and storing request/response bodies for *every* request (success inclu
 
 ## Error bodies (separate write-path)
 
-Raw request/response bodies for a *failed* request are published separately from the spend event, to their own Kafka topic (`kafka.error_bodies`, default topic `error-bodies`) as a flat `kafkalog.ErrorBodyEvent`:
+The raw **provider response** body for a *failed* request is published separately from the spend event, to its own Kafka topic (`kafka.error_bodies`, default topic `error-bodies`) as a flat `kafkalog.ErrorBodyEvent`:
 
 | Field              | Type              | Description                                                                                                         |
 | ------------------ | ----------------- | --------------------------------------------------------------------------------------------------------------------- |
@@ -122,14 +122,15 @@ Raw request/response bodies for a *failed* request are published separately from
 | `start_time`       | timestamp         | Request start                                                                                                          |
 | `http_status`      | int               | HTTP status of the failure                                                                                             |
 | `error_class`      | string, omitempty | Same classification as `SpendEvent.error_class`                                                                       |
-| `request_body`     | string, omitempty | Client-facing request body, sanitized (`logger.SanitizeRequestBodyForLog`) and capped at 32 KiB                       |
 | `response_body`    | string, omitempty | Raw upstream provider error body, capped at 16 KiB (uncapped relative to `error_message`'s 512 bytes)                 |
+
+**Deliberately no request-body field.** An earlier version of this design also shipped the client's request body (the user's prompt) alongside the response, to make failures easier to reproduce. That was cut: a prompt is the user's own content, and routing it into a queryable analytics table — even a short-retention, failure-only one — is a materially different (and worse) privacy posture than shipping a provider's own error text, which is not something an error-debugging feature should introduce as a side effect. If you need to reproduce a specific failure, correlate `request_id` with your own request logging outside AIR, or capture it there under whatever consent/retention rules already govern that data.
 
 This is deliberately **not** a field on `SpendEvent`/`air.spend_logs`:
 
 - Spend/billing rows are kept for a long time (retention measured in months/years) and are meant to stay light; raw bodies are bulky and only useful for a short debugging window, so they need their own, independently configurable ClickHouse retention (`TTL`) — a separate table gives you that for free, a shared one doesn't.
 - It's independently toggleable (`kafka.error_bodies.enabled`) precisely so it can be turned on temporarily while debugging without touching the always-on spend-log path, and turned back off (or left permanently off, the default) without affecting spend/billing at all.
-- It only fires for failures (`status == "failure"`) — no additional exposure of prompt/completion content for successful traffic beyond what already exists today.
+- It only fires for failures (`status == "failure"`) — no additional exposure of completion content for successful traffic beyond what already exists today.
 
 **Join back to the spend event / `air.errors` on `(request_id, server_router_id)`, not `request_id` alone.** In a chained deployment (one AIR instance proxying to another as an upstream credential), `request_id` is derived from the upstream provider's own response id and is echoed back through every hop unchanged — two different hops logging the same logical request in the same millisecond can share a `request_id`. `server_router_id` (the hostname/pod of the specific instance that logged the row) disambiguates them; see the `ORDER BY` on `air.logs` in your ClickHouse schema for the same reasoning applied to the spend table.
 
@@ -137,7 +138,7 @@ A reference join view for a ClickHouse deployment with the matching `air.errors`
 
 ```sql
 CREATE VIEW air.errors_with_raw AS
-SELECT e.*, b.request_body, b.response_body
+SELECT e.*, b.response_body
 FROM air.errors AS e
 LEFT JOIN air.error_bodies AS b
     ON e.request_id = b.request_id AND e.server_router_id = b.server_router_id;
