@@ -468,6 +468,7 @@ func (p *Proxy) writeFallbackResponse(
 	if logCtx != nil && !logCtx.Logged {
 		if logCtx.Status == "failure" && !proxyResp.IsStreaming {
 			logCtx.ErrorMsg = extractErrorMessage(proxyResp.Body)
+			logCtx.ErrorBodyRaw = extractErrorBodyRaw(proxyResp.Body)
 		}
 		if proxyResp.IsStreaming {
 			logCtx.Logged = true

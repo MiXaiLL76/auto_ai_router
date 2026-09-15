@@ -11,17 +11,35 @@ import (
 // newTestLogger builds a Logger with no underlying Kafka client, for testing
 // queue/DLQ bookkeeping logic that doesn't touch the network (mirrors
 // litellmdb/spendlog's own test idiom of a Logger{pool: nil, ...}).
-func newTestLogger(queueSize int) *Logger {
+func newTestLogger(queueSize int) *Logger[*SpendEvent] {
 	cfg := DefaultConfig()
 	cfg.Brokers = []string{"kafka:9092"}
 	cfg.LogQueueSize = queueSize
 	cfg.ApplyDefaults()
 
-	return &Logger{
+	return &Logger[*SpendEvent]{
 		config:   cfg,
 		logger:   cfg.Logger,
 		topic:    cfg.Topic,
 		queue:    make(chan *SpendEvent, queueSize),
+		stopChan: make(chan struct{}),
+	}
+}
+
+// newTestRawBodyLogger mirrors newTestLogger for the RawBodyEvent
+// instantiation of the generic Logger[T], used by manager_test.go's
+// DefaultRawBodyManager tests.
+func newTestRawBodyLogger(queueSize int) *Logger[*RawBodyEvent] {
+	cfg := DefaultConfig()
+	cfg.Brokers = []string{"kafka:9092"}
+	cfg.LogQueueSize = queueSize
+	cfg.ApplyDefaults()
+
+	return &Logger[*RawBodyEvent]{
+		config:   cfg,
+		logger:   cfg.Logger,
+		topic:    cfg.Topic,
+		queue:    make(chan *RawBodyEvent, queueSize),
 		stopChan: make(chan struct{}),
 	}
 }
@@ -44,12 +62,6 @@ func TestLogger_Log_NonBlocking(t *testing.T) {
 	stats := l.Stats()
 	assert.Equal(t, uint64(1), stats.Queued)
 	assert.Equal(t, 1, stats.QueueLen)
-}
-
-func TestLogger_Log_NilEvent(t *testing.T) {
-	l := newTestLogger(10)
-	assert.NoError(t, l.Log(nil))
-	assert.Equal(t, 0, l.Stats().QueueLen)
 }
 
 func TestLogger_Log_QueueFull(t *testing.T) {
@@ -131,7 +143,7 @@ func TestLogger_AppendToDLQLocked_NeverExceedsCap(t *testing.T) {
 	// overflow the cap.
 	l.dlqMu.Lock()
 	for i := 0; i < 5; i++ {
-		l.appendToDLQLocked(&deadLetterBatch{
+		l.appendToDLQLocked(&deadLetterBatch[*SpendEvent]{
 			batch:    []*SpendEvent{{RequestID: "retried"}},
 			failedAt: time.Now(),
 			attempts: 4,

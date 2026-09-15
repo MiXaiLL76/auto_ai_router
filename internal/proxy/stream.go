@@ -1137,12 +1137,21 @@ func (p *Proxy) finalizeStreamingLog(logCtx *RequestLogContext, totalTokens int,
 		if logCtx.ErrorMsg == "" {
 			logCtx.ErrorMsg = extractErrorMessage(lastChunk)
 		}
+		if logCtx.ErrorBodyRaw == "" {
+			// lastChunk was already streamed to the client live as it arrived
+			// -- nothing to mask in hindsight, the client saw exactly this.
+			logCtx.ErrorBodyRaw = extractErrorBodyRaw(lastChunk)
+			logCtx.ClientResponseBody = logCtx.ErrorBodyRaw
+		}
 	} else if streamErr := extractStreamErrorEvent(lastChunk); streamErr != "" {
 		// Provider returned HTTP 2xx but sent an error event inside the stream
 		// (e.g. `data: {"error":...}`, `event: error`, response.failed). Without
 		// this check such requests are logged as success and never hit ERROR.
+		// Same as above: already relayed live, nothing left to mask.
 		logCtx.Status = "failure"
 		logCtx.ErrorMsg = streamErr
+		logCtx.ErrorBodyRaw = extractErrorBodyRaw([]byte(streamErr))
+		logCtx.ClientResponseBody = logCtx.ErrorBodyRaw
 		p.logUpstreamError(logCtx.Context(), "Provider sent error event in stream", statusCode,
 			logCtx.Credential, logCtx.ModelID, []byte(streamErr),
 			"request_id", logCtx.RequestID)
@@ -1434,7 +1443,13 @@ func (p *Proxy) streamToClient(
 
 	writeEarlyStreamError := func(payload string) error {
 		statusCode := statusCodeFromProviderStreamError(payload)
-		markProxyProviderStreamError(logCtx, statusCode, payload)
+		// Nothing has committed yet, so writeProviderStreamErrorBeforeCommit
+		// below replaces the body entirely with maskedUpstreamErrorBody --
+		// recomputed here (cheap, pure) just to record exactly what that call
+		// is about to write, rather than trusting the two to stay in sync by
+		// construction.
+		clientSaw := string(maskedUpstreamErrorBody(statusCode, logContextRequestID(logCtx)))
+		markProxyProviderStreamError(logCtx, statusCode, payload, clientSaw)
 		if logCtx != nil {
 			logCtx.StreamOutcome = "stream_error"
 		}

@@ -239,6 +239,50 @@ var (
 		},
 	)
 
+	// Raw-body logger stats mirror the spend-logger gauges above for the
+	// separate, independently-toggleable raw-body write-path.
+	KafkaRawBodyLoggerQueuedTotal = promauto.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "auto_ai_router_kafka_raw_body_logger_queued_total",
+			Help: "Cumulative number of raw-body events queued for Kafka publishing",
+		},
+	)
+
+	KafkaRawBodyLoggerProducedTotal = promauto.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "auto_ai_router_kafka_raw_body_logger_produced_total",
+			Help: "Cumulative number of raw-body events successfully produced to Kafka",
+		},
+	)
+
+	KafkaRawBodyLoggerDroppedTotal = promauto.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "auto_ai_router_kafka_raw_body_logger_dropped_total",
+			Help: "Cumulative number of raw-body events dropped because the producer queue was full",
+		},
+	)
+
+	KafkaRawBodyLoggerErrorsTotal = promauto.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "auto_ai_router_kafka_raw_body_logger_errors_total",
+			Help: "Cumulative number of raw-body events that failed to produce after all retries",
+		},
+	)
+
+	KafkaRawBodyLoggerDLQSize = promauto.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "auto_ai_router_kafka_raw_body_logger_dlq_size",
+			Help: "Current number of batches held in the Kafka raw-body logger dead letter queue",
+		},
+	)
+
+	KafkaRawBodyLoggerHealthy = promauto.NewGauge(
+		prometheus.GaugeOpts{
+			Name: "auto_ai_router_kafka_raw_body_logger_healthy",
+			Help: "Kafka broker connectivity for raw-body publishing (1 = healthy, 0 = unhealthy)",
+		},
+	)
+
 	SpendQueueDepth = promauto.NewGauge(
 		prometheus.GaugeOpts{
 			Name: "auto_ai_router_spend_queue_depth",
@@ -575,4 +619,22 @@ func (m *Metrics) UpdateKafkaSpendLoggerStats(queued, produced, dropped, errors 
 		h = 1.0
 	}
 	KafkaSpendLoggerHealthy.Set(h)
+}
+
+// UpdateKafkaRawBodyLoggerStats mirrors UpdateKafkaSpendLoggerStats for the
+// separate raw-body write-path.
+func (m *Metrics) UpdateKafkaRawBodyLoggerStats(queued, produced, dropped, errors uint64, dlqSize int, healthy bool) {
+	if !m.isEnabled() {
+		return
+	}
+	KafkaRawBodyLoggerQueuedTotal.Set(float64(queued))
+	KafkaRawBodyLoggerProducedTotal.Set(float64(produced))
+	KafkaRawBodyLoggerDroppedTotal.Set(float64(dropped))
+	KafkaRawBodyLoggerErrorsTotal.Set(float64(errors))
+	KafkaRawBodyLoggerDLQSize.Set(float64(dlqSize))
+	h := 0.0
+	if healthy {
+		h = 1.0
+	}
+	KafkaRawBodyLoggerHealthy.Set(h)
 }

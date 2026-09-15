@@ -690,6 +690,16 @@ func (p *Proxy) readRequestBodyAndSelectModel(
 		return nil, "", "", false, false
 	}
 	body = sanitized.Body
+	if p.rawBodyStoreRawBody {
+		// Opt-in only (kafka.raw_bodies.store_raw_body, default false) --
+		// this is the client's own request body, e.g. the prompt, a
+		// materially bigger privacy commitment than the provider's own
+		// error text. Captured once here (post-sanitization, the body that
+		// actually goes on to the provider) and carried on logCtx for
+		// whatever the eventual outcome turns out to be, same pattern as
+		// ErrorBodyRaw/ClientResponseBody on the response side.
+		logCtx.RequestBodyRaw = extractErrorBodyRaw(body)
+	}
 	if info := responseCompatRequestFromContext(r.Context()); info != nil {
 		info.RequestedModel = sanitized.ModelID
 		info.IncludeUsage = strings.Contains(r.URL.Path, "/responses") || clientRequestedStreamUsage(body)

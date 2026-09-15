@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"strings"
 	"syscall"
 	"testing"
 
@@ -428,3 +429,30 @@ func TestExtractEndUser(t *testing.T) {
 // Compile-time check that timeoutError implements net.Error
 var _ net.Error = (*timeoutError)(nil)
 var _ net.Error = (*nonTimeoutNetError)(nil)
+
+func TestExtractErrorBodyRaw(t *testing.T) {
+	t.Run("empty body returns empty string", func(t *testing.T) {
+		assert.Equal(t, "", extractErrorBodyRaw(nil))
+		assert.Equal(t, "", extractErrorBodyRaw([]byte{}))
+	})
+
+	t.Run("short body returned verbatim", func(t *testing.T) {
+		body := []byte(`{"error":{"message":"invalid api key","type":"authentication_error"}}`)
+		assert.Equal(t, string(body), extractErrorBodyRaw(body))
+	})
+
+	t.Run("body under extractErrorMessage's 512-byte cap is not truncated here", func(t *testing.T) {
+		// The whole point of ErrorBodyRaw is to keep what ErrorMessage cuts off.
+		body := []byte(`{"error":"` + strings.Repeat("x", 1000) + `"}`)
+		got := extractErrorBodyRaw(body)
+		assert.Equal(t, string(body), got)
+		assert.Greater(t, len(got), 512)
+	})
+
+	t.Run("body over maxErrorBodyRawBytes is truncated with a marker", func(t *testing.T) {
+		body := []byte(strings.Repeat("y", maxErrorBodyRawBytes+100))
+		got := extractErrorBodyRaw(body)
+		assert.True(t, strings.HasSuffix(got, "..."))
+		assert.Equal(t, maxErrorBodyRawBytes+len("..."), len(got))
+	})
+}

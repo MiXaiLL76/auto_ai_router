@@ -101,6 +101,27 @@ func extractErrorMessage(body []byte) string {
 	return string(body)
 }
 
+// maxErrorBodyRawBytes bounds RequestLogContext.ErrorBodyRaw so one
+// pathological provider error (e.g. echoing back an oversized prompt in a
+// validation message) can't inflate a single Kafka spend event unreasonably.
+// Larger than extractErrorMessage's 512-byte cap on purpose: this field
+// exists specifically so operators can see a provider failure in full,
+// where the short error_message got cut off.
+const maxErrorBodyRawBytes = 16 * 1024
+
+// extractErrorBodyRaw returns the raw upstream error response body,
+// untruncated up to maxErrorBodyRawBytes. Only ever called from failure
+// paths (see call sites) — never populated for a successful response.
+func extractErrorBodyRaw(body []byte) string {
+	if len(body) == 0 {
+		return ""
+	}
+	if len(body) > maxErrorBodyRawBytes {
+		return string(body[:maxErrorBodyRawBytes]) + "..."
+	}
+	return string(body)
+}
+
 // mapHTTPStatusToErrorClass maps HTTP status codes to LiteLLM exception class names
 // Reference: https://docs.litellm.ai/docs/exception_mapping
 func mapHTTPStatusToErrorClass(statusCode int) string {

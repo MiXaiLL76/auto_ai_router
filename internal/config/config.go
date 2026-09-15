@@ -1106,6 +1106,40 @@ type KafkaConfig struct {
 	// Service for Kafka requires its own CA, not present in the OS default
 	// trust store). Empty means the OS default trust store is used.
 	TLSCACert string `yaml:"tls_ca_cert,omitempty"`
+
+	// RawBodies configures the separate, independently-toggleable
+	// write-path that publishes raw request/response bodies for *failed*
+	// requests only (see kafkalog.RawBodyEvent). Off by default even when
+	// kafka.enabled is true -- it is a second, optional producer, not a
+	// field on the spend event, precisely so it can be enabled/disabled and
+	// retained independently of spend-log analytics.
+	RawBodies KafkaRawBodiesConfig `yaml:"raw_bodies,omitempty"`
+}
+
+// KafkaRawBodiesConfig configures the raw-body Kafka write-path
+// (internal/kafkalog.RawBodyManager). Reuses the parent KafkaConfig's
+// brokers/TLS/SASL — only Enabled and Topic differ, since this is meant to be
+// the same Kafka cluster, a different topic with its own retention.
+type KafkaRawBodiesConfig struct {
+	Enabled bool `yaml:"enabled"`
+
+	// Topic is the Kafka topic raw raw-body events are published to.
+	Topic string `yaml:"topic"` // default: "raw-bodies"
+
+	// StoreRawBody additionally captures the client's own request body
+	// (e.g. the prompt) into the event's RequestBody field. Off by default:
+	// a provider's error text is one thing to ship off-box, the user's own
+	// request content is a materially bigger privacy commitment, so this
+	// needs an explicit, separate opt-in rather than riding along with
+	// Enabled.
+	StoreRawBody bool `yaml:"store_raw_body"` // default: false
+
+	// StoreOnlyErrors restricts publishing to failed requests (status ==
+	// "failure"), matching the feature's original scope. Set to false to
+	// publish an event for every request regardless of outcome -- useful
+	// once StoreRawBody is on and the goal is capturing request bodies
+	// generally, not just alongside errors.
+	StoreOnlyErrors bool `yaml:"store_only_errors"` // default: true
 }
 
 // OTELConfig holds OpenTelemetry export configuration for logs, traces and metrics.
@@ -1380,22 +1414,32 @@ func (l *LiteLLMDBConfig) UnmarshalYAML(value *yaml.Node) error {
 	return nil
 }
 
+// tempKafkaRawBodiesConfig mirrors KafkaRawBodiesConfig with string
+// fields, the same env-variable-resolution convention as KafkaConfig itself.
+type tempKafkaRawBodiesConfig struct {
+	Enabled         string `yaml:"enabled"`
+	Topic           string `yaml:"topic"`
+	StoreRawBody    string `yaml:"store_raw_body"`
+	StoreOnlyErrors string `yaml:"store_only_errors"`
+}
+
 // UnmarshalYAML implements custom unmarshaling for KafkaConfig with env variable support.
 func (k *KafkaConfig) UnmarshalYAML(value *yaml.Node) error {
 	type tempConfig struct {
-		Enabled          string   `yaml:"enabled"`
-		Brokers          []string `yaml:"brokers"`
-		Topic            string   `yaml:"topic"`
-		ClientID         string   `yaml:"client_id"`
-		LogQueueSize     string   `yaml:"log_queue_size"`
-		LogBatchSize     string   `yaml:"log_batch_size"`
-		LogFlushInterval string   `yaml:"log_flush_interval"`
-		LogWorkers       string   `yaml:"log_workers"`
-		TLSEnabled       string   `yaml:"tls_enabled,omitempty"`
-		SASLMechanism    string   `yaml:"sasl_mechanism,omitempty"`
-		SASLUsername     string   `yaml:"sasl_username,omitempty"`
-		SASLPassword     string   `yaml:"sasl_password,omitempty"`
-		TLSCACert        string   `yaml:"tls_ca_cert,omitempty"`
+		Enabled          string                   `yaml:"enabled"`
+		Brokers          []string                 `yaml:"brokers"`
+		Topic            string                   `yaml:"topic"`
+		ClientID         string                   `yaml:"client_id"`
+		LogQueueSize     string                   `yaml:"log_queue_size"`
+		LogBatchSize     string                   `yaml:"log_batch_size"`
+		LogFlushInterval string                   `yaml:"log_flush_interval"`
+		LogWorkers       string                   `yaml:"log_workers"`
+		TLSEnabled       string                   `yaml:"tls_enabled,omitempty"`
+		SASLMechanism    string                   `yaml:"sasl_mechanism,omitempty"`
+		SASLUsername     string                   `yaml:"sasl_username,omitempty"`
+		SASLPassword     string                   `yaml:"sasl_password,omitempty"`
+		TLSCACert        string                   `yaml:"tls_ca_cert,omitempty"`
+		RawBodies        tempKafkaRawBodiesConfig `yaml:"raw_bodies,omitempty"`
 	}
 
 	var temp tempConfig
@@ -1446,6 +1490,17 @@ func (k *KafkaConfig) UnmarshalYAML(value *yaml.Node) error {
 	k.SASLUsername = resolveEnvString(temp.SASLUsername)
 	k.SASLPassword = resolveEnvString(temp.SASLPassword)
 	k.TLSCACert = resolveEnvString(temp.TLSCACert)
+
+	if k.RawBodies.Enabled, err = parseField(temp.RawBodies.Enabled, false, strconv.ParseBool, "kafka.raw_bodies.enabled"); err != nil {
+		return err
+	}
+	k.RawBodies.Topic = resolveEnvString(temp.RawBodies.Topic)
+	if k.RawBodies.StoreRawBody, err = parseField(temp.RawBodies.StoreRawBody, false, strconv.ParseBool, "kafka.raw_bodies.store_raw_body"); err != nil {
+		return err
+	}
+	if k.RawBodies.StoreOnlyErrors, err = parseField(temp.RawBodies.StoreOnlyErrors, true, strconv.ParseBool, "kafka.raw_bodies.store_only_errors"); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -1686,6 +1741,12 @@ func defaultKafkaConfig() KafkaConfig {
 		LogBatchSize:     100,
 		LogFlushInterval: 5 * time.Second,
 		LogWorkers:       4,
+		RawBodies: KafkaRawBodiesConfig{
+			Enabled:         false,
+			Topic:           "raw-bodies",
+			StoreRawBody:    false,
+			StoreOnlyErrors: true,
+		},
 	}
 }
 
@@ -2069,6 +2130,18 @@ func (c *Config) Validate() error {
 		}
 		if c.Kafka.SASLMechanism != "" && (c.Kafka.SASLUsername == "" || c.Kafka.SASLPassword == "") {
 			return fmt.Errorf("kafka.sasl_username and kafka.sasl_password are required when kafka.sasl_mechanism is set")
+		}
+	}
+
+	if c.Kafka.RawBodies.Enabled {
+		if !c.Kafka.Enabled {
+			return fmt.Errorf("kafka.raw_bodies.enabled requires kafka.enabled=true")
+		}
+		if c.Kafka.RawBodies.Topic == "" {
+			return fmt.Errorf("kafka.raw_bodies.topic is required when kafka.raw_bodies is enabled")
+		}
+		if c.Kafka.RawBodies.Topic == c.Kafka.Topic {
+			return fmt.Errorf("kafka.raw_bodies.topic must differ from kafka.topic")
 		}
 	}
 

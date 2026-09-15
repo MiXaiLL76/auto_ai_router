@@ -209,6 +209,7 @@ func litellmCallType(path string) string {
 func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
 	litellmEnabled := p.postgresSpendTrackingEnabled()
 	kafkaEnabled := p.kafkaLog != nil && p.kafkaLog.IsEnabled()
+	rawBodyLogEnabled := p.rawBodyLog != nil && p.rawBodyLog.IsEnabled()
 	if !litellmEnabled && !kafkaEnabled {
 		return nil
 	}
@@ -353,6 +354,17 @@ func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
 				kafkaFallbackReason = "publish_error"
 			}
 		}
+	}
+
+	// Raw request/response bodies are supplementary debugging data, never
+	// published for the proxy/chain-audit traffic excluded above. By default
+	// (StoreOnlyErrors=true) they're also failures-only; an operator can set
+	// kafka.raw_bodies.store_only_errors=false to capture every request,
+	// which only makes sense once StoreRawBody is also on (see
+	// buildRawBodyEvent) -- otherwise a success row would carry nothing
+	// but identifying fields.
+	if rawBodyLogEnabled && !logCtx.IsProxyRequest && (status == "failure" || !p.rawBodyStoreOnlyErrors) {
+		p.logRawBodyToKafka(logCtx)
 	}
 
 	// Build metadata with usage, cost breakdown, requester IP, and optional error

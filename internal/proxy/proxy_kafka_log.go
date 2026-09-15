@@ -167,3 +167,43 @@ func (p *Proxy) buildKafkaSpendEvent(
 
 	return event
 }
+
+// logRawBodyToKafka publishes the raw request/response body for a failed
+// request to the separate raw-bodies topic (internal/kafkalog), if that
+// write-path is enabled. Best-effort, mirroring logSpendToKafka: never
+// affects request processing, failures are logged and swallowed rather than
+// surfaced to the caller -- unlike the spend event, there's no Postgres row
+// to flag a fallback reason on for this one, it's purely supplementary.
+func (p *Proxy) logRawBodyToKafka(logCtx *RequestLogContext) {
+	event := p.buildRawBodyEvent(logCtx)
+	if err := p.rawBodyLog.LogRawBody(event); err != nil {
+		p.logger.WarnContext(logCtx.Context(), "Failed to queue Kafka raw-body event",
+			"error", err,
+			"request_id", logCtx.RequestID,
+		)
+	}
+}
+
+// buildRawBodyEvent maps a RequestLogContext onto kafkalog.RawBodyEvent.
+// Caller (logSpendToLiteLLMDB) calls this for every failure, and additionally
+// for successes when StoreOnlyErrors is disabled -- so, unlike
+// buildKafkaSpendEvent, this function must check the status itself rather
+// than trust the caller's gate, otherwise a success row would get a
+// misleading ErrorClass derived from its 2xx HTTPStatus.
+func (p *Proxy) buildRawBodyEvent(logCtx *RequestLogContext) *kafkalog.RawBodyEvent {
+	event := &kafkalog.RawBodyEvent{
+		RequestID:          logCtx.spendRequestID(),
+		ServerRouterID:     p.routerID,
+		StartTime:          logCtx.StartTime,
+		HTTPStatus:         logCtx.HTTPStatus,
+		ResponseBody:       logCtx.ErrorBodyRaw,
+		ClientResponseBody: logCtx.ClientResponseBody,
+	}
+	if logCtx.HTTPStatus >= 400 {
+		event.ErrorClass = mapHTTPStatusToErrorClass(logCtx.HTTPStatus)
+	}
+	if p.rawBodyStoreRawBody {
+		event.RequestBody = logCtx.RequestBodyRaw
+	}
+	return event
+}

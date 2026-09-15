@@ -103,3 +103,57 @@ func (e *SpendEvent) Key() []byte {
 	}
 	return []byte(e.RequestID)
 }
+
+// RawBodyEvent is a separate, independently-toggleable event published to
+// its own Kafka topic (default "raw-bodies", see KafkaRawBodiesConfig)
+// carrying the untruncated request/response bodies for a *failed* request
+// only. Deliberately not part of SpendEvent/air.spend_logs: those rows are
+// kept far longer (billing/analytics) and are meant to stay light, while raw
+// bodies are bulky, only useful for a short debugging window, and need their
+// own, independently configurable retention. Join back to the matching
+// SpendEvent/air.errors row on (request_id, server_router_id) -- request_id
+// alone can collide across hops of a chained request that land in the same
+// millisecond (see air.logs' ORDER BY, which includes server_router_id for
+// the same reason).
+type RawBodyEvent struct {
+	RequestID      string    `json:"request_id"`
+	ServerRouterID string    `json:"server_router_id"`
+	StartTime      time.Time `json:"start_time"`
+	HTTPStatus     int       `json:"http_status"`
+	ErrorClass     string    `json:"error_class,omitempty"`
+	// ResponseBody is the raw upstream provider error body, capped at
+	// maxErrorBodyRawBytes. Same capture sites as SpendEvent.ErrorMessage
+	// used to populate before this event type existed, just uncapped at 512
+	// bytes.
+	ResponseBody string `json:"response_body,omitempty"`
+	// RequestBody is the client's own request body (e.g. the prompt),
+	// capped at the same limit as ResponseBody. Only ever populated when
+	// KafkaRawBodiesConfig.StoreRawBody is explicitly enabled -- off by
+	// default, since this is a materially bigger privacy commitment than
+	// shipping a provider's own error text and must be an explicit,
+	// separate opt-in, not a side effect of turning RawBodies on.
+	RequestBody string `json:"request_body,omitempty"`
+	// ClientResponseBody is what the router actually sent back to the client
+	// for this failure -- which is usually NOT the same as ResponseBody.
+	// maskedUpstreamErrorBody replaces the provider's own error text with a
+	// short, pre-vetted message for essentially every 4xx/5xx response
+	// (unconditionally, not just for specific credential types -- see
+	// internal/proxy/errors.go), specifically so provider internals are never
+	// echoed back to the client. This field lets an operator see both sides:
+	// what the provider actually said (ResponseBody) and what the client was
+	// told instead (ClientResponseBody). The two are identical only when a
+	// mid-stream error was detected after the response had already committed
+	// (nothing left to mask at that point -- the client already received
+	// those exact bytes as they streamed through).
+	ClientResponseBody string `json:"client_response_body,omitempty"`
+}
+
+// Key returns the Kafka record key (request_id), matching SpendEvent's
+// partitioning so a request's spend event and raw-body event -- when both
+// are published -- land on the same partition and stay orderable.
+func (e *RawBodyEvent) Key() []byte {
+	if e == nil {
+		return nil
+	}
+	return []byte(e.RequestID)
+}
