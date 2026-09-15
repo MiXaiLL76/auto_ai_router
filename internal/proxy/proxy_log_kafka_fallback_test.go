@@ -332,12 +332,12 @@ func TestLogSpendToLiteLLMDB_ChargesImagesWithoutProviderUsage(t *testing.T) {
 	assert.InDelta(t, 0.08, dbStub.loggedEntries[0].Spend, 1e-12)
 }
 
-// TestLogSpendToLiteLLMDB_ErrorBodyStoreOnlyErrorsGate covers the two new
-// kafka.error_bodies toggles end to end through the real call site (not a
-// direct buildErrorBodyEvent call): with the default StoreOnlyErrors=true a
-// successful request must not publish an error-body event, but flipping it
+// TestLogSpendToLiteLLMDB_RawBodyStoreOnlyErrorsGate covers the two new
+// kafka.raw_bodies toggles end to end through the real call site (not a
+// direct buildRawBodyEvent call): with the default StoreOnlyErrors=true a
+// successful request must not publish an raw-body event, but flipping it
 // to false must publish one for every request regardless of outcome.
-func TestLogSpendToLiteLLMDB_ErrorBodyStoreOnlyErrorsGate(t *testing.T) {
+func TestLogSpendToLiteLLMDB_RawBodyStoreOnlyErrorsGate(t *testing.T) {
 	for _, tt := range []struct {
 		name            string
 		storeOnlyErrors bool
@@ -348,9 +348,9 @@ func TestLogSpendToLiteLLMDB_ErrorBodyStoreOnlyErrorsGate(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			prx := NewTestProxyBuilder().Build()
-			stub := &stubKafkaErrorBodyManager{enabled: true}
-			prx.errorBodyLog = stub
-			prx.errorBodyStoreOnlyErrors = tt.storeOnlyErrors
+			stub := &stubKafkaRawBodyManager{enabled: true}
+			prx.rawBodyLog = stub
+			prx.rawBodyStoreOnlyErrors = tt.storeOnlyErrors
 			prx.LiteLLMDB = &stubLiteLLMManager{}
 			setTestModelPrice(prx, "gpt-4o-mini", &routermodels.ModelPrice{
 				InputCostPerToken: 0.000001, OutputCostPerToken: 0.000002,

@@ -43,16 +43,16 @@ func TestSpendEvent_JSONMarshal_OmitsNilOptionalFields(t *testing.T) {
 	assert.Equal(t, float64(0), raw["body_response_bytes"])
 }
 
-func TestErrorBodyEvent_Key(t *testing.T) {
-	e := &ErrorBodyEvent{RequestID: "req-123"}
+func TestRawBodyEvent_Key(t *testing.T) {
+	e := &RawBodyEvent{RequestID: "req-123"}
 	assert.Equal(t, []byte("req-123"), e.Key())
 
-	var nilEvent *ErrorBodyEvent
+	var nilEvent *RawBodyEvent
 	assert.Nil(t, nilEvent.Key())
 }
 
-func TestErrorBodyEvent_JSONMarshal_OmitsEmptyOptionalFields(t *testing.T) {
-	e := &ErrorBodyEvent{
+func TestRawBodyEvent_JSONMarshal_OmitsEmptyOptionalFields(t *testing.T) {
+	e := &RawBodyEvent{
 		RequestID:      "req-123",
 		ServerRouterID: "air-ru02-abc123",
 		StartTime:      time.Date(2026, 7, 15, 10, 0, 0, 0, time.UTC),
@@ -74,19 +74,19 @@ func TestErrorBodyEvent_JSONMarshal_OmitsEmptyOptionalFields(t *testing.T) {
 	assert.False(t, hasResponseBody)
 }
 
-// TestErrorBodyEvent_RequestBodyOmittedWhenEmpty locks in that RequestBody
-// (only ever populated when KafkaErrorBodiesConfig.StoreRawBody is
+// TestRawBodyEvent_RequestBodyOmittedWhenEmpty locks in that RequestBody
+// (only ever populated when KafkaRawBodiesConfig.StoreRawBody is
 // explicitly enabled) doesn't appear in the JSON at all when the capture
 // site left it unset, same omitempty behavior as ResponseBody.
-func TestErrorBodyEvent_RequestBodyOmittedWhenEmpty(t *testing.T) {
-	e := ErrorBodyEvent{}
+func TestRawBodyEvent_RequestBodyOmittedWhenEmpty(t *testing.T) {
+	e := RawBodyEvent{}
 	data, err := json.Marshal(&e)
 	require.NoError(t, err)
 	assert.NotContains(t, string(data), "request_body")
 }
 
-func TestErrorBodyEvent_JSONMarshal_IncludesRequestBodyWhenSet(t *testing.T) {
-	e := &ErrorBodyEvent{
+func TestRawBodyEvent_JSONMarshal_IncludesRequestBodyWhenSet(t *testing.T) {
+	e := &RawBodyEvent{
 		RequestID:   "req-123",
 		RequestBody: `{"messages":[{"role":"user","content":"hello"}]}`,
 	}
@@ -99,8 +99,8 @@ func TestErrorBodyEvent_JSONMarshal_IncludesRequestBodyWhenSet(t *testing.T) {
 	assert.Equal(t, e.RequestBody, raw["request_body"])
 }
 
-func TestErrorBodyEvent_JSONMarshal_IncludesBodiesWhenSet(t *testing.T) {
-	e := &ErrorBodyEvent{
+func TestRawBodyEvent_JSONMarshal_IncludesBodiesWhenSet(t *testing.T) {
+	e := &RawBodyEvent{
 		RequestID:          "req-123",
 		ErrorClass:         "RateLimitError",
 		ResponseBody:       `{"error":{"message":"rate limited"}}`,

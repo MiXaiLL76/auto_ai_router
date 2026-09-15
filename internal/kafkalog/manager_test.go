@@ -18,14 +18,14 @@ func TestNoopManager(t *testing.T) {
 	assert.NoError(t, m.Shutdown(context.Background()))
 }
 
-func TestNoopErrorBodyManager(t *testing.T) {
-	m := NewNoopErrorBodyManager()
+func TestNoopRawBodyManager(t *testing.T) {
+	m := NewNoopRawBodyManager()
 
 	assert.False(t, m.IsEnabled())
 	assert.False(t, m.IsHealthy())
 	assert.Equal(t, Stats{}, m.Stats())
-	assert.NoError(t, m.LogErrorBody(&ErrorBodyEvent{RequestID: "req-1"}))
-	assert.NoError(t, m.LogErrorBody(nil))
+	assert.NoError(t, m.LogRawBody(&RawBodyEvent{RequestID: "req-1"}))
+	assert.NoError(t, m.LogRawBody(nil))
 	assert.NoError(t, m.Shutdown(context.Background()))
 }
 
@@ -39,10 +39,10 @@ func TestDefaultManager_LogSpend_NilEvent(t *testing.T) {
 	assert.Equal(t, 0, m.logger.Stats().QueueLen)
 }
 
-// TestDefaultErrorBodyManager_LogErrorBody_NilEvent mirrors
-// TestDefaultManager_LogSpend_NilEvent for the error-body write-path.
-func TestDefaultErrorBodyManager_LogErrorBody_NilEvent(t *testing.T) {
-	m := &DefaultErrorBodyManager{logger: newTestErrorBodyLogger(10)}
-	assert.NoError(t, m.LogErrorBody(nil))
+// TestDefaultRawBodyManager_LogRawBody_NilEvent mirrors
+// TestDefaultManager_LogSpend_NilEvent for the raw-body write-path.
+func TestDefaultRawBodyManager_LogRawBody_NilEvent(t *testing.T) {
+	m := &DefaultRawBodyManager{logger: newTestRawBodyLogger(10)}
+	assert.NoError(t, m.LogRawBody(nil))
 	assert.Equal(t, 0, m.logger.Stats().QueueLen)
 }

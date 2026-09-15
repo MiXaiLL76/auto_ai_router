@@ -30,7 +30,7 @@ const dlqMaxSize = 10
 
 // Keyed is the constraint Logger[T] events must satisfy: a stable key so
 // retries/reprocessing of the same logical event stay ordered on the same
-// Kafka partition. Both *SpendEvent and *ErrorBodyEvent key by request_id.
+// Kafka partition. Both *SpendEvent and *RawBodyEvent key by request_id.
 type Keyed interface {
 	Key() []byte
 }
@@ -62,7 +62,7 @@ type deadLetterBatch[T Keyed] struct {
 
 // Logger is an asynchronous Kafka producer, generic over the event type it
 // publishes (T is a pointer type implementing Keyed, e.g. *SpendEvent or
-// *ErrorBodyEvent) so the spend-log and error-body write-paths share one
+// *RawBodyEvent) so the spend-log and raw-body write-paths share one
 // tested queue/batch/retry/DLQ implementation instead of two copies of it.
 //
 // Mirrors internal/litellmdb/spendlog.Logger: non-blocking Log(), batching,
@@ -103,7 +103,7 @@ type Logger[T Keyed] struct {
 // an error, it only keeps IsHealthy() false until a connection succeeds.
 //
 // T is not inferable from cfg, so callers must instantiate it explicitly,
-// e.g. NewLogger[*SpendEvent](cfg) or NewLogger[*ErrorBodyEvent](cfg).
+// e.g. NewLogger[*SpendEvent](cfg) or NewLogger[*RawBodyEvent](cfg).
 func NewLogger[T Keyed](cfg *Config) (*Logger[T], error) {
 	opts := []kgo.Opt{
 		kgo.SeedBrokers(cfg.Brokers...),
@@ -187,7 +187,7 @@ func (l *Logger[T]) Start() {
 // Callers are expected to have already nil-checked event: a generic T
 // constrained only by Keyed cannot be safely compared to nil here (a typed
 // nil pointer wrapped as T would not compare equal to an untyped nil), so
-// each public entry point (Manager.LogSpend, ErrorBodyManager.LogErrorBody)
+// each public entry point (Manager.LogSpend, RawBodyManager.LogRawBody)
 // does that check itself before calling in.
 func (l *Logger[T]) Log(event T) error {
 	select {

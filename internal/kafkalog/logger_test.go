@@ -26,20 +26,20 @@ func newTestLogger(queueSize int) *Logger[*SpendEvent] {
 	}
 }
 
-// newTestErrorBodyLogger mirrors newTestLogger for the ErrorBodyEvent
+// newTestRawBodyLogger mirrors newTestLogger for the RawBodyEvent
 // instantiation of the generic Logger[T], used by manager_test.go's
-// DefaultErrorBodyManager tests.
-func newTestErrorBodyLogger(queueSize int) *Logger[*ErrorBodyEvent] {
+// DefaultRawBodyManager tests.
+func newTestRawBodyLogger(queueSize int) *Logger[*RawBodyEvent] {
 	cfg := DefaultConfig()
 	cfg.Brokers = []string{"kafka:9092"}
 	cfg.LogQueueSize = queueSize
 	cfg.ApplyDefaults()
 
-	return &Logger[*ErrorBodyEvent]{
+	return &Logger[*RawBodyEvent]{
 		config:   cfg,
 		logger:   cfg.Logger,
 		topic:    cfg.Topic,
-		queue:    make(chan *ErrorBodyEvent, queueSize),
+		queue:    make(chan *RawBodyEvent, queueSize),
 		stopChan: make(chan struct{}),
 	}
 }

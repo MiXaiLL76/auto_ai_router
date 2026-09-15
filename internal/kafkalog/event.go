@@ -104,8 +104,8 @@ func (e *SpendEvent) Key() []byte {
 	return []byte(e.RequestID)
 }
 
-// ErrorBodyEvent is a separate, independently-toggleable event published to
-// its own Kafka topic (default "error-bodies", see KafkaErrorBodiesConfig)
+// RawBodyEvent is a separate, independently-toggleable event published to
+// its own Kafka topic (default "raw-bodies", see KafkaRawBodiesConfig)
 // carrying the untruncated request/response bodies for a *failed* request
 // only. Deliberately not part of SpendEvent/air.spend_logs: those rows are
 // kept far longer (billing/analytics) and are meant to stay light, while raw
@@ -115,7 +115,7 @@ func (e *SpendEvent) Key() []byte {
 // alone can collide across hops of a chained request that land in the same
 // millisecond (see air.logs' ORDER BY, which includes server_router_id for
 // the same reason).
-type ErrorBodyEvent struct {
+type RawBodyEvent struct {
 	RequestID      string    `json:"request_id"`
 	ServerRouterID string    `json:"server_router_id"`
 	StartTime      time.Time `json:"start_time"`
@@ -128,10 +128,10 @@ type ErrorBodyEvent struct {
 	ResponseBody string `json:"response_body,omitempty"`
 	// RequestBody is the client's own request body (e.g. the prompt),
 	// capped at the same limit as ResponseBody. Only ever populated when
-	// KafkaErrorBodiesConfig.StoreRawBody is explicitly enabled -- off by
+	// KafkaRawBodiesConfig.StoreRawBody is explicitly enabled -- off by
 	// default, since this is a materially bigger privacy commitment than
 	// shipping a provider's own error text and must be an explicit,
-	// separate opt-in, not a side effect of turning ErrorBodies on.
+	// separate opt-in, not a side effect of turning RawBodies on.
 	RequestBody string `json:"request_body,omitempty"`
 	// ClientResponseBody is what the router actually sent back to the client
 	// for this failure -- which is usually NOT the same as ResponseBody.
@@ -149,9 +149,9 @@ type ErrorBodyEvent struct {
 }
 
 // Key returns the Kafka record key (request_id), matching SpendEvent's
-// partitioning so a request's spend event and error-body event -- when both
+// partitioning so a request's spend event and raw-body event -- when both
 // are published -- land on the same partition and stay orderable.
-func (e *ErrorBodyEvent) Key() []byte {
+func (e *RawBodyEvent) Key() []byte {
 	if e == nil {
 		return nil
 	}

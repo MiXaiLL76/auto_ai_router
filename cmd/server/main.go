@@ -129,7 +129,7 @@ func main() {
 
 	litellmDBManager := initializeLiteLLMDB(cfg, log)
 	kafkaLogManager := initializeKafkaLog(cfg, log, litellmDBManager)
-	errorBodyLogManager := initializeErrorBodyLog(cfg, log)
+	rawBodyLogManager := initializeRawBodyLog(cfg, log)
 
 	// ==================== Budget reservation & key-level RPM/TPM ====================
 	// Both are Redis-backed and reuse the shared valkey client with isolated key
@@ -243,9 +243,9 @@ func main() {
 		Commit:                     Commit,
 		LiteLLMDB:                  litellmDBManager,
 		KafkaLog:                   kafkaLogManager,
-		ErrorBodyLog:               errorBodyLogManager,
-		ErrorBodyStoreRawBody:      cfg.Kafka.ErrorBodies.StoreRawBody,
-		ErrorBodyStoreOnlyErrors:   cfg.Kafka.ErrorBodies.StoreOnlyErrors,
+		RawBodyLog:                 rawBodyLogManager,
+		RawBodyStoreRawBody:        cfg.Kafka.RawBodies.StoreRawBody,
+		RawBodyStoreOnlyErrors:     cfg.Kafka.RawBodies.StoreOnlyErrors,
 		HealthChecker:              healthChecker,
 		PriceRegistry:              priceRegistry,
 		OrganizationPolicies:       organizationPolicies,
@@ -283,8 +283,8 @@ func main() {
 	if kafkaLogManager.IsEnabled() {
 		startKafkaMetricsUpdater(bgCtx, cfg, log, kafkaLogManager, metrics, &wg)
 	}
-	if errorBodyLogManager.IsEnabled() {
-		startErrorBodyLogMetricsUpdater(bgCtx, cfg, log, errorBodyLogManager, metrics, &wg)
+	if rawBodyLogManager.IsEnabled() {
+		startRawBodyLogMetricsUpdater(bgCtx, cfg, log, rawBodyLogManager, metrics, &wg)
 	}
 
 	if respStore != nil {
@@ -490,13 +490,13 @@ func main() {
 		}
 	}
 
-	// Shutdown Kafka error-body publisher
-	if errorBodyLogManager.IsEnabled() {
-		log.Info("Shutting down Kafka error-body publisher...")
-		errorBodyShutdownCtx, errorBodyShutdownCancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer errorBodyShutdownCancel()
-		if err := errorBodyLogManager.Shutdown(errorBodyShutdownCtx); err != nil {
-			log.Error("Kafka error-body publisher shutdown error", "error", err)
+	// Shutdown Kafka raw-body publisher
+	if rawBodyLogManager.IsEnabled() {
+		log.Info("Shutting down Kafka raw-body publisher...")
+		rawBodyShutdownCtx, rawBodyShutdownCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer rawBodyShutdownCancel()
+		if err := rawBodyLogManager.Shutdown(rawBodyShutdownCtx); err != nil {
+			log.Error("Kafka raw-body publisher shutdown error", "error", err)
 		}
 	}
 
@@ -1076,31 +1076,31 @@ func initializeKafkaLog(cfg *config.Config, log *slog.Logger, litellmDBManager l
 	return manager
 }
 
-// initializeErrorBodyLog sets up the separate, independently-toggleable
+// initializeRawBodyLog sets up the separate, independently-toggleable
 // Kafka write-path that publishes raw request/response bodies for *failed*
-// requests only (internal/kafkalog.ErrorBodyManager). Unlike the spend-log
+// requests only (internal/kafkalog.RawBodyManager). Unlike the spend-log
 // path, there is no "Kafka-only mode" fallback to worry about: this data has
 // no Postgres counterpart at all, so a broker unavailable at startup just
 // keeps IsHealthy() false, same as the spend-log path's default (non-fatal)
 // case -- it never blocks startup or degrades to something worse than "not
 // publishing this optional debugging stream".
-func initializeErrorBodyLog(cfg *config.Config, log *slog.Logger) kafkalog.ErrorBodyManager {
-	if !cfg.Kafka.Enabled || !cfg.Kafka.ErrorBodies.Enabled {
-		log.Info("Kafka error-body publishing disabled - using NoopErrorBodyManager")
-		return kafkalog.NewNoopErrorBodyManager()
+func initializeRawBodyLog(cfg *config.Config, log *slog.Logger) kafkalog.RawBodyManager {
+	if !cfg.Kafka.Enabled || !cfg.Kafka.RawBodies.Enabled {
+		log.Info("Kafka raw-body publishing disabled - using NoopRawBodyManager")
+		return kafkalog.NewNoopRawBodyManager()
 	}
 
-	log.Info("Initializing Kafka error-body publisher...", "brokers", cfg.Kafka.Brokers, "topic", cfg.Kafka.ErrorBodies.Topic)
+	log.Info("Initializing Kafka raw-body publisher...", "brokers", cfg.Kafka.Brokers, "topic", cfg.Kafka.RawBodies.Topic)
 
-	errorBodyCfg := &kafkalog.Config{
+	rawBodyCfg := &kafkalog.Config{
 		// Reuses the spend-log Kafka config's brokers/TLS/SASL/queue tuning --
 		// same cluster, just a different topic with its own retention. Only
 		// Topic (and, by extension, ClientID staying the router-wide default)
 		// differs from initializeKafkaLog's kafkaCfg. Config.Validate() already
-		// guarantees ErrorBodies.Topic is non-empty and != Kafka.Topic whenever
-		// ErrorBodies.Enabled is true, so no fallback is needed here.
+		// guarantees RawBodies.Topic is non-empty and != Kafka.Topic whenever
+		// RawBodies.Enabled is true, so no fallback is needed here.
 		Brokers:          cfg.Kafka.Brokers,
-		Topic:            cfg.Kafka.ErrorBodies.Topic,
+		Topic:            cfg.Kafka.RawBodies.Topic,
 		ClientID:         cfg.Kafka.ClientID,
 		LogQueueSize:     cfg.Kafka.LogQueueSize,
 		LogBatchSize:     cfg.Kafka.LogBatchSize,
@@ -1115,15 +1115,15 @@ func initializeErrorBodyLog(cfg *config.Config, log *slog.Logger) kafkalog.Error
 		// No FallbackNotifier: there's no Postgres row for this event to flag.
 	}
 
-	manager, err := kafkalog.NewErrorBody(errorBodyCfg)
+	manager, err := kafkalog.NewRawBody(rawBodyCfg)
 	if err != nil {
-		log.Warn("Failed to initialize Kafka error-body publisher, degrading to NoopErrorBodyManager",
+		log.Warn("Failed to initialize Kafka raw-body publisher, degrading to NoopRawBodyManager",
 			"error", err,
 			"impact", "Raw request/response bodies for failed requests will not be published; spend logging is unaffected",
 		)
-		return kafkalog.NewNoopErrorBodyManager()
+		return kafkalog.NewNoopRawBodyManager()
 	}
-	log.Info("Kafka error-body publisher initialized successfully")
+	log.Info("Kafka raw-body publisher initialized successfully")
 	return manager
 }
 
@@ -1264,13 +1264,13 @@ func startKafkaMetricsUpdater(
 	log.Info("Kafka spend logger metrics updater started (updates every 10 seconds)")
 }
 
-// startErrorBodyLogMetricsUpdater mirrors startKafkaMetricsUpdater for the
-// separate error-body write-path.
-func startErrorBodyLogMetricsUpdater(
+// startRawBodyLogMetricsUpdater mirrors startKafkaMetricsUpdater for the
+// separate raw-body write-path.
+func startRawBodyLogMetricsUpdater(
 	bgCtx context.Context,
 	cfg *config.Config,
 	log *slog.Logger,
-	errorBodyLogManager kafkalog.ErrorBodyManager,
+	rawBodyLogManager kafkalog.RawBodyManager,
 	metrics *monitoring.Metrics,
 	wg *sync.WaitGroup,
 ) {
@@ -1289,13 +1289,13 @@ func startErrorBodyLogMetricsUpdater(
 			case <-bgCtx.Done():
 				return
 			case <-ticker.C:
-				stats := errorBodyLogManager.Stats()
-				metrics.UpdateKafkaErrorBodyLoggerStats(stats.Queued, stats.Produced, stats.Dropped, stats.Errors, stats.DLQSize, stats.Healthy)
+				stats := rawBodyLogManager.Stats()
+				metrics.UpdateKafkaRawBodyLoggerStats(stats.Queued, stats.Produced, stats.Dropped, stats.Errors, stats.DLQSize, stats.Healthy)
 			}
 		}
 	}()
 
-	log.Info("Kafka error-body logger metrics updater started (updates every 10 seconds)")
+	log.Info("Kafka raw-body logger metrics updater started (updates every 10 seconds)")
 }
 
 func updateMetrics(

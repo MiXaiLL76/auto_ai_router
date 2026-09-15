@@ -1,7 +1,7 @@
 // Package kafkalog publishes an expanded copy of every SpendLogEntry to a
 // Kafka topic ("air.spend_logs") for downstream ClickHouse analytics,
 // alongside (not instead of) the existing LiteLLM Postgres write path. It
-// also has a second, independently-toggleable write-path (ErrorBodyManager)
+// also has a second, independently-toggleable write-path (RawBodyManager)
 // that publishes raw request/response bodies for failed requests only, to
 // its own topic -- kept separate from spend events because that data is
 // bulky and short-retention, unlike the spend/billing rows in air.logs.
@@ -117,19 +117,19 @@ func (m *DefaultManager) Shutdown(ctx context.Context) error {
 	return err
 }
 
-// ==================== ErrorBodyManager ====================
+// ==================== RawBodyManager ====================
 
-// ErrorBodyManager is the raw-error-body write-path interface. Structurally
+// RawBodyManager is the raw-body write-path interface. Structurally
 // identical to Manager (same lifecycle: enabled/healthy/stats/shutdown), but
 // kept as its own interface -- rather than a second type parameter on
 // Manager -- so a caller holding just a Manager can't accidentally call
-// LogErrorBody, and vice versa; the two write-paths are independently
+// LogRawBody, and vice versa; the two write-paths are independently
 // enabled and genuinely optional in different ways (see
 // docs/litellm-integration/kafka_spend_log.md).
-type ErrorBodyManager interface {
-	// LogErrorBody queues a raw request/response body event for a failed
+type RawBodyManager interface {
+	// LogRawBody queues a raw request/response body event for a failed
 	// request. Returns an error only if the event could not be queued.
-	LogErrorBody(event *ErrorBodyEvent) error
+	LogRawBody(event *RawBodyEvent) error
 
 	IsEnabled() bool
 	IsHealthy() bool
@@ -137,52 +137,52 @@ type ErrorBodyManager interface {
 	Shutdown(ctx context.Context) error
 }
 
-// NoopErrorBodyManager is a no-op implementation used when error-body
+// NoopRawBodyManager is a no-op implementation used when raw-body
 // publishing is disabled (the default).
-type NoopErrorBodyManager struct{}
+type NoopRawBodyManager struct{}
 
-// NewNoopErrorBodyManager creates a new no-op error-body manager.
-func NewNoopErrorBodyManager() *NoopErrorBodyManager {
-	return &NoopErrorBodyManager{}
+// NewNoopRawBodyManager creates a new no-op raw-body manager.
+func NewNoopRawBodyManager() *NoopRawBodyManager {
+	return &NoopRawBodyManager{}
 }
 
-func (n *NoopErrorBodyManager) LogErrorBody(_ *ErrorBodyEvent) error { return nil }
-func (n *NoopErrorBodyManager) IsEnabled() bool                      { return false }
-func (n *NoopErrorBodyManager) IsHealthy() bool                      { return false }
-func (n *NoopErrorBodyManager) Stats() Stats                         { return Stats{} }
-func (n *NoopErrorBodyManager) Shutdown(_ context.Context) error {
+func (n *NoopRawBodyManager) LogRawBody(_ *RawBodyEvent) error { return nil }
+func (n *NoopRawBodyManager) IsEnabled() bool                  { return false }
+func (n *NoopRawBodyManager) IsHealthy() bool                  { return false }
+func (n *NoopRawBodyManager) Stats() Stats                     { return Stats{} }
+func (n *NoopRawBodyManager) Shutdown(_ context.Context) error {
 	return nil
 }
 
-// DefaultErrorBodyManager is the real implementation of ErrorBodyManager.
-type DefaultErrorBodyManager struct {
-	logger *Logger[*ErrorBodyEvent]
+// DefaultRawBodyManager is the real implementation of RawBodyManager.
+type DefaultRawBodyManager struct {
+	logger *Logger[*RawBodyEvent]
 	log    *slog.Logger
 }
 
-// NewErrorBody creates a new ErrorBodyManager instance and starts its
+// NewErrorBody creates a new RawBodyManager instance and starts its
 // background producer. cfg is a plain kafkalog.Config pointed at the
-// error-bodies topic (same brokers/TLS/SASL as the spend-log cfg is the
+// raw-bodies topic (same brokers/TLS/SASL as the spend-log cfg is the
 // common case, but that's the caller's choice, not enforced here).
-func NewErrorBody(cfg *Config) (ErrorBodyManager, error) {
+func NewRawBody(cfg *Config) (RawBodyManager, error) {
 	cfg.ApplyDefaults()
 
 	if err := cfg.Validate(); err != nil {
 		return nil, err
 	}
 
-	logger, err := NewLogger[*ErrorBodyEvent](cfg)
+	logger, err := NewLogger[*RawBodyEvent](cfg)
 	if err != nil {
 		return nil, err
 	}
 	logger.Start()
 
-	m := &DefaultErrorBodyManager{
+	m := &DefaultRawBodyManager{
 		logger: logger,
 		log:    cfg.Logger,
 	}
 
-	cfg.Logger.Info("Kafka error-body logger initialized",
+	cfg.Logger.Info("Kafka raw-body logger initialized",
 		"brokers", cfg.Brokers,
 		"topic", cfg.Topic,
 		"log_queue_size", cfg.LogQueueSize,
@@ -191,23 +191,23 @@ func NewErrorBody(cfg *Config) (ErrorBodyManager, error) {
 	return m, nil
 }
 
-func (m *DefaultErrorBodyManager) LogErrorBody(event *ErrorBodyEvent) error {
+func (m *DefaultRawBodyManager) LogRawBody(event *RawBodyEvent) error {
 	if event == nil {
 		return nil
 	}
 	return m.logger.Log(event)
 }
 
-func (m *DefaultErrorBodyManager) IsEnabled() bool { return true }
+func (m *DefaultRawBodyManager) IsEnabled() bool { return true }
 
-func (m *DefaultErrorBodyManager) IsHealthy() bool { return m.logger.IsHealthy() }
+func (m *DefaultRawBodyManager) IsHealthy() bool { return m.logger.IsHealthy() }
 
-func (m *DefaultErrorBodyManager) Stats() Stats { return m.logger.Stats() }
+func (m *DefaultRawBodyManager) Stats() Stats { return m.logger.Stats() }
 
-func (m *DefaultErrorBodyManager) Shutdown(ctx context.Context) error {
-	m.log.Info("Shutting down Kafka error-body logger...")
+func (m *DefaultRawBodyManager) Shutdown(ctx context.Context) error {
+	m.log.Info("Shutting down Kafka raw-body logger...")
 	err := m.logger.Shutdown(ctx)
-	m.log.Info("Kafka error-body logger shutdown complete")
+	m.log.Info("Kafka raw-body logger shutdown complete")
 	return err
 }
 
@@ -215,5 +215,5 @@ func (m *DefaultErrorBodyManager) Shutdown(ctx context.Context) error {
 
 var _ Manager = (*DefaultManager)(nil)
 var _ Manager = (*NoopManager)(nil)
-var _ ErrorBodyManager = (*DefaultErrorBodyManager)(nil)
-var _ ErrorBodyManager = (*NoopErrorBodyManager)(nil)
+var _ RawBodyManager = (*DefaultRawBodyManager)(nil)
+var _ RawBodyManager = (*NoopRawBodyManager)(nil)

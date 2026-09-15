@@ -172,7 +172,7 @@ func TestConfig_Validate_Kafka(t *testing.T) {
 	}
 }
 
-func TestConfig_Validate_KafkaErrorBodies(t *testing.T) {
+func TestConfig_Validate_KafkaRawBodies(t *testing.T) {
 	baseKafka := KafkaConfig{
 		Enabled:          true,
 		Brokers:          []string{"kafka:9092"},
@@ -190,14 +190,14 @@ func TestConfig_Validate_KafkaErrorBodies(t *testing.T) {
 		errContains string
 	}{
 		{
-			name:    "disabled error_bodies is always valid",
+			name:    "disabled raw_bodies is always valid",
 			mutate:  func(k *KafkaConfig) {},
 			wantErr: false,
 		},
 		{
 			name: "enabled with distinct topic passes",
 			mutate: func(k *KafkaConfig) {
-				k.ErrorBodies = KafkaErrorBodiesConfig{Enabled: true, Topic: "error-bodies"}
+				k.RawBodies = KafkaRawBodiesConfig{Enabled: true, Topic: "raw-bodies"}
 			},
 			wantErr: false,
 		},
@@ -205,26 +205,26 @@ func TestConfig_Validate_KafkaErrorBodies(t *testing.T) {
 			name: "enabled without kafka.enabled fails",
 			mutate: func(k *KafkaConfig) {
 				k.Enabled = false
-				k.ErrorBodies = KafkaErrorBodiesConfig{Enabled: true, Topic: "error-bodies"}
+				k.RawBodies = KafkaRawBodiesConfig{Enabled: true, Topic: "raw-bodies"}
 			},
 			wantErr:     true,
-			errContains: "kafka.error_bodies.enabled requires kafka.enabled=true",
+			errContains: "kafka.raw_bodies.enabled requires kafka.enabled=true",
 		},
 		{
 			name: "enabled without topic fails",
 			mutate: func(k *KafkaConfig) {
-				k.ErrorBodies = KafkaErrorBodiesConfig{Enabled: true}
+				k.RawBodies = KafkaRawBodiesConfig{Enabled: true}
 			},
 			wantErr:     true,
-			errContains: "kafka.error_bodies.topic is required",
+			errContains: "kafka.raw_bodies.topic is required",
 		},
 		{
 			name: "enabled with topic same as spend topic fails",
 			mutate: func(k *KafkaConfig) {
-				k.ErrorBodies = KafkaErrorBodiesConfig{Enabled: true, Topic: "air.spend_logs"}
+				k.RawBodies = KafkaRawBodiesConfig{Enabled: true, Topic: "air.spend_logs"}
 			},
 			wantErr:     true,
-			errContains: "kafka.error_bodies.topic must differ from kafka.topic",
+			errContains: "kafka.raw_bodies.topic must differ from kafka.topic",
 		},
 	}
 
@@ -245,28 +245,28 @@ func TestConfig_Validate_KafkaErrorBodies(t *testing.T) {
 	}
 }
 
-func TestKafkaConfig_UnmarshalYAML_ErrorBodies(t *testing.T) {
-	t.Setenv("KAFKA_ERROR_BODIES_ENABLED_TEST", "true")
+func TestKafkaConfig_UnmarshalYAML_RawBodies(t *testing.T) {
+	t.Setenv("KAFKA_RAW_BODIES_ENABLED_TEST", "true")
 
 	yamlDoc := `
 enabled: true
 brokers:
   - "kafka:9092"
 topic: air.spend_logs
-error_bodies:
-  enabled: "os.environ/KAFKA_ERROR_BODIES_ENABLED_TEST"
-  topic: error-bodies
+raw_bodies:
+  enabled: "os.environ/KAFKA_RAW_BODIES_ENABLED_TEST"
+  topic: raw-bodies
 `
 	var kafkaCfg KafkaConfig
 	a := assert.New(t)
 	a.NoError(yaml.Unmarshal([]byte(yamlDoc), &kafkaCfg))
-	a.True(kafkaCfg.ErrorBodies.Enabled)
-	a.Equal("error-bodies", kafkaCfg.ErrorBodies.Topic)
-	a.False(kafkaCfg.ErrorBodies.StoreRawBody, "store_raw_body must default to false when omitted")
-	a.True(kafkaCfg.ErrorBodies.StoreOnlyErrors, "store_only_errors must default to true when omitted")
+	a.True(kafkaCfg.RawBodies.Enabled)
+	a.Equal("raw-bodies", kafkaCfg.RawBodies.Topic)
+	a.False(kafkaCfg.RawBodies.StoreRawBody, "store_raw_body must default to false when omitted")
+	a.True(kafkaCfg.RawBodies.StoreOnlyErrors, "store_only_errors must default to true when omitted")
 }
 
-func TestKafkaConfig_UnmarshalYAML_ErrorBodiesDefaultsToDisabled(t *testing.T) {
+func TestKafkaConfig_UnmarshalYAML_RawBodiesDefaultsToDisabled(t *testing.T) {
 	yamlDoc := `
 enabled: true
 brokers:
@@ -276,29 +276,29 @@ topic: air.spend_logs
 	var kafkaCfg KafkaConfig
 	a := assert.New(t)
 	a.NoError(yaml.Unmarshal([]byte(yamlDoc), &kafkaCfg))
-	a.False(kafkaCfg.ErrorBodies.Enabled)
-	a.Empty(kafkaCfg.ErrorBodies.Topic)
-	a.False(kafkaCfg.ErrorBodies.StoreRawBody)
-	a.True(kafkaCfg.ErrorBodies.StoreOnlyErrors)
+	a.False(kafkaCfg.RawBodies.Enabled)
+	a.Empty(kafkaCfg.RawBodies.Topic)
+	a.False(kafkaCfg.RawBodies.StoreRawBody)
+	a.True(kafkaCfg.RawBodies.StoreOnlyErrors)
 }
 
-func TestKafkaConfig_UnmarshalYAML_ErrorBodiesStoreToggles(t *testing.T) {
+func TestKafkaConfig_UnmarshalYAML_RawBodiesStoreToggles(t *testing.T) {
 	yamlDoc := `
 enabled: true
 brokers:
   - "kafka:9092"
 topic: air.spend_logs
-error_bodies:
+raw_bodies:
   enabled: "true"
-  topic: error-bodies
+  topic: raw-bodies
   store_raw_body: "true"
   store_only_errors: "false"
 `
 	var kafkaCfg KafkaConfig
 	a := assert.New(t)
 	a.NoError(yaml.Unmarshal([]byte(yamlDoc), &kafkaCfg))
-	a.True(kafkaCfg.ErrorBodies.StoreRawBody)
-	a.False(kafkaCfg.ErrorBodies.StoreOnlyErrors)
+	a.True(kafkaCfg.RawBodies.StoreRawBody)
+	a.False(kafkaCfg.RawBodies.StoreOnlyErrors)
 }
 
 func TestConfig_Validate_KafkaOnlyModeRequiresKafka(t *testing.T) {

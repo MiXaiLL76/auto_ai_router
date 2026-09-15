@@ -24,13 +24,13 @@ kafka:
   sasl_password: "os.environ/KAFKA_SASL_PASSWORD"
 
   # Separate, independently-toggleable write-path: raw request/response
-  # bodies, published to their own topic. See "Error bodies" below for why
+  # bodies, published to their own topic. See "Raw bodies" below for why
   # this isn't just a field on the spend event.
-  error_bodies:
-    enabled: os.environ/KAFKA_ERROR_BODIES_ENABLED   # default: false
-    topic: "error-bodies"
-    store_raw_body: os.environ/KAFKA_ERROR_BODIES_STORE_RAW_BODY       # default: false
-    store_only_errors: os.environ/KAFKA_ERROR_BODIES_STORE_ONLY_ERRORS # default: true
+  raw_bodies:
+    enabled: os.environ/KAFKA_RAW_BODIES_ENABLED   # default: false
+    topic: "raw-bodies"
+    store_raw_body: os.environ/KAFKA_RAW_BODIES_STORE_RAW_BODY       # default: false
+    store_only_errors: os.environ/KAFKA_RAW_BODIES_STORE_ONLY_ERRORS # default: true
 
 litellm_db:
   enabled: true
@@ -111,11 +111,11 @@ This exposes Kafka on `localhost:9092` and ClickHouse on `localhost:8123` (HTTP)
 
 ## Out of scope: request/response bodies for successful requests
 
-Capturing and storing request/response bodies for *every* request (success included) is still out of scope — it would make `air.spend_logs` both heavier and much longer-retained than it needs to be, and is a distinct problem from "help me debug this one failure" (see "Error bodies" below, which covers that narrower case). The event fields `body_captured`, `body_request_bytes`, and `body_response_bytes` remain reserved placeholders: `body_captured: false`, byte counts `0`, no delivery/storage/PII-handling logic behind them.
+Capturing and storing request/response bodies for *every* request (success included) is still out of scope — it would make `air.spend_logs` both heavier and much longer-retained than it needs to be, and is a distinct problem from "help me debug this one failure" (see "Raw bodies" below, which covers that narrower case). The event fields `body_captured`, `body_request_bytes`, and `body_response_bytes` remain reserved placeholders: `body_captured: false`, byte counts `0`, no delivery/storage/PII-handling logic behind them.
 
-## Error bodies (separate write-path)
+## Raw bodies (separate write-path)
 
-The raw **provider response** body for a failed request is published separately from the spend event, to its own Kafka topic (`kafka.error_bodies`, default topic `error-bodies`, staged in ClickHouse as `air.raw_bodies_kafka`/`air.raw_bodies_read`) as a flat `kafkalog.ErrorBodyEvent`:
+The raw **provider response** body for a failed request is published separately from the spend event, to its own Kafka topic (`kafka.raw_bodies`, default topic `raw-bodies`, staged in ClickHouse as `air.raw_bodies_kafka`/`air.raw_bodies_read`) as a flat `kafkalog.RawBodyEvent`:
 
 | Field              | Type              | Description                                                                                                         |
 | ------------------ | ----------------- | --------------------------------------------------------------------------------------------------------------------- |
@@ -126,13 +126,13 @@ The raw **provider response** body for a failed request is published separately 
 | `error_class`      | string, omitempty | Same classification as `SpendEvent.error_class`. Empty on success rows (see `store_only_errors` below)                |
 | `response_body`    | string, omitempty | Raw upstream provider error body, capped at 16 KiB (uncapped relative to `error_message`'s 512 bytes)                 |
 | `client_response_body` | string, omitempty | What the router actually sent back to the client for this failure, capped the same way as `response_body`         |
-| `request_body`     | string, omitempty | The client's own request body (e.g. the prompt). Only populated when `kafka.error_bodies.store_raw_body: true`        |
+| `request_body`     | string, omitempty | The client's own request body (e.g. the prompt). Only populated when `kafka.raw_bodies.store_raw_body: true`        |
 
 **`response_body` and `client_response_body` are usually different values, on purpose.** `maskedUpstreamErrorBody` (`internal/proxy/errors.go`) replaces the provider's own error text with a short, pre-vetted message for essentially every 4xx/5xx response — unconditionally, not gated by credential type — specifically so provider internals are never echoed back to the client. `response_body` is what the provider actually said; `client_response_body` is what the client was told instead. They're identical only when a mid-stream error is detected *after* the response has already committed and streamed those exact bytes to the client live — at that point there's nothing left to mask in hindsight.
 
-**`request_body` is a separate, explicit opt-in — off by default.** A prompt is the user's own content, and routing it into a queryable analytics table is a materially different (and worse) privacy posture than shipping a provider's own error text. `kafka.error_bodies.store_raw_body` (default `false`) must be turned on deliberately for `request_body` to ever be non-empty; leaving it off (the default) preserves the original failure-response-only design exactly. If you need to reproduce a specific failure without turning this on, correlate `request_id` with your own request logging outside AIR under whatever consent/retention rules already govern that data.
+**`request_body` is a separate, explicit opt-in — off by default.** A prompt is the user's own content, and routing it into a queryable analytics table is a materially different (and worse) privacy posture than shipping a provider's own error text. `kafka.raw_bodies.store_raw_body` (default `false`) must be turned on deliberately for `request_body` to ever be non-empty; leaving it off (the default) preserves the original failure-response-only design exactly. If you need to reproduce a specific failure without turning this on, correlate `request_id` with your own request logging outside AIR under whatever consent/retention rules already govern that data.
 
-Two independent toggles control scope, both under `kafka.error_bodies`:
+Two independent toggles control scope, both under `kafka.raw_bodies`:
 
 | Toggle | Default | Effect when changed |
 | --- | --- | --- |
@@ -144,23 +144,23 @@ With both left at their defaults, behavior is unchanged from the original design
 This is deliberately **not** a field on `SpendEvent`/`air.spend_logs`:
 
 - Spend/billing rows are kept for a long time (retention measured in months/years) and are meant to stay light; raw bodies are bulky and only useful for a short debugging window, so they need their own, independently configurable ClickHouse retention (`TTL`) — a separate table gives you that for free, a shared one doesn't.
-- It's independently toggleable (`kafka.error_bodies.enabled`) precisely so it can be turned on temporarily while debugging without touching the always-on spend-log path, and turned back off (or left permanently off, the default) without affecting spend/billing at all.
+- It's independently toggleable (`kafka.raw_bodies.enabled`) precisely so it can be turned on temporarily while debugging without touching the always-on spend-log path, and turned back off (or left permanently off, the default) without affecting spend/billing at all.
 - By default it only fires for failures (`status == "failure"`) — no additional exposure of completion content for successful traffic beyond what already exists today, unless `store_only_errors` is explicitly disabled.
 
 **Join back to the spend event / `air.errors` on `(request_id, server_router_id)`, not `request_id` alone.** In a chained deployment (one AIR instance proxying to another as an upstream credential), `request_id` is derived from the upstream provider's own response id and is echoed back through every hop unchanged — two different hops logging the same logical request in the same millisecond can share a `request_id`. `server_router_id` (the hostname/pod of the specific instance that logged the row) disambiguates them; see the `ORDER BY` on `air.logs` in your ClickHouse schema for the same reasoning applied to the spend table.
 
-A reference join view for a ClickHouse deployment with the matching `air.errors`/`air.error_bodies` tables:
+A reference join view for a ClickHouse deployment with the matching `air.errors`/`air.raw_bodies` tables:
 
 ```sql
 CREATE VIEW air.errors_with_raw AS
 SELECT e.*, b.response_body, b.client_response_body, b.request_body
 FROM air.errors AS e
-LEFT JOIN air.error_bodies AS b
+LEFT JOIN air.raw_bodies AS b
     ON e.request_id = b.request_id AND e.server_router_id = b.server_router_id;
 ```
 
 ## Implementation notes
 
-The Kafka producer/event-builder lives in `internal/kafkalog` (manager, event, config, async logger). Both write-paths share one generic `Logger[T]` engine (`T` is a pointer type implementing `Keyed`, i.e. `*SpendEvent` or `*ErrorBodyEvent`) — same queue/batch/retry/DLQ/health-check machinery, just parameterized over the event type and pointed at a different topic (`Manager`/`DefaultManager` for spend events, `ErrorBodyManager`/`DefaultErrorBodyManager` for error bodies).
+The Kafka producer/event-builder lives in `internal/kafkalog` (manager, event, config, async logger). Both write-paths share one generic `Logger[T]` engine (`T` is a pointer type implementing `Keyed`, i.e. `*SpendEvent` or `*RawBodyEvent`) — same queue/batch/retry/DLQ/health-check machinery, just parameterized over the event type and pointed at a different topic (`Manager`/`DefaultManager` for spend events, `RawBodyManager`/`DefaultRawBodyManager` for error bodies).
 
-Both are wired into the existing spend-logging call site in `internal/proxy/proxy_log.go` (`logSpendToLiteLLMDB`), which already runs from every place a request's log is finalized — no changes to individual call sites are needed to add either Kafka publish. The error-body publish additionally requires `kafka.error_bodies.enabled`, plus either `status == "failure"` or `store_only_errors: false`.
+Both are wired into the existing spend-logging call site in `internal/proxy/proxy_log.go` (`logSpendToLiteLLMDB`), which already runs from every place a request's log is finalized — no changes to individual call sites are needed to add either Kafka publish. The raw-body publish additionally requires `kafka.raw_bodies.enabled`, plus either `status == "failure"` or `store_only_errors: false`.

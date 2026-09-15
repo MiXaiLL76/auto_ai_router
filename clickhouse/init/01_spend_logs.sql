@@ -227,10 +227,10 @@ TTL toDateTime(start_time) + INTERVAL 90 DAY;  -- пример; конкретн
 CREATE MATERIALIZED VIEW air.spend_logs_mv TO air.spend_logs AS
 SELECT * FROM air.spend_logs_kafka;
 
--- Separate, independently-toggleable write-path (kafka.error_bodies): raw
+-- Separate, independently-toggleable write-path (kafka.raw_bodies): raw
 -- provider response for a *failed* request only, on its own topic so
 -- retention/enablement can be managed independently of air.spend_logs (see
--- docs/litellm-integration/kafka_spend_log.md, "Error bodies").
+-- docs/litellm-integration/kafka_spend_log.md, "Raw bodies").
 --
 -- response_body / client_response_body are usually NOT the same value:
 -- maskedUpstreamErrorBody replaces the provider's own error text with a
@@ -239,12 +239,11 @@ SELECT * FROM air.spend_logs_kafka;
 -- the client. They're equal only when a mid-stream error was detected after
 -- the response had already committed -- nothing left to mask, the client
 -- already got those exact bytes live.
--- Renamed from air.error_bodies_kafka per MiXaiLL76's PR #207 review: this
--- staging table is no longer error-only once kafka.error_bodies.store_only_errors
--- is set to false (it can then carry a row for every request, error or not),
--- so "error_bodies" stopped being an accurate name for it. The downstream
--- storage table keeps its air.error_bodies name -- StoreOnlyErrors defaults
--- to true, so out of the box it still only ever holds failures.
+-- Named air.raw_bodies_kafka/air.raw_bodies, not air.error_bodies_kafka/
+-- air.error_bodies: neither table is error-only once
+-- kafka.raw_bodies.store_only_errors is set to false (they can then carry a
+-- row for every request, error or not) -- StoreOnlyErrors still defaults to
+-- true, so out of the box both only ever hold failures.
 CREATE TABLE air.raw_bodies_kafka
 (
     request_id String,
@@ -254,7 +253,7 @@ CREATE TABLE air.raw_bodies_kafka
     error_class Nullable(String),
     response_body Nullable(String),
     client_response_body Nullable(String),
-    -- Only populated when kafka.error_bodies.store_raw_body is enabled
+    -- Only populated when kafka.raw_bodies.store_raw_body is enabled
     -- (default false) -- the client's own request body (e.g. the prompt) is
     -- a materially bigger privacy commitment than a provider's error text,
     -- so it needs its own explicit opt-in. See MiXaiLL76/auto_ai_router#207.
@@ -263,8 +262,8 @@ CREATE TABLE air.raw_bodies_kafka
 ENGINE = Kafka
 SETTINGS
     kafka_broker_list = 'kafka:29092',
-    kafka_topic_list = 'error-bodies',
-    kafka_group_name = 'clickhouse_error_bodies',
+    kafka_topic_list = 'raw-bodies',
+    kafka_group_name = 'clickhouse_raw_bodies',
     kafka_format = 'JSONEachRow',
     date_time_input_format = 'best_effort',
     kafka_num_consumers = 2,
@@ -272,7 +271,7 @@ SETTINGS
 
 -- Plain MergeTree for the same single-node-docker-compose reason as
 -- air.spend_logs above; swap for ReplicatedMergeTree in a real cluster.
-CREATE TABLE air.error_bodies
+CREATE TABLE air.raw_bodies
 (
     request_id String,
     server_router_id String,
@@ -296,7 +295,7 @@ ORDER BY (start_time, request_id, server_router_id)
 -- actually needs, it has no bearing on air.spend_logs' own TTL.
 TTL toDateTime(start_time) + INTERVAL 14 DAY;  -- пример; на усмотрение DBA/CH-кластера
 
-CREATE MATERIALIZED VIEW air.error_bodies_mv TO air.error_bodies AS
+CREATE MATERIALIZED VIEW air.raw_bodies_mv TO air.raw_bodies AS
 SELECT * FROM air.raw_bodies_kafka;
 
 -- Join back to the matching air.spend_logs / air.errors row on
@@ -305,6 +304,6 @@ SELECT * FROM air.raw_bodies_kafka;
 CREATE VIEW air.spend_logs_with_raw_errors AS
 SELECT s.*, b.response_body, b.client_response_body, b.request_body
 FROM air.spend_logs AS s
-LEFT JOIN air.error_bodies AS b
+LEFT JOIN air.raw_bodies AS b
     ON s.request_id = b.request_id AND s.server_router_id = b.server_router_id
 WHERE s.status = 'failure';

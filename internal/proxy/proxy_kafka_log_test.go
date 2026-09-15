@@ -36,26 +36,26 @@ func (s *stubKafkaManager) Shutdown(context.Context) error {
 
 var _ kafkalog.Manager = (*stubKafkaManager)(nil)
 
-// stubKafkaErrorBodyManager mirrors stubKafkaManager for the separate
-// error-bodies write-path (kafkalog.ErrorBodyManager).
-type stubKafkaErrorBodyManager struct {
-	events  []*kafkalog.ErrorBodyEvent
+// stubKafkaRawBodyManager mirrors stubKafkaManager for the separate
+// raw-bodies write-path (kafkalog.RawBodyManager).
+type stubKafkaRawBodyManager struct {
+	events  []*kafkalog.RawBodyEvent
 	err     error
 	enabled bool
 }
 
-func (s *stubKafkaErrorBodyManager) LogErrorBody(event *kafkalog.ErrorBodyEvent) error {
+func (s *stubKafkaRawBodyManager) LogRawBody(event *kafkalog.RawBodyEvent) error {
 	s.events = append(s.events, event)
 	return s.err
 }
-func (s *stubKafkaErrorBodyManager) IsEnabled() bool       { return s.enabled }
-func (s *stubKafkaErrorBodyManager) IsHealthy() bool       { return true }
-func (s *stubKafkaErrorBodyManager) Stats() kafkalog.Stats { return kafkalog.Stats{} }
-func (s *stubKafkaErrorBodyManager) Shutdown(context.Context) error {
+func (s *stubKafkaRawBodyManager) IsEnabled() bool       { return s.enabled }
+func (s *stubKafkaRawBodyManager) IsHealthy() bool       { return true }
+func (s *stubKafkaRawBodyManager) Stats() kafkalog.Stats { return kafkalog.Stats{} }
+func (s *stubKafkaRawBodyManager) Shutdown(context.Context) error {
 	return nil
 }
 
-var _ kafkalog.ErrorBodyManager = (*stubKafkaErrorBodyManager)(nil)
+var _ kafkalog.RawBodyManager = (*stubKafkaRawBodyManager)(nil)
 
 func testLogCtx(t *testing.T) *RequestLogContext {
 	t.Helper()
@@ -259,14 +259,14 @@ func TestBuildKafkaSpendEvent_ErrorClassOnlyOnFailure(t *testing.T) {
 	assert.Empty(t, eventOK.ErrorClass)
 }
 
-// TestBuildErrorBodyEvent_MapsRawBodies checks that buildErrorBodyEvent (the
-// separate error-bodies write-path, see kafkalog.ErrorBodyEvent) carries the
+// TestBuildRawBodyEvent_MapsRawBodies checks that buildRawBodyEvent (the
+// separate raw-bodies write-path, see kafkalog.RawBodyEvent) carries the
 // raw response body through untouched, keyed on the same
 // request_id/server_router_id a matching air.errors row would have so the
 // two can be joined. RequestBody stays empty here since
-// errorBodyStoreRawBody defaults to false on a bare NewTestProxyBuilder --
-// see TestBuildErrorBodyEvent_RequestBody{Included,Omitted} for that toggle.
-func TestBuildErrorBodyEvent_MapsRawBodies(t *testing.T) {
+// rawBodyStoreRawBody defaults to false on a bare NewTestProxyBuilder --
+// see TestBuildRawBodyEvent_RequestBody{Included,Omitted} for that toggle.
+func TestBuildRawBodyEvent_MapsRawBodies(t *testing.T) {
 	prx := NewTestProxyBuilder().Build()
 	rawResponse := `{"error":{"message":"the model produced invalid content","type":"invalid_request_error"}}`
 
@@ -275,61 +275,61 @@ func TestBuildErrorBodyEvent_MapsRawBodies(t *testing.T) {
 	logCtx.ErrorBodyRaw = rawResponse
 	logCtx.RequestBodyRaw = "some prompt that should not leak out by default"
 
-	event := prx.buildErrorBodyEvent(logCtx)
+	event := prx.buildRawBodyEvent(logCtx)
 
 	assert.Equal(t, logCtx.spendRequestID(), event.RequestID)
 	assert.Equal(t, prx.routerID, event.ServerRouterID)
 	assert.Equal(t, "BadRequestError", event.ErrorClass)
 	assert.Equal(t, rawResponse, event.ResponseBody)
-	assert.Empty(t, event.RequestBody, "RequestBody must stay empty when errorBodyStoreRawBody is off, even if logCtx captured one")
+	assert.Empty(t, event.RequestBody, "RequestBody must stay empty when rawBodyStoreRawBody is off, even if logCtx captured one")
 }
 
-// TestBuildErrorBodyEvent_RequestBodyIncludedWhenStoreRawBodyEnabled verifies
-// the opt-in: kafka.error_bodies.store_raw_body=true is the only thing that
+// TestBuildRawBodyEvent_RequestBodyIncludedWhenStoreRawBodyEnabled verifies
+// the opt-in: kafka.raw_bodies.store_raw_body=true is the only thing that
 // lets RequestBody reach the event.
-func TestBuildErrorBodyEvent_RequestBodyIncludedWhenStoreRawBodyEnabled(t *testing.T) {
+func TestBuildRawBodyEvent_RequestBodyIncludedWhenStoreRawBodyEnabled(t *testing.T) {
 	prx := NewTestProxyBuilder().Build()
-	prx.errorBodyStoreRawBody = true
+	prx.rawBodyStoreRawBody = true
 
 	logCtx := testLogCtx(t)
 	logCtx.HTTPStatus = 400
 	logCtx.RequestBodyRaw = `{"messages":[{"role":"user","content":"hello"}]}`
 
-	event := prx.buildErrorBodyEvent(logCtx)
+	event := prx.buildRawBodyEvent(logCtx)
 	assert.Equal(t, logCtx.RequestBodyRaw, event.RequestBody)
 }
 
-// TestBuildErrorBodyEvent_NoErrorClassOnSuccess guards the store_only_errors
-// gating (proxy_log.go): once that toggle is disabled, buildErrorBodyEvent
+// TestBuildRawBodyEvent_NoErrorClassOnSuccess guards the store_only_errors
+// gating (proxy_log.go): once that toggle is disabled, buildRawBodyEvent
 // also runs for 2xx requests, and a 2xx status must not get a misleading
 // ErrorClass derived from mapHTTPStatusToErrorClass's default branch.
-func TestBuildErrorBodyEvent_NoErrorClassOnSuccess(t *testing.T) {
+func TestBuildRawBodyEvent_NoErrorClassOnSuccess(t *testing.T) {
 	prx := NewTestProxyBuilder().Build()
 
 	logCtx := testLogCtx(t)
 	logCtx.HTTPStatus = 200
 
-	event := prx.buildErrorBodyEvent(logCtx)
+	event := prx.buildRawBodyEvent(logCtx)
 	assert.Empty(t, event.ErrorClass)
 }
 
-// TestLogErrorBodyToKafka_OnlyCalledOnFailure guards the gate in
-// logSpendToLiteLLMDB: the error-bodies write-path must never publish for a
+// TestLogRawBodyToKafka_OnlyCalledOnFailure guards the gate in
+// logSpendToLiteLLMDB: the raw-bodies write-path must never publish for a
 // successful request, even when logCtx.ErrorBodyRaw is a non-empty leftover
 // from an earlier failed attempt on a retried request that ultimately
 // succeeded (mirrors TestBuildKafkaSpendEvent_ErrorClassOnlyOnFailure's
 // stale-retry concern, but at the call-site gate instead of inside the
-// builder, since ErrorBodyEvent has no "status" field of its own to gate on).
-func TestLogErrorBodyToKafka_OnlyCalledOnFailure(t *testing.T) {
-	stub := &stubKafkaErrorBodyManager{enabled: true}
+// builder, since RawBodyEvent has no "status" field of its own to gate on).
+func TestLogRawBodyToKafka_OnlyCalledOnFailure(t *testing.T) {
+	stub := &stubKafkaRawBodyManager{enabled: true}
 	prx := NewTestProxyBuilder().Build()
-	prx.errorBodyLog = stub
+	prx.rawBodyLog = stub
 
 	logCtx := testLogCtx(t)
 	logCtx.HTTPStatus = 400
 	logCtx.ErrorBodyRaw = `{"error":"bad request"}`
 
-	prx.logErrorBodyToKafka(logCtx) // simulates what logSpendToLiteLLMDB does when status == "failure"
+	prx.logRawBodyToKafka(logCtx) // simulates what logSpendToLiteLLMDB does when status == "failure"
 	require.Len(t, stub.events, 1)
 	assert.Equal(t, `{"error":"bad request"}`, stub.events[0].ResponseBody)
 }

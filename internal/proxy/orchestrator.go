@@ -690,8 +690,8 @@ func (p *Proxy) readRequestBodyAndSelectModel(
 		return nil, "", "", false, false
 	}
 	body = sanitized.Body
-	if p.errorBodyStoreRawBody {
-		// Opt-in only (kafka.error_bodies.store_raw_body, default false) --
+	if p.rawBodyStoreRawBody {
+		// Opt-in only (kafka.raw_bodies.store_raw_body, default false) --
 		// this is the client's own request body, e.g. the prompt, a
 		// materially bigger privacy commitment than the provider's own
 		// error text. Captured once here (post-sanitization, the body that

@@ -1107,24 +1107,24 @@ type KafkaConfig struct {
 	// trust store). Empty means the OS default trust store is used.
 	TLSCACert string `yaml:"tls_ca_cert,omitempty"`
 
-	// ErrorBodies configures the separate, independently-toggleable
+	// RawBodies configures the separate, independently-toggleable
 	// write-path that publishes raw request/response bodies for *failed*
-	// requests only (see kafkalog.ErrorBodyEvent). Off by default even when
+	// requests only (see kafkalog.RawBodyEvent). Off by default even when
 	// kafka.enabled is true -- it is a second, optional producer, not a
 	// field on the spend event, precisely so it can be enabled/disabled and
 	// retained independently of spend-log analytics.
-	ErrorBodies KafkaErrorBodiesConfig `yaml:"error_bodies,omitempty"`
+	RawBodies KafkaRawBodiesConfig `yaml:"raw_bodies,omitempty"`
 }
 
-// KafkaErrorBodiesConfig configures the raw-error-body Kafka write-path
-// (internal/kafkalog.ErrorBodyManager). Reuses the parent KafkaConfig's
+// KafkaRawBodiesConfig configures the raw-body Kafka write-path
+// (internal/kafkalog.RawBodyManager). Reuses the parent KafkaConfig's
 // brokers/TLS/SASL — only Enabled and Topic differ, since this is meant to be
 // the same Kafka cluster, a different topic with its own retention.
-type KafkaErrorBodiesConfig struct {
+type KafkaRawBodiesConfig struct {
 	Enabled bool `yaml:"enabled"`
 
-	// Topic is the Kafka topic raw error-body events are published to.
-	Topic string `yaml:"topic"` // default: "error-bodies"
+	// Topic is the Kafka topic raw raw-body events are published to.
+	Topic string `yaml:"topic"` // default: "raw-bodies"
 
 	// StoreRawBody additionally captures the client's own request body
 	// (e.g. the prompt) into the event's RequestBody field. Off by default:
@@ -1414,9 +1414,9 @@ func (l *LiteLLMDBConfig) UnmarshalYAML(value *yaml.Node) error {
 	return nil
 }
 
-// tempKafkaErrorBodiesConfig mirrors KafkaErrorBodiesConfig with string
+// tempKafkaRawBodiesConfig mirrors KafkaRawBodiesConfig with string
 // fields, the same env-variable-resolution convention as KafkaConfig itself.
-type tempKafkaErrorBodiesConfig struct {
+type tempKafkaRawBodiesConfig struct {
 	Enabled         string `yaml:"enabled"`
 	Topic           string `yaml:"topic"`
 	StoreRawBody    string `yaml:"store_raw_body"`
@@ -1426,20 +1426,20 @@ type tempKafkaErrorBodiesConfig struct {
 // UnmarshalYAML implements custom unmarshaling for KafkaConfig with env variable support.
 func (k *KafkaConfig) UnmarshalYAML(value *yaml.Node) error {
 	type tempConfig struct {
-		Enabled          string                     `yaml:"enabled"`
-		Brokers          []string                   `yaml:"brokers"`
-		Topic            string                     `yaml:"topic"`
-		ClientID         string                     `yaml:"client_id"`
-		LogQueueSize     string                     `yaml:"log_queue_size"`
-		LogBatchSize     string                     `yaml:"log_batch_size"`
-		LogFlushInterval string                     `yaml:"log_flush_interval"`
-		LogWorkers       string                     `yaml:"log_workers"`
-		TLSEnabled       string                     `yaml:"tls_enabled,omitempty"`
-		SASLMechanism    string                     `yaml:"sasl_mechanism,omitempty"`
-		SASLUsername     string                     `yaml:"sasl_username,omitempty"`
-		SASLPassword     string                     `yaml:"sasl_password,omitempty"`
-		TLSCACert        string                     `yaml:"tls_ca_cert,omitempty"`
-		ErrorBodies      tempKafkaErrorBodiesConfig `yaml:"error_bodies,omitempty"`
+		Enabled          string                   `yaml:"enabled"`
+		Brokers          []string                 `yaml:"brokers"`
+		Topic            string                   `yaml:"topic"`
+		ClientID         string                   `yaml:"client_id"`
+		LogQueueSize     string                   `yaml:"log_queue_size"`
+		LogBatchSize     string                   `yaml:"log_batch_size"`
+		LogFlushInterval string                   `yaml:"log_flush_interval"`
+		LogWorkers       string                   `yaml:"log_workers"`
+		TLSEnabled       string                   `yaml:"tls_enabled,omitempty"`
+		SASLMechanism    string                   `yaml:"sasl_mechanism,omitempty"`
+		SASLUsername     string                   `yaml:"sasl_username,omitempty"`
+		SASLPassword     string                   `yaml:"sasl_password,omitempty"`
+		TLSCACert        string                   `yaml:"tls_ca_cert,omitempty"`
+		RawBodies        tempKafkaRawBodiesConfig `yaml:"raw_bodies,omitempty"`
 	}
 
 	var temp tempConfig
@@ -1491,14 +1491,14 @@ func (k *KafkaConfig) UnmarshalYAML(value *yaml.Node) error {
 	k.SASLPassword = resolveEnvString(temp.SASLPassword)
 	k.TLSCACert = resolveEnvString(temp.TLSCACert)
 
-	if k.ErrorBodies.Enabled, err = parseField(temp.ErrorBodies.Enabled, false, strconv.ParseBool, "kafka.error_bodies.enabled"); err != nil {
+	if k.RawBodies.Enabled, err = parseField(temp.RawBodies.Enabled, false, strconv.ParseBool, "kafka.raw_bodies.enabled"); err != nil {
 		return err
 	}
-	k.ErrorBodies.Topic = resolveEnvString(temp.ErrorBodies.Topic)
-	if k.ErrorBodies.StoreRawBody, err = parseField(temp.ErrorBodies.StoreRawBody, false, strconv.ParseBool, "kafka.error_bodies.store_raw_body"); err != nil {
+	k.RawBodies.Topic = resolveEnvString(temp.RawBodies.Topic)
+	if k.RawBodies.StoreRawBody, err = parseField(temp.RawBodies.StoreRawBody, false, strconv.ParseBool, "kafka.raw_bodies.store_raw_body"); err != nil {
 		return err
 	}
-	if k.ErrorBodies.StoreOnlyErrors, err = parseField(temp.ErrorBodies.StoreOnlyErrors, true, strconv.ParseBool, "kafka.error_bodies.store_only_errors"); err != nil {
+	if k.RawBodies.StoreOnlyErrors, err = parseField(temp.RawBodies.StoreOnlyErrors, true, strconv.ParseBool, "kafka.raw_bodies.store_only_errors"); err != nil {
 		return err
 	}
 	return nil
@@ -1741,9 +1741,9 @@ func defaultKafkaConfig() KafkaConfig {
 		LogBatchSize:     100,
 		LogFlushInterval: 5 * time.Second,
 		LogWorkers:       4,
-		ErrorBodies: KafkaErrorBodiesConfig{
+		RawBodies: KafkaRawBodiesConfig{
 			Enabled:         false,
-			Topic:           "error-bodies",
+			Topic:           "raw-bodies",
 			StoreRawBody:    false,
 			StoreOnlyErrors: true,
 		},
@@ -2133,15 +2133,15 @@ func (c *Config) Validate() error {
 		}
 	}
 
-	if c.Kafka.ErrorBodies.Enabled {
+	if c.Kafka.RawBodies.Enabled {
 		if !c.Kafka.Enabled {
-			return fmt.Errorf("kafka.error_bodies.enabled requires kafka.enabled=true")
+			return fmt.Errorf("kafka.raw_bodies.enabled requires kafka.enabled=true")
 		}
-		if c.Kafka.ErrorBodies.Topic == "" {
-			return fmt.Errorf("kafka.error_bodies.topic is required when kafka.error_bodies is enabled")
+		if c.Kafka.RawBodies.Topic == "" {
+			return fmt.Errorf("kafka.raw_bodies.topic is required when kafka.raw_bodies is enabled")
 		}
-		if c.Kafka.ErrorBodies.Topic == c.Kafka.Topic {
-			return fmt.Errorf("kafka.error_bodies.topic must differ from kafka.topic")
+		if c.Kafka.RawBodies.Topic == c.Kafka.Topic {
+			return fmt.Errorf("kafka.raw_bodies.topic must differ from kafka.topic")
 		}
 	}
 
