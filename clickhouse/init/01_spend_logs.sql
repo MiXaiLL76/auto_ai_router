@@ -239,7 +239,13 @@ SELECT * FROM air.spend_logs_kafka;
 -- the client. They're equal only when a mid-stream error was detected after
 -- the response had already committed -- nothing left to mask, the client
 -- already got those exact bytes live.
-CREATE TABLE air.error_bodies_kafka
+-- Renamed from air.error_bodies_kafka per MiXaiLL76's PR #207 review: this
+-- staging table is no longer error-only once kafka.error_bodies.store_only_errors
+-- is set to false (it can then carry a row for every request, error or not),
+-- so "error_bodies" stopped being an accurate name for it. The downstream
+-- storage table keeps its air.error_bodies name -- StoreOnlyErrors defaults
+-- to true, so out of the box it still only ever holds failures.
+CREATE TABLE air.raw_bodies_kafka
 (
     request_id String,
     server_router_id String,
@@ -247,7 +253,12 @@ CREATE TABLE air.error_bodies_kafka
     http_status UInt16,
     error_class Nullable(String),
     response_body Nullable(String),
-    client_response_body Nullable(String)
+    client_response_body Nullable(String),
+    -- Only populated when kafka.error_bodies.store_raw_body is enabled
+    -- (default false) -- the client's own request body (e.g. the prompt) is
+    -- a materially bigger privacy commitment than a provider's error text,
+    -- so it needs its own explicit opt-in. See MiXaiLL76/auto_ai_router#207.
+    request_body Nullable(String)
 )
 ENGINE = Kafka
 SETTINGS
@@ -269,7 +280,8 @@ CREATE TABLE air.error_bodies
     http_status UInt16,
     error_class Nullable(String),
     response_body Nullable(String),
-    client_response_body Nullable(String)
+    client_response_body Nullable(String),
+    request_body Nullable(String)
 )
 ENGINE = MergeTree
 PARTITION BY toYYYYMM(start_time)
@@ -285,13 +297,13 @@ ORDER BY (start_time, request_id, server_router_id)
 TTL toDateTime(start_time) + INTERVAL 14 DAY;  -- пример; на усмотрение DBA/CH-кластера
 
 CREATE MATERIALIZED VIEW air.error_bodies_mv TO air.error_bodies AS
-SELECT * FROM air.error_bodies_kafka;
+SELECT * FROM air.raw_bodies_kafka;
 
 -- Join back to the matching air.spend_logs / air.errors row on
 -- (request_id, server_router_id), not request_id alone, for the same
 -- collision reason as the ORDER BY above.
 CREATE VIEW air.spend_logs_with_raw_errors AS
-SELECT s.*, b.response_body, b.client_response_body
+SELECT s.*, b.response_body, b.client_response_body, b.request_body
 FROM air.spend_logs AS s
 LEFT JOIN air.error_bodies AS b
     ON s.request_id = b.request_id AND s.server_router_id = b.server_router_id

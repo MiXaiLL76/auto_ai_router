@@ -356,10 +356,14 @@ func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
 		}
 	}
 
-	// Raw request/response bodies are supplementary debugging data for
-	// failures only -- never published for a successful request, and never
-	// for the proxy/chain-audit traffic excluded above either.
-	if errorBodyLogEnabled && !logCtx.IsProxyRequest && status == "failure" {
+	// Raw request/response bodies are supplementary debugging data, never
+	// published for the proxy/chain-audit traffic excluded above. By default
+	// (StoreOnlyErrors=true) they're also failures-only; an operator can set
+	// kafka.error_bodies.store_only_errors=false to capture every request,
+	// which only makes sense once StoreRawBody is also on (see
+	// buildErrorBodyEvent) -- otherwise a success row would carry nothing
+	// but identifying fields.
+	if errorBodyLogEnabled && !logCtx.IsProxyRequest && (status == "failure" || !p.errorBodyStoreOnlyErrors) {
 		p.logErrorBodyToKafka(logCtx)
 	}
 

@@ -185,17 +185,25 @@ func (p *Proxy) logErrorBodyToKafka(logCtx *RequestLogContext) {
 }
 
 // buildErrorBodyEvent maps a RequestLogContext onto kafkalog.ErrorBodyEvent.
-// Caller (logSpendToLiteLLMDB) only calls this when status == "failure", but
-// the function doesn't re-check that itself -- it trusts the caller's gate,
-// same as buildKafkaSpendEvent trusts its status parameter for ErrorClass.
+// Caller (logSpendToLiteLLMDB) calls this for every failure, and additionally
+// for successes when StoreOnlyErrors is disabled -- so, unlike
+// buildKafkaSpendEvent, this function must check the status itself rather
+// than trust the caller's gate, otherwise a success row would get a
+// misleading ErrorClass derived from its 2xx HTTPStatus.
 func (p *Proxy) buildErrorBodyEvent(logCtx *RequestLogContext) *kafkalog.ErrorBodyEvent {
-	return &kafkalog.ErrorBodyEvent{
+	event := &kafkalog.ErrorBodyEvent{
 		RequestID:          logCtx.spendRequestID(),
 		ServerRouterID:     p.routerID,
 		StartTime:          logCtx.StartTime,
 		HTTPStatus:         logCtx.HTTPStatus,
-		ErrorClass:         mapHTTPStatusToErrorClass(logCtx.HTTPStatus),
 		ResponseBody:       logCtx.ErrorBodyRaw,
 		ClientResponseBody: logCtx.ClientResponseBody,
 	}
+	if logCtx.HTTPStatus >= 400 {
+		event.ErrorClass = mapHTTPStatusToErrorClass(logCtx.HTTPStatus)
+	}
+	if p.errorBodyStoreRawBody {
+		event.RequestBody = logCtx.RequestBodyRaw
+	}
+	return event
 }

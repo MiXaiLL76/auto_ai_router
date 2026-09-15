@@ -74,14 +74,29 @@ func TestErrorBodyEvent_JSONMarshal_OmitsEmptyOptionalFields(t *testing.T) {
 	assert.False(t, hasResponseBody)
 }
 
-// TestErrorBodyEvent_HasNoRequestBodyField locks in a deliberate design
-// choice: this event only ever carries the provider's response, never the
-// client's request (the user's prompt) -- see the type's doc comment.
-func TestErrorBodyEvent_HasNoRequestBodyField(t *testing.T) {
+// TestErrorBodyEvent_RequestBodyOmittedWhenEmpty locks in that RequestBody
+// (only ever populated when KafkaErrorBodiesConfig.StoreRawBody is
+// explicitly enabled) doesn't appear in the JSON at all when the capture
+// site left it unset, same omitempty behavior as ResponseBody.
+func TestErrorBodyEvent_RequestBodyOmittedWhenEmpty(t *testing.T) {
 	e := ErrorBodyEvent{}
 	data, err := json.Marshal(&e)
 	require.NoError(t, err)
 	assert.NotContains(t, string(data), "request_body")
+}
+
+func TestErrorBodyEvent_JSONMarshal_IncludesRequestBodyWhenSet(t *testing.T) {
+	e := &ErrorBodyEvent{
+		RequestID:   "req-123",
+		RequestBody: `{"messages":[{"role":"user","content":"hello"}]}`,
+	}
+
+	data, err := json.Marshal(e)
+	require.NoError(t, err)
+
+	var raw map[string]interface{}
+	require.NoError(t, json.Unmarshal(data, &raw))
+	assert.Equal(t, e.RequestBody, raw["request_body"])
 }
 
 func TestErrorBodyEvent_JSONMarshal_IncludesBodiesWhenSet(t *testing.T) {

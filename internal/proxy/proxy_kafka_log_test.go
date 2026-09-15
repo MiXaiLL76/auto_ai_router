@@ -263,9 +263,9 @@ func TestBuildKafkaSpendEvent_ErrorClassOnlyOnFailure(t *testing.T) {
 // separate error-bodies write-path, see kafkalog.ErrorBodyEvent) carries the
 // raw response body through untouched, keyed on the same
 // request_id/server_router_id a matching air.errors row would have so the
-// two can be joined. Deliberately does not carry any client request body
-// (prompt) -- that's the user's own content, not something to route into an
-// analytics table as a side effect of debugging provider errors.
+// two can be joined. RequestBody stays empty here since
+// errorBodyStoreRawBody defaults to false on a bare NewTestProxyBuilder --
+// see TestBuildErrorBodyEvent_RequestBody{Included,Omitted} for that toggle.
 func TestBuildErrorBodyEvent_MapsRawBodies(t *testing.T) {
 	prx := NewTestProxyBuilder().Build()
 	rawResponse := `{"error":{"message":"the model produced invalid content","type":"invalid_request_error"}}`
@@ -273,6 +273,7 @@ func TestBuildErrorBodyEvent_MapsRawBodies(t *testing.T) {
 	logCtx := testLogCtx(t)
 	logCtx.HTTPStatus = 400
 	logCtx.ErrorBodyRaw = rawResponse
+	logCtx.RequestBodyRaw = "some prompt that should not leak out by default"
 
 	event := prx.buildErrorBodyEvent(logCtx)
 
@@ -280,6 +281,36 @@ func TestBuildErrorBodyEvent_MapsRawBodies(t *testing.T) {
 	assert.Equal(t, prx.routerID, event.ServerRouterID)
 	assert.Equal(t, "BadRequestError", event.ErrorClass)
 	assert.Equal(t, rawResponse, event.ResponseBody)
+	assert.Empty(t, event.RequestBody, "RequestBody must stay empty when errorBodyStoreRawBody is off, even if logCtx captured one")
+}
+
+// TestBuildErrorBodyEvent_RequestBodyIncludedWhenStoreRawBodyEnabled verifies
+// the opt-in: kafka.error_bodies.store_raw_body=true is the only thing that
+// lets RequestBody reach the event.
+func TestBuildErrorBodyEvent_RequestBodyIncludedWhenStoreRawBodyEnabled(t *testing.T) {
+	prx := NewTestProxyBuilder().Build()
+	prx.errorBodyStoreRawBody = true
+
+	logCtx := testLogCtx(t)
+	logCtx.HTTPStatus = 400
+	logCtx.RequestBodyRaw = `{"messages":[{"role":"user","content":"hello"}]}`
+
+	event := prx.buildErrorBodyEvent(logCtx)
+	assert.Equal(t, logCtx.RequestBodyRaw, event.RequestBody)
+}
+
+// TestBuildErrorBodyEvent_NoErrorClassOnSuccess guards the store_only_errors
+// gating (proxy_log.go): once that toggle is disabled, buildErrorBodyEvent
+// also runs for 2xx requests, and a 2xx status must not get a misleading
+// ErrorClass derived from mapHTTPStatusToErrorClass's default branch.
+func TestBuildErrorBodyEvent_NoErrorClassOnSuccess(t *testing.T) {
+	prx := NewTestProxyBuilder().Build()
+
+	logCtx := testLogCtx(t)
+	logCtx.HTTPStatus = 200
+
+	event := prx.buildErrorBodyEvent(logCtx)
+	assert.Empty(t, event.ErrorClass)
 }
 
 // TestLogErrorBodyToKafka_OnlyCalledOnFailure guards the gate in

@@ -262,6 +262,8 @@ error_bodies:
 	a.NoError(yaml.Unmarshal([]byte(yamlDoc), &kafkaCfg))
 	a.True(kafkaCfg.ErrorBodies.Enabled)
 	a.Equal("error-bodies", kafkaCfg.ErrorBodies.Topic)
+	a.False(kafkaCfg.ErrorBodies.StoreRawBody, "store_raw_body must default to false when omitted")
+	a.True(kafkaCfg.ErrorBodies.StoreOnlyErrors, "store_only_errors must default to true when omitted")
 }
 
 func TestKafkaConfig_UnmarshalYAML_ErrorBodiesDefaultsToDisabled(t *testing.T) {
@@ -276,6 +278,27 @@ topic: air.spend_logs
 	a.NoError(yaml.Unmarshal([]byte(yamlDoc), &kafkaCfg))
 	a.False(kafkaCfg.ErrorBodies.Enabled)
 	a.Empty(kafkaCfg.ErrorBodies.Topic)
+	a.False(kafkaCfg.ErrorBodies.StoreRawBody)
+	a.True(kafkaCfg.ErrorBodies.StoreOnlyErrors)
+}
+
+func TestKafkaConfig_UnmarshalYAML_ErrorBodiesStoreToggles(t *testing.T) {
+	yamlDoc := `
+enabled: true
+brokers:
+  - "kafka:9092"
+topic: air.spend_logs
+error_bodies:
+  enabled: "true"
+  topic: error-bodies
+  store_raw_body: "true"
+  store_only_errors: "false"
+`
+	var kafkaCfg KafkaConfig
+	a := assert.New(t)
+	a.NoError(yaml.Unmarshal([]byte(yamlDoc), &kafkaCfg))
+	a.True(kafkaCfg.ErrorBodies.StoreRawBody)
+	a.False(kafkaCfg.ErrorBodies.StoreOnlyErrors)
 }
 
 func TestConfig_Validate_KafkaOnlyModeRequiresKafka(t *testing.T) {

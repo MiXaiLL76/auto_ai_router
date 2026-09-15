@@ -261,6 +261,7 @@ type RequestLogContext struct {
 	ErrorMsg              string                   // Error message (added to metadata on failure)
 	ErrorBodyRaw          string                   // Untruncated upstream provider error body, captured BEFORE any client-facing masking (maskedUpstreamErrorBody/clientResponseBodyForCredential) is applied. Only ever set on failure paths. Feeds kafkalog.ErrorBodyEvent.ResponseBody, not SpendEvent.
 	ClientResponseBody    string                   // What the client actually received for this failure, AFTER masking (identical to ErrorBodyRaw when nothing was masked, e.g. mid-stream errors detected after the response already committed -- see markProxyProviderStreamError's clientSaw param). Feeds kafkalog.ErrorBodyEvent.ClientResponseBody.
+	RequestBodyRaw        string                   // Untruncated client request body, captured only when kafka.error_bodies.store_raw_body is enabled (see readRequestBodyAndSelectModel). Feeds kafkalog.ErrorBodyEvent.RequestBody. Empty whenever the toggle is off, so it never holds prompt content by default.
 	TokenUsage            *converter.TokenUsage    // Token usage with detailed breakdown
 	ModelPrice            *models.ModelPrice       // Price resolved before the provider request
 	PriceModelID          string                   // Model identifier used for price lookup
@@ -361,6 +362,8 @@ type Config struct {
 	LiteLLMDB                  litellmdb.Manager          // LiteLLM database integration (optional)
 	KafkaLog                   kafkalog.Manager           // Kafka spend-log publishing (optional, analytics write-path)
 	ErrorBodyLog               kafkalog.ErrorBodyManager  // Kafka raw-error-body publishing (optional, separate topic, failure-only)
+	ErrorBodyStoreRawBody      bool                       // Mirrors KafkaErrorBodiesConfig.StoreRawBody
+	ErrorBodyStoreOnlyErrors   bool                       // Mirrors KafkaErrorBodiesConfig.StoreOnlyErrors
 	HealthChecker              HealthChecker              // Optional: cached DB health status (updated by health monitor)
 	PriceRegistry              *models.ModelPriceRegistry // Model pricing information (optional)
 	OrganizationPolicies       *models.OrganizationPolicyRegistry
@@ -401,6 +404,8 @@ type Proxy struct {
 	LiteLLMDB                        litellmdb.Manager          // LiteLLM database integration
 	kafkaLog                         kafkalog.Manager           // Kafka spend-log publishing (optional, analytics write-path)
 	errorBodyLog                     kafkalog.ErrorBodyManager  // Kafka raw-error-body publishing (optional, separate topic, failure-only)
+	errorBodyStoreRawBody            bool                       // Mirrors KafkaErrorBodiesConfig.StoreRawBody
+	errorBodyStoreOnlyErrors         bool                       // Mirrors KafkaErrorBodiesConfig.StoreOnlyErrors
 	healthChecker                    HealthChecker              // Cached DB health status (optional)
 	priceRegistry                    *models.ModelPriceRegistry // Model pricing information (optional)
 	organizationPolicies             *models.OrganizationPolicyRegistry
@@ -482,6 +487,8 @@ func New(cfg *Config) *Proxy {
 		LiteLLMDB:                        cfg.LiteLLMDB,
 		kafkaLog:                         cfg.KafkaLog,
 		errorBodyLog:                     cfg.ErrorBodyLog,
+		errorBodyStoreRawBody:            cfg.ErrorBodyStoreRawBody,
+		errorBodyStoreOnlyErrors:         cfg.ErrorBodyStoreOnlyErrors,
 		healthChecker:                    cfg.HealthChecker,
 		priceRegistry:                    cfg.PriceRegistry,
 		organizationPolicies:             cfg.OrganizationPolicies,

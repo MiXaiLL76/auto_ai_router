@@ -24,11 +24,13 @@ kafka:
   sasl_password: "os.environ/KAFKA_SASL_PASSWORD"
 
   # Separate, independently-toggleable write-path: raw request/response
-  # bodies for *failed* requests only, published to their own topic. See
-  # "Error bodies" below for why this isn't just a field on the spend event.
+  # bodies, published to their own topic. See "Error bodies" below for why
+  # this isn't just a field on the spend event.
   error_bodies:
     enabled: os.environ/KAFKA_ERROR_BODIES_ENABLED   # default: false
     topic: "error-bodies"
+    store_raw_body: os.environ/KAFKA_ERROR_BODIES_STORE_RAW_BODY       # default: false
+    store_only_errors: os.environ/KAFKA_ERROR_BODIES_STORE_ONLY_ERRORS # default: true
 
 litellm_db:
   enabled: true
@@ -113,27 +115,37 @@ Capturing and storing request/response bodies for *every* request (success inclu
 
 ## Error bodies (separate write-path)
 
-The raw **provider response** body for a *failed* request is published separately from the spend event, to its own Kafka topic (`kafka.error_bodies`, default topic `error-bodies`) as a flat `kafkalog.ErrorBodyEvent`:
+The raw **provider response** body for a failed request is published separately from the spend event, to its own Kafka topic (`kafka.error_bodies`, default topic `error-bodies`, staged in ClickHouse as `air.raw_bodies_kafka`/`air.raw_bodies_read`) as a flat `kafkalog.ErrorBodyEvent`:
 
 | Field              | Type              | Description                                                                                                         |
 | ------------------ | ----------------- | --------------------------------------------------------------------------------------------------------------------- |
 | `request_id`       | string            | Same value as the matching `SpendEvent.request_id` / `air.errors.request_id`; also the Kafka message key             |
 | `server_router_id` | string            | Same value as the matching spend event. Join on `(request_id, server_router_id)`, not `request_id` alone — see below |
 | `start_time`       | timestamp         | Request start                                                                                                          |
-| `http_status`      | int               | HTTP status of the failure                                                                                             |
-| `error_class`      | string, omitempty | Same classification as `SpendEvent.error_class`                                                                       |
+| `http_status`      | int               | HTTP status of the request (only ≥400 when `error_class`/`response_body`/`client_response_body` are populated)        |
+| `error_class`      | string, omitempty | Same classification as `SpendEvent.error_class`. Empty on success rows (see `store_only_errors` below)                |
 | `response_body`    | string, omitempty | Raw upstream provider error body, capped at 16 KiB (uncapped relative to `error_message`'s 512 bytes)                 |
 | `client_response_body` | string, omitempty | What the router actually sent back to the client for this failure, capped the same way as `response_body`         |
+| `request_body`     | string, omitempty | The client's own request body (e.g. the prompt). Only populated when `kafka.error_bodies.store_raw_body: true`        |
 
 **`response_body` and `client_response_body` are usually different values, on purpose.** `maskedUpstreamErrorBody` (`internal/proxy/errors.go`) replaces the provider's own error text with a short, pre-vetted message for essentially every 4xx/5xx response — unconditionally, not gated by credential type — specifically so provider internals are never echoed back to the client. `response_body` is what the provider actually said; `client_response_body` is what the client was told instead. They're identical only when a mid-stream error is detected *after* the response has already committed and streamed those exact bytes to the client live — at that point there's nothing left to mask in hindsight.
 
-**Deliberately no request-body field.** An earlier version of this design also shipped the client's request body (the user's prompt) alongside the response, to make failures easier to reproduce. That was cut: a prompt is the user's own content, and routing it into a queryable analytics table — even a short-retention, failure-only one — is a materially different (and worse) privacy posture than shipping a provider's own error text, which is not something an error-debugging feature should introduce as a side effect. If you need to reproduce a specific failure, correlate `request_id` with your own request logging outside AIR, or capture it there under whatever consent/retention rules already govern that data.
+**`request_body` is a separate, explicit opt-in — off by default.** A prompt is the user's own content, and routing it into a queryable analytics table is a materially different (and worse) privacy posture than shipping a provider's own error text. `kafka.error_bodies.store_raw_body` (default `false`) must be turned on deliberately for `request_body` to ever be non-empty; leaving it off (the default) preserves the original failure-response-only design exactly. If you need to reproduce a specific failure without turning this on, correlate `request_id` with your own request logging outside AIR under whatever consent/retention rules already govern that data.
+
+Two independent toggles control scope, both under `kafka.error_bodies`:
+
+| Toggle | Default | Effect when changed |
+| --- | --- | --- |
+| `store_raw_body` | `false` | `true` additionally captures the client's request body into `request_body` |
+| `store_only_errors` | `true` | `false` publishes an event for *every* request, not just failures — `error_class`/`response_body`/`client_response_body` stay empty on success rows; mainly useful once `store_raw_body` is also on and the goal is capturing requests generally, not just failures |
+
+With both left at their defaults, behavior is unchanged from the original design: failure-only, provider/client response bodies only, no request content.
 
 This is deliberately **not** a field on `SpendEvent`/`air.spend_logs`:
 
 - Spend/billing rows are kept for a long time (retention measured in months/years) and are meant to stay light; raw bodies are bulky and only useful for a short debugging window, so they need their own, independently configurable ClickHouse retention (`TTL`) — a separate table gives you that for free, a shared one doesn't.
 - It's independently toggleable (`kafka.error_bodies.enabled`) precisely so it can be turned on temporarily while debugging without touching the always-on spend-log path, and turned back off (or left permanently off, the default) without affecting spend/billing at all.
-- It only fires for failures (`status == "failure"`) — no additional exposure of completion content for successful traffic beyond what already exists today.
+- By default it only fires for failures (`status == "failure"`) — no additional exposure of completion content for successful traffic beyond what already exists today, unless `store_only_errors` is explicitly disabled.
 
 **Join back to the spend event / `air.errors` on `(request_id, server_router_id)`, not `request_id` alone.** In a chained deployment (one AIR instance proxying to another as an upstream credential), `request_id` is derived from the upstream provider's own response id and is echoed back through every hop unchanged — two different hops logging the same logical request in the same millisecond can share a `request_id`. `server_router_id` (the hostname/pod of the specific instance that logged the row) disambiguates them; see the `ORDER BY` on `air.logs` in your ClickHouse schema for the same reasoning applied to the spend table.
 
@@ -141,7 +153,7 @@ A reference join view for a ClickHouse deployment with the matching `air.errors`
 
 ```sql
 CREATE VIEW air.errors_with_raw AS
-SELECT e.*, b.response_body, b.client_response_body
+SELECT e.*, b.response_body, b.client_response_body, b.request_body
 FROM air.errors AS e
 LEFT JOIN air.error_bodies AS b
     ON e.request_id = b.request_id AND e.server_router_id = b.server_router_id;
@@ -151,4 +163,4 @@ LEFT JOIN air.error_bodies AS b
 
 The Kafka producer/event-builder lives in `internal/kafkalog` (manager, event, config, async logger). Both write-paths share one generic `Logger[T]` engine (`T` is a pointer type implementing `Keyed`, i.e. `*SpendEvent` or `*ErrorBodyEvent`) — same queue/batch/retry/DLQ/health-check machinery, just parameterized over the event type and pointed at a different topic (`Manager`/`DefaultManager` for spend events, `ErrorBodyManager`/`DefaultErrorBodyManager` for error bodies).
 
-Both are wired into the existing spend-logging call site in `internal/proxy/proxy_log.go` (`logSpendToLiteLLMDB`), which already runs from every place a request's log is finalized — no changes to individual call sites are needed to add either Kafka publish. The error-body publish additionally requires `status == "failure"` at that call site, on top of `kafka.error_bodies.enabled`.
+Both are wired into the existing spend-logging call site in `internal/proxy/proxy_log.go` (`logSpendToLiteLLMDB`), which already runs from every place a request's log is finalized — no changes to individual call sites are needed to add either Kafka publish. The error-body publish additionally requires `kafka.error_bodies.enabled`, plus either `status == "failure"` or `store_only_errors: false`.

@@ -244,6 +244,8 @@ func main() {
 		LiteLLMDB:                  litellmDBManager,
 		KafkaLog:                   kafkaLogManager,
 		ErrorBodyLog:               errorBodyLogManager,
+		ErrorBodyStoreRawBody:      cfg.Kafka.ErrorBodies.StoreRawBody,
+		ErrorBodyStoreOnlyErrors:   cfg.Kafka.ErrorBodies.StoreOnlyErrors,
 		HealthChecker:              healthChecker,
 		PriceRegistry:              priceRegistry,
 		OrganizationPolicies:       organizationPolicies,

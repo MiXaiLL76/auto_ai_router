@@ -125,14 +125,14 @@ type ErrorBodyEvent struct {
 	// maxErrorBodyRawBytes. Same capture sites as SpendEvent.ErrorMessage
 	// used to populate before this event type existed, just uncapped at 512
 	// bytes.
-	//
-	// Deliberately no RequestBody field: the client-facing request body is
-	// the user's prompt, and shipping that into a queryable analytics table
-	// is a meaningfully different (and worse) privacy posture than shipping
-	// a provider's own error text -- not something to introduce as a side
-	// effect of an error-debugging feature. This event only ever carries the
-	// provider's response.
 	ResponseBody string `json:"response_body,omitempty"`
+	// RequestBody is the client's own request body (e.g. the prompt),
+	// capped at the same limit as ResponseBody. Only ever populated when
+	// KafkaErrorBodiesConfig.StoreRawBody is explicitly enabled -- off by
+	// default, since this is a materially bigger privacy commitment than
+	// shipping a provider's own error text and must be an explicit,
+	// separate opt-in, not a side effect of turning ErrorBodies on.
+	RequestBody string `json:"request_body,omitempty"`
 	// ClientResponseBody is what the router actually sent back to the client
 	// for this failure -- which is usually NOT the same as ResponseBody.
 	// maskedUpstreamErrorBody replaces the provider's own error text with a

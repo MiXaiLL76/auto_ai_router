@@ -332,6 +332,45 @@ func TestLogSpendToLiteLLMDB_ChargesImagesWithoutProviderUsage(t *testing.T) {
 	assert.InDelta(t, 0.08, dbStub.loggedEntries[0].Spend, 1e-12)
 }
 
+// TestLogSpendToLiteLLMDB_ErrorBodyStoreOnlyErrorsGate covers the two new
+// kafka.error_bodies toggles end to end through the real call site (not a
+// direct buildErrorBodyEvent call): with the default StoreOnlyErrors=true a
+// successful request must not publish an error-body event, but flipping it
+// to false must publish one for every request regardless of outcome.
+func TestLogSpendToLiteLLMDB_ErrorBodyStoreOnlyErrorsGate(t *testing.T) {
+	for _, tt := range []struct {
+		name            string
+		storeOnlyErrors bool
+		wantPublished   bool
+	}{
+		{name: "default (errors only) skips a successful request", storeOnlyErrors: true, wantPublished: false},
+		{name: "store_only_errors=false publishes a successful request too", storeOnlyErrors: false, wantPublished: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			prx := NewTestProxyBuilder().Build()
+			stub := &stubKafkaErrorBodyManager{enabled: true}
+			prx.errorBodyLog = stub
+			prx.errorBodyStoreOnlyErrors = tt.storeOnlyErrors
+			prx.LiteLLMDB = &stubLiteLLMManager{}
+			setTestModelPrice(prx, "gpt-4o-mini", &routermodels.ModelPrice{
+				InputCostPerToken: 0.000001, OutputCostPerToken: 0.000002,
+			})
+
+			logCtx := testLogCtx(t)
+			logCtx.HTTPStatus = http.StatusOK
+
+			require.NoError(t, prx.logSpendToLiteLLMDB(logCtx))
+
+			if tt.wantPublished {
+				require.Len(t, stub.events, 1)
+				assert.Empty(t, stub.events[0].ErrorClass, "a 2xx row must not get a misleading ErrorClass")
+			} else {
+				assert.Empty(t, stub.events)
+			}
+		})
+	}
+}
+
 func TestLogSpendToLiteLLMDB_DoesNotChargeFailedImageRequest(t *testing.T) {
 	prx := NewTestProxyBuilder().Build()
 	dbStub := &stubLiteLLMManager{}

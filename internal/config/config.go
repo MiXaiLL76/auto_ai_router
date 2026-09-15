@@ -1125,6 +1125,21 @@ type KafkaErrorBodiesConfig struct {
 
 	// Topic is the Kafka topic raw error-body events are published to.
 	Topic string `yaml:"topic"` // default: "error-bodies"
+
+	// StoreRawBody additionally captures the client's own request body
+	// (e.g. the prompt) into the event's RequestBody field. Off by default:
+	// a provider's error text is one thing to ship off-box, the user's own
+	// request content is a materially bigger privacy commitment, so this
+	// needs an explicit, separate opt-in rather than riding along with
+	// Enabled.
+	StoreRawBody bool `yaml:"store_raw_body"` // default: false
+
+	// StoreOnlyErrors restricts publishing to failed requests (status ==
+	// "failure"), matching the feature's original scope. Set to false to
+	// publish an event for every request regardless of outcome -- useful
+	// once StoreRawBody is on and the goal is capturing request bodies
+	// generally, not just alongside errors.
+	StoreOnlyErrors bool `yaml:"store_only_errors"` // default: true
 }
 
 // OTELConfig holds OpenTelemetry export configuration for logs, traces and metrics.
@@ -1402,8 +1417,10 @@ func (l *LiteLLMDBConfig) UnmarshalYAML(value *yaml.Node) error {
 // tempKafkaErrorBodiesConfig mirrors KafkaErrorBodiesConfig with string
 // fields, the same env-variable-resolution convention as KafkaConfig itself.
 type tempKafkaErrorBodiesConfig struct {
-	Enabled string `yaml:"enabled"`
-	Topic   string `yaml:"topic"`
+	Enabled         string `yaml:"enabled"`
+	Topic           string `yaml:"topic"`
+	StoreRawBody    string `yaml:"store_raw_body"`
+	StoreOnlyErrors string `yaml:"store_only_errors"`
 }
 
 // UnmarshalYAML implements custom unmarshaling for KafkaConfig with env variable support.
@@ -1478,6 +1495,12 @@ func (k *KafkaConfig) UnmarshalYAML(value *yaml.Node) error {
 		return err
 	}
 	k.ErrorBodies.Topic = resolveEnvString(temp.ErrorBodies.Topic)
+	if k.ErrorBodies.StoreRawBody, err = parseField(temp.ErrorBodies.StoreRawBody, false, strconv.ParseBool, "kafka.error_bodies.store_raw_body"); err != nil {
+		return err
+	}
+	if k.ErrorBodies.StoreOnlyErrors, err = parseField(temp.ErrorBodies.StoreOnlyErrors, true, strconv.ParseBool, "kafka.error_bodies.store_only_errors"); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -1719,8 +1742,10 @@ func defaultKafkaConfig() KafkaConfig {
 		LogFlushInterval: 5 * time.Second,
 		LogWorkers:       4,
 		ErrorBodies: KafkaErrorBodiesConfig{
-			Enabled: false,
-			Topic:   "error-bodies",
+			Enabled:         false,
+			Topic:           "error-bodies",
+			StoreRawBody:    false,
+			StoreOnlyErrors: true,
 		},
 	}
 }
