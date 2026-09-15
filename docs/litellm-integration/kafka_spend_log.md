@@ -123,6 +123,9 @@ The raw **provider response** body for a *failed* request is published separatel
 | `http_status`      | int               | HTTP status of the failure                                                                                             |
 | `error_class`      | string, omitempty | Same classification as `SpendEvent.error_class`                                                                       |
 | `response_body`    | string, omitempty | Raw upstream provider error body, capped at 16 KiB (uncapped relative to `error_message`'s 512 bytes)                 |
+| `client_response_body` | string, omitempty | What the router actually sent back to the client for this failure, capped the same way as `response_body`         |
+
+**`response_body` and `client_response_body` are usually different values, on purpose.** `maskedUpstreamErrorBody` (`internal/proxy/errors.go`) replaces the provider's own error text with a short, pre-vetted message for essentially every 4xx/5xx response — unconditionally, not gated by credential type — specifically so provider internals are never echoed back to the client. `response_body` is what the provider actually said; `client_response_body` is what the client was told instead. They're identical only when a mid-stream error is detected *after* the response has already committed and streamed those exact bytes to the client live — at that point there's nothing left to mask in hindsight.
 
 **Deliberately no request-body field.** An earlier version of this design also shipped the client's request body (the user's prompt) alongside the response, to make failures easier to reproduce. That was cut: a prompt is the user's own content, and routing it into a queryable analytics table — even a short-retention, failure-only one — is a materially different (and worse) privacy posture than shipping a provider's own error text, which is not something an error-debugging feature should introduce as a side effect. If you need to reproduce a specific failure, correlate `request_id` with your own request logging outside AIR, or capture it there under whatever consent/retention rules already govern that data.
 
@@ -138,7 +141,7 @@ A reference join view for a ClickHouse deployment with the matching `air.errors`
 
 ```sql
 CREATE VIEW air.errors_with_raw AS
-SELECT e.*, b.response_body
+SELECT e.*, b.response_body, b.client_response_body
 FROM air.errors AS e
 LEFT JOIN air.error_bodies AS b
     ON e.request_id = b.request_id AND e.server_router_id = b.server_router_id;

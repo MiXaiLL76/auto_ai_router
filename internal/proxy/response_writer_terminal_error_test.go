@@ -306,3 +306,41 @@ func stringChunks(chunks []string) [][]byte {
 	}
 	return result
 }
+
+// TestMarkProxyProviderStreamError_ClientSaw checks that ClientResponseBody
+// tracks whatever clientSaw the caller passes, independent of ErrorBodyRaw
+// (the raw provider payload) -- the two callers pass genuinely different
+// values: writeEarlyStreamError (before the response commits) passes the
+// masked replacement body that's about to be written instead of payload,
+// while resolveCapturedProviderStreamError (after commit) passes payload
+// itself back, since those exact bytes already reached the client live and
+// nothing can be masked after the fact.
+func TestMarkProxyProviderStreamError_ClientSaw(t *testing.T) {
+	t.Run("before commit: client saw the masked body, not the provider's", func(t *testing.T) {
+		logCtx := &RequestLogContext{}
+		rawPayload := `{"error":{"message":"provider internals leaked here","type":"server_error"}}`
+		maskedBody := `{"error":{"message":"Request failed","type":"server_error","param":null,"code":"api_error"}}`
+
+		markProxyProviderStreamError(logCtx, http.StatusInternalServerError, rawPayload, maskedBody)
+
+		assert.Equal(t, rawPayload, logCtx.ErrorBodyRaw)
+		assert.Equal(t, maskedBody, logCtx.ClientResponseBody)
+		assert.NotEqual(t, logCtx.ErrorBodyRaw, logCtx.ClientResponseBody)
+	})
+
+	t.Run("after commit: client already saw the raw payload, nothing to mask", func(t *testing.T) {
+		logCtx := &RequestLogContext{}
+		rawPayload := `{"error":{"message":"already streamed to the client"}}`
+
+		markProxyProviderStreamError(logCtx, http.StatusTooManyRequests, rawPayload, rawPayload)
+
+		assert.Equal(t, rawPayload, logCtx.ErrorBodyRaw)
+		assert.Equal(t, logCtx.ErrorBodyRaw, logCtx.ClientResponseBody)
+	})
+
+	t.Run("empty payload is a no-op, including for ClientResponseBody", func(t *testing.T) {
+		logCtx := &RequestLogContext{ClientResponseBody: "pre-existing"}
+		markProxyProviderStreamError(logCtx, http.StatusBadGateway, "", "some client body")
+		assert.Equal(t, "pre-existing", logCtx.ClientResponseBody, "no-op guard must not be bypassed just because clientSaw is non-empty")
+	})
+}

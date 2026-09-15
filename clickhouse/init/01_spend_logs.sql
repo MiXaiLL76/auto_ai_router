@@ -228,9 +228,17 @@ CREATE MATERIALIZED VIEW air.spend_logs_mv TO air.spend_logs AS
 SELECT * FROM air.spend_logs_kafka;
 
 -- Separate, independently-toggleable write-path (kafka.error_bodies): raw
--- request/response bodies for a *failed* request only, on their own topic so
+-- provider response for a *failed* request only, on its own topic so
 -- retention/enablement can be managed independently of air.spend_logs (see
 -- docs/litellm-integration/kafka_spend_log.md, "Error bodies").
+--
+-- response_body / client_response_body are usually NOT the same value:
+-- maskedUpstreamErrorBody replaces the provider's own error text with a
+-- short, pre-vetted message for essentially every 4xx/5xx (unconditionally,
+-- not credential-specific), so provider internals are never echoed back to
+-- the client. They're equal only when a mid-stream error was detected after
+-- the response had already committed -- nothing left to mask, the client
+-- already got those exact bytes live.
 CREATE TABLE air.error_bodies_kafka
 (
     request_id String,
@@ -238,7 +246,8 @@ CREATE TABLE air.error_bodies_kafka
     start_time DateTime64(3),
     http_status UInt16,
     error_class Nullable(String),
-    response_body Nullable(String)
+    response_body Nullable(String),
+    client_response_body Nullable(String)
 )
 ENGINE = Kafka
 SETTINGS
@@ -259,7 +268,8 @@ CREATE TABLE air.error_bodies
     start_time DateTime64(3),
     http_status UInt16,
     error_class Nullable(String),
-    response_body Nullable(String)
+    response_body Nullable(String),
+    client_response_body Nullable(String)
 )
 ENGINE = MergeTree
 PARTITION BY toYYYYMM(start_time)
@@ -281,7 +291,7 @@ SELECT * FROM air.error_bodies_kafka;
 -- (request_id, server_router_id), not request_id alone, for the same
 -- collision reason as the ORDER BY above.
 CREATE VIEW air.spend_logs_with_raw_errors AS
-SELECT s.*, b.response_body
+SELECT s.*, b.response_body, b.client_response_body
 FROM air.spend_logs AS s
 LEFT JOIN air.error_bodies AS b
     ON s.request_id = b.request_id AND s.server_router_id = b.server_router_id

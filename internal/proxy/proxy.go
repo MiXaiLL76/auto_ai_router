@@ -259,7 +259,8 @@ type RequestLogContext struct {
 	Status                string                   // "success" or "failure"
 	HTTPStatus            int                      // HTTP response status code
 	ErrorMsg              string                   // Error message (added to metadata on failure)
-	ErrorBodyRaw          string                   // Untruncated upstream provider error body; only ever set on failure paths, never for a successful response. Feeds kafkalog.ErrorBodyEvent.ResponseBody (see buildErrorBodyEvent), not SpendEvent.
+	ErrorBodyRaw          string                   // Untruncated upstream provider error body, captured BEFORE any client-facing masking (maskedUpstreamErrorBody/clientResponseBodyForCredential) is applied. Only ever set on failure paths. Feeds kafkalog.ErrorBodyEvent.ResponseBody, not SpendEvent.
+	ClientResponseBody    string                   // What the client actually received for this failure, AFTER masking (identical to ErrorBodyRaw when nothing was masked, e.g. mid-stream errors detected after the response already committed -- see markProxyProviderStreamError's clientSaw param). Feeds kafkalog.ErrorBodyEvent.ClientResponseBody.
 	TokenUsage            *converter.TokenUsage    // Token usage with detailed breakdown
 	ModelPrice            *models.ModelPrice       // Price resolved before the provider request
 	PriceModelID          string                   // Model identifier used for price lookup
@@ -2218,6 +2219,11 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 			// air.error_bodies.response_body came back NULL for it despite the
 			// other 4 capture sites all being covered.
 			logCtx.ErrorBodyRaw = extractErrorBodyRaw(rawErrorBody)
+			// clientBody is already the post-masking body computed above by
+			// clientResponseBodyForCredential (line ~2154) -- this is the exact
+			// bytes actually written to the client via resp.Body below, not a
+			// second, possibly-drifting recomputation.
+			logCtx.ClientResponseBody = extractErrorBodyRaw(clientBody)
 			// Final error returned to the client — single unified ERROR record
 			// with everything needed for debugging.
 			p.logUpstreamError(r.Context(), "Upstream request completed with error status", resp.StatusCode, cred, modelID, rawErrorBody,

@@ -133,6 +133,19 @@ type ErrorBodyEvent struct {
 	// effect of an error-debugging feature. This event only ever carries the
 	// provider's response.
 	ResponseBody string `json:"response_body,omitempty"`
+	// ClientResponseBody is what the router actually sent back to the client
+	// for this failure -- which is usually NOT the same as ResponseBody.
+	// maskedUpstreamErrorBody replaces the provider's own error text with a
+	// short, pre-vetted message for essentially every 4xx/5xx response
+	// (unconditionally, not just for specific credential types -- see
+	// internal/proxy/errors.go), specifically so provider internals are never
+	// echoed back to the client. This field lets an operator see both sides:
+	// what the provider actually said (ResponseBody) and what the client was
+	// told instead (ClientResponseBody). The two are identical only when a
+	// mid-stream error was detected after the response had already committed
+	// (nothing left to mask at that point -- the client already received
+	// those exact bytes as they streamed through).
+	ClientResponseBody string `json:"client_response_body,omitempty"`
 }
 
 // Key returns the Kafka record key (request_id), matching SpendEvent's

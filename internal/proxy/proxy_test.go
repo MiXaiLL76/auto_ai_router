@@ -409,6 +409,13 @@ func TestProxyRequest_SingleCredentialNoFallback_PublishesRawErrorBody(t *testin
 	require.Equal(t, http.StatusTooManyRequests, w.Code)
 	require.Len(t, stub.events, 1, "the real upstream error must publish an error-body event")
 	assert.Equal(t, rawBody, stub.events[0].ResponseBody)
+	// maskedUpstreamErrorBody replaces the provider's own text unconditionally
+	// for any 4xx/5xx (see internal/proxy/errors.go) -- ClientResponseBody
+	// must reflect what the client actually got, which is NOT rawBody, and
+	// must match w.Body byte-for-byte (the actual client response).
+	assert.NotEqual(t, rawBody, stub.events[0].ClientResponseBody, "the client-facing body must be the masked one, not the raw provider text")
+	assert.JSONEq(t, w.Body.String(), stub.events[0].ClientResponseBody)
+	assert.Contains(t, stub.events[0].ClientResponseBody, "Rate limit exceeded")
 }
 
 func TestProxyRequest_Streaming(t *testing.T) {

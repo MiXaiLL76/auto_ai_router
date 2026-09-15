@@ -190,11 +190,12 @@ func (p *Proxy) logErrorBodyToKafka(logCtx *RequestLogContext) {
 // same as buildKafkaSpendEvent trusts its status parameter for ErrorClass.
 func (p *Proxy) buildErrorBodyEvent(logCtx *RequestLogContext) *kafkalog.ErrorBodyEvent {
 	return &kafkalog.ErrorBodyEvent{
-		RequestID:      logCtx.spendRequestID(),
-		ServerRouterID: p.routerID,
-		StartTime:      logCtx.StartTime,
-		HTTPStatus:     logCtx.HTTPStatus,
-		ErrorClass:     mapHTTPStatusToErrorClass(logCtx.HTTPStatus),
-		ResponseBody:   logCtx.ErrorBodyRaw,
+		RequestID:          logCtx.spendRequestID(),
+		ServerRouterID:     p.routerID,
+		StartTime:          logCtx.StartTime,
+		HTTPStatus:         logCtx.HTTPStatus,
+		ErrorClass:         mapHTTPStatusToErrorClass(logCtx.HTTPStatus),
+		ResponseBody:       logCtx.ErrorBodyRaw,
+		ClientResponseBody: logCtx.ClientResponseBody,
 	}
 }

@@ -86,9 +86,10 @@ func TestErrorBodyEvent_HasNoRequestBodyField(t *testing.T) {
 
 func TestErrorBodyEvent_JSONMarshal_IncludesBodiesWhenSet(t *testing.T) {
 	e := &ErrorBodyEvent{
-		RequestID:    "req-123",
-		ErrorClass:   "RateLimitError",
-		ResponseBody: `{"error":{"message":"rate limited"}}`,
+		RequestID:          "req-123",
+		ErrorClass:         "RateLimitError",
+		ResponseBody:       `{"error":{"message":"rate limited"}}`,
+		ClientResponseBody: `{"error":{"message":"Rate limit exceeded","type":"rate_limit_error","param":null,"code":"rate_limit_error"}}`,
 	}
 
 	data, err := json.Marshal(e)
@@ -99,6 +100,8 @@ func TestErrorBodyEvent_JSONMarshal_IncludesBodiesWhenSet(t *testing.T) {
 
 	assert.Equal(t, "RateLimitError", raw["error_class"])
 	assert.Equal(t, `{"error":{"message":"rate limited"}}`, raw["response_body"])
+	assert.Equal(t, e.ClientResponseBody, raw["client_response_body"])
+	assert.NotEqual(t, raw["response_body"], raw["client_response_body"], "the whole point of this field is that it usually differs from response_body")
 }
 
 func TestSpendEvent_JSONMarshal_IncludesTTFTWhenSet(t *testing.T) {
