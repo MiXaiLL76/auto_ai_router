@@ -249,6 +249,10 @@ CREATE TABLE air.raw_bodies_kafka
     request_id String,
     server_router_id String,
     start_time DateTime64(3),
+    -- When this router finished processing the request -- for a failure
+    -- row, effectively when the error was finalized/detected. Same value
+    -- as the matching air.spend_logs.end_time for this request.
+    end_time DateTime64(3),
     http_status UInt16,
     error_class Nullable(String),
     response_body Nullable(String),
@@ -276,6 +280,7 @@ CREATE TABLE air.raw_bodies
     request_id String,
     server_router_id String,
     start_time DateTime64(3),
+    end_time DateTime64(3),
     http_status UInt16,
     error_class Nullable(String),
     response_body Nullable(String),

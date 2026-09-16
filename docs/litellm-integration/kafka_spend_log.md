@@ -121,7 +121,8 @@ The raw **provider response** body for a failed request is published separately 
 | ------------------ | ----------------- | --------------------------------------------------------------------------------------------------------------------- |
 | `request_id`       | string            | Same value as the matching `SpendEvent.request_id` / `air.errors.request_id`; also the Kafka message key             |
 | `server_router_id` | string            | Same value as the matching spend event. Join on `(request_id, server_router_id)`, not `request_id` alone — see below |
-| `start_time`       | timestamp         | Request start                                                                                                          |
+| `start_time`       | timestamp         | Same value as the matching `SpendEvent.start_time` — when this router started processing the request                 |
+| `end_time`         | timestamp         | Same value as the matching `SpendEvent.end_time` — when this router finished processing it; for a failure row, effectively when the error was finalized/detected |
 | `http_status`      | int               | HTTP status of the request. Usually ≥400 on a failure row, but **not always** — a mid-stream SSE error (provider returns HTTP 200, then sends an error event inside the stream) is a genuine failure with a 2xx `http_status`         |
 | `error_class`      | string, omitempty | Same classification as `SpendEvent.error_class`, gated on the same canonical success/failure outcome (not on `http_status` directly, for the 2xx-mid-stream-failure reason above). Empty on success rows (see `store_only_errors` below) |
 | `response_body`    | string, omitempty | Raw upstream provider error body, capped at 16 KiB (uncapped relative to `error_message`'s 512 bytes)                 |

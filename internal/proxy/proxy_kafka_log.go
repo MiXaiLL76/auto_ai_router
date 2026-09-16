@@ -174,8 +174,8 @@ func (p *Proxy) buildKafkaSpendEvent(
 // affects request processing, failures are logged and swallowed rather than
 // surfaced to the caller -- unlike the spend event, there's no Postgres row
 // to flag a fallback reason on for this one, it's purely supplementary.
-func (p *Proxy) logRawBodyToKafka(logCtx *RequestLogContext, status string) {
-	event := p.buildRawBodyEvent(logCtx, status)
+func (p *Proxy) logRawBodyToKafka(logCtx *RequestLogContext, status string, endTime time.Time) {
+	event := p.buildRawBodyEvent(logCtx, status, endTime)
 	if err := p.rawBodyLog.LogRawBody(event); err != nil {
 		p.logger.WarnContext(logCtx.Context(), "Failed to queue Kafka raw-body event",
 			"error", err,
@@ -198,11 +198,12 @@ func (p *Proxy) logRawBodyToKafka(logCtx *RequestLogContext, status string) {
 // populated and the row being published -- same bug this function's
 // original "don't trust a 2xx HTTPStatus" comment was trying to avoid, just
 // missed the case where a 2xx HTTPStatus and a genuine failure coexist.
-func (p *Proxy) buildRawBodyEvent(logCtx *RequestLogContext, status string) *kafkalog.RawBodyEvent {
+func (p *Proxy) buildRawBodyEvent(logCtx *RequestLogContext, status string, endTime time.Time) *kafkalog.RawBodyEvent {
 	event := &kafkalog.RawBodyEvent{
 		RequestID:          logCtx.spendRequestID(),
 		ServerRouterID:     p.routerID,
 		StartTime:          logCtx.StartTime,
+		EndTime:            endTime,
 		HTTPStatus:         logCtx.HTTPStatus,
 		ResponseBody:       logCtx.ErrorBodyRaw,
 		ClientResponseBody: logCtx.ClientResponseBody,

@@ -52,10 +52,13 @@ func TestRawBodyEvent_Key(t *testing.T) {
 }
 
 func TestRawBodyEvent_JSONMarshal_OmitsEmptyOptionalFields(t *testing.T) {
+	startTime := time.Date(2026, 7, 15, 10, 0, 0, 0, time.UTC)
+	endTime := time.Date(2026, 7, 15, 10, 0, 0, 250, time.UTC)
 	e := &RawBodyEvent{
 		RequestID:      "req-123",
 		ServerRouterID: "air-ru02-abc123",
-		StartTime:      time.Date(2026, 7, 15, 10, 0, 0, 0, time.UTC),
+		StartTime:      startTime,
+		EndTime:        endTime,
 		HTTPStatus:     429,
 	}
 
@@ -67,6 +70,8 @@ func TestRawBodyEvent_JSONMarshal_OmitsEmptyOptionalFields(t *testing.T) {
 
 	assert.Equal(t, "req-123", raw["request_id"])
 	assert.Equal(t, "air-ru02-abc123", raw["server_router_id"])
+	assert.Contains(t, raw, "start_time")
+	assert.Contains(t, raw, "end_time", "EndTime has no omitempty -- always present, same as SpendEvent.EndTime")
 	assert.Equal(t, float64(429), raw["http_status"])
 	_, hasErrorClass := raw["error_class"]
 	assert.False(t, hasErrorClass)
