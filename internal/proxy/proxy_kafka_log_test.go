@@ -274,11 +274,14 @@ func TestBuildRawBodyEvent_MapsRawBodies(t *testing.T) {
 	logCtx.HTTPStatus = 400
 	logCtx.ErrorBodyRaw = rawResponse
 	logCtx.RequestBodyRaw = "some prompt that should not leak out by default"
+	endTime := logCtx.StartTime.Add(250 * time.Millisecond)
 
-	event := prx.buildRawBodyEvent(logCtx, "failure")
+	event := prx.buildRawBodyEvent(logCtx, "failure", endTime)
 
 	assert.Equal(t, logCtx.spendRequestID(), event.RequestID)
 	assert.Equal(t, prx.routerID, event.ServerRouterID)
+	assert.Equal(t, logCtx.StartTime, event.StartTime)
+	assert.Equal(t, endTime, event.EndTime, "EndTime must be the same value passed in, matching SpendEvent.EndTime for the same request")
 	assert.Equal(t, "BadRequestError", event.ErrorClass)
 	assert.Equal(t, rawResponse, event.ResponseBody)
 	assert.Empty(t, event.RequestBody, "RequestBody must stay empty when rawBodyStoreRawBody is off, even if logCtx captured one")
@@ -295,7 +298,7 @@ func TestBuildRawBodyEvent_RequestBodyIncludedWhenStoreRawBodyEnabled(t *testing
 	logCtx.HTTPStatus = 400
 	logCtx.RequestBodyRaw = `{"messages":[{"role":"user","content":"hello"}]}`
 
-	event := prx.buildRawBodyEvent(logCtx, "failure")
+	event := prx.buildRawBodyEvent(logCtx, "failure", logCtx.StartTime)
 	assert.Equal(t, logCtx.RequestBodyRaw, event.RequestBody)
 }
 
@@ -309,7 +312,7 @@ func TestBuildRawBodyEvent_NoErrorClassOnSuccess(t *testing.T) {
 	logCtx := testLogCtx(t)
 	logCtx.HTTPStatus = 200
 
-	event := prx.buildRawBodyEvent(logCtx, "success")
+	event := prx.buildRawBodyEvent(logCtx, "success", logCtx.StartTime)
 	assert.Empty(t, event.ErrorClass)
 }
 
@@ -331,7 +334,7 @@ func TestBuildRawBodyEvent_ErrorClassSetOnMidStreamFailureWithHTTP2xx(t *testing
 	logCtx.ErrorBodyRaw = `{"error":{"message":"content filtered"}}`
 	logCtx.ClientResponseBody = logCtx.ErrorBodyRaw
 
-	event := prx.buildRawBodyEvent(logCtx, "failure")
+	event := prx.buildRawBodyEvent(logCtx, "failure", logCtx.StartTime)
 	assert.NotEmpty(t, event.ErrorClass, "a canonical-failure row must get a non-empty ErrorClass even with a 2xx HTTPStatus")
 }
 
@@ -351,7 +354,7 @@ func TestLogRawBodyToKafka_OnlyCalledOnFailure(t *testing.T) {
 	logCtx.HTTPStatus = 400
 	logCtx.ErrorBodyRaw = `{"error":"bad request"}`
 
-	prx.logRawBodyToKafka(logCtx, "failure") // simulates what logSpendToLiteLLMDB does when status == "failure"
+	prx.logRawBodyToKafka(logCtx, "failure", logCtx.StartTime) // simulates what logSpendToLiteLLMDB does when status == "failure"
 	require.Len(t, stub.events, 1)
 	assert.Equal(t, `{"error":"bad request"}`, stub.events[0].ResponseBody)
 }

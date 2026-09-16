@@ -119,8 +119,15 @@ type RawBodyEvent struct {
 	RequestID      string    `json:"request_id"`
 	ServerRouterID string    `json:"server_router_id"`
 	StartTime      time.Time `json:"start_time"`
-	HTTPStatus     int       `json:"http_status"`
-	ErrorClass     string    `json:"error_class,omitempty"`
+	// EndTime is when this router finished processing the request -- for a
+	// failure row, effectively when the error was finalized/detected (exact
+	// moment for a direct 4xx/5xx response, end of stream processing for a
+	// mid-stream SSE error). Same value as the matching SpendEvent.EndTime
+	// for this request, computed at the same call site (logSpendToLiteLLMDB),
+	// not independently -- so the two never drift for one logical request.
+	EndTime    time.Time `json:"end_time"`
+	HTTPStatus int       `json:"http_status"`
+	ErrorClass string    `json:"error_class,omitempty"`
 	// ResponseBody is the raw upstream provider error body, capped at
 	// maxErrorBodyRawBytes. Same capture sites as SpendEvent.ErrorMessage
 	// used to populate before this event type existed, just uncapped at 512
