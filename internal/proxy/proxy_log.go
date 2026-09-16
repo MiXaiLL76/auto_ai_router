@@ -364,7 +364,7 @@ func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
 	// buildRawBodyEvent) -- otherwise a success row would carry nothing
 	// but identifying fields.
 	if rawBodyLogEnabled && !logCtx.IsProxyRequest && (status == "failure" || !p.rawBodyStoreOnlyErrors) {
-		p.logRawBodyToKafka(logCtx)
+		p.logRawBodyToKafka(logCtx, status)
 	}
 
 	// Build metadata with usage, cost breakdown, requester IP, and optional error

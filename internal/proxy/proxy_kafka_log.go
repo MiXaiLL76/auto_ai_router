@@ -174,8 +174,8 @@ func (p *Proxy) buildKafkaSpendEvent(
 // affects request processing, failures are logged and swallowed rather than
 // surfaced to the caller -- unlike the spend event, there's no Postgres row
 // to flag a fallback reason on for this one, it's purely supplementary.
-func (p *Proxy) logRawBodyToKafka(logCtx *RequestLogContext) {
-	event := p.buildRawBodyEvent(logCtx)
+func (p *Proxy) logRawBodyToKafka(logCtx *RequestLogContext, status string) {
+	event := p.buildRawBodyEvent(logCtx, status)
 	if err := p.rawBodyLog.LogRawBody(event); err != nil {
 		p.logger.WarnContext(logCtx.Context(), "Failed to queue Kafka raw-body event",
 			"error", err,
@@ -187,10 +187,18 @@ func (p *Proxy) logRawBodyToKafka(logCtx *RequestLogContext) {
 // buildRawBodyEvent maps a RequestLogContext onto kafkalog.RawBodyEvent.
 // Caller (logSpendToLiteLLMDB) calls this for every failure, and additionally
 // for successes when StoreOnlyErrors is disabled -- so, unlike
-// buildKafkaSpendEvent, this function must check the status itself rather
-// than trust the caller's gate, otherwise a success row would get a
-// misleading ErrorClass derived from its 2xx HTTPStatus.
-func (p *Proxy) buildRawBodyEvent(logCtx *RequestLogContext) *kafkalog.RawBodyEvent {
+// buildKafkaSpendEvent, this function must check status itself rather than
+// trust the caller's gate. Takes the same canonical status string
+// buildKafkaSpendEvent uses (not a re-derived one), and gates ErrorClass on
+// it rather than on a raw HTTPStatus >= 400 check: a mid-stream SSE error
+// (provider returns HTTP 2xx, then sends an error event inside the stream --
+// see stream.go's finalizeStreamingLog) sets Status = "failure" without
+// touching HTTPStatus, which stays 2xx. Gating on HTTPStatus alone left that
+// row's ErrorClass empty despite ResponseBody/ClientResponseBody being
+// populated and the row being published -- same bug this function's
+// original "don't trust a 2xx HTTPStatus" comment was trying to avoid, just
+// missed the case where a 2xx HTTPStatus and a genuine failure coexist.
+func (p *Proxy) buildRawBodyEvent(logCtx *RequestLogContext, status string) *kafkalog.RawBodyEvent {
 	event := &kafkalog.RawBodyEvent{
 		RequestID:          logCtx.spendRequestID(),
 		ServerRouterID:     p.routerID,
@@ -199,7 +207,7 @@ func (p *Proxy) buildRawBodyEvent(logCtx *RequestLogContext) *kafkalog.RawBodyEv
 		ResponseBody:       logCtx.ErrorBodyRaw,
 		ClientResponseBody: logCtx.ClientResponseBody,
 	}
-	if logCtx.HTTPStatus >= 400 {
+	if status == "failure" {
 		event.ErrorClass = mapHTTPStatusToErrorClass(logCtx.HTTPStatus)
 	}
 	if p.rawBodyStoreRawBody {

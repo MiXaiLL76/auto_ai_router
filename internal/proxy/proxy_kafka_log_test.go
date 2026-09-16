@@ -275,7 +275,7 @@ func TestBuildRawBodyEvent_MapsRawBodies(t *testing.T) {
 	logCtx.ErrorBodyRaw = rawResponse
 	logCtx.RequestBodyRaw = "some prompt that should not leak out by default"
 
-	event := prx.buildRawBodyEvent(logCtx)
+	event := prx.buildRawBodyEvent(logCtx, "failure")
 
 	assert.Equal(t, logCtx.spendRequestID(), event.RequestID)
 	assert.Equal(t, prx.routerID, event.ServerRouterID)
@@ -295,22 +295,44 @@ func TestBuildRawBodyEvent_RequestBodyIncludedWhenStoreRawBodyEnabled(t *testing
 	logCtx.HTTPStatus = 400
 	logCtx.RequestBodyRaw = `{"messages":[{"role":"user","content":"hello"}]}`
 
-	event := prx.buildRawBodyEvent(logCtx)
+	event := prx.buildRawBodyEvent(logCtx, "failure")
 	assert.Equal(t, logCtx.RequestBodyRaw, event.RequestBody)
 }
 
 // TestBuildRawBodyEvent_NoErrorClassOnSuccess guards the store_only_errors
 // gating (proxy_log.go): once that toggle is disabled, buildRawBodyEvent
-// also runs for 2xx requests, and a 2xx status must not get a misleading
-// ErrorClass derived from mapHTTPStatusToErrorClass's default branch.
+// also runs for successful (2xx) requests, and a "success" status must not
+// get a misleading ErrorClass derived from mapHTTPStatusToErrorClass.
 func TestBuildRawBodyEvent_NoErrorClassOnSuccess(t *testing.T) {
 	prx := NewTestProxyBuilder().Build()
 
 	logCtx := testLogCtx(t)
 	logCtx.HTTPStatus = 200
 
-	event := prx.buildRawBodyEvent(logCtx)
+	event := prx.buildRawBodyEvent(logCtx, "success")
 	assert.Empty(t, event.ErrorClass)
+}
+
+// TestBuildRawBodyEvent_ErrorClassSetOnMidStreamFailureWithHTTP2xx guards a
+// real bug: a mid-stream SSE error (provider returns HTTP 200, then sends an
+// error event inside the stream -- see stream.go's finalizeStreamingLog)
+// sets logCtx.Status = "failure" without touching HTTPStatus, which stays
+// 2xx. Gating ErrorClass on a raw "HTTPStatus >= 400" check (instead of the
+// canonical status, like buildKafkaSpendEvent does) left this row's
+// ErrorClass empty despite ResponseBody/ClientResponseBody being populated
+// and the row actually getting published -- so air.raw_bodies.error_class
+// silently disagreed with air.spend_logs.error_class for the exact same
+// request.
+func TestBuildRawBodyEvent_ErrorClassSetOnMidStreamFailureWithHTTP2xx(t *testing.T) {
+	prx := NewTestProxyBuilder().Build()
+
+	logCtx := testLogCtx(t)
+	logCtx.HTTPStatus = 200 // never updated by the mid-stream-error branch in stream.go
+	logCtx.ErrorBodyRaw = `{"error":{"message":"content filtered"}}`
+	logCtx.ClientResponseBody = logCtx.ErrorBodyRaw
+
+	event := prx.buildRawBodyEvent(logCtx, "failure")
+	assert.NotEmpty(t, event.ErrorClass, "a canonical-failure row must get a non-empty ErrorClass even with a 2xx HTTPStatus")
 }
 
 // TestLogRawBodyToKafka_OnlyCalledOnFailure guards the gate in
@@ -329,7 +351,7 @@ func TestLogRawBodyToKafka_OnlyCalledOnFailure(t *testing.T) {
 	logCtx.HTTPStatus = 400
 	logCtx.ErrorBodyRaw = `{"error":"bad request"}`
 
-	prx.logRawBodyToKafka(logCtx) // simulates what logSpendToLiteLLMDB does when status == "failure"
+	prx.logRawBodyToKafka(logCtx, "failure") // simulates what logSpendToLiteLLMDB does when status == "failure"
 	require.Len(t, stub.events, 1)
 	assert.Equal(t, `{"error":"bad request"}`, stub.events[0].ResponseBody)
 }
