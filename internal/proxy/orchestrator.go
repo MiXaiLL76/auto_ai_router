@@ -698,7 +698,16 @@ func (p *Proxy) readRequestBodyAndSelectModel(
 		// actually goes on to the provider) and carried on logCtx for
 		// whatever the eventual outcome turns out to be, same pattern as
 		// ErrorBodyRaw/ClientResponseBody on the response side.
-		logCtx.RequestBodyRaw = extractErrorBodyRaw(body)
+		//
+		// redactRequestBodyForLogging strips the actual prompt/message
+		// content (messages, system, prompt, input, contents, instructions)
+		// before this ever reaches logCtx -- model, tools, and every other
+		// parameter are kept. Fails closed: if body isn't valid JSON, no
+		// redaction can be guaranteed, so nothing is captured at all rather
+		// than risk shipping raw content.
+		if redacted, ok := redactRequestBodyForLogging(body); ok {
+			logCtx.RequestBodyRaw = extractErrorBodyRaw([]byte(redacted))
+		}
 	}
 	if info := responseCompatRequestFromContext(r.Context()); info != nil {
 		info.RequestedModel = sanitized.ModelID

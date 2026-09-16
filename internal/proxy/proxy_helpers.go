@@ -123,6 +123,107 @@ func extractErrorBodyRaw(body []byte) string {
 	return string(body)
 }
 
+// sensitiveRequestBodyFields are the top-level (or nested, e.g. inside a
+// Responses API request object) JSON keys that carry the client's own
+// prompt/conversation content, across the request shapes AIR accepts:
+// messages (chat completions, Anthropic native), prompt (legacy
+// completions), input (Responses API, embeddings), instructions (Responses
+// API system prompt), contents (Gemini/Vertex native). Everything else in
+// the body -- model, tools, tool_choice, temperature, max_tokens, stream,
+// response_format, ... -- is request shape/parameters, not content, and is
+// left untouched.
+var sensitiveRequestBodyFields = map[string]struct{}{
+	"messages":     {},
+	"system":       {},
+	"prompt":       {},
+	"input":        {},
+	"contents":     {},
+	"instructions": {},
+}
+
+// redactRequestBodyForLogging returns body with sensitiveRequestBodyFields
+// replaced by shape-preserving placeholders (role and count kept, actual
+// text dropped), for the client-request-body opt-in
+// (kafka.raw_bodies.store_raw_body). Fails closed: ("", false) when body
+// isn't valid JSON (multipart, binary, malformed) rather than risk shipping
+// unredacted content, since the whole point of this function is the safety
+// gate on that opt-in.
+func redactRequestBodyForLogging(body []byte) (string, bool) {
+	var parsed map[string]any
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return "", false
+	}
+	redacted, ok := redactSensitiveFields(parsed).(map[string]any)
+	if !ok {
+		return "", false
+	}
+	out, err := json.Marshal(redacted)
+	if err != nil {
+		return "", false
+	}
+	return string(out), true
+}
+
+// redactSensitiveFields walks value looking for sensitiveRequestBodyFields
+// at any depth (covers the Responses API's nested request shapes) and
+// replaces their value via redactFieldValueShape; everything else is
+// recursed into unchanged.
+func redactSensitiveFields(value any) any {
+	switch v := value.(type) {
+	case map[string]any:
+		result := make(map[string]any, len(v))
+		for key, child := range v {
+			if _, sensitive := sensitiveRequestBodyFields[key]; sensitive {
+				result[key] = redactFieldValueShape(child)
+				continue
+			}
+			result[key] = redactSensitiveFields(child)
+		}
+		return result
+	case []any:
+		result := make([]any, len(v))
+		for i, child := range v {
+			result[i] = redactSensitiveFields(child)
+		}
+		return result
+	default:
+		return value
+	}
+}
+
+// redactFieldValueShape blanks a sensitive field's actual content while
+// keeping enough shape to debug with. For a messages-style array (each
+// element an object with e.g. "role"/"type"), keeps those identifying keys
+// per element and replaces the rest with a single "content": "[REDACTED]"
+// placeholder -- preserving turn count and roles without the text. Known
+// limitation: shapes that don't use "role"/"type"/"content" (e.g. Gemini's
+// content.parts) aren't specially preserved and just collapse to the
+// generic placeholder. Anything else (a plain string, or an array of plain
+// strings as with embeddings' `input`) becomes a flat "[REDACTED]".
+func redactFieldValueShape(value any) any {
+	items, ok := value.([]any)
+	if !ok {
+		return "[REDACTED]"
+	}
+	result := make([]any, len(items))
+	for i, item := range items {
+		obj, ok := item.(map[string]any)
+		if !ok {
+			result[i] = "[REDACTED]"
+			continue
+		}
+		redacted := map[string]any{"content": "[REDACTED]"}
+		if role, ok := obj["role"]; ok {
+			redacted["role"] = role
+		}
+		if typ, ok := obj["type"]; ok {
+			redacted["type"] = typ
+		}
+		result[i] = redacted
+	}
+	return result
+}
+
 // mapHTTPStatusToErrorClass maps HTTP status codes to LiteLLM exception class names
 // Reference: https://docs.litellm.ai/docs/exception_mapping
 func mapHTTPStatusToErrorClass(statusCode int) string {

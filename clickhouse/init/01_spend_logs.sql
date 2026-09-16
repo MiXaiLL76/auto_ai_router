@@ -258,9 +258,10 @@ CREATE TABLE air.raw_bodies_kafka
     response_body Nullable(String),
     client_response_body Nullable(String),
     -- Only populated when kafka.raw_bodies.store_raw_body is enabled
-    -- (default false) -- the client's own request body (e.g. the prompt) is
-    -- a materially bigger privacy commitment than a provider's error text,
-    -- so it needs its own explicit opt-in. See MiXaiLL76/auto_ai_router#207.
+    -- (default false), and even then the router redacts prompt/message
+    -- content before publishing (messages/system/prompt/input/contents/
+    -- instructions replaced with a role/count-preserving placeholder) --
+    -- see redactRequestBodyForLogging in the router's proxy_helpers.go.
     request_body Nullable(String)
 )
 ENGINE = Kafka

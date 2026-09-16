@@ -456,3 +456,64 @@ func TestExtractErrorBodyRaw(t *testing.T) {
 		assert.Equal(t, maxErrorBodyRawBytes+len("..."), len(got))
 	})
 }
+
+func TestRedactRequestBodyForLogging(t *testing.T) {
+	t.Run("redacts message content but keeps role, model, tools and params", func(t *testing.T) {
+		body := []byte(`{
+			"model": "gpt-4o-mini",
+			"temperature": 0.7,
+			"max_tokens": 512,
+			"stream": true,
+			"tools": [{"type": "function", "function": {"name": "get_weather", "parameters": {"type": "object"}}}],
+			"messages": [
+				{"role": "system", "content": "You are a helpful assistant"},
+				{"role": "user", "content": "my SSN is 123-45-6789"},
+				{"role": "assistant", "content": "I cannot help with that"}
+			]
+		}`)
+
+		out, ok := redactRequestBodyForLogging(body)
+		require.True(t, ok)
+
+		var parsed map[string]any
+		require.NoError(t, json.Unmarshal([]byte(out), &parsed))
+
+		assert.Equal(t, "gpt-4o-mini", parsed["model"], "non-sensitive params must survive untouched")
+		assert.Equal(t, 0.7, parsed["temperature"])
+		assert.Equal(t, float64(512), parsed["max_tokens"])
+		assert.Equal(t, true, parsed["stream"])
+		assert.NotEmpty(t, parsed["tools"], "tool definitions must survive untouched")
+
+		assert.NotContains(t, out, "123-45-6789", "the actual prompt content must never appear in the redacted output")
+		assert.NotContains(t, out, "helpful assistant")
+
+		messages, ok := parsed["messages"].([]any)
+		require.True(t, ok)
+		require.Len(t, messages, 3, "turn count (shape) must be preserved")
+		roles := make([]string, len(messages))
+		for i, m := range messages {
+			msg := m.(map[string]any)
+			roles[i] = msg["role"].(string)
+			assert.Equal(t, "[REDACTED]", msg["content"])
+		}
+		assert.Equal(t, []string{"system", "user", "assistant"}, roles, "roles must be preserved per turn")
+	})
+
+	t.Run("redacts prompt and input string fields entirely", func(t *testing.T) {
+		body := []byte(`{"model": "gpt-3.5-turbo-instruct", "prompt": "write me a poem about my divorce"}`)
+		out, ok := redactRequestBodyForLogging(body)
+		require.True(t, ok)
+		assert.NotContains(t, out, "divorce")
+		assert.Contains(t, out, `"prompt":"[REDACTED]"`)
+	})
+
+	t.Run("fails closed on non-JSON body", func(t *testing.T) {
+		_, ok := redactRequestBodyForLogging([]byte("--boundary\r\nnot json at all"))
+		assert.False(t, ok, "must not attempt to redact/ship a body it can't parse")
+	})
+
+	t.Run("fails closed on empty body", func(t *testing.T) {
+		_, ok := redactRequestBodyForLogging(nil)
+		assert.False(t, ok)
+	})
+}
