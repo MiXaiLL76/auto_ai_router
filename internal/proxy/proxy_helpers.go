@@ -123,15 +123,18 @@ func extractErrorBodyRaw(body []byte) string {
 	return string(body)
 }
 
-// sensitiveRequestBodyFields are the top-level (or nested, e.g. inside a
-// Responses API request object) JSON keys that carry the client's own
-// prompt/conversation content, across the request shapes AIR accepts:
-// messages (chat completions, Anthropic native), prompt (legacy
+// sensitiveRequestBodyFields are the top-level JSON keys that carry the
+// client's own prompt/conversation content, across the request shapes AIR
+// accepts: messages (chat completions, Anthropic native), prompt (legacy
 // completions), input (Responses API, embeddings), instructions (Responses
-// API system prompt), contents (Gemini/Vertex native). Everything else in
-// the body -- model, tools, tool_choice, temperature, max_tokens, stream,
+// API system prompt), contents (Gemini/Vertex native). Every one of these
+// shapes carries the field at the top level -- never nested inside e.g. a
+// tool's JSON-Schema parameters -- so redactSensitiveFields matches only at
+// the top level, not by name anywhere in the tree. Everything else in the
+// body -- model, tools, tool_choice, temperature, max_tokens, stream,
 // response_format, ... -- is request shape/parameters, not content, and is
-// left untouched.
+// left untouched, even if a tool parameter happens to share one of these
+// names.
 var sensitiveRequestBodyFields = map[string]struct{}{
 	"messages":     {},
 	"system":       {},
@@ -153,41 +156,29 @@ func redactRequestBodyForLogging(body []byte) (string, bool) {
 	if err := json.Unmarshal(body, &parsed); err != nil {
 		return "", false
 	}
-	redacted, ok := redactSensitiveFields(parsed).(map[string]any)
-	if !ok {
-		return "", false
-	}
-	out, err := json.Marshal(redacted)
+	redactSensitiveFields(parsed)
+	out, err := json.Marshal(parsed)
 	if err != nil {
 		return "", false
 	}
 	return string(out), true
 }
 
-// redactSensitiveFields walks value looking for sensitiveRequestBodyFields
-// at any depth (covers the Responses API's nested request shapes) and
-// replaces their value via redactFieldValueShape; everything else is
-// recursed into unchanged.
-func redactSensitiveFields(value any) any {
-	switch v := value.(type) {
-	case map[string]any:
-		result := make(map[string]any, len(v))
-		for key, child := range v {
-			if _, sensitive := sensitiveRequestBodyFields[key]; sensitive {
-				result[key] = redactFieldValueShape(child)
-				continue
-			}
-			result[key] = redactSensitiveFields(child)
+// redactSensitiveFields replaces sensitiveRequestBodyFields found at the
+// top level of parsed via redactFieldValueShape, in place. Every shape AIR
+// accepts (chat completions, legacy completions, Responses API, Anthropic
+// native, Gemini/Vertex native) carries these as top-level request fields,
+// never nested inside e.g. a tool's JSON-Schema parameters -- so unlike an
+// earlier version of this function, this does NOT recurse into unrelated
+// keys (tools, tool_choice, response_format, ...) looking for name
+// collisions. Those are request parameters that must survive untouched for
+// error analysis, and a tool parameter happening to be named "input" or
+// "messages" is not conversation content.
+func redactSensitiveFields(parsed map[string]any) {
+	for key, child := range parsed {
+		if _, sensitive := sensitiveRequestBodyFields[key]; sensitive {
+			parsed[key] = redactFieldValueShape(child)
 		}
-		return result
-	case []any:
-		result := make([]any, len(v))
-		for i, child := range v {
-			result[i] = redactSensitiveFields(child)
-		}
-		return result
-	default:
-		return value
 	}
 }
 

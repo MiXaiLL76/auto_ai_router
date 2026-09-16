@@ -532,6 +532,54 @@ func TestRedactRequestBodyForLogging(t *testing.T) {
 		assert.Contains(t, out, `"prompt":"[REDACTED]"`)
 	})
 
+	t.Run("does not redact a tool schema property named like a sensitive field", func(t *testing.T) {
+		// A JSON-Schema "parameters" object is free to name a property
+		// "input", "messages", "system", etc. -- those are request shape,
+		// not conversation content, and redaction keying off the name
+		// alone (rather than its position in the body) must not mangle
+		// them.
+		body := []byte(`{
+			"model": "gpt-4o-mini",
+			"messages": [{"role": "user", "content": "what's the weather"}],
+			"tools": [{
+				"type": "function",
+				"function": {
+					"name": "run_query",
+					"parameters": {
+						"type": "object",
+						"properties": {
+							"input": {"type": "string", "description": "the query text"},
+							"messages": {"type": "array", "items": {"type": "string"}}
+						},
+						"required": ["input"]
+					}
+				}
+			}]
+		}`)
+
+		out, ok := redactRequestBodyForLogging(body)
+		require.True(t, ok)
+
+		var parsed map[string]any
+		require.NoError(t, json.Unmarshal([]byte(out), &parsed))
+
+		tools, ok := parsed["tools"].([]any)
+		require.True(t, ok)
+		require.Len(t, tools, 1)
+		fn := tools[0].(map[string]any)["function"].(map[string]any)
+		params := fn["parameters"].(map[string]any)
+		props := params["properties"].(map[string]any)
+		assert.Equal(t, "run_query", fn["name"])
+		assert.NotEqual(t, "[REDACTED]", props["input"], "tool parameter named 'input' must survive untouched")
+		assert.NotEqual(t, "[REDACTED]", props["messages"], "tool parameter named 'messages' must survive untouched")
+		assert.Contains(t, out, "the query text", "tool parameter description must survive untouched")
+
+		messages, ok := parsed["messages"].([]any)
+		require.True(t, ok)
+		require.Len(t, messages, 1)
+		assert.Equal(t, "[REDACTED]", messages[0].(map[string]any)["content"], "actual conversation content must still be redacted")
+	})
+
 	t.Run("fails closed on non-JSON body", func(t *testing.T) {
 		_, ok := redactRequestBodyForLogging([]byte("--boundary\r\nnot json at all"))
 		assert.False(t, ok, "must not attempt to redact/ship a body it can't parse")
