@@ -176,13 +176,22 @@ func nextSSEFrameEnd(data []byte) int {
 	}
 }
 
-func markProxyProviderStreamError(logCtx *RequestLogContext, statusCode int, payload string) {
+// markProxyProviderStreamError records a streaming provider error. clientSaw
+// is whatever the client actually received for it: the masked replacement
+// body when the caller can still rewrite the response (an error caught
+// before any bytes committed, see writeProviderStreamErrorBeforeCommit), or
+// simply payload again when the error was only detected after streaming had
+// already relayed those exact raw bytes through and nothing could be masked
+// in hindsight (see resolveCapturedProviderStreamError).
+func markProxyProviderStreamError(logCtx *RequestLogContext, statusCode int, payload string, clientSaw string) {
 	if logCtx == nil || payload == "" {
 		return
 	}
 	logCtx.Status = "failure"
 	logCtx.HTTPStatus = statusCode
 	logCtx.ErrorMsg = payload
+	logCtx.ErrorBodyRaw = extractErrorBodyRaw([]byte(payload))
+	logCtx.ClientResponseBody = extractErrorBodyRaw([]byte(clientSaw))
 }
 
 func statusCodeFromProviderStreamError(payload string) int {
@@ -335,7 +344,10 @@ func resolveCapturedProviderStreamError(
 	if earlyErr.statusCode >= http.StatusBadRequest {
 		statusCode = earlyErr.statusCode
 	}
-	markProxyProviderStreamError(logCtx, statusCode, payload)
+	// Detected after the stream had already committed and relayed these
+	// bytes live -- nothing left to mask, the client already saw exactly
+	// this payload.
+	markProxyProviderStreamError(logCtx, statusCode, payload, payload)
 	if streamErr == nil {
 		return proxyProviderStreamError{payload: payload, statusCode: statusCode}
 	}
@@ -364,6 +376,15 @@ func (p *Proxy) writeProxyResponse(w http.ResponseWriter, resp *ProxyResponse, c
 		resp.StatusCode = mappedStatus
 	}
 	responseBody, responseBodyChanged, responseBodyMasked := clientResponseBodyForCredential(resp.StatusCode, resp.Body, cred, modelID, logContextRequestID(logCtx))
+	// writeProxyResponse serves both the primary proxy-credential path
+	// (proxy.go) and the fallback retry path (retry.go); both separately set
+	// logCtx.ErrorBodyRaw from the untouched resp.Body after this function
+	// returns, but only here do we have the masked/client-facing body, so
+	// capture it now rather than recomputing masking a second time at either
+	// caller.
+	if logCtx != nil && resp.StatusCode >= 400 {
+		logCtx.ClientResponseBody = extractErrorBodyRaw(responseBody)
+	}
 	if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
 		endpoint := endpointFromRequest(clientReq)
 		if logCtx != nil && logCtx.Request != nil {

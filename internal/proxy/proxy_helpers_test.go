@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net"
 	"net/http"
+	"strings"
 	"syscall"
 	"testing"
 
@@ -428,3 +429,164 @@ func TestExtractEndUser(t *testing.T) {
 // Compile-time check that timeoutError implements net.Error
 var _ net.Error = (*timeoutError)(nil)
 var _ net.Error = (*nonTimeoutNetError)(nil)
+
+func TestExtractErrorBodyRaw(t *testing.T) {
+	t.Run("empty body returns empty string", func(t *testing.T) {
+		assert.Equal(t, "", extractErrorBodyRaw(nil))
+		assert.Equal(t, "", extractErrorBodyRaw([]byte{}))
+	})
+
+	t.Run("short body returned verbatim", func(t *testing.T) {
+		body := []byte(`{"error":{"message":"invalid api key","type":"authentication_error"}}`)
+		assert.Equal(t, string(body), extractErrorBodyRaw(body))
+	})
+
+	t.Run("body under extractErrorMessage's 512-byte cap is not truncated here", func(t *testing.T) {
+		// The whole point of ErrorBodyRaw is to keep what ErrorMessage cuts off.
+		body := []byte(`{"error":"` + strings.Repeat("x", 1000) + `"}`)
+		got := extractErrorBodyRaw(body)
+		assert.Equal(t, string(body), got)
+		assert.Greater(t, len(got), 512)
+	})
+
+	t.Run("body over maxErrorBodyRawBytes is truncated with a marker", func(t *testing.T) {
+		body := []byte(strings.Repeat("y", maxErrorBodyRawBytes+100))
+		got := extractErrorBodyRaw(body)
+		assert.True(t, strings.HasSuffix(got, "..."))
+		assert.Equal(t, maxErrorBodyRawBytes+len("..."), len(got))
+	})
+}
+
+func TestRedactRequestBodyForLogging(t *testing.T) {
+	t.Run("redacts message content but keeps role, model, tools and params", func(t *testing.T) {
+		body := []byte(`{
+			"model": "gpt-4o-mini",
+			"temperature": 0.7,
+			"max_tokens": 512,
+			"stream": true,
+			"tools": [{"type": "function", "function": {"name": "get_weather", "parameters": {"type": "object"}}}],
+			"messages": [
+				{"role": "system", "content": "You are a helpful assistant"},
+				{"role": "user", "content": "my SSN is 123-45-6789"},
+				{"role": "assistant", "content": "I cannot help with that"}
+			]
+		}`)
+
+		out, ok := redactRequestBodyForLogging(body)
+		require.True(t, ok)
+
+		var parsed map[string]any
+		require.NoError(t, json.Unmarshal([]byte(out), &parsed))
+
+		assert.Equal(t, "gpt-4o-mini", parsed["model"], "non-sensitive params must survive untouched")
+		assert.Equal(t, 0.7, parsed["temperature"])
+		assert.Equal(t, float64(512), parsed["max_tokens"])
+		assert.Equal(t, true, parsed["stream"])
+		assert.NotEmpty(t, parsed["tools"], "tool definitions must survive untouched")
+
+		assert.NotContains(t, out, "123-45-6789", "the actual prompt content must never appear in the redacted output")
+		assert.NotContains(t, out, "helpful assistant")
+
+		messages, ok := parsed["messages"].([]any)
+		require.True(t, ok)
+		require.Len(t, messages, 3, "turn count (shape) must be preserved")
+		roles := make([]string, len(messages))
+		for i, m := range messages {
+			msg := m.(map[string]any)
+			roles[i] = msg["role"].(string)
+			assert.Equal(t, "[REDACTED]", msg["content"])
+		}
+		assert.Equal(t, []string{"system", "user", "assistant"}, roles, "roles must be preserved per turn")
+	})
+
+	t.Run("redacts developer-role messages same as any other role", func(t *testing.T) {
+		// OpenAI's newer reasoning models (o1/o3/gpt-5) use "developer" in
+		// place of "system" -- redaction must not be keyed off specific role
+		// strings, or a new/renamed role slips through unredacted.
+		body := []byte(`{
+			"model": "o3-mini",
+			"messages": [
+				{"role": "developer", "content": "internal system prompt with secret instructions"},
+				{"role": "user", "content": "hello"}
+			]
+		}`)
+
+		out, ok := redactRequestBodyForLogging(body)
+		require.True(t, ok)
+		assert.NotContains(t, out, "secret instructions")
+
+		var parsed map[string]any
+		require.NoError(t, json.Unmarshal([]byte(out), &parsed))
+		messages := parsed["messages"].([]any)
+		require.Len(t, messages, 2)
+		devMsg := messages[0].(map[string]any)
+		assert.Equal(t, "developer", devMsg["role"])
+		assert.Equal(t, "[REDACTED]", devMsg["content"])
+	})
+
+	t.Run("redacts prompt and input string fields entirely", func(t *testing.T) {
+		body := []byte(`{"model": "gpt-3.5-turbo-instruct", "prompt": "write me a poem about my divorce"}`)
+		out, ok := redactRequestBodyForLogging(body)
+		require.True(t, ok)
+		assert.NotContains(t, out, "divorce")
+		assert.Contains(t, out, `"prompt":"[REDACTED]"`)
+	})
+
+	t.Run("does not redact a tool schema property named like a sensitive field", func(t *testing.T) {
+		// A JSON-Schema "parameters" object is free to name a property
+		// "input", "messages", "system", etc. -- those are request shape,
+		// not conversation content, and redaction keying off the name
+		// alone (rather than its position in the body) must not mangle
+		// them.
+		body := []byte(`{
+			"model": "gpt-4o-mini",
+			"messages": [{"role": "user", "content": "what's the weather"}],
+			"tools": [{
+				"type": "function",
+				"function": {
+					"name": "run_query",
+					"parameters": {
+						"type": "object",
+						"properties": {
+							"input": {"type": "string", "description": "the query text"},
+							"messages": {"type": "array", "items": {"type": "string"}}
+						},
+						"required": ["input"]
+					}
+				}
+			}]
+		}`)
+
+		out, ok := redactRequestBodyForLogging(body)
+		require.True(t, ok)
+
+		var parsed map[string]any
+		require.NoError(t, json.Unmarshal([]byte(out), &parsed))
+
+		tools, ok := parsed["tools"].([]any)
+		require.True(t, ok)
+		require.Len(t, tools, 1)
+		fn := tools[0].(map[string]any)["function"].(map[string]any)
+		params := fn["parameters"].(map[string]any)
+		props := params["properties"].(map[string]any)
+		assert.Equal(t, "run_query", fn["name"])
+		assert.NotEqual(t, "[REDACTED]", props["input"], "tool parameter named 'input' must survive untouched")
+		assert.NotEqual(t, "[REDACTED]", props["messages"], "tool parameter named 'messages' must survive untouched")
+		assert.Contains(t, out, "the query text", "tool parameter description must survive untouched")
+
+		messages, ok := parsed["messages"].([]any)
+		require.True(t, ok)
+		require.Len(t, messages, 1)
+		assert.Equal(t, "[REDACTED]", messages[0].(map[string]any)["content"], "actual conversation content must still be redacted")
+	})
+
+	t.Run("fails closed on non-JSON body", func(t *testing.T) {
+		_, ok := redactRequestBodyForLogging([]byte("--boundary\r\nnot json at all"))
+		assert.False(t, ok, "must not attempt to redact/ship a body it can't parse")
+	})
+
+	t.Run("fails closed on empty body", func(t *testing.T) {
+		_, ok := redactRequestBodyForLogging(nil)
+		assert.False(t, ok)
+	})
+}

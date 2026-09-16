@@ -362,6 +362,62 @@ func TestProxyRequest_SingleCredentialNoFallback_Real429SetsRetryAfter(t *testin
 	assert.GreaterOrEqual(t, seconds, 1)
 }
 
+// TestProxyRequest_SingleCredentialNoFallback_PublishesRawErrorBody is a
+// regression test for a gap found via an actual end-to-end run against
+// docker-compose.kafka.yml (unit tests alone missed it): this is the same
+// "real 429 falls straight through to the normal response-writing path"
+// scenario as the Real429SetsRetryAfter test above, but that code path
+// (proxy.go, the non-streaming "Upstream request completed with error
+// status" branch) turned out to be the one real gap among ~40 call sites
+// that set logCtx.Status = "failure" -- it classified logCtx.ErrorMsg but
+// never set logCtx.ErrorBodyRaw, so air.raw_bodies.response_body came
+// back NULL for what is likely the single most common failure shape (a
+// direct, non-retried provider error).
+func TestProxyRequest_SingleCredentialNoFallback_PublishesRawErrorBody(t *testing.T) {
+	rawBody := `{"error":{"code":"429","message":"Rate limit exceeded","param":null,"type":"rate_limit_error"}}`
+	mockServer := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = io.WriteString(w, rawBody)
+	}))
+	defer mockServer.Close()
+
+	stub := &stubKafkaRawBodyManager{enabled: true}
+	prx := NewTestProxyBuilder().
+		WithSingleCredential("alibabacloud-ru-international", config.ProviderTypeOpenAI, mockServer.URL, "upstream-key-1").
+		Build()
+	prx.rawBodyLog = stub
+	// logSpendToLiteLLMDB early-returns unless at least one of Postgres or the
+	// spend Kafka topic is enabled (rawBodyLogEnabled alone doesn't keep it
+	// from bailing out) -- in real deployments kafka.raw_bodies.enabled
+	// requires kafka.enabled=true anyway (see Config.Validate()), so this
+	// mirrors that, it isn't a workaround for a real gap.
+	prx.kafkaLog = &stubKafkaManager{enabled: true}
+	// With kafkaLog enabled, logSpendToLiteLLMDB now actually runs (unlike in
+	// Real429SetsRetryAfter above, where it silently no-ops) and needs a
+	// resolvable price even for this zero-token rejected request.
+	setTestModelPrice(prx, "deepseek-v4-flash-0731", &models.ModelPrice{})
+
+	reqBody := `{"model":"deepseek-v4-flash-0731","messages":[{"role":"user","content":"Hello"}]}`
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(reqBody))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	prx.ProxyRequest(w, req)
+
+	require.Equal(t, http.StatusTooManyRequests, w.Code)
+	require.Len(t, stub.events, 1, "the real upstream error must publish an raw-body event")
+	assert.Equal(t, rawBody, stub.events[0].ResponseBody)
+	// maskedUpstreamErrorBody replaces the provider's own text unconditionally
+	// for any 4xx/5xx (see internal/proxy/errors.go) -- ClientResponseBody
+	// must reflect what the client actually got, which is NOT rawBody, and
+	// must match w.Body byte-for-byte (the actual client response).
+	assert.NotEqual(t, rawBody, stub.events[0].ClientResponseBody, "the client-facing body must be the masked one, not the raw provider text")
+	assert.JSONEq(t, w.Body.String(), stub.events[0].ClientResponseBody)
+	assert.Contains(t, stub.events[0].ClientResponseBody, "Rate limit exceeded")
+}
+
 func TestProxyRequest_Streaming(t *testing.T) {
 	// Create mock server that returns streaming response
 	mockServer := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

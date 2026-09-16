@@ -259,6 +259,9 @@ type RequestLogContext struct {
 	Status                string                   // "success" or "failure"
 	HTTPStatus            int                      // HTTP response status code
 	ErrorMsg              string                   // Error message (added to metadata on failure)
+	ErrorBodyRaw          string                   // Untruncated upstream provider error body, captured BEFORE any client-facing masking (maskedUpstreamErrorBody/clientResponseBodyForCredential) is applied. Only ever set on failure paths. Feeds kafkalog.RawBodyEvent.ResponseBody, not SpendEvent.
+	ClientResponseBody    string                   // What the client actually received for this failure, AFTER masking (identical to ErrorBodyRaw when nothing was masked, e.g. mid-stream errors detected after the response already committed -- see markProxyProviderStreamError's clientSaw param). Feeds kafkalog.RawBodyEvent.ClientResponseBody.
+	RequestBodyRaw        string                   // Untruncated client request body, captured only when kafka.raw_bodies.store_raw_body is enabled (see readRequestBodyAndSelectModel). Feeds kafkalog.RawBodyEvent.RequestBody. Empty whenever the toggle is off, so it never holds prompt content by default.
 	TokenUsage            *converter.TokenUsage    // Token usage with detailed breakdown
 	ModelPrice            *models.ModelPrice       // Price resolved before the provider request
 	PriceModelID          string                   // Model identifier used for price lookup
@@ -348,39 +351,43 @@ type HealthChecker interface {
 
 // Config holds all configuration needed to create a Proxy
 type Config struct {
-	Balancer                   *balancer.RoundRobin
-	Logger                     *slog.Logger
-	MaxBodySizeMB              int
-	ResponseBodyMultiplier     int // Multiplier for response body size limit (default: DefaultResponseBodyMultiplier)
-	RequestTimeout             time.Duration
-	MaxIdleConns               int
-	MaxIdleConnsPerHost        int
-	IdleConnTimeout            time.Duration
-	Metrics                    *monitoring.Metrics
-	MasterKey                  string
-	RateLimiter                *ratelimit.RPMLimiter
-	TokenManager               *auth.VertexTokenManager
-	ModelManager               *models.Manager
-	Version                    string
-	Commit                     string
-	LiteLLMDB                  litellmdb.Manager          // LiteLLM database integration (optional)
-	KafkaLog                   kafkalog.Manager           // Kafka spend-log publishing (optional, analytics write-path)
-	HealthChecker              HealthChecker              // Optional: cached DB health status (updated by health monitor)
-	PriceRegistry              *models.ModelPriceRegistry // Model pricing information (optional)
-	OrganizationPolicies       *models.OrganizationPolicyRegistry
-	MaxProviderRetries         int                 // Max same-type credential retries (default: 2)
-	MaxFallbackAttempts        int                 // Max fallback proxy hops per request chain (default: 5)
-	ResponseStore              responsestore.Store // Optional: Responses API store (bbolt or Redis)
-	SessionStickyEnabled       bool
-	SessionStickyAutoCacheCtrl bool // Auto-inject Anthropic cache_control markers when session is active (default: true)
-	SessionStoreTTL            time.Duration
-	RouterID                   string // Human-readable name for this router (shown in /trace); defaults to hostname
-	DrainUpstreamOnAbort       bool   // When true, keep reading upstream after client disconnect to get real usage (default: false)
-	ResponseCompatibility      string
-	TiktokenEnabled            bool // Local tiktoken-based prompt/completion token fallback estimation (default: true)
-	StrictAllTeamModelsACL     bool
-	ResponseHeaderMode         config.ResponseHeaderMode
-	CredentialNameAsTeamID     bool
+	Balancer                     *balancer.RoundRobin
+	Logger                       *slog.Logger
+	MaxBodySizeMB                int
+	ResponseBodyMultiplier       int // Multiplier for response body size limit (default: DefaultResponseBodyMultiplier)
+	RequestTimeout               time.Duration
+	MaxIdleConns                 int
+	MaxIdleConnsPerHost          int
+	IdleConnTimeout              time.Duration
+	Metrics                      *monitoring.Metrics
+	MasterKey                    string
+	RateLimiter                  *ratelimit.RPMLimiter
+	TokenManager                 *auth.VertexTokenManager
+	ModelManager                 *models.Manager
+	Version                      string
+	Commit                       string
+	LiteLLMDB                    litellmdb.Manager          // LiteLLM database integration (optional)
+	KafkaLog                     kafkalog.Manager           // Kafka spend-log publishing (optional, analytics write-path)
+	RawBodyLog                   kafkalog.RawBodyManager    // Kafka raw-body publishing (optional, separate topic, failure-only)
+	RawBodyStoreRawBody          bool                       // Mirrors KafkaRawBodiesConfig.StoreRawBody
+	RawBodyStoreOnlyErrors       bool                       // Mirrors KafkaRawBodiesConfig.StoreOnlyErrors
+	RawBodyRedactSensitiveFields bool                       // Mirrors KafkaRawBodiesConfig.RedactSensitiveFields
+	HealthChecker                HealthChecker              // Optional: cached DB health status (updated by health monitor)
+	PriceRegistry                *models.ModelPriceRegistry // Model pricing information (optional)
+	OrganizationPolicies         *models.OrganizationPolicyRegistry
+	MaxProviderRetries           int                 // Max same-type credential retries (default: 2)
+	MaxFallbackAttempts          int                 // Max fallback proxy hops per request chain (default: 5)
+	ResponseStore                responsestore.Store // Optional: Responses API store (bbolt or Redis)
+	SessionStickyEnabled         bool
+	SessionStickyAutoCacheCtrl   bool // Auto-inject Anthropic cache_control markers when session is active (default: true)
+	SessionStoreTTL              time.Duration
+	RouterID                     string // Human-readable name for this router (shown in /trace); defaults to hostname
+	DrainUpstreamOnAbort         bool   // When true, keep reading upstream after client disconnect to get real usage (default: false)
+	ResponseCompatibility        string
+	TiktokenEnabled              bool // Local tiktoken-based prompt/completion token fallback estimation (default: true)
+	StrictAllTeamModelsACL       bool
+	ResponseHeaderMode           config.ResponseHeaderMode
+	CredentialNameAsTeamID       bool
 
 	BudgetReserver                   *budget.Reserver      // Atomic Redis budget reservation (nil if Redis disabled — feature is a no-op)
 	KeyRateLimiter                   *ratelimit.RPMLimiter // Key/user/team/org RPM/TPM enforcement (nil if Redis disabled)
@@ -404,6 +411,10 @@ type Proxy struct {
 	modelManager                     *models.Manager            // Model manager for getting configured models
 	LiteLLMDB                        litellmdb.Manager          // LiteLLM database integration
 	kafkaLog                         kafkalog.Manager           // Kafka spend-log publishing (optional, analytics write-path)
+	rawBodyLog                       kafkalog.RawBodyManager    // Kafka raw-body publishing (optional, separate topic, failure-only)
+	rawBodyStoreRawBody              bool                       // Mirrors KafkaRawBodiesConfig.StoreRawBody
+	rawBodyStoreOnlyErrors           bool                       // Mirrors KafkaRawBodiesConfig.StoreOnlyErrors
+	rawBodyRedactSensitiveFields     bool                       // Mirrors KafkaRawBodiesConfig.RedactSensitiveFields
 	healthChecker                    HealthChecker              // Cached DB health status (optional)
 	priceRegistry                    *models.ModelPriceRegistry // Model pricing information (optional)
 	organizationPolicies             *models.OrganizationPolicyRegistry
@@ -484,6 +495,10 @@ func New(cfg *Config) *Proxy {
 		modelManager:                     cfg.ModelManager,
 		LiteLLMDB:                        cfg.LiteLLMDB,
 		kafkaLog:                         cfg.KafkaLog,
+		rawBodyLog:                       cfg.RawBodyLog,
+		rawBodyStoreRawBody:              cfg.RawBodyStoreRawBody,
+		rawBodyStoreOnlyErrors:           cfg.RawBodyStoreOnlyErrors,
+		rawBodyRedactSensitiveFields:     cfg.RawBodyRedactSensitiveFields,
 		healthChecker:                    cfg.HealthChecker,
 		priceRegistry:                    cfg.PriceRegistry,
 		organizationPolicies:             cfg.OrganizationPolicies,
@@ -1408,6 +1423,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 			}
 			if proxyResp.StatusCode >= 400 {
 				logCtx.ErrorMsg = extractErrorMessage(proxyResp.Body)
+				logCtx.ErrorBodyRaw = extractErrorBodyRaw(proxyResp.Body)
 			}
 		}
 		return
@@ -2207,6 +2223,18 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 			// — keeps the spend-log/analytics record in sync with what the client
 			// actually saw instead of a generic placeholder.
 			logCtx.ErrorMsg = classifiedErrorMessage(resp.StatusCode, rawErrorBody)
+			// This is the main non-streaming, non-retried direct-provider-error
+			// path -- found missing its ErrorBodyRaw capture via an actual
+			// end-to-end smoke test (docker-compose.kafka.yml): a request that
+			// gets a real upstream error and isn't retried lands here, and
+			// air.raw_bodies.response_body came back NULL for it despite the
+			// other 4 capture sites all being covered.
+			logCtx.ErrorBodyRaw = extractErrorBodyRaw(rawErrorBody)
+			// clientBody is already the post-masking body computed above by
+			// clientResponseBodyForCredential (line ~2154) -- this is the exact
+			// bytes actually written to the client via resp.Body below, not a
+			// second, possibly-drifting recomputation.
+			logCtx.ClientResponseBody = extractErrorBodyRaw(clientBody)
 			// Final error returned to the client — single unified ERROR record
 			// with everything needed for debugging.
 			p.logUpstreamError(r.Context(), "Upstream request completed with error status", resp.StatusCode, cred, modelID, rawErrorBody,

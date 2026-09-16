@@ -28,6 +28,13 @@ const dlqRecoveryInterval = 5 * time.Minute
 // dlqMaxSize caps the in-memory dead letter queue (same bound as spendlog).
 const dlqMaxSize = 10
 
+// Keyed is the constraint Logger[T] events must satisfy: a stable key so
+// retries/reprocessing of the same logical event stay ordered on the same
+// Kafka partition. Both *SpendEvent and *RawBodyEvent key by request_id.
+type Keyed interface {
+	Key() []byte
+}
+
 // Stats holds kafkalog producer statistics for observability.
 type Stats struct {
 	QueueLen       int
@@ -46,26 +53,29 @@ type Stats struct {
 }
 
 // deadLetterBatch represents a batch that failed to produce after all retries.
-type deadLetterBatch struct {
-	batch     []*SpendEvent
+type deadLetterBatch[T Keyed] struct {
+	batch     []T
 	failedAt  time.Time
 	lastError error
 	attempts  int
 }
 
-// Logger is an asynchronous Kafka producer for spend events.
+// Logger is an asynchronous Kafka producer, generic over the event type it
+// publishes (T is a pointer type implementing Keyed, e.g. *SpendEvent or
+// *RawBodyEvent) so the spend-log and raw-body write-paths share one
+// tested queue/batch/retry/DLQ implementation instead of two copies of it.
 //
 // Mirrors internal/litellmdb/spendlog.Logger: non-blocking Log(), batching,
 // retry with exponential backoff, an in-memory Dead Letter Queue, and
 // graceful shutdown. Unlike spendlog, broker unavailability never blocks
 // callers or drops the process — see Manager.IsHealthy.
-type Logger struct {
+type Logger[T Keyed] struct {
 	client *kgo.Client
 	topic  string
 	logger *slog.Logger
 	config *Config
 
-	queue chan *SpendEvent
+	queue chan T
 
 	stopChan  chan struct{}
 	wg        sync.WaitGroup
@@ -85,13 +95,16 @@ type Logger struct {
 	dlqOverflow    uint64
 
 	dlqMu sync.Mutex
-	dlq   []*deadLetterBatch
+	dlq   []*deadLetterBatch[T]
 }
 
 // NewLogger creates a new asynchronous Kafka producer logger. The underlying
 // client connects lazily — broker unavailability at construction time is not
 // an error, it only keeps IsHealthy() false until a connection succeeds.
-func NewLogger(cfg *Config) (*Logger, error) {
+//
+// T is not inferable from cfg, so callers must instantiate it explicitly,
+// e.g. NewLogger[*SpendEvent](cfg) or NewLogger[*RawBodyEvent](cfg).
+func NewLogger[T Keyed](cfg *Config) (*Logger[T], error) {
 	opts := []kgo.Opt{
 		kgo.SeedBrokers(cfg.Brokers...),
 		kgo.ClientID(cfg.ClientID),
@@ -131,12 +144,12 @@ func NewLogger(cfg *Config) (*Logger, error) {
 		return nil, fmt.Errorf("kafkalog: create client: %w", err)
 	}
 
-	l := &Logger{
+	l := &Logger[T]{
 		client:   client,
 		topic:    cfg.Topic,
 		logger:   cfg.Logger,
 		config:   cfg,
-		queue:    make(chan *SpendEvent, cfg.LogQueueSize),
+		queue:    make(chan T, cfg.LogQueueSize),
 		stopChan: make(chan struct{}),
 	}
 	return l, nil
@@ -144,7 +157,7 @@ func NewLogger(cfg *Config) (*Logger, error) {
 
 // Start starts the background workers, health checker and DLQ recovery loop.
 // Safe to call multiple times (idempotent).
-func (l *Logger) Start() {
+func (l *Logger[T]) Start() {
 	l.startOnce.Do(func() {
 		numWorkers := l.config.LogWorkers
 		if numWorkers <= 0 {
@@ -157,7 +170,7 @@ func (l *Logger) Start() {
 		}
 		go l.healthCheckWorker()
 		go l.dlqRecoveryWorker()
-		l.logger.Info("[Kafka] SpendLogger started",
+		l.logger.Info("[Kafka] Logger started",
 			"topic", l.topic,
 			"queue_size", l.config.LogQueueSize,
 			"batch_size", l.config.LogBatchSize,
@@ -170,11 +183,13 @@ func (l *Logger) Start() {
 // Log adds an event to the queue with backpressure handling.
 // BLOCKING: waits up to 5 seconds for queue space if full.
 // Returns ErrQueueFull if the timeout is reached (event not queued).
-func (l *Logger) Log(event *SpendEvent) error {
-	if event == nil {
-		return nil
-	}
-
+//
+// Callers are expected to have already nil-checked event: a generic T
+// constrained only by Keyed cannot be safely compared to nil here (a typed
+// nil pointer wrapped as T would not compare equal to an untyped nil), so
+// each public entry point (Manager.LogSpend, RawBodyManager.LogRawBody)
+// does that check itself before calling in.
+func (l *Logger[T]) Log(event T) error {
 	select {
 	case l.queue <- event:
 		atomic.AddUint64(&l.queued, 1)
@@ -192,8 +207,8 @@ func (l *Logger) Log(event *SpendEvent) error {
 	case <-ctx.Done():
 		atomic.AddUint64(&l.dropped, 1)
 		atomic.AddUint64(&l.queueFullCount, 1)
-		l.logger.Error("[Kafka] SpendLog event dropped: queue full timeout",
-			"request_id", event.RequestID,
+		l.logger.Error("[Kafka] Event dropped: queue full timeout",
+			"request_id", string(event.Key()),
 			"queue_len", len(l.queue),
 			"queue_cap", cap(l.queue),
 			"timeout_sec", 5,
@@ -203,12 +218,12 @@ func (l *Logger) Log(event *SpendEvent) error {
 }
 
 // IsHealthy reports the last known broker connectivity state.
-func (l *Logger) IsHealthy() bool {
+func (l *Logger[T]) IsHealthy() bool {
 	return l.healthy.Load()
 }
 
 // Stats returns current producer statistics.
-func (l *Logger) Stats() Stats {
+func (l *Logger[T]) Stats() Stats {
 	l.dlqMu.Lock()
 	dlqSize := len(l.dlq)
 	l.dlqMu.Unlock()
@@ -232,12 +247,12 @@ func (l *Logger) Stats() Stats {
 
 // Shutdown stops the logger and waits for all queued events to be flushed.
 // Idempotent: safe to call multiple times.
-func (l *Logger) Shutdown(ctx context.Context) error {
+func (l *Logger[T]) Shutdown(ctx context.Context) error {
 	if !l.shutdown.CompareAndSwap(false, true) {
 		return nil
 	}
 
-	l.logger.Info("[Kafka] SpendLogger shutting down...", "pending", len(l.queue))
+	l.logger.Info("[Kafka] Logger shutting down...", "pending", len(l.queue))
 
 	close(l.stopChan)
 
@@ -250,14 +265,14 @@ func (l *Logger) Shutdown(ctx context.Context) error {
 	var shutdownErr error
 	select {
 	case <-done:
-		l.logger.Info("[Kafka] SpendLogger shutdown complete",
+		l.logger.Info("[Kafka] Logger shutdown complete",
 			"produced", atomic.LoadUint64(&l.produced),
 			"dropped", atomic.LoadUint64(&l.dropped),
 			"errors", atomic.LoadUint64(&l.errors),
 			"dlq_size", l.dlqSize(),
 		)
 	case <-ctx.Done():
-		l.logger.Warn("[Kafka] SpendLogger shutdown timeout", "pending", len(l.queue))
+		l.logger.Warn("[Kafka] Logger shutdown timeout", "pending", len(l.queue))
 		shutdownErr = ctx.Err()
 	}
 
@@ -265,17 +280,17 @@ func (l *Logger) Shutdown(ctx context.Context) error {
 	return shutdownErr
 }
 
-func (l *Logger) dlqSize() int {
+func (l *Logger[T]) dlqSize() int {
 	l.dlqMu.Lock()
 	defer l.dlqMu.Unlock()
 	return len(l.dlq)
 }
 
 // worker is the background goroutine that batches and produces the queue.
-func (l *Logger) worker() {
+func (l *Logger[T]) worker() {
 	defer l.wg.Done()
 
-	batch := make([]*SpendEvent, 0, l.config.LogBatchSize)
+	batch := make([]T, 0, l.config.LogBatchSize)
 	ticker := time.NewTicker(l.config.LogFlushInterval)
 	defer ticker.Stop()
 
@@ -304,7 +319,7 @@ func (l *Logger) worker() {
 	}
 }
 
-func (l *Logger) drainQueue(batch *[]*SpendEvent) {
+func (l *Logger[T]) drainQueue(batch *[]T) {
 	for {
 		select {
 		case event := <-l.queue:
@@ -317,7 +332,7 @@ func (l *Logger) drainQueue(batch *[]*SpendEvent) {
 
 // flushBatch produces a batch to Kafka with retry and DLQ fallback.
 // Retry strategy mirrors spendlog: 0s, 1s, 5s, 30s backoff, 4 attempts total.
-func (l *Logger) flushBatch(batch []*SpendEvent) {
+func (l *Logger[T]) flushBatch(batch []T) {
 	if len(batch) == 0 {
 		return
 	}
@@ -357,7 +372,7 @@ func (l *Logger) flushBatch(batch []*SpendEvent) {
 
 		lastErr = err
 		l.healthy.Store(false)
-		l.logger.Warn("[Kafka] SpendLog batch produce failed",
+		l.logger.Warn("[Kafka] Batch produce failed",
 			"attempt", attempt+1,
 			"max_attempts", maxAttempts,
 			"batch_size", len(batch),
@@ -371,13 +386,13 @@ func (l *Logger) flushBatch(batch []*SpendEvent) {
 
 // produceBatch marshals and synchronously produces a batch of events, keyed
 // by request_id so retries/reprocessing stay ordered per request.
-func (l *Logger) produceBatch(batch []*SpendEvent) error {
+func (l *Logger[T]) produceBatch(batch []T) error {
 	records := make([]*kgo.Record, 0, len(batch))
 	for _, event := range batch {
 		value, err := json.Marshal(event)
 		if err != nil {
-			l.logger.Error("[Kafka] Failed to marshal spend event, skipping",
-				"request_id", event.RequestID, "error", err)
+			l.logger.Error("[Kafka] Failed to marshal event, skipping",
+				"request_id", string(event.Key()), "error", err)
 			continue
 		}
 		records = append(records, &kgo.Record{
@@ -405,12 +420,12 @@ func (l *Logger) produceBatch(batch []*SpendEvent) error {
 // flushDLQ re-added failed batches with a plain append, which could push the
 // DLQ past dlqMaxSize while new failures were being added concurrently by
 // the worker.
-func (l *Logger) appendToDLQLocked(dlb *deadLetterBatch) {
+func (l *Logger[T]) appendToDLQLocked(dlb *deadLetterBatch[T]) {
 	if len(l.dlq) >= dlqMaxSize {
 		dropped := l.dlq[0]
 		l.dlq = l.dlq[1:]
 		atomic.AddUint64(&l.dlqOverflow, 1)
-		l.logger.Error("[Kafka] SpendLog DLQ overflow - batch dropped",
+		l.logger.Error("[Kafka] DLQ overflow - batch dropped",
 			"dropped_batch_size", len(dropped.batch),
 			"dropped_at", dropped.failedAt,
 			"dlq_size", len(l.dlq),
@@ -425,20 +440,20 @@ func (l *Logger) appendToDLQLocked(dlb *deadLetterBatch) {
 // the caller (holding dlqMu) on Postgres round-trips. Request IDs are copied
 // upfront since dropped.batch's backing array must not be retained/mutated
 // after appendToDLQLocked returns.
-func (l *Logger) notifyFallback(batch []*SpendEvent, reason string) {
+func (l *Logger[T]) notifyFallback(batch []T, reason string) {
 	if l.config.FallbackNotifier == nil || len(batch) == 0 {
 		return
 	}
 	requestIDs := make([]string, len(batch))
 	for i, event := range batch {
-		requestIDs[i] = event.RequestID
+		requestIDs[i] = string(event.Key())
 	}
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		for _, requestID := range requestIDs {
 			if err := l.config.FallbackNotifier(ctx, requestID, reason); err != nil {
-				l.logger.Warn("[Kafka] Failed to flag spend log row for fallback resend",
+				l.logger.Warn("[Kafka] Failed to flag row for fallback resend",
 					"request_id", requestID,
 					"reason", reason,
 					"error", err,
@@ -448,7 +463,7 @@ func (l *Logger) notifyFallback(batch []*SpendEvent, reason string) {
 	}()
 }
 
-func (l *Logger) addToDLQ(batch []*SpendEvent, lastErr error, attempts int) {
+func (l *Logger[T]) addToDLQ(batch []T, lastErr error, attempts int) {
 	l.dlqMu.Lock()
 	defer l.dlqMu.Unlock()
 
@@ -456,9 +471,9 @@ func (l *Logger) addToDLQ(batch []*SpendEvent, lastErr error, attempts int) {
 	// batch[:0] + append immediately after this returns, and dlqRecoveryWorker
 	// reads dlb.batch concurrently from a different goroutine. Without a copy,
 	// both goroutines end up racing on (and corrupting) the same backing array.
-	batchCopy := append([]*SpendEvent(nil), batch...)
+	batchCopy := append([]T(nil), batch...)
 
-	dlb := &deadLetterBatch{
+	dlb := &deadLetterBatch[T]{
 		batch:     batchCopy,
 		failedAt:  time.Now(),
 		lastError: lastErr,
@@ -468,7 +483,7 @@ func (l *Logger) addToDLQ(batch []*SpendEvent, lastErr error, attempts int) {
 	l.appendToDLQLocked(dlb)
 	atomic.AddUint64(&l.dlqCount, 1)
 
-	l.logger.Error("[Kafka] SpendLog batch sent to Dead Letter Queue",
+	l.logger.Error("[Kafka] Batch sent to Dead Letter Queue",
 		"batch_size", len(batch),
 		"dlq_size", len(l.dlq),
 		"last_error", lastErr,
@@ -478,7 +493,7 @@ func (l *Logger) addToDLQ(batch []*SpendEvent, lastErr error, attempts int) {
 
 // healthCheckWorker periodically pings the brokers so IsHealthy() reflects
 // connectivity even while the queue is idle (no batches being produced).
-func (l *Logger) healthCheckWorker() {
+func (l *Logger[T]) healthCheckWorker() {
 	defer l.wg.Done()
 
 	ticker := time.NewTicker(healthCheckInterval)
@@ -496,7 +511,7 @@ func (l *Logger) healthCheckWorker() {
 	}
 }
 
-func (l *Logger) probeHealth() {
+func (l *Logger[T]) probeHealth() {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -512,7 +527,7 @@ func (l *Logger) probeHealth() {
 }
 
 // dlqRecoveryWorker periodically retries failed batches from the DLQ.
-func (l *Logger) dlqRecoveryWorker() {
+func (l *Logger[T]) dlqRecoveryWorker() {
 	defer l.wg.Done()
 
 	ticker := time.NewTicker(dlqRecoveryInterval)
@@ -529,13 +544,13 @@ func (l *Logger) dlqRecoveryWorker() {
 	}
 }
 
-func (l *Logger) flushDLQ() {
+func (l *Logger[T]) flushDLQ() {
 	l.dlqMu.Lock()
 	if len(l.dlq) == 0 {
 		l.dlqMu.Unlock()
 		return
 	}
-	dlqCopy := make([]*deadLetterBatch, len(l.dlq))
+	dlqCopy := make([]*deadLetterBatch[T], len(l.dlq))
 	copy(dlqCopy, l.dlq)
 	l.dlq = l.dlq[:0]
 	l.dlqMu.Unlock()
@@ -547,7 +562,7 @@ func (l *Logger) flushDLQ() {
 			atomic.AddUint64(&l.batchesOK, 1)
 			atomic.AddUint64(&l.dlqRecovered, 1)
 			l.healthy.Store(true)
-			l.logger.Warn("[Kafka] SpendLog batch recovered from DLQ",
+			l.logger.Warn("[Kafka] Batch recovered from DLQ",
 				"batch_size", len(dlb.batch),
 				"time_in_dlq", time.Since(dlb.failedAt).String(),
 			)

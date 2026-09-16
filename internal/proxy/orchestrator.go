@@ -690,6 +690,35 @@ func (p *Proxy) readRequestBodyAndSelectModel(
 		return nil, "", "", false, false
 	}
 	body = sanitized.Body
+	if p.rawBodyStoreRawBody {
+		// Opt-in only (kafka.raw_bodies.store_raw_body, default false) --
+		// this is the client's own request body, e.g. the prompt, a
+		// materially bigger privacy commitment than the provider's own
+		// error text. Captured once here (post-sanitization, the body that
+		// actually goes on to the provider) and carried on logCtx for
+		// whatever the eventual outcome turns out to be, same pattern as
+		// ErrorBodyRaw/ClientResponseBody on the response side.
+		if p.rawBodyRedactSensitiveFields {
+			// Default path. redactRequestBodyForLogging strips the actual
+			// prompt/message content (messages, system, prompt, input,
+			// contents, instructions) before this ever reaches logCtx --
+			// model, tools, and every other parameter are kept. Fails
+			// closed: if body isn't valid JSON, no redaction can be
+			// guaranteed, so nothing is captured at all rather than risk
+			// shipping raw content.
+			if redacted, ok := redactRequestBodyForLogging(body); ok {
+				logCtx.RequestBodyRaw = extractErrorBodyRaw([]byte(redacted))
+			}
+		} else {
+			// Explicit escape hatch (kafka.raw_bodies.redact_sensitive_fields:
+			// false): captures the body verbatim, prompt included. Not the
+			// default, not recommended -- exists for a short-lived,
+			// access-controlled debugging session where the actual prompt
+			// is genuinely needed, at the cost of reintroducing exactly the
+			// exposure the redaction above exists to avoid.
+			logCtx.RequestBodyRaw = extractErrorBodyRaw(body)
+		}
+	}
 	if info := responseCompatRequestFromContext(r.Context()); info != nil {
 		info.RequestedModel = sanitized.ModelID
 		info.IncludeUsage = strings.Contains(r.URL.Path, "/responses") || clientRequestedStreamUsage(body)
