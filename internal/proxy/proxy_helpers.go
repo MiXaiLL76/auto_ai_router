@@ -103,7 +103,8 @@ func extractErrorMessage(body []byte) string {
 
 // maxErrorBodyRawBytes bounds RequestLogContext.ErrorBodyRaw so one
 // pathological provider error (e.g. echoing back an oversized prompt in a
-// validation message) can't inflate a single Kafka spend event unreasonably.
+// validation message) can't inflate a single Kafka kafkalog.RawBodyEvent
+// unreasonably.
 // Larger than extractErrorMessage's 512-byte cap on purpose: this field
 // exists specifically so operators can see a provider failure in full,
 // where the short error_message got cut off.

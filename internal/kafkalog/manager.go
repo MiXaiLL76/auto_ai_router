@@ -160,7 +160,7 @@ type DefaultRawBodyManager struct {
 	log    *slog.Logger
 }
 
-// NewErrorBody creates a new RawBodyManager instance and starts its
+// NewRawBody creates a new RawBodyManager instance and starts its
 // background producer. cfg is a plain kafkalog.Config pointed at the
 // raw-bodies topic (same brokers/TLS/SASL as the spend-log cfg is the
 // common case, but that's the caller's choice, not enforced here).
