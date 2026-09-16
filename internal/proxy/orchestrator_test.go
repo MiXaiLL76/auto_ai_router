@@ -130,6 +130,46 @@ func TestOrchestrateRequest_RecordsReasoningRequestMetadata(t *testing.T) {
 	}
 }
 
+// TestOrchestrateRequest_RequestBodyRedaction covers the
+// kafka.raw_bodies.redact_sensitive_fields toggle end to end through the
+// real capture site in readRequestBodyAndSelectModel (not a direct
+// redactRequestBodyForLogging call): with the default (redact=true) the
+// captured RequestBodyRaw must never contain the actual message content;
+// with the explicit escape hatch (redact=false) it must contain it
+// verbatim, since that's the whole point of turning the toggle off.
+func TestOrchestrateRequest_RequestBodyRedaction(t *testing.T) {
+	body := `{"model":"claude-opus-4-8","messages":[{"role":"user","content":"my SSN is 123-45-6789"}]}`
+
+	for _, tt := range []struct {
+		name              string
+		redactSensitive   bool
+		wantContentLeaked bool
+	}{
+		{name: "default: redacted", redactSensitive: true, wantContentLeaked: false},
+		{name: "escape hatch: verbatim", redactSensitive: false, wantContentLeaked: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			prx := NewTestProxyBuilder().
+				WithSingleCredential("test", config.ProviderTypeAnthropic, "http://test.local", "upstream-key").
+				WithMasterKey("master-key").
+				Build()
+			prx.rawBodyStoreRawBody = true
+			prx.rawBodyRedactSensitiveFields = tt.redactSensitive
+
+			req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(body))
+			req.Header.Set("Authorization", "Bearer master-key")
+			logCtx := &RequestLogContext{}
+
+			_, ok := prx.orchestrateRequest(httptest.NewRecorder(), req, logCtx)
+			require.True(t, ok)
+
+			leaked := strings.Contains(logCtx.RequestBodyRaw, "123-45-6789")
+			assert.Equal(t, tt.wantContentLeaked, leaked)
+			assert.Contains(t, logCtx.RequestBodyRaw, `"model":"claude-opus-4-8"`, "non-sensitive fields must survive either way")
+		})
+	}
+}
+
 func TestOrchestrateRequest_ResponsesAPI_PassthroughForOpenAI(t *testing.T) {
 	logger := testhelpers.NewTestLogger()
 	prx := NewTestProxyBuilder().

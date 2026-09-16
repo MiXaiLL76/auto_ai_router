@@ -698,15 +698,25 @@ func (p *Proxy) readRequestBodyAndSelectModel(
 		// actually goes on to the provider) and carried on logCtx for
 		// whatever the eventual outcome turns out to be, same pattern as
 		// ErrorBodyRaw/ClientResponseBody on the response side.
-		//
-		// redactRequestBodyForLogging strips the actual prompt/message
-		// content (messages, system, prompt, input, contents, instructions)
-		// before this ever reaches logCtx -- model, tools, and every other
-		// parameter are kept. Fails closed: if body isn't valid JSON, no
-		// redaction can be guaranteed, so nothing is captured at all rather
-		// than risk shipping raw content.
-		if redacted, ok := redactRequestBodyForLogging(body); ok {
-			logCtx.RequestBodyRaw = extractErrorBodyRaw([]byte(redacted))
+		if p.rawBodyRedactSensitiveFields {
+			// Default path. redactRequestBodyForLogging strips the actual
+			// prompt/message content (messages, system, prompt, input,
+			// contents, instructions) before this ever reaches logCtx --
+			// model, tools, and every other parameter are kept. Fails
+			// closed: if body isn't valid JSON, no redaction can be
+			// guaranteed, so nothing is captured at all rather than risk
+			// shipping raw content.
+			if redacted, ok := redactRequestBodyForLogging(body); ok {
+				logCtx.RequestBodyRaw = extractErrorBodyRaw([]byte(redacted))
+			}
+		} else {
+			// Explicit escape hatch (kafka.raw_bodies.redact_sensitive_fields:
+			// false): captures the body verbatim, prompt included. Not the
+			// default, not recommended -- exists for a short-lived,
+			// access-controlled debugging session where the actual prompt
+			// is genuinely needed, at the cost of reintroducing exactly the
+			// exposure the redaction above exists to avoid.
+			logCtx.RequestBodyRaw = extractErrorBodyRaw(body)
 		}
 	}
 	if info := responseCompatRequestFromContext(r.Context()); info != nil {

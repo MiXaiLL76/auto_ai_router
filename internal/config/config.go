@@ -1140,6 +1140,19 @@ type KafkaRawBodiesConfig struct {
 	// once StoreRawBody is on and the goal is capturing request bodies
 	// generally, not just alongside errors.
 	StoreOnlyErrors bool `yaml:"store_only_errors"` // default: true
+
+	// RedactSensitiveFields controls whether StoreRawBody's captured
+	// request body has prompt/message content stripped before publishing
+	// (see redactRequestBodyForLogging: messages/system/prompt/input/
+	// contents/instructions replaced with a role/count-preserving
+	// placeholder, everything else -- model, tools, temperature, ...
+	// untouched). Defaults to true; only meaningful when StoreRawBody is
+	// also on. Set to false to capture the request body verbatim instead --
+	// e.g. for a short-lived, access-controlled debugging session where the
+	// actual prompt is genuinely needed. This is a deliberate, explicit
+	// escape hatch, not a recommended default: turning it off reintroduces
+	// exactly the privacy exposure StoreRawBody's redaction exists to avoid.
+	RedactSensitiveFields bool `yaml:"redact_sensitive_fields"` // default: true
 }
 
 // OTELConfig holds OpenTelemetry export configuration for logs, traces and metrics.
@@ -1417,10 +1430,11 @@ func (l *LiteLLMDBConfig) UnmarshalYAML(value *yaml.Node) error {
 // tempKafkaRawBodiesConfig mirrors KafkaRawBodiesConfig with string
 // fields, the same env-variable-resolution convention as KafkaConfig itself.
 type tempKafkaRawBodiesConfig struct {
-	Enabled         string `yaml:"enabled"`
-	Topic           string `yaml:"topic"`
-	StoreRawBody    string `yaml:"store_raw_body"`
-	StoreOnlyErrors string `yaml:"store_only_errors"`
+	Enabled               string `yaml:"enabled"`
+	Topic                 string `yaml:"topic"`
+	StoreRawBody          string `yaml:"store_raw_body"`
+	StoreOnlyErrors       string `yaml:"store_only_errors"`
+	RedactSensitiveFields string `yaml:"redact_sensitive_fields"`
 }
 
 // UnmarshalYAML implements custom unmarshaling for KafkaConfig with env variable support.
@@ -1499,6 +1513,9 @@ func (k *KafkaConfig) UnmarshalYAML(value *yaml.Node) error {
 		return err
 	}
 	if k.RawBodies.StoreOnlyErrors, err = parseField(temp.RawBodies.StoreOnlyErrors, true, strconv.ParseBool, "kafka.raw_bodies.store_only_errors"); err != nil {
+		return err
+	}
+	if k.RawBodies.RedactSensitiveFields, err = parseField(temp.RawBodies.RedactSensitiveFields, true, strconv.ParseBool, "kafka.raw_bodies.redact_sensitive_fields"); err != nil {
 		return err
 	}
 	return nil
@@ -1742,10 +1759,11 @@ func defaultKafkaConfig() KafkaConfig {
 		LogFlushInterval: 5 * time.Second,
 		LogWorkers:       4,
 		RawBodies: KafkaRawBodiesConfig{
-			Enabled:         false,
-			Topic:           "raw-bodies",
-			StoreRawBody:    false,
-			StoreOnlyErrors: true,
+			Enabled:               false,
+			Topic:                 "raw-bodies",
+			StoreRawBody:          false,
+			StoreOnlyErrors:       true,
+			RedactSensitiveFields: true,
 		},
 	}
 }

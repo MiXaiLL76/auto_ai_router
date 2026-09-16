@@ -264,6 +264,7 @@ raw_bodies:
 	a.Equal("raw-bodies", kafkaCfg.RawBodies.Topic)
 	a.False(kafkaCfg.RawBodies.StoreRawBody, "store_raw_body must default to false when omitted")
 	a.True(kafkaCfg.RawBodies.StoreOnlyErrors, "store_only_errors must default to true when omitted")
+	a.True(kafkaCfg.RawBodies.RedactSensitiveFields, "redact_sensitive_fields must default to true when omitted")
 }
 
 func TestKafkaConfig_UnmarshalYAML_RawBodiesDefaultsToDisabled(t *testing.T) {
@@ -280,6 +281,7 @@ topic: air.spend_logs
 	a.Empty(kafkaCfg.RawBodies.Topic)
 	a.False(kafkaCfg.RawBodies.StoreRawBody)
 	a.True(kafkaCfg.RawBodies.StoreOnlyErrors)
+	a.True(kafkaCfg.RawBodies.RedactSensitiveFields)
 }
 
 func TestKafkaConfig_UnmarshalYAML_RawBodiesStoreToggles(t *testing.T) {
@@ -299,6 +301,25 @@ raw_bodies:
 	a.NoError(yaml.Unmarshal([]byte(yamlDoc), &kafkaCfg))
 	a.True(kafkaCfg.RawBodies.StoreRawBody)
 	a.False(kafkaCfg.RawBodies.StoreOnlyErrors)
+	a.True(kafkaCfg.RawBodies.RedactSensitiveFields, "unset redact_sensitive_fields must still default to true even when other toggles are set explicitly")
+}
+
+func TestKafkaConfig_UnmarshalYAML_RawBodiesRedactSensitiveFieldsCanBeDisabled(t *testing.T) {
+	yamlDoc := `
+enabled: true
+brokers:
+  - "kafka:9092"
+topic: air.spend_logs
+raw_bodies:
+  enabled: "true"
+  topic: raw-bodies
+  store_raw_body: "true"
+  redact_sensitive_fields: "false"
+`
+	var kafkaCfg KafkaConfig
+	a := assert.New(t)
+	a.NoError(yaml.Unmarshal([]byte(yamlDoc), &kafkaCfg))
+	a.False(kafkaCfg.RawBodies.RedactSensitiveFields, "must be an explicit, honored escape hatch, not silently forced back to true")
 }
 
 func TestConfig_Validate_KafkaOnlyModeRequiresKafka(t *testing.T) {
