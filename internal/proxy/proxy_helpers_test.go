@@ -499,6 +499,31 @@ func TestRedactRequestBodyForLogging(t *testing.T) {
 		assert.Equal(t, []string{"system", "user", "assistant"}, roles, "roles must be preserved per turn")
 	})
 
+	t.Run("redacts developer-role messages same as any other role", func(t *testing.T) {
+		// OpenAI's newer reasoning models (o1/o3/gpt-5) use "developer" in
+		// place of "system" -- redaction must not be keyed off specific role
+		// strings, or a new/renamed role slips through unredacted.
+		body := []byte(`{
+			"model": "o3-mini",
+			"messages": [
+				{"role": "developer", "content": "internal system prompt with secret instructions"},
+				{"role": "user", "content": "hello"}
+			]
+		}`)
+
+		out, ok := redactRequestBodyForLogging(body)
+		require.True(t, ok)
+		assert.NotContains(t, out, "secret instructions")
+
+		var parsed map[string]any
+		require.NoError(t, json.Unmarshal([]byte(out), &parsed))
+		messages := parsed["messages"].([]any)
+		require.Len(t, messages, 2)
+		devMsg := messages[0].(map[string]any)
+		assert.Equal(t, "developer", devMsg["role"])
+		assert.Equal(t, "[REDACTED]", devMsg["content"])
+	})
+
 	t.Run("redacts prompt and input string fields entirely", func(t *testing.T) {
 		body := []byte(`{"model": "gpt-3.5-turbo-instruct", "prompt": "write me a poem about my divorce"}`)
 		out, ok := redactRequestBodyForLogging(body)
