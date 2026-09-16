@@ -863,6 +863,51 @@ func TestExtractTokenUsage_WebSearchRequests(t *testing.T) {
 			body: `{"usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12},"choices":[{"message":{"annotations":[{"type":"file_citation"}]}}]}`,
 			want: 0,
 		},
+		{
+			name: "x_tools is not added to output items",
+			body: `{"usage":{"input_tokens":10,"output_tokens":2,"total_tokens":12,"x_tools":{"web_search":{"count":1}}},"output":[{"type":"web_search_call","status":"completed"},{"type":"message","status":"completed"}]}`,
+			want: 1,
+		},
+		{
+			name: "x_tools wins over output items",
+			body: `{"usage":{"input_tokens":10,"output_tokens":2,"total_tokens":12,"x_tools":{"web_search":{"count":2}}},"output":[{"type":"web_search_call","status":"completed"}]}`,
+			want: 2,
+		},
+		{
+			name: "x_tools and x_details are not summed",
+			body: `{"usage":{"input_tokens":10,"output_tokens":2,"total_tokens":12,"x_details":[{"x_billing_type":"response_api","plugins":{"web_search":{"count":1}}}],"x_tools":{"web_search":{"count":1}}}}`,
+			want: 1,
+		},
+		{
+			name: "x_details without x_tools",
+			body: `{"usage":{"input_tokens":10,"output_tokens":2,"total_tokens":12,"x_details":[{"plugins":{"web_search":{"count":2}}}]},"output":[{"type":"web_search_call","status":"completed"}]}`,
+			want: 2,
+		},
+		{
+			name: "chat plugins.search",
+			body: `{"usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12,"plugins":{"search":{"count":1,"strategy":"agent"}}}}`,
+			want: 1,
+		},
+		{
+			name: "server_tool_use wins over extensions",
+			body: `{"usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12,"server_tool_use":{"web_search_requests":3},"plugins":{"search":{"count":1}}}}`,
+			want: 3,
+		},
+		{
+			name: "nested completed response x_tools is not added to output items",
+			body: `{"type":"response.completed","response":{"output":[{"type":"web_search_call","status":"completed"}],"usage":{"input_tokens":10,"output_tokens":2,"total_tokens":12,"x_details":[{"plugins":{"web_search":{"count":1}}}],"x_tools":{"web_search":{"count":1}}}}}`,
+			want: 1,
+		},
+		{
+			name: "nested completed response x_tools wins over output items",
+			body: `{"type":"response.completed","response":{"output":[{"type":"web_search_call","status":"completed"}],"usage":{"input_tokens":10,"output_tokens":2,"total_tokens":12,"x_tools":{"web_search":{"count":3}}}}}`,
+			want: 3,
+		},
+		{
+			name: "unexpected extension shape falls back to output items",
+			body: `{"usage":{"input_tokens":10,"output_tokens":2,"total_tokens":12,"x_tools":"n/a","plugins":["search"]},"output":[{"type":"web_search_call","status":"completed"}]}`,
+			want: 1,
+		},
 	}
 
 	for _, tt := range tests {

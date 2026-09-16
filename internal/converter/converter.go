@@ -398,6 +398,16 @@ type responsesUsageDetails struct {
 		WebSearchRequests int `json:"web_search_requests,omitempty"`
 	} `json:"server_tool_use,omitempty"`
 	WebSearchRequests int `json:"web_search_requests,omitempty"`
+	converterutil.ToolUsageExtensions
+}
+
+// webSearchRequests returns the provider-reported web search count: the
+// standard counters first, then the provider usage extensions.
+func (u *responsesUsageDetails) webSearchRequests() int {
+	if requests := webSearchRequestsFromUsage(u.ServerToolUse.WebSearchRequests, u.WebSearchRequests); requests > 0 {
+		return requests
+	}
+	return u.ToolUsageExtensions.WebSearchRequests()
 }
 
 // tokenUsageShapeUsage is the "usage" object shape read by
@@ -527,10 +537,11 @@ func tokenUsageFromShape(resp *tokenUsageResponseShape, opts TokenUsageExtractio
 		completionTokens = resp.Response.Usage.OutputTokens
 	}
 
-	webSearchRequests := webSearchRequestsFromExtractedResponse(resp.Usage.ServerToolUse.WebSearchRequests, resp.Usage.WebSearchRequests, resp.Choices, resp.Output, resp.Response.Output)
-	if webSearchRequests == 0 && resp.Response.Usage != nil {
-		webSearchRequests = webSearchRequestsFromUsage(resp.Response.Usage.ServerToolUse.WebSearchRequests, resp.Response.Usage.WebSearchRequests)
+	var nestedUsageRequests int
+	if resp.Response.Usage != nil {
+		nestedUsageRequests = resp.Response.Usage.webSearchRequests()
 	}
+	webSearchRequests := webSearchRequestsFromExtractedResponse(resp.Usage.webSearchRequests(), nestedUsageRequests, resp.Choices, resp.Output, resp.Response.Output)
 
 	if promptTokens == 0 && completionTokens == 0 && webSearchRequests == 0 {
 		return nil
@@ -720,14 +731,19 @@ func webSearchRequestsFromUsage(values ...int) int {
 	return 0
 }
 
+// webSearchRequestsFromExtractedResponse picks one web search count for the
+// response, never adding different representations of the same executions
+// together: a usage counter reported by the provider (top-level usage, then
+// the response.completed event's usage) wins over counting web_search_call
+// output items, which in turn wins over url_citation annotations.
 func webSearchRequestsFromExtractedResponse(
-	serverToolUseRequests int,
 	usageRequests int,
+	nestedUsageRequests int,
 	choices []extractedChoiceWithAnnotations,
 	output []extractedOutputItem,
 	nestedOutput []extractedOutputItem,
 ) int {
-	if requests := webSearchRequestsFromUsage(serverToolUseRequests, usageRequests); requests > 0 {
+	if requests := webSearchRequestsFromUsage(usageRequests, nestedUsageRequests); requests > 0 {
 		return requests
 	}
 	if requests := countCompletedWebSearchOutputItems(output); requests > 0 {

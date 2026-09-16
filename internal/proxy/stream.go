@@ -204,6 +204,7 @@ func (o *openAIStreamUsageExtractor) extractChatCompletionUsage(payload []byte) 
 				WebSearchRequests int `json:"web_search_requests,omitempty"`
 			} `json:"server_tool_use,omitempty"`
 			WebSearchRequests int `json:"web_search_requests,omitempty"`
+			converterutil.ToolUsageExtensions
 		} `json:"usage"`
 	}
 
@@ -252,6 +253,7 @@ func (o *openAIStreamUsageExtractor) extractChatCompletionUsage(payload []byte) 
 		WebSearchRequests: webSearchRequestsFromUsage(
 			data.Usage.ServerToolUse.WebSearchRequests,
 			data.Usage.WebSearchRequests,
+			data.Usage.ToolUsageExtensions.WebSearchRequests(),
 		),
 	}
 }
@@ -300,6 +302,7 @@ func (o *openAIStreamUsageExtractor) extractResponsesAPIUsage(payload []byte) *S
 	webSearchRequests := webSearchRequestsFromUsage(
 		usage.ServerToolUse.WebSearchRequests,
 		usage.WebSearchRequests,
+		usage.ToolUsageExtensions.WebSearchRequests(),
 	)
 	if webSearchRequests == 0 {
 		webSearchRequests = countCompletedStreamingWebSearchItems(data.Response.Output)
@@ -376,6 +379,7 @@ type responsesAPIUsage struct {
 		WebSearchRequests int `json:"web_search_requests,omitempty"`
 	} `json:"server_tool_use,omitempty"`
 	WebSearchRequests int `json:"web_search_requests,omitempty"`
+	converterutil.ToolUsageExtensions
 }
 
 // anthropicStreamUsageExtractor implements StreamUsageExtractor for Anthropic format
