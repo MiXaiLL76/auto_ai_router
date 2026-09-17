@@ -84,7 +84,7 @@ func (p *Proxy) admitOrganizationModel(
 	if !ok {
 		return nil, "", "", false
 	}
-	if policy == nil {
+	if !policy.HasCustomPricing() {
 		return body, "", "", true
 	}
 
@@ -143,6 +143,9 @@ func (p *Proxy) IsOrganizationModelAllowedForToken(
 	if p == nil || p.modelManager == nil || policy == nil {
 		return false
 	}
+	if !policy.HasCustomPricing() {
+		return p.IsModelAllowedForToken(tokenInfo, publicModelID)
+	}
 	resolution, err := p.modelManager.ResolveOrganizationModel(policy, publicModelID)
 	if err != nil {
 		return false
@@ -160,7 +163,7 @@ func (p *Proxy) resolveRetryBillingPrice(
 	modelID string,
 	realModelID string,
 ) (string, *routermodels.ModelPrice) {
-	if logCtx != nil && logCtx.OrganizationPolicy != nil {
+	if logCtx != nil && logCtx.OrganizationPolicy.HasCustomPricing() {
 		return logCtx.PriceModelID, logCtx.ModelPrice
 	}
 	return lookupBillingModelPrice(p.priceRegistry, publicModelID, modelID, realModelID)

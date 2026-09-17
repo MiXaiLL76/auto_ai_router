@@ -530,8 +530,10 @@ func addOrganizationPolicySpendMetadata(metadata string, logCtx *RequestLogConte
 	}
 	spendMetadata["public_model_name"] = logCtx.PublicModelID
 	spendMetadata["canonical_model_name"] = logCtx.CanonicalModelID
-	spendMetadata["billing_profile_id"] = logCtx.BillingProfileID
-	spendMetadata["billing_profile_sha256"] = logCtx.BillingProfileSHA256
+	if logCtx.OrganizationPolicy.HasCustomPricing() {
+		spendMetadata["billing_profile_id"] = logCtx.BillingProfileID
+		spendMetadata["billing_profile_sha256"] = logCtx.BillingProfileSHA256
+	}
 	spendMetadata["billing_price_model_name"] = logCtx.PriceModelID
 	spendMetadata["billing_organization_id"] = logCtx.BillingOrganizationID
 	encoded, err := json.Marshal(doc)

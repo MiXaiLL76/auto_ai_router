@@ -342,6 +342,57 @@ func TestOrganizationPolicy_FrozenPriceSurvivesDefaultRegistryChange(t *testing.
 	assert.Same(t, price, resolved)
 }
 
+func TestOrganizationPolicy_DefaultPriceUsesGlobalAliasAndRefresh(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+		assert.Equal(t, "route-a", body["model"])
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"chatcmpl-1","object":"chat.completion","model":"route-a","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}}`))
+	}))
+	defer upstream.Close()
+	db := &organizationPolicyTestDB{tokens: map[string]*dbmodels.TokenInfo{
+		"token": {Token: "token-hash", UserID: "user-1", DirectOrganizationID: "org-1", OrganizationID: "org-1"},
+	}}
+	prx := newOrganizationPolicyProxy(t, upstream.URL, db, []config.OrganizationPolicyConfig{{
+		OrganizationID: "org-1", CredentialDenylist: []string{"other-provider"},
+	}})
+	for _, rate := range []float64{0.001, 0.002} {
+		setTestModelPrice(prx, "route-a", &routermodels.ModelPrice{InputCostPerToken: rate, OutputCostPerToken: rate})
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", stringsReader(`{"model":"public/shared","messages":[]}`))
+		req.Header.Set("Authorization", "Bearer token")
+		w := httptest.NewRecorder()
+		prx.ProxyRequest(w, req)
+		require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+		require.NotEmpty(t, db.logs)
+		entry := db.logs[len(db.logs)-1]
+		assert.InDelta(t, 15*rate, entry.Spend, 1e-12)
+		assert.Equal(t, "org-1", entry.OrganizationID)
+		var metadata map[string]any
+		require.NoError(t, json.Unmarshal([]byte(entry.Metadata), &metadata))
+		spendMetadata := metadata["spend_logs_metadata"].(map[string]any)
+		assert.Equal(t, "org-1", spendMetadata["billing_organization_id"])
+		assert.NotContains(t, spendMetadata, "billing_profile_id")
+		assert.NotContains(t, spendMetadata, "billing_profile_sha256")
+	}
+	require.Len(t, db.logs, 2)
+	policy, _ := prx.organizationPolicies.Policy("org-1")
+	logCtx := &RequestLogContext{OrganizationPolicy: policy}
+	_, retryPrice := prx.resolveRetryBillingPrice(logCtx, "public/shared", "route-a", "route-a")
+	require.NotNil(t, retryPrice)
+	assert.Equal(t, 0.002, retryPrice.InputCostPerToken)
+
+	prx.strictAllTeamModelsACL = true
+	db.tokens["token"].Models = []string{"route-b"}
+	assert.False(t, prx.IsOrganizationModelAllowedForToken(db.tokens["token"], policy, "public/shared"))
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", stringsReader(`{"model":"public/shared","messages":[]}`))
+	req.Header.Set("Authorization", "Bearer token")
+	w := httptest.NewRecorder()
+	prx.ProxyRequest(w, req)
+	assert.Equal(t, http.StatusForbidden, w.Code)
+	require.Len(t, db.logs, 2)
+}
+
 func TestOrganizationPolicy_InvisibleTargetRejectsBeforePriceAndProvider(t *testing.T) {
 	var calls atomic.Int32
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -77,11 +77,21 @@ func LoadOrganizationPolicies(
 	if manager == nil {
 		return nil, fmt.Errorf("organization policies require a model manager")
 	}
+	if err := config.ValidateOrganizationPolicies(policies); err != nil {
+		return nil, err
+	}
 
 	profileByLink := make(map[string]loadedProfile, len(policies))
 
 	profiles := make(map[string]profileIdentity)
 	for _, cfg := range policies {
+		if cfg.PriceProfileID == "" {
+			registry.byOrganization[cfg.OrganizationID] = &OrganizationPolicy{
+				OrganizationID:     cfg.OrganizationID,
+				credentialDenylist: append([]string(nil), cfg.CredentialDenylist...),
+			}
+			continue
+		}
 		loaded, cached := profileByLink[cfg.ModelPricesLink]
 		if !cached {
 			priceRows, identity, err := loadStrictOrganizationPriceProfile(cfg.PriceProfileID, cfg.ModelPricesLink)
@@ -132,6 +142,10 @@ func LoadOrganizationPolicies(
 		registry.byOrganization[policy.OrganizationID] = policy
 	}
 	return registry, nil
+}
+
+func (p *OrganizationPolicy) HasCustomPricing() bool {
+	return p != nil && p.PriceProfileID != ""
 }
 
 func (p *OrganizationPolicy) CredentialDenylist() []string {
@@ -296,7 +310,7 @@ func (m *Manager) IsAnyModelIDAllowedByScope(candidates []string, allowedModelID
 }
 
 func (m *Manager) GetAllModelsScopedForOrganization(visibility scope.Context, policy *OrganizationPolicy) ModelsResponse {
-	if policy == nil {
+	if !policy.HasCustomPricing() {
 		return m.GetAllModelsScoped(visibility)
 	}
 	if response, ok := m.getCachedScopedAllModelsForOrganization(visibility, policy); ok {
@@ -313,14 +327,14 @@ func (m *Manager) GetAllModelsScopedForOrganization(visibility scope.Context, po
 	return projected
 }
 
-// GetAllModelsWithAccessGroupsScopedForOrganization deliberately ignores
-// include_model_access_groups for organization-scoped keys: the access-group
-// projection is an administrative view over internal routes, and an
-// organization catalog is an explicit curated surface (allowlist + mappings +
-// prices). Returning access-group pseudo-models would re-introduce backend IDs
-// through a query parameter, exactly as GetAllModelsWithAccessGroupsScoped
-// already suppresses them once a client model surface is configured.
+// GetAllModelsWithAccessGroupsScopedForOrganization preserves the global catalog
+// behavior unless a custom tariff defines the organization model surface.
+// Custom tariff policies exclude provider access groups to keep internal routes
+// out of the organization catalog.
 func (m *Manager) GetAllModelsWithAccessGroupsScopedForOrganization(visibility scope.Context, policy *OrganizationPolicy) ModelsResponse {
+	if !policy.HasCustomPricing() {
+		return m.GetAllModelsWithAccessGroupsScoped(visibility)
+	}
 	return m.GetAllModelsScopedForOrganization(visibility, policy)
 }
 

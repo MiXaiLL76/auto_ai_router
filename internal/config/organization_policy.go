@@ -112,11 +112,14 @@ func ValidateOrganizationPolicies(policies []OrganizationPolicyConfig) error {
 			return fmt.Errorf("organization policy: duplicate organization_id %q", policy.OrganizationID)
 		}
 		seen[policy.OrganizationID] = struct{}{}
-		if policy.PriceProfileID == "" {
+		if policy.PriceProfileID == "" && policy.ModelPricesLink != "" {
 			return fmt.Errorf("organization policy %q: price_profile_id is required", policy.OrganizationID)
 		}
-		if policy.ModelPricesLink == "" {
+		if policy.ModelPricesLink == "" && policy.PriceProfileID != "" {
 			return fmt.Errorf("organization policy %q: model_prices_link is required", policy.OrganizationID)
+		}
+		if policy.PriceProfileID == "" && (policy.AllowlistSet || len(policy.ModelAllowlist) > 0 || len(policy.ModelMappings) > 0) {
+			return fmt.Errorf("organization policy %q requires a price profile for model overrides", policy.OrganizationID)
 		}
 		for _, modelID := range policy.ModelAllowlist {
 			if modelID == "" {

@@ -72,6 +72,7 @@ func newDenylistRootProxy(
 	leafURL string,
 	db *organizationPolicyTestDB,
 	denylist []string,
+	defaultPricing bool,
 ) *Proxy {
 	t.Helper()
 	credential := proxyCred("leaf-router", leafURL, 1)
@@ -80,12 +81,15 @@ func newDenylistRootProxy(
 	}})
 	manager.LoadModelsFromConfig([]config.CredentialConfig{credential})
 	manager.SetCredentials([]config.CredentialConfig{credential})
-	registry, err := routermodels.LoadOrganizationPolicies([]config.OrganizationPolicyConfig{{
+	policy := config.OrganizationPolicyConfig{
 		OrganizationID:     "org-1",
-		PriceProfileID:     "profile-1",
-		ModelPricesLink:    writeProxyPolicyPrices(t, `{"route-a":{"input_cost_per_token":0.001,"output_cost_per_token":0.001}}`),
 		CredentialDenylist: denylist,
-	}}, manager, routermodels.OrganizationPolicyLoadOptions{
+	}
+	if !defaultPricing {
+		policy.PriceProfileID = "profile-1"
+		policy.ModelPricesLink = writeProxyPolicyPrices(t, `{"route-a":{"input_cost_per_token":0.001,"output_cost_per_token":0.001}}`)
+	}
+	registry, err := routermodels.LoadOrganizationPolicies([]config.OrganizationPolicyConfig{policy}, manager, routermodels.OrganizationPolicyLoadOptions{
 		LiteLLMDBEnabled:      true,
 		LiteLLMDBRequired:     true,
 		DisableSpendLogsWrite: false,
@@ -97,6 +101,7 @@ func newDenylistRootProxy(
 	builder.config.OrganizationPolicies = registry
 	root := builder.Build()
 	root.LiteLLMDB = db
+	setTestModelPrice(root, "route-a", &routermodels.ModelPrice{InputCostPerToken: 0.001, OutputCostPerToken: 0.001})
 	return root
 }
 
@@ -105,6 +110,7 @@ func newLocalDenylistPolicyProxy(
 	credentials []config.CredentialConfig,
 	db *organizationPolicyTestDB,
 	denylist []string,
+	defaultPricing bool,
 ) *Proxy {
 	t.Helper()
 	models := make([]config.ModelRPMConfig, 0, len(credentials))
@@ -114,12 +120,15 @@ func newLocalDenylistPolicyProxy(
 	manager := routermodels.New(testhelpers.NewTestLogger(), 100, models)
 	manager.LoadModelsFromConfig(credentials)
 	manager.SetCredentials(credentials)
-	registry, err := routermodels.LoadOrganizationPolicies([]config.OrganizationPolicyConfig{{
+	policy := config.OrganizationPolicyConfig{
 		OrganizationID:     "org-1",
-		PriceProfileID:     "profile-1",
-		ModelPricesLink:    writeProxyPolicyPrices(t, `{"route-a":{"input_cost_per_token":0.001,"output_cost_per_token":0.001}}`),
 		CredentialDenylist: denylist,
-	}}, manager, routermodels.OrganizationPolicyLoadOptions{
+	}
+	if !defaultPricing {
+		policy.PriceProfileID = "profile-1"
+		policy.ModelPricesLink = writeProxyPolicyPrices(t, `{"route-a":{"input_cost_per_token":0.001,"output_cost_per_token":0.001}}`)
+	}
+	registry, err := routermodels.LoadOrganizationPolicies([]config.OrganizationPolicyConfig{policy}, manager, routermodels.OrganizationPolicyLoadOptions{
 		LiteLLMDBEnabled:      true,
 		LiteLLMDBRequired:     true,
 		DisableSpendLogsWrite: false,
@@ -135,6 +144,14 @@ func newLocalDenylistPolicyProxy(
 }
 
 func TestOrganizationCredentialDenylistIsOrganizationScopedAndAppliesLocally(t *testing.T) {
+	for _, defaultPricing := range []bool{false, true} {
+		t.Run(fmt.Sprintf("default_pricing_%t", defaultPricing), func(t *testing.T) {
+			testOrganizationCredentialDenylistLocally(t, defaultPricing)
+		})
+	}
+}
+
+func testOrganizationCredentialDenylistLocally(t *testing.T, defaultPricing bool) {
 	var deniedCalls, allowedCalls atomic.Int32
 	var deniedHeader, allowedHeader atomic.Bool
 	deniedProvider := denylistProvider(t, &deniedCalls, &deniedHeader)
@@ -157,7 +174,7 @@ func TestOrganizationCredentialDenylistIsOrganizationScopedAndAppliesLocally(t *
 			DirectOrganizationID: "org-2", OrganizationID: "org-2",
 		},
 	}}
-	proxy := newLocalDenylistPolicyProxy(t, credentials, db, []string{"denied-provider"})
+	proxy := newLocalDenylistPolicyProxy(t, credentials, db, []string{"denied-provider"}, defaultPricing)
 	setTestModelPrice(proxy, "route-a", &routermodels.ModelPrice{})
 
 	request := func(token string) *httptest.ResponseRecorder {
@@ -180,6 +197,14 @@ func TestOrganizationCredentialDenylistIsOrganizationScopedAndAppliesLocally(t *
 }
 
 func TestOrganizationCredentialDenylistPropagatesAndKeepsRouterEligible(t *testing.T) {
+	for _, defaultPricing := range []bool{false, true} {
+		t.Run(fmt.Sprintf("default_pricing_%t", defaultPricing), func(t *testing.T) {
+			testOrganizationCredentialDenylistPropagation(t, defaultPricing)
+		})
+	}
+}
+
+func testOrganizationCredentialDenylistPropagation(t *testing.T, defaultPricing bool) {
 	var deniedCalls, allowedCalls atomic.Int32
 	var deniedHeader, allowedHeader atomic.Bool
 	deniedProvider := denylistProvider(t, &deniedCalls, &deniedHeader)
@@ -213,7 +238,7 @@ func TestOrganizationCredentialDenylistPropagatesAndKeepsRouterEligible(t *testi
 			DirectOrganizationID: "org-1", OrganizationID: "org-1",
 		},
 	}}
-	root := newDenylistRootProxy(t, "http://air-middle", db, []string{"denied-provider", "leaf-router"})
+	root := newDenylistRootProxy(t, "http://air-middle", db, []string{"denied-provider", "leaf-router"}, defaultPricing)
 	setDenylistHostRewrite(t, root, "air-middle", middleServer.URL)
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(
@@ -464,6 +489,58 @@ func TestOrganizationCredentialDenylistSurvivesRetry(t *testing.T) {
 	leaf.ProxyRequest(w, req)
 
 	require.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, int32(1), failingCalls.Load())
+	assert.Zero(t, deniedCalls.Load())
+	assert.Equal(t, int32(1), allowedCalls.Load())
+}
+
+func TestOrganizationDefaultPricingDenylistRetryAndExhaustion(t *testing.T) {
+	var failingCalls, deniedCalls, allowedCalls atomic.Int32
+	failingProvider := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		failingCalls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"error":{"message":"failed"}}`))
+	}))
+	defer failingProvider.Close()
+	var deniedHeader, allowedHeader atomic.Bool
+	deniedProvider := denylistProvider(t, &deniedCalls, &deniedHeader)
+	defer deniedProvider.Close()
+	allowedProvider := denylistProvider(t, &allowedCalls, &allowedHeader)
+	defer allowedProvider.Close()
+	failing := directDenylistCredential("failing-provider", failingProvider.URL)
+	failing.Weight = 100
+	credentials := []config.CredentialConfig{
+		failing,
+		directDenylistCredential("denied-provider", deniedProvider.URL),
+		directDenylistCredential("allowed-provider", allowedProvider.URL),
+	}
+	db := &organizationPolicyTestDB{tokens: map[string]*dbmodels.TokenInfo{
+		"org-token": {Token: "token-hash", UserID: "user-1", DirectOrganizationID: "org-1", OrganizationID: "org-1"},
+	}}
+	request := func(prx *Proxy) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"route-a","messages":[]}`))
+		req.Header.Set("Authorization", "Bearer org-token")
+		req.Header.Set("Content-Type", "application/json")
+		w := httptest.NewRecorder()
+		prx.ProxyRequest(w, req)
+		return w
+	}
+	prx := newLocalDenylistPolicyProxy(t, credentials, db, []string{"denied-provider"}, true)
+	prx.maxProviderRetries = 1
+	setTestModelPrice(prx, "route-a", &routermodels.ModelPrice{InputCostPerToken: 0.001, OutputCostPerToken: 0.002})
+	w := request(prx)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	assert.Equal(t, int32(1), failingCalls.Load())
+	assert.Zero(t, deniedCalls.Load())
+	assert.Equal(t, int32(1), allowedCalls.Load())
+	require.NotEmpty(t, db.logs)
+	assert.Greater(t, db.logs[len(db.logs)-1].Spend, 0.0)
+
+	blocked := newLocalDenylistPolicyProxy(t, credentials, db, []string{"failing-provider", "denied-provider", "allowed-provider"}, true)
+	setTestModelPrice(blocked, "route-a", &routermodels.ModelPrice{InputCostPerToken: 0.001})
+	w = request(blocked)
+	assert.Equal(t, http.StatusTooManyRequests, w.Code, w.Body.String())
 	assert.Equal(t, int32(1), failingCalls.Load())
 	assert.Zero(t, deniedCalls.Load())
 	assert.Equal(t, int32(1), allowedCalls.Load())

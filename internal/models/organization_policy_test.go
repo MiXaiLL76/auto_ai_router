@@ -41,6 +41,33 @@ func validPolicyOptions() OrganizationPolicyLoadOptions {
 	}
 }
 
+func TestOrganizationPolicy_DefaultCatalog(t *testing.T) {
+	manager := testPolicyManager()
+	registry, err := LoadOrganizationPolicies([]config.OrganizationPolicyConfig{{
+		OrganizationID:     "org-default",
+		CredentialDenylist: []string{"provider"},
+	}, {
+		OrganizationID:  "org-custom",
+		PriceProfileID:  "custom",
+		ModelPricesLink: writePolicyPrices(t, `{"public/a":{"input_cost_per_token":0.001}}`),
+	}}, manager, validPolicyOptions())
+	require.NoError(t, err)
+	policy, ok := registry.Policy("org-default")
+	require.True(t, ok)
+	assert.False(t, policy.HasCustomPricing())
+	assert.Empty(t, policy.ProfileSHA256)
+	assert.Equal(t, []string{"provider"}, policy.CredentialDenylist())
+	visibility := scope.PublicContext()
+	assert.Equal(t, manager.GetAllModelsScoped(visibility), manager.GetAllModelsScopedForOrganization(visibility, policy))
+	assert.Equal(t, manager.GetAllModelsWithAccessGroupsScoped(visibility), manager.GetAllModelsWithAccessGroupsScopedForOrganization(visibility, policy))
+	manager.SetClientModelIDs([]string{"public/a"})
+	assert.Equal(t, manager.GetAllModelsScoped(visibility), manager.GetAllModelsScopedForOrganization(visibility, policy))
+	custom, ok := registry.Policy("org-custom")
+	require.True(t, ok)
+	assert.True(t, custom.HasCustomPricing())
+	assert.Equal(t, []string{"public/a"}, responseModelIDs(manager.GetAllModelsScopedForOrganization(visibility, custom)))
+}
+
 func TestLoadOrganizationPolicies_RequiresPostgresWriter(t *testing.T) {
 	_, err := LoadOrganizationPolicies([]config.OrganizationPolicyConfig{{
 		OrganizationID:  "org-1",

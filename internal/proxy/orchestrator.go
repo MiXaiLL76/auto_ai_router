@@ -760,7 +760,7 @@ func (p *Proxy) readRequestBodyAndSelectModel(
 		if !ok {
 			return nil, "", "", false, false
 		}
-		if logCtx.OrganizationPolicy != nil {
+		if logCtx.OrganizationPolicy.HasCustomPricing() {
 			return policyBody, policyModelID, policyRealModelID, streaming, true
 		}
 	}
