@@ -1508,7 +1508,16 @@ func (k *KafkaConfig) UnmarshalYAML(value *yaml.Node) error {
 	if k.RawBodies.Enabled, err = parseField(temp.RawBodies.Enabled, false, strconv.ParseBool, "kafka.raw_bodies.enabled"); err != nil {
 		return err
 	}
+	// Unlike Topic/ClientID on the parent KafkaConfig (whose defaults are
+	// applied later by kafkalog.Config.ApplyDefaults), this one has no such
+	// second pass -- Validate runs directly against this struct, so an
+	// unresolved empty topic must fall back to the documented default here,
+	// not silently become "" and fail "topic is required" at startup for
+	// every deployment that (reasonably) omits it.
 	k.RawBodies.Topic = resolveEnvString(temp.RawBodies.Topic)
+	if k.RawBodies.Topic == "" {
+		k.RawBodies.Topic = "raw-bodies"
+	}
 	if k.RawBodies.StoreRawBody, err = parseField(temp.RawBodies.StoreRawBody, false, strconv.ParseBool, "kafka.raw_bodies.store_raw_body"); err != nil {
 		return err
 	}

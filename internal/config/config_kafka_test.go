@@ -267,6 +267,34 @@ raw_bodies:
 	a.True(kafkaCfg.RawBodies.RedactSensitiveFields, "redact_sensitive_fields must default to true when omitted")
 }
 
+// TestKafkaConfig_UnmarshalYAML_RawBodiesTopicDefaultsWhenOmitted guards a
+// real production incident (2026-09-17): enabling raw_bodies without an
+// explicit topic -- exactly `enabled: true` plus `store_only_errors: true`,
+// nothing else, which is a perfectly reasonable config given the docs say
+// topic defaults to "raw-bodies" -- overwrote Topic with "" instead of
+// falling back, and Validate() then rejected the config at startup
+// ("kafka.raw_bodies.topic is required"), crash-looping every pod that had
+// raw_bodies enabled without spelling out topic.
+func TestKafkaConfig_UnmarshalYAML_RawBodiesTopicDefaultsWhenOmitted(t *testing.T) {
+	yamlDoc := `
+enabled: true
+brokers:
+  - "kafka:9092"
+topic: air.spend_logs
+raw_bodies:
+  enabled: true
+  store_only_errors: true
+`
+	var kafkaCfg KafkaConfig
+	a := assert.New(t)
+	a.NoError(yaml.Unmarshal([]byte(yamlDoc), &kafkaCfg))
+	a.Equal("raw-bodies", kafkaCfg.RawBodies.Topic, "an omitted topic must fall back to the documented default, not become empty")
+
+	cfg := baseValidConfigForKafkaTests()
+	cfg.Kafka = kafkaCfg
+	a.NoError(cfg.Validate(), "this exact shape must pass startup validation, not crash-loop")
+}
+
 func TestKafkaConfig_UnmarshalYAML_RawBodiesDefaultsToDisabled(t *testing.T) {
 	yamlDoc := `
 enabled: true
@@ -278,7 +306,12 @@ topic: air.spend_logs
 	a := assert.New(t)
 	a.NoError(yaml.Unmarshal([]byte(yamlDoc), &kafkaCfg))
 	a.False(kafkaCfg.RawBodies.Enabled)
-	a.Empty(kafkaCfg.RawBodies.Topic)
+	// Topic still defaults to "raw-bodies" even with the whole raw_bodies
+	// block absent -- harmless since Validate only inspects Topic when
+	// Enabled is true, and it keeps this identical to the omitted-topic
+	// case (TestKafkaConfig_UnmarshalYAML_RawBodiesTopicDefaultsWhenOmitted)
+	// rather than depending on which fields happened to be present.
+	a.Equal("raw-bodies", kafkaCfg.RawBodies.Topic)
 	a.False(kafkaCfg.RawBodies.StoreRawBody)
 	a.True(kafkaCfg.RawBodies.StoreOnlyErrors)
 	a.True(kafkaCfg.RawBodies.RedactSensitiveFields)
