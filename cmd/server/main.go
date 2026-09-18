@@ -179,6 +179,7 @@ func main() {
 	if litellmDBManager.IsEnabled() {
 		applyInitialDBModelTable(context.Background(), litellmDBManager, staticCreds, bal, modelManager, rateLimiter, priceRegistry, cfg, log)
 	}
+	modelManager.SetExternalModelIDs(cfg.Video.ModelIDs())
 	organizationPolicies := loadOrganizationPoliciesOrExit(log, cfg, modelManager)
 	if !organizationPolicies.Empty() {
 		log.Info("Organization policies loaded", "count", len(cfg.OrganizationPolicies))
@@ -270,6 +271,8 @@ func main() {
 		DefaultEstimatedCompletionTokens: cfg.LiteLLMDB.DefaultEstimatedCompletionTokens,
 	})
 
+	videoRuntime := initializeVideoOrExit(cfg, prx, litellmDBManager, log)
+
 	// ==================== Background Goroutines ====================
 	bgCtx, bgCancel := context.WithCancel(context.Background())
 	defer bgCancel()
@@ -277,6 +280,7 @@ func main() {
 	prx.Start(bgCtx)
 
 	var wg sync.WaitGroup
+	videoRuntime.start(bgCtx, &wg)
 	var updateMutex sync.Mutex
 
 	startMetricsUpdater(bgCtx, cfg, log, bal, rateLimiter, metrics, &wg, &updateMutex)
@@ -310,6 +314,9 @@ func main() {
 
 	// ==================== HTTP Server Setup ====================
 	rtr := router.New(prx, modelManager, &cfg.Monitoring, log, cfg)
+	if videoRuntime != nil {
+		rtr.SetVideoHandler(videoRuntime.handler)
+	}
 	mux := http.NewServeMux()
 	mux.Handle("/", rtr)
 

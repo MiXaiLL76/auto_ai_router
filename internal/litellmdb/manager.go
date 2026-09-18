@@ -54,6 +54,16 @@ type Manager interface {
 	Shutdown(ctx context.Context) error
 }
 
+// SpendCommitResult is the result of an acknowledged accounting transaction.
+type SpendCommitResult = spendlog.CommitResult
+
+// SpendCommitter is implemented by managers that can acknowledge a spend
+// entry synchronously. Callers that require durable accounting can opt in
+// without expanding the base Manager interface used by read-only components.
+type SpendCommitter interface {
+	CommitSpend(context.Context, *models.SpendLogEntry) (SpendCommitResult, error)
+}
+
 // ==================== NoopManager ====================
 
 // NoopManager is a no-op implementation when module is disabled
@@ -84,6 +94,11 @@ func (n *NoopManager) ValidateTokenForModel(_ context.Context, _, _ string) (*mo
 func (n *NoopManager) LogSpend(_ *models.SpendLogEntry) error {
 	// no-op
 	return nil
+}
+
+// CommitSpend is a no-op when the LiteLLM database module is disabled.
+func (n *NoopManager) CommitSpend(_ context.Context, _ *models.SpendLogEntry) (SpendCommitResult, error) {
+	return SpendCommitResult{}, nil
 }
 
 // SpendLoggingEnabled reports whether PostgreSQL spend writes are active.
@@ -222,6 +237,16 @@ func (m *DefaultManager) LogSpend(entry *models.SpendLogEntry) error {
 	return m.spendLogger.Log(entry)
 }
 
+// CommitSpend writes one spend entry synchronously. The spend logger provides
+// request-ID idempotency and retains the entry for asynchronous replay when a
+// database attempt fails.
+func (m *DefaultManager) CommitSpend(ctx context.Context, entry *models.SpendLogEntry) (SpendCommitResult, error) {
+	if m.config.DisableSpendLogsWrite || m.spendLogger == nil {
+		return SpendCommitResult{}, nil
+	}
+	return m.spendLogger.CommitSpend(ctx, entry)
+}
+
 // SpendLoggingEnabled reports whether PostgreSQL spend writes are active.
 func (m *DefaultManager) SpendLoggingEnabled() bool {
 	return !m.config.DisableSpendLogsWrite && m.spendLogger != nil
@@ -299,3 +324,5 @@ func (m *DefaultManager) Shutdown(ctx context.Context) error {
 
 var _ Manager = (*DefaultManager)(nil)
 var _ Manager = (*NoopManager)(nil)
+var _ SpendCommitter = (*DefaultManager)(nil)
+var _ SpendCommitter = (*NoopManager)(nil)

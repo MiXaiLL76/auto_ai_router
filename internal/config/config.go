@@ -212,6 +212,7 @@ type Config struct {
 	Redis                RedisConfig                `yaml:"redis,omitempty"`
 	OTEL                 OTELConfig                 `yaml:"otel,omitempty"`
 	Kafka                KafkaConfig                `yaml:"kafka,omitempty"`
+	Video                VideoConfig                `yaml:"video,omitempty"`
 	// ModelTemplates stores x-model-templates entries as raw interface{} so that
 	// both single-model mappings and lists of models can be defined as YAML anchors
 	// without type errors. The actual model data is extracted via anchor expansion.
@@ -243,6 +244,7 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 		Redis                RedisConfig                `yaml:"redis,omitempty"`
 		OTEL                 OTELConfig                 `yaml:"otel,omitempty"`
 		Kafka                KafkaConfig                `yaml:"kafka,omitempty"`
+		Video                VideoConfig                `yaml:"video,omitempty"`
 		ModelTemplates       map[string]interface{}     `yaml:"x-model-templates,omitempty"`
 	}
 
@@ -266,6 +268,7 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 	c.Redis = raw.Redis
 	c.OTEL = raw.OTEL
 	c.Kafka = raw.Kafka
+	c.Video = raw.Video
 	c.ModelTemplates = raw.ModelTemplates
 
 	return nil
@@ -1818,6 +1821,9 @@ func (c *Config) Normalize() {
 }
 
 func (c *Config) Validate() error {
+	if err := c.Video.Validate(); err != nil {
+		return err
+	}
 	if c.Server.Port <= 0 || c.Server.Port > 65535 {
 		return fmt.Errorf("invalid port: %d", c.Server.Port)
 	}

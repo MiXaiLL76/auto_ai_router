@@ -61,6 +61,7 @@ var spendRoutes = []spendRoute{
 	{"aresponses", "/responses", "/responses"},
 	{"aimage_generation", "/images/generations", "/image/generations"},
 	{"aimage_edit", "/images/edits", "/images/edits"},
+	{"avideo_generation", "/videos", "/videos"},
 	{"atranscription", "/audio/transcriptions", "/audio/transcriptions"},
 	{"aspeech", "/audio/speech", "/audio/speech"},
 	{"amoderation", "/moderations", "/moderations"},

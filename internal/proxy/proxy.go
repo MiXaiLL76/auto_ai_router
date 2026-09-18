@@ -261,6 +261,7 @@ type RequestLogContext struct {
 	ErrorMsg              string                   // Error message (added to metadata on failure)
 	ErrorBodyRaw          string                   // Untruncated upstream provider error body, captured BEFORE any client-facing masking (maskedUpstreamErrorBody/clientResponseBodyForCredential) is applied. Only ever set on failure paths. Feeds kafkalog.RawBodyEvent.ResponseBody, not SpendEvent.
 	ClientResponseBody    string                   // What the client actually received for this failure, AFTER masking (identical to ErrorBodyRaw when nothing was masked, e.g. mid-stream errors detected after the response already committed -- see markProxyProviderStreamError's clientSaw param). Feeds kafkalog.RawBodyEvent.ClientResponseBody.
+	ErrorOrigin           ErrorOrigin              // Which code path produced this failure (see ErrorOrigin's doc comment) -- a fixed, filterable tag distinct from ErrorMsg's free text. Empty when the cause is already self-evident from HTTPStatus/ErrorBodyRaw alone. Feeds kafkalog SpendEvent.ErrorOrigin/RawBodyEvent.ErrorOrigin and LiteLLM_SpendLogs.metadata.error_information.error_origin.
 	RequestBodyRaw        string                   // Untruncated client request body, captured only when kafka.raw_bodies.store_raw_body is enabled (see readRequestBodyAndSelectModel). Feeds kafkalog.RawBodyEvent.RequestBody. Empty whenever the toggle is off, so it never holds prompt content by default.
 	TokenUsage            *converter.TokenUsage    // Token usage with detailed breakdown
 	ModelPrice            *models.ModelPrice       // Price resolved before the provider request
@@ -692,6 +693,19 @@ func (p *Proxy) executeProxyRequest(
 	// Send request
 	resp, err := p.client.Do(proxyReq) //nolint:gosec // G704: same targetURL as above, host isn't attacker-controlled
 	if err != nil {
+		if isClientCanceledTransportError(r, err) {
+			// The client is already gone -- don't count this against the
+			// credential's error rate, and let the caller's retry loop know
+			// (via the same check) that trying another credential is
+			// pointless. See ErrorOriginClientCanceled's doc comment.
+			p.logger.DebugContext(r.Context(), "Proxy request aborted: client disconnected",
+				"credential", cred.Name,
+				"model", modelID,
+				"error", err,
+				"url", targetURL,
+			)
+			return nil, err
+		}
 		// Transport failure on one credential — the caller retries with another
 		// credential or fallback, so this is WARN; the final outcome (success or
 		// exhausted attempts) is logged at the appropriate level by the caller.
@@ -1032,6 +1046,13 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 			resp, fwdErr := p.forwardToProxy(w, r, modelID, cred, proxyBody, start)
 			lastProxyErr = fwdErr
 			if fwdErr != nil {
+				if isClientCanceledTransportError(r, fwdErr) {
+					// No point trying another same-type credential against
+					// an already-dead client context; fall straight to the
+					// "no upstream response" block below.
+					shouldRetry = false
+					break
+				}
 				shouldRetry = true
 				retryReason = RetryReasonNetErr
 				continue
@@ -1105,28 +1126,50 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 			statusCode := http.StatusBadGateway
 			statusMessage := "Bad Gateway"
 			errorMsg := fmt.Sprintf("Proxy forward error: %v", lastProxyErr)
-			if isTimeoutError(lastProxyErr) {
+			errorOrigin := ErrorOriginProxyForwardError
+			clientCanceled := isClientCanceledTransportError(r, lastProxyErr)
+			switch {
+			case clientCanceled:
+				statusCode = StatusClientClosedRequest
+				statusMessage = "Client Closed Request"
+				errorMsg = "Client disconnected before a response was received"
+				errorOrigin = ErrorOriginClientCanceled
+			case isTimeoutError(lastProxyErr):
 				statusCode = http.StatusRequestTimeout
 				statusMessage = "Request Timeout"
 				errorMsg = "Request timeout"
-			} else if errors.Is(lastProxyErr, ErrResponseBodyTooLarge) {
+				errorOrigin = ""
+			case errors.Is(lastProxyErr, ErrResponseBodyTooLarge):
 				statusMessage = "Bad Gateway: upstream response too large"
 				errorMsg = "Response body too large"
+				errorOrigin = ErrorOriginResponseTooLarge
 			}
-			p.logUpstreamError(r.Context(), "Proxy request failed: no upstream response", statusCode, cred, modelID, nil,
-				"error", lastProxyErr,
-				"url", cred.BaseURL,
-				"request_id", logCtx.RequestID)
+			if clientCanceled {
+				p.logger.DebugContext(r.Context(), "Proxy request aborted: client disconnected",
+					"error_code", statusCode, "credential", cred.Name, "model", modelID,
+					"error", lastProxyErr,
+					"url", cred.BaseURL,
+					"request_id", logCtx.RequestID)
+			} else {
+				p.logUpstreamError(r.Context(), "Proxy request failed: no upstream response", statusCode, cred, modelID, nil,
+					"error", lastProxyErr,
+					"url", cred.BaseURL,
+					"request_id", logCtx.RequestID)
+			}
 			logCtx.Status = "failure"
 			logCtx.HTTPStatus = statusCode
 			logCtx.ErrorMsg = errorMsg
+			logCtx.ErrorOrigin = errorOrigin
 			logCtx.TargetURL = cred.BaseURL
 			// Client-facing outcome decided (all attempts exhausted, no response at
 			// all) — record exactly once here with genuine end-to-end duration.
 			p.metrics.RecordRequest(cred.Name, r.URL.Path, modelID, statusCode, time.Since(start))
-			if statusCode == http.StatusRequestTimeout {
+			switch statusCode {
+			case http.StatusRequestTimeout:
 				WriteErrorTimeout(w, statusMessage)
-			} else {
+			case StatusClientClosedRequest:
+				WriteErrorClientClosed(w, statusMessage)
+			default:
 				WriteErrorBadGateway(w, statusMessage)
 			}
 			return
@@ -1785,6 +1828,19 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 		attemptedCreds[cred.Name] = true
 		resp, doErr = p.client.Do(proxyReq) //nolint:gosec // G704: same targetURL as the request built above, host isn't attacker-controlled
 		if doErr != nil {
+			if isClientCanceledTransportError(r, doErr) {
+				// The client is already gone -- trying another credential
+				// would just fail the same way against a dead context, and
+				// counting this attempt against cred's fail2ban/error-rate
+				// accounting would blame the credential for the client's own
+				// behavior. Stop retrying immediately; the final "no
+				// response" block below handles the classification/logging.
+				p.logger.DebugContext(r.Context(), "Upstream request aborted: client disconnected",
+					"credential", cred.Name, "model", modelID, "error", doErr, "url", targetURL)
+				transportErr = doErr
+				shouldRetry = false
+				break
+			}
 			// Transport failure on one credential — retried with the next one;
 			// the final failure is logged at ERROR after the retry loop.
 			statusCode := http.StatusBadGateway
@@ -1871,6 +1927,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 				logCtx.Status = "failure"
 				logCtx.HTTPStatus = http.StatusBadGateway
 				logCtx.ErrorMsg = fmt.Sprintf("Failed to read response body: %v", readErr)
+				logCtx.ErrorOrigin = ErrorOriginResponseTooLarge
 				logCtx.TargetURL = targetURL
 				// Client-facing outcome decided (502 written to the client below,
 				// no further attempts) — record exactly once here.
@@ -1952,24 +2009,50 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 		}
 		statusCode := http.StatusBadGateway
 		statusMessage := "Bad Gateway"
-		if transportErr != nil && isTimeoutError(transportErr) {
+		errorOrigin := ErrorOriginAllAttemptsExhausted
+		errorMsg := "All provider attempts failed"
+		clientCanceled := isClientCanceledTransportError(r, transportErr)
+		switch {
+		case clientCanceled:
+			// The client left before any credential attempt produced a
+			// response -- this was never actually a 502 from anyone's
+			// perspective, so it must not be tagged/counted as one (see
+			// ErrorOriginClientCanceled's doc comment).
+			statusCode = StatusClientClosedRequest
+			statusMessage = "Client Closed Request"
+			errorMsg = "Client disconnected before a response was received"
+			errorOrigin = ErrorOriginClientCanceled
+		case transportErr != nil && isTimeoutError(transportErr):
 			statusCode = http.StatusRequestTimeout
 			statusMessage = "Request Timeout"
+			errorOrigin = ""
 		}
-		p.logUpstreamError(r.Context(), "All provider attempts failed: no upstream response", statusCode, cred, modelID, nil,
-			"error", transportErr,
-			"url", targetURL,
-			"request_id", logCtx.RequestID)
+		if clientCanceled {
+			p.logger.DebugContext(r.Context(), "All provider attempts aborted: client disconnected",
+				"error_code", statusCode, "credential", cred.Name, "provider", string(cred.Type), "model", modelID,
+				"error", transportErr,
+				"url", targetURL,
+				"request_id", logCtx.RequestID)
+		} else {
+			p.logUpstreamError(r.Context(), "All provider attempts failed: no upstream response", statusCode, cred, modelID, nil,
+				"error", transportErr,
+				"url", targetURL,
+				"request_id", logCtx.RequestID)
+		}
 		logCtx.Status = "failure"
 		logCtx.HTTPStatus = statusCode
-		logCtx.ErrorMsg = "All provider attempts failed"
+		logCtx.ErrorMsg = errorMsg
+		logCtx.ErrorOrigin = errorOrigin
 		logCtx.TargetURL = targetURL
 		// Client-facing outcome decided (all attempts exhausted, no response at
 		// all) — record exactly once here with genuine end-to-end duration.
 		p.metrics.RecordRequest(cred.Name, r.URL.Path, modelID, statusCode, time.Since(start))
-		if statusCode == http.StatusRequestTimeout {
+		switch statusCode {
+		case http.StatusRequestTimeout:
 			WriteErrorTimeout(w, statusMessage)
-		} else {
+		case StatusClientClosedRequest:
+			WriteErrorClientClosed(w, statusMessage)
+		default:
 			WriteErrorBadGateway(w, statusMessage)
 		}
 		return

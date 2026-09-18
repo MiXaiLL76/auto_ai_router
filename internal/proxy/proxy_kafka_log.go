@@ -210,6 +210,7 @@ func (p *Proxy) buildRawBodyEvent(logCtx *RequestLogContext, status string, endT
 	}
 	if status == "failure" {
 		event.ErrorClass = mapHTTPStatusToErrorClass(logCtx.HTTPStatus)
+		event.ErrorOrigin = string(logCtx.ErrorOrigin)
 	}
 	if p.rawBodyStoreRawBody {
 		event.RequestBody = logCtx.RequestBodyRaw

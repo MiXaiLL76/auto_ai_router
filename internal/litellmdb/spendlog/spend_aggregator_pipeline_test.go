@@ -90,6 +90,11 @@ func TestBuildSpendLogRecordsUsesUTCDateAndEntryDimensions(t *testing.T) {
 	assert.Equal(t, entry.RequestID, records[0].RequestID)
 }
 
+func TestVideoCallTypeUsesVideoDailyEndpoint(t *testing.T) {
+	assert.Equal(t, "avideo_generation", LiteLLMCallTypeForPath("/v1/videos"))
+	assert.Equal(t, "/videos", dailyEndpoint("avideo_generation"))
+}
+
 func TestBuildSpendLogRecordsExtractsCacheTokensFromMetadata(t *testing.T) {
 	entry := atomicTestEntry("req-cache")
 	entry.Metadata = `{"usage_object":{

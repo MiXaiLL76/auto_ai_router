@@ -37,6 +37,12 @@ func TestNoopManager(t *testing.T) {
 		assert.NoError(t, err)
 	})
 
+	t.Run("CommitSpend", func(t *testing.T) {
+		result, err := manager.CommitSpend(context.Background(), &models.SpendLogEntry{RequestID: "test"})
+		assert.NoError(t, err)
+		assert.Zero(t, result)
+	})
+
 	t.Run("Stats", func(t *testing.T) {
 		authStats := manager.AuthCacheStats()
 		assert.Equal(t, 0, authStats.Size)
@@ -58,6 +64,18 @@ func TestDefaultManager_InterfaceCompliance(t *testing.T) {
 	// Compile-time check that DefaultManager implements Manager
 	var _ Manager = (*DefaultManager)(nil)
 	var _ Manager = (*NoopManager)(nil)
+	var _ SpendCommitter = (*DefaultManager)(nil)
+	var _ SpendCommitter = (*NoopManager)(nil)
+}
+
+func TestDefaultManager_CommitSpendDisabled(t *testing.T) {
+	manager := &DefaultManager{
+		config: &models.Config{DisableSpendLogsWrite: true},
+	}
+
+	result, err := manager.CommitSpend(context.Background(), &models.SpendLogEntry{RequestID: "test"})
+	assert.NoError(t, err)
+	assert.Zero(t, result)
 }
 
 func TestNew_InvalidConfig(t *testing.T) {

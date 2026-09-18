@@ -152,3 +152,30 @@ func TestValidateOrganizationPolicies(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "credential_denylist exceeds 65536 bytes")
 }
+
+func TestOrganizationPolicyConfig_DefaultPricing(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		fields    string
+		wantError bool
+	}{
+		{name: "denylist", fields: "credential_denylist: [provider-a]"},
+		{name: "profile only", fields: "price_profile_id: custom", wantError: true},
+		{name: "source only", fields: "model_prices_link: /tmp/prices.json", wantError: true},
+		{name: "empty allowlist", fields: "model_allowlist: []", wantError: true},
+		{name: "allowlist", fields: "model_allowlist: [public/model]", wantError: true},
+		{name: "mapping", fields: "model_mappings: {public/model: route-a}", wantError: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			var policy OrganizationPolicyConfig
+			require.NoError(t, yaml.Unmarshal([]byte("organization_id: org-1\n"+tt.fields+"\n"), &policy))
+			err := ValidateOrganizationPolicies([]OrganizationPolicyConfig{policy})
+			if tt.wantError {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+				assert.Equal(t, []string{"provider-a"}, policy.CredentialDenylist)
+			}
+		})
+	}
+}

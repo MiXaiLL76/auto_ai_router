@@ -234,3 +234,12 @@ func WriteErrorBadGateway(w http.ResponseWriter, message string) {
 func WriteErrorTimeout(w http.ResponseWriter, message string) {
 	WriteJSONError(w, http.StatusRequestTimeout, message, errorTypeForStatus(http.StatusRequestTimeout), nil, nil)
 }
+
+// WriteErrorClientClosed writes a 499 Client Closed Request JSON error.
+// Best-effort only: by the time this is reached the client's own connection
+// is already gone (see StatusClientClosedRequest), so these bytes are never
+// actually read by anyone -- kept for parity with the other WriteError*
+// helpers and in case an intermediary in the chain is still listening.
+func WriteErrorClientClosed(w http.ResponseWriter, message string) {
+	WriteJSONError(w, StatusClientClosedRequest, message, "client_closed_request", nil, nil)
+}

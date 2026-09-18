@@ -199,6 +199,25 @@ func TestSetClientModelIDsInvalidatesScopedCatalogCache(t *testing.T) {
 	assert.Equal(t, []string{"public/a"}, after)
 }
 
+func TestExternalModelsRemainOutsideUnscopedCatalog(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+	credential := config.CredentialConfig{Name: "provider", Type: config.ProviderTypeOpenAI}
+	manager := New(logger, 100, []config.ModelRPMConfig{{Name: "text-model", Credential: credential.Name}})
+	manager.LoadModelsFromConfig([]config.CredentialConfig{credential})
+	manager.SetCredentials([]config.CredentialConfig{credential})
+	manager.SetClientModelIDs([]string{})
+	manager.SetExternalModelIDs([]string{"runway/gen4.5", "runway/gen4_turbo"})
+
+	assert.Empty(t, manager.GetAllModelsScoped(scope.PublicContext()).Data)
+	assert.True(t, manager.IsClientModelIDRoutable("runway/gen4.5"))
+	assert.True(t, manager.IsClientModelIDRoutable("runway/gen4_turbo"))
+	assert.Empty(t, manager.GetCredentialsForModel("runway/gen4.5"))
+	assert.False(t, manager.HasModel("provider", "runway/gen4.5"))
+
+	manager.SetExternalModelIDs(nil)
+	assert.Empty(t, manager.GetAllModelsScoped(scope.PublicContext()).Data)
+}
+
 func TestGetAllModelsScoped_AdminExcludesCredentialsWithoutRoute(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
 	staticModels := []config.ModelRPMConfig{{Name: "blocked-model", Credential: "proxy"}}

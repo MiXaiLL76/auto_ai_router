@@ -128,6 +128,15 @@ type RawBodyEvent struct {
 	EndTime    time.Time `json:"end_time"`
 	HTTPStatus int       `json:"http_status"`
 	ErrorClass string    `json:"error_class,omitempty"`
+	// ErrorOrigin names the specific code path that produced this failure
+	// (see proxy.ErrorOrigin's doc comment) -- deliberately only published
+	// here, not on SpendEvent/LiteLLM_SpendLogs: several of its values
+	// (all_attempts_exhausted, proxy_forward_error, response_too_large) mean
+	// ResponseBody is empty (the upstream never actually responded), and this
+	// raw-bodies pipeline is exactly the debugging-focused, short-retention
+	// event meant to answer "why" for that case -- the long-retention
+	// billing/analytics event stays free of an operational-debugging-only tag.
+	ErrorOrigin string `json:"error_origin,omitempty"`
 	// ResponseBody is the raw upstream provider error body, capped at
 	// maxErrorBodyRawBytes. Same capture sites as SpendEvent.ErrorMessage
 	// used to populate before this event type existed, just uncapped at 512

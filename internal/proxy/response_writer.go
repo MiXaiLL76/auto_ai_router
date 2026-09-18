@@ -192,6 +192,14 @@ func markProxyProviderStreamError(logCtx *RequestLogContext, statusCode int, pay
 	logCtx.ErrorMsg = payload
 	logCtx.ErrorBodyRaw = extractErrorBodyRaw([]byte(payload))
 	logCtx.ClientResponseBody = extractErrorBodyRaw([]byte(clientSaw))
+	// statusCode only ever lands on 502 here via statusCodeFromErrorSignals'
+	// own catch-all (no known keyword in the stream's terminal error event
+	// matched) -- a genuinely classified mid-stream status (429/408/503/500)
+	// never does, so this check alone safely identifies the unclassified case
+	// without needing statusCodeFromProviderStreamError to report it explicitly.
+	if statusCode == http.StatusBadGateway {
+		logCtx.ErrorOrigin = ErrorOriginUnclassifiedStreamError
+	}
 }
 
 func statusCodeFromProviderStreamError(payload string) int {

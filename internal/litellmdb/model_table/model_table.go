@@ -402,7 +402,7 @@ func convertPricingToModelPrice(p *queries.CustomPricingLiteLLMParams) *manager.
 	if p == nil {
 		return nil
 	}
-	if p.InputCostPerToken == nil && p.OutputCostPerToken == nil && len(p.SearchContextCostPerQuery) == 0 {
+	if p.InputCostPerToken == nil && p.OutputCostPerToken == nil && p.OutputCostPerVideoPerSecond == nil && len(p.SearchContextCostPerQuery) == 0 {
 		return nil
 	}
 
@@ -514,6 +514,9 @@ func convertPricingToModelPrice(p *queries.CustomPricingLiteLLMParams) *manager.
 	}
 	if p.OutputCostPerImageToken != nil {
 		price.OutputCostPerImageToken = *p.OutputCostPerImageToken
+	}
+	if p.OutputCostPerVideoPerSecond != nil {
+		price.OutputCostPerVideoPerSecond = *p.OutputCostPerVideoPerSecond
 	}
 	if len(p.SearchContextCostPerQuery) > 0 {
 		price.SearchContextCostPerQuery = p.SearchContextCostPerQuery

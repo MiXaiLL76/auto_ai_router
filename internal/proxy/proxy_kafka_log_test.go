@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
@@ -285,6 +286,24 @@ func TestBuildRawBodyEvent_MapsRawBodies(t *testing.T) {
 	assert.Equal(t, "BadRequestError", event.ErrorClass)
 	assert.Equal(t, rawResponse, event.ResponseBody)
 	assert.Empty(t, event.RequestBody, "RequestBody must stay empty when rawBodyStoreRawBody is off, even if logCtx captured one")
+}
+
+// TestBuildRawBodyEvent_ErrorOriginSetWhenResponseBodyEmpty reproduces the
+// exact motivating case for ErrorOrigin: a 502 with no upstream response at
+// all (ResponseBody empty because nothing ever answered), where ErrorOrigin
+// is the only field left that says why.
+func TestBuildRawBodyEvent_ErrorOriginSetWhenResponseBodyEmpty(t *testing.T) {
+	prx := NewTestProxyBuilder().Build()
+
+	logCtx := testLogCtx(t)
+	logCtx.HTTPStatus = http.StatusBadGateway
+	logCtx.ErrorOrigin = ErrorOriginProxyForwardError
+	endTime := logCtx.StartTime.Add(250 * time.Millisecond)
+
+	event := prx.buildRawBodyEvent(logCtx, "failure", endTime)
+
+	assert.Empty(t, event.ResponseBody, "no upstream response was ever received for this origin")
+	assert.Equal(t, "proxy_forward_error", event.ErrorOrigin)
 }
 
 // TestBuildRawBodyEvent_RequestBodyIncludedWhenStoreRawBodyEnabled verifies
