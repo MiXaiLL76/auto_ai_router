@@ -43,11 +43,11 @@ func initializeVideoOrExit(cfg *config.Config, prx *proxy.Proxy, db litellmdb.Ma
 	}
 
 	store := video.NewPostgresStore(db.GetPool())
-	migrationCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	err := store.Migrate(migrationCtx)
+	schemaCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	err := store.CheckSchema(schemaCtx)
 	cancel()
 	if err != nil {
-		logger.Error("Video schema migration failed", "error", err)
+		logger.Error("Video database schema is unavailable or incompatible", "error", err)
 		os.Exit(1)
 	}
 

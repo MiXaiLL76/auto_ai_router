@@ -37,6 +37,7 @@ RUN go build -ldflags="-s -w -X main.Version=${VERSION} -X main.Commit=${COMMIT}
 # distroless/static has no shell/wget/curl, so HEALTHCHECK below execs this
 # tiny binary directly instead — see cmd/healthcheck.
 RUN go build -ldflags="-s -w" -o healthcheck ./cmd/healthcheck
+RUN go build -ldflags="-s -w" -o migrate ./cmd/migrate
 
 # Final stage — distroless/static: no shell, no package manager, no libc,
 # just ca-certificates + tzdata + a nonroot user (uid/gid 65532) baked in.
@@ -54,6 +55,7 @@ WORKDIR /app
 # for the default user only (see the uid note above).
 COPY --from=builder /app/auto_ai_router .
 COPY --from=builder /app/healthcheck .
+COPY --from=builder /app/migrate .
 
 # Go runtime tuning defaults — overridable via env in the actual deployment
 # manifest (e.g. if a pod's memory limit differs from the value assumed here).
