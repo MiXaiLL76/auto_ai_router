@@ -145,6 +145,7 @@ Key properties:
 - **Reconcile exactly once**: guarded by `RequestLogContext.budgetReconciled`. The real call site is `logSpendToLiteLLMDB` (after the true cost is computed); a `defer` in `ProxyRequest` calls it a second time with cost `0` as a safety net for paths that never reach a credential (early failures) — the guard makes that a no-op once real reconciliation already happened.
 - **Fail open on Redis errors**: a `TryReserve` error logs a warning and allows the request — the DB-snapshot check remains the backstop.
 - **RPM/TPM** uses a second `ratelimit.RPMLimiter` instance (namespace `litellmauth:`, separate from the per-credential/provider limiter) keyed by `token:<hash>`, `user:<id>`, `team:<id>`, `org:<id>`, `teammember:<team>:<user>`, `orgmember:<org>:<user>`.
+- **Hybrid mode** (`redis.hybrid: true`, shared with the RPM/TPM hybrid backend — see [Redis](../advanced/redis.md#hybrid-mode)): `TryReserve`/`Reconcile` decide against local in-process state instead of a synchronous Redis round trip, and asynchronously flush deltas to Redis every 100ms. A background sync (every `redis.sync_interval`, default 5s) pulls each entity's shared Redis total and estimates `remote_other = redis_total - this_instance's_own_contribution`, which is added to the local check. Concurrent requests on the *same* instance are still exact (serialized by an in-process mutex); overspend across the whole fleet is bounded by how much other instances reserve within one `sync_interval`, not eliminated — the same trade-off the RPM/TPM hybrid backend makes. This removes the "+1 RTT before, +1 RTT after" cost of `redis.hybrid: false`, which is the main reason `enforce_budget_reservation` defaults to off.
 
 ## 3. Spend logging (post-call, async)
 
@@ -216,6 +217,8 @@ redis:
   enabled: true   # required for enforce_budget_reservation / enforce_key_rate_limits to take effect
   addresses:
     - "os.environ/REDIS_ADDRESS"
+  hybrid: false         # true: local decisions + async Redis sync for budget reservation and RPM/TPM alike (§2b)
+  sync_interval: 5s     # hybrid only: how often the shared Redis counters are pulled
 ```
 
 | Parameter                             | Type     | Default | Description                                                                                |
@@ -228,6 +231,8 @@ redis:
 | `default_estimated_completion_tokens` | int      | 1000    | Completion-token estimate for budget reservation when `max_tokens` is absent               |
 
 Both `enforce_*` flags default to `false`: enabling them changes production enforcement behavior (requests can start failing with 402/429 that previously passed), so it's an explicit opt-in. The model allow-list check (§2a) has no such flag — it is always enforced for non-admin keys once `litellm_db.enabled: true`.
+
+`redis.hybrid` (see `redis.md`) is a separate, opt-in decision from `enforce_budget_reservation`/`enforce_key_rate_limits`: it only changes *how* an already-enabled reservation/rate-limit talks to Redis (sync direct vs. local-plus-async), not whether it runs at all.
 
 ## Known limitations
 
