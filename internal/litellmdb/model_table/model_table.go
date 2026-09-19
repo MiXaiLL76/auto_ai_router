@@ -3,9 +3,14 @@ package modeltable
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
+
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb/connection"
@@ -44,9 +49,26 @@ func (a *ProxyModelTable) FetchModels(ctx context.Context) ([]queries.ModelTable
 	}
 	defer conn.Release()
 
-	rows, err := conn.Query(ctx, queries.QueryProxyModelTable)
+	results, err := a.queryModels(ctx, conn, queries.QueryProxyModelTableWithBlocked, true)
+	if isUndefinedColumn(err) {
+		// Schemas from before LiteLLM added the blocked column.
+		a.logger.Debug("LiteLLM_ProxyModelTable has no blocked column, reading without it")
+		results, err = a.queryModels(ctx, conn, queries.QueryProxyModelTable, false)
+	}
 	if err != nil {
-		a.logger.Error("Failed to execute QueryProxyModelTable", "error", err)
+		return nil, err
+	}
+
+	a.logger.Info("Models loaded from DB", "count", len(results))
+	return results, nil
+}
+
+func (a *ProxyModelTable) queryModels(ctx context.Context, conn *pgxpool.Conn, query string, withBlocked bool) ([]queries.ModelTable, error) {
+	rows, err := conn.Query(ctx, query)
+	if err != nil {
+		if !isUndefinedColumn(err) {
+			a.logger.Error("Failed to execute QueryProxyModelTable", "error", err)
+		}
 		return nil, err
 	}
 	defer rows.Close()
@@ -55,25 +77,66 @@ func (a *ProxyModelTable) FetchModels(ctx context.Context) ([]queries.ModelTable
 
 	for rows.Next() {
 		var m queries.ModelTable
-		err := rows.Scan(
-			&m.ModelID,
-			&m.ModelName,
-			&m.LlmParams,
-			&m.ModelInfo,
-		)
-		if err != nil {
+		var blocked *bool
+		targets := []any{&m.ModelID, &m.ModelName, &m.LlmParams, &m.ModelInfo}
+		if withBlocked {
+			targets = append(targets, &blocked)
+		}
+		if err := rows.Scan(targets...); err != nil {
 			a.logger.Error("Failed to scan row", "error", err)
 			continue
 		}
+		m.Blocked = blocked != nil && *blocked
 		results = append(results, m)
 	}
 
 	if err = rows.Err(); err != nil {
+		if !isUndefinedColumn(err) {
+			a.logger.Error("Failed to read QueryProxyModelTable rows", "error", err)
+		}
 		return nil, err
 	}
-
-	a.logger.Info("Models loaded from DB", "count", len(results))
 	return results, nil
+}
+
+// isUndefinedColumn reports whether err is PostgreSQL's undefined_column (42703).
+func isUndefinedColumn(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "42703"
+}
+
+// FetchRouterSettings loads model_group_alias and fallbacks from
+// LiteLLM_Config.router_settings. A database without that row yields empty settings.
+func (a *ProxyModelTable) FetchRouterSettings(ctx context.Context) (queries.RouterSettings, error) {
+	if !a.pool.IsHealthy() {
+		return queries.RouterSettings{}, models.ErrConnectionFailed
+	}
+
+	conn, err := a.pool.Acquire(ctx)
+	if err != nil {
+		a.logger.Error("Failed to acquire connection", "error", err)
+		return queries.RouterSettings{}, models.ErrConnectionFailed
+	}
+	defer conn.Release()
+
+	var raw []byte
+	rows, err := conn.Query(ctx, queries.QueryRouterSettings)
+	if err != nil {
+		a.logger.Error("Failed to execute QueryRouterSettings", "error", err)
+		return queries.RouterSettings{}, err
+	}
+	defer rows.Close()
+	if rows.Next() {
+		if err := rows.Scan(&raw); err != nil {
+			a.logger.Error("Failed to scan router_settings", "error", err)
+			return queries.RouterSettings{}, err
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return queries.RouterSettings{}, err
+	}
+
+	return queries.ParseRouterSettings(raw)
 }
 
 func (a *ProxyModelTable) FetchCredentials(ctx context.Context) ([]queries.CredentialTable, error) {
@@ -131,14 +194,35 @@ func (a *ProxyModelTable) FetchModelsForAIR(ctx context.Context, signingKey stri
 		a.logger.Error("Failed to FetchModels", "error", err)
 		return nil, nil, nil, err
 	}
+	// A failed read must fail the whole sync: applying models without their aliases
+	// would make every aliased name 404 until the next successful cycle.
+	router, err := a.FetchRouterSettings(ctx)
+	if err != nil {
+		a.logger.Error("Failed to FetchRouterSettings", "error", err)
+		return nil, nil, nil, err
+	}
 
+	airCredentials, airModels, airPrices := buildAIRModels(a.logger, creds, dbModels, router, signingKey)
+	return airCredentials, airModels, airPrices, nil
+}
+
+// buildAIRModels turns rows read from the LiteLLM database into AIR credentials,
+// per-credential model configs and prices. It performs no I/O so the whole
+// conversion can be exercised against exported data.
+func buildAIRModels(
+	logger *slog.Logger,
+	creds []queries.CredentialTable,
+	dbModels []queries.ModelTable,
+	router queries.RouterSettings,
+	signingKey string,
+) ([]config.CredentialConfig, []config.ModelRPMConfig, map[string]*manager.ModelPrice) {
 	// Decrypt named credentials
 	for i := range creds {
 		if creds[i].CredentialParams == nil {
 			continue
 		}
 		if err := cryptoutils.DecryptCredentialLiteLLMParams(creds[i].CredentialParams, signingKey); err != nil {
-			a.logger.Warn("Failed to decrypt credential params",
+			logger.Warn("Failed to decrypt credential params",
 				"credential", derefStr(creds[i].CredentialName, "<nil>"),
 				"error", err,
 			)
@@ -155,7 +239,7 @@ func (a *ProxyModelTable) FetchModelsForAIR(ctx context.Context, signingKey stri
 			continue
 		}
 		if err := cryptoutils.DecryptCredentialLiteLLMParams(&dbModels[i].LlmParams.CredentialLiteLLMParams, signingKey); err != nil {
-			a.logger.Warn("Failed to decrypt model inline credential",
+			logger.Warn("Failed to decrypt model inline credential",
 				"model", derefStr(dbModels[i].ModelName, "<nil>"),
 				"error", err,
 			)
@@ -165,7 +249,7 @@ func (a *ProxyModelTable) FetchModelsForAIR(ctx context.Context, signingKey stri
 		if p.CustomLLMProvider != nil && *p.CustomLLMProvider != "" {
 			decrypted, err := cryptoutils.DecryptValueHelper(*p.CustomLLMProvider, "custom_llm_provider", signingKey)
 			if err != nil {
-				a.logger.Warn("Failed to decrypt model custom_llm_provider",
+				logger.Warn("Failed to decrypt model custom_llm_provider",
 					"model", derefStr(dbModels[i].ModelName, "<nil>"),
 					"error", err,
 				)
@@ -173,10 +257,36 @@ func (a *ProxyModelTable) FetchModelsForAIR(ctx context.Context, signingKey stri
 				p.CustomLLMProvider = &decrypted
 			}
 		}
+		// LiteLLM stores the bound credential name encrypted. A plaintext name (written
+		// by another tool) fails authentication and is kept as is.
+		if p.LiteLLMCredentialName != nil && *p.LiteLLMCredentialName != "" {
+			if decrypted, err := cryptoutils.DecryptValueHelper(*p.LiteLLMCredentialName, "litellm_credential_name", signingKey); err == nil {
+				p.LiteLLMCredentialName = &decrypted
+			}
+		}
+	}
+
+	// A named credential whose credential_info carries no provider takes it from the
+	// deployments that reference it (LiteLLM keeps custom_llm_provider on the model).
+	providerByCredential := make(map[string]string)
+	for _, model := range dbModels {
+		if model.LlmParams == nil {
+			continue
+		}
+		name := model.LlmParams.EffectiveCredentialName()
+		if name == "" {
+			continue
+		}
+		if provider := modelProviderName(model.LlmParams); provider != "" {
+			if _, seen := providerByCredential[name]; !seen {
+				providerByCredential[name] = provider
+			}
+		}
 	}
 
 	// Build named credential map and list
 	credByName := make(map[string]bool)
+	credTypeByName := make(map[string]config.ProviderType)
 	var airCredentials []config.CredentialConfig
 
 	for _, cred := range creds {
@@ -185,18 +295,24 @@ func (a *ProxyModelTable) FetchModelsForAIR(ctx context.Context, signingKey stri
 		}
 		cfg := convertCredentialTableToConfig(cred)
 		if cfg.Type == "" {
-			a.logger.Warn("Skipping credential with unsupported provider",
+			if provider, ok := providerByCredential[*cred.CredentialName]; ok {
+				cfg.Type = mapProviderType(provider)
+			}
+		}
+		if cfg.Type == "" {
+			logger.Warn("Skipping credential with unsupported provider",
 				"credential", derefStr(cred.CredentialName, "<nil>"),
 			)
 			continue
 		}
 		if credByName[*cred.CredentialName] {
-			a.logger.Warn("Duplicate credential name in DB, skipping",
+			logger.Warn("Duplicate credential name in DB, skipping",
 				"credential", *cred.CredentialName,
 			)
 			continue
 		}
 		credByName[*cred.CredentialName] = true
+		credTypeByName[*cred.CredentialName] = cfg.Type
 		airCredentials = append(airCredentials, cfg)
 	}
 
@@ -210,29 +326,39 @@ func (a *ProxyModelTable) FetchModelsForAIR(ctx context.Context, signingKey stri
 		}
 		modelName := *model.ModelName
 
+		if model.Blocked {
+			logger.Info("Skipping blocked model", "model", modelName, "model_id", derefStr(model.ModelID, ""))
+			continue
+		}
+		if model.Mode() == "rerank" {
+			logger.Info("Skipping rerank model: /rerank is not supported", "model", modelName)
+			continue
+		}
+
 		// Determine which credential this model uses
 		var credName string
-		if model.LlmParams.CredentialName != nil && *model.LlmParams.CredentialName != "" {
-			credName = *model.LlmParams.CredentialName
+		if bound := model.LlmParams.EffectiveCredentialName(); bound != "" {
+			credName = bound
 			if !credByName[credName] {
-				a.logger.Warn("Model references unknown credential",
+				logger.Warn("Model references unknown credential",
 					"model", modelName,
 					"credential", credName,
 				)
 				continue
 			}
-		} else if hasInlineCredentials(&model.LlmParams.CredentialLiteLLMParams) {
+		} else if hasInlineEndpoint(model.LlmParams) {
 			// Create synthetic credential from model inline params
 			syntheticName := fmt.Sprintf("db-model-%s", derefStr(model.ModelID, modelName))
 			if !credByName[syntheticName] {
 				syntheticCred := convertInlineCredToConfig(syntheticName, model.LlmParams)
 				if syntheticCred.Type == "" {
-					a.logger.Warn("Skipping model with unsupported inline provider",
+					logger.Warn("Skipping model with unsupported inline provider",
 						"model", modelName,
 					)
 					continue
 				}
 				credByName[syntheticName] = true
+				credTypeByName[syntheticName] = syntheticCred.Type
 				airCredentials = append(airCredentials, syntheticCred)
 			}
 			credName = syntheticName
@@ -240,8 +366,9 @@ func (a *ProxyModelTable) FetchModelsForAIR(ctx context.Context, signingKey stri
 
 		// Build ModelRPMConfig
 		rpmCfg := config.ModelRPMConfig{
-			Name:       modelName,
-			Credential: credName,
+			Name:         modelName,
+			DeploymentID: derefStr(model.ModelID, ""),
+			Credential:   credName,
 		}
 		if model.LlmParams.RPM != nil {
 			rpmCfg.RPM = *model.LlmParams.RPM
@@ -257,8 +384,14 @@ func (a *ProxyModelTable) FetchModelsForAIR(ctx context.Context, signingKey stri
 			rpmCfg.TPM = -1
 		}
 		// Map real provider model name (e.g. "gemini-2.0-flash" → "vertex_ai/gemini-2.0-flash")
-		if model.LlmParams.Model != nil && *model.LlmParams.Model != "" && *model.LlmParams.Model != modelName {
-			rpmCfg.Model = *model.LlmParams.Model
+		if model.LlmParams.Model != nil && *model.LlmParams.Model != "" {
+			if realName := stripVLLMPrefix(*model.LlmParams.Model); realName != modelName {
+				rpmCfg.Model = realName
+			}
+		}
+		// Default request params are a vLLM-deployment feature only.
+		if credTypeByName[credName] == config.ProviderTypeVLLM {
+			rpmCfg.DefaultParams = model.LlmParams.DefaultRequestParams()
 		}
 		airModels = append(airModels, rpmCfg)
 
@@ -276,13 +409,83 @@ func (a *ProxyModelTable) FetchModelsForAIR(ctx context.Context, signingKey stri
 		}
 	}
 
-	a.logger.Info("FetchModelsForAIR completed",
+	airModels = applyModelGroupAliases(logger, airModels, airPrices, router)
+
+	logger.Info("FetchModelsForAIR completed",
 		"credentials", len(airCredentials),
 		"models", len(airModels),
 		"prices", len(airPrices),
 	)
 
-	return airCredentials, airModels, airPrices, nil
+	return airCredentials, airModels, airPrices
+}
+
+// applyModelGroupAliases exposes every LiteLLM router_settings.model_group_alias as a
+// model of its own: each deployment of the target group is duplicated under the alias
+// name, keeping the target's provider-facing model name, credential and default
+// params. A real group with the alias's name wins over the alias, as in LiteLLM.
+//
+// router_settings.fallbacks (group-to-group failover) is deliberately not applied:
+// AIR's failover works between credentials of one model, not between models, so
+// importing it as credential tiers would misroute. It is logged at debug level so the
+// gap is visible.
+func applyModelGroupAliases(
+	logger *slog.Logger,
+	airModels []config.ModelRPMConfig,
+	airPrices map[string]*manager.ModelPrice,
+	router queries.RouterSettings,
+) []config.ModelRPMConfig {
+	if len(router.Fallbacks) > 0 {
+		logger.Debug("router_settings.fallbacks is not imported (model-level failover unsupported)",
+			"groups", len(router.Fallbacks))
+	}
+	if len(router.ModelGroupAlias) == 0 {
+		return airModels
+	}
+
+	byGroup := make(map[string][]config.ModelRPMConfig, len(airModels))
+	for _, m := range airModels {
+		byGroup[m.Name] = append(byGroup[m.Name], m)
+	}
+
+	aliases := make([]string, 0, len(router.ModelGroupAlias))
+	for alias := range router.ModelGroupAlias {
+		aliases = append(aliases, alias)
+	}
+	sort.Strings(aliases)
+
+	for _, alias := range aliases {
+		target := router.ModelGroupAlias[alias]
+		if alias == target {
+			continue
+		}
+		if _, exists := byGroup[alias]; exists {
+			logger.Info("model_group_alias ignored: a model group with that name exists",
+				"alias", alias, "target", target)
+			continue
+		}
+		group := byGroup[target]
+		if len(group) == 0 {
+			logger.Warn("model_group_alias target has no usable deployments",
+				"alias", alias, "target", target)
+			continue
+		}
+		for _, m := range group {
+			aliased := m
+			aliased.Name = alias
+			if aliased.Model == "" {
+				aliased.Model = target
+			}
+			airModels = append(airModels, aliased)
+		}
+		if price, ok := airPrices[target]; ok {
+			if _, has := airPrices[alias]; !has {
+				airPrices[alias] = price
+			}
+		}
+	}
+
+	return airModels
 }
 
 // ==================== Helper functions ====================
@@ -294,10 +497,52 @@ func derefStr(s *string, fallback string) string {
 	return fallback
 }
 
+// modelProviderName returns a deployment's own (decrypted) custom_llm_provider.
+func modelProviderName(params *queries.GenericLiteLLMParams) string {
+	if params == nil {
+		return ""
+	}
+	if params.CustomLLMProvider != nil && *params.CustomLLMProvider != "" {
+		return *params.CustomLLMProvider
+	}
+	if params.CustomLLMProviderName != nil {
+		return *params.CustomLLMProviderName
+	}
+	return ""
+}
+
+// stripVLLMPrefix removes the LiteLLM provider prefix ("hosted_vllm/model") that the
+// upstream vLLM server does not know. Only the vLLM prefixes are touched: other
+// slashes are part of real model ids (for example "Qwen/Qwen3-8B").
+func stripVLLMPrefix(model string) string {
+	for _, prefix := range []string{"hosted_vllm/", "vllm/"} {
+		if rest, ok := strings.CutPrefix(model, prefix); ok {
+			return rest
+		}
+	}
+	return model
+}
+
+// hasInlineEndpoint reports whether a deployment carries its own connection details.
+// Besides secrets (hasInlineCredentials) a vLLM deployment counts with just an
+// api_base: vLLM is routinely run without an API key.
+func hasInlineEndpoint(params *queries.GenericLiteLLMParams) bool {
+	if params == nil {
+		return false
+	}
+	if hasInlineCredentials(&params.CredentialLiteLLMParams) {
+		return true
+	}
+	return mapProviderType(modelProviderName(params)) == config.ProviderTypeVLLM &&
+		params.APIBase != nil && *params.APIBase != ""
+}
+
 // mapProviderType converts a LiteLLM custom_llm_provider string to config.ProviderType
 func mapProviderType(provider string) config.ProviderType {
 	p := strings.ToLower(provider)
 	switch {
+	case p == "hosted_vllm" || p == "vllm" || p == "hosted-vllm":
+		return config.ProviderTypeVLLM
 	case p == "air" || p == "aar" || strings.Contains(p, "auto_ai_router") || strings.Contains(p, "auto-ai-router"):
 		return config.ProviderTypeAIR
 	case strings.Contains(p, "openai") || strings.Contains(p, "router"):

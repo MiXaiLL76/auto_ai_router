@@ -320,17 +320,18 @@ type Manager struct {
 	dynamicModelPriorityTiers    map[string]map[string][]httputil.ModelPriorityTier // model ID -> proxy/AIR credential -> per-priority-tier breakdown learned from upstream /health
 	dynamicModelSourceCreds      map[string]map[string]string                       // model ID -> local (proxy/AIR) credential -> real upstream credential name learned from /health
 	dynamicModelScopes           map[string]map[string]ScopeMetadata
-	dbModelNames                 map[string]bool              // model names that were loaded from LiteLLM DB (for hot-reload diffing)
-	modelAliases                 map[string]string            // alias -> real model name (from model_alias config)
-	clientModelIDs               map[string]struct{}          // exact advertised canonical client IDs
-	clientModelSurfaceConfigured bool                         // distinguishes an omitted boundary from an explicit empty boundary
-	publicModelAliases           map[string]string            // client alias -> canonical LiteLLM public deployment identity
-	acceptedModelAliases         map[string]string            // accepted client alias -> canonical model, hidden from discovery
-	externalModelIDs             map[string]struct{}          // client-visible models handled outside the inference balancer
-	modelRealNames               map[string]string            // alias name -> real model name (global, no specific credential)
-	modelRealNamesPerCred        map[string]map[string]string // credential -> alias -> real model name (for credential-specific entries)
-	credentialMappingsReady      bool                         // true after static/DB credential mappings have been initialized
-	defaultModelsRPM             int                          // default RPM for models
+	dbModelNames                 map[string]bool                      // model names that were loaded from LiteLLM DB (for hot-reload diffing)
+	modelAliases                 map[string]string                    // alias -> real model name (from model_alias config)
+	clientModelIDs               map[string]struct{}                  // exact advertised canonical client IDs
+	clientModelSurfaceConfigured bool                                 // distinguishes an omitted boundary from an explicit empty boundary
+	publicModelAliases           map[string]string                    // client alias -> canonical LiteLLM public deployment identity
+	acceptedModelAliases         map[string]string                    // accepted client alias -> canonical model, hidden from discovery
+	externalModelIDs             map[string]struct{}                  // client-visible models handled outside the inference balancer
+	modelRealNames               map[string]string                    // alias name -> real model name (global, no specific credential)
+	modelRealNamesPerCred        map[string]map[string]string         // credential -> alias -> real model name (for credential-specific entries)
+	modelDefaultParams           map[string]map[string]map[string]any // credential -> alias -> request-body defaults (DB-sourced vLLM deployments only)
+	credentialMappingsReady      bool                                 // true after static/DB credential mappings have been initialized
+	defaultModelsRPM             int                                  // default RPM for models
 	logger                       *slog.Logger
 	credentials                  []config.CredentialConfig // credentials for fetching remote models
 	credentialsConfigured        bool
@@ -358,6 +359,7 @@ func New(logger *slog.Logger, defaultModelsRPM int, staticModels []config.ModelR
 		externalModelIDs:            make(map[string]struct{}),
 		modelRealNames:              make(map[string]string),
 		modelRealNamesPerCred:       make(map[string]map[string]string),
+		modelDefaultParams:          make(map[string]map[string]map[string]any),
 		modelWebSocketResponses:     make(map[string]bool),
 		modelPassthroughResponses:   make(map[string]*bool),
 		modelPassthroughMessages:    make(map[string]*bool),
@@ -474,6 +476,16 @@ func (m *Manager) GetRealModelNameForCredential(alias, credential string) (strin
 	return alias, false
 }
 
+// GetDefaultParamsForCredential returns the request-body defaults configured for a
+// model alias served by a credential (LiteLLM deployment litellm_params such as
+// chat_template_kwargs or temperature). The returned map is shared and must be
+// treated as read-only. Returns nil when the deployment has none.
+func (m *Manager) GetDefaultParamsForCredential(alias, credential string) map[string]any {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.modelDefaultParams[credential][alias]
+}
+
 // GetAliasesForCredentialRealModel returns route-visible model IDs on a
 // credential that resolve to the same provider-facing model name.
 func (m *Manager) GetAliasesForCredentialRealModel(credential, realModel string) []string {
@@ -568,12 +580,13 @@ func isNativeResponsesModel(modelID string) bool {
 }
 
 // providerPassthroughDefaults maps provider types to their default passthrough behaviour.
-// OpenAI and Proxy natively support /v1/responses so they default to true.
+// OpenAI, vLLM and Proxy natively support /v1/responses so they default to true.
 // Vertex AI and Anthropic use the native ProviderResponses converter (Phase 4) instead.
 var providerPassthroughDefaults = map[config.ProviderType]bool{
 	config.ProviderTypeOpenAI:    true,
 	config.ProviderTypeProxy:     true,
 	config.ProviderTypeAIR:       true,
+	config.ProviderTypeVLLM:      true,
 	config.ProviderTypeVertexAI:  false,
 	config.ProviderTypeGemini:    false,
 	config.ProviderTypeAnthropic: false,
@@ -1225,7 +1238,14 @@ func (m *Manager) UpdateDBModels(dbModels []config.ModelRPMConfig, staticCreds [
 	}
 	// 3. Apply DB model data.
 	newDBNames := make(map[string]bool, len(dbModels))
+	newDefaultParams := make(map[string]map[string]map[string]any)
 	for _, dm := range dbModels {
+		if len(dm.DefaultParams) > 0 && dm.Credential != "" {
+			if newDefaultParams[dm.Credential] == nil {
+				newDefaultParams[dm.Credential] = make(map[string]map[string]any)
+			}
+			newDefaultParams[dm.Credential][dm.Name] = dm.DefaultParams
+		}
 		newLimits[dm.Name] = append(newLimits[dm.Name], ModelLimits{
 			RPM:        dm.RPM,
 			TPM:        dm.TPM,
@@ -1257,6 +1277,7 @@ func (m *Manager) UpdateDBModels(dbModels []config.ModelRPMConfig, staticCreds [
 	m.modelRealNames = newRealNames
 	m.modelRealNamesPerCred = newRealNamesPerCred
 	m.dbModelNames = newDBNames
+	m.modelDefaultParams = newDefaultParams
 
 	// 4. Rebuild ALL credential↔model mappings from the merged modelLimits.
 	//    Proxy-fetched entries (from GetAllModels) are discarded but auto-refresh
@@ -2829,6 +2850,7 @@ var providerTypeLiteLLMPrefix = map[config.ProviderType]string{
 	config.ProviderTypeBedrock:   "bedrock",
 	config.ProviderTypeProxy:     "openai",
 	config.ProviderTypeAIR:       "openai",
+	config.ProviderTypeVLLM:      "hosted_vllm",
 }
 
 // GetAllModelsWithAccessGroups returns all models in "provider/model-id" format,
