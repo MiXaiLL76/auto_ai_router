@@ -1,13 +1,14 @@
 # Redis / Valkey Integration
 
-Auto AI Router supports an optional Redis (or [Valkey](https://valkey.io/)) backend that enables two features when running multiple replicas:
+Auto AI Router supports an optional Redis (or [Valkey](https://valkey.io/)) backend that enables three features when running multiple replicas:
 
-| Feature                              | Without Redis                                                 | With Redis                                                 |
-| ------------------------------------ | ------------------------------------------------------------- | ---------------------------------------------------------- |
-| **Rate limiting** (RPM/TPM)          | Per-pod counters — each replica enforces limits independently | Global counters — limits enforced across the whole cluster |
-| **Response storage** (`store: true`) | Local bbolt file — not accessible from other pods             | Shared Redis — any replica can retrieve stored responses   |
+| Feature                                             | Without Redis                                                 | With Redis                                                 |
+| ---------------------------------------------------- | ------------------------------------------------------------- | ---------------------------------------------------------- |
+| **Rate limiting** (RPM/TPM)                          | Per-pod counters — each replica enforces limits independently | Global counters — limits enforced across the whole cluster |
+| **Budget reservation** (`litellm_db.enforce_budget_reservation`) | DB-snapshot check only (see [LiteLLM auth](../litellm-integration/litellm_auth.md)) | Atomic pre-reservation, closing the pre-check-vs-actual-spend race |
+| **Response storage** (`store: true`)                 | Local bbolt file — not accessible from other pods             | Shared Redis — any replica can retrieve stored responses   |
 
-If Redis is not configured, both features fall back to their original in-process implementations automatically.
+If Redis is not configured, all three fall back to their original in-process (or DB-snapshot-only) implementations automatically.
 
 ## When to use Redis
 
@@ -94,6 +95,8 @@ On startup, the router connects to Redis and immediately performs a `PING` healt
 - If Redis is **unreachable** (connection error or ping timeout) → both features silently fall back to their in-process implementations. The server starts normally.
 
 ## Hybrid Mode
+
+`hybrid` applies to both the RPM/TPM rate limiter and budget reservation (`litellm_db.enforce_budget_reservation`) — one flag, one `sync_interval`, backed by independent `HybridBackend` implementations (`internal/ratelimit` and `internal/litellmdb/budget` respectively) that share the same design.
 
 When `hybrid: true`, the router uses a **HybridBackend** that combines an in-process local counter with an asynchronous Redis sync:
 
@@ -210,4 +213,4 @@ Start with `--maxmemory 256mb` and adjust based on observed usage.
 - **Redis Cluster**: only standalone and basic single-node deployments are supported. Cluster mode is not supported (keys in multi-key Lua scripts must share a hash slot).
 - **Sentinel**: not supported. Use a load-balancer in front of Redis for HA.
 - **Pool settings** (`min_idle_conns`, `max_idle_conns`, `max_conn_lifetime`): parsed and reserved for future use; the valkey-go client manages its own connection pool internally.
-- **Hybrid mode and response store**: `hybrid` only affects rate limiting. The response store always talks to Redis directly (reads must be synchronous).
+- **Hybrid mode and response store**: `hybrid` only affects rate limiting and budget reservation. The response store always talks to Redis directly (reads must be synchronous).
