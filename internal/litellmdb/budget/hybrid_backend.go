@@ -176,6 +176,10 @@ func (h *HybridBackend) enqueue(op deltaOp) {
 
 func (h *HybridBackend) tryReserve(_ context.Context, entity string, dbSpend, estimatedCost, maxBudget float64) (bool, error) {
 	s := h.getOrCreate(entity)
+	// Read remoteOther before taking s.mu: doSync locks remoteMu then s.mu, so
+	// locking s.mu first here and remoteMu second would invert that order and
+	// deadlock against a concurrent sync tick.
+	remoteOther := h.remoteFor(entity)
 	s.mu.Lock()
 	now := time.Now()
 	if !s.seeded || now.Sub(s.seededAt) > h.ttl {
@@ -184,7 +188,6 @@ func (h *HybridBackend) tryReserve(_ context.Context, entity string, dbSpend, es
 		s.seeded = true
 	}
 	s.seededAt = now
-	remoteOther := h.remoteFor(entity)
 	total := s.dbSpend + s.localDelta + remoteOther + estimatedCost
 	if maxBudget >= 0 && total > maxBudget {
 		s.mu.Unlock()
@@ -245,7 +248,7 @@ func (h *HybridBackend) writeWorker() {
 		cancel()
 		for _, res := range results {
 			if err := res.Error(); err != nil {
-				h.recordRedisError("hybrid_write", err)
+				h.recordRedisError("budget_hybrid_write", err)
 				break
 			}
 		}
@@ -319,7 +322,7 @@ func (h *HybridBackend) doSync() {
 		redisTotal, err := results[i].AsFloat64()
 		if err != nil {
 			if !valkey.IsValkeyNil(err) {
-				h.recordRedisError("hybrid_sync", err)
+				h.recordRedisError("budget_hybrid_sync", err)
 				continue
 			}
 			redisTotal = 0
