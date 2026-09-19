@@ -1805,7 +1805,11 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 		case config.ProviderTypeBedrock:
 			proxyReq.Header.Set("Authorization", "Bearer "+cred.APIKey)
 		default:
-			proxyReq.Header.Set("Authorization", "Bearer "+cred.APIKey)
+			// A self-hosted vLLM commonly runs without --api-key: send no
+			// Authorization header at all rather than a dangling "Bearer ".
+			if cred.Type != config.ProviderTypeVLLM || cred.APIKey != "" {
+				proxyReq.Header.Set("Authorization", "Bearer "+cred.APIKey)
+			}
 		}
 
 		if p.logger.Enabled(context.Background(), slog.LevelDebug) {

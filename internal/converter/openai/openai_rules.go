@@ -76,6 +76,41 @@ func ReplaceModelInBody(body []byte, oldModel, newModel string) []byte {
 	return body
 }
 
+// ApplyDefaultParams sets each key of defaults that is absent from the top level of a
+// JSON request body, leaving every key the client sent untouched. It mirrors LiteLLM,
+// where a deployment's litellm_params are merged under the request kwargs. Values
+// already in the body keep their exact bytes; the body is returned as is when there is
+// nothing to add or it is not a JSON object.
+func ApplyDefaultParams(body []byte, defaults map[string]any) []byte {
+	if len(defaults) == 0 || len(body) == 0 {
+		return body
+	}
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(body, &top); err != nil || top == nil {
+		return body
+	}
+	changed := false
+	for key, value := range defaults {
+		if _, present := top[key]; present {
+			continue
+		}
+		raw, err := json.Marshal(value)
+		if err != nil {
+			continue
+		}
+		top[key] = raw
+		changed = true
+	}
+	if !changed {
+		return body
+	}
+	out, err := json.Marshal(top)
+	if err != nil {
+		return body
+	}
+	return out
+}
+
 // --- Model family parameter mappings ---
 
 // o1Mapping: o1, o1-mini, o1-preview, o1-pro

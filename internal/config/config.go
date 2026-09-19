@@ -41,6 +41,12 @@ const (
 	ProviderTypeBedrock   ProviderType = "bedrock"
 	ProviderTypeProxy     ProviderType = "proxy"
 	ProviderTypeAIR       ProviderType = "air"
+	// ProviderTypeVLLM is a self-hosted vLLM server (LiteLLM's "hosted_vllm").
+	// It speaks the OpenAI wire protocol (see EffectiveProviderType) but keeps its
+	// own identity so spend logs and daily aggregates record custom_llm_provider
+	// "vllm", and so vLLM-only behaviour (per-model default sampling params)
+	// never leaks into other OpenAI-compatible providers.
+	ProviderTypeVLLM ProviderType = "vllm"
 )
 
 // LogValue implements slog.LogValuer so structured log backends (e.g. the
@@ -53,7 +59,7 @@ func (p ProviderType) LogValue() slog.Value {
 // IsValid checks if the provider type is valid
 func (p ProviderType) IsValid() bool {
 	switch p {
-	case ProviderTypeOpenAI, ProviderTypeVertexAI, ProviderTypeGemini, ProviderTypeAnthropic, ProviderTypeCometAPI, ProviderTypeProMan, ProviderTypeBedrock, ProviderTypeProxy, ProviderTypeAIR:
+	case ProviderTypeOpenAI, ProviderTypeVertexAI, ProviderTypeGemini, ProviderTypeAnthropic, ProviderTypeCometAPI, ProviderTypeProMan, ProviderTypeBedrock, ProviderTypeProxy, ProviderTypeAIR, ProviderTypeVLLM:
 		return true
 	}
 	return false
@@ -98,6 +104,8 @@ func normalizeProviderType(raw string) ProviderType {
 		return ProviderTypeAIR
 	case "pro-man", "pro_man":
 		return ProviderTypeProMan
+	case "hosted_vllm", "hosted-vllm":
+		return ProviderTypeVLLM
 	default:
 		return ProviderType(strings.ToLower(strings.TrimSpace(raw)))
 	}
@@ -131,6 +139,12 @@ type ModelRPMConfig struct {
 	// google_proto set); false otherwise.
 	// Explicit true/false overrides the default.
 	PassthroughMessages *bool `yaml:"passthrough_messages,omitempty"`
+
+	// DefaultParams are request-body defaults applied to a vLLM deployment when the
+	// client did not send the same key (LiteLLM deployment litellm_params such as
+	// chat_template_kwargs, temperature, top_k). Populated only by the database
+	// loader and never accepted from YAML.
+	DefaultParams map[string]any `yaml:"-"`
 }
 
 // UnmarshalYAML implements custom unmarshaling for ModelRPMConfig with env variable support.
@@ -864,6 +878,9 @@ func (c CredentialConfig) EffectiveProviderType() ProviderType {
 	}
 	if c.Type == ProviderTypeCometAPI && c.GoogleProtocol {
 		return ProviderTypeGemini
+	}
+	if c.Type == ProviderTypeVLLM {
+		return ProviderTypeOpenAI
 	}
 	return c.Type
 }
@@ -1956,7 +1973,7 @@ func (c *Config) Validate() error {
 
 		// Validate provider type
 		if !cred.Type.IsValid() {
-			return fmt.Errorf("credential %s: invalid type: %s (must be 'openai', 'vertex-ai', 'gemini', 'anthropic', 'cometapi', 'proman', 'bedrock', 'proxy', or 'air')", cred.Name, cred.Type)
+			return fmt.Errorf("credential %s: invalid type: %s (must be 'openai', 'vertex-ai', 'gemini', 'anthropic', 'cometapi', 'proman', 'bedrock', 'proxy', 'air', or 'vllm')", cred.Name, cred.Type)
 		}
 		if cred.AuthType != "" && cred.AuthType != "bearer" && cred.AuthType != "x-api-key" {
 			return fmt.Errorf("credential %s: invalid auth_type: %s (must be 'bearer' or 'x-api-key')", cred.Name, cred.AuthType)
@@ -1983,6 +2000,16 @@ func (c *Config) Validate() error {
 				return err
 			}
 			// api_key is optional for proxy/AIR
+
+		case ProviderTypeVLLM:
+			// vLLM serves an OpenAI-compatible API and is commonly deployed without
+			// --api-key, so base_url is required but api_key is optional.
+			if cred.BaseURL == "" {
+				return fmt.Errorf("credential %s: base_url is required for vllm type", cred.Name)
+			}
+			if err := validateBaseURL(cred.Name, cred.BaseURL); err != nil {
+				return err
+			}
 
 		case ProviderTypeVertexAI:
 			// For Vertex AI, project_id and location are required
