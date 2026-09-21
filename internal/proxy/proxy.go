@@ -852,7 +852,7 @@ func (p *Proxy) WithResponseCompatibility(
 	r *http.Request,
 	next func(http.ResponseWriter, *http.Request),
 ) {
-	if p.responseCompat == nil {
+	if p.responseCompat == nil || r.URL.Path == "/v1/messages" {
 		next(w, r)
 		return
 	}

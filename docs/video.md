@@ -68,8 +68,39 @@ video:
 Video requires LiteLLM SpendLogs writes.
 Startup fails when video is enabled without PostgreSQL, object storage, Runway credentials or synchronous spend settlement.
 
-Budgeted and rate limited keys are rejected until durable asynchronous reservations are enabled.
-The current Cloud.ru video organizations have no such limits.
+Video generation rejects applicable budget and rate limits until durable asynchronous reservations are supported.
+Personal user limits do not apply to team keys, matching normal AIR admission.
+
+## Database migrations
+
+Run `/app/migrate` before starting a release with video enabled.
+The command reads `DATABASE_URL` and applies embedded SQL migrations through golang-migrate.
+The migration command is included in the AIR container image.
+
+```sh
+DATABASE_URL="$VIDEO_DATABASE_URL" /app/migrate
+```
+
+Migration history is stored separately from LiteLLM in `air_schema_migrations`.
+The first migration creates the video tables on an empty database.
+For an existing installation it validates the tables and indexes before accepting the initial version.
+Existing jobs, uploads and LiteLLM tables are preserved.
+No manual baseline operation is required for a matching schema.
+
+Run migrations as a deployment Job using the same image as the server.
+The database secret must be ready before the Job starts.
+The Job must complete before updating the server configuration or Deployment.
+A failed migration must stop the rollout.
+
+Repeated runs apply only pending migrations.
+Concurrent migration commands are serialized by the migration driver.
+The migration role requires temporary table access, schema creation privileges and ownership of existing video objects or equivalent privileges.
+
+Server startup checks the recorded schema version without creating or altering tables.
+Missing, dirty or incompatible migration history prevents video startup.
+Resolve a failed migration before retrying the rollout.
+Do not mark a version as applied without checking the database structure.
+Application rollback does not run a database rollback.
 
 ## Billing
 

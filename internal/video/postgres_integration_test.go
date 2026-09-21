@@ -22,7 +22,8 @@ func TestPostgresStoreIdempotencyIsolationAndLeaseFencing(t *testing.T) {
 	t.Cleanup(pool.Close)
 
 	store := NewPostgresStore(pool)
-	require.NoError(t, store.Migrate(t.Context()))
+	require.NoError(t, MigrateDatabase(t.Context(), databaseURL))
+	require.NoError(t, store.CheckSchema(t.Context()))
 	org := "video-test-" + uuid.NewString()
 	t.Cleanup(func() {
 		_, _ = pool.Exec(context.Background(), `DELETE FROM air_video_uploads WHERE organization_id=$1`, org)
