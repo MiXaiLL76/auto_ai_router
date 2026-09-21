@@ -170,10 +170,20 @@ func chatContentPartsToInput(parts []interface{}) ([]interface{}, error) {
 }
 
 // chatAssistantMessageToInputItems converts one assistant Chat Completions
-// message into zero or more Responses API input items: a message item for
-// any text content, plus one function_call item per tool call.
+// message into zero or more Responses API input items: any reasoning items
+// carried in "thinking_blocks", a message item for any text content, and one
+// function_call item per tool call.
 func chatAssistantMessageToInputItems(msg map[string]interface{}) []interface{} {
 	var items []interface{}
+
+	// Reasoning items must come first, in their original relative order --
+	// see ResponseToChat's injectThinkingBlocks, which packs them into
+	// "thinking_blocks" specifically so a reasoning model's tool-calling
+	// loop keeps its chain of thought across Chat Completions turns (this
+	// feature always runs the Responses API in stateless/store:false mode,
+	// rebuilding the full input from message history on every turn -- see
+	// ChatRequestToResponses -- so nothing else re-supplies this context).
+	items = append(items, chatThinkingBlocksToReasoningItems(msg["thinking_blocks"])...)
 
 	if content := chatAssistantContentToOutputParts(msg["content"]); len(content) > 0 {
 		items = append(items, map[string]interface{}{
@@ -203,6 +213,39 @@ func chatAssistantMessageToInputItems(msg map[string]interface{}) []interface{} 
 		})
 	}
 
+	return items
+}
+
+// chatThinkingBlocksToReasoningItems reconstructs Responses API "reasoning"
+// input items from an assistant message's "thinking_blocks" field -- the
+// inverse of ResponseToChat's injectThinkingBlocks. Only entries this
+// package itself wrote (type == responsesReasoningBlockType) are consumed;
+// anything else (e.g. an Anthropic-flavored openai.OpenAIThinkingBlock
+// entry, should one somehow arrive on this route) is ignored rather than
+// forwarded as a malformed reasoning item.
+func chatThinkingBlocksToReasoningItems(raw interface{}) []interface{} {
+	blocks, ok := raw.([]interface{})
+	if !ok {
+		return nil
+	}
+	items := make([]interface{}, 0, len(blocks))
+	for _, b := range blocks {
+		blockMap, ok := b.(map[string]interface{})
+		if !ok || blockMap["type"] != responsesReasoningBlockType {
+			continue
+		}
+		item := map[string]interface{}{"type": "reasoning"}
+		if id, ok := blockMap["id"].(string); ok && id != "" {
+			item["id"] = id
+		}
+		if enc, ok := blockMap["encrypted_content"].(string); ok && enc != "" {
+			item["encrypted_content"] = enc
+		}
+		if summary, ok := blockMap["summary"]; ok {
+			item["summary"] = summary
+		}
+		items = append(items, item)
+	}
 	return items
 }
 

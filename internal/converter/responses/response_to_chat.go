@@ -25,6 +25,7 @@ func ResponseToChat(body []byte) ([]byte, error) {
 	var refusal string
 	var toolCalls []openai.OpenAIToolCall
 	var images []openai.ImageData
+	var thinkingBlocks []responsesReasoningBlock
 	hasFunctionCall := false
 
 	for _, item := range resp.Output {
@@ -47,6 +48,30 @@ func ResponseToChat(body []byte) ([]byte, error) {
 				if s.Text != "" {
 					reasoningParts = append(reasoningParts, s.Text)
 				}
+			}
+			// Preserve the reasoning item structurally (id + encrypted_content),
+			// not just its flattened summary text, so a subsequent Chat
+			// Completions turn can reconstruct a proper "reasoning" input item
+			// ahead of any function_call it informed -- see
+			// chatAssistantMessageToInputItems. This whole feature always runs
+			// Responses API in the stateless/store:false mode (a fresh
+			// /v1/responses call per Chat Completions turn, full input
+			// rebuilt from the client's message history each time -- see
+			// ChatRequestToResponses), and OpenAI's own guidance for reasoning
+			// models doing multi-round function calling in that mode is that
+			// the reasoning item must be echoed back alongside its
+			// function_call/function_call_output pair on the next turn, or
+			// the model loses the chain of thought that produced the call
+			// (degraded quality at best, a rejected request at worst).
+			// reasoningParts/message.ReasoningContent above stays purely for
+			// human/debug visibility -- it is not what gets fed back.
+			if item.ID != "" || item.EncryptedContent != "" || len(item.Summary) > 0 {
+				thinkingBlocks = append(thinkingBlocks, responsesReasoningBlock{
+					Type:             responsesReasoningBlockType,
+					ID:               item.ID,
+					EncryptedContent: item.EncryptedContent,
+					Summary:          item.Summary,
+				})
 			}
 		case "function_call":
 			hasFunctionCall = true
@@ -128,7 +153,65 @@ func ResponseToChat(body []byte) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal chat completions response: %w", err)
 	}
+	if len(thinkingBlocks) > 0 {
+		if patched, err := injectThinkingBlocks(result, thinkingBlocks); err == nil {
+			result = patched
+		}
+		// On a patch failure, fall through and return the unpatched result --
+		// losing reasoning continuity is a quality regression, not a reason
+		// to fail the whole response.
+	}
 	return result, nil
+}
+
+// responsesReasoningBlockType discriminates this package's own
+// thinking_blocks convention from openai.OpenAIThinkingBlock's
+// Anthropic-flavored entries (see chatAssistantMessageToInputItems) -- the
+// two must never be confused if a single conversation somehow mixes routes.
+const responsesReasoningBlockType = "responses_reasoning"
+
+// responsesReasoningBlock is this round trip's own thinking_blocks entry
+// shape (see injectThinkingBlocks / chatAssistantMessageToInputItems). Chat
+// Completions has no native field for an opaque, must-echo-back reasoning
+// item, so -- following the same convention this codebase already uses for
+// Anthropic's thinking+signature blocks (openai.OpenAIMessage.ThinkingBlocks,
+// see anthropic.convertOpenAIMessagesToAnthropic) -- it rides along as an
+// extra "thinking_blocks" field on the assistant message that a
+// well-behaved client preserves without understanding it.
+type responsesReasoningBlock struct {
+	Type             string          `json:"type"`
+	ID               string          `json:"id,omitempty"`
+	EncryptedContent string          `json:"encrypted_content,omitempty"`
+	Summary          []OutputContent `json:"summary,omitempty"`
+}
+
+// injectThinkingBlocks patches "thinking_blocks" onto choices[0].message in
+// an already-marshaled Chat Completions response body. openai.
+// OpenAIResponseMessage (the response-side message type) has no
+// ThinkingBlocks field -- that field only exists on openai.OpenAIMessage,
+// the *request*-side type, since it's normally something a client echoes
+// back rather than something AIR's own response builders populate. Patching
+// the raw JSON here avoids widening a struct shared by every converter in
+// the codebase just for this one round trip.
+func injectThinkingBlocks(body []byte, blocks []responsesReasoningBlock) ([]byte, error) {
+	var resp map[string]interface{}
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return body, err
+	}
+	choices, ok := resp["choices"].([]interface{})
+	if !ok || len(choices) == 0 {
+		return body, nil
+	}
+	choice, ok := choices[0].(map[string]interface{})
+	if !ok {
+		return body, nil
+	}
+	message, ok := choice["message"].(map[string]interface{})
+	if !ok {
+		return body, nil
+	}
+	message["thinking_blocks"] = blocks
+	return json.Marshal(resp)
 }
 
 // chatCompletionIDFromResponses exposes a Chat-Completions-shaped response
