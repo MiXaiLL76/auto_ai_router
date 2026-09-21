@@ -403,9 +403,20 @@ func (p *Proxy) prepareRequestForCredential(
 				return req, err
 			}
 			req.body = openai.ReplaceResponsesBodyParam(realModelID, responsesBody)
-			// proxyBody must stay in sync with body: TryFallbackProxy forwards
-			// proxyBody, not body, to fallback credentials.
-			req.proxyBody = openai.ReplaceResponsesBodyParam(modelID, responsesBody)
+			// req.proxyBody/req.proxyPath are deliberately left at their
+			// defaults (baseProxyBody, the alias-restored *Chat Completions*
+			// body, and basePath, "/v1/chat/completions") rather than the
+			// Responses-shaped conversion above: a fallback proxy-like
+			// credential (TryFallbackProxy forwards proxyBody/proxyPath, not
+			// body/path) is itself an AIR instance that does its own
+			// model-specific responses_only handling on the request it
+			// actually receives -- same reasoning as the "Proxy-like
+			// credentials are excluded" comment above for the direct-send
+			// path. Overwriting them here previously sent a
+			// Responses-shaped body (input/max_output_tokens, real model
+			// name instead of the alias) to /v1/chat/completions on the
+			// fallback, which every such peer rejects with "messages is
+			// required".
 			req.convertedToResponses = true
 			req.path = strings.Replace(basePath, "/chat/completions", "/responses", 1)
 			p.logger.DebugContext(r.Context(), "Converted Chat Completions request to Responses API format (responses_only)",

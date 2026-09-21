@@ -569,6 +569,72 @@ func TestPrepareRequestForCredential_ChatCompletionsPreservesDeveloperRoleForNon
 	require.Equal(t, "developer", directMessages[0].(map[string]interface{})["role"])
 }
 
+// TestPrepareRequestForCredential_ResponsesOnlyModel_ProxyBodyStaysChatShaped
+// reproduces a real production failure: for a responses_only model, the
+// direct-send path (req.body/req.path) is correctly converted to Responses
+// API shape and /v1/responses -- but req.proxyBody/req.proxyPath, the
+// fields TryFallbackProxy forwards to a fallback *proxy-like* (AIR-to-AIR)
+// credential, must NOT get that conversion. A chained AIR instance does its
+// own model-specific responses_only handling on the request it actually
+// receives, exactly like the "Proxy-like credentials are excluded" comment
+// says for the direct-send branch just above it -- so the fallback needs
+// the original Chat Completions body (with the alias model name, not the
+// real one) on the original /v1/chat/completions path. Previously this
+// path overwrote proxyBody with the Responses-shaped conversion (input/
+// max_output_tokens, real model name) while leaving proxyPath at
+// /v1/chat/completions, so a fallback proxy received a Responses-shaped
+// body on a Chat Completions path and rejected it with "messages is
+// required".
+func TestPrepareRequestForCredential_ResponsesOnlyModel_ProxyBodyStaysChatShaped(t *testing.T) {
+	prx := NewTestProxyBuilder().Build()
+	cred := config.CredentialConfig{Name: "openai-main", Type: config.ProviderTypeOpenAI, APIKey: "key", BaseURL: "https://api.openai.com", RPM: 100}
+	prx.modelManager = models.New(prx.logger, 50, []config.ModelRPMConfig{
+		{Name: "gpt-5-pro", ResponsesOnly: true, Credential: cred.Name, RPM: -1, TPM: -1},
+	})
+	prx.modelManager.LoadModelsFromConfig([]config.CredentialConfig{cred})
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	body := []byte(`{"model":"gpt-5-pro-real","max_tokens":64,"messages":[{"role":"user","content":"hi"}]}`)
+	proxyBody := []byte(`{"model":"gpt-5-pro","max_tokens":64,"messages":[{"role":"user","content":"hi"}]}`)
+
+	prepared, err := prx.prepareRequestForCredential(
+		req,
+		body,
+		proxyBody,
+		"gpt-5-pro",
+		"gpt-5-pro-real",
+		"/v1/chat/completions",
+		false,
+		&cred,
+		false,
+		false,
+		false,
+	)
+	require.NoError(t, err)
+	require.True(t, prepared.convertedToResponses)
+
+	// Direct-send side: correctly converted to Responses API shape.
+	require.Equal(t, "/v1/responses", prepared.path)
+	var direct map[string]interface{}
+	require.NoError(t, json.Unmarshal(prepared.body, &direct))
+	require.Contains(t, direct, "input")
+	require.NotContains(t, direct, "messages")
+	require.Equal(t, "gpt-5-pro-real", direct["model"])
+
+	// Fallback-proxy side: must stay exactly the original Chat Completions
+	// shape, with the alias model name, on the original path -- untouched
+	// by the Responses conversion above.
+	require.Equal(t, "/v1/chat/completions", prepared.proxyPath,
+		"a fallback proxy-like credential must receive the original chat path, not the Responses one")
+	var forwarded map[string]interface{}
+	require.NoError(t, json.Unmarshal(prepared.proxyBody, &forwarded))
+	require.Contains(t, forwarded, "messages",
+		"a fallback proxy-like credential must receive a Chat-Completions-shaped body, not Responses-shaped")
+	require.NotContains(t, forwarded, "input")
+	require.Equal(t, "gpt-5-pro", forwarded["model"],
+		"a fallback proxy-like credential must receive the alias model name, not the real one")
+}
+
 func TestPrepareRequestForCredential_MessagesKeepsOriginalProxyRequest(t *testing.T) {
 	prx := NewTestProxyBuilder().Build()
 	cred := config.CredentialConfig{Name: "openai", Type: config.ProviderTypeOpenAI, APIKey: "key", BaseURL: "http://openai.local", RPM: 100}
