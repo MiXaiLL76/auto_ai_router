@@ -36,11 +36,48 @@ func TestParseRouterSettings(t *testing.T) {
 		assert.Equal(t, map[string]string{"a": "b"}, got.ModelGroupAlias)
 	})
 
-	t.Run("unusable entries are skipped instead of failing the sync", func(t *testing.T) {
-		got, err := ParseRouterSettings([]byte(`{"model_group_alias": {"": "x", "n": 5, "ok": " target "}, "fallbacks": [{"g": [1, "f", ""]}]}`))
+	t.Run("empty names and targets are skipped silently", func(t *testing.T) {
+		got, err := ParseRouterSettings([]byte(`{"model_group_alias": {"": "x", "ok": " target "}, "fallbacks": [{"g": [1, "f", ""]}]}`))
 		require.NoError(t, err)
 		assert.Equal(t, map[string]string{"ok": "target"}, got.ModelGroupAlias)
 		assert.Equal(t, map[string][]string{"g": {"f"}}, got.Fallbacks)
+	})
+
+	// An unexpected structure is reported, but everything readable is still returned so
+	// the caller can log the error and keep syncing.
+	t.Run("a wrong alias value drops only that alias", func(t *testing.T) {
+		got, err := ParseRouterSettings([]byte(`{"model_group_alias": {"n": 5, "ok": "target"}}`))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), `model_group_alias["n"]`)
+		assert.Equal(t, map[string]string{"ok": "target"}, got.ModelGroupAlias)
+	})
+
+	t.Run("a wrong fallbacks entry drops only that entry", func(t *testing.T) {
+		got, err := ParseRouterSettings([]byte(`{"fallbacks": [{"a": "b"}, {"c": ["d"]}]}`))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "fallbacks[0]")
+		assert.Equal(t, map[string][]string{"c": {"d"}}, got.Fallbacks)
+	})
+
+	t.Run("a wrongly typed field does not lose the other one", func(t *testing.T) {
+		got, err := ParseRouterSettings([]byte(`{"fallbacks": {"a": ["b"]}, "model_group_alias": {"x": "y"}}`))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "router_settings.fallbacks")
+		assert.Empty(t, got.Fallbacks)
+		assert.Equal(t, map[string]string{"x": "y"}, got.ModelGroupAlias)
+
+		got, err = ParseRouterSettings([]byte(`{"model_group_alias": "oops", "fallbacks": [{"a": ["b"]}]}`))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "router_settings.model_group_alias")
+		assert.Empty(t, got.ModelGroupAlias)
+		assert.Equal(t, map[string][]string{"a": {"b"}}, got.Fallbacks)
+	})
+
+	t.Run("a document that is not an object is an error with empty settings", func(t *testing.T) {
+		got, err := ParseRouterSettings([]byte(`["not", "an", "object"]`))
+		require.Error(t, err)
+		assert.Empty(t, got.ModelGroupAlias)
+		assert.Empty(t, got.Fallbacks)
 	})
 
 	t.Run("empty and null", func(t *testing.T) {

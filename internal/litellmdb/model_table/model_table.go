@@ -106,7 +106,8 @@ func isUndefinedColumn(err error) bool {
 }
 
 // FetchRouterSettings loads model_group_alias and fallbacks from
-// LiteLLM_Config.router_settings. A database without that row yields empty settings.
+// LiteLLM_Config.router_settings. A database without that row yields empty settings, and
+// parts of the row with an unexpected structure are logged and ignored.
 func (a *ProxyModelTable) FetchRouterSettings(ctx context.Context) (queries.RouterSettings, error) {
 	if !a.pool.IsHealthy() {
 		return queries.RouterSettings{}, models.ErrConnectionFailed
@@ -136,7 +137,13 @@ func (a *ProxyModelTable) FetchRouterSettings(ctx context.Context) (queries.Rout
 		return queries.RouterSettings{}, err
 	}
 
-	return queries.ParseRouterSettings(raw)
+	// Parsing is best-effort: whatever has an unexpected shape is dropped and reported,
+	// the rest is still used. A row AIR does not understand must not stop the sync.
+	settings, err := queries.ParseRouterSettings(raw)
+	if err != nil {
+		a.logger.Warn("router_settings has unexpected structure, ignoring the unusable parts", "error", err)
+	}
+	return settings, nil
 }
 
 func (a *ProxyModelTable) FetchCredentials(ctx context.Context) ([]queries.CredentialTable, error) {
