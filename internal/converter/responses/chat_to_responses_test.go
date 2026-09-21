@@ -186,3 +186,24 @@ func TestChatRequestToResponses_DeletesChatOnlyFields(t *testing.T) {
 		assert.NotContains(t, raw, key)
 	}
 }
+
+func TestChatRequestToResponses_ForcesStatelessReasoning(t *testing.T) {
+	body := `{"model":"o3-pro","messages":[{"role":"user","content":"hi"}]}`
+	out, err := ChatRequestToResponses([]byte(body))
+	require.NoError(t, err)
+
+	var raw map[string]interface{}
+	require.NoError(t, json.Unmarshal(out, &raw))
+	assert.Equal(t, false, raw["store"])
+	assert.Equal(t, []interface{}{"reasoning.encrypted_content"}, raw["include"])
+}
+
+func TestChatRequestToResponses_ForcesStatelessReasoning_KeepsExistingInclude(t *testing.T) {
+	body := `{"model":"o3-pro","messages":[{"role":"user","content":"hi"}],"include":["file_search_call.results"]}`
+	out, err := ChatRequestToResponses([]byte(body))
+	require.NoError(t, err)
+
+	var raw map[string]interface{}
+	require.NoError(t, json.Unmarshal(out, &raw))
+	assert.ElementsMatch(t, []interface{}{"file_search_call.results", "reasoning.encrypted_content"}, raw["include"])
+}

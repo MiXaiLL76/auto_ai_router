@@ -190,6 +190,19 @@ func TransformResponsesStreamToChat(reader io.Reader, model string, output io.Wr
 					}
 				}
 			}
+			// same as ResponseToChat: echo the reasoning item(s) back as
+			// thinking_blocks so a follow-up tool-call turn keeps its
+			// chain of thought. The terminal event carries the full final
+			// Response, so this is the only place a streamed reply can
+			// grab it.
+			if blocks := reasoningBlocksFromOutput(event.Response.Output); len(blocks) > 0 {
+				if err := writeFirstChunkOnce(); err != nil {
+					return err
+				}
+				if err := writeThinkingBlocksChunk(output, ensureChatID(), model, timestamp, blocks); err != nil {
+					return err
+				}
+			}
 			reason := responsesFinishReason(event.Response.Status, event.Response.IncompleteDetails, nextToolCallIdx > 0)
 			usage := responsesUsageToChat(event.Response.Usage)
 			if err := writeChatTerminalChunks(output, ensureChatID(), model, timestamp, reason, usage); err != nil {
@@ -257,6 +270,26 @@ func writeChatStreamChunk(output io.Writer, chatID, model string, timestamp int6
 	data, err := json.Marshal(chunk)
 	if err != nil {
 		return fmt.Errorf("failed to marshal streaming chunk: %w", err)
+	}
+	_, err = fmt.Fprintf(output, "data: %s\n\n", data)
+	return err
+}
+
+// writeThinkingBlocksChunk writes a chunk carrying thinking_blocks on the
+// delta. openai.OpenAIStreamingDelta has no ThinkingBlocks field -- same
+// reason injectThinkingBlocks (response_to_chat.go) patches raw JSON
+// instead of widening a struct shared by every converter -- so this builds
+// the chunk by hand rather than through OpenAIStreamingChunk.
+func writeThinkingBlocksChunk(output io.Writer, chatID, model string, timestamp int64, blocks []responsesReasoningBlock) error {
+	chunk := map[string]interface{}{
+		"id": chatID, "object": "chat.completion.chunk", "created": timestamp, "model": model,
+		"choices": []interface{}{
+			map[string]interface{}{"index": 0, "delta": map[string]interface{}{"thinking_blocks": blocks}, "finish_reason": nil},
+		},
+	}
+	data, err := json.Marshal(chunk)
+	if err != nil {
+		return fmt.Errorf("failed to marshal thinking_blocks chunk: %w", err)
 	}
 	_, err = fmt.Fprintf(output, "data: %s\n\n", data)
 	return err

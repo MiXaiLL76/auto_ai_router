@@ -194,6 +194,31 @@ type responsesReasoningBlock struct {
 	Summary          []OutputContent `json:"summary,omitempty"`
 }
 
+// reasoningBlocksFromOutput pulls the same thinking_blocks entries out of a
+// Response's output array that ResponseToChat's own loop above builds
+// inline. TransformResponsesStreamToChat needs it too: it doesn't get
+// reasoning items incrementally (only text/refusal/arguments stream as
+// deltas), but the terminal response.completed/.incomplete/.failed event
+// always carries the complete final Response, output included.
+func reasoningBlocksFromOutput(output []OutputItem) []responsesReasoningBlock {
+	var blocks []responsesReasoningBlock
+	for _, item := range output {
+		if item.Type != "reasoning" {
+			continue
+		}
+		if item.ID == "" && item.EncryptedContent == "" && len(item.Summary) == 0 {
+			continue
+		}
+		blocks = append(blocks, responsesReasoningBlock{
+			Type:             responsesReasoningBlockType,
+			ID:               item.ID,
+			EncryptedContent: item.EncryptedContent,
+			Summary:          item.Summary,
+		})
+	}
+	return blocks
+}
+
 // injectThinkingBlocks patches "thinking_blocks" onto choices[0].message in
 // an already-marshaled Chat Completions response body. openai.
 // OpenAIResponseMessage (the response-side message type) has no

@@ -261,6 +261,39 @@ func TestTransformResponsesStreamToChat_RefusalDelta(t *testing.T) {
 	assert.Equal(t, "I can't help with that.", refusal)
 }
 
+func TestTransformResponsesStreamToChat_ReasoningSurvivesAsThinkingBlocks(t *testing.T) {
+	input := strings.NewReader(
+		sseLine(`{"type":"response.created","response":{"id":"resp_reason","object":"response","status":"in_progress"}}`) +
+			sseLine(`{"type":"response.function_call_arguments.delta","output_index":1,"delta":"{}"}`) +
+			sseLine(`{"type":"response.completed","response":{"id":"resp_reason","object":"response","status":"completed","output":[`+
+				`{"type":"reasoning","id":"rs_abc","encrypted_content":"opaque-blob","summary":[{"type":"summary_text","text":"thinking"}]},`+
+				`{"type":"function_call","call_id":"call_1","name":"get_weather","arguments":"{}"}`+
+				`]}}`) +
+			"data: [DONE]\n\n",
+	)
+
+	var out bytes.Buffer
+	require.NoError(t, TransformResponsesStreamToChat(input, "o3-pro", &out))
+	chunks := collectSSEChunks(t, out.Bytes())
+
+	var blocks []interface{}
+	for _, c := range chunks {
+		choices := c["choices"].([]interface{})
+		if len(choices) == 0 {
+			continue
+		}
+		delta := choices[0].(map[string]interface{})["delta"].(map[string]interface{})
+		if tb, ok := delta["thinking_blocks"].([]interface{}); ok {
+			blocks = tb
+		}
+	}
+	require.Len(t, blocks, 1, "the final response.completed event must carry the reasoning item forward as a thinking_blocks chunk")
+	block := blocks[0].(map[string]interface{})
+	assert.Equal(t, "responses_reasoning", block["type"])
+	assert.Equal(t, "rs_abc", block["id"])
+	assert.Equal(t, "opaque-blob", block["encrypted_content"])
+}
+
 func TestTransformResponsesStreamToChat_MalformedLineSkipped(t *testing.T) {
 	input := strings.NewReader(
 		sseLine(`{"type":"response.created","response":{"id":"resp_3","object":"response","status":"in_progress"}}`) +

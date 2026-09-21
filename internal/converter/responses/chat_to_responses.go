@@ -43,6 +43,7 @@ func ChatRequestToResponses(body []byte) ([]byte, error) {
 	chatToolChoiceToResponses(raw)
 	chatReasoningToResponses(raw)
 	chatResponseFormatToText(raw)
+	chatForceStatelessResponses(raw)
 
 	deleteChatOnlyFields(raw)
 
@@ -396,6 +397,27 @@ func chatResponseFormatToText(raw map[string]interface{}) {
 		return
 	}
 	raw["text"] = map[string]interface{}{"format": format}
+}
+
+// chatForceStatelessResponses pins store:false and requests
+// reasoning.encrypted_content. This whole feature rebuilds "input" from the
+// client's own message history on every call (chatMessagesToInput) instead
+// of using previous_response_id, so a reasoning item can only ever be
+// re-sent to the provider as an id-less blob via encrypted_content -- the
+// bare id ResponseToChat would otherwise fall back to means nothing outside
+// the conversation the provider chose to store it under, which store:false
+// isn't relying on anyway.
+func chatForceStatelessResponses(raw map[string]interface{}) {
+	raw["store"] = false
+
+	const encryptedContentInclude = "reasoning.encrypted_content"
+	existing, _ := raw["include"].([]interface{})
+	for _, v := range existing {
+		if s, _ := v.(string); s == encryptedContentInclude {
+			return
+		}
+	}
+	raw["include"] = append(existing, encryptedContentInclude)
 }
 
 // deleteChatOnlyFields removes Chat-Completions-only fields the Responses
