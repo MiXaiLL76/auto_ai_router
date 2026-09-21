@@ -315,7 +315,8 @@ type Manager struct {
 	modelWebSocketResponses      map[string]bool
 	modelPassthroughResponses    map[string]*bool                                   // model name -> explicit passthrough_responses override (nil = auto)
 	modelPassthroughMessages     map[string]*bool                                   // model name -> explicit passthrough_messages override (nil = provider default)
-	modelResponsesOnly           map[string]bool                                    // model name -> true if only /v1/responses is accepted upstream (responses_only: true)
+	modelResponsesOnly           map[string]bool                                    // model name -> true if only /v1/responses is accepted upstream (responses_only: true), for entries with no specific credential
+	modelResponsesOnlyPerCred    map[string]map[string]bool                         // credential -> model name -> true (for credential-specific responses_only entries -- the same alias can be served by another credential that doesn't need it)
 	dynamicModelWeights          map[string]map[string]int                          // model ID -> credential -> weight learned from upstream /health
 	dynamicModelPriorities       map[string]map[string]int                          // model ID -> credential -> priority learned from upstream /health (scalar; MIN of live tiers when tiers exist)
 	dynamicModelPriorityTiers    map[string]map[string][]httputil.ModelPriorityTier // model ID -> proxy/AIR credential -> per-priority-tier breakdown learned from upstream /health
@@ -363,6 +364,7 @@ func New(logger *slog.Logger, defaultModelsRPM int, staticModels []config.ModelR
 		modelPassthroughResponses:   make(map[string]*bool),
 		modelPassthroughMessages:    make(map[string]*bool),
 		modelResponsesOnly:          make(map[string]bool),
+		modelResponsesOnlyPerCred:   make(map[string]map[string]bool),
 		dynamicModelWeights:         make(map[string]map[string]int),
 		dynamicModelPriorities:      make(map[string]map[string]int),
 		dynamicModelPriorityTiers:   make(map[string]map[string][]httputil.ModelPriorityTier),
@@ -420,9 +422,16 @@ func New(logger *slog.Logger, defaultModelsRPM int, staticModels []config.ModelR
 					"model", staticModel.Name, "value", *staticModel.PassthroughMessages)
 			}
 			if staticModel.ResponsesOnly {
-				m.modelResponsesOnly[staticModel.Name] = true
+				if staticModel.Credential != "" {
+					if m.modelResponsesOnlyPerCred[staticModel.Credential] == nil {
+						m.modelResponsesOnlyPerCred[staticModel.Credential] = make(map[string]bool)
+					}
+					m.modelResponsesOnlyPerCred[staticModel.Credential][staticModel.Name] = true
+				} else {
+					m.modelResponsesOnly[staticModel.Name] = true
+				}
 				logger.Debug("Registered responses_only model",
-					"model", staticModel.Name)
+					"model", staticModel.Name, "credential", staticModel.Credential)
 			}
 			logger.Debug("Added static model from config.yaml",
 				"model", staticModel.Name,
@@ -643,14 +652,27 @@ func (m *Manager) HasPassthroughResponsesOverride(modelID string) bool {
 	return ok && value != nil
 }
 
-// IsResponsesOnly reports whether modelID's upstream only accepts the
-// Responses API (responses_only: true in models[]) and must never be sent a
-// /v1/chat/completions request directly. No auto-detection: false unless
-// explicitly configured, since (unlike PassthroughResponses) there is no
-// reliable way to infer this from the model name alone.
-func (m *Manager) IsResponsesOnly(modelID string) bool {
+// IsResponsesOnlyForCredential reports whether modelID's upstream only
+// accepts the Responses API (responses_only: true in models[]) *on the given
+// credential* and must never be sent a /v1/chat/completions request
+// directly. No auto-detection: false unless explicitly configured, since
+// (unlike PassthroughResponses) there is no reliable way to infer this from
+// the model name alone.
+//
+// Scoped per credential -- same reasoning as GetRealModelNameForCredential:
+// the same public alias can be served by several credentials across
+// different providers (e.g. an OpenAI deployment that is Responses-API-
+// exclusive, and an OpenRouter/Azure credential for the same alias that
+// isn't), and only the credential(s) the flag was actually set on should be
+// routed through the Responses API conversion.
+func (m *Manager) IsResponsesOnlyForCredential(modelID, credential string) bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
+	if per, ok := m.modelResponsesOnlyPerCred[credential]; ok {
+		if v, ok := per[modelID]; ok {
+			return v
+		}
+	}
 	return m.modelResponsesOnly[modelID]
 }
 

@@ -294,6 +294,46 @@ func TestOrchestrateRequest_ResponsesAPI_ResponsesOnlyForcesPassthrough(t *testi
 	require.False(t, hasMessages, "must not be converted to Chat Completions shape")
 }
 
+// TestPrepareRequestForCredential_ResponsesOnlyScopedToItsOwnCredential
+// reproduces a real misconfiguration: the same public alias ("gpt-5-pro") is
+// served by two credentials -- a real Responses-API-exclusive OpenAI
+// deployment (responses_only: true) and a fallback OpenRouter credential
+// that never opted in. The flag must not leak onto the fallback credential
+// just because it shares the alias.
+func TestPrepareRequestForCredential_ResponsesOnlyScopedToItsOwnCredential(t *testing.T) {
+	openaiCred := config.CredentialConfig{Name: "openai_main", Type: config.ProviderTypeOpenAI, APIKey: "key", BaseURL: "https://api.openai.com", RPM: 100}
+	openrouterCred := config.CredentialConfig{Name: "openrouter_fallback", Type: config.ProviderTypeOpenAI, APIKey: "key2", BaseURL: "https://openrouter.ai/api/v1", RPM: 100}
+	prx := NewTestProxyBuilder().WithCredentials(openaiCred, openrouterCred).Build()
+	prx.modelManager = models.New(prx.logger, 50, []config.ModelRPMConfig{
+		{Name: "gpt-5-pro", Credential: openaiCred.Name, ResponsesOnly: true, RPM: -1, TPM: -1},
+		{Name: "gpt-5-pro", Credential: openrouterCred.Name, RPM: -1, TPM: -1},
+	})
+	prx.modelManager.LoadModelsFromConfig([]config.CredentialConfig{openaiCred, openrouterCred})
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	body := []byte(`{"model":"gpt-5-pro","max_tokens":64,"messages":[{"role":"user","content":"hi"}]}`)
+
+	prepared, err := prx.prepareRequestForCredential(
+		req, body, body, "gpt-5-pro", "gpt-5-pro", "/v1/chat/completions",
+		false, &openaiCred, false, false, false,
+	)
+	require.NoError(t, err)
+	assert.True(t, prepared.convertedToResponses, "the credential the flag was set on must convert to Responses API shape")
+	assert.Equal(t, "/v1/responses", prepared.path)
+
+	prepared, err = prx.prepareRequestForCredential(
+		req, body, body, "gpt-5-pro", "gpt-5-pro", "/v1/chat/completions",
+		false, &openrouterCred, false, false, false,
+	)
+	require.NoError(t, err)
+	assert.False(t, prepared.convertedToResponses,
+		"a fallback credential for the same alias that never opted into responses_only must not be converted to Responses API shape")
+	assert.Equal(t, "/v1/chat/completions", prepared.path)
+	var raw map[string]interface{}
+	require.NoError(t, json.Unmarshal(prepared.body, &raw))
+	assert.Contains(t, raw, "messages", "the fallback credential must still receive a normal Chat Completions request")
+}
+
 func TestPrepareRequestForCredential_UsesCredentialSpecificRealModel(t *testing.T) {
 	logger := testhelpers.NewTestLogger()
 	cheap := config.CredentialConfig{Name: "cheapgpt", Type: config.ProviderTypeAnthropic, APIKey: "key", BaseURL: "http://cheapgpt.local", RPM: 100}

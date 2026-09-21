@@ -1645,6 +1645,52 @@ func TestGetRealModelNameForCredential_SameAliasMultipleProviders(t *testing.T) 
 	assert.False(t, ok)
 }
 
+// TestIsResponsesOnlyForCredential_SameAliasMultipleProviders reproduces a
+// real misconfiguration: the same public alias ("gpt-5-pro") served by two
+// credentials on different providers, only one of which is actually
+// Responses-API-exclusive. responses_only must apply only to the credential
+// it was configured on, not leak onto every credential that happens to share
+// the alias.
+func TestIsResponsesOnlyForCredential_SameAliasMultipleProviders(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+
+	staticModels := []config.ModelRPMConfig{
+		{
+			Name:          "gpt-5-pro",
+			Credential:    "openai_main",
+			ResponsesOnly: true,
+			RPM:           100,
+		},
+		{
+			Name:       "gpt-5-pro",
+			Credential: "openrouter_fallback",
+			RPM:        100,
+		},
+	}
+	m := New(logger, 100, staticModels)
+
+	assert.True(t, m.IsResponsesOnlyForCredential("gpt-5-pro", "openai_main"),
+		"the credential responses_only was actually set on must be flagged")
+	assert.False(t, m.IsResponsesOnlyForCredential("gpt-5-pro", "openrouter_fallback"),
+		"a fallback credential for the same alias that never opted in must not be converted to Responses API shape")
+	assert.False(t, m.IsResponsesOnlyForCredential("gpt-5-pro", "unknown-cred"))
+}
+
+// TestIsResponsesOnlyForCredential_FallbackToGlobal verifies that a
+// responses_only entry with no credential set (the pre-existing global
+// behavior) still applies regardless of which credential ends up serving
+// that alias.
+func TestIsResponsesOnlyForCredential_FallbackToGlobal(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+
+	staticModels := []config.ModelRPMConfig{
+		{Name: "gpt-5-pro", ResponsesOnly: true, RPM: 100},
+	}
+	m := New(logger, 100, staticModels)
+
+	assert.True(t, m.IsResponsesOnlyForCredential("gpt-5-pro", "any-credential"))
+}
+
 // TestGetRealModelNameForCredential_FallbackToGlobal verifies that when a model has a
 // global real name (no credential in config) and is routed to any credential, the global
 // real name is used as fallback.

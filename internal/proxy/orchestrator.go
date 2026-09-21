@@ -388,7 +388,7 @@ func (p *Proxy) prepareRequestForCredential(
 	}
 	if !isResponsesAPI {
 		if !cred.IsProxyLike() && strings.Contains(basePath, "/chat/completions") &&
-			p.modelManager != nil && p.modelManager.IsResponsesOnly(modelID) {
+			p.modelManager != nil && p.modelManager.IsResponsesOnlyForCredential(modelID, cred.Name) {
 			// This model's upstream only accepts the Responses API (see
 			// config.ModelRPMConfig.ResponsesOnly) -- the client called
 			// /v1/chat/completions, so convert its request to Responses API
@@ -458,7 +458,7 @@ func (p *Proxy) prepareRequestForCredential(
 		req.nativeResponses = true
 		p.logger.DebugContext(r.Context(), "Native Responses converter path",
 			"model", modelID, "provider", cred.Type, "streaming", streaming)
-	case !cred.IsProxyLike() && p.modelManager != nil && p.modelManager.IsResponsesOnly(modelID):
+	case !cred.IsProxyLike() && p.modelManager != nil && p.modelManager.IsResponsesOnlyForCredential(modelID, cred.Name):
 		// The client already called /v1/responses, and this model's upstream
 		// only accepts /v1/responses (config.ModelRPMConfig.ResponsesOnly) --
 		// nothing to convert, forward the client's own Responses-shaped body
