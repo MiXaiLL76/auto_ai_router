@@ -207,3 +207,51 @@ func TestChatRequestToResponses_ForcesStatelessReasoning_KeepsExistingInclude(t 
 	require.NoError(t, json.Unmarshal(out, &raw))
 	assert.ElementsMatch(t, []interface{}{"file_search_call.results", "reasoning.encrypted_content"}, raw["include"])
 }
+
+func TestChatRequestToResponses_DropsUnsupportedChatOnlyFields(t *testing.T) {
+	body := `{"model":"gpt-5-pro","messages":[{"role":"user","content":"hi"}],
+		"seed":42,"logprobs":true,"top_logprobs":3,"modalities":["text","audio"],
+		"audio":{"voice":"alloy","format":"wav"},"prediction":{"type":"content","content":"foo"},
+		"web_search_options":{"search_context_size":"high"}
+	}`
+	out, err := ChatRequestToResponses([]byte(body))
+	require.NoError(t, err)
+
+	var raw map[string]interface{}
+	require.NoError(t, json.Unmarshal(out, &raw))
+	for _, key := range []string{"seed", "logprobs", "modalities", "audio", "prediction", "web_search_options"} {
+		assert.NotContains(t, raw, key)
+	}
+	// top_logprobs is a valid Responses API field under the same name, unlike the others.
+	assert.Equal(t, float64(3), raw["top_logprobs"])
+}
+
+func TestChatRequestToResponses_VerbosityMovesUnderText(t *testing.T) {
+	body := `{"model":"gpt-5-pro","messages":[{"role":"user","content":"hi"}],"verbosity":"low"}`
+	out, err := ChatRequestToResponses([]byte(body))
+	require.NoError(t, err)
+
+	var raw map[string]interface{}
+	require.NoError(t, json.Unmarshal(out, &raw))
+	assert.NotContains(t, raw, "verbosity")
+	text, ok := raw["text"].(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, "low", text["verbosity"])
+}
+
+func TestChatRequestToResponses_VerbosityMergesWithResponseFormat(t *testing.T) {
+	body := `{"model":"gpt-5-pro","messages":[{"role":"user","content":"hi"}],
+		"verbosity":"high","response_format":{"type":"json_object"}
+	}`
+	out, err := ChatRequestToResponses([]byte(body))
+	require.NoError(t, err)
+
+	var raw map[string]interface{}
+	require.NoError(t, json.Unmarshal(out, &raw))
+	text, ok := raw["text"].(map[string]interface{})
+	require.True(t, ok)
+	assert.Equal(t, "high", text["verbosity"])
+	format, ok := text["format"].(map[string]interface{})
+	require.True(t, ok, "verbosity must not clobber the format text.format already carries")
+	assert.Equal(t, "json_object", format["type"])
+}

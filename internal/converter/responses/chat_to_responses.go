@@ -43,6 +43,7 @@ func ChatRequestToResponses(body []byte) ([]byte, error) {
 	chatToolChoiceToResponses(raw)
 	chatReasoningToResponses(raw)
 	chatResponseFormatToText(raw)
+	chatVerbosityToText(raw)
 	chatForceStatelessResponses(raw)
 
 	deleteChatOnlyFields(raw)
@@ -399,6 +400,22 @@ func chatResponseFormatToText(raw map[string]interface{}) {
 	raw["text"] = map[string]interface{}{"format": format}
 }
 
+// chatVerbosityToText moves Chat Completions' top-level verbosity into the
+// Responses API's nested text.verbosity, merging into an existing text
+// object rather than clobbering whatever chatResponseFormatToText already
+// put there.
+func chatVerbosityToText(raw map[string]interface{}) {
+	verbosity, ok := raw["verbosity"].(string)
+	if !ok || verbosity == "" {
+		return
+	}
+	if existing, ok := raw["text"].(map[string]interface{}); ok {
+		existing["verbosity"] = verbosity
+		return
+	}
+	raw["text"] = map[string]interface{}{"verbosity": verbosity}
+}
+
 // chatForceStatelessResponses pins store:false and requests
 // reasoning.encrypted_content. This whole feature rebuilds "input" from the
 // client's own message history on every call (chatMessagesToInput) instead
@@ -437,4 +454,11 @@ func deleteChatOnlyFields(raw map[string]interface{}) {
 	delete(raw, "stream_options")
 	delete(raw, "functions")
 	delete(raw, "function_call")
+	delete(raw, "verbosity") // moved into text.verbosity by chatVerbosityToText
+	delete(raw, "seed")
+	delete(raw, "logprobs")
+	delete(raw, "modalities")
+	delete(raw, "audio")
+	delete(raw, "prediction")
+	delete(raw, "web_search_options")
 }
