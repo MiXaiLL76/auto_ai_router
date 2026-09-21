@@ -159,22 +159,6 @@ func (p *Proxy) HealthCheckScoped(visibility scope.Context) (bool, *httputil.Pro
 				primaryBans[bp.Credential] = bp
 			}
 		}
-		if bp.Model == fail2ban.WildcardModel {
-			// A credential-wide ban covers every model of the credential,
-			// including ones with no ban entry of their own. An exact ban on
-			// the same model is more specific and wins, whatever the order.
-			if active {
-				for key, ms := range modelsInfo {
-					if ms.Credential == bp.Credential && ms.BanOrigin == "" {
-						applyBanToModelStats(&ms, bp, active)
-						modelsInfo[key] = ms
-					}
-				}
-			}
-		} else if ms, ok := modelsInfo[bp.Credential+":"+bp.Model]; ok {
-			applyBanToModelStats(&ms, bp, active)
-			modelsInfo[bp.Credential+":"+bp.Model] = ms
-		}
 		// Aggregate into per-credential counts
 		if len(bp.ErrorCodeCounts) > 0 {
 			if credentialErrorCounts[bp.Credential] == nil {
@@ -185,6 +169,7 @@ func (p *Proxy) HealthCheckScoped(visibility scope.Context) (bool, *httputil.Pro
 			}
 		}
 	}
+	applyBansToModels(modelsInfo, bannedPairs, visibleCreds, now)
 	for credName, bp := range primaryBans {
 		if cs, ok := credentialsInfo[credName]; ok {
 			cs.BanOrigin = bp.Origin
@@ -218,6 +203,54 @@ func (p *Proxy) HealthCheckScoped(visibility scope.Context) (bool, *httputil.Pro
 	}
 
 	return healthy, status
+}
+
+// applyBansToModels overlays ban details onto the per-model health stats. The
+// result does not depend on the order of bannedPairs (GetBannedPairs iterates
+// a map): an active exact ban wins over a credential-wide one, and an expired
+// exact ban is ignored while the credential is banned credential-wide, so its
+// stale reason, expiry and error counts never leak next to the active ban.
+func applyBansToModels(
+	modelsInfo map[string]httputil.ModelHealthStats,
+	bannedPairs []fail2ban.BanPair,
+	visibleCreds map[string]bool,
+	now time.Time,
+) {
+	isActive := func(bp fail2ban.BanPair) bool {
+		return bp.BanUntil.IsZero() || bp.BanUntil.After(now)
+	}
+
+	credentialWide := make(map[string]fail2ban.BanPair)
+	for _, bp := range bannedPairs {
+		if visibleCreds[bp.Credential] && bp.Model == fail2ban.WildcardModel && isActive(bp) {
+			credentialWide[bp.Credential] = bp
+		}
+	}
+
+	for _, bp := range bannedPairs {
+		if !visibleCreds[bp.Credential] || bp.Model == fail2ban.WildcardModel {
+			continue
+		}
+		active := isActive(bp)
+		if _, wide := credentialWide[bp.Credential]; wide && !active {
+			continue
+		}
+		key := bp.Credential + ":" + bp.Model
+		if ms, ok := modelsInfo[key]; ok {
+			applyBanToModelStats(&ms, bp, active)
+			modelsInfo[key] = ms
+		}
+	}
+
+	// A credential-wide ban covers every model of the credential, including
+	// ones with no ban entry of their own; models already under an active
+	// exact ban keep their more specific details.
+	for key, ms := range modelsInfo {
+		if bp, wide := credentialWide[ms.Credential]; wide && ms.BanOrigin == "" {
+			applyBanToModelStats(&ms, bp, true)
+			modelsInfo[key] = ms
+		}
+	}
 }
 
 // applyBanToModelStats copies one ban's details onto a model's health entry.

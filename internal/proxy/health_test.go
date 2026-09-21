@@ -816,3 +816,88 @@ func TestHealthCheck_ProxyCredentialLimitsFromRateLimiter(t *testing.T) {
 	assert.GreaterOrEqual(t, proxyStat.CurrentRPM, 0)
 	assert.GreaterOrEqual(t, proxyStat.CurrentTPM, 36800) // Allow small variance due to time calculations
 }
+
+func TestApplyBansToModels_ExpiredExactBanDoesNotOverrideAdminWildcard(t *testing.T) {
+	now := time.Now().UTC()
+	adminUntil := now.Add(time.Hour)
+	admin := fail2ban.BanPair{
+		Credential: "cred", Model: fail2ban.WildcardModel,
+		BanUntil: adminUntil, Reason: "maintenance", Origin: fail2ban.OriginAdmin,
+	}
+	expired := fail2ban.BanPair{
+		Credential: "cred", Model: "gpt",
+		BanUntil: now.Add(-time.Minute), Reason: "upstream 500",
+		ErrorCodeCounts: map[int]int{500: 3}, Origin: fail2ban.OriginFail2Ban,
+	}
+	visible := map[string]bool{"cred": true}
+
+	// GetBannedPairs iterates a map, so both orders must give the same result.
+	for name, pairs := range map[string][]fail2ban.BanPair{
+		"wildcard first": {admin, expired},
+		"exact first":    {expired, admin},
+	} {
+		t.Run(name, func(t *testing.T) {
+			models := map[string]httputil.ModelHealthStats{
+				"cred:gpt":   {Credential: "cred"},
+				"cred:other": {Credential: "cred"},
+			}
+			applyBansToModels(models, pairs, visible, now)
+
+			for key, ms := range models {
+				require.Equal(t, fail2ban.OriginAdmin, ms.BanOrigin, key)
+				require.Equal(t, "maintenance", ms.ProviderError, key)
+				require.NotNil(t, ms.BanUntil, key)
+				require.True(t, ms.BanUntil.Equal(adminUntil), key)
+				require.Empty(t, ms.ErrorCodeCounts, key)
+			}
+		})
+	}
+}
+
+func TestApplyBansToModels_ActiveExactBanWinsOverWildcard(t *testing.T) {
+	now := time.Now().UTC()
+	exactUntil := now.Add(10 * time.Minute)
+	admin := fail2ban.BanPair{
+		Credential: "cred", Model: fail2ban.WildcardModel,
+		BanUntil: now.Add(time.Hour), Reason: "maintenance", Origin: fail2ban.OriginAdmin,
+	}
+	exact := fail2ban.BanPair{
+		Credential: "cred", Model: "gpt",
+		BanUntil: exactUntil, Reason: "upstream 500", Origin: fail2ban.OriginFail2Ban,
+	}
+	visible := map[string]bool{"cred": true}
+
+	for name, pairs := range map[string][]fail2ban.BanPair{
+		"wildcard first": {admin, exact},
+		"exact first":    {exact, admin},
+	} {
+		t.Run(name, func(t *testing.T) {
+			models := map[string]httputil.ModelHealthStats{
+				"cred:gpt":   {Credential: "cred"},
+				"cred:other": {Credential: "cred"},
+			}
+			applyBansToModels(models, pairs, visible, now)
+
+			require.Equal(t, fail2ban.OriginFail2Ban, models["cred:gpt"].BanOrigin)
+			require.Equal(t, "upstream 500", models["cred:gpt"].ProviderError)
+			require.Equal(t, fail2ban.OriginAdmin, models["cred:other"].BanOrigin)
+			require.Equal(t, "maintenance", models["cred:other"].ProviderError)
+		})
+	}
+}
+
+func TestApplyBansToModels_ExpiredExactBanWithoutWildcardStaysVisible(t *testing.T) {
+	now := time.Now().UTC()
+	expired := fail2ban.BanPair{
+		Credential: "cred", Model: "gpt",
+		BanUntil: now.Add(-time.Minute), Reason: "upstream 500",
+		ErrorCodeCounts: map[int]int{500: 3}, Origin: fail2ban.OriginFail2Ban,
+	}
+	models := map[string]httputil.ModelHealthStats{"cred:gpt": {Credential: "cred"}}
+	applyBansToModels(models, []fail2ban.BanPair{expired}, map[string]bool{"cred": true}, now)
+
+	ms := models["cred:gpt"]
+	require.Empty(t, ms.BanOrigin)
+	require.Equal(t, "upstream 500", ms.ProviderError)
+	require.Equal(t, map[int]int{500: 3}, ms.ErrorCodeCounts)
+}
