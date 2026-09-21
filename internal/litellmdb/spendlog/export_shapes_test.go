@@ -206,10 +206,10 @@ func TestExport_DailyUserSpendFollowsTheKeyOwner(t *testing.T) {
 			return
 		}
 		total += requests
-		switch userID := rec["user_id"]; {
-		case userID == owner[key]:
+		switch rec["user_id"] {
+		case owner[key]:
 			keyOwner += requests
-		case userID == "":
+		case "":
 			noUser += requests
 		default:
 			fromHeader += requests
