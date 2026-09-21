@@ -142,6 +142,12 @@ type ModelRPMConfig struct {
 	// image of PassthroughResponses/the existing Responses->Chat conversion,
 	// in the opposite direction. Default false: nil/omitted means the model
 	// is called via /v1/chat/completions as normal.
+	//
+	// Coverage: only /v1/chat/completions and /v1/responses are handled. A
+	// client calling this model via /v1/messages still gets converted to
+	// /v1/chat/completions and sent to the (Responses-API-exclusive)
+	// upstream, which will reject it -- there is no Messages<->Responses
+	// path for this flag.
 	ResponsesOnly bool `yaml:"responses_only,omitempty"`
 }
 

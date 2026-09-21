@@ -375,6 +375,24 @@ models:
     passthrough_responses: true  # force passthrough
 ```
 
+## Responses-Only Models
+
+Some OpenAI reasoning-tier deployments are Responses-API-exclusive: they reject
+`/v1/chat/completions` outright. Mark such a model with `responses_only: true` to have the
+router convert a `/v1/chat/completions` request to Responses API shape, send it to the
+provider's `/v1/responses`, and convert the response back before the client sees it:
+
+```yaml
+models:
+  - name: "gpt-5-pro"
+    credential: openai_main
+    responses_only: true
+```
+
+`responses_only` only covers `/v1/chat/completions` and `/v1/responses`. Calling such a
+model via `/v1/messages` still converts to `/v1/chat/completions` and gets rejected by the
+upstream — there is no Messages API support for this flag.
+
 ## Provider Support
 
 | Feature                  | Anthropic | Comet API | Vertex AI | Bedrock | OpenAI |

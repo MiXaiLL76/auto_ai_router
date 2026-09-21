@@ -458,6 +458,18 @@ func (p *Proxy) prepareRequestForCredential(
 		req.nativeResponses = true
 		p.logger.DebugContext(r.Context(), "Native Responses converter path",
 			"model", modelID, "provider", cred.Type, "streaming", streaming)
+	case !cred.IsProxyLike() && p.modelManager != nil && p.modelManager.IsResponsesOnly(modelID):
+		// The client already called /v1/responses, and this model's upstream
+		// only accepts /v1/responses (config.ModelRPMConfig.ResponsesOnly) --
+		// nothing to convert, forward the client's own Responses-shaped body
+		// as-is instead of falling into the default RequestToChat branch
+		// below, which would send it to /v1/chat/completions and get
+		// rejected by the very upstream this flag exists to route around.
+		req.body = openai.ReplaceResponsesBodyParam(realModelID, body)
+		req.proxyBody = openai.ReplaceResponsesBodyParam(realModelID, proxyBody)
+		req.passthroughResponses = true
+		p.logger.DebugContext(r.Context(), "Responses API request for responses_only model forwarded as passthrough",
+			"model", modelID, "streaming", streaming)
 	default:
 		chatBody, err := responses.RequestToChat(body)
 		if err != nil {
