@@ -5,9 +5,11 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/mixaill76/auto_ai_router/internal/balancer"
 	"github.com/mixaill76/auto_ai_router/internal/config"
+	"github.com/mixaill76/auto_ai_router/internal/fail2ban"
 	"github.com/mixaill76/auto_ai_router/internal/httputil"
 	"github.com/mixaill76/auto_ai_router/internal/proxy/webui"
 	"github.com/mixaill76/auto_ai_router/internal/ratelimit"
@@ -141,27 +143,37 @@ func (p *Proxy) HealthCheckScoped(visibility scope.Context) (bool, *httputil.Pro
 
 	// Enrich models and credentials with error code counts from banned pairs
 	bannedPairs := p.balancer.GetBannedPairs()
+	now := time.Now().UTC()
 	// credentialErrorCounts accumulates error counts per credential across all its banned models
 	credentialErrorCounts := make(map[string]map[int]int)
+	// primaryBans holds, per credential, the active ban that best explains why
+	// it is banned (see betterBan).
+	primaryBans := make(map[string]fail2ban.BanPair)
 	for _, bp := range bannedPairs {
 		if !visibleCreds[bp.Credential] {
 			continue
 		}
-		modelKey := bp.Credential + ":" + bp.Model
-		if ms, ok := modelsInfo[modelKey]; ok {
-			if len(bp.ErrorCodeCounts) > 0 {
-				counts := make(map[int]int, len(bp.ErrorCodeCounts))
-				for code, cnt := range bp.ErrorCodeCounts {
-					counts[code] = cnt
+		active := bp.BanUntil.IsZero() || bp.BanUntil.After(now)
+		if active {
+			if cur, ok := primaryBans[bp.Credential]; !ok || betterBan(bp, cur) {
+				primaryBans[bp.Credential] = bp
+			}
+		}
+		if bp.Model == fail2ban.WildcardModel {
+			// A credential-wide ban covers every model of the credential,
+			// including ones with no ban entry of their own. An exact ban on
+			// the same model is more specific and wins, whatever the order.
+			if active {
+				for key, ms := range modelsInfo {
+					if ms.Credential == bp.Credential && ms.BanOrigin == "" {
+						applyBanToModelStats(&ms, bp, active)
+						modelsInfo[key] = ms
+					}
 				}
-				ms.ErrorCodeCounts = counts
 			}
-			ms.ProviderError = bp.Reason
-			if !bp.BanUntil.IsZero() {
-				banUntil := bp.BanUntil
-				ms.BanUntil = &banUntil
-			}
-			modelsInfo[modelKey] = ms
+		} else if ms, ok := modelsInfo[bp.Credential+":"+bp.Model]; ok {
+			applyBanToModelStats(&ms, bp, active)
+			modelsInfo[bp.Credential+":"+bp.Model] = ms
 		}
 		// Aggregate into per-credential counts
 		if len(bp.ErrorCodeCounts) > 0 {
@@ -171,6 +183,17 @@ func (p *Proxy) HealthCheckScoped(visibility scope.Context) (bool, *httputil.Pro
 			for code, cnt := range bp.ErrorCodeCounts {
 				credentialErrorCounts[bp.Credential][code] += cnt
 			}
+		}
+	}
+	for credName, bp := range primaryBans {
+		if cs, ok := credentialsInfo[credName]; ok {
+			cs.BanOrigin = bp.Origin
+			cs.BanReason = bp.Reason
+			if !bp.BanUntil.IsZero() {
+				until := bp.BanUntil
+				cs.BanUntil = &until
+			}
+			credentialsInfo[credName] = cs
 		}
 	}
 	// Apply aggregated error counts to credential info
@@ -195,6 +218,40 @@ func (p *Proxy) HealthCheckScoped(visibility scope.Context) (bool, *httputil.Pro
 	}
 
 	return healthy, status
+}
+
+// applyBanToModelStats copies one ban's details onto a model's health entry.
+// An expired ban that has not been swept yet keeps its historical error
+// counts (as before) but is not reported as the model's current ban.
+func applyBanToModelStats(ms *httputil.ModelHealthStats, bp fail2ban.BanPair, active bool) {
+	if len(bp.ErrorCodeCounts) > 0 {
+		counts := make(map[int]int, len(bp.ErrorCodeCounts))
+		for code, cnt := range bp.ErrorCodeCounts {
+			counts[code] = cnt
+		}
+		ms.ErrorCodeCounts = counts
+	}
+	ms.ProviderError = bp.Reason
+	if !bp.BanUntil.IsZero() {
+		banUntil := bp.BanUntil
+		ms.BanUntil = &banUntil
+	}
+	if active {
+		ms.BanOrigin = bp.Origin
+	}
+}
+
+// betterBan reports whether a explains a credential's ban better than b: an
+// admin ban beats an automatic one, then the ban lasting longest wins (a
+// permanent ban, with a zero BanUntil, lasts longest).
+func betterBan(a, b fail2ban.BanPair) bool {
+	if (a.Origin == fail2ban.OriginAdmin) != (b.Origin == fail2ban.OriginAdmin) {
+		return a.Origin == fail2ban.OriginAdmin
+	}
+	if a.BanUntil.IsZero() != b.BanUntil.IsZero() {
+		return a.BanUntil.IsZero()
+	}
+	return a.BanUntil.After(b.BanUntil)
 }
 
 func visibleCredentials(creds []config.CredentialConfig, visibility scope.Context) []config.CredentialConfig {

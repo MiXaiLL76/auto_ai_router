@@ -66,6 +66,7 @@
         <div class="wf-stat">
           <span class="label">banned</span>
           <span class="val" id="statBanned">—</span>
+          <span class="delta" id="statBannedDelta"></span>
         </div>
         <div class="wf-stat">
           <span class="label">active models</span>
@@ -164,8 +165,41 @@
         .replace(/"/g, '&quot;');
     }
 
-    function badge(cls, text) {
-      return `<span class="wf-badge ${cls}"><span class="dotS"></span>${esc(text)}</span>`;
+    function badge(cls, text, title) {
+      const t = title ? ` title="${esc(title)}"` : '';
+      return `<span class="wf-badge ${cls}"${t}><span class="dotS"></span>${esc(text)}</span>`;
+    }
+
+    // ── ban details ────────────────────────────────────────────────────────────
+    // /health reports why something is banned: ban_origin ("admin" = set by an
+    // operator through /api/ban, "fail2ban" = automatic), a reason and — for a
+    // temporary ban — ban_until. A ban without ban_until lasts until unban.
+    function fmtRemaining(ms) {
+      const mins = Math.ceil(ms / 60000);
+      if (mins < 1) return '<1m';
+      if (mins < 60) return `${mins}m`;
+      const h = Math.floor(mins / 60);
+      const m = mins % 60;
+      if (h < 24) return m ? `${h}h ${m}m` : `${h}h`;
+      const d = Math.floor(h / 24);
+      return (h % 24) ? `${d}d ${h % 24}h` : `${d}d`;
+    }
+
+    function fmtBanUntil(iso) {
+      if (!iso) return 'until unban';
+      const until = new Date(iso);
+      if (isNaN(until.getTime())) return 'until unban';
+      const left = until.getTime() - Date.now();
+      if (left <= 0) return 'expiring';
+      const sameDay = until.toDateString() === new Date().toDateString();
+      const when = sameDay
+        ? until.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+        : until.toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+      return `until ${when} · ${fmtRemaining(left)} left`;
+    }
+
+    function isAdminBan(x) {
+      return !!x.is_banned && x.ban_origin === 'admin';
     }
 
     function renderBar(cur, lim) {
@@ -209,12 +243,13 @@
       document.getElementById('credsGrid').innerHTML = entries.map(([name, c]) => {
         const rpmP = pct(c.current_rpm, c.limit_rpm);
         const tpmP = pct(c.current_tpm, c.limit_tpm);
-        const bannedCls = c.is_banned ? ' banned' : '';
+        const admin = isAdminBan(c);
+        const bannedCls = c.is_banned ? (admin ? ' banned admin' : ' banned') : '';
 
         let badges = badge(TYPE_CLASS[c.type] || '', c.type);
         badges += badge('info', `w:${fmtNum(c.weight || 1)}`);
         if (c.is_fallback) badges += badge('', 'fallback');
-        if (c.is_banned) badges += badge('err', 'banned');
+        if (c.is_banned) badges += admin ? badge('warn', 'banned · admin') : badge('err', 'banned');
 
         let errHtml = '';
         const errCounts = c.banned_error_counts || {};
@@ -225,11 +260,18 @@
           errHtml = `<div style="font-size:var(--fs-xs);color:var(--status-err);margin-bottom:8px;">${esc(parts)}</div>`;
         }
 
+        let banHtml = '';
+        if (c.is_banned) {
+          const note = [c.ban_reason, fmtBanUntil(c.ban_until)].filter(Boolean).join(' · ');
+          banHtml = `<div class="ban-note${admin ? ' admin' : ''}">${esc(note)}</div>`;
+        }
+
         return `<div class="wf-card${bannedCls}">
       <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;margin-bottom:12px;">
         <span style="font-size:13px;overflow-wrap:anywhere;">${esc(name)}</span>
         <div style="display:flex;gap:3px;flex-wrap:wrap;justify-content:flex-end;flex-shrink:0;">${badges}</div>
       </div>
+      ${banHtml}
       ${errHtml}
       <div style="display:grid;gap:8px;">
         <div>
@@ -276,6 +318,11 @@
     }
 
     function rowStatusBadge(m) {
+      if (isAdminBan(m)) {
+        // The status column is narrow: keep the badge short, details on hover.
+        const details = [m.provider_error, fmtBanUntil(m.ban_until)].filter(Boolean).join(' · ');
+        return badge('warn', 'banned · admin', details);
+      }
       if (m.is_banned) {
         const errCounts = m.error_code_counts || {};
         const errStr = Object.entries(errCounts).map(([c, n]) => `${n}×${c}`).join(' ');
@@ -489,6 +536,10 @@
         document.getElementById('statModels').textContent = nModels;
         document.getElementById('statAvailDelta').textContent =
           total > 0 ? `${Math.round((avail / total) * 100)}% up` : '';
+
+        const adminBanned = Object.values(data.credentials || {}).filter(isAdminBan).length;
+        document.getElementById('statBannedDelta').textContent =
+          adminBanned > 0 ? `${adminBanned} by admin` : '';
 
         renderCreds(data.credentials || {});
         credentialsData = data.credentials || {};

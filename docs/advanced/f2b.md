@@ -72,6 +72,137 @@ The key is the credential's `name` under `credentials:`.
 
 Only credentials with an actual quirk need an entry here; leave the rest out.
 
+## Manual Bans (Admin API)
+
+Fail2Ban reacts to errors after the fact. Sometimes an operator needs to take a credential out of rotation *before* anything fails — draining a replica ahead of a scale-in, pulling a key that is being rotated, pausing one model on one backend. Three endpoints do that. They are always available and accept **only the master key**: LiteLLM DB keys get `403`, and a request without credentials gets `401`.
+
+| Endpoint          | Purpose                                     |
+| ----------------- | ------------------------------------------- |
+| `POST /api/ban`   | Ban a credential (all models, or one model) |
+| `POST /api/unban` | Lift bans                                   |
+| `GET /api/bans`   | List active bans, automatic and manual      |
+
+Requests and responses are JSON. Unknown request fields are rejected with `400` — a typo such as `ttl_seconds` must not silently turn a temporary ban into a permanent one.
+
+### Ban
+
+```bash
+# All models of a credential, for 30 minutes
+curl -X POST http://router:8080/api/ban \
+  -H "Authorization: Bearer $MASTER_KEY" \
+  -d '{"credential": "k8s_n9_1xH200", "ttl": "30m", "reason": "air-scaler drain"}'
+
+# One model only, until it is explicitly unbanned
+curl -X POST http://router:8080/api/ban \
+  -H "Authorization: Bearer $MASTER_KEY" \
+  -d '{"credential": "k8s_n9_1xH200", "model": "llama-3-70b"}'
+```
+
+| Field        | Required | Description                                                                                    |
+| ------------ | -------- | ---------------------------------------------------------------------------------------------- |
+| `credential` | yes      | Credential `name`. Unknown names return `404`.                                                 |
+| `model`      | no       | A model ID bans that `credential + model` pair. Omitted, empty or `"*"` bans **every** model.  |
+| `ttl`        | no       | Duration such as `30m` or `2h`, must be positive. **Omitted means the ban lasts until unban.** |
+| `reason`     | no       | Free text, stored as `admin: <reason>` and shown in `/health`, `/api/bans` and logs.           |
+
+The response describes the ban that was created:
+
+```json
+{
+  "credential": "k8s_n9_1xH200",
+  "model": "*",
+  "origin": "admin",
+  "reason": "admin: air-scaler drain",
+  "error_code": 0,
+  "since": "2026-09-21T10:00:00Z",
+  "permanent": false,
+  "until": "2026-09-21T10:30:00Z"
+}
+```
+
+`model: "*"` in a response means the ban covers every model of the credential. For a permanent ban `permanent` is `true` and `until` is absent.
+
+**Whole-credential bans cover models the router has not seen yet.** A ban on `credential|*` is checked on every routing decision, so it also applies to models that a proxy/AIR credential learns from its upstream later. Nothing is enumerated when the ban is created.
+
+**A manual ban always wins.** It replaces any existing ban on the same key — shorter or longer, automatic or manual — so an operator can override a long automatic ban without unbanning first. Failure counters are not touched.
+
+**There is no maximum `ttl`.** Without a `ttl` the ban stays until you lift it with `/api/unban`.
+
+!!! warning "Bans live in memory"
+A router restart drops every ban, permanent ones included. A controller that drains a replica should re-issue the ban on each cycle rather than assume it survived.
+
+### Unban
+
+```bash
+# Lift everything on the credential (the wildcard ban and per-model bans)
+curl -X POST http://router:8080/api/unban \
+  -H "Authorization: Bearer $MASTER_KEY" \
+  -d '{"credential": "k8s_n9_1xH200"}'
+```
+
+The response is `{"credential": "...", "model": "...", "removed": N}`, where `removed` counts the active bans that were lifted.
+
+- Without `model`, **all** bans on the credential are lifted — manual and automatic, wildcard and per-model.
+- With `model`, only the ban on that exact key is lifted. Unbanning `llama-3-70b` does **not** lift a credential-wide ban; unban with `"model": "*"` (or without `model`) for that.
+- Unban is idempotent: nothing to lift still returns `200` with `removed: 0`. An unknown credential returns `404`.
+
+### List
+
+`GET /api/bans` returns every active (non-expired) ban, ordered by credential and model:
+
+```json
+{
+  "bans": [
+    {
+      "credential": "k8s_n9_1xH200",
+      "model": "*",
+      "origin": "admin",
+      "reason": "admin: air-scaler drain",
+      "error_code": 0,
+      "since": "2026-09-21T10:00:00Z",
+      "permanent": false,
+      "until": "2026-09-21T10:30:00Z"
+    },
+    {
+      "credential": "openai-2",
+      "model": "gpt-4o",
+      "origin": "fail2ban",
+      "error_code": 429,
+      "since": "2026-09-21T09:58:00Z",
+      "permanent": false,
+      "until": "2026-09-21T10:03:00Z"
+    }
+  ]
+}
+```
+
+`origin` is `admin` for bans created through the API and `fail2ban` for automatic ones (including provider-quota bans). `error_code` is the HTTP status that triggered an automatic ban, and `0` for a manual one.
+
+### Example: graceful scale-in
+
+1. `POST /api/ban` for the replica being removed — new requests stop going to it.
+2. Wait until its in-flight requests finish (or a timeout passes). Requests already running are not interrupted.
+3. Scale the replica down, then `POST /api/unban` when it comes back.
+
+A controller talking to a router that predates these endpoints gets `404` and can fall back to hard scale-in.
+
 ## Monitoring Bans
 
-Ban and unban events are exported as Prometheus counters (`auto_ai_router_credential_ban_events_total`, `auto_ai_router_credential_unban_events_total`, labelled by credential and model — ban events also carry the error code) and logged at `ERROR` level — losing a credential shrinks routing capacity for its models, so it's worth alerting on.
+Ban and unban events are exported as Prometheus counters (`auto_ai_router_credential_ban_events_total`, `auto_ai_router_credential_unban_events_total`, labelled by credential and model — ban events also carry the error code). Automatic bans are logged at `ERROR` level — losing a credential shrinks routing capacity for its models, so it's worth alerting on. Manual bans are deliberate, so they are logged at `WARN` ("Credential banned by admin") with `error_code` `0`; a wildcard ban shows up with model `*`.
+
+`/health` explains why a credential is banned:
+
+| Field        | Where                | Description                                                                                                 |
+| ------------ | -------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `ban_origin` | credential and model | `admin` or `fail2ban`                                                                                       |
+| `ban_reason` | credential           | Reason of the ban that best explains the state: a manual ban if there is one, otherwise the longest-lasting |
+| `ban_until`  | credential           | When that ban expires; absent for a permanent ban                                                           |
+
+A credential-wide ban marks every model of the credential as banned in `/health`. If a model also has its own, more specific ban, that one is reported for the model.
+
+The `/vhealth` dashboard reads these fields, so no master key or `/api/bans` call is needed to see manual bans there:
+
+- a banned credential card shows the reason and when the ban ends (`until 17:29 · 30m left`, or `until unban` for a permanent ban);
+- manual bans are drawn in the warning colour with a `banned · admin` badge, automatic ones in the error colour with the error counts;
+- in the models table the badge stays short (`banned · admin`) and the reason and expiry are in its tooltip;
+- the `banned` counter in the overview shows how many credentials are banned by an admin.

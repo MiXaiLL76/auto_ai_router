@@ -1,3 +1,4 @@
+// Package proxy authenticates client requests, forwards them to upstream provider credentials and serves the health, trace and admin ban endpoints.
 package proxy
 
 import (

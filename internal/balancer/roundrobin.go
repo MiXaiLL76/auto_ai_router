@@ -958,6 +958,31 @@ func (r *RoundRobin) BanUntil(credentialName, modelID string, statusCode int, un
 	r.fail2ban.BanUntil(credentialName, modelID, statusCode, until, reason)
 }
 
+// HasCredential reports whether a credential with this name is configured
+// (static or DB-sourced).
+func (r *RoundRobin) HasCredential(credentialName string) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.getCredentialByName(credentialName) != nil
+}
+
+// AdminBan bans a credential for one model, or for every model when modelID is
+// empty or fail2ban.WildcardModel. A ttl of 0 means until AdminUnban.
+func (r *RoundRobin) AdminBan(credentialName, modelID string, ttl time.Duration, reason string) fail2ban.BanPair {
+	return r.fail2ban.AdminBan(credentialName, modelID, ttl, reason)
+}
+
+// AdminUnban lifts admin/automatic bans and returns how many active bans were
+// removed. An empty modelID removes every ban of the credential.
+func (r *RoundRobin) AdminUnban(credentialName, modelID string) int {
+	return r.fail2ban.AdminUnban(credentialName, modelID)
+}
+
+// GetActiveBans returns the currently active bans ordered by credential and model.
+func (r *RoundRobin) GetActiveBans() []fail2ban.BanPair {
+	return r.fail2ban.GetActiveBans()
+}
+
 func (r *RoundRobin) GetCredentialsSnapshot() []config.CredentialConfig {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
