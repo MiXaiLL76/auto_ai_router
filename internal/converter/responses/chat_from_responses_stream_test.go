@@ -1,0 +1,159 @@
+package responses
+
+import (
+	"bufio"
+	"bytes"
+	"encoding/json"
+	"strings"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// collectSSEChunks parses "data: {...}" SSE lines out of raw output, decoding
+// each into a generic map for assertion (skips the terminal "[DONE]" line).
+func collectSSEChunks(t *testing.T, raw []byte) []map[string]interface{} {
+	t.Helper()
+	var chunks []map[string]interface{}
+	scanner := bufio.NewScanner(bytes.NewReader(raw))
+	for scanner.Scan() {
+		line := scanner.Text()
+		if !strings.HasPrefix(line, "data: ") {
+			continue
+		}
+		payload := strings.TrimPrefix(line, "data: ")
+		if payload == "[DONE]" {
+			continue
+		}
+		var chunk map[string]interface{}
+		require.NoError(t, json.Unmarshal([]byte(payload), &chunk))
+		chunks = append(chunks, chunk)
+	}
+	require.NoError(t, scanner.Err())
+	return chunks
+}
+
+func sseLine(eventJSON string) string {
+	return "data: " + eventJSON + "\n\n"
+}
+
+func TestTransformResponsesStreamToChat_TextDeltas(t *testing.T) {
+	input := strings.NewReader(
+		sseLine(`{"type":"response.created","response":{"id":"resp_1","object":"response","status":"in_progress"}}`) +
+			sseLine(`{"type":"response.output_text.delta","output_index":0,"delta":"Hel"}`) +
+			sseLine(`{"type":"response.output_text.delta","output_index":0,"delta":"lo"}`) +
+			sseLine(`{"type":"response.completed","response":{"id":"resp_1","object":"response","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"Hello"}]}],"usage":{"input_tokens":5,"output_tokens":2,"total_tokens":7}}}`) +
+			"data: [DONE]\n\n",
+	)
+
+	var out bytes.Buffer
+	require.NoError(t, TransformResponsesStreamToChat(input, "gpt-5-pro", &out))
+
+	chunks := collectSSEChunks(t, out.Bytes())
+	require.GreaterOrEqual(t, len(chunks), 4)
+
+	// First chunk: role-only.
+	firstDelta := chunks[0]["choices"].([]interface{})[0].(map[string]interface{})["delta"].(map[string]interface{})
+	assert.Equal(t, "assistant", firstDelta["role"])
+
+	// Content deltas, in order, reconstruct the full text.
+	var text string
+	for _, c := range chunks {
+		choices := c["choices"].([]interface{})
+		if len(choices) == 0 {
+			continue
+		}
+		delta := choices[0].(map[string]interface{})["delta"].(map[string]interface{})
+		if content, ok := delta["content"].(string); ok {
+			text += content
+		}
+	}
+	assert.Equal(t, "Hello", text)
+
+	// Terminal finish_reason chunk.
+	last := chunks[len(chunks)-2] // finish chunk precedes the usage-only chunk
+	finishChoice := last["choices"].([]interface{})[0].(map[string]interface{})
+	assert.Equal(t, "stop", finishChoice["finish_reason"])
+
+	// Usage-only terminal chunk (no choices).
+	usageChunk := chunks[len(chunks)-1]
+	assert.Empty(t, usageChunk["choices"])
+	usage := usageChunk["usage"].(map[string]interface{})
+	assert.Equal(t, float64(5), usage["prompt_tokens"])
+	assert.Equal(t, float64(2), usage["completion_tokens"])
+}
+
+func TestTransformResponsesStreamToChat_FunctionCall(t *testing.T) {
+	input := strings.NewReader(
+		sseLine(`{"type":"response.created","response":{"id":"resp_2","object":"response","status":"in_progress"}}`) +
+			sseLine(`{"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","call_id":"call_xyz","name":"get_weather"}}`) +
+			sseLine(`{"type":"response.function_call_arguments.delta","output_index":0,"delta":"{\"city\":"}`) +
+			sseLine(`{"type":"response.function_call_arguments.delta","output_index":0,"delta":"\"paris\"}"}`) +
+			sseLine(`{"type":"response.completed","response":{"id":"resp_2","object":"response","status":"completed","output":[{"type":"function_call","call_id":"call_xyz","name":"get_weather","arguments":"{\"city\":\"paris\"}"}]}}`) +
+			"data: [DONE]\n\n",
+	)
+
+	var out bytes.Buffer
+	require.NoError(t, TransformResponsesStreamToChat(input, "gpt-5-pro", &out))
+
+	chunks := collectSSEChunks(t, out.Bytes())
+
+	var toolCallID, name, args string
+	for _, c := range chunks {
+		choices := c["choices"].([]interface{})
+		if len(choices) == 0 {
+			continue
+		}
+		delta := choices[0].(map[string]interface{})["delta"].(map[string]interface{})
+		tcRaw, ok := delta["tool_calls"]
+		if !ok {
+			continue
+		}
+		for _, tcAny := range tcRaw.([]interface{}) {
+			tc := tcAny.(map[string]interface{})
+			assert.Equal(t, float64(0), tc["index"])
+			if id, ok := tc["id"].(string); ok && id != "" {
+				toolCallID = id
+			}
+			fn := tc["function"].(map[string]interface{})
+			if n, ok := fn["name"].(string); ok && n != "" {
+				name = n
+			}
+			if a, ok := fn["arguments"].(string); ok {
+				args += a
+			}
+		}
+	}
+	assert.Equal(t, "call_xyz", toolCallID)
+	assert.Equal(t, "get_weather", name)
+	assert.Equal(t, `{"city":"paris"}`, args)
+
+	// finish_reason must be tool_calls once a function_call was streamed.
+	var finishReason string
+	for _, c := range chunks {
+		choices := c["choices"].([]interface{})
+		if len(choices) == 0 {
+			continue
+		}
+		if fr, ok := choices[0].(map[string]interface{})["finish_reason"].(string); ok {
+			finishReason = fr
+		}
+	}
+	assert.Equal(t, "tool_calls", finishReason)
+}
+
+func TestTransformResponsesStreamToChat_MalformedLineSkipped(t *testing.T) {
+	input := strings.NewReader(
+		sseLine(`{"type":"response.created","response":{"id":"resp_3","object":"response","status":"in_progress"}}`) +
+			"data: {not valid json\n\n" +
+			sseLine(`{"type":"response.output_text.delta","output_index":0,"delta":"ok"}`) +
+			sseLine(`{"type":"response.completed","response":{"id":"resp_3","object":"response","status":"completed","output":[]}}`) +
+			"data: [DONE]\n\n",
+	)
+
+	var out bytes.Buffer
+	require.NoError(t, TransformResponsesStreamToChat(input, "gpt-5-pro", &out))
+	assert.Contains(t, out.String(), `"content":"ok"`)
+	assert.Contains(t, out.String(), "data: [DONE]")
+}

@@ -1712,6 +1712,29 @@ func (p *Proxy) handleMessagesAPIStreaming(
 	return p.handleTransformedStreaming(w, resp, cred.Name, modelID, "messages", transformer, logCtx)
 }
 
+// handleChatFromResponsesStreaming handles a responses_only model's streaming
+// response (see config.ModelRPMConfig.ResponsesOnly / orchestrator.go's
+// ChatRequestToResponses branch): AIR called the provider's native
+// /v1/responses on the client's behalf, so the raw upstream SSE is already
+// Responses-API-shaped -- no provider-specific pre-conversion is needed
+// (unlike handleMessagesAPIStreaming's Bedrock/Anthropic case), since a
+// responses_only credential speaks OpenAI's own Responses API wire format
+// directly. Convert it to Chat Completions SSE for the client, which called
+// /v1/chat/completions.
+func (p *Proxy) handleChatFromResponsesStreaming(
+	w http.ResponseWriter,
+	resp *http.Response,
+	cred *config.CredentialConfig,
+	modelID string,
+	logCtx *RequestLogContext,
+) error {
+	publicModel := clientVisibleResponseModel(logCtx, modelID)
+	transformer := func(reader io.Reader, _ string, writer io.Writer) error {
+		return responses.TransformResponsesStreamToChat(reader, publicModel, writer)
+	}
+	return p.handleTransformedStreaming(w, resp, cred.Name, modelID, "chat_from_responses", transformer, logCtx)
+}
+
 // handleNativeResponsesStreaming handles Responses API streaming via the Phase 4
 // ProviderResponses converter (Vertex AI, Anthropic). The provider SSE is converted
 // directly to Responses API SSE format by the provider-specific StreamTo implementation.

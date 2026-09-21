@@ -315,6 +315,7 @@ type Manager struct {
 	modelWebSocketResponses      map[string]bool
 	modelPassthroughResponses    map[string]*bool                                   // model name -> explicit passthrough_responses override (nil = auto)
 	modelPassthroughMessages     map[string]*bool                                   // model name -> explicit passthrough_messages override (nil = provider default)
+	modelResponsesOnly           map[string]bool                                    // model name -> true if only /v1/responses is accepted upstream (responses_only: true)
 	dynamicModelWeights          map[string]map[string]int                          // model ID -> credential -> weight learned from upstream /health
 	dynamicModelPriorities       map[string]map[string]int                          // model ID -> credential -> priority learned from upstream /health (scalar; MIN of live tiers when tiers exist)
 	dynamicModelPriorityTiers    map[string]map[string][]httputil.ModelPriorityTier // model ID -> proxy/AIR credential -> per-priority-tier breakdown learned from upstream /health
@@ -361,6 +362,7 @@ func New(logger *slog.Logger, defaultModelsRPM int, staticModels []config.ModelR
 		modelWebSocketResponses:     make(map[string]bool),
 		modelPassthroughResponses:   make(map[string]*bool),
 		modelPassthroughMessages:    make(map[string]*bool),
+		modelResponsesOnly:          make(map[string]bool),
 		dynamicModelWeights:         make(map[string]map[string]int),
 		dynamicModelPriorities:      make(map[string]map[string]int),
 		dynamicModelPriorityTiers:   make(map[string]map[string][]httputil.ModelPriorityTier),
@@ -416,6 +418,11 @@ func New(logger *slog.Logger, defaultModelsRPM int, staticModels []config.ModelR
 				m.modelPassthroughMessages[staticModel.Name] = staticModel.PassthroughMessages
 				logger.Debug("Registered passthrough_messages override",
 					"model", staticModel.Name, "value", *staticModel.PassthroughMessages)
+			}
+			if staticModel.ResponsesOnly {
+				m.modelResponsesOnly[staticModel.Name] = true
+				logger.Debug("Registered responses_only model",
+					"model", staticModel.Name)
 			}
 			logger.Debug("Added static model from config.yaml",
 				"model", staticModel.Name,
@@ -634,6 +641,17 @@ func (m *Manager) HasPassthroughResponsesOverride(modelID string) bool {
 	defer m.mu.RUnlock()
 	value, ok := m.modelPassthroughResponses[modelID]
 	return ok && value != nil
+}
+
+// IsResponsesOnly reports whether modelID's upstream only accepts the
+// Responses API (responses_only: true in models[]) and must never be sent a
+// /v1/chat/completions request directly. No auto-detection: false unless
+// explicitly configured, since (unlike PassthroughResponses) there is no
+// reliable way to infer this from the model name alone.
+func (m *Manager) IsResponsesOnly(modelID string) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.modelResponsesOnly[modelID]
 }
 
 // IsPassthroughMessagesForProvider reports whether /v1/messages requests for modelID

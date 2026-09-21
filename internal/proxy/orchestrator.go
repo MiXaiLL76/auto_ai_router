@@ -40,6 +40,7 @@ type orchestratedRequest struct {
 	isMessagesAPI        bool
 	convertedResp        bool
 	convertedMessages    bool
+	convertedToResponses bool // true when a /v1/chat/completions request was converted to Responses API shape for a responses_only model
 	passthroughResponses bool // true for codex/OpenAI models: Responses API forwarded as-is (no conversion)
 	passthroughMessages  bool // true when /v1/messages is forwarded natively (no Messages->Chat->Messages round trip)
 	nativeResponses      bool // true when using Phase 4 ProviderResponses converter (Vertex/Anthropic)
@@ -57,6 +58,7 @@ type credentialPreparedRequest struct {
 	path                 string
 	convertedResp        bool
 	convertedMessages    bool
+	convertedToResponses bool
 	passthroughResponses bool
 	passthroughMessages  bool
 	nativeResponses      bool
@@ -279,6 +281,7 @@ func (p *Proxy) orchestrateRequest(
 		isMessagesAPI:        isMessagesAPI,
 		convertedResp:        credentialReq.convertedResp,
 		convertedMessages:    credentialReq.convertedMessages,
+		convertedToResponses: credentialReq.convertedToResponses,
 		passthroughResponses: credentialReq.passthroughResponses,
 		passthroughMessages:  credentialReq.passthroughMessages,
 		nativeResponses:      credentialReq.nativeResponses,
@@ -384,6 +387,31 @@ func (p *Proxy) prepareRequestForCredential(
 		return req, nil
 	}
 	if !isResponsesAPI {
+		if !cred.IsProxyLike() && strings.Contains(basePath, "/chat/completions") &&
+			p.modelManager != nil && p.modelManager.IsResponsesOnly(modelID) {
+			// This model's upstream only accepts the Responses API (see
+			// config.ModelRPMConfig.ResponsesOnly) -- the client called
+			// /v1/chat/completions, so convert its request to Responses API
+			// shape and send it to the provider's /v1/responses instead. The
+			// response side (ResponseToChat / TransformResponsesStreamToChat)
+			// converts back before the client ever sees a Responses-shaped
+			// body. Proxy-like credentials are excluded: a chained AIR
+			// instance does its own model-specific handling on the request
+			// it actually receives.
+			responsesBody, err := responses.ChatRequestToResponses(body)
+			if err != nil {
+				return req, err
+			}
+			req.body = openai.ReplaceResponsesBodyParam(realModelID, responsesBody)
+			// proxyBody must stay in sync with body: TryFallbackProxy forwards
+			// proxyBody, not body, to fallback credentials.
+			req.proxyBody = openai.ReplaceResponsesBodyParam(modelID, responsesBody)
+			req.convertedToResponses = true
+			req.path = strings.Replace(basePath, "/chat/completions", "/responses", 1)
+			p.logger.DebugContext(r.Context(), "Converted Chat Completions request to Responses API format (responses_only)",
+				"model", modelID, "streaming", streaming)
+			return req, nil
+		}
 		// Normalize "developer" role here too, not just in the Responses→Chat
 		// converter: a client can send an already Chat-Completions-shaped body
 		// straight to /v1/chat/completions (or an SDK can emit "developer" for

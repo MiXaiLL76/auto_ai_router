@@ -131,6 +131,18 @@ type ModelRPMConfig struct {
 	// google_proto set); false otherwise.
 	// Explicit true/false overrides the default.
 	PassthroughMessages *bool `yaml:"passthrough_messages,omitempty"`
+
+	// ResponsesOnly marks a model whose upstream only accepts OpenAI's native
+	// /v1/responses endpoint and rejects /v1/chat/completions outright (some
+	// OpenAI reasoning-tier deployments are Responses-API-exclusive). When
+	// true, a client request to /v1/chat/completions for this model is
+	// converted to a Responses API request, sent to the provider's
+	// /v1/responses, and the Responses API response/stream is converted back
+	// to Chat Completions shape before reaching the client -- the mirror
+	// image of PassthroughResponses/the existing Responses->Chat conversion,
+	// in the opposite direction. Default false: nil/omitted means the model
+	// is called via /v1/chat/completions as normal.
+	ResponsesOnly bool `yaml:"responses_only,omitempty"`
 }
 
 // UnmarshalYAML implements custom unmarshaling for ModelRPMConfig with env variable support.
@@ -145,6 +157,7 @@ func (m *ModelRPMConfig) UnmarshalYAML(value *yaml.Node) error {
 		PassthroughResponses string `yaml:"passthrough_responses,omitempty"`
 		WebSocketResponses   string `yaml:"websocket_responses,omitempty"`
 		PassthroughMessages  string `yaml:"passthrough_messages,omitempty"`
+		ResponsesOnly        string `yaml:"responses_only,omitempty"`
 	}
 
 	var temp tempConfig
@@ -160,6 +173,9 @@ func (m *ModelRPMConfig) UnmarshalYAML(value *yaml.Node) error {
 
 	var err error
 	if m.WebSocketResponses, err = parseField(temp.WebSocketResponses, false, strconv.ParseBool, "websocket_responses"); err != nil {
+		return err
+	}
+	if m.ResponsesOnly, err = parseField(temp.ResponsesOnly, false, strconv.ParseBool, "responses_only for model '"+m.Name+"'"); err != nil {
 		return err
 	}
 	if m.RPM, err = parseField(temp.RPM, 0, strconv.Atoi, "rpm for model '"+m.Name+"'"); err != nil {
