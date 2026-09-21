@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -97,31 +98,57 @@ func (p ProviderType) IsProxyLike() bool {
 }
 
 func normalizeProviderType(raw string) ProviderType {
-	switch strings.ToLower(strings.TrimSpace(raw)) {
+	value := strings.ToLower(strings.TrimSpace(raw))
+	switch value {
 	case "comet-api", "comet_api":
 		return ProviderTypeCometAPI
 	case "aar", "auto-ai-router", "auto_ai_router":
 		return ProviderTypeAIR
 	case "pro-man", "pro_man":
 		return ProviderTypeProMan
-	case "hosted_vllm", "hosted-vllm":
-		return ProviderTypeVLLM
 	default:
-		return ProviderType(strings.ToLower(strings.TrimSpace(raw)))
+		if IsVLLMProviderName(value) {
+			return ProviderTypeVLLM
+		}
+		return ProviderType(value)
 	}
+}
+
+// VLLMLiteLLMProvider is LiteLLM's name for the vLLM provider: custom_llm_provider
+// "hosted_vllm" and the "hosted_vllm/<model>" model prefix.
+const VLLMLiteLLMProvider = "hosted_vllm"
+
+// vllmProviderNames are the spellings of the vLLM provider accepted in configuration and
+// in a LiteLLM database, and the prefixes that may precede a model id.
+var vllmProviderNames = []string{"vllm", VLLMLiteLLMProvider, "hosted-vllm"}
+
+// IsVLLMProviderName reports whether name is a spelling of the vLLM provider
+// (case-insensitive).
+func IsVLLMProviderName(name string) bool {
+	name = strings.ToLower(strings.TrimSpace(name))
+	return slices.Contains(vllmProviderNames, name)
+}
+
+// TrimVLLMProviderPrefix removes the LiteLLM provider prefix ("hosted_vllm/model") that
+// the upstream vLLM server does not know. Only the vLLM prefixes are touched: other
+// slashes are part of real model ids (for example "Qwen/Qwen3-8B").
+func TrimVLLMProviderPrefix(model string) string {
+	for _, name := range vllmProviderNames {
+		if rest, ok := strings.CutPrefix(model, name+"/"); ok {
+			return rest
+		}
+	}
+	return model
 }
 
 // ModelRPMConfig represents RPM and TPM limits for a specific model
 type ModelRPMConfig struct {
-	Name  string `yaml:"name"`
-	Model string `yaml:"model,omitempty"` // Real model name sent to provider (alias for Name if different)
-	// DeploymentID is the authoritative LiteLLM_ProxyModelTable.model_id.
-	// It is populated only by the database loader and is never accepted from YAML.
-	DeploymentID string `yaml:"-"`
-	RPM          int    `yaml:"rpm"`
-	TPM          int    `yaml:"tpm"`
-	Weight       int    `yaml:"weight"`               // Weighted round-robin weight (0 = use credential default / 1)
-	Credential   string `yaml:"credential,omitempty"` // If set, model is only available for this credential
+	Name       string `yaml:"name"`
+	Model      string `yaml:"model,omitempty"` // Real model name sent to provider (alias for Name if different)
+	RPM        int    `yaml:"rpm"`
+	TPM        int    `yaml:"tpm"`
+	Weight     int    `yaml:"weight"`               // Weighted round-robin weight (0 = use credential default / 1)
+	Credential string `yaml:"credential,omitempty"` // If set, model is only available for this credential
 
 	// PassthroughResponses controls whether Responses API requests for this model
 	// are forwarded as-is to the provider's native /v1/responses endpoint instead

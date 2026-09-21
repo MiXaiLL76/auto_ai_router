@@ -76,6 +76,13 @@ func ReplaceModelInBody(body []byte, oldModel, newModel string) []byte {
 	return body
 }
 
+// defaultParamSynonyms lists request keys that set the same value as a default key. A
+// client that sent one of them has already chosen it, so the default must not add a
+// second spelling: max_tokens next to max_completion_tokens is ambiguous for the server.
+var defaultParamSynonyms = map[string][]string{
+	"max_tokens": {"max_completion_tokens"},
+}
+
 // ApplyDefaultParams sets each key of defaults that is absent from the top level of a
 // JSON request body, leaving every key the client sent untouched. It mirrors LiteLLM,
 // where a deployment's litellm_params are merged under the request kwargs. Values
@@ -91,7 +98,7 @@ func ApplyDefaultParams(body []byte, defaults map[string]any) []byte {
 	}
 	changed := false
 	for key, value := range defaults {
-		if _, present := top[key]; present {
+		if clientSetParam(top, key) {
 			continue
 		}
 		raw, err := json.Marshal(value)
@@ -109,6 +116,19 @@ func ApplyDefaultParams(body []byte, defaults map[string]any) []byte {
 		return body
 	}
 	return out
+}
+
+// clientSetParam reports whether the request already carries key or a synonym of it.
+func clientSetParam(top map[string]json.RawMessage, key string) bool {
+	if _, present := top[key]; present {
+		return true
+	}
+	for _, synonym := range defaultParamSynonyms[key] {
+		if _, present := top[synonym]; present {
+			return true
+		}
+	}
+	return false
 }
 
 // --- Model family parameter mappings ---

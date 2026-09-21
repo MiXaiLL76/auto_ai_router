@@ -59,9 +59,12 @@ in `config.yaml`. The mapping follows LiteLLM's own semantics:
   vLLM; other slashes (`Qwen/Qwen3-8B`) are part of the model id and are kept. A vLLM
   deployment with only an inline `api_base` (no API key) is accepted too.
 - **Several deployments, one name** — deployments sharing a `model_name` form one pool.
-- **Aliases** — `router_settings.model_group_alias` from `LiteLLM_Config` is imported: the alias
-  serves the target group's deployments (same credential, same real model, same default
-  parameters, same price). A real model group with the alias's name wins over the alias.
+- **Aliases** — `router_settings.model_group_alias` from `LiteLLM_Config` is imported as public
+  model aliases. As in LiteLLM the alias is resolved to its target group before a deployment is
+  picked, so both names share one set of deployments and the target's rate limits, balancer
+  state and price; the alias is still listed in `/v1/models`. A key whose model list contains
+  either name may use the alias. A real model group with the alias's name wins over the alias,
+  and a `public_model_alias` from the config wins over the imported one.
 - **Skipped** — deployments with `blocked = true`, and `mode: rerank` deployments (`/rerank`
   is not supported).
 - **Not imported** — `router_settings.fallbacks`. AIR fails over between credentials of one

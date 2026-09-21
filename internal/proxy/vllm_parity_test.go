@@ -58,9 +58,10 @@ func newFakeVLLM(t *testing.T, capture *vllmCapture) *httptest.Server {
 }
 
 // newVLLMProxy builds a proxy in front of one keyless vLLM credential that serves the
-// deployments a LiteLLM database would describe: a model group alias resolving to a real
-// vLLM model name with default sampling params, and an embedding model that also has
-// (irrelevant) defaults which must never reach a non-chat request.
+// deployments a LiteLLM database would describe: a group with a real vLLM model name and
+// default sampling params, reachable through the model group alias qwen-flash, and an
+// embedding model that also has (irrelevant) defaults which must never reach a non-chat
+// request.
 func newVLLMProxy(t *testing.T, upstreamURL string, db *organizationPolicyTestDB) *Proxy {
 	t.Helper()
 	logger := testhelpers.NewTestLogger()
@@ -72,7 +73,7 @@ func newVLLMProxy(t *testing.T, upstreamURL string, db *organizationPolicyTestDB
 	manager.SetCredentials([]config.CredentialConfig{credential})
 	manager.UpdateDBModels([]config.ModelRPMConfig{
 		{
-			Name: "qwen-flash", Model: "qwen-36-35b-fp8", Credential: credential.Name, RPM: -1, TPM: -1,
+			Name: "qwen-36-35b-fast", Model: "qwen-36-35b-fp8", Credential: credential.Name, RPM: -1, TPM: -1,
 			DefaultParams: map[string]any{
 				"chat_template_kwargs": map[string]any{"enable_thinking": false},
 				"temperature":          0.7,
@@ -84,10 +85,11 @@ func newVLLMProxy(t *testing.T, upstreamURL string, db *organizationPolicyTestDB
 			DefaultParams: map[string]any{"temperature": 0.5},
 		},
 	}, nil, []config.CredentialConfig{credential})
+	manager.SetDBPublicModelAliases(map[string]string{"qwen-flash": "qwen-36-35b-fast"})
 
 	prices := routermodels.NewModelPriceRegistry()
 	prices.MergeDB(map[string]*routermodels.ModelPrice{
-		"qwen-flash":         {InputCostPerToken: 2e-7, OutputCostPerToken: 1e-6},
+		"qwen-36-35b-fast":   {InputCostPerToken: 2e-7, OutputCostPerToken: 1e-6},
 		"qwen3-embedding-8b": {InputCostPerToken: 1e-8},
 	})
 
@@ -242,4 +244,56 @@ func TestVLLM_ResponsesAPIIsPassedThrough(t *testing.T) {
 	assert.Equal(t, "qwen-flash", db.logs[0].ModelGroup)
 	assert.Equal(t, 10, db.logs[0].PromptTokens)
 	assert.Equal(t, 5, db.logs[0].CompletionTokens)
+}
+
+// A model group alias is resolved to its target before routing, so a request under the
+// alias is billed and limited as the target: it shares the target's model rate limit
+// instead of getting a second allowance, and records the alias as its model group.
+func TestVLLM_AliasSharesTargetRateLimit(t *testing.T) {
+	capture := &vllmCapture{}
+	upstream := newFakeVLLM(t, capture)
+	db := newVLLMTestDB()
+	prx := newVLLMProxy(t, upstream.URL, db)
+	prx.rateLimiter.AddModelWithTPM("ray-service-prod", "qwen-36-35b-fast", 1, -1)
+
+	send := func(model string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+			stringsReader(`{"model":"`+model+`","messages":[{"role":"user","content":"hi"}]}`))
+		req.Header.Set("Authorization", "Bearer token")
+		w := httptest.NewRecorder()
+		prx.ProxyRequest(w, req)
+		return w
+	}
+
+	first := send("qwen-flash")
+	require.Equal(t, http.StatusOK, first.Code, first.Body.String())
+
+	// The one request per minute is spent, whichever name is used next.
+	assert.Equal(t, http.StatusTooManyRequests, send("qwen-36-35b-fast").Code, "the target shares the alias's allowance")
+	assert.Equal(t, http.StatusTooManyRequests, send("qwen-flash").Code, "the alias shares the target's allowance")
+
+	// The two rejected attempts are logged as failures after the successful one.
+	require.Len(t, db.logs, 3)
+	assert.Equal(t, "success", db.logs[0].Status)
+	assert.Equal(t, "qwen-36-35b-fp8", db.logs[0].Model)
+	assert.Equal(t, "qwen-flash", db.logs[0].ModelGroup)
+}
+
+func TestVLLM_TargetRequestRecordsItsOwnModelGroup(t *testing.T) {
+	capture := &vllmCapture{}
+	upstream := newFakeVLLM(t, capture)
+	db := newVLLMTestDB()
+	prx := newVLLMProxy(t, upstream.URL, db)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		stringsReader(`{"model":"qwen-36-35b-fast","messages":[{"role":"user","content":"hi"}]}`))
+	req.Header.Set("Authorization", "Bearer token")
+	w := httptest.NewRecorder()
+
+	prx.ProxyRequest(w, req)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+
+	require.Len(t, db.logs, 1)
+	assert.Equal(t, "qwen-36-35b-fp8", db.logs[0].Model)
+	assert.Equal(t, "qwen-36-35b-fast", db.logs[0].ModelGroup)
 }

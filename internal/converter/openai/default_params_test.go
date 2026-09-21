@@ -65,3 +65,28 @@ func TestApplyDefaultParams(t *testing.T) {
 		}
 	})
 }
+
+func TestApplyDefaultParams_MaxTokensSynonym(t *testing.T) {
+	defaults := map[string]any{"max_tokens": json.Number("1024")}
+
+	t.Run("filled when the client set neither spelling", func(t *testing.T) {
+		got := decodeBody(t, ApplyDefaultParams([]byte(`{"model":"m"}`), defaults))
+		assert.EqualValues(t, 1024, got["max_tokens"])
+	})
+
+	t.Run("not added next to the client's max_completion_tokens", func(t *testing.T) {
+		got := decodeBody(t, ApplyDefaultParams([]byte(`{"model":"m","max_completion_tokens":256}`), defaults))
+		assert.EqualValues(t, 256, got["max_completion_tokens"])
+		assert.NotContains(t, got, "max_tokens", "two spellings of one limit are ambiguous")
+	})
+
+	t.Run("the client's max_tokens wins", func(t *testing.T) {
+		got := decodeBody(t, ApplyDefaultParams([]byte(`{"model":"m","max_tokens":64}`), defaults))
+		assert.EqualValues(t, 64, got["max_tokens"])
+	})
+
+	t.Run("a large seed default keeps every digit", func(t *testing.T) {
+		out := string(ApplyDefaultParams([]byte(`{"model":"m"}`), map[string]any{"seed": json.Number("9007199254740993")}))
+		assert.Contains(t, out, `"seed":9007199254740993`)
+	})
+}

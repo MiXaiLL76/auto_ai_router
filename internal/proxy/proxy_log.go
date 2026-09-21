@@ -408,10 +408,10 @@ func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
 			CompletionStartTime: completionStartTime,
 			CallType:            litellmCallType(logCtx.Request.URL.Path),
 			APIBase:             apiBase,
-			Model:               spendModel,        // Provider-facing (real) model name
-			ModelID:             modelIDFormatted,  // credential.name:model_name
-			ModelGroup:          logCtx.ModelID,    // Model name the client asked for
-			CustomLLMProvider:   customLLMProvider, // Provider type as string
+			Model:               spendModel,               // Provider-facing (real) model name
+			ModelID:             modelIDFormatted,         // credential.name:model_name
+			ModelGroup:          logCtx.spendModelGroup(), // Model name the client asked for
+			CustomLLMProvider:   customLLMProvider,        // Provider type as string
 			PromptTokens:        logCtx.TokenUsage.PromptTokens,
 			CompletionTokens:    logCtx.TokenUsage.CompletionTokens,
 			TotalTokens:         logCtx.TokenUsage.Total(),

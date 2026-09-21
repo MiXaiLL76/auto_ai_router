@@ -851,6 +851,7 @@ func (p *Proxy) readRequestBodyAndSelectModel(
 	} else if isPublicAlias {
 		p.logger.DebugContext(r.Context(), "Resolved public model alias", "alias", modelID, "canonical", canonical)
 		body = openai.ReplaceModelInBody(body, modelID, canonical)
+		logCtx.PublicAliasID = modelID
 		modelID = canonical
 		logCtx.ModelID = modelID
 	}

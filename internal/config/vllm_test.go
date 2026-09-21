@@ -61,3 +61,23 @@ func TestConfig_Validate_VLLM(t *testing.T) {
 		require.Error(t, cfg.Validate())
 	})
 }
+
+func TestIsVLLMProviderName(t *testing.T) {
+	for _, name := range []string{"vllm", "hosted_vllm", "hosted-vllm", "VLLM", " Hosted_VLLM "} {
+		assert.True(t, IsVLLMProviderName(name), name)
+	}
+	for _, name := range []string{"", "openai", "vllm-cluster", "hosted"} {
+		assert.False(t, IsVLLMProviderName(name), name)
+	}
+	assert.Equal(t, "hosted_vllm", VLLMLiteLLMProvider)
+}
+
+func TestTrimVLLMProviderPrefix(t *testing.T) {
+	assert.Equal(t, "m", TrimVLLMProviderPrefix("hosted_vllm/m"))
+	assert.Equal(t, "m", TrimVLLMProviderPrefix("vllm/m"))
+	assert.Equal(t, "m", TrimVLLMProviderPrefix("hosted-vllm/m"))
+	assert.Equal(t, "m", TrimVLLMProviderPrefix("m"))
+	assert.Equal(t, "Qwen/Qwen3-8B", TrimVLLMProviderPrefix("Qwen/Qwen3-8B"))
+	assert.Equal(t, "hosted_vllm", TrimVLLMProviderPrefix("hosted_vllm"))
+	assert.Equal(t, "openai/gpt", TrimVLLMProviderPrefix("openai/gpt"))
+}

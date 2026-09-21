@@ -37,15 +37,24 @@ func NewProxyModelTable(pool *connection.ConnectionPool, logger *slog.Logger) *P
 	}
 }
 
-func (a *ProxyModelTable) FetchModels(ctx context.Context) ([]queries.ModelTable, error) {
+// acquire returns a pooled connection that the caller must Release. An unhealthy pool
+// and a failed acquire are both reported as ErrConnectionFailed.
+func (a *ProxyModelTable) acquire(ctx context.Context) (*pgxpool.Conn, error) {
 	if !a.pool.IsHealthy() {
 		return nil, models.ErrConnectionFailed
 	}
-
 	conn, err := a.pool.Acquire(ctx)
 	if err != nil {
 		a.logger.Error("Failed to acquire connection", "error", err)
 		return nil, models.ErrConnectionFailed
+	}
+	return conn, nil
+}
+
+func (a *ProxyModelTable) FetchModels(ctx context.Context) ([]queries.ModelTable, error) {
+	conn, err := a.acquire(ctx)
+	if err != nil {
+		return nil, err
 	}
 	defer conn.Release()
 
@@ -109,14 +118,9 @@ func isUndefinedColumn(err error) bool {
 // LiteLLM_Config.router_settings. A database without that row yields empty settings, and
 // parts of the row with an unexpected structure are logged and ignored.
 func (a *ProxyModelTable) FetchRouterSettings(ctx context.Context) (queries.RouterSettings, error) {
-	if !a.pool.IsHealthy() {
-		return queries.RouterSettings{}, models.ErrConnectionFailed
-	}
-
-	conn, err := a.pool.Acquire(ctx)
+	conn, err := a.acquire(ctx)
 	if err != nil {
-		a.logger.Error("Failed to acquire connection", "error", err)
-		return queries.RouterSettings{}, models.ErrConnectionFailed
+		return queries.RouterSettings{}, err
 	}
 	defer conn.Release()
 
@@ -147,14 +151,9 @@ func (a *ProxyModelTable) FetchRouterSettings(ctx context.Context) (queries.Rout
 }
 
 func (a *ProxyModelTable) FetchCredentials(ctx context.Context) ([]queries.CredentialTable, error) {
-	if !a.pool.IsHealthy() {
-		return nil, models.ErrConnectionFailed
-	}
-
-	conn, err := a.pool.Acquire(ctx)
+	conn, err := a.acquire(ctx)
 	if err != nil {
-		a.logger.Error("Failed to acquire connection", "error", err)
-		return nil, models.ErrConnectionFailed
+		return nil, err
 	}
 	defer conn.Release()
 
@@ -190,31 +189,35 @@ func (a *ProxyModelTable) FetchCredentials(ctx context.Context) ([]queries.Crede
 	return results, nil
 }
 
-func (a *ProxyModelTable) FetchModelsForAIR(ctx context.Context, signingKey string) ([]config.CredentialConfig, []config.ModelRPMConfig, map[string]*manager.ModelPrice, error) {
+// FetchModelsForAIR also returns the router_settings.model_group_alias entries that are
+// usable on this fleet (alias -> target model group). They are not turned into models:
+// the caller registers them as public model aliases so an alias is resolved to its
+// target before routing and shares the target's limits, balancer state and billing.
+func (a *ProxyModelTable) FetchModelsForAIR(ctx context.Context, signingKey string) ([]config.CredentialConfig, []config.ModelRPMConfig, map[string]*manager.ModelPrice, map[string]string, error) {
 	creds, err := a.FetchCredentials(ctx)
 	if err != nil {
 		a.logger.Error("Failed to FetchCredentials", "error", err)
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 	dbModels, err := a.FetchModels(ctx)
 	if err != nil {
 		a.logger.Error("Failed to FetchModels", "error", err)
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 	// A failed read must fail the whole sync: applying models without their aliases
 	// would make every aliased name 404 until the next successful cycle.
 	router, err := a.FetchRouterSettings(ctx)
 	if err != nil {
 		a.logger.Error("Failed to FetchRouterSettings", "error", err)
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 
-	airCredentials, airModels, airPrices := buildAIRModels(a.logger, creds, dbModels, router, signingKey)
-	return airCredentials, airModels, airPrices, nil
+	airCredentials, airModels, airPrices, airAliases := buildAIRModels(a.logger, creds, dbModels, router, signingKey)
+	return airCredentials, airModels, airPrices, airAliases, nil
 }
 
 // buildAIRModels turns rows read from the LiteLLM database into AIR credentials,
-// per-credential model configs and prices. It performs no I/O so the whole
+// per-credential model configs, prices and model group aliases. It performs no I/O so the whole
 // conversion can be exercised against exported data.
 func buildAIRModels(
 	logger *slog.Logger,
@@ -222,7 +225,7 @@ func buildAIRModels(
 	dbModels []queries.ModelTable,
 	router queries.RouterSettings,
 	signingKey string,
-) ([]config.CredentialConfig, []config.ModelRPMConfig, map[string]*manager.ModelPrice) {
+) ([]config.CredentialConfig, []config.ModelRPMConfig, map[string]*manager.ModelPrice, map[string]string) {
 	// Decrypt named credentials
 	for i := range creds {
 		if creds[i].CredentialParams == nil {
@@ -373,9 +376,8 @@ func buildAIRModels(
 
 		// Build ModelRPMConfig
 		rpmCfg := config.ModelRPMConfig{
-			Name:         modelName,
-			DeploymentID: derefStr(model.ModelID, ""),
-			Credential:   credName,
+			Name:       modelName,
+			Credential: credName,
 		}
 		if model.LlmParams.RPM != nil {
 			rpmCfg.RPM = *model.LlmParams.RPM
@@ -392,7 +394,7 @@ func buildAIRModels(
 		}
 		// Map real provider model name (e.g. "gemini-2.0-flash" → "vertex_ai/gemini-2.0-flash")
 		if model.LlmParams.Model != nil && *model.LlmParams.Model != "" {
-			if realName := stripVLLMPrefix(*model.LlmParams.Model); realName != modelName {
+			if realName := config.TrimVLLMProviderPrefix(*model.LlmParams.Model); realName != modelName {
 				rpmCfg.Model = realName
 			}
 		}
@@ -416,43 +418,49 @@ func buildAIRModels(
 		}
 	}
 
-	airModels = applyModelGroupAliases(logger, airModels, airPrices, router)
+	airAliases := resolveModelGroupAliases(logger, airModels, router)
 
 	logger.Info("FetchModelsForAIR completed",
 		"credentials", len(airCredentials),
 		"models", len(airModels),
 		"prices", len(airPrices),
+		"aliases", len(airAliases),
 	)
 
-	return airCredentials, airModels, airPrices
+	return airCredentials, airModels, airPrices, airAliases
 }
 
-// applyModelGroupAliases exposes every LiteLLM router_settings.model_group_alias as a
-// model of its own: each deployment of the target group is duplicated under the alias
-// name, keeping the target's provider-facing model name, credential and default
-// params. A real group with the alias's name wins over the alias, as in LiteLLM.
+// resolveModelGroupAliases selects the LiteLLM router_settings.model_group_alias entries
+// AIR can serve, as alias -> target model group. In LiteLLM an alias is resolved to its
+// target group before a deployment is picked, so requests under either name share one
+// set of deployments, limits and health state. AIR gets the same by registering the
+// result as public model aliases (routing resolves them before credential selection)
+// instead of copying deployments under the alias name, which would give the alias its
+// own rate limiter, balancer state and bans.
+//
+// An alias is dropped when it names a real model group (the group wins, as in LiteLLM),
+// points at itself, or its target has no usable deployment.
 //
 // router_settings.fallbacks (group-to-group failover) is deliberately not applied:
 // AIR's failover works between credentials of one model, not between models, so
 // importing it as credential tiers would misroute. It is logged at debug level so the
 // gap is visible.
-func applyModelGroupAliases(
+func resolveModelGroupAliases(
 	logger *slog.Logger,
 	airModels []config.ModelRPMConfig,
-	airPrices map[string]*manager.ModelPrice,
 	router queries.RouterSettings,
-) []config.ModelRPMConfig {
+) map[string]string {
 	if len(router.Fallbacks) > 0 {
 		logger.Debug("router_settings.fallbacks is not imported (model-level failover unsupported)",
 			"groups", len(router.Fallbacks))
 	}
 	if len(router.ModelGroupAlias) == 0 {
-		return airModels
+		return nil
 	}
 
-	byGroup := make(map[string][]config.ModelRPMConfig, len(airModels))
+	groups := make(map[string]struct{}, len(airModels))
 	for _, m := range airModels {
-		byGroup[m.Name] = append(byGroup[m.Name], m)
+		groups[m.Name] = struct{}{}
 	}
 
 	aliases := make([]string, 0, len(router.ModelGroupAlias))
@@ -461,38 +469,28 @@ func applyModelGroupAliases(
 	}
 	sort.Strings(aliases)
 
+	resolved := make(map[string]string, len(aliases))
 	for _, alias := range aliases {
 		target := router.ModelGroupAlias[alias]
 		if alias == target {
 			continue
 		}
-		if _, exists := byGroup[alias]; exists {
+		if _, exists := groups[alias]; exists {
 			logger.Info("model_group_alias ignored: a model group with that name exists",
 				"alias", alias, "target", target)
 			continue
 		}
-		group := byGroup[target]
-		if len(group) == 0 {
+		if _, ok := groups[target]; !ok {
 			logger.Warn("model_group_alias target has no usable deployments",
 				"alias", alias, "target", target)
 			continue
 		}
-		for _, m := range group {
-			aliased := m
-			aliased.Name = alias
-			if aliased.Model == "" {
-				aliased.Model = target
-			}
-			airModels = append(airModels, aliased)
-		}
-		if price, ok := airPrices[target]; ok {
-			if _, has := airPrices[alias]; !has {
-				airPrices[alias] = price
-			}
-		}
+		resolved[alias] = target
 	}
-
-	return airModels
+	if len(resolved) == 0 {
+		return nil
+	}
+	return resolved
 }
 
 // ==================== Helper functions ====================
@@ -518,18 +516,6 @@ func modelProviderName(params *queries.GenericLiteLLMParams) string {
 	return ""
 }
 
-// stripVLLMPrefix removes the LiteLLM provider prefix ("hosted_vllm/model") that the
-// upstream vLLM server does not know. Only the vLLM prefixes are touched: other
-// slashes are part of real model ids (for example "Qwen/Qwen3-8B").
-func stripVLLMPrefix(model string) string {
-	for _, prefix := range []string{"hosted_vllm/", "vllm/"} {
-		if rest, ok := strings.CutPrefix(model, prefix); ok {
-			return rest
-		}
-	}
-	return model
-}
-
 // hasInlineEndpoint reports whether a deployment carries its own connection details.
 // Besides secrets (hasInlineCredentials) a vLLM deployment counts with just an
 // api_base: vLLM is routinely run without an API key.
@@ -548,7 +534,7 @@ func hasInlineEndpoint(params *queries.GenericLiteLLMParams) bool {
 func mapProviderType(provider string) config.ProviderType {
 	p := strings.ToLower(provider)
 	switch {
-	case p == "hosted_vllm" || p == "vllm" || p == "hosted-vllm":
+	case config.IsVLLMProviderName(p):
 		return config.ProviderTypeVLLM
 	case p == "air" || p == "aar" || strings.Contains(p, "auto_ai_router") || strings.Contains(p, "auto-ai-router"):
 		return config.ProviderTypeAIR
@@ -784,11 +770,8 @@ func pricingProviderName(params *queries.GenericLiteLLMParams) string {
 	if params == nil {
 		return ""
 	}
-	if params.CustomLLMProvider != nil && *params.CustomLLMProvider != "" {
-		return *params.CustomLLMProvider
-	}
-	if params.CustomLLMProviderName != nil && *params.CustomLLMProviderName != "" {
-		return *params.CustomLLMProviderName
+	if provider := modelProviderName(params); provider != "" {
+		return provider
 	}
 	if params.Model != nil {
 		if slash := strings.IndexByte(*params.Model, '/'); slash > 0 {

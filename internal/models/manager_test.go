@@ -1868,3 +1868,87 @@ func TestManager_ReplaceModelPriorityTiersForCredential(t *testing.T) {
 	assert.Nil(t, m.GetModelPriorityTiersForCredential("gemini-2.5-flash", "usa03"))
 	assert.Len(t, m.GetModelPriorityTiersForCredential("gpt-5", "ger01"), 2)
 }
+
+func newDBAliasManager(t *testing.T) *Manager {
+	t.Helper()
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+	credential := config.CredentialConfig{Name: "vllm-a", Type: config.ProviderTypeVLLM}
+	manager := New(logger, 100, nil)
+	manager.SetCredentials([]config.CredentialConfig{credential})
+	manager.UpdateDBModels([]config.ModelRPMConfig{
+		{Name: "qwen-fast", Model: "qwen-fp8", Credential: credential.Name},
+		{Name: "gpt-oss-120b", Credential: credential.Name},
+	}, nil, []config.CredentialConfig{credential})
+	return manager
+}
+
+func TestDBPublicModelAlias_ResolvesToTargetAndIsListed(t *testing.T) {
+	manager := newDBAliasManager(t)
+	manager.SetDBPublicModelAliases(map[string]string{"qwen-flash": "qwen-fast"})
+
+	canonical, isAlias, err := manager.ResolvePublicModelAlias("qwen-flash")
+	require.NoError(t, err)
+	assert.True(t, isAlias)
+	assert.Equal(t, "qwen-fast", canonical)
+	assert.True(t, manager.IsClientModelIDRoutable("qwen-flash"))
+
+	// Clients still discover the alias next to its target (the /v1/models path).
+	assert.Equal(t, []string{"gpt-oss-120b", "qwen-fast", "qwen-flash"},
+		responseModelIDs(manager.GetAllModelsScoped(scope.AdminContext())))
+
+	// A key limited to either name may use the alias; one limited to another model may not.
+	assert.True(t, manager.IsModelIDAllowedByScope("qwen-flash", []string{"qwen-flash"}))
+	assert.True(t, manager.IsModelIDAllowedByScope("qwen-flash", []string{"qwen-fast"}))
+	assert.False(t, manager.IsModelIDAllowedByScope("qwen-flash", []string{"gpt-oss-120b"}))
+	assert.False(t, manager.IsModelIDAllowedByScope("qwen-fast", []string{"qwen-flash"}),
+		"the target must not gain permission from a scope that only lists the alias")
+}
+
+func TestDBPublicModelAlias_RealModelWinsOverAlias(t *testing.T) {
+	manager := newDBAliasManager(t)
+	manager.SetDBPublicModelAliases(map[string]string{"gpt-oss-120b": "qwen-fast"})
+
+	_, isAlias, err := manager.ResolvePublicModelAlias("gpt-oss-120b")
+	require.NoError(t, err)
+	assert.False(t, isAlias, "a routable model is never shadowed by an alias of the same name")
+}
+
+func TestDBPublicModelAlias_ConfiguredAliasWins(t *testing.T) {
+	manager := newDBAliasManager(t)
+	manager.SetDBPublicModelAliases(map[string]string{"qwen-flash": "qwen-fast"})
+	manager.SetPublicModelAliases(map[string]string{"qwen-flash": "gpt-oss-120b"})
+
+	canonical, isAlias, err := manager.ResolvePublicModelAlias("qwen-flash")
+	require.NoError(t, err)
+	assert.True(t, isAlias)
+	assert.Equal(t, "gpt-oss-120b", canonical)
+
+	// The configured alias survives a DB sync in either order.
+	manager.SetDBPublicModelAliases(map[string]string{"qwen-flash": "qwen-fast", "other": "qwen-fast"})
+	canonical, _, err = manager.ResolvePublicModelAlias("qwen-flash")
+	require.NoError(t, err)
+	assert.Equal(t, "gpt-oss-120b", canonical)
+	canonical, isAlias, err = manager.ResolvePublicModelAlias("other")
+	require.NoError(t, err)
+	assert.True(t, isAlias)
+	assert.Equal(t, "qwen-fast", canonical)
+}
+
+func TestDBPublicModelAlias_SyncReplacesTheSet(t *testing.T) {
+	manager := newDBAliasManager(t)
+	manager.SetDBPublicModelAliases(map[string]string{"qwen-flash": "qwen-fast"})
+	manager.SetDBPublicModelAliases(map[string]string{"qwen-flash": "qwen-fast"}) // unchanged sync
+
+	manager.SetDBPublicModelAliases(map[string]string{"qwen-turbo": "qwen-fast"})
+	_, gone, err := manager.ResolvePublicModelAlias("qwen-flash")
+	require.NoError(t, err)
+	assert.False(t, gone, "an alias removed from router_settings stops resolving")
+	listed := responseModelIDs(manager.GetAllModelsScoped(scope.AdminContext()))
+	assert.NotContains(t, listed, "qwen-flash")
+	assert.Contains(t, listed, "qwen-turbo")
+
+	// An alias whose target has no deployment left is not routable.
+	manager.SetDBPublicModelAliases(map[string]string{"qwen-turbo": "missing"})
+	_, _, err = manager.ResolvePublicModelAlias("qwen-turbo")
+	assert.Error(t, err)
+}

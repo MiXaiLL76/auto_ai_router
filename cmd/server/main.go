@@ -863,7 +863,7 @@ func syncDBModelTable(
 	fetchCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	dbCreds, dbModelCfgs, dbPrices, err := dbManager.FetchModelsForAIR(fetchCtx, cfg.Server.MasterKey)
+	dbCreds, dbModelCfgs, dbPrices, dbAliases, err := dbManager.FetchModelsForAIR(fetchCtx, cfg.Server.MasterKey)
 	if err != nil {
 		log.Warn("DB model table sync: fetch failed", "error", err)
 		return
@@ -879,6 +879,8 @@ func syncDBModelTable(
 	// DB-sourced proxy credentials participate in GetAllModels remote fetches.
 	modelManager.UpdateDBModels(dbModelCfgs, staticCreds, allCreds)
 	modelManager.SetCredentials(allCreds)
+	// After the models: an alias never shadows a routable model of the same name.
+	modelManager.SetDBPublicModelAliases(dbAliases)
 
 	// Upsert rate limiter entries for all DB credential+model pairs.
 	// For models with no specific credential, register only static (YAML) creds —
@@ -932,7 +934,7 @@ func applyInitialDBModelTable(
 	fetchCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	dbCreds, dbModelCfgs, dbPrices, err := dbManager.FetchModelsForAIR(fetchCtx, cfg.Server.MasterKey)
+	dbCreds, dbModelCfgs, dbPrices, dbAliases, err := dbManager.FetchModelsForAIR(fetchCtx, cfg.Server.MasterKey)
 	if err != nil {
 		log.Warn("Failed to load initial model table from LiteLLM DB (continuing without DB models)",
 			"error", err,
@@ -947,6 +949,8 @@ func applyInitialDBModelTable(
 	// Let the model manager know about all credentials (including DB proxy creds)
 	// so that GetAllModels can fetch remote model lists from DB-sourced proxy credentials.
 	modelManager.SetCredentials(allCreds)
+	// After the models: an alias never shadows a routable model of the same name.
+	modelManager.SetDBPublicModelAliases(dbAliases)
 
 	// For models with no specific credential, register only static (YAML) creds.
 	// Synthetic DB credentials (db-model-*) are model-specific and must not be

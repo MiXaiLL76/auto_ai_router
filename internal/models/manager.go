@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"net/http"
 	"slices"
 	"strings"
@@ -324,7 +325,9 @@ type Manager struct {
 	modelAliases                 map[string]string                    // alias -> real model name (from model_alias config)
 	clientModelIDs               map[string]struct{}                  // exact advertised canonical client IDs
 	clientModelSurfaceConfigured bool                                 // distinguishes an omitted boundary from an explicit empty boundary
-	publicModelAliases           map[string]string                    // client alias -> canonical LiteLLM public deployment identity
+	publicModelAliases           map[string]string                    // effective client alias -> canonical LiteLLM public deployment identity
+	staticPublicModelAliases     map[string]string                    // public_model_alias from config; wins over the DB ones
+	dbPublicModelAliases         map[string]string                    // LiteLLM router_settings.model_group_alias
 	acceptedModelAliases         map[string]string                    // accepted client alias -> canonical model, hidden from discovery
 	externalModelIDs             map[string]struct{}                  // client-visible models handled outside the inference balancer
 	modelRealNames               map[string]string                    // alias name -> real model name (global, no specific credential)
@@ -355,6 +358,8 @@ func New(logger *slog.Logger, defaultModelsRPM int, staticModels []config.ModelR
 		modelAliases:                make(map[string]string),
 		clientModelIDs:              make(map[string]struct{}),
 		publicModelAliases:          make(map[string]string),
+		staticPublicModelAliases:    make(map[string]string),
+		dbPublicModelAliases:        make(map[string]string),
 		acceptedModelAliases:        make(map[string]string),
 		externalModelIDs:            make(map[string]struct{}),
 		modelRealNames:              make(map[string]string),
@@ -761,15 +766,63 @@ func (m *Manager) SetClientModelIDs(modelIDs []string) {
 func (m *Manager) SetPublicModelAliases(aliases map[string]string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.publicModelAliases = make(map[string]string, len(aliases))
+	m.staticPublicModelAliases = make(map[string]string, len(aliases))
 	for alias, target := range aliases {
 		if alias == "" || target == "" || alias == target {
 			m.logger.Warn("Invalid public model alias, skipping", "alias", alias, "target", target)
 			continue
 		}
-		m.publicModelAliases[alias] = target
+		m.staticPublicModelAliases[alias] = target
 		m.logger.Info("Registered public model alias", "alias", alias, "target", target)
 	}
+	m.rebuildPublicModelAliasesLocked()
+}
+
+// SetDBPublicModelAliases replaces the aliases imported from LiteLLM
+// router_settings.model_group_alias. Like a LiteLLM alias they resolve to the target
+// group before routing, so both names share the target's credentials, limits and
+// balancer state. An alias that names a routable model is ignored (the real model
+// wins), and a configured public_model_alias of the same name wins over the DB one.
+// It is called on every DB sync, so an unchanged set does nothing.
+func (m *Manager) SetDBPublicModelAliases(aliases map[string]string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	next := make(map[string]string, len(aliases))
+	for alias, target := range aliases {
+		if alias == "" || target == "" || alias == target {
+			continue
+		}
+		if len(m.modelToCredentials[alias]) > 0 {
+			m.logger.Debug("DB model group alias ignored: a routable model with that name exists",
+				"alias", alias, "target", target)
+			continue
+		}
+		next[alias] = target
+	}
+	if maps.Equal(next, m.dbPublicModelAliases) {
+		return
+	}
+	for alias, target := range next {
+		if previous, ok := m.dbPublicModelAliases[alias]; !ok || previous != target {
+			m.logger.Info("Registered DB model group alias", "alias", alias, "target", target)
+		}
+	}
+	for alias := range m.dbPublicModelAliases {
+		if _, ok := next[alias]; !ok {
+			m.logger.Info("Removed DB model group alias", "alias", alias)
+		}
+	}
+	m.dbPublicModelAliases = next
+	m.rebuildPublicModelAliasesLocked()
+}
+
+// rebuildPublicModelAliasesLocked recomputes the effective alias map (DB aliases
+// overlaid by configured ones) and drops every cache derived from it.
+func (m *Manager) rebuildPublicModelAliasesLocked() {
+	effective := make(map[string]string, len(m.dbPublicModelAliases)+len(m.staticPublicModelAliases))
+	maps.Copy(effective, m.dbPublicModelAliases)
+	maps.Copy(effective, m.staticPublicModelAliases)
+	m.publicModelAliases = effective
 	m.allModels = nil
 	m.invalidateAllModelsCachesLocked()
 }
@@ -2850,7 +2903,7 @@ var providerTypeLiteLLMPrefix = map[config.ProviderType]string{
 	config.ProviderTypeBedrock:   "bedrock",
 	config.ProviderTypeProxy:     "openai",
 	config.ProviderTypeAIR:       "openai",
-	config.ProviderTypeVLLM:      "hosted_vllm",
+	config.ProviderTypeVLLM:      config.VLLMLiteLLMProvider,
 }
 
 // GetAllModelsWithAccessGroups returns all models in "provider/model-id" format,

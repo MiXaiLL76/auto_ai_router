@@ -26,8 +26,8 @@ credentials:
 ## Responses API
 
 vLLM serves `/v1/responses` natively, so a Responses API request is forwarded to it
-unchanged (the real model name replaces the alias) rather than being converted into a
-Chat Completions request. Set `passthrough_responses: false` on a model to convert instead.
+unchanged (the real model name replaces the model group name) rather than being converted
+into a Chat Completions request. Set `passthrough_responses: false` on a model to convert instead.
 
 ## Using a LiteLLM database
 
@@ -43,7 +43,8 @@ A LiteLLM deployment can carry default request parameters in its `litellm_params
 `top_p`, `top_k`, `min_p`, `presence_penalty`, `frequency_penalty`,
 `repetition_penalty`, `max_tokens`, `seed`). For `vllm` credentials AIR fills these
 into `/chat/completions` requests **only when the client did not send the same key**,
-which is the precedence LiteLLM uses (the request wins over the deployment).
+which is the precedence LiteLLM uses (the request wins over the deployment). A deployment
+`max_tokens` is likewise not added when the client sent `max_completion_tokens`.
 Embeddings, the passed-through `/v1/responses` and other endpoints never receive them.
 
 Defaults are read from the LiteLLM database only; there is no YAML setting for them.

@@ -1,5 +1,7 @@
 package queries
 
+import "encoding/json"
+
 const QueryProxyModelTable = `SELECT model_id, model_name, litellm_params, model_info FROM public."LiteLLM_ProxyModelTable"`
 
 // QueryProxyModelTableWithBlocked also reads the blocked flag that newer LiteLLM
@@ -102,8 +104,9 @@ type GenericLiteLLMParams struct {
 	PresencePenalty    *float64       `json:"presence_penalty,omitempty"`
 	FrequencyPenalty   *float64       `json:"frequency_penalty,omitempty"`
 	RepetitionPenalty  *float64       `json:"repetition_penalty,omitempty"`
-	MaxTokens          *float64       `json:"max_tokens,omitempty"`
-	Seed               *float64       `json:"seed,omitempty"`
+	// Integer params keep their literal: a float64 round trip corrupts a seed above 2^53.
+	MaxTokens *json.Number `json:"max_tokens,omitempty"`
+	Seed      *json.Number `json:"seed,omitempty"`
 
 	ModelInfo map[string]interface{} `json:"model_info,omitempty"`
 }
@@ -141,8 +144,14 @@ func (p *GenericLiteLLMParams) DefaultRequestParams() map[string]any {
 		"presence_penalty":   p.PresencePenalty,
 		"frequency_penalty":  p.FrequencyPenalty,
 		"repetition_penalty": p.RepetitionPenalty,
-		"max_tokens":         p.MaxTokens,
-		"seed":               p.Seed,
+	} {
+		if val != nil {
+			out[key] = *val
+		}
+	}
+	for key, val := range map[string]*json.Number{
+		"max_tokens": p.MaxTokens,
+		"seed":       p.Seed,
 	} {
 		if val != nil {
 			out[key] = *val

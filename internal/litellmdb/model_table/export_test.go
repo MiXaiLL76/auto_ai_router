@@ -140,7 +140,7 @@ func mustJSON(t *testing.T, v any) json.RawMessage {
 func TestExport_LoaderServesTheWholeFleet(t *testing.T) {
 	dir, key := exportEnv(t)
 	export := loadExport(t, dir, key)
-	creds, models, prices := buildAIRModels(testhelpers.NewTestLogger(), export.credRows, export.rows, export.router, key)
+	creds, models, prices, aliases := buildAIRModels(testhelpers.NewTestLogger(), export.credRows, export.rows, export.router, key)
 
 	require.NotEmpty(t, export.rows)
 	require.NotEmpty(t, models, "an export of a working proxy must yield models")
@@ -154,7 +154,7 @@ func TestExport_LoaderServesTheWholeFleet(t *testing.T) {
 	}
 
 	// Independent expectation: serve every row that is neither blocked nor a rerank
-	// model, plus one copy of the target group's deployments per usable alias.
+	// model; aliases resolve to their target group instead of adding models.
 	groups := map[string]int{}
 	served := 0
 	for _, row := range export.rows {
@@ -164,14 +164,7 @@ func TestExport_LoaderServesTheWholeFleet(t *testing.T) {
 		groups[*row.ModelName]++
 		served++
 	}
-	expected := served
-	for alias, target := range export.router.ModelGroupAlias {
-		if _, isGroup := groups[alias]; isGroup || alias == target {
-			continue
-		}
-		expected += groups[target]
-	}
-	assert.Len(t, models, expected)
+	assert.Len(t, models, served)
 
 	names := map[string]bool{}
 	for _, m := range models {
@@ -184,11 +177,16 @@ func TestExport_LoaderServesTheWholeFleet(t *testing.T) {
 			assert.False(t, names[*row.ModelName], "%s must not be served", *row.ModelName)
 		}
 	}
-	// Every alias whose target is served must be servable itself.
+	// Every alias whose target is served must resolve to it; an alias that would shadow
+	// a real group must not.
 	for alias, target := range export.router.ModelGroupAlias {
-		if groups[target] > 0 {
-			assert.True(t, names[alias], "alias %s -> %s", alias, target)
-			assert.Contains(t, prices, alias, "billing needs a price under the alias name")
+		_, isGroup := groups[alias]
+		switch {
+		case isGroup || alias == target || groups[target] == 0:
+			assert.NotContains(t, aliases, alias)
+		default:
+			assert.Equal(t, target, aliases[alias], "alias %s", alias)
+			assert.False(t, names[alias], "alias %s must not be a model of its own", alias)
 		}
 	}
 	t.Logf("export: %d rows -> %d credentials, %d models (%d aliases), %d prices",
@@ -202,7 +200,7 @@ func TestExport_LoaderServesTheWholeFleet(t *testing.T) {
 func TestExport_ModelPairsMatchObservedTraffic(t *testing.T) {
 	dir, key := exportEnv(t)
 	export := loadExport(t, dir, key)
-	_, models, _ := buildAIRModels(testhelpers.NewTestLogger(), export.credRows, export.rows, export.router, key)
+	_, models, _, aliases := buildAIRModels(testhelpers.NewTestLogger(), export.credRows, export.rows, export.router, key)
 
 	realNames := map[string]map[string]bool{}
 	for _, m := range models {
@@ -214,6 +212,10 @@ func TestExport_ModelPairsMatchObservedTraffic(t *testing.T) {
 			realNames[m.Name] = map[string]bool{}
 		}
 		realNames[m.Name][real] = true
+	}
+	// An alias is served by its target's deployments.
+	for alias, target := range aliases {
+		realNames[alias] = realNames[target]
 	}
 
 	var total, knownGroup, explained int64

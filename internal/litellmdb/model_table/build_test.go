@@ -167,17 +167,18 @@ func fixtureModels(t *testing.T) []queries.ModelTable {
 }
 
 type builtFixture struct {
-	creds  []config.CredentialConfig
-	models []config.ModelRPMConfig
-	prices map[string]bool
-	priced map[string]float64 // model name -> input cost
+	creds   []config.CredentialConfig
+	models  []config.ModelRPMConfig
+	aliases map[string]string
+	prices  map[string]bool
+	priced  map[string]float64 // model name -> input cost
 }
 
 func buildFixture(t *testing.T) builtFixture {
 	t.Helper()
-	creds, models, prices := buildAIRModels(testhelpers.NewTestLogger(),
+	creds, models, prices, aliases := buildAIRModels(testhelpers.NewTestLogger(),
 		fixtureCredentials(t), fixtureModels(t), fixtureRouterSettings(), fixtureSigningKey)
-	out := builtFixture{creds: creds, models: models, prices: map[string]bool{}, priced: map[string]float64{}}
+	out := builtFixture{creds: creds, models: models, aliases: aliases, prices: map[string]bool{}, priced: map[string]float64{}}
 	for name, price := range prices {
 		out.prices[name] = true
 		out.priced[name] = price.InputCostPerToken
@@ -235,7 +236,6 @@ func TestBuildAIRModels_RealModelNames(t *testing.T) {
 	ultra := f.only(t, "qwen3.5-397b-a17b-fp8")
 	assert.Equal(t, "qwen397b-int4", ultra.Model)
 	assert.Equal(t, "ray-service-prod", ultra.Credential)
-	assert.Equal(t, "id-qwen-ultra", ultra.DeploymentID)
 
 	// The provider prefix vLLM does not know is stripped.
 	assert.Equal(t, "qwen-36-35b-fp8", f.only(t, "qwen-36-35b-fast").Model)
@@ -310,49 +310,56 @@ func TestBuildAIRModels_DefaultParamsOnlyForVLLM(t *testing.T) {
 func TestBuildAIRModels_ModelGroupAliases(t *testing.T) {
 	f := buildFixture(t)
 
-	// The alias serves its target's deployments under the alias name, keeping the
-	// provider-facing model name.
-	ultra := f.only(t, "qwen-ultra")
-	assert.Equal(t, "qwen397b-int4", ultra.Model)
-	assert.Equal(t, "ray-service-prod", ultra.Credential)
+	// A usable alias resolves to its target group at routing time.
+	assert.Equal(t, map[string]string{
+		"gpt-oss":     "gpt-oss-120b",
+		"qwen-flash":  "qwen-36-35b-fast",
+		"qwen-ultra":  "qwen3.5-397b-a17b-fp8",
+		"coder-ultra": "kimi-k26",
+		"qwen-36-35b": "qwen-36-35b-fp8",
+		"qwen3-coder": "qwen-ultra-flash",
+	}, f.aliases)
 
-	// A target whose real name equals its group name still needs an explicit real name.
-	assert.Equal(t, "gpt-oss-120b", f.only(t, "gpt-oss").Model)
-	assert.Equal(t, "kimi-k26", f.only(t, "coder-ultra").Model)
-	assert.Equal(t, "vllm-only-h200x8-deployment-nodeport", f.only(t, "coder-ultra").Credential)
+	// It is not a model of its own: a copy of the deployments would get its own rate
+	// limiter, balancer state and bans, so the two names would not share the target's limits.
+	for alias, target := range f.aliases {
+		assert.Empty(t, f.modelsNamed(alias), "alias %s must not become a model", alias)
+		assert.NotEmpty(t, f.modelsNamed(target), "alias %s target must be served", alias)
+	}
 
-	// Default params travel with the aliased deployment.
-	flash := f.only(t, "qwen-flash")
-	assert.Equal(t, "qwen-36-35b-fp8", flash.Model)
-	assert.Equal(t, f.only(t, "qwen-36-35b-fast").DefaultParams, flash.DefaultParams)
-	assert.Equal(t, f.only(t, "qwen-ultra-flash").DefaultParams, f.only(t, "qwen3-coder").DefaultParams)
-	assert.Equal(t, "qwen397b-int4", f.only(t, "qwen3-coder").Model)
-
-	// Two aliases may share a target.
-	assert.Equal(t, "qwen-36-35b-fp8", f.only(t, "qwen-36-35b").Model)
+	// Deployments stay under the target group, with the provider-facing name and the
+	// default params the requests routed there will use.
+	assert.Equal(t, "qwen397b-int4", f.only(t, "qwen3.5-397b-a17b-fp8").Model)
+	assert.Equal(t, "ray-service-prod", f.only(t, "qwen3.5-397b-a17b-fp8").Credential)
+	assert.Equal(t, "vllm-only-h200x8-deployment-nodeport", f.only(t, "kimi-k26").Credential)
+	assert.Equal(t, "qwen-36-35b-fp8", f.only(t, "qwen-36-35b-fast").Model)
+	assert.NotNil(t, f.only(t, "qwen-36-35b-fast").DefaultParams)
 
 	// An alias never overrides a real group of the same name.
+	assert.NotContains(t, f.aliases, "gemma-3-27b-it")
 	gemma := f.only(t, "gemma-3-27b-it")
 	assert.Empty(t, gemma.Model)
-	assert.Equal(t, "id-gemma", gemma.DeploymentID)
 
 	// Unusable aliases are dropped quietly.
-	assert.Empty(t, f.modelsNamed("ghost"))
-	assert.Empty(t, f.modelsNamed("self"))
+	assert.NotContains(t, f.aliases, "ghost")
+	assert.NotContains(t, f.aliases, "self")
 
 	// router_settings.fallbacks is not turned into models.
-	assert.Len(t, f.modelsNamed("coder-ultra"), 1)
+	assert.Len(t, f.modelsNamed("kimi-k26"), 1)
 }
 
-func TestBuildAIRModels_AliasesInheritPrices(t *testing.T) {
+func TestBuildAIRModels_AliasesAreBilledAsTheirTarget(t *testing.T) {
 	f := buildFixture(t)
 
-	// Billing looks the price up by the name the client used.
+	// The alias is resolved to its target before billing, so prices live under the
+	// target's name only.
 	assert.InDelta(t, 4e-7, f.priced["qwen3.5-397b-a17b-fp8"], 1e-15)
-	assert.InDelta(t, 4e-7, f.priced["qwen-ultra"], 1e-15)
-	assert.InDelta(t, 2e-7, f.priced["qwen-flash"], 1e-15)
-	assert.InDelta(t, 1e-6, f.priced["coder-ultra"], 1e-15)
-	assert.True(t, f.prices["gpt-oss"])
+	assert.InDelta(t, 2e-7, f.priced["qwen-36-35b-fast"], 1e-15)
+	assert.InDelta(t, 1e-6, f.priced["kimi-k26"], 1e-15)
+	assert.True(t, f.prices["gpt-oss-120b"])
+	for alias := range f.aliases {
+		assert.False(t, f.prices[alias], "alias %s has no price of its own", alias)
+	}
 	assert.False(t, f.prices["ghost"])
 }
 
@@ -364,21 +371,10 @@ func TestBuildAIRModels_IsDeterministic(t *testing.T) {
 }
 
 func TestBuildAIRModels_NoRouterSettings(t *testing.T) {
-	_, models, _ := buildAIRModels(testhelpers.NewTestLogger(),
+	_, models, _, aliases := buildAIRModels(testhelpers.NewTestLogger(),
 		fixtureCredentials(t), fixtureModels(t), queries.RouterSettings{}, fixtureSigningKey)
-	for _, m := range models {
-		assert.NotEqual(t, "qwen-ultra", m.Name)
-	}
+	assert.Empty(t, aliases)
 	assert.NotEmpty(t, models)
-}
-
-func TestStripVLLMPrefix(t *testing.T) {
-	assert.Equal(t, "m", stripVLLMPrefix("hosted_vllm/m"))
-	assert.Equal(t, "m", stripVLLMPrefix("vllm/m"))
-	assert.Equal(t, "m", stripVLLMPrefix("m"))
-	assert.Equal(t, "Qwen/Qwen3-8B", stripVLLMPrefix("Qwen/Qwen3-8B"))
-	assert.Equal(t, "hosted_vllm", stripVLLMPrefix("hosted_vllm"))
-	assert.Equal(t, "openai/gpt", stripVLLMPrefix("openai/gpt"))
 }
 
 func TestMapProviderType_VLLM(t *testing.T) {
