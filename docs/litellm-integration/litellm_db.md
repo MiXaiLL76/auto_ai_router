@@ -72,8 +72,9 @@ in `config.yaml`. The mapping follows LiteLLM's own semantics:
 
 LiteLLM's `user_header_mappings` is replaced by fixed headers. The `-Email` headers set the
 **end user** (`LiteLLM_EndUserTable`, `LiteLLM_DailyEndUserSpend`); the `-Id` headers set the
-**user** recorded in the spend log and `LiteLLM_DailyUserSpend`, in place of the key's owner.
-The first header present (in this order) wins; empty, longer than 256 bytes, or non-printable
+**user** recorded in the spend log and `LiteLLM_DailyUserSpend`. The `-Id` headers apply only to
+service keys that have no owner (`user_id` is empty); on a key that has an owner they are
+ignored and the owner is recorded. The first header present (in this order) wins; empty, longer than 256 bytes, or non-printable
 values are ignored.
 
 | Purpose  | Headers, highest priority first                                                    |
@@ -83,7 +84,7 @@ values are ignored.
 
 There is no fallback to the request body (`user`, `metadata.user_id`) and the key owner's
 email is never used as an end user. The headers affect statistics only: authentication and
-budget checks keep using the key's own user. They are taken on trust, so expose the router
+budget checks keep using the key's own user. They are taken on trust, so expose service keys
 only to clients that set them honestly (typically behind OpenWebUI or another gateway).
 
 ## Model names in spend records

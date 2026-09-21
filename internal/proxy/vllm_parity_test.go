@@ -101,7 +101,8 @@ func newVLLMProxy(t *testing.T, upstreamURL string, db *organizationPolicyTestDB
 
 func newVLLMTestDB() *organizationPolicyTestDB {
 	return &organizationPolicyTestDB{tokens: map[string]*dbmodels.TokenInfo{
-		"token": {Token: "token-hash", UserID: "key-owner", TeamID: "team-1"},
+		"token":         {Token: "token-hash", UserID: "key-owner", TeamID: "team-1"},
+		"service-token": {Token: "service-token-hash", TeamID: "team-1"},
 	}}
 }
 
@@ -113,7 +114,7 @@ func TestVLLM_ChatRequestEndToEnd(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
 		stringsReader(`{"model":"qwen-flash","messages":[{"role":"user","content":"hi"}],"temperature":0.1}`))
-	req.Header.Set("Authorization", "Bearer token")
+	req.Header.Set("Authorization", "Bearer service-token")
 	req.Header.Set("X-OpenWebUI-User-Email", "Ivan.Petrov@example.com")
 	req.Header.Set("X-OpenWebUI-User-Id", "S-1-5-21-1-2-3-4")
 	w := httptest.NewRecorder()
@@ -139,10 +140,33 @@ func TestVLLM_ChatRequestEndToEnd(t *testing.T) {
 	assert.Equal(t, "qwen-36-35b-fp8", log.Model, "model is the deployment's real name")
 	assert.Equal(t, "qwen-flash", log.ModelGroup, "model_group is the name the client asked for")
 	assert.Equal(t, "vllm", log.CustomLLMProvider)
-	assert.Equal(t, "S-1-5-21-1-2-3-4", log.UserID, "the user header replaces the key owner in the spend record")
+	assert.Equal(t, "S-1-5-21-1-2-3-4", log.UserID, "on an ownerless service key the user header names the user")
 	assert.Equal(t, "Ivan.Petrov@example.com", log.EndUser, "end user keeps the caller's spelling")
 	assert.Equal(t, "team-1", log.TeamID)
 	assert.Equal(t, "success", log.Status)
+}
+
+// A key that has an owner must keep billing its owner: the identity headers are not
+// authenticated, so honouring them here would let the key holder charge someone else.
+func TestVLLM_UserIDHeaderIgnoredForKeyWithOwner(t *testing.T) {
+	capture := &vllmCapture{}
+	upstream := newFakeVLLM(t, capture)
+	db := newVLLMTestDB()
+	prx := newVLLMProxy(t, upstream.URL, db)
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		stringsReader(`{"model":"qwen-flash","messages":[{"role":"user","content":"hi"}]}`))
+	req.Header.Set("Authorization", "Bearer token")
+	req.Header.Set("X-OpenWebUI-User-Id", "S-1-5-21-1-2-3-4")
+	req.Header.Set("X-AIR-User-Id", "victim")
+	req.Header.Set("X-AirClaw-User-Id", "victim")
+	w := httptest.NewRecorder()
+
+	prx.ProxyRequest(w, req)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+
+	require.Len(t, db.logs, 1)
+	assert.Equal(t, "key-owner", db.logs[0].UserID, "a key with an owner is never re-attributed by headers")
 }
 
 func TestVLLM_DefaultsApplyWhenClientSendsNothing(t *testing.T) {

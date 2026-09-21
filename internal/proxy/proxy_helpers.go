@@ -659,8 +659,8 @@ func addOrganizationPolicySpendMetadata(metadata string, logCtx *RequestLogConte
 // Identity headers, in priority order. They mirror LiteLLM's user_header_mappings for
 // the callers this deployment fronts: the *-Email headers carry the end user
 // (LiteLLM role "customer": LiteLLM_EndUserTable / DailyEndUserSpend), the *-Id
-// headers carry the internal user id (LiteLLM role "internal_user": the SID that
-// replaces the key owner in SpendLogs and DailyUserSpend). X-End-User is AIR's
+// headers carry the internal user id (LiteLLM role "internal_user": the SID recorded
+// in SpendLogs and DailyUserSpend for an ownerless service key). X-End-User is AIR's
 // original end-user header and stays supported.
 var (
 	endUserHeaders = []string{"X-AIR-User-Email", "X-End-User", "X-OpenWebUI-User-Email", "X-AirClaw-User-Email"}

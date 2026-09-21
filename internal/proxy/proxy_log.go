@@ -261,12 +261,19 @@ func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
 	// substituting the email would fabricate EndUserTable/DailyEndUserSpend
 	// rows that have no counterpart in the primary accounting.
 	endUser := extractEndUser(logCtx.Request)
-	// LiteLLM's user_header_mappings (role internal_user) replaces the key owner with
-	// the user named in the header, so SpendLogs and DailyUserSpend follow the person
-	// behind a shared service key. Only the spend record is affected; authentication
-	// and budget checks keep using the key's own user.
-	if headerUserID := extractUserID(logCtx.Request); headerUserID != "" {
-		userID = headerUserID
+	// LiteLLM's user_header_mappings (role internal_user) names the person behind a
+	// shared service key, so SpendLogs and DailyUserSpend follow that person. The
+	// header is honoured only for ownerless service keys (no user_id): the identity
+	// headers are not authenticated, and on a key that has an owner they would let
+	// its holder bill any other user (LiteLLM_UserTable, team/org member spend) while
+	// budget checks keep reading the key's own user. An empty user_id is the marker,
+	// not metadata.service_account_id: personal keys carry service_account_id too,
+	// whereas the shared keys fronted by OpenWebUI/AirClaw are exactly the ones with
+	// no owner, and those are the only callers that need to name the person.
+	if userID == "" {
+		if headerUserID := extractUserID(logCtx.Request); headerUserID != "" {
+			userID = headerUserID
+		}
 	}
 
 	// LiteLLM records the deployment's provider-facing name in model and the name the
