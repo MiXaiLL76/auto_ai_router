@@ -143,6 +143,124 @@ func TestTransformResponsesStreamToChat_FunctionCall(t *testing.T) {
 	assert.Equal(t, "tool_calls", finishReason)
 }
 
+// TestTransformResponsesStreamToChat_FailedSurfacesErrorAsContent reproduces
+// a real gap: a stream that ends in response.failed with an embedded
+// error.message and no other output must surface that message as content,
+// exactly like ResponseToChat does non-streaming for the same status="failed"
+// shape -- not silently hand back finish_reason:"stop" with an empty message.
+func TestTransformResponsesStreamToChat_FailedSurfacesErrorAsContent(t *testing.T) {
+	input := strings.NewReader(
+		sseLine(`{"type":"response.created","response":{"id":"resp_fail","object":"response","status":"in_progress"}}`) +
+			sseLine(`{"type":"response.failed","response":{"id":"resp_fail","object":"response","status":"failed","output":[],"error":{"message":"upstream rate limited","code":"rate_limit_exceeded"}}}`) +
+			"data: [DONE]\n\n",
+	)
+
+	var out bytes.Buffer
+	require.NoError(t, TransformResponsesStreamToChat(input, "gpt-5-pro", &out))
+	chunks := collectSSEChunks(t, out.Bytes())
+
+	var text, finishReason string
+	for _, c := range chunks {
+		choices := c["choices"].([]interface{})
+		if len(choices) == 0 {
+			continue
+		}
+		choice := choices[0].(map[string]interface{})
+		delta := choice["delta"].(map[string]interface{})
+		if content, ok := delta["content"].(string); ok {
+			text += content
+		}
+		if fr, ok := choice["finish_reason"].(string); ok {
+			finishReason = fr
+		}
+	}
+	assert.Equal(t, "upstream rate limited", text)
+	assert.Equal(t, "stop", finishReason)
+}
+
+func TestTransformResponsesStreamToChat_FailedDoesNotOverwriteStreamedContent(t *testing.T) {
+	input := strings.NewReader(
+		sseLine(`{"type":"response.created","response":{"id":"resp_partial","object":"response","status":"in_progress"}}`) +
+			sseLine(`{"type":"response.output_text.delta","output_index":0,"delta":"partial answer"}`) +
+			sseLine(`{"type":"response.failed","response":{"id":"resp_partial","object":"response","status":"failed","output":[],"error":{"message":"connection reset"}}}`) +
+			"data: [DONE]\n\n",
+	)
+
+	var out bytes.Buffer
+	require.NoError(t, TransformResponsesStreamToChat(input, "gpt-5-pro", &out))
+	chunks := collectSSEChunks(t, out.Bytes())
+
+	var text string
+	for _, c := range chunks {
+		choices := c["choices"].([]interface{})
+		if len(choices) == 0 {
+			continue
+		}
+		delta := choices[0].(map[string]interface{})["delta"].(map[string]interface{})
+		if content, ok := delta["content"].(string); ok {
+			text += content
+		}
+	}
+	assert.Equal(t, "partial answer", text)
+}
+
+func TestTransformResponsesStreamToChat_StandaloneErrorEvent(t *testing.T) {
+	input := strings.NewReader(
+		sseLine(`{"type":"response.created","response":{"id":"resp_err","object":"response","status":"in_progress"}}`) +
+			sseLine(`{"type":"error","code":"server_error","message":"the model is overloaded"}`) +
+			"data: [DONE]\n\n",
+	)
+
+	var out bytes.Buffer
+	require.NoError(t, TransformResponsesStreamToChat(input, "gpt-5-pro", &out))
+	chunks := collectSSEChunks(t, out.Bytes())
+
+	var text, finishReason string
+	for _, c := range chunks {
+		choices := c["choices"].([]interface{})
+		if len(choices) == 0 {
+			continue
+		}
+		choice := choices[0].(map[string]interface{})
+		delta := choice["delta"].(map[string]interface{})
+		if content, ok := delta["content"].(string); ok {
+			text += content
+		}
+		if fr, ok := choice["finish_reason"].(string); ok {
+			finishReason = fr
+		}
+	}
+	assert.Equal(t, "the model is overloaded", text)
+	assert.Equal(t, "stop", finishReason)
+}
+
+func TestTransformResponsesStreamToChat_RefusalDelta(t *testing.T) {
+	input := strings.NewReader(
+		sseLine(`{"type":"response.created","response":{"id":"resp_refusal","object":"response","status":"in_progress"}}`) +
+			sseLine(`{"type":"response.refusal.delta","output_index":0,"delta":"I can't "}`) +
+			sseLine(`{"type":"response.refusal.delta","output_index":0,"delta":"help with that."}`) +
+			sseLine(`{"type":"response.completed","response":{"id":"resp_refusal","object":"response","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"refusal","refusal":"I can't help with that."}]}]}}`) +
+			"data: [DONE]\n\n",
+	)
+
+	var out bytes.Buffer
+	require.NoError(t, TransformResponsesStreamToChat(input, "gpt-5-pro", &out))
+	chunks := collectSSEChunks(t, out.Bytes())
+
+	var refusal string
+	for _, c := range chunks {
+		choices := c["choices"].([]interface{})
+		if len(choices) == 0 {
+			continue
+		}
+		delta := choices[0].(map[string]interface{})["delta"].(map[string]interface{})
+		if r, ok := delta["refusal"].(string); ok {
+			refusal += r
+		}
+	}
+	assert.Equal(t, "I can't help with that.", refusal)
+}
+
 func TestTransformResponsesStreamToChat_MalformedLineSkipped(t *testing.T) {
 	input := strings.NewReader(
 		sseLine(`{"type":"response.created","response":{"id":"resp_3","object":"response","status":"in_progress"}}`) +

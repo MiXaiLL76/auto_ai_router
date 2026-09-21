@@ -127,10 +127,8 @@ func ResponseToChat(body []byte) ([]byte, error) {
 	// no output items at all; surface the embedded error text as content
 	// instead of handing back an empty message with no explanation.
 	if resp.Status == "failed" && message.Content == "" && len(toolCalls) == 0 {
-		if errMap, ok := resp.Error.(map[string]interface{}); ok {
-			if msg, ok := errMap["message"].(string); ok && msg != "" {
-				message.Content = msg
-			}
+		if msg := responsesErrorMessage(resp.Error); msg != "" {
+			message.Content = msg
 		}
 	}
 
@@ -162,6 +160,17 @@ func ResponseToChat(body []byte) ([]byte, error) {
 		// to fail the whole response.
 	}
 	return result, nil
+}
+
+// responsesErrorMessage pulls "message" out of a Response.Error. Shared with
+// the streaming transformer so failed responses look the same either way.
+func responsesErrorMessage(err interface{}) string {
+	errMap, ok := err.(map[string]interface{})
+	if !ok {
+		return ""
+	}
+	msg, _ := errMap["message"].(string)
+	return msg
 }
 
 // responsesReasoningBlockType discriminates this package's own

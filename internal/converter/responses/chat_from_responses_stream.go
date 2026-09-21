@@ -18,12 +18,10 @@ import (
 type responsesStreamEvent struct {
 	Type        string      `json:"type"`
 	OutputIndex int         `json:"output_index"`
-	Delta       string      `json:"delta"` // plain-string delta for output_text/reasoning_summary_text/function_call_arguments events
+	Delta       string      `json:"delta"` // plain-string delta for output_text/reasoning_summary_text/refusal/function_call_arguments events
 	Item        *OutputItem `json:"item,omitempty"`
 	Response    *Response   `json:"response,omitempty"`
-	Error       *struct {
-		Message string `json:"message"`
-	} `json:"error,omitempty"`
+	Message     string      `json:"message,omitempty"` // top-level on the standalone "error" event, not nested
 }
 
 // TransformResponsesStreamToChat reads a Responses API SSE stream from
@@ -40,6 +38,7 @@ type responsesStreamEvent struct {
 //	response.created / response.in_progress — captures the response ID, emits the role-only opening chunk
 //	response.output_item.added              — announces a function_call's id/name (message items produce no chunk of their own)
 //	response.output_text.delta              — streams assistant text
+//	response.refusal.delta                  — streams a model refusal
 //	response.reasoning_summary_text.delta   — streams reasoning/thinking text
 //	response.function_call_arguments.delta  — streams a function call's arguments
 //	response.completed / .incomplete / .failed — carries the final status/usage; [DONE] is written after the loop
@@ -59,6 +58,7 @@ func TransformResponsesStreamToChat(reader io.Reader, model string, output io.Wr
 	// message item sharing the output array never consumes a slot.
 	toolCallSlots := make(map[int]int)
 	nextToolCallIdx := 0
+	streamedContent := false // any text/refusal already sent, so a failed status doesn't clobber it
 
 	ensureChatID := func() string {
 		if chatID == "" {
@@ -129,7 +129,21 @@ func TransformResponsesStreamToChat(reader io.Reader, model string, output io.Wr
 			if event.Delta == "" {
 				continue
 			}
+			streamedContent = true
 			delta := openai.OpenAIStreamingDelta{Content: event.Delta}
+			if err := writeChatStreamChunk(output, ensureChatID(), model, timestamp, delta, nil); err != nil {
+				return err
+			}
+
+		case "response.refusal.delta":
+			if err := writeFirstChunkOnce(); err != nil {
+				return err
+			}
+			if event.Delta == "" {
+				continue
+			}
+			streamedContent = true
+			delta := openai.OpenAIStreamingDelta{Refusal: event.Delta}
 			if err := writeChatStreamChunk(output, ensureChatID(), model, timestamp, delta, nil); err != nil {
 				return err
 			}
@@ -164,6 +178,18 @@ func TransformResponsesStreamToChat(reader io.Reader, model string, output io.Wr
 			if event.Response == nil {
 				continue
 			}
+			// surface the error text for a bare failure, same as ResponseToChat does non-streaming
+			if event.Response.Status == "failed" && !streamedContent && nextToolCallIdx == 0 {
+				if msg := responsesErrorMessage(event.Response.Error); msg != "" {
+					if err := writeFirstChunkOnce(); err != nil {
+						return err
+					}
+					delta := openai.OpenAIStreamingDelta{Content: msg}
+					if err := writeChatStreamChunk(output, ensureChatID(), model, timestamp, delta, nil); err != nil {
+						return err
+					}
+				}
+			}
 			reason := responsesFinishReason(event.Response.Status, event.Response.IncompleteDetails, nextToolCallIdx > 0)
 			usage := responsesUsageToChat(event.Response.Usage)
 			if err := writeChatTerminalChunks(output, ensureChatID(), model, timestamp, reason, usage); err != nil {
@@ -172,11 +198,14 @@ func TransformResponsesStreamToChat(reader io.Reader, model string, output io.Wr
 
 		case "error", "response.error":
 			msg := "responses API stream error"
-			if event.Error != nil && event.Error.Message != "" {
-				msg = event.Error.Message
+			if event.Message != "" {
+				msg = event.Message
 			}
 			reason := "stop"
 			delta := openai.OpenAIStreamingDelta{Content: msg}
+			if err := writeFirstChunkOnce(); err != nil {
+				return err
+			}
 			if err := writeChatStreamChunk(output, ensureChatID(), model, timestamp, delta, &reason); err != nil {
 				return err
 			}
