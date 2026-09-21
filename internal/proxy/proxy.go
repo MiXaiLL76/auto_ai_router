@@ -245,11 +245,11 @@ func (logCtx *RequestLogContext) Context() context.Context {
 // spendModelGroup is the model group recorded in spend: the name the client asked for.
 // A public model alias is resolved to its target for routing (so it shares the
 // target's limits and balancer state), but LiteLLM records the alias as model_group.
-func (l *RequestLogContext) spendModelGroup() string {
-	if l.PublicAliasID != "" {
-		return l.PublicAliasID
+func (logCtx *RequestLogContext) spendModelGroup() string {
+	if logCtx.PublicAliasID != "" {
+		return logCtx.PublicAliasID
 	}
-	return l.ModelID
+	return logCtx.ModelID
 }
 
 // RequestLogContext holds all data needed for logging a request to LiteLLM DB

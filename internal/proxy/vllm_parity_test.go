@@ -139,7 +139,7 @@ func TestVLLM_ChatRequestEndToEnd(t *testing.T) {
 
 	require.Len(t, db.logs, 1)
 	log := db.logs[0]
-	assert.Equal(t, "qwen-36-35b-fp8", log.Model, "model is the deployment's real name")
+	assert.Equal(t, "qwen-36-35b-fast", log.Model, "model stays the router-facing name; the dashboards key on it")
 	assert.Equal(t, "qwen-flash", log.ModelGroup, "model_group is the name the client asked for")
 	assert.Equal(t, "vllm", log.CustomLLMProvider)
 	assert.Equal(t, "S-1-5-21-1-2-3-4", log.UserID, "on an ownerless service key the user header names the user")
@@ -240,7 +240,7 @@ func TestVLLM_ResponsesAPIIsPassedThrough(t *testing.T) {
 	assert.Equal(t, "qwen-36-35b-fp8", body["model"], "the real model name replaces the alias")
 
 	require.Len(t, db.logs, 1)
-	assert.Equal(t, "qwen-36-35b-fp8", db.logs[0].Model)
+	assert.Equal(t, "qwen-36-35b-fast", db.logs[0].Model)
 	assert.Equal(t, "qwen-flash", db.logs[0].ModelGroup)
 	assert.Equal(t, 10, db.logs[0].PromptTokens)
 	assert.Equal(t, 5, db.logs[0].CompletionTokens)
@@ -275,7 +275,7 @@ func TestVLLM_AliasSharesTargetRateLimit(t *testing.T) {
 	// The two rejected attempts are logged as failures after the successful one.
 	require.Len(t, db.logs, 3)
 	assert.Equal(t, "success", db.logs[0].Status)
-	assert.Equal(t, "qwen-36-35b-fp8", db.logs[0].Model)
+	assert.Equal(t, "qwen-36-35b-fast", db.logs[0].Model)
 	assert.Equal(t, "qwen-flash", db.logs[0].ModelGroup)
 }
 
@@ -294,6 +294,6 @@ func TestVLLM_TargetRequestRecordsItsOwnModelGroup(t *testing.T) {
 	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
 
 	require.Len(t, db.logs, 1)
-	assert.Equal(t, "qwen-36-35b-fp8", db.logs[0].Model)
+	assert.Equal(t, "qwen-36-35b-fast", db.logs[0].Model)
 	assert.Equal(t, "qwen-36-35b-fast", db.logs[0].ModelGroup)
 }

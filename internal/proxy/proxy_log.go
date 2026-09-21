@@ -276,14 +276,6 @@ func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
 		}
 	}
 
-	// LiteLLM records the deployment's provider-facing name in model and the name the
-	// client asked for in model_group. The daily tables key on both, and downstream
-	// reports normalise the model column, so the pair has to match.
-	spendModel := logCtx.RealModelID
-	if spendModel == "" {
-		spendModel = logCtx.ModelID
-	}
-
 	// Extract domain from targetURL for APIBase (e.g., "https://api.openai.com/..." -> "api.openai.com")
 	apiBase := "auto_ai_router"
 	if logCtx.TargetURL != "" {
@@ -408,7 +400,7 @@ func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
 			CompletionStartTime: completionStartTime,
 			CallType:            litellmCallType(logCtx.Request.URL.Path),
 			APIBase:             apiBase,
-			Model:               spendModel,               // Provider-facing (real) model name
+			Model:               logCtx.ModelID,           // Model name
 			ModelID:             modelIDFormatted,         // credential.name:model_name
 			ModelGroup:          logCtx.spendModelGroup(), // Model name the client asked for
 			CustomLLMProvider:   customLLMProvider,        // Provider type as string
