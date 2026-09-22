@@ -3,6 +3,7 @@ package openai
 import (
 	"bytes"
 	"encoding/json"
+	"slices"
 	"strings"
 )
 
@@ -76,11 +77,13 @@ func ReplaceModelInBody(body []byte, oldModel, newModel string) []byte {
 	return body
 }
 
-// defaultParamSynonyms lists request keys that set the same value as a default key. A
-// client that sent one of them has already chosen it, so the default must not add a
-// second spelling: max_tokens next to max_completion_tokens is ambiguous for the server.
-var defaultParamSynonyms = map[string][]string{
-	"max_tokens": {"max_completion_tokens"},
+// defaultParamSynonymGroups lists sets of request keys that set the same value. A
+// client that sent any member of a group has already chosen it, so a default keyed
+// on another member must not be added too: max_tokens next to max_completion_tokens
+// is ambiguous for the server. Grouped (rather than keyed one-directionally) so the
+// check works regardless of which spelling the default itself happens to use.
+var defaultParamSynonymGroups = [][]string{
+	{"max_tokens", "max_completion_tokens"},
 }
 
 // ApplyDefaultParams sets each key of defaults that is absent from the top level of a
@@ -123,9 +126,17 @@ func clientSetParam(top map[string]json.RawMessage, key string) bool {
 	if _, present := top[key]; present {
 		return true
 	}
-	for _, synonym := range defaultParamSynonyms[key] {
-		if _, present := top[synonym]; present {
-			return true
+	for _, group := range defaultParamSynonymGroups {
+		if !slices.Contains(group, key) {
+			continue
+		}
+		for _, synonym := range group {
+			if synonym == key {
+				continue
+			}
+			if _, present := top[synonym]; present {
+				return true
+			}
 		}
 	}
 	return false

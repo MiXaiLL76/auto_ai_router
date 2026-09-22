@@ -8,7 +8,9 @@ import (
 	"log/slog"
 	"sort"
 	"strings"
+	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -51,18 +53,12 @@ func (a *ProxyModelTable) acquire(ctx context.Context) (*pgxpool.Conn, error) {
 	return conn, nil
 }
 
-func (a *ProxyModelTable) FetchModels(ctx context.Context) ([]queries.ModelTable, error) {
-	conn, err := a.acquire(ctx)
-	if err != nil {
-		return nil, err
-	}
-	defer conn.Release()
-
-	results, err := a.queryModels(ctx, conn, queries.QueryProxyModelTableWithBlocked, true)
+func (a *ProxyModelTable) FetchModels(ctx context.Context, tx pgx.Tx) ([]queries.ModelTable, error) {
+	results, err := a.queryModels(ctx, tx, queries.QueryProxyModelTableWithBlocked, true)
 	if isUndefinedColumn(err) {
 		// Schemas from before LiteLLM added the blocked column.
 		a.logger.Debug("LiteLLM_ProxyModelTable has no blocked column, reading without it")
-		results, err = a.queryModels(ctx, conn, queries.QueryProxyModelTable, false)
+		results, err = a.queryModels(ctx, tx, queries.QueryProxyModelTable, false)
 	}
 	if err != nil {
 		return nil, err
@@ -72,8 +68,8 @@ func (a *ProxyModelTable) FetchModels(ctx context.Context) ([]queries.ModelTable
 	return results, nil
 }
 
-func (a *ProxyModelTable) queryModels(ctx context.Context, conn *pgxpool.Conn, query string, withBlocked bool) ([]queries.ModelTable, error) {
-	rows, err := conn.Query(ctx, query)
+func (a *ProxyModelTable) queryModels(ctx context.Context, tx pgx.Tx, query string, withBlocked bool) ([]queries.ModelTable, error) {
+	rows, err := tx.Query(ctx, query)
 	if err != nil {
 		if !isUndefinedColumn(err) {
 			a.logger.Error("Failed to execute QueryProxyModelTable", "error", err)
@@ -117,15 +113,9 @@ func isUndefinedColumn(err error) bool {
 // FetchRouterSettings loads model_group_alias and fallbacks from
 // LiteLLM_Config.router_settings. A database without that row yields empty settings, and
 // parts of the row with an unexpected structure are logged and ignored.
-func (a *ProxyModelTable) FetchRouterSettings(ctx context.Context) (queries.RouterSettings, error) {
-	conn, err := a.acquire(ctx)
-	if err != nil {
-		return queries.RouterSettings{}, err
-	}
-	defer conn.Release()
-
+func (a *ProxyModelTable) FetchRouterSettings(ctx context.Context, tx pgx.Tx) (queries.RouterSettings, error) {
 	var raw []byte
-	rows, err := conn.Query(ctx, queries.QueryRouterSettings)
+	rows, err := tx.Query(ctx, queries.QueryRouterSettings)
 	if err != nil {
 		a.logger.Error("Failed to execute QueryRouterSettings", "error", err)
 		return queries.RouterSettings{}, err
@@ -150,14 +140,8 @@ func (a *ProxyModelTable) FetchRouterSettings(ctx context.Context) (queries.Rout
 	return settings, nil
 }
 
-func (a *ProxyModelTable) FetchCredentials(ctx context.Context) ([]queries.CredentialTable, error) {
-	conn, err := a.acquire(ctx)
-	if err != nil {
-		return nil, err
-	}
-	defer conn.Release()
-
-	rows, err := conn.Query(ctx, queries.QueryCredentialsTable)
+func (a *ProxyModelTable) FetchCredentials(ctx context.Context, tx pgx.Tx) ([]queries.CredentialTable, error) {
+	rows, err := tx.Query(ctx, queries.QueryCredentialsTable)
 	if err != nil {
 		a.logger.Error("Failed to execute QueryCredentialsTable", "error", err)
 		return nil, err
@@ -193,27 +177,61 @@ func (a *ProxyModelTable) FetchCredentials(ctx context.Context) ([]queries.Crede
 // usable on this fleet (alias -> target model group). They are not turned into models:
 // the caller registers them as public model aliases so an alias is resolved to its
 // target before routing and shares the target's limits, balancer state and billing.
+//
+// Credentials, models and router_settings are read inside one READ COMMITTED
+// transaction. Reading each on its own connection let a concurrent LiteLLM admin
+// write (e.g. an alias update) land between two of the three reads, producing an
+// aliases/models snapshot that never existed together in the DB.
 func (a *ProxyModelTable) FetchModelsForAIR(ctx context.Context, signingKey string) ([]config.CredentialConfig, []config.ModelRPMConfig, map[string]*manager.ModelPrice, map[string]string, error) {
-	creds, err := a.FetchCredentials(ctx)
+	conn, err := a.acquire(ctx)
+	if err != nil {
+		return nil, nil, nil, nil, err
+	}
+	defer conn.Release()
+
+	tx, err := conn.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.ReadCommitted})
+	if err != nil {
+		a.logger.Error("Failed to begin transaction", "error", err)
+		return nil, nil, nil, nil, err
+	}
+	defer rollbackTransaction(ctx, tx)
+
+	creds, err := a.FetchCredentials(ctx, tx)
 	if err != nil {
 		a.logger.Error("Failed to FetchCredentials", "error", err)
 		return nil, nil, nil, nil, err
 	}
-	dbModels, err := a.FetchModels(ctx)
+	dbModels, err := a.FetchModels(ctx, tx)
 	if err != nil {
 		a.logger.Error("Failed to FetchModels", "error", err)
 		return nil, nil, nil, nil, err
 	}
 	// A failed read must fail the whole sync: applying models without their aliases
 	// would make every aliased name 404 until the next successful cycle.
-	router, err := a.FetchRouterSettings(ctx)
+	router, err := a.FetchRouterSettings(ctx, tx)
 	if err != nil {
 		a.logger.Error("Failed to FetchRouterSettings", "error", err)
 		return nil, nil, nil, nil, err
 	}
 
+	if err := tx.Commit(ctx); err != nil {
+		a.logger.Error("Failed to commit transaction", "error", err)
+		return nil, nil, nil, nil, err
+	}
+
 	airCredentials, airModels, airPrices, airAliases := buildAIRModels(a.logger, creds, dbModels, router, signingKey)
 	return airCredentials, airModels, airPrices, airAliases, nil
+}
+
+const transactionRollbackTimeout = 250 * time.Millisecond
+
+// rollbackTransaction uses an independent bounded context so the caller's own
+// deadline cannot prevent PostgreSQL from cleaning up a failed transaction. pgx
+// treats Rollback as a no-op after a successful commit.
+func rollbackTransaction(parent context.Context, tx pgx.Tx) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), transactionRollbackTimeout)
+	defer cancel()
+	_ = tx.Rollback(ctx)
 }
 
 // buildAIRModels turns rows read from the LiteLLM database into AIR credentials,

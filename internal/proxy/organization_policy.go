@@ -125,6 +125,11 @@ func (p *Proxy) admitOrganizationModel(
 	logCtx.PublicModelID = resolution.PublicModelID
 	logCtx.CanonicalModelID = resolution.CanonicalModelID
 	logCtx.ModelID = resolution.ModelID
+	if resolution.IsPublicAlias {
+		// Mirrors the non-custom-pricing path (orchestrator.go's ResolvePublicModelAlias
+		// branch): the alias, not its target, must be recorded as the spend model group.
+		logCtx.PublicAliasID = resolution.PublicModelID
+	}
 	logCtx.RealModelID = resolution.RealModelID
 	logCtx.PriceModelID = resolution.PriceModelID
 	logCtx.ModelPrice = resolution.ModelPrice

@@ -68,6 +68,34 @@ func TestOrganizationPolicy_DefaultCatalog(t *testing.T) {
 	assert.Equal(t, []string{"public/a"}, responseModelIDs(manager.GetAllModelsScopedForOrganization(visibility, custom)))
 }
 
+// TestResolveOrganizationModel_PublicAlias covers the bug where a request through a
+// public model alias (router_settings.model_group_alias, testPolicyManager's
+// "alias/a" -> "public/a") under a custom-pricing organization recorded the alias's
+// target as the spend model group instead of the alias the client actually asked
+// for. The caller (proxy.admitOrganizationModel) relies on IsPublicAlias to fix that.
+func TestResolveOrganizationModel_PublicAlias(t *testing.T) {
+	manager := testPolicyManager()
+	registry, err := LoadOrganizationPolicies([]config.OrganizationPolicyConfig{{
+		OrganizationID:  "org-custom",
+		PriceProfileID:  "custom",
+		ModelPricesLink: writePolicyPrices(t, `{"alias/a":{"input_cost_per_token":0.001}}`),
+	}}, manager, validPolicyOptions())
+	require.NoError(t, err)
+	policy, ok := registry.Policy("org-custom")
+	require.True(t, ok)
+
+	resolution, err := manager.ResolveOrganizationModel(policy, "alias/a")
+	require.NoError(t, err)
+	assert.True(t, resolution.IsPublicAlias, "alias/a is resolved through a public model alias")
+	assert.Equal(t, "alias/a", resolution.PublicModelID, "the client's own request name, for spend's model group")
+	assert.Equal(t, "route-a", resolution.ModelID, "the alias's routing target")
+
+	// A directly-requested (non-alias) model must not be flagged as one.
+	direct, err := manager.ResolveOrganizationModel(policy, "public/a")
+	require.NoError(t, err)
+	assert.False(t, direct.IsPublicAlias)
+}
+
 func TestLoadOrganizationPolicies_RequiresPostgresWriter(t *testing.T) {
 	_, err := LoadOrganizationPolicies([]config.OrganizationPolicyConfig{{
 		OrganizationID:  "org-1",

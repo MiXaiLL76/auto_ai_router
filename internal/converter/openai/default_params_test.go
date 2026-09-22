@@ -89,4 +89,13 @@ func TestApplyDefaultParams_MaxTokensSynonym(t *testing.T) {
 		out := string(ApplyDefaultParams([]byte(`{"model":"m"}`), map[string]any{"seed": json.Number("9007199254740993")}))
 		assert.Contains(t, out, `"seed":9007199254740993`)
 	})
+
+	t.Run("a default keyed max_completion_tokens is not added next to the client's max_tokens", func(t *testing.T) {
+		got := decodeBody(t, ApplyDefaultParams(
+			[]byte(`{"model":"m","max_tokens":64}`),
+			map[string]any{"max_completion_tokens": json.Number("1024")},
+		))
+		assert.EqualValues(t, 64, got["max_tokens"])
+		assert.NotContains(t, got, "max_completion_tokens", "two spellings of one limit are ambiguous")
+	})
 }
