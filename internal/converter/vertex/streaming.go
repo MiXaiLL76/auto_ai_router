@@ -22,12 +22,10 @@ import (
 	"google.golang.org/genai"
 )
 
-const maxVertexSSELineBytes = 64 * 1024 * 1024
-
 // TransformVertexStreamToOpenAI converts Vertex AI SSE stream to OpenAI SSE format
 func TransformVertexStreamToOpenAI(vertexStream io.Reader, model string, output io.Writer) error {
 	scanner := bufio.NewScanner(vertexStream)
-	scanner.Buffer(make([]byte, 1024*1024), maxVertexSSELineBytes)
+	scanner.Buffer(make([]byte, 1024*1024), converterutil.MaxSSELineBytes)
 	chatID := converterutil.GenerateID()
 	timestamp := converterutil.GetCurrentTimestamp()
 	isFirstChunk := true
