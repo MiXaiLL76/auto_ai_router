@@ -27,6 +27,45 @@ func TestProviderConverter_RequestFrom_Passthrough(t *testing.T) {
 	}
 }
 
+// TestProviderConverter_RequestFrom_StripsCacheSaltForNonRealOpenAIHost
+// covers the "default" (OpenAI-compatible) branch of RequestFrom: cache_salt
+// is a genuine OpenAI Chat Completions parameter, but most other servers
+// speaking the same wire protocol (aggregators, self-hosted deployments)
+// reject it outright, so it must only be forwarded to genuine api.openai.com.
+func TestProviderConverter_RequestFrom_StripsCacheSaltForNonRealOpenAIHost(t *testing.T) {
+	body := []byte(`{"model":"gpt-5-mini","cache_salt":"partition-1","messages":[]}`)
+
+	c := New(config.ProviderTypeOpenAI, RequestMode{
+		ModelID: "gpt-5-mini",
+		BaseURL: "https://api.cometapi.com/v1",
+	})
+	got, err := c.RequestFrom(body)
+	if err != nil {
+		t.Fatalf("RequestFrom error: %v", err)
+	}
+	m := mustUnmarshal[map[string]any](t, got)
+	if _, present := m["cache_salt"]; present {
+		t.Fatalf("expected cache_salt to be stripped for non-OpenAI base_url, got %s", string(got))
+	}
+}
+
+func TestProviderConverter_RequestFrom_PreservesCacheSaltForRealOpenAIHost(t *testing.T) {
+	body := []byte(`{"model":"gpt-5-mini","cache_salt":"partition-1","messages":[]}`)
+
+	c := New(config.ProviderTypeOpenAI, RequestMode{
+		ModelID: "gpt-5-mini",
+		BaseURL: "https://api.openai.com/v1",
+	})
+	got, err := c.RequestFrom(body)
+	if err != nil {
+		t.Fatalf("RequestFrom error: %v", err)
+	}
+	m := mustUnmarshal[map[string]any](t, got)
+	if v, present := m["cache_salt"]; !present || v != "partition-1" {
+		t.Fatalf("expected cache_salt to be preserved for genuine api.openai.com, got %s", string(got))
+	}
+}
+
 func TestProviderConverter_RequestFrom_Anthropic(t *testing.T) {
 	body := mustJSON(t, minimalOpenAIChatRequest())
 

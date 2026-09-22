@@ -40,8 +40,8 @@ func (m *MockDBManager) ConnectionStats() *pgxpool.Stat                         
 func (m *MockDBManager) GetPool() *pgxpool.Pool                                       { return nil }
 func (m *MockDBManager) Shutdown(ctx context.Context) error                           { return nil }
 func (m *MockDBManager) FetchMasterKey(ctx context.Context, default_key string) error { return nil }
-func (m *MockDBManager) FetchModelsForAIR(ctx context.Context, signingKey string) ([]config.CredentialConfig, []config.ModelRPMConfig, map[string]*imodels.ModelPrice, error) {
-	return []config.CredentialConfig{}, []config.ModelRPMConfig{}, make(map[string]*imodels.ModelPrice), nil
+func (m *MockDBManager) FetchModelsForAIR(ctx context.Context, signingKey string) ([]config.CredentialConfig, []config.ModelRPMConfig, map[string]*imodels.ModelPrice, map[string]string, error) {
+	return []config.CredentialConfig{}, []config.ModelRPMConfig{}, make(map[string]*imodels.ModelPrice), nil, nil
 }
 
 // Compile-time check

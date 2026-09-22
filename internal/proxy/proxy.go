@@ -1,3 +1,4 @@
+// Package proxy authenticates client requests, forwards them to upstream provider credentials and serves the health, trace and admin ban endpoints.
 package proxy
 
 import (
@@ -243,6 +244,16 @@ func (logCtx *RequestLogContext) Context() context.Context {
 	return logCtx.Request.Context()
 }
 
+// spendModelGroup is the model group recorded in spend: the name the client asked for.
+// A public model alias is resolved to its target for routing (so it shares the
+// target's limits and balancer state), but LiteLLM records the alias as model_group.
+func (logCtx *RequestLogContext) spendModelGroup() string {
+	if logCtx.PublicAliasID != "" {
+		return logCtx.PublicAliasID
+	}
+	return logCtx.ModelID
+}
+
 // RequestLogContext holds all data needed for logging a request to LiteLLM DB
 // Filled throughout request processing and logged at the end via defer
 type RequestLogContext struct {
@@ -256,6 +267,7 @@ type RequestLogContext struct {
 	PublicModelID         string                   // Client-facing model before alias resolution
 	CanonicalModelID      string                   // Organization canonical public model after scoped admission
 	ModelID               string                   // Model alias name (what client requested)
+	PublicAliasID         string                   // Client-requested name when it was a public model alias (LiteLLM model_group_alias); ModelID then holds its target
 	RealModelID           string                   // Real model name sent to provider (for price lookup; equals ModelID if no alias)
 	Status                string                   // "success" or "failure"
 	HTTPStatus            int                      // HTTP response status code
@@ -1670,6 +1682,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 				ModelID:             realModelID,
 				DisplayModelID:      modelID,
 				ContentType:         r.Header.Get("Content-Type"),
+				BaseURL:             cred.BaseURL,
 			})
 			var convErr error
 			requestBody, convErr = conv.RequestFrom(body)
@@ -1807,7 +1820,11 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 		case config.ProviderTypeBedrock:
 			proxyReq.Header.Set("Authorization", "Bearer "+cred.APIKey)
 		default:
-			proxyReq.Header.Set("Authorization", "Bearer "+cred.APIKey)
+			// A self-hosted vLLM commonly runs without --api-key: send no
+			// Authorization header at all rather than a dangling "Bearer ".
+			if cred.Type != config.ProviderTypeVLLM || cred.APIKey != "" {
+				proxyReq.Header.Set("Authorization", "Bearer "+cred.APIKey)
+			}
 		}
 
 		if p.logger.Enabled(context.Background(), slog.LevelDebug) {

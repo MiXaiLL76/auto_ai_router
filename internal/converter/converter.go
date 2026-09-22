@@ -40,6 +40,12 @@ type RequestMode struct {
 	ModelID             string // real provider model name (URL construction, format detection)
 	DisplayModelID      string // alias to echo in responses; falls back to ModelID when empty
 	ContentType         string // original request content type (needed for multipart endpoints)
+	// BaseURL is the credential's configured base_url. Only used to
+	// distinguish genuine api.openai.com from a third-party server that
+	// merely speaks OpenAI's wire protocol (see openaiconv.IsRealOpenAIHost)
+	// -- provider Type alone can't tell the two apart, since both are
+	// configured as type: "openai".
+	BaseURL string
 }
 
 // responseModel returns the model name to embed in response/streaming output.
@@ -167,6 +173,17 @@ func (c *ProviderConverter) RequestFrom(body []byte) ([]byte, error) {
 		// Completions requests need their tool list normalized.
 		if !c.mode.IsResponsesAPI {
 			body = openaiconv.ConvertWebSearchTools(body)
+		}
+
+		// cache_salt is a genuine OpenAI Chat Completions parameter, but most
+		// other servers that merely speak the OpenAI wire protocol (behind
+		// this same "openai"-typed default bucket: aggregators, self-hosted
+		// vLLM deployments, etc.) reject it outright with a 400 ("cache_salt:
+		// Extra inputs are not permitted") rather than ignoring an unknown
+		// field. Forward it only when the credential's base_url is genuinely
+		// OpenAI's own API.
+		if !openaiconv.IsRealOpenAIHost(c.mode.BaseURL) {
+			body = openaiconv.StripCacheSalt(body)
 		}
 
 		if c.mode.IsImageGeneration || c.mode.IsImageEdit {

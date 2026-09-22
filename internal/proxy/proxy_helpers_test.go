@@ -405,7 +405,7 @@ func TestExtractEndUser(t *testing.T) {
 		want    string
 	}{
 		{
-			name:    "header_present",
+			name:    "legacy_header_present",
 			headers: map[string]string{"X-End-User": "user@example.com"},
 			want:    "user@example.com",
 		},
@@ -413,6 +413,64 @@ func TestExtractEndUser(t *testing.T) {
 			name:    "header_absent",
 			headers: map[string]string{},
 			want:    "",
+		},
+		{
+			name:    "openwebui_email",
+			headers: map[string]string{"X-OpenWebUI-User-Email": "ivan@example.com"},
+			want:    "ivan@example.com",
+		},
+		{
+			name:    "airclaw_email",
+			headers: map[string]string{"X-AirClaw-User-Email": "claw@example.com"},
+			want:    "claw@example.com",
+		},
+		{
+			name:    "air_email",
+			headers: map[string]string{"X-AIR-User-Email": "own@example.com"},
+			want:    "own@example.com",
+		},
+		{
+			name: "priority_air_then_legacy_then_openwebui_then_airclaw",
+			headers: map[string]string{
+				"X-AIR-User-Email":       "own@example.com",
+				"X-End-User":             "legacy@example.com",
+				"X-OpenWebUI-User-Email": "owui@example.com",
+				"X-AirClaw-User-Email":   "claw@example.com",
+			},
+			want: "own@example.com",
+		},
+		{
+			name: "falls_through_to_next_header",
+			headers: map[string]string{
+				"X-OpenWebUI-User-Email": "owui@example.com",
+				"X-AirClaw-User-Email":   "claw@example.com",
+			},
+			want: "owui@example.com",
+		},
+		{
+			name:    "value_is_trimmed_and_case_is_preserved",
+			headers: map[string]string{"X-OpenWebUI-User-Email": "  Ivan.Petrov@example.com  "},
+			want:    "Ivan.Petrov@example.com",
+		},
+		{
+			name:    "blank_value_is_ignored",
+			headers: map[string]string{"X-AIR-User-Email": "   ", "X-OpenWebUI-User-Email": "ivan@example.com"},
+			want:    "ivan@example.com",
+		},
+		{
+			name:    "too_long_value_is_ignored",
+			headers: map[string]string{"X-AIR-User-Email": strings.Repeat("a", maxIdentityHeaderLen+1), "X-End-User": "ok@example.com"},
+			want:    "ok@example.com",
+		},
+		{
+			name:    "control_characters_are_ignored",
+			headers: map[string]string{"X-AIR-User-Email": "a@b.com\x01", "X-End-User": "ok@example.com"},
+			want:    "ok@example.com",
+		},
+		{
+			name:    "invalid_utf8_is_ignored",
+			headers: map[string]string{"X-AIR-User-Email": "a\xff@b.com", "X-End-User": "ok@example.com"},
+			want:    "ok@example.com",
 		},
 	}
 	for _, tt := range tests {
@@ -422,6 +480,51 @@ func TestExtractEndUser(t *testing.T) {
 				req.Header.Set(k, v)
 			}
 			assert.Equal(t, tt.want, extractEndUser(req))
+		})
+	}
+
+	t.Run("nil_request", func(t *testing.T) {
+		assert.Equal(t, "", extractEndUser(nil))
+		assert.Equal(t, "", extractUserID(nil))
+	})
+}
+
+func TestExtractUserID(t *testing.T) {
+	tests := []struct {
+		name    string
+		headers map[string]string
+		want    string
+	}{
+		{name: "absent", headers: map[string]string{}, want: ""},
+		{
+			name:    "openwebui_sid",
+			headers: map[string]string{"X-OpenWebUI-User-Id": "S-1-5-21-3396494274-2626632863-120886085-599475"},
+			want:    "S-1-5-21-3396494274-2626632863-120886085-599475",
+		},
+		{name: "airclaw", headers: map[string]string{"X-AirClaw-User-Id": "claw-42"}, want: "claw-42"},
+		{name: "air", headers: map[string]string{"X-AIR-User-Id": "own-1"}, want: "own-1"},
+		{
+			name: "priority_air_then_openwebui_then_airclaw",
+			headers: map[string]string{
+				"X-AIR-User-Id":       "own-1",
+				"X-OpenWebUI-User-Id": "owui-2",
+				"X-AirClaw-User-Id":   "claw-3",
+			},
+			want: "own-1",
+		},
+		{
+			name:    "an_email_header_is_not_a_user_id",
+			headers: map[string]string{"X-OpenWebUI-User-Email": "ivan@example.com"},
+			want:    "",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req, _ := http.NewRequest("GET", "/", nil)
+			for k, v := range tt.headers {
+				req.Header.Set(k, v)
+			}
+			assert.Equal(t, tt.want, extractUserID(req))
 		})
 	}
 }

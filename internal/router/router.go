@@ -195,6 +195,19 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 
+	// Admin ban management (master key only, enforced by the handlers)
+	switch req.URL.Path {
+	case "/api/ban":
+		r.proxy.HandleAdminBan(w, req)
+		return
+	case "/api/unban":
+		r.proxy.HandleAdminUnban(w, req)
+		return
+	case "/api/bans":
+		r.proxy.HandleAdminBans(w, req)
+		return
+	}
+
 	if req.URL.Path == "/health/readiness" {
 		r.handleReadiness(w, req)
 		return

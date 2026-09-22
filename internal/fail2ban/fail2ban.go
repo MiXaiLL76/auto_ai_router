@@ -4,6 +4,7 @@ package fail2ban
 import (
 	"io"
 	"log/slog"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -20,12 +21,41 @@ type ErrorCodeRule struct {
 	BanDuration time.Duration // 0 means permanent ban
 }
 
+const (
+	// WildcardModel is the model part of a ban key that bans every model of a
+	// credential, including models the router only learns about later (e.g. the
+	// ones a proxy/AIR credential discovers from its upstream /health).
+	WildcardModel = "*"
+
+	// OriginFail2Ban marks bans created automatically from upstream errors.
+	OriginFail2Ban = "fail2ban"
+	// OriginAdmin marks bans created by an operator through the admin API.
+	OriginAdmin = "admin"
+
+	// adminErrorCode is the service error code recorded for admin bans; it is
+	// not an HTTP status and only shows up in metrics and /api/bans.
+	adminErrorCode = 0
+)
+
 // banInfo stores information about a ban
 type banInfo struct {
 	banTime     time.Time
 	banDuration time.Duration // 0 = permanent
 	errorCode   int
 	reason      string
+	origin      string // OriginFail2Ban (default) or OriginAdmin
+}
+
+func (b *banInfo) originOrDefault() string {
+	if b.origin == "" {
+		return OriginFail2Ban
+	}
+	return b.origin
+}
+
+// active reports whether the ban has not expired yet. Permanent bans never expire.
+func (b *banInfo) active() bool {
+	return b.banDuration == 0 || time.Since(b.banTime) <= b.banDuration
 }
 
 // BanPair represents a banned credential+model pair with ban details
@@ -36,8 +66,9 @@ type BanPair struct {
 	ErrorCodeCounts map[int]int
 	BanTime         time.Time
 	BanDuration     time.Duration
-	BanUntil        time.Time
+	BanUntil        time.Time // zero for a permanent ban
 	Reason          string
+	Origin          string // OriginFail2Ban or OriginAdmin
 }
 
 type Fail2Ban struct {
@@ -289,6 +320,7 @@ func (f *Fail2Ban) BanUntil(credentialName, modelID string, statusCode int, unti
 		banDuration: duration,
 		errorCode:   statusCode,
 		reason:      reason,
+		origin:      OriginFail2Ban,
 	}
 
 	monitoring.CredentialBanEvents.WithLabelValues(credentialName, modelID, strconv.Itoa(statusCode)).Inc()
@@ -301,7 +333,16 @@ func (f *Fail2Ban) BanUntil(credentialName, modelID string, statusCode int, unti
 		"ban_duration", duration)
 }
 
+// IsBanned reports whether credentialName is banned for modelID, either by a
+// ban on that exact pair or by a credential-wide wildcard ban (WildcardModel).
 func (f *Fail2Ban) IsBanned(credentialName, modelID string) bool {
+	if f.isBannedKey(credentialName, modelID) {
+		return true
+	}
+	return modelID != WildcardModel && f.isBannedKey(credentialName, WildcardModel)
+}
+
+func (f *Fail2Ban) isBannedKey(credentialName, modelID string) bool {
 	key := banKey(credentialName, modelID)
 
 	// First check with read lock
@@ -373,12 +414,7 @@ func (f *Fail2Ban) Unban(credentialName, modelID string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if _, exists := f.banned[key]; exists {
-		delete(f.banned, key)
-		delete(f.failures, key)
-		// Record unban event only if pair was actually banned
-		monitoring.CredentialUnbanEvents.WithLabelValues(credentialName, modelID).Inc()
-		f.logger.Info("Credential unbanned manually",
-			"credential", credentialName, "model", modelID)
+		f.removeBanLocked(key, credentialName, modelID)
 	}
 }
 
@@ -387,17 +423,111 @@ func (f *Fail2Ban) UnbanCredential(credentialName string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
+	f.removeCredentialBansLocked(credentialName)
+}
+
+// removeBanLocked drops one ban and its failure counters. Caller holds f.mu.
+func (f *Fail2Ban) removeBanLocked(key, credentialName, modelID string) {
+	delete(f.banned, key)
+	delete(f.failures, key)
+	monitoring.CredentialUnbanEvents.WithLabelValues(credentialName, modelID).Inc()
+	f.logger.Info("Credential unbanned manually",
+		"credential", credentialName, "model", modelID)
+}
+
+// removeCredentialBansLocked drops every ban of a credential, wildcard
+// included, and returns how many of them were still active. Caller holds f.mu.
+func (f *Fail2Ban) removeCredentialBansLocked(credentialName string) int {
 	prefix := credentialName + "|"
-	for key := range f.banned {
+	removed := 0
+	for key, ban := range f.banned {
 		if strings.HasPrefix(key, prefix) {
 			_, model := parseBanKey(key)
-			delete(f.banned, key)
-			delete(f.failures, key)
-			monitoring.CredentialUnbanEvents.WithLabelValues(credentialName, model).Inc()
-			f.logger.Info("Credential unbanned manually",
-				"credential", credentialName, "model", model)
+			if ban.active() {
+				removed++
+			}
+			f.removeBanLocked(key, credentialName, model)
 		}
 	}
+	return removed
+}
+
+// AdminBan bans credentialName for modelID on behalf of an operator. An empty
+// modelID or WildcardModel bans every model of the credential. A ttl of 0
+// bans until AdminUnban (or a restart — bans live in memory only).
+//
+// Unlike BanUntil it replaces any existing ban for the same key, shorter or
+// longer, so an operator can always override an automatic ban. Failure
+// counters are left untouched.
+func (f *Fail2Ban) AdminBan(credentialName, modelID string, ttl time.Duration, reason string) BanPair {
+	if modelID == "" {
+		modelID = WildcardModel
+	}
+	reason = adminReason(reason)
+	key := banKey(credentialName, modelID)
+	now := utils.NowUTC()
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	ban := &banInfo{
+		banTime:     now,
+		banDuration: ttl,
+		errorCode:   adminErrorCode,
+		reason:      reason,
+		origin:      OriginAdmin,
+	}
+	f.banned[key] = ban
+
+	monitoring.CredentialBanEvents.WithLabelValues(credentialName, modelID, strconv.Itoa(adminErrorCode)).Inc()
+	f.logger.Warn("Credential banned by admin",
+		"credential", credentialName,
+		"model", modelID,
+		"reason", reason,
+		"ban_duration", ttl,
+		"permanent", ttl == 0)
+
+	return f.banPairLocked(key, ban)
+}
+
+// adminReason prefixes reason with "admin:" so admin bans are recognisable in
+// /health and logs even without looking at the origin field.
+func adminReason(reason string) string {
+	reason = strings.TrimSpace(reason)
+	switch {
+	case reason == "":
+		return "admin"
+	case strings.HasPrefix(reason, "admin:"):
+		return reason
+	default:
+		return "admin: " + reason
+	}
+}
+
+// AdminUnban lifts bans on credentialName and returns how many active bans
+// were removed. An empty modelID removes every ban of the credential
+// (wildcard and per-model); otherwise only the ban on that exact key is
+// removed, so unbanning one model does not lift a credential-wide wildcard
+// ban. Removing nothing is not an error.
+func (f *Fail2Ban) AdminUnban(credentialName, modelID string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if modelID == "" {
+		return f.removeCredentialBansLocked(credentialName)
+	}
+
+	key := banKey(credentialName, modelID)
+	ban, exists := f.banned[key]
+	if !exists {
+		return 0
+	}
+	active := ban.active()
+	f.removeBanLocked(key, credentialName, modelID)
+	if active {
+		return 1
+	}
+	return 0
 }
 
 // HasAnyBan returns true if any model on the given credential is currently banned
@@ -442,25 +572,51 @@ func (f *Fail2Ban) GetBannedPairs() []BanPair {
 
 	pairs := make([]BanPair, 0, len(f.banned))
 	for key, ban := range f.banned {
-		credential, model := parseBanKey(key)
-		counts := make(map[int]int)
-		if codeCounts, ok := f.failures[key]; ok {
-			for code, count := range codeCounts {
-				counts[code] = count
-			}
-		}
-		pairs = append(pairs, BanPair{
-			Credential:      credential,
-			Model:           model,
-			ErrorCode:       ban.errorCode,
-			ErrorCodeCounts: counts,
-			BanTime:         ban.banTime,
-			BanDuration:     ban.banDuration,
-			BanUntil:        banUntil(ban),
-			Reason:          ban.reason,
-		})
+		pairs = append(pairs, f.banPairLocked(key, ban))
 	}
 	return pairs
+}
+
+// GetActiveBans returns the bans that have not expired yet, ordered by
+// credential and model. Unlike GetBannedPairs it skips expired entries that
+// have not been swept from the map.
+func (f *Fail2Ban) GetActiveBans() []BanPair {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+
+	pairs := make([]BanPair, 0, len(f.banned))
+	for key, ban := range f.banned {
+		if ban.active() {
+			pairs = append(pairs, f.banPairLocked(key, ban))
+		}
+	}
+	sort.Slice(pairs, func(i, j int) bool {
+		if pairs[i].Credential != pairs[j].Credential {
+			return pairs[i].Credential < pairs[j].Credential
+		}
+		return pairs[i].Model < pairs[j].Model
+	})
+	return pairs
+}
+
+// banPairLocked builds the exported view of one ban. Caller holds f.mu.
+func (f *Fail2Ban) banPairLocked(key string, ban *banInfo) BanPair {
+	credential, model := parseBanKey(key)
+	counts := make(map[int]int)
+	for code, count := range f.failures[key] {
+		counts[code] = count
+	}
+	return BanPair{
+		Credential:      credential,
+		Model:           model,
+		ErrorCode:       ban.errorCode,
+		ErrorCodeCounts: counts,
+		BanTime:         ban.banTime,
+		BanDuration:     ban.banDuration,
+		BanUntil:        banUntil(ban),
+		Reason:          ban.reason,
+		Origin:          ban.originOrDefault(),
+	}
 }
 
 func banUntil(ban *banInfo) time.Time {
@@ -478,19 +634,30 @@ func (f *Fail2Ban) RemainingBan(credentialName, modelID string) (time.Duration, 
 	f.mu.RLock()
 	defer f.mu.RUnlock()
 
-	ban, exists := f.banned[banKey(credentialName, modelID)]
-	if !exists {
-		return 0, false
+	keys := []string{banKey(credentialName, modelID)}
+	if modelID != WildcardModel {
+		keys = append(keys, banKey(credentialName, WildcardModel))
 	}
-	until := banUntil(ban)
-	if until.IsZero() {
-		return 0, false // permanent ban — no finite ETA
+
+	// The credential is usable again only once every applicable ban has
+	// lifted, so report the longest remaining one.
+	var longest time.Duration
+	found := false
+	for _, key := range keys {
+		ban, exists := f.banned[key]
+		if !exists {
+			continue
+		}
+		until := banUntil(ban)
+		if until.IsZero() {
+			return 0, false // permanent ban — no finite ETA
+		}
+		if remaining := until.Sub(utils.NowUTC()); remaining > longest {
+			longest = remaining
+			found = true
+		}
 	}
-	remaining := until.Sub(utils.NowUTC())
-	if remaining <= 0 {
-		return 0, false
-	}
-	return remaining, true
+	return longest, found
 }
 
 // DefaultBanDuration returns the configured ban duration that would apply to

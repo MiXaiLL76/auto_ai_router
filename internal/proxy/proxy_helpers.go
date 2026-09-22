@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"strings"
 	"syscall"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/mixaill76/auto_ai_router/internal/converter"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb"
@@ -654,13 +656,50 @@ func addOrganizationPolicySpendMetadata(metadata string, logCtx *RequestLogConte
 	return string(encoded)
 }
 
-// extractEndUser extracts end_user from request headers or body
-func extractEndUser(r *http.Request) string {
-	// Check X-End-User header first
-	if endUser := r.Header.Get("X-End-User"); endUser != "" {
-		return endUser
+// Identity headers, in priority order. They mirror LiteLLM's user_header_mappings for
+// the callers this deployment fronts: the *-Email headers carry the end user
+// (LiteLLM role "customer": LiteLLM_EndUserTable / DailyEndUserSpend), the *-Id
+// headers carry the internal user id (LiteLLM role "internal_user": the SID recorded
+// in SpendLogs and DailyUserSpend for an ownerless service key). X-End-User is AIR's
+// original end-user header and stays supported.
+var (
+	endUserHeaders = []string{"X-AIR-User-Email", "X-End-User", "X-OpenWebUI-User-Email", "X-AirClaw-User-Email"}
+	userIDHeaders  = []string{"X-AIR-User-Id", "X-OpenWebUI-User-Id", "X-AirClaw-User-Id"}
+)
+
+// maxIdentityHeaderLen bounds an identity value; real emails and Windows SIDs are far
+// shorter, and the value ends up in indexed database columns.
+const maxIdentityHeaderLen = 256
+
+// firstIdentityHeader returns the first usable value among names. A value is unusable
+// when it is empty after trimming, too long, invalid UTF-8 or contains control
+// characters; such a header is skipped so a lower-priority one can still apply.
+func firstIdentityHeader(r *http.Request, names []string) string {
+	if r == nil {
+		return ""
+	}
+	for _, name := range names {
+		value := strings.TrimSpace(r.Header.Get(name))
+		if value == "" || len(value) > maxIdentityHeaderLen || !utf8.ValidString(value) {
+			continue
+		}
+		if strings.ContainsFunc(value, unicode.IsControl) {
+			continue
+		}
+		return value
 	}
 	return ""
+}
+
+// extractEndUser returns the end user (email) the caller identified via headers.
+// The key owner's email is never used as a fallback: see logSpend.
+func extractEndUser(r *http.Request) string {
+	return firstIdentityHeader(r, endUserHeaders)
+}
+
+// extractUserID returns the internal user id the caller identified via headers, or "".
+func extractUserID(r *http.Request) string {
+	return firstIdentityHeader(r, userIDHeaders)
 }
 
 // getClientIP gets the client IP address

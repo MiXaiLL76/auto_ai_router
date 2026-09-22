@@ -42,6 +42,11 @@ type OrganizationModelResolution struct {
 	RealModelID      string
 	PriceModelID     string
 	ModelPrice       *ModelPrice
+	// IsPublicAlias is true when PublicModelID was resolved through a LiteLLM
+	// public model alias (router_settings.model_group_alias), as opposed to being
+	// used directly or through an organization ModelMappings entry. The caller
+	// uses it to record the alias, not its target, as the spend model group.
+	IsPublicAlias bool
 }
 
 type OrganizationPolicyLoadOptions struct {
@@ -269,6 +274,7 @@ func (m *Manager) ResolveOrganizationModel(policy *OrganizationPolicy, publicID 
 		RealModelID:      realID,
 		PriceModelID:     publicID,
 		ModelPrice:       price,
+		IsPublicAlias:    isAlias,
 	}, nil
 }
 

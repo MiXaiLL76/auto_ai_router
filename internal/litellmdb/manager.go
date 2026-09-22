@@ -35,8 +35,9 @@ type Manager interface {
 	// only log a non-nil error, never treat it as fatal.
 	MarkSpendLogKafkaFallback(ctx context.Context, requestID, reason string) error
 
-	// Model table - fetch credentials/models/prices from LiteLLM DB for AIR
-	FetchModelsForAIR(ctx context.Context, signingKey string) ([]config.CredentialConfig, []config.ModelRPMConfig, map[string]*imodels.ModelPrice, error)
+	// Model table - fetch credentials/models/prices/model group aliases (alias -> target)
+	// from LiteLLM DB for AIR
+	FetchModelsForAIR(ctx context.Context, signingKey string) ([]config.CredentialConfig, []config.ModelRPMConfig, map[string]*imodels.ModelPrice, map[string]string, error)
 
 	// Status
 	IsEnabled() bool
@@ -79,8 +80,8 @@ func (n *NoopManager) FetchMasterKey(_ context.Context, _ string) error {
 	return nil
 }
 
-func (n *NoopManager) FetchModelsForAIR(_ context.Context, _ string) ([]config.CredentialConfig, []config.ModelRPMConfig, map[string]*imodels.ModelPrice, error) {
-	return nil, nil, nil, nil
+func (n *NoopManager) FetchModelsForAIR(_ context.Context, _ string) ([]config.CredentialConfig, []config.ModelRPMConfig, map[string]*imodels.ModelPrice, map[string]string, error) {
+	return nil, nil, nil, nil, nil
 }
 
 func (n *NoopManager) ValidateToken(_ context.Context, _ string) (*models.TokenInfo, error) {
@@ -214,8 +215,8 @@ func (m *DefaultManager) FetchMasterKey(ctx context.Context, defaultKey string) 
 	return m.auth.FetchMasterKey(ctx, defaultKey)
 }
 
-// FetchModelsForAIR loads credentials, model RPM configs and prices from LiteLLM DB
-func (m *DefaultManager) FetchModelsForAIR(ctx context.Context, signingKey string) ([]config.CredentialConfig, []config.ModelRPMConfig, map[string]*imodels.ModelPrice, error) {
+// FetchModelsForAIR loads credentials, model RPM configs, prices and model group aliases from LiteLLM DB
+func (m *DefaultManager) FetchModelsForAIR(ctx context.Context, signingKey string) ([]config.CredentialConfig, []config.ModelRPMConfig, map[string]*imodels.ModelPrice, map[string]string, error) {
 	return m.modelTable.FetchModelsForAIR(ctx, signingKey)
 }
 

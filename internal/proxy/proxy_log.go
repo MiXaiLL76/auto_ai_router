@@ -254,12 +254,27 @@ func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
 		teamID = credName
 	}
 
-	// LiteLLM's end_user is the caller-supplied end-user identifier ("user" in
-	// the request body, X-End-User for AIR). The key owner's email must NOT be
-	// used as a fallback: LiteLLM leaves end_user empty for such traffic, and
+	// LiteLLM's end_user is the caller-supplied end-user identifier. AIR reads it
+	// from identity headers only (see endUserHeaders): the *-Email headers set by
+	// OpenWebUI/AirClaw or AIR's own X-AIR-User-Email. The key owner's email must
+	// NOT be used as a fallback: LiteLLM leaves end_user empty for such traffic, and
 	// substituting the email would fabricate EndUserTable/DailyEndUserSpend
 	// rows that have no counterpart in the primary accounting.
 	endUser := extractEndUser(logCtx.Request)
+	// LiteLLM's user_header_mappings (role internal_user) names the person behind a
+	// shared service key, so SpendLogs and DailyUserSpend follow that person. The
+	// header is honoured only for ownerless service keys (no user_id): the identity
+	// headers are not authenticated, and on a key that has an owner they would let
+	// its holder bill any other user (LiteLLM_UserTable, team/org member spend) while
+	// budget checks keep reading the key's own user. An empty user_id is the marker,
+	// not metadata.service_account_id: personal keys carry service_account_id too,
+	// whereas the shared keys fronted by OpenWebUI/AirClaw are exactly the ones with
+	// no owner, and those are the only callers that need to name the person.
+	if userID == "" {
+		if headerUserID := extractUserID(logCtx.Request); headerUserID != "" {
+			userID = headerUserID
+		}
+	}
 
 	// Extract domain from targetURL for APIBase (e.g., "https://api.openai.com/..." -> "api.openai.com")
 	apiBase := "auto_ai_router"
@@ -385,10 +400,10 @@ func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
 			CompletionStartTime: completionStartTime,
 			CallType:            litellmCallType(logCtx.Request.URL.Path),
 			APIBase:             apiBase,
-			Model:               logCtx.ModelID,    // Model name
-			ModelID:             modelIDFormatted,  // credential.name:model_name
-			ModelGroup:          logCtx.ModelID,    // Model name
-			CustomLLMProvider:   customLLMProvider, // Provider type as string
+			Model:               logCtx.ModelID,           // Model name
+			ModelID:             modelIDFormatted,         // credential.name:model_name
+			ModelGroup:          logCtx.spendModelGroup(), // Model name the client asked for
+			CustomLLMProvider:   customLLMProvider,        // Provider type as string
 			PromptTokens:        logCtx.TokenUsage.PromptTokens,
 			CompletionTokens:    logCtx.TokenUsage.CompletionTokens,
 			TotalTokens:         logCtx.TokenUsage.Total(),

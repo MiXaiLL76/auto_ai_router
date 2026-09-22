@@ -37,6 +37,12 @@ type CredentialHealthStats struct {
 	LimitRPM          int               `json:"limit_rpm"`
 	LimitTPM          int               `json:"limit_tpm"`
 	BannedErrorCounts map[int]int       `json:"banned_error_counts,omitempty"` // aggregated error counts from banned models
+	// BanOrigin/BanReason/BanUntil describe why the credential is banned: the
+	// admin ban if there is one, otherwise the automatic ban expiring last.
+	// BanUntil is omitted for a permanent ban.
+	BanOrigin string     `json:"ban_origin,omitempty"` // "admin" or "fail2ban"
+	BanReason string     `json:"ban_reason,omitempty"`
+	BanUntil  *time.Time `json:"ban_until,omitempty"`
 }
 
 // ModelPriorityTier is one learned primary-priority tier of a proxy/AIR credential for a
@@ -84,6 +90,7 @@ type ModelHealthStats struct {
 	ErrorCodeCounts map[int]int       `json:"error_code_counts,omitempty"` // error code -> count when banned
 	ProviderError   string            `json:"provider_error,omitempty"`
 	BanUntil        *time.Time        `json:"ban_until,omitempty"`
+	BanOrigin       string            `json:"ban_origin,omitempty"` // "admin" or "fail2ban"
 }
 
 // EffectiveHealthWeight resolves the health weight fallback chain:

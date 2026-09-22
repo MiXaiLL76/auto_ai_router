@@ -99,7 +99,7 @@ func (p *Proxy) buildKafkaSpendEvent(
 		Model:      logCtx.ModelID,
 		RealModel:  realModel,
 		ModelID:    modelIDFormatted,
-		ModelGroup: logCtx.ModelID,
+		ModelGroup: logCtx.spendModelGroup(),
 
 		CredentialName:                 logCtx.Credential.Name,
 		CredentialType:                 string(logCtx.Credential.Type),

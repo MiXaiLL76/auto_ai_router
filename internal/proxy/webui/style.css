@@ -313,6 +313,18 @@ body {
 .wf-card.banned {
   border-color: color-mix(in oklch, var(--status-err) 55%, var(--line));
 }
+/* An operator's ban is deliberate, not a failure — warn colour, not error. */
+.wf-card.banned.admin {
+  border-color: color-mix(in oklch, var(--status-warn) 55%, var(--line));
+}
+/* Why a credential is banned and until when (reason · until · time left). */
+.ban-note {
+  font-size: var(--fs-xs);
+  color: var(--status-err);
+  margin-bottom: 8px;
+  overflow-wrap: anywhere;
+}
+.ban-note.admin { color: var(--status-warn); }
 
 .wf-stat {
   border: 1px solid var(--line);

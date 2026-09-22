@@ -2,6 +2,7 @@ package vertexresponses
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -155,6 +156,64 @@ func TestTransformVertexStreamToResponses_ImageGenerationCallAndUsage(t *testing
 	usage := completed["usage"].(map[string]interface{})
 	details := usage["output_tokens_details"].(map[string]interface{})
 	assert.Equal(t, float64(1120), details["image_tokens"])
+}
+
+// A generated image arrives as one base64 blob inside a single Vertex SSE line,
+// so that line routinely exceeds 1 MiB. The scanner used to cap tokens at 1 MiB
+// and failed the whole stream with "bufio.Scanner: token too long" before any
+// event was written, leaving the client with an empty 200 response.
+func TestTransformVertexStreamToResponses_PreservesLargeInlineImage(t *testing.T) {
+	imageBytes := bytes.Repeat([]byte{0xab}, 900*1024)
+	imageB64 := base64.StdEncoding.EncodeToString(imageBytes)
+	stream := buildVertexSSEStream([]map[string]interface{}{
+		{
+			"candidates": []map[string]interface{}{
+				{
+					"content": map[string]interface{}{
+						"role": "model",
+						"parts": []map[string]interface{}{
+							{"inlineData": map[string]interface{}{"mimeType": "image/png", "data": imageB64}},
+						},
+					},
+					"finishReason": "STOP",
+				},
+			},
+			"usageMetadata": map[string]interface{}{
+				"promptTokenCount":     10,
+				"candidatesTokenCount": 1290,
+				"totalTokenCount":      1300,
+				"candidatesTokensDetails": []map[string]interface{}{
+					{"modality": "IMAGE", "tokenCount": 1290},
+				},
+			},
+		},
+	})
+	longestLine := 0
+	for _, line := range strings.Split(stream, "\n") {
+		if len(line) > longestLine {
+			longestLine = len(line)
+		}
+	}
+	require.Greater(t, longestLine, 1024*1024)
+
+	var out bytes.Buffer
+	require.NoError(t, TransformVertexStreamToResponses(
+		strings.NewReader(stream), &out, "gemini-2.5-flash-image", "", nil, nil,
+	))
+
+	var completed map[string]interface{}
+	for _, event := range parseVertexSSEEvents(out.String()) {
+		if event["type"] == "response.completed" {
+			completed, _ = event["response"].(map[string]interface{})
+		}
+	}
+	require.NotNil(t, completed)
+
+	output := completed["output"].([]interface{})
+	require.Len(t, output, 1)
+	imageCall := output[0].(map[string]interface{})
+	assert.Equal(t, "image_generation_call", imageCall["type"])
+	assert.Equal(t, imageB64, imageCall["result"])
 }
 
 func TestTransformVertexStreamToResponses_PreservesGroundedSearchUsage(t *testing.T) {

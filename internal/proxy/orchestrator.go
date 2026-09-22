@@ -292,7 +292,37 @@ func (p *Proxy) orchestrateRequest(
 	}, true
 }
 
+// prepareRequestForCredential builds the outbound request for a credential and, for
+// a vLLM deployment, fills in the deployment's default request params (LiteLLM
+// litellm_params such as chat_template_kwargs or temperature). Every dispatch path
+// (first attempt, retry, fallback) goes through here, so a retried request keeps the
+// same defaults.
 func (p *Proxy) prepareRequestForCredential(
+	r *http.Request,
+	baseBody []byte,
+	baseProxyBody []byte,
+	modelID string,
+	baseRealModelID string,
+	basePath string,
+	streaming bool,
+	cred *config.CredentialConfig,
+	isResponsesAPI bool,
+	prevEntryHandled bool,
+	stickyCacheEligible bool,
+) (credentialPreparedRequest, error) {
+	req, err := p.buildCredentialRequest(r, baseBody, baseProxyBody, modelID, baseRealModelID,
+		basePath, streaming, cred, isResponsesAPI, prevEntryHandled, stickyCacheEligible)
+	if err != nil || cred.Type != config.ProviderTypeVLLM || p.modelManager == nil ||
+		!strings.HasSuffix(req.path, "/chat/completions") {
+		return req, err
+	}
+	if defaults := p.modelManager.GetDefaultParamsForCredential(modelID, cred.Name); len(defaults) > 0 {
+		req.body = openai.ApplyDefaultParams(req.body, defaults)
+	}
+	return req, nil
+}
+
+func (p *Proxy) buildCredentialRequest(
 	r *http.Request,
 	baseBody []byte,
 	baseProxyBody []byte,
@@ -872,6 +902,7 @@ func (p *Proxy) readRequestBodyAndSelectModel(
 	} else if isPublicAlias {
 		p.logger.DebugContext(r.Context(), "Resolved public model alias", "alias", modelID, "canonical", canonical)
 		body = openai.ReplaceModelInBody(body, modelID, canonical)
+		logCtx.PublicAliasID = modelID
 		modelID = canonical
 		logCtx.ModelID = modelID
 	}

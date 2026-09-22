@@ -17,6 +17,7 @@ import (
 	// function-call-args marshal).
 	json "github.com/goccy/go-json"
 
+	"github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
 	"github.com/mixaill76/auto_ai_router/internal/converter/responses"
 	"github.com/mixaill76/auto_ai_router/internal/converter/vertex"
 	"google.golang.org/genai"
@@ -97,7 +98,7 @@ func TransformVertexStreamToResponses(
 	}
 
 	scanner := bufio.NewScanner(reader)
-	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
+	scanner.Buffer(make([]byte, 1024*1024), converterutil.MaxSSELineBytes)
 
 	lineCount := 0
 	for scanner.Scan() {

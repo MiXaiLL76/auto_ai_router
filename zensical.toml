@@ -19,6 +19,7 @@ nav = [
     { "AWS Bedrock" = "providers/bedrock.md" },
     { "Vertex AI" = "providers/vertex.md" },
     { "Gemini AI Studio" = "providers/gemini.md" },
+    { "vLLM" = "providers/vllm.md" },
     { "Proxy" = "providers/proxy.md" },
   ]},
   { "Monitoring" = [

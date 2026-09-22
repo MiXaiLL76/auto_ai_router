@@ -182,7 +182,7 @@ func transformChatStreamToResponsesInner(
 	onComplete ...func(*Response),
 ) error {
 	scanner := bufio.NewScanner(reader)
-	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
+	scanner.Buffer(make([]byte, 1024*1024), converterutil.MaxSSELineBytes)
 
 	acc := &streamAccumulator{
 		responseID: GenerateResponseID(),
