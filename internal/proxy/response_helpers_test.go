@@ -211,8 +211,15 @@ func TestInjectStreamOptions_AddsIncludeUsage(t *testing.T) {
 	}
 }
 
-func TestInjectStreamOptions_UpdatesExisting(t *testing.T) {
-	body := []byte(`{"stream_options":{"include_usage":false,"foo":1}}`)
+// TestInjectStreamOptions_RebuildsExisting guards against a real production
+// 400 ("stream_options: Extra inputs are not permitted"): a client-sent
+// stream_options object commonly carries provider-specific keys (e.g. vLLM's
+// continuous_usage_stats) that api.openai.com and other strict
+// OpenAI-compatible servers reject outright, while aggregators silently
+// ignore them. injectStreamOptions must rebuild the object to exactly
+// {"include_usage": true}, not merge into the client's own object.
+func TestInjectStreamOptions_RebuildsExisting(t *testing.T) {
+	body := []byte(`{"stream_options":{"include_usage":false,"continuous_usage_stats":true}}`)
 	modified := injectStreamOptions(body)
 
 	var raw map[string]interface{}
@@ -227,8 +234,8 @@ func TestInjectStreamOptions_UpdatesExisting(t *testing.T) {
 	if includeUsage, ok := streamOptions["include_usage"].(bool); !ok || !includeUsage {
 		t.Fatalf("expected include_usage=true, got %v", streamOptions["include_usage"])
 	}
-	if streamOptions["foo"] != float64(1) {
-		t.Fatalf("expected foo to be preserved, got %v", streamOptions["foo"])
+	if len(streamOptions) != 1 {
+		t.Fatalf("expected stream_options to contain only include_usage, got %v", streamOptions)
 	}
 }
 
@@ -287,6 +294,26 @@ func TestSanitizeAndExtractRequestBody_InjectsStreamOptionsForChatCompletions(t 
 	var raw map[string]interface{}
 	require.NoError(t, json.Unmarshal(result.Body, &raw))
 	assert.Contains(t, raw, "stream_options")
+}
+
+// TestSanitizeAndExtractRequestBody_RebuildsClientStreamOptions guards against
+// a real production 400 ("stream_options: Extra inputs are not permitted"):
+// a client's own stream_options object commonly carries provider-specific
+// keys (e.g. vLLM's continuous_usage_stats) that api.openai.com and other
+// strict OpenAI-compatible servers reject outright, while aggregators
+// silently ignore them -- the ingress sanitizer (injectIncludeUsageRaw) must
+// rebuild the object to exactly {"include_usage": true}, not merge into it.
+func TestSanitizeAndExtractRequestBody_RebuildsClientStreamOptions(t *testing.T) {
+	body := []byte(`{"model":"gpt-4","stream":true,"stream_options":{"include_usage":false,"continuous_usage_stats":true},"messages":[{"role":"user","content":"hi"}]}`)
+
+	result, err := sanitizeAndExtractRequestBody(body, "application/json", false)
+	require.NoError(t, err)
+
+	var raw map[string]interface{}
+	require.NoError(t, json.Unmarshal(result.Body, &raw))
+	streamOptions, ok := raw["stream_options"].(map[string]interface{})
+	require.True(t, ok, "expected stream_options map, got %T", raw["stream_options"])
+	assert.Equal(t, map[string]interface{}{"include_usage": true}, streamOptions)
 }
 
 // TestExtractTokenUsageFromPayloads_BatchedSSEMergesUsage reproduces a
