@@ -144,7 +144,7 @@ func main() {
 				budgetReserver = budget.NewHybrid(redisBackend.Client(), budgetKeyPrefix, cfg.LiteLLMDB.BudgetReservationTTL, cfg.Redis.SyncInterval, log, metrics)
 				log.Info("Budget reservation: enabled (hybrid: local decisions, async Redis sync)")
 			} else {
-				budgetReserver = budget.New(redisBackend.Client(), budgetKeyPrefix, cfg.LiteLLMDB.BudgetReservationTTL, log)
+				budgetReserver = budget.New(redisBackend.Client(), budgetKeyPrefix, cfg.LiteLLMDB.BudgetReservationTTL)
 				log.Info("Budget reservation: enabled (Redis-backed, atomic overspend protection)")
 			}
 			defer budgetReserver.Close()
