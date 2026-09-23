@@ -542,6 +542,15 @@ func (p *Proxy) writeProxyStreamingResponseWithTokens(
 	setSuccessfulSSEHeaders(w.Header(), resp.StatusCode)
 
 	var lastUsage *converter.TokenUsage
+	recordUsage := func(usage *converter.TokenUsage) {
+		if lastUsage == nil {
+			lastUsage = &converter.TokenUsage{}
+		}
+		lastUsage.MergeNonZero(usage)
+		if logCtx != nil && usage.Total() > 0 {
+			logCtx.UsageSource = "provider"
+		}
+	}
 	completion := p.newCompletionTokenAccumulator(tokenizerModelID)
 	var payloadBuf [][]byte
 	onLine := func(chunk []byte) {
@@ -552,17 +561,7 @@ func (p *Proxy) writeProxyStreamingResponseWithTokens(
 				logCtx.observeImageStreamPayloads(payloadBuf)
 			}
 			if usage := extractTokenUsageFromPayloads(payloadBuf, tokenUsageOptions); usage != nil {
-				// Merge rather than replace: a web-search-only chunk (no
-				// prompt/completion tokens) arriving separately from the
-				// usage chunk must not have its WebSearchRequests clobbered
-				// back to zero by a later chunk's usage read.
-				if lastUsage == nil {
-					lastUsage = &converter.TokenUsage{}
-				}
-				lastUsage.MergeNonZero(usage)
-				if logCtx != nil {
-					logCtx.UsageSource = "provider"
-				}
+				recordUsage(usage)
 			}
 		}
 		completion.AddPayloads(payloadBuf)
@@ -573,16 +572,20 @@ func (p *Proxy) writeProxyStreamingResponseWithTokens(
 	}
 
 	buildFallbackUsage := func() *converter.TokenUsage {
-		if lastUsage != nil {
+		if lastUsage.Total() > 0 {
 			return lastUsage
 		}
+		usage := lastUsage
 		if tokens := completion.TokenCount(); tokens > 0 {
+			if usage == nil {
+				usage = &converter.TokenUsage{}
+			}
+			usage.CompletionTokens = tokens
 			if logCtx != nil && logCtx.UsageSource == "" {
 				logCtx.UsageSource = "estimated"
 			}
-			return &converter.TokenUsage{CompletionTokens: tokens}
 		}
-		return nil
+		return usage
 	}
 	finalize := func(streamErr error) (*converter.TokenUsage, error) {
 		usageLines.Finalize(onLine)
@@ -601,11 +604,7 @@ func (p *Proxy) writeProxyStreamingResponseWithTokens(
 	if logCtx != nil && logCtx.HideWebSearchResults {
 		clientReader = newWebSearchResultsStripReader(clientReader, func(payload []byte) {
 			if usage := converter.ExtractTokenUsageWithOptions(payload, tokenUsageOptions); usage != nil {
-				if lastUsage == nil {
-					lastUsage = &converter.TokenUsage{}
-				}
-				lastUsage.MergeNonZero(usage)
-				logCtx.UsageSource = "provider"
+				recordUsage(usage)
 			}
 		})
 	}

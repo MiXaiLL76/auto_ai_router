@@ -2260,14 +2260,6 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 				bodyForTokenExtraction = normalizedBody
 				dropRepresentationIntegrityHeaders(resp.Header)
 			}
-			// bodyForTokenExtraction keeps the results: they are the billing
-			// evidence for the search.
-			if logCtx.HideWebSearchResults {
-				if stripped, ok := stripWebSearchResults(finalResponseBody); ok {
-					finalResponseBody = stripped
-					dropRepresentationIntegrityHeaders(resp.Header)
-				}
-			}
 		}
 
 		if mappedStatus, ok := statusCodeFromProviderBodyError(resp.StatusCode, finalResponseBody); ok {
@@ -2278,6 +2270,12 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 		if clientBodyChanged {
 			finalResponseBody = clientBody
 			bodyForTokenExtraction = clientBody
+		}
+		if logCtx.HideWebSearchResults && resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
+			if stripped, ok := stripWebSearchResults(finalResponseBody); ok {
+				finalResponseBody = stripped
+				dropRepresentationIntegrityHeaders(resp.Header)
+			}
 		}
 		if clientBodyChanged || clientBodyMasked {
 			dropRepresentationIntegrityHeaders(resp.Header)

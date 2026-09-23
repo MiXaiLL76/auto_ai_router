@@ -23,6 +23,9 @@ func TestProxyRequest_ZAIWebSearchResultsBilling(t *testing.T) {
 	const jsonResponse = `{"id":"zai-1","object":"chat.completion","created":1,"model":"glm-5.3-flashx",` +
 		`"choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],` +
 		`"usage":{"prompt_tokens":10,"completion_tokens":4,"total_tokens":14},"web_search":` + results + `}`
+	const providerFieldResponse = `{"id":"zai-4","object":"chat.completion","created":1,"model":"glm-5.3-flashx","provider":"Z.AI",` +
+		`"choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],` +
+		`"usage":{"prompt_tokens":10,"completion_tokens":4,"total_tokens":14},"web_search":` + results + `}`
 	const noResultsResponse = `{"id":"zai-3","object":"chat.completion","created":1,"model":"glm-5.3-flashx",` +
 		`"choices":[{"index":0,"message":{"role":"assistant","content":"4"},"finish_reason":"stop"}],` +
 		`"usage":{"prompt_tokens":10,"completion_tokens":4,"total_tokens":14}}`
@@ -34,6 +37,11 @@ func TestProxyRequest_ZAIWebSearchResultsBilling(t *testing.T) {
 		`{"id":"zai-2","object":"chat.completion.chunk","created":1,"model":"glm-5.3-flashx","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],` +
 		`"usage":{"prompt_tokens":10,"completion_tokens":4,"total_tokens":14}}` +
 		"\n\ndata: [DONE]\n\n"
+	const cutStreamResponse = "data: " +
+		`{"id":"zai-5","object":"chat.completion.chunk","created":1,"model":"glm-5.3-flashx","choices":[{"index":0,"delta":{"role":"assistant","content":"ok"}}]}` +
+		"\n\ndata: " +
+		`{"id":"zai-5","object":"chat.completion.chunk","created":1,"model":"glm-5.3-flashx","choices":[{"index":0,"delta":{"content":""}}],"web_search":` + results + `}` +
+		"\n\n"
 
 	const hidden = `{"enable":true,"search_engine":"search-prime"}`
 	const requested = `{"enable":true,"search_engine":"search-prime","search_result":true}`
@@ -46,6 +54,7 @@ func TestProxyRequest_ZAIWebSearchResultsBilling(t *testing.T) {
 		response            string
 		wantResultsInClient bool
 		wantRequests        int
+		wantEstimatedTokens bool
 	}{
 		{name: "direct, results not requested", credType: config.ProviderTypeOpenAI, searchOptions: hidden, response: jsonResponse, wantRequests: 1},
 		{name: "direct stream, results not requested", credType: config.ProviderTypeOpenAI, searchOptions: hidden, stream: true, response: streamResponse, wantRequests: 1},
@@ -53,6 +62,8 @@ func TestProxyRequest_ZAIWebSearchResultsBilling(t *testing.T) {
 		{name: "direct stream, results requested", credType: config.ProviderTypeOpenAI, searchOptions: requested, stream: true, response: streamResponse, wantResultsInClient: true, wantRequests: 1},
 		{name: "remote router, results not requested", credType: config.ProviderTypeProxy, searchOptions: hidden, response: jsonResponse, wantRequests: 1},
 		{name: "remote router stream, results not requested", credType: config.ProviderTypeProxy, searchOptions: hidden, stream: true, response: streamResponse, wantRequests: 1},
+		{name: "direct, sanitized response envelope", credType: config.ProviderTypeOpenAI, searchOptions: hidden, response: providerFieldResponse, wantRequests: 1},
+		{name: "remote router stream cut before usage", credType: config.ProviderTypeProxy, searchOptions: hidden, stream: true, response: cutStreamResponse, wantRequests: 1, wantEstimatedTokens: true},
 		{name: "provider skipped the search", credType: config.ProviderTypeOpenAI, searchOptions: hidden, response: noResultsResponse, wantRequests: 0},
 	}
 
@@ -134,8 +145,13 @@ func TestProxyRequest_ZAIWebSearchResultsBilling(t *testing.T) {
 
 			require.Len(t, dbStub.loggedEntries, 1)
 			entry := dbStub.loggedEntries[0]
-			assert.Equal(t, 10, entry.PromptTokens)
-			assert.Equal(t, 4, entry.CompletionTokens)
+			if tt.wantEstimatedTokens {
+				assert.Positive(t, entry.PromptTokens)
+				assert.Positive(t, entry.CompletionTokens)
+			} else {
+				assert.Equal(t, 10, entry.PromptTokens)
+				assert.Equal(t, 4, entry.CompletionTokens)
+			}
 
 			metadata := decodeMetadata(t, entry.Metadata)
 			usageObject := metadata["usage_object"].(map[string]interface{})
@@ -145,7 +161,7 @@ func TestProxyRequest_ZAIWebSearchResultsBilling(t *testing.T) {
 			wantSearchCost := float64(tt.wantRequests) * 5
 			costBreakdown := metadata["cost_breakdown"].(map[string]interface{})
 			assert.Equal(t, wantSearchCost, costBreakdown["web_search_cost"])
-			assert.Equal(t, 10+4*2+wantSearchCost, entry.Spend)
+			assert.Equal(t, float64(entry.PromptTokens+entry.CompletionTokens*2)+wantSearchCost, entry.Spend)
 		})
 	}
 }
