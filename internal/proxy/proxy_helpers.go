@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"strings"
 	"syscall"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/mixaill76/auto_ai_router/internal/converter"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb"
@@ -35,6 +37,50 @@ func isTimeoutError(err error) bool {
 	}
 
 	return false
+}
+
+// isClientContextCanceled reports whether r's own context is already
+// canceled — i.e. the client itself gave up (closed the connection, hit its
+// own request timeout) before AIR finished talking to any upstream. Checked
+// directly against r.Context().Err() rather than pattern-matching the
+// transport error returned by p.client.Do, so it can't be confused with
+// isClientDisconnectError's EPIPE/ECONNRESET cases: for an *outbound* call
+// (AIR -> provider) those mean the connection to the *provider* broke, a
+// genuine upstream failure, not the inbound client having left. A canceled
+// r.Context() is unambiguous either way: it's used as the parent context for
+// every upstream request instead of the incoming request's own connection
+// (see upstreamRequestContext), so it can only become Done via the client
+// disconnecting or the handler itself returning.
+func isClientContextCanceled(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
+	return errors.Is(r.Context().Err(), context.Canceled)
+}
+
+// isClientCanceledTransportError reports whether attemptErr -- the error a
+// specific credential attempt just failed with -- was actually *caused* by
+// the client disconnecting, as opposed to r's context merely being canceled
+// at some point during a longer retry sequence for an unrelated reason.
+//
+// The two checks answer different questions and neither alone is enough:
+// isClientContextCanceled(r) alone would also fire for a credential attempt
+// that failed for a genuine, unrelated reason (e.g. a real ECONNREFUSED)
+// simply because the client *happened* to also give up around the same
+// time -- plausible whenever AIR's retry/fallback sequence takes long enough
+// that the client's own (often shorter) timeout elapses before AIR finishes
+// working through a real outage. Misclassifying that as client_canceled
+// would hide a genuine multi-credential outage from fail2ban/ERROR-level
+// alerting exactly when it matters most. Conversely, checking only
+// errors.Is(attemptErr, context.Canceled) without isClientContextCanceled(r)
+// would fire on a transport that returns a bare context.Canceled for
+// reasons unrelated to r's own context (see the "transport error" case in
+// client_error_messages_test.go, which relies on exactly this not
+// happening). Requiring both pins the classification to the one case that
+// actually matters: THIS attempt failed specifically because the client's
+// own context is what unblocked p.client.Do.
+func isClientCanceledTransportError(r *http.Request, attemptErr error) bool {
+	return errors.Is(attemptErr, context.Canceled) && isClientContextCanceled(r)
 }
 
 // isClientDisconnectError checks if an error indicates the client disconnected
@@ -101,6 +147,180 @@ func extractErrorMessage(body []byte) string {
 	return string(body)
 }
 
+// maxErrorBodyRawBytes bounds RequestLogContext.ErrorBodyRaw so one
+// pathological provider error (e.g. echoing back an oversized prompt in a
+// validation message) can't inflate a single Kafka kafkalog.RawBodyEvent
+// unreasonably.
+// Larger than extractErrorMessage's 512-byte cap on purpose: this field
+// exists specifically so operators can see a provider failure in full,
+// where the short error_message got cut off.
+const maxErrorBodyRawBytes = 16 * 1024
+
+// extractErrorBodyRaw returns the raw upstream error response body,
+// untruncated up to maxErrorBodyRawBytes. Only ever called from failure
+// paths (see call sites) — never populated for a successful response.
+func extractErrorBodyRaw(body []byte) string {
+	if len(body) == 0 {
+		return ""
+	}
+	if len(body) > maxErrorBodyRawBytes {
+		return string(body[:maxErrorBodyRawBytes]) + "..."
+	}
+	return string(body)
+}
+
+// ErrorOrigin names the specific code path that produced a failure outcome,
+// independent of ErrorMsg's free text — a short, fixed, greppable/filterable
+// tag rather than a message meant for a human to read once. It exists
+// because several failure paths (most notably the ones that end in 502) have
+// no upstream body to show at all (ErrorBodyRaw empty: the provider never
+// responded), so RawBodyEvent.ResponseBody alone can't distinguish "every
+// credential's connection attempt failed" from "the response was too big to
+// read" from "a mid-stream error's text didn't match any known signal" — all
+// three currently surface as an indistinguishable bare 502 unless the
+// operator parses ErrorMsg's prose by hand. Set alongside ErrorMsg/HTTPStatus
+// at each distinct failure call site; empty when a failure's cause is already
+// self-evident from HTTPStatus/ErrorBodyRaw alone (e.g. a plain classified
+// 4xx with the real provider text attached).
+type ErrorOrigin string
+
+const (
+	// ErrorOriginAllAttemptsExhausted: every direct-provider credential (and
+	// fallback) attempt failed at the transport level — no HTTP response was
+	// ever received from anyone. See proxyRequest's "All provider attempts
+	// failed" tail.
+	ErrorOriginAllAttemptsExhausted ErrorOrigin = "all_attempts_exhausted"
+	// ErrorOriginProxyForwardError: same as ErrorOriginAllAttemptsExhausted,
+	// but for an AIR-to-AIR proxy-type credential chain (base_url pointing at
+	// another AIR instance) — see proxyRequest's "Proxy forward error" tail.
+	ErrorOriginProxyForwardError ErrorOrigin = "proxy_forward_error"
+	// ErrorOriginResponseTooLarge: the upstream response body exceeded the
+	// configured read-size limit (ErrResponseBodyTooLarge). Treated as fatal
+	// — another credential's response would likely be just as large — so
+	// this is a final outcome, never retried.
+	ErrorOriginResponseTooLarge ErrorOrigin = "response_too_large"
+	// ErrorOriginUnclassifiedStreamError: a provider streamed a terminal
+	// error event whose embedded message/type/code didn't match any of
+	// statusCodeFromErrorSignals' known keywords, so the status defaulted to
+	// 502 as a catch-all rather than a genuine "bad gateway" diagnosis.
+	ErrorOriginUnclassifiedStreamError ErrorOrigin = "unclassified_stream_error"
+	// ErrorOriginWebSocketStreamError: a native Realtime WebSocket turn
+	// ended with outcome "stream_error".
+	ErrorOriginWebSocketStreamError ErrorOrigin = "websocket_stream_error"
+	// ErrorOriginClientCanceled: the client disconnected (closed the
+	// connection, or its own request timeout fired) before any credential
+	// attempt produced a response — see isClientContextCanceled. Distinct
+	// from ErrorOriginAllAttemptsExhausted/ErrorOriginProxyForwardError:
+	// those name a genuine upstream transport failure, while this one means
+	// no upstream failure occurred at all, AIR just gave up because the
+	// original caller already left. Carries StatusClientClosedRequest (499),
+	// not 502, and is deliberately excluded from fail2ban/credential-error
+	// accounting (see the isClientContextCanceled checks in the retry loops)
+	// since it reflects the client's behavior, not the credential's.
+	ErrorOriginClientCanceled ErrorOrigin = "client_canceled"
+)
+
+// StatusClientClosedRequest is the nginx-convention status (not defined by
+// net/http) used to record that a request ended because the client itself
+// disconnected before any response was available — as opposed to 502, which
+// would claim an upstream transport failure that never actually happened.
+// Never meaningfully delivered to the client (which is already gone by the
+// time this is decided); it exists for accurate logging/metrics/raw-body
+// classification.
+const StatusClientClosedRequest = 499
+
+// sensitiveRequestBodyFields are the top-level JSON keys that carry the
+// client's own prompt/conversation content, across the request shapes AIR
+// accepts: messages (chat completions, Anthropic native), prompt (legacy
+// completions), input (Responses API, embeddings), instructions (Responses
+// API system prompt), contents (Gemini/Vertex native). Every one of these
+// shapes carries the field at the top level -- never nested inside e.g. a
+// tool's JSON-Schema parameters -- so redactSensitiveFields matches only at
+// the top level, not by name anywhere in the tree. Everything else in the
+// body -- model, tools, tool_choice, temperature, max_tokens, stream,
+// response_format, ... -- is request shape/parameters, not content, and is
+// left untouched, even if a tool parameter happens to share one of these
+// names.
+var sensitiveRequestBodyFields = map[string]struct{}{
+	"messages":     {},
+	"system":       {},
+	"prompt":       {},
+	"input":        {},
+	"contents":     {},
+	"instructions": {},
+}
+
+// redactRequestBodyForLogging returns body with sensitiveRequestBodyFields
+// replaced by shape-preserving placeholders (role and count kept, actual
+// text dropped), for the client-request-body opt-in
+// (kafka.raw_bodies.store_raw_body). Fails closed: ("", false) when body
+// isn't valid JSON (multipart, binary, malformed) rather than risk shipping
+// unredacted content, since the whole point of this function is the safety
+// gate on that opt-in.
+func redactRequestBodyForLogging(body []byte) (string, bool) {
+	var parsed map[string]any
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return "", false
+	}
+	redactSensitiveFields(parsed)
+	out, err := json.Marshal(parsed)
+	if err != nil {
+		return "", false
+	}
+	return string(out), true
+}
+
+// redactSensitiveFields replaces sensitiveRequestBodyFields found at the
+// top level of parsed via redactFieldValueShape, in place. Every shape AIR
+// accepts (chat completions, legacy completions, Responses API, Anthropic
+// native, Gemini/Vertex native) carries these as top-level request fields,
+// never nested inside e.g. a tool's JSON-Schema parameters -- so unlike an
+// earlier version of this function, this does NOT recurse into unrelated
+// keys (tools, tool_choice, response_format, ...) looking for name
+// collisions. Those are request parameters that must survive untouched for
+// error analysis, and a tool parameter happening to be named "input" or
+// "messages" is not conversation content.
+func redactSensitiveFields(parsed map[string]any) {
+	for key, child := range parsed {
+		if _, sensitive := sensitiveRequestBodyFields[key]; sensitive {
+			parsed[key] = redactFieldValueShape(child)
+		}
+	}
+}
+
+// redactFieldValueShape blanks a sensitive field's actual content while
+// keeping enough shape to debug with. For a messages-style array (each
+// element an object with e.g. "role"/"type"), keeps those identifying keys
+// per element and replaces the rest with a single "content": "[REDACTED]"
+// placeholder -- preserving turn count and roles without the text. Known
+// limitation: shapes that don't use "role"/"type"/"content" (e.g. Gemini's
+// content.parts) aren't specially preserved and just collapse to the
+// generic placeholder. Anything else (a plain string, or an array of plain
+// strings as with embeddings' `input`) becomes a flat "[REDACTED]".
+func redactFieldValueShape(value any) any {
+	items, ok := value.([]any)
+	if !ok {
+		return "[REDACTED]"
+	}
+	result := make([]any, len(items))
+	for i, item := range items {
+		obj, ok := item.(map[string]any)
+		if !ok {
+			result[i] = "[REDACTED]"
+			continue
+		}
+		redacted := map[string]any{"content": "[REDACTED]"}
+		if role, ok := obj["role"]; ok {
+			redacted["role"] = role
+		}
+		if typ, ok := obj["type"]; ok {
+			redacted["type"] = typ
+		}
+		result[i] = redacted
+	}
+	return result
+}
+
 // mapHTTPStatusToErrorClass maps HTTP status codes to LiteLLM exception class names
 // Reference: https://docs.litellm.ai/docs/exception_mapping
 func mapHTTPStatusToErrorClass(statusCode int) string {
@@ -123,6 +343,13 @@ func mapHTTPStatusToErrorClass(statusCode int) string {
 		return "ServiceUnavailableError"
 	case http.StatusInternalServerError:
 		return "InternalServerError"
+	case StatusClientClosedRequest:
+		// Not a real provider/LiteLLM exception class (this status never
+		// reaches a client) -- distinguishes a client-side cancellation from
+		// both a genuine 4xx (BadRequestError) and a genuine upstream 5xx
+		// (APIConnectionError), which the >=400/>=500 default below would
+		// otherwise collapse it into.
+		return "ClientDisconnected"
 	default:
 		if statusCode >= 400 && statusCode < 500 {
 			return "BadRequestError"
@@ -416,8 +643,10 @@ func addOrganizationPolicySpendMetadata(metadata string, logCtx *RequestLogConte
 	}
 	spendMetadata["public_model_name"] = logCtx.PublicModelID
 	spendMetadata["canonical_model_name"] = logCtx.CanonicalModelID
-	spendMetadata["billing_profile_id"] = logCtx.BillingProfileID
-	spendMetadata["billing_profile_sha256"] = logCtx.BillingProfileSHA256
+	if logCtx.OrganizationPolicy.HasCustomPricing() {
+		spendMetadata["billing_profile_id"] = logCtx.BillingProfileID
+		spendMetadata["billing_profile_sha256"] = logCtx.BillingProfileSHA256
+	}
 	spendMetadata["billing_price_model_name"] = logCtx.PriceModelID
 	spendMetadata["billing_organization_id"] = logCtx.BillingOrganizationID
 	encoded, err := json.Marshal(doc)
@@ -427,13 +656,50 @@ func addOrganizationPolicySpendMetadata(metadata string, logCtx *RequestLogConte
 	return string(encoded)
 }
 
-// extractEndUser extracts end_user from request headers or body
-func extractEndUser(r *http.Request) string {
-	// Check X-End-User header first
-	if endUser := r.Header.Get("X-End-User"); endUser != "" {
-		return endUser
+// Identity headers, in priority order. They mirror LiteLLM's user_header_mappings for
+// the callers this deployment fronts: the *-Email headers carry the end user
+// (LiteLLM role "customer": LiteLLM_EndUserTable / DailyEndUserSpend), the *-Id
+// headers carry the internal user id (LiteLLM role "internal_user": the SID recorded
+// in SpendLogs and DailyUserSpend for an ownerless service key). X-End-User is AIR's
+// original end-user header and stays supported.
+var (
+	endUserHeaders = []string{"X-AIR-User-Email", "X-End-User", "X-OpenWebUI-User-Email", "X-AirClaw-User-Email"}
+	userIDHeaders  = []string{"X-AIR-User-Id", "X-OpenWebUI-User-Id", "X-AirClaw-User-Id"}
+)
+
+// maxIdentityHeaderLen bounds an identity value; real emails and Windows SIDs are far
+// shorter, and the value ends up in indexed database columns.
+const maxIdentityHeaderLen = 256
+
+// firstIdentityHeader returns the first usable value among names. A value is unusable
+// when it is empty after trimming, too long, invalid UTF-8 or contains control
+// characters; such a header is skipped so a lower-priority one can still apply.
+func firstIdentityHeader(r *http.Request, names []string) string {
+	if r == nil {
+		return ""
+	}
+	for _, name := range names {
+		value := strings.TrimSpace(r.Header.Get(name))
+		if value == "" || len(value) > maxIdentityHeaderLen || !utf8.ValidString(value) {
+			continue
+		}
+		if strings.ContainsFunc(value, unicode.IsControl) {
+			continue
+		}
+		return value
 	}
 	return ""
+}
+
+// extractEndUser returns the end user (email) the caller identified via headers.
+// The key owner's email is never used as a fallback: see logSpend.
+func extractEndUser(r *http.Request) string {
+	return firstIdentityHeader(r, endUserHeaders)
+}
+
+// extractUserID returns the internal user id the caller identified via headers, or "".
+func extractUserID(r *http.Request) string {
+	return firstIdentityHeader(r, userIDHeaders)
 }
 
 // getClientIP gets the client IP address

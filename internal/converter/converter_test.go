@@ -27,6 +27,256 @@ func TestProviderConverter_RequestFrom_Passthrough(t *testing.T) {
 	}
 }
 
+// TestProviderConverter_RequestFrom_StripsCacheSaltForNonRealOpenAIHost
+// covers the "default" (OpenAI-compatible) branch of RequestFrom: cache_salt
+// is a genuine OpenAI Chat Completions parameter, but most other servers
+// speaking the same wire protocol (aggregators, self-hosted deployments)
+// reject it outright, so it must only be forwarded to genuine api.openai.com.
+func TestProviderConverter_RequestFrom_StripsCacheSaltForNonRealOpenAIHost(t *testing.T) {
+	body := []byte(`{"model":"gpt-5-mini","cache_salt":"partition-1","messages":[]}`)
+
+	c := New(config.ProviderTypeOpenAI, RequestMode{
+		ModelID: "gpt-5-mini",
+		BaseURL: "https://api.cometapi.com/v1",
+	})
+	got, err := c.RequestFrom(body)
+	if err != nil {
+		t.Fatalf("RequestFrom error: %v", err)
+	}
+	m := mustUnmarshal[map[string]any](t, got)
+	if _, present := m["cache_salt"]; present {
+		t.Fatalf("expected cache_salt to be stripped for non-OpenAI base_url, got %s", string(got))
+	}
+}
+
+func TestProviderConverter_RequestFrom_PreservesCacheSaltForRealOpenAIHost(t *testing.T) {
+	body := []byte(`{"model":"gpt-5-mini","cache_salt":"partition-1","messages":[]}`)
+
+	c := New(config.ProviderTypeOpenAI, RequestMode{
+		ModelID: "gpt-5-mini",
+		BaseURL: "https://api.openai.com/v1",
+	})
+	got, err := c.RequestFrom(body)
+	if err != nil {
+		t.Fatalf("RequestFrom error: %v", err)
+	}
+	m := mustUnmarshal[map[string]any](t, got)
+	if v, present := m["cache_salt"]; !present || v != "partition-1" {
+		t.Fatalf("expected cache_salt to be preserved for genuine api.openai.com, got %s", string(got))
+	}
+}
+
+// TestProviderConverter_RequestFrom_PreservesCacheSaltForVLLM covers the vLLM
+// exception to shouldStripCacheSalt: self-hosted vLLM is confirmed to support
+// cache_salt for its own prefix-cache partitioning, unlike other non-OpenAI
+// servers sharing the same default RequestFrom bucket.
+func TestProviderConverter_RequestFrom_PreservesCacheSaltForVLLM(t *testing.T) {
+	body := []byte(`{"model":"qwen3-32b","cache_salt":"partition-1","messages":[]}`)
+
+	c := New(config.ProviderTypeVLLM, RequestMode{
+		ModelID: "qwen3-32b",
+		BaseURL: "https://vllm.internal.example.com/v1",
+	})
+	got, err := c.RequestFrom(body)
+	if err != nil {
+		t.Fatalf("RequestFrom error: %v", err)
+	}
+	m := mustUnmarshal[map[string]any](t, got)
+	if v, present := m["cache_salt"]; !present || v != "partition-1" {
+		t.Fatalf("expected cache_salt to be preserved for vLLM, got %s", string(got))
+	}
+}
+
+// TestProviderConverter_RequestFrom_StripsCacheSaltForAnthropicMessagesPassthrough
+// covers the MessagesPassthrough branch: a client can still send an
+// OpenAI-only field like cache_salt on a /v1/messages request that's
+// forwarded natively to Anthropic (or CometAPI/ProMan in Anthropic-protocol
+// mode) without going through OpenAIToAnthropic at all.
+func TestProviderConverter_RequestFrom_StripsCacheSaltForAnthropicMessagesPassthrough(t *testing.T) {
+	body := []byte(`{"model":"claude-test","cache_salt":"partition-1","messages":[]}`)
+
+	c := New(config.ProviderTypeAnthropic, RequestMode{
+		ModelID:             "claude-test",
+		MessagesPassthrough: true,
+	})
+	got, err := c.RequestFrom(body)
+	if err != nil {
+		t.Fatalf("RequestFrom error: %v", err)
+	}
+	m := mustUnmarshal[map[string]any](t, got)
+	if _, present := m["cache_salt"]; present {
+		t.Fatalf("expected cache_salt to be stripped for Anthropic messages passthrough, got %s", string(got))
+	}
+}
+
+// TestProviderConverter_RequestFrom_StripsCacheSaltForBedrockOpenAICompatible
+// covers the Bedrock non-Anthropic branch (OpenAI-compatible passthrough,
+// e.g. GLM/Llama): body forwards mostly as-is, but a stray cache_salt must
+// still be removed since Bedrock's OpenAI-compatible layer rejects it.
+func TestProviderConverter_RequestFrom_StripsCacheSaltForBedrockOpenAICompatible(t *testing.T) {
+	body := []byte(`{"model":"zai.glm-4.7-flash","cache_salt":"partition-1","messages":[]}`)
+
+	c := New(config.ProviderTypeBedrock, RequestMode{ModelID: "zai.glm-4.7-flash"})
+	got, err := c.RequestFrom(body)
+	if err != nil {
+		t.Fatalf("RequestFrom error: %v", err)
+	}
+	m := mustUnmarshal[map[string]any](t, got)
+	if _, present := m["cache_salt"]; present {
+		t.Fatalf("expected cache_salt to be stripped for Bedrock OpenAI-compatible passthrough, got %s", string(got))
+	}
+}
+
+// TestProviderConverter_RequestFrom_StripsCacheSaltForEmbeddings covers the
+// IsEmbeddings default branch (OpenAI/Proxy/AIR/etc. embeddings passthrough),
+// which previously bypassed cache_salt stripping entirely.
+func TestProviderConverter_RequestFrom_StripsCacheSaltForEmbeddings(t *testing.T) {
+	body := []byte(`{"model":"text-embedding-3-small","cache_salt":"partition-1","input":"hi"}`)
+
+	c := New(config.ProviderTypeOpenAI, RequestMode{
+		IsEmbeddings: true,
+		ModelID:      "text-embedding-3-small",
+		BaseURL:      "https://api.cometapi.com/v1",
+	})
+	got, err := c.RequestFrom(body)
+	if err != nil {
+		t.Fatalf("RequestFrom error: %v", err)
+	}
+	m := mustUnmarshal[map[string]any](t, got)
+	if _, present := m["cache_salt"]; present {
+		t.Fatalf("expected cache_salt to be stripped for embeddings on a non-OpenAI host, got %s", string(got))
+	}
+}
+
+// TestProviderConverter_RequestFrom_StripsStreamOptionsExtrasForOpenAI covers
+// the "default" (OpenAI-compatible) branch: real api.openai.com doesn't
+// understand vLLM's stream_options.continuous_usage_stats extension key
+// (rejects it outright with a 400), so it must be stripped down to just
+// include_usage regardless of how genuine the destination host is -- unlike
+// cache_salt, there's no "real OpenAI" exception here.
+func TestProviderConverter_RequestFrom_StripsStreamOptionsExtrasForOpenAI(t *testing.T) {
+	body := []byte(`{"model":"gpt-5-mini","stream":true,"stream_options":{"include_usage":true,"continuous_usage_stats":true},"messages":[]}`)
+
+	c := New(config.ProviderTypeOpenAI, RequestMode{
+		ModelID:     "gpt-5-mini",
+		BaseURL:     "https://api.openai.com/v1",
+		IsStreaming: true,
+	})
+	got, err := c.RequestFrom(body)
+	if err != nil {
+		t.Fatalf("RequestFrom error: %v", err)
+	}
+	m := mustUnmarshal[map[string]any](t, got)
+	streamOptions, ok := m["stream_options"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected stream_options map, got %T", m["stream_options"])
+	}
+	if len(streamOptions) != 1 || streamOptions["include_usage"] != true {
+		t.Fatalf("expected stream_options to contain only include_usage=true, got %v", streamOptions)
+	}
+}
+
+// TestProviderConverter_RequestFrom_PreservesStreamOptionsExtrasForVLLM covers
+// the vLLM exception: self-hosted vLLM understands continuous_usage_stats
+// (its own streaming-usage extension), so RequestFrom must leave a client's
+// stream_options object untouched instead of stripping it down.
+func TestProviderConverter_RequestFrom_PreservesStreamOptionsExtrasForVLLM(t *testing.T) {
+	body := []byte(`{"model":"qwen3-32b","stream":true,"stream_options":{"include_usage":true,"continuous_usage_stats":true},"messages":[]}`)
+
+	c := New(config.ProviderTypeVLLM, RequestMode{
+		ModelID:     "qwen3-32b",
+		BaseURL:     "https://vllm.internal.example.com/v1",
+		IsStreaming: true,
+	})
+	got, err := c.RequestFrom(body)
+	if err != nil {
+		t.Fatalf("RequestFrom error: %v", err)
+	}
+	m := mustUnmarshal[map[string]any](t, got)
+	streamOptions, ok := m["stream_options"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected stream_options map, got %T", m["stream_options"])
+	}
+	if streamOptions["continuous_usage_stats"] != true {
+		t.Fatalf("expected continuous_usage_stats to be preserved for vLLM, got %v", streamOptions)
+	}
+}
+
+// TestProviderConverter_RequestFrom_StripsStreamOptionsExtrasForBedrockOpenAICompatible
+// covers the Bedrock non-Anthropic branch (OpenAI-compatible passthrough,
+// e.g. GLM/Llama): same rule as the default branch applies here too.
+func TestProviderConverter_RequestFrom_StripsStreamOptionsExtrasForBedrockOpenAICompatible(t *testing.T) {
+	body := []byte(`{"model":"zai.glm-4.7-flash","stream":true,"stream_options":{"include_usage":true,"continuous_usage_stats":true},"messages":[]}`)
+
+	c := New(config.ProviderTypeBedrock, RequestMode{
+		ModelID:     "zai.glm-4.7-flash",
+		IsStreaming: true,
+	})
+	got, err := c.RequestFrom(body)
+	if err != nil {
+		t.Fatalf("RequestFrom error: %v", err)
+	}
+	m := mustUnmarshal[map[string]any](t, got)
+	streamOptions, ok := m["stream_options"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected stream_options map, got %T", m["stream_options"])
+	}
+	if len(streamOptions) != 1 || streamOptions["include_usage"] != true {
+		t.Fatalf("expected stream_options to contain only include_usage=true, got %v", streamOptions)
+	}
+}
+
+// TestProviderConverter_RequestFrom_LeavesStreamOptionsAloneWhenNotStreaming
+// guards against RebuildStreamOptionsIncludeUsageOnly running on a
+// non-streaming request: IsStreaming gates the check, so a stray
+// stream_options-shaped field on a non-streaming body (unusual, but not
+// impossible) is left untouched.
+func TestProviderConverter_RequestFrom_LeavesStreamOptionsAloneWhenNotStreaming(t *testing.T) {
+	body := []byte(`{"model":"gpt-5-mini","stream_options":{"include_usage":true,"continuous_usage_stats":true},"messages":[]}`)
+
+	c := New(config.ProviderTypeOpenAI, RequestMode{
+		ModelID: "gpt-5-mini",
+		BaseURL: "https://api.openai.com/v1",
+		// IsStreaming intentionally left false.
+	})
+	got, err := c.RequestFrom(body)
+	if err != nil {
+		t.Fatalf("RequestFrom error: %v", err)
+	}
+	m := mustUnmarshal[map[string]any](t, got)
+	streamOptions, ok := m["stream_options"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected stream_options map, got %T", m["stream_options"])
+	}
+	if streamOptions["continuous_usage_stats"] != true {
+		t.Fatalf("expected stream_options to be left untouched for a non-streaming request, got %v", streamOptions)
+	}
+}
+
+// TestProviderConverter_RequestFrom_StripsStreamOptionsForAnthropicMessagesPassthrough
+// covers the MessagesPassthrough branch: native api.anthropic.com has no
+// stream_options concept at all (rejects the whole field, not just
+// unrecognized keys inside it), and a client can still send it directly on a
+// /v1/messages request since ingress sanitization only skips *injecting*
+// stream_options for isMessagesAPI, it doesn't strip one the client sent.
+func TestProviderConverter_RequestFrom_StripsStreamOptionsForAnthropicMessagesPassthrough(t *testing.T) {
+	body := []byte(`{"model":"claude-test","stream":true,"stream_options":{"include_usage":true},"messages":[]}`)
+
+	c := New(config.ProviderTypeAnthropic, RequestMode{
+		ModelID:             "claude-test",
+		MessagesPassthrough: true,
+		IsStreaming:         true,
+	})
+	got, err := c.RequestFrom(body)
+	if err != nil {
+		t.Fatalf("RequestFrom error: %v", err)
+	}
+	m := mustUnmarshal[map[string]any](t, got)
+	if _, present := m["stream_options"]; present {
+		t.Fatalf("expected stream_options to be stripped for Anthropic messages passthrough, got %s", string(got))
+	}
+}
+
 func TestProviderConverter_RequestFrom_Anthropic(t *testing.T) {
 	body := mustJSON(t, minimalOpenAIChatRequest())
 
@@ -862,6 +1112,51 @@ func TestExtractTokenUsage_WebSearchRequests(t *testing.T) {
 			name: "non web annotation is not billed",
 			body: `{"usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12},"choices":[{"message":{"annotations":[{"type":"file_citation"}]}}]}`,
 			want: 0,
+		},
+		{
+			name: "x_tools is not added to output items",
+			body: `{"usage":{"input_tokens":10,"output_tokens":2,"total_tokens":12,"x_tools":{"web_search":{"count":1}}},"output":[{"type":"web_search_call","status":"completed"},{"type":"message","status":"completed"}]}`,
+			want: 1,
+		},
+		{
+			name: "x_tools wins over output items",
+			body: `{"usage":{"input_tokens":10,"output_tokens":2,"total_tokens":12,"x_tools":{"web_search":{"count":2}}},"output":[{"type":"web_search_call","status":"completed"}]}`,
+			want: 2,
+		},
+		{
+			name: "x_tools and x_details are not summed",
+			body: `{"usage":{"input_tokens":10,"output_tokens":2,"total_tokens":12,"x_details":[{"x_billing_type":"response_api","plugins":{"web_search":{"count":1}}}],"x_tools":{"web_search":{"count":1}}}}`,
+			want: 1,
+		},
+		{
+			name: "x_details without x_tools",
+			body: `{"usage":{"input_tokens":10,"output_tokens":2,"total_tokens":12,"x_details":[{"plugins":{"web_search":{"count":2}}}]},"output":[{"type":"web_search_call","status":"completed"}]}`,
+			want: 2,
+		},
+		{
+			name: "chat plugins.search",
+			body: `{"usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12,"plugins":{"search":{"count":1,"strategy":"agent"}}}}`,
+			want: 1,
+		},
+		{
+			name: "server_tool_use wins over extensions",
+			body: `{"usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12,"server_tool_use":{"web_search_requests":3},"plugins":{"search":{"count":1}}}}`,
+			want: 3,
+		},
+		{
+			name: "nested completed response x_tools is not added to output items",
+			body: `{"type":"response.completed","response":{"output":[{"type":"web_search_call","status":"completed"}],"usage":{"input_tokens":10,"output_tokens":2,"total_tokens":12,"x_details":[{"plugins":{"web_search":{"count":1}}}],"x_tools":{"web_search":{"count":1}}}}}`,
+			want: 1,
+		},
+		{
+			name: "nested completed response x_tools wins over output items",
+			body: `{"type":"response.completed","response":{"output":[{"type":"web_search_call","status":"completed"}],"usage":{"input_tokens":10,"output_tokens":2,"total_tokens":12,"x_tools":{"web_search":{"count":3}}}}}`,
+			want: 3,
+		},
+		{
+			name: "unexpected extension shape falls back to output items",
+			body: `{"usage":{"input_tokens":10,"output_tokens":2,"total_tokens":12,"x_tools":"n/a","plugins":["search"]},"output":[{"type":"web_search_call","status":"completed"}]}`,
+			want: 1,
 		},
 	}
 

@@ -55,6 +55,22 @@ When `model_allowlist` is omitted, the organization sees the global callable sur
 
 ### Provider credential exclusion
 
+Omit both `price_profile_id` and `model_prices_link` to use global AIR pricing and models with an organization credential denylist.
+
+```yaml
+organization_policies:
+  - organization_id: os.environ/ORGANIZATION_ID
+    credential_denylist:
+      - cometapi01
+      - cheapgpt-openai-key-1
+```
+
+This policy uses the standard model aliases, price lookup, and price refresh schedule. Key and team access restrictions still apply. SpendLogs retain the organization identity without a custom billing profile ID or digest.
+
+The two tariff fields must be supplied together or omitted together. `model_allowlist` and nonempty `model_mappings` require a tariff profile. Policies with a tariff profile retain exact public model price matching.
+
+Credential exclusions apply during request routing. The model catalog is unchanged. A request fails if every eligible provider credential is excluded.
+
 `credential_denylist` contains exact case-sensitive provider credential names. Matching provider credentials are excluded from initial selection, session affinity, retries, and fallback. Router credentials remain eligible. The restriction follows a request through chained AIR routers. Unknown names are ignored locally and remain available to downstream routers.
 
 The list accepts up to 1024 names and 65536 encoded bytes. Each name may contain up to 256 bytes. Empty names, duplicate names, and control characters fail configuration loading. An omitted or empty list preserves standard routing.

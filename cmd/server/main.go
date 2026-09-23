@@ -129,6 +129,7 @@ func main() {
 
 	litellmDBManager := initializeLiteLLMDB(cfg, log)
 	kafkaLogManager := initializeKafkaLog(cfg, log, litellmDBManager)
+	rawBodyLogManager := initializeRawBodyLog(cfg, log)
 
 	// ==================== Budget reservation & key-level RPM/TPM ====================
 	// Both are Redis-backed and reuse the shared valkey client with isolated key
@@ -185,6 +186,7 @@ func main() {
 	if litellmDBManager.IsEnabled() {
 		applyInitialDBModelTable(context.Background(), litellmDBManager, staticCreds, bal, modelManager, rateLimiter, priceRegistry, cfg, log)
 	}
+	modelManager.SetExternalModelIDs(cfg.Video.ModelIDs())
 	organizationPolicies := loadOrganizationPoliciesOrExit(log, cfg, modelManager)
 	if !organizationPolicies.Empty() {
 		log.Info("Organization policies loaded", "count", len(cfg.OrganizationPolicies))
@@ -232,38 +234,42 @@ func main() {
 
 	// ==================== Create Proxy ====================
 	prx := proxy.New(&proxy.Config{
-		Balancer:                   bal,
-		Logger:                     log,
-		MaxBodySizeMB:              cfg.Server.MaxBodySizeMB,
-		ResponseBodyMultiplier:     cfg.Server.ResponseBodyMultiplier,
-		RequestTimeout:             cfg.Server.RequestTimeout,
-		MaxIdleConns:               cfg.Server.MaxIdleConns,
-		MaxIdleConnsPerHost:        cfg.Server.MaxIdleConnsPerHost,
-		IdleConnTimeout:            cfg.Server.IdleConnTimeout,
-		Metrics:                    metrics,
-		MasterKey:                  cfg.Server.MasterKey,
-		RateLimiter:                rateLimiter,
-		TokenManager:               tokenManager,
-		ModelManager:               modelManager,
-		Version:                    Version,
-		Commit:                     Commit,
-		LiteLLMDB:                  litellmDBManager,
-		KafkaLog:                   kafkaLogManager,
-		HealthChecker:              healthChecker,
-		PriceRegistry:              priceRegistry,
-		OrganizationPolicies:       organizationPolicies,
-		MaxProviderRetries:         cfg.Server.MaxProviderRetries,
-		MaxFallbackAttempts:        cfg.Server.MaxFallbackAttempts,
-		ResponseStore:              respStore,
-		SessionStickyEnabled:       cfg.Server.SessionStickyEnabled,
-		SessionStickyAutoCacheCtrl: cfg.Server.SessionStickyAutoCacheCtrl,
-		SessionStoreTTL:            time.Duration(cfg.Server.SessionStickyTTL) * time.Minute,
-		DrainUpstreamOnAbort:       cfg.Server.DrainUpstreamOnAbort,
-		ResponseCompatibility:      cfg.Server.ResponseCompatibility,
-		TiktokenEnabled:            cfg.Server.TiktokenEnabled,
-		StrictAllTeamModelsACL:     cfg.Server.StrictAllTeamModelsACL,
-		ResponseHeaderMode:         cfg.Server.ResponseHeaders.Mode,
-		CredentialNameAsTeamID:     cfg.Server.CredentialNameAsTeamID,
+		Balancer:                     bal,
+		Logger:                       log,
+		MaxBodySizeMB:                cfg.Server.MaxBodySizeMB,
+		ResponseBodyMultiplier:       cfg.Server.ResponseBodyMultiplier,
+		RequestTimeout:               cfg.Server.RequestTimeout,
+		MaxIdleConns:                 cfg.Server.MaxIdleConns,
+		MaxIdleConnsPerHost:          cfg.Server.MaxIdleConnsPerHost,
+		IdleConnTimeout:              cfg.Server.IdleConnTimeout,
+		Metrics:                      metrics,
+		MasterKey:                    cfg.Server.MasterKey,
+		RateLimiter:                  rateLimiter,
+		TokenManager:                 tokenManager,
+		ModelManager:                 modelManager,
+		Version:                      Version,
+		Commit:                       Commit,
+		LiteLLMDB:                    litellmDBManager,
+		KafkaLog:                     kafkaLogManager,
+		RawBodyLog:                   rawBodyLogManager,
+		RawBodyStoreRawBody:          cfg.Kafka.RawBodies.StoreRawBody,
+		RawBodyStoreOnlyErrors:       cfg.Kafka.RawBodies.StoreOnlyErrors,
+		RawBodyRedactSensitiveFields: cfg.Kafka.RawBodies.RedactSensitiveFields,
+		HealthChecker:                healthChecker,
+		PriceRegistry:                priceRegistry,
+		OrganizationPolicies:         organizationPolicies,
+		MaxProviderRetries:           cfg.Server.MaxProviderRetries,
+		MaxFallbackAttempts:          cfg.Server.MaxFallbackAttempts,
+		ResponseStore:                respStore,
+		SessionStickyEnabled:         cfg.Server.SessionStickyEnabled,
+		SessionStickyAutoCacheCtrl:   cfg.Server.SessionStickyAutoCacheCtrl,
+		SessionStoreTTL:              time.Duration(cfg.Server.SessionStickyTTL) * time.Minute,
+		DrainUpstreamOnAbort:         cfg.Server.DrainUpstreamOnAbort,
+		ResponseCompatibility:        cfg.Server.ResponseCompatibility,
+		TiktokenEnabled:              cfg.Server.TiktokenEnabled,
+		StrictAllTeamModelsACL:       cfg.Server.StrictAllTeamModelsACL,
+		ResponseHeaderMode:           cfg.Server.ResponseHeaders.Mode,
+		CredentialNameAsTeamID:       cfg.Server.CredentialNameAsTeamID,
 
 		BudgetReserver:                   budgetReserver,
 		KeyRateLimiter:                   keyRateLimiter,
@@ -272,6 +278,8 @@ func main() {
 		DefaultEstimatedCompletionTokens: cfg.LiteLLMDB.DefaultEstimatedCompletionTokens,
 	})
 
+	videoRuntime := initializeVideoOrExit(cfg, prx, litellmDBManager, log)
+
 	// ==================== Background Goroutines ====================
 	bgCtx, bgCancel := context.WithCancel(context.Background())
 	defer bgCancel()
@@ -279,12 +287,16 @@ func main() {
 	prx.Start(bgCtx)
 
 	var wg sync.WaitGroup
+	videoRuntime.start(bgCtx, &wg)
 	var updateMutex sync.Mutex
 
 	startMetricsUpdater(bgCtx, cfg, log, bal, rateLimiter, metrics, &wg, &updateMutex)
 	startProxyStatsUpdater(bgCtx, log, bal, rateLimiter, modelManager, &wg, &updateMutex)
 	if kafkaLogManager.IsEnabled() {
 		startKafkaMetricsUpdater(bgCtx, cfg, log, kafkaLogManager, metrics, &wg)
+	}
+	if rawBodyLogManager.IsEnabled() {
+		startRawBodyLogMetricsUpdater(bgCtx, cfg, log, rawBodyLogManager, metrics, &wg)
 	}
 
 	if respStore != nil {
@@ -309,6 +321,9 @@ func main() {
 
 	// ==================== HTTP Server Setup ====================
 	rtr := router.New(prx, modelManager, &cfg.Monitoring, log, cfg)
+	if videoRuntime != nil {
+		rtr.SetVideoHandler(videoRuntime.handler)
+	}
 	mux := http.NewServeMux()
 	mux.Handle("/", rtr)
 
@@ -487,6 +502,16 @@ func main() {
 		defer kafkaShutdownCancel()
 		if err := kafkaLogManager.Shutdown(kafkaShutdownCtx); err != nil {
 			log.Error("Kafka spend-log publisher shutdown error", "error", err)
+		}
+	}
+
+	// Shutdown Kafka raw-body publisher
+	if rawBodyLogManager.IsEnabled() {
+		log.Info("Shutting down Kafka raw-body publisher...")
+		rawBodyShutdownCtx, rawBodyShutdownCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer rawBodyShutdownCancel()
+		if err := rawBodyLogManager.Shutdown(rawBodyShutdownCtx); err != nil {
+			log.Error("Kafka raw-body publisher shutdown error", "error", err)
 		}
 	}
 
@@ -845,7 +870,7 @@ func syncDBModelTable(
 	fetchCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	dbCreds, dbModelCfgs, dbPrices, err := dbManager.FetchModelsForAIR(fetchCtx, cfg.Server.MasterKey)
+	dbCreds, dbModelCfgs, dbPrices, dbAliases, err := dbManager.FetchModelsForAIR(fetchCtx, cfg.Server.MasterKey)
 	if err != nil {
 		log.Warn("DB model table sync: fetch failed", "error", err)
 		return
@@ -861,6 +886,8 @@ func syncDBModelTable(
 	// DB-sourced proxy credentials participate in GetAllModels remote fetches.
 	modelManager.UpdateDBModels(dbModelCfgs, staticCreds, allCreds)
 	modelManager.SetCredentials(allCreds)
+	// After the models: an alias never shadows a routable model of the same name.
+	modelManager.SetDBPublicModelAliases(dbAliases)
 
 	// Upsert rate limiter entries for all DB credential+model pairs.
 	// For models with no specific credential, register only static (YAML) creds —
@@ -914,7 +941,7 @@ func applyInitialDBModelTable(
 	fetchCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	dbCreds, dbModelCfgs, dbPrices, err := dbManager.FetchModelsForAIR(fetchCtx, cfg.Server.MasterKey)
+	dbCreds, dbModelCfgs, dbPrices, dbAliases, err := dbManager.FetchModelsForAIR(fetchCtx, cfg.Server.MasterKey)
 	if err != nil {
 		log.Warn("Failed to load initial model table from LiteLLM DB (continuing without DB models)",
 			"error", err,
@@ -929,6 +956,8 @@ func applyInitialDBModelTable(
 	// Let the model manager know about all credentials (including DB proxy creds)
 	// so that GetAllModels can fetch remote model lists from DB-sourced proxy credentials.
 	modelManager.SetCredentials(allCreds)
+	// After the models: an alias never shadows a routable model of the same name.
+	modelManager.SetDBPublicModelAliases(dbAliases)
 
 	// For models with no specific credential, register only static (YAML) creds.
 	// Synthetic DB credentials (db-model-*) are model-specific and must not be
@@ -984,6 +1013,7 @@ func initializeLiteLLMDB(cfg *config.Config, log *slog.Logger) litellmdb.Manager
 		LogWorkers:                  cfg.LiteLLMDB.LogWorkers,
 		DisableSpendLogsWrite:       cfg.LiteLLMDB.DisableSpendLogsWrite,
 		IncludeTeamSpendInUserSpend: &cfg.LiteLLMDB.IncludeTeamSpendInUserSpend,
+		DailySpendTimezone:          cfg.LiteLLMDB.DailySpendTimezone,
 		Logger:                      log,
 	}
 
@@ -1063,6 +1093,57 @@ func initializeKafkaLog(cfg *config.Config, log *slog.Logger, litellmDBManager l
 		return kafkalog.NewNoopManager()
 	}
 	log.Info("Kafka spend-log publisher initialized successfully")
+	return manager
+}
+
+// initializeRawBodyLog sets up the separate, independently-toggleable
+// Kafka write-path that publishes raw request/response bodies for *failed*
+// requests only (internal/kafkalog.RawBodyManager). Unlike the spend-log
+// path, there is no "Kafka-only mode" fallback to worry about: this data has
+// no Postgres counterpart at all, so a broker unavailable at startup just
+// keeps IsHealthy() false, same as the spend-log path's default (non-fatal)
+// case -- it never blocks startup or degrades to something worse than "not
+// publishing this optional debugging stream".
+func initializeRawBodyLog(cfg *config.Config, log *slog.Logger) kafkalog.RawBodyManager {
+	if !cfg.Kafka.Enabled || !cfg.Kafka.RawBodies.Enabled {
+		log.Info("Kafka raw-body publishing disabled - using NoopRawBodyManager")
+		return kafkalog.NewNoopRawBodyManager()
+	}
+
+	log.Info("Initializing Kafka raw-body publisher...", "brokers", cfg.Kafka.Brokers, "topic", cfg.Kafka.RawBodies.Topic)
+
+	rawBodyCfg := &kafkalog.Config{
+		// Reuses the spend-log Kafka config's brokers/TLS/SASL/queue tuning --
+		// same cluster, just a different topic with its own retention. Only
+		// Topic (and, by extension, ClientID staying the router-wide default)
+		// differs from initializeKafkaLog's kafkaCfg. Config.Validate() already
+		// guarantees RawBodies.Topic is non-empty and != Kafka.Topic whenever
+		// RawBodies.Enabled is true, so no fallback is needed here.
+		Brokers:          cfg.Kafka.Brokers,
+		Topic:            cfg.Kafka.RawBodies.Topic,
+		ClientID:         cfg.Kafka.ClientID,
+		LogQueueSize:     cfg.Kafka.LogQueueSize,
+		LogBatchSize:     cfg.Kafka.LogBatchSize,
+		LogFlushInterval: cfg.Kafka.LogFlushInterval,
+		LogWorkers:       cfg.Kafka.LogWorkers,
+		TLSEnabled:       cfg.Kafka.TLSEnabled,
+		SASLMechanism:    cfg.Kafka.SASLMechanism,
+		SASLUsername:     cfg.Kafka.SASLUsername,
+		SASLPassword:     cfg.Kafka.SASLPassword,
+		TLSCACert:        cfg.Kafka.TLSCACert,
+		Logger:           log,
+		// No FallbackNotifier: there's no Postgres row for this event to flag.
+	}
+
+	manager, err := kafkalog.NewRawBody(rawBodyCfg)
+	if err != nil {
+		log.Warn("Failed to initialize Kafka raw-body publisher, degrading to NoopRawBodyManager",
+			"error", err,
+			"impact", "Raw request/response bodies for failed requests will not be published; spend logging is unaffected",
+		)
+		return kafkalog.NewNoopRawBodyManager()
+	}
+	log.Info("Kafka raw-body publisher initialized successfully")
 	return manager
 }
 
@@ -1201,6 +1282,40 @@ func startKafkaMetricsUpdater(
 	}()
 
 	log.Info("Kafka spend logger metrics updater started (updates every 10 seconds)")
+}
+
+// startRawBodyLogMetricsUpdater mirrors startKafkaMetricsUpdater for the
+// separate raw-body write-path.
+func startRawBodyLogMetricsUpdater(
+	bgCtx context.Context,
+	cfg *config.Config,
+	log *slog.Logger,
+	rawBodyLogManager kafkalog.RawBodyManager,
+	metrics *monitoring.Metrics,
+	wg *sync.WaitGroup,
+) {
+	if !cfg.MetricsCollectionEnabled() {
+		return
+	}
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		ticker := time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-bgCtx.Done():
+				return
+			case <-ticker.C:
+				stats := rawBodyLogManager.Stats()
+				metrics.UpdateKafkaRawBodyLoggerStats(stats.Queued, stats.Produced, stats.Dropped, stats.Errors, stats.DLQSize, stats.Healthy)
+			}
+		}
+	}()
+
+	log.Info("Kafka raw-body logger metrics updater started (updates every 10 seconds)")
 }
 
 func updateMetrics(

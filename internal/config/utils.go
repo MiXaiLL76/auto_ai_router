@@ -194,6 +194,17 @@ func PrintConfig(logger *slog.Logger, cfg *Config) {
 	if len(cfg.OrganizationPolicies) > 0 {
 		logger.Info("organization_policies", "total_count", len(cfg.OrganizationPolicies))
 	}
+	if cfg.Video.Enabled {
+		logger.Info("video",
+			"enabled", true,
+			"models", len(cfg.Video.Models),
+			"runway_base_url", cfg.Video.RunwayBaseURL,
+			"s3_endpoint", cfg.Video.S3Endpoint,
+			"s3_bucket", cfg.Video.S3Bucket,
+			"s3_prefix", cfg.Video.S3Prefix,
+			"worker_concurrency", cfg.Video.WorkerConcurrency,
+		)
+	}
 
 	// LiteLLM DB config
 	if cfg.LiteLLMDB.Enabled {

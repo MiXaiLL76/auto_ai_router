@@ -69,19 +69,24 @@ func ClassifyBadRequest(rawBody []byte) BadRequest {
 	// itself contain "invalid parameter"/"invalidparameter" as a substring,
 	// "request" sits in between) still lands back in this same bucket
 	// instead of falling through to the generic default.
-	case hasSignal(joined, "invalid argument", "invalid parameter", "invalidparameter", "invalid_parameter", "invalid value", "unsupported parameter", "unknown parameter", "unrecognized parameter", "missing required", "required field", "must be", "should be", "does not support", "is not supported"):
+	case hasSignal(joined, "invalid argument", "invalid parameter", "invalidparameter", "invalid_parameter", "invalid value", "unsupported parameter", "unknown parameter", "unrecognized parameter", "argument not supported", "missing required", "required field", "must be", "should be", "does not support", "is not supported"):
 		result.Message = "Invalid request parameter"
 		result.Code = "invalid_parameter"
 		// Precedence: an explicit "param" from the provider's own JSON is
 		// authoritative; next, a field path quoted directly in the message
 		// ("Invalid 'output[1].type': 'input_file'. Supported values are:
 		// ...") is precise even for dynamic/nested paths a fixed list can't
-		// cover; only fall back to the generic keyword list last — it does
-		// broad substring matching (e.g. "input") that a quoted path like
-		// "input_file" would otherwise shadow.
+		// cover; then a parameter the message names in prose ("The parameter
+		// size specified in the request is not valid: image size must be
+		// ..."); only fall back to the generic keyword list last — it matches
+		// any listed word anywhere in the message, so unrelated wording such
+		// as "image size" or "by the model" would otherwise win.
 		param := providerParam
 		if param == nil {
 			param = extractQuotedInvalidField(signals)
+		}
+		if param == nil {
+			param = extractNamedParameterField(signals)
 		}
 		if param == nil {
 			param = inferBadRequestParam(joined, nil)
@@ -268,12 +273,163 @@ func inferBadRequestParam(joined string, providerParam *string) *string {
 		"prompt",
 		"n",
 	} {
-		if strings.Contains(joined, param) {
+		if containsWord(joined, param) {
 			p := param
 			return &p
 		}
 	}
 	return nil
+}
+
+// containsWord reports whether word occurs in text as a whole identifier —
+// not as part of a longer one. Plain substring matching made short names
+// like "n" match almost any message, and "input" match inside "input_file".
+func containsWord(text, word string) bool {
+	for from := 0; from < len(text); {
+		idx := strings.Index(text[from:], word)
+		if idx < 0 {
+			return false
+		}
+		start := from + idx
+		end := start + len(word)
+		if (start == 0 || !isIdentifierByte(text[start-1])) && (end == len(text) || !isIdentifierByte(text[end])) {
+			return true
+		}
+		from = start + 1
+	}
+	return false
+}
+
+func isIdentifierByte(b byte) bool {
+	return b == '_' || b >= 'a' && b <= 'z' || b >= 'A' && b <= 'Z' || b >= '0' && b <= '9'
+}
+
+// namedParameterStopwords are words that commonly follow "parameter" in
+// provider prose without being a parameter name ("Invalid parameter value",
+// "parameters specified in the request").
+var namedParameterStopwords = map[string]struct{}{
+	"a": {}, "an": {}, "and": {}, "are": {}, "can": {}, "cannot": {}, "does": {},
+	"error": {}, "for": {}, "format": {}, "has": {}, "have": {}, "in": {},
+	"invalid": {}, "is": {}, "list": {}, "missing": {}, "must": {}, "name": {},
+	"names": {}, "not": {}, "of": {}, "or": {}, "provided": {}, "required": {},
+	"set": {}, "should": {}, "specified": {}, "supplied": {}, "that": {},
+	"the": {}, "this": {}, "to": {}, "type": {}, "types": {}, "validation": {},
+	"value": {}, "values": {}, "was": {}, "were": {}, "which": {}, "with": {},
+}
+
+// extractNamedParameterField pulls a parameter name out of provider messages
+// that name it in prose instead of a structured "param" field:
+//
+//	The parameter size specified in the request is not valid: ...
+//	The specified parameter `image_config.aspect_ratio` is invalid.
+//	The parameter service_tier=flex specified in the request is not supported ...
+//	Argument not supported: size
+//
+// Returns nil when the word after "parameter" is ordinary prose.
+func extractNamedParameterField(signals []string) *string {
+	for _, signal := range signals {
+		lowerBytes := []byte(signal)
+		for i, b := range lowerBytes {
+			if b >= 'A' && b <= 'Z' {
+				lowerBytes[i] = b + ('a' - 'A')
+			}
+		}
+		lower := string(lowerBytes)
+
+		for _, marker := range []string{"argument not supported:", "unsupported argument:"} {
+			if idx := strings.Index(lower, marker); idx >= 0 {
+				if field := leadingParameterName(signal[idx+len(marker):]); field != "" {
+					return &field
+				}
+			}
+		}
+
+		const word = "parameter"
+		for from := 0; from < len(lower); {
+			idx := strings.Index(lower[from:], word)
+			if idx < 0 {
+				break
+			}
+			start := from + idx
+			from = start + len(word)
+			if start > 0 && isIdentifierByte(lower[start-1]) {
+				continue // e.g. "invalidparameter"
+			}
+			rest := signal[from:]
+			switch {
+			case strings.HasPrefix(rest, "(s)"):
+				rest = rest[len("(s)"):]
+			case strings.HasPrefix(rest, "s"):
+				rest = rest[len("s"):]
+			}
+			if rest == "" || (rest[0] != ' ' && rest[0] != ':') {
+				continue // e.g. "parameterized"
+			}
+			if field := parameterNamedAfter(rest); field != "" {
+				return &field
+			}
+		}
+	}
+	return nil
+}
+
+var namedParameterFollowers = map[string]struct{}{
+	"are": {}, "can": {}, "cannot": {}, "does": {}, "has": {}, "have": {}, "is": {},
+	"is/are": {}, "must": {}, "not": {}, "should": {}, "specified": {}, "value": {},
+	"values": {}, "was": {}, "were": {},
+}
+
+// parameterNamedAfter reads the word following "parameter" and accepts it as a
+// name only when the message marks it as one: quoted ("parameter `size`"),
+// introduced by a colon ("Invalid parameter: size"), assigned
+// ("service_tier=flex"), or followed by a verb about it ("parameter size
+// specified ..."). Plain prose such as "parameter parsing failed" is rejected.
+func parameterNamedAfter(rest string) string {
+	colon := false
+	i := 0
+	for i < len(rest) && (rest[i] == ' ' || rest[i] == ':') {
+		colon = colon || rest[i] == ':'
+		i++
+	}
+	s := rest[i:]
+	quoted := s != "" && strings.IndexByte("`'\"", s[0]) >= 0
+
+	token := leadingParameterName(s)
+	if token == "" {
+		return ""
+	}
+	if quoted || colon {
+		return token
+	}
+	after := strings.TrimPrefix(s[len(token):], ".")
+	if strings.HasPrefix(after, "=") {
+		return token
+	}
+	fields := strings.Fields(after)
+	if len(fields) == 0 {
+		return ""
+	}
+	if _, ok := namedParameterFollowers[strings.ToLower(strings.TrimRight(fields[0], ".,;:"))]; ok {
+		return token
+	}
+	return ""
+}
+
+// leadingParameterName reads the parameter token at the start of s, skipping
+// separators and an opening quote, and stopping at anything that can't be part
+// of a parameter path ("size`", "service_tier=flex", "size.").
+func leadingParameterName(s string) string {
+	s = strings.TrimLeft(s, " :")
+	s = strings.TrimLeft(s, "`'\"")
+	end := 0
+	for end < len(s) && (isIdentifierByte(s[end]) || s[end] == '.' || s[end] == '[' || s[end] == ']' || s[end] == '-') {
+		end++
+	}
+	token := strings.TrimRight(s[:end], ".")
+	if _, stop := namedParameterStopwords[strings.ToLower(token)]; stop {
+		return ""
+	}
+	return cleanProviderErrorParam(token)
 }
 
 // extractQuotedInvalidField pulls the field path out of a provider message

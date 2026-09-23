@@ -41,6 +41,61 @@ func validPolicyOptions() OrganizationPolicyLoadOptions {
 	}
 }
 
+func TestOrganizationPolicy_DefaultCatalog(t *testing.T) {
+	manager := testPolicyManager()
+	registry, err := LoadOrganizationPolicies([]config.OrganizationPolicyConfig{{
+		OrganizationID:     "org-default",
+		CredentialDenylist: []string{"provider"},
+	}, {
+		OrganizationID:  "org-custom",
+		PriceProfileID:  "custom",
+		ModelPricesLink: writePolicyPrices(t, `{"public/a":{"input_cost_per_token":0.001}}`),
+	}}, manager, validPolicyOptions())
+	require.NoError(t, err)
+	policy, ok := registry.Policy("org-default")
+	require.True(t, ok)
+	assert.False(t, policy.HasCustomPricing())
+	assert.Empty(t, policy.ProfileSHA256)
+	assert.Equal(t, []string{"provider"}, policy.CredentialDenylist())
+	visibility := scope.PublicContext()
+	assert.Equal(t, manager.GetAllModelsScoped(visibility), manager.GetAllModelsScopedForOrganization(visibility, policy))
+	assert.Equal(t, manager.GetAllModelsWithAccessGroupsScoped(visibility), manager.GetAllModelsWithAccessGroupsScopedForOrganization(visibility, policy))
+	manager.SetClientModelIDs([]string{"public/a"})
+	assert.Equal(t, manager.GetAllModelsScoped(visibility), manager.GetAllModelsScopedForOrganization(visibility, policy))
+	custom, ok := registry.Policy("org-custom")
+	require.True(t, ok)
+	assert.True(t, custom.HasCustomPricing())
+	assert.Equal(t, []string{"public/a"}, responseModelIDs(manager.GetAllModelsScopedForOrganization(visibility, custom)))
+}
+
+// TestResolveOrganizationModel_PublicAlias covers the bug where a request through a
+// public model alias (router_settings.model_group_alias, testPolicyManager's
+// "alias/a" -> "public/a") under a custom-pricing organization recorded the alias's
+// target as the spend model group instead of the alias the client actually asked
+// for. The caller (proxy.admitOrganizationModel) relies on IsPublicAlias to fix that.
+func TestResolveOrganizationModel_PublicAlias(t *testing.T) {
+	manager := testPolicyManager()
+	registry, err := LoadOrganizationPolicies([]config.OrganizationPolicyConfig{{
+		OrganizationID:  "org-custom",
+		PriceProfileID:  "custom",
+		ModelPricesLink: writePolicyPrices(t, `{"alias/a":{"input_cost_per_token":0.001}}`),
+	}}, manager, validPolicyOptions())
+	require.NoError(t, err)
+	policy, ok := registry.Policy("org-custom")
+	require.True(t, ok)
+
+	resolution, err := manager.ResolveOrganizationModel(policy, "alias/a")
+	require.NoError(t, err)
+	assert.True(t, resolution.IsPublicAlias, "alias/a is resolved through a public model alias")
+	assert.Equal(t, "alias/a", resolution.PublicModelID, "the client's own request name, for spend's model group")
+	assert.Equal(t, "route-a", resolution.ModelID, "the alias's routing target")
+
+	// A directly-requested (non-alias) model must not be flagged as one.
+	direct, err := manager.ResolveOrganizationModel(policy, "public/a")
+	require.NoError(t, err)
+	assert.False(t, direct.IsPublicAlias)
+}
+
 func TestLoadOrganizationPolicies_RequiresPostgresWriter(t *testing.T) {
 	_, err := LoadOrganizationPolicies([]config.OrganizationPolicyConfig{{
 		OrganizationID:  "org-1",
@@ -120,4 +175,30 @@ func TestLoadOrganizationPolicies_FreePriceAndScopedCatalog(t *testing.T) {
 	assert.Equal(t, "org/model", resolution.PriceModelID)
 	require.NotNil(t, resolution.ModelPrice)
 	assert.True(t, resolution.ModelPrice.CacheReadInputTokensFree)
+}
+
+func TestOrganizationPolicyAcceptsExternalModel(t *testing.T) {
+	manager := testPolicyManager()
+	manager.SetExternalModelIDs([]string{"runway/gen4.5"})
+	registry, err := LoadOrganizationPolicies([]config.OrganizationPolicyConfig{{
+		OrganizationID:  "org-video",
+		PriceProfileID:  "profile-video",
+		ModelPricesLink: writePolicyPrices(t, `{"runway/gen4.5":{"output_cost_per_video_per_second":1.25}}`),
+		AllowlistSet:    true,
+		ModelAllowlist:  []string{"runway/gen4.5"},
+	}}, manager, validPolicyOptions())
+	require.NoError(t, err)
+	policy, ok := registry.Policy("org-video")
+	require.True(t, ok)
+
+	resolution, err := manager.ResolveOrganizationModelScoped(policy, "runway/gen4.5", scope.PublicContext())
+	require.NoError(t, err)
+	assert.Equal(t, "runway/gen4.5", resolution.ModelID)
+	require.NotNil(t, resolution.ModelPrice)
+	assert.Equal(t, 1.25, resolution.ModelPrice.OutputCostPerVideoPerSecond)
+	assert.Equal(
+		t,
+		[]string{"runway/gen4.5"},
+		responseModelIDs(manager.GetAllModelsScopedForOrganization(scope.PublicContext(), policy)),
+	)
 }

@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
+	"github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
 	"github.com/mixaill76/auto_ai_router/internal/scope"
 	"github.com/mixaill76/auto_ai_router/internal/utils"
 )
@@ -41,6 +42,11 @@ type OrganizationModelResolution struct {
 	RealModelID      string
 	PriceModelID     string
 	ModelPrice       *ModelPrice
+	// IsPublicAlias is true when PublicModelID was resolved through a LiteLLM
+	// public model alias (router_settings.model_group_alias), as opposed to being
+	// used directly or through an organization ModelMappings entry. The caller
+	// uses it to record the alias, not its target, as the spend model group.
+	IsPublicAlias bool
 }
 
 type OrganizationPolicyLoadOptions struct {
@@ -77,11 +83,21 @@ func LoadOrganizationPolicies(
 	if manager == nil {
 		return nil, fmt.Errorf("organization policies require a model manager")
 	}
+	if err := config.ValidateOrganizationPolicies(policies); err != nil {
+		return nil, err
+	}
 
 	profileByLink := make(map[string]loadedProfile, len(policies))
 
 	profiles := make(map[string]profileIdentity)
 	for _, cfg := range policies {
+		if cfg.PriceProfileID == "" {
+			registry.byOrganization[cfg.OrganizationID] = &OrganizationPolicy{
+				OrganizationID:     cfg.OrganizationID,
+				credentialDenylist: append([]string(nil), cfg.CredentialDenylist...),
+			}
+			continue
+		}
 		loaded, cached := profileByLink[cfg.ModelPricesLink]
 		if !cached {
 			priceRows, identity, err := loadStrictOrganizationPriceProfile(cfg.PriceProfileID, cfg.ModelPricesLink)
@@ -132,6 +148,10 @@ func LoadOrganizationPolicies(
 		registry.byOrganization[policy.OrganizationID] = policy
 	}
 	return registry, nil
+}
+
+func (p *OrganizationPolicy) HasCustomPricing() bool {
+	return p != nil && p.PriceProfileID != ""
 }
 
 func (p *OrganizationPolicy) CredentialDenylist() []string {
@@ -254,6 +274,7 @@ func (m *Manager) ResolveOrganizationModel(policy *OrganizationPolicy, publicID 
 		RealModelID:      realID,
 		PriceModelID:     publicID,
 		ModelPrice:       price,
+		IsPublicAlias:    isAlias,
 	}, nil
 }
 
@@ -296,7 +317,7 @@ func (m *Manager) IsAnyModelIDAllowedByScope(candidates []string, allowedModelID
 }
 
 func (m *Manager) GetAllModelsScopedForOrganization(visibility scope.Context, policy *OrganizationPolicy) ModelsResponse {
-	if policy == nil {
+	if !policy.HasCustomPricing() {
 		return m.GetAllModelsScoped(visibility)
 	}
 	if response, ok := m.getCachedScopedAllModelsForOrganization(visibility, policy); ok {
@@ -313,14 +334,14 @@ func (m *Manager) GetAllModelsScopedForOrganization(visibility scope.Context, po
 	return projected
 }
 
-// GetAllModelsWithAccessGroupsScopedForOrganization deliberately ignores
-// include_model_access_groups for organization-scoped keys: the access-group
-// projection is an administrative view over internal routes, and an
-// organization catalog is an explicit curated surface (allowlist + mappings +
-// prices). Returning access-group pseudo-models would re-introduce backend IDs
-// through a query parameter, exactly as GetAllModelsWithAccessGroupsScoped
-// already suppresses them once a client model surface is configured.
+// GetAllModelsWithAccessGroupsScopedForOrganization preserves the global catalog
+// behavior unless a custom tariff defines the organization model surface.
+// Custom tariff policies exclude provider access groups to keep internal routes
+// out of the organization catalog.
 func (m *Manager) GetAllModelsWithAccessGroupsScopedForOrganization(visibility scope.Context, policy *OrganizationPolicy) ModelsResponse {
+	if !policy.HasCustomPricing() {
+		return m.GetAllModelsWithAccessGroupsScoped(visibility)
+	}
 	return m.GetAllModelsScopedForOrganization(visibility, policy)
 }
 
@@ -374,6 +395,20 @@ func (m *Manager) projectOrganizationCatalog(response ModelsResponse, visibility
 			continue
 		}
 		publicByID[model.ID] = model
+	}
+	for modelID := range m.externalModelIDs {
+		if !policy.allowlistAdmitsLocked(modelID) {
+			continue
+		}
+		if _, priced := policy.prices[modelID]; !priced {
+			continue
+		}
+		publicByID[modelID] = Model{
+			ID:      modelID,
+			Object:  "model",
+			Created: converterutil.GetCurrentTimestamp(),
+			OwnedBy: "system",
+		}
 	}
 	for source, target := range policy.mappings {
 		if policy.AllowlistSet {
@@ -515,6 +550,9 @@ func decodeStrictPriceRow(modelID string, row json.RawMessage) (*ModelPrice, err
 	if err := decoder.Decode(&price); err != nil {
 		return nil, fmt.Errorf("organization tariff %q: %w", modelID, err)
 	}
+	if err := validateStrictImagePricing(fields, &price); err != nil {
+		return nil, fmt.Errorf("organization tariff %q: %w", modelID, err)
+	}
 	hasPriceField := false
 	for field := range fields {
 		if known[field] {
@@ -537,7 +575,8 @@ func modelPriceJSONFields() map[string]bool {
 		if name == "" || name == "-" {
 			continue
 		}
-		isPriceField := name != "litellm_provider" && name != "reasoning_tokens_additive" && name != "web_search_billing_unit"
+		isPriceField := name != "litellm_provider" && name != "reasoning_tokens_additive" && name != "web_search_billing_unit" &&
+			name != "image_request_defaults" && name != "input_images_free_per_request"
 		result[name] = isPriceField
 	}
 	return result

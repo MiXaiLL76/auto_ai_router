@@ -610,3 +610,54 @@ func TestVertexToOpenAI_UsesGroundingQueriesForWebSearchUsage(t *testing.T) {
 		t.Fatalf("expected two distinct search queries, got %d", response.Usage.ServerToolUse.WebSearchRequests)
 	}
 }
+
+// TestVertexToOpenAI_MaxTokensWithNoPartsReturnsEmptyContent covers a
+// real-world Gemini "thinking" case: a small max_tokens gets entirely
+// consumed by hidden reasoning before any visible text is produced, and
+// Vertex reports FinishReasonMaxTokens with a candidate that has no parts at
+// all (not even a thought part -- ThoughtsTokenCount is the only sign any
+// reasoning happened). content must stay empty here, matching every other
+// provider route's behavior for a genuinely empty completion -- not a
+// synthetic "[Response truncated due to max tokens limit]" placeholder that
+// reads as real model output to any caller that doesn't special-case this
+// exact string.
+func TestVertexToOpenAI_MaxTokensWithNoPartsReturnsEmptyContent(t *testing.T) {
+	vertexResp := genai.GenerateContentResponse{
+		Candidates: []*genai.Candidate{{
+			Content:      &genai.Content{Role: "model"},
+			FinishReason: genai.FinishReasonMaxTokens,
+		}},
+		UsageMetadata: &genai.GenerateContentResponseUsageMetadata{
+			PromptTokenCount:   14,
+			ThoughtsTokenCount: 300,
+			TotalTokenCount:    314,
+		},
+	}
+	body, err := json.Marshal(vertexResp)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	converted, err := VertexToOpenAI(body, "google/gemini-3.7-flash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var response openai.OpenAIResponse
+	if err := json.Unmarshal(converted, &response); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(response.Choices) != 1 {
+		t.Fatalf("expected 1 choice, got %d", len(response.Choices))
+	}
+	choice := response.Choices[0]
+	if choice.FinishReason != "length" {
+		t.Fatalf("expected finish_reason length, got %q", choice.FinishReason)
+	}
+	if choice.Message.Content != "" {
+		t.Fatalf("content must be empty (no synthetic placeholder), got %q", choice.Message.Content)
+	}
+	if strings.Contains(string(converted), "truncated") || strings.Contains(string(converted), "[Response") {
+		t.Fatalf("response must not contain a synthetic truncation placeholder: %s", converted)
+	}
+}

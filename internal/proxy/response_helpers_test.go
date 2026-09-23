@@ -211,6 +211,12 @@ func TestInjectStreamOptions_AddsIncludeUsage(t *testing.T) {
 	}
 }
 
+// TestInjectStreamOptions_UpdatesExisting covers the ingress-time merge:
+// injectStreamOptions runs before the destination provider is known, so it
+// must preserve whatever else the client sent in stream_options (e.g. vLLM's
+// continuous_usage_stats) -- stripping provider-specific keys is a later,
+// provider-aware decision made in converter.RequestFrom (see
+// shouldStripStreamOptionsExtras), not here.
 func TestInjectStreamOptions_UpdatesExisting(t *testing.T) {
 	body := []byte(`{"stream_options":{"include_usage":false,"foo":1}}`)
 	modified := injectStreamOptions(body)
@@ -287,6 +293,27 @@ func TestSanitizeAndExtractRequestBody_InjectsStreamOptionsForChatCompletions(t 
 	var raw map[string]interface{}
 	require.NoError(t, json.Unmarshal(result.Body, &raw))
 	assert.Contains(t, raw, "stream_options")
+}
+
+// TestSanitizeAndExtractRequestBody_PreservesClientStreamOptionsAtIngress
+// documents that the destination provider is still unknown at ingress
+// (sanitizeAndExtractRequestBody runs ahead of credential selection): a
+// client's own stream_options object, including provider-specific keys like
+// vLLM's continuous_usage_stats, must be preserved here and only stripped
+// later, once the actual provider is resolved (converter.RequestFrom /
+// shouldStripStreamOptionsExtras) -- see converter_test.go for that
+// provider-aware half of the behavior.
+func TestSanitizeAndExtractRequestBody_PreservesClientStreamOptionsAtIngress(t *testing.T) {
+	body := []byte(`{"model":"gpt-4","stream":true,"stream_options":{"include_usage":false,"continuous_usage_stats":true},"messages":[{"role":"user","content":"hi"}]}`)
+
+	result, err := sanitizeAndExtractRequestBody(body, "application/json", false)
+	require.NoError(t, err)
+
+	var raw map[string]interface{}
+	require.NoError(t, json.Unmarshal(result.Body, &raw))
+	streamOptions, ok := raw["stream_options"].(map[string]interface{})
+	require.True(t, ok, "expected stream_options map, got %T", raw["stream_options"])
+	assert.Equal(t, map[string]interface{}{"include_usage": true, "continuous_usage_stats": true}, streamOptions)
 }
 
 // TestExtractTokenUsageFromPayloads_BatchedSSEMergesUsage reproduces a

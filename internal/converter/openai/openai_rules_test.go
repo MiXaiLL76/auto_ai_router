@@ -1,6 +1,7 @@
 package openai
 
 import (
+	"bytes"
 	"encoding/json"
 	"testing"
 
@@ -792,4 +793,59 @@ func TestNormalizeDeveloperRole_NoMessagesArray(t *testing.T) {
 	body := []byte(`{"model":"gpt-4o","input":"hi"}`)
 	result := NormalizeDeveloperRole(body)
 	assert.JSONEq(t, string(body), string(result))
+}
+
+// --- StripCacheSalt tests ---
+
+func TestStripCacheSalt_RemovesField(t *testing.T) {
+	body := makeBody(t, map[string]any{
+		"model":      "gpt-5-mini",
+		"cache_salt": "some-partition-key",
+		"messages":   []any{},
+	})
+	result := bodyToMap(t, StripCacheSalt(body))
+	_, present := result["cache_salt"]
+	assert.False(t, present, "cache_salt should have been stripped")
+	assert.Equal(t, "gpt-5-mini", result["model"])
+}
+
+// TestStripCacheSalt_NoFieldPresent verifies the fast path: when cache_salt
+// isn't in the body at all, the exact same byte slice is returned rather
+// than round-tripped through unmarshal/marshal.
+func TestStripCacheSalt_NoFieldPresent(t *testing.T) {
+	body := []byte(`{"model":"gpt-4o","messages":[]}`)
+	result := StripCacheSalt(body)
+	require.Equal(t, 0, bytes.Compare(body, result))
+	assert.True(t, &body[0] == &result[0], "expected the exact same underlying array to be returned")
+}
+
+func TestStripCacheSalt_InvalidJSON(t *testing.T) {
+	body := []byte(`{"cache_salt": not valid json`)
+	result := StripCacheSalt(body)
+	assert.Equal(t, body, result, "invalid JSON should be returned unchanged rather than dropped")
+}
+
+// --- IsRealOpenAIHost tests ---
+
+func TestIsRealOpenAIHost(t *testing.T) {
+	tests := []struct {
+		name    string
+		baseURL string
+		want    bool
+	}{
+		{"empty", "", false},
+		{"genuine openai https", "https://api.openai.com/v1", true},
+		{"genuine openai no scheme", "api.openai.com/v1", true},
+		{"genuine openai bare host", "api.openai.com", true},
+		{"genuine openai subdomain", "https://eu.api.openai.com/v1", true},
+		{"openrouter", "https://openrouter.ai/api/v1", false},
+		{"self-hosted vLLM", "https://llm.internal.example.com/v1", false},
+		{"lookalike host is not a real subdomain", "https://api.openai.com.evil.example.com", false},
+		{"malformed URL", "https://[::1", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, IsRealOpenAIHost(tt.baseURL))
+		})
+	}
 }

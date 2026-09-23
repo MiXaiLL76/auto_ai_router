@@ -172,6 +172,189 @@ func TestConfig_Validate_Kafka(t *testing.T) {
 	}
 }
 
+func TestConfig_Validate_KafkaRawBodies(t *testing.T) {
+	baseKafka := KafkaConfig{
+		Enabled:          true,
+		Brokers:          []string{"kafka:9092"},
+		Topic:            "air.spend_logs",
+		LogQueueSize:     5000,
+		LogBatchSize:     100,
+		LogFlushInterval: 5 * time.Second,
+		LogWorkers:       4,
+	}
+
+	tests := []struct {
+		name        string
+		mutate      func(k *KafkaConfig)
+		wantErr     bool
+		errContains string
+	}{
+		{
+			name:    "disabled raw_bodies is always valid",
+			mutate:  func(k *KafkaConfig) {},
+			wantErr: false,
+		},
+		{
+			name: "enabled with distinct topic passes",
+			mutate: func(k *KafkaConfig) {
+				k.RawBodies = KafkaRawBodiesConfig{Enabled: true, Topic: "raw-bodies"}
+			},
+			wantErr: false,
+		},
+		{
+			name: "enabled without kafka.enabled fails",
+			mutate: func(k *KafkaConfig) {
+				k.Enabled = false
+				k.RawBodies = KafkaRawBodiesConfig{Enabled: true, Topic: "raw-bodies"}
+			},
+			wantErr:     true,
+			errContains: "kafka.raw_bodies.enabled requires kafka.enabled=true",
+		},
+		{
+			name: "enabled without topic fails",
+			mutate: func(k *KafkaConfig) {
+				k.RawBodies = KafkaRawBodiesConfig{Enabled: true}
+			},
+			wantErr:     true,
+			errContains: "kafka.raw_bodies.topic is required",
+		},
+		{
+			name: "enabled with topic same as spend topic fails",
+			mutate: func(k *KafkaConfig) {
+				k.RawBodies = KafkaRawBodiesConfig{Enabled: true, Topic: "air.spend_logs"}
+			},
+			wantErr:     true,
+			errContains: "kafka.raw_bodies.topic must differ from kafka.topic",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			kafka := baseKafka
+			tt.mutate(&kafka)
+			cfg := baseValidConfigForKafkaTests()
+			cfg.Kafka = kafka
+			err := cfg.Validate()
+			if tt.wantErr {
+				assert.Error(t, err)
+				assert.Contains(t, err.Error(), tt.errContains)
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestKafkaConfig_UnmarshalYAML_RawBodies(t *testing.T) {
+	t.Setenv("KAFKA_RAW_BODIES_ENABLED_TEST", "true")
+
+	yamlDoc := `
+enabled: true
+brokers:
+  - "kafka:9092"
+topic: air.spend_logs
+raw_bodies:
+  enabled: "os.environ/KAFKA_RAW_BODIES_ENABLED_TEST"
+  topic: raw-bodies
+`
+	var kafkaCfg KafkaConfig
+	a := assert.New(t)
+	a.NoError(yaml.Unmarshal([]byte(yamlDoc), &kafkaCfg))
+	a.True(kafkaCfg.RawBodies.Enabled)
+	a.Equal("raw-bodies", kafkaCfg.RawBodies.Topic)
+	a.False(kafkaCfg.RawBodies.StoreRawBody, "store_raw_body must default to false when omitted")
+	a.True(kafkaCfg.RawBodies.StoreOnlyErrors, "store_only_errors must default to true when omitted")
+	a.True(kafkaCfg.RawBodies.RedactSensitiveFields, "redact_sensitive_fields must default to true when omitted")
+}
+
+// TestKafkaConfig_UnmarshalYAML_RawBodiesTopicDefaultsWhenOmitted guards a
+// real production incident (2026-09-17): enabling raw_bodies without an
+// explicit topic -- exactly `enabled: true` plus `store_only_errors: true`,
+// nothing else, which is a perfectly reasonable config given the docs say
+// topic defaults to "raw-bodies" -- overwrote Topic with "" instead of
+// falling back, and Validate() then rejected the config at startup
+// ("kafka.raw_bodies.topic is required"), crash-looping every pod that had
+// raw_bodies enabled without spelling out topic.
+func TestKafkaConfig_UnmarshalYAML_RawBodiesTopicDefaultsWhenOmitted(t *testing.T) {
+	yamlDoc := `
+enabled: true
+brokers:
+  - "kafka:9092"
+topic: air.spend_logs
+raw_bodies:
+  enabled: true
+  store_only_errors: true
+`
+	var kafkaCfg KafkaConfig
+	a := assert.New(t)
+	a.NoError(yaml.Unmarshal([]byte(yamlDoc), &kafkaCfg))
+	a.Equal("raw-bodies", kafkaCfg.RawBodies.Topic, "an omitted topic must fall back to the documented default, not become empty")
+
+	cfg := baseValidConfigForKafkaTests()
+	cfg.Kafka = kafkaCfg
+	a.NoError(cfg.Validate(), "this exact shape must pass startup validation, not crash-loop")
+}
+
+func TestKafkaConfig_UnmarshalYAML_RawBodiesDefaultsToDisabled(t *testing.T) {
+	yamlDoc := `
+enabled: true
+brokers:
+  - "kafka:9092"
+topic: air.spend_logs
+`
+	var kafkaCfg KafkaConfig
+	a := assert.New(t)
+	a.NoError(yaml.Unmarshal([]byte(yamlDoc), &kafkaCfg))
+	a.False(kafkaCfg.RawBodies.Enabled)
+	// Topic still defaults to "raw-bodies" even with the whole raw_bodies
+	// block absent -- harmless since Validate only inspects Topic when
+	// Enabled is true, and it keeps this identical to the omitted-topic
+	// case (TestKafkaConfig_UnmarshalYAML_RawBodiesTopicDefaultsWhenOmitted)
+	// rather than depending on which fields happened to be present.
+	a.Equal("raw-bodies", kafkaCfg.RawBodies.Topic)
+	a.False(kafkaCfg.RawBodies.StoreRawBody)
+	a.True(kafkaCfg.RawBodies.StoreOnlyErrors)
+	a.True(kafkaCfg.RawBodies.RedactSensitiveFields)
+}
+
+func TestKafkaConfig_UnmarshalYAML_RawBodiesStoreToggles(t *testing.T) {
+	yamlDoc := `
+enabled: true
+brokers:
+  - "kafka:9092"
+topic: air.spend_logs
+raw_bodies:
+  enabled: "true"
+  topic: raw-bodies
+  store_raw_body: "true"
+  store_only_errors: "false"
+`
+	var kafkaCfg KafkaConfig
+	a := assert.New(t)
+	a.NoError(yaml.Unmarshal([]byte(yamlDoc), &kafkaCfg))
+	a.True(kafkaCfg.RawBodies.StoreRawBody)
+	a.False(kafkaCfg.RawBodies.StoreOnlyErrors)
+	a.True(kafkaCfg.RawBodies.RedactSensitiveFields, "unset redact_sensitive_fields must still default to true even when other toggles are set explicitly")
+}
+
+func TestKafkaConfig_UnmarshalYAML_RawBodiesRedactSensitiveFieldsCanBeDisabled(t *testing.T) {
+	yamlDoc := `
+enabled: true
+brokers:
+  - "kafka:9092"
+topic: air.spend_logs
+raw_bodies:
+  enabled: "true"
+  topic: raw-bodies
+  store_raw_body: "true"
+  redact_sensitive_fields: "false"
+`
+	var kafkaCfg KafkaConfig
+	a := assert.New(t)
+	a.NoError(yaml.Unmarshal([]byte(yamlDoc), &kafkaCfg))
+	a.False(kafkaCfg.RawBodies.RedactSensitiveFields, "must be an explicit, honored escape hatch, not silently forced back to true")
+}
+
 func TestConfig_Validate_KafkaOnlyModeRequiresKafka(t *testing.T) {
 	cfg := baseValidConfigForKafkaTests()
 	cfg.LiteLLMDB.DisableSpendLogsWrite = true

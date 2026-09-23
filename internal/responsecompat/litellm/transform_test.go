@@ -266,3 +266,49 @@ func TestTransformTextCompletion(t *testing.T) {
 	assert.Equal(t, "stop", choice["finish_reason"])
 	assert.NotContains(t, choice, "message")
 }
+
+func TestTransformImageDropsProviderCost(t *testing.T) {
+	for _, endpoint := range []string{"/v1/images/generations", "/v1/images/edits"} {
+		t.Run(endpoint, func(t *testing.T) {
+			result := New().Transform(Context{
+				Endpoint:       endpoint,
+				RequestedModel: "vendor/image-model",
+			}, Response{
+				StatusCode: http.StatusOK,
+				Headers:    make(http.Header),
+				Body:       []byte(`{"data":[{"url":"https://img.example/1.jpeg","mime_type":"image/jpeg"}],"usage":{"cost_in_usd_ticks":200000000}}`),
+			})
+
+			require.Equal(t, http.StatusOK, result.StatusCode)
+			var body map[string]any
+			require.NoError(t, json.Unmarshal(result.Body, &body))
+			assert.NotContains(t, body, "usage")
+			data := body["data"].([]any)
+			require.Len(t, data, 1)
+			assert.Equal(t, "https://img.example/1.jpeg", data[0].(map[string]any)["url"])
+		})
+	}
+}
+
+func TestTransformImageKeepsTokenUsage(t *testing.T) {
+	result := New().Transform(Context{
+		Endpoint:       "/v1/images/generations",
+		RequestedModel: "vendor/image-model",
+	}, Response{
+		StatusCode: http.StatusOK,
+		Headers:    make(http.Header),
+		Body:       []byte(`{"model":"provider-image-model","created":1,"data":[{"url":"https://img.example/1.jpeg","size":"2048x2048"}],"usage":{"generated_images":1,"output_tokens":16384,"total_tokens":16384,"cost":0.04,"cost_details":{"upstream_inference_cost":0.04},"is_byok":false}}`),
+	})
+
+	require.Equal(t, http.StatusOK, result.StatusCode)
+	var body map[string]any
+	require.NoError(t, json.Unmarshal(result.Body, &body))
+	assert.Equal(t, "vendor/image-model", body["model"])
+	usage := body["usage"].(map[string]any)
+	assert.Equal(t, float64(1), usage["generated_images"])
+	assert.Equal(t, float64(16384), usage["output_tokens"])
+	assert.Equal(t, float64(16384), usage["total_tokens"])
+	assert.NotContains(t, usage, "cost")
+	assert.NotContains(t, usage, "cost_details")
+	assert.NotContains(t, usage, "is_byok")
+}

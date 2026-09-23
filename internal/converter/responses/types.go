@@ -1,6 +1,10 @@
 package responses
 
-import "encoding/json"
+import (
+	"encoding/json"
+
+	"github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
+)
 
 // ===== Request Types =====
 
@@ -237,6 +241,9 @@ type Usage struct {
 	InputTokensDetails  InputDetails          `json:"input_tokens_details"`
 	OutputTokensDetails OutputDetails         `json:"output_tokens_details"`
 	ServerToolUse       *ServerToolUseDetails `json:"server_tool_use,omitempty"`
+	// Provider usage extensions are kept verbatim so re-encoding a passthrough
+	// response does not drop the built-in tool counters a downstream hop bills.
+	converterutil.ToolUsageExtensions
 }
 
 type ServerToolUseDetails struct {

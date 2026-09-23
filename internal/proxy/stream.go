@@ -204,6 +204,7 @@ func (o *openAIStreamUsageExtractor) extractChatCompletionUsage(payload []byte) 
 				WebSearchRequests int `json:"web_search_requests,omitempty"`
 			} `json:"server_tool_use,omitempty"`
 			WebSearchRequests int `json:"web_search_requests,omitempty"`
+			converterutil.ToolUsageExtensions
 		} `json:"usage"`
 	}
 
@@ -252,6 +253,7 @@ func (o *openAIStreamUsageExtractor) extractChatCompletionUsage(payload []byte) 
 		WebSearchRequests: webSearchRequestsFromUsage(
 			data.Usage.ServerToolUse.WebSearchRequests,
 			data.Usage.WebSearchRequests,
+			data.Usage.ToolUsageExtensions.WebSearchRequests(),
 		),
 	}
 }
@@ -300,6 +302,7 @@ func (o *openAIStreamUsageExtractor) extractResponsesAPIUsage(payload []byte) *S
 	webSearchRequests := webSearchRequestsFromUsage(
 		usage.ServerToolUse.WebSearchRequests,
 		usage.WebSearchRequests,
+		usage.ToolUsageExtensions.WebSearchRequests(),
 	)
 	if webSearchRequests == 0 {
 		webSearchRequests = countCompletedStreamingWebSearchItems(data.Response.Output)
@@ -376,6 +379,7 @@ type responsesAPIUsage struct {
 		WebSearchRequests int `json:"web_search_requests,omitempty"`
 	} `json:"server_tool_use,omitempty"`
 	WebSearchRequests int `json:"web_search_requests,omitempty"`
+	converterutil.ToolUsageExtensions
 }
 
 // anthropicStreamUsageExtractor implements StreamUsageExtractor for Anthropic format
@@ -789,6 +793,9 @@ func (p *Proxy) handleTransformedStreaming(
 					outputStreamError.Observe(chunk)
 				}
 				if logCtx != nil && hasUsage {
+					if logCtx.IsImageGeneration {
+						logCtx.observeImageStreamPayloads(payloads)
+					}
 					if usage := extractTokenUsageFromPayloads(payloads, converter.TokenUsageExtractionOptions{}); usage != nil {
 						if logCtx.TokenUsage == nil {
 							logCtx.TokenUsage = &converter.TokenUsage{}
@@ -897,6 +904,11 @@ func (p *Proxy) handleStreamingWithTokens(w http.ResponseWriter, resp *http.Resp
 		payloadBuf = splitSSEPayloads(chunk, payloadBuf)
 		if hasUsage := chunkMayCarryTokenUsage(chunk); hasUsage {
 			if logCtx != nil {
+				// The image usage event isn't necessarily the stream's last data
+				// frame, so it is recorded as it passes rather than from lastChunk.
+				if logCtx.IsImageGeneration {
+					logCtx.observeImageStreamPayloads(payloadBuf)
+				}
 				if usage := extractTokenUsageFromPayloads(payloadBuf, converter.TokenUsageExtractionOptions{AudioInputIncludesCachedAudio: true}); usage != nil {
 					if logCtx.TokenUsage == nil {
 						logCtx.TokenUsage = &converter.TokenUsage{}
@@ -1137,12 +1149,21 @@ func (p *Proxy) finalizeStreamingLog(logCtx *RequestLogContext, totalTokens int,
 		if logCtx.ErrorMsg == "" {
 			logCtx.ErrorMsg = extractErrorMessage(lastChunk)
 		}
+		if logCtx.ErrorBodyRaw == "" {
+			// lastChunk was already streamed to the client live as it arrived
+			// -- nothing to mask in hindsight, the client saw exactly this.
+			logCtx.ErrorBodyRaw = extractErrorBodyRaw(lastChunk)
+			logCtx.ClientResponseBody = logCtx.ErrorBodyRaw
+		}
 	} else if streamErr := extractStreamErrorEvent(lastChunk); streamErr != "" {
 		// Provider returned HTTP 2xx but sent an error event inside the stream
 		// (e.g. `data: {"error":...}`, `event: error`, response.failed). Without
 		// this check such requests are logged as success and never hit ERROR.
+		// Same as above: already relayed live, nothing left to mask.
 		logCtx.Status = "failure"
 		logCtx.ErrorMsg = streamErr
+		logCtx.ErrorBodyRaw = extractErrorBodyRaw([]byte(streamErr))
+		logCtx.ClientResponseBody = logCtx.ErrorBodyRaw
 		p.logUpstreamError(logCtx.Context(), "Provider sent error event in stream", statusCode,
 			logCtx.Credential, logCtx.ModelID, []byte(streamErr),
 			"request_id", logCtx.RequestID)
@@ -1434,7 +1455,13 @@ func (p *Proxy) streamToClient(
 
 	writeEarlyStreamError := func(payload string) error {
 		statusCode := statusCodeFromProviderStreamError(payload)
-		markProxyProviderStreamError(logCtx, statusCode, payload)
+		// Nothing has committed yet, so writeProviderStreamErrorBeforeCommit
+		// below replaces the body entirely with maskedUpstreamErrorBody --
+		// recomputed here (cheap, pure) just to record exactly what that call
+		// is about to write, rather than trusting the two to stay in sync by
+		// construction.
+		clientSaw := string(maskedUpstreamErrorBody(statusCode, logContextRequestID(logCtx)))
+		markProxyProviderStreamError(logCtx, statusCode, payload, clientSaw)
 		if logCtx != nil {
 			logCtx.StreamOutcome = "stream_error"
 		}

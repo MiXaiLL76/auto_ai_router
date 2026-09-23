@@ -40,6 +40,12 @@ type RequestMode struct {
 	ModelID             string // real provider model name (URL construction, format detection)
 	DisplayModelID      string // alias to echo in responses; falls back to ModelID when empty
 	ContentType         string // original request content type (needed for multipart endpoints)
+	// BaseURL is the credential's configured base_url. Only used to
+	// distinguish genuine api.openai.com from a third-party server that
+	// merely speaks OpenAI's wire protocol (see openaiconv.IsRealOpenAIHost)
+	// -- provider Type alone can't tell the two apart, since both are
+	// configured as type: "openai".
+	BaseURL string
 }
 
 // responseModel returns the model name to embed in response/streaming output.
@@ -115,6 +121,35 @@ func New(providerType config.ProviderType, mode RequestMode) *ProviderConverter 
 	}
 }
 
+// shouldStripCacheSalt reports whether cache_salt must be removed from the
+// request body before forwarding. cache_salt is a genuine OpenAI Chat
+// Completions parameter (partitions prompt caching); most other servers that
+// merely speak the OpenAI wire protocol -- aggregators, strict OpenAI-shaped
+// deployments -- reject it outright with a 400 ("cache_salt: Extra inputs
+// are not permitted") rather than ignoring an unknown field. Strip it
+// everywhere except: genuine api.openai.com (see IsRealOpenAIHost), and
+// self-hosted vLLM (config.ProviderTypeVLLM), which is confirmed to support
+// the parameter for its own prefix-cache partitioning -- stripping it there
+// would silently disable that partitioning instead of avoiding an error.
+func (c *ProviderConverter) shouldStripCacheSalt() bool {
+	if c.providerType == config.ProviderTypeVLLM {
+		return false
+	}
+	return !openaiconv.IsRealOpenAIHost(c.mode.BaseURL)
+}
+
+// shouldStripStreamOptionsExtras reports whether a streaming request's
+// stream_options object must be rebuilt down to just {"include_usage": true}
+// before forwarding, discarding provider-specific extension keys (e.g.
+// vLLM's continuous_usage_stats) the ingress sanitizer otherwise preserves.
+// Unlike cache_salt, real OpenAI itself doesn't understand these extension
+// keys either -- only self-hosted vLLM (config.ProviderTypeVLLM) does, so
+// the exception is narrower: strip for everyone except vLLM, not "everyone
+// except vLLM and genuine OpenAI".
+func (c *ProviderConverter) shouldStripStreamOptionsExtras() bool {
+	return c.providerType != config.ProviderTypeVLLM
+}
+
 // RequestFrom converts an OpenAI-format request body to the provider-specific format.
 // Returns the original body unchanged for OpenAI-compatible providers (passthrough).
 func (c *ProviderConverter) RequestFrom(body []byte) ([]byte, error) {
@@ -134,6 +169,9 @@ func (c *ProviderConverter) RequestFrom(body []byte) ([]byte, error) {
 		case config.ProviderTypeBedrock:
 			return nil, errors.New("bedrock does not support embeddings")
 		default:
+			if c.shouldStripCacheSalt() {
+				body = openaiconv.StripCacheSalt(body)
+			}
 			return body, nil
 		}
 	}
@@ -148,8 +186,17 @@ func (c *ProviderConverter) RequestFrom(body []byte) ([]byte, error) {
 		}
 		if c.mode.MessagesPassthrough {
 			// body is already native Anthropic Messages JSON (model field already
-			// resolved to c.mode.ModelID upstream) — forward as-is.
-			return body, nil
+			// resolved to c.mode.ModelID upstream) — forward as-is, minus any
+			// stray OpenAI-only fields a client sent anyway (see shouldStripCacheSalt),
+			// and minus stream_options: unlike the OpenAI wire protocol bucket, native
+			// Anthropic has no stream_options concept at all (rejects the whole
+			// field, not just unrecognized keys inside it) -- a client can still
+			// send it directly on a /v1/messages request since the ingress
+			// sanitizer already skips stream_options injection for isMessagesAPI.
+			if c.shouldStripCacheSalt() {
+				body = openaiconv.StripCacheSalt(body)
+			}
+			return openaiconv.StripStreamOptions(body), nil
 		}
 		return anthropic.OpenAIToAnthropic(body, c.mode.ModelID, c.providerType == config.ProviderTypeAnthropic)
 	case config.ProviderTypeBedrock:
@@ -158,6 +205,12 @@ func (c *ProviderConverter) RequestFrom(body []byte) ([]byte, error) {
 		}
 		if isAnthropicBedrockModel(c.mode.ModelID) {
 			return anthropic.OpenAIToBedrock(body, c.mode.ModelID)
+		}
+		if c.shouldStripCacheSalt() {
+			body = openaiconv.StripCacheSalt(body)
+		}
+		if c.mode.IsStreaming && c.shouldStripStreamOptionsExtras() {
+			body = openaiconv.RebuildStreamOptionsIncludeUsageOnly(body)
 		}
 		return body, nil
 	default:
@@ -169,8 +222,30 @@ func (c *ProviderConverter) RequestFrom(body []byte) ([]byte, error) {
 			body = openaiconv.ConvertWebSearchTools(body)
 		}
 
+		// See shouldStripCacheSalt: strip for everyone in this default bucket
+		// (aggregators, strict OpenAI-shaped deployments, ...) except genuine
+		// api.openai.com and self-hosted vLLM.
+		if c.shouldStripCacheSalt() {
+			body = openaiconv.StripCacheSalt(body)
+		}
+
+		// See shouldStripStreamOptionsExtras: the ingress sanitizer preserves
+		// whatever stream_options object the client sent (plus a guaranteed
+		// include_usage=true); strip it down to just include_usage here for
+		// every destination except vLLM, which understands the extra keys.
+		if c.mode.IsStreaming && c.shouldStripStreamOptionsExtras() {
+			body = openaiconv.RebuildStreamOptionsIncludeUsageOnly(body)
+		}
+
 		if c.mode.IsImageGeneration || c.mode.IsImageEdit {
 			body = openaiconv.RewriteImageMiniJSON(body, c.mode.ModelID, c.mode.IsImageEdit)
+		}
+
+		// Some image families watermark their output unless told otherwise;
+		// images served through the router are always requested without one.
+		// JSON bodies are handled here, multipart edits by RewriteImageEditMultipart.
+		if (c.mode.IsImageGeneration || c.mode.IsImageEdit) && openaiconv.AddsImageWatermark(c.mode.ModelID) {
+			body = openaiconv.DisableImageWatermark(body)
 		}
 
 		// gpt-image-1 family does not support the response_format parameter in
@@ -183,6 +258,7 @@ func (c *ProviderConverter) RequestFrom(body []byte) ([]byte, error) {
 		//   1. Replace model aliases with the provider-facing model name.
 		//   2. Fix image parts sent as application/octet-stream (detect real MIME from magic bytes).
 		//   3. Strip the response_format field for gpt-image-1 (JSON stripping won't work on multipart).
+		//   4. Force watermark=false for watermarking families, as for JSON above.
 		if c.mode.IsImageEdit && strings.Contains(strings.ToLower(c.mode.ContentType), "multipart/form-data") {
 			stripRF := openaiconv.IsGptImage1Model(c.mode.ModelID)
 			newBody, newCT := openaiconv.RewriteImageEditMultipart(body, c.mode.ContentType, c.mode.ModelID, stripRF)
@@ -398,6 +474,16 @@ type responsesUsageDetails struct {
 		WebSearchRequests int `json:"web_search_requests,omitempty"`
 	} `json:"server_tool_use,omitempty"`
 	WebSearchRequests int `json:"web_search_requests,omitempty"`
+	converterutil.ToolUsageExtensions
+}
+
+// webSearchRequests returns the provider-reported web search count: the
+// standard counters first, then the provider usage extensions.
+func (u *responsesUsageDetails) webSearchRequests() int {
+	if requests := webSearchRequestsFromUsage(u.ServerToolUse.WebSearchRequests, u.WebSearchRequests); requests > 0 {
+		return requests
+	}
+	return u.ToolUsageExtensions.WebSearchRequests()
 }
 
 // tokenUsageShapeUsage is the "usage" object shape read by
@@ -527,10 +613,11 @@ func tokenUsageFromShape(resp *tokenUsageResponseShape, opts TokenUsageExtractio
 		completionTokens = resp.Response.Usage.OutputTokens
 	}
 
-	webSearchRequests := webSearchRequestsFromExtractedResponse(resp.Usage.ServerToolUse.WebSearchRequests, resp.Usage.WebSearchRequests, resp.Choices, resp.Output, resp.Response.Output)
-	if webSearchRequests == 0 && resp.Response.Usage != nil {
-		webSearchRequests = webSearchRequestsFromUsage(resp.Response.Usage.ServerToolUse.WebSearchRequests, resp.Response.Usage.WebSearchRequests)
+	var nestedUsageRequests int
+	if resp.Response.Usage != nil {
+		nestedUsageRequests = resp.Response.Usage.webSearchRequests()
 	}
+	webSearchRequests := webSearchRequestsFromExtractedResponse(resp.Usage.webSearchRequests(), nestedUsageRequests, resp.Choices, resp.Output, resp.Response.Output)
 
 	if promptTokens == 0 && completionTokens == 0 && webSearchRequests == 0 {
 		return nil
@@ -720,14 +807,19 @@ func webSearchRequestsFromUsage(values ...int) int {
 	return 0
 }
 
+// webSearchRequestsFromExtractedResponse picks one web search count for the
+// response, never adding different representations of the same executions
+// together: a usage counter reported by the provider (top-level usage, then
+// the response.completed event's usage) wins over counting web_search_call
+// output items, which in turn wins over url_citation annotations.
 func webSearchRequestsFromExtractedResponse(
-	serverToolUseRequests int,
 	usageRequests int,
+	nestedUsageRequests int,
 	choices []extractedChoiceWithAnnotations,
 	output []extractedOutputItem,
 	nestedOutput []extractedOutputItem,
 ) int {
-	if requests := webSearchRequestsFromUsage(serverToolUseRequests, usageRequests); requests > 0 {
+	if requests := webSearchRequestsFromUsage(usageRequests, nestedUsageRequests); requests > 0 {
 		return requests
 	}
 	if requests := countCompletedWebSearchOutputItems(output); requests > 0 {

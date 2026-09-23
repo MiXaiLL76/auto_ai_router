@@ -582,6 +582,7 @@ func (s *nativeWSSession) finish(turn *nativeWSTurn, event []byte, outcome strin
 	status := http.StatusOK
 	if outcome == "stream_error" {
 		status = http.StatusBadGateway
+		turn.log.ErrorOrigin = ErrorOriginWebSocketStreamError
 	}
 	chunk := sseDataFrame(event)
 	s.proxy.finalizeStreamingLog(turn.log, turn.accumulator.TokenCount(), chunk, "openai", status, false)

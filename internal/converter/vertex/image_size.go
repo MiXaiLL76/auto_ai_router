@@ -2,8 +2,9 @@ package vertex
 
 import (
 	"math"
-	"strconv"
 	"strings"
+
+	converterutil "github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
 )
 
 type geminiImageRatio struct {
@@ -167,29 +168,12 @@ func exactGeminiImageConfig(profile geminiImageProfile, width, height int) (*gem
 }
 
 func parseGeminiImageSize(size string) (int, int, bool, error) {
-	normalized := strings.ToLower(strings.TrimSpace(size))
-	normalized = strings.ReplaceAll(normalized, "×", "x")
-
-	separator := "x"
-	ratioOnly := false
-	for _, candidate := range []string{":", "/"} {
-		if strings.Contains(normalized, candidate) {
-			separator = candidate
-			ratioOnly = true
-			break
-		}
-	}
-
-	left, right, ok := strings.Cut(normalized, separator)
-	if !ok || strings.Contains(right, separator) {
+	width, height, ratioOnly, ok := converterutil.ParseImageDimensions(size)
+	if !ok {
 		return 0, 0, false, imageValidationError("size", "Invalid image size", "invalid_image_size")
 	}
-	width, widthErr := strconv.Atoi(strings.TrimSpace(left))
-	height, heightErr := strconv.Atoi(strings.TrimSpace(right))
-	if widthErr != nil || heightErr != nil || width <= 0 || height <= 0 {
-		return 0, 0, false, imageValidationError("size", "Invalid image size", "invalid_image_size")
-	}
-	if separator == "x" && width <= 32 && height <= 32 {
+	// "16x9" is a ratio written with the pixel separator.
+	if !ratioOnly && width <= 32 && height <= 32 {
 		ratioOnly = true
 	}
 

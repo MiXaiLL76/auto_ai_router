@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -41,6 +42,12 @@ const (
 	ProviderTypeBedrock   ProviderType = "bedrock"
 	ProviderTypeProxy     ProviderType = "proxy"
 	ProviderTypeAIR       ProviderType = "air"
+	// ProviderTypeVLLM is a self-hosted vLLM server (LiteLLM's "hosted_vllm").
+	// It speaks the OpenAI wire protocol (see EffectiveProviderType) but keeps its
+	// own identity so spend logs and daily aggregates record custom_llm_provider
+	// "vllm", and so vLLM-only behaviour (per-model default sampling params)
+	// never leaks into other OpenAI-compatible providers.
+	ProviderTypeVLLM ProviderType = "vllm"
 )
 
 // LogValue implements slog.LogValuer so structured log backends (e.g. the
@@ -53,7 +60,7 @@ func (p ProviderType) LogValue() slog.Value {
 // IsValid checks if the provider type is valid
 func (p ProviderType) IsValid() bool {
 	switch p {
-	case ProviderTypeOpenAI, ProviderTypeVertexAI, ProviderTypeGemini, ProviderTypeAnthropic, ProviderTypeCometAPI, ProviderTypeProMan, ProviderTypeBedrock, ProviderTypeProxy, ProviderTypeAIR:
+	case ProviderTypeOpenAI, ProviderTypeVertexAI, ProviderTypeGemini, ProviderTypeAnthropic, ProviderTypeCometAPI, ProviderTypeProMan, ProviderTypeBedrock, ProviderTypeProxy, ProviderTypeAIR, ProviderTypeVLLM:
 		return true
 	}
 	return false
@@ -91,7 +98,8 @@ func (p ProviderType) IsProxyLike() bool {
 }
 
 func normalizeProviderType(raw string) ProviderType {
-	switch strings.ToLower(strings.TrimSpace(raw)) {
+	value := strings.ToLower(strings.TrimSpace(raw))
+	switch value {
 	case "comet-api", "comet_api":
 		return ProviderTypeCometAPI
 	case "aar", "auto-ai-router", "auto_ai_router":
@@ -99,21 +107,48 @@ func normalizeProviderType(raw string) ProviderType {
 	case "pro-man", "pro_man":
 		return ProviderTypeProMan
 	default:
-		return ProviderType(strings.ToLower(strings.TrimSpace(raw)))
+		if IsVLLMProviderName(value) {
+			return ProviderTypeVLLM
+		}
+		return ProviderType(value)
 	}
+}
+
+// VLLMLiteLLMProvider is LiteLLM's name for the vLLM provider: custom_llm_provider
+// "hosted_vllm" and the "hosted_vllm/<model>" model prefix.
+const VLLMLiteLLMProvider = "hosted_vllm"
+
+// vllmProviderNames are the spellings of the vLLM provider accepted in configuration and
+// in a LiteLLM database, and the prefixes that may precede a model id.
+var vllmProviderNames = []string{"vllm", VLLMLiteLLMProvider, "hosted-vllm"}
+
+// IsVLLMProviderName reports whether name is a spelling of the vLLM provider
+// (case-insensitive).
+func IsVLLMProviderName(name string) bool {
+	name = strings.ToLower(strings.TrimSpace(name))
+	return slices.Contains(vllmProviderNames, name)
+}
+
+// TrimVLLMProviderPrefix removes the LiteLLM provider prefix ("hosted_vllm/model") that
+// the upstream vLLM server does not know. Only the vLLM prefixes are touched: other
+// slashes are part of real model ids (for example "Qwen/Qwen3-8B").
+func TrimVLLMProviderPrefix(model string) string {
+	for _, name := range vllmProviderNames {
+		if rest, ok := strings.CutPrefix(model, name+"/"); ok {
+			return rest
+		}
+	}
+	return model
 }
 
 // ModelRPMConfig represents RPM and TPM limits for a specific model
 type ModelRPMConfig struct {
-	Name  string `yaml:"name"`
-	Model string `yaml:"model,omitempty"` // Real model name sent to provider (alias for Name if different)
-	// DeploymentID is the authoritative LiteLLM_ProxyModelTable.model_id.
-	// It is populated only by the database loader and is never accepted from YAML.
-	DeploymentID string `yaml:"-"`
-	RPM          int    `yaml:"rpm"`
-	TPM          int    `yaml:"tpm"`
-	Weight       int    `yaml:"weight"`               // Weighted round-robin weight (0 = use credential default / 1)
-	Credential   string `yaml:"credential,omitempty"` // If set, model is only available for this credential
+	Name       string `yaml:"name"`
+	Model      string `yaml:"model,omitempty"` // Real model name sent to provider (alias for Name if different)
+	RPM        int    `yaml:"rpm"`
+	TPM        int    `yaml:"tpm"`
+	Weight     int    `yaml:"weight"`               // Weighted round-robin weight (0 = use credential default / 1)
+	Credential string `yaml:"credential,omitempty"` // If set, model is only available for this credential
 
 	// PassthroughResponses controls whether Responses API requests for this model
 	// are forwarded as-is to the provider's native /v1/responses endpoint instead
@@ -131,6 +166,12 @@ type ModelRPMConfig struct {
 	// google_proto set); false otherwise.
 	// Explicit true/false overrides the default.
 	PassthroughMessages *bool `yaml:"passthrough_messages,omitempty"`
+
+	// DefaultParams are request-body defaults applied to a vLLM deployment when the
+	// client did not send the same key (LiteLLM deployment litellm_params such as
+	// chat_template_kwargs, temperature, top_k). Populated only by the database
+	// loader and never accepted from YAML.
+	DefaultParams map[string]any `yaml:"-"`
 }
 
 // UnmarshalYAML implements custom unmarshaling for ModelRPMConfig with env variable support.
@@ -212,6 +253,7 @@ type Config struct {
 	Redis                RedisConfig                `yaml:"redis,omitempty"`
 	OTEL                 OTELConfig                 `yaml:"otel,omitempty"`
 	Kafka                KafkaConfig                `yaml:"kafka,omitempty"`
+	Video                VideoConfig                `yaml:"video,omitempty"`
 	// ModelTemplates stores x-model-templates entries as raw interface{} so that
 	// both single-model mappings and lists of models can be defined as YAML anchors
 	// without type errors. The actual model data is extracted via anchor expansion.
@@ -243,6 +285,7 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 		Redis                RedisConfig                `yaml:"redis,omitempty"`
 		OTEL                 OTELConfig                 `yaml:"otel,omitempty"`
 		Kafka                KafkaConfig                `yaml:"kafka,omitempty"`
+		Video                VideoConfig                `yaml:"video,omitempty"`
 		ModelTemplates       map[string]interface{}     `yaml:"x-model-templates,omitempty"`
 	}
 
@@ -266,6 +309,7 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 	c.Redis = raw.Redis
 	c.OTEL = raw.OTEL
 	c.Kafka = raw.Kafka
+	c.Video = raw.Video
 	c.ModelTemplates = raw.ModelTemplates
 
 	return nil
@@ -862,6 +906,9 @@ func (c CredentialConfig) EffectiveProviderType() ProviderType {
 	if c.Type == ProviderTypeCometAPI && c.GoogleProtocol {
 		return ProviderTypeGemini
 	}
+	if c.Type == ProviderTypeVLLM {
+		return ProviderTypeOpenAI
+	}
 	return c.Type
 }
 
@@ -1071,6 +1118,11 @@ type LiteLLMDBConfig struct {
 	// DefaultEstimatedCompletionTokens is the completion-token estimate used for
 	// budget pre-reservation when the request doesn't specify max_tokens.
 	DefaultEstimatedCompletionTokens int `yaml:"default_estimated_completion_tokens"` // default: 1000
+
+	// DailySpendTimezone sets the calendar day the Daily* spend tables are
+	// grouped by. Only their date column follows it; every stored timestamp
+	// stays UTC.
+	DailySpendTimezone *time.Location `yaml:"daily_spend_timezone"` // default: UTC
 }
 
 // KafkaConfig holds configuration for the Kafka spend-log analytics write-path
@@ -1106,6 +1158,53 @@ type KafkaConfig struct {
 	// Service for Kafka requires its own CA, not present in the OS default
 	// trust store). Empty means the OS default trust store is used.
 	TLSCACert string `yaml:"tls_ca_cert,omitempty"`
+
+	// RawBodies configures the separate, independently-toggleable
+	// write-path that publishes raw request/response bodies for *failed*
+	// requests only (see kafkalog.RawBodyEvent). Off by default even when
+	// kafka.enabled is true -- it is a second, optional producer, not a
+	// field on the spend event, precisely so it can be enabled/disabled and
+	// retained independently of spend-log analytics.
+	RawBodies KafkaRawBodiesConfig `yaml:"raw_bodies,omitempty"`
+}
+
+// KafkaRawBodiesConfig configures the raw-body Kafka write-path
+// (internal/kafkalog.RawBodyManager). Reuses the parent KafkaConfig's
+// brokers/TLS/SASL — only Enabled and Topic differ, since this is meant to be
+// the same Kafka cluster, a different topic with its own retention.
+type KafkaRawBodiesConfig struct {
+	Enabled bool `yaml:"enabled"`
+
+	// Topic is the Kafka topic raw raw-body events are published to.
+	Topic string `yaml:"topic"` // default: "raw-bodies"
+
+	// StoreRawBody additionally captures the client's own request body
+	// (e.g. the prompt) into the event's RequestBody field. Off by default:
+	// a provider's error text is one thing to ship off-box, the user's own
+	// request content is a materially bigger privacy commitment, so this
+	// needs an explicit, separate opt-in rather than riding along with
+	// Enabled.
+	StoreRawBody bool `yaml:"store_raw_body"` // default: false
+
+	// StoreOnlyErrors restricts publishing to failed requests (status ==
+	// "failure"), matching the feature's original scope. Set to false to
+	// publish an event for every request regardless of outcome -- useful
+	// once StoreRawBody is on and the goal is capturing request bodies
+	// generally, not just alongside errors.
+	StoreOnlyErrors bool `yaml:"store_only_errors"` // default: true
+
+	// RedactSensitiveFields controls whether StoreRawBody's captured
+	// request body has prompt/message content stripped before publishing
+	// (see redactRequestBodyForLogging: messages/system/prompt/input/
+	// contents/instructions replaced with a role/count-preserving
+	// placeholder, everything else -- model, tools, temperature, ...
+	// untouched). Defaults to true; only meaningful when StoreRawBody is
+	// also on. Set to false to capture the request body verbatim instead --
+	// e.g. for a short-lived, access-controlled debugging session where the
+	// actual prompt is genuinely needed. This is a deliberate, explicit
+	// escape hatch, not a recommended default: turning it off reintroduces
+	// exactly the privacy exposure StoreRawBody's redaction exists to avoid.
+	RedactSensitiveFields bool `yaml:"redact_sensitive_fields"` // default: true
 }
 
 // OTELConfig holds OpenTelemetry export configuration for logs, traces and metrics.
@@ -1301,6 +1400,7 @@ func (l *LiteLLMDBConfig) UnmarshalYAML(value *yaml.Node) error {
 		BudgetReservationTTL             string `yaml:"budget_reservation_ttl"`
 		EnforceKeyRateLimits             string `yaml:"enforce_key_rate_limits"`
 		DefaultEstimatedCompletionTokens string `yaml:"default_estimated_completion_tokens"`
+		DailySpendTimezone               string `yaml:"daily_spend_timezone"`
 	}
 
 	var temp tempConfig
@@ -1376,26 +1476,41 @@ func (l *LiteLLMDBConfig) UnmarshalYAML(value *yaml.Node) error {
 	if l.BudgetReservationTTL, err = parseField(temp.BudgetReservationTTL, 15*time.Minute, time.ParseDuration, "litellm_db.budget_reservation_ttl"); err != nil {
 		return err
 	}
+	// Timezone fields
+	if l.DailySpendTimezone, err = parseField(temp.DailySpendTimezone, time.UTC, time.LoadLocation, "litellm_db.daily_spend_timezone"); err != nil {
+		return err
+	}
 
 	return nil
+}
+
+// tempKafkaRawBodiesConfig mirrors KafkaRawBodiesConfig with string
+// fields, the same env-variable-resolution convention as KafkaConfig itself.
+type tempKafkaRawBodiesConfig struct {
+	Enabled               string `yaml:"enabled"`
+	Topic                 string `yaml:"topic"`
+	StoreRawBody          string `yaml:"store_raw_body"`
+	StoreOnlyErrors       string `yaml:"store_only_errors"`
+	RedactSensitiveFields string `yaml:"redact_sensitive_fields"`
 }
 
 // UnmarshalYAML implements custom unmarshaling for KafkaConfig with env variable support.
 func (k *KafkaConfig) UnmarshalYAML(value *yaml.Node) error {
 	type tempConfig struct {
-		Enabled          string   `yaml:"enabled"`
-		Brokers          []string `yaml:"brokers"`
-		Topic            string   `yaml:"topic"`
-		ClientID         string   `yaml:"client_id"`
-		LogQueueSize     string   `yaml:"log_queue_size"`
-		LogBatchSize     string   `yaml:"log_batch_size"`
-		LogFlushInterval string   `yaml:"log_flush_interval"`
-		LogWorkers       string   `yaml:"log_workers"`
-		TLSEnabled       string   `yaml:"tls_enabled,omitempty"`
-		SASLMechanism    string   `yaml:"sasl_mechanism,omitempty"`
-		SASLUsername     string   `yaml:"sasl_username,omitempty"`
-		SASLPassword     string   `yaml:"sasl_password,omitempty"`
-		TLSCACert        string   `yaml:"tls_ca_cert,omitempty"`
+		Enabled          string                   `yaml:"enabled"`
+		Brokers          []string                 `yaml:"brokers"`
+		Topic            string                   `yaml:"topic"`
+		ClientID         string                   `yaml:"client_id"`
+		LogQueueSize     string                   `yaml:"log_queue_size"`
+		LogBatchSize     string                   `yaml:"log_batch_size"`
+		LogFlushInterval string                   `yaml:"log_flush_interval"`
+		LogWorkers       string                   `yaml:"log_workers"`
+		TLSEnabled       string                   `yaml:"tls_enabled,omitempty"`
+		SASLMechanism    string                   `yaml:"sasl_mechanism,omitempty"`
+		SASLUsername     string                   `yaml:"sasl_username,omitempty"`
+		SASLPassword     string                   `yaml:"sasl_password,omitempty"`
+		TLSCACert        string                   `yaml:"tls_ca_cert,omitempty"`
+		RawBodies        tempKafkaRawBodiesConfig `yaml:"raw_bodies,omitempty"`
 	}
 
 	var temp tempConfig
@@ -1446,6 +1561,29 @@ func (k *KafkaConfig) UnmarshalYAML(value *yaml.Node) error {
 	k.SASLUsername = resolveEnvString(temp.SASLUsername)
 	k.SASLPassword = resolveEnvString(temp.SASLPassword)
 	k.TLSCACert = resolveEnvString(temp.TLSCACert)
+
+	if k.RawBodies.Enabled, err = parseField(temp.RawBodies.Enabled, false, strconv.ParseBool, "kafka.raw_bodies.enabled"); err != nil {
+		return err
+	}
+	// Unlike Topic/ClientID on the parent KafkaConfig (whose defaults are
+	// applied later by kafkalog.Config.ApplyDefaults), this one has no such
+	// second pass -- Validate runs directly against this struct, so an
+	// unresolved empty topic must fall back to the documented default here,
+	// not silently become "" and fail "topic is required" at startup for
+	// every deployment that (reasonably) omits it.
+	k.RawBodies.Topic = resolveEnvString(temp.RawBodies.Topic)
+	if k.RawBodies.Topic == "" {
+		k.RawBodies.Topic = "raw-bodies"
+	}
+	if k.RawBodies.StoreRawBody, err = parseField(temp.RawBodies.StoreRawBody, false, strconv.ParseBool, "kafka.raw_bodies.store_raw_body"); err != nil {
+		return err
+	}
+	if k.RawBodies.StoreOnlyErrors, err = parseField(temp.RawBodies.StoreOnlyErrors, true, strconv.ParseBool, "kafka.raw_bodies.store_only_errors"); err != nil {
+		return err
+	}
+	if k.RawBodies.RedactSensitiveFields, err = parseField(temp.RawBodies.RedactSensitiveFields, true, strconv.ParseBool, "kafka.raw_bodies.redact_sensitive_fields"); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -1673,6 +1811,7 @@ func defaultLiteLLMDBConfig() LiteLLMDBConfig {
 		BudgetReservationTTL:             15 * time.Minute,
 		EnforceKeyRateLimits:             false,
 		DefaultEstimatedCompletionTokens: 1000,
+		DailySpendTimezone:               time.UTC,
 	}
 }
 
@@ -1686,6 +1825,13 @@ func defaultKafkaConfig() KafkaConfig {
 		LogBatchSize:     100,
 		LogFlushInterval: 5 * time.Second,
 		LogWorkers:       4,
+		RawBodies: KafkaRawBodiesConfig{
+			Enabled:               false,
+			Topic:                 "raw-bodies",
+			StoreRawBody:          false,
+			StoreOnlyErrors:       true,
+			RedactSensitiveFields: true,
+		},
 	}
 }
 
@@ -1739,6 +1885,9 @@ func (c *Config) Normalize() {
 }
 
 func (c *Config) Validate() error {
+	if err := c.Video.Validate(); err != nil {
+		return err
+	}
 	if c.Server.Port <= 0 || c.Server.Port > 65535 {
 		return fmt.Errorf("invalid port: %d", c.Server.Port)
 	}
@@ -1862,7 +2011,7 @@ func (c *Config) Validate() error {
 
 		// Validate provider type
 		if !cred.Type.IsValid() {
-			return fmt.Errorf("credential %s: invalid type: %s (must be 'openai', 'vertex-ai', 'gemini', 'anthropic', 'cometapi', 'proman', 'bedrock', 'proxy', or 'air')", cred.Name, cred.Type)
+			return fmt.Errorf("credential %s: invalid type: %s (must be 'openai', 'vertex-ai', 'gemini', 'anthropic', 'cometapi', 'proman', 'bedrock', 'proxy', 'air', or 'vllm')", cred.Name, cred.Type)
 		}
 		if cred.AuthType != "" && cred.AuthType != "bearer" && cred.AuthType != "x-api-key" {
 			return fmt.Errorf("credential %s: invalid auth_type: %s (must be 'bearer' or 'x-api-key')", cred.Name, cred.AuthType)
@@ -1889,6 +2038,16 @@ func (c *Config) Validate() error {
 				return err
 			}
 			// api_key is optional for proxy/AIR
+
+		case ProviderTypeVLLM:
+			// vLLM serves an OpenAI-compatible API and is commonly deployed without
+			// --api-key, so base_url is required but api_key is optional.
+			if cred.BaseURL == "" {
+				return fmt.Errorf("credential %s: base_url is required for vllm type", cred.Name)
+			}
+			if err := validateBaseURL(cred.Name, cred.BaseURL); err != nil {
+				return err
+			}
 
 		case ProviderTypeVertexAI:
 			// For Vertex AI, project_id and location are required
@@ -2069,6 +2228,18 @@ func (c *Config) Validate() error {
 		}
 		if c.Kafka.SASLMechanism != "" && (c.Kafka.SASLUsername == "" || c.Kafka.SASLPassword == "") {
 			return fmt.Errorf("kafka.sasl_username and kafka.sasl_password are required when kafka.sasl_mechanism is set")
+		}
+	}
+
+	if c.Kafka.RawBodies.Enabled {
+		if !c.Kafka.Enabled {
+			return fmt.Errorf("kafka.raw_bodies.enabled requires kafka.enabled=true")
+		}
+		if c.Kafka.RawBodies.Topic == "" {
+			return fmt.Errorf("kafka.raw_bodies.topic is required when kafka.raw_bodies is enabled")
+		}
+		if c.Kafka.RawBodies.Topic == c.Kafka.Topic {
+			return fmt.Errorf("kafka.raw_bodies.topic must differ from kafka.topic")
 		}
 	}
 

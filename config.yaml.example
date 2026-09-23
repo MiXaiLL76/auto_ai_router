@@ -302,3 +302,4 @@ litellm_db:
   log_workers: 4  # Parallel queue-draining writer workers (default: 4)
   log_retry_attempts: 3  # Spend log retry attempts (default: 3)
   log_retry_delay: 1s  # Spend log retry delay (default: 1s)
+  daily_spend_timezone: "Europe/Moscow"  # Timezone of the daily spend tables (default: UTC)

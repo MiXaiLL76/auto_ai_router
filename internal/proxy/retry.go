@@ -446,6 +446,9 @@ func (p *Proxy) writeFallbackResponse(
 		tokens, usage := extractOpenAITokensAndUsage(proxyResp.Body, usageOptions)
 		if logCtx != nil {
 			logCtx.TokenUsage = usage
+			if logCtx.IsImageGeneration && proxyResp.StatusCode < http.StatusBadRequest {
+				logCtx.observeImageResponseBody(proxyResp.Body)
+			}
 		}
 		if tokens > 0 {
 			p.rateLimiter.ConsumeTokens(fallbackCred.Name, tokens)
@@ -468,6 +471,7 @@ func (p *Proxy) writeFallbackResponse(
 	if logCtx != nil && !logCtx.Logged {
 		if logCtx.Status == "failure" && !proxyResp.IsStreaming {
 			logCtx.ErrorMsg = extractErrorMessage(proxyResp.Body)
+			logCtx.ErrorBodyRaw = extractErrorBodyRaw(proxyResp.Body)
 		}
 		if proxyResp.IsStreaming {
 			logCtx.Logged = true

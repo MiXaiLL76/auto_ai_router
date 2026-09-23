@@ -3,6 +3,8 @@ package openai
 import (
 	"bytes"
 	"encoding/json"
+	"net/url"
+	"slices"
 	"strings"
 )
 
@@ -74,6 +76,71 @@ func ReplaceModelInBody(body []byte, oldModel, newModel string) []byte {
 	}
 
 	return body
+}
+
+// defaultParamSynonymGroups lists sets of request keys that set the same value. A
+// client that sent any member of a group has already chosen it, so a default keyed
+// on another member must not be added too: max_tokens next to max_completion_tokens
+// is ambiguous for the server. Grouped (rather than keyed one-directionally) so the
+// check works regardless of which spelling the default itself happens to use.
+var defaultParamSynonymGroups = [][]string{
+	{"max_tokens", "max_completion_tokens"},
+}
+
+// ApplyDefaultParams sets each key of defaults that is absent from the top level of a
+// JSON request body, leaving every key the client sent untouched. It mirrors LiteLLM,
+// where a deployment's litellm_params are merged under the request kwargs. Values
+// already in the body keep their exact bytes; the body is returned as is when there is
+// nothing to add or it is not a JSON object.
+func ApplyDefaultParams(body []byte, defaults map[string]any) []byte {
+	if len(defaults) == 0 || len(body) == 0 {
+		return body
+	}
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(body, &top); err != nil || top == nil {
+		return body
+	}
+	changed := false
+	for key, value := range defaults {
+		if clientSetParam(top, key) {
+			continue
+		}
+		raw, err := json.Marshal(value)
+		if err != nil {
+			continue
+		}
+		top[key] = raw
+		changed = true
+	}
+	if !changed {
+		return body
+	}
+	out, err := json.Marshal(top)
+	if err != nil {
+		return body
+	}
+	return out
+}
+
+// clientSetParam reports whether the request already carries key or a synonym of it.
+func clientSetParam(top map[string]json.RawMessage, key string) bool {
+	if _, present := top[key]; present {
+		return true
+	}
+	for _, group := range defaultParamSynonymGroups {
+		if !slices.Contains(group, key) {
+			continue
+		}
+		for _, synonym := range group {
+			if synonym == key {
+				continue
+			}
+			if _, present := top[synonym]; present {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // --- Model family parameter mappings ---
@@ -435,6 +502,98 @@ func StripResponseFormat(body []byte) []byte {
 	return UpdateJSONField(body, ModelParamsMapping{
 		KeysToRemove: []string{"response_format"},
 	})
+}
+
+// StripCacheSalt removes the cache_salt field from a JSON request body.
+// cache_salt is a real OpenAI Chat Completions parameter (partitions prompt
+// caching), but it's recent enough that most other OpenAI-compatible server
+// implementations -- vLLM-based deployments, aggregators, anything using a
+// strict Pydantic/JSON-Schema request model -- don't recognize it yet and
+// reject the whole request with a 400 ("cache_salt: Extra inputs are not
+// permitted") rather than ignoring an unknown field. See IsRealOpenAIHost:
+// only genuine api.openai.com should ever see this field forwarded.
+func StripCacheSalt(body []byte) []byte {
+	// This runs on every request through the default (OpenAI-compatible)
+	// branch, so skip the unmarshal/marshal round trip in the common case
+	// where the field isn't present at all.
+	if !bytes.Contains(body, []byte(`"cache_salt"`)) {
+		return body
+	}
+	return UpdateJSONField(body, ModelParamsMapping{
+		KeysToRemove: []string{"cache_salt"},
+	})
+}
+
+var streamOptionsIncludeUsageOnly = json.RawMessage(`{"include_usage":true}`)
+
+// RebuildStreamOptionsIncludeUsageOnly replaces the stream_options object
+// with exactly {"include_usage": true} when present, discarding any other
+// keys. The ingress sanitizer guarantees stream_options exists with
+// include_usage=true for every streaming Chat Completions request but
+// otherwise preserves whatever the client sent (e.g. vLLM's
+// continuous_usage_stats extension) -- that's fine for a genuine self-hosted
+// vLLM destination, which understands the key, but api.openai.com and other
+// strict OpenAI-compatible servers reject an unrecognized key outright with
+// a 400 ("stream_options: Extra inputs are not permitted"). Callers decide
+// when to call this based on the resolved provider (see
+// ProviderConverter.shouldStripStreamOptionsExtras); it's a no-op if
+// stream_options isn't present.
+func RebuildStreamOptionsIncludeUsageOnly(body []byte) []byte {
+	if !bytes.Contains(body, []byte(`"stream_options"`)) {
+		return body
+	}
+	var data map[string]json.RawMessage
+	if err := json.Unmarshal(body, &data); err != nil {
+		return body
+	}
+	if _, exists := data["stream_options"]; !exists {
+		return body
+	}
+	data["stream_options"] = streamOptionsIncludeUsageOnly
+	marshaled, err := json.Marshal(data)
+	if err != nil {
+		return body
+	}
+	return marshaled
+}
+
+// StripStreamOptions removes the stream_options field from a JSON request
+// body entirely, unlike RebuildStreamOptionsIncludeUsageOnly. Used for the
+// native Anthropic Messages API (/v1/messages), which -- unlike the OpenAI
+// wire protocol bucket -- doesn't merely reject unrecognized keys inside
+// stream_options, it has no stream_options concept at all and rejects the
+// whole field outright with a 400 ("stream_options: Extra inputs are not
+// permitted"). Native Anthropic streaming always includes usage regardless,
+// so there's no include_usage equivalent to preserve here.
+func StripStreamOptions(body []byte) []byte {
+	if !bytes.Contains(body, []byte(`"stream_options"`)) {
+		return body
+	}
+	return UpdateJSONField(body, ModelParamsMapping{
+		KeysToRemove: []string{"stream_options"},
+	})
+}
+
+// IsRealOpenAIHost reports whether baseURL points at OpenAI's own API
+// (api.openai.com or a subdomain), as opposed to a third-party server that
+// merely speaks the OpenAI-compatible wire protocol (OpenRouter, a
+// self-hosted vLLM deployment, most aggregators) -- credentials of type
+// "openai" cover both cases here, since AIR's provider Type field only
+// records the wire protocol, not who actually operates the endpoint.
+func IsRealOpenAIHost(baseURL string) bool {
+	trimmed := strings.TrimSpace(baseURL)
+	if trimmed == "" {
+		return false
+	}
+	u, err := url.Parse(trimmed)
+	if err != nil || u.Hostname() == "" {
+		u, err = url.Parse("https://" + trimmed)
+		if err != nil {
+			return false
+		}
+	}
+	host := strings.TrimSuffix(strings.ToLower(u.Hostname()), ".")
+	return host == "api.openai.com" || strings.HasSuffix(host, ".api.openai.com")
 }
 
 func ReplaceResponsesBodyParam(modelID string, body []byte) []byte {

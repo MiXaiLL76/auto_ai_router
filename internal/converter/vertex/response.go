@@ -75,10 +75,17 @@ func VertexToOpenAI(vertexBody []byte, model string) ([]byte, error) {
 		}
 
 		if content == "" && len(images) == 0 && len(toolCalls) == 0 && reasoningContent == "" {
-			// Handle case where parts is empty but we have a finish reason
-			if candidate.FinishReason == genai.FinishReasonMaxTokens {
-				content = "[Response truncated due to max tokens limit]"
-			} else if candidate.FinishReason != genai.FinishReasonSafety {
+			// MAX_TOKENS with literally no parts back means the whole budget was
+			// spent on hidden reasoning (see the usage.reasoning_tokens ==
+			// usage.completion_tokens case a small max_tokens on a Gemini
+			// thinking model reliably produces) -- there is no partial model
+			// text to show. Leave content empty and let finish_reason "length"
+			// carry the signal, same as every other provider route: a synthetic
+			// English placeholder here isn't real model output, is silently
+			// indistinguishable from one, and (unlike an empty string) can't be
+			// detected by a client without hardcoding this exact string.
+			if candidate.FinishReason != genai.FinishReasonMaxTokens &&
+				candidate.FinishReason != genai.FinishReasonSafety {
 				content = "[No content generated]"
 			}
 		}

@@ -2,6 +2,7 @@ package responses
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -207,6 +208,51 @@ func TestStreamTransform_BasicText(t *testing.T) {
 	assert.Contains(t, result, " world")
 
 	// Should contain completion events
+	assert.Contains(t, result, "response.completed")
+}
+
+// A chat chunk can carry a generated image as one base64 blob in delta.images,
+// which pushes a single SSE line past 1 MiB. The scanner used to cap tokens at
+// 1 MiB and aborted the whole stream with "bufio.Scanner: token too long", so
+// the text and usage that followed the image never reached the client either.
+func TestStreamTransform_OversizedImageLineDoesNotAbortStream(t *testing.T) {
+	stopReason := "stop"
+	imageURL := "data:image/png;base64," + base64.StdEncoding.EncodeToString(bytes.Repeat([]byte{0xab}, 900*1024))
+	imageChunk, err := json.Marshal(map[string]interface{}{
+		"id":      "chatcmpl-test",
+		"object":  "chat.completion.chunk",
+		"created": 1700000000,
+		"model":   "gpt-4o",
+		"choices": []interface{}{
+			map[string]interface{}{
+				"index": 0,
+				"delta": map[string]interface{}{
+					"images": []interface{}{
+						map[string]interface{}{
+							"type":      "image_url",
+							"index":     0,
+							"image_url": map[string]interface{}{"url": imageURL},
+						},
+					},
+				},
+				"finish_reason": nil,
+			},
+		},
+	})
+	require.NoError(t, err)
+	require.Greater(t, len(imageChunk), 1024*1024)
+
+	input := buildSSEChunk(buildChatChunkWithRole("assistant")) +
+		buildSSEChunk(string(imageChunk)) +
+		buildSSEChunk(buildChatChunk("after image", &stopReason)) +
+		buildSSEChunk(buildUsageChunk(10, 5, 15)) +
+		"data: [DONE]\n\n"
+
+	var output bytes.Buffer
+	require.NoError(t, TransformChatStreamToResponses(strings.NewReader(input), &output, "gpt-4o"))
+
+	result := output.String()
+	assert.Contains(t, result, "after image")
 	assert.Contains(t, result, "response.completed")
 }
 

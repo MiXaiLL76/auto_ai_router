@@ -231,7 +231,7 @@ ______________________________________________________________________
 
 ## Organization Model Policies
 
-`organization_policies` adds a scoped public model surface for verified LiteLLM organizations. It is an overlay on top of the global surface.
+`organization_policies` with a tariff profile adds a scoped public model surface for verified LiteLLM organizations. Policies containing only an organization ID and credential denylist use the global model surface and pricing.
 
 ```yaml
 organization_policies:
@@ -260,4 +260,4 @@ An organization mapping shadows every global meaning of the same request ID only
 
 Database model ACLs still run after organization surface admission. For an organization-mapped request, AIR tests the ordered candidate set `PublicModelID`, `CanonicalModelID`, and `ModelID` against the applicable key, team, user, and membership allowlists. A direct request for a canonical or routed target does not inherit permission from an organization public ID.
 
-`GET /v1/models?include_model_access_groups=true` returns the same curated organization surface as the plain listing. The provider access-group projection is an administrative view over internal routes and is intentionally suppressed for organization-scoped keys so backend IDs are not re-introduced through a query parameter.
+`GET /v1/models?include_model_access_groups=true` returns the same curated organization surface as the plain listing for policies with a tariff profile. Policies without a tariff profile retain the standard catalog behavior and access checks.

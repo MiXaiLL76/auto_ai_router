@@ -9,6 +9,16 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/utils"
 )
 
+// MaxSSELineBytes is the largest single SSE line a streaming reader accepts.
+// One line has to hold a whole generated image: providers send it as a single
+// base64 blob (inlineData / delta.images), which routinely exceeds both bufio's
+// default 64 KiB and the 1 MiB each reader used to set on its own. Too low a cap
+// fails the stream with "bufio.Scanner: token too long" before a single event
+// reaches the client, so the readers share one value instead of drifting apart —
+// that drift is what broke image output on /v1/responses while
+// /v1/chat/completions kept working.
+const MaxSSELineBytes = 64 * 1024 * 1024
+
 // GenerateID generates a unique chat completion ID.
 // Used by multiple transformers to generate response IDs in a consistent format.
 func GenerateID() string {

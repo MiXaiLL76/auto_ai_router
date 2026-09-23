@@ -14,7 +14,6 @@ import (
 	"net/textproto"
 	"regexp"
 	"sort"
-	"strconv"
 	"strings"
 
 	// Also used by request ingress sanitization below. RawMessage keeps large
@@ -243,8 +242,16 @@ func extractSessionIDFromHeaders(header http.Header) string {
 var rawIncludeUsageTrue = goccyjson.RawMessage("true")
 
 // injectIncludeUsageRaw ensures reqBody["stream_options"]["include_usage"] is
-// true, operating entirely on RawMessage sub-slices so the rest of reqBody
-// (in particular messages/input) is never boxed into interface{}.
+// true, merging into whatever stream_options object the client sent rather
+// than discarding it. This runs before the destination provider is resolved
+// (sanitizeAndExtractRequestBody is called at request ingress, ahead of
+// credential selection), so it cannot know yet whether a client-sent
+// provider-specific key like vLLM's continuous_usage_stats should ultimately
+// survive: that decision needs the resolved provider and is made later, in
+// converter.ProviderConverter.RequestFrom (see shouldStripStreamOptionsExtras
+// / RebuildStreamOptionsIncludeUsageOnly). Operates entirely on RawMessage
+// sub-slices so the rest of reqBody (in particular messages/input) is never
+// boxed into interface{}.
 func injectIncludeUsageRaw(reqBody map[string]goccyjson.RawMessage) error {
 	streamOptionsRaw, exists := reqBody["stream_options"]
 	var streamOptions map[string]goccyjson.RawMessage
@@ -627,47 +634,6 @@ func hasMultipartClosingBoundary(body []byte, boundary string) bool {
 	return len(after) == 0 || bytes.HasPrefix(after, []byte("\r\n"))
 }
 
-func extractImageCountFromBody(body []byte, contentType string) int {
-	if strings.HasPrefix(strings.ToLower(contentType), "multipart/form-data") {
-		_, params, err := mime.ParseMediaType(contentType)
-		if err != nil {
-			return 1
-		}
-		boundary := params["boundary"]
-		if boundary == "" {
-			return 1
-		}
-		reader := multipart.NewReader(bytes.NewReader(body), boundary)
-		for {
-			part, err := reader.NextPart()
-			if err != nil {
-				break
-			}
-			if part.FileName() != "" || part.FormName() != "n" {
-				continue
-			}
-			data, err := io.ReadAll(io.LimitReader(part, 64))
-			if err != nil {
-				break
-			}
-			n, err := strconv.Atoi(strings.TrimSpace(string(data)))
-			if err == nil && n > 0 {
-				return n
-			}
-			break
-		}
-		return 1
-	}
-
-	var imgReq struct {
-		N *int `json:"n"`
-	}
-	if err := json.Unmarshal(body, &imgReq); err == nil && imgReq.N != nil && *imgReq.N > 0 {
-		return *imgReq.N
-	}
-	return 1
-}
-
 func extractWebSearchRequestUsage(body []byte, contentType string) (bool, string) {
 	if len(body) == 0 || strings.HasPrefix(strings.ToLower(contentType), "multipart/form-data") {
 		return false, ""
@@ -817,8 +783,12 @@ func extractTokensFromResponse(body []byte, credType config.ProviderType) int {
 	return extractOpenAITotalTokens(body)
 }
 
-// injectStreamOptions ensures stream_options.include_usage is set in a Chat Completions request body.
-// Used after Responses API conversion where ingress sanitization skipped injection.
+// injectStreamOptions ensures stream_options.include_usage is set in a Chat
+// Completions request body, merging into whatever the client sent rather
+// than discarding it -- see injectIncludeUsageRaw for why: this runs before
+// the destination provider is resolved, so provider-specific extension keys
+// are stripped later if needed, in converter.RequestFrom. Used after
+// Responses API conversion where ingress sanitization skipped injection.
 func injectStreamOptions(body []byte) []byte {
 	var raw map[string]interface{}
 	if err := json.Unmarshal(body, &raw); err != nil {

@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
@@ -35,6 +36,27 @@ func (s *stubKafkaManager) Shutdown(context.Context) error {
 }
 
 var _ kafkalog.Manager = (*stubKafkaManager)(nil)
+
+// stubKafkaRawBodyManager mirrors stubKafkaManager for the separate
+// raw-bodies write-path (kafkalog.RawBodyManager).
+type stubKafkaRawBodyManager struct {
+	events  []*kafkalog.RawBodyEvent
+	err     error
+	enabled bool
+}
+
+func (s *stubKafkaRawBodyManager) LogRawBody(event *kafkalog.RawBodyEvent) error {
+	s.events = append(s.events, event)
+	return s.err
+}
+func (s *stubKafkaRawBodyManager) IsEnabled() bool       { return s.enabled }
+func (s *stubKafkaRawBodyManager) IsHealthy() bool       { return true }
+func (s *stubKafkaRawBodyManager) Stats() kafkalog.Stats { return kafkalog.Stats{} }
+func (s *stubKafkaRawBodyManager) Shutdown(context.Context) error {
+	return nil
+}
+
+var _ kafkalog.RawBodyManager = (*stubKafkaRawBodyManager)(nil)
 
 func testLogCtx(t *testing.T) *RequestLogContext {
 	t.Helper()
@@ -236,6 +258,124 @@ func TestBuildKafkaSpendEvent_ErrorClassOnlyOnFailure(t *testing.T) {
 	eventOK := prx.buildKafkaSpendEvent(logCtx2, "cred", "cred:model", "hash",
 		"", "", "", "", "api.openai.com", "success", 0, nil, 0, logCtx2.StartTime)
 	assert.Empty(t, eventOK.ErrorClass)
+}
+
+// TestBuildRawBodyEvent_MapsRawBodies checks that buildRawBodyEvent (the
+// separate raw-bodies write-path, see kafkalog.RawBodyEvent) carries the
+// raw response body through untouched, keyed on the same
+// request_id/server_router_id a matching air.errors row would have so the
+// two can be joined. RequestBody stays empty here since
+// rawBodyStoreRawBody defaults to false on a bare NewTestProxyBuilder --
+// see TestBuildRawBodyEvent_RequestBody{Included,Omitted} for that toggle.
+func TestBuildRawBodyEvent_MapsRawBodies(t *testing.T) {
+	prx := NewTestProxyBuilder().Build()
+	rawResponse := `{"error":{"message":"the model produced invalid content","type":"invalid_request_error"}}`
+
+	logCtx := testLogCtx(t)
+	logCtx.HTTPStatus = 400
+	logCtx.ErrorBodyRaw = rawResponse
+	logCtx.RequestBodyRaw = "some prompt that should not leak out by default"
+	endTime := logCtx.StartTime.Add(250 * time.Millisecond)
+
+	event := prx.buildRawBodyEvent(logCtx, "failure", endTime)
+
+	assert.Equal(t, logCtx.spendRequestID(), event.RequestID)
+	assert.Equal(t, prx.routerID, event.ServerRouterID)
+	assert.Equal(t, logCtx.StartTime, event.StartTime)
+	assert.Equal(t, endTime, event.EndTime, "EndTime must be the same value passed in, matching SpendEvent.EndTime for the same request")
+	assert.Equal(t, "BadRequestError", event.ErrorClass)
+	assert.Equal(t, rawResponse, event.ResponseBody)
+	assert.Empty(t, event.RequestBody, "RequestBody must stay empty when rawBodyStoreRawBody is off, even if logCtx captured one")
+}
+
+// TestBuildRawBodyEvent_ErrorOriginSetWhenResponseBodyEmpty reproduces the
+// exact motivating case for ErrorOrigin: a 502 with no upstream response at
+// all (ResponseBody empty because nothing ever answered), where ErrorOrigin
+// is the only field left that says why.
+func TestBuildRawBodyEvent_ErrorOriginSetWhenResponseBodyEmpty(t *testing.T) {
+	prx := NewTestProxyBuilder().Build()
+
+	logCtx := testLogCtx(t)
+	logCtx.HTTPStatus = http.StatusBadGateway
+	logCtx.ErrorOrigin = ErrorOriginProxyForwardError
+	endTime := logCtx.StartTime.Add(250 * time.Millisecond)
+
+	event := prx.buildRawBodyEvent(logCtx, "failure", endTime)
+
+	assert.Empty(t, event.ResponseBody, "no upstream response was ever received for this origin")
+	assert.Equal(t, "proxy_forward_error", event.ErrorOrigin)
+}
+
+// TestBuildRawBodyEvent_RequestBodyIncludedWhenStoreRawBodyEnabled verifies
+// the opt-in: kafka.raw_bodies.store_raw_body=true is the only thing that
+// lets RequestBody reach the event.
+func TestBuildRawBodyEvent_RequestBodyIncludedWhenStoreRawBodyEnabled(t *testing.T) {
+	prx := NewTestProxyBuilder().Build()
+	prx.rawBodyStoreRawBody = true
+
+	logCtx := testLogCtx(t)
+	logCtx.HTTPStatus = 400
+	logCtx.RequestBodyRaw = `{"messages":[{"role":"user","content":"hello"}]}`
+
+	event := prx.buildRawBodyEvent(logCtx, "failure", logCtx.StartTime)
+	assert.Equal(t, logCtx.RequestBodyRaw, event.RequestBody)
+}
+
+// TestBuildRawBodyEvent_NoErrorClassOnSuccess guards the store_only_errors
+// gating (proxy_log.go): once that toggle is disabled, buildRawBodyEvent
+// also runs for successful (2xx) requests, and a "success" status must not
+// get a misleading ErrorClass derived from mapHTTPStatusToErrorClass.
+func TestBuildRawBodyEvent_NoErrorClassOnSuccess(t *testing.T) {
+	prx := NewTestProxyBuilder().Build()
+
+	logCtx := testLogCtx(t)
+	logCtx.HTTPStatus = 200
+
+	event := prx.buildRawBodyEvent(logCtx, "success", logCtx.StartTime)
+	assert.Empty(t, event.ErrorClass)
+}
+
+// TestBuildRawBodyEvent_ErrorClassSetOnMidStreamFailureWithHTTP2xx guards a
+// real bug: a mid-stream SSE error (provider returns HTTP 200, then sends an
+// error event inside the stream -- see stream.go's finalizeStreamingLog)
+// sets logCtx.Status = "failure" without touching HTTPStatus, which stays
+// 2xx. Gating ErrorClass on a raw "HTTPStatus >= 400" check (instead of the
+// canonical status, like buildKafkaSpendEvent does) left this row's
+// ErrorClass empty despite ResponseBody/ClientResponseBody being populated
+// and the row actually getting published -- so air.raw_bodies.error_class
+// silently disagreed with air.spend_logs.error_class for the exact same
+// request.
+func TestBuildRawBodyEvent_ErrorClassSetOnMidStreamFailureWithHTTP2xx(t *testing.T) {
+	prx := NewTestProxyBuilder().Build()
+
+	logCtx := testLogCtx(t)
+	logCtx.HTTPStatus = 200 // never updated by the mid-stream-error branch in stream.go
+	logCtx.ErrorBodyRaw = `{"error":{"message":"content filtered"}}`
+	logCtx.ClientResponseBody = logCtx.ErrorBodyRaw
+
+	event := prx.buildRawBodyEvent(logCtx, "failure", logCtx.StartTime)
+	assert.NotEmpty(t, event.ErrorClass, "a canonical-failure row must get a non-empty ErrorClass even with a 2xx HTTPStatus")
+}
+
+// TestLogRawBodyToKafka_OnlyCalledOnFailure guards the gate in
+// logSpendToLiteLLMDB: the raw-bodies write-path must never publish for a
+// successful request, even when logCtx.ErrorBodyRaw is a non-empty leftover
+// from an earlier failed attempt on a retried request that ultimately
+// succeeded (mirrors TestBuildKafkaSpendEvent_ErrorClassOnlyOnFailure's
+// stale-retry concern, but at the call-site gate instead of inside the
+// builder, since RawBodyEvent has no "status" field of its own to gate on).
+func TestLogRawBodyToKafka_OnlyCalledOnFailure(t *testing.T) {
+	stub := &stubKafkaRawBodyManager{enabled: true}
+	prx := NewTestProxyBuilder().Build()
+	prx.rawBodyLog = stub
+
+	logCtx := testLogCtx(t)
+	logCtx.HTTPStatus = 400
+	logCtx.ErrorBodyRaw = `{"error":"bad request"}`
+
+	prx.logRawBodyToKafka(logCtx, "failure", logCtx.StartTime) // simulates what logSpendToLiteLLMDB does when status == "failure"
+	require.Len(t, stub.events, 1)
+	assert.Equal(t, `{"error":"bad request"}`, stub.events[0].ResponseBody)
 }
 
 func TestBuildKafkaSpendEvent_RealModelIDPreserved(t *testing.T) {

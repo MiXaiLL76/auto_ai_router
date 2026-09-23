@@ -22,6 +22,16 @@ type Router struct {
 	appConfig        *config.Config
 	logger           *slog.Logger
 	isReady          atomic.Bool
+	videoHandler     http.Handler
+}
+
+func (r *Router) SetVideoHandler(handler http.Handler) {
+	r.videoHandler = handler
+}
+
+func isVideoPath(path string) bool {
+	return path == "/v1/videos" || strings.HasPrefix(path, "/v1/videos/") ||
+		path == "/v1/media/uploads" || strings.HasPrefix(path, "/v1/media/uploads/")
 }
 
 var proxiedPublicPaths = map[string]struct{}{
@@ -136,6 +146,15 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		}
 	}()
 
+	if isVideoPath(req.URL.Path) {
+		if r.videoHandler == nil {
+			proxy.WriteErrorNotFound(w, "Not Found")
+			return
+		}
+		r.videoHandler.ServeHTTP(w, req)
+		return
+	}
+
 	if allowedMethod, public := publicPathAllowedMethod(req); public && req.Method != allowedMethod {
 		writeMethodNotAllowed(w, allowedMethod)
 		return
@@ -173,6 +192,19 @@ func (r *Router) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	// Router chain trace (visual HTML)
 	if req.URL.Path == "/vtrace" {
 		r.handleVisualTrace(w, req)
+		return
+	}
+
+	// Admin ban management (master key only, enforced by the handlers)
+	switch req.URL.Path {
+	case "/api/ban":
+		r.proxy.HandleAdminBan(w, req)
+		return
+	case "/api/unban":
+		r.proxy.HandleAdminUnban(w, req)
+		return
+	case "/api/bans":
+		r.proxy.HandleAdminBans(w, req)
 		return
 	}
 

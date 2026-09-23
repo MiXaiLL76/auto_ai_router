@@ -209,6 +209,7 @@ func litellmCallType(path string) string {
 func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
 	litellmEnabled := p.postgresSpendTrackingEnabled()
 	kafkaEnabled := p.kafkaLog != nil && p.kafkaLog.IsEnabled()
+	rawBodyLogEnabled := p.rawBodyLog != nil && p.rawBodyLog.IsEnabled()
 	if !litellmEnabled && !kafkaEnabled {
 		return nil
 	}
@@ -253,12 +254,27 @@ func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
 		teamID = credName
 	}
 
-	// LiteLLM's end_user is the caller-supplied end-user identifier ("user" in
-	// the request body, X-End-User for AIR). The key owner's email must NOT be
-	// used as a fallback: LiteLLM leaves end_user empty for such traffic, and
+	// LiteLLM's end_user is the caller-supplied end-user identifier. AIR reads it
+	// from identity headers only (see endUserHeaders): the *-Email headers set by
+	// OpenWebUI/AirClaw or AIR's own X-AIR-User-Email. The key owner's email must
+	// NOT be used as a fallback: LiteLLM leaves end_user empty for such traffic, and
 	// substituting the email would fabricate EndUserTable/DailyEndUserSpend
 	// rows that have no counterpart in the primary accounting.
 	endUser := extractEndUser(logCtx.Request)
+	// LiteLLM's user_header_mappings (role internal_user) names the person behind a
+	// shared service key, so SpendLogs and DailyUserSpend follow that person. The
+	// header is honoured only for ownerless service keys (no user_id): the identity
+	// headers are not authenticated, and on a key that has an owner they would let
+	// its holder bill any other user (LiteLLM_UserTable, team/org member spend) while
+	// budget checks keep reading the key's own user. An empty user_id is the marker,
+	// not metadata.service_account_id: personal keys carry service_account_id too,
+	// whereas the shared keys fronted by OpenWebUI/AirClaw are exactly the ones with
+	// no owner, and those are the only callers that need to name the person.
+	if userID == "" {
+		if headerUserID := extractUserID(logCtx.Request); headerUserID != "" {
+			userID = headerUserID
+		}
+	}
 
 	// Extract domain from targetURL for APIBase (e.g., "https://api.openai.com/..." -> "api.openai.com")
 	apiBase := "auto_ai_router"
@@ -282,12 +298,7 @@ func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
 	if logCtx.TokenUsage == nil {
 		logCtx.TokenUsage = &converter.TokenUsage{}
 	}
-	if logCtx.IsImageGeneration && status == "success" && logCtx.TokenUsage.ImageCount <= 0 {
-		logCtx.TokenUsage.ImageCount = logCtx.ImageCount
-		if logCtx.TokenUsage.ImageCount <= 0 {
-			logCtx.TokenUsage.ImageCount = 1
-		}
-	}
+	logCtx.finalizeImageUsage(status)
 	logCtx.applyWebSearchUsageDefaults(status)
 	logCtx.TokenUsage.Normalize()
 
@@ -355,6 +366,17 @@ func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
 		}
 	}
 
+	// Raw request/response bodies are supplementary debugging data, never
+	// published for the proxy/chain-audit traffic excluded above. By default
+	// (StoreOnlyErrors=true) they're also failures-only; an operator can set
+	// kafka.raw_bodies.store_only_errors=false to capture every request,
+	// which only makes sense once StoreRawBody is also on (see
+	// buildRawBodyEvent) -- otherwise a success row would carry nothing
+	// but identifying fields.
+	if rawBodyLogEnabled && !logCtx.IsProxyRequest && (status == "failure" || !p.rawBodyStoreOnlyErrors) {
+		p.logRawBodyToKafka(logCtx, status, endTime)
+	}
+
 	// Build metadata with usage, cost breakdown, requester IP, and optional error
 	requesterIP := getClientIP(logCtx.Request)
 	overheadMs := float64(time.Since(logCtx.StartTime).Microseconds()) / 1000.0
@@ -378,10 +400,10 @@ func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
 			CompletionStartTime: completionStartTime,
 			CallType:            litellmCallType(logCtx.Request.URL.Path),
 			APIBase:             apiBase,
-			Model:               logCtx.ModelID,    // Model name
-			ModelID:             modelIDFormatted,  // credential.name:model_name
-			ModelGroup:          logCtx.ModelID,    // Model name
-			CustomLLMProvider:   customLLMProvider, // Provider type as string
+			Model:               logCtx.ModelID,           // Model name
+			ModelID:             modelIDFormatted,         // credential.name:model_name
+			ModelGroup:          logCtx.spendModelGroup(), // Model name the client asked for
+			CustomLLMProvider:   customLLMProvider,        // Provider type as string
 			PromptTokens:        logCtx.TokenUsage.PromptTokens,
 			CompletionTokens:    logCtx.TokenUsage.CompletionTokens,
 			TotalTokens:         logCtx.TokenUsage.Total(),

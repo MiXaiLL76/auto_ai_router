@@ -131,6 +131,7 @@ func TestConvertPricingToModelPrice(t *testing.T) {
 	cacheCreation := 0.05
 	outputImage := 0.5
 	outputImageToken := 0.6
+	outputVideoPerSecond := 1.25
 	inputAbove200k := 0.07
 
 	price := convertPricingToModelPrice(&queries.CustomPricingLiteLLMParams{
@@ -141,6 +142,7 @@ func TestConvertPricingToModelPrice(t *testing.T) {
 		CacheCreationInputTokenCost:       &cacheCreation,
 		OutputCostPerImage:                &outputImage,
 		OutputCostPerImageToken:           &outputImageToken,
+		OutputCostPerVideoPerSecond:       &outputVideoPerSecond,
 		InputCostPerTokenAbove200kTokens:  &inputAbove200k,
 		OutputCostPerTokenAbove200kTokens: &output,
 	})
@@ -153,6 +155,7 @@ func TestConvertPricingToModelPrice(t *testing.T) {
 	assert.Equal(t, cacheCreation, price.CacheCreationInputTokenCost)
 	assert.Equal(t, outputImage, price.OutputCostPerImage)
 	assert.Equal(t, outputImageToken, price.OutputCostPerImageToken)
+	assert.Equal(t, outputVideoPerSecond, price.OutputCostPerVideoPerSecond)
 	assert.Equal(t, inputAbove200k, price.InputCostPerTokenAbove200k)
 
 	assert.Nil(t, convertPricingToModelPrice(&queries.CustomPricingLiteLLMParams{}))
@@ -284,4 +287,15 @@ func TestConvertPricingToModelPrice_WebSearchOnly(t *testing.T) {
 
 	require.NotNil(t, price)
 	assert.Equal(t, searchContextCost, price.SearchContextCostPerQuery)
+}
+
+func TestConvertPricingToModelPriceVideoOnly(t *testing.T) {
+	outputVideoPerSecond := 1.25
+
+	price := convertPricingToModelPrice(&queries.CustomPricingLiteLLMParams{
+		OutputCostPerVideoPerSecond: &outputVideoPerSecond,
+	})
+
+	require.NotNil(t, price)
+	assert.Equal(t, outputVideoPerSecond, price.OutputCostPerVideoPerSecond)
 }
