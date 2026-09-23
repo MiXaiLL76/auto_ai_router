@@ -107,14 +107,19 @@ func dailyEndpoint(callType string) string {
 // on the LiteLLM schema, and everything it returned is already known here: the
 // writer owns every column it inserted.
 //
-// The date bucket is the UTC wall-clock date of StartTime, matching
-// TO_CHAR("startTime", 'YYYY-MM-DD') on the UTC wall clock LiteLLM stores in
-// the timestamp-without-time-zone column.
+// The date bucket is the wall-clock date of StartTime in timezone (UTC when
+// nil), matching TO_CHAR("startTime", 'YYYY-MM-DD') on the UTC wall clock
+// LiteLLM stores in the timestamp-without-time-zone column only while it
+// stays UTC.
 func buildSpendLogRecords(
 	inserted []insertedSpendEntry,
 	logger *slog.Logger,
 	scope string,
+	timezone *time.Location,
 ) ([]spendLogRecord, error) {
+	if timezone == nil {
+		timezone = time.UTC
+	}
 	records := make([]spendLogRecord, 0, len(inserted))
 	for _, item := range inserted {
 		entry := item.entry
@@ -125,7 +130,7 @@ func buildSpendLogRecords(
 		originalCallType, cacheRead, cacheCreation := spendLogMetadataFields(entry.Metadata)
 		record := spendLogRecord{
 			UserID:                   entry.UserID,
-			Date:                     entry.StartTime.UTC().Format("2006-01-02"),
+			Date:                     entry.StartTime.In(timezone).Format("2006-01-02"),
 			APIKey:                   entry.APIKey,
 			Model:                    entry.Model,
 			ModelGroup:               entry.ModelGroup,

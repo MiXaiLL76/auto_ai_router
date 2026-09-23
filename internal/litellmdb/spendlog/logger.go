@@ -705,7 +705,7 @@ func (sl *Logger) writeBatchInTransaction(ctx context.Context, tx pgx.Tx, batch 
 	// Daily aggregates are built from the in-memory entries. Re-reading the
 	// just-inserted rows from LiteLLM_SpendLogs is a heavy query on the LiteLLM
 	// schema, and everything it returned is already known to the writer.
-	records, err := buildSpendLogRecords(accountingBatch, sl.logger, "atomic")
+	records, err := buildSpendLogRecords(accountingBatch, sl.logger, "atomic", sl.config.DailySpendTimezone)
 	if err != nil {
 		return nil, fmt.Errorf("build daily aggregation records: %w", err)
 	}

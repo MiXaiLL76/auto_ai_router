@@ -1006,6 +1006,7 @@ func initializeLiteLLMDB(cfg *config.Config, log *slog.Logger) litellmdb.Manager
 		LogWorkers:                  cfg.LiteLLMDB.LogWorkers,
 		DisableSpendLogsWrite:       cfg.LiteLLMDB.DisableSpendLogsWrite,
 		IncludeTeamSpendInUserSpend: &cfg.LiteLLMDB.IncludeTeamSpendInUserSpend,
+		DailySpendTimezone:          cfg.LiteLLMDB.DailySpendTimezone,
 		Logger:                      log,
 	}
 

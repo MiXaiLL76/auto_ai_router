@@ -21,6 +21,7 @@ func TestOpenAIChatFailureDailyProjectionKeepsEndpointAndFailureCount(t *testing
 		[]insertedSpendEntry{{entry: entry, requestID: entry.RequestID}},
 		logger.logger,
 		"test",
+		nil,
 	)
 
 	require.NoError(t, err)

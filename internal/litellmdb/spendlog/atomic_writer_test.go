@@ -142,7 +142,7 @@ func TestLegacyFailureOriginalRouteEnablesDailyAggregationWithoutPopulatingEndpo
 	entry.Metadata = `{"spend_logs_metadata":{"original_call_type":"acompletion"}}`
 
 	records, err := buildSpendLogRecords(
-		[]insertedSpendEntry{{entry: entry, requestID: entry.RequestID}}, logger.logger, "test",
+		[]insertedSpendEntry{{entry: entry, requestID: entry.RequestID}}, logger.logger, "test", nil,
 	)
 
 	require.NoError(t, err)
@@ -295,6 +295,7 @@ func TestAtomicWriterEventFallbackReplayDoesNotFeedAccounting(t *testing.T) {
 func newAtomicTestLogger() *Logger {
 	return &Logger{
 		logger: testhelpers.NewTestLogger(),
+		config: &models.Config{},
 		queue:  make(chan *models.SpendLogEntry),
 	}
 }

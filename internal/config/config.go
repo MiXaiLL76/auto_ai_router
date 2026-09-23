@@ -1118,6 +1118,11 @@ type LiteLLMDBConfig struct {
 	// DefaultEstimatedCompletionTokens is the completion-token estimate used for
 	// budget pre-reservation when the request doesn't specify max_tokens.
 	DefaultEstimatedCompletionTokens int `yaml:"default_estimated_completion_tokens"` // default: 1000
+
+	// DailySpendTimezone sets the calendar day the Daily* spend tables are
+	// grouped by. Only their date column follows it; every stored timestamp
+	// stays UTC.
+	DailySpendTimezone *time.Location `yaml:"daily_spend_timezone"` // default: UTC
 }
 
 // KafkaConfig holds configuration for the Kafka spend-log analytics write-path
@@ -1395,6 +1400,7 @@ func (l *LiteLLMDBConfig) UnmarshalYAML(value *yaml.Node) error {
 		BudgetReservationTTL             string `yaml:"budget_reservation_ttl"`
 		EnforceKeyRateLimits             string `yaml:"enforce_key_rate_limits"`
 		DefaultEstimatedCompletionTokens string `yaml:"default_estimated_completion_tokens"`
+		DailySpendTimezone               string `yaml:"daily_spend_timezone"`
 	}
 
 	var temp tempConfig
@@ -1468,6 +1474,10 @@ func (l *LiteLLMDBConfig) UnmarshalYAML(value *yaml.Node) error {
 		return err
 	}
 	if l.BudgetReservationTTL, err = parseField(temp.BudgetReservationTTL, 15*time.Minute, time.ParseDuration, "litellm_db.budget_reservation_ttl"); err != nil {
+		return err
+	}
+	// Timezone fields
+	if l.DailySpendTimezone, err = parseField(temp.DailySpendTimezone, time.UTC, time.LoadLocation, "litellm_db.daily_spend_timezone"); err != nil {
 		return err
 	}
 
@@ -1801,6 +1811,7 @@ func defaultLiteLLMDBConfig() LiteLLMDBConfig {
 		BudgetReservationTTL:             15 * time.Minute,
 		EnforceKeyRateLimits:             false,
 		DefaultEstimatedCompletionTokens: 1000,
+		DailySpendTimezone:               time.UTC,
 	}
 }
 
