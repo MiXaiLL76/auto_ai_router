@@ -135,6 +135,8 @@ func (r *streamReader) readFrame() error {
 		r.normalizeResponsesChunk(body)
 		if isImageEndpoint(r.ctx.Endpoint) {
 			dropProviderImageCost(body)
+		} else if r.ctx.Endpoint == "/v1/responses" {
+			dropResponsesProviderCost(body)
 		}
 	}
 	stripRoutingMetadata(body)
@@ -365,9 +367,6 @@ func (r *streamReader) usageChoices() []any {
 
 func liteLLMStreamUsage(usage map[string]any) map[string]any {
 	normalizeUsage(usage)
-	delete(usage, "cost")
-	delete(usage, "cost_details")
-	delete(usage, "is_byok")
 	details, _ := usage["completion_tokens_details"].(map[string]any)
 	if details == nil {
 		details = make(map[string]any)
