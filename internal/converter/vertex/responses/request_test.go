@@ -512,6 +512,89 @@ func TestResponsesRequestToVertex_WebSearchOnlyNoToolConfig(t *testing.T) {
 	assert.Contains(t, tools[0].(map[string]interface{}), "googleSearch")
 }
 
+func TestResponsesRequestToVertex_URLContextTool(t *testing.T) {
+	body := `{
+		"model": "gemini-3.8-flash",
+		"input": "What is on https://example.com/page ?",
+		"tools": [{"type": "url_context"}]
+	}`
+
+	result, err := ResponsesRequestToVertex([]byte(body), "gemini-3.8-flash")
+	require.NoError(t, err)
+
+	var vr map[string]interface{}
+	require.NoError(t, json.Unmarshal(result, &vr))
+
+	tools, ok := vr["tools"].([]interface{})
+	require.True(t, ok, "url_context must reach Vertex as a tool")
+	require.Len(t, tools, 1)
+	assert.Equal(t, map[string]interface{}{"urlContext": map[string]interface{}{}}, tools[0])
+}
+
+func TestResponsesRequestToVertex_URLContextWithWebSearch(t *testing.T) {
+	body := `{
+		"model": "gemini-3.8-flash",
+		"input": "compare",
+		"tools": [{"type": "web_search"}, {"type": "url_context"}]
+	}`
+
+	result, err := ResponsesRequestToVertex([]byte(body), "gemini-3.8-flash")
+	require.NoError(t, err)
+
+	var vr map[string]interface{}
+	require.NoError(t, json.Unmarshal(result, &vr))
+
+	tools := vr["tools"].([]interface{})
+	require.Len(t, tools, 2)
+	assert.Contains(t, tools[0].(map[string]interface{}), "googleSearch")
+	assert.Contains(t, tools[1].(map[string]interface{}), "urlContext")
+}
+
+func TestResponsesRequestToVertex_URLContextWithFunctionNoToolConfig(t *testing.T) {
+	body := `{
+		"model": "gemini-3.8-flash",
+		"input": "read the page",
+		"tools": [
+			{"type": "url_context"},
+			{"type": "function", "name": "lookup", "parameters": {"type": "object"}}
+		],
+		"tool_choice": "auto"
+	}`
+
+	result, err := ResponsesRequestToVertex([]byte(body), "gemini-3.8-flash")
+	require.NoError(t, err)
+
+	var vr map[string]interface{}
+	require.NoError(t, json.Unmarshal(result, &vr))
+
+	_, hasToolConfig := vr["toolConfig"]
+	assert.False(t, hasToolConfig, "toolConfig must not be set when functions were dropped")
+
+	tools := vr["tools"].([]interface{})
+	require.Len(t, tools, 1)
+	assert.Contains(t, tools[0].(map[string]interface{}), "urlContext")
+}
+
+func TestResponsesRequestToVertex_FunctionToolChoiceStillMapped(t *testing.T) {
+	body := `{
+		"model": "gemini-3.8-flash",
+		"input": "call it",
+		"tools": [{"type": "function", "name": "lookup", "parameters": {"type": "object"}}],
+		"tool_choice": "required"
+	}`
+
+	result, err := ResponsesRequestToVertex([]byte(body), "gemini-3.8-flash")
+	require.NoError(t, err)
+
+	var vr map[string]interface{}
+	require.NoError(t, json.Unmarshal(result, &vr))
+
+	toolConfig, ok := vr["toolConfig"].(map[string]interface{})
+	require.True(t, ok, "toolConfig must be set for function-only tools")
+	fcc := toolConfig["functionCallingConfig"].(map[string]interface{})
+	assert.Equal(t, "ANY", fcc["mode"])
+}
+
 // TestVertexSchemaConversion verifies that function parameters are converted to genai.Schema.
 func TestVertexSchemaConversion(t *testing.T) {
 	params := map[string]interface{}{

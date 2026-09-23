@@ -254,6 +254,44 @@ func TestTransformVertexStreamToResponses_PreservesGroundedSearchUsage(t *testin
 	t.Fatal("missing response.completed event")
 }
 
+func TestTransformVertexStreamToResponses_UsageFoldsThoughtsAndToolUsePrompt(t *testing.T) {
+	stream := buildVertexSSEStream([]map[string]interface{}{{
+		"candidates": []map[string]interface{}{{
+			"content": map[string]interface{}{
+				"role":  "model",
+				"parts": []map[string]interface{}{{"text": "page summary"}},
+			},
+			"finishReason": "STOP",
+		}},
+		"usageMetadata": map[string]interface{}{
+			"promptTokenCount":        46,
+			"toolUsePromptTokenCount": 5000,
+			"candidatesTokenCount":    81,
+			"thoughtsTokenCount":      300,
+			"totalTokenCount":         5427,
+		},
+	}})
+
+	var out bytes.Buffer
+	require.NoError(t, TransformVertexStreamToResponses(
+		strings.NewReader(stream), &out, "gemini-test", "", nil, nil,
+	))
+
+	for _, event := range parseVertexSSEEvents(out.String()) {
+		if event["type"] != "response.completed" {
+			continue
+		}
+		usage := event["response"].(map[string]interface{})["usage"].(map[string]interface{})
+		assert.Equal(t, float64(5046), usage["input_tokens"])
+		assert.Equal(t, float64(381), usage["output_tokens"])
+		assert.Equal(t, float64(5427), usage["total_tokens"])
+		details := usage["output_tokens_details"].(map[string]interface{})
+		assert.Equal(t, float64(300), details["reasoning_tokens"])
+		return
+	}
+	t.Fatal("missing response.completed event")
+}
+
 func TestTransformVertexStreamToResponses_AccumulatesDistinctSearchesAcrossChunks(t *testing.T) {
 	searchChunk := func(query string, includeUsage bool) map[string]interface{} {
 		chunk := map[string]interface{}{
