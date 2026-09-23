@@ -414,6 +414,13 @@ func (p *Proxy) writeProxyResponse(w http.ResponseWriter, resp *ProxyResponse, c
 			responseBody = normalizedBody
 			responseBodyChanged = true
 		}
+		// Only the client copy loses the results; callers bill from resp.Body.
+		if logCtx != nil && logCtx.HideWebSearchResults {
+			if stripped, ok := stripWebSearchResults(responseBody); ok {
+				responseBody = stripped
+				responseBodyChanged = true
+			}
+		}
 	}
 	logCtx.captureClientResponseID(responseBody)
 
@@ -591,6 +598,17 @@ func (p *Proxy) writeProxyStreamingResponseWithTokens(
 		logCtx,
 		modelID,
 	)
+	if logCtx != nil && logCtx.HideWebSearchResults {
+		clientReader = newWebSearchResultsStripReader(clientReader, func(payload []byte) {
+			if usage := converter.ExtractTokenUsageWithOptions(payload, tokenUsageOptions); usage != nil {
+				if lastUsage == nil {
+					lastUsage = &converter.TokenUsage{}
+				}
+				lastUsage.MergeNonZero(usage)
+				logCtx.UsageSource = "provider"
+			}
+		})
+	}
 
 	if _, ok := w.(http.Flusher); ok {
 		err := p.streamToClient(

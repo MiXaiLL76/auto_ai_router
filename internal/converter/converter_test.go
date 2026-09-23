@@ -148,6 +148,39 @@ func TestProviderConverter_RequestFrom_StripsCacheSaltForEmbeddings(t *testing.T
 	}
 }
 
+// Z.AI returns web_search results (the only evidence of a billable search)
+// only on request, so Chat Completions always ask for them; native Responses
+// requests keep their own tool contract.
+func TestProviderConverter_RequestFrom_ForcesZAIWebSearchResults(t *testing.T) {
+	body := []byte(`{"model":"glm-5.3-flashx","messages":[{"role":"user","content":"news?"}],"tools":[{"type":"web_search","web_search":{"enable":true,"search_engine":"search-prime"}}]}`)
+
+	for _, providerType := range []config.ProviderType{config.ProviderTypeOpenAI, config.ProviderTypeProxy} {
+		got, err := New(providerType, RequestMode{ModelID: "glm-5.3-flashx"}).RequestFrom(body)
+		if err != nil {
+			t.Fatalf("%s: RequestFrom error: %v", providerType, err)
+		}
+		var req struct {
+			Tools []struct {
+				WebSearch map[string]any `json:"web_search"`
+			} `json:"tools"`
+		}
+		if err := json.Unmarshal(got, &req); err != nil {
+			t.Fatalf("%s: decode converted body: %v", providerType, err)
+		}
+		if len(req.Tools) != 1 || req.Tools[0].WebSearch["search_result"] != true {
+			t.Fatalf("%s: expected search_result=true, got %s", providerType, got)
+		}
+	}
+
+	got, err := New(config.ProviderTypeOpenAI, RequestMode{ModelID: "glm-5.3-flashx", IsResponsesAPI: true}).RequestFrom(body)
+	if err != nil {
+		t.Fatalf("RequestFrom error: %v", err)
+	}
+	if !bytes.Equal(got, body) {
+		t.Fatalf("expected Responses API body unchanged, got %s", got)
+	}
+}
+
 func TestProviderConverter_RequestFrom_Anthropic(t *testing.T) {
 	body := mustJSON(t, minimalOpenAIChatRequest())
 
@@ -1028,6 +1061,31 @@ func TestExtractTokenUsage_WebSearchRequests(t *testing.T) {
 			name: "unexpected extension shape falls back to output items",
 			body: `{"usage":{"input_tokens":10,"output_tokens":2,"total_tokens":12,"x_tools":"n/a","plugins":["search"]},"output":[{"type":"web_search_call","status":"completed"}]}`,
 			want: 1,
+		},
+		{
+			name: "zai web_search results are one search",
+			body: `{"usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12},"web_search":[{"title":"a","link":"https://a.example","refer":"ref_1"},{"title":"b","link":"https://b.example","refer":"ref_2"}]}`,
+			want: 1,
+		},
+		{
+			name: "zai stream chunk with results and no usage",
+			body: `{"id":"1","object":"chat.completion.chunk","choices":[{"index":0,"delta":{"content":""}}],"web_search":[{"title":"a","refer":"ref_1"}]}`,
+			want: 1,
+		},
+		{
+			name: "zai empty results are not billed",
+			body: `{"usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12},"web_search":[]}`,
+			want: 0,
+		},
+		{
+			name: "unexpected web_search shape keeps token usage",
+			body: `{"usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12},"web_search":{"enable":true}}`,
+			want: 0,
+		},
+		{
+			name: "server_tool_use wins over zai results",
+			body: `{"usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12,"server_tool_use":{"web_search_requests":2}},"web_search":[{"refer":"ref_1"}]}`,
+			want: 2,
 		},
 	}
 

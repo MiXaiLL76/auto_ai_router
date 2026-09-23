@@ -478,6 +478,9 @@ var (
 	// keeps this a single cheap scan like the usage check.
 	sseWebSearchCallNeedle = []byte(`"web_search_call"`)
 	sseAnnotationsNeedle   = []byte(`"annotations"`)
+	// sseWebSearchResultsNeedle catches the top-level "web_search" results
+	// array a Z.AI chat stream sends in one chunk, apart from its usage.
+	sseWebSearchResultsNeedle = []byte(`"web_search"`)
 	// sseErrorNeedle and sseResponseFailedNeedle prefilter
 	// extractStreamErrorEvent's json.Unmarshal (called from
 	// proxyStreamErrorCapture.Observe/Finalize on every assembled SSE frame):
@@ -509,7 +512,8 @@ func frameMayCarryStreamError(frame []byte) bool {
 func chunkMayCarryTokenUsage(chunk []byte) bool {
 	return bytes.Contains(chunk, sseUsageNeedle) ||
 		bytes.Contains(chunk, sseWebSearchCallNeedle) ||
-		bytes.Contains(chunk, sseAnnotationsNeedle)
+		bytes.Contains(chunk, sseAnnotationsNeedle) ||
+		bytes.Contains(chunk, sseWebSearchResultsNeedle)
 }
 
 // splitSSEPayloads splits an SSE-formatted chunk into its "data:" JSON payload
@@ -934,6 +938,17 @@ func (p *Proxy) handleStreamingWithTokens(w http.ResponseWriter, resp *http.Resp
 	onChunk := func(chunk []byte) {
 		chunkCount++
 		usageLines.Observe(chunk, onLine)
+	}
+
+	if logCtx != nil && logCtx.HideWebSearchResults {
+		providerReader = newWebSearchResultsStripReader(providerReader, func(payload []byte) {
+			if usage := converter.ExtractTokenUsageWithOptions(payload, converter.TokenUsageExtractionOptions{AudioInputIncludesCachedAudio: true}); usage != nil {
+				if logCtx.TokenUsage == nil {
+					logCtx.TokenUsage = &converter.TokenUsage{}
+				}
+				logCtx.TokenUsage.MergeNonZero(usage)
+			}
+		})
 	}
 
 	clientReader := normalizeSuccessfulResponseModelStream(

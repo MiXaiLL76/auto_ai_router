@@ -200,6 +200,7 @@ func (c *ProviderConverter) RequestFrom(body []byte) ([]byte, error) {
 		// Completions requests need their tool list normalized.
 		if !c.mode.IsResponsesAPI {
 			body = openaiconv.ConvertWebSearchTools(body)
+			body = openaiconv.ForceWebSearchResults(body)
 		}
 
 		// See shouldStripCacheSalt: strip for everyone in this default bucket
@@ -508,6 +509,7 @@ type tokenUsageResponseShape struct {
 		Usage  *responsesUsageDetails `json:"usage,omitempty"`
 		Output []extractedOutputItem  `json:"output,omitempty"`
 	} `json:"response,omitempty"`
+	WebSearch json.RawMessage `json:"web_search,omitempty"`
 }
 
 // ExtractTokenUsageWithOptions is like ExtractTokenUsage, but lets callers
@@ -589,7 +591,7 @@ func tokenUsageFromShape(resp *tokenUsageResponseShape, opts TokenUsageExtractio
 	if resp.Response.Usage != nil {
 		nestedUsageRequests = resp.Response.Usage.webSearchRequests()
 	}
-	webSearchRequests := webSearchRequestsFromExtractedResponse(resp.Usage.webSearchRequests(), nestedUsageRequests, resp.Choices, resp.Output, resp.Response.Output)
+	webSearchRequests := webSearchRequestsFromExtractedResponse(resp.Usage.webSearchRequests(), nestedUsageRequests, resp.Choices, resp.Output, resp.Response.Output, resp.WebSearch)
 
 	if promptTokens == 0 && completionTokens == 0 && webSearchRequests == 0 {
 		return nil
@@ -790,6 +792,7 @@ func webSearchRequestsFromExtractedResponse(
 	choices []extractedChoiceWithAnnotations,
 	output []extractedOutputItem,
 	nestedOutput []extractedOutputItem,
+	searchResults json.RawMessage,
 ) int {
 	if requests := webSearchRequestsFromUsage(usageRequests, nestedUsageRequests); requests > 0 {
 		return requests
@@ -800,6 +803,9 @@ func webSearchRequestsFromExtractedResponse(
 	if requests := countCompletedWebSearchOutputItems(nestedOutput); requests > 0 {
 		return requests
 	}
+	if hasWebSearchResults(searchResults) {
+		return 1
+	}
 	for _, choice := range choices {
 		for _, annotation := range choice.Message.Annotations {
 			if annotation.Type == "url_citation" {
@@ -808,6 +814,15 @@ func webSearchRequestsFromExtractedResponse(
 		}
 	}
 	return 0
+}
+
+func hasWebSearchResults(raw json.RawMessage) bool {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 || raw[0] != '[' {
+		return false
+	}
+	var results []json.RawMessage
+	return json.Unmarshal(raw, &results) == nil && len(results) > 0
 }
 
 func countCompletedWebSearchOutputItems(output []extractedOutputItem) int {
