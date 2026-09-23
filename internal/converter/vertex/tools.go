@@ -106,6 +106,10 @@ func convertOpenAIToolsToVertex(openAITools []interface{}) vertexToolsResult {
 			builtinTools = append(builtinTools, &genai.Tool{
 				CodeExecution: &genai.ToolCodeExecution{},
 			})
+		case "url_context":
+			builtinTools = append(builtinTools, &genai.Tool{
+				URLContext: &genai.URLContext{},
+			})
 		}
 	}
 

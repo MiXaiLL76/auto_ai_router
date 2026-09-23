@@ -136,6 +136,7 @@ All OpenAI tool types are supported:
 | `google_search_retrieval`           | `GoogleSearchRetrieval` with dynamic retrieval config |
 | `google_maps`                       | `GoogleMaps` (separate Tool)                          |
 | `code_execution`                    | `ToolCodeExecution` (separate Tool)                   |
+| `url_context`                       | `URLContext` (separate Tool)                          |
 
 #### tool_choice
 

@@ -252,6 +252,19 @@ func TestConvertOpenAIToolsToVertex_BuiltinToolsOnly(t *testing.T) {
 	assert.NotNil(t, result.Tools[0].GoogleSearch)
 }
 
+func TestConvertOpenAIToolsToVertex_URLContext(t *testing.T) {
+	openAITools := []interface{}{
+		map[string]interface{}{"type": "url_context"},
+	}
+
+	result := convertOpenAIToolsToVertex(openAITools)
+
+	assert.False(t, result.HasFunctionDecls, "should not have function declarations")
+	assert.True(t, result.HasBuiltinTools, "url_context is a builtin tool")
+	require.Len(t, result.Tools, 1)
+	assert.NotNil(t, result.Tools[0].URLContext)
+}
+
 // TestConvertOpenAIToolsToVertex_MixedToolsDropsFunctions verifies that when
 // built-in tools and functions are mixed, functions are dropped (Gemini API limitation).
 func TestConvertOpenAIToolsToVertex_MixedToolsDropsFunctions(t *testing.T) {
