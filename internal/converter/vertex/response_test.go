@@ -456,6 +456,10 @@ func TestMapFinishReason(t *testing.T) {
 		{"SAFETY", "content_filter"},
 		{"RECITATION", "content_filter"},
 		{"TOOL_CALL", "tool_calls"},
+		{"IMAGE_SAFETY", "content_filter"},
+		{"IMAGE_PROHIBITED_CONTENT", "content_filter"},
+		{"IMAGE_RECITATION", "content_filter"},
+		{"NO_IMAGE", "stop"},
 		{"UNKNOWN_REASON", "stop"},
 		{"", "stop"},
 	}
@@ -659,5 +663,56 @@ func TestVertexToOpenAI_MaxTokensWithNoPartsReturnsEmptyContent(t *testing.T) {
 	}
 	if strings.Contains(string(converted), "truncated") || strings.Contains(string(converted), "[Response") {
 		t.Fatalf("response must not contain a synthetic truncation placeholder: %s", converted)
+	}
+}
+
+// TestVertexToOpenAI_EmptyCandidateNeverGetsPlaceholder covers every Vertex
+// finish reason that can legitimately leave a candidate with no parts at
+// all -- including the image-generation-specific ones (NO_IMAGE when the
+// model produced no image, IMAGE_SAFETY when it was blocked) -- and asserts
+// none of them fall back to a synthetic "[No content generated]" literal.
+// The MAX_TOKENS/SAFETY-only carve-out this once had missed these, so a
+// candidate with e.g. FinishReasonNoImage still got the placeholder text.
+func TestVertexToOpenAI_EmptyCandidateNeverGetsPlaceholder(t *testing.T) {
+	reasons := []genai.FinishReason{
+		genai.FinishReasonStop,
+		genai.FinishReasonOther,
+		genai.FinishReasonRecitation,
+		genai.FinishReasonNoImage,
+		genai.FinishReasonImageSafety,
+		genai.FinishReasonImageProhibitedContent,
+		genai.FinishReasonImageRecitation,
+		genai.FinishReasonImageOther,
+	}
+
+	for _, reason := range reasons {
+		t.Run(string(reason), func(t *testing.T) {
+			vertexResp := genai.GenerateContentResponse{
+				Candidates: []*genai.Candidate{{
+					Content:      &genai.Content{Role: "model"},
+					FinishReason: reason,
+				}},
+			}
+			body, err := json.Marshal(vertexResp)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			converted, err := VertexToOpenAI(body, "gemini-image-model")
+			if err != nil {
+				t.Fatal(err)
+			}
+			var response openai.OpenAIResponse
+			if err := json.Unmarshal(converted, &response); err != nil {
+				t.Fatal(err)
+			}
+
+			if len(response.Choices) != 1 {
+				t.Fatalf("expected 1 choice, got %d", len(response.Choices))
+			}
+			if content := response.Choices[0].Message.Content; content != "" {
+				t.Fatalf("content must be empty for finish reason %q (no synthetic placeholder), got %q", reason, content)
+			}
+		})
 	}
 }

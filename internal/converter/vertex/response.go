@@ -74,21 +74,15 @@ func VertexToOpenAI(vertexBody []byte, model string) ([]byte, error) {
 			}
 		}
 
-		if content == "" && len(images) == 0 && len(toolCalls) == 0 && reasoningContent == "" {
-			// MAX_TOKENS with literally no parts back means the whole budget was
-			// spent on hidden reasoning (see the usage.reasoning_tokens ==
-			// usage.completion_tokens case a small max_tokens on a Gemini
-			// thinking model reliably produces) -- there is no partial model
-			// text to show. Leave content empty and let finish_reason "length"
-			// carry the signal, same as every other provider route: a synthetic
-			// English placeholder here isn't real model output, is silently
-			// indistinguishable from one, and (unlike an empty string) can't be
-			// detected by a client without hardcoding this exact string.
-			if candidate.FinishReason != genai.FinishReasonMaxTokens &&
-				candidate.FinishReason != genai.FinishReasonSafety {
-				content = "[No content generated]"
-			}
-		}
+		// A candidate with no parts back at all (MAX_TOKENS entirely consumed
+		// by hidden reasoning, an image-generation candidate that produced no
+		// image -- NO_IMAGE, IMAGE_SAFETY, IMAGE_PROHIBITED_CONTENT, etc. --
+		// or any other empty finish) has no partial model output to show.
+		// Leave content empty and let finish_reason carry the signal, same as
+		// every other provider route: a synthetic English placeholder here
+		// isn't real model output, is silently indistinguishable from one,
+		// and (unlike an empty string) can't be detected by a client without
+		// hardcoding an exact string.
 
 		message := openai.OpenAIResponseMessage{
 			Role:    "assistant",
@@ -308,6 +302,8 @@ func mapFinishReason(vertexReason string) string {
 	case "SAFETY", "RECITATION":
 		return "content_filter"
 	case "BLOCKLIST", "PROHIBITED_CONTENT", "SPII":
+		return "content_filter"
+	case "IMAGE_SAFETY", "IMAGE_PROHIBITED_CONTENT", "IMAGE_RECITATION":
 		return "content_filter"
 	case "TOOL_CALL":
 		return "tool_calls"
