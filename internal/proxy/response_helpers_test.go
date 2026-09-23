@@ -181,6 +181,17 @@ func TestExtractWebSearchRequestUsage(t *testing.T) {
 			body:   `{"model":"gpt-4o","tools":[{"type":"function","function":{"name":"f"}}]}`,
 			wantOn: false,
 		},
+		{
+			name:     "openrouter web plugin defaults medium",
+			body:     `{"model":"openai/gpt-4o","plugins":[{"id":"web"}]}`,
+			wantOn:   true,
+			wantSize: "medium",
+		},
+		{
+			name:   "non-web plugin is not web search",
+			body:   `{"model":"openai/gpt-4o","plugins":[{"id":"some-other-plugin"}]}`,
+			wantOn: false,
+		},
 	}
 
 	for _, tt := range tests {

@@ -824,3 +824,61 @@ func TestStripCacheSalt_InvalidJSON(t *testing.T) {
 	result := StripCacheSalt(body)
 	assert.Equal(t, body, result, "invalid JSON should be returned unchanged rather than dropped")
 }
+
+// --- IsOpenRouterHost tests ---
+
+func TestIsOpenRouterHost(t *testing.T) {
+	tests := []struct {
+		name    string
+		baseURL string
+		want    bool
+	}{
+		{"empty", "", false},
+		{"genuine openrouter https", "https://openrouter.ai/api/v1", true},
+		{"genuine openrouter no scheme", "openrouter.ai/api/v1", true},
+		{"genuine openrouter bare host", "openrouter.ai", true},
+		{"genuine openrouter subdomain", "https://eu.openrouter.ai/api/v1", true},
+		{"real openai", "https://api.openai.com/v1", false},
+		{"self-hosted vLLM", "https://llm.internal.example.com/v1", false},
+		{"lookalike host is not a real subdomain", "https://openrouter.ai.evil.example.com", false},
+		{"malformed URL", "https://[::1", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, IsOpenRouterHost(tt.baseURL))
+		})
+	}
+}
+
+// --- StripOpenRouterOnlyFields tests ---
+
+func TestStripOpenRouterOnlyFields_RemovesBothFields(t *testing.T) {
+	body := makeBody(t, map[string]any{
+		"model":    "gpt-5-mini",
+		"plugins":  []any{map[string]any{"id": "web"}},
+		"provider": map[string]any{"order": []any{"openai"}},
+		"messages": []any{},
+	})
+	result := bodyToMap(t, StripOpenRouterOnlyFields(body))
+	_, hasPlugins := result["plugins"]
+	_, hasProvider := result["provider"]
+	assert.False(t, hasPlugins, "plugins should have been stripped")
+	assert.False(t, hasProvider, "provider should have been stripped")
+	assert.Equal(t, "gpt-5-mini", result["model"])
+}
+
+// TestStripOpenRouterOnlyFields_NoFieldPresent verifies the fast path: when
+// neither field is in the body at all, the exact same byte slice is returned
+// rather than round-tripped through unmarshal/marshal.
+func TestStripOpenRouterOnlyFields_NoFieldPresent(t *testing.T) {
+	body := []byte(`{"model":"gpt-4o","messages":[]}`)
+	result := StripOpenRouterOnlyFields(body)
+	require.Equal(t, 0, bytes.Compare(body, result))
+	assert.True(t, &body[0] == &result[0], "expected the exact same underlying array to be returned")
+}
+
+func TestStripOpenRouterOnlyFields_InvalidJSON(t *testing.T) {
+	body := []byte(`{"plugins": not valid json`)
+	result := StripOpenRouterOnlyFields(body)
+	assert.Equal(t, body, result, "invalid JSON should be returned unchanged rather than dropped")
+}

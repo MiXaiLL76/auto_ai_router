@@ -3,6 +3,7 @@ package openai
 import (
 	"bytes"
 	"encoding/json"
+	"net/url"
 	"slices"
 	"strings"
 )
@@ -571,6 +572,48 @@ func StripStreamOptions(body []byte) []byte {
 	}
 	return UpdateJSONField(body, ModelParamsMapping{
 		KeysToRemove: []string{"stream_options"},
+	})
+}
+
+// IsOpenRouterHost reports whether baseURL points at OpenRouter's own API
+// (openrouter.ai or a subdomain), as opposed to a third-party server that
+// merely speaks the OpenAI-compatible wire protocol (a remote AIR gateway,
+// Requesty, self-hosted vLLM) -- credentials of type "openai" cover all of
+// these here, since AIR's provider Type field only records the wire
+// protocol, not who actually operates the endpoint.
+func IsOpenRouterHost(baseURL string) bool {
+	trimmed := strings.TrimSpace(baseURL)
+	if trimmed == "" {
+		return false
+	}
+	u, err := url.Parse(trimmed)
+	if err != nil || u.Hostname() == "" {
+		u, err = url.Parse("https://" + trimmed)
+		if err != nil {
+			return false
+		}
+	}
+	host := strings.TrimSuffix(strings.ToLower(u.Hostname()), ".")
+	return host == "openrouter.ai" || strings.HasSuffix(host, ".openrouter.ai")
+}
+
+// StripOpenRouterOnlyFields removes the `plugins` and `provider` fields from
+// a JSON request body. Both are genuine OpenRouter-only request parameters --
+// `plugins` enables OpenRouter's paid web-search plugin, `provider` picks or
+// orders which upstream vendor OpenRouter routes the request to -- that no
+// other OpenAI-wire-protocol server is confirmed to understand. A strict
+// server rejects an unrecognized field outright with a 400; a lenient one
+// just ignores it, which for `plugins` is worse than an error: the client
+// asked (and may be billed) for a feature that silently never ran. Callers
+// decide when to call this based on the resolved provider (see
+// ProviderConverter.shouldStripOpenRouterOnlyFields); it's a no-op if
+// neither field is present.
+func StripOpenRouterOnlyFields(body []byte) []byte {
+	if !bytes.Contains(body, []byte(`"plugins"`)) && !bytes.Contains(body, []byte(`"provider"`)) {
+		return body
+	}
+	return UpdateJSONField(body, ModelParamsMapping{
+		KeysToRemove: []string{"plugins", "provider"},
 	})
 }
 

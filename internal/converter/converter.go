@@ -40,6 +40,12 @@ type RequestMode struct {
 	ModelID             string // real provider model name (URL construction, format detection)
 	DisplayModelID      string // alias to echo in responses; falls back to ModelID when empty
 	ContentType         string // original request content type (needed for multipart endpoints)
+	// BaseURL is the credential's configured base_url. Only used to
+	// distinguish genuine OpenRouter from another third-party server that
+	// merely speaks OpenAI's wire protocol (see openaiconv.IsOpenRouterHost)
+	// -- provider Type alone can't tell them apart, since both are
+	// configured as type: "openai".
+	BaseURL string
 }
 
 // responseModel returns the model name to embed in response/streaming output.
@@ -141,6 +147,21 @@ func (c *ProviderConverter) shouldStripStreamOptionsExtras() bool {
 	return c.providerType != config.ProviderTypeVLLM
 }
 
+// shouldStripOpenRouterOnlyFields reports whether `plugins` and `provider`
+// must be removed from the request body before forwarding. Both are genuine
+// OpenRouter features -- `plugins` enables its paid web-search plugin,
+// `provider` picks/orders which upstream vendor OpenRouter routes to -- and
+// OpenRouter itself is the only destination confirmed to understand either
+// one. Every other OpenAI-wire-protocol server (aggregators, strict
+// OpenAI-shaped deployments, genuine api.openai.com, self-hosted vLLM) either
+// rejects them outright with a 400 on an unrecognized field, or silently
+// ignores them -- worse, since a client asking for OpenRouter's paid web
+// search would get billed for a feature that silently never ran. Strip for
+// everyone except genuine OpenRouter (see openaiconv.IsOpenRouterHost).
+func (c *ProviderConverter) shouldStripOpenRouterOnlyFields() bool {
+	return !openaiconv.IsOpenRouterHost(c.mode.BaseURL)
+}
+
 // RequestFrom converts an OpenAI-format request body to the provider-specific format.
 // Returns the original body unchanged for OpenAI-compatible providers (passthrough).
 func (c *ProviderConverter) RequestFrom(body []byte) ([]byte, error) {
@@ -162,6 +183,9 @@ func (c *ProviderConverter) RequestFrom(body []byte) ([]byte, error) {
 		default:
 			if c.shouldStripCacheSalt() {
 				body = openaiconv.StripCacheSalt(body)
+			}
+			if c.shouldStripOpenRouterOnlyFields() {
+				body = openaiconv.StripOpenRouterOnlyFields(body)
 			}
 			return body, nil
 		}
@@ -187,6 +211,9 @@ func (c *ProviderConverter) RequestFrom(body []byte) ([]byte, error) {
 			if c.shouldStripCacheSalt() {
 				body = openaiconv.StripCacheSalt(body)
 			}
+			if c.shouldStripOpenRouterOnlyFields() {
+				body = openaiconv.StripOpenRouterOnlyFields(body)
+			}
 			return openaiconv.StripStreamOptions(body), nil
 		}
 		return anthropic.OpenAIToAnthropic(body, c.mode.ModelID, c.providerType == config.ProviderTypeAnthropic)
@@ -202,6 +229,9 @@ func (c *ProviderConverter) RequestFrom(body []byte) ([]byte, error) {
 		}
 		if c.mode.IsStreaming && c.shouldStripStreamOptionsExtras() {
 			body = openaiconv.RebuildStreamOptionsIncludeUsageOnly(body)
+		}
+		if c.shouldStripOpenRouterOnlyFields() {
+			body = openaiconv.StripOpenRouterOnlyFields(body)
 		}
 		return body, nil
 	default:
@@ -226,6 +256,14 @@ func (c *ProviderConverter) RequestFrom(body []byte) ([]byte, error) {
 		// every destination except vLLM, which understands the extra keys.
 		if c.mode.IsStreaming && c.shouldStripStreamOptionsExtras() {
 			body = openaiconv.RebuildStreamOptionsIncludeUsageOnly(body)
+		}
+
+		// See shouldStripOpenRouterOnlyFields: plugins/provider are genuine
+		// OpenRouter features that every other destination in this bucket
+		// either rejects outright or silently ignores -- strip for everyone
+		// except genuine OpenRouter.
+		if c.shouldStripOpenRouterOnlyFields() {
+			body = openaiconv.StripOpenRouterOnlyFields(body)
 		}
 
 		if c.mode.IsImageGeneration || c.mode.IsImageEdit {

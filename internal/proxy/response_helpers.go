@@ -642,6 +642,7 @@ func extractWebSearchRequestUsage(body []byte, contentType string) (bool, string
 	var req struct {
 		WebSearchOptions map[string]interface{}   `json:"web_search_options,omitempty"`
 		Tools            []map[string]interface{} `json:"tools,omitempty"`
+		Plugins          []map[string]interface{} `json:"plugins,omitempty"`
 	}
 	if err := json.Unmarshal(body, &req); err != nil {
 		return false, ""
@@ -656,12 +657,30 @@ func extractWebSearchRequestUsage(body []byte, contentType string) (bool, string
 		}
 		return true, webSearchContextSizeFromMap(tool)
 	}
+	// OpenRouter's paid web-search plugin: a client asking for it (and only
+	// preserved on the wire for genuine OpenRouter, see
+	// converter.shouldStripOpenRouterOnlyFields) is a billable request the
+	// same way web_search_options/tools are -- without this, pre-billing and
+	// quota checks never see it. Convention per OpenRouter's own docs
+	// (id: "web" enables the plugin); not independently verified against a
+	// live OpenRouter response this session.
+	for _, plugin := range req.Plugins {
+		if !isWebSearchPlugin(plugin) {
+			continue
+		}
+		return true, webSearchContextSizeFromMap(plugin)
+	}
 	return false, ""
 }
 
 func isWebSearchTool(tool map[string]interface{}) bool {
 	toolType, _ := tool["type"].(string)
 	return toolType == "web_search" || strings.HasPrefix(toolType, "web_search_")
+}
+
+func isWebSearchPlugin(plugin map[string]interface{}) bool {
+	id, _ := plugin["id"].(string)
+	return id == "web"
 }
 
 func webSearchContextSizeFromMap(values map[string]interface{}) string {

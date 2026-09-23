@@ -1680,6 +1680,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 				ModelID:             realModelID,
 				DisplayModelID:      modelID,
 				ContentType:         r.Header.Get("Content-Type"),
+				BaseURL:             cred.BaseURL,
 			})
 			var convErr error
 			requestBody, convErr = conv.RequestFrom(body)

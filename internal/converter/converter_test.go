@@ -255,6 +255,112 @@ func TestProviderConverter_RequestFrom_StripsStreamOptionsForAnthropicMessagesPa
 	}
 }
 
+// TestProviderConverter_RequestFrom_StripsOpenRouterOnlyFieldsForOpenAICompatible
+// covers the "default" (OpenAI-compatible) branch: plugins/provider are
+// genuine OpenRouter-only features that no other destination sharing this
+// bucket (aggregators, genuine api.openai.com, ...) is confirmed to
+// understand.
+func TestProviderConverter_RequestFrom_StripsOpenRouterOnlyFieldsForOpenAICompatible(t *testing.T) {
+	body := []byte(`{"model":"gpt-5-mini","plugins":[{"id":"web"}],"provider":{"order":["openai"]},"messages":[]}`)
+
+	c := New(config.ProviderTypeOpenAI, RequestMode{
+		ModelID: "gpt-5-mini",
+		BaseURL: "https://api.cometapi.com/v1",
+	})
+	got, err := c.RequestFrom(body)
+	if err != nil {
+		t.Fatalf("RequestFrom error: %v", err)
+	}
+	m := mustUnmarshal[map[string]any](t, got)
+	if _, present := m["plugins"]; present {
+		t.Fatalf("expected plugins to be stripped, got %s", string(got))
+	}
+	if _, present := m["provider"]; present {
+		t.Fatalf("expected provider to be stripped, got %s", string(got))
+	}
+}
+
+// TestProviderConverter_RequestFrom_PreservesOpenRouterOnlyFieldsForGenuineOpenRouter
+// covers the OpenRouter exception to shouldStripOpenRouterOnlyFields: the one
+// destination actually confirmed to support plugins (paid web search) and
+// provider (vendor routing preference).
+func TestProviderConverter_RequestFrom_PreservesOpenRouterOnlyFieldsForGenuineOpenRouter(t *testing.T) {
+	body := []byte(`{"model":"gpt-5-mini","plugins":[{"id":"web"}],"provider":{"order":["openai"]},"messages":[]}`)
+
+	c := New(config.ProviderTypeOpenAI, RequestMode{
+		ModelID: "gpt-5-mini",
+		BaseURL: "https://openrouter.ai/api/v1",
+	})
+	got, err := c.RequestFrom(body)
+	if err != nil {
+		t.Fatalf("RequestFrom error: %v", err)
+	}
+	m := mustUnmarshal[map[string]any](t, got)
+	if _, present := m["plugins"]; !present {
+		t.Fatalf("expected plugins to be preserved for genuine OpenRouter, got %s", string(got))
+	}
+	if _, present := m["provider"]; !present {
+		t.Fatalf("expected provider to be preserved for genuine OpenRouter, got %s", string(got))
+	}
+}
+
+// TestProviderConverter_RequestFrom_StripsOpenRouterOnlyFieldsForAnthropicMessagesPassthrough
+// covers the MessagesPassthrough branch: a client can still send OpenRouter
+// fields on a /v1/messages request forwarded natively to an Anthropic-wire
+// provider, which never understands them.
+func TestProviderConverter_RequestFrom_StripsOpenRouterOnlyFieldsForAnthropicMessagesPassthrough(t *testing.T) {
+	body := []byte(`{"model":"claude-test","plugins":[{"id":"web"}],"messages":[]}`)
+
+	c := New(config.ProviderTypeAnthropic, RequestMode{
+		ModelID:             "claude-test",
+		MessagesPassthrough: true,
+	})
+	got, err := c.RequestFrom(body)
+	if err != nil {
+		t.Fatalf("RequestFrom error: %v", err)
+	}
+	m := mustUnmarshal[map[string]any](t, got)
+	if _, present := m["plugins"]; present {
+		t.Fatalf("expected plugins to be stripped for Anthropic messages passthrough, got %s", string(got))
+	}
+}
+
+// TestProviderConverter_RequestFrom_StripsOpenRouterOnlyFieldsForBedrockOpenAICompatible
+// covers the Bedrock non-Anthropic branch (OpenAI-compatible passthrough,
+// e.g. GLM/Llama): same rule as the default branch applies here too.
+func TestProviderConverter_RequestFrom_StripsOpenRouterOnlyFieldsForBedrockOpenAICompatible(t *testing.T) {
+	body := []byte(`{"model":"zai.glm-4.7-flash","plugins":[{"id":"web"}],"messages":[]}`)
+
+	c := New(config.ProviderTypeBedrock, RequestMode{ModelID: "zai.glm-4.7-flash"})
+	got, err := c.RequestFrom(body)
+	if err != nil {
+		t.Fatalf("RequestFrom error: %v", err)
+	}
+	m := mustUnmarshal[map[string]any](t, got)
+	if _, present := m["plugins"]; present {
+		t.Fatalf("expected plugins to be stripped for Bedrock OpenAI-compatible passthrough, got %s", string(got))
+	}
+}
+
+// TestProviderConverter_RequestFrom_StripsOpenRouterOnlyFieldsForEmbeddings
+// covers the IsEmbeddings default branch.
+func TestProviderConverter_RequestFrom_StripsOpenRouterOnlyFieldsForEmbeddings(t *testing.T) {
+	body := []byte(`{"model":"text-embedding-3-small","plugins":[{"id":"web"}],"input":"hi"}`)
+
+	c := New(config.ProviderTypeOpenAI, RequestMode{
+		IsEmbeddings: true,
+		ModelID:      "text-embedding-3-small",
+	})
+	got, err := c.RequestFrom(body)
+	if err != nil {
+		t.Fatalf("RequestFrom error: %v", err)
+	}
+	m := mustUnmarshal[map[string]any](t, got)
+	if _, present := m["plugins"]; present {
+		t.Fatalf("expected plugins to be stripped for embeddings, got %s", string(got))
+	}
+}
+
 func TestProviderConverter_RequestFrom_Anthropic(t *testing.T) {
 	body := mustJSON(t, minimalOpenAIChatRequest())
 
