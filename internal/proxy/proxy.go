@@ -23,6 +23,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/converter"
 	anthropicconv "github.com/mixaill76/auto_ai_router/internal/converter/anthropic"
 	"github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
+	"github.com/mixaill76/auto_ai_router/internal/converter/openai"
 	promanutils "github.com/mixaill76/auto_ai_router/internal/converter/proman/utils"
 	"github.com/mixaill76/auto_ai_router/internal/converter/responses"
 	"github.com/mixaill76/auto_ai_router/internal/httputil"
@@ -2145,6 +2146,8 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 && conv != nil && conv.IsPassthrough() {
 			finalResponseBody = rewriteResponseModelAlias(finalResponseBody, realModelID, modelID)
+			// Before billing picks its body: the stripped searches are billed from usage.
+			finalResponseBody = openai.StripServerToolCalls(finalResponseBody)
 		}
 
 		// bodyForTokenExtraction is set to finalResponseBody now and may be updated

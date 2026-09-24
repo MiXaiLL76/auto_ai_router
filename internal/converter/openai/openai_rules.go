@@ -314,6 +314,23 @@ func matchModelFamily(modelID, family string) bool {
 	return strings.HasPrefix(base, family+"-") || strings.HasPrefix(base, family+".")
 }
 
+// SupportsReasoningEffortNone reports whether effort "none" turns reasoning off
+// for modelID (GPT-5.1+, GPT-6) rather than being a value to drop. The codex,
+// pro, chat and astra variants reject it.
+func SupportsReasoningEffortNone(modelID string) bool {
+	lower := strings.ToLower(modelID)
+	for _, variant := range []string{"codex", "-pro", "chat", "astra"} {
+		if strings.Contains(lower, variant) {
+			return false
+		}
+	}
+	if matchModelFamily(modelID, "gpt-6") {
+		return true
+	}
+	minor, ok := strings.CutPrefix(extractBaseModelName(modelID), "gpt-5.")
+	return ok && minor != "" && minor[0] >= '1' && minor[0] <= '9'
+}
+
 // ReplaceBodyParam applies model-specific parameter transformations to the request body.
 // This ensures unsupported parameters are removed and renamed before sending to the provider.
 func ReplaceBodyParam(modelID string, body []byte) []byte {

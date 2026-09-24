@@ -806,6 +806,41 @@ func TestPrepareCodexPassthrough_DropsReasoningNone(t *testing.T) {
 	assert.NotContains(t, parsed, "reasoning", "reasoning.effort='none' should be dropped for native passthrough")
 }
 
+// On GPT-5.1+ / GPT-6 an omitted effort means the default one: dropping "none"
+// turned reasoning back on.
+func TestPrepareCodexPassthrough_KeepsReasoningNoneWhereItIsASetting(t *testing.T) {
+	for _, model := range []string{"gpt-6-sol", "openai/gpt-6-luna", "gpt-5.6-terra"} {
+		t.Run(model, func(t *testing.T) {
+			body := []byte(`{"model": "` + model + `", "input": "Say pong", "reasoning": {"effort": "none"}}`)
+
+			var parsed map[string]interface{}
+			require.NoError(t, json.Unmarshal(PrepareCodexPassthrough(body, false), &parsed))
+
+			require.Contains(t, parsed, "reasoning")
+			assert.Equal(t, "none", parsed["reasoning"].(map[string]interface{})["effort"])
+		})
+	}
+	t.Run("codex still drops it", func(t *testing.T) {
+		body := []byte(`{"model": "gpt-5.2-codex", "input": "Say pong", "reasoning": {"effort": "none"}}`)
+
+		var parsed map[string]interface{}
+		require.NoError(t, json.Unmarshal(PrepareCodexPassthrough(body, false), &parsed))
+
+		assert.NotContains(t, parsed, "reasoning")
+	})
+}
+
+func TestRequestToChat_ReasoningNoneWhereItIsASetting(t *testing.T) {
+	result, err := RequestToChat([]byte(`{"model": "gpt-6-sol", "input": "Say pong", "reasoning": {"effort": "none"}}`))
+	require.NoError(t, err)
+
+	var parsed map[string]interface{}
+	require.NoError(t, json.Unmarshal(result, &parsed))
+
+	assert.Equal(t, "none", parsed["reasoning_effort"])
+	assert.NotContains(t, parsed, "reasoning")
+}
+
 // TestPrepareCodexPassthrough_RecoversReasoningSummaryFromContent reproduces the
 // reported bug: a synthetic/replayed reasoning item shaped like
 // {"content": [{"type": "reasoning_text", "text": "..."}]} instead of the

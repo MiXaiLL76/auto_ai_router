@@ -1,5 +1,7 @@
 package openai
 
+import "github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
+
 // Request types
 
 // OpenAIRequest represents the OpenAI API request format
@@ -144,6 +146,30 @@ type TokenDetails struct {
 	CacheWriteTokens          int                        `json:"cache_write_tokens,omitempty"`
 	AudioTokens               int                        `json:"audio_tokens,omitempty"`
 	ImageTokens               int                        `json:"image_tokens,omitempty"`
+	converterutil.CachingTokensExtension
+}
+
+// CacheWrite returns the cache-write total and its 5m / 1h split under any
+// naming: cache_creation_tokens, cache_write_tokens, then Requesty's caching_tokens.
+func (d *TokenDetails) CacheWrite() (total, fiveMinutes, oneHour int) {
+	if d == nil {
+		return 0, 0, 0
+	}
+	total = d.CacheCreationTokens
+	if total == 0 {
+		total = d.CacheWriteTokens
+	}
+	if d.CacheCreationTokenDetails != nil {
+		fiveMinutes = d.CacheCreationTokenDetails.Ephemeral5mInputTokens
+		oneHour = d.CacheCreationTokenDetails.Ephemeral1hInputTokens
+	}
+	if total == 0 && fiveMinutes == 0 && oneHour == 0 {
+		return d.CachingTokensExtension.CacheWrite()
+	}
+	if total == 0 {
+		total = fiveMinutes + oneHour
+	}
+	return total, fiveMinutes, oneHour
 }
 
 // CacheCreationTokenDetails preserves Anthropic's cache-write TTL breakdown.

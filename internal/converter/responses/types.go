@@ -429,6 +429,9 @@ type Response struct {
 	ContextEdits         interface{} `json:"context_edits,omitempty"`
 	PromptCacheRetention interface{} `json:"prompt_cache_retention,omitempty"`
 	Billing              interface{} `json:"billing,omitempty"`
+	// ToolUsage is OpenAI's meter for hosted tools (image_gen tokens, web_search
+	// requests), outside usage. Declared so a re-encode keeps it.
+	ToolUsage interface{} `json:"tool_usage,omitempty"`
 }
 
 // CompactResource represents the response from POST /v1/responses/compact.
