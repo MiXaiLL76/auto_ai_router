@@ -13,11 +13,19 @@ import (
 // StatusCode is 0 for the common case ("caller decides", historically always
 // mapped to 400) or a specific status (e.g. 413) when the error itself dictates
 // which 4xx applies, regardless of which proxy call site catches it.
+//
+// Cause, when set, is the underlying error that led to this classification (e.g. the raw
+// json.UnmarshalTypeError from RequestJSONValidationError) -- log-only detail, such as the
+// full nested field path for an error inside a nested struct. Error() deliberately never
+// includes it: Error()'s text can reach the client as-is (see proxy writeValidationError,
+// which falls back to it whenever Code is unset), and the underlying Go error text isn't
+// meant for a client response. Use errors.Unwrap / the Cause field directly for logging.
 type RequestValidationError struct {
 	Param      string
 	Code       string
 	Message    string
 	StatusCode int
+	Cause      error
 }
 
 func (e *RequestValidationError) Error() string {
@@ -31,6 +39,16 @@ func (e *RequestValidationError) Error() string {
 		return e.Param
 	}
 	return fmt.Sprintf("%s: %s", e.Param, e.Message)
+}
+
+// Unwrap exposes Cause to errors.Is/errors.As/errors.Unwrap chains -- e.g. a caller logging
+// this error can pull the original json.UnmarshalTypeError (full nested field path, actual
+// wrong-type description) back out with errors.Unwrap without it ever reaching the client.
+func (e *RequestValidationError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Cause
 }
 
 func NewRequestValidationError(param, message string) error {
@@ -55,7 +73,7 @@ func NewRequestEntityTooLargeError(param, message string) error {
 func RequestJSONValidationError(err error) error {
 	var typeErr *json.UnmarshalTypeError
 	if errors.As(err, &typeErr) {
-		return &RequestValidationError{Param: typeErr.Field, Message: "Invalid parameter type", Code: "invalid_type"}
+		return &RequestValidationError{Param: typeErr.Field, Message: "Invalid parameter type", Code: "invalid_type", Cause: typeErr}
 	}
-	return &RequestValidationError{Message: "Invalid JSON", Code: "invalid_json"}
+	return &RequestValidationError{Message: "Invalid JSON", Code: "invalid_json", Cause: err}
 }

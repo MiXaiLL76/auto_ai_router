@@ -27,20 +27,40 @@ type MessagesAdapterMetadata struct {
 func MessagesToChat(body []byte) ([]byte, MessagesAdapterMetadata, error) {
 	var request map[string]interface{}
 	if err := json.Unmarshal(body, &request); err != nil {
-		return nil, MessagesAdapterMetadata{}, fmt.Errorf("failed to parse Messages request: %w", err)
+		// The body isn't even valid JSON at this point (request is a generic map, so a
+		// present-but-wrong-typed field would unmarshal fine here and get caught by the
+		// specific checks below instead) -- still the client's mistake, not ours.
+		return nil, MessagesAdapterMetadata{}, converterutil.RequestJSONValidationError(err)
 	}
 
-	model, _ := request["model"].(string)
-	if model == "" {
-		return nil, MessagesAdapterMetadata{}, fmt.Errorf("model is required")
+	modelField, hasModel := request["model"]
+	model, modelIsString := modelField.(string)
+	if !hasModel || model == "" {
+		return nil, MessagesAdapterMetadata{}, converterutil.NewRequestValidationError("model", "Missing required parameter")
 	}
-	maxTokens, ok := request["max_tokens"].(float64)
-	if !ok || maxTokens <= 0 {
-		return nil, MessagesAdapterMetadata{}, fmt.Errorf("max_tokens is required")
+	if !modelIsString {
+		return nil, MessagesAdapterMetadata{}, &converterutil.RequestValidationError{Param: "model", Message: "Invalid parameter type", Code: "invalid_type"}
+	}
+	maxTokensField, hasMaxTokens := request["max_tokens"]
+	if !hasMaxTokens {
+		return nil, MessagesAdapterMetadata{}, converterutil.NewRequestValidationError("max_tokens", "Missing required parameter")
+	}
+	maxTokens, maxTokensIsNumber := maxTokensField.(float64)
+	if !maxTokensIsNumber {
+		// A present-but-wrong-typed field (e.g. "max_tokens":"five") is not the same
+		// mistake as an absent one -- distinct code/message so the client can tell
+		// "I forgot this" apart from "I sent the wrong type", same as every other
+		// converter's json.UnmarshalTypeError classification (see
+		// converterutil.RequestJSONValidationError). This field can't go through that
+		// helper directly since request is a generic map, not a typed struct.
+		return nil, MessagesAdapterMetadata{}, &converterutil.RequestValidationError{Param: "max_tokens", Message: "Invalid parameter type", Code: "invalid_type"}
+	}
+	if maxTokens <= 0 {
+		return nil, MessagesAdapterMetadata{}, &converterutil.RequestValidationError{Param: "max_tokens", Message: "Invalid parameter value", Code: "invalid_value"}
 	}
 	rawMessages, ok := request["messages"].([]interface{})
 	if !ok || len(rawMessages) == 0 {
-		return nil, MessagesAdapterMetadata{}, fmt.Errorf("messages is required")
+		return nil, MessagesAdapterMetadata{}, converterutil.NewRequestValidationError("messages", "Missing required parameter")
 	}
 
 	messages, err := messagesToChatMessages(rawMessages)

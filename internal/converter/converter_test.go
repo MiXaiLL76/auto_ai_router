@@ -5,11 +5,13 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/converter/anthropic"
+	converterutil "github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
 	"github.com/mixaill76/auto_ai_router/internal/converter/openai"
 	"github.com/mixaill76/auto_ai_router/internal/converter/vertex"
 	"google.golang.org/genai"
@@ -588,6 +590,10 @@ func TestProviderConverter_RequestFrom_BedrockOpenAICompatiblePassthrough(t *tes
 	}
 }
 
+// TestProviderConverter_RequestFrom_AnthropicImageNotSupported also confirms the
+// unsupported-capability error classifies as a *converterutil.RequestValidationError:
+// the client asked an Anthropic-wire model for something it can't do -- its mistake, not
+// ours, so the proxy layer must answer 4xx instead of falling through to a generic 500.
 func TestProviderConverter_RequestFrom_AnthropicImageNotSupported(t *testing.T) {
 	c := New(config.ProviderTypeAnthropic, RequestMode{IsImageGeneration: true})
 	_, err := c.RequestFrom([]byte(`{"model":"gpt-4"}`))
@@ -596,6 +602,50 @@ func TestProviderConverter_RequestFrom_AnthropicImageNotSupported(t *testing.T) 
 	}
 	if !strings.Contains(err.Error(), "does not support image generation") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+	var validationErr *converterutil.RequestValidationError
+	if !errors.As(err, &validationErr) {
+		t.Fatalf("expected *converterutil.RequestValidationError, got %T: %v", err, err)
+	}
+}
+
+// TestProviderConverter_RequestFrom_AnthropicEmbeddingsNotSupported and
+// TestProviderConverter_RequestFrom_BedrockEmbeddingsNotSupported cover the other two
+// unsupported-capability sites (converter.go's embeddings switch), same reasoning as the
+// image-generation test above.
+func TestProviderConverter_RequestFrom_AnthropicEmbeddingsNotSupported(t *testing.T) {
+	c := New(config.ProviderTypeAnthropic, RequestMode{IsEmbeddings: true})
+	_, err := c.RequestFrom([]byte(`{"model":"claude-haiku-4-5","input":"hello"}`))
+	if err == nil {
+		t.Fatalf("expected error for embeddings")
+	}
+	var validationErr *converterutil.RequestValidationError
+	if !errors.As(err, &validationErr) {
+		t.Fatalf("expected *converterutil.RequestValidationError, got %T: %v", err, err)
+	}
+}
+
+func TestProviderConverter_RequestFrom_BedrockImageNotSupported(t *testing.T) {
+	c := New(config.ProviderTypeBedrock, RequestMode{IsImageGeneration: true})
+	_, err := c.RequestFrom([]byte(`{"model":"stability.sd3"}`))
+	if err == nil {
+		t.Fatalf("expected error for image generation")
+	}
+	var validationErr *converterutil.RequestValidationError
+	if !errors.As(err, &validationErr) {
+		t.Fatalf("expected *converterutil.RequestValidationError, got %T: %v", err, err)
+	}
+}
+
+func TestProviderConverter_RequestFrom_BedrockEmbeddingsNotSupported(t *testing.T) {
+	c := New(config.ProviderTypeBedrock, RequestMode{IsEmbeddings: true})
+	_, err := c.RequestFrom([]byte(`{"model":"claude-haiku-4-5","input":"hello"}`))
+	if err == nil {
+		t.Fatalf("expected error for embeddings")
+	}
+	var validationErr *converterutil.RequestValidationError
+	if !errors.As(err, &validationErr) {
+		t.Fatalf("expected *converterutil.RequestValidationError, got %T: %v", err, err)
 	}
 }
 
