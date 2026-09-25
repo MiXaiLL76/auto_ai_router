@@ -155,6 +155,58 @@ func TestAnthropicToResponsesResponse_TruncatedToolCall(t *testing.T) {
 	assert.Equal(t, "I'll check the weather in Paris for you.", resp.Output[0].Content[0].Text)
 }
 
+// TestAnthropicToResponsesResponse_TruncatedToolCallDowngradesCompletedStatus covers a
+// non-canonical upstream that reports stop_reason "tool_use" (normally -> status
+// "completed") while the one tool_use block it forwarded was truncated (input nil) and
+// got dropped. The client must not be told the response is "completed" when the one
+// thing it was waiting for -- the tool call -- never arrived.
+func TestAnthropicToResponsesResponse_TruncatedToolCallDowngradesCompletedStatus(t *testing.T) {
+	body := `{
+		"id": "msg_notools",
+		"type": "message",
+		"role": "assistant",
+		"model": "claude-opus-4-7",
+		"content": [{"type": "tool_use", "id": "toolu_trunc", "name": "get_weather"}],
+		"stop_reason": "tool_use",
+		"usage": {"input_tokens": 10, "output_tokens": 5}
+	}`
+
+	resp, err := AnthropicToResponsesResponse([]byte(body), "claude-opus-4-7", "", 0)
+	require.NoError(t, err)
+
+	assert.Equal(t, "incomplete", resp.Status)
+	require.NotNil(t, resp.IncompleteDetails)
+	assert.Equal(t, "max_output_tokens", resp.IncompleteDetails.Reason)
+	for _, item := range resp.Output {
+		assert.NotEqual(t, "function_call", item.Type)
+	}
+}
+
+// TestAnthropicToResponsesResponse_TruncatedComputerCallDropped covers a tool_use block
+// named "computer" (the computer-use discriminator) that was truncated mid-call. The
+// nil-Input check must run before the computer/function-call split, otherwise a
+// truncated computer call slips through with a fabricated Action: nil and a "completed"
+// status that claims the call finished when it didn't.
+func TestAnthropicToResponsesResponse_TruncatedComputerCallDropped(t *testing.T) {
+	body := `{
+		"id": "msg_cctrunc",
+		"type": "message",
+		"role": "assistant",
+		"model": "claude-opus-4-7",
+		"content": [{"type": "tool_use", "id": "toolu_cctrunc", "name": "computer"}],
+		"stop_reason": "tool_use",
+		"usage": {"input_tokens": 10, "output_tokens": 5}
+	}`
+
+	resp, err := AnthropicToResponsesResponse([]byte(body), "claude-opus-4-7", "", 0)
+	require.NoError(t, err)
+
+	assert.Equal(t, "incomplete", resp.Status)
+	for _, item := range resp.Output {
+		assert.NotEqual(t, "computer_call", item.Type, "truncated computer_call must not be surfaced with a fabricated nil action")
+	}
+}
+
 // TestAnthropicToResponsesResponse_WebSearch verifies that a server_tool_use
 // web_search block becomes a web_search_call output item with a
 // {"type":"search","query":...} action (instead of being silently dropped,

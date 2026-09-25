@@ -71,6 +71,16 @@ func AnthropicToOpenAI(anthropicBody []byte, model string) ([]byte, error) {
 	}
 
 	finishReason := mapAnthropicStopReason(anthropicResp.StopReason)
+	if finishReason == "tool_calls" && len(toolCalls) == 0 {
+		// A canonical Anthropic response never reaches here (stop_reason "tool_use"
+		// implies at least one complete tool_use block), but a proxy/aggregator
+		// credential (CometAPI, ProMan, a non-standard Bedrock front) can send
+		// stop_reason "tool_use" while every tool_use block it forwarded was
+		// truncated (input nil) and got dropped above. Don't tell the client to
+		// expect tool calls that aren't there -- an agent loop keyed on
+		// finish_reason == "tool_calls" would spin or crash on a nil/empty list.
+		finishReason = "length"
+	}
 
 	// join multiple text blocks with double newline separator
 	textContent := ""

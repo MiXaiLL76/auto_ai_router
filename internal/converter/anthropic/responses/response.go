@@ -34,7 +34,17 @@ func buildAnthropicResponse(
 	createdAt int64,
 ) *responses.Response {
 	status, incompleteDetails := anthropicStopReasonToStatus(ar.StopReason)
-	output := anthropicContentToOutputItems(ar.Content)
+	output, droppedTruncatedToolCall := anthropicContentToOutputItems(ar.Content)
+	if droppedTruncatedToolCall && status == "completed" {
+		// stop_reason "tool_use" maps to "completed" above on the assumption that a
+		// tool_use block always finished -- true for canonical Anthropic, not
+		// guaranteed for a proxy/aggregator credential that reports "tool_use" while
+		// forwarding a truncated block (see the nil-Input case in
+		// anthropicContentToOutputItems). Don't tell the client the response is
+		// final when the one thing it was waiting for got dropped.
+		status = "incomplete"
+		incompleteDetails = &responses.IncompleteDetails{Reason: "max_output_tokens"}
+	}
 	usage := anthropicUsageToUsage(ar.Usage)
 	completedAt := createdAt
 	return responses.BuildCompletedResponse(responses.CompletedResponseParams{
@@ -49,10 +59,14 @@ func buildAnthropicResponse(
 	})
 }
 
-// anthropicContentToOutputItems converts Anthropic content blocks to Responses API output items.
-func anthropicContentToOutputItems(blocks []anthropic.ContentBlock) []responses.OutputItem {
+// anthropicContentToOutputItems converts Anthropic content blocks to Responses API output
+// items. The second return value reports whether a tool_use block was dropped because it was
+// truncated mid-call (input nil) -- the caller uses it to downgrade response.status away from
+// "completed" when that happens.
+func anthropicContentToOutputItems(blocks []anthropic.ContentBlock) ([]responses.OutputItem, bool) {
 	var output []responses.OutputItem
 	var msgContent []responses.OutputContent
+	droppedTruncatedToolCall := false
 
 	flushMessage := func() {
 		if len(msgContent) == 0 {
@@ -117,6 +131,19 @@ func anthropicContentToOutputItems(blocks []anthropic.ContentBlock) []responses.
 		case "tool_use":
 			// Flush accumulated text before a tool call.
 			flushMessage()
+			if block.Input == nil {
+				// Truncated mid-call (usually max_tokens): Anthropic sent the tool_use
+				// block header before the JSON args finished, so there's no real input
+				// to report -- for either a function_call or a computer_call (checked
+				// before the computer/function split below, since a truncated
+				// "computer"-named call must be dropped exactly the same way; only the
+				// discriminator differs, not the truncation). Don't fabricate a
+				// placeholder call: the caller downgrades response.status to
+				// "incomplete" when any block was dropped here, so that signal isn't
+				// lost even though stop_reason "tool_use" normally maps to "completed".
+				droppedTruncatedToolCall = true
+				continue
+			}
 			// Detect computer_use tool call by tool name.
 			// The name "computer" is the canonical discriminator; the action-key
 			// heuristic is kept as a fallback for non-standard names.
@@ -135,15 +162,6 @@ func anthropicContentToOutputItems(blocks []anthropic.ContentBlock) []responses.
 					Name:   block.Name,
 					Action: block.Input,
 				})
-				continue
-			}
-			if block.Input == nil {
-				// Truncated mid-call (usually max_tokens): Anthropic sent the tool_use
-				// block header before the JSON args finished, so there's no real input
-				// to report. Don't fabricate a {} placeholder call -- the top-level
-				// response.status/incomplete_details already carry the truncation
-				// signal (see anthropicStopReasonToStatus), same rule as the Chat
-				// Completions converter (see anthropic/response.go).
 				continue
 			}
 			argsJSON := "{}"
@@ -173,7 +191,7 @@ func anthropicContentToOutputItems(blocks []anthropic.ContentBlock) []responses.
 		}}
 	}
 
-	return output
+	return output, droppedTruncatedToolCall
 }
 
 // webSearchCitationsToAnnotations converts a text block's Anthropic web_search

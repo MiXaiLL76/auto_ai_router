@@ -248,6 +248,45 @@ func TestAnthropicToOpenAIKeepsGenuineNoArgToolCall(t *testing.T) {
 	}
 }
 
+// TestAnthropicToOpenAIDowngradesEmptyToolCallsFinishReason covers a non-canonical
+// upstream (proxy/aggregator credential) that reports stop_reason "tool_use" even though
+// every tool_use block it forwarded was truncated (input nil) and got dropped. A canonical
+// Anthropic response never reaches this state -- "tool_use" implies at least one complete
+// block -- but an agent loop keyed on finish_reason == "tool_calls" would spin or crash on
+// a nil/empty list if the converter reported it anyway, so finish_reason is downgraded to
+// "length" whenever no tool call actually survived.
+func TestAnthropicToOpenAIDowngradesEmptyToolCallsFinishReason(t *testing.T) {
+	body := []byte(`{
+		"id":"msg_notools",
+		"type":"message",
+		"role":"assistant",
+		"model":"claude-opus-4-7",
+		"content":[{"type":"tool_use","id":"toolu_trunc","name":"get_weather"}],
+		"stop_reason":"tool_use",
+		"usage":{"input_tokens":10,"output_tokens":5}
+	}`)
+
+	converted, err := AnthropicToOpenAI(body, "anthropic/claude-opus-4.7")
+	if err != nil {
+		t.Fatalf("convert Anthropic response: %v", err)
+	}
+
+	var response openai.OpenAIResponse
+	if err := json.Unmarshal(converted, &response); err != nil {
+		t.Fatalf("unmarshal OpenAI response: %v", err)
+	}
+	if len(response.Choices) != 1 {
+		t.Fatalf("expected one choice, got %+v", response.Choices)
+	}
+	choice := response.Choices[0]
+	if len(choice.Message.ToolCalls) != 0 {
+		t.Fatalf("expected no tool calls, got %+v", choice.Message.ToolCalls)
+	}
+	if choice.FinishReason != "length" {
+		t.Fatalf("expected finish_reason downgraded to %q, got %q", "length", choice.FinishReason)
+	}
+}
+
 // TestAnthropicToOpenAICountsWebSearchServerToolUse covers providers that execute the
 // Anthropic web_search server tool but leave server_tool_use out of usage. The call is
 // billable, so the converter counts the server_tool_use blocks it can see in the response
