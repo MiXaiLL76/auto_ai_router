@@ -53,29 +53,78 @@ func UpdateJSONField(body []byte, mapping ModelParamsMapping) []byte {
 }
 
 // ReplaceModelInBody replaces the "model" field value in a JSON body.
-// Uses byte-level replacement of `"model":"oldValue"` to avoid full re-serialization.
+// Uses byte-level replacement of `"model":"oldValue"` to avoid full
+// re-serialization in the common case. json.Marshal never escapes a forward
+// slash, so this fast path only matches when the body encodes the model
+// string the same way -- a client (or intermediary) that escapes it as
+// "openai\/gpt-5.5" instead of "openai/gpt-5.5" is equally valid JSON but
+// won't byte-match. Falls back to a real (but still shallow, no
+// messages/tools re-encoding cost beyond a single top-level pass) parse of
+// just the "model" field so an alternate valid encoding can't silently skip
+// the rewrite -- which would otherwise forward the client-facing alias
+// instead of the resolved real model name to the upstream, which then 400s
+// "model not found" for a name it never heard of.
+//
+// The fast path only runs when `"model"` appears exactly once: with two or
+// more occurrences (a client sending a duplicate top-level key, not valid
+// per a strict JSON grammar but accepted and resolved last-value-wins by
+// every real parser, this one's own fallback included), bytes.Replace's
+// count=1 would touch only the first occurrence and leave a second, stale
+// "model" value in the body -- the one that would actually win once
+// whatever's on the other end parses it. Falling back to the parse-based
+// path there produces a single, unambiguous "model" key instead.
 func ReplaceModelInBody(body []byte, oldModel, newModel string) []byte {
 	oldToken, _ := json.Marshal(oldModel) //nolint:errcheck // json.Marshal on a plain string never fails //
 	newToken, _ := json.Marshal(newModel) //nolint:errcheck // json.Marshal on a plain string never fails //
 
-	// Replace "model":"oldModel" → "model":"newModel"
-	// Handles both with and without spaces after colon
-	patterns := [][]byte{
-		append([]byte(`"model":`), oldToken...),
-		append([]byte(`"model": `), oldToken...),
-	}
-	replacements := [][]byte{
-		append([]byte(`"model":`), newToken...),
-		append([]byte(`"model": `), newToken...),
-	}
+	if bytes.Count(body, quotedModelKeyBytes) == 1 {
+		// Replace "model":"oldModel" → "model":"newModel"
+		// Handles both with and without spaces after colon
+		patterns := [][]byte{
+			append([]byte(`"model":`), oldToken...),
+			append([]byte(`"model": `), oldToken...),
+		}
+		replacements := [][]byte{
+			append([]byte(`"model":`), newToken...),
+			append([]byte(`"model": `), newToken...),
+		}
 
-	for i, pattern := range patterns {
-		if bytes.Contains(body, pattern) {
-			return bytes.Replace(body, pattern, replacements[i], 1)
+		for i, pattern := range patterns {
+			if bytes.Contains(body, pattern) {
+				return bytes.Replace(body, pattern, replacements[i], 1)
+			}
 		}
 	}
 
-	return body
+	return replaceModelFieldViaParse(body, oldModel, newToken)
+}
+
+var quotedModelKeyBytes = []byte(`"model"`)
+
+// replaceModelFieldViaParse is ReplaceModelInBody's fallback for a body whose
+// "model" field is present but encoded differently than json.Marshal would
+// produce (e.g. an escaped forward slash). A shallow map[string]json.RawMessage
+// pass is enough: every other field (messages, tools, ...) is carried through
+// untouched as raw bytes, so this doesn't pay to re-parse or re-encode them.
+func replaceModelFieldViaParse(body []byte, oldModel string, newToken []byte) []byte {
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(body, &top); err != nil {
+		return body
+	}
+	raw, ok := top["model"]
+	if !ok {
+		return body
+	}
+	var current string
+	if err := json.Unmarshal(raw, &current); err != nil || current != oldModel {
+		return body
+	}
+	top["model"] = newToken
+	out, err := json.Marshal(top)
+	if err != nil {
+		return body
+	}
+	return out
 }
 
 // defaultParamSynonymGroups lists sets of request keys that set the same value. A
@@ -263,6 +312,23 @@ func matchModelFamily(modelID, family string) bool {
 		return true
 	}
 	return strings.HasPrefix(base, family+"-") || strings.HasPrefix(base, family+".")
+}
+
+// SupportsReasoningEffortNone reports whether effort "none" turns reasoning off
+// for modelID (GPT-5.1+, GPT-6) rather than being a value to drop. The codex,
+// pro, chat and astra variants reject it.
+func SupportsReasoningEffortNone(modelID string) bool {
+	lower := strings.ToLower(modelID)
+	for _, variant := range []string{"codex", "-pro", "chat", "astra"} {
+		if strings.Contains(lower, variant) {
+			return false
+		}
+	}
+	if matchModelFamily(modelID, "gpt-6") {
+		return true
+	}
+	minor, ok := strings.CutPrefix(extractBaseModelName(modelID), "gpt-5.")
+	return ok && minor != "" && minor[0] >= '1' && minor[0] <= '9'
 }
 
 // ReplaceBodyParam applies model-specific parameter transformations to the request body.
@@ -505,13 +571,14 @@ func StripResponseFormat(body []byte) []byte {
 }
 
 // StripCacheSalt removes the cache_salt field from a JSON request body.
-// cache_salt is a real OpenAI Chat Completions parameter (partitions prompt
-// caching), but it's recent enough that most other OpenAI-compatible server
-// implementations -- vLLM-based deployments, aggregators, anything using a
-// strict Pydantic/JSON-Schema request model -- don't recognize it yet and
-// reject the whole request with a 400 ("cache_salt: Extra inputs are not
-// permitted") rather than ignoring an unknown field. See IsRealOpenAIHost:
-// only genuine api.openai.com should ever see this field forwarded.
+// cache_salt is a LiteLLM/router-level convention for partitioning prompt
+// caching; it's not part of OpenAI's own Chat Completions API, and genuine
+// api.openai.com rejects it outright with a 400 ("Unknown parameter:
+// 'cache_salt'.") -- confirmed directly against api.openai.com, not just
+// inferred -- same as every other OpenAI-wire-protocol server that doesn't
+// recognize it. Only self-hosted vLLM is confirmed to actually support it,
+// for its own prefix-cache partitioning (see
+// ProviderConverter.shouldStripCacheSalt).
 func StripCacheSalt(body []byte) []byte {
 	// This runs on every request through the default (OpenAI-compatible)
 	// branch, so skip the unmarshal/marshal round trip in the common case
@@ -524,13 +591,63 @@ func StripCacheSalt(body []byte) []byte {
 	})
 }
 
-// IsRealOpenAIHost reports whether baseURL points at OpenAI's own API
-// (api.openai.com or a subdomain), as opposed to a third-party server that
-// merely speaks the OpenAI-compatible wire protocol (OpenRouter, a
-// self-hosted vLLM deployment, most aggregators) -- credentials of type
-// "openai" cover both cases here, since AIR's provider Type field only
-// records the wire protocol, not who actually operates the endpoint.
-func IsRealOpenAIHost(baseURL string) bool {
+var streamOptionsIncludeUsageOnly = json.RawMessage(`{"include_usage":true}`)
+
+// RebuildStreamOptionsIncludeUsageOnly replaces the stream_options object
+// with exactly {"include_usage": true} when present, discarding any other
+// keys. The ingress sanitizer guarantees stream_options exists with
+// include_usage=true for every streaming Chat Completions request but
+// otherwise preserves whatever the client sent (e.g. vLLM's
+// continuous_usage_stats extension) -- that's fine for a genuine self-hosted
+// vLLM destination, which understands the key, but api.openai.com and other
+// strict OpenAI-compatible servers reject an unrecognized key outright with
+// a 400 ("stream_options: Extra inputs are not permitted"). Callers decide
+// when to call this based on the resolved provider (see
+// ProviderConverter.shouldStripStreamOptionsExtras); it's a no-op if
+// stream_options isn't present.
+func RebuildStreamOptionsIncludeUsageOnly(body []byte) []byte {
+	if !bytes.Contains(body, []byte(`"stream_options"`)) {
+		return body
+	}
+	var data map[string]json.RawMessage
+	if err := json.Unmarshal(body, &data); err != nil {
+		return body
+	}
+	if _, exists := data["stream_options"]; !exists {
+		return body
+	}
+	data["stream_options"] = streamOptionsIncludeUsageOnly
+	marshaled, err := json.Marshal(data)
+	if err != nil {
+		return body
+	}
+	return marshaled
+}
+
+// StripStreamOptions removes the stream_options field from a JSON request
+// body entirely, unlike RebuildStreamOptionsIncludeUsageOnly. Used for the
+// native Anthropic Messages API (/v1/messages), which -- unlike the OpenAI
+// wire protocol bucket -- doesn't merely reject unrecognized keys inside
+// stream_options, it has no stream_options concept at all and rejects the
+// whole field outright with a 400 ("stream_options: Extra inputs are not
+// permitted"). Native Anthropic streaming always includes usage regardless,
+// so there's no include_usage equivalent to preserve here.
+func StripStreamOptions(body []byte) []byte {
+	if !bytes.Contains(body, []byte(`"stream_options"`)) {
+		return body
+	}
+	return UpdateJSONField(body, ModelParamsMapping{
+		KeysToRemove: []string{"stream_options"},
+	})
+}
+
+// IsOpenRouterHost reports whether baseURL points at OpenRouter's own API
+// (openrouter.ai or a subdomain), as opposed to a third-party server that
+// merely speaks the OpenAI-compatible wire protocol (a remote AIR gateway,
+// Requesty, self-hosted vLLM) -- credentials of type "openai" cover all of
+// these here, since AIR's provider Type field only records the wire
+// protocol, not who actually operates the endpoint.
+func IsOpenRouterHost(baseURL string) bool {
 	trimmed := strings.TrimSpace(baseURL)
 	if trimmed == "" {
 		return false
@@ -543,7 +660,46 @@ func IsRealOpenAIHost(baseURL string) bool {
 		}
 	}
 	host := strings.TrimSuffix(strings.ToLower(u.Hostname()), ".")
-	return host == "api.openai.com" || strings.HasSuffix(host, ".api.openai.com")
+	return host == "openrouter.ai" || strings.HasSuffix(host, ".openrouter.ai")
+}
+
+// StripOpenRouterOnlyFields removes the `plugins` and `provider` fields from
+// a JSON request body. Both are genuine OpenRouter-only request parameters --
+// `plugins` enables OpenRouter's paid web-search plugin, `provider` picks or
+// orders which upstream vendor OpenRouter routes the request to -- that no
+// other OpenAI-wire-protocol server is confirmed to understand. A strict
+// server rejects an unrecognized field outright with a 400; a lenient one
+// just ignores it, which for `plugins` is worse than an error: the client
+// asked (and may be billed) for a feature that silently never ran. Callers
+// decide when to call this based on the resolved provider (see
+// ProviderConverter.shouldStripOpenRouterOnlyFields); it's a no-op if
+// neither field is present.
+func StripOpenRouterOnlyFields(body []byte) []byte {
+	if !bytes.Contains(body, []byte(`"plugins"`)) && !bytes.Contains(body, []byte(`"provider"`)) {
+		return body
+	}
+	return UpdateJSONField(body, ModelParamsMapping{
+		KeysToRemove: []string{"plugins", "provider"},
+	})
+}
+
+// StripVLLMOnlySamplingParams removes chat_template_kwargs, repetition_penalty,
+// and length_penalty from a JSON request body. All three are vLLM/HF-generate
+// sampling extensions, not part of OpenAI's own Chat Completions API -- AIR
+// itself supports configuring them as per-model defaults for vLLM deployments
+// (see litellmdb ChatTemplateKwargs/RepetitionPenalty), but every other
+// OpenAI-wire-protocol destination is confirmed to reject all three outright
+// with a 400 ("Unknown parameter: '<field>'.", confirmed directly against
+// api.openai.com), same as cache_salt/stream_options/plugins.
+func StripVLLMOnlySamplingParams(body []byte) []byte {
+	if !bytes.Contains(body, []byte(`"chat_template_kwargs"`)) &&
+		!bytes.Contains(body, []byte(`"repetition_penalty"`)) &&
+		!bytes.Contains(body, []byte(`"length_penalty"`)) {
+		return body
+	}
+	return UpdateJSONField(body, ModelParamsMapping{
+		KeysToRemove: []string{"chat_template_kwargs", "repetition_penalty", "length_penalty"},
+	})
 }
 
 func ReplaceResponsesBodyParam(modelID string, body []byte) []byte {

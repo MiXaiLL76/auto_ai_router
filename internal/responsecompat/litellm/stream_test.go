@@ -412,3 +412,29 @@ func TestImageStreamDropsProviderCost(t *testing.T) {
 		})
 	}
 }
+
+// Text and Responses streams drop provider cost from usage like chat streams
+// and non-streaming responses do; token counts are kept.
+func TestStreamDropsProviderCostFromUsage(t *testing.T) {
+	const cost = `"cost":0.000196,"is_byok":false,"cost_details":{"upstream_inference_cost":0.000196}`
+	tests := map[string]string{
+		"/v1/chat/completions": `data: {"id":"id-1","created":1,"choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":"stop"}]}` + "\n\n" +
+			`data: {"id":"id-1","created":1,"choices":[],"usage":{"prompt_tokens":8,"completion_tokens":13,"total_tokens":21,` + cost + `}}` + "\n\n",
+		"/v1/completions": `data: {"id":"id-1","created":1,"choices":[{"index":0,"text":"ok","finish_reason":"stop"}]}` + "\n\n" +
+			`data: {"id":"id-1","created":1,"choices":[],"usage":{"prompt_tokens":8,"completion_tokens":13,"total_tokens":21,` + cost + `}}` + "\n\n",
+		"/v1/responses": `data: {"type":"response.completed","response":{"id":"resp-1","model":"provider-model","usage":{"input_tokens":8,"output_tokens":13,"total_tokens":21,` + cost + `}}}` + "\n\n",
+	}
+	for endpoint, stream := range tests {
+		t.Run(endpoint, func(t *testing.T) {
+			output, err := io.ReadAll(New().Stream(Context{
+				Endpoint:       endpoint,
+				RequestedModel: "public-model",
+				IncludeUsage:   true,
+			}, strings.NewReader(stream+"data: [DONE]\n\n")))
+			require.NoError(t, err)
+			assert.NotContains(t, string(output), "cost")
+			assert.NotContains(t, string(output), "is_byok")
+			assert.Contains(t, string(output), `"total_tokens":21`)
+		})
+	}
+}

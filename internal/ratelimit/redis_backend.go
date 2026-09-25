@@ -199,6 +199,10 @@ type RedisBackend struct {
 	keyPrefix      string
 	keyTTL         int           // seconds
 	commandTimeout time.Duration // per-command deadline cap
+	// keepKeysOnDelete is set for counters shared with other deployments:
+	// deleteKey leaves them to expire via keyTTL instead of wiping usage
+	// that other deployments recorded.
+	keepKeysOnDelete bool
 }
 
 // NewValkeyClient creates a valkey.Client from RedisConfig.
@@ -261,6 +265,21 @@ func NewRedisBackendFromClientWithTTL(client valkey.Client, keyPrefix string, ke
 
 // Client returns the underlying valkey.Client so it can be shared with other components.
 func (b *RedisBackend) Client() valkey.Client { return b.client }
+
+// WithSharedKeyPrefix returns a backend for counters shared with other
+// deployments: it reuses b's client, key TTL and command timeout, namespaces
+// its keys under prefix, and never deletes keys (removing a model in one
+// deployment must not wipe usage recorded by the others; idle keys expire via
+// the key TTL). The copy does not own the client: close only the original.
+func (b *RedisBackend) WithSharedKeyPrefix(prefix string) *RedisBackend {
+	c := *b
+	c.keyPrefix = prefix
+	c.keepKeysOnDelete = true
+	return &c
+}
+
+// KeyPrefix returns the namespace prepended to every key of this backend.
+func (b *RedisBackend) KeyPrefix() string { return b.keyPrefix }
 
 // Close shuts down the underlying Valkey client.
 func (b *RedisBackend) Close() { b.client.Close() }
@@ -539,8 +558,17 @@ func (b *RedisBackend) batchCurrentStats(ctx context.Context, keys []string) map
 // Redis command error encountered, for callers that need connectivity
 // visibility (e.g. HybridBackend.doSync — see redis_todo.md item 3).
 func (b *RedisBackend) batchCurrentStatsErr(ctx context.Context, keys []string) (map[string][2]int, error) {
+	out, _, err := b.batchCurrentStatsFailed(ctx, keys)
+	return out, err
+}
+
+// batchCurrentStatsFailed is like batchCurrentStatsErr but also reports which
+// keys could not be read. Their entries in the returned map are zero, so
+// callers that must tell "no usage" from "unknown" (HybridBackend.applySync)
+// need this set.
+func (b *RedisBackend) batchCurrentStatsFailed(ctx context.Context, keys []string) (map[string][2]int, map[string]bool, error) {
 	if len(keys) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 	now := nowMS()
 	nowStr := fmt.Sprintf("%d", now)
@@ -566,22 +594,30 @@ func (b *RedisBackend) batchCurrentStatsErr(ctx context.Context, keys []string) 
 	results := b.client.DoMulti(cmdCtx, cmds...)
 
 	out := make(map[string][2]int, len(keys))
+	var failed map[string]bool
 	var firstErr error
 	for i, key := range keys {
 		var rpm, tpm int64
-		if v, err := results[i*2].AsInt64(); err == nil {
+		v, rpmErr := results[i*2].AsInt64()
+		if rpmErr == nil {
 			rpm = v
-		} else if firstErr == nil {
-			firstErr = err
 		}
-		if v, err := results[i*2+1].AsInt64(); err == nil {
+		v, tpmErr := results[i*2+1].AsInt64()
+		if tpmErr == nil {
 			tpm = v
-		} else if firstErr == nil {
-			firstErr = err
+		}
+		if err := errors.Join(rpmErr, tpmErr); err != nil {
+			if failed == nil {
+				failed = make(map[string]bool)
+			}
+			failed[key] = true
+			if firstErr == nil {
+				firstErr = err
+			}
 		}
 		out[key] = [2]int{int(rpm), int(tpm)}
 	}
-	return out, firstErr
+	return out, failed, firstErr
 }
 
 // setCurrentUsage is a no-op for the Redis backend: all replicas write to the
@@ -589,6 +625,9 @@ func (b *RedisBackend) batchCurrentStatsErr(ctx context.Context, keys []string) 
 func (b *RedisBackend) setCurrentUsage(_ context.Context, _ string, _, _ int) {}
 
 func (b *RedisBackend) deleteKey(ctx context.Context, key string) {
+	if b.keepKeysOnDelete {
+		return
+	}
 	for _, redisKey := range []string{b.rpmKey(key), b.tpmKey(key)} {
 		_, _ = b.doWithRetry(ctx, func(ctx context.Context) (int64, error) {
 			return 0, b.client.Do(ctx, b.client.B().Del().Key(redisKey).Build()).Error()

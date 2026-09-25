@@ -52,6 +52,9 @@ func (t *Transformer) Transform(ctx Context, response Response) Response {
 		err = normalizeTextCompletion(ctx, body)
 	case "/v1/images/generations", "/v1/images/edits":
 		normalizeImage(ctx, body)
+	case "/v1/responses":
+		overrideModel(ctx.RequestedModel, body)
+		dropResponsesProviderCost(body)
 	default:
 		overrideModel(ctx.RequestedModel, body)
 	}
@@ -73,9 +76,6 @@ func normalizeEmbedding(ctx Context, body map[string]any) {
 	delete(body, "id")
 	delete(body, "provider")
 	if usage, ok := body["usage"].(map[string]any); ok {
-		delete(usage, "cost")
-		delete(usage, "cost_details")
-		delete(usage, "is_byok")
 		normalizeUsage(usage)
 	}
 }
@@ -91,19 +91,38 @@ func isImageEndpoint(endpoint string) bool {
 	return endpoint == "/v1/images/generations" || endpoint == "/v1/images/edits"
 }
 
-// dropProviderImageCost removes provider-side cost figures from an image
-// response or stream event's usage: they expose the upstream price, while the
-// client is billed by the router. Token and image counts are kept.
+// dropProviderCost removes provider-side cost figures (OpenRouter-style
+// aggregators add them to usage) on every surface: they expose the upstream
+// price, while the client is billed by the router. Token counts are kept.
+func dropProviderCost(usage map[string]any) {
+	for _, field := range []string{"cost", "cost_details", "cost_in_usd_ticks", "is_byok"} {
+		delete(usage, field)
+	}
+}
+
+// dropProviderImageCost drops provider cost from an image response or stream
+// event's usage, and the usage itself when nothing else is left in it.
 func dropProviderImageCost(body map[string]any) {
 	usage, ok := body["usage"].(map[string]any)
 	if !ok {
 		return
 	}
-	for _, field := range []string{"cost", "cost_details", "cost_in_usd_ticks", "is_byok"} {
-		delete(usage, field)
-	}
+	dropProviderCost(usage)
 	if len(usage) == 0 {
 		delete(body, "usage")
+	}
+}
+
+// dropResponsesProviderCost drops provider cost from a Responses body's usage
+// and from the usage nested in a stream event's response object.
+func dropResponsesProviderCost(body map[string]any) {
+	if usage, ok := body["usage"].(map[string]any); ok {
+		dropProviderCost(usage)
+	}
+	if response, ok := body["response"].(map[string]any); ok {
+		if usage, ok := response["usage"].(map[string]any); ok {
+			dropProviderCost(usage)
+		}
 	}
 }
 
@@ -256,6 +275,7 @@ func overrideModel(requestedModel string, body map[string]any) {
 }
 
 func normalizeUsage(usage map[string]any) {
+	dropProviderCost(usage)
 	for _, field := range []string{"prompt_tokens", "completion_tokens", "total_tokens"} {
 		if usage[field] == nil {
 			usage[field] = float64(0)

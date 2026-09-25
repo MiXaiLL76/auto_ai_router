@@ -451,6 +451,15 @@ type RedisConfig struct {
 	// KeyPrefix is prepended to every rate-limit key (default: "rl:").
 	KeyPrefix string `yaml:"key_prefix,omitempty"`
 
+	// BalancerKeyPrefix overrides KeyPrefix for the balancer's credential/model
+	// RPM/TPM counters only (default: KeyPrefix, i.e. current behaviour). Deployments that
+	// call the same upstream credentials should set the same value so the
+	// provider quota is counted jointly, while budget, auth and response-store
+	// keys stay isolated under each deployment's KeyPrefix. The shared value must
+	// differ from the KeyPrefix of every such deployment: counters are treated as
+	// shared (never deleted) only where BalancerKeyPrefix != KeyPrefix.
+	BalancerKeyPrefix string `yaml:"balancer_key_prefix,omitempty"`
+
 	TLSEnabled bool `yaml:"tls_enabled,omitempty"`
 
 	ConnectTimeout   time.Duration `yaml:"connect_timeout,omitempty"`    // default: 5s
@@ -489,6 +498,7 @@ func (r *RedisConfig) UnmarshalYAML(value *yaml.Node) error {
 		Password          string   `yaml:"password,omitempty"`
 		SelectDB          string   `yaml:"select_db,omitempty"`
 		KeyPrefix         string   `yaml:"key_prefix,omitempty"`
+		BalancerKeyPrefix string   `yaml:"balancer_key_prefix,omitempty"`
 		TLSEnabled        string   `yaml:"tls_enabled,omitempty"`
 		ConnectTimeout    string   `yaml:"connect_timeout,omitempty"`
 		ConnWriteTimeout  string   `yaml:"conn_write_timeout,omitempty"`
@@ -522,6 +532,7 @@ func (r *RedisConfig) UnmarshalYAML(value *yaml.Node) error {
 	r.Username = resolveEnvString(temp.Username)
 	r.Password = resolveEnvString(temp.Password)
 	r.KeyPrefix = resolveEnvString(temp.KeyPrefix)
+	r.BalancerKeyPrefix = resolveEnvString(temp.BalancerKeyPrefix)
 
 	if r.SelectDB, err = parseField(temp.SelectDB, 0, strconv.Atoi, "redis.select_db"); err != nil {
 		return err
@@ -570,6 +581,9 @@ func (r *RedisConfig) UnmarshalYAML(value *yaml.Node) error {
 	// Apply default key prefix
 	if r.KeyPrefix == "" {
 		r.KeyPrefix = "rl:"
+	}
+	if r.BalancerKeyPrefix == "" {
+		r.BalancerKeyPrefix = r.KeyPrefix
 	}
 
 	return nil
@@ -1140,6 +1154,11 @@ type LiteLLMDBConfig struct {
 	// DefaultEstimatedCompletionTokens is the completion-token estimate used for
 	// budget pre-reservation when the request doesn't specify max_tokens.
 	DefaultEstimatedCompletionTokens int `yaml:"default_estimated_completion_tokens"` // default: 1000
+
+	// DailySpendTimezone sets the calendar day the Daily* spend tables are
+	// grouped by. Only their date column follows it; every stored timestamp
+	// stays UTC.
+	DailySpendTimezone *time.Location `yaml:"daily_spend_timezone"` // default: UTC
 }
 
 // KafkaConfig holds configuration for the Kafka spend-log analytics write-path
@@ -1417,6 +1436,7 @@ func (l *LiteLLMDBConfig) UnmarshalYAML(value *yaml.Node) error {
 		BudgetReservationTTL             string `yaml:"budget_reservation_ttl"`
 		EnforceKeyRateLimits             string `yaml:"enforce_key_rate_limits"`
 		DefaultEstimatedCompletionTokens string `yaml:"default_estimated_completion_tokens"`
+		DailySpendTimezone               string `yaml:"daily_spend_timezone"`
 	}
 
 	var temp tempConfig
@@ -1490,6 +1510,10 @@ func (l *LiteLLMDBConfig) UnmarshalYAML(value *yaml.Node) error {
 		return err
 	}
 	if l.BudgetReservationTTL, err = parseField(temp.BudgetReservationTTL, 15*time.Minute, time.ParseDuration, "litellm_db.budget_reservation_ttl"); err != nil {
+		return err
+	}
+	// Timezone fields
+	if l.DailySpendTimezone, err = parseField(temp.DailySpendTimezone, time.UTC, time.LoadLocation, "litellm_db.daily_spend_timezone"); err != nil {
 		return err
 	}
 
@@ -1782,7 +1806,7 @@ func defaultMonitoringConfig() MonitoringConfig {
 }
 
 func defaultRedisConfig() RedisConfig {
-	return RedisConfig{
+	r := RedisConfig{
 		Enabled:           false,
 		InitAddresses:     nil,
 		Username:          "",
@@ -1799,6 +1823,8 @@ func defaultRedisConfig() RedisConfig {
 		KeyTTL:            120,
 		CommandTimeout:    3 * time.Second,
 	}
+	r.BalancerKeyPrefix = r.KeyPrefix
+	return r
 }
 
 func defaultLiteLLMDBConfig() LiteLLMDBConfig {
@@ -1823,6 +1849,7 @@ func defaultLiteLLMDBConfig() LiteLLMDBConfig {
 		BudgetReservationTTL:             15 * time.Minute,
 		EnforceKeyRateLimits:             false,
 		DefaultEstimatedCompletionTokens: 1000,
+		DailySpendTimezone:               time.UTC,
 	}
 }
 

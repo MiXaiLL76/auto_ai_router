@@ -9,7 +9,7 @@ import (
 
 // responsesToolsToVertex converts Responses API tools to Vertex AI genai.Tool slice.
 // Function tools are grouped into one Tool with FunctionDeclarations.
-// Built-in tools (web_search, code_interpreter) become separate Tool entries.
+// Built-in tools (web_search, code_interpreter, url_context) become separate Tool entries.
 func responsesToolsToVertex(tools []responses.Tool) []*genai.Tool {
 	if len(tools) == 0 {
 		return nil
@@ -42,6 +42,13 @@ func responsesToolsToVertex(tools []responses.Tool) []*genai.Tool {
 				CodeExecution: &genai.ToolCodeExecution{},
 			})
 
+		case "url_context":
+			// Gemini-native built-in with no OpenAI counterpart: the model fetches
+			// the URLs mentioned in the prompt itself.
+			builtinTools = append(builtinTools, &genai.Tool{
+				URLContext: &genai.URLContext{},
+			})
+
 			// Other tool types (file_search, computer_use, mcp) are not supported by
 			// Vertex and are silently skipped. image_generation is intentionally not
 			// emitted as a tool either: buildGenConfig translates it to the IMAGE
@@ -58,6 +65,17 @@ func responsesToolsToVertex(tools []responses.Tool) []*genai.Tool {
 		return []*genai.Tool{{FunctionDeclarations: funcDecls}}
 	}
 	return nil
+}
+
+// hasFunctionDeclarations reports whether the converted Vertex tools still carry
+// function declarations, i.e. whether a FunctionCallingConfig is applicable.
+func hasFunctionDeclarations(tools []*genai.Tool) bool {
+	for _, t := range tools {
+		if t != nil && len(t.FunctionDeclarations) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // responsesToolChoiceToVertex maps Responses API tool_choice to Vertex ToolConfig.

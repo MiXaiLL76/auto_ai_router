@@ -66,9 +66,15 @@ func applyLiteLLMRequestCompatibility(path string, body []byte) []byte {
 }
 
 type responseCompatibilityWriter struct {
-	target         http.ResponseWriter
-	transformer    *compatlitellm.Transformer
-	request        *http.Request
+	target      http.ResponseWriter
+	transformer *compatlitellm.Transformer
+	request     *http.Request
+	// endpoint is the client-facing path, captured before proxying. The
+	// orchestrator rewrites request.URL.Path to the provider path (e.g.
+	// /v1/responses -> /v1/chat/completions when converting), and the URL is
+	// shared with this request, so reading it at transform time would reshape
+	// a Responses body as a chat completion.
+	endpoint       string
 	header         http.Header
 	initialHeaders http.Header
 	body           bytes.Buffer
@@ -91,6 +97,7 @@ func newResponseCompatibilityWriter(
 		target:         target,
 		transformer:    transformer,
 		request:        request,
+		endpoint:       request.URL.Path,
 		header:         initial.Clone(),
 		initialHeaders: initial,
 	}
@@ -244,7 +251,7 @@ func (w *responseCompatibilityWriter) splitHeaders() (http.Header, http.Header) 
 }
 
 func (w *responseCompatibilityWriter) compatContext() compatlitellm.Context {
-	ctx := compatlitellm.Context{Endpoint: w.request.URL.Path}
+	ctx := compatlitellm.Context{Endpoint: w.endpoint}
 	if info := responseCompatRequestFromContext(w.request.Context()); info != nil {
 		ctx.RequestID = info.RequestID
 		ctx.RequestedModel = info.RequestedModel

@@ -159,6 +159,210 @@ func TestOpenAIToAnthropic_ResponseFormatJSONSchemaIncludesSchema(t *testing.T) 
 	assert.Contains(t, schema["properties"], "city")
 }
 
+// TestOpenAIToAnthropic_ResponseFormatJSONSchemaAddsMissingAdditionalProperties
+// covers the live-reproduced bug: Anthropic's native Structured Outputs
+// requires "additionalProperties": false on every object node explicitly --
+// unlike OpenAI, which only requires it under strict:true. A client's
+// non-strict schema (or any schema that simply omits the key, object or
+// nested) 400s outright there without this normalization:
+// "output_config.format.schema: For 'object' type, 'additionalProperties'
+// must be explicitly set to false".
+func TestOpenAIToAnthropic_ResponseFormatJSONSchemaAddsMissingAdditionalProperties(t *testing.T) {
+	result, err := OpenAIToAnthropic([]byte(`{
+		"model":"claude-haiku-4-5",
+		"messages":[{"role":"user","content":"classify this"}],
+		"response_format":{
+			"type":"json_schema",
+			"json_schema":{
+				"name":"result",
+				"schema":{
+					"type":"object",
+					"properties":{
+						"title_ru":{"type":"string","maxLength":400},
+						"blocks":{"type":"array","items":{"type":"string","enum":["I","II"]}}
+					},
+					"required":["title_ru"]
+				},
+				"strict":false
+			}
+		}
+	}`), "claude-haiku-4-5", true)
+	require.NoError(t, err)
+
+	var request map[string]interface{}
+	require.NoError(t, json.Unmarshal(result, &request))
+	schema := request["output_config"].(map[string]interface{})["format"].(map[string]interface{})["schema"].(map[string]interface{})
+
+	assert.Equal(t, false, schema["additionalProperties"], "top-level object node must get additionalProperties:false")
+	// The client's actual constraints (enum, maxLength, required) must survive
+	// the normalization untouched -- this isn't a fallback to a generic
+	// "respond with JSON" instruction, the schema is still enforced.
+	assert.Equal(t, []interface{}{"title_ru"}, schema["required"])
+	properties := schema["properties"].(map[string]interface{})
+	assert.EqualValues(t, 400, properties["title_ru"].(map[string]interface{})["maxLength"])
+}
+
+// TestOpenAIToAnthropic_ResponseFormatJSONSchemaNormalizesNestedObjectWithoutExplicitType
+// covers a nested object schema that has no explicit "type": "object" at
+// all -- a "properties" key alone is a near-universal real-world signal of
+// an object node, so it must be normalized too, not just the schema root.
+func TestOpenAIToAnthropic_ResponseFormatJSONSchemaNormalizesNestedObjectWithoutExplicitType(t *testing.T) {
+	result, err := OpenAIToAnthropic([]byte(`{
+		"model":"claude-haiku-4-5",
+		"messages":[{"role":"user","content":"test"}],
+		"response_format":{
+			"type":"json_schema",
+			"json_schema":{
+				"name":"result",
+				"schema":{
+					"type":"object",
+					"properties":{
+						"address":{
+							"properties":{"city":{"type":"string"}}
+						}
+					}
+				}
+			}
+		}
+	}`), "claude-haiku-4-5", true)
+	require.NoError(t, err)
+
+	var request map[string]interface{}
+	require.NoError(t, json.Unmarshal(result, &request))
+	schema := request["output_config"].(map[string]interface{})["format"].(map[string]interface{})["schema"].(map[string]interface{})
+	address := schema["properties"].(map[string]interface{})["address"].(map[string]interface{})
+
+	assert.Equal(t, false, schema["additionalProperties"])
+	assert.Equal(t, false, address["additionalProperties"], "nested object with only 'properties' (no explicit type) must be normalized too")
+}
+
+// TestOpenAIToAnthropic_ResponseFormatJSONSchemaPreservesExplicitAdditionalProperties
+// covers the case where the client already set additionalProperties
+// themselves (true, or a nested schema) -- the normalizer must never
+// override an explicit choice, only fill in an absent one.
+func TestOpenAIToAnthropic_ResponseFormatJSONSchemaPreservesExplicitAdditionalProperties(t *testing.T) {
+	result, err := OpenAIToAnthropic([]byte(`{
+		"model":"claude-haiku-4-5",
+		"messages":[{"role":"user","content":"test"}],
+		"response_format":{
+			"type":"json_schema",
+			"json_schema":{
+				"name":"result",
+				"schema":{
+					"type":"object",
+					"properties":{"city":{"type":"string"}},
+					"additionalProperties":true
+				}
+			}
+		}
+	}`), "claude-haiku-4-5", true)
+	require.NoError(t, err)
+
+	var request map[string]interface{}
+	require.NoError(t, json.Unmarshal(result, &request))
+	schema := request["output_config"].(map[string]interface{})["format"].(map[string]interface{})["schema"].(map[string]interface{})
+	assert.Equal(t, true, schema["additionalProperties"], "explicit client choice must not be overridden")
+}
+
+// TestOpenAIToAnthropic_ResponseFormatJSONSchemaDropsTypeUnionAlongsideEnum
+// covers a live-reproduced Anthropic validator quirk: a nullable enum field
+// shaped as OpenAI's own convention (type: ["string","null"], enum includes
+// null as a member) makes Anthropic reject every enum value against the
+// union as a whole -- "Invalid schema: Enum value 'derailment' does not
+// match declared type '['string', 'null']'" -- even though "derailment"
+// plainly satisfies the "string" half. "enum" is already fully
+// self-describing (null is one of its own members here), so the redundant
+// "type" array is dropped; a single-string "type" alongside "enum" is left
+// alone since that combination works fine.
+func TestOpenAIToAnthropic_ResponseFormatJSONSchemaDropsTypeUnionAlongsideEnum(t *testing.T) {
+	result, err := OpenAIToAnthropic([]byte(`{
+		"model":"claude-haiku-4-5",
+		"messages":[{"role":"user","content":"test"}],
+		"response_format":{
+			"type":"json_schema",
+			"json_schema":{
+				"name":"result",
+				"schema":{
+					"type":"object",
+					"properties":{
+						"incident_type":{
+							"enum":["derailment","collision",null],
+							"type":["string","null"]
+						},
+						"title":{"enum":["a","b"],"type":"string"}
+					}
+				}
+			}
+		}
+	}`), "claude-haiku-4-5", true)
+	require.NoError(t, err)
+
+	var request map[string]interface{}
+	require.NoError(t, json.Unmarshal(result, &request))
+	schema := request["output_config"].(map[string]interface{})["format"].(map[string]interface{})["schema"].(map[string]interface{})
+	properties := schema["properties"].(map[string]interface{})
+
+	incidentType := properties["incident_type"].(map[string]interface{})
+	_, hasType := incidentType["type"]
+	assert.False(t, hasType, "the union-typed \"type\" array must be dropped when \"enum\" is present")
+	assert.Equal(t, []interface{}{"derailment", "collision", nil}, incidentType["enum"], "enum itself, including its null member, must survive untouched")
+
+	// A single-string "type" alongside "enum" is a different, working
+	// combination -- must not be touched by this fixup.
+	title := properties["title"].(map[string]interface{})
+	assert.Equal(t, "string", title["type"])
+}
+
+// TestOpenAIToAnthropic_ResponseFormatJSONSchemaDropsNumberMinMax covers the
+// third layer of the same live-reproduced incident: Anthropic's Structured
+// Outputs schema support doesn't include "minimum"/"maximum" on numeric
+// nodes at all -- "output_config.format.schema: For 'number' type,
+// properties maximum, minimum are not supported" -- so they're dropped
+// rather than sent through to 400. Applied to both "number" and "integer".
+func TestOpenAIToAnthropic_ResponseFormatJSONSchemaDropsNumberMinMax(t *testing.T) {
+	result, err := OpenAIToAnthropic([]byte(`{
+		"model":"claude-haiku-4-5",
+		"messages":[{"role":"user","content":"test"}],
+		"response_format":{
+			"type":"json_schema",
+			"json_schema":{
+				"name":"result",
+				"schema":{
+					"type":"object",
+					"properties":{
+						"relevance":{"type":"number","minimum":0,"maximum":1},
+						"count":{"type":"integer","minimum":0,"maximum":100},
+						"title":{"type":"string","maxLength":400}
+					}
+				}
+			}
+		}
+	}`), "claude-haiku-4-5", true)
+	require.NoError(t, err)
+
+	var request map[string]interface{}
+	require.NoError(t, json.Unmarshal(result, &request))
+	schema := request["output_config"].(map[string]interface{})["format"].(map[string]interface{})["schema"].(map[string]interface{})
+	properties := schema["properties"].(map[string]interface{})
+
+	relevance := properties["relevance"].(map[string]interface{})
+	_, hasMin := relevance["minimum"]
+	_, hasMax := relevance["maximum"]
+	assert.False(t, hasMin, "minimum must be dropped from a number node")
+	assert.False(t, hasMax, "maximum must be dropped from a number node")
+	assert.Equal(t, "number", relevance["type"], "the type itself must survive")
+
+	count := properties["count"].(map[string]interface{})
+	_, hasMin = count["minimum"]
+	_, hasMax = count["maximum"]
+	assert.False(t, hasMin, "minimum must be dropped from an integer node too")
+	assert.False(t, hasMax, "maximum must be dropped from an integer node too")
+
+	// Constraints on unrelated types must not be touched by this fixup.
+	title := properties["title"].(map[string]interface{})
+	assert.EqualValues(t, 400, title["maxLength"])
+}
+
 func TestOpenAIToAnthropic_ResponseFormatJSONObjectForbidsMarkdownFences(t *testing.T) {
 	result, err := OpenAIToAnthropic([]byte(`{
 		"model":"claude-sonnet-4-6",

@@ -191,6 +191,7 @@ func (o *openAIStreamUsageExtractor) extractChatCompletionUsage(payload []byte) 
 				} `json:"cache_creation_token_details,omitempty"`
 				AudioTokens int `json:"audio_tokens,omitempty"`
 				ImageTokens int `json:"image_tokens,omitempty"`
+				converterutil.CachingTokensExtension
 			} `json:"prompt_tokens_details,omitempty"`
 			CompletionTokensDetails struct {
 				AcceptedPredictionTokens int `json:"accepted_prediction_tokens,omitempty"`
@@ -220,9 +221,13 @@ func (o *openAIStreamUsageExtractor) extractChatCompletionUsage(payload []byte) 
 	if cacheCreationTokens == 0 {
 		cacheCreationTokens = data.Usage.PromptTokensDetails.CacheWriteTokens
 	}
+	cacheCreation5mTokens := data.Usage.PromptTokensDetails.CacheCreationTokenDetails.Ephemeral5mInputTokens
+	cacheCreation1hTokens := data.Usage.PromptTokensDetails.CacheCreationTokenDetails.Ephemeral1hInputTokens
 	if cacheCreationTokens == 0 {
-		cacheCreationTokens = data.Usage.PromptTokensDetails.CacheCreationTokenDetails.Ephemeral5mInputTokens +
-			data.Usage.PromptTokensDetails.CacheCreationTokenDetails.Ephemeral1hInputTokens
+		cacheCreationTokens = cacheCreation5mTokens + cacheCreation1hTokens
+	}
+	if cacheCreationTokens == 0 {
+		cacheCreationTokens, cacheCreation5mTokens, cacheCreation1hTokens = data.Usage.PromptTokensDetails.CachingWrite()
 	}
 	cachedTokens, cachedAudioTokens := converterutil.NormalizeCachedAudioBreakdown(
 		data.Usage.PromptTokensDetails.CachedTokens,
@@ -235,8 +240,8 @@ func (o *openAIStreamUsageExtractor) extractChatCompletionUsage(payload []byte) 
 		CachedTokens:          cachedTokens,
 		CachedAudioTokens:     cachedAudioTokens,
 		CacheCreationTokens:   cacheCreationTokens,
-		CacheCreation5mTokens: data.Usage.PromptTokensDetails.CacheCreationTokenDetails.Ephemeral5mInputTokens,
-		CacheCreation1hTokens: data.Usage.PromptTokensDetails.CacheCreationTokenDetails.Ephemeral1hInputTokens,
+		CacheCreation5mTokens: cacheCreation5mTokens,
+		CacheCreation1hTokens: cacheCreation1hTokens,
 		AudioInputTokens: normalizeStreamAudioInput(
 			data.Usage.PromptTokensDetails.AudioTokens,
 			cachedTokens,
@@ -478,6 +483,9 @@ var (
 	// keeps this a single cheap scan like the usage check.
 	sseWebSearchCallNeedle = []byte(`"web_search_call"`)
 	sseAnnotationsNeedle   = []byte(`"annotations"`)
+	// sseWebSearchResultsNeedle catches the top-level "web_search" results
+	// array a Z.AI chat stream sends in one chunk, apart from its usage.
+	sseWebSearchResultsNeedle = []byte(`"web_search"`)
 	// sseErrorNeedle and sseResponseFailedNeedle prefilter
 	// extractStreamErrorEvent's json.Unmarshal (called from
 	// proxyStreamErrorCapture.Observe/Finalize on every assembled SSE frame):
@@ -509,7 +517,8 @@ func frameMayCarryStreamError(frame []byte) bool {
 func chunkMayCarryTokenUsage(chunk []byte) bool {
 	return bytes.Contains(chunk, sseUsageNeedle) ||
 		bytes.Contains(chunk, sseWebSearchCallNeedle) ||
-		bytes.Contains(chunk, sseAnnotationsNeedle)
+		bytes.Contains(chunk, sseAnnotationsNeedle) ||
+		bytes.Contains(chunk, sseWebSearchResultsNeedle)
 }
 
 // splitSSEPayloads splits an SSE-formatted chunk into its "data:" JSON payload
@@ -934,6 +943,17 @@ func (p *Proxy) handleStreamingWithTokens(w http.ResponseWriter, resp *http.Resp
 	onChunk := func(chunk []byte) {
 		chunkCount++
 		usageLines.Observe(chunk, onLine)
+	}
+
+	if logCtx != nil && logCtx.HideWebSearchResults {
+		providerReader = newWebSearchResultsStripReader(providerReader, func(payload []byte) {
+			if usage := converter.ExtractTokenUsageWithOptions(payload, converter.TokenUsageExtractionOptions{AudioInputIncludesCachedAudio: true}); usage != nil {
+				if logCtx.TokenUsage == nil {
+					logCtx.TokenUsage = &converter.TokenUsage{}
+				}
+				logCtx.TokenUsage.MergeNonZero(usage)
+			}
+		})
 	}
 
 	clientReader := normalizeSuccessfulResponseModelStream(

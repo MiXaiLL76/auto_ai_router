@@ -695,7 +695,9 @@ func ChatToMessages(body []byte, metadata MessagesAdapterMetadata) ([]byte, erro
 			"type": "thinking", "thinking": choice.Message.ReasoningContent, "signature": nil,
 		})
 	}
-	if choice.Message.Content != nil {
+	// A tool_use-only turn has content "" in Chat form; echoed back as an empty
+	// text block it gets a 400 from Anthropic.
+	if choice.Message.Content != nil && *choice.Message.Content != "" {
 		content = append(content, map[string]interface{}{"type": "text", "text": *choice.Message.Content})
 	}
 	for _, toolCall := range choice.Message.ToolCalls {
@@ -733,20 +735,31 @@ func chatUsageToMessages(usage *openai.OpenAIUsage) *AnthropicUsage {
 		return &AnthropicUsage{}
 	}
 	cacheRead := 0
-	cacheCreation := 0
 	if usage.PromptTokensDetails != nil {
 		cacheRead = usage.PromptTokensDetails.CachedTokens
-		cacheCreation = usage.PromptTokensDetails.CacheCreationTokens
-		if cacheCreation == 0 {
-			cacheCreation = usage.PromptTokensDetails.CacheWriteTokens
-		}
 	}
-	return &AnthropicUsage{
+	cacheCreation, cacheCreation5m, cacheCreation1h := usage.PromptTokensDetails.CacheWrite()
+	result := &AnthropicUsage{
 		InputTokens:              max(usage.PromptTokens-cacheRead-cacheCreation, 0),
 		OutputTokens:             usage.CompletionTokens,
 		CacheReadInputTokens:     cacheRead,
 		CacheCreationInputTokens: cacheCreation,
 	}
+	// Billing downstream (stream reader, next AIR hop) sees only this usage:
+	// without the split a 1h write bills at the 5m price, without
+	// server_tool_use searches do not bill at all.
+	if cacheCreation5m > 0 || cacheCreation1h > 0 {
+		result.CacheCreation = &CacheCreationDetails{
+			Ephemeral5mInputTokens: cacheCreation5m,
+			Ephemeral1hInputTokens: cacheCreation1h,
+		}
+	}
+	if usage.ServerToolUse != nil && usage.ServerToolUse.WebSearchRequests > 0 {
+		result.ServerToolUse = &ServerToolUsageDetails{
+			WebSearchRequests: usage.ServerToolUse.WebSearchRequests,
+		}
+	}
+	return result
 }
 
 func chatFinishReasonToMessages(reason string) string {

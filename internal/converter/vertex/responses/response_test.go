@@ -143,6 +143,27 @@ func TestUsageMetadataToUsage_PreservesCachedAudioTokens(t *testing.T) {
 	assert.Equal(t, 15, usage.InputTokensDetails.AudioTokens)
 }
 
+// Gemini keeps thoughts out of candidatesTokenCount and url_context page content
+// out of promptTokenCount. Responses usage is what billing reads, so both must be
+// folded in: previously a thinking turn was billed max(candidates, thoughts) and
+// fetched pages were not billed at all.
+func TestUsageMetadataToUsage_FoldsThoughtsAndToolUsePrompt(t *testing.T) {
+	usage := usageMetadataToUsage(&genai.GenerateContentResponseUsageMetadata{
+		PromptTokenCount:        46,
+		ToolUsePromptTokenCount: 5000,
+		CandidatesTokenCount:    81,
+		ThoughtsTokenCount:      300,
+		TotalTokenCount:         5427,
+	})
+
+	require.NotNil(t, usage)
+	assert.Equal(t, 5046, usage.InputTokens)
+	assert.Equal(t, 381, usage.OutputTokens)
+	assert.Equal(t, 300, usage.OutputTokensDetails.ReasoningTokens)
+	assert.Equal(t, 5427, usage.TotalTokens)
+	assert.Equal(t, usage.TotalTokens, usage.InputTokens+usage.OutputTokens)
+}
+
 func TestCandidatesToOutputItems_CodeInterpreter_CodeOnly(t *testing.T) {
 	vertexResp := &genai.GenerateContentResponse{
 		Candidates: []*genai.Candidate{

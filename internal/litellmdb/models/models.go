@@ -74,6 +74,10 @@ type Config struct {
 	// cumulative LiteLLM_UserTable spend projection. Nil defaults to true.
 	IncludeTeamSpendInUserSpend *bool
 
+	// DailySpendTimezone sets the calendar day the Daily* spend tables are
+	// grouped by. Nil means UTC. Stored timestamps are unaffected.
+	DailySpendTimezone *time.Location
+
 	// Logger
 	Logger *slog.Logger
 }

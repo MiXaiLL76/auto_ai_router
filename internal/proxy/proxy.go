@@ -23,6 +23,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/converter"
 	anthropicconv "github.com/mixaill76/auto_ai_router/internal/converter/anthropic"
 	"github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
+	"github.com/mixaill76/auto_ai_router/internal/converter/openai"
 	promanutils "github.com/mixaill76/auto_ai_router/internal/converter/proman/utils"
 	"github.com/mixaill76/auto_ai_router/internal/converter/responses"
 	"github.com/mixaill76/auto_ai_router/internal/httputil"
@@ -289,6 +290,7 @@ type RequestLogContext struct {
 	ImageCount            int                      // Number of images requested ('n' param, at least 1)
 	WebSearchRequested    bool                     // True when the request enabled the built-in web search tool
 	WebSearchContextSize  string                   // low|medium|high from web_search_options/tool config
+	HideWebSearchResults  bool                     // Z.AI web_search tool without search_result: results are still fetched to bill the search, then stripped from the client response
 	ReasoningRequested    bool
 	ReasoningSource       string
 	ThinkingMode          string
@@ -684,6 +686,7 @@ func (p *Proxy) executeProxyRequest(
 	if r.URL.Path == "/v1/messages" {
 		body, anthropicBetas = anthropicconv.ExtractBetaHeader(body)
 	}
+	body = forceWebSearchResultsForPath(r.URL.Path, body)
 	proxyReq, err := http.NewRequestWithContext(httputil.WithProxyURL(upstreamCtx, cred.ProxyURL), r.Method, targetURL, bytes.NewReader(body)) //nolint:gosec // G704: targetURL's host is proxyBaseURL from a configured credential, not attacker-controlled — only the path/query comes from the incoming request
 	if err != nil {
 		p.logger.ErrorContext(r.Context(), "Failed to create proxy request", "error", err, "url", targetURL)
@@ -1007,6 +1010,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 		logCtx.WebSearchRequested = true
 		logCtx.WebSearchContextSize = webSearchContextSize
 	}
+	logCtx.HideWebSearchResults = webSearchResultsHiddenFromClient(r.URL.Path, body)
 
 	if !p.applyCredentialCompatibilityRouting(w, r, prepared, logCtx, start) {
 		return
@@ -1683,6 +1687,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 				DisplayModelID:      modelID,
 				ContentType:         r.Header.Get("Content-Type"),
 				BaseURL:             cred.BaseURL,
+				IsVLLM:              cred.Type == config.ProviderTypeVLLM,
 			})
 			var convErr error
 			requestBody, convErr = conv.RequestFrom(body)
@@ -2143,6 +2148,8 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 && conv != nil && conv.IsPassthrough() {
 			finalResponseBody = rewriteResponseModelAlias(finalResponseBody, realModelID, modelID)
+			// Before billing picks its body: the stripped searches are billed from usage.
+			finalResponseBody = openai.StripServerToolCalls(finalResponseBody)
 		}
 
 		// bodyForTokenExtraction is set to finalResponseBody now and may be updated
@@ -2290,6 +2297,12 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 		if clientBodyChanged {
 			finalResponseBody = clientBody
 			bodyForTokenExtraction = clientBody
+		}
+		if logCtx.HideWebSearchResults && resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
+			if stripped, ok := stripWebSearchResults(finalResponseBody); ok {
+				finalResponseBody = stripped
+				dropRepresentationIntegrityHeaders(resp.Header)
+			}
 		}
 		if clientBodyChanged || clientBodyMasked {
 			dropRepresentationIntegrityHeaders(resp.Header)

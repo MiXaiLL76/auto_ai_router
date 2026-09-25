@@ -52,8 +52,10 @@ type HybridBackend struct {
 
 	// remoteStats holds the estimated traffic from OTHER instances only.
 	// It is periodically refreshed: remote = redis_total - local.
+	// remoteSync keeps per-key refresh bookkeeping for applySync.
 	remoteMu    sync.RWMutex
 	remoteStats map[string][2]int // key → [rpm, tpm]
+	remoteSync  map[string]*remoteSyncState
 
 	writeQueue chan asyncOp
 	stopCh     chan struct{}
@@ -81,6 +83,7 @@ func NewHybridBackend(remote *RedisBackend, syncInterval time.Duration, log *slo
 		metrics:      metrics,
 		tracked:      make(map[string]struct{}),
 		remoteStats:  make(map[string][2]int),
+		remoteSync:   make(map[string]*remoteSyncState),
 		writeQueue:   make(chan asyncOp, hybridWriteQueueSize),
 		stopCh:       make(chan struct{}),
 	}
@@ -94,10 +97,10 @@ func NewHybridBackend(remote *RedisBackend, syncInterval time.Duration, log *slo
 // Redis. metrics may be nil in tests that construct a HybridBackend without
 // a full Metrics instance.
 func (h *HybridBackend) recordRedisError(operation string, err error) {
-	// Warn, not Error: a failed background write/sync degrades this backend
-	// to local-only counting for the affected key until Redis recovers — by
-	// design, non-fatal and self-healing, not an operator-actionable
-	// emergency on its own. The metric below (unaffected by log level) is
+	// Warn, not Error: a failed background write/sync is non-fatal and
+	// self-healing — the last good remote estimate is kept for one window (see
+	// applySync), after which the affected key is counted locally until Redis
+	// recovers. Not an operator-actionable emergency on its own. The metric below (unaffected by log level) is
 	// the real signal for alerting on a sustained outage.
 	h.log.Warn("Hybrid backend: Redis operation failed", "operation", operation, "error", err)
 	if h.metrics != nil {
@@ -245,18 +248,13 @@ func (h *HybridBackend) doSync() {
 	// recordRedisError itself, so the outer select (the only place that
 	// reports) can't double-count the same underlying failure once for the
 	// goroutine's own error and again for a racing ctx.Done() timeout.
-	type statsResult struct {
-		total    map[string][2]int
-		local    map[string][2]int
-		totalErr error
-	}
-	ch := make(chan statsResult, 1)
+	ch := make(chan syncResult, 1)
 
 	go func() {
-		total, err := h.remote.batchCurrentStatsErr(ctx, keys)
+		total, failed, err := h.remote.batchCurrentStatsFailed(ctx, keys)
 		local := h.local.batchCurrentStats(ctx, keys)
 		select {
-		case ch <- statsResult{total, local, err}:
+		case ch <- syncResult{total: total, local: local, failed: failed, err: err}:
 		case <-ctx.Done():
 		}
 	}()
@@ -264,26 +262,91 @@ func (h *HybridBackend) doSync() {
 	select {
 	case <-ctx.Done():
 		h.recordRedisError("hybrid_sync", ctx.Err())
-		return
+		h.applySync(keys, syncResult{timedOut: true}, time.Now())
 	case r := <-ch:
-		if r.totalErr != nil {
-			h.recordRedisError("hybrid_sync", r.totalErr)
+		if r.err != nil {
+			h.recordRedisError("hybrid_sync", r.err)
 		}
-		h.remoteMu.Lock()
-		for _, key := range keys {
-			total := r.total[key]
-			local := r.local[key]
-			remoteRPM := total[0] - local[0]
-			remoteTPM := total[1] - local[1]
-			if remoteRPM < 0 {
-				remoteRPM = 0
-			}
-			if remoteTPM < 0 {
-				remoteTPM = 0
-			}
-			h.remoteStats[key] = [2]int{remoteRPM, remoteTPM}
+		h.applySync(keys, r, time.Now())
+	}
+}
+
+// syncResult is one sync round: Redis totals (all instances) and local counts.
+type syncResult struct {
+	total    map[string][2]int
+	local    map[string][2]int
+	failed   map[string]bool // keys whose Redis read failed (their total is zero)
+	err      error           // first Redis error of the round
+	timedOut bool            // the round timed out, no key was read
+}
+
+// remoteSyncState is per-key refresh bookkeeping, guarded by remoteMu.
+type remoteSyncState struct {
+	syncedAt   time.Time // last successful refresh
+	failing    bool      // a refresh failed since syncedAt
+	floor      [2]int    // last good estimate, held while failing and right after recovery
+	floorUntil time.Time // syncedAt + window: when the held estimate ages out
+}
+
+// applySync refreshes remoteStats from one sync round, key by key.
+//
+// A key whose Redis read failed keeps its last good estimate: the failed read
+// comes back as zero, and writing it made every instance treat the others as
+// idle and admit up to the full limit on its own. The estimate is valid for
+// one window after it was measured (rpmWindow == tpmWindow == 60s). Until then
+// it is also a floor for the first totals after recovery, which miss the
+// writes dropped during the outage. On the first failed round after that
+// window the estimate is dropped and the key is counted locally until Redis
+// recovers.
+//
+// Keys removed by deleteKey while the round was in flight are skipped, so a
+// late round cannot bring their estimate back.
+func (h *HybridBackend) applySync(keys []string, r syncResult, now time.Time) {
+	h.trackedMu.Lock()
+	defer h.trackedMu.Unlock()
+	h.remoteMu.Lock()
+	defer h.remoteMu.Unlock()
+	if h.remoteSync == nil {
+		h.remoteSync = make(map[string]*remoteSyncState)
+	}
+
+	dropped := 0
+	for _, key := range keys {
+		if _, ok := h.tracked[key]; !ok {
+			continue
 		}
-		h.remoteMu.Unlock()
+		st := h.remoteSync[key]
+		if st == nil {
+			st = &remoteSyncState{}
+			h.remoteSync[key] = st
+		}
+
+		if r.timedOut || r.failed[key] {
+			if !st.failing && !st.syncedAt.IsZero() {
+				st.failing = true
+				st.floor, st.floorUntil = h.remoteStats[key], st.syncedAt.Add(rpmWindow)
+			}
+			if !st.syncedAt.IsZero() && now.After(st.floorUntil) {
+				if _, ok := h.remoteStats[key]; ok {
+					delete(h.remoteStats, key)
+					dropped++
+				}
+			}
+			continue
+		}
+
+		total, local := r.total[key], r.local[key]
+		remote := [2]int{max(total[0]-local[0], 0), max(total[1]-local[1], 0)}
+		if now.Before(st.floorUntil) {
+			remote = [2]int{max(remote[0], st.floor[0]), max(remote[1], st.floor[1])}
+		}
+		h.remoteStats[key] = remote
+		st.syncedAt, st.failing = now, false
+	}
+
+	if dropped > 0 && h.log != nil {
+		h.log.Warn("Hybrid backend: remote estimate older than one window dropped, counting locally until Redis sync recovers",
+			"keys", dropped)
 	}
 }
 
@@ -412,6 +475,7 @@ func (h *HybridBackend) deleteKey(ctx context.Context, key string) {
 
 	h.remoteMu.Lock()
 	delete(h.remoteStats, key)
+	delete(h.remoteSync, key)
 	h.remoteMu.Unlock()
 
 	h.local.deleteKey(ctx, key)

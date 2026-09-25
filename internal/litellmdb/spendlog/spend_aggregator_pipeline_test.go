@@ -3,6 +3,7 @@ package spendlog
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb/models"
 	"github.com/stretchr/testify/assert"
@@ -61,7 +62,7 @@ func TestBuildDailyProjectionDimensions(t *testing.T) {
 			}
 			logger := newAtomicTestLogger()
 			records, err := buildSpendLogRecords(
-				[]insertedSpendEntry{{entry: entry, requestID: entry.RequestID}}, logger.logger, "test",
+				[]insertedSpendEntry{{entry: entry, requestID: entry.RequestID}}, logger.logger, "test", nil,
 			)
 			require.NoError(t, err)
 			require.Len(t, records, 1)
@@ -79,7 +80,7 @@ func TestBuildSpendLogRecordsUsesUTCDateAndEntryDimensions(t *testing.T) {
 	logger := newAtomicTestLogger()
 
 	records, err := buildSpendLogRecords(
-		[]insertedSpendEntry{{entry: entry, requestID: entry.RequestID}}, logger.logger, "test",
+		[]insertedSpendEntry{{entry: entry, requestID: entry.RequestID}}, logger.logger, "test", nil,
 	)
 
 	require.NoError(t, err)
@@ -88,6 +89,27 @@ func TestBuildSpendLogRecordsUsesUTCDateAndEntryDimensions(t *testing.T) {
 	assert.Equal(t, entry.UserID, records[0].UserID)
 	assert.Equal(t, entry.APIKey, records[0].APIKey)
 	assert.Equal(t, entry.RequestID, records[0].RequestID)
+}
+
+// 22:30 UTC is already the next day in Moscow: the daily date has to follow the
+// configured timezone while the entry it came from stays on UTC.
+func TestBuildSpendLogRecordsBucketsDateInConfiguredTimezone(t *testing.T) {
+	msk, err := time.LoadLocation("Europe/Moscow")
+	require.NoError(t, err)
+
+	entry := atomicTestEntry("req-msk")
+	entry.StartTime = time.Date(2026, 3, 10, 22, 30, 0, 0, time.UTC)
+	logger := newAtomicTestLogger()
+
+	records, err := buildSpendLogRecords(
+		[]insertedSpendEntry{{entry: entry, requestID: entry.RequestID}}, logger.logger, "test", msk,
+	)
+
+	require.NoError(t, err)
+	require.Len(t, records, 1)
+	assert.Equal(t, "2026-03-11", records[0].Date)
+	assert.Equal(t, time.Date(2026, 3, 10, 22, 30, 0, 0, time.UTC), entry.StartTime,
+		"the entry the raw startTime column is written from stays UTC")
 }
 
 func TestVideoCallTypeUsesVideoDailyEndpoint(t *testing.T) {
@@ -105,7 +127,7 @@ func TestBuildSpendLogRecordsExtractsCacheTokensFromMetadata(t *testing.T) {
 	logger := newAtomicTestLogger()
 
 	records, err := buildSpendLogRecords(
-		[]insertedSpendEntry{{entry: entry, requestID: entry.RequestID}}, logger.logger, "test",
+		[]insertedSpendEntry{{entry: entry, requestID: entry.RequestID}}, logger.logger, "test", nil,
 	)
 
 	require.NoError(t, err)
@@ -117,7 +139,7 @@ func TestBuildSpendLogRecordsExtractsCacheTokensFromMetadata(t *testing.T) {
 
 	entry.Metadata = `{"usage_object":{"prompt_tokens_details":{"cached_tokens": 3, "cache_creation_tokens": 5}}}`
 	records, err = buildSpendLogRecords(
-		[]insertedSpendEntry{{entry: entry, requestID: entry.RequestID}}, logger.logger, "test",
+		[]insertedSpendEntry{{entry: entry, requestID: entry.RequestID}}, logger.logger, "test", nil,
 	)
 	require.NoError(t, err)
 	assert.Equal(t, int64(3), records[0].CacheReadInputTokens)
@@ -131,7 +153,7 @@ func TestKnownEffectiveRouteWithEmptyRawCallTypeRequiresFailureStatus(t *testing
 	logger := newAtomicTestLogger()
 
 	_, err := buildSpendLogRecords(
-		[]insertedSpendEntry{{entry: entry, requestID: entry.RequestID}}, logger.logger, "test",
+		[]insertedSpendEntry{{entry: entry, requestID: entry.RequestID}}, logger.logger, "test", nil,
 	)
 
 	require.Error(t, err)
@@ -150,7 +172,7 @@ func TestKnownEffectiveRouteAcceptsNonzeroFailureWithEmptyRawCallType(t *testing
 	logger := newAtomicTestLogger()
 
 	records, err := buildSpendLogRecords(
-		[]insertedSpendEntry{{entry: entry, requestID: entry.RequestID}}, logger.logger, "test",
+		[]insertedSpendEntry{{entry: entry, requestID: entry.RequestID}}, logger.logger, "test", nil,
 	)
 
 	require.NoError(t, err)

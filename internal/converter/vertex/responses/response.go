@@ -367,9 +367,13 @@ func usageMetadataToUsage(meta *genai.GenerateContentResponseUsageMetadata) *res
 		audioInputTokens = 0
 	}
 
+	// Gemini reports thoughts and tool-use prompt (e.g. url_context page content)
+	// outside candidatesTokenCount / promptTokenCount, while Responses API
+	// output_tokens includes reasoning and input_tokens covers everything the
+	// model read. Fold them in, as convertVertexUsageMetadata does for Chat.
 	return &responses.Usage{
-		InputTokens:  int(meta.PromptTokenCount),
-		OutputTokens: int(meta.CandidatesTokenCount),
+		InputTokens:  int(meta.PromptTokenCount + meta.ToolUsePromptTokenCount),
+		OutputTokens: int(meta.CandidatesTokenCount + meta.ThoughtsTokenCount),
 		TotalTokens:  int(meta.TotalTokenCount),
 		InputTokensDetails: responses.InputDetails{
 			CachedTokens:      cachedTokens,

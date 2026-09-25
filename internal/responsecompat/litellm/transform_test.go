@@ -290,6 +290,44 @@ func TestTransformImageDropsProviderCost(t *testing.T) {
 	}
 }
 
+// Provider cost figures in usage expose the upstream price, while the client is
+// billed by the router, so they are dropped on every surface, not only images
+// and embeddings. Token counts, including non-standard ones, are kept.
+func TestTransformDropsProviderCostFromUsage(t *testing.T) {
+	const usage = `{"prompt_tokens":8,"completion_tokens":13,"total_tokens":21,` +
+		`"prompt_tokens_details":{"cached_tokens":0,"caching_tokens":0},` +
+		`"completion_tokens_details":{"reasoning_tokens":0},` +
+		`"cost":0.000196,"is_byok":false,"cost_details":{"upstream_inference_cost":0.000196}}`
+	tests := map[string]string{
+		"/v1/chat/completions": `{"model":"provider-model","choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":` + usage + `}`,
+		"/v1/completions":      `{"model":"provider-model","choices":[{"text":"ok","finish_reason":"stop"}],"usage":` + usage + `}`,
+		"/v1/responses":        `{"id":"resp-1","object":"response","model":"provider-model","output":[],"usage":{"input_tokens":8,"output_tokens":13,"total_tokens":21,"cost":0.000196,"is_byok":false}}`,
+	}
+	for endpoint, body := range tests {
+		t.Run(endpoint, func(t *testing.T) {
+			result := New().Transform(Context{
+				Endpoint:       endpoint,
+				RequestedModel: "public-model",
+			}, Response{
+				StatusCode: http.StatusOK,
+				Headers:    make(http.Header),
+				Body:       []byte(body),
+			})
+
+			require.Equal(t, http.StatusOK, result.StatusCode)
+			assert.NotContains(t, string(result.Body), "cost")
+			assert.NotContains(t, string(result.Body), "is_byok")
+			var decoded map[string]any
+			require.NoError(t, json.Unmarshal(result.Body, &decoded))
+			usage := decoded["usage"].(map[string]any)
+			assert.Equal(t, float64(21), usage["total_tokens"])
+			if details, ok := usage["prompt_tokens_details"].(map[string]any); ok {
+				assert.Equal(t, float64(0), details["caching_tokens"])
+			}
+		})
+	}
+}
+
 func TestTransformImageKeepsTokenUsage(t *testing.T) {
 	result := New().Transform(Context{
 		Endpoint:       "/v1/images/generations",

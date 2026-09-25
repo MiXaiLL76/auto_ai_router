@@ -574,6 +574,126 @@ func TestReplaceModelInBody(t *testing.T) {
 			newModel:  "gpt-5",
 			wantModel: "gpt-4o",
 		},
+		{
+			// json.Marshal never escapes '/', so the fast byte-level path's
+			// pattern is `"model":"openai/gpt-5.5"` -- this body encodes the
+			// same string with an escaped slash instead (equally valid JSON,
+			// e.g. how PHP's json_encode serializes by default). Regression
+			// test for the bug where this silently fell through unchanged,
+			// forwarding the client alias instead of the real model name and
+			// getting a 400 from the upstream ("model not found").
+			name:      "escaped forward slash falls back to parse",
+			body:      `{"model":"openai\/gpt-5.5","messages":[]}`,
+			oldModel:  "openai/gpt-5.5",
+			newModel:  "gpt-5.5",
+			wantModel: "gpt-5.5",
+		},
+		{
+			name:      "escaped forward slash, no match, falls back and returns unchanged",
+			body:      `{"model":"openai\/gpt-5.5","messages":[]}`,
+			oldModel:  "nonexistent",
+			newModel:  "gpt-5.5",
+			wantModel: "openai/gpt-5.5",
+		},
+		{
+			name:      "unicode-escaped slash, lowercase hex",
+			body:      "{\"model\":\"openai\\u002fgpt-5.5\",\"messages\":[]}",
+			oldModel:  "openai/gpt-5.5",
+			newModel:  "gpt-5.5",
+			wantModel: "gpt-5.5",
+		},
+		{
+			name:      "unicode-escaped slash, uppercase hex",
+			body:      "{\"model\":\"openai\\u002Fgpt-5.5\",\"messages\":[]}",
+			oldModel:  "openai/gpt-5.5",
+			newModel:  "gpt-5.5",
+			wantModel: "gpt-5.5",
+		},
+		{
+			// g is 'g' -- an escape that has nothing to do with the slash,
+			// placed elsewhere in the value, still equally valid JSON for the
+			// same string.
+			name:      "unrelated unicode escape inside the value",
+			body:      "{\"model\":\"openai/\\u0067pt-5.5\",\"messages\":[]}",
+			oldModel:  "openai/gpt-5.5",
+			newModel:  "gpt-5.5",
+			wantModel: "gpt-5.5",
+		},
+		{
+			name:      "space before the colon",
+			body:      `{"model" :"openai/gpt-5.5","messages":[]}`,
+			oldModel:  "openai/gpt-5.5",
+			newModel:  "gpt-5.5",
+			wantModel: "gpt-5.5",
+		},
+		{
+			name:      "space on both sides of the colon",
+			body:      `{"model" : "openai/gpt-5.5","messages":[]}`,
+			oldModel:  "openai/gpt-5.5",
+			newModel:  "gpt-5.5",
+			wantModel: "gpt-5.5",
+		},
+		{
+			name:      "two or more spaces after the colon",
+			body:      `{"model":   "openai/gpt-5.5","messages":[]}`,
+			oldModel:  "openai/gpt-5.5",
+			newModel:  "gpt-5.5",
+			wantModel: "gpt-5.5",
+		},
+		{
+			name:      "tab after the colon",
+			body:      "{\"model\":\t\"openai/gpt-5.5\",\"messages\":[]}",
+			oldModel:  "openai/gpt-5.5",
+			newModel:  "gpt-5.5",
+			wantModel: "gpt-5.5",
+		},
+		{
+			name:      "newline after the colon",
+			body:      "{\"model\":\n  \"openai/gpt-5.5\",\"messages\":[]}",
+			oldModel:  "openai/gpt-5.5",
+			newModel:  "gpt-5.5",
+			wantModel: "gpt-5.5",
+		},
+		{
+			name:      "CRLF after the colon",
+			body:      "{\"model\":\r\n\"openai/gpt-5.5\",\"messages\":[]}",
+			oldModel:  "openai/gpt-5.5",
+			newModel:  "gpt-5.5",
+			wantModel: "gpt-5.5",
+		},
+		{
+			name:      "unicode escape in the key itself",
+			body:      "{\"\\u006dodel\":\"openai/gpt-5.5\",\"messages\":[]}",
+			oldModel:  "openai/gpt-5.5",
+			newModel:  "gpt-5.5",
+			wantModel: "gpt-5.5",
+		},
+		{
+			// Duplicate top-level keys aren't valid per a strict reading of the
+			// JSON spec, but every real-world parser (including encoding/json's
+			// map decoding) resolves it last-value-wins -- worth pinning down
+			// explicitly since the fallback's re-encode naturally collapses the
+			// duplicate into a single key either way.
+			name:      "duplicate model key, last copy escaped",
+			body:      `{"model":"openai/gpt-5.5","messages":[],"model":"openai\/gpt-5.5"}`,
+			oldModel:  "openai/gpt-5.5",
+			newModel:  "gpt-5.5",
+			wantModel: "gpt-5.5",
+		},
+		{
+			// Both copies byte-identical this time (no escaping difference) --
+			// still must not take the fast path's count=1 bytes.Replace, which
+			// would rewrite only the first copy and leave the second, stale
+			// "openai/gpt-5.5" as the one that wins once anything downstream
+			// parses the body (last-value-wins). Live-reproduced against
+			// production: this exact body 400s "Invalid model" on the
+			// currently deployed (unfixed) image.
+			name:      "duplicate model key, both copies identical",
+			body:      `{"model":"openai/gpt-5.5","model":"openai/gpt-5.5","messages":[]}`,
+			oldModel:  "openai/gpt-5.5",
+			newModel:  "gpt-5.5",
+			wantModel: "gpt-5.5",
+		},
 	}
 
 	for _, tt := range tests {
@@ -585,6 +705,20 @@ func TestReplaceModelInBody(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestReplaceModelInBody_EscapedSlashPreservesOtherFields guards the fallback
+// path specifically: messages/tools and any other top-level field must
+// survive the shallow parse-and-reencode untouched, not just the model field.
+func TestReplaceModelInBody_EscapedSlashPreservesOtherFields(t *testing.T) {
+	body := []byte(`{"model":"openai\/gpt-5.5","messages":[{"role":"user","content":"hi"}],"max_tokens":5,"stream":true}`)
+	result := bodyToMap(t, ReplaceModelInBody(body, "openai/gpt-5.5", "gpt-5.5"))
+	assert.Equal(t, "gpt-5.5", result["model"])
+	assert.EqualValues(t, 5, result["max_tokens"])
+	assert.Equal(t, true, result["stream"])
+	messages, ok := result["messages"].([]interface{})
+	require.True(t, ok, "expected messages array to survive, got %T", result["messages"])
+	require.Len(t, messages, 1)
 }
 
 // --- ConvertWebSearchTools tests ---
@@ -825,27 +959,118 @@ func TestStripCacheSalt_InvalidJSON(t *testing.T) {
 	assert.Equal(t, body, result, "invalid JSON should be returned unchanged rather than dropped")
 }
 
-// --- IsRealOpenAIHost tests ---
+// --- IsOpenRouterHost tests ---
 
-func TestIsRealOpenAIHost(t *testing.T) {
+func TestIsOpenRouterHost(t *testing.T) {
 	tests := []struct {
 		name    string
 		baseURL string
 		want    bool
 	}{
 		{"empty", "", false},
-		{"genuine openai https", "https://api.openai.com/v1", true},
-		{"genuine openai no scheme", "api.openai.com/v1", true},
-		{"genuine openai bare host", "api.openai.com", true},
-		{"genuine openai subdomain", "https://eu.api.openai.com/v1", true},
-		{"openrouter", "https://openrouter.ai/api/v1", false},
+		{"genuine openrouter https", "https://openrouter.ai/api/v1", true},
+		{"genuine openrouter no scheme", "openrouter.ai/api/v1", true},
+		{"genuine openrouter bare host", "openrouter.ai", true},
+		{"genuine openrouter subdomain", "https://eu.openrouter.ai/api/v1", true},
+		{"real openai", "https://api.openai.com/v1", false},
 		{"self-hosted vLLM", "https://llm.internal.example.com/v1", false},
-		{"lookalike host is not a real subdomain", "https://api.openai.com.evil.example.com", false},
+		{"lookalike host is not a real subdomain", "https://openrouter.ai.evil.example.com", false},
 		{"malformed URL", "https://[::1", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.want, IsRealOpenAIHost(tt.baseURL))
+			assert.Equal(t, tt.want, IsOpenRouterHost(tt.baseURL))
 		})
+	}
+}
+
+// --- StripOpenRouterOnlyFields tests ---
+
+func TestStripOpenRouterOnlyFields_RemovesBothFields(t *testing.T) {
+	body := makeBody(t, map[string]any{
+		"model":    "gpt-5-mini",
+		"plugins":  []any{map[string]any{"id": "web"}},
+		"provider": map[string]any{"order": []any{"openai"}},
+		"messages": []any{},
+	})
+	result := bodyToMap(t, StripOpenRouterOnlyFields(body))
+	_, hasPlugins := result["plugins"]
+	_, hasProvider := result["provider"]
+	assert.False(t, hasPlugins, "plugins should have been stripped")
+	assert.False(t, hasProvider, "provider should have been stripped")
+	assert.Equal(t, "gpt-5-mini", result["model"])
+}
+
+// TestStripOpenRouterOnlyFields_NoFieldPresent verifies the fast path: when
+// neither field is in the body at all, the exact same byte slice is returned
+// rather than round-tripped through unmarshal/marshal.
+func TestStripOpenRouterOnlyFields_NoFieldPresent(t *testing.T) {
+	body := []byte(`{"model":"gpt-4o","messages":[]}`)
+	result := StripOpenRouterOnlyFields(body)
+	require.Equal(t, 0, bytes.Compare(body, result))
+	assert.True(t, &body[0] == &result[0], "expected the exact same underlying array to be returned")
+}
+
+func TestStripOpenRouterOnlyFields_InvalidJSON(t *testing.T) {
+	body := []byte(`{"plugins": not valid json`)
+	result := StripOpenRouterOnlyFields(body)
+	assert.Equal(t, body, result, "invalid JSON should be returned unchanged rather than dropped")
+}
+
+// --- StripVLLMOnlySamplingParams tests ---
+
+func TestStripVLLMOnlySamplingParams_RemovesAllThreeFields(t *testing.T) {
+	body := makeBody(t, map[string]any{
+		"model":                "test",
+		"chat_template_kwargs": map[string]any{"enable_thinking": true},
+		"repetition_penalty":   1.1,
+		"length_penalty":       1.0,
+		"messages":             []any{},
+	})
+	result := bodyToMap(t, StripVLLMOnlySamplingParams(body))
+	for _, key := range []string{"chat_template_kwargs", "repetition_penalty", "length_penalty"} {
+		_, present := result[key]
+		assert.False(t, present, "%s should have been stripped", key)
+	}
+	assert.Equal(t, "test", result["model"])
+}
+
+// TestStripVLLMOnlySamplingParams_NoFieldPresent verifies the fast path: when
+// none of the three fields are in the body at all, the exact same byte slice
+// is returned rather than round-tripped through unmarshal/marshal.
+func TestStripVLLMOnlySamplingParams_NoFieldPresent(t *testing.T) {
+	body := []byte(`{"model":"gpt-4o","messages":[]}`)
+	result := StripVLLMOnlySamplingParams(body)
+	require.Equal(t, 0, bytes.Compare(body, result))
+	assert.True(t, &body[0] == &result[0], "expected the exact same underlying array to be returned")
+}
+
+func TestStripVLLMOnlySamplingParams_InvalidJSON(t *testing.T) {
+	body := []byte(`{"repetition_penalty": not valid json`)
+	result := StripVLLMOnlySamplingParams(body)
+	assert.Equal(t, body, result, "invalid JSON should be returned unchanged rather than dropped")
+}
+
+func TestSupportsReasoningEffortNone(t *testing.T) {
+	tests := map[string]bool{
+		"gpt-6-sol":             true,
+		"openai/gpt-6-luna":     true,
+		"gpt-6-astra":           false,
+		"gpt-5.1":               true,
+		"gpt-5.6-terra":         true,
+		"openai/gpt-5.4-mini":   true,
+		"gpt-5":                 false,
+		"gpt-5-mini":            false,
+		"gpt-5.0":               false,
+		"gpt-5.2-codex":         false,
+		"gpt-5.4-pro":           false,
+		"gpt-5.1-chat-latest":   false,
+		"gpt-4o-mini":           false,
+		"o3":                    false,
+		"qwen3.8-omni-flash":    false,
+		"anthropic/claude-opus": false,
+	}
+	for model, want := range tests {
+		assert.Equal(t, want, SupportsReasoningEffortNone(model), model)
 	}
 }

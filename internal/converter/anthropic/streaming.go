@@ -218,8 +218,9 @@ func TransformAnthropicStreamToOpenAI(anthropicStream io.Reader, model string, o
 				// No OpenAI equivalent; silently consumed to avoid unknown-delta errors.
 
 			case "input_json_delta":
-				// Stream partial tool arguments to the client.
-				if event.Delta.PartialJSON != "" {
+				// Stream partial tool arguments to the client, only for client tools:
+				// server_tool_use input (web search etc.) is run by the provider.
+				if current.blockType == "tool_use" && event.Delta.PartialJSON != "" {
 					tc := openai.OpenAIStreamingToolCall{
 						Index: current.toolCallIdx,
 						Function: &openai.OpenAIStreamingToolFunction{

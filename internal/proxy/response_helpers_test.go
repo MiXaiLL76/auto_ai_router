@@ -181,6 +181,17 @@ func TestExtractWebSearchRequestUsage(t *testing.T) {
 			body:   `{"model":"gpt-4o","tools":[{"type":"function","function":{"name":"f"}}]}`,
 			wantOn: false,
 		},
+		{
+			name:     "openrouter web plugin defaults medium",
+			body:     `{"model":"openai/gpt-4o","plugins":[{"id":"web"}]}`,
+			wantOn:   true,
+			wantSize: "medium",
+		},
+		{
+			name:   "non-web plugin is not web search",
+			body:   `{"model":"openai/gpt-4o","plugins":[{"id":"some-other-plugin"}]}`,
+			wantOn: false,
+		},
 	}
 
 	for _, tt := range tests {
@@ -211,6 +222,12 @@ func TestInjectStreamOptions_AddsIncludeUsage(t *testing.T) {
 	}
 }
 
+// TestInjectStreamOptions_UpdatesExisting covers the ingress-time merge:
+// injectStreamOptions runs before the destination provider is known, so it
+// must preserve whatever else the client sent in stream_options (e.g. vLLM's
+// continuous_usage_stats) -- stripping provider-specific keys is a later,
+// provider-aware decision made in converter.RequestFrom (see
+// shouldStripStreamOptionsExtras), not here.
 func TestInjectStreamOptions_UpdatesExisting(t *testing.T) {
 	body := []byte(`{"stream_options":{"include_usage":false,"foo":1}}`)
 	modified := injectStreamOptions(body)
@@ -287,6 +304,51 @@ func TestSanitizeAndExtractRequestBody_InjectsStreamOptionsForChatCompletions(t 
 	var raw map[string]interface{}
 	require.NoError(t, json.Unmarshal(result.Body, &raw))
 	assert.Contains(t, raw, "stream_options")
+}
+
+// TestSanitizeAndExtractRequestBody_PreservesClientStreamOptionsAtIngress
+// documents that the destination provider is still unknown at ingress
+// (sanitizeAndExtractRequestBody runs ahead of credential selection): a
+// client's own stream_options object, including provider-specific keys like
+// vLLM's continuous_usage_stats, must be preserved here and only stripped
+// later, once the actual provider is resolved (converter.RequestFrom /
+// shouldStripStreamOptionsExtras) -- see converter_test.go for that
+// provider-aware half of the behavior.
+func TestSanitizeAndExtractRequestBody_PreservesClientStreamOptionsAtIngress(t *testing.T) {
+	body := []byte(`{"model":"gpt-4","stream":true,"stream_options":{"include_usage":false,"continuous_usage_stats":true},"messages":[{"role":"user","content":"hi"}]}`)
+
+	result, err := sanitizeAndExtractRequestBody(body, "application/json", false)
+	require.NoError(t, err)
+
+	var raw map[string]interface{}
+	require.NoError(t, json.Unmarshal(result.Body, &raw))
+	streamOptions, ok := raw["stream_options"].(map[string]interface{})
+	require.True(t, ok, "expected stream_options map, got %T", raw["stream_options"])
+	assert.Equal(t, map[string]interface{}{"include_usage": true, "continuous_usage_stats": true}, streamOptions)
+}
+
+// TestSanitizeAndExtractRequestBody_StripsUnusedClientMetadata covers
+// litellm_session_id/session_id/inference_geo/trace: none of these are
+// understood by any provider on the wire, and session_id's value is already
+// captured into result.SessionID (used for AIR's own sticky-routing
+// decision) before the key is removed -- so, unlike cache_salt/stream_options,
+// there's no destination-aware exception to make, and this runs unconditionally
+// at ingress rather than per-provider in converter.RequestFrom.
+func TestSanitizeAndExtractRequestBody_StripsUnusedClientMetadata(t *testing.T) {
+	body := []byte(`{"model":"gpt-4","session_id":"sess-123","litellm_session_id":"legacy-sess","inference_geo":"eu","trace":{"id":"abc"},"messages":[{"role":"user","content":"hi"}]}`)
+
+	result, err := sanitizeAndExtractRequestBody(body, "application/json", false)
+	require.NoError(t, err)
+
+	assert.Equal(t, "legacy-sess", result.SessionID, "expected litellm_session_id (checked first) to still be captured before removal")
+
+	var raw map[string]interface{}
+	require.NoError(t, json.Unmarshal(result.Body, &raw))
+	assert.NotContains(t, raw, "session_id")
+	assert.NotContains(t, raw, "litellm_session_id")
+	assert.NotContains(t, raw, "inference_geo")
+	assert.NotContains(t, raw, "trace")
+	assert.Contains(t, raw, "messages", "unrelated fields must survive")
 }
 
 // TestExtractTokenUsageFromPayloads_BatchedSSEMergesUsage reproduces a

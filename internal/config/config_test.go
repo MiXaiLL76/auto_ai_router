@@ -1504,6 +1504,50 @@ credentials:
 	}
 }
 
+func TestRedisConfig_BalancerKeyPrefix(t *testing.T) {
+	t.Setenv("TEST_BALANCER_PREFIX", "env-balancer:")
+	tests := []struct {
+		name             string
+		yamlLines        string
+		expectedKey      string
+		expectedBalancer string
+	}{
+		{name: "omitted defaults to key_prefix", yamlLines: "  key_prefix: \"ru01\"\n", expectedKey: "ru01", expectedBalancer: "ru01"},
+		{name: "both omitted", yamlLines: "", expectedKey: "rl:", expectedBalancer: "rl:"},
+		{name: "explicit", yamlLines: "  key_prefix: \"ru01\"\n  balancer_key_prefix: \"air-balancer:\"\n", expectedKey: "ru01", expectedBalancer: "air-balancer:"},
+		{name: "from env", yamlLines: "  balancer_key_prefix: \"os.environ/TEST_BALANCER_PREFIX\"\n", expectedKey: "rl:", expectedBalancer: "env-balancer:"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			configPath := filepath.Join(tmpDir, "config.yaml")
+
+			configContent := `
+server:
+  port: 8080
+  max_body_size_mb: 10
+  master_key: "sk-test"
+  model_prices_link: "file://price.json"
+redis:
+  enabled: false
+` + tt.yamlLines + `
+credentials:
+  - name: "test"
+    type: "openai"
+    api_key: "sk-test"
+    base_url: "https://api.openai.com"
+`
+			require.NoError(t, os.WriteFile(configPath, []byte(configContent), 0644))
+
+			cfg, err := Load(configPath)
+			require.NoError(t, err)
+			assert.Equal(t, tt.expectedKey, cfg.Redis.KeyPrefix)
+			assert.Equal(t, tt.expectedBalancer, cfg.Redis.BalancerKeyPrefix)
+		})
+	}
+}
+
 func TestConfig_UnmarshalYAML_ModelPricesLink(t *testing.T) {
 	tmpDir := t.TempDir()
 	configPath := filepath.Join(tmpDir, "config.yaml")

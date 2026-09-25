@@ -137,7 +137,7 @@ func TestExport_FailureRowsHaveTheShapeAIRProjects(t *testing.T) {
 	metadata := `{"spend_logs_metadata":{"original_call_type":"acompletion"}}`
 	entry.Metadata = metadata
 
-	records, err := buildSpendLogRecords([]insertedSpendEntry{{entry: entry, requestID: "r1"}}, slog.New(slog.NewTextHandler(io.Discard, nil)), "test")
+	records, err := buildSpendLogRecords([]insertedSpendEntry{{entry: entry, requestID: "r1"}}, slog.New(slog.NewTextHandler(io.Discard, nil)), "test", nil)
 	require.NoError(t, err)
 	require.Len(t, records, 1)
 	assert.Equal(t, "qwen-ultra", records[0].Model, "failure rows use the public name as model")

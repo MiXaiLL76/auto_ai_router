@@ -634,3 +634,23 @@ func TestChatToResponse_WithoutOptions_Unchanged(t *testing.T) {
 	require.Len(t, resp.Output, 1)
 	assert.Equal(t, "message", resp.Output[0].Type)
 }
+
+// The non-streaming passthrough re-encodes the body through Response, which
+// drops any field Response does not declare.
+func TestResponse_RoundTripKeepsToolUsage(t *testing.T) {
+	body := `{"id":"resp_1","object":"response","created_at":1,"model":"gpt-6-luna","status":"completed","output":[],` +
+		`"usage":{"input_tokens":1633,"output_tokens":43,"total_tokens":1676},` +
+		`"tool_usage":{"image_gen":{"input_tokens":30,"input_tokens_details":{"image_tokens":0,"text_tokens":30},"output_tokens":196,"output_tokens_details":{"image_tokens":196,"text_tokens":0},"total_tokens":226},"web_search":{"num_requests":0}}}`
+
+	var resp Response
+	require.NoError(t, json.Unmarshal([]byte(body), &resp))
+	encoded, err := json.Marshal(&resp)
+	require.NoError(t, err)
+
+	var decoded map[string]interface{}
+	require.NoError(t, json.Unmarshal(encoded, &decoded))
+	toolUsage, ok := decoded["tool_usage"].(map[string]interface{})
+	require.True(t, ok, "tool_usage must survive the re-encode")
+	imageGen := toolUsage["image_gen"].(map[string]interface{})
+	assert.Equal(t, float64(196), imageGen["output_tokens"])
+}

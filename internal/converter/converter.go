@@ -41,11 +41,21 @@ type RequestMode struct {
 	DisplayModelID      string // alias to echo in responses; falls back to ModelID when empty
 	ContentType         string // original request content type (needed for multipart endpoints)
 	// BaseURL is the credential's configured base_url. Only used to
-	// distinguish genuine api.openai.com from a third-party server that
-	// merely speaks OpenAI's wire protocol (see openaiconv.IsRealOpenAIHost)
-	// -- provider Type alone can't tell the two apart, since both are
+	// distinguish genuine OpenRouter from another third-party server that
+	// merely speaks OpenAI's wire protocol (see openaiconv.IsOpenRouterHost)
+	// -- provider Type alone can't tell them apart, since both are
 	// configured as type: "openai".
 	BaseURL string
+	// IsVLLM is true when the credential's *original* configured type is
+	// config.ProviderTypeVLLM. Needed separately from providerType (the
+	// constructor argument to New) because CredentialConfig.EffectiveProviderType
+	// deliberately normalizes vLLM to config.ProviderTypeOpenAI before it ever
+	// reaches the converter -- vLLM speaks the OpenAI wire protocol, so it must
+	// be routed through the same "default" switch case, not a dedicated one.
+	// That normalization means providerType alone can never distinguish a real
+	// vLLM deployment from any other OpenAI-compatible destination once inside
+	// RequestFrom; the vLLM-only exceptions below need this instead.
+	IsVLLM bool
 }
 
 // responseModel returns the model name to embed in response/streaming output.
@@ -121,6 +131,72 @@ func New(providerType config.ProviderType, mode RequestMode) *ProviderConverter 
 	}
 }
 
+// shouldStripCacheSalt reports whether cache_salt must be removed from the
+// request body before forwarding. cache_salt is a LiteLLM/router-level
+// convention for partitioning prompt caching; genuine api.openai.com rejects
+// it outright with a 400 ("Unknown parameter: 'cache_salt'.") just like every
+// other OpenAI-wire-protocol server that doesn't recognize it -- confirmed
+// directly against api.openai.com, so there is no "real OpenAI" exception
+// here (unlike, say, an actual OpenAI-only parameter would need). The one
+// exception is self-hosted vLLM (see RequestMode.IsVLLM), which is confirmed
+// to support the parameter for its own prefix-cache partitioning -- stripping
+// it there would silently disable that partitioning instead of avoiding an
+// error.
+func (c *ProviderConverter) shouldStripCacheSalt() bool {
+	return !c.mode.IsVLLM
+}
+
+// shouldStripStreamOptionsExtras reports whether a streaming request's
+// stream_options object must be rebuilt down to just {"include_usage": true}
+// before forwarding, discarding provider-specific extension keys (e.g.
+// vLLM's continuous_usage_stats) the ingress sanitizer otherwise preserves.
+// Same shape as shouldStripCacheSalt: only self-hosted vLLM (see
+// RequestMode.IsVLLM) is confirmed to understand these extension keys, so
+// strip for everyone else, real api.openai.com included.
+func (c *ProviderConverter) shouldStripStreamOptionsExtras() bool {
+	return !c.mode.IsVLLM
+}
+
+// shouldStripVLLMOnlySamplingParams reports whether chat_template_kwargs,
+// repetition_penalty, and length_penalty must be removed from the request
+// body before forwarding. All three are vLLM/HF-generate-style sampling
+// extensions -- not part of OpenAI's own Chat Completions API -- that AIR
+// itself supports configuring as per-model defaults for vLLM deployments
+// (see litellmdb ChatTemplateKwargs/RepetitionPenalty). Confirmed directly
+// against api.openai.com that all three get the same "Unknown parameter"
+// 400 cache_salt/stream_options/plugins do.
+//
+// Narrower than shouldStripCacheSalt/shouldStripStreamOptionsExtras: this
+// only strips for providerType == ProviderTypeOpenAI, not every destination
+// sharing the same RequestFrom branches. ProviderTypeProxy and
+// ProviderTypeAIR (see ProviderType.IsProxyLike) forward to another AIR
+// instance or a dynamically-discovered backend AIR itself doesn't control --
+// that far end could be fronting vLLM, so stripping here would risk
+// discarding a param the actual destination understands, on our own
+// speculation about what's downstream. Only a credential explicitly
+// configured as type: "openai" (confirmed, not merely assumed, OpenAI wire
+// protocol with no further chaining) is safe to strip for unconditionally.
+// Bedrock and Anthropic/CometAPI/ProMan already fall outside this by virtue
+// of providerType never being ProviderTypeOpenAI there.
+func (c *ProviderConverter) shouldStripVLLMOnlySamplingParams() bool {
+	return !c.mode.IsVLLM && c.providerType == config.ProviderTypeOpenAI
+}
+
+// shouldStripOpenRouterOnlyFields reports whether `plugins` and `provider`
+// must be removed from the request body before forwarding. Both are genuine
+// OpenRouter features -- `plugins` enables its paid web-search plugin,
+// `provider` picks/orders which upstream vendor OpenRouter routes to -- and
+// OpenRouter itself is the only destination confirmed to understand either
+// one. Every other OpenAI-wire-protocol server (aggregators, strict
+// OpenAI-shaped deployments, genuine api.openai.com, self-hosted vLLM) either
+// rejects them outright with a 400 on an unrecognized field, or silently
+// ignores them -- worse, since a client asking for OpenRouter's paid web
+// search would get billed for a feature that silently never ran. Strip for
+// everyone except genuine OpenRouter (see openaiconv.IsOpenRouterHost).
+func (c *ProviderConverter) shouldStripOpenRouterOnlyFields() bool {
+	return !openaiconv.IsOpenRouterHost(c.mode.BaseURL)
+}
+
 // RequestFrom converts an OpenAI-format request body to the provider-specific format.
 // Returns the original body unchanged for OpenAI-compatible providers (passthrough).
 func (c *ProviderConverter) RequestFrom(body []byte) ([]byte, error) {
@@ -140,6 +216,15 @@ func (c *ProviderConverter) RequestFrom(body []byte) ([]byte, error) {
 		case config.ProviderTypeBedrock:
 			return nil, errors.New("bedrock does not support embeddings")
 		default:
+			if c.shouldStripCacheSalt() {
+				body = openaiconv.StripCacheSalt(body)
+			}
+			if c.shouldStripOpenRouterOnlyFields() {
+				body = openaiconv.StripOpenRouterOnlyFields(body)
+			}
+			if c.shouldStripVLLMOnlySamplingParams() {
+				body = openaiconv.StripVLLMOnlySamplingParams(body)
+			}
 			return body, nil
 		}
 	}
@@ -154,8 +239,24 @@ func (c *ProviderConverter) RequestFrom(body []byte) ([]byte, error) {
 		}
 		if c.mode.MessagesPassthrough {
 			// body is already native Anthropic Messages JSON (model field already
-			// resolved to c.mode.ModelID upstream) — forward as-is.
-			return body, nil
+			// resolved to c.mode.ModelID upstream) — forward as-is, minus any
+			// stray OpenAI-only fields a client sent anyway (see shouldStripCacheSalt),
+			// and minus stream_options: unlike the OpenAI wire protocol bucket, native
+			// Anthropic has no stream_options concept at all (rejects the whole
+			// field, not just unrecognized keys inside it) -- a client can still
+			// send it directly on a /v1/messages request since the ingress
+			// sanitizer already skips stream_options injection for isMessagesAPI.
+			if c.shouldStripCacheSalt() {
+				body = openaiconv.StripCacheSalt(body)
+			}
+			if c.shouldStripOpenRouterOnlyFields() {
+				body = openaiconv.StripOpenRouterOnlyFields(body)
+			}
+			// No shouldStripVLLMOnlySamplingParams call here: providerType is
+			// always Anthropic/CometAPI/ProMan in this branch, never
+			// ProviderTypeOpenAI, so it would always be a no-op (see that
+			// method's doc comment).
+			return openaiconv.StripStreamOptions(body), nil
 		}
 		return anthropic.OpenAIToAnthropic(body, c.mode.ModelID, c.providerType == config.ProviderTypeAnthropic)
 	case config.ProviderTypeBedrock:
@@ -165,6 +266,18 @@ func (c *ProviderConverter) RequestFrom(body []byte) ([]byte, error) {
 		if isAnthropicBedrockModel(c.mode.ModelID) {
 			return anthropic.OpenAIToBedrock(body, c.mode.ModelID)
 		}
+		if c.shouldStripCacheSalt() {
+			body = openaiconv.StripCacheSalt(body)
+		}
+		if c.mode.IsStreaming && c.shouldStripStreamOptionsExtras() {
+			body = openaiconv.RebuildStreamOptionsIncludeUsageOnly(body)
+		}
+		if c.shouldStripOpenRouterOnlyFields() {
+			body = openaiconv.StripOpenRouterOnlyFields(body)
+		}
+		// No shouldStripVLLMOnlySamplingParams call here: providerType is
+		// always ProviderTypeBedrock in this branch, never ProviderTypeOpenAI,
+		// so it would always be a no-op (see that method's doc comment).
 		return body, nil
 	default:
 		// ProviderTypeOpenAI, ProviderTypeProxy, ProviderTypeAIR, and others:
@@ -173,17 +286,40 @@ func (c *ProviderConverter) RequestFrom(body []byte) ([]byte, error) {
 		// Completions requests need their tool list normalized.
 		if !c.mode.IsResponsesAPI {
 			body = openaiconv.ConvertWebSearchTools(body)
+			body = openaiconv.ForceWebSearchResults(body)
 		}
 
-		// cache_salt is a genuine OpenAI Chat Completions parameter, but most
-		// other servers that merely speak the OpenAI wire protocol (behind
-		// this same "openai"-typed default bucket: aggregators, self-hosted
-		// vLLM deployments, etc.) reject it outright with a 400 ("cache_salt:
-		// Extra inputs are not permitted") rather than ignoring an unknown
-		// field. Forward it only when the credential's base_url is genuinely
-		// OpenAI's own API.
-		if !openaiconv.IsRealOpenAIHost(c.mode.BaseURL) {
+		// See shouldStripCacheSalt: strip for everyone in this default bucket
+		// (aggregators, strict OpenAI-shaped deployments, genuine
+		// api.openai.com, ...) except self-hosted vLLM.
+		if c.shouldStripCacheSalt() {
 			body = openaiconv.StripCacheSalt(body)
+		}
+
+		// See shouldStripStreamOptionsExtras: the ingress sanitizer preserves
+		// whatever stream_options object the client sent (plus a guaranteed
+		// include_usage=true); strip it down to just include_usage here for
+		// every destination except vLLM, which understands the extra keys.
+		if c.mode.IsStreaming && c.shouldStripStreamOptionsExtras() {
+			body = openaiconv.RebuildStreamOptionsIncludeUsageOnly(body)
+		}
+
+		// See shouldStripOpenRouterOnlyFields: plugins/provider are genuine
+		// OpenRouter features that every other destination in this bucket
+		// either rejects outright or silently ignores -- strip for everyone
+		// except genuine OpenRouter.
+		if c.shouldStripOpenRouterOnlyFields() {
+			body = openaiconv.StripOpenRouterOnlyFields(body)
+		}
+
+		// See shouldStripVLLMOnlySamplingParams: chat_template_kwargs/
+		// repetition_penalty/length_penalty are vLLM sampling extensions --
+		// strip only when this bucket's provider is confirmed genuine OpenAI,
+		// never for ProviderTypeProxy/ProviderTypeAIR (IsProxyLike), which
+		// forward to a router this one doesn't control and could itself be
+		// fronting vLLM.
+		if c.shouldStripVLLMOnlySamplingParams() {
+			body = openaiconv.StripVLLMOnlySamplingParams(body)
 		}
 
 		if c.mode.IsImageGeneration || c.mode.IsImageEdit {
@@ -458,6 +594,7 @@ type tokenUsageShapeUsage struct {
 		AudioTokens int `json:"audio_tokens,omitempty"`
 		TextTokens  int `json:"text_tokens,omitempty"`
 		ImageTokens int `json:"image_tokens,omitempty"`
+		converterutil.CachingTokensExtension
 	} `json:"prompt_tokens_details,omitempty"`
 	CompletionTokensDetails struct {
 		AcceptedPredictionTokens int `json:"accepted_prediction_tokens,omitempty"`
@@ -485,6 +622,7 @@ type tokenUsageResponseShape struct {
 		Usage  *responsesUsageDetails `json:"usage,omitempty"`
 		Output []extractedOutputItem  `json:"output,omitempty"`
 	} `json:"response,omitempty"`
+	WebSearch json.RawMessage `json:"web_search,omitempty"`
 }
 
 // ExtractTokenUsageWithOptions is like ExtractTokenUsage, but lets callers
@@ -566,7 +704,7 @@ func tokenUsageFromShape(resp *tokenUsageResponseShape, opts TokenUsageExtractio
 	if resp.Response.Usage != nil {
 		nestedUsageRequests = resp.Response.Usage.webSearchRequests()
 	}
-	webSearchRequests := webSearchRequestsFromExtractedResponse(resp.Usage.webSearchRequests(), nestedUsageRequests, resp.Choices, resp.Output, resp.Response.Output)
+	webSearchRequests := webSearchRequestsFromExtractedResponse(resp.Usage.webSearchRequests(), nestedUsageRequests, resp.Choices, resp.Output, resp.Response.Output, resp.WebSearch)
 
 	if promptTokens == 0 && completionTokens == 0 && webSearchRequests == 0 {
 		return nil
@@ -596,6 +734,9 @@ func tokenUsageFromShape(resp *tokenUsageResponseShape, opts TokenUsageExtractio
 	cachedAudioTokens := resp.Usage.PromptTokensDetails.CachedAudioTokens
 	if cacheCreationTokens == 0 {
 		cacheCreationTokens = resp.Usage.PromptTokensDetails.CacheWriteTokens
+	}
+	if cacheCreationTokens == 0 && cacheCreation5mTokens == 0 && cacheCreation1hTokens == 0 {
+		cacheCreationTokens, cacheCreation5mTokens, cacheCreation1hTokens = resp.Usage.PromptTokensDetails.CachingWrite()
 	}
 	if cacheCreationTokens == 0 && cacheCreation5mTokens == 0 && cacheCreation1hTokens == 0 {
 		cacheCreationTokens = resp.Usage.InputTokensDetails.CacheCreationTokens
@@ -736,6 +877,10 @@ type extractedChoiceWithAnnotations struct {
 	Message struct {
 		Annotations []extractedAnnotation `json:"annotations,omitempty"`
 	} `json:"message"`
+	// Streaming chunks carry annotations in delta.
+	Delta struct {
+		Annotations []extractedAnnotation `json:"annotations,omitempty"`
+	} `json:"delta"`
 }
 
 type extractedAnnotation struct {
@@ -767,6 +912,7 @@ func webSearchRequestsFromExtractedResponse(
 	choices []extractedChoiceWithAnnotations,
 	output []extractedOutputItem,
 	nestedOutput []extractedOutputItem,
+	searchResults json.RawMessage,
 ) int {
 	if requests := webSearchRequestsFromUsage(usageRequests, nestedUsageRequests); requests > 0 {
 		return requests
@@ -777,14 +923,32 @@ func webSearchRequestsFromExtractedResponse(
 	if requests := countCompletedWebSearchOutputItems(nestedOutput); requests > 0 {
 		return requests
 	}
+	if hasWebSearchResults(searchResults) {
+		return 1
+	}
+	// A citation proves a search but not how many: one per response.
 	for _, choice := range choices {
 		for _, annotation := range choice.Message.Annotations {
 			if annotation.Type == "url_citation" {
 				return 1
 			}
 		}
+		for _, annotation := range choice.Delta.Annotations {
+			if annotation.Type == "url_citation" {
+				return 1
+			}
+		}
 	}
 	return 0
+}
+
+func hasWebSearchResults(raw json.RawMessage) bool {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 || raw[0] != '[' {
+		return false
+	}
+	var results []json.RawMessage
+	return json.Unmarshal(raw, &results) == nil && len(results) > 0
 }
 
 func countCompletedWebSearchOutputItems(output []extractedOutputItem) int {

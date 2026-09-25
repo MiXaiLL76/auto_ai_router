@@ -242,8 +242,16 @@ func extractSessionIDFromHeaders(header http.Header) string {
 var rawIncludeUsageTrue = goccyjson.RawMessage("true")
 
 // injectIncludeUsageRaw ensures reqBody["stream_options"]["include_usage"] is
-// true, operating entirely on RawMessage sub-slices so the rest of reqBody
-// (in particular messages/input) is never boxed into interface{}.
+// true, merging into whatever stream_options object the client sent rather
+// than discarding it. This runs before the destination provider is resolved
+// (sanitizeAndExtractRequestBody is called at request ingress, ahead of
+// credential selection), so it cannot know yet whether a client-sent
+// provider-specific key like vLLM's continuous_usage_stats should ultimately
+// survive: that decision needs the resolved provider and is made later, in
+// converter.ProviderConverter.RequestFrom (see shouldStripStreamOptionsExtras
+// / RebuildStreamOptionsIncludeUsageOnly). Operates entirely on RawMessage
+// sub-slices so the rest of reqBody (in particular messages/input) is never
+// boxed into interface{}.
 func injectIncludeUsageRaw(reqBody map[string]goccyjson.RawMessage) error {
 	streamOptionsRaw, exists := reqBody["stream_options"]
 	var streamOptions map[string]goccyjson.RawMessage
@@ -382,9 +390,19 @@ func sanitizeJSONRequestBody(body []byte, isMessagesAPI bool) (sanitizedRequestB
 
 	// Extract session ID before removing LiteLLM-only request metadata.
 	result.SessionID = extractSessionIDFromRawBody(reqBody)
-	if _, exists := reqBody["litellm_session_id"]; exists {
-		delete(reqBody, "litellm_session_id")
-		changed = true
+	// litellm_session_id/session_id only ever drive AIR's own sticky-routing
+	// decision (already captured above into result.SessionID); no provider
+	// understands either as a wire-protocol field, and both are gone from
+	// reqBody before routing even happens, so removing them here can't affect
+	// which credential gets picked. inference_geo and trace are the same
+	// shape: internal-only metadata no provider needs, safe to drop for
+	// everyone regardless of destination -- unlike cache_salt/stream_options,
+	// there's no backend confirmed to actually use these.
+	for _, key := range [...]string{"litellm_session_id", "session_id", "inference_geo", "trace"} {
+		if _, exists := reqBody[key]; exists {
+			delete(reqBody, key)
+			changed = true
+		}
 	}
 
 	// Check if this is a streaming request
@@ -634,6 +652,7 @@ func extractWebSearchRequestUsage(body []byte, contentType string) (bool, string
 	var req struct {
 		WebSearchOptions map[string]interface{}   `json:"web_search_options,omitempty"`
 		Tools            []map[string]interface{} `json:"tools,omitempty"`
+		Plugins          []map[string]interface{} `json:"plugins,omitempty"`
 	}
 	if err := json.Unmarshal(body, &req); err != nil {
 		return false, ""
@@ -648,12 +667,30 @@ func extractWebSearchRequestUsage(body []byte, contentType string) (bool, string
 		}
 		return true, webSearchContextSizeFromMap(tool)
 	}
+	// OpenRouter's paid web-search plugin: a client asking for it (and only
+	// preserved on the wire for genuine OpenRouter, see
+	// converter.shouldStripOpenRouterOnlyFields) is a billable request the
+	// same way web_search_options/tools are -- without this, pre-billing and
+	// quota checks never see it. Convention per OpenRouter's own docs
+	// (id: "web" enables the plugin); not independently verified against a
+	// live OpenRouter response this session.
+	for _, plugin := range req.Plugins {
+		if !isWebSearchPlugin(plugin) {
+			continue
+		}
+		return true, webSearchContextSizeFromMap(plugin)
+	}
 	return false, ""
 }
 
 func isWebSearchTool(tool map[string]interface{}) bool {
 	toolType, _ := tool["type"].(string)
 	return toolType == "web_search" || strings.HasPrefix(toolType, "web_search_")
+}
+
+func isWebSearchPlugin(plugin map[string]interface{}) bool {
+	id, _ := plugin["id"].(string)
+	return id == "web"
 }
 
 func webSearchContextSizeFromMap(values map[string]interface{}) string {
@@ -775,8 +812,12 @@ func extractTokensFromResponse(body []byte, credType config.ProviderType) int {
 	return extractOpenAITotalTokens(body)
 }
 
-// injectStreamOptions ensures stream_options.include_usage is set in a Chat Completions request body.
-// Used after Responses API conversion where ingress sanitization skipped injection.
+// injectStreamOptions ensures stream_options.include_usage is set in a Chat
+// Completions request body, merging into whatever the client sent rather
+// than discarding it -- see injectIncludeUsageRaw for why: this runs before
+// the destination provider is resolved, so provider-specific extension keys
+// are stripped later if needed, in converter.RequestFrom. Used after
+// Responses API conversion where ingress sanitization skipped injection.
 func injectStreamOptions(body []byte) []byte {
 	var raw map[string]interface{}
 	if err := json.Unmarshal(body, &raw); err != nil {

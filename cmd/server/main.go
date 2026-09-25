@@ -698,14 +698,15 @@ func initializeBalancer(
 	var rateLimiter *ratelimit.RPMLimiter
 	var hybridBackend *ratelimit.HybridBackend
 	if redisBackend != nil {
+		limiterBackend := balancerRedisBackend(cfg.Redis, redisBackend)
 		if cfg.Redis.Hybrid {
 			log.Info("Rate limiter: using hybrid backend (local decisions, async Redis sync)",
-				"sync_interval", cfg.Redis.SyncInterval)
-			hybridBackend = ratelimit.NewHybridBackend(redisBackend, cfg.Redis.SyncInterval, log, metrics)
+				"sync_interval", cfg.Redis.SyncInterval, "balancer_key_prefix", limiterBackend.KeyPrefix())
+			hybridBackend = ratelimit.NewHybridBackend(limiterBackend, cfg.Redis.SyncInterval, log, metrics)
 			rateLimiter = ratelimit.NewWithHybrid(hybridBackend)
 		} else {
-			log.Info("Rate limiter: using Redis backend")
-			rateLimiter = ratelimit.NewWithRedis(redisBackend)
+			log.Info("Rate limiter: using Redis backend", "balancer_key_prefix", limiterBackend.KeyPrefix())
+			rateLimiter = ratelimit.NewWithRedis(limiterBackend)
 		}
 	} else {
 		rateLimiter = ratelimit.New()
@@ -715,6 +716,19 @@ func initializeBalancer(
 	bal.SetLogger(log)
 
 	return f2b, rateLimiter, bal, hybridBackend
+}
+
+// balancerRedisBackend returns the backend for the balancer's credential/model
+// counters. By default redis.balancer_key_prefix equals redis.key_prefix and
+// the deployment's own backend is used as is (current behaviour). A different
+// prefix gives counters shared with other deployments that set the same value.
+// The empty check only covers configs built in code (e.g. tests), where the
+// YAML default is not applied.
+func balancerRedisBackend(cfg config.RedisConfig, own *ratelimit.RedisBackend) *ratelimit.RedisBackend {
+	if cfg.BalancerKeyPrefix == "" || cfg.BalancerKeyPrefix == cfg.KeyPrefix {
+		return own
+	}
+	return own.WithSharedKeyPrefix(cfg.BalancerKeyPrefix)
 }
 
 func convertFailBanRules(
@@ -1006,6 +1020,7 @@ func initializeLiteLLMDB(cfg *config.Config, log *slog.Logger) litellmdb.Manager
 		LogWorkers:                  cfg.LiteLLMDB.LogWorkers,
 		DisableSpendLogsWrite:       cfg.LiteLLMDB.DisableSpendLogsWrite,
 		IncludeTeamSpendInUserSpend: &cfg.LiteLLMDB.IncludeTeamSpendInUserSpend,
+		DailySpendTimezone:          cfg.LiteLLMDB.DailySpendTimezone,
 		Logger:                      log,
 	}
 

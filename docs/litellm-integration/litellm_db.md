@@ -36,11 +36,16 @@ litellm_db:
 | `include_team_spend_in_user_spend` | bool     | true    | Include team-bound events in the cumulative user spend projection |
 | `log_retry_attempts`               | int      | 3       | Retry attempts on log insert failure                              |
 | `log_retry_delay`                  | duration | 1s      | Delay between retry attempts                                      |
+| `daily_spend_timezone`             | string   | UTC     | Timezone the daily spend tables are grouped by                    |
+
+### Daily aggregation timezone
+
+By default the `date` column of the daily spend tables holds the **UTC** calendar day of the request, the day LiteLLM itself aggregates by. `daily_spend_timezone` moves that boundary to a local day: with `Europe/Moscow`, a request at `2026-03-10T22:30:00Z` counts towards `2026-03-11`. Only that column follows the setting — every table AIR aggregates takes the day from one computed value, so they cannot disagree with each other, and stored timestamps such as `LiteLLM_SpendLogs.startTime` and `created_at`/`updated_at` stay UTC.
 
 ## Features
 
 - **Spend logging** — records token usage, costs, and request metadata
-- **Daily aggregation** — aggregates spend by user, team, organization, end user, agent, and tags
+- **Daily aggregation** — aggregates spend by user, team, organization, and end user
 - **API key auth** — validates API keys against LiteLLM verification tokens
 - **Batch processing** — logs are batched and flushed periodically for performance
 - **Dead Letter Queue** — failed log inserts are captured for later retry
