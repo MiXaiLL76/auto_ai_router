@@ -8,7 +8,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestCachingTokensExtension_CacheWrite(t *testing.T) {
+func TestCachingTokensExtension_CachingWrite(t *testing.T) {
 	tests := []struct {
 		name                  string
 		details               string
@@ -28,7 +28,7 @@ func TestCachingTokensExtension_CacheWrite(t *testing.T) {
 				CachingTokensExtension
 			}
 			require.NoError(t, json.Unmarshal([]byte(tt.details), &details))
-			total, fiveMin, oneHr := details.CacheWrite()
+			total, fiveMin, oneHr := details.CachingWrite()
 			assert.Equal(t, tt.total, total)
 			assert.Equal(t, tt.fiveMin, fiveMin)
 			assert.Equal(t, tt.oneHr, oneHr)

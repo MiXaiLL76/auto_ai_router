@@ -736,7 +736,7 @@ func tokenUsageFromShape(resp *tokenUsageResponseShape, opts TokenUsageExtractio
 		cacheCreationTokens = resp.Usage.PromptTokensDetails.CacheWriteTokens
 	}
 	if cacheCreationTokens == 0 && cacheCreation5mTokens == 0 && cacheCreation1hTokens == 0 {
-		cacheCreationTokens, cacheCreation5mTokens, cacheCreation1hTokens = resp.Usage.PromptTokensDetails.CachingTokensExtension.CacheWrite()
+		cacheCreationTokens, cacheCreation5mTokens, cacheCreation1hTokens = resp.Usage.PromptTokensDetails.CachingWrite()
 	}
 	if cacheCreationTokens == 0 && cacheCreation5mTokens == 0 && cacheCreation1hTokens == 0 {
 		cacheCreationTokens = resp.Usage.InputTokensDetails.CacheCreationTokens

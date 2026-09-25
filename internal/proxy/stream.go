@@ -227,7 +227,7 @@ func (o *openAIStreamUsageExtractor) extractChatCompletionUsage(payload []byte) 
 		cacheCreationTokens = cacheCreation5mTokens + cacheCreation1hTokens
 	}
 	if cacheCreationTokens == 0 {
-		cacheCreationTokens, cacheCreation5mTokens, cacheCreation1hTokens = data.Usage.PromptTokensDetails.CachingTokensExtension.CacheWrite()
+		cacheCreationTokens, cacheCreation5mTokens, cacheCreation1hTokens = data.Usage.PromptTokensDetails.CachingWrite()
 	}
 	cachedTokens, cachedAudioTokens := converterutil.NormalizeCachedAudioBreakdown(
 		data.Usage.PromptTokensDetails.CachedTokens,

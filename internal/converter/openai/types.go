@@ -164,7 +164,7 @@ func (d *TokenDetails) CacheWrite() (total, fiveMinutes, oneHour int) {
 		oneHour = d.CacheCreationTokenDetails.Ephemeral1hInputTokens
 	}
 	if total == 0 && fiveMinutes == 0 && oneHour == 0 {
-		return d.CachingTokensExtension.CacheWrite()
+		return d.CachingWrite()
 	}
 	if total == 0 {
 		total = fiveMinutes + oneHour

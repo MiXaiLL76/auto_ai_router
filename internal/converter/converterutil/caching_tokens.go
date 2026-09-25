@@ -13,9 +13,9 @@ type CachingTokenDetails struct {
 	Caching1hTokens int `json:"caching_1h_tokens,omitempty"`
 }
 
-// CacheWrite returns the total and its 5m / 1h split. Negative counters count
+// CachingWrite returns the total and its 5m / 1h split. Negative counters count
 // as absent; a missing total is the sum of the split.
-func (e CachingTokensExtension) CacheWrite() (total, fiveMinutes, oneHour int) {
+func (e CachingTokensExtension) CachingWrite() (total, fiveMinutes, oneHour int) {
 	total = NonNegativeTokenCount(e.CachingTokens)
 	if e.CachingTokenDetails != nil {
 		fiveMinutes = NonNegativeTokenCount(e.CachingTokenDetails.Caching5mTokens)
