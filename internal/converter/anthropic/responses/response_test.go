@@ -117,6 +117,44 @@ func TestAnthropicToResponsesResponse_ToolUse(t *testing.T) {
 	assert.Equal(t, "London", args["city"])
 }
 
+// TestAnthropicToResponsesResponse_TruncatedToolCall verifies that a tool_use
+// block whose JSON args never finished streaming (max_tokens mid-call) is
+// dropped rather than surfaced as a function_call with fabricated {}
+// arguments. The top-level status/incomplete_details already tell the client
+// the response was cut off; a synthetic no-arg call would look like the model
+// deliberately invoked the function, which the client can't tell apart from
+// real truncation.
+func TestAnthropicToResponsesResponse_TruncatedToolCall(t *testing.T) {
+	body := `{
+		"id": "msg_trunc",
+		"type": "message",
+		"role": "assistant",
+		"model": "claude-opus-4-7",
+		"content": [
+			{"type": "text", "text": "I'll check the weather in Paris for you."},
+			{"type": "tool_use", "id": "toolu_trunc", "name": "get_weather"}
+		],
+		"stop_reason": "max_tokens",
+		"usage": {"input_tokens": 10, "output_tokens": 80}
+	}`
+
+	resp, err := AnthropicToResponsesResponse([]byte(body), "claude-opus-4-7", "", 0)
+	require.NoError(t, err)
+
+	assert.Equal(t, "incomplete", resp.Status)
+	require.NotNil(t, resp.IncompleteDetails)
+	assert.Equal(t, "max_output_tokens", resp.IncompleteDetails.Reason)
+
+	for _, item := range resp.Output {
+		assert.NotEqual(t, "function_call", item.Type, "truncated tool_use must not surface as a function_call")
+	}
+
+	require.Len(t, resp.Output, 1)
+	assert.Equal(t, "message", resp.Output[0].Type)
+	require.Len(t, resp.Output[0].Content, 1)
+	assert.Equal(t, "I'll check the weather in Paris for you.", resp.Output[0].Content[0].Text)
+}
+
 // TestAnthropicToResponsesResponse_WebSearch verifies that a server_tool_use
 // web_search block becomes a web_search_call output item with a
 // {"type":"search","query":...} action (instead of being silently dropped,

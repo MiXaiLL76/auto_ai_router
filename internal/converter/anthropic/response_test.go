@@ -172,6 +172,82 @@ func TestAnthropicToOpenAIPreservesOpaqueToolID(t *testing.T) {
 	}
 }
 
+// TestAnthropicToOpenAIDropsTruncatedToolCall covers a tool_use block whose JSON args
+// never finished streaming (typically the model hit max_tokens mid-call). Anthropic still
+// sends the block header (id, name) with input omitted/null. Fabricating an empty {}
+// arguments object here would look like the model deliberately called the function with
+// no parameters, which a client cannot tell apart from real truncation -- so the block is
+// dropped and finish_reason (mapped to "length") is left to carry the signal instead.
+func TestAnthropicToOpenAIDropsTruncatedToolCall(t *testing.T) {
+	body := []byte(`{
+		"id":"msg_truncated",
+		"type":"message",
+		"role":"assistant",
+		"model":"claude-opus-4-7",
+		"content":[
+			{"type":"text","text":"I'll check the weather in Paris for you."},
+			{"type":"tool_use","id":"toolu_truncated","name":"get_weather"}
+		],
+		"stop_reason":"max_tokens",
+		"usage":{"input_tokens":10,"output_tokens":80}
+	}`)
+
+	converted, err := AnthropicToOpenAI(body, "anthropic/claude-opus-4.7")
+	if err != nil {
+		t.Fatalf("convert Anthropic response: %v", err)
+	}
+
+	var response openai.OpenAIResponse
+	if err := json.Unmarshal(converted, &response); err != nil {
+		t.Fatalf("unmarshal OpenAI response: %v", err)
+	}
+	if len(response.Choices) != 1 {
+		t.Fatalf("expected one choice, got %+v", response.Choices)
+	}
+	choice := response.Choices[0]
+	if len(choice.Message.ToolCalls) != 0 {
+		t.Fatalf("expected truncated tool_use to be dropped, got %+v", choice.Message.ToolCalls)
+	}
+	if choice.FinishReason != "length" {
+		t.Fatalf("expected finish_reason %q, got %q", "length", choice.FinishReason)
+	}
+	if choice.Message.Content != "I'll check the weather in Paris for you." {
+		t.Fatalf("expected partial text content preserved, got %q", choice.Message.Content)
+	}
+}
+
+// TestAnthropicToOpenAIKeepsGenuineNoArgToolCall covers a tool_use block that legitimately
+// completed with an empty (but present) input object -- the model deliberately called a
+// no-argument function. This must stay distinct from the truncated case above, which has
+// no input field at all.
+func TestAnthropicToOpenAIKeepsGenuineNoArgToolCall(t *testing.T) {
+	body := []byte(`{
+		"id":"msg_noargs",
+		"type":"message",
+		"role":"assistant",
+		"model":"claude-opus-4-7",
+		"content":[{"type":"tool_use","id":"toolu_noargs","name":"ping","input":{}}],
+		"stop_reason":"tool_use",
+		"usage":{"input_tokens":10,"output_tokens":5}
+	}`)
+
+	converted, err := AnthropicToOpenAI(body, "anthropic/claude-opus-4.7")
+	if err != nil {
+		t.Fatalf("convert Anthropic response: %v", err)
+	}
+
+	var response openai.OpenAIResponse
+	if err := json.Unmarshal(converted, &response); err != nil {
+		t.Fatalf("unmarshal OpenAI response: %v", err)
+	}
+	if len(response.Choices) != 1 || len(response.Choices[0].Message.ToolCalls) != 1 {
+		t.Fatalf("expected one genuine no-arg tool call, got %+v", response.Choices)
+	}
+	if got := response.Choices[0].Message.ToolCalls[0].Function.Arguments; got != "{}" {
+		t.Fatalf("expected empty-object arguments preserved, got %q", got)
+	}
+}
+
 // TestAnthropicToOpenAICountsWebSearchServerToolUse covers providers that execute the
 // Anthropic web_search server tool but leave server_tool_use out of usage. The call is
 // billable, so the converter counts the server_tool_use blocks it can see in the response

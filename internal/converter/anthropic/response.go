@@ -47,11 +47,17 @@ func AnthropicToOpenAI(anthropicBody []byte, model string) ([]byte, error) {
 				webSearchRequests++
 			}
 		case "tool_use":
+			if block.Input == nil {
+				// Truncated mid-call (usually max_tokens): Anthropic sent the tool_use
+				// block header before the JSON args finished, so there's no real input
+				// to report. Don't fabricate a {} placeholder call -- same rule as every
+				// other provider route (see vertex/response.go): let finish_reason carry
+				// the truncation signal instead of synthesizing data the model never sent.
+				continue
+			}
 			argsJSON := "{}"
-			if block.Input != nil {
-				if data, err := json.Marshal(block.Input); err == nil {
-					argsJSON = string(data)
-				}
+			if data, err := json.Marshal(block.Input); err == nil {
+				argsJSON = string(data)
 			}
 			toolCalls = append(toolCalls, openai.OpenAIToolCall{
 				ID:   block.ID,

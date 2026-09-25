@@ -137,11 +137,18 @@ func anthropicContentToOutputItems(blocks []anthropic.ContentBlock) []responses.
 				})
 				continue
 			}
+			if block.Input == nil {
+				// Truncated mid-call (usually max_tokens): Anthropic sent the tool_use
+				// block header before the JSON args finished, so there's no real input
+				// to report. Don't fabricate a {} placeholder call -- the top-level
+				// response.status/incomplete_details already carry the truncation
+				// signal (see anthropicStopReasonToStatus), same rule as the Chat
+				// Completions converter (see anthropic/response.go).
+				continue
+			}
 			argsJSON := "{}"
-			if block.Input != nil {
-				if b, err := json.Marshal(block.Input); err == nil {
-					argsJSON = string(b)
-				}
+			if b, err := json.Marshal(block.Input); err == nil {
+				argsJSON = string(b)
 			}
 			output = append(output, responses.OutputItem{
 				Type:      "function_call",
