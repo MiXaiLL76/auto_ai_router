@@ -260,6 +260,24 @@ Merely enabling a tool does not count as execution. A successful response with n
 
 The count and selected context size are written to spend metadata under `usage_object.server_tool_use` and `additional_usage_values.server_tool_use`; the tool cost is written to `cost_breakdown.tool_usage_cost` and `cost_breakdown.web_search_cost`.
 
+### Cost margin
+
+AIR adds a [LiteLLM-style margin](https://docs.litellm.ai/docs/proxy/provider_margins) to the calculated cost. It is set in `metadata.cost_margin_config`: keys are AIR credential types (`openai`, `vertex-ai`, ...) or `global`, values are a fraction (`0.10` = 10%) or `{"percentage": 0.10, "fixed_amount": 0.001}` (USD per request).
+
+```json
+{"cost_margin_config": {"global": 0.05, "openai": {"percentage": 0.1, "fixed_amount": 0.001}}}
+```
+
+The first layer that has the provider or `global` wins; missing entities are skipped:
+
+| Key          | Layers                           |
+| ------------ | -------------------------------- |
+| Team         | key → team → team's organization |
+| Organization | key → organization               |
+| Personal     | key → user                       |
+
+The marked-up cost goes to `spend`, budgets and Kafka `total_cost`; `cost_breakdown` keeps `original_cost` and the `margin_*` fields. Failed requests with no usage are not charged `fixed_amount`. Changes apply once the auth cache entry expires.
+
 ### Regular input tokens
 
 Vertex AI and OpenAI include audio and cached tokens **inside** `prompt_tokens`. Anthropic reports cache reads and writes separately on the wire, so AIR first normalises Anthropic usage to an inclusive prompt total. The formula then uses the same semantics for every provider:

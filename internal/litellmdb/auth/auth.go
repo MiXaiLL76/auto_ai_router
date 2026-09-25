@@ -200,6 +200,7 @@ func (a *Authenticator) fetchTokenFromDB(ctx context.Context, hashedToken string
 	var userMaxBudget, userSpend *float64
 	var userTPMLimit, userRPMLimit *int64
 	var userModels []string
+	var userMetadata []byte
 
 	// ============ Team fields ============
 	var teamIDCheck, teamAlias *string
@@ -208,12 +209,14 @@ func (a *Authenticator) fetchTokenFromDB(ctx context.Context, hashedToken string
 	var teamBlocked *bool
 	var teamTPMLimit, teamRPMLimit *int64
 	var teamModels []string
+	var teamMetadata []byte
 
 	// ============ Organization fields (with external budget) ============
 	var orgIDCheck *string
 	var orgSpend *float64
 	var orgMaxBudget *float64
 	var orgTPMLimit, orgRPMLimit *int64
+	var orgMetadata []byte
 
 	// ============ TeamMembership fields (with external budget) ============
 	var teamMemberSpend *float64
@@ -252,6 +255,7 @@ func (a *Authenticator) fetchTokenFromDB(ctx context.Context, hashedToken string
 		&userTPMLimit,
 		&userRPMLimit,
 		&userModels,
+		&userMetadata,
 
 		// Team
 		&teamIDCheck,
@@ -263,6 +267,7 @@ func (a *Authenticator) fetchTokenFromDB(ctx context.Context, hashedToken string
 		&teamTPMLimit,
 		&teamRPMLimit,
 		&teamModels,
+		&teamMetadata,
 
 		// Organization
 		&orgIDCheck,
@@ -270,6 +275,7 @@ func (a *Authenticator) fetchTokenFromDB(ctx context.Context, hashedToken string
 		&orgMaxBudget,
 		&orgTPMLimit,
 		&orgRPMLimit,
+		&orgMetadata,
 
 		// TeamMembership
 		&teamMemberSpend,
@@ -378,6 +384,9 @@ func (a *Authenticator) fetchTokenFromDB(ctx context.Context, hashedToken string
 	info.OrgMemberTPMLimit = orgMemberTPMLimit
 	info.OrgMemberRPMLimit = orgMemberRPMLimit
 
+	// Set cost margin layers (key -> team -> org, or key -> user for a personal key)
+	info.CostMarginConfigs = a.costMarginConfigs(&info, tokenMetadata, userMetadata, teamMetadata, orgMetadata)
+
 	a.logger.Debug("Token loaded with full hierarchy",
 		"token_prefix", security.MaskToken(hashedToken),
 		"user_id", info.UserID,
@@ -386,6 +395,57 @@ func (a *Authenticator) fetchTokenFromDB(ctx context.Context, hashedToken string
 	)
 
 	return &info, nil
+}
+
+// costMarginConfigs collects the cost_margin_config layers in priority order.
+// The key comes first. A team or organization key then bills the team and its
+// organization, a personal key (no team, no organization) bills the user, the
+// same split budgetLevels uses. Parsing is best-effort: a config AIR does not
+// understand must not fail authentication.
+func (a *Authenticator) costMarginConfigs(info *models.TokenInfo, keyMetadata, userMetadata, teamMetadata, orgMetadata []byte) []models.CostMarginConfig {
+	type layer struct {
+		level string
+		raw   []byte
+	}
+	layers := []layer{{"key", metadataCostMarginConfig(keyMetadata)}}
+	switch {
+	case info.TeamID != "":
+		layers = append(layers,
+			layer{"team", metadataCostMarginConfig(teamMetadata)},
+			layer{"organization", metadataCostMarginConfig(orgMetadata)},
+		)
+	case info.OrganizationID != "":
+		layers = append(layers, layer{"organization", metadataCostMarginConfig(orgMetadata)})
+	default:
+		layers = append(layers, layer{"user", metadataCostMarginConfig(userMetadata)})
+	}
+
+	var configs []models.CostMarginConfig
+	for _, layer := range layers {
+		cfg, err := models.ParseCostMarginConfig(layer.raw)
+		if err != nil {
+			a.logger.Warn("cost_margin_config has unexpected structure, ignoring the unusable parts",
+				"level", layer.level,
+				"token_prefix", security.MaskToken(info.Token),
+				"error", err,
+			)
+		}
+		if len(cfg) > 0 {
+			configs = append(configs, cfg)
+		}
+	}
+	return configs
+}
+
+// metadataCostMarginConfig extracts cost_margin_config from a LiteLLM metadata column.
+func metadataCostMarginConfig(raw []byte) []byte {
+	var metadata struct {
+		CostMarginConfig json.RawMessage `json:"cost_margin_config"`
+	}
+	if err := json.Unmarshal(raw, &metadata); err != nil {
+		return nil
+	}
+	return metadata.CostMarginConfig
 }
 
 func decodeMetadata(raw []byte) map[string]interface{} {

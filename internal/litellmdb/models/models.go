@@ -2,8 +2,11 @@
 package models
 
 import (
+	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
+	"maps"
 	"regexp"
 	"strings"
 	"time"
@@ -237,6 +240,90 @@ type TokenInfo struct {
 
 	// Metadata
 	Metadata map[string]interface{}
+
+	// Cost margin layers in priority order: key, then team and organization
+	// (or user for a personal key) (see CostMargin)
+	CostMarginConfigs []CostMarginConfig
+}
+
+// ==================== Cost Margin ====================
+
+// CostMargin is one LiteLLM cost_margin_config entry
+// (https://docs.litellm.ai/docs/proxy/provider_margins).
+type CostMargin struct {
+	Percentage  float64 // Fraction of the base cost (0.10 = 10%)
+	FixedAmount float64 // USD added per request
+}
+
+// CostMarginConfig maps a LiteLLM provider name (or "global") to its margin.
+type CostMarginConfig map[string]CostMargin
+
+// ParseCostMarginConfig reads a LiteLLM cost_margin_config value. Empty or null
+// input yields nil.
+//
+// Parsing is best-effort like queries.ParseRouterSettings: the returned config
+// holds every entry that could be read, and the error lists each ignored one (a
+// malformed document, a value of the wrong type or a negative margin, which
+// LiteLLM's admin API rejects too).
+func ParseCostMarginConfig(raw []byte) (CostMarginConfig, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil, nil
+	}
+
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		return nil, fmt.Errorf("parse cost_margin_config: %w", err)
+	}
+
+	cfg := make(CostMarginConfig, len(doc))
+	var errs []error
+	for provider, value := range doc {
+		margin, err := parseCostMargin(value)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("ignoring cost_margin_config[%q]: %w", provider, err))
+			continue
+		}
+		cfg[provider] = margin
+	}
+	return cfg, errors.Join(errs...)
+}
+
+// parseCostMargin reads a cost_margin_config value: a percentage or
+// {"percentage": ..., "fixed_amount": ...}.
+func parseCostMargin(value json.RawMessage) (CostMargin, error) {
+	var margin CostMargin
+	if err := json.Unmarshal(value, &margin.Percentage); err != nil {
+		var obj struct {
+			Percentage  float64 `json:"percentage"`
+			FixedAmount float64 `json:"fixed_amount"`
+		}
+		if err := json.Unmarshal(value, &obj); err != nil {
+			return CostMargin{}, err
+		}
+		margin = CostMargin(obj)
+	}
+	if margin.Percentage < 0 || margin.FixedAmount < 0 {
+		return CostMargin{}, errors.New("margin must be non-negative")
+	}
+	return margin, nil
+}
+
+// CostMargin resolves the margin for a provider (AIR credential type). The
+// first layer that has either the provider or "global" wins, so {"global": 0}
+// on a key switches off a team or organization margin.
+func (t *TokenInfo) CostMargin(provider string) (CostMargin, bool) {
+	if t == nil {
+		return CostMargin{}, false
+	}
+	for _, cfg := range t.CostMarginConfigs {
+		if margin, ok := cfg[provider]; ok && provider != "" {
+			return margin, true
+		}
+		if margin, ok := cfg["global"]; ok {
+			return margin, true
+		}
+	}
+	return CostMargin{}, false
 }
 
 // LiteLLM sentinel values stored in key or user model allowlists.
@@ -314,6 +401,12 @@ func (t *TokenInfo) Clone() *TokenInfo {
 	clone.Tags = append([]string(nil), t.Tags...)
 	if t.Metadata != nil {
 		clone.Metadata = cloneMetadataValue(t.Metadata).(map[string]interface{})
+	}
+	if t.CostMarginConfigs != nil {
+		clone.CostMarginConfigs = make([]CostMarginConfig, len(t.CostMarginConfigs))
+		for i, cfg := range t.CostMarginConfigs {
+			clone.CostMarginConfigs[i] = maps.Clone(cfg)
+		}
 	}
 
 	clone.MaxBudget = clonePointer(t.MaxBudget)

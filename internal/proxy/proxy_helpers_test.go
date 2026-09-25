@@ -13,8 +13,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/converter"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb"
+	dbmodels "github.com/mixaill76/auto_ai_router/internal/litellmdb/models"
 )
 
 // timeoutError is a mock net.Error that reports timeout.
@@ -69,6 +71,36 @@ func TestIsClientDisconnectError(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			assert.Equal(t, tt.want, isClientDisconnectError(tt.err))
+		})
+	}
+}
+
+func TestRequestLogContextApplyCostMargin(t *testing.T) {
+	tokenInfo := &litellmdb.TokenInfo{CostMarginConfigs: []dbmodels.CostMarginConfig{
+		{"openai": {Percentage: 0.2, FixedAmount: 0.5}},
+	}}
+	openai := &config.CredentialConfig{Type: config.ProviderTypeOpenAI}
+	anthropic := &config.CredentialConfig{Type: config.ProviderTypeAnthropic}
+
+	tests := []struct {
+		name       string
+		tokenInfo  *litellmdb.TokenInfo
+		credential *config.CredentialConfig
+		wantTotal  float64
+		wantMargin float64
+	}{
+		{"percentage and fixed amount", tokenInfo, openai, 1.7, 0.7},
+		{"no matching margin", tokenInfo, anthropic, 1, 0},
+		{"no credential selected yet", tokenInfo, nil, 1, 0},
+		{"nil token info", nil, openai, 1, 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			costs := &converter.TokenCosts{TotalCost: 1}
+			logCtx := &RequestLogContext{TokenInfo: tt.tokenInfo, Credential: tt.credential}
+			logCtx.applyCostMargin(costs)
+			assert.InDelta(t, tt.wantTotal, costs.TotalCost, 1e-9)
+			assert.InDelta(t, tt.wantMargin, costs.MarginTotalAmount, 1e-9)
 		})
 	}
 }

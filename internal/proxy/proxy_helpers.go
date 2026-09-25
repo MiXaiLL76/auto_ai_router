@@ -12,6 +12,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/converter"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb"
 )
@@ -372,6 +373,24 @@ func (logCtx *RequestLogContext) applyWebSearchUsageDefaults(status string) {
 	}
 }
 
+// applyCostMargin adds the cost_margin_config markup of the key's hierarchy
+// (see TokenInfo.CostMargin) for the selected credential's provider on top of
+// already calculated costs, the same way litellm.cost_calculator._apply_cost_margin does.
+func (logCtx *RequestLogContext) applyCostMargin(costs *converter.TokenCosts) {
+	var provider config.ProviderType
+	if logCtx.Credential != nil {
+		provider = logCtx.Credential.Type
+	}
+	margin, ok := logCtx.TokenInfo.CostMargin(string(provider))
+	if !ok {
+		return
+	}
+	costs.MarginPercent = margin.Percentage
+	costs.MarginFixedAmount = margin.FixedAmount
+	costs.MarginTotalAmount = costs.TotalCost*margin.Percentage + margin.FixedAmount
+	costs.TotalCost += costs.MarginTotalAmount
+}
+
 // buildMetadata builds metadata JSON with user/team alias, usage, cost, and optional error info
 func buildMetadata(hashedToken string, tokenInfo *litellmdb.TokenInfo, errorMsg string, httpStatus int, usage *converter.TokenUsage, requesterIP string, costs *converter.TokenCosts, modelID string, overheadMs float64, kafkaFallbackReason string) string {
 	var userID, teamID, organizationID string
@@ -471,14 +490,14 @@ func buildMetadata(hashedToken string, tokenInfo *litellmdb.TokenInfo, errorMsg 
 			"cached_input_cost":   costs.CachedInputCost,
 			"cache_creation_cost": costs.CacheCreationCost,
 			"total_cost":          costs.TotalCost,
-			"original_cost":       costs.TotalCost,
-			"margin_percent":      0.0,
+			"original_cost":       costs.TotalCost - costs.MarginTotalAmount,
+			"margin_percent":      costs.MarginPercent,
 			"discount_amount":     0.0,
 			"tool_usage_cost":     costs.WebSearchCost,
 			"web_search_cost":     costs.WebSearchCost,
 			"discount_percent":    0.0,
-			"margin_fixed_amount": 0.0,
-			"margin_total_amount": 0.0,
+			"margin_fixed_amount": costs.MarginFixedAmount,
+			"margin_total_amount": costs.MarginTotalAmount,
 		}
 	}
 
