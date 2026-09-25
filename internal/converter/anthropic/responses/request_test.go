@@ -35,6 +35,22 @@ func TestResponsesRequestToAnthropic_StringInput(t *testing.T) {
 	assert.Equal(t, "Hello, world!", msg["content"])
 }
 
+// TestResponsesRequestToAnthropic_MaxOutputTokensWrongTypeReportsParam covers a client
+// that sends max_output_tokens as a string instead of a number on the Responses API
+// route. Same class of bug as the Chat Completions path: the raw json.Unmarshal error
+// must classify as a *converterutil.RequestValidationError naming the field, not fall
+// through to a generic 500.
+func TestResponsesRequestToAnthropic_MaxOutputTokensWrongTypeReportsParam(t *testing.T) {
+	body := `{"model":"claude-haiku-4-5","input":"Say OK.","max_output_tokens":"five"}`
+
+	_, err := ResponsesRequestToAnthropic([]byte(body), "claude-haiku-4-5")
+	require.Error(t, err)
+	var validationErr *converterutil.RequestValidationError
+	require.True(t, errors.As(err, &validationErr))
+	assert.Equal(t, "max_output_tokens", validationErr.Param)
+	assert.Equal(t, "invalid_type", validationErr.Code)
+}
+
 func TestResponsesRequestToAnthropic_SamplingRemoved(t *testing.T) {
 	body := `{"model":"M","input":"hi","temperature":0.7,"top_p":0.9,"max_output_tokens":128}`
 

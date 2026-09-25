@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	converterutil "github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
 	"github.com/mixaill76/auto_ai_router/internal/converter/responses"
 	"github.com/mixaill76/auto_ai_router/internal/converter/vertex"
 	"google.golang.org/genai"
@@ -15,7 +16,10 @@ import (
 func ResponsesRequestToVertex(body []byte, model string) ([]byte, error) {
 	var req responses.Request
 	if err := json.Unmarshal(body, &req); err != nil {
-		return nil, fmt.Errorf("ResponsesRequestToVertex: parse request: %w", err)
+		// A malformed field (e.g. max_output_tokens sent as a string) is the client's
+		// mistake, not ours -- classify it so the proxy layer answers 4xx naming the
+		// offending param instead of falling through to a generic 500.
+		return nil, converterutil.RequestJSONValidationError(err)
 	}
 
 	vertexReq, err := buildVertexRequest(&req, model)

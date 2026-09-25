@@ -2,6 +2,8 @@
 package converterutil
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 )
@@ -40,4 +42,20 @@ func NewRequestValidationError(param, message string) error {
 // 413 Request Entity Too Large instead of the default 400.
 func NewRequestEntityTooLargeError(param, message string) error {
 	return &RequestValidationError{Param: param, Message: message, StatusCode: http.StatusRequestEntityTooLarge}
+}
+
+// RequestJSONValidationError classifies a json.Unmarshal error against the client's
+// OpenAI-format request body into a RequestValidationError, so a malformed field (e.g.
+// max_tokens sent as a string) reaches the client as a 4xx naming the offending param --
+// the same shape the openai/* passthrough route already gets for free from the real
+// OpenAI API -- instead of an opaque 500 from whatever provider-specific converter tried
+// to json.Unmarshal the value next. Mirrors the pattern already used for image params in
+// vertex/images.go; callers doing their own json.Unmarshal of the client body should wrap
+// the error through this instead of a plain fmt.Errorf.
+func RequestJSONValidationError(err error) error {
+	var typeErr *json.UnmarshalTypeError
+	if errors.As(err, &typeErr) {
+		return &RequestValidationError{Param: typeErr.Field, Message: "Invalid parameter type", Code: "invalid_type"}
+	}
+	return &RequestValidationError{Message: "Invalid JSON", Code: "invalid_json"}
 }

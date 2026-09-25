@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	converterutil "github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
 	"github.com/mixaill76/auto_ai_router/internal/converter/openai"
 	"google.golang.org/genai"
 )
@@ -37,7 +38,12 @@ func OpenAIToVertex(openAIBody []byte, isImageGeneration bool, isImageEdit bool,
 	}
 
 	if err := json.Unmarshal(openAIBody, &req); err != nil {
-		return nil, fmt.Errorf("failed to parse OpenAI request: %w", err)
+		// A malformed field (e.g. max_tokens sent as a string) is the client's mistake,
+		// not ours -- classify it so the proxy layer answers 4xx naming the offending
+		// param, instead of falling through to a generic 500 (see converterutil.
+		// RequestJSONValidationError; same pattern already used for image params in
+		// this package's images.go).
+		return nil, converterutil.RequestJSONValidationError(err)
 	}
 
 	vertexReq := VertexRequest{

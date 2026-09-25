@@ -40,6 +40,22 @@ func TestResponsesRequestToVertex_StringInput(t *testing.T) {
 	assert.Equal(t, float64(512), cfg["maxOutputTokens"])
 }
 
+// TestResponsesRequestToVertex_MaxOutputTokensWrongTypeReportsParam covers a client
+// that sends max_output_tokens as a string instead of a number on the Responses API
+// route. Same class of bug as the Chat Completions path: the raw json.Unmarshal error
+// must classify as a *converterutil.RequestValidationError naming the field, not fall
+// through to a generic 500.
+func TestResponsesRequestToVertex_MaxOutputTokensWrongTypeReportsParam(t *testing.T) {
+	body := `{"model":"gemini-2.5-flash","input":"Say OK.","max_output_tokens":"five"}`
+
+	_, err := ResponsesRequestToVertex([]byte(body), "gemini-2.5-flash")
+	require.Error(t, err)
+	var validationErr *converterutil.RequestValidationError
+	require.True(t, errors.As(err, &validationErr))
+	assert.Equal(t, "max_output_tokens", validationErr.Param)
+	assert.Equal(t, "invalid_type", validationErr.Code)
+}
+
 func TestResponsesRequestToVertex_Instructions(t *testing.T) {
 	body := `{
 		"model": "gemini-2.0-flash",
