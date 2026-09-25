@@ -167,6 +167,24 @@ type ModelRPMConfig struct {
 	// Explicit true/false overrides the default.
 	PassthroughMessages *bool `yaml:"passthrough_messages,omitempty"`
 
+	// ResponsesOnly marks a model whose upstream only accepts OpenAI's native
+	// /v1/responses endpoint and rejects /v1/chat/completions outright (some
+	// OpenAI reasoning-tier deployments are Responses-API-exclusive). When
+	// true, a client request to /v1/chat/completions for this model is
+	// converted to a Responses API request, sent to the provider's
+	// /v1/responses, and the Responses API response/stream is converted back
+	// to Chat Completions shape before reaching the client -- the mirror
+	// image of PassthroughResponses/the existing Responses->Chat conversion,
+	// in the opposite direction. Default false: nil/omitted means the model
+	// is called via /v1/chat/completions as normal.
+	//
+	// Coverage: only /v1/chat/completions and /v1/responses are handled. A
+	// client calling this model via /v1/messages still gets converted to
+	// /v1/chat/completions and sent to the (Responses-API-exclusive)
+	// upstream, which will reject it -- there is no Messages<->Responses
+	// path for this flag.
+	ResponsesOnly bool `yaml:"responses_only,omitempty"`
+
 	// DefaultParams are request-body defaults applied to a vLLM deployment when the
 	// client did not send the same key (LiteLLM deployment litellm_params such as
 	// chat_template_kwargs, temperature, top_k). Populated only by the database
@@ -186,6 +204,7 @@ func (m *ModelRPMConfig) UnmarshalYAML(value *yaml.Node) error {
 		PassthroughResponses string `yaml:"passthrough_responses,omitempty"`
 		WebSocketResponses   string `yaml:"websocket_responses,omitempty"`
 		PassthroughMessages  string `yaml:"passthrough_messages,omitempty"`
+		ResponsesOnly        string `yaml:"responses_only,omitempty"`
 	}
 
 	var temp tempConfig
@@ -201,6 +220,9 @@ func (m *ModelRPMConfig) UnmarshalYAML(value *yaml.Node) error {
 
 	var err error
 	if m.WebSocketResponses, err = parseField(temp.WebSocketResponses, false, strconv.ParseBool, "websocket_responses"); err != nil {
+		return err
+	}
+	if m.ResponsesOnly, err = parseField(temp.ResponsesOnly, false, strconv.ParseBool, "responses_only for model '"+m.Name+"'"); err != nil {
 		return err
 	}
 	if m.RPM, err = parseField(temp.RPM, 0, strconv.Atoi, "rpm for model '"+m.Name+"'"); err != nil {

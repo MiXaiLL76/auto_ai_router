@@ -99,6 +99,7 @@ func (p *Proxy) applyCredentialCompatibilityRouting(
 		prepared.realModelID = nextReq.realModelID
 		prepared.convertedResp = nextReq.convertedResp
 		prepared.convertedMessages = nextReq.convertedMessages
+		prepared.convertedToResponses = nextReq.convertedToResponses
 		prepared.passthroughResponses = nextReq.passthroughResponses
 		prepared.passthroughMessages = nextReq.passthroughMessages
 		prepared.nativeResponses = nextReq.nativeResponses
@@ -1597,6 +1598,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 			prepared.realModelID = nextReq.realModelID
 			prepared.convertedResp = nextReq.convertedResp
 			prepared.convertedMessages = nextReq.convertedMessages
+			prepared.convertedToResponses = nextReq.convertedToResponses
 			prepared.passthroughResponses = nextReq.passthroughResponses
 			prepared.passthroughMessages = nextReq.passthroughMessages
 			prepared.nativeResponses = nextReq.nativeResponses
@@ -2239,6 +2241,27 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 				bodyForTokenExtraction = finalResponseBody
 				tokenUsageOptions.AudioInputIncludesCachedAudio = false
 			}
+		} else if prepared.convertedToResponses && resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			// responses_only model: the upstream call itself was to
+			// /v1/responses (see ChatRequestToResponses), so finalResponseBody
+			// is currently Responses-API-shaped -- convert it back to Chat
+			// Completions shape for the client, which called
+			// /v1/chat/completions and expects that shape back.
+			chatBody, convErr := responses.ResponseToChat(finalResponseBody)
+			if convErr != nil {
+				args := []any{
+					"credential", cred.Name, "provider", string(cred.Type),
+					"model", modelID, "error", convErr,
+					"request_id", logCtx.RequestID,
+				}
+				args = appendResponseBodyForLogs(args, cred, decodedBody)
+				p.logger.ErrorContext(r.Context(), "Failed to convert Responses API response to Chat Completions format", args...)
+				// finalResponseBody already holds the raw Responses-API body — return as-is.
+			} else {
+				finalResponseBody = chatBody
+				bodyForTokenExtraction = finalResponseBody
+				tokenUsageOptions.AudioInputIncludesCachedAudio = false
+			}
 		}
 
 		if resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
@@ -2429,6 +2452,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 			"is_messages_api", prepared.isMessagesAPI,
 			"converted_resp", prepared.convertedResp,
 			"converted_messages", prepared.convertedMessages,
+			"converted_to_responses", prepared.convertedToResponses,
 			"provider", cred.Type,
 			"model", modelID,
 			"resp_content_type", resp.Header.Get("Content-Type"),
@@ -2510,6 +2534,28 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 				if err != nil {
 					p.logStreamHandlerError(r.Context(), "Failed to handle streaming response", err,
 						"credential", cred.Name, "model", modelID, "request_id", logCtx.RequestID)
+				} else if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+					streamCompleted = true
+				}
+			}
+		} else if prepared.convertedToResponses {
+			// responses_only model: upstream streams native Responses API SSE
+			// (we called its /v1/responses) — convert back to Chat Completions
+			// SSE for the client, which called /v1/chat/completions.
+			if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+				err := p.handleChatFromResponsesStreaming(w, resp, cred, modelID, logCtx)
+				if err != nil {
+					p.logStreamHandlerError(r.Context(), "Failed to handle responses_only streaming", err,
+						"credential", cred.Name, "model", modelID, "request_id", logCtx.RequestID)
+				} else {
+					streamCompleted = true
+				}
+			} else {
+				// Error response: stream using provider's native format instead.
+				err := p.handleProviderStreaming(w, resp, cred, realModelID, modelID, logCtx)
+				if err != nil {
+					p.logStreamHandlerError(r.Context(), "Failed to handle provider streaming response", err,
+						"credential", cred.Name, "provider", cred.Type, "model", modelID, "request_id", logCtx.RequestID)
 				} else if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 					streamCompleted = true
 				}

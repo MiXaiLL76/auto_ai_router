@@ -40,6 +40,7 @@ type orchestratedRequest struct {
 	isMessagesAPI        bool
 	convertedResp        bool
 	convertedMessages    bool
+	convertedToResponses bool // true when a /v1/chat/completions request was converted to Responses API shape for a responses_only model
 	passthroughResponses bool // true for codex/OpenAI models: Responses API forwarded as-is (no conversion)
 	passthroughMessages  bool // true when /v1/messages is forwarded natively (no Messages->Chat->Messages round trip)
 	nativeResponses      bool // true when using Phase 4 ProviderResponses converter (Vertex/Anthropic)
@@ -57,6 +58,7 @@ type credentialPreparedRequest struct {
 	path                 string
 	convertedResp        bool
 	convertedMessages    bool
+	convertedToResponses bool
 	passthroughResponses bool
 	passthroughMessages  bool
 	nativeResponses      bool
@@ -279,6 +281,7 @@ func (p *Proxy) orchestrateRequest(
 		isMessagesAPI:        isMessagesAPI,
 		convertedResp:        credentialReq.convertedResp,
 		convertedMessages:    credentialReq.convertedMessages,
+		convertedToResponses: credentialReq.convertedToResponses,
 		passthroughResponses: credentialReq.passthroughResponses,
 		passthroughMessages:  credentialReq.passthroughMessages,
 		nativeResponses:      credentialReq.nativeResponses,
@@ -414,6 +417,83 @@ func (p *Proxy) buildCredentialRequest(
 		return req, nil
 	}
 	if !isResponsesAPI {
+		// EffectiveProviderType() == ProviderTypeOpenAI covers both a genuine OpenAI-wire
+		// credential and a vLLM one (EffectiveProviderType maps vLLM -> OpenAI for exactly
+		// this kind of wire-protocol decision) -- the only two BuildURL cases that honor
+		// req.path (default: "URL constructed by proxy based on cred.BaseURL + path").
+		// Every other provider type (vertex-ai, gemini, anthropic/cometapi/proman,
+		// bedrock) has its own hardcoded BuildURL case that ignores req.path entirely
+		// (e.g. Anthropic always builds .../v1/messages) and its own request converter
+		// that expects a Chat-shaped body (OpenAIToVertex, OpenAIToAnthropic, ...), not
+		// the Responses-shaped one (input, no messages) this branch produces. Without this
+		// check, responses_only:true on a model whose credential isn't OpenAI/vLLM -- a
+		// config typo, or a credential later changed type -- silently sends a
+		// Responses-shaped body into a Chat-shaped converter/URL and fails with no useful
+		// diagnostic, on every single request to that model.
+		if !cred.IsProxyLike() && cred.EffectiveProviderType() == config.ProviderTypeOpenAI &&
+			strings.Contains(basePath, "/chat/completions") &&
+			p.modelManager != nil && p.modelManager.IsResponsesOnlyForCredential(modelID, cred.Name) {
+			// This model's upstream only accepts the Responses API (see
+			// config.ModelRPMConfig.ResponsesOnly) -- the client called
+			// /v1/chat/completions, so convert its request to Responses API
+			// shape and send it to the provider's /v1/responses instead. The
+			// response side (ResponseToChat / TransformResponsesStreamToChat)
+			// converts back before the client ever sees a Responses-shaped
+			// body. Proxy-like credentials are excluded: a chained AIR
+			// instance does its own model-specific handling on the request
+			// it actually receives.
+			// ReplaceBodyParam first, on the Chat-shaped body: o1/o3/o4/gpt-5 reject
+			// temperature/top_p/top_logprobs on the Responses API exactly like they do
+			// on Chat Completions, but deleteChatOnlyFields (chat_to_responses.go) only
+			// strips frequency_penalty/presence_penalty/logprobs -- not those three --
+			// so without this they survive into the Responses body and the upstream
+			// 400s. ReplaceBodyParam also renames max_tokens -> max_completion_tokens,
+			// which is safe to do before conversion: ChatRequestToResponses reads
+			// max_completion_tokens first anyway, falling back to max_tokens only when
+			// it's absent. ReplaceResponsesBodyParam still runs after conversion for
+			// gpt-6's include-list filtering (Responses-only field, no Chat equivalent
+			// to strip pre-conversion); its own temperature/top_p/top_logprobs removal
+			// is now redundant for gpt-6 (already gone via ReplaceBodyParam) but kept
+			// since gpt-6 must still work if ever called with a body ReplaceBodyParam
+			// didn't touch.
+			responsesBody, err := responses.ChatRequestToResponses(openai.ReplaceBodyParam(realModelID, body))
+			if err != nil {
+				return req, err
+			}
+			req.body = openai.ReplaceResponsesBodyParam(realModelID, responsesBody)
+			// req.proxyBody/req.proxyPath are deliberately left at their
+			// defaults (baseProxyBody, the alias-restored *Chat Completions*
+			// body, and basePath, "/v1/chat/completions") rather than the
+			// Responses-shaped conversion above: a fallback proxy-like
+			// credential (TryFallbackProxy forwards proxyBody/proxyPath, not
+			// body/path) is itself an AIR instance that does its own
+			// model-specific responses_only handling on the request it
+			// actually receives -- same reasoning as the "Proxy-like
+			// credentials are excluded" comment above for the direct-send
+			// path. Overwriting them here previously sent a
+			// Responses-shaped body (input/max_output_tokens, real model
+			// name instead of the alias) to /v1/chat/completions on the
+			// fallback, which every such peer rejects with "messages is
+			// required".
+			req.convertedToResponses = true
+			req.path = strings.Replace(basePath, "/chat/completions", "/responses", 1)
+			p.logger.DebugContext(r.Context(), "Converted Chat Completions request to Responses API format (responses_only)",
+				"model", modelID, "streaming", streaming)
+			return req, nil
+		} else if !cred.IsProxyLike() && strings.Contains(basePath, "/chat/completions") &&
+			cred.EffectiveProviderType() != config.ProviderTypeOpenAI &&
+			p.modelManager != nil && p.modelManager.IsResponsesOnlyForCredential(modelID, cred.Name) {
+			// responses_only is set on this model+credential (static config typo, or a DB
+			// model_info.mode:"responses" bound to a non-OpenAI/vLLM credential) but the
+			// credential can't take a Responses-shaped request -- see the comment above.
+			// Not converting is correct here (better a Chat-shaped 400/incompatible
+			// upstream response than a definitely-broken Responses-shaped one), but the
+			// misconfiguration would otherwise be invisible until someone notices this
+			// model always fails -- surface it once per request so it shows up in logs
+			// immediately instead of during an incident.
+			p.logger.WarnContext(r.Context(), "responses_only set on a credential that cannot serve the Responses API; ignoring the flag for this request",
+				"model", modelID, "credential", cred.Name, "provider", string(cred.Type))
+		}
 		// Normalize "developer" role here too, not just in the Responses→Chat
 		// converter: a client can send an already Chat-Completions-shaped body
 		// straight to /v1/chat/completions (or an SDK can emit "developer" for
@@ -449,6 +529,18 @@ func (p *Proxy) buildCredentialRequest(
 		req.nativeResponses = true
 		p.logger.DebugContext(r.Context(), "Native Responses converter path",
 			"model", modelID, "provider", cred.Type, "streaming", streaming)
+	case !cred.IsProxyLike() && p.modelManager != nil && p.modelManager.IsResponsesOnlyForCredential(modelID, cred.Name):
+		// The client already called /v1/responses, and this model's upstream
+		// only accepts /v1/responses (config.ModelRPMConfig.ResponsesOnly) --
+		// nothing to convert, forward the client's own Responses-shaped body
+		// as-is instead of falling into the default RequestToChat branch
+		// below, which would send it to /v1/chat/completions and get
+		// rejected by the very upstream this flag exists to route around.
+		req.body = openai.ReplaceResponsesBodyParam(realModelID, body)
+		req.proxyBody = openai.ReplaceResponsesBodyParam(realModelID, proxyBody)
+		req.passthroughResponses = true
+		p.logger.DebugContext(r.Context(), "Responses API request for responses_only model forwarded as passthrough",
+			"model", modelID, "streaming", streaming)
 	default:
 		chatBody, err := responses.RequestToChat(body)
 		if err != nil {
