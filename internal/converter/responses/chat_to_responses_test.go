@@ -72,6 +72,57 @@ func TestChatRequestToResponses_ImageContent(t *testing.T) {
 	assert.Equal(t, "high", imgPart["detail"])
 }
 
+// TestChatRequestToResponses_FileContent covers a client-supplied "file" content part
+// (e.g. a PDF attachment) surviving the conversion to Responses API's "input_file", both
+// for the inline file_data form and the file_id form. Before this fix, "file" fell into
+// chatContentPartsToInput's default case and was silently dropped -- the attachment
+// vanished with no client-visible error, and the model answered as though it had never
+// been sent.
+func TestChatRequestToResponses_FileContent(t *testing.T) {
+	body := `{"model":"gpt-5-pro","max_tokens":50,"messages":[
+		{"role":"user","content":[
+			{"type":"text","text":"summarize this"},
+			{"type":"file","file":{"file_data":"data:application/pdf;base64,AAAA","filename":"doc.pdf"}}
+		]}
+	]}`
+
+	out, err := ChatRequestToResponses([]byte(body))
+	require.NoError(t, err)
+
+	var raw map[string]interface{}
+	require.NoError(t, json.Unmarshal(out, &raw))
+	input := raw["input"].([]interface{})
+	require.Len(t, input, 1)
+	parts := input[0].(map[string]interface{})["content"].([]interface{})
+	require.Len(t, parts, 2, "the file part must survive, not be silently dropped")
+	filePart := parts[1].(map[string]interface{})
+	assert.Equal(t, "input_file", filePart["type"])
+	assert.Equal(t, "data:application/pdf;base64,AAAA", filePart["file_data"])
+	assert.Equal(t, "doc.pdf", filePart["filename"])
+	assert.NotContains(t, filePart, "file_id")
+}
+
+func TestChatRequestToResponses_FileContentByID(t *testing.T) {
+	body := `{"model":"gpt-5-pro","max_tokens":50,"messages":[
+		{"role":"user","content":[
+			{"type":"file","file":{"file_id":"file-abc123"}}
+		]}
+	]}`
+
+	out, err := ChatRequestToResponses([]byte(body))
+	require.NoError(t, err)
+
+	var raw map[string]interface{}
+	require.NoError(t, json.Unmarshal(out, &raw))
+	input := raw["input"].([]interface{})
+	parts := input[0].(map[string]interface{})["content"].([]interface{})
+	require.Len(t, parts, 1)
+	filePart := parts[0].(map[string]interface{})
+	assert.Equal(t, "input_file", filePart["type"])
+	assert.Equal(t, "file-abc123", filePart["file_id"])
+	assert.NotContains(t, filePart, "file_data")
+}
+
 // TestChatRequestToResponses_ToolUseRoundTrip covers the peculiarity that
 // matters most for multi-turn agentic conversations: Responses API has no
 // "tool_calls" field on a message and no "tool" role -- an assistant tool
@@ -107,6 +158,58 @@ func TestChatRequestToResponses_ToolUseRoundTrip(t *testing.T) {
 	assert.Equal(t, "function_call_output", fco["type"])
 	assert.Equal(t, "call_abc123", fco["call_id"])
 	assert.Equal(t, "18C, cloudy", fco["output"])
+}
+
+// TestChatRequestToResponses_ToolResultContentParts covers a tool-role message whose
+// content is the content-parts array shape ([{"type":"text","text":"..."}]) rather than
+// a plain string -- both are valid Chat Completions shapes. Before this fix, the array
+// fell into chatToolContentToString's default case and got JSON-marshaled whole, so the
+// model received the literal JSON source (e.g. [{"type":"text","text":"18C, cloudy"}])
+// as the tool result instead of the text itself.
+func TestChatRequestToResponses_ToolResultContentParts(t *testing.T) {
+	body := `{"model":"gpt-5-pro","max_tokens":50,"messages":[
+		{"role":"user","content":"what's the weather in paris?"},
+		{"role":"assistant","content":null,"tool_calls":[
+			{"id":"call_abc123","type":"function","function":{"name":"get_weather","arguments":"{\"city\":\"paris\"}"}}
+		]},
+		{"role":"tool","tool_call_id":"call_abc123","content":[{"type":"text","text":"18C, cloudy"}]}
+	]}`
+
+	out, err := ChatRequestToResponses([]byte(body))
+	require.NoError(t, err)
+
+	var raw map[string]interface{}
+	require.NoError(t, json.Unmarshal(out, &raw))
+	input := raw["input"].([]interface{})
+	require.Len(t, input, 3)
+	fco := input[2].(map[string]interface{})
+	assert.Equal(t, "function_call_output", fco["type"])
+	assert.Equal(t, "18C, cloudy", fco["output"], "the text must be extracted, not the JSON source of the content-parts array")
+}
+
+// TestChatRequestToResponses_ToolResultMultiPartContent covers multiple text parts in a
+// tool result -- they must be concatenated in order, same interpretation as content
+// parts on a user/assistant message.
+func TestChatRequestToResponses_ToolResultMultiPartContent(t *testing.T) {
+	body := `{"model":"gpt-5-pro","max_tokens":50,"messages":[
+		{"role":"user","content":"?"},
+		{"role":"assistant","content":null,"tool_calls":[
+			{"id":"call_1","type":"function","function":{"name":"f","arguments":"{}"}}
+		]},
+		{"role":"tool","tool_call_id":"call_1","content":[
+			{"type":"text","text":"part one. "},
+			{"type":"text","text":"part two."}
+		]}
+	]}`
+
+	out, err := ChatRequestToResponses([]byte(body))
+	require.NoError(t, err)
+
+	var raw map[string]interface{}
+	require.NoError(t, json.Unmarshal(out, &raw))
+	input := raw["input"].([]interface{})
+	fco := input[2].(map[string]interface{})
+	assert.Equal(t, "part one. part two.", fco["output"])
 }
 
 func TestChatRequestToResponses_ToolsFlattening(t *testing.T) {

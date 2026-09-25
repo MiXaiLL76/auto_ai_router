@@ -137,6 +137,9 @@ func fixtureModels(t *testing.T) []queries.ModelTable {
 		modelRow(t, "id-frida-1", "frida", vllmParams(t, "frida", "rgm-s-dsapp01-frida-1", map[string]any{"input_cost_per_token": 1e-8}), embedInfo, false),
 		modelRow(t, "id-frida-2", "frida", vllmParams(t, "frida", "rgm-s-dsapp01-frida-2", map[string]any{"input_cost_per_token": 1e-8}), embedInfo, false),
 		modelRow(t, "id-rerank", "bge-reranker-v2-m3", vllmParams(t, "bge-reranker-v2-m3", "rgm-s-dsapp01-rerank-1", nil), map[string]any{"mode": "rerank"}, false),
+		// A deployment whose upstream only accepts the Responses API -- LiteLLM marks
+		// these model_info.mode: "responses", same convention as "rerank" above.
+		modelRow(t, "id-gpt5-pro", "gpt-5-pro", vllmParams(t, "gpt-5-pro", "ray-service-prod", nil), map[string]any{"mode": "responses"}, false),
 		modelRow(t, "id-blocked", "deepseek-v4-flash", vllmParams(t, "deepseek-v4-flash", "ray-service-prod", priced(4e-7, 2.4e-6)), chatInfo(), true),
 		// Defaults are a vLLM feature: an OpenAI-typed deployment must not get them.
 		modelRow(t, "id-openai", "gpt-x", map[string]any{
@@ -251,6 +254,17 @@ func TestBuildAIRModels_SkipsBlockedAndRerank(t *testing.T) {
 	f := buildFixture(t)
 	assert.Empty(t, f.modelsNamed("deepseek-v4-flash"), "blocked deployments must not serve traffic")
 	assert.Empty(t, f.modelsNamed("bge-reranker-v2-m3"), "/rerank is not supported")
+}
+
+// TestBuildAIRModels_ResponsesOnly verifies that model_info.mode: "responses" (LiteLLM's
+// marker for a deployment whose upstream only accepts the Responses API, same convention
+// as "mode": "rerank") is translated into ModelRPMConfig.ResponsesOnly -- without this,
+// UpdateDBModels never learns the flag for a DB-only model and every /v1/chat/completions
+// request to it is forwarded unconverted and rejected upstream.
+func TestBuildAIRModels_ResponsesOnly(t *testing.T) {
+	f := buildFixture(t)
+	assert.True(t, f.only(t, "gpt-5-pro").ResponsesOnly)
+	assert.False(t, f.only(t, "gpt-oss-120b").ResponsesOnly, "an ordinary chat-mode model must not be flagged")
 }
 
 func TestBuildAIRModels_SeveralDeploymentsPerName(t *testing.T) {

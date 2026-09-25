@@ -1604,6 +1604,83 @@ func TestUpdateDBModels_DBOnlyGlobalMapping(t *testing.T) {
 	assert.ElementsMatch(t, []string{"db-cred-1"}, creds)
 }
 
+// TestUpdateDBModels_DBModelResponsesOnly covers the primary "AIR instead of LiteLLM"
+// deployment shape: a model synced from the LiteLLM DB (model_info.mode: "responses",
+// translated by model_table.go into ModelRPMConfig.ResponsesOnly) must be converted to
+// Responses API shape exactly like a static config.yaml entry would be. Before this fix,
+// modelResponsesOnly/modelResponsesOnlyPerCred were only ever populated from static
+// models in New(), so a DB-only responses_only model was silently never converted and
+// every request to it 400d upstream.
+func TestUpdateDBModels_DBModelResponsesOnly(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+
+	m := New(logger, 100, nil)
+	staticCreds := []config.CredentialConfig{}
+	dbCreds := []config.CredentialConfig{{Name: "db-cred-1"}}
+
+	dbModels := []config.ModelRPMConfig{
+		{Name: "gpt-5-pro", Credential: "db-cred-1", RPM: 100, ResponsesOnly: true},
+		{Name: "gpt-4o-mini", Credential: "db-cred-1", RPM: 100},
+	}
+	m.UpdateDBModels(dbModels, staticCreds, dbCreds)
+
+	assert.True(t, m.IsResponsesOnlyForCredential("gpt-5-pro", "db-cred-1"),
+		"a DB-synced model_info.mode:responses model must be flagged responses_only")
+	assert.False(t, m.IsResponsesOnlyForCredential("gpt-4o-mini", "db-cred-1"))
+}
+
+// TestUpdateDBModels_ResponsesOnlyClearedWhenDBModelRemoved verifies that responses_only
+// for a DB-only model (no static config.yaml entry) disappears on the next sync cycle
+// once LiteLLM stops reporting model_info.mode: "responses" for it (e.g. the deployment
+// was reconfigured or removed) -- the flag must not linger from a stale sync.
+func TestUpdateDBModels_ResponsesOnlyClearedWhenDBModelRemoved(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+
+	m := New(logger, 100, nil)
+	staticCreds := []config.CredentialConfig{}
+	dbCreds := []config.CredentialConfig{{Name: "db-cred-1"}}
+
+	m.UpdateDBModels([]config.ModelRPMConfig{
+		{Name: "gpt-5-pro", Credential: "db-cred-1", RPM: 100, ResponsesOnly: true},
+	}, staticCreds, dbCreds)
+	assert.True(t, m.IsResponsesOnlyForCredential("gpt-5-pro", "db-cred-1"))
+
+	// Next sync cycle: LiteLLM no longer reports this model as responses_only (mode
+	// changed, or the model_table.go translation no longer sees mode: "responses").
+	m.UpdateDBModels([]config.ModelRPMConfig{
+		{Name: "gpt-5-pro", Credential: "db-cred-1", RPM: 100, ResponsesOnly: false},
+	}, staticCreds, dbCreds)
+	assert.False(t, m.IsResponsesOnlyForCredential("gpt-5-pro", "db-cred-1"),
+		"responses_only must be rebuilt fresh each sync, not accumulate from a stale one")
+}
+
+// TestUpdateDBModels_StaticResponsesOnlyNotLostAfterDBSync mirrors
+// TestUpdateDBModels_StaticRealNameNotOverriddenByDB for the responses_only flag: a
+// static config.yaml responses_only:true entry must survive DB sync cycles unrelated to
+// it, the same way staticModelRealNames does via its own static snapshot.
+func TestUpdateDBModels_StaticResponsesOnlyNotLostAfterDBSync(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelError}))
+
+	staticModels := []config.ModelRPMConfig{
+		{Name: "gpt-5-pro", Credential: "openai_main", ResponsesOnly: true, RPM: 100},
+	}
+	m := New(logger, 100, staticModels)
+	staticCreds := []config.CredentialConfig{{Name: "openai_main"}}
+	m.LoadModelsFromConfig(staticCreds)
+
+	dbCreds := []config.CredentialConfig{{Name: "db-cred-1"}}
+	allCreds := append(append([]config.CredentialConfig(nil), staticCreds...), dbCreds...)
+
+	// Unrelated DB models sync in, repeatedly -- must never touch the static entry.
+	for i := 0; i < 2; i++ {
+		m.UpdateDBModels([]config.ModelRPMConfig{
+			{Name: "unrelated-model", Credential: "db-cred-1", RPM: 5},
+		}, staticCreds, allCreds)
+		assert.True(t, m.IsResponsesOnlyForCredential("gpt-5-pro", "openai_main"),
+			"static responses_only must survive DB sync cycle %d", i)
+	}
+}
+
 // TestGetRealModelNameForCredential_SameAliasMultipleProviders verifies that the same model
 // alias (e.g. "claude-haiku-4.5") resolves to the correct real name for each credential,
 // even when Bedrock and OpenRouter both expose it under the same name but with different

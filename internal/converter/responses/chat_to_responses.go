@@ -121,8 +121,8 @@ func chatMessageToInputItem(role string, content interface{}) (map[string]interf
 }
 
 // chatContentPartsToInput converts Chat Completions message content parts
-// (text / image_url / input_audio) to Responses API input content parts
-// (input_text / input_image / input_audio). Mirrors convertContentParts
+// (text / image_url / input_audio / file) to Responses API input content parts
+// (input_text / input_image / input_audio / input_file). Mirrors convertContentParts
 // (request.go) in reverse.
 func chatContentPartsToInput(parts []interface{}) ([]interface{}, error) {
 	result := make([]interface{}, 0, len(parts))
@@ -161,6 +161,28 @@ func chatContentPartsToInput(parts []interface{}) ([]interface{}, error) {
 				entry["format"] = audio["format"]
 			}
 			result = append(result, entry)
+		case "file":
+			// Chat Completions' {"type":"file","file":{file_data|file_id,filename}} has a
+			// direct Responses API equivalent, input_file (see convertContentParts in
+			// request.go handling the reverse direction: it already treats "input_file"
+			// as a known, real Responses type, not an unrecognized one -- it just can't
+			// represent it back in Chat, hence the validation error there instead of a
+			// silent drop). Previously fell into default below and vanished silently: a
+			// PDF/document attachment disappeared with no client-visible error, and the
+			// model answered as if the file had never been sent.
+			if fileMap, ok := partMap["file"].(map[string]interface{}); ok {
+				entry := map[string]interface{}{"type": "input_file"}
+				if fileData, ok := fileMap["file_data"].(string); ok && fileData != "" {
+					entry["file_data"] = fileData
+				}
+				if fileID, ok := fileMap["file_id"].(string); ok && fileID != "" {
+					entry["file_id"] = fileID
+				}
+				if filename, ok := fileMap["filename"].(string); ok && filename != "" {
+					entry["filename"] = filename
+				}
+				result = append(result, entry)
+			}
 		default:
 			// Unknown content part type -- skip rather than forward something
 			// the Responses API would reject outright (mirrors
@@ -289,6 +311,39 @@ func chatToolContentToString(content interface{}) string {
 	case string:
 		return c
 	case nil:
+		return ""
+	case []interface{}:
+		// Chat Completions also allows a tool-role message's content as the same
+		// content-parts array shape used for user/assistant messages (typically just
+		// [{"type":"text","text":"..."}]). Without this case, that array fell into the
+		// json.Marshal fallback below and the model literally received the JSON source
+		// (e.g. [{"type":"text","text":"72°F"}]) as the tool's result text instead of
+		// the result itself. Concatenate every "text" part's text (parts are meant to
+		// be read in sequence, same interpretation as a message's own content parts);
+		// any non-text part (or an empty/unparseable array) falls back to marshaling
+		// the whole array as JSON, same as the pre-existing default case, rather than
+		// guessing at a part shape this function doesn't otherwise need to understand.
+		var text string
+		allText := len(c) > 0
+		for _, part := range c {
+			partMap, ok := part.(map[string]interface{})
+			if !ok {
+				allText = false
+				break
+			}
+			if t, _ := partMap["type"].(string); t != "text" {
+				allText = false
+				break
+			}
+			s, _ := partMap["text"].(string)
+			text += s
+		}
+		if allText {
+			return text
+		}
+		if b, err := json.Marshal(c); err == nil {
+			return string(b)
+		}
 		return ""
 	default:
 		if b, err := json.Marshal(c); err == nil {

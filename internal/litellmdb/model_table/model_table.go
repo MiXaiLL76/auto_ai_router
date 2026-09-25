@@ -396,6 +396,14 @@ func buildAIRModels(
 		rpmCfg := config.ModelRPMConfig{
 			Name:       modelName,
 			Credential: credName,
+			// A model whose upstream only accepts OpenAI's native Responses API (not
+			// Chat Completions) is marked model_info.mode: "responses" by LiteLLM, the
+			// same convention already used for "rerank" above. Without this, a
+			// responses_only model synced from the DB (the primary "AIR instead of
+			// LiteLLM" deployment shape) never gets its Chat->Responses conversion and
+			// every request to it 400s -- static config.yaml is the only place the
+			// flag could otherwise come from.
+			ResponsesOnly: model.Mode() == "responses",
 		}
 		if model.LlmParams.RPM != nil {
 			rpmCfg.RPM = *model.LlmParams.RPM
