@@ -132,7 +132,7 @@ Local counter (in-memory, <1 µs)
 | Latency per request         | +1 RTT to Redis                | ~0 (in-memory)                                 |
 | `/health` endpoint latency  | 1 pipeline RTT (batched)       | ~0 (in-memory)                                 |
 | Cross-instance accuracy     | Exact (atomic Lua scripts)     | ±`sync_interval` drift (default ±5 s)          |
-| Redis unavailability impact | Requests blocked until timeout | Continues with local counters                  |
+| Redis unavailability impact | Requests blocked until timeout | Keeps remote estimate one window, then local   |
 | Write load on Redis         | 1–2 commands per request       | Batched async; typically 1 pipeline per 100 ms |
 
 Use `hybrid: false` when you need hard rate-limit enforcement across replicas with zero tolerance for drift. Use `hybrid: true` when latency matters more than exact cross-replica synchronisation.
@@ -226,7 +226,7 @@ Retries are **not** performed on:
 
 **Idempotency of write operations:** Each rate-limit entry uses a UUID as the ZSET member. If a retry sends the same command after a silent success, Redis `ZADD` updates the score (timestamp) of the existing member rather than inserting a duplicate — so requests are never double-counted.
 
-> In hybrid mode, writes go through the async queue and are not retried individually. If a batch fails the affected entries are simply lost. The next sync cycle will re-read the true Redis total and correct the remote-count estimate.
+> In hybrid mode, writes go through the async queue and are not retried individually. If a batch fails the affected entries are simply lost, so the first totals read after an outage miss them. To avoid underestimating the other instances, the last good remote estimate of a key is kept while its sync fails and is used as a floor for the first totals after recovery, until it is one window (60 s) old. If Redis stays unavailable longer than that, the estimate is dropped (a warning is logged) and each instance counts locally, so together they can admit up to N times the limit until Redis recovers.
 
 ## Memory Sizing
 

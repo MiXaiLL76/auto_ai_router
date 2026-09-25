@@ -558,8 +558,17 @@ func (b *RedisBackend) batchCurrentStats(ctx context.Context, keys []string) map
 // Redis command error encountered, for callers that need connectivity
 // visibility (e.g. HybridBackend.doSync — see redis_todo.md item 3).
 func (b *RedisBackend) batchCurrentStatsErr(ctx context.Context, keys []string) (map[string][2]int, error) {
+	out, _, err := b.batchCurrentStatsFailed(ctx, keys)
+	return out, err
+}
+
+// batchCurrentStatsFailed is like batchCurrentStatsErr but also reports which
+// keys could not be read. Their entries in the returned map are zero, so
+// callers that must tell "no usage" from "unknown" (HybridBackend.applySync)
+// need this set.
+func (b *RedisBackend) batchCurrentStatsFailed(ctx context.Context, keys []string) (map[string][2]int, map[string]bool, error) {
 	if len(keys) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 	now := nowMS()
 	nowStr := fmt.Sprintf("%d", now)
@@ -585,22 +594,30 @@ func (b *RedisBackend) batchCurrentStatsErr(ctx context.Context, keys []string) 
 	results := b.client.DoMulti(cmdCtx, cmds...)
 
 	out := make(map[string][2]int, len(keys))
+	var failed map[string]bool
 	var firstErr error
 	for i, key := range keys {
 		var rpm, tpm int64
-		if v, err := results[i*2].AsInt64(); err == nil {
+		v, rpmErr := results[i*2].AsInt64()
+		if rpmErr == nil {
 			rpm = v
-		} else if firstErr == nil {
-			firstErr = err
 		}
-		if v, err := results[i*2+1].AsInt64(); err == nil {
+		v, tpmErr := results[i*2+1].AsInt64()
+		if tpmErr == nil {
 			tpm = v
-		} else if firstErr == nil {
-			firstErr = err
+		}
+		if err := errors.Join(rpmErr, tpmErr); err != nil {
+			if failed == nil {
+				failed = make(map[string]bool)
+			}
+			failed[key] = true
+			if firstErr == nil {
+				firstErr = err
+			}
 		}
 		out[key] = [2]int{int(rpm), int(tpm)}
 	}
-	return out, firstErr
+	return out, failed, firstErr
 }
 
 // setCurrentUsage is a no-op for the Redis backend: all replicas write to the
