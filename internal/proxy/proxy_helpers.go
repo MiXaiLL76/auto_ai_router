@@ -263,6 +263,7 @@ func redactRequestBodyForLogging(body []byte) (string, bool) {
 		return "", false
 	}
 	redactSensitiveFields(parsed)
+	redactToolDescriptions(parsed)
 	out, err := json.Marshal(parsed)
 	if err != nil {
 		return "", false
@@ -284,6 +285,47 @@ func redactSensitiveFields(parsed map[string]any) {
 	for key, child := range parsed {
 		if _, sensitive := sensitiveRequestBodyFields[key]; sensitive {
 			parsed[key] = redactFieldValueShape(child)
+		}
+	}
+}
+
+// redactToolDescriptions blanks every "description" string found anywhere inside
+// parsed["tools"], at any nesting depth. Unlike sensitiveRequestBodyFields above, this
+// is a name-based, recursive redaction specifically for "tools" -- deliberately unlike
+// redactSensitiveFields's position-only matching, because a tool's free-text
+// descriptions (the top-level tool description, and any "description" inside its
+// JSON-Schema parameters/input_schema, at any depth) are written entirely by the client
+// and can carry the same kind of confidential business detail as prompt content, even
+// though they're structurally a request parameter, not a top-level content field.
+// Covers every "tools" shape AIR accepts without needing shape-specific logic: OpenAI
+// Chat Completions (tools[].function.description), Anthropic native
+// (tools[].description, tools[].input_schema...), Responses API (tools[].description,
+// flat, no "function" wrapper), and Gemini/Vertex (tools[].function_declarations[].
+// description). A JSON-Schema property that happens to be *named* "description" (e.g. a
+// "create_ticket" tool's own "description" parameter) is unaffected -- only the
+// doc-comment key itself is blanked, not property names, which stay data shape like
+// everything else redactSensitiveFields already leaves alone.
+func redactToolDescriptions(parsed map[string]any) {
+	tools, ok := parsed["tools"]
+	if !ok {
+		return
+	}
+	redactDescriptionsRecursive(tools)
+}
+
+func redactDescriptionsRecursive(value any) {
+	switch v := value.(type) {
+	case map[string]any:
+		for key, child := range v {
+			if key == "description" {
+				v[key] = "[REDACTED]"
+				continue
+			}
+			redactDescriptionsRecursive(child)
+		}
+	case []any:
+		for _, item := range v {
+			redactDescriptionsRecursive(item)
 		}
 	}
 }
