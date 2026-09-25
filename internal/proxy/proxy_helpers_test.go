@@ -635,12 +635,15 @@ func TestRedactRequestBodyForLogging(t *testing.T) {
 		assert.Contains(t, out, `"prompt":"[REDACTED]"`)
 	})
 
-	t.Run("does not redact a tool schema property named like a sensitive field", func(t *testing.T) {
+	t.Run("does not redact a tool schema property named like a sensitive field, but does redact its description", func(t *testing.T) {
 		// A JSON-Schema "parameters" object is free to name a property
 		// "input", "messages", "system", etc. -- those are request shape,
 		// not conversation content, and redaction keying off the name
 		// alone (rather than its position in the body) must not mangle
-		// them.
+		// them. The property's own free-text "description", however, is
+		// client-authored content (can carry the same kind of confidential
+		// business detail as a prompt) and must be redacted regardless of
+		// where in the tool schema it appears.
 		body := []byte(`{
 			"model": "gpt-4o-mini",
 			"messages": [{"role": "user", "content": "what's the weather"}],
@@ -648,6 +651,7 @@ func TestRedactRequestBodyForLogging(t *testing.T) {
 				"type": "function",
 				"function": {
 					"name": "run_query",
+					"description": "Runs a query against the internal billing database",
 					"parameters": {
 						"type": "object",
 						"properties": {
@@ -675,12 +679,66 @@ func TestRedactRequestBodyForLogging(t *testing.T) {
 		assert.Equal(t, "run_query", fn["name"])
 		assert.NotEqual(t, "[REDACTED]", props["input"], "tool parameter named 'input' must survive untouched")
 		assert.NotEqual(t, "[REDACTED]", props["messages"], "tool parameter named 'messages' must survive untouched")
-		assert.Contains(t, out, "the query text", "tool parameter description must survive untouched")
+
+		assert.Equal(t, "[REDACTED]", fn["description"], "the tool's own description must be redacted")
+		inputProp := props["input"].(map[string]any)
+		assert.Equal(t, "[REDACTED]", inputProp["description"], "a nested JSON-Schema property description must be redacted too")
+		assert.NotContains(t, out, "the query text", "tool parameter description content must not survive")
+		assert.NotContains(t, out, "billing database", "tool description content must not survive")
 
 		messages, ok := parsed["messages"].([]any)
 		require.True(t, ok)
 		require.Len(t, messages, 1)
 		assert.Equal(t, "[REDACTED]", messages[0].(map[string]any)["content"], "actual conversation content must still be redacted")
+	})
+
+	t.Run("redacts anthropic-native tools shape too (description + input_schema)", func(t *testing.T) {
+		// Anthropic's native tool shape has no "function" wrapper and uses
+		// "input_schema" instead of "parameters" -- the redaction must be
+		// generic enough to catch "description" regardless of this
+		// shape difference, since it's not the OpenAI-specific
+		// tools[].function.description path exercised above.
+		body := []byte(`{
+			"model": "claude-opus-4-5",
+			"max_tokens": 512,
+			"messages": [{"role": "user", "content": "hi"}],
+			"tools": [{
+				"name": "internal_lookup",
+				"description": "Looks up a customer's account by internal ID",
+				"input_schema": {
+					"type": "object",
+					"properties": {
+						"account_id": {"type": "string", "description": "internal account identifier, confidential"}
+					}
+				}
+			}]
+		}`)
+
+		out, ok := redactRequestBodyForLogging(body)
+		require.True(t, ok)
+		assert.NotContains(t, out, "customer's account")
+		assert.NotContains(t, out, "confidential")
+
+		var parsed map[string]any
+		require.NoError(t, json.Unmarshal([]byte(out), &parsed))
+		tool := parsed["tools"].([]any)[0].(map[string]any)
+		assert.Equal(t, "internal_lookup", tool["name"], "tool name must survive untouched")
+		assert.Equal(t, "[REDACTED]", tool["description"])
+	})
+
+	t.Run("leaves a top-level description field outside tools untouched", func(t *testing.T) {
+		// redactToolDescriptions only walks parsed["tools"] -- a "description"
+		// key anywhere else in the body (however unlikely in AIR's accepted
+		// shapes) is not this function's concern and must not be touched.
+		body := []byte(`{
+			"model": "gpt-4o-mini",
+			"messages": [{"role": "user", "content": "hi"}],
+			"description": "not a tool, should survive"
+		}`)
+
+		out, ok := redactRequestBodyForLogging(body)
+		require.True(t, ok)
+		assert.Contains(t, out, "not a tool, should survive")
 	})
 
 	t.Run("fails closed on non-JSON body", func(t *testing.T) {
