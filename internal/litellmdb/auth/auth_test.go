@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"testing"
 	"time"
@@ -435,6 +436,42 @@ func TestNewAuthenticator(t *testing.T) {
 	assert.NotNil(t, auth)
 	assert.Equal(t, cache, auth.cache)
 	assert.Equal(t, logger, auth.logger)
+}
+
+func TestAuthenticator_CostMarginConfigs(t *testing.T) {
+	margin := func(pct float64) []byte {
+		return []byte(fmt.Sprintf(`{"cost_margin_config": {"global": %v}}`, pct))
+	}
+	key, user, team, org := margin(0.1), margin(0.2), margin(0.3), margin(0.4)
+
+	tests := []struct {
+		name string
+		info models.TokenInfo
+		want []float64
+	}{
+		{"personal key", models.TokenInfo{UserID: "u"}, []float64{0.1, 0.2}},
+		{"team key of a user", models.TokenInfo{UserID: "u", TeamID: "t", OrganizationID: "o"}, []float64{0.1, 0.3, 0.4}},
+		{"team key without organization", models.TokenInfo{TeamID: "t"}, []float64{0.1, 0.3, 0.4}},
+		{"organization key of a user", models.TokenInfo{UserID: "u", OrganizationID: "o"}, []float64{0.1, 0.4}},
+	}
+	auth := NewAuthenticator(nil, nil, slog.Default())
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			configs := auth.costMarginConfigs(&tt.info, key, user, team, org)
+			var got []float64
+			for _, cfg := range configs {
+				got = append(got, cfg["global"].Percentage)
+			}
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestAuthenticator_CostMarginConfigs_SkipsMissingEntities(t *testing.T) {
+	auth := NewAuthenticator(nil, nil, slog.Default())
+	info := &models.TokenInfo{TeamID: "t"}
+	configs := auth.costMarginConfigs(info, []byte(`{}`), nil, []byte(`{"cost_margin_config": {"global": 0.3}}`), nil)
+	assert.Equal(t, []models.CostMarginConfig{{"global": {Percentage: 0.3}}}, configs)
 }
 
 func TestAuthenticator_ValidateToken_EmptyToken(t *testing.T) {

@@ -325,6 +325,11 @@ func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
 			return fmt.Errorf("cost calculation failed for %q", priceModelID)
 		}
 	}
+	// LiteLLM bills a fixed margin only on priced responses; AIR also writes
+	// $0 audit rows for failed requests, which must not be charged the fee.
+	if tokenCosts.TotalCost > 0 || status == "success" {
+		logCtx.applyCostMargin(tokenCosts)
+	}
 	cost := tokenCosts.TotalCost
 	p.logger.DebugContext(logSpendCtx, "Calculated cost for model",
 		"model_name", priceModelID,

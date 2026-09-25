@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // ==================== DefaultConfig Tests ====================
@@ -342,6 +343,76 @@ func TestTokenInfo_IsModelAllowed_ResolvedEmptyTeamScopeStaysUnrestricted(t *tes
 	}
 
 	assert.True(t, token.IsModelAllowed("public/chat"))
+}
+
+// ==================== Cost Margin Tests ====================
+
+func TestParseCostMarginConfig(t *testing.T) {
+	cfg, err := ParseCostMarginConfig([]byte(`{"global": 0.05, "anthropic": {"percentage": 0.08, "fixed_amount": 0.001}}`))
+	require.NoError(t, err)
+	assert.Equal(t, CostMarginConfig{
+		"global":    {Percentage: 0.05},
+		"anthropic": {Percentage: 0.08, FixedAmount: 0.001},
+	}, cfg)
+
+	cfg, err = ParseCostMarginConfig(nil)
+	assert.NoError(t, err)
+	assert.Nil(t, cfg)
+}
+
+func TestParseCostMarginConfig_IgnoresInvalidEntries(t *testing.T) {
+	cfg, err := ParseCostMarginConfig([]byte(`{"openai": -0.1, "gemini": "10%", "global": 0.05}`))
+	assert.Error(t, err)
+	assert.Equal(t, CostMarginConfig{"global": {Percentage: 0.05}}, cfg)
+
+	_, err = ParseCostMarginConfig([]byte(`[0.1]`))
+	assert.Error(t, err)
+}
+
+func TestTokenInfo_CostMargin(t *testing.T) {
+	token := &TokenInfo{CostMarginConfigs: []CostMarginConfig{
+		{"anthropic": {FixedAmount: 0.001}},                         // key
+		{"openai": {Percentage: 0.2}},                               // team
+		{"global": {Percentage: 0.05}, "openai": {Percentage: 0.1}}, // organization
+	}}
+
+	tests := []struct {
+		name     string
+		provider string
+		want     CostMargin
+	}{
+		{"key provider", "anthropic", CostMargin{FixedAmount: 0.001}},
+		{"team beats organization provider", "openai", CostMargin{Percentage: 0.2}},
+		{"falls through to organization global", "gemini", CostMargin{Percentage: 0.05}},
+		{"unknown provider uses global", "", CostMargin{Percentage: 0.05}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := token.CostMargin(tt.provider)
+			assert.True(t, ok)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestTokenInfo_CostMargin_GlobalZeroOverrides(t *testing.T) {
+	token := &TokenInfo{CostMarginConfigs: []CostMarginConfig{
+		{"global": {}},
+		{"openai": {Percentage: 0.2}},
+	}}
+
+	got, ok := token.CostMargin("openai")
+	assert.True(t, ok)
+	assert.Equal(t, CostMargin{}, got)
+}
+
+func TestTokenInfo_CostMargin_None(t *testing.T) {
+	_, ok := (&TokenInfo{}).CostMargin("openai")
+	assert.False(t, ok)
+
+	var token *TokenInfo
+	_, ok = token.CostMargin("openai")
+	assert.False(t, ok)
 }
 
 // ==================== Budget Check Helper Tests ====================

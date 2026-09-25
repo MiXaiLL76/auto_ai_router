@@ -152,7 +152,12 @@ func (p *Proxy) estimateRequestCost(logCtx *RequestLogContext, publicModelID, mo
 		PromptTokens:     promptTokens,
 		CompletionTokens: p.estimateCompletionTokens(body),
 	}
-	return modelPrice.CalculateCost(usage), true
+	costs := modelPrice.CalculateCosts(usage)
+	if costs == nil {
+		return 0, false
+	}
+	logCtx.applyCostMargin(costs)
+	return costs.TotalCost, true
 }
 
 func (p *Proxy) spendTrackingEnabled() bool {
