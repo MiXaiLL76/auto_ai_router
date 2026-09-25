@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
+	"github.com/mixaill76/auto_ai_router/internal/converter/openai"
 )
 
 // ResponsesMetadata holds Responses-API-only fields that are extracted from
@@ -421,12 +422,13 @@ func PrepareCodexPassthrough(body []byte, prevEntryHandled bool) []byte {
 		}
 	}
 
-	// 4.5. Drop reasoning.effort="none" for native passthrough.
-	// OpenAI Responses API rejects reasoning.effort on non-reasoning models such as
-	// gpt-4o-mini, while "none" is semantically equivalent to omitting reasoning.
+	// 4.5. Drop reasoning.effort="none" for native passthrough: non-reasoning
+	// models such as gpt-4o-mini reject reasoning.effort. Models that take "none"
+	// keep it, as omitting effort there means the default effort.
 	if reasoningVal, ok := raw["reasoning"]; ok {
 		if reasoningMap, ok := reasoningVal.(map[string]interface{}); ok {
-			if effort, ok := reasoningMap["effort"].(string); ok && effort == "none" {
+			model, _ := raw["model"].(string)
+			if effort, ok := reasoningMap["effort"].(string); ok && effort == "none" && !openai.SupportsReasoningEffortNone(model) {
 				delete(raw, "reasoning")
 			}
 		}
@@ -1261,7 +1263,7 @@ func convertToolChoice(raw map[string]interface{}) error {
 }
 
 // convertReasoning extracts reasoning.effort and sets it as top-level reasoning_effort.
-// Skips "none" effort (equivalent to no reasoning) and empty values.
+// Skips empty values, and "none" unless openai.SupportsReasoningEffortNone.
 // Note: reasoning.generate_summary is a Responses-API-only field with no Chat Completions
 // equivalent — it is intentionally not forwarded.
 func convertReasoning(raw map[string]interface{}) {
@@ -1273,7 +1275,12 @@ func convertReasoning(raw map[string]interface{}) {
 	if !ok {
 		return
 	}
-	if effort, ok := reasoningMap["effort"].(string); ok && effort != "" && effort != "none" {
+	effort, _ := reasoningMap["effort"].(string)
+	if effort == "" {
+		return
+	}
+	model, _ := raw["model"].(string)
+	if effort != "none" || openai.SupportsReasoningEffortNone(model) {
 		raw["reasoning_effort"] = effort
 	}
 }

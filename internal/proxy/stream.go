@@ -191,6 +191,7 @@ func (o *openAIStreamUsageExtractor) extractChatCompletionUsage(payload []byte) 
 				} `json:"cache_creation_token_details,omitempty"`
 				AudioTokens int `json:"audio_tokens,omitempty"`
 				ImageTokens int `json:"image_tokens,omitempty"`
+				converterutil.CachingTokensExtension
 			} `json:"prompt_tokens_details,omitempty"`
 			CompletionTokensDetails struct {
 				AcceptedPredictionTokens int `json:"accepted_prediction_tokens,omitempty"`
@@ -220,9 +221,13 @@ func (o *openAIStreamUsageExtractor) extractChatCompletionUsage(payload []byte) 
 	if cacheCreationTokens == 0 {
 		cacheCreationTokens = data.Usage.PromptTokensDetails.CacheWriteTokens
 	}
+	cacheCreation5mTokens := data.Usage.PromptTokensDetails.CacheCreationTokenDetails.Ephemeral5mInputTokens
+	cacheCreation1hTokens := data.Usage.PromptTokensDetails.CacheCreationTokenDetails.Ephemeral1hInputTokens
 	if cacheCreationTokens == 0 {
-		cacheCreationTokens = data.Usage.PromptTokensDetails.CacheCreationTokenDetails.Ephemeral5mInputTokens +
-			data.Usage.PromptTokensDetails.CacheCreationTokenDetails.Ephemeral1hInputTokens
+		cacheCreationTokens = cacheCreation5mTokens + cacheCreation1hTokens
+	}
+	if cacheCreationTokens == 0 {
+		cacheCreationTokens, cacheCreation5mTokens, cacheCreation1hTokens = data.Usage.PromptTokensDetails.CachingWrite()
 	}
 	cachedTokens, cachedAudioTokens := converterutil.NormalizeCachedAudioBreakdown(
 		data.Usage.PromptTokensDetails.CachedTokens,
@@ -235,8 +240,8 @@ func (o *openAIStreamUsageExtractor) extractChatCompletionUsage(payload []byte) 
 		CachedTokens:          cachedTokens,
 		CachedAudioTokens:     cachedAudioTokens,
 		CacheCreationTokens:   cacheCreationTokens,
-		CacheCreation5mTokens: data.Usage.PromptTokensDetails.CacheCreationTokenDetails.Ephemeral5mInputTokens,
-		CacheCreation1hTokens: data.Usage.PromptTokensDetails.CacheCreationTokenDetails.Ephemeral1hInputTokens,
+		CacheCreation5mTokens: cacheCreation5mTokens,
+		CacheCreation1hTokens: cacheCreation1hTokens,
 		AudioInputTokens: normalizeStreamAudioInput(
 			data.Usage.PromptTokensDetails.AudioTokens,
 			cachedTokens,

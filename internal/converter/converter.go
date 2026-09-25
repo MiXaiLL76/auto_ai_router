@@ -594,6 +594,7 @@ type tokenUsageShapeUsage struct {
 		AudioTokens int `json:"audio_tokens,omitempty"`
 		TextTokens  int `json:"text_tokens,omitempty"`
 		ImageTokens int `json:"image_tokens,omitempty"`
+		converterutil.CachingTokensExtension
 	} `json:"prompt_tokens_details,omitempty"`
 	CompletionTokensDetails struct {
 		AcceptedPredictionTokens int `json:"accepted_prediction_tokens,omitempty"`
@@ -735,6 +736,9 @@ func tokenUsageFromShape(resp *tokenUsageResponseShape, opts TokenUsageExtractio
 		cacheCreationTokens = resp.Usage.PromptTokensDetails.CacheWriteTokens
 	}
 	if cacheCreationTokens == 0 && cacheCreation5mTokens == 0 && cacheCreation1hTokens == 0 {
+		cacheCreationTokens, cacheCreation5mTokens, cacheCreation1hTokens = resp.Usage.PromptTokensDetails.CachingWrite()
+	}
+	if cacheCreationTokens == 0 && cacheCreation5mTokens == 0 && cacheCreation1hTokens == 0 {
 		cacheCreationTokens = resp.Usage.InputTokensDetails.CacheCreationTokens
 		cacheCreation5mTokens = resp.Usage.InputTokensDetails.CacheCreationTokenDetails.Ephemeral5mInputTokens
 		cacheCreation1hTokens = resp.Usage.InputTokensDetails.CacheCreationTokenDetails.Ephemeral1hInputTokens
@@ -873,6 +877,10 @@ type extractedChoiceWithAnnotations struct {
 	Message struct {
 		Annotations []extractedAnnotation `json:"annotations,omitempty"`
 	} `json:"message"`
+	// Streaming chunks carry annotations in delta.
+	Delta struct {
+		Annotations []extractedAnnotation `json:"annotations,omitempty"`
+	} `json:"delta"`
 }
 
 type extractedAnnotation struct {
@@ -918,8 +926,14 @@ func webSearchRequestsFromExtractedResponse(
 	if hasWebSearchResults(searchResults) {
 		return 1
 	}
+	// A citation proves a search but not how many: one per response.
 	for _, choice := range choices {
 		for _, annotation := range choice.Message.Annotations {
+			if annotation.Type == "url_citation" {
+				return 1
+			}
+		}
+		for _, annotation := range choice.Delta.Annotations {
 			if annotation.Type == "url_citation" {
 				return 1
 			}
