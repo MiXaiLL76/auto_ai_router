@@ -199,6 +199,10 @@ type RedisBackend struct {
 	keyPrefix      string
 	keyTTL         int           // seconds
 	commandTimeout time.Duration // per-command deadline cap
+	// keepKeysOnDelete is set for counters shared with other deployments:
+	// deleteKey leaves them to expire via keyTTL instead of wiping usage
+	// that other deployments recorded.
+	keepKeysOnDelete bool
 }
 
 // NewValkeyClient creates a valkey.Client from RedisConfig.
@@ -261,6 +265,21 @@ func NewRedisBackendFromClientWithTTL(client valkey.Client, keyPrefix string, ke
 
 // Client returns the underlying valkey.Client so it can be shared with other components.
 func (b *RedisBackend) Client() valkey.Client { return b.client }
+
+// WithSharedKeyPrefix returns a backend for counters shared with other
+// deployments: it reuses b's client, key TTL and command timeout, namespaces
+// its keys under prefix, and never deletes keys (removing a model in one
+// deployment must not wipe usage recorded by the others; idle keys expire via
+// the key TTL). The copy does not own the client: close only the original.
+func (b *RedisBackend) WithSharedKeyPrefix(prefix string) *RedisBackend {
+	c := *b
+	c.keyPrefix = prefix
+	c.keepKeysOnDelete = true
+	return &c
+}
+
+// KeyPrefix returns the namespace prepended to every key of this backend.
+func (b *RedisBackend) KeyPrefix() string { return b.keyPrefix }
 
 // Close shuts down the underlying Valkey client.
 func (b *RedisBackend) Close() { b.client.Close() }
@@ -589,6 +608,9 @@ func (b *RedisBackend) batchCurrentStatsErr(ctx context.Context, keys []string) 
 func (b *RedisBackend) setCurrentUsage(_ context.Context, _ string, _, _ int) {}
 
 func (b *RedisBackend) deleteKey(ctx context.Context, key string) {
+	if b.keepKeysOnDelete {
+		return
+	}
 	for _, redisKey := range []string{b.rpmKey(key), b.tpmKey(key)} {
 		_, _ = b.doWithRetry(ctx, func(ctx context.Context) (int64, error) {
 			return 0, b.client.Do(ctx, b.client.B().Del().Key(redisKey).Build()).Error()

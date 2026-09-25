@@ -129,6 +129,45 @@ func TestCmdCtx_ParentDeadlineTighter_ReturnsParent(t *testing.T) {
 
 // ── key helpers ─────────────────────────────────────────────────────────────
 
+func TestRedisBackend_WithSharedKeyPrefix(t *testing.T) {
+	b := &RedisBackend{keyPrefix: "ru01", keyTTL: 60, commandTimeout: 2 * time.Second}
+	c := b.WithSharedKeyPrefix("air-balancer:")
+
+	assert.Equal(t, "air-balancer:rpm:{c:mycred}:m:mycred:mymodel", c.rpmKey("m:mycred:mymodel"))
+	assert.Equal(t, "air-balancer:", c.KeyPrefix())
+	assert.Equal(t, 60, c.keyTTL)
+	assert.Equal(t, 2*time.Second, c.commandTimeout)
+	// The original backend keeps its namespace and still deletes keys.
+	assert.Equal(t, "ru01rpm:{c:mycred}:m:mycred:mymodel", b.rpmKey("m:mycred:mymodel"))
+	assert.False(t, b.keepKeysOnDelete)
+	// Shared counters are never deleted: with a nil client a real DEL would panic.
+	assert.NotPanics(t, func() { c.deleteKey(context.Background(), "m:mycred:mymodel") })
+}
+
+// Two deployments with different key_prefix but the same balancer prefix must
+// see each other's traffic for the same credential/model, and removing the
+// model in one deployment must not wipe the other's usage.
+func TestRedisBackend_Integration_WithSharedKeyPrefix(t *testing.T) {
+	shared := fmt.Sprintf("test:balancer:%d:", time.Now().UnixNano())
+	deployA := redisBackendForTest(t, "test:ru01:").WithSharedKeyPrefix(shared)
+	deployB := redisBackendForTest(t, "test:ru02:").WithSharedKeyPrefix(shared)
+	ctx := context.Background()
+	key := "m:grant:claude-opus-4.6"
+	cleanup := redisBackendForTest(t, shared)
+	t.Cleanup(func() { cleanup.deleteKey(ctx, key) })
+
+	require.True(t, deployA.tryAllowRPM(ctx, key, 4))
+	require.True(t, deployA.tryAllowRPM(ctx, key, 4))
+	assert.Equal(t, 2, deployB.currentRPM(ctx, key))
+
+	require.True(t, deployB.tryAllowRPM(ctx, key, 4))
+	require.True(t, deployB.tryAllowRPM(ctx, key, 4))
+	assert.False(t, deployB.tryAllowRPM(ctx, key, 4), "joint limit of 4 must be reached across both deployments")
+
+	deployA.deleteKey(ctx, key)
+	assert.Equal(t, 4, deployB.currentRPM(ctx, key), "model removal in A must not reset B's usage")
+}
+
 func TestRedisBackend_KeyFunctions(t *testing.T) {
 	b := &RedisBackend{keyPrefix: "rl:"}
 	// Credential key: wrapped in hash tag for slot consistency.

@@ -149,6 +149,26 @@ func TestInitializeBalancerReturnsHybridBackendForCallerToClose(t *testing.T) {
 	})
 }
 
+func TestBalancerRedisBackend(t *testing.T) {
+	own := ratelimit.NewRedisBackendFromClient(nil, "ru01")
+
+	t.Run("default balancer prefix (equal to key prefix) keeps the deployment backend", func(t *testing.T) {
+		got := balancerRedisBackend(config.RedisConfig{KeyPrefix: "ru01", BalancerKeyPrefix: "ru01"}, own)
+		assert.Same(t, own, got)
+	})
+
+	t.Run("empty balancer prefix in a code-built config keeps the deployment backend", func(t *testing.T) {
+		got := balancerRedisBackend(config.RedisConfig{KeyPrefix: "ru01"}, own)
+		assert.Same(t, own, got)
+	})
+
+	t.Run("balancer prefix namespaces only the limiter backend", func(t *testing.T) {
+		got := balancerRedisBackend(config.RedisConfig{KeyPrefix: "ru01", BalancerKeyPrefix: "air-balancer:"}, own)
+		assert.Equal(t, "air-balancer:", got.KeyPrefix())
+		assert.Equal(t, "ru01", own.KeyPrefix(), "the deployment's own backend (budget/auth/response store) must keep its prefix")
+	})
+}
+
 // TestConnectRedisWithRetry_BoundedByOverallDeadline is a regression test for
 // the ~75s worst-case startup block found in review: connectRedisWithRetry
 // must give up and fall back to nil well before its full

@@ -32,6 +32,7 @@ redis:
     - "redis:6379"            # host:port of your Redis/Valkey instance
   password: "os.environ/REDIS_PASSWORD"   # optional; supports env variable syntax
   key_prefix: "rl:"           # namespace prefix for all keys (default: "rl:")
+  # balancer_key_prefix: "air-balancer:"  # optional, default = key_prefix; shared RPM/TPM counters, must differ from every key_prefix
   force_single_client: true   # set false only for Redis Cluster
   connect_timeout: 5s
   conn_write_timeout: 10s
@@ -43,25 +44,26 @@ redis:
 
 ### All Parameters
 
-| Parameter             | Type     | Default | Description                                           |
-| --------------------- | -------- | ------- | ----------------------------------------------------- |
-| `enabled`             | bool     | `false` | Enable Redis backend                                  |
-| `addresses`           | []string | —       | One or more `host:port` addresses                     |
-| `username`            | string   | —       | Redis ACL username (optional)                         |
-| `password`            | string   | —       | Redis AUTH password (optional)                        |
-| `select_db`           | int      | `0`     | Redis database index                                  |
-| `key_prefix`          | string   | `"rl:"` | Prefix prepended to every key                         |
-| `tls_enabled`         | bool     | `false` | Enable TLS                                            |
-| `connect_timeout`     | duration | `5s`    | TCP dial timeout                                      |
-| `conn_write_timeout`  | duration | `10s`   | Per-connection write/pipeline timeout                 |
-| `force_single_client` | bool     | `false` | Skip cluster detection (use for single-node)          |
-| `command_timeout`     | duration | `3s`    | Maximum duration for a single Redis command           |
-| `key_ttl`             | int      | `120`   | Rate-limit key TTL in seconds                         |
-| `hybrid`              | bool     | `false` | Enable hybrid mode (see below)                        |
-| `sync_interval`       | duration | `5s`    | Hybrid only: interval between Redis sync pulls        |
-| `min_idle_conns`      | int      | `10`    | Minimum idle connections (reserved for future use)    |
-| `max_idle_conns`      | int      | `100`   | Maximum idle connections (reserved for future use)    |
-| `max_conn_lifetime`   | duration | `30m`   | Maximum connection lifetime (reserved for future use) |
+| Parameter             | Type     | Default      | Description                                           |
+| --------------------- | -------- | ------------ | ----------------------------------------------------- |
+| `enabled`             | bool     | `false`      | Enable Redis backend                                  |
+| `addresses`           | []string | —            | One or more `host:port` addresses                     |
+| `username`            | string   | —            | Redis ACL username (optional)                         |
+| `password`            | string   | —            | Redis AUTH password (optional)                        |
+| `select_db`           | int      | `0`          | Redis database index                                  |
+| `key_prefix`          | string   | `"rl:"`      | Prefix prepended to every key                         |
+| `balancer_key_prefix` | string   | `key_prefix` | Prefix for credential/model RPM/TPM counters only     |
+| `tls_enabled`         | bool     | `false`      | Enable TLS                                            |
+| `connect_timeout`     | duration | `5s`         | TCP dial timeout                                      |
+| `conn_write_timeout`  | duration | `10s`        | Per-connection write/pipeline timeout                 |
+| `force_single_client` | bool     | `false`      | Skip cluster detection (use for single-node)          |
+| `command_timeout`     | duration | `3s`         | Maximum duration for a single Redis command           |
+| `key_ttl`             | int      | `120`        | Rate-limit key TTL in seconds                         |
+| `hybrid`              | bool     | `false`      | Enable hybrid mode (see below)                        |
+| `sync_interval`       | duration | `5s`         | Hybrid only: interval between Redis sync pulls        |
+| `min_idle_conns`      | int      | `10`         | Minimum idle connections (reserved for future use)    |
+| `max_idle_conns`      | int      | `100`        | Maximum idle connections (reserved for future use)    |
+| `max_conn_lifetime`   | duration | `30m`        | Maximum connection lifetime (reserved for future use) |
 
 All string values support the `os.environ/VAR_NAME` syntax for environment variable substitution.
 
@@ -149,7 +151,39 @@ All keys are namespaced under `key_prefix` (default `rl:`):
 
 The `{c:credname}` portion is a Redis **hash tag** — it ensures all four keys for a given credential (`cred rpm`, `cred tpm`, `model rpm`, `model tpm`) land in the same hash slot. This is required by valkey-go's multi-key `EVAL` slot validation, which is enforced even on single-node deployments.
 
+The four `rpm:`/`tpm:` keys above use `balancer_key_prefix`, which defaults to `key_prefix` (so nothing changes unless it is set). Response, budget and auth keys always stay under `key_prefix`.
+
 Rate-limit keys expire after `key_ttl` seconds of inactivity (default **120 seconds**) via Redis `EXPIRE`. Response keys use the TTL from the `ttl` field of the request, or persist indefinitely when `ttl: 0`.
+
+### Sharing credential limits between deployments
+
+A credential's RPM/TPM limit usually mirrors the provider's quota for that account. If several router deployments (each with its own `key_prefix`) call the same upstream credentials, each one counts only its own traffic, and together they can exceed the provider quota. Give them the same `balancer_key_prefix` so the credential/model counters are shared, while each deployment keeps its budget, auth and response-store keys isolated:
+
+```yaml
+# deployment A
+redis:
+  key_prefix: "ru01"
+  balancer_key_prefix: "air-balancer:"
+
+# deployment B
+redis:
+  key_prefix: "ru02"
+  balancer_key_prefix: "air-balancer:"
+```
+
+Requirements for every deployment that shares the prefix:
+
+- the same Redis/Valkey instance and the same `select_db`;
+- a `balancer_key_prefix` that differs from the `key_prefix` of every one of them. Each deployment decides on its own whether its counters are shared: only when its `balancer_key_prefix` differs from its own `key_prefix`. If deployment B set `balancer_key_prefix` to A's `key_prefix` (say `ru01`), A would stay in the normal mode and delete the shared counters (`DEL`) whenever a model is removed on A;
+- credentials with the same name point to the same upstream account;
+- the same `rpm`/`tpm` for a shared credential/model: each deployment compares the joint counter with its own limit, so the highest configured limit effectively wins;
+- `key_ttl` of at least 60 seconds (the counter window).
+
+When `balancer_key_prefix` differs from `key_prefix`, the counters are treated as shared and are never deleted by the router: when a model disappears from one deployment, its keys are left to expire via `key_ttl`, so usage recorded by the other deployments is kept. While a deployment is being switched to a new `balancer_key_prefix`, old and new pods count separately until the rollout finishes.
+
+With a shared prefix, the credential/model RPM/TPM gauges (`auto_ai_router_credential_rpm_current`, `auto_ai_router_model_rpm_current`, …) and `/health` report the joint usage of all deployments sharing it, not the usage of the deployment that exports them. Do not sum these gauges across deployments.
+
+Changing `key_prefix` itself is not a substitute: it would also merge budget reservations, key-level limits and stored responses.
 
 ## How Rate Limiting Works in Redis
 

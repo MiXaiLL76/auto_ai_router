@@ -278,6 +278,7 @@ redis:
   # password: "os.environ/REDIS_PASSWORD"
   # select_db: 0                         # Redis database index (default: 0)
   key_prefix: "rl:"                      # Prefix for all keys (default: "rl:")
+  # balancer_key_prefix: "air-balancer:" # Shared prefix for credential/model RPM/TPM counters across deployments (default: key_prefix)
   # tls_enabled: false                   # Enable TLS (default: false)
   connect_timeout: 5s                    # TCP connect timeout (default: 5s)
   conn_write_timeout: 10s               # Write/pipeline timeout (default: 10s)
