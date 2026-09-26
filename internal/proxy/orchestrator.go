@@ -608,6 +608,7 @@ func (p *Proxy) authenticateRequest(
 		logCtx.Token = trusted.rawToken
 		logCtx.TokenInfo = trusted.tokenInfo
 		logCtx.Scope = scopeContextFromTokenInfo(trusted.tokenInfo)
+		p.noteRequestKey(r.Context(), logCtx.TokenInfo)
 		return true
 	}
 
@@ -641,6 +642,7 @@ func (p *Proxy) authenticateRequest(
 			IsMasterKey: true,
 		}
 		logCtx.Scope = scope.AdminContext()
+		p.noteRequestKey(r.Context(), logCtx.TokenInfo)
 		return true
 	}
 
@@ -668,6 +670,7 @@ func (p *Proxy) authenticateRequest(
 		"team_id", tokenInfo.TeamID,
 	)
 	logCtx.Scope = scopeContextFromTokenInfo(tokenInfo)
+	p.noteRequestKey(r.Context(), tokenInfo)
 	return true
 }
 

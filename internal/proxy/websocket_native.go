@@ -370,6 +370,7 @@ func (s *nativeWSSession) prepare(event map[string]json.RawMessage, historyToken
 	}
 	if !ok {
 		s.proxy.reconcileBudgetAndRateLimits(logCtx, 0)
+		s.proxy.observeKeyRequest(logCtx.TokenInfo, recorder.statusCode)
 		s.sendHTTPError(recorder)
 		return nil, nil, false
 	}
@@ -586,6 +587,7 @@ func (s *nativeWSSession) finish(turn *nativeWSTurn, event []byte, outcome strin
 	}
 	chunk := sseDataFrame(event)
 	s.proxy.finalizeStreamingLog(turn.log, turn.accumulator.TokenCount(), chunk, "openai", status, false)
+	s.proxy.observeKeyRequest(turn.log.TokenInfo, status)
 	if turn.log.Credential != nil && turn.log.TokenUsage != nil {
 		tokens := turn.log.TokenUsage.PromptTokens + turn.log.TokenUsage.CompletionTokens
 		s.proxy.rateLimiter.ConsumeTokens(turn.log.Credential.Name, tokens)
