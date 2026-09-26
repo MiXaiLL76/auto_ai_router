@@ -47,11 +47,17 @@ func AnthropicToOpenAI(anthropicBody []byte, model string) ([]byte, error) {
 				webSearchRequests++
 			}
 		case "tool_use":
+			if block.Input == nil {
+				// Truncated mid-call (usually max_tokens): Anthropic sent the tool_use
+				// block header before the JSON args finished, so there's no real input
+				// to report. Don't fabricate a {} placeholder call -- same rule as every
+				// other provider route (see vertex/response.go): let finish_reason carry
+				// the truncation signal instead of synthesizing data the model never sent.
+				continue
+			}
 			argsJSON := "{}"
-			if block.Input != nil {
-				if data, err := json.Marshal(block.Input); err == nil {
-					argsJSON = string(data)
-				}
+			if data, err := json.Marshal(block.Input); err == nil {
+				argsJSON = string(data)
 			}
 			toolCalls = append(toolCalls, openai.OpenAIToolCall{
 				ID:   block.ID,
@@ -65,6 +71,16 @@ func AnthropicToOpenAI(anthropicBody []byte, model string) ([]byte, error) {
 	}
 
 	finishReason := mapAnthropicStopReason(anthropicResp.StopReason)
+	if finishReason == "tool_calls" && len(toolCalls) == 0 {
+		// A canonical Anthropic response never reaches here (stop_reason "tool_use"
+		// implies at least one complete tool_use block), but a proxy/aggregator
+		// credential (CometAPI, ProMan, a non-standard Bedrock front) can send
+		// stop_reason "tool_use" while every tool_use block it forwarded was
+		// truncated (input nil) and got dropped above. Don't tell the client to
+		// expect tool calls that aren't there -- an agent loop keyed on
+		// finish_reason == "tool_calls" would spin or crash on a nil/empty list.
+		finishReason = "length"
+	}
 
 	// join multiple text blocks with double newline separator
 	textContent := ""
