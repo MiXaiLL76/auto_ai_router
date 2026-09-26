@@ -125,6 +125,16 @@ models:
     rpm: 100
     tpm: 50000
 
+  # vLLM: request-body defaults for /chat/completions (vllm credentials only). A key the
+  # client sent wins; objects are merged key by key. See docs/providers/vllm.md.
+  # - name: "unlimited-ocr"
+  #   credential: vllm_ocr
+  #   rpm: -1
+  #   tpm: -1
+  #   default_params:
+  #     skip_special_tokens: false
+  #     vllm_xargs: {ngram_size: 35, window_size: 128}
+
   # Comet API Claude aliases for public model names.
   - name: "anthropic/claude-haiku-4.5"
     model: "claude-haiku-4-5-20251001"

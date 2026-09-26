@@ -290,8 +290,9 @@ func (p *Proxy) orchestrateRequest(
 }
 
 // prepareRequestForCredential builds the outbound request for a credential and, for
-// a vLLM deployment, fills in the deployment's default request params (LiteLLM
-// litellm_params such as chat_template_kwargs or temperature). Every dispatch path
+// a vLLM deployment, lifts a literal extra_body to the top level and fills in the
+// deployment's default request params (config.yaml default_params, LiteLLM
+// litellm_params). Every dispatch path
 // (first attempt, retry, fallback) goes through here, so a retried request keeps the
 // same defaults.
 func (p *Proxy) prepareRequestForCredential(
@@ -309,9 +310,13 @@ func (p *Proxy) prepareRequestForCredential(
 ) (credentialPreparedRequest, error) {
 	req, err := p.buildCredentialRequest(r, baseBody, baseProxyBody, modelID, baseRealModelID,
 		basePath, streaming, cred, isResponsesAPI, prevEntryHandled, stickyCacheEligible)
-	if err != nil || cred.Type != config.ProviderTypeVLLM || p.modelManager == nil ||
-		!strings.HasSuffix(req.path, "/chat/completions") {
+	if err != nil || cred.Type != config.ProviderTypeVLLM {
 		return req, err
+	}
+	// vLLM reads only top-level fields: lift a literal extra_body sent by non-SDK clients.
+	req.body = openai.UnwrapExtraBody(req.body)
+	if p.modelManager == nil || !strings.HasSuffix(req.path, "/chat/completions") {
+		return req, nil
 	}
 	if defaults := p.modelManager.GetDefaultParamsForCredential(modelID, cred.Name); len(defaults) > 0 {
 		req.body = openai.ApplyDefaultParams(req.body, defaults)

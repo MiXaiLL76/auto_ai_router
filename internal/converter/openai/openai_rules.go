@@ -137,11 +137,21 @@ var defaultParamSynonymGroups = [][]string{
 }
 
 // ApplyDefaultParams sets each key of defaults that is absent from the top level of a
-// JSON request body, leaving every key the client sent untouched. It mirrors LiteLLM,
-// where a deployment's litellm_params are merged under the request kwargs. Values
+// JSON request body, leaving every key the client sent untouched. Values
 // already in the body keep their exact bytes; the body is returned as is when there is
 // nothing to add or it is not a JSON object.
+//
+// Object-valued defaults (chat_template_kwargs, vllm_xargs, ...) are merged into the
+// client's object key by key, recursively, the client winning on every key it sent:
+// a client that only sets vllm_xargs.window_size still gets the default ngram_size.
+// This deliberately differs from LiteLLM, which drops the whole default object once
+// the request carries the key. A client value that is not an object (including an
+// explicit null) replaces the default as a whole.
 func ApplyDefaultParams(body []byte, defaults map[string]any) []byte {
+	return applyDefaults(body, defaults, true)
+}
+
+func applyDefaults(body []byte, defaults map[string]any, topLevel bool) []byte {
 	if len(defaults) == 0 || len(body) == 0 {
 		return body
 	}
@@ -151,7 +161,20 @@ func ApplyDefaultParams(body []byte, defaults map[string]any) []byte {
 	}
 	changed := false
 	for key, value := range defaults {
-		if clientSetParam(top, key) {
+		if raw, present := top[key]; present {
+			nested, isObject := value.(map[string]any)
+			if !isObject {
+				continue
+			}
+			merged := applyDefaults(raw, nested, false)
+			if !bytes.Equal(merged, raw) {
+				top[key] = merged
+				changed = true
+			}
+			continue
+		}
+		// Synonyms (max_tokens / max_completion_tokens) are request-level fields only.
+		if topLevel && clientSetParam(top, key) {
 			continue
 		}
 		raw, err := json.Marshal(value)
@@ -163,6 +186,41 @@ func ApplyDefaultParams(body []byte, defaults map[string]any) []byte {
 	}
 	if !changed {
 		return body
+	}
+	out, err := json.Marshal(top)
+	if err != nil {
+		return body
+	}
+	return out
+}
+
+// UnwrapExtraBody lifts the keys of a literal top-level "extra_body" object into the
+// top level of a JSON request body and drops "extra_body". The OpenAI SDKs already
+// flatten extra_body on the client side; this covers curl and hand-written clients
+// that send the field as is, which vLLM would otherwise ignore. A key present at both
+// levels keeps its top-level value. The body is returned as is when it has no
+// extra_body object or is not a JSON object.
+func UnwrapExtraBody(body []byte) []byte {
+	if len(body) == 0 {
+		return body
+	}
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(body, &top); err != nil || top == nil {
+		return body
+	}
+	raw, ok := top["extra_body"]
+	if !ok {
+		return body
+	}
+	var extra map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &extra); err != nil || extra == nil {
+		return body
+	}
+	delete(top, "extra_body")
+	for key, value := range extra {
+		if _, present := top[key]; !present {
+			top[key] = value
+		}
 	}
 	out, err := json.Marshal(top)
 	if err != nil {

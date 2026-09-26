@@ -167,25 +167,41 @@ type ModelRPMConfig struct {
 	// Explicit true/false overrides the default.
 	PassthroughMessages *bool `yaml:"passthrough_messages,omitempty"`
 
-	// DefaultParams are request-body defaults applied to a vLLM deployment when the
-	// client did not send the same key (LiteLLM deployment litellm_params such as
-	// chat_template_kwargs, temperature, top_k). Populated only by the database
-	// loader and never accepted from YAML.
-	DefaultParams map[string]any `yaml:"-"`
+	// DefaultParams are request-body defaults applied to /chat/completions requests
+	// sent to a vLLM deployment (skip_special_tokens, vllm_xargs, chat_template_kwargs,
+	// temperature, ...). A key the client sent wins; object values are merged key by
+	// key (see openai.ApplyDefaultParams). Read from YAML `default_params` and from
+	// the LiteLLM database (litellm_params); for the same credential and model the
+	// YAML value wins.
+	DefaultParams map[string]any `yaml:"default_params,omitempty"`
+}
+
+// defaultParamsReservedKeys are request fields a default must never set: they decide
+// what is being asked, not how it is generated.
+var defaultParamsReservedKeys = []string{"model", "messages", "prompt", "input", "stream"}
+
+func validateDefaultParams(params map[string]any, model string) error {
+	for _, key := range defaultParamsReservedKeys {
+		if _, ok := params[key]; ok {
+			return fmt.Errorf("default_params for model '%s' must not set %q", model, key)
+		}
+	}
+	return nil
 }
 
 // UnmarshalYAML implements custom unmarshaling for ModelRPMConfig with env variable support.
 func (m *ModelRPMConfig) UnmarshalYAML(value *yaml.Node) error {
 	type tempConfig struct {
-		Name                 string `yaml:"name"`
-		Model                string `yaml:"model,omitempty"`
-		RPM                  string `yaml:"rpm"`
-		TPM                  string `yaml:"tpm"`
-		Weight               string `yaml:"weight"`
-		Credential           string `yaml:"credential,omitempty"`
-		PassthroughResponses string `yaml:"passthrough_responses,omitempty"`
-		WebSocketResponses   string `yaml:"websocket_responses,omitempty"`
-		PassthroughMessages  string `yaml:"passthrough_messages,omitempty"`
+		Name                 string         `yaml:"name"`
+		Model                string         `yaml:"model,omitempty"`
+		RPM                  string         `yaml:"rpm"`
+		TPM                  string         `yaml:"tpm"`
+		Weight               string         `yaml:"weight"`
+		Credential           string         `yaml:"credential,omitempty"`
+		PassthroughResponses string         `yaml:"passthrough_responses,omitempty"`
+		WebSocketResponses   string         `yaml:"websocket_responses,omitempty"`
+		PassthroughMessages  string         `yaml:"passthrough_messages,omitempty"`
+		DefaultParams        map[string]any `yaml:"default_params,omitempty"`
 	}
 
 	var temp tempConfig
@@ -198,6 +214,10 @@ func (m *ModelRPMConfig) UnmarshalYAML(value *yaml.Node) error {
 	m.Credential = resolveEnvString(temp.Credential)
 	m.PassthroughResponses = nil
 	m.PassthroughMessages = nil
+	if err := validateDefaultParams(temp.DefaultParams, m.Name); err != nil {
+		return err
+	}
+	m.DefaultParams = temp.DefaultParams
 
 	var err error
 	if m.WebSocketResponses, err = parseField(temp.WebSocketResponses, false, strconv.ParseBool, "websocket_responses"); err != nil {
