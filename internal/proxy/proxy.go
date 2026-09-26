@@ -408,7 +408,8 @@ type Config struct {
 	KeyRateLimiter                   *ratelimit.RPMLimiter // Key/user/team/org RPM/TPM enforcement (nil if Redis disabled)
 	BudgetReservationEnabled         bool                  // Config toggle; independent of nil-check for clearer intent
 	KeyRateLimitsEnabled             bool
-	DefaultEstimatedCompletionTokens int // Completion-token estimate when max_tokens is absent (default: 1000)
+	DefaultEstimatedCompletionTokens int                    // Completion-token estimate when max_tokens is absent (default: 1000)
+	KeyMetrics                       *monitoring.KeyMetrics // Per-API-key request counters (nil = disabled)
 }
 
 type Proxy struct {
@@ -449,6 +450,7 @@ type Proxy struct {
 	budgetReservationEnabled         bool
 	keyRateLimitsEnabled             bool
 	defaultEstimatedCompletionTokens int
+	keyMetrics                       *monitoring.KeyMetrics
 	responseCompat                   *compatlitellm.Transformer
 	version                          string
 	commit                           string
@@ -533,6 +535,7 @@ func New(cfg *Config) *Proxy {
 		budgetReservationEnabled:         cfg.BudgetReservationEnabled,
 		keyRateLimitsEnabled:             cfg.KeyRateLimitsEnabled,
 		defaultEstimatedCompletionTokens: cfg.DefaultEstimatedCompletionTokens,
+		keyMetrics:                       cfg.KeyMetrics,
 		responseCompat:                   responseCompat,
 		client:                           httputil.NewHTTPClient(httpClientCfg),
 		version:                          cfg.Version,

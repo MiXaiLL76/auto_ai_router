@@ -142,11 +142,12 @@ The `fail2ban` block bans a `credential + model` pair after repeated failures at
 
 ## Monitoring Parameters
 
-| Parameter            | Type   | Description                             |
-| -------------------- | ------ | --------------------------------------- |
-| `prometheus_enabled` | bool   | Enable Prometheus metrics on `/metrics` |
-| `log_errors`         | bool   | Enable error logging to file            |
-| `errors_log_path`    | string | Path to error log file                  |
+| Parameter            | Type   | Description                                                                                                             |
+| -------------------- | ------ | ----------------------------------------------------------------------------------------------------------------------- |
+| `prometheus_enabled` | bool   | Enable Prometheus metrics on `/metrics`                                                                                 |
+| `log_errors`         | bool   | Enable error logging to file                                                                                            |
+| `errors_log_path`    | string | Path to error log file                                                                                                  |
+| `key_metrics`        | object | Opt-in per-API-key request counters (needs `litellm_db`), see [Prometheus](../monitoring/prometheus.md#per-key-metrics) |
 
 !!! note
 The `/health` endpoint is always available and cannot be disabled or reconfigured.

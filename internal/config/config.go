@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mixaill76/auto_ai_router/internal/monitoring"
 	"github.com/mixaill76/auto_ai_router/internal/scope"
 	"gopkg.in/yaml.v3"
 )
@@ -1071,6 +1072,85 @@ type MonitoringConfig struct {
 	// the cluster (no Service/Ingress route to PprofPort).
 	PprofEnabled bool `yaml:"pprof_enabled,omitempty"` // default: false
 	PprofPort    int  `yaml:"pprof_port,omitempty"`    // default: 6060
+	// KeyMetrics exposes per-API-key request counters; see KeyMetricsConfig.
+	KeyMetrics KeyMetricsConfig `yaml:"key_metrics,omitempty"`
+}
+
+// KeyMetricsConfig configures per-API-key Prometheus metrics
+// (auto_ai_router_key_requests_total + auto_ai_router_key_info). Keys are only
+// known with litellm_db enabled; without it the feature stays off.
+type KeyMetricsConfig struct {
+	Enabled bool `yaml:"enabled"` // default: false
+	// InfoLabels selects the owner labels on auto_ai_router_key_info
+	// (key_alias, user_id, user_email, team_id, team_alias, organization_id).
+	// Empty means monitoring.DefaultKeyInfoLabels (everything but user_email).
+	InfoLabels []string `yaml:"info_labels,omitempty"`
+	// MaxKeys caps distinct key label values; keys first seen past the cap
+	// are counted under key="__other__". 0 = unlimited. default: 5000
+	MaxKeys int `yaml:"max_keys,omitempty"`
+	// IdleTTL drops the series of keys without traffic for this long.
+	// 0 = never. default: 24h
+	IdleTTL time.Duration `yaml:"idle_ttl,omitempty"`
+}
+
+const (
+	defaultKeyMetricsMaxKeys = 5000
+	defaultKeyMetricsIdleTTL = 24 * time.Hour
+)
+
+func defaultKeyMetricsConfig() KeyMetricsConfig {
+	return KeyMetricsConfig{
+		MaxKeys: defaultKeyMetricsMaxKeys,
+		IdleTTL: defaultKeyMetricsIdleTTL,
+	}
+}
+
+// UnmarshalYAML implements custom unmarshaling for KeyMetricsConfig with env variable support
+func (k *KeyMetricsConfig) UnmarshalYAML(value *yaml.Node) error {
+	type tempConfig struct {
+		Enabled    string   `yaml:"enabled"`
+		InfoLabels []string `yaml:"info_labels,omitempty"`
+		MaxKeys    string   `yaml:"max_keys,omitempty"`
+		IdleTTL    string   `yaml:"idle_ttl,omitempty"`
+	}
+
+	var temp tempConfig
+	if err := value.Decode(&temp); err != nil {
+		return err
+	}
+
+	var err error
+	if k.Enabled, err = parseField(temp.Enabled, false, strconv.ParseBool, "monitoring.key_metrics.enabled"); err != nil {
+		return err
+	}
+	if k.MaxKeys, err = parseField(temp.MaxKeys, defaultKeyMetricsMaxKeys, strconv.Atoi, "monitoring.key_metrics.max_keys"); err != nil {
+		return err
+	}
+	if k.MaxKeys < 0 {
+		return fmt.Errorf("invalid monitoring.key_metrics.max_keys: must be >= 0, got %d", k.MaxKeys)
+	}
+	if k.IdleTTL, err = parseField(temp.IdleTTL, defaultKeyMetricsIdleTTL, time.ParseDuration, "monitoring.key_metrics.idle_ttl"); err != nil {
+		return err
+	}
+	if k.IdleTTL < 0 {
+		return fmt.Errorf("invalid monitoring.key_metrics.idle_ttl: must be >= 0, got %s", k.IdleTTL)
+	}
+
+	k.InfoLabels = nil
+	seen := make(map[string]bool, len(temp.InfoLabels))
+	for _, raw := range temp.InfoLabels {
+		label := strings.TrimSpace(resolveEnvString(raw))
+		if label == "" || seen[label] {
+			continue
+		}
+		if !slices.Contains(monitoring.KeyInfoLabels, label) {
+			return fmt.Errorf("invalid monitoring.key_metrics.info_labels: unknown label %q (allowed: %s)",
+				label, strings.Join(monitoring.KeyInfoLabels, ", "))
+		}
+		seen[label] = true
+		k.InfoLabels = append(k.InfoLabels, label)
+	}
+	return nil
 }
 
 // LiteLLMDBConfig holds configuration for LiteLLM database integration
@@ -1355,11 +1435,12 @@ func (o *OTELConfig) applyDefaults() {
 func (m *MonitoringConfig) UnmarshalYAML(value *yaml.Node) error {
 	// Create a temporary struct with all string fields
 	type tempConfig struct {
-		PrometheusEnabled string `yaml:"prometheus_enabled"`
-		LogErrors         string `yaml:"log_errors,omitempty"`
-		ErrorsLogPath     string `yaml:"errors_log_path,omitempty"`
-		PprofEnabled      string `yaml:"pprof_enabled,omitempty"`
-		PprofPort         string `yaml:"pprof_port,omitempty"`
+		PrometheusEnabled string    `yaml:"prometheus_enabled"`
+		LogErrors         string    `yaml:"log_errors,omitempty"`
+		ErrorsLogPath     string    `yaml:"errors_log_path,omitempty"`
+		PprofEnabled      string    `yaml:"pprof_enabled,omitempty"`
+		PprofPort         string    `yaml:"pprof_port,omitempty"`
+		KeyMetrics        yaml.Node `yaml:"key_metrics,omitempty"`
 	}
 
 	var temp tempConfig
@@ -1385,6 +1466,13 @@ func (m *MonitoringConfig) UnmarshalYAML(value *yaml.Node) error {
 	// Resolve string fields
 	m.HealthCheckPath = "/health" // Fixed path, not configurable via YAML
 	m.ErrorsLogPath = resolveEnvString(temp.ErrorsLogPath)
+
+	m.KeyMetrics = defaultKeyMetricsConfig()
+	if temp.KeyMetrics.Kind != 0 {
+		if err := temp.KeyMetrics.Decode(&m.KeyMetrics); err != nil {
+			return err
+		}
+	}
 
 	return nil
 }
@@ -1780,6 +1868,7 @@ func defaultMonitoringConfig() MonitoringConfig {
 		ErrorsLogPath:     "logs/logs.jsonl",
 		PprofEnabled:      false,
 		PprofPort:         6060,
+		KeyMetrics:        defaultKeyMetricsConfig(),
 	}
 }
 
@@ -1858,6 +1947,13 @@ func defaultKafkaConfig() KafkaConfig {
 // which bridges the same registry. Either sink alone is enough to require it.
 func (c *Config) MetricsCollectionEnabled() bool {
 	return c.Monitoring.PrometheusEnabled || c.OTEL.Enabled
+}
+
+// KeyMetricsEnabled reports whether per-key metrics are actually recorded:
+// requested, some metrics sink is active, and litellm_db is enabled (keys are
+// only identified through LiteLLM token validation).
+func (c *Config) KeyMetricsEnabled() bool {
+	return c.Monitoring.KeyMetrics.Enabled && c.MetricsCollectionEnabled() && c.LiteLLMDB.Enabled
 }
 
 func defaultOTELConfig() OTELConfig {

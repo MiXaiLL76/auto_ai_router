@@ -3552,6 +3552,624 @@
       ],
       "title": "Average TTFT by Credential",
       "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 193 },
+      "id": 1200,
+      "panels": [],
+      "title": "API Keys (monitoring.key_metrics)",
+      "type": "row"
+    },
+    {
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 4, "x": 0, "y": 194 },
+      "id": 1201,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "editorMode": "code",
+          "expr": "count(sum by (key) (rate(auto_ai_router_key_requests_total{service_name=~\"$service\"}[5m]) * on (key, instance) group_left (key_alias) auto_ai_router_key_info{service_name=~\"$service\",key_alias=~\"$key_alias\",team_alias=~\"$key_team\"}) > 0) or vector(0)",
+          "refId": "A",
+          "legendFormat": "Active Keys"
+        }
+      ],
+      "title": "Active Keys",
+      "type": "stat",
+      "description": "Keys with traffic in the last 5m."
+    },
+    {
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 4, "x": 4, "y": 194 },
+      "id": 1202,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "editorMode": "code",
+          "expr": "sum(rate(auto_ai_router_key_requests_total{service_name=~\"$service\"}[5m]) * 60 * on (key, instance) group_left (key_alias) auto_ai_router_key_info{service_name=~\"$service\",key_alias=~\"$key_alias\",team_alias=~\"$key_team\"}) or vector(0)",
+          "refId": "A",
+          "legendFormat": "Key RPM"
+        }
+      ],
+      "title": "Key RPM",
+      "type": "stat",
+      "description": "Requests per minute from all keys (matching the key filters)."
+    },
+    {
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "max": 1,
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "#EAB839", "value": 0.02 },
+              { "color": "red", "value": 0.05 }
+            ]
+          },
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 4, "x": 8, "y": 194 },
+      "id": 1203,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "editorMode": "code",
+          "expr": "(sum(rate(auto_ai_router_key_requests_total{service_name=~\"$service\",status=~\"[45]..\"}[5m]) * on (key, instance) group_left (key_alias) auto_ai_router_key_info{service_name=~\"$service\",key_alias=~\"$key_alias\",team_alias=~\"$key_team\"}) or vector(0)) / sum(rate(auto_ai_router_key_requests_total{service_name=~\"$service\"}[5m]) * on (key, instance) group_left (key_alias) auto_ai_router_key_info{service_name=~\"$service\",key_alias=~\"$key_alias\",team_alias=~\"$key_team\"})",
+          "refId": "A",
+          "legendFormat": "Key Error Rate"
+        }
+      ],
+      "title": "Key Error Rate",
+      "type": "stat",
+      "description": "Share of key requests answered with 4xx/5xx over the last 5m."
+    },
+    {
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "#EAB839", "value": 0.1 },
+              { "color": "red", "value": 5 }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 4, "x": 12, "y": 194 },
+      "id": 1204,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "editorMode": "code",
+          "expr": "sum(rate(auto_ai_router_key_requests_total{service_name=~\"$service\",status=\"429\"}[5m]) * 60 * on (key, instance) group_left (key_alias) auto_ai_router_key_info{service_name=~\"$service\",key_alias=~\"$key_alias\",team_alias=~\"$key_team\"}) or vector(0)",
+          "refId": "A",
+          "legendFormat": "Rate-limited RPM (429)"
+        }
+      ],
+      "title": "Rate-limited RPM (429)",
+      "type": "stat",
+      "description": "Key requests rejected with 429 per minute (key/user/team/org RPM/TPM limits or no capacity)."
+    },
+    {
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "#EAB839", "value": 0.1 },
+              { "color": "red", "value": 5 }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 4, "x": 16, "y": 194 },
+      "id": 1205,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "editorMode": "code",
+          "expr": "sum(rate(auto_ai_router_key_requests_total{service_name=~\"$service\",status=\"402\"}[5m]) * 60 * on (key, instance) group_left (key_alias) auto_ai_router_key_info{service_name=~\"$service\",key_alias=~\"$key_alias\",team_alias=~\"$key_team\"}) or vector(0)",
+          "refId": "A",
+          "legendFormat": "Budget-blocked RPM (402)"
+        }
+      ],
+      "title": "Budget-blocked RPM (402)",
+      "type": "stat",
+      "description": "Key requests rejected with 402 (budget exceeded) per minute."
+    },
+    {
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "#EAB839", "value": 1 },
+              { "color": "red", "value": 10 }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 4, "w": 4, "x": 20, "y": 194 },
+      "id": 1206,
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "showPercentChange": false,
+        "textMode": "auto",
+        "wideLayout": true
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "editorMode": "code",
+          "expr": "count(sum by (key) (increase(auto_ai_router_key_requests_total{service_name=~\"$service\",status=~\"402|429\"}[$__range]) * on (key, instance) group_left (key_alias) auto_ai_router_key_info{service_name=~\"$service\",key_alias=~\"$key_alias\",team_alias=~\"$key_team\"}) > 0) or vector(0)",
+          "refId": "A",
+          "legendFormat": "Keys Hitting Limits"
+        }
+      ],
+      "title": "Keys Hitting Limits",
+      "type": "stat",
+      "description": "Distinct keys that got a 402 or 429 within the dashboard time range."
+    },
+    {
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 25,
+            "gradientMode": "none",
+            "hideFrom": { "legend": false, "tooltip": false, "viz": false },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": { "type": "linear" },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": { "group": "A", "mode": "none" },
+            "thresholdsStyle": { "mode": "off" }
+          },
+          "mappings": [],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] },
+          "unit": "reqpm"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 198 },
+      "id": 1207,
+      "options": {
+        "legend": {
+          "calcs": ["mean", "lastNotNull"],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "sortBy": "Mean",
+          "sortDesc": true
+        },
+        "tooltip": { "hideZeros": true, "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "editorMode": "code",
+          "expr": "topk(10, sum by (key, key_alias) (rate(auto_ai_router_key_requests_total{service_name=~\"$service\"}[5m]) * 60 * on (key, instance) group_left (key_alias) auto_ai_router_key_info{service_name=~\"$service\",key_alias=~\"$key_alias\",team_alias=~\"$key_team\"}))",
+          "refId": "A",
+          "legendFormat": "{{key_alias}} ({{key}})",
+          "range": true
+        }
+      ],
+      "title": "Top 10 Keys by RPM",
+      "type": "timeseries",
+      "description": "Requests per minute per API key; key = sha256 hash prefix."
+    },
+    {
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 25,
+            "gradientMode": "none",
+            "hideFrom": { "legend": false, "tooltip": false, "viz": false },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": { "type": "linear" },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": { "group": "A", "mode": "none" },
+            "thresholdsStyle": { "mode": "off" }
+          },
+          "mappings": [],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] },
+          "unit": "reqpm"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 198 },
+      "id": 1208,
+      "options": {
+        "legend": {
+          "calcs": ["mean", "lastNotNull"],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "sortBy": "Mean",
+          "sortDesc": true
+        },
+        "tooltip": { "hideZeros": true, "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "editorMode": "code",
+          "expr": "topk(10, sum by ($key_group) (rate(auto_ai_router_key_requests_total{service_name=~\"$service\"}[5m]) * 60 * on (key, instance) group_left ($key_group) auto_ai_router_key_info{service_name=~\"$service\",key_alias=~\"$key_alias\",team_alias=~\"$key_team\"}))",
+          "refId": "A",
+          "legendFormat": "{{$key_group}}",
+          "range": true
+        }
+      ],
+      "title": "Top 10 by ${key_group:text} (RPM)",
+      "type": "timeseries",
+      "description": "Requests per minute grouped by the 'Group keys by' variable. Needs the label in monitoring.key_metrics.info_labels."
+    },
+    {
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 25,
+            "gradientMode": "none",
+            "hideFrom": { "legend": false, "tooltip": false, "viz": false },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": { "type": "linear" },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": { "group": "A", "mode": "none" },
+            "thresholdsStyle": { "mode": "off" }
+          },
+          "mappings": [],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] },
+          "unit": "reqpm"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 206 },
+      "id": 1209,
+      "options": {
+        "legend": {
+          "calcs": ["mean", "lastNotNull"],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "sortBy": "Mean",
+          "sortDesc": true
+        },
+        "tooltip": { "hideZeros": true, "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "editorMode": "code",
+          "expr": "sum by (status) (rate(auto_ai_router_key_requests_total{service_name=~\"$service\"}[5m]) * 60 * on (key, instance) group_left (key_alias) auto_ai_router_key_info{service_name=~\"$service\",key_alias=~\"$key_alias\",team_alias=~\"$key_team\"})",
+          "refId": "A",
+          "legendFormat": "HTTP {{status}}",
+          "range": true
+        }
+      ],
+      "title": "Key Requests by Status (RPM)",
+      "type": "timeseries",
+      "description": "Requests per minute from keys by final HTTP status."
+    },
+    {
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "palette-classic" },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 25,
+            "gradientMode": "none",
+            "hideFrom": { "legend": false, "tooltip": false, "viz": false },
+            "insertNulls": false,
+            "lineInterpolation": "linear",
+            "lineWidth": 1,
+            "pointSize": 5,
+            "scaleDistribution": { "type": "linear" },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": { "group": "A", "mode": "none" },
+            "thresholdsStyle": { "mode": "off" }
+          },
+          "mappings": [],
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] },
+          "unit": "reqpm"
+        },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 206 },
+      "id": 1210,
+      "options": {
+        "legend": {
+          "calcs": ["mean", "lastNotNull"],
+          "displayMode": "table",
+          "placement": "bottom",
+          "showLegend": true,
+          "sortBy": "Mean",
+          "sortDesc": true
+        },
+        "tooltip": { "hideZeros": true, "mode": "multi", "sort": "desc" }
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "editorMode": "code",
+          "expr": "topk(10, sum by (key, key_alias, status) (rate(auto_ai_router_key_requests_total{service_name=~\"$service\",status=~\"[45]..\"}[5m]) * 60 * on (key, instance) group_left (key_alias) auto_ai_router_key_info{service_name=~\"$service\",key_alias=~\"$key_alias\",team_alias=~\"$key_team\"}))",
+          "refId": "A",
+          "legendFormat": "{{key_alias}} ({{key}}) HTTP {{status}}",
+          "range": true
+        }
+      ],
+      "title": "Top 10 Keys by Errors (4xx/5xx RPM)",
+      "type": "timeseries",
+      "description": "Failing requests per minute per key and status."
+    },
+    {
+      "fieldConfig": {
+        "defaults": {
+          "custom": { "align": "auto", "cellOptions": { "type": "auto" }, "inspect": false },
+          "mappings": [],
+          "unit": "short"
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byName", "options": "RPM (5m)" },
+            "properties": [{ "id": "decimals", "value": 1 }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "Requests" },
+            "properties": [{ "id": "decimals", "value": 0 }]
+          },
+          {
+            "matcher": { "id": "byName", "options": "Errors (4xx/5xx)" },
+            "properties": [
+              { "id": "unit", "value": "short" },
+              { "id": "decimals", "value": 0 },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    { "color": "green", "value": null },
+                    { "color": "yellow", "value": 10 },
+                    { "color": "red", "value": 100 }
+                  ]
+                }
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": { "mode": "gradient", "type": "color-background" }
+              }
+            ]
+          },
+          {
+            "matcher": { "id": "byName", "options": "Limited (402/429)" },
+            "properties": [
+              { "id": "unit", "value": "short" },
+              { "id": "decimals", "value": 0 },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    { "color": "green", "value": null },
+                    { "color": "yellow", "value": 1 },
+                    { "color": "red", "value": 50 }
+                  ]
+                }
+              },
+              {
+                "id": "custom.cellOptions",
+                "value": { "mode": "gradient", "type": "color-background" }
+              }
+            ]
+          }
+        ]
+      },
+      "gridPos": { "h": 10, "w": 24, "x": 0, "y": 214 },
+      "id": 1211,
+      "options": {
+        "cellHeight": "sm",
+        "showHeader": true,
+        "sortBy": [{ "desc": true, "displayName": "RPM (5m)" }]
+      },
+      "targets": [
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "editorMode": "code",
+          "expr": "sum by (key, key_alias, user_id, team_id, team_alias, organization_id) (rate(auto_ai_router_key_requests_total{service_name=~\"$service\"}[5m]) * 60 * on (key, instance) group_left (key_alias, user_id, team_id, team_alias, organization_id) auto_ai_router_key_info{service_name=~\"$service\",key_alias=~\"$key_alias\",team_alias=~\"$key_team\"})",
+          "refId": "A",
+          "format": "table",
+          "instant": true
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "editorMode": "code",
+          "expr": "sum by (key, key_alias, user_id, team_id, team_alias, organization_id) (increase(auto_ai_router_key_requests_total{service_name=~\"$service\"}[$__range]) * on (key, instance) group_left (key_alias, user_id, team_id, team_alias, organization_id) auto_ai_router_key_info{service_name=~\"$service\",key_alias=~\"$key_alias\",team_alias=~\"$key_team\"})",
+          "refId": "B",
+          "format": "table",
+          "instant": true
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "editorMode": "code",
+          "expr": "sum by (key, key_alias, user_id, team_id, team_alias, organization_id) (increase(auto_ai_router_key_requests_total{service_name=~\"$service\",status=~\"[45]..\"}[$__range]) * on (key, instance) group_left (key_alias, user_id, team_id, team_alias, organization_id) auto_ai_router_key_info{service_name=~\"$service\",key_alias=~\"$key_alias\",team_alias=~\"$key_team\"})",
+          "refId": "C",
+          "format": "table",
+          "instant": true
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "editorMode": "code",
+          "expr": "sum by (key, key_alias, user_id, team_id, team_alias, organization_id) (increase(auto_ai_router_key_requests_total{service_name=~\"$service\",status=~\"402|429\"}[$__range]) * on (key, instance) group_left (key_alias, user_id, team_id, team_alias, organization_id) auto_ai_router_key_info{service_name=~\"$service\",key_alias=~\"$key_alias\",team_alias=~\"$key_team\"})",
+          "refId": "D",
+          "format": "table",
+          "instant": true
+        }
+      ],
+      "title": "Keys Overview",
+      "transformations": [
+        { "id": "merge", "options": {} },
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": { "Time": true },
+            "indexByName": {
+              "key": 0,
+              "key_alias": 1,
+              "user_id": 2,
+              "team_id": 3,
+              "team_alias": 4,
+              "organization_id": 5,
+              "Value #A": 6,
+              "Value #B": 7,
+              "Value #C": 8,
+              "Value #D": 9
+            },
+            "renameByName": {
+              "key": "Key",
+              "key_alias": "Key alias",
+              "user_id": "User",
+              "team_id": "Team ID",
+              "team_alias": "Team",
+              "organization_id": "Organization",
+              "Value #A": "RPM (5m)",
+              "Value #B": "Requests",
+              "Value #C": "Errors (4xx/5xx)",
+              "Value #D": "Limited (402/429)"
+            }
+          }
+        }
+      ],
+      "type": "table",
+      "description": "Per-key totals for the dashboard time range. Owner columns follow monitoring.key_metrics.info_labels."
     }
   ],
   "preload": false,
@@ -3621,6 +4239,51 @@
         "name": "model",
         "query": "label_values(auto_ai_router_model_rpm_current, model)",
         "refresh": 2,
+        "type": "query"
+      },
+      {
+        "current": { "text": "Team", "value": "team_alias" },
+        "description": "Label used by the 'Top 10 by ...' key panel",
+        "includeAll": false,
+        "label": "Group keys by",
+        "multi": false,
+        "name": "key_group",
+        "options": [
+          { "selected": true, "text": "Team", "value": "team_alias" },
+          { "selected": false, "text": "Team ID", "value": "team_id" },
+          { "selected": false, "text": "User", "value": "user_id" },
+          { "selected": false, "text": "Key alias", "value": "key_alias" },
+          { "selected": false, "text": "Organization", "value": "organization_id" }
+        ],
+        "query": "Team : team_alias,Team ID : team_id,User : user_id,Key alias : key_alias,Organization : organization_id",
+        "type": "custom"
+      },
+      {
+        "allValue": ".*",
+        "current": { "text": "All", "value": ["$__all"] },
+        "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+        "definition": "label_values(auto_ai_router_key_info{service_name=~\"$service\"}, team_alias)",
+        "includeAll": true,
+        "label": "Key team",
+        "multi": true,
+        "name": "key_team",
+        "query": "label_values(auto_ai_router_key_info{service_name=~\"$service\"}, team_alias)",
+        "refresh": 2,
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "allValue": ".*",
+        "current": { "text": "All", "value": ["$__all"] },
+        "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+        "definition": "label_values(auto_ai_router_key_info{service_name=~\"$service\"}, key_alias)",
+        "includeAll": true,
+        "label": "Key alias",
+        "multi": true,
+        "name": "key_alias",
+        "query": "label_values(auto_ai_router_key_info{service_name=~\"$service\"}, key_alias)",
+        "refresh": 2,
+        "sort": 1,
         "type": "query"
       }
     ]
