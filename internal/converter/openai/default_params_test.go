@@ -172,6 +172,15 @@ func TestUnwrapExtraBody(t *testing.T) {
 		assert.EqualValues(t, 5, got["top_k"])
 	})
 
+	t.Run("request-defining keys are not lifted", func(t *testing.T) {
+		got := decodeBody(t, UnwrapExtraBody([]byte(
+			`{"model":"m","messages":[],"extra_body":{"stream":true,"model":"other","prompt":"p","top_k":5}}`)))
+		assert.NotContains(t, got, "stream")
+		assert.NotContains(t, got, "prompt")
+		assert.Equal(t, "m", got["model"])
+		assert.EqualValues(t, 5, got["top_k"])
+	})
+
 	t.Run("bodies without an extra_body object are returned as is", func(t *testing.T) {
 		for _, body := range []string{``, `not json`, `[1]`, `{"model":"m"}`, `{"model":"m", "extra_body": null}`, `{"extra_body":"x"}`} {
 			assert.Equal(t, body, string(UnwrapExtraBody([]byte(body))), body)

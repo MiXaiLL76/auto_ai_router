@@ -194,14 +194,20 @@ func applyDefaults(body []byte, defaults map[string]any, topLevel bool) []byte {
 	return out
 }
 
+// extraBodyNeverLifted are request fields UnwrapExtraBody drops instead of lifting.
+var extraBodyNeverLifted = []string{"model", "messages", "prompt", "input", "stream"}
+
 // UnwrapExtraBody lifts the keys of a literal top-level "extra_body" object into the
 // top level of a JSON request body and drops "extra_body". The OpenAI SDKs already
 // flatten extra_body on the client side; this covers curl and hand-written clients
 // that send the field as is, which vLLM would otherwise ignore. A key present at both
-// levels keeps its top-level value. The body is returned as is when it has no
-// extra_body object or is not a JSON object.
+// levels keeps its top-level value. Keys that decide what is being asked (model,
+// messages, prompt, input, stream) are never lifted: the router has already routed
+// and accounted the request by its top-level values. The body is returned as is when
+// it has no extra_body object or is not a JSON object.
 func UnwrapExtraBody(body []byte) []byte {
-	if len(body) == 0 {
+	// Cheap pre-check: vLLM bodies often carry megabytes of base64 images.
+	if !bytes.Contains(body, []byte(`"extra_body"`)) {
 		return body
 	}
 	var top map[string]json.RawMessage
@@ -218,6 +224,9 @@ func UnwrapExtraBody(body []byte) []byte {
 	}
 	delete(top, "extra_body")
 	for key, value := range extra {
+		if slices.Contains(extraBodyNeverLifted, key) {
+			continue
+		}
 		if _, present := top[key]; !present {
 			top[key] = value
 		}

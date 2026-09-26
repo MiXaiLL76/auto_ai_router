@@ -90,4 +90,6 @@ The OpenAI SDKs flatten `extra_body` into the top level of the request before se
 Clients that post a literal `"extra_body": {...}` instead (curl, hand-written HTTP) would
 have those fields ignored by vLLM, so for `vllm` credentials AIR lifts the keys of an
 `extra_body` object to the top level and removes `extra_body`, on every endpoint. A key
-present at both levels keeps its top-level value. This happens before defaults are applied.
+present at both levels keeps its top-level value. `model`, `messages`, `prompt`, `input`
+and `stream` inside `extra_body` are dropped, not lifted: the request has already been
+routed and accounted by its top-level values. This happens before defaults are applied.
