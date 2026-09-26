@@ -332,7 +332,8 @@ type Manager struct {
 	externalModelIDs             map[string]struct{}                  // client-visible models handled outside the inference balancer
 	modelRealNames               map[string]string                    // alias name -> real model name (global, no specific credential)
 	modelRealNamesPerCred        map[string]map[string]string         // credential -> alias -> real model name (for credential-specific entries)
-	modelDefaultParams           map[string]map[string]map[string]any // credential -> alias -> request-body defaults (DB-sourced vLLM deployments only)
+	modelDefaultParams           map[string]map[string]map[string]any // credential -> alias -> request-body defaults from the LiteLLM DB (replaced on every sync)
+	staticDefaultParams          map[string]map[string]map[string]any // credential ("" = any credential) -> alias -> defaults from config.yaml; immutable after New
 	credentialMappingsReady      bool                                 // true after static/DB credential mappings have been initialized
 	defaultModelsRPM             int                                  // default RPM for models
 	logger                       *slog.Logger
@@ -365,6 +366,7 @@ func New(logger *slog.Logger, defaultModelsRPM int, staticModels []config.ModelR
 		modelRealNames:              make(map[string]string),
 		modelRealNamesPerCred:       make(map[string]map[string]string),
 		modelDefaultParams:          make(map[string]map[string]map[string]any),
+		staticDefaultParams:         make(map[string]map[string]map[string]any),
 		modelWebSocketResponses:     make(map[string]bool),
 		modelPassthroughResponses:   make(map[string]*bool),
 		modelPassthroughMessages:    make(map[string]*bool),
@@ -411,6 +413,16 @@ func New(logger *slog.Logger, defaultModelsRPM int, staticModels []config.ModelR
 					"alias", staticModel.Name,
 					"real", staticModel.Model,
 					"credential", staticModel.Credential)
+			}
+			// Register request-body defaults. A model without credential applies them on
+			// every credential that serves it; repeated entries merge, the later one winning.
+			if len(staticModel.DefaultParams) > 0 {
+				byAlias := m.staticDefaultParams[staticModel.Credential]
+				if byAlias == nil {
+					byAlias = make(map[string]map[string]any)
+					m.staticDefaultParams[staticModel.Credential] = byAlias
+				}
+				byAlias[staticModel.Name] = mergeDefaultParams(byAlias[staticModel.Name], staticModel.DefaultParams)
 			}
 			// Register explicit passthrough_responses override if set
 			if staticModel.PassthroughResponses != nil {
@@ -482,13 +494,49 @@ func (m *Manager) GetRealModelNameForCredential(alias, credential string) (strin
 }
 
 // GetDefaultParamsForCredential returns the request-body defaults configured for a
-// model alias served by a credential (LiteLLM deployment litellm_params such as
-// chat_template_kwargs or temperature). The returned map is shared and must be
-// treated as read-only. Returns nil when the deployment has none.
+// model alias served by a credential. Layers, each merged over the previous one key by
+// key (objects recursively): LiteLLM DB litellm_params, then config.yaml for the model
+// on any credential, then config.yaml for this exact credential — the config wins over
+// the database. The returned map may be shared and must be treated as read-only.
+// Returns nil when the deployment has none.
 func (m *Manager) GetDefaultParamsForCredential(alias, credential string) map[string]any {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	return m.modelDefaultParams[credential][alias]
+	var out map[string]any
+	for _, layer := range []map[string]any{
+		m.modelDefaultParams[credential][alias],
+		m.staticDefaultParams[""][alias],
+		m.staticDefaultParams[credential][alias],
+	} {
+		switch {
+		case len(layer) == 0:
+		case out == nil:
+			out = layer
+		default:
+			out = mergeDefaultParams(out, layer)
+		}
+	}
+	return out
+}
+
+// mergeDefaultParams returns base with over applied on top: over wins on every key,
+// and where both values are objects they are merged recursively. Neither input is
+// modified.
+func mergeDefaultParams(base, over map[string]any) map[string]any {
+	out := make(map[string]any, len(base)+len(over))
+	for k, v := range base {
+		out[k] = v
+	}
+	for k, v := range over {
+		baseObj, baseIsObj := out[k].(map[string]any)
+		overObj, overIsObj := v.(map[string]any)
+		if baseIsObj && overIsObj {
+			out[k] = mergeDefaultParams(baseObj, overObj)
+			continue
+		}
+		out[k] = v
+	}
+	return out
 }
 
 // GetAliasesForCredentialRealModel returns route-visible model IDs on a

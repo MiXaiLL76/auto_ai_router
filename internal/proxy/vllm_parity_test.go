@@ -297,3 +297,54 @@ func TestVLLM_TargetRequestRecordsItsOwnModelGroup(t *testing.T) {
 	assert.Equal(t, "qwen-36-35b-fast", db.logs[0].Model)
 	assert.Equal(t, "qwen-36-35b-fast", db.logs[0].ModelGroup)
 }
+
+// Defaults from config.yaml (no LiteLLM database row) reach vLLM, and an object the
+// client sent only in part is completed from the default instead of replacing it.
+func TestVLLM_StaticDefaultParamsMergeIntoRequest(t *testing.T) {
+	capture := &vllmCapture{}
+	upstream := newFakeVLLM(t, capture)
+	logger := testhelpers.NewTestLogger()
+	credential := config.CredentialConfig{
+		Name: "k8s_unlimited_ocr_0_1xH200", Type: config.ProviderTypeVLLM, BaseURL: upstream.URL, RPM: 100, TPM: 100000,
+	}
+	manager := routermodels.New(logger, 100, []config.ModelRPMConfig{{
+		Name: "unlimited-ocr", Credential: credential.Name, RPM: -1, TPM: -1,
+		DefaultParams: map[string]any{
+			"skip_special_tokens": false,
+			"vllm_xargs":          map[string]any{"ngram_size": 35, "window_size": 128},
+		},
+	}})
+	manager.LoadModelsFromConfig([]config.CredentialConfig{credential})
+	manager.SetCredentials([]config.CredentialConfig{credential})
+	builder := NewTestProxyBuilder().WithCredentials(credential).WithMasterKey("master-key")
+	builder.config.ModelManager = manager
+	prx := builder.Build()
+
+	send := func(body string) map[string]any {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", stringsReader(body))
+		req.Header.Set("Authorization", "Bearer master-key")
+		w := httptest.NewRecorder()
+		prx.ProxyRequest(w, req)
+		require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+		_, _, _, got := capture.snapshot()
+		return got
+	}
+
+	got := send(`{"model":"unlimited-ocr","messages":[{"role":"user","content":"<image>document parsing."}]}`)
+	assert.Equal(t, false, got["skip_special_tokens"])
+	assert.Equal(t, map[string]any{"ngram_size": 35.0, "window_size": 128.0}, got["vllm_xargs"])
+
+	got = send(`{"model":"unlimited-ocr","messages":[{"role":"user","content":"<image>Multi page parsing."}],` +
+		`"vllm_xargs":{"window_size":1024},"skip_special_tokens":true}`)
+	assert.Equal(t, true, got["skip_special_tokens"], "the client's value wins")
+	assert.Equal(t, map[string]any{"ngram_size": 35.0, "window_size": 1024.0}, got["vllm_xargs"],
+		"a partial object keeps the default keys the client did not send")
+
+	// A literal extra_body (curl, hand-written clients) is lifted before defaults apply.
+	got = send(`{"model":"unlimited-ocr","messages":[{"role":"user","content":"<image>document parsing."}],` +
+		`"extra_body":{"vllm_xargs":{"window_size":1024}}}`)
+	assert.NotContains(t, got, "extra_body")
+	assert.Equal(t, false, got["skip_special_tokens"])
+	assert.Equal(t, map[string]any{"ngram_size": 35.0, "window_size": 1024.0}, got["vllm_xargs"])
+}
