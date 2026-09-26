@@ -139,8 +139,15 @@ func main() {
 	var keyRateLimiter *ratelimit.RPMLimiter
 	if redisBackend != nil && cfg.LiteLLMDB.Enabled {
 		if cfg.LiteLLMDB.EnforceBudgetReservation {
-			budgetReserver = budget.New(redisBackend.Client(), cfg.Redis.KeyPrefix+"litellmbudget:", cfg.LiteLLMDB.BudgetReservationTTL, log)
-			log.Info("Budget reservation: enabled (Redis-backed, atomic overspend protection)")
+			budgetKeyPrefix := cfg.Redis.KeyPrefix + "litellmbudget:"
+			if cfg.Redis.Hybrid {
+				budgetReserver = budget.NewHybrid(redisBackend.Client(), budgetKeyPrefix, cfg.LiteLLMDB.BudgetReservationTTL, cfg.Redis.SyncInterval, log, metrics)
+				log.Info("Budget reservation: enabled (hybrid: local decisions, async Redis sync)")
+			} else {
+				budgetReserver = budget.New(redisBackend.Client(), budgetKeyPrefix, cfg.LiteLLMDB.BudgetReservationTTL)
+				log.Info("Budget reservation: enabled (Redis-backed, atomic overspend protection)")
+			}
+			defer budgetReserver.Close()
 		}
 		if cfg.LiteLLMDB.EnforceKeyRateLimits {
 			authRedisBackend := ratelimit.NewRedisBackendFromClient(redisBackend.Client(), cfg.Redis.KeyPrefix+"litellmauth:")
