@@ -242,7 +242,7 @@ func (p *Proxy) orchestrateRequest(
 		p.logger.ErrorContext(r.Context(), "Failed to prepare request for credential",
 			"error_code", status,
 			"credential", cred.Name, "provider", string(cred.Type),
-			"model", modelID, "error", prepErr,
+			"model", modelID, "error", prepErr, "cause", validationErr.Unwrap(),
 			"request_id", logCtx.RequestID)
 		logCtx.Status = "failure"
 		logCtx.HTTPStatus = status

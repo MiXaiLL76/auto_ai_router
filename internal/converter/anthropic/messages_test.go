@@ -522,6 +522,39 @@ func TestOpenAIToAnthropic_ChatFileFileIDUnsupported(t *testing.T) {
 	assert.NotContains(t, err.Error(), "Anthropic")
 }
 
+// TestOpenAIToAnthropic_MaxTokensWrongTypeReportsParam covers a client that sends
+// max_tokens as a string ("five") instead of a number. Before this fix, the raw
+// json.Unmarshal error reached the proxy layer as a plain error, which doesn't match
+// *converterutil.RequestValidationError and falls through to a generic 500 -- opaque to
+// the client and indistinguishable from a real upstream failure. It must classify as a
+// validation error naming the offending param, the same way the openai/* passthrough
+// route already does (OpenAI's own API returns invalid_type/max_tokens for this).
+func TestOpenAIToAnthropic_MaxTokensWrongTypeReportsParam(t *testing.T) {
+	body := []byte(`{"model":"claude-haiku-4-5","messages":[{"role":"user","content":"Say OK."}],"max_tokens":"five"}`)
+
+	_, err := OpenAIToAnthropic(body, "claude-haiku-4-5", true)
+	require.Error(t, err)
+	var validationErr *converterutil.RequestValidationError
+	require.True(t, errors.As(err, &validationErr))
+	assert.Equal(t, "max_tokens", validationErr.Param)
+	assert.Equal(t, "invalid_type", validationErr.Code)
+}
+
+// TestOpenAIToBedrock_MaxTokensWrongTypeReportsParam covers the Bedrock request path,
+// which builds on top of OpenAIToAnthropic (converter.go gates Bedrock+Anthropic models
+// through OpenAIToBedrock, which calls OpenAIToAnthropic first). Confirms the
+// classification fix above propagates through unchanged rather than needing its own fix.
+func TestOpenAIToBedrock_MaxTokensWrongTypeReportsParam(t *testing.T) {
+	body := []byte(`{"model":"claude-haiku-4-5","messages":[{"role":"user","content":"Say OK."}],"max_tokens":"five"}`)
+
+	_, err := OpenAIToBedrock(body, "claude-haiku-4-5")
+	require.Error(t, err)
+	var validationErr *converterutil.RequestValidationError
+	require.True(t, errors.As(err, &validationErr))
+	assert.Equal(t, "max_tokens", validationErr.Param)
+	assert.Equal(t, "invalid_type", validationErr.Code)
+}
+
 func TestOpenAIToAnthropic_ChatPDFAsImageURLRejected(t *testing.T) {
 	body := []byte(`{
 		"model":"claude-sonnet-4-5",

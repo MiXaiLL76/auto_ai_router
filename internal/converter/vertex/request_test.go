@@ -2,11 +2,31 @@ package vertex
 
 import (
 	"encoding/json"
+	"errors"
 	"testing"
 
+	converterutil "github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
 	"github.com/mixaill76/auto_ai_router/internal/converter/openai"
 	"github.com/stretchr/testify/require"
 )
+
+// TestOpenAIToVertex_MaxTokensWrongTypeReportsParam covers a client that sends
+// max_tokens as a string ("five") instead of a number. Before this fix, the raw
+// json.Unmarshal error reached the proxy layer as a plain error, which doesn't match
+// *converterutil.RequestValidationError and falls through to a generic 500 -- opaque to
+// the client and indistinguishable from a real upstream failure. It must classify as a
+// validation error naming the offending param, the same way the openai/* passthrough
+// route already does (OpenAI's own API returns invalid_type/max_tokens for this).
+func TestOpenAIToVertex_MaxTokensWrongTypeReportsParam(t *testing.T) {
+	body := []byte(`{"model":"gemini-2.5-flash","messages":[{"role":"user","content":"Say OK."}],"max_tokens":"five"}`)
+
+	_, err := OpenAIToVertex(body, false, false, "gemini-2.5-flash", "application/json")
+	require.Error(t, err)
+	var validationErr *converterutil.RequestValidationError
+	require.True(t, errors.As(err, &validationErr))
+	require.Equal(t, "max_tokens", validationErr.Param)
+	require.Equal(t, "invalid_type", validationErr.Code)
+}
 
 // TestOpenAIToVertex_ToolRoleMessage_UsesNameField verifies that when a tool-role
 // message has Name set (e.g. "get_weather"), the resulting FunctionResponse.Name

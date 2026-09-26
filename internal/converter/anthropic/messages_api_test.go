@@ -122,6 +122,38 @@ func TestMessagesToChat_DocumentProviderFileIDRejected(t *testing.T) {
 	assert.NotContains(t, err.Error(), "Anthropic")
 }
 
+// TestMessagesToChat_MaxTokensWrongTypeReportsParam covers a client sending
+// "max_tokens" as a string on the native /v1/messages route. Before this fix, the
+// map[string]interface{} type assertion failing (present-but-wrong-typed field) was
+// conflated with the field being entirely absent, producing the misleading
+// "max_tokens is required" for both cases, wrapped in a plain error with no param/code.
+func TestMessagesToChat_MaxTokensWrongTypeReportsParam(t *testing.T) {
+	body := []byte(`{"model":"claude-haiku-4-5","max_tokens":"five","messages":[{"role":"user","content":"hi"}]}`)
+
+	_, _, err := MessagesToChat(body)
+
+	require.Error(t, err)
+	var validationErr *converterutil.RequestValidationError
+	require.True(t, errors.As(err, &validationErr))
+	assert.Equal(t, "max_tokens", validationErr.Param)
+	assert.Equal(t, "invalid_type", validationErr.Code)
+}
+
+// TestMessagesToChat_MaxTokensMissingReportsMissing covers the field genuinely absent
+// (as opposed to present with the wrong type, above) -- must classify distinctly so a
+// client can tell "you forgot this" apart from "you sent the wrong type".
+func TestMessagesToChat_MaxTokensMissingReportsMissing(t *testing.T) {
+	body := []byte(`{"model":"claude-haiku-4-5","messages":[{"role":"user","content":"hi"}]}`)
+
+	_, _, err := MessagesToChat(body)
+
+	require.Error(t, err)
+	var validationErr *converterutil.RequestValidationError
+	require.True(t, errors.As(err, &validationErr))
+	assert.Equal(t, "max_tokens", validationErr.Param)
+	assert.NotEqual(t, "invalid_type", validationErr.Code)
+}
+
 func TestMessagesToChat_MalformedDocumentSourceRejected(t *testing.T) {
 	tests := []struct {
 		name      string

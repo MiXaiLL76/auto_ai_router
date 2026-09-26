@@ -1649,7 +1649,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 					p.logger.WarnContext(r.Context(), "Invalid Responses API request for provider format",
 						"error_code", status,
 						"credential", cred.Name, "provider", string(cred.Type),
-						"model", modelID, "error", convErr,
+						"model", modelID, "error", convErr, "cause", validationErr.Unwrap(),
 						"request_id", logCtx.RequestID)
 					logCtx.Status = "failure"
 					logCtx.HTTPStatus = status
@@ -1696,7 +1696,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 					p.logger.WarnContext(r.Context(), "Invalid request for provider format",
 						"error_code", status,
 						"credential", cred.Name, "provider", string(cred.Type),
-						"model", modelID, "error", convErr,
+						"model", modelID, "error", convErr, "cause", validationErr.Unwrap(),
 						"request_id", logCtx.RequestID)
 					logCtx.Status = "failure"
 					logCtx.HTTPStatus = status

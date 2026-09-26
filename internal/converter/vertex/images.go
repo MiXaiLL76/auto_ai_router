@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -556,9 +555,5 @@ func imageValidationError(param, message, code string) error {
 }
 
 func imageJSONValidationError(err error) error {
-	var typeErr *json.UnmarshalTypeError
-	if errors.As(err, &typeErr) {
-		return imageValidationError(typeErr.Field, "Invalid parameter type", "invalid_type")
-	}
-	return imageValidationError("", "Invalid JSON", "invalid_json")
+	return converterutil.RequestJSONValidationError(err)
 }
