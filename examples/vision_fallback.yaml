@@ -1,0 +1,39 @@
+# Vision fallback example: GLM and gpt-oss cannot see images, Qwen can.
+# Images sent to GLM / gpt-oss are described by Qwen first.
+# Docs: docs/advanced/vision_fallback.md
+
+server:
+  port: 8080
+  master_key: os.environ/ROUTER_MASTER_KEY
+
+credentials:
+  - name: vllm_glm
+    type: vllm
+    base_url: http://vllm-glm:8000
+    rpm: -1
+  - name: vllm_qwen
+    type: vllm
+    base_url: http://vllm-qwen:8000
+    rpm: -1
+  - name: vllm_gpt_oss
+    type: vllm
+    base_url: http://vllm-gpt-oss:8000
+    rpm: -1
+
+models:
+  - name: glm-text
+    credential: vllm_glm
+    supports_vision: false
+  - name: gpt-oss
+    credential: vllm_gpt_oss
+    supports_vision: false
+  - name: qwen-vl
+    credential: vllm_qwen
+    supports_vision: true
+
+vision_fallback:
+  mode: describe                    # reject | strip | describe
+  describe_model: qwen-vl
+  max_images: 4
+  max_tokens: 1024
+  timeout: 2m

@@ -160,12 +160,16 @@ func PrintConfig(logger *slog.Logger, cfg *Config) {
 			if tpm == 0 {
 				tpm = -1
 			}
-			logger.Info(fmt.Sprintf("  [%d] model", i),
+			modelArgs := []any{
 				"name", model.Name,
 				"credential", model.Credential,
 				"rpm", rpmToString(rpm),
 				"tpm", tpmToString(tpm),
-			)
+			}
+			if model.SupportsVision != nil {
+				modelArgs = append(modelArgs, "supports_vision", *model.SupportsVision)
+			}
+			logger.Info(fmt.Sprintf("  [%d] model", i), modelArgs...)
 		}
 	}
 
@@ -194,6 +198,13 @@ func PrintConfig(logger *slog.Logger, cfg *Config) {
 	if len(cfg.OrganizationPolicies) > 0 {
 		logger.Info("organization_policies", "total_count", len(cfg.OrganizationPolicies))
 	}
+	logger.Info("vision_fallback",
+		"mode", cfg.VisionFallback.Mode,
+		"describe_model", cfg.VisionFallback.DescribeModel,
+		"max_images", cfg.VisionFallback.MaxImages,
+		"max_tokens", cfg.VisionFallback.MaxTokens,
+		"timeout", cfg.VisionFallback.Timeout,
+	)
 	if cfg.Video.Enabled {
 		logger.Info("video",
 			"enabled", true,

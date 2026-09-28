@@ -2462,3 +2462,62 @@ monitoring:
 	assert.True(t, found, "model gpt-4o should be unpacked into cfg.Models")
 	assert.True(t, foundEnvWeight, "model gpt-4o-mini should be unpacked into cfg.Models")
 }
+
+func TestLoad_VisionFallback(t *testing.T) {
+	t.Setenv("TEST_VISION_MODEL", "qwen-vl")
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	configContent := `
+server:
+  master_key: sk-test
+credentials:
+  - name: vllm-node
+    type: vllm
+    base_url: http://vllm:8000
+    rpm: -1
+models:
+  - name: glm
+    credential: vllm-node
+    supports_vision: false
+  - name: qwen-vl
+    credential: vllm-node
+    supports_vision: "true"
+  - name: gpt-oss
+    credential: vllm-node
+vision_fallback:
+  describe_model: os.environ/TEST_VISION_MODEL
+  max_images: 2
+  timeout: 30s
+`
+	require.NoError(t, os.WriteFile(configPath, []byte(configContent), 0600))
+
+	cfg, err := Load(configPath)
+	require.NoError(t, err)
+	require.Len(t, cfg.Models, 3)
+	require.NotNil(t, cfg.Models[0].SupportsVision)
+	assert.False(t, *cfg.Models[0].SupportsVision)
+	require.NotNil(t, cfg.Models[1].SupportsVision)
+	assert.True(t, *cfg.Models[1].SupportsVision)
+	assert.Nil(t, cfg.Models[2].SupportsVision)
+
+	assert.Equal(t, VisionFallbackDescribe, cfg.VisionFallback.Mode, "describe is the default once describe_model is set")
+	assert.Equal(t, "qwen-vl", cfg.VisionFallback.DescribeModel)
+	assert.Equal(t, 2, cfg.VisionFallback.MaxImages)
+	assert.Equal(t, 30*time.Second, cfg.VisionFallback.Timeout)
+	assert.Equal(t, DefaultVisionMaxTokens, cfg.VisionFallback.MaxTokens)
+}
+
+func TestLoad_VisionFallbackDefaultsToReject(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	require.NoError(t, os.WriteFile(configPath, []byte(`
+server:
+  master_key: sk-test
+credentials:
+  - name: vllm-node
+    type: vllm
+    base_url: http://vllm:8000
+    rpm: -1
+`), 0600))
+	cfg, err := Load(configPath)
+	require.NoError(t, err)
+	assert.Equal(t, VisionFallbackReject, cfg.VisionFallback.Mode)
+}

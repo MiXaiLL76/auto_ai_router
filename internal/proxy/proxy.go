@@ -409,6 +409,8 @@ type Config struct {
 	BudgetReservationEnabled         bool                  // Config toggle; independent of nil-check for clearer intent
 	KeyRateLimitsEnabled             bool
 	DefaultEstimatedCompletionTokens int // Completion-token estimate when max_tokens is absent (default: 1000)
+
+	VisionFallback config.VisionFallbackConfig // What to do with images sent to models with supports_vision: false
 }
 
 type Proxy struct {
@@ -449,6 +451,7 @@ type Proxy struct {
 	budgetReservationEnabled         bool
 	keyRateLimitsEnabled             bool
 	defaultEstimatedCompletionTokens int
+	visionFallback                   config.VisionFallbackConfig
 	responseCompat                   *compatlitellm.Transformer
 	version                          string
 	commit                           string
@@ -458,6 +461,8 @@ func New(cfg *Config) *Proxy {
 	if cfg.Balancer != nil && cfg.ModelManager != nil {
 		cfg.Balancer.SetModelChecker(cfg.ModelManager)
 	}
+	visionFallback := cfg.VisionFallback
+	visionFallback.ApplyDefaults()
 
 	// Create HTTP client using centralized factory with request-specific timeout
 	httpClientCfg := httputil.DefaultHTTPClientConfig()
@@ -533,6 +538,7 @@ func New(cfg *Config) *Proxy {
 		budgetReservationEnabled:         cfg.BudgetReservationEnabled,
 		keyRateLimitsEnabled:             cfg.KeyRateLimitsEnabled,
 		defaultEstimatedCompletionTokens: cfg.DefaultEstimatedCompletionTokens,
+		visionFallback:                   visionFallback,
 		responseCompat:                   responseCompat,
 		client:                           httputil.NewHTTPClient(httpClientCfg),
 		version:                          cfg.Version,

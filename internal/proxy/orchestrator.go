@@ -167,6 +167,20 @@ func (p *Proxy) orchestrateRequest(
 		}
 	}
 
+	// Images sent to a model configured with supports_vision: false are handled once
+	// per request on the base body, before a credential is picked, so a rejected
+	// request never takes a rate-limit slot and no slot is held while images are
+	// described. The Responses API runs this after its history is prepended (below).
+	if !isResponsesAPI {
+		visionFormat := visionFormatChat
+		if isMessagesAPI {
+			visionFormat = visionFormatMessages
+		}
+		if !p.applyVisionFallbackToBase(w, r, logCtx, &baseBody, &baseProxyBody, modelID, baseRealModelID, visionFormat) {
+			return nil, false
+		}
+	}
+
 	cred, ok := p.selectCredentialForModel(w, modelID, logCtx.SessionID, preferredCredentialName, routingExclusions, logCtx)
 	if !ok {
 		return nil, false
@@ -210,6 +224,12 @@ func (p *Proxy) orchestrateRequest(
 		// Capture the full accumulated input (history + current) for storage.
 		// This must happen after any history prepending but before RequestToChat removes "input".
 		responsesMetadata.AccumulatedInput = responses.ExtractInputArray(baseBody)
+	}
+
+	// Responses API: images of the stored history prepended above are handled too.
+	// The stored AccumulatedInput keeps the original images.
+	if isResponsesAPI && !p.applyVisionFallbackToBase(w, r, logCtx, &baseBody, &baseProxyBody, modelID, baseRealModelID, visionFormatResponses) {
+		return nil, false
 	}
 
 	stickyCacheEligible := logCtx.SessionID != "" || preferredCredentialName != ""

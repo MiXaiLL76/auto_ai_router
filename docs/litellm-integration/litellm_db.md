@@ -75,6 +75,8 @@ in `config.yaml`. The mapping follows LiteLLM's own semantics:
 - **Not imported** — `router_settings.fallbacks`. AIR fails over between credentials of one
   model, not between models, so `coder-ultra -> qwen-ultra` style rules are ignored.
 - **Default parameters** — see [vLLM](../providers/vllm.md#default-parameters).
+- **Vision support** — `model_info.supports_vision` becomes the model's `supports_vision`
+  flag (a value from `config.yaml` wins). See [Vision Fallback](../advanced/vision_fallback.md).
 
 ## Identifying the user
 

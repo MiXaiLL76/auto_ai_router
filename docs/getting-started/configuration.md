@@ -293,6 +293,21 @@ By default, models can also be declared directly inside a credential via the `mo
 
 See [Load Balancing](../advanced/balancing.md) for details on multi-credential routing.
 
+Set `supports_vision: false` on a model that cannot accept images; what happens to images
+sent to it is configured in the top-level `vision_fallback` section. See
+[Vision Fallback](../advanced/vision_fallback.md).
+
+```yaml
+models:
+  - name: "glm-text"
+    credential: vllm_glm
+    supports_vision: false
+
+vision_fallback:
+  mode: describe            # reject | strip | describe
+  describe_model: qwen-vl
+```
+
 ## YAML Anchors for Models
 
 When many credentials share the same set of models, YAML anchors eliminate repetition.
