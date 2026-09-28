@@ -758,19 +758,149 @@ func TestRedactRequestBodyForLogging(t *testing.T) {
 		assert.Equal(t, "[REDACTED]", tool["description"])
 	})
 
-	t.Run("leaves a top-level description field outside tools untouched", func(t *testing.T) {
-		// redactToolDescriptions only walks parsed["tools"] -- a "description"
-		// key anywhere else in the body (however unlikely in AIR's accepted
-		// shapes) is not this function's concern and must not be touched.
+	t.Run("masks a top-level description field outside tools too", func(t *testing.T) {
 		body := []byte(`{
 			"model": "gpt-4o-mini",
 			"messages": [{"role": "user", "content": "hi"}],
-			"description": "not a tool, should survive"
+			"description": "not a tool, still client text"
 		}`)
 
 		out, ok := redactRequestBodyForLogging(body)
 		require.True(t, ok)
-		assert.Contains(t, out, "not a tool, should survive")
+		assert.NotContains(t, out, "still client text")
+		assert.Contains(t, out, `"description":"[REDACTED]"`)
+	})
+
+	t.Run("masks client-written chat completions params but keeps their shape", func(t *testing.T) {
+		body := []byte(`{
+			"model": "gpt-5.4",
+			"messages": [{"role": "user", "content": "hi"}],
+			"temperature": 0.2,
+			"reasoning_effort": "low",
+			"tool_choice": {"type": "function", "function": {"name": "lookup_customer"}},
+			"tools": [{"type": "function", "function": {
+				"name": "lookup_customer",
+				"description": "SECRET tool description",
+				"parameters": {
+					"type": "object",
+					"properties": {
+						"tier": {"type": ["string", "null"], "enum": ["SECRET vip@acme.ru"], "default": {"name": "SECRET default"}, "title": "SECRET title", "maxLength": 32}
+					},
+					"required": ["tier"]
+				}
+			}}],
+			"functions": [{"name": "legacy_fn", "description": "SECRET legacy description", "parameters": {"type": "object"}}],
+			"response_format": {"type": "json_schema", "json_schema": {"name": "answer", "description": "SECRET schema description", "schema": {"type": "object", "properties": {"a": {"type": "string", "description": "SECRET property description"}}}}},
+			"user": "SECRET ivan@acme.ru",
+			"safety_identifier": "SECRET safety id",
+			"prompt_cache_key": "SECRET cache key",
+			"metadata": {"customer_email": "SECRET email", "name": "SECRET name", "phone": 79161234567},
+			"prediction": {"type": "content", "content": "SECRET predicted file"},
+			"web_search_options": {"search_context_size": "low", "user_location": {"type": "approximate", "approximate": {"city": "SECRET city"}}},
+			"stop": ["SECRET stop"]
+		}`)
+
+		out, ok := redactRequestBodyForLogging(body)
+		require.True(t, ok)
+		assert.NotContains(t, out, "SECRET")
+		assert.NotContains(t, out, "79161234567", "numbers inside free-form metadata are masked too")
+
+		var parsed map[string]any
+		require.NoError(t, json.Unmarshal([]byte(out), &parsed))
+		assert.Equal(t, "gpt-5.4", parsed["model"])
+		assert.Equal(t, 0.2, parsed["temperature"])
+		assert.Equal(t, "low", parsed["reasoning_effort"])
+		assert.Equal(t, "lookup_customer", parsed["tool_choice"].(map[string]any)["function"].(map[string]any)["name"])
+
+		fn := parsed["tools"].([]any)[0].(map[string]any)["function"].(map[string]any)
+		assert.Equal(t, "lookup_customer", fn["name"])
+		params := fn["parameters"].(map[string]any)
+		assert.Equal(t, []any{"tier"}, params["required"], "required property names are schema shape")
+		tier := params["properties"].(map[string]any)["tier"].(map[string]any)
+		assert.Equal(t, []any{"string", "null"}, tier["type"])
+		assert.Equal(t, float64(32), tier["maxLength"])
+		assert.Equal(t, []any{"[REDACTED]"}, tier["enum"], "enum keeps its length, not its values")
+
+		rf := parsed["response_format"].(map[string]any)
+		assert.Equal(t, "json_schema", rf["type"])
+		assert.Equal(t, "answer", rf["json_schema"].(map[string]any)["name"])
+
+		wso := parsed["web_search_options"].(map[string]any)
+		assert.Equal(t, "low", wso["search_context_size"])
+		metadata := parsed["metadata"].(map[string]any)
+		assert.Equal(t, "[REDACTED]", metadata["name"], "a loggable key inside free-form metadata is still masked")
+	})
+
+	t.Run("masks Responses API and Anthropic tool configuration secrets", func(t *testing.T) {
+		for name, body := range map[string]string{
+			"responses": `{
+				"model": "gpt-5.4",
+				"input": "hi",
+				"previous_response_id": "resp_123",
+				"text": {"verbosity": "low", "format": {"type": "json_schema", "name": "o", "description": "SECRET text description", "schema": {"type": "object"}}},
+				"tools": [
+					{"type": "web_search", "user_location": {"type": "approximate", "city": "SECRET city", "region": "SECRET region"}},
+					{"type": "mcp", "server_label": "crm", "server_url": "https://SECRET.example/mcp", "headers": {"Authorization": "Bearer SECRET token"}, "authorization": "SECRET oauth"}
+				]
+			}`,
+			"anthropic": `{
+				"model": "claude-opus-4-8",
+				"max_tokens": 10,
+				"system": "hi",
+				"messages": [{"role": "user", "content": "hi"}],
+				"metadata": {"user_id": "SECRET user id"},
+				"mcp_servers": [{"type": "url", "url": "https://SECRET.example/mcp", "name": "crm", "authorization_token": "SECRET token"}],
+				"tools": [{"type": "web_search_20250305", "name": "web_search", "user_location": {"type": "approximate", "city": "SECRET city", "timezone": "SECRET tz"}}],
+				"output_config": {"effort": "high", "format": {"type": "json_schema", "schema": {"type": "object", "properties": {"q": {"type": "string", "description": "SECRET output description"}}}}}
+			}`,
+		} {
+			t.Run(name, func(t *testing.T) {
+				out, ok := redactRequestBodyForLogging([]byte(body))
+				require.True(t, ok)
+				assert.NotContains(t, out, "SECRET")
+				assert.Contains(t, out, `"type":"web_search`, "tool types must survive")
+			})
+		}
+	})
+
+	t.Run("masks location coordinates and a Gemini-native system instruction", func(t *testing.T) {
+		body := []byte(`{
+			"model": "gemini-3.1-flash",
+			"contents": [{"role": "user", "parts": [{"text": "hi"}]}],
+			"systemInstruction": {"parts": [{"text": "SECRET system instruction"}]},
+			"toolConfig": {"retrievalConfig": {"latLng": {"latitude": 55.7512, "longitude": 37.6184}}}
+		}`)
+
+		out, ok := redactRequestBodyForLogging(body)
+		require.True(t, ok)
+		assert.NotContains(t, out, "SECRET")
+		assert.NotContains(t, out, "55.7512")
+		assert.NotContains(t, out, "37.6184")
+		assert.Contains(t, out, `"latitude":"[REDACTED]"`, "keys stay, values go")
+	})
+
+	t.Run("keeps a tool parameter named like a free-form or loggable field as a schema", func(t *testing.T) {
+		body := []byte(`{
+			"model": "claude-opus-4-8",
+			"messages": [{"role": "user", "content": "hi"}],
+			"tools": [{"name": "create_ticket", "input_schema": {"type": "object", "properties": {
+				"metadata": {"type": "object", "description": "SECRET metadata description"},
+				"description": {"type": "string", "format": "markdown", "description": "SECRET body description"}
+			}}}]
+		}`)
+
+		out, ok := redactRequestBodyForLogging(body)
+		require.True(t, ok)
+		assert.NotContains(t, out, "SECRET")
+
+		var parsed map[string]any
+		require.NoError(t, json.Unmarshal([]byte(out), &parsed))
+		props := parsed["tools"].([]any)[0].(map[string]any)["input_schema"].(map[string]any)["properties"].(map[string]any)
+		assert.Equal(t, "object", props["metadata"].(map[string]any)["type"])
+		descriptionParam := props["description"].(map[string]any)
+		assert.Equal(t, "string", descriptionParam["type"])
+		assert.Equal(t, "markdown", descriptionParam["format"])
+		assert.Equal(t, "[REDACTED]", descriptionParam["description"])
 	})
 
 	t.Run("fails closed on non-JSON body", func(t *testing.T) {
