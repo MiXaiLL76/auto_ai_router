@@ -526,8 +526,10 @@ func visionChatChunkStartsAnswer(choice map[string]any) bool {
 // response event.
 func (r *visionSSEInjector) rewriteResponsesLine(line []byte) []byte {
 	if bytes.HasPrefix(line, []byte("event:")) {
+		// Two event lines in a row are not valid SSE; pass the earlier one on anyway.
+		previous := r.heldEvent
 		r.heldEvent = append([]byte(nil), line...)
-		return nil
+		return previous
 	}
 	held := r.heldEvent
 	r.heldEvent = nil

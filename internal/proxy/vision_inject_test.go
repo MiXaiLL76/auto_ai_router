@@ -552,3 +552,14 @@ func TestVisionChatChunkMayStartAnswer(t *testing.T) {
 		assert.Equal(t, want, visionChatChunkMayStartAnswer([]byte(payload)), payload)
 	}
 }
+
+// Two event lines in a row (invalid SSE) are both passed on.
+func TestVisionStreamInjector_ConsecutiveEventLines(t *testing.T) {
+	const upstream = "event: first\nevent: response.output_text.delta\n" +
+		`data: {"type":"response.output_text.delta","item_id":"m","content_index":0,"delta":"x"}` + "\n\n"
+	inj := &visionResponseInjection{prefix: "P", choices: 1}
+	out, err := io.ReadAll(newVisionStreamInjector(io.NopCloser(strings.NewReader(upstream)), inj, true))
+	require.NoError(t, err)
+	assert.True(t, strings.HasPrefix(string(out), "event: first\nevent: response.output_text.delta\ndata: "), string(out))
+	assert.Contains(t, string(out), `"delta":"Px"`)
+}
