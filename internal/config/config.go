@@ -1225,6 +1225,11 @@ type LiteLLMDBConfig struct {
 	// grouped by. Only their date column follows it; every stored timestamp
 	// stays UTC.
 	DailySpendTimezone *time.Location `yaml:"daily_spend_timezone"` // default: UTC
+
+	// EnableCostMargin applies metadata.cost_margin_config of the key, user,
+	// team and organization on top of the calculated cost. Off by default so an
+	// existing LiteLLM DB with margins configured keeps billing the raw cost.
+	EnableCostMargin bool `yaml:"enable_cost_margin"` // default: false (opt-in)
 }
 
 // KafkaConfig holds configuration for the Kafka spend-log analytics write-path
@@ -1925,6 +1930,7 @@ func defaultLiteLLMDBConfig() LiteLLMDBConfig {
 		EnforceKeyRateLimits:             false,
 		DefaultEstimatedCompletionTokens: 1000,
 		DailySpendTimezone:               time.UTC,
+		EnableCostMargin:                 false,
 	}
 }
 

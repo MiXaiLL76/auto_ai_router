@@ -231,6 +231,7 @@ func PrintConfig(logger *slog.Logger, cfg *Config) {
 			"budget_reservation_ttl", cfg.LiteLLMDB.BudgetReservationTTL.String(),
 			"enforce_key_rate_limits", cfg.LiteLLMDB.EnforceKeyRateLimits,
 			"default_estimated_completion_tokens", cfg.LiteLLMDB.DefaultEstimatedCompletionTokens,
+			"enable_cost_margin", cfg.LiteLLMDB.EnableCostMargin,
 		)
 	} else {
 		logger.Info("litellm_db", "status", "DISABLED")
