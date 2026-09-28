@@ -15,7 +15,6 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/converter/openai"
 	promanutils "github.com/mixaill76/auto_ai_router/internal/converter/proman/utils"
-	"github.com/mixaill76/auto_ai_router/internal/monitoring"
 	"github.com/mixaill76/auto_ai_router/internal/requestid"
 )
 
@@ -181,12 +180,20 @@ func (s *nativeWSSession) close() {
 		s.finish(turn, nil, outcome)
 		delete(s.retiring, id)
 	}
-	s.releasePending()
+	status := http.StatusBadGateway
+	if s.clientAborted {
+		status = StatusClientClosedRequest
+	}
+	s.releasePending(status)
 }
 
-func (s *nativeWSSession) releasePending() {
+// releasePending drops a queued steer that never became its own response and
+// counts it for per-key metrics with status (it was sent upstream, so it is a
+// client request like any other).
+func (s *nativeWSSession) releasePending(status int) {
 	if s.pending != nil {
 		s.proxy.reconcileBudgetAndRateLimits(s.pending.log, 0)
+		s.pending.finishKey(status)
 		s.pending = nil
 	}
 	s.waitingForTools = false
@@ -246,7 +253,8 @@ func (s *nativeWSSession) create(event map[string]json.RawMessage) bool {
 		return s.upstream != nil
 	}
 	if resuming {
-		s.releasePending()
+		// The steer was accepted upstream and is continued by this turn.
+		s.releasePending(http.StatusOK)
 	}
 	if s.upstream == nil {
 		if err := s.connect(turn.log); err != nil {
@@ -510,7 +518,8 @@ func (s *nativeWSSession) upstreamEvent(body []byte) bool {
 		s.waitingForTools = true
 	}
 	if event.Type == "response.steer.failed" {
-		s.releasePending()
+		// Upstream refused to apply the steer to the active response.
+		s.releasePending(http.StatusConflict)
 	}
 	turn := s.active
 	if retiring := s.retiring[id]; retiring != nil {
@@ -591,7 +600,7 @@ func (s *nativeWSSession) finish(turn *nativeWSTurn, event []byte, outcome strin
 	s.proxy.finalizeStreamingLog(turn.log, turn.accumulator.TokenCount(), chunk, "openai", status, false)
 	keyStatus := status
 	if outcome == "client_aborted" {
-		keyStatus = monitoring.KeyStatusClientClosed
+		keyStatus = StatusClientClosedRequest
 	}
 	turn.finishKey(keyStatus)
 	if turn.log.Credential != nil && turn.log.TokenUsage != nil {

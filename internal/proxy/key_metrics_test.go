@@ -6,7 +6,9 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/gorilla/websocket"
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb"
 	dbmodels "github.com/mixaill76/auto_ai_router/internal/litellmdb/models"
@@ -100,6 +102,28 @@ auto_ai_router_key_requests_total{key="master",status="200"} 1
 	require.NoError(t, testutil.GatherAndCompare(reg, strings.NewReader(expected)))
 }
 
+func newKeyTurnTestProxy(t *testing.T) (*Proxy, *prometheus.Registry) {
+	t.Helper()
+	reg := prometheus.NewRegistry()
+	km, err := monitoring.NewKeyMetrics(reg, monitoring.KeyMetricsOptions{InfoLabels: []string{}})
+	require.NoError(t, err)
+	return &Proxy{keyMetrics: km}, reg
+}
+
+var keyTurnTestInfo = &dbmodels.TokenInfo{Token: "0123456789abcdef0123456789abcdef"}
+
+func assertKeyTurnCounts(t *testing.T, reg *prometheus.Registry, counts ...string) {
+	t.Helper()
+	expected := `
+# HELP auto_ai_router_key_requests_total Total client requests per API key (hash prefix) and final HTTP status; join with auto_ai_router_key_info for owner labels
+# TYPE auto_ai_router_key_requests_total counter
+`
+	for i := 0; i < len(counts); i += 2 {
+		expected += `auto_ai_router_key_requests_total{key="0123456789ab",status="` + counts[i] + `"} ` + counts[i+1] + "\n"
+	}
+	require.NoError(t, testutil.GatherAndCompare(reg, strings.NewReader(expected), "auto_ai_router_key_requests_total"))
+}
+
 func TestWithKeyTurn(t *testing.T) {
 	var disabled Proxy
 	ctx := context.Background()
@@ -107,16 +131,12 @@ func TestWithKeyTurn(t *testing.T) {
 	assert.Equal(t, ctx, gotCtx)
 	finish(http.StatusOK) // no-op without metrics
 
-	reg := prometheus.NewRegistry()
-	km, err := monitoring.NewKeyMetrics(reg, monitoring.KeyMetricsOptions{InfoLabels: []string{}})
-	require.NoError(t, err)
-	prx := &Proxy{keyMetrics: km}
-	info := &dbmodels.TokenInfo{Token: "0123456789abcdef0123456789abcdef"}
+	prx, reg := newKeyTurnTestProxy(t)
 
 	// The WS upgrade's own slot must not be touched by the turn.
 	outerCtx, outer := monitoring.WithKeyIdentitySlot(context.Background())
 	turnCtx, finish := prx.withKeyTurn(outerCtx)
-	prx.noteRequestKey(turnCtx, info)
+	prx.noteRequestKey(turnCtx, keyTurnTestInfo)
 	finish(0)
 	_, ok := outer()
 	assert.False(t, ok)
@@ -124,17 +144,54 @@ func TestWithKeyTurn(t *testing.T) {
 	_, finish = prx.withKeyTurn(context.Background())
 	finish(http.StatusBadGateway) // turn never authenticated: not counted
 
-	clientCtx, cancel := context.WithCancel(context.Background())
-	turnCtx, finish = prx.withKeyTurn(clientCtx)
-	prx.noteRequestKey(turnCtx, info)
-	cancel()
-	finish(0) // client disconnected before any status
+	turnCtx, finish = prx.withKeyTurn(context.Background())
+	prx.noteRequestKey(turnCtx, keyTurnTestInfo)
+	finish(StatusClientClosedRequest)
 
-	expected := `
-# HELP auto_ai_router_key_requests_total Total client requests per API key (hash prefix) and final HTTP status; join with auto_ai_router_key_info for owner labels
-# TYPE auto_ai_router_key_requests_total counter
-auto_ai_router_key_requests_total{key="0123456789ab",status="200"} 1
-auto_ai_router_key_requests_total{key="0123456789ab",status="499"} 1
-`
-	require.NoError(t, testutil.GatherAndCompare(reg, strings.NewReader(expected), "auto_ai_router_key_requests_total"))
+	assertKeyTurnCounts(t, reg, "200", "1", "499", "1")
+}
+
+func TestNativeWSReleasePendingCountsSteer(t *testing.T) {
+	prx, reg := newKeyTurnTestProxy(t)
+	s := &nativeWSSession{proxy: prx}
+	queue := func() {
+		ctx, finish := prx.withKeyTurn(context.Background())
+		prx.noteRequestKey(ctx, keyTurnTestInfo)
+		s.pending = &nativeWSTurn{log: &RequestLogContext{}, finishKey: finish}
+	}
+
+	queue()
+	s.releasePending(http.StatusConflict) // steer.failed
+	queue()
+	s.releasePending(StatusClientClosedRequest) // session closed after client abort
+	s.releasePending(http.StatusOK)             // nothing pending: not counted
+
+	assertKeyTurnCounts(t, reg, "409", "1", "499", "1")
+}
+
+func TestWSSSEWriterDetectsClientGone(t *testing.T) {
+	serverConn := make(chan *websocket.Conn, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
+		require.NoError(t, err)
+		serverConn <- conn
+	}))
+	defer srv.Close()
+	client, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(srv.URL, "http"), nil)
+	require.NoError(t, err)
+	conn := <-serverConn
+	defer func() { _ = conn.Close() }()
+
+	w := newWSSSEWriter(conn)
+	_, _ = w.Write([]byte("data: {\"type\":\"response.created\"}\n\n"))
+	assert.False(t, w.clientGone)
+
+	_ = client.Close()
+	// The first writes after a disconnect may still land in socket buffers.
+	require.Eventually(t, func() bool {
+		_, _ = w.Write([]byte("data: {\"type\":\"response.output_text.delta\"}\n\n"))
+		w.writeMu.Lock()
+		defer w.writeMu.Unlock()
+		return w.clientGone
+	}, 5*time.Second, 10*time.Millisecond)
 }

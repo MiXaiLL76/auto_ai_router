@@ -43,22 +43,18 @@ func (p *Proxy) noteRequestKey(ctx context.Context, info *models.TokenInfo) {
 
 // withKeyTurn gives one WebSocket turn its own key identity slot, so the turn
 // is counted like a standalone HTTP request. finish records the turn with its
-// final status; 0 means no status was set and becomes 200, or 499 when the
-// client went away (ctx done). finish is a no-op if the turn never
-// authenticated.
+// final status (0 = implicit 200) and is a no-op if the turn never
+// authenticated. The caller decides when a turn is a client abort (499): a
+// hijacked request's context is not canceled when the client disconnects, so
+// ctx cannot tell.
 func (p *Proxy) withKeyTurn(ctx context.Context) (context.Context, func(status int)) {
 	if p.keyMetrics == nil {
 		return ctx, func(int) {}
 	}
 	turnCtx, identity := monitoring.WithKeyIdentitySlot(ctx)
 	return turnCtx, func(status int) {
-		id, ok := identity()
-		if !ok {
-			return
+		if id, ok := identity(); ok {
+			p.keyMetrics.ObserveStatus(id, status)
 		}
-		if status == 0 && ctx.Err() != nil {
-			status = monitoring.KeyStatusClientClosed
-		}
-		p.keyMetrics.ObserveStatus(id, status)
 	}
 }

@@ -117,10 +117,11 @@ type KeyMetricsOptions struct {
 	IdleTTL    time.Duration // <= 0 disables idle eviction
 }
 
-// KeyStatusClientClosed is recorded when the client went away before any
-// response status was written (nginx's 499), so aborted requests do not
-// inflate the 200 count.
-const KeyStatusClientClosed = 499
+// StatusClientClosedRequest is nginx's 499 (not defined by net/http): the
+// client went away before a response status was delivered. Per-key metrics
+// record it so aborted requests do not inflate the 200 count; the proxy uses
+// the same value (proxy.StatusClientClosedRequest) for logs and raw bodies.
+const StatusClientClosedRequest = 499
 
 type keyState struct {
 	identity KeyIdentity // identity behind info; zero for the overflow key
@@ -370,7 +371,7 @@ func (m *KeyMetrics) Middleware(next http.Handler) http.Handler {
 			if id, ok := identity(); ok {
 				status := sw.status
 				if status == 0 && r.Context().Err() != nil {
-					status = KeyStatusClientClosed
+					status = StatusClientClosedRequest
 				}
 				m.ObserveStatus(id, status)
 			}
