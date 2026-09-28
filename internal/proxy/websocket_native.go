@@ -15,6 +15,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/converter/openai"
 	promanutils "github.com/mixaill76/auto_ai_router/internal/converter/proman/utils"
+	"github.com/mixaill76/auto_ai_router/internal/monitoring"
 	"github.com/mixaill76/auto_ai_router/internal/requestid"
 )
 
@@ -587,7 +588,11 @@ func (s *nativeWSSession) finish(turn *nativeWSTurn, event []byte, outcome strin
 	}
 	chunk := sseDataFrame(event)
 	s.proxy.finalizeStreamingLog(turn.log, turn.accumulator.TokenCount(), chunk, "openai", status, false)
-	s.proxy.observeKeyRequest(turn.log.TokenInfo, status)
+	keyStatus := status
+	if outcome == "client_aborted" {
+		keyStatus = monitoring.KeyStatusClientClosed
+	}
+	s.proxy.observeKeyRequest(turn.log.TokenInfo, keyStatus)
 	if turn.log.Credential != nil && turn.log.TokenUsage != nil {
 		tokens := turn.log.TokenUsage.PromptTokens + turn.log.TokenUsage.CompletionTokens
 		s.proxy.rateLimiter.ConsumeTokens(turn.log.Credential.Name, tokens)

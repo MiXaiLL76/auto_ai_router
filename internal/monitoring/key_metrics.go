@@ -5,6 +5,7 @@ import (
 	"context"
 	"net"
 	"net/http"
+	"slices"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -114,9 +115,15 @@ type KeyMetricsOptions struct {
 	IdleTTL    time.Duration // <= 0 disables idle eviction
 }
 
+// KeyStatusClientClosed is recorded when the client went away before any
+// response status was written (nginx's 499), so aborted requests do not
+// inflate the 200 count.
+const KeyStatusClientClosed = 499
+
 type keyState struct {
-	info     []string // current info label values; nil for the overflow key
-	statuses map[string]struct{}
+	identity KeyIdentity // identity behind info; zero for the overflow key
+	info     []string    // current info label values; nil for the overflow key
+	counters map[string]prometheus.Counter
 	lastSeen time.Time
 }
 
@@ -130,9 +137,12 @@ type KeyMetrics struct {
 	requests *prometheus.CounterVec
 	info     *prometheus.GaugeVec
 
-	mu   sync.Mutex
-	keys map[string]*keyState
-	now  func() time.Time
+	mu sync.Mutex
+	// keys holds attributed keys only; overflow is kept apart so it does not
+	// take one of the max_keys slots.
+	keys     map[string]*keyState
+	overflow *keyState
+	now      func() time.Time
 }
 
 // NewKeyMetrics registers the per-key collectors on reg.
@@ -183,37 +193,52 @@ func (m *KeyMetrics) Observe(id KeyIdentity, statusCode int) {
 		status = strconv.Itoa(statusCode)
 	}
 
+	now := m.now()
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	key := id.Key
 	state, ok := m.keys[key]
-	if !ok && m.maxKeys > 0 && len(m.keys) >= m.maxKeys {
+	switch {
+	case ok:
+		m.setInfoLocked(key, state, id)
+	case m.maxKeys > 0 && len(m.keys) >= m.maxKeys:
 		key = KeyLabelOverflow
-		state, ok = m.keys[key]
-	}
-	if !ok {
-		state = &keyState{statuses: make(map[string]struct{})}
+		if m.overflow == nil {
+			m.overflow = &keyState{counters: make(map[string]prometheus.Counter)}
+		}
+		state = m.overflow
+	default:
+		state = &keyState{counters: make(map[string]prometheus.Counter)}
 		m.keys[key] = state
-	}
-	state.lastSeen = m.now()
-	if key != KeyLabelOverflow {
 		m.setInfoLocked(key, state, id)
 	}
-	state.statuses[status] = struct{}{}
-	m.requests.WithLabelValues(key, status).Inc()
+	state.lastSeen = now
+	counter, ok := state.counters[status]
+	if !ok {
+		counter = m.requests.WithLabelValues(key, status)
+		state.counters[status] = counter
+	}
+	counter.Inc()
 }
 
 // setInfoLocked keeps exactly one info series per key: a changed alias/owner
 // replaces the old series, otherwise PromQL joins would hit many-to-many.
+// The common case (owner unchanged) is a struct comparison without
+// allocations.
 func (m *KeyMetrics) setInfoLocked(key string, state *keyState, id KeyIdentity) {
+	if state.info != nil && state.identity == id {
+		return
+	}
 	values := make([]string, 0, len(m.infoLabels)+1)
 	values = append(values, key)
 	for _, label := range m.infoLabels {
 		values = append(values, id.infoValue(label))
 	}
+	state.identity = id
 	if state.info != nil {
-		if equalStrings(state.info, values) {
+		if slices.Equal(state.info, values) {
 			return
 		}
 		m.info.DeleteLabelValues(state.info...)
@@ -236,13 +261,21 @@ func (m *KeyMetrics) evictIdle() {
 		if state.lastSeen.After(cutoff) {
 			continue
 		}
-		for status := range state.statuses {
-			m.requests.DeleteLabelValues(key, status)
-		}
-		if state.info != nil {
-			m.info.DeleteLabelValues(state.info...)
-		}
+		m.deleteSeriesLocked(key, state)
 		delete(m.keys, key)
+	}
+	if m.overflow != nil && !m.overflow.lastSeen.After(cutoff) {
+		m.deleteSeriesLocked(KeyLabelOverflow, m.overflow)
+		m.overflow = nil
+	}
+}
+
+func (m *KeyMetrics) deleteSeriesLocked(key string, state *keyState) {
+	for status := range state.counters {
+		m.requests.DeleteLabelValues(key, status)
+	}
+	if state.info != nil {
+		m.info.DeleteLabelValues(state.info...)
 	}
 }
 
@@ -263,18 +296,6 @@ func (m *KeyMetrics) Run(ctx context.Context) {
 			m.evictIdle()
 		}
 	}
-}
-
-func equalStrings(a, b []string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
 }
 
 // ==================== Per-request identity slot ====================
@@ -337,7 +358,11 @@ func (m *KeyMetrics) Middleware(next http.Handler) http.Handler {
 				return
 			}
 			if id, ok := identity(); ok {
-				m.ObserveStatus(id, sw.status)
+				status := sw.status
+				if status == 0 && r.Context().Err() != nil {
+					status = KeyStatusClientClosed
+				}
+				m.ObserveStatus(id, status)
 			}
 		}()
 		next.ServeHTTP(sw, r.WithContext(ctx))
