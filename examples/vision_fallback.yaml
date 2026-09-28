@@ -37,3 +37,4 @@ vision_fallback:
   max_images: 4
   max_tokens: 1024
   timeout: 2m
+  inject_into_response: true        # descriptions start the answer; later turns restore them

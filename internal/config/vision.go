@@ -44,9 +44,18 @@ type VisionFallbackConfig struct {
 	// authenticated, rate-limited and billed like any other request.
 	DescribeModel  string        `yaml:"describe_model"`
 	DescribePrompt string        `yaml:"describe_prompt"`
-	MaxImages      int           `yaml:"max_images"` // images described per request; the rest become placeholders
+	MaxImages      int           `yaml:"max_images"` // images described per request, the rest become placeholders; 0 = no limit
 	MaxTokens      int           `yaml:"max_tokens"` // max_tokens of each describe call
 	Timeout        time.Duration `yaml:"timeout"`    // per describe call
+	// InjectIntoResponse prepends the descriptions to the assistant answer (describe
+	// mode) so the client keeps them in its history and later turns restore them
+	// without another describe call. nil = true.
+	InjectIntoResponse *bool `yaml:"inject_into_response"`
+}
+
+// InjectEnabled reports whether descriptions are written into the answer.
+func (c *VisionFallbackConfig) InjectEnabled() bool {
+	return c.InjectIntoResponse == nil || *c.InjectIntoResponse
 }
 
 func (c *VisionFallbackConfig) UnmarshalYAML(value *yaml.Node) error {
@@ -57,6 +66,7 @@ func (c *VisionFallbackConfig) UnmarshalYAML(value *yaml.Node) error {
 		MaxImages      string `yaml:"max_images"`
 		MaxTokens      string `yaml:"max_tokens"`
 		Timeout        string `yaml:"timeout"`
+		Inject         string `yaml:"inject_into_response"`
 	}
 	var raw rawVisionFallbackConfig
 	if err := value.Decode(&raw); err != nil {
@@ -67,7 +77,8 @@ func (c *VisionFallbackConfig) UnmarshalYAML(value *yaml.Node) error {
 	c.DescribeModel = resolveEnvString(raw.DescribeModel)
 	c.DescribePrompt = resolveEnvString(raw.DescribePrompt)
 	var err error
-	if c.MaxImages, err = parseField(raw.MaxImages, 0, strconv.Atoi, "vision_fallback.max_images"); err != nil {
+	// Omitted max_images means the default; an explicit 0 means no limit.
+	if c.MaxImages, err = parseField(raw.MaxImages, DefaultVisionMaxImages, strconv.Atoi, "vision_fallback.max_images"); err != nil {
 		return err
 	}
 	if c.MaxTokens, err = parseField(raw.MaxTokens, 0, strconv.Atoi, "vision_fallback.max_tokens"); err != nil {
@@ -76,10 +87,19 @@ func (c *VisionFallbackConfig) UnmarshalYAML(value *yaml.Node) error {
 	if c.Timeout, err = parseField(raw.Timeout, 0, time.ParseDuration, "vision_fallback.timeout"); err != nil {
 		return err
 	}
+	if c.InjectIntoResponse, err = parseOptionalBool(raw.Inject, "vision_fallback.inject_into_response"); err != nil {
+		return err
+	}
 	return nil
 }
 
-// ApplyDefaults fills omitted values.
+// defaultVisionFallbackConfig is used when the vision_fallback section is absent.
+func defaultVisionFallbackConfig() VisionFallbackConfig {
+	return VisionFallbackConfig{MaxImages: DefaultVisionMaxImages}
+}
+
+// ApplyDefaults fills omitted values. max_images is not touched: its default is
+// applied while parsing, because an explicit 0 means "no limit".
 func (c *VisionFallbackConfig) ApplyDefaults() {
 	if c.Mode == "" {
 		if c.DescribeModel != "" {
@@ -90,9 +110,6 @@ func (c *VisionFallbackConfig) ApplyDefaults() {
 	}
 	if c.DescribePrompt == "" {
 		c.DescribePrompt = DefaultVisionDescribePrompt
-	}
-	if c.MaxImages == 0 {
-		c.MaxImages = DefaultVisionMaxImages
 	}
 	if c.MaxTokens == 0 {
 		c.MaxTokens = DefaultVisionMaxTokens

@@ -305,6 +305,10 @@ type RequestLogContext struct {
 	BillingProfileSHA256  string
 	BillingOrganizationID string
 
+	// visionInject holds image descriptions of this request to prepend to the answer
+	// (vision fallback, describe mode); nil when there is nothing to write.
+	visionInject *visionResponseInjection
+
 	reservedEntities       []reservedEntity
 	rateLimitedTPMEntities []string
 	// budgetReconciled guards against double reconciliation: the first call (from
@@ -410,7 +414,8 @@ type Config struct {
 	KeyRateLimitsEnabled             bool
 	DefaultEstimatedCompletionTokens int // Completion-token estimate when max_tokens is absent (default: 1000)
 
-	VisionFallback config.VisionFallbackConfig // What to do with images sent to models with supports_vision: false
+	VisionFallback     config.VisionFallbackConfig // What to do with images sent to models with supports_vision: false; defaults are applied by config.Load
+	ServerWriteTimeout time.Duration               // http.Server WriteTimeout; restored after vision describe calls
 }
 
 type Proxy struct {
@@ -452,6 +457,8 @@ type Proxy struct {
 	keyRateLimitsEnabled             bool
 	defaultEstimatedCompletionTokens int
 	visionFallback                   config.VisionFallbackConfig
+	visionFlagIgnoredWarned          sync.Map // model name -> struct{}: supports_vision ignored warning already logged
+	serverWriteTimeout               time.Duration
 	responseCompat                   *compatlitellm.Transformer
 	version                          string
 	commit                           string
@@ -461,8 +468,6 @@ func New(cfg *Config) *Proxy {
 	if cfg.Balancer != nil && cfg.ModelManager != nil {
 		cfg.Balancer.SetModelChecker(cfg.ModelManager)
 	}
-	visionFallback := cfg.VisionFallback
-	visionFallback.ApplyDefaults()
 
 	// Create HTTP client using centralized factory with request-specific timeout
 	httpClientCfg := httputil.DefaultHTTPClientConfig()
@@ -538,7 +543,8 @@ func New(cfg *Config) *Proxy {
 		budgetReservationEnabled:         cfg.BudgetReservationEnabled,
 		keyRateLimitsEnabled:             cfg.KeyRateLimitsEnabled,
 		defaultEstimatedCompletionTokens: cfg.DefaultEstimatedCompletionTokens,
-		visionFallback:                   visionFallback,
+		visionFallback:                   cfg.VisionFallback,
+		serverWriteTimeout:               cfg.ServerWriteTimeout,
 		responseCompat:                   responseCompat,
 		client:                           httputil.NewHTTPClient(httpClientCfg),
 		version:                          cfg.Version,
@@ -2156,6 +2162,15 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 			finalResponseBody = openai.StripServerToolCalls(finalResponseBody)
 		}
 
+		// Vision fallback: prepend the image descriptions to the answer while the body
+		// is still in the upstream format; the conversions below carry them along.
+		if logCtx.visionInject != nil && !prepared.nativeResponses && resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			if injected, ok := injectVisionIntoResponse(finalResponseBody, logCtx.visionInject, prepared.passthroughResponses); ok {
+				finalResponseBody = injected
+				dropRepresentationIntegrityHeaders(resp.Header)
+			}
+		}
+
 		// bodyForTokenExtraction is set to finalResponseBody now and may be updated
 		// after Responses API conversion (for nativeResponses the raw provider body
 		// uses a provider-specific format that ExtractTokenUsage cannot parse).
@@ -2439,6 +2454,12 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 			"model", modelID,
 			"resp_content_type", resp.Header.Get("Content-Type"),
 			"resp_status", resp.StatusCode)
+
+		// Vision fallback: the image descriptions start the answer text. Injected into
+		// the upstream stream, before any conversion to the client format.
+		if logCtx.visionInject != nil && !prepared.nativeResponses && resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			resp.Body = newVisionStreamInjector(resp.Body, logCtx.visionInject, prepared.passthroughResponses)
+		}
 
 		streamCompleted := false
 		if prepared.convertedMessages {

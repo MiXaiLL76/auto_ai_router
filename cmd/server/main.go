@@ -277,6 +277,7 @@ func main() {
 		KeyRateLimitsEnabled:             cfg.LiteLLMDB.EnforceKeyRateLimits,
 		DefaultEstimatedCompletionTokens: cfg.LiteLLMDB.DefaultEstimatedCompletionTokens,
 		VisionFallback:                   cfg.VisionFallback,
+		ServerWriteTimeout:               cfg.Server.WriteTimeout,
 	})
 
 	videoRuntime := initializeVideoOrExit(cfg, prx, litellmDBManager, log)

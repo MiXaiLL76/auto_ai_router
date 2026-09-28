@@ -1,15 +1,21 @@
 package proxy
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
+	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	routermodels "github.com/mixaill76/auto_ai_router/internal/models"
+	"github.com/mixaill76/auto_ai_router/internal/requestid"
 	"github.com/mixaill76/auto_ai_router/internal/testhelpers"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -48,8 +54,17 @@ func newVisionUpstream(t *testing.T, u *visionUpstream) *httptest.Server {
 		u.mu.Unlock()
 
 		w.Header().Set("Content-Type", "application/json")
+		streaming := body["stream"] == true
 		if r.URL.Path == "/v1/responses" {
-			_, _ = w.Write([]byte(`{"id":"resp_1","object":"response","model":"glm","status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}],"usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15}}`))
+			if streaming {
+				writeVisionSSE(w, visionResponsesStreamEvents)
+				return
+			}
+			_, _ = w.Write([]byte(`{"id":"resp_1","object":"response","model":"glm","status":"completed","output":[{"type":"message","id":"msg_1","role":"assistant","content":[{"type":"output_text","text":"ok"}]}],"usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15}}`))
+			return
+		}
+		if streaming && body["model"] != "qwen-vl" {
+			writeVisionSSE(w, visionChatStreamEvents)
 			return
 		}
 		answer := "ok"
@@ -65,9 +80,13 @@ func newVisionUpstream(t *testing.T, u *visionUpstream) *httptest.Server {
 			}
 			answer = visionTestOwl
 		}
+		choices := []any{map[string]any{"index": 0, "message": map[string]any{"role": "assistant", "content": answer}, "finish_reason": "stop"}}
+		if n, _ := body["n"].(float64); n == 2 {
+			choices = append(choices, map[string]any{"index": 1, "message": map[string]any{"role": "assistant", "content": nil, "tool_calls": []any{}}, "finish_reason": "stop"})
+		}
 		resp, _ := json.Marshal(map[string]any{
 			"id": "chatcmpl-1", "object": "chat.completion", "model": body["model"],
-			"choices": []any{map[string]any{"index": 0, "message": map[string]any{"role": "assistant", "content": answer}, "finish_reason": "stop"}},
+			"choices": choices,
 			"usage":   map[string]any{"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
 		})
 		_, _ = w.Write(resp)
@@ -92,6 +111,8 @@ func newVisionProxy(t *testing.T, upstreamURL string, fallback config.VisionFall
 		{Name: "qwen-vl", Credential: credential.Name, RPM: -1, TPM: -1, SupportsVision: &vision},
 		{Name: "gpt-oss", Credential: credential.Name, RPM: -1, TPM: -1},
 		{Name: "glm-alias", Model: "zai/glm-5", Credential: credential.Name, RPM: -1, TPM: -1, SupportsVision: &noVision},
+		// Responses API converted to Chat Completions instead of passed through.
+		{Name: "glm-chatresp", Credential: credential.Name, RPM: -1, TPM: -1, SupportsVision: &noVision, PassthroughResponses: &noVision},
 		// Not vLLM-only: the flag must be ignored.
 		{Name: "openai-text", Credential: openaiCredential.Name, RPM: -1, TPM: -1, SupportsVision: &noVision},
 		{Name: "mixed", Credential: credential.Name, RPM: -1, TPM: -1, SupportsVision: &noVision},
@@ -102,16 +123,18 @@ func newVisionProxy(t *testing.T, upstreamURL string, fallback config.VisionFall
 
 	prices := routermodels.NewModelPriceRegistry()
 	prices.MergeDB(map[string]*routermodels.ModelPrice{
-		"glm":         {InputCostPerToken: 1e-7, OutputCostPerToken: 1e-6},
-		"qwen-vl":     {InputCostPerToken: 1e-7, OutputCostPerToken: 1e-6},
-		"gpt-oss":     {InputCostPerToken: 1e-7, OutputCostPerToken: 1e-6},
-		"openai-text": {InputCostPerToken: 1e-7, OutputCostPerToken: 1e-6},
-		"mixed":       {InputCostPerToken: 1e-7, OutputCostPerToken: 1e-6},
-		"glm-alias":   {InputCostPerToken: 1e-7, OutputCostPerToken: 1e-6},
+		"glm":          {InputCostPerToken: 1e-7, OutputCostPerToken: 1e-6},
+		"qwen-vl":      {InputCostPerToken: 1e-7, OutputCostPerToken: 1e-6},
+		"gpt-oss":      {InputCostPerToken: 1e-7, OutputCostPerToken: 1e-6},
+		"openai-text":  {InputCostPerToken: 1e-7, OutputCostPerToken: 1e-6},
+		"mixed":        {InputCostPerToken: 1e-7, OutputCostPerToken: 1e-6},
+		"glm-alias":    {InputCostPerToken: 1e-7, OutputCostPerToken: 1e-6},
+		"glm-chatresp": {InputCostPerToken: 1e-7, OutputCostPerToken: 1e-6},
 	})
 
 	builder := NewTestProxyBuilder().WithCredentials(creds...).WithMasterKey("master-key")
 	builder.config.ModelManager = manager
+	fallback.ApplyDefaults() // as config.Load does
 	builder.config.VisionFallback = fallback
 	prx := builder.Build()
 	db := newVLLMTestDB()
@@ -121,7 +144,9 @@ func newVisionProxy(t *testing.T, upstreamURL string, fallback config.VisionFall
 }
 
 func describeFallback() config.VisionFallbackConfig {
-	return config.VisionFallbackConfig{DescribeModel: "qwen-vl"}
+	cfg := config.VisionFallbackConfig{DescribeModel: "qwen-vl", MaxImages: config.DefaultVisionMaxImages}
+	cfg.ApplyDefaults()
+	return cfg
 }
 
 func sendVisionRequest(t *testing.T, prx *Proxy, path, body string) *httptest.ResponseRecorder {
@@ -164,7 +189,7 @@ func TestVisionFallback_DescribesCurrentTurnImage(t *testing.T) {
 		{"role":"assistant","content":"Привет! Чем могу помочь?"},
 		{"role":"user","content":[{"type":"text","text":"что на картинке?"},{"type":"image_url","image_url":{"url":"`+visionTestImage+`"}}]}]}`)
 	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
-	assert.Equal(t, "described", w.Header().Get(HeaderVisionFallback))
+	assert.Equal(t, "described=1/1", w.Header().Get(HeaderVisionFallback))
 
 	paths, bodies := u.snapshot()
 	require.Len(t, bodies, 2, "one describe call, then the real request")
@@ -305,7 +330,7 @@ func TestVisionFallback_DescribeFailureKeepsRequest(t *testing.T) {
 	w := sendVisionRequest(t, prx, "/v1/chat/completions", `{"model":"glm","messages":[
 		{"role":"user","content":[{"type":"image_url","image_url":{"url":"`+visionTestImage+`"}}]}]}`)
 	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
-	assert.Equal(t, "stripped", w.Header().Get(HeaderVisionFallback))
+	assert.Equal(t, "described=0/1", w.Header().Get(HeaderVisionFallback))
 	_, bodies := u.snapshot()
 	last := bodies[len(bodies)-1]
 	assert.Equal(t, "glm", last["model"])
@@ -352,7 +377,7 @@ func TestVisionFallback_ResponsesAPI(t *testing.T) {
 	w := sendVisionRequest(t, prx, "/v1/responses", `{"model":"glm","store":false,"input":[
 		{"role":"user","content":[{"type":"input_text","text":"что на картинке?"},{"type":"input_image","image_url":"`+visionTestImage+`"}]}]}`)
 	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
-	assert.Equal(t, "described", w.Header().Get(HeaderVisionFallback))
+	assert.Equal(t, "described=1/1", w.Header().Get(HeaderVisionFallback))
 
 	paths, bodies := u.snapshot()
 	require.Len(t, bodies, 2)
@@ -406,11 +431,119 @@ func TestVisionFallback_MaxImages(t *testing.T) {
 		{"role":"user","content":[{"type":"image_url","image_url":{"url":"`+visionTestImage+`"}},{"type":"image_url","image_url":"`+visionTestImage+`"}]}]}`)
 	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
 
+	assert.Equal(t, "described=1/2", w.Header().Get(HeaderVisionFallback), "the header shows a partial result")
+
 	_, bodies := u.snapshot()
 	require.Len(t, bodies, 2, "one describe call only")
 	parts := messageParts(t, bodies[1], 0)
 	assert.Contains(t, partText(t, parts[0]), visionTestOwl)
 	assert.Contains(t, partText(t, parts[1]), "too many images")
+}
+
+// max_images: 0 means no limit.
+func TestVisionFallback_MaxImagesUnlimited(t *testing.T) {
+	u := &visionUpstream{}
+	fallback := describeFallback()
+	fallback.MaxImages = 0
+	prx, _ := newVisionProxy(t, newVisionUpstream(t, u).URL, fallback)
+
+	image := `{"type":"image_url","image_url":{"url":"` + visionTestImage + `"}}`
+	w := sendVisionRequest(t, prx, "/v1/chat/completions", `{"model":"glm","messages":[
+		{"role":"user","content":[`+strings.Repeat(image+",", config.DefaultVisionMaxImages)+image+`]}]}`)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	assert.Equal(t, fmt.Sprintf("described=%d/%d", config.DefaultVisionMaxImages+1, config.DefaultVisionMaxImages+1), w.Header().Get(HeaderVisionFallback))
+	_, bodies := u.snapshot()
+	assert.Len(t, bodies, config.DefaultVisionMaxImages+2)
+}
+
+// A panic inside a describe goroutine is recovered there: the image becomes a
+// placeholder and the request still completes (the router's recovery does not cover
+// goroutines, the process would crash).
+func TestVisionFallback_DescribePanicRecovered(t *testing.T) {
+	orig := marshalVisionJSON
+	marshalVisionJSON = func(v any) ([]byte, error) {
+		if m, ok := v.(map[string]any); ok && m["model"] == "qwen-vl" {
+			panic("boom")
+		}
+		return orig(v)
+	}
+	t.Cleanup(func() { marshalVisionJSON = orig })
+
+	u := &visionUpstream{}
+	prx, _ := newVisionProxy(t, newVisionUpstream(t, u).URL, describeFallback())
+	w := sendVisionRequest(t, prx, "/v1/chat/completions", `{"model":"glm","messages":[
+		{"role":"user","content":[{"type":"image_url","image_url":{"url":"`+visionTestImage+`"}}]}]}`)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	assert.Equal(t, "described=0/1", w.Header().Get(HeaderVisionFallback))
+	_, bodies := u.snapshot()
+	require.Len(t, bodies, 1)
+	assert.Equal(t, "[image omitted: the image could not be described]", partText(t, messageParts(t, bodies[0], 0)[0]))
+}
+
+// The describe call keeps the caller's context (cancellation, values) but gets its own
+// request_id and none of the caller's per-request state.
+func TestVisionDescribeContext(t *testing.T) {
+	type otherKey struct{}
+	parentCtx, cancelParent := context.WithCancel(requestid.WithID(context.Background(), "parent-id"))
+	parentCtx = context.WithValue(parentCtx, otherKey{}, "kept")
+	parentCtx = context.WithValue(parentCtx, responseCompatContextKey{}, &responseCompatRequest{RequestID: "parent-id"})
+	parentCtx = context.WithValue(parentCtx, nativeWSRoutingKey{}, &nativeWSRouting{credential: "c"})
+
+	ctx, cancel := visionDescribeContext(parentCtx, time.Minute)
+	defer cancel()
+	assert.True(t, isVisionDescribeRequest(ctx))
+	assert.Equal(t, "parent-id", ctx.Value(visionDescribeCtxKey{}), "the parent request_id is kept for correlation")
+	assert.NotEmpty(t, requestid.FromContext(ctx))
+	assert.NotEqual(t, "parent-id", requestid.FromContext(ctx), "the describe call has its own spend-log key")
+	assert.Equal(t, "kept", ctx.Value(otherKey{}))
+	assert.Nil(t, responseCompatRequestFromContext(ctx))
+	assert.Nil(t, nativeWSRoutingFromContext(ctx))
+	_, hasDeadline := ctx.Deadline()
+	assert.True(t, hasDeadline)
+
+	cancelParent()
+	<-ctx.Done() // client cancellation reaches the describe call
+
+	ctx, cancel = visionDescribeContext(context.Background(), 0)
+	defer cancel()
+	_, hasDeadline = ctx.Deadline()
+	assert.False(t, hasDeadline, "timeout 0 means no own deadline")
+}
+
+// Images sent to a public model alias (model_group_alias) or a model_alias are handled
+// with the flag of the target model: aliases are resolved before the fallback runs.
+func TestVisionFallback_AliasesResolveToTarget(t *testing.T) {
+	for name, setup := range map[string]func(*routermodels.Manager){
+		"model_group_alias": func(m *routermodels.Manager) { m.SetDBPublicModelAliases(map[string]string{"glm-public": "glm"}) },
+		"model_alias":       func(m *routermodels.Manager) { m.SetModelAliases(map[string]string{"glm-public": "glm"}) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			u := &visionUpstream{}
+			prx, _ := newVisionProxy(t, newVisionUpstream(t, u).URL, config.VisionFallbackConfig{Mode: config.VisionFallbackStrip})
+			setup(prx.modelManager)
+			w := sendVisionRequest(t, prx, "/v1/chat/completions", `{"model":"glm-public","messages":[
+				{"role":"user","content":[{"type":"image_url","image_url":{"url":"`+visionTestImage+`"}}]}]}`)
+			require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+			assert.Equal(t, "stripped", w.Header().Get(HeaderVisionFallback))
+			_, bodies := u.snapshot()
+			require.Len(t, bodies, 1)
+			assert.NotContains(t, mustJSON(t, bodies[0]["messages"]), "image_url")
+		})
+	}
+}
+
+// A supports_vision: false that is ignored (non-vLLM credential) is logged once.
+func TestWarnVisionFlagIgnored_Once(t *testing.T) {
+	u := &visionUpstream{}
+	prx, _ := newVisionProxy(t, newVisionUpstream(t, u).URL, describeFallback())
+	var buf bytes.Buffer
+	prx.logger = slog.New(slog.NewTextHandler(&buf, nil))
+	for range 2 {
+		w := sendVisionRequest(t, prx, "/v1/chat/completions", `{"model":"mixed","messages":[
+			{"role":"user","content":[{"type":"image_url","image_url":{"url":"`+visionTestImage+`"}}]}]}`)
+		require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	}
+	assert.Equal(t, 1, strings.Count(buf.String(), "supports_vision: false is ignored"))
 }
 
 // A describe answer that is not a chat completion, or is empty, leaves a placeholder.
@@ -470,33 +603,33 @@ func TestApplyVisionFallback_EdgeCases(t *testing.T) {
 
 	t.Run("invalid json mentioning image", func(t *testing.T) {
 		body := []byte(`{"model":"glm","messages":"image`)
-		res := prx.applyVisionFallback(req, body, "glm", visionFormatChat)
+		res := prx.applyVisionFallback(httptest.NewRecorder(), req, body, "glm", visionFormatChat)
 		assert.Equal(t, body, res.body)
 		assert.Empty(t, res.outcome)
 	})
 	t.Run("the word image without image parts", func(t *testing.T) {
 		body := []byte(`{"model":"glm","messages":[{"role":"user","content":"draw an image"}]}`)
-		res := prx.applyVisionFallback(req, body, "glm", visionFormatChat)
+		res := prx.applyVisionFallback(httptest.NewRecorder(), req, body, "glm", visionFormatChat)
 		assert.Equal(t, body, res.body)
 		assert.False(t, res.rejected)
 	})
 	t.Run("no model manager", func(t *testing.T) {
 		bare := &Proxy{}
 		body := []byte(`{"messages":[{"role":"user","content":[{"type":"image_url","image_url":"x"}]}]}`)
-		assert.Equal(t, body, bare.applyVisionFallback(req, body, "glm", visionFormatChat).body)
+		assert.Equal(t, body, bare.applyVisionFallback(httptest.NewRecorder(), req, body, "glm", visionFormatChat).body)
 	})
 	t.Run("unset mode rejects", func(t *testing.T) {
-		unset := *prx
-		unset.visionFallback.Mode = ""
+		prx.visionFallback.Mode = ""
+		defer func() { prx.visionFallback.Mode = config.VisionFallbackStrip }()
 		body := []byte(`{"messages":[{"role":"user","content":[{"type":"image_url","image_url":"x"}]}]}`)
-		assert.True(t, unset.applyVisionFallback(req, body, "glm", visionFormatChat).rejected)
+		assert.True(t, prx.applyVisionFallback(httptest.NewRecorder(), req, body, "glm", visionFormatChat).rejected)
 	})
 	t.Run("model without credentials", func(t *testing.T) {
 		assert.False(t, prx.servedOnlyByVLLM("no-such-model"))
 	})
 	t.Run("numbers survive the rewrite", func(t *testing.T) {
 		body := []byte(`{"seed":12345678901234567890,"messages":[{"role":"user","content":[{"type":"image_url","image_url":"x"}]}]}`)
-		res := prx.applyVisionFallback(req, body, "glm", visionFormatChat)
+		res := prx.applyVisionFallback(httptest.NewRecorder(), req, body, "glm", visionFormatChat)
 		assert.Equal(t, "stripped", res.outcome)
 		assert.Contains(t, string(res.body), `"seed":12345678901234567890`)
 	})
@@ -512,7 +645,7 @@ func TestApplyVisionFallback_EncodeFailure(t *testing.T) {
 	prx, _ := newVisionProxy(t, newVisionUpstream(t, u).URL, describeFallback())
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 	body := []byte(`{"messages":[{"role":"user","content":[{"type":"image_url","image_url":"x"}]}]}`)
-	res := prx.applyVisionFallback(req, body, "glm", visionFormatChat)
+	res := prx.applyVisionFallback(httptest.NewRecorder(), req, body, "glm", visionFormatChat)
 	assert.Equal(t, body, res.body)
 	assert.Empty(t, res.outcome)
 	_, bodies := u.snapshot()
@@ -553,6 +686,7 @@ func TestVisionImageURL(t *testing.T) {
 		{"responses chat-shaped part", `{"type":"image_url","image_url":"u"}`, visionFormatResponses, "", false},
 		{"messages base64", `{"type":"image","source":{"type":"base64","media_type":"image/png","data":"AA"}}`, visionFormatMessages, "data:image/png;base64,AA", true},
 		{"messages base64 without data", `{"type":"image","source":{"type":"base64","media_type":"image/png"}}`, visionFormatMessages, "", true},
+		{"messages base64 without media_type", `{"type":"image","source":{"type":"base64","data":"AA"}}`, visionFormatMessages, "data:image/jpeg;base64,AA", true},
 		{"messages url", `{"type":"image","source":{"type":"url","url":"https://x"}}`, visionFormatMessages, "https://x", true},
 		{"messages file", `{"type":"image","source":{"type":"file","file_id":"f"}}`, visionFormatMessages, "", true},
 		{"messages text", `{"type":"text","text":"t"}`, visionFormatMessages, "", false},
@@ -613,21 +747,20 @@ func TestVisionFallback_GlobalRealModelName(t *testing.T) {
 	w := sendVisionRequest(t, prx, "/v1/chat/completions", `{"model":"glm-global","messages":[
 		{"role":"user","content":[{"type":"image_url","image_url":{"url":"`+visionTestImage+`"}}]}]}`)
 	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
-	assert.Equal(t, "described", w.Header().Get(HeaderVisionFallback))
+	assert.Equal(t, "described=1/1", w.Header().Get(HeaderVisionFallback))
 	_, bodies := u.snapshot()
 	require.Len(t, bodies, 2)
 	assert.Equal(t, "zai/glm-global", bodies[1]["model"])
 	assert.Contains(t, partText(t, messageParts(t, bodies[1], 0)[0]), visionTestOwl)
 
 	// The proxy body (sent to AIR/proxy peers) carries the router name.
-	base, proxyBody := []byte(`{"model":"zai/glm-global","messages":[{"role":"user","content":[{"type":"image_url","image_url":"x"}]}]}`), []byte(nil)
+	base := []byte(`{"model":"zai/glm-global","messages":[{"role":"user","content":[{"type":"image_url","image_url":"x"}]}]}`)
 	prx.visionFallback.Mode = config.VisionFallbackStrip
-	ok := prx.applyVisionFallbackToBase(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil),
-		&RequestLogContext{}, &base, &proxyBody, "glm-global", "zai/glm-global", visionFormatChat)
+	rewritten, ok := prx.applyVisionFallbackToBase(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil),
+		&RequestLogContext{}, base, "glm-global", visionFormatChat)
 	require.True(t, ok)
-	assert.Contains(t, string(base), `"model":"zai/glm-global"`)
-	assert.Contains(t, string(proxyBody), `"model":"glm-global"`)
-	assert.NotContains(t, string(proxyBody), "image_url")
+	assert.Contains(t, string(rewritten), `"model":"zai/glm-global"`)
+	assert.NotContains(t, string(rewritten), "image_url")
 }
 
 func TestMarshalVisionJSON(t *testing.T) {
@@ -637,4 +770,40 @@ func TestMarshalVisionJSON(t *testing.T) {
 
 	_, err = marshalVisionJSON(make(chan int))
 	assert.Error(t, err)
+}
+
+// deadlineRecorder records the write deadlines set through http.ResponseController.
+type deadlineRecorder struct {
+	*httptest.ResponseRecorder
+	deadlines []time.Time
+}
+
+func (d *deadlineRecorder) SetWriteDeadline(t time.Time) error {
+	d.deadlines = append(d.deadlines, t)
+	return nil
+}
+
+// The server write_timeout is lifted while images are described (nothing is written
+// meanwhile) and restored in full afterwards.
+func TestVisionFallback_WriteDeadlineAroundDescribe(t *testing.T) {
+	u := &visionUpstream{}
+	prx, _ := newVisionProxy(t, newVisionUpstream(t, u).URL, describeFallback())
+	prx.serverWriteTimeout = time.Minute
+
+	w := &deadlineRecorder{ResponseRecorder: httptest.NewRecorder()}
+	body := []byte(`{"model":"glm","messages":[{"role":"user","content":[{"type":"image_url","image_url":"` + visionTestImage + `"}]}]}`)
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	req.Header.Set("Authorization", "Bearer token")
+	before := time.Now()
+	res := prx.applyVisionFallback(w, req, body, "glm", visionFormatChat)
+	require.Equal(t, "described=1/1", res.outcome)
+	require.Len(t, w.deadlines, 2)
+	assert.True(t, w.deadlines[0].IsZero(), "no deadline while describing")
+	assert.WithinDuration(t, before.Add(time.Minute), w.deadlines[1], 5*time.Second, "a full write_timeout afterwards")
+
+	// Strip mode makes no describe call and leaves the deadline alone.
+	prx.visionFallback.Mode = config.VisionFallbackStrip
+	w = &deadlineRecorder{ResponseRecorder: httptest.NewRecorder()}
+	prx.applyVisionFallback(w, req, body, "glm", visionFormatChat)
+	assert.Empty(t, w.deadlines)
 }

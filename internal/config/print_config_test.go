@@ -304,3 +304,16 @@ func TestPrintConfig_VisionFallback(t *testing.T) {
 	assert.Contains(t, out, `"msg":"vision_fallback"`)
 	assert.Contains(t, out, `"describe_model":"qwen-vl"`)
 }
+
+func TestPrintConfig_VisionFallbackOmittedWhenUnused(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, nil))
+	cfg := &Config{
+		Models:         []ModelRPMConfig{{Name: "gpt-oss", Credential: "vllm"}},
+		VisionFallback: VisionFallbackConfig{Mode: VisionFallbackReject, MaxImages: DefaultVisionMaxImages},
+	}
+
+	PrintConfig(logger, cfg)
+
+	assert.NotContains(t, buf.String(), `"msg":"vision_fallback"`)
+}

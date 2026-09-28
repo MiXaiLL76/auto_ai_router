@@ -26,6 +26,29 @@ timeout: 45s
 	}, cfg)
 }
 
+func TestVisionFallbackConfig_MaxImages(t *testing.T) {
+	var cfg VisionFallbackConfig
+	require.NoError(t, yaml.Unmarshal([]byte("mode: strip\n"), &cfg))
+	assert.Equal(t, DefaultVisionMaxImages, cfg.MaxImages, "omitted max_images gets the default")
+
+	cfg = VisionFallbackConfig{}
+	require.NoError(t, yaml.Unmarshal([]byte("max_images: 0\n"), &cfg))
+	cfg.ApplyDefaults()
+	assert.Equal(t, 0, cfg.MaxImages, "explicit 0 means no limit and survives ApplyDefaults")
+}
+
+func TestVisionFallbackConfig_InjectIntoResponse(t *testing.T) {
+	var cfg VisionFallbackConfig
+	require.NoError(t, yaml.Unmarshal([]byte("describe_model: qwen-vl\n"), &cfg))
+	assert.Nil(t, cfg.InjectIntoResponse)
+	assert.True(t, cfg.InjectEnabled(), "on by default")
+
+	require.NoError(t, yaml.Unmarshal([]byte("inject_into_response: false\n"), &cfg))
+	assert.False(t, cfg.InjectEnabled())
+
+	assert.ErrorContains(t, yaml.Unmarshal([]byte("inject_into_response: sometimes\n"), &cfg), "inject_into_response")
+}
+
 func TestVisionFallbackConfig_UnmarshalYAMLErrors(t *testing.T) {
 	for name, doc := range map[string]string{
 		"not a mapping":  `[1, 2]`,
@@ -45,7 +68,7 @@ func TestVisionFallbackConfig_Defaults(t *testing.T) {
 	cfg.ApplyDefaults()
 	assert.Equal(t, VisionFallbackConfig{
 		Mode: VisionFallbackReject, DescribePrompt: DefaultVisionDescribePrompt,
-		MaxImages: DefaultVisionMaxImages, MaxTokens: DefaultVisionMaxTokens, Timeout: DefaultVisionTimeout,
+		MaxTokens: DefaultVisionMaxTokens, Timeout: DefaultVisionTimeout,
 	}, cfg)
 
 	cfg = VisionFallbackConfig{DescribeModel: "qwen-vl"}
@@ -83,6 +106,36 @@ func TestVisionFallbackConfig_Validate(t *testing.T) {
 func TestConfigValidate_VisionFallback(t *testing.T) {
 	cfg := &Config{VisionFallback: VisionFallbackConfig{Mode: "bogus"}}
 	assert.ErrorContains(t, cfg.Validate(), "vision_fallback.mode")
+}
+
+func TestConfigValidate_DescribeModelWithoutVision(t *testing.T) {
+	noVision := false
+	cfg := &Config{
+		Models:         []ModelRPMConfig{{Name: "glm", SupportsVision: &noVision}},
+		VisionFallback: VisionFallbackConfig{Mode: VisionFallbackDescribe, DescribeModel: "glm"},
+	}
+	assert.ErrorContains(t, cfg.Validate(), "vision_fallback.describe_model")
+}
+
+func TestParseOptionalBool(t *testing.T) {
+	t.Setenv("TEST_OPTIONAL_BOOL", "true")
+	t.Setenv("TEST_OPTIONAL_BOOL_EMPTY", "")
+
+	v, err := parseOptionalBool("", "field")
+	require.NoError(t, err)
+	assert.Nil(t, v)
+
+	v, err = parseOptionalBool("os.environ/TEST_OPTIONAL_BOOL_EMPTY", "field")
+	require.NoError(t, err)
+	assert.Nil(t, v, "an unset environment variable means omitted")
+
+	v, err = parseOptionalBool("os.environ/TEST_OPTIONAL_BOOL", "field")
+	require.NoError(t, err)
+	require.NotNil(t, v)
+	assert.True(t, *v)
+
+	_, err = parseOptionalBool("maybe", "field for model 'x'")
+	assert.ErrorContains(t, err, "invalid field for model 'x'")
 }
 
 func TestModelRPMConfig_SupportsVision(t *testing.T) {

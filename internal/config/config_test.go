@@ -2520,4 +2520,5 @@ credentials:
 	cfg, err := Load(configPath)
 	require.NoError(t, err)
 	assert.Equal(t, VisionFallbackReject, cfg.VisionFallback.Mode)
+	assert.Equal(t, DefaultVisionMaxImages, cfg.VisionFallback.MaxImages, "absent section still gets the default limit")
 }

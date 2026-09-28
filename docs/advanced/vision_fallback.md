@@ -20,7 +20,9 @@ Models that never declared `supports_vision` are not touched: images pass throug
 Vision fallback applies only to models served **exclusively** by [`vllm`](../providers/vllm.md)
 credentials. A `supports_vision: false` on a model reachable through any other provider
 (OpenAI, Anthropic, Vertex, an AIR/proxy peer, ...) — alone or mixed with vLLM
-credentials — is ignored, and its requests are forwarded unchanged.
+credentials — is ignored, and its requests are forwarded unchanged. The first request with
+images to such a model logs a `WARN` once:
+`supports_vision: false is ignored: the model is served by a non-vLLM credential`.
 
 ## Configuration
 
@@ -42,9 +44,10 @@ models:
 vision_fallback:
   mode: describe                    # reject | strip | describe
   describe_model: qwen-vl           # vision-capable model served by this AIR
-  max_images: 4                     # images described per request (default 4)
+  max_images: 4                     # images described per request (default 4, 0 = no limit)
   max_tokens: 1024                  # max_tokens of each describe call (default 1024)
   timeout: 2m                       # per describe call (default 2m)
+  inject_into_response: true        # write descriptions into the answer (default true)
   # describe_prompt: "..."          # system prompt of the describe call (a detailed default is built in)
 ```
 
@@ -61,21 +64,31 @@ of them says `false`, the whole name is treated as text-only, because a request 
 that deployment.
 
 Models loaded from the [LiteLLM database](../litellm-integration/litellm_db.md) take the flag
-from `model_info.supports_vision` (the field LiteLLM itself uses). A `supports_vision` set in
-`config.yaml` for the same name wins over the database.
+from `model_info.supports_vision` (the field LiteLLM itself uses). The same rule applies across
+both sources: a `false` from `config.yaml` or from the database makes the name text-only, a
+`true` from one source never hides a `false` from the other.
+
+Aliases (`model_group_alias`, `public_model_alias`, `model_alias`) are resolved first, so the
+flag of the target model applies.
 
 ### `vision_fallback` (global)
 
-| Parameter         | Default                                                   | Description                                                                             |
-| ----------------- | --------------------------------------------------------- | --------------------------------------------------------------------------------------- |
-| `mode`            | `describe` if `describe_model` is set, otherwise `reject` | What to do with images sent to a `supports_vision: false` model                         |
-| `describe_model`  | —                                                         | Model used to describe images. Required for `describe`. Must be a model this AIR serves |
-| `describe_prompt` | built-in                                                  | System prompt of the describe call                                                      |
-| `max_images`      | `4`                                                       | Images of one request that are described; further images become placeholders            |
-| `max_tokens`      | `1024`                                                    | `max_tokens` of each describe call                                                      |
-| `timeout`         | `2m`                                                      | Timeout of each describe call                                                           |
+| Parameter              | Default                                                   | Description                                                                                                                                                                |
+| ---------------------- | --------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `mode`                 | `describe` if `describe_model` is set, otherwise `reject` | What to do with images sent to a `supports_vision: false` model                                                                                                            |
+| `describe_model`       | —                                                         | Model used to describe images. Required for `describe`. Must be a model this AIR serves; a model declared `supports_vision: false` in `config.yaml` is rejected at startup |
+| `describe_prompt`      | built-in                                                  | System prompt of the describe call                                                                                                                                         |
+| `max_images`           | `4`                                                       | Images of one request that are described; further images become placeholders. `0` = no limit                                                                               |
+| `max_tokens`           | `1024`                                                    | `max_tokens` of each describe call                                                                                                                                         |
+| `timeout`              | `2m`                                                      | Timeout of each describe call                                                                                                                                              |
+| `inject_into_response` | `true`                                                    | Write the descriptions at the start of the answer so later turns restore them (see [Descriptions in the answer](#descriptions-in-the-answer))                              |
 
 All values accept `os.environ/VAR`.
+
+`timeout` may exceed `server.write_timeout`: nothing is written to the client while images are
+described, so the write deadline is lifted for that step, and the rest of the request gets a full
+`write_timeout` afterwards. Keep the client's own timeout in mind — it sees no bytes until the
+describe step is over.
 
 ## How `describe` works
 
@@ -110,13 +123,22 @@ turn.
    A brown owl sits on a birch branch at night. ...
    ```
 
-3. Images **before** the current turn are replaced with `[image from an earlier turn omitted]`
-   without any call. The model already answered about them, and that answer is in the history.
+3. Images **before** the current turn are never described again. Each gets the description
+   recorded in the answer to its turn (see [Descriptions in the answer](#descriptions-in-the-answer)),
+   or `[image from an earlier turn omitted]` when there is none.
 
-4. The rewritten request goes to the text-only model as usual (streaming included).
+4. The rewritten request goes to the text-only model as usual (streaming included), and the
+   descriptions of this turn are written at the start of its answer.
 
-The response carries `X-AIR-Vision-Fallback: described` (at least one image was described) or
-`stripped` (only placeholders).
+The response carries `X-AIR-Vision-Fallback`, a comma-separated list of:
+
+| Value           | Meaning                                                                                                                       |
+| --------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| `described=N/M` | `N` of the `M` images of the current turn were described; the rest became placeholders (failed call, `max_images`, `file_id`) |
+| `restored=K`    | `K` history images got their description back from an earlier answer                                                          |
+| `stripped`      | only placeholders: `strip` mode, or history images without a recorded description                                             |
+
+`N < M` is a partial result; `described=0/M` means every describe call failed.
 
 ### Example
 
@@ -163,12 +185,60 @@ Next request — the client sends the whole history again, the image is now old:
 }
 ```
 
-No describe call is made; the image becomes `[image from an earlier turn omitted]`.
+No describe call is made. If the assistant answer still starts with the description block
+AIR wrote into it, the image gets exactly the text it had on the first turn; otherwise it
+becomes `[image from an earlier turn omitted]`.
 
-**Trade-off:** a follow-up about a detail that neither the description nor the assistant's
-answer mentioned ("what colour are its eyes?") cannot be answered — the model no longer has
-the image. The describe prompt asks for an exhaustive description to keep this rare; the
-user can always attach the image again.
+**Trade-off:** a follow-up about a detail the description does not mention ("what colour
+are its eyes?") cannot be answered — the model never saw the image. The describe prompt
+asks for an exhaustive description to keep this rare; the user can always attach the image
+again.
+
+## Descriptions in the answer
+
+AIR keeps no state. To keep an image's description for later turns, it writes the
+descriptions of the current turn at the start of the answer, one collapsible block per image:
+
+```text
+<details type="air-vision" n="1" model="qwen-vl">
+<summary>Image 1 described by qwen-vl</summary>
+A brown owl sits on a birch branch at night. ...
+</details>
+
+На картинке изображена сова.
+```
+
+Open WebUI renders the block collapsed under its summary and sends the answer text back with
+the history. On the next request AIR:
+
+- matches the blocks to the images of the turn they answered, by order (`n` counts the images
+  that were described, in order) and puts the same text in place of each image — the prompt is
+  identical to the first turn, so vLLM's prefix cache still hits;
+- removes the blocks from the assistant messages before the conversation goes upstream. This
+  also happens for vision-capable vLLM models, e.g. when the conversation is switched to one:
+  it sees the original image and does not need the text.
+
+Where the block goes:
+
+| Endpoint               | Non-streaming                                        | Streaming                                                                           |
+| ---------------------- | ---------------------------------------------------- | ----------------------------------------------------------------------------------- |
+| `/v1/chat/completions` | start of `choices[i].message.content` (every choice) | an extra `delta.content` chunk before the first answer chunk of each choice         |
+| `/v1/responses`        | start of the first `output_text`                     | start of the first `response.output_text.delta`, and in the matching `.done` events |
+| `/v1/messages`         | start of the first `text` block (after `thinking`)   | start of the first `text` block (after `thinking`)                                  |
+
+The block comes after the reasoning, never inside it: Open WebUI does not send reasoning back
+with the history. `usage` is unchanged — the inserted text is not billed as completion tokens.
+
+The block is **not** written when the client asked for machine-readable output —
+`response_format` / `text.format` other than `text`, Messages `output_format`, or a forced tool
+call (`tool_choice: "required"`, a named function, Messages `any` / `tool`). Set
+`inject_into_response: false` to turn it off entirely; history images then always become
+placeholders.
+
+!!! note "Streaming Responses answers made only of tool calls"
+A streamed `/v1/responses` answer without any `output_text` carries no block, so its
+images become placeholders later. Chat Completions and non-streaming answers get the block
+even then.
 
 ## Supported APIs
 
@@ -179,8 +249,9 @@ user can always attach the image again.
 | `/v1/messages`         | `{"type": "image"}` (base64 or url source), including inside `tool_result` | `{"type": "text"}`       |
 
 For `/v1/responses` with `previous_response_id`, the stored history is prepended first, so its
-images are handled like any other earlier-turn image. The stored conversation itself keeps the
-original images.
+images are handled like any other earlier-turn image. The stored conversation keeps the
+original images, and the stored answer keeps the description block, so the descriptions are
+restored from the store as well.
 
 An `input_image` given only as `file_id` cannot be fetched by AIR and becomes a placeholder.
 
@@ -190,6 +261,14 @@ The describe call runs through AIR's own pipeline with the caller's headers: the
 the same end-user headers (`X-OpenWebUI-User-Email`, ...). It is therefore authenticated,
 rate-limited, load-balanced and billed like a normal request — it shows up as a separate
 spend-log row for `describe_model`. The key must be allowed to use `describe_model`.
+
+Each described image counts as one request against the key's RPM: a message with 4 images costs
+5 requests. When the key's limit is hit, the remaining images become placeholders and the header
+shows it (`described=2/4`).
+
+The describe call has its own `request_id` (it is the key of its spend-log row). It runs inside the
+caller's trace, and the `DEBUG` line `Vision fallback: describe call` links the two
+(`request_id` = caller, `describe_request_id` = describe call).
 
 If a describe call fails (error, timeout, model not allowed), the image becomes
 `[image omitted: the image could not be described]` and the original request still proceeds.
@@ -201,7 +280,7 @@ A describe call never triggers another describe round: if `describe_model` is it
 ## Logs
 
 ```text
-[INFO] Rewrote image input for a model without vision support model=glm-text outcome=described images=1 described=1 describe_model=qwen-vl
+[INFO] Rewrote image input for a model without vision support model=glm-text outcome=described=1/1 images=1 current_turn_images=1 described=1 restored=0 inject_into_response=true describe_model=qwen-vl
 [WARN] Rejected image input for a model without vision support error_code=400 model=glm-text images=1
 ```
 

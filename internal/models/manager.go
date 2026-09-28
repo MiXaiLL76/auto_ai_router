@@ -333,7 +333,7 @@ type Manager struct {
 	modelRealNames               map[string]string                    // alias name -> real model name (global, no specific credential)
 	modelRealNamesPerCred        map[string]map[string]string         // credential -> alias -> real model name (for credential-specific entries)
 	modelDefaultParams           map[string]map[string]map[string]any // credential -> alias -> request-body defaults (DB-sourced vLLM deployments only)
-	staticVisionSupport          map[string]bool                      // model name -> supports_vision from config.yaml (wins over the DB)
+	staticVisionSupport          map[string]bool                      // model name -> supports_vision from config.yaml
 	modelVisionSupport           map[string]bool                      // model name -> effective supports_vision (static + DB model_info)
 	credentialMappingsReady      bool                                 // true after static/DB credential mappings have been initialized
 	defaultModelsRPM             int                                  // default RPM for models
@@ -497,21 +497,25 @@ func (m *Manager) GetDefaultParamsForCredential(alias, credential string) map[st
 }
 
 // collectVisionSupport folds the supports_vision flags of model entries into one
-// value per model name. A name is served by every entry that carries it, so one
-// explicit false makes the whole name non-vision: a request could land on that
-// deployment.
+// value per model name (see foldVisionSupport).
 func collectVisionSupport(entries []config.ModelRPMConfig) map[string]bool {
 	support := make(map[string]bool)
 	for _, entry := range entries {
-		if entry.SupportsVision == nil {
-			continue
+		if entry.SupportsVision != nil {
+			foldVisionSupport(support, entry.Name, *entry.SupportsVision)
 		}
-		if current, seen := support[entry.Name]; seen && !current {
-			continue
-		}
-		support[entry.Name] = *entry.SupportsVision
 	}
 	return support
+}
+
+// foldVisionSupport records one supports_vision flag for name. A name is served by
+// every entry that carries it, config.yaml and database alike, so one explicit false
+// makes the whole name non-vision: a request could land on that deployment.
+func foldVisionSupport(support map[string]bool, name string, supported bool) {
+	if current, seen := support[name]; seen && !current {
+		return
+	}
+	support[name] = supported
 }
 
 // SupportsVision reports whether modelID accepts image inputs. known is false when
@@ -1365,7 +1369,9 @@ func (m *Manager) UpdateDBModels(dbModels []config.ModelRPMConfig, staticCreds [
 	m.dbModelNames = newDBNames
 	m.modelDefaultParams = newDefaultParams
 	newVisionSupport := collectVisionSupport(dbModels)
-	maps.Copy(newVisionSupport, m.staticVisionSupport)
+	for name, supported := range m.staticVisionSupport {
+		foldVisionSupport(newVisionSupport, name, supported)
+	}
 	m.modelVisionSupport = newVisionSupport
 
 	// 4. Rebuild ALL credential↔model mappings from the merged modelLimits.

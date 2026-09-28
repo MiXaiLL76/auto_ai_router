@@ -203,9 +203,6 @@ func (m *ModelRPMConfig) UnmarshalYAML(value *yaml.Node) error {
 	m.Name = resolveEnvString(temp.Name)
 	m.Model = resolveEnvString(temp.Model)
 	m.Credential = resolveEnvString(temp.Credential)
-	m.PassthroughResponses = nil
-	m.PassthroughMessages = nil
-	m.SupportsVision = nil
 
 	var err error
 	if m.WebSocketResponses, err = parseField(temp.WebSocketResponses, false, strconv.ParseBool, "websocket_responses"); err != nil {
@@ -221,34 +218,14 @@ func (m *ModelRPMConfig) UnmarshalYAML(value *yaml.Node) error {
 		return err
 	}
 
-	if temp.PassthroughResponses != "" {
-		resolved := resolveEnvString(temp.PassthroughResponses)
-		if resolved != "" {
-			passthroughResponses, err := strconv.ParseBool(resolved)
-			if err != nil {
-				return fmt.Errorf("invalid passthrough_responses for model '%s': %w", m.Name, err)
-			}
-			m.PassthroughResponses = &passthroughResponses
-		}
+	if m.PassthroughResponses, err = parseOptionalBool(temp.PassthroughResponses, "passthrough_responses for model '"+m.Name+"'"); err != nil {
+		return err
 	}
-
-	if temp.PassthroughMessages != "" {
-		resolved := resolveEnvString(temp.PassthroughMessages)
-		if resolved != "" {
-			passthroughMessages, err := strconv.ParseBool(resolved)
-			if err != nil {
-				return fmt.Errorf("invalid passthrough_messages for model '%s': %w", m.Name, err)
-			}
-			m.PassthroughMessages = &passthroughMessages
-		}
+	if m.PassthroughMessages, err = parseOptionalBool(temp.PassthroughMessages, "passthrough_messages for model '"+m.Name+"'"); err != nil {
+		return err
 	}
-
-	if resolved := resolveEnvString(temp.SupportsVision); resolved != "" {
-		supportsVision, err := strconv.ParseBool(resolved)
-		if err != nil {
-			return fmt.Errorf("invalid supports_vision for model '%s': %w", m.Name, err)
-		}
-		m.SupportsVision = &supportsVision
+	if m.SupportsVision, err = parseOptionalBool(temp.SupportsVision, "supports_vision for model '"+m.Name+"'"); err != nil {
+		return err
 	}
 
 	return nil
@@ -1700,6 +1677,9 @@ func Load(path string) (*Config, error) {
 		cfg.Kafka = defaultKafkaConfig()
 	}
 
+	if !hasMappingKey(&root, "vision_fallback") {
+		cfg.VisionFallback = defaultVisionFallbackConfig()
+	}
 	cfg.VisionFallback.ApplyDefaults()
 
 	// Ensure HealthCheckPath is always set regardless of whether monitoring section exists.
@@ -1927,6 +1907,13 @@ func (c *Config) Validate() error {
 	}
 	if err := c.VisionFallback.Validate(); err != nil {
 		return err
+	}
+	if c.VisionFallback.Mode == VisionFallbackDescribe {
+		for _, model := range c.Models {
+			if model.Name == c.VisionFallback.DescribeModel && model.SupportsVision != nil && !*model.SupportsVision {
+				return fmt.Errorf("vision_fallback.describe_model %q is declared supports_vision: false", model.Name)
+			}
+		}
 	}
 	if c.Server.Port <= 0 || c.Server.Port > 65535 {
 		return fmt.Errorf("invalid port: %d", c.Server.Port)
