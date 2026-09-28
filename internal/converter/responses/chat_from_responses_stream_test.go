@@ -234,6 +234,54 @@ func TestTransformResponsesStreamToChat_StandaloneErrorEvent(t *testing.T) {
 	assert.Equal(t, "stop", finishReason)
 }
 
+// TestTransformResponsesStreamToChat_ErrorThenFailedDoesNotDuplicate covers a real
+// Responses API stream shape: a standalone "error" event immediately followed by a
+// terminal "response.failed" event describing the same failure (OpenAI commonly sends
+// both). Before this fix, streamErrorReported didn't exist, so the terminal event's own
+// failed-status handling ran unconditionally and re-derived + resent the same error
+// text plus a second finish_reason chunk -- data the client sees after a stream it
+// already considered finished. Usage, which only the terminal event carries, must still
+// come through.
+func TestTransformResponsesStreamToChat_ErrorThenFailedDoesNotDuplicate(t *testing.T) {
+	input := strings.NewReader(
+		sseLine(`{"type":"response.created","response":{"id":"resp_both","object":"response","status":"in_progress"}}`) +
+			sseLine(`{"type":"error","code":"server_error","message":"the model is overloaded"}`) +
+			sseLine(`{"type":"response.failed","response":{"id":"resp_both","object":"response","status":"failed","output":[],`+
+				`"error":{"message":"the model is overloaded","code":"server_error"},`+
+				`"usage":{"input_tokens":10,"output_tokens":0,"total_tokens":10}}}`) +
+			"data: [DONE]\n\n",
+	)
+
+	var out bytes.Buffer
+	require.NoError(t, TransformResponsesStreamToChat(input, "gpt-5-pro", &out))
+	chunks := collectSSEChunks(t, out.Bytes())
+
+	var text string
+	finishReasonCount := 0
+	var usage map[string]interface{}
+	for _, c := range chunks {
+		if u, ok := c["usage"].(map[string]interface{}); ok {
+			usage = u
+		}
+		choices, ok := c["choices"].([]interface{})
+		if !ok || len(choices) == 0 {
+			continue
+		}
+		choice := choices[0].(map[string]interface{})
+		delta := choice["delta"].(map[string]interface{})
+		if content, ok := delta["content"].(string); ok {
+			text += content
+		}
+		if _, ok := choice["finish_reason"].(string); ok {
+			finishReasonCount++
+		}
+	}
+	assert.Equal(t, "the model is overloaded", text, "error text must appear exactly once, not duplicated")
+	assert.Equal(t, 1, finishReasonCount, "finish_reason must be sent exactly once, not once per event describing the same failure")
+	require.NotNil(t, usage, "the terminal event's usage must still reach the client even though its error/finish_reason are suppressed")
+	assert.Equal(t, float64(10), usage["total_tokens"])
+}
+
 func TestTransformResponsesStreamToChat_RefusalDelta(t *testing.T) {
 	input := strings.NewReader(
 		sseLine(`{"type":"response.created","response":{"id":"resp_refusal","object":"response","status":"in_progress"}}`) +
@@ -292,6 +340,49 @@ func TestTransformResponsesStreamToChat_ReasoningSurvivesAsThinkingBlocks(t *tes
 	assert.Equal(t, "responses_reasoning", block["type"])
 	assert.Equal(t, "rs_abc", block["id"])
 	assert.Equal(t, "opaque-blob", block["encrypted_content"])
+}
+
+// TestTransformResponsesStreamToChat_ReasoningNoSummaryStillGetsEmptyList is the
+// streaming-path counterpart of
+// TestReasoningContinuity_RoundTrip_NoSummary (response_to_chat.go's non-streaming
+// reasoningBlocksFromOutput shares the same nonNilSummary helper and had the same
+// omitempty bug): a reasoning item with no "summary" at all (the common case -- this
+// feature never requests reasoning.summary) must still produce "summary":[] on the
+// thinking_blocks chunk, not omit the key or marshal it as null.
+func TestTransformResponsesStreamToChat_ReasoningNoSummaryStillGetsEmptyList(t *testing.T) {
+	input := strings.NewReader(
+		sseLine(`{"type":"response.created","response":{"id":"resp_reason2","object":"response","status":"in_progress"}}`) +
+			sseLine(`{"type":"response.function_call_arguments.delta","output_index":1,"delta":"{}"}`) +
+			sseLine(`{"type":"response.completed","response":{"id":"resp_reason2","object":"response","status":"completed","output":[`+
+				`{"type":"reasoning","id":"rs_xyz","encrypted_content":"opaque-blob-2"},`+
+				`{"type":"function_call","call_id":"call_1","name":"get_weather","arguments":"{}"}`+
+				`]}}`) +
+			"data: [DONE]\n\n",
+	)
+
+	var out bytes.Buffer
+	require.NoError(t, TransformResponsesStreamToChat(input, "o3-pro", &out))
+
+	assert.Contains(t, out.String(), `"summary":[]`,
+		"the thinking_blocks chunk must carry an explicit empty summary list, not omit the key or marshal it as null")
+
+	chunks := collectSSEChunks(t, out.Bytes())
+	var blocks []interface{}
+	for _, c := range chunks {
+		choices := c["choices"].([]interface{})
+		if len(choices) == 0 {
+			continue
+		}
+		delta := choices[0].(map[string]interface{})["delta"].(map[string]interface{})
+		if tb, ok := delta["thinking_blocks"].([]interface{}); ok {
+			blocks = tb
+		}
+	}
+	require.Len(t, blocks, 1)
+	block := blocks[0].(map[string]interface{})
+	summary, ok := block["summary"]
+	require.True(t, ok, `"summary" key must be present even when empty`)
+	assert.Equal(t, []interface{}{}, summary)
 }
 
 func TestTransformResponsesStreamToChat_MalformedLineSkipped(t *testing.T) {

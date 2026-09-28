@@ -529,19 +529,42 @@ func (p *Proxy) buildCredentialRequest(
 		req.nativeResponses = true
 		p.logger.DebugContext(r.Context(), "Native Responses converter path",
 			"model", modelID, "provider", cred.Type, "streaming", streaming)
-	case !cred.IsProxyLike() && p.modelManager != nil && p.modelManager.IsResponsesOnlyForCredential(modelID, cred.Name):
+	case !cred.IsProxyLike() && cred.EffectiveProviderType() == config.ProviderTypeOpenAI &&
+		p.modelManager != nil && p.modelManager.IsResponsesOnlyForCredential(modelID, cred.Name):
 		// The client already called /v1/responses, and this model's upstream
 		// only accepts /v1/responses (config.ModelRPMConfig.ResponsesOnly) --
 		// nothing to convert, forward the client's own Responses-shaped body
 		// as-is instead of falling into the default RequestToChat branch
 		// below, which would send it to /v1/chat/completions and get
 		// rejected by the very upstream this flag exists to route around.
+		//
+		// EffectiveProviderType() == ProviderTypeOpenAI gate: same reasoning as the
+		// Chat Completions branch above (see its comment) -- a responses_only model
+		// (typically a DB model_info.mode:"responses" entry, since that's the one
+		// source of the flag a config typo can't easily catch ahead of time) bound to
+		// a non-OpenAI/vLLM credential must NOT take this passthrough branch. Without
+		// this check, req.passthroughResponses=true below skips conversion entirely,
+		// so the client's raw Responses-shaped body (input/max_output_tokens, no
+		// messages) would be forwarded verbatim to e.g. Anthropic's /v1/messages,
+		// which doesn't understand it -- worse than before this feature existed,
+		// when such a request fell through to RequestToChat and worked normally.
 		req.body = openai.ReplaceResponsesBodyParam(realModelID, body)
 		req.proxyBody = openai.ReplaceResponsesBodyParam(realModelID, proxyBody)
 		req.passthroughResponses = true
 		p.logger.DebugContext(r.Context(), "Responses API request for responses_only model forwarded as passthrough",
 			"model", modelID, "streaming", streaming)
 	default:
+		if !cred.IsProxyLike() && cred.EffectiveProviderType() != config.ProviderTypeOpenAI &&
+			p.modelManager != nil && p.modelManager.IsResponsesOnlyForCredential(modelID, cred.Name) {
+			// responses_only is set on this model+credential (typically a DB
+			// model_info.mode:"responses" entry bound to the wrong credential) but the
+			// credential can't take the passthrough branch above -- falling through to
+			// RequestToChat here is correct (same as before responses_only existed),
+			// but the misconfiguration would otherwise be invisible until someone
+			// notices this model always behaves oddly on /v1/responses.
+			p.logger.WarnContext(r.Context(), "responses_only set on a credential that cannot serve native Responses API passthrough; converting to Chat Completions instead",
+				"model", modelID, "credential", cred.Name, "provider", string(cred.Type))
+		}
 		chatBody, err := responses.RequestToChat(body)
 		if err != nil {
 			return req, err

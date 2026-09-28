@@ -59,6 +59,14 @@ func TransformResponsesStreamToChat(reader io.Reader, model string, output io.Wr
 	toolCallSlots := make(map[int]int)
 	nextToolCallIdx := 0
 	streamedContent := false // any text/refusal already sent, so a failed status doesn't clobber it
+	// streamErrorReported tracks whether a standalone "error"/"response.error" event
+	// already delivered an error-content chunk and a finish_reason to the client. A
+	// real Responses API stream commonly sends that event AND a terminal
+	// response.failed event describing the same failure (see the switch cases below);
+	// without this flag the terminal event's own failed-status handling would
+	// re-derive and resend the same error text plus a second finish_reason -- data
+	// arriving after the client already considers the stream finished.
+	streamErrorReported := false
 
 	ensureChatID := func() string {
 		if chatID == "" {
@@ -178,6 +186,22 @@ func TransformResponsesStreamToChat(reader io.Reader, model string, output io.Wr
 			if event.Response == nil {
 				continue
 			}
+			if streamErrorReported {
+				// A standalone "error"/"response.error" event already delivered the
+				// error content and a finish_reason ("stop") to the client -- this
+				// terminal event describes the same failure a real Responses API
+				// stream commonly repeats. Re-running the block below would resend
+				// that same error text and a second finish_reason: data the client
+				// sees arriving after a stream it already considers finished. Usage
+				// is the one thing only this event can carry (the standalone error
+				// event has no usage field), so still forward it alone if present.
+				if usage := responsesUsageToChat(event.Response.Usage); usage != nil {
+					if err := writeChatUsageChunk(output, ensureChatID(), model, timestamp, usage); err != nil {
+						return err
+					}
+				}
+				continue
+			}
 			// surface the error text for a bare failure, same as ResponseToChat does non-streaming
 			if event.Response.Status == "failed" && !streamedContent && nextToolCallIdx == 0 {
 				if msg := responsesErrorMessage(event.Response.Error); msg != "" {
@@ -222,6 +246,11 @@ func TransformResponsesStreamToChat(reader io.Reader, model string, output io.Wr
 			if err := writeChatStreamChunk(output, ensureChatID(), model, timestamp, delta, &reason); err != nil {
 				return err
 			}
+			// A terminal response.completed/.incomplete/.failed event commonly follows
+			// this one describing the same failure -- see the streamErrorReported
+			// check above, which stops that event from resending this same content
+			// and finish_reason.
+			streamErrorReported = true
 
 		default:
 			// response.output_item.done, response.content_part.*,
@@ -305,6 +334,14 @@ func writeChatTerminalChunks(output io.Writer, chatID, model string, timestamp i
 	if usage == nil {
 		return nil
 	}
+	return writeChatUsageChunk(output, chatID, model, timestamp, usage)
+}
+
+// writeChatUsageChunk writes the usage-only chunk (no choices) half of the terminal
+// contract on its own -- split out of writeChatTerminalChunks for the
+// streamErrorReported case above, which needs usage without a second finish_reason
+// chunk (a standalone "error" event already sent one).
+func writeChatUsageChunk(output io.Writer, chatID, model string, timestamp int64, usage *openai.OpenAIUsage) error {
 	chunk := openai.OpenAIStreamingChunk{
 		ID:      chatID,
 		Object:  "chat.completion.chunk",

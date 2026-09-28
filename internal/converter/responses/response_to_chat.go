@@ -70,7 +70,7 @@ func ResponseToChat(body []byte) ([]byte, error) {
 					Type:             responsesReasoningBlockType,
 					ID:               item.ID,
 					EncryptedContent: item.EncryptedContent,
-					Summary:          item.Summary,
+					Summary:          nonNilSummary(item.Summary),
 				})
 			}
 		case "function_call":
@@ -188,10 +188,14 @@ const responsesReasoningBlockType = "responses_reasoning"
 // extra "thinking_blocks" field on the assistant message that a
 // well-behaved client preserves without understanding it.
 type responsesReasoningBlock struct {
-	Type             string          `json:"type"`
-	ID               string          `json:"id,omitempty"`
-	EncryptedContent string          `json:"encrypted_content,omitempty"`
-	Summary          []OutputContent `json:"summary,omitempty"`
+	Type             string `json:"type"`
+	ID               string `json:"id,omitempty"`
+	EncryptedContent string `json:"encrypted_content,omitempty"`
+	// No omitempty: OpenAI's Responses API requires "summary" to be present as a list
+	// (even an empty one) on a reasoning input item -- see nonNilSummary's doc comment.
+	// Dropping the key entirely when empty (the omitempty behavior) is exactly what
+	// broke the second turn of every reasoning responses_only tool-use conversation.
+	Summary []OutputContent `json:"summary"`
 }
 
 // reasoningBlocksFromOutput pulls the same thinking_blocks entries out of a
@@ -213,10 +217,27 @@ func reasoningBlocksFromOutput(output []OutputItem) []responsesReasoningBlock {
 			Type:             responsesReasoningBlockType,
 			ID:               item.ID,
 			EncryptedContent: item.EncryptedContent,
-			Summary:          item.Summary,
+			Summary:          nonNilSummary(item.Summary),
 		})
 	}
 	return blocks
+}
+
+// nonNilSummary returns s, or a non-nil empty slice when s is nil/empty. A nil Go slice
+// marshals to JSON "null"; OpenAI's Responses API rejects a reasoning input item whose
+// "summary" is anything other than a list -- including null or the key being absent
+// entirely -- with "Invalid 'summary': summary is required and must be a list for
+// reasoning" (see chatThinkingBlocksToReasoningItems, chat_to_responses.go, which
+// rebuilds this same item from what the client echoes back next turn). Summary is only
+// ever non-empty when the client explicitly requested reasoning.summary, which this
+// feature does not do by default, so this is the common case, not an edge case --
+// without it, "summary" comes back as "null" and every second turn of a reasoning
+// responses_only model's tool-use conversation fails.
+func nonNilSummary(s []OutputContent) []OutputContent {
+	if s == nil {
+		return []OutputContent{}
+	}
+	return s
 }
 
 // injectThinkingBlocks patches "thinking_blocks" onto choices[0].message in

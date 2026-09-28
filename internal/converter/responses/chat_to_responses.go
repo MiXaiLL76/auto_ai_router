@@ -3,6 +3,8 @@ package responses
 import (
 	"encoding/json"
 	"fmt"
+
+	"github.com/mixaill76/auto_ai_router/internal/converter/openai"
 )
 
 // ChatRequestToResponses converts a Chat Completions request body into a
@@ -265,8 +267,18 @@ func chatThinkingBlocksToReasoningItems(raw interface{}) []interface{} {
 		if enc, ok := blockMap["encrypted_content"].(string); ok && enc != "" {
 			item["encrypted_content"] = enc
 		}
-		if summary, ok := blockMap["summary"]; ok {
+		// OpenAI requires "summary" to be present as a list (even an empty one) on a
+		// reasoning input item, or the request 400s with "Invalid 'summary': summary is
+		// required and must be a list for reasoning" -- see nonNilSummary's doc comment
+		// (response_to_chat.go) for why this codebase's own client-facing thinking_blocks
+		// no longer omits the key. Defaulting here too, regardless of what's actually in
+		// blockMap, is deliberate belt-and-suspenders: an older client from before that
+		// fix, or any client/proxy that normalizes away an empty-array field, would
+		// otherwise still reproduce the exact same 400 on the next turn.
+		if summary, ok := blockMap["summary"].([]interface{}); ok {
 			item["summary"] = summary
+		} else {
+			item["summary"] = []interface{}{}
 		}
 		items = append(items, item)
 	}
@@ -471,16 +483,27 @@ func chatVerbosityToText(raw map[string]interface{}) {
 	raw["text"] = map[string]interface{}{"verbosity": verbosity}
 }
 
-// chatForceStatelessResponses pins store:false and requests
-// reasoning.encrypted_content. This whole feature rebuilds "input" from the
-// client's own message history on every call (chatMessagesToInput) instead
-// of using previous_response_id, so a reasoning item can only ever be
-// re-sent to the provider as an id-less blob via encrypted_content -- the
-// bare id ResponseToChat would otherwise fall back to means nothing outside
-// the conversation the provider chose to store it under, which store:false
-// isn't relying on anyway.
+// chatForceStatelessResponses pins store:false unconditionally (needed regardless of
+// model: this whole feature rebuilds "input" from the client's own message history on
+// every call -- chatMessagesToInput -- instead of using previous_response_id) and
+// requests reasoning.encrypted_content, but only when the request is actually going to
+// a reasoning-capable model. A reasoning item can only ever be re-sent to the provider
+// as an id-less blob via encrypted_content -- the bare id ResponseToChat would otherwise
+// fall back to means nothing outside the conversation the provider chose to store it
+// under, which store:false isn't relying on anyway -- so encrypted_content genuinely
+// needs requesting for those models. But at least one other OpenAI-API client project
+// has independently hit (and designed around) the same assumption this guards against:
+// some non-reasoning models reject the encrypted-content include value outright, which
+// would make every single request to a non-reasoning responses_only model 400
+// unconditionally -- worse than the reasoning-continuity gap in the modelMappings-miss
+// case below, which only degrades one specific unrecognized reasoning family instead of
+// breaking a whole class of models outright.
 func chatForceStatelessResponses(raw map[string]interface{}) {
 	raw["store"] = false
+
+	if !chatRequestWantsReasoning(raw) {
+		return
+	}
 
 	const encryptedContentInclude = "reasoning.encrypted_content"
 	existing, _ := raw["include"].([]interface{})
@@ -490,6 +513,30 @@ func chatForceStatelessResponses(raw map[string]interface{}) {
 		}
 	}
 	raw["include"] = append(existing, encryptedContentInclude)
+}
+
+// chatRequestWantsReasoning reports whether raw is a request this codebase already
+// knows or can tell is going to a reasoning-capable model: the model belongs to one of
+// the families ReplaceBodyParam already treats as reasoning-capable (openai.
+// IsReasoningModel -- covers the common, intended case: responses_only exists
+// specifically for o1-pro/o3-pro/gpt-5-pro/gpt-6/*-codex-style deployments), or the
+// client explicitly asked for reasoning (a non-empty "reasoning_effort", not yet
+// deleted at this point in the pipeline -- deleteChatOnlyFields runs after this -- or an
+// already Responses-shaped "reasoning" object, e.g. via extra_body). The explicit-ask
+// checks catch a genuinely reasoning-capable model this family list doesn't recognize
+// yet; they can't catch the reverse (a model outside every known family that also never
+// gets asked for reasoning), which is the residual, deliberately accepted risk here.
+func chatRequestWantsReasoning(raw map[string]interface{}) bool {
+	if model, ok := raw["model"].(string); ok && openai.IsReasoningModel(model) {
+		return true
+	}
+	if effort, ok := raw["reasoning_effort"].(string); ok && effort != "" {
+		return true
+	}
+	if reasoning, ok := raw["reasoning"].(map[string]interface{}); ok && len(reasoning) > 0 {
+		return true
+	}
+	return false
 }
 
 // deleteChatOnlyFields removes Chat-Completions-only fields the Responses

@@ -294,6 +294,56 @@ func TestOrchestrateRequest_ResponsesAPI_ResponsesOnlyForcesPassthrough(t *testi
 	require.False(t, hasMessages, "must not be converted to Chat Completions shape")
 }
 
+// TestOrchestrateRequest_ResponsesAPI_ResponsesOnlyIgnoredForNonOpenAICredential covers
+// review finding #2 (round 3): the /v1/responses passthrough branch for a
+// responses_only model was gated only on !cred.IsProxyLike(), unlike the parallel
+// /v1/chat/completions branch which also checks EffectiveProviderType() ==
+// ProviderTypeOpenAI. A responses_only model bound to a non-OpenAI/vLLM credential
+// (typically a DB model_info.mode:"responses" entry synced onto the wrong credential)
+// must fall through to the normal RequestToChat conversion -- exactly the behavior this
+// request had before the responses_only feature existed -- not take the passthrough
+// branch, which would forward the client's raw Responses-shaped body (input, no
+// messages) straight to a provider whose converter/URL builder expects Chat shape.
+func TestOrchestrateRequest_ResponsesAPI_ResponsesOnlyIgnoredForNonOpenAICredential(t *testing.T) {
+	logger := testhelpers.NewTestLogger()
+	builder := NewTestProxyBuilder().
+		WithSingleCredential("anthropic-cred", config.ProviderTypeAnthropic, "https://api.anthropic.com", "upstream-key").
+		WithMasterKey("master-key")
+	modelManager := models.New(logger, 50, []config.ModelRPMConfig{
+		{
+			Name:          "claude-opus-4.5",
+			Credential:    "anthropic-cred",
+			ResponsesOnly: true, // misconfigured on purpose
+		},
+	})
+	modelManager.LoadModelsFromConfig(builder.config.Credentials)
+	builder.config.ModelManager = modelManager
+	prx := builder.Build()
+	prx.logger = logger
+
+	body := `{"model":"claude-opus-4.5","input":"Hello","stream":false}`
+	req := httptest.NewRequest("POST", "/v1/responses", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer master-key")
+	w := httptest.NewRecorder()
+	logCtx := &RequestLogContext{}
+
+	prepared, ok := prx.orchestrateRequest(w, req, logCtx)
+	require.True(t, ok)
+	require.NotNil(t, prepared)
+
+	require.True(t, prepared.isResponsesAPI)
+	require.False(t, prepared.passthroughResponses,
+		"a non-OpenAI/vLLM credential must never take the Responses-shaped passthrough branch, regardless of responses_only")
+	require.True(t, prepared.convertedResp, "must fall through to RequestToChat, same as before responses_only existed")
+
+	var raw map[string]interface{}
+	require.NoError(t, json.Unmarshal(prepared.body, &raw))
+	_, hasMessages := raw["messages"]
+	require.True(t, hasMessages, "body must be converted to Chat Completions shape for the Anthropic converter downstream")
+	_, hasInput := raw["input"]
+	require.False(t, hasInput, "must not still be Responses-API-shaped")
+}
+
 // TestPrepareRequestForCredential_ResponsesOnlyScopedToItsOwnCredential
 // reproduces a real misconfiguration: the same public alias ("gpt-5-pro") is
 // served by two credentials -- a real Responses-API-exclusive OpenAI

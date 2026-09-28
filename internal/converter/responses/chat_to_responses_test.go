@@ -311,6 +311,41 @@ func TestChatRequestToResponses_ForcesStatelessReasoning_KeepsExistingInclude(t 
 	assert.ElementsMatch(t, []interface{}{"file_search_call.results", "reasoning.encrypted_content"}, raw["include"])
 }
 
+// TestChatRequestToResponses_NonReasoningModelSkipsEncryptedContentInclude covers review
+// finding #4: "include":["reasoning.encrypted_content"] was added unconditionally
+// regardless of the model, and at least one other OpenAI-API client project
+// independently reports some non-reasoning models reject that include value outright --
+// which would 400 every single request to a non-reasoning responses_only model. store
+// must still be pinned false (needed for every model this feature serves, reasoning or
+// not), but "include" must stay absent for a model outside every known reasoning family
+// with no explicit reasoning request either.
+func TestChatRequestToResponses_NonReasoningModelSkipsEncryptedContentInclude(t *testing.T) {
+	body := `{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}`
+	out, err := ChatRequestToResponses([]byte(body))
+	require.NoError(t, err)
+
+	var raw map[string]interface{}
+	require.NoError(t, json.Unmarshal(out, &raw))
+	assert.Equal(t, false, raw["store"], "store:false is needed for every model this feature serves")
+	assert.NotContains(t, raw, "include", "a non-reasoning model must not get reasoning.encrypted_content added")
+}
+
+// TestChatRequestToResponses_ExplicitReasoningEffortForcesInclude covers a model
+// outside every family openai.IsReasoningModel recognizes, that the client
+// nonetheless explicitly asked for reasoning on (e.g. a reasoning-capable model this
+// family list hasn't been updated for yet) -- the explicit ask alone must be enough to
+// still request encrypted_content, since ResponseToChat/chatThinkingBlocksToReasoningItems
+// need it for continuity regardless of whether the model name is recognized.
+func TestChatRequestToResponses_ExplicitReasoningEffortForcesInclude(t *testing.T) {
+	body := `{"model":"some-future-reasoning-model","messages":[{"role":"user","content":"hi"}],"reasoning_effort":"high"}`
+	out, err := ChatRequestToResponses([]byte(body))
+	require.NoError(t, err)
+
+	var raw map[string]interface{}
+	require.NoError(t, json.Unmarshal(out, &raw))
+	assert.Equal(t, []interface{}{"reasoning.encrypted_content"}, raw["include"])
+}
+
 func TestChatRequestToResponses_DropsUnsupportedChatOnlyFields(t *testing.T) {
 	body := `{"model":"gpt-5-pro","messages":[{"role":"user","content":"hi"}],
 		"seed":42,"logprobs":true,"top_logprobs":3,"modalities":["text","audio"],
