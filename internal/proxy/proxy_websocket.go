@@ -33,6 +33,10 @@ type wsSSEWriter struct {
 
 	finalResp *responses.Response
 	isFailed  bool
+	// clientGone is set (under writeMu) once a write to the client fails.
+	// It is the only disconnect signal during a turn: the hijacked request's
+	// context is not canceled when the client goes away.
+	clientGone bool
 }
 
 func newWSSSEWriter(conn *websocket.Conn) *wsSSEWriter {
@@ -124,7 +128,9 @@ func (w *wsSSEWriter) parseSSEEvents() {
 		}
 
 		w.writeMu.Lock()
-		_ = w.conn.WriteMessage(websocket.TextMessage, []byte(eventData))
+		if err := w.conn.WriteMessage(websocket.TextMessage, []byte(eventData)); err != nil {
+			w.clientGone = true
+		}
 		w.writeMu.Unlock()
 
 		// Terminal events close the turn (no separate [DONE] needed)
@@ -379,6 +385,10 @@ outerLoop:
 		internalReq.Header.Set("Content-Type", "application/json")
 
 		wsWriter := newWSSSEWriter(conn)
+		// Each turn is one request for per-key metrics; the 101 upgrade
+		// itself is skipped by the metrics middleware.
+		turnCtx, finishKeyTurn := p.withKeyTurn(internalReq.Context())
+		internalReq = internalReq.WithContext(turnCtx)
 
 		// Run ProxyRequest in a goroutine; wait for the turn to finish.
 		turnDone := make(chan struct{})
@@ -408,6 +418,13 @@ outerLoop:
 				}
 				wsWriter.closeDone()
 			}
+			keyStatus := wsWriter.status
+			wsWriter.writeMu.Lock()
+			if wsWriter.clientGone {
+				keyStatus = StatusClientClosedRequest
+			}
+			wsWriter.writeMu.Unlock()
+			finishKeyTurn(keyStatus)
 		}()
 
 		// Wait for the turn to complete or the client to disconnect.

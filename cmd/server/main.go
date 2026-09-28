@@ -43,6 +43,7 @@ import (
 	_ "github.com/mixaill76/auto_ai_router/internal/converter/anthropic/responses"
 	_ "github.com/mixaill76/auto_ai_router/internal/converter/bedrock/responses"
 	_ "github.com/mixaill76/auto_ai_router/internal/converter/vertex/responses"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 	"go.opentelemetry.io/otel/propagation"
@@ -232,6 +233,8 @@ func main() {
 		}
 	}
 
+	keyMetrics := initializeKeyMetrics(cfg, log)
+
 	// ==================== Create Proxy ====================
 	prx := proxy.New(&proxy.Config{
 		Balancer:                     bal,
@@ -278,6 +281,7 @@ func main() {
 		DefaultEstimatedCompletionTokens: cfg.LiteLLMDB.DefaultEstimatedCompletionTokens,
 		VisionFallback:                   cfg.VisionFallback,
 		ServerWriteTimeout:               cfg.Server.WriteTimeout,
+		KeyMetrics:                       keyMetrics,
 	})
 
 	videoRuntime := initializeVideoOrExit(cfg, prx, litellmDBManager, log)
@@ -290,6 +294,9 @@ func main() {
 
 	var wg sync.WaitGroup
 	videoRuntime.start(bgCtx, &wg)
+	if keyMetrics != nil {
+		wg.Go(func() { keyMetrics.Run(bgCtx) })
+	}
 	var updateMutex sync.Mutex
 
 	startMetricsUpdater(bgCtx, cfg, log, bal, rateLimiter, metrics, &wg, &updateMutex)
@@ -334,7 +341,9 @@ func main() {
 		log.Info("Prometheus metrics enabled", "path", "/metrics")
 	}
 
-	var rootHandler http.Handler = mux
+	// Per-key request counters observe the final status of every request, so
+	// they wrap the whole mux (no-op when key metrics are disabled).
+	rootHandler := keyMetrics.Middleware(mux)
 	if otelSDK.TracesEnabled() {
 		// Server spans for every API request; health/readiness probes and
 		// metrics scrapes are excluded to avoid trace noise.
@@ -1007,6 +1016,33 @@ func applyInitialDBModelTable(
 	)
 }
 
+// initializeKeyMetrics registers per-API-key metrics when
+// monitoring.key_metrics is enabled and usable; nil disables every hook.
+func initializeKeyMetrics(cfg *config.Config, log *slog.Logger) *monitoring.KeyMetrics {
+	if !cfg.Monitoring.KeyMetrics.Enabled {
+		return nil
+	}
+	if !cfg.KeyMetricsEnabled() {
+		log.Warn("monitoring.key_metrics.enabled ignored: requires litellm_db.enabled and prometheus_enabled or otel.enabled",
+			"litellm_db_enabled", cfg.LiteLLMDB.Enabled,
+			"metrics_collection_enabled", cfg.MetricsCollectionEnabled())
+		return nil
+	}
+	km, err := monitoring.NewKeyMetrics(prometheus.DefaultRegisterer, monitoring.KeyMetricsOptions{
+		InfoLabels: cfg.Monitoring.KeyMetrics.InfoLabels,
+		MaxKeys:    cfg.Monitoring.KeyMetrics.MaxKeys,
+		IdleTTL:    cfg.Monitoring.KeyMetrics.IdleTTL,
+	})
+	if err != nil {
+		log.Error("Failed to register per-key metrics; disabled", "error", err)
+		return nil
+	}
+	log.Info("Per-key metrics enabled",
+		"max_keys", cfg.Monitoring.KeyMetrics.MaxKeys,
+		"idle_ttl", cfg.Monitoring.KeyMetrics.IdleTTL.String())
+	return km
+}
+
 func initializeLiteLLMDB(cfg *config.Config, log *slog.Logger) litellmdb.Manager {
 	if !cfg.LiteLLMDB.Enabled {
 		log.Info("LiteLLM DB integration disabled - using NoopManager (no security checks)")
@@ -1030,6 +1066,7 @@ func initializeLiteLLMDB(cfg *config.Config, log *slog.Logger) litellmdb.Manager
 		DisableSpendLogsWrite:       cfg.LiteLLMDB.DisableSpendLogsWrite,
 		IncludeTeamSpendInUserSpend: &cfg.LiteLLMDB.IncludeTeamSpendInUserSpend,
 		DailySpendTimezone:          cfg.LiteLLMDB.DailySpendTimezone,
+		EnableCostMargin:            cfg.LiteLLMDB.EnableCostMargin,
 		Logger:                      log,
 	}
 

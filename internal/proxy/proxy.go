@@ -412,7 +412,8 @@ type Config struct {
 	KeyRateLimiter                   *ratelimit.RPMLimiter // Key/user/team/org RPM/TPM enforcement (nil if Redis disabled)
 	BudgetReservationEnabled         bool                  // Config toggle; independent of nil-check for clearer intent
 	KeyRateLimitsEnabled             bool
-	DefaultEstimatedCompletionTokens int // Completion-token estimate when max_tokens is absent (default: 1000)
+	DefaultEstimatedCompletionTokens int                    // Completion-token estimate when max_tokens is absent (default: 1000)
+	KeyMetrics                       *monitoring.KeyMetrics // Per-API-key request counters (nil = disabled)
 
 	VisionFallback     config.VisionFallbackConfig // What to do with images sent to models with supports_vision: false; defaults are applied by config.Load
 	ServerWriteTimeout time.Duration               // http.Server WriteTimeout; restored after vision describe calls
@@ -459,6 +460,7 @@ type Proxy struct {
 	visionFallback                   config.VisionFallbackConfig
 	visionFlagIgnoredWarned          sync.Map // model name -> struct{}: supports_vision ignored warning already logged
 	serverWriteTimeout               time.Duration
+	keyMetrics                       *monitoring.KeyMetrics
 	responseCompat                   *compatlitellm.Transformer
 	version                          string
 	commit                           string
@@ -545,6 +547,7 @@ func New(cfg *Config) *Proxy {
 		defaultEstimatedCompletionTokens: cfg.DefaultEstimatedCompletionTokens,
 		visionFallback:                   cfg.VisionFallback,
 		serverWriteTimeout:               cfg.ServerWriteTimeout,
+		keyMetrics:                       cfg.KeyMetrics,
 		responseCompat:                   responseCompat,
 		client:                           httputil.NewHTTPClient(httpClientCfg),
 		version:                          cfg.Version,
