@@ -23,6 +23,9 @@ type Authenticator struct {
 	pool   *connection.ConnectionPool
 	cache  *Cache
 	logger *slog.Logger
+
+	// costMarginEnabled gates loading cost_margin_config (see costMarginConfigs)
+	costMarginEnabled bool
 }
 
 // NewAuthenticator creates a new authenticator
@@ -32,6 +35,13 @@ func NewAuthenticator(pool *connection.ConnectionPool, cache *Cache, logger *slo
 		cache:  cache,
 		logger: logger,
 	}
+}
+
+// WithCostMargin enables applying metadata.cost_margin_config. When disabled
+// TokenInfo.CostMarginConfigs stays empty, so no margin is ever added.
+func (a *Authenticator) WithCostMargin(enabled bool) *Authenticator {
+	a.costMarginEnabled = enabled
+	return a
 }
 
 // FetchMasterKey seeds the auth cache with the proxy master key. The config
@@ -403,6 +413,9 @@ func (a *Authenticator) fetchTokenFromDB(ctx context.Context, hashedToken string
 // same split budgetLevels uses. Parsing is best-effort: a config AIR does not
 // understand must not fail authentication.
 func (a *Authenticator) costMarginConfigs(info *models.TokenInfo, keyMetadata, userMetadata, teamMetadata, orgMetadata []byte) []models.CostMarginConfig {
+	if !a.costMarginEnabled {
+		return nil
+	}
 	type layer struct {
 		level string
 		raw   []byte

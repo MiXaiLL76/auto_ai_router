@@ -81,6 +81,10 @@ type Config struct {
 	// grouped by. Nil means UTC. Stored timestamps are unaffected.
 	DailySpendTimezone *time.Location
 
+	// EnableCostMargin loads metadata.cost_margin_config into
+	// TokenInfo.CostMarginConfigs. Off by default: no margin is applied.
+	EnableCostMargin bool
+
 	// Logger
 	Logger *slog.Logger
 }

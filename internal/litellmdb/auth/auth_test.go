@@ -454,7 +454,7 @@ func TestAuthenticator_CostMarginConfigs(t *testing.T) {
 		{"team key without organization", models.TokenInfo{TeamID: "t"}, []float64{0.1, 0.3, 0.4}},
 		{"organization key of a user", models.TokenInfo{UserID: "u", OrganizationID: "o"}, []float64{0.1, 0.4}},
 	}
-	auth := NewAuthenticator(nil, nil, slog.Default())
+	auth := NewAuthenticator(nil, nil, slog.Default()).WithCostMargin(true)
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			configs := auth.costMarginConfigs(&tt.info, key, user, team, org)
@@ -468,10 +468,17 @@ func TestAuthenticator_CostMarginConfigs(t *testing.T) {
 }
 
 func TestAuthenticator_CostMarginConfigs_SkipsMissingEntities(t *testing.T) {
-	auth := NewAuthenticator(nil, nil, slog.Default())
+	auth := NewAuthenticator(nil, nil, slog.Default()).WithCostMargin(true)
 	info := &models.TokenInfo{TeamID: "t"}
 	configs := auth.costMarginConfigs(info, []byte(`{}`), nil, []byte(`{"cost_margin_config": {"global": 0.3}}`), nil)
 	assert.Equal(t, []models.CostMarginConfig{{"global": {Percentage: 0.3}}}, configs)
+}
+
+func TestAuthenticator_CostMarginConfigs_DisabledByDefault(t *testing.T) {
+	auth := NewAuthenticator(nil, nil, slog.Default())
+	info := &models.TokenInfo{TeamID: "t"}
+	margin := []byte(`{"cost_margin_config": {"global": 0.3}}`)
+	assert.Nil(t, auth.costMarginConfigs(info, margin, margin, margin, margin))
 }
 
 func TestAuthenticator_ValidateToken_EmptyToken(t *testing.T) {

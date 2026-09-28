@@ -262,7 +262,7 @@ The count and selected context size are written to spend metadata under `usage_o
 
 ### Cost margin
 
-AIR adds a [LiteLLM-style margin](https://docs.litellm.ai/docs/proxy/provider_margins) to the calculated cost. It is set in `metadata.cost_margin_config`: keys are AIR credential types (`openai`, `vertex-ai`, ...) or `global`, values are a fraction (`0.10` = 10%) or `{"percentage": 0.10, "fixed_amount": 0.001}` (USD per request).
+AIR can add a [LiteLLM-style margin](https://docs.litellm.ai/docs/proxy/provider_margins) to the calculated cost. It is off by default: enable it with `litellm_db.enable_cost_margin: true`, otherwise `cost_margin_config` is ignored and the raw cost is billed. The margin is set in `metadata.cost_margin_config`: keys are AIR credential types (`openai`, `vertex-ai`, ...) or `global`, values are a fraction (`0.10` = 10%) or `{"percentage": 0.10, "fixed_amount": 0.001}` (USD per request).
 
 ```json
 {"cost_margin_config": {"global": 0.05, "openai": {"percentage": 0.1, "fixed_amount": 0.001}}}
