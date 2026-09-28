@@ -3,6 +3,7 @@ package monitoring
 import (
 	"bufio"
 	"context"
+	"fmt"
 	"net"
 	"net/http"
 	"slices"
@@ -67,7 +68,8 @@ var KeyInfoLabels = []string{
 	KeyInfoLabelOrganizationID,
 }
 
-// DefaultKeyInfoLabels is used when info_labels is not configured. user_email
+// DefaultKeyInfoLabels is used when info_labels is not configured (nil; an
+// empty list means no owner labels). user_email
 // is opt-in: /metrics is usually unauthenticated inside the cluster.
 var DefaultKeyInfoLabels = []string{
 	KeyInfoLabelKeyAlias,
@@ -150,6 +152,14 @@ func NewKeyMetrics(reg prometheus.Registerer, opts KeyMetricsOptions) (*KeyMetri
 	infoLabels := opts.InfoLabels
 	if infoLabels == nil {
 		infoLabels = DefaultKeyInfoLabels
+	}
+	for i, label := range infoLabels {
+		if !slices.Contains(KeyInfoLabels, label) {
+			return nil, fmt.Errorf("unknown key info label %q", label)
+		}
+		if slices.Contains(infoLabels[:i], label) {
+			return nil, fmt.Errorf("duplicate key info label %q", label)
+		}
 	}
 	m := &KeyMetrics{
 		infoLabels: append([]string(nil), infoLabels...),

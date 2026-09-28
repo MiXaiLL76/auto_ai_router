@@ -8,7 +8,6 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/mixaill76/auto_ai_router/internal/converter/responses"
-	"github.com/mixaill76/auto_ai_router/internal/monitoring"
 )
 
 var wsUpgrader = websocket.Upgrader{
@@ -382,7 +381,7 @@ outerLoop:
 		wsWriter := newWSSSEWriter(conn)
 		// Each turn is one request for per-key metrics; the 101 upgrade
 		// itself is skipped by the metrics middleware.
-		turnCtx, turnKey := monitoring.WithKeyIdentitySlot(internalReq.Context())
+		turnCtx, finishKeyTurn := p.withKeyTurn(internalReq.Context())
 		internalReq = internalReq.WithContext(turnCtx)
 
 		// Run ProxyRequest in a goroutine; wait for the turn to finish.
@@ -413,9 +412,7 @@ outerLoop:
 				}
 				wsWriter.closeDone()
 			}
-			if id, ok := turnKey(); ok {
-				p.keyMetrics.ObserveStatus(id, wsWriter.status)
-			}
+			finishKeyTurn(wsWriter.status)
 		}()
 
 		// Wait for the turn to complete or the client to disconnect.

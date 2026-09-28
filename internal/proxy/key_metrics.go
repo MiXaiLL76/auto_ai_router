@@ -41,11 +41,24 @@ func (p *Proxy) noteRequestKey(ctx context.Context, info *models.TokenInfo) {
 	monitoring.SetRequestKeyIdentity(ctx, keyIdentityFromTokenInfo(info))
 }
 
-// observeKeyRequest counts one finished request directly, for flows that are
-// not an HTTP request of their own (native WebSocket turns).
-func (p *Proxy) observeKeyRequest(info *models.TokenInfo, statusCode int) {
-	if p.keyMetrics == nil || info == nil {
-		return
+// withKeyTurn gives one WebSocket turn its own key identity slot, so the turn
+// is counted like a standalone HTTP request. finish records the turn with its
+// final status; 0 means no status was set and becomes 200, or 499 when the
+// client went away (ctx done). finish is a no-op if the turn never
+// authenticated.
+func (p *Proxy) withKeyTurn(ctx context.Context) (context.Context, func(status int)) {
+	if p.keyMetrics == nil {
+		return ctx, func(int) {}
 	}
-	p.keyMetrics.ObserveStatus(keyIdentityFromTokenInfo(info), statusCode)
+	turnCtx, identity := monitoring.WithKeyIdentitySlot(ctx)
+	return turnCtx, func(status int) {
+		id, ok := identity()
+		if !ok {
+			return
+		}
+		if status == 0 && ctx.Err() != nil {
+			status = monitoring.KeyStatusClientClosed
+		}
+		p.keyMetrics.ObserveStatus(id, status)
+	}
 }

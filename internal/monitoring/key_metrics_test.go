@@ -2,6 +2,7 @@ package monitoring
 
 import (
 	"bufio"
+	"context"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -9,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
@@ -229,4 +231,51 @@ func TestKeyMetrics_ExposedNames(t *testing.T) {
 auto_ai_router_key_info{key="k",team_alias="ml"} 1
 `
 	require.NoError(t, testutil.GatherAndCompare(reg, strings.NewReader(expected), "auto_ai_router_key_info"))
+}
+
+func TestKeyMetrics_InfoLabelsMatchConfig(t *testing.T) {
+	// config validates info_labels against its own copy of the list.
+	assert.Equal(t, KeyInfoLabels, config.KeyMetricsInfoLabels)
+}
+
+func TestKeyMetrics_RejectsBadInfoLabels(t *testing.T) {
+	_, err := NewKeyMetrics(prometheus.NewRegistry(), KeyMetricsOptions{InfoLabels: []string{"key_hash"}})
+	assert.Error(t, err)
+	_, err = NewKeyMetrics(prometheus.NewRegistry(), KeyMetricsOptions{InfoLabels: []string{KeyInfoLabelTeamID, KeyInfoLabelTeamID}})
+	assert.Error(t, err)
+}
+
+func TestKeyMetrics_OverflowDoesNotTakeMaxKeysSlot(t *testing.T) {
+	m, _ := newTestKeyMetrics(t, KeyMetricsOptions{IdleTTL: time.Hour, MaxKeys: 2})
+	now := time.Unix(1_700_000_000, 0)
+	m.now = func() time.Time { return now }
+
+	m.Observe(KeyIdentity{Key: "k1"}, 200)
+	now = now.Add(50 * time.Minute)
+	m.Observe(KeyIdentity{Key: "k2"}, 200)
+	m.Observe(KeyIdentity{Key: "k3"}, 200) // over the cap
+	assert.Len(t, m.keys, 2)
+
+	now = now.Add(11 * time.Minute)
+	m.evictIdle() // drops k1 only
+	m.Observe(KeyIdentity{Key: "k4"}, 200)
+	assert.Equal(t, 1.0, keyRequests(m, "k4", "200"), "a freed slot goes to the next new key")
+	assert.Equal(t, 1.0, keyRequests(m, KeyLabelOverflow, "200"))
+}
+
+func TestKeyMetrics_MiddlewareClientGoneIs499(t *testing.T) {
+	m, _ := newTestKeyMetrics(t, KeyMetricsOptions{})
+	handler := m.Middleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		SetRequestKeyIdentity(r.Context(), KeyIdentity{Key: "k"})
+		if r.URL.Path == "/late" {
+			_, _ = w.Write([]byte("partial")) // status already sent: stays 200
+		}
+	}))
+	for _, path := range []string{"/gone", "/late"} {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		handler.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, path, nil).WithContext(ctx))
+	}
+	assert.Equal(t, 1.0, keyRequests(m, "k", "499"))
+	assert.Equal(t, 1.0, keyRequests(m, "k", "200"))
 }

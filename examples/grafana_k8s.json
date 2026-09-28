@@ -3623,11 +3623,18 @@
           "expr": "sum(rate(auto_ai_router_key_requests_total{service_name=~\"$service\"}[5m]) * 60 * on (key, instance) group_left (key_alias) auto_ai_router_key_info{service_name=~\"$service\",key_alias=~\"$key_alias\",team_alias=~\"$key_team\"}) or vector(0)",
           "refId": "A",
           "legendFormat": "Key RPM"
+        },
+        {
+          "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
+          "editorMode": "code",
+          "expr": "sum(rate(auto_ai_router_key_requests_total{service_name=~\"$service\",key=\"__other__\"}[5m]) * 60) or vector(0)",
+          "refId": "B",
+          "legendFormat": "Overflow (__other__)"
         }
       ],
       "title": "Key RPM",
       "type": "stat",
-      "description": "Requests per minute from all keys (matching the key filters)."
+      "description": "Requests per minute from all keys (matching the key filters). Overflow (__other__) is traffic of keys first seen after max_keys was reached: it has no owner labels, so it is excluded from every other key panel; non-zero means max_keys is too low."
     },
     {
       "fieldConfig": {
@@ -3663,7 +3670,7 @@
         {
           "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
           "editorMode": "code",
-          "expr": "(sum(rate(auto_ai_router_key_requests_total{service_name=~\"$service\",status=~\"[45]..\"}[5m]) * on (key, instance) group_left (key_alias) auto_ai_router_key_info{service_name=~\"$service\",key_alias=~\"$key_alias\",team_alias=~\"$key_team\"}) or vector(0)) / sum(rate(auto_ai_router_key_requests_total{service_name=~\"$service\"}[5m]) * on (key, instance) group_left (key_alias) auto_ai_router_key_info{service_name=~\"$service\",key_alias=~\"$key_alias\",team_alias=~\"$key_team\"})",
+          "expr": "(sum(rate(auto_ai_router_key_requests_total{service_name=~\"$service\",status=~\"[45]..\",status!=\"499\"}[5m]) * on (key, instance) group_left (key_alias) auto_ai_router_key_info{service_name=~\"$service\",key_alias=~\"$key_alias\",team_alias=~\"$key_team\"}) or vector(0)) / sum(rate(auto_ai_router_key_requests_total{service_name=~\"$service\"}[5m]) * on (key, instance) group_left (key_alias) auto_ai_router_key_info{service_name=~\"$service\",key_alias=~\"$key_alias\",team_alias=~\"$key_team\"})",
           "refId": "A",
           "legendFormat": "Key Error Rate"
         }
@@ -4021,7 +4028,7 @@
         {
           "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
           "editorMode": "code",
-          "expr": "topk(10, sum by (key, key_alias, status) (rate(auto_ai_router_key_requests_total{service_name=~\"$service\",status=~\"[45]..\"}[5m]) * 60 * on (key, instance) group_left (key_alias) auto_ai_router_key_info{service_name=~\"$service\",key_alias=~\"$key_alias\",team_alias=~\"$key_team\"}))",
+          "expr": "topk(10, sum by (key, key_alias, status) (rate(auto_ai_router_key_requests_total{service_name=~\"$service\",status=~\"[45]..\",status!=\"499\"}[5m]) * 60 * on (key, instance) group_left (key_alias) auto_ai_router_key_info{service_name=~\"$service\",key_alias=~\"$key_alias\",team_alias=~\"$key_team\"}))",
           "refId": "A",
           "legendFormat": "{{key_alias}} ({{key}}) HTTP {{status}}",
           "range": true
@@ -4120,7 +4127,7 @@
         {
           "datasource": { "type": "prometheus", "uid": "${DS_PROMETHEUS}" },
           "editorMode": "code",
-          "expr": "sum by (key, key_alias, user_id, team_id, team_alias, organization_id) (increase(auto_ai_router_key_requests_total{service_name=~\"$service\",status=~\"[45]..\"}[$__range]) * on (key, instance) group_left (key_alias, user_id, team_id, team_alias, organization_id) auto_ai_router_key_info{service_name=~\"$service\",key_alias=~\"$key_alias\",team_alias=~\"$key_team\"})",
+          "expr": "sum by (key, key_alias, user_id, team_id, team_alias, organization_id) (increase(auto_ai_router_key_requests_total{service_name=~\"$service\",status=~\"[45]..\",status!=\"499\"}[$__range]) * on (key, instance) group_left (key_alias, user_id, team_id, team_alias, organization_id) auto_ai_router_key_info{service_name=~\"$service\",key_alias=~\"$key_alias\",team_alias=~\"$key_team\"})",
           "refId": "C",
           "format": "table",
           "instant": true

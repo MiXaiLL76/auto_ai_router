@@ -37,6 +37,14 @@ key_metrics:
 	assert.Equal(t, time.Duration(0), m.KeyMetrics.IdleTTL)
 }
 
+func TestKeyMetricsConfig_EmptyInfoLabelsDisablesOwnerLabels(t *testing.T) {
+	var m MonitoringConfig
+	require.NoError(t, yaml.Unmarshal([]byte("key_metrics:\n  info_labels: []\n"), &m))
+	// Explicit [] must stay distinguishable from "not set" (nil = defaults).
+	assert.NotNil(t, m.KeyMetrics.InfoLabels)
+	assert.Empty(t, m.KeyMetrics.InfoLabels)
+}
+
 func TestKeyMetricsConfig_Invalid(t *testing.T) {
 	for name, body := range map[string]string{
 		"unknown label":    "info_labels: [key_hash]",

@@ -10,7 +10,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/mixaill76/auto_ai_router/internal/monitoring"
 	"github.com/mixaill76/auto_ai_router/internal/scope"
 	"gopkg.in/yaml.v3"
 )
@@ -1083,7 +1082,8 @@ type KeyMetricsConfig struct {
 	Enabled bool `yaml:"enabled"` // default: false
 	// InfoLabels selects the owner labels on auto_ai_router_key_info
 	// (key_alias, user_id, user_email, team_id, team_alias, organization_id).
-	// Empty means monitoring.DefaultKeyInfoLabels (everything but user_email).
+	// Unset (nil) means monitoring.DefaultKeyInfoLabels (everything but
+	// user_email); an explicit empty list disables owner labels entirely.
 	InfoLabels []string `yaml:"info_labels,omitempty"`
 	// MaxKeys caps distinct key label values; keys first seen past the cap
 	// are counted under key="__other__". 0 = unlimited. default: 5000
@@ -1092,6 +1092,11 @@ type KeyMetricsConfig struct {
 	// 0 = never. default: 24h
 	IdleTTL time.Duration `yaml:"idle_ttl,omitempty"`
 }
+
+// KeyMetricsInfoLabels lists the accepted info_labels values. It mirrors
+// monitoring.KeyInfoLabels (kept in sync by a test) so config does not pull in
+// the metrics package.
+var KeyMetricsInfoLabels = []string{"key_alias", "user_id", "user_email", "team_id", "team_alias", "organization_id"}
 
 const (
 	defaultKeyMetricsMaxKeys = 5000
@@ -1137,15 +1142,18 @@ func (k *KeyMetricsConfig) UnmarshalYAML(value *yaml.Node) error {
 	}
 
 	k.InfoLabels = nil
+	if temp.InfoLabels != nil {
+		k.InfoLabels = make([]string, 0, len(temp.InfoLabels))
+	}
 	seen := make(map[string]bool, len(temp.InfoLabels))
 	for _, raw := range temp.InfoLabels {
 		label := strings.TrimSpace(resolveEnvString(raw))
 		if label == "" || seen[label] {
 			continue
 		}
-		if !slices.Contains(monitoring.KeyInfoLabels, label) {
+		if !slices.Contains(KeyMetricsInfoLabels, label) {
 			return fmt.Errorf("invalid monitoring.key_metrics.info_labels: unknown label %q (allowed: %s)",
-				label, strings.Join(monitoring.KeyInfoLabels, ", "))
+				label, strings.Join(KeyMetricsInfoLabels, ", "))
 		}
 		seen[label] = true
 		k.InfoLabels = append(k.InfoLabels, label)

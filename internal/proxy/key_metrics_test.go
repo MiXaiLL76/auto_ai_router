@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -97,4 +98,43 @@ auto_ai_router_key_requests_total{key="fedcba987654",status="429"} 1
 auto_ai_router_key_requests_total{key="master",status="200"} 1
 `
 	require.NoError(t, testutil.GatherAndCompare(reg, strings.NewReader(expected)))
+}
+
+func TestWithKeyTurn(t *testing.T) {
+	var disabled Proxy
+	ctx := context.Background()
+	gotCtx, finish := disabled.withKeyTurn(ctx)
+	assert.Equal(t, ctx, gotCtx)
+	finish(http.StatusOK) // no-op without metrics
+
+	reg := prometheus.NewRegistry()
+	km, err := monitoring.NewKeyMetrics(reg, monitoring.KeyMetricsOptions{InfoLabels: []string{}})
+	require.NoError(t, err)
+	prx := &Proxy{keyMetrics: km}
+	info := &dbmodels.TokenInfo{Token: "0123456789abcdef0123456789abcdef"}
+
+	// The WS upgrade's own slot must not be touched by the turn.
+	outerCtx, outer := monitoring.WithKeyIdentitySlot(context.Background())
+	turnCtx, finish := prx.withKeyTurn(outerCtx)
+	prx.noteRequestKey(turnCtx, info)
+	finish(0)
+	_, ok := outer()
+	assert.False(t, ok)
+
+	_, finish = prx.withKeyTurn(context.Background())
+	finish(http.StatusBadGateway) // turn never authenticated: not counted
+
+	clientCtx, cancel := context.WithCancel(context.Background())
+	turnCtx, finish = prx.withKeyTurn(clientCtx)
+	prx.noteRequestKey(turnCtx, info)
+	cancel()
+	finish(0) // client disconnected before any status
+
+	expected := `
+# HELP auto_ai_router_key_requests_total Total client requests per API key (hash prefix) and final HTTP status; join with auto_ai_router_key_info for owner labels
+# TYPE auto_ai_router_key_requests_total counter
+auto_ai_router_key_requests_total{key="0123456789ab",status="200"} 1
+auto_ai_router_key_requests_total{key="0123456789ab",status="499"} 1
+`
+	require.NoError(t, testutil.GatherAndCompare(reg, strings.NewReader(expected), "auto_ai_router_key_requests_total"))
 }

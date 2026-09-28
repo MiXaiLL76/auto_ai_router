@@ -42,6 +42,7 @@ type nativeWSTurn struct {
 	id          string
 	body        []byte
 	accumulator *completionTokenAccumulator
+	finishKey   func(status int)
 }
 
 type nativeWSSession struct {
@@ -328,7 +329,7 @@ func (s *nativeWSSession) prepare(event map[string]json.RawMessage, historyToken
 	if s.credential != nil {
 		routing.credential = s.credential.Name
 	}
-	ctx := context.WithValue(s.request.Context(), nativeWSRoutingKey{}, routing)
+	ctx, finishKey := s.proxy.withKeyTurn(context.WithValue(s.request.Context(), nativeWSRoutingKey{}, routing))
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "/v1/responses", bytes.NewReader(body))
 	if err != nil {
 		return nil, nil, false
@@ -371,7 +372,7 @@ func (s *nativeWSSession) prepare(event map[string]json.RawMessage, historyToken
 	}
 	if !ok {
 		s.proxy.reconcileBudgetAndRateLimits(logCtx, 0)
-		s.proxy.observeKeyRequest(logCtx.TokenInfo, recorder.statusCode)
+		finishKey(recorder.statusCode)
 		s.sendHTTPError(recorder)
 		return nil, nil, false
 	}
@@ -387,7 +388,7 @@ func (s *nativeWSSession) prepare(event map[string]json.RawMessage, historyToken
 	logCtx.WebSearchRequested, logCtx.WebSearchContextSize = extractWebSearchRequestUsage(prepared.body, "application/json")
 	s.proxy.setPromptTokensEstimate(logCtx, prepared.body, prepared.realModelID)
 	logCtx.ActualCredentialName = s.actualCredential
-	return &nativeWSTurn{log: logCtx, body: prepared.body, accumulator: s.proxy.newCompletionTokenAccumulator(prepared.realModelID)}, wire, true
+	return &nativeWSTurn{log: logCtx, body: prepared.body, accumulator: s.proxy.newCompletionTokenAccumulator(prepared.realModelID), finishKey: finishKey}, wire, true
 }
 
 func nativeWebSocketURL(baseURL string) (string, error) {
@@ -592,7 +593,7 @@ func (s *nativeWSSession) finish(turn *nativeWSTurn, event []byte, outcome strin
 	if outcome == "client_aborted" {
 		keyStatus = monitoring.KeyStatusClientClosed
 	}
-	s.proxy.observeKeyRequest(turn.log.TokenInfo, keyStatus)
+	turn.finishKey(keyStatus)
 	if turn.log.Credential != nil && turn.log.TokenUsage != nil {
 		tokens := turn.log.TokenUsage.PromptTokens + turn.log.TokenUsage.CompletionTokens
 		s.proxy.rateLimiter.ConsumeTokens(turn.log.Credential.Name, tokens)
