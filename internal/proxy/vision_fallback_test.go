@@ -63,6 +63,10 @@ func newVisionUpstream(t *testing.T, u *visionUpstream) *httptest.Server {
 			_, _ = w.Write([]byte(`{"id":"resp_1","object":"response","model":"glm","status":"completed","output":[{"type":"message","id":"msg_1","role":"assistant","content":[{"type":"output_text","text":"ok"}]}],"usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15}}`))
 			return
 		}
+		if r.URL.Path == "/v1/messages" {
+			_, _ = w.Write([]byte(`{"id":"msg_1","type":"message","role":"assistant","model":"glm","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":10,"output_tokens":5}}`))
+			return
+		}
 		if streaming && body["model"] != "qwen-vl" {
 			writeVisionSSE(w, visionChatStreamEvents)
 			return
@@ -113,6 +117,8 @@ func newVisionProxy(t *testing.T, upstreamURL string, fallback config.VisionFall
 		{Name: "glm-alias", Model: "zai/glm-5", Credential: credential.Name, RPM: -1, TPM: -1, SupportsVision: &noVision},
 		// Responses API converted to Chat Completions instead of passed through.
 		{Name: "glm-chatresp", Credential: credential.Name, RPM: -1, TPM: -1, SupportsVision: &noVision, PassthroughResponses: &noVision},
+		// /v1/messages forwarded natively: the upstream answers in Anthropic format.
+		{Name: "glm-msgpass", Credential: credential.Name, RPM: -1, TPM: -1, SupportsVision: &noVision, PassthroughMessages: &vision},
 		// Not vLLM-only: the flag must be ignored.
 		{Name: "openai-text", Credential: openaiCredential.Name, RPM: -1, TPM: -1, SupportsVision: &noVision},
 		{Name: "mixed", Credential: credential.Name, RPM: -1, TPM: -1, SupportsVision: &noVision},
@@ -130,6 +136,7 @@ func newVisionProxy(t *testing.T, upstreamURL string, fallback config.VisionFall
 		"mixed":        {InputCostPerToken: 1e-7, OutputCostPerToken: 1e-6},
 		"glm-alias":    {InputCostPerToken: 1e-7, OutputCostPerToken: 1e-6},
 		"glm-chatresp": {InputCostPerToken: 1e-7, OutputCostPerToken: 1e-6},
+		"glm-msgpass":  {InputCostPerToken: 1e-7, OutputCostPerToken: 1e-6},
 	})
 
 	builder := NewTestProxyBuilder().WithCredentials(creds...).WithMasterKey("master-key")
@@ -199,9 +206,9 @@ func TestVisionFallback_DescribesCurrentTurnImage(t *testing.T) {
 	assert.Equal(t, "qwen-vl", describe["model"])
 	assert.Equal(t, false, describe["stream"])
 	describeParts := messageParts(t, describe, 1)
-	require.Len(t, describeParts, 2)
-	assert.Contains(t, partText(t, describeParts[0]), "что на картинке?", "the user's question is passed as context")
-	assert.Equal(t, visionTestImage, describeParts[1].(map[string]any)["image_url"].(map[string]any)["url"])
+	require.Len(t, describeParts, 1, "only the image: the description must not depend on this turn's question")
+	assert.Equal(t, visionTestImage, describeParts[0].(map[string]any)["image_url"].(map[string]any)["url"])
+	assert.NotContains(t, mustJSON(t, describe), "что на картинке?")
 
 	main := bodies[1]
 	assert.Equal(t, "glm", main["model"])
@@ -363,7 +370,7 @@ func TestVisionFallback_MessagesAPI(t *testing.T) {
 	_, bodies := u.snapshot()
 	require.Len(t, bodies, 2)
 	describeParts := messageParts(t, bodies[0], 1)
-	assert.Equal(t, "data:image/png;base64,iVBORw0KGgo=", describeParts[1].(map[string]any)["image_url"].(map[string]any)["url"])
+	assert.Equal(t, "data:image/png;base64,iVBORw0KGgo=", describeParts[0].(map[string]any)["image_url"].(map[string]any)["url"])
 	assert.Contains(t, mustJSON(t, bodies[1]["messages"]), visionTestOwl)
 	assert.NotContains(t, mustJSON(t, bodies[1]["messages"]), "iVBORw0KGgo=")
 }
@@ -394,7 +401,7 @@ func TestCollectVisionImages_ResponsesTurnBoundary(t *testing.T) {
 		{"type":"function_call","call_id":"c1","name":"shot","arguments":"{}"},
 		{"type":"function_call_output","call_id":"c1","output":[{"type":"input_image","image_url":"data:new"},{"type":"input_image","file_id":"file-1"}]}]}`))
 	require.NoError(t, err)
-	refs, _ := collectVisionImages(root, visionFormatResponses)
+	refs := collectVisionImages(root, visionFormatResponses)
 	require.Len(t, refs, 3)
 	assert.False(t, refs[0].current)
 	assert.True(t, refs[1].current)
@@ -408,11 +415,10 @@ func TestCollectVisionImages_MessagesToolResult(t *testing.T) {
 		{"role":"assistant","content":[{"type":"tool_use","id":"t1","name":"shot","input":{}}]},
 		{"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":[{"type":"image","source":{"type":"url","url":"https://x/a.png"}}]},{"type":"text","text":"что тут?"}]}]}`))
 	require.NoError(t, err)
-	refs, question := collectVisionImages(root, visionFormatMessages)
+	refs := collectVisionImages(root, visionFormatMessages)
 	require.Len(t, refs, 1)
 	assert.True(t, refs[0].current)
 	assert.Equal(t, "https://x/a.png", refs[0].url)
-	assert.Equal(t, "что тут?", question)
 }
 
 func mustJSON(t *testing.T, v any) string {
@@ -653,19 +659,16 @@ func TestApplyVisionFallback_EncodeFailure(t *testing.T) {
 }
 
 func TestCollectVisionImages_Robustness(t *testing.T) {
-	long := strings.Repeat("я", maxVisionQuestionChars+10) + "END"
 	root, err := decodeVisionBody([]byte(`{"messages":[
 		"junk",
 		{"role":"user","content":null},
-		{"role":"user","content":["junk",{"type":"text","text":"` + long + `"},{"type":"text","text":42},{"type":"image_url","image_url":42}]}]}`))
+		{"role":"user","content":["junk",{"type":"text","text":42},{"type":"image_url","image_url":42}]}]}`))
 	require.NoError(t, err)
-	refs, question := collectVisionImages(root, visionFormatChat)
+	refs := collectVisionImages(root, visionFormatChat)
 	require.Len(t, refs, 1)
 	assert.Empty(t, refs[0].url, "an image_url of an unknown shape has no usable URL")
-	assert.Equal(t, maxVisionQuestionChars, len([]rune(question)))
-	assert.True(t, strings.HasSuffix(question, "END"), "the latest text is kept")
 
-	empty, _ := collectVisionImages(map[string]any{}, visionFormatChat)
+	empty := collectVisionImages(map[string]any{}, visionFormatChat)
 	assert.Empty(t, empty)
 }
 

@@ -2164,8 +2164,8 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 
 		// Vision fallback: prepend the image descriptions to the answer while the body
 		// is still in the upstream format; the conversions below carry them along.
-		if logCtx.visionInject != nil && !prepared.nativeResponses && resp.StatusCode >= 200 && resp.StatusCode < 300 {
-			if injected, ok := injectVisionIntoResponse(finalResponseBody, logCtx.visionInject, prepared.passthroughResponses); ok {
+		if inj := visionInjectionFor(logCtx, prepared, resp.StatusCode); inj != nil {
+			if injected, ok := injectVisionIntoResponse(finalResponseBody, inj, prepared.passthroughResponses); ok {
 				finalResponseBody = injected
 				dropRepresentationIntegrityHeaders(resp.Header)
 			}
@@ -2457,8 +2457,8 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 
 		// Vision fallback: the image descriptions start the answer text. Injected into
 		// the upstream stream, before any conversion to the client format.
-		if logCtx.visionInject != nil && !prepared.nativeResponses && resp.StatusCode >= 200 && resp.StatusCode < 300 {
-			resp.Body = newVisionStreamInjector(resp.Body, logCtx.visionInject, prepared.passthroughResponses)
+		if inj := visionInjectionFor(logCtx, prepared, resp.StatusCode); inj != nil {
+			resp.Body = newVisionStreamInjector(resp.Body, inj, prepared.passthroughResponses)
 		}
 
 		streamCompleted := false

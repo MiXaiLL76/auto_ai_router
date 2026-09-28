@@ -376,7 +376,7 @@ func TestVisionRestore_MatchesByNumber(t *testing.T) {
 		{"type":"message","role":"assistant","content":[{"type":"output_text","text":` + mustJSON(t, marker+"ответ") + `}]},
 		{"role":"user","content":[{"type":"input_image","image_url":"c"}]}]}`))
 	require.NoError(t, err)
-	refs, _ := collectVisionImages(root, visionFormatResponses)
+	refs := collectVisionImages(root, visionFormatResponses)
 	require.Len(t, refs, 4)
 	require.NotNil(t, refs[0].restored)
 	assert.Equal(t, "первая", refs[0].restored.text)
@@ -469,4 +469,86 @@ func TestInjectVisionIntoResponse_ResponsesToolCallsOnly(t *testing.T) {
 
 func TestVisionFallbackConfig_InjectDefault(t *testing.T) {
 	assert.True(t, (&config.VisionFallbackConfig{}).InjectEnabled())
+}
+
+// passthrough_messages: true on a vLLM model: the upstream answers in Anthropic format,
+// which is not written into. The image is still described.
+func TestVisionInject_MessagesPassthroughSkipped(t *testing.T) {
+	u := &visionUpstream{}
+	prx, _ := newVisionProxy(t, newVisionUpstream(t, u).URL, describeFallback())
+	w := sendVisionRequest(t, prx, "/v1/messages", `{"model":"glm-msgpass","max_tokens":100,"messages":[
+		{"role":"user","content":[{"type":"image","source":{"type":"base64","media_type":"image/png","data":"iVBORw0KGgo="}}]}]}`)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	assert.Equal(t, "described=1/1", w.Header().Get(HeaderVisionFallback))
+	assert.NotContains(t, w.Body.String(), "air-vision")
+	paths, bodies := u.snapshot()
+	require.Len(t, bodies, 2)
+	assert.Equal(t, "/v1/messages", paths[1])
+	assert.Contains(t, mustJSON(t, bodies[1]["messages"]), visionTestOwl)
+}
+
+// A streamed Responses answer made only of tool calls gets a message item with the
+// descriptions before the final event, numbered in sequence.
+func TestVisionStreamInjector_ResponsesToolCallsOnly(t *testing.T) {
+	const upstream = `event: response.output_item.added
+data: {"type":"response.output_item.added","sequence_number":1,"output_index":0,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"f","arguments":""}}
+
+event: response.output_item.done
+data: {"type":"response.output_item.done","sequence_number":2,"output_index":0,"item":{"type":"function_call","id":"fc_1","call_id":"call_1","name":"f","arguments":"{}"}}
+
+event: response.completed
+data: {"type":"response.completed","sequence_number":3,"response":{"id":"resp_1","status":"completed","output":[{"type":"function_call","id":"fc_1","call_id":"call_1","name":"f","arguments":"{}"}],"usage":{"input_tokens":10,"output_tokens":5,"total_tokens":15}}}
+
+`
+	inj := &visionResponseInjection{prefix: visionTestMarker, choices: 1}
+	out, err := io.ReadAll(newVisionStreamInjector(io.NopCloser(strings.NewReader(upstream)), inj, true))
+	require.NoError(t, err)
+
+	var types []string
+	var seqs []float64
+	for _, event := range sseEvents(t, string(out)) {
+		types = append(types, event["type"].(string))
+		seqs = append(seqs, event["sequence_number"].(float64))
+	}
+	assert.Equal(t, []string{
+		"response.output_item.added", "response.output_item.done",
+		"response.output_item.added", "response.content_part.added", "response.output_text.delta",
+		"response.output_text.done", "response.content_part.done", "response.output_item.done",
+		"response.completed",
+	}, types)
+	assert.Equal(t, []float64{1, 2, 3, 4, 5, 6, 7, 8, 9}, seqs)
+	assert.Equal(t, 9, strings.Count(string(out), "event: "), "every data line keeps its event line")
+
+	events := sseEvents(t, string(out))
+	assert.Equal(t, strings.TrimRight(visionTestMarker, "\n"), events[4]["delta"])
+	assert.EqualValues(t, 1, events[4]["output_index"], "appended after the function call")
+	completed := events[8]["response"].(map[string]any)
+	output := completed["output"].([]any)
+	require.Len(t, output, 2)
+	assert.Equal(t, "function_call", output[0].(map[string]any)["type"])
+	assert.Equal(t, strings.TrimRight(visionTestMarker, "\n"), responsesOutputText(t, completed))
+	assert.NotNil(t, completed["usage"], "usage is untouched")
+
+	// The next turn restores the description from that item.
+	answers := visionTurnAnswers([]any{
+		map[string]any{"role": "user", "content": []any{}},
+		output[0], output[1],
+	}, visionFormatResponses)
+	assert.Equal(t, visionTestOwl, answers[0][1].text)
+}
+
+func TestVisionChatChunkMayStartAnswer(t *testing.T) {
+	cases := map[string]bool{
+		`{"choices":[{"delta":{"role":"assistant","content":""}}]}`:                  false,
+		`{"choices":[{"delta":{"reasoning_content":"думаю"},"finish_reason":null}]}`: false,
+		`{"choices":[{"delta":{"content":null,"reasoning_content":"x"}}]}`:           false,
+		`{"choices":[],"usage":{"prompt_tokens":1}}`:                                 false,
+		`{"choices":[{"delta":{"content":"Это"}}]}`:                                  true,
+		`{"choices":[{"delta":{"content": "с пробелом"}}]}`:                          true,
+		`{"choices":[{"delta":{},"finish_reason":"stop"}]}`:                          true,
+		`{"choices":[{"delta":{"tool_calls":[{"index":0}]}}]}`:                       true,
+	}
+	for payload, want := range cases {
+		assert.Equal(t, want, visionChatChunkMayStartAnswer([]byte(payload)), payload)
+	}
 }

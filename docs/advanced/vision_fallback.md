@@ -97,7 +97,9 @@ Responses API also the last `reasoning` or `*_call` item). Everything after it i
 turn.
 
 1. Each image of the current turn (user message or tool result, e.g. a screenshot returned
-   by an agent tool) is sent to `describe_model` together with the user's text of that turn:
+   by an agent tool) is sent to `describe_model` on its own. The user's question is **not**
+   passed: the description is reused on every later turn, so it must cover the whole image,
+   not only what the first question asked about.
 
    ```json
    {
@@ -107,7 +109,6 @@ turn.
      "messages": [
        {"role": "system", "content": "Describe this image as precisely and completely as possible: ..."},
        {"role": "user", "content": [
-         {"type": "text", "text": "User's question about the image: что на картинке?"},
          {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,..."}}
        ]}
      ]
@@ -218,6 +219,10 @@ the history. On the next request AIR:
   also happens for vision-capable vLLM models, e.g. when the conversation is switched to one:
   it sees the original image and does not need the text.
 
+Like the rest of the feature, this applies only to models served exclusively by vLLM. A
+conversation switched to a model of another provider (OpenAI, Anthropic, ...) sends the blocks
+upstream unchanged, as ordinary text of the earlier answers.
+
 Where the block goes:
 
 | Endpoint               | Non-streaming                                        | Streaming                                                                           |
@@ -225,6 +230,10 @@ Where the block goes:
 | `/v1/chat/completions` | start of `choices[i].message.content` (every choice) | an extra `delta.content` chunk before the first answer chunk of each choice         |
 | `/v1/responses`        | start of the first `output_text`                     | start of the first `response.output_text.delta`, and in the matching `.done` events |
 | `/v1/messages`         | start of the first `text` block (after `thinking`)   | start of the first `text` block (after `thinking`)                                  |
+
+An answer without text (tool calls only) still gets the block: Chat Completions as the message
+`content`; Responses as an extra `message` item — placed after the reasoning when not streaming,
+and at the end of `output` when streaming (its events are inserted before `response.completed`).
 
 The block comes after the reasoning, never inside it: Open WebUI does not send reasoning back
 with the history. `usage` is unchanged — the inserted text is not billed as completion tokens.
@@ -235,10 +244,9 @@ call (`tool_choice: "required"`, a named function, Messages `any` / `tool`). Set
 `inject_into_response: false` to turn it off entirely; history images then always become
 placeholders.
 
-!!! note "Streaming Responses answers made only of tool calls"
-A streamed `/v1/responses` answer without any `output_text` carries no block, so its
-images become placeholders later. Chat Completions and non-streaming answers get the block
-even then.
+Nor is it written for a vLLM model with an explicit `passthrough_messages: true`: `/v1/messages`
+then goes to vLLM natively and the answer comes back in Anthropic format. The images are still
+described; only the block in the answer (and so the restore on later turns) is missing.
 
 ## Supported APIs
 

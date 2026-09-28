@@ -30,8 +30,8 @@ const (
 
 	DefaultVisionDescribePrompt = "Describe this image as precisely and completely as possible: " +
 		"objects, people, layout, colors, all visible text verbatim, numbers, tables, charts and code. " +
-		"The description is passed to another model that cannot see the image, so do not omit details. " +
-		"Answer in the language of the user's question."
+		"The description is passed to another model that cannot see the image and is reused for every " +
+		"later question about it, so describe everything, not only what seems important."
 )
 
 // VisionFallbackConfig is the top-level vision_fallback section.

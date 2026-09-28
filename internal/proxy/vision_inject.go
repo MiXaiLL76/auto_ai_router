@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -226,6 +227,17 @@ func visionChoiceCount(root map[string]any) int {
 	return 1
 }
 
+// visionInjectionFor returns the descriptions to write into a successful answer whose
+// upstream format is Chat Completions or Responses, nil otherwise. A /v1/messages
+// passthrough (upstream answers in Anthropic format) is not written into.
+func visionInjectionFor(logCtx *RequestLogContext, prepared *orchestratedRequest, status int) *visionResponseInjection {
+	if logCtx.visionInject == nil || prepared.nativeResponses || prepared.passthroughMessages ||
+		status < 200 || status >= 300 {
+		return nil
+	}
+	return logCtx.visionInject
+}
+
 // injectVisionIntoResponse prepends the descriptions to a non-streaming answer in
 // the upstream format (Chat Completions, or Responses for Responses passthrough).
 // Conversions to the client format run afterwards and carry the text along.
@@ -344,6 +356,11 @@ type visionSSEInjector struct {
 	// Chat Completions: per choice index
 	seen     map[int]bool
 	injected map[int]bool
+	skipped  bool // a chunk passed without being decoded: the role was already sent
+
+	// Responses: an "event:" line waits for its data line, so events can be
+	// inserted before the pair.
+	heldEvent []byte
 
 	// Responses: the output_text part that carries the prefix
 	target struct {
@@ -367,6 +384,8 @@ func (r *visionSSEInjector) Read(p []byte) (int, error) {
 			}
 		}
 		if err != nil {
+			r.pending = append(r.pending, r.heldEvent...)
+			r.heldEvent = nil
 			r.err = err
 		}
 	}
@@ -409,6 +428,12 @@ func (r *visionSSEInjector) rewriteChatLine(line []byte) []byte {
 	if !ok {
 		return line
 	}
+	// Reasoning models stream hundreds of chunks before the answer starts: decode
+	// only chunks that may start it.
+	if !visionChatChunkMayStartAnswer(payload) {
+		r.skipped = true
+		return line
+	}
 	chunk, err := decodeVisionBody(payload)
 	if err != nil {
 		return line
@@ -428,7 +453,7 @@ func (r *visionSSEInjector) rewriteChatLine(line []byte) []byte {
 		}
 		if !r.injected[index] && visionChatChunkStartsAnswer(choice) {
 			delta := map[string]any{"content": r.inj.prefix}
-			if !r.seen[index] {
+			if !r.seen[index] && !r.skipped {
 				delta["role"] = "assistant"
 			}
 			synthetic := make(map[string]any, len(chunk))
@@ -457,6 +482,31 @@ func (r *visionSSEInjector) rewriteChatLine(line []byte) []byte {
 	return append(out, line...)
 }
 
+// visionChatChunkMayStartAnswer is a byte-level pre-check for
+// visionChatChunkStartsAnswer: a tool call, a finish reason or non-empty content.
+func visionChatChunkMayStartAnswer(payload []byte) bool {
+	if bytes.Contains(payload, []byte(`"tool_calls"`)) {
+		return true
+	}
+	return visionJSONStringFieldNonEmpty(payload, `"finish_reason":`) || visionJSONStringFieldNonEmpty(payload, `"content":`)
+}
+
+// visionJSONStringFieldNonEmpty reports whether key (quoted, with the colon) is
+// followed by a non-empty string somewhere in payload. "reasoning_content" does not
+// match "content": the needle starts with the quote.
+func visionJSONStringFieldNonEmpty(payload []byte, key string) bool {
+	for rest := payload; ; {
+		i := bytes.Index(rest, []byte(key))
+		if i < 0 {
+			return false
+		}
+		rest = bytes.TrimLeft(rest[i+len(key):], " \t")
+		if len(rest) >= 2 && rest[0] == '"' && rest[1] != '"' {
+			return true
+		}
+	}
+}
+
 func visionChatChunkStartsAnswer(choice map[string]any) bool {
 	if choice["finish_reason"] != nil {
 		return true
@@ -471,15 +521,49 @@ func visionChatChunkStartsAnswer(choice map[string]any) bool {
 
 // rewriteResponsesLine prepends the descriptions to the first output_text of the
 // answer and keeps every later event that repeats that text (the .done events and
-// the final response) consistent with it.
+// the final response) consistent with it. An answer without any output_text (tool
+// calls only) gets a message item with the descriptions appended before the final
+// response event.
 func (r *visionSSEInjector) rewriteResponsesLine(line []byte) []byte {
+	if bytes.HasPrefix(line, []byte("event:")) {
+		r.heldEvent = append([]byte(nil), line...)
+		return nil
+	}
+	held := r.heldEvent
+	r.heldEvent = nil
+	before, data := r.rewriteResponsesData(line)
+	return slices.Concat(before, held, data)
+}
+
+// visionResponsesEventTypes are the events rewriteResponsesData may change, before
+// and after the prefixed output_text is known.
+var (
+	visionResponsesTypesBefore = []string{`"response.output_text.delta"`, `"response.completed"`, `"response.incomplete"`}
+	visionResponsesTypesAfter  = []string{`"response.output_text.done"`, `"response.content_part.done"`, `"response.output_item.done"`, `"response.completed"`, `"response.incomplete"`}
+)
+
+func (r *visionSSEInjector) rewriteResponsesData(line []byte) (before, data []byte) {
 	head, payload, ending, ok := sseDataPayload(line)
-	if !ok || !bytes.Contains(payload, []byte(`"response.`)) {
-		return line
+	if !ok {
+		return nil, line
+	}
+	types := visionResponsesTypesBefore
+	if r.target.set {
+		types = visionResponsesTypesAfter
+	}
+	relevant := false
+	for _, t := range types {
+		if bytes.Contains(payload, []byte(t)) {
+			relevant = true
+			break
+		}
+	}
+	if !relevant {
+		return nil, line
 	}
 	event, err := decodeVisionBody(payload)
 	if err != nil {
-		return line
+		return nil, line
 	}
 	prefix := r.inj.prefix
 	changed := false
@@ -510,27 +594,89 @@ func (r *visionSSEInjector) rewriteResponsesLine(line []byte) []byte {
 			changed = r.prefixTargetItem(item)
 		}
 	case "response.completed", "response.incomplete":
-		if resp, _ := event["response"].(map[string]any); resp != nil && r.target.set {
-			output, _ := resp["output"].([]any)
-			for _, raw := range output {
-				if item, _ := raw.(map[string]any); item != nil && r.prefixTargetItem(item) {
+		if resp, _ := event["response"].(map[string]any); resp != nil {
+			if r.target.set {
+				output, _ := resp["output"].([]any)
+				for _, raw := range output {
+					if item, _ := raw.(map[string]any); item != nil && r.prefixTargetItem(item) {
+						changed = true
+					}
+				}
+				if text, ok := resp["output_text"].(string); ok {
+					resp["output_text"] = prefix + text
 					changed = true
 				}
-			}
-			if text, ok := resp["output_text"].(string); ok {
-				resp["output_text"] = prefix + text
-				changed = true
+			} else {
+				before = r.appendResponsesMessageItem(event, resp, head, ending)
+				changed = before != nil
 			}
 		}
 		r.done = true
 	}
 	if !changed {
-		return line
+		return nil, line
 	}
-	if data, ok := sseDataLine(head, event, ending); ok {
-		return data
+	if out, ok := sseDataLine(head, event, ending); ok {
+		return before, out
 	}
-	return line
+	return nil, line
+}
+
+// appendResponsesMessageItem adds a message item holding the descriptions to the
+// final response and returns the events that stream it (added, text, done), numbered
+// before the final event.
+func (r *visionSSEInjector) appendResponsesMessageItem(final, resp map[string]any, head, ending []byte) []byte {
+	output, _ := resp["output"].([]any)
+	outputIndex := len(output)
+	text := strings.TrimRight(r.inj.prefix, "\n")
+	const itemID = "msg_air_vision"
+	item := map[string]any{
+		"type": "message", "id": itemID, "role": "assistant", "status": "completed",
+		"content": []any{visionOutputTextPart(text)},
+	}
+	part := map[string]any{"item_id": itemID, "output_index": outputIndex, "content_index": 0}
+	withPart := func(fields map[string]any) map[string]any {
+		for k, v := range part {
+			fields[k] = v
+		}
+		return fields
+	}
+	events := []map[string]any{
+		{"type": "response.output_item.added", "output_index": outputIndex, "item": map[string]any{
+			"type": "message", "id": itemID, "role": "assistant", "status": "in_progress", "content": []any{},
+		}},
+		withPart(map[string]any{"type": "response.content_part.added", "part": visionOutputTextPart("")}),
+		withPart(map[string]any{"type": "response.output_text.delta", "delta": text}),
+		withPart(map[string]any{"type": "response.output_text.done", "text": text}),
+		withPart(map[string]any{"type": "response.content_part.done", "part": visionOutputTextPart(text)}),
+		{"type": "response.output_item.done", "output_index": outputIndex, "item": item},
+	}
+	var seq int64 = -1
+	if n, ok := final["sequence_number"].(json.Number); ok {
+		if v, err := n.Int64(); err == nil {
+			seq = v
+		}
+	}
+	var out []byte
+	for i, event := range events {
+		if seq >= 0 {
+			event["sequence_number"] = seq + int64(i)
+		}
+		data, ok := sseDataLine(head, event, ending)
+		if !ok {
+			return nil
+		}
+		out = append(out, "event: "+event["type"].(string)+string(ending)...)
+		out = append(append(out, data...), ending...)
+	}
+	if seq >= 0 {
+		final["sequence_number"] = seq + int64(len(events))
+	}
+	resp["output"] = append(output, item)
+	if existing, ok := resp["output_text"].(string); ok {
+		resp["output_text"] = r.inj.prefix + existing
+	}
+	return out
 }
 
 func (r *visionSSEInjector) isTarget(itemID, contentIndex any) bool {

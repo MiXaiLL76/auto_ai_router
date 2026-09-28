@@ -24,9 +24,6 @@ import (
 // and "stripped" (placeholders only).
 const HeaderVisionFallback = "X-AIR-Vision-Fallback"
 
-// maxVisionQuestionChars bounds the user text passed to the describe model as context.
-const maxVisionQuestionChars = 4000
-
 type visionBodyFormat int
 
 const (
@@ -125,7 +122,7 @@ func (p *Proxy) applyVisionFallback(w http.ResponseWriter, r *http.Request, body
 // model: current-turn images are described (mode describe), history images get the
 // description recorded in the answer to their turn, the rest become placeholders.
 func (p *Proxy) rewriteVisionImages(w http.ResponseWriter, r *http.Request, root map[string]any, modelID string, format visionBodyFormat) (visionFallbackResult, bool) {
-	refs, question := collectVisionImages(root, format)
+	refs := collectVisionImages(root, format)
 	result := visionFallbackResult{images: len(refs)}
 	if len(refs) == 0 {
 		return result, false
@@ -154,7 +151,7 @@ func (p *Proxy) rewriteVisionImages(w http.ResponseWriter, r *http.Request, root
 	}
 	var descs []visionDescription
 	if mode == config.VisionFallbackDescribe && result.current > 0 {
-		descs = p.describeVisionImages(w, r, refs, question, modelID, replacements)
+		descs = p.describeVisionImages(w, r, refs, modelID, replacements)
 		result.described = len(descs)
 	}
 	for i, ref := range refs {
@@ -262,7 +259,7 @@ func (p *Proxy) applyVisionFallbackToBase(
 // describeVisionImages describes the current-turn images (at most max_images) in
 // parallel and stores each description in replacements. It returns the successful
 // descriptions in image order; failed ones keep their placeholder.
-func (p *Proxy) describeVisionImages(w http.ResponseWriter, r *http.Request, refs []visionImageRef, question, modelID string, replacements []string) []visionDescription {
+func (p *Proxy) describeVisionImages(w http.ResponseWriter, r *http.Request, refs []visionImageRef, modelID string, replacements []string) []visionDescription {
 	cfg := p.visionFallback
 
 	// Nothing is written to the client while images are described, but the server
@@ -304,7 +301,7 @@ func (p *Proxy) describeVisionImages(w http.ResponseWriter, r *http.Request, ref
 				}
 			}()
 			start := time.Now()
-			text, err := p.describeVisionImage(r, url, question)
+			text, err := p.describeVisionImage(r, url)
 			if err != nil {
 				p.logger.WarnContext(r.Context(), "Vision fallback: describe call failed",
 					"model", modelID, "describe_model", cfg.DescribeModel,
@@ -330,13 +327,12 @@ func (p *Proxy) describeVisionImages(w http.ResponseWriter, r *http.Request, ref
 // describeVisionImage runs one Chat Completions request against describe_model through
 // this router's own pipeline with the caller's headers, so the call is authenticated,
 // rate-limited, balanced and billed to the same key and end user as the original.
-func (p *Proxy) describeVisionImage(r *http.Request, imageURL, question string) (string, error) {
+//
+// The user's question is deliberately not passed: the description is reused on every
+// later turn, so it must not be narrowed to what the first question asked about.
+func (p *Proxy) describeVisionImage(r *http.Request, imageURL string) (string, error) {
 	cfg := p.visionFallback
-	userContent := []any{}
-	if question != "" {
-		userContent = append(userContent, map[string]any{"type": "text", "text": "User's question about the image: " + question})
-	}
-	userContent = append(userContent, map[string]any{"type": "image_url", "image_url": map[string]any{"url": imageURL}})
+	userContent := []any{map[string]any{"type": "image_url", "image_url": map[string]any{"url": imageURL}}}
 	messages := []any{map[string]any{"role": "user", "content": userContent}}
 	if cfg.DescribePrompt != "" {
 		messages = append([]any{map[string]any{"role": "system", "content": cfg.DescribePrompt}}, messages...)
@@ -449,12 +445,12 @@ var marshalVisionJSON = func(v any) ([]byte, error) {
 	return bytes.TrimRight(buf.Bytes(), "\n"), nil
 }
 
-// collectVisionImages finds every image part of the conversation and the user text of
-// the current turn (everything after the last model output).
-func collectVisionImages(root map[string]any, format visionBodyFormat) ([]visionImageRef, string) {
+// collectVisionImages finds every image part of the conversation; the current turn is
+// everything after the last model output.
+func collectVisionImages(root map[string]any, format visionBodyFormat) []visionImageRef {
 	items, _ := root[visionItemsKey(format)].([]any)
 	if len(items) == 0 {
-		return nil, ""
+		return nil
 	}
 
 	boundary := -1
@@ -466,7 +462,6 @@ func collectVisionImages(root map[string]any, format visionBodyFormat) ([]vision
 	answers := visionTurnAnswers(items, format)
 
 	var refs []visionImageRef
-	var question []string
 	number := 0 // described images of the turn so far, numbered as on the turn they were described
 	for i, raw := range items {
 		item, ok := raw.(map[string]any)
@@ -496,16 +491,8 @@ func collectVisionImages(root map[string]any, format visionBodyFormat) ([]vision
 				}
 			}
 		}
-		if current && item["role"] == "user" {
-			question = append(question, visionItemText(item["content"])...)
-		}
 	}
-
-	text := strings.TrimSpace(strings.Join(question, "\n"))
-	if runes := []rune(text); len(runes) > maxVisionQuestionChars {
-		text = string(runes[len(runes)-maxVisionQuestionChars:]) // the latest text is the most relevant
-	}
-	return refs, text
+	return refs
 }
 
 // visionTurnAnswers maps every conversation item that is not a model output to the
