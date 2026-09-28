@@ -108,6 +108,10 @@ func PrintConfig(logger *slog.Logger, cfg *Config) {
 		"errors_log_path", cfg.Monitoring.ErrorsLogPath,
 		"pprof_enabled", cfg.Monitoring.PprofEnabled,
 		"pprof_port", cfg.Monitoring.PprofPort,
+		"key_metrics_enabled", cfg.KeyMetricsEnabled(),
+		"key_metrics_info_labels", cfg.Monitoring.KeyMetrics.InfoLabels,
+		"key_metrics_max_keys", cfg.Monitoring.KeyMetrics.MaxKeys,
+		"key_metrics_idle_ttl", cfg.Monitoring.KeyMetrics.IdleTTL.String(),
 	)
 
 	// Fail2Ban config

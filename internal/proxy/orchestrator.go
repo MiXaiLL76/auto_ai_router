@@ -598,7 +598,22 @@ func (p *Proxy) IsModelAllowedForToken(tokenInfo *models.TokenInfo, model string
 	})
 }
 
+// authenticateRequest validates the caller and, on success, attributes the
+// request to its key for per-key metrics (one place for every auth method).
 func (p *Proxy) authenticateRequest(
+	w http.ResponseWriter,
+	r *http.Request,
+	logCtx *RequestLogContext,
+	isLiteLLMHealthy bool,
+) bool {
+	if !p.authenticateCaller(w, r, logCtx, isLiteLLMHealthy) {
+		return false
+	}
+	p.noteRequestKey(r.Context(), logCtx.TokenInfo)
+	return true
+}
+
+func (p *Proxy) authenticateCaller(
 	w http.ResponseWriter,
 	r *http.Request,
 	logCtx *RequestLogContext,

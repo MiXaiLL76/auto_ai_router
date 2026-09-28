@@ -14,6 +14,7 @@ import (
 
 	"github.com/mixaill76/auto_ai_router/internal/converter"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb"
+	"github.com/mixaill76/auto_ai_router/internal/monitoring"
 )
 
 // ErrResponseBodyTooLarge is returned when a response body exceeds the configured size limit.
@@ -227,7 +228,7 @@ const (
 // Never meaningfully delivered to the client (which is already gone by the
 // time this is decided); it exists for accurate logging/metrics/raw-body
 // classification.
-const StatusClientClosedRequest = 499
+const StatusClientClosedRequest = monitoring.StatusClientClosedRequest
 
 // sensitiveRequestBodyFields are the top-level JSON keys that carry the
 // client's own prompt/conversation content, across the request shapes AIR
