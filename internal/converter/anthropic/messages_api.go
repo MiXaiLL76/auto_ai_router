@@ -150,7 +150,7 @@ func MessagesToChat(body []byte) ([]byte, MessagesAdapterMetadata, error) {
 func NormalizeMessagesForPassthrough(body []byte, model string, isRealAnthropicBackend bool) ([]byte, error) {
 	var request map[string]interface{}
 	if err := json.Unmarshal(body, &request); err != nil {
-		return nil, fmt.Errorf("failed to parse Messages request: %w", err)
+		return nil, converterutil.RequestJSONValidationError(err)
 	}
 
 	// Models that no longer accept sampling params (Claude Opus 4.7+ — see

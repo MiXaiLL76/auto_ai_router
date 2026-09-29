@@ -557,6 +557,21 @@ func roundTripFirstUserBlock(t *testing.T, messagesBody []byte) map[string]inter
 	return content[0].(map[string]interface{})
 }
 
+// TestNormalizeMessagesForPassthrough_MalformedJSONClassifiesAs400 covers review item
+// 3: this function's own json.Unmarshal of the client's raw /v1/messages passthrough
+// body had the same plain-fmt.Errorf gap MessagesToChat was fixed for -- the exact same
+// malformed request got a detailed 4xx on the credential that converts (MessagesToChat)
+// and a generic 500 ("Failed to convert Messages API request") on a passthrough
+// credential (this function), for no reason other than which route happened to handle
+// it.
+func TestNormalizeMessagesForPassthrough_MalformedJSONClassifiesAs400(t *testing.T) {
+	_, err := NormalizeMessagesForPassthrough([]byte(`{not valid json`), "claude-opus-4.7", true)
+	require.Error(t, err)
+	var validationErr *converterutil.RequestValidationError
+	require.True(t, errors.As(err, &validationErr))
+	assert.Equal(t, "invalid_json", validationErr.Code)
+}
+
 // TestNormalizeMessagesForPassthrough_AdaptiveThinkingBeta covers the /v1/messages
 // native-passthrough path: a client sending native Anthropic "thinking":{"type":"adaptive"}
 // straight through still needs the effort-2025-11-24 beta. On Opus 4.7+ the sampling params

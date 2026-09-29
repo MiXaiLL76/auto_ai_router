@@ -56,6 +56,22 @@ func TestIsResponsesAPI(t *testing.T) {
 	}
 }
 
+// TestRequestToChat_MalformedJSONClassifiesAs400 covers review item 3: this converter's
+// own json.Unmarshal of the client's raw /v1/responses body had the same plain-fmt.Errorf
+// gap the chat-completions/vertex/embeddings converters were fixed for -- malformed JSON
+// here still fell through to a generic 500 instead of a 4xx. Note this unmarshals into a
+// generic map[string]interface{}, not a typed struct, so a per-field type mismatch (e.g.
+// "max_output_tokens":"five") can't produce a json.UnmarshalTypeError at this specific
+// call site the way it does for the typed-struct converters -- only genuinely malformed
+// JSON syntax, or a non-object top-level value, can fail here.
+func TestRequestToChat_MalformedJSONClassifiesAs400(t *testing.T) {
+	_, err := RequestToChat([]byte(`{not valid json`))
+	require.Error(t, err)
+	var validationErr *converterutil.RequestValidationError
+	require.True(t, errors.As(err, &validationErr))
+	assert.Equal(t, "invalid_json", validationErr.Code)
+}
+
 func TestRequestToChat_StringInput(t *testing.T) {
 	body := `{"model":"gpt-4o","input":"What is 2+2?","temperature":0.5}`
 	result, err := RequestToChat([]byte(body))
