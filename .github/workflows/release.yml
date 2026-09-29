@@ -10,6 +10,7 @@ on:
 permissions:
   contents: write
   packages: write
+  actions: read  # lint.yml (workflow_call) explain job reads its own run log
 
 jobs:
   # 0. Проверка качества кода (fmt, lint, tests)
@@ -84,7 +85,28 @@ jobs:
             type=raw,value=dev-latest,enable=${{ github.ref != 'refs/heads/main' && !startsWith(github.ref, 'refs/tags/') }}
             type=raw,value=${{ github.ref_name }}-latest,enable=${{ github.ref != 'refs/heads/main' && !startsWith(github.ref, 'refs/tags/') }}
             type=sha,prefix=sha-
+      # proxy.golang.org / sum.golang.org occasionally drop an HTTP/2 stream
+      # (INTERNAL_ERROR) during `go mod download`. One hiccup shouldn't fail
+      # a release: on failure the build runs once more; layers that already
+      # built come from the gha cache, so the retry is cheap.
       - name: Build and push
+        id: build
+        continue-on-error: true
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          platforms: linux/amd64
+          build-args: |
+            VERSION=${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'dev' }}
+            COMMIT=${{ github.sha }}
+
+      - name: Build and push (retry)
+        if: steps.build.outcome == 'failure'
         uses: docker/build-push-action@v7
         with:
           context: .
