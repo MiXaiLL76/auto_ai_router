@@ -14,12 +14,16 @@ name: Lint
 #     prints one ::error annotation with the cause and the local command;
 #   - all checks run even if an earlier one failed (`if: !cancelled()`), so
 #     one run shows every problem at once;
-#   - if the pod is OOM-killed (exit 137) Kubernetes kills the whole
+#   - pre-commit runs first, before any Go setup: most failures are
+#     formatting, and they should show up in ~30s, not after the build;
+#   - if a process gets OOM-killed (exit 137) Kubernetes kills the whole
 #     container, the step can't report anything, and every later step fails
 #     with "TypeError: Converting circular structure to JSON" — ARC noise.
-#     The `explain` job then reads the log from outside and says which step
-#     died and why. govulncheck is the memory hog (~2-3 GB), so it runs last:
-#     if it gets killed, all other checks have already reported.
+#     The pod has no memory limit of its own, so this is the *node* running
+#     out of memory (too many heavy pods at once). The `explain` job reads the
+#     log from outside and says which step died. govulncheck is the memory
+#     hog (~2-3 GB), so it runs last: if it gets killed, all other checks have
+#     already reported.
 
 env:
   GOLANGCI_LINT_VERSION: v2.13.1
@@ -68,22 +72,54 @@ jobs:
     steps:
     - uses: actions/checkout@v6
 
-    - name: Prepare toolchain
+    # Retries: a network hiccup must not read as a lint failure.
+    - name: Install pre-commit
       run: |
-        git config --global --add safe.directory "$GITHUB_WORKSPACE"
-        go version
-        # Printed so an OOM kill can be compared against the real limit.
-        echo "pod memory limit: $(cat /sys/fs/cgroup/memory.max 2>/dev/null || cat /sys/fs/cgroup/memory/memory.limit_in_bytes 2>/dev/null || echo unknown)"
-
         retry() { for i in 1 2 3; do "$@" && return 0; echo "retry $i/3: $*"; sleep 15; done; return 1; }
-        fail() { echo "::error title=toolchain setup::$1 — network/proxy problem, not a code problem; re-run"; exit 1; }
+        git config --global --add safe.directory "$GITHUB_WORKSPACE"
+        retry sh -c 'apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq python3-venv >/dev/null' \
+          || { echo "::error title=setup::apt-get install python3-venv failed 3 times — network problem, not a code problem; re-run"; exit 1; }
+        python3 -m venv /opt/pre-commit
+        retry /opt/pre-commit/bin/pip install -q pre-commit \
+          || { echo "::error title=setup::pip install pre-commit failed 3 times — network problem, not a code problem; re-run"; exit 1; }
+
+    - name: pre-commit
+      run: |
+        if ! /opt/pre-commit/bin/pre-commit run --all-files --show-diff-on-failure; then
+          echo "### ❌ pre-commit: hooks failed or modified files — see log" >> "$GITHUB_STEP_SUMMARY"
+          echo "::error title=pre-commit::hooks failed or modified files — run 'pre-commit run --all-files' and commit the result"
+          exit 1
+        fi
+        echo "### ✅ pre-commit" >> "$GITHUB_STEP_SUMMARY"
+
+    - name: Install Go tools
+      if: ${{ !cancelled() }}
+      run: |
+        retry() { for i in 1 2 3; do "$@" && return 0; echo "retry $i/3: $*"; sleep 15; done; return 1; }
+        fail() { echo "::error title=setup::$1 — network/proxy problem, not a code problem; re-run"; exit 1; }
+        go version
+        limit=$(cat /sys/fs/cgroup/memory.max 2>/dev/null || cat /sys/fs/cgroup/memory/memory.limit_in_bytes 2>/dev/null || echo unknown)
+        case "$limit" in max|9223372036854*) limit="none (an OOM kill here means the node ran out of memory)" ;; esac
+        echo "pod memory limit: $limit"
 
         retry go mod download || fail "go mod download failed 3 times"
-        retry go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@${GOLANGCI_LINT_VERSION} || fail "golangci-lint install failed 3 times"
+
+        # Prebuilt release binary (checksum-verified): `go install` compiles
+        # golangci-lint from source, which took ~60s of this step.
+        v=${GOLANGCI_LINT_VERSION#v}; arch=$(go env GOARCH)
+        tarball="golangci-lint-${v}-linux-${arch}.tar.gz"
+        base="https://github.com/golangci/golangci-lint/releases/download/${GOLANGCI_LINT_VERSION}"
+        cd /tmp
+        retry sh -c "curl -fsSLO '${base}/${tarball}' && curl -fsSLO '${base}/golangci-lint-${v}-checksums.txt'" \
+          || fail "golangci-lint download failed 3 times"
+        grep " ${tarball}\$" "golangci-lint-${v}-checksums.txt" | sha256sum -c - \
+          || { echo "::error title=setup::golangci-lint ${tarball} checksum mismatch"; exit 1; }
+        tar xzf "$tarball" --strip-components=1 -C /usr/local/bin "golangci-lint-${v}-linux-${arch}/golangci-lint"
+        golangci-lint version
+        cd "$GITHUB_WORKSPACE"
+
         # Unpinned on purpose, like `make vuln`: a fresh advisory must fail here the same day.
         retry go install golang.org/x/vuln/cmd/govulncheck@latest || fail "govulncheck install failed 3 times"
-        retry sh -c 'apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq python3-venv >/dev/null' || fail "python3-venv install failed 3 times"
-        python3 -m venv /opt/pre-commit && retry /opt/pre-commit/bin/pip install -q pre-commit || fail "pre-commit install failed 3 times"
 
     - name: gofmt
       if: ${{ !cancelled() }}
@@ -122,16 +158,6 @@ jobs:
         fi
         echo "### ✅ golangci-lint" >> "$GITHUB_STEP_SUMMARY"
 
-    - name: pre-commit
-      if: ${{ !cancelled() }}
-      run: |
-        if ! /opt/pre-commit/bin/pre-commit run --all-files --show-diff-on-failure; then
-          echo "### ❌ pre-commit: hooks failed or modified files — see log" >> "$GITHUB_STEP_SUMMARY"
-          echo "::error title=pre-commit::hooks failed or modified files — run 'pre-commit run --all-files' and commit the result"
-          exit 1
-        fi
-        echo "### ✅ pre-commit" >> "$GITHUB_STEP_SUMMARY"
-
     - name: go test -race
       if: ${{ !cancelled() }}
       run: |
@@ -162,12 +188,14 @@ jobs:
           exit 1
         fi
         pct=$(go tool cover -func=coverage.out | awk '/^total:/ { sub("%", "", $3); print $3 }')
+        echo "Total coverage: ${pct:-?}% (threshold ${MIN_COVERAGE}%)"
         if [ -z "$pct" ] || [ "${pct%.*}" -lt "$MIN_COVERAGE" ]; then
           echo "### ❌ coverage: ${pct:-?}% (threshold ${MIN_COVERAGE}%)" >> "$GITHUB_STEP_SUMMARY"
           echo "::error title=coverage::total coverage ${pct:-?}% is below the ${MIN_COVERAGE}% threshold — add tests"
           exit 1
         fi
         echo "### ✅ coverage: ${pct}% (threshold ${MIN_COVERAGE}%)" >> "$GITHUB_STEP_SUMMARY"
+        echo "::notice title=Total coverage::${pct}% (threshold ${MIN_COVERAGE}%)"
 
     # Last on purpose — see the header comment.
     - name: govulncheck
@@ -240,7 +268,7 @@ jobs:
             [.steps[] | select(.started_at != null and .started_at[0:19] + "Z" <= $ts
                               and ((.completed_at // "9999")[0:19] + "Z") >= $ts) | .name][0] // empty')
           [ -n "$killed" ] || killed="$first"
-          msg="'${killed}' was killed by the kernel (exit 137): the ARC pod ran out of memory (OOMKilled). Not a code problem. Steps after it failing with 'Converting circular structure to JSON' are fallout, ignore them. Re-run; if it keeps happening, raise the memory limit of arc-air-runners pods (limit is printed in 'Prepare toolchain')."
+          msg="'${killed}' was killed by the kernel (exit 137): the Kubernetes node ran out of memory (OOM; pods have no memory limit, see 'Install Go tools'). Not a code problem. Steps after it failing with 'Converting circular structure to JSON' are fallout, ignore them. Re-run; if it keeps happening, set resources.requests.memory (~3Gi) on arc-air-runners job pods so fewer heavy pods land on one node."
         elif grep -q 'circular structure to JSON' job.log; then
           msg="The ARC container hook broke after step '${first}' — runner infrastructure problem, not a code problem. Re-run."
         else
