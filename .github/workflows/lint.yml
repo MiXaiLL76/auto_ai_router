@@ -161,7 +161,12 @@ jobs:
     - name: go test -race
       if: ${{ !cancelled() }}
       run: |
-        if ! go test -v -race -coverprofile=coverage.out -covermode=atomic ./... > test.log 2>&1; then
+        # Same method as `make test-coverage`: run every package's tests, but
+        # measure coverage of ./internal/... only, counting code exercised
+        # from other packages' tests too (-coverpkg). Without it the cmd/*
+        # mains and cross-package calls skew the total ~5 points low.
+        coverpkg=$(go list ./internal/... | paste -sd, -)
+        if ! go test -v -race -coverpkg="$coverpkg" -coverprofile=coverage.out -covermode=atomic ./... > test.log 2>&1; then
           cat test.log
           # The full -v log is huge; surface just the failures.
           failed=$(grep -E '^(--- FAIL|FAIL|panic:|WARNING: DATA RACE)' test.log | head -50)

@@ -99,7 +99,7 @@ test-coverage:
 	@export PATH=/usr/local/go/bin:$$PATH; \
 	export GOCACHE=$${GOCACHE:-/tmp/go-build}; \
 	COVERPKG="$$( $(GO) list ./internal/... | paste -sd "," - )"; \
-	$(GO) test -coverpkg="$$COVERPKG" -coverprofile=coverage.out $(INTERNAL_PKGS)
+	$(GO) test -coverpkg="$$COVERPKG" -coverprofile=coverage.out ./...
 	@echo ""
 	@echo "Coverage by package:"
 	export PATH=/usr/local/go/bin:$$PATH && $(GO) tool cover -func=coverage.out | grep -E "github.com"
@@ -142,7 +142,7 @@ test-check-coverage:
 	@export PATH=/usr/local/go/bin:$$PATH; \
 	export GOCACHE=$${GOCACHE:-/tmp/go-build}; \
 	COVERPKG="$$( $(GO) list ./internal/... | paste -sd "," - )"; \
-	$(GO) test -coverpkg="$$COVERPKG" -coverprofile=coverage.out $(INTERNAL_PKGS) > /dev/null
+	$(GO) test -coverpkg="$$COVERPKG" -coverprofile=coverage.out ./... > /dev/null
 	@export PATH=/usr/local/go/bin:$$PATH && $(GO) tool cover -func=coverage.out | grep total | awk '{print "Total coverage: " $$3}'
 	@export PATH=/usr/local/go/bin:$$PATH && $(GO) tool cover -func=coverage.out | grep total | awk '{gsub(/%/,"",$$3); if ($$3+0 < 80) {print "❌ Coverage is below 80%"; exit 1} else {print "✅ Coverage is above 80%"}}'
 
