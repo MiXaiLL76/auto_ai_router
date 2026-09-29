@@ -749,7 +749,7 @@ func (p *Proxy) readRequestBodyAndSelectModel(
 			// contents, instructions) before this ever reaches logCtx and
 			// masks every other client-written string (tool descriptions,
 			// user, metadata, ...) -- model, tool names, parameter shape
-			// and numeric/boolean params are kept. Fails
+			// and allowlisted numbers/booleans are kept. Fails
 			// closed: if body isn't valid JSON, no redaction can be
 			// guaranteed, so nothing is captured at all rather than risk
 			// shipping raw content.

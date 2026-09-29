@@ -827,8 +827,7 @@ func TestRedactRequestBodyForLogging(t *testing.T) {
 
 		wso := parsed["web_search_options"].(map[string]any)
 		assert.Equal(t, "low", wso["search_context_size"])
-		metadata := parsed["metadata"].(map[string]any)
-		assert.Equal(t, "[REDACTED]", metadata["name"], "a loggable key inside free-form metadata is still masked")
+		assert.Equal(t, "[REDACTED: 3 keys]", parsed["metadata"], "free-form metadata keeps only its size")
 	})
 
 	t.Run("masks Responses API and Anthropic tool configuration secrets", func(t *testing.T) {
@@ -876,7 +875,7 @@ func TestRedactRequestBodyForLogging(t *testing.T) {
 		assert.NotContains(t, out, "SECRET")
 		assert.NotContains(t, out, "55.7512")
 		assert.NotContains(t, out, "37.6184")
-		assert.Contains(t, out, `"latitude":"[REDACTED]"`, "keys stay, values go")
+		assert.Contains(t, out, `"latLng":"[REDACTED: 2 keys]"`)
 	})
 
 	t.Run("keeps a tool parameter named like a free-form or loggable field as a schema", func(t *testing.T) {
@@ -901,6 +900,53 @@ func TestRedactRequestBodyForLogging(t *testing.T) {
 		assert.Equal(t, "string", descriptionParam["type"])
 		assert.Equal(t, "markdown", descriptionParam["format"])
 		assert.Equal(t, "[REDACTED]", descriptionParam["description"])
+	})
+
+	t.Run("masks numbers, names and free-form keys outside where they belong", func(t *testing.T) {
+		body := []byte(`{
+			"model": "gpt-5.4",
+			"messages": [{"role": "user", "content": "hi"}],
+			"temperature": 0.3,
+			"max_completion_tokens": 256,
+			"stream": true,
+			"seed": 5550101,
+			"user": 5550102,
+			"is_vip": true,
+			"extra_body": {"customer": {"name": "Ivan Petrov", "phone": 79161234567, "summary": "SECRET", "verified": true}},
+			"properties": {"metadata": {"k": 1}},
+			"metadata": {"ivan@acme.ru": true},
+			"logit_bias": {"50256": -100},
+			"tools": [{"type": "mcp", "server_label": "crm", "name": "lookup"}],
+			"generationConfig": {"responseMimeType": "application/json", "thinkingLevel": "high", "topK": 40,
+				"responseSchema": {"type": "OBJECT", "properties": {"metadata": {"type": "STRING"}}}},
+			"reasoning": {"effort": "high", "summary": "auto"}
+		}`)
+
+		out, ok := redactRequestBodyForLogging(body)
+		require.True(t, ok)
+		for _, secret := range []string{"5550101", "5550102", "Ivan", "79161234567", "SECRET", "ivan@acme.ru", "50256"} {
+			assert.NotContains(t, out, secret)
+		}
+
+		var parsed map[string]any
+		require.NoError(t, json.Unmarshal([]byte(out), &parsed))
+		assert.Equal(t, 0.3, parsed["temperature"])
+		assert.Equal(t, float64(256), parsed["max_completion_tokens"])
+		assert.Equal(t, true, parsed["stream"])
+		assert.Equal(t, "[REDACTED]", parsed["seed"])
+		assert.Equal(t, "[REDACTED]", parsed["user"])
+		assert.Equal(t, "[REDACTED]", parsed["is_vip"])
+		assert.Equal(t, map[string]any{"name": "[REDACTED]", "phone": "[REDACTED]", "summary": "[REDACTED]", "verified": "[REDACTED]"},
+			parsed["extra_body"].(map[string]any)["customer"], "allowlisted keys count only where the API defines them")
+		assert.Equal(t, map[string]any{"effort": "high", "summary": "auto"}, parsed["reasoning"])
+		assert.Equal(t, "[REDACTED: 1 keys]", parsed["properties"].(map[string]any)["metadata"],
+			"properties is a schema keyword only inside a definition")
+		assert.Equal(t, "[REDACTED: 1 keys]", parsed["metadata"])
+		assert.Equal(t, "[REDACTED: 1 keys]", parsed["logit_bias"])
+		assert.Equal(t, map[string]any{"type": "mcp", "server_label": "crm", "name": "lookup"}, parsed["tools"].([]any)[0])
+		assert.Equal(t, map[string]any{"responseMimeType": "application/json", "thinkingLevel": "high", "topK": float64(40),
+			"responseSchema": map[string]any{"type": "OBJECT", "properties": map[string]any{"metadata": map[string]any{"type": "STRING"}}}},
+			parsed["generationConfig"], "a Gemini response schema parameter named metadata is still a schema")
 	})
 
 	t.Run("fails closed on non-JSON body", func(t *testing.T) {
