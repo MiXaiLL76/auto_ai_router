@@ -396,7 +396,7 @@ func (s *nativeWSSession) prepare(event map[string]json.RawMessage, historyToken
 	logCtx.WebSearchRequested, logCtx.WebSearchContextSize = extractWebSearchRequestUsage(prepared.body, "application/json")
 	s.proxy.setPromptTokensEstimate(logCtx, prepared.body, prepared.realModelID)
 	logCtx.ActualCredentialName = s.actualCredential
-	return &nativeWSTurn{log: logCtx, body: prepared.body, accumulator: s.proxy.newCompletionTokenAccumulator(prepared.realModelID), finishKey: finishKey}, wire, true
+	return &nativeWSTurn{log: logCtx, body: prepared.body, accumulator: s.proxy.newCompletionTokenAccumulator(prepared.realModelID, logCtx), finishKey: finishKey}, wire, true
 }
 
 func nativeWebSocketURL(baseURL string) (string, error) {

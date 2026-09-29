@@ -762,7 +762,7 @@ func (p *Proxy) handleTransformedStreaming(
 		_ = pr.Close()
 	}()
 	var totalTokens int
-	completion := p.newCompletionTokenAccumulator(modelID)
+	completion := p.newCompletionTokenAccumulator(modelID, logCtx)
 
 	// Capture last chunk for usage extraction (Solution 3: Hybrid approach)
 	var lastChunk []byte
@@ -894,7 +894,7 @@ func (p *Proxy) handleStreamingWithTokens(w http.ResponseWriter, resp *http.Resp
 		"content_type", resp.Header.Get("Content-Type"))
 
 	var totalTokens int
-	completion := p.newCompletionTokenAccumulator(modelID)
+	completion := p.newCompletionTokenAccumulator(modelID, logCtx)
 	chunkCount := 0
 
 	// Capture last chunk for usage extraction (Solution 3: Hybrid approach)
@@ -1786,7 +1786,7 @@ func (p *Proxy) handlePassthroughResponsesStreaming(
 		lastRawChunk          []byte // last raw buffer for fallback in finalizeStreamingLog
 		completedEventPayload []byte // JSON payload of response.completed (used instead of lastRawChunk)
 		partialSSELine        string // partial SSE line accumulator across buffer reads
-		completion            = p.newCompletionTokenAccumulator(modelID)
+		completion            = p.newCompletionTokenAccumulator(modelID, logCtx)
 		detectStreamError     = resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices
 		providerStreamError   = &proxyStreamErrorCapture{}
 	)

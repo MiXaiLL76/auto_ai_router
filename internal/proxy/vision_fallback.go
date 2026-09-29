@@ -303,7 +303,7 @@ func (p *Proxy) describeVisionImages(w http.ResponseWriter, r *http.Request, ref
 			continue
 		}
 		if cfg.MaxImages > 0 && number >= cfg.MaxImages {
-			replacements[i] = "[image omitted: too many images in one message, only the first ones were described]"
+			replacements[i] = "[image omitted: too many images in one request, only the first ones were described]"
 			continue
 		}
 		number++

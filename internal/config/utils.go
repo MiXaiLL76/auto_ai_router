@@ -32,7 +32,6 @@ func resolveEnvString(value string) string {
 // parseFunc is a function type that parses a string value into the desired type
 type parseFunc[T any] func(string) (T, error)
 
-// parseField resolves env variable and parses value with proper error context
 // parseOptionalBool parses a tri-state boolean: nil when the value is omitted or its
 // environment variable resolves to "".
 func parseOptionalBool(tempValue, fieldPath string) (*bool, error) {
@@ -47,6 +46,7 @@ func parseOptionalBool(tempValue, fieldPath string) (*bool, error) {
 	return &value, nil
 }
 
+// parseField resolves env variable and parses value with proper error context
 func parseField[T any](tempValue string, defaultValue T, parser parseFunc[T], fieldPath string) (T, error) {
 	if tempValue == "" {
 		return defaultValue, nil
