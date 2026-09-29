@@ -75,6 +75,12 @@ func (p *Proxy) buildKafkaSpendEvent(
 		ttftMs = &ttft
 	}
 
+	var upstreamSendMs *int64
+	if !logCtx.UpstreamSendTime.IsZero() {
+		us := logCtx.UpstreamSendTime.Sub(logCtx.StartTime).Milliseconds()
+		upstreamSendMs = &us
+	}
+
 	var keyAlias, userAlias, teamAlias string
 	if logCtx.TokenInfo != nil {
 		keyAlias = logCtx.TokenInfo.KeyAlias
@@ -87,6 +93,7 @@ func (p *Proxy) buildKafkaSpendEvent(
 		StartTime:           logCtx.StartTime,
 		EndTime:             endTime,
 		CompletionStartTime: completionStartTime,
+		UpstreamSendMs:      upstreamSendMs,
 		DurationMs:          endTime.Sub(logCtx.StartTime).Milliseconds(),
 		TTFTMs:              ttftMs,
 

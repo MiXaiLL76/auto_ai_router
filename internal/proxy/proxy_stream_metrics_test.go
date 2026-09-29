@@ -103,7 +103,7 @@ func TestExecuteProxyRequest_NonOKBodyErrorStatusRecordsAttemptErrorOnce(t *test
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
 
-	_, err := prx.executeProxyRequest(req, cred, "gpt-4", []byte(`{}`), time.Now())
+	_, err := prx.executeProxyRequest(req, cred, "gpt-4", []byte(`{}`), time.Now(), nil)
 	assert.NoError(t, err)
 
 	count := testutil.ToFloat64(monitoring.CredentialErrorsTotal.WithLabelValues("double-count-cred"))

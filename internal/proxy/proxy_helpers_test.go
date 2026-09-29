@@ -225,7 +225,7 @@ func TestGetClientIP(t *testing.T) {
 
 func TestBuildMetadata(t *testing.T) {
 	t.Run("nil_tokenInfo", func(t *testing.T) {
-		result := buildMetadata("hashed123", nil, "", 0, nil, "", nil, "", 0, "")
+		result := buildMetadata("hashed123", nil, "", 0, nil, "", nil, "", 0, 0, "")
 		var m map[string]interface{}
 		err := json.Unmarshal([]byte(result), &m)
 		require.NoError(t, err)
@@ -243,7 +243,7 @@ func TestBuildMetadata(t *testing.T) {
 			UserAlias:      "my-user",
 			TeamAlias:      "my-team",
 		}
-		result := buildMetadata("hashed456", tokenInfo, "", 0, nil, "", nil, "gpt-4o", 0, "")
+		result := buildMetadata("hashed456", tokenInfo, "", 0, nil, "", nil, "gpt-4o", 0, 0, "")
 		var m map[string]interface{}
 		err := json.Unmarshal([]byte(result), &m)
 		require.NoError(t, err)
@@ -257,7 +257,7 @@ func TestBuildMetadata(t *testing.T) {
 	})
 
 	t.Run("with_error_info", func(t *testing.T) {
-		result := buildMetadata("hashed789", nil, "rate limit exceeded", http.StatusTooManyRequests, nil, "", nil, "", 0, "")
+		result := buildMetadata("hashed789", nil, "rate limit exceeded", http.StatusTooManyRequests, nil, "", nil, "", 0, 0, "")
 		var m map[string]interface{}
 		err := json.Unmarshal([]byte(result), &m)
 		require.NoError(t, err)
@@ -283,7 +283,7 @@ func TestBuildMetadata(t *testing.T) {
 			CacheCreation1hTokens:  8,
 		}
 
-		result := buildMetadata("hashed", nil, "", 0, usage, "", nil, "gpt-4o", 0, "")
+		result := buildMetadata("hashed", nil, "", 0, usage, "", nil, "gpt-4o", 0, 0, "")
 		var m map[string]interface{}
 		err := json.Unmarshal([]byte(result), &m)
 		require.NoError(t, err)
@@ -782,4 +782,23 @@ func TestRedactRequestBodyForLogging(t *testing.T) {
 		_, ok := redactRequestBodyForLogging(nil)
 		assert.False(t, ok)
 	})
+}
+
+// TestBuildMetadata_UpstreamSendDelay verifies the router-side processing
+// time (StartTime → first upstream send) is exposed in the Postgres spend
+// metadata JSON alongside the existing litellm_overhead_time_ms, and stays 0
+// when the request never reached a provider.
+func TestBuildMetadata_UpstreamSendDelay(t *testing.T) {
+	result := buildMetadata("hashed", nil, "", 0, nil, "", nil, "gpt-4o", 42.5, 12.25, "")
+	var m map[string]interface{}
+	err := json.Unmarshal([]byte(result), &m)
+	require.NoError(t, err)
+	assert.Equal(t, float64(42.5), m["litellm_overhead_time_ms"])
+	assert.Equal(t, float64(12.25), m["upstream_send_delay_ms"])
+
+	zero := buildMetadata("hashed", nil, "", 0, nil, "", nil, "gpt-4o", 42.5, 0, "")
+	var mz map[string]interface{}
+	err = json.Unmarshal([]byte(zero), &mz)
+	require.NoError(t, err)
+	assert.Equal(t, float64(0), mz["upstream_send_delay_ms"], "no send → no delay")
 }

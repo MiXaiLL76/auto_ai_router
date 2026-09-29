@@ -448,6 +448,7 @@ func (s *nativeWSSession) connect(logCtx *RequestLogContext) error {
 		}
 	}
 	dialer := websocket.Dialer{HandshakeTimeout: 30 * time.Second, Proxy: http.ProxyFromEnvironment}
+	s.proxy.stampFirstUpstreamSend(logCtx)
 	conn, response, err := dialer.DialContext(s.request.Context(), target, headers)
 	if response != nil && response.Body != nil {
 		_ = response.Body.Close()

@@ -266,7 +266,7 @@ func (p *Proxy) TryFallbackProxy(
 		// Add jitter (0-50ms) to prevent thundering herd when multiple requests fail simultaneously
 		jitter := time.Duration(rand.IntN(50)) * time.Millisecond
 		time.Sleep(jitter)
-		proxyResp, fwdErr := p.forwardToProxy(w, r, modelID, fallbackCred, body, start)
+		proxyResp, fwdErr := p.forwardToProxy(w, r, modelID, fallbackCred, body, start, logCtx)
 		if fwdErr != nil {
 			// Mid-chain failure — the next fallback is tried; the final outcome
 			// is logged at ERROR when the response is written to the client.
