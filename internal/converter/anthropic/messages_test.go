@@ -523,12 +523,9 @@ func TestOpenAIToAnthropic_ChatFileFileIDUnsupported(t *testing.T) {
 }
 
 // TestOpenAIToAnthropic_MaxTokensWrongTypeReportsParam covers a client that sends
-// max_tokens as a string ("five") instead of a number. Before this fix, the raw
-// json.Unmarshal error reached the proxy layer as a plain error, which doesn't match
-// *converterutil.RequestValidationError and falls through to a generic 500 -- opaque to
-// the client and indistinguishable from a real upstream failure. It must classify as a
-// validation error naming the offending param, the same way the openai/* passthrough
-// route already does (OpenAI's own API returns invalid_type/max_tokens for this).
+// max_tokens as a string ("five") instead of a number, which must classify as a
+// validation error naming the offending param instead of falling through to a
+// generic 500.
 func TestOpenAIToAnthropic_MaxTokensWrongTypeReportsParam(t *testing.T) {
 	body := []byte(`{"model":"claude-haiku-4-5","messages":[{"role":"user","content":"Say OK."}],"max_tokens":"five"}`)
 

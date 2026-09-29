@@ -123,10 +123,8 @@ func TestMessagesToChat_DocumentProviderFileIDRejected(t *testing.T) {
 }
 
 // TestMessagesToChat_MaxTokensWrongTypeReportsParam covers a client sending
-// "max_tokens" as a string on the native /v1/messages route. Before this fix, the
-// map[string]interface{} type assertion failing (present-but-wrong-typed field) was
-// conflated with the field being entirely absent, producing the misleading
-// "max_tokens is required" for both cases, wrapped in a plain error with no param/code.
+// "max_tokens" as a string on the native /v1/messages route, which must report
+// invalid_type rather than being conflated with the field being absent.
 func TestMessagesToChat_MaxTokensWrongTypeReportsParam(t *testing.T) {
 	body := []byte(`{"model":"claude-haiku-4-5","max_tokens":"five","messages":[{"role":"user","content":"hi"}]}`)
 

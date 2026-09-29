@@ -14,9 +14,8 @@ import (
 )
 
 // TestOpenAIEmbeddingToVertex_DimensionsWrongTypeReportsParam covers a client sending
-// "dimensions" as a string instead of a number. Before this fix, the raw
-// json.Unmarshal error reached the proxy layer as a plain error, which doesn't match
-// *converterutil.RequestValidationError and falls through to a generic 500.
+// "dimensions" as a string instead of a number, which must classify as a validation
+// error instead of falling through to a generic 500.
 func TestOpenAIEmbeddingToVertex_DimensionsWrongTypeReportsParam(t *testing.T) {
 	body := []byte(`{"model":"text-embedding-3-small","input":"hello","dimensions":"x"}`)
 
