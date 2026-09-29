@@ -1,18 +1,25 @@
 name: Lint
 
-# Every check is its own job, so the PR checks list says exactly what broke
-# ("govulncheck" red, everything else green) instead of one "Lint Code" job
-# whose cause is buried in a summary table. Each job:
-#   - fails on its own, with a single ::error annotation naming the cause
-#     and the local command that reproduces it;
-#   - retries its network-bound setup (go mod download / go install), so a
-#     transient proxy.golang.org / sum.golang.org hiccup doesn't read as a
-#     lint failure;
-#   - reports exit 137 as what it is on arc-air-runners — the pod was
-#     SIGKILLed, almost always OOMKilled — not as a finding. After such a
-#     kill the ARC container hook breaks and every later step of that job
-#     fails with "TypeError: Converting circular structure to JSON"; that
-#     message is noise, look for the first failing step.
+# One job, checks run one after another in the same pod.
+#
+# Why one job: on arc-air-runners the per-job overhead (pod start ~50s,
+# actions/setup-go download + 572 MB cache restore/save, 1-4 min) cost more
+# than all the checks together (~3 min). The golang image already ships Go,
+# so there is no setup-go and no Actions cache at all: `go mod download`
+# from the proxy takes seconds, and a cold build is cheaper than moving the
+# cache tarball around.
+#
+# How to read a failure:
+#   - every check is its own step; a failing step goes red on its own and
+#     prints one ::error annotation with the cause and the local command;
+#   - all checks run even if an earlier one failed (`if: !cancelled()`), so
+#     one run shows every problem at once;
+#   - if the pod is OOM-killed (exit 137) Kubernetes kills the whole
+#     container, the step can't report anything, and every later step fails
+#     with "TypeError: Converting circular structure to JSON" — ARC noise.
+#     The `explain` job then reads the log from outside and says which step
+#     died and why. govulncheck is the memory hog (~2-3 GB), so it runs last:
+#     if it gets killed, all other checks have already reported.
 
 env:
   GOLANGCI_LINT_VERSION: v2.13.1
@@ -39,183 +46,157 @@ on:
       - '.github/workflows/lint.yml'
   workflow_call:
 
-# A new push to a PR supersedes the previous run: cancel it instead of
-# letting both fight for runner memory. Pushes to main/develop and release
-# runs (workflow_call) are never cancelled.
+permissions:
+  contents: read
+  actions: read  # explain job reads this run's job log
+
+# A new push to a PR supersedes the previous run. Pushes to main/develop and
+# release runs (workflow_call) are never cancelled.
 concurrency:
   group: lint-${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  gofmt:
-    name: gofmt
+  checks:
+    name: Checks
     runs-on: arc-air-runners
     container:
-      image: ghcr.io/actions/actions-runner:latest
+      image: golang:1.27
+    env:
+      CGO_ENABLED: 1  # -race
+
     steps:
     - uses: actions/checkout@v6
 
-    - uses: actions/setup-go@v6
-      with:
-        go-version: '1.27'
-        cache: false
+    - name: Prepare toolchain
+      run: |
+        git config --global --add safe.directory "$GITHUB_WORKSPACE"
+        go version
+        # Printed so an OOM kill can be compared against the real limit.
+        echo "pod memory limit: $(cat /sys/fs/cgroup/memory.max 2>/dev/null || cat /sys/fs/cgroup/memory/memory.limit_in_bytes 2>/dev/null || echo unknown)"
 
-    - name: Check formatting
+        retry() { for i in 1 2 3; do "$@" && return 0; echo "retry $i/3: $*"; sleep 15; done; return 1; }
+        fail() { echo "::error title=toolchain setup::$1 — network/proxy problem, not a code problem; re-run"; exit 1; }
+
+        retry go mod download || fail "go mod download failed 3 times"
+        retry go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@${GOLANGCI_LINT_VERSION} || fail "golangci-lint install failed 3 times"
+        # Unpinned on purpose, like `make vuln`: a fresh advisory must fail here the same day.
+        retry go install golang.org/x/vuln/cmd/govulncheck@latest || fail "govulncheck install failed 3 times"
+        retry sh -c 'apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq python3-venv >/dev/null' || fail "python3-venv install failed 3 times"
+        python3 -m venv /opt/pre-commit && retry /opt/pre-commit/bin/pip install -q pre-commit || fail "pre-commit install failed 3 times"
+
+    - name: gofmt
+      if: ${{ !cancelled() }}
       run: |
         files=$(gofmt -s -l .)
         if [ -n "$files" ]; then
           echo "$files"
           count=$(echo "$files" | wc -l)
-          {
-            echo "## gofmt: ${count} unformatted file(s)"
-            echo '```'
-            echo "$files"
-            echo '```'
-            echo "Fix locally: \`make format\`"
-          } >> "$GITHUB_STEP_SUMMARY"
+          { echo "### ❌ gofmt: ${count} unformatted file(s)"; echo '```'; echo "$files"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           echo "::error title=gofmt::${count} unformatted file(s) — run 'make format'"
           exit 1
         fi
-        echo "## gofmt: OK" >> "$GITHUB_STEP_SUMMARY"
+        echo "### ✅ gofmt" >> "$GITHUB_STEP_SUMMARY"
 
-  vet:
-    name: go vet
-    runs-on: arc-air-runners
-    container:
-      image: ghcr.io/actions/actions-runner:latest
-    steps:
-    - uses: actions/checkout@v6
-
-    - uses: actions/setup-go@v6
-      with:
-        go-version: '1.27'
-        cache: true
-
-    - name: Download modules
+    - name: go vet
+      if: ${{ !cancelled() }}
       run: |
-        for i in 1 2 3; do go mod download && exit 0; echo "retry $i/3..."; sleep 15; done
-        echo "::error title=go mod download::could not download modules after 3 attempts — network/proxy problem, not a code problem; re-run"
-        exit 1
-
-    - name: Run go vet
-      run: |
-        set +e
-        go vet ./... > vet.log 2>&1
-        status=$?
-        cat vet.log
-        if [ "$status" -eq 137 ]; then
-          echo "::error title=go vet killed::exit 137 (SIGKILL) — runner pod most likely OOMKilled; re-run, raise arc-air-runners memory if it repeats"
-          exit 1
-        fi
-        if [ "$status" -ne 0 ]; then
-          {
-            echo "## go vet: failed"
-            echo '```'
-            cat vet.log
-            echo '```'
-            echo "Reproduce locally: \`make vet\`"
-          } >> "$GITHUB_STEP_SUMMARY"
+        if ! go vet ./... > vet.log 2>&1; then
+          cat vet.log
+          { echo "### ❌ go vet"; echo '```'; cat vet.log; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           echo "::error title=go vet::go vet reported issues — see log; run 'make vet'"
           exit 1
         fi
-        echo "## go vet: OK" >> "$GITHUB_STEP_SUMMARY"
+        echo "### ✅ go vet" >> "$GITHUB_STEP_SUMMARY"
 
-  golangci:
-    name: golangci-lint
-    runs-on: arc-air-runners
-    container:
-      image: ghcr.io/actions/actions-runner:latest
-    steps:
-    - uses: actions/checkout@v6
-
-    - uses: actions/setup-go@v6
-      with:
-        go-version: '1.27'
-        cache: true
-
-    - name: Install golangci-lint ${{ env.GOLANGCI_LINT_VERSION }}
+    - name: golangci-lint
+      if: ${{ !cancelled() }}
       run: |
-        for i in 1 2 3; do
-          go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@${GOLANGCI_LINT_VERSION} && exit 0
-          echo "retry $i/3..."; sleep 15
-        done
-        echo "::error title=golangci-lint install::could not install golangci-lint after 3 attempts — network/proxy problem, not a code problem; re-run"
-        exit 1
-
-    - name: Run golangci-lint
-      run: |
-        set +e
-        golangci-lint run --timeout=5m --max-issues-per-linter=0 --max-same-issues=0 ./... > golangci.log 2>&1
-        status=$?
-        cat golangci.log
-        if [ "$status" -eq 137 ]; then
-          echo "::error title=golangci-lint killed::exit 137 (SIGKILL) — runner pod most likely OOMKilled; re-run, raise arc-air-runners memory if it repeats"
-          exit 1
-        fi
-        issues=$(grep -cE '^\S+\.go:[0-9]+:[0-9]+:' golangci.log || true)
-        gosec=$(grep -cE '^\S+\.go:[0-9]+:[0-9]+:.*\(gosec\)' golangci.log || true)
-        if [ "$status" -ne 0 ]; then
-          {
-            echo "## golangci-lint: ${issues} issue(s), ${gosec} from gosec"
-            echo '```'
-            cat golangci.log
-            echo '```'
-            echo "Reproduce locally: \`make lint\`"
-          } >> "$GITHUB_STEP_SUMMARY"
+        if ! golangci-lint run --timeout=5m --max-issues-per-linter=0 --max-same-issues=0 ./... > golangci.log 2>&1; then
+          cat golangci.log
+          issues=$(grep -cE '^\S+\.go:[0-9]+:[0-9]+:' golangci.log || true)
+          gosec=$(grep -cE '^\S+\.go:[0-9]+:[0-9]+:.*\(gosec\)' golangci.log || true)
+          { echo "### ❌ golangci-lint: ${issues} issue(s), ${gosec} gosec"; echo '```'; cat golangci.log; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           echo "::error title=golangci-lint::${issues} issue(s) (${gosec} gosec) — run 'make lint'"
           exit 1
         fi
-        echo "## golangci-lint: OK" >> "$GITHUB_STEP_SUMMARY"
+        echo "### ✅ golangci-lint" >> "$GITHUB_STEP_SUMMARY"
 
-  govulncheck:
-    name: govulncheck
-    runs-on: arc-air-runners
-    container:
-      image: ghcr.io/actions/actions-runner:latest
-    steps:
-    - uses: actions/checkout@v6
-
-    - uses: actions/setup-go@v6
-      with:
-        go-version: '1.27'
-        cache: true
-
-    # Unpinned on purpose: the tool and the vulnerability DB move together,
-    # and a fresh advisory must fail here the same day. Mirrors `make vuln`.
-    - name: Install govulncheck
+    - name: pre-commit
+      if: ${{ !cancelled() }}
       run: |
-        for i in 1 2 3; do go install golang.org/x/vuln/cmd/govulncheck@latest && exit 0; echo "retry $i/3..."; sleep 15; done
-        echo "::error title=govulncheck install::could not install govulncheck after 3 attempts — network/proxy problem, not a code problem; re-run"
-        exit 1
-
-    - name: Run govulncheck
-      run: |
-        set +e
-        govulncheck ./... > govulncheck.log 2>&1
-        status=$?
-        cat govulncheck.log
-        if [ "$status" -eq 137 ]; then
-          echo "::error title=govulncheck killed::exit 137 (SIGKILL) — runner pod most likely OOMKilled; re-run, raise arc-air-runners memory if it repeats"
+        if ! /opt/pre-commit/bin/pre-commit run --all-files --show-diff-on-failure; then
+          echo "### ❌ pre-commit: hooks failed or modified files — see log" >> "$GITHUB_STEP_SUMMARY"
+          echo "::error title=pre-commit::hooks failed or modified files — run 'pre-commit run --all-files' and commit the result"
           exit 1
         fi
-        vulns=$(grep -cE '^Vulnerability #' govulncheck.log || true)
+        echo "### ✅ pre-commit" >> "$GITHUB_STEP_SUMMARY"
+
+    - name: go test -race
+      if: ${{ !cancelled() }}
+      run: |
+        if ! go test -v -race -coverprofile=coverage.out -covermode=atomic ./... > test.log 2>&1; then
+          cat test.log
+          # The full -v log is huge; surface just the failures.
+          failed=$(grep -E '^(--- FAIL|FAIL|panic:|WARNING: DATA RACE)' test.log | head -50)
+          {
+            echo "### ❌ go test"
+            echo '```'
+            if [ -n "$failed" ]; then echo "$failed"; else tail -50 test.log; fi
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "$failed" | grep -E '^--- FAIL' | head -20 | while read -r line; do
+            echo "::error title=go test::${line}"
+          done
+          grep -q 'WARNING: DATA RACE' test.log && echo "::error title=go test::data race detected — see log"
+          echo "::error title=go test::tests failed — run 'make test-race'"
+          exit 1
+        fi
+        echo "### ✅ go test" >> "$GITHUB_STEP_SUMMARY"
+
+    - name: coverage
+      if: ${{ !cancelled() }}
+      run: |
+        if [ ! -s coverage.out ]; then
+          echo "::error title=coverage::no coverage.out — tests did not run to completion"
+          exit 1
+        fi
+        pct=$(go tool cover -func=coverage.out | awk '/^total:/ { sub("%", "", $3); print $3 }')
+        if [ -z "$pct" ] || [ "${pct%.*}" -lt "$MIN_COVERAGE" ]; then
+          echo "### ❌ coverage: ${pct:-?}% (threshold ${MIN_COVERAGE}%)" >> "$GITHUB_STEP_SUMMARY"
+          echo "::error title=coverage::total coverage ${pct:-?}% is below the ${MIN_COVERAGE}% threshold — add tests"
+          exit 1
+        fi
+        echo "### ✅ coverage: ${pct}% (threshold ${MIN_COVERAGE}%)" >> "$GITHUB_STEP_SUMMARY"
+
+    # Last on purpose — see the header comment.
+    - name: govulncheck
+      if: ${{ !cancelled() }}
+      env:
+        # Unbounded, govulncheck peaks at ~3.2 GB on this repo; with a soft
+        # limit the GC keeps it at ~2.1 GB (slower: ~30s instead of ~10s).
+        GOMEMLIMIT: 1500MiB
+      run: |
+        status=0
+        govulncheck ./... > govulncheck.log 2>&1 || status=$?
+        cat govulncheck.log
         if [ "$status" -ne 0 ]; then
+          vulns=$(grep -cE '^Vulnerability #' govulncheck.log || true)
           {
             if [ "$vulns" -gt 0 ]; then
-              echo "## govulncheck: ${vulns} vulnerability(ies) reachable from our code"
+              echo "### ❌ govulncheck: ${vulns} vulnerability(ies) reachable from our code"
               echo
               echo "No code change is needed to trigger this — a new advisory landed in the vulnerability DB."
               echo "Fix: bump the module(s) listed under **Fixed in** (\`go get -u ./... && go mod tidy\`), then \`make vuln\`."
             else
-              echo "## govulncheck: did not complete (exit ${status})"
+              echo "### ❌ govulncheck: did not complete (exit ${status})"
             fi
             echo '```'
             cat govulncheck.log
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
           if [ "$vulns" -gt 0 ]; then
-            # One annotation per advisory, so the ID and fixed version show
-            # up on the PR checks page without opening the log.
+            # One annotation per advisory: ID, vulnerable and fixed version.
             awk '
               /^Vulnerability #/ { id=$3 }
               /^    Found in:/   { found=$3 }
@@ -226,98 +207,45 @@ jobs:
           fi
           exit 1
         fi
-        echo "## govulncheck: no reachable vulnerabilities" >> "$GITHUB_STEP_SUMMARY"
+        echo "### ✅ govulncheck" >> "$GITHUB_STEP_SUMMARY"
 
-  pre-commit:
-    name: pre-commit
-    runs-on: arc-air-runners
-    container:
-      image: ghcr.io/actions/actions-runner:latest
+  # Runs on a GitHub-hosted runner, outside the ARC pod, so it still works
+  # when the pod was OOM-killed and could not report anything itself.
+  explain:
+    name: Why did Checks fail?
+    needs: checks
+    if: ${{ failure() }}
+    runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v6
-
-    - uses: actions/setup-python@v6
-      with:
-        python-version: '3.x'
-
-    - name: Install pre-commit
-      run: |
-        for i in 1 2 3; do pip install pre-commit && exit 0; echo "retry $i/3..."; sleep 15; done
-        echo "::error title=pre-commit install::could not install pre-commit after 3 attempts — network problem, not a code problem; re-run"
-        exit 1
-
-    - name: Run pre-commit
-      run: |
-        set +e
-        pre-commit run --all-files --show-diff-on-failure
-        status=$?
-        if [ "$status" -ne 0 ]; then
-          echo "## pre-commit: hooks failed or modified files — see log" >> "$GITHUB_STEP_SUMMARY"
-          echo "::error title=pre-commit::hooks failed or modified files — run 'pre-commit run --all-files' (or 'make format') and commit the result"
-          exit 1
-        fi
-        echo "## pre-commit: OK" >> "$GITHUB_STEP_SUMMARY"
-
-  test:
-    name: Tests & coverage
-    runs-on: arc-air-runners
-    container:
-      image: golang:1.27
-    steps:
-    - uses: actions/checkout@v6
-
-    - uses: actions/setup-go@v6
-      with:
-        go-version: '1.27'
-        cache: true
-
-    - name: Download modules
-      run: |
-        for i in 1 2 3; do go mod download && exit 0; echo "retry $i/3..."; sleep 15; done
-        echo "::error title=go mod download::could not download modules after 3 attempts — network/proxy problem, not a code problem; re-run"
-        exit 1
-
-    - name: Run tests
+    - name: Explain failure
       env:
-        CGO_ENABLED: 1
+        GH_TOKEN: ${{ github.token }}
+        REPO: ${{ github.repository }}
+        RUN_ID: ${{ github.run_id }}
+        ATTEMPT: ${{ github.run_attempt }}
       run: |
-        set +e
-        go test -v -race -coverprofile=coverage.out -covermode=atomic ./... > test.log 2>&1
-        status=$?
-        cat test.log
-        if [ "$status" -eq 137 ]; then
-          echo "::error title=go test killed::exit 137 (SIGKILL) — runner pod most likely OOMKilled (-race is memory-hungry); re-run, raise arc-air-runners memory if it repeats"
-          exit 1
-        fi
-        if [ "$status" -ne 0 ]; then
-          # The full -v log is huge; surface just the failures.
-          failed=$(grep -E '^(--- FAIL|FAIL|panic:|WARNING: DATA RACE)' test.log | head -50)
-          {
-            echo "## go test: failed"
-            echo '```'
-            if [ -n "$failed" ]; then echo "$failed"; else tail -50 test.log; fi
-            echo '```'
-            echo "Reproduce locally: \`make test-race\`"
-          } >> "$GITHUB_STEP_SUMMARY"
-          if [ -n "$failed" ]; then
-            echo "$failed" | grep -E '^--- FAIL' | head -20 | while read -r line; do
-              echo "::error title=go test::${line}"
-            done
-            grep -q 'WARNING: DATA RACE' test.log && echo "::error title=go test::data race detected — see log"
-          fi
-          echo "::error title=go test::tests failed (exit ${status}) — see summary; run 'make test-race'"
-          exit 1
+        # Under workflow_call the job is named "<caller job> / Checks".
+        job=$(gh api "repos/$REPO/actions/runs/$RUN_ID/attempts/$ATTEMPT/jobs" \
+          -q '[.jobs[] | select(.name == "Checks" or (.name | endswith("/ Checks")))][0]')
+        job_id=$(echo "$job" | jq -r .id)
+        failed_steps=$(echo "$job" | jq -r '[.steps[] | select(.conclusion == "failure") | .name] | join(", ")')
+        first=$(echo "$job" | jq -r '[.steps[] | select(.conclusion == "failure") | .name][0] // "unknown"')
+        gh api "repos/$REPO/actions/jobs/$job_id/logs" > job.log 2>/dev/null || true
+
+        if grep -q 'exit code 137' job.log; then
+          # Log lines start with an RFC3339 timestamp; map the 137 line onto
+          # the step whose [started_at, completed_at] window contains it.
+          ts=$(grep -m1 'exit code 137' job.log | cut -c1-19)
+          killed=$(echo "$job" | jq -r --arg ts "${ts}Z" '
+            [.steps[] | select(.started_at != null and .started_at[0:19] + "Z" <= $ts
+                              and ((.completed_at // "9999")[0:19] + "Z") >= $ts) | .name][0] // empty')
+          [ -n "$killed" ] || killed="$first"
+          msg="'${killed}' was killed by the kernel (exit 137): the ARC pod ran out of memory (OOMKilled). Not a code problem. Steps after it failing with 'Converting circular structure to JSON' are fallout, ignore them. Re-run; if it keeps happening, raise the memory limit of arc-air-runners pods (limit is printed in 'Prepare toolchain')."
+        elif grep -q 'circular structure to JSON' job.log; then
+          msg="The ARC container hook broke after step '${first}' — runner infrastructure problem, not a code problem. Re-run."
+        else
+          msg="Failed step(s): ${failed_steps}. Open the Checks job and look at the red steps / annotations above."
         fi
 
-    - name: Check coverage
-      run: |
-        pct=$(go tool cover -func=coverage.out | awk '/^total:/ { sub("%", "", $3); print $3 }')
-        echo "## Coverage: ${pct}% (threshold ${MIN_COVERAGE}%)" >> "$GITHUB_STEP_SUMMARY"
-        if [ -z "$pct" ]; then
-          echo "::error title=coverage::could not compute total coverage from coverage.out"
-          exit 1
-        fi
-        if [ "${pct%.*}" -lt "$MIN_COVERAGE" ]; then
-          echo "::error title=coverage::total coverage ${pct}% is below the ${MIN_COVERAGE}% threshold — add tests"
-          exit 1
-        fi
+        echo "::error title=Why Checks failed::${msg}"
+        { echo "## Why did Checks fail?"; echo; echo "$msg"; echo; echo "Failed steps: ${failed_steps:-none}"; } >> "$GITHUB_STEP_SUMMARY"

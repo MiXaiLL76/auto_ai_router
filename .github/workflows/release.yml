@@ -10,6 +10,7 @@ on:
 permissions:
   contents: write
   packages: write
+  actions: read  # lint.yml (workflow_call) explain job reads its own run log
 
 jobs:
   # 0. Проверка качества кода (fmt, lint, tests)
