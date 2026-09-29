@@ -263,6 +263,22 @@ func (p *Proxy) TryFallbackProxy(
 		ctx = SetTried(ctx, triedCreds)
 		r = r.WithContext(ctx)
 
+		// Mirrors the same-type retry loop's own convention (proxy.go): keep
+		// logCtx.Credential in lockstep with the credential actually being
+		// attempted, not just the one from writeFallbackResponse once a
+		// response comes back. Some fallback attempts here are the very
+		// first upstream send for this request at all (see
+		// applyCredentialCompatibilityRouting, which skips straight to
+		// TryFallbackProxy without ever calling forwardToProxy on the
+		// original credential) -- forwardToProxy's stampFirstUpstreamSend
+		// reads logCtx.Credential to label the
+		// auto_ai_router_time_to_upstream_send_seconds metric, and it would
+		// otherwise still point at the original, never-actually-sent
+		// credential at that moment.
+		if logCtx != nil {
+			logCtx.Credential = fallbackCred
+		}
+
 		// Add jitter (0-50ms) to prevent thundering herd when multiple requests fail simultaneously
 		jitter := time.Duration(rand.IntN(50)) * time.Millisecond
 		time.Sleep(jitter)

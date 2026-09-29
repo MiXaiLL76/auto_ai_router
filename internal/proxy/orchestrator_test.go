@@ -13,7 +13,10 @@ import (
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/models"
+	"github.com/mixaill76/auto_ai_router/internal/monitoring"
 	"github.com/mixaill76/auto_ai_router/internal/testhelpers"
+	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -928,6 +931,8 @@ func TestProxyRequest_UnsupportedProManRequestRoutesToFallbackProxy(t *testing.T
 			config.CredentialConfig{Name: "fallback", Type: config.ProviderTypeProxy, BaseURL: fallback.URL, APIKey: "fallback-key", RPM: 100, TPM: 10000, IsFallback: true},
 		).
 		Build()
+	prx.metrics = monitoring.New(true)
+	monitoring.TimeToUpstreamSendSeconds.Reset()
 
 	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(`{"model":"claude-sonnet-4-6","messages":[{"role":"assistant","content":[{"type":"server_tool_use","name":"web_search"}]}]}`))
 	req.Header.Set("Authorization", "Bearer master-key")
@@ -940,6 +945,30 @@ func TestProxyRequest_UnsupportedProManRequestRoutesToFallbackProxy(t *testing.T
 	assert.Contains(t, w.Body.String(), "fallback ok")
 	assert.Equal(t, int32(0), atomic.LoadInt32(&promanCalls))
 	assert.Equal(t, int32(1), atomic.LoadInt32(&fallbackCalls))
+
+	// This request's very first (and only) upstream send happens inside
+	// TryFallbackProxy -- applyCredentialCompatibilityRouting skips the
+	// original "proman" credential entirely and never calls forwardToProxy
+	// on it. Before the fix, logCtx.Credential was only updated to the
+	// fallback credential in writeFallbackResponse, which runs *after*
+	// forwardToProxy/executeProxyRequest already read it inside
+	// stampFirstUpstreamSend -- mislabeling the metric under "proman", a
+	// credential that was never actually attempted.
+	fallbackObserver, ok := monitoring.TimeToUpstreamSendSeconds.
+		WithLabelValues("fallback", "/v1/chat/completions").(prometheus.Histogram)
+	require.True(t, ok)
+	var fallbackMetric dto.Metric
+	require.NoError(t, fallbackObserver.Write(&fallbackMetric))
+	assert.Equal(t, uint64(1), fallbackMetric.GetHistogram().GetSampleCount(),
+		"the upstream-send-delay sample must be attributed to the fallback credential that actually sent the request")
+
+	promanObserver, ok := monitoring.TimeToUpstreamSendSeconds.
+		WithLabelValues("proman", "/v1/chat/completions").(prometheus.Histogram)
+	require.True(t, ok)
+	var promanMetric dto.Metric
+	require.NoError(t, promanObserver.Write(&promanMetric))
+	assert.Equal(t, uint64(0), promanMetric.GetHistogram().GetSampleCount(),
+		"the never-attempted original credential must not receive an upstream-send-delay sample")
 }
 
 // TestProxyRequest_UnsupportedProManRequestFallbackBlockedWhenPriceUnavailable
