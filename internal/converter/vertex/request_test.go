@@ -2,11 +2,10 @@ package vertex
 
 import (
 	"encoding/json"
-	"errors"
 	"testing"
 
-	converterutil "github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
 	"github.com/mixaill76/auto_ai_router/internal/converter/openai"
+	"github.com/mixaill76/auto_ai_router/internal/testhelpers"
 	"github.com/stretchr/testify/require"
 )
 
@@ -18,11 +17,7 @@ func TestOpenAIToVertex_MaxTokensWrongTypeReportsParam(t *testing.T) {
 	body := []byte(`{"model":"gemini-2.5-flash","messages":[{"role":"user","content":"Say OK."}],"max_tokens":"five"}`)
 
 	_, err := OpenAIToVertex(body, false, false, "gemini-2.5-flash", "application/json")
-	require.Error(t, err)
-	var validationErr *converterutil.RequestValidationError
-	require.True(t, errors.As(err, &validationErr))
-	require.Equal(t, "max_tokens", validationErr.Param)
-	require.Equal(t, "invalid_type", validationErr.Code)
+	testhelpers.RequireValidationError(t, err, "max_tokens", "invalid_type")
 }
 
 // TestOpenAIToVertex_ToolRoleMessage_UsesNameField verifies that when a tool-role

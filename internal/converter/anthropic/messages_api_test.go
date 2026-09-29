@@ -9,6 +9,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
+	"github.com/mixaill76/auto_ai_router/internal/testhelpers"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -130,11 +131,7 @@ func TestMessagesToChat_MaxTokensWrongTypeReportsParam(t *testing.T) {
 
 	_, _, err := MessagesToChat(body)
 
-	require.Error(t, err)
-	var validationErr *converterutil.RequestValidationError
-	require.True(t, errors.As(err, &validationErr))
-	assert.Equal(t, "max_tokens", validationErr.Param)
-	assert.Equal(t, "invalid_type", validationErr.Code)
+	testhelpers.RequireValidationError(t, err, "max_tokens", "invalid_type")
 }
 
 // TestMessagesToChat_MaxTokensMissingReportsMissing covers the field genuinely absent
@@ -163,11 +160,7 @@ func TestMessagesToChat_ModelWrongTypeReportsInvalidType(t *testing.T) {
 
 	_, _, err := MessagesToChat(body)
 
-	require.Error(t, err)
-	var validationErr *converterutil.RequestValidationError
-	require.True(t, errors.As(err, &validationErr))
-	assert.Equal(t, "model", validationErr.Param)
-	assert.Equal(t, "invalid_type", validationErr.Code)
+	testhelpers.RequireValidationError(t, err, "model", "invalid_type")
 }
 
 func TestMessagesToChat_ModelMissingReportsMissing(t *testing.T) {
@@ -193,11 +186,7 @@ func TestMessagesToChat_MessagesWrongTypeReportsInvalidType(t *testing.T) {
 
 	_, _, err := MessagesToChat(body)
 
-	require.Error(t, err)
-	var validationErr *converterutil.RequestValidationError
-	require.True(t, errors.As(err, &validationErr))
-	assert.Equal(t, "messages", validationErr.Param)
-	assert.Equal(t, "invalid_type", validationErr.Code)
+	testhelpers.RequireValidationError(t, err, "messages", "invalid_type")
 }
 
 func TestMessagesToChat_MessagesEmptyReportsInvalidValue(t *testing.T) {
@@ -205,11 +194,7 @@ func TestMessagesToChat_MessagesEmptyReportsInvalidValue(t *testing.T) {
 
 	_, _, err := MessagesToChat(body)
 
-	require.Error(t, err)
-	var validationErr *converterutil.RequestValidationError
-	require.True(t, errors.As(err, &validationErr))
-	assert.Equal(t, "messages", validationErr.Param)
-	assert.Equal(t, "invalid_value", validationErr.Code)
+	testhelpers.RequireValidationError(t, err, "messages", "invalid_value")
 }
 
 func TestMessagesToChat_MessagesMissingReportsMissing(t *testing.T) {

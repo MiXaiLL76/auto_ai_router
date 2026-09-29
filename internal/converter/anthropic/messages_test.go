@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
+	"github.com/mixaill76/auto_ai_router/internal/testhelpers"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -530,11 +531,7 @@ func TestOpenAIToAnthropic_MaxTokensWrongTypeReportsParam(t *testing.T) {
 	body := []byte(`{"model":"claude-haiku-4-5","messages":[{"role":"user","content":"Say OK."}],"max_tokens":"five"}`)
 
 	_, err := OpenAIToAnthropic(body, "claude-haiku-4-5", true)
-	require.Error(t, err)
-	var validationErr *converterutil.RequestValidationError
-	require.True(t, errors.As(err, &validationErr))
-	assert.Equal(t, "max_tokens", validationErr.Param)
-	assert.Equal(t, "invalid_type", validationErr.Code)
+	testhelpers.RequireValidationError(t, err, "max_tokens", "invalid_type")
 }
 
 // TestOpenAIToBedrock_MaxTokensWrongTypeReportsParam covers the Bedrock request path,
@@ -545,11 +542,7 @@ func TestOpenAIToBedrock_MaxTokensWrongTypeReportsParam(t *testing.T) {
 	body := []byte(`{"model":"claude-haiku-4-5","messages":[{"role":"user","content":"Say OK."}],"max_tokens":"five"}`)
 
 	_, err := OpenAIToBedrock(body, "claude-haiku-4-5")
-	require.Error(t, err)
-	var validationErr *converterutil.RequestValidationError
-	require.True(t, errors.As(err, &validationErr))
-	assert.Equal(t, "max_tokens", validationErr.Param)
-	assert.Equal(t, "invalid_type", validationErr.Code)
+	testhelpers.RequireValidationError(t, err, "max_tokens", "invalid_type")
 }
 
 func TestOpenAIToAnthropic_ChatPDFAsImageURLRejected(t *testing.T) {
