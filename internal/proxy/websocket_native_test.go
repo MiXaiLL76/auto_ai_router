@@ -131,6 +131,20 @@ func wsCompleted(id string) string {
 	return fmt.Sprintf(`{"type":"response.completed","response":{"id":%q,"model":"gpt-6-astra","status":"completed","output":[],"usage":{"input_tokens":100,"output_tokens":20,"input_tokens_details":{"cached_tokens":40,"cache_write_tokens":10},"output_tokens_details":{"reasoning_tokens":5}}}}`, id)
 }
 
+// assertUpstreamSendStamped verifies a spend entry carried a non-null
+// upstream_send_delay_ms in its metadata. The WebSocket path must stamp
+// every turn's logCtx at the actual write to the upstream socket (not at the
+// one-time connection handshake), so this must hold for the first turn, for
+// a steer, and for every later response.create on the same connection.
+func assertUpstreamSendStamped(t *testing.T, entry *dbmodels.SpendLogEntry) {
+	t.Helper()
+	var metadata map[string]interface{}
+	require.NoError(t, json.Unmarshal([]byte(entry.Metadata), &metadata))
+	val, ok := metadata["upstream_send_delay_ms"].(float64)
+	require.True(t, ok, "expected upstream_send_delay_ms in spend metadata, metadata=%s", entry.Metadata)
+	assert.GreaterOrEqual(t, val, 0.0, "upstream_send_delay_ms must be a non-negative elapsed duration")
+}
+
 func TestNativeWebSocketSteeringAndBilling(t *testing.T) {
 	for _, provider := range []config.ProviderType{config.ProviderTypeOpenAI, config.ProviderTypeProxy} {
 		t.Run(string(provider), func(t *testing.T) {
@@ -167,6 +181,7 @@ func TestNativeWebSocketSteeringAndBilling(t *testing.T) {
 			first := f.entry(t)
 			assert.Equal(t, 10, first.PromptTokens)
 			assert.InDelta(t, 16, first.Spend, 1e-9)
+			assertUpstreamSendStamped(t, first)
 			wsWrite(t, upstream, wsCreated("resp_2"))
 			wsEvent(t, f.client, "response.created")
 			wsWrite(t, upstream, wsCompleted("resp_2"))
@@ -176,6 +191,7 @@ func TestNativeWebSocketSteeringAndBilling(t *testing.T) {
 			assert.Equal(t, 20, second.CompletionTokens)
 			assert.InDelta(t, 106.5, second.Spend, 1e-9)
 			assert.NotEqual(t, first.RequestID, second.RequestID)
+			assertUpstreamSendStamped(t, second)
 			wsWrite(t, upstream, wsCompleted("resp_2"))
 			wsWrite(t, f.client, `{"type":"response.create","model":"astra","previous_response_id":"resp_2","input":[{"type":"function_call_output","call_id":"call_1","output":"done"},{"type":"configuration_update","reasoning":{"effort":"high"}}]}`)
 			next := wsEvent(t, upstream, "response.create")
@@ -187,6 +203,7 @@ func TestNativeWebSocketSteeringAndBilling(t *testing.T) {
 			wsEvent(t, f.client, "response.completed")
 			third := f.entry(t)
 			assert.NotEqual(t, second.RequestID, third.RequestID)
+			assertUpstreamSendStamped(t, third)
 			select {
 			case extra := <-f.db.entries:
 				t.Fatalf("duplicate charge: %+v", extra)

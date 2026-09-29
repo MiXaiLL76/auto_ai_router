@@ -435,7 +435,7 @@ func (logCtx *RequestLogContext) applyCostMargin(costs *converter.TokenCosts) {
 }
 
 // buildMetadata builds metadata JSON with user/team alias, usage, cost, and optional error info
-func buildMetadata(hashedToken string, tokenInfo *litellmdb.TokenInfo, errorMsg string, httpStatus int, usage *converter.TokenUsage, requesterIP string, costs *converter.TokenCosts, modelID string, overheadMs float64, kafkaFallbackReason string) string {
+func buildMetadata(hashedToken string, tokenInfo *litellmdb.TokenInfo, errorMsg string, httpStatus int, usage *converter.TokenUsage, requesterIP string, costs *converter.TokenCosts, modelID string, overheadMs float64, upstreamSendDelayMs float64, kafkaFallbackReason string) string {
 	var userID, teamID, organizationID string
 	if tokenInfo != nil {
 		userID = tokenInfo.UserID
@@ -560,6 +560,7 @@ func buildMetadata(hashedToken string, tokenInfo *litellmdb.TokenInfo, errorMsg 
 		"additional_usage_values":       additionalUsage,
 		"cold_storage_object_key":       nil,
 		"litellm_overhead_time_ms":      overheadMs,
+		"upstream_send_delay_ms":        upstreamSendDelayMs,
 		"vector_store_request_metadata": nil,
 		"status":                        "success",
 	}

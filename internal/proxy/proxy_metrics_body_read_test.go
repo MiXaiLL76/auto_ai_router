@@ -98,7 +98,7 @@ func TestExecuteProxyRequest_BodyTooLarge_RecordsCredentialError(t *testing.T) {
 	upstreamReq.Header.Set("Authorization", "Bearer key")
 	w := httptest.NewRecorder()
 
-	proxyResp, err := prx.forwardToProxy(w, upstreamReq, "test-model", cred, []byte("body"), time.Now().UTC())
+	proxyResp, err := prx.forwardToProxy(w, upstreamReq, "test-model", cred, []byte("body"), time.Now().UTC(), nil)
 
 	require.Error(t, err)
 	require.Nil(t, proxyResp)

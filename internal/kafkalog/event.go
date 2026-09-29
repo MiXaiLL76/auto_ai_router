@@ -17,8 +17,16 @@ type SpendEvent struct {
 	// CompletionStartTime is the time-to-first-token (TTFT) timestamp, nil
 	// when the request wasn't streamed or no chunk was ever written.
 	CompletionStartTime *time.Time `json:"completion_start_time,omitempty"`
-	DurationMs          int64      `json:"duration_ms"`
-	TTFTMs              *int64     `json:"ttft_ms,omitempty"`
+	// UpstreamSendMs is the router-side processing time in milliseconds:
+	// elapsed time from request start (start_time) to the first upstream
+	// send. Unlike duration_ms it excludes upstream latency entirely — it
+	// isolates auth/rate-limit/credential-selection/body-conversion cost —
+	// and is omitted when the request never reached a provider. Both this
+	// and ttft_ms are derived timings, so duration_ms decomposes as
+	// upstream_send_ms + "time the upstream took".
+	UpstreamSendMs *int64 `json:"upstream_send_ms,omitempty"`
+	DurationMs     int64  `json:"duration_ms"`
+	TTFTMs         *int64 `json:"ttft_ms,omitempty"`
 
 	CallType     string `json:"call_type"`
 	APIBase      string `json:"api_base"`
