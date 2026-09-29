@@ -274,6 +274,7 @@ func (s *nativeWSSession) create(event map[string]json.RawMessage) bool {
 	if err != nil {
 		return false
 	}
+	s.proxy.stampFirstUpstreamSend(turn.log)
 	return writeNativeWS(s.upstream, encoded) == nil
 }
 
@@ -315,6 +316,7 @@ func (s *nativeWSSession) steer(event map[string]json.RawMessage) bool {
 	if err != nil {
 		return false
 	}
+	s.proxy.stampFirstUpstreamSend(pending.log)
 	return writeNativeWS(s.upstream, wire) == nil
 }
 
@@ -448,7 +450,6 @@ func (s *nativeWSSession) connect(logCtx *RequestLogContext) error {
 		}
 	}
 	dialer := websocket.Dialer{HandshakeTimeout: 30 * time.Second, Proxy: http.ProxyFromEnvironment}
-	s.proxy.stampFirstUpstreamSend(logCtx)
 	conn, response, err := dialer.DialContext(s.request.Context(), target, headers)
 	if response != nil && response.Body != nil {
 		_ = response.Body.Close()
