@@ -7,8 +7,12 @@ Anthropic, with round-robin credential balancing (fail2ban + rate limiting), Lit
 integration for spend logging and auth, and provider responses normalized to the OpenAI
 format. Development targets the Go toolchain pinned in `go.mod` (currently Go 1.27).
 Common tasks are driven through the `Makefile`: `make build`, `make test`,
-`make test-race`, `make lint` (pinned `golangci-lint`), and `make format` before you
-commit. New code is expected to keep package test coverage at or above the 80% threshold
+`make test-race`, `make lint` (pinned `golangci-lint`), `make vuln` and `make format`
+before you commit. `make lint` does not look for vulnerable dependencies — that is
+`make vuln`, which runs `govulncheck@latest` exactly like CI. Because the vulnerability
+database is live, CI can start failing on every branch (including `main`) with no code
+change when a new advisory lands; the fix is to bump the affected module
+(`go get -u ./...` + `go mod tidy`), not to pin the tool. New code is expected to keep package test coverage at or above the 80% threshold
 (`make test-check-coverage`), so add tests alongside behavior changes. If you touch the
 Kafka/ClickHouse spend pipeline, `make kafka-up` brings up a local stack for manual
 verification.
