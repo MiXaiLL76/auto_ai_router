@@ -217,7 +217,9 @@ the history. On the next request AIR:
   identical to the first turn, so vLLM's prefix cache still hits;
 - removes the blocks from the assistant messages before the conversation goes upstream. This
   also happens for vision-capable vLLM models, e.g. when the conversation is switched to one:
-  it sees the original image and does not need the text.
+  it sees the original image and does not need the text. A side effect: text in an earlier
+  answer of a vLLM model that happens to match the block format exactly
+  (`<details type="air-vision" n="…" model="…">…</details>`) is removed as well.
 
 Like the rest of the feature, this applies only to models served exclusively by vLLM. A
 conversation switched to a model of another provider (OpenAI, Anthropic, ...) sends the blocks
@@ -232,8 +234,8 @@ Where the block goes:
 | `/v1/messages`         | start of the first `text` block (after `thinking`)   | start of the first `text` block (after `thinking`)                                  |
 
 An answer without text (tool calls only) still gets the block: Chat Completions as the message
-`content`; Responses as an extra `message` item — placed after the reasoning when not streaming,
-and at the end of `output` when streaming (its events are inserted before `response.completed`).
+`content`; Responses as an extra `message` item at the end of `output` (when streaming, its
+events are inserted before `response.completed`).
 
 The block comes after the reasoning, never inside it: Open WebUI does not send reasoning back
 with the history. `usage` is unchanged — the inserted text is not billed as completion tokens.
@@ -272,18 +274,27 @@ spend-log row for `describe_model`. The key must be allowed to use `describe_mod
 
 Each described image counts as one request against the key's RPM: a message with 4 images costs
 5 requests. When the key's limit is hit, the remaining images become placeholders and the header
-shows it (`described=2/4`).
+shows it (`described=2/4`). The describe calls can also use up the limit the main request needs:
+on a key with 5 RPM, a message with 5 images gets its main request rejected with `429`.
+
+The images are described **before** a credential is picked for the main request, so a rejected
+main request (`429`, no credential available, upstream error) has already paid for its describe
+calls, and a client that retries pays for them again on every retry — AIR keeps no cache of
+descriptions. Keep `max_images` low on keys with tight RPM or budget limits.
 
 The describe call has its own `request_id` (it is the key of its spend-log row). It runs inside the
 caller's trace, and the `DEBUG` line `Vision fallback: describe call` links the two
 (`request_id` = caller, `describe_request_id` = describe call).
 
-If a describe call fails (error, timeout, model not allowed), the image becomes
+If a describe call fails (error, timeout, model not allowed for the key — the caller gets no
+error for that, only a placeholder), the image becomes
 `[image omitted: the image could not be described]` and the original request still proceeds.
 The failure is logged at `WARN` as `Vision fallback: describe call failed`.
 
-A describe call never triggers another describe round: if `describe_model` is itself marked
-`supports_vision: false`, its images are stripped instead.
+A describe call never triggers another describe round. If `describe_model` is itself marked
+`supports_vision: false` (e.g. by a `model_info.supports_vision` value synced from the database
+after startup), the describe call is rejected, every image becomes a placeholder, and
+`vision_fallback.describe_model has supports_vision: false` is logged once at `WARN`.
 
 ## Logs
 

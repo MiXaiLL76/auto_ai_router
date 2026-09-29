@@ -459,6 +459,7 @@ type Proxy struct {
 	defaultEstimatedCompletionTokens int
 	visionFallback                   config.VisionFallbackConfig
 	visionFlagIgnoredWarned          sync.Map // model name -> struct{}: supports_vision ignored warning already logged
+	visionDescribeBlindWarned        sync.Map // model name -> struct{}: text-only describe_model warning already logged
 	serverWriteTimeout               time.Duration
 	keyMetrics                       *monitoring.KeyMetrics
 	responseCompat                   *compatlitellm.Transformer

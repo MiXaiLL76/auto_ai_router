@@ -128,10 +128,14 @@ func (p *Proxy) rewriteVisionImages(w http.ResponseWriter, r *http.Request, root
 		return result, false
 	}
 
-	mode := p.visionFallback.Mode
-	if mode == config.VisionFallbackDescribe && isVisionDescribeRequest(r.Context()) {
-		mode = config.VisionFallbackStrip
+	// A describe call to a text-only model would come back with a made-up or "I cannot
+	// see" answer that is then stored in the answer marker and restored on every later
+	// turn. Reject it instead: the outer request keeps a placeholder for the image.
+	if isVisionDescribeRequest(r.Context()) {
+		p.warnVisionDescribeModelBlind(r.Context(), modelID)
+		return result, true
 	}
+	mode := p.visionFallback.Mode
 	if mode != config.VisionFallbackStrip && mode != config.VisionFallbackDescribe {
 		return result, true
 	}
@@ -210,6 +214,17 @@ func (p *Proxy) warnVisionFlagIgnored(ctx context.Context, modelID string) {
 		"credentials", p.modelManager.GetCredentialsForModel(modelID))
 }
 
+// warnVisionDescribeModelBlind logs once per model that describe_model resolves to a
+// text-only vLLM model. Config.Validate catches a YAML supports_vision: false on
+// describe_model, but not one that arrives later with the database sync.
+func (p *Proxy) warnVisionDescribeModelBlind(ctx context.Context, modelID string) {
+	if _, seen := p.visionDescribeBlindWarned.LoadOrStore(modelID, struct{}{}); seen {
+		return
+	}
+	p.logger.WarnContext(ctx, "vision_fallback.describe_model has supports_vision: false, images cannot be described and become placeholders",
+		"describe_model", modelID)
+}
+
 // applyVisionFallbackToBase runs applyVisionFallback on the orchestrator's base
 // body and returns the rewritten body, or nil when the body is unchanged. It writes
 // the 400 response and returns false when the request is rejected.
@@ -268,12 +283,17 @@ func (p *Proxy) describeVisionImages(w http.ResponseWriter, r *http.Request, ref
 	// give the rest of the request a full write_timeout afterwards, as it would have
 	// had without the describe step.
 	rc := http.NewResponseController(w)
-	_ = rc.SetWriteDeadline(time.Time{})
-	defer func() {
-		if p.serverWriteTimeout > 0 {
-			_ = rc.SetWriteDeadline(time.Now().Add(p.serverWriteTimeout))
-		}
-	}()
+	if err := rc.SetWriteDeadline(time.Time{}); err != nil {
+		// A ResponseWriter wrapper without Unwrap: the describe step may outlive write_timeout.
+		p.logger.WarnContext(r.Context(), "Vision fallback: cannot lift the write deadline during describe",
+			"model", modelID, "error", err)
+	} else {
+		defer func() {
+			if p.serverWriteTimeout > 0 {
+				_ = rc.SetWriteDeadline(time.Now().Add(p.serverWriteTimeout))
+			}
+		}()
+	}
 
 	var wg sync.WaitGroup
 	results := make([]*visionDescription, len(refs)) // each goroutine writes only its own slot

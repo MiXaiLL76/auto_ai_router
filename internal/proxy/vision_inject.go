@@ -310,19 +310,13 @@ func injectVisionIntoResponsesOutput(root map[string]any, prefix string) bool {
 		item["content"] = append([]any{visionOutputTextPart(prefix)}, parts...)
 		return true
 	}
-	// No message item (tool calls only): add one after the leading reasoning.
-	at := 0
-	for at < len(output) {
-		if item, _ := output[at].(map[string]any); item == nil || item["type"] != "reasoning" {
-			break
-		}
-		at++
-	}
+	// No message item (tool calls only): append one at the end, where the streaming
+	// injector adds it too, so a stored response has the same shape either way.
 	msg := map[string]any{
 		"type": "message", "id": "msg_air_vision", "role": "assistant", "status": "completed",
 		"content": []any{visionOutputTextPart(strings.TrimRight(prefix, "\n"))},
 	}
-	root["output"] = append(output[:at:at], append([]any{msg}, output[at:]...)...)
+	root["output"] = append(output, msg)
 	return true
 }
 

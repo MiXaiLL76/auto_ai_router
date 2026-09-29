@@ -353,8 +353,10 @@ func TestVisionFallback_NoRecursionWhenDescribeModelLacksVision(t *testing.T) {
 	w := sendVisionRequest(t, prx, "/v1/chat/completions", `{"model":"glm","messages":[
 		{"role":"user","content":[{"type":"image_url","image_url":{"url":"`+visionTestImage+`"}}]}]}`)
 	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	assert.Equal(t, "described=0/1", w.Header().Get(HeaderVisionFallback))
 	_, bodies := u.snapshot()
-	assert.Len(t, bodies, 2, "one inner call (stripped) and the real request")
+	require.Len(t, bodies, 1, "the inner describe call is rejected before reaching the upstream")
+	assert.Contains(t, mustJSON(t, bodies[0]["messages"]), "could not be described")
 }
 
 // /v1/messages (Anthropic shape) with a base64 image block: converted to Chat for vLLM,

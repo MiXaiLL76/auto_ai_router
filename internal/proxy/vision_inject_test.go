@@ -460,7 +460,8 @@ func TestInjectVisionIntoResponse_ResponsesToolCallsOnly(t *testing.T) {
 	output := resp["output"].([]any)
 	require.Len(t, output, 3)
 	assert.Equal(t, "reasoning", output[0].(map[string]any)["type"])
-	assert.Equal(t, "message", output[1].(map[string]any)["type"], "a message item is added after the reasoning")
+	assert.Equal(t, "function_call", output[1].(map[string]any)["type"])
+	assert.Equal(t, "message", output[2].(map[string]any)["type"], "a message item is appended, as in the streaming path")
 	assert.Equal(t, strings.TrimRight(visionTestMarker, "\n"), responsesOutputText(t, resp))
 
 	_, ok = injectVisionIntoResponse([]byte(`not json`), inj, false)

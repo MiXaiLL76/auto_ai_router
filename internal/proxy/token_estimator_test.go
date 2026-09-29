@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -111,6 +112,18 @@ func TestCompletionTokenAccumulator_GPTReasoningFamiliesUseTokenizer(t *testing.
 
 func TestCompletionTokenAccumulator_CountsJoinedOpenAIText(t *testing.T) {
 	acc := newCompletionTokenAccumulator("gpt-4")
+	acc.AddChunk([]byte(`data: {"choices":[{"delta":{"content":"hello"}}]}` + "\n\n"))
+	acc.AddChunk([]byte(`data: {"choices":[{"delta":{"content":" world"}}]}` + "\n\n"))
+
+	assert.Equal(t, 2, acc.TokenCount())
+}
+
+// Image descriptions injected by the vision fallback are not model output.
+func TestCompletionTokenAccumulator_SkipsVisionMarkers(t *testing.T) {
+	acc := newCompletionTokenAccumulator("gpt-4")
+	marker, err := json.Marshal(visionTestMarker)
+	require.NoError(t, err)
+	acc.AddChunk([]byte(`data: {"choices":[{"delta":{"content":` + string(marker) + `}}]}` + "\n\n"))
 	acc.AddChunk([]byte(`data: {"choices":[{"delta":{"content":"hello"}}]}` + "\n\n"))
 	acc.AddChunk([]byte(`data: {"choices":[{"delta":{"content":" world"}}]}` + "\n\n"))
 
