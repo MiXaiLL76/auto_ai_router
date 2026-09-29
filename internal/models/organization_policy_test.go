@@ -121,6 +121,7 @@ func TestLoadOrganizationPolicies_StrictTariffJSON(t *testing.T) {
 		{name: "unknown field", body: `{"public/a":{"unexpected":1}}`, want: "unknown price field"},
 		{name: "null row", body: `{"public/a":null}`, want: "null price row"},
 		{name: "empty row", body: `{"public/a":{}}`, want: "empty price row"},
+		{name: "rate only, no price field", body: `{"public/a":{"rate":1.4}}`, want: "no recognized price field"},
 	}
 
 	for _, tt := range tests {
@@ -137,6 +138,27 @@ func TestLoadOrganizationPolicies_StrictTariffJSON(t *testing.T) {
 			assert.Contains(t, err.Error(), tt.want)
 		})
 	}
+}
+
+// TestLoadOrganizationPolicies_AcceptsRateField covers a price profile that
+// carries a "rate" multiplier alongside real price fields: strict decoding
+// must accept it and preserve the value, without applying it to the parsed
+// cost fields (rate is not yet consumed by cost calculation).
+func TestLoadOrganizationPolicies_AcceptsRateField(t *testing.T) {
+	manager := testPolicyManager()
+	registry, err := LoadOrganizationPolicies([]config.OrganizationPolicyConfig{{
+		OrganizationID:  "org-1",
+		PriceProfileID:  "profile-1",
+		ModelPricesLink: writePolicyPrices(t, `{"public/a":{"input_cost_per_token":0.001,"output_cost_per_token":0.002,"rate":1.4}}`),
+	}}, manager, validPolicyOptions())
+	require.NoError(t, err)
+	policy, ok := registry.Policy("org-1")
+	require.True(t, ok)
+	price, ok := policy.Price("public/a")
+	require.True(t, ok)
+	assert.Equal(t, 1.4, price.Rate)
+	assert.Equal(t, 0.001, price.InputCostPerToken)
+	assert.Equal(t, 0.002, price.OutputCostPerToken)
 }
 
 func TestLoadOrganizationPolicies_AllowlistRequiresExactPrice(t *testing.T) {
