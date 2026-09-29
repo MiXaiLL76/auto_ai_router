@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 )
 
@@ -14,12 +15,9 @@ import (
 // mapped to 400) or a specific status (e.g. 413) when the error itself dictates
 // which 4xx applies, regardless of which proxy call site catches it.
 //
-// Cause, when set, is the underlying error that led to this classification (e.g. the raw
-// json.UnmarshalTypeError from RequestJSONValidationError) -- log-only detail, such as the
-// full nested field path for an error inside a nested struct. Error() deliberately never
-// includes it: Error()'s text can reach the client as-is (see proxy writeValidationError,
-// which falls back to it whenever Code is unset), and the underlying Go error text isn't
-// meant for a client response. Use errors.Unwrap / the Cause field directly for logging.
+// Cause (log-only, e.g. RequestJSONValidationError's raw json.UnmarshalTypeError) never
+// reaches Error() -- that text can reach the client as-is -- so callers should just log
+// this error normally; LogValue below folds Cause in automatically when present.
 type RequestValidationError struct {
 	Param      string
 	Code       string
@@ -51,8 +49,42 @@ func (e *RequestValidationError) Unwrap() error {
 	return e.Cause
 }
 
+// LogValue folds Cause into this error's own slog output automatically, so a call site
+// logging it the normal way ("error", err) gets the cause for free when there is one,
+// without every such call site needing its own "cause", err.Unwrap() -- which, copy-pasted
+// across several call sites, logged a noisy cause=<nil> for the common case (a plain
+// NewRequestValidationError never has one).
+func (e *RequestValidationError) LogValue() slog.Value {
+	if e == nil {
+		return slog.StringValue("<nil>")
+	}
+	if e.Cause == nil {
+		return slog.StringValue(e.Error())
+	}
+	return slog.GroupValue(
+		slog.String("msg", e.Error()),
+		slog.Any("cause", e.Cause),
+	)
+}
+
 func NewRequestValidationError(param, message string) error {
 	return &RequestValidationError{Param: param, Message: message}
+}
+
+// NewInvalidTypeError marks a field the client sent as the wrong JSON type (present, just
+// not the type this route expects for it) -- the "invalid_type" counterpart to
+// RequestJSONValidationError's json.UnmarshalTypeError case, for callers that classify a
+// field by hand (e.g. from a generic map[string]interface{} type assertion) instead of
+// through a typed struct's json.Unmarshal.
+func NewInvalidTypeError(param string) error {
+	return &RequestValidationError{Param: param, Message: "Invalid parameter type", Code: "invalid_type"}
+}
+
+// NewInvalidValueError marks a field of the right type but an unacceptable value (e.g. an
+// empty required array, a negative count) -- the "invalid_value" counterpart to
+// NewInvalidTypeError above.
+func NewInvalidValueError(param string) error {
+	return &RequestValidationError{Param: param, Message: "Invalid parameter value", Code: "invalid_value"}
 }
 
 // NewRequestEntityTooLargeError marks a payload that exceeds a provider-imposed
@@ -73,7 +105,9 @@ func NewRequestEntityTooLargeError(param, message string) error {
 func RequestJSONValidationError(err error) error {
 	var typeErr *json.UnmarshalTypeError
 	if errors.As(err, &typeErr) {
-		return &RequestValidationError{Param: typeErr.Field, Message: "Invalid parameter type", Code: "invalid_type", Cause: typeErr}
+		vErr := NewInvalidTypeError(typeErr.Field).(*RequestValidationError)
+		vErr.Cause = typeErr
+		return vErr
 	}
 	return &RequestValidationError{Message: "Invalid JSON", Code: "invalid_json", Cause: err}
 }
