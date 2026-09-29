@@ -154,6 +154,79 @@ func TestMessagesToChat_MaxTokensMissingReportsMissing(t *testing.T) {
 	assert.NotEqual(t, "invalid_type", validationErr.Code)
 }
 
+// TestMessagesToChat_ModelWrongTypeReportsInvalidType covers review finding #2: a
+// non-string "model" (e.g. 123) used to zero-value the type assertion to "", which
+// matched the "model == \"\"" missing-parameter check before the invalid_type check
+// below it ever ran -- the client got "Missing required parameter" for a field it did
+// send, just with the wrong type. Type must now be checked before the empty-string
+// value check.
+func TestMessagesToChat_ModelWrongTypeReportsInvalidType(t *testing.T) {
+	body := []byte(`{"model":123,"max_tokens":64,"messages":[{"role":"user","content":"hi"}]}`)
+
+	_, _, err := MessagesToChat(body)
+
+	require.Error(t, err)
+	var validationErr *converterutil.RequestValidationError
+	require.True(t, errors.As(err, &validationErr))
+	assert.Equal(t, "model", validationErr.Param)
+	assert.Equal(t, "invalid_type", validationErr.Code)
+}
+
+func TestMessagesToChat_ModelMissingReportsMissing(t *testing.T) {
+	body := []byte(`{"max_tokens":64,"messages":[{"role":"user","content":"hi"}]}`)
+
+	_, _, err := MessagesToChat(body)
+
+	require.Error(t, err)
+	var validationErr *converterutil.RequestValidationError
+	require.True(t, errors.As(err, &validationErr))
+	assert.Equal(t, "model", validationErr.Param)
+	assert.NotEqual(t, "invalid_type", validationErr.Code)
+}
+
+// TestMessagesToChat_MessagesWrongTypeReportsInvalidType and
+// TestMessagesToChat_MessagesEmptyReportsInvalidValue cover review finding #4:
+// "messages" as a non-array and "messages" as an empty array used to both produce the
+// same "Missing required parameter" -- present-wrong-type, present-empty-value, and
+// genuinely-absent are three different client mistakes and must classify distinctly,
+// same as max_tokens already does above.
+func TestMessagesToChat_MessagesWrongTypeReportsInvalidType(t *testing.T) {
+	body := []byte(`{"model":"claude-haiku-4-5","max_tokens":64,"messages":"not an array"}`)
+
+	_, _, err := MessagesToChat(body)
+
+	require.Error(t, err)
+	var validationErr *converterutil.RequestValidationError
+	require.True(t, errors.As(err, &validationErr))
+	assert.Equal(t, "messages", validationErr.Param)
+	assert.Equal(t, "invalid_type", validationErr.Code)
+}
+
+func TestMessagesToChat_MessagesEmptyReportsInvalidValue(t *testing.T) {
+	body := []byte(`{"model":"claude-haiku-4-5","max_tokens":64,"messages":[]}`)
+
+	_, _, err := MessagesToChat(body)
+
+	require.Error(t, err)
+	var validationErr *converterutil.RequestValidationError
+	require.True(t, errors.As(err, &validationErr))
+	assert.Equal(t, "messages", validationErr.Param)
+	assert.Equal(t, "invalid_value", validationErr.Code)
+}
+
+func TestMessagesToChat_MessagesMissingReportsMissing(t *testing.T) {
+	body := []byte(`{"model":"claude-haiku-4-5","max_tokens":64}`)
+
+	_, _, err := MessagesToChat(body)
+
+	require.Error(t, err)
+	var validationErr *converterutil.RequestValidationError
+	require.True(t, errors.As(err, &validationErr))
+	assert.Equal(t, "messages", validationErr.Param)
+	assert.NotEqual(t, "invalid_type", validationErr.Code)
+	assert.NotEqual(t, "invalid_value", validationErr.Code)
+}
+
 func TestMessagesToChat_MalformedDocumentSourceRejected(t *testing.T) {
 	tests := []struct {
 		name      string
