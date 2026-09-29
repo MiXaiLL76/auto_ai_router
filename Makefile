@@ -1,4 +1,4 @@
-.PHONY: build run clean test fmt vet lint install-lint format help install-deps docker-build docs-install docs-serve docs-build docs-deploy test-clean kafka-up kafka-down kafka-logs kafka-ps kafka-clean kafka-clickhouse-client
+.PHONY: build run clean test fmt vet lint vuln install-lint format help install-deps docker-build docs-install docs-serve docs-build docs-deploy test-clean kafka-up kafka-down kafka-logs kafka-ps kafka-clean kafka-clickhouse-client
 
 # Build variables
 BINARY_NAME=auto_ai_router
@@ -42,6 +42,7 @@ help:
 	@echo "  vet                  - Run go vet"
 	@echo "  lint                 - Run golangci-lint (requires installation)"
 	@echo "  install-lint         - Install pinned golangci-lint"
+	@echo "  vuln                 - Run govulncheck (latest, same as CI)"
 	@echo "  format               - Format code and run pre-commit checks"
 	@echo "  install-deps         - Install/update dependencies"
 	@echo "  mod-tidy             - Tidy go.mod"
@@ -172,6 +173,14 @@ lint:
 	fi
 	export PATH=/usr/local/go/bin:$$(go env GOPATH)/bin:$$PATH && golangci-lint run ./...
 	@echo "Lint complete"
+
+## vuln: Run govulncheck. Unpinned (@latest) on purpose, like CI: the
+## vulnerability DB and the tool move together, so a new advisory fails here
+## exactly as it fails the Lint workflow.
+vuln:
+	@echo "Running govulncheck..."
+	export PATH=/usr/local/go/bin:$$PATH && $(GO) run golang.org/x/vuln/cmd/govulncheck@latest ./...
+	@echo "Vuln check complete"
 
 ## install-lint: Install pinned golangci-lint
 install-lint:

@@ -11,6 +11,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb/models"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb/queries"
 	"github.com/mixaill76/auto_ai_router/internal/monitoring"
@@ -503,8 +504,9 @@ func (rows *atomicTestRows) Scan(dest ...any) error {
 func (rows *atomicTestRows) Values() ([]any, error) {
 	return append([]any(nil), rows.current...), nil
 }
-func (rows *atomicTestRows) RawValues() [][]byte { return nil }
-func (rows *atomicTestRows) Conn() *pgx.Conn     { return nil }
+func (rows *atomicTestRows) RawValues() [][]byte  { return nil }
+func (rows *atomicTestRows) Conn() *pgx.Conn      { return nil }
+func (rows *atomicTestRows) TypeMap() *pgtype.Map { return nil }
 
 func assignAtomicTestValue(destination, source any) error {
 	dest := reflect.ValueOf(destination)
