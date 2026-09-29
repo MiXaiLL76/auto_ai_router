@@ -97,9 +97,6 @@ func extractInputTexts(input interface{}) ([]string, error) {
 func OpenAIEmbeddingToVertex(body []byte) ([]byte, error) {
 	var req openai.OpenAIEmbeddingRequest
 	if err := json.Unmarshal(body, &req); err != nil {
-		// A malformed field (e.g. dimensions sent as a string) is the client's
-		// mistake, not ours -- classify it so the proxy layer answers 4xx naming the
-		// offending param instead of falling through to a generic 500.
 		return nil, converterutil.RequestJSONValidationError(err)
 	}
 
@@ -130,9 +127,6 @@ func OpenAIEmbeddingToVertex(body []byte) ([]byte, error) {
 func OpenAIEmbeddingToGemini(body []byte, model string) ([]byte, error) {
 	var req openai.OpenAIEmbeddingRequest
 	if err := json.Unmarshal(body, &req); err != nil {
-		// A malformed field (e.g. dimensions sent as a string) is the client's
-		// mistake, not ours -- classify it so the proxy layer answers 4xx naming the
-		// offending param instead of falling through to a generic 500.
 		return nil, converterutil.RequestJSONValidationError(err)
 	}
 
@@ -218,10 +212,7 @@ func estimateTokens(text string) int {
 func ExtractEmbeddingTexts(body []byte) ([]string, error) {
 	var req openai.OpenAIEmbeddingRequest
 	if err := json.Unmarshal(body, &req); err != nil {
-		// A malformed field (e.g. dimensions sent as a string) is the client's
-		// mistake, not ours -- classify it so the proxy layer answers 4xx naming the
-		// offending param instead of falling through to a generic 500.
-		return nil, converterutil.RequestJSONValidationError(err)
+		return nil, fmt.Errorf("failed to parse embedding request: %w", err)
 	}
 	return extractInputTexts(req.Input)
 }

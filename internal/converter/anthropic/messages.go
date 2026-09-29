@@ -73,10 +73,6 @@ func SamplingRemoved(model string) bool {
 func OpenAIToAnthropic(openAIBody []byte, model string, isRealAnthropicBackend bool) ([]byte, error) {
 	var req openai.OpenAIRequest
 	if err := json.Unmarshal(openAIBody, &req); err != nil {
-		// A malformed field (e.g. max_tokens sent as a string) is the client's mistake,
-		// not ours -- classify it so the proxy layer answers 4xx naming the offending
-		// param, instead of falling through to a generic 500 (see converterutil.
-		// RequestJSONValidationError).
 		return nil, converterutil.RequestJSONValidationError(err)
 	}
 
