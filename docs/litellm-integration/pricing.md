@@ -202,6 +202,7 @@ For reference:
 | `output_cost_per_image`                                       | Cost per generated image (takes priority over `output_cost_per_image_token`) |
 | `search_context_cost_per_query`                               | Web Search cost per request/call, keyed by `search_context_size_*`           |
 | `web_search_billing_unit`                                     | `per_query` or `per_prompt` Web Search charging mode                         |
+| `rate`                                                        | Per-model markup/discount multiplier. Accepted and preserved so strict tariff decoding does not reject it, but **not yet applied** to cost calculation |
 
 ## Cost Calculation
 
