@@ -8,6 +8,7 @@ package budget
 import (
 	"context"
 	"os"
+	"strconv"
 	"testing"
 	"time"
 
@@ -31,7 +32,8 @@ func reserverForTest(t *testing.T, prefix string) *Reserver {
 		t.Fatalf("failed to create valkey client: %v", err)
 	}
 	t.Cleanup(client.Close)
-	return New(client, prefix, time.Minute, nil)
+	// Unique suffix: keys outlive the test (1m TTL), so reruns must not share them.
+	return New(client, prefix+strconv.FormatInt(time.Now().UnixNano(), 10)+":", time.Minute)
 }
 
 func TestTryReserve_SeedsFromDBSpendAndAllows(t *testing.T) {
@@ -120,7 +122,7 @@ func TestNilReserver_NoOp(t *testing.T) {
 	if err := nilReserver.Reconcile(ctx, "e", 1); err != nil {
 		t.Fatalf("nil Reserver Reconcile should be no-op: %v", err)
 	}
-	rc := New(nil, "test:budget:nilclient:", time.Minute, nil)
+	rc := New(nil, "test:budget:nilclient:", time.Minute)
 	allowed, err = rc.TryReserve(ctx, "e", 100, 100, 1)
 	if err != nil || !allowed {
 		t.Fatalf("nil-client Reserver TryReserve should be no-op allow: allowed=%v err=%v", allowed, err)

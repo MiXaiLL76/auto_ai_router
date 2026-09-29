@@ -32,6 +32,7 @@ SELECT
   u.tpm_limit as user_tpm_limit,
   u.rpm_limit as user_rpm_limit,
   u.models as user_models,
+  u.metadata as user_metadata,
 
   -- ============ Team ============
   tm.team_id as team_id_check,
@@ -43,6 +44,7 @@ SELECT
   tm.tpm_limit as team_tpm_limit,
   tm.rpm_limit as team_rpm_limit,
   tm.models as team_models,
+  tm.metadata as team_metadata,
 
   -- ============ Organization ============
   o.organization_id as org_id_check,
@@ -50,6 +52,7 @@ SELECT
   b_org.max_budget as org_max_budget,
   b_org.tpm_limit as org_tpm_limit,
   b_org.rpm_limit as org_rpm_limit,
+  o.metadata as org_metadata,
 
   -- ============ TeamMembership ============
   tmem.spend as team_member_spend,

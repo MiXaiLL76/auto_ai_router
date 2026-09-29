@@ -1,13 +1,14 @@
 # Redis / Valkey Integration
 
-Auto AI Router supports an optional Redis (or [Valkey](https://valkey.io/)) backend that enables two features when running multiple replicas:
+Auto AI Router supports an optional Redis (or [Valkey](https://valkey.io/)) backend that enables three features when running multiple replicas:
 
-| Feature                              | Without Redis                                                 | With Redis                                                 |
-| ------------------------------------ | ------------------------------------------------------------- | ---------------------------------------------------------- |
-| **Rate limiting** (RPM/TPM)          | Per-pod counters — each replica enforces limits independently | Global counters — limits enforced across the whole cluster |
-| **Response storage** (`store: true`) | Local bbolt file — not accessible from other pods             | Shared Redis — any replica can retrieve stored responses   |
+| Feature                                                          | Without Redis                                                                       | With Redis                                                         |
+| ---------------------------------------------------------------- | ----------------------------------------------------------------------------------- | ------------------------------------------------------------------ |
+| **Rate limiting** (RPM/TPM)                                      | Per-pod counters — each replica enforces limits independently                       | Global counters — limits enforced across the whole cluster         |
+| **Budget reservation** (`litellm_db.enforce_budget_reservation`) | DB-snapshot check only (see [LiteLLM auth](../litellm-integration/litellm_auth.md)) | Atomic pre-reservation, closing the pre-check-vs-actual-spend race |
+| **Response storage** (`store: true`)                             | Local bbolt file — not accessible from other pods                                   | Shared Redis — any replica can retrieve stored responses           |
 
-If Redis is not configured, both features fall back to their original in-process implementations automatically.
+If Redis is not configured, all three fall back to their original in-process (or DB-snapshot-only) implementations automatically.
 
 ## When to use Redis
 
@@ -97,6 +98,8 @@ On startup, the router connects to Redis and immediately performs a `PING` healt
 
 ## Hybrid Mode
 
+`hybrid` applies to both the RPM/TPM rate limiter and budget reservation (`litellm_db.enforce_budget_reservation`) — one flag, one `sync_interval`, backed by independent `HybridBackend` implementations (`internal/ratelimit` and `internal/litellmdb/budget` respectively) that share the same design.
+
 When `hybrid: true`, the router uses a **HybridBackend** that combines an in-process local counter with an asynchronous Redis sync:
 
 ```
@@ -136,6 +139,16 @@ Local counter (in-memory, <1 µs)
 | Write load on Redis         | 1–2 commands per request       | Batched async; typically 1 pipeline per 100 ms |
 
 Use `hybrid: false` when you need hard rate-limit enforcement across replicas with zero tolerance for drift. Use `hybrid: true` when latency matters more than exact cross-replica synchronisation.
+
+### Budget reservation specifics
+
+The budget `HybridBackend` differs from the rate limiter's in how it writes to Redis, because a lost budget delta never ages out of a sliding window — it would permanently skew every replica's view of the entity's spend:
+
+- **No dropped writes.** Deltas accumulate per entity in memory until Redis acknowledges them; there is no bounded queue to overflow. A failed flush keeps the delta owed and retries with exponential backoff (100 ms → 5 s cap). Only deltas still unacknowledged at shutdown are lost (logged as a warning).
+- **Idempotent retries.** Each write carries a per-replica sequence number, remembered in `<key_prefix>litellmbudget:{<entity>}:w:<replica-id>`. A retry of a write whose reply was lost (timeout, dropped connection) is ignored by Redis instead of being counted twice.
+- **Own spend vs. other replicas.** Sync subtracts only this replica's *acknowledged* spend from the Redis total, so deltas still in flight never mask other replicas' spend.
+- **Key loss recovery.** If sync finds the counter `<key_prefix>litellmbudget:{<entity>}` gone (Redis restart without persistence, eviction) while this replica has spend in it, the next flush re-seeds it with this replica's DB snapshot plus acknowledged spend.
+- **Idle eviction.** Entities unused for longer than `litellm_db.budget_reservation_ttl` that owe Redis nothing are dropped from memory and from the sync pipeline; the next request reseeds them from the DB.
 
 ## Key Layout
 
@@ -244,4 +257,4 @@ Start with `--maxmemory 256mb` and adjust based on observed usage.
 - **Redis Cluster**: only standalone and basic single-node deployments are supported. Cluster mode is not supported (keys in multi-key Lua scripts must share a hash slot).
 - **Sentinel**: not supported. Use a load-balancer in front of Redis for HA.
 - **Pool settings** (`min_idle_conns`, `max_idle_conns`, `max_conn_lifetime`): parsed and reserved for future use; the valkey-go client manages its own connection pool internally.
-- **Hybrid mode and response store**: `hybrid` only affects rate limiting. The response store always talks to Redis directly (reads must be synchronous).
+- **Hybrid mode and response store**: `hybrid` only affects rate limiting and budget reservation. The response store always talks to Redis directly (reads must be synchronous).

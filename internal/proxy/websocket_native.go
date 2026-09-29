@@ -41,6 +41,7 @@ type nativeWSTurn struct {
 	id          string
 	body        []byte
 	accumulator *completionTokenAccumulator
+	finishKey   func(status int)
 }
 
 type nativeWSSession struct {
@@ -179,12 +180,20 @@ func (s *nativeWSSession) close() {
 		s.finish(turn, nil, outcome)
 		delete(s.retiring, id)
 	}
-	s.releasePending()
+	status := http.StatusBadGateway
+	if s.clientAborted {
+		status = StatusClientClosedRequest
+	}
+	s.releasePending(status)
 }
 
-func (s *nativeWSSession) releasePending() {
+// releasePending drops a queued steer that never became its own response and
+// counts it for per-key metrics with status (it was sent upstream, so it is a
+// client request like any other).
+func (s *nativeWSSession) releasePending(status int) {
 	if s.pending != nil {
 		s.proxy.reconcileBudgetAndRateLimits(s.pending.log, 0)
+		s.pending.finishKey(status)
 		s.pending = nil
 	}
 	s.waitingForTools = false
@@ -244,7 +253,8 @@ func (s *nativeWSSession) create(event map[string]json.RawMessage) bool {
 		return s.upstream != nil
 	}
 	if resuming {
-		s.releasePending()
+		// The steer was accepted upstream and is continued by this turn.
+		s.releasePending(http.StatusOK)
 	}
 	if s.upstream == nil {
 		if err := s.connect(turn.log); err != nil {
@@ -327,7 +337,7 @@ func (s *nativeWSSession) prepare(event map[string]json.RawMessage, historyToken
 	if s.credential != nil {
 		routing.credential = s.credential.Name
 	}
-	ctx := context.WithValue(s.request.Context(), nativeWSRoutingKey{}, routing)
+	ctx, finishKey := s.proxy.withKeyTurn(context.WithValue(s.request.Context(), nativeWSRoutingKey{}, routing))
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "/v1/responses", bytes.NewReader(body))
 	if err != nil {
 		return nil, nil, false
@@ -370,6 +380,7 @@ func (s *nativeWSSession) prepare(event map[string]json.RawMessage, historyToken
 	}
 	if !ok {
 		s.proxy.reconcileBudgetAndRateLimits(logCtx, 0)
+		finishKey(recorder.statusCode)
 		s.sendHTTPError(recorder)
 		return nil, nil, false
 	}
@@ -385,7 +396,7 @@ func (s *nativeWSSession) prepare(event map[string]json.RawMessage, historyToken
 	logCtx.WebSearchRequested, logCtx.WebSearchContextSize = extractWebSearchRequestUsage(prepared.body, "application/json")
 	s.proxy.setPromptTokensEstimate(logCtx, prepared.body, prepared.realModelID)
 	logCtx.ActualCredentialName = s.actualCredential
-	return &nativeWSTurn{log: logCtx, body: prepared.body, accumulator: s.proxy.newCompletionTokenAccumulator(prepared.realModelID)}, wire, true
+	return &nativeWSTurn{log: logCtx, body: prepared.body, accumulator: s.proxy.newCompletionTokenAccumulator(prepared.realModelID), finishKey: finishKey}, wire, true
 }
 
 func nativeWebSocketURL(baseURL string) (string, error) {
@@ -507,7 +518,8 @@ func (s *nativeWSSession) upstreamEvent(body []byte) bool {
 		s.waitingForTools = true
 	}
 	if event.Type == "response.steer.failed" {
-		s.releasePending()
+		// Upstream refused to apply the steer to the active response.
+		s.releasePending(http.StatusConflict)
 	}
 	turn := s.active
 	if retiring := s.retiring[id]; retiring != nil {
@@ -586,6 +598,11 @@ func (s *nativeWSSession) finish(turn *nativeWSTurn, event []byte, outcome strin
 	}
 	chunk := sseDataFrame(event)
 	s.proxy.finalizeStreamingLog(turn.log, turn.accumulator.TokenCount(), chunk, "openai", status, false)
+	keyStatus := status
+	if outcome == "client_aborted" {
+		keyStatus = StatusClientClosedRequest
+	}
+	turn.finishKey(keyStatus)
 	if turn.log.Credential != nil && turn.log.TokenUsage != nil {
 		tokens := turn.log.TokenUsage.PromptTokens + turn.log.TokenUsage.CompletionTokens
 		s.proxy.rateLimiter.ConsumeTokens(turn.log.Credential.Name, tokens)
