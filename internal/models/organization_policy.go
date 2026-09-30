@@ -576,7 +576,7 @@ func modelPriceJSONFields() map[string]bool {
 			continue
 		}
 		isPriceField := name != "litellm_provider" && name != "reasoning_tokens_additive" && name != "web_search_billing_unit" &&
-			name != "image_request_defaults" && name != "input_images_free_per_request"
+			name != "image_request_defaults" && name != "input_images_free_per_request" && name != "rate"
 		result[name] = isPriceField
 	}
 	return result

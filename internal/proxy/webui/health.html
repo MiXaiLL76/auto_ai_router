@@ -267,9 +267,9 @@
         }
 
         return `<div class="wf-card${bannedCls}">
-      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;margin-bottom:12px;">
-        <span style="font-size:13px;overflow-wrap:anywhere;">${esc(name)}</span>
-        <div style="display:flex;gap:3px;flex-wrap:wrap;justify-content:flex-end;flex-shrink:0;">${badges}</div>
+      <div style="display:grid;gap:6px;margin-bottom:12px;min-width:0;">
+        <div style="font-size:13px;overflow-wrap:anywhere;">${esc(name)}</div>
+        <div style="display:flex;gap:3px;flex-wrap:wrap;">${badges}</div>
       </div>
       ${banHtml}
       ${errHtml}

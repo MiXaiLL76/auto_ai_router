@@ -262,6 +262,7 @@ type RequestLogContext struct {
 	ClientResponseID      string                   // ID returned to the client
 	StartTime             time.Time                // Request start time
 	CompletionStartTime   time.Time                // Timestamp of the first real content/tool/reasoning delta (TTFT), not just the first byte/chunk; zero if not streamed or never reached
+	UpstreamSendTime      time.Time                // Timestamp of the first request handed to an upstream provider (first attempt only; retries do not overwrite). Zero when the request never reached a provider (e.g. all credentials exhausted before send). Together with StartTime this breaks duration_ms into router processing time and upstream time.
 	Request               *http.Request            // HTTP request
 	Token                 string                   // Auth token (raw, will be hashed)
 	PublicModelID         string                   // Client-facing model before alias resolution
@@ -663,6 +664,28 @@ func (p *Proxy) upstreamRequestContext(r *http.Request) (context.Context, contex
 	return ctx, cancel
 }
 
+// stampFirstUpstreamSend records the first moment this request body is
+// handed to an upstream provider. Retries/fallbacks call this again on the
+// same logCtx without moving the timestamp, keeping it anchored to the
+// first attempt. Also records the router-side processing time (StartTime →
+// UpstreamSendTime) as a Prometheus histogram — the whole point of the
+// field is to break duration_ms into router cost and upstream cost, and the
+// metric is the queryable form of that split.
+func (p *Proxy) stampFirstUpstreamSend(logCtx *RequestLogContext) {
+	if logCtx == nil {
+		return
+	}
+	if !logCtx.UpstreamSendTime.IsZero() {
+		return
+	}
+	logCtx.UpstreamSendTime = time.Now()
+	if logCtx.Credential != nil {
+		p.metrics.RecordUpstreamSendDelay(logCtx.Credential.Name,
+			endpointFromLogContext(logCtx),
+			logCtx.UpstreamSendTime.Sub(logCtx.StartTime))
+	}
+}
+
 // executeProxyRequest executes a request to a proxy credential and returns response details.
 // This is a private helper method to avoid code duplication between forwardToProxy and related functions.
 func (p *Proxy) executeProxyRequest(
@@ -671,6 +694,7 @@ func (p *Proxy) executeProxyRequest(
 	modelID string,
 	body []byte,
 	start time.Time,
+	logCtx *RequestLogContext,
 ) (*ProxyResponse, error) {
 	// Build target URL
 	proxyBaseURL := strings.TrimSuffix(cred.BaseURL, "/")
@@ -722,6 +746,7 @@ func (p *Proxy) executeProxyRequest(
 	}
 
 	// Send request
+	p.stampFirstUpstreamSend(logCtx)
 	resp, err := p.client.Do(proxyReq) //nolint:gosec // G704: same targetURL as above, host isn't attacker-controlled
 	if err != nil {
 		if isClientCanceledTransportError(r, err) {
@@ -859,8 +884,9 @@ func (p *Proxy) forwardToProxy(
 	cred *config.CredentialConfig,
 	body []byte,
 	start time.Time,
+	logCtx *RequestLogContext,
 ) (*ProxyResponse, error) {
-	return p.executeProxyRequest(r, cred, modelID, body, start)
+	return p.executeProxyRequest(r, cred, modelID, body, start, logCtx)
 }
 
 func (p *Proxy) ProxyRequest(w http.ResponseWriter, r *http.Request) {
@@ -1075,7 +1101,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 
 			shouldRetry = false
 
-			resp, fwdErr := p.forwardToProxy(w, r, modelID, cred, proxyBody, start)
+			resp, fwdErr := p.forwardToProxy(w, r, modelID, cred, proxyBody, start, logCtx)
 			lastProxyErr = fwdErr
 			if fwdErr != nil {
 				if isClientCanceledTransportError(r, fwdErr) {
@@ -1864,6 +1890,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 		// Execute HTTP request
 		var doErr error
 		attemptedCreds[cred.Name] = true
+		p.stampFirstUpstreamSend(logCtx)
 		resp, doErr = p.client.Do(proxyReq) //nolint:gosec // G704: same targetURL as the request built above, host isn't attacker-controlled
 		if doErr != nil {
 			if isClientCanceledTransportError(r, doErr) {

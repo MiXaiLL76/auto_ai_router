@@ -119,6 +119,12 @@ type ModelPrice struct {
 	SearchContextCostPerQuery map[string]float64 `json:"search_context_cost_per_query,omitempty"`
 	WebSearchBillingUnit      string             `json:"web_search_billing_unit,omitempty"`
 	LiteLLMProvider           string             `json:"litellm_provider,omitempty"`
+
+	// Rate is a per-model markup/discount multiplier some price profiles carry
+	// (e.g. a provider markup applied upstream of these prices). It is parsed
+	// and preserved so strict tariff JSON decoding does not reject it, but it
+	// is not yet applied anywhere in cost calculation.
+	Rate float64 `json:"rate,omitempty"`
 }
 
 // ModelPriceRegistry stores and manages cached model prices

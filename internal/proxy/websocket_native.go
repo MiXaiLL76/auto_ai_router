@@ -274,6 +274,7 @@ func (s *nativeWSSession) create(event map[string]json.RawMessage) bool {
 	if err != nil {
 		return false
 	}
+	s.proxy.stampFirstUpstreamSend(turn.log)
 	return writeNativeWS(s.upstream, encoded) == nil
 }
 
@@ -315,6 +316,7 @@ func (s *nativeWSSession) steer(event map[string]json.RawMessage) bool {
 	if err != nil {
 		return false
 	}
+	s.proxy.stampFirstUpstreamSend(pending.log)
 	return writeNativeWS(s.upstream, wire) == nil
 }
 
