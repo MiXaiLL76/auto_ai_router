@@ -394,8 +394,9 @@ func buildAIRModels(
 
 		// Build ModelRPMConfig
 		rpmCfg := config.ModelRPMConfig{
-			Name:       modelName,
-			Credential: credName,
+			Name:           modelName,
+			Credential:     credName,
+			SupportsVision: model.SupportsVision(),
 		}
 		if model.LlmParams.RPM != nil {
 			rpmCfg.RPM = *model.LlmParams.RPM

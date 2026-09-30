@@ -36,6 +36,13 @@ Deployments read from the LiteLLM database (`LiteLLM_ProxyModelTable`) with
 [LiteLLM Database](../litellm-integration/litellm_db.md#models-from-the-litellm-database)
 for how names, aliases and default parameters are imported.
 
+## Text-only models and images
+
+A vLLM model without a vision encoder (GLM, gpt-oss) rejects image inputs with `400`.
+Mark such models with `supports_vision: false` and choose what AIR does with the images —
+reject early, strip them, or have a vision model describe them. See
+[Vision Fallback](../advanced/vision_fallback.md).
+
 ## Default parameters
 
 A LiteLLM deployment can carry default request parameters in its `litellm_params`

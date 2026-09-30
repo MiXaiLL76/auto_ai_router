@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -432,4 +433,19 @@ func TestCloseErrorLogFiles_MultipleCalls(t *testing.T) {
 	var entry ErrorLogEntry
 	err = json.Unmarshal(content, &entry)
 	assert.NoError(t, err)
+}
+
+// The vision fallback lifts the write deadline through http.ResponseController; that
+// only works when every wrapper around the connection's writer implements Unwrap.
+func TestResponseCapture_WriteDeadlineReachesConnection(t *testing.T) {
+	var deadlineErr error
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		deadlineErr = http.NewResponseController(newResponseCapture(w)).SetWriteDeadline(time.Time{})
+	}))
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL)
+	assert.NoError(t, err)
+	_ = resp.Body.Close()
+	assert.NoError(t, deadlineErr)
 }

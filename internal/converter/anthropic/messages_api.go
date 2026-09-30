@@ -269,7 +269,7 @@ func userMessageToChat(message map[string]interface{}) ([]interface{}, error) {
 			copyCacheControl(block, part)
 			userContent = append(userContent, part)
 		case "image":
-			if imageURL := sourceToImageURL(block["source"]); imageURL != "" {
+			if imageURL := SourceToImageURL(block["source"]); imageURL != "" {
 				part := map[string]interface{}{"type": "image_url", "image_url": map[string]interface{}{"url": imageURL}}
 				copyCacheControl(block, part)
 				userContent = append(userContent, part)
@@ -456,7 +456,10 @@ func toolChoiceToChat(choice map[string]interface{}) interface{} {
 	}
 }
 
-func sourceToImageURL(raw interface{}) string {
+// SourceToImageURL turns an Anthropic image block source (base64 or url) into an
+// OpenAI-style image URL; a base64 source without media_type is taken as JPEG.
+// Returns "" for sources that have no URL form (file, missing data).
+func SourceToImageURL(raw interface{}) string {
 	source, _ := raw.(map[string]interface{})
 	switch source["type"] {
 	case "base64":
@@ -563,7 +566,7 @@ func toolResultContentToChat(raw interface{}) (interface{}, error) {
 		case "text":
 			converted = append(converted, map[string]interface{}{"type": "text", "text": stringValue(block["text"])})
 		case "image":
-			if imageURL := sourceToImageURL(block["source"]); imageURL != "" {
+			if imageURL := SourceToImageURL(block["source"]); imageURL != "" {
 				converted = append(converted, map[string]interface{}{"type": "image_url", "image_url": map[string]interface{}{"url": imageURL}})
 			}
 		case "document":

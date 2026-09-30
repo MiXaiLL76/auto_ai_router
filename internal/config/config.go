@@ -167,6 +167,12 @@ type ModelRPMConfig struct {
 	// Explicit true/false overrides the default.
 	PassthroughMessages *bool `yaml:"passthrough_messages,omitempty"`
 
+	// SupportsVision declares whether the model accepts image inputs. nil = unknown:
+	// images are forwarded as-is. false = image inputs are handled by the top-level
+	// vision_fallback policy (reject / strip / describe) before the upstream call.
+	// From the database it is read from LiteLLM's model_info.supports_vision.
+	SupportsVision *bool `yaml:"supports_vision,omitempty"`
+
 	// DefaultParams are request-body defaults applied to a vLLM deployment when the
 	// client did not send the same key (LiteLLM deployment litellm_params such as
 	// chat_template_kwargs, temperature, top_k). Populated only by the database
@@ -186,6 +192,7 @@ func (m *ModelRPMConfig) UnmarshalYAML(value *yaml.Node) error {
 		PassthroughResponses string `yaml:"passthrough_responses,omitempty"`
 		WebSocketResponses   string `yaml:"websocket_responses,omitempty"`
 		PassthroughMessages  string `yaml:"passthrough_messages,omitempty"`
+		SupportsVision       string `yaml:"supports_vision,omitempty"`
 	}
 
 	var temp tempConfig
@@ -196,8 +203,6 @@ func (m *ModelRPMConfig) UnmarshalYAML(value *yaml.Node) error {
 	m.Name = resolveEnvString(temp.Name)
 	m.Model = resolveEnvString(temp.Model)
 	m.Credential = resolveEnvString(temp.Credential)
-	m.PassthroughResponses = nil
-	m.PassthroughMessages = nil
 
 	var err error
 	if m.WebSocketResponses, err = parseField(temp.WebSocketResponses, false, strconv.ParseBool, "websocket_responses"); err != nil {
@@ -213,26 +218,14 @@ func (m *ModelRPMConfig) UnmarshalYAML(value *yaml.Node) error {
 		return err
 	}
 
-	if temp.PassthroughResponses != "" {
-		resolved := resolveEnvString(temp.PassthroughResponses)
-		if resolved != "" {
-			passthroughResponses, err := strconv.ParseBool(resolved)
-			if err != nil {
-				return fmt.Errorf("invalid passthrough_responses for model '%s': %w", m.Name, err)
-			}
-			m.PassthroughResponses = &passthroughResponses
-		}
+	if m.PassthroughResponses, err = parseOptionalBool(temp.PassthroughResponses, "passthrough_responses for model '"+m.Name+"'"); err != nil {
+		return err
 	}
-
-	if temp.PassthroughMessages != "" {
-		resolved := resolveEnvString(temp.PassthroughMessages)
-		if resolved != "" {
-			passthroughMessages, err := strconv.ParseBool(resolved)
-			if err != nil {
-				return fmt.Errorf("invalid passthrough_messages for model '%s': %w", m.Name, err)
-			}
-			m.PassthroughMessages = &passthroughMessages
-		}
+	if m.PassthroughMessages, err = parseOptionalBool(temp.PassthroughMessages, "passthrough_messages for model '"+m.Name+"'"); err != nil {
+		return err
+	}
+	if m.SupportsVision, err = parseOptionalBool(temp.SupportsVision, "supports_vision for model '"+m.Name+"'"); err != nil {
+		return err
 	}
 
 	return nil
@@ -254,6 +247,7 @@ type Config struct {
 	OTEL                 OTELConfig                 `yaml:"otel,omitempty"`
 	Kafka                KafkaConfig                `yaml:"kafka,omitempty"`
 	Video                VideoConfig                `yaml:"video,omitempty"`
+	VisionFallback       VisionFallbackConfig       `yaml:"vision_fallback,omitempty"`
 	// ModelTemplates stores x-model-templates entries as raw interface{} so that
 	// both single-model mappings and lists of models can be defined as YAML anchors
 	// without type errors. The actual model data is extracted via anchor expansion.
@@ -286,6 +280,7 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 		OTEL                 OTELConfig                 `yaml:"otel,omitempty"`
 		Kafka                KafkaConfig                `yaml:"kafka,omitempty"`
 		Video                VideoConfig                `yaml:"video,omitempty"`
+		VisionFallback       VisionFallbackConfig       `yaml:"vision_fallback,omitempty"`
 		ModelTemplates       map[string]interface{}     `yaml:"x-model-templates,omitempty"`
 	}
 
@@ -310,6 +305,7 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 	c.OTEL = raw.OTEL
 	c.Kafka = raw.Kafka
 	c.Video = raw.Video
+	c.VisionFallback = raw.VisionFallback
 	c.ModelTemplates = raw.ModelTemplates
 
 	return nil
@@ -1784,6 +1780,11 @@ func Load(path string) (*Config, error) {
 		cfg.Kafka = defaultKafkaConfig()
 	}
 
+	if !hasMappingKey(&root, "vision_fallback") {
+		cfg.VisionFallback = defaultVisionFallbackConfig()
+	}
+	cfg.VisionFallback.ApplyDefaults()
+
 	// Ensure HealthCheckPath is always set regardless of whether monitoring section exists.
 	// MonitoringConfig.UnmarshalYAML is only called when a "monitoring:" key is present in YAML.
 	cfg.Monitoring.HealthCheckPath = "/health"
@@ -2015,6 +2016,16 @@ func (c *Config) Normalize() {
 func (c *Config) Validate() error {
 	if err := c.Video.Validate(); err != nil {
 		return err
+	}
+	if err := c.VisionFallback.Validate(); err != nil {
+		return err
+	}
+	if c.VisionFallback.Mode == VisionFallbackDescribe {
+		for _, model := range c.Models {
+			if model.Name == c.VisionFallback.DescribeModel && model.SupportsVision != nil && !*model.SupportsVision {
+				return fmt.Errorf("vision_fallback.describe_model %q is declared supports_vision: false", model.Name)
+			}
+		}
 	}
 	if c.Server.Port <= 0 || c.Server.Port > 65535 {
 		return fmt.Errorf("invalid port: %d", c.Server.Port)
