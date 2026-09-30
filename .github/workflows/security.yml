@@ -21,7 +21,7 @@ jobs:
     container:
       image: trufflesecurity/trufflehog:latest
     steps:
-    - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       with:
         fetch-depth: 0  # scan history, not just the tip
 
@@ -51,7 +51,7 @@ jobs:
     container:
       image: semgrep/semgrep:latest
     steps:
-    - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
     - name: semgrep
       run: |
@@ -84,7 +84,7 @@ jobs:
       volumes:
         - trivy-cache:/root/.cache/trivy
     steps:
-    - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
     - name: trivy fs
       run: |
@@ -108,7 +108,7 @@ jobs:
       volumes:
         - clamav-db:/var/lib/clamav
     steps:
-    - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
     - name: Update signatures
       run: |
         if ! freshclam --stdout; then
