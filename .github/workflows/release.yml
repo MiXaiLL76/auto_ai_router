@@ -18,6 +18,11 @@ jobs:
     name: Quality Check
     uses: ./.github/workflows/lint.yml
 
+  # 0b. Security-сканы исходников (trufflehog, semgrep, trivy fs, clamav)
+  security-check:
+    name: Security Check
+    uses: ./.github/workflows/security.yml
+
   # 1. Сборка бинарников (только для тегов)
   build-binaries:
     needs: quality-check
@@ -124,10 +129,73 @@ jobs:
             VERSION=${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'dev' }}
             COMMIT=${{ github.sha }}
 
-  # 3. Загрузка assets в существующий релиз (только для тегов)
+  # 2b. Скан опубликованного образа: CVE (trivy image) и best practices (dockle).
+  # Образ берётся из GHCR по тегу sha-<short sha>, который ставит build-docker,
+  # так что сам build-docker не меняется. Docker-демон не нужен: оба
+  # инструмента тянут образ из registry напрямую.
+  scan-image:
+    needs: build-docker
+    name: Scan Docker Image
+    runs-on: baremetal-mixaill
+    container:
+      image: aquasec/trivy:latest
+      volumes:
+        - trivy-cache:/root/.cache/trivy
+    env:
+      DOCKLE_VERSION: v0.4.15
+      # Private GHCR package → both tools need the token (packages: read).
+      TRIVY_USERNAME: ${{ github.actor }}
+      TRIVY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+      DOCKLE_USERNAME: ${{ github.actor }}
+      DOCKLE_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Image ref
+        run: |
+          repo=$(echo "$GITHUB_REPOSITORY" | tr '[:upper:]' '[:lower:]')
+          echo "IMAGE=ghcr.io/${repo}:sha-$(echo "$GITHUB_SHA" | cut -c1-7)" >> "$GITHUB_ENV"
+
+      - name: trivy image
+        if: ${{ !cancelled() }}
+        run: |
+          status=0
+          trivy image --no-progress --exit-code 1 --severity HIGH,CRITICAL --ignore-unfixed \
+            "$IMAGE" > trivy-image.log 2>&1 || status=$?
+          cat trivy-image.log
+          if [ "$status" -ne 0 ]; then
+            { echo "### ❌ trivy image: HIGH/CRITICAL in ${IMAGE}"; echo '```'; cat trivy-image.log; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error title=trivy image::HIGH/CRITICAL vulnerabilities in ${IMAGE} — bump the base image / Go version / deps; see log"
+            exit 1
+          fi
+          echo "### ✅ trivy image: ${IMAGE}" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: dockle
+        if: ${{ !cancelled() }}
+        run: |
+          v=${DOCKLE_VERSION#v}
+          tarball="dockle_${v}_Linux-64bit.tar.gz"
+          base="https://github.com/goodwithtech/dockle/releases/download/${DOCKLE_VERSION}"
+          cd /tmp
+          wget -q "${base}/${tarball}" "${base}/dockle_${v}_checksums.txt"
+          grep " ${tarball}\$" "dockle_${v}_checksums.txt" | sha256sum -c - \
+            || { echo "::error title=dockle::${tarball} checksum mismatch"; exit 1; }
+          tar xzf "$tarball" -C /usr/local/bin dockle
+          cd "$GITHUB_WORKSPACE"
+
+          status=0
+          dockle --exit-code 1 --exit-level warn "$IMAGE" > dockle.log 2>&1 || status=$?
+          cat dockle.log
+          if [ "$status" -ne 0 ]; then
+            { echo "### ❌ dockle: ${IMAGE}"; echo '```'; cat dockle.log; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error title=dockle::image best-practice check failed (WARN or worse) — see log"
+            exit 1
+          fi
+          echo "### ✅ dockle: ${IMAGE}" >> "$GITHUB_STEP_SUMMARY"
+
+  # 3. Загрузка assets в существующий релиз (только для тегов).
+  # Ждёт security-сканы: релиз с найденными проблемами не публикуется.
   upload-assets:
     if: startsWith(github.ref, 'refs/tags/')
-    needs: [build-binaries, build-docker]
+    needs: [build-binaries, build-docker, security-check, scan-image]
     runs-on: baremetal-mixaill
     container:
       image: ubuntu:24.04

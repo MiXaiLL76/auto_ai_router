@@ -57,6 +57,11 @@ COPY --from=builder /app/auto_ai_router .
 COPY --from=builder /app/healthcheck .
 COPY --from=builder /app/migrate .
 
+# Already the default of the :nonroot base (uid 65532); spelled out because
+# Dockerfile scanners (trivy misconfig DS-0002) read this file, not the base
+# image config, and flag a Dockerfile without USER as running as root.
+USER nonroot:nonroot
+
 # Go runtime tuning defaults — overridable via env in the actual deployment
 # manifest (e.g. if a pod's memory limit differs from the value assumed here).
 #
