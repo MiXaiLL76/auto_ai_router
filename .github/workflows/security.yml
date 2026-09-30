@@ -1,8 +1,7 @@
 name: Security
 
+# PRs and pushes go through ci.yml, releases through release.yml.
 on:
-  pull_request:
-    branches: [ main, develop ]
   schedule:
     - cron: '0 4 * * 1'  # Monday 04:00 UTC
   workflow_call:

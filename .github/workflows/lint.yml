@@ -29,25 +29,8 @@ env:
   GOLANGCI_LINT_VERSION: v2.13.1
   MIN_COVERAGE: 72
 
+# Called from ci.yml (PRs, pushes to main/develop) and release.yml.
 on:
-  push:
-    branches: [ main, develop ]
-    paths:
-      - '**.go'
-      - 'go.mod'
-      - 'go.sum'
-      - '.golangci.yml'
-      - '.pre-commit-config.yaml'
-      - '.github/workflows/lint.yml'
-  pull_request:
-    branches: [ main, develop ]
-    paths:
-      - '**.go'
-      - 'go.mod'
-      - 'go.sum'
-      - '.golangci.yml'
-      - '.pre-commit-config.yaml'
-      - '.github/workflows/lint.yml'
   workflow_call:
 
 permissions:
