@@ -84,7 +84,7 @@ func (r *Router) handleLogin(w http.ResponseWriter, req *http.Request) {
 	// Secure is deliberately left unset: the router is commonly served over
 	// plain HTTP behind a TLS-terminating reverse proxy, where a Secure cookie
 	// would never be sent back and login would silently fail.
-	http.SetCookie(w, &http.Cookie{ //nolint:gosec // G124: Secure omitted for reverse-proxy/HTTP deployments; see comment above
+	http.SetCookie(w, &http.Cookie{ //nolint:gosec // G124: Secure omitted for reverse-proxy/HTTP deployments; see comment above // nosemgrep: go.lang.security.audit.net.cookie-missing-secure.cookie-missing-secure
 		Name:     "session",
 		Value:    sessionJWT,
 		Path:     "/",
@@ -92,7 +92,7 @@ func (r *Router) handleLogin(w http.ResponseWriter, req *http.Request) {
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
 	})
-	http.SetCookie(w, &http.Cookie{ //nolint:gosec // G124: Secure omitted for reverse-proxy/HTTP deployments; see comment above
+	http.SetCookie(w, &http.Cookie{ //nolint:gosec // G124: Secure omitted for reverse-proxy/HTTP deployments; see comment above // nosemgrep: go.lang.security.audit.net.cookie-missing-secure.cookie-missing-secure
 		Name:     "username",
 		Value:    loginReq.Username,
 		Path:     "/",
@@ -100,7 +100,7 @@ func (r *Router) handleLogin(w http.ResponseWriter, req *http.Request) {
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
 	})
-	http.SetCookie(w, &http.Cookie{ //nolint:gosec // G124: Secure omitted for reverse-proxy/HTTP deployments; see comment above
+	http.SetCookie(w, &http.Cookie{ //nolint:gosec // G124: Secure omitted for reverse-proxy/HTTP deployments; see comment above // nosemgrep: go.lang.security.audit.net.cookie-missing-secure.cookie-missing-secure
 		Name:     "authenticated",
 		Value:    "true",
 		Path:     "/",
