@@ -1,8 +1,6 @@
 name: Security
 
 on:
-  push:
-    branches: [ main, develop, chore/changed_runner ]
   pull_request:
     branches: [ main, develop, chore/changed_runner ]
   schedule:
@@ -19,12 +17,12 @@ concurrency:
 
 jobs:
   trufflehog:
-    name: Secrets (trufflehog)
+    name: security:Trufflehog
     runs-on: baremetal-mixaill
     container:
       image: trufflesecurity/trufflehog:latest
     steps:
-    - uses: actions/checkout@v6
+    - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
       with:
         fetch-depth: 0  # scan history, not just the tip
 
@@ -49,26 +47,35 @@ jobs:
         echo "### ✅ trufflehog${SINCE:+ (PR commits only)}" >> "$GITHUB_STEP_SUMMARY"
 
   semgrep:
-    name: SAST (semgrep)
+    name: security:SAST
     runs-on: baremetal-mixaill
     container:
       image: semgrep/semgrep:latest
     steps:
-    - uses: actions/checkout@v6
+    - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
 
     - name: semgrep
       run: |
         status=0
+        # Excluded rules — same decisions as in .golangci.yml:
+        #   math-random-used: every math/rand call site is retry/backoff
+        #     jitter, not crypto (gosec G404 is excluded for the same reason);
+        #   unsafe-deserialization-interface: json.Unmarshal into interface{}
+        #     is safe in Go (no type gadgets); the converters must accept
+        #     arbitrary tool-call JSON by design.
         semgrep scan --metrics=off --error \
           --config p/golang --config p/dockerfile --config p/github-actions \
-          --emacs-output=semgrep.emacs > semgrep.log 2>&1 || status=$?
+          --exclude-rule go.lang.security.audit.crypto.math_random.math-random-used \
+          --exclude-rule go.lang.security.deserialization.unsafe-deserialization-interface.go-unsafe-deserialization-interface \
+          --vim-output=semgrep.vim > semgrep.log 2>&1 || status=$?
         cat semgrep.log
         if [ "$status" -eq 1 ]; then
-          count=$(wc -l < semgrep.emacs)
-          { echo "### ❌ semgrep: ${count} finding(s)"; echo '```'; cat semgrep.emacs; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
-          # emacs format: path:line:col:severity(rule):message
-          awk -F: '{ msg=$5; for (i=6; i<=NF; i++) msg=msg ":" $i;
-                     printf "::error file=%s,line=%s,title=semgrep %s::%s\n", $1, $2, $4, msg }' semgrep.emacs
+          count=$(wc -l < semgrep.vim)
+          { echo "### ❌ semgrep: ${count} finding(s)"; echo '```'; cat semgrep.vim; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          # vim format: path:line:col:severity:rule:message (no code snippet,
+          # unlike emacs, so only the message can contain colons)
+          awk -F: '{ msg=$6; for (i=7; i<=NF; i++) msg=msg ":" $i;
+                     printf "::error file=%s,line=%s,title=semgrep %s::%s\n", $1, $2, $5, msg }' semgrep.vim
           exit 1
         elif [ "$status" -ne 0 ]; then
           echo "::error title=semgrep::semgrep failed with exit ${status} — see log"
@@ -77,14 +84,14 @@ jobs:
         echo "### ✅ semgrep" >> "$GITHUB_STEP_SUMMARY"
 
   trivy:
-    name: Deps & config (trivy)
+    name: security:Trivy
     runs-on: baremetal-mixaill
     container:
       image: aquasec/trivy:latest
       volumes:
         - trivy-cache:/root/.cache/trivy
     steps:
-    - uses: actions/checkout@v6
+    - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
 
     - name: trivy fs
       run: |
@@ -101,18 +108,14 @@ jobs:
         echo "### ✅ trivy fs" >> "$GITHUB_STEP_SUMMARY"
 
   clamav:
-    name: Malware (clamav)
+    name: security:Clamav
     runs-on: baremetal-mixaill
     container:
       image: clamav/clamav-debian:stable  # not the alpine one: JS actions need glibc
       volumes:
         - clamav-db:/var/lib/clamav
     steps:
-    - uses: actions/checkout@v6
-
-    # The mirror rate-limits frequent full downloads; with the DB kept in a
-    # volume this is a small diff. If the update fails but an older DB is
-    # there, scan with it rather than fail on a network problem.
+    - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
     - name: Update signatures
       run: |
         if ! freshclam --stdout; then
