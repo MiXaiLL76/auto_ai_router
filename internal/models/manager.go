@@ -70,6 +70,10 @@ type ModelPrice struct {
 	InputCostPerImageToken  float64 `json:"input_cost_per_image_token,omitempty"`
 	OutputCostPerImageToken float64 `json:"output_cost_per_image_token,omitempty"`
 
+	// Input video tokens. Falls back to the image rate, then the regular input
+	// rate, which is how video was billed while it shared the image counter.
+	InputCostPerVideoToken float64 `json:"input_cost_per_video_token,omitempty"`
+
 	// Reasoning tokens (deep thinking models)
 	OutputCostPerReasoningToken float64 `json:"output_cost_per_reasoning_token,omitempty"`
 

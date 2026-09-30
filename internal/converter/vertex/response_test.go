@@ -427,8 +427,13 @@ func TestConvertVertexUsageMetadata_ImageVideoTokens(t *testing.T) {
 
 	usage := convertVertexUsageMetadata(meta)
 
-	if usage.PromptTokensDetails == nil || usage.PromptTokensDetails.ImageTokens != 100 {
-		t.Fatalf("expected 100 uncached input image/video tokens, got %v", usage.PromptTokensDetails)
+	// Input images and video are reported apart (they can carry different
+	// prices); together they are still the 100 uncached media tokens.
+	if usage.PromptTokensDetails == nil || usage.PromptTokensDetails.ImageTokens != 60 {
+		t.Fatalf("expected 60 uncached input image tokens, got %v", usage.PromptTokensDetails)
+	}
+	if usage.PromptTokensDetails.VideoTokens != 40 {
+		t.Fatalf("expected 40 uncached input video tokens, got %v", usage.PromptTokensDetails)
 	}
 	if usage.PromptTokensDetails.CachedTokens != 80 {
 		t.Fatalf("expected 80 cached tokens, got %v", usage.PromptTokensDetails)

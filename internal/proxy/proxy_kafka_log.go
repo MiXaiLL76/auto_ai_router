@@ -134,6 +134,7 @@ func (p *Proxy) buildKafkaSpendEvent(
 		RejectedPredictionTokens: usage.RejectedPredictionTokens,
 		ImageCount:               usage.ImageCount,
 		ImageTokens:              usage.ImageTokens,
+		VideoInputTokens:         usage.VideoInputTokens,
 		OutputImageTokens:        usage.OutputImageTokens,
 		WebSearchRequests:        usage.WebSearchRequests,
 		WebSearchContextSize:     usage.WebSearchContextSize,
@@ -165,6 +166,7 @@ func (p *Proxy) buildKafkaSpendEvent(
 		event.CachedOutputCost = tokenCosts.CachedOutputCost
 		event.PredictionCost = tokenCosts.PredictionCost
 		event.ImageCost = tokenCosts.ImageCost
+		event.VideoInputCost = tokenCosts.VideoInputCost
 		event.WebSearchCost = tokenCosts.WebSearchCost
 	}
 

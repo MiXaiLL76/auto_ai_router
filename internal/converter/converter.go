@@ -110,7 +110,23 @@ type ProviderConverter struct {
 	// inputTexts caches the original embedding request texts so that
 	// GeminiEmbeddingToOpenAI can estimate prompt_tokens when the upstream
 	// API (Gemini batchEmbedContents) does not return token statistics.
+	// Only legacy text-only models use it; embedContent-family models
+	// (vertex.IsEmbedContentModel) are billed from usageMetadata.
 	inputTexts []string
+	// embedContentRequest is the OpenAI body of an embedContent-family
+	// embeddings request, kept so ResponseTo can estimate usage from its text
+	// parts when a reply carries no usageMetadata (see EmbeddingUsageEstimated).
+	embedContentRequest []byte
+	// embeddingUsageEstimated is set by ResponseTo when that estimate was used.
+	embeddingUsageEstimated bool
+	// embedContentInputs is the number of vectors an embedContent-family
+	// embeddings request asks for; it picks the Gemini API method in BuildURL.
+	embedContentInputs int
+	// embedContentFanOut holds one Vertex AI embedContent body per input when
+	// such a request asks for more than one vector: Vertex AI embeds a single
+	// content per call, so the proxy sends these separately and merges the
+	// replies (see EmbeddingFanOutBodies).
+	embedContentFanOut [][]byte
 	// rewrittenContentType is set by RequestFrom when a multipart body is rewritten
 	// (e.g. for image edits).  Empty string means the original Content-Type is still valid.
 	rewrittenContentType string
@@ -204,8 +220,30 @@ func (c *ProviderConverter) RequestFrom(body []byte) ([]byte, error) {
 	if c.mode.IsEmbeddings {
 		switch c.providerType {
 		case config.ProviderTypeVertexAI:
+			if vertex.IsEmbedContentModel(c.mode.ModelID) {
+				bodies, err := vertex.OpenAIEmbeddingToVertexEmbedContent(body)
+				if err != nil {
+					return nil, err
+				}
+				c.embedContentRequest = body
+				c.embedContentInputs = len(bodies)
+				if len(bodies) == 1 {
+					return bodies[0], nil
+				}
+				c.embedContentFanOut = bodies
+				return vertex.EmbedContentFanOutEnvelope(bodies), nil
+			}
 			return vertex.OpenAIEmbeddingToVertex(body)
 		case config.ProviderTypeGemini:
+			if vertex.IsEmbedContentModel(c.mode.ModelID) {
+				converted, inputs, err := vertex.OpenAIEmbeddingToGeminiEmbedContent(body, c.mode.ModelID)
+				if err != nil {
+					return nil, err
+				}
+				c.embedContentRequest = body
+				c.embedContentInputs = inputs
+				return converted, nil
+			}
 			// Cache input texts for token estimation in ResponseTo.
 			if texts, err := vertex.ExtractEmbeddingTexts(body); err == nil {
 				c.inputTexts = texts
@@ -364,9 +402,15 @@ func (c *ProviderConverter) ResponseTo(body []byte) ([]byte, error) {
 	// Handle embeddings responses
 	if c.mode.IsEmbeddings {
 		switch c.providerType {
-		case config.ProviderTypeVertexAI:
-			return vertex.VertexEmbeddingToOpenAI(body, c.mode.ModelID)
-		case config.ProviderTypeGemini:
+		case config.ProviderTypeVertexAI, config.ProviderTypeGemini:
+			if vertex.IsEmbedContentModel(c.mode.ModelID) {
+				converted, estimated, err := vertex.EmbedContentToOpenAI(body, c.mode.ModelID, c.embedContentRequest)
+				c.embeddingUsageEstimated = estimated
+				return converted, err
+			}
+			if c.providerType == config.ProviderTypeVertexAI {
+				return vertex.VertexEmbeddingToOpenAI(body, c.mode.ModelID)
+			}
 			return vertex.GeminiEmbeddingToOpenAI(body, c.mode.ModelID, c.inputTexts)
 		default:
 			return body, nil
@@ -446,8 +490,14 @@ func (c *ProviderConverter) BuildURL(cred *config.CredentialConfig) string {
 	if c.mode.IsEmbeddings {
 		switch c.providerType {
 		case config.ProviderTypeVertexAI:
+			if vertex.IsEmbedContentModel(c.mode.ModelID) {
+				return vertex.BuildVertexEmbedContentURL(cred, c.mode.ModelID)
+			}
 			return vertex.BuildVertexEmbeddingURL(cred, c.mode.ModelID)
 		case config.ProviderTypeGemini:
+			if vertex.IsEmbedContentModel(c.mode.ModelID) {
+				return vertex.BuildGeminiEmbedContentURL(cred, c.mode.ModelID, c.embedContentInputs)
+			}
 			return vertex.BuildGeminiEmbeddingURL(cred, c.mode.ModelID)
 		default:
 			return ""
@@ -477,6 +527,23 @@ func (c *ProviderConverter) BuildURL(cred *config.CredentialConfig) string {
 		// OpenAI and Proxy: URL constructed by proxy based on cred.BaseURL + path
 		return ""
 	}
+}
+
+// EmbeddingFanOutBodies returns the per-input upstream bodies of a Vertex AI
+// embedContent request that asks for more than one vector, in input order, or
+// nil when the body from RequestFrom goes upstream as a single call. The
+// caller sends each to BuildURL's target and joins the replies with
+// vertex.MergeEmbedContentResponses before ResponseTo.
+func (c *ProviderConverter) EmbeddingFanOutBodies() [][]byte {
+	return c.embedContentFanOut
+}
+
+// EmbeddingUsageEstimated reports whether the last ResponseTo had to estimate
+// the usage of an embedContent-family embeddings reply from the request text,
+// because the provider returned no usageMetadata. Media parts are not in that
+// estimate, so the caller should log it.
+func (c *ProviderConverter) EmbeddingUsageEstimated() bool {
+	return c.embeddingUsageEstimated
 }
 
 // RewrittenContentType returns the new Content-Type header value when RequestFrom rewrote
@@ -545,6 +612,7 @@ type responsesUsageDetails struct {
 			Ephemeral1hInputTokens int `json:"ephemeral_1h_input_tokens,omitempty"`
 		} `json:"cache_creation_token_details,omitempty"`
 		ImageTokens int `json:"image_tokens,omitempty"`
+		VideoTokens int `json:"video_tokens,omitempty"`
 		TextTokens  int `json:"text_tokens,omitempty"`
 		AudioTokens int `json:"audio_tokens,omitempty"`
 	} `json:"input_tokens_details,omitempty"`
@@ -594,6 +662,7 @@ type tokenUsageShapeUsage struct {
 		AudioTokens int `json:"audio_tokens,omitempty"`
 		TextTokens  int `json:"text_tokens,omitempty"`
 		ImageTokens int `json:"image_tokens,omitempty"`
+		VideoTokens int `json:"video_tokens,omitempty"`
 		converterutil.CachingTokensExtension
 	} `json:"prompt_tokens_details,omitempty"`
 	CompletionTokensDetails struct {
@@ -770,6 +839,10 @@ func tokenUsageFromShape(resp *tokenUsageResponseShape, opts TokenUsageExtractio
 	if inputImageTokens == 0 {
 		inputImageTokens = resp.Usage.InputTokensDetails.ImageTokens
 	}
+	inputVideoTokens := resp.Usage.PromptTokensDetails.VideoTokens
+	if inputVideoTokens == 0 {
+		inputVideoTokens = resp.Usage.InputTokensDetails.VideoTokens
+	}
 	audioOut := resp.Usage.CompletionTokensDetails.AudioTokens
 	if audioOut == 0 {
 		audioOut = resp.Usage.OutputTokensDetails.AudioTokens
@@ -810,6 +883,9 @@ func tokenUsageFromShape(resp *tokenUsageResponseShape, opts TokenUsageExtractio
 		}
 		if inputImageTokens == 0 {
 			inputImageTokens = u.InputTokensDetails.ImageTokens
+		}
+		if inputVideoTokens == 0 {
+			inputVideoTokens = u.InputTokensDetails.VideoTokens
 		}
 		if cachedAudioTokens == 0 {
 			cachedAudioTokens = u.InputTokensDetails.CachedAudioTokens
@@ -864,6 +940,7 @@ func tokenUsageFromShape(resp *tokenUsageResponseShape, opts TokenUsageExtractio
 		CacheCreation1hTokens:    cacheCreation1hTokens,
 		AudioInputTokens:         audioIn,
 		ImageTokens:              inputImageTokens,
+		VideoInputTokens:         inputVideoTokens,
 		OutputImageTokens:        outputImageTokens,
 		AcceptedPredictionTokens: resp.Usage.CompletionTokensDetails.AcceptedPredictionTokens,
 		RejectedPredictionTokens: resp.Usage.CompletionTokensDetails.RejectedPredictionTokens,

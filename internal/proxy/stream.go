@@ -120,7 +120,8 @@ type StreamUsageInfo struct {
 	CachedAudioTokens        int // Cached prompt tokens whose modality is audio
 	AudioInputTokens         int // Audio tokens in the request
 	AudioOutputTokens        int // Audio tokens in the response
-	ImageTokens              int // Input image/video tokens (if reported)
+	ImageTokens              int // Input image tokens (if reported)
+	VideoInputTokens         int // Input video tokens (if reported)
 	OutputImageTokens        int // Output image/video tokens (if reported)
 	ReasoningTokens          int // Reasoning/thoughts tokens (output)
 	AcceptedPredictionTokens int
@@ -191,6 +192,7 @@ func (o *openAIStreamUsageExtractor) extractChatCompletionUsage(payload []byte) 
 				} `json:"cache_creation_token_details,omitempty"`
 				AudioTokens int `json:"audio_tokens,omitempty"`
 				ImageTokens int `json:"image_tokens,omitempty"`
+				VideoTokens int `json:"video_tokens,omitempty"`
 				converterutil.CachingTokensExtension
 			} `json:"prompt_tokens_details,omitempty"`
 			CompletionTokensDetails struct {
@@ -250,6 +252,7 @@ func (o *openAIStreamUsageExtractor) extractChatCompletionUsage(payload []byte) 
 		),
 		AudioOutputTokens:        data.Usage.CompletionTokensDetails.AudioTokens,
 		ImageTokens:              data.Usage.PromptTokensDetails.ImageTokens,
+		VideoInputTokens:         data.Usage.PromptTokensDetails.VideoTokens,
 		OutputImageTokens:        data.Usage.CompletionTokensDetails.ImageTokens,
 		ReasoningTokens:          data.Usage.CompletionTokensDetails.ReasoningTokens,
 		AcceptedPredictionTokens: data.Usage.CompletionTokensDetails.AcceptedPredictionTokens,
@@ -332,6 +335,7 @@ func (o *openAIStreamUsageExtractor) extractResponsesAPIUsage(payload []byte) *S
 		),
 		AudioOutputTokens:        usage.OutputTokensDetails.AudioTokens,
 		ImageTokens:              usage.InputTokensDetails.ImageTokens,
+		VideoInputTokens:         usage.InputTokensDetails.VideoTokens,
 		OutputImageTokens:        usage.OutputTokensDetails.ImageTokens,
 		ReasoningTokens:          usage.OutputTokensDetails.ReasoningTokens,
 		AcceptedPredictionTokens: usage.OutputTokensDetails.AcceptedPredictionTokens,
@@ -371,6 +375,7 @@ type responsesAPIUsage struct {
 		} `json:"cache_creation_token_details,omitempty"`
 		AudioTokens int `json:"audio_tokens,omitempty"`
 		ImageTokens int `json:"image_tokens,omitempty"`
+		VideoTokens int `json:"video_tokens,omitempty"`
 	} `json:"input_tokens_details,omitempty"`
 	OutputTokensDetails struct {
 		AcceptedPredictionTokens int `json:"accepted_prediction_tokens,omitempty"`
@@ -1079,6 +1084,9 @@ func (p *Proxy) finalizeStreamingLog(logCtx *RequestLogContext, totalTokens int,
 			if usageInfo.ImageTokens > 0 {
 				logCtx.TokenUsage.ImageTokens = usageInfo.ImageTokens
 			}
+			if usageInfo.VideoInputTokens > 0 {
+				logCtx.TokenUsage.VideoInputTokens = usageInfo.VideoInputTokens
+			}
 			if usageInfo.OutputImageTokens > 0 {
 				logCtx.TokenUsage.OutputImageTokens = usageInfo.OutputImageTokens
 			}
@@ -1116,6 +1124,7 @@ func (p *Proxy) finalizeStreamingLog(logCtx *RequestLogContext, totalTokens int,
 				"audio_input_tokens", usageInfo.AudioInputTokens,
 				"audio_output_tokens", usageInfo.AudioOutputTokens,
 				"image_tokens", usageInfo.ImageTokens,
+				"video_input_tokens", usageInfo.VideoInputTokens,
 				"output_image_tokens", usageInfo.OutputImageTokens,
 				"reasoning_tokens", usageInfo.ReasoningTokens,
 				"web_search_requests", usageInfo.WebSearchRequests,

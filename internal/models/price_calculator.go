@@ -146,6 +146,7 @@ func CalculateTokenCosts(usage *converter.TokenUsage, price *ModelPrice) *conver
 	audioInputTokens := converterutil.NonNegativeTokenCount(usage.AudioInputTokens)
 	audioOutputTokens := converterutil.NonNegativeTokenCount(usage.AudioOutputTokens)
 	imageTokens := converterutil.NonNegativeTokenCount(usage.ImageTokens)
+	videoInputTokens := converterutil.NonNegativeTokenCount(usage.VideoInputTokens)
 	outputImageTokens := converterutil.NonNegativeTokenCount(usage.OutputImageTokens)
 	cachedOutputTokens := converterutil.NonNegativeTokenCount(usage.CachedOutputTokens)
 	outputTextTokens := converterutil.NonNegativeTokenCount(usage.OutputTextTokens)
@@ -178,7 +179,9 @@ func CalculateTokenCosts(usage *converter.TokenUsage, price *ModelPrice) *conver
 
 	// Calculate "regular" input tokens by subtracting specialized token types.
 	// Vertex/OpenAI: audio/cached tokens are included in PromptTokens; Anthropic: same + cache creation.
-	regularInputTokens := promptTokens - audioInputTokens - cachedInputTokens - cacheCreationTokens - imageTokens
+	// Image and video tokens are part of PromptTokens too, so only the text
+	// remainder is priced at the regular input rate.
+	regularInputTokens := promptTokens - audioInputTokens - cachedInputTokens - cacheCreationTokens - imageTokens - videoInputTokens
 	if regularInputTokens < 0 {
 		regularInputTokens = 0
 	}
@@ -188,11 +191,15 @@ func CalculateTokenCosts(usage *converter.TokenUsage, price *ModelPrice) *conver
 	// does: prompt=340, cached=320, image=81). Charging the whole image bucket on
 	// top of the cached one then bills the overlap twice -- once at the cache-read
 	// rate and once at the image rate -- and the negative clamp above hides it.
+	// Video tokens share the same bucket; the overlap is taken off images first.
 	billableImageTokens := imageTokens
+	billableVideoTokens := videoInputTokens
 	if promptTokens > 0 {
-		overlap := audioInputTokens + cachedInputTokens + cacheCreationTokens + imageTokens - promptTokens
+		overlap := audioInputTokens + cachedInputTokens + cacheCreationTokens + imageTokens + videoInputTokens - promptTokens
 		if overlap > 0 {
-			billableImageTokens = converterutil.NonNegativeTokenCount(imageTokens - overlap)
+			fromImages := min(overlap, imageTokens)
+			billableImageTokens = imageTokens - fromImages
+			billableVideoTokens = converterutil.NonNegativeTokenCount(videoInputTokens - (overlap - fromImages))
 		}
 	}
 
@@ -355,6 +362,14 @@ func CalculateTokenCosts(usage *converter.TokenUsage, price *ModelPrice) *conver
 	}
 	costs.ImageCost = float64(billableImageTokens) * inputImageCost
 
+	// Input video tokens: own rate when configured, otherwise the image rate
+	// (video used to be reported inside the image counter).
+	inputVideoCost := price.InputCostPerVideoToken
+	if inputVideoCost == 0 {
+		inputVideoCost = inputImageCost
+	}
+	costs.VideoInputCost = float64(billableVideoTokens) * inputVideoCost
+
 	// Generated image tokens are part of CompletionTokens and must not also be
 	// charged as text. Prefer the token-based image rate when the provider reports
 	// a token breakdown; otherwise use the per-image price for Imagen-style APIs.
@@ -392,6 +407,7 @@ func CalculateTokenCosts(usage *converter.TokenUsage, price *ModelPrice) *conver
 		costs.CachedOutputCost +
 		costs.PredictionCost +
 		costs.ImageCost +
+		costs.VideoInputCost +
 		costs.WebSearchCost
 
 	return costs
