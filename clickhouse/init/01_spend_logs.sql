@@ -31,6 +31,7 @@ CREATE TABLE air.spend_logs_kafka
     completion_start_time Nullable(DateTime64(3)),
     duration_ms UInt32,
     ttft_ms Nullable(UInt32),
+    upstream_send_ms Nullable(UInt32),
 
     call_type String,
     api_base String,
@@ -145,6 +146,7 @@ CREATE TABLE air.spend_logs
     completion_start_time Nullable(DateTime64(3)),
     duration_ms UInt32,
     ttft_ms Nullable(UInt32),
+    upstream_send_ms Nullable(UInt32),
 
     call_type String,
     api_base String,

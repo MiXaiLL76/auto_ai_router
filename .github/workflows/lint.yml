@@ -1,13 +1,16 @@
 name: Lint
 
-# One job, checks run one after another in the same pod.
+# One job, checks run one after another on the same runner.
 #
-# Why one job: on arc-air-runners the per-job overhead (pod start ~50s,
-# actions/setup-go download + 572 MB cache restore/save, 1-4 min) cost more
-# than all the checks together (~3 min). The golang image already ships Go,
-# so there is no setup-go and no Actions cache at all: `go mod download`
-# from the proxy takes seconds, and a cold build is cheaper than moving the
-# cache tarball around.
+# Runs in a golang container on the baremetal-mixaill host: the image ships
+# Go and gcc (go test -race needs cgo), so there is no setup-go. The Go
+# module/build caches are named Docker volumes that persist on the host, so
+# there is no Actions cache at all — a warm local cache beats moving a
+# tarball around.
+#
+# Every self-hosted job of this repo runs in a container on purpose: the
+# container runs as root and leaves root-owned files in the shared _work
+# checkout, which a job running directly on the host could not clean up.
 #
 # How to read a failure:
 #   - every check is its own step; a failing step goes red on its own and
@@ -16,38 +19,18 @@ name: Lint
 #     one run shows every problem at once;
 #   - pre-commit runs first, before any Go setup: most failures are
 #     formatting, and they should show up in ~30s, not after the build;
-#   - if a process gets OOM-killed (exit 137) Kubernetes kills the whole
-#     container, the step can't report anything, and every later step fails
-#     with "TypeError: Converting circular structure to JSON" — ARC noise.
-#     The pod has no memory limit of its own, so this is the *node* running
-#     out of memory (too many heavy pods at once). The `explain` job reads the
-#     log from outside and says which step died. govulncheck is the memory
-#     hog (~2-3 GB), so it runs last: if it gets killed, all other checks have
+#   - if a process gets OOM-killed (exit 137) the host ran out of memory
+#     (too many heavy jobs at once). The `explain` job reads the log from
+#     outside and says which step died. govulncheck is the memory hog
+#     (~2-3 GB), so it runs last: if it gets killed, all other checks have
 #     already reported.
 
 env:
   GOLANGCI_LINT_VERSION: v2.13.1
   MIN_COVERAGE: 72
 
+# Called from ci.yml (PRs, pushes to main/develop) and release.yml.
 on:
-  push:
-    branches: [ main, develop ]
-    paths:
-      - '**.go'
-      - 'go.mod'
-      - 'go.sum'
-      - '.golangci.yml'
-      - '.pre-commit-config.yaml'
-      - '.github/workflows/lint.yml'
-  pull_request:
-    branches: [ main, develop ]
-    paths:
-      - '**.go'
-      - 'go.mod'
-      - 'go.sum'
-      - '.golangci.yml'
-      - '.pre-commit-config.yaml'
-      - '.github/workflows/lint.yml'
   workflow_call:
 
 permissions:
@@ -63,14 +46,22 @@ concurrency:
 jobs:
   checks:
     name: Checks
-    runs-on: arc-air-runners
+    runs-on: baremetal-mixaill
     container:
       image: golang:1.27
+      # Named Docker volumes live on the host between runs: a warm Go
+      # module/build cache without moving an Actions cache tarball around.
+      # PRs run untrusted code as root, so they get their own volumes and
+      # cannot poison the cache used by main/develop/release checks.
+      # (Release binaries do not use these volumes at all — see release.yml.)
+      volumes:
+        - go-mod-${{ github.event_name == 'pull_request' && 'pr' || 'trusted' }}:/go/pkg/mod
+        - go-build-${{ github.event_name == 'pull_request' && 'pr' || 'trusted' }}:/root/.cache/go-build
     env:
       CGO_ENABLED: 1  # -race
 
     steps:
-    - uses: actions/checkout@v6
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
     # Retries: a network hiccup must not read as a lint failure.
     - name: Install pre-commit
@@ -98,9 +89,8 @@ jobs:
         retry() { for i in 1 2 3; do "$@" && return 0; echo "retry $i/3: $*"; sleep 15; done; return 1; }
         fail() { echo "::error title=setup::$1 — network/proxy problem, not a code problem; re-run"; exit 1; }
         go version
-        limit=$(cat /sys/fs/cgroup/memory.max 2>/dev/null || cat /sys/fs/cgroup/memory/memory.limit_in_bytes 2>/dev/null || echo unknown)
-        case "$limit" in max|9223372036854*) limit="none (an OOM kill here means the node ran out of memory)" ;; esac
-        echo "pod memory limit: $limit"
+        # No container memory limit: an OOM kill here means the host ran out of memory.
+        awk '/^MemTotal:/ { t=$2 } /^MemAvailable:/ { a=$2 } END { printf "host memory: %.1f GiB total, %.1f GiB available\n", t/1048576, a/1048576 }' /proc/meminfo
 
         retry go mod download || fail "go mod download failed 3 times"
 
@@ -242,8 +232,8 @@ jobs:
         fi
         echo "### ✅ govulncheck" >> "$GITHUB_STEP_SUMMARY"
 
-  # Runs on a GitHub-hosted runner, outside the ARC pod, so it still works
-  # when the pod was OOM-killed and could not report anything itself.
+  # Runs on a GitHub-hosted runner, off the baremetal host, so it still works
+  # when the runner there was OOM-killed and could not report anything itself.
   explain:
     name: Why did Checks fail?
     needs: checks
@@ -273,9 +263,7 @@ jobs:
             [.steps[] | select(.started_at != null and .started_at[0:19] + "Z" <= $ts
                               and ((.completed_at // "9999")[0:19] + "Z") >= $ts) | .name][0] // empty')
           [ -n "$killed" ] || killed="$first"
-          msg="'${killed}' was killed by the kernel (exit 137): the Kubernetes node ran out of memory (OOM; pods have no memory limit, see 'Install Go tools'). Not a code problem. Steps after it failing with 'Converting circular structure to JSON' are fallout, ignore them. Re-run; if it keeps happening, set resources.requests.memory (~3Gi) on arc-air-runners job pods so fewer heavy pods land on one node."
-        elif grep -q 'circular structure to JSON' job.log; then
-          msg="The ARC container hook broke after step '${first}' — runner infrastructure problem, not a code problem. Re-run."
+          msg="'${killed}' was killed by the kernel (exit 137): the baremetal-mixaill host ran out of memory (see host memory in 'Install Go tools'). Not a code problem. Re-run; if it keeps happening, run fewer jobs on the host at once."
         else
           msg="Failed step(s): ${failed_steps}. Open the Checks job and look at the red steps / annotations above."
         fi

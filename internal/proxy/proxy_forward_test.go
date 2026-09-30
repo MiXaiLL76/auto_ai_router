@@ -70,7 +70,7 @@ func TestForwardToProxy_Headers(t *testing.T) {
 	// Отправляем request
 	w := httptest.NewRecorder()
 	respBody := []byte("request body")
-	proxyResp, err := prx.forwardToProxy(w, upstreamReq, "test-model", cred, respBody, time.Now().UTC())
+	proxyResp, err := prx.forwardToProxy(w, upstreamReq, "test-model", cred, respBody, time.Now().UTC(), nil)
 
 	// Проверки результата
 	require.NoError(t, err, "forwardToProxy должен выполниться без ошибок")
@@ -150,7 +150,7 @@ func TestForwardToProxy_HeadersWithoutAPIKey(t *testing.T) {
 	upstreamReq.Header.Set("Authorization", "Bearer custom-token")
 
 	w := httptest.NewRecorder()
-	proxyResp, err := prx.forwardToProxy(w, upstreamReq, "test-model", cred, []byte("body"), time.Now().UTC())
+	proxyResp, err := prx.forwardToProxy(w, upstreamReq, "test-model", cred, []byte("body"), time.Now().UTC(), nil)
 
 	require.NoError(t, err)
 	require.NotNil(t, proxyResp)
@@ -196,7 +196,7 @@ func TestForwardToProxy_MultipleHopByHopHeaders(t *testing.T) {
 	upstreamReq.Header.Set("Upgrade", "websocket")
 
 	w := httptest.NewRecorder()
-	proxyResp, err := prx.forwardToProxy(w, upstreamReq, "test-model", cred, []byte("body"), time.Now().UTC())
+	proxyResp, err := prx.forwardToProxy(w, upstreamReq, "test-model", cred, []byte("body"), time.Now().UTC(), nil)
 
 	require.NoError(t, err)
 	require.NotNil(t, proxyResp)
@@ -239,7 +239,7 @@ func TestForwardToProxy_ContentLengthCorrect(t *testing.T) {
 	upstreamReq.Header.Set("Authorization", "Bearer key")
 
 	w := httptest.NewRecorder()
-	proxyResp, err := prx.forwardToProxy(w, upstreamReq, "test-model", cred, []byte("body"), time.Now().UTC())
+	proxyResp, err := prx.forwardToProxy(w, upstreamReq, "test-model", cred, []byte("body"), time.Now().UTC(), nil)
 
 	require.NoError(t, err)
 	require.NotNil(t, proxyResp)
@@ -286,7 +286,7 @@ func TestForwardToProxy_QueryParameters(t *testing.T) {
 	upstreamReq.Header.Set("Authorization", "Bearer key")
 
 	w := httptest.NewRecorder()
-	proxyResp, err := prx.forwardToProxy(w, upstreamReq, "test-model", cred, []byte("body"), time.Now().UTC())
+	proxyResp, err := prx.forwardToProxy(w, upstreamReq, "test-model", cred, []byte("body"), time.Now().UTC(), nil)
 
 	require.NoError(t, err)
 	require.NotNil(t, proxyResp)
@@ -326,7 +326,7 @@ func TestForwardToProxy_LargeResponseBody(t *testing.T) {
 	upstreamReq.Header.Set("Authorization", "Bearer key")
 
 	w := httptest.NewRecorder()
-	proxyResp, err := prx.forwardToProxy(w, upstreamReq, "test-model", cred, []byte("body"), time.Now().UTC())
+	proxyResp, err := prx.forwardToProxy(w, upstreamReq, "test-model", cred, []byte("body"), time.Now().UTC(), nil)
 
 	require.NoError(t, err)
 	require.NotNil(t, proxyResp)
@@ -366,7 +366,7 @@ func TestForwardToProxy_UpstreamError(t *testing.T) {
 	upstreamReq.Header.Set("Authorization", "Bearer key")
 
 	w := httptest.NewRecorder()
-	proxyResp, err := prx.forwardToProxy(w, upstreamReq, "test-model", cred, []byte("body"), time.Now().UTC())
+	proxyResp, err := prx.forwardToProxy(w, upstreamReq, "test-model", cred, []byte("body"), time.Now().UTC(), nil)
 
 	// Ошибок быть не должно, но статус код должен быть 500
 	require.NoError(t, err)
@@ -423,7 +423,7 @@ func TestForwardToProxy_StreamingWithDrainUpstreamOnAbort_BodyReadableAfterRetur
 	upstreamReq.Header.Set("Authorization", "Bearer key")
 
 	w := httptest.NewRecorder()
-	proxyResp, err := prx.forwardToProxy(w, upstreamReq, "test-model", cred, []byte("body"), time.Now().UTC())
+	proxyResp, err := prx.forwardToProxy(w, upstreamReq, "test-model", cred, []byte("body"), time.Now().UTC(), nil)
 
 	require.NoError(t, err)
 	require.NotNil(t, proxyResp)

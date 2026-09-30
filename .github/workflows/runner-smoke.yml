@@ -1,0 +1,26 @@
+name: Runner smoke test
+on:
+  workflow_dispatch:
+
+jobs:
+  smoke:
+    name: Run on self-hosted runner
+    runs-on: baremetal-mixaill
+    container:
+      image: ubuntu:24.04
+
+    steps:
+      - name: Where am I
+        run: |
+          echo "runner name : ${RUNNER_NAME}"
+          echo "hostname    : $(hostname)"
+          echo "user        : $(whoami)"
+          uname -a
+          cat /etc/os-release | head -2
+          apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl >/dev/null
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Network to GitHub API
+        run: curl -sS -o /dev/null -w 'api.github.com -> %{http_code}\n' https://api.github.com

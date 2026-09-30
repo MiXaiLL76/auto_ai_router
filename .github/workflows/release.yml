@@ -10,7 +10,7 @@ on:
 permissions:
   contents: write
   packages: write
-  actions: read  # lint.yml (workflow_call) explain job reads its own run log
+  actions: read
 
 jobs:
   # 0. Проверка качества кода (fmt, lint, tests)
@@ -18,24 +18,26 @@ jobs:
     name: Quality Check
     uses: ./.github/workflows/lint.yml
 
+  # 0b. Security-сканы исходников (trufflehog, semgrep, trivy fs, clamav)
+  security-check:
+    name: Security Check
+    uses: ./.github/workflows/security.yml
+
   # 1. Сборка бинарников (только для тегов)
   build-binaries:
     needs: quality-check
     if: startsWith(github.ref, 'refs/tags/')
     name: Build Release Binaries
-    runs-on: arc-air-runners
+    runs-on: baremetal-mixaill
     container:
-      image: ghcr.io/actions/actions-runner:latest
+      image: golang:1.27
     strategy:
       matrix:
         goos: [linux]
         goarch: [amd64, arm64]
     steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-go@v6
-        with:
-          go-version: '1.27'
-          cache: true
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - name: Get version
         id: version
         run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
@@ -47,33 +49,29 @@ jobs:
           go build -ldflags="-s -w -X main.Version=${{ steps.version.outputs.VERSION }} -X main.Commit=${{ github.sha }}" -o "${BINARY_NAME}" ./cmd/server
           if [ "${{ matrix.goos }}" = "windows" ]; then zip "${BINARY_NAME}.zip" "${BINARY_NAME}"; else tar czf "${BINARY_NAME}.tar.gz" "${BINARY_NAME}"; fi
       - name: Upload artifacts
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: binary-${{ matrix.goos }}-${{ matrix.goarch }}
           path: |
             *.tar.gz
             *.zip
 
-  # 2. Сборка Docker (для веток и для тегов)
+  # 2. Сборка Docker (для веток и для тегов).
   build-docker:
     needs: quality-check
-    name: Build and Push Docker Image
+    name: Build Docker Image
     runs-on: ubuntu-latest
+    outputs:
+      image: ghcr.io/${{ steps.repo.outputs.repository }}
     steps:
-      - uses: actions/checkout@v6
-      - uses: docker/setup-buildx-action@v4
-      - name: Log in to GHCR
-        uses: docker/login-action@v4
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
       - name: Lowercase repo name
         id: repo
         run: echo "repository=${GITHUB_REPOSITORY,,}" >> $GITHUB_OUTPUT
       - name: Extract metadata
         id: meta
-        uses: docker/metadata-action@v6
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ghcr.io/${{ steps.repo.outputs.repository }}
           tags: |
@@ -85,17 +83,13 @@ jobs:
             type=raw,value=dev-latest,enable=${{ github.ref != 'refs/heads/main' && !startsWith(github.ref, 'refs/tags/') }}
             type=raw,value=${{ github.ref_name }}-latest,enable=${{ github.ref != 'refs/heads/main' && !startsWith(github.ref, 'refs/tags/') }}
             type=sha,prefix=sha-
-      # proxy.golang.org / sum.golang.org occasionally drop an HTTP/2 stream
-      # (INTERNAL_ERROR) during `go mod download`. One hiccup shouldn't fail
-      # a release: on failure the build runs once more; layers that already
-      # built come from the gha cache, so the retry is cheap.
-      - name: Build and push
+      - name: Build
         id: build
         continue-on-error: true
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
-          push: true
+          outputs: type=docker,dest=${{ runner.temp }}/image.tar
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
@@ -105,12 +99,12 @@ jobs:
             VERSION=${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'dev' }}
             COMMIT=${{ github.sha }}
 
-      - name: Build and push (retry)
+      - name: Build (retry)
         if: steps.build.outcome == 'failure'
-        uses: docker/build-push-action@v7
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
-          push: true
+          outputs: type=docker,dest=${{ runner.temp }}/image.tar
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
@@ -120,22 +114,105 @@ jobs:
             VERSION=${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'dev' }}
             COMMIT=${{ github.sha }}
 
-  # 3. Загрузка assets в существующий релиз (только для тегов)
+      - name: Upload image tarball
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: docker-image
+          path: ${{ runner.temp }}/image.tar
+          retention-days: 1
+
+  scan-image:
+    needs: build-docker
+    name: Scan Docker Image
+    runs-on: ubuntu-latest
+    env:
+      DOCKLE_VERSION: v0.4.15
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: docker-image
+          path: image
+
+      - name: trivy image
+        if: ${{ !cancelled() }}
+        run: |
+          status=0
+          docker run --rm -v "$PWD/image:/image:ro" aquasec/trivy:latest image \
+            --no-progress --exit-code 1 --severity HIGH,CRITICAL --ignore-unfixed \
+            --input /image/image.tar > trivy-image.log 2>&1 || status=$?
+          cat trivy-image.log
+          if [ "$status" -ne 0 ]; then
+            { echo "### ❌ trivy image: HIGH/CRITICAL"; echo '```'; cat trivy-image.log; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error title=trivy image::HIGH/CRITICAL vulnerabilities in the image — bump the base image / Go version / deps; see log"
+            exit 1
+          fi
+          echo "### ✅ trivy image" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: dockle
+        if: ${{ !cancelled() }}
+        run: |
+          v=${DOCKLE_VERSION#v}
+          tarball="dockle_${v}_Linux-64bit.tar.gz"
+          base="https://github.com/goodwithtech/dockle/releases/download/${DOCKLE_VERSION}"
+          cd "$RUNNER_TEMP"
+          wget -q "${base}/${tarball}" "${base}/dockle_${v}_checksums.txt"
+          grep " ${tarball}\$" "dockle_${v}_checksums.txt" | sha256sum -c - \
+            || { echo "::error title=dockle::${tarball} checksum mismatch"; exit 1; }
+          tar xzf "$tarball" dockle
+          cd "$GITHUB_WORKSPACE"
+
+          status=0
+          "$RUNNER_TEMP/dockle" --exit-code 1 --exit-level warn --input image/image.tar > dockle.log 2>&1 || status=$?
+          cat dockle.log
+          if [ "$status" -ne 0 ]; then
+            { echo "### ❌ dockle"; echo '```'; cat dockle.log; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error title=dockle::image best-practice check failed (WARN or worse) — see log"
+            exit 1
+          fi
+          echo "### ✅ dockle" >> "$GITHUB_STEP_SUMMARY"
+
+  # 3. Публикация: пушим в GHCR ровно тот tar, который прошёл проверки
+  publish-docker:
+    needs: [build-docker, security-check, scan-image]
+    name: Push Docker Image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: docker-image
+          path: image
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Push
+        run: |
+          docker load -i image/image.tar
+          docker image push --all-tags "$IMAGE"
+        env:
+          IMAGE: ${{ needs.build-docker.outputs.image }}
+
   upload-assets:
     if: startsWith(github.ref, 'refs/tags/')
-    needs: [build-binaries, build-docker]
-    runs-on: arc-air-runners
+    needs: [build-binaries, security-check, scan-image, publish-docker]
+    runs-on: baremetal-mixaill
     container:
-      image: ghcr.io/actions/actions-runner:latest
+      image: ubuntu:24.04
     steps:
-      - uses: actions/download-artifact@v8
+      - name: Install gh
+        run: apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq gh >/dev/null
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           path: artifacts
+          pattern: binary-*
       - name: Upload assets to existing release
         run: |
           for file in artifacts/**/*; do
-            if [ -f "$file" ]; then gh release upload "${{ github.ref_name }}" "$file" --clobber; fi
+            if [ -f "$file" ]; then gh release upload "$TAG" "$file" --clobber; fi
           done
         env:
+          TAG: ${{ github.ref_name }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GH_REPO: ${{ github.repository }}

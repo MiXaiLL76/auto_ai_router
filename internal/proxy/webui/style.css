@@ -1537,16 +1537,25 @@ details.diagram-section > summary {
   max-width: 640px;
 }
 .wf-cards-grid .wf-card-head {
-  display: flex;
-  justify-content: space-between;
+  /* Mirrors the table below: the last track is the status column (16%, keep
+     in sync with td:nth-child(6)), so the rpm badge starts on the same
+     vertical line as the status badges. A badge too wide for that track
+     grows it leftwards instead of spilling out of the card. */
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(16%, max-content);
   align-items: center;
-  gap: var(--sp-2);
-  padding: var(--sp-3) var(--sp-4);
+  padding: var(--sp-3) 0;
   border-bottom: 1px solid var(--line);
 }
 .wf-cards-grid .wf-card-head .model-name {
   font-size: var(--fs-sm);
   overflow-wrap: anywhere;
+  min-width: 0;
+  padding-left: var(--sp-3);
+}
+.wf-cards-grid .wf-card-head .wf-badge {
+  justify-self: start;
+  margin: 0 var(--sp-3);
 }
 .wf-cards-grid .wf-table th, .wf-cards-grid .wf-table td { padding: 6px var(--sp-3); }
 
@@ -1597,9 +1606,15 @@ details.diagram-section > summary {
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
 }
-/* status badge can be long ("banned · 3×429") — clip it to the column rather
-   than let it shove the table wider. */
+/* status badge can be long ("banned · admin", "banned · 3×429") — wrap it
+   inside the column rather than clip it or let it shove the table wider. */
 .wf-cards-grid .wf-table td:nth-child(6) { overflow: hidden; }
+.wf-cards-grid .wf-table td:nth-child(6) .wf-badge {
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  line-height: 1.35;
+}
 .usage-pct { font-size: var(--fs-sm); color: var(--fg); }
 .usage-pct.warn { color: var(--status-warn); }
 .usage-pct.err  { color: var(--status-err); }

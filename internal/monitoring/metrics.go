@@ -67,6 +67,24 @@ var (
 		[]string{"credential", "endpoint"},
 	)
 
+	// TimeToUpstreamSendSeconds measures the router's own processing time
+	// before a request is handed to an upstream provider: elapsed time from
+	// request start (RequestLogContext.StartTime) to the first upstream send
+	// (RequestLogContext.UpstreamSendTime — first attempt only). Unlike
+	// request duration, this excludes upstream latency entirely, so it
+	// isolates the cost of auth/rate-limit/credential-selection/body
+	// conversion inside the router. Only observed for requests that actually
+	// reached a provider — requests rejected before any send attempt don't
+	// emit a sample.
+	TimeToUpstreamSendSeconds = promauto.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:    "auto_ai_router_time_to_upstream_send_seconds",
+			Help:    "Router processing time before the first upstream send, from request start to the first provider attempt",
+			Buckets: []float64{0.001, 0.0025, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 0.75, 1, 1.5, 2, 2.5, 3, 4, 5, 7.5, 10, 15, 20, 30, 60},
+		},
+		[]string{"credential", "endpoint"},
+	)
+
 	AbortedRequestsTotal = promauto.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "auto_ai_router_aborted_requests_total",
@@ -518,6 +536,20 @@ func (m *Metrics) RecordTTFT(credential, endpoint string, ttft time.Duration) {
 		return
 	}
 	TimeToFirstTokenSeconds.WithLabelValues(credential, endpoint).Observe(ttft.Seconds())
+}
+
+// RecordUpstreamSendDelay records the router's own processing time before
+// a request was first handed to an upstream provider (StartTime →
+// UpstreamSendTime, first attempt only). Unlike RecordTTFT this is
+// independent of streaming and of TTFT semantics: it isolates the router's
+// per-request cost — auth, rate limit, credential selection, body
+// conversion — from upstream latency. Call once per request that actually
+// reached a provider.
+func (m *Metrics) RecordUpstreamSendDelay(credential, endpoint string, delay time.Duration) {
+	if !m.isEnabled() {
+		return
+	}
+	TimeToUpstreamSendSeconds.WithLabelValues(credential, endpoint).Observe(delay.Seconds())
 }
 
 // RecordCredentialAttemptError records that a single upstream attempt against
