@@ -161,6 +161,7 @@ func (p *Proxy) buildKafkaSpendEvent(
 		event.AudioOutputCost = tokenCosts.AudioOutputCost
 		event.ReasoningCost = tokenCosts.ReasoningCost
 		event.CachedInputCost = tokenCosts.CachedInputCost
+		event.ExplicitCacheReadCost = tokenCosts.ExplicitCachedInputCost
 		event.CacheCreationCost = tokenCosts.CacheCreationCost
 		event.CachedOutputCost = tokenCosts.CachedOutputCost
 		event.PredictionCost = tokenCosts.PredictionCost

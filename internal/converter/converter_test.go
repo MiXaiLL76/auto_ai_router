@@ -1533,3 +1533,47 @@ func buildBedrockEventStreamFrame(t *testing.T, innerJSON string) []byte {
 	copy(frame[12:], payload)
 	return frame
 }
+
+func TestExtractTokenUsage_CacheType(t *testing.T) {
+	tests := []struct {
+		name     string
+		body     string
+		wantType string
+	}{
+		{
+			name:     "explicit cache chat completions",
+			body:     `{"usage":{"prompt_tokens":100,"completion_tokens":10,"prompt_tokens_details":{"cached_tokens":60,"cache_type":"ephemeral","cache_creation_input_tokens":30,"cache_creation":{"ephemeral_5m_input_tokens":30}}}}`,
+			wantType: "ephemeral",
+		},
+		{
+			name:     "no cache_type means implicit",
+			body:     `{"usage":{"prompt_tokens":100,"completion_tokens":10,"prompt_tokens_details":{"cached_tokens":60}}}`,
+			wantType: "",
+		},
+		{
+			name:     "responses API input_tokens_details carries cache_type",
+			body:     `{"usage":{"input_tokens":100,"output_tokens":10,"input_tokens_details":{"cached_tokens":60,"cache_type":"ephemeral"}}}`,
+			wantType: "ephemeral",
+		},
+		{
+			name:     "nested streaming response.completed carries cache_type",
+			body:     `{"type":"response.completed","response":{"usage":{"input_tokens":100,"output_tokens":10,"input_tokens_details":{"cached_tokens":60,"cache_type":"ephemeral"}}}}`,
+			wantType: "ephemeral",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			usage := ExtractTokenUsage([]byte(tt.body))
+			if usage == nil {
+				t.Fatalf("expected usage for %s", tt.name)
+			}
+			if usage.CacheType != tt.wantType {
+				t.Fatalf("expected CacheType=%q, got %q", tt.wantType, usage.CacheType)
+			}
+			if usage.CachedInputTokens != 60 {
+				t.Fatalf("expected cached_tokens=60, got %d", usage.CachedInputTokens)
+			}
+		})
+	}
+}

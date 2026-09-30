@@ -5,15 +5,23 @@ import "github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
 // TokenUsage is a universal format for token usage across all providers.
 // Used by converters to return usage data without circular dependencies.
 type TokenUsage struct {
-	PromptTokens             int
-	CompletionTokens         int
-	AudioInputTokens         int
-	AudioOutputTokens        int
-	CachedInputTokens        int
-	CachedAudioInputTokens   int
-	CacheCreationTokens      int
-	CacheCreation5mTokens    int
-	CacheCreation1hTokens    int
+	PromptTokens           int
+	CompletionTokens       int
+	AudioInputTokens       int
+	AudioOutputTokens      int
+	CachedInputTokens      int
+	CachedAudioInputTokens int
+	CacheCreationTokens    int
+	CacheCreation5mTokens  int
+	CacheCreation1hTokens  int
+	// CacheType is the explicit-cache mode marker from
+	// usage.prompt_tokens_details.cache_type (Alibaba/Qwen returns "ephemeral"
+	// when the request ran with an explicit cache marker). Empty means the
+	// request did not use explicit cache — any cached_tokens then come from
+	// implicit (automatic) caching. Explicit and implicit cache are mutually
+	// exclusive per request/model; CacheType decides which tariff cached read
+	// tokens are billed at (see models.CalculateTokenCosts).
+	CacheType                string
 	CachedOutputTokens       int
 	OutputTextTokens         int
 	ReasoningTokens          int
@@ -151,6 +159,9 @@ func (tu *TokenUsage) MergeNonZero(src *TokenUsage) {
 	if src.CacheCreation1hTokens != 0 {
 		tu.CacheCreation1hTokens = src.CacheCreation1hTokens
 	}
+	if src.CacheType != "" {
+		tu.CacheType = src.CacheType
+	}
 	if src.CachedOutputTokens != 0 {
 		tu.CachedOutputTokens = src.CachedOutputTokens
 	}
@@ -188,21 +199,27 @@ func (tu *TokenUsage) MergeNonZero(src *TokenUsage) {
 
 // TokenCosts contains cost breakdown by token type
 type TokenCosts struct {
-	InputCost         float64
-	OutputCost        float64
-	AudioInputCost    float64
-	AudioOutputCost   float64
-	ReasoningCost     float64
-	CachedInputCost   float64
-	CacheCreationCost float64
-	CachedOutputCost  float64
-	PredictionCost    float64
-	ImageCost         float64
-	WebSearchCost     float64
-	TotalCost         float64
-	MarginPercent     float64
-	MarginFixedAmount float64
-	MarginTotalAmount float64
+	InputCost       float64
+	OutputCost      float64
+	AudioInputCost  float64
+	AudioOutputCost float64
+	ReasoningCost   float64
+	CachedInputCost float64
+	// ExplicitCachedInputCost is the cost of cached prompt tokens read in
+	// explicit cache mode (Alibaba/Qwen cache_type="ephemeral"), billed at the
+	// model's explicit_cache_read_input_token_cost tariff. It is kept separate
+	// from CachedInputCost (implicit cache read) so spend logs can attribute
+	// the two cache tariffs independently; both are added into TotalCost.
+	ExplicitCachedInputCost float64
+	CacheCreationCost       float64
+	CachedOutputCost        float64
+	PredictionCost          float64
+	ImageCost               float64
+	WebSearchCost           float64
+	TotalCost               float64
+	MarginPercent           float64
+	MarginFixedAmount       float64
+	MarginTotalAmount       float64
 }
 
 func NormalizeWebSearchContextSize(size string) string {

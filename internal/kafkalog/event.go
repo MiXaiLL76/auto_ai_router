@@ -70,18 +70,19 @@ type SpendEvent struct {
 	WebSearchRequests        int    `json:"web_search_requests"`
 	WebSearchContextSize     string `json:"web_search_context_size,omitempty"`
 
-	InputCost         float64 `json:"input_cost"`
-	OutputCost        float64 `json:"output_cost"`
-	AudioInputCost    float64 `json:"audio_input_cost"`
-	AudioOutputCost   float64 `json:"audio_output_cost"`
-	ReasoningCost     float64 `json:"reasoning_cost"`
-	CachedInputCost   float64 `json:"cached_input_cost"`
-	CacheCreationCost float64 `json:"cache_creation_cost"`
-	CachedOutputCost  float64 `json:"cached_output_cost"`
-	PredictionCost    float64 `json:"prediction_cost"`
-	ImageCost         float64 `json:"image_cost"`
-	WebSearchCost     float64 `json:"web_search_cost"`
-	TotalCost         float64 `json:"total_cost"`
+	InputCost             float64 `json:"input_cost"`
+	OutputCost            float64 `json:"output_cost"`
+	AudioInputCost        float64 `json:"audio_input_cost"`
+	AudioOutputCost       float64 `json:"audio_output_cost"`
+	ReasoningCost         float64 `json:"reasoning_cost"`
+	CachedInputCost       float64 `json:"cached_input_cost"`
+	ExplicitCacheReadCost float64 `json:"explicit_cache_read_cost,omitempty"`
+	CacheCreationCost     float64 `json:"cache_creation_cost"`
+	CachedOutputCost      float64 `json:"cached_output_cost"`
+	PredictionCost        float64 `json:"prediction_cost"`
+	ImageCost             float64 `json:"image_cost"`
+	WebSearchCost         float64 `json:"web_search_cost"`
+	TotalCost             float64 `json:"total_cost"`
 
 	APIKeyHash     string `json:"api_key_hash"`
 	UserID         string `json:"user_id"`

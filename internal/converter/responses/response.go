@@ -82,7 +82,8 @@ func ChatToResponse(body []byte, opts ...ChatToResponseOption) ([]byte, error) {
 					Ephemeral5mInputTokens int `json:"ephemeral_5m_input_tokens,omitempty"`
 					Ephemeral1hInputTokens int `json:"ephemeral_1h_input_tokens,omitempty"`
 				} `json:"cache_creation_token_details,omitempty"`
-				AudioTokens int `json:"audio_tokens,omitempty"`
+				AudioTokens int    `json:"audio_tokens,omitempty"`
+				CacheType   string `json:"cache_type,omitempty"`
 			} `json:"prompt_tokens_details,omitempty"`
 			CompletionTokensDetails *struct {
 				ReasoningTokens int `json:"reasoning_tokens,omitempty"`
@@ -214,6 +215,7 @@ func ChatToResponse(body []byte, opts ...ChatToResponseOption) ([]byte, error) {
 			)
 			usage.InputTokensDetails.CachedTokens = cachedTokens
 			usage.InputTokensDetails.CachedAudioTokens = cachedAudioTokens
+			usage.InputTokensDetails.CacheType = ccResp.Usage.PromptTokensDetails.CacheType
 			usage.InputTokensDetails.AudioTokens = normalizedAudioTokens(
 				ccResp.Usage.PromptTokensDetails.AudioTokens,
 				cachedTokens,
