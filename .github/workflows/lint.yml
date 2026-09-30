@@ -68,9 +68,12 @@ jobs:
       image: golang:1.27
       # Named Docker volumes live on the host between runs: a warm Go
       # module/build cache without moving an Actions cache tarball around.
+      # PRs run untrusted code as root, so they get their own volumes and
+      # cannot poison the cache used by main/develop/release checks.
+      # (Release binaries do not use these volumes at all — see release.yml.)
       volumes:
-        - go-mod:/go/pkg/mod
-        - go-build:/root/.cache/go-build
+        - go-mod-${{ github.event_name == 'pull_request' && 'pr' || 'trusted' }}:/go/pkg/mod
+        - go-build-${{ github.event_name == 'pull_request' && 'pr' || 'trusted' }}:/root/.cache/go-build
     env:
       CGO_ENABLED: 1  # -race
 

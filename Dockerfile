@@ -60,7 +60,9 @@ COPY --from=builder /app/migrate .
 # Already the default of the :nonroot base (uid 65532); spelled out because
 # Dockerfile scanners (trivy misconfig DS-0002) read this file, not the base
 # image config, and flag a Dockerfile without USER as running as root.
-USER nonroot:nonroot
+# Numeric on purpose: with a name ("nonroot") Kubernetes cannot verify
+# runAsNonRoot: true without an explicit runAsUser and refuses to start the pod.
+USER 65532:65532
 
 # Go runtime tuning defaults — overridable via env in the actual deployment
 # manifest (e.g. if a pod's memory limit differs from the value assumed here).

@@ -2,7 +2,7 @@ name: Security
 
 on:
   pull_request:
-    branches: [ main, develop, chore/changed_runner ]
+    branches: [ main, develop ]
   schedule:
     - cron: '0 4 * * 1'  # Monday 04:00 UTC
   workflow_call:
@@ -57,12 +57,6 @@ jobs:
     - name: semgrep
       run: |
         status=0
-        # Excluded rules — same decisions as in .golangci.yml:
-        #   math-random-used: every math/rand call site is retry/backoff
-        #     jitter, not crypto (gosec G404 is excluded for the same reason);
-        #   unsafe-deserialization-interface: json.Unmarshal into interface{}
-        #     is safe in Go (no type gadgets); the converters must accept
-        #     arbitrary tool-call JSON by design.
         semgrep scan --metrics=off --error \
           --config p/golang --config p/dockerfile --config p/github-actions \
           --exclude-rule go.lang.security.audit.crypto.math_random.math-random-used \
