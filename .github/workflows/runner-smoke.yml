@@ -1,12 +1,4 @@
 name: Runner smoke test
-
-# Проверка, что self-hosted baremetal-раннер жив: запускается вручную и должен
-# отработать на хосте baremetal-mixaill, а не на раннере GitHub.
-# Job идёт в контейнере, как и все self-hosted джобы репозитория: если он
-# стартовал, Docker на хосте доступен пользователю раннера.
-# Если job висит в "Waiting for a runner" — сервис раннера на хосте не запущен
-# или оффлайн: смотреть Settings → Actions → Runners и
-# `systemctl status 'actions.runner.*'` на хосте.
 on:
   workflow_dispatch:
 

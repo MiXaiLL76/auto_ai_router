@@ -31,8 +31,6 @@ jobs:
     runs-on: baremetal-mixaill
     container:
       image: golang:1.27
-      # Named Docker volumes live on the host between runs: a warm Go
-      # module/build cache without moving an Actions cache tarball around.
       volumes:
         - go-mod:/go/pkg/mod
         - go-build:/root/.cache/go-build
@@ -42,8 +40,6 @@ jobs:
         goarch: [amd64, arm64]
     steps:
       - uses: actions/checkout@v6
-      # The workspace is owned by the host's runner user, not by root in the
-      # container; without this git refuses it and go build's VCS stamping fails.
       - run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - name: Get version
         id: version
@@ -94,10 +90,6 @@ jobs:
             type=raw,value=dev-latest,enable=${{ github.ref != 'refs/heads/main' && !startsWith(github.ref, 'refs/tags/') }}
             type=raw,value=${{ github.ref_name }}-latest,enable=${{ github.ref != 'refs/heads/main' && !startsWith(github.ref, 'refs/tags/') }}
             type=sha,prefix=sha-
-      # proxy.golang.org / sum.golang.org occasionally drop an HTTP/2 stream
-      # (INTERNAL_ERROR) during `go mod download`. One hiccup shouldn't fail
-      # a release: on failure the build runs once more; layers that already
-      # built come from the gha cache, so the retry is cheap.
       - name: Build and push
         id: build
         continue-on-error: true
@@ -129,10 +121,6 @@ jobs:
             VERSION=${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || 'dev' }}
             COMMIT=${{ github.sha }}
 
-  # 2b. Скан опубликованного образа: CVE (trivy image) и best practices (dockle).
-  # Образ берётся из GHCR по тегу sha-<short sha>, который ставит build-docker,
-  # так что сам build-docker не меняется. Docker-демон не нужен: оба
-  # инструмента тянут образ из registry напрямую.
   scan-image:
     needs: build-docker
     name: Scan Docker Image
@@ -143,7 +131,6 @@ jobs:
         - trivy-cache:/root/.cache/trivy
     env:
       DOCKLE_VERSION: v0.4.15
-      # Private GHCR package → both tools need the token (packages: read).
       TRIVY_USERNAME: ${{ github.actor }}
       TRIVY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
       DOCKLE_USERNAME: ${{ github.actor }}
@@ -191,8 +178,7 @@ jobs:
           fi
           echo "### ✅ dockle: ${IMAGE}" >> "$GITHUB_STEP_SUMMARY"
 
-  # 3. Загрузка assets в существующий релиз (только для тегов).
-  # Ждёт security-сканы: релиз с найденными проблемами не публикуется.
+
   upload-assets:
     if: startsWith(github.ref, 'refs/tags/')
     needs: [build-binaries, build-docker, security-check, scan-image]
