@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -70,7 +69,7 @@ func BuildVertexImageURL(cred *config.CredentialConfig, modelID string) string {
 func OpenAIImageToVertex(openAIBody []byte) ([]byte, error) {
 	var openAIReq openai.OpenAIImageRequest
 	if err := json.Unmarshal(openAIBody, &openAIReq); err != nil {
-		return nil, imageJSONValidationError(err)
+		return nil, converterutil.RequestJSONValidationError(err)
 	}
 
 	// Convert size to aspect ratio
@@ -147,14 +146,14 @@ func ImageRequestToOpenAIChatRequest(openAIBody []byte) ([]byte, error) {
 func imageRequestToOpenAIChatRequest(openAIBody []byte, providerModel string) ([]byte, error) {
 	var imageReq openai.OpenAIImageRequest
 	if err := json.Unmarshal(openAIBody, &imageReq); err != nil {
-		return nil, imageJSONValidationError(err)
+		return nil, converterutil.RequestJSONValidationError(err)
 	}
 
 	if strings.TrimSpace(imageReq.Prompt) == "" {
 		return nil, imageValidationError("prompt", "Missing required parameter", "missing_required_parameter")
 	}
 	if imageReq.N != nil && *imageReq.N <= 0 {
-		return nil, imageValidationError("n", "Invalid parameter value", "invalid_value")
+		return nil, converterutil.NewInvalidValueError("n")
 	}
 
 	genConfig := map[string]interface{}{
@@ -184,7 +183,7 @@ func imageRequestToOpenAIChatRequest(openAIBody []byte, providerModel string) ([
 	}
 	if imageReq.Seed != nil {
 		if *imageReq.Seed < math.MinInt32 || *imageReq.Seed > math.MaxInt32 {
-			return nil, imageValidationError("seed", "Invalid parameter value", "invalid_value")
+			return nil, converterutil.NewInvalidValueError("seed")
 		}
 		chatReq.Seed = imageReq.Seed
 	}
@@ -205,7 +204,7 @@ func ImageEditRequestToOpenAIChatRequest(openAIBody []byte, contentType string) 
 func imageEditRequestToOpenAIChatRequest(openAIBody []byte, contentType, providerModel string) ([]byte, error) {
 	mediaType, params, err := mime.ParseMediaType(contentType)
 	if err != nil {
-		return nil, imageValidationError("content_type", "Invalid parameter value", "invalid_value")
+		return nil, converterutil.NewInvalidValueError("content_type")
 	}
 	if mediaType == "application/json" {
 		return imageEditJSONToOpenAIChatRequest(openAIBody, providerModel)
@@ -216,7 +215,7 @@ func imageEditRequestToOpenAIChatRequest(openAIBody []byte, contentType, provide
 
 	boundary := params["boundary"]
 	if boundary == "" {
-		return nil, imageValidationError("content_type", "Invalid parameter value", "invalid_value")
+		return nil, converterutil.NewInvalidValueError("content_type")
 	}
 
 	reader := multipart.NewReader(bytes.NewReader(openAIBody), boundary)
@@ -323,7 +322,7 @@ func imageEditRequestToOpenAIChatRequest(openAIBody []byte, contentType, provide
 	if rawSeed := strings.TrimSpace(fields["seed"]); rawSeed != "" {
 		seed, err := strconv.ParseInt(rawSeed, 10, 32)
 		if err != nil {
-			return nil, imageValidationError("seed", "Invalid parameter value", "invalid_value")
+			return nil, converterutil.NewInvalidValueError("seed")
 		}
 		chatReq.Seed = &seed
 	}
@@ -344,10 +343,10 @@ func imageEditRequestToOpenAIChatRequest(openAIBody []byte, contentType, provide
 	if rawN := strings.TrimSpace(fields["n"]); rawN != "" {
 		n, err := strconv.Atoi(rawN)
 		if err != nil {
-			return nil, imageValidationError("n", "Invalid parameter type", "invalid_type")
+			return nil, converterutil.NewInvalidTypeError("n")
 		}
 		if n <= 0 {
-			return nil, imageValidationError("n", "Invalid parameter value", "invalid_value")
+			return nil, converterutil.NewInvalidValueError("n")
 		}
 		n = clampImageCount(n)
 		chatReq.N = &n
@@ -459,7 +458,7 @@ func convertVertexUsageToImageUsage(meta *genai.GenerateContentResponseUsageMeta
 func parseImageEditFloat(raw, name string) (float64, error) {
 	value, err := strconv.ParseFloat(raw, 64)
 	if err != nil || math.IsNaN(value) || math.IsInf(value, 0) {
-		return 0, imageValidationError(name, "Invalid parameter value", "invalid_value")
+		return 0, converterutil.NewInvalidValueError(name)
 	}
 	return value, nil
 }
@@ -553,12 +552,4 @@ func clampImageCount(n int) int {
 
 func imageValidationError(param, message, code string) error {
 	return &converterutil.RequestValidationError{Param: param, Message: message, Code: code}
-}
-
-func imageJSONValidationError(err error) error {
-	var typeErr *json.UnmarshalTypeError
-	if errors.As(err, &typeErr) {
-		return imageValidationError(typeErr.Field, "Invalid parameter type", "invalid_type")
-	}
-	return imageValidationError("", "Invalid JSON", "invalid_json")
 }

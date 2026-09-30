@@ -27,20 +27,49 @@ type MessagesAdapterMetadata struct {
 func MessagesToChat(body []byte) ([]byte, MessagesAdapterMetadata, error) {
 	var request map[string]interface{}
 	if err := json.Unmarshal(body, &request); err != nil {
-		return nil, MessagesAdapterMetadata{}, fmt.Errorf("failed to parse Messages request: %w", err)
+		// The body isn't even valid JSON at this point (request is a generic map, so a
+		// present-but-wrong-typed field would unmarshal fine here and get caught by the
+		// specific checks below instead) -- still the client's mistake, not ours.
+		return nil, MessagesAdapterMetadata{}, converterutil.RequestJSONValidationError(err)
 	}
 
-	model, _ := request["model"].(string)
+	// Every field below follows the same three-step order: present? -- right type? --
+	// acceptable value? A wrong-typed field's zero value can accidentally satisfy an
+	// earlier value check -- "model" used to check "== ''" before checking the type
+	// assertion's own ok, so a non-string model (e.g. 123, zero-valuing to "") matched
+	// the "missing" branch first and the invalid_type branch below it was unreachable.
+	modelField, hasModel := request["model"]
+	if !hasModel {
+		return nil, MessagesAdapterMetadata{}, converterutil.NewRequestValidationError("model", "Missing required parameter")
+	}
+	model, modelIsString := modelField.(string)
+	if !modelIsString {
+		return nil, MessagesAdapterMetadata{}, converterutil.NewInvalidTypeError("model")
+	}
 	if model == "" {
-		return nil, MessagesAdapterMetadata{}, fmt.Errorf("model is required")
+		return nil, MessagesAdapterMetadata{}, converterutil.NewRequestValidationError("model", "Missing required parameter")
 	}
-	maxTokens, ok := request["max_tokens"].(float64)
-	if !ok || maxTokens <= 0 {
-		return nil, MessagesAdapterMetadata{}, fmt.Errorf("max_tokens is required")
+	maxTokensField, hasMaxTokens := request["max_tokens"]
+	if !hasMaxTokens {
+		return nil, MessagesAdapterMetadata{}, converterutil.NewRequestValidationError("max_tokens", "Missing required parameter")
 	}
-	rawMessages, ok := request["messages"].([]interface{})
-	if !ok || len(rawMessages) == 0 {
-		return nil, MessagesAdapterMetadata{}, fmt.Errorf("messages is required")
+	maxTokens, maxTokensIsNumber := maxTokensField.(float64)
+	if !maxTokensIsNumber {
+		return nil, MessagesAdapterMetadata{}, converterutil.NewInvalidTypeError("max_tokens")
+	}
+	if maxTokens <= 0 {
+		return nil, MessagesAdapterMetadata{}, converterutil.NewInvalidValueError("max_tokens")
+	}
+	messagesField, hasMessages := request["messages"]
+	if !hasMessages {
+		return nil, MessagesAdapterMetadata{}, converterutil.NewRequestValidationError("messages", "Missing required parameter")
+	}
+	rawMessages, messagesIsArray := messagesField.([]interface{})
+	if !messagesIsArray {
+		return nil, MessagesAdapterMetadata{}, converterutil.NewInvalidTypeError("messages")
+	}
+	if len(rawMessages) == 0 {
+		return nil, MessagesAdapterMetadata{}, converterutil.NewInvalidValueError("messages")
 	}
 
 	messages, err := messagesToChatMessages(rawMessages)
@@ -121,7 +150,7 @@ func MessagesToChat(body []byte) ([]byte, MessagesAdapterMetadata, error) {
 func NormalizeMessagesForPassthrough(body []byte, model string, isRealAnthropicBackend bool) ([]byte, error) {
 	var request map[string]interface{}
 	if err := json.Unmarshal(body, &request); err != nil {
-		return nil, fmt.Errorf("failed to parse Messages request: %w", err)
+		return nil, converterutil.RequestJSONValidationError(err)
 	}
 
 	// Models that no longer accept sampling params (Claude Opus 4.7+ — see
