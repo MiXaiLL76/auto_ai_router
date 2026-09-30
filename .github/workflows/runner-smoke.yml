@@ -1,0 +1,34 @@
+name: Runner smoke test
+
+# Проверка, что self-hosted baremetal-раннер жив: запускается вручную и должен
+# отработать на хосте baremetal-mixaill, а не на раннере GitHub.
+# Job идёт в контейнере, как и все self-hosted джобы репозитория: если он
+# стартовал, Docker на хосте доступен пользователю раннера.
+# Если job висит в "Waiting for a runner" — сервис раннера на хосте не запущен
+# или оффлайн: смотреть Settings → Actions → Runners и
+# `systemctl status 'actions.runner.*'` на хосте.
+on:
+  workflow_dispatch:
+
+jobs:
+  smoke:
+    name: Run on self-hosted runner
+    runs-on: baremetal-mixaill
+    container:
+      image: ubuntu:24.04
+
+    steps:
+      - name: Where am I
+        run: |
+          echo "runner name : ${RUNNER_NAME}"
+          echo "hostname    : $(hostname)"
+          echo "user        : $(whoami)"
+          uname -a
+          cat /etc/os-release | head -2
+          apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl >/dev/null
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Network to GitHub API
+        run: curl -sS -o /dev/null -w 'api.github.com -> %{http_code}\n' https://api.github.com
