@@ -1713,3 +1713,58 @@ func TestCalculateTokenCosts_AlibabaExplicitCacheReadEndToEnd(t *testing.T) {
 	assert.Zero(t, costs.CachedInputCost)
 	assert.Zero(t, costs.CacheCreationCost)
 }
+
+func TestCalculateTokenCosts_ExplicitCacheReadAudioTokensUseExplicitRate(t *testing.T) {
+	// Cached AUDIO tokens in explicit-cache mode must bill at the explicit
+	// tariff, not silently fall back to the implicit cache-read rate just
+	// because no dedicated explicit-audio rate is configured.
+	usage := &converter.TokenUsage{
+		PromptTokens:           1507,
+		CompletionTokens:       267,
+		CachedInputTokens:      100,
+		CachedAudioInputTokens: 40,
+		CacheType:              "ephemeral",
+	}
+
+	price := &ModelPrice{
+		InputCostPerToken:               0.000003,
+		OutputCostPerToken:              0.000015,
+		CacheReadInputTokenCost:         0.0000003, // implicit — must NOT be used for any of the 100 cached tokens
+		ExplicitCacheReadInputTokenCost: 0.0000006, // explicit — must be used for ALL 100 cached tokens, audio included
+	}
+
+	costs := CalculateTokenCosts(usage, price)
+
+	require.NotNil(t, costs)
+	// 60 regular + 40 audio cached tokens, all at the explicit rate (no
+	// dedicated CacheReadInputAudioTokenCost configured, so audio falls back
+	// to the explicit rate too, not the implicit one).
+	assert.InDelta(t, 100*0.0000006, costs.ExplicitCachedInputCost, 1e-12)
+	assert.Zero(t, costs.CachedInputCost)
+}
+
+func TestCalculateTokenCosts_ExplicitCacheReadRespectsCacheReadInputTokensFree(t *testing.T) {
+	// CacheReadInputTokensFree must suppress explicit-cache billing exactly
+	// like it suppresses implicit-cache billing, even when an explicit
+	// tariff is configured on the model.
+	usage := &converter.TokenUsage{
+		PromptTokens:      100,
+		CompletionTokens:  10,
+		CachedInputTokens: 60,
+		CacheType:         "ephemeral",
+	}
+
+	price := &ModelPrice{
+		InputCostPerToken:               0.001,
+		OutputCostPerToken:              0.002,
+		ExplicitCacheReadInputTokenCost: 0.0006, // configured, but must be ignored — reads are free
+		CacheReadInputTokensFree:        true,
+	}
+
+	costs := CalculateTokenCosts(usage, price)
+
+	require.NotNil(t, costs)
+	assert.InDelta(t, 40*0.001, costs.InputCost, 1e-12)
+	assert.Zero(t, costs.ExplicitCachedInputCost, "free cache reads must stay free even in explicit mode")
+	assert.Zero(t, costs.CachedInputCost)
+}

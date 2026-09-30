@@ -167,7 +167,6 @@ func CalculateTokenCosts(usage *converter.TokenUsage, price *ModelPrice) *conver
 	fullSessionOutputRate, fullSessionOutputMatched := fullSessionRate(tiers, promptTokens, func(t fullSessionTier) float64 { return t.outputRate })
 	fullSessionCacheReadRate, fullSessionCacheReadMatched := fullSessionRate(tiers, promptTokens, func(t fullSessionTier) float64 { return t.cacheReadRate })
 	fullSessionCacheCreationRate, fullSessionCacheCreationMatched := fullSessionRate(tiers, promptTokens, func(t fullSessionTier) float64 { return t.cacheCreationRate })
-	fullSessionExplicitCacheReadRate, fullSessionExplicitCacheReadMatched := fullSessionRate(tiers, promptTokens, func(t fullSessionTier) float64 { return t.explicitCacheReadRate })
 
 	inputCostPerToken := price.InputCostPerToken
 	if fullSessionInputMatched {
@@ -295,18 +294,26 @@ func CalculateTokenCosts(usage *converter.TokenUsage, price *ModelPrice) *conver
 	// Alibaba marks a request as explicit cache when
 	// usage.prompt_tokens_details.cache_type == "ephemeral" (TokenUsage.CacheType);
 	// those cached reads use the model's explicit_cache_read_input_token_cost
-	// tariff (with its own full-session tiers) instead of the implicit
+	// tariff (with its own full-session tiers, and its own dedicated audio rate
+	// CacheReadInputAudioTokenCost — never the implicit-cache-derived
+	// cachedAudioCost computed above) instead of the implicit
 	// cache_read_input_token_cost. Explicit and implicit cache are mutually
-	// exclusive, so CacheType decides the tariff; when the model has no
-	// explicit tariff configured, cached reads fall back to the implicit
-	// cache-read rate (which is what would have applied without this feature).
+	// exclusive, so CacheType decides the tariff. CacheReadInputTokensFree
+	// gates the explicit tariff exactly like it gates the implicit one: when
+	// set, cached reads stay free regardless of cache mode. When the model has
+	// no explicit tariff configured (and isn't free), cached reads fall back
+	// to the implicit cache-read rate (which is what would have applied
+	// without this feature).
 	if usage.CacheType == "ephemeral" && cachedInputTokens > 0 {
-		explicitCacheReadRate := price.ExplicitCacheReadInputTokenCost
-		if fullSessionExplicitCacheReadMatched {
-			explicitCacheReadRate = fullSessionExplicitCacheReadRate
+		explicitCacheReadRate := 0.0
+		if !price.CacheReadInputTokensFree {
+			explicitCacheReadRate = price.ExplicitCacheReadInputTokenCost
+			if rate, ok := fullSessionRate(tiers, promptTokens, func(t fullSessionTier) float64 { return t.explicitCacheReadRate }); ok {
+				explicitCacheReadRate = rate
+			}
 		}
 		if explicitCacheReadRate > 0 {
-			explicitCachedAudioCost := cachedAudioCost
+			explicitCachedAudioCost := price.CacheReadInputAudioTokenCost
 			if explicitCachedAudioCost == 0 {
 				explicitCachedAudioCost = explicitCacheReadRate
 			}

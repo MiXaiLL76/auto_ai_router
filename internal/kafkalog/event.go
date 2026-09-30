@@ -76,7 +76,7 @@ type SpendEvent struct {
 	AudioOutputCost       float64 `json:"audio_output_cost"`
 	ReasoningCost         float64 `json:"reasoning_cost"`
 	CachedInputCost       float64 `json:"cached_input_cost"`
-	ExplicitCacheReadCost float64 `json:"explicit_cache_read_cost,omitempty"`
+	ExplicitCacheReadCost float64 `json:"explicit_cache_read_cost"`
 	CacheCreationCost     float64 `json:"cache_creation_cost"`
 	CachedOutputCost      float64 `json:"cached_output_cost"`
 	PredictionCost        float64 `json:"prediction_cost"`
