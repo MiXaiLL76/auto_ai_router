@@ -746,8 +746,10 @@ func (p *Proxy) readRequestBodyAndSelectModel(
 		if p.rawBodyRedactSensitiveFields {
 			// Default path. redactRequestBodyForLogging strips the actual
 			// prompt/message content (messages, system, prompt, input,
-			// contents, instructions) before this ever reaches logCtx --
-			// model, tools, and every other parameter are kept. Fails
+			// contents, instructions) before this ever reaches logCtx and
+			// masks every other client-written string (tool descriptions,
+			// user, metadata, ...) -- model, tool names, parameter shape
+			// and allowlisted numbers/booleans are kept. Fails
 			// closed: if body isn't valid JSON, no redaction can be
 			// guaranteed, so nothing is captured at all rather than risk
 			// shipping raw content.

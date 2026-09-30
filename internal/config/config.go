@@ -1304,8 +1304,10 @@ type KafkaRawBodiesConfig struct {
 	// request body has prompt/message content stripped before publishing
 	// (see redactRequestBodyForLogging: messages/system/prompt/input/
 	// contents/instructions replaced with a role/count-preserving
-	// placeholder, everything else -- model, tools, temperature, ...
-	// untouched). Defaults to true; only meaningful when StoreRawBody is
+	// placeholder, every other client-written string -- tool descriptions,
+	// user, metadata, ... -- masked, while model, tool names, parameter
+	// shape and allowlisted numbers/booleans are kept). Defaults to true; only
+	// meaningful when StoreRawBody is
 	// also on. Set to false to capture the request body verbatim instead --
 	// e.g. for a short-lived, access-controlled debugging session where the
 	// actual prompt is genuinely needed. This is a deliberate, explicit

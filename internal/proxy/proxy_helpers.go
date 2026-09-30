@@ -238,11 +238,12 @@ const StatusClientClosedRequest = monitoring.StatusClientClosedRequest
 // API system prompt), contents (Gemini/Vertex native). Every one of these
 // shapes carries the field at the top level -- never nested inside e.g. a
 // tool's JSON-Schema parameters -- so redactSensitiveFields matches only at
-// the top level, not by name anywhere in the tree. Everything else in the
-// body -- model, tools, tool_choice, temperature, max_tokens, stream,
-// response_format, ... -- is request shape/parameters, not content, and is
-// left untouched, even if a tool parameter happens to share one of these
-// names.
+// the top level, not by name anywhere in the tree, and swaps each for a
+// role/count-preserving placeholder. Everything else in the body -- model,
+// tools, tool_choice, temperature, response_format, user, metadata, ... --
+// goes through maskClientParams instead, which keeps the request's shape and
+// parameters but masks the client-written values inside them, even if a
+// tool parameter happens to share one of these names.
 var sensitiveRequestBodyFields = map[string]struct{}{
 	"messages":     {},
 	"system":       {},
@@ -254,7 +255,8 @@ var sensitiveRequestBodyFields = map[string]struct{}{
 
 // redactRequestBodyForLogging returns body with sensitiveRequestBodyFields
 // replaced by shape-preserving placeholders (role and count kept, actual
-// text dropped), for the client-request-body opt-in
+// text dropped) and every other client-written value masked by
+// maskClientParams, for the client-request-body opt-in
 // (kafka.raw_bodies.store_raw_body). Fails closed: ("", false) when body
 // isn't valid JSON (multipart, binary, malformed) rather than risk shipping
 // unredacted content, since the whole point of this function is the safety
@@ -265,7 +267,7 @@ func redactRequestBodyForLogging(body []byte) (string, bool) {
 		return "", false
 	}
 	redactSensitiveFields(parsed)
-	redactToolDescriptions(parsed)
+	maskClientParams(parsed)
 	out, err := json.Marshal(parsed)
 	if err != nil {
 		return "", false
@@ -280,9 +282,10 @@ func redactRequestBodyForLogging(body []byte) (string, bool) {
 // never nested inside e.g. a tool's JSON-Schema parameters -- so unlike an
 // earlier version of this function, this does NOT recurse into unrelated
 // keys (tools, tool_choice, response_format, ...) looking for name
-// collisions. Those are request parameters that must survive untouched for
-// error analysis, and a tool parameter happening to be named "input" or
-// "messages" is not conversation content.
+// collisions. Those are request parameters whose shape must survive for
+// error analysis (maskClientParams masks only the values inside them), and
+// a tool parameter happening to be named "input" or "messages" is not
+// conversation content.
 func redactSensitiveFields(parsed map[string]any) {
 	for key, child := range parsed {
 		if _, sensitive := sensitiveRequestBodyFields[key]; sensitive {
@@ -291,44 +294,294 @@ func redactSensitiveFields(parsed map[string]any) {
 	}
 }
 
-// redactToolDescriptions blanks every "description" string found anywhere inside
-// parsed["tools"], at any nesting depth. Unlike sensitiveRequestBodyFields above, this
-// is a name-based, recursive redaction specifically for "tools" -- deliberately unlike
-// redactSensitiveFields's position-only matching, because a tool's free-text
-// descriptions (the top-level tool description, and any "description" inside its
-// JSON-Schema parameters/input_schema, at any depth) are written entirely by the client
-// and can carry the same kind of confidential business detail as prompt content, even
-// though they're structurally a request parameter, not a top-level content field.
-// Covers every "tools" shape AIR accepts without needing shape-specific logic: OpenAI
-// Chat Completions (tools[].function.description), Anthropic native
-// (tools[].description, tools[].input_schema...), Responses API (tools[].description,
-// flat, no "function" wrapper), and Gemini/Vertex (tools[].function_declarations[].
-// description). A JSON-Schema property that happens to be *named* "description" (e.g. a
-// "create_ticket" tool's own "description" parameter) is unaffected -- only the
-// doc-comment key itself is blanked, not property names, which stay data shape like
-// everything else redactSensitiveFields already leaves alone.
-func redactToolDescriptions(parsed map[string]any) {
-	tools, ok := parsed["tools"]
-	if !ok {
-		return
-	}
-	redactDescriptionsRecursive(tools)
+// loggableStringFields are the only keys whose string values maskClientParams
+// keeps verbatim: what was called (model, the JSON-Schema
+// type/format/required/$ref that make up a tool's shape) and
+// request parameters drawn from a fixed, provider-defined vocabulary
+// (reasoning effort, service tier, image size, ...). None of these is text
+// the client writes, and together they're what an error analysis needs --
+// which model, which tool, which structured-output mode, which effort.
+// Deliberately an allowlist rather than a list of known content fields: AIR
+// proxies any path and any body shape, and such a list is never complete --
+// the previous one leaked tool and response_format/text schema descriptions,
+// user, metadata, prediction content, a web search tool's user_location and
+// MCP authorization tokens. A string under any key not listed here is masked,
+// so an unknown parameter costs at worst a "[REDACTED]" in a debug log.
+var loggableStringFields = map[string]struct{}{
+	// What was called, and the request's structural shape.
+	"model":    {},
+	"type":     {},
+	"format":   {},
+	"required": {},
+	"$ref":     {},
+	// Enumerated request parameters.
+	"tool_choice":            {},
+	"function_call":          {},
+	"service_tier":           {},
+	"reasoning_effort":       {},
+	"effort":                 {},
+	"summary":                {},
+	"verbosity":              {},
+	"truncation":             {},
+	"include":                {},
+	"modalities":             {},
+	"search_context_size":    {},
+	"prompt_cache_retention": {},
+	"ttl":                    {},
+	"previous_response_id":   {},
+	"encoding_format":        {},
+	"response_format":        {},
+	"output_format":          {},
+	"quality":                {},
+	"size":                   {},
+	"style":                  {},
+	"background":             {},
+	"moderation":             {},
+	"input_fidelity":         {},
+	"voice":                  {},
+	"seconds":                {},
+	// Gemini's generationConfig.
+	"responseMimeType":   {},
+	"responseModalities": {},
+	"thinkingLevel":      {},
+	"mediaResolution":    {},
 }
 
-func redactDescriptionsRecursive(value any) {
+// definitionStringFields are loggable like loggableStringFields, but only in
+// scopeDefinition, where they name a tool, function, schema or MCP server.
+// Anywhere else "name" may as well be a person's.
+var definitionStringFields = map[string]struct{}{
+	"name":         {},
+	"server_label": {},
+}
+
+// definitionFields are the fields whose objects define or pick tools,
+// functions, MCP servers and structured-output formats (scopeDefinition).
+var definitionFields = map[string]struct{}{
+	"tools":              {},
+	"functions":          {},
+	"tool_choice":        {},
+	"function_call":      {},
+	"response_format":    {},
+	"text":               {},
+	"output_config":      {},
+	"mcp_servers":        {},
+	"responseSchema":     {}, // Gemini's generationConfig
+	"responseJsonSchema": {},
+}
+
+// paramObjectFields are the fields whose objects hold more request
+// parameters, so the allowlists apply inside them as at the top level. Any
+// other object -- extra_body, a vendor extension, the client's own data --
+// is scopeOpaque.
+var paramObjectFields = map[string]struct{}{
+	"reasoning":          {},
+	"thinking":           {},
+	"stream_options":     {},
+	"audio":              {},
+	"prediction":         {},
+	"web_search_options": {},
+	"cache_control":      {},
+	"generationConfig":   {},
+	"thinkingConfig":     {},
+}
+
+// loggableNumberFields are the only keys whose numbers maskClientParams
+// keeps: sampling and length limits, and a tool schema's size/range
+// constraints. Any other number is masked like a string -- the client picks
+// a seed, a numeric user ID or a phone number just as freely.
+var loggableNumberFields = map[string]struct{}{
+	"temperature":           {},
+	"top_p":                 {},
+	"top_k":                 {},
+	"presence_penalty":      {},
+	"frequency_penalty":     {},
+	"n":                     {},
+	"max_tokens":            {},
+	"max_completion_tokens": {},
+	"max_output_tokens":     {},
+	"budget_tokens":         {},
+	"thinking_budget":       {},
+	// Gemini's generationConfig.
+	"topP":            {},
+	"topK":            {},
+	"maxOutputTokens": {},
+	"thinkingBudget":  {},
+	// JSON Schema.
+	"minimum":    {},
+	"maximum":    {},
+	"minLength":  {},
+	"maxLength":  {},
+	"minItems":   {},
+	"maxItems":   {},
+	"multipleOf": {},
+}
+
+// loggableBoolFields are the only keys whose booleans maskClientParams
+// keeps: request flags and a schema's additionalProperties. A boolean under
+// any other key is a fact about the client's data ({"is_vip": true}).
+var loggableBoolFields = map[string]struct{}{
+	"stream":                    {},
+	"store":                     {},
+	"background":                {},
+	"parallel_tool_calls":       {},
+	"disable_parallel_tool_use": {},
+	"logprobs":                  {},
+	"echo":                      {},
+	"include_usage":             {},
+	"includeThoughts":           {},
+	"strict":                    {},
+	"additionalProperties":      {},
+}
+
+// freeFormClientFields are containers whose contents are the client's own
+// data, keys chosen freely and values alike: metadata, MCP headers, a web
+// search tool's user_location or Gemini's latLng, logit_bias (keyed by token
+// ID) and JSON-Schema literal values (enum/const/default/examples, which may
+// be whole objects). maskFreeForm keeps only their size: a key can leak as
+// much as a value ({"metadata": {"ivan@acme.ru": true}}), and a location's
+// coordinates are as personal as its city.
+var freeFormClientFields = map[string]struct{}{
+	"metadata":      {},
+	"headers":       {},
+	"user_location": {},
+	"latLng":        {},
+	"lat_lng":       {},
+	"logit_bias":    {},
+	"enum":          {},
+	"const":         {},
+	"default":       {},
+	"examples":      {},
+}
+
+// jsonSchemaNameMaps are the JSON-Schema keywords whose object keys are
+// property/definition names picked by the tool author, not request field
+// names, so loggableStringFields/freeFormClientFields must not be looked up
+// by them: a tool parameter named "metadata", "default" or "description" is
+// still a schema and keeps its type/format like any other parameter. Only
+// honored in scopeDefinition; elsewhere "properties" is just a key.
+var jsonSchemaNameMaps = map[string]struct{}{
+	"properties":        {},
+	"patternProperties": {},
+	"$defs":             {},
+	"definitions":       {},
+}
+
+// maskScope is the kind of object a value sits in. The allowlists hold
+// generic words -- name, type, summary, stream -- that mean what they
+// assume only where the request API defines them, not in the client's own
+// objects.
+type maskScope int
+
+const (
+	// scopeParams is the top level and paramObjectFields.
+	scopeParams maskScope = iota
+	// scopeDefinition is everything under definitionFields.
+	scopeDefinition
+	// scopeOpaque is any other object and everything in it: every value is
+	// masked, only keys are kept.
+	scopeOpaque
+)
+
+// nestedScope returns the scope of an object found under key in scope.
+func nestedScope(scope maskScope, key string) maskScope {
+	if scope != scopeParams {
+		return scope
+	}
+	if _, ok := definitionFields[key]; ok {
+		return scopeDefinition
+	}
+	if _, ok := paramObjectFields[key]; ok {
+		return scopeParams
+	}
+	return scopeOpaque
+}
+
+// maskClientParams masks, in place, every client-written value in parsed
+// outside sensitiveRequestBodyFields (those are redactSensitiveFields's
+// job): a string, number or boolean becomes "[REDACTED]" unless it's
+// outside scopeOpaque and its key is in loggableStringFields (or
+// definitionStringFields, in scopeDefinition), loggableNumberFields or
+// loggableBoolFields respectively, and a freeFormClientFields container is
+// replaced by maskFreeForm. Object keys are kept, so tools, response_format,
+// text.format, web_search_options, ... stay readable in the log: which
+// parameters a tool declares and of which types, but not the text
+// describing them. This covers tool descriptions at any depth in every
+// "tools" dialect (OpenAI tools[].function, Anthropic tools[].input_schema,
+// Responses API flat tools[], Gemini function_declarations) and the legacy
+// "functions" field, structured-output schemas,
+// user/safety_identifier/prompt_cache_key/seed, prediction content, a FIM
+// suffix, and MCP server URLs and tokens.
+func maskClientParams(parsed map[string]any) {
+	for key, child := range parsed {
+		if _, sensitive := sensitiveRequestBodyFields[key]; sensitive {
+			continue
+		}
+		parsed[key] = maskClientValue(key, child, scopeParams)
+	}
+}
+
+// maskClientValue masks value, found under key in an object of the given
+// scope, per maskClientParams's rules. Array elements inherit the array's
+// key, so "required": [...] and a JSON-Schema "type": ["string", "null"]
+// survive while "stop": [...] doesn't.
+func maskClientValue(key string, value any, scope maskScope) any {
+	if _, freeForm := freeFormClientFields[key]; freeForm {
+		return maskFreeForm(value)
+	}
+	var loggable bool
 	switch v := value.(type) {
-	case map[string]any:
-		for key, child := range v {
-			if key == "description" {
-				v[key] = "[REDACTED]"
-				continue
-			}
-			redactDescriptionsRecursive(child)
+	case string:
+		_, loggable = loggableStringFields[key]
+		if _, name := definitionStringFields[key]; name && scope == scopeDefinition {
+			loggable = true
 		}
+	case float64:
+		_, loggable = loggableNumberFields[key]
+	case bool:
+		_, loggable = loggableBoolFields[key]
 	case []any:
-		for _, item := range v {
-			redactDescriptionsRecursive(item)
+		for i, item := range v {
+			v[i] = maskClientValue(key, item, scope)
 		}
+		return v
+	case map[string]any:
+		if _, namesSchemas := jsonSchemaNameMaps[key]; namesSchemas && scope == scopeDefinition {
+			for name, schema := range v {
+				// name is a property name, schema its schema.
+				v[name] = maskClientValue("", schema, scope)
+			}
+			return v
+		}
+		inner := nestedScope(scope, key)
+		for childKey, child := range v {
+			v[childKey] = maskClientValue(childKey, child, inner)
+		}
+		return v
+	default: // null
+		return value
+	}
+	if loggable && scope != scopeOpaque {
+		return value
+	}
+	return "[REDACTED]"
+}
+
+// maskFreeForm replaces a freeFormClientFields value with a placeholder that
+// keeps only its size: an object becomes "[REDACTED: N keys]", an array
+// keeps its length with each element replaced the same way, and anything
+// else becomes "[REDACTED]".
+func maskFreeForm(value any) any {
+	switch v := value.(type) {
+	case []any:
+		for i, item := range v {
+			v[i] = maskFreeForm(item)
+		}
+		return v
+	case map[string]any:
+		return fmt.Sprintf("[REDACTED: %d keys]", len(v))
+	default:
+		return "[REDACTED]"
 	}
 }
 
