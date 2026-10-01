@@ -238,6 +238,13 @@ func TestVLLM_ResponsesAPIIsPassedThrough(t *testing.T) {
 	assert.Equal(t, "hi", body["input"], "the Responses-shaped body is forwarded unchanged")
 	assert.NotContains(t, body, "messages")
 	assert.Equal(t, "qwen-36-35b-fp8", body["model"], "the real model name replaces the alias")
+	// LiteLLM applies a deployment's litellm_params defaults regardless of API
+	// shape; prepareRequestForCredential's own suffix check used to only
+	// recognize "/chat/completions", silently skipping defaults for a vLLM
+	// deployment spoken to natively over /v1/responses.
+	assert.Equal(t, map[string]any{"enable_thinking": false}, body["chat_template_kwargs"],
+		"vLLM deployment defaults must also apply to a native /v1/responses request")
+	assert.EqualValues(t, 20, body["top_k"])
 
 	require.Len(t, db.logs, 1)
 	assert.Equal(t, "qwen-36-35b-fast", db.logs[0].Model)

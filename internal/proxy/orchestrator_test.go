@@ -297,6 +297,53 @@ func TestOrchestrateRequest_ResponsesAPI_ResponsesOnlyForcesPassthrough(t *testi
 	require.False(t, hasMessages, "must not be converted to Chat Completions shape")
 }
 
+// TestOrchestrateRequest_ResponsesAPI_ResponsesOnlyPassthroughAppliesCodexPrep
+// covers a critical review finding: the responses_only passthrough branch
+// above (IsResponsesOnlyForCredential) forwarded the client's body with only
+// ReplaceResponsesBodyParam, unlike the IsPassthroughResponsesForProvider
+// branch right before it in the same switch, which also runs
+// PrepareCodexPassthrough -- stripping proxy-internal store/metadata/ttl and
+// normalizing input shape. Without it, a client's metadata/ttl fields (not
+// part of OpenAI's actual Responses API request schema) leaked straight to
+// the provider unstripped.
+func TestOrchestrateRequest_ResponsesAPI_ResponsesOnlyPassthroughAppliesCodexPrep(t *testing.T) {
+	logger := testhelpers.NewTestLogger()
+	passthroughResponses := false
+	builder := NewTestProxyBuilder().
+		WithSingleCredential("test", config.ProviderTypeOpenAI, "http://test.local", "upstream-key").
+		WithMasterKey("master-key")
+	modelManager := models.New(logger, 50, []config.ModelRPMConfig{
+		{
+			Name:                 "qwen-5",
+			Credential:           "test",
+			PassthroughResponses: &passthroughResponses,
+			ResponsesOnly:        true,
+		},
+	})
+	modelManager.LoadModelsFromConfig(builder.config.Credentials)
+	builder.config.ModelManager = modelManager
+	prx := builder.Build()
+	prx.logger = logger
+
+	body := `{"model":"qwen-5","input":"Hello","stream":false,"metadata":{"foo":"bar"},"ttl":60}`
+	req := httptest.NewRequest("POST", "/v1/responses", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer master-key")
+	w := httptest.NewRecorder()
+	logCtx := &RequestLogContext{}
+
+	prepared, ok := prx.orchestrateRequest(w, req, logCtx)
+	require.True(t, ok)
+	require.NotNil(t, prepared)
+	require.True(t, prepared.passthroughResponses)
+
+	var raw map[string]interface{}
+	require.NoError(t, json.Unmarshal(prepared.body, &raw))
+	_, hasMetadata := raw["metadata"]
+	assert.False(t, hasMetadata, "PrepareCodexPassthrough must strip proxy-internal metadata before it reaches the provider")
+	_, hasTTL := raw["ttl"]
+	assert.False(t, hasTTL, "PrepareCodexPassthrough must strip proxy-internal ttl before it reaches the provider")
+}
+
 // TestOrchestrateRequest_ResponsesAPI_ResponsesOnlyIgnoredForNonOpenAICredential covers
 // review finding #2 (round 3): the /v1/responses passthrough branch for a
 // responses_only model was gated only on !cred.IsProxyLike(), unlike the parallel

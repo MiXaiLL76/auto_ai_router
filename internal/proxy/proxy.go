@@ -1706,11 +1706,22 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 			// Use realModelID for URL construction and body conversion (provider-facing name).
 			// modelID (alias) is used for credential selection and rate limiting.
 			conv = converter.New(cred.EffectiveProviderType(), converter.RequestMode{
-				IsImageGeneration:   logCtx.IsImageGeneration,
-				IsImageEdit:         isImageEdit,
-				IsEmbeddings:        isEmbeddings,
-				IsStreaming:         streaming,
-				IsResponsesAPI:      prepared.passthroughResponses,
+				IsImageGeneration: logCtx.IsImageGeneration,
+				IsImageEdit:       isImageEdit,
+				IsEmbeddings:      isEmbeddings,
+				IsStreaming:       streaming,
+				// prepared.convertedToResponses means body is already
+				// Responses-shaped here too (orchestrator.go's
+				// ChatRequestToResponses, for a responses_only model) -- not
+				// just the passthrough case. Without it, the default-provider
+				// branch's `!c.mode.IsResponsesAPI` check (converter.go)
+				// mistakes it for a Chat-shaped body and runs
+				// ConvertWebSearchTools/ForceWebSearchResults on it, which
+				// silently drops every non-function/non-web_search hosted
+				// tool (code_interpreter, file_search, image_generation, mcp,
+				// custom, ...) and its tool_choice -- tools the Responses API
+				// (unlike Chat Completions) actually supports.
+				IsResponsesAPI:      prepared.passthroughResponses || prepared.convertedToResponses,
 				MessagesPassthrough: prepared.passthroughMessages,
 				ModelID:             realModelID,
 				DisplayModelID:      modelID,

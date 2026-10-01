@@ -312,8 +312,18 @@ func (p *Proxy) prepareRequestForCredential(
 ) (credentialPreparedRequest, error) {
 	req, err := p.buildCredentialRequest(r, baseBody, baseProxyBody, modelID, baseRealModelID,
 		basePath, streaming, cred, isResponsesAPI, prevEntryHandled, stickyCacheEligible)
+	// The suffix check also accepts "/responses" (not just "/chat/completions")
+	// so a vLLM deployment's litellm_params defaults (chat_template_kwargs,
+	// temperature, ...) still apply for a model_info.mode:"responses" entry --
+	// LiteLLM applies these regardless of API shape -- and for a
+	// responses_only model whose /v1/chat/completions request
+	// buildCredentialRequest just converted: req.path is "/v1/responses" by
+	// this point (see the responses_only branch above), but ApplyDefaultParams
+	// itself is shape-agnostic (it just sets whatever top-level JSON keys the
+	// client didn't), so there's no reason the client's original API shape
+	// should matter here.
 	if err != nil || cred.Type != config.ProviderTypeVLLM || p.modelManager == nil ||
-		!strings.HasSuffix(req.path, "/chat/completions") {
+		(!strings.HasSuffix(req.path, "/chat/completions") && !strings.HasSuffix(req.path, "/responses")) {
 		return req, err
 	}
 	if defaults := p.modelManager.GetDefaultParamsForCredential(modelID, cred.Name); len(defaults) > 0 {
@@ -548,8 +558,18 @@ func (p *Proxy) buildCredentialRequest(
 		// messages) would be forwarded verbatim to e.g. Anthropic's /v1/messages,
 		// which doesn't understand it -- worse than before this feature existed,
 		// when such a request fell through to RequestToChat and worked normally.
-		req.body = openai.ReplaceResponsesBodyParam(realModelID, body)
-		req.proxyBody = openai.ReplaceResponsesBodyParam(realModelID, proxyBody)
+		// Same prep as the IsPassthroughResponsesForProvider case above --
+		// this is structurally the same situation (a Responses-shaped body
+		// going straight to a provider's native /v1/responses): strip
+		// proxy-internal store/metadata/ttl, drop previous_response_id when
+		// AIR already resolved and inlined that history itself
+		// (prevEntryHandled) so the upstream doesn't see it twice or 404 on
+		// an ID it never stored, and normalize input/instructions shape.
+		// Without this, previous_response_id survived even when
+		// prevEntryHandled was true, and ttl/metadata leaked to the
+		// provider unstripped.
+		req.body = openai.ReplaceResponsesBodyParam(realModelID, responses.PrepareCodexPassthrough(body, prevEntryHandled))
+		req.proxyBody = openai.ReplaceResponsesBodyParam(realModelID, responses.PrepareCodexPassthrough(proxyBody, prevEntryHandled))
 		req.passthroughResponses = true
 		p.logger.DebugContext(r.Context(), "Responses API request for responses_only model forwarded as passthrough",
 			"model", modelID, "streaming", streaming)

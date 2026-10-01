@@ -2,10 +2,13 @@ package responses
 
 import (
 	"encoding/json"
+	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
 )
 
 func TestChatRequestToResponses_BasicTextMessage(t *testing.T) {
@@ -273,6 +276,23 @@ func TestChatRequestToResponses_MissingMessages(t *testing.T) {
 func TestChatRequestToResponses_UnsupportedRole(t *testing.T) {
 	_, err := ChatRequestToResponses([]byte(`{"model":"gpt-5-pro","messages":[{"role":"bogus","content":"x"}]}`))
 	assert.Error(t, err)
+}
+
+// TestChatRequestToResponses_InputAudioRejected covers a critical review
+// finding: Chat Completions' {"type":"input_audio",...} content part has no
+// faithful Responses API equivalent (the Responses input content union has
+// no audio variant at all), so silently forwarding a guessed wire shape the
+// provider would 400 on (or worse, silently ignore) is wrong -- the request
+// must be rejected with a clear client-facing error instead.
+func TestChatRequestToResponses_InputAudioRejected(t *testing.T) {
+	body := `{"model":"gpt-5-pro","messages":[{"role":"user","content":[
+		{"type":"text","text":"transcribe this"},
+		{"type":"input_audio","input_audio":{"data":"BASE64","format":"wav"}}
+	]}]}`
+	_, err := ChatRequestToResponses([]byte(body))
+	require.Error(t, err)
+	var validationErr *converterutil.RequestValidationError
+	assert.True(t, errors.As(err, &validationErr), "must be a RequestValidationError so the client gets a 4xx, not a 500")
 }
 
 func TestChatRequestToResponses_DeletesChatOnlyFields(t *testing.T) {

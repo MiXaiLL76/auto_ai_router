@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
 	"github.com/mixaill76/auto_ai_router/internal/converter/openai"
 )
 
@@ -157,12 +158,20 @@ func chatContentPartsToInput(parts []interface{}) ([]interface{}, error) {
 			}
 			result = append(result, entry)
 		case "input_audio":
-			entry := map[string]interface{}{"type": "input_audio"}
-			if audio, ok := partMap["input_audio"].(map[string]interface{}); ok {
-				entry["data"] = audio["data"]
-				entry["format"] = audio["format"]
-			}
-			result = append(result, entry)
+			// Chat Completions' {"type":"input_audio","input_audio":{data,format}}
+			// has no faithful Responses API equivalent to convert to: the
+			// Responses API's input content union (text/image/file) has no
+			// audio variant at all, so there is no wire shape -- flat or
+			// nested -- that an actual /v1/responses endpoint accepts here.
+			// Silently sending something it will 400 on (or worse, silently
+			// drop) is worse than telling the client up front; mirrors how
+			// request.go's reverse converter already errors on
+			// input_file.file_id rather than the generic "unknown part"
+			// skip used for a truly unrecognized type, since this is a
+			// recognized type we simply can't carry, not an unrecognized one.
+			return nil, converterutil.NewRequestValidationError(
+				"content[].input_audio", "audio input is not supported for a responses_only model",
+			)
 		case "file":
 			// Chat Completions' {"type":"file","file":{file_data|file_id,filename}} has a
 			// direct Responses API equivalent, input_file (see convertContentParts in
@@ -249,6 +258,18 @@ func chatAssistantMessageToInputItems(msg map[string]interface{}) []interface{} 
 // anything else (e.g. an Anthropic-flavored openai.OpenAIThinkingBlock
 // entry, should one somehow arrive on this route) is ignored rather than
 // forwarded as a malformed reasoning item.
+//
+// A block with no encrypted_content is dropped entirely rather than
+// replayed as a bare {"id": ...} reasoning item: chatForceStatelessResponses
+// pins store:false unconditionally, and OpenAI's own error for that
+// combination is explicit -- "Item with id '...' not found. Items are not
+// persisted when store is set to false". encrypted_content only gets
+// requested (via the "reasoning.encrypted_content" include) when
+// chatRequestWantsReasoning recognized the model/request as reasoning-
+// capable; for a model outside the known reasoning families that was never
+// asked for reasoning either, the original response item carried no
+// encrypted_content to begin with, so the id alone is dead weight that
+// would 404 the very next tool-calling turn instead of silently degrading.
 func chatThinkingBlocksToReasoningItems(raw interface{}) []interface{} {
 	blocks, ok := raw.([]interface{})
 	if !ok {
@@ -260,12 +281,13 @@ func chatThinkingBlocksToReasoningItems(raw interface{}) []interface{} {
 		if !ok || blockMap["type"] != responsesReasoningBlockType {
 			continue
 		}
-		item := map[string]interface{}{"type": "reasoning"}
+		enc, _ := blockMap["encrypted_content"].(string)
+		if enc == "" {
+			continue
+		}
+		item := map[string]interface{}{"type": "reasoning", "encrypted_content": enc}
 		if id, ok := blockMap["id"].(string); ok && id != "" {
 			item["id"] = id
-		}
-		if enc, ok := blockMap["encrypted_content"].(string); ok && enc != "" {
-			item["encrypted_content"] = enc
 		}
 		// OpenAI requires "summary" to be present as a list (even an empty one) on a
 		// reasoning input item, or the request 400s with "Invalid 'summary': summary is

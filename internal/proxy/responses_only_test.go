@@ -80,6 +80,71 @@ func TestProxyRequest_ResponsesOnlyModel_ChatCompletionsEndpoint(t *testing.T) {
 	assert.Equal(t, "assistant", message["role"])
 }
 
+// hostedToolUpstreamTransport asserts a non-function ("hosted") Responses API
+// tool survives conv.RequestFrom unchanged for a responses_only model.
+type hostedToolUpstreamTransport struct {
+	t *testing.T
+}
+
+func (tr hostedToolUpstreamTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	assert.Equal(tr.t, "/v1/responses", r.URL.Path)
+
+	body, err := io.ReadAll(r.Body)
+	require.NoError(tr.t, err)
+
+	var reqBody map[string]interface{}
+	require.NoError(tr.t, json.Unmarshal(body, &reqBody))
+	tools, ok := reqBody["tools"].([]interface{})
+	require.True(tr.t, ok, "tools must survive conversion")
+	require.Len(tr.t, tools, 1)
+	tool := tools[0].(map[string]interface{})
+	assert.Equal(tr.t, "code_interpreter", tool["type"],
+		"a hosted (non-function) Responses API tool must not be stripped by the Chat-Completions-only web-search tool filter")
+
+	respBody := `{
+		"id":"resp_test2","object":"response","created_at":1700000000,"model":"gpt-5-pro","status":"completed",
+		"output":[{"type":"message","id":"msg_1","status":"completed","role":"assistant",
+			"content":[{"type":"output_text","text":"ok","annotations":[]}]}],
+		"usage":{"input_tokens":9,"output_tokens":1,"total_tokens":10}
+	}`
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": {"application/json"}},
+		Body:       io.NopCloser(strings.NewReader(respBody)),
+		Request:    r,
+	}, nil
+}
+
+// TestProxyRequest_ResponsesOnlyModel_PreservesHostedTools covers the critical
+// review finding that RequestMode.IsResponsesAPI was only ever set from
+// prepared.passthroughResponses, never prepared.convertedToResponses: the
+// Responses-shaped body a responses_only model's /v1/chat/completions
+// request gets converted to (orchestrator.go's ChatRequestToResponses) was
+// then mistaken for a Chat-shaped body by converter.go's default branch,
+// which ran ConvertWebSearchTools/ForceWebSearchResults on it -- silently
+// dropping every hosted tool (code_interpreter, file_search,
+// image_generation, mcp, custom, ...) the Responses API actually supports.
+func TestProxyRequest_ResponsesOnlyModel_PreservesHostedTools(t *testing.T) {
+	credential := config.CredentialConfig{Name: "openai_main", Type: config.ProviderTypeOpenAI, BaseURL: "https://api.openai.com", APIKey: "provider-key", RPM: -1, TPM: -1}
+	prx := NewTestProxyBuilder().WithCredentials(credential).Build()
+	prx.modelManager = models.New(prx.logger, 50, []config.ModelRPMConfig{
+		{Name: "gpt-5-pro", ResponsesOnly: true, Credential: "openai_main", RPM: -1, TPM: -1},
+	})
+	prx.modelManager.LoadModelsFromConfig([]config.CredentialConfig{credential})
+	prx.client.Transport = hostedToolUpstreamTransport{t: t}
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions",
+		strings.NewReader(`{"model":"gpt-5-pro","max_tokens":64,"messages":[{"role":"user","content":"hi"}],`+
+			`"tools":[{"type":"code_interpreter","container":{"type":"auto"}}]}`))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+
+	prx.ProxyRequest(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+}
+
 // failedStatusResponsesTransport simulates the Responses API's async-style error shape:
 // an outer HTTP 200 whose body carries "status":"failed" and an embedded error, no
 // output items at all.

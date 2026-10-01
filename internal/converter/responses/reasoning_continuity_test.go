@@ -157,6 +157,69 @@ func TestReasoningContinuity_RoundTrip_NoSummary(t *testing.T) {
 		`must be an empty list, not missing or null -- OpenAI rejects anything else with "summary is required and must be a list for reasoning"`)
 }
 
+// TestReasoningContinuity_UnrecognizedModelBareIDDoesNotReplay covers the 404
+// this feature used to produce for any model outside openai.IsReasoningModel's
+// known families (e.g. an Azure deployment named "prod-reasoner", or a custom
+// model alias): chatRequestWantsReasoning never requested the
+// "reasoning.encrypted_content" include for turn 1 (since the model name
+// didn't match and the client never asked for reasoning either), so the
+// provider's reasoning item in that response carries only an id -- no
+// encrypted_content. chatForceStatelessResponses always pins store:false, so
+// a bare id is never valid to replay: OpenAI's error is explicit ("Item with
+// id '...' not found. Items are not persisted when store is set to false").
+// The fix drops such a block instead of forwarding it.
+func TestReasoningContinuity_UnrecognizedModelBareIDDoesNotReplay(t *testing.T) {
+	responsesBody := `{
+		"id":"resp_1","object":"response","created_at":1700000000,"model":"prod-reasoner","status":"completed",
+		"output":[
+			{"type":"reasoning","id":"rs_abc","summary":[]},
+			{"type":"function_call","id":"fc_1","call_id":"call_1","name":"get_weather","arguments":"{\"city\":\"paris\"}"}
+		]
+	}`
+
+	chatBody, err := ResponseToChat([]byte(responsesBody))
+	require.NoError(t, err)
+
+	var chatResp map[string]interface{}
+	require.NoError(t, json.Unmarshal(chatBody, &chatResp))
+	message := chatResp["choices"].([]interface{})[0].(map[string]interface{})["message"].(map[string]interface{})
+
+	// ResponseToChat still surfaces the bare-id block on the client-facing
+	// message (unchanged) -- the fix is entirely about not replaying it.
+	thinkingBlocks, ok := message["thinking_blocks"].([]interface{})
+	require.True(t, ok)
+	require.Len(t, thinkingBlocks, 1)
+	block := thinkingBlocks[0].(map[string]interface{})
+	assert.Equal(t, "rs_abc", block["id"])
+	assert.Empty(t, block["encrypted_content"])
+
+	// Turn 2: client echoes the message back verbatim, as a well-behaved
+	// client does.
+	nextRequest := map[string]interface{}{
+		"model":      "prod-reasoner",
+		"max_tokens": 100,
+		"messages": []interface{}{
+			map[string]interface{}{"role": "user", "content": "what's the weather in paris?"},
+			message,
+			map[string]interface{}{"role": "tool", "tool_call_id": "call_1", "content": "18C, cloudy"},
+		},
+	}
+	nextRequestBody, err := json.Marshal(nextRequest)
+	require.NoError(t, err)
+
+	responsesRequest, err := ChatRequestToResponses(nextRequestBody)
+	require.NoError(t, err)
+
+	var reqRaw map[string]interface{}
+	require.NoError(t, json.Unmarshal(responsesRequest, &reqRaw))
+	for _, raw := range reqRaw["input"].([]interface{}) {
+		item, ok := raw.(map[string]interface{})
+		require.True(t, ok)
+		assert.NotEqual(t, "reasoning", item["type"],
+			"a bare-id reasoning item (no encrypted_content) must never be replayed under store:false — OpenAI 404s it")
+	}
+}
+
 // TestChatThinkingBlocksToReasoningItems_MissingSummaryDefaultsToEmptyList covers the
 // belt-and-suspenders side of the fix directly: even if a thinking_blocks entry has no
 // "summary" key at all (an older client from before this fix, or any client/proxy that
