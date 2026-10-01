@@ -20,7 +20,8 @@ type TokenUsage struct {
 	AcceptedPredictionTokens int
 	RejectedPredictionTokens int
 	ImageCount               int // Number of images to generate (1-10)
-	ImageTokens              int // Input image/video tokens
+	ImageTokens              int // Input image tokens (PDF pages included)
+	VideoInputTokens         int // Input video tokens, priced apart from images
 	OutputImageTokens        int // Generated image/video tokens
 	WebSearchRequests        int // Built-in web search tool calls/requests
 	WebSearchContextSize     string
@@ -81,6 +82,7 @@ func (tu *TokenUsage) Normalize() *TokenUsage {
 	tu.RejectedPredictionTokens = converterutil.NonNegativeTokenCount(tu.RejectedPredictionTokens)
 	tu.ImageCount = converterutil.NonNegativeTokenCount(tu.ImageCount)
 	tu.ImageTokens = converterutil.NonNegativeTokenCount(tu.ImageTokens)
+	tu.VideoInputTokens = converterutil.NonNegativeTokenCount(tu.VideoInputTokens)
 	tu.OutputImageTokens = converterutil.NonNegativeTokenCount(tu.OutputImageTokens)
 	tu.WebSearchRequests = converterutil.NonNegativeTokenCount(tu.WebSearchRequests)
 	if tu.WebSearchRequests > 0 || tu.WebSearchContextSize != "" {
@@ -172,6 +174,9 @@ func (tu *TokenUsage) MergeNonZero(src *TokenUsage) {
 	if src.ImageTokens != 0 {
 		tu.ImageTokens = src.ImageTokens
 	}
+	if src.VideoInputTokens != 0 {
+		tu.VideoInputTokens = src.VideoInputTokens
+	}
 	if src.OutputImageTokens != 0 {
 		tu.OutputImageTokens = src.OutputImageTokens
 	}
@@ -198,6 +203,7 @@ type TokenCosts struct {
 	CachedOutputCost  float64
 	PredictionCost    float64
 	ImageCost         float64
+	VideoInputCost    float64
 	WebSearchCost     float64
 	TotalCost         float64
 	MarginPercent     float64

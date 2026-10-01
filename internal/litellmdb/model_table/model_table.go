@@ -771,6 +771,12 @@ func convertPricingToModelPrice(p *queries.CustomPricingLiteLLMParams) *manager.
 	if p.OutputCostPerImageToken != nil {
 		price.OutputCostPerImageToken = *p.OutputCostPerImageToken
 	}
+	if p.InputCostPerImageToken != nil {
+		price.InputCostPerImageToken = *p.InputCostPerImageToken
+	}
+	if p.InputCostPerVideoToken != nil {
+		price.InputCostPerVideoToken = *p.InputCostPerVideoToken
+	}
 	if p.OutputCostPerVideoPerSecond != nil {
 		price.OutputCostPerVideoPerSecond = *p.OutputCostPerVideoPerSecond
 	}

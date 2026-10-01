@@ -146,6 +146,7 @@ type TokenDetails struct {
 	CacheWriteTokens          int                        `json:"cache_write_tokens,omitempty"`
 	AudioTokens               int                        `json:"audio_tokens,omitempty"`
 	ImageTokens               int                        `json:"image_tokens,omitempty"`
+	VideoTokens               int                        `json:"video_tokens,omitempty"`
 	converterutil.CachingTokensExtension
 }
 
@@ -323,6 +324,18 @@ type OpenAIEmbeddingData struct {
 }
 
 type OpenAIEmbeddingUsage struct {
-	PromptTokens int `json:"prompt_tokens"`
-	TotalTokens  int `json:"total_tokens"`
+	PromptTokens        int                           `json:"prompt_tokens"`
+	TotalTokens         int                           `json:"total_tokens"`
+	PromptTokensDetails *OpenAIEmbeddingPromptDetails `json:"prompt_tokens_details,omitempty"`
+}
+
+// OpenAIEmbeddingPromptDetails breaks the embedding prompt down by modality
+// (an extension to the OpenAI shape, mirroring chat prompt_tokens_details).
+// Image, audio and video tokens are part of PromptTokens, so billing prices
+// them at their own rates and only the remainder at the text rate.
+type OpenAIEmbeddingPromptDetails struct {
+	TextTokens  int `json:"text_tokens,omitempty"`
+	ImageTokens int `json:"image_tokens,omitempty"`
+	AudioTokens int `json:"audio_tokens,omitempty"`
+	VideoTokens int `json:"video_tokens,omitempty"`
 }

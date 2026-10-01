@@ -434,6 +434,40 @@ For Gemini-backed `images.generate` / `images.edit`, the router converts the Ope
 
 The router also supports the dedicated Imagen API endpoint for image generation models.
 
+### Embeddings
+
+`/v1/embeddings` works with `vertex-ai` and `gemini` credentials. Text-only models (`gemini-embedding-001`, `text-embedding-*`) take the usual OpenAI input: a string or an array of strings.
+
+Gemini Embedding 2 (`gemini-embedding-2`, `gemini-embedding-2-preview`) is multimodal. Every item of `input` gives one vector (`data[i].index` is the item's position). An item is a string, a content part in the same shape as in chat (see [Content Types](#content-types)), or an array of strings and parts that are embedded together as **one** vector:
+
+```python
+client.embeddings.create(
+    model="gemini-embedding-2",
+    dimensions=768,
+    input=[
+        "task: search result | query: dog on a beach",  # vector 0
+        [  # vector 1: text + image
+            "title: none | text: a dog",
+            {
+                "type": "image_url",
+                "image_url": {"url": "data:image/png;base64,iVBOR..."},
+            },
+        ],
+        {
+            "type": "file",
+            "file": {"file_data": "data:application/pdf;base64,JVBER..."},
+        },  # vector 2
+    ],
+)
+```
+
+- Media goes inline (`data:` URL or base64) or as a public `https://` / `gs://` link; a link needs a MIME type, taken from the file extension or from `mime_type` on the part.
+- Input the router cannot convert is rejected with 400 before any call to Google. At most 100 items per request.
+- There is no `task_type`: put the task into the text, as in the example.
+- On Vertex AI (use `location: global`) each vector is a separate `embedContent` call, sent in parallel. A retry on the next credential re-sends only the inputs that have no vector yet; an input Google rejects (400/413/422) while the others succeed is not retried.
+
+`usage.prompt_tokens_details` splits the tokens by modality (`text_tokens`, `image_tokens`, `audio_tokens`, `video_tokens`; PDF pages count as images), and each modality is billed at its own rate (see [Model Pricing](../litellm-integration/pricing.md)). If Google returns no usage, the text is estimated at ~4 characters per token (media is not counted) and a warning is logged.
+
 ### Streaming
 
 SSE streaming works transparently:
@@ -472,4 +506,5 @@ The router provides accurate token counting with modality breakdown:
 - **Completion tokens**: Total output tokens (includes thinking tokens)
 - **Cached tokens**: Reported separately (deducted from base cost to avoid double-charging)
 - **Audio tokens**: Tracked separately for accurate billing
+- **Image and video tokens**: Reported separately (`prompt_tokens_details.image_tokens` / `video_tokens`), each at its own price
 - **Thinking tokens**: Included in completion count, tracked in `completion_tokens_details.reasoning_tokens`

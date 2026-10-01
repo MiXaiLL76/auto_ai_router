@@ -1536,6 +1536,9 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 		shouldRetry     bool
 		retryReason     RetryReason
 		transportErr    error
+		// Replies of a fanned-out embeddings request kept across attempts, so
+		// a retry only re-sends the inputs that did not get one.
+		embedFanOutReplies embedContentFanOutReplies
 	)
 
 	for attempt := 0; attempt <= p.maxProviderRetries; attempt++ {
@@ -1876,9 +1879,16 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 
 		// Execute HTTP request
 		var doErr error
+		fanOutInputFault := false
 		attemptedCreds[cred.Name] = true
 		p.stampFirstUpstreamSend(logCtx)
-		resp, doErr = p.client.Do(proxyReq) //nolint:gosec // G704: same targetURL as the request built above, host isn't attacker-controlled
+		if fanOut := embeddingFanOutBodies(conv); len(fanOut) > 1 {
+			// Vertex AI embedContent takes one content per call: one call per
+			// input, answered as a single merged response.
+			resp, fanOutInputFault, doErr = p.doEmbedContentFanOut(proxyReq, realModelID, fanOut, &embedFanOutReplies)
+		} else {
+			resp, doErr = p.client.Do(proxyReq) //nolint:gosec // G704: same targetURL as the request built above, host isn't attacker-controlled
+		}
 		if doErr != nil {
 			if isClientCanceledTransportError(r, doErr) {
 				// The client is already gone -- trying another credential
@@ -2004,6 +2014,12 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 
 		// Check if we should retry with another same-type credential
 		shouldRetry, retryReason = ShouldRetryWithFallback(resp.StatusCode, responseBody)
+		if shouldRetry && fanOutInputFault {
+			// The provider refused one input while embedding others on this
+			// same credential: the input is at fault, and every further
+			// credential would refuse it the same way.
+			shouldRetry = false
+		}
 		if !shouldRetry {
 			break
 		}
@@ -2169,6 +2185,13 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 				finalResponseBody = convertedBody
 				tokenUsageOptions.AudioInputIncludesCachedAudio = false
 				p.logTransformedResponse(r.Context(), cred.Name, string(cred.Type), finalResponseBody)
+				if conv.EmbeddingUsageEstimated() {
+					// Billed from a text-length estimate: media parts of this
+					// request are not in it.
+					p.logger.WarnContext(r.Context(), "Embedding response carried no usageMetadata, prompt tokens estimated from the request text",
+						"credential", cred.Name, "provider", string(cred.Type),
+						"model", modelID, "request_id", logCtx.RequestID)
+				}
 			}
 		} else {
 			finalResponseBody = []byte(decodedBody)
