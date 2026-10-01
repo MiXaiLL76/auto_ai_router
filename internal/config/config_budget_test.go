@@ -45,3 +45,12 @@ default_estimated_completion_tokens: 2048
 	assert.Equal(t, 30*time.Minute, cfg.BudgetReservationTTL)
 	assert.Equal(t, 2048, cfg.DefaultEstimatedCompletionTokens)
 }
+
+func TestLiteLLMDBEnableCostMarginParsesExplicitSetting(t *testing.T) {
+	var cfg LiteLLMDBConfig
+	require.NoError(t, yaml.Unmarshal([]byte("enabled: false\n"), &cfg))
+	assert.False(t, cfg.EnableCostMargin)
+
+	require.NoError(t, yaml.Unmarshal([]byte("enable_cost_margin: true\n"), &cfg))
+	assert.True(t, cfg.EnableCostMargin)
+}
