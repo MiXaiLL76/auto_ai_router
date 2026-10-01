@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	converterutil "github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
 	"github.com/mixaill76/auto_ai_router/internal/converter/responses"
 	"github.com/mixaill76/auto_ai_router/internal/converter/vertex"
 	"google.golang.org/genai"
@@ -15,7 +16,7 @@ import (
 func ResponsesRequestToVertex(body []byte, model string) ([]byte, error) {
 	var req responses.Request
 	if err := json.Unmarshal(body, &req); err != nil {
-		return nil, fmt.Errorf("ResponsesRequestToVertex: parse request: %w", err)
+		return nil, converterutil.RequestJSONValidationError(err)
 	}
 
 	vertexReq, err := buildVertexRequest(&req, model)

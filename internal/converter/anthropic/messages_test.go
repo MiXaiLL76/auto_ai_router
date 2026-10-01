@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
+	"github.com/mixaill76/auto_ai_router/internal/testhelpers"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -520,6 +521,28 @@ func TestOpenAIToAnthropic_ChatFileFileIDUnsupported(t *testing.T) {
 	assert.Equal(t, "messages.content.file.file_id", validationErr.Param)
 	assert.Equal(t, "file_id is not supported for this route", validationErr.Message)
 	assert.NotContains(t, err.Error(), "Anthropic")
+}
+
+// TestOpenAIToAnthropic_MaxTokensWrongTypeReportsParam covers a client that sends
+// max_tokens as a string ("five") instead of a number, which must classify as a
+// validation error naming the offending param instead of falling through to a
+// generic 500.
+func TestOpenAIToAnthropic_MaxTokensWrongTypeReportsParam(t *testing.T) {
+	body := []byte(`{"model":"claude-haiku-4-5","messages":[{"role":"user","content":"Say OK."}],"max_tokens":"five"}`)
+
+	_, err := OpenAIToAnthropic(body, "claude-haiku-4-5", true)
+	testhelpers.RequireValidationError(t, err, "max_tokens", "invalid_type")
+}
+
+// TestOpenAIToBedrock_MaxTokensWrongTypeReportsParam covers the Bedrock request path,
+// which builds on top of OpenAIToAnthropic (converter.go gates Bedrock+Anthropic models
+// through OpenAIToBedrock, which calls OpenAIToAnthropic first). Confirms the
+// classification fix above propagates through unchanged rather than needing its own fix.
+func TestOpenAIToBedrock_MaxTokensWrongTypeReportsParam(t *testing.T) {
+	body := []byte(`{"model":"claude-haiku-4-5","messages":[{"role":"user","content":"Say OK."}],"max_tokens":"five"}`)
+
+	_, err := OpenAIToBedrock(body, "claude-haiku-4-5")
+	testhelpers.RequireValidationError(t, err, "max_tokens", "invalid_type")
 }
 
 func TestOpenAIToAnthropic_ChatPDFAsImageURLRejected(t *testing.T) {

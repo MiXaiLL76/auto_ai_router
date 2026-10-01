@@ -1,0 +1,136 @@
+name: Security
+
+# PRs and pushes go through ci.yml, releases through release.yml.
+on:
+  schedule:
+    - cron: '0 4 * * 1'  # Monday 04:00 UTC
+  workflow_call:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  trufflehog:
+    name: security:Trufflehog
+    runs-on: baremetal-mixaill
+    container:
+      image: trufflesecurity/trufflehog:latest
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        fetch-depth: 0  # scan history, not just the tip
+
+    - name: trufflehog
+      env:
+        # On a PR only the new commits; everywhere else the whole history.
+        SINCE: ${{ github.event.pull_request.base.sha }}
+      run: |
+        git config --global --add safe.directory "$GITHUB_WORKSPACE"
+        status=0
+        trufflehog git "file://$GITHUB_WORKSPACE" ${SINCE:+--since-commit "$SINCE"} \
+          --results=verified --fail --no-update > trufflehog.log 2>&1 || status=$?
+        cat trufflehog.log
+        if [ "$status" -eq 183 ]; then
+          { echo "### ❌ trufflehog: verified live secret(s) in git history"; echo '```'; cat trufflehog.log; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          echo "::error title=trufflehog::verified live secret(s) found — revoke/rotate them first, then remove from history; see log"
+          exit 1
+        elif [ "$status" -ne 0 ]; then
+          echo "::error title=trufflehog::trufflehog failed with exit ${status} — see log"
+          exit 1
+        fi
+        echo "### ✅ trufflehog${SINCE:+ (PR commits only)}" >> "$GITHUB_STEP_SUMMARY"
+
+  semgrep:
+    name: security:SAST
+    runs-on: baremetal-mixaill
+    container:
+      image: semgrep/semgrep:latest
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+    - name: semgrep
+      run: |
+        status=0
+        semgrep scan --metrics=off --error \
+          --config p/golang --config p/dockerfile --config p/github-actions \
+          --exclude-rule go.lang.security.audit.crypto.math_random.math-random-used \
+          --exclude-rule go.lang.security.deserialization.unsafe-deserialization-interface.go-unsafe-deserialization-interface \
+          --vim-output=semgrep.vim > semgrep.log 2>&1 || status=$?
+        cat semgrep.log
+        if [ "$status" -eq 1 ]; then
+          count=$(wc -l < semgrep.vim)
+          { echo "### ❌ semgrep: ${count} finding(s)"; echo '```'; cat semgrep.vim; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          # vim format: path:line:col:severity:rule:message (no code snippet,
+          # unlike emacs, so only the message can contain colons)
+          awk -F: '{ msg=$6; for (i=7; i<=NF; i++) msg=msg ":" $i;
+                     printf "::error file=%s,line=%s,title=semgrep %s::%s\n", $1, $2, $5, msg }' semgrep.vim
+          exit 1
+        elif [ "$status" -ne 0 ]; then
+          echo "::error title=semgrep::semgrep failed with exit ${status} — see log"
+          exit 1
+        fi
+        echo "### ✅ semgrep" >> "$GITHUB_STEP_SUMMARY"
+
+  trivy:
+    name: security:Trivy
+    runs-on: baremetal-mixaill
+    container:
+      image: aquasec/trivy:latest
+      volumes:
+        - trivy-cache:/root/.cache/trivy
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+    - name: trivy fs
+      run: |
+        status=0
+        trivy fs --no-progress --exit-code 1 \
+          --scanners vuln,secret,misconfig --severity HIGH,CRITICAL --ignore-unfixed \
+          . > trivy.log 2>&1 || status=$?
+        cat trivy.log
+        if [ "$status" -ne 0 ]; then
+          { echo "### ❌ trivy fs: HIGH/CRITICAL findings"; echo '```'; cat trivy.log; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          echo "::error title=trivy fs::HIGH/CRITICAL vulnerability, secret or misconfig — see log (bump the dep to the 'Fixed Version')"
+          exit 1
+        fi
+        echo "### ✅ trivy fs" >> "$GITHUB_STEP_SUMMARY"
+
+  clamav:
+    name: security:Clamav
+    runs-on: baremetal-mixaill
+    container:
+      image: clamav/clamav-debian:stable  # not the alpine one: JS actions need glibc
+      volumes:
+        - clamav-db:/var/lib/clamav
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+    - name: Update signatures
+      run: |
+        if ! freshclam --stdout; then
+          if ls /var/lib/clamav/*.c[lv]d >/dev/null 2>&1; then
+            echo "::warning title=clamav::freshclam failed — scanning with the existing (older) signature DB"
+          else
+            echo "::error title=clamav::freshclam failed and there is no signature DB yet — network/mirror problem, re-run"
+            exit 1
+          fi
+        fi
+
+    - name: clamscan
+      run: |
+        status=0
+        clamscan --recursive --infected --exclude-dir='/\.git$' "$GITHUB_WORKSPACE" > clamav.log 2>&1 || status=$?
+        cat clamav.log
+        if [ "$status" -eq 1 ]; then
+          { echo "### ❌ clamav: infected file(s)"; echo '```'; grep FOUND clamav.log; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          grep FOUND clamav.log | while read -r line; do echo "::error title=clamav::${line}"; done
+          exit 1
+        elif [ "$status" -ne 0 ]; then
+          echo "::error title=clamav::clamscan failed with exit ${status} — see log"
+          exit 1
+        fi
+        echo "### ✅ clamav" >> "$GITHUB_STEP_SUMMARY"

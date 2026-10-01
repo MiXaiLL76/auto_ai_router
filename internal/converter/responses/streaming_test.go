@@ -186,6 +186,181 @@ func buildToolCallArgChunkWithIndex(arguments string, index int) string {
 	return string(data)
 }
 
+// parseSSEEvents splits raw SSE output into individual events, each decoded
+// as a map with its event name stored under "_event".
+func parseSSEEvents(t *testing.T, raw string) []map[string]interface{} {
+	t.Helper()
+	var events []map[string]interface{}
+	for _, block := range strings.Split(raw, "\n\n") {
+		block = strings.TrimSpace(block)
+		if block == "" {
+			continue
+		}
+		lines := strings.SplitN(block, "\n", 2)
+		require.Len(t, lines, 2, "malformed SSE block: %q", block)
+		eventName := strings.TrimPrefix(lines[0], "event: ")
+		dataLine := strings.TrimPrefix(lines[1], "data: ")
+		var decoded map[string]interface{}
+		require.NoError(t, json.Unmarshal([]byte(dataLine), &decoded), "block: %q", block)
+		decoded["_event"] = eventName
+		events = append(events, decoded)
+	}
+	return events
+}
+
+func buildReasoningChunk(reasoningContent string) string {
+	chunk := map[string]interface{}{
+		"id":      "chatcmpl-test",
+		"object":  "chat.completion.chunk",
+		"created": 1700000000,
+		"model":   "deepseek/deepseek-v4.1-flash",
+		"choices": []interface{}{
+			map[string]interface{}{
+				"index": 0,
+				"delta": map[string]interface{}{
+					"reasoning_content": reasoningContent,
+				},
+				"finish_reason": nil,
+			},
+		},
+	}
+	data, _ := json.Marshal(chunk)
+	return string(data)
+}
+
+func TestStreamTransform_ReasoningContent(t *testing.T) {
+	stopReason := "stop"
+
+	input := buildSSEChunk(buildReasoningChunk("Let me think. ")) +
+		buildSSEChunk(buildReasoningChunk("The answer is ok.")) +
+		buildSSEChunk(buildChatChunk("Ok.", nil)) +
+		buildSSEChunk(buildChatChunk("", &stopReason)) +
+		buildSSEChunk(buildUsageChunk(10, 8, 18)) +
+		"data: [DONE]\n\n"
+
+	var capturedResp *Response
+	var output bytes.Buffer
+	err := TransformChatStreamToResponses(strings.NewReader(input), &output, "deepseek/deepseek-v4.1-flash",
+		func(r *Response) { capturedResp = r })
+	require.NoError(t, err)
+
+	events := parseSSEEvents(t, output.String())
+
+	itemType := func(e map[string]interface{}) string {
+		item, ok := e["item"].(map[string]interface{})
+		if !ok {
+			return ""
+		}
+		t, _ := item["type"].(string)
+		return t
+	}
+
+	var reasoningAddedIdx, messageAddedIdx = -1, -1
+	for i, e := range events {
+		switch {
+		case e["_event"] == "response.output_item.added" && itemType(e) == "reasoning":
+			reasoningAddedIdx = i
+			assert.Equal(t, float64(0), e["output_index"])
+		case e["_event"] == "response.output_item.added" && itemType(e) == "message":
+			messageAddedIdx = i
+			assert.Equal(t, float64(1), e["output_index"], "message should be shifted to output_index 1 by the reasoning item")
+		}
+	}
+	require.NotEqual(t, -1, reasoningAddedIdx, "reasoning output_item.added not found")
+	require.NotEqual(t, -1, messageAddedIdx, "message output_item.added not found")
+	assert.Less(t, reasoningAddedIdx, messageAddedIdx, "reasoning item should be announced before the message item")
+
+	require.NotNil(t, capturedResp)
+	require.Len(t, capturedResp.Output, 2)
+	assert.Equal(t, "reasoning", capturedResp.Output[0].Type)
+	require.Len(t, capturedResp.Output[0].Summary, 1)
+	assert.Equal(t, "Let me think. The answer is ok.", capturedResp.Output[0].Summary[0].Text)
+	assert.Equal(t, "message", capturedResp.Output[1].Type)
+	assert.Equal(t, "Ok.", capturedResp.Output[1].Content[0].Text)
+}
+
+// Covers the case where the entire max_output_tokens budget is consumed by
+// reasoning before any visible content streams — the reasoning item must
+// still be closed and surfaced, instead of leaving a dangling "added" event
+// or dropping the reasoning text entirely.
+func TestStreamTransform_ReasoningOnly_NoVisibleContent(t *testing.T) {
+	lengthReason := "length"
+
+	input := buildSSEChunk(buildReasoningChunk("Thinking very hard...")) +
+		buildSSEChunk(buildChatChunk("", &lengthReason)) +
+		buildSSEChunk(buildUsageChunk(10, 50, 60)) +
+		"data: [DONE]\n\n"
+
+	var capturedResp *Response
+	var output bytes.Buffer
+	err := TransformChatStreamToResponses(strings.NewReader(input), &output, "deepseek/deepseek-v4.1-flash",
+		func(r *Response) { capturedResp = r })
+	require.NoError(t, err)
+
+	events := parseSSEEvents(t, output.String())
+
+	var addedCount, doneCount int
+	for _, e := range events {
+		item, ok := e["item"].(map[string]interface{})
+		if !ok || item["type"] != "reasoning" {
+			continue
+		}
+		assert.Equal(t, float64(0), e["output_index"])
+		switch e["_event"] {
+		case "response.output_item.added":
+			addedCount++
+			assert.Equal(t, "in_progress", item["status"])
+		case "response.output_item.done":
+			doneCount++
+			assert.Equal(t, "completed", item["status"])
+		}
+	}
+	assert.Equal(t, 1, addedCount, "reasoning item should be added exactly once")
+	assert.Equal(t, 1, doneCount, "reasoning item should be closed exactly once (safety net at completion)")
+
+	require.NotNil(t, capturedResp)
+	require.Len(t, capturedResp.Output, 1)
+	assert.Equal(t, "reasoning", capturedResp.Output[0].Type)
+	assert.Equal(t, "Thinking very hard...", capturedResp.Output[0].Summary[0].Text)
+}
+
+func TestStreamTransform_ReasoningThenToolCall(t *testing.T) {
+	stopReason := "tool_calls"
+
+	input := buildSSEChunk(buildReasoningChunk("I should call the weather tool.")) +
+		buildSSEChunk(buildToolCallStartChunk("call_abc", "get_weather")) +
+		buildSSEChunk(buildToolCallArgChunk(`{"city":"Paris"}`)) +
+		buildSSEChunk(buildChatChunk("", &stopReason)) +
+		"data: [DONE]\n\n"
+
+	var capturedResp *Response
+	var output bytes.Buffer
+	err := TransformChatStreamToResponses(strings.NewReader(input), &output, "deepseek/deepseek-v4.1-flash",
+		func(r *Response) { capturedResp = r })
+	require.NoError(t, err)
+
+	events := parseSSEEvents(t, output.String())
+
+	var found bool
+	for _, e := range events {
+		item, ok := e["item"].(map[string]interface{})
+		if !ok || item["type"] != "function_call" || e["_event"] != "response.output_item.added" {
+			continue
+		}
+		found = true
+		// Tool call has no preceding message, so with reasoning at index 0
+		// the function_call must be shifted to output_index 1 (not 0).
+		assert.Equal(t, float64(1), e["output_index"])
+	}
+	assert.True(t, found, "function_call output_item.added not found")
+
+	require.NotNil(t, capturedResp)
+	require.Len(t, capturedResp.Output, 2)
+	assert.Equal(t, "reasoning", capturedResp.Output[0].Type)
+	assert.Equal(t, "function_call", capturedResp.Output[1].Type)
+	assert.Equal(t, "call_abc", capturedResp.Output[1].CallID)
+}
+
 func TestStreamTransform_BasicText(t *testing.T) {
 	stopReason := "stop"
 

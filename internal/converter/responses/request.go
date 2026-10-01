@@ -607,7 +607,7 @@ func IsResponsesAPI(body []byte) bool {
 func RequestToChat(body []byte) ([]byte, error) {
 	var raw map[string]interface{}
 	if err := json.Unmarshal(body, &raw); err != nil {
-		return nil, fmt.Errorf("failed to parse request body: %w", err)
+		return nil, converterutil.RequestJSONValidationError(err)
 	}
 
 	messages, err := convertInputValue(raw["input"])

@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 
+	converterutil "github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
 	"github.com/mixaill76/auto_ai_router/internal/converter/openai"
 )
 
@@ -72,7 +73,7 @@ func SamplingRemoved(model string) bool {
 func OpenAIToAnthropic(openAIBody []byte, model string, isRealAnthropicBackend bool) ([]byte, error) {
 	var req openai.OpenAIRequest
 	if err := json.Unmarshal(openAIBody, &req); err != nil {
-		return nil, fmt.Errorf("failed to parse OpenAI request: %w", err)
+		return nil, converterutil.RequestJSONValidationError(err)
 	}
 
 	// Resolve model: caller-supplied parameter takes precedence.

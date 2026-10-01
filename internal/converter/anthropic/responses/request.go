@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/mixaill76/auto_ai_router/internal/converter/anthropic"
+	converterutil "github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
 	"github.com/mixaill76/auto_ai_router/internal/converter/responses"
 )
 
@@ -14,7 +15,7 @@ import (
 func ResponsesRequestToAnthropic(body []byte, model string) ([]byte, error) {
 	var req responses.Request
 	if err := json.Unmarshal(body, &req); err != nil {
-		return nil, fmt.Errorf("ResponsesRequestToAnthropic: parse: %w", err)
+		return nil, converterutil.RequestJSONValidationError(err)
 	}
 
 	anthropicReq, err := buildAnthropicRequest(&req, model)

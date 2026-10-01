@@ -12,6 +12,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/kafkalog"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb"
 	pricingmodels "github.com/mixaill76/auto_ai_router/internal/models"
+	"github.com/mixaill76/auto_ai_router/internal/monitoring"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -61,10 +62,11 @@ var _ kafkalog.RawBodyManager = (*stubKafkaRawBodyManager)(nil)
 func testLogCtx(t *testing.T) *RequestLogContext {
 	t.Helper()
 	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	startTime := time.Date(2026, 7, 15, 10, 0, 0, 0, time.UTC)
 	return &RequestLogContext{
 		RequestID: "req-123",
 		EventID:   "req-123",
-		StartTime: time.Date(2026, 7, 15, 10, 0, 0, 0, time.UTC),
+		StartTime: startTime,
 		Request:   req,
 		Token:     "sk-test",
 		ModelID:   "gpt-4o-mini",
@@ -79,7 +81,8 @@ func testLogCtx(t *testing.T) *RequestLogContext {
 			WebSearchRequests:    2,
 			WebSearchContextSize: "high",
 		},
-		SessionID: "session-1",
+		UpstreamSendTime: startTime.Add(500 * time.Millisecond),
+		SessionID:        "session-1",
 	}
 }
 
@@ -103,6 +106,8 @@ func TestBuildKafkaSpendEvent_BasicMapping(t *testing.T) {
 	assert.Equal(t, logCtx.StartTime, event.StartTime)
 	assert.Equal(t, endTime, event.EndTime)
 	assert.Equal(t, int64(1230), event.DurationMs)
+	require.NotNil(t, event.UpstreamSendMs, "testLogCtx sets UpstreamSendTime, so upstream_send_ms must be present")
+	assert.Equal(t, int64(500), *event.UpstreamSendMs, "upstream_send_ms should be StartTime→UpstreamSendTime (500ms in testLogCtx)")
 	assert.Equal(t, "acompletion", event.CallType)
 	assert.Equal(t, "api.openai.com", event.APIBase)
 	assert.Equal(t, "success", event.Status)
@@ -435,4 +440,49 @@ func TestLogSpendToKafka_PublishFailureDoesNotPanic(t *testing.T) {
 	})
 	assert.ErrorIs(t, err, assert.AnError, "the manager's error should be surfaced to the caller")
 	assert.Len(t, stub.events, 1, "event should still be attempted even though the manager returns an error")
+}
+
+// TestBuildKafkaSpendEvent_NoUpstreamSend verifies that a request which never
+// reached any provider (UpstreamSendTime left zero) omits upstream_send_ms
+// entirely rather than emitting a bogus 0 — consumers can distinguish "the
+// router never got to send" from "took zero milliseconds to send".
+func TestBuildKafkaSpendEvent_NoUpstreamSend(t *testing.T) {
+	prx := NewTestProxyBuilder().Build()
+	logCtx := testLogCtx(t)
+	logCtx.UpstreamSendTime = time.Time{} // cleared: request never reached a provider
+
+	event := prx.buildKafkaSpendEvent(logCtx, "openai_primary", "openai_primary:gpt-4o-mini", "hashed-token",
+		"user-1", "team-1", "org-1", "end-user@example.com", "api.openai.com", "failure",
+		0.0, nil, 4.2, logCtx.StartTime.Add(1000*time.Millisecond))
+
+	require.NotNil(t, event)
+	assert.Nil(t, event.UpstreamSendMs, "upstream_send_ms must be omitted when the request never reached a provider")
+	assert.Equal(t, int64(1000), event.DurationMs, "duration_ms is still reported for the failed request")
+}
+
+// TestStampFirstUpstreamSend_Idempotent verifies the stamp is anchored to the
+// first upstream attempt: retries/fallbacks reuse the same logCtx and must not
+// move UpstreamSendTime forward, otherwise upstream_send_ms would silently
+// include the time spent waiting on the failed first attempt.
+func TestStampFirstUpstreamSend_Idempotent(t *testing.T) {
+	prx := NewTestProxyBuilder().Build()
+	prx.metrics = monitoring.New(false)
+	logCtx := testLogCtx(t)
+	logCtx.UpstreamSendTime = time.Time{}
+
+	prx.stampFirstUpstreamSend(logCtx)
+	first := logCtx.UpstreamSendTime
+	assert.False(t, first.IsZero(), "stamp must be set on the first send")
+
+	// Simulate a retry a few milliseconds later on the same logCtx.
+	time.Sleep(5 * time.Millisecond)
+	prx.stampFirstUpstreamSend(logCtx)
+	assert.Equal(t, first, logCtx.UpstreamSendTime, "retries must not overwrite the first-send timestamp")
+}
+
+// TestStampFirstUpstreamSend_NilCtx verifies the helper is safe on a nil
+// logCtx (tests call executeProxyRequest/forwardToProxy with nil).
+func TestStampFirstUpstreamSend_NilCtx(t *testing.T) {
+	prx := NewTestProxyBuilder().Build()
+	assert.NotPanics(t, func() { prx.stampFirstUpstreamSend(nil) })
 }

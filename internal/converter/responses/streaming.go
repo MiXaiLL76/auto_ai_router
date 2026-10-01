@@ -34,8 +34,16 @@ type streamAccumulator struct {
 	// Accumulated content
 	fullText      string
 	fullRefusal   string // accumulated refusal text
+	fullReasoning string // accumulated reasoning_content text
 	toolCalls     []accumulatedToolCall
 	currentToolID int // index into toolCalls for the active tool call
+
+	// Whether a reasoning output item has been started/closed. Always
+	// output_index 0 when present — DeepSeek-style providers stream
+	// reasoning_content before content/tool_calls.
+	reasoningStarted bool
+	reasoningClosed  bool
+	reasoningItemID  string
 
 	// Usage from final chunk
 	usage *chatCompletionsUsage
@@ -64,6 +72,15 @@ type streamAccumulator struct {
 	storeFlag          bool
 	previousResponseID string
 	requestMetadata    map[string]string
+}
+
+// reasoningOffset returns the output_index shift caused by a reasoning item
+// occupying index 0. Reasoning is always the first output item when present.
+func (acc *streamAccumulator) reasoningOffset() int {
+	if acc.reasoningStarted {
+		return 1
+	}
+	return 0
 }
 
 type accumulatedToolCall struct {
@@ -99,10 +116,11 @@ type chatStreamChunk struct {
 	Choices []struct {
 		Index int `json:"index"`
 		Delta struct {
-			Role      string `json:"role,omitempty"`
-			Content   string `json:"content,omitempty"`
-			Refusal   string `json:"refusal,omitempty"`
-			ToolCalls []struct {
+			Role             string `json:"role,omitempty"`
+			Content          string `json:"content,omitempty"`
+			Refusal          string `json:"refusal,omitempty"`
+			ReasoningContent string `json:"reasoning_content,omitempty"`
+			ToolCalls        []struct {
 				Index    int    `json:"index"`
 				ID       string `json:"id,omitempty"`
 				Type     string `json:"type,omitempty"`
@@ -301,6 +319,36 @@ func transformChatStreamToResponsesInner(
 
 		choice := chunk.Choices[0]
 
+		// Handle reasoning_content delta BEFORE text/tool_calls: DeepSeek-style
+		// providers stream reasoning ahead of the visible content, and the
+		// reasoning output item must be announced (and later closed) before
+		// the message/tool_call item that follows it.
+		if choice.Delta.ReasoningContent != "" {
+			if !acc.headerEmitted {
+				if err := emitHeaderEvents(writer, acc); err != nil {
+					return err
+				}
+			}
+			if !acc.reasoningStarted {
+				acc.reasoningStarted = true
+				acc.reasoningItemID = GenerateItemID("rs_")
+				itemAddedEvent := map[string]interface{}{
+					"type":         "response.output_item.added",
+					"output_index": 0,
+					"item": map[string]interface{}{
+						"type":    "reasoning",
+						"id":      acc.reasoningItemID,
+						"status":  "in_progress",
+						"summary": []interface{}{},
+					},
+				}
+				if err := writeSSEWithSeq(writer, "response.output_item.added", itemAddedEvent, acc); err != nil {
+					return err
+				}
+			}
+			acc.fullReasoning += choice.Delta.ReasoningContent
+		}
+
 		// Handle text content delta BEFORE finish_reason.
 		// Some providers (Vertex with GoogleSearch, short responses) send both
 		// content and finish_reason in the same chunk. Processing finish_reason
@@ -328,7 +376,7 @@ func transformChatStreamToResponsesInner(
 			deltaEvent := map[string]interface{}{
 				"type":          "response.output_text.delta",
 				"item_id":       acc.messageItemID,
-				"output_index":  0,
+				"output_index":  acc.reasoningOffset(),
 				"content_index": 0,
 				"delta":         choice.Delta.Content,
 			}
@@ -353,7 +401,7 @@ func transformChatStreamToResponsesInner(
 			refusalEvent := map[string]interface{}{
 				"type":          "response.refusal.delta",
 				"item_id":       acc.messageItemID,
-				"output_index":  0,
+				"output_index":  acc.reasoningOffset(),
 				"content_index": 0,
 				"delta":         choice.Delta.Refusal,
 			}
@@ -368,6 +416,9 @@ func transformChatStreamToResponsesInner(
 				if err := emitHeaderEvents(writer, acc); err != nil {
 					return err
 				}
+			}
+			if err := closeReasoningItem(writer, acc); err != nil {
+				return err
 			}
 
 			// New tool call (has ID)
@@ -388,9 +439,9 @@ func transformChatStreamToResponsesInner(
 				acc.state = stateStreamingToolCall
 
 				// Emit output_item.added for function_call
-				outputIndex := 0
+				outputIndex := acc.reasoningOffset()
 				if acc.messageStarted {
-					outputIndex = 1
+					outputIndex++
 				}
 				outputIndex += tc.Index
 
@@ -422,9 +473,9 @@ func transformChatStreamToResponsesInner(
 				}
 				acc.toolCalls[idx].arguments += tc.Function.Arguments
 
-				outputIndex := 0
+				outputIndex := acc.reasoningOffset()
 				if acc.messageStarted {
-					outputIndex = 1
+					outputIndex++
 				}
 				outputIndex += tc.Index
 
@@ -492,6 +543,17 @@ func transformChatStreamToResponsesInner(
 // buildTypedCompletedResponse builds a typed *Response from the stream accumulator.
 func buildTypedCompletedResponse(acc *streamAccumulator) *Response {
 	var output []OutputItem
+
+	if acc.fullReasoning != "" {
+		output = append(output, OutputItem{
+			Type:   "reasoning",
+			ID:     acc.reasoningItemID,
+			Status: "completed",
+			Summary: []OutputContent{
+				{Type: "summary_text", Text: acc.fullReasoning},
+			},
+		})
+	}
 
 	if acc.messageStarted && acc.fullText != "" {
 		output = append(output, OutputItem{
@@ -602,35 +664,79 @@ func emitHeaderEvents(w io.Writer, acc *streamAccumulator) error {
 	return writeSSEWithSeq(w, "response.in_progress", inProgressEvent, acc)
 }
 
+// closeReasoningItem emits output_item.done for a started-but-not-yet-closed
+// reasoning item. Called right before the message or the first tool_call
+// opens (reasoning always precedes them), and as a safety net at completion
+// time in case the stream ended with reasoning only (e.g. max_output_tokens
+// was exhausted entirely by reasoning, before any visible content).
+func closeReasoningItem(w io.Writer, acc *streamAccumulator) error {
+	if !acc.reasoningStarted || acc.reasoningClosed {
+		return nil
+	}
+	acc.reasoningClosed = true
+
+	summary := []interface{}{}
+	if acc.fullReasoning != "" {
+		summary = []interface{}{
+			map[string]interface{}{"type": "summary_text", "text": acc.fullReasoning},
+		}
+	}
+	doneEvent := map[string]interface{}{
+		"type":         "response.output_item.done",
+		"output_index": 0,
+		"item": map[string]interface{}{
+			"type":    "reasoning",
+			"id":      acc.reasoningItemID,
+			"status":  "completed",
+			"summary": summary,
+		},
+	}
+	return writeSSEWithSeq(w, "response.output_item.done", doneEvent, acc)
+}
+
 // emitMessageStartEvents emits output_item.added and content_part.added for a message.
 func emitMessageStartEvents(w io.Writer, acc *streamAccumulator) error {
+	if err := closeReasoningItem(w, acc); err != nil {
+		return err
+	}
+
 	acc.messageStarted = true
 	acc.messageItemID = GenerateItemID("msg_")
 
 	msgItemID := acc.messageItemID
+	outputIndex := acc.reasoningOffset()
 
-	itemAddedEvent := BuildMessageItemAddedEvent(0, msgItemID)
+	itemAddedEvent := BuildMessageItemAddedEvent(outputIndex, msgItemID)
 	if err := writeSSEWithSeq(w, "response.output_item.added", itemAddedEvent, acc); err != nil {
 		return err
 	}
 
-	contentPartEvent := BuildContentPartAddedEvent(acc.messageItemID, 0, 0)
+	contentPartEvent := BuildContentPartAddedEvent(acc.messageItemID, outputIndex, 0)
 	return writeSSEWithSeq(w, "response.content_part.added", contentPartEvent, acc)
 }
 
 // emitCompletionEvents emits all closing events and the final response.completed.
 func emitCompletionEvents(w io.Writer, acc *streamAccumulator) error {
+	// Safety net: close a reasoning item that was opened but never followed
+	// by a message or tool_call (e.g. max_output_tokens was exhausted entirely
+	// by reasoning, before any visible content).
+	if err := closeReasoningItem(w, acc); err != nil {
+		return err
+	}
+
+	msgOutputIndex := acc.reasoningOffset()
+
 	// only emit text closing events if there's actual text content.
 	// This matches the condition in buildCompletedResponse (messageStarted && fullText != "").
 	if acc.messageStarted && acc.fullText != "" {
 		// output_text.done
-		textDoneEvent := BuildOutputTextDoneEvent(acc.messageItemID, 0, 0, acc.fullText)
+		textDoneEvent := BuildOutputTextDoneEvent(acc.messageItemID, msgOutputIndex, 0, acc.fullText)
 		if err := writeSSEWithSeq(w, "response.output_text.done", textDoneEvent, acc); err != nil {
 			return err
 		}
 
 		// content_part.done
-		contentPartDoneEvent := BuildContentPartDoneEvent(acc.messageItemID, 0, 0, acc.fullText)
+		contentPartDoneEvent := BuildContentPartDoneEvent(acc.messageItemID, msgOutputIndex, 0, acc.fullText)
 		if err := writeSSEWithSeq(w, "response.content_part.done", contentPartDoneEvent, acc); err != nil {
 			return err
 		}
@@ -638,7 +744,7 @@ func emitCompletionEvents(w io.Writer, acc *streamAccumulator) error {
 		// output_item.done for message
 		msgDoneEvent := map[string]interface{}{
 			"type":         "response.output_item.done",
-			"output_index": 0,
+			"output_index": msgOutputIndex,
 			"item": map[string]interface{}{
 				"type":   "message",
 				"id":     acc.messageItemID,
@@ -663,7 +769,7 @@ func emitCompletionEvents(w io.Writer, acc *streamAccumulator) error {
 		refusalDoneEvent := map[string]interface{}{
 			"type":          "response.refusal.done",
 			"item_id":       acc.messageItemID,
-			"output_index":  0,
+			"output_index":  msgOutputIndex,
 			"content_index": 0,
 			"refusal":       acc.fullRefusal,
 		}
@@ -674,9 +780,9 @@ func emitCompletionEvents(w io.Writer, acc *streamAccumulator) error {
 
 	// Close tool calls
 	for i, tc := range acc.toolCalls {
-		outputIndex := i
+		outputIndex := i + acc.reasoningOffset()
 		if acc.messageStarted {
-			outputIndex = i + 1
+			outputIndex++
 		}
 
 		// function_call_arguments.done
@@ -760,6 +866,17 @@ func buildInProgressResponse(acc *streamAccumulator) map[string]interface{} {
 // buildCompletedResponse builds the full response object for the completed event.
 func buildCompletedResponse(acc *streamAccumulator) map[string]interface{} {
 	output := make([]OutputItem, 0)
+
+	if acc.fullReasoning != "" {
+		output = append(output, OutputItem{
+			Type:   "reasoning",
+			ID:     acc.reasoningItemID,
+			Status: "completed",
+			Summary: []OutputContent{
+				{Type: "summary_text", Text: acc.fullReasoning},
+			},
+		})
+	}
 
 	if acc.messageStarted && acc.fullText != "" {
 		output = append(output, OutputItem{

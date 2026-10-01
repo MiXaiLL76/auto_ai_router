@@ -5,6 +5,7 @@ import (
 	"net/url"
 	"strings"
 
+	"github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
 	"github.com/mixaill76/auto_ai_router/internal/converter/openai"
 )
 
@@ -19,10 +20,10 @@ func imageEditJSONToOpenAIChatRequest(body []byte, model string) ([]byte, error)
 		Mask   json.RawMessage `json:"mask"`
 	}
 	if err := json.Unmarshal(body, &fields); err != nil {
-		return nil, imageJSONValidationError(err)
+		return nil, converterutil.RequestJSONValidationError(err)
 	}
 	if len(fields.Image) > 0 && len(fields.Images) > 0 {
-		return nil, imageValidationError("image", "Invalid parameter value", "invalid_value")
+		return nil, converterutil.NewInvalidValueError("image")
 	}
 	rawImages := fields.Image
 	if len(fields.Images) > 0 {
@@ -31,7 +32,7 @@ func imageEditJSONToOpenAIChatRequest(body []byte, model string) ([]byte, error)
 	var images []json.RawMessage
 	if len(rawImages) > 0 && rawImages[0] == '[' {
 		if err := json.Unmarshal(rawImages, &images); err != nil {
-			return nil, imageJSONValidationError(err)
+			return nil, converterutil.RequestJSONValidationError(err)
 		}
 	} else if len(rawImages) > 0 && string(rawImages) != "null" {
 		images = append(images, rawImages)
@@ -70,7 +71,7 @@ func imageEditJSONURL(raw json.RawMessage, param string) (*openai.ImageURL, erro
 			ImageURL string `json:"image_url"`
 		}
 		if json.Unmarshal(raw, &object) != nil {
-			return nil, imageValidationError(param, "Invalid parameter type", "invalid_type")
+			return nil, converterutil.NewInvalidTypeError(param)
 		}
 		value = object.ImageURL
 		if value == "" {

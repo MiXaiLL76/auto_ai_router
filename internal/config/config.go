@@ -1326,8 +1326,10 @@ type KafkaRawBodiesConfig struct {
 	// request body has prompt/message content stripped before publishing
 	// (see redactRequestBodyForLogging: messages/system/prompt/input/
 	// contents/instructions replaced with a role/count-preserving
-	// placeholder, everything else -- model, tools, temperature, ...
-	// untouched). Defaults to true; only meaningful when StoreRawBody is
+	// placeholder, every other client-written string -- tool descriptions,
+	// user, metadata, ... -- masked, while model, tool names, parameter
+	// shape and allowlisted numbers/booleans are kept). Defaults to true; only
+	// meaningful when StoreRawBody is
 	// also on. Set to false to capture the request body verbatim instead --
 	// e.g. for a short-lived, access-controlled debugging session where the
 	// actual prompt is genuinely needed. This is a deliberate, explicit
@@ -1538,6 +1540,7 @@ func (l *LiteLLMDBConfig) UnmarshalYAML(value *yaml.Node) error {
 		EnforceKeyRateLimits             string `yaml:"enforce_key_rate_limits"`
 		DefaultEstimatedCompletionTokens string `yaml:"default_estimated_completion_tokens"`
 		DailySpendTimezone               string `yaml:"daily_spend_timezone"`
+		EnableCostMargin                 string `yaml:"enable_cost_margin"`
 	}
 
 	var temp tempConfig
@@ -1569,6 +1572,9 @@ func (l *LiteLLMDBConfig) UnmarshalYAML(value *yaml.Node) error {
 		return err
 	}
 	if l.EnforceKeyRateLimits, err = parseField(temp.EnforceKeyRateLimits, false, strconv.ParseBool, "litellm_db.enforce_key_rate_limits"); err != nil {
+		return err
+	}
+	if l.EnableCostMargin, err = parseField(temp.EnableCostMargin, false, strconv.ParseBool, "litellm_db.enable_cost_margin"); err != nil {
 		return err
 	}
 
