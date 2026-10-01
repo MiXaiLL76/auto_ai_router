@@ -37,8 +37,7 @@ permissions:
   contents: read
   actions: read  # explain job reads this run's job log
 
-# A new push to a PR supersedes the previous run. Pushes to main/develop and
-# release runs (workflow_call) are never cancelled.
+# A new push to a PR supersedes the previous run.
 concurrency:
   group: lint-${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
