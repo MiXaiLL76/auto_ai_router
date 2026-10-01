@@ -3,8 +3,10 @@ package vertex
 import (
 	"testing"
 
+	"github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/genai"
 )
 
 // TestConvertToolCallsToGenaiParts_NestedFormat verifies conversion of
@@ -435,4 +437,49 @@ func TestConvertGoogleSearchRetrieval(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestConvertToolCallsToGenaiParts_ThoughtSignatureFromID covers clients that drop
+// provider_specific_fields but echo the tool call id (OpenAI Agents SDK): the
+// signature embedded into the id by the response side must be restored (#266).
+func TestConvertToolCallsToGenaiParts_ThoughtSignatureFromID(t *testing.T) {
+	signature := []byte("real-signature")
+	resp := convertGenaiToOpenAIFunctionCall(&genai.FunctionCall{Name: "get_weather"}, signature)
+
+	parts := convertToolCallsToGenaiParts([]interface{}{
+		map[string]interface{}{
+			"id":       resp.ID,
+			"type":     "function",
+			"function": map[string]interface{}{"name": "get_weather", "arguments": "{}"},
+		},
+	})
+	require.Len(t, parts, 1)
+	assert.Equal(t, signature, parts[0].ThoughtSignature)
+}
+
+// TestConvertToolCallsToGenaiParts_ProviderFieldsWinOverID verifies the decode
+// priority: provider_specific_fields first, then the id suffix.
+func TestConvertToolCallsToGenaiParts_ProviderFieldsWinOverID(t *testing.T) {
+	parts := convertToolCallsToGenaiParts([]interface{}{
+		map[string]interface{}{
+			"id":       converterutil.EncodeToolCallIDWithSignature("call_1", []byte("from-id")),
+			"function": map[string]interface{}{"name": "get_weather", "arguments": "{}"},
+			"provider_specific_fields": map[string]interface{}{
+				"thought_signature": converterutil.EncodeBase64([]byte("from-fields")),
+			},
+		},
+	})
+	require.Len(t, parts, 1)
+	assert.Equal(t, []byte("from-fields"), parts[0].ThoughtSignature)
+}
+
+func TestConvertVertexFunctionCallToStreamingOpenAI_EmbedsSignatureInID(t *testing.T) {
+	signature := []byte("stream-signature")
+	tc := convertVertexFunctionCallToStreamingOpenAI(&genai.FunctionCall{Name: "f"}, signature, 0)
+
+	_, decoded := converterutil.SplitToolCallIDSignature(tc.ID)
+	assert.Equal(t, signature, decoded)
+
+	tc = convertVertexFunctionCallToStreamingOpenAI(&genai.FunctionCall{Name: "f"}, nil, 0)
+	assert.NotContains(t, tc.ID, converterutil.ThoughtSignatureSeparator)
 }

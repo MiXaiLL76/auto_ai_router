@@ -168,7 +168,7 @@ func processPart(w io.Writer, acc *vertexStreamAccumulator, part *genai.Part) er
 		return processThoughtDelta(w, acc, part.Text)
 
 	case part.FunctionCall != nil:
-		return processFunctionCallPart(w, acc, part.FunctionCall)
+		return processFunctionCallPart(w, acc, part.FunctionCall, part.ThoughtSignature)
 
 	case part.ExecutableCode != nil:
 		return processCodePart(w, acc, part.ExecutableCode)
@@ -262,7 +262,7 @@ func processThoughtDelta(w io.Writer, acc *vertexStreamAccumulator, delta string
 	return nil
 }
 
-func processFunctionCallPart(w io.Writer, acc *vertexStreamAccumulator, fc *genai.FunctionCall) error {
+func processFunctionCallPart(w io.Writer, acc *vertexStreamAccumulator, fc *genai.FunctionCall, thoughtSignature []byte) error {
 	if !acc.headerEmitted {
 		if err := emitVertexHeaderEvents(w, acc); err != nil {
 			return err
@@ -278,6 +278,8 @@ func processFunctionCallPart(w io.Writer, acc *vertexStreamAccumulator, fc *gena
 	if callID == "" {
 		callID = generateItemID("call_")
 	}
+	// See response.go: call_id carries the thoughtSignature back to us.
+	callID = converterutil.EncodeToolCallIDWithSignature(callID, thoughtSignature)
 	itemID := generateItemID("fc_")
 	outputIdx := currentOutputIndex(acc)
 
