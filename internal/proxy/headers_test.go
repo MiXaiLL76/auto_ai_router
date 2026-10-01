@@ -1,12 +1,15 @@
 package proxy
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestGetHopByHopHeaders(t *testing.T) {
@@ -213,4 +216,47 @@ func TestCopyResponseHeadersRegularCredentialKeepsNonStructuralHeaders(t *testin
 	assert.Equal(t, "application/json", w.Header().Get("Content-Type"))
 	assert.Equal(t, "debug-upstream", w.Header().Get("X-Litellm-Version"))
 	assert.Equal(t, "provider-server", w.Header().Get("Server"))
+}
+
+// TestAIRHopReceivesSessionIDHeader covers #266: the body session id is stripped at
+// ingress, so a type: air hop must get it as Session-Id to keep session-sticky
+// routing on the downstream instance. Plain proxy credentials are left alone.
+func TestAIRHopReceivesSessionIDHeader(t *testing.T) {
+	for _, tc := range []struct {
+		credType   config.ProviderType
+		body       string
+		wantHeader string
+	}{
+		{config.ProviderTypeAIR, `{"model":"route-a","session_id":"sess-1","messages":[{"role":"user","content":"hi"}]}`, "sess-1"},
+		{config.ProviderTypeAIR, `{"model":"route-a","extra_body":{"litellm_session_id":"sess-2"},"messages":[{"role":"user","content":"hi"}]}`, "sess-2"},
+		{config.ProviderTypeAIR, `{"model":"route-a","messages":[{"role":"user","content":"hi"}]}`, ""},
+		{config.ProviderTypeProxy, `{"model":"route-a","session_id":"sess-1","messages":[{"role":"user","content":"hi"}]}`, ""},
+	} {
+		t.Run(string(tc.credType)+"/"+tc.wantHeader, func(t *testing.T) {
+			var gotHeader string
+			var gotBody map[string]interface{}
+			upstream := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gotHeader = r.Header.Get(HeaderSessionID)
+				_ = json.NewDecoder(r.Body).Decode(&gotBody)
+				w.Header().Set("Content-Type", "application/json")
+				_ = json.NewEncoder(w).Encode(createMockChatCompletionResponse("chatcmpl-1", "route-a", "ok"))
+			}))
+			defer upstream.Close()
+
+			cred := proxyCred("downstream", upstream.URL, 1)
+			cred.Type = tc.credType
+			prx := NewTestProxyBuilder().WithCredentials(cred).WithMasterKey("master-key").Build()
+			registerTestModel(prx, cred.Name, "route-a")
+
+			req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", strings.NewReader(tc.body))
+			req.Header.Set("Authorization", "Bearer master-key")
+			req.Header.Set("Content-Type", "application/json")
+			w := httptest.NewRecorder()
+			prx.ProxyRequest(w, req)
+
+			require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+			assert.Equal(t, tc.wantHeader, gotHeader)
+			assert.NotContains(t, gotBody, "session_id")
+		})
+	}
 }
