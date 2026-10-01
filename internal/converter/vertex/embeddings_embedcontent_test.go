@@ -11,6 +11,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
 	"github.com/mixaill76/auto_ai_router/internal/converter/openai"
+	"github.com/mixaill76/auto_ai_router/internal/testhelpers"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -202,6 +203,19 @@ func TestOpenAIEmbeddingToVertexEmbedContent_OversizedInlineDataIs413(t *testing
 	var validationErr *converterutil.RequestValidationError
 	require.True(t, errors.As(err, &validationErr), "got %v", err)
 	assert.Equal(t, 413, validationErr.StatusCode)
+}
+
+// TestEmbedContent_DimensionsWrongTypeReportsParam is the embedContent-family
+// counterpart of TestOpenAIEmbeddingToVertex_DimensionsWrongTypeReportsParam:
+// a mistyped field is a 400 naming the param, not a generic 500.
+func TestEmbedContent_DimensionsWrongTypeReportsParam(t *testing.T) {
+	body := []byte(`{"model":"gemini-embedding-2","input":"hello","dimensions":"x"}`)
+
+	_, err := OpenAIEmbeddingToVertexEmbedContent(body)
+	testhelpers.RequireValidationError(t, err, "dimensions", "invalid_type")
+
+	_, _, err = OpenAIEmbeddingToGeminiEmbedContent(body, "gemini-embedding-2")
+	testhelpers.RequireValidationError(t, err, "dimensions", "invalid_type")
 }
 
 func TestEmbedContentFanOutEnvelope(t *testing.T) {

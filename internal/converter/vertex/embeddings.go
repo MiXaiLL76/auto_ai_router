@@ -298,7 +298,7 @@ func OpenAIEmbeddingToGeminiEmbedContent(body []byte, model string) ([]byte, int
 func parseEmbedContentRequest(body []byte) ([]*genai.Content, *int32, error) {
 	var req openai.OpenAIEmbeddingRequest
 	if err := json.Unmarshal(body, &req); err != nil {
-		return nil, nil, fmt.Errorf("failed to parse embedding request: %w", err)
+		return nil, nil, converterutil.RequestJSONValidationError(err)
 	}
 	contents, err := parseEmbeddingContents(req.Input)
 	if err != nil {
