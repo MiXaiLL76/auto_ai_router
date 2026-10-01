@@ -3,7 +3,6 @@ package converter
 
 import (
 	"bytes"
-	"errors"
 	"io"
 	"strings"
 
@@ -250,9 +249,16 @@ func (c *ProviderConverter) RequestFrom(body []byte) ([]byte, error) {
 			}
 			return vertex.OpenAIEmbeddingToGemini(body, c.mode.ModelID)
 		case config.ProviderTypeAnthropic, config.ProviderTypeCometAPI, config.ProviderTypeProMan:
-			return nil, errors.New(string(c.providerType) + " does not support embeddings")
+			// The client picked a model that can't do what it asked for -- its mistake,
+			// not ours; answer 4xx, not the generic 500 a plain error falls through to.
+			// Message stays provider-agnostic: this project's convention is never to leak
+			// the internal backend name to the client (see e.g.
+			// anthropic/messages_test.go's assert.NotContains(..., "Anthropic")) --
+			// c.providerType is still visible server-side via the call site's own
+			// "provider" log field.
+			return nil, converterutil.NewRequestValidationError("model", "model does not support embeddings")
 		case config.ProviderTypeBedrock:
-			return nil, errors.New("bedrock does not support embeddings")
+			return nil, converterutil.NewRequestValidationError("model", "model does not support embeddings")
 		default:
 			if c.shouldStripCacheSalt() {
 				body = openaiconv.StripCacheSalt(body)
@@ -271,9 +277,12 @@ func (c *ProviderConverter) RequestFrom(body []byte) ([]byte, error) {
 	case config.ProviderTypeVertexAI, config.ProviderTypeGemini:
 		return vertex.OpenAIToVertex(body, c.mode.IsImageGeneration, c.mode.IsImageEdit, c.mode.ModelID, c.mode.ContentType)
 	case config.ProviderTypeAnthropic, config.ProviderTypeCometAPI, config.ProviderTypeProMan:
-		// Anthropic-compatible providers do not support image generation
+		// Anthropic-compatible providers do not support image generation. The client
+		// picked a model that can't do what it asked for -- its mistake, not ours;
+		// answer 4xx, not the generic 500 a plain error falls through to. Message stays
+		// provider-agnostic -- see the embeddings case above for why.
 		if c.mode.IsImageGeneration {
-			return nil, errors.New(string(c.providerType) + " does not support image generation")
+			return nil, converterutil.NewRequestValidationError("model", "model does not support image generation")
 		}
 		if c.mode.MessagesPassthrough {
 			// body is already native Anthropic Messages JSON (model field already
@@ -299,7 +308,7 @@ func (c *ProviderConverter) RequestFrom(body []byte) ([]byte, error) {
 		return anthropic.OpenAIToAnthropic(body, c.mode.ModelID, c.providerType == config.ProviderTypeAnthropic)
 	case config.ProviderTypeBedrock:
 		if c.mode.IsImageGeneration {
-			return nil, errors.New("bedrock does not support image generation")
+			return nil, converterutil.NewRequestValidationError("model", "model does not support image generation")
 		}
 		if isAnthropicBedrockModel(c.mode.ModelID) {
 			return anthropic.OpenAIToBedrock(body, c.mode.ModelID)

@@ -5,11 +5,13 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/converter/anthropic"
+	converterutil "github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
 	"github.com/mixaill76/auto_ai_router/internal/converter/openai"
 	"github.com/mixaill76/auto_ai_router/internal/converter/vertex"
 	"google.golang.org/genai"
@@ -588,14 +590,54 @@ func TestProviderConverter_RequestFrom_BedrockOpenAICompatiblePassthrough(t *tes
 	}
 }
 
-func TestProviderConverter_RequestFrom_AnthropicImageNotSupported(t *testing.T) {
-	c := New(config.ProviderTypeAnthropic, RequestMode{IsImageGeneration: true})
-	_, err := c.RequestFrom([]byte(`{"model":"gpt-4"}`))
-	if err == nil {
-		t.Fatalf("expected error for image generation")
+// TestProviderConverter_RequestFrom_CapabilityNotSupported covers every
+// unsupported-capability site in converter.go's RequestFrom (image generation and
+// embeddings, across every provider type that can't do either): the client asked a
+// model for something it can't do -- its mistake, not ours, so the proxy layer must
+// answer 4xx (a *converterutil.RequestValidationError) instead of falling through to a
+// generic 500. Also guards against the internal provider type name (e.g. "anthropic",
+// "cometapi", "proman", "bedrock") leaking into the client-facing message: this
+// project's convention is never to expose the backend name (see e.g.
+// anthropic/messages_test.go's assert.NotContains(..., "Anthropic")), and an earlier
+// version of these errors used fmt.Sprintf("%s does not support ...", providerType)
+// before that was caught in review.
+func TestProviderConverter_RequestFrom_CapabilityNotSupported(t *testing.T) {
+	tests := []struct {
+		name         string
+		providerType config.ProviderType
+		mode         RequestMode
+		body         string
+		wantSubstr   string
+	}{
+		{"anthropic image", config.ProviderTypeAnthropic, RequestMode{IsImageGeneration: true}, `{"model":"gpt-4"}`, "does not support image generation"},
+		{"cometapi image", config.ProviderTypeCometAPI, RequestMode{IsImageGeneration: true}, `{"model":"gpt-4"}`, "does not support image generation"},
+		{"proman image", config.ProviderTypeProMan, RequestMode{IsImageGeneration: true}, `{"model":"gpt-4"}`, "does not support image generation"},
+		{"bedrock image", config.ProviderTypeBedrock, RequestMode{IsImageGeneration: true}, `{"model":"stability.sd3"}`, "does not support image generation"},
+		{"anthropic embeddings", config.ProviderTypeAnthropic, RequestMode{IsEmbeddings: true}, `{"model":"claude-haiku-4-5","input":"hello"}`, "does not support embeddings"},
+		{"cometapi embeddings", config.ProviderTypeCometAPI, RequestMode{IsEmbeddings: true}, `{"model":"claude-haiku-4-5","input":"hello"}`, "does not support embeddings"},
+		{"proman embeddings", config.ProviderTypeProMan, RequestMode{IsEmbeddings: true}, `{"model":"claude-haiku-4-5","input":"hello"}`, "does not support embeddings"},
+		{"bedrock embeddings", config.ProviderTypeBedrock, RequestMode{IsEmbeddings: true}, `{"model":"claude-haiku-4-5","input":"hello"}`, "does not support embeddings"},
 	}
-	if !strings.Contains(err.Error(), "does not support image generation") {
-		t.Fatalf("unexpected error: %v", err)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := New(tt.providerType, tt.mode)
+			_, err := c.RequestFrom([]byte(tt.body))
+			if err == nil {
+				t.Fatalf("expected error")
+			}
+			var validationErr *converterutil.RequestValidationError
+			if !errors.As(err, &validationErr) {
+				t.Fatalf("expected *converterutil.RequestValidationError, got %T: %v", err, err)
+			}
+			if !strings.Contains(err.Error(), tt.wantSubstr) {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			for _, leaked := range []string{"anthropic", "cometapi", "proman", "bedrock"} {
+				if strings.Contains(strings.ToLower(err.Error()), leaked) {
+					t.Fatalf("client-facing error must not name the backend provider, got: %v", err)
+				}
+			}
+		})
 	}
 }
 

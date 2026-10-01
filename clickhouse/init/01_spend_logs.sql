@@ -267,7 +267,9 @@ CREATE TABLE air.raw_bodies_kafka
     -- (default false), and even then the router redacts prompt/message
     -- content before publishing by default (messages/system/prompt/input/
     -- contents/instructions replaced with a role/count-preserving
-    -- placeholder) -- see redactRequestBodyForLogging in the router's
+    -- placeholder, every other client-written string -- tool descriptions,
+    -- user, metadata, ... -- masked, model/tool names/parameter shape
+    -- kept) -- see redactRequestBodyForLogging in the router's
     -- proxy_helpers.go. kafka.raw_bodies.redact_sensitive_fields=false is
     -- an explicit escape hatch that captures this verbatim instead.
     request_body Nullable(String)

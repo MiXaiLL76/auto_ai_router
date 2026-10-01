@@ -5,8 +5,20 @@ import (
 	"testing"
 
 	"github.com/mixaill76/auto_ai_router/internal/converter/openai"
+	"github.com/mixaill76/auto_ai_router/internal/testhelpers"
 	"github.com/stretchr/testify/require"
 )
+
+// TestOpenAIToVertex_MaxTokensWrongTypeReportsParam covers a client that sends
+// max_tokens as a string ("five") instead of a number, which must classify as a
+// validation error naming the offending param instead of falling through to a
+// generic 500.
+func TestOpenAIToVertex_MaxTokensWrongTypeReportsParam(t *testing.T) {
+	body := []byte(`{"model":"gemini-2.5-flash","messages":[{"role":"user","content":"Say OK."}],"max_tokens":"five"}`)
+
+	_, err := OpenAIToVertex(body, false, false, "gemini-2.5-flash", "application/json")
+	testhelpers.RequireValidationError(t, err, "max_tokens", "invalid_type")
+}
 
 // TestOpenAIToVertex_ToolRoleMessage_UsesNameField verifies that when a tool-role
 // message has Name set (e.g. "get_weather"), the resulting FunctionResponse.Name

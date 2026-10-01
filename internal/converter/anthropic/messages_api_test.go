@@ -9,6 +9,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
+	"github.com/mixaill76/auto_ai_router/internal/testhelpers"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -120,6 +121,93 @@ func TestMessagesToChat_DocumentProviderFileIDRejected(t *testing.T) {
 	assert.Equal(t, "messages.content.document.source.file_id", validationErr.Param)
 	assert.Equal(t, "file_id is not supported for this route", validationErr.Message)
 	assert.NotContains(t, err.Error(), "Anthropic")
+}
+
+// TestMessagesToChat_MaxTokensWrongTypeReportsParam covers a client sending
+// "max_tokens" as a string on the native /v1/messages route, which must report
+// invalid_type rather than being conflated with the field being absent.
+func TestMessagesToChat_MaxTokensWrongTypeReportsParam(t *testing.T) {
+	body := []byte(`{"model":"claude-haiku-4-5","max_tokens":"five","messages":[{"role":"user","content":"hi"}]}`)
+
+	_, _, err := MessagesToChat(body)
+
+	testhelpers.RequireValidationError(t, err, "max_tokens", "invalid_type")
+}
+
+// TestMessagesToChat_MaxTokensMissingReportsMissing covers the field genuinely absent
+// (as opposed to present with the wrong type, above) -- must classify distinctly so a
+// client can tell "you forgot this" apart from "you sent the wrong type".
+func TestMessagesToChat_MaxTokensMissingReportsMissing(t *testing.T) {
+	body := []byte(`{"model":"claude-haiku-4-5","messages":[{"role":"user","content":"hi"}]}`)
+
+	_, _, err := MessagesToChat(body)
+
+	require.Error(t, err)
+	var validationErr *converterutil.RequestValidationError
+	require.True(t, errors.As(err, &validationErr))
+	assert.Equal(t, "max_tokens", validationErr.Param)
+	assert.NotEqual(t, "invalid_type", validationErr.Code)
+}
+
+// TestMessagesToChat_ModelWrongTypeReportsInvalidType covers review finding #2: a
+// non-string "model" (e.g. 123) used to zero-value the type assertion to "", which
+// matched the "model == \"\"" missing-parameter check before the invalid_type check
+// below it ever ran -- the client got "Missing required parameter" for a field it did
+// send, just with the wrong type. Type must now be checked before the empty-string
+// value check.
+func TestMessagesToChat_ModelWrongTypeReportsInvalidType(t *testing.T) {
+	body := []byte(`{"model":123,"max_tokens":64,"messages":[{"role":"user","content":"hi"}]}`)
+
+	_, _, err := MessagesToChat(body)
+
+	testhelpers.RequireValidationError(t, err, "model", "invalid_type")
+}
+
+func TestMessagesToChat_ModelMissingReportsMissing(t *testing.T) {
+	body := []byte(`{"max_tokens":64,"messages":[{"role":"user","content":"hi"}]}`)
+
+	_, _, err := MessagesToChat(body)
+
+	require.Error(t, err)
+	var validationErr *converterutil.RequestValidationError
+	require.True(t, errors.As(err, &validationErr))
+	assert.Equal(t, "model", validationErr.Param)
+	assert.NotEqual(t, "invalid_type", validationErr.Code)
+}
+
+// TestMessagesToChat_MessagesWrongTypeReportsInvalidType and
+// TestMessagesToChat_MessagesEmptyReportsInvalidValue cover review finding #4:
+// "messages" as a non-array and "messages" as an empty array used to both produce the
+// same "Missing required parameter" -- present-wrong-type, present-empty-value, and
+// genuinely-absent are three different client mistakes and must classify distinctly,
+// same as max_tokens already does above.
+func TestMessagesToChat_MessagesWrongTypeReportsInvalidType(t *testing.T) {
+	body := []byte(`{"model":"claude-haiku-4-5","max_tokens":64,"messages":"not an array"}`)
+
+	_, _, err := MessagesToChat(body)
+
+	testhelpers.RequireValidationError(t, err, "messages", "invalid_type")
+}
+
+func TestMessagesToChat_MessagesEmptyReportsInvalidValue(t *testing.T) {
+	body := []byte(`{"model":"claude-haiku-4-5","max_tokens":64,"messages":[]}`)
+
+	_, _, err := MessagesToChat(body)
+
+	testhelpers.RequireValidationError(t, err, "messages", "invalid_value")
+}
+
+func TestMessagesToChat_MessagesMissingReportsMissing(t *testing.T) {
+	body := []byte(`{"model":"claude-haiku-4-5","max_tokens":64}`)
+
+	_, _, err := MessagesToChat(body)
+
+	require.Error(t, err)
+	var validationErr *converterutil.RequestValidationError
+	require.True(t, errors.As(err, &validationErr))
+	assert.Equal(t, "messages", validationErr.Param)
+	assert.NotEqual(t, "invalid_type", validationErr.Code)
+	assert.NotEqual(t, "invalid_value", validationErr.Code)
 }
 
 func TestMessagesToChat_MalformedDocumentSourceRejected(t *testing.T) {
@@ -450,6 +538,21 @@ func roundTripFirstUserBlock(t *testing.T, messagesBody []byte) map[string]inter
 	content := messages[0].(map[string]interface{})["content"].([]interface{})
 	require.NotEmpty(t, content)
 	return content[0].(map[string]interface{})
+}
+
+// TestNormalizeMessagesForPassthrough_MalformedJSONClassifiesAs400 covers review item
+// 3: this function's own json.Unmarshal of the client's raw /v1/messages passthrough
+// body had the same plain-fmt.Errorf gap MessagesToChat was fixed for -- the exact same
+// malformed request got a detailed 4xx on the credential that converts (MessagesToChat)
+// and a generic 500 ("Failed to convert Messages API request") on a passthrough
+// credential (this function), for no reason other than which route happened to handle
+// it.
+func TestNormalizeMessagesForPassthrough_MalformedJSONClassifiesAs400(t *testing.T) {
+	_, err := NormalizeMessagesForPassthrough([]byte(`{not valid json`), "claude-opus-4.7", true)
+	require.Error(t, err)
+	var validationErr *converterutil.RequestValidationError
+	require.True(t, errors.As(err, &validationErr))
+	assert.Equal(t, "invalid_json", validationErr.Code)
 }
 
 // TestNormalizeMessagesForPassthrough_AdaptiveThinkingBeta covers the /v1/messages
