@@ -285,9 +285,12 @@ func CalculateTokenCosts(usage *converter.TokenUsage, price *ModelPrice) *conver
 		cachedAudioTokens = cachedInputTokens
 	}
 	regularCachedTokens := cachedInputTokens - cachedAudioTokens
-	cachedAudioCost := price.CacheReadInputAudioTokenCost
-	if cachedAudioCost == 0 {
-		cachedAudioCost = cachedInputCost
+	cachedAudioCost := 0.0
+	if !price.CacheReadInputTokensFree {
+		cachedAudioCost = price.CacheReadInputAudioTokenCost
+		if cachedAudioCost == 0 {
+			cachedAudioCost = cachedInputCost
+		}
 	}
 
 	// Cached read tokens are priced differently depending on cache mode.

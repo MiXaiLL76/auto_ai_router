@@ -1768,3 +1768,41 @@ func TestCalculateTokenCosts_ExplicitCacheReadRespectsCacheReadInputTokensFree(t
 	assert.Zero(t, costs.ExplicitCachedInputCost, "free cache reads must stay free even in explicit mode")
 	assert.Zero(t, costs.CachedInputCost)
 }
+
+func TestCalculateTokenCosts_CacheReadInputTokensFreeAlsoFreesAudioTokens(t *testing.T) {
+	// Regression test: CacheReadInputTokensFree must zero out cached AUDIO
+	// tokens too, not just regular cached tokens. The audio rate
+	// (CacheReadInputAudioTokenCost) used to be read unconditionally,
+	// ignoring the free flag, in both implicit and explicit cache mode.
+	for _, tt := range []struct {
+		name      string
+		cacheType string
+	}{
+		{"implicit cache", ""},
+		{"explicit cache", "ephemeral"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			usage := &converter.TokenUsage{
+				PromptTokens:           100,
+				CompletionTokens:       10,
+				CachedInputTokens:      20,
+				CachedAudioInputTokens: 20,
+				CacheType:              tt.cacheType,
+			}
+
+			price := &ModelPrice{
+				InputCostPerToken:               0.001,
+				OutputCostPerToken:              0.002,
+				CacheReadInputAudioTokenCost:    0.002, // configured, but must be ignored — reads are free
+				ExplicitCacheReadInputTokenCost: 0.0006,
+				CacheReadInputTokensFree:        true,
+			}
+
+			costs := CalculateTokenCosts(usage, price)
+
+			require.NotNil(t, costs)
+			assert.Zero(t, costs.CachedInputCost)
+			assert.Zero(t, costs.ExplicitCachedInputCost, "free cache reads must stay free in explicit mode too")
+		})
+	}
+}

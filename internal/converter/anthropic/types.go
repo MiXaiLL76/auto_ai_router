@@ -192,7 +192,14 @@ type AnthropicUsage struct {
 	// extension (mirroring converter.TokenUsage.CacheType) so a Messages API
 	// request answered by an Alibaba/Qwen credential still carries the
 	// explicit-cache marker (converter.CacheTypeExplicit) through to billing,
-	// which reads this same converted usage object back.
+	// which reads this same converted usage object back. A real Anthropic API
+	// response never sets this; it's only ever non-empty on a body this
+	// router produced itself (via chatUsageToMessages) — including when an
+	// upstream AIR/proxy-type credential chains through another instance of
+	// this router presenting as Anthropic-compatible. That's why
+	// anthropic/responses' Anthropic -> Responses API converter must also
+	// read this field back, not just the Chat Completions -> Messages API
+	// direction that writes it.
 	CacheType string `json:"cache_type,omitempty"`
 }
 
@@ -266,4 +273,8 @@ type AnthropicStreamUsage struct {
 	CacheCreationInputTokens *int                    `json:"cache_creation_input_tokens,omitempty"`
 	CacheCreation            *CacheCreationDetails   `json:"cache_creation,omitempty"`
 	ServerToolUse            *ServerToolUsageDetails `json:"server_tool_use,omitempty"`
+	// CacheType mirrors AnthropicUsage.CacheType — see its doc comment. A
+	// plain string (not a pointer like the counters above) since an omitted
+	// vs. explicit-empty distinction doesn't apply to it.
+	CacheType string `json:"cache_type,omitempty"`
 }
