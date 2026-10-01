@@ -544,6 +544,12 @@ type responsesUsageDetails struct {
 		Ephemeral5mInputTokens int `json:"ephemeral_5m_input_tokens,omitempty"`
 		Ephemeral1hInputTokens int `json:"ephemeral_1h_input_tokens,omitempty"`
 	} `json:"cache_creation,omitempty"`
+	// CacheType is our own extension to Anthropic's native usage schema (see
+	// anthropic.AnthropicUsage.CacheType) carrying the explicit-cache marker
+	// through the Chat Completions -> Messages API conversion, flat alongside
+	// CacheReadInputTokens rather than nested like the Responses API shape
+	// below.
+	CacheType          string `json:"cache_type,omitempty"`
 	InputTokensDetails struct {
 		CachedTokens              int `json:"cached_tokens,omitempty"`
 		CachedAudioTokens         int `json:"cached_audio_tokens,omitempty"`
@@ -749,6 +755,11 @@ func tokenUsageFromShape(resp *tokenUsageResponseShape, opts TokenUsageExtractio
 	if cacheType == "" {
 		cacheType = resp.Usage.InputTokensDetails.CacheType
 	}
+	if cacheType == "" {
+		// Flat Anthropic/Messages-API-shaped extension field (see
+		// responsesUsageDetails.CacheType's doc comment).
+		cacheType = resp.Usage.CacheType
+	}
 	if cachedTokens == 0 && resp.Usage.CacheReadInputTokens > 0 {
 		cachedTokens = resp.Usage.CacheReadInputTokens
 		anthropicFlatCacheRead = true
@@ -830,6 +841,9 @@ func tokenUsageFromShape(resp *tokenUsageResponseShape, opts TokenUsageExtractio
 		}
 		if cacheType == "" {
 			cacheType = u.InputTokensDetails.CacheType
+		}
+		if cacheType == "" {
+			cacheType = u.CacheType
 		}
 		if cacheCreationTokens == 0 {
 			cacheCreationTokens = u.InputTokensDetails.CacheCreationTokens

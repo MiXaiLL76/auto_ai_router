@@ -2,6 +2,12 @@ package converter
 
 import "github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
 
+// CacheTypeExplicit is the TokenUsage.CacheType value Alibaba/Qwen sets
+// (usage.prompt_tokens_details.cache_type) when a request used an explicit
+// cache marker (cache_control:{"type":"ephemeral"}), as opposed to implicit
+// (automatic) caching, which reports no cache_type at all.
+const CacheTypeExplicit = "ephemeral"
+
 // TokenUsage is a universal format for token usage across all providers.
 // Used by converters to return usage data without circular dependencies.
 type TokenUsage struct {
@@ -15,12 +21,12 @@ type TokenUsage struct {
 	CacheCreation5mTokens  int
 	CacheCreation1hTokens  int
 	// CacheType is the explicit-cache mode marker from
-	// usage.prompt_tokens_details.cache_type (Alibaba/Qwen returns "ephemeral"
-	// when the request ran with an explicit cache marker). Empty means the
-	// request did not use explicit cache — any cached_tokens then come from
-	// implicit (automatic) caching. Explicit and implicit cache are mutually
-	// exclusive per request/model; CacheType decides which tariff cached read
-	// tokens are billed at (see models.CalculateTokenCosts).
+	// usage.prompt_tokens_details.cache_type (Alibaba/Qwen returns
+	// CacheTypeExplicit when the request ran with an explicit cache marker).
+	// Empty means the request did not use explicit cache — any cached_tokens
+	// then come from implicit (automatic) caching. Explicit and implicit
+	// cache are mutually exclusive per request/model; CacheType decides which
+	// tariff cached read tokens are billed at (see models.CalculateTokenCosts).
 	CacheType                string
 	CachedOutputTokens       int
 	OutputTextTokens         int
@@ -206,10 +212,15 @@ type TokenCosts struct {
 	ReasoningCost   float64
 	CachedInputCost float64
 	// ExplicitCachedInputCost is the cost of cached prompt tokens read in
-	// explicit cache mode (Alibaba/Qwen cache_type="ephemeral"), billed at the
-	// model's explicit_cache_read_input_token_cost tariff. It is kept separate
-	// from CachedInputCost (implicit cache read) so spend logs can attribute
-	// the two cache tariffs independently; both are added into TotalCost.
+	// explicit cache mode (Alibaba/Qwen CacheType == CacheTypeExplicit),
+	// billed at the model's explicit_cache_read_input_token_cost tariff. When
+	// the model has no explicit tariff configured (or it's free via
+	// CacheReadInputTokensFree), this instead holds the cost computed at the
+	// implicit cache-read rate — i.e. the same amount CachedInputCost would
+	// have held without this feature. It is kept separate from CachedInputCost
+	// (which stays zero whenever CacheType == CacheTypeExplicit) so spend logs
+	// can attribute the two cache tariffs independently; both are added into
+	// TotalCost.
 	ExplicitCachedInputCost float64
 	CacheCreationCost       float64
 	CachedOutputCost        float64

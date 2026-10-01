@@ -100,11 +100,14 @@ type chatCompletionsUsage struct {
 	CacheCreationTokens   int
 	CacheCreation5mTokens int
 	CacheCreation1hTokens int
-	ReasoningTokens       int
-	AudioInputTokens      int
-	AudioOutputTokens     int
-	ImageOutputTokens     int
-	WebSearchRequests     int
+	// CacheType is Alibaba/Qwen's explicit cache mode marker
+	// (converter.CacheTypeExplicit) from prompt_tokens_details.cache_type.
+	CacheType         string
+	ReasoningTokens   int
+	AudioInputTokens  int
+	AudioOutputTokens int
+	ImageOutputTokens int
+	WebSearchRequests int
 }
 
 // chatStreamChunk represents a parsed Chat Completions streaming chunk.
@@ -145,7 +148,14 @@ type chatStreamChunk struct {
 				Ephemeral5mInputTokens int `json:"ephemeral_5m_input_tokens,omitempty"`
 				Ephemeral1hInputTokens int `json:"ephemeral_1h_input_tokens,omitempty"`
 			} `json:"cache_creation_token_details,omitempty"`
-			AudioTokens int `json:"audio_tokens,omitempty"`
+			// Alibaba returns the explicit cache creation TTL detail under
+			// cache_creation.ephemeral_5m_input_tokens (no _token_details suffix).
+			CacheCreation *struct {
+				Ephemeral5mInputTokens int `json:"ephemeral_5m_input_tokens,omitempty"`
+				Ephemeral1hInputTokens int `json:"ephemeral_1h_input_tokens,omitempty"`
+			} `json:"cache_creation,omitempty"`
+			AudioTokens int    `json:"audio_tokens,omitempty"`
+			CacheType   string `json:"cache_type,omitempty"`
 		} `json:"prompt_tokens_details,omitempty"`
 		CompletionTokensDetails *struct {
 			ReasoningTokens int `json:"reasoning_tokens,omitempty"`
@@ -285,6 +295,7 @@ func transformChatStreamToResponsesInner(
 				)
 				acc.usage.CachedTokens = cachedTokens
 				acc.usage.CachedAudioTokens = cachedAudioTokens
+				acc.usage.CacheType = chunk.Usage.PromptTokensDetails.CacheType
 				acc.usage.CacheCreationTokens = chunk.Usage.PromptTokensDetails.CacheCreationTokens
 				if acc.usage.CacheCreationTokens == 0 {
 					acc.usage.CacheCreationTokens = chunk.Usage.PromptTokensDetails.CacheWriteTokens
@@ -295,7 +306,13 @@ func transformChatStreamToResponsesInner(
 					cachedAudioTokens,
 					audioInputIncludesCachedAudio,
 				)
-				if details := chunk.Usage.PromptTokensDetails.CacheCreationTokenDetails; details != nil {
+				details := chunk.Usage.PromptTokensDetails.CacheCreationTokenDetails
+				if details == nil {
+					// Alibaba spells the TTL detail cache_creation.ephemeral_5m_input_tokens
+					// (nested in prompt_tokens_details, no _token_details suffix).
+					details = chunk.Usage.PromptTokensDetails.CacheCreation
+				}
+				if details != nil {
 					acc.usage.CacheCreation5mTokens = details.Ephemeral5mInputTokens
 					acc.usage.CacheCreation1hTokens = details.Ephemeral1hInputTokens
 					if acc.usage.CacheCreationTokens == 0 {
@@ -591,6 +608,7 @@ func buildTypedCompletedResponse(acc *streamAccumulator) *Response {
 				CachedAudioTokens:   acc.usage.CachedAudioTokens,
 				CacheCreationTokens: acc.usage.CacheCreationTokens,
 				AudioTokens:         acc.usage.AudioInputTokens,
+				CacheType:           acc.usage.CacheType,
 			},
 			OutputTokensDetails: OutputDetails{ReasoningTokens: acc.usage.ReasoningTokens, AudioTokens: acc.usage.AudioOutputTokens, ImageTokens: acc.usage.ImageOutputTokens},
 		}
@@ -914,6 +932,7 @@ func buildCompletedResponse(acc *streamAccumulator) map[string]interface{} {
 				CachedAudioTokens:   acc.usage.CachedAudioTokens,
 				CacheCreationTokens: acc.usage.CacheCreationTokens,
 				AudioTokens:         acc.usage.AudioInputTokens,
+				CacheType:           acc.usage.CacheType,
 			},
 			OutputTokensDetails: OutputDetails{
 				ReasoningTokens: acc.usage.ReasoningTokens,

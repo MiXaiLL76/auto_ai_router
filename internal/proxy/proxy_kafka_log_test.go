@@ -213,6 +213,30 @@ func TestBuildKafkaSpendEvent_CacheBreakdownMapped(t *testing.T) {
 	assert.Equal(t, 30, event.CacheCreationTokens)
 	assert.Equal(t, 10, event.CacheCreation5mTokens)
 	assert.Equal(t, 20, event.CacheCreation1hTokens)
+	assert.Empty(t, event.CacheType)
+}
+
+func TestBuildKafkaSpendEvent_CacheTypeVisibleEvenAtZeroCost(t *testing.T) {
+	// CacheType must reach the Kafka event even when the explicit-cache
+	// tariff isn't configured and ExplicitCachedInputCost/CachedInputCost
+	// both end up zero — the cache mode should still be visible for spend
+	// analysis, not only when it produced a non-zero cost.
+	prx := NewTestProxyBuilder().Build()
+	logCtx := testLogCtx(t)
+	logCtx.TokenUsage = &converter.TokenUsage{
+		PromptTokens:      200,
+		CompletionTokens:  50,
+		CachedInputTokens: 80,
+		CacheType:         converter.CacheTypeExplicit,
+	}
+
+	tokenCosts := &converter.TokenCosts{} // no explicit tariff configured -> zero cache cost
+	event := prx.buildKafkaSpendEvent(logCtx, "cred", "cred:model", "hash",
+		"", "", "", "", "api.openai.com", "success", 0, tokenCosts, 0, logCtx.StartTime)
+
+	assert.Equal(t, converter.CacheTypeExplicit, event.CacheType)
+	assert.Zero(t, event.ExplicitCacheReadCost)
+	assert.Zero(t, event.CachedInputCost)
 }
 
 func TestBuildKafkaSpendEvent_TTFTComputedWhenStreamed(t *testing.T) {

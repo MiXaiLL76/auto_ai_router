@@ -304,7 +304,7 @@ func CalculateTokenCosts(usage *converter.TokenUsage, price *ModelPrice) *conver
 	// no explicit tariff configured (and isn't free), cached reads fall back
 	// to the implicit cache-read rate (which is what would have applied
 	// without this feature).
-	if usage.CacheType == "ephemeral" && cachedInputTokens > 0 {
+	if usage.CacheType == converter.CacheTypeExplicit && cachedInputTokens > 0 {
 		explicitCacheReadRate := 0.0
 		if !price.CacheReadInputTokensFree {
 			explicitCacheReadRate = price.ExplicitCacheReadInputTokenCost

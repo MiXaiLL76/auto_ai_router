@@ -188,6 +188,12 @@ type AnthropicUsage struct {
 	ServerToolUse            *ServerToolUsageDetails `json:"server_tool_use,omitempty"`
 	ServiceTier              string                  `json:"service_tier,omitempty"`
 	InferenceGeo             string                  `json:"inference_geo,omitempty"`
+	// CacheType is not part of Anthropic's native schema — it's our own
+	// extension (mirroring converter.TokenUsage.CacheType) so a Messages API
+	// request answered by an Alibaba/Qwen credential still carries the
+	// explicit-cache marker (converter.CacheTypeExplicit) through to billing,
+	// which reads this same converted usage object back.
+	CacheType string `json:"cache_type,omitempty"`
 }
 
 // ---------------------------------------------------------------------------

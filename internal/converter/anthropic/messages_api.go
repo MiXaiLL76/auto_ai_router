@@ -764,8 +764,10 @@ func chatUsageToMessages(usage *openai.OpenAIUsage) *AnthropicUsage {
 		return &AnthropicUsage{}
 	}
 	cacheRead := 0
+	cacheType := ""
 	if usage.PromptTokensDetails != nil {
 		cacheRead = usage.PromptTokensDetails.CachedTokens
+		cacheType = usage.PromptTokensDetails.CacheType
 	}
 	cacheCreation, cacheCreation5m, cacheCreation1h := usage.PromptTokensDetails.CacheWrite()
 	result := &AnthropicUsage{
@@ -773,6 +775,7 @@ func chatUsageToMessages(usage *openai.OpenAIUsage) *AnthropicUsage {
 		OutputTokens:             usage.CompletionTokens,
 		CacheReadInputTokens:     cacheRead,
 		CacheCreationInputTokens: cacheCreation,
+		CacheType:                cacheType,
 	}
 	// Billing downstream (stream reader, next AIR hop) sees only this usage:
 	// without the split a 1h write bills at the 5m price, without
