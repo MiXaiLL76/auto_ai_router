@@ -314,6 +314,23 @@ func matchModelFamily(modelID, family string) bool {
 	return strings.HasPrefix(base, family+"-") || strings.HasPrefix(base, family+".")
 }
 
+// IsReasoningModel reports whether modelID belongs to one of the reasoning-capable
+// families this codebase already special-cases for sampling-parameter stripping (see
+// modelMappings/ReplaceBodyParam above: o1/o3/o4/gpt-5/gpt-6 all reject
+// temperature/top_p and support reasoning_effort). Reusing that exact family list here
+// keeps the two classifications in lockstep -- a model this router already treats as
+// reasoning-capable for one purpose is treated as reasoning-capable for every purpose,
+// rather than risking two independently-maintained lists drifting apart as new model
+// families ship.
+func IsReasoningModel(modelID string) bool {
+	for _, m := range modelMappings {
+		if matchModelFamily(modelID, m.prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 // SupportsReasoningEffortNone reports whether effort "none" turns reasoning off
 // for modelID (GPT-5.1+, GPT-6) rather than being a value to drop. The codex,
 // pro, chat and astra variants reject it.
