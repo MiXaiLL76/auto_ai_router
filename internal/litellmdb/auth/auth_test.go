@@ -449,10 +449,10 @@ func TestAuthenticator_CostMarginConfigs(t *testing.T) {
 		info models.TokenInfo
 		want []float64
 	}{
-		{"personal key", models.TokenInfo{UserID: "u"}, []float64{0.1, 0.2}},
+		{"personal key", models.TokenInfo{UserID: "u"}, []float64{0.1, 0.2, 0.4}},
 		{"team key of a user", models.TokenInfo{UserID: "u", TeamID: "t", OrganizationID: "o"}, []float64{0.1, 0.3, 0.4}},
 		{"team key without organization", models.TokenInfo{TeamID: "t"}, []float64{0.1, 0.3, 0.4}},
-		{"organization key of a user", models.TokenInfo{UserID: "u", OrganizationID: "o"}, []float64{0.1, 0.4}},
+		{"organization key of a user", models.TokenInfo{UserID: "u", OrganizationID: "o"}, []float64{0.1, 0.2, 0.4}},
 	}
 	auth := NewAuthenticator(nil, nil, slog.Default()).WithCostMargin(true)
 	for _, tt := range tests {
