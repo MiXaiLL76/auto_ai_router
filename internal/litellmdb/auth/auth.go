@@ -206,7 +206,7 @@ func (a *Authenticator) fetchTokenFromDB(ctx context.Context, hashedToken string
 	var tokenMetadata []byte
 
 	// ============ User fields ============
-	var userIDCheck, userAlias, userEmail *string
+	var userIDCheck, userAlias, userEmail, userOrganizationID *string
 	var userMaxBudget, userSpend *float64
 	var userTPMLimit, userRPMLimit *int64
 	var userModels []string
@@ -260,6 +260,7 @@ func (a *Authenticator) fetchTokenFromDB(ctx context.Context, hashedToken string
 		&userIDCheck,
 		&userAlias,
 		&userEmail,
+		&userOrganizationID,
 		&userMaxBudget,
 		&userSpend,
 		&userTPMLimit,
@@ -334,6 +335,16 @@ func (a *Authenticator) fetchTokenFromDB(ctx context.Context, hashedToken string
 	}
 	if teamOrganizationID != nil {
 		info.TeamOrganizationID = *teamOrganizationID
+		// A team key without an organization of its own bills the team's organization
+		if orgID == nil {
+			info.OrganizationID = *teamOrganizationID
+		}
+	}
+	// A key without a team or organization of its own bills the user's organization
+	if orgID == nil && teamID == nil && userOrganizationID != nil {
+		orgID = userOrganizationID
+		info.OrganizationID = *orgID
+		info.DirectOrganizationID = *orgID
 	}
 	if blocked != nil {
 		info.Blocked = *blocked
@@ -394,7 +405,7 @@ func (a *Authenticator) fetchTokenFromDB(ctx context.Context, hashedToken string
 	info.OrgMemberTPMLimit = orgMemberTPMLimit
 	info.OrgMemberRPMLimit = orgMemberRPMLimit
 
-	// Set cost margin layers (key -> team -> org, or key -> user for a personal key)
+	// Set cost margin layers (key -> team -> org, or key -> user -> org without a team)
 	info.CostMarginConfigs = a.costMarginConfigs(&info, tokenMetadata, userMetadata, teamMetadata, orgMetadata)
 
 	a.logger.Debug("Token loaded with full hierarchy",
@@ -408,8 +419,8 @@ func (a *Authenticator) fetchTokenFromDB(ctx context.Context, hashedToken string
 }
 
 // costMarginConfigs collects the cost_margin_config layers in priority order.
-// The key comes first. A team or organization key then bills the team and its
-// organization, a personal key (no team, no organization) bills the user, the
+// The key comes first. A team key then bills the team and its organization, a
+// key without a team bills the user and the key's (or user's) organization, the
 // same split budgetLevels uses. Parsing is best-effort: a config AIR does not
 // understand must not fail authentication.
 func (a *Authenticator) costMarginConfigs(info *models.TokenInfo, keyMetadata, userMetadata, teamMetadata, orgMetadata []byte) []models.CostMarginConfig {
@@ -421,17 +432,12 @@ func (a *Authenticator) costMarginConfigs(info *models.TokenInfo, keyMetadata, u
 		raw   []byte
 	}
 	layers := []layer{{"key", metadataCostMarginConfig(keyMetadata)}}
-	switch {
-	case info.TeamID != "":
-		layers = append(layers,
-			layer{"team", metadataCostMarginConfig(teamMetadata)},
-			layer{"organization", metadataCostMarginConfig(orgMetadata)},
-		)
-	case info.OrganizationID != "":
-		layers = append(layers, layer{"organization", metadataCostMarginConfig(orgMetadata)})
-	default:
+	if info.TeamID != "" {
+		layers = append(layers, layer{"team", metadataCostMarginConfig(teamMetadata)})
+	} else {
 		layers = append(layers, layer{"user", metadataCostMarginConfig(userMetadata)})
 	}
+	layers = append(layers, layer{"organization", metadataCostMarginConfig(orgMetadata)})
 
 	var configs []models.CostMarginConfig
 	for _, layer := range layers {

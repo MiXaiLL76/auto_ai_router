@@ -27,6 +27,7 @@ SELECT
   u.user_id as user_id_check,
   u.user_alias,
   u.user_email,
+  u.organization_id as user_organization_id,
   u.max_budget as user_max_budget,
   u.spend as user_spend,
   u.tpm_limit as user_tpm_limit,
@@ -77,8 +78,9 @@ LEFT JOIN "LiteLLM_TeamTable" tm ON t.team_id = tm.team_id
 
 -- Join Organization
 -- Organization_id resolved from: token.organization_id OR team.organization_id
+-- OR, for a key without a team, user.organization_id
 LEFT JOIN "LiteLLM_OrganizationTable" o ON
-  COALESCE(t.organization_id, tm.organization_id) = o.organization_id
+  COALESCE(t.organization_id, tm.organization_id, CASE WHEN t.team_id IS NULL THEN u.organization_id END) = o.organization_id
 
 -- Join Organization's Budget (external budget)
 LEFT JOIN "LiteLLM_BudgetTable" b_org ON o.budget_id = b_org.budget_id
@@ -98,9 +100,9 @@ LEFT JOIN "LiteLLM_BudgetTable" b_tmem ON tmem.budget_id = b_tmem.budget_id
 -- Only if both user_id AND organization_id exist (resolved)
 LEFT JOIN "LiteLLM_OrganizationMembership" omem ON
   t.user_id IS NOT NULL
-  AND COALESCE(t.organization_id, tm.organization_id) IS NOT NULL
+  AND COALESCE(t.organization_id, tm.organization_id, CASE WHEN t.team_id IS NULL THEN u.organization_id END) IS NOT NULL
   AND t.user_id = omem.user_id
-  AND COALESCE(t.organization_id, tm.organization_id) = omem.organization_id
+  AND COALESCE(t.organization_id, tm.organization_id, CASE WHEN t.team_id IS NULL THEN u.organization_id END) = omem.organization_id
 
 -- Join OrganizationMembership's Budget (external budget)
 LEFT JOIN "LiteLLM_BudgetTable" b_omem ON omem.budget_id = b_omem.budget_id
