@@ -129,8 +129,11 @@ type StreamUsageInfo struct {
 	CacheCreationTokens      int // Tokens created for cache (billed at different rate)
 	CacheCreation5mTokens    int
 	CacheCreation1hTokens    int
-	CacheReadTokens          int // Tokens read from cache (billed at cheaper rate)
-	WebSearchRequests        int // Confirmed built-in web search executions
+	// CacheType mirrors TokenUsage.CacheType: Alibaba's explicit cache mode
+	// marker ("ephemeral") from prompt_tokens_details.cache_type.
+	CacheType         string
+	CacheReadTokens   int // Tokens read from cache (billed at cheaper rate)
+	WebSearchRequests int // Confirmed built-in web search executions
 }
 
 // StreamUsageExtractor provides a provider-agnostic interface for extracting
@@ -189,8 +192,15 @@ func (o *openAIStreamUsageExtractor) extractChatCompletionUsage(payload []byte) 
 					Ephemeral5mInputTokens int `json:"ephemeral_5m_input_tokens,omitempty"`
 					Ephemeral1hInputTokens int `json:"ephemeral_1h_input_tokens,omitempty"`
 				} `json:"cache_creation_token_details,omitempty"`
-				AudioTokens int `json:"audio_tokens,omitempty"`
-				ImageTokens int `json:"image_tokens,omitempty"`
+				// Alibaba returns the explicit cache creation TTL detail under
+				// cache_creation.ephemeral_5m_input_tokens (no _token_details).
+				CacheCreation struct {
+					Ephemeral5mInputTokens int `json:"ephemeral_5m_input_tokens,omitempty"`
+					Ephemeral1hInputTokens int `json:"ephemeral_1h_input_tokens,omitempty"`
+				} `json:"cache_creation,omitempty"`
+				AudioTokens int    `json:"audio_tokens,omitempty"`
+				ImageTokens int    `json:"image_tokens,omitempty"`
+				CacheType   string `json:"cache_type,omitempty"`
 				converterutil.CachingTokensExtension
 			} `json:"prompt_tokens_details,omitempty"`
 			CompletionTokensDetails struct {
@@ -223,6 +233,10 @@ func (o *openAIStreamUsageExtractor) extractChatCompletionUsage(payload []byte) 
 	}
 	cacheCreation5mTokens := data.Usage.PromptTokensDetails.CacheCreationTokenDetails.Ephemeral5mInputTokens
 	cacheCreation1hTokens := data.Usage.PromptTokensDetails.CacheCreationTokenDetails.Ephemeral1hInputTokens
+	if cacheCreation5mTokens == 0 && cacheCreation1hTokens == 0 {
+		cacheCreation5mTokens = data.Usage.PromptTokensDetails.CacheCreation.Ephemeral5mInputTokens
+		cacheCreation1hTokens = data.Usage.PromptTokensDetails.CacheCreation.Ephemeral1hInputTokens
+	}
 	if cacheCreationTokens == 0 {
 		cacheCreationTokens = cacheCreation5mTokens + cacheCreation1hTokens
 	}
@@ -242,6 +256,7 @@ func (o *openAIStreamUsageExtractor) extractChatCompletionUsage(payload []byte) 
 		CacheCreationTokens:   cacheCreationTokens,
 		CacheCreation5mTokens: cacheCreation5mTokens,
 		CacheCreation1hTokens: cacheCreation1hTokens,
+		CacheType:             data.Usage.PromptTokensDetails.CacheType,
 		AudioInputTokens: normalizeStreamAudioInput(
 			data.Usage.PromptTokensDetails.AudioTokens,
 			cachedTokens,
@@ -324,6 +339,7 @@ func (o *openAIStreamUsageExtractor) extractResponsesAPIUsage(payload []byte) *S
 		CacheCreationTokens:   cacheCreationTokens,
 		CacheCreation5mTokens: usage.InputTokensDetails.CacheCreationTokenDetails.Ephemeral5mInputTokens,
 		CacheCreation1hTokens: usage.InputTokensDetails.CacheCreationTokenDetails.Ephemeral1hInputTokens,
+		CacheType:             usage.InputTokensDetails.CacheType,
 		AudioInputTokens: normalizeStreamAudioInput(
 			usage.InputTokensDetails.AudioTokens,
 			cachedTokens,
@@ -369,8 +385,9 @@ type responsesAPIUsage struct {
 			Ephemeral5mInputTokens int `json:"ephemeral_5m_input_tokens,omitempty"`
 			Ephemeral1hInputTokens int `json:"ephemeral_1h_input_tokens,omitempty"`
 		} `json:"cache_creation_token_details,omitempty"`
-		AudioTokens int `json:"audio_tokens,omitempty"`
-		ImageTokens int `json:"image_tokens,omitempty"`
+		AudioTokens int    `json:"audio_tokens,omitempty"`
+		ImageTokens int    `json:"image_tokens,omitempty"`
+		CacheType   string `json:"cache_type,omitempty"`
 	} `json:"input_tokens_details,omitempty"`
 	OutputTokensDetails struct {
 		AcceptedPredictionTokens int `json:"accepted_prediction_tokens,omitempty"`
@@ -1066,6 +1083,9 @@ func (p *Proxy) finalizeStreamingLog(logCtx *RequestLogContext, totalTokens int,
 
 			if usageInfo.CachedTokens > 0 {
 				logCtx.TokenUsage.CachedInputTokens = usageInfo.CachedTokens
+			}
+			if usageInfo.CacheType != "" {
+				logCtx.TokenUsage.CacheType = usageInfo.CacheType
 			}
 			if usageInfo.CachedAudioTokens > 0 {
 				logCtx.TokenUsage.CachedAudioInputTokens = usageInfo.CachedAudioTokens

@@ -668,6 +668,58 @@ func TestTransformAnthropicStreamToResponses_CacheUsageUsesInclusiveInputTotal(t
 	assert.Equal(t, float64(15), ttlDetails["ephemeral_1h_input_tokens"])
 }
 
+func TestTransformAnthropicStreamToResponses_PreservesAlibabaCacheType(t *testing.T) {
+	// cache_type only appears on a body this router (or an upstream
+	// AIR/proxy-type credential chaining through another instance of it)
+	// produced itself for an Alibaba/Qwen credential — it must survive the
+	// Anthropic SSE -> Responses API SSE conversion so billing sees it.
+	stream := buildAnthropicSSEStream([]map[string]interface{}{
+		{
+			"type": "message_start",
+			"message": map[string]interface{}{
+				"usage": map[string]interface{}{
+					"input_tokens": 6, "cache_read_input_tokens": 1486, "cache_creation_input_tokens": 335,
+					"cache_creation": map[string]interface{}{"ephemeral_5m_input_tokens": 335},
+					"cache_type":     "ephemeral",
+				},
+			},
+		},
+		{
+			"type":          "content_block_start",
+			"content_block": map[string]interface{}{"type": "text"},
+		},
+		{
+			"type":  "content_block_delta",
+			"delta": map[string]interface{}{"type": "text_delta", "text": "ok"},
+		},
+		{"type": "content_block_stop"},
+		{
+			"type":  "message_delta",
+			"delta": map[string]interface{}{"stop_reason": "end_turn"},
+			"usage": map[string]interface{}{"output_tokens": 511},
+		},
+		{"type": "message_stop"},
+	})
+
+	var out bytes.Buffer
+	require.NoError(t, TransformAnthropicStreamToResponses(
+		strings.NewReader(stream), &out, "qwen3.7-flash", "", nil, nil,
+	))
+
+	events := parseSSEEvents(out.String())
+	var response map[string]interface{}
+	for _, event := range events {
+		if event["type"] == "response.completed" {
+			response = event["response"].(map[string]interface{})
+		}
+	}
+	require.NotNil(t, response)
+	usage := response["usage"].(map[string]interface{})
+	details := usage["input_tokens_details"].(map[string]interface{})
+	assert.Equal(t, "ephemeral", details["cache_type"])
+	assert.Equal(t, float64(1486), details["cached_tokens"])
+}
+
 func TestTransformAnthropicStreamToResponses_ExplicitZeroCacheDeltaClearsPreviousUsage(t *testing.T) {
 	stream := buildAnthropicSSEStream([]map[string]interface{}{
 		{

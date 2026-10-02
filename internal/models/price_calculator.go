@@ -22,11 +22,12 @@ const (
 // billed at this tier's rates. Zero-value rates mean "not configured for
 // this tier" and are skipped by fullSessionRate.
 type fullSessionTier struct {
-	threshold         int
-	inputRate         float64
-	outputRate        float64
-	cacheReadRate     float64
-	cacheCreationRate float64
+	threshold             int
+	inputRate             float64
+	outputRate            float64
+	cacheReadRate         float64
+	cacheCreationRate     float64
+	explicitCacheReadRate float64
 }
 
 // fullSessionTiers returns the configured full-session tiers in descending
@@ -63,11 +64,12 @@ func fullSessionTiers(price *ModelPrice) []fullSessionTier {
 			cacheCreationRate: price.CacheCreationInputTokenCostAbove272k,
 		},
 		{
-			threshold:         tokenTiering256kThreshold,
-			inputRate:         price.InputCostPerTokenAbove256k,
-			outputRate:        price.OutputCostPerTokenAbove256k,
-			cacheReadRate:     price.CacheReadInputTokenCostAbove256k,
-			cacheCreationRate: price.CacheCreationInputTokenCostAbove256k,
+			threshold:             tokenTiering256kThreshold,
+			inputRate:             price.InputCostPerTokenAbove256k,
+			outputRate:            price.OutputCostPerTokenAbove256k,
+			cacheReadRate:         price.CacheReadInputTokenCostAbove256k,
+			cacheCreationRate:     price.CacheCreationInputTokenCostAbove256k,
+			explicitCacheReadRate: price.ExplicitCacheReadInputTokenCostAbove256k,
 		},
 	}
 	if config.IsGoogleGeminiProvider(price.LiteLLMProvider) {
@@ -81,18 +83,20 @@ func fullSessionTiers(price *ModelPrice) []fullSessionTier {
 	}
 	return append(tiers,
 		fullSessionTier{
-			threshold:         tokenTiering128kThreshold,
-			inputRate:         price.InputCostPerTokenAbove128k,
-			outputRate:        price.OutputCostPerTokenAbove128k,
-			cacheReadRate:     price.CacheReadInputTokenCostAbove128k,
-			cacheCreationRate: price.CacheCreationInputTokenCostAbove128k,
+			threshold:             tokenTiering128kThreshold,
+			inputRate:             price.InputCostPerTokenAbove128k,
+			outputRate:            price.OutputCostPerTokenAbove128k,
+			cacheReadRate:         price.CacheReadInputTokenCostAbove128k,
+			cacheCreationRate:     price.CacheCreationInputTokenCostAbove128k,
+			explicitCacheReadRate: price.ExplicitCacheReadInputTokenCostAbove128k,
 		},
 		fullSessionTier{
-			threshold:         tokenTiering32kThreshold,
-			inputRate:         price.InputCostPerTokenAbove32k,
-			outputRate:        price.OutputCostPerTokenAbove32k,
-			cacheReadRate:     price.CacheReadInputTokenCostAbove32k,
-			cacheCreationRate: price.CacheCreationInputTokenCostAbove32k,
+			threshold:             tokenTiering32kThreshold,
+			inputRate:             price.InputCostPerTokenAbove32k,
+			outputRate:            price.OutputCostPerTokenAbove32k,
+			cacheReadRate:         price.CacheReadInputTokenCostAbove32k,
+			cacheCreationRate:     price.CacheCreationInputTokenCostAbove32k,
+			explicitCacheReadRate: price.ExplicitCacheReadInputTokenCostAbove32k,
 		},
 	)
 }
@@ -281,12 +285,51 @@ func CalculateTokenCosts(usage *converter.TokenUsage, price *ModelPrice) *conver
 		cachedAudioTokens = cachedInputTokens
 	}
 	regularCachedTokens := cachedInputTokens - cachedAudioTokens
-	cachedAudioCost := price.CacheReadInputAudioTokenCost
-	if cachedAudioCost == 0 {
-		cachedAudioCost = cachedInputCost
+	cachedAudioCost := 0.0
+	if !price.CacheReadInputTokensFree {
+		cachedAudioCost = price.CacheReadInputAudioTokenCost
+		if cachedAudioCost == 0 {
+			cachedAudioCost = cachedInputCost
+		}
 	}
-	costs.CachedInputCost = float64(regularCachedTokens)*cachedInputCost +
-		float64(cachedAudioTokens)*cachedAudioCost
+
+	// Cached read tokens are priced differently depending on cache mode.
+	// Alibaba marks a request as explicit cache when
+	// usage.prompt_tokens_details.cache_type == "ephemeral" (TokenUsage.CacheType);
+	// those cached reads use the model's explicit_cache_read_input_token_cost
+	// tariff (with its own full-session tiers, and its own dedicated audio rate
+	// CacheReadInputAudioTokenCost — never the implicit-cache-derived
+	// cachedAudioCost computed above) instead of the implicit
+	// cache_read_input_token_cost. Explicit and implicit cache are mutually
+	// exclusive, so CacheType decides the tariff. CacheReadInputTokensFree
+	// gates the explicit tariff exactly like it gates the implicit one: when
+	// set, cached reads stay free regardless of cache mode. When the model has
+	// no explicit tariff configured (and isn't free), cached reads fall back
+	// to the implicit cache-read rate (which is what would have applied
+	// without this feature).
+	if usage.CacheType == converter.CacheTypeExplicit && cachedInputTokens > 0 {
+		explicitCacheReadRate := 0.0
+		if !price.CacheReadInputTokensFree {
+			explicitCacheReadRate = price.ExplicitCacheReadInputTokenCost
+			if rate, ok := fullSessionRate(tiers, promptTokens, func(t fullSessionTier) float64 { return t.explicitCacheReadRate }); ok {
+				explicitCacheReadRate = rate
+			}
+		}
+		if explicitCacheReadRate > 0 {
+			explicitCachedAudioCost := price.CacheReadInputAudioTokenCost
+			if explicitCachedAudioCost == 0 {
+				explicitCachedAudioCost = explicitCacheReadRate
+			}
+			costs.ExplicitCachedInputCost = float64(regularCachedTokens)*explicitCacheReadRate +
+				float64(cachedAudioTokens)*explicitCachedAudioCost
+		} else {
+			costs.ExplicitCachedInputCost = float64(regularCachedTokens)*cachedInputCost +
+				float64(cachedAudioTokens)*cachedAudioCost
+		}
+	} else {
+		costs.CachedInputCost = float64(regularCachedTokens)*cachedInputCost +
+			float64(cachedAudioTokens)*cachedAudioCost
+	}
 
 	cacheCreationCost := price.CacheCreationInputTokenCost
 	cacheCreationFullSession := false
@@ -388,6 +431,7 @@ func CalculateTokenCosts(usage *converter.TokenUsage, price *ModelPrice) *conver
 		costs.AudioOutputCost +
 		costs.ReasoningCost +
 		costs.CachedInputCost +
+		costs.ExplicitCachedInputCost +
 		costs.CacheCreationCost +
 		costs.CachedOutputCost +
 		costs.PredictionCost +

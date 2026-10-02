@@ -82,7 +82,14 @@ func ChatToResponse(body []byte, opts ...ChatToResponseOption) ([]byte, error) {
 					Ephemeral5mInputTokens int `json:"ephemeral_5m_input_tokens,omitempty"`
 					Ephemeral1hInputTokens int `json:"ephemeral_1h_input_tokens,omitempty"`
 				} `json:"cache_creation_token_details,omitempty"`
-				AudioTokens int `json:"audio_tokens,omitempty"`
+				// Alibaba returns the explicit cache creation TTL detail under
+				// cache_creation.ephemeral_5m_input_tokens (no _token_details suffix).
+				CacheCreation *struct {
+					Ephemeral5mInputTokens int `json:"ephemeral_5m_input_tokens,omitempty"`
+					Ephemeral1hInputTokens int `json:"ephemeral_1h_input_tokens,omitempty"`
+				} `json:"cache_creation,omitempty"`
+				AudioTokens int    `json:"audio_tokens,omitempty"`
+				CacheType   string `json:"cache_type,omitempty"`
 			} `json:"prompt_tokens_details,omitempty"`
 			CompletionTokensDetails *struct {
 				ReasoningTokens int `json:"reasoning_tokens,omitempty"`
@@ -214,6 +221,7 @@ func ChatToResponse(body []byte, opts ...ChatToResponseOption) ([]byte, error) {
 			)
 			usage.InputTokensDetails.CachedTokens = cachedTokens
 			usage.InputTokensDetails.CachedAudioTokens = cachedAudioTokens
+			usage.InputTokensDetails.CacheType = ccResp.Usage.PromptTokensDetails.CacheType
 			usage.InputTokensDetails.AudioTokens = normalizedAudioTokens(
 				ccResp.Usage.PromptTokensDetails.AudioTokens,
 				cachedTokens,
@@ -224,7 +232,13 @@ func ChatToResponse(body []byte, opts ...ChatToResponseOption) ([]byte, error) {
 			if usage.InputTokensDetails.CacheCreationTokens == 0 {
 				usage.InputTokensDetails.CacheCreationTokens = ccResp.Usage.PromptTokensDetails.CacheWriteTokens
 			}
-			if details := ccResp.Usage.PromptTokensDetails.CacheCreationTokenDetails; details != nil {
+			details := ccResp.Usage.PromptTokensDetails.CacheCreationTokenDetails
+			if details == nil {
+				// Alibaba spells the TTL detail cache_creation.ephemeral_5m_input_tokens
+				// (nested in prompt_tokens_details, no _token_details suffix).
+				details = ccResp.Usage.PromptTokensDetails.CacheCreation
+			}
+			if details != nil {
 				usage.InputTokensDetails.CacheCreationTokenDetails = &CacheCreationTokenDetails{
 					Ephemeral5mInputTokens: details.Ephemeral5mInputTokens,
 					Ephemeral1hInputTokens: details.Ephemeral1hInputTokens,

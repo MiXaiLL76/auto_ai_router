@@ -49,6 +49,11 @@ type anthropicStreamAccumulator struct {
 	cacheCreation5mTokens int
 	cacheCreation1hTokens int
 	webSearchRequests     int
+	// cacheType is our own extension (see anthropic.AnthropicUsage.CacheType's
+	// doc comment) — absent on a real Anthropic stream, present when this
+	// body is Alibaba/Qwen usage that already passed through
+	// chatUsageToMessages/TransformChatStreamToMessages.
+	cacheType string
 
 	// Stream status
 	stopReason         string
@@ -130,6 +135,7 @@ func processAnthropicEvent(w io.Writer, acc *anthropicStreamAccumulator, event *
 				acc.cacheCreationTokens, acc.cacheCreation5mTokens, acc.cacheCreation1hTokens = anthropic.NormalizeCacheCreationUsage(
 					event.Message.Usage.CacheCreationInputTokens, event.Message.Usage.CacheCreation,
 				)
+				acc.cacheType = event.Message.Usage.CacheType
 				if event.Message.Usage.ServerToolUse != nil && event.Message.Usage.ServerToolUse.WebSearchRequests > 0 {
 					acc.webSearchRequests = event.Message.Usage.ServerToolUse.WebSearchRequests
 				}
@@ -309,6 +315,9 @@ func processAnthropicEvent(w io.Writer, acc *anthropicStreamAccumulator, event *
 			}
 			if event.Usage.ServerToolUse != nil && event.Usage.ServerToolUse.WebSearchRequests > 0 {
 				acc.webSearchRequests = event.Usage.ServerToolUse.WebSearchRequests
+			}
+			if event.Usage.CacheType != "" {
+				acc.cacheType = event.Usage.CacheType
 			}
 		}
 
@@ -615,6 +624,7 @@ func buildAnthropicCompletedResponse(acc *anthropicStreamAccumulator) *responses
 		InputTokensDetails: responses.InputDetails{
 			CachedTokens:        acc.cachedTokens,
 			CacheCreationTokens: acc.cacheCreationTokens,
+			CacheType:           acc.cacheType,
 		},
 	}
 	if acc.cacheCreation5mTokens > 0 || acc.cacheCreation1hTokens > 0 {

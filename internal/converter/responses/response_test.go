@@ -339,6 +339,44 @@ func TestChatToResponse_Usage(t *testing.T) {
 	assert.Equal(t, 3, resp.Usage.OutputTokensDetails.AudioTokens)
 }
 
+func TestChatToResponse_AlibabaExplicitCacheCreationDetail(t *testing.T) {
+	// Alibaba spells the cache-creation TTL detail cache_creation.ephemeral_5m_input_tokens
+	// (no _token_details suffix), unlike the OpenAI/Anthropic shape covered by
+	// TestChatToResponse_Usage. Both cache_type and the TTL split must survive
+	// the Chat Completions -> Responses API conversion so billing (which runs
+	// on the converted body) sees them.
+	ccBody := `{
+		"id": "chatcmpl-abc123",
+		"object": "chat.completion",
+		"created": 1700000000,
+		"model": "qwen3.7-flash",
+		"choices": [{
+			"index": 0,
+			"message": {"role": "assistant", "content": "hi"},
+			"finish_reason": "stop"
+		}],
+		"usage": {
+			"prompt_tokens": 1827,
+			"completion_tokens": 511,
+			"total_tokens": 2338,
+			"prompt_tokens_details": {"cached_tokens": 1486, "cache_type": "ephemeral", "cache_creation_input_tokens": 335, "cache_write_tokens": 335, "cache_creation": {"ephemeral_5m_input_tokens": 335}}
+		}
+	}`
+
+	result, err := ChatToResponse([]byte(ccBody))
+	require.NoError(t, err)
+
+	var resp Response
+	require.NoError(t, json.Unmarshal(result, &resp))
+
+	require.NotNil(t, resp.Usage)
+	assert.Equal(t, "ephemeral", resp.Usage.InputTokensDetails.CacheType)
+	assert.Equal(t, 335, resp.Usage.InputTokensDetails.CacheCreationTokens)
+	require.NotNil(t, resp.Usage.InputTokensDetails.CacheCreationTokenDetails)
+	assert.Equal(t, 335, resp.Usage.InputTokensDetails.CacheCreationTokenDetails.Ephemeral5mInputTokens)
+	assert.Equal(t, 0, resp.Usage.InputTokensDetails.CacheCreationTokenDetails.Ephemeral1hInputTokens)
+}
+
 func TestChatToResponse_NegativeCachedTokensDoNotIncreaseAudioInput(t *testing.T) {
 	ccBody := `{
 		"id": "chatcmpl-abc123",

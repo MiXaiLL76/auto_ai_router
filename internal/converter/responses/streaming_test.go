@@ -9,6 +9,9 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/mixaill76/auto_ai_router/internal/converter"
+	"github.com/mixaill76/auto_ai_router/internal/models"
 )
 
 func buildSSEChunk(data string) string {
@@ -520,6 +523,101 @@ func TestStreamTransform_Usage(t *testing.T) {
 	assert.Equal(t, float64(11), ttlDetails["ephemeral_1h_input_tokens"])
 	outputDetails := completedEvent.Response.Usage["output_tokens_details"].(map[string]interface{})
 	assert.Equal(t, float64(3), outputDetails["audio_tokens"])
+}
+
+func TestStreamTransform_AlibabaExplicitCacheUsage(t *testing.T) {
+	// Alibaba's streaming usage chunk spells the cache-creation TTL detail
+	// cache_creation.ephemeral_5m_input_tokens (no _token_details suffix) and
+	// carries cache_type="ephemeral" — both must survive the Chat Completions
+	// -> Responses API SSE transform so billing (which reads the emitted
+	// response.completed event) sees them.
+	stopReason := "stop"
+	usageChunk := `{"id":"chatcmpl-test","object":"chat.completion.chunk","model":"qwen3.7-flash","choices":[],"usage":{"prompt_tokens":1827,"completion_tokens":511,"total_tokens":2338,"prompt_tokens_details":{"cached_tokens":1486,"cache_type":"ephemeral","cache_creation_input_tokens":335,"cache_write_tokens":335,"cache_creation":{"ephemeral_5m_input_tokens":335}}}}`
+
+	input := buildSSEChunk(buildChatChunk("test", nil)) +
+		buildSSEChunk(buildChatChunk("", &stopReason)) +
+		buildSSEChunk(usageChunk) +
+		"data: [DONE]\n\n"
+
+	var output bytes.Buffer
+	err := TransformChatStreamToResponses(strings.NewReader(input), &output, "qwen3.7-flash")
+	require.NoError(t, err)
+
+	result := output.String()
+	completedIdx := strings.Index(result, "event: response.completed\n")
+	require.NotEqual(t, -1, completedIdx)
+	afterEvent := result[completedIdx:]
+	dataIdx := strings.Index(afterEvent, "data: ")
+	require.NotEqual(t, -1, dataIdx)
+	dataLine := afterEvent[dataIdx+6:]
+	if endIdx := strings.Index(dataLine, "\n"); endIdx > 0 {
+		dataLine = dataLine[:endIdx]
+	}
+
+	var completedEvent struct {
+		Response struct {
+			Usage map[string]interface{} `json:"usage"`
+		} `json:"response"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(dataLine), &completedEvent))
+
+	details := completedEvent.Response.Usage["input_tokens_details"].(map[string]interface{})
+	assert.Equal(t, "ephemeral", details["cache_type"])
+	assert.Equal(t, float64(1486), details["cached_tokens"])
+	assert.Equal(t, float64(335), details["cache_creation_tokens"])
+	ttlDetails := details["cache_creation_token_details"].(map[string]interface{})
+	assert.Equal(t, float64(335), ttlDetails["ephemeral_5m_input_tokens"])
+}
+
+func TestStreamTransform_AlibabaExplicitCacheBillsAtExplicitTariff(t *testing.T) {
+	// Full path: Alibaba Chat Completions SSE -> Responses API SSE -> the
+	// same extraction/costing billing actually runs (converter.ExtractTokenUsage
+	// on the emitted response.completed event -> models.CalculateTokenCosts).
+	// Regression test for the streaming cache_type/cache_creation drop that
+	// made explicit-cache streaming requests bill at the implicit tariff.
+	stopReason := "stop"
+	usageChunk := `{"id":"chatcmpl-test","object":"chat.completion.chunk","model":"qwen3.7-flash","choices":[],"usage":{"prompt_tokens":1827,"completion_tokens":511,"total_tokens":2338,"prompt_tokens_details":{"cached_tokens":1486,"cache_type":"ephemeral","cache_creation_input_tokens":335,"cache_write_tokens":335,"cache_creation":{"ephemeral_5m_input_tokens":335}}}}`
+
+	input := buildSSEChunk(buildChatChunk("test", nil)) +
+		buildSSEChunk(buildChatChunk("", &stopReason)) +
+		buildSSEChunk(usageChunk) +
+		"data: [DONE]\n\n"
+
+	var output bytes.Buffer
+	err := TransformChatStreamToResponses(strings.NewReader(input), &output, "qwen3.7-flash")
+	require.NoError(t, err)
+
+	result := output.String()
+	completedIdx := strings.Index(result, "event: response.completed\n")
+	require.NotEqual(t, -1, completedIdx)
+	afterEvent := result[completedIdx:]
+	dataIdx := strings.Index(afterEvent, "data: ")
+	require.NotEqual(t, -1, dataIdx)
+	dataLine := afterEvent[dataIdx+6:]
+	if endIdx := strings.Index(dataLine, "\n"); endIdx > 0 {
+		dataLine = dataLine[:endIdx]
+	}
+
+	// This is what proxy billing actually does with the emitted SSE event
+	// (see extractTokenUsageFromPayloads -> converter.ExtractTokenUsageWithOptions).
+	usage := converter.ExtractTokenUsage([]byte(dataLine))
+	require.NotNil(t, usage)
+	require.Equal(t, "ephemeral", usage.CacheType)
+	require.Equal(t, 1486, usage.CachedInputTokens)
+	require.Equal(t, 335, usage.CacheCreationTokens)
+	require.Equal(t, 335, usage.CacheCreation5mTokens)
+
+	price := &models.ModelPrice{
+		InputCostPerToken:               0.0000003,
+		OutputCostPerToken:              0.0000012,
+		CacheReadInputTokenCost:         0.00000015, // implicit — must NOT be used
+		ExplicitCacheReadInputTokenCost: 0.000000075,
+		CacheCreationInputTokenCost:     0.0000009,
+	}
+	costs := models.CalculateTokenCosts(usage, price)
+	require.NotNil(t, costs)
+	assert.InDelta(t, 1486*0.000000075, costs.ExplicitCachedInputCost, 1e-15)
+	assert.Zero(t, costs.CachedInputCost, "streaming explicit-cache request must not bill the implicit tariff")
 }
 
 func TestStreamTransform_UsageSanitizesCachedAudioFields(t *testing.T) {
