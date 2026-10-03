@@ -66,6 +66,8 @@ credentials:
     api_key: "sk-proj-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
     base_url: "https://api.openai.com"
     # proxy_url: "os.environ/OPENAI_PROXY_URL"  # Optional: http(s):// or socks5(h)://[user:password@]host:port
+    # request_headers:  # Optional, direct providers only (not air/proxy): fixed upstream headers (empty value = don't send)
+    #   User-Agent: "auto-ai-router/1.0"  # e.g. when the provider's WAF rejects some client User-Agents
     rpm: 100
     tpm: 50000
     weight: 100  # Optional: weighted round-robin share (default 1). See docs/advanced/balancing.md

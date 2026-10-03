@@ -3,8 +3,10 @@ package config
 import (
 	"fmt"
 	"log/slog"
+	"maps"
 	"net/url"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -137,6 +139,11 @@ func PrintConfig(logger *slog.Logger, cfg *Config) {
 			"is_fallback":       cred.IsFallback,
 			"fallback_priority": cred.FallbackPriority,
 			"priority":          cred.Priority,
+		}
+
+		// Header names only: values may hold secrets resolved from the environment.
+		if len(cred.RequestHeaders) > 0 {
+			credLog["request_headers"] = slices.Sorted(maps.Keys(cred.RequestHeaders))
 		}
 
 		// Add Vertex AI specific fields if present
