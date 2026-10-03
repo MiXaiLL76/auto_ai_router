@@ -721,3 +721,44 @@ func TestResponse_RoundTripKeepsToolUsage(t *testing.T) {
 	imageGen := toolUsage["image_gen"].(map[string]interface{})
 	assert.Equal(t, float64(196), imageGen["output_tokens"])
 }
+
+// TestChatToResponse_ReasoningFieldSpellings: OpenAI-compatible providers
+// return reasoning as "reasoning_content" (DeepSeek, SiliconFlow) or
+// "reasoning" (OpenRouter, vLLM, Ollama), and the raw upstream body reaches
+// ChatToResponse un-normalized — both must surface as a reasoning item, and an
+// unexpected non-string value must not fail the whole conversion.
+func TestChatToResponse_ReasoningFieldSpellings(t *testing.T) {
+	cases := []struct {
+		name          string
+		fields        string
+		wantReasoning string
+	}{
+		{name: "reasoning_content", fields: `"reasoning_content": "via reasoning_content"`, wantReasoning: "via reasoning_content"},
+		{name: "reasoning", fields: `"reasoning": "via reasoning"`, wantReasoning: "via reasoning"},
+		{name: "reasoning_content wins when both are sent", fields: `"reasoning_content": "primary", "reasoning": "secondary"`, wantReasoning: "primary"},
+		{name: "empty reasoning_content falls back to reasoning", fields: `"reasoning_content": "", "reasoning": "fallback"`, wantReasoning: "fallback"},
+		{name: "non-string reasoning is ignored", fields: `"reasoning": {"effort": "high"}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body := `{"id": "chatcmpl-1", "object": "chat.completion", "created": 1700000000, "model": "m",
+				"choices": [{"index": 0, "finish_reason": "stop",
+					"message": {"role": "assistant", "content": "Ok.", ` + tc.fields + `}}]}`
+			result, err := ChatToResponse([]byte(body))
+			require.NoError(t, err)
+
+			var resp Response
+			require.NoError(t, json.Unmarshal(result, &resp))
+			if tc.wantReasoning == "" {
+				require.Len(t, resp.Output, 1)
+				assert.Equal(t, "message", resp.Output[0].Type)
+				return
+			}
+			require.Len(t, resp.Output, 2)
+			assert.Equal(t, "reasoning", resp.Output[0].Type)
+			require.Len(t, resp.Output[0].Summary, 1)
+			assert.Equal(t, tc.wantReasoning, resp.Output[0].Summary[0].Text)
+			assert.Equal(t, "Ok.", resp.Output[1].Content[0].Text)
+		})
+	}
+}

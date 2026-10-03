@@ -201,9 +201,9 @@ func outputToInputItems(output []OutputItem) []interface{} {
 			})
 
 		case "reasoning":
-			// Skip reasoning items that have neither summary nor encrypted_content —
-			// there's nothing useful to pass to the next turn.
-			if len(item.Summary) == 0 && item.EncryptedContent == "" {
+			// Skip reasoning items that have neither summary, reasoning text nor
+			// encrypted_content — there's nothing useful to pass to the next turn.
+			if len(item.Summary) == 0 && len(item.Content) == 0 && item.EncryptedContent == "" {
 				continue
 			}
 			reasoningItem := map[string]interface{}{
@@ -226,6 +226,24 @@ func outputToInputItems(output []OutputItem) []interface{} {
 				}
 				if len(summary) > 0 {
 					reasoningItem["summary"] = summary
+				}
+			}
+			// Raw reasoning_text content (e.g. gpt-oss) is the only text such an
+			// item carries when it has no summary; keep it so the next turn still
+			// gets the reasoning (PrepareCodexPassthrough recovers a summary from
+			// it, RequestToChat reads it directly).
+			if _, hasSummary := reasoningItem["summary"]; !hasSummary {
+				content := make([]interface{}, 0, len(item.Content))
+				for _, c := range item.Content {
+					if c.Text != "" {
+						content = append(content, map[string]interface{}{
+							"type": c.Type,
+							"text": c.Text,
+						})
+					}
+				}
+				if len(content) > 0 {
+					reasoningItem["content"] = content
 				}
 			}
 			// Preserve encrypted_content for same-provider round-trips (Anthropic).
@@ -689,20 +707,69 @@ func convertInputValue(input interface{}) ([]interface{}, error) {
 	}
 
 	var messages []interface{}
-	// pendingToolCalls accumulates consecutive function_call items
-	// to merge them into a single assistant message with multiple tool_calls.
-	var pendingToolCalls []interface{}
 
+	// Chat Completions carries a whole assistant turn — reasoning_content,
+	// content and tool_calls — in one message, while the Responses API splits
+	// it into reasoning / message / function_call items (see ChatToResponse).
+	// The pending* state folds the items of one turn back into one message.
+	var pendingAssistant map[string]interface{}
+	var pendingToolCalls []interface{}
+	var pendingReasoning []string
+	// A reasoning item belongs to the item that follows it, so its text waits
+	// in unclaimedReasoning until that item claims it for its turn.
+	var unclaimedReasoning []string
+
+	claimReasoning := func() {
+		pendingReasoning = append(pendingReasoning, unclaimedReasoning...)
+		unclaimedReasoning = nil
+	}
+
+	// flushToolCalls emits the assistant turn built so far, if any.
+	// Unclaimed reasoning stays pending for the next item.
 	flushToolCalls := func() {
-		if len(pendingToolCalls) == 0 {
+		if pendingAssistant == nil && len(pendingToolCalls) == 0 && len(pendingReasoning) == 0 {
 			return
 		}
-		messages = append(messages, map[string]interface{}{
-			"role":       "assistant",
-			"content":    nil,
-			"tool_calls": pendingToolCalls,
-		})
-		pendingToolCalls = nil
+		msg := pendingAssistant
+		if msg == nil {
+			msg = map[string]interface{}{"role": "assistant", "content": nil}
+			if len(pendingToolCalls) == 0 {
+				// Reasoning-only turn (e.g. max_output_tokens ran out mid-reasoning):
+				// content is required when there are no tool_calls.
+				msg["content"] = ""
+			}
+		}
+		if len(pendingToolCalls) > 0 {
+			msg["tool_calls"] = pendingToolCalls
+		}
+		if len(pendingReasoning) > 0 {
+			msg["reasoning_content"] = strings.Join(pendingReasoning, "\n\n")
+		}
+		messages = append(messages, msg)
+		pendingAssistant, pendingToolCalls, pendingReasoning = nil, nil, nil
+	}
+
+	// endAssistantTurn closes the turn before an item that is not part of it
+	// (user/system message, tool result, ...). Reasoning nothing claimed stays
+	// with the turn it ended, or becomes a reasoning-only assistant message.
+	endAssistantTurn := func() {
+		claimReasoning()
+		flushToolCalls()
+	}
+
+	addToolCall := func(toolCall map[string]interface{}) {
+		claimReasoning()
+		pendingToolCalls = append(pendingToolCalls, toolCall)
+	}
+
+	// addAssistantMessage starts a turn with an assistant message item; the
+	// function_call items that follow it join the same Chat message.
+	addAssistantMessage := func(msg map[string]interface{}) {
+		if pendingAssistant != nil || len(pendingToolCalls) > 0 {
+			flushToolCalls()
+		}
+		claimReasoning()
+		pendingAssistant = msg
 	}
 
 	for _, item := range inputArr {
@@ -719,7 +786,7 @@ func convertInputValue(input interface{}) ([]interface{}, error) {
 			callID, _ := itemMap["call_id"].(string)
 			name, _ := itemMap["name"].(string)
 			arguments, _ := itemMap["arguments"].(string)
-			pendingToolCalls = append(pendingToolCalls, map[string]interface{}{
+			addToolCall(map[string]interface{}{
 				"id":   callID,
 				"type": "function",
 				"function": map[string]interface{}{
@@ -730,35 +797,16 @@ func convertInputValue(input interface{}) ([]interface{}, error) {
 
 		case "function_call_output":
 			// Flush any pending tool calls before the output
-			flushToolCalls()
+			endAssistantTurn()
 			msg := convertFunctionCallOutput(itemMap)
 			messages = append(messages, msg)
 
 		case "reasoning":
-			// Serialize reasoning as a synthetic assistant message using summary text.
+			// Carried as reasoning_content of the assistant message it precedes —
+			// the field DeepSeek-style providers require back on tool-call turns.
 			// encrypted_content is dropped — it is only meaningful to the original provider.
-			flushToolCalls()
-			var textParts []interface{}
-			if summary, ok := itemMap["summary"].([]interface{}); ok {
-				for _, s := range summary {
-					sm, ok := s.(map[string]interface{})
-					if !ok {
-						continue
-					}
-					text, _ := sm["text"].(string)
-					if text != "" {
-						textParts = append(textParts, map[string]interface{}{
-							"type": "text",
-							"text": "[Reasoning]: " + text,
-						})
-					}
-				}
-			}
-			if len(textParts) > 0 {
-				messages = append(messages, map[string]interface{}{
-					"role":    "assistant",
-					"content": textParts,
-				})
+			if text := reasoningItemText(itemMap); text != "" {
+				unclaimedReasoning = append(unclaimedReasoning, text)
 			}
 
 		case "web_search_call":
@@ -773,7 +821,7 @@ func convertInputValue(input interface{}) ([]interface{}, error) {
 				if name == "" {
 					name = "web_search"
 				}
-				pendingToolCalls = append(pendingToolCalls, map[string]interface{}{
+				addToolCall(map[string]interface{}{
 					"id":   callID,
 					"type": "function",
 					"function": map[string]interface{}{
@@ -797,7 +845,7 @@ func convertInputValue(input interface{}) ([]interface{}, error) {
 
 		case "computer_call_output":
 			// Convert screenshot/output to a user message with image content.
-			flushToolCalls()
+			endAssistantTurn()
 			var content []interface{}
 			if output, ok := itemMap["output"].(map[string]interface{}); ok {
 				outputType, _ := output["type"].(string)
@@ -847,7 +895,7 @@ func convertInputValue(input interface{}) ([]interface{}, error) {
 			if callID != "" {
 				code, _ := itemMap["code"].(string)
 				argsJSON, _ := json.Marshal(map[string]interface{}{"code": code})
-				pendingToolCalls = append(pendingToolCalls, map[string]interface{}{
+				addToolCall(map[string]interface{}{
 					"id":   callID,
 					"type": "function",
 					"function": map[string]interface{}{
@@ -877,7 +925,7 @@ func convertInputValue(input interface{}) ([]interface{}, error) {
 				callID, _ = itemMap["id"].(string)
 			}
 			if callID != "" {
-				pendingToolCalls = append(pendingToolCalls, map[string]interface{}{
+				addToolCall(map[string]interface{}{
 					"id":   callID,
 					"type": "function",
 					"function": map[string]interface{}{
@@ -904,7 +952,7 @@ func convertInputValue(input interface{}) ([]interface{}, error) {
 			flushToolCalls()
 			result, _ := itemMap["result"].(string)
 			if result != "" {
-				messages = append(messages, map[string]interface{}{
+				addAssistantMessage(map[string]interface{}{
 					"role": "assistant",
 					"content": []interface{}{
 						map[string]interface{}{
@@ -915,6 +963,7 @@ func convertInputValue(input interface{}) ([]interface{}, error) {
 						},
 					},
 				})
+				flushToolCalls()
 			}
 
 		case "mcp_tool_call":
@@ -942,7 +991,7 @@ func convertInputValue(input interface{}) ([]interface{}, error) {
 				if argsStr == "" {
 					argsStr = "{}"
 				}
-				pendingToolCalls = append(pendingToolCalls, map[string]interface{}{
+				addToolCall(map[string]interface{}{
 					"id":   callID,
 					"type": "function",
 					"function": map[string]interface{}{
@@ -967,7 +1016,7 @@ func convertInputValue(input interface{}) ([]interface{}, error) {
 		case "compaction":
 			// A compaction item carries an encrypted_content summary of prior context.
 			// Inject it as a user message so the model has the compacted context.
-			flushToolCalls()
+			endAssistantTurn()
 			ec, _ := itemMap["encrypted_content"].(string)
 			if ec != "" {
 				messages = append(messages, map[string]interface{}{
@@ -977,26 +1026,57 @@ func convertInputValue(input interface{}) ([]interface{}, error) {
 			}
 
 		default:
-			// Flush any pending tool calls before a regular message
-			flushToolCalls()
 			// only convert items that have a "role" field (messages).
 			// Skip unrecognized input item types (e.g. item_reference) to avoid
 			// sending malformed messages to Chat Completions providers.
 			if _, hasRole := itemMap["role"]; !hasRole && itemType != "" && itemType != "message" {
+				flushToolCalls()
 				continue
 			}
 			msg, err := convertMessage(itemMap)
 			if err != nil {
 				return nil, err
 			}
+			if msg["role"] == "assistant" {
+				addAssistantMessage(msg)
+				continue
+			}
+			endAssistantTurn()
 			messages = append(messages, msg)
 		}
 	}
 
-	// Flush any remaining tool calls
-	flushToolCalls()
+	// Flush the trailing assistant turn, if any
+	endAssistantTurn()
 
 	return messages, nil
+}
+
+// reasoningItemText returns the reasoning text of a Responses reasoning item.
+// Raw reasoning_text content wins over summary_text when both are present:
+// Chat's reasoning_content is the model's reasoning itself, a summary only a
+// digest of it. Some clients echo reasoning back in "content" alone (see
+// PrepareCodexPassthrough), so neither field may be ignored.
+func reasoningItemText(item map[string]interface{}) string {
+	if text := joinReasoningParts(item["content"]); text != "" {
+		return text
+	}
+	return joinReasoningParts(item["summary"])
+}
+
+func joinReasoningParts(raw interface{}) string {
+	parts, _ := raw.([]interface{})
+	texts := make([]string, 0, len(parts))
+	for _, part := range parts {
+		partMap, ok := part.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if text, _ := partMap["text"].(string); text != "" {
+			texts = append(texts, text)
+		}
+	}
+	return strings.Join(texts, "\n\n")
 }
 
 // convertMessage converts an InputMessage or ResponseOutputMessage to a Chat Completions message.
