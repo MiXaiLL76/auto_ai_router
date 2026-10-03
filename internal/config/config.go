@@ -1534,6 +1534,7 @@ func (l *LiteLLMDBConfig) UnmarshalYAML(value *yaml.Node) error {
 		EnforceKeyRateLimits             string `yaml:"enforce_key_rate_limits"`
 		DefaultEstimatedCompletionTokens string `yaml:"default_estimated_completion_tokens"`
 		DailySpendTimezone               string `yaml:"daily_spend_timezone"`
+		EnableCostMargin                 string `yaml:"enable_cost_margin"`
 	}
 
 	var temp tempConfig
@@ -1565,6 +1566,9 @@ func (l *LiteLLMDBConfig) UnmarshalYAML(value *yaml.Node) error {
 		return err
 	}
 	if l.EnforceKeyRateLimits, err = parseField(temp.EnforceKeyRateLimits, false, strconv.ParseBool, "litellm_db.enforce_key_rate_limits"); err != nil {
+		return err
+	}
+	if l.EnableCostMargin, err = parseField(temp.EnableCostMargin, false, strconv.ParseBool, "litellm_db.enable_cost_margin"); err != nil {
 		return err
 	}
 
