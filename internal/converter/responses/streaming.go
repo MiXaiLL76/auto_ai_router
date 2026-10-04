@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"sort"
 	"strings"
 
 	// goccy/go-json instead of encoding/json: both json.* calls in this file run
@@ -34,16 +35,19 @@ type streamAccumulator struct {
 	// Accumulated content
 	fullText      string
 	fullRefusal   string // accumulated refusal text
-	fullReasoning string // accumulated reasoning_content text
 	toolCalls     []accumulatedToolCall
 	currentToolID int // index into toolCalls for the active tool call
 
-	// Whether a reasoning output item has been started/closed. Always
-	// output_index 0 when present — DeepSeek-style providers stream
-	// reasoning_content before content/tool_calls.
-	reasoningStarted bool
-	reasoningClosed  bool
-	reasoningItemID  string
+	// Reasoning output items, one per contiguous run of reasoning deltas.
+	// Usually a single item at output_index 0: DeepSeek-style providers
+	// stream reasoning before content/tool_calls.
+	reasoningItems []streamReasoningItem
+
+	// nextOutputIndex is the output_index the next output item opens at.
+	// An item keeps the index it opened with, so one opening late (e.g.
+	// reasoning after text) never shifts indices already sent to the client.
+	nextOutputIndex    int
+	messageOutputIndex int
 
 	// Usage from final chunk
 	usage *chatCompletionsUsage
@@ -74,20 +78,48 @@ type streamAccumulator struct {
 	requestMetadata    map[string]string
 }
 
-// reasoningOffset returns the output_index shift caused by a reasoning item
-// occupying index 0. Reasoning is always the first output item when present.
-func (acc *streamAccumulator) reasoningOffset() int {
-	if acc.reasoningStarted {
-		return 1
+// allocOutputIndex reserves the output_index for an output item being opened.
+func (acc *streamAccumulator) allocOutputIndex() int {
+	idx := acc.nextOutputIndex
+	acc.nextOutputIndex++
+	return idx
+}
+
+// openReasoningItem returns the reasoning item currently receiving deltas,
+// or nil once visible output closed it (or before any reasoning arrived).
+func (acc *streamAccumulator) openReasoningItem() *streamReasoningItem {
+	if n := len(acc.reasoningItems); n > 0 && !acc.reasoningItems[n-1].closed {
+		return &acc.reasoningItems[n-1]
 	}
-	return 0
+	return nil
+}
+
+// toolOutputIndex returns the output_index of acc.toolCalls[idx], reserving
+// one on first use for a slot that was never announced with an id.
+func (acc *streamAccumulator) toolOutputIndex(idx int) int {
+	tc := &acc.toolCalls[idx]
+	if !tc.indexed {
+		tc.outputIndex = acc.allocOutputIndex()
+		tc.indexed = true
+	}
+	return tc.outputIndex
 }
 
 type accumulatedToolCall struct {
-	id        string
-	name      string
-	arguments string
-	itemID    string // Responses API item ID
+	id          string
+	name        string
+	arguments   string
+	itemID      string // Responses API item ID
+	outputIndex int
+	indexed     bool // outputIndex has been assigned
+}
+
+// streamReasoningItem is a reasoning output item built from reasoning deltas.
+type streamReasoningItem struct {
+	itemID      string
+	outputIndex int
+	text        string
+	closed      bool
 }
 
 // chatCompletionsUsage represents usage from a Chat Completions streaming chunk.
@@ -116,10 +148,12 @@ type chatStreamChunk struct {
 	Choices []struct {
 		Index int `json:"index"`
 		Delta struct {
-			Role             string `json:"role,omitempty"`
-			Content          string `json:"content,omitempty"`
-			Refusal          string `json:"refusal,omitempty"`
-			ReasoningContent string `json:"reasoning_content,omitempty"`
+			Role    string `json:"role,omitempty"`
+			Content string `json:"content,omitempty"`
+			Refusal string `json:"refusal,omitempty"`
+			// See chatReasoningText for the two spellings and why interface{}.
+			ReasoningContent interface{} `json:"reasoning_content,omitempty"`
+			Reasoning        interface{} `json:"reasoning,omitempty"`
 			ToolCalls        []struct {
 				Index    int    `json:"index"`
 				ID       string `json:"id,omitempty"`
@@ -319,34 +353,19 @@ func transformChatStreamToResponsesInner(
 
 		choice := chunk.Choices[0]
 
-		// Handle reasoning_content delta BEFORE text/tool_calls: DeepSeek-style
+		// Handle reasoning delta BEFORE text/tool_calls: DeepSeek-style
 		// providers stream reasoning ahead of the visible content, and the
 		// reasoning output item must be announced (and later closed) before
 		// the message/tool_call item that follows it.
-		if choice.Delta.ReasoningContent != "" {
+		if reasoningDelta := chatReasoningText(choice.Delta.ReasoningContent, choice.Delta.Reasoning); reasoningDelta != "" {
 			if !acc.headerEmitted {
 				if err := emitHeaderEvents(writer, acc); err != nil {
 					return err
 				}
 			}
-			if !acc.reasoningStarted {
-				acc.reasoningStarted = true
-				acc.reasoningItemID = GenerateItemID("rs_")
-				itemAddedEvent := map[string]interface{}{
-					"type":         "response.output_item.added",
-					"output_index": 0,
-					"item": map[string]interface{}{
-						"type":    "reasoning",
-						"id":      acc.reasoningItemID,
-						"status":  "in_progress",
-						"summary": []interface{}{},
-					},
-				}
-				if err := writeSSEWithSeq(writer, "response.output_item.added", itemAddedEvent, acc); err != nil {
-					return err
-				}
+			if err := emitReasoningDelta(writer, acc, reasoningDelta); err != nil {
+				return err
 			}
-			acc.fullReasoning += choice.Delta.ReasoningContent
 		}
 
 		// Handle text content delta BEFORE finish_reason.
@@ -363,6 +382,9 @@ func transformChatStreamToResponsesInner(
 					return err
 				}
 			}
+			if err := closeReasoningItem(writer, acc); err != nil {
+				return err
+			}
 			if !acc.messageStarted {
 				if err := emitMessageStartEvents(writer, acc); err != nil {
 					return err
@@ -376,7 +398,7 @@ func transformChatStreamToResponsesInner(
 			deltaEvent := map[string]interface{}{
 				"type":          "response.output_text.delta",
 				"item_id":       acc.messageItemID,
-				"output_index":  acc.reasoningOffset(),
+				"output_index":  acc.messageOutputIndex,
 				"content_index": 0,
 				"delta":         choice.Delta.Content,
 			}
@@ -392,6 +414,9 @@ func transformChatStreamToResponsesInner(
 					return err
 				}
 			}
+			if err := closeReasoningItem(writer, acc); err != nil {
+				return err
+			}
 			if !acc.messageStarted {
 				if err := emitMessageStartEvents(writer, acc); err != nil {
 					return err
@@ -401,7 +426,7 @@ func transformChatStreamToResponsesInner(
 			refusalEvent := map[string]interface{}{
 				"type":          "response.refusal.delta",
 				"item_id":       acc.messageItemID,
-				"output_index":  acc.reasoningOffset(),
+				"output_index":  acc.messageOutputIndex,
 				"content_index": 0,
 				"delta":         choice.Delta.Refusal,
 			}
@@ -412,6 +437,12 @@ func transformChatStreamToResponsesInner(
 
 		// Handle tool call deltas
 		for _, tc := range choice.Delta.ToolCalls {
+			if tc.Index < 0 {
+				// Malformed upstream chunk; indexing with it would panic the
+				// transform goroutine, which has no recover, and take the
+				// whole process down.
+				continue
+			}
 			if !acc.headerEmitted {
 				if err := emitHeaderEvents(writer, acc); err != nil {
 					return err
@@ -421,15 +452,18 @@ func transformChatStreamToResponsesInner(
 				return err
 			}
 
-			// New tool call (has ID)
-			if tc.ID != "" {
+			// New tool call (has an ID not seen at this index yet — some
+			// providers repeat the ID on every chunk of the same call)
+			if tc.ID != "" && (tc.Index >= len(acc.toolCalls) || acc.toolCalls[tc.Index].id != tc.ID) {
 				idx := tc.Index
 				for len(acc.toolCalls) <= idx {
 					acc.toolCalls = append(acc.toolCalls, accumulatedToolCall{})
 				}
 				toolCall := accumulatedToolCall{
-					id:     tc.ID,
-					itemID: GenerateItemID("fc_"),
+					id:          tc.ID,
+					itemID:      GenerateItemID("fc_"),
+					outputIndex: acc.allocOutputIndex(),
+					indexed:     true,
 				}
 				if tc.Function != nil {
 					toolCall.name = tc.Function.Name
@@ -439,11 +473,7 @@ func transformChatStreamToResponsesInner(
 				acc.state = stateStreamingToolCall
 
 				// Emit output_item.added for function_call
-				outputIndex := acc.reasoningOffset()
-				if acc.messageStarted {
-					outputIndex++
-				}
-				outputIndex += tc.Index
+				outputIndex := toolCall.outputIndex
 
 				itemAddedEvent := map[string]interface{}{
 					"type":         "response.output_item.added",
@@ -460,6 +490,10 @@ func transformChatStreamToResponsesInner(
 				if err := writeSSEWithSeq(writer, "response.output_item.added", itemAddedEvent, acc); err != nil {
 					return err
 				}
+			} else if tc.Function != nil && tc.Function.Name != "" &&
+				tc.Index < len(acc.toolCalls) && acc.toolCalls[tc.Index].name == "" {
+				// The call's name arrived after the chunk that opened it.
+				acc.toolCalls[tc.Index].name = tc.Function.Name
 			}
 
 			// Accumulate arguments
@@ -473,11 +507,7 @@ func transformChatStreamToResponsesInner(
 				}
 				acc.toolCalls[idx].arguments += tc.Function.Arguments
 
-				outputIndex := acc.reasoningOffset()
-				if acc.messageStarted {
-					outputIndex++
-				}
-				outputIndex += tc.Index
+				outputIndex := acc.toolOutputIndex(idx)
 
 				argDeltaEvent := map[string]interface{}{
 					"type":         "response.function_call_arguments.delta",
@@ -540,23 +570,33 @@ func transformChatStreamToResponsesInner(
 	return nil
 }
 
-// buildTypedCompletedResponse builds a typed *Response from the stream accumulator.
-func buildTypedCompletedResponse(acc *streamAccumulator) *Response {
-	var output []OutputItem
+// completedOutputItems returns the stream's output items in output_index
+// order, the order the client saw them open in.
+func completedOutputItems(acc *streamAccumulator) []OutputItem {
+	type indexedItem struct {
+		outputIndex int
+		item        OutputItem
+	}
+	// Appended in the usual reasoning → message → tool calls order, which the
+	// stable sort keeps for items without an assigned index.
+	var items []indexedItem
 
-	if acc.fullReasoning != "" {
-		output = append(output, OutputItem{
+	for _, r := range acc.reasoningItems {
+		if r.text == "" {
+			continue
+		}
+		items = append(items, indexedItem{r.outputIndex, OutputItem{
 			Type:   "reasoning",
-			ID:     acc.reasoningItemID,
+			ID:     r.itemID,
 			Status: "completed",
 			Summary: []OutputContent{
-				{Type: "summary_text", Text: acc.fullReasoning},
+				{Type: "summary_text", Text: r.text},
 			},
-		})
+		}})
 	}
 
 	if acc.messageStarted && acc.fullText != "" {
-		output = append(output, OutputItem{
+		items = append(items, indexedItem{acc.messageOutputIndex, OutputItem{
 			Type:   "message",
 			ID:     acc.messageItemID,
 			Status: "completed",
@@ -566,19 +606,33 @@ func buildTypedCompletedResponse(acc *streamAccumulator) *Response {
 				Text:        acc.fullText,
 				Annotations: []Annotation{},
 			}},
-		})
+		}})
 	}
 
 	for _, tc := range acc.toolCalls {
-		output = append(output, OutputItem{
+		items = append(items, indexedItem{tc.outputIndex, OutputItem{
 			Type:      "function_call",
 			ID:        tc.itemID,
 			Status:    "completed",
 			CallID:    tc.id,
 			Name:      tc.name,
 			Arguments: tc.arguments,
-		})
+		}})
 	}
+
+	sort.SliceStable(items, func(i, j int) bool {
+		return items[i].outputIndex < items[j].outputIndex
+	})
+	output := make([]OutputItem, 0, len(items))
+	for _, it := range items {
+		output = append(output, it.item)
+	}
+	return output
+}
+
+// buildTypedCompletedResponse builds a typed *Response from the stream accumulator.
+func buildTypedCompletedResponse(acc *streamAccumulator) *Response {
+	output := completedOutputItems(acc)
 
 	var usage *Usage
 	if acc.usage != nil {
@@ -664,31 +718,71 @@ func emitHeaderEvents(w io.Writer, acc *streamAccumulator) error {
 	return writeSSEWithSeq(w, "response.in_progress", inProgressEvent, acc)
 }
 
-// closeReasoningItem emits output_item.done for a started-but-not-yet-closed
-// reasoning item. Called right before the message or the first tool_call
-// opens (reasoning always precedes them), and as a safety net at completion
-// time in case the stream ended with reasoning only (e.g. max_output_tokens
-// was exhausted entirely by reasoning, before any visible content).
+// emitReasoningDelta streams a reasoning delta as a reasoning output item with
+// a single summary_text part, opening the item (output_item.added +
+// reasoning_summary_part.added) on its first delta — the event sequence
+// OpenAI's own Responses API streams reasoning summaries with.
+func emitReasoningDelta(w io.Writer, acc *streamAccumulator, delta string) error {
+	item := acc.openReasoningItem()
+	if item == nil {
+		acc.reasoningItems = append(acc.reasoningItems, streamReasoningItem{
+			itemID:      GenerateItemID("rs_"),
+			outputIndex: acc.allocOutputIndex(),
+		})
+		item = &acc.reasoningItems[len(acc.reasoningItems)-1]
+
+		itemAddedEvent := map[string]interface{}{
+			"type":         "response.output_item.added",
+			"output_index": item.outputIndex,
+			"item": map[string]interface{}{
+				"type":    "reasoning",
+				"id":      item.itemID,
+				"status":  "in_progress",
+				"summary": []interface{}{},
+			},
+		}
+		if err := writeSSEWithSeq(w, "response.output_item.added", itemAddedEvent, acc); err != nil {
+			return err
+		}
+		partAddedEvent := BuildReasoningSummaryPartAddedEvent(item.itemID, item.outputIndex, 0)
+		if err := writeSSEWithSeq(w, "response.reasoning_summary_part.added", partAddedEvent, acc); err != nil {
+			return err
+		}
+	}
+
+	item.text += delta
+	deltaEvent := BuildReasoningSummaryTextDeltaEvent(item.itemID, item.outputIndex, 0, delta)
+	return writeSSEWithSeq(w, "response.reasoning_summary_text.delta", deltaEvent, acc)
+}
+
+// closeReasoningItem closes the reasoning item still receiving deltas, if
+// any. Called as soon as visible output (text, refusal, tool call) arrives,
+// and as a safety net at completion time in case the stream ended with
+// reasoning only (e.g. max_output_tokens was exhausted entirely by
+// reasoning, before any visible content).
 func closeReasoningItem(w io.Writer, acc *streamAccumulator) error {
-	if !acc.reasoningStarted || acc.reasoningClosed {
+	item := acc.openReasoningItem()
+	if item == nil {
 		return nil
 	}
-	acc.reasoningClosed = true
+	item.closed = true
 
-	summary := []interface{}{}
-	if acc.fullReasoning != "" {
-		summary = []interface{}{
-			map[string]interface{}{"type": "summary_text", "text": acc.fullReasoning},
-		}
+	textDoneEvent := BuildReasoningSummaryTextDoneEvent(item.itemID, item.outputIndex, 0, item.text)
+	if err := writeSSEWithSeq(w, "response.reasoning_summary_text.done", textDoneEvent, acc); err != nil {
+		return err
+	}
+	partDoneEvent := BuildReasoningSummaryPartDoneEvent(item.itemID, item.outputIndex, 0, item.text)
+	if err := writeSSEWithSeq(w, "response.reasoning_summary_part.done", partDoneEvent, acc); err != nil {
+		return err
 	}
 	doneEvent := map[string]interface{}{
 		"type":         "response.output_item.done",
-		"output_index": 0,
+		"output_index": item.outputIndex,
 		"item": map[string]interface{}{
 			"type":    "reasoning",
-			"id":      acc.reasoningItemID,
+			"id":      item.itemID,
 			"status":  "completed",
-			"summary": summary,
+			"summary": []interface{}{BuildReasoningSummaryPart(item.text)},
 		},
 	}
 	return writeSSEWithSeq(w, "response.output_item.done", doneEvent, acc)
@@ -702,9 +796,10 @@ func emitMessageStartEvents(w io.Writer, acc *streamAccumulator) error {
 
 	acc.messageStarted = true
 	acc.messageItemID = GenerateItemID("msg_")
+	acc.messageOutputIndex = acc.allocOutputIndex()
 
 	msgItemID := acc.messageItemID
-	outputIndex := acc.reasoningOffset()
+	outputIndex := acc.messageOutputIndex
 
 	itemAddedEvent := BuildMessageItemAddedEvent(outputIndex, msgItemID)
 	if err := writeSSEWithSeq(w, "response.output_item.added", itemAddedEvent, acc); err != nil {
@@ -724,7 +819,7 @@ func emitCompletionEvents(w io.Writer, acc *streamAccumulator) error {
 		return err
 	}
 
-	msgOutputIndex := acc.reasoningOffset()
+	msgOutputIndex := acc.messageOutputIndex
 
 	// only emit text closing events if there's actual text content.
 	// This matches the condition in buildCompletedResponse (messageStarted && fullText != "").
@@ -779,11 +874,9 @@ func emitCompletionEvents(w io.Writer, acc *streamAccumulator) error {
 	}
 
 	// Close tool calls
-	for i, tc := range acc.toolCalls {
-		outputIndex := i + acc.reasoningOffset()
-		if acc.messageStarted {
-			outputIndex++
-		}
+	for i := range acc.toolCalls {
+		outputIndex := acc.toolOutputIndex(i)
+		tc := acc.toolCalls[i]
 
 		// function_call_arguments.done
 		argsDoneEvent := map[string]interface{}{
@@ -865,43 +958,7 @@ func buildInProgressResponse(acc *streamAccumulator) map[string]interface{} {
 
 // buildCompletedResponse builds the full response object for the completed event.
 func buildCompletedResponse(acc *streamAccumulator) map[string]interface{} {
-	output := make([]OutputItem, 0)
-
-	if acc.fullReasoning != "" {
-		output = append(output, OutputItem{
-			Type:   "reasoning",
-			ID:     acc.reasoningItemID,
-			Status: "completed",
-			Summary: []OutputContent{
-				{Type: "summary_text", Text: acc.fullReasoning},
-			},
-		})
-	}
-
-	if acc.messageStarted && acc.fullText != "" {
-		output = append(output, OutputItem{
-			Type:   "message",
-			ID:     acc.messageItemID,
-			Status: "completed",
-			Role:   "assistant",
-			Content: []OutputContent{{
-				Type:        "output_text",
-				Text:        acc.fullText,
-				Annotations: []Annotation{},
-			}},
-		})
-	}
-
-	for _, tc := range acc.toolCalls {
-		output = append(output, OutputItem{
-			Type:      "function_call",
-			ID:        tc.itemID,
-			CallID:    tc.id,
-			Name:      tc.name,
-			Arguments: tc.arguments,
-			Status:    "completed",
-		})
-	}
+	output := completedOutputItems(acc)
 
 	var usageObj *Usage
 	if acc.usage != nil {

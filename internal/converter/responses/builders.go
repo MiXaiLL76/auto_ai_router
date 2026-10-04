@@ -155,3 +155,50 @@ func BuildContentPartDoneEvent(itemID string, outputIndex, contentIndex int, tex
 		"part":          BuildTextPart(text),
 	}
 }
+
+func BuildReasoningSummaryPart(text string) map[string]interface{} {
+	return map[string]interface{}{
+		"type": "summary_text",
+		"text": text,
+	}
+}
+
+func BuildReasoningSummaryPartAddedEvent(itemID string, outputIndex, summaryIndex int) map[string]interface{} {
+	return map[string]interface{}{
+		"type":          "response.reasoning_summary_part.added",
+		"item_id":       itemID,
+		"output_index":  outputIndex,
+		"summary_index": summaryIndex,
+		"part":          BuildReasoningSummaryPart(""),
+	}
+}
+
+func BuildReasoningSummaryTextDeltaEvent(itemID string, outputIndex, summaryIndex int, delta string) map[string]interface{} {
+	return map[string]interface{}{
+		"type":          "response.reasoning_summary_text.delta",
+		"item_id":       itemID,
+		"output_index":  outputIndex,
+		"summary_index": summaryIndex,
+		"delta":         delta,
+	}
+}
+
+func BuildReasoningSummaryTextDoneEvent(itemID string, outputIndex, summaryIndex int, text string) map[string]interface{} {
+	return map[string]interface{}{
+		"type":          "response.reasoning_summary_text.done",
+		"item_id":       itemID,
+		"output_index":  outputIndex,
+		"summary_index": summaryIndex,
+		"text":          text,
+	}
+}
+
+func BuildReasoningSummaryPartDoneEvent(itemID string, outputIndex, summaryIndex int, text string) map[string]interface{} {
+	return map[string]interface{}{
+		"type":          "response.reasoning_summary_part.done",
+		"item_id":       itemID,
+		"output_index":  outputIndex,
+		"summary_index": summaryIndex,
+		"part":          BuildReasoningSummaryPart(text),
+	}
+}
