@@ -1123,3 +1123,48 @@ func TestStreamTransform_ToolCallIDRepeatedOnEveryChunk(t *testing.T) {
 	require.Len(t, capturedResp.Output, 1)
 	assert.Equal(t, `{"city":"Paris"}`, capturedResp.Output[0].Arguments)
 }
+
+// TestStreamTransform_ToolCallNameAfterOpen: a call opened by a chunk without
+// its name must still get the name a later chunk of the same call carries.
+func TestStreamTransform_ToolCallNameAfterOpen(t *testing.T) {
+	stopReason := "tool_calls"
+	input := buildSSEChunk(buildDeltaChunk(map[string]interface{}{"tool_calls": []interface{}{
+		map[string]interface{}{"index": 0, "id": "call_1", "type": "function", "function": map[string]interface{}{"arguments": ""}},
+	}})) +
+		buildSSEChunk(buildDeltaChunk(map[string]interface{}{"tool_calls": []interface{}{
+			map[string]interface{}{"index": 0, "id": "call_1", "function": map[string]interface{}{"name": "get_weather", "arguments": "{}"}},
+		}})) +
+		buildSSEChunk(buildChatChunk("", &stopReason)) +
+		"data: [DONE]\n\n"
+
+	var capturedResp *Response
+	var output bytes.Buffer
+	require.NoError(t, TransformChatStreamToResponses(strings.NewReader(input), &output, "deepseek-v4-pro",
+		func(r *Response) { capturedResp = r }))
+
+	require.NotNil(t, capturedResp)
+	require.Len(t, capturedResp.Output, 1)
+	assert.Equal(t, "get_weather", capturedResp.Output[0].Name)
+	assert.Equal(t, "{}", capturedResp.Output[0].Arguments)
+}
+
+// TestStreamTransform_NegativeToolCallIndexIgnored: a malformed negative tool
+// call index must be skipped, not panic the transform goroutine.
+func TestStreamTransform_NegativeToolCallIndexIgnored(t *testing.T) {
+	stopReason := "stop"
+	input := buildSSEChunk(buildDeltaChunk(map[string]interface{}{"tool_calls": []interface{}{
+		map[string]interface{}{"index": -1, "id": "call_1", "type": "function", "function": map[string]interface{}{"name": "f", "arguments": "{}"}},
+	}})) +
+		buildSSEChunk(buildChatChunk("Ok.", &stopReason)) +
+		"data: [DONE]\n\n"
+
+	var capturedResp *Response
+	var output bytes.Buffer
+	require.NotPanics(t, func() {
+		require.NoError(t, TransformChatStreamToResponses(strings.NewReader(input), &output, "deepseek-v4-pro",
+			func(r *Response) { capturedResp = r }))
+	})
+	require.NotNil(t, capturedResp)
+	require.Len(t, capturedResp.Output, 1)
+	assert.Equal(t, "message", capturedResp.Output[0].Type)
+}

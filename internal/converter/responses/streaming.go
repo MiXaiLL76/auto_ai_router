@@ -437,6 +437,12 @@ func transformChatStreamToResponsesInner(
 
 		// Handle tool call deltas
 		for _, tc := range choice.Delta.ToolCalls {
+			if tc.Index < 0 {
+				// Malformed upstream chunk; indexing with it would panic the
+				// transform goroutine, which has no recover, and take the
+				// whole process down.
+				continue
+			}
 			if !acc.headerEmitted {
 				if err := emitHeaderEvents(writer, acc); err != nil {
 					return err
@@ -484,6 +490,10 @@ func transformChatStreamToResponsesInner(
 				if err := writeSSEWithSeq(writer, "response.output_item.added", itemAddedEvent, acc); err != nil {
 					return err
 				}
+			} else if tc.Function != nil && tc.Function.Name != "" &&
+				tc.Index < len(acc.toolCalls) && acc.toolCalls[tc.Index].name == "" {
+				// The call's name arrived after the chunk that opened it.
+				acc.toolCalls[tc.Index].name = tc.Function.Name
 			}
 
 			// Accumulate arguments

@@ -40,7 +40,10 @@ func TestProxyRequest_ConvertedResponsesRoundTripsReasoning(t *testing.T) {
 			upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				raw, _ := io.ReadAll(r.Body)
 				var body map[string]interface{}
-				require.NoError(t, json.Unmarshal(raw, &body))
+				if !assert.NoError(t, json.Unmarshal(raw, &body)) {
+					w.WriteHeader(http.StatusBadRequest)
+					return
+				}
 				mu.Lock()
 				upstreamBodies = append(upstreamBodies, body)
 				turn := len(upstreamBodies)
