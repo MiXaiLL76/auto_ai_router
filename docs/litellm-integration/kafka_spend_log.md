@@ -97,9 +97,9 @@ The init DDL runs only for an empty ClickHouse data directory. Before deploying 
 2. [`clickhouse/migrations/003_upstream_send_ms.sql`](../../clickhouse/migrations/003_upstream_send_ms.sql) — `upstream_send_ms`;
 3. [`clickhouse/migrations/004_explicit_cache_columns.sql`](../../clickhouse/migrations/004_explicit_cache_columns.sql) — `cache_type` and `explicit_cache_read_cost` (Alibaba/Qwen explicit cache). Without it ClickHouse silently drops both keys, and explicit-cache requests show a cost breakdown that does not add up to `total_cost`.
 
-Every migration uses `ADD COLUMN IF NOT EXISTS`, so re-running one is harmless.
+Every migration is safe to re-run.
 
-Each migration detaches the materialized view, adds the fields to both the MergeTree and Kafka tables, then reattaches the view. For replicated production tables, add the cluster-specific `ON CLUSTER` clause required by your deployment.
+The `Kafka`-engine table doesn't support `ALTER ... ADD COLUMN` (ClickHouse rejects it with `NOT_IMPLEMENTED`), so each migration drops and recreates `air.spend_logs_kafka` and the materialized view with the new columns already in place, while adding the fields to the `MergeTree` table (`air.spend_logs`) with a plain `ALTER ... ADD COLUMN IF NOT EXISTS` instead — that table is never dropped. No events are lost: Kafka tracks consumer progress under `kafka_group_name`, which each migration keeps unchanged, so the recreated table resumes exactly where the old one stopped. For replicated production tables, add the cluster-specific `ON CLUSTER` clause required by your deployment.
 
 After re-enabling publishing, send one synthetic event with non-zero `cached_audio_input_tokens`, `cache_creation_5m_tokens`, `cache_creation_1h_tokens`, `web_search_requests`, and `web_search_cost`. Verify that the row appears in `air.spend_logs` and that `system.kafka_consumers` reports no parse exceptions before completing the rollout.
 
