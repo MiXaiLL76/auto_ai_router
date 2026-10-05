@@ -1,7 +1,9 @@
 package proxy
 
 import (
+	"bytes"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -284,6 +286,75 @@ func TestNativeWebSocketHandshakeAppliesCredentialRequestHeaders(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("no upstream handshake")
 	}
+}
+
+// gorilla writes the handshake with net/http's Request.Write, which also adds its
+// own Go-http-client User-Agent unless the header is present and empty.
+func TestNativeWebSocketHandshakeCanDropUserAgent(t *testing.T) {
+	type seen struct {
+		ua  []string
+		has bool
+	}
+	captured := make(chan seen, 1)
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ua, has := r.Header["User-Agent"]
+		captured <- seen{ua: ua, has: has}
+		http.Error(w, "stop after handshake", http.StatusBadGateway)
+	}))
+	defer upstream.Close()
+	cred := config.CredentialConfig{
+		Name: "upstream", Type: config.ProviderTypeOpenAI, BaseURL: upstream.URL, APIKey: "upstream-key",
+		RPM: 100, TPM: 10000, RequestHeaders: map[string]string{"User-Agent": ""},
+	}
+	prx := NewTestProxyBuilder().WithCredentials(cred).Build()
+	prx.modelManager = models.New(prx.logger, 100, []config.ModelRPMConfig{{Name: "gpt-6-astra", Credential: "upstream", WebSocketResponses: true}})
+	prx.modelManager.LoadModelsFromConfig([]config.CredentialConfig{cred})
+	prx.LiteLLMDB = &nativeWSTestDB{clientAuthTestDB: &clientAuthTestDB{}, entries: make(chan *dbmodels.SpendLogEntry, 1)}
+	setTestModelPrice(prx, "gpt-6-astra", &models.ModelPrice{InputCostPerToken: 1, OutputCostPerToken: 2})
+	server := httptest.NewServer(http.HandlerFunc(prx.HandleWebSocketResponses))
+	defer server.Close()
+	conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http")+"/v1/responses", http.Header{
+		"Authorization": {"Bearer master-key"}, "User-Agent": {blockedClientUserAgent},
+	})
+	require.NoError(t, err)
+	defer func() { _ = conn.Close() }()
+	wsWrite(t, conn, `{"type":"response.create","model":"gpt-6-astra","input":"hi"}`)
+
+	select {
+	case got := <-captured:
+		assert.False(t, got.has, "unexpected User-Agent %q", got.ua)
+	case <-time.After(5 * time.Second):
+		t.Fatal("no upstream handshake")
+	}
+}
+
+// request_headers values may be secrets resolved from os.environ/, so the debug
+// dump of outbound headers names them without their values.
+func TestProxyRequestDebugLogMasksCredentialRequestHeaders(t *testing.T) {
+	upstream := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, requestHeadersCases[0].response)
+	}))
+	defer upstream.Close()
+
+	prx := NewTestProxyBuilder().WithCredentials(config.CredentialConfig{
+		Name: "novita", Type: config.ProviderTypeOpenAI, BaseURL: upstream.URL, APIKey: "provider-key",
+		RPM: -1, TPM: -1, RequestHeaders: map[string]string{"X-Provider-Token": "s3cr3t", "X-Client-Hint": ""},
+	}).Build()
+	var logs bytes.Buffer
+	prx.logger = slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	w := httptest.NewRecorder()
+
+	prx.ProxyRequest(w, newRequestHeadersClientRequest("/v1/chat/completions", requestHeadersCases[0].body))
+
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	out := logs.String()
+	require.Contains(t, out, "Proxy request headers")
+	assert.Contains(t, out, `"X-Provider-Token":"[credential request_headers]"`)
+	assert.NotContains(t, out, "s3cr3t")
+	assert.NotContains(t, out, "provider-key")
+	// A removed header is not in the outbound request, so it is not logged at all.
+	assert.NotContains(t, out, "X-Client-Hint")
 }
 
 // config rejects request_headers that would override internal AIR markers. The

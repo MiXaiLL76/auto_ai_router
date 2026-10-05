@@ -39,6 +39,44 @@ request_headers:
 	assert.Equal(t, cred.RequestHeaders, restored.RequestHeaders)
 }
 
+// Surrounding whitespace never reaches the wire (net/http trims it), so it is
+// dropped at load time and a blank value means "remove", like an empty one.
+func TestCredentialRequestHeadersTrimValues(t *testing.T) {
+	t.Setenv("TEST_PROVIDER_HEADER_PADDED", "  s3cr3t\t")
+	var cred CredentialConfig
+	require.NoError(t, yaml.Unmarshal([]byte(`
+name: novita
+type: openai
+request_headers:
+  User-Agent: "  auto-ai-router/1.0  "
+  X-Inner: "a \t b"
+  X-Blank: "  \t "
+  X-Token: os.environ/TEST_PROVIDER_HEADER_PADDED
+`), &cred))
+	assert.Equal(t, map[string]string{
+		"User-Agent": "auto-ai-router/1.0",
+		"X-Inner":    "a \t b",
+		"X-Blank":    "",
+		"X-Token":    "s3cr3t",
+	}, cred.RequestHeaders)
+}
+
+// Ordinary request headers a provider WAF or gateway may look at stay allowed.
+func TestCredentialRequestHeadersAllowed(t *testing.T) {
+	var cred CredentialConfig
+	require.NoError(t, yaml.Unmarshal([]byte(`
+name: novita
+type: vllm
+request_headers:
+  Accept: application/json
+  Referer: https://router.example
+  X-Title: router
+  Cookie: a=b
+  X-Request-Source: "\u00e9t\u00e9"
+`), &cred))
+	assert.Len(t, cred.RequestHeaders, 5)
+}
+
 func TestCredentialRequestHeadersAbsent(t *testing.T) {
 	var cred CredentialConfig
 	require.NoError(t, yaml.Unmarshal([]byte("name: plain\ntype: openai\nbase_url: https://api.openai.com/v1"), &cred))
@@ -57,6 +95,13 @@ func TestCredentialRequestHeadersRejected(t *testing.T) {
 		{name: "host", headers: "Host: example.com", wantErr: "cannot set Host"},
 		{name: "content type", headers: "Content-Type: text/plain", wantErr: "cannot set Content-Type"},
 		{name: "content length", headers: "Content-Length: 1", wantErr: "cannot set Content-Length"},
+		{name: "content encoding", headers: "Content-Encoding: gzip", wantErr: "cannot set Content-Encoding"},
+		{name: "any content header", headers: "content-language: en", wantErr: "cannot set Content-Language"},
+		{name: "transfer encoding", headers: "Transfer-Encoding: chunked", wantErr: "cannot set Transfer-Encoding"},
+		{name: "expect", headers: "Expect: 100-continue", wantErr: "cannot set Expect"},
+		{name: "origin", headers: "Origin: https://example.com", wantErr: "cannot set Origin"},
+		{name: "proxy connection", headers: "Proxy-Connection: keep-alive", wantErr: "cannot set Proxy-Connection"},
+		{name: "upgrade", headers: "Upgrade: websocket", wantErr: "cannot set Upgrade"},
 		{name: "accept encoding", headers: "Accept-Encoding: gzip", wantErr: "cannot set Accept-Encoding"},
 		{name: "anthropic beta", headers: "anthropic-beta: context-1m-2025-08-07", wantErr: "cannot set Anthropic-Beta"},
 		{name: "anthropic version", headers: "Anthropic-Version: 2023-01-01", wantErr: "cannot set Anthropic-Version"},
@@ -71,6 +116,10 @@ func TestCredentialRequestHeadersRejected(t *testing.T) {
 		{name: "name with colon", headers: "\"X-A:B\": x", wantErr: "invalid header name"},
 		{name: "empty name", headers: "\"\": x", wantErr: "invalid header name"},
 		{name: "value with newline", headers: "X-Injected: \"a\\r\\nX-Evil: 1\"", wantErr: "value contains control characters"},
+		{name: "value with bare lf", headers: "X-Injected: \"a\\nb\"", wantErr: "value contains control characters"},
+		{name: "value with nul", headers: "X-Injected: \"a\\0b\"", wantErr: "value contains control characters"},
+		{name: "value with del", headers: "X-Injected: \"a\\x7Fb\"", wantErr: "value contains control characters"},
+		{name: "non-ascii name", headers: "X-Заголовок: x", wantErr: "invalid header name"},
 		{name: "same header twice", headers: "User-Agent: a\n  user-agent: b", wantErr: "name the same header"},
 	}
 	for _, tt := range tests {
@@ -104,7 +153,29 @@ func TestCredentialRequestHeadersUnsetEnvIsAnError(t *testing.T) {
 	var cred CredentialConfig
 	err := yaml.Unmarshal([]byte("name: test\ntype: openai\nrequest_headers:\n  X-Provider-Token: os.environ/TEST_REQUEST_HEADER_NOT_SET\n"), &cred)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "environment variable TEST_REQUEST_HEADER_NOT_SET is not set")
+	assert.Contains(t, err.Error(), "environment variable TEST_REQUEST_HEADER_NOT_SET is not set or empty")
+}
+
+// A blank variable would otherwise turn into "remove this header" after trimming.
+func TestCredentialRequestHeadersBlankEnvIsAnError(t *testing.T) {
+	t.Setenv("TEST_REQUEST_HEADER_BLANK", " \t ")
+	var cred CredentialConfig
+	err := yaml.Unmarshal([]byte("name: test\ntype: openai\nrequest_headers:\n  X-Provider-Token: os.environ/TEST_REQUEST_HEADER_BLANK\n"), &cred)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "environment variable TEST_REQUEST_HEADER_BLANK is not set or empty")
+}
+
+// The unset variable is reported once, by the returned error, not also by
+// resolveEnvString's generic warning.
+func TestCredentialRequestHeadersUnsetEnvDoesNotWarn(t *testing.T) {
+	var buf bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	var cred CredentialConfig
+	require.Error(t, yaml.Unmarshal([]byte("name: test\ntype: openai\nrequest_headers:\n  X-Provider-Token: os.environ/TEST_REQUEST_HEADER_NOT_SET\n"), &cred))
+	assert.NotContains(t, buf.String(), "TEST_REQUEST_HEADER_NOT_SET")
 }
 
 func TestCredentialRequestHeadersErrorsDoNotEchoValues(t *testing.T) {
@@ -145,19 +216,18 @@ func TestConfigValidateRejectsBadCredentialRequestHeaders(t *testing.T) {
 	assert.Contains(t, err.Error(), "request_headers are not supported for air credentials")
 }
 
-func TestCredentialRequestHeadersArePartOfProviderIdentity(t *testing.T) {
+// Changing a direct credential's request_headers on hot reload must not drop
+// learned provider metadata: they do not change which provider it talks to.
+func TestCredentialRequestHeadersAreNotPartOfProviderIdentity(t *testing.T) {
 	cred := CredentialConfig{Name: "novita", Type: ProviderTypeOpenAI, RequestHeaders: map[string]string{"User-Agent": "a"}}
-	same := cred
-	same.RequestHeaders = map[string]string{"User-Agent": "a"}
-	assert.True(t, cred.SameProviderIdentity(same))
 
 	changed := cred
 	changed.RequestHeaders = map[string]string{"User-Agent": "b"}
-	assert.False(t, cred.SameProviderIdentity(changed))
+	assert.True(t, cred.SameProviderIdentity(changed))
 
 	dropped := cred
 	dropped.RequestHeaders = nil
-	assert.False(t, cred.SameProviderIdentity(dropped))
+	assert.True(t, cred.SameProviderIdentity(dropped))
 }
 
 func TestPrintConfigLogsRequestHeaderNamesOnly(t *testing.T) {

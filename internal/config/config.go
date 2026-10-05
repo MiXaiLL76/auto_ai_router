@@ -4,7 +4,6 @@ package config
 import (
 	"fmt"
 	"log/slog"
-	"maps"
 	"os"
 	"slices"
 	"strconv"
@@ -945,8 +944,11 @@ func (c CredentialConfig) SameProviderIdentity(other CredentialConfig) bool {
 		c.AuthType == other.AuthType &&
 		c.OpenAIProtocol == other.OpenAIProtocol &&
 		c.GoogleProtocol == other.GoogleProtocol &&
-		c.IsFallback == other.IsFallback &&
-		maps.Equal(c.RequestHeaders, other.RequestHeaders)
+		c.IsFallback == other.IsFallback
+	// RequestHeaders are deliberately not part of the identity: the learned
+	// metadata (remote models, provider scopes) exists only for air/proxy
+	// credentials, which cannot have request_headers, and a new User-Agent does
+	// not make a direct provider a different one.
 }
 
 // UnmarshalYAML implements custom unmarshaling for CredentialConfig with env variable support

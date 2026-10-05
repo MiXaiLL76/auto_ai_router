@@ -31,6 +31,35 @@ func TestApplyCredentialRequestHeaders(t *testing.T) {
 	assert.Equal(t, "Bearer provider-key", header.Get("Authorization"))
 }
 
+// The client may send a header several times; the configured value replaces all of them.
+func TestApplyCredentialRequestHeadersReplacesEveryClientValue(t *testing.T) {
+	header := http.Header{"X-Extra": {"one", "two"}, "X-Drop": {"one", "two"}}
+
+	ApplyCredentialRequestHeaders(header, &config.CredentialConfig{RequestHeaders: map[string]string{
+		"X-Extra": "configured",
+		"X-Drop":  "",
+	}})
+
+	assert.Equal(t, []string{"configured"}, header.Values("X-Extra"))
+	_, hasDrop := header["X-Drop"]
+	assert.False(t, hasDrop)
+}
+
+// Credentials built in code skip the YAML trimming; a blank value still removes
+// the header instead of sending an empty one.
+func TestApplyCredentialRequestHeadersBlankValueRemoves(t *testing.T) {
+	header := http.Header{"X-Client-Hint": {"hint"}, "User-Agent": {"Python-urllib/3.11"}}
+
+	ApplyCredentialRequestHeaders(header, &config.CredentialConfig{RequestHeaders: map[string]string{
+		"X-Client-Hint": " \t",
+		"user-agent":    " ",
+	}})
+
+	_, hasHint := header["X-Client-Hint"]
+	assert.False(t, hasHint)
+	assert.Equal(t, []string{""}, header["User-Agent"])
+}
+
 func TestApplyCredentialRequestHeadersNoop(t *testing.T) {
 	header := http.Header{"User-Agent": {"Python-urllib/3.11"}}
 	ApplyCredentialRequestHeaders(header, nil)

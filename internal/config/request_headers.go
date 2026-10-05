@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"maps"
 	"net/textproto"
+	"os"
 	"slices"
 	"strings"
 )
@@ -13,17 +14,20 @@ import (
 // authentication, body framing, response decoding or AIR-to-AIR signalling, so
 // such configs are rejected at load time instead of misbehaving at request time.
 var reservedCredentialRequestHeaders = map[string]string{
-	"Authorization":       "provider authentication comes from api_key/auth_type",
-	"X-Api-Key":           "provider authentication comes from api_key/auth_type",
-	"X-Goog-Api-Key":      "provider authentication comes from api_key",
-	"Host":                "the host comes from base_url",
-	"Content-Length":      "it is derived from the request body",
-	"Content-Type":        "it is derived from the request body",
-	"Transfer-Encoding":   "it is derived from the request body",
-	"Accept-Encoding":     "the router negotiates compression per connection",
-	"Anthropic-Beta":      "the router merges it from the client header, the request body and converter needs",
-	"Anthropic-Version":   "the router pins the Anthropic API version",
+	"Authorization":     "provider authentication comes from api_key/auth_type",
+	"X-Api-Key":         "provider authentication comes from api_key/auth_type",
+	"X-Goog-Api-Key":    "provider authentication comes from api_key",
+	"Host":              "the host comes from base_url",
+	"Transfer-Encoding": "it is derived from the request body",
+	"Expect":            "the HTTP client manages request body transmission",
+	"Accept-Encoding":   "the router negotiates compression per connection",
+	"Anthropic-Beta":    "the router merges it from the client header, the request body and converter needs",
+	"Anthropic-Version": "the router pins the Anthropic API version",
+	// The router strips the client's Origin for Anthropic: it switches the API to
+	// browser CORS authentication.
+	"Origin":              "the router controls it per provider",
 	"Connection":          "it is a hop-by-hop header",
+	"Proxy-Connection":    "it is a hop-by-hop header",
 	"Keep-Alive":          "it is a hop-by-hop header",
 	"Proxy-Authenticate":  "it is a hop-by-hop header",
 	"Proxy-Authorization": "it is a hop-by-hop header; put proxy credentials into proxy_url",
@@ -38,14 +42,17 @@ var reservedCredentialRequestHeaderPrefixes = []struct {
 	prefix string
 	reason string
 }{
+	// Content-Type, Content-Length, Content-Encoding, ... describe the body the router builds.
+	{prefix: "Content-", reason: "it is derived from the request body"},
 	{prefix: "Air-", reason: "it is an internal AIR header"},
 	{prefix: "Sec-Websocket-", reason: "it is a WebSocket handshake header"},
 }
 
 // parseCredentialRequestHeaders resolves os.environ/ values, validates the
 // credential's request_headers and returns them keyed by canonical header name.
-// An env reference that resolves to nothing is an error rather than an empty
-// value, because an empty value means "do not send this header".
+// Values are trimmed of surrounding spaces and tabs (net/http would trim them on
+// the wire anyway), so a blank value means "do not send this header". An env
+// reference that resolves to a blank value is therefore an error instead.
 func parseCredentialRequestHeaders(credName string, credType ProviderType, raw map[string]string) (map[string]string, error) {
 	if len(raw) == 0 {
 		return nil, nil
@@ -54,14 +61,16 @@ func parseCredentialRequestHeaders(credName string, credType ProviderType, raw m
 	resolved := make(map[string]string, len(raw))
 	for _, name := range slices.Sorted(maps.Keys(raw)) {
 		value := raw[name]
-		if strings.HasPrefix(value, envPrefix) {
-			value = resolveEnvString(value)
+		if envVar, ok := strings.CutPrefix(value, envPrefix); ok {
+			// os.Getenv rather than resolveEnvString: an unset variable is reported
+			// once, as the error below, instead of also as a warning.
+			value = trimHeaderFieldValue(os.Getenv(envVar))
 			if value == "" {
-				return nil, fmt.Errorf("credential %s: request_headers[%s]: environment variable %s is not set",
-					credName, name, strings.TrimPrefix(raw[name], envPrefix))
+				return nil, fmt.Errorf("credential %s: request_headers[%s]: environment variable %s is not set or empty",
+					credName, name, envVar)
 			}
 		}
-		resolved[name] = value
+		resolved[name] = trimHeaderFieldValue(value)
 	}
 	if err := validateCredentialRequestHeaders(credName, credType, resolved); err != nil {
 		return nil, err
@@ -137,4 +146,10 @@ func validHeaderFieldValue(value string) bool {
 		}
 	}
 	return true
+}
+
+// trimHeaderFieldValue drops optional whitespace around a field value (RFC 9110
+// section 5.5): spaces and horizontal tabs only.
+func trimHeaderFieldValue(value string) string {
+	return strings.Trim(value, " \t")
 }
