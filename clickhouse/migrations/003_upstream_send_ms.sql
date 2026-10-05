@@ -10,7 +10,13 @@
 -- kafka_group_name is unchanged. air.spend_logs (the MergeTree table) is
 -- only ALTERed, never dropped.
 --
--- Pause AIR Kafka publishing before running this migration. Safe to re-run.
+-- Pause AIR Kafka publishing before running this migration. Safe to re-run
+-- on its own -- but never run it again after
+-- 004_explicit_cache_columns.sql has already been applied: it rebuilds
+-- air.spend_logs_kafka from only this migration's column set, narrowing it
+-- back below the columns 004 already added (see
+-- 002_cache_web_search_columns.sql's doc comment for the confirmed failure
+-- mode this causes). Apply 002/003/004 forward, in order, never backward.
 
 DROP TABLE IF EXISTS air.spend_logs_mv;
 

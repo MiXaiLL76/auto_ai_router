@@ -19,7 +19,14 @@
 -- (broker list, topic, group name, consumer count) into it, and add the
 -- ON CLUSTER clause your deployment needs.
 --
--- Pause AIR Kafka publishing before running this migration. Safe to re-run.
+-- Pause AIR Kafka publishing before running this migration. Safe to re-run
+-- on its own -- but this is currently the last migration in the chain, so
+-- that's the only direction that's safe: once a migration after this one
+-- exists, never run 004 again on its own afterwards, for the same reason
+-- 002_cache_web_search_columns.sql's doc comment spells out -- it would
+-- rebuild air.spend_logs_kafka from only 004's column set, narrowing it
+-- back below whatever the later migration added, and break ingestion with
+-- NUMBER_OF_COLUMNS_DOESNT_MATCH until that later migration is re-applied.
 
 DROP TABLE IF EXISTS air.spend_logs_mv;
 
