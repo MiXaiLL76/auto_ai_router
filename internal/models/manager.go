@@ -339,20 +339,21 @@ type Manager struct {
 	dynamicModelPriorityTiers    map[string]map[string][]httputil.ModelPriorityTier // model ID -> proxy/AIR credential -> per-priority-tier breakdown learned from upstream /health
 	dynamicModelSourceCreds      map[string]map[string]string                       // model ID -> local (proxy/AIR) credential -> real upstream credential name learned from /health
 	dynamicModelScopes           map[string]map[string]ScopeMetadata
-	dbModelNames                 map[string]bool                      // model names that were loaded from LiteLLM DB (for hot-reload diffing)
-	modelAliases                 map[string]string                    // alias -> real model name (from model_alias config)
-	clientModelIDs               map[string]struct{}                  // exact advertised canonical client IDs
-	clientModelSurfaceConfigured bool                                 // distinguishes an omitted boundary from an explicit empty boundary
-	publicModelAliases           map[string]string                    // effective client alias -> canonical LiteLLM public deployment identity
-	staticPublicModelAliases     map[string]string                    // public_model_alias from config; wins over the DB ones
-	dbPublicModelAliases         map[string]string                    // LiteLLM router_settings.model_group_alias
-	acceptedModelAliases         map[string]string                    // accepted client alias -> canonical model, hidden from discovery
-	externalModelIDs             map[string]struct{}                  // client-visible models handled outside the inference balancer
-	modelRealNames               map[string]string                    // alias name -> real model name (global, no specific credential)
-	modelRealNamesPerCred        map[string]map[string]string         // credential -> alias -> real model name (for credential-specific entries)
-	modelDefaultParams           map[string]map[string]map[string]any // credential -> alias -> request-body defaults (DB-sourced vLLM deployments only)
-	credentialMappingsReady      bool                                 // true after static/DB credential mappings have been initialized
-	defaultModelsRPM             int                                  // default RPM for models
+	dbModelNames                 map[string]bool                                  // model names that were loaded from LiteLLM DB (for hot-reload diffing)
+	modelAliases                 map[string]string                                // alias -> real model name (from model_alias config)
+	clientModelIDs               map[string]struct{}                              // exact advertised canonical client IDs
+	clientModelSurfaceConfigured bool                                             // distinguishes an omitted boundary from an explicit empty boundary
+	publicModelAliases           map[string]string                                // effective client alias -> canonical LiteLLM public deployment identity
+	staticPublicModelAliases     map[string]string                                // public_model_alias from config; wins over the DB ones
+	dbPublicModelAliases         map[string]string                                // LiteLLM router_settings.model_group_alias
+	acceptedModelAliases         map[string]string                                // accepted client alias -> canonical model, hidden from discovery
+	externalModelIDs             map[string]struct{}                              // client-visible models handled outside the inference balancer
+	modelRealNames               map[string]string                                // alias name -> real model name (global, no specific credential)
+	modelRealNamesPerCred        map[string]map[string]string                     // credential -> alias -> real model name (for credential-specific entries)
+	modelDefaultParams           map[string]map[string]map[string]any             // credential -> alias -> request-body defaults (DB-sourced vLLM deployments only)
+	modelReasoningEffortMaps     map[string]map[string]*config.ReasoningEffortMap // alias -> credential ("" = every credential) -> reasoning_effort_map from config.yaml
+	credentialMappingsReady      bool                                             // true after static/DB credential mappings have been initialized
+	defaultModelsRPM             int                                              // default RPM for models
 	logger                       *slog.Logger
 	credentials                  []config.CredentialConfig // credentials for fetching remote models
 	credentialsConfigured        bool
@@ -383,6 +384,7 @@ func New(logger *slog.Logger, defaultModelsRPM int, staticModels []config.ModelR
 		modelRealNames:              make(map[string]string),
 		modelRealNamesPerCred:       make(map[string]map[string]string),
 		modelDefaultParams:          make(map[string]map[string]map[string]any),
+		modelReasoningEffortMaps:    make(map[string]map[string]*config.ReasoningEffortMap),
 		modelWebSocketResponses:     make(map[string]bool),
 		modelPassthroughResponses:   make(map[string]*bool),
 		modelPassthroughMessages:    make(map[string]*bool),
@@ -429,6 +431,12 @@ func New(logger *slog.Logger, defaultModelsRPM int, staticModels []config.ModelR
 					"alias", staticModel.Name,
 					"real", staticModel.Model,
 					"credential", staticModel.Credential)
+			}
+			if staticModel.ReasoningEffortMap != nil {
+				if m.modelReasoningEffortMaps[staticModel.Name] == nil {
+					m.modelReasoningEffortMaps[staticModel.Name] = make(map[string]*config.ReasoningEffortMap)
+				}
+				m.modelReasoningEffortMaps[staticModel.Name][staticModel.Credential] = staticModel.ReasoningEffortMap
 			}
 			// Register explicit passthrough_responses override if set
 			if staticModel.PassthroughResponses != nil {
@@ -507,6 +515,19 @@ func (m *Manager) GetDefaultParamsForCredential(alias, credential string) map[st
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.modelDefaultParams[credential][alias]
+}
+
+// GetReasoningEffortMap returns the reasoning_effort_map configured for a model
+// alias served by a credential: the entry bound to that credential, else the
+// entry without a credential. nil when the model has none.
+func (m *Manager) GetReasoningEffortMap(alias, credential string) *config.ReasoningEffortMap {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	byCred := m.modelReasoningEffortMaps[alias]
+	if rem, ok := byCred[credential]; ok {
+		return rem
+	}
+	return byCred[""]
 }
 
 // GetAliasesForCredentialRealModel returns route-visible model IDs on a

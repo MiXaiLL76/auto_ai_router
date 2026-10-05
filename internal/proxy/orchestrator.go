@@ -289,8 +289,9 @@ func (p *Proxy) orchestrateRequest(
 	}, true
 }
 
-// prepareRequestForCredential builds the outbound request for a credential and, for
-// a vLLM deployment, fills in the deployment's default request params (LiteLLM
+// prepareRequestForCredential builds the outbound request for a credential, cleans
+// up client params the upstream would reject (see sanitizeClientParams) and, for a
+// vLLM deployment, fills in the deployment's default request params (LiteLLM
 // litellm_params such as chat_template_kwargs or temperature). Every dispatch path
 // (first attempt, retry, fallback) goes through here, so a retried request keeps the
 // same defaults.
@@ -309,7 +310,11 @@ func (p *Proxy) prepareRequestForCredential(
 ) (credentialPreparedRequest, error) {
 	req, err := p.buildCredentialRequest(r, baseBody, baseProxyBody, modelID, baseRealModelID,
 		basePath, streaming, cred, isResponsesAPI, prevEntryHandled, stickyCacheEligible)
-	if err != nil || cred.Type != config.ProviderTypeVLLM || p.modelManager == nil ||
+	if err != nil {
+		return req, err
+	}
+	req.body = p.sanitizeClientParams(r, modelID, cred, req)
+	if cred.Type != config.ProviderTypeVLLM || p.modelManager == nil ||
 		!strings.HasSuffix(req.path, "/chat/completions") {
 		return req, err
 	}
@@ -317,6 +322,35 @@ func (p *Proxy) prepareRequestForCredential(
 		req.body = openai.ApplyDefaultParams(req.body, defaults)
 	}
 	return req, nil
+}
+
+// sanitizeClientParams fixes client params that would only earn a 400 from the
+// upstream, on OpenAI-shaped bodies (Chat Completions, and Responses forwarded
+// natively): it drops an empty tools array with its tool_choice and
+// parallel_tool_calls, and rewrites the reasoning effort through the model's
+// reasoning_effort_map. Proxy-like credentials are skipped: the peer router owns
+// that model's config and does the same on its side.
+func (p *Proxy) sanitizeClientParams(r *http.Request, modelID string, cred *config.CredentialConfig, req credentialPreparedRequest) []byte {
+	if cred.IsProxyLike() ||
+		(!strings.HasSuffix(req.path, "/chat/completions") && !req.passthroughResponses && !req.nativeResponses) {
+		return req.body
+	}
+	body := openai.DropEmptyTools(req.body)
+	if p.modelManager == nil {
+		return body
+	}
+	effortMap := p.modelManager.GetReasoningEffortMap(modelID, cred.Name)
+	if effortMap == nil {
+		return body
+	}
+	return openai.MapReasoningEffort(body, func(v string) (string, bool) {
+		mapped, changed := effortMap.Resolve(v)
+		if changed {
+			p.logger.DebugContext(r.Context(), "Rewrote reasoning effort via reasoning_effort_map",
+				"model", modelID, "credential", cred.Name, "from", v, "to", mapped)
+		}
+		return mapped, changed
+	})
 }
 
 func (p *Proxy) buildCredentialRequest(

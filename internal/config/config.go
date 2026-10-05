@@ -167,6 +167,11 @@ type ModelRPMConfig struct {
 	// Explicit true/false overrides the default.
 	PassthroughMessages *bool `yaml:"passthrough_messages,omitempty"`
 
+	// ReasoningEffortMap rewrites the client's reasoning effort (chat
+	// reasoning_effort, chat_template_kwargs.reasoning_effort, Responses
+	// reasoning.effort) into a value this model accepts. nil = sent as is.
+	ReasoningEffortMap *ReasoningEffortMap `yaml:"reasoning_effort_map,omitempty"`
+
 	// DefaultParams are request-body defaults applied to a vLLM deployment when the
 	// client did not send the same key (LiteLLM deployment litellm_params such as
 	// chat_template_kwargs, temperature, top_k). Populated only by the database
@@ -177,15 +182,16 @@ type ModelRPMConfig struct {
 // UnmarshalYAML implements custom unmarshaling for ModelRPMConfig with env variable support.
 func (m *ModelRPMConfig) UnmarshalYAML(value *yaml.Node) error {
 	type tempConfig struct {
-		Name                 string `yaml:"name"`
-		Model                string `yaml:"model,omitempty"`
-		RPM                  string `yaml:"rpm"`
-		TPM                  string `yaml:"tpm"`
-		Weight               string `yaml:"weight"`
-		Credential           string `yaml:"credential,omitempty"`
-		PassthroughResponses string `yaml:"passthrough_responses,omitempty"`
-		WebSocketResponses   string `yaml:"websocket_responses,omitempty"`
-		PassthroughMessages  string `yaml:"passthrough_messages,omitempty"`
+		Name                 string              `yaml:"name"`
+		Model                string              `yaml:"model,omitempty"`
+		RPM                  string              `yaml:"rpm"`
+		TPM                  string              `yaml:"tpm"`
+		Weight               string              `yaml:"weight"`
+		Credential           string              `yaml:"credential,omitempty"`
+		PassthroughResponses string              `yaml:"passthrough_responses,omitempty"`
+		WebSocketResponses   string              `yaml:"websocket_responses,omitempty"`
+		PassthroughMessages  string              `yaml:"passthrough_messages,omitempty"`
+		ReasoningEffortMap   *ReasoningEffortMap `yaml:"reasoning_effort_map,omitempty"`
 	}
 
 	var temp tempConfig
@@ -198,6 +204,10 @@ func (m *ModelRPMConfig) UnmarshalYAML(value *yaml.Node) error {
 	m.Credential = resolveEnvString(temp.Credential)
 	m.PassthroughResponses = nil
 	m.PassthroughMessages = nil
+	m.ReasoningEffortMap = nil
+	if !temp.ReasoningEffortMap.IsEmpty() {
+		m.ReasoningEffortMap = temp.ReasoningEffortMap
+	}
 
 	var err error
 	if m.WebSocketResponses, err = parseField(temp.WebSocketResponses, false, strconv.ParseBool, "websocket_responses"); err != nil {
@@ -241,6 +251,7 @@ func (m *ModelRPMConfig) UnmarshalYAML(value *yaml.Node) error {
 type Config struct {
 	Server               ServerConfig               `yaml:"server"`
 	Fail2Ban             Fail2BanConfig             `yaml:"fail2ban,omitempty"`
+	Retry                RetryConfig                `yaml:"retry,omitempty"`
 	Credentials          []CredentialConfig         `yaml:"credentials"`
 	Monitoring           MonitoringConfig           `yaml:"monitoring"`
 	Models               []ModelRPMConfig           `yaml:"models,omitempty"`
@@ -273,6 +284,7 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 	type RawConfig struct {
 		Server               ServerConfig               `yaml:"server"`
 		Fail2Ban             Fail2BanConfig             `yaml:"fail2ban,omitempty"`
+		Retry                RetryConfig                `yaml:"retry,omitempty"`
 		Credentials          []CredentialConfig         `yaml:"credentials"`
 		Monitoring           MonitoringConfig           `yaml:"monitoring"`
 		Models               []ModelRPMConfig           `yaml:"models,omitempty"`
@@ -297,6 +309,7 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 	// Copy values to actual config
 	c.Server = raw.Server
 	c.Fail2Ban = raw.Fail2Ban
+	c.Retry = raw.Retry
 	c.Credentials = raw.Credentials
 	c.Monitoring = raw.Monitoring
 	c.Models = raw.Models

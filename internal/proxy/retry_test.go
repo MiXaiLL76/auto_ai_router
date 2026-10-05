@@ -192,7 +192,7 @@ func TestShouldRetryWithFallback_EmptyResponseBody(t *testing.T) {
 	assert.Equal(t, RetryReasonServerErr, reason)
 }
 
-func TestIsRetryableContent_ContentPolicyViolation(t *testing.T) {
+func TestShouldRetryWithFallback_ContentPolicyMarkers(t *testing.T) {
 	// Content policy strings are treated as non-retryable (provider-specific business logic)
 	tests := []struct {
 		name     string
@@ -210,13 +210,13 @@ func TestIsRetryableContent_ContentPolicyViolation(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := isRetryableContent([]byte(tt.content))
+			result, _ := ShouldRetryWithFallback(http.StatusServiceUnavailable, []byte(tt.content))
 			assert.Equal(t, tt.expected, result)
 		})
 	}
 }
 
-func TestIsRetryableContent_ModelErrors(t *testing.T) {
+func TestShouldRetryWithFallback_ModelErrorBodies(t *testing.T) {
 	tests := []struct {
 		name     string
 		content  string
@@ -234,7 +234,7 @@ func TestIsRetryableContent_ModelErrors(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := isRetryableContent([]byte(tt.content))
+			result, _ := ShouldRetryWithFallback(http.StatusServiceUnavailable, []byte(tt.content))
 			assert.Equal(t, tt.expected, result)
 		})
 	}
