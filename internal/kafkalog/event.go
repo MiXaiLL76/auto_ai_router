@@ -50,16 +50,21 @@ type SpendEvent struct {
 	ServerVersion  string `json:"server_version"`
 	ServerCommit   string `json:"server_commit"`
 
-	PromptTokens             int    `json:"prompt_tokens"`
-	CompletionTokens         int    `json:"completion_tokens"`
-	TotalTokens              int    `json:"total_tokens"`
-	AudioInputTokens         int    `json:"audio_input_tokens"`
-	AudioOutputTokens        int    `json:"audio_output_tokens"`
-	CachedInputTokens        int    `json:"cached_input_tokens"`
-	CachedAudioInputTokens   int    `json:"cached_audio_input_tokens"`
-	CacheCreationTokens      int    `json:"cache_creation_tokens"`
-	CacheCreation5mTokens    int    `json:"cache_creation_5m_tokens"`
-	CacheCreation1hTokens    int    `json:"cache_creation_1h_tokens"`
+	PromptTokens           int `json:"prompt_tokens"`
+	CompletionTokens       int `json:"completion_tokens"`
+	TotalTokens            int `json:"total_tokens"`
+	AudioInputTokens       int `json:"audio_input_tokens"`
+	AudioOutputTokens      int `json:"audio_output_tokens"`
+	CachedInputTokens      int `json:"cached_input_tokens"`
+	CachedAudioInputTokens int `json:"cached_audio_input_tokens"`
+	CacheCreationTokens    int `json:"cache_creation_tokens"`
+	CacheCreation5mTokens  int `json:"cache_creation_5m_tokens"`
+	CacheCreation1hTokens  int `json:"cache_creation_1h_tokens"`
+	// CacheType is the explicit-cache mode marker (converter.CacheTypeExplicit,
+	// i.e. "ephemeral", for Alibaba/Qwen) — present even when the request's
+	// cache cost ended up zero (no explicit tariff configured, or free), so
+	// the cache mode is still visible for spend analysis.
+	CacheType                string `json:"cache_type,omitempty"`
 	CachedOutputTokens       int    `json:"cached_output_tokens"`
 	ReasoningTokens          int    `json:"reasoning_tokens"`
 	AcceptedPredictionTokens int    `json:"accepted_prediction_tokens"`
@@ -71,19 +76,20 @@ type SpendEvent struct {
 	WebSearchRequests        int    `json:"web_search_requests"`
 	WebSearchContextSize     string `json:"web_search_context_size,omitempty"`
 
-	InputCost         float64 `json:"input_cost"`
-	OutputCost        float64 `json:"output_cost"`
-	AudioInputCost    float64 `json:"audio_input_cost"`
-	AudioOutputCost   float64 `json:"audio_output_cost"`
-	ReasoningCost     float64 `json:"reasoning_cost"`
-	CachedInputCost   float64 `json:"cached_input_cost"`
-	CacheCreationCost float64 `json:"cache_creation_cost"`
-	CachedOutputCost  float64 `json:"cached_output_cost"`
-	PredictionCost    float64 `json:"prediction_cost"`
-	ImageCost         float64 `json:"image_cost"`
-	VideoInputCost    float64 `json:"video_input_cost"`
-	WebSearchCost     float64 `json:"web_search_cost"`
-	TotalCost         float64 `json:"total_cost"`
+	InputCost             float64 `json:"input_cost"`
+	OutputCost            float64 `json:"output_cost"`
+	AudioInputCost        float64 `json:"audio_input_cost"`
+	AudioOutputCost       float64 `json:"audio_output_cost"`
+	ReasoningCost         float64 `json:"reasoning_cost"`
+	CachedInputCost       float64 `json:"cached_input_cost"`
+	ExplicitCacheReadCost float64 `json:"explicit_cache_read_cost"`
+	CacheCreationCost     float64 `json:"cache_creation_cost"`
+	CachedOutputCost      float64 `json:"cached_output_cost"`
+	PredictionCost        float64 `json:"prediction_cost"`
+	ImageCost             float64 `json:"image_cost"`
+	VideoInputCost        float64 `json:"video_input_cost"`
+	WebSearchCost         float64 `json:"web_search_cost"`
+	TotalCost             float64 `json:"total_cost"`
 
 	APIKeyHash     string `json:"api_key_hash"`
 	UserID         string `json:"user_id"`

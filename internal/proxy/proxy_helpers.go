@@ -706,6 +706,7 @@ func buildMetadata(hashedToken string, tokenInfo *litellmdb.TokenInfo, errorMsg 
 		"cached_audio_tokens":          0,
 		"cache_creation_tokens":        0,
 		"cache_creation_token_details": nil,
+		"cache_type":                   nil,
 	}
 	completionTokensDetails := map[string]interface{}{
 		"text_tokens":                nil,
@@ -730,6 +731,9 @@ func buildMetadata(hashedToken string, tokenInfo *litellmdb.TokenInfo, errorMsg 
 		promptTokensDetails["cached_tokens"] = usage.CachedInputTokens
 		promptTokensDetails["cached_audio_tokens"] = usage.CachedAudioInputTokens
 		promptTokensDetails["cache_creation_tokens"] = usage.CacheCreationTokens
+		if usage.CacheType != "" {
+			promptTokensDetails["cache_type"] = usage.CacheType
+		}
 		if usage.CacheCreation5mTokens > 0 || usage.CacheCreation1hTokens > 0 {
 			promptTokensDetails["cache_creation_token_details"] = map[string]interface{}{
 				"ephemeral_5m_input_tokens": usage.CacheCreation5mTokens,
@@ -767,6 +771,7 @@ func buildMetadata(hashedToken string, tokenInfo *litellmdb.TokenInfo, errorMsg 
 			"cached_audio_tokens":          promptTokensDetails["cached_audio_tokens"],
 			"cache_creation_tokens":        promptTokensDetails["cache_creation_tokens"],
 			"cache_creation_token_details": promptTokensDetails["cache_creation_token_details"],
+			"cache_type":                   promptTokensDetails["cache_type"],
 		},
 		"completion_tokens_details": map[string]interface{}{
 			"text_tokens":                completionTokensDetails["text_tokens"],
@@ -783,23 +788,24 @@ func buildMetadata(hashedToken string, tokenInfo *litellmdb.TokenInfo, errorMsg 
 	var costBreakdown interface{}
 	if costs != nil {
 		costBreakdown = map[string]interface{}{
-			"input_cost":          costs.InputCost,
-			"output_cost":         costs.OutputCost,
-			"reasoning_cost":      costs.ReasoningCost,
-			"cached_input_cost":   costs.CachedInputCost,
-			"cache_creation_cost": costs.CacheCreationCost,
-			"audio_input_cost":    costs.AudioInputCost,
-			"image_cost":          costs.ImageCost,
-			"video_input_cost":    costs.VideoInputCost,
-			"total_cost":          costs.TotalCost,
-			"original_cost":       costs.TotalCost - costs.MarginTotalAmount,
-			"margin_percent":      costs.MarginPercent,
-			"discount_amount":     0.0,
-			"tool_usage_cost":     costs.WebSearchCost,
-			"web_search_cost":     costs.WebSearchCost,
-			"discount_percent":    0.0,
-			"margin_fixed_amount": costs.MarginFixedAmount,
-			"margin_total_amount": costs.MarginTotalAmount,
+			"input_cost":               costs.InputCost,
+			"output_cost":              costs.OutputCost,
+			"reasoning_cost":           costs.ReasoningCost,
+			"cached_input_cost":        costs.CachedInputCost,
+			"explicit_cache_read_cost": costs.ExplicitCachedInputCost,
+			"cache_creation_cost":      costs.CacheCreationCost,
+			"audio_input_cost":         costs.AudioInputCost,
+			"image_cost":               costs.ImageCost,
+			"video_input_cost":         costs.VideoInputCost,
+			"total_cost":               costs.TotalCost,
+			"original_cost":            costs.TotalCost - costs.MarginTotalAmount,
+			"margin_percent":           costs.MarginPercent,
+			"discount_amount":          0.0,
+			"tool_usage_cost":          costs.WebSearchCost,
+			"web_search_cost":          costs.WebSearchCost,
+			"discount_percent":         0.0,
+			"margin_fixed_amount":      costs.MarginFixedAmount,
+			"margin_total_amount":      costs.MarginTotalAmount,
 		}
 	}
 

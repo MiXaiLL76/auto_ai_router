@@ -167,6 +167,24 @@ type ModelRPMConfig struct {
 	// Explicit true/false overrides the default.
 	PassthroughMessages *bool `yaml:"passthrough_messages,omitempty"`
 
+	// ResponsesOnly marks a model whose upstream only accepts OpenAI's native
+	// /v1/responses endpoint and rejects /v1/chat/completions outright (some
+	// OpenAI reasoning-tier deployments are Responses-API-exclusive). When
+	// true, a client request to /v1/chat/completions for this model is
+	// converted to a Responses API request, sent to the provider's
+	// /v1/responses, and the Responses API response/stream is converted back
+	// to Chat Completions shape before reaching the client -- the mirror
+	// image of PassthroughResponses/the existing Responses->Chat conversion,
+	// in the opposite direction. Default false: nil/omitted means the model
+	// is called via /v1/chat/completions as normal.
+	//
+	// Coverage: only /v1/chat/completions and /v1/responses are handled. A
+	// client calling this model via /v1/messages still gets converted to
+	// /v1/chat/completions and sent to the (Responses-API-exclusive)
+	// upstream, which will reject it -- there is no Messages<->Responses
+	// path for this flag.
+	ResponsesOnly bool `yaml:"responses_only,omitempty"`
+
 	// DefaultParams are request-body defaults applied to a vLLM deployment when the
 	// client did not send the same key (LiteLLM deployment litellm_params such as
 	// chat_template_kwargs, temperature, top_k). Populated only by the database
@@ -186,6 +204,7 @@ func (m *ModelRPMConfig) UnmarshalYAML(value *yaml.Node) error {
 		PassthroughResponses string `yaml:"passthrough_responses,omitempty"`
 		WebSocketResponses   string `yaml:"websocket_responses,omitempty"`
 		PassthroughMessages  string `yaml:"passthrough_messages,omitempty"`
+		ResponsesOnly        string `yaml:"responses_only,omitempty"`
 	}
 
 	var temp tempConfig
@@ -201,6 +220,9 @@ func (m *ModelRPMConfig) UnmarshalYAML(value *yaml.Node) error {
 
 	var err error
 	if m.WebSocketResponses, err = parseField(temp.WebSocketResponses, false, strconv.ParseBool, "websocket_responses"); err != nil {
+		return err
+	}
+	if m.ResponsesOnly, err = parseField(temp.ResponsesOnly, false, strconv.ParseBool, "responses_only for model '"+m.Name+"'"); err != nil {
 		return err
 	}
 	if m.RPM, err = parseField(temp.RPM, 0, strconv.Atoi, "rpm for model '"+m.Name+"'"); err != nil {
@@ -845,6 +867,14 @@ type CredentialConfig struct {
 
 	// Proxy/AIR remote-router specific fields
 	IsFallback bool `yaml:"is_fallback,omitempty"`
+
+	// RequestHeaders are set on every upstream request sent with this direct
+	// provider credential (not air/proxy), replacing whatever the client sent
+	// under the same name; an empty value removes the header instead. Keys are
+	// canonical header names.
+	// Typical use: a fixed User-Agent for a provider whose WAF rejects some
+	// client User-Agents (Novita's Cloudflare answers Python-urllib with 403/1010).
+	RequestHeaders map[string]string `yaml:"request_headers,omitempty"`
 }
 
 func (c CredentialConfig) VisibleTo(visibility scope.Context) bool {
@@ -937,6 +967,10 @@ func (c CredentialConfig) SameProviderIdentity(other CredentialConfig) bool {
 		c.OpenAIProtocol == other.OpenAIProtocol &&
 		c.GoogleProtocol == other.GoogleProtocol &&
 		c.IsFallback == other.IsFallback
+	// RequestHeaders are deliberately not part of the identity: the learned
+	// metadata (remote models, provider scopes) exists only for air/proxy
+	// credentials, which cannot have request_headers, and a new User-Agent does
+	// not make a direct provider a different one.
 }
 
 // UnmarshalYAML implements custom unmarshaling for CredentialConfig with env variable support
@@ -966,6 +1000,8 @@ func (c *CredentialConfig) UnmarshalYAML(value *yaml.Node) error {
 		CredentialsJSON  string           `yaml:"credentials_json,omitempty"`
 		IsFallback       string           `yaml:"is_fallback,omitempty"`
 		Models           []ModelRPMConfig `yaml:"models,omitempty"`
+
+		RequestHeaders map[string]string `yaml:"request_headers,omitempty"`
 	}
 
 	var temp tempConfig
@@ -1032,6 +1068,10 @@ func (c *CredentialConfig) UnmarshalYAML(value *yaml.Node) error {
 	}
 	// Copy models decoded via YAML anchors / inline definitions
 	c.Models = temp.Models
+
+	if c.RequestHeaders, err = parseCredentialRequestHeaders(c.Name, c.Type, temp.RequestHeaders); err != nil {
+		return err
+	}
 
 	if _, err := ParseProxyURL(c.ProxyURL); err != nil {
 		return fmt.Errorf("credential %s: %w", c.Name, err)
@@ -1518,6 +1558,7 @@ func (l *LiteLLMDBConfig) UnmarshalYAML(value *yaml.Node) error {
 		EnforceKeyRateLimits             string `yaml:"enforce_key_rate_limits"`
 		DefaultEstimatedCompletionTokens string `yaml:"default_estimated_completion_tokens"`
 		DailySpendTimezone               string `yaml:"daily_spend_timezone"`
+		EnableCostMargin                 string `yaml:"enable_cost_margin"`
 	}
 
 	var temp tempConfig
@@ -1549,6 +1590,9 @@ func (l *LiteLLMDBConfig) UnmarshalYAML(value *yaml.Node) error {
 		return err
 	}
 	if l.EnforceKeyRateLimits, err = parseField(temp.EnforceKeyRateLimits, false, strconv.ParseBool, "litellm_db.enforce_key_rate_limits"); err != nil {
+		return err
+	}
+	if l.EnableCostMargin, err = parseField(temp.EnableCostMargin, false, strconv.ParseBool, "litellm_db.enable_cost_margin"); err != nil {
 		return err
 	}
 
@@ -2152,6 +2196,9 @@ func (c *Config) Validate() error {
 		}
 		if cred.OpenAIProtocol && cred.GoogleProtocol {
 			return fmt.Errorf("credential %s: openai_proto and google_proto are mutually exclusive", cred.Name)
+		}
+		if err := validateCredentialRequestHeaders(cred.Name, cred.Type, cred.RequestHeaders); err != nil {
+			return err
 		}
 
 		// Validate by provider type

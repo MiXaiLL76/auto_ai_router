@@ -12,6 +12,8 @@ import (
 	// separately from this file's other encoding/json uses, which stay on stdlib.
 	goccyjson "github.com/goccy/go-json"
 	"github.com/tiktoken-go/tokenizer"
+
+	"github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
 )
 
 // Fixed OpenAI Chat Completions framing tokens around messages and the assistant reply.
@@ -529,11 +531,7 @@ func appendChatCompletionDeltaText(b *strings.Builder, payload []byte) {
 	}
 	for _, choice := range data.Choices {
 		appendDeltaValueText(b, choice.Delta.Content)
-		if choice.Delta.ReasoningContent != nil {
-			appendDeltaValueText(b, choice.Delta.ReasoningContent)
-		} else {
-			appendDeltaValueText(b, choice.Delta.Reasoning)
-		}
+		appendDeltaValueText(b, converterutil.PickReasoningField(choice.Delta.ReasoningContent, choice.Delta.Reasoning))
 		b.WriteString(choice.Delta.Refusal)
 		if choice.Delta.FunctionCall != nil {
 			b.WriteString(choice.Delta.FunctionCall.Name)

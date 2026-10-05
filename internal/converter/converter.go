@@ -611,6 +611,12 @@ type responsesUsageDetails struct {
 		Ephemeral5mInputTokens int `json:"ephemeral_5m_input_tokens,omitempty"`
 		Ephemeral1hInputTokens int `json:"ephemeral_1h_input_tokens,omitempty"`
 	} `json:"cache_creation,omitempty"`
+	// CacheType is our own extension to Anthropic's native usage schema (see
+	// anthropic.AnthropicUsage.CacheType) carrying the explicit-cache marker
+	// through the Chat Completions -> Messages API conversion, flat alongside
+	// CacheReadInputTokens rather than nested like the Responses API shape
+	// below.
+	CacheType          string `json:"cache_type,omitempty"`
 	InputTokensDetails struct {
 		CachedTokens              int `json:"cached_tokens,omitempty"`
 		CachedAudioTokens         int `json:"cached_audio_tokens,omitempty"`
@@ -620,10 +626,11 @@ type responsesUsageDetails struct {
 			Ephemeral5mInputTokens int `json:"ephemeral_5m_input_tokens,omitempty"`
 			Ephemeral1hInputTokens int `json:"ephemeral_1h_input_tokens,omitempty"`
 		} `json:"cache_creation_token_details,omitempty"`
-		ImageTokens int `json:"image_tokens,omitempty"`
-		VideoTokens int `json:"video_tokens,omitempty"`
-		TextTokens  int `json:"text_tokens,omitempty"`
-		AudioTokens int `json:"audio_tokens,omitempty"`
+		ImageTokens int    `json:"image_tokens,omitempty"`
+		VideoTokens int    `json:"video_tokens,omitempty"`
+		TextTokens  int    `json:"text_tokens,omitempty"`
+		AudioTokens int    `json:"audio_tokens,omitempty"`
+		CacheType   string `json:"cache_type,omitempty"`
 	} `json:"input_tokens_details,omitempty"`
 	OutputTokensDetails struct {
 		AudioTokens     int `json:"audio_tokens,omitempty"`
@@ -668,10 +675,21 @@ type tokenUsageShapeUsage struct {
 			Ephemeral5mInputTokens int `json:"ephemeral_5m_input_tokens,omitempty"`
 			Ephemeral1hInputTokens int `json:"ephemeral_1h_input_tokens,omitempty"`
 		} `json:"cache_creation_token_details,omitempty"`
+		// Alibaba returns the explicit cache creation TTL detail under
+		// cache_creation.ephemeral_5m_input_tokens (no _token_details suffix).
+		CacheCreation struct {
+			Ephemeral5mInputTokens int `json:"ephemeral_5m_input_tokens,omitempty"`
+			Ephemeral1hInputTokens int `json:"ephemeral_1h_input_tokens,omitempty"`
+		} `json:"cache_creation,omitempty"`
 		AudioTokens int `json:"audio_tokens,omitempty"`
 		TextTokens  int `json:"text_tokens,omitempty"`
 		ImageTokens int `json:"image_tokens,omitempty"`
 		VideoTokens int `json:"video_tokens,omitempty"`
+		// CacheType is Alibaba's explicit cache mode marker:
+		// "ephemeral" when the request used an explicit cache marker, absent
+		// otherwise (implicit cache). Explicit and implicit cache are mutually
+		// exclusive — see TokenUsage.CacheType.
+		CacheType string `json:"cache_type,omitempty"`
 		converterutil.CachingTokensExtension
 	} `json:"prompt_tokens_details,omitempty"`
 	CompletionTokensDetails struct {
@@ -802,6 +820,15 @@ func tokenUsageFromShape(resp *tokenUsageResponseShape, opts TokenUsageExtractio
 	if cachedTokens == 0 {
 		cachedTokens = resp.Usage.InputTokensDetails.CachedTokens
 	}
+	cacheType := resp.Usage.PromptTokensDetails.CacheType
+	if cacheType == "" {
+		cacheType = resp.Usage.InputTokensDetails.CacheType
+	}
+	if cacheType == "" {
+		// Flat Anthropic/Messages-API-shaped extension field (see
+		// responsesUsageDetails.CacheType's doc comment).
+		cacheType = resp.Usage.CacheType
+	}
 	if cachedTokens == 0 && resp.Usage.CacheReadInputTokens > 0 {
 		cachedTokens = resp.Usage.CacheReadInputTokens
 		anthropicFlatCacheRead = true
@@ -809,6 +836,12 @@ func tokenUsageFromShape(resp *tokenUsageResponseShape, opts TokenUsageExtractio
 	cacheCreationTokens := resp.Usage.PromptTokensDetails.CacheCreationTokens
 	cacheCreation5mTokens := resp.Usage.PromptTokensDetails.CacheCreationTokenDetails.Ephemeral5mInputTokens
 	cacheCreation1hTokens := resp.Usage.PromptTokensDetails.CacheCreationTokenDetails.Ephemeral1hInputTokens
+	// Alibaba spells the TTL detail cache_creation.ephemeral_5m_input_tokens
+	// (nested in prompt_tokens_details, no _token_details suffix).
+	if cacheCreation5mTokens == 0 && cacheCreation1hTokens == 0 {
+		cacheCreation5mTokens = resp.Usage.PromptTokensDetails.CacheCreation.Ephemeral5mInputTokens
+		cacheCreation1hTokens = resp.Usage.PromptTokensDetails.CacheCreation.Ephemeral1hInputTokens
+	}
 	cachedAudioTokens := resp.Usage.PromptTokensDetails.CachedAudioTokens
 	if cacheCreationTokens == 0 {
 		cacheCreationTokens = resp.Usage.PromptTokensDetails.CacheWriteTokens
@@ -879,6 +912,12 @@ func tokenUsageFromShape(resp *tokenUsageResponseShape, opts TokenUsageExtractio
 		if cachedTokens == 0 {
 			cachedTokens = u.InputTokensDetails.CachedTokens
 		}
+		if cacheType == "" {
+			cacheType = u.InputTokensDetails.CacheType
+		}
+		if cacheType == "" {
+			cacheType = u.CacheType
+		}
 		if cacheCreationTokens == 0 {
 			cacheCreationTokens = u.InputTokensDetails.CacheCreationTokens
 			cacheCreation5mTokens = u.InputTokensDetails.CacheCreationTokenDetails.Ephemeral5mInputTokens
@@ -942,6 +981,7 @@ func tokenUsageFromShape(resp *tokenUsageResponseShape, opts TokenUsageExtractio
 		CompletionTokens:         completionTokens,
 		CachedInputTokens:        cachedTokens,
 		CachedAudioInputTokens:   cachedAudioTokens,
+		CacheType:                cacheType,
 		CachedOutputTokens:       cachedOutputTokens,
 		OutputTextTokens:         outputTextTokens,
 		CacheCreationTokens:      cacheCreationTokens,

@@ -49,6 +49,13 @@ type CustomPricingLiteLLMParams struct {
 	CacheCreationInputTokenCostAbove272kTokens         *float64 `json:"cache_creation_input_token_cost_above_272k_tokens,omitempty"`
 	CacheReadInputAudioTokenCost                       *float64 `json:"cache_read_input_audio_token_cost,omitempty"`
 
+	// Alibaba/Qwen Explicit Cache Read has its own tariff, separate from
+	// Implicit Cache Read (cache_read_input_token_cost). See ModelPrice.
+	ExplicitCacheReadInputTokenCost          *float64 `json:"explicit_cache_read_input_token_cost,omitempty"`
+	ExplicitCacheReadInputTokenCostAbove32k  *float64 `json:"explicit_cache_read_input_token_cost_above_32k_tokens,omitempty"`
+	ExplicitCacheReadInputTokenCostAbove128k *float64 `json:"explicit_cache_read_input_token_cost_above_128k_tokens,omitempty"`
+	ExplicitCacheReadInputTokenCostAbove256k *float64 `json:"explicit_cache_read_input_token_cost_above_256k_tokens,omitempty"`
+
 	InputCostPerTokenAbove32kTokens  *float64 `json:"input_cost_per_token_above_32k_tokens,omitempty"`
 	InputCostPerTokenAbove128kTokens *float64 `json:"input_cost_per_token_above_128k_tokens,omitempty"`
 	InputCostPerTokenAbove200kTokens *float64 `json:"input_cost_per_token_above_200k_tokens,omitempty"`

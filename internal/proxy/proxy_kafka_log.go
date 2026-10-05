@@ -128,6 +128,7 @@ func (p *Proxy) buildKafkaSpendEvent(
 		CacheCreationTokens:      usage.CacheCreationTokens,
 		CacheCreation5mTokens:    usage.CacheCreation5mTokens,
 		CacheCreation1hTokens:    usage.CacheCreation1hTokens,
+		CacheType:                usage.CacheType,
 		CachedOutputTokens:       usage.CachedOutputTokens,
 		ReasoningTokens:          usage.ReasoningTokens,
 		AcceptedPredictionTokens: usage.AcceptedPredictionTokens,
@@ -162,6 +163,7 @@ func (p *Proxy) buildKafkaSpendEvent(
 		event.AudioOutputCost = tokenCosts.AudioOutputCost
 		event.ReasoningCost = tokenCosts.ReasoningCost
 		event.CachedInputCost = tokenCosts.CachedInputCost
+		event.ExplicitCacheReadCost = tokenCosts.ExplicitCachedInputCost
 		event.CacheCreationCost = tokenCosts.CacheCreationCost
 		event.CachedOutputCost = tokenCosts.CachedOutputCost
 		event.PredictionCost = tokenCosts.PredictionCost
