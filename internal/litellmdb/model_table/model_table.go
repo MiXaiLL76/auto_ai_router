@@ -773,6 +773,18 @@ func convertPricingToModelPrice(p *queries.CustomPricingLiteLLMParams) *manager.
 	if p.CacheReadInputAudioTokenCost != nil {
 		price.CacheReadInputAudioTokenCost = *p.CacheReadInputAudioTokenCost
 	}
+	if p.ExplicitCacheReadInputTokenCost != nil {
+		price.ExplicitCacheReadInputTokenCost = *p.ExplicitCacheReadInputTokenCost
+	}
+	if p.ExplicitCacheReadInputTokenCostAbove32k != nil {
+		price.ExplicitCacheReadInputTokenCostAbove32k = *p.ExplicitCacheReadInputTokenCostAbove32k
+	}
+	if p.ExplicitCacheReadInputTokenCostAbove128k != nil {
+		price.ExplicitCacheReadInputTokenCostAbove128k = *p.ExplicitCacheReadInputTokenCostAbove128k
+	}
+	if p.ExplicitCacheReadInputTokenCostAbove256k != nil {
+		price.ExplicitCacheReadInputTokenCostAbove256k = *p.ExplicitCacheReadInputTokenCostAbove256k
+	}
 	if p.OutputCostPerImage != nil {
 		price.OutputCostPerImage = *p.OutputCostPerImage
 	}

@@ -425,6 +425,43 @@ func TestAnthropicToResponsesResponse_CacheUsageUsesInclusiveInputTotal(t *testi
 	assert.Equal(t, float64(15), ttlDetails["ephemeral_1h_input_tokens"])
 }
 
+func TestAnthropicToResponsesResponse_PreservesAlibabaCacheType(t *testing.T) {
+	// cache_type is not part of Anthropic's native schema — it only appears
+	// on a body this router itself produced (chatUsageToMessages, for an
+	// Alibaba/Qwen credential answering a /v1/messages request), or on a
+	// body relayed through an upstream AIR/proxy-type credential chaining
+	// through another instance of this router. It must survive the
+	// Anthropic -> Responses API conversion so billing (which reads this
+	// converted usage back) still sees the explicit-cache marker.
+	body := `{
+		"id": "msg_alibaba_chained",
+		"type": "message",
+		"role": "assistant",
+		"model": "qwen3.7-flash",
+		"content": [{"type": "text", "text": "ok"}],
+		"stop_reason": "end_turn",
+		"usage": {
+			"input_tokens": 6,
+			"output_tokens": 511,
+			"cache_read_input_tokens": 1486,
+			"cache_creation_input_tokens": 335,
+			"cache_creation": {"ephemeral_5m_input_tokens": 335},
+			"cache_type": "ephemeral"
+		}
+	}`
+
+	resp, err := AnthropicToResponsesResponse([]byte(body), "qwen3.7-flash", "", 0)
+	require.NoError(t, err)
+	require.NotNil(t, resp.Usage)
+
+	raw, err := json.Marshal(resp.Usage.InputTokensDetails)
+	require.NoError(t, err)
+	var details map[string]interface{}
+	require.NoError(t, json.Unmarshal(raw, &details))
+	assert.Equal(t, "ephemeral", details["cache_type"])
+	assert.Equal(t, float64(1486), details["cached_tokens"])
+}
+
 func TestAnthropicToResponsesResponse_CustomResponseID(t *testing.T) {
 	body := `{
 		"id": "msg_07",

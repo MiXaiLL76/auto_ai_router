@@ -1871,6 +1871,9 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 				proxyReq.Header.Set("Authorization", "Bearer "+cred.APIKey)
 			}
 		}
+		// Last, so per-credential request_headers override what the client sent
+		// (e.g. a User-Agent the provider's WAF rejects).
+		httputil.ApplyCredentialRequestHeaders(proxyReq.Header, cred)
 
 		if p.logger.Enabled(context.Background(), slog.LevelDebug) {
 			p.logger.DebugContext(r.Context(), "Proxy request details",
@@ -1878,9 +1881,21 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 				"request_body", logger.SanitizeRequestBodyForLog(requestBody, 500))
 		}
 
+		var configuredHeaders map[string]bool
+		if len(cred.RequestHeaders) > 0 {
+			configuredHeaders = make(map[string]bool, len(cred.RequestHeaders))
+			for name := range cred.RequestHeaders {
+				configuredHeaders[http.CanonicalHeaderKey(name)] = true
+			}
+		}
 		debugHeaders := make(map[string]string)
 		for key, values := range proxyReq.Header {
 			if key == "Authorization" || key == "X-Api-Key" || key == "X-Goog-Api-Key" {
+				continue
+			}
+			if configuredHeaders[key] {
+				// request_headers values may come from os.environ/ secrets.
+				debugHeaders[key] = "[credential request_headers]"
 				continue
 			}
 			debugHeaders[key] = strings.Join(values, ", ")

@@ -96,8 +96,20 @@ type ModelPrice struct {
 	CacheCreationInputTokenCostAbove1hrAbove200k float64 `json:"cache_creation_input_token_cost_above_1hr_above_200k_tokens,omitempty"`
 	CacheReadInputTokenCostAbove272k             float64 `json:"cache_read_input_token_cost_above_272k_tokens,omitempty"`
 	CacheCreationInputTokenCostAbove272k         float64 `json:"cache_creation_input_token_cost_above_272k_tokens,omitempty"`
-	CacheReadInputAudioTokenCost                 float64 `json:"cache_read_input_audio_token_cost,omitempty"`
-	OutputCostPerPredictionToken                 float64 `json:"output_cost_per_prediction_token,omitempty"`
+	// Explicit Cache (Alibaba/Qwen) read tokens are billed at their own rate,
+	// separate from Implicit Cache Read (cache_read_input_token_cost). A request
+	// runs in explicit cache mode when usage.prompt_tokens_details.cache_type ==
+	// "ephemeral"; per-model support for explicit vs implicit cache is independent
+	// — a model may price one and not the other. Each tier field is filled only
+	// for the tiers the model actually offers: with no tier field configured the
+	// base rate applies; with no base rate the request falls back to implicit
+	// cache read pricing (never to free).
+	ExplicitCacheReadInputTokenCost          float64 `json:"explicit_cache_read_input_token_cost,omitempty"`
+	ExplicitCacheReadInputTokenCostAbove32k  float64 `json:"explicit_cache_read_input_token_cost_above_32k_tokens,omitempty"`
+	ExplicitCacheReadInputTokenCostAbove128k float64 `json:"explicit_cache_read_input_token_cost_above_128k_tokens,omitempty"`
+	ExplicitCacheReadInputTokenCostAbove256k float64 `json:"explicit_cache_read_input_token_cost_above_256k_tokens,omitempty"`
+	CacheReadInputAudioTokenCost             float64 `json:"cache_read_input_audio_token_cost,omitempty"`
+	OutputCostPerPredictionToken             float64 `json:"output_cost_per_prediction_token,omitempty"`
 
 	// Vision/Images cost per image (not per token)
 	OutputCostPerImage float64 `json:"output_cost_per_image,omitempty"`
