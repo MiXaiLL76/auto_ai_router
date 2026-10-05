@@ -444,20 +444,30 @@ func TestAuthenticator_CostMarginConfigs(t *testing.T) {
 	}
 	key, user, team, org := margin(0.1), margin(0.2), margin(0.3), margin(0.4)
 
+	// The query joins the organization only through the key or its team, so a
+	// key without either has no organization metadata.
 	tests := []struct {
-		name string
-		info models.TokenInfo
-		want []float64
+		name   string
+		info   models.TokenInfo
+		hasOrg bool
+		want   []float64
 	}{
-		{"personal key", models.TokenInfo{UserID: "u"}, []float64{0.1, 0.2, 0.4}},
-		{"team key of a user", models.TokenInfo{UserID: "u", TeamID: "t", OrganizationID: "o"}, []float64{0.1, 0.3, 0.4}},
-		{"team key without organization", models.TokenInfo{TeamID: "t"}, []float64{0.1, 0.3, 0.4}},
-		{"organization key of a user", models.TokenInfo{UserID: "u", OrganizationID: "o"}, []float64{0.1, 0.2, 0.4}},
+		{"personal key", models.TokenInfo{UserID: "u"}, false, []float64{0.1, 0.2}},
+		{"team key without organization", models.TokenInfo{UserID: "u", TeamID: "t"}, false, []float64{0.1, 0.3}},
+		{"team key in an organization", models.TokenInfo{UserID: "u", TeamID: "t", TeamOrganizationID: "o"}, true, []float64{0.1, 0.3, 0.4}},
+		{"organization key", models.TokenInfo{UserID: "u", OrganizationID: "o"}, true, []float64{0.1, 0.2, 0.4}},
 	}
 	auth := NewAuthenticator(nil, nil, slog.Default()).WithCostMargin(true)
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			configs := auth.costMarginConfigs(&tt.info, key, user, team, org)
+			teamMetadata, orgMetadata := []byte(nil), []byte(nil)
+			if tt.info.TeamID != "" {
+				teamMetadata = team
+			}
+			if tt.hasOrg {
+				orgMetadata = org
+			}
+			configs := auth.costMarginConfigs(&tt.info, key, user, teamMetadata, orgMetadata)
 			var got []float64
 			for _, cfg := range configs {
 				got = append(got, cfg["global"].Percentage)

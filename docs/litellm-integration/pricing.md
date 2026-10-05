@@ -269,12 +269,12 @@ AIR can add a [LiteLLM-style margin](https://docs.litellm.ai/docs/proxy/provider
 {"cost_margin_config": {"global": 0.05, "openai": {"percentage": 0.1, "fixed_amount": 0.001}}}
 ```
 
-The first layer that has the provider or `global` wins; missing entities are skipped:
+The first layer that has the provider or `global` wins; missing entities are skipped. A key's organization is the key's own `organization_id` or its team's; `LiteLLM_UserTable.organization_id` is never used, so a personal key has no organization. Team and organization membership budgets have no margin layer.
 
 | Key          | Layers                           |
 | ------------ | -------------------------------- |
 | Team         | key → team → team's organization |
-| Organization | key → organization               |
+| Organization | key → user → organization        |
 | Personal     | key → user                       |
 
 The marked-up cost goes to `spend`, budgets and Kafka `total_cost`; `cost_breakdown` keeps `original_cost` and the `margin_*` fields. Failed requests with no usage are not charged `fixed_amount`. Changes apply once the auth cache entry expires.

@@ -13,8 +13,7 @@ func (p *Proxy) effectiveOrganizationPolicy(info *dbmodels.TokenInfo) (*routermo
 		return nil, "", false
 	}
 
-	// Only the token's own organization (or, for a key without a team, its
-	// user's organization) counts as a direct organization here.
+	// Only the token's own organization counts as a direct organization here.
 	// info.OrganizationID is documented as "resolved from token or team", so it
 	// must not be used as a fallback: a team-derived organization would then be
 	// admitted through the direct branch and skip the TeamDangling /

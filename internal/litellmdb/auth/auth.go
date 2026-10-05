@@ -206,7 +206,7 @@ func (a *Authenticator) fetchTokenFromDB(ctx context.Context, hashedToken string
 	var tokenMetadata []byte
 
 	// ============ User fields ============
-	var userIDCheck, userAlias, userEmail, userOrganizationID *string
+	var userIDCheck, userAlias, userEmail *string
 	var userMaxBudget, userSpend *float64
 	var userTPMLimit, userRPMLimit *int64
 	var userModels []string
@@ -260,7 +260,6 @@ func (a *Authenticator) fetchTokenFromDB(ctx context.Context, hashedToken string
 		&userIDCheck,
 		&userAlias,
 		&userEmail,
-		&userOrganizationID,
 		&userMaxBudget,
 		&userSpend,
 		&userTPMLimit,
@@ -336,12 +335,6 @@ func (a *Authenticator) fetchTokenFromDB(ctx context.Context, hashedToken string
 	if teamOrganizationID != nil {
 		info.TeamOrganizationID = *teamOrganizationID
 	}
-	// A key without a team or organization of its own bills the user's organization
-	if orgID == nil && teamID == nil && userOrganizationID != nil {
-		orgID = userOrganizationID
-		info.OrganizationID = *orgID
-		info.DirectOrganizationID = *orgID
-	}
 	if blocked != nil {
 		info.Blocked = *blocked
 	}
@@ -416,9 +409,11 @@ func (a *Authenticator) fetchTokenFromDB(ctx context.Context, hashedToken string
 
 // costMarginConfigs collects the cost_margin_config layers in priority order.
 // The key comes first. A team key then bills the team and its organization, a
-// key without a team bills the user and the key's (or user's) organization, the
-// same split budgetLevels uses. Parsing is best-effort: a config AIR does not
-// understand must not fail authentication.
+// key without a team bills the user and the key's own organization, the same
+// split budgetLevels uses. The organization comes only from the key or its team:
+// a personal key has none. Membership levels (teammember, orgmember) have no
+// margin layer. Parsing is best-effort: a config AIR does not understand must
+// not fail authentication.
 func (a *Authenticator) costMarginConfigs(info *models.TokenInfo, keyMetadata, userMetadata, teamMetadata, orgMetadata []byte) []models.CostMarginConfig {
 	if !a.costMarginEnabled {
 		return nil
