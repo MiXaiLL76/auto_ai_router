@@ -191,3 +191,31 @@ func TestPeekStreamStartErrorDetectsFragmentedErrorFrame(t *testing.T) {
 	assert.Contains(t, payload, "rate_limit_exceeded")
 	assert.Equal(t, http.StatusTooManyRequests, statusCodeFromProviderStreamError(payload))
 }
+
+func TestNonRetryableStreamStartErrorStillReachesClient(t *testing.T) {
+	var primaryHits, secondaryHits atomic.Int32
+	primary := sseServer(t, &primaryHits,
+		"data: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":{\"code\":\"invalid_prompt\",\"message\":\"content policy violation\"}}}\n\n")
+	defer primary.Close()
+	secondary := sseServer(t, &secondaryHits, streamOKChunks)
+	defer secondary.Close()
+
+	prx := twoCredentialProxy(primary.URL, secondary.URL)
+	w := httptest.NewRecorder()
+	prx.ProxyRequest(w, newRequestHeadersClientRequest("/v1/chat/completions", streamChatRequestBody))
+
+	assert.Equal(t, int32(1), primaryHits.Load())
+	assert.Equal(t, int32(0), secondaryHits.Load(), "content policy errors must not be retried")
+	assert.GreaterOrEqual(t, w.Code, http.StatusBadRequest, "client must get the error, not an empty 200: %s", w.Body.String())
+	assert.NotEmpty(t, w.Body.String())
+}
+
+func TestPeekStreamStartErrorReplaysBytesWhenErrorFound(t *testing.T) {
+	body := &chunkedReadCloser{chunks: [][]byte{[]byte(streamStartRateLimitEvent)}, err: io.EOF}
+	resp := &http.Response{Body: body}
+
+	require.Contains(t, peekStreamStartError(resp), "rate_limit_exceeded")
+	got, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	assert.Equal(t, streamStartRateLimitEvent, string(got))
+}
