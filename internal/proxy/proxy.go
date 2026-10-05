@@ -1961,6 +1961,41 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 		if cred.Type == config.ProviderTypeBedrock && resp.StatusCode >= http.StatusBadRequest {
 			isStreamingResp = false
 		}
+		// Some providers reject a streaming request with HTTP 200 and a stream whose
+		// first event is a terminal error (e.g. a Responses API response.failed with
+		// rate_limit_exceeded). Nothing has been forwarded to the client at that point,
+		// so treat it like the equivalent HTTP error and retry on another credential
+		// instead of relaying it.
+		if isStreamingResp && cred.Type != config.ProviderTypeBedrock &&
+			resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
+			currentCloseBody := closeBody // capture for timer closure
+			peekTimer := time.AfterFunc(p.requestTimeout, func() { currentCloseBody() })
+			payload := peekStreamStartError(resp)
+			peekTimer.Stop()
+			if payload != "" {
+				status := statusCodeFromProviderStreamError(payload)
+				if retry, reason := ShouldRetryWithFallback(status, []byte(payload)); retry {
+					closeBody()
+					isStreamingResp = false
+					resp.StatusCode = status
+					resp.Header.Set("Content-Type", "application/json")
+					resp.Header.Del("Content-Length")
+					responseBody = []byte(payload)
+					// Status was 200, so the per-attempt error check above didn't count it.
+					p.metrics.RecordCredentialAttemptError(cred.Name)
+					p.recordProviderResponse(r.Context(), cred, modelID, realModelID, status, resp.Header, responseBody)
+					shouldRetry, retryReason = true, reason
+					retryLogArgs := []any{
+						"error_code", status, "credential", cred.Name,
+						"reason", retryReason, "model", modelID,
+						"attempt", attempt + 1, "max_attempts", p.maxProviderRetries + 1,
+					}
+					retryLogArgs = appendResponseBodyForLogs(retryLogArgs, cred, payload)
+					p.logger.WarnContext(r.Context(), "Provider stream started with a retryable error event, will retry", retryLogArgs...)
+					continue
+				}
+			}
+		}
 		if isStreamingResp {
 			p.recordProviderResponse(r.Context(), cred, modelID, realModelID, resp.StatusCode, resp.Header, nil)
 			// Cannot retry streaming responses

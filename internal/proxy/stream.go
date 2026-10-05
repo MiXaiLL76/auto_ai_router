@@ -1388,6 +1388,63 @@ func (g *streamInitialCommitGate) Release() []byte {
 	return pending
 }
 
+// replayReadCloser serves bytes already read from a stream before handing reads
+// back to it, then surfaces the read error that ended the peek (if any) once
+// the prefix is drained. Close always closes the underlying body.
+type replayReadCloser struct {
+	prefix []byte
+	err    error
+	rest   io.ReadCloser
+}
+
+func (r *replayReadCloser) Read(p []byte) (int, error) {
+	if len(r.prefix) > 0 {
+		n := copy(p, r.prefix)
+		r.prefix = r.prefix[n:]
+		return n, nil
+	}
+	if r.err != nil {
+		return 0, r.err
+	}
+	return r.rest.Read(p)
+}
+
+func (r *replayReadCloser) Close() error {
+	return r.rest.Close()
+}
+
+// peekStreamStartError reads a successful (2xx) streaming response up to its
+// first complete frame -- the same point streamToClient's initial commit gate
+// waits for before writing anything downstream, so nothing reaches the client
+// later than before. If that frame is a terminal error event, its payload is
+// returned so the caller can treat the attempt like an HTTP error response and
+// retry it on another credential. Either way resp.Body is replaced with a reader
+// that replays the peeked bytes, so a caller that decides not to retry still
+// forwards the stream exactly as received.
+func peekStreamStartError(resp *http.Response) string {
+	var gate streamInitialCommitGate
+	buf := make([]byte, 4096)
+	var readErr error
+	payload := ""
+	for {
+		n, err := resp.Body.Read(buf)
+		if n > 0 {
+			var ready bool
+			payload, ready = gate.Observe(buf[:n])
+			if payload != "" || ready {
+				break
+			}
+		}
+		if err != nil {
+			payload = gate.FinalizeTerminalError()
+			readErr = err
+			break
+		}
+	}
+	resp.Body = &replayReadCloser{prefix: gate.Release(), err: readErr, rest: resp.Body}
+	return payload
+}
+
 func (p *Proxy) streamToClient(
 	ctx context.Context,
 	w http.ResponseWriter,
