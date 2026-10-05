@@ -1051,6 +1051,31 @@ func TestStripVLLMOnlySamplingParams_InvalidJSON(t *testing.T) {
 	assert.Equal(t, body, result, "invalid JSON should be returned unchanged rather than dropped")
 }
 
+func TestIsReasoningModel(t *testing.T) {
+	tests := map[string]bool{
+		"o1":                    true,
+		"o1-pro":                true,
+		"o3-mini":               true,
+		"o3-pro":                true,
+		"o4-mini":               true,
+		"gpt-5":                 true,
+		"gpt-5-pro":             true,
+		"gpt-5.2-codex":         true,
+		"gpt-6-sol":             true,
+		"openai/gpt-6-luna":     true,
+		"gpt-4o":                false,
+		"gpt-4o-mini":           false,
+		"gpt-4.1":               false,
+		"gpt-4.1-mini":          false,
+		"anthropic/claude-opus": false,
+		"qwen3.8-omni-flash":    false,
+		"gemini-2.5-flash":      false,
+	}
+	for model, want := range tests {
+		assert.Equal(t, want, IsReasoningModel(model), model)
+	}
+}
+
 func TestSupportsReasoningEffortNone(t *testing.T) {
 	tests := map[string]bool{
 		"gpt-6-sol":             true,

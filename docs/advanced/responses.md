@@ -406,6 +406,40 @@ models:
     passthrough_responses: true  # force passthrough
 ```
 
+## Responses-Only Models
+
+Some OpenAI reasoning-tier deployments are Responses-API-exclusive: they reject
+`/v1/chat/completions` outright. Mark such a model with `responses_only: true` to have the
+router convert a `/v1/chat/completions` request to Responses API shape, send it to the
+provider's `/v1/responses`, and convert the response back before the client sees it:
+
+```yaml
+models:
+  - name: "gpt-5-pro"
+    credential: openai_main
+    responses_only: true
+```
+
+`responses_only` only covers `/v1/chat/completions` and `/v1/responses`. Calling such a
+model via `/v1/messages` still converts to `/v1/chat/completions` and gets rejected by the
+upstream — there is no Messages API support for this flag.
+
+Limitations of the `/v1/chat/completions` conversion:
+
+- **Custom tools** (`{"type":"custom"}` in `tools` or `tool_choice`) and **`input_audio`**
+  content parts are rejected with 400: the Responses API has no way to carry them back as
+  Chat Completions output.
+- **Hosted tools** (`image_generation`, `web_search`, `file_search`, `code_interpreter`,
+  `mcp`, ...) are forwarded as-is. Only `image_generation` results reach the client (as
+  `message.images` / `delta.images`); other hosted-tool calls are not shown, but their cost
+  is in `usage`.
+- **Reasoning continuity**: each turn is sent with `store: false`, and the reasoning items
+  come back to the client as `thinking_blocks` with `encrypted_content`. The client has to
+  send the assistant message back with `thinking_blocks` unchanged. Encrypted reasoning
+  is expected to be readable only by the organization that produced it, so keep all credentials behind one
+  `responses_only` alias in the same organization (or the same Azure resource); otherwise a
+  tool-calling turn that lands on another credential can be rejected with 400.
+
 ## Provider Support
 
 | Feature                  | Anthropic | Comet API | Vertex AI | Bedrock | OpenAI |
