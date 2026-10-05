@@ -17,17 +17,18 @@
 --
 -- Pause AIR Kafka publishing before running this migration. Safe to re-run
 -- on its own (e.g. if it errored out partway) -- but never run it again
--- after 003_upstream_send_ms.sql/004_explicit_cache_columns.sql have
--- already been applied: it rebuilds air.spend_logs_kafka from only this
--- migration's column set, narrowing it back below the columns those later
--- migrations already added. air.spend_logs (which only ever gets ADD
--- COLUMN, never a rebuild) keeps every column, so the two tables end up
--- with a different column count -- every message the Kafka table then
+-- after 003_upstream_send_ms.sql/004_explicit_cache_columns.sql/
+-- 005_video_input_columns.sql have already been applied: it rebuilds
+-- air.spend_logs_kafka from only this migration's column set, narrowing it
+-- back below the columns those later migrations already added.
+-- air.spend_logs (which only ever gets ADD COLUMN, never a rebuild) keeps
+-- every column, so the two tables end up with a different column count --
+-- every message the Kafka table then
 -- tries to pass to the materialized view fails with
 -- NUMBER_OF_COLUMNS_DOESNT_MATCH (confirmed against a real instance) until
 -- the later migration(s) are re-applied to rebuild air.spend_logs_kafka
--- with the full column set again. Apply 002/003/004 forward, in order,
--- never backward.
+-- with the full column set again. Apply 002/003/004/005 forward, in
+-- order, never backward.
 
 DROP TABLE IF EXISTS air.spend_logs_mv;
 

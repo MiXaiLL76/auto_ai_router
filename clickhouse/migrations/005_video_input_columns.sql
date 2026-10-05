@@ -1,17 +1,18 @@
--- Upgrade an existing air.spend_logs Kafka -> MergeTree pipeline to include
--- the Alibaba/Qwen explicit-cache columns introduced by PR #262:
---   cache_type               -- "ephemeral" for explicit cache, NULL otherwise
---   explicit_cache_read_cost -- Explicit Cache Read cost; for these requests
---                               cached_input_cost is 0 and the cache-read cost
---                               lands here instead, so it is part of the cost
---                               breakdown that sums to total_cost.
+-- Upgrade an existing air.spend_logs Kafka -> MergeTree pipeline to the
+-- event schema that reports input video apart from input images
+-- (Gemini Embedding 2 billing):
+--   video_input_tokens -- input video tokens, previously counted in image_tokens
+--   video_input_cost   -- their cost (input_cost_per_video_token, falling back
+--                         to the image rate); part of the cost breakdown that
+--                         sums to total_cost.
 --
 -- The Kafka table engine does not support ALTER ... ADD COLUMN (ClickHouse
--- fails with NOT_IMPLEMENTED), so air.spend_logs_kafka and the materialized
--- view are dropped and recreated; only the MergeTree table is altered in
--- place. No events are lost: consumer offsets are committed in Kafka under
--- kafka_group_name, so the recreated table resumes where the old one stopped
--- as long as kafka_group_name is unchanged.
+-- fails with NOT_IMPLEMENTED) -- same issue as 002_cache_web_search_columns.sql,
+-- same fix: air.spend_logs_kafka and the materialized view are dropped and
+-- recreated; only the MergeTree table is altered in place. No events are
+-- lost: consumer offsets live in Kafka under kafka_group_name, so the
+-- recreated table resumes where the old one stopped as long as
+-- kafka_group_name is unchanged.
 --
 -- The CREATE below uses the reference SETTINGS from
 -- clickhouse/init/01_spend_logs.sql. Before running this on a real cluster,
@@ -20,13 +21,35 @@
 -- ON CLUSTER clause your deployment needs.
 --
 -- Pause AIR Kafka publishing before running this migration. Safe to re-run
--- on its own -- but never run it again after 005_video_input_columns.sql
--- has already been applied, for the same reason
+-- on its own -- but this is currently the last migration in the chain, so
+-- that's the only direction that's safe: once a migration after this one
+-- exists, never run 005 again on its own afterwards, for the same reason
+-- 002_cache_web_search_columns.sql's doc comment spells out -- it would
+-- rebuild air.spend_logs_kafka from only 005's column set, narrowing it
+-- back below whatever the later migration added, and break ingestion with
+-- NUMBER_OF_COLUMNS_DOESNT_MATCH until that later migration is re-applied.
+-- Apply 002/003/004/005 forward, in order, never backward.
+
+DROP TABLE IF EXISTS air.spend_logs_mv;
+
+ALTER TABLE air.spend_logs
+    ADD COLUMN IF NOT EXISTS video_input_tokens UInt32 DEFAULT 0 AFTER image_tokens,
+    ADD COLUMN IF NOT EXISTS video_input_cost Float64 DEFAULT 0 AFTER image_cost;
+
+DROP TABLE IF EXISTS air.spend_logs_kafka;
+
+CREATE TABLE air.spend_logs_kafka`
+-- (broker list, topic, group name, consumer count) into it, and add the
+-- ON CLUSTER clause your deployment needs.
+--
+-- Pause AIR Kafka publishing before running this migration. Safe to re-run
+-- on its own -- but this is currently the last migration in the chain, so
+-- that's the only direction that's safe: once a migration after this one
+-- exists, never run 004 again on its own afterwards, for the same reason
 -- 002_cache_web_search_columns.sql's doc comment spells out -- it would
 -- rebuild air.spend_logs_kafka from only 004's column set, narrowing it
--- back below the columns 005 already added, and break ingestion with
--- NUMBER_OF_COLUMNS_DOESNT_MATCH until 005 is re-applied. Apply
--- 002/003/004/005 forward, in order, never backward.
+-- back below whatever the later migration added, and break ingestion with
+-- NUMBER_OF_COLUMNS_DOESNT_MATCH until that later migration is re-applied.
 
 DROP TABLE IF EXISTS air.spend_logs_mv;
 
@@ -85,6 +108,7 @@ CREATE TABLE air.spend_logs_kafka
     rejected_prediction_tokens UInt32,
     image_count UInt32,
     image_tokens UInt32,
+    video_input_tokens UInt32,
     output_image_tokens UInt32,
     web_search_requests UInt32,
     web_search_context_size Nullable(String),
@@ -100,6 +124,7 @@ CREATE TABLE air.spend_logs_kafka
     cached_output_cost Float64,
     prediction_cost Float64,
     image_cost Float64,
+    video_input_cost Float64,
     web_search_cost Float64,
     total_cost Float64,
 
