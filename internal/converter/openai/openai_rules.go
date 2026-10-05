@@ -133,7 +133,31 @@ func replaceModelFieldViaParse(body []byte, oldModel string, newToken []byte) []
 // is ambiguous for the server. Grouped (rather than keyed one-directionally) so the
 // check works regardless of which spelling the default itself happens to use.
 var defaultParamSynonymGroups = [][]string{
-	{"max_tokens", "max_completion_tokens"},
+	{"max_tokens", "max_completion_tokens", "max_output_tokens"},
+}
+
+// ResponsesDefaultParams returns defaults with its Chat Completions token-limit keys
+// (max_tokens / max_completion_tokens) renamed to the Responses API's max_output_tokens,
+// for applying a deployment's defaults to a /v1/responses body. Without the rename the
+// limit would land under a key the Responses API does not read. defaults is not modified.
+func ResponsesDefaultParams(defaults map[string]any) map[string]any {
+	limit, hasLimit := defaults["max_completion_tokens"]
+	if !hasLimit {
+		limit, hasLimit = defaults["max_tokens"]
+	}
+	if !hasLimit {
+		return defaults
+	}
+	out := make(map[string]any, len(defaults))
+	for k, v := range defaults {
+		if k != "max_tokens" && k != "max_completion_tokens" {
+			out[k] = v
+		}
+	}
+	if _, ok := out["max_output_tokens"]; !ok {
+		out["max_output_tokens"] = limit
+	}
+	return out
 }
 
 // ApplyDefaultParams sets each key of defaults that is absent from the top level of a

@@ -43,7 +43,9 @@ func ChatRequestToResponses(body []byte) ([]byte, error) {
 	if err := chatToolsToResponses(raw); err != nil {
 		return nil, err
 	}
-	chatToolChoiceToResponses(raw)
+	if err := chatToolChoiceToResponses(raw); err != nil {
+		return nil, err
+	}
 	chatReasoningToResponses(raw)
 	chatResponseFormatToText(raw)
 	chatVerbosityToText(raw)
@@ -407,7 +409,16 @@ func chatToolsToResponses(raw map[string]interface{}) error {
 		if !ok {
 			continue
 		}
-		if toolType, _ := toolMap["type"].(string); toolType != "function" {
+		toolType, _ := toolMap["type"].(string)
+		if toolType == "custom" {
+			// A custom tool's call comes back as custom_tool_call, and Chat
+			// Completions' tool_calls here only carry function calls, so the
+			// call could not be returned to the client.
+			return converterutil.NewRequestValidationError(
+				"tools", "custom tools are not supported for a responses_only model",
+			)
+		}
+		if toolType != "function" {
 			// Non-function tools have no portable Chat Completions shape to
 			// have arrived as in the first place; nothing to convert.
 			converted = append(converted, toolMap)
@@ -436,18 +447,55 @@ func chatToolsToResponses(raw map[string]interface{}) error {
 
 // chatToolChoiceToResponses converts a nested Chat Completions tool_choice
 // object ({type:"function", function:{name}}) to the Responses API's flat
-// shape ({type:"function", name}). String values ("auto"/"none"/"required")
+// shape ({type:"function", name}), and flattens the function entries of an
+// allowed_tools choice the same way. String values ("auto"/"none"/"required")
 // are valid in both APIs and pass through unchanged.
-func chatToolChoiceToResponses(raw map[string]interface{}) {
+func chatToolChoiceToResponses(raw map[string]interface{}) error {
 	tcMap, ok := raw["tool_choice"].(map[string]interface{})
-	if !ok || tcMap["type"] != "function" {
-		return
-	}
-	fn, ok := tcMap["function"].(map[string]interface{})
 	if !ok {
-		return
+		return nil
 	}
-	raw["tool_choice"] = map[string]interface{}{"type": "function", "name": fn["name"]}
+	switch tcMap["type"] {
+	case "function":
+		fn, ok := tcMap["function"].(map[string]interface{})
+		if !ok {
+			return nil
+		}
+		raw["tool_choice"] = map[string]interface{}{"type": "function", "name": fn["name"]}
+	case "custom":
+		return converterutil.NewRequestValidationError(
+			"tool_choice", "custom tools are not supported for a responses_only model",
+		)
+	case "allowed_tools":
+		// Chat: {type:"allowed_tools", allowed_tools:{mode, tools:[{type:"function", function:{name}}]}}
+		// Responses: {type:"allowed_tools", mode, tools:[{type:"function", name}]}
+		allowed, ok := tcMap["allowed_tools"].(map[string]interface{})
+		if !ok {
+			return nil
+		}
+		flat := map[string]interface{}{"type": "allowed_tools", "mode": allowed["mode"]}
+		tools, _ := allowed["tools"].([]interface{})
+		flatTools := make([]interface{}, 0, len(tools))
+		for _, t := range tools {
+			toolMap, ok := t.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			if toolMap["type"] == "custom" {
+				return converterutil.NewRequestValidationError(
+					"tool_choice", "custom tools are not supported for a responses_only model",
+				)
+			}
+			if fn, ok := toolMap["function"].(map[string]interface{}); ok && toolMap["type"] == "function" {
+				flatTools = append(flatTools, map[string]interface{}{"type": "function", "name": fn["name"]})
+				continue
+			}
+			flatTools = append(flatTools, toolMap)
+		}
+		flat["tools"] = flatTools
+		raw["tool_choice"] = flat
+	}
+	return nil
 }
 
 // chatReasoningToResponses converts Chat Completions' top-level

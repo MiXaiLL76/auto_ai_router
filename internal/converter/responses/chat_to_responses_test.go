@@ -413,3 +413,47 @@ func TestChatRequestToResponses_VerbosityMergesWithResponseFormat(t *testing.T) 
 	require.True(t, ok, "verbosity must not clobber the format text.format already carries")
 	assert.Equal(t, "json_object", format["type"])
 }
+
+func TestChatRequestToResponses_CustomToolRejected(t *testing.T) {
+	cases := map[string]string{
+		"nested custom tool": `{"model":"gpt-5-pro","messages":[{"role":"user","content":"hi"}],
+			"tools":[{"type":"custom","custom":{"name":"code_exec"}}]}`,
+		"flat custom tool": `{"model":"gpt-5-pro","messages":[{"role":"user","content":"hi"}],
+			"tools":[{"type":"custom","name":"code_exec"}]}`,
+		"custom tool_choice": `{"model":"gpt-5-pro","messages":[{"role":"user","content":"hi"}],
+			"tools":[{"type":"function","function":{"name":"f"}}],
+			"tool_choice":{"type":"custom","custom":{"name":"code_exec"}}}`,
+		"custom tool inside allowed_tools": `{"model":"gpt-5-pro","messages":[{"role":"user","content":"hi"}],
+			"tools":[{"type":"function","function":{"name":"f"}}],
+			"tool_choice":{"type":"allowed_tools","allowed_tools":{"mode":"auto","tools":[{"type":"custom","custom":{"name":"x"}}]}}}`,
+	}
+	for name, body := range cases {
+		t.Run(name, func(t *testing.T) {
+			_, err := ChatRequestToResponses([]byte(body))
+			var verr *converterutil.RequestValidationError
+			require.ErrorAs(t, err, &verr)
+		})
+	}
+}
+
+func TestChatRequestToResponses_AllowedToolsChoiceFlattened(t *testing.T) {
+	body := `{"model":"gpt-5-pro","messages":[{"role":"user","content":"hi"}],
+		"tools":[{"type":"function","function":{"name":"get_weather","parameters":{}}},{"type":"function","function":{"name":"get_time","parameters":{}}}],
+		"tool_choice":{"type":"allowed_tools","allowed_tools":{"mode":"required","tools":[
+			{"type":"function","function":{"name":"get_weather"}},
+			{"type":"image_generation"}
+		]}}}`
+	out, err := ChatRequestToResponses([]byte(body))
+	require.NoError(t, err)
+
+	var raw map[string]interface{}
+	require.NoError(t, json.Unmarshal(out, &raw))
+	assert.Equal(t, map[string]interface{}{
+		"type": "allowed_tools",
+		"mode": "required",
+		"tools": []interface{}{
+			map[string]interface{}{"type": "function", "name": "get_weather"},
+			map[string]interface{}{"type": "image_generation"},
+		},
+	}, raw["tool_choice"])
+}

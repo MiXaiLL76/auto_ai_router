@@ -327,6 +327,9 @@ func (p *Proxy) prepareRequestForCredential(
 		return req, err
 	}
 	if defaults := p.modelManager.GetDefaultParamsForCredential(modelID, cred.Name); len(defaults) > 0 {
+		if strings.HasSuffix(req.path, "/responses") {
+			defaults = openai.ResponsesDefaultParams(defaults)
+		}
 		req.body = openai.ApplyDefaultParams(req.body, defaults)
 	}
 	return req, nil

@@ -17,6 +17,7 @@ func collectSSEChunks(t *testing.T, raw []byte) []map[string]interface{} {
 	t.Helper()
 	var chunks []map[string]interface{}
 	scanner := bufio.NewScanner(bytes.NewReader(raw))
+	scanner.Buffer(make([]byte, 64*1024), 16*1024*1024)
 	for scanner.Scan() {
 		line := scanner.Text()
 		if !strings.HasPrefix(line, "data: ") {
@@ -398,4 +399,45 @@ func TestTransformResponsesStreamToChat_MalformedLineSkipped(t *testing.T) {
 	require.NoError(t, TransformResponsesStreamToChat(input, "gpt-5-pro", &out))
 	assert.Contains(t, out.String(), `"content":"ok"`)
 	assert.Contains(t, out.String(), "data: [DONE]")
+}
+
+func TestTransformResponsesStreamToChat_LargeImageEvent(t *testing.T) {
+	// One base64 image well past the old 1 MiB line cap, as an output_item.done
+	// event followed by a terminal event that repeats it.
+	img := strings.Repeat("A", 3*1024*1024)
+	item := `{"type":"image_generation_call","id":"ig_1","status":"completed","result":"` + img + `"}`
+	input := strings.NewReader(
+		sseLine(`{"type":"response.created","response":{"id":"resp_1","object":"response","status":"in_progress"}}`) +
+			sseLine(`{"type":"response.output_item.done","output_index":0,"item":`+item+`}`) +
+			sseLine(`{"type":"response.completed","response":{"id":"resp_1","object":"response","status":"completed","output":[`+item+`],"usage":{"input_tokens":5,"output_tokens":2,"total_tokens":7}}}`),
+	)
+
+	var out bytes.Buffer
+	require.NoError(t, TransformResponsesStreamToChat(input, "gpt-5-pro", &out))
+	assert.True(t, strings.HasSuffix(out.String(), "data: [DONE]\n\n"))
+
+	var images []interface{}
+	var finish string
+	var sawUsage bool
+	for _, c := range collectSSEChunks(t, out.Bytes()) {
+		if _, ok := c["usage"].(map[string]interface{}); ok {
+			sawUsage = true
+		}
+		choices := c["choices"].([]interface{})
+		if len(choices) == 0 {
+			continue
+		}
+		choice := choices[0].(map[string]interface{})
+		if fr, ok := choice["finish_reason"].(string); ok {
+			finish = fr
+		}
+		delta := choice["delta"].(map[string]interface{})
+		if imgs, ok := delta["images"].([]interface{}); ok {
+			images = append(images, imgs...)
+		}
+	}
+	require.Len(t, images, 1, "the image is emitted once, from output_item.done")
+	assert.Equal(t, img, images[0].(map[string]interface{})["b64_json"])
+	assert.Equal(t, "stop", finish)
+	assert.True(t, sawUsage)
 }

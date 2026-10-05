@@ -41,12 +41,15 @@ type responsesStreamEvent struct {
 //	response.refusal.delta                  — streams a model refusal
 //	response.reasoning_summary_text.delta   — streams reasoning/thinking text
 //	response.function_call_arguments.delta  — streams a function call's arguments
+//	response.output_item.done               — emits a finished image_generation_call as delta.images
 //	response.completed / .incomplete / .failed — carries the final status/usage; [DONE] is written after the loop
 //	error / response.error                  — provider-side stream error, surfaced as content
 func TransformResponsesStreamToChat(reader io.Reader, model string, output io.Writer) error {
 	scanner := bufio.NewScanner(reader)
-	// Increase scanner buffer for large chunks (e.g. a long reasoning summary).
-	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
+	// A single event can carry a whole generated image (output_item.done for an
+	// image_generation_call) and the terminal event repeats the full output, so
+	// use the shared cap instead of a local 1 MiB one.
+	scanner.Buffer(make([]byte, 1024*1024), converterutil.MaxSSELineBytes)
 
 	var chatID string
 	timestamp := converterutil.GetCurrentTimestamp()
@@ -58,6 +61,7 @@ func TransformResponsesStreamToChat(reader io.Reader, model string, output io.Wr
 	// message item sharing the output array never consumes a slot.
 	toolCallSlots := make(map[int]int)
 	nextToolCallIdx := 0
+	imageIdx := 0
 	streamedContent := false // any text/refusal already sent, so a failed status doesn't clobber it
 	// streamErrorReported tracks whether a standalone "error"/"response.error" event
 	// already delivered an error-content chunk and a finish_reason to the client. A
@@ -182,6 +186,23 @@ func TransformResponsesStreamToChat(reader io.Reader, model string, output io.Wr
 				return err
 			}
 
+		case "response.output_item.done":
+			// Same output as ResponseToChat's image_generation_call case; the
+			// partial_image events before it are previews and are not relayed.
+			if event.Item == nil || event.Item.Type != "image_generation_call" || event.Item.Result == "" {
+				continue
+			}
+			if err := writeFirstChunkOnce(); err != nil {
+				return err
+			}
+			streamedContent = true
+			idx := imageIdx
+			imageIdx++
+			delta := openai.OpenAIStreamingDelta{Images: []openai.ImageData{{Type: "image_url", Index: &idx, B64JSON: event.Item.Result}}}
+			if err := writeChatStreamChunk(output, ensureChatID(), model, timestamp, delta, nil); err != nil {
+				return err
+			}
+
 		case "response.completed", "response.incomplete", "response.failed":
 			if event.Response == nil {
 				continue
@@ -253,7 +274,7 @@ func TransformResponsesStreamToChat(reader io.Reader, model string, output io.Wr
 			streamErrorReported = true
 
 		default:
-			// response.output_item.done, response.content_part.*,
+			// response.content_part.*, response.image_generation_call.partial_image,
 			// response.output_text.done, response.function_call_arguments.done,
 			// etc.: bookkeeping-only events already reflected by the deltas
 			// streamed above; nothing further for the client to see.
