@@ -51,7 +51,8 @@ func ChatToResponse(body []byte, opts ...ChatToResponseOption) ([]byte, error) {
 				Role             string      `json:"role"`
 				Content          interface{} `json:"content"`
 				Refusal          string      `json:"refusal,omitempty"`
-				ReasoningContent string      `json:"reasoning_content,omitempty"`
+				ReasoningContent interface{} `json:"reasoning_content,omitempty"`
+				Reasoning        interface{} `json:"reasoning,omitempty"`
 				Images           []struct {
 					B64JSON  string `json:"b64_json,omitempty"`
 					ImageURL *struct {
@@ -123,16 +124,15 @@ func ChatToResponse(body []byte, opts ...ChatToResponseOption) ([]byte, error) {
 				incompleteDetails = &IncompleteDetails{Reason: "content_filter"}
 			}
 
-			// Add reasoning output item if the provider returned reasoning_content
-			// (normalized upstream from e.g. DeepSeek's "reasoning" field). Emitted
+			// Add reasoning output item if the provider returned reasoning. Emitted
 			// before the message item, matching the Anthropic/Vertex converters.
-			if choice.Message.ReasoningContent != "" {
+			if reasoning := converterutil.ReasoningText(choice.Message.ReasoningContent, choice.Message.Reasoning); reasoning != "" {
 				output = append(output, OutputItem{
 					Type:   "reasoning",
 					ID:     GenerateItemID("rs_"),
 					Status: "completed",
 					Summary: []OutputContent{
-						{Type: "summary_text", Text: choice.Message.ReasoningContent},
+						{Type: "summary_text", Text: reasoning},
 					},
 				})
 			}

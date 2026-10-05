@@ -1148,19 +1148,14 @@ func TestRequestToChat_ReasoningItem(t *testing.T) {
 	require.NoError(t, json.Unmarshal(result, &parsed))
 
 	messages := parsed["messages"].([]interface{})
-	require.Len(t, messages, 3)
-
-	// reasoning → synthetic assistant message with summary text
-	reasoningMsg := messages[1].(map[string]interface{})
-	assert.Equal(t, "assistant", reasoningMsg["role"])
-	content := reasoningMsg["content"].([]interface{})
-	require.Len(t, content, 1)
-	part := content[0].(map[string]interface{})
-	assert.Equal(t, "text", part["type"])
-	assert.Contains(t, part["text"].(string), "The answer is 42.")
-
-	// encrypted_content must not appear
-	assert.NotContains(t, reasoningMsg, "encrypted_content")
+	// A reasoning item no assistant output follows is dropped: a reasoning-only
+	// assistant message (empty content, two assistant messages in a row) is
+	// rejected by several Chat providers. It never becomes visible text either.
+	require.Len(t, messages, 2)
+	assert.Equal(t, "user", messages[0].(map[string]interface{})["role"])
+	assert.Equal(t, "user", messages[1].(map[string]interface{})["role"])
+	assert.NotContains(t, string(result), "The answer is 42.")
+	assert.NotContains(t, string(result), "enc_should_be_dropped")
 }
 
 func TestRequestToChat_ReasoningItem_NoSummary(t *testing.T) {
@@ -1771,11 +1766,243 @@ func TestRequestToChat_MixedSpecialItems(t *testing.T) {
 	require.NoError(t, json.Unmarshal(result, &parsed))
 
 	messages := parsed["messages"].([]interface{})
-	// user, assistant(function_call), tool, assistant(reasoning), user
-	require.Len(t, messages, 5)
+	// user, assistant(function_call), tool, user — the trailing reasoning-only
+	// turn is dropped.
+	require.Len(t, messages, 4)
 	assert.Equal(t, "user", messages[0].(map[string]interface{})["role"])
 	assert.Equal(t, "assistant", messages[1].(map[string]interface{})["role"])
 	assert.Equal(t, "tool", messages[2].(map[string]interface{})["role"])
-	assert.Equal(t, "assistant", messages[3].(map[string]interface{})["role"])
-	assert.Equal(t, "user", messages[4].(map[string]interface{})["role"])
+	assert.Equal(t, "user", messages[3].(map[string]interface{})["role"])
+	assert.NotContains(t, string(result), "Found it.")
+}
+
+// chatMessages runs RequestToChat on body and returns the converted messages.
+func chatMessages(t *testing.T, body string) []map[string]interface{} {
+	t.Helper()
+	result, err := RequestToChat([]byte(body))
+	require.NoError(t, err)
+	var parsed struct {
+		Messages []map[string]interface{} `json:"messages"`
+	}
+	require.NoError(t, json.Unmarshal(result, &parsed))
+	return parsed.Messages
+}
+
+// TestRequestToChat_ReasoningTravelsAsReasoningContent replays a DeepSeek-style
+// thinking-mode tool loop through the Responses API: each reasoning item must
+// come back as reasoning_content on the assistant message it led to — DeepSeek
+// rejects a thinking-mode tool-call turn without it — and never as visible
+// assistant text the model would read back as its own answer.
+func TestRequestToChat_ReasoningTravelsAsReasoningContent(t *testing.T) {
+	messages := chatMessages(t, `{
+		"model": "deepseek-v4-pro",
+		"input": [
+			{"role": "user", "content": "Weather in Paris and Rome?"},
+			{"type": "reasoning", "id": "rs_1", "summary": [{"type": "summary_text", "text": "Need both cities."}]},
+			{"type": "function_call", "call_id": "call_1", "name": "get_weather", "arguments": "{\"city\":\"Paris\"}"},
+			{"type": "function_call", "call_id": "call_2", "name": "get_weather", "arguments": "{\"city\":\"Rome\"}"},
+			{"type": "function_call_output", "call_id": "call_1", "output": "Sunny"},
+			{"type": "function_call_output", "call_id": "call_2", "output": "Rainy"},
+			{"type": "reasoning", "id": "rs_2", "summary": [{"type": "summary_text", "text": "Summarize both."}]},
+			{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Paris is sunny, Rome is rainy."}]}
+		]
+	}`)
+
+	require.Len(t, messages, 5)
+	assert.Equal(t, "user", messages[0]["role"])
+
+	toolTurn := messages[1]
+	assert.Equal(t, "assistant", toolTurn["role"])
+	assert.Nil(t, toolTurn["content"])
+	assert.Equal(t, "Need both cities.", toolTurn["reasoning_content"])
+	assert.Len(t, toolTurn["tool_calls"], 2)
+
+	assert.Equal(t, "tool", messages[2]["role"])
+	assert.Equal(t, "tool", messages[3]["role"])
+
+	answer := messages[4]
+	assert.Equal(t, "assistant", answer["role"])
+	assert.Equal(t, "Summarize both.", answer["reasoning_content"])
+	assert.NotContains(t, answer, "tool_calls")
+
+	raw, err := json.Marshal(messages)
+	require.NoError(t, err)
+	assert.NotContains(t, string(raw), "[Reasoning]")
+}
+
+// TestRequestToChat_ReasoningOnlyInCurrentToolLoop: reasoning_content goes
+// back only on assistant turns after the last user message. Past turns'
+// reasoning is dropped — deepseek-reasoner rejects it, strict validators reject
+// unknown message fields, and it only inflates input tokens elsewhere.
+func TestRequestToChat_ReasoningOnlyInCurrentToolLoop(t *testing.T) {
+	messages := chatMessages(t, `{
+		"model": "deepseek-v4-pro",
+		"input": [
+			{"role": "user", "content": "q1"},
+			{"type": "reasoning", "summary": [{"type": "summary_text", "text": "R1"}]},
+			{"type": "function_call", "call_id": "call_1", "name": "f", "arguments": "{}"},
+			{"type": "function_call_output", "call_id": "call_1", "output": "1"},
+			{"type": "reasoning", "summary": [{"type": "summary_text", "text": "R2"}]},
+			{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "A1"}]},
+			{"role": "user", "content": "q2"},
+			{"type": "reasoning", "summary": [{"type": "summary_text", "text": "R3"}]},
+			{"type": "function_call", "call_id": "call_2", "name": "f", "arguments": "{}"},
+			{"type": "function_call_output", "call_id": "call_2", "output": "2"}
+		]
+	}`)
+
+	require.Len(t, messages, 7)
+	for i := 0; i < 5; i++ {
+		assert.NotContains(t, messages[i], "reasoning_content", "message %d is before the last user message", i)
+	}
+	assert.Equal(t, "user", messages[4]["role"])
+	assert.Equal(t, "assistant", messages[5]["role"])
+	assert.Equal(t, "R3", messages[5]["reasoning_content"])
+	assert.Equal(t, "tool", messages[6]["role"])
+}
+
+// TestRequestToChat_AssistantMessageJoinsFollowingToolCalls checks that the
+// reasoning, message and function_call items of one assistant turn fold back
+// into the single Chat message ChatToResponse split them from.
+func TestRequestToChat_AssistantMessageJoinsFollowingToolCalls(t *testing.T) {
+	messages := chatMessages(t, `{
+		"model": "deepseek-v4-pro",
+		"input": [
+			{"role": "user", "content": "Weather in Paris?"},
+			{"type": "reasoning", "summary": [{"type": "summary_text", "text": "Call the tool."}]},
+			{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Checking."}]},
+			{"type": "function_call", "call_id": "call_1", "name": "get_weather", "arguments": "{}"},
+			{"type": "function_call_output", "call_id": "call_1", "output": "Sunny"}
+		]
+	}`)
+
+	require.Len(t, messages, 3)
+	turn := messages[1]
+	assert.Equal(t, "assistant", turn["role"])
+	assert.Equal(t, "Call the tool.", turn["reasoning_content"])
+	content := turn["content"].([]interface{})
+	require.Len(t, content, 1)
+	assert.Equal(t, "Checking.", content[0].(map[string]interface{})["text"])
+	toolCalls := turn["tool_calls"].([]interface{})
+	require.Len(t, toolCalls, 1)
+	assert.Equal(t, "call_1", toolCalls[0].(map[string]interface{})["id"])
+	assert.Equal(t, "tool", messages[2]["role"])
+}
+
+// TestRequestToChat_ReasoningBelongsToTheItemAfterIt: a reasoning item is the
+// reasoning behind the item that follows it, so it must land on that item's
+// Chat message, not on the one before.
+func TestRequestToChat_ReasoningBelongsToTheItemAfterIt(t *testing.T) {
+	t.Run("each assistant message keeps its own reasoning", func(t *testing.T) {
+		messages := chatMessages(t, `{
+			"model": "m",
+			"input": [
+				{"role": "user", "content": "q"},
+				{"type": "reasoning", "summary": [{"type": "summary_text", "text": "first"}]},
+				{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "a1"}]},
+				{"type": "reasoning", "summary": [{"type": "summary_text", "text": "second"}]},
+				{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "a2"}]}
+			]
+		}`)
+		require.Len(t, messages, 3)
+		assert.Equal(t, "first", messages[1]["reasoning_content"])
+		assert.Equal(t, "second", messages[2]["reasoning_content"])
+	})
+
+	t.Run("tool calls of one turn share one message", func(t *testing.T) {
+		messages := chatMessages(t, `{
+			"model": "m",
+			"input": [
+				{"role": "user", "content": "q"},
+				{"type": "reasoning", "summary": [{"type": "summary_text", "text": "first"}]},
+				{"type": "function_call", "call_id": "call_1", "name": "f", "arguments": "{}"},
+				{"type": "reasoning", "summary": [{"type": "summary_text", "text": "second"}]},
+				{"type": "function_call", "call_id": "call_2", "name": "f", "arguments": "{}"},
+				{"type": "function_call_output", "call_id": "call_1", "output": "1"},
+				{"type": "function_call_output", "call_id": "call_2", "output": "2"}
+			]
+		}`)
+		require.Len(t, messages, 4)
+		assert.Equal(t, "first\n\nsecond", messages[1]["reasoning_content"])
+		assert.Len(t, messages[1]["tool_calls"], 2)
+	})
+
+	t.Run("reasoning before a built-in tool call", func(t *testing.T) {
+		messages := chatMessages(t, `{
+			"model": "m",
+			"input": [
+				{"role": "user", "content": "q"},
+				{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Let me look."}]},
+				{"type": "reasoning", "summary": [{"type": "summary_text", "text": "Search first."}]},
+				{"type": "web_search_call", "id": "ws_1", "status": "completed"},
+				{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "Found."}]}
+			]
+		}`)
+		// user, assistant text, assistant(web_search tool call), tool, assistant
+		require.Len(t, messages, 5)
+		assert.NotContains(t, messages[1], "reasoning_content")
+		assert.Equal(t, "Search first.", messages[2]["reasoning_content"])
+		assert.NotNil(t, messages[2]["tool_calls"])
+		assert.Equal(t, "tool", messages[3]["role"])
+		assert.NotContains(t, messages[4], "reasoning_content")
+	})
+}
+
+// TestRequestToChat_ReasoningTextSources: clients echo reasoning back as
+// summary_text, as raw reasoning_text content, or both — none may be lost.
+func TestRequestToChat_ReasoningTextSources(t *testing.T) {
+	cases := []struct {
+		name string
+		item string
+		want string
+	}{
+		{
+			name: "summary parts",
+			item: `{"type": "reasoning", "summary": [{"type": "summary_text", "text": "A"}, {"type": "summary_text", "text": "B"}]}`,
+			want: "A\n\nB",
+		},
+		{
+			name: "content only",
+			item: `{"type": "reasoning", "content": [{"type": "reasoning_text", "text": "raw"}]}`,
+			want: "raw",
+		},
+		{
+			name: "raw content wins over its summary",
+			item: `{"type": "reasoning", "summary": [{"type": "summary_text", "text": "digest"}], "content": [{"type": "reasoning_text", "text": "raw"}]}`,
+			want: "raw",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			messages := chatMessages(t, `{"model": "m", "input": [
+				{"role": "user", "content": "q"},
+				`+tc.item+`,
+				{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "a"}]}
+			]}`)
+			require.Len(t, messages, 2)
+			assert.Equal(t, tc.want, messages[1]["reasoning_content"])
+		})
+	}
+}
+
+func TestOutputToInputItems_Reasoning_ContentOnly(t *testing.T) {
+	// A reasoning item whose only text is raw reasoning_text content (e.g.
+	// gpt-oss) must survive into the next turn's input instead of being dropped.
+	output := []OutputItem{
+		{
+			Type:    "reasoning",
+			ID:      "rs_raw",
+			Content: []OutputContent{{Type: "reasoning_text", Text: "raw thoughts"}},
+		},
+	}
+	items := outputToInputItems(output)
+	require.Len(t, items, 1)
+
+	item := items[0].(map[string]interface{})
+	assert.Equal(t, "reasoning", item["type"])
+	assert.NotContains(t, item, "summary")
+	content := item["content"].([]interface{})
+	require.Len(t, content, 1)
+	assert.Equal(t, "reasoning_text", content[0].(map[string]interface{})["type"])
+	assert.Equal(t, "raw thoughts", content[0].(map[string]interface{})["text"])
 }
