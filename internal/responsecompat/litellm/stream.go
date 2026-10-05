@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
 )
 
 type streamReader struct {
@@ -277,9 +278,7 @@ func (r *streamReader) normalizeChatChunk(body map[string]any) (bool, bool) {
 			choice["delta"] = delta
 		}
 		if reasoning, ok := delta["reasoning"]; ok {
-			if _, exists := delta["reasoning_content"]; !exists {
-				delta["reasoning_content"] = reasoning
-			}
+			delta["reasoning_content"] = converterutil.PickReasoningField(delta["reasoning_content"], reasoning)
 			delete(delta, "reasoning")
 		}
 		if delta["refusal"] == nil {

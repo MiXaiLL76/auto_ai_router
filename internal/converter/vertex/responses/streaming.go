@@ -244,22 +244,15 @@ func processThoughtDelta(w io.Writer, acc *vertexStreamAccumulator, delta string
 		acc.reasoningStarted = true
 		acc.reasoningItemID = generateItemID("rs_")
 		acc.reasoningOutputIndex = outputIdx
-		if err := writeVertexSSE(w, "response.output_item.added", map[string]interface{}{
-			"type":         "response.output_item.added",
-			"output_index": outputIdx,
-			"item": map[string]interface{}{
-				"type":    "reasoning",
-				"id":      acc.reasoningItemID,
-				"status":  "in_progress",
-				"summary": []interface{}{},
-			},
-		}, acc); err != nil {
-			return err
+		for _, ev := range responses.BuildReasoningItemOpenEvents(outputIdx, acc.reasoningItemID) {
+			if err := writeVertexSSE(w, ev["type"].(string), ev, acc); err != nil {
+				return err
+			}
 		}
 	}
 	acc.fullReasoning += delta
-	// Reasoning deltas have no standardized SSE type yet — accumulate only.
-	return nil
+	return writeVertexSSE(w, "response.reasoning_summary_text.delta",
+		responses.BuildReasoningSummaryTextDeltaEvent(acc.reasoningItemID, acc.reasoningOutputIndex, 0, delta), acc)
 }
 
 func processFunctionCallPart(w io.Writer, acc *vertexStreamAccumulator, fc *genai.FunctionCall) error {
@@ -411,18 +404,12 @@ func emitVertexCompletionEvents(w io.Writer, acc *vertexStreamAccumulator) error
 		closures = append(closures, closureItem{
 			outputIndex: idx,
 			fn: func() error {
-				return writeVertexSSE(w, "response.output_item.done", map[string]interface{}{
-					"type":         "response.output_item.done",
-					"output_index": idx,
-					"item": map[string]interface{}{
-						"type":   "reasoning",
-						"id":     acc.reasoningItemID,
-						"status": "completed",
-						"summary": []interface{}{
-							map[string]interface{}{"type": "summary_text", "text": acc.fullReasoning},
-						},
-					},
-				}, acc)
+				for _, ev := range responses.BuildReasoningItemCloseEvents(idx, acc.reasoningItemID, acc.fullReasoning) {
+					if err := writeVertexSSE(w, ev["type"].(string), ev, acc); err != nil {
+						return err
+					}
+				}
+				return nil
 			},
 		})
 	}

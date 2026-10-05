@@ -175,6 +175,37 @@ for event in stream:
         print(event.delta, end="", flush=True)
 ```
 
+### Reasoning
+
+Reasoning streams as a `reasoning` output item with one `summary_text` part, the same way for
+every provider (Chat Completions upstreams, Anthropic, Vertex AI):
+
+```
+response.output_item.added            (item.type = "reasoning")
+response.reasoning_summary_part.added
+response.reasoning_summary_text.delta (repeated)
+response.reasoning_summary_text.done
+response.reasoning_summary_part.done
+response.output_item.done
+```
+
+Chat upstreams return reasoning as `reasoning_content` or `reasoning`; the router reads both.
+It is raw chain of thought, but it is still exposed as `summary_text`, because Responses
+clients such as Codex render the summary.
+
+When reasoning items are sent back as input:
+
+| Upstream         | Mapping                                                                                                                          |
+| ---------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| Chat Completions | `reasoning_content` of the assistant message it belongs to, only for turns after the last `user` message (the current tool loop) |
+| Anthropic        | `thinking` block carrying the text and its signature (`encrypted_content`)                                                       |
+| Vertex AI        | Dropped. Gemini keeps continuity through `thoughtSignature`                                                                      |
+
+Chat providers do not get reasoning from older turns. DeepSeek thinking mode and Kimi need it
+only inside the current tool loop, `deepseek-reasoner` rejects it on past turns, and it costs
+input tokens. A reasoning-only turn with no message or tool call, for example one cut off by
+`max_output_tokens`, is dropped.
+
 ## WebSocket Protocol
 
 The router accepts WebSocket connections on `GET /v1/responses` (with `Upgrade: websocket` header). By default, each turn uses the existing HTTP/SSE provider path. Enable native upstream WebSockets for models whose providers support them:
