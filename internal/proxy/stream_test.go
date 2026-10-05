@@ -521,6 +521,22 @@ func TestOpenAIStreamUsageExtractor(t *testing.T) {
 			},
 		},
 		{
+			name:      "alibaba explicit cache read",
+			chunk:     []byte(`{"usage":{"prompt_tokens":1507,"completion_tokens":267,"prompt_tokens_details":{"cached_tokens":1486,"cache_type":"ephemeral","cache_creation_input_tokens":0,"cache_creation":{"ephemeral_5m_input_tokens":0}}}}`),
+			expectNil: false,
+			expectUsage: func(u *StreamUsageInfo) bool {
+				return u.PromptTokens == 1507 && u.CachedTokens == 1486 && u.CacheType == "ephemeral" && u.CacheCreationTokens == 0
+			},
+		},
+		{
+			name:      "alibaba explicit cache creation with 5m detail",
+			chunk:     []byte(`{"usage":{"prompt_tokens":1507,"completion_tokens":204,"prompt_tokens_details":{"cached_tokens":0,"cache_type":"ephemeral","cache_creation_input_tokens":1486,"cache_creation":{"ephemeral_5m_input_tokens":1486}}}}`),
+			expectNil: false,
+			expectUsage: func(u *StreamUsageInfo) bool {
+				return u.CacheType == "ephemeral" && u.CacheCreationTokens == 1486 && u.CacheCreation5mTokens == 1486 && u.CachedTokens == 0
+			},
+		},
+		{
 			name:      "usage with audio output tokens",
 			chunk:     []byte(`{"usage":{"prompt_tokens":100,"completion_tokens":50,"completion_tokens_details":{"audio_tokens":10}}}`),
 			expectNil: false,
