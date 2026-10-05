@@ -27,14 +27,15 @@ type anthropicStreamAccumulator struct {
 	meta       *responses.ResponsesMetadata
 
 	// Accumulated content by block index
-	currentBlockType   string
-	currentBlockID     string
-	currentBlockName   string
-	currentText        string
-	currentThinking    string
-	currentToolArgs    string
-	currentReasoningID string                        // ID assigned at content_block_start for "thinking"
-	currentCitations   []anthropic.AnthropicCitation // accumulated via citations_delta, consumed at block finalize
+	currentBlockType    string
+	currentBlockID      string
+	currentBlockName    string
+	currentText         string
+	currentThinking     string
+	currentToolArgs     string
+	currentReasoningID  string                        // ID assigned at content_block_start for "thinking"
+	currentReasoningIdx int                           // output_index the current reasoning item was announced at
+	currentCitations    []anthropic.AnthropicCitation // accumulated via citations_delta, consumed at block finalize
 
 	// Completed output items
 	msgContent  []responses.OutputContent
@@ -156,18 +157,11 @@ func processAnthropicEvent(w io.Writer, acc *anthropicStreamAccumulator, event *
 			}
 			// Announce the reasoning item immediately so the client knows its output_index.
 			acc.currentReasoningID = generateItemID("rs_")
-			outputIdx := len(acc.outputItems)
-			if err := writeAnthropicSSE(w, "response.output_item.added", map[string]interface{}{
-				"type":         "response.output_item.added",
-				"output_index": outputIdx,
-				"item": map[string]interface{}{
-					"type":    "reasoning",
-					"id":      acc.currentReasoningID,
-					"status":  "in_progress",
-					"summary": []interface{}{},
-				},
-			}, acc); err != nil {
-				return err
+			acc.currentReasoningIdx = len(acc.outputItems)
+			for _, ev := range responses.BuildReasoningItemOpenEvents(acc.currentReasoningIdx, acc.currentReasoningID) {
+				if err := writeAnthropicSSE(w, ev["type"].(string), ev, acc); err != nil {
+					return err
+				}
 			}
 
 		case "tool_use":
@@ -239,6 +233,12 @@ func processAnthropicEvent(w io.Writer, acc *anthropicStreamAccumulator, event *
 			}
 		case "thinking_delta":
 			acc.currentThinking += event.Delta.Thinking
+			if event.Delta.Thinking != "" && acc.currentReasoningID != "" {
+				if err := writeAnthropicSSE(w, "response.reasoning_summary_text.delta",
+					responses.BuildReasoningSummaryTextDeltaEvent(acc.currentReasoningID, acc.currentReasoningIdx, 0, event.Delta.Thinking), acc); err != nil {
+					return err
+				}
+			}
 		case "citations_delta":
 			if event.Delta.Citation != nil {
 				acc.currentCitations = append(acc.currentCitations, *event.Delta.Citation)
@@ -374,6 +374,17 @@ func finalizeCurrentBlock(w io.Writer, acc *anthropicStreamAccumulator) error {
 		itemID := acc.currentReasoningID
 		if itemID == "" {
 			itemID = generateItemID("rs_")
+		} else {
+			// Close the summary part opened at content_block_start; the
+			// output_item.done follows below or at completion.
+			for _, ev := range []map[string]interface{}{
+				responses.BuildReasoningSummaryTextDoneEvent(itemID, acc.currentReasoningIdx, 0, acc.currentThinking),
+				responses.BuildReasoningSummaryPartDoneEvent(itemID, acc.currentReasoningIdx, 0, acc.currentThinking),
+			} {
+				if err := writeAnthropicSSE(w, ev["type"].(string), ev, acc); err != nil {
+					return err
+				}
+			}
 		}
 		if acc.currentThinking != "" {
 			// Appended here, closed once by emitAnthropicCompletionEvents (which
@@ -394,16 +405,7 @@ func finalizeCurrentBlock(w io.Writer, acc *anthropicStreamAccumulator) error {
 			// avoid leaving the "added" event from content_block_start
 			// dangling with no matching "done".
 			outputIdx := len(acc.outputItems)
-			if err := writeAnthropicSSE(w, "response.output_item.done", map[string]interface{}{
-				"type":         "response.output_item.done",
-				"output_index": outputIdx,
-				"item": map[string]interface{}{
-					"type":    "reasoning",
-					"id":      itemID,
-					"status":  "completed",
-					"summary": []interface{}{},
-				},
-			}, acc); err != nil {
+			if err := writeAnthropicSSE(w, "response.output_item.done", responses.BuildReasoningItemDoneEvent(outputIdx, itemID, ""), acc); err != nil {
 				return err
 			}
 		}

@@ -202,3 +202,77 @@ func BuildReasoningSummaryPartDoneEvent(itemID string, outputIndex, summaryIndex
 		"part":          BuildReasoningSummaryPart(text),
 	}
 }
+
+// BuildFunctionCallItemAddedEvent builds the output_item.added event opening a
+// streamed function_call item.
+func BuildFunctionCallItemAddedEvent(outputIndex int, itemID, callID, name string) map[string]interface{} {
+	return map[string]interface{}{
+		"type":         "response.output_item.added",
+		"output_index": outputIndex,
+		"item": map[string]interface{}{
+			"type":      "function_call",
+			"id":        itemID,
+			"call_id":   callID,
+			"name":      name,
+			"arguments": "",
+			"status":    "in_progress",
+		},
+	}
+}
+
+// BuildReasoningItemAddedEvent builds the output_item.added event opening a
+// streamed reasoning item.
+func BuildReasoningItemAddedEvent(outputIndex int, itemID string) map[string]interface{} {
+	return map[string]interface{}{
+		"type":         "response.output_item.added",
+		"output_index": outputIndex,
+		"item": map[string]interface{}{
+			"type":    "reasoning",
+			"id":      itemID,
+			"status":  "in_progress",
+			"summary": []interface{}{},
+		},
+	}
+}
+
+// BuildReasoningItemDoneEvent builds the output_item.done event closing a
+// streamed reasoning item; an empty text closes it with an empty summary.
+func BuildReasoningItemDoneEvent(outputIndex int, itemID, text string) map[string]interface{} {
+	summary := []interface{}{}
+	if text != "" {
+		summary = append(summary, BuildReasoningSummaryPart(text))
+	}
+	return map[string]interface{}{
+		"type":         "response.output_item.done",
+		"output_index": outputIndex,
+		"item": map[string]interface{}{
+			"type":    "reasoning",
+			"id":      itemID,
+			"status":  "completed",
+			"summary": summary,
+		},
+	}
+}
+
+// BuildReasoningItemOpenEvents builds the events opening a streamed reasoning
+// item with a single summary part (output_item.added +
+// reasoning_summary_part.added) — the sequence OpenAI's own Responses API
+// streams reasoning summaries with. Every converter streams reasoning this
+// way, so clients see the same events whichever provider served the request.
+func BuildReasoningItemOpenEvents(outputIndex int, itemID string) []map[string]interface{} {
+	return []map[string]interface{}{
+		BuildReasoningItemAddedEvent(outputIndex, itemID),
+		BuildReasoningSummaryPartAddedEvent(itemID, outputIndex, 0),
+	}
+}
+
+// BuildReasoningItemCloseEvents builds the events closing a reasoning item
+// opened with BuildReasoningItemOpenEvents (reasoning_summary_text.done +
+// reasoning_summary_part.done + output_item.done).
+func BuildReasoningItemCloseEvents(outputIndex int, itemID, text string) []map[string]interface{} {
+	return []map[string]interface{}{
+		BuildReasoningSummaryTextDoneEvent(itemID, outputIndex, 0, text),
+		BuildReasoningSummaryPartDoneEvent(itemID, outputIndex, 0, text),
+		BuildReasoningItemDoneEvent(outputIndex, itemID, text),
+	}
+}

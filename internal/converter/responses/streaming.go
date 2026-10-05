@@ -2,10 +2,11 @@ package responses
 
 import (
 	"bufio"
+	"cmp"
 	"fmt"
 	"io"
 	"log/slog"
-	"sort"
+	"slices"
 	"strings"
 
 	// goccy/go-json instead of encoding/json: both json.* calls in this file run
@@ -33,10 +34,13 @@ type streamAccumulator struct {
 	createdAt  int64
 
 	// Accumulated content
-	fullText      string
-	fullRefusal   string // accumulated refusal text
-	toolCalls     []accumulatedToolCall
-	currentToolID int // index into toolCalls for the active tool call
+	fullText    string
+	fullRefusal string // accumulated refusal text
+	toolCalls   []accumulatedToolCall
+	// toolSlots maps an upstream tool_calls[].index to the toolCalls slot of
+	// the call currently streaming under it. Slots are allocated on demand,
+	// so a sparse or huge upstream index never allocates the gap before it.
+	toolSlots map[int]int
 
 	// Reasoning output items, one per contiguous run of reasoning deltas.
 	// Usually a single item at output_index 0: DeepSeek-style providers
@@ -94,15 +98,48 @@ func (acc *streamAccumulator) openReasoningItem() *streamReasoningItem {
 	return nil
 }
 
-// toolOutputIndex returns the output_index of acc.toolCalls[idx], reserving
-// one on first use for a slot that was never announced with an id.
-func (acc *streamAccumulator) toolOutputIndex(idx int) int {
-	tc := &acc.toolCalls[idx]
-	if !tc.indexed {
-		tc.outputIndex = acc.allocOutputIndex()
-		tc.indexed = true
+// maxStreamToolCalls caps the function_call items one streamed response may
+// open, bounding memory against a malformed or hostile upstream.
+const maxStreamToolCalls = 1024
+
+// toolCallSlot resolves an upstream tool call delta to its toolCalls slot,
+// opening a new call when the delta starts one. A new call starts when the
+// delta carries an ID other than the one streaming under its index — some
+// OpenAI-compatible backends send index 0 for every parallel call — or when
+// an unseen index carries data without an ID, which gets a generated call_id
+// so the client never receives a function_call it cannot answer.
+// Returns -1 for a delta to ignore.
+func (acc *streamAccumulator) toolCallSlot(index int, id string, hasData bool) (slot int, isNew bool) {
+	if index < 0 {
+		// Malformed upstream chunk.
+		return -1, false
 	}
-	return tc.outputIndex
+	slot, seen := acc.toolSlots[index]
+	if seen && (id == "" || acc.toolCalls[slot].id == id) {
+		return slot, false
+	}
+	if id == "" && !hasData {
+		return -1, false
+	}
+	if len(acc.toolCalls) >= maxStreamToolCalls {
+		slog.Warn("[responses/streaming] tool call limit reached, dropping further calls",
+			"limit", maxStreamToolCalls)
+		return -1, false
+	}
+	if id == "" {
+		id = GenerateItemID("call_")
+	}
+	if acc.toolSlots == nil {
+		acc.toolSlots = make(map[int]int)
+	}
+	slot = len(acc.toolCalls)
+	acc.toolSlots[index] = slot
+	acc.toolCalls = append(acc.toolCalls, accumulatedToolCall{
+		id:          id,
+		itemID:      GenerateItemID("fc_"),
+		outputIndex: acc.allocOutputIndex(),
+	})
+	return slot, true
 }
 
 type accumulatedToolCall struct {
@@ -111,7 +148,6 @@ type accumulatedToolCall struct {
 	arguments   string
 	itemID      string // Responses API item ID
 	outputIndex int
-	indexed     bool // outputIndex has been assigned
 }
 
 // streamReasoningItem is a reasoning output item built from reasoning deltas.
@@ -151,7 +187,7 @@ type chatStreamChunk struct {
 			Role    string `json:"role,omitempty"`
 			Content string `json:"content,omitempty"`
 			Refusal string `json:"refusal,omitempty"`
-			// See chatReasoningText for the two spellings and why interface{}.
+			// See converterutil.PickReasoningField for the two spellings and why interface{}.
 			ReasoningContent interface{} `json:"reasoning_content,omitempty"`
 			Reasoning        interface{} `json:"reasoning,omitempty"`
 			ToolCalls        []struct {
@@ -357,7 +393,7 @@ func transformChatStreamToResponsesInner(
 		// providers stream reasoning ahead of the visible content, and the
 		// reasoning output item must be announced (and later closed) before
 		// the message/tool_call item that follows it.
-		if reasoningDelta := chatReasoningText(choice.Delta.ReasoningContent, choice.Delta.Reasoning); reasoningDelta != "" {
+		if reasoningDelta := converterutil.ReasoningText(choice.Delta.ReasoningContent, choice.Delta.Reasoning); reasoningDelta != "" {
 			if !acc.headerEmitted {
 				if err := emitHeaderEvents(writer, acc); err != nil {
 					return err
@@ -437,10 +473,12 @@ func transformChatStreamToResponsesInner(
 
 		// Handle tool call deltas
 		for _, tc := range choice.Delta.ToolCalls {
-			if tc.Index < 0 {
-				// Malformed upstream chunk; indexing with it would panic the
-				// transform goroutine, which has no recover, and take the
-				// whole process down.
+			var name, args string
+			if tc.Function != nil {
+				name, args = tc.Function.Name, tc.Function.Arguments
+			}
+			slot, isNew := acc.toolCallSlot(tc.Index, tc.ID, name != "" || args != "")
+			if slot < 0 {
 				continue
 			}
 			if !acc.headerEmitted {
@@ -452,68 +490,26 @@ func transformChatStreamToResponsesInner(
 				return err
 			}
 
-			// New tool call (has an ID not seen at this index yet — some
-			// providers repeat the ID on every chunk of the same call)
-			if tc.ID != "" && (tc.Index >= len(acc.toolCalls) || acc.toolCalls[tc.Index].id != tc.ID) {
-				idx := tc.Index
-				for len(acc.toolCalls) <= idx {
-					acc.toolCalls = append(acc.toolCalls, accumulatedToolCall{})
-				}
-				toolCall := accumulatedToolCall{
-					id:          tc.ID,
-					itemID:      GenerateItemID("fc_"),
-					outputIndex: acc.allocOutputIndex(),
-					indexed:     true,
-				}
-				if tc.Function != nil {
-					toolCall.name = tc.Function.Name
-				}
-				acc.toolCalls[idx] = toolCall
-				acc.currentToolID = idx
+			call := &acc.toolCalls[slot]
+			if isNew {
+				call.name = name
 				acc.state = stateStreamingToolCall
-
-				// Emit output_item.added for function_call
-				outputIndex := toolCall.outputIndex
-
-				itemAddedEvent := map[string]interface{}{
-					"type":         "response.output_item.added",
-					"output_index": outputIndex,
-					"item": map[string]interface{}{
-						"type":      "function_call",
-						"id":        acc.toolCalls[idx].itemID,
-						"call_id":   acc.toolCalls[idx].id,
-						"name":      acc.toolCalls[idx].name,
-						"arguments": "",
-						"status":    "in_progress",
-					},
-				}
-				if err := writeSSEWithSeq(writer, "response.output_item.added", itemAddedEvent, acc); err != nil {
+				if err := writeSSEWithSeq(writer, "response.output_item.added",
+					BuildFunctionCallItemAddedEvent(call.outputIndex, call.itemID, call.id, call.name), acc); err != nil {
 					return err
 				}
-			} else if tc.Function != nil && tc.Function.Name != "" &&
-				tc.Index < len(acc.toolCalls) && acc.toolCalls[tc.Index].name == "" {
+			} else if name != "" && call.name == "" {
 				// The call's name arrived after the chunk that opened it.
-				acc.toolCalls[tc.Index].name = tc.Function.Name
+				call.name = name
 			}
 
-			// Accumulate arguments
-			if tc.Function != nil && tc.Function.Arguments != "" {
-				idx := tc.Index
-				if idx >= len(acc.toolCalls) {
-					for len(acc.toolCalls) <= idx {
-						acc.toolCalls = append(acc.toolCalls, accumulatedToolCall{})
-					}
-					acc.toolCalls[idx].itemID = GenerateItemID("fc_")
-				}
-				acc.toolCalls[idx].arguments += tc.Function.Arguments
-
-				outputIndex := acc.toolOutputIndex(idx)
-
+			if args != "" {
+				call.arguments += args
 				argDeltaEvent := map[string]interface{}{
 					"type":         "response.function_call_arguments.delta",
-					"item_id":      acc.toolCalls[idx].itemID,
-					"output_index": outputIndex,
-					"delta":        tc.Function.Arguments,
+					"item_id":      call.itemID,
+					"output_index": call.outputIndex,
+					"delta":        args,
 				}
 				if err := writeSSEWithSeq(writer, "response.function_call_arguments.delta", argDeltaEvent, acc); err != nil {
 					return err
@@ -620,8 +616,8 @@ func completedOutputItems(acc *streamAccumulator) []OutputItem {
 		}})
 	}
 
-	sort.SliceStable(items, func(i, j int) bool {
-		return items[i].outputIndex < items[j].outputIndex
+	slices.SortStableFunc(items, func(a, b indexedItem) int {
+		return cmp.Compare(a.outputIndex, b.outputIndex)
 	})
 	output := make([]OutputItem, 0, len(items))
 	for _, it := range items {
@@ -719,7 +715,12 @@ func emitHeaderEvents(w io.Writer, acc *streamAccumulator) error {
 }
 
 // emitReasoningDelta streams a reasoning delta as a reasoning output item with
-// a single summary_text part, opening the item (output_item.added +
+// a single summary_text part. Chat's reasoning_content is the raw chain of
+// thought, which the spec would put in content[{type:"reasoning_text"}]; it is
+// mapped to summary_text on purpose, because that is what Responses clients
+// (Codex) render, and it matches ChatToResponse and the Anthropic/Vertex
+// converters. RequestToChat accepts either form on the way back.
+// The item is opened (output_item.added +
 // reasoning_summary_part.added) on its first delta — the event sequence
 // OpenAI's own Responses API streams reasoning summaries with.
 func emitReasoningDelta(w io.Writer, acc *streamAccumulator, delta string) error {
@@ -731,22 +732,10 @@ func emitReasoningDelta(w io.Writer, acc *streamAccumulator, delta string) error
 		})
 		item = &acc.reasoningItems[len(acc.reasoningItems)-1]
 
-		itemAddedEvent := map[string]interface{}{
-			"type":         "response.output_item.added",
-			"output_index": item.outputIndex,
-			"item": map[string]interface{}{
-				"type":    "reasoning",
-				"id":      item.itemID,
-				"status":  "in_progress",
-				"summary": []interface{}{},
-			},
-		}
-		if err := writeSSEWithSeq(w, "response.output_item.added", itemAddedEvent, acc); err != nil {
-			return err
-		}
-		partAddedEvent := BuildReasoningSummaryPartAddedEvent(item.itemID, item.outputIndex, 0)
-		if err := writeSSEWithSeq(w, "response.reasoning_summary_part.added", partAddedEvent, acc); err != nil {
-			return err
+		for _, ev := range BuildReasoningItemOpenEvents(item.outputIndex, item.itemID) {
+			if err := writeSSEWithSeq(w, ev["type"].(string), ev, acc); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -767,25 +756,12 @@ func closeReasoningItem(w io.Writer, acc *streamAccumulator) error {
 	}
 	item.closed = true
 
-	textDoneEvent := BuildReasoningSummaryTextDoneEvent(item.itemID, item.outputIndex, 0, item.text)
-	if err := writeSSEWithSeq(w, "response.reasoning_summary_text.done", textDoneEvent, acc); err != nil {
-		return err
+	for _, ev := range BuildReasoningItemCloseEvents(item.outputIndex, item.itemID, item.text) {
+		if err := writeSSEWithSeq(w, ev["type"].(string), ev, acc); err != nil {
+			return err
+		}
 	}
-	partDoneEvent := BuildReasoningSummaryPartDoneEvent(item.itemID, item.outputIndex, 0, item.text)
-	if err := writeSSEWithSeq(w, "response.reasoning_summary_part.done", partDoneEvent, acc); err != nil {
-		return err
-	}
-	doneEvent := map[string]interface{}{
-		"type":         "response.output_item.done",
-		"output_index": item.outputIndex,
-		"item": map[string]interface{}{
-			"type":    "reasoning",
-			"id":      item.itemID,
-			"status":  "completed",
-			"summary": []interface{}{BuildReasoningSummaryPart(item.text)},
-		},
-	}
-	return writeSSEWithSeq(w, "response.output_item.done", doneEvent, acc)
+	return nil
 }
 
 // emitMessageStartEvents emits output_item.added and content_part.added for a message.
@@ -874,9 +850,8 @@ func emitCompletionEvents(w io.Writer, acc *streamAccumulator) error {
 	}
 
 	// Close tool calls
-	for i := range acc.toolCalls {
-		outputIndex := acc.toolOutputIndex(i)
-		tc := acc.toolCalls[i]
+	for _, tc := range acc.toolCalls {
+		outputIndex := tc.outputIndex
 
 		// function_call_arguments.done
 		argsDoneEvent := map[string]interface{}{

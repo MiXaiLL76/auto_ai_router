@@ -707,6 +707,8 @@ func convertInputValue(input interface{}) ([]interface{}, error) {
 	}
 
 	var messages []interface{}
+	// lastUserIdx is the index in messages of the last user message; -1 if none.
+	lastUserIdx := -1
 
 	// Chat Completions carries a whole assistant turn — reasoning_content,
 	// content and tool_calls — in one message, while the Responses API splits
@@ -732,12 +734,15 @@ func convertInputValue(input interface{}) ([]interface{}, error) {
 		}
 		msg := pendingAssistant
 		if msg == nil {
-			msg = map[string]interface{}{"role": "assistant", "content": nil}
 			if len(pendingToolCalls) == 0 {
-				// Reasoning-only turn (e.g. max_output_tokens ran out mid-reasoning):
-				// content is required when there are no tool_calls.
-				msg["content"] = ""
+				// Reasoning-only turn (e.g. max_output_tokens ran out mid-reasoning).
+				// Dropped: an assistant message with empty content, or two assistant
+				// messages in a row, is rejected by several Chat providers, and
+				// reasoning alone gives the model nothing to continue from.
+				pendingReasoning = nil
+				return
 			}
+			msg = map[string]interface{}{"role": "assistant", "content": nil}
 		}
 		if len(pendingToolCalls) > 0 {
 			msg["tool_calls"] = pendingToolCalls
@@ -751,7 +756,7 @@ func convertInputValue(input interface{}) ([]interface{}, error) {
 
 	// endAssistantTurn closes the turn before an item that is not part of it
 	// (user/system message, tool result, ...). Reasoning nothing claimed stays
-	// with the turn it ended, or becomes a reasoning-only assistant message.
+	// with the turn it ended, or is dropped with a reasoning-only turn.
 	endAssistantTurn := func() {
 		claimReasoning()
 		flushToolCalls()
@@ -805,7 +810,7 @@ func convertInputValue(input interface{}) ([]interface{}, error) {
 			// Carried as reasoning_content of the assistant message it precedes —
 			// the field DeepSeek-style providers require back on tool-call turns.
 			// encrypted_content is dropped — it is only meaningful to the original provider.
-			if text := reasoningItemText(itemMap); text != "" {
+			if text := ReasoningItemText(itemMap); text != "" {
 				unclaimedReasoning = append(unclaimedReasoning, text)
 			}
 
@@ -1042,6 +1047,9 @@ func convertInputValue(input interface{}) ([]interface{}, error) {
 				continue
 			}
 			endAssistantTurn()
+			if msg["role"] == "user" {
+				lastUserIdx = len(messages)
+			}
 			messages = append(messages, msg)
 		}
 	}
@@ -1049,15 +1057,26 @@ func convertInputValue(input interface{}) ([]interface{}, error) {
 	// Flush the trailing assistant turn, if any
 	endAssistantTurn()
 
+	// reasoning_content is only sent back for the current tool loop — the
+	// assistant turns after the last user message. DeepSeek thinking mode and
+	// Kimi require it there; older turns' reasoning is useless to every
+	// provider, inflates input tokens, and some (deepseek-reasoner) reject it
+	// outright on past turns.
+	for i := 0; i < lastUserIdx; i++ {
+		if msg, ok := messages[i].(map[string]interface{}); ok && msg["role"] == "assistant" {
+			delete(msg, "reasoning_content")
+		}
+	}
+
 	return messages, nil
 }
 
-// reasoningItemText returns the reasoning text of a Responses reasoning item.
+// ReasoningItemText returns the reasoning text of a Responses reasoning item.
 // Raw reasoning_text content wins over summary_text when both are present:
 // Chat's reasoning_content is the model's reasoning itself, a summary only a
 // digest of it. Some clients echo reasoning back in "content" alone (see
 // PrepareCodexPassthrough), so neither field may be ignored.
-func reasoningItemText(item map[string]interface{}) string {
+func ReasoningItemText(item map[string]interface{}) string {
 	if text := joinReasoningParts(item["content"]); text != "" {
 		return text
 	}

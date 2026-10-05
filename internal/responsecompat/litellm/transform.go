@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
 	"github.com/mixaill76/auto_ai_router/internal/upstreamerror"
 )
 
@@ -218,9 +219,7 @@ func normalizeCompletion(ctx Context, body map[string]any) error {
 		moveProviderSpecificField(message, "refusal")
 		moveProviderSpecificField(choice, "content_filter_results")
 		if reasoning, ok := message["reasoning"]; ok {
-			if _, exists := message["reasoning_content"]; !exists {
-				message["reasoning_content"] = reasoning
-			}
+			message["reasoning_content"] = converterutil.PickReasoningField(message["reasoning_content"], reasoning)
 			delete(message, "reasoning")
 		}
 

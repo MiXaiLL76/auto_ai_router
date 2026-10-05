@@ -119,7 +119,7 @@ func ChatToResponse(body []byte, opts ...ChatToResponseOption) ([]byte, error) {
 
 			// Add reasoning output item if the provider returned reasoning. Emitted
 			// before the message item, matching the Anthropic/Vertex converters.
-			if reasoning := chatReasoningText(choice.Message.ReasoningContent, choice.Message.Reasoning); reasoning != "" {
+			if reasoning := converterutil.ReasoningText(choice.Message.ReasoningContent, choice.Message.Reasoning); reasoning != "" {
 				output = append(output, OutputItem{
 					Type:   "reasoning",
 					ID:     GenerateItemID("rs_"),
@@ -265,21 +265,6 @@ func ChatToResponse(body []byte, opts ...ChatToResponseOption) ([]byte, error) {
 		return nil, fmt.Errorf("failed to marshal responses API response: %w", err)
 	}
 	return result, nil
-}
-
-// chatReasoningText returns the reasoning text of a Chat Completions message or
-// stream delta. OpenAI-compatible providers spell the field either
-// "reasoning_content" (DeepSeek, SiliconFlow, LiteLLM) or "reasoning"
-// (OpenRouter, vLLM, Ollama, Groq), and the raw upstream body reaches this
-// converter before internal/responsecompat folds one into the other. Both are
-// decoded as interface{} so a provider sending a non-string there cannot fail
-// the whole unmarshal and take the content and tool calls down with it.
-func chatReasoningText(reasoningContent, reasoning interface{}) string {
-	if text, _ := reasoningContent.(string); text != "" {
-		return text
-	}
-	text, _ := reasoning.(string)
-	return text
 }
 
 func responseImageResult(b64JSON string, imageURL *struct {
