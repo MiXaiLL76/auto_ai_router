@@ -334,6 +334,10 @@ func (a *Authenticator) fetchTokenFromDB(ctx context.Context, hashedToken string
 	}
 	if teamOrganizationID != nil {
 		info.TeamOrganizationID = *teamOrganizationID
+		// A team key without an organization of its own bills the team's organization
+		if orgID == nil {
+			info.OrganizationID = *teamOrganizationID
+		}
 	}
 	if blocked != nil {
 		info.Blocked = *blocked
