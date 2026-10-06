@@ -139,6 +139,15 @@ func (p *Proxy) buildKafkaSpendEvent(
 		OutputImageTokens:        usage.OutputImageTokens,
 		WebSearchRequests:        usage.WebSearchRequests,
 		WebSearchContextSize:     usage.WebSearchContextSize,
+		XSearchCalls:             usage.XSearchCalls,
+		XSearchPosts:             usage.XSearchPosts,
+		XSearchProfiles:          usage.XSearchProfiles,
+		CodeExecutionCalls:       usage.CodeExecutionCalls,
+		AttachmentSearchCalls:    usage.AttachmentSearchCalls,
+		CollectionsSearchCalls:   usage.CollectionsSearchCalls,
+		MCPCalls:                 usage.MCPCalls,
+		ImageToolGenerations:     usage.ImageToolGenerations,
+		ImageToolEdits:           usage.ImageToolEdits,
 
 		TotalCost: cost,
 
@@ -170,6 +179,16 @@ func (p *Proxy) buildKafkaSpendEvent(
 		event.ImageCost = tokenCosts.ImageCost
 		event.VideoInputCost = tokenCosts.VideoInputCost
 		event.WebSearchCost = tokenCosts.WebSearchCost
+		event.XSearchCost = tokenCosts.XSearchCost
+		event.CodeExecutionCost = tokenCosts.CodeExecutionCost
+		event.AttachmentSearchCost = tokenCosts.AttachmentSearchCost
+		event.CollectionsSearchCost = tokenCosts.CollectionsSearchCost
+		event.ImageToolCost = tokenCosts.ImageGenerationToolCost
+		event.ToolUsageCost = tokenCosts.ToolUsageCost
+	}
+	if usage.ProviderCostUSD > 0 {
+		providerCost := usage.ProviderCostUSD
+		event.ProviderReportedCost = &providerCost
 	}
 
 	if status == "failure" {

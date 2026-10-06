@@ -1,12 +1,27 @@
 package converter
 
-import "github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
+import (
+	"math"
+
+	"github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
+)
 
 // CacheTypeExplicit is the TokenUsage.CacheType value Alibaba/Qwen sets
 // (usage.prompt_tokens_details.cache_type) when a request used an explicit
 // cache marker (cache_control:{"type":"ephemeral"}), as opposed to implicit
 // (automatic) caching, which reports no cache_type at all.
 const CacheTypeExplicit = "ephemeral"
+
+// TokenUsage.ReasoningAccounting values: how the provider counted reasoning
+// tokens relative to completion_tokens in one response.
+const (
+	// ReasoningAccountingIncluded: completion_tokens already contains the
+	// reasoning tokens (OpenAI semantics, total = prompt + completion).
+	ReasoningAccountingIncluded = "included"
+	// ReasoningAccountingAdditive: reasoning tokens come on top of
+	// completion_tokens (xAI, total = prompt + completion + reasoning).
+	ReasoningAccountingAdditive = "additive"
+)
 
 // TokenUsage is a universal format for token usage across all providers.
 // Used by converters to return usage data without circular dependencies.
@@ -42,6 +57,65 @@ type TokenUsage struct {
 	// ImageBilling carries per-image pricing inputs for image generation/edit
 	// requests (nil otherwise). A pointer keeps TokenUsage comparable.
 	ImageBilling *ImageBillingDetails
+
+	// ServerToolUsageReported is true when the provider reported a
+	// server-side tool usage object (xAI usage.server_side_tool_usage_details).
+	// The counters it carries, zeros included, are then authoritative: a zero
+	// there means no billable executions rather than missing data, so neither
+	// output items nor citations may stand in for it. Only when the object
+	// lacks web_search_calls or image_generation_calls do WebSearchRequests
+	// and the image tool counts fall back to those, as without the object.
+	ServerToolUsageReported bool
+	XSearchCalls            int // X Search calls (logged; X Search bills per fetched item)
+	XSearchPosts            int // X posts fetched across all X Search calls, not de-duplicated
+	XSearchProfiles         int // X user profiles fetched across all X Search calls
+	CodeExecutionCalls      int // code_execution (alias code_interpreter)
+	AttachmentSearchCalls   int // attachment_search over files attached to the request
+	CollectionsSearchCalls  int // collections_search (alias file_search)
+	MCPCalls                int // remote MCP calls (only their tokens are billed)
+	// ImageToolGenerations and ImageToolEdits count the images a built-in
+	// image_generation tool produced inside a chat/Responses request, priced
+	// at the image model's own tariff (ModelPrice.ImageGenerationToolModel).
+	ImageToolGenerations int
+	ImageToolEdits       int
+	// ReasoningAccounting is how this response counted reasoning tokens
+	// (ReasoningAccountingIncluded/Additive), detected from its total_tokens;
+	// empty when the response does not tell. Prices opt into using it with
+	// reasoning_tokens_accounting: "auto".
+	ReasoningAccounting string
+	// ProviderCostUSD is the provider's own figure for what the request cost
+	// us (xAI usage.cost_in_usd_ticks, aggregators' usage.cost). It is kept
+	// for reconciliation only and never added to the billed price.
+	ProviderCostUSD float64
+}
+
+// HasServerToolUsage reports whether the per-tool counters are worth logging:
+// the provider reported a server-side tool usage object (even one counting
+// web searches only, or nothing at all), or a built-in tool other than web
+// search, which has fields of its own, was used.
+func (tu *TokenUsage) HasServerToolUsage() bool {
+	if tu == nil {
+		return false
+	}
+	if tu.ServerToolUsageReported {
+		return true
+	}
+	for _, counter := range tu.serverToolCounters() {
+		if *counter > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// serverToolCounters lists the built-in tool counters other than
+// WebSearchRequests, for the code that treats them all alike.
+func (tu *TokenUsage) serverToolCounters() [9]*int {
+	return [...]*int{
+		&tu.XSearchCalls, &tu.XSearchPosts, &tu.XSearchProfiles,
+		&tu.CodeExecutionCalls, &tu.AttachmentSearchCalls, &tu.CollectionsSearchCalls,
+		&tu.MCPCalls, &tu.ImageToolGenerations, &tu.ImageToolEdits,
+	}
 }
 
 // Image request operations used by per-image price tiers.
@@ -102,6 +176,15 @@ func (tu *TokenUsage) Normalize() *TokenUsage {
 	if tu.WebSearchRequests > 0 || tu.WebSearchContextSize != "" {
 		tu.WebSearchContextSize = NormalizeWebSearchContextSize(tu.WebSearchContextSize)
 	}
+	for _, counter := range tu.serverToolCounters() {
+		*counter = converterutil.NonNegativeTokenCount(*counter)
+	}
+	if tu.ReasoningAccounting != ReasoningAccountingIncluded && tu.ReasoningAccounting != ReasoningAccountingAdditive {
+		tu.ReasoningAccounting = ""
+	}
+	if !(tu.ProviderCostUSD > 0) || math.IsInf(tu.ProviderCostUSD, 0) {
+		tu.ProviderCostUSD = 0
+	}
 	return tu
 }
 
@@ -122,7 +205,12 @@ func (tu *TokenUsage) IsZero() bool {
 	if tu == nil {
 		return true
 	}
-	return *tu == TokenUsage{}
+	// Neither a reported tool usage object whose counters are all zero nor
+	// the reasoning accounting verdict is consumption.
+	usage := *tu
+	usage.ServerToolUsageReported = false
+	usage.ReasoningAccounting = ""
+	return usage == TokenUsage{}
 }
 
 // MergeNonZero copies every non-zero/non-empty field from src into tu,
@@ -197,14 +285,64 @@ func (tu *TokenUsage) MergeNonZero(src *TokenUsage) {
 	if src.OutputImageTokens != 0 {
 		tu.OutputImageTokens = src.OutputImageTokens
 	}
-	if src.WebSearchRequests != 0 {
-		tu.WebSearchRequests = src.WebSearchRequests
-	}
 	if src.WebSearchContextSize != "" {
 		tu.WebSearchContextSize = src.WebSearchContextSize
 	}
 	if src.ImageBilling != nil {
 		tu.ImageBilling = src.ImageBilling
+	}
+	tu.MergeUsageExtensions(src)
+}
+
+// MergeUsageExtensions merges from src only what the generic usage
+// extraction derives beyond token counts: the built-in tool counters (with
+// the same cumulative semantics as MergeNonZero), the reasoning accounting
+// and the provider's own cost. MergeNonZero ends with it; stream handlers
+// that read token counts from a typed usage object call it directly so they
+// do not drop these.
+func (tu *TokenUsage) MergeUsageExtensions(src *TokenUsage) {
+	if tu == nil || src == nil {
+		return
+	}
+	tu.mergeToolUsage(src)
+	// The verdict travels with the reasoning tokens it was read from: the
+	// chunk that last reported them decides it, and one that does not settle
+	// it (e.g. no total_tokens) clears an earlier verdict rather than leaving
+	// it to describe figures it was not read from; the price row's fixed
+	// setting then applies.
+	if src.ReasoningTokens != 0 || src.ReasoningAccounting != "" {
+		tu.ReasoningAccounting = src.ReasoningAccounting
+	}
+	if src.ProviderCostUSD != 0 {
+		tu.ProviderCostUSD = src.ProviderCostUSD
+	}
+}
+
+// mergeToolUsage merges the built-in tool counters. A provider-reported tool
+// usage object is cumulative for the whole request (xAI repeats it on every
+// usage-bearing stream chunk, and the terminal event carries the total), so
+// the latest reported object replaces the counters outright, zeros included:
+// summing them would bill repeated stream events twice, and keeping an
+// earlier non-zero value would override the provider's authoritative zero.
+// Once such an object was seen, counts derived from output items or
+// citations of later chunks no longer apply. Without one, a non-zero count
+// replaces the earlier one, as in MergeNonZero.
+func (tu *TokenUsage) mergeToolUsage(src *TokenUsage) {
+	replace := src.ServerToolUsageReported
+	if !replace && tu.ServerToolUsageReported {
+		return // Keep the authoritative counters.
+	}
+	tu.ServerToolUsageReported = replace
+	mergeToolCounter(&tu.WebSearchRequests, src.WebSearchRequests, replace)
+	srcCounters := src.serverToolCounters()
+	for i, counter := range tu.serverToolCounters() {
+		mergeToolCounter(counter, *srcCounters[i], replace)
+	}
+}
+
+func mergeToolCounter(dst *int, src int, replace bool) {
+	if replace || src != 0 {
+		*dst = src
 	}
 }
 
@@ -233,10 +371,21 @@ type TokenCosts struct {
 	ImageCost               float64
 	VideoInputCost          float64
 	WebSearchCost           float64
-	TotalCost               float64
-	MarginPercent           float64
-	MarginFixedAmount       float64
-	MarginTotalAmount       float64
+	// Built-in server-side tool charges other than web search. Each is billed
+	// per unit (call, fetched X post/profile, generated image), never by
+	// tokens, and is part of TotalCost exactly once.
+	XSearchCost             float64
+	CodeExecutionCost       float64
+	AttachmentSearchCost    float64
+	CollectionsSearchCost   float64
+	ImageGenerationToolCost float64
+	// ToolUsageCost is the sum of every built-in tool charge above, web search
+	// included. It is a breakdown figure already contained in TotalCost.
+	ToolUsageCost     float64
+	TotalCost         float64
+	MarginPercent     float64
+	MarginFixedAmount float64
+	MarginTotalAmount float64
 }
 
 func NormalizeWebSearchContextSize(size string) string {

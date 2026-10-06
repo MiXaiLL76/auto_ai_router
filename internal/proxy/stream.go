@@ -249,6 +249,7 @@ func (o *openAIStreamUsageExtractor) extractChatCompletionUsage(payload []byte) 
 		data.Usage.PromptTokensDetails.CachedTokens,
 		data.Usage.PromptTokensDetails.CachedAudioTokens,
 	)
+	toolUsage, _ := data.Usage.ServerSideToolUsage()
 
 	return &StreamUsageInfo{
 		PromptTokens:          intValue(data.Usage.PromptTokens),
@@ -277,6 +278,7 @@ func (o *openAIStreamUsageExtractor) extractChatCompletionUsage(payload []byte) 
 			data.Usage.ServerToolUse.WebSearchRequests,
 			data.Usage.WebSearchRequests,
 			data.Usage.ToolUsageExtensions.WebSearchRequests(),
+			toolUsage.WebSearchCalls,
 		),
 	}
 }
@@ -322,16 +324,22 @@ func (o *openAIStreamUsageExtractor) extractResponsesAPIUsage(payload []byte) *S
 		usage.InputTokensDetails.CachedTokens,
 		usage.InputTokensDetails.CachedAudioTokens,
 	)
+	toolUsage, _ := usage.ServerSideToolUsage()
 	webSearchRequests := webSearchRequestsFromUsage(
 		usage.ServerToolUse.WebSearchRequests,
 		usage.WebSearchRequests,
 		usage.ToolUsageExtensions.WebSearchRequests(),
+		toolUsage.WebSearchCalls,
 	)
-	if webSearchRequests == 0 {
+	// A server-side tool usage object reporting zero web searches is
+	// authoritative (xAI bills successful executions only): output items of
+	// failed attempts must not replace it. Only an object without the
+	// web_search_calls counter leaves the items to count.
+	if webSearchRequests == 0 && !toolUsage.WebSearchCallsReported {
 		webSearchRequests = countCompletedStreamingWebSearchItems(data.Response.Output)
-	}
-	if webSearchRequests == 0 {
-		webSearchRequests = countCompletedStreamingWebSearchItems(data.Output)
+		if webSearchRequests == 0 {
+			webSearchRequests = countCompletedStreamingWebSearchItems(data.Output)
+		}
 	}
 
 	return &StreamUsageInfo{
@@ -2001,6 +2009,12 @@ func (p *Proxy) handlePassthroughResponsesStreaming(
 						if event.Response.Usage.ServerToolUse != nil {
 							logCtx.TokenUsage.WebSearchRequests = event.Response.Usage.ServerToolUse.WebSearchRequests
 						}
+						// The typed usage above has no room for provider extensions:
+						// xAI's server-side tool counters, images of a built-in
+						// image_generation tool in response.output, the reasoning
+						// accounting (total_tokens) and the provider's own cost.
+						logCtx.TokenUsage.MergeUsageExtensions(
+							converter.ExtractTokenUsageWithOptions([]byte(jsonData), tokenUsageOptions))
 					}
 				}
 				completedEventPayload = []byte(jsonData) // plain JSON; extractResponsesAPIUsage handles it

@@ -4,6 +4,7 @@ package converter
 import (
 	"bytes"
 	"io"
+	"math"
 	"strings"
 
 	// goccy/go-json instead of encoding/json: the only json.* use in this file
@@ -654,15 +655,55 @@ type responsesUsageDetails struct {
 	} `json:"server_tool_use,omitempty"`
 	WebSearchRequests int `json:"web_search_requests,omitempty"`
 	converterutil.ToolUsageExtensions
+	// Provider-side cost of the request, read for reconciliation only (see
+	// TokenUsage.ProviderCostUSD). Raw so an unexpected shape cannot fail the
+	// decode of the token counters next to it.
+	CostInUSDTicks json.RawMessage `json:"cost_in_usd_ticks,omitempty"` // xAI, 1e-10 USD
+	CostInNanoUSD  json.RawMessage `json:"cost_in_nano_usd,omitempty"`  // xAI Responses, 1e-9 USD
+	Cost           json.RawMessage `json:"cost,omitempty"`              // aggregators (Requesty, OpenRouter), USD
 }
 
 // webSearchRequests returns the provider-reported web search count: the
-// standard counters first, then the provider usage extensions.
-func (u *responsesUsageDetails) webSearchRequests() int {
+// standard counters first, then the provider usage extensions, toolUsage
+// being this usage object's decoded server-side tool usage. The count is
+// reported when it is the provider's own figure: an xAI web_search_calls
+// counter is reported even when it is zero, and that zero is authoritative,
+// so output items and citations must not replace it.
+func (u *responsesUsageDetails) webSearchRequests(toolUsage converterutil.ServerSideToolUsage) reportedCount {
 	if requests := webSearchRequestsFromUsage(u.ServerToolUse.WebSearchRequests, u.WebSearchRequests); requests > 0 {
-		return requests
+		return reportedCount{requests, true}
 	}
-	return u.ToolUsageExtensions.WebSearchRequests()
+	if toolUsage.WebSearchCallsReported {
+		return reportedCount{toolUsage.WebSearchCalls, true}
+	}
+	if requests := u.ToolUsageExtensions.WebSearchRequests(); requests > 0 {
+		return reportedCount{requests, true}
+	}
+	return reportedCount{}
+}
+
+// providerCostUSD returns the provider's own cost figure in USD, or 0.
+func (u *responsesUsageDetails) providerCostUSD() float64 {
+	if ticks := rawPositiveNumber(u.CostInUSDTicks); ticks > 0 {
+		return ticks / 1e10
+	}
+	if nano := rawPositiveNumber(u.CostInNanoUSD); nano > 0 {
+		return nano / 1e9
+	}
+	return rawPositiveNumber(u.Cost)
+}
+
+// rawPositiveNumber decodes a raw JSON number, returning 0 for anything that
+// is not a finite positive number (absent, null, string, object, ...).
+func rawPositiveNumber(raw json.RawMessage) float64 {
+	if len(raw) == 0 {
+		return 0
+	}
+	var value float64
+	if json.Unmarshal(raw, &value) != nil || math.IsNaN(value) || math.IsInf(value, 0) || value <= 0 {
+		return 0
+	}
+	return value
 }
 
 // tokenUsageShapeUsage is the "usage" object shape read by
@@ -806,13 +847,26 @@ func tokenUsageFromShape(resp *tokenUsageResponseShape, opts TokenUsageExtractio
 		completionTokens = resp.Response.Usage.OutputTokens
 	}
 
-	var nestedUsageRequests int
+	// Each level's server-side tool usage object is decoded once; the
+	// top-level one wins for the per-tool counters, like the other fields.
+	toolUsage, toolUsageReported := resp.Usage.ServerSideToolUsage()
+	usageRequests := resp.Usage.webSearchRequests(toolUsage)
+	var nestedUsageRequests reportedCount
 	if resp.Response.Usage != nil {
-		nestedUsageRequests = resp.Response.Usage.webSearchRequests()
+		nestedToolUsage, nestedToolUsageReported := resp.Response.Usage.ServerSideToolUsage()
+		nestedUsageRequests = resp.Response.Usage.webSearchRequests(nestedToolUsage)
+		if !toolUsageReported {
+			toolUsage, toolUsageReported = nestedToolUsage, nestedToolUsageReported
+		}
 	}
-	webSearchRequests := webSearchRequestsFromExtractedResponse(resp.Usage.webSearchRequests(), nestedUsageRequests, resp.Choices, resp.Output, resp.Response.Output, resp.WebSearch)
+	webSearchRequests := webSearchRequestsFromExtractedResponse(
+		usageRequests, nestedUsageRequests,
+		resp.Choices, resp.Output, resp.Response.Output, resp.WebSearch,
+	)
+	imageToolGenerations, imageToolEdits := imageGenerationToolImages(resp.Output, resp.Response.Output, toolUsage)
 
-	if promptTokens == 0 && completionTokens == 0 && webSearchRequests == 0 {
+	if promptTokens == 0 && completionTokens == 0 && webSearchRequests == 0 &&
+		!toolUsageReported && imageToolGenerations == 0 && imageToolEdits == 0 {
 		return nil
 	}
 
@@ -977,6 +1031,20 @@ func tokenUsageFromShape(resp *tokenUsageResponseShape, opts TokenUsageExtractio
 	if cacheCreationTokens == 0 {
 		cacheCreationTokens = cacheCreation5mTokens + cacheCreation1hTokens
 	}
+	// Decided on the provider's own figures, before the Anthropic flat-cache
+	// correction below rewrites promptTokens (Anthropic sends no total_tokens).
+	var reasoningAccounting string
+	if !anthropicFlatCacheRead && !anthropicFlatCacheCreation {
+		totalTokens := resp.Usage.TotalTokens
+		if resp.Usage.PromptTokens == 0 && resp.Usage.InputTokens == 0 && resp.Response.Usage != nil {
+			totalTokens = resp.Response.Usage.TotalTokens
+		}
+		reasoningAccounting = detectReasoningAccounting(promptTokens, completionTokens, reasoning, totalTokens)
+	}
+	providerCost := resp.Usage.providerCostUSD()
+	if providerCost == 0 && resp.Response.Usage != nil {
+		providerCost = resp.Response.Usage.providerCostUSD()
+	}
 	// Anthropic's input_tokens excludes cache tokens; add them back so promptTokens
 	// matches the inclusive-total semantics CalculateTokenCosts subtracts cache from.
 	if promptTokensFromInputTokens && anthropicFlatCacheRead {
@@ -1013,7 +1081,77 @@ func tokenUsageFromShape(resp *tokenUsageResponseShape, opts TokenUsageExtractio
 		AudioOutputTokens:        audioOut,
 		ReasoningTokens:          reasoning,
 		WebSearchRequests:        webSearchRequests,
+		ServerToolUsageReported:  toolUsageReported,
+		XSearchCalls:             toolUsage.XSearchCalls,
+		XSearchPosts:             toolUsage.XPostsFetched,
+		XSearchProfiles:          toolUsage.XUsersFetched,
+		CodeExecutionCalls:       toolUsage.CodeExecutionCalls,
+		AttachmentSearchCalls:    toolUsage.AttachmentSearchCalls,
+		CollectionsSearchCalls:   toolUsage.CollectionsSearchCalls,
+		MCPCalls:                 toolUsage.MCPCalls,
+		ImageToolGenerations:     imageToolGenerations,
+		ImageToolEdits:           imageToolEdits,
+		ReasoningAccounting:      reasoningAccounting,
+		ProviderCostUSD:          providerCost,
 	}).Normalize()
+}
+
+// detectReasoningAccounting tells from the provider's own total_tokens
+// whether completionTokens already contains the reasoning tokens. xAI reports
+// reasoning on top of completion_tokens (total = prompt + completion +
+// reasoning) while OpenAI-compatible aggregators fold it in (total = prompt +
+// completion), and the same model can be served through both. Empty when the
+// response does not settle it: no reasoning, no total, or a total matching
+// neither sum.
+func detectReasoningAccounting(promptTokens, completionTokens, reasoningTokens, totalTokens int) string {
+	if reasoningTokens <= 0 || totalTokens <= 0 || promptTokens < 0 || completionTokens < 0 {
+		return ""
+	}
+	switch totalTokens {
+	case promptTokens + completionTokens + reasoningTokens:
+		return ReasoningAccountingAdditive
+	case promptTokens + completionTokens:
+		if completionTokens >= reasoningTokens {
+			return ReasoningAccountingIncluded
+		}
+	}
+	return ""
+}
+
+// imageGenerationToolImages counts the images a built-in image_generation
+// tool returned inside a chat/Responses response, split into generations and
+// edits by the item ID prefix (xAI: "ig_" generation, "ie_" edit). When the
+// provider's server-side tool usage object carries image_generation_calls,
+// that is the authoritative total and the items only tell how many of those
+// were edits; without the counter (no object, or an object without that
+// key), the completed items are counted.
+func imageGenerationToolImages(
+	output, nestedOutput []extractedOutputItem,
+	toolUsage converterutil.ServerSideToolUsage,
+) (generations, edits int) {
+	for _, items := range [][]extractedOutputItem{output, nestedOutput} {
+		itemGenerations, itemEdits := 0, 0
+		for _, item := range items {
+			if item.Type != "image_generation_call" || (item.Status != "" && item.Status != "completed") {
+				continue
+			}
+			if strings.HasPrefix(item.ID, "ie_") {
+				itemEdits++
+			} else {
+				itemGenerations++
+			}
+		}
+		if itemGenerations+itemEdits > 0 {
+			generations, edits = itemGenerations, itemEdits
+			break
+		}
+	}
+	if !toolUsage.ImageGenerationCallsReported {
+		return generations, edits
+	}
+	total := toolUsage.ImageGenerationCalls
+	edits = min(edits, total)
+	return total - edits, edits
 }
 
 type extractedChoiceWithAnnotations struct {
@@ -1032,7 +1170,15 @@ type extractedAnnotation struct {
 
 type extractedOutputItem struct {
 	Type   string `json:"type"`
+	ID     string `json:"id,omitempty"`
 	Status string `json:"status,omitempty"`
+}
+
+// reportedCount is a provider usage counter together with whether the
+// provider reported it at all (a reported zero is authoritative).
+type reportedCount struct {
+	count    int
+	reported bool
 }
 
 func webSearchRequestsFromUsage(values ...int) int {
@@ -1048,17 +1194,23 @@ func webSearchRequestsFromUsage(values ...int) int {
 // response, never adding different representations of the same executions
 // together: a usage counter reported by the provider (top-level usage, then
 // the response.completed event's usage) wins over counting web_search_call
-// output items, which in turn wins over url_citation annotations.
+// output items, which in turn wins over url_citation annotations. A counter
+// the provider reported as zero (xAI's server-side tool usage object) ends
+// the search too: xAI bills only successful executions, so items of failed
+// attempts or citations must not turn that zero into a charge.
 func webSearchRequestsFromExtractedResponse(
-	usageRequests int,
-	nestedUsageRequests int,
+	usageRequests reportedCount,
+	nestedUsageRequests reportedCount,
 	choices []extractedChoiceWithAnnotations,
 	output []extractedOutputItem,
 	nestedOutput []extractedOutputItem,
 	searchResults json.RawMessage,
 ) int {
-	if requests := webSearchRequestsFromUsage(usageRequests, nestedUsageRequests); requests > 0 {
+	if requests := webSearchRequestsFromUsage(usageRequests.count, nestedUsageRequests.count); requests > 0 {
 		return requests
+	}
+	if usageRequests.reported || nestedUsageRequests.reported {
+		return 0
 	}
 	if requests := countCompletedWebSearchOutputItems(output); requests > 0 {
 		return requests
