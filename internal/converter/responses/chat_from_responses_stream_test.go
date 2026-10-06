@@ -283,6 +283,43 @@ func TestTransformResponsesStreamToChat_ErrorThenFailedDoesNotDuplicate(t *testi
 	assert.Equal(t, float64(10), usage["total_tokens"])
 }
 
+// TestTransformResponsesStreamToChat_ReasoningSummaryDelta covers the other
+// half of the reasoning-in-stream fix: once ChatRequestToResponses requests
+// a summary, the upstream streams response.reasoning_summary_text.delta
+// events -- the stream converter must relay those as delta.reasoning_content
+// so the client actually sees the model's reasoning.
+func TestTransformResponsesStreamToChat_ReasoningSummaryDelta(t *testing.T) {
+	input := strings.NewReader(
+		sseLine(`{"type":"response.created","response":{"id":"resp_rs","object":"response","status":"in_progress"}}`) +
+			sseLine(`{"type":"response.reasoning_summary_text.delta","delta":"Начнём с "}`) +
+			sseLine(`{"type":"response.reasoning_summary_text.delta","delta":"проверки."}`) +
+			sseLine(`{"type":"response.output_text.delta","output_index":0,"delta":"Ответ: 42"}`) +
+			sseLine(`{"type":"response.completed","response":{"id":"resp_rs","object":"response","status":"completed","output":[]}}`) +
+			"data: [DONE]\n\n",
+	)
+
+	var out bytes.Buffer
+	require.NoError(t, TransformResponsesStreamToChat(input, "gpt-5-pro", &out))
+	chunks := collectSSEChunks(t, out.Bytes())
+
+	var reasoning, text string
+	for _, c := range chunks {
+		choices := c["choices"].([]interface{})
+		if len(choices) == 0 {
+			continue
+		}
+		delta := choices[0].(map[string]interface{})["delta"].(map[string]interface{})
+		if rc, ok := delta["reasoning_content"].(string); ok {
+			reasoning += rc
+		}
+		if content, ok := delta["content"].(string); ok {
+			text += content
+		}
+	}
+	assert.Equal(t, "Начнём с проверки.", reasoning, "reasoning_summary_text.delta must stream as reasoning_content")
+	assert.Equal(t, "Ответ: 42", text)
+}
+
 func TestTransformResponsesStreamToChat_RefusalDelta(t *testing.T) {
 	input := strings.NewReader(
 		sseLine(`{"type":"response.created","response":{"id":"resp_refusal","object":"response","status":"in_progress"}}`) +
