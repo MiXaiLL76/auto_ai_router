@@ -55,6 +55,7 @@ graph LR
 ## Advanced
 
 - [Load Balancing](advanced/balancing.md) — round-robin, fallback credentials
+- [Retries and Request Cleanup](advanced/retry.md) — which upstream errors are retried, reasoning effort mapping
 - [Session-Sticky Routing](advanced/session_sticky.md) — cache affinity for multi-turn conversations
 - [Responses API](advanced/responses.md) — multi-turn support, passthrough models
 - [Redis / Valkey](advanced/redis.md) — distributed rate limiting and response store

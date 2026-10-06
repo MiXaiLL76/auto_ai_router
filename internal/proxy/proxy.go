@@ -394,6 +394,7 @@ type Config struct {
 	OrganizationPolicies         *models.OrganizationPolicyRegistry
 	MaxProviderRetries           int                 // Max same-type credential retries (default: 2)
 	MaxFallbackAttempts          int                 // Max fallback proxy hops per request chain (default: 5)
+	Retry                        config.RetryConfig  // Which upstream errors are replayed on another credential (zero value = built-in policy)
 	ResponseStore                responsestore.Store // Optional: Responses API store (bbolt or Redis)
 	SessionStickyEnabled         bool
 	SessionStickyAutoCacheCtrl   bool // Auto-inject Anthropic cache_control markers when session is active (default: true)
@@ -437,6 +438,7 @@ type Proxy struct {
 	priceRegistry                    *models.ModelPriceRegistry // Model pricing information (optional)
 	organizationPolicies             *models.OrganizationPolicyRegistry
 	maxProviderRetries               int                 // Max same-type credential retries on provider errors
+	retryPolicy                      *retryPolicy        // compiled Config.Retry
 	maxFallbackAttempts              int                 // Max fallback proxy hops per request chain
 	responseStore                    responsestore.Store // Optional: Responses API store (bbolt or Redis)
 	sessionStore                     *SessionStore       // Optional: session-sticky credential routing
@@ -523,6 +525,7 @@ func New(cfg *Config) *Proxy {
 		organizationPolicies:             cfg.OrganizationPolicies,
 		maxProviderRetries:               cfg.MaxProviderRetries,
 		maxFallbackAttempts:              cfg.MaxFallbackAttempts,
+		retryPolicy:                      newRetryPolicy(cfg.Retry),
 		responseStore:                    cfg.ResponseStore,
 		sessionStore:                     sessionStore,
 		stickyAutoCacheCtrl:              cfg.SessionStickyAutoCacheCtrl,
@@ -1114,7 +1117,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 			}
 
 			if !cred.IsFallback {
-				shouldRetry, retryReason = ShouldRetryWithFallback(proxyResp.StatusCode, proxyResp.Body)
+				shouldRetry, retryReason = p.shouldRetry(cred, proxyResp.StatusCode, proxyResp.Body)
 			}
 
 			if !shouldRetry {
@@ -2067,7 +2070,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 		p.recordProviderResponse(r.Context(), cred, modelID, realModelID, resp.StatusCode, resp.Header, responseBody)
 
 		// Check if we should retry with another same-type credential
-		shouldRetry, retryReason = ShouldRetryWithFallback(resp.StatusCode, responseBody)
+		shouldRetry, retryReason = p.shouldRetry(cred, resp.StatusCode, responseBody)
 		if !shouldRetry {
 			break
 		}

@@ -140,6 +140,10 @@ Set to `false` to skip local estimation entirely if all your configured provider
 
 The `fail2ban` block bans a `credential + model` pair after repeated failures at configured HTTP status codes, so a broken or rate-limited upstream stops eating a share of round-robin traffic. See [Fail2Ban](../advanced/f2b.md) for the full parameter reference, per-error-code rules, and per-credential overrides (for upstreams — e.g. resellers/aggregators — that signal failure with a different status code than the rest of the pool).
 
+## Retry Parameters
+
+The `retry` block decides which upstream errors are replayed on the next credential of the same model. By default, self-hosted `vllm` credentials do not retry `400`. See [Retries and Request Cleanup](../advanced/retry.md) for status code sets, body markers and per-provider and per-credential overrides.
+
 ## Monitoring Parameters
 
 | Parameter            | Type   | Description                                                                                                             |
@@ -332,6 +336,8 @@ models:
 ```
 
 By default, all models are available through all credentials. Use the `models` section to restrict which credentials serve which models.
+
+A model entry can also set `reasoning_effort_map`, which rewrites the client's reasoning effort into a value the model accepts (e.g. `{minimal: low, high: medium, default: low}`). See [Reasoning effort mapping](../advanced/retry.md#reasoning-effort-mapping).
 
 By default, models can also be declared directly inside a credential via the `models:` field — they are automatically extracted and added to the global models list with the credential name pre-filled.
 
