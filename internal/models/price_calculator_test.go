@@ -849,6 +849,52 @@ func TestCalculateTokenCosts_CacheCreation1hCostsMoreThan5mForSameVolume(t *test
 	assert.InDelta(t, 0.006, oneHourCosts.TotalCost, 1e-12)
 }
 
+// TestCalculateTokenCosts_KimiK3CacheWriteTTL guards the kimi-k3 pricing
+// configured in model_prices.json against regressions: Kimi's 1h cache
+// write ($6/M at rate 1.3 => $7.80/M) must bill at exactly double its 5m
+// cache write ($3/M at rate 1.3 => $3.90/M, same as plain input), per the
+// Kimi Cache Write TTL billing spec.
+func TestCalculateTokenCosts_KimiK3CacheWriteTTL(t *testing.T) {
+	price := &ModelPrice{
+		InputCostPerToken:                   0.0000039,
+		OutputCostPerToken:                  0.0000195,
+		CacheReadInputTokenCost:             0.00000039,
+		CacheCreationInputTokenCost:         0.0000039,
+		CacheCreationInputTokenCostAbove1hr: 0.0000078,
+	}
+
+	t.Run("default TTL (5m) bills at the input rate", func(t *testing.T) {
+		usage := &converter.TokenUsage{
+			PromptTokens:          1_000_000,
+			CacheCreationTokens:   1_000_000,
+			CacheCreation5mTokens: 1_000_000,
+		}
+		costs := CalculateTokenCosts(usage, price)
+		assert.InDelta(t, 3.9, costs.CacheCreationCost, 1e-9)
+	})
+
+	t.Run("explicit 1h TTL bills at double the 5m rate", func(t *testing.T) {
+		usage := &converter.TokenUsage{
+			PromptTokens:          1_000_000,
+			CacheCreationTokens:   1_000_000,
+			CacheCreation1hTokens: 1_000_000,
+		}
+		costs := CalculateTokenCosts(usage, price)
+		assert.InDelta(t, 7.8, costs.CacheCreationCost, 1e-9)
+	})
+
+	t.Run("mixed 5m and 1h writes bill each bucket at its own rate", func(t *testing.T) {
+		usage := &converter.TokenUsage{
+			PromptTokens:          1_000_000,
+			CacheCreationTokens:   1_000_000,
+			CacheCreation5mTokens: 400_000,
+			CacheCreation1hTokens: 600_000,
+		}
+		costs := CalculateTokenCosts(usage, price)
+		assert.InDelta(t, 400_000*0.0000039+600_000*0.0000078, costs.CacheCreationCost, 1e-9)
+	})
+}
+
 func TestCalculateTokenCosts_CachedAudioUsesDedicatedRate(t *testing.T) {
 	usage := &converter.TokenUsage{
 		PromptTokens:           100,

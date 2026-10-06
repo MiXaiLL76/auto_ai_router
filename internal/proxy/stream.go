@@ -914,6 +914,16 @@ func (p *Proxy) handleStreamingWithTokens(w http.ResponseWriter, resp *http.Resp
 	completion := p.newCompletionTokenAccumulator(modelID)
 	chunkCount := 0
 
+	// Kimi/Moonshot never puts its cache-write TTL split in the SSE body
+	// (cache_creation_token_details stays null) — it arrives once, on the
+	// initial response headers, before any chunk is read.
+	cacheWrite5m, cacheWrite1h := kimiCacheWriteTTLFromHeaders(resp.Header)
+	tokenUsageOpts := converter.TokenUsageExtractionOptions{
+		AudioInputIncludesCachedAudio: true,
+		CacheWriteTTLHeader5mTokens:   cacheWrite5m,
+		CacheWriteTTLHeader1hTokens:   cacheWrite1h,
+	}
+
 	// Capture last chunk for usage extraction (Solution 3: Hybrid approach)
 	var lastChunk []byte
 	detectProviderStreamError := resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices
@@ -935,7 +945,7 @@ func (p *Proxy) handleStreamingWithTokens(w http.ResponseWriter, resp *http.Resp
 				if logCtx.IsImageGeneration {
 					logCtx.observeImageStreamPayloads(payloadBuf)
 				}
-				if usage := extractTokenUsageFromPayloads(payloadBuf, converter.TokenUsageExtractionOptions{AudioInputIncludesCachedAudio: true}); usage != nil {
+				if usage := extractTokenUsageFromPayloads(payloadBuf, tokenUsageOpts); usage != nil {
 					if logCtx.TokenUsage == nil {
 						logCtx.TokenUsage = &converter.TokenUsage{}
 					}
@@ -964,7 +974,7 @@ func (p *Proxy) handleStreamingWithTokens(w http.ResponseWriter, resp *http.Resp
 
 	if logCtx != nil && logCtx.HideWebSearchResults {
 		providerReader = newWebSearchResultsStripReader(providerReader, func(payload []byte) {
-			if usage := converter.ExtractTokenUsageWithOptions(payload, converter.TokenUsageExtractionOptions{AudioInputIncludesCachedAudio: true}); usage != nil {
+			if usage := converter.ExtractTokenUsageWithOptions(payload, tokenUsageOpts); usage != nil {
 				if logCtx.TokenUsage == nil {
 					logCtx.TokenUsage = &converter.TokenUsage{}
 				}
