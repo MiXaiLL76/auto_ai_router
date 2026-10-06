@@ -33,8 +33,8 @@ type RetryConfig struct {
 	BadRequestMarkers []string `yaml:"bad_request_markers,omitempty"`
 
 	// ProviderOverrides replace StatusCodes for credentials of one provider type,
-	// keyed by the credential's configured type (vllm, openai, ...). Merged over
-	// DefaultRetryProviderOverrides: a key given here replaces the built-in one.
+	// keyed by the credential's configured type (vllm, openai, ...). A key given
+	// here also replaces the built-in exclusions of DefaultRetryProviderExclusions.
 	ProviderOverrides map[ProviderType]RetryOverrideConfig `yaml:"provider_overrides,omitempty"`
 
 	// CredentialOverrides replace StatusCodes for one credential, keyed by
@@ -77,13 +77,15 @@ var DefaultBadRequestMarkers = []string{
 	"but the supported range is from",
 }
 
-// DefaultRetryProviderOverrides drops 400 from the retry set of self-hosted vLLM:
-// every replica of a vLLM model runs the same weights, chat template and limits,
-// and there is no account or quota behind it, so a 400 (unsupported
-// reasoning_effort, max_tokens over the context, prompt too long) comes back
-// identical from every replica.
-var DefaultRetryProviderOverrides = map[ProviderType]RetryOverrideConfig{
-	ProviderTypeVLLM: {StatusCodes: append([]int{404, 429}, statusClass(5)...)},
+// DefaultRetryProviderExclusions are status codes removed from StatusCodes for
+// one provider type unless ProviderOverrides sets that type explicitly.
+//
+// Self-hosted vLLM drops 400: every replica of a vLLM model runs the same
+// weights, chat template and limits, and there is no account or quota behind
+// it, so a 400 (unsupported reasoning_effort, max_tokens over the context,
+// prompt too long) comes back identical from every replica.
+var DefaultRetryProviderExclusions = map[ProviderType][]int{
+	ProviderTypeVLLM: {400},
 }
 
 // DefaultRetryConfig returns the built-in retry policy.
@@ -93,20 +95,24 @@ func DefaultRetryConfig() RetryConfig {
 
 // WithDefaults returns a copy with the built-in values filled in: the default
 // status codes when none are set, the built-in markers ahead of the configured
-// ones, and the built-in provider overrides under the configured ones.
+// ones, and a provider override derived from StatusCodes for every provider
+// type with built-in exclusions and no configured override.
 func (c RetryConfig) WithDefaults() RetryConfig {
 	out := RetryConfig{
 		StatusCodes:         slices.Clone(c.StatusCodes),
 		NonRetryableMarkers: mergeMarkers(DefaultNonRetryableMarkers, c.NonRetryableMarkers),
 		BadRequestMarkers:   mergeMarkers(DefaultBadRequestMarkers, c.BadRequestMarkers),
-		ProviderOverrides:   make(map[ProviderType]RetryOverrideConfig, len(DefaultRetryProviderOverrides)+len(c.ProviderOverrides)),
+		ProviderOverrides:   make(map[ProviderType]RetryOverrideConfig, len(DefaultRetryProviderExclusions)+len(c.ProviderOverrides)),
 		CredentialOverrides: make(map[string]RetryOverrideConfig, len(c.CredentialOverrides)),
 	}
 	if len(out.StatusCodes) == 0 {
 		out.StatusCodes = slices.Clone(DefaultRetryStatusCodes)
 	}
-	for k, v := range DefaultRetryProviderOverrides {
-		out.ProviderOverrides[k] = v
+	for k, excluded := range DefaultRetryProviderExclusions {
+		codes := slices.DeleteFunc(slices.Clone(out.StatusCodes), func(code int) bool {
+			return slices.Contains(excluded, code)
+		})
+		out.ProviderOverrides[k] = RetryOverrideConfig{StatusCodes: codes}
 	}
 	for k, v := range c.ProviderOverrides {
 		out.ProviderOverrides[k] = v

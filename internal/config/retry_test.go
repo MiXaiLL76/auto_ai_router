@@ -67,7 +67,8 @@ func TestRetryConfig_WithDefaults(t *testing.T) {
 	assert.Equal(t, []int{503}, cfg.StatusCodes)
 	assert.Equal(t, append(append([]string{}, DefaultBadRequestMarkers...), "too long"), cfg.BadRequestMarkers,
 		"configured markers are lower-cased and appended after the built-in ones without duplicates")
-	assert.Contains(t, cfg.ProviderOverrides, ProviderTypeVLLM, "built-in provider overrides are kept")
+	assert.Equal(t, []int{503}, cfg.ProviderOverrides[ProviderTypeVLLM].StatusCodes,
+		"the built-in vllm set follows status_codes minus 400")
 	assert.Equal(t, []int{429}, cfg.ProviderOverrides[ProviderTypeOpenAI].StatusCodes)
 	assert.Equal(t, []int{500}, cfg.CredentialOverrides["c"].StatusCodes)
 }

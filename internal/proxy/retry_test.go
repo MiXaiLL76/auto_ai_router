@@ -751,3 +751,37 @@ func TestShouldRetryWithFallback_MarkersOnlyApplyTo400(t *testing.T) {
 		t.Errorf("expected retry for 500 regardless of body text")
 	}
 }
+
+func TestRetryPolicy_GlobalStatusCodesReachVLLM(t *testing.T) {
+	// The built-in vLLM rule only drops 400; every other choice of the global
+	// status_codes must still apply to vLLM credentials.
+	rp := newRetryPolicy(config.RetryConfig{StatusCodes: []int{429}})
+	vllm := &config.CredentialConfig{Name: "v", Type: config.ProviderTypeVLLM}
+	openai := &config.CredentialConfig{Name: "o", Type: config.ProviderTypeOpenAI}
+
+	for _, cred := range []*config.CredentialConfig{vllm, openai} {
+		retry, _ := rp.shouldRetry(cred, http.StatusTooManyRequests, nil)
+		assert.True(t, retry, "%s: 429 is in status_codes", cred.Type)
+		retry, _ = rp.shouldRetry(cred, http.StatusInternalServerError, nil)
+		assert.False(t, retry, "%s: 500 is not in status_codes", cred.Type)
+		retry, _ = rp.shouldRetry(cred, http.StatusNotFound, nil)
+		assert.False(t, retry, "%s: 404 is not in status_codes", cred.Type)
+	}
+
+	// 400 in the global set is still dropped for vLLM only.
+	rp = newRetryPolicy(config.RetryConfig{StatusCodes: []int{400, 429}})
+	retry, _ := rp.shouldRetry(vllm, http.StatusBadRequest, nil)
+	assert.False(t, retry, "vllm: 400 is never retried by the built-in rule")
+	retry, _ = rp.shouldRetry(openai, http.StatusBadRequest, nil)
+	assert.True(t, retry, "openai: 400 follows status_codes")
+
+	// An explicit vllm override still replaces the set entirely.
+	rp = newRetryPolicy(config.RetryConfig{
+		StatusCodes:       []int{429},
+		ProviderOverrides: map[config.ProviderType]config.RetryOverrideConfig{config.ProviderTypeVLLM: {StatusCodes: []int{400, 503}}},
+	})
+	retry, _ = rp.shouldRetry(vllm, http.StatusBadRequest, nil)
+	assert.True(t, retry, "explicit vllm override wins")
+	retry, _ = rp.shouldRetry(vllm, http.StatusTooManyRequests, nil)
+	assert.False(t, retry, "explicit vllm override replaces status_codes")
+}

@@ -19,8 +19,8 @@ retry:
   non_retryable_markers: []
   bad_request_markers: []
   provider_overrides:
-    vllm:
-      status_codes: [404, 429, "5xx"]                    # the built-in default for vllm
+    openai:
+      status_codes: [429, "5xx"]
   credential_overrides:
     reseller-pool-1:
       status_codes: [429, "5xx"]
@@ -40,7 +40,7 @@ The client gets every other response unchanged, straight from the first credenti
 | `status_codes`          | list          | `[400, 401, 402, 403, 404, 429, "5xx"]` | Status codes that are retried. Each entry is an exact code (`429`) or a class (`"4xx"`, `"5xx"`). Empty or omitted = default |
 | `non_retryable_markers` | list (string) | content-policy texts                    | Body substrings (case-insensitive) that stop the retry for **any** status. Added to the built-in list                        |
 | `bad_request_markers`   | list (string) | known "the request is wrong" texts      | Body substrings (case-insensitive) that stop the retry of a **400**. Added to the built-in list                              |
-| `provider_overrides`    | map           | `vllm: [404, 429, "5xx"]`               | Replaces `status_codes` for every credential of a provider type (`vllm`, `openai`, `anthropic`, ...)                         |
+| `provider_overrides`    | map           | `vllm`: `status_codes` without `400`    | Replaces `status_codes` for every credential of a provider type (`vllm`, `openai`, `anthropic`, ...)                         |
 | `credential_overrides`  | map           | —                                       | Replaces `status_codes` for one credential, keyed by its `name`                                                              |
 
 ### Precedence
@@ -49,11 +49,11 @@ The effective status code set of a credential is the first one that exists:
 
 1. its `credential_overrides` entry;
 2. the `provider_overrides` entry of its `type`;
-3. the top-level `status_codes`.
+3. the top-level `status_codes` (for `vllm`, without `400`).
 
 An override **replaces** the set and does not merge with it. List every code you want retried, including the ones already in `status_codes`. An override with an empty list (`status_codes: []`) disables retries for that credential or provider.
 
-`provider_overrides` merges over the built-in overrides by key. Setting `vllm` replaces the built-in `vllm` entry; any other key leaves it in place.
+The built-in `vllm` rule is not a fixed list: it is the top-level `status_codes` with `400` removed, so `status_codes: [429]` means `[429]` for `vllm` too. Setting `provider_overrides.vllm` replaces this rule with your list.
 
 Markers apply on top of the status code set, whichever set is in effect. Configured markers are added to the built-in ones, never replace them.
 
@@ -65,7 +65,7 @@ Self-hosted vLLM replicas of one model run the same weights, chat template and `
 - `max_tokens` over the context window;
 - a prompt longer than the context window.
 
-So the built-in policy sends such a `400` straight to the client. `5xx`, `429` and `404` (e.g. a replica that serves another model) are still retried.
+So the built-in policy sends such a `400` straight to the client. Every other code of `status_codes` (by default `5xx`, `429` and `404`, e.g. a replica that serves another model) is still retried.
 
 To restore the old behavior:
 
