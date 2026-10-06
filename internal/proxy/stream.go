@@ -786,6 +786,16 @@ func (p *Proxy) handleTransformedStreaming(
 	var totalTokens int
 	completion := p.newCompletionTokenAccumulator(modelID)
 
+	// This billing extraction re-parses the already-converted (provider →
+	// Responses/Messages/Chat SSE) output bytes, which for Kimi/Moonshot never
+	// carry a 5m/1h split of their own — the split only ever arrives on the
+	// upstream response headers, read once here before any chunk is processed.
+	cacheWrite5m, cacheWrite1h := kimiCacheWriteTTLFromHeaders(resp.Header)
+	billingTokenUsageOpts := converter.TokenUsageExtractionOptions{
+		CacheWriteTTLHeader5mTokens: cacheWrite5m,
+		CacheWriteTTLHeader1hTokens: cacheWrite1h,
+	}
+
 	// Capture last chunk for usage extraction (Solution 3: Hybrid approach)
 	var lastChunk []byte
 	detectProviderStreamError := resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices
@@ -827,7 +837,7 @@ func (p *Proxy) handleTransformedStreaming(
 					if logCtx.IsImageGeneration {
 						logCtx.observeImageStreamPayloads(payloads)
 					}
-					if usage := extractTokenUsageFromPayloads(payloads, converter.TokenUsageExtractionOptions{}); usage != nil {
+					if usage := extractTokenUsageFromPayloads(payloads, billingTokenUsageOpts); usage != nil {
 						if logCtx.TokenUsage == nil {
 							logCtx.TokenUsage = &converter.TokenUsage{}
 						}
@@ -919,6 +929,16 @@ func (p *Proxy) handleStreamingWithTokens(w http.ResponseWriter, resp *http.Resp
 	completion := p.newCompletionTokenAccumulator(modelID)
 	chunkCount := 0
 
+	// Kimi/Moonshot never puts its cache-write TTL split in the SSE body
+	// (cache_creation_token_details stays null) — it arrives once, on the
+	// initial response headers, before any chunk is read.
+	cacheWrite5m, cacheWrite1h := kimiCacheWriteTTLFromHeaders(resp.Header)
+	tokenUsageOpts := converter.TokenUsageExtractionOptions{
+		AudioInputIncludesCachedAudio: true,
+		CacheWriteTTLHeader5mTokens:   cacheWrite5m,
+		CacheWriteTTLHeader1hTokens:   cacheWrite1h,
+	}
+
 	// Capture last chunk for usage extraction (Solution 3: Hybrid approach)
 	var lastChunk []byte
 	detectProviderStreamError := resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices
@@ -940,7 +960,7 @@ func (p *Proxy) handleStreamingWithTokens(w http.ResponseWriter, resp *http.Resp
 				if logCtx.IsImageGeneration {
 					logCtx.observeImageStreamPayloads(payloadBuf)
 				}
-				if usage := extractTokenUsageFromPayloads(payloadBuf, converter.TokenUsageExtractionOptions{AudioInputIncludesCachedAudio: true}); usage != nil {
+				if usage := extractTokenUsageFromPayloads(payloadBuf, tokenUsageOpts); usage != nil {
 					if logCtx.TokenUsage == nil {
 						logCtx.TokenUsage = &converter.TokenUsage{}
 					}
@@ -969,7 +989,7 @@ func (p *Proxy) handleStreamingWithTokens(w http.ResponseWriter, resp *http.Resp
 
 	if logCtx != nil && logCtx.HideWebSearchResults {
 		providerReader = newWebSearchResultsStripReader(providerReader, func(payload []byte) {
-			if usage := converter.ExtractTokenUsageWithOptions(payload, converter.TokenUsageExtractionOptions{AudioInputIncludesCachedAudio: true}); usage != nil {
+			if usage := converter.ExtractTokenUsageWithOptions(payload, tokenUsageOpts); usage != nil {
 				if logCtx.TokenUsage == nil {
 					logCtx.TokenUsage = &converter.TokenUsage{}
 				}
@@ -1725,7 +1745,8 @@ func (p *Proxy) handleResponsesAPIStreaming(
 				"model", modelID, "provider", cred.Type)
 			usageOptions := tokenUsageExtractionOptionsForResponse(cred, resp.Header)
 			return responses.TransformChatStreamToResponsesWithMetaAndUsage(
-				r, w, publicModel, reqMeta, usageOptions.AudioInputIncludesCachedAudio, onComplete,
+				r, w, publicModel, reqMeta, usageOptions.AudioInputIncludesCachedAudio,
+				usageOptions.CacheWriteTTLHeader5mTokens, usageOptions.CacheWriteTTLHeader1hTokens, onComplete,
 			)
 		}
 
@@ -1751,9 +1772,11 @@ func (p *Proxy) handleResponsesAPIStreaming(
 			}
 		}()
 
-		// Then convert Chat Completions SSE to Responses API SSE
+		// Then convert Chat Completions SSE to Responses API SSE. Not Kimi here —
+		// this branch is for providers needing native-format conversion (Vertex,
+		// Anthropic, Bedrock), none of which need the header-sourced TTL fallback.
 		err := responses.TransformChatStreamToResponsesWithMetaAndUsage(
-			pr, w, publicModel, reqMeta, false, onComplete,
+			pr, w, publicModel, reqMeta, false, 0, 0, onComplete,
 		)
 		_ = pr.Close()
 		wg.Wait() // ensure goroutine completes before reading transformErr
@@ -1790,9 +1813,10 @@ func (p *Proxy) handleMessagesAPIStreaming(
 		DisplayModelID: publicModel,
 		IsStreaming:    true,
 	})
+	cacheWrite5m, cacheWrite1h := kimiCacheWriteTTLFromHeaders(resp.Header)
 	transformer := func(reader io.Reader, _ string, writer io.Writer) error {
 		if conv.IsPassthrough() {
-			return anthropicconv.TransformChatStreamToMessages(reader, writer, publicModel, metadata)
+			return anthropicconv.TransformChatStreamToMessages(reader, writer, publicModel, metadata, cacheWrite5m, cacheWrite1h)
 		}
 		chatReader, chatWriter := io.Pipe()
 		var providerErr error
@@ -1807,7 +1831,10 @@ func (p *Proxy) handleMessagesAPIStreaming(
 			}
 			_ = chatWriter.Close()
 		}()
-		err := anthropicconv.TransformChatStreamToMessages(chatReader, writer, publicModel, metadata)
+		// Not Kimi here — this branch is for providers needing native-format
+		// conversion (Vertex, Anthropic, Bedrock), none of which need the
+		// header-sourced TTL fallback.
+		err := anthropicconv.TransformChatStreamToMessages(chatReader, writer, publicModel, metadata, 0, 0)
 		_ = chatReader.Close()
 		wg.Wait()
 		if err != nil {

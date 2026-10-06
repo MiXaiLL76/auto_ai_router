@@ -584,6 +584,16 @@ func (c *ProviderConverter) UsageFromResponse(body []byte) *TokenUsage {
 
 type TokenUsageExtractionOptions struct {
 	AudioInputIncludesCachedAudio bool
+	// CacheWriteTTLHeader5mTokens / CacheWriteTTLHeader1hTokens carry the
+	// cache-write TTL breakdown read from upstream response headers (used by
+	// Kimi/Moonshot, whose body never reports a 5m/1h split —
+	// cache_creation_token_details stays null; the split is only available
+	// via the Msh-Usage-Cache-Write-Tokens-5m/-1h response headers). Callers
+	// with access to the raw HTTP response headers fill these in;
+	// tokenUsageFromShape falls back to them only when the body itself
+	// didn't already supply a 5m/1h split.
+	CacheWriteTTLHeader5mTokens int
+	CacheWriteTTLHeader1hTokens int
 }
 
 // ExtractTokenUsage parses token usage from an OpenAI-format JSON response body.
@@ -956,6 +966,13 @@ func tokenUsageFromShape(resp *tokenUsageResponseShape, opts TokenUsageExtractio
 		if outputTextTokens == 0 {
 			outputTextTokens = u.OutputTokensDetails.TextTokens
 		}
+	}
+	// Body never reports the TTL split for providers like Kimi/Moonshot
+	// (cache_creation_token_details stays null) — fall back to the
+	// header-sourced split when the body gave us none.
+	if cacheCreation5mTokens == 0 && cacheCreation1hTokens == 0 {
+		cacheCreation5mTokens = opts.CacheWriteTTLHeader5mTokens
+		cacheCreation1hTokens = opts.CacheWriteTTLHeader1hTokens
 	}
 	if cacheCreationTokens == 0 {
 		cacheCreationTokens = cacheCreation5mTokens + cacheCreation1hTokens

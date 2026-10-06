@@ -268,6 +268,72 @@ func TestChatRequestToResponses_ReasoningEffortAndResponseFormat(t *testing.T) {
 	assert.Equal(t, true, format["strict"])
 }
 
+// TestChatRequestToResponses_StreamRequestsReasoningSummary reproduces the
+// live bug: without a requested summary, a streaming Responses API reply
+// never emits response.reasoning_summary_text.delta -- the model spends
+// reasoning tokens (visible in usage anyway) but the client sees no
+// reasoning text, so streamed replies look like the model never reasoned.
+func TestChatRequestToResponses_StreamRequestsReasoningSummary(t *testing.T) {
+	body := `{"model":"gpt-5-pro","stream":true,"messages":[{"role":"user","content":"hi"}]}`
+	out, err := ChatRequestToResponses([]byte(body))
+	require.NoError(t, err)
+
+	var raw map[string]interface{}
+	require.NoError(t, json.Unmarshal(out, &raw))
+	reasoning := raw["reasoning"].(map[string]interface{})
+	assert.Equal(t, "detailed", reasoning["summary"])
+}
+
+func TestChatRequestToResponses_StreamReasoningSummaryWithEffort(t *testing.T) {
+	body := `{"model":"gpt-5-pro","stream":true,"reasoning_effort":"high","messages":[{"role":"user","content":"hi"}]}`
+	out, err := ChatRequestToResponses([]byte(body))
+	require.NoError(t, err)
+
+	var raw map[string]interface{}
+	require.NoError(t, json.Unmarshal(out, &raw))
+	reasoning := raw["reasoning"].(map[string]interface{})
+	assert.Equal(t, "high", reasoning["effort"])
+	assert.Equal(t, "detailed", reasoning["summary"])
+}
+
+func TestChatRequestToResponses_StreamKeepsExplicitClientSummary(t *testing.T) {
+	body := `{"model":"gpt-5-pro","stream":true,"reasoning":{"summary":"concise"},"messages":[{"role":"user","content":"hi"}]}`
+	out, err := ChatRequestToResponses([]byte(body))
+	require.NoError(t, err)
+
+	var raw map[string]interface{}
+	require.NoError(t, json.Unmarshal(out, &raw))
+	reasoning := raw["reasoning"].(map[string]interface{})
+	assert.Equal(t, "concise", reasoning["summary"], "an explicit client summary must win over the default")
+}
+
+func TestChatRequestToResponses_NonStreamNoReasoningSummary(t *testing.T) {
+	body := `{"model":"gpt-5-pro","messages":[{"role":"user","content":"hi"}]}`
+	out, err := ChatRequestToResponses([]byte(body))
+	require.NoError(t, err)
+
+	var raw map[string]interface{}
+	require.NoError(t, json.Unmarshal(out, &raw))
+	_, has := raw["reasoning"]
+	assert.False(t, has, "non-stream requests don't need the summary default")
+}
+
+// TestChatRequestToResponses_NonReasoningModelSkipsSummaryInStream guards
+// the critical regression: a live probe shows non-reasoning models (gpt-4o,
+// gpt-4.1) reject "reasoning.summary" outright with 400 "Unsupported
+// parameter", so the summary default must not leak onto their streamed
+// requests.
+func TestChatRequestToResponses_NonReasoningModelSkipsSummaryInStream(t *testing.T) {
+	body := `{"model":"gpt-4o","stream":true,"messages":[{"role":"user","content":"hi"}]}`
+	out, err := ChatRequestToResponses([]byte(body))
+	require.NoError(t, err)
+
+	var raw map[string]interface{}
+	require.NoError(t, json.Unmarshal(out, &raw))
+	_, has := raw["reasoning"]
+	assert.False(t, has, "a non-reasoning model must not receive reasoning.summary in any mode")
+}
+
 func TestChatRequestToResponses_MissingMessages(t *testing.T) {
 	_, err := ChatRequestToResponses([]byte(`{"model":"gpt-5-pro"}`))
 	assert.Error(t, err)
