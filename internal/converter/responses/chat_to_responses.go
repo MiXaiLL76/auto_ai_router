@@ -499,17 +499,41 @@ func chatToolChoiceToResponses(raw map[string]interface{}) error {
 }
 
 // chatReasoningToResponses converts Chat Completions' top-level
-// reasoning_effort into the Responses API's nested reasoning.effort.
+// reasoning_effort into the Responses API's nested reasoning.effort, and
+// ensures streamed replies to reasoning-capable models actually surface
+// their reasoning.
 func chatReasoningToResponses(raw map[string]interface{}) {
 	effort, ok := raw["reasoning_effort"].(string)
-	if !ok || effort == "" {
-		return
+	if ok && effort != "" {
+		if existing, ok := raw["reasoning"].(map[string]interface{}); ok {
+			existing["effort"] = effort
+		} else {
+			raw["reasoning"] = map[string]interface{}{"effort": effort}
+		}
 	}
-	if existing, ok := raw["reasoning"].(map[string]interface{}); ok {
-		existing["effort"] = effort
-		return
+
+	// Without a requested summary, streaming Responses API replies never
+	// emit response.reasoning_summary_text.delta -- the model burns
+	// reasoning tokens (visible in usage) but the client sees no reasoning
+	// text at all, and the streamed reply looks like the model never
+	// thought. Requesting the summary makes OpenAI stream it, which
+	// TransformResponsesStreamToChat already relays as reasoning_content.
+	//
+	// Scoped to requests the codebase already treats as reasoning-capable
+	// (chatRequestWantsReasoning -- same gate chatForceStatelessResponses
+	// uses): a live probe shows non-reasoning models like gpt-4o reject
+	// "reasoning.summary" outright with 400 "Unsupported parameter", so
+	// sending it unconditionally would break every streamed request to a
+	// non-reasoning responses_only model.
+	if stream, ok := raw["stream"].(bool); ok && stream && chatRequestWantsReasoning(raw) {
+		if existing, ok := raw["reasoning"].(map[string]interface{}); ok {
+			if _, has := existing["summary"]; !has {
+				existing["summary"] = "detailed"
+			}
+		} else {
+			raw["reasoning"] = map[string]interface{}{"summary": "detailed"}
+		}
 	}
-	raw["reasoning"] = map[string]interface{}{"effort": effort}
 }
 
 // chatResponseFormatToText converts Chat Completions' response_format into
