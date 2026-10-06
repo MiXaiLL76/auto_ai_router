@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
@@ -23,6 +24,14 @@ const (
 
 	airUsageAudioTokensExcludeCached = "exclude-cached"
 	airUsageAudioTokensIncludeCached = "include-cached"
+
+	// HeaderKimiCacheWriteTokens5m / HeaderKimiCacheWriteTokens1h carry Kimi's
+	// (Moonshot AI) cache-write TTL breakdown. Kimi's OpenAI-compatible Chat
+	// Completions body only reports the aggregate via
+	// usage.prompt_tokens_details.cache_write_tokens — cache_creation_token_details
+	// stays null — so the 5m/1h split is only available via these response headers.
+	HeaderKimiCacheWriteTokens5m = "Msh-Usage-Cache-Write-Tokens-5m" //nolint:gosec // G101: HTTP header name, not a credential
+	HeaderKimiCacheWriteTokens1h = "Msh-Usage-Cache-Write-Tokens-1h" //nolint:gosec // G101: HTTP header name, not a credential
 )
 
 type audioUsageContract int
@@ -73,7 +82,27 @@ func tokenUsageExtractionOptionsForResponse(cred *config.CredentialConfig, heade
 			opts.AudioInputIncludesCachedAudio = true
 		}
 	}
+	opts.CacheWriteTTLHeader5mTokens, opts.CacheWriteTTLHeader1hTokens = kimiCacheWriteTTLFromHeaders(headers)
 	return opts
+}
+
+// kimiCacheWriteTTLFromHeaders parses Kimi's cache-write TTL breakdown
+// headers. Harmless to read unconditionally for every credential/provider:
+// no other upstream sets these header names, so non-Kimi responses simply
+// yield (0, 0).
+func kimiCacheWriteTTLFromHeaders(headers http.Header) (fiveMinTokens, oneHourTokens int) {
+	if headers == nil {
+		return 0, 0
+	}
+	return nonNegativeHeaderInt(headers.Get(HeaderKimiCacheWriteTokens5m)), nonNegativeHeaderInt(headers.Get(HeaderKimiCacheWriteTokens1h))
+}
+
+func nonNegativeHeaderInt(value string) int {
+	n, err := strconv.Atoi(strings.TrimSpace(value))
+	if err != nil || n < 0 {
+		return 0
+	}
+	return n
 }
 
 func markAudioUsageContract(headers http.Header, includesCachedAudio bool) {
