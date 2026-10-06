@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/converter"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -168,6 +169,24 @@ func TestGrokPricing_ImageToolNeedsResolvablePrice(t *testing.T) {
 	assert.Zero(t, withoutModel.CalculateCostsWithResolver(usage, func(m string) *ModelPrice { return prices[m] }).ImageGenerationToolCost)
 }
 
+// Each edit of the image_generation tool is priced like its own images
+// endpoint edit request, so the free source-image allowance applies per edit.
+func TestGrokPricing_ImageToolEditsGetTheAllowanceEach(t *testing.T) {
+	prices := loadGrokTestPrices(t)
+	price := prices["grok-4.7"]
+	usage := &converter.TokenUsage{PromptTokens: 10, ImageToolEdits: 3}
+	cost := func(imagePrice *ModelPrice) float64 {
+		return price.CalculateCostsWithResolver(usage, func(string) *ModelPrice { return imagePrice }).ImageGenerationToolCost
+	}
+
+	paid := *prices["grok-imagine-image-2.0"]
+	assert.InDelta(t, 3*(0.078+0.013), cost(&paid), 1e-12, "one paid source image per edit")
+
+	oneFree := paid
+	oneFree.InputImagesFreePerRequest = 1
+	assert.InDelta(t, 3*0.078, cost(&oneFree), 1e-12, "the allowance covers the source image of every edit")
+}
+
 func TestGrokPricing_ToolAliasesPricedOnce(t *testing.T) {
 	usage := &converter.TokenUsage{CodeExecutionCalls: 1, CollectionsSearchCalls: 1, AttachmentSearchCalls: 1}
 
@@ -214,6 +233,32 @@ func TestLongContextMode_DefaultsUnchanged(t *testing.T) {
 	inclusive.LongContextPricingMode = LongContextFullRequest200kInclusive
 	assert.InDelta(t, 200_000*10+10*20, inclusive.CalculateCost(&converter.TokenUsage{PromptTokens: 200_000, CompletionTokens: 10}), 1e-9,
 		"the explicit mode wins over the Gemini default")
+}
+
+// The mode bills reasoning with the rest of the output at the long-context
+// output rate even when the row sets its own (base) reasoning rate.
+func TestLongContextMode_ReasoningFollowsTheTier(t *testing.T) {
+	base := ModelPrice{
+		InputCostPerToken:           1,
+		OutputCostPerToken:          2,
+		OutputCostPerReasoningToken: 3,
+		InputCostPerTokenAbove200k:  10,
+		OutputCostPerTokenAbove200k: 20,
+	}
+	reasoning := func(price ModelPrice, prompt int) float64 {
+		return price.CalculateCosts(&converter.TokenUsage{PromptTokens: prompt, CompletionTokens: 100, ReasoningTokens: 40}).ReasoningCost
+	}
+
+	mode := base
+	mode.LongContextPricingMode = LongContextFullRequest200kInclusive
+	assert.InDelta(t, 40*3, reasoning(mode, 199_999), 1e-9, "below the threshold the row's reasoning rate applies")
+	assert.InDelta(t, 40*20, reasoning(mode, 200_000), 1e-9, "from 200k on reasoning is long-context output")
+
+	// Rows without the mode keep their reasoning rate at any prompt size.
+	assert.InDelta(t, 40*3, reasoning(base, 250_000), 1e-9)
+	gemini := base
+	gemini.LiteLLMProvider = "vertex_ai"
+	assert.InDelta(t, 40*3, reasoning(gemini, 250_000), 1e-9)
 }
 
 func TestLongContextMode_HigherTierStillWins(t *testing.T) {
@@ -267,4 +312,32 @@ func TestStrictOrganizationTariff_RejectsInvalidToolAndModeFields(t *testing.T) 
 
 	_, err := decodeStrictPriceRow("m", json.RawMessage(`{"input_cost_per_token":1,"tool_cost_per_call":{"file_search":1,"collections_search":1}}`))
 	assert.NoError(t, err, "an alias repeating the canonical price is not ambiguous")
+}
+
+// An organization tariff is looked up by exact model ID, so a reference that
+// does not name one of its rows would leave the tool's images unbilled.
+func TestStrictOrganizationTariff_ImageToolModelMustExist(t *testing.T) {
+	load := func(body string) error {
+		_, err := LoadOrganizationPolicies([]config.OrganizationPolicyConfig{{
+			OrganizationID:  "org-1",
+			PriceProfileID:  "profile-1",
+			ModelPricesLink: writePolicyPrices(t, body),
+		}}, testPolicyManager(), validPolicyOptions())
+		return err
+	}
+	const image = `"grok-imagine-image-2.0":{"output_cost_per_image":0.104}`
+
+	require.NoError(t, load(`{"public/a":{"input_cost_per_token":1,"image_generation_tool_model":"grok-imagine-image-2.0"},`+image+`}`))
+
+	for name, reference := range map[string]string{
+		"missing":       "grok-imagine-image-9",
+		"other case":    "Grok-Imagine-Image-2.0",
+		"refers itself": "public/a",
+	} {
+		t.Run(name, func(t *testing.T) {
+			err := load(`{"public/a":{"input_cost_per_token":1,"image_generation_tool_model":"` + reference + `"},` + image + `}`)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "image_generation_tool_model")
+		})
+	}
 }

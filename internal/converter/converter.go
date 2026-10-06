@@ -596,21 +596,22 @@ type responsesUsageDetails struct {
 }
 
 // webSearchRequests returns the provider-reported web search count: the
-// standard counters first, then the provider usage extensions. reported is
-// true when the count is the provider's own figure: an xAI server-side tool
-// usage object reports it even when it is zero, and that zero is
-// authoritative, so output items and citations must not replace it.
-func (u *responsesUsageDetails) webSearchRequests() (requests int, reported bool) {
+// standard counters first, then the provider usage extensions, toolUsage
+// being this usage object's decoded server-side tool usage. The count is
+// reported when it is the provider's own figure: an xAI web_search_calls
+// counter is reported even when it is zero, and that zero is authoritative,
+// so output items and citations must not replace it.
+func (u *responsesUsageDetails) webSearchRequests(toolUsage converterutil.ServerSideToolUsage) reportedCount {
 	if requests := webSearchRequestsFromUsage(u.ServerToolUse.WebSearchRequests, u.WebSearchRequests); requests > 0 {
-		return requests, true
+		return reportedCount{requests, true}
 	}
-	if toolUsage, ok := u.ServerSideToolUsage(); ok {
-		return toolUsage.WebSearchCalls, true
+	if toolUsage.WebSearchCallsReported {
+		return reportedCount{toolUsage.WebSearchCalls, true}
 	}
 	if requests := u.ToolUsageExtensions.WebSearchRequests(); requests > 0 {
-		return requests, true
+		return reportedCount{requests, true}
 	}
-	return 0, false
+	return reportedCount{}
 }
 
 // providerCostUSD returns the provider's own cost figure in USD, or 0.
@@ -777,23 +778,23 @@ func tokenUsageFromShape(resp *tokenUsageResponseShape, opts TokenUsageExtractio
 		completionTokens = resp.Response.Usage.OutputTokens
 	}
 
-	usageRequests, usageRequestsReported := resp.Usage.webSearchRequests()
-	var nestedUsageRequests int
-	var nestedUsageRequestsReported bool
+	// Each level's server-side tool usage object is decoded once; the
+	// top-level one wins for the per-tool counters, like the other fields.
+	toolUsage, toolUsageReported := resp.Usage.ServerSideToolUsage()
+	usageRequests := resp.Usage.webSearchRequests(toolUsage)
+	var nestedUsageRequests reportedCount
 	if resp.Response.Usage != nil {
-		nestedUsageRequests, nestedUsageRequestsReported = resp.Response.Usage.webSearchRequests()
+		nestedToolUsage, nestedToolUsageReported := resp.Response.Usage.ServerSideToolUsage()
+		nestedUsageRequests = resp.Response.Usage.webSearchRequests(nestedToolUsage)
+		if !toolUsageReported {
+			toolUsage, toolUsageReported = nestedToolUsage, nestedToolUsageReported
+		}
 	}
 	webSearchRequests := webSearchRequestsFromExtractedResponse(
-		reportedCount{usageRequests, usageRequestsReported},
-		reportedCount{nestedUsageRequests, nestedUsageRequestsReported},
+		usageRequests, nestedUsageRequests,
 		resp.Choices, resp.Output, resp.Response.Output, resp.WebSearch,
 	)
-
-	toolUsage, toolUsageReported := resp.Usage.ServerSideToolUsage()
-	if !toolUsageReported && resp.Response.Usage != nil {
-		toolUsage, toolUsageReported = resp.Response.Usage.ServerSideToolUsage()
-	}
-	imageToolGenerations, imageToolEdits := imageGenerationToolImages(resp.Output, resp.Response.Output, toolUsage, toolUsageReported)
+	imageToolGenerations, imageToolEdits := imageGenerationToolImages(resp.Output, resp.Response.Output, toolUsage)
 
 	if promptTokens == 0 && completionTokens == 0 && webSearchRequests == 0 &&
 		!toolUsageReported && imageToolGenerations == 0 && imageToolEdits == 0 {
@@ -1043,13 +1044,13 @@ func detectReasoningAccounting(promptTokens, completionTokens, reasoningTokens, 
 // imageGenerationToolImages counts the images a built-in image_generation
 // tool returned inside a chat/Responses response, split into generations and
 // edits by the item ID prefix (xAI: "ig_" generation, "ie_" edit). When the
-// provider reported a server-side tool usage object, its
-// image_generation_calls is the authoritative total and the items only tell
-// how many of those were edits; without one, the completed items are counted.
+// provider's server-side tool usage object carries image_generation_calls,
+// that is the authoritative total and the items only tell how many of those
+// were edits; without the counter (no object, or an object without that
+// key), the completed items are counted.
 func imageGenerationToolImages(
 	output, nestedOutput []extractedOutputItem,
 	toolUsage converterutil.ServerSideToolUsage,
-	toolUsageReported bool,
 ) (generations, edits int) {
 	for _, items := range [][]extractedOutputItem{output, nestedOutput} {
 		itemGenerations, itemEdits := 0, 0
@@ -1068,7 +1069,7 @@ func imageGenerationToolImages(
 			break
 		}
 	}
-	if !toolUsageReported {
+	if !toolUsage.ImageGenerationCallsReported {
 		return generations, edits
 	}
 	total := toolUsage.ImageGenerationCalls

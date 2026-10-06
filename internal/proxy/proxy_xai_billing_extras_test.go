@@ -1,9 +1,12 @@
 package proxy
 
 import (
+	"bytes"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
@@ -166,4 +169,22 @@ func TestBuildMetadata_ToolUsageCostIsTheSumOfToolCharges(t *testing.T) {
 	serverToolUse := metadata["usage_object"].(map[string]interface{})["server_tool_use"].(map[string]interface{})
 	assert.NotContains(t, serverToolUse, "x_posts_fetched", "per-tool counters are logged only when tools other than web search ran")
 	assert.NotContains(t, metadata, "provider_reported_cost")
+}
+
+// A row naming a missing price row is reported once per price source, not on
+// every request billed with it.
+func TestBillingPriceResolver_WarnsOncePerMissingReference(t *testing.T) {
+	prx := NewTestProxyBuilder().Build()
+	var logs bytes.Buffer
+	prx.logger = slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	prx.priceRegistry = routermodels.NewModelPriceRegistry()
+	resolve := prx.billingPriceResolver(testLogCtx(t))
+	const missing = "warn-once-test-missing-image-model"
+
+	assert.Nil(t, resolve(missing))
+	assert.Nil(t, resolve(missing))
+	assert.Nil(t, prx.billingPriceResolver(testLogCtx(t))(missing), "a later request")
+
+	assert.Equal(t, 1, strings.Count(logs.String(), "Referenced price row not found"))
+	assert.Contains(t, logs.String(), missing)
 }

@@ -35,6 +35,9 @@ func TestServerSideToolUsage_DecodesXAIObject(t *testing.T) {
 		CollectionsSearchCalls: 4,
 		MCPCalls:               5,
 		ImageGenerationCalls:   7,
+
+		WebSearchCallsReported:       true,
+		ImageGenerationCallsReported: true,
 	}, got)
 }
 
@@ -48,7 +51,32 @@ func TestServerSideToolUsage_AbsentIsNotZero(t *testing.T) {
 
 	got, ok := ToolUsageExtensions{ServerSideToolUsageDetails: json.RawMessage(`{"web_search_calls":0}`)}.ServerSideToolUsage()
 	require.True(t, ok, "an object reporting zero is reported usage")
-	assert.Equal(t, ServerSideToolUsage{}, got)
+	assert.Equal(t, ServerSideToolUsage{WebSearchCallsReported: true}, got)
+}
+
+func TestServerSideToolUsage_CounterPresence(t *testing.T) {
+	tests := []struct {
+		name               string
+		raw                string
+		web, image         int
+		webSeen, imageSeen bool
+	}{
+		{"counters missing", `{"x_search_calls":1}`, 0, 0, false, false},
+		{"counters zero", `{"web_search_calls":0,"image_generation_calls":0}`, 0, 0, true, true},
+		{"counters set", `{"web_search_calls":2,"image_generation_calls":3}`, 2, 3, true, true},
+		{"counters null", `{"web_search_calls":null,"image_generation_calls":null}`, 0, 0, false, false},
+		{"counters malformed", `{"web_search_calls":"2","image_generation_calls":-1}`, 0, 0, false, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, ok := ToolUsageExtensions{ServerSideToolUsageDetails: json.RawMessage(tt.raw)}.ServerSideToolUsage()
+			require.True(t, ok)
+			assert.Equal(t, tt.web, got.WebSearchCalls)
+			assert.Equal(t, tt.webSeen, got.WebSearchCallsReported)
+			assert.Equal(t, tt.image, got.ImageGenerationCalls)
+			assert.Equal(t, tt.imageSeen, got.ImageGenerationCallsReported)
+		})
+	}
 }
 
 func TestServerSideToolUsage_AliasesAreNotSummed(t *testing.T) {

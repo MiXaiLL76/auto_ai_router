@@ -426,9 +426,11 @@ func CalculateTokenCostsWithResolver(usage *converter.TokenUsage, price *ModelPr
 	}
 	costs.CachedOutputCost = float64(cachedOutputTokens) * cachedOutputCost
 
-	// Reasoning tokens with fallback
+	// Reasoning tokens with fallback. A long-context mode row bills reasoning
+	// with the rest of the output at the tier's output rate: there is no
+	// long-context reasoning rate, and the base reasoning rate would undercut it.
 	reasoningCost := price.OutputCostPerReasoningToken
-	if reasoningCost == 0 {
+	if reasoningCost == 0 || (fullSessionOutputMatched && price.longContextFullRequest200kInclusive()) {
 		reasoningCost = outputCostPerToken
 	}
 	costs.ReasoningCost = float64(reasoningTokens) * reasoningCost
@@ -557,8 +559,9 @@ func (p *ModelPrice) toolCostPerCall(tool string) float64 {
 
 // imageGenerationToolCost prices the images a built-in image_generation tool
 // produced, at ImageGenerationToolModel's tariff with its default request
-// parameters (the tool takes no size or quality). Edits use the tier for
-// edits and pay for one source image each, as the images endpoint does.
+// parameters (the tool takes no size or quality). Each edit is priced as its
+// own images-endpoint edit request: the tier for edits plus one source image,
+// with the row's free source-image allowance applying to every edit.
 func (p *ModelPrice) imageGenerationToolCost(usage *converter.TokenUsage, resolve PriceResolver) float64 {
 	generations := converterutil.NonNegativeTokenCount(usage.ImageToolGenerations)
 	edits := converterutil.NonNegativeTokenCount(usage.ImageToolEdits)
@@ -574,8 +577,8 @@ func (p *ModelPrice) imageGenerationToolCost(usage *converter.TokenUsage, resolv
 		Operation: converter.ImageOperationGeneration,
 	})
 	if edits > 0 {
-		edit := &converter.ImageBillingDetails{Operation: converter.ImageOperationEdit, InputImages: edits}
-		cost += imagePrice.outputImageCost(edits, edit) + imagePrice.inputImageCost(edit)
+		edit := &converter.ImageBillingDetails{Operation: converter.ImageOperationEdit, InputImages: 1}
+		cost += imagePrice.outputImageCost(edits, edit) + float64(edits)*imagePrice.inputImageCost(edit)
 	}
 	return cost
 }

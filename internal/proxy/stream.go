@@ -247,6 +247,7 @@ func (o *openAIStreamUsageExtractor) extractChatCompletionUsage(payload []byte) 
 		data.Usage.PromptTokensDetails.CachedTokens,
 		data.Usage.PromptTokensDetails.CachedAudioTokens,
 	)
+	toolUsage, _ := data.Usage.ServerSideToolUsage()
 
 	return &StreamUsageInfo{
 		PromptTokens:          intValue(data.Usage.PromptTokens),
@@ -274,16 +275,9 @@ func (o *openAIStreamUsageExtractor) extractChatCompletionUsage(payload []byte) 
 			data.Usage.ServerToolUse.WebSearchRequests,
 			data.Usage.WebSearchRequests,
 			data.Usage.ToolUsageExtensions.WebSearchRequests(),
-			serverSideWebSearchCalls(data.Usage.ToolUsageExtensions),
+			toolUsage.WebSearchCalls,
 		),
 	}
-}
-
-// serverSideWebSearchCalls returns web_search_calls from an xAI server-side
-// tool usage object, or 0 when there is none.
-func serverSideWebSearchCalls(extensions converterutil.ToolUsageExtensions) int {
-	toolUsage, _ := extensions.ServerSideToolUsage()
-	return toolUsage.WebSearchCalls
 }
 
 // extractResponsesAPIUsage parses usage from Responses API streaming format.
@@ -327,17 +321,18 @@ func (o *openAIStreamUsageExtractor) extractResponsesAPIUsage(payload []byte) *S
 		usage.InputTokensDetails.CachedTokens,
 		usage.InputTokensDetails.CachedAudioTokens,
 	)
+	toolUsage, _ := usage.ServerSideToolUsage()
 	webSearchRequests := webSearchRequestsFromUsage(
 		usage.ServerToolUse.WebSearchRequests,
 		usage.WebSearchRequests,
 		usage.ToolUsageExtensions.WebSearchRequests(),
-		serverSideWebSearchCalls(usage.ToolUsageExtensions),
+		toolUsage.WebSearchCalls,
 	)
 	// A server-side tool usage object reporting zero web searches is
 	// authoritative (xAI bills successful executions only): output items of
-	// failed attempts must not replace it.
-	_, serverToolUsageReported := usage.ServerSideToolUsage()
-	if webSearchRequests == 0 && !serverToolUsageReported {
+	// failed attempts must not replace it. Only an object without the
+	// web_search_calls counter leaves the items to count.
+	if webSearchRequests == 0 && !toolUsage.WebSearchCallsReported {
 		webSearchRequests = countCompletedStreamingWebSearchItems(data.Response.Output)
 		if webSearchRequests == 0 {
 			webSearchRequests = countCompletedStreamingWebSearchItems(data.Output)

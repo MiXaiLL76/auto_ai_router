@@ -513,6 +513,9 @@ func loadStrictOrganizationPriceProfile(profileID, link string) (map[string]*Mod
 		}
 		prices[modelID] = price
 	}
+	if err := validateStrictPriceReferences(prices); err != nil {
+		return nil, profileIdentity{}, err
+	}
 	sum := sha256.Sum256(data)
 	return prices, profileIdentity{id: profileID, source: link, sha256: hex.EncodeToString(sum[:])}, nil
 }
@@ -616,6 +619,26 @@ func validateStrictToolAndModePricing(price *ModelPrice) error {
 	}
 	if price.XSearchCostPerPost < 0 || price.XSearchCostPerProfile < 0 {
 		return errors.New("x_search_cost_per_post and x_search_cost_per_profile must not be negative")
+	}
+	return nil
+}
+
+// validateStrictPriceReferences rejects a row naming a price row the tariff
+// does not have: an organization tariff is looked up by exact model ID, so a
+// misspelled or differently cased image_generation_tool_model would leave
+// every image of that tool unbilled.
+func validateStrictPriceReferences(prices map[string]*ModelPrice) error {
+	for modelID, price := range prices {
+		reference := strings.TrimSpace(price.ImageGenerationToolModel)
+		if reference == "" {
+			continue
+		}
+		if reference == modelID {
+			return fmt.Errorf("organization tariff %q: image_generation_tool_model must name another price row", modelID)
+		}
+		if _, ok := prices[reference]; !ok {
+			return fmt.Errorf("organization tariff %q: image_generation_tool_model %q has no price row in this tariff (model IDs match exactly)", modelID, reference)
+		}
 	}
 	return nil
 }

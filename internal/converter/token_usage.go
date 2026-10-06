@@ -59,9 +59,11 @@ type TokenUsage struct {
 
 	// ServerToolUsageReported is true when the provider reported a
 	// server-side tool usage object (xAI usage.server_side_tool_usage_details).
-	// Its counts, zeros included, are then authoritative: a zero there means
-	// no billable executions rather than missing data, so neither output items
-	// nor citations may stand in for it, and WebSearchRequests comes from it.
+	// The counters it carries, zeros included, are then authoritative: a zero
+	// there means no billable executions rather than missing data, so neither
+	// output items nor citations may stand in for it. Only when the object
+	// lacks web_search_calls or image_generation_calls do WebSearchRequests
+	// and the image tool counts fall back to those, as without the object.
 	ServerToolUsageReported bool
 	XSearchCalls            int // X Search calls (logged; X Search bills per fetched item)
 	XSearchPosts            int // X posts fetched across all X Search calls, not de-duplicated
@@ -86,16 +88,33 @@ type TokenUsage struct {
 	ProviderCostUSD float64
 }
 
-// HasServerToolUsage reports whether any built-in tool other than web search
-// was used, i.e. whether the per-tool counters are worth logging.
+// HasServerToolUsage reports whether the per-tool counters are worth logging:
+// the provider reported a server-side tool usage object (even one counting
+// web searches only, or nothing at all), or a built-in tool other than web
+// search, which has fields of its own, was used.
 func (tu *TokenUsage) HasServerToolUsage() bool {
 	if tu == nil {
 		return false
 	}
-	return tu.ServerToolUsageReported || tu.XSearchCalls > 0 || tu.XSearchPosts > 0 ||
-		tu.XSearchProfiles > 0 || tu.CodeExecutionCalls > 0 || tu.AttachmentSearchCalls > 0 ||
-		tu.CollectionsSearchCalls > 0 || tu.MCPCalls > 0 || tu.ImageToolGenerations > 0 ||
-		tu.ImageToolEdits > 0
+	if tu.ServerToolUsageReported {
+		return true
+	}
+	for _, counter := range tu.serverToolCounters() {
+		if *counter > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// serverToolCounters lists the built-in tool counters other than
+// WebSearchRequests, for the code that treats them all alike.
+func (tu *TokenUsage) serverToolCounters() [9]*int {
+	return [...]*int{
+		&tu.XSearchCalls, &tu.XSearchPosts, &tu.XSearchProfiles,
+		&tu.CodeExecutionCalls, &tu.AttachmentSearchCalls, &tu.CollectionsSearchCalls,
+		&tu.MCPCalls, &tu.ImageToolGenerations, &tu.ImageToolEdits,
+	}
 }
 
 // Image request operations used by per-image price tiers.
@@ -155,15 +174,9 @@ func (tu *TokenUsage) Normalize() *TokenUsage {
 	if tu.WebSearchRequests > 0 || tu.WebSearchContextSize != "" {
 		tu.WebSearchContextSize = NormalizeWebSearchContextSize(tu.WebSearchContextSize)
 	}
-	tu.XSearchCalls = converterutil.NonNegativeTokenCount(tu.XSearchCalls)
-	tu.XSearchPosts = converterutil.NonNegativeTokenCount(tu.XSearchPosts)
-	tu.XSearchProfiles = converterutil.NonNegativeTokenCount(tu.XSearchProfiles)
-	tu.CodeExecutionCalls = converterutil.NonNegativeTokenCount(tu.CodeExecutionCalls)
-	tu.AttachmentSearchCalls = converterutil.NonNegativeTokenCount(tu.AttachmentSearchCalls)
-	tu.CollectionsSearchCalls = converterutil.NonNegativeTokenCount(tu.CollectionsSearchCalls)
-	tu.MCPCalls = converterutil.NonNegativeTokenCount(tu.MCPCalls)
-	tu.ImageToolGenerations = converterutil.NonNegativeTokenCount(tu.ImageToolGenerations)
-	tu.ImageToolEdits = converterutil.NonNegativeTokenCount(tu.ImageToolEdits)
+	for _, counter := range tu.serverToolCounters() {
+		*counter = converterutil.NonNegativeTokenCount(*counter)
+	}
 	if tu.ReasoningAccounting != ReasoningAccountingIncluded && tu.ReasoningAccounting != ReasoningAccountingAdditive {
 		tu.ReasoningAccounting = ""
 	}
@@ -190,7 +203,12 @@ func (tu *TokenUsage) IsZero() bool {
 	if tu == nil {
 		return true
 	}
-	return *tu == TokenUsage{}
+	// Neither a reported tool usage object whose counters are all zero nor
+	// the reasoning accounting verdict is consumption.
+	usage := *tu
+	usage.ServerToolUsageReported = false
+	usage.ReasoningAccounting = ""
+	return usage == TokenUsage{}
 }
 
 // MergeNonZero copies every non-zero/non-empty field from src into tu,
@@ -262,32 +280,32 @@ func (tu *TokenUsage) MergeNonZero(src *TokenUsage) {
 	if src.OutputImageTokens != 0 {
 		tu.OutputImageTokens = src.OutputImageTokens
 	}
-	tu.mergeToolUsage(src)
 	if src.WebSearchContextSize != "" {
 		tu.WebSearchContextSize = src.WebSearchContextSize
 	}
 	if src.ImageBilling != nil {
 		tu.ImageBilling = src.ImageBilling
 	}
-	if src.ReasoningAccounting != "" {
-		tu.ReasoningAccounting = src.ReasoningAccounting
-	}
-	if src.ProviderCostUSD != 0 {
-		tu.ProviderCostUSD = src.ProviderCostUSD
-	}
+	tu.MergeUsageExtensions(src)
 }
 
 // MergeUsageExtensions merges from src only what the generic usage
 // extraction derives beyond token counts: the built-in tool counters (with
 // the same cumulative semantics as MergeNonZero), the reasoning accounting
-// and the provider's own cost. It is for stream handlers that read token
-// counts from a typed usage object and would otherwise drop these.
+// and the provider's own cost. MergeNonZero ends with it; stream handlers
+// that read token counts from a typed usage object call it directly so they
+// do not drop these.
 func (tu *TokenUsage) MergeUsageExtensions(src *TokenUsage) {
 	if tu == nil || src == nil {
 		return
 	}
 	tu.mergeToolUsage(src)
-	if src.ReasoningAccounting != "" {
+	// The verdict travels with the reasoning tokens it was read from: the
+	// chunk that last reported them decides it, and one that does not settle
+	// it (e.g. no total_tokens) clears an earlier verdict rather than leaving
+	// it to describe figures it was not read from; the price row's fixed
+	// setting then applies.
+	if src.ReasoningTokens != 0 || src.ReasoningAccounting != "" {
 		tu.ReasoningAccounting = src.ReasoningAccounting
 	}
 	if src.ProviderCostUSD != 0 {
@@ -302,39 +320,23 @@ func (tu *TokenUsage) MergeUsageExtensions(src *TokenUsage) {
 // summing them would bill repeated stream events twice, and keeping an
 // earlier non-zero value would override the provider's authoritative zero.
 // Once such an object was seen, counts derived from output items or
-// citations of later chunks no longer apply.
+// citations of later chunks no longer apply. Without one, a non-zero count
+// replaces the earlier one, as in MergeNonZero.
 func (tu *TokenUsage) mergeToolUsage(src *TokenUsage) {
-	switch {
-	case src.ServerToolUsageReported:
-		tu.ServerToolUsageReported = true
-		tu.WebSearchRequests = src.WebSearchRequests
-		tu.XSearchCalls = src.XSearchCalls
-		tu.XSearchPosts = src.XSearchPosts
-		tu.XSearchProfiles = src.XSearchProfiles
-		tu.CodeExecutionCalls = src.CodeExecutionCalls
-		tu.AttachmentSearchCalls = src.AttachmentSearchCalls
-		tu.CollectionsSearchCalls = src.CollectionsSearchCalls
-		tu.MCPCalls = src.MCPCalls
-		tu.ImageToolGenerations = src.ImageToolGenerations
-		tu.ImageToolEdits = src.ImageToolEdits
-	case tu.ServerToolUsageReported:
-		// Keep the authoritative counters.
-	default:
-		mergeNonZeroInt(&tu.WebSearchRequests, src.WebSearchRequests)
-		mergeNonZeroInt(&tu.XSearchCalls, src.XSearchCalls)
-		mergeNonZeroInt(&tu.XSearchPosts, src.XSearchPosts)
-		mergeNonZeroInt(&tu.XSearchProfiles, src.XSearchProfiles)
-		mergeNonZeroInt(&tu.CodeExecutionCalls, src.CodeExecutionCalls)
-		mergeNonZeroInt(&tu.AttachmentSearchCalls, src.AttachmentSearchCalls)
-		mergeNonZeroInt(&tu.CollectionsSearchCalls, src.CollectionsSearchCalls)
-		mergeNonZeroInt(&tu.MCPCalls, src.MCPCalls)
-		mergeNonZeroInt(&tu.ImageToolGenerations, src.ImageToolGenerations)
-		mergeNonZeroInt(&tu.ImageToolEdits, src.ImageToolEdits)
+	replace := src.ServerToolUsageReported
+	if !replace && tu.ServerToolUsageReported {
+		return // Keep the authoritative counters.
+	}
+	tu.ServerToolUsageReported = replace
+	mergeToolCounter(&tu.WebSearchRequests, src.WebSearchRequests, replace)
+	srcCounters := src.serverToolCounters()
+	for i, counter := range tu.serverToolCounters() {
+		mergeToolCounter(counter, *srcCounters[i], replace)
 	}
 }
 
-func mergeNonZeroInt(dst *int, src int) {
-	if src != 0 {
+func mergeToolCounter(dst *int, src int, replace bool) {
+	if replace || src != 0 {
 		*dst = src
 	}
 }

@@ -294,6 +294,38 @@ func TestProxyRequest_XAIResponsesStreamToolBillingCountedOnce(t *testing.T) {
 	}
 }
 
+// A usage object that lacks the web_search_calls / image_generation_calls
+// counters is no proof that those tools did not run: the streamed terminal
+// event's completed items are billed instead of a free zero.
+func TestProxyRequest_XAIResponsesStreamObjectWithoutCountersFallsBackToItems(t *testing.T) {
+	upstream := newIPv4Server(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = w.Write([]byte("event: response.completed\ndata: " +
+			`{"type":"response.completed","response":{"id":"resp_s","object":"response","status":"completed","model":"grok-4.7",` +
+			`"output":[{"type":"web_search_call","id":"ws_1","status":"completed"},` +
+			`{"type":"image_generation_call","id":"ig_1","status":"completed","result":"AAAA"}],` +
+			`"usage":{"input_tokens":300,"output_tokens":20,"total_tokens":320,` +
+			`"server_side_tool_usage_details":{"x_search_calls":0,"code_interpreter_calls":1}}}}` +
+			"\n\ndata: [DONE]\n\n"))
+	}))
+	defer upstream.Close()
+	prx, dbStub := newXAIBillingTestProxy(t, upstream, "xai-direct")
+
+	serveXAIBillingRequest(t, prx, "/v1/responses", `{"model":"grok-4.7","input":"draw the news","stream":true,
+		"tools":[{"type":"web_search"},{"type":"image_generation"},{"type":"code_interpreter"}]}`)
+
+	require.Len(t, dbStub.loggedEntries, 1)
+	entry := dbStub.loggedEntries[0]
+	metadata := decodeMetadata(t, entry.Metadata)
+	serverToolUse := metadata["usage_object"].(map[string]interface{})["server_tool_use"].(map[string]interface{})
+	assert.Equal(t, float64(1), serverToolUse["web_search_requests"])
+	assert.Equal(t, float64(1), serverToolUse["image_generation_calls"])
+	assert.Equal(t, float64(1), serverToolUse["code_execution_calls"])
+	wantTokens := 300*0.0000026 + 20*0.0000078
+	wantTools := 0.0065 + 0.052 + 0.0065
+	assert.InDelta(t, wantTokens+wantTools, entry.Spend, 1e-12)
+}
+
 // xAI repeats the cumulative usage object on every chat stream chunk; the
 // final figures are billed once, not summed per chunk.
 func TestProxyRequest_XAIChatStreamCumulativeUsageNotSummed(t *testing.T) {

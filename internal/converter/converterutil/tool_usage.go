@@ -42,6 +42,13 @@ type ServerSideToolUsage struct {
 	CollectionsSearchCalls int // collections_search, alias file_search
 	MCPCalls               int
 	ImageGenerationCalls   int
+	// WebSearchCallsReported and ImageGenerationCallsReported tell whether
+	// the object carried that counter at all. Only a carried counter is
+	// authoritative, zero included: these two executions have another
+	// source (web_search_call and image_generation_call output items,
+	// citations) to fall back to when the counter is missing.
+	WebSearchCallsReported       bool
+	ImageGenerationCallsReported bool
 }
 
 // serverSideToolUsageKeys lists, per category, every counter name that may
@@ -68,7 +75,8 @@ var serverSideToolUsageKeys = struct {
 // no data then, as opposed to an object reporting zero usage, whose zeros are
 // authoritative. A counter missing from a present object counts as zero, and
 // so does one whose value is not a non-negative number, so a single malformed
-// counter cannot hide the others.
+// counter cannot hide the others; neither counts as reported (see
+// ServerSideToolUsage.WebSearchCallsReported).
 func (u ToolUsageExtensions) ServerSideToolUsage() (usage ServerSideToolUsage, ok bool) {
 	raw := bytes.TrimSpace(u.ServerSideToolUsageDetails)
 	if len(raw) == 0 || raw[0] != '{' {
@@ -78,32 +86,28 @@ func (u ToolUsageExtensions) ServerSideToolUsage() (usage ServerSideToolUsage, o
 	if json.Unmarshal(raw, &fields) != nil {
 		return ServerSideToolUsage{}, false
 	}
-	count := func(keys []string) int {
-		largest := 0
+	count := func(keys []string) (largest int, reported bool) {
 		for _, key := range keys {
-			var value float64
-			if json.Unmarshal(fields[key], &value) != nil || math.IsNaN(value) || value <= 0 {
+			var value *float64 // nil for null
+			if json.Unmarshal(fields[key], &value) != nil || value == nil || math.IsNaN(*value) || *value < 0 {
 				continue
 			}
-			if value > math.MaxInt32 {
-				value = math.MaxInt32
-			}
-			largest = max(largest, int(value))
+			reported = true
+			largest = max(largest, int(min(*value, math.MaxInt32)))
 		}
-		return largest
+		return largest, reported
 	}
 	keys := serverSideToolUsageKeys
-	return ServerSideToolUsage{
-		WebSearchCalls:         count(keys.web),
-		XSearchCalls:           count(keys.xSearch),
-		XPostsFetched:          count(keys.xPosts),
-		XUsersFetched:          count(keys.xUsers),
-		CodeExecutionCalls:     count(keys.code),
-		AttachmentSearchCalls:  count(keys.attachment),
-		CollectionsSearchCalls: count(keys.collections),
-		MCPCalls:               count(keys.mcp),
-		ImageGenerationCalls:   count(keys.image),
-	}, true
+	usage.WebSearchCalls, usage.WebSearchCallsReported = count(keys.web)
+	usage.XSearchCalls, _ = count(keys.xSearch)
+	usage.XPostsFetched, _ = count(keys.xPosts)
+	usage.XUsersFetched, _ = count(keys.xUsers)
+	usage.CodeExecutionCalls, _ = count(keys.code)
+	usage.AttachmentSearchCalls, _ = count(keys.attachment)
+	usage.CollectionsSearchCalls, _ = count(keys.collections)
+	usage.MCPCalls, _ = count(keys.mcp)
+	usage.ImageGenerationCalls, usage.ImageGenerationCallsReported = count(keys.image)
+	return usage, true
 }
 
 type webSearchCount struct {

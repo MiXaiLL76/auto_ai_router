@@ -262,8 +262,12 @@ ORDER BY (start_time, team_id, model)
 -- truncates to seconds, which is fine at a 90-day retention granularity.
 TTL toDateTime(start_time) + INTERVAL 90 DAY;  -- пример; конкретное значение и владение таблицей — на стороне DBA/CH-кластера, не AIR
 
+-- An event from an AIR version that predates tool_usage_cost arrives with it
+-- 0; web search was the only priced tool then (see
+-- clickhouse/migrations/005_tool_usage_columns.sql).
 CREATE MATERIALIZED VIEW air.spend_logs_mv TO air.spend_logs AS
-SELECT * FROM air.spend_logs_kafka;
+SELECT * REPLACE (if(tool_usage_cost = 0, web_search_cost, tool_usage_cost) AS tool_usage_cost)
+FROM air.spend_logs_kafka;
 
 -- Separate, independently-toggleable write-path (kafka.raw_bodies): raw
 -- provider response for a *failed* request only, on its own topic so

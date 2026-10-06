@@ -13,7 +13,13 @@
 --
 -- On the MergeTree table tool_usage_cost defaults to web_search_cost, so rows
 -- written before this migration (when web search was the only priced tool)
--- read back the right total.
+-- read back the right total. That DEFAULT only covers existing parts: an
+-- event from an AIR pod that predates these fields still reaches the
+-- MergeTree table through the Kafka table, which fills the missing field with
+-- an explicit 0. The materialized view therefore falls back to web_search_cost
+-- for such events, so tool_usage_cost stays right through the rollout window
+-- (an event from a current pod never has tool_usage_cost below
+-- web_search_cost, which it includes).
 --
 -- The Kafka table engine does not support ALTER ... ADD COLUMN (ClickHouse
 -- fails with NOT_IMPLEMENTED), so air.spend_logs_kafka and the materialized
@@ -177,4 +183,5 @@ SETTINGS
     kafka_handle_error_mode = 'stream';
 
 CREATE MATERIALIZED VIEW air.spend_logs_mv TO air.spend_logs AS
-SELECT * FROM air.spend_logs_kafka;
+SELECT * REPLACE (if(tool_usage_cost = 0, web_search_cost, tool_usage_cost) AS tool_usage_cost)
+FROM air.spend_logs_kafka;

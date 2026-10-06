@@ -169,7 +169,7 @@ func TestExtractTokenUsage_StreamTerminalEvents(t *testing.T) {
 }
 
 func imageCalls(n int) converterutil.ServerSideToolUsage {
-	return converterutil.ServerSideToolUsage{ImageGenerationCalls: n}
+	return converterutil.ServerSideToolUsage{ImageGenerationCalls: n, ImageGenerationCallsReported: true}
 }
 
 func TestImageGenerationToolImages(t *testing.T) {
@@ -179,18 +179,75 @@ func TestImageGenerationToolImages(t *testing.T) {
 		{Type: "image_generation_call", ID: "ig_3", Status: "failed"},
 		{Type: "message", ID: "msg_1"},
 	}
+	noCounter := converterutil.ServerSideToolUsage{WebSearchCalls: 1, WebSearchCallsReported: true}
 
-	gens, edits := imageGenerationToolImages(items, nil, imageCalls(0), false)
+	gens, edits := imageGenerationToolImages(items, nil, converterutil.ServerSideToolUsage{})
 	assert.Equal(t, [2]int{1, 1}, [2]int{gens, edits}, "without a counter the completed items are counted")
 
-	gens, edits = imageGenerationToolImages(items, nil, imageCalls(3), true)
+	gens, edits = imageGenerationToolImages(items, nil, noCounter)
+	assert.Equal(t, [2]int{1, 1}, [2]int{gens, edits}, "an object without image_generation_calls leaves the items to count")
+
+	gens, edits = imageGenerationToolImages(items, nil, imageCalls(3))
 	assert.Equal(t, [2]int{2, 1}, [2]int{gens, edits}, "the counter is the total, items only tell the edits")
 
-	gens, edits = imageGenerationToolImages(items, nil, imageCalls(0), true)
+	gens, edits = imageGenerationToolImages(items, nil, imageCalls(0))
 	assert.Equal(t, [2]int{0, 0}, [2]int{gens, edits}, "a reported zero is authoritative")
 
-	gens, edits = imageGenerationToolImages(nil, items, imageCalls(0), false)
+	gens, edits = imageGenerationToolImages(nil, items, converterutil.ServerSideToolUsage{})
 	assert.Equal(t, [2]int{1, 1}, [2]int{gens, edits}, "items of the streamed terminal event count too")
+}
+
+// An object lacking a counter (an older or partial xAI shape) is no proof
+// that the tool did not run: only the counters it carries are authoritative.
+func TestExtractTokenUsage_ServerSideObjectWithoutCounterFallsBackToItems(t *testing.T) {
+	body := []byte(`{"object":"response","status":"completed",
+		"output":[{"type":"web_search_call","id":"ws_1","status":"completed"},
+			{"type":"image_generation_call","id":"ig_1","status":"completed"},
+			{"type":"image_generation_call","id":"ie_2","status":"completed"}],
+		"usage":{"input_tokens":100,"output_tokens":10,"total_tokens":110,
+			"server_side_tool_usage_details":{"x_search_calls":0,"code_interpreter_calls":1}}}`)
+
+	usage := ExtractTokenUsage(body)
+
+	require.NotNil(t, usage)
+	assert.True(t, usage.ServerToolUsageReported)
+	assert.Equal(t, 1, usage.CodeExecutionCalls)
+	assert.Equal(t, 1, usage.WebSearchRequests, "no web_search_calls counter: the completed item is counted")
+	assert.Equal(t, 1, usage.ImageToolGenerations, "no image_generation_calls counter: the items are counted")
+	assert.Equal(t, 1, usage.ImageToolEdits)
+}
+
+func TestMergeNonZero_ReasoningAccountingFollowsReasoningTokens(t *testing.T) {
+	merged := &TokenUsage{}
+	merged.MergeNonZero(&TokenUsage{CompletionTokens: 40, ReasoningTokens: 30, ReasoningAccounting: ReasoningAccountingIncluded})
+
+	// A chunk without reasoning tokens neither replaces them nor the verdict.
+	merged.MergeNonZero(&TokenUsage{CompletionTokens: 45})
+	assert.Equal(t, ReasoningAccountingIncluded, merged.ReasoningAccounting)
+
+	// The final figures do not settle it (no total_tokens): the earlier
+	// verdict, read from other figures, is dropped instead of kept stale.
+	merged.MergeNonZero(&TokenUsage{CompletionTokens: 50, ReasoningTokens: 35})
+	assert.Equal(t, 35, merged.ReasoningTokens)
+	assert.Empty(t, merged.ReasoningAccounting)
+
+	// A conclusive later chunk decides.
+	merged.MergeNonZero(&TokenUsage{CompletionTokens: 50, ReasoningTokens: 35, ReasoningAccounting: ReasoningAccountingAdditive})
+	assert.Equal(t, ReasoningAccountingAdditive, merged.ReasoningAccounting)
+
+	// MergeUsageExtensions (typed stream handlers) follows the same rule.
+	typed := &TokenUsage{ReasoningAccounting: ReasoningAccountingIncluded}
+	typed.MergeUsageExtensions(&TokenUsage{ReasoningTokens: 35})
+	assert.Empty(t, typed.ReasoningAccounting)
+}
+
+func TestTokenUsage_IsZeroIgnoresFlagsWithoutConsumption(t *testing.T) {
+	assert.True(t, (&TokenUsage{ServerToolUsageReported: true}).IsZero(),
+		"a reported tool usage object with all counters zero is no consumption")
+	assert.True(t, (&TokenUsage{ReasoningAccounting: ReasoningAccountingAdditive}).IsZero())
+	assert.False(t, (&TokenUsage{ServerToolUsageReported: true, XSearchPosts: 1}).IsZero())
+	assert.False(t, (&TokenUsage{ImageToolEdits: 1}).IsZero())
+	assert.False(t, (&TokenUsage{ProviderCostUSD: 0.01}).IsZero(), "a provider-reported cost means something was consumed")
 }
 
 func TestExtractTokenUsage_ProviderCostShapes(t *testing.T) {
