@@ -24,7 +24,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// geminiEmbedding2TestPrice is the VseLLM gemini-embedding-2 price entry.
+// geminiEmbedding2TestPrice is a gemini-embedding-2 price entry.
 func geminiEmbedding2TestPrice() *pricing.ModelPrice {
 	return &pricing.ModelPrice{
 		InputCostPerToken:      0.00000026,

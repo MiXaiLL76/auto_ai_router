@@ -21,41 +21,19 @@
 -- ON CLUSTER clause your deployment needs.
 --
 -- Pause AIR Kafka publishing before running this migration. Safe to re-run
--- on its own -- but this is currently the last migration in the chain, so
--- that's the only direction that's safe: once a migration after this one
--- exists, never run 005 again on its own afterwards, for the same reason
+-- on its own only while it is the last applied migration: once a later one
+-- has been applied, never run 005 again on its own, for the same reason
 -- 002_cache_web_search_columns.sql's doc comment spells out -- it would
 -- rebuild air.spend_logs_kafka from only 005's column set, narrowing it
 -- back below whatever the later migration added, and break ingestion with
 -- NUMBER_OF_COLUMNS_DOESNT_MATCH until that later migration is re-applied.
--- Apply 002/003/004/005 forward, in order, never backward.
+-- Apply the migrations forward, in order, never backward.
 
 DROP TABLE IF EXISTS air.spend_logs_mv;
 
 ALTER TABLE air.spend_logs
     ADD COLUMN IF NOT EXISTS video_input_tokens UInt32 DEFAULT 0 AFTER image_tokens,
     ADD COLUMN IF NOT EXISTS video_input_cost Float64 DEFAULT 0 AFTER image_cost;
-
-DROP TABLE IF EXISTS air.spend_logs_kafka;
-
-CREATE TABLE air.spend_logs_kafka`
--- (broker list, topic, group name, consumer count) into it, and add the
--- ON CLUSTER clause your deployment needs.
---
--- Pause AIR Kafka publishing before running this migration. Safe to re-run
--- on its own -- but this is currently the last migration in the chain, so
--- that's the only direction that's safe: once a migration after this one
--- exists, never run 004 again on its own afterwards, for the same reason
--- 002_cache_web_search_columns.sql's doc comment spells out -- it would
--- rebuild air.spend_logs_kafka from only 004's column set, narrowing it
--- back below whatever the later migration added, and break ingestion with
--- NUMBER_OF_COLUMNS_DOESNT_MATCH until that later migration is re-applied.
-
-DROP TABLE IF EXISTS air.spend_logs_mv;
-
-ALTER TABLE air.spend_logs
-    ADD COLUMN IF NOT EXISTS cache_type LowCardinality(Nullable(String)) AFTER cache_creation_1h_tokens,
-    ADD COLUMN IF NOT EXISTS explicit_cache_read_cost Float64 DEFAULT 0 AFTER cached_input_cost;
 
 DROP TABLE IF EXISTS air.spend_logs_kafka;
 
@@ -140,9 +118,9 @@ CREATE TABLE air.spend_logs_kafka
     requester_ip String,
     session_id String,
     overhead_ms Float64,
-    body_captured UInt8,              -- всегда 0 пока; поле-заглушка под будущий PR
-    body_request_bytes UInt32,        -- всегда 0 пока; поле-заглушка под будущий PR
-    body_response_bytes UInt32        -- всегда 0 пока; поле-заглушка под будущий PR
+    body_captured UInt8,
+    body_request_bytes UInt32,
+    body_response_bytes UInt32
 )
 ENGINE = Kafka
 SETTINGS

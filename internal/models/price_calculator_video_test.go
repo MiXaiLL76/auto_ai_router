@@ -9,8 +9,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// geminiEmbedding2Price is the VseLLM prices entry for gemini-embedding-2
-// (rates already include the 1.3 markup).
+// geminiEmbedding2Price is a gemini-embedding-2 price entry with separate
+// text, image, audio and video input rates.
 const geminiEmbedding2Price = `{
 	"input_cost_per_token": 0.00000026,
 	"input_cost_per_image_token": 0.000000585,
