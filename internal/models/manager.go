@@ -84,6 +84,22 @@ type ModelPrice struct {
 	// output nor reasoning. Defaults to false so existing models are unaffected.
 	ReasoningTokensAdditive bool `json:"reasoning_tokens_additive,omitempty"`
 
+	// ReasoningTokensAccounting set to ReasoningTokensAccountingAuto decides
+	// the semantics above per response instead, from the provider's own
+	// total_tokens (see converter.TokenUsage.ReasoningAccounting): one price
+	// row is shared by every credential serving the model, and xAI reports
+	// reasoning on top of completion_tokens while aggregators such as Requesty
+	// fold it in, so a fixed flag would misbill one of the two routes.
+	// Responses that do not settle it fall back to ReasoningTokensAdditive.
+	ReasoningTokensAccounting string `json:"reasoning_tokens_accounting,omitempty"`
+
+	// LongContextPricingMode opts the model into a long-context billing rule
+	// beyond the provider defaults. LongContextFullRequest200kInclusive bills
+	// the whole request (input, cached input, output and reasoning) at the
+	// *_above_200k_tokens rates once the prompt reaches 200k tokens — at
+	// exactly 200,000 too — as xAI does. Empty keeps the default 200k handling.
+	LongContextPricingMode string `json:"long_context_pricing_mode,omitempty"`
+
 	// Cached/Prediction tokens
 	OutputCostPerCachedToken                     float64 `json:"output_cost_per_cached_token,omitempty"`
 	InputCostPerCachedToken                      float64 `json:"input_cost_per_cached_token,omitempty"`
@@ -131,6 +147,21 @@ type ModelPrice struct {
 	SearchContextCostPerQuery map[string]float64 `json:"search_context_cost_per_query,omitempty"`
 	WebSearchBillingUnit      string             `json:"web_search_billing_unit,omitempty"`
 	LiteLLMProvider           string             `json:"litellm_provider,omitempty"`
+
+	// Other built-in server-side tools (xAI), billed per unit on top of tokens.
+	// ToolCostPerCall maps a tool to its price per successful call; keys are
+	// code_execution, attachment_search and collections_search, with the
+	// aliases code_interpreter, document_search and file_search accepted for
+	// them (a tool is priced once even when both names are present).
+	ToolCostPerCall map[string]float64 `json:"tool_cost_per_call,omitempty"`
+	// X Search is billed per fetched item rather than per call: every post
+	// (parent and quoted posts included) and every user profile it returned.
+	XSearchCostPerPost    float64 `json:"x_search_cost_per_post,omitempty"`
+	XSearchCostPerProfile float64 `json:"x_search_cost_per_profile,omitempty"`
+	// ImageGenerationToolModel names the price row (from the same price source)
+	// that prices images produced by a built-in image_generation tool, e.g.
+	// grok-imagine-image-2.0. Without it such images are not billed.
+	ImageGenerationToolModel string `json:"image_generation_tool_model,omitempty"`
 
 	// Rate is a per-model markup/discount multiplier some price profiles carry
 	// (e.g. a provider markup applied upstream of these prices). It is parsed

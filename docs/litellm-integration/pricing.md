@@ -207,6 +207,13 @@ For reference:
 | `output_cost_per_image`                                       | Cost per generated image (takes priority over `output_cost_per_image_token`)                                                                                                             |
 | `search_context_cost_per_query`                               | Web Search cost per request/call, keyed by `search_context_size_*`                                                                                                                       |
 | `web_search_billing_unit`                                     | `per_query` or `per_prompt` Web Search charging mode                                                                                                                                     |
+| `tool_cost_per_call`                                          | Price per successful call: `code_execution`, `attachment_search`, `collections_search` (aliases `code_interpreter`, `document_search`, `file_search`)                                    |
+| `x_search_cost_per_post`                                      | X Search price per fetched post (parent and quoted posts included, not de-duplicated)                                                                                                    |
+| `x_search_cost_per_profile`                                   | X Search price per fetched user profile                                                                                                                                                  |
+| `image_generation_tool_model`                                 | Price row (same price source) for images of a built-in `image_generation` tool, e.g. `grok-imagine-image-2.0`                                                                            |
+| `long_context_pricing_mode`                                   | `full_request_200k_inclusive`: from 200k prompt tokens (inclusive) the whole request uses the `*_above_200k_tokens` rates                                                                |
+| `reasoning_tokens_additive`                                   | Boolean. `true` when the provider reports reasoning on top of `completion_tokens` instead of inside it                                                                                   |
+| `reasoning_tokens_accounting`                                 | `auto`: reasoning semantics decided per response from `total_tokens`, falling back to `reasoning_tokens_additive`                                                                        |
 | `rate`                                                        | Per-model markup/discount multiplier. Accepted and preserved so strict tariff decoding does not reject it, but **not yet applied** to cost calculation                                   |
 
 ## Cost Calculation
@@ -265,7 +272,27 @@ Merely enabling a tool does not count as execution. A successful response with n
 
 `per_query` multiplies the configured price by the confirmed query count. `per_prompt` clamps any positive count to one charge. LiteLLM Gemini 2.x entries without an explicit unit use `per_prompt`, while Gemini 3.x entries explicitly use `per_query`.
 
-The count and selected context size are written to spend metadata under `usage_object.server_tool_use` and `additional_usage_values.server_tool_use`; the tool cost is written to `cost_breakdown.tool_usage_cost` and `cost_breakdown.web_search_cost`.
+The count and selected context size are written to spend metadata under `usage_object.server_tool_use` and `additional_usage_values.server_tool_use`; the tool cost is written to `cost_breakdown.web_search_cost` and included in `cost_breakdown.tool_usage_cost`.
+
+### Built-in server-side tools (xAI)
+
+xAI runs its server-side tools itself (Responses API; on Chat Completions only the implicit `attachment_search` over attached files) and reports the successful executions in `usage.server_side_tool_usage_details`. AIR reads that object from non-streaming responses and from the terminal stream event (`response.completed` or `response.incomplete`). On Chat Completions every usage chunk repeats the cumulative object and the last one wins, so repeated stream events are never summed.
+
+| Counter                              | Billed with                                                                                                                                                      |
+| ------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `web_search_calls`                   | `search_context_cost_per_query`, as Web Search above                                                                                                             |
+| `x_posts_fetched`, `x_users_fetched` | `x_search_cost_per_post`, `x_search_cost_per_profile`                                                                                                            |
+| `code_interpreter_calls`             | `tool_cost_per_call.code_execution`                                                                                                                              |
+| `document_search_calls`              | `tool_cost_per_call.attachment_search`                                                                                                                           |
+| `file_search_calls`                  | `tool_cost_per_call.collections_search`                                                                                                                          |
+| `image_generation_calls`             | the `image_generation_tool_model` row: generations (`ig_` items) at its default generation tier, edits (`ie_` items) at its edit tier plus one source image each |
+| `x_search_calls`, `mcp_calls`        | not billed per call (X Search bills fetched items; MCP, `view_image` and `view_x_video` only cost tokens); logged                                                |
+
+When the object is present its counts are authoritative, zeros included: a reported zero is not replaced by `web_search_call` output items (failed attempts) or citations. Without the object the usual Web Search fallbacks apply. Alternative names of one tool (`code_interpreter`/`code_execution`, `file_search`/`collections_search`, `document_search`/`attachment_search`) are priced once. Tool charges are per unit and do not change with the long-context tier.
+
+Spend metadata gets the counters in `usage_object.server_tool_use` (`x_search_calls`, `x_posts_fetched`, `x_users_fetched`, `code_execution_calls`, `attachment_search_calls`, `collections_search_calls`, `mcp_calls`, `image_generation_calls`, `image_edit_calls`) and the charges in `cost_breakdown` (`x_search_cost`, `code_execution_cost`, `attachment_search_cost`, `collections_search_cost`, `image_generation_tool_cost`). `cost_breakdown.tool_usage_cost` is the sum of all tool charges, Web Search included, and is already part of `total_cost`. The Kafka spend event carries the same fields (see `clickhouse/migrations/005_tool_usage_columns.sql`).
+
+The provider's own cost of the request (xAI `usage.cost_in_usd_ticks` / `cost_in_nano_usd`, aggregators' `usage.cost`) is logged as `provider_reported_cost` for reconciliation only: it is never added to the billed price, and LiteLLM compatibility mode removes it from client responses.
 
 ### Cost margin
 
@@ -294,13 +321,15 @@ Vertex AI and OpenAI include audio and cached tokens **inside** `prompt_tokens`.
 
 ### Regular output tokens
 
-All providers include reasoning inside `completion_tokens`:
+Most providers include reasoning inside `completion_tokens`:
 
 - OpenAI `o-series`: `completion_tokens_details.reasoning_tokens` is a subset of `completion_tokens`
 - Vertex Gemini 2.5+: thinking tokens are included in `candidatesTokenCount`
 - Anthropic with extended thinking: thinking tokens are included in `output_tokens`
 
 The subtraction ensures reasoning is billed at `output_cost_per_reasoning_token` (not double-charged at the base output rate as well).
+
+xAI reports reasoning **on top of** `completion_tokens` (`total_tokens = prompt + completion + reasoning`), while aggregators serving the same models (Requesty) fold it in. `reasoning_tokens_additive: true` skips the subtraction for a model, but one price row is shared by every credential serving it, so a fixed flag misbills one of the routes. With `reasoning_tokens_accounting: "auto"` AIR decides per response from the provider's `total_tokens`: equal to prompt + completion + reasoning means additive, equal to prompt + completion means included. A response that does not settle it (no `total_tokens`, e.g. an estimated aborted stream) falls back to `reasoning_tokens_additive`. The detected value is logged as `reasoning_tokens_accounting` in spend metadata.
 
 ### Tiered pricing (200k threshold)
 
@@ -321,6 +350,10 @@ input_cost = regular_below × input_cost_per_token
 The same logic applies to output tokens using `output_cost_per_token_above_200k_tokens`.
 
 Cache prices follow LiteLLM's full-session semantics: when `prompt_tokens > 200_000`, all cache read/write tokens use the matching `*_above_200k_tokens` rate. The 32k/128k/256k/272k full-session cache fields take precedence over the 200k tier whenever configured, with the highest exceeded threshold winning (see "Long-context pricing" below).
+
+### Long-context mode (`full_request_200k_inclusive`)
+
+xAI bills the long-context rates for **all** tokens of a request once its prompt **reaches** 200k tokens. A price row opts into that rule with `long_context_pricing_mode: "full_request_200k_inclusive"`: from `prompt_tokens >= 200_000` (cached tokens included) regular input, cached input, output and reasoning are all billed at the `*_above_200k_tokens` rates, and below it at the base rates. The proportional split above is not used for such a row. The mode belongs to the price row, so it applies to every credential serving the model, an aggregator fallback included. Rows without the mode, or with an unrecognised value, keep the default 200k handling, and Gemini rows keep their exclusive full-session 200k tier. Higher configured full-session tiers (256k/272k/512k) still win.
 
 ### Long-context pricing (32k / 128k / 256k / 272k / 512k full-session tiers)
 

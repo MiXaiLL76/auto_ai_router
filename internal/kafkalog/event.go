@@ -74,6 +74,16 @@ type SpendEvent struct {
 	OutputImageTokens        int    `json:"output_image_tokens"`
 	WebSearchRequests        int    `json:"web_search_requests"`
 	WebSearchContextSize     string `json:"web_search_context_size,omitempty"`
+	// Built-in server-side tool usage beyond web search (xAI).
+	XSearchCalls           int `json:"x_search_calls"`
+	XSearchPosts           int `json:"x_search_posts"`
+	XSearchProfiles        int `json:"x_search_profiles"`
+	CodeExecutionCalls     int `json:"code_execution_calls"`
+	AttachmentSearchCalls  int `json:"attachment_search_calls"`
+	CollectionsSearchCalls int `json:"collections_search_calls"`
+	MCPCalls               int `json:"mcp_calls"`
+	ImageToolGenerations   int `json:"image_tool_generations"`
+	ImageToolEdits         int `json:"image_tool_edits"`
 
 	InputCost             float64 `json:"input_cost"`
 	OutputCost            float64 `json:"output_cost"`
@@ -87,7 +97,20 @@ type SpendEvent struct {
 	PredictionCost        float64 `json:"prediction_cost"`
 	ImageCost             float64 `json:"image_cost"`
 	WebSearchCost         float64 `json:"web_search_cost"`
-	TotalCost             float64 `json:"total_cost"`
+	XSearchCost           float64 `json:"x_search_cost"`
+	CodeExecutionCost     float64 `json:"code_execution_cost"`
+	AttachmentSearchCost  float64 `json:"attachment_search_cost"`
+	CollectionsSearchCost float64 `json:"collections_search_cost"`
+	ImageToolCost         float64 `json:"image_tool_cost"`
+	// ToolUsageCost sums web_search_cost and the other tool costs above; it is
+	// a breakdown figure already contained in total_cost.
+	ToolUsageCost float64 `json:"tool_usage_cost"`
+	TotalCost     float64 `json:"total_cost"`
+	// ProviderReportedCost is the provider's own cost of the request (xAI
+	// cost_in_usd_ticks, aggregators' usage.cost) for reconciliation; absent
+	// (NULL in ClickHouse) when the provider did not report one. Not part of
+	// total_cost.
+	ProviderReportedCost *float64 `json:"provider_reported_cost,omitempty"`
 
 	APIKeyHash     string `json:"api_key_hash"`
 	UserID         string `json:"user_id"`

@@ -553,6 +553,9 @@ func decodeStrictPriceRow(modelID string, row json.RawMessage) (*ModelPrice, err
 	if err := validateStrictImagePricing(fields, &price); err != nil {
 		return nil, fmt.Errorf("organization tariff %q: %w", modelID, err)
 	}
+	if err := validateStrictToolAndModePricing(&price); err != nil {
+		return nil, fmt.Errorf("organization tariff %q: %w", modelID, err)
+	}
 	hasPriceField := false
 	for field := range fields {
 		if known[field] {
@@ -576,10 +579,45 @@ func modelPriceJSONFields() map[string]bool {
 			continue
 		}
 		isPriceField := name != "litellm_provider" && name != "reasoning_tokens_additive" && name != "web_search_billing_unit" &&
-			name != "image_request_defaults" && name != "input_images_free_per_request" && name != "rate"
+			name != "image_request_defaults" && name != "input_images_free_per_request" && name != "rate" &&
+			name != "reasoning_tokens_accounting" && name != "long_context_pricing_mode" && name != "image_generation_tool_model"
 		result[name] = isPriceField
 	}
 	return result
+}
+
+// validateStrictToolAndModePricing rejects values the lenient price-file
+// loader would silently ignore: an unknown mode keeps the default billing,
+// an unknown tool key is never charged, and a tool priced under both its
+// canonical name and its alias at different prices is ambiguous.
+func validateStrictToolAndModePricing(price *ModelPrice) error {
+	if mode := strings.TrimSpace(price.LongContextPricingMode); mode != "" && !strings.EqualFold(mode, LongContextFullRequest200kInclusive) {
+		return fmt.Errorf("long_context_pricing_mode %q is not supported (only %q)", mode, LongContextFullRequest200kInclusive)
+	}
+	if accounting := strings.TrimSpace(price.ReasoningTokensAccounting); accounting != "" && !strings.EqualFold(accounting, ReasoningTokensAccountingAuto) {
+		return fmt.Errorf("reasoning_tokens_accounting %q is not supported (only %q)", accounting, ReasoningTokensAccountingAuto)
+	}
+	for tool, cost := range price.ToolCostPerCall {
+		canonical, isAlias := toolCostAliases[tool]
+		if !isAlias {
+			canonical = tool
+		}
+		if canonical != ToolCodeExecution && canonical != ToolAttachmentSearch && canonical != ToolCollectionsSearch {
+			return fmt.Errorf("tool_cost_per_call: unknown tool %q", tool)
+		}
+		if cost < 0 {
+			return fmt.Errorf("tool_cost_per_call[%q] must not be negative", tool)
+		}
+		if isAlias {
+			if canonicalCost, ok := price.ToolCostPerCall[canonical]; ok && canonicalCost != cost {
+				return fmt.Errorf("tool_cost_per_call prices %q and its alias %q differently", canonical, tool)
+			}
+		}
+	}
+	if price.XSearchCostPerPost < 0 || price.XSearchCostPerProfile < 0 {
+		return errors.New("x_search_cost_per_post and x_search_cost_per_profile must not be negative")
+	}
+	return nil
 }
 
 func rejectDuplicateJSONKeys(data []byte) error {

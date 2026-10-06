@@ -34,6 +34,29 @@ func lookupBillingModelPrice(registry *models.ModelPriceRegistry, publicModelID,
 	return modelID, nil
 }
 
+// billingPriceResolver looks up price rows that the billed row refers to by
+// name (ModelPrice.ImageGenerationToolModel) in the same price source the
+// request is billed from: the organization tariff when one applies, the
+// default price list otherwise, so one request never mixes two tariffs.
+func (p *Proxy) billingPriceResolver(logCtx *RequestLogContext) models.PriceResolver {
+	return func(modelID string) *models.ModelPrice {
+		var price *models.ModelPrice
+		if logCtx != nil && logCtx.OrganizationPolicy.HasCustomPricing() {
+			price, _ = logCtx.OrganizationPolicy.Price(modelID)
+		} else if p.priceRegistry != nil {
+			price = p.priceRegistry.GetPrice(modelID)
+		}
+		if price == nil && p.logger != nil {
+			args := []any{"referenced_model", modelID}
+			if logCtx != nil {
+				args = append(args, "model", logCtx.ModelID, "request_id", logCtx.RequestID)
+			}
+			p.logger.Warn("Referenced price row not found; usage billed at its tariff is not charged", args...)
+		}
+		return price
+	}
+}
+
 // resolveBillingPrice resolves and caches the billing price on logCtx so that
 // budget reservation (called once per request, before the provider call) and
 // final spend logging (called once per request, after the response) agree on

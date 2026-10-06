@@ -17,12 +17,39 @@ const (
 	tokenTiering512kThreshold = 512_000
 )
 
+// ModelPrice.LongContextPricingMode values.
+const (
+	// LongContextFullRequest200kInclusive bills every token of a request
+	// whose prompt reaches 200k tokens (>= 200,000, not >) at the
+	// *_above_200k_tokens rates: xAI's long-context rule.
+	LongContextFullRequest200kInclusive = "full_request_200k_inclusive"
+)
+
+// ReasoningTokensAccountingAuto is the ModelPrice.ReasoningTokensAccounting
+// value that detects reasoning-token semantics per response.
+const ReasoningTokensAccountingAuto = "auto"
+
+// Canonical ModelPrice.ToolCostPerCall keys and the aliases accepted for them.
+const (
+	ToolCodeExecution     = "code_execution"
+	ToolAttachmentSearch  = "attachment_search"
+	ToolCollectionsSearch = "collections_search"
+)
+
+var toolCostAliases = map[string]string{
+	"code_interpreter": ToolCodeExecution,
+	"document_search":  ToolAttachmentSearch,
+	"file_search":      ToolCollectionsSearch,
+}
+
 // fullSessionTier describes one "Alibaba Cloud style" pricing bracket: once
 // the prompt exceeds threshold, the ENTIRE request (not just the excess) is
 // billed at this tier's rates. Zero-value rates mean "not configured for
-// this tier" and are skipped by fullSessionRate.
+// this tier" and are skipped by fullSessionRate. An inclusive tier already
+// applies when the prompt equals threshold.
 type fullSessionTier struct {
 	threshold             int
+	inclusive             bool
 	inputRate             float64
 	outputRate            float64
 	cacheReadRate         float64
@@ -47,6 +74,13 @@ type fullSessionTier struct {
 // same *_above_200k_tokens price fields are reused by both tier shapes;
 // only the billing style differs per provider. Otherwise 200k keeps its
 // separate proportional-only handling further down in CalculateTokenCosts.
+//
+// A price row may also opt into a 200k rule explicitly through
+// LongContextPricingMode, regardless of provider: xAI bills the whole request
+// at the long-context rates once the prompt reaches 200k tokens, inclusive.
+// The explicit mode wins over the Gemini default, and is the same for every
+// credential serving the model (an aggregator route included), because the
+// client pays one tariff whichever route served it.
 func fullSessionTiers(price *ModelPrice) []fullSessionTier {
 	tiers := []fullSessionTier{
 		{
@@ -72,9 +106,10 @@ func fullSessionTiers(price *ModelPrice) []fullSessionTier {
 			explicitCacheReadRate: price.ExplicitCacheReadInputTokenCostAbove256k,
 		},
 	}
-	if config.IsGoogleGeminiProvider(price.LiteLLMProvider) {
+	if price.longContextFullRequest200kInclusive() || config.IsGoogleGeminiProvider(price.LiteLLMProvider) {
 		tiers = append(tiers, fullSessionTier{
 			threshold:         tokenTiering200kThreshold,
+			inclusive:         price.longContextFullRequest200kInclusive(),
 			inputRate:         price.InputCostPerTokenAbove200k,
 			outputRate:        price.OutputCostPerTokenAbove200k,
 			cacheReadRate:     price.CacheReadInputTokenCostAbove200k,
@@ -108,7 +143,7 @@ func fullSessionTiers(price *ModelPrice) []fullSessionTier {
 // case callers should fall back to the existing 200k-proportional/base rate.
 func fullSessionRate(tiers []fullSessionTier, promptTokens int, pick func(fullSessionTier) float64) (rate float64, ok bool) {
 	for _, tier := range tiers {
-		if promptTokens <= tier.threshold {
+		if promptTokens < tier.threshold || (promptTokens == tier.threshold && !tier.inclusive) {
 			continue
 		}
 		if r := pick(tier); r > 0 {
@@ -137,6 +172,19 @@ func fullSessionRate(tiers []fullSessionTier, promptTokens int, pick func(fullSe
 // completion_tokens can include tokens not captured by any of the other output
 // breakdowns, so the derived subtraction alone would overcount billable text tokens).
 func CalculateTokenCosts(usage *converter.TokenUsage, price *ModelPrice) *converter.TokenCosts {
+	return CalculateTokenCostsWithResolver(usage, price, nil)
+}
+
+// PriceResolver returns another model's price row from the same price source
+// as the billed model (the organization tariff when one applies, the default
+// price list otherwise), or nil when it has none.
+type PriceResolver func(modelID string) *ModelPrice
+
+// CalculateTokenCostsWithResolver is CalculateTokenCosts with a way to price
+// usage billed at another model's tariff: images produced by a built-in
+// image_generation tool are priced at ImageGenerationToolModel's row. With a
+// nil resolver such images are not billed.
+func CalculateTokenCostsWithResolver(usage *converter.TokenUsage, price *ModelPrice, resolve PriceResolver) *converter.TokenCosts {
 	if usage == nil || price == nil {
 		return nil
 	}
@@ -200,11 +248,16 @@ func CalculateTokenCosts(usage *converter.TokenUsage, price *ModelPrice) *conver
 		}
 	}
 
+	// The default 200k shape bills only the excess at the higher rate; a row
+	// with an explicit long-context mode is billed by that mode alone. An
+	// unrecognized mode value keeps the default rather than disabling both.
+	proportional200k := !price.longContextFullRequest200kInclusive()
+
 	// Regular input with full-session or 200k tiering
 	switch {
 	case fullSessionInputMatched:
 		costs.InputCost = float64(regularInputTokens) * inputCostPerToken
-	case price.InputCostPerTokenAbove200k > 0 && promptTokens > tokenTiering200kThreshold:
+	case proportional200k && price.InputCostPerTokenAbove200k > 0 && promptTokens > tokenTiering200kThreshold:
 		above := promptTokens - tokenTiering200kThreshold
 		// Distribute regular tokens proportionally between below/above threshold
 		regularAbove := int(int64(regularInputTokens) * int64(above) / int64(promptTokens))
@@ -222,7 +275,7 @@ func CalculateTokenCosts(usage *converter.TokenUsage, price *ModelPrice) *conver
 	// tokens would be double-excluded: once here and once by never having been
 	// part of CompletionTokens to begin with.
 	reasoningTokensToSubtract := reasoningTokens
-	if price.ReasoningTokensAdditive {
+	if price.reasoningTokensAdditive(usage) {
 		reasoningTokensToSubtract = 0
 	}
 	regularOutputTokens := completionTokens - audioOutputTokens - reasoningTokensToSubtract -
@@ -239,7 +292,7 @@ func CalculateTokenCosts(usage *converter.TokenUsage, price *ModelPrice) *conver
 	switch {
 	case fullSessionOutputMatched:
 		costs.OutputCost = float64(regularOutputTokens) * outputCostPerToken
-	case price.OutputCostPerTokenAbove200k > 0 && completionTokens > tokenTiering200kThreshold:
+	case proportional200k && price.OutputCostPerTokenAbove200k > 0 && completionTokens > tokenTiering200kThreshold:
 		above := completionTokens - tokenTiering200kThreshold
 		// Distribute regular tokens proportionally between below/above threshold
 		regularAbove := int(int64(regularOutputTokens) * int64(above) / int64(completionTokens))
@@ -424,7 +477,26 @@ func CalculateTokenCosts(usage *converter.TokenUsage, price *ModelPrice) *conver
 			price.webSearchCostPerQuery(usage.WebSearchContextSize)
 	}
 
-	// Calculate total
+	// Other built-in server-side tools: per unit, never scaled by the
+	// long-context tier, which only applies to tokens.
+	costs.XSearchCost = float64(converterutil.NonNegativeTokenCount(usage.XSearchPosts))*price.XSearchCostPerPost +
+		float64(converterutil.NonNegativeTokenCount(usage.XSearchProfiles))*price.XSearchCostPerProfile
+	costs.CodeExecutionCost = float64(converterutil.NonNegativeTokenCount(usage.CodeExecutionCalls)) *
+		price.toolCostPerCall(ToolCodeExecution)
+	costs.AttachmentSearchCost = float64(converterutil.NonNegativeTokenCount(usage.AttachmentSearchCalls)) *
+		price.toolCostPerCall(ToolAttachmentSearch)
+	costs.CollectionsSearchCost = float64(converterutil.NonNegativeTokenCount(usage.CollectionsSearchCalls)) *
+		price.toolCostPerCall(ToolCollectionsSearch)
+	costs.ImageGenerationToolCost = price.imageGenerationToolCost(usage, resolve)
+	costs.ToolUsageCost = costs.WebSearchCost +
+		costs.XSearchCost +
+		costs.CodeExecutionCost +
+		costs.AttachmentSearchCost +
+		costs.CollectionsSearchCost +
+		costs.ImageGenerationToolCost
+
+	// Calculate total. Tool charges enter once, through ToolUsageCost (web
+	// search included).
 	costs.TotalCost = costs.InputCost +
 		costs.OutputCost +
 		costs.AudioInputCost +
@@ -436,9 +508,76 @@ func CalculateTokenCosts(usage *converter.TokenUsage, price *ModelPrice) *conver
 		costs.CachedOutputCost +
 		costs.PredictionCost +
 		costs.ImageCost +
-		costs.WebSearchCost
+		costs.ToolUsageCost
 
 	return costs
+}
+
+// longContextFullRequest200kInclusive reports whether the row opted into
+// xAI's long-context rule (see LongContextFullRequest200kInclusive).
+func (p *ModelPrice) longContextFullRequest200kInclusive() bool {
+	return p != nil && strings.EqualFold(strings.TrimSpace(p.LongContextPricingMode), LongContextFullRequest200kInclusive)
+}
+
+// reasoningTokensAdditive reports whether usage.ReasoningTokens comes on top
+// of usage.CompletionTokens for this response: the row's fixed setting, or,
+// with reasoning_tokens_accounting "auto", what the response itself showed.
+func (p *ModelPrice) reasoningTokensAdditive(usage *converter.TokenUsage) bool {
+	if strings.EqualFold(strings.TrimSpace(p.ReasoningTokensAccounting), ReasoningTokensAccountingAuto) {
+		switch usage.ReasoningAccounting {
+		case converter.ReasoningAccountingAdditive:
+			return true
+		case converter.ReasoningAccountingIncluded:
+			return false
+		}
+	}
+	return p.ReasoningTokensAdditive
+}
+
+// toolCostPerCall returns the per-call price of a built-in tool, looked up by
+// its canonical key first and then by its alias. A tool priced under both
+// names is charged once, at the canonical key's price.
+func (p *ModelPrice) toolCostPerCall(tool string) float64 {
+	if len(p.ToolCostPerCall) == 0 {
+		return 0
+	}
+	if cost, ok := p.ToolCostPerCall[tool]; ok {
+		return max(cost, 0)
+	}
+	for alias, canonical := range toolCostAliases {
+		if canonical != tool {
+			continue
+		}
+		if cost, ok := p.ToolCostPerCall[alias]; ok {
+			return max(cost, 0)
+		}
+	}
+	return 0
+}
+
+// imageGenerationToolCost prices the images a built-in image_generation tool
+// produced, at ImageGenerationToolModel's tariff with its default request
+// parameters (the tool takes no size or quality). Edits use the tier for
+// edits and pay for one source image each, as the images endpoint does.
+func (p *ModelPrice) imageGenerationToolCost(usage *converter.TokenUsage, resolve PriceResolver) float64 {
+	generations := converterutil.NonNegativeTokenCount(usage.ImageToolGenerations)
+	edits := converterutil.NonNegativeTokenCount(usage.ImageToolEdits)
+	model := strings.TrimSpace(p.ImageGenerationToolModel)
+	if generations+edits == 0 || model == "" || resolve == nil {
+		return 0
+	}
+	imagePrice := resolve(model)
+	if imagePrice == nil || imagePrice == p {
+		return 0
+	}
+	cost := imagePrice.outputImageCost(generations, &converter.ImageBillingDetails{
+		Operation: converter.ImageOperationGeneration,
+	})
+	if edits > 0 {
+		edit := &converter.ImageBillingDetails{Operation: converter.ImageOperationEdit, InputImages: edits}
+		cost += imagePrice.outputImageCost(edits, edit) + imagePrice.inputImageCost(edit)
+	}
+	return cost
 }
 
 // CalculateCost is a convenience method on ModelPrice that calculates total cost
@@ -453,6 +592,12 @@ func (p *ModelPrice) CalculateCost(usage *converter.TokenUsage) float64 {
 // CalculateCosts returns the full cost breakdown for all token types.
 func (p *ModelPrice) CalculateCosts(usage *converter.TokenUsage) *converter.TokenCosts {
 	return CalculateTokenCosts(usage, p)
+}
+
+// CalculateCostsWithResolver is CalculateCosts that can also price usage
+// billed at another model's tariff (see CalculateTokenCostsWithResolver).
+func (p *ModelPrice) CalculateCostsWithResolver(usage *converter.TokenUsage, resolve PriceResolver) *converter.TokenCosts {
+	return CalculateTokenCostsWithResolver(usage, p, resolve)
 }
 
 func (p *ModelPrice) webSearchCostPerQuery(contextSize string) float64 {
