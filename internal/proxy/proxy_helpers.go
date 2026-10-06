@@ -750,6 +750,17 @@ func buildMetadata(hashedToken string, tokenInfo *litellmdb.TokenInfo, errorMsg 
 		if usage.WebSearchRequests > 0 {
 			serverToolUse["web_search_context_size"] = usage.WebSearchContextSize
 		}
+		if usage.HasServerToolUsage() {
+			serverToolUse["x_search_calls"] = usage.XSearchCalls
+			serverToolUse["x_posts_fetched"] = usage.XSearchPosts
+			serverToolUse["x_users_fetched"] = usage.XSearchProfiles
+			serverToolUse["code_execution_calls"] = usage.CodeExecutionCalls
+			serverToolUse["attachment_search_calls"] = usage.AttachmentSearchCalls
+			serverToolUse["collections_search_calls"] = usage.CollectionsSearchCalls
+			serverToolUse["mcp_calls"] = usage.MCPCalls
+			serverToolUse["image_generation_calls"] = usage.ImageToolGenerations
+			serverToolUse["image_edit_calls"] = usage.ImageToolEdits
+		}
 		usageObject = map[string]interface{}{
 			"total_tokens":              usage.Total(),
 			"prompt_tokens":             usage.PromptTokens,
@@ -795,11 +806,18 @@ func buildMetadata(hashedToken string, tokenInfo *litellmdb.TokenInfo, errorMsg 
 			"original_cost":            costs.TotalCost - costs.MarginTotalAmount,
 			"margin_percent":           costs.MarginPercent,
 			"discount_amount":          0.0,
-			"tool_usage_cost":          costs.WebSearchCost,
-			"web_search_cost":          costs.WebSearchCost,
-			"discount_percent":         0.0,
-			"margin_fixed_amount":      costs.MarginFixedAmount,
-			"margin_total_amount":      costs.MarginTotalAmount,
+			// tool_usage_cost sums every built-in tool charge below; it is
+			// already part of total_cost, as each of its parts is.
+			"tool_usage_cost":            costs.ToolUsageCost,
+			"web_search_cost":            costs.WebSearchCost,
+			"x_search_cost":              costs.XSearchCost,
+			"code_execution_cost":        costs.CodeExecutionCost,
+			"attachment_search_cost":     costs.AttachmentSearchCost,
+			"collections_search_cost":    costs.CollectionsSearchCost,
+			"image_generation_tool_cost": costs.ImageGenerationToolCost,
+			"discount_percent":           0.0,
+			"margin_fixed_amount":        costs.MarginFixedAmount,
+			"margin_total_amount":        costs.MarginTotalAmount,
 		}
 	}
 
@@ -822,6 +840,16 @@ func buildMetadata(hashedToken string, tokenInfo *litellmdb.TokenInfo, errorMsg 
 		"upstream_send_delay_ms":        upstreamSendDelayMs,
 		"vector_store_request_metadata": nil,
 		"status":                        "success",
+	}
+	if usage != nil {
+		// For reconciliation with the provider's bill only (xAI
+		// cost_in_usd_ticks, aggregators' usage.cost); never part of the price.
+		if usage.ProviderCostUSD > 0 {
+			metadata["provider_reported_cost"] = usage.ProviderCostUSD
+		}
+		if usage.ReasoningAccounting != "" {
+			metadata["reasoning_tokens_accounting"] = usage.ReasoningAccounting
+		}
 	}
 
 	if tokenInfo != nil {

@@ -513,6 +513,9 @@ func loadStrictOrganizationPriceProfile(profileID, link string) (map[string]*Mod
 		}
 		prices[modelID] = price
 	}
+	if err := validateStrictPriceReferences(prices); err != nil {
+		return nil, profileIdentity{}, err
+	}
 	sum := sha256.Sum256(data)
 	return prices, profileIdentity{id: profileID, source: link, sha256: hex.EncodeToString(sum[:])}, nil
 }
@@ -553,6 +556,9 @@ func decodeStrictPriceRow(modelID string, row json.RawMessage) (*ModelPrice, err
 	if err := validateStrictImagePricing(fields, &price); err != nil {
 		return nil, fmt.Errorf("organization tariff %q: %w", modelID, err)
 	}
+	if err := validateStrictToolAndModePricing(&price); err != nil {
+		return nil, fmt.Errorf("organization tariff %q: %w", modelID, err)
+	}
 	hasPriceField := false
 	for field := range fields {
 		if known[field] {
@@ -576,10 +582,65 @@ func modelPriceJSONFields() map[string]bool {
 			continue
 		}
 		isPriceField := name != "litellm_provider" && name != "reasoning_tokens_additive" && name != "web_search_billing_unit" &&
-			name != "image_request_defaults" && name != "input_images_free_per_request" && name != "rate"
+			name != "image_request_defaults" && name != "input_images_free_per_request" && name != "rate" &&
+			name != "reasoning_tokens_accounting" && name != "long_context_pricing_mode" && name != "image_generation_tool_model"
 		result[name] = isPriceField
 	}
 	return result
+}
+
+// validateStrictToolAndModePricing rejects values the lenient price-file
+// loader would silently ignore: an unknown mode keeps the default billing,
+// an unknown tool key is never charged, and a tool priced under both its
+// canonical name and its alias at different prices is ambiguous.
+func validateStrictToolAndModePricing(price *ModelPrice) error {
+	if mode := strings.TrimSpace(price.LongContextPricingMode); mode != "" && !strings.EqualFold(mode, LongContextFullRequest200kInclusive) {
+		return fmt.Errorf("long_context_pricing_mode %q is not supported (only %q)", mode, LongContextFullRequest200kInclusive)
+	}
+	if accounting := strings.TrimSpace(price.ReasoningTokensAccounting); accounting != "" && !strings.EqualFold(accounting, ReasoningTokensAccountingAuto) {
+		return fmt.Errorf("reasoning_tokens_accounting %q is not supported (only %q)", accounting, ReasoningTokensAccountingAuto)
+	}
+	for tool, cost := range price.ToolCostPerCall {
+		canonical, isAlias := toolCostAliases[tool]
+		if !isAlias {
+			canonical = tool
+		}
+		if canonical != ToolCodeExecution && canonical != ToolAttachmentSearch && canonical != ToolCollectionsSearch {
+			return fmt.Errorf("tool_cost_per_call: unknown tool %q", tool)
+		}
+		if cost < 0 {
+			return fmt.Errorf("tool_cost_per_call[%q] must not be negative", tool)
+		}
+		if isAlias {
+			if canonicalCost, ok := price.ToolCostPerCall[canonical]; ok && canonicalCost != cost {
+				return fmt.Errorf("tool_cost_per_call prices %q and its alias %q differently", canonical, tool)
+			}
+		}
+	}
+	if price.XSearchCostPerPost < 0 || price.XSearchCostPerProfile < 0 {
+		return errors.New("x_search_cost_per_post and x_search_cost_per_profile must not be negative")
+	}
+	return nil
+}
+
+// validateStrictPriceReferences rejects a row naming a price row the tariff
+// does not have: an organization tariff is looked up by exact model ID, so a
+// misspelled or differently cased image_generation_tool_model would leave
+// every image of that tool unbilled.
+func validateStrictPriceReferences(prices map[string]*ModelPrice) error {
+	for modelID, price := range prices {
+		reference := strings.TrimSpace(price.ImageGenerationToolModel)
+		if reference == "" {
+			continue
+		}
+		if reference == modelID {
+			return fmt.Errorf("organization tariff %q: image_generation_tool_model must name another price row", modelID)
+		}
+		if _, ok := prices[reference]; !ok {
+			return fmt.Errorf("organization tariff %q: image_generation_tool_model %q has no price row in this tariff (model IDs match exactly)", modelID, reference)
+		}
+	}
+	return nil
 }
 
 func rejectDuplicateJSONKeys(data []byte) error {

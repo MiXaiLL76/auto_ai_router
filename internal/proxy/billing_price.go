@@ -1,6 +1,10 @@
 package proxy
 
-import "github.com/mixaill76/auto_ai_router/internal/models"
+import (
+	"sync"
+
+	"github.com/mixaill76/auto_ai_router/internal/models"
+)
 
 // lookupBillingModelPrice resolves the price row to bill a request against.
 // Candidates are tried strictly in the order publicModelID, modelID,
@@ -32,6 +36,40 @@ func lookupBillingModelPrice(registry *models.ModelPriceRegistry, publicModelID,
 	}
 
 	return modelID, nil
+}
+
+// missingPriceReferenceWarnings holds the price source and referenced model
+// pairs already reported missing, so a misconfigured row is logged once
+// rather than on every request using it. The spend rows still carry the
+// unbilled usage (e.g. image_tool_generations with a zero image_tool_cost).
+var missingPriceReferenceWarnings sync.Map
+
+// billingPriceResolver looks up price rows that the billed row refers to by
+// name (ModelPrice.ImageGenerationToolModel) in the same price source the
+// request is billed from: the organization tariff when one applies, the
+// default price list otherwise, so one request never mixes two tariffs.
+func (p *Proxy) billingPriceResolver(logCtx *RequestLogContext) models.PriceResolver {
+	return func(modelID string) *models.ModelPrice {
+		var price *models.ModelPrice
+		priceSource := "default"
+		if logCtx != nil && logCtx.OrganizationPolicy.HasCustomPricing() {
+			price, _ = logCtx.OrganizationPolicy.Price(modelID)
+			priceSource = logCtx.OrganizationPolicy.CacheKey()
+		} else if p.priceRegistry != nil {
+			price = p.priceRegistry.GetPrice(modelID)
+		}
+		if price != nil || p.logger == nil {
+			return price
+		}
+		if _, warned := missingPriceReferenceWarnings.LoadOrStore(priceSource+"\x00"+modelID, struct{}{}); !warned {
+			args := []any{"referenced_model", modelID, "price_source", priceSource}
+			if logCtx != nil {
+				args = append(args, "model", logCtx.ModelID, "request_id", logCtx.RequestID)
+			}
+			p.logger.Warn("Referenced price row not found; usage billed at its tariff is not charged (logged once)", args...)
+		}
+		return nil
+	}
 }
 
 // resolveBillingPrice resolves and caches the billing price on logCtx so that

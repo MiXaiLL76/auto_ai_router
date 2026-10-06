@@ -82,6 +82,14 @@ type CustomPricingLiteLLMParams struct {
 	OutputCostPerReasoningToken      *float64           `json:"output_cost_per_reasoning_token,omitempty"`
 	SearchContextCostPerQuery        map[string]float64 `json:"search_context_cost_per_query,omitempty"`
 	WebSearchBillingUnit             *string            `json:"web_search_billing_unit,omitempty"`
+
+	// Built-in server-side tools and billing modes (xAI). See ModelPrice.
+	ToolCostPerCall           map[string]float64 `json:"tool_cost_per_call,omitempty"`
+	XSearchCostPerPost        *float64           `json:"x_search_cost_per_post,omitempty"`
+	XSearchCostPerProfile     *float64           `json:"x_search_cost_per_profile,omitempty"`
+	ImageGenerationToolModel  *string            `json:"image_generation_tool_model,omitempty"`
+	LongContextPricingMode    *string            `json:"long_context_pricing_mode,omitempty"`
+	ReasoningTokensAccounting *string            `json:"reasoning_tokens_accounting,omitempty"`
 }
 
 // GenericLiteLLMParams

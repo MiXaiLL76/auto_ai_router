@@ -800,6 +800,24 @@ func convertPricingToModelPrice(p *queries.CustomPricingLiteLLMParams) *manager.
 	if p.WebSearchBillingUnit != nil {
 		price.WebSearchBillingUnit = *p.WebSearchBillingUnit
 	}
+	if len(p.ToolCostPerCall) > 0 {
+		price.ToolCostPerCall = p.ToolCostPerCall
+	}
+	if p.XSearchCostPerPost != nil {
+		price.XSearchCostPerPost = *p.XSearchCostPerPost
+	}
+	if p.XSearchCostPerProfile != nil {
+		price.XSearchCostPerProfile = *p.XSearchCostPerProfile
+	}
+	if p.ImageGenerationToolModel != nil {
+		price.ImageGenerationToolModel = *p.ImageGenerationToolModel
+	}
+	if p.LongContextPricingMode != nil {
+		price.LongContextPricingMode = *p.LongContextPricingMode
+	}
+	if p.ReasoningTokensAccounting != nil {
+		price.ReasoningTokensAccounting = *p.ReasoningTokensAccounting
+	}
 
 	return price
 }

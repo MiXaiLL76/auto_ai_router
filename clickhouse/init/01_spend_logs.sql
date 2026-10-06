@@ -75,6 +75,15 @@ CREATE TABLE air.spend_logs_kafka
     output_image_tokens UInt32,
     web_search_requests UInt32,
     web_search_context_size Nullable(String),
+    x_search_calls UInt32,
+    x_search_posts UInt32,
+    x_search_profiles UInt32,
+    code_execution_calls UInt32,
+    attachment_search_calls UInt32,
+    collections_search_calls UInt32,
+    mcp_calls UInt32,
+    image_tool_generations UInt32,
+    image_tool_edits UInt32,
 
     input_cost Float64,
     output_cost Float64,
@@ -88,7 +97,14 @@ CREATE TABLE air.spend_logs_kafka
     prediction_cost Float64,
     image_cost Float64,
     web_search_cost Float64,
+    x_search_cost Float64,
+    code_execution_cost Float64,
+    attachment_search_cost Float64,
+    collections_search_cost Float64,
+    image_tool_cost Float64,
+    tool_usage_cost Float64,
     total_cost Float64,
+    provider_reported_cost Nullable(Float64),
 
     api_key_hash String,
     user_id String,
@@ -192,6 +208,15 @@ CREATE TABLE air.spend_logs
     output_image_tokens UInt32,
     web_search_requests UInt32,
     web_search_context_size Nullable(String),
+    x_search_calls UInt32,
+    x_search_posts UInt32,
+    x_search_profiles UInt32,
+    code_execution_calls UInt32,
+    attachment_search_calls UInt32,
+    collections_search_calls UInt32,
+    mcp_calls UInt32,
+    image_tool_generations UInt32,
+    image_tool_edits UInt32,
 
     input_cost Float64,
     output_cost Float64,
@@ -205,7 +230,14 @@ CREATE TABLE air.spend_logs
     prediction_cost Float64,
     image_cost Float64,
     web_search_cost Float64,
+    x_search_cost Float64,
+    code_execution_cost Float64,
+    attachment_search_cost Float64,
+    collections_search_cost Float64,
+    image_tool_cost Float64,
+    tool_usage_cost Float64,
     total_cost Float64,
+    provider_reported_cost Nullable(Float64),
 
     api_key_hash String,
     user_id String,
@@ -230,8 +262,12 @@ ORDER BY (start_time, team_id, model)
 -- truncates to seconds, which is fine at a 90-day retention granularity.
 TTL toDateTime(start_time) + INTERVAL 90 DAY;  -- пример; конкретное значение и владение таблицей — на стороне DBA/CH-кластера, не AIR
 
+-- An event from an AIR version that predates tool_usage_cost arrives with it
+-- 0; web search was the only priced tool then (see
+-- clickhouse/migrations/005_tool_usage_columns.sql).
 CREATE MATERIALIZED VIEW air.spend_logs_mv TO air.spend_logs AS
-SELECT * FROM air.spend_logs_kafka;
+SELECT * REPLACE (if(tool_usage_cost = 0, web_search_cost, tool_usage_cost) AS tool_usage_cost)
+FROM air.spend_logs_kafka;
 
 -- Separate, independently-toggleable write-path (kafka.raw_bodies): raw
 -- provider response for a *failed* request only, on its own topic so
