@@ -55,7 +55,7 @@ func TestChatToMessages_AlibabaExplicitCacheBillsAtExplicitTariff(t *testing.T) 
 		}
 	}`)
 
-	converted, err := anthropicconv.ChatToMessages(body, anthropicconv.MessagesAdapterMetadata{})
+	converted, err := anthropicconv.ChatToMessages(body, anthropicconv.MessagesAdapterMetadata{}, 0, 0)
 	require.NoError(t, err)
 
 	// This is what proxy billing actually does with the converted body
@@ -92,7 +92,7 @@ func TestTransformChatStreamToMessages_AlibabaExplicitCacheBillsAtExplicitTariff
 
 	var output bytes.Buffer
 	require.NoError(t, anthropicconv.TransformChatStreamToMessages(
-		strings.NewReader(stream), &output, "qwen3.7-flash", anthropicconv.MessagesAdapterMetadata{},
+		strings.NewReader(stream), &output, "qwen3.7-flash", anthropicconv.MessagesAdapterMetadata{}, 0, 0,
 	))
 
 	got := output.String()
@@ -122,4 +122,97 @@ func TestTransformChatStreamToMessages_AlibabaExplicitCacheBillsAtExplicitTariff
 	require.NotNil(t, costs)
 	assert.InDelta(t, 1486*0.000000075, costs.ExplicitCachedInputCost, 1e-15)
 	assert.Zero(t, costs.CachedInputCost, "streaming explicit-cache /v1/messages request must not bill the implicit tariff")
+}
+
+// kimiCacheWriteModelPrice has a 1h cache-write rate double the 5m/base rate,
+// matching the real kimi-k3 pricing — so a request billed at the wrong
+// tariff is caught immediately.
+func kimiCacheWriteModelPrice() *models.ModelPrice {
+	return &models.ModelPrice{
+		InputCostPerToken:                   0.0000039,
+		OutputCostPerToken:                  0.0000195,
+		CacheReadInputTokenCost:             0.00000039,
+		CacheCreationInputTokenCost:         0.0000039,
+		CacheCreationInputTokenCostAbove1hr: 0.0000078,
+	}
+}
+
+func TestChatToMessages_KimiCacheWriteTTLFallbackBillsAt1hTariff(t *testing.T) {
+	// Full path: Kimi Chat Completions response (TTL split only ever on
+	// response headers, never in the body) -> Messages API response -> the
+	// same extraction/costing billing actually runs. Regression test for
+	// non-streaming /v1/messages requests against a Kimi-backed model
+	// silently billing a 1h cache write at the 5m rate.
+	body := []byte(`{
+		"id":"chatcmpl-1",
+		"model":"kimi-k3",
+		"choices":[{
+			"index":0,
+			"message":{"role":"assistant","content":"hi"},
+			"finish_reason":"stop"
+		}],
+		"usage":{
+			"prompt_tokens":1100,
+			"completion_tokens":10,
+			"total_tokens":1110,
+			"prompt_tokens_details":{"cache_write_tokens":1000}
+		}
+	}`)
+
+	// The caller (proxy layer) would have read this split off the
+	// Msh-Usage-Cache-Write-Tokens-5m/-1h response headers.
+	converted, err := anthropicconv.ChatToMessages(body, anthropicconv.MessagesAdapterMetadata{}, 200, 800)
+	require.NoError(t, err)
+
+	usage := converter.ExtractTokenUsage(converted)
+	require.NotNil(t, usage)
+	require.Equal(t, 1000, usage.CacheCreationTokens)
+	require.Equal(t, 200, usage.CacheCreation5mTokens)
+	require.Equal(t, 800, usage.CacheCreation1hTokens)
+
+	costs := models.CalculateTokenCosts(usage, kimiCacheWriteModelPrice())
+	require.NotNil(t, costs)
+	assert.InDelta(t, 200*0.0000039+800*0.0000078, costs.CacheCreationCost, 1e-12)
+}
+
+func TestTransformChatStreamToMessages_KimiCacheWriteTTLFallbackBillsAt1hTariff(t *testing.T) {
+	// Streaming counterpart: Kimi Chat Completions SSE -> Messages API SSE ->
+	// the same extraction/costing billing actually runs on the final
+	// message_delta event.
+	stream := strings.Join([]string{
+		`data: {"id":"chatcmpl-1","model":"kimi-k3","choices":[{"index":0,"delta":{"content":"hi"},"finish_reason":null}]}`,
+		"",
+		`data: {"id":"chatcmpl-1","model":"kimi-k3","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}`,
+		"",
+		`data: {"id":"chatcmpl-1","model":"kimi-k3","choices":[],"usage":{"prompt_tokens":1100,"completion_tokens":10,"total_tokens":1110,"prompt_tokens_details":{"cache_write_tokens":1000}}}`,
+		"",
+		"data: [DONE]",
+		"",
+	}, "\n")
+
+	var output bytes.Buffer
+	require.NoError(t, anthropicconv.TransformChatStreamToMessages(
+		strings.NewReader(stream), &output, "kimi-k3", anthropicconv.MessagesAdapterMetadata{}, 200, 800,
+	))
+
+	got := output.String()
+	deltaIdx := strings.Index(got, "event: message_delta\n")
+	require.NotEqual(t, -1, deltaIdx)
+	afterEvent := got[deltaIdx:]
+	dataIdx := strings.Index(afterEvent, "data: ")
+	require.NotEqual(t, -1, dataIdx)
+	dataLine := afterEvent[dataIdx+6:]
+	if endIdx := strings.Index(dataLine, "\n"); endIdx > 0 {
+		dataLine = dataLine[:endIdx]
+	}
+
+	usage := converter.ExtractTokenUsage([]byte(dataLine))
+	require.NotNil(t, usage)
+	require.Equal(t, 1000, usage.CacheCreationTokens)
+	require.Equal(t, 200, usage.CacheCreation5mTokens)
+	require.Equal(t, 800, usage.CacheCreation1hTokens)
+
+	costs := models.CalculateTokenCosts(usage, kimiCacheWriteModelPrice())
+	require.NotNil(t, costs)
+	assert.InDelta(t, 200*0.0000039+800*0.0000078, costs.CacheCreationCost, 1e-12)
 }
