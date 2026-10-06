@@ -1378,7 +1378,8 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 		} else {
 			// Save passthrough Responses API response or convert Chat Completions response if needed
 			if prepared.convertedMessages && proxyResp.StatusCode >= 200 && proxyResp.StatusCode < 300 {
-				messagesBody, convErr := anthropicconv.ChatToMessages(proxyResp.Body, prepared.messagesMetadata)
+				messagesBody, convErr := anthropicconv.ChatToMessages(proxyResp.Body, prepared.messagesMetadata,
+					tokenUsageOptions.CacheWriteTTLHeader5mTokens, tokenUsageOptions.CacheWriteTTLHeader1hTokens)
 				if convErr != nil {
 					p.logger.ErrorContext(r.Context(), "Failed to convert proxy response to Messages API format",
 						"credential", cred.Name, "model", modelID, "error", convErr,
@@ -2253,7 +2254,8 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 
 		// Handle Responses API response body.
 		if prepared.convertedMessages && resp.StatusCode >= 200 && resp.StatusCode < 300 {
-			messagesBody, convErr := anthropicconv.ChatToMessages(finalResponseBody, prepared.messagesMetadata)
+			messagesBody, convErr := anthropicconv.ChatToMessages(finalResponseBody, prepared.messagesMetadata,
+				tokenUsageOptions.CacheWriteTTLHeader5mTokens, tokenUsageOptions.CacheWriteTTLHeader1hTokens)
 			if convErr != nil {
 				p.logger.ErrorContext(r.Context(), "Failed to convert to Messages API format",
 					"credential", cred.Name, "model", modelID, "error", convErr,
