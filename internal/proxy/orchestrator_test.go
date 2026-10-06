@@ -248,6 +248,192 @@ func TestOrchestrateRequest_ResponsesAPI_ConvertedForOpenAIWhenPassthroughDisabl
 	require.True(t, hasMessages, "messages should be present after conversion")
 }
 
+// TestOrchestrateRequest_ResponsesAPI_ResponsesOnlyForcesPassthrough covers
+// the same passthrough_responses:false + OpenAI setup as
+// TestOrchestrateRequest_ResponsesAPI_ConvertedForOpenAIWhenPassthroughDisabled
+// above, but with responses_only also set: a client calling /v1/responses
+// directly for a model whose upstream only accepts /v1/responses must not
+// fall into the default RequestToChat branch, which would send it to
+// /v1/chat/completions and get rejected by that very upstream.
+func TestOrchestrateRequest_ResponsesAPI_ResponsesOnlyForcesPassthrough(t *testing.T) {
+	logger := testhelpers.NewTestLogger()
+	passthroughResponses := false
+	builder := NewTestProxyBuilder().
+		WithSingleCredential("test", config.ProviderTypeOpenAI, "http://test.local", "upstream-key").
+		WithMasterKey("master-key")
+	modelManager := models.New(logger, 50, []config.ModelRPMConfig{
+		{
+			Name:                 "qwen-5",
+			Credential:           "test",
+			PassthroughResponses: &passthroughResponses,
+			ResponsesOnly:        true,
+		},
+	})
+	modelManager.LoadModelsFromConfig(builder.config.Credentials)
+	builder.config.ModelManager = modelManager
+	prx := builder.Build()
+	prx.logger = logger
+
+	body := `{"model":"qwen-5","input":"Hello","stream":false}`
+	req := httptest.NewRequest("POST", "/v1/responses", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer master-key")
+	w := httptest.NewRecorder()
+	logCtx := &RequestLogContext{}
+
+	prepared, ok := prx.orchestrateRequest(w, req, logCtx)
+	require.True(t, ok)
+	require.NotNil(t, prepared)
+
+	require.True(t, prepared.isResponsesAPI)
+	require.False(t, prepared.convertedResp, "must not fall into the default RequestToChat branch")
+	require.True(t, prepared.passthroughResponses)
+	require.Equal(t, "/v1/responses", prepared.request.URL.Path)
+
+	var raw map[string]interface{}
+	require.NoError(t, json.Unmarshal(prepared.body, &raw))
+	_, hasInput := raw["input"]
+	require.True(t, hasInput, "body must stay Responses-API-shaped")
+	_, hasMessages := raw["messages"]
+	require.False(t, hasMessages, "must not be converted to Chat Completions shape")
+}
+
+// TestOrchestrateRequest_ResponsesAPI_ResponsesOnlyPassthroughAppliesCodexPrep
+// covers a critical review finding: the responses_only passthrough branch
+// above (IsResponsesOnlyForCredential) forwarded the client's body with only
+// ReplaceResponsesBodyParam, unlike the IsPassthroughResponsesForProvider
+// branch right before it in the same switch, which also runs
+// PrepareCodexPassthrough -- stripping proxy-internal store/metadata/ttl and
+// normalizing input shape. Without it, a client's metadata/ttl fields (not
+// part of OpenAI's actual Responses API request schema) leaked straight to
+// the provider unstripped.
+func TestOrchestrateRequest_ResponsesAPI_ResponsesOnlyPassthroughAppliesCodexPrep(t *testing.T) {
+	logger := testhelpers.NewTestLogger()
+	passthroughResponses := false
+	builder := NewTestProxyBuilder().
+		WithSingleCredential("test", config.ProviderTypeOpenAI, "http://test.local", "upstream-key").
+		WithMasterKey("master-key")
+	modelManager := models.New(logger, 50, []config.ModelRPMConfig{
+		{
+			Name:                 "qwen-5",
+			Credential:           "test",
+			PassthroughResponses: &passthroughResponses,
+			ResponsesOnly:        true,
+		},
+	})
+	modelManager.LoadModelsFromConfig(builder.config.Credentials)
+	builder.config.ModelManager = modelManager
+	prx := builder.Build()
+	prx.logger = logger
+
+	body := `{"model":"qwen-5","input":"Hello","stream":false,"metadata":{"foo":"bar"},"ttl":60}`
+	req := httptest.NewRequest("POST", "/v1/responses", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer master-key")
+	w := httptest.NewRecorder()
+	logCtx := &RequestLogContext{}
+
+	prepared, ok := prx.orchestrateRequest(w, req, logCtx)
+	require.True(t, ok)
+	require.NotNil(t, prepared)
+	require.True(t, prepared.passthroughResponses)
+
+	var raw map[string]interface{}
+	require.NoError(t, json.Unmarshal(prepared.body, &raw))
+	_, hasMetadata := raw["metadata"]
+	assert.False(t, hasMetadata, "PrepareCodexPassthrough must strip proxy-internal metadata before it reaches the provider")
+	_, hasTTL := raw["ttl"]
+	assert.False(t, hasTTL, "PrepareCodexPassthrough must strip proxy-internal ttl before it reaches the provider")
+}
+
+// TestOrchestrateRequest_ResponsesAPI_ResponsesOnlyIgnoredForNonOpenAICredential covers
+// review finding #2 (round 3): the /v1/responses passthrough branch for a
+// responses_only model was gated only on !cred.IsProxyLike(), unlike the parallel
+// /v1/chat/completions branch which also checks EffectiveProviderType() ==
+// ProviderTypeOpenAI. A responses_only model bound to a non-OpenAI/vLLM credential
+// (typically a DB model_info.mode:"responses" entry synced onto the wrong credential)
+// must fall through to the normal RequestToChat conversion -- exactly the behavior this
+// request had before the responses_only feature existed -- not take the passthrough
+// branch, which would forward the client's raw Responses-shaped body (input, no
+// messages) straight to a provider whose converter/URL builder expects Chat shape.
+func TestOrchestrateRequest_ResponsesAPI_ResponsesOnlyIgnoredForNonOpenAICredential(t *testing.T) {
+	logger := testhelpers.NewTestLogger()
+	builder := NewTestProxyBuilder().
+		WithSingleCredential("anthropic-cred", config.ProviderTypeAnthropic, "https://api.anthropic.com", "upstream-key").
+		WithMasterKey("master-key")
+	modelManager := models.New(logger, 50, []config.ModelRPMConfig{
+		{
+			Name:          "claude-opus-4.5",
+			Credential:    "anthropic-cred",
+			ResponsesOnly: true, // misconfigured on purpose
+		},
+	})
+	modelManager.LoadModelsFromConfig(builder.config.Credentials)
+	builder.config.ModelManager = modelManager
+	prx := builder.Build()
+	prx.logger = logger
+
+	body := `{"model":"claude-opus-4.5","input":"Hello","stream":false}`
+	req := httptest.NewRequest("POST", "/v1/responses", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer master-key")
+	w := httptest.NewRecorder()
+	logCtx := &RequestLogContext{}
+
+	prepared, ok := prx.orchestrateRequest(w, req, logCtx)
+	require.True(t, ok)
+	require.NotNil(t, prepared)
+
+	require.True(t, prepared.isResponsesAPI)
+	require.False(t, prepared.passthroughResponses,
+		"a non-OpenAI/vLLM credential must never take the Responses-shaped passthrough branch, regardless of responses_only")
+	require.True(t, prepared.convertedResp, "must fall through to RequestToChat, same as before responses_only existed")
+
+	var raw map[string]interface{}
+	require.NoError(t, json.Unmarshal(prepared.body, &raw))
+	_, hasMessages := raw["messages"]
+	require.True(t, hasMessages, "body must be converted to Chat Completions shape for the Anthropic converter downstream")
+	_, hasInput := raw["input"]
+	require.False(t, hasInput, "must not still be Responses-API-shaped")
+}
+
+// TestPrepareRequestForCredential_ResponsesOnlyScopedToItsOwnCredential
+// reproduces a real misconfiguration: the same public alias ("gpt-5-pro") is
+// served by two credentials -- a real Responses-API-exclusive OpenAI
+// deployment (responses_only: true) and a fallback OpenRouter credential
+// that never opted in. The flag must not leak onto the fallback credential
+// just because it shares the alias.
+func TestPrepareRequestForCredential_ResponsesOnlyScopedToItsOwnCredential(t *testing.T) {
+	openaiCred := config.CredentialConfig{Name: "openai_main", Type: config.ProviderTypeOpenAI, APIKey: "key", BaseURL: "https://api.openai.com", RPM: 100}
+	openrouterCred := config.CredentialConfig{Name: "openrouter_fallback", Type: config.ProviderTypeOpenAI, APIKey: "key2", BaseURL: "https://openrouter.ai/api/v1", RPM: 100}
+	prx := NewTestProxyBuilder().WithCredentials(openaiCred, openrouterCred).Build()
+	prx.modelManager = models.New(prx.logger, 50, []config.ModelRPMConfig{
+		{Name: "gpt-5-pro", Credential: openaiCred.Name, ResponsesOnly: true, RPM: -1, TPM: -1},
+		{Name: "gpt-5-pro", Credential: openrouterCred.Name, RPM: -1, TPM: -1},
+	})
+	prx.modelManager.LoadModelsFromConfig([]config.CredentialConfig{openaiCred, openrouterCred})
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	body := []byte(`{"model":"gpt-5-pro","max_tokens":64,"messages":[{"role":"user","content":"hi"}]}`)
+
+	prepared, err := prx.prepareRequestForCredential(
+		req, body, body, "gpt-5-pro", "gpt-5-pro", "/v1/chat/completions",
+		false, &openaiCred, false, false, false,
+	)
+	require.NoError(t, err)
+	assert.True(t, prepared.convertedToResponses, "the credential the flag was set on must convert to Responses API shape")
+	assert.Equal(t, "/v1/responses", prepared.path)
+
+	prepared, err = prx.prepareRequestForCredential(
+		req, body, body, "gpt-5-pro", "gpt-5-pro", "/v1/chat/completions",
+		false, &openrouterCred, false, false, false,
+	)
+	require.NoError(t, err)
+	assert.False(t, prepared.convertedToResponses,
+		"a fallback credential for the same alias that never opted into responses_only must not be converted to Responses API shape")
+	assert.Equal(t, "/v1/chat/completions", prepared.path)
+	var raw map[string]interface{}
+	require.NoError(t, json.Unmarshal(prepared.body, &raw))
+	assert.Contains(t, raw, "messages", "the fallback credential must still receive a normal Chat Completions request")
+}
+
 func TestPrepareRequestForCredential_UsesCredentialSpecificRealModel(t *testing.T) {
 	logger := testhelpers.NewTestLogger()
 	cheap := config.CredentialConfig{Name: "cheapgpt", Type: config.ProviderTypeAnthropic, APIKey: "key", BaseURL: "http://cheapgpt.local", RPM: 100}
@@ -570,6 +756,72 @@ func TestPrepareRequestForCredential_ChatCompletionsPreservesDeveloperRoleForNon
 	require.NoError(t, json.Unmarshal(prepared.body, &direct))
 	directMessages := direct["messages"].([]interface{})
 	require.Equal(t, "developer", directMessages[0].(map[string]interface{})["role"])
+}
+
+// TestPrepareRequestForCredential_ResponsesOnlyModel_ProxyBodyStaysChatShaped
+// reproduces a real production failure: for a responses_only model, the
+// direct-send path (req.body/req.path) is correctly converted to Responses
+// API shape and /v1/responses -- but req.proxyBody/req.proxyPath, the
+// fields TryFallbackProxy forwards to a fallback *proxy-like* (AIR-to-AIR)
+// credential, must NOT get that conversion. A chained AIR instance does its
+// own model-specific responses_only handling on the request it actually
+// receives, exactly like the "Proxy-like credentials are excluded" comment
+// says for the direct-send branch just above it -- so the fallback needs
+// the original Chat Completions body (with the alias model name, not the
+// real one) on the original /v1/chat/completions path. Previously this
+// path overwrote proxyBody with the Responses-shaped conversion (input/
+// max_output_tokens, real model name) while leaving proxyPath at
+// /v1/chat/completions, so a fallback proxy received a Responses-shaped
+// body on a Chat Completions path and rejected it with "messages is
+// required".
+func TestPrepareRequestForCredential_ResponsesOnlyModel_ProxyBodyStaysChatShaped(t *testing.T) {
+	prx := NewTestProxyBuilder().Build()
+	cred := config.CredentialConfig{Name: "openai-main", Type: config.ProviderTypeOpenAI, APIKey: "key", BaseURL: "https://api.openai.com", RPM: 100}
+	prx.modelManager = models.New(prx.logger, 50, []config.ModelRPMConfig{
+		{Name: "gpt-5-pro", ResponsesOnly: true, Credential: cred.Name, RPM: -1, TPM: -1},
+	})
+	prx.modelManager.LoadModelsFromConfig([]config.CredentialConfig{cred})
+
+	req := httptest.NewRequest("POST", "/v1/chat/completions", nil)
+	body := []byte(`{"model":"gpt-5-pro-real","max_tokens":64,"messages":[{"role":"user","content":"hi"}]}`)
+	proxyBody := []byte(`{"model":"gpt-5-pro","max_tokens":64,"messages":[{"role":"user","content":"hi"}]}`)
+
+	prepared, err := prx.prepareRequestForCredential(
+		req,
+		body,
+		proxyBody,
+		"gpt-5-pro",
+		"gpt-5-pro-real",
+		"/v1/chat/completions",
+		false,
+		&cred,
+		false,
+		false,
+		false,
+	)
+	require.NoError(t, err)
+	require.True(t, prepared.convertedToResponses)
+
+	// Direct-send side: correctly converted to Responses API shape.
+	require.Equal(t, "/v1/responses", prepared.path)
+	var direct map[string]interface{}
+	require.NoError(t, json.Unmarshal(prepared.body, &direct))
+	require.Contains(t, direct, "input")
+	require.NotContains(t, direct, "messages")
+	require.Equal(t, "gpt-5-pro-real", direct["model"])
+
+	// Fallback-proxy side: must stay exactly the original Chat Completions
+	// shape, with the alias model name, on the original path -- untouched
+	// by the Responses conversion above.
+	require.Equal(t, "/v1/chat/completions", prepared.proxyPath,
+		"a fallback proxy-like credential must receive the original chat path, not the Responses one")
+	var forwarded map[string]interface{}
+	require.NoError(t, json.Unmarshal(prepared.proxyBody, &forwarded))
+	require.Contains(t, forwarded, "messages",
+		"a fallback proxy-like credential must receive a Chat-Completions-shaped body, not Responses-shaped")
+	require.NotContains(t, forwarded, "input")
+	require.Equal(t, "gpt-5-pro", forwarded["model"],
+		"a fallback proxy-like credential must receive the alias model name, not the real one")
 }
 
 func TestPrepareRequestForCredential_MessagesKeepsOriginalProxyRequest(t *testing.T) {

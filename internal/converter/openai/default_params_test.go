@@ -99,3 +99,29 @@ func TestApplyDefaultParams_MaxTokensSynonym(t *testing.T) {
 		assert.NotContains(t, got, "max_completion_tokens", "two spellings of one limit are ambiguous")
 	})
 }
+
+func TestResponsesDefaultParams(t *testing.T) {
+	t.Run("token limit is renamed to max_output_tokens", func(t *testing.T) {
+		defaults := map[string]any{"max_tokens": 512.0, "temperature": 0.7}
+		got := ResponsesDefaultParams(defaults)
+		assert.Equal(t, map[string]any{"max_output_tokens": 512.0, "temperature": 0.7}, got)
+		assert.Contains(t, defaults, "max_tokens", "input map is not modified")
+	})
+
+	t.Run("max_completion_tokens wins over max_tokens", func(t *testing.T) {
+		got := ResponsesDefaultParams(map[string]any{"max_tokens": 1.0, "max_completion_tokens": 2.0})
+		assert.Equal(t, map[string]any{"max_output_tokens": 2.0}, got)
+	})
+
+	t.Run("client max_output_tokens is not overridden", func(t *testing.T) {
+		body := []byte(`{"model":"m","input":"hi","max_output_tokens":10}`)
+		got := decodeBody(t, ApplyDefaultParams(body, ResponsesDefaultParams(map[string]any{"max_tokens": 512.0})))
+		assert.EqualValues(t, 10, got["max_output_tokens"])
+		assert.NotContains(t, got, "max_tokens")
+	})
+
+	t.Run("no token limit leaves defaults as is", func(t *testing.T) {
+		defaults := map[string]any{"temperature": 0.7}
+		assert.Equal(t, defaults, ResponsesDefaultParams(defaults))
+	})
+}

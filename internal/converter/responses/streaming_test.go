@@ -525,6 +525,52 @@ func TestStreamTransform_Usage(t *testing.T) {
 	assert.Equal(t, float64(3), outputDetails["audio_tokens"])
 }
 
+func TestStreamTransform_KimiCacheWriteTTLFromHeaderFallback(t *testing.T) {
+	// Kimi/Moonshot's streaming usage chunk only ever carries the aggregate
+	// via cache_write_tokens — no cache_creation_token_details/cache_creation
+	// sub-object, since the 5m/1h split only arrives on response headers. The
+	// caller (the proxy layer) reads those headers and must supply the split
+	// as a fallback, which should survive into both the emitted
+	// response.completed event and (transitively) the persisted Response.
+	stopReason := "stop"
+	usageChunk := `{"id":"chatcmpl-test","object":"chat.completion.chunk","model":"kimi-k3","choices":[],"usage":{"prompt_tokens":1100,"completion_tokens":10,"total_tokens":1110,"prompt_tokens_details":{"cache_write_tokens":1000}}}`
+
+	input := buildSSEChunk(buildChatChunk("test", nil)) +
+		buildSSEChunk(buildChatChunk("", &stopReason)) +
+		buildSSEChunk(usageChunk) +
+		"data: [DONE]\n\n"
+
+	var output bytes.Buffer
+	err := TransformChatStreamToResponsesWithMetaAndUsage(
+		strings.NewReader(input), &output, "kimi-k3", nil, false, 200, 800,
+	)
+	require.NoError(t, err)
+
+	result := output.String()
+	completedIdx := strings.Index(result, "event: response.completed\n")
+	require.NotEqual(t, -1, completedIdx)
+	afterEvent := result[completedIdx:]
+	dataIdx := strings.Index(afterEvent, "data: ")
+	require.NotEqual(t, -1, dataIdx)
+	dataLine := afterEvent[dataIdx+6:]
+	if endIdx := strings.Index(dataLine, "\n"); endIdx > 0 {
+		dataLine = dataLine[:endIdx]
+	}
+
+	var completedEvent struct {
+		Response struct {
+			Usage map[string]interface{} `json:"usage"`
+		} `json:"response"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(dataLine), &completedEvent))
+
+	details := completedEvent.Response.Usage["input_tokens_details"].(map[string]interface{})
+	assert.Equal(t, float64(1000), details["cache_creation_tokens"])
+	ttlDetails := details["cache_creation_token_details"].(map[string]interface{})
+	assert.Equal(t, float64(200), ttlDetails["ephemeral_5m_input_tokens"])
+	assert.Equal(t, float64(800), ttlDetails["ephemeral_1h_input_tokens"])
+}
+
 func TestStreamTransform_AlibabaExplicitCacheUsage(t *testing.T) {
 	// Alibaba's streaming usage chunk spells the cache-creation TTL detail
 	// cache_creation.ephemeral_5m_input_tokens (no _token_details suffix) and
@@ -670,7 +716,7 @@ func TestStreamTransform_UsagePreservesNormalizedAudioInput(t *testing.T) {
 
 	var output bytes.Buffer
 	err := TransformChatStreamToResponsesWithMetaAndUsage(
-		strings.NewReader(input), &output, "gpt-4o", nil, false,
+		strings.NewReader(input), &output, "gpt-4o", nil, false, 0, 0,
 	)
 	require.NoError(t, err)
 

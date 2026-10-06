@@ -99,6 +99,7 @@ func (p *Proxy) applyCredentialCompatibilityRouting(
 		prepared.realModelID = nextReq.realModelID
 		prepared.convertedResp = nextReq.convertedResp
 		prepared.convertedMessages = nextReq.convertedMessages
+		prepared.convertedToResponses = nextReq.convertedToResponses
 		prepared.passthroughResponses = nextReq.passthroughResponses
 		prepared.passthroughMessages = nextReq.passthroughMessages
 		prepared.nativeResponses = nextReq.nativeResponses
@@ -1380,7 +1381,8 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 		} else {
 			// Save passthrough Responses API response or convert Chat Completions response if needed
 			if prepared.convertedMessages && proxyResp.StatusCode >= 200 && proxyResp.StatusCode < 300 {
-				messagesBody, convErr := anthropicconv.ChatToMessages(proxyResp.Body, prepared.messagesMetadata)
+				messagesBody, convErr := anthropicconv.ChatToMessages(proxyResp.Body, prepared.messagesMetadata,
+					tokenUsageOptions.CacheWriteTTLHeader5mTokens, tokenUsageOptions.CacheWriteTTLHeader1hTokens)
 				if convErr != nil {
 					p.logger.ErrorContext(r.Context(), "Failed to convert proxy response to Messages API format",
 						"credential", cred.Name, "model", modelID, "error", convErr,
@@ -1629,6 +1631,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 			prepared.realModelID = nextReq.realModelID
 			prepared.convertedResp = nextReq.convertedResp
 			prepared.convertedMessages = nextReq.convertedMessages
+			prepared.convertedToResponses = nextReq.convertedToResponses
 			prepared.passthroughResponses = nextReq.passthroughResponses
 			prepared.passthroughMessages = nextReq.passthroughMessages
 			prepared.nativeResponses = nextReq.nativeResponses
@@ -1707,11 +1710,22 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 			// Use realModelID for URL construction and body conversion (provider-facing name).
 			// modelID (alias) is used for credential selection and rate limiting.
 			conv = converter.New(cred.EffectiveProviderType(), converter.RequestMode{
-				IsImageGeneration:   logCtx.IsImageGeneration,
-				IsImageEdit:         isImageEdit,
-				IsEmbeddings:        isEmbeddings,
-				IsStreaming:         streaming,
-				IsResponsesAPI:      prepared.passthroughResponses,
+				IsImageGeneration: logCtx.IsImageGeneration,
+				IsImageEdit:       isImageEdit,
+				IsEmbeddings:      isEmbeddings,
+				IsStreaming:       streaming,
+				// prepared.convertedToResponses means body is already
+				// Responses-shaped here too (orchestrator.go's
+				// ChatRequestToResponses, for a responses_only model) -- not
+				// just the passthrough case. Without it, the default-provider
+				// branch's `!c.mode.IsResponsesAPI` check (converter.go)
+				// mistakes it for a Chat-shaped body and runs
+				// ConvertWebSearchTools/ForceWebSearchResults on it, which
+				// silently drops every non-function/non-web_search hosted
+				// tool (code_interpreter, file_search, image_generation, mcp,
+				// custom, ...) and its tool_choice -- tools the Responses API
+				// (unlike Chat Completions) actually supports.
+				IsResponsesAPI:      prepared.passthroughResponses || prepared.convertedToResponses,
 				MessagesPassthrough: prepared.passthroughMessages,
 				ModelID:             realModelID,
 				DisplayModelID:      modelID,
@@ -1964,6 +1978,41 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 		if cred.Type == config.ProviderTypeBedrock && resp.StatusCode >= http.StatusBadRequest {
 			isStreamingResp = false
 		}
+		// Some providers reject a streaming request with HTTP 200 and a stream whose
+		// first event is a terminal error (e.g. a Responses API response.failed with
+		// rate_limit_exceeded). Nothing has been forwarded to the client at that point,
+		// so treat it like the equivalent HTTP error and retry on another credential
+		// instead of relaying it.
+		if isStreamingResp && cred.Type != config.ProviderTypeBedrock &&
+			resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices {
+			currentCloseBody := closeBody // capture for timer closure
+			peekTimer := time.AfterFunc(p.requestTimeout, func() { currentCloseBody() })
+			payload := peekStreamStartError(resp)
+			peekTimer.Stop()
+			if payload != "" {
+				status := statusCodeFromProviderStreamError(payload)
+				if retry, reason := ShouldRetryWithFallback(status, []byte(payload)); retry {
+					closeBody()
+					isStreamingResp = false
+					resp.StatusCode = status
+					resp.Header.Set("Content-Type", "application/json")
+					resp.Header.Del("Content-Length")
+					responseBody = []byte(payload)
+					// Status was 200, so the per-attempt error check above didn't count it.
+					p.metrics.RecordCredentialAttemptError(cred.Name)
+					p.recordProviderResponse(r.Context(), cred, modelID, realModelID, status, resp.Header, responseBody)
+					shouldRetry, retryReason = true, reason
+					retryLogArgs := []any{
+						"error_code", status, "credential", cred.Name,
+						"reason", retryReason, "model", modelID,
+						"attempt", attempt + 1, "max_attempts", p.maxProviderRetries + 1,
+					}
+					retryLogArgs = appendResponseBodyForLogs(retryLogArgs, cred, payload)
+					p.logger.WarnContext(r.Context(), "Provider stream started with a retryable error event, will retry", retryLogArgs...)
+					continue
+				}
+			}
+		}
 		if isStreamingResp {
 			p.recordProviderResponse(r.Context(), cred, modelID, realModelID, resp.StatusCode, resp.Header, nil)
 			// Cannot retry streaming responses
@@ -2208,7 +2257,8 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 
 		// Handle Responses API response body.
 		if prepared.convertedMessages && resp.StatusCode >= 200 && resp.StatusCode < 300 {
-			messagesBody, convErr := anthropicconv.ChatToMessages(finalResponseBody, prepared.messagesMetadata)
+			messagesBody, convErr := anthropicconv.ChatToMessages(finalResponseBody, prepared.messagesMetadata,
+				tokenUsageOptions.CacheWriteTTLHeader5mTokens, tokenUsageOptions.CacheWriteTTLHeader1hTokens)
 			if convErr != nil {
 				p.logger.ErrorContext(r.Context(), "Failed to convert to Messages API format",
 					"credential", cred.Name, "model", modelID, "error", convErr,
@@ -2284,6 +2334,27 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 				finalResponseBody = responsesBody
+				bodyForTokenExtraction = finalResponseBody
+				tokenUsageOptions.AudioInputIncludesCachedAudio = false
+			}
+		} else if prepared.convertedToResponses && resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			// responses_only model: the upstream call itself was to
+			// /v1/responses (see ChatRequestToResponses), so finalResponseBody
+			// is currently Responses-API-shaped -- convert it back to Chat
+			// Completions shape for the client, which called
+			// /v1/chat/completions and expects that shape back.
+			chatBody, convErr := responses.ResponseToChat(finalResponseBody)
+			if convErr != nil {
+				args := []any{
+					"credential", cred.Name, "provider", string(cred.Type),
+					"model", modelID, "error", convErr,
+					"request_id", logCtx.RequestID,
+				}
+				args = appendResponseBodyForLogs(args, cred, decodedBody)
+				p.logger.ErrorContext(r.Context(), "Failed to convert Responses API response to Chat Completions format", args...)
+				// finalResponseBody already holds the raw Responses-API body — return as-is.
+			} else {
+				finalResponseBody = chatBody
 				bodyForTokenExtraction = finalResponseBody
 				tokenUsageOptions.AudioInputIncludesCachedAudio = false
 			}
@@ -2477,6 +2548,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 			"is_messages_api", prepared.isMessagesAPI,
 			"converted_resp", prepared.convertedResp,
 			"converted_messages", prepared.convertedMessages,
+			"converted_to_responses", prepared.convertedToResponses,
 			"provider", cred.Type,
 			"model", modelID,
 			"resp_content_type", resp.Header.Get("Content-Type"),
@@ -2558,6 +2630,28 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 				if err != nil {
 					p.logStreamHandlerError(r.Context(), "Failed to handle streaming response", err,
 						"credential", cred.Name, "model", modelID, "request_id", logCtx.RequestID)
+				} else if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+					streamCompleted = true
+				}
+			}
+		} else if prepared.convertedToResponses {
+			// responses_only model: upstream streams native Responses API SSE
+			// (we called its /v1/responses) — convert back to Chat Completions
+			// SSE for the client, which called /v1/chat/completions.
+			if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+				err := p.handleChatFromResponsesStreaming(w, resp, cred, modelID, logCtx)
+				if err != nil {
+					p.logStreamHandlerError(r.Context(), "Failed to handle responses_only streaming", err,
+						"credential", cred.Name, "model", modelID, "request_id", logCtx.RequestID)
+				} else {
+					streamCompleted = true
+				}
+			} else {
+				// Error response: stream using provider's native format instead.
+				err := p.handleProviderStreaming(w, resp, cred, realModelID, modelID, logCtx)
+				if err != nil {
+					p.logStreamHandlerError(r.Context(), "Failed to handle provider streaming response", err,
+						"credential", cred.Name, "provider", cred.Type, "model", modelID, "request_id", logCtx.RequestID)
 				} else if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 					streamCompleted = true
 				}

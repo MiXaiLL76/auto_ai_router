@@ -286,7 +286,7 @@ func TestChatToMessages(t *testing.T) {
 		}
 	}`)
 
-	converted, err := ChatToMessages(body, MessagesAdapterMetadata{ToolNames: map[string]string{truncated: longName}})
+	converted, err := ChatToMessages(body, MessagesAdapterMetadata{ToolNames: map[string]string{truncated: longName}}, 0, 0)
 	require.NoError(t, err)
 
 	var got map[string]interface{}
@@ -332,7 +332,7 @@ func TestChatToMessages_AlibabaExplicitCache(t *testing.T) {
 		}
 	}`)
 
-	converted, err := ChatToMessages(body, MessagesAdapterMetadata{})
+	converted, err := ChatToMessages(body, MessagesAdapterMetadata{}, 0, 0)
 	require.NoError(t, err)
 
 	var got map[string]interface{}
@@ -451,7 +451,7 @@ func TestTransformChatStreamToMessages(t *testing.T) {
 	}, "\n")
 
 	var output bytes.Buffer
-	require.NoError(t, TransformChatStreamToMessages(strings.NewReader(stream), &output, "fallback-model", MessagesAdapterMetadata{}))
+	require.NoError(t, TransformChatStreamToMessages(strings.NewReader(stream), &output, "fallback-model", MessagesAdapterMetadata{}, 0, 0))
 
 	got := output.String()
 	assert.Contains(t, got, "event: message_start")

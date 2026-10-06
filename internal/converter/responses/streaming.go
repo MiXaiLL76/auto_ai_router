@@ -245,29 +245,36 @@ type chatStreamChunk struct {
 // Pass a *ResponsesMetadata as the second variadic element to have store,
 // previous_response_id and metadata echoed back in all SSE response objects.
 func TransformChatStreamToResponses(reader io.Reader, writer io.Writer, model string, onComplete ...func(*Response)) error {
-	return transformChatStreamToResponsesInner(reader, writer, model, nil, true, onComplete...)
+	return transformChatStreamToResponsesInner(reader, writer, model, nil, true, 0, 0, onComplete...)
 }
 
 // TransformChatStreamToResponsesWithMeta is like TransformChatStreamToResponses but
 // additionally echoes request-side fields (store, previous_response_id, metadata) into
 // every emitted response object so the wire payload matches the stored record.
 func TransformChatStreamToResponsesWithMeta(reader io.Reader, writer io.Writer, model string, meta *ResponsesMetadata, onComplete ...func(*Response)) error {
-	return transformChatStreamToResponsesInner(reader, writer, model, meta, true, onComplete...)
+	return transformChatStreamToResponsesInner(reader, writer, model, meta, true, 0, 0, onComplete...)
 }
 
 // TransformChatStreamToResponsesWithMetaAndUsage is like
 // TransformChatStreamToResponsesWithMeta but also defines whether the source
-// audio_tokens value includes cached audio.
+// audio_tokens value includes cached audio, and carries the cache-write TTL
+// split sourced from upstream response headers (used by Kimi/Moonshot, whose
+// chunks never carry cache_creation_token_details/cache_creation — the split
+// is only available via response headers read by the caller). Applied only
+// as a fallback when a chunk's own usage carries no 5m/1h breakdown.
 func TransformChatStreamToResponsesWithMetaAndUsage(
 	reader io.Reader,
 	writer io.Writer,
 	model string,
 	meta *ResponsesMetadata,
 	audioInputIncludesCachedAudio bool,
+	cacheWriteTTLFallback5mTokens int,
+	cacheWriteTTLFallback1hTokens int,
 	onComplete ...func(*Response),
 ) error {
 	return transformChatStreamToResponsesInner(
-		reader, writer, model, meta, audioInputIncludesCachedAudio, onComplete...,
+		reader, writer, model, meta, audioInputIncludesCachedAudio,
+		cacheWriteTTLFallback5mTokens, cacheWriteTTLFallback1hTokens, onComplete...,
 	)
 }
 
@@ -277,6 +284,8 @@ func transformChatStreamToResponsesInner(
 	model string,
 	meta *ResponsesMetadata,
 	audioInputIncludesCachedAudio bool,
+	cacheWriteTTLFallback5mTokens int,
+	cacheWriteTTLFallback1hTokens int,
 	onComplete ...func(*Response),
 ) error {
 	scanner := bufio.NewScanner(reader)
@@ -388,6 +397,12 @@ func transformChatStreamToResponsesInner(
 					if acc.usage.CacheCreationTokens == 0 {
 						acc.usage.CacheCreationTokens = details.Ephemeral5mInputTokens + details.Ephemeral1hInputTokens
 					}
+				}
+				// Kimi/Moonshot never reports a TTL split in the body — fall back
+				// to the header-sourced split the caller supplied.
+				if acc.usage.CacheCreation5mTokens == 0 && acc.usage.CacheCreation1hTokens == 0 {
+					acc.usage.CacheCreation5mTokens = cacheWriteTTLFallback5mTokens
+					acc.usage.CacheCreation1hTokens = cacheWriteTTLFallback1hTokens
 				}
 			}
 			if chunk.Usage.CompletionTokensDetails != nil {

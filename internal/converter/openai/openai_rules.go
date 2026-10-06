@@ -133,7 +133,31 @@ func replaceModelFieldViaParse(body []byte, oldModel string, newToken []byte) []
 // is ambiguous for the server. Grouped (rather than keyed one-directionally) so the
 // check works regardless of which spelling the default itself happens to use.
 var defaultParamSynonymGroups = [][]string{
-	{"max_tokens", "max_completion_tokens"},
+	{"max_tokens", "max_completion_tokens", "max_output_tokens"},
+}
+
+// ResponsesDefaultParams returns defaults with its Chat Completions token-limit keys
+// (max_tokens / max_completion_tokens) renamed to the Responses API's max_output_tokens,
+// for applying a deployment's defaults to a /v1/responses body. Without the rename the
+// limit would land under a key the Responses API does not read. defaults is not modified.
+func ResponsesDefaultParams(defaults map[string]any) map[string]any {
+	limit, hasLimit := defaults["max_completion_tokens"]
+	if !hasLimit {
+		limit, hasLimit = defaults["max_tokens"]
+	}
+	if !hasLimit {
+		return defaults
+	}
+	out := make(map[string]any, len(defaults))
+	for k, v := range defaults {
+		if k != "max_tokens" && k != "max_completion_tokens" {
+			out[k] = v
+		}
+	}
+	if _, ok := out["max_output_tokens"]; !ok {
+		out["max_output_tokens"] = limit
+	}
+	return out
 }
 
 // ApplyDefaultParams sets each key of defaults that is absent from the top level of a
@@ -312,6 +336,23 @@ func matchModelFamily(modelID, family string) bool {
 		return true
 	}
 	return strings.HasPrefix(base, family+"-") || strings.HasPrefix(base, family+".")
+}
+
+// IsReasoningModel reports whether modelID belongs to one of the reasoning-capable
+// families this codebase already special-cases for sampling-parameter stripping (see
+// modelMappings/ReplaceBodyParam above: o1/o3/o4/gpt-5/gpt-6 all reject
+// temperature/top_p and support reasoning_effort). Reusing that exact family list here
+// keeps the two classifications in lockstep -- a model this router already treats as
+// reasoning-capable for one purpose is treated as reasoning-capable for every purpose,
+// rather than risking two independently-maintained lists drifting apart as new model
+// families ship.
+func IsReasoningModel(modelID string) bool {
+	for _, m := range modelMappings {
+		if matchModelFamily(modelID, m.prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 // SupportsReasoningEffortNone reports whether effort "none" turns reasoning off
