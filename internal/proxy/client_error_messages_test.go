@@ -70,7 +70,7 @@ func TestProxyRequestClientErrorMessages(t *testing.T) {
 					assert.NotContains(t, w.Body.String(), detail)
 				}
 				if tt.status == http.StatusBadRequest {
-					assert.Equal(t, "Context length exceeded", response.Error.Message)
+					assert.Equal(t, "This model's maximum context length is exceeded by the request", response.Error.Message)
 					assert.Equal(t, "invalid_request_error", response.Error.Type)
 					require.NotNil(t, response.Error.Code)
 					assert.Equal(t, "context_length_exceeded", *response.Error.Code)
