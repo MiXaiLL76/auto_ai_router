@@ -550,8 +550,8 @@ func (c *ProviderConverter) EmbeddingFanOutBodies() [][]byte {
 
 // EmbeddingUsageEstimated reports whether the last ResponseTo had to estimate
 // the usage of an embedContent-family embeddings reply from the request text,
-// because the provider returned no usageMetadata. Media parts are not in that
-// estimate, so the caller should log it.
+// because the provider returned no usageMetadata for some or all inputs. Media
+// parts are not in that estimate, so the caller should log it.
 func (c *ProviderConverter) EmbeddingUsageEstimated() bool {
 	return c.embeddingUsageEstimated
 }

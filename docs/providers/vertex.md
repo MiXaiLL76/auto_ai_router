@@ -466,7 +466,7 @@ client.embeddings.create(
 - There is no `task_type`: put the task into the text, as in the example.
 - On Vertex AI (use `location: global`) each vector is a separate `embedContent` call, sent in parallel. A retry on the next credential re-sends only the inputs that have no vector yet; an input Google rejects (400/413/422) while the others succeed is not retried.
 
-`usage.prompt_tokens_details` splits the tokens by modality (`text_tokens`, `image_tokens`, `audio_tokens`, `video_tokens`; PDF pages count as images), and each modality is billed at its own rate (see [Model Pricing](../litellm-integration/pricing.md)). If Google returns no usage, the text is estimated at ~4 characters per token (media is not counted) and a warning is logged.
+`usage.prompt_tokens_details` splits the tokens by modality (`text_tokens`, `image_tokens`, `audio_tokens`, `video_tokens`; PDF pages count as images), and each modality is billed at its own rate (see [Model Pricing](../litellm-integration/pricing.md)). If Google returns no usage for some or all inputs, their text is estimated at ~4 characters per token (media is not counted) and a warning is logged.
 
 ### Streaming
 

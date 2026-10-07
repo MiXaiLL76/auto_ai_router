@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"strings"
@@ -112,6 +113,10 @@ type embedContentResponse struct {
 	Embedding     *embedContentValues     `json:"embedding,omitempty"`
 	Embeddings    []embedContentValues    `json:"embeddings,omitempty"`
 	UsageMetadata *EmbeddingUsageMetadata `json:"usageMetadata,omitempty"`
+	// UnmeteredInputs lists the inputs of a merged fan-out whose reply
+	// carried no usage (see MergeEmbedContentResponses); they are not in
+	// UsageMetadata.
+	UnmeteredInputs []int `json:"unmeteredInputs,omitempty"`
 }
 
 type embedContentValues struct {
@@ -725,7 +730,8 @@ func GeminiEmbeddingToOpenAI(body []byte, model string, inputTexts []string) ([]
 // A reply without usage would otherwise bill nothing, so usage is then
 // estimated from the text parts of request (the OpenAI request body) and
 // estimated is true: the caller should log it, since media parts cannot be
-// sized from the request and stay unbilled.
+// sized from the request and stay unbilled. The same applies to the inputs
+// of a merged fan-out whose own reply carried no usage while others did.
 func EmbedContentToOpenAI(body []byte, model string, request []byte) (converted []byte, estimated bool, err error) {
 	var resp embedContentResponse
 	if err := json.Unmarshal(body, &resp); err != nil {
@@ -752,8 +758,18 @@ func EmbedContentToOpenAI(body []byte, model string, request []byte) (converted 
 	if resp.UsageMetadata != nil {
 		usage = resp.UsageMetadata.openAIUsage()
 	}
-	if usage.PromptTokens == 0 {
-		usage = estimateEmbedContentTextUsage(request)
+	switch {
+	case usage.PromptTokens == 0:
+		tokens := estimateEmbedContentTextTokens(request, nil)
+		usage = openai.OpenAIEmbeddingUsage{PromptTokens: tokens, TotalTokens: tokens}
+		estimated = true
+	case len(resp.UnmeteredInputs) > 0:
+		tokens := estimateEmbedContentTextTokens(request, resp.UnmeteredInputs)
+		usage.PromptTokens += tokens
+		usage.TotalTokens += tokens
+		if usage.PromptTokensDetails != nil {
+			usage.PromptTokensDetails.TextTokens += tokens
+		}
 		estimated = true
 	}
 	converted, err = json.Marshal(openai.OpenAIEmbeddingResponse{
@@ -765,17 +781,28 @@ func EmbedContentToOpenAI(body []byte, model string, request []byte) (converted 
 	return converted, estimated, err
 }
 
-// estimateEmbedContentTextUsage sizes the text parts of an embedContent-family
-// OpenAI request at ~4 characters per token, the estimate the legacy text-only
-// path uses. It is zero when request is empty or cannot be parsed.
-func estimateEmbedContentTextUsage(request []byte) openai.OpenAIEmbeddingUsage {
+// estimateEmbedContentTextTokens sizes the text parts of an
+// embedContent-family OpenAI request at ~4 characters per token, the estimate
+// the legacy text-only path uses: of the inputs at the given indices, or of
+// all inputs when indices is nil. It is zero when request is empty or cannot
+// be parsed.
+func estimateEmbedContentTextTokens(request []byte, indices []int) int {
 	var req openai.OpenAIEmbeddingRequest
 	if len(request) == 0 || json.Unmarshal(request, &req) != nil {
-		return openai.OpenAIEmbeddingUsage{}
+		return 0
 	}
 	contents, err := parseEmbeddingContents(req.Input)
 	if err != nil {
-		return openai.OpenAIEmbeddingUsage{}
+		return 0
+	}
+	if indices != nil {
+		selected := make([]*genai.Content, 0, len(indices))
+		for _, i := range indices {
+			if i >= 0 && i < len(contents) {
+				selected = append(selected, contents[i])
+			}
+		}
+		contents = selected
 	}
 	tokens := 0
 	for _, content := range contents {
@@ -785,37 +812,60 @@ func estimateEmbedContentTextUsage(request []byte) openai.OpenAIEmbeddingUsage {
 			}
 		}
 	}
-	return openai.OpenAIEmbeddingUsage{PromptTokens: tokens, TotalTokens: tokens}
+	return tokens
+}
+
+// embedContentReply is a single Vertex AI embedContent response.
+type embedContentReply struct {
+	Embedding     json.RawMessage         `json:"embedding"`
+	UsageMetadata *EmbeddingUsageMetadata `json:"usageMetadata,omitempty"`
+}
+
+func parseEmbedContentReply(body []byte) (embedContentReply, error) {
+	var reply embedContentReply
+	if err := json.Unmarshal(body, &reply); err != nil {
+		return reply, err
+	}
+	if len(reply.Embedding) == 0 || string(reply.Embedding) == "null" {
+		return reply, errors.New("carries no embedding")
+	}
+	return reply, nil
+}
+
+// IsEmbedContentReply reports whether body is a single embedContent response
+// that carries an embedding. A 2xx reply without one (an error object
+// instead, or nothing) is not a vector the request can use.
+func IsEmbedContentReply(body []byte) bool {
+	_, err := parseEmbedContentReply(body)
+	return err == nil
 }
 
 // MergeEmbedContentResponses joins single-content Vertex AI embedContent
 // responses, given in input order, into the batch shape EmbedContentToOpenAI
 // reads: {"embeddings": [...], "usageMetadata": {...}} with usage summed per
-// modality.
+// modality. When only some replies carry usage, the others are listed in
+// "unmeteredInputs" so that their usage gets estimated rather than billed as
+// zero.
 func MergeEmbedContentResponses(bodies [][]byte) ([]byte, error) {
-	type singleResponse struct {
-		Embedding     json.RawMessage         `json:"embedding"`
-		UsageMetadata *EmbeddingUsageMetadata `json:"usageMetadata,omitempty"`
-	}
 	merged := struct {
-		Embeddings    []json.RawMessage       `json:"embeddings"`
-		UsageMetadata *EmbeddingUsageMetadata `json:"usageMetadata,omitempty"`
+		Embeddings      []json.RawMessage       `json:"embeddings"`
+		UsageMetadata   *EmbeddingUsageMetadata `json:"usageMetadata,omitempty"`
+		UnmeteredInputs []int                   `json:"unmeteredInputs,omitempty"`
 	}{Embeddings: make([]json.RawMessage, len(bodies))}
 
 	var usage EmbeddingUsageMetadata
 	hasUsage := false
+	var unmetered []int
 	byModality := make(map[string]int)
 	var modalityOrder []string
 	for i, body := range bodies {
-		var single singleResponse
-		if err := json.Unmarshal(body, &single); err != nil {
+		single, err := parseEmbedContentReply(body)
+		if err != nil {
 			return nil, fmt.Errorf("embedContent response %d: %w", i, err)
 		}
-		if len(single.Embedding) == 0 || string(single.Embedding) == "null" {
-			return nil, fmt.Errorf("embedContent response %d carries no embedding", i)
-		}
 		merged.Embeddings[i] = single.Embedding
-		if single.UsageMetadata == nil {
+		if !single.UsageMetadata.metered() {
+			unmetered = append(unmetered, i)
 			continue
 		}
 		hasUsage = true
@@ -836,8 +886,15 @@ func MergeEmbedContentResponses(bodies [][]byte) ([]byte, error) {
 			})
 		}
 		merged.UsageMetadata = &usage
+		// Without any usage the whole request is estimated anyway.
+		merged.UnmeteredInputs = unmetered
 	}
 	return json.Marshal(merged)
+}
+
+// metered reports whether m reports any prompt tokens.
+func (m *EmbeddingUsageMetadata) metered() bool {
+	return m != nil && m.openAIUsage().PromptTokens > 0
 }
 
 func (m *EmbeddingUsageMetadata) modalityDetails() []EmbeddingModalityTokenCount {

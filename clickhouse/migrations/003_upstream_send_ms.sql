@@ -12,12 +12,13 @@
 --
 -- Pause AIR Kafka publishing before running this migration. Safe to re-run
 -- on its own -- but never run it again after
--- 004_explicit_cache_columns.sql/005_video_input_columns.sql have already
--- been applied: it rebuilds air.spend_logs_kafka from only this migration's
--- column set, narrowing it back below the columns those later migrations
--- already added (see 002_cache_web_search_columns.sql's doc comment for the
--- confirmed failure mode this causes). Apply 002/003/004/005 forward, in
--- order, never backward.
+-- 004_explicit_cache_columns.sql/005_tool_usage_columns.sql/
+-- 006_video_input_columns.sql have already been applied: it rebuilds
+-- air.spend_logs_kafka from only this migration's column set, narrowing it
+-- back below the columns those later migrations already added (see
+-- 002_cache_web_search_columns.sql's doc comment for the confirmed failure
+-- mode this causes). Apply 002/003/004/005/006 forward, in order, never
+-- backward.
 
 DROP TABLE IF EXISTS air.spend_logs_mv;
 

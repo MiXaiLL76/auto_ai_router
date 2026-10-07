@@ -3,6 +3,7 @@ package proxy
 import (
 	"bytes"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -50,7 +51,9 @@ func (c *embedContentFanOutReplies) forModel(model string) {
 type embedContentFanOutResult struct {
 	resp *http.Response
 	body []byte
-	err  error
+	// decoded is body without its Content-Encoding, set for a usable 2xx reply.
+	decoded []byte
+	err     error
 }
 
 // doEmbedContentFanOut sends one Vertex AI embedContent call per body that
@@ -58,10 +61,14 @@ type embedContentFanOutResult struct {
 // with it the credential's egress proxy) for each, and answers as if it were
 // a single upstream call:
 //
+//   - a reply exceeded the response size limit: ErrResponseBodyTooLarge, which
+//     the caller treats as on the single-call path (502, no retry);
 //   - every input has a reply: a synthesized 200 whose body is the replies
 //     joined in input order by vertex.MergeEmbedContentResponses;
-//   - some call got a non-2xx reply: that reply (the lowest input index), so
-//     retry, fail2ban and error mapping see the provider's own status and body;
+//   - some call got a non-2xx reply: that reply (the lowest input index, an
+//     input fault first), so retry, fail2ban and error mapping see the
+//     provider's own status and body. A 2xx reply that carries no embedding
+//     counts as a non-2xx one: the status its error body maps to, else 502;
 //   - otherwise the first transport error.
 //
 // The first failure stops launching further calls, since a partial set of
@@ -70,9 +77,10 @@ type embedContentFanOutResult struct {
 // the next credential attempt.
 //
 // inputFault reports a refusal that faults the input rather than the
-// credential: the provider rejected one input with a 400/413/422 while
-// embedding another on this same credential in this attempt. Every other
-// credential would reject it the same way, so the caller must not retry.
+// credential: the provider rejected one input with a 400/413/422 while other
+// inputs of this request got embedded, in this attempt or a previous one.
+// Every other credential would reject it the same way, so the caller must not
+// retry.
 func (p *Proxy) doEmbedContentFanOut(template *http.Request, model string, bodies [][]byte, replies *embedContentFanOutReplies) (resp *http.Response, inputFault bool, err error) {
 	replies.forModel(model)
 	keys := make([][sha256.Size]byte, len(bodies))
@@ -131,9 +139,20 @@ func (p *Proxy) doEmbedContentFanOut(template *http.Request, model string, bodie
 				return
 			}
 			results[i] = embedContentFanOutResult{resp: resp, body: data}
-			if !isSuccessStatus(resp.StatusCode) {
-				halt()
+			if isSuccessStatus(resp.StatusCode) {
+				decoded := []byte(decodeResponseBody(data, resp.Header.Get("Content-Encoding")))
+				if vertex.IsEmbedContentReply(decoded) {
+					results[i].decoded = decoded
+					return
+				}
+				// Not a vector: never kept, so a retry asks for this input again.
+				status, ok := statusCodeFromProviderBodyError(resp.StatusCode, decoded)
+				if !ok {
+					status = http.StatusBadGateway
+				}
+				resp.StatusCode, resp.Status = status, fmt.Sprintf("%d %s", status, http.StatusText(status))
 			}
+			halt()
 		}(i, body)
 	}
 	wg.Wait()
@@ -141,13 +160,14 @@ func (p *Proxy) doEmbedContentFanOut(template *http.Request, model string, bodie
 	var (
 		refused      *embedContentFanOutResult
 		transportErr error
+		tooLarge     error
 		succeeded    *http.Response
 	)
 	for i := range results {
 		result := &results[i]
 		switch {
 		case result.resp != nil && isSuccessStatus(result.resp.StatusCode):
-			replies.byInput[keys[i]] = []byte(decodeResponseBody(result.body, result.resp.Header.Get("Content-Encoding")))
+			replies.byInput[keys[i]] = result.decoded
 			if succeeded == nil {
 				succeeded = result.resp
 			}
@@ -155,15 +175,28 @@ func (p *Proxy) doEmbedContentFanOut(template *http.Request, model string, bodie
 			if refused == nil {
 				refused = result
 			}
+		case errors.Is(result.err, ErrResponseBodyTooLarge):
+			tooLarge = result.err
 		case result.err != nil:
 			if transportErr == nil {
 				transportErr = result.err
 			}
 		}
 	}
+	if tooLarge != nil {
+		return nil, false, tooLarge
+	}
 	if refused != nil {
-		inputFault = succeeded != nil && isEmbedContentInputFault(refused.resp.StatusCode)
-		return responseWithBody(refused.resp, refused.body), inputFault, nil
+		// Another input has a vector for this request: an input the provider
+		// cannot embed is at fault, whichever credential embedded the others.
+		if len(replies.byInput) > 0 {
+			for i := range results {
+				if result := &results[i]; result.resp != nil && isEmbedContentInputFault(result.resp.StatusCode) {
+					return responseWithBody(result.resp, result.body), true, nil
+				}
+			}
+		}
+		return responseWithBody(refused.resp, refused.body), false, nil
 	}
 	if transportErr != nil {
 		return nil, false, transportErr
@@ -175,7 +208,8 @@ func (p *Proxy) doEmbedContentFanOut(template *http.Request, model string, bodie
 	}
 	merged, err := vertex.MergeEmbedContentResponses(ordered)
 	if err != nil {
-		// An unusable reply must not be replayed into the next attempt.
+		// Not expected: replies are checked before they are kept. Still, an
+		// unusable reply must not be replayed into the next attempt.
 		replies.byInput = nil
 		return nil, false, fmt.Errorf("merge embedContent fan-out responses: %w", err)
 	}

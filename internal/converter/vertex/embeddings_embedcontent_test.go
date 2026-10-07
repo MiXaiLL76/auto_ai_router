@@ -391,6 +391,47 @@ func TestMergeEmbedContentResponses_RejectsReplyWithoutEmbedding(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestMergeEmbedContentResponses_PartialUsageEstimatesTheUnmeteredInputs(t *testing.T) {
+	// Only the first reply carries usage: the others must not bill as zero.
+	merged, err := MergeEmbedContentResponses([][]byte{
+		[]byte(`{"embedding":{"values":[1]},"usageMetadata":{"promptTokenCount":263,"totalTokenCount":263,"promptTokensDetails":[{"modality":"TEXT","tokenCount":5},{"modality":"IMAGE","tokenCount":258}]}}`),
+		[]byte(`{"embedding":{"values":[2]}}`),
+		[]byte(`{"embedding":{"values":[3]},"usageMetadata":{"promptTokenCount":0}}`),
+	})
+	require.NoError(t, err)
+	assert.JSONEq(t, `{
+		"embeddings": [{"values":[1]},{"values":[2]},{"values":[3]}],
+		"usageMetadata": {"promptTokenCount":263,"totalTokenCount":263,"promptTokensDetails":[{"modality":"TEXT","tokenCount":5},{"modality":"IMAGE","tokenCount":258}]},
+		"unmeteredInputs": [1, 2]
+	}`, string(merged))
+
+	// 12 + 8 characters -> 3 + 2 estimated tokens for inputs 1 and 2.
+	request := `{"model":"gemini-embedding-2","input":["metered input text",
+		"twelve chars", [{"type":"text","text":"eight ch"},{"type":"image_url","image_url":{"url":"data:image/png;base64,iVBORw0KGgo="}}]]}`
+	result, estimated, err := EmbedContentToOpenAI(merged, "gemini-embedding-2", []byte(request))
+	require.NoError(t, err)
+	assert.True(t, estimated)
+	var resp openai.OpenAIEmbeddingResponse
+	require.NoError(t, json.Unmarshal(result, &resp))
+	assert.Equal(t, 268, resp.Usage.PromptTokens)
+	assert.Equal(t, 268, resp.Usage.TotalTokens)
+	assert.Equal(t, &openai.OpenAIEmbeddingPromptDetails{TextTokens: 10, ImageTokens: 258}, resp.Usage.PromptTokensDetails)
+}
+
+func TestMergeEmbedContentResponses_FullUsageListsNoUnmeteredInputs(t *testing.T) {
+	merged, err := MergeEmbedContentResponses([][]byte{[]byte(`{"embedding":{"values":[1]}}`), []byte(`{"embedding":{"values":[2]}}`)})
+	require.NoError(t, err)
+	assert.JSONEq(t, `{"embeddings":[{"values":[1]},{"values":[2]}]}`, string(merged),
+		"no usage at all: the whole request is estimated, nothing to list")
+}
+
+func TestIsEmbedContentReply(t *testing.T) {
+	assert.True(t, IsEmbedContentReply([]byte(`{"embedding":{"values":[1]}}`)))
+	assert.False(t, IsEmbedContentReply([]byte(`{"error":{"code":429,"status":"RESOURCE_EXHAUSTED"}}`)))
+	assert.False(t, IsEmbedContentReply([]byte(`{"embedding":null}`)))
+	assert.False(t, IsEmbedContentReply([]byte(`not json`)))
+}
+
 func TestGeminiEmbeddingToOpenAI_PrefersUsageMetadataOverEstimate(t *testing.T) {
 	body := `{"embeddings":[{"values":[0.1]},{"values":[0.2]}],"usageMetadata":{"promptTokenCount":9}}`
 	result, err := GeminiEmbeddingToOpenAI([]byte(body), "gemini-embedding-001", []string{"a much longer text than nine tokens would suggest at all", "b"})

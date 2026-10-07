@@ -1935,6 +1935,13 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 				shouldRetry = false
 				break
 			}
+			if errors.Is(doErr, ErrResponseBodyTooLarge) {
+				// A fanned-out embeddings reply over the size limit: fatal, as
+				// on the single-call path below.
+				p.metrics.RecordCredentialAttemptError(cred.Name)
+				p.failResponseTooLarge(w, r, logCtx, cred, modelID, targetURL, doErr, start)
+				return
+			}
 			// Transport failure on one credential — retried with the next one;
 			// the final failure is logged at ERROR after the retry loop.
 			statusCode := http.StatusBadGateway
@@ -2048,20 +2055,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 				p.metrics.RecordCredentialAttemptError(cred.Name)
 			}
 			if errors.Is(readErr, ErrResponseBodyTooLarge) {
-				// Response too large — fatal, another credential won't help
-				p.logUpstreamError(r.Context(), "Failed to read response body: too large", http.StatusBadGateway, cred, modelID, nil,
-					"error", readErr,
-					"url", targetURL,
-					"request_id", logCtx.RequestID)
-				logCtx.Status = "failure"
-				logCtx.HTTPStatus = http.StatusBadGateway
-				logCtx.ErrorMsg = fmt.Sprintf("Failed to read response body: %v", readErr)
-				logCtx.ErrorOrigin = ErrorOriginResponseTooLarge
-				logCtx.TargetURL = targetURL
-				// Client-facing outcome decided (502 written to the client below,
-				// no further attempts) — record exactly once here.
-				p.metrics.RecordRequest(cred.Name, r.URL.Path, modelID, http.StatusBadGateway, time.Since(start))
-				WriteErrorBadGateway(w, "upstream response too large")
+				p.failResponseTooLarge(w, r, logCtx, cred, modelID, targetURL, readErr, start)
 				return
 			}
 			// Transport error reading body — retryable with another credential
@@ -2082,9 +2076,9 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 		// Check if we should retry with another same-type credential
 		shouldRetry, retryReason = p.shouldRetry(cred, resp.StatusCode, responseBody)
 		if shouldRetry && fanOutInputFault {
-			// The provider refused one input while embedding others on this
-			// same credential: the input is at fault, and every further
-			// credential would refuse it the same way.
+			// The provider refused one input while others of this request got
+			// embedded: the input is at fault, and every further credential
+			// would refuse it the same way.
 			shouldRetry = false
 		}
 		if !shouldRetry {
@@ -2253,9 +2247,9 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 				tokenUsageOptions.AudioInputIncludesCachedAudio = false
 				p.logTransformedResponse(r.Context(), cred.Name, string(cred.Type), finalResponseBody)
 				if conv.EmbeddingUsageEstimated() {
-					// Billed from a text-length estimate: media parts of this
-					// request are not in it.
-					p.logger.WarnContext(r.Context(), "Embedding response carried no usageMetadata, prompt tokens estimated from the request text",
+					// Billed (in part) from a text-length estimate: media parts
+					// of the inputs without usage are not in it.
+					p.logger.WarnContext(r.Context(), "Embedding response lacked usageMetadata for some or all inputs, their prompt tokens estimated from the request text",
 						"credential", cred.Name, "provider", string(cred.Type),
 						"model", modelID, "request_id", logCtx.RequestID)
 				}
@@ -2731,6 +2725,24 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 			p.setSessionBinding(logCtx.SessionID, modelID, cred.Name)
 		}
 	}
+}
+
+// failResponseTooLarge answers 502 for an upstream response over the size
+// limit. It is fatal: another credential won't help.
+func (p *Proxy) failResponseTooLarge(w http.ResponseWriter, r *http.Request, logCtx *RequestLogContext, cred *config.CredentialConfig, modelID, targetURL string, readErr error, start time.Time) {
+	p.logUpstreamError(r.Context(), "Failed to read response body: too large", http.StatusBadGateway, cred, modelID, nil,
+		"error", readErr,
+		"url", targetURL,
+		"request_id", logCtx.RequestID)
+	logCtx.Status = "failure"
+	logCtx.HTTPStatus = http.StatusBadGateway
+	logCtx.ErrorMsg = fmt.Sprintf("Failed to read response body: %v", readErr)
+	logCtx.ErrorOrigin = ErrorOriginResponseTooLarge
+	logCtx.TargetURL = targetURL
+	// Client-facing outcome decided (502 written to the client, no further
+	// attempts) — record exactly once here.
+	p.metrics.RecordRequest(cred.Name, r.URL.Path, modelID, http.StatusBadGateway, time.Since(start))
+	WriteErrorBadGateway(w, "upstream response too large")
 }
 
 // readLimitedResponseBody reads a response body with size limit protection.
