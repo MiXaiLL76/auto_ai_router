@@ -3,7 +3,6 @@ package anthropicresponses
 import (
 	"encoding/json"
 	"fmt"
-	"strings"
 
 	"github.com/mixaill76/auto_ai_router/internal/converter/anthropic"
 	converterutil "github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
@@ -273,25 +272,14 @@ func inputToAnthropicMessages(input interface{}) ([]anthropic.AnthropicMessage, 
 		case "reasoning":
 			// Include reasoning as a thinking block in an assistant message.
 			flushPendingToolUse()
-			var thinkingText strings.Builder
-			if summary, ok := itemMap["summary"].([]interface{}); ok {
-				for _, s := range summary {
-					if sm, ok := s.(map[string]interface{}); ok {
-						if t, ok := sm["text"].(string); ok {
-							thinkingText.WriteString(t)
-						}
-					}
-				}
-			}
+			thinkingText := responses.ReasoningItemText(itemMap)
 			encContent, _ := itemMap["encrypted_content"].(string)
-			if thinkingText.Len() > 0 || encContent != "" {
-				block := anthropic.ContentBlock{Type: "thinking"}
-				if encContent != "" {
-					// Preserve encrypted thinking for round-trip to same provider.
-					block.Signature = encContent
-				} else {
-					block.Thinking = thinkingText.String()
-				}
+			if thinkingText != "" || encContent != "" {
+				// The signature (encrypted_content, see anthropicContentToOutputItems) is
+				// verified against the thinking text it was issued for, so the
+				// text travels with it: anthropicContentToOutputItems put the full
+				// thinking into the summary.
+				block := anthropic.ContentBlock{Type: "thinking", Thinking: thinkingText, Signature: encContent}
 				messages = append(messages, anthropic.AnthropicMessage{
 					Role:    "assistant",
 					Content: []anthropic.ContentBlock{block},

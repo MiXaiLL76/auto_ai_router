@@ -1357,6 +1357,59 @@ func TestExtractTokenUsage_CacheWriteTokens(t *testing.T) {
 	}
 }
 
+// TestExtractTokenUsage_KimiCacheWriteTTLFromHeaders covers Kimi/Moonshot's
+// shape: the body only ever reports the aggregate via
+// usage.prompt_tokens_details.cache_write_tokens (cache_creation_token_details
+// stays null), so the 5m/1h split must come from the caller-supplied
+// CacheWriteTTLHeader5mTokens/1hTokens options (sourced from the
+// Msh-Usage-Cache-Write-Tokens-5m/-1h response headers).
+func TestExtractTokenUsage_KimiCacheWriteTTLFromHeaders(t *testing.T) {
+	body := []byte(`{"usage":{"prompt_tokens":1100,"completion_tokens":10,"prompt_tokens_details":{"cache_write_tokens":1000}}}`)
+
+	t.Run("1h header split applied when body has no breakdown", func(t *testing.T) {
+		usage := ExtractTokenUsageWithOptions(body, TokenUsageExtractionOptions{
+			CacheWriteTTLHeader5mTokens: 200,
+			CacheWriteTTLHeader1hTokens: 800,
+		})
+		if usage == nil {
+			t.Fatal("expected usage")
+		}
+		if usage.CacheCreationTokens != 1000 {
+			t.Fatalf("expected aggregate CacheCreationTokens=1000 (from body), got %d", usage.CacheCreationTokens)
+		}
+		if usage.CacheCreation5mTokens != 200 || usage.CacheCreation1hTokens != 800 {
+			t.Fatalf("expected 5m=200/1h=800 from headers, got 5m=%d/1h=%d", usage.CacheCreation5mTokens, usage.CacheCreation1hTokens)
+		}
+	})
+
+	t.Run("body breakdown wins over headers when both present", func(t *testing.T) {
+		bodyWithBreakdown := []byte(`{"usage":{"prompt_tokens":1100,"completion_tokens":10,"prompt_tokens_details":{"cache_write_tokens":1000,"cache_creation_token_details":{"ephemeral_5m_input_tokens":300,"ephemeral_1h_input_tokens":700}}}}`)
+		usage := ExtractTokenUsageWithOptions(bodyWithBreakdown, TokenUsageExtractionOptions{
+			CacheWriteTTLHeader5mTokens: 200,
+			CacheWriteTTLHeader1hTokens: 800,
+		})
+		if usage == nil {
+			t.Fatal("expected usage")
+		}
+		if usage.CacheCreation5mTokens != 300 || usage.CacheCreation1hTokens != 700 {
+			t.Fatalf("expected body breakdown 5m=300/1h=700 to win, got 5m=%d/1h=%d", usage.CacheCreation5mTokens, usage.CacheCreation1hTokens)
+		}
+	})
+
+	t.Run("no headers means no split", func(t *testing.T) {
+		usage := ExtractTokenUsageWithOptions(body, TokenUsageExtractionOptions{})
+		if usage == nil {
+			t.Fatal("expected usage")
+		}
+		if usage.CacheCreation5mTokens != 0 || usage.CacheCreation1hTokens != 0 {
+			t.Fatalf("expected no split without headers, got 5m=%d/1h=%d", usage.CacheCreation5mTokens, usage.CacheCreation1hTokens)
+		}
+		if usage.CacheCreationTokens != 1000 {
+			t.Fatalf("expected aggregate CacheCreationTokens=1000, got %d", usage.CacheCreationTokens)
+		}
+	})
+}
+
 func TestExtractTokenUsage_ResponsesAPIStreamingEvent(t *testing.T) {
 	// Responses API streaming event format: response.completed SSE event
 	// Usage is nested inside response.usage, not at top level
@@ -1532,4 +1585,48 @@ func buildBedrockEventStreamFrame(t *testing.T, innerJSON string) []byte {
 	binary.BigEndian.PutUint32(frame[4:8], 0)
 	copy(frame[12:], payload)
 	return frame
+}
+
+func TestExtractTokenUsage_CacheType(t *testing.T) {
+	tests := []struct {
+		name     string
+		body     string
+		wantType string
+	}{
+		{
+			name:     "explicit cache chat completions",
+			body:     `{"usage":{"prompt_tokens":100,"completion_tokens":10,"prompt_tokens_details":{"cached_tokens":60,"cache_type":"ephemeral","cache_creation_input_tokens":30,"cache_creation":{"ephemeral_5m_input_tokens":30}}}}`,
+			wantType: "ephemeral",
+		},
+		{
+			name:     "no cache_type means implicit",
+			body:     `{"usage":{"prompt_tokens":100,"completion_tokens":10,"prompt_tokens_details":{"cached_tokens":60}}}`,
+			wantType: "",
+		},
+		{
+			name:     "responses API input_tokens_details carries cache_type",
+			body:     `{"usage":{"input_tokens":100,"output_tokens":10,"input_tokens_details":{"cached_tokens":60,"cache_type":"ephemeral"}}}`,
+			wantType: "ephemeral",
+		},
+		{
+			name:     "nested streaming response.completed carries cache_type",
+			body:     `{"type":"response.completed","response":{"usage":{"input_tokens":100,"output_tokens":10,"input_tokens_details":{"cached_tokens":60,"cache_type":"ephemeral"}}}}`,
+			wantType: "ephemeral",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			usage := ExtractTokenUsage([]byte(tt.body))
+			if usage == nil {
+				t.Fatalf("expected usage for %s", tt.name)
+			}
+			if usage.CacheType != tt.wantType {
+				t.Fatalf("expected CacheType=%q, got %q", tt.wantType, usage.CacheType)
+			}
+			if usage.CachedInputTokens != 60 {
+				t.Fatalf("expected cached_tokens=60, got %d", usage.CachedInputTokens)
+			}
+		})
+	}
 }

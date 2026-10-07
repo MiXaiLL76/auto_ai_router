@@ -42,6 +42,7 @@ nav = [
     { "Security" = "advanced/security.md" },
     { "Load Balancing" = "advanced/balancing.md" },
     { "Fail2Ban" = "advanced/f2b.md" },
+    { "Retries and Request Cleanup" = "advanced/retry.md" },
     { "Session-Sticky Routing" = "advanced/session_sticky.md" },
     { "Responses API" = "advanced/responses.md" },
     { "Redis / Valkey" = "advanced/redis.md" },

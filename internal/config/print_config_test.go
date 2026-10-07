@@ -3,6 +3,7 @@ package config
 import (
 	"bytes"
 	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
@@ -281,4 +282,38 @@ func TestPrintConfig_EmptyModels(t *testing.T) {
 
 	output := buf.String()
 	assert.NotEmpty(t, output)
+}
+
+func TestPrintConfig_VisionFallback(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, nil))
+	noVision := false
+	cfg := &Config{
+		Models: []ModelRPMConfig{
+			{Name: "glm", Credential: "vllm", SupportsVision: &noVision},
+			{Name: "gpt-oss", Credential: "vllm"},
+		},
+		VisionFallback: VisionFallbackConfig{Mode: VisionFallbackDescribe, DescribeModel: "qwen-vl", MaxImages: 4},
+	}
+
+	PrintConfig(logger, cfg)
+
+	out := buf.String()
+	assert.Contains(t, out, `"supports_vision":false`)
+	assert.Equal(t, 1, strings.Count(out, `"supports_vision"`), "only models that declare the flag log it")
+	assert.Contains(t, out, `"msg":"vision_fallback"`)
+	assert.Contains(t, out, `"describe_model":"qwen-vl"`)
+}
+
+func TestPrintConfig_VisionFallbackOmittedWhenUnused(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, nil))
+	cfg := &Config{
+		Models:         []ModelRPMConfig{{Name: "gpt-oss", Credential: "vllm"}},
+		VisionFallback: VisionFallbackConfig{Mode: VisionFallbackReject, MaxImages: DefaultVisionMaxImages},
+	}
+
+	PrintConfig(logger, cfg)
+
+	assert.NotContains(t, buf.String(), `"msg":"vision_fallback"`)
 }

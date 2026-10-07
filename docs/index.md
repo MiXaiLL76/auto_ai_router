@@ -55,11 +55,13 @@ graph LR
 ## Advanced
 
 - [Load Balancing](advanced/balancing.md) — round-robin, fallback credentials
+- [Retries and Request Cleanup](advanced/retry.md) — which upstream errors are retried, reasoning effort mapping
 - [Session-Sticky Routing](advanced/session_sticky.md) — cache affinity for multi-turn conversations
 - [Responses API](advanced/responses.md) — multi-turn support, passthrough models
 - [Redis / Valkey](advanced/redis.md) — distributed rate limiting and response store
 - [Security](advanced/security.md) — master key, token auth
 - [Model Aliases](advanced/model_alias.md) — routing by alias
+- [Vision Fallback](advanced/vision_fallback.md) — images sent to text-only models: reject, strip or describe with a vision model
 - [Troubleshooting](advanced/troubleshooting.md)
 
 ## LiteLLM Integration

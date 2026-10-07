@@ -272,16 +272,47 @@ func injectIncludeUsageRaw(reqBody map[string]goccyjson.RawMessage) error {
 	return nil
 }
 
-// stripClientControlledServiceTier removes the two request locations through
-// which clients may select a more expensive upstream service tier. It is
-// intentionally not recursive: service_tier in metadata, messages, or tool
-// schemas is user data and must be preserved.
-func stripClientControlledServiceTier(reqBody map[string]goccyjson.RawMessage) (bool, error) {
-	changed := false
-	if _, exists := reqBody["service_tier"]; exists {
-		delete(reqBody, "service_tier")
-		changed = true
+// clientControlledBillingParams are request parameters through which a client
+// could make the upstream bill us for more than the router charges back:
+//   - service_tier: a more expensive service tier (e.g. xAI/OpenAI "priority",
+//     billed at a premium the router does not price);
+//   - deferred: xAI deferred completions, which return only a request_id —
+//     the provider still runs and bills the generation, but the response the
+//     router sees carries no usage to charge;
+//   - search_parameters: xAI's legacy Live Search, billed per source by xAI
+//     but not priced by the router.
+var clientControlledBillingParams = []string{"service_tier", "deferred", "search_parameters"}
+
+// isClientControlledBillingFormField reports whether a multipart field name
+// sets one of clientControlledBillingParams, directly or through extra_body.
+func isClientControlledBillingFormField(name string) bool {
+	for _, param := range clientControlledBillingParams {
+		if name == param || name == "extra_body["+param+"]" || name == "extra_body."+param {
+			return true
+		}
 	}
+	return false
+}
+
+// deleteClientControlledBillingParams removes clientControlledBillingParams
+// from one JSON object level, reporting whether anything was removed.
+func deleteClientControlledBillingParams(object map[string]goccyjson.RawMessage) bool {
+	changed := false
+	for _, param := range clientControlledBillingParams {
+		if _, exists := object[param]; exists {
+			delete(object, param)
+			changed = true
+		}
+	}
+	return changed
+}
+
+// stripClientControlledBillingParams removes clientControlledBillingParams
+// from the two request locations through which clients may set them: the
+// top level and extra_body. It is intentionally not recursive: the same names
+// in metadata, messages, or tool schemas are user data and must be preserved.
+func stripClientControlledBillingParams(reqBody map[string]goccyjson.RawMessage) (bool, error) {
+	changed := deleteClientControlledBillingParams(reqBody)
 
 	extraBodyRaw, exists := reqBody["extra_body"]
 	if !exists {
@@ -296,11 +327,10 @@ func stripClientControlledServiceTier(reqBody map[string]goccyjson.RawMessage) (
 	if err := goccyjson.Unmarshal(extraBodyRaw, &extraBody); err != nil {
 		return changed, err
 	}
-	if _, exists := extraBody["service_tier"]; !exists {
+	if !deleteClientControlledBillingParams(extraBody) {
 		return changed, nil
 	}
 
-	delete(extraBody, "service_tier")
 	sanitizedExtraBody, err := goccyjson.Marshal(extraBody)
 	if err != nil {
 		return true, err
@@ -377,7 +407,7 @@ func sanitizeJSONRequestBody(body []byte, isMessagesAPI bool) (sanitizedRequestB
 		return result, nil // Existing invalid-body handling reports missing model.
 	}
 
-	changed, err := stripClientControlledServiceTier(reqBody)
+	changed, err := stripClientControlledBillingParams(reqBody)
 	if err != nil {
 		return sanitizedRequestBody{}, err
 	}
@@ -490,7 +520,7 @@ func sanitizeMultipartRequestBody(body []byte, params map[string]string) (saniti
 			return sanitizedRequestBody{}, invalidMultipartError(closeErr)
 		}
 
-		if name == "service_tier" || name == "extra_body[service_tier]" || name == "extra_body.service_tier" {
+		if isClientControlledBillingFormField(name) {
 			result.Changed = true
 			continue
 		}
@@ -502,8 +532,7 @@ func sanitizeMultipartRequestBody(body []byte, params map[string]string) (saniti
 				if err := goccyjson.Unmarshal(data, &extraBody); err != nil {
 					return sanitizedRequestBody{}, invalidMultipartError(err)
 				}
-				if _, exists := extraBody["service_tier"]; exists {
-					delete(extraBody, "service_tier")
+				if deleteClientControlledBillingParams(extraBody) {
 					data, err = goccyjson.Marshal(extraBody)
 					if err != nil {
 						return sanitizedRequestBody{}, invalidMultipartError(err)

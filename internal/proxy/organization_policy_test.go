@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -23,7 +24,9 @@ import (
 type organizationPolicyTestDB struct {
 	litellmdb.NoopManager
 	tokens map[string]*dbmodels.TokenInfo
-	logs   []*dbmodels.SpendLogEntry
+	// mu guards logs: vision describe calls log spend from parallel goroutines.
+	mu   sync.Mutex
+	logs []*dbmodels.SpendLogEntry
 }
 
 func (d *organizationPolicyTestDB) IsEnabled() bool           { return true }
@@ -39,6 +42,8 @@ func (d *organizationPolicyTestDB) ValidateToken(_ context.Context, rawToken str
 }
 
 func (d *organizationPolicyTestDB) LogSpend(entry *dbmodels.SpendLogEntry) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
 	d.logs = append(d.logs, entry)
 	return nil
 }

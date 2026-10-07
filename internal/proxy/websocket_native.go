@@ -15,6 +15,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/converter/openai"
 	promanutils "github.com/mixaill76/auto_ai_router/internal/converter/proman/utils"
+	"github.com/mixaill76/auto_ai_router/internal/httputil"
 	"github.com/mixaill76/auto_ai_router/internal/requestid"
 )
 
@@ -398,7 +399,7 @@ func (s *nativeWSSession) prepare(event map[string]json.RawMessage, historyToken
 	logCtx.WebSearchRequested, logCtx.WebSearchContextSize = extractWebSearchRequestUsage(prepared.body, "application/json")
 	s.proxy.setPromptTokensEstimate(logCtx, prepared.body, prepared.realModelID)
 	logCtx.ActualCredentialName = s.actualCredential
-	return &nativeWSTurn{log: logCtx, body: prepared.body, accumulator: s.proxy.newCompletionTokenAccumulator(prepared.realModelID), finishKey: finishKey}, wire, true
+	return &nativeWSTurn{log: logCtx, body: prepared.body, accumulator: s.proxy.newCompletionTokenAccumulator(prepared.realModelID, logCtx), finishKey: finishKey}, wire, true
 }
 
 func nativeWebSocketURL(baseURL string) (string, error) {
@@ -450,6 +451,7 @@ func (s *nativeWSSession) connect(logCtx *RequestLogContext) error {
 			}
 		}
 	}
+	httputil.ApplyCredentialRequestHeaders(headers, cred)
 	dialer := websocket.Dialer{HandshakeTimeout: 30 * time.Second, Proxy: http.ProxyFromEnvironment}
 	conn, response, err := dialer.DialContext(s.request.Context(), target, headers)
 	if response != nil && response.Body != nil {

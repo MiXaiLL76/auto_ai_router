@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
 	"github.com/mixaill76/auto_ai_router/internal/upstreamerror"
 )
 
@@ -92,10 +93,11 @@ func isImageEndpoint(endpoint string) bool {
 }
 
 // dropProviderCost removes provider-side cost figures (OpenRouter-style
-// aggregators add them to usage) on every surface: they expose the upstream
+// aggregators add them to usage, xAI reports cost_in_usd_ticks and, on the
+// Responses API, cost_in_nano_usd) on every surface: they expose the upstream
 // price, while the client is billed by the router. Token counts are kept.
 func dropProviderCost(usage map[string]any) {
-	for _, field := range []string{"cost", "cost_details", "cost_in_usd_ticks", "is_byok"} {
+	for _, field := range []string{"cost", "cost_details", "cost_in_usd_ticks", "cost_in_nano_usd", "is_byok"} {
 		delete(usage, field)
 	}
 }
@@ -218,9 +220,7 @@ func normalizeCompletion(ctx Context, body map[string]any) error {
 		moveProviderSpecificField(message, "refusal")
 		moveProviderSpecificField(choice, "content_filter_results")
 		if reasoning, ok := message["reasoning"]; ok {
-			if _, exists := message["reasoning_content"]; !exists {
-				message["reasoning_content"] = reasoning
-			}
+			message["reasoning_content"] = converterutil.PickReasoningField(message["reasoning_content"], reasoning)
 			delete(message, "reasoning")
 		}
 

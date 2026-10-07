@@ -128,6 +128,7 @@ func (p *Proxy) buildKafkaSpendEvent(
 		CacheCreationTokens:      usage.CacheCreationTokens,
 		CacheCreation5mTokens:    usage.CacheCreation5mTokens,
 		CacheCreation1hTokens:    usage.CacheCreation1hTokens,
+		CacheType:                usage.CacheType,
 		CachedOutputTokens:       usage.CachedOutputTokens,
 		ReasoningTokens:          usage.ReasoningTokens,
 		AcceptedPredictionTokens: usage.AcceptedPredictionTokens,
@@ -137,6 +138,15 @@ func (p *Proxy) buildKafkaSpendEvent(
 		OutputImageTokens:        usage.OutputImageTokens,
 		WebSearchRequests:        usage.WebSearchRequests,
 		WebSearchContextSize:     usage.WebSearchContextSize,
+		XSearchCalls:             usage.XSearchCalls,
+		XSearchPosts:             usage.XSearchPosts,
+		XSearchProfiles:          usage.XSearchProfiles,
+		CodeExecutionCalls:       usage.CodeExecutionCalls,
+		AttachmentSearchCalls:    usage.AttachmentSearchCalls,
+		CollectionsSearchCalls:   usage.CollectionsSearchCalls,
+		MCPCalls:                 usage.MCPCalls,
+		ImageToolGenerations:     usage.ImageToolGenerations,
+		ImageToolEdits:           usage.ImageToolEdits,
 
 		TotalCost: cost,
 
@@ -161,11 +171,22 @@ func (p *Proxy) buildKafkaSpendEvent(
 		event.AudioOutputCost = tokenCosts.AudioOutputCost
 		event.ReasoningCost = tokenCosts.ReasoningCost
 		event.CachedInputCost = tokenCosts.CachedInputCost
+		event.ExplicitCacheReadCost = tokenCosts.ExplicitCachedInputCost
 		event.CacheCreationCost = tokenCosts.CacheCreationCost
 		event.CachedOutputCost = tokenCosts.CachedOutputCost
 		event.PredictionCost = tokenCosts.PredictionCost
 		event.ImageCost = tokenCosts.ImageCost
 		event.WebSearchCost = tokenCosts.WebSearchCost
+		event.XSearchCost = tokenCosts.XSearchCost
+		event.CodeExecutionCost = tokenCosts.CodeExecutionCost
+		event.AttachmentSearchCost = tokenCosts.AttachmentSearchCost
+		event.CollectionsSearchCost = tokenCosts.CollectionsSearchCost
+		event.ImageToolCost = tokenCosts.ImageGenerationToolCost
+		event.ToolUsageCost = tokenCosts.ToolUsageCost
+	}
+	if usage.ProviderCostUSD > 0 {
+		providerCost := usage.ProviderCostUSD
+		event.ProviderReportedCost = &providerCost
 	}
 
 	if status == "failure" {

@@ -167,6 +167,35 @@ type ModelRPMConfig struct {
 	// Explicit true/false overrides the default.
 	PassthroughMessages *bool `yaml:"passthrough_messages,omitempty"`
 
+	// ReasoningEffortMap rewrites the client's reasoning effort (chat
+	// reasoning_effort, chat_template_kwargs.reasoning_effort, Responses
+	// reasoning.effort) into a value this model accepts. nil = sent as is.
+	ReasoningEffortMap *ReasoningEffortMap `yaml:"reasoning_effort_map,omitempty"`
+
+	// ResponsesOnly marks a model whose upstream only accepts OpenAI's native
+	// /v1/responses endpoint and rejects /v1/chat/completions outright (some
+	// OpenAI reasoning-tier deployments are Responses-API-exclusive). When
+	// true, a client request to /v1/chat/completions for this model is
+	// converted to a Responses API request, sent to the provider's
+	// /v1/responses, and the Responses API response/stream is converted back
+	// to Chat Completions shape before reaching the client -- the mirror
+	// image of PassthroughResponses/the existing Responses->Chat conversion,
+	// in the opposite direction. Default false: nil/omitted means the model
+	// is called via /v1/chat/completions as normal.
+	//
+	// Coverage: only /v1/chat/completions and /v1/responses are handled. A
+	// client calling this model via /v1/messages still gets converted to
+	// /v1/chat/completions and sent to the (Responses-API-exclusive)
+	// upstream, which will reject it -- there is no Messages<->Responses
+	// path for this flag.
+	ResponsesOnly bool `yaml:"responses_only,omitempty"`
+
+	// SupportsVision declares whether the model accepts image inputs. nil = unknown:
+	// images are forwarded as-is. false = image inputs are handled by the top-level
+	// vision_fallback policy (reject / strip / describe) before the upstream call.
+	// From the database it is read from LiteLLM's model_info.supports_vision.
+	SupportsVision *bool `yaml:"supports_vision,omitempty"`
+
 	// DefaultParams are request-body defaults applied to a vLLM deployment when the
 	// client did not send the same key (LiteLLM deployment litellm_params such as
 	// chat_template_kwargs, temperature, top_k). Populated only by the database
@@ -177,15 +206,18 @@ type ModelRPMConfig struct {
 // UnmarshalYAML implements custom unmarshaling for ModelRPMConfig with env variable support.
 func (m *ModelRPMConfig) UnmarshalYAML(value *yaml.Node) error {
 	type tempConfig struct {
-		Name                 string `yaml:"name"`
-		Model                string `yaml:"model,omitempty"`
-		RPM                  string `yaml:"rpm"`
-		TPM                  string `yaml:"tpm"`
-		Weight               string `yaml:"weight"`
-		Credential           string `yaml:"credential,omitempty"`
-		PassthroughResponses string `yaml:"passthrough_responses,omitempty"`
-		WebSocketResponses   string `yaml:"websocket_responses,omitempty"`
-		PassthroughMessages  string `yaml:"passthrough_messages,omitempty"`
+		Name                 string              `yaml:"name"`
+		Model                string              `yaml:"model,omitempty"`
+		RPM                  string              `yaml:"rpm"`
+		TPM                  string              `yaml:"tpm"`
+		Weight               string              `yaml:"weight"`
+		Credential           string              `yaml:"credential,omitempty"`
+		PassthroughResponses string              `yaml:"passthrough_responses,omitempty"`
+		WebSocketResponses   string              `yaml:"websocket_responses,omitempty"`
+		PassthroughMessages  string              `yaml:"passthrough_messages,omitempty"`
+		ResponsesOnly        string              `yaml:"responses_only,omitempty"`
+		ReasoningEffortMap   *ReasoningEffortMap `yaml:"reasoning_effort_map,omitempty"`
+		SupportsVision       string              `yaml:"supports_vision,omitempty"`
 	}
 
 	var temp tempConfig
@@ -196,11 +228,16 @@ func (m *ModelRPMConfig) UnmarshalYAML(value *yaml.Node) error {
 	m.Name = resolveEnvString(temp.Name)
 	m.Model = resolveEnvString(temp.Model)
 	m.Credential = resolveEnvString(temp.Credential)
-	m.PassthroughResponses = nil
-	m.PassthroughMessages = nil
+	m.ReasoningEffortMap = nil
+	if !temp.ReasoningEffortMap.IsEmpty() {
+		m.ReasoningEffortMap = temp.ReasoningEffortMap
+	}
 
 	var err error
 	if m.WebSocketResponses, err = parseField(temp.WebSocketResponses, false, strconv.ParseBool, "websocket_responses"); err != nil {
+		return err
+	}
+	if m.ResponsesOnly, err = parseField(temp.ResponsesOnly, false, strconv.ParseBool, "responses_only for model '"+m.Name+"'"); err != nil {
 		return err
 	}
 	if m.RPM, err = parseField(temp.RPM, 0, strconv.Atoi, "rpm for model '"+m.Name+"'"); err != nil {
@@ -213,26 +250,14 @@ func (m *ModelRPMConfig) UnmarshalYAML(value *yaml.Node) error {
 		return err
 	}
 
-	if temp.PassthroughResponses != "" {
-		resolved := resolveEnvString(temp.PassthroughResponses)
-		if resolved != "" {
-			passthroughResponses, err := strconv.ParseBool(resolved)
-			if err != nil {
-				return fmt.Errorf("invalid passthrough_responses for model '%s': %w", m.Name, err)
-			}
-			m.PassthroughResponses = &passthroughResponses
-		}
+	if m.PassthroughResponses, err = parseOptionalBool(temp.PassthroughResponses, "passthrough_responses for model '"+m.Name+"'"); err != nil {
+		return err
 	}
-
-	if temp.PassthroughMessages != "" {
-		resolved := resolveEnvString(temp.PassthroughMessages)
-		if resolved != "" {
-			passthroughMessages, err := strconv.ParseBool(resolved)
-			if err != nil {
-				return fmt.Errorf("invalid passthrough_messages for model '%s': %w", m.Name, err)
-			}
-			m.PassthroughMessages = &passthroughMessages
-		}
+	if m.PassthroughMessages, err = parseOptionalBool(temp.PassthroughMessages, "passthrough_messages for model '"+m.Name+"'"); err != nil {
+		return err
+	}
+	if m.SupportsVision, err = parseOptionalBool(temp.SupportsVision, "supports_vision for model '"+m.Name+"'"); err != nil {
+		return err
 	}
 
 	return nil
@@ -241,6 +266,7 @@ func (m *ModelRPMConfig) UnmarshalYAML(value *yaml.Node) error {
 type Config struct {
 	Server               ServerConfig               `yaml:"server"`
 	Fail2Ban             Fail2BanConfig             `yaml:"fail2ban,omitempty"`
+	Retry                RetryConfig                `yaml:"retry,omitempty"`
 	Credentials          []CredentialConfig         `yaml:"credentials"`
 	Monitoring           MonitoringConfig           `yaml:"monitoring"`
 	Models               []ModelRPMConfig           `yaml:"models,omitempty"`
@@ -254,6 +280,7 @@ type Config struct {
 	OTEL                 OTELConfig                 `yaml:"otel,omitempty"`
 	Kafka                KafkaConfig                `yaml:"kafka,omitempty"`
 	Video                VideoConfig                `yaml:"video,omitempty"`
+	VisionFallback       VisionFallbackConfig       `yaml:"vision_fallback,omitempty"`
 	// ModelTemplates stores x-model-templates entries as raw interface{} so that
 	// both single-model mappings and lists of models can be defined as YAML anchors
 	// without type errors. The actual model data is extracted via anchor expansion.
@@ -273,6 +300,7 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 	type RawConfig struct {
 		Server               ServerConfig               `yaml:"server"`
 		Fail2Ban             Fail2BanConfig             `yaml:"fail2ban,omitempty"`
+		Retry                RetryConfig                `yaml:"retry,omitempty"`
 		Credentials          []CredentialConfig         `yaml:"credentials"`
 		Monitoring           MonitoringConfig           `yaml:"monitoring"`
 		Models               []ModelRPMConfig           `yaml:"models,omitempty"`
@@ -286,6 +314,7 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 		OTEL                 OTELConfig                 `yaml:"otel,omitempty"`
 		Kafka                KafkaConfig                `yaml:"kafka,omitempty"`
 		Video                VideoConfig                `yaml:"video,omitempty"`
+		VisionFallback       VisionFallbackConfig       `yaml:"vision_fallback,omitempty"`
 		ModelTemplates       map[string]interface{}     `yaml:"x-model-templates,omitempty"`
 	}
 
@@ -297,6 +326,7 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 	// Copy values to actual config
 	c.Server = raw.Server
 	c.Fail2Ban = raw.Fail2Ban
+	c.Retry = raw.Retry
 	c.Credentials = raw.Credentials
 	c.Monitoring = raw.Monitoring
 	c.Models = raw.Models
@@ -310,6 +340,7 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 	c.OTEL = raw.OTEL
 	c.Kafka = raw.Kafka
 	c.Video = raw.Video
+	c.VisionFallback = raw.VisionFallback
 	c.ModelTemplates = raw.ModelTemplates
 
 	return nil
@@ -845,6 +876,14 @@ type CredentialConfig struct {
 
 	// Proxy/AIR remote-router specific fields
 	IsFallback bool `yaml:"is_fallback,omitempty"`
+
+	// RequestHeaders are set on every upstream request sent with this direct
+	// provider credential (not air/proxy), replacing whatever the client sent
+	// under the same name; an empty value removes the header instead. Keys are
+	// canonical header names.
+	// Typical use: a fixed User-Agent for a provider whose WAF rejects some
+	// client User-Agents (Novita's Cloudflare answers Python-urllib with 403/1010).
+	RequestHeaders map[string]string `yaml:"request_headers,omitempty"`
 }
 
 func (c CredentialConfig) VisibleTo(visibility scope.Context) bool {
@@ -937,6 +976,10 @@ func (c CredentialConfig) SameProviderIdentity(other CredentialConfig) bool {
 		c.OpenAIProtocol == other.OpenAIProtocol &&
 		c.GoogleProtocol == other.GoogleProtocol &&
 		c.IsFallback == other.IsFallback
+	// RequestHeaders are deliberately not part of the identity: the learned
+	// metadata (remote models, provider scopes) exists only for air/proxy
+	// credentials, which cannot have request_headers, and a new User-Agent does
+	// not make a direct provider a different one.
 }
 
 // UnmarshalYAML implements custom unmarshaling for CredentialConfig with env variable support
@@ -966,6 +1009,8 @@ func (c *CredentialConfig) UnmarshalYAML(value *yaml.Node) error {
 		CredentialsJSON  string           `yaml:"credentials_json,omitempty"`
 		IsFallback       string           `yaml:"is_fallback,omitempty"`
 		Models           []ModelRPMConfig `yaml:"models,omitempty"`
+
+		RequestHeaders map[string]string `yaml:"request_headers,omitempty"`
 	}
 
 	var temp tempConfig
@@ -1032,6 +1077,10 @@ func (c *CredentialConfig) UnmarshalYAML(value *yaml.Node) error {
 	}
 	// Copy models decoded via YAML anchors / inline definitions
 	c.Models = temp.Models
+
+	if c.RequestHeaders, err = parseCredentialRequestHeaders(c.Name, c.Type, temp.RequestHeaders); err != nil {
+		return err
+	}
 
 	if _, err := ParseProxyURL(c.ProxyURL); err != nil {
 		return fmt.Errorf("credential %s: %w", c.Name, err)
@@ -1788,6 +1837,13 @@ func Load(path string) (*Config, error) {
 		cfg.Kafka = defaultKafkaConfig()
 	}
 
+	// A null value ("vision_fallback:" with every child commented out) is present
+	// but never reaches VisionFallbackConfig.UnmarshalYAML, so it needs the defaults too.
+	if !hasMappingKey(&root, "vision_fallback") || mappingValueIsNull(&root, "vision_fallback") {
+		cfg.VisionFallback = defaultVisionFallbackConfig()
+	}
+	cfg.VisionFallback.ApplyDefaults()
+
 	// Ensure HealthCheckPath is always set regardless of whether monitoring section exists.
 	// MonitoringConfig.UnmarshalYAML is only called when a "monitoring:" key is present in YAML.
 	cfg.Monitoring.HealthCheckPath = "/health"
@@ -2008,6 +2064,26 @@ func hasMappingKey(node *yaml.Node, key string) bool {
 	return false
 }
 
+// mappingValueIsNull reports whether key is present in the top-level mapping with an
+// empty or explicit null value.
+func mappingValueIsNull(node *yaml.Node, key string) bool {
+	if node == nil {
+		return false
+	}
+	if node.Kind == yaml.DocumentNode && len(node.Content) > 0 {
+		node = node.Content[0]
+	}
+	if node.Kind != yaml.MappingNode {
+		return false
+	}
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		if node.Content[i].Value == key {
+			return node.Content[i+1].Tag == "!!null"
+		}
+	}
+	return false
+}
+
 // Normalize cleans up configuration values
 func (c *Config) Normalize() {
 	// Remove /v1 suffix from base_url to avoid duplication
@@ -2019,6 +2095,16 @@ func (c *Config) Normalize() {
 func (c *Config) Validate() error {
 	if err := c.Video.Validate(); err != nil {
 		return err
+	}
+	if err := c.VisionFallback.Validate(); err != nil {
+		return err
+	}
+	if c.VisionFallback.Mode == VisionFallbackDescribe {
+		for _, model := range c.Models {
+			if model.Name == c.VisionFallback.DescribeModel && model.SupportsVision != nil && !*model.SupportsVision {
+				return fmt.Errorf("vision_fallback.describe_model %q is declared supports_vision: false", model.Name)
+			}
+		}
 	}
 	if c.Server.Port <= 0 || c.Server.Port > 65535 {
 		return fmt.Errorf("invalid port: %d", c.Server.Port)
@@ -2156,6 +2242,9 @@ func (c *Config) Validate() error {
 		}
 		if cred.OpenAIProtocol && cred.GoogleProtocol {
 			return fmt.Errorf("credential %s: openai_proto and google_proto are mutually exclusive", cred.Name)
+		}
+		if err := validateCredentialRequestHeaders(cred.Name, cred.Type, cred.RequestHeaders); err != nil {
+			return err
 		}
 
 		// Validate by provider type

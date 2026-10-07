@@ -3,7 +3,6 @@ package vertexresponses
 import (
 	"encoding/json"
 	"fmt"
-	"strings"
 
 	converterutil "github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
 	"github.com/mixaill76/auto_ai_router/internal/converter/responses"
@@ -204,24 +203,13 @@ func inputToContents(input interface{}) ([]*genai.Content, error) {
 			})
 
 		case "reasoning":
-			// Reasoning items carry model summary text; include as model content.
-			flushToolParts()
-			if summary, ok := itemMap["summary"].([]interface{}); ok {
-				var text strings.Builder
-				for _, s := range summary {
-					if sm, ok := s.(map[string]interface{}); ok {
-						if t, ok := sm["text"].(string); ok {
-							text.WriteString(t)
-						}
-					}
-				}
-				if text.Len() > 0 {
-					contents = append(contents, &genai.Content{
-						Role:  "model",
-						Parts: []*genai.Part{{Text: "[Reasoning]: " + text.String()}},
-					})
-				}
-			}
+			// Dropped. Gemini keeps reasoning continuity through thoughtSignature
+			// (carried on function calls), not through past thought text, and
+			// sending the text back as a visible model part would make the model
+			// read its own reasoning as an answer it already gave. The same item
+			// goes back as reasoning_content to Chat providers (responses
+			// package) and as a signed thinking block to Anthropic.
+			continue
 
 		default:
 			// Unknown item types are skipped to avoid corrupting the conversation.

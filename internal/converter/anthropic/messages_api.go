@@ -269,7 +269,7 @@ func userMessageToChat(message map[string]interface{}) ([]interface{}, error) {
 			copyCacheControl(block, part)
 			userContent = append(userContent, part)
 		case "image":
-			if imageURL := sourceToImageURL(block["source"]); imageURL != "" {
+			if imageURL := SourceToImageURL(block["source"]); imageURL != "" {
 				part := map[string]interface{}{"type": "image_url", "image_url": map[string]interface{}{"url": imageURL}}
 				copyCacheControl(block, part)
 				userContent = append(userContent, part)
@@ -456,7 +456,10 @@ func toolChoiceToChat(choice map[string]interface{}) interface{} {
 	}
 }
 
-func sourceToImageURL(raw interface{}) string {
+// SourceToImageURL turns an Anthropic image block source (base64 or url) into an
+// OpenAI-style image URL; a base64 source without media_type is taken as JPEG.
+// Returns "" for sources that have no URL form (file, missing data).
+func SourceToImageURL(raw interface{}) string {
 	source, _ := raw.(map[string]interface{})
 	switch source["type"] {
 	case "base64":
@@ -563,7 +566,7 @@ func toolResultContentToChat(raw interface{}) (interface{}, error) {
 		case "text":
 			converted = append(converted, map[string]interface{}{"type": "text", "text": stringValue(block["text"])})
 		case "image":
-			if imageURL := sourceToImageURL(block["source"]); imageURL != "" {
+			if imageURL := SourceToImageURL(block["source"]); imageURL != "" {
 				converted = append(converted, map[string]interface{}{"type": "image_url", "image_url": map[string]interface{}{"url": imageURL}})
 			}
 		case "document":
@@ -689,7 +692,13 @@ func makeOpenAISchemaStrict(schema map[string]interface{}) {
 	}
 }
 
-func ChatToMessages(body []byte, metadata MessagesAdapterMetadata) ([]byte, error) {
+// ChatToMessages converts a Chat Completions response body to the Anthropic
+// Messages API format. cacheWriteTTLFallback5mTokens/1hTokens carry the
+// cache-write TTL split sourced from upstream response headers (used by
+// Kimi/Moonshot, whose body never reports a 5m/1h breakdown); they are
+// applied only when the body itself has none. Pass 0, 0 when no such
+// fallback is available.
+func ChatToMessages(body []byte, metadata MessagesAdapterMetadata, cacheWriteTTLFallback5mTokens, cacheWriteTTLFallback1hTokens int) ([]byte, error) {
 	var response struct {
 		ID      string              `json:"id"`
 		Model   string              `json:"model"`
@@ -754,25 +763,34 @@ func ChatToMessages(body []byte, metadata MessagesAdapterMetadata) ([]byte, erro
 		"model":         response.Model,
 		"stop_reason":   chatFinishReasonToMessages(choice.FinishReason),
 		"stop_sequence": nil,
-		"usage":         chatUsageToMessages(response.Usage),
+		"usage":         chatUsageToMessages(response.Usage, cacheWriteTTLFallback5mTokens, cacheWriteTTLFallback1hTokens),
 	}
 	return json.Marshal(converted)
 }
 
-func chatUsageToMessages(usage *openai.OpenAIUsage) *AnthropicUsage {
+func chatUsageToMessages(usage *openai.OpenAIUsage, cacheWriteTTLFallback5mTokens, cacheWriteTTLFallback1hTokens int) *AnthropicUsage {
 	if usage == nil {
 		return &AnthropicUsage{}
 	}
 	cacheRead := 0
+	cacheType := ""
 	if usage.PromptTokensDetails != nil {
 		cacheRead = usage.PromptTokensDetails.CachedTokens
+		cacheType = usage.PromptTokensDetails.CacheType
 	}
 	cacheCreation, cacheCreation5m, cacheCreation1h := usage.PromptTokensDetails.CacheWrite()
+	// Kimi/Moonshot never reports a TTL split in the body — fall back to the
+	// header-sourced split the caller supplied.
+	if cacheCreation5m == 0 && cacheCreation1h == 0 {
+		cacheCreation5m = cacheWriteTTLFallback5mTokens
+		cacheCreation1h = cacheWriteTTLFallback1hTokens
+	}
 	result := &AnthropicUsage{
 		InputTokens:              max(usage.PromptTokens-cacheRead-cacheCreation, 0),
 		OutputTokens:             usage.CompletionTokens,
 		CacheReadInputTokens:     cacheRead,
 		CacheCreationInputTokens: cacheCreation,
+		CacheType:                cacheType,
 	}
 	// Billing downstream (stream reader, next AIR hop) sees only this usage:
 	// without the split a 1h write bills at the 5m price, without
@@ -814,20 +832,35 @@ func normalizeToolUseID(id string) string {
 }
 
 type messagesStreamState struct {
-	writer     io.Writer
-	model      string
-	metadata   MessagesAdapterMetadata
-	messageID  string
-	blockIndex int
-	blockType  string
-	toolIndex  int
-	finish     string
-	usage      *openai.OpenAIUsage
-	started    bool
+	writer                        io.Writer
+	model                         string
+	metadata                      MessagesAdapterMetadata
+	messageID                     string
+	blockIndex                    int
+	blockType                     string
+	toolIndex                     int
+	finish                        string
+	usage                         *openai.OpenAIUsage
+	started                       bool
+	cacheWriteTTLFallback5mTokens int
+	cacheWriteTTLFallback1hTokens int
 }
 
-func TransformChatStreamToMessages(reader io.Reader, writer io.Writer, model string, metadata MessagesAdapterMetadata) error {
-	state := messagesStreamState{writer: writer, model: model, metadata: metadata, messageID: "msg_" + uuid.NewString()}
+// TransformChatStreamToMessages converts a Chat Completions SSE stream to
+// Anthropic Messages API SSE. cacheWriteTTLFallback5mTokens/1hTokens carry
+// the cache-write TTL split sourced from upstream response headers (used by
+// Kimi/Moonshot, whose chunks never report a 5m/1h breakdown); applied only
+// when a chunk's own usage has none. Pass 0, 0 when no such fallback is
+// available.
+func TransformChatStreamToMessages(reader io.Reader, writer io.Writer, model string, metadata MessagesAdapterMetadata, cacheWriteTTLFallback5mTokens, cacheWriteTTLFallback1hTokens int) error {
+	state := messagesStreamState{
+		writer:                        writer,
+		model:                         model,
+		metadata:                      metadata,
+		messageID:                     "msg_" + uuid.NewString(),
+		cacheWriteTTLFallback5mTokens: cacheWriteTTLFallback5mTokens,
+		cacheWriteTTLFallback1hTokens: cacheWriteTTLFallback1hTokens,
+	}
 	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
 	for scanner.Scan() {
@@ -995,7 +1028,7 @@ func (s *messagesStreamState) finishStream() error {
 	if reason == "" {
 		reason = "end_turn"
 	}
-	usage := chatUsageToMessages(s.usage)
+	usage := chatUsageToMessages(s.usage, s.cacheWriteTTLFallback5mTokens, s.cacheWriteTTLFallback1hTokens)
 	if err := writeMessagesSSE(s.writer, "message_delta", map[string]interface{}{
 		"type":  "message_delta",
 		"delta": map[string]interface{}{"stop_reason": reason, "stop_sequence": nil},

@@ -36,6 +36,13 @@ Deployments read from the LiteLLM database (`LiteLLM_ProxyModelTable`) with
 [LiteLLM Database](../litellm-integration/litellm_db.md#models-from-the-litellm-database)
 for how names, aliases and default parameters are imported.
 
+## Text-only models and images
+
+A vLLM model without a vision encoder (GLM, gpt-oss) rejects image inputs with `400`.
+Mark such models with `supports_vision: false` and choose what AIR does with the images —
+reject early, strip them, or have a vision model describe them. See
+[Vision Fallback](../advanced/vision_fallback.md).
+
 ## Default parameters
 
 A LiteLLM deployment can carry default request parameters in its `litellm_params`
@@ -48,3 +55,14 @@ which is the precedence LiteLLM uses (the request wins over the deployment). A d
 Embeddings, the passed-through `/v1/responses` and other endpoints never receive them.
 
 Defaults are read from the LiteLLM database only; there is no YAML setting for them.
+
+## Errors and reasoning effort
+
+A `400` from a `vllm` credential is not replayed on the other replicas of the model:
+every replica runs the same template and limits, so it would fail the same way. See
+[Retries and Request Cleanup](../advanced/retry.md#why-vllm-does-not-retry-400) to
+change this.
+
+When a chat template accepts only some `reasoning_effort` values, set
+`reasoning_effort_map` on the model so client values are rewritten instead of
+rejected. See [Reasoning effort mapping](../advanced/retry.md#reasoning-effort-mapping).

@@ -849,6 +849,52 @@ func TestCalculateTokenCosts_CacheCreation1hCostsMoreThan5mForSameVolume(t *test
 	assert.InDelta(t, 0.006, oneHourCosts.TotalCost, 1e-12)
 }
 
+// TestCalculateTokenCosts_KimiK3CacheWriteTTL guards the kimi-k3 pricing
+// configured in model_prices.json against regressions: Kimi's 1h cache
+// write ($6/M at rate 1.3 => $7.80/M) must bill at exactly double its 5m
+// cache write ($3/M at rate 1.3 => $3.90/M, same as plain input), per the
+// Kimi Cache Write TTL billing spec.
+func TestCalculateTokenCosts_KimiK3CacheWriteTTL(t *testing.T) {
+	price := &ModelPrice{
+		InputCostPerToken:                   0.0000039,
+		OutputCostPerToken:                  0.0000195,
+		CacheReadInputTokenCost:             0.00000039,
+		CacheCreationInputTokenCost:         0.0000039,
+		CacheCreationInputTokenCostAbove1hr: 0.0000078,
+	}
+
+	t.Run("default TTL (5m) bills at the input rate", func(t *testing.T) {
+		usage := &converter.TokenUsage{
+			PromptTokens:          1_000_000,
+			CacheCreationTokens:   1_000_000,
+			CacheCreation5mTokens: 1_000_000,
+		}
+		costs := CalculateTokenCosts(usage, price)
+		assert.InDelta(t, 3.9, costs.CacheCreationCost, 1e-9)
+	})
+
+	t.Run("explicit 1h TTL bills at double the 5m rate", func(t *testing.T) {
+		usage := &converter.TokenUsage{
+			PromptTokens:          1_000_000,
+			CacheCreationTokens:   1_000_000,
+			CacheCreation1hTokens: 1_000_000,
+		}
+		costs := CalculateTokenCosts(usage, price)
+		assert.InDelta(t, 7.8, costs.CacheCreationCost, 1e-9)
+	})
+
+	t.Run("mixed 5m and 1h writes bill each bucket at its own rate", func(t *testing.T) {
+		usage := &converter.TokenUsage{
+			PromptTokens:          1_000_000,
+			CacheCreationTokens:   1_000_000,
+			CacheCreation5mTokens: 400_000,
+			CacheCreation1hTokens: 600_000,
+		}
+		costs := CalculateTokenCosts(usage, price)
+		assert.InDelta(t, 400_000*0.0000039+600_000*0.0000078, costs.CacheCreationCost, 1e-9)
+	})
+}
+
 func TestCalculateTokenCosts_CachedAudioUsesDedicatedRate(t *testing.T) {
 	usage := &converter.TokenUsage{
 		PromptTokens:           100,
@@ -1421,4 +1467,388 @@ func TestCalculateTokenCosts_CachedImageOverlapKeepsDedicatedImageRate(t *testin
 	assert.Equal(t, 0.0, costs.InputCost)
 	assert.InDelta(t, float64(20)*price.InputCostPerImageToken, costs.ImageCost, 1e-12)
 	assert.InDelta(t, float64(80)*price.CacheReadInputTokenCost, costs.CachedInputCost, 1e-12)
+}
+
+// --- Alibaba/Qwen Explicit Cache (cache_type="ephemeral") ---
+
+func TestCalculateTokenCosts_ExplicitCacheReadUsesDedicatedTariff(t *testing.T) {
+	// Explicit Cache Read: prompt includes cached tokens, cache_type = "ephemeral",
+	// cached_tokens > 0 -> billed at explicit_cache_read_input_token_cost.
+	usage := &converter.TokenUsage{
+		PromptTokens:      1507,
+		CompletionTokens:  267,
+		CachedInputTokens: 1486,
+		CacheType:         "ephemeral",
+	}
+
+	price := &ModelPrice{
+		InputCostPerToken:               0.000003,  // $3/1M
+		OutputCostPerToken:              0.000015,  // $15/1M
+		CacheReadInputTokenCost:         0.0000003, // $0.3/1M (implicit — must NOT be used)
+		ExplicitCacheReadInputTokenCost: 0.0000006, // $0.6/1M (explicit — must be used)
+		CacheCreationInputTokenCost:     0.00000375,
+	}
+
+	costs := CalculateTokenCosts(usage, price)
+
+	require.NotNil(t, costs)
+	// Regular input: 1507 - 1486 = 21 tokens × $3/1M
+	assert.InDelta(t, 21*0.000003, costs.InputCost, 1e-12)
+	// Explicit cache read: 1486 × $0.6/1M — separate field, not CachedInputCost
+	assert.InDelta(t, 1486*0.0000006, costs.ExplicitCachedInputCost, 1e-12)
+	assert.Zero(t, costs.CachedInputCost, "explicit cache read must not bill implicit cache read tariff")
+	assert.InDelta(t, 267*0.000015, costs.OutputCost, 1e-12)
+	assert.InDelta(t, 21*0.000003+1486*0.0000006+267*0.000015, costs.TotalCost, 1e-12)
+}
+
+func TestCalculateTokenCosts_ImplicitCacheReadStillUsesImplicitTariff(t *testing.T) {
+	// Same token counts but no cache_type: implicit cache read — the existing
+	// cache_read_input_token_cost tariff keeps applying, explicit tariff unused.
+	usage := &converter.TokenUsage{
+		PromptTokens:      1507,
+		CompletionTokens:  267,
+		CachedInputTokens: 1486,
+	}
+
+	price := &ModelPrice{
+		InputCostPerToken:               0.000003,
+		OutputCostPerToken:              0.000015,
+		CacheReadInputTokenCost:         0.0000003,
+		ExplicitCacheReadInputTokenCost: 0.0000006,
+	}
+
+	costs := CalculateTokenCosts(usage, price)
+
+	require.NotNil(t, costs)
+	assert.InDelta(t, 21*0.000003, costs.InputCost, 1e-12)
+	assert.InDelta(t, 1486*0.0000003, costs.CachedInputCost, 1e-12)
+	assert.Zero(t, costs.ExplicitCachedInputCost)
+	assert.InDelta(t, 21*0.000003+1486*0.0000003+267*0.000015, costs.TotalCost, 1e-12)
+}
+
+func TestCalculateTokenCosts_ExplicitCacheCreationUsesCreationTariff(t *testing.T) {
+	// Explicit Cache Creation: cache_creation_input_tokens > 0 is always billed
+	// at cache_creation tariff; cache_type only decides the cached READ tariff.
+	// cache_type="ephemeral", cached_tokens=0, creation>0.
+	usage := &converter.TokenUsage{
+		PromptTokens:          1507,
+		CompletionTokens:      20,
+		CacheCreationTokens:   1486,
+		CacheCreation5mTokens: 1486,
+		CacheType:             "ephemeral",
+	}
+
+	price := &ModelPrice{
+		InputCostPerToken:               0.000003,
+		OutputCostPerToken:              0.000015,
+		CacheReadInputTokenCost:         0.0000003,
+		ExplicitCacheReadInputTokenCost: 0.0000006,
+		CacheCreationInputTokenCost:     0.00000375,
+	}
+
+	costs := CalculateTokenCosts(usage, price)
+
+	require.NotNil(t, costs)
+	// Regular input: 1507 - 1486 = 21
+	assert.InDelta(t, 21*0.000003, costs.InputCost, 1e-12)
+	// Creation billed at creation tariff (5m tokens use the base creation rate)
+	assert.InDelta(t, 1486*0.00000375, costs.CacheCreationCost, 1e-12)
+	assert.Zero(t, costs.ExplicitCachedInputCost, "creation is not a cache read")
+	assert.Zero(t, costs.CachedInputCost)
+}
+
+func TestCalculateTokenCosts_ExplicitCacheReadAndCreationTogether(t *testing.T) {
+	// Alibaba explicit cache request can both read an existing prefix and
+	// create/extend the cache block: cached_tokens>0 AND cache_creation>0.
+	// Each part is billed separately, remaining prompt tokens as regular input.
+	usage := &converter.TokenUsage{
+		PromptTokens:        1827,
+		CompletionTokens:    511,
+		CachedInputTokens:   1486,
+		CacheCreationTokens: 335,
+		CacheType:           "ephemeral",
+	}
+
+	price := &ModelPrice{
+		InputCostPerToken:               0.000003,
+		OutputCostPerToken:              0.000015,
+		CacheReadInputTokenCost:         0.0000003,
+		ExplicitCacheReadInputTokenCost: 0.0000006,
+		CacheCreationInputTokenCost:     0.00000375,
+	}
+
+	costs := CalculateTokenCosts(usage, price)
+
+	require.NotNil(t, costs)
+	// Regular input: 1827 - 1486 - 335 = 6 tokens
+	assert.InDelta(t, 6*0.000003, costs.InputCost, 1e-12)
+	assert.InDelta(t, 1486*0.0000006, costs.ExplicitCachedInputCost, 1e-12)
+	assert.InDelta(t, 335*0.00000375, costs.CacheCreationCost, 1e-12)
+	assert.Zero(t, costs.CachedInputCost)
+	assert.InDelta(t, 511*0.000015, costs.OutputCost, 1e-12)
+	assert.InDelta(t, 6*0.000003+1486*0.0000006+335*0.00000375+511*0.000015, costs.TotalCost, 1e-12)
+}
+
+func TestCalculateTokenCosts_ExplicitCacheReadFullSessionTier(t *testing.T) {
+	// Alibaba full-session tier: the whole prompt determines the tariff for the
+	// explicit cache read as well. Prompt crosses 32k -> explicit above-32k rate.
+	usage := &converter.TokenUsage{
+		PromptTokens:      40_000,
+		CompletionTokens:  1_000,
+		CachedInputTokens: 38_000,
+		CacheType:         "ephemeral",
+	}
+
+	price := &ModelPrice{
+		InputCostPerToken:                       0.001,
+		OutputCostPerToken:                      0.002,
+		CacheReadInputTokenCost:                 0.0003,
+		ExplicitCacheReadInputTokenCost:         0.0006,
+		ExplicitCacheReadInputTokenCostAbove32k: 0.0005,
+		CacheCreationInputTokenCost:             0.001,
+	}
+
+	costs := CalculateTokenCosts(usage, price)
+
+	require.NotNil(t, costs)
+	// Full session: regular input (2k) AND explicit cache read (38k) both use the
+	// above-32k tier rate, applied to the whole request.
+	assert.InDelta(t, 2000*0.001, costs.InputCost, 1e-9) // base input rate (no above-32k input tier configured)
+	assert.InDelta(t, 38000*0.0005, costs.ExplicitCachedInputCost, 1e-9)
+	assert.Zero(t, costs.CachedInputCost)
+	assert.InDelta(t, 1000*0.002, costs.OutputCost, 1e-9)
+}
+
+func TestCalculateTokenCosts_ExplicitCacheReadFallsBackToImplicitRate(t *testing.T) {
+	// Model without an explicit cache read tariff: explicit-mode cached reads
+	// fall back to the implicit cache read rate (never to regular input rate).
+	usage := &converter.TokenUsage{
+		PromptTokens:      1507,
+		CompletionTokens:  100,
+		CachedInputTokens: 1486,
+		CacheType:         "ephemeral",
+	}
+
+	price := &ModelPrice{
+		InputCostPerToken:       0.000003,
+		OutputCostPerToken:      0.000015,
+		CacheReadInputTokenCost: 0.0000003,
+	}
+
+	costs := CalculateTokenCosts(usage, price)
+
+	require.NotNil(t, costs)
+	assert.InDelta(t, 21*0.000003, costs.InputCost, 1e-12)
+	assert.InDelta(t, 1486*0.0000003, costs.ExplicitCachedInputCost, 1e-12)
+	assert.Zero(t, costs.CachedInputCost)
+}
+
+func TestCalculateTokenCosts_ExplicitCacheReadFallsBackToRegularRate(t *testing.T) {
+	// No cache tariff at all: explicit-mode cached read falls back to regular
+	// input rate, same as the implicit path did before.
+	usage := &converter.TokenUsage{
+		PromptTokens:      110,
+		CompletionTokens:  10,
+		CachedInputTokens: 10,
+		CacheType:         "ephemeral",
+	}
+
+	price := &ModelPrice{
+		InputCostPerToken:  0.001,
+		OutputCostPerToken: 0.002,
+	}
+
+	costs := CalculateTokenCosts(usage, price)
+
+	require.NotNil(t, costs)
+	assert.InDelta(t, 100*0.001, costs.InputCost, 1e-12)
+	assert.InDelta(t, 10*0.001, costs.ExplicitCachedInputCost, 1e-12)
+	assert.InDelta(t, 110*0.001+10*0.002, costs.TotalCost, 1e-12)
+}
+
+func TestCalculateTokenCosts_CacheReadTokensFreeIgnoresExplicitFallback(t *testing.T) {
+	// cache_read_input_tokens_free + explicit mode without explicit tariff:
+	// cached reads stay free (explicit fallback inherits the free flag).
+	usage := &converter.TokenUsage{
+		PromptTokens:      100,
+		CompletionTokens:  10,
+		CachedInputTokens: 60,
+		CacheType:         "ephemeral",
+	}
+
+	price := &ModelPrice{
+		InputCostPerToken:        0.001,
+		OutputCostPerToken:       0.002,
+		CacheReadInputTokensFree: true,
+	}
+
+	costs := CalculateTokenCosts(usage, price)
+
+	require.NotNil(t, costs)
+	assert.InDelta(t, 40*0.001, costs.InputCost, 1e-12)
+	assert.Zero(t, costs.ExplicitCachedInputCost)
+	assert.Zero(t, costs.CachedInputCost)
+	assert.InDelta(t, 40*0.001+10*0.002, costs.TotalCost, 1e-12)
+}
+
+func TestCalculateTokenCosts_AlibabaExplicitCacheEndToEnd(t *testing.T) {
+	// Real Alibaba DashScope response shape (verified 2026-09-30 against
+	// ali-dashscope-sg via OpenAI-compatible Chat Completions): explicit cache
+	// read + creation in one request. usage.prompt_tokens_details carries
+	// cache_type, cached_tokens, cache_creation_input_tokens and the
+	// cache_creation.ephemeral_5m_input_tokens detail.
+	body := []byte(`{"id":"chatcmpl-x","object":"chat.completion","model":"qwen3.7-flash","choices":[],"usage":{"prompt_tokens":1827,"completion_tokens":511,"total_tokens":2338,"prompt_tokens_details":{"cached_tokens":1486,"cache_type":"ephemeral","cache_creation_input_tokens":335,"cache_write_tokens":335,"cache_creation":{"ephemeral_5m_input_tokens":335},"text_tokens":1827},"completion_tokens_details":{"reasoning_tokens":486,"text_tokens":511}}}`)
+
+	usage := converter.ExtractTokenUsage(body)
+	require.NotNil(t, usage)
+	require.Equal(t, "ephemeral", usage.CacheType)
+	require.Equal(t, 1486, usage.CachedInputTokens)
+	require.Equal(t, 335, usage.CacheCreationTokens)
+	require.Equal(t, 335, usage.CacheCreation5mTokens)
+
+	price := &ModelPrice{
+		// qwen3.7-flash style tariff, per-1M values converted to per-token
+		InputCostPerToken:               0.0000003,
+		OutputCostPerToken:              0.0000012,
+		CacheReadInputTokenCost:         0.00000015,
+		ExplicitCacheReadInputTokenCost: 0.000000075,
+		CacheCreationInputTokenCost:     0.0000009,
+	}
+
+	costs := CalculateTokenCosts(usage, price)
+	require.NotNil(t, costs)
+
+	// regular input: 1827 - 1486 - 335 = 6
+	assert.InDelta(t, 6*0.0000003, costs.InputCost, 1e-15)
+	// explicit cache read: 1486 * $0.075/1M
+	assert.InDelta(t, 1486*0.000000075, costs.ExplicitCachedInputCost, 1e-15)
+	assert.Zero(t, costs.CachedInputCost)
+	// creation: 335 * $0.9/1M (5m tokens use the base creation rate)
+	assert.InDelta(t, 335*0.0000009, costs.CacheCreationCost, 1e-15)
+	// output: reasoning tokens (486) are split out of completion_tokens (511)
+	// and billed at the reasoning rate, which falls back to the output rate;
+	// remaining 25 text tokens billed as regular output.
+	assert.InDelta(t, 25*0.0000012, costs.OutputCost, 1e-15)
+	assert.InDelta(t, 486*0.0000012, costs.ReasoningCost, 1e-15)
+	assert.InDelta(t, 6*0.0000003+1486*0.000000075+335*0.0000009+511*0.0000012, costs.TotalCost, 1e-15)
+}
+
+func TestCalculateTokenCosts_AlibabaExplicitCacheReadEndToEnd(t *testing.T) {
+	// Pure explicit cache read (no creation): real Alibaba response shape.
+	body := []byte(`{"id":"chatcmpl-y","object":"chat.completion","model":"qwen3.7-flash","choices":[],"usage":{"prompt_tokens":1507,"completion_tokens":267,"total_tokens":1774,"prompt_tokens_details":{"cached_tokens":1486,"cache_type":"ephemeral","cache_creation_input_tokens":0,"cache_write_tokens":0,"cache_creation":{"ephemeral_5m_input_tokens":0},"text_tokens":1507},"completion_tokens_details":{"reasoning_tokens":255,"text_tokens":267}}}`)
+
+	usage := converter.ExtractTokenUsage(body)
+	require.NotNil(t, usage)
+	require.Equal(t, "ephemeral", usage.CacheType)
+	require.Equal(t, 1486, usage.CachedInputTokens)
+	require.Zero(t, usage.CacheCreationTokens)
+
+	price := &ModelPrice{
+		InputCostPerToken:               0.0000003,
+		OutputCostPerToken:              0.0000012,
+		CacheReadInputTokenCost:         0.00000015, // must NOT be used
+		ExplicitCacheReadInputTokenCost: 0.000000075,
+		CacheCreationInputTokenCost:     0.0000009,
+	}
+
+	costs := CalculateTokenCosts(usage, price)
+	require.NotNil(t, costs)
+
+	assert.InDelta(t, 21*0.0000003, costs.InputCost, 1e-15)
+	assert.InDelta(t, 1486*0.000000075, costs.ExplicitCachedInputCost, 1e-15)
+	assert.Zero(t, costs.CachedInputCost)
+	assert.Zero(t, costs.CacheCreationCost)
+}
+
+func TestCalculateTokenCosts_ExplicitCacheReadAudioTokensUseExplicitRate(t *testing.T) {
+	// Cached AUDIO tokens in explicit-cache mode must bill at the explicit
+	// tariff, not silently fall back to the implicit cache-read rate just
+	// because no dedicated explicit-audio rate is configured.
+	usage := &converter.TokenUsage{
+		PromptTokens:           1507,
+		CompletionTokens:       267,
+		CachedInputTokens:      100,
+		CachedAudioInputTokens: 40,
+		CacheType:              "ephemeral",
+	}
+
+	price := &ModelPrice{
+		InputCostPerToken:               0.000003,
+		OutputCostPerToken:              0.000015,
+		CacheReadInputTokenCost:         0.0000003, // implicit — must NOT be used for any of the 100 cached tokens
+		ExplicitCacheReadInputTokenCost: 0.0000006, // explicit — must be used for ALL 100 cached tokens, audio included
+	}
+
+	costs := CalculateTokenCosts(usage, price)
+
+	require.NotNil(t, costs)
+	// 60 regular + 40 audio cached tokens, all at the explicit rate (no
+	// dedicated CacheReadInputAudioTokenCost configured, so audio falls back
+	// to the explicit rate too, not the implicit one).
+	assert.InDelta(t, 100*0.0000006, costs.ExplicitCachedInputCost, 1e-12)
+	assert.Zero(t, costs.CachedInputCost)
+}
+
+func TestCalculateTokenCosts_ExplicitCacheReadRespectsCacheReadInputTokensFree(t *testing.T) {
+	// CacheReadInputTokensFree must suppress explicit-cache billing exactly
+	// like it suppresses implicit-cache billing, even when an explicit
+	// tariff is configured on the model.
+	usage := &converter.TokenUsage{
+		PromptTokens:      100,
+		CompletionTokens:  10,
+		CachedInputTokens: 60,
+		CacheType:         "ephemeral",
+	}
+
+	price := &ModelPrice{
+		InputCostPerToken:               0.001,
+		OutputCostPerToken:              0.002,
+		ExplicitCacheReadInputTokenCost: 0.0006, // configured, but must be ignored — reads are free
+		CacheReadInputTokensFree:        true,
+	}
+
+	costs := CalculateTokenCosts(usage, price)
+
+	require.NotNil(t, costs)
+	assert.InDelta(t, 40*0.001, costs.InputCost, 1e-12)
+	assert.Zero(t, costs.ExplicitCachedInputCost, "free cache reads must stay free even in explicit mode")
+	assert.Zero(t, costs.CachedInputCost)
+}
+
+func TestCalculateTokenCosts_CacheReadInputTokensFreeAlsoFreesAudioTokens(t *testing.T) {
+	// Regression test: CacheReadInputTokensFree must zero out cached AUDIO
+	// tokens too, not just regular cached tokens. The audio rate
+	// (CacheReadInputAudioTokenCost) used to be read unconditionally,
+	// ignoring the free flag, in both implicit and explicit cache mode.
+	for _, tt := range []struct {
+		name      string
+		cacheType string
+	}{
+		{"implicit cache", ""},
+		{"explicit cache", "ephemeral"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			usage := &converter.TokenUsage{
+				PromptTokens:           100,
+				CompletionTokens:       10,
+				CachedInputTokens:      20,
+				CachedAudioInputTokens: 20,
+				CacheType:              tt.cacheType,
+			}
+
+			price := &ModelPrice{
+				InputCostPerToken:               0.001,
+				OutputCostPerToken:              0.002,
+				CacheReadInputAudioTokenCost:    0.002, // configured, but must be ignored — reads are free
+				ExplicitCacheReadInputTokenCost: 0.0006,
+				CacheReadInputTokensFree:        true,
+			}
+
+			costs := CalculateTokenCosts(usage, price)
+
+			require.NotNil(t, costs)
+			assert.Zero(t, costs.CachedInputCost)
+			assert.Zero(t, costs.ExplicitCachedInputCost, "free cache reads must stay free in explicit mode too")
+		})
+	}
 }

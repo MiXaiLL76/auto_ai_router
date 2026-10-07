@@ -9,6 +9,9 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/mixaill76/auto_ai_router/internal/converter"
+	"github.com/mixaill76/auto_ai_router/internal/models"
 )
 
 func buildSSEChunk(data string) string {
@@ -522,6 +525,147 @@ func TestStreamTransform_Usage(t *testing.T) {
 	assert.Equal(t, float64(3), outputDetails["audio_tokens"])
 }
 
+func TestStreamTransform_KimiCacheWriteTTLFromHeaderFallback(t *testing.T) {
+	// Kimi/Moonshot's streaming usage chunk only ever carries the aggregate
+	// via cache_write_tokens — no cache_creation_token_details/cache_creation
+	// sub-object, since the 5m/1h split only arrives on response headers. The
+	// caller (the proxy layer) reads those headers and must supply the split
+	// as a fallback, which should survive into both the emitted
+	// response.completed event and (transitively) the persisted Response.
+	stopReason := "stop"
+	usageChunk := `{"id":"chatcmpl-test","object":"chat.completion.chunk","model":"kimi-k3","choices":[],"usage":{"prompt_tokens":1100,"completion_tokens":10,"total_tokens":1110,"prompt_tokens_details":{"cache_write_tokens":1000}}}`
+
+	input := buildSSEChunk(buildChatChunk("test", nil)) +
+		buildSSEChunk(buildChatChunk("", &stopReason)) +
+		buildSSEChunk(usageChunk) +
+		"data: [DONE]\n\n"
+
+	var output bytes.Buffer
+	err := TransformChatStreamToResponsesWithMetaAndUsage(
+		strings.NewReader(input), &output, "kimi-k3", nil, false, 200, 800,
+	)
+	require.NoError(t, err)
+
+	result := output.String()
+	completedIdx := strings.Index(result, "event: response.completed\n")
+	require.NotEqual(t, -1, completedIdx)
+	afterEvent := result[completedIdx:]
+	dataIdx := strings.Index(afterEvent, "data: ")
+	require.NotEqual(t, -1, dataIdx)
+	dataLine := afterEvent[dataIdx+6:]
+	if endIdx := strings.Index(dataLine, "\n"); endIdx > 0 {
+		dataLine = dataLine[:endIdx]
+	}
+
+	var completedEvent struct {
+		Response struct {
+			Usage map[string]interface{} `json:"usage"`
+		} `json:"response"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(dataLine), &completedEvent))
+
+	details := completedEvent.Response.Usage["input_tokens_details"].(map[string]interface{})
+	assert.Equal(t, float64(1000), details["cache_creation_tokens"])
+	ttlDetails := details["cache_creation_token_details"].(map[string]interface{})
+	assert.Equal(t, float64(200), ttlDetails["ephemeral_5m_input_tokens"])
+	assert.Equal(t, float64(800), ttlDetails["ephemeral_1h_input_tokens"])
+}
+
+func TestStreamTransform_AlibabaExplicitCacheUsage(t *testing.T) {
+	// Alibaba's streaming usage chunk spells the cache-creation TTL detail
+	// cache_creation.ephemeral_5m_input_tokens (no _token_details suffix) and
+	// carries cache_type="ephemeral" — both must survive the Chat Completions
+	// -> Responses API SSE transform so billing (which reads the emitted
+	// response.completed event) sees them.
+	stopReason := "stop"
+	usageChunk := `{"id":"chatcmpl-test","object":"chat.completion.chunk","model":"qwen3.7-flash","choices":[],"usage":{"prompt_tokens":1827,"completion_tokens":511,"total_tokens":2338,"prompt_tokens_details":{"cached_tokens":1486,"cache_type":"ephemeral","cache_creation_input_tokens":335,"cache_write_tokens":335,"cache_creation":{"ephemeral_5m_input_tokens":335}}}}`
+
+	input := buildSSEChunk(buildChatChunk("test", nil)) +
+		buildSSEChunk(buildChatChunk("", &stopReason)) +
+		buildSSEChunk(usageChunk) +
+		"data: [DONE]\n\n"
+
+	var output bytes.Buffer
+	err := TransformChatStreamToResponses(strings.NewReader(input), &output, "qwen3.7-flash")
+	require.NoError(t, err)
+
+	result := output.String()
+	completedIdx := strings.Index(result, "event: response.completed\n")
+	require.NotEqual(t, -1, completedIdx)
+	afterEvent := result[completedIdx:]
+	dataIdx := strings.Index(afterEvent, "data: ")
+	require.NotEqual(t, -1, dataIdx)
+	dataLine := afterEvent[dataIdx+6:]
+	if endIdx := strings.Index(dataLine, "\n"); endIdx > 0 {
+		dataLine = dataLine[:endIdx]
+	}
+
+	var completedEvent struct {
+		Response struct {
+			Usage map[string]interface{} `json:"usage"`
+		} `json:"response"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(dataLine), &completedEvent))
+
+	details := completedEvent.Response.Usage["input_tokens_details"].(map[string]interface{})
+	assert.Equal(t, "ephemeral", details["cache_type"])
+	assert.Equal(t, float64(1486), details["cached_tokens"])
+	assert.Equal(t, float64(335), details["cache_creation_tokens"])
+	ttlDetails := details["cache_creation_token_details"].(map[string]interface{})
+	assert.Equal(t, float64(335), ttlDetails["ephemeral_5m_input_tokens"])
+}
+
+func TestStreamTransform_AlibabaExplicitCacheBillsAtExplicitTariff(t *testing.T) {
+	// Full path: Alibaba Chat Completions SSE -> Responses API SSE -> the
+	// same extraction/costing billing actually runs (converter.ExtractTokenUsage
+	// on the emitted response.completed event -> models.CalculateTokenCosts).
+	// Regression test for the streaming cache_type/cache_creation drop that
+	// made explicit-cache streaming requests bill at the implicit tariff.
+	stopReason := "stop"
+	usageChunk := `{"id":"chatcmpl-test","object":"chat.completion.chunk","model":"qwen3.7-flash","choices":[],"usage":{"prompt_tokens":1827,"completion_tokens":511,"total_tokens":2338,"prompt_tokens_details":{"cached_tokens":1486,"cache_type":"ephemeral","cache_creation_input_tokens":335,"cache_write_tokens":335,"cache_creation":{"ephemeral_5m_input_tokens":335}}}}`
+
+	input := buildSSEChunk(buildChatChunk("test", nil)) +
+		buildSSEChunk(buildChatChunk("", &stopReason)) +
+		buildSSEChunk(usageChunk) +
+		"data: [DONE]\n\n"
+
+	var output bytes.Buffer
+	err := TransformChatStreamToResponses(strings.NewReader(input), &output, "qwen3.7-flash")
+	require.NoError(t, err)
+
+	result := output.String()
+	completedIdx := strings.Index(result, "event: response.completed\n")
+	require.NotEqual(t, -1, completedIdx)
+	afterEvent := result[completedIdx:]
+	dataIdx := strings.Index(afterEvent, "data: ")
+	require.NotEqual(t, -1, dataIdx)
+	dataLine := afterEvent[dataIdx+6:]
+	if endIdx := strings.Index(dataLine, "\n"); endIdx > 0 {
+		dataLine = dataLine[:endIdx]
+	}
+
+	// This is what proxy billing actually does with the emitted SSE event
+	// (see extractTokenUsageFromPayloads -> converter.ExtractTokenUsageWithOptions).
+	usage := converter.ExtractTokenUsage([]byte(dataLine))
+	require.NotNil(t, usage)
+	require.Equal(t, "ephemeral", usage.CacheType)
+	require.Equal(t, 1486, usage.CachedInputTokens)
+	require.Equal(t, 335, usage.CacheCreationTokens)
+	require.Equal(t, 335, usage.CacheCreation5mTokens)
+
+	price := &models.ModelPrice{
+		InputCostPerToken:               0.0000003,
+		OutputCostPerToken:              0.0000012,
+		CacheReadInputTokenCost:         0.00000015, // implicit — must NOT be used
+		ExplicitCacheReadInputTokenCost: 0.000000075,
+		CacheCreationInputTokenCost:     0.0000009,
+	}
+	costs := models.CalculateTokenCosts(usage, price)
+	require.NotNil(t, costs)
+	assert.InDelta(t, 1486*0.000000075, costs.ExplicitCachedInputCost, 1e-15)
+	assert.Zero(t, costs.CachedInputCost, "streaming explicit-cache request must not bill the implicit tariff")
+}
+
 func TestStreamTransform_UsageSanitizesCachedAudioFields(t *testing.T) {
 	stopReason := "stop"
 	usageChunk := `{"id":"chatcmpl-test","object":"chat.completion.chunk","model":"gpt-4o","choices":[],"usage":{"prompt_tokens":200,"completion_tokens":1,"total_tokens":201,"prompt_tokens_details":{"cached_tokens":-80,"cached_audio_tokens":40,"audio_tokens":100}}}`
@@ -572,7 +716,7 @@ func TestStreamTransform_UsagePreservesNormalizedAudioInput(t *testing.T) {
 
 	var output bytes.Buffer
 	err := TransformChatStreamToResponsesWithMetaAndUsage(
-		strings.NewReader(input), &output, "gpt-4o", nil, false,
+		strings.NewReader(input), &output, "gpt-4o", nil, false, 0, 0,
 	)
 	require.NoError(t, err)
 
@@ -867,4 +1011,304 @@ func TestStreamTransform_ContentAndFinishReasonNoDone(t *testing.T) {
 	assert.Contains(t, result, "The answer is 42.")
 	assert.Contains(t, result, "response.output_text.delta")
 	assert.Contains(t, result, "response.completed")
+}
+
+// buildDeltaChunk builds a chat.completion.chunk carrying the given delta.
+func buildDeltaChunk(delta map[string]interface{}) string {
+	chunk := map[string]interface{}{
+		"id":      "chatcmpl-test",
+		"object":  "chat.completion.chunk",
+		"created": 1700000000,
+		"model":   "deepseek-v4-pro",
+		"choices": []interface{}{
+			map[string]interface{}{
+				"index":         0,
+				"delta":         delta,
+				"finish_reason": nil,
+			},
+		},
+	}
+	data, _ := json.Marshal(chunk)
+	return string(data)
+}
+
+// assertConsistentOutputIndices checks what a Responses client relies on:
+// every output item opens at its own output_index, every later event about
+// the item repeats that index, sequence numbers only grow, and the final
+// response lists the items in output_index order.
+func assertConsistentOutputIndices(t *testing.T, events []map[string]interface{}) {
+	t.Helper()
+	indexByID := map[string]float64{}
+	openedAt := map[float64]string{}
+	var finalOutput []interface{}
+	lastSeq := float64(0)
+	for _, e := range events {
+		seq, _ := e["sequence_number"].(float64)
+		assert.Greater(t, seq, lastSeq, "sequence_number must increase (%s)", e["_event"])
+		lastSeq = seq
+
+		id, _ := e["item_id"].(string)
+		if item, ok := e["item"].(map[string]interface{}); ok {
+			id, _ = item["id"].(string)
+		}
+		switch e["_event"] {
+		case "response.output_item.added":
+			idx := e["output_index"].(float64)
+			prev, dup := openedAt[idx]
+			assert.False(t, dup, "output_index %v opened twice (%s, then %s)", idx, prev, id)
+			openedAt[idx] = id
+			indexByID[id] = idx
+		case "response.completed", "response.incomplete":
+			finalOutput, _ = e["response"].(map[string]interface{})["output"].([]interface{})
+		default:
+			if idx, ok := e["output_index"].(float64); ok && id != "" {
+				want, known := indexByID[id]
+				if assert.True(t, known, "%s for item %s that was never added", e["_event"], id) {
+					assert.Equal(t, want, idx, "%s for item %s", e["_event"], id)
+				}
+			}
+		}
+	}
+	for i, raw := range finalOutput {
+		id, _ := raw.(map[string]interface{})["id"].(string)
+		assert.Equal(t, float64(i), indexByID[id], "final output[%d] (%s) out of output_index order", i, id)
+	}
+}
+
+// TestStreamTransform_ReasoningSummaryEvents: reasoning streams live with the
+// event sequence OpenAI's Responses API uses for reasoning summaries, instead
+// of reaching the client only once the whole item is done.
+func TestStreamTransform_ReasoningSummaryEvents(t *testing.T) {
+	stopReason := "stop"
+	input := buildSSEChunk(buildReasoningChunk("Let me ")) +
+		buildSSEChunk(buildReasoningChunk("think.")) +
+		buildSSEChunk(buildChatChunk("Ok.", nil)) +
+		buildSSEChunk(buildChatChunk("", &stopReason)) +
+		"data: [DONE]\n\n"
+
+	var output bytes.Buffer
+	require.NoError(t, TransformChatStreamToResponses(strings.NewReader(input), &output, "deepseek-v4-pro"))
+	events := parseSSEEvents(t, output.String())
+	assertConsistentOutputIndices(t, events)
+
+	var reasoningEvents []map[string]interface{}
+	messageAddedAt, reasoningDoneAt := -1, -1
+	for i, e := range events {
+		name := e["_event"].(string)
+		item, _ := e["item"].(map[string]interface{})
+		switch {
+		case strings.HasPrefix(name, "response.reasoning_summary_"):
+			reasoningEvents = append(reasoningEvents, e)
+		case item != nil && item["type"] == "reasoning":
+			reasoningEvents = append(reasoningEvents, e)
+			if name == "response.output_item.done" {
+				reasoningDoneAt = i
+			}
+		case item != nil && item["type"] == "message" && name == "response.output_item.added":
+			messageAddedAt = i
+		}
+	}
+
+	var names []string
+	for _, e := range reasoningEvents {
+		names = append(names, e["_event"].(string))
+	}
+	assert.Equal(t, []string{
+		"response.output_item.added",
+		"response.reasoning_summary_part.added",
+		"response.reasoning_summary_text.delta",
+		"response.reasoning_summary_text.delta",
+		"response.reasoning_summary_text.done",
+		"response.reasoning_summary_part.done",
+		"response.output_item.done",
+	}, names)
+	require.Len(t, reasoningEvents, 7)
+
+	assert.Equal(t, "Let me ", reasoningEvents[2]["delta"])
+	assert.Equal(t, "think.", reasoningEvents[3]["delta"])
+	assert.Equal(t, "Let me think.", reasoningEvents[4]["text"])
+	assert.Equal(t, "Let me think.", reasoningEvents[5]["part"].(map[string]interface{})["text"])
+	doneItem := reasoningEvents[6]["item"].(map[string]interface{})
+	assert.Equal(t, "Let me think.", doneItem["summary"].([]interface{})[0].(map[string]interface{})["text"])
+	for _, e := range reasoningEvents[1:6] {
+		assert.Equal(t, float64(0), e["summary_index"])
+	}
+
+	require.NotEqual(t, -1, messageAddedAt)
+	assert.Less(t, reasoningDoneAt, messageAddedAt, "reasoning must be closed before the message opens")
+}
+
+// TestStreamTransform_ReasoningFieldSpelling covers providers (OpenRouter,
+// vLLM, Ollama) that stream reasoning as "reasoning" rather than
+// "reasoning_content", and checks a non-string value there does not make the
+// converter drop the rest of the chunk.
+func TestStreamTransform_ReasoningFieldSpelling(t *testing.T) {
+	stopReason := "stop"
+	input := buildSSEChunk(buildDeltaChunk(map[string]interface{}{"reasoning": "Thinking via reasoning."})) +
+		buildSSEChunk(buildDeltaChunk(map[string]interface{}{"reasoning": map[string]interface{}{"x": 1}, "content": "Answer."})) +
+		buildSSEChunk(buildChatChunk("", &stopReason)) +
+		"data: [DONE]\n\n"
+
+	var capturedResp *Response
+	var output bytes.Buffer
+	require.NoError(t, TransformChatStreamToResponses(strings.NewReader(input), &output, "deepseek-v4-pro",
+		func(r *Response) { capturedResp = r }))
+	assertConsistentOutputIndices(t, parseSSEEvents(t, output.String()))
+
+	require.NotNil(t, capturedResp)
+	require.Len(t, capturedResp.Output, 2)
+	assert.Equal(t, "reasoning", capturedResp.Output[0].Type)
+	assert.Equal(t, "Thinking via reasoning.", capturedResp.Output[0].Summary[0].Text)
+	assert.Equal(t, "message", capturedResp.Output[1].Type)
+	assert.Equal(t, "Answer.", capturedResp.Output[1].Content[0].Text)
+}
+
+// TestStreamTransform_LateReasoningKeepsOutputIndices: reasoning that arrives
+// after visible output (interleaved thinking) opens a new item at the next
+// free output_index instead of shifting indices the client already has.
+func TestStreamTransform_LateReasoningKeepsOutputIndices(t *testing.T) {
+	stopReason := "stop"
+	input := buildSSEChunk(buildReasoningChunk("plan")) +
+		buildSSEChunk(buildChatChunk("Hel", nil)) +
+		buildSSEChunk(buildReasoningChunk("re")) +
+		buildSSEChunk(buildReasoningChunk("think")) +
+		buildSSEChunk(buildChatChunk("lo", nil)) +
+		buildSSEChunk(buildChatChunk("", &stopReason)) +
+		"data: [DONE]\n\n"
+
+	var capturedResp *Response
+	var output bytes.Buffer
+	require.NoError(t, TransformChatStreamToResponses(strings.NewReader(input), &output, "deepseek-v4-pro",
+		func(r *Response) { capturedResp = r }))
+	events := parseSSEEvents(t, output.String())
+	assertConsistentOutputIndices(t, events)
+
+	for _, e := range events {
+		if e["_event"] == "response.output_text.delta" {
+			assert.Equal(t, float64(1), e["output_index"], "text deltas must stay on the message's index")
+		}
+	}
+
+	require.NotNil(t, capturedResp)
+	require.Len(t, capturedResp.Output, 3)
+	assert.Equal(t, "reasoning", capturedResp.Output[0].Type)
+	assert.Equal(t, "plan", capturedResp.Output[0].Summary[0].Text)
+	assert.Equal(t, "message", capturedResp.Output[1].Type)
+	assert.Equal(t, "Hello", capturedResp.Output[1].Content[0].Text)
+	assert.Equal(t, "reasoning", capturedResp.Output[2].Type)
+	assert.Equal(t, "rethink", capturedResp.Output[2].Summary[0].Text)
+	assert.NotEqual(t, capturedResp.Output[0].ID, capturedResp.Output[2].ID)
+}
+
+// TestStreamTransform_ToolCallBeforeText: a message opening after a tool call
+// takes the next index; the tool call keeps the one it was announced with.
+func TestStreamTransform_ToolCallBeforeText(t *testing.T) {
+	stopReason := "tool_calls"
+	input := buildSSEChunk(buildReasoningChunk("call it")) +
+		buildSSEChunk(buildToolCallStartChunk("call_1", "get_weather")) +
+		buildSSEChunk(buildToolCallArgChunk(`{"city":"Paris"}`)) +
+		buildSSEChunk(buildChatChunk("Calling.", nil)) +
+		buildSSEChunk(buildChatChunk("", &stopReason)) +
+		"data: [DONE]\n\n"
+
+	var capturedResp *Response
+	var output bytes.Buffer
+	require.NoError(t, TransformChatStreamToResponses(strings.NewReader(input), &output, "deepseek-v4-pro",
+		func(r *Response) { capturedResp = r }))
+	assertConsistentOutputIndices(t, parseSSEEvents(t, output.String()))
+
+	require.NotNil(t, capturedResp)
+	require.Len(t, capturedResp.Output, 3)
+	assert.Equal(t, "reasoning", capturedResp.Output[0].Type)
+	assert.Equal(t, "function_call", capturedResp.Output[1].Type)
+	assert.Equal(t, `{"city":"Paris"}`, capturedResp.Output[1].Arguments)
+	assert.Equal(t, "message", capturedResp.Output[2].Type)
+}
+
+// TestStreamTransform_ToolCallIDRepeatedOnEveryChunk: some providers repeat
+// the tool call id on every chunk of the same call; that is one call, not a
+// new one per chunk, and its arguments must accumulate.
+func TestStreamTransform_ToolCallIDRepeatedOnEveryChunk(t *testing.T) {
+	toolCallChunk := func(args string) string {
+		return buildDeltaChunk(map[string]interface{}{
+			"tool_calls": []interface{}{map[string]interface{}{
+				"index": 0,
+				"id":    "call_1",
+				"type":  "function",
+				"function": map[string]interface{}{
+					"name":      "get_weather",
+					"arguments": args,
+				},
+			}},
+		})
+	}
+	stopReason := "tool_calls"
+	input := buildSSEChunk(toolCallChunk(`{"city":`)) +
+		buildSSEChunk(toolCallChunk(`"Paris"}`)) +
+		buildSSEChunk(buildChatChunk("", &stopReason)) +
+		"data: [DONE]\n\n"
+
+	var capturedResp *Response
+	var output bytes.Buffer
+	require.NoError(t, TransformChatStreamToResponses(strings.NewReader(input), &output, "deepseek-v4-pro",
+		func(r *Response) { capturedResp = r }))
+	events := parseSSEEvents(t, output.String())
+	assertConsistentOutputIndices(t, events)
+
+	added := 0
+	for _, e := range events {
+		if e["_event"] == "response.output_item.added" {
+			added++
+		}
+	}
+	assert.Equal(t, 1, added)
+
+	require.NotNil(t, capturedResp)
+	require.Len(t, capturedResp.Output, 1)
+	assert.Equal(t, `{"city":"Paris"}`, capturedResp.Output[0].Arguments)
+}
+
+// TestStreamTransform_ToolCallNameAfterOpen: a call opened by a chunk without
+// its name must still get the name a later chunk of the same call carries.
+func TestStreamTransform_ToolCallNameAfterOpen(t *testing.T) {
+	stopReason := "tool_calls"
+	input := buildSSEChunk(buildDeltaChunk(map[string]interface{}{"tool_calls": []interface{}{
+		map[string]interface{}{"index": 0, "id": "call_1", "type": "function", "function": map[string]interface{}{"arguments": ""}},
+	}})) +
+		buildSSEChunk(buildDeltaChunk(map[string]interface{}{"tool_calls": []interface{}{
+			map[string]interface{}{"index": 0, "id": "call_1", "function": map[string]interface{}{"name": "get_weather", "arguments": "{}"}},
+		}})) +
+		buildSSEChunk(buildChatChunk("", &stopReason)) +
+		"data: [DONE]\n\n"
+
+	var capturedResp *Response
+	var output bytes.Buffer
+	require.NoError(t, TransformChatStreamToResponses(strings.NewReader(input), &output, "deepseek-v4-pro",
+		func(r *Response) { capturedResp = r }))
+
+	require.NotNil(t, capturedResp)
+	require.Len(t, capturedResp.Output, 1)
+	assert.Equal(t, "get_weather", capturedResp.Output[0].Name)
+	assert.Equal(t, "{}", capturedResp.Output[0].Arguments)
+}
+
+// TestStreamTransform_NegativeToolCallIndexIgnored: a malformed negative tool
+// call index must be skipped, not panic the transform goroutine.
+func TestStreamTransform_NegativeToolCallIndexIgnored(t *testing.T) {
+	stopReason := "stop"
+	input := buildSSEChunk(buildDeltaChunk(map[string]interface{}{"tool_calls": []interface{}{
+		map[string]interface{}{"index": -1, "id": "call_1", "type": "function", "function": map[string]interface{}{"name": "f", "arguments": "{}"}},
+	}})) +
+		buildSSEChunk(buildChatChunk("Ok.", &stopReason)) +
+		"data: [DONE]\n\n"
+
+	var capturedResp *Response
+	var output bytes.Buffer
+	require.NotPanics(t, func() {
+		require.NoError(t, TransformChatStreamToResponses(strings.NewReader(input), &output, "deepseek-v4-pro",
+			func(r *Response) { capturedResp = r }))
+	})
+	require.NotNil(t, capturedResp)
+	require.Len(t, capturedResp.Output, 1)
+	assert.Equal(t, "message", capturedResp.Output[0].Type)
 }

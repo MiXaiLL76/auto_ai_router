@@ -705,6 +705,7 @@ func buildMetadata(hashedToken string, tokenInfo *litellmdb.TokenInfo, errorMsg 
 		"cached_audio_tokens":          0,
 		"cache_creation_tokens":        0,
 		"cache_creation_token_details": nil,
+		"cache_type":                   nil,
 	}
 	completionTokensDetails := map[string]interface{}{
 		"text_tokens":                nil,
@@ -728,6 +729,9 @@ func buildMetadata(hashedToken string, tokenInfo *litellmdb.TokenInfo, errorMsg 
 		promptTokensDetails["cached_tokens"] = usage.CachedInputTokens
 		promptTokensDetails["cached_audio_tokens"] = usage.CachedAudioInputTokens
 		promptTokensDetails["cache_creation_tokens"] = usage.CacheCreationTokens
+		if usage.CacheType != "" {
+			promptTokensDetails["cache_type"] = usage.CacheType
+		}
 		if usage.CacheCreation5mTokens > 0 || usage.CacheCreation1hTokens > 0 {
 			promptTokensDetails["cache_creation_token_details"] = map[string]interface{}{
 				"ephemeral_5m_input_tokens": usage.CacheCreation5mTokens,
@@ -745,6 +749,17 @@ func buildMetadata(hashedToken string, tokenInfo *litellmdb.TokenInfo, errorMsg 
 		serverToolUse["web_search_requests"] = usage.WebSearchRequests
 		if usage.WebSearchRequests > 0 {
 			serverToolUse["web_search_context_size"] = usage.WebSearchContextSize
+		}
+		if usage.HasServerToolUsage() {
+			serverToolUse["x_search_calls"] = usage.XSearchCalls
+			serverToolUse["x_posts_fetched"] = usage.XSearchPosts
+			serverToolUse["x_users_fetched"] = usage.XSearchProfiles
+			serverToolUse["code_execution_calls"] = usage.CodeExecutionCalls
+			serverToolUse["attachment_search_calls"] = usage.AttachmentSearchCalls
+			serverToolUse["collections_search_calls"] = usage.CollectionsSearchCalls
+			serverToolUse["mcp_calls"] = usage.MCPCalls
+			serverToolUse["image_generation_calls"] = usage.ImageToolGenerations
+			serverToolUse["image_edit_calls"] = usage.ImageToolEdits
 		}
 		usageObject = map[string]interface{}{
 			"total_tokens":              usage.Total(),
@@ -764,6 +779,7 @@ func buildMetadata(hashedToken string, tokenInfo *litellmdb.TokenInfo, errorMsg 
 			"cached_audio_tokens":          promptTokensDetails["cached_audio_tokens"],
 			"cache_creation_tokens":        promptTokensDetails["cache_creation_tokens"],
 			"cache_creation_token_details": promptTokensDetails["cache_creation_token_details"],
+			"cache_type":                   promptTokensDetails["cache_type"],
 		},
 		"completion_tokens_details": map[string]interface{}{
 			"text_tokens":                completionTokensDetails["text_tokens"],
@@ -780,20 +796,28 @@ func buildMetadata(hashedToken string, tokenInfo *litellmdb.TokenInfo, errorMsg 
 	var costBreakdown interface{}
 	if costs != nil {
 		costBreakdown = map[string]interface{}{
-			"input_cost":          costs.InputCost,
-			"output_cost":         costs.OutputCost,
-			"reasoning_cost":      costs.ReasoningCost,
-			"cached_input_cost":   costs.CachedInputCost,
-			"cache_creation_cost": costs.CacheCreationCost,
-			"total_cost":          costs.TotalCost,
-			"original_cost":       costs.TotalCost - costs.MarginTotalAmount,
-			"margin_percent":      costs.MarginPercent,
-			"discount_amount":     0.0,
-			"tool_usage_cost":     costs.WebSearchCost,
-			"web_search_cost":     costs.WebSearchCost,
-			"discount_percent":    0.0,
-			"margin_fixed_amount": costs.MarginFixedAmount,
-			"margin_total_amount": costs.MarginTotalAmount,
+			"input_cost":               costs.InputCost,
+			"output_cost":              costs.OutputCost,
+			"reasoning_cost":           costs.ReasoningCost,
+			"cached_input_cost":        costs.CachedInputCost,
+			"explicit_cache_read_cost": costs.ExplicitCachedInputCost,
+			"cache_creation_cost":      costs.CacheCreationCost,
+			"total_cost":               costs.TotalCost,
+			"original_cost":            costs.TotalCost - costs.MarginTotalAmount,
+			"margin_percent":           costs.MarginPercent,
+			"discount_amount":          0.0,
+			// tool_usage_cost sums every built-in tool charge below; it is
+			// already part of total_cost, as each of its parts is.
+			"tool_usage_cost":            costs.ToolUsageCost,
+			"web_search_cost":            costs.WebSearchCost,
+			"x_search_cost":              costs.XSearchCost,
+			"code_execution_cost":        costs.CodeExecutionCost,
+			"attachment_search_cost":     costs.AttachmentSearchCost,
+			"collections_search_cost":    costs.CollectionsSearchCost,
+			"image_generation_tool_cost": costs.ImageGenerationToolCost,
+			"discount_percent":           0.0,
+			"margin_fixed_amount":        costs.MarginFixedAmount,
+			"margin_total_amount":        costs.MarginTotalAmount,
 		}
 	}
 
@@ -816,6 +840,16 @@ func buildMetadata(hashedToken string, tokenInfo *litellmdb.TokenInfo, errorMsg 
 		"upstream_send_delay_ms":        upstreamSendDelayMs,
 		"vector_store_request_metadata": nil,
 		"status":                        "success",
+	}
+	if usage != nil {
+		// For reconciliation with the provider's bill only (xAI
+		// cost_in_usd_ticks, aggregators' usage.cost); never part of the price.
+		if usage.ProviderCostUSD > 0 {
+			metadata["provider_reported_cost"] = usage.ProviderCostUSD
+		}
+		if usage.ReasoningAccounting != "" {
+			metadata["reasoning_tokens_accounting"] = usage.ReasoningAccounting
+		}
 	}
 
 	if tokenInfo != nil {

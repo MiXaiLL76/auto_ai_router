@@ -49,6 +49,13 @@ type CustomPricingLiteLLMParams struct {
 	CacheCreationInputTokenCostAbove272kTokens         *float64 `json:"cache_creation_input_token_cost_above_272k_tokens,omitempty"`
 	CacheReadInputAudioTokenCost                       *float64 `json:"cache_read_input_audio_token_cost,omitempty"`
 
+	// Alibaba/Qwen Explicit Cache Read has its own tariff, separate from
+	// Implicit Cache Read (cache_read_input_token_cost). See ModelPrice.
+	ExplicitCacheReadInputTokenCost          *float64 `json:"explicit_cache_read_input_token_cost,omitempty"`
+	ExplicitCacheReadInputTokenCostAbove32k  *float64 `json:"explicit_cache_read_input_token_cost_above_32k_tokens,omitempty"`
+	ExplicitCacheReadInputTokenCostAbove128k *float64 `json:"explicit_cache_read_input_token_cost_above_128k_tokens,omitempty"`
+	ExplicitCacheReadInputTokenCostAbove256k *float64 `json:"explicit_cache_read_input_token_cost_above_256k_tokens,omitempty"`
+
 	InputCostPerTokenAbove32kTokens  *float64 `json:"input_cost_per_token_above_32k_tokens,omitempty"`
 	InputCostPerTokenAbove128kTokens *float64 `json:"input_cost_per_token_above_128k_tokens,omitempty"`
 	InputCostPerTokenAbove200kTokens *float64 `json:"input_cost_per_token_above_200k_tokens,omitempty"`
@@ -75,6 +82,14 @@ type CustomPricingLiteLLMParams struct {
 	OutputCostPerReasoningToken      *float64           `json:"output_cost_per_reasoning_token,omitempty"`
 	SearchContextCostPerQuery        map[string]float64 `json:"search_context_cost_per_query,omitempty"`
 	WebSearchBillingUnit             *string            `json:"web_search_billing_unit,omitempty"`
+
+	// Built-in server-side tools and billing modes (xAI). See ModelPrice.
+	ToolCostPerCall           map[string]float64 `json:"tool_cost_per_call,omitempty"`
+	XSearchCostPerPost        *float64           `json:"x_search_cost_per_post,omitempty"`
+	XSearchCostPerProfile     *float64           `json:"x_search_cost_per_profile,omitempty"`
+	ImageGenerationToolModel  *string            `json:"image_generation_tool_model,omitempty"`
+	LongContextPricingMode    *string            `json:"long_context_pricing_mode,omitempty"`
+	ReasoningTokensAccounting *string            `json:"reasoning_tokens_accounting,omitempty"`
 }
 
 // GenericLiteLLMParams
@@ -177,6 +192,15 @@ type ModelTable struct {
 func (m ModelTable) Mode() string {
 	mode, _ := m.ModelInfo["mode"].(string)
 	return mode
+}
+
+// SupportsVision returns model_info.supports_vision, or nil when it is absent or
+// not a boolean.
+func (m ModelTable) SupportsVision() *bool {
+	if v, ok := m.ModelInfo["supports_vision"].(bool); ok {
+		return &v
+	}
+	return nil
 }
 
 // RouterSettings is the subset of LiteLLM_Config.router_settings AIR imports.

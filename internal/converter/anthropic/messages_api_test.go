@@ -286,7 +286,7 @@ func TestChatToMessages(t *testing.T) {
 		}
 	}`)
 
-	converted, err := ChatToMessages(body, MessagesAdapterMetadata{ToolNames: map[string]string{truncated: longName}})
+	converted, err := ChatToMessages(body, MessagesAdapterMetadata{ToolNames: map[string]string{truncated: longName}}, 0, 0)
 	require.NoError(t, err)
 
 	var got map[string]interface{}
@@ -308,6 +308,41 @@ func TestChatToMessages(t *testing.T) {
 	assert.Equal(t, float64(8), usage["output_tokens"])
 	assert.Equal(t, float64(20), usage["cache_read_input_tokens"])
 	assert.Equal(t, float64(10), usage["cache_creation_input_tokens"])
+}
+
+func TestChatToMessages_AlibabaExplicitCache(t *testing.T) {
+	// Alibaba's cache_type (explicit cache marker) and its unsuffixed
+	// cache_creation.ephemeral_5m_input_tokens detail (no _token_details
+	// suffix) must survive the Chat Completions -> Messages API conversion
+	// as our own extension field, since Anthropic's native schema has no
+	// cache_type concept of its own.
+	body := []byte(`{
+		"id":"chatcmpl-1",
+		"model":"qwen3.7-flash",
+		"choices":[{
+			"index":0,
+			"message":{"role":"assistant","content":"hi"},
+			"finish_reason":"stop"
+		}],
+		"usage":{
+			"prompt_tokens":1827,
+			"completion_tokens":511,
+			"total_tokens":2338,
+			"prompt_tokens_details":{"cached_tokens":1486,"cache_type":"ephemeral","cache_creation_input_tokens":335,"cache_write_tokens":335,"cache_creation":{"ephemeral_5m_input_tokens":335}}
+		}
+	}`)
+
+	converted, err := ChatToMessages(body, MessagesAdapterMetadata{}, 0, 0)
+	require.NoError(t, err)
+
+	var got map[string]interface{}
+	require.NoError(t, json.Unmarshal(converted, &got))
+	usage := got["usage"].(map[string]interface{})
+	assert.Equal(t, "ephemeral", usage["cache_type"])
+	assert.Equal(t, float64(1486), usage["cache_read_input_tokens"])
+	assert.Equal(t, float64(335), usage["cache_creation_input_tokens"])
+	cacheCreation := usage["cache_creation"].(map[string]interface{})
+	assert.Equal(t, float64(335), cacheCreation["ephemeral_5m_input_tokens"])
 }
 
 func TestMessagesToChatPreservesThinkingForAnthropicProvider(t *testing.T) {
@@ -416,7 +451,7 @@ func TestTransformChatStreamToMessages(t *testing.T) {
 	}, "\n")
 
 	var output bytes.Buffer
-	require.NoError(t, TransformChatStreamToMessages(strings.NewReader(stream), &output, "fallback-model", MessagesAdapterMetadata{}))
+	require.NoError(t, TransformChatStreamToMessages(strings.NewReader(stream), &output, "fallback-model", MessagesAdapterMetadata{}, 0, 0))
 
 	got := output.String()
 	assert.Contains(t, got, "event: message_start")

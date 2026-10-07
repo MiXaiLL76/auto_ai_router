@@ -47,9 +47,25 @@ func TestClassifyBadRequest(t *testing.T) {
 		{
 			name:        "context length",
 			body:        `{"error":{"message":"Input is too long for the context window","code":"context_length_exceeded"}}`,
-			wantMessage: "Context length exceeded",
+			wantMessage: "This model's maximum context length is exceeded by the request",
 			wantCode:    "context_length_exceeded",
 			wantParam:   stringPtr("input"),
+		},
+		{
+			// vLLM: mentions "output tokens" too, must not land in invalid_max_tokens.
+			name:        "vllm context length with output tokens",
+			body:        `{"error":{"code":400,"message":"This model's maximum context length is 409600 tokens. However, you requested 32000 output tokens and your prompt contains at least 377601 input tokens, for a total of at least 409601 tokens. Please reduce the length of the input prompt or the number of requested output tokens. (parameter=input_tokens, value=377601)","param":"input_tokens","type":"BadRequestError"}}`,
+			wantMessage: "This model's maximum context length is 409600 tokens. However, you requested 32000 output tokens and your prompt contains at least 377601 input tokens.",
+			wantCode:    "context_length_exceeded",
+			wantParam:   stringPtr("input_tokens"),
+			notContains: []string{"Please reduce", "parameter="},
+		},
+		{
+			name:        "vllm legacy context length",
+			body:        `{"object":"error","message":"This model's maximum context length is 32768 tokens. However, you requested 40000 tokens (38000 in the messages, 2000 in the completion). Please reduce the length of the messages or completion.","type":"BadRequestError","code":400}`,
+			wantMessage: "This model's maximum context length is 32768 tokens. However, you requested 2000 output tokens and your prompt contains at least 38000 input tokens.",
+			wantCode:    "context_length_exceeded",
+			wantParam:   stringPtr("messages"),
 		},
 		{
 			name:        "invalid model",
@@ -223,6 +239,7 @@ func TestClassifyBadRequest_IsIdempotent(t *testing.T) {
 		`{"error":{"message":"Provider rejected tool_choice.","param":"tool_choice"}}`,
 		`{"error":{"message":"max_completion_tokens must be less than 8192","param":"max_completion_tokens"}}`,
 		`{"error":{"message":"Input is too long for the context window"}}`,
+		`{"error":{"message":"This model's maximum context length is 409600 tokens. However, you requested 32000 output tokens and your prompt contains at least 377601 input tokens.","param":"input_tokens"}}`,
 		`{"error":{"message":"litellm.BadRequestError: Received Model Group=x"}}`,
 		`{"error":{"message":"The parameters logprobs is not supported.","code":"invalid_parameter_error"}}`,
 		`{"error":{"message":"Invalid 'output[1].type': 'input_file'.","type":"InvalidParameter"}}`,

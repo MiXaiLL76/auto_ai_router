@@ -34,69 +34,96 @@ type AttemptCountKey struct{}
 // defaultMaxFallbackAttempts is the fallback value used when Proxy.maxFallbackAttempts is 0.
 const defaultMaxFallbackAttempts = 5
 
-// ShouldRetryWithFallback determines if request should be retried based on status code and response body.
-// Returns (shouldRetry, reason)
-func ShouldRetryWithFallback(statusCode int, respBody []byte) (bool, RetryReason) {
-	// Determine if status code is retryable
-	var retryReason RetryReason
-	switch {
-	case statusCode == http.StatusBadRequest || statusCode == http.StatusNotFound:
-		retryReason = RetryReasonServerErr
-	case statusCode == http.StatusUnauthorized || statusCode == http.StatusForbidden:
-		retryReason = RetryReasonAuthErr
-	case statusCode == http.StatusPaymentRequired:
-		retryReason = RetryReasonPaymentErr
-	case statusCode == http.StatusTooManyRequests:
-		retryReason = RetryReasonRateLimit
-	case statusCode >= 500 && statusCode < 600:
-		retryReason = RetryReasonServerErr
-	default:
-		return false, ""
-	}
+// maxRetryBodyScan bounds how much of an upstream error body the retry markers scan.
+const maxRetryBodyScan = 8 * 1024
 
-	// Check if response body contains non-retryable errors
-	if !isRetryableContent(respBody) {
-		return false, ""
-	}
-
-	// A 400 that describes the request rather than the credential fails identically
-	// everywhere, so retrying it only multiplies the damage.
-	if statusCode == http.StatusBadRequest && isDeterministicBadRequest(respBody) {
-		return false, ""
-	}
-
-	return true, retryReason
+// retryPolicy is the compiled form of config.RetryConfig.
+type retryPolicy struct {
+	statusCodes         map[int]struct{}
+	providerOverrides   map[config.ProviderType]map[int]struct{}
+	credentialOverrides map[string]map[int]struct{}
+	nonRetryableMarkers [][]byte
+	badRequestMarkers   [][]byte
 }
 
-// deterministicBadRequestMarkers are upstream 400 texts that fault the request
-// itself — a parameter the target model does not implement, a media part it cannot
-// use — rather than anything about the credential that served it. Replaying such a
-// request on the next credential returns the identical 400, so the retry chain turns
-// one malformed client request into one failure per credential, each billed as an
-// error against a different upstream account.
-//
-// Kept deliberately narrow: only messages that are a property of the request and the
-// model belong here. Anything that could plausibly differ between credentials — a
-// model missing from one account, a disabled API, a quota — must stay retryable,
-// since moving to another credential is exactly what fixes those.
-var deterministicBadRequestMarkers = [][]byte{
-	[]byte("penalty is not enabled"),
-	[]byte("thinking level is unsupported"),
-	[]byte("thinking level minimal is not supported"),
-	[]byte("unsupported mime type"),
-	[]byte("required oneof field"),
-	[]byte("but the supported range is from"),
+// defaultRetryPolicy is the built-in policy, used when a Proxy has none configured.
+var defaultRetryPolicy = newRetryPolicy(config.DefaultRetryConfig())
+
+func newRetryPolicy(cfg config.RetryConfig) *retryPolicy {
+	cfg = cfg.WithDefaults()
+	rp := &retryPolicy{
+		statusCodes:         statusCodeSet(cfg.StatusCodes),
+		providerOverrides:   make(map[config.ProviderType]map[int]struct{}, len(cfg.ProviderOverrides)),
+		credentialOverrides: make(map[string]map[int]struct{}, len(cfg.CredentialOverrides)),
+		nonRetryableMarkers: markerBytes(cfg.NonRetryableMarkers),
+		badRequestMarkers:   markerBytes(cfg.BadRequestMarkers),
+	}
+	for providerType, override := range cfg.ProviderOverrides {
+		rp.providerOverrides[providerType] = statusCodeSet(override.StatusCodes)
+	}
+	for credName, override := range cfg.CredentialOverrides {
+		rp.credentialOverrides[credName] = statusCodeSet(override.StatusCodes)
+	}
+	return rp
 }
 
-// isDeterministicBadRequest reports whether a 400 body matches a known
-// request-fault marker. Scans the same bounded prefix as isRetryableContent.
-func isDeterministicBadRequest(respBody []byte) bool {
-	const maxRetryBodyScan = 8 * 1024
+func statusCodeSet(codes []int) map[int]struct{} {
+	set := make(map[int]struct{}, len(codes))
+	for _, code := range codes {
+		set[code] = struct{}{}
+	}
+	return set
+}
+
+func markerBytes(markers []string) [][]byte {
+	out := make([][]byte, len(markers))
+	for i, m := range markers {
+		out[i] = []byte(m)
+	}
+	return out
+}
+
+// statusCodesFor returns the retryable status codes for cred: its credential
+// override, else its provider type override, else the global set.
+func (rp *retryPolicy) statusCodesFor(cred *config.CredentialConfig) map[int]struct{} {
+	if cred != nil {
+		if codes, ok := rp.credentialOverrides[cred.Name]; ok {
+			return codes
+		}
+		if codes, ok := rp.providerOverrides[cred.Type]; ok {
+			return codes
+		}
+	}
+	return rp.statusCodes
+}
+
+// shouldRetry reports whether an upstream response from cred should be replayed on
+// another credential, and why. cred may be nil (global status codes only).
+func (rp *retryPolicy) shouldRetry(cred *config.CredentialConfig, statusCode int, respBody []byte) (bool, RetryReason) {
+	if _, ok := rp.statusCodesFor(cred)[statusCode]; !ok {
+		return false, ""
+	}
+
 	if len(respBody) > maxRetryBodyScan {
 		respBody = respBody[:maxRetryBodyScan]
 	}
 	bodyLower := bytes.ToLower(respBody)
-	for _, marker := range deterministicBadRequestMarkers {
+
+	// The provider refused the content itself; every other credential would too.
+	if containsAnyMarker(bodyLower, rp.nonRetryableMarkers) {
+		return false, ""
+	}
+	// A 400 that describes the request rather than the credential fails identically
+	// everywhere, so retrying it only multiplies the damage.
+	if statusCode == http.StatusBadRequest && containsAnyMarker(bodyLower, rp.badRequestMarkers) {
+		return false, ""
+	}
+
+	return true, retryReasonForStatus(statusCode)
+}
+
+func containsAnyMarker(bodyLower []byte, markers [][]byte) bool {
+	for _, marker := range markers {
 		if bytes.Contains(bodyLower, marker) {
 			return true
 		}
@@ -104,22 +131,32 @@ func isDeterministicBadRequest(respBody []byte) bool {
 	return false
 }
 
-// isRetryableContent checks if response body contains errors that shouldn't be retried.
-func isRetryableContent(respBody []byte) bool {
-	const maxRetryBodyScan = 8 * 1024
-	if len(respBody) > maxRetryBodyScan {
-		respBody = respBody[:maxRetryBodyScan]
+func retryReasonForStatus(statusCode int) RetryReason {
+	switch statusCode {
+	case http.StatusUnauthorized, http.StatusForbidden:
+		return RetryReasonAuthErr
+	case http.StatusPaymentRequired:
+		return RetryReasonPaymentErr
+	case http.StatusTooManyRequests:
+		return RetryReasonRateLimit
+	default:
+		return RetryReasonServerErr
 	}
-	bodyLower := bytes.ToLower(respBody)
+}
 
-	// Don't retry if content policy violation (provider-specific business logic error)
-	if bytes.Contains(bodyLower, []byte("content policy")) ||
-		bytes.Contains(bodyLower, []byte("content management policy")) ||
-		bytes.Contains(bodyLower, []byte("policy violation")) {
-		return false
+// shouldRetry applies the proxy's configured retry policy to a response from cred.
+func (p *Proxy) shouldRetry(cred *config.CredentialConfig, statusCode int, respBody []byte) (bool, RetryReason) {
+	rp := p.retryPolicy
+	if rp == nil {
+		rp = defaultRetryPolicy
 	}
+	return rp.shouldRetry(cred, statusCode, respBody)
+}
 
-	return true
+// ShouldRetryWithFallback applies the built-in retry policy without a credential
+// (global status codes only). Returns (shouldRetry, reason).
+func ShouldRetryWithFallback(statusCode int, respBody []byte) (bool, RetryReason) {
+	return defaultRetryPolicy.shouldRetry(nil, statusCode, respBody)
 }
 
 // setRetryAfterFromBan sets the Retry-After header for a 429 response to
@@ -309,7 +346,7 @@ func (p *Proxy) TryFallbackProxy(
 			return p.writeFallbackResponse(w, r, proxyResp, fallbackCred, modelID, originalCredName, logCtx, start)
 		}
 
-		shouldRetry, _ := ShouldRetryWithFallback(proxyResp.StatusCode, proxyResp.Body)
+		shouldRetry, _ := p.shouldRetry(fallbackCred, proxyResp.StatusCode, proxyResp.Body)
 		if !shouldRetry {
 			return p.writeFallbackResponse(w, r, proxyResp, fallbackCred, modelID, originalCredName, logCtx, start)
 		}
