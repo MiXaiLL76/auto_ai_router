@@ -787,7 +787,7 @@ func (p *Proxy) handleTransformedStreaming(
 		_ = pr.Close()
 	}()
 	var totalTokens int
-	completion := p.newCompletionTokenAccumulator(modelID)
+	completion := p.newCompletionTokenAccumulator(modelID, logCtx)
 
 	// This billing extraction re-parses the already-converted (provider →
 	// Responses/Messages/Chat SSE) output bytes, which for Kimi/Moonshot never
@@ -929,7 +929,7 @@ func (p *Proxy) handleStreamingWithTokens(w http.ResponseWriter, resp *http.Resp
 		"content_type", resp.Header.Get("Content-Type"))
 
 	var totalTokens int
-	completion := p.newCompletionTokenAccumulator(modelID)
+	completion := p.newCompletionTokenAccumulator(modelID, logCtx)
 	chunkCount := 0
 
 	// Kimi/Moonshot never puts its cache-write TTL split in the SSE body
@@ -1921,7 +1921,7 @@ func (p *Proxy) handlePassthroughResponsesStreaming(
 		lastRawChunk          []byte // last raw buffer for fallback in finalizeStreamingLog
 		completedEventPayload []byte // JSON payload of response.completed (used instead of lastRawChunk)
 		partialSSELine        string // partial SSE line accumulator across buffer reads
-		completion            = p.newCompletionTokenAccumulator(modelID)
+		completion            = p.newCompletionTokenAccumulator(modelID, logCtx)
 		detectStreamError     = resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices
 		providerStreamError   = &proxyStreamErrorCapture{}
 	)

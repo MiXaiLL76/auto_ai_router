@@ -551,7 +551,7 @@ func (p *Proxy) writeProxyStreamingResponseWithTokens(
 			logCtx.UsageSource = "provider"
 		}
 	}
-	completion := p.newCompletionTokenAccumulator(tokenizerModelID)
+	completion := p.newCompletionTokenAccumulator(tokenizerModelID, logCtx)
 	var payloadBuf [][]byte
 	onLine := func(chunk []byte) {
 		// Image-bearing usage events can span several HTTP reads.

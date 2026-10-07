@@ -194,6 +194,15 @@ func (m ModelTable) Mode() string {
 	return mode
 }
 
+// SupportsVision returns model_info.supports_vision, or nil when it is absent or
+// not a boolean.
+func (m ModelTable) SupportsVision() *bool {
+	if v, ok := m.ModelInfo["supports_vision"].(bool); ok {
+		return &v
+	}
+	return nil
+}
+
 // RouterSettings is the subset of LiteLLM_Config.router_settings AIR imports.
 type RouterSettings struct {
 	// ModelGroupAlias maps a client-facing name to the model group it resolves to.

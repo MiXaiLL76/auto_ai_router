@@ -307,6 +307,10 @@ type RequestLogContext struct {
 	BillingProfileSHA256  string
 	BillingOrganizationID string
 
+	// visionInject holds image descriptions of this request to prepend to the answer
+	// (vision fallback, describe mode); nil when there is nothing to write.
+	visionInject *visionResponseInjection
+
 	reservedEntities       []reservedEntity
 	rateLimitedTPMEntities []string
 	// budgetReconciled guards against double reconciliation: the first call (from
@@ -413,6 +417,9 @@ type Config struct {
 	KeyRateLimitsEnabled             bool
 	DefaultEstimatedCompletionTokens int                    // Completion-token estimate when max_tokens is absent (default: 1000)
 	KeyMetrics                       *monitoring.KeyMetrics // Per-API-key request counters (nil = disabled)
+
+	VisionFallback     config.VisionFallbackConfig // What to do with images sent to models with supports_vision: false; defaults are applied by config.Load
+	ServerWriteTimeout time.Duration               // http.Server WriteTimeout; restored after vision describe calls
 }
 
 type Proxy struct {
@@ -454,6 +461,10 @@ type Proxy struct {
 	budgetReservationEnabled         bool
 	keyRateLimitsEnabled             bool
 	defaultEstimatedCompletionTokens int
+	visionFallback                   config.VisionFallbackConfig
+	visionFlagIgnoredWarned          sync.Map // model name -> struct{}: supports_vision ignored warning already logged
+	visionDescribeBlindWarned        sync.Map // model name -> struct{}: text-only describe_model warning already logged
+	serverWriteTimeout               time.Duration
 	keyMetrics                       *monitoring.KeyMetrics
 	responseCompat                   *compatlitellm.Transformer
 	version                          string
@@ -540,6 +551,8 @@ func New(cfg *Config) *Proxy {
 		budgetReservationEnabled:         cfg.BudgetReservationEnabled,
 		keyRateLimitsEnabled:             cfg.KeyRateLimitsEnabled,
 		defaultEstimatedCompletionTokens: cfg.DefaultEstimatedCompletionTokens,
+		visionFallback:                   cfg.VisionFallback,
+		serverWriteTimeout:               cfg.ServerWriteTimeout,
 		keyMetrics:                       cfg.KeyMetrics,
 		responseCompat:                   responseCompat,
 		client:                           httputil.NewHTTPClient(httpClientCfg),
@@ -2247,6 +2260,15 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 			finalResponseBody = openai.StripServerToolCalls(finalResponseBody)
 		}
 
+		// Vision fallback: prepend the image descriptions to the answer while the body
+		// is still in the upstream format; the conversions below carry them along.
+		if inj := visionInjectionFor(logCtx, prepared, resp.StatusCode); inj != nil {
+			if injected, ok := injectVisionIntoResponse(finalResponseBody, inj, prepared.passthroughResponses); ok {
+				finalResponseBody = injected
+				dropRepresentationIntegrityHeaders(resp.Header)
+			}
+		}
+
 		// bodyForTokenExtraction is set to finalResponseBody now and may be updated
 		// after Responses API conversion (for nativeResponses the raw provider body
 		// uses a provider-specific format that ExtractTokenUsage cannot parse).
@@ -2553,6 +2575,12 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 			"model", modelID,
 			"resp_content_type", resp.Header.Get("Content-Type"),
 			"resp_status", resp.StatusCode)
+
+		// Vision fallback: the image descriptions start the answer text. Injected into
+		// the upstream stream, before any conversion to the client format.
+		if inj := visionInjectionFor(logCtx, prepared, resp.StatusCode); inj != nil {
+			resp.Body = newVisionStreamInjector(resp.Body, inj, prepared.passthroughResponses)
+		}
 
 		streamCompleted := false
 		if prepared.convertedMessages {

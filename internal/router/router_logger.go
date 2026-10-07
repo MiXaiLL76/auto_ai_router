@@ -95,6 +95,11 @@ func (rc *responseCapture) Flush() {
 	}
 }
 
+// Unwrap lets http.ResponseController reach the underlying writer (write deadlines).
+func (rc *responseCapture) Unwrap() http.ResponseWriter {
+	return rc.ResponseWriter
+}
+
 // ErrorLogEntry represents a single error log entry
 type ErrorLogEntry struct {
 	Timestamp string       `json:"timestamp"`
