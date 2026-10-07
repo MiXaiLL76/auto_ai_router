@@ -144,13 +144,22 @@ type TokenDetails struct {
 	CacheCreationTokens       int                        `json:"cache_creation_tokens,omitempty"`
 	CacheCreationTokenDetails *CacheCreationTokenDetails `json:"cache_creation_token_details,omitempty"`
 	CacheWriteTokens          int                        `json:"cache_write_tokens,omitempty"`
-	AudioTokens               int                        `json:"audio_tokens,omitempty"`
-	ImageTokens               int                        `json:"image_tokens,omitempty"`
+	// AlibabaCacheCreation carries Alibaba/Qwen's cache-creation TTL detail,
+	// spelled cache_creation.ephemeral_5m_input_tokens (no _token_details
+	// suffix) — distinct from CacheCreationTokenDetails above.
+	AlibabaCacheCreation *CacheCreationTokenDetails `json:"cache_creation,omitempty"`
+	AudioTokens          int                        `json:"audio_tokens,omitempty"`
+	ImageTokens          int                        `json:"image_tokens,omitempty"`
+	// CacheType is Alibaba/Qwen's explicit cache mode marker
+	// (converter.CacheTypeExplicit, i.e. "ephemeral") from
+	// prompt_tokens_details.cache_type.
+	CacheType string `json:"cache_type,omitempty"`
 	converterutil.CachingTokensExtension
 }
 
 // CacheWrite returns the cache-write total and its 5m / 1h split under any
-// naming: cache_creation_tokens, cache_write_tokens, then Requesty's caching_tokens.
+// naming: cache_creation_tokens, cache_write_tokens, Alibaba's unsuffixed
+// cache_creation, then Requesty's caching_tokens.
 func (d *TokenDetails) CacheWrite() (total, fiveMinutes, oneHour int) {
 	if d == nil {
 		return 0, 0, 0
@@ -162,6 +171,10 @@ func (d *TokenDetails) CacheWrite() (total, fiveMinutes, oneHour int) {
 	if d.CacheCreationTokenDetails != nil {
 		fiveMinutes = d.CacheCreationTokenDetails.Ephemeral5mInputTokens
 		oneHour = d.CacheCreationTokenDetails.Ephemeral1hInputTokens
+	}
+	if fiveMinutes == 0 && oneHour == 0 && d.AlibabaCacheCreation != nil {
+		fiveMinutes = d.AlibabaCacheCreation.Ephemeral5mInputTokens
+		oneHour = d.AlibabaCacheCreation.Ephemeral1hInputTokens
 	}
 	if total == 0 && fiveMinutes == 0 && oneHour == 0 {
 		return d.CachingWrite()

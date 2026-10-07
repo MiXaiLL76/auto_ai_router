@@ -105,6 +105,7 @@ type TestProxyConfig struct {
 	SessionStoreTTL        time.Duration
 	MaxProviderRetries     int
 	MaxFallbackAttempts    int
+	Retry                  config.RetryConfig
 	DrainUpstreamOnAbort   bool
 	TiktokenEnabled        bool
 	ResponseHeaderMode     config.ResponseHeaderMode
@@ -254,6 +255,12 @@ func (b *TestProxyBuilder) WithMaxProviderRetries(n int) *TestProxyBuilder {
 }
 
 // WithDrainUpstreamOnAbort enables or disables upstream draining after client disconnect.
+// WithRetry sets the retry policy config (zero value = built-in policy).
+func (b *TestProxyBuilder) WithRetry(cfg config.RetryConfig) *TestProxyBuilder {
+	b.config.Retry = cfg
+	return b
+}
+
 func (b *TestProxyBuilder) WithDrainUpstreamOnAbort(v bool) *TestProxyBuilder {
 	b.config.DrainUpstreamOnAbort = v
 	return b
@@ -306,6 +313,7 @@ func (b *TestProxyBuilder) Build() *Proxy {
 		SessionStoreTTL:        b.config.SessionStoreTTL,
 		MaxProviderRetries:     b.config.MaxProviderRetries,
 		MaxFallbackAttempts:    b.config.MaxFallbackAttempts,
+		Retry:                  b.config.Retry,
 		DrainUpstreamOnAbort:   b.config.DrainUpstreamOnAbort,
 		TiktokenEnabled:        b.config.TiktokenEnabled,
 		ResponseHeaderMode:     b.config.ResponseHeaderMode,

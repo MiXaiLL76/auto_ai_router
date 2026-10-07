@@ -55,3 +55,14 @@ which is the precedence LiteLLM uses (the request wins over the deployment). A d
 Embeddings, the passed-through `/v1/responses` and other endpoints never receive them.
 
 Defaults are read from the LiteLLM database only; there is no YAML setting for them.
+
+## Errors and reasoning effort
+
+A `400` from a `vllm` credential is not replayed on the other replicas of the model:
+every replica runs the same template and limits, so it would fail the same way. See
+[Retries and Request Cleanup](../advanced/retry.md#why-vllm-does-not-retry-400) to
+change this.
+
+When a chat template accepts only some `reasoning_effort` values, set
+`reasoning_effort_map` on the model so client values are rewritten instead of
+rejected. See [Reasoning effort mapping](../advanced/retry.md#reasoning-effort-mapping).

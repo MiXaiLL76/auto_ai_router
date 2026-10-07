@@ -5,11 +5,13 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/converter/anthropic"
+	converterutil "github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
 	"github.com/mixaill76/auto_ai_router/internal/converter/openai"
 	"github.com/mixaill76/auto_ai_router/internal/converter/vertex"
 	"google.golang.org/genai"
@@ -588,14 +590,54 @@ func TestProviderConverter_RequestFrom_BedrockOpenAICompatiblePassthrough(t *tes
 	}
 }
 
-func TestProviderConverter_RequestFrom_AnthropicImageNotSupported(t *testing.T) {
-	c := New(config.ProviderTypeAnthropic, RequestMode{IsImageGeneration: true})
-	_, err := c.RequestFrom([]byte(`{"model":"gpt-4"}`))
-	if err == nil {
-		t.Fatalf("expected error for image generation")
+// TestProviderConverter_RequestFrom_CapabilityNotSupported covers every
+// unsupported-capability site in converter.go's RequestFrom (image generation and
+// embeddings, across every provider type that can't do either): the client asked a
+// model for something it can't do -- its mistake, not ours, so the proxy layer must
+// answer 4xx (a *converterutil.RequestValidationError) instead of falling through to a
+// generic 500. Also guards against the internal provider type name (e.g. "anthropic",
+// "cometapi", "proman", "bedrock") leaking into the client-facing message: this
+// project's convention is never to expose the backend name (see e.g.
+// anthropic/messages_test.go's assert.NotContains(..., "Anthropic")), and an earlier
+// version of these errors used fmt.Sprintf("%s does not support ...", providerType)
+// before that was caught in review.
+func TestProviderConverter_RequestFrom_CapabilityNotSupported(t *testing.T) {
+	tests := []struct {
+		name         string
+		providerType config.ProviderType
+		mode         RequestMode
+		body         string
+		wantSubstr   string
+	}{
+		{"anthropic image", config.ProviderTypeAnthropic, RequestMode{IsImageGeneration: true}, `{"model":"gpt-4"}`, "does not support image generation"},
+		{"cometapi image", config.ProviderTypeCometAPI, RequestMode{IsImageGeneration: true}, `{"model":"gpt-4"}`, "does not support image generation"},
+		{"proman image", config.ProviderTypeProMan, RequestMode{IsImageGeneration: true}, `{"model":"gpt-4"}`, "does not support image generation"},
+		{"bedrock image", config.ProviderTypeBedrock, RequestMode{IsImageGeneration: true}, `{"model":"stability.sd3"}`, "does not support image generation"},
+		{"anthropic embeddings", config.ProviderTypeAnthropic, RequestMode{IsEmbeddings: true}, `{"model":"claude-haiku-4-5","input":"hello"}`, "does not support embeddings"},
+		{"cometapi embeddings", config.ProviderTypeCometAPI, RequestMode{IsEmbeddings: true}, `{"model":"claude-haiku-4-5","input":"hello"}`, "does not support embeddings"},
+		{"proman embeddings", config.ProviderTypeProMan, RequestMode{IsEmbeddings: true}, `{"model":"claude-haiku-4-5","input":"hello"}`, "does not support embeddings"},
+		{"bedrock embeddings", config.ProviderTypeBedrock, RequestMode{IsEmbeddings: true}, `{"model":"claude-haiku-4-5","input":"hello"}`, "does not support embeddings"},
 	}
-	if !strings.Contains(err.Error(), "does not support image generation") {
-		t.Fatalf("unexpected error: %v", err)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := New(tt.providerType, tt.mode)
+			_, err := c.RequestFrom([]byte(tt.body))
+			if err == nil {
+				t.Fatalf("expected error")
+			}
+			var validationErr *converterutil.RequestValidationError
+			if !errors.As(err, &validationErr) {
+				t.Fatalf("expected *converterutil.RequestValidationError, got %T: %v", err, err)
+			}
+			if !strings.Contains(err.Error(), tt.wantSubstr) {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			for _, leaked := range []string{"anthropic", "cometapi", "proman", "bedrock"} {
+				if strings.Contains(strings.ToLower(err.Error()), leaked) {
+					t.Fatalf("client-facing error must not name the backend provider, got: %v", err)
+				}
+			}
+		})
 	}
 }
 
@@ -1315,6 +1357,59 @@ func TestExtractTokenUsage_CacheWriteTokens(t *testing.T) {
 	}
 }
 
+// TestExtractTokenUsage_KimiCacheWriteTTLFromHeaders covers Kimi/Moonshot's
+// shape: the body only ever reports the aggregate via
+// usage.prompt_tokens_details.cache_write_tokens (cache_creation_token_details
+// stays null), so the 5m/1h split must come from the caller-supplied
+// CacheWriteTTLHeader5mTokens/1hTokens options (sourced from the
+// Msh-Usage-Cache-Write-Tokens-5m/-1h response headers).
+func TestExtractTokenUsage_KimiCacheWriteTTLFromHeaders(t *testing.T) {
+	body := []byte(`{"usage":{"prompt_tokens":1100,"completion_tokens":10,"prompt_tokens_details":{"cache_write_tokens":1000}}}`)
+
+	t.Run("1h header split applied when body has no breakdown", func(t *testing.T) {
+		usage := ExtractTokenUsageWithOptions(body, TokenUsageExtractionOptions{
+			CacheWriteTTLHeader5mTokens: 200,
+			CacheWriteTTLHeader1hTokens: 800,
+		})
+		if usage == nil {
+			t.Fatal("expected usage")
+		}
+		if usage.CacheCreationTokens != 1000 {
+			t.Fatalf("expected aggregate CacheCreationTokens=1000 (from body), got %d", usage.CacheCreationTokens)
+		}
+		if usage.CacheCreation5mTokens != 200 || usage.CacheCreation1hTokens != 800 {
+			t.Fatalf("expected 5m=200/1h=800 from headers, got 5m=%d/1h=%d", usage.CacheCreation5mTokens, usage.CacheCreation1hTokens)
+		}
+	})
+
+	t.Run("body breakdown wins over headers when both present", func(t *testing.T) {
+		bodyWithBreakdown := []byte(`{"usage":{"prompt_tokens":1100,"completion_tokens":10,"prompt_tokens_details":{"cache_write_tokens":1000,"cache_creation_token_details":{"ephemeral_5m_input_tokens":300,"ephemeral_1h_input_tokens":700}}}}`)
+		usage := ExtractTokenUsageWithOptions(bodyWithBreakdown, TokenUsageExtractionOptions{
+			CacheWriteTTLHeader5mTokens: 200,
+			CacheWriteTTLHeader1hTokens: 800,
+		})
+		if usage == nil {
+			t.Fatal("expected usage")
+		}
+		if usage.CacheCreation5mTokens != 300 || usage.CacheCreation1hTokens != 700 {
+			t.Fatalf("expected body breakdown 5m=300/1h=700 to win, got 5m=%d/1h=%d", usage.CacheCreation5mTokens, usage.CacheCreation1hTokens)
+		}
+	})
+
+	t.Run("no headers means no split", func(t *testing.T) {
+		usage := ExtractTokenUsageWithOptions(body, TokenUsageExtractionOptions{})
+		if usage == nil {
+			t.Fatal("expected usage")
+		}
+		if usage.CacheCreation5mTokens != 0 || usage.CacheCreation1hTokens != 0 {
+			t.Fatalf("expected no split without headers, got 5m=%d/1h=%d", usage.CacheCreation5mTokens, usage.CacheCreation1hTokens)
+		}
+		if usage.CacheCreationTokens != 1000 {
+			t.Fatalf("expected aggregate CacheCreationTokens=1000, got %d", usage.CacheCreationTokens)
+		}
+	})
+}
+
 func TestExtractTokenUsage_ResponsesAPIStreamingEvent(t *testing.T) {
 	// Responses API streaming event format: response.completed SSE event
 	// Usage is nested inside response.usage, not at top level
@@ -1490,4 +1585,48 @@ func buildBedrockEventStreamFrame(t *testing.T, innerJSON string) []byte {
 	binary.BigEndian.PutUint32(frame[4:8], 0)
 	copy(frame[12:], payload)
 	return frame
+}
+
+func TestExtractTokenUsage_CacheType(t *testing.T) {
+	tests := []struct {
+		name     string
+		body     string
+		wantType string
+	}{
+		{
+			name:     "explicit cache chat completions",
+			body:     `{"usage":{"prompt_tokens":100,"completion_tokens":10,"prompt_tokens_details":{"cached_tokens":60,"cache_type":"ephemeral","cache_creation_input_tokens":30,"cache_creation":{"ephemeral_5m_input_tokens":30}}}}`,
+			wantType: "ephemeral",
+		},
+		{
+			name:     "no cache_type means implicit",
+			body:     `{"usage":{"prompt_tokens":100,"completion_tokens":10,"prompt_tokens_details":{"cached_tokens":60}}}`,
+			wantType: "",
+		},
+		{
+			name:     "responses API input_tokens_details carries cache_type",
+			body:     `{"usage":{"input_tokens":100,"output_tokens":10,"input_tokens_details":{"cached_tokens":60,"cache_type":"ephemeral"}}}`,
+			wantType: "ephemeral",
+		},
+		{
+			name:     "nested streaming response.completed carries cache_type",
+			body:     `{"type":"response.completed","response":{"usage":{"input_tokens":100,"output_tokens":10,"input_tokens_details":{"cached_tokens":60,"cache_type":"ephemeral"}}}}`,
+			wantType: "ephemeral",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			usage := ExtractTokenUsage([]byte(tt.body))
+			if usage == nil {
+				t.Fatalf("expected usage for %s", tt.name)
+			}
+			if usage.CacheType != tt.wantType {
+				t.Fatalf("expected CacheType=%q, got %q", tt.wantType, usage.CacheType)
+			}
+			if usage.CachedInputTokens != 60 {
+				t.Fatalf("expected cached_tokens=60, got %d", usage.CachedInputTokens)
+			}
+		})
+	}
 }

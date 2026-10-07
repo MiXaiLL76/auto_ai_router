@@ -15,6 +15,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/converter/openai"
 	promanutils "github.com/mixaill76/auto_ai_router/internal/converter/proman/utils"
+	"github.com/mixaill76/auto_ai_router/internal/httputil"
 	"github.com/mixaill76/auto_ai_router/internal/requestid"
 )
 
@@ -449,6 +450,7 @@ func (s *nativeWSSession) connect(logCtx *RequestLogContext) error {
 			}
 		}
 	}
+	httputil.ApplyCredentialRequestHeaders(headers, cred)
 	dialer := websocket.Dialer{HandshakeTimeout: 30 * time.Second, Proxy: http.ProxyFromEnvironment}
 	conn, response, err := dialer.DialContext(s.request.Context(), target, headers)
 	if response != nil && response.Body != nil {

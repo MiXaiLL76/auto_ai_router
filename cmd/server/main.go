@@ -262,6 +262,7 @@ func main() {
 		PriceRegistry:                priceRegistry,
 		OrganizationPolicies:         organizationPolicies,
 		MaxProviderRetries:           cfg.Server.MaxProviderRetries,
+		Retry:                        cfg.Retry,
 		MaxFallbackAttempts:          cfg.Server.MaxFallbackAttempts,
 		ResponseStore:                respStore,
 		SessionStickyEnabled:         cfg.Server.SessionStickyEnabled,

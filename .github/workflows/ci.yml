@@ -1,0 +1,25 @@
+name: CI
+
+# Single entry point for PRs and pushes to main/develop: lint/tests and the
+# security scans run as two parallel jobs of one run. lint.yml and
+# security.yml are reusable (workflow_call) and are also called by release.yml.
+
+on:
+  pull_request:
+    branches: [ main, develop ]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+
+permissions:
+  contents: read
+  actions: read  # lint's explain job reads this run's job log
+
+jobs:
+  lint:
+    name: Lint
+    uses: ./.github/workflows/lint.yml
+
+  security:
+    name: Security
+    uses: ./.github/workflows/security.yml

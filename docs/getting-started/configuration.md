@@ -140,6 +140,10 @@ Set to `false` to skip local estimation entirely if all your configured provider
 
 The `fail2ban` block bans a `credential + model` pair after repeated failures at configured HTTP status codes, so a broken or rate-limited upstream stops eating a share of round-robin traffic. See [Fail2Ban](../advanced/f2b.md) for the full parameter reference, per-error-code rules, and per-credential overrides (for upstreams — e.g. resellers/aggregators — that signal failure with a different status code than the rest of the pool).
 
+## Retry Parameters
+
+The `retry` block decides which upstream errors are replayed on the next credential of the same model. By default, self-hosted `vllm` credentials do not retry `400`. See [Retries and Request Cleanup](../advanced/retry.md) for status code sets, body markers and per-provider and per-credential overrides.
+
 ## Monitoring Parameters
 
 | Parameter            | Type   | Description                                                                                                             |
@@ -163,6 +167,7 @@ Common fields for all credentials:
 | `name`             | string | Unique credential identifier                                                                                                     |
 | `type`             | string | Provider type: `openai`, `anthropic`, `cometapi`, `vertex-ai`, `gemini`, `bedrock`, `vllm`, `proxy`                              |
 | `proxy_url`        | string | Optional outbound proxy URL for this credential (HTTP, HTTPS, SOCKS5)                                                            |
+| `request_headers`  | map    | Optional fixed headers for upstream requests of direct providers ([details](#fixed-upstream-request-headers))                    |
 | `rpm`              | int    | Requests per minute limit (-1 = unlimited)                                                                                       |
 | `tpm`              | int    | Tokens per minute limit (-1 = unlimited)                                                                                         |
 | `is_fallback`      | bool   | Use as fallback when primary credentials are exhausted                                                                           |
@@ -199,6 +204,48 @@ is preserved. Invalid URLs are rejected during config loading without exposing
 proxy credentials in the error. If the proxy fails, the request fails through
 the usual credential retry/fallback flow; it does not retry the same credential
 directly. Proxy lists and rotation are not supported.
+
+### Fixed upstream request headers
+
+By default the router forwards the client's own headers (except authentication,
+hop-by-hop, client-IP and internal AIR headers) to the provider, including its
+`User-Agent`. Set `request_headers` on a credential to send fixed values instead,
+for example when the provider's WAF rejects some client User-Agents (Novita's
+Cloudflare answers `Python-urllib/*` with `403 error code: 1010`):
+
+```yaml
+credentials:
+  - name: novita
+    type: openai
+    api_key: os.environ/NOVITA_API_KEY
+    base_url: https://api.novita.ai/openai
+    request_headers:
+      User-Agent: "auto-ai-router/1.0"      # replaces the client's User-Agent
+      X-Provider-Token: os.environ/NOVITA_TOKEN
+      X-Client-Hint: ""                     # empty: never send this header
+```
+
+- The configured value replaces every value the client sent under the same name
+  (names are case-insensitive). An empty or blank value removes the header; for
+  `User-Agent` this sends none at all rather than Go's default `Go-http-client`.
+- Applies to every request sent with the credential: regular and streaming HTTP
+  requests, retries (a retry on another credential uses that credential's
+  headers) and the native WebSocket handshake of `/v1/responses`.
+- Values support `os.environ/VAR`. A variable that is unset or blank is a
+  config error, not a silent removal. Surrounding spaces and tabs are trimmed.
+- Values are never logged: startup logs list header names only, and the debug
+  dump of outbound headers shows `[credential request_headers]` instead.
+- Only for direct providers. `air` and `proxy` credentials reject the field: the
+  remote router would treat the headers as client headers and forward them to
+  every provider behind it. Set them on the provider credential of the router
+  that actually calls the provider.
+- Headers the router manages itself are rejected at load time: `Authorization`,
+  `X-Api-Key`, `X-Goog-Api-Key`, `Host`, `Content-*`, `Transfer-Encoding`,
+  `Expect`, `Accept-Encoding`, `Anthropic-Beta`, `Anthropic-Version`, `Origin`,
+  hop-by-hop headers (`Connection`, `Keep-Alive`, `Proxy-Connection`,
+  `Proxy-Authenticate`, `Proxy-Authorization`, `TE`, `Trailer`, `Upgrade`),
+  and the `Air-*` and `Sec-WebSocket-*` families. Invalid header names and values
+  with control characters (CR, LF, NUL, ...) are rejected too.
 
 ### Scoped credential visibility
 
@@ -289,6 +336,8 @@ models:
 ```
 
 By default, all models are available through all credentials. Use the `models` section to restrict which credentials serve which models.
+
+A model entry can also set `reasoning_effort_map`, which rewrites the client's reasoning effort into a value the model accepts (e.g. `{minimal: low, high: medium, default: low}`). See [Reasoning effort mapping](../advanced/retry.md#reasoning-effort-mapping).
 
 By default, models can also be declared directly inside a credential via the `models:` field — they are automatically extracted and added to the global models list with the credential name pre-filled.
 

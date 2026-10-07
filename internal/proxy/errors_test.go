@@ -119,7 +119,7 @@ func TestMaskedUpstreamErrorBodyClassifiesBadRequest(t *testing.T) {
 		{
 			name:        "context length",
 			body:        `{"error":{"message":"Input is too long for the context window","code":"context_length_exceeded"}}`,
-			wantMessage: "Context length exceeded",
+			wantMessage: "This model's maximum context length is exceeded by the request",
 			wantCode:    "context_length_exceeded",
 			wantParam:   stringPtr("input"),
 		},

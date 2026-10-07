@@ -84,6 +84,22 @@ type ModelPrice struct {
 	// output nor reasoning. Defaults to false so existing models are unaffected.
 	ReasoningTokensAdditive bool `json:"reasoning_tokens_additive,omitempty"`
 
+	// ReasoningTokensAccounting set to ReasoningTokensAccountingAuto decides
+	// the semantics above per response instead, from the provider's own
+	// total_tokens (see converter.TokenUsage.ReasoningAccounting): one price
+	// row is shared by every credential serving the model, and xAI reports
+	// reasoning on top of completion_tokens while aggregators such as Requesty
+	// fold it in, so a fixed flag would misbill one of the two routes.
+	// Responses that do not settle it fall back to ReasoningTokensAdditive.
+	ReasoningTokensAccounting string `json:"reasoning_tokens_accounting,omitempty"`
+
+	// LongContextPricingMode opts the model into a long-context billing rule
+	// beyond the provider defaults. LongContextFullRequest200kInclusive bills
+	// the whole request (input, cached input, output and reasoning) at the
+	// *_above_200k_tokens rates once the prompt reaches 200k tokens — at
+	// exactly 200,000 too — as xAI does. Empty keeps the default 200k handling.
+	LongContextPricingMode string `json:"long_context_pricing_mode,omitempty"`
+
 	// Cached/Prediction tokens
 	OutputCostPerCachedToken                     float64 `json:"output_cost_per_cached_token,omitempty"`
 	InputCostPerCachedToken                      float64 `json:"input_cost_per_cached_token,omitempty"`
@@ -96,8 +112,20 @@ type ModelPrice struct {
 	CacheCreationInputTokenCostAbove1hrAbove200k float64 `json:"cache_creation_input_token_cost_above_1hr_above_200k_tokens,omitempty"`
 	CacheReadInputTokenCostAbove272k             float64 `json:"cache_read_input_token_cost_above_272k_tokens,omitempty"`
 	CacheCreationInputTokenCostAbove272k         float64 `json:"cache_creation_input_token_cost_above_272k_tokens,omitempty"`
-	CacheReadInputAudioTokenCost                 float64 `json:"cache_read_input_audio_token_cost,omitempty"`
-	OutputCostPerPredictionToken                 float64 `json:"output_cost_per_prediction_token,omitempty"`
+	// Explicit Cache (Alibaba/Qwen) read tokens are billed at their own rate,
+	// separate from Implicit Cache Read (cache_read_input_token_cost). A request
+	// runs in explicit cache mode when usage.prompt_tokens_details.cache_type ==
+	// "ephemeral"; per-model support for explicit vs implicit cache is independent
+	// — a model may price one and not the other. Each tier field is filled only
+	// for the tiers the model actually offers: with no tier field configured the
+	// base rate applies; with no base rate the request falls back to implicit
+	// cache read pricing (never to free).
+	ExplicitCacheReadInputTokenCost          float64 `json:"explicit_cache_read_input_token_cost,omitempty"`
+	ExplicitCacheReadInputTokenCostAbove32k  float64 `json:"explicit_cache_read_input_token_cost_above_32k_tokens,omitempty"`
+	ExplicitCacheReadInputTokenCostAbove128k float64 `json:"explicit_cache_read_input_token_cost_above_128k_tokens,omitempty"`
+	ExplicitCacheReadInputTokenCostAbove256k float64 `json:"explicit_cache_read_input_token_cost_above_256k_tokens,omitempty"`
+	CacheReadInputAudioTokenCost             float64 `json:"cache_read_input_audio_token_cost,omitempty"`
+	OutputCostPerPredictionToken             float64 `json:"output_cost_per_prediction_token,omitempty"`
 
 	// Vision/Images cost per image (not per token)
 	OutputCostPerImage float64 `json:"output_cost_per_image,omitempty"`
@@ -119,6 +147,21 @@ type ModelPrice struct {
 	SearchContextCostPerQuery map[string]float64 `json:"search_context_cost_per_query,omitempty"`
 	WebSearchBillingUnit      string             `json:"web_search_billing_unit,omitempty"`
 	LiteLLMProvider           string             `json:"litellm_provider,omitempty"`
+
+	// Other built-in server-side tools (xAI), billed per unit on top of tokens.
+	// ToolCostPerCall maps a tool to its price per successful call; keys are
+	// code_execution, attachment_search and collections_search, with the
+	// aliases code_interpreter, document_search and file_search accepted for
+	// them (a tool is priced once even when both names are present).
+	ToolCostPerCall map[string]float64 `json:"tool_cost_per_call,omitempty"`
+	// X Search is billed per fetched item rather than per call: every post
+	// (parent and quoted posts included) and every user profile it returned.
+	XSearchCostPerPost    float64 `json:"x_search_cost_per_post,omitempty"`
+	XSearchCostPerProfile float64 `json:"x_search_cost_per_profile,omitempty"`
+	// ImageGenerationToolModel names the price row (from the same price source)
+	// that prices images produced by a built-in image_generation tool, e.g.
+	// grok-imagine-image-2.0. Without it such images are not billed.
+	ImageGenerationToolModel string `json:"image_generation_tool_model,omitempty"`
 
 	// Rate is a per-model markup/discount multiplier some price profiles carry
 	// (e.g. a provider markup applied upstream of these prices). It is parsed
@@ -311,83 +354,93 @@ const (
 
 // Manager handles model discovery and mapping
 type Manager struct {
-	mu                           sync.RWMutex
-	credentialModels             map[string][]string          // credential name -> list of model IDs
-	allModels                    []Model                      // deduplicated list of all models
-	modelToCredentials           map[string][]string          // model ID -> list of credential names
-	modelLimits                  map[string][]ModelLimits     // model ID -> limits (may have multiple entries for different credentials)
-	staticModelLimits            map[string][]ModelLimits     // immutable snapshot of limits from config.yaml (never modified after New())
-	staticModelRealNames         map[string]string            // immutable snapshot of global real names from config.yaml
-	staticModelRealNamesPerCred  map[string]map[string]string // immutable snapshot of per-credential real names: credential -> alias -> real name
-	modelWebSocketResponses      map[string]bool
-	modelPassthroughResponses    map[string]*bool                                   // model name -> explicit passthrough_responses override (nil = auto)
-	modelPassthroughMessages     map[string]*bool                                   // model name -> explicit passthrough_messages override (nil = provider default)
-	dynamicModelWeights          map[string]map[string]int                          // model ID -> credential -> weight learned from upstream /health
-	dynamicModelPriorities       map[string]map[string]int                          // model ID -> credential -> priority learned from upstream /health (scalar; MIN of live tiers when tiers exist)
-	dynamicModelPriorityTiers    map[string]map[string][]httputil.ModelPriorityTier // model ID -> proxy/AIR credential -> per-priority-tier breakdown learned from upstream /health
-	dynamicModelSourceCreds      map[string]map[string]string                       // model ID -> local (proxy/AIR) credential -> real upstream credential name learned from /health
-	dynamicModelScopes           map[string]map[string]ScopeMetadata
-	dbModelNames                 map[string]bool                      // model names that were loaded from LiteLLM DB (for hot-reload diffing)
-	modelAliases                 map[string]string                    // alias -> real model name (from model_alias config)
-	clientModelIDs               map[string]struct{}                  // exact advertised canonical client IDs
-	clientModelSurfaceConfigured bool                                 // distinguishes an omitted boundary from an explicit empty boundary
-	publicModelAliases           map[string]string                    // effective client alias -> canonical LiteLLM public deployment identity
-	staticPublicModelAliases     map[string]string                    // public_model_alias from config; wins over the DB ones
-	dbPublicModelAliases         map[string]string                    // LiteLLM router_settings.model_group_alias
-	acceptedModelAliases         map[string]string                    // accepted client alias -> canonical model, hidden from discovery
-	externalModelIDs             map[string]struct{}                  // client-visible models handled outside the inference balancer
-	modelRealNames               map[string]string                    // alias name -> real model name (global, no specific credential)
-	modelRealNamesPerCred        map[string]map[string]string         // credential -> alias -> real model name (for credential-specific entries)
-	modelDefaultParams           map[string]map[string]map[string]any // credential -> alias -> request-body defaults (DB-sourced vLLM deployments only)
-	staticVisionSupport          map[string]bool                      // model name -> supports_vision from config.yaml
-	modelVisionSupport           map[string]bool                      // model name -> effective supports_vision (static + DB model_info)
-	credentialMappingsReady      bool                                 // true after static/DB credential mappings have been initialized
-	defaultModelsRPM             int                                  // default RPM for models
-	logger                       *slog.Logger
-	credentials                  []config.CredentialConfig // credentials for fetching remote models
-	credentialsConfigured        bool
-	remoteModelsCache            map[string]remoteModelCache        // cache for remote models per credential (credentialName -> cache)
-	cacheExpiration              time.Duration                      // how long to cache remote models (default 5 minutes)
-	allModelsCache               allModelsCache                     // cached result of GetAllModels (3 second TTL)
-	scopedAllModelsCache         *lru.Cache[string, allModelsCache] // cached scoped /v1/models responses
+	mu                              sync.RWMutex
+	credentialModels                map[string][]string          // credential name -> list of model IDs
+	allModels                       []Model                      // deduplicated list of all models
+	modelToCredentials              map[string][]string          // model ID -> list of credential names
+	modelLimits                     map[string][]ModelLimits     // model ID -> limits (may have multiple entries for different credentials)
+	staticModelLimits               map[string][]ModelLimits     // immutable snapshot of limits from config.yaml (never modified after New())
+	staticModelRealNames            map[string]string            // immutable snapshot of global real names from config.yaml
+	staticModelRealNamesPerCred     map[string]map[string]string // immutable snapshot of per-credential real names: credential -> alias -> real name
+	modelWebSocketResponses         map[string]bool
+	modelPassthroughResponses       map[string]*bool                                   // model name -> explicit passthrough_responses override (nil = auto)
+	modelPassthroughMessages        map[string]*bool                                   // model name -> explicit passthrough_messages override (nil = provider default)
+	modelResponsesOnly              map[string]bool                                    // model name -> true if only /v1/responses is accepted upstream (responses_only: true), for entries with no specific credential
+	modelResponsesOnlyPerCred       map[string]map[string]bool                         // credential -> model name -> true (for credential-specific responses_only entries -- the same alias can be served by another credential that doesn't need it)
+	staticModelResponsesOnly        map[string]bool                                    // immutable snapshot of modelResponsesOnly from config.yaml (never modified after New())
+	staticModelResponsesOnlyPerCred map[string]map[string]bool                         // immutable snapshot of modelResponsesOnlyPerCred from config.yaml
+	dynamicModelWeights             map[string]map[string]int                          // model ID -> credential -> weight learned from upstream /health
+	dynamicModelPriorities          map[string]map[string]int                          // model ID -> credential -> priority learned from upstream /health (scalar; MIN of live tiers when tiers exist)
+	dynamicModelPriorityTiers       map[string]map[string][]httputil.ModelPriorityTier // model ID -> proxy/AIR credential -> per-priority-tier breakdown learned from upstream /health
+	dynamicModelSourceCreds         map[string]map[string]string                       // model ID -> local (proxy/AIR) credential -> real upstream credential name learned from /health
+	dynamicModelScopes              map[string]map[string]ScopeMetadata
+	dbModelNames                    map[string]bool                                  // model names that were loaded from LiteLLM DB (for hot-reload diffing)
+	modelAliases                    map[string]string                                // alias -> real model name (from model_alias config)
+	clientModelIDs                  map[string]struct{}                              // exact advertised canonical client IDs
+	clientModelSurfaceConfigured    bool                                             // distinguishes an omitted boundary from an explicit empty boundary
+	publicModelAliases              map[string]string                                // effective client alias -> canonical LiteLLM public deployment identity
+	staticPublicModelAliases        map[string]string                                // public_model_alias from config; wins over the DB ones
+	dbPublicModelAliases            map[string]string                                // LiteLLM router_settings.model_group_alias
+	acceptedModelAliases            map[string]string                                // accepted client alias -> canonical model, hidden from discovery
+	externalModelIDs                map[string]struct{}                              // client-visible models handled outside the inference balancer
+	modelRealNames                  map[string]string                                // alias name -> real model name (global, no specific credential)
+	modelRealNamesPerCred           map[string]map[string]string                     // credential -> alias -> real model name (for credential-specific entries)
+	modelDefaultParams              map[string]map[string]map[string]any             // credential -> alias -> request-body defaults (DB-sourced vLLM deployments only)
+	modelReasoningEffortMaps        map[string]map[string]*config.ReasoningEffortMap // alias -> credential ("" = every credential) -> reasoning_effort_map from config.yaml
+	staticVisionSupport             map[string]bool                                  // model name -> supports_vision from config.yaml
+	modelVisionSupport              map[string]bool                                  // model name -> effective supports_vision (static + DB model_info)
+	credentialMappingsReady         bool                                             // true after static/DB credential mappings have been initialized
+	defaultModelsRPM                int                                              // default RPM for models
+	logger                          *slog.Logger
+	credentials                     []config.CredentialConfig // credentials for fetching remote models
+	credentialsConfigured           bool
+	remoteModelsCache               map[string]remoteModelCache        // cache for remote models per credential (credentialName -> cache)
+	cacheExpiration                 time.Duration                      // how long to cache remote models (default 5 minutes)
+	allModelsCache                  allModelsCache                     // cached result of GetAllModels (3 second TTL)
+	scopedAllModelsCache            *lru.Cache[string, allModelsCache] // cached scoped /v1/models responses
 }
 
 // New creates a new model manager
 func New(logger *slog.Logger, defaultModelsRPM int, staticModels []config.ModelRPMConfig) *Manager {
 	m := &Manager{
-		credentialModels:            make(map[string][]string),
-		allModels:                   make([]Model, 0),
-		modelToCredentials:          make(map[string][]string),
-		modelLimits:                 make(map[string][]ModelLimits),
-		staticModelLimits:           make(map[string][]ModelLimits),
-		staticModelRealNames:        make(map[string]string),
-		staticModelRealNamesPerCred: make(map[string]map[string]string),
-		dbModelNames:                make(map[string]bool),
-		modelAliases:                make(map[string]string),
-		clientModelIDs:              make(map[string]struct{}),
-		publicModelAliases:          make(map[string]string),
-		staticPublicModelAliases:    make(map[string]string),
-		dbPublicModelAliases:        make(map[string]string),
-		acceptedModelAliases:        make(map[string]string),
-		externalModelIDs:            make(map[string]struct{}),
-		modelRealNames:              make(map[string]string),
-		modelRealNamesPerCred:       make(map[string]map[string]string),
-		modelDefaultParams:          make(map[string]map[string]map[string]any),
-		staticVisionSupport:         collectVisionSupport(staticModels),
-		modelWebSocketResponses:     make(map[string]bool),
-		modelPassthroughResponses:   make(map[string]*bool),
-		modelPassthroughMessages:    make(map[string]*bool),
-		dynamicModelWeights:         make(map[string]map[string]int),
-		dynamicModelPriorities:      make(map[string]map[string]int),
-		dynamicModelPriorityTiers:   make(map[string]map[string][]httputil.ModelPriorityTier),
-		dynamicModelSourceCreds:     make(map[string]map[string]string),
-		dynamicModelScopes:          make(map[string]map[string]ScopeMetadata),
-		defaultModelsRPM:            defaultModelsRPM,
-		logger:                      logger,
-		credentials:                 make([]config.CredentialConfig, 0),
-		remoteModelsCache:           make(map[string]remoteModelCache),
-		cacheExpiration:             5 * time.Minute, // Default cache TTL: 5 minutes
-		scopedAllModelsCache:        newScopedAllModelsCache(),
+		credentialModels:                make(map[string][]string),
+		allModels:                       make([]Model, 0),
+		modelToCredentials:              make(map[string][]string),
+		modelLimits:                     make(map[string][]ModelLimits),
+		staticModelLimits:               make(map[string][]ModelLimits),
+		staticModelRealNames:            make(map[string]string),
+		staticModelRealNamesPerCred:     make(map[string]map[string]string),
+		dbModelNames:                    make(map[string]bool),
+		modelAliases:                    make(map[string]string),
+		clientModelIDs:                  make(map[string]struct{}),
+		publicModelAliases:              make(map[string]string),
+		staticPublicModelAliases:        make(map[string]string),
+		dbPublicModelAliases:            make(map[string]string),
+		acceptedModelAliases:            make(map[string]string),
+		externalModelIDs:                make(map[string]struct{}),
+		modelRealNames:                  make(map[string]string),
+		modelRealNamesPerCred:           make(map[string]map[string]string),
+		modelDefaultParams:              make(map[string]map[string]map[string]any),
+		modelReasoningEffortMaps:        make(map[string]map[string]*config.ReasoningEffortMap),
+		staticVisionSupport:             collectVisionSupport(staticModels),
+		modelWebSocketResponses:         make(map[string]bool),
+		modelPassthroughResponses:       make(map[string]*bool),
+		modelPassthroughMessages:        make(map[string]*bool),
+		modelResponsesOnly:              make(map[string]bool),
+		modelResponsesOnlyPerCred:       make(map[string]map[string]bool),
+		staticModelResponsesOnly:        make(map[string]bool),
+		staticModelResponsesOnlyPerCred: make(map[string]map[string]bool),
+		dynamicModelWeights:             make(map[string]map[string]int),
+		dynamicModelPriorities:          make(map[string]map[string]int),
+		dynamicModelPriorityTiers:       make(map[string]map[string][]httputil.ModelPriorityTier),
+		dynamicModelSourceCreds:         make(map[string]map[string]string),
+		dynamicModelScopes:              make(map[string]map[string]ScopeMetadata),
+		defaultModelsRPM:                defaultModelsRPM,
+		logger:                          logger,
+		credentials:                     make([]config.CredentialConfig, 0),
+		remoteModelsCache:               make(map[string]remoteModelCache),
+		cacheExpiration:                 5 * time.Minute, // Default cache TTL: 5 minutes
+		scopedAllModelsCache:            newScopedAllModelsCache(),
 	}
 
 	// Load static models from config.yaml
@@ -421,6 +474,12 @@ func New(logger *slog.Logger, defaultModelsRPM int, staticModels []config.ModelR
 					"real", staticModel.Model,
 					"credential", staticModel.Credential)
 			}
+			if staticModel.ReasoningEffortMap != nil {
+				if m.modelReasoningEffortMaps[staticModel.Name] == nil {
+					m.modelReasoningEffortMaps[staticModel.Name] = make(map[string]*config.ReasoningEffortMap)
+				}
+				m.modelReasoningEffortMaps[staticModel.Name][staticModel.Credential] = staticModel.ReasoningEffortMap
+			}
 			// Register explicit passthrough_responses override if set
 			if staticModel.PassthroughResponses != nil {
 				m.modelPassthroughResponses[staticModel.Name] = staticModel.PassthroughResponses
@@ -432,6 +491,18 @@ func New(logger *slog.Logger, defaultModelsRPM int, staticModels []config.ModelR
 				m.modelPassthroughMessages[staticModel.Name] = staticModel.PassthroughMessages
 				logger.Debug("Registered passthrough_messages override",
 					"model", staticModel.Name, "value", *staticModel.PassthroughMessages)
+			}
+			if staticModel.ResponsesOnly {
+				if staticModel.Credential != "" {
+					if m.modelResponsesOnlyPerCred[staticModel.Credential] == nil {
+						m.modelResponsesOnlyPerCred[staticModel.Credential] = make(map[string]bool)
+					}
+					m.modelResponsesOnlyPerCred[staticModel.Credential][staticModel.Name] = true
+				} else {
+					m.modelResponsesOnly[staticModel.Name] = true
+				}
+				logger.Debug("Registered responses_only model",
+					"model", staticModel.Name, "credential", staticModel.Credential)
 			}
 			logger.Debug("Added static model from config.yaml",
 				"model", staticModel.Name,
@@ -458,6 +529,16 @@ func New(logger *slog.Logger, defaultModelsRPM int, staticModels []config.ModelR
 			snapshot[alias] = realName
 		}
 		m.staticModelRealNamesPerCred[cred] = snapshot
+	}
+	for k, v := range m.modelResponsesOnly {
+		m.staticModelResponsesOnly[k] = v
+	}
+	for cred, names := range m.modelResponsesOnlyPerCred {
+		snapshot := make(map[string]bool, len(names))
+		for alias, v := range names {
+			snapshot[alias] = v
+		}
+		m.staticModelResponsesOnlyPerCred[cred] = snapshot
 	}
 
 	return m
@@ -532,6 +613,19 @@ func (m *Manager) SupportsVision(modelID string) (supported, known bool) {
 	defer m.mu.RUnlock()
 	supported, known = m.modelVisionSupport[modelID]
 	return supported, known
+}
+
+// GetReasoningEffortMap returns the reasoning_effort_map configured for a model
+// alias served by a credential: the entry bound to that credential, else the
+// entry without a credential. nil when the model has none.
+func (m *Manager) GetReasoningEffortMap(alias, credential string) *config.ReasoningEffortMap {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	byCred := m.modelReasoningEffortMaps[alias]
+	if rem, ok := byCred[credential]; ok {
+		return rem
+	}
+	return byCred[""]
 }
 
 // GetAliasesForCredentialRealModel returns route-visible model IDs on a
@@ -695,6 +789,30 @@ func (m *Manager) HasPassthroughResponsesOverride(modelID string) bool {
 	defer m.mu.RUnlock()
 	value, ok := m.modelPassthroughResponses[modelID]
 	return ok && value != nil
+}
+
+// IsResponsesOnlyForCredential reports whether modelID's upstream only
+// accepts the Responses API (responses_only: true in models[]) *on the given
+// credential* and must never be sent a /v1/chat/completions request
+// directly. No auto-detection: false unless explicitly configured, since
+// (unlike PassthroughResponses) there is no reliable way to infer this from
+// the model name alone.
+//
+// Scoped per credential -- same reasoning as GetRealModelNameForCredential:
+// the same public alias can be served by several credentials across
+// different providers (e.g. an OpenAI deployment that is Responses-API-
+// exclusive, and an OpenRouter/Azure credential for the same alias that
+// isn't), and only the credential(s) the flag was actually set on should be
+// routed through the Responses API conversion.
+func (m *Manager) IsResponsesOnlyForCredential(modelID, credential string) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if per, ok := m.modelResponsesOnlyPerCred[credential]; ok {
+		if v, ok := per[modelID]; ok {
+			return v
+		}
+	}
+	return m.modelResponsesOnly[modelID]
 }
 
 // IsPassthroughMessagesForProvider reports whether /v1/messages requests for modelID
@@ -1332,6 +1450,25 @@ func (m *Manager) UpdateDBModels(dbModels []config.ModelRPMConfig, staticCreds [
 		}
 		newRealNamesPerCred[cred] = snapshot
 	}
+
+	// 2c. Rebuild modelResponsesOnly/modelResponsesOnlyPerCred = static snapshot + DB
+	//     entries (model_info.mode == "responses" in model_table.go). Same reasoning as
+	//     the real-name maps above: without this, a DB-sourced model (the primary "AIR
+	//     instead of LiteLLM" deployment shape) whose upstream only accepts /v1/responses
+	//     never gets converted and every request to it 400s.
+	newResponsesOnly := make(map[string]bool, len(m.staticModelResponsesOnly)+len(dbModels))
+	for k, v := range m.staticModelResponsesOnly {
+		newResponsesOnly[k] = v
+	}
+	newResponsesOnlyPerCred := make(map[string]map[string]bool, len(m.staticModelResponsesOnlyPerCred))
+	for cred, names := range m.staticModelResponsesOnlyPerCred {
+		snapshot := make(map[string]bool, len(names))
+		for alias, v := range names {
+			snapshot[alias] = v
+		}
+		newResponsesOnlyPerCred[cred] = snapshot
+	}
+
 	// 3. Apply DB model data.
 	newDBNames := make(map[string]bool, len(dbModels))
 	newDefaultParams := make(map[string]map[string]map[string]any)
@@ -1366,6 +1503,16 @@ func (m *Manager) UpdateDBModels(dbModels []config.ModelRPMConfig, staticCreds [
 				}
 			}
 		}
+		if dm.ResponsesOnly {
+			if dm.Credential != "" {
+				if newResponsesOnlyPerCred[dm.Credential] == nil {
+					newResponsesOnlyPerCred[dm.Credential] = make(map[string]bool)
+				}
+				newResponsesOnlyPerCred[dm.Credential][dm.Name] = true
+			} else {
+				newResponsesOnly[dm.Name] = true
+			}
+		}
 		newDBNames[dm.Name] = true
 	}
 
@@ -1379,6 +1526,8 @@ func (m *Manager) UpdateDBModels(dbModels []config.ModelRPMConfig, staticCreds [
 		foldVisionSupport(newVisionSupport, name, supported)
 	}
 	m.modelVisionSupport = newVisionSupport
+	m.modelResponsesOnly = newResponsesOnly
+	m.modelResponsesOnlyPerCred = newResponsesOnlyPerCred
 
 	// 4. Rebuild ALL credential↔model mappings from the merged modelLimits.
 	//    Proxy-fetched entries (from GetAllModels) are discarded but auto-refresh

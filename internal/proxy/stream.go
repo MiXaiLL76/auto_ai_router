@@ -129,8 +129,11 @@ type StreamUsageInfo struct {
 	CacheCreationTokens      int // Tokens created for cache (billed at different rate)
 	CacheCreation5mTokens    int
 	CacheCreation1hTokens    int
-	CacheReadTokens          int // Tokens read from cache (billed at cheaper rate)
-	WebSearchRequests        int // Confirmed built-in web search executions
+	// CacheType mirrors TokenUsage.CacheType: Alibaba's explicit cache mode
+	// marker ("ephemeral") from prompt_tokens_details.cache_type.
+	CacheType         string
+	CacheReadTokens   int // Tokens read from cache (billed at cheaper rate)
+	WebSearchRequests int // Confirmed built-in web search executions
 }
 
 // StreamUsageExtractor provides a provider-agnostic interface for extracting
@@ -189,8 +192,15 @@ func (o *openAIStreamUsageExtractor) extractChatCompletionUsage(payload []byte) 
 					Ephemeral5mInputTokens int `json:"ephemeral_5m_input_tokens,omitempty"`
 					Ephemeral1hInputTokens int `json:"ephemeral_1h_input_tokens,omitempty"`
 				} `json:"cache_creation_token_details,omitempty"`
-				AudioTokens int `json:"audio_tokens,omitempty"`
-				ImageTokens int `json:"image_tokens,omitempty"`
+				// Alibaba returns the explicit cache creation TTL detail under
+				// cache_creation.ephemeral_5m_input_tokens (no _token_details).
+				CacheCreation struct {
+					Ephemeral5mInputTokens int `json:"ephemeral_5m_input_tokens,omitempty"`
+					Ephemeral1hInputTokens int `json:"ephemeral_1h_input_tokens,omitempty"`
+				} `json:"cache_creation,omitempty"`
+				AudioTokens int    `json:"audio_tokens,omitempty"`
+				ImageTokens int    `json:"image_tokens,omitempty"`
+				CacheType   string `json:"cache_type,omitempty"`
 				converterutil.CachingTokensExtension
 			} `json:"prompt_tokens_details,omitempty"`
 			CompletionTokensDetails struct {
@@ -223,6 +233,10 @@ func (o *openAIStreamUsageExtractor) extractChatCompletionUsage(payload []byte) 
 	}
 	cacheCreation5mTokens := data.Usage.PromptTokensDetails.CacheCreationTokenDetails.Ephemeral5mInputTokens
 	cacheCreation1hTokens := data.Usage.PromptTokensDetails.CacheCreationTokenDetails.Ephemeral1hInputTokens
+	if cacheCreation5mTokens == 0 && cacheCreation1hTokens == 0 {
+		cacheCreation5mTokens = data.Usage.PromptTokensDetails.CacheCreation.Ephemeral5mInputTokens
+		cacheCreation1hTokens = data.Usage.PromptTokensDetails.CacheCreation.Ephemeral1hInputTokens
+	}
 	if cacheCreationTokens == 0 {
 		cacheCreationTokens = cacheCreation5mTokens + cacheCreation1hTokens
 	}
@@ -233,6 +247,7 @@ func (o *openAIStreamUsageExtractor) extractChatCompletionUsage(payload []byte) 
 		data.Usage.PromptTokensDetails.CachedTokens,
 		data.Usage.PromptTokensDetails.CachedAudioTokens,
 	)
+	toolUsage, _ := data.Usage.ServerSideToolUsage()
 
 	return &StreamUsageInfo{
 		PromptTokens:          intValue(data.Usage.PromptTokens),
@@ -242,6 +257,7 @@ func (o *openAIStreamUsageExtractor) extractChatCompletionUsage(payload []byte) 
 		CacheCreationTokens:   cacheCreationTokens,
 		CacheCreation5mTokens: cacheCreation5mTokens,
 		CacheCreation1hTokens: cacheCreation1hTokens,
+		CacheType:             data.Usage.PromptTokensDetails.CacheType,
 		AudioInputTokens: normalizeStreamAudioInput(
 			data.Usage.PromptTokensDetails.AudioTokens,
 			cachedTokens,
@@ -259,6 +275,7 @@ func (o *openAIStreamUsageExtractor) extractChatCompletionUsage(payload []byte) 
 			data.Usage.ServerToolUse.WebSearchRequests,
 			data.Usage.WebSearchRequests,
 			data.Usage.ToolUsageExtensions.WebSearchRequests(),
+			toolUsage.WebSearchCalls,
 		),
 	}
 }
@@ -304,16 +321,22 @@ func (o *openAIStreamUsageExtractor) extractResponsesAPIUsage(payload []byte) *S
 		usage.InputTokensDetails.CachedTokens,
 		usage.InputTokensDetails.CachedAudioTokens,
 	)
+	toolUsage, _ := usage.ServerSideToolUsage()
 	webSearchRequests := webSearchRequestsFromUsage(
 		usage.ServerToolUse.WebSearchRequests,
 		usage.WebSearchRequests,
 		usage.ToolUsageExtensions.WebSearchRequests(),
+		toolUsage.WebSearchCalls,
 	)
-	if webSearchRequests == 0 {
+	// A server-side tool usage object reporting zero web searches is
+	// authoritative (xAI bills successful executions only): output items of
+	// failed attempts must not replace it. Only an object without the
+	// web_search_calls counter leaves the items to count.
+	if webSearchRequests == 0 && !toolUsage.WebSearchCallsReported {
 		webSearchRequests = countCompletedStreamingWebSearchItems(data.Response.Output)
-	}
-	if webSearchRequests == 0 {
-		webSearchRequests = countCompletedStreamingWebSearchItems(data.Output)
+		if webSearchRequests == 0 {
+			webSearchRequests = countCompletedStreamingWebSearchItems(data.Output)
+		}
 	}
 
 	return &StreamUsageInfo{
@@ -324,6 +347,7 @@ func (o *openAIStreamUsageExtractor) extractResponsesAPIUsage(payload []byte) *S
 		CacheCreationTokens:   cacheCreationTokens,
 		CacheCreation5mTokens: usage.InputTokensDetails.CacheCreationTokenDetails.Ephemeral5mInputTokens,
 		CacheCreation1hTokens: usage.InputTokensDetails.CacheCreationTokenDetails.Ephemeral1hInputTokens,
+		CacheType:             usage.InputTokensDetails.CacheType,
 		AudioInputTokens: normalizeStreamAudioInput(
 			usage.InputTokensDetails.AudioTokens,
 			cachedTokens,
@@ -369,8 +393,9 @@ type responsesAPIUsage struct {
 			Ephemeral5mInputTokens int `json:"ephemeral_5m_input_tokens,omitempty"`
 			Ephemeral1hInputTokens int `json:"ephemeral_1h_input_tokens,omitempty"`
 		} `json:"cache_creation_token_details,omitempty"`
-		AudioTokens int `json:"audio_tokens,omitempty"`
-		ImageTokens int `json:"image_tokens,omitempty"`
+		AudioTokens int    `json:"audio_tokens,omitempty"`
+		ImageTokens int    `json:"image_tokens,omitempty"`
+		CacheType   string `json:"cache_type,omitempty"`
 	} `json:"input_tokens_details,omitempty"`
 	OutputTokensDetails struct {
 		AcceptedPredictionTokens int `json:"accepted_prediction_tokens,omitempty"`
@@ -764,6 +789,16 @@ func (p *Proxy) handleTransformedStreaming(
 	var totalTokens int
 	completion := p.newCompletionTokenAccumulator(modelID, logCtx)
 
+	// This billing extraction re-parses the already-converted (provider →
+	// Responses/Messages/Chat SSE) output bytes, which for Kimi/Moonshot never
+	// carry a 5m/1h split of their own — the split only ever arrives on the
+	// upstream response headers, read once here before any chunk is processed.
+	cacheWrite5m, cacheWrite1h := kimiCacheWriteTTLFromHeaders(resp.Header)
+	billingTokenUsageOpts := converter.TokenUsageExtractionOptions{
+		CacheWriteTTLHeader5mTokens: cacheWrite5m,
+		CacheWriteTTLHeader1hTokens: cacheWrite1h,
+	}
+
 	// Capture last chunk for usage extraction (Solution 3: Hybrid approach)
 	var lastChunk []byte
 	detectProviderStreamError := resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices
@@ -805,7 +840,7 @@ func (p *Proxy) handleTransformedStreaming(
 					if logCtx.IsImageGeneration {
 						logCtx.observeImageStreamPayloads(payloads)
 					}
-					if usage := extractTokenUsageFromPayloads(payloads, converter.TokenUsageExtractionOptions{}); usage != nil {
+					if usage := extractTokenUsageFromPayloads(payloads, billingTokenUsageOpts); usage != nil {
 						if logCtx.TokenUsage == nil {
 							logCtx.TokenUsage = &converter.TokenUsage{}
 						}
@@ -897,6 +932,16 @@ func (p *Proxy) handleStreamingWithTokens(w http.ResponseWriter, resp *http.Resp
 	completion := p.newCompletionTokenAccumulator(modelID, logCtx)
 	chunkCount := 0
 
+	// Kimi/Moonshot never puts its cache-write TTL split in the SSE body
+	// (cache_creation_token_details stays null) — it arrives once, on the
+	// initial response headers, before any chunk is read.
+	cacheWrite5m, cacheWrite1h := kimiCacheWriteTTLFromHeaders(resp.Header)
+	tokenUsageOpts := converter.TokenUsageExtractionOptions{
+		AudioInputIncludesCachedAudio: true,
+		CacheWriteTTLHeader5mTokens:   cacheWrite5m,
+		CacheWriteTTLHeader1hTokens:   cacheWrite1h,
+	}
+
 	// Capture last chunk for usage extraction (Solution 3: Hybrid approach)
 	var lastChunk []byte
 	detectProviderStreamError := resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices
@@ -918,7 +963,7 @@ func (p *Proxy) handleStreamingWithTokens(w http.ResponseWriter, resp *http.Resp
 				if logCtx.IsImageGeneration {
 					logCtx.observeImageStreamPayloads(payloadBuf)
 				}
-				if usage := extractTokenUsageFromPayloads(payloadBuf, converter.TokenUsageExtractionOptions{AudioInputIncludesCachedAudio: true}); usage != nil {
+				if usage := extractTokenUsageFromPayloads(payloadBuf, tokenUsageOpts); usage != nil {
 					if logCtx.TokenUsage == nil {
 						logCtx.TokenUsage = &converter.TokenUsage{}
 					}
@@ -947,7 +992,7 @@ func (p *Proxy) handleStreamingWithTokens(w http.ResponseWriter, resp *http.Resp
 
 	if logCtx != nil && logCtx.HideWebSearchResults {
 		providerReader = newWebSearchResultsStripReader(providerReader, func(payload []byte) {
-			if usage := converter.ExtractTokenUsageWithOptions(payload, converter.TokenUsageExtractionOptions{AudioInputIncludesCachedAudio: true}); usage != nil {
+			if usage := converter.ExtractTokenUsageWithOptions(payload, tokenUsageOpts); usage != nil {
 				if logCtx.TokenUsage == nil {
 					logCtx.TokenUsage = &converter.TokenUsage{}
 				}
@@ -1066,6 +1111,9 @@ func (p *Proxy) finalizeStreamingLog(logCtx *RequestLogContext, totalTokens int,
 
 			if usageInfo.CachedTokens > 0 {
 				logCtx.TokenUsage.CachedInputTokens = usageInfo.CachedTokens
+			}
+			if usageInfo.CacheType != "" {
+				logCtx.TokenUsage.CacheType = usageInfo.CacheType
 			}
 			if usageInfo.CachedAudioTokens > 0 {
 				logCtx.TokenUsage.CachedAudioInputTokens = usageInfo.CachedAudioTokens
@@ -1368,6 +1416,63 @@ func (g *streamInitialCommitGate) Release() []byte {
 	return pending
 }
 
+// replayReadCloser serves bytes already read from a stream before handing reads
+// back to it, then surfaces the read error that ended the peek (if any) once
+// the prefix is drained. Close always closes the underlying body.
+type replayReadCloser struct {
+	prefix []byte
+	err    error
+	rest   io.ReadCloser
+}
+
+func (r *replayReadCloser) Read(p []byte) (int, error) {
+	if len(r.prefix) > 0 {
+		n := copy(p, r.prefix)
+		r.prefix = r.prefix[n:]
+		return n, nil
+	}
+	if r.err != nil {
+		return 0, r.err
+	}
+	return r.rest.Read(p)
+}
+
+func (r *replayReadCloser) Close() error {
+	return r.rest.Close()
+}
+
+// peekStreamStartError reads a successful (2xx) streaming response up to its
+// first complete frame -- the same point streamToClient's initial commit gate
+// waits for before writing anything downstream, so nothing reaches the client
+// later than before. If that frame is a terminal error event, its payload is
+// returned so the caller can treat the attempt like an HTTP error response and
+// retry it on another credential. Either way resp.Body is replaced with a reader
+// that replays the peeked bytes, so a caller that decides not to retry still
+// forwards the stream exactly as received.
+func peekStreamStartError(resp *http.Response) string {
+	var gate streamInitialCommitGate
+	buf := make([]byte, 4096)
+	var readErr error
+	payload := ""
+	for {
+		n, err := resp.Body.Read(buf)
+		if n > 0 {
+			var ready bool
+			payload, ready = gate.Observe(buf[:n])
+			if payload != "" || ready {
+				break
+			}
+		}
+		if err != nil {
+			payload = gate.FinalizeTerminalError()
+			readErr = err
+			break
+		}
+	}
+	resp.Body = &replayReadCloser{prefix: gate.Release(), err: readErr, rest: resp.Body}
+	return payload
+}
+
 func (p *Proxy) streamToClient(
 	ctx context.Context,
 	w http.ResponseWriter,
@@ -1639,7 +1744,8 @@ func (p *Proxy) handleResponsesAPIStreaming(
 				"model", modelID, "provider", cred.Type)
 			usageOptions := tokenUsageExtractionOptionsForResponse(cred, resp.Header)
 			return responses.TransformChatStreamToResponsesWithMetaAndUsage(
-				r, w, publicModel, reqMeta, usageOptions.AudioInputIncludesCachedAudio, onComplete,
+				r, w, publicModel, reqMeta, usageOptions.AudioInputIncludesCachedAudio,
+				usageOptions.CacheWriteTTLHeader5mTokens, usageOptions.CacheWriteTTLHeader1hTokens, onComplete,
 			)
 		}
 
@@ -1665,9 +1771,11 @@ func (p *Proxy) handleResponsesAPIStreaming(
 			}
 		}()
 
-		// Then convert Chat Completions SSE to Responses API SSE
+		// Then convert Chat Completions SSE to Responses API SSE. Not Kimi here —
+		// this branch is for providers needing native-format conversion (Vertex,
+		// Anthropic, Bedrock), none of which need the header-sourced TTL fallback.
 		err := responses.TransformChatStreamToResponsesWithMetaAndUsage(
-			pr, w, publicModel, reqMeta, false, onComplete,
+			pr, w, publicModel, reqMeta, false, 0, 0, onComplete,
 		)
 		_ = pr.Close()
 		wg.Wait() // ensure goroutine completes before reading transformErr
@@ -1704,9 +1812,10 @@ func (p *Proxy) handleMessagesAPIStreaming(
 		DisplayModelID: publicModel,
 		IsStreaming:    true,
 	})
+	cacheWrite5m, cacheWrite1h := kimiCacheWriteTTLFromHeaders(resp.Header)
 	transformer := func(reader io.Reader, _ string, writer io.Writer) error {
 		if conv.IsPassthrough() {
-			return anthropicconv.TransformChatStreamToMessages(reader, writer, publicModel, metadata)
+			return anthropicconv.TransformChatStreamToMessages(reader, writer, publicModel, metadata, cacheWrite5m, cacheWrite1h)
 		}
 		chatReader, chatWriter := io.Pipe()
 		var providerErr error
@@ -1721,7 +1830,10 @@ func (p *Proxy) handleMessagesAPIStreaming(
 			}
 			_ = chatWriter.Close()
 		}()
-		err := anthropicconv.TransformChatStreamToMessages(chatReader, writer, publicModel, metadata)
+		// Not Kimi here — this branch is for providers needing native-format
+		// conversion (Vertex, Anthropic, Bedrock), none of which need the
+		// header-sourced TTL fallback.
+		err := anthropicconv.TransformChatStreamToMessages(chatReader, writer, publicModel, metadata, 0, 0)
 		_ = chatReader.Close()
 		wg.Wait()
 		if err != nil {
@@ -1730,6 +1842,29 @@ func (p *Proxy) handleMessagesAPIStreaming(
 		return providerErr
 	}
 	return p.handleTransformedStreaming(w, resp, cred.Name, modelID, "messages", transformer, logCtx)
+}
+
+// handleChatFromResponsesStreaming handles a responses_only model's streaming
+// response (see config.ModelRPMConfig.ResponsesOnly / orchestrator.go's
+// ChatRequestToResponses branch): AIR called the provider's native
+// /v1/responses on the client's behalf, so the raw upstream SSE is already
+// Responses-API-shaped -- no provider-specific pre-conversion is needed
+// (unlike handleMessagesAPIStreaming's Bedrock/Anthropic case), since a
+// responses_only credential speaks OpenAI's own Responses API wire format
+// directly. Convert it to Chat Completions SSE for the client, which called
+// /v1/chat/completions.
+func (p *Proxy) handleChatFromResponsesStreaming(
+	w http.ResponseWriter,
+	resp *http.Response,
+	cred *config.CredentialConfig,
+	modelID string,
+	logCtx *RequestLogContext,
+) error {
+	publicModel := clientVisibleResponseModel(logCtx, modelID)
+	transformer := func(reader io.Reader, _ string, writer io.Writer) error {
+		return responses.TransformResponsesStreamToChat(reader, publicModel, writer)
+	}
+	return p.handleTransformedStreaming(w, resp, cred.Name, modelID, "chat_from_responses", transformer, logCtx)
 }
 
 // handleNativeResponsesStreaming handles Responses API streaming via the Phase 4
@@ -1865,6 +2000,12 @@ func (p *Proxy) handlePassthroughResponsesStreaming(
 						if event.Response.Usage.ServerToolUse != nil {
 							logCtx.TokenUsage.WebSearchRequests = event.Response.Usage.ServerToolUse.WebSearchRequests
 						}
+						// The typed usage above has no room for provider extensions:
+						// xAI's server-side tool counters, images of a built-in
+						// image_generation tool in response.output, the reasoning
+						// accounting (total_tokens) and the provider's own cost.
+						logCtx.TokenUsage.MergeUsageExtensions(
+							converter.ExtractTokenUsageWithOptions([]byte(jsonData), tokenUsageOptions))
 					}
 				}
 				completedEventPayload = []byte(jsonData) // plain JSON; extractResponsesAPIUsage handles it

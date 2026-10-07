@@ -258,6 +258,9 @@ type InputDetails struct {
 	CacheWriteTokens          int                        `json:"cache_write_tokens,omitempty"`    // extension: OpenAI/Azure name for the same counter
 	CacheCreationTokenDetails *CacheCreationTokenDetails `json:"cache_creation_token_details,omitempty"`
 	AudioTokens               int                        `json:"audio_tokens,omitempty"` // extension: audio input tokens
+	// CacheType is Alibaba's explicit cache mode marker ("ephemeral") from
+	// prompt_tokens_details.cache_type; see converter.TokenUsage.CacheType.
+	CacheType string `json:"cache_type,omitempty"`
 }
 
 // CacheCreationTokenDetails preserves Anthropic's cache-write TTL breakdown.

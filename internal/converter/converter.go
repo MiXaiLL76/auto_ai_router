@@ -3,8 +3,8 @@ package converter
 
 import (
 	"bytes"
-	"errors"
 	"io"
+	"math"
 	"strings"
 
 	// goccy/go-json instead of encoding/json: the only json.* use in this file
@@ -212,9 +212,16 @@ func (c *ProviderConverter) RequestFrom(body []byte) ([]byte, error) {
 			}
 			return vertex.OpenAIEmbeddingToGemini(body, c.mode.ModelID)
 		case config.ProviderTypeAnthropic, config.ProviderTypeCometAPI, config.ProviderTypeProMan:
-			return nil, errors.New(string(c.providerType) + " does not support embeddings")
+			// The client picked a model that can't do what it asked for -- its mistake,
+			// not ours; answer 4xx, not the generic 500 a plain error falls through to.
+			// Message stays provider-agnostic: this project's convention is never to leak
+			// the internal backend name to the client (see e.g.
+			// anthropic/messages_test.go's assert.NotContains(..., "Anthropic")) --
+			// c.providerType is still visible server-side via the call site's own
+			// "provider" log field.
+			return nil, converterutil.NewRequestValidationError("model", "model does not support embeddings")
 		case config.ProviderTypeBedrock:
-			return nil, errors.New("bedrock does not support embeddings")
+			return nil, converterutil.NewRequestValidationError("model", "model does not support embeddings")
 		default:
 			if c.shouldStripCacheSalt() {
 				body = openaiconv.StripCacheSalt(body)
@@ -233,9 +240,12 @@ func (c *ProviderConverter) RequestFrom(body []byte) ([]byte, error) {
 	case config.ProviderTypeVertexAI, config.ProviderTypeGemini:
 		return vertex.OpenAIToVertex(body, c.mode.IsImageGeneration, c.mode.IsImageEdit, c.mode.ModelID, c.mode.ContentType)
 	case config.ProviderTypeAnthropic, config.ProviderTypeCometAPI, config.ProviderTypeProMan:
-		// Anthropic-compatible providers do not support image generation
+		// Anthropic-compatible providers do not support image generation. The client
+		// picked a model that can't do what it asked for -- its mistake, not ours;
+		// answer 4xx, not the generic 500 a plain error falls through to. Message stays
+		// provider-agnostic -- see the embeddings case above for why.
 		if c.mode.IsImageGeneration {
-			return nil, errors.New(string(c.providerType) + " does not support image generation")
+			return nil, converterutil.NewRequestValidationError("model", "model does not support image generation")
 		}
 		if c.mode.MessagesPassthrough {
 			// body is already native Anthropic Messages JSON (model field already
@@ -261,7 +271,7 @@ func (c *ProviderConverter) RequestFrom(body []byte) ([]byte, error) {
 		return anthropic.OpenAIToAnthropic(body, c.mode.ModelID, c.providerType == config.ProviderTypeAnthropic)
 	case config.ProviderTypeBedrock:
 		if c.mode.IsImageGeneration {
-			return nil, errors.New("bedrock does not support image generation")
+			return nil, converterutil.NewRequestValidationError("model", "model does not support image generation")
 		}
 		if isAnthropicBedrockModel(c.mode.ModelID) {
 			return anthropic.OpenAIToBedrock(body, c.mode.ModelID)
@@ -508,6 +518,16 @@ func (c *ProviderConverter) UsageFromResponse(body []byte) *TokenUsage {
 
 type TokenUsageExtractionOptions struct {
 	AudioInputIncludesCachedAudio bool
+	// CacheWriteTTLHeader5mTokens / CacheWriteTTLHeader1hTokens carry the
+	// cache-write TTL breakdown read from upstream response headers (used by
+	// Kimi/Moonshot, whose body never reports a 5m/1h split —
+	// cache_creation_token_details stays null; the split is only available
+	// via the Msh-Usage-Cache-Write-Tokens-5m/-1h response headers). Callers
+	// with access to the raw HTTP response headers fill these in;
+	// tokenUsageFromShape falls back to them only when the body itself
+	// didn't already supply a 5m/1h split.
+	CacheWriteTTLHeader5mTokens int
+	CacheWriteTTLHeader1hTokens int
 }
 
 // ExtractTokenUsage parses token usage from an OpenAI-format JSON response body.
@@ -535,6 +555,12 @@ type responsesUsageDetails struct {
 		Ephemeral5mInputTokens int `json:"ephemeral_5m_input_tokens,omitempty"`
 		Ephemeral1hInputTokens int `json:"ephemeral_1h_input_tokens,omitempty"`
 	} `json:"cache_creation,omitempty"`
+	// CacheType is our own extension to Anthropic's native usage schema (see
+	// anthropic.AnthropicUsage.CacheType) carrying the explicit-cache marker
+	// through the Chat Completions -> Messages API conversion, flat alongside
+	// CacheReadInputTokens rather than nested like the Responses API shape
+	// below.
+	CacheType          string `json:"cache_type,omitempty"`
 	InputTokensDetails struct {
 		CachedTokens              int `json:"cached_tokens,omitempty"`
 		CachedAudioTokens         int `json:"cached_audio_tokens,omitempty"`
@@ -544,9 +570,10 @@ type responsesUsageDetails struct {
 			Ephemeral5mInputTokens int `json:"ephemeral_5m_input_tokens,omitempty"`
 			Ephemeral1hInputTokens int `json:"ephemeral_1h_input_tokens,omitempty"`
 		} `json:"cache_creation_token_details,omitempty"`
-		ImageTokens int `json:"image_tokens,omitempty"`
-		TextTokens  int `json:"text_tokens,omitempty"`
-		AudioTokens int `json:"audio_tokens,omitempty"`
+		ImageTokens int    `json:"image_tokens,omitempty"`
+		TextTokens  int    `json:"text_tokens,omitempty"`
+		AudioTokens int    `json:"audio_tokens,omitempty"`
+		CacheType   string `json:"cache_type,omitempty"`
 	} `json:"input_tokens_details,omitempty"`
 	OutputTokensDetails struct {
 		AudioTokens     int `json:"audio_tokens,omitempty"`
@@ -560,15 +587,55 @@ type responsesUsageDetails struct {
 	} `json:"server_tool_use,omitempty"`
 	WebSearchRequests int `json:"web_search_requests,omitempty"`
 	converterutil.ToolUsageExtensions
+	// Provider-side cost of the request, read for reconciliation only (see
+	// TokenUsage.ProviderCostUSD). Raw so an unexpected shape cannot fail the
+	// decode of the token counters next to it.
+	CostInUSDTicks json.RawMessage `json:"cost_in_usd_ticks,omitempty"` // xAI, 1e-10 USD
+	CostInNanoUSD  json.RawMessage `json:"cost_in_nano_usd,omitempty"`  // xAI Responses, 1e-9 USD
+	Cost           json.RawMessage `json:"cost,omitempty"`              // aggregators (Requesty, OpenRouter), USD
 }
 
 // webSearchRequests returns the provider-reported web search count: the
-// standard counters first, then the provider usage extensions.
-func (u *responsesUsageDetails) webSearchRequests() int {
+// standard counters first, then the provider usage extensions, toolUsage
+// being this usage object's decoded server-side tool usage. The count is
+// reported when it is the provider's own figure: an xAI web_search_calls
+// counter is reported even when it is zero, and that zero is authoritative,
+// so output items and citations must not replace it.
+func (u *responsesUsageDetails) webSearchRequests(toolUsage converterutil.ServerSideToolUsage) reportedCount {
 	if requests := webSearchRequestsFromUsage(u.ServerToolUse.WebSearchRequests, u.WebSearchRequests); requests > 0 {
-		return requests
+		return reportedCount{requests, true}
 	}
-	return u.ToolUsageExtensions.WebSearchRequests()
+	if toolUsage.WebSearchCallsReported {
+		return reportedCount{toolUsage.WebSearchCalls, true}
+	}
+	if requests := u.ToolUsageExtensions.WebSearchRequests(); requests > 0 {
+		return reportedCount{requests, true}
+	}
+	return reportedCount{}
+}
+
+// providerCostUSD returns the provider's own cost figure in USD, or 0.
+func (u *responsesUsageDetails) providerCostUSD() float64 {
+	if ticks := rawPositiveNumber(u.CostInUSDTicks); ticks > 0 {
+		return ticks / 1e10
+	}
+	if nano := rawPositiveNumber(u.CostInNanoUSD); nano > 0 {
+		return nano / 1e9
+	}
+	return rawPositiveNumber(u.Cost)
+}
+
+// rawPositiveNumber decodes a raw JSON number, returning 0 for anything that
+// is not a finite positive number (absent, null, string, object, ...).
+func rawPositiveNumber(raw json.RawMessage) float64 {
+	if len(raw) == 0 {
+		return 0
+	}
+	var value float64
+	if json.Unmarshal(raw, &value) != nil || math.IsNaN(value) || math.IsInf(value, 0) || value <= 0 {
+		return 0
+	}
+	return value
 }
 
 // tokenUsageShapeUsage is the "usage" object shape read by
@@ -591,9 +658,20 @@ type tokenUsageShapeUsage struct {
 			Ephemeral5mInputTokens int `json:"ephemeral_5m_input_tokens,omitempty"`
 			Ephemeral1hInputTokens int `json:"ephemeral_1h_input_tokens,omitempty"`
 		} `json:"cache_creation_token_details,omitempty"`
+		// Alibaba returns the explicit cache creation TTL detail under
+		// cache_creation.ephemeral_5m_input_tokens (no _token_details suffix).
+		CacheCreation struct {
+			Ephemeral5mInputTokens int `json:"ephemeral_5m_input_tokens,omitempty"`
+			Ephemeral1hInputTokens int `json:"ephemeral_1h_input_tokens,omitempty"`
+		} `json:"cache_creation,omitempty"`
 		AudioTokens int `json:"audio_tokens,omitempty"`
 		TextTokens  int `json:"text_tokens,omitempty"`
 		ImageTokens int `json:"image_tokens,omitempty"`
+		// CacheType is Alibaba's explicit cache mode marker:
+		// "ephemeral" when the request used an explicit cache marker, absent
+		// otherwise (implicit cache). Explicit and implicit cache are mutually
+		// exclusive — see TokenUsage.CacheType.
+		CacheType string `json:"cache_type,omitempty"`
 		converterutil.CachingTokensExtension
 	} `json:"prompt_tokens_details,omitempty"`
 	CompletionTokensDetails struct {
@@ -700,13 +778,26 @@ func tokenUsageFromShape(resp *tokenUsageResponseShape, opts TokenUsageExtractio
 		completionTokens = resp.Response.Usage.OutputTokens
 	}
 
-	var nestedUsageRequests int
+	// Each level's server-side tool usage object is decoded once; the
+	// top-level one wins for the per-tool counters, like the other fields.
+	toolUsage, toolUsageReported := resp.Usage.ServerSideToolUsage()
+	usageRequests := resp.Usage.webSearchRequests(toolUsage)
+	var nestedUsageRequests reportedCount
 	if resp.Response.Usage != nil {
-		nestedUsageRequests = resp.Response.Usage.webSearchRequests()
+		nestedToolUsage, nestedToolUsageReported := resp.Response.Usage.ServerSideToolUsage()
+		nestedUsageRequests = resp.Response.Usage.webSearchRequests(nestedToolUsage)
+		if !toolUsageReported {
+			toolUsage, toolUsageReported = nestedToolUsage, nestedToolUsageReported
+		}
 	}
-	webSearchRequests := webSearchRequestsFromExtractedResponse(resp.Usage.webSearchRequests(), nestedUsageRequests, resp.Choices, resp.Output, resp.Response.Output, resp.WebSearch)
+	webSearchRequests := webSearchRequestsFromExtractedResponse(
+		usageRequests, nestedUsageRequests,
+		resp.Choices, resp.Output, resp.Response.Output, resp.WebSearch,
+	)
+	imageToolGenerations, imageToolEdits := imageGenerationToolImages(resp.Output, resp.Response.Output, toolUsage)
 
-	if promptTokens == 0 && completionTokens == 0 && webSearchRequests == 0 {
+	if promptTokens == 0 && completionTokens == 0 && webSearchRequests == 0 &&
+		!toolUsageReported && imageToolGenerations == 0 && imageToolEdits == 0 {
 		return nil
 	}
 
@@ -724,6 +815,15 @@ func tokenUsageFromShape(resp *tokenUsageResponseShape, opts TokenUsageExtractio
 	if cachedTokens == 0 {
 		cachedTokens = resp.Usage.InputTokensDetails.CachedTokens
 	}
+	cacheType := resp.Usage.PromptTokensDetails.CacheType
+	if cacheType == "" {
+		cacheType = resp.Usage.InputTokensDetails.CacheType
+	}
+	if cacheType == "" {
+		// Flat Anthropic/Messages-API-shaped extension field (see
+		// responsesUsageDetails.CacheType's doc comment).
+		cacheType = resp.Usage.CacheType
+	}
 	if cachedTokens == 0 && resp.Usage.CacheReadInputTokens > 0 {
 		cachedTokens = resp.Usage.CacheReadInputTokens
 		anthropicFlatCacheRead = true
@@ -731,6 +831,12 @@ func tokenUsageFromShape(resp *tokenUsageResponseShape, opts TokenUsageExtractio
 	cacheCreationTokens := resp.Usage.PromptTokensDetails.CacheCreationTokens
 	cacheCreation5mTokens := resp.Usage.PromptTokensDetails.CacheCreationTokenDetails.Ephemeral5mInputTokens
 	cacheCreation1hTokens := resp.Usage.PromptTokensDetails.CacheCreationTokenDetails.Ephemeral1hInputTokens
+	// Alibaba spells the TTL detail cache_creation.ephemeral_5m_input_tokens
+	// (nested in prompt_tokens_details, no _token_details suffix).
+	if cacheCreation5mTokens == 0 && cacheCreation1hTokens == 0 {
+		cacheCreation5mTokens = resp.Usage.PromptTokensDetails.CacheCreation.Ephemeral5mInputTokens
+		cacheCreation1hTokens = resp.Usage.PromptTokensDetails.CacheCreation.Ephemeral1hInputTokens
+	}
 	cachedAudioTokens := resp.Usage.PromptTokensDetails.CachedAudioTokens
 	if cacheCreationTokens == 0 {
 		cacheCreationTokens = resp.Usage.PromptTokensDetails.CacheWriteTokens
@@ -797,6 +903,12 @@ func tokenUsageFromShape(resp *tokenUsageResponseShape, opts TokenUsageExtractio
 		if cachedTokens == 0 {
 			cachedTokens = u.InputTokensDetails.CachedTokens
 		}
+		if cacheType == "" {
+			cacheType = u.InputTokensDetails.CacheType
+		}
+		if cacheType == "" {
+			cacheType = u.CacheType
+		}
 		if cacheCreationTokens == 0 {
 			cacheCreationTokens = u.InputTokensDetails.CacheCreationTokens
 			cacheCreation5mTokens = u.InputTokensDetails.CacheCreationTokenDetails.Ephemeral5mInputTokens
@@ -833,8 +945,29 @@ func tokenUsageFromShape(resp *tokenUsageResponseShape, opts TokenUsageExtractio
 			outputTextTokens = u.OutputTokensDetails.TextTokens
 		}
 	}
+	// Body never reports the TTL split for providers like Kimi/Moonshot
+	// (cache_creation_token_details stays null) — fall back to the
+	// header-sourced split when the body gave us none.
+	if cacheCreation5mTokens == 0 && cacheCreation1hTokens == 0 {
+		cacheCreation5mTokens = opts.CacheWriteTTLHeader5mTokens
+		cacheCreation1hTokens = opts.CacheWriteTTLHeader1hTokens
+	}
 	if cacheCreationTokens == 0 {
 		cacheCreationTokens = cacheCreation5mTokens + cacheCreation1hTokens
+	}
+	// Decided on the provider's own figures, before the Anthropic flat-cache
+	// correction below rewrites promptTokens (Anthropic sends no total_tokens).
+	var reasoningAccounting string
+	if !anthropicFlatCacheRead && !anthropicFlatCacheCreation {
+		totalTokens := resp.Usage.TotalTokens
+		if resp.Usage.PromptTokens == 0 && resp.Usage.InputTokens == 0 && resp.Response.Usage != nil {
+			totalTokens = resp.Response.Usage.TotalTokens
+		}
+		reasoningAccounting = detectReasoningAccounting(promptTokens, completionTokens, reasoning, totalTokens)
+	}
+	providerCost := resp.Usage.providerCostUSD()
+	if providerCost == 0 && resp.Response.Usage != nil {
+		providerCost = resp.Response.Usage.providerCostUSD()
 	}
 	// Anthropic's input_tokens excludes cache tokens; add them back so promptTokens
 	// matches the inclusive-total semantics CalculateTokenCosts subtracts cache from.
@@ -857,6 +990,7 @@ func tokenUsageFromShape(resp *tokenUsageResponseShape, opts TokenUsageExtractio
 		CompletionTokens:         completionTokens,
 		CachedInputTokens:        cachedTokens,
 		CachedAudioInputTokens:   cachedAudioTokens,
+		CacheType:                cacheType,
 		CachedOutputTokens:       cachedOutputTokens,
 		OutputTextTokens:         outputTextTokens,
 		CacheCreationTokens:      cacheCreationTokens,
@@ -870,7 +1004,77 @@ func tokenUsageFromShape(resp *tokenUsageResponseShape, opts TokenUsageExtractio
 		AudioOutputTokens:        audioOut,
 		ReasoningTokens:          reasoning,
 		WebSearchRequests:        webSearchRequests,
+		ServerToolUsageReported:  toolUsageReported,
+		XSearchCalls:             toolUsage.XSearchCalls,
+		XSearchPosts:             toolUsage.XPostsFetched,
+		XSearchProfiles:          toolUsage.XUsersFetched,
+		CodeExecutionCalls:       toolUsage.CodeExecutionCalls,
+		AttachmentSearchCalls:    toolUsage.AttachmentSearchCalls,
+		CollectionsSearchCalls:   toolUsage.CollectionsSearchCalls,
+		MCPCalls:                 toolUsage.MCPCalls,
+		ImageToolGenerations:     imageToolGenerations,
+		ImageToolEdits:           imageToolEdits,
+		ReasoningAccounting:      reasoningAccounting,
+		ProviderCostUSD:          providerCost,
 	}).Normalize()
+}
+
+// detectReasoningAccounting tells from the provider's own total_tokens
+// whether completionTokens already contains the reasoning tokens. xAI reports
+// reasoning on top of completion_tokens (total = prompt + completion +
+// reasoning) while OpenAI-compatible aggregators fold it in (total = prompt +
+// completion), and the same model can be served through both. Empty when the
+// response does not settle it: no reasoning, no total, or a total matching
+// neither sum.
+func detectReasoningAccounting(promptTokens, completionTokens, reasoningTokens, totalTokens int) string {
+	if reasoningTokens <= 0 || totalTokens <= 0 || promptTokens < 0 || completionTokens < 0 {
+		return ""
+	}
+	switch totalTokens {
+	case promptTokens + completionTokens + reasoningTokens:
+		return ReasoningAccountingAdditive
+	case promptTokens + completionTokens:
+		if completionTokens >= reasoningTokens {
+			return ReasoningAccountingIncluded
+		}
+	}
+	return ""
+}
+
+// imageGenerationToolImages counts the images a built-in image_generation
+// tool returned inside a chat/Responses response, split into generations and
+// edits by the item ID prefix (xAI: "ig_" generation, "ie_" edit). When the
+// provider's server-side tool usage object carries image_generation_calls,
+// that is the authoritative total and the items only tell how many of those
+// were edits; without the counter (no object, or an object without that
+// key), the completed items are counted.
+func imageGenerationToolImages(
+	output, nestedOutput []extractedOutputItem,
+	toolUsage converterutil.ServerSideToolUsage,
+) (generations, edits int) {
+	for _, items := range [][]extractedOutputItem{output, nestedOutput} {
+		itemGenerations, itemEdits := 0, 0
+		for _, item := range items {
+			if item.Type != "image_generation_call" || (item.Status != "" && item.Status != "completed") {
+				continue
+			}
+			if strings.HasPrefix(item.ID, "ie_") {
+				itemEdits++
+			} else {
+				itemGenerations++
+			}
+		}
+		if itemGenerations+itemEdits > 0 {
+			generations, edits = itemGenerations, itemEdits
+			break
+		}
+	}
+	if !toolUsage.ImageGenerationCallsReported {
+		return generations, edits
+	}
+	total := toolUsage.ImageGenerationCalls
+	edits = min(edits, total)
+	return total - edits, edits
 }
 
 type extractedChoiceWithAnnotations struct {
@@ -889,7 +1093,15 @@ type extractedAnnotation struct {
 
 type extractedOutputItem struct {
 	Type   string `json:"type"`
+	ID     string `json:"id,omitempty"`
 	Status string `json:"status,omitempty"`
+}
+
+// reportedCount is a provider usage counter together with whether the
+// provider reported it at all (a reported zero is authoritative).
+type reportedCount struct {
+	count    int
+	reported bool
 }
 
 func webSearchRequestsFromUsage(values ...int) int {
@@ -905,17 +1117,23 @@ func webSearchRequestsFromUsage(values ...int) int {
 // response, never adding different representations of the same executions
 // together: a usage counter reported by the provider (top-level usage, then
 // the response.completed event's usage) wins over counting web_search_call
-// output items, which in turn wins over url_citation annotations.
+// output items, which in turn wins over url_citation annotations. A counter
+// the provider reported as zero (xAI's server-side tool usage object) ends
+// the search too: xAI bills only successful executions, so items of failed
+// attempts or citations must not turn that zero into a charge.
 func webSearchRequestsFromExtractedResponse(
-	usageRequests int,
-	nestedUsageRequests int,
+	usageRequests reportedCount,
+	nestedUsageRequests reportedCount,
 	choices []extractedChoiceWithAnnotations,
 	output []extractedOutputItem,
 	nestedOutput []extractedOutputItem,
 	searchResults json.RawMessage,
 ) int {
-	if requests := webSearchRequestsFromUsage(usageRequests, nestedUsageRequests); requests > 0 {
+	if requests := webSearchRequestsFromUsage(usageRequests.count, nestedUsageRequests.count); requests > 0 {
 		return requests
+	}
+	if usageRequests.reported || nestedUsageRequests.reported {
+		return 0
 	}
 	if requests := countCompletedWebSearchOutputItems(output); requests > 0 {
 		return requests

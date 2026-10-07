@@ -320,7 +320,7 @@ func (p *Proxy) logSpendToLiteLLMDB(logCtx *RequestLogContext) error {
 		}
 		tokenCosts = &converter.TokenCosts{}
 	} else {
-		tokenCosts = modelPrice.CalculateCosts(logCtx.TokenUsage)
+		tokenCosts = modelPrice.CalculateCostsWithResolver(logCtx.TokenUsage, p.billingPriceResolver(logCtx))
 		if tokenCosts == nil {
 			return fmt.Errorf("cost calculation failed for %q", priceModelID)
 		}

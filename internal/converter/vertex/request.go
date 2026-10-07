@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	converterutil "github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
 	"github.com/mixaill76/auto_ai_router/internal/converter/openai"
 	"google.golang.org/genai"
 )
@@ -37,7 +38,7 @@ func OpenAIToVertex(openAIBody []byte, isImageGeneration bool, isImageEdit bool,
 	}
 
 	if err := json.Unmarshal(openAIBody, &req); err != nil {
-		return nil, fmt.Errorf("failed to parse OpenAI request: %w", err)
+		return nil, converterutil.RequestJSONValidationError(err)
 	}
 
 	vertexReq := VertexRequest{

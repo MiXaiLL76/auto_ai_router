@@ -6,10 +6,30 @@ import (
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/converter/openai"
+	"github.com/mixaill76/auto_ai_router/internal/testhelpers"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/genai"
 )
+
+// TestOpenAIEmbeddingToVertex_DimensionsWrongTypeReportsParam covers a client sending
+// "dimensions" as a string instead of a number, which must classify as a validation
+// error instead of falling through to a generic 500.
+func TestOpenAIEmbeddingToVertex_DimensionsWrongTypeReportsParam(t *testing.T) {
+	body := []byte(`{"model":"text-embedding-3-small","input":"hello","dimensions":"x"}`)
+
+	_, err := OpenAIEmbeddingToVertex(body)
+	testhelpers.RequireValidationError(t, err, "dimensions", "invalid_type")
+}
+
+// TestOpenAIEmbeddingToGemini_DimensionsWrongTypeReportsParam is the Gemini-route
+// equivalent of the Vertex test above; same request struct, same converter bug.
+func TestOpenAIEmbeddingToGemini_DimensionsWrongTypeReportsParam(t *testing.T) {
+	body := []byte(`{"model":"gemini-embedding-001","input":"hello","dimensions":"x"}`)
+
+	_, err := OpenAIEmbeddingToGemini(body, "gemini-embedding-001")
+	testhelpers.RequireValidationError(t, err, "dimensions", "invalid_type")
+}
 
 func TestOpenAIEmbeddingToVertex_SingleString(t *testing.T) {
 	req := openai.OpenAIEmbeddingRequest{

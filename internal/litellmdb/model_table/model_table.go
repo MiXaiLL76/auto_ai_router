@@ -394,8 +394,16 @@ func buildAIRModels(
 
 		// Build ModelRPMConfig
 		rpmCfg := config.ModelRPMConfig{
-			Name:           modelName,
-			Credential:     credName,
+			Name:       modelName,
+			Credential: credName,
+			// A model whose upstream only accepts OpenAI's native Responses API (not
+			// Chat Completions) is marked model_info.mode: "responses" by LiteLLM, the
+			// same convention already used for "rerank" above. Without this, a
+			// responses_only model synced from the DB (the primary "AIR instead of
+			// LiteLLM" deployment shape) never gets its Chat->Responses conversion and
+			// every request to it 400s -- static config.yaml is the only place the
+			// flag could otherwise come from.
+			ResponsesOnly:  model.Mode() == "responses",
 			SupportsVision: model.SupportsVision(),
 		}
 		if model.LlmParams.RPM != nil {
@@ -766,6 +774,18 @@ func convertPricingToModelPrice(p *queries.CustomPricingLiteLLMParams) *manager.
 	if p.CacheReadInputAudioTokenCost != nil {
 		price.CacheReadInputAudioTokenCost = *p.CacheReadInputAudioTokenCost
 	}
+	if p.ExplicitCacheReadInputTokenCost != nil {
+		price.ExplicitCacheReadInputTokenCost = *p.ExplicitCacheReadInputTokenCost
+	}
+	if p.ExplicitCacheReadInputTokenCostAbove32k != nil {
+		price.ExplicitCacheReadInputTokenCostAbove32k = *p.ExplicitCacheReadInputTokenCostAbove32k
+	}
+	if p.ExplicitCacheReadInputTokenCostAbove128k != nil {
+		price.ExplicitCacheReadInputTokenCostAbove128k = *p.ExplicitCacheReadInputTokenCostAbove128k
+	}
+	if p.ExplicitCacheReadInputTokenCostAbove256k != nil {
+		price.ExplicitCacheReadInputTokenCostAbove256k = *p.ExplicitCacheReadInputTokenCostAbove256k
+	}
 	if p.OutputCostPerImage != nil {
 		price.OutputCostPerImage = *p.OutputCostPerImage
 	}
@@ -780,6 +800,24 @@ func convertPricingToModelPrice(p *queries.CustomPricingLiteLLMParams) *manager.
 	}
 	if p.WebSearchBillingUnit != nil {
 		price.WebSearchBillingUnit = *p.WebSearchBillingUnit
+	}
+	if len(p.ToolCostPerCall) > 0 {
+		price.ToolCostPerCall = p.ToolCostPerCall
+	}
+	if p.XSearchCostPerPost != nil {
+		price.XSearchCostPerPost = *p.XSearchCostPerPost
+	}
+	if p.XSearchCostPerProfile != nil {
+		price.XSearchCostPerProfile = *p.XSearchCostPerProfile
+	}
+	if p.ImageGenerationToolModel != nil {
+		price.ImageGenerationToolModel = *p.ImageGenerationToolModel
+	}
+	if p.LongContextPricingMode != nil {
+		price.LongContextPricingMode = *p.LongContextPricingMode
+	}
+	if p.ReasoningTokensAccounting != nil {
+		price.ReasoningTokensAccounting = *p.ReasoningTokensAccounting
 	}
 
 	return price

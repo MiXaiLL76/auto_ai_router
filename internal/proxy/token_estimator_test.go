@@ -207,6 +207,14 @@ func TestExtractCompletionDeltaText_ChatCompletionsReasoningNonString(t *testing
 	assert.Equal(t, "hellothink", extractCompletionDeltaText(chunk))
 }
 
+// An empty reasoning_content must not hide a populated reasoning field — the
+// same rule the converters and responsecompat apply (converterutil.PickReasoningField).
+func TestExtractCompletionDeltaText_ChatCompletionsEmptyReasoningContentFallsBack(t *testing.T) {
+	chunk := []byte(`data: {"choices":[{"delta":{"reasoning_content":"","reasoning":"think"}}]}` + "\n\n")
+
+	assert.Equal(t, "think", extractCompletionDeltaText(chunk))
+}
+
 func TestExtractCompletionDeltaText_IgnoresAudioBytes(t *testing.T) {
 	chunk := []byte(`data: {"type":"response.output_audio.delta","delta":"QUJDREVGRw=="}` + "\n\n" +
 		`data: {"type":"response.audio.delta","delta":"QUJDREVGRw=="}` + "\n\n")

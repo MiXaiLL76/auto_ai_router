@@ -51,6 +51,73 @@ func TestChatToResponse_BasicText(t *testing.T) {
 	assert.NotNil(t, resp.Output[0].Content[0].Annotations)
 }
 
+func TestChatToResponse_ReasoningContent(t *testing.T) {
+	ccBody := `{
+		"id": "chatcmpl-abc123",
+		"object": "chat.completion",
+		"created": 1700000000,
+		"model": "deepseek/deepseek-v4.1-flash",
+		"choices": [{
+			"index": 0,
+			"message": {
+				"role": "assistant",
+				"content": "Ok.",
+				"reasoning_content": "The user wants a short answer, so I'll reply with Ok."
+			},
+			"finish_reason": "stop"
+		}],
+		"usage": {
+			"prompt_tokens": 10,
+			"completion_tokens": 8,
+			"total_tokens": 18,
+			"completion_tokens_details": {"reasoning_tokens": 5}
+		}
+	}`
+
+	result, err := ChatToResponse([]byte(ccBody))
+	require.NoError(t, err)
+
+	var resp Response
+	require.NoError(t, json.Unmarshal(result, &resp))
+
+	require.Len(t, resp.Output, 2)
+
+	assert.Equal(t, "reasoning", resp.Output[0].Type)
+	assert.Equal(t, "completed", resp.Output[0].Status)
+	require.Len(t, resp.Output[0].Summary, 1)
+	assert.Equal(t, "summary_text", resp.Output[0].Summary[0].Type)
+	assert.Equal(t, "The user wants a short answer, so I'll reply with Ok.", resp.Output[0].Summary[0].Text)
+
+	assert.Equal(t, "message", resp.Output[1].Type)
+	assert.Equal(t, "Ok.", resp.Output[1].Content[0].Text)
+}
+
+func TestChatToResponse_NoReasoningContent_NoReasoningItem(t *testing.T) {
+	ccBody := `{
+		"id": "chatcmpl-abc123",
+		"object": "chat.completion",
+		"created": 1700000000,
+		"model": "gpt-4o",
+		"choices": [{
+			"index": 0,
+			"message": {
+				"role": "assistant",
+				"content": "The capital of France is Paris."
+			},
+			"finish_reason": "stop"
+		}]
+	}`
+
+	result, err := ChatToResponse([]byte(ccBody))
+	require.NoError(t, err)
+
+	var resp Response
+	require.NoError(t, json.Unmarshal(result, &resp))
+
+	require.Len(t, resp.Output, 1)
+	assert.Equal(t, "message", resp.Output[0].Type)
+}
+
 func TestChatToResponse_ContentArray(t *testing.T) {
 	ccBody := `{
 		"id": "chatcmpl-abc123",
@@ -270,6 +337,44 @@ func TestChatToResponse_Usage(t *testing.T) {
 	assert.NotNil(t, resp.Usage.OutputTokensDetails)
 	assert.Equal(t, 10, resp.Usage.OutputTokensDetails.ReasoningTokens)
 	assert.Equal(t, 3, resp.Usage.OutputTokensDetails.AudioTokens)
+}
+
+func TestChatToResponse_AlibabaExplicitCacheCreationDetail(t *testing.T) {
+	// Alibaba spells the cache-creation TTL detail cache_creation.ephemeral_5m_input_tokens
+	// (no _token_details suffix), unlike the OpenAI/Anthropic shape covered by
+	// TestChatToResponse_Usage. Both cache_type and the TTL split must survive
+	// the Chat Completions -> Responses API conversion so billing (which runs
+	// on the converted body) sees them.
+	ccBody := `{
+		"id": "chatcmpl-abc123",
+		"object": "chat.completion",
+		"created": 1700000000,
+		"model": "qwen3.7-flash",
+		"choices": [{
+			"index": 0,
+			"message": {"role": "assistant", "content": "hi"},
+			"finish_reason": "stop"
+		}],
+		"usage": {
+			"prompt_tokens": 1827,
+			"completion_tokens": 511,
+			"total_tokens": 2338,
+			"prompt_tokens_details": {"cached_tokens": 1486, "cache_type": "ephemeral", "cache_creation_input_tokens": 335, "cache_write_tokens": 335, "cache_creation": {"ephemeral_5m_input_tokens": 335}}
+		}
+	}`
+
+	result, err := ChatToResponse([]byte(ccBody))
+	require.NoError(t, err)
+
+	var resp Response
+	require.NoError(t, json.Unmarshal(result, &resp))
+
+	require.NotNil(t, resp.Usage)
+	assert.Equal(t, "ephemeral", resp.Usage.InputTokensDetails.CacheType)
+	assert.Equal(t, 335, resp.Usage.InputTokensDetails.CacheCreationTokens)
+	require.NotNil(t, resp.Usage.InputTokensDetails.CacheCreationTokenDetails)
+	assert.Equal(t, 335, resp.Usage.InputTokensDetails.CacheCreationTokenDetails.Ephemeral5mInputTokens)
+	assert.Equal(t, 0, resp.Usage.InputTokensDetails.CacheCreationTokenDetails.Ephemeral1hInputTokens)
 }
 
 func TestChatToResponse_NegativeCachedTokensDoNotIncreaseAudioInput(t *testing.T) {
@@ -653,4 +758,45 @@ func TestResponse_RoundTripKeepsToolUsage(t *testing.T) {
 	require.True(t, ok, "tool_usage must survive the re-encode")
 	imageGen := toolUsage["image_gen"].(map[string]interface{})
 	assert.Equal(t, float64(196), imageGen["output_tokens"])
+}
+
+// TestChatToResponse_ReasoningFieldSpellings: OpenAI-compatible providers
+// return reasoning as "reasoning_content" (DeepSeek, SiliconFlow) or
+// "reasoning" (OpenRouter, vLLM, Ollama), and the raw upstream body reaches
+// ChatToResponse un-normalized — both must surface as a reasoning item, and an
+// unexpected non-string value must not fail the whole conversion.
+func TestChatToResponse_ReasoningFieldSpellings(t *testing.T) {
+	cases := []struct {
+		name          string
+		fields        string
+		wantReasoning string
+	}{
+		{name: "reasoning_content", fields: `"reasoning_content": "via reasoning_content"`, wantReasoning: "via reasoning_content"},
+		{name: "reasoning", fields: `"reasoning": "via reasoning"`, wantReasoning: "via reasoning"},
+		{name: "reasoning_content wins when both are sent", fields: `"reasoning_content": "primary", "reasoning": "secondary"`, wantReasoning: "primary"},
+		{name: "empty reasoning_content falls back to reasoning", fields: `"reasoning_content": "", "reasoning": "fallback"`, wantReasoning: "fallback"},
+		{name: "non-string reasoning is ignored", fields: `"reasoning": {"effort": "high"}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body := `{"id": "chatcmpl-1", "object": "chat.completion", "created": 1700000000, "model": "m",
+				"choices": [{"index": 0, "finish_reason": "stop",
+					"message": {"role": "assistant", "content": "Ok.", ` + tc.fields + `}}]}`
+			result, err := ChatToResponse([]byte(body))
+			require.NoError(t, err)
+
+			var resp Response
+			require.NoError(t, json.Unmarshal(result, &resp))
+			if tc.wantReasoning == "" {
+				require.Len(t, resp.Output, 1)
+				assert.Equal(t, "message", resp.Output[0].Type)
+				return
+			}
+			require.Len(t, resp.Output, 2)
+			assert.Equal(t, "reasoning", resp.Output[0].Type)
+			require.Len(t, resp.Output[0].Summary, 1)
+			assert.Equal(t, tc.wantReasoning, resp.Output[0].Summary[0].Text)
+			assert.Equal(t, "Ok.", resp.Output[1].Content[0].Text)
+		})
+	}
 }

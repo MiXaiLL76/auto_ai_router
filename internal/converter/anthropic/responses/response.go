@@ -276,6 +276,11 @@ func anthropicUsageToUsage(au *anthropic.AnthropicUsage) *responses.Usage {
 	inputDetails := responses.InputDetails{
 		CachedTokens:        au.CacheReadInputTokens,
 		CacheCreationTokens: cacheCreationTokens,
+		// CacheType is our own extension (see AnthropicUsage.CacheType's doc
+		// comment) — absent on a real Anthropic response, but present when
+		// this body is Alibaba/Qwen usage that already passed through
+		// chatUsageToMessages, including via an AIR-chained proxy credential.
+		CacheType: au.CacheType,
 	}
 	if cacheCreation5mTokens > 0 || cacheCreation1hTokens > 0 {
 		inputDetails.CacheCreationTokenDetails = &responses.CacheCreationTokenDetails{
