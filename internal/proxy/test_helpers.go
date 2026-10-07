@@ -111,6 +111,7 @@ type TestProxyConfig struct {
 	ResponseHeaderMode     config.ResponseHeaderMode
 	CredentialNameAsTeamID bool
 	OrganizationPolicies   *models.OrganizationPolicyRegistry
+	VisionFallback         config.VisionFallbackConfig
 }
 
 // NewTestProxyBuilder creates a builder with default configuration.
@@ -318,6 +319,7 @@ func (b *TestProxyBuilder) Build() *Proxy {
 		ResponseHeaderMode:     b.config.ResponseHeaderMode,
 		CredentialNameAsTeamID: b.config.CredentialNameAsTeamID,
 		OrganizationPolicies:   b.config.OrganizationPolicies,
+		VisionFallback:         b.config.VisionFallback,
 	})
 }
 

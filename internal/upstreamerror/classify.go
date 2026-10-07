@@ -10,6 +10,7 @@ package upstreamerror
 import (
 	"bytes"
 	"encoding/json"
+	"regexp"
 	"strings"
 	"unicode"
 )
@@ -38,6 +39,18 @@ func ClassifyBadRequest(rawBody []byte) BadRequest {
 		return classified
 	}
 
+	// Context-window overflow is checked before the max_tokens branch: vLLM's
+	// message ("This model's maximum context length is N tokens. However, you
+	// requested M output tokens and your prompt contains at least K input
+	// tokens ...") also says "output tokens"/"max_tokens", and reporting it as
+	// "Invalid input_tokens"/invalid_max_tokens hides the real cause.
+	if hasSignal(joined, contextLengthSignals...) {
+		result.Message = contextLengthMessage(joined)
+		result.Code = "context_length_exceeded"
+		result.Param = inferBadRequestParam(joined, providerParam)
+		return result
+	}
+
 	switch {
 	case hasSignal(joined, "tool_choice", "tool choice", "toolchoice"):
 		param := "tool_choice"
@@ -53,10 +66,6 @@ func ClassifyBadRequest(rawBody []byte) BadRequest {
 		result.Message = "Invalid " + *param
 		result.Code = "invalid_max_tokens"
 		result.Param = param
-	case hasSignal(joined, "context length", "context window", "context limit", "too many tokens", "input too long", "prompt too long", "prompt is too long", "token limit"):
-		result.Message = "Context length exceeded"
-		result.Code = "context_length_exceeded"
-		result.Param = inferBadRequestParam(joined, providerParam)
 	case hasSignal(joined, "model group", "model not found", "model does not exist", "unsupported model", "invalid model", "model not supported"):
 		param := "model"
 		result.Message = "Invalid model"
@@ -121,6 +130,50 @@ func ClassifyBadRequest(rawBody []byte) BadRequest {
 	}
 
 	return result
+}
+
+// contextLengthGenericMessage is used when the provider text carries no limit.
+const contextLengthGenericMessage = "This model's maximum context length is exceeded by the request"
+
+var contextLengthSignals = []string{"context length", "context window", "context limit", "too many tokens", "input too long", "prompt too long", "prompt is too long", "token limit"}
+
+var (
+	contextMaxTokensRe    = regexp.MustCompile(`maximum context length is (\d+)`)
+	contextOutputTokensRe = regexp.MustCompile(`requested (\d+) output tokens|(\d+) in the completion`)
+	contextInputTokensRe  = regexp.MustCompile(`(\d+) input tokens|(\d+) in the messages`)
+)
+
+// contextLengthMessage rebuilds a context-overflow message from the numbers
+// in the provider text (digits only — never the provider's own wording).
+// The "This model's maximum context length is" prefix is the phrase
+// OpenAI-compatible clients (LiteLLM's ContextWindowExceededError, which
+// drives its context_window_fallbacks) match on, so it's kept even when
+// the limit itself is unknown.
+func contextLengthMessage(joined string) string {
+	limit := firstNumber(contextMaxTokensRe, joined)
+	output := firstNumber(contextOutputTokensRe, joined)
+	input := firstNumber(contextInputTokensRe, joined)
+	if limit == "" {
+		return contextLengthGenericMessage
+	}
+	msg := "This model's maximum context length is " + limit + " tokens."
+	switch {
+	case input != "" && output != "":
+		msg += " However, you requested " + output + " output tokens and your prompt contains at least " + input + " input tokens."
+	case input != "":
+		msg += " However, your prompt contains at least " + input + " input tokens."
+	}
+	return msg
+}
+
+func firstNumber(re *regexp.Regexp, text string) string {
+	m := re.FindStringSubmatch(text)
+	for _, g := range m[min(1, len(m)):] {
+		if g != "" {
+			return g
+		}
+	}
+	return ""
 }
 
 const maxProviderErrorSignalBytes = 8 * 1024

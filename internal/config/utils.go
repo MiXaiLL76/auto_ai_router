@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
@@ -32,6 +33,20 @@ func resolveEnvString(value string) string {
 
 // parseFunc is a function type that parses a string value into the desired type
 type parseFunc[T any] func(string) (T, error)
+
+// parseOptionalBool parses a tri-state boolean: nil when the value is omitted or its
+// environment variable resolves to "".
+func parseOptionalBool(tempValue, fieldPath string) (*bool, error) {
+	resolved := resolveEnvString(tempValue)
+	if resolved == "" {
+		return nil, nil
+	}
+	value, err := strconv.ParseBool(resolved)
+	if err != nil {
+		return nil, fmt.Errorf("invalid %s: %w", fieldPath, err)
+	}
+	return &value, nil
+}
 
 // parseField resolves env variable and parses value with proper error context
 func parseField[T any](tempValue string, defaultValue T, parser parseFunc[T], fieldPath string) (T, error) {
@@ -171,12 +186,16 @@ func PrintConfig(logger *slog.Logger, cfg *Config) {
 			if tpm == 0 {
 				tpm = -1
 			}
-			logger.Info(fmt.Sprintf("  [%d] model", i),
+			modelArgs := []any{
 				"name", model.Name,
 				"credential", model.Credential,
 				"rpm", rpmToString(rpm),
 				"tpm", tpmToString(tpm),
-			)
+			}
+			if model.SupportsVision != nil {
+				modelArgs = append(modelArgs, "supports_vision", *model.SupportsVision)
+			}
+			logger.Info(fmt.Sprintf("  [%d] model", i), modelArgs...)
 		}
 	}
 
@@ -204,6 +223,16 @@ func PrintConfig(logger *slog.Logger, cfg *Config) {
 	}
 	if len(cfg.OrganizationPolicies) > 0 {
 		logger.Info("organization_policies", "total_count", len(cfg.OrganizationPolicies))
+	}
+	if visionFallbackConfigured(cfg) {
+		logger.Info("vision_fallback",
+			"mode", cfg.VisionFallback.Mode,
+			"describe_model", cfg.VisionFallback.DescribeModel,
+			"max_images", cfg.VisionFallback.MaxImages,
+			"max_tokens", cfg.VisionFallback.MaxTokens,
+			"timeout", cfg.VisionFallback.Timeout,
+			"inject_into_response", cfg.VisionFallback.InjectEnabled(),
+		)
 	}
 	if cfg.Video.Enabled {
 		logger.Info("video",
@@ -340,4 +369,20 @@ func convertMapToArgs(m map[string]any) []any {
 	}
 
 	return args
+}
+
+// visionFallbackConfigured reports whether the vision_fallback section matters for
+// this configuration: it was set explicitly, or a model declares supports_vision.
+// Flags that only come from the database are not known here.
+func visionFallbackConfigured(cfg *Config) bool {
+	if cfg.VisionFallback.DescribeModel != "" ||
+		(cfg.VisionFallback.Mode != "" && cfg.VisionFallback.Mode != VisionFallbackReject) {
+		return true
+	}
+	for _, model := range cfg.Models {
+		if model.SupportsVision != nil {
+			return true
+		}
+	}
+	return false
 }

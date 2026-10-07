@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -115,6 +116,24 @@ func TestCompletionTokenAccumulator_CountsJoinedOpenAIText(t *testing.T) {
 	acc.AddChunk([]byte(`data: {"choices":[{"delta":{"content":" world"}}]}` + "\n\n"))
 
 	assert.Equal(t, 2, acc.TokenCount())
+}
+
+// Image descriptions injected by the vision fallback are not model output; text of
+// a request without an injection is counted as is.
+func TestCompletionTokenAccumulator_SkipsVisionMarkers(t *testing.T) {
+	marker, err := json.Marshal(visionTestMarker)
+	require.NoError(t, err)
+	count := func(logCtx *RequestLogContext) int {
+		acc := (&Proxy{tiktokenEnabled: true}).newCompletionTokenAccumulator("gpt-4", logCtx)
+		acc.AddChunk([]byte(`data: {"choices":[{"delta":{"content":` + string(marker) + `}}]}` + "\n\n"))
+		acc.AddChunk([]byte(`data: {"choices":[{"delta":{"content":"hello"}}]}` + "\n\n"))
+		acc.AddChunk([]byte(`data: {"choices":[{"delta":{"content":" world"}}]}` + "\n\n"))
+		return acc.TokenCount()
+	}
+
+	assert.Equal(t, 2, count(&RequestLogContext{visionInject: &visionResponseInjection{}}))
+	assert.Greater(t, count(&RequestLogContext{}), 2, "without an injection the text is model output")
+	assert.Greater(t, count(nil), 2)
 }
 
 func TestCompletionTokenAccumulator_UnknownModelUsesDefaultTokenizer(t *testing.T) {
@@ -253,7 +272,7 @@ func TestProxy_SetPromptTokensEstimate_NoOpWhenTiktokenDisabled(t *testing.T) {
 func TestProxy_NewCompletionTokenAccumulator_NilWhenTiktokenDisabled(t *testing.T) {
 	prx := NewTestProxyBuilder().WithTiktokenEnabled(false).Build()
 
-	acc := prx.newCompletionTokenAccumulator("gpt-4o-mini")
+	acc := prx.newCompletionTokenAccumulator("gpt-4o-mini", nil)
 	require.Nil(t, acc)
 
 	// AddChunk/TokenCount on a nil accumulator must stay safe no-ops — this is how
@@ -266,7 +285,7 @@ func TestProxy_NewCompletionTokenAccumulator_NilWhenTiktokenDisabled(t *testing.
 func TestProxy_NewCompletionTokenAccumulator_ActiveWhenTiktokenEnabled(t *testing.T) {
 	prx := NewTestProxyBuilder().Build()
 
-	acc := prx.newCompletionTokenAccumulator("gpt-4o-mini")
+	acc := prx.newCompletionTokenAccumulator("gpt-4o-mini", nil)
 	require.NotNil(t, acc)
 	acc.AddChunk([]byte(`data: {"choices":[{"delta":{"content":"hello"}}]}` + "\n\n"))
 	assert.Greater(t, acc.TokenCount(), 0)

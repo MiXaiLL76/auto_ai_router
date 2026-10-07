@@ -129,17 +129,22 @@ func (p *Proxy) orchestrateRequest(
 	}
 	r = r.WithContext(SetTried(r.Context(), triedCreds))
 
-	// proxyBody: body with the original alias restored.
+	// baseProxyBody: body with the original alias restored.
 	// Proxy credentials handle their own model routing, so they must receive the
 	// alias ("anthropic/claude-sonnet-4.6"), not the provider-specific real name
 	// ("global.anthropic.claude-sonnet-4-6") that was substituted for direct providers.
-	proxyBody := body
-	if modelID != realModelID {
-		proxyBody = openai.ReplaceModelInBody(body, realModelID, modelID)
-	}
-	baseBody := body
-	baseProxyBody := proxyBody
+	// baseBody and baseProxyBody must always change together (drifting apart has
+	// caused bugs before), so every rewrite of the base body goes through setBaseBody.
 	baseRealModelID := realModelID
+	var baseBody, baseProxyBody []byte
+	setBaseBody := func(newBody []byte) {
+		baseBody = newBody
+		baseProxyBody = newBody
+		if modelID != baseRealModelID {
+			baseProxyBody = openai.ReplaceModelInBody(newBody, baseRealModelID, modelID)
+		}
+	}
+	setBaseBody(body)
 	basePath := r.URL.Path
 
 	// Detect Responses API requests and select credential before conversion.
@@ -169,6 +174,56 @@ func (p *Proxy) orchestrateRequest(
 		}
 	}
 
+	if isResponsesAPI {
+		// Handle previous_response_id: prepend the previous entry's accumulated input
+		// + output so the model sees the full conversation history. Credential choice
+		// depends only on the entry loaded above, not on the body, so this runs before
+		// selection and the vision fallback below sees the whole conversation.
+		if responsesMetadata.PreviousResponseID != "" && prevEntry != nil && prevEntry.ResponseJSON != nil {
+			var accInput json.RawMessage
+			if prevEntry.AccumulatedInput != nil {
+				accInput = prevEntry.AccumulatedInput
+			}
+			newBody, prependErr := responses.PrependHistoryToInput(baseBody, accInput, prevEntry.ResponseJSON.Output)
+			if prependErr != nil {
+				p.logger.WarnContext(r.Context(), "Failed to prepend previous response history, ignoring",
+					"id", responsesMetadata.PreviousResponseID, "error", prependErr)
+			} else {
+				setBaseBody(newBody)
+				prevEntryHandled = true
+				p.logger.DebugContext(r.Context(), "Prepended previous response history to input",
+					"previous_response_id", responsesMetadata.PreviousResponseID,
+					"output_items", len(prevEntry.ResponseJSON.Output),
+					"credential", preferredCredentialName,
+				)
+			}
+		}
+
+		// Capture the full accumulated input (history + current) for storage.
+		// This must happen after any history prepending but before RequestToChat removes
+		// "input", and before the vision fallback: the stored history keeps the images.
+		responsesMetadata.AccumulatedInput = responses.ExtractInputArray(baseBody)
+	}
+
+	// Images sent to a model configured with supports_vision: false are handled once
+	// per request on the base body, before a credential is picked, so a rejected
+	// request never takes a rate-limit slot and no slot is held while images are
+	// described.
+	visionFormat := visionFormatChat
+	switch {
+	case isResponsesAPI:
+		visionFormat = visionFormatResponses
+	case isMessagesAPI:
+		visionFormat = visionFormatMessages
+	}
+	visionBody, ok := p.applyVisionFallbackToBase(w, r, logCtx, baseBody, modelID, visionFormat)
+	if !ok {
+		return nil, false
+	}
+	if visionBody != nil {
+		setBaseBody(visionBody)
+	}
+
 	cred, ok := p.selectCredentialForModel(w, modelID, logCtx.SessionID, preferredCredentialName, routingExclusions, logCtx)
 	if !ok {
 		return nil, false
@@ -181,38 +236,6 @@ func (p *Proxy) orchestrateRequest(
 		"model", modelID,
 		"streaming", streaming,
 		"url_path", r.URL.Path)
-
-	if isResponsesAPI {
-		// Handle previous_response_id: load the previous entry and prepend its
-		// accumulated input + output so the model sees the full conversation history.
-		if responsesMetadata.PreviousResponseID != "" && prevEntry != nil && prevEntry.ResponseJSON != nil {
-			var accInput json.RawMessage
-			if prevEntry.AccumulatedInput != nil {
-				accInput = prevEntry.AccumulatedInput
-			}
-			newBody, prependErr := responses.PrependHistoryToInput(baseBody, accInput, prevEntry.ResponseJSON.Output)
-			if prependErr != nil {
-				p.logger.WarnContext(r.Context(), "Failed to prepend previous response history, ignoring",
-					"id", responsesMetadata.PreviousResponseID, "error", prependErr)
-			} else {
-				baseBody = newBody
-				prevEntryHandled = true
-				baseProxyBody = baseBody
-				if modelID != baseRealModelID {
-					baseProxyBody = openai.ReplaceModelInBody(baseBody, baseRealModelID, modelID)
-				}
-				p.logger.DebugContext(r.Context(), "Prepended previous response history to input",
-					"previous_response_id", responsesMetadata.PreviousResponseID,
-					"output_items", len(prevEntry.ResponseJSON.Output),
-					"credential", preferredCredentialName,
-				)
-			}
-		}
-
-		// Capture the full accumulated input (history + current) for storage.
-		// This must happen after any history prepending but before RequestToChat removes "input".
-		responsesMetadata.AccumulatedInput = responses.ExtractInputArray(baseBody)
-	}
 
 	stickyCacheEligible := logCtx.SessionID != "" || preferredCredentialName != ""
 	credentialReq, prepErr := p.prepareRequestForCredential(
@@ -257,7 +280,6 @@ func (p *Proxy) orchestrateRequest(
 		return nil, false
 	}
 	body = credentialReq.body
-	proxyBody = credentialReq.proxyBody
 	realModelID = credentialReq.realModelID
 	r.URL.Path = credentialReq.path
 
@@ -267,7 +289,7 @@ func (p *Proxy) orchestrateRequest(
 	return &orchestratedRequest{
 		request:              r,
 		body:                 body,
-		proxyBody:            proxyBody,
+		proxyBody:            credentialReq.proxyBody,
 		proxyPath:            credentialReq.proxyPath,
 		baseBody:             baseBody,
 		baseProxyBody:        baseProxyBody,

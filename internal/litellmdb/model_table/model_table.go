@@ -403,7 +403,8 @@ func buildAIRModels(
 			// LiteLLM" deployment shape) never gets its Chat->Responses conversion and
 			// every request to it 400s -- static config.yaml is the only place the
 			// flag could otherwise come from.
-			ResponsesOnly: model.Mode() == "responses",
+			ResponsesOnly:  model.Mode() == "responses",
+			SupportsVision: model.SupportsVision(),
 		}
 		if model.LlmParams.RPM != nil {
 			rpmCfg.RPM = *model.LlmParams.RPM

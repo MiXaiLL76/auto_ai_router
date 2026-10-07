@@ -150,7 +150,7 @@ func TestClassifyBadRequest_PluralProseIsNotAParameter(t *testing.T) {
 		{
 			name:    "plural models in a context length message",
 			body:    `{"error":{"message":"Context length exceeded for these models"}}`,
-			message: "Context length exceeded",
+			message: "This model's maximum context length is exceeded by the request",
 		},
 		{
 			name:    "unsupported models is a model error",
