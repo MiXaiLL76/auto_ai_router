@@ -481,10 +481,14 @@ func TestNewTransport_HTTP2PingExplicitOverride(t *testing.T) {
 }
 
 func TestNewTransport_HTTP2PingNegativeDisables(t *testing.T) {
-	// A negative duration (e.g. -1s — plain "-1" has no unit and fails
-	// time.ParseDuration, so it can't round-trip through YAML) is the
-	// explicit opt-out: unlike zero, it must NOT fall back to the default,
-	// it must resolve to Go's own "0 == no health check is performed".
+	// Disabling can only ever work through SendPingTimeout: Go's own
+	// x/net/http2 (net/http/internal/http2/config.go, setConfigDefaults)
+	// unconditionally promotes PingTimeout back to 15s minimum regardless of
+	// what we set it to, so asserting PingTimeout == 0 here would prove
+	// nothing about actual runtime behavior — only SendPingTimeout == 0
+	// genuinely means "no health check is performed" per its own doc
+	// comment. PingTimeout is asserted at the package default instead,
+	// since that's what it actually resolves to.
 	transport := newTransport(&HTTPClientConfig{
 		HTTP2IdlePingTimeout: -1 * time.Second,
 		HTTP2PingTimeout:     -1 * time.Second,
@@ -492,7 +496,34 @@ func TestNewTransport_HTTP2PingNegativeDisables(t *testing.T) {
 
 	if assert.NotNil(t, transport.HTTP2) {
 		assert.Zero(t, transport.HTTP2.SendPingTimeout)
-		assert.Zero(t, transport.HTTP2.PingTimeout)
+		assert.Equal(t, defaultHTTP2PingTimeout, transport.HTTP2.PingTimeout)
+	}
+}
+
+func TestNewTransport_HTTP2PingTimeoutAloneNegativeStillDisables(t *testing.T) {
+	// Setting only http2_ping_timeout negative (HTTP2IdlePingTimeout left at
+	// its zero-means-default) must still disable the whole check via
+	// SendPingTimeout — otherwise it would silently do nothing at all
+	// (PingTimeout alone going to 0 doesn't survive Go's own defaulting; see
+	// TestNewTransport_HTTP2PingNegativeDisables).
+	transport := newTransport(&HTTPClientConfig{
+		HTTP2PingTimeout: -1 * time.Second,
+	})
+
+	if assert.NotNil(t, transport.HTTP2) {
+		assert.Zero(t, transport.HTTP2.SendPingTimeout)
+	}
+}
+
+func TestNewTransport_HTTP2IdlePingTimeoutAloneNegativeStillDisables(t *testing.T) {
+	// Symmetric to the above: setting only http2_idle_ping_timeout negative
+	// (HTTP2PingTimeout left at its zero-means-default) must disable too.
+	transport := newTransport(&HTTPClientConfig{
+		HTTP2IdlePingTimeout: -1 * time.Second,
+	})
+
+	if assert.NotNil(t, transport.HTTP2) {
+		assert.Zero(t, transport.HTTP2.SendPingTimeout)
 	}
 }
 
@@ -501,9 +532,9 @@ func TestNewTransport_HTTP2CountErrorFeedsMetric(t *testing.T) {
 	require.NotNil(t, transport.HTTP2)
 	require.NotNil(t, transport.HTTP2.CountError, "CountError must be wired so a PING timeout closing a connection is visible in Grafana, not just inferred from retries")
 
-	before := testutil.ToFloat64(monitoring.HTTP2ConnectionClosedTotal.WithLabelValues("conn_close_lost_ping"))
+	before := testutil.ToFloat64(monitoring.HTTP2TransportErrorsTotal.WithLabelValues("conn_close_lost_ping"))
 	transport.HTTP2.CountError("conn_close_lost_ping")
-	after := testutil.ToFloat64(monitoring.HTTP2ConnectionClosedTotal.WithLabelValues("conn_close_lost_ping"))
+	after := testutil.ToFloat64(monitoring.HTTP2TransportErrorsTotal.WithLabelValues("conn_close_lost_ping"))
 
 	assert.Equal(t, before+1, after)
 }

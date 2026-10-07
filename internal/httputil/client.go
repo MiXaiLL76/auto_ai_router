@@ -60,11 +60,21 @@ type HTTPClientConfig struct {
 	// has gone silent — not idle, just unresponsive — gets probed and, if it
 	// doesn't answer, closed instead of sitting in the pool until
 	// ResponseHeaderTimeout gives up on it. Zero falls back to the package
-	// defaults; a negative duration (e.g. -1s) explicitly disables HTTP/2 ping
-	// liveness checking (maps to Go's own SendPingTimeout == 0 == "no health
-	// check is performed") — plain "-1" has no unit and fails
-	// time.ParseDuration, so this is spelled out as a duration, not the bare
-	// -1 sentinel request_timeout uses elsewhere in config.go.
+	// defaults; a negative duration (e.g. -1s) on EITHER field explicitly
+	// disables HTTP/2 ping liveness checking entirely — plain "-1" has no unit
+	// and fails time.ParseDuration, so this is spelled out as a duration, not
+	// the bare -1 sentinel request_timeout uses elsewhere in config.go.
+	//
+	// The disable path always goes through SendPingTimeout (Go's own
+	// "0 == no health check is performed"), never through PingTimeout: Go's
+	// vendored x/net/http2 (net/http/internal/http2/config.go,
+	// setConfigDefaults) unconditionally runs
+	// setDefault(&conf.PingTimeout, 1, math.MaxInt64, 15*time.Second), so any
+	// PingTimeout below 1ns — including a literal 0 — silently becomes 15s
+	// again deep inside net/http, with no way to make it a true "off" on its
+	// own. Setting only HTTP2PingTimeout negative therefore still disables
+	// the whole check (via SendPingTimeout), not because PingTimeout itself
+	// went to 0.
 	HTTP2IdlePingTimeout time.Duration
 	HTTP2PingTimeout     time.Duration
 }
@@ -110,23 +120,28 @@ func newTransport(cfg *HTTPClientConfig) *http.Transport {
 		idleConnTimeout = defaultIdleConnTimeout
 	}
 
-	// A negative value is an explicit opt-out (see HTTPClientConfig doc
-	// comment); it maps to Go's own "0 == disabled" rather than falling back
-	// to the default like a genuine zero value does.
+	// A negative value on either field is an explicit opt-out, resolved
+	// before per-field defaulting: see HTTPClientConfig's doc comment for why
+	// disabling always goes through SendPingTimeout (the only field whose
+	// zero actually means "off" at the Go level) regardless of which one of
+	// the two the caller set negative.
+	disablePing := cfg.HTTP2IdlePingTimeout < 0 || cfg.HTTP2PingTimeout < 0
+
 	http2IdlePingTimeout := cfg.HTTP2IdlePingTimeout
 	switch {
+	case disablePing:
+		http2IdlePingTimeout = 0
 	case http2IdlePingTimeout == 0:
 		http2IdlePingTimeout = defaultHTTP2IdlePingTimeout
-	case http2IdlePingTimeout < 0:
-		http2IdlePingTimeout = 0
 	}
 
+	// PingTimeout has no real "off" to preserve here (see the doc comment),
+	// so it's always resolved to a usable positive value — including when
+	// disablePing is true, where it's simply unused: once SendPingTimeout is
+	// 0, Go never sends a ping to wait on an ack for in the first place.
 	http2PingTimeout := cfg.HTTP2PingTimeout
-	switch {
-	case http2PingTimeout == 0:
+	if http2PingTimeout <= 0 {
 		http2PingTimeout = defaultHTTP2PingTimeout
-	case http2PingTimeout < 0:
-		http2PingTimeout = 0
 	}
 
 	return &http.Transport{
@@ -146,12 +161,17 @@ func newTransport(cfg *HTTPClientConfig) *http.Transport {
 			PingTimeout:     http2PingTimeout,
 			// errType is one of a small fixed set of lowercase_with_underscores
 			// stdlib-internal reason strings (see net/http.HTTP2Config.CountError),
-			// safe as a label with no cardinality risk. The only one our ping
-			// config can trigger is conn_close_lost_ping — the PING went unacked
-			// and the connection was torn down; see
-			// monitoring.HTTP2ConnectionClosedTotal.
+			// safe as a label with no cardinality risk. CountError fires for every
+			// client-side HTTP/2 transport error Go recognizes — frame read errors
+			// and plain EOF (read_frame_*), GOAWAY (recv_goaway_*) and RST_STREAM
+			// (recv_rststream_*) from the peer, all of which are routine and
+			// unrelated to our ping config — not just our own ping timeouts. The
+			// one reason this specific ping config can trigger is
+			// conn_close_lost_ping: the PING went unacked and the connection was
+			// torn down. See monitoring.HTTP2TransportErrorsTotal's doc comment —
+			// triage by filtering reason="conn_close_lost_ping", not the total.
 			CountError: func(errType string) {
-				monitoring.HTTP2ConnectionClosedTotal.WithLabelValues(errType).Inc()
+				monitoring.HTTP2TransportErrorsTotal.WithLabelValues(errType).Inc()
 			},
 		},
 	}
