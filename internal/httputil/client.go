@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
+	"github.com/mixaill76/auto_ai_router/internal/monitoring"
 	"github.com/mixaill76/auto_ai_router/internal/ratelimit"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
 )
@@ -59,8 +60,11 @@ type HTTPClientConfig struct {
 	// has gone silent — not idle, just unresponsive — gets probed and, if it
 	// doesn't answer, closed instead of sitting in the pool until
 	// ResponseHeaderTimeout gives up on it. Zero falls back to the package
-	// defaults; there is currently no way to disable the ping checks via this
-	// struct, same as the other zero-means-default fields above.
+	// defaults; a negative duration (e.g. -1s) explicitly disables HTTP/2 ping
+	// liveness checking (maps to Go's own SendPingTimeout == 0 == "no health
+	// check is performed") — plain "-1" has no unit and fails
+	// time.ParseDuration, so this is spelled out as a duration, not the bare
+	// -1 sentinel request_timeout uses elsewhere in config.go.
 	HTTP2IdlePingTimeout time.Duration
 	HTTP2PingTimeout     time.Duration
 }
@@ -106,14 +110,23 @@ func newTransport(cfg *HTTPClientConfig) *http.Transport {
 		idleConnTimeout = defaultIdleConnTimeout
 	}
 
+	// A negative value is an explicit opt-out (see HTTPClientConfig doc
+	// comment); it maps to Go's own "0 == disabled" rather than falling back
+	// to the default like a genuine zero value does.
 	http2IdlePingTimeout := cfg.HTTP2IdlePingTimeout
-	if http2IdlePingTimeout == 0 {
+	switch {
+	case http2IdlePingTimeout == 0:
 		http2IdlePingTimeout = defaultHTTP2IdlePingTimeout
+	case http2IdlePingTimeout < 0:
+		http2IdlePingTimeout = 0
 	}
 
 	http2PingTimeout := cfg.HTTP2PingTimeout
-	if http2PingTimeout == 0 {
+	switch {
+	case http2PingTimeout == 0:
 		http2PingTimeout = defaultHTTP2PingTimeout
+	case http2PingTimeout < 0:
+		http2PingTimeout = 0
 	}
 
 	return &http.Transport{
@@ -131,6 +144,15 @@ func newTransport(cfg *HTTPClientConfig) *http.Transport {
 		HTTP2: &http.HTTP2Config{
 			SendPingTimeout: http2IdlePingTimeout,
 			PingTimeout:     http2PingTimeout,
+			// errType is one of a small fixed set of lowercase_with_underscores
+			// stdlib-internal reason strings (see net/http.HTTP2Config.CountError),
+			// safe as a label with no cardinality risk. The only one our ping
+			// config can trigger is conn_close_lost_ping — the PING went unacked
+			// and the connection was torn down; see
+			// monitoring.HTTP2ConnectionClosedTotal.
+			CountError: func(errType string) {
+				monitoring.HTTP2ConnectionClosedTotal.WithLabelValues(errType).Inc()
+			},
 		},
 	}
 }

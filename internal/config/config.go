@@ -611,7 +611,7 @@ type ServerConfig struct {
 	MaxIdleConns               int                   `yaml:"max_idle_conns"`
 	MaxIdleConnsPerHost        int                   `yaml:"max_idle_conns_per_host"`
 	IdleConnTimeout            time.Duration         `yaml:"idle_conn_timeout"`
-	HTTP2IdlePingTimeout       time.Duration         `yaml:"http2_idle_ping_timeout"` // How long a provider HTTP/2 connection may go without any frame before a liveness PING is sent (default: 15s)
+	HTTP2IdlePingTimeout       time.Duration         `yaml:"http2_idle_ping_timeout"` // How long a provider HTTP/2 connection may go without any frame before a liveness PING is sent (default: 15s; a negative duration, e.g. -1s, disables the check)
 	HTTP2PingTimeout           time.Duration         `yaml:"http2_ping_timeout"`      // How long to wait for a liveness PING to be acked before closing the connection (default: 10s)
 	ReadTimeout                time.Duration         `yaml:"-"`                                 // HTTP server read timeout (equals request_timeout, not configurable via YAML)
 	WriteTimeout               time.Duration         `yaml:"write_timeout"`                     // HTTP server write timeout (default: 60s)

@@ -12,8 +12,11 @@ import (
 	"time"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
+	"github.com/mixaill76/auto_ai_router/internal/monitoring"
 	"github.com/mixaill76/auto_ai_router/internal/testhelpers"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func newIPv4Server(t *testing.T, handler http.Handler) *httptest.Server {
@@ -475,4 +478,32 @@ func TestNewTransport_HTTP2PingExplicitOverride(t *testing.T) {
 		assert.Equal(t, 7*time.Second, transport.HTTP2.SendPingTimeout)
 		assert.Equal(t, 3*time.Second, transport.HTTP2.PingTimeout)
 	}
+}
+
+func TestNewTransport_HTTP2PingNegativeDisables(t *testing.T) {
+	// A negative duration (e.g. -1s — plain "-1" has no unit and fails
+	// time.ParseDuration, so it can't round-trip through YAML) is the
+	// explicit opt-out: unlike zero, it must NOT fall back to the default,
+	// it must resolve to Go's own "0 == no health check is performed".
+	transport := newTransport(&HTTPClientConfig{
+		HTTP2IdlePingTimeout: -1 * time.Second,
+		HTTP2PingTimeout:     -1 * time.Second,
+	})
+
+	if assert.NotNil(t, transport.HTTP2) {
+		assert.Zero(t, transport.HTTP2.SendPingTimeout)
+		assert.Zero(t, transport.HTTP2.PingTimeout)
+	}
+}
+
+func TestNewTransport_HTTP2CountErrorFeedsMetric(t *testing.T) {
+	transport := newTransport(nil)
+	require.NotNil(t, transport.HTTP2)
+	require.NotNil(t, transport.HTTP2.CountError, "CountError must be wired so a PING timeout closing a connection is visible in Grafana, not just inferred from retries")
+
+	before := testutil.ToFloat64(monitoring.HTTP2ConnectionClosedTotal.WithLabelValues("conn_close_lost_ping"))
+	transport.HTTP2.CountError("conn_close_lost_ping")
+	after := testutil.ToFloat64(monitoring.HTTP2ConnectionClosedTotal.WithLabelValues("conn_close_lost_ping"))
+
+	assert.Equal(t, before+1, after)
 }

@@ -34,6 +34,24 @@ var (
 		[]string{"credential", "model", "endpoint", "status"},
 	)
 
+	// HTTP2ConnectionClosedTotal is fed by http.HTTP2Config.CountError (see
+	// internal/httputil/client.go), the stdlib's own counter for HTTP/2
+	// transport-level connection closures. The reason label is Go's internal
+	// string for why a connection was torn down (lowercase, digits,
+	// underscores only — see net/http.HTTP2Config.CountError's doc comment,
+	// a small fixed set, not user input). The only reason our ping config
+	// currently exercises is conn_close_lost_ping: the idle-liveness PING
+	// went unacked within http2_ping_timeout and the connection was closed —
+	// this is the fix's own detection signal, not just its side effect, so a
+	// spike here is the first place to look when triaging a provider outage.
+	HTTP2ConnectionClosedTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "auto_ai_router_http2_connection_closed_total",
+			Help: "HTTP/2 client connections closed by the Go transport's own error counters, labeled by its internal reason string.",
+		},
+		[]string{"reason"},
+	)
+
 	RequestDuration = promauto.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Name: "auto_ai_router_requests_duration_seconds",
