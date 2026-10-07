@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"strings"
@@ -45,6 +46,21 @@ func TestIsTimeoutError(t *testing.T) {
 		{"context_canceled", context.Canceled, false},
 		{"generic_error", errors.New("something"), false},
 		{"non_timeout_net_error", &nonTimeoutNetError{}, false},
+		{
+			"http2_connection_lost_from_ping_check",
+			errors.New("http2: client connection lost"),
+			true,
+		},
+		{
+			"http2_connection_lost_wrapped",
+			fmt.Errorf("Post %q: %w", "https://example.com", errors.New("http2: client connection lost")),
+			true,
+		},
+		{
+			"http2_unrelated_error_not_misclassified",
+			errors.New("http2: client conn is closed"),
+			false,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

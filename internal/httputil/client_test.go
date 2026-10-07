@@ -12,8 +12,11 @@ import (
 	"time"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
+	"github.com/mixaill76/auto_ai_router/internal/monitoring"
 	"github.com/mixaill76/auto_ai_router/internal/testhelpers"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func newIPv4Server(t *testing.T, handler http.Handler) *httptest.Server {
@@ -441,4 +444,97 @@ func TestFetchFromProxy_LargeResponse(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, len(largeBody), len(body))
 	assert.Equal(t, largeBody, body)
+}
+
+func TestNewTransport_HTTP2PingDefaults(t *testing.T) {
+	transport := newTransport(nil)
+
+	if assert.NotNil(t, transport.HTTP2) {
+		assert.Equal(t, defaultHTTP2IdlePingTimeout, transport.HTTP2.SendPingTimeout)
+		assert.Equal(t, defaultHTTP2PingTimeout, transport.HTTP2.PingTimeout)
+	}
+}
+
+func TestNewTransport_HTTP2PingZeroFallsBackToDefaults(t *testing.T) {
+	// A caller that only cares about Timeout (e.g. internal/auth/vertex.go)
+	// leaves HTTP2IdlePingTimeout/HTTP2PingTimeout at their Go zero value —
+	// those must still resolve to the package defaults, not to a disabled
+	// (zero) HTTP/2 ping, same as every other zero-means-default field here.
+	transport := newTransport(&HTTPClientConfig{Timeout: 30 * time.Second})
+
+	if assert.NotNil(t, transport.HTTP2) {
+		assert.Equal(t, defaultHTTP2IdlePingTimeout, transport.HTTP2.SendPingTimeout)
+		assert.Equal(t, defaultHTTP2PingTimeout, transport.HTTP2.PingTimeout)
+	}
+}
+
+func TestNewTransport_HTTP2PingExplicitOverride(t *testing.T) {
+	transport := newTransport(&HTTPClientConfig{
+		HTTP2IdlePingTimeout: 7 * time.Second,
+		HTTP2PingTimeout:     3 * time.Second,
+	})
+
+	if assert.NotNil(t, transport.HTTP2) {
+		assert.Equal(t, 7*time.Second, transport.HTTP2.SendPingTimeout)
+		assert.Equal(t, 3*time.Second, transport.HTTP2.PingTimeout)
+	}
+}
+
+func TestNewTransport_HTTP2PingNegativeDisables(t *testing.T) {
+	// Disabling can only ever work through SendPingTimeout: Go's own
+	// x/net/http2 (net/http/internal/http2/config.go, setConfigDefaults)
+	// unconditionally promotes PingTimeout back to 15s minimum regardless of
+	// what we set it to, so asserting PingTimeout == 0 here would prove
+	// nothing about actual runtime behavior — only SendPingTimeout == 0
+	// genuinely means "no health check is performed" per its own doc
+	// comment. PingTimeout is asserted at the package default instead,
+	// since that's what it actually resolves to.
+	transport := newTransport(&HTTPClientConfig{
+		HTTP2IdlePingTimeout: -1 * time.Second,
+		HTTP2PingTimeout:     -1 * time.Second,
+	})
+
+	if assert.NotNil(t, transport.HTTP2) {
+		assert.Zero(t, transport.HTTP2.SendPingTimeout)
+		assert.Equal(t, defaultHTTP2PingTimeout, transport.HTTP2.PingTimeout)
+	}
+}
+
+func TestNewTransport_HTTP2PingTimeoutAloneNegativeStillDisables(t *testing.T) {
+	// Setting only http2_ping_timeout negative (HTTP2IdlePingTimeout left at
+	// its zero-means-default) must still disable the whole check via
+	// SendPingTimeout — otherwise it would silently do nothing at all
+	// (PingTimeout alone going to 0 doesn't survive Go's own defaulting; see
+	// TestNewTransport_HTTP2PingNegativeDisables).
+	transport := newTransport(&HTTPClientConfig{
+		HTTP2PingTimeout: -1 * time.Second,
+	})
+
+	if assert.NotNil(t, transport.HTTP2) {
+		assert.Zero(t, transport.HTTP2.SendPingTimeout)
+	}
+}
+
+func TestNewTransport_HTTP2IdlePingTimeoutAloneNegativeStillDisables(t *testing.T) {
+	// Symmetric to the above: setting only http2_idle_ping_timeout negative
+	// (HTTP2PingTimeout left at its zero-means-default) must disable too.
+	transport := newTransport(&HTTPClientConfig{
+		HTTP2IdlePingTimeout: -1 * time.Second,
+	})
+
+	if assert.NotNil(t, transport.HTTP2) {
+		assert.Zero(t, transport.HTTP2.SendPingTimeout)
+	}
+}
+
+func TestNewTransport_HTTP2CountErrorFeedsMetric(t *testing.T) {
+	transport := newTransport(nil)
+	require.NotNil(t, transport.HTTP2)
+	require.NotNil(t, transport.HTTP2.CountError, "CountError must be wired so a PING timeout closing a connection is visible in Grafana, not just inferred from retries")
+
+	before := testutil.ToFloat64(monitoring.HTTP2TransportErrorsTotal.WithLabelValues("conn_close_lost_ping"))
+	transport.HTTP2.CountError("conn_close_lost_ping")
+	after := testutil.ToFloat64(monitoring.HTTP2TransportErrorsTotal.WithLabelValues("conn_close_lost_ping"))
+
+	assert.Equal(t, before+1, after)
 }
