@@ -230,6 +230,45 @@ func TestVisionFallback_DescribesCurrentTurnImage(t *testing.T) {
 	}
 }
 
+// A request from an AIR peer (proxy marker + master key) is billed by the peer. Its
+// describe call must be sent the same way: accounted like the parent (not charged to
+// the master key here) and routed with the parent's credential denylist.
+func TestVisionFallback_PeerRequestDescribeCallStaysPeerRequest(t *testing.T) {
+	u := &visionUpstream{}
+	prx, db := newVisionProxy(t, newVisionUpstream(t, u).URL, describeFallback())
+
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", stringsReader(`{"model":"glm","messages":[
+		{"role":"user","content":[{"type":"text","text":"что на картинке?"},{"type":"image_url","image_url":{"url":"`+visionTestImage+`"}}]}]}`))
+	req.Header.Set("Authorization", "Bearer master-key")
+	req.Header.Set(HeaderAIRProxyClient, "1")
+	req.Header.Set(HeaderAIRCredentialDenylist, `["openai-node"]`)
+	w := httptest.NewRecorder()
+	prx.ProxyRequest(w, req)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	assert.Equal(t, "described=1/1", w.Header().Get(HeaderVisionFallback))
+
+	require.Len(t, db.logs, 2)
+	for _, log := range db.logs {
+		assert.True(t, log.SkipAccounting, "%s: a peer request and its describe call are billed by the peer", log.Model)
+	}
+}
+
+func TestMarkVisionDescribePeerRequest(t *testing.T) {
+	r := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", nil)
+	r = withEffectiveCredentialDenylist(captureCredentialDenylist(r, true), []string{"peer-a", "vllm-2"})
+
+	header := http.Header{}
+	require.NoError(t, markVisionDescribePeerRequest(r.Context(), header))
+	assert.Empty(t, header, "not a peer request: the describe call is a normal request of the caller's key")
+
+	ctx := context.WithValue(r.Context(), visionPeerRequestKey{}, true)
+	require.NoError(t, markVisionDescribePeerRequest(ctx, header))
+	assert.Equal(t, "1", header.Get(HeaderAIRProxyClient))
+	denylist, err := parseCredentialDenylist(header.Get(HeaderAIRCredentialDenylist))
+	require.NoError(t, err)
+	assert.Equal(t, []string{"peer-a", "vllm-2"}, denylist)
+}
+
 // A later turn: the image is in the history, the assistant already answered about it.
 // It becomes a placeholder and no describe call is made.
 func TestVisionFallback_HistoryImageBecomesPlaceholder(t *testing.T) {

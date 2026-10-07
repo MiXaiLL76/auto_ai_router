@@ -236,6 +236,9 @@ func (p *Proxy) applyVisionFallbackToBase(
 	modelID string,
 	format visionBodyFormat,
 ) ([]byte, bool) {
+	if logCtx.IsProxyRequest {
+		r = r.WithContext(context.WithValue(r.Context(), visionPeerRequestKey{}, true))
+	}
 	vision := p.applyVisionFallback(w, r, baseBody, modelID, format)
 	if vision.rejected {
 		msg := fmt.Sprintf("Model %s does not support image inputs; remove the images or use a vision-capable model", modelID)
@@ -346,7 +349,9 @@ func (p *Proxy) describeVisionImages(w http.ResponseWriter, r *http.Request, ref
 
 // describeVisionImage runs one Chat Completions request against describe_model through
 // this router's own pipeline with the caller's headers, so the call is authenticated,
-// rate-limited, balanced and billed to the same key and end user as the original.
+// rate-limited, balanced and billed to the same key and end user as the original
+// (for a request from an AIR peer: accounted and routed like the original, see
+// markVisionDescribePeerRequest).
 //
 // The user's question is deliberately not passed: the description is reused on every
 // later turn, so it must not be narrowed to what the first question asked about.
@@ -379,6 +384,9 @@ func (p *Proxy) describeVisionImage(r *http.Request, imageURL string) (string, e
 		req.Header.Del(h)
 	}
 	dropRepresentationIntegrityHeaders(req.Header)
+	if err := markVisionDescribePeerRequest(r.Context(), req.Header); err != nil {
+		return "", err
+	}
 	req.Header.Set("Content-Type", "application/json")
 	req.ContentLength = int64(len(payload))
 	req.RemoteAddr = r.RemoteAddr
@@ -402,6 +410,27 @@ func (p *Proxy) describeVisionImage(r *http.Request, imageURL string) (string, e
 		return "", fmt.Errorf("describe model returned an empty description")
 	}
 	return strings.TrimSpace(resp.Choices[0].Message.Content), nil
+}
+
+// visionPeerRequestKey marks a request that came from a trusted AIR peer (proxy
+// marker + master key), so its describe calls are sent the same way.
+type visionPeerRequestKey struct{}
+
+// markVisionDescribePeerRequest makes the describe call of a request from an AIR peer
+// one too: proxyRequest strips the proxy marker and the credential denylist from the
+// inbound headers, so they are set again from the parent's state. The describe call
+// is then accounted like its parent (logged, not charged on this AIR -- the peer bills
+// the user) and routed with the parent's effective denylist, which keeps it off the
+// credentials the peer excluded, including a route back to the peer itself.
+func markVisionDescribePeerRequest(ctx context.Context, header http.Header) error {
+	if peer, _ := ctx.Value(visionPeerRequestKey{}).(bool); !peer {
+		return nil
+	}
+	header.Set(HeaderAIRProxyClient, "1")
+	if err := setCredentialDenylistHeader(header, effectiveCredentialDenylist(ctx)); err != nil {
+		return fmt.Errorf("describe call: %w", err)
+	}
+	return nil
 }
 
 // visionDescribeContext derives the context of an internal describe call from the

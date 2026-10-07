@@ -250,6 +250,10 @@ Nor is it written for a vLLM model with an explicit `passthrough_messages: true`
 then goes to vLLM natively and the answer comes back in Anthropic format. The images are still
 described; only the block in the answer (and so the restore on later turns) is missing.
 
+The same holds for a [`responses_only`](../getting-started/configuration.md#models) vLLM model
+called through `/v1/chat/completions`: the request is converted to the Responses API, and the
+block is not written into the converted answer. See [Limitations](#limitations-and-edge-cases).
+
 ## Supported APIs
 
 | Endpoint               | Image parts recognized                                                     | Replaced with            |
@@ -271,6 +275,13 @@ The describe call runs through AIR's own pipeline with the caller's headers: the
 the same end-user headers (`X-OpenWebUI-User-Email`, ...). It is therefore authenticated,
 rate-limited, load-balanced and billed like a normal request — it shows up as a separate
 spend-log row for `describe_model`. The key must be allowed to use `describe_model`.
+
+A request forwarded by another AIR (proxy/AIR credential, authenticated with the master key) is
+billed by that AIR. Its describe calls are sent the same way: they get a spend-log row here but
+are not charged to any key, and they are routed with the forwarding AIR's credential denylist, so
+they never go to a credential it excluded (including a route back to it). The forwarding AIR only
+sees the usage of the main request, so the describe calls of a forwarded request are not billed
+to the end user's key.
 
 Each described image counts as one request against the key's RPM: a message with 4 images costs
 5 requests. When the key's limit is hit, the remaining images become placeholders and the header
@@ -295,6 +306,34 @@ A describe call never triggers another describe round. If `describe_model` is it
 `supports_vision: false` (e.g. by a `model_info.supports_vision` value synced from the database
 after startup), the describe call is rejected, every image becomes a placeholder, and
 `vision_fallback.describe_model has supports_vision: false` is logged once at `WARN`.
+
+## Limitations and edge cases
+
+**`responses_only` models.** A text-only vLLM model with `responses_only: true` (or
+`model_info.mode: responses` in the database) called through `/v1/chat/completions` is
+converted to the Responses API upstream. `reject`, `strip` and the describe step itself work,
+but the description block is **not** written into the answer, so later turns cannot restore it:
+history images of such a conversation always become `[image from an earlier turn omitted]`
+(`X-AIR-Vision-Fallback` shows `stripped`, never `restored=K`). The answer itself is not
+affected.
+
+**Native WebSocket (`/v1/responses` over WebSocket).** Native WebSocket requires an
+OpenAI-compatible Responses provider, so a turn to a vLLM model fails with
+`Native WebSocket requires an OpenAI-compatible Responses provider` anyway. In `describe` mode the
+images are described (and billed) before that error.
+
+**Rejected or retried main requests.** Images are described before credential selection and the
+key's budget/rate-limit checks of the main request. A main request that then fails (`429`, `503`,
+no credential, upstream error) has already paid for its describe calls, and every client retry
+pays again (see [Billing and limits](#billing-and-limits)).
+
+**`max_tokens: 0`.** Unlike `max_images`, `0` is not "no limit": it is replaced with the default
+`1024`. Set an explicit large value if descriptions are cut off.
+
+**Stream without a trailing newline.** The block is inserted in front of the first answer chunk.
+If the upstream closes the stream right after that chunk without a line terminator, the inserted
+and the original event end up on one line and the client may drop the chunk. vLLM always ends a
+stream with `data: [DONE]`, so this is not expected in practice.
 
 ## Logs
 

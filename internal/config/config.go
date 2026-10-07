@@ -1837,7 +1837,9 @@ func Load(path string) (*Config, error) {
 		cfg.Kafka = defaultKafkaConfig()
 	}
 
-	if !hasMappingKey(&root, "vision_fallback") {
+	// A null value ("vision_fallback:" with every child commented out) is present
+	// but never reaches VisionFallbackConfig.UnmarshalYAML, so it needs the defaults too.
+	if !hasMappingKey(&root, "vision_fallback") || mappingValueIsNull(&root, "vision_fallback") {
 		cfg.VisionFallback = defaultVisionFallbackConfig()
 	}
 	cfg.VisionFallback.ApplyDefaults()
@@ -2057,6 +2059,26 @@ func hasMappingKey(node *yaml.Node, key string) bool {
 	for i := 0; i+1 < len(node.Content); i += 2 {
 		if node.Content[i].Value == key {
 			return true
+		}
+	}
+	return false
+}
+
+// mappingValueIsNull reports whether key is present in the top-level mapping with an
+// empty or explicit null value.
+func mappingValueIsNull(node *yaml.Node, key string) bool {
+	if node == nil {
+		return false
+	}
+	if node.Kind == yaml.DocumentNode && len(node.Content) > 0 {
+		node = node.Content[0]
+	}
+	if node.Kind != yaml.MappingNode {
+		return false
+	}
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		if node.Content[i].Value == key {
+			return node.Content[i+1].Tag == "!!null"
 		}
 	}
 	return false

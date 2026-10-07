@@ -2506,6 +2506,27 @@ vision_fallback:
 	assert.Equal(t, DefaultVisionMaxTokens, cfg.VisionFallback.MaxTokens)
 }
 
+func TestLoad_VisionFallbackNullSectionGetsDefaults(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	require.NoError(t, os.WriteFile(configPath, []byte(`
+server:
+  master_key: sk-test
+credentials:
+  - name: vllm-node
+    type: vllm
+    base_url: http://vllm:8000
+    rpm: -1
+vision_fallback:
+  # mode: describe
+  # describe_model: qwen-vl
+`), 0600))
+	cfg, err := Load(configPath)
+	require.NoError(t, err)
+	assert.Equal(t, VisionFallbackReject, cfg.VisionFallback.Mode)
+	assert.Equal(t, DefaultVisionMaxImages, cfg.VisionFallback.MaxImages, "an empty section must not turn into max_images: 0 (no limit)")
+	assert.Equal(t, DefaultVisionMaxTokens, cfg.VisionFallback.MaxTokens)
+}
+
 func TestLoad_VisionFallbackDefaultsToReject(t *testing.T) {
 	configPath := filepath.Join(t.TempDir(), "config.yaml")
 	require.NoError(t, os.WriteFile(configPath, []byte(`
