@@ -380,6 +380,8 @@ type Config struct {
 	MaxIdleConns                 int
 	MaxIdleConnsPerHost          int
 	IdleConnTimeout              time.Duration
+	HTTP2IdlePingTimeout         time.Duration // See httputil.HTTPClientConfig.HTTP2IdlePingTimeout (default: 15s)
+	HTTP2PingTimeout             time.Duration // See httputil.HTTPClientConfig.HTTP2PingTimeout (default: 10s)
 	Metrics                      *monitoring.Metrics
 	MasterKey                    string
 	RateLimiter                  *ratelimit.RPMLimiter
@@ -482,6 +484,8 @@ func New(cfg *Config) *Proxy {
 	httpClientCfg.MaxIdleConns = cfg.MaxIdleConns
 	httpClientCfg.MaxIdleConnsPerHost = cfg.MaxIdleConnsPerHost
 	httpClientCfg.IdleConnTimeout = cfg.IdleConnTimeout
+	httpClientCfg.HTTP2IdlePingTimeout = cfg.HTTP2IdlePingTimeout
+	httpClientCfg.HTTP2PingTimeout = cfg.HTTP2PingTimeout
 
 	// Compute max response body size from multiplier
 	multiplier := cfg.ResponseBodyMultiplier

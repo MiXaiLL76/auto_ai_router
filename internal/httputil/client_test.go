@@ -442,3 +442,37 @@ func TestFetchFromProxy_LargeResponse(t *testing.T) {
 	assert.Equal(t, len(largeBody), len(body))
 	assert.Equal(t, largeBody, body)
 }
+
+func TestNewTransport_HTTP2PingDefaults(t *testing.T) {
+	transport := newTransport(nil)
+
+	if assert.NotNil(t, transport.HTTP2) {
+		assert.Equal(t, defaultHTTP2IdlePingTimeout, transport.HTTP2.SendPingTimeout)
+		assert.Equal(t, defaultHTTP2PingTimeout, transport.HTTP2.PingTimeout)
+	}
+}
+
+func TestNewTransport_HTTP2PingZeroFallsBackToDefaults(t *testing.T) {
+	// A caller that only cares about Timeout (e.g. internal/auth/vertex.go)
+	// leaves HTTP2IdlePingTimeout/HTTP2PingTimeout at their Go zero value —
+	// those must still resolve to the package defaults, not to a disabled
+	// (zero) HTTP/2 ping, same as every other zero-means-default field here.
+	transport := newTransport(&HTTPClientConfig{Timeout: 30 * time.Second})
+
+	if assert.NotNil(t, transport.HTTP2) {
+		assert.Equal(t, defaultHTTP2IdlePingTimeout, transport.HTTP2.SendPingTimeout)
+		assert.Equal(t, defaultHTTP2PingTimeout, transport.HTTP2.PingTimeout)
+	}
+}
+
+func TestNewTransport_HTTP2PingExplicitOverride(t *testing.T) {
+	transport := newTransport(&HTTPClientConfig{
+		HTTP2IdlePingTimeout: 7 * time.Second,
+		HTTP2PingTimeout:     3 * time.Second,
+	})
+
+	if assert.NotNil(t, transport.HTTP2) {
+		assert.Equal(t, 7*time.Second, transport.HTTP2.SendPingTimeout)
+		assert.Equal(t, 3*time.Second, transport.HTTP2.PingTimeout)
+	}
+}

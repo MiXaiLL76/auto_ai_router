@@ -611,6 +611,8 @@ type ServerConfig struct {
 	MaxIdleConns               int                   `yaml:"max_idle_conns"`
 	MaxIdleConnsPerHost        int                   `yaml:"max_idle_conns_per_host"`
 	IdleConnTimeout            time.Duration         `yaml:"idle_conn_timeout"`
+	HTTP2IdlePingTimeout       time.Duration         `yaml:"http2_idle_ping_timeout"` // How long a provider HTTP/2 connection may go without any frame before a liveness PING is sent (default: 15s)
+	HTTP2PingTimeout           time.Duration         `yaml:"http2_ping_timeout"`      // How long to wait for a liveness PING to be acked before closing the connection (default: 10s)
 	ReadTimeout                time.Duration         `yaml:"-"`                                 // HTTP server read timeout (equals request_timeout, not configurable via YAML)
 	WriteTimeout               time.Duration         `yaml:"write_timeout"`                     // HTTP server write timeout (default: 60s)
 	IdleTimeout                time.Duration         `yaml:"idle_timeout"`                      // HTTP server idle timeout (default: 2*write_timeout)
@@ -714,6 +716,8 @@ func (s *ServerConfig) UnmarshalYAML(value *yaml.Node) error {
 		MaxIdleConns               string                `yaml:"max_idle_conns"`
 		MaxIdleConnsPerHost        string                `yaml:"max_idle_conns_per_host"`
 		IdleConnTimeout            string                `yaml:"idle_conn_timeout"`
+		HTTP2IdlePingTimeout       string                `yaml:"http2_idle_ping_timeout"`
+		HTTP2PingTimeout           string                `yaml:"http2_ping_timeout"`
 		WriteTimeout               string                `yaml:"write_timeout"`
 		IdleTimeout                string                `yaml:"idle_timeout"`
 		MaxProviderRetries         string                `yaml:"max_provider_retries"`
@@ -769,6 +773,12 @@ func (s *ServerConfig) UnmarshalYAML(value *yaml.Node) error {
 		return err
 	}
 	if s.IdleConnTimeout, err = parseField(temp.IdleConnTimeout, 120*time.Second, time.ParseDuration, "idle_conn_timeout"); err != nil {
+		return err
+	}
+	if s.HTTP2IdlePingTimeout, err = parseField(temp.HTTP2IdlePingTimeout, 15*time.Second, time.ParseDuration, "http2_idle_ping_timeout"); err != nil {
+		return err
+	}
+	if s.HTTP2PingTimeout, err = parseField(temp.HTTP2PingTimeout, 10*time.Second, time.ParseDuration, "http2_ping_timeout"); err != nil {
 		return err
 	}
 	if s.WriteTimeout, err = parseField(temp.WriteTimeout, 60*time.Second, time.ParseDuration, "write_timeout"); err != nil {

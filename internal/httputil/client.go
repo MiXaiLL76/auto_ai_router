@@ -23,6 +23,20 @@ const (
 	defaultMaxIdleConns        = 100
 	defaultMaxIdleConnsPerHost = 10
 	defaultIdleConnTimeout     = 90 * time.Second
+
+	// A pooled HTTP/2 connection whose peer stopped responding (egress proxy ate
+	// the RST, remote end went dark) looks identical to a merely-idle one — Go's
+	// Transport has no way to tell them apart and will keep handing it to new
+	// requests until ResponseHeaderTimeout gives up on whatever request lands on
+	// it next, which can take minutes. These two defaults wire up Go's built-in
+	// HTTP/2 keepalive (http.HTTP2Config, Go 1.24+): after
+	// defaultHTTP2IdlePingTimeout with no frames on a connection, a PING is sent;
+	// if it isn't acked within defaultHTTP2PingTimeout, the connection is closed
+	// and the next request dials a fresh one. A live-but-slow non-streaming call
+	// (no frames while the provider is still generating) is unaffected — the PING
+	// rides alongside it, and once acked, the request keeps waiting normally.
+	defaultHTTP2IdlePingTimeout = 15 * time.Second
+	defaultHTTP2PingTimeout     = 10 * time.Second
 )
 
 // ProxyStatusError reports a non-success response from a proxied endpoint.
@@ -40,22 +54,34 @@ type HTTPClientConfig struct {
 	MaxIdleConns        int
 	MaxIdleConnsPerHost int
 	IdleConnTimeout     time.Duration
+	// HTTP2IdlePingTimeout and HTTP2PingTimeout configure HTTP/2 keepalive pings
+	// (http.HTTP2Config.SendPingTimeout / .PingTimeout) so a pooled connection that
+	// has gone silent — not idle, just unresponsive — gets probed and, if it
+	// doesn't answer, closed instead of sitting in the pool until
+	// ResponseHeaderTimeout gives up on it. Zero falls back to the package
+	// defaults; there is currently no way to disable the ping checks via this
+	// struct, same as the other zero-means-default fields above.
+	HTTP2IdlePingTimeout time.Duration
+	HTTP2PingTimeout     time.Duration
 }
 
 // DefaultHTTPClientConfig returns HTTP client configuration with sensible defaults
 // Used for consistent HTTP client configuration across the application
 func DefaultHTTPClientConfig() *HTTPClientConfig {
 	return &HTTPClientConfig{
-		Timeout:             defaultTimeout,
-		MaxIdleConns:        defaultMaxIdleConns,
-		MaxIdleConnsPerHost: defaultMaxIdleConnsPerHost,
-		IdleConnTimeout:     defaultIdleConnTimeout,
+		Timeout:              defaultTimeout,
+		MaxIdleConns:         defaultMaxIdleConns,
+		MaxIdleConnsPerHost:  defaultMaxIdleConnsPerHost,
+		IdleConnTimeout:      defaultIdleConnTimeout,
+		HTTP2IdlePingTimeout: defaultHTTP2IdlePingTimeout,
+		HTTP2PingTimeout:     defaultHTTP2PingTimeout,
 	}
 }
 
-// NewHTTPClient creates a new HTTP client with the given configuration
-// This centralized factory ensures consistent HTTP client behavior throughout the application
-func NewHTTPClient(cfg *HTTPClientConfig) *http.Client {
+// newTransport builds the *http.Transport for NewHTTPClient. Split out so the
+// HTTP/2 ping wiring can be asserted directly in tests without unwrapping the
+// otelhttp.Transport that NewHTTPClient returns it inside.
+func newTransport(cfg *HTTPClientConfig) *http.Transport {
 	if cfg == nil {
 		cfg = DefaultHTTPClientConfig()
 	}
@@ -80,7 +106,17 @@ func NewHTTPClient(cfg *HTTPClientConfig) *http.Client {
 		idleConnTimeout = defaultIdleConnTimeout
 	}
 
-	transport := &http.Transport{
+	http2IdlePingTimeout := cfg.HTTP2IdlePingTimeout
+	if http2IdlePingTimeout == 0 {
+		http2IdlePingTimeout = defaultHTTP2IdlePingTimeout
+	}
+
+	http2PingTimeout := cfg.HTTP2PingTimeout
+	if http2PingTimeout == 0 {
+		http2PingTimeout = defaultHTTP2PingTimeout
+	}
+
+	return &http.Transport{
 		Proxy:                 proxyFromRequest,
 		TLSHandshakeTimeout:   timeout, // Timeout for TLS handshake phase
 		ResponseHeaderTimeout: timeout, // Timeout for connect + response headers only
@@ -88,7 +124,21 @@ func NewHTTPClient(cfg *HTTPClientConfig) *http.Client {
 		MaxIdleConnsPerHost:   maxIdleConnsPerHost,
 		IdleConnTimeout:       idleConnTimeout,
 		DisableKeepAlives:     false,
+		// Detects a connection that has gone silent (no HTTP/2 frames at all,
+		// including on in-flight streams) and closes it if it doesn't answer a
+		// PING, instead of leaving a dead connection in the pool for up to
+		// ResponseHeaderTimeout on every request that happens to land on it.
+		HTTP2: &http.HTTP2Config{
+			SendPingTimeout: http2IdlePingTimeout,
+			PingTimeout:     http2PingTimeout,
+		},
 	}
+}
+
+// NewHTTPClient creates a new HTTP client with the given configuration
+// This centralized factory ensures consistent HTTP client behavior throughout the application
+func NewHTTPClient(cfg *HTTPClientConfig) *http.Client {
+	transport := newTransport(cfg)
 
 	return &http.Client{
 		// No global timeout — streaming responses can run for minutes.
