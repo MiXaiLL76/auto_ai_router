@@ -243,8 +243,12 @@ func convertVertexUsageMetadata(meta *genai.GenerateContentResponseUsageMetadata
 			switch genai.MediaModality(detail.Modality) {
 			case genai.MediaModalityAudio:
 				usage.PromptTokensDetails.AudioTokens += int(detail.TokenCount)
-			case genai.MediaModalityImage, genai.MediaModalityVideo:
+			case genai.MediaModalityImage:
 				usage.PromptTokensDetails.ImageTokens += int(detail.TokenCount)
+			case genai.MediaModalityVideo:
+				// Reported apart from images: the two can carry different prices
+				// (input_cost_per_video_token falls back to the image rate).
+				usage.PromptTokensDetails.VideoTokens += int(detail.TokenCount)
 			}
 		}
 	}
@@ -260,8 +264,12 @@ func convertVertexUsageMetadata(meta *genai.GenerateContentResponseUsageMetadata
 			switch genai.MediaModality(detail.Modality) {
 			case genai.MediaModalityAudio:
 				usage.PromptTokensDetails.AudioTokens += int(detail.TokenCount)
-			case genai.MediaModalityImage, genai.MediaModalityVideo:
+			case genai.MediaModalityImage:
 				usage.PromptTokensDetails.ImageTokens += int(detail.TokenCount)
+			case genai.MediaModalityVideo:
+				// Reported apart from images: the two can carry different prices
+				// (input_cost_per_video_token falls back to the image rate).
+				usage.PromptTokensDetails.VideoTokens += int(detail.TokenCount)
 			}
 		}
 	}
@@ -280,10 +288,15 @@ func convertVertexUsageMetadata(meta *genai.GenerateContentResponseUsageMetadata
 				if usage.PromptTokensDetails.AudioTokens < 0 {
 					usage.PromptTokensDetails.AudioTokens = 0
 				}
-			case genai.MediaModalityImage, genai.MediaModalityVideo:
+			case genai.MediaModalityImage:
 				usage.PromptTokensDetails.ImageTokens -= int(detail.TokenCount)
 				if usage.PromptTokensDetails.ImageTokens < 0 {
 					usage.PromptTokensDetails.ImageTokens = 0
+				}
+			case genai.MediaModalityVideo:
+				usage.PromptTokensDetails.VideoTokens -= int(detail.TokenCount)
+				if usage.PromptTokensDetails.VideoTokens < 0 {
+					usage.PromptTokensDetails.VideoTokens = 0
 				}
 			}
 		}

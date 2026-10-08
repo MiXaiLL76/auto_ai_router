@@ -42,4 +42,5 @@ See the [Vertex AI documentation](vertex.md) for the full reference on:
 - [Audio output](vertex.md#audio-output)
 - [Structured output](vertex.md#structured-output)
 - [Image generation](vertex.md#image-generation)
+- [Embeddings](vertex.md#embeddings) (including multimodal Gemini Embedding 2)
 - [Streaming](vertex.md#streaming)

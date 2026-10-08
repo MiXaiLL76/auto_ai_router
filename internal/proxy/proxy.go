@@ -311,6 +311,12 @@ type RequestLogContext struct {
 	// (vision fallback, describe mode); nil when there is nothing to write.
 	visionInject *visionResponseInjection
 
+	// keptEmbeddings of embeddingInputs: a failed fanned-out embeddings request
+	// was billed for the inputs the provider had already embedded (see
+	// billKeptEmbedFanOutReplies).
+	keptEmbeddings  int
+	embeddingInputs int
+
 	reservedEntities       []reservedEntity
 	rateLimitedTPMEntities []string
 	// budgetReconciled guards against double reconciliation: the first call (from
@@ -1558,7 +1564,21 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 		shouldRetry     bool
 		retryReason     RetryReason
 		transportErr    error
+		// Replies of a fanned-out embeddings request kept across attempts, so
+		// a retry only re-sends the inputs that did not get one.
+		embedFanOutReplies embedContentFanOutReplies
+		// fannedOut: this attempt sent an embeddings fan-out, which consumes
+		// the tokens of its replies on the credentials that served them.
+		fannedOut bool
 	)
+	// A failure that ends the request anywhere below still bills the replies
+	// a fan-out kept (the final error response bills them itself before it
+	// logs). Runs before the spend-logging defer above.
+	defer func() {
+		if !logCtx.Logged && logCtx.Status == "failure" {
+			p.billKeptEmbedFanOutReplies(r.Context(), logCtx, &embedFanOutReplies)
+		}
+	}()
 
 	for attempt := 0; attempt <= p.maxProviderRetries; attempt++ {
 		if attempt > 0 {
@@ -1667,6 +1687,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 		shouldRetry = false
 		retryReason = ""
 		transportErr = nil
+		fannedOut = false
 
 		// Create converter and build request body / target URL.
 		// nativeResponses path uses ProviderResponses (Vertex AI, Anthropic) directly.
@@ -1925,9 +1946,25 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 
 		// Execute HTTP request
 		var doErr error
+		fanOutInputFault := false
 		attemptedCreds[cred.Name] = true
 		p.stampFirstUpstreamSend(logCtx)
-		resp, doErr = p.client.Do(proxyReq) //nolint:gosec // G704: same targetURL as the request built above, host isn't attacker-controlled
+		if fanOut := embeddingFanOutBodies(conv); len(fanOut) > 1 {
+			// Vertex AI embedContent takes one content per call: one call per
+			// input, each within cred's rate limits, answered as a single
+			// merged response.
+			fannedOut = true
+			resp, fanOutInputFault, doErr = p.doEmbedContentFanOut(embedContentFanOut{
+				template:   proxyReq,
+				model:      realModelID,
+				bodies:     fanOut,
+				request:    body,
+				credential: cred.Name,
+				limitModel: modelID,
+			}, &embedFanOutReplies)
+		} else {
+			resp, doErr = p.client.Do(proxyReq) //nolint:gosec // G704: same targetURL as the request built above, host isn't attacker-controlled
+		}
 		if doErr != nil {
 			if isClientCanceledTransportError(r, doErr) {
 				// The client is already gone -- trying another credential
@@ -1941,6 +1978,27 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 				transportErr = doErr
 				shouldRetry = false
 				break
+			}
+			if errors.Is(doErr, ErrResponseBodyTooLarge) {
+				// A fanned-out embeddings reply over the size limit: fatal, as
+				// on the single-call path below.
+				p.metrics.RecordCredentialAttemptError(cred.Name)
+				p.failResponseTooLarge(w, r, logCtx, cred, modelID, targetURL, doErr, start)
+				return
+			}
+			if errors.Is(doErr, errEmbedFanOutRateLimited) {
+				// cred's own RPM/TPM in this router ran out partway through a
+				// fanned-out embeddings request. Nothing failed upstream, so no
+				// fail2ban or attempt-error accounting: the next credential gets
+				// the inputs still missing.
+				p.logger.InfoContext(r.Context(), "Embeddings fan-out reached the credential rate limit, continuing on the next credential",
+					"credential", cred.Name, "model", modelID, "detail", doErr,
+					"attempt", attempt+1, "max_attempts", p.maxProviderRetries+1,
+					"request_id", logCtx.RequestID)
+				shouldRetry = true
+				retryReason = RetryReasonRateLimit
+				transportErr = doErr
+				continue
 			}
 			// Transport failure on one credential — retried with the next one;
 			// the final failure is logged at ERROR after the retry loop.
@@ -2055,20 +2113,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 				p.metrics.RecordCredentialAttemptError(cred.Name)
 			}
 			if errors.Is(readErr, ErrResponseBodyTooLarge) {
-				// Response too large — fatal, another credential won't help
-				p.logUpstreamError(r.Context(), "Failed to read response body: too large", http.StatusBadGateway, cred, modelID, nil,
-					"error", readErr,
-					"url", targetURL,
-					"request_id", logCtx.RequestID)
-				logCtx.Status = "failure"
-				logCtx.HTTPStatus = http.StatusBadGateway
-				logCtx.ErrorMsg = fmt.Sprintf("Failed to read response body: %v", readErr)
-				logCtx.ErrorOrigin = ErrorOriginResponseTooLarge
-				logCtx.TargetURL = targetURL
-				// Client-facing outcome decided (502 written to the client below,
-				// no further attempts) — record exactly once here.
-				p.metrics.RecordRequest(cred.Name, r.URL.Path, modelID, http.StatusBadGateway, time.Since(start))
-				WriteErrorBadGateway(w, "upstream response too large")
+				p.failResponseTooLarge(w, r, logCtx, cred, modelID, targetURL, readErr, start)
 				return
 			}
 			// Transport error reading body — retryable with another credential
@@ -2088,6 +2133,12 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 
 		// Check if we should retry with another same-type credential
 		shouldRetry, retryReason = p.shouldRetry(cred, resp.StatusCode, responseBody)
+		if shouldRetry && fanOutInputFault {
+			// The provider refused one input while others of this request got
+			// embedded: the input is at fault, and every further credential
+			// would refuse it the same way.
+			shouldRetry = false
+		}
 		if !shouldRetry {
 			break
 		}
@@ -2111,6 +2162,9 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 			fallbackStatus = http.StatusBadGateway
 			if isTimeoutError(transportErr) {
 				fallbackStatus = http.StatusRequestTimeout
+			}
+			if errors.Is(transportErr, errEmbedFanOutRateLimited) {
+				fallbackStatus = http.StatusTooManyRequests
 			}
 		} else if resp != nil {
 			fallbackStatus = resp.StatusCode
@@ -2148,6 +2202,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 		errorOrigin := ErrorOriginAllAttemptsExhausted
 		errorMsg := "All provider attempts failed"
 		clientCanceled := isClientCanceledTransportError(r, transportErr)
+		rateLimited := errors.Is(transportErr, errEmbedFanOutRateLimited)
 		switch {
 		case clientCanceled:
 			// The client left before any credential attempt produced a
@@ -2158,18 +2213,29 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 			statusMessage = "Client Closed Request"
 			errorMsg = "Client disconnected before a response was received"
 			errorOrigin = ErrorOriginClientCanceled
+		case rateLimited:
+			statusCode = http.StatusTooManyRequests
+			statusMessage = "Rate limit exceeded"
+			errorMsg = "Credential rate limits ran out before every embeddings input was sent"
+			errorOrigin = ErrorOriginFanOutRateLimited
 		case transportErr != nil && isTimeoutError(transportErr):
 			statusCode = http.StatusRequestTimeout
 			statusMessage = "Request Timeout"
 			errorOrigin = ""
 		}
-		if clientCanceled {
+		switch {
+		case clientCanceled:
 			p.logger.DebugContext(r.Context(), "All provider attempts aborted: client disconnected",
 				"error_code", statusCode, "credential", cred.Name, "provider", string(cred.Type), "model", modelID,
 				"error", transportErr,
 				"url", targetURL,
 				"request_id", logCtx.RequestID)
-		} else {
+		case rateLimited:
+			p.logger.ErrorContext(r.Context(), "Embeddings request ran out of credential rate limits before every input was sent",
+				"error_code", statusCode, "credential", cred.Name, "provider", string(cred.Type), "model", modelID,
+				"error", transportErr,
+				"request_id", logCtx.RequestID)
+		default:
 			p.logUpstreamError(r.Context(), "All provider attempts failed: no upstream response", statusCode, cred, modelID, nil,
 				"error", transportErr,
 				"url", targetURL,
@@ -2188,6 +2254,9 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 			WriteErrorTimeout(w, statusMessage)
 		case StatusClientClosedRequest:
 			WriteErrorClientClosed(w, statusMessage)
+		case http.StatusTooManyRequests:
+			p.setRetryAfterFromBan(w, modelID, nil, logCtx.Scope)
+			WriteErrorRateLimit(w, statusMessage)
 		default:
 			WriteErrorBadGateway(w, statusMessage)
 		}
@@ -2253,6 +2322,13 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 				finalResponseBody = convertedBody
 				tokenUsageOptions.AudioInputIncludesCachedAudio = false
 				p.logTransformedResponse(r.Context(), cred.Name, string(cred.Type), finalResponseBody)
+				if conv.EmbeddingUsageEstimated() {
+					// Billed (in part) from a text-length estimate: media parts
+					// of the inputs without usage are not in it.
+					p.logger.WarnContext(r.Context(), "Embedding response lacked usageMetadata for some or all inputs, their prompt tokens estimated from the request text",
+						"credential", cred.Name, "provider", string(cred.Type),
+						"model", modelID, "request_id", logCtx.RequestID)
+				}
 			}
 		} else {
 			finalResponseBody = []byte(decodedBody)
@@ -2444,7 +2520,9 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 		// bodyForTokenExtraction is not mutated between here and its next use
 		// below.
 		tokens, directProviderTokenUsage := extractOpenAITokensAndUsage(bodyForTokenExtraction, tokenUsageOptions)
-		if tokens > 0 {
+		// A fan-out consumed its replies' tokens on the credentials that served
+		// them, call by call.
+		if tokens > 0 && !fannedOut {
 			p.rateLimiter.ConsumeTokens(cred.Name, tokens)
 			if modelID != "" {
 				p.rateLimiter.ConsumeModelTokens(cred.Name, modelID, tokens)
@@ -2498,6 +2576,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 			p.logUpstreamError(r.Context(), "Upstream request completed with error status", resp.StatusCode, cred, modelID, rawErrorBody,
 				"url", targetURL,
 				"request_id", logCtx.RequestID)
+			p.billKeptEmbedFanOutReplies(r.Context(), logCtx, &embedFanOutReplies)
 		} else if logCtx.TokenUsage != nil {
 			p.metrics.RecordTokenUsage(cred.Name, modelID,
 				logCtx.TokenUsage.PromptTokens, logCtx.TokenUsage.CompletionTokens,
@@ -2740,6 +2819,24 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 			p.setSessionBinding(logCtx.SessionID, modelID, cred.Name)
 		}
 	}
+}
+
+// failResponseTooLarge answers 502 for an upstream response over the size
+// limit. It is fatal: another credential won't help.
+func (p *Proxy) failResponseTooLarge(w http.ResponseWriter, r *http.Request, logCtx *RequestLogContext, cred *config.CredentialConfig, modelID, targetURL string, readErr error, start time.Time) {
+	p.logUpstreamError(r.Context(), "Failed to read response body: too large", http.StatusBadGateway, cred, modelID, nil,
+		"error", readErr,
+		"url", targetURL,
+		"request_id", logCtx.RequestID)
+	logCtx.Status = "failure"
+	logCtx.HTTPStatus = http.StatusBadGateway
+	logCtx.ErrorMsg = fmt.Sprintf("Failed to read response body: %v", readErr)
+	logCtx.ErrorOrigin = ErrorOriginResponseTooLarge
+	logCtx.TargetURL = targetURL
+	// Client-facing outcome decided (502 written to the client, no further
+	// attempts) — record exactly once here.
+	p.metrics.RecordRequest(cred.Name, r.URL.Path, modelID, http.StatusBadGateway, time.Since(start))
+	WriteErrorBadGateway(w, "upstream response too large")
 }
 
 // readLimitedResponseBody reads a response body with size limit protection.
