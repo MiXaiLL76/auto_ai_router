@@ -35,7 +35,7 @@ func TestLookupGeminiModelProfile(t *testing.T) {
 		assert.Nil(t, lookupGeminiModelProfile(model), model)
 	}
 	// Detection comes from the ID, not from the "image" / "gemini-3" substrings.
-	assert.True(t, isGeminiImageModel(nanoBanana21))
+	assert.True(t, isImageModel(nanoBanana21))
 	assert.True(t, isThinkingCapableModel(nanoBanana21))
 	assert.Equal(t, []string{"1K", "2K", "4K"}, geminiImageProfileForModel(nanoBanana21).resolutionValues())
 }
@@ -323,6 +323,10 @@ func TestVertexToOpenAI_GoogleSearchGroundingBilling(t *testing.T) {
 		// Any other model is billed for its search context as before.
 		{name: "search grounding only, unprofiled model", model: "gemini-2.5-flash", body: response(search, "", "gemini-2.5-flash"),
 			promptTokens: 1000, totalTokens: 1050, searchQueries: 3},
+		// The answering model decides, not the name the router routed by: an alias
+		// answered by a model that bills search context stays billed.
+		{name: "search grounding only, answered by an unprofiled model", model: nanoBanana21,
+			body: response(search, "", "gemini-3.1-flash-image"), promptTokens: 1000, totalTokens: 1050, searchQueries: 3},
 		// url_context content is billed as input; the split is unknown, so all of it stays.
 		{name: "search and url context", model: nanoBanana21,
 			body:         response(search, `,"urlContextMetadata":{"urlMetadata":[{"retrievedUrl":"https://example.com"}]}`, ""),
@@ -565,6 +569,46 @@ func TestImageEndpointsThinkingOnlyForProfiledModels(t *testing.T) {
 		body := fmt.Sprintf(`{"model":%q,"prompt":"A cat","image_config":"{not json"}`, nanoBanana21)
 		_, err := OpenAIToVertex([]byte(body), true, false, nanoBanana21, "application/json")
 		testhelpers.RequireValidationError(t, err, "image_config", "invalid_json")
+	})
+}
+
+// TestImageEndpointsExtrasOfWrongType: a JSON images request used to pass the Gemini
+// extras unread, so a value of the wrong type must not start failing for a model
+// without a profile; a profiled model, whose parameters are documented, rejects it.
+func TestImageEndpointsExtrasOfWrongType(t *testing.T) {
+	extras := []struct{ json, param, code string }{
+		{json: `"image_size":2048`, param: "image_size", code: "invalid_type"},
+		{json: `"aspectRatio":{"w":16,"h":9}`, param: "aspectRatio", code: "invalid_type"},
+		{json: `"reasoning_effort":{"effort":"high"}`, param: "reasoning_effort", code: "invalid_type"},
+		{json: `"thinkingLevel":3`, param: "thinkingLevel", code: "invalid_type"},
+		{json: `"image_config":"{not json"`, param: "image_config", code: "invalid_json"},
+		{json: `"imageConfig":[1,2]`, param: "imageConfig", code: "invalid_json"},
+	}
+	for _, tt := range extras {
+		t.Run("unprofiled model ignores "+tt.json, func(t *testing.T) {
+			const model = "gemini-3.1-flash-image-preview"
+			for _, edit := range []bool{false, true} {
+				body := fmt.Sprintf(`{"model":%q,"prompt":"A cat","size":"1024x1024","image":%q,%s}`, model, testImageDataURL(0), tt.json)
+				out, err := OpenAIToVertex([]byte(body), !edit, edit, model, "application/json")
+				require.NoError(t, err)
+				imageConfig := mapAt(t, generationConfigOf(t, decodeVertexRequest(t, out)), "imageConfig")
+				assert.Equal(t, map[string]interface{}{"aspectRatio": "1:1", "imageSize": "1K"}, imageConfig, "size still applies")
+			}
+		})
+		t.Run("profiled model rejects "+tt.json, func(t *testing.T) {
+			body := fmt.Sprintf(`{"model":%q,"prompt":"A cat",%s}`, nanoBanana21, tt.json)
+			_, err := OpenAIToVertex([]byte(body), true, false, nanoBanana21, "application/json")
+			testhelpers.RequireValidationError(t, err, tt.param, tt.code)
+		})
+	}
+
+	t.Run("a wrongly typed extra does not hide a valid one", func(t *testing.T) {
+		const model = "gemini-3.1-flash-image-preview"
+		body := fmt.Sprintf(`{"model":%q,"prompt":"A cat","image_size":2048,"aspect_ratio":"16:9"}`, model)
+		out, err := OpenAIToVertex([]byte(body), true, false, model, "application/json")
+		require.NoError(t, err)
+		imageConfig := mapAt(t, generationConfigOf(t, decodeVertexRequest(t, out)), "imageConfig")
+		assert.Equal(t, map[string]interface{}{"aspectRatio": "16:9"}, imageConfig)
 	})
 }
 

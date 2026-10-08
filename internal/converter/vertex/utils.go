@@ -111,6 +111,13 @@ func extractMimeType(header string) string {
 	return header[start:]
 }
 
+// IsImageMIME reports whether mimeType is an image/* type, case-insensitively as
+// MIME types compare ("Image/PNG" too).
+func IsImageMIME(mimeType string) bool {
+	const prefix = "image/"
+	return len(mimeType) >= len(prefix) && strings.EqualFold(mimeType[:len(prefix)], prefix)
+}
+
 // mimeTypeMap maps file extensions to MIME types
 var mimeTypeMap = map[string]string{
 	"jpg":  "image/jpeg",

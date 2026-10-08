@@ -75,6 +75,10 @@ Vertex AI is fully supported via the [Responses API](../advanced/responses.md). 
 
 Supported features: streaming, `store` / `previous_response_id` multi-turn, tools, thinking/reasoning.
 
+The `image_generation` tool turns on image output (`responseModalities: ["IMAGE"]`), and its `size` maps to Gemini's
+image config the same way `size` does on [`images.generate`](#image-generation) (`"auto"` or no size leaves it to
+the model).
+
 ## OpenAI-Compatible API
 
 The router accepts requests in **OpenAI Chat Completion format** and automatically converts them to Vertex AI (GenAI) format. Responses are converted back to OpenAI format, so any OpenAI SDK works transparently.
@@ -167,7 +171,8 @@ The context Google Search retrieved (`toolUsePromptTokenCount`) is billed as inp
 `gemini-nano-banana-2.1`, whose pricing does not charge it: there it is left out of `prompt_tokens` when Google
 Search is the only tool that produced it. With `url_context`, code execution, Maps or retrieval grounding in the
 same response it stays in, as their context is billed. The model is recognized by Gemini's `modelVersion`, so
-this holds under an alias too.
+this holds under an alias too, and the other way round: a response whose `modelVersion` names another model is billed
+as that model (the routed model name counts only when Google sends no `modelVersion`).
 
 #### tool_choice
 
@@ -228,6 +233,10 @@ that takes a level (Gemini 3) reads a budget-only config as the level of the sam
 the model's own default, ≥5,000 → `medium`, ≥15,000 → `high`), and a Gemini 2.5 model reads a level-only config as
 that level's budget (see the tables below). An effort the router does not know leaves the depth to the model: no
 level on Gemini 3, a dynamic budget (`-1`) on Gemini 2.5 — never a zero budget `gemini-2.5-pro` would reject.
+
+A source that sets nothing — an empty `thinking_config`, a `thinking_budget` that is not a number — counts as absent:
+the next source or the default applies. `none` / `disable` (and Anthropic's `{"type": "disabled"}`) on a model without
+thinking, such as `gemini-2.0-flash`, sends no thinking config at all.
 
 #### reasoning_effort mapping
 
@@ -474,7 +483,7 @@ For Gemini-backed `images.generate` / `images.edit`, the router converts the Ope
 - `images.generate` maps prompt and size to Gemini image config.
 - `images.edit` accepts multipart image uploads (or JSON `image` / `images`) and sends them as inline image parts alongside the text prompt, in order.
 - `response_format="b64_json"` is supported naturally because Gemini image responses are returned as inline image bytes and converted to `b64_json`.
-- Both endpoints, JSON and multipart alike, also accept `aspect_ratio` / `aspectRatio`, `image_size` / `imageSize` and `image_config` / `imageConfig` (an object, or the same object as a JSON string), which override what `size` maps to. `image_size` is sent upper-case (`"2k"` → `"2K"`). A model with configurable thinking levels ([`gemini-nano-banana-2.1`](#gemini-nano-banana-21)) also takes `thinking_level` / `thinkingLevel` / `reasoning_effort`; other image models get no thinking config, as on the chat route.
+- Both endpoints, JSON and multipart alike, also accept `aspect_ratio` / `aspectRatio`, `image_size` / `imageSize` and `image_config` / `imageConfig` (an object, or the same object as a JSON string), which override what `size` maps to. `image_size` is sent upper-case (`"2k"` → `"2K"`). A model with configurable thinking levels ([`gemini-nano-banana-2.1`](#gemini-nano-banana-21)) also takes `thinking_level` / `thinkingLevel` / `reasoning_effort`; other image models get no thinking config, as on the chat route. In a JSON body, a value of the wrong type (`"image_size": 2048`, an unparsable `image_config`) is rejected with 400 for `gemini-nano-banana-2.1` and ignored for other models; a multipart `image_config` that is not valid JSON is rejected for every model.
 - Thinking tokens are part of `usage.output_tokens` and broken out as `usage.output_tokens_details.reasoning_tokens`; interim "thought" images are not returned.
 
 #### Gemini Nano Banana 2.1

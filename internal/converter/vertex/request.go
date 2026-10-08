@@ -216,6 +216,47 @@ func partsHaveText(parts []*genai.Part) bool {
 	return false
 }
 
+// ValidateInputImages rejects a request with more images than the model accepts,
+// counting every image part of every turn: the upstream limit is per request.
+func ValidateInputImages(model string, contents []*genai.Content) error {
+	profile := lookupGeminiModelProfile(model)
+	if profile == nil || profile.maxInputImages <= 0 {
+		return nil
+	}
+	images := 0
+	for _, content := range contents {
+		if content == nil {
+			continue
+		}
+		for _, part := range content.Parts {
+			if isImagePart(part) {
+				images++
+			}
+		}
+	}
+	if images <= profile.maxInputImages {
+		return nil
+	}
+	return &converterutil.RequestValidationError{
+		Param: "image",
+		Code:  "too_many_images",
+		Message: fmt.Sprintf("Too many input images: %d were sent, this model accepts at most %d per request",
+			images, profile.maxInputImages),
+	}
+}
+
+func isImagePart(part *genai.Part) bool {
+	switch {
+	case part == nil:
+		return false
+	case part.InlineData != nil:
+		return IsImageMIME(part.InlineData.MIMEType)
+	case part.FileData != nil:
+		return IsImageMIME(part.FileData.MIMEType)
+	}
+	return false
+}
+
 // findFunctionNameByToolCallID searches assistant messages' tool_calls for a matching
 // tool_call_id and returns the function name. This is needed because many OpenAI clients
 // (including Google's own OpenAI-compatible endpoint) don't include the "name" field

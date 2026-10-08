@@ -70,8 +70,9 @@ func buildVertexRequest(req *responses.Request, model string) (*vertex.VertexReq
 	}
 
 	// Generation config.
-	if generationConfig := buildGenConfig(req, model); generationConfig != nil {
-		vr.GenerationConfig = &vertex.VertexGenerationConfig{GenerationConfig: generationConfig}
+	vr.GenerationConfig, err = buildGenConfig(req, model)
+	if err != nil {
+		return nil, err
 	}
 
 	return vr, nil
@@ -247,16 +248,24 @@ func messageItemToContent(itemMap map[string]interface{}, role string) (*genai.C
 }
 
 // buildGenConfig constructs Vertex GenerationConfig from a Responses API request.
-func buildGenConfig(req *responses.Request, model string) *genai.GenerationConfig {
+func buildGenConfig(req *responses.Request, model string) (*vertex.VertexGenerationConfig, error) {
 	cfg := &genai.GenerationConfig{}
+	var imageConfig *genai.ImageConfig
 	hasParams := false
 
 	// OpenAI exposes image generation as a built-in Responses tool. Vertex does
 	// not have an equivalent tool object; Gemini image models select generated
-	// image output through generationConfig.responseModalities instead.
+	// image output through generationConfig.responseModalities instead, and the
+	// tool's size becomes the imageConfig the images endpoints map it to.
 	for _, tool := range req.Tools {
 		if tool.Type == "image_generation" {
 			cfg.ResponseModalities = []genai.Modality{genai.Modality("IMAGE")}
+			if size, ok := tool.Size.(string); ok {
+				var err error
+				if imageConfig, err = vertex.ImageConfigForSize(model, size); err != nil {
+					return nil, err
+				}
+			}
 			hasParams = true
 			break
 		}
@@ -331,7 +340,7 @@ func buildGenConfig(req *responses.Request, model string) *genai.GenerationConfi
 	vertex.ApplyGenerationConstraints(cfg, model)
 
 	if !hasParams {
-		return nil
+		return nil, nil
 	}
-	return cfg
+	return &vertex.VertexGenerationConfig{GenerationConfig: cfg, ImageConfig: imageConfig}, nil
 }

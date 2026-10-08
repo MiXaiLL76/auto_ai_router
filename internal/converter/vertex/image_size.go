@@ -276,6 +276,22 @@ func unsupportedImageConfigError(param, value string, supported []string) error 
 		"invalid_value")
 }
 
+// ImageConfigForSize maps an OpenAI image size ("1024x1536", "16:9") to the model's
+// Gemini imageConfig as the images endpoints do, checked like an explicit one; nil
+// for an empty or "auto" size.
+// Exported for use by sub-packages (e.g. vertex/responses).
+func ImageConfigForSize(model, size string) (*genai.ImageConfig, error) {
+	config, err := mapGeminiImageSize(model, size)
+	if err != nil || config == nil {
+		return nil, err
+	}
+	imageConfig := &genai.ImageConfig{AspectRatio: config.aspectRatio, ImageSize: config.imageSize}
+	if err := validateGeminiImageConfig(model, imageConfig); err != nil {
+		return nil, err
+	}
+	return imageConfig, nil
+}
+
 func applyGeminiImageSize(genConfig map[string]interface{}, model, size string) error {
 	config, err := mapGeminiImageSize(model, size)
 	if err != nil {

@@ -161,7 +161,7 @@ func candidatesToOutputItems(vertexResp *genai.GenerateContentResponse) []respon
 				// Responses API represents a generated image as a standalone
 				// image_generation_call whose result is raw base64 (without the
 				// data-URL prefix).
-				if strings.HasPrefix(strings.ToLower(part.InlineData.MIMEType), "image/") {
+				if vertex.IsImageMIME(part.InlineData.MIMEType) {
 					flushMessage()
 					output = append(output, responses.OutputItem{
 						Type:         "image_generation_call",

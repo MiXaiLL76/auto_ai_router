@@ -13,9 +13,33 @@ import (
 // replayed across every credential in the rotation. Deciding here — once, by model —
 // keeps that class of failure out of the upstream entirely.
 //
-// The thinking-level floor is the same kind of check but lives next to the rest of
-// the thinking logic; see lowestThinkingLevel in thinking.go. Models pinned by ID
-// are in model_profile.go.
+// Most checks go by the model name; a model whose name does not reveal its
+// capabilities is pinned by ID in model_profile.go, and the checks here consult that
+// profile first. The thinking-level floor is the same kind of check but lives next
+// to the rest of the thinking logic; see lowestThinkingLevel in thinking.go.
+
+// isImageModel reports whether the model generates images: its profile says so, or
+// its name contains "image" (Gemini image models, Imagen).
+func isImageModel(model string) bool {
+	if profile := lookupGeminiModelProfile(model); profile != nil && profile.imageGeneration {
+		return true
+	}
+	return strings.Contains(strings.ToLower(model), "image")
+}
+
+// isThinkingCapableModel returns true for models that support dynamic thinking
+// (Gemini 2.5+, Gemini 3+, profiled models with thinking levels). These models think
+// autonomously when ThinkingConfig is not set, causing unpredictable latency.
+func isThinkingCapableModel(model string) bool {
+	if profile := lookupGeminiModelProfile(model); profile != nil {
+		return profile.hasThinkingLevels()
+	}
+	if isImageModel(model) {
+		return false
+	}
+	lower := strings.ToLower(model)
+	return strings.Contains(lower, "gemini-2.5") || strings.Contains(lower, "gemini-3")
+}
 
 // supportsPenalty reports whether the model accepts frequency_penalty /
 // presence_penalty in generationConfig.

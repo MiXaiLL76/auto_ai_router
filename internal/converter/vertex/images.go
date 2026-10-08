@@ -204,17 +204,24 @@ func imageRequestToOpenAIChatRequest(openAIBody []byte, providerModel string) ([
 
 // geminiImageExtras are the Gemini parameters every images endpoint accepts and hands
 // to the chat request's fields of the same names. image_config is an object or that
-// object as a JSON string (the multipart form).
+// object as a JSON string (the multipart form); the others are strings.
+//
+// A JSON body used to pass them unread, whatever their type. So they are decoded raw
+// and checked in applyTo: there a value of the wrong type is a 400 only for a
+// profiled model (whose parameters are documented) and is ignored for any other. The
+// multipart form has always rejected a malformed image_config, for every model.
 type geminiImageExtras struct {
 	ImageConfig        json.RawMessage `json:"image_config"`
 	ImageConfigCamel   json.RawMessage `json:"imageConfig"`
-	AspectRatio        string          `json:"aspect_ratio"`
-	AspectRatioCamel   string          `json:"aspectRatio"`
-	ImageSize          string          `json:"image_size"`
-	ImageSizeCamel     string          `json:"imageSize"`
-	ThinkingLevel      string          `json:"thinking_level"`
-	ThinkingLevelCamel string          `json:"thinkingLevel"`
-	ReasoningEffort    string          `json:"reasoning_effort"`
+	AspectRatio        json.RawMessage `json:"aspect_ratio"`
+	AspectRatioCamel   json.RawMessage `json:"aspectRatio"`
+	ImageSize          json.RawMessage `json:"image_size"`
+	ImageSizeCamel     json.RawMessage `json:"imageSize"`
+	ThinkingLevel      json.RawMessage `json:"thinking_level"`
+	ThinkingLevelCamel json.RawMessage `json:"thinkingLevel"`
+	ReasoningEffort    json.RawMessage `json:"reasoning_effort"`
+
+	fromForm bool // read from multipart form fields
 }
 
 // geminiImageExtrasFromFields reads the extras from multipart form fields.
@@ -226,51 +233,84 @@ func geminiImageExtrasFromFields(fields map[string]string) geminiImageExtras {
 		return json.RawMessage(strconv.Quote(fields[name]))
 	}
 	return geminiImageExtras{
+		fromForm:           true,
 		ImageConfig:        rawJSON("image_config"),
 		ImageConfigCamel:   rawJSON("imageConfig"),
-		AspectRatio:        fields["aspect_ratio"],
-		AspectRatioCamel:   fields["aspectRatio"],
-		ImageSize:          fields["image_size"],
-		ImageSizeCamel:     fields["imageSize"],
-		ThinkingLevel:      fields["thinking_level"],
-		ThinkingLevelCamel: fields["thinkingLevel"],
-		ReasoningEffort:    fields["reasoning_effort"],
+		AspectRatio:        rawJSON("aspect_ratio"),
+		AspectRatioCamel:   rawJSON("aspectRatio"),
+		ImageSize:          rawJSON("image_size"),
+		ImageSizeCamel:     rawJSON("imageSize"),
+		ThinkingLevel:      rawJSON("thinking_level"),
+		ThinkingLevelCamel: rawJSON("thinkingLevel"),
+		ReasoningEffort:    rawJSON("reasoning_effort"),
 	}
 }
 
 // applyTo sets the extras on the chat request, where they override what size mapped
 // to. Thinking fields pass only to a model with profiled thinking levels.
 func (e geminiImageExtras) applyTo(chatReq *openai.OpenAIRequest, model string) error {
-	var err error
-	if chatReq.ImageConfigSnake, err = parseImageConfigParam("image_config", e.ImageConfig); err != nil {
-		return err
+	profile := lookupGeminiModelProfile(model)
+	p := imageExtraParser{strict: e.fromForm || profile != nil}
+	chatReq.ImageConfigSnake = p.objectField("image_config", e.ImageConfig)
+	chatReq.ImageConfig = p.objectField("imageConfig", e.ImageConfigCamel)
+	chatReq.AspectRatioSnake = p.stringField("aspect_ratio", e.AspectRatio)
+	chatReq.AspectRatio = p.stringField("aspectRatio", e.AspectRatioCamel)
+	chatReq.ImageSizeSnake = p.stringField("image_size", e.ImageSize)
+	chatReq.ImageSize = p.stringField("imageSize", e.ImageSizeCamel)
+	if profile.hasThinkingLevels() {
+		chatReq.ThinkingLevel = p.stringField("thinking_level", e.ThinkingLevel)
+		chatReq.ThinkingLevelCamel = p.stringField("thinkingLevel", e.ThinkingLevelCamel)
+		chatReq.ReasoningEffort = p.stringField("reasoning_effort", e.ReasoningEffort)
 	}
-	if chatReq.ImageConfig, err = parseImageConfigParam("imageConfig", e.ImageConfigCamel); err != nil {
-		return err
-	}
-	chatReq.AspectRatioSnake, chatReq.AspectRatio = e.AspectRatio, e.AspectRatioCamel
-	chatReq.ImageSizeSnake, chatReq.ImageSize = e.ImageSize, e.ImageSizeCamel
-	if lookupGeminiModelProfile(model).hasThinkingLevels() {
-		chatReq.ThinkingLevel, chatReq.ThinkingLevelCamel = e.ThinkingLevel, e.ThinkingLevelCamel
-		chatReq.ReasoningEffort = e.ReasoningEffort
-	}
-	return nil
+	return p.err
 }
 
-// parseImageConfigParam reads image_config: an object or a JSON string of one.
-func parseImageConfigParam(name string, raw json.RawMessage) (map[string]interface{}, error) {
+// imageExtraParser decodes geminiImageExtras values. A value it cannot use is
+// dropped; when strict, the first such value is also kept as err.
+type imageExtraParser struct {
+	strict bool
+	err    error
+}
+
+func (p *imageExtraParser) fail(err error) {
+	if p.strict && p.err == nil {
+		p.err = err
+	}
+}
+
+// stringField reads a JSON string; absent and null are "".
+func (p *imageExtraParser) stringField(name string, raw json.RawMessage) string {
+	if isAbsentJSON(raw) {
+		return ""
+	}
+	var value string
+	if json.Unmarshal(raw, &value) != nil {
+		p.fail(converterutil.NewInvalidTypeError(name))
+		return ""
+	}
+	return value
+}
+
+// objectField reads an object or a JSON string of one; absent, null and "" are nil.
+func (p *imageExtraParser) objectField(name string, raw json.RawMessage) map[string]interface{} {
 	var text string
 	if json.Unmarshal(raw, &text) == nil {
 		raw = json.RawMessage(text)
 	}
-	if len(bytes.TrimSpace(raw)) == 0 || string(raw) == "null" {
-		return nil, nil
+	if isAbsentJSON(raw) {
+		return nil
 	}
 	var parsed map[string]interface{}
-	if err := json.Unmarshal(raw, &parsed); err != nil {
-		return nil, imageValidationError(name, "Invalid JSON", "invalid_json")
+	if json.Unmarshal(raw, &parsed) != nil {
+		p.fail(imageValidationError(name, "Invalid JSON", "invalid_json"))
+		return nil
 	}
-	return parsed, nil
+	return parsed
+}
+
+func isAbsentJSON(raw json.RawMessage) bool {
+	raw = bytes.TrimSpace(raw)
+	return len(raw) == 0 || string(raw) == "null"
 }
 
 // ImageEditRequestToOpenAIChatRequest converts JSON or multipart image edit requests
@@ -569,7 +609,7 @@ func detectImageMIMEType(headerValue string, data []byte) (string, error) {
 	if mimeType == "" || mimeType == "application/octet-stream" {
 		mimeType = http.DetectContentType(data)
 	}
-	if !strings.HasPrefix(strings.ToLower(mimeType), "image/") {
+	if !IsImageMIME(mimeType) {
 		return "", fmt.Errorf("unsupported MIME type %q", mimeType)
 	}
 	return mimeType, nil

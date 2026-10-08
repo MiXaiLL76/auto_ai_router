@@ -1,10 +1,8 @@
 package vertex
 
 import (
-	"fmt"
 	"strings"
 
-	converterutil "github.com/mixaill76/auto_ai_router/internal/converter/converterutil"
 	"google.golang.org/genai"
 )
 
@@ -85,14 +83,6 @@ func (p *geminiModelProfile) hasThinkingLevels() bool {
 	return p != nil && len(p.thinkingLevels) > 0
 }
 
-// thinkingLevelRank orders the normalized level names (see thinkingName).
-var thinkingLevelRank = map[string]int{
-	"minimal": 0,
-	"low":     1,
-	"medium":  2,
-	"high":    3,
-}
-
 // thinkingLevel resolves a level or effort name to the highest supported level not
 // above it ("low" → MINIMAL without LOW), the lowest one for "none". ok is false for
 // a name that is not a level.
@@ -121,47 +111,4 @@ func (p *geminiModelProfile) thinkingConfig(requested string, includeThoughts bo
 		level = p.defaultThinkingLevel
 	}
 	return &genai.ThinkingConfig{IncludeThoughts: includeThoughts, ThinkingLevel: level}
-}
-
-// ValidateInputImages rejects a request with more images than the model accepts,
-// counting every image part of every turn: the upstream limit is per request.
-func ValidateInputImages(model string, contents []*genai.Content) error {
-	profile := lookupGeminiModelProfile(model)
-	if profile == nil || profile.maxInputImages <= 0 {
-		return nil
-	}
-	images := 0
-	for _, content := range contents {
-		if content == nil {
-			continue
-		}
-		for _, part := range content.Parts {
-			if isImagePart(part) {
-				images++
-			}
-		}
-	}
-	if images <= profile.maxInputImages {
-		return nil
-	}
-	return &converterutil.RequestValidationError{
-		Param: "image",
-		Code:  "too_many_images",
-		Message: fmt.Sprintf("Too many input images: %d were sent, this model accepts at most %d per request",
-			images, profile.maxInputImages),
-	}
-}
-
-func isImagePart(part *genai.Part) bool {
-	if part == nil {
-		return false
-	}
-	mimeType := ""
-	switch {
-	case part.InlineData != nil:
-		mimeType = part.InlineData.MIMEType
-	case part.FileData != nil:
-		mimeType = part.FileData.MIMEType
-	}
-	return strings.HasPrefix(strings.ToLower(mimeType), "image/")
 }

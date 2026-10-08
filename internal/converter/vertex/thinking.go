@@ -10,7 +10,7 @@ import (
 // Checks Anthropic-style thinking first, then falls back to reasoning_effort.
 // Image models get none, except those whose profile pins their thinking levels.
 func mapReasoningToThinkingConfig(thinking interface{}, reasoningEffort string, model string) *genai.ThinkingConfig {
-	if isGeminiImageModel(model) && !lookupGeminiModelProfile(model).hasThinkingLevels() {
+	if isImageModel(model) && !lookupGeminiModelProfile(model).hasThinkingLevels() {
 		return nil
 	}
 	if thinking != nil {
@@ -70,30 +70,6 @@ func lowestThinkingLevel(model string) genai.ThinkingLevel {
 	return genai.ThinkingLevelMinimal
 }
 
-// isGeminiImageModel returns true for Gemini image generation/editing models:
-// those with an image-generation profile and, by name, those containing "image".
-func isGeminiImageModel(model string) bool {
-	if profile := lookupGeminiModelProfile(model); profile != nil && profile.imageGeneration {
-		return true
-	}
-	lower := strings.ToLower(model)
-	return strings.Contains(lower, "gemini") && strings.Contains(lower, "image")
-}
-
-// isThinkingCapableModel returns true for models that support dynamic thinking
-// (Gemini 2.5+, Gemini 3+, profiled models with thinking levels). These models think
-// autonomously when ThinkingConfig is not set, causing unpredictable latency.
-func isThinkingCapableModel(model string) bool {
-	if profile := lookupGeminiModelProfile(model); profile != nil {
-		return profile.hasThinkingLevels()
-	}
-	if isGeminiImageModel(model) {
-		return false
-	}
-	lower := strings.ToLower(model)
-	return strings.Contains(lower, "gemini-2.5") || strings.Contains(lower, "gemini-3")
-}
-
 // isGemini25ProModel returns true for Gemini 2.5 Pro variants.
 // These models require thinking to always be enabled (ThinkingBudget=0 is invalid).
 func isGemini25ProModel(model string) bool {
@@ -108,7 +84,12 @@ func isGemini25ProModel(model string) bool {
 //	so we use dynamic mode which lets the model decide the budget.
 //
 // Gemini 3: the lowest level the specific model accepts — see lowestThinkingLevel.
+// A model without thinking (Gemini 2.0, image models) gets nil: it has nothing to
+// disable, and a zero budget there could be rejected.
 func disableThinkingConfig(model string) *genai.ThinkingConfig {
+	if !isThinkingCapableModel(model) {
+		return nil
+	}
 	if isGemini3Model(model) {
 		return &genai.ThinkingConfig{
 			IncludeThoughts: false,
@@ -154,13 +135,9 @@ func mapReasoningEffort(effort string, model string) *genai.ThinkingConfig {
 }
 
 // MapReasoningEffortToThinkingConfig maps a Responses API reasoning.effort to a Vertex
-// ThinkingConfig like the chat route's reasoning_effort; "none" maps to nil on a model
-// without thinking, where a zero budget would be rejected.
+// ThinkingConfig exactly like the chat route's reasoning_effort.
 // Exported for use by sub-packages (e.g. vertex/responses).
 func MapReasoningEffortToThinkingConfig(effort, model string) *genai.ThinkingConfig {
-	if thinkingName(effort) == "none" && !isThinkingCapableModel(model) {
-		return nil
-	}
 	return mapReasoningToThinkingConfig(nil, effort, model)
 }
 
@@ -170,24 +147,26 @@ func MapReasoningEffortToThinkingConfig(effort, model string) *genai.ThinkingCon
 // Exported for use by sub-packages (e.g. vertex/responses).
 func DefaultThinkingConfig(model string) *genai.ThinkingConfig {
 	if profile := lookupGeminiModelProfile(model); profile.hasThinkingLevels() {
-		return &genai.ThinkingConfig{IncludeThoughts: false, ThinkingLevel: profile.defaultThinkingLevel}
+		return profile.thinkingConfig("", false)
 	}
-	if isThinkingCapableModel(model) {
-		return disableThinkingConfig(model)
-	}
-	return nil
+	return disableThinkingConfig(model)
 }
 
 // mapNativeThinkingConfig maps Gemini-native thinking_config from extra_body to ThinkingConfig.
 // Format: {"thinking_budget": 1024, "thinking_level": "medium", "include_thoughts": true}
 // (camelCase keys too). A level-based model reads a lone budget as the level of the
 // same depth, Gemini 2.5 a lone level as its budget; given both, the model's own kind
-// wins.
+// wins. A config that asks for nothing — no level, no numeric budget, include_thoughts
+// not true (an empty object, a budget that is not a number) — returns nil, so the
+// caller goes on to the next source and, failing that, to the model default.
 func mapNativeThinkingConfig(tcMap map[string]interface{}, model string) *genai.ThinkingConfig {
 	includeThoughts, _ := thinkingConfigField(tcMap, "include_thoughts", "includeThoughts").(bool)
 	levelName, _ := thinkingConfigField(tcMap, "thinking_level", "thinkingLevel").(string)
 	levelName = thinkingName(levelName)
 	budget, hasBudget := thinkingBudgetValue(thinkingConfigField(tcMap, "thinking_budget", "thinkingBudget"))
+	if !includeThoughts && levelName == "" && !hasBudget {
+		return nil
+	}
 
 	profile := lookupGeminiModelProfile(model)
 	if profile.hasThinkingLevels() || isGemini3Model(model) {
@@ -326,6 +305,14 @@ func thinkingName(name string) string {
 		return "high"
 	}
 	return name
+}
+
+// thinkingLevelRank orders the normalized level names (see thinkingName).
+var thinkingLevelRank = map[string]int{
+	"minimal": 0,
+	"low":     1,
+	"medium":  2,
+	"high":    3,
 }
 
 // gemini3ThinkingLevel maps a normalized level name to one the Gemini 3 model accepts:

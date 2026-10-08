@@ -208,6 +208,10 @@ type Tool struct {
 	// code_interpreter
 	Container interface{} `json:"container,omitempty"`
 
+	// image_generation: "1024x1536", "auto", ... Untyped, so that a value of another
+	// type fails no request; only the Gemini route reads it (a string).
+	Size interface{} `json:"size,omitempty"`
+
 	// mcp
 	ServerLabel     string      `json:"server_label,omitempty"`
 	ServerURL       string      `json:"server_url,omitempty"`

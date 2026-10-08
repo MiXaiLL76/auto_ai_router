@@ -111,6 +111,45 @@ func TestResponsesRequestToVertex_NanoBanana21ReferenceImageLimit(t *testing.T) 
 	testhelpers.RequireValidationError(t, err, "image", "too_many_images")
 }
 
+// TestResponsesRequestToVertex_ImageGenerationSize pins that the image_generation
+// tool's size reaches Google as the imageConfig the images endpoints map it to.
+func TestResponsesRequestToVertex_ImageGenerationSize(t *testing.T) {
+	imageConfig := func(t *testing.T, model, tool string) map[string]interface{} {
+		t.Helper()
+		body := fmt.Sprintf(`{"model":%q,"input":"Draw a banana","tools":[%s]}`, model, tool)
+		out, err := ResponsesRequestToVertex([]byte(body), model)
+		require.NoError(t, err)
+		var req struct {
+			GenerationConfig struct {
+				ResponseModalities []string               `json:"responseModalities"`
+				ImageConfig        map[string]interface{} `json:"imageConfig"`
+			} `json:"generationConfig"`
+		}
+		require.NoError(t, json.Unmarshal(out, &req))
+		assert.Equal(t, []string{"IMAGE"}, req.GenerationConfig.ResponseModalities)
+		return req.GenerationConfig.ImageConfig
+	}
+
+	assert.Equal(t, map[string]interface{}{"aspectRatio": "2:3", "imageSize": "1K"},
+		imageConfig(t, nanoBanana21, `{"type":"image_generation","size":"1024x1536"}`))
+	// The official grid size maps exactly; 512px is never picked for 2.1.
+	assert.Equal(t, map[string]interface{}{"aspectRatio": "16:9", "imageSize": "2K"},
+		imageConfig(t, nanoBanana21, `{"type":"image_generation","size":"2752x1536"}`))
+	assert.Equal(t, map[string]interface{}{"aspectRatio": "1:1", "imageSize": "1K"},
+		imageConfig(t, nanoBanana21, `{"type":"image_generation","size":"512x512"}`))
+	// A model with a fixed resolution gets the ratio only.
+	assert.Equal(t, map[string]interface{}{"aspectRatio": "3:2"},
+		imageConfig(t, "gemini-2.5-flash-image", `{"type":"image_generation","size":"1536x1024"}`))
+	for _, tool := range []string{`{"type":"image_generation"}`, `{"type":"image_generation","size":"auto"}`,
+		`{"type":"image_generation","size":1024}`} {
+		assert.Nil(t, imageConfig(t, nanoBanana21, tool), tool)
+	}
+
+	body := fmt.Sprintf(`{"model":%q,"input":"x","tools":[{"type":"image_generation","size":"big"}]}`, nanoBanana21)
+	_, err := ResponsesRequestToVertex([]byte(body), nanoBanana21)
+	testhelpers.RequireValidationError(t, err, "size", "invalid_image_size")
+}
+
 // TestResponsesRequestToVertex_ReasoningEffortMatchesChat pins that
 // reasoning.effort resolves as the chat route's reasoning_effort does on models
 // without a profile, "none" included.
@@ -126,6 +165,8 @@ func TestResponsesRequestToVertex_ReasoningEffortMatchesChat(t *testing.T) {
 		// Image models without a profile take no ThinkingConfig on either route.
 		{model: "gemini-2.5-flash-image", effort: "low", want: `null`},
 		{model: "gemini-3.1-flash-image-preview", effort: "none", want: `null`},
+		// Nor does none on a model without thinking, where a zero budget could be rejected.
+		{model: "gemini-2.0-flash", effort: "none", want: `null`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.model+" "+tt.effort, func(t *testing.T) {

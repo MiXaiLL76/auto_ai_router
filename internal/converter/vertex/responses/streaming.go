@@ -194,7 +194,7 @@ func processPart(w io.Writer, acc *vertexStreamAccumulator, part *genai.Part) er
 }
 
 func processImagePart(w io.Writer, acc *vertexStreamAccumulator, blob *genai.Blob) error {
-	if blob == nil || !strings.HasPrefix(strings.ToLower(blob.MIMEType), "image/") {
+	if blob == nil || !vertex.IsImageMIME(blob.MIMEType) {
 		return nil
 	}
 	if !acc.headerEmitted {

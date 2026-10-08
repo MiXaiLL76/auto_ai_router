@@ -155,10 +155,15 @@ func buildGenerationConfig(req *openai.OpenAIRequest, model string) *VertexGener
 	//   4. reasoning_effort
 	//   5. Default: the model's own level for a profiled model, otherwise disable
 	//      autonomous thinking for predictable latency
+	// A source counts only when it sets something (see mapNativeThinkingConfig): an
+	// empty or malformed one must not skip the default.
 	var thinkingResolved bool
-	if tcMap := nativeThinkingConfig(req); tcMap != nil {
-		cfg.ThinkingConfig = mapNativeThinkingConfig(tcMap, model)
-		thinkingResolved = true
+	for _, tcMap := range nativeThinkingConfigs(req) {
+		if tc := mapNativeThinkingConfig(tcMap, model); tc != nil {
+			cfg.ThinkingConfig = tc
+			thinkingResolved = true
+			break
+		}
 	}
 	thinkingLevel := cmp.Or(req.ThinkingLevel, req.ThinkingLevelCamel,
 		extraBodyString(req.ExtraBody, "thinking_level"), extraBodyString(req.ExtraBody, "thinkingLevel"))
@@ -176,8 +181,10 @@ func buildGenerationConfig(req *openai.OpenAIRequest, model string) *VertexGener
 		if thinkingLevel != "" {
 			tcMap["thinking_level"] = thinkingLevel
 		}
-		cfg.ThinkingConfig = mapNativeThinkingConfig(tcMap, model)
-		thinkingResolved = true
+		if tc := mapNativeThinkingConfig(tcMap, model); tc != nil {
+			cfg.ThinkingConfig = tc
+			thinkingResolved = true
+		}
 	}
 	if !thinkingResolved {
 		// Use top-level thinking field first, then extra_body.thinking
@@ -227,24 +234,24 @@ func buildGenerationConfig(req *openai.OpenAIRequest, model string) *VertexGener
 	return cfg
 }
 
-// nativeThinkingConfig returns the request's thinking_config / thinkingConfig: top
-// level first, then extra_body, then extra_body.generation_config.
-func nativeThinkingConfig(req *openai.OpenAIRequest) map[string]interface{} {
-	if req.ThinkingConfig != nil {
-		return req.ThinkingConfig
-	}
-	if req.ThinkingConfigCamel != nil {
-		return req.ThinkingConfigCamel
+// nativeThinkingConfigs returns the request's thinking_config / thinkingConfig objects
+// by priority: top level first, then extra_body, then extra_body.generation_config.
+func nativeThinkingConfigs(req *openai.OpenAIRequest) []map[string]interface{} {
+	var configs []map[string]interface{}
+	for _, tcMap := range []map[string]interface{}{req.ThinkingConfig, req.ThinkingConfigCamel} {
+		if tcMap != nil {
+			configs = append(configs, tcMap)
+		}
 	}
 	gcMap, _ := req.ExtraBody["generation_config"].(map[string]interface{})
 	for _, fields := range []map[string]interface{}{req.ExtraBody, gcMap} {
 		for _, key := range []string{"thinking_config", "thinkingConfig"} {
 			if tcMap, ok := fields[key].(map[string]interface{}); ok {
-				return tcMap
+				configs = append(configs, tcMap)
 			}
 		}
 	}
-	return nil
+	return configs
 }
 
 // extraBodyString returns the trimmed string extra_body[key], or "".
@@ -261,7 +268,7 @@ func applyExtraBodyToConfig(cfg *genai.GenerationConfig, extraBody map[string]in
 	if gcMap, ok := extraBody["generation_config"].(map[string]interface{}); ok {
 		if mimeType, ok := gcMap["response_mime_type"].(string); ok {
 			// Skip response_mime_type for image generation models
-			if !strings.Contains(strings.ToLower(model), "image") && !isGeminiImageModel(model) {
+			if !isImageModel(model) {
 				cfg.ResponseMIMEType = mimeType
 			}
 		}
