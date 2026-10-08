@@ -48,7 +48,7 @@ jobs:
     name: Checks
     runs-on: baremetal-mixaill
     container:
-      image: golang:1.27
+      image: golang:1.27.1  # 1.27.2 export data v5 breaks golangci-lint v2.13.1 typecheck
       # Named Docker volumes live on the host between runs: a warm Go
       # module/build cache without moving an Actions cache tarball around.
       # PRs run untrusted code as root, so they get their own volumes and
