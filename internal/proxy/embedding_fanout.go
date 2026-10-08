@@ -1,0 +1,396 @@
+package proxy
+
+import (
+	"bytes"
+	"context"
+	"crypto/sha256"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"strconv"
+	"sync"
+	"sync/atomic"
+
+	"github.com/mixaill76/auto_ai_router/internal/converter"
+	"github.com/mixaill76/auto_ai_router/internal/converter/vertex"
+)
+
+// embedContentFanOutConcurrency caps the parallel upstream calls one
+// fanned-out embeddings request makes (Vertex AI embedContent embeds a single
+// content per call).
+const embedContentFanOutConcurrency = 8
+
+// embeddingFanOutBodies returns conv's per-input embedContent bodies, or nil
+// when the request goes upstream as one call (conv is nil on the native
+// Responses path).
+func embeddingFanOutBodies(conv *converter.ProviderConverter) [][]byte {
+	if conv == nil {
+		return nil
+	}
+	return conv.EmbeddingFanOutBodies()
+}
+
+// embedContentFanOutReplies keeps the embedContent replies a fanned-out
+// request has already received, across its credential attempts. Each reply is
+// a call the provider has billed, so a retry on the next credential sends only
+// the inputs still missing, and a request that fails is still billed for them
+// (see billKeptEmbedFanOutReplies). Replies are keyed by the exact upstream body
+// and reused only for the same provider model: vectors of different models
+// must never be mixed in one response.
+type embedContentFanOutReplies struct {
+	model   string
+	byInput map[[sha256.Size]byte][]byte
+	// bodies are the latest attempt's per-input embedContent bodies, in input
+	// order, and request the client's OpenAI request they came from.
+	bodies  [][]byte
+	request []byte
+}
+
+// forModel drops the kept replies when model differs from the one they came from.
+func (c *embedContentFanOutReplies) forModel(model string) {
+	if c.byInput == nil || c.model != model {
+		c.model = model
+		c.byInput = make(map[[sha256.Size]byte][]byte)
+	}
+}
+
+// received returns the kept reply of each input of the latest attempt, in
+// input order: nil for an input that has none.
+func (c *embedContentFanOutReplies) received() [][]byte {
+	out := make([][]byte, len(c.bodies))
+	for i, body := range c.bodies {
+		out[i] = c.byInput[sha256.Sum256(body)]
+	}
+	return out
+}
+
+// embedContentFanOut is one credential attempt of a fanned-out embeddings
+// request.
+type embedContentFanOut struct {
+	// template is cloned for every call: URL, headers, context and with it the
+	// credential's egress proxy.
+	template *http.Request
+	// model is the provider model: kept replies are reused only for it.
+	model string
+	// bodies are the per-input embedContent bodies, in input order.
+	bodies [][]byte
+	// request is the client's OpenAI request, for usage estimates.
+	request []byte
+	// credential and limitModel are the rate limiter keys the balancer admitted
+	// this attempt under: the credential name and the model ID it was selected
+	// for, not the provider model. With no credential, calls are not rate
+	// limited.
+	credential string
+	limitModel string
+}
+
+// errEmbedFanOutRateLimited reports that this router's own RPM/TPM limits for
+// the credential ran out before every input of a fanned-out request was sent.
+// The inputs left over go to the next credential: nothing about the credential
+// itself failed, so it is not fail2ban material.
+var errEmbedFanOutRateLimited = errors.New("credential rate limit reached during embeddings fan-out")
+
+type embedContentFanOutResult struct {
+	resp *http.Response
+	body []byte
+	// decoded is body without its Content-Encoding, set for a usable 2xx reply.
+	decoded []byte
+	err     error
+}
+
+// doEmbedContentFanOut sends one Vertex AI embedContent call per body that
+// replies has no answer for yet and answers as if it were a single upstream
+// call:
+//
+//   - a reply exceeded the response size limit: ErrResponseBodyTooLarge, which
+//     the caller treats as on the single-call path (502, no retry);
+//   - every input has a reply: a synthesized 200 whose body is the replies
+//     joined in input order by vertex.MergeEmbedContentResponses;
+//   - some call got a non-2xx reply: that reply (the lowest input index, an
+//     input fault first), so retry, fail2ban and error mapping see the
+//     provider's own status and body. A 2xx reply that carries no embedding
+//     counts as a non-2xx one: the status its error body maps to, else 502;
+//   - otherwise the first transport error;
+//   - otherwise, when the credential's rate limits ran out before every input
+//     was sent, errEmbedFanOutRateLimited.
+//
+// Every call counts against the credential's limits in this router, as any
+// single upstream request does: the attempt's first call uses the RPM slot the
+// balancer took when it selected the credential, every further one takes its
+// own, and a call that gets none is not sent. The tokens of each reply are
+// consumed on the credential that served it.
+//
+// The first failure, or the first call without a slot, stops launching
+// further calls, since a partial set of vectors is useless to the client.
+// Calls already in flight are left to finish: the provider bills them either
+// way, and their replies stay in replies for the next credential attempt.
+//
+// inputFault reports a refusal that faults the input rather than the
+// credential: the provider rejected one input with a 400/413/422 while other
+// inputs of this request got embedded, in this attempt or a previous one.
+// Every other credential would reject it the same way, so the caller must not
+// retry.
+func (p *Proxy) doEmbedContentFanOut(attempt embedContentFanOut, replies *embedContentFanOutReplies) (resp *http.Response, inputFault bool, err error) {
+	bodies := attempt.bodies
+	replies.forModel(attempt.model)
+	replies.bodies, replies.request = bodies, attempt.request
+	keys := make([][sha256.Size]byte, len(bodies))
+	for i, body := range bodies {
+		keys[i] = sha256.Sum256(body)
+	}
+
+	template := attempt.template
+	ctx := template.Context()
+	stop := make(chan struct{})
+	var stopOnce sync.Once
+	halt := func() { stopOnce.Do(func() { close(stop) }) }
+	admit := p.embedContentFanOutAdmission(attempt)
+
+	results := make([]embedContentFanOutResult, len(bodies))
+	sem := make(chan struct{}, embedContentFanOutConcurrency)
+	var wg sync.WaitGroup
+	for i, body := range bodies {
+		if _, ok := replies.byInput[keys[i]]; ok {
+			continue
+		}
+		wg.Add(1)
+		go func(i int, body []byte) {
+			defer wg.Done()
+			select {
+			case sem <- struct{}{}:
+			case <-stop:
+				return
+			case <-ctx.Done():
+				results[i].err = ctx.Err()
+				return
+			}
+			defer func() { <-sem }()
+			// A free slot and a stop can be ready at once; stop wins.
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			if !admit() {
+				// No rate limit headroom left on this credential, and later
+				// calls would find none either: the rest of the inputs go to
+				// the next credential.
+				halt()
+				return
+			}
+
+			req := template.Clone(ctx)
+			req.Body = io.NopCloser(bytes.NewReader(body))
+			req.GetBody = func() (io.ReadCloser, error) { return io.NopCloser(bytes.NewReader(body)), nil }
+			req.ContentLength = int64(len(body))
+			req.Header.Set("Content-Length", strconv.Itoa(len(body)))
+
+			resp, err := p.client.Do(req) //nolint:gosec // G704: template's URL, host comes from the matched credential
+			if err != nil {
+				results[i].err = err
+				halt()
+				return
+			}
+			data, readErr := p.readLimitedResponseBody(resp.Body)
+			_ = resp.Body.Close()
+			if readErr != nil {
+				results[i].err = readErr
+				halt()
+				return
+			}
+			results[i] = embedContentFanOutResult{resp: resp, body: data}
+			if isSuccessStatus(resp.StatusCode) {
+				decoded := []byte(decodeResponseBody(data, resp.Header.Get("Content-Encoding")))
+				if vertex.IsEmbedContentReply(decoded) {
+					results[i].decoded = decoded
+					return
+				}
+				// Not a vector: never kept, so a retry asks for this input again.
+				status, ok := statusCodeFromProviderBodyError(resp.StatusCode, decoded)
+				if !ok {
+					status = http.StatusBadGateway
+				}
+				resp.StatusCode, resp.Status = status, fmt.Sprintf("%d %s", status, http.StatusText(status))
+			}
+			halt()
+		}(i, body)
+	}
+	wg.Wait()
+
+	var (
+		refused      *embedContentFanOutResult
+		transportErr error
+		tooLarge     error
+		succeeded    *http.Response
+		tokens       int
+	)
+	for i := range results {
+		result := &results[i]
+		switch {
+		case result.resp != nil && isSuccessStatus(result.resp.StatusCode):
+			replies.byInput[keys[i]] = result.decoded
+			tokens += vertex.EmbedContentReplyTokens(result.decoded, bodies[i])
+			if succeeded == nil {
+				succeeded = result.resp
+			}
+		case result.resp != nil:
+			if refused == nil {
+				refused = result
+			}
+		case errors.Is(result.err, ErrResponseBodyTooLarge):
+			tooLarge = result.err
+		case result.err != nil:
+			if transportErr == nil {
+				transportErr = result.err
+			}
+		}
+	}
+	p.consumeEmbedContentFanOutTokens(attempt, tokens)
+
+	if tooLarge != nil {
+		return nil, false, tooLarge
+	}
+	if refused != nil {
+		// Another input has a vector for this request: an input the provider
+		// cannot embed is at fault, whichever credential embedded the others.
+		if len(replies.byInput) > 0 {
+			for i := range results {
+				if result := &results[i]; result.resp != nil && isEmbedContentInputFault(result.resp.StatusCode) {
+					return responseWithBody(result.resp, result.body), true, nil
+				}
+			}
+		}
+		return responseWithBody(refused.resp, refused.body), false, nil
+	}
+	if transportErr != nil {
+		return nil, false, transportErr
+	}
+
+	ordered := make([][]byte, len(bodies))
+	missing := 0
+	for i := range bodies {
+		ordered[i] = replies.byInput[keys[i]]
+		if ordered[i] == nil {
+			missing++
+		}
+	}
+	if missing > 0 {
+		// Only a call without a rate limit slot leaves an input unsent and
+		// unanswered without a failure beside it.
+		return nil, false, fmt.Errorf("%w: %d of %d inputs left for the next credential", errEmbedFanOutRateLimited, missing, len(bodies))
+	}
+	merged, err := vertex.MergeEmbedContentResponses(ordered)
+	if err != nil {
+		// Not expected: replies are checked before they are kept. Still, an
+		// unusable reply must not be replayed into the next attempt.
+		replies.byInput = nil
+		return nil, false, fmt.Errorf("merge embedContent fan-out responses: %w", err)
+	}
+	out := &http.Response{
+		Status:     "200 OK",
+		StatusCode: http.StatusOK,
+		Proto:      "HTTP/1.1",
+		ProtoMajor: 1,
+		ProtoMinor: 1,
+		Header:     make(http.Header),
+		Request:    template,
+	}
+	if succeeded != nil {
+		out.Status, out.StatusCode = succeeded.Status, succeeded.StatusCode
+		out.Proto, out.ProtoMajor, out.ProtoMinor = succeeded.Proto, succeeded.ProtoMajor, succeeded.ProtoMinor
+		out.Header = succeeded.Header.Clone()
+	}
+	out.Header.Del("Content-Encoding")
+	out.Header.Del("Content-Length")
+	out.Header.Set("Content-Type", "application/json")
+	return responseWithBody(out, merged), false, nil
+}
+
+// embedContentFanOutAdmission returns the gate every call of attempt passes
+// before it is sent: true when the call may go upstream. The first call uses
+// the slot the balancer already took for the attempt; every further call
+// takes one of its own through the same atomic credential + model RPM/TPM
+// check (ratelimit.RPMLimiter.TryAllowAll), so the limiter counts upstream
+// calls, not client requests.
+func (p *Proxy) embedContentFanOutAdmission(attempt embedContentFanOut) func() bool {
+	if attempt.credential == "" || p.rateLimiter == nil {
+		return func() bool { return true }
+	}
+	var prepaid atomic.Int32
+	prepaid.Store(1)
+	return func() bool {
+		if prepaid.Add(-1) >= 0 {
+			return true
+		}
+		return p.rateLimiter.TryAllowAll(attempt.credential, attempt.limitModel)
+	}
+}
+
+// consumeEmbedContentFanOutTokens records the tokens of the replies an
+// attempt got on the credential that served them (TPM), as the single-call
+// path does for its one response.
+func (p *Proxy) consumeEmbedContentFanOutTokens(attempt embedContentFanOut, tokens int) {
+	if attempt.credential == "" || p.rateLimiter == nil || tokens <= 0 {
+		return
+	}
+	p.rateLimiter.ConsumeTokens(attempt.credential, tokens)
+	if attempt.limitModel != "" {
+		p.rateLimiter.ConsumeModelTokens(attempt.credential, attempt.limitModel, tokens)
+	}
+}
+
+// billKeptEmbedFanOutReplies charges a failed fanned-out embeddings request
+// for the replies it kept. Each is a call the provider has billed although the
+// client gets an error and no vectors; until a partial result can be returned
+// to the client, its key pays for them. Only a failure without usage of its
+// own is filled in.
+func (p *Proxy) billKeptEmbedFanOutReplies(ctx context.Context, logCtx *RequestLogContext, replies *embedContentFanOutReplies) {
+	if logCtx == nil || len(replies.bodies) == 0 || (logCtx.TokenUsage != nil && !logCtx.TokenUsage.IsZero()) {
+		return
+	}
+	received := replies.received()
+	body, embedded, estimated, err := vertex.EmbedContentPartialResponse(received, replies.model, replies.request)
+	if err != nil {
+		p.logger.ErrorContext(ctx, "Failed to bill the embeddings a failed request kept",
+			"error", err, "model", logCtx.ModelID, "request_id", logCtx.RequestID)
+		return
+	}
+	if embedded == 0 {
+		return
+	}
+	// The same extraction a successful reply goes through after ResponseTo.
+	_, usage := extractOpenAITokensAndUsage(body, converter.TokenUsageExtractionOptions{})
+	if usage == nil || usage.IsZero() {
+		return
+	}
+	logCtx.TokenUsage = usage
+	logCtx.keptEmbeddings, logCtx.embeddingInputs = embedded, len(received)
+	p.logger.WarnContext(ctx, "Embeddings request failed after some inputs were embedded, billing them to the key",
+		"embedded_inputs", embedded, "inputs", len(received),
+		"prompt_tokens", usage.PromptTokens, "estimated", estimated,
+		"http_status", logCtx.HTTPStatus, "model", logCtx.ModelID, "request_id", logCtx.RequestID)
+}
+
+func isSuccessStatus(statusCode int) bool {
+	return statusCode >= http.StatusOK && statusCode < http.StatusMultipleChoices
+}
+
+// isEmbedContentInputFault reports the statuses a provider answers when it
+// cannot embed the content it was given (malformed, oversized or unsupported
+// media). Auth, missing-model, quota and server errors are about the
+// credential and stay retryable.
+func isEmbedContentInputFault(statusCode int) bool {
+	switch statusCode {
+	case http.StatusBadRequest, http.StatusRequestEntityTooLarge, http.StatusUnprocessableEntity:
+		return true
+	}
+	return false
+}
+
+// responseWithBody returns resp with body as its already-read, replayable Body.
+func responseWithBody(resp *http.Response, body []byte) *http.Response {
+	resp.Body = io.NopCloser(bytes.NewReader(body))
+	resp.ContentLength = int64(len(body))
+	return resp
+}

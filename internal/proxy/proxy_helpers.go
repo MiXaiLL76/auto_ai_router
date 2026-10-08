@@ -233,6 +233,11 @@ const (
 	// ErrorOriginWebSocketStreamError: a native Realtime WebSocket turn
 	// ended with outcome "stream_error".
 	ErrorOriginWebSocketStreamError ErrorOrigin = "websocket_stream_error"
+	// ErrorOriginFanOutRateLimited: a fanned-out embeddings request (one
+	// upstream call per input) ran out of this router's RPM/TPM headroom on
+	// every credential it could use before all of its inputs were sent.
+	// Answered with 429; no credential failed, so nothing reached fail2ban.
+	ErrorOriginFanOutRateLimited ErrorOrigin = "fan_out_rate_limited"
 	// ErrorOriginClientCanceled: the client disconnected (closed the
 	// connection, or its own request timeout fired) before any credential
 	// attempt produced a response — see isClientContextCanceled. Distinct
@@ -733,6 +738,7 @@ func buildMetadata(hashedToken string, tokenInfo *litellmdb.TokenInfo, errorMsg 
 		"text_tokens":                  nil,
 		"audio_tokens":                 0,
 		"image_tokens":                 nil,
+		"video_tokens":                 0,
 		"cached_tokens":                0,
 		"cached_audio_tokens":          0,
 		"cache_creation_tokens":        0,
@@ -758,6 +764,7 @@ func buildMetadata(hashedToken string, tokenInfo *litellmdb.TokenInfo, errorMsg 
 		usage = normalizedUsage.Normalize()
 		promptTokensDetails["audio_tokens"] = usage.AudioInputTokens
 		promptTokensDetails["image_tokens"] = usage.ImageTokens
+		promptTokensDetails["video_tokens"] = usage.VideoInputTokens
 		promptTokensDetails["cached_tokens"] = usage.CachedInputTokens
 		promptTokensDetails["cached_audio_tokens"] = usage.CachedAudioInputTokens
 		promptTokensDetails["cache_creation_tokens"] = usage.CacheCreationTokens
@@ -807,6 +814,7 @@ func buildMetadata(hashedToken string, tokenInfo *litellmdb.TokenInfo, errorMsg 
 		"prompt_tokens_details": map[string]interface{}{
 			"audio_tokens":                 promptTokensDetails["audio_tokens"],
 			"image_tokens":                 promptTokensDetails["image_tokens"],
+			"video_tokens":                 promptTokensDetails["video_tokens"],
 			"cached_tokens":                promptTokensDetails["cached_tokens"],
 			"cached_audio_tokens":          promptTokensDetails["cached_audio_tokens"],
 			"cache_creation_tokens":        promptTokensDetails["cache_creation_tokens"],
@@ -834,6 +842,9 @@ func buildMetadata(hashedToken string, tokenInfo *litellmdb.TokenInfo, errorMsg 
 			"cached_input_cost":        costs.CachedInputCost,
 			"explicit_cache_read_cost": costs.ExplicitCachedInputCost,
 			"cache_creation_cost":      costs.CacheCreationCost,
+			"audio_input_cost":         costs.AudioInputCost,
+			"image_cost":               costs.ImageCost,
+			"video_input_cost":         costs.VideoInputCost,
 			"total_cost":               costs.TotalCost,
 			"original_cost":            costs.TotalCost - costs.MarginTotalAmount,
 			"margin_percent":           costs.MarginPercent,
@@ -1000,6 +1011,14 @@ func addRequestSpendMetadata(metadata string, logCtx *RequestLogContext) string 
 	}
 	if logCtx.RequestEndpoint != "" {
 		spendMetadata["request_endpoint"] = logCtx.RequestEndpoint
+	}
+	if logCtx.keptEmbeddings > 0 {
+		// The request failed, yet these inputs were embedded (and paid for)
+		// upstream: the row's cost is theirs.
+		spendMetadata["billed_partial_embeddings"] = map[string]interface{}{
+			"embedded_inputs": logCtx.keptEmbeddings,
+			"inputs":          logCtx.embeddingInputs,
+		}
 	}
 	encoded, err := json.Marshal(doc)
 	if err != nil {

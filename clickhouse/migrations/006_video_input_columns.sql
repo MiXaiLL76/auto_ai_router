@@ -1,32 +1,20 @@
 -- Upgrade an existing air.spend_logs Kafka -> MergeTree pipeline to the
--- built-in server-side tool columns (xAI server_side_tool_usage_details):
---   x_search_calls, x_search_posts, x_search_profiles,
---   code_execution_calls, attachment_search_calls, collections_search_calls,
---   mcp_calls, image_tool_generations, image_tool_edits -- per-tool usage;
---   x_search_cost, code_execution_cost, attachment_search_cost,
---   collections_search_cost, image_tool_cost        -- per-tool charges;
---   tool_usage_cost        -- sum of web_search_cost and the charges above,
---                             already contained in total_cost;
---   provider_reported_cost -- the provider's own cost of the request (xAI
---                             cost_in_usd_ticks, aggregators' usage.cost),
---                             for reconciliation only, NULL when not reported.
---
--- On the MergeTree table tool_usage_cost defaults to web_search_cost, so rows
--- written before this migration (when web search was the only priced tool)
--- read back the right total. That DEFAULT only covers existing parts: an
--- event from an AIR pod that predates these fields still reaches the
--- MergeTree table through the Kafka table, which fills the missing field with
--- an explicit 0. The materialized view therefore falls back to web_search_cost
--- for such events, so tool_usage_cost stays right through the rollout window
--- (an event from a current pod never has tool_usage_cost below
--- web_search_cost, which it includes).
+-- event schema that reports input video apart from input images
+-- (Gemini Embedding 2 billing):
+--   video_input_tokens -- input video tokens, previously counted in image_tokens
+--   video_input_cost   -- their cost (input_cost_per_video_token, falling back
+--                         to the image rate); part of the cost breakdown that
+--                         sums to total_cost.
 --
 -- The Kafka table engine does not support ALTER ... ADD COLUMN (ClickHouse
--- fails with NOT_IMPLEMENTED), so air.spend_logs_kafka and the materialized
--- view are dropped and recreated; only the MergeTree table is altered in
--- place. No events are lost: consumer offsets are committed in Kafka under
--- kafka_group_name, so the recreated table resumes where the old one stopped
--- as long as kafka_group_name is unchanged.
+-- fails with NOT_IMPLEMENTED) -- same issue as 002_cache_web_search_columns.sql,
+-- same fix: air.spend_logs_kafka and the materialized view are dropped and
+-- recreated; only the MergeTree table is altered in place. No events are
+-- lost: consumer offsets live in Kafka under kafka_group_name, so the
+-- recreated table resumes where the old one stopped as long as
+-- kafka_group_name is unchanged. The recreated view keeps
+-- 005_tool_usage_columns.sql's tool_usage_cost fallback for events from AIR
+-- pods that predate that field.
 --
 -- The CREATE below uses the reference SETTINGS from
 -- clickhouse/init/01_spend_logs.sql. Before running this on a real cluster,
@@ -34,34 +22,21 @@
 -- (broker list, topic, group name, consumer count) into it, and add the
 -- ON CLUSTER clause your deployment needs.
 --
--- Run it before (or together with) rolling out the AIR version that emits
--- these fields, with AIR Kafka publishing paused. Safe to re-run on its own
--- only while it is the last applied migration: never run 005 again once
--- 006_video_input_columns.sql has been applied, for the same reason
--- 002_cache_web_search_columns.sql's doc comment spells out -- it would
--- rebuild air.spend_logs_kafka from only 005's column set, narrowing it
--- back below whatever the later migration added, and break ingestion with
+-- Run it after 005_tool_usage_columns.sql: the Kafka table below carries 005's
+-- columns too. Pause AIR Kafka publishing before running this migration. Safe
+-- to re-run on its own -- but this is currently the last migration in the
+-- chain, so that's the only direction that's safe: once a migration after
+-- this one exists, never run 006 again on its own afterwards, for the same
+-- reason 002_cache_web_search_columns.sql's doc comment spells out -- it would
+-- rebuild air.spend_logs_kafka from only 006's column set, narrowing it back
+-- below whatever the later migration added, and break ingestion with
 -- NUMBER_OF_COLUMNS_DOESNT_MATCH until that later migration is re-applied.
 
 DROP TABLE IF EXISTS air.spend_logs_mv;
 
 ALTER TABLE air.spend_logs
-    ADD COLUMN IF NOT EXISTS x_search_calls UInt32 DEFAULT 0 AFTER web_search_context_size,
-    ADD COLUMN IF NOT EXISTS x_search_posts UInt32 DEFAULT 0 AFTER x_search_calls,
-    ADD COLUMN IF NOT EXISTS x_search_profiles UInt32 DEFAULT 0 AFTER x_search_posts,
-    ADD COLUMN IF NOT EXISTS code_execution_calls UInt32 DEFAULT 0 AFTER x_search_profiles,
-    ADD COLUMN IF NOT EXISTS attachment_search_calls UInt32 DEFAULT 0 AFTER code_execution_calls,
-    ADD COLUMN IF NOT EXISTS collections_search_calls UInt32 DEFAULT 0 AFTER attachment_search_calls,
-    ADD COLUMN IF NOT EXISTS mcp_calls UInt32 DEFAULT 0 AFTER collections_search_calls,
-    ADD COLUMN IF NOT EXISTS image_tool_generations UInt32 DEFAULT 0 AFTER mcp_calls,
-    ADD COLUMN IF NOT EXISTS image_tool_edits UInt32 DEFAULT 0 AFTER image_tool_generations,
-    ADD COLUMN IF NOT EXISTS x_search_cost Float64 DEFAULT 0 AFTER web_search_cost,
-    ADD COLUMN IF NOT EXISTS code_execution_cost Float64 DEFAULT 0 AFTER x_search_cost,
-    ADD COLUMN IF NOT EXISTS attachment_search_cost Float64 DEFAULT 0 AFTER code_execution_cost,
-    ADD COLUMN IF NOT EXISTS collections_search_cost Float64 DEFAULT 0 AFTER attachment_search_cost,
-    ADD COLUMN IF NOT EXISTS image_tool_cost Float64 DEFAULT 0 AFTER collections_search_cost,
-    ADD COLUMN IF NOT EXISTS tool_usage_cost Float64 DEFAULT web_search_cost AFTER image_tool_cost,
-    ADD COLUMN IF NOT EXISTS provider_reported_cost Nullable(Float64) AFTER total_cost;
+    ADD COLUMN IF NOT EXISTS video_input_tokens UInt32 DEFAULT 0 AFTER image_tokens,
+    ADD COLUMN IF NOT EXISTS video_input_cost Float64 DEFAULT 0 AFTER image_cost;
 
 DROP TABLE IF EXISTS air.spend_logs_kafka;
 
@@ -114,6 +89,7 @@ CREATE TABLE air.spend_logs_kafka
     rejected_prediction_tokens UInt32,
     image_count UInt32,
     image_tokens UInt32,
+    video_input_tokens UInt32,
     output_image_tokens UInt32,
     web_search_requests UInt32,
     web_search_context_size Nullable(String),
@@ -138,6 +114,7 @@ CREATE TABLE air.spend_logs_kafka
     cached_output_cost Float64,
     prediction_cost Float64,
     image_cost Float64,
+    video_input_cost Float64,
     web_search_cost Float64,
     x_search_cost Float64,
     code_execution_cost Float64,

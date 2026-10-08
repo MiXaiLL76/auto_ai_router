@@ -71,6 +71,7 @@ type SpendEvent struct {
 	RejectedPredictionTokens int    `json:"rejected_prediction_tokens"`
 	ImageCount               int    `json:"image_count"`
 	ImageTokens              int    `json:"image_tokens"`
+	VideoInputTokens         int    `json:"video_input_tokens"`
 	OutputImageTokens        int    `json:"output_image_tokens"`
 	WebSearchRequests        int    `json:"web_search_requests"`
 	WebSearchContextSize     string `json:"web_search_context_size,omitempty"`
@@ -96,6 +97,7 @@ type SpendEvent struct {
 	CachedOutputCost      float64 `json:"cached_output_cost"`
 	PredictionCost        float64 `json:"prediction_cost"`
 	ImageCost             float64 `json:"image_cost"`
+	VideoInputCost        float64 `json:"video_input_cost"`
 	WebSearchCost         float64 `json:"web_search_cost"`
 	XSearchCost           float64 `json:"x_search_cost"`
 	CodeExecutionCost     float64 `json:"code_execution_cost"`
