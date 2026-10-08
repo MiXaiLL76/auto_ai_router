@@ -46,6 +46,8 @@ type vertexStreamAccumulator struct {
 	usage *genai.GenerateContentResponseUsageMetadata
 	// Confirmed Google Search queries from grounding metadata.
 	webSearchQueries map[string]struct{}
+	// What fed the tool-use prompt tokens, for billing them.
+	toolUse vertex.ToolUseSources
 
 	// Finish reason (string)
 	finishReason string
@@ -128,9 +130,10 @@ func TransformVertexStreamToResponses(
 			continue
 		}
 		vertex.AddWebSearchQueries(acc.webSearchQueries, chunk.Candidates)
+		acc.toolUse.Add(chunk.Candidates, chunk.ModelVersion)
 
 		candidate := chunk.Candidates[0]
-		if candidate.FinishReason != genai.FinishReasonUnspecified {
+		if vertex.HasFinishReason(candidate) {
 			acc.finishReason = string(candidate.FinishReason)
 		}
 
@@ -164,7 +167,11 @@ func TransformVertexStreamToResponses(
 // processPart handles a single genai.Part from a streaming chunk.
 func processPart(w io.Writer, acc *vertexStreamAccumulator, part *genai.Part) error {
 	switch {
-	case part.Thought && part.Text != "":
+	case part.Thought:
+		// A thought without text is an interim draft image, not a result.
+		if part.Text == "" {
+			return nil
+		}
 		return processThoughtDelta(w, acc, part.Text)
 
 	case part.FunctionCall != nil:
@@ -617,7 +624,7 @@ func buildVertexCompletedResponse(acc *vertexStreamAccumulator) *responses.Respo
 
 	var usage *responses.Usage
 	if acc.usage != nil {
-		usage = usageMetadataToUsage(acc.usage)
+		usage = usageMetadataToUsage(vertex.BillableUsageMetadata(acc.usage, acc.toolUse, acc.model))
 	}
 	webSearchRequests := len(acc.webSearchQueries)
 	if usage == nil && webSearchRequests > 0 {

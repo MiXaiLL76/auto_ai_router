@@ -59,6 +59,11 @@ func OpenAIToVertex(openAIBody []byte, isImageGeneration bool, isImageEdit bool,
 
 	// Generation config
 	vertexReq.GenerationConfig = buildGenerationConfig(&req, model)
+	if vertexReq.GenerationConfig != nil {
+		if err := validateGeminiImageConfig(model, vertexReq.GenerationConfig.ImageConfig); err != nil {
+			return nil, err
+		}
+	}
 
 	// Messages → Contents + SystemInstruction
 	for _, msg := range req.Messages {
@@ -173,11 +178,17 @@ func OpenAIToVertex(openAIBody []byte, isImageGeneration bool, isImageEdit bool,
 			Parts: []*genai.Part{{Text: "."}},
 		})
 	}
+	if err := ValidateInputImages(model, vertexReq.Contents); err != nil {
+		return nil, err
+	}
 
 	// Tools
 	var hasUserFunctions bool
 	if len(req.Tools) > 0 {
-		toolsResult := convertOpenAIToolsToVertex(req.Tools)
+		toolsResult, err := convertOpenAIToolsToVertex(req.Tools)
+		if err != nil {
+			return nil, err
+		}
 		if len(toolsResult.Tools) > 0 {
 			vertexReq.Tools = toolsResult.Tools
 		}

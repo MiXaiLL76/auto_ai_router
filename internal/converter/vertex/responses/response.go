@@ -35,7 +35,9 @@ func buildResponsesResponse(
 ) *responses.Response {
 	status, incompleteDetails := finishReasonToStatus(vertexResp)
 	output := candidatesToOutputItems(vertexResp)
-	usage := usageMetadataToUsage(vertexResp.UsageMetadata)
+	var toolUse vertex.ToolUseSources
+	toolUse.Add(vertexResp.Candidates, vertexResp.ModelVersion)
+	usage := usageMetadataToUsage(vertex.BillableUsageMetadata(vertexResp.UsageMetadata, toolUse, model))
 	webSearchRequests := vertex.CountWebSearchRequests(vertexResp.Candidates)
 	if usage == nil && webSearchRequests > 0 {
 		usage = &responses.Usage{}
@@ -295,6 +297,12 @@ func groundingMetadataToWebSearchCall(gm *genai.GroundingMetadata) *responses.Ou
 	}
 	var queries []string
 	for _, q := range gm.WebSearchQueries {
+		if q != "" {
+			queries = append(queries, q)
+		}
+	}
+	// Image search queries are searches too.
+	for _, q := range gm.ImageSearchQueries {
 		if q != "" {
 			queries = append(queries, q)
 		}

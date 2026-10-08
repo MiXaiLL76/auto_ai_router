@@ -49,10 +49,16 @@ func buildVertexRequest(req *responses.Request, model string) (*vertex.VertexReq
 		return nil, err
 	}
 	vr.Contents = contents
+	if err := vertex.ValidateInputImages(model, vr.Contents); err != nil {
+		return nil, err
+	}
 
 	// Tools.
 	if len(req.Tools) > 0 {
-		vr.Tools = responsesToolsToVertex(req.Tools)
+		vr.Tools, err = responsesToolsToVertex(req.Tools)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	// Tool choice — only set FunctionCallingConfig when function declarations survived
@@ -311,14 +317,18 @@ func buildGenConfig(req *responses.Request, model string) *genai.GenerationConfi
 		}
 	}
 
-	// Reasoning → ThinkingConfig.
-	if req.Reasoning != nil && req.Reasoning.Effort != "" && req.Reasoning.Effort != "none" {
+	// Reasoning → ThinkingConfig, falling back to the model default.
+	if req.Reasoning != nil && req.Reasoning.Effort != "" {
 		cfg.ThinkingConfig = vertex.MapReasoningEffortToThinkingConfig(req.Reasoning.Effort, model)
-		hasParams = true
-	} else if def := vertex.DefaultThinkingConfig(model); def != nil {
-		cfg.ThinkingConfig = def
+	}
+	if cfg.ThinkingConfig == nil {
+		cfg.ThinkingConfig = vertex.DefaultThinkingConfig(model)
+	}
+	if cfg.ThinkingConfig != nil {
 		hasParams = true
 	}
+
+	vertex.ApplyGenerationConstraints(cfg, model)
 
 	if !hasParams {
 		return nil

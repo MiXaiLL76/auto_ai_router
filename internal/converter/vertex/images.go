@@ -144,10 +144,14 @@ func ImageRequestToOpenAIChatRequest(openAIBody []byte) ([]byte, error) {
 }
 
 func imageRequestToOpenAIChatRequest(openAIBody []byte, providerModel string) ([]byte, error) {
-	var imageReq openai.OpenAIImageRequest
-	if err := json.Unmarshal(openAIBody, &imageReq); err != nil {
+	var body struct {
+		openai.OpenAIImageRequest
+		geminiImageExtras
+	}
+	if err := json.Unmarshal(openAIBody, &body); err != nil {
 		return nil, converterutil.RequestJSONValidationError(err)
 	}
+	imageReq, extras := body.OpenAIImageRequest, body.geminiImageExtras
 
 	if strings.TrimSpace(imageReq.Prompt) == "" {
 		return nil, imageValidationError("prompt", "Missing required parameter", "missing_required_parameter")
@@ -191,8 +195,82 @@ func imageRequestToOpenAIChatRequest(openAIBody []byte, providerModel string) ([
 		n := clampImageCount(*imageReq.N)
 		chatReq.N = &n
 	}
+	if err := extras.applyTo(&chatReq, providerModel); err != nil {
+		return nil, err
+	}
 
 	return json.Marshal(chatReq)
+}
+
+// geminiImageExtras are the Gemini parameters every images endpoint accepts and hands
+// to the chat request's fields of the same names. image_config is an object or that
+// object as a JSON string (the multipart form).
+type geminiImageExtras struct {
+	ImageConfig        json.RawMessage `json:"image_config"`
+	ImageConfigCamel   json.RawMessage `json:"imageConfig"`
+	AspectRatio        string          `json:"aspect_ratio"`
+	AspectRatioCamel   string          `json:"aspectRatio"`
+	ImageSize          string          `json:"image_size"`
+	ImageSizeCamel     string          `json:"imageSize"`
+	ThinkingLevel      string          `json:"thinking_level"`
+	ThinkingLevelCamel string          `json:"thinkingLevel"`
+	ReasoningEffort    string          `json:"reasoning_effort"`
+}
+
+// geminiImageExtrasFromFields reads the extras from multipart form fields.
+func geminiImageExtrasFromFields(fields map[string]string) geminiImageExtras {
+	rawJSON := func(name string) json.RawMessage {
+		if fields[name] == "" {
+			return nil
+		}
+		return json.RawMessage(strconv.Quote(fields[name]))
+	}
+	return geminiImageExtras{
+		ImageConfig:        rawJSON("image_config"),
+		ImageConfigCamel:   rawJSON("imageConfig"),
+		AspectRatio:        fields["aspect_ratio"],
+		AspectRatioCamel:   fields["aspectRatio"],
+		ImageSize:          fields["image_size"],
+		ImageSizeCamel:     fields["imageSize"],
+		ThinkingLevel:      fields["thinking_level"],
+		ThinkingLevelCamel: fields["thinkingLevel"],
+		ReasoningEffort:    fields["reasoning_effort"],
+	}
+}
+
+// applyTo sets the extras on the chat request, where they override what size mapped
+// to. Thinking fields pass only to a model with profiled thinking levels.
+func (e geminiImageExtras) applyTo(chatReq *openai.OpenAIRequest, model string) error {
+	var err error
+	if chatReq.ImageConfigSnake, err = parseImageConfigParam("image_config", e.ImageConfig); err != nil {
+		return err
+	}
+	if chatReq.ImageConfig, err = parseImageConfigParam("imageConfig", e.ImageConfigCamel); err != nil {
+		return err
+	}
+	chatReq.AspectRatioSnake, chatReq.AspectRatio = e.AspectRatio, e.AspectRatioCamel
+	chatReq.ImageSizeSnake, chatReq.ImageSize = e.ImageSize, e.ImageSizeCamel
+	if lookupGeminiModelProfile(model).hasThinkingLevels() {
+		chatReq.ThinkingLevel, chatReq.ThinkingLevelCamel = e.ThinkingLevel, e.ThinkingLevelCamel
+		chatReq.ReasoningEffort = e.ReasoningEffort
+	}
+	return nil
+}
+
+// parseImageConfigParam reads image_config: an object or a JSON string of one.
+func parseImageConfigParam(name string, raw json.RawMessage) (map[string]interface{}, error) {
+	var text string
+	if json.Unmarshal(raw, &text) == nil {
+		raw = json.RawMessage(text)
+	}
+	if len(bytes.TrimSpace(raw)) == 0 || string(raw) == "null" {
+		return nil, nil
+	}
+	var parsed map[string]interface{}
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		return nil, imageValidationError(name, "Invalid JSON", "invalid_json")
+	}
+	return parsed, nil
 }
 
 // ImageEditRequestToOpenAIChatRequest converts JSON or multipart image edit requests
@@ -303,9 +381,6 @@ func imageEditRequestToOpenAIChatRequest(openAIBody []byte, contentType, provide
 	if err := applyGeminiImageSize(genConfig, providerModel, fields["size"]); err != nil {
 		return nil, err
 	}
-	if err := applyGeminiImageConfigFields(genConfig, fields); err != nil {
-		return nil, err
-	}
 
 	chatReq := openai.OpenAIRequest{
 		Model: model,
@@ -351,6 +426,9 @@ func imageEditRequestToOpenAIChatRequest(openAIBody []byte, contentType, provide
 		n = clampImageCount(n)
 		chatReq.N = &n
 	}
+	if err := geminiImageExtrasFromFields(fields).applyTo(&chatReq, providerModel); err != nil {
+		return nil, err
+	}
 
 	return json.Marshal(chatReq)
 }
@@ -379,6 +457,10 @@ func VertexChatResponseToOpenAIImageWithModel(vertexBody []byte, model string) (
 	for _, candidate := range vertexResp.Candidates {
 		if candidate.Content != nil && candidate.Content.Parts != nil {
 			for _, part := range candidate.Content.Parts {
+				// A thought image is an interim draft, not a result.
+				if part.Thought {
+					continue
+				}
 				// Extract inline data (image) from part
 				if part.InlineData != nil {
 					// Encode binary image data to base64
@@ -401,6 +483,8 @@ func VertexChatResponseToOpenAIImageWithModel(vertexBody []byte, model string) (
 
 // convertVertexUsageToImageUsage maps Vertex UsageMetadata to the OpenAI images API usage format.
 // The images API uses input_tokens/output_tokens rather than the chat prompt_tokens/completion_tokens.
+// Thinking tokens (outside candidatesTokenCount) count as output and are broken out
+// as reasoning_tokens, billed at the text rate as on the chat route.
 func convertVertexUsageToImageUsage(meta *genai.GenerateContentResponseUsageMetadata, imageCount int) *openai.OpenAIImageUsage {
 	inputTokens := int(meta.PromptTokenCount)
 
@@ -438,9 +522,15 @@ func convertVertexUsageToImageUsage(meta *genai.GenerateContentResponseUsageMeta
 		outputImageTokens = outputTokens
 	}
 
+	reasoningTokens := max(int(meta.ThoughtsTokenCount), 0)
+	outputTokens += reasoningTokens
+
 	var outputTokensDetails *openai.OpenAIImageOutputTokenDetails
-	if outputImageTokens > 0 {
-		outputTokensDetails = &openai.OpenAIImageOutputTokenDetails{ImageTokens: outputImageTokens}
+	if outputImageTokens > 0 || reasoningTokens > 0 {
+		outputTokensDetails = &openai.OpenAIImageOutputTokenDetails{
+			ImageTokens:     outputImageTokens,
+			ReasoningTokens: reasoningTokens,
+		}
 	}
 
 	return &openai.OpenAIImageUsage{
@@ -461,61 +551,6 @@ func parseImageEditFloat(raw, name string) (float64, error) {
 		return 0, converterutil.NewInvalidValueError(name)
 	}
 	return value, nil
-}
-
-func applyGeminiImageConfigFields(genConfig map[string]interface{}, fields map[string]string) error {
-	imageConfig := map[string]interface{}{}
-	if existing, ok := genConfig["image_config"].(map[string]interface{}); ok {
-		for key, value := range existing {
-			imageConfig[key] = value
-		}
-	}
-
-	for _, name := range []string{"image_config", "imageConfig"} {
-		raw := strings.TrimSpace(fields[name])
-		if raw == "" {
-			continue
-		}
-		var parsed map[string]interface{}
-		if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
-			return imageValidationError(name, "Invalid JSON", "invalid_json")
-		}
-		for key, value := range parsed {
-			imageConfig[key] = value
-		}
-	}
-
-	if aspectRatio := firstNonEmptyField(fields, "aspect_ratio", "aspectRatio"); aspectRatio != "" {
-		imageConfig["aspectRatio"] = aspectRatio
-		delete(imageConfig, "aspect_ratio")
-	}
-	if imageSize := firstNonEmptyField(fields, "image_size", "imageSize"); imageSize != "" {
-		imageConfig["imageSize"] = imageSize
-		delete(imageConfig, "image_size")
-	}
-
-	if aspectRatio, ok := imageConfig["aspect_ratio"].(string); ok && aspectRatio != "" {
-		imageConfig["aspectRatio"] = aspectRatio
-		delete(imageConfig, "aspect_ratio")
-	}
-	if imageSize, ok := imageConfig["image_size"].(string); ok && imageSize != "" {
-		imageConfig["imageSize"] = imageSize
-		delete(imageConfig, "image_size")
-	}
-
-	if len(imageConfig) > 0 {
-		genConfig["image_config"] = imageConfig
-	}
-	return nil
-}
-
-func firstNonEmptyField(fields map[string]string, names ...string) string {
-	for _, name := range names {
-		if value := strings.TrimSpace(fields[name]); value != "" {
-			return value
-		}
-	}
-	return ""
 }
 
 func readMultipartPartLimit(part *multipart.Part, maxBytes int64) ([]byte, error) {

@@ -32,6 +32,10 @@ func TestRequestUsesReasoning(t *testing.T) {
 		{name: "nested extra body", body: `{"extra_body":{"reasoning_effort":"low"}}`, want: true, wantSource: "extra_body.reasoning_effort", wantThinkingMode: thinkingModeUnspecified},
 		{name: "nested extra body thinking", body: `{"extra_body":{"thinking":{"type":"adaptive"}}}`, want: true, wantSource: "extra_body.thinking", wantThinkingMode: thinkingModeAdaptive},
 		{name: "nested thinking config", body: `{"thinking_config":{"thinking_level":"high"}}`, want: true, wantSource: "thinking_config.thinking_level", wantThinkingMode: thinkingModeUnspecified},
+		{name: "camelCase thinking level", body: `{"thinkingLevel":"high"}`, want: true, wantSource: "thinkingLevel", wantThinkingMode: thinkingModeUnspecified},
+		{name: "camelCase thinking config", body: `{"thinkingConfig":{"thinkingLevel":"minimal"}}`, want: true, wantSource: "thinkingConfig.thinkingLevel", wantThinkingMode: thinkingModeUnspecified},
+		{name: "camelCase thinking budget", body: `{"thinking_config":{"thinkingBudget":2048}}`, want: true, wantSource: "thinking_config.thinkingBudget", wantThinkingMode: thinkingModeUnspecified},
+		{name: "extra body generation config thinking config", body: `{"extra_body":{"generation_config":{"thinking_config":{"thinking_level":"high"}}}}`, want: true, wantSource: "extra_body.generation_config.thinking_config.thinking_level", wantThinkingMode: thinkingModeUnspecified},
 		{name: "include thoughts only", body: `{"thinking_config":{"include_thoughts":true}}`, wantThinkingMode: thinkingModeUnspecified},
 		{name: "invalid json", body: `{`, wantThinkingMode: thinkingModeUnspecified},
 	}

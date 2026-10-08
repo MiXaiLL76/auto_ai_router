@@ -132,11 +132,42 @@ All OpenAI tool types are supported:
 | ----------------------------------- | ----------------------------------------------------- |
 | `function`                          | `FunctionDeclarations` (grouped in one Tool)          |
 | `computer_use`                      | `ComputerUse` (separate Tool)                         |
-| `web_search` / `web_search_preview` | `GoogleSearch` (separate Tool)                        |
+| `web_search` / `web_search_preview` | `GoogleSearch` (separate Tool, see below)             |
+| `google_search`                     | Same as `web_search` (Google's own name for the tool) |
 | `google_search_retrieval`           | `GoogleSearchRetrieval` with dynamic retrieval config |
 | `google_maps`                       | `GoogleMaps` (separate Tool)                          |
 | `code_execution`                    | `ToolCodeExecution` (separate Tool)                   |
 | `url_context`                       | `URLContext` (separate Tool)                          |
+
+#### Google Search types
+
+Search tools accept `search_types` (on Chat Completions and the Responses API alike): `["web_search"]` (the
+default), `["image_search"]`, or both. Image search (Grounding with Google Image Search) is supported by
+`gemini-nano-banana-2.1` and `gemini-3.1-flash-image`. `search_types` also takes Gemini's object form
+`{"webSearch": {}, "imageSearch": {}}`, where an entry set to `false` or `null` is off. An unknown type or value
+is rejected with 400 instead of silently becoming a web search. All search tools of a request are merged into
+one `GoogleSearch` tool.
+
+```python
+response = client.chat.completions.create(
+    model="gemini-nano-banana-2.1",
+    messages=[
+        {
+            "role": "user",
+            "content": "A detailed painting of a Timareta butterfly resting on a flower",
+        }
+    ],
+    tools=[{"type": "web_search", "search_types": ["web_search", "image_search"]}],
+)
+```
+
+Every search query Google ran — web and image alike, from the grounding metadata — is reported in
+`usage.server_tool_use.web_search_requests` and billed per query (`web_search_billing_unit: per_query`).
+The context Google Search retrieved (`toolUsePromptTokenCount`) is billed as input, except on
+`gemini-nano-banana-2.1`, whose pricing does not charge it: there it is left out of `prompt_tokens` when Google
+Search is the only tool that produced it. With `url_context`, code execution, Maps or retrieval grounding in the
+same response it stays in, as their context is billed. The model is recognized by Gemini's `modelVersion`, so
+this holds under an alias too.
 
 #### tool_choice
 
@@ -184,7 +215,19 @@ Gemini 2.5 and Gemini 3+ models support configurable reasoning. The router suppo
 3. `extra_body.thinking` — Anthropic-style format
 4. `extra_body.reasoning_effort` — OpenAI format (lowest priority)
 
-If none are specified, the router explicitly suppresses autonomous thinking for **predictable latency**. Exception: `gemini-2.5-pro` cannot disable thinking and uses dynamic budget (`-1`) by default.
+If none are specified, the router explicitly suppresses autonomous thinking for **predictable latency**. Exceptions: `gemini-2.5-pro` cannot disable thinking and uses dynamic budget (`-1`) by default; [`gemini-nano-banana-2.1`](#gemini-nano-banana-21) keeps its own default level (`MEDIUM`).
+
+Each source is read at the top level (where the OpenAI SDKs put `extra_body` keys) first, then inside a literal
+`extra_body` object; `thinking_config` is also read from `extra_body.generation_config`, as in Gemini's REST
+shape. Gemini's camelCase spellings are accepted as well: `thinkingLevel`, and `thinkingConfig` with
+`thinkingLevel` / `thinkingBudget` / `includeThoughts`.
+
+Every source resolves by the same rules on every model: level and effort names are case-insensitive and may use
+Gemini's enum spelling (`THINKING_LEVEL_HIGH`); `xhigh` and `max` mean `high`; `disable` means `none`. A model
+that takes a level (Gemini 3) reads a budget-only config as the level of the same depth (`0` → its floor, `-1` →
+the model's own default, ≥5,000 → `medium`, ≥15,000 → `high`), and a Gemini 2.5 model reads a level-only config as
+that level's budget (see the tables below). An effort the router does not know leaves the depth to the model: no
+level on Gemini 3, a dynamic budget (`-1`) on Gemini 2.5 — never a zero budget `gemini-2.5-pro` would reject.
 
 #### reasoning_effort mapping
 
@@ -429,8 +472,28 @@ resp = client.images.edit(
 For Gemini-backed `images.generate` / `images.edit`, the router converts the OpenAI request to a multimodal Gemini chat request with `response_modalities=["IMAGE"]`.
 
 - `images.generate` maps prompt and size to Gemini image config.
-- `images.edit` accepts multipart image uploads and sends them as inline image parts alongside the text prompt.
+- `images.edit` accepts multipart image uploads (or JSON `image` / `images`) and sends them as inline image parts alongside the text prompt, in order.
 - `response_format="b64_json"` is supported naturally because Gemini image responses are returned as inline image bytes and converted to `b64_json`.
+- Both endpoints, JSON and multipart alike, also accept `aspect_ratio` / `aspectRatio`, `image_size` / `imageSize` and `image_config` / `imageConfig` (an object, or the same object as a JSON string), which override what `size` maps to. `image_size` is sent upper-case (`"2k"` → `"2K"`). A model with configurable thinking levels ([`gemini-nano-banana-2.1`](#gemini-nano-banana-21)) also takes `thinking_level` / `thinkingLevel` / `reasoning_effort`; other image models get no thinking config, as on the chat route.
+- Thinking tokens are part of `usage.output_tokens` and broken out as `usage.output_tokens_details.reasoning_tokens`; interim "thought" images are not returned.
+
+#### Gemini Nano Banana 2.1
+
+`gemini-nano-banana-2.1` has no `image` or `gemini-3` in its ID, so the router pins its capabilities by model ID
+(also for versioned IDs such as `-preview` or `-001`) instead of deriving them from the name:
+
+| Capability          | Behavior                                                                                                                                                                                                                                                                                                          |
+| ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Image sizes         | `1K` (default), `2K`, `4K`. `512` is not supported: `size` never maps to it and an explicit `image_size: "512"` is rejected with 400. `image_size` is case-insensitive (`"2k"`).                                                                                                                                  |
+| Aspect ratios       | `1:1`, `1:4`, `1:8`, `2:3`, `3:2`, `3:4`, `4:1`, `4:3`, `4:5`, `5:4`, `8:1`, `9:16`, `16:9`, `21:9`. Others are rejected with 400.                                                                                                                                                                                |
+| `9:21`              | Listed by Vertex only, not by the Gemini API; rejected on both routes until verified live on both.                                                                                                                                                                                                                |
+| Thinking            | `ThinkingLevel` `MINIMAL` / `MEDIUM` / `HIGH`, default `MEDIUM`. `low` maps to `MINIMAL`, `xhigh` to `HIGH`, `none` to `MINIMAL`; a thinking budget is never sent: `thinking_budget` / `budget_tokens` map to the level of the same depth (`0` → `MINIMAL`, `-1` → default, ≥5,000 → `MEDIUM`, ≥15,000 → `HIGH`). |
+| Sampling parameters | `temperature`, `top_p`, `top_k`, `seed`, `logprobs` / `top_logprobs` are dropped from every source (top level, `extra_body`, `generation_config`); Google rejects them.                                                                                                                                           |
+| Reference images    | Up to 14 images per request (references, mask and images from earlier turns together); more is rejected with 400 `too_many_images` before the upstream call.                                                                                                                                                      |
+| Search              | Web and image search; the retrieved context is not billed as input. See [Google Search types](#google-search-types).                                                                                                                                                                                              |
+
+Image output is billed by the image tokens each route reports: 1K = 1,120 and 2K = 1,680 on both routes, 4K =
+2,520 on the Gemini API and 3,780 on Vertex.
 
 The router also supports the dedicated Imagen API endpoint for image generation models.
 
@@ -473,3 +536,5 @@ The router provides accurate token counting with modality breakdown:
 - **Cached tokens**: Reported separately (deducted from base cost to avoid double-charging)
 - **Audio tokens**: Tracked separately for accurate billing
 - **Thinking tokens**: Included in completion count, tracked in `completion_tokens_details.reasoning_tokens`
+- **Generated image tokens**: Tracked in `completion_tokens_details.image_tokens` and billed at the image output rate, apart from text and thinking
+- **Google Search**: Queries in `server_tool_use.web_search_requests`; search-retrieved context counts as prompt tokens except on `gemini-nano-banana-2.1` (see [Google Search types](#google-search-types))

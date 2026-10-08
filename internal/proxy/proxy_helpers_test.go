@@ -965,6 +965,33 @@ func TestRedactRequestBodyForLogging(t *testing.T) {
 			parsed["generationConfig"], "a Gemini response schema parameter named metadata is still a schema")
 	})
 
+	t.Run("keeps Gemini image and search parameters", func(t *testing.T) {
+		body := []byte(`{
+			"model": "gemini-nano-banana-2.1",
+			"prompt": "SECRET",
+			"aspect_ratio": "16:9",
+			"image_size": "4K",
+			"thinking_level": "high",
+			"image_config": {"aspect_ratio": "4:5", "note": "SECRET"},
+			"generationConfig": {"imageConfig": {"aspectRatio": "21:9", "imageSize": "2K"}},
+			"tools": [{"type": "google_search", "search_types": ["web_search", "image_search"]}]
+		}`)
+
+		out, ok := redactRequestBodyForLogging(body)
+		require.True(t, ok)
+		assert.NotContains(t, out, "SECRET")
+
+		var parsed map[string]any
+		require.NoError(t, json.Unmarshal([]byte(out), &parsed))
+		assert.Equal(t, "16:9", parsed["aspect_ratio"])
+		assert.Equal(t, "4K", parsed["image_size"])
+		assert.Equal(t, "high", parsed["thinking_level"])
+		assert.Equal(t, "4:5", parsed["image_config"].(map[string]any)["aspect_ratio"])
+		imageConfig := parsed["generationConfig"].(map[string]any)["imageConfig"].(map[string]any)
+		assert.Equal(t, map[string]any{"aspectRatio": "21:9", "imageSize": "2K"}, imageConfig)
+		assert.Equal(t, []any{"web_search", "image_search"}, parsed["tools"].([]any)[0].(map[string]any)["search_types"])
+	})
+
 	t.Run("fails closed on non-JSON body", func(t *testing.T) {
 		_, ok := redactRequestBodyForLogging([]byte("--boundary\r\nnot json at all"))
 		assert.False(t, ok, "must not attempt to redact/ship a body it can't parse")

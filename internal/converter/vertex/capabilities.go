@@ -1,6 +1,10 @@
 package vertex
 
-import "strings"
+import (
+	"strings"
+
+	"google.golang.org/genai"
+)
 
 // This file collects per-model capability checks for fields the router copies into
 // Vertex/Gemini generationConfig. Google validates generationConfig strictly: a knob
@@ -10,7 +14,8 @@ import "strings"
 // keeps that class of failure out of the upstream entirely.
 //
 // The thinking-level floor is the same kind of check but lives next to the rest of
-// the thinking logic; see lowestThinkingLevel in thinking.go.
+// the thinking logic; see lowestThinkingLevel in thinking.go. Models pinned by ID
+// are in model_profile.go.
 
 // supportsPenalty reports whether the model accepts frequency_penalty /
 // presence_penalty in generationConfig.
@@ -31,4 +36,14 @@ func supportsPenalty(model string) bool {
 		return true
 	}
 	return strings.Contains(lower, "gemini-1.") || strings.Contains(lower, "gemini-2.0")
+}
+
+// ApplyGenerationConstraints removes the generationConfig fields the model rejects.
+// It runs after every request source is merged, so none can put one back.
+// Exported for use by sub-packages (e.g. vertex/responses).
+func ApplyGenerationConstraints(cfg *genai.GenerationConfig, model string) {
+	if profile := lookupGeminiModelProfile(model); cfg != nil && profile != nil && profile.rejectsSamplingParams {
+		cfg.Temperature, cfg.TopP, cfg.TopK, cfg.Seed = nil, nil, nil, nil
+		cfg.ResponseLogprobs, cfg.Logprobs = false, nil
+	}
 }

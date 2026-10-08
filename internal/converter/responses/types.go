@@ -182,6 +182,8 @@ type Tool struct {
 	// web_search_preview
 	UserLocation      interface{} `json:"user_location,omitempty"`
 	SearchContextSize string      `json:"search_context_size,omitempty"`
+	// Gemini-only search types (see vertex.GoogleSearchTypes).
+	SearchTypes interface{} `json:"search_types,omitempty"`
 
 	// Anthropic-specific web_search restriction fields, carried through as-is
 	// for a Responses-shaped request that targets an Anthropic backend (see

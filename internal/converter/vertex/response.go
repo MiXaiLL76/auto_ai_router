@@ -124,7 +124,9 @@ func VertexToOpenAI(vertexBody []byte, model string) ([]byte, error) {
 
 	// Convert usage metadata
 	if vertexResp.UsageMetadata != nil {
-		openAIResp.Usage = convertVertexUsageMetadata(vertexResp.UsageMetadata)
+		var toolUse ToolUseSources
+		toolUse.Add(vertexResp.Candidates, vertexResp.ModelVersion)
+		openAIResp.Usage = convertVertexUsageMetadata(BillableUsageMetadata(vertexResp.UsageMetadata, toolUse, model))
 	}
 	if webSearchRequests := CountWebSearchRequests(vertexResp.Candidates); webSearchRequests > 0 {
 		if openAIResp.Usage == nil {
@@ -138,16 +140,20 @@ func VertexToOpenAI(vertexBody []byte, model string) ([]byte, error) {
 }
 
 // CountWebSearchRequests returns the number of distinct Google Search queries
-// confirmed by Vertex grounding metadata.
+// confirmed by Vertex grounding metadata, web and image search together.
 func CountWebSearchRequests(candidates []*genai.Candidate) int {
 	queries := make(map[string]struct{})
 	AddWebSearchQueries(queries, candidates)
 	return len(queries)
 }
 
+// imageSearchQueryKey keeps image queries apart from web ones: the same text searched
+// both ways is two billed queries.
+const imageSearchQueryKey = "\x00image_search\x00"
+
 // AddWebSearchQueries adds distinct, non-empty Google Search queries from the
-// supplied candidates to queries. Callers can reuse the same set across
-// streaming chunks so each provider query is billed exactly once.
+// supplied candidates (web and image search alike) to queries. Callers can reuse the
+// same set across streaming chunks so each provider query is billed exactly once.
 func AddWebSearchQueries(queries map[string]struct{}, candidates []*genai.Candidate) {
 	for _, candidate := range candidates {
 		if candidate == nil || candidate.GroundingMetadata == nil {
@@ -159,7 +165,107 @@ func AddWebSearchQueries(queries map[string]struct{}, candidates []*genai.Candid
 				queries[query] = struct{}{}
 			}
 		}
+		for _, query := range candidate.GroundingMetadata.ImageSearchQueries {
+			query = strings.TrimSpace(query)
+			if query != "" {
+				queries[imageSearchQueryKey+query] = struct{}{}
+			}
+		}
 	}
+}
+
+// ToolUseSources records, over a response or a whole stream, what fed
+// toolUsePromptTokenCount and which model answered.
+type ToolUseSources struct {
+	search       bool   // Google Search (web or image) queries ran
+	other        bool   // url_context fetches, code execution, Maps or retrieval grounding
+	modelVersion string // Gemini's modelVersion of the response
+}
+
+// Add records the tool use in candidates and the modelVersion, which names the model
+// even when the router knows it by an alias.
+func (s *ToolUseSources) Add(candidates []*genai.Candidate, modelVersion string) {
+	if modelVersion != "" {
+		s.modelVersion = modelVersion
+	}
+	for _, candidate := range candidates {
+		if candidate == nil {
+			continue
+		}
+		if candidate.URLContextMetadata != nil {
+			s.other = true
+		}
+		if candidate.Content != nil {
+			for _, part := range candidate.Content.Parts {
+				if part != nil && (part.ExecutableCode != nil || part.CodeExecutionResult != nil) {
+					s.other = true
+				}
+			}
+		}
+		gm := candidate.GroundingMetadata
+		if gm == nil {
+			continue
+		}
+		if len(gm.WebSearchQueries) > 0 || len(gm.ImageSearchQueries) > 0 {
+			s.search = true
+		}
+		if len(gm.RetrievalQueries) > 0 {
+			s.other = true
+		}
+		for _, chunk := range gm.GroundingChunks {
+			if chunk != nil && (chunk.Maps != nil || chunk.RetrievedContext != nil) {
+				s.other = true
+			}
+		}
+	}
+}
+
+// unbilledSearchContext reports whether the answering model (by modelVersion, else
+// model) does not charge Google Search context as input.
+func (s ToolUseSources) unbilledSearchContext(model string) bool {
+	for _, name := range []string{s.modelVersion, model} {
+		if profile := lookupGeminiModelProfile(name); profile != nil {
+			return profile.unbilledSearchContext
+		}
+	}
+	return false
+}
+
+// BillableUsageMetadata drops the tool-use prompt tokens from meta when the model does
+// not charge Google Search context and only Google Search produced it. With any other
+// tool (url_context is billed as input) the split is unknown, so all of it is billed.
+func BillableUsageMetadata(meta *genai.GenerateContentResponseUsageMetadata, sources ToolUseSources, model string) *genai.GenerateContentResponseUsageMetadata {
+	if meta == nil || meta.ToolUsePromptTokenCount <= 0 || !sources.search || sources.other ||
+		!sources.unbilledSearchContext(model) {
+		return meta
+	}
+	billable := *meta
+	if billable.TotalTokenCount >= billable.ToolUsePromptTokenCount {
+		billable.TotalTokenCount -= billable.ToolUsePromptTokenCount
+	}
+	billable.ToolUsePromptTokenCount = 0
+	billable.ToolUsePromptTokensDetails = nil
+	return &billable
+}
+
+// streamUsageMetadata is BillableUsageMetadata for one stream chunk. Stream usage is
+// merged with later non-zero values winning, so a zero can't undo an earlier value;
+// until the last chunk (which carries the grounding) the tool-use modality breakdown
+// is left out, or search image tokens would stick even when they end up unbilled.
+func streamUsageMetadata(meta *genai.GenerateContentResponseUsageMetadata, sources ToolUseSources, model string, finished bool) *genai.GenerateContentResponseUsageMetadata {
+	meta = BillableUsageMetadata(meta, sources, model)
+	if finished || meta == nil || len(meta.ToolUsePromptTokensDetails) == 0 || !sources.unbilledSearchContext(model) {
+		return meta
+	}
+	partial := *meta
+	partial.ToolUsePromptTokensDetails = nil
+	return &partial
+}
+
+// HasFinishReason reports whether a candidate carries Gemini's finish reason; it
+// is absent on every stream chunk but the last.
+func HasFinishReason(candidate *genai.Candidate) bool {
+	return candidate != nil && candidate.FinishReason != "" && candidate.FinishReason != genai.FinishReasonUnspecified
 }
 
 func inlineDataToChatImage(index int, blob *genai.Blob) (openai.ImageData, bool) {

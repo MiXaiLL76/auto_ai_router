@@ -31,6 +31,8 @@ func TransformVertexStreamToOpenAI(vertexStream io.Reader, model string, output 
 	isFirstChunk := true
 	doneWritten := false // track if [DONE] was sent
 	webSearchQueries := make(map[string]struct{})
+	var toolUse ToolUseSources
+	finished := false // a candidate has reported its finish reason
 
 	vertexLineCount := 0
 	vertexChunkCount := 0
@@ -64,6 +66,12 @@ func TransformVertexStreamToOpenAI(vertexStream io.Reader, model string, output 
 		}
 		AddWebSearchQueries(webSearchQueries, vertexChunk.Candidates)
 		webSearchRequests := len(webSearchQueries)
+		toolUse.Add(vertexChunk.Candidates, vertexChunk.ModelVersion)
+		for _, candidate := range vertexChunk.Candidates {
+			if HasFinishReason(candidate) {
+				finished = true
+			}
+		}
 
 		// Skip chunks with no candidates
 		if len(vertexChunk.Candidates) == 0 {
@@ -77,7 +85,7 @@ func TransformVertexStreamToOpenAI(vertexStream io.Reader, model string, output 
 					Created: timestamp,
 					Model:   model,
 					Choices: []openai.OpenAIStreamingChoice{},
-					Usage:   convertVertexUsageMetadata(vertexChunk.UsageMetadata),
+					Usage:   convertVertexUsageMetadata(streamUsageMetadata(vertexChunk.UsageMetadata, toolUse, model, finished)),
 				}
 				setVertexWebSearchUsage(openAIChunk.Usage, webSearchRequests)
 				chunkJSON, err := json.Marshal(openAIChunk)
@@ -160,7 +168,8 @@ func TransformVertexStreamToOpenAI(vertexStream io.Reader, model string, output 
 			}
 
 			// Handle finish reason
-			if candidate.FinishReason != genai.FinishReasonUnspecified {
+			// An absent finish reason is "", not FINISH_REASON_UNSPECIFIED.
+			if HasFinishReason(candidate) {
 				finishReason := mapFinishReason(string(candidate.FinishReason))
 				// Vertex returns "STOP" even with function calls (Gemini 3+).
 				// Override for OpenAI compatibility.
@@ -181,7 +190,7 @@ func TransformVertexStreamToOpenAI(vertexStream io.Reader, model string, output 
 			// 	"total_tokens", vertexChunk.UsageMetadata.TotalTokenCount,
 			// 	"cached_tokens", vertexChunk.UsageMetadata.CachedContentTokenCount,
 			// )
-			openAIChunk.Usage = convertVertexUsageMetadata(vertexChunk.UsageMetadata)
+			openAIChunk.Usage = convertVertexUsageMetadata(streamUsageMetadata(vertexChunk.UsageMetadata, toolUse, model, finished))
 			setVertexWebSearchUsage(openAIChunk.Usage, webSearchRequests)
 		}
 
