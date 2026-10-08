@@ -425,6 +425,64 @@ func TestMergeEmbedContentResponses_FullUsageListsNoUnmeteredInputs(t *testing.T
 		"no usage at all: the whole request is estimated, nothing to list")
 }
 
+func TestEmbedContentPartialResponse_BillsTheRepliesThatArrived(t *testing.T) {
+	// Input 0 metered, input 1 never answered, input 2 answered without usage:
+	// its text is estimated (12 characters -> 3 tokens), the image is not.
+	request := `{"model":"gemini-embedding-2","input":["metered input text","never answered",
+		[{"type":"text","text":"twelve chars"},{"type":"image_url","image_url":{"url":"data:image/png;base64,iVBORw0KGgo="}}]]}`
+	body, embedded, estimated, err := EmbedContentPartialResponse([][]byte{
+		[]byte(`{"embedding":{"values":[1]},"usageMetadata":{"promptTokenCount":263,"totalTokenCount":263,"promptTokensDetails":[{"modality":"TEXT","tokenCount":5},{"modality":"IMAGE","tokenCount":258}]}}`),
+		nil,
+		[]byte(`{"embedding":{"values":[3]}}`),
+	}, "gemini-embedding-2", []byte(request))
+
+	require.NoError(t, err)
+	assert.Equal(t, 2, embedded)
+	assert.True(t, estimated)
+	var resp openai.OpenAIEmbeddingResponse
+	require.NoError(t, json.Unmarshal(body, &resp))
+	assert.Empty(t, resp.Data, "the client gets no vectors")
+	assert.Equal(t, "gemini-embedding-2", resp.Model)
+	assert.Equal(t, 266, resp.Usage.PromptTokens)
+	assert.Equal(t, 266, resp.Usage.TotalTokens)
+	assert.Equal(t, &openai.OpenAIEmbeddingPromptDetails{TextTokens: 8, ImageTokens: 258}, resp.Usage.PromptTokensDetails)
+}
+
+func TestEmbedContentPartialResponse_NoUsageAtAllEstimatesOnlyTheRepliesThatArrived(t *testing.T) {
+	request := `{"model":"gemini-embedding-2","input":["twelve chars","a much longer input that never got a reply"]}`
+	body, embedded, estimated, err := EmbedContentPartialResponse([][]byte{[]byte(`{"embedding":{"values":[1]}}`), nil},
+		"gemini-embedding-2", []byte(request))
+
+	require.NoError(t, err)
+	assert.Equal(t, 1, embedded)
+	assert.True(t, estimated)
+	var resp openai.OpenAIEmbeddingResponse
+	require.NoError(t, json.Unmarshal(body, &resp))
+	assert.Equal(t, 3, resp.Usage.PromptTokens)
+	assert.Nil(t, resp.Usage.PromptTokensDetails)
+}
+
+func TestEmbedContentPartialResponse_NothingArrived(t *testing.T) {
+	body, embedded, estimated, err := EmbedContentPartialResponse([][]byte{nil, nil}, "gemini-embedding-2", nil)
+	require.NoError(t, err)
+	assert.Nil(t, body)
+	assert.Zero(t, embedded)
+	assert.False(t, estimated)
+}
+
+func TestEmbedContentPartialResponse_RejectsReplyWithoutEmbedding(t *testing.T) {
+	_, _, _, err := EmbedContentPartialResponse([][]byte{[]byte(`{"usageMetadata":{"promptTokenCount":3}}`)}, "gemini-embedding-2", nil)
+	require.Error(t, err)
+}
+
+func TestEmbedContentReplyTokens(t *testing.T) {
+	body := []byte(`{"content":{"parts":[{"text":"twelve chars"},{"inlineData":{"mimeType":"image/png","data":"iVBORw0KGgo="}}]}}`)
+	assert.Equal(t, 263, EmbedContentReplyTokens(
+		[]byte(`{"embedding":{"values":[1]},"usageMetadata":{"promptTokenCount":263,"totalTokenCount":263}}`), body), "reported usage")
+	assert.Equal(t, 3, EmbedContentReplyTokens([]byte(`{"embedding":{"values":[1]}}`), body), "else the estimate of its text")
+	assert.Zero(t, EmbedContentReplyTokens([]byte(`{"embedding":{"values":[1]}}`), []byte(`not json`)))
+}
+
 func TestIsEmbedContentReply(t *testing.T) {
 	assert.True(t, IsEmbedContentReply([]byte(`{"embedding":{"values":[1]}}`)))
 	assert.False(t, IsEmbedContentReply([]byte(`{"error":{"code":429,"status":"RESOURCE_EXHAUSTED"}}`)))

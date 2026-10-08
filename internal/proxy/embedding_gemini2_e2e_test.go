@@ -235,11 +235,11 @@ func TestDoEmbedContentFanOut_MergesRepliesInInputOrder(t *testing.T) {
 	template.Header.Set("Authorization", "Bearer vertex-token")
 	template.Header.Set("Content-Type", "application/json")
 
-	resp, inputFault, err := prx.doEmbedContentFanOut(template, "gemini-embedding-2", [][]byte{
+	resp, inputFault, err := prx.doEmbedContentFanOut(fanOutAttempt(template, "gemini-embedding-2", [][]byte{
 		[]byte(`{"content":{"parts":[{"text":"a"}]}}`),
 		[]byte(`{"content":{"parts":[{"text":"b"}]}}`),
 		[]byte(`{"content":{"parts":[{"text":"c"}]}}`),
-	}, &embedContentFanOutReplies{})
+	}), &embedContentFanOutReplies{})
 
 	require.NoError(t, err)
 	assert.False(t, inputFault)
@@ -270,10 +270,10 @@ func TestDoEmbedContentFanOut_ReturnsProviderErrorOfLowestInput(t *testing.T) {
 	require.NoError(t, err)
 
 	replies := &embedContentFanOutReplies{}
-	resp, inputFault, err := prx.doEmbedContentFanOut(template, "gemini-embedding-2", [][]byte{
+	resp, inputFault, err := prx.doEmbedContentFanOut(fanOutAttempt(template, "gemini-embedding-2", [][]byte{
 		[]byte(`{"content":{"parts":[{"text":"ok"}]}}`),
 		[]byte(`{"content":{"parts":[{"text":"bad"}]}}`),
-	}, replies)
+	}), replies)
 
 	require.NoError(t, err)
 	assert.False(t, inputFault, "a quota error is about the credential, not the input")
@@ -291,7 +291,7 @@ func TestDoEmbedContentFanOut_TransportErrorIsReturned(t *testing.T) {
 	template, err := http.NewRequest(http.MethodPost, upstreamURL+"/x:embedContent", nil)
 	require.NoError(t, err)
 
-	resp, inputFault, err := prx.doEmbedContentFanOut(template, "gemini-embedding-2", [][]byte{[]byte(`{}`), []byte(`{}`)}, &embedContentFanOutReplies{})
+	resp, inputFault, err := prx.doEmbedContentFanOut(fanOutAttempt(template, "gemini-embedding-2", [][]byte{[]byte(`{}`), []byte(`{}`)}), &embedContentFanOutReplies{})
 
 	require.Error(t, err)
 	assert.False(t, inputFault)
@@ -484,6 +484,11 @@ func textEmbedBodies(texts ...string) [][]byte {
 	return bodies
 }
 
+// fanOutAttempt is a fan-out attempt of model over bodies with no rate limits.
+func fanOutAttempt(template *http.Request, model string, bodies [][]byte) embedContentFanOut {
+	return embedContentFanOut{template: template, model: model, bodies: bodies}
+}
+
 func fanOutTemplate(t *testing.T, upstreamURL string) *http.Request {
 	t.Helper()
 	template, err := http.NewRequest(http.MethodPost, upstreamURL+"/v1beta1/projects/p/locations/global/publishers/google/models/gemini-embedding-2:embedContent", nil)
@@ -503,7 +508,7 @@ func TestDoEmbedContentFanOut_InputRefusalBesideSuccessIsInputFault(t *testing.T
 	defer upstream.Close()
 	prx := NewTestProxyBuilder().Build()
 
-	resp, inputFault, err := prx.doEmbedContentFanOut(fanOutTemplate(t, upstream.URL), "gemini-embedding-2", textEmbedBodies("ok", "bad"), &embedContentFanOutReplies{})
+	resp, inputFault, err := prx.doEmbedContentFanOut(fanOutAttempt(fanOutTemplate(t, upstream.URL), "gemini-embedding-2", textEmbedBodies("ok", "bad")), &embedContentFanOutReplies{})
 
 	require.NoError(t, err)
 	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
@@ -517,7 +522,7 @@ func TestDoEmbedContentFanOut_RefusalWithoutSuccessIsNotInputFault(t *testing.T)
 	defer upstream.Close()
 	prx := NewTestProxyBuilder().Build()
 
-	resp, inputFault, err := prx.doEmbedContentFanOut(fanOutTemplate(t, upstream.URL), "gemini-embedding-2", textEmbedBodies("x", "y"), &embedContentFanOutReplies{})
+	resp, inputFault, err := prx.doEmbedContentFanOut(fanOutAttempt(fanOutTemplate(t, upstream.URL), "gemini-embedding-2", textEmbedBodies("x", "y")), &embedContentFanOutReplies{})
 
 	require.NoError(t, err)
 	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
@@ -540,11 +545,11 @@ func TestDoEmbedContentFanOut_RetrySendsOnlyMissingInputs(t *testing.T) {
 	replies := &embedContentFanOutReplies{}
 	bodies := textEmbedBodies("a", "b", "c")
 
-	first, _, err := prx.doEmbedContentFanOut(fanOutTemplate(t, upstream.URL), "gemini-embedding-2", bodies, replies)
+	first, _, err := prx.doEmbedContentFanOut(fanOutAttempt(fanOutTemplate(t, upstream.URL), "gemini-embedding-2", bodies), replies)
 	require.NoError(t, err)
 	require.Equal(t, http.StatusTooManyRequests, first.StatusCode)
 
-	second, inputFault, err := prx.doEmbedContentFanOut(fanOutTemplate(t, upstream.URL), "gemini-embedding-2", bodies, replies)
+	second, inputFault, err := prx.doEmbedContentFanOut(fanOutAttempt(fanOutTemplate(t, upstream.URL), "gemini-embedding-2", bodies), replies)
 	require.NoError(t, err)
 	assert.False(t, inputFault)
 	require.Equal(t, http.StatusOK, second.StatusCode)
@@ -566,15 +571,22 @@ func TestDoEmbedContentFanOut_RepliesAreNotReusedAcrossModels(t *testing.T) {
 	replies := &embedContentFanOutReplies{}
 	bodies := textEmbedBodies("a", "b")
 
-	_, _, err := prx.doEmbedContentFanOut(fanOutTemplate(t, upstream.URL), "gemini-embedding-2-preview", bodies, replies)
+	_, _, err := prx.doEmbedContentFanOut(fanOutAttempt(fanOutTemplate(t, upstream.URL), "gemini-embedding-2-preview", bodies), replies)
 	require.NoError(t, err)
-	_, _, err = prx.doEmbedContentFanOut(fanOutTemplate(t, upstream.URL), "gemini-embedding-2", bodies, replies)
+	_, _, err = prx.doEmbedContentFanOut(fanOutAttempt(fanOutTemplate(t, upstream.URL), "gemini-embedding-2", bodies), replies)
 	require.NoError(t, err)
 
 	assert.Len(t, calls(), 4, "vectors of another model are never mixed in")
 }
 
 func newVertexEmbeddingProxy(t *testing.T, upstreamURL string, projects ...string) (*Proxy, *stubLiteLLMManager) {
+	t.Helper()
+	return newRateLimitedVertexEmbeddingProxy(t, upstreamURL, -1, projects...)
+}
+
+// newRateLimitedVertexEmbeddingProxy is newVertexEmbeddingProxy whose
+// credentials allow rpm requests a minute each (-1: unlimited).
+func newRateLimitedVertexEmbeddingProxy(t *testing.T, upstreamURL string, rpm int, projects ...string) (*Proxy, *stubLiteLLMManager) {
 	t.Helper()
 	target, err := url.Parse(upstreamURL)
 	require.NoError(t, err)
@@ -586,7 +598,7 @@ func newVertexEmbeddingProxy(t *testing.T, upstreamURL string, projects ...strin
 			ProjectID:       project,
 			Location:        "global",
 			CredentialsJSON: fakeServiceAccountJSON(t, upstreamURL+"/token"),
-			RPM:             -1,
+			RPM:             rpm,
 			TPM:             -1,
 		}
 	}
@@ -624,8 +636,26 @@ func TestProxyRequest_VertexGeminiEmbedding2InputRefusalIsNotRetried(t *testing.
 	assert.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
 	assert.Equal(t, int32(1), refused.Load(), "a refused input is not replayed on the other credentials")
 	assert.LessOrEqual(t, embedded.Load(), int32(19), "each other input is sent at most once")
+	// The inputs embedded before the refusal were paid for upstream: the key
+	// pays for them although the request failed.
 	require.Len(t, dbStub.loggedEntries, 1)
-	assert.Zero(t, dbStub.loggedEntries[0].Spend)
+	entry := dbStub.loggedEntries[0]
+	assert.Equal(t, int(embedded.Load()), entry.PromptTokens)
+	assert.InDelta(t, float64(embedded.Load())*0.00000026, entry.Spend, 1e-15)
+	assert.Equal(t, map[string]any{"embedded_inputs": float64(embedded.Load()), "inputs": float64(20)},
+		billedPartialEmbeddings(t, entry.Metadata))
+}
+
+// billedPartialEmbeddings returns spend_logs_metadata.billed_partial_embeddings
+// of a spend log row's metadata, nil when it has none.
+func billedPartialEmbeddings(t *testing.T, metadata string) map[string]any {
+	t.Helper()
+	var doc struct {
+		SpendLogsMetadata map[string]any `json:"spend_logs_metadata"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(metadata), &doc))
+	billed, _ := doc.SpendLogsMetadata["billed_partial_embeddings"].(map[string]any)
+	return billed
 }
 
 func TestProxyRequest_VertexGeminiEmbedding2RetrySendsOnlyMissingInputs(t *testing.T) {
@@ -694,13 +724,13 @@ func TestDoEmbedContentFanOut_SuccessReplyWithoutEmbeddingIsRefusedAndNotKept(t 
 	replies := &embedContentFanOutReplies{}
 	bodies := textEmbedBodies("a", "b", "c")
 
-	first, inputFault, err := prx.doEmbedContentFanOut(fanOutTemplate(t, upstream.URL), "gemini-embedding-2", bodies, replies)
+	first, inputFault, err := prx.doEmbedContentFanOut(fanOutAttempt(fanOutTemplate(t, upstream.URL), "gemini-embedding-2", bodies), replies)
 	require.NoError(t, err)
 	assert.False(t, inputFault)
 	assert.Equal(t, http.StatusTooManyRequests, first.StatusCode, "the status its error body maps to")
 	assert.Len(t, replies.byInput, 2, "only real vectors are kept")
 
-	second, _, err := prx.doEmbedContentFanOut(fanOutTemplate(t, upstream.URL), "gemini-embedding-2", bodies, replies)
+	second, _, err := prx.doEmbedContentFanOut(fanOutAttempt(fanOutTemplate(t, upstream.URL), "gemini-embedding-2", bodies), replies)
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, second.StatusCode)
 	body, err := io.ReadAll(second.Body)
@@ -721,7 +751,7 @@ func TestDoEmbedContentFanOut_SuccessReplyWithNothingUsableIs502(t *testing.T) {
 	defer upstream.Close()
 	prx := NewTestProxyBuilder().Build()
 
-	resp, inputFault, err := prx.doEmbedContentFanOut(fanOutTemplate(t, upstream.URL), "gemini-embedding-2", textEmbedBodies("a", "b"), &embedContentFanOutReplies{})
+	resp, inputFault, err := prx.doEmbedContentFanOut(fanOutAttempt(fanOutTemplate(t, upstream.URL), "gemini-embedding-2", textEmbedBodies("a", "b")), &embedContentFanOutReplies{})
 
 	require.NoError(t, err)
 	assert.False(t, inputFault)
@@ -743,7 +773,7 @@ func TestDoEmbedContentFanOut_OversizedReplyIsReturnedAsTooLarge(t *testing.T) {
 	prx := NewTestProxyBuilder().Build()
 	prx.maxResponseBodySize = 512
 
-	resp, inputFault, err := prx.doEmbedContentFanOut(fanOutTemplate(t, upstream.URL), "gemini-embedding-2", textEmbedBodies("busy", "big", "ok"), &embedContentFanOutReplies{})
+	resp, inputFault, err := prx.doEmbedContentFanOut(fanOutAttempt(fanOutTemplate(t, upstream.URL), "gemini-embedding-2", textEmbedBodies("busy", "big", "ok")), &embedContentFanOutReplies{})
 
 	require.ErrorIs(t, err, ErrResponseBodyTooLarge, "fatal, even beside a retryable refusal")
 	assert.False(t, inputFault)
@@ -768,12 +798,12 @@ func TestDoEmbedContentFanOut_InputRefusalAfterEarlierAttemptIsInputFault(t *tes
 	replies := &embedContentFanOutReplies{}
 	bodies := textEmbedBodies("ok", "bad")
 
-	_, inputFault, err := prx.doEmbedContentFanOut(fanOutTemplate(t, upstream.URL), "gemini-embedding-2", bodies, replies)
+	_, inputFault, err := prx.doEmbedContentFanOut(fanOutAttempt(fanOutTemplate(t, upstream.URL), "gemini-embedding-2", bodies), replies)
 	require.NoError(t, err)
 	require.False(t, inputFault)
 
 	// The retry sends "bad" alone; "ok" was embedded on the first attempt.
-	resp, inputFault, err := prx.doEmbedContentFanOut(fanOutTemplate(t, upstream.URL), "gemini-embedding-2", bodies, replies)
+	resp, inputFault, err := prx.doEmbedContentFanOut(fanOutAttempt(fanOutTemplate(t, upstream.URL), "gemini-embedding-2", bodies), replies)
 	require.NoError(t, err)
 	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
 	assert.True(t, inputFault, "another input of this request got embedded, so the refused one is at fault")
@@ -794,7 +824,7 @@ func TestDoEmbedContentFanOut_InputFaultWinsOverLowerIndexRefusal(t *testing.T) 
 	defer upstream.Close()
 	prx := NewTestProxyBuilder().Build()
 
-	resp, inputFault, err := prx.doEmbedContentFanOut(fanOutTemplate(t, upstream.URL), "gemini-embedding-2", textEmbedBodies("busy", "bad", "ok"), &embedContentFanOutReplies{})
+	resp, inputFault, err := prx.doEmbedContentFanOut(fanOutAttempt(fanOutTemplate(t, upstream.URL), "gemini-embedding-2", textEmbedBodies("busy", "bad", "ok")), &embedContentFanOutReplies{})
 
 	require.NoError(t, err)
 	assert.Equal(t, http.StatusBadRequest, resp.StatusCode, "the request cannot succeed on any credential")
@@ -864,4 +894,196 @@ func TestProxyRequest_VertexGeminiEmbedding2ReplyWithoutEmbeddingIsRetriedAlone(
 	assert.Len(t, calls(), 4, "a, b, c once and b again on the next credential")
 	require.Len(t, dbStub.loggedEntries, 1)
 	assert.InDelta(t, 3*0.00000026, dbStub.loggedEntries[0].Spend, 1e-15)
+}
+
+// limitedFanOutAttempt is a fan-out attempt on credential, admitted by the
+// balancer for model gemini-embedding-2: like the balancer, it takes the
+// attempt's first RPM slot before the fan-out does.
+func limitedFanOutAttempt(t *testing.T, prx *Proxy, upstreamURL, credential string, bodies [][]byte) embedContentFanOut {
+	t.Helper()
+	require.True(t, prx.rateLimiter.TryAllowAll(credential, "gemini-embedding-2"), "the balancer admits the credential")
+	return embedContentFanOut{
+		template:   fanOutTemplate(t, upstreamURL),
+		model:      "gemini-embedding-2",
+		bodies:     bodies,
+		credential: credential,
+		limitModel: "gemini-embedding-2",
+	}
+}
+
+func TestDoEmbedContentFanOut_CallsBeyondTheCredentialRPMGoToTheNextCredential(t *testing.T) {
+	upstream, calls := embedTextUpstream(t, func(_, text string, w http.ResponseWriter) {
+		writeTextEmbedding(w, map[string]string{"a": "1", "b": "2", "c": "3", "d": "4", "e": "5"}[text])
+	})
+	defer upstream.Close()
+	prx := NewTestProxyBuilder().Build()
+	prx.rateLimiter.AddCredentialWithTPM("grant-a", 2, 1000)
+	prx.rateLimiter.AddCredentialWithTPM("grant-b", 10, 1000)
+	replies := &embedContentFanOutReplies{}
+	bodies := textEmbedBodies("a", "b", "c", "d", "e")
+
+	resp, inputFault, err := prx.doEmbedContentFanOut(limitedFanOutAttempt(t, prx, upstream.URL, "grant-a", bodies), replies)
+	require.ErrorIs(t, err, errEmbedFanOutRateLimited)
+	assert.Contains(t, err.Error(), "3 of 5 inputs left")
+	assert.Nil(t, resp)
+	assert.False(t, inputFault)
+	assert.Len(t, calls(), 2, "the balancer's slot and one more: RPM 2")
+	assert.Equal(t, 2, prx.rateLimiter.GetCurrentRPM("grant-a"))
+	assert.Equal(t, 2, prx.rateLimiter.GetCurrentTPM("grant-a"), "the tokens of its replies")
+	assert.Len(t, replies.byInput, 2)
+
+	resp, _, err = prx.doEmbedContentFanOut(limitedFanOutAttempt(t, prx, upstream.URL, "grant-b", bodies), replies)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	body, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	assert.Contains(t, string(body), `"embeddings":[{"values":[1]},{"values":[2]},{"values":[3]},{"values":[4]},{"values":[5]}]`)
+	assert.ElementsMatch(t, []string{"p/a", "p/b", "p/c", "p/d", "p/e"}, calls(), "each input sent once")
+	assert.Equal(t, 3, prx.rateLimiter.GetCurrentRPM("grant-b"))
+	assert.Equal(t, 3, prx.rateLimiter.GetCurrentTPM("grant-b"))
+}
+
+func TestDoEmbedContentFanOut_CredentialTPMGatesFurtherCalls(t *testing.T) {
+	upstream, calls := embedTextUpstream(t, func(_, _ string, w http.ResponseWriter) {
+		writeTextEmbedding(w, "1")
+	})
+	defer upstream.Close()
+	prx := NewTestProxyBuilder().Build()
+	prx.rateLimiter.AddCredentialWithTPM("grant-a", 100, 50)
+	attempt := limitedFanOutAttempt(t, prx, upstream.URL, "grant-a", textEmbedBodies("a", "b", "c"))
+	prx.rateLimiter.ConsumeTokens("grant-a", 50) // used up by other requests
+
+	_, _, err := prx.doEmbedContentFanOut(attempt, &embedContentFanOutReplies{})
+
+	require.ErrorIs(t, err, errEmbedFanOutRateLimited)
+	assert.Len(t, calls(), 1, "only the call the balancer admitted")
+}
+
+func TestDoEmbedContentFanOut_ReplyWithoutUsageConsumesItsTextEstimate(t *testing.T) {
+	upstream, _ := embedTextUpstream(t, func(_, _ string, w http.ResponseWriter) {
+		_, _ = w.Write([]byte(`{"embedding":{"values":[1]}}`))
+	})
+	defer upstream.Close()
+	prx := NewTestProxyBuilder().Build()
+	prx.rateLimiter.AddCredentialWithTPM("grant-a", 100, 1000)
+
+	_, _, err := prx.doEmbedContentFanOut(limitedFanOutAttempt(t, prx, upstream.URL, "grant-a", textEmbedBodies("twelve chars", "eight ch")), &embedContentFanOutReplies{})
+
+	require.NoError(t, err)
+	assert.Equal(t, 5, prx.rateLimiter.GetCurrentTPM("grant-a"), "12 + 8 characters -> 3 + 2 tokens")
+}
+
+func TestProxyRequest_VertexGeminiEmbedding2SpreadsInputsOverCredentialRPM(t *testing.T) {
+	upstream, calls := embedTextUpstream(t, func(_, _ string, w http.ResponseWriter) {
+		writeTextEmbedding(w, "1")
+	})
+	defer upstream.Close()
+	prx, dbStub := newRateLimitedVertexEmbeddingProxy(t, upstream.URL, 3, "grant-a", "grant-b")
+
+	w := postEmbeddings(prx, `{"model":"gemini-embedding-2","input":["a","b","c","d","e"]}`)
+
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	perProject := map[string]int{}
+	for _, call := range calls() {
+		perProject[strings.Split(call, "/")[0]]++
+	}
+	assert.Len(t, calls(), 5, "each input sent once")
+	assert.ElementsMatch(t, []int{3, 2}, []int{perProject["grant-a"], perProject["grant-b"]},
+		"one credential up to its RPM, the rest on the other")
+	assert.Equal(t, perProject["grant-a"], prx.rateLimiter.GetCurrentRPM("grant-a"), "every upstream call counts")
+	assert.Equal(t, perProject["grant-b"], prx.rateLimiter.GetCurrentRPM("grant-b"))
+	assert.Equal(t, 5, prx.rateLimiter.GetCurrentTPM("grant-a")+prx.rateLimiter.GetCurrentTPM("grant-b"),
+		"tokens counted once, on the credential that served them")
+	assert.False(t, prx.balancer.IsBanned("grant-a", "gemini-embedding-2"))
+	assert.False(t, prx.balancer.IsBanned("grant-b", "gemini-embedding-2"))
+	require.Len(t, dbStub.loggedEntries, 1)
+	assert.InDelta(t, 5*0.00000026, dbStub.loggedEntries[0].Spend, 1e-15)
+}
+
+func TestProxyRequest_VertexGeminiEmbedding2RunsOutOfCredentialRPM(t *testing.T) {
+	upstream, calls := embedTextUpstream(t, func(_, _ string, w http.ResponseWriter) {
+		writeTextEmbedding(w, "1")
+	})
+	defer upstream.Close()
+	prx, dbStub := newRateLimitedVertexEmbeddingProxy(t, upstream.URL, 2, "grant-a", "grant-b")
+
+	w := postEmbeddings(prx, `{"model":"gemini-embedding-2","input":["a","b","c","d","e"]}`)
+
+	assert.Equal(t, http.StatusTooManyRequests, w.Code, w.Body.String())
+	assert.NotEmpty(t, w.Header().Get("Retry-After"))
+	assert.Len(t, calls(), 4, "two calls per credential, the fifth input never sent")
+	assert.False(t, prx.balancer.IsBanned("grant-a", "gemini-embedding-2"), "a local limit is not the credential's failure")
+	assert.False(t, prx.balancer.IsBanned("grant-b", "gemini-embedding-2"))
+	// The four embedded inputs were paid for upstream.
+	require.Len(t, dbStub.loggedEntries, 1)
+	entry := dbStub.loggedEntries[0]
+	assert.Equal(t, 4, entry.PromptTokens)
+	assert.InDelta(t, 4*0.00000026, entry.Spend, 1e-15)
+	assert.Equal(t, map[string]any{"embedded_inputs": float64(4), "inputs": float64(5)}, billedPartialEmbeddings(t, entry.Metadata))
+	assert.Contains(t, entry.Metadata, `"error_class":"RateLimitError"`)
+	assert.Contains(t, entry.Metadata, "Credential rate limits ran out before every embeddings input was sent")
+}
+
+func TestProxyRequest_VertexGeminiEmbedding2ProviderRefusalAfterRetriesBillsKeptReplies(t *testing.T) {
+	var cCalls atomic.Int32
+	upstream, calls := embedTextUpstream(t, func(_, text string, w http.ResponseWriter) {
+		if text == "c" {
+			cCalls.Add(1)
+			writeRateLimited(w)
+			return
+		}
+		writeTextEmbedding(w, "1")
+	})
+	defer upstream.Close()
+	prx, dbStub := newVertexEmbeddingProxy(t, upstream.URL, "grant-a", "grant-b")
+
+	w := postEmbeddings(prx, `{"model":"gemini-embedding-2","input":["a","b","c"]}`)
+
+	assert.Equal(t, http.StatusTooManyRequests, w.Code, w.Body.String())
+	assert.Equal(t, int32(2), cCalls.Load(), "c on both credentials")
+	assert.Len(t, calls(), 4, "a and b once")
+	require.Len(t, dbStub.loggedEntries, 1)
+	entry := dbStub.loggedEntries[0]
+	assert.Equal(t, 2, entry.PromptTokens)
+	assert.InDelta(t, 2*0.00000026, entry.Spend, 1e-15, "the key pays for a and b, embedded and paid for upstream")
+	assert.Equal(t, map[string]any{"embedded_inputs": float64(2), "inputs": float64(3)}, billedPartialEmbeddings(t, entry.Metadata))
+}
+
+func TestProxyRequest_VertexGeminiEmbedding2TransportFailureBillsKeptReplies(t *testing.T) {
+	upstream, _ := embedTextUpstream(t, func(_, text string, w http.ResponseWriter) {
+		if text == "c" {
+			time.Sleep(50 * time.Millisecond) // let a and b finish
+			conn, _, err := w.(http.Hijacker).Hijack()
+			require.NoError(t, err)
+			_ = conn.Close()
+			return
+		}
+		writeTextEmbedding(w, "1")
+	})
+	defer upstream.Close()
+	prx, dbStub := newVertexEmbeddingProxy(t, upstream.URL, "grant-a", "grant-b")
+
+	w := postEmbeddings(prx, `{"model":"gemini-embedding-2","input":["a","b","c"]}`)
+
+	assert.Equal(t, http.StatusBadGateway, w.Code, w.Body.String())
+	require.Len(t, dbStub.loggedEntries, 1)
+	entry := dbStub.loggedEntries[0]
+	assert.Equal(t, 2, entry.PromptTokens)
+	assert.InDelta(t, 2*0.00000026, entry.Spend, 1e-15)
+}
+
+func TestProxyRequest_VertexGeminiEmbedding2SuccessBillsNoKeptRepliesTwice(t *testing.T) {
+	upstream, _ := embedTextUpstream(t, func(_, _ string, w http.ResponseWriter) {
+		writeTextEmbedding(w, "1")
+	})
+	defer upstream.Close()
+	prx, dbStub := newVertexEmbeddingProxy(t, upstream.URL, "grant-a")
+
+	w := postEmbeddings(prx, `{"model":"gemini-embedding-2","input":["a","b","c"]}`)
+
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	require.Len(t, dbStub.loggedEntries, 1)
+	assert.Equal(t, 3, dbStub.loggedEntries[0].PromptTokens)
+	assert.Nil(t, billedPartialEmbeddings(t, dbStub.loggedEntries[0].Metadata))
+	assert.Equal(t, 3, prx.rateLimiter.GetCurrentTPM("grant-a"), "the fan-out's tokens, not counted again on success")
 }

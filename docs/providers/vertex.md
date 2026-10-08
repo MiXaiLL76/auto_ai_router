@@ -465,6 +465,8 @@ client.embeddings.create(
 - Input the router cannot convert is rejected with 400 before any call to Google. At most 100 items per request.
 - There is no `task_type`: put the task into the text, as in the example.
 - On Vertex AI (use `location: global`) each vector is a separate `embedContent` call, sent in parallel. A retry on the next credential re-sends only the inputs that have no vector yet; an input Google rejects (400/413/422) while the others succeed is not retried.
+- Each of these calls counts against the credential's `rpm` and `tpm`, like a request of its own, so set them to the Vertex AI quota in calls per minute. When a credential runs out partway through a request, the inputs still missing go to the next credential; when every credential has run out, the client gets `429` with `Retry-After`. One request spreads over at most `max_provider_retries + 1` credentials (see [Retry](../advanced/retry.md)).
+- If the request fails after some inputs were embedded, Google has already billed those calls, and the key pays for them: the spend log row (status `failure`) carries their usage and `spend_logs_metadata.billed_partial_embeddings` (`embedded_inputs` of `inputs`).
 
 `usage.prompt_tokens_details` splits the tokens by modality (`text_tokens`, `image_tokens`, `audio_tokens`, `video_tokens`; PDF pages count as images), and each modality is billed at its own rate (see [Model Pricing](../litellm-integration/pricing.md)). If Google returns no usage for some or all inputs, their text is estimated at ~4 characters per token (media is not counted) and a warning is logged.
 
