@@ -34,6 +34,41 @@ var (
 		[]string{"credential", "model", "endpoint", "status"},
 	)
 
+	// HTTP2TransportErrorsTotal is fed by http.HTTP2Config.CountError (see
+	// internal/httputil/client.go), the stdlib's own counter for client-side
+	// HTTP/2 transport errors. The reason label is Go's internal string for
+	// what happened (lowercase, digits, underscores only — see
+	// net/http.HTTP2Config.CountError's doc comment, a small fixed set, not
+	// user input) and despite the metric's name, most reasons do NOT mean a
+	// connection was closed: read_frame_eof/read_frame_unexpected_eof/
+	// read_frame_too_large/read_frame_other/read_frame_conn_error_* fire on
+	// routine frame-read errors (an ordinary EOF when a provider closes a
+	// keep-alive connection lands here too), recv_goaway_* fires whenever a
+	// peer sends GOAWAY (graceful drain, in-flight streams still finish),
+	// and recv_rststream_* fires per reset *stream*, not per connection —
+	// all of this is normal HTTP/2 traffic, unrelated to our ping config.
+	// The one reason this fix's ping check itself produces is
+	// conn_close_lost_ping: the idle-liveness PING went unacked within
+	// http2_ping_timeout and the connection actually was torn down. Filter
+	// on reason="conn_close_lost_ping" specifically when triaging the ping
+	// fix — the total across all reasons is mostly unrelated background
+	// noise, not a signal.
+	//
+	// conn_close_lost_ping itself can also be reported for a connection that
+	// was already closed for an unrelated reason: a known upstream Go bug
+	// (golang/go#80923) leaves healthCheck's AfterFunc timer running past
+	// readLoop's exit, so it can still fire and double-count a close that
+	// already happened. Harmless (the connection's already gone either way),
+	// but worth knowing before reading a small, steady trickle of this
+	// reason as N distinct real ping failures.
+	HTTP2TransportErrorsTotal = promauto.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "auto_ai_router_http2_transport_errors_total",
+			Help: "Client-side HTTP/2 transport errors from the Go runtime's own error counters, labeled by its internal reason string. Most reasons are routine protocol/connection-lifecycle events, not failures; reason=\"conn_close_lost_ping\" is the one this router's HTTP/2 ping liveness check itself produces.",
+		},
+		[]string{"reason"},
+	)
+
 	RequestDuration = promauto.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Name: "auto_ai_router_requests_duration_seconds",

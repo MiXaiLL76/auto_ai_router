@@ -21,6 +21,26 @@ import (
 // ErrResponseBodyTooLarge is returned when a response body exceeds the configured size limit.
 var ErrResponseBodyTooLarge = errors.New("response body too large")
 
+// http2ConnectionLostSubstring matches the error Go's HTTP/2 transport
+// returns when its own idle-liveness PING goes unacked and it tears down the
+// connection (closeForLostPing in net/http/internal/http2/transport.go —
+// also fires http.HTTP2Config.CountError's "conn_close_lost_ping", wired in
+// internal/httputil/client.go). It's a plain errors.New with no exported
+// sentinel and no Timeout() method, so substring matching is the only way to
+// recognize it.
+//
+// Before that ping check existed, the equivalent dead connection surfaced
+// via ResponseHeaderTimeout instead and was classified as a timeout below;
+// matching this string keeps it classified the same way, so anything keyed
+// off the 408/502 split (alerts, dashboards, fail2ban) doesn't see it
+// silently move to 502. This is Go's internal wording, not a stable
+// contract — if a future release changes it, this stops matching and such
+// requests fall through to 502. That's not a functional regression (retries
+// and fallback key off there being a transport error at all, not off this
+// specific classification), just a quiet drop in the 408 count, so it's
+// worth re-checking this string whenever the Go toolchain version changes.
+const http2ConnectionLostSubstring = "http2: client connection lost"
+
 // isTimeoutError checks if an error is a timeout error
 func isTimeoutError(err error) bool {
 	if err == nil {
@@ -35,6 +55,10 @@ func isTimeoutError(err error) bool {
 	// Check for net.Error timeout
 	var netErr net.Error
 	if errors.As(err, &netErr) && netErr.Timeout() {
+		return true
+	}
+
+	if strings.Contains(err.Error(), http2ConnectionLostSubstring) {
 		return true
 	}
 
