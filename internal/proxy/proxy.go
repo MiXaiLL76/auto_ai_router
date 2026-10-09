@@ -807,7 +807,7 @@ func (p *Proxy) executeProxyRequest(
 		// Proxy/AIR credentials are dynamic relays — don't record them in fail2ban.
 		// Their 429/5xx reflect downstream capacity, not a permanent credential failure.
 		if !cred.IsProxyLike() {
-			p.balancer.RecordResponse(cred.Name, modelID, statusCode)
+			p.recordBanSignal(cred, modelID, statusCode)
 			p.reportHealth(string(cred.Type), cred.Name, modelID, statusCode, 0)
 		}
 		// Per-attempt failure — tracked separately from the client-facing
@@ -818,7 +818,7 @@ func (p *Proxy) executeProxyRequest(
 	}
 	// Proxy/AIR credentials are dynamic relays — don't record them in fail2ban.
 	if !cred.IsProxyLike() {
-		p.balancer.RecordResponse(cred.Name, modelID, resp.StatusCode)
+		p.recordBanSignal(cred, modelID, resp.StatusCode)
 		p.reportHealth(string(cred.Type), cred.Name, modelID, resp.StatusCode,
 			healthclient.RetryAfterSeconds(resp.Header.Get("Retry-After")))
 	}
@@ -1859,7 +1859,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 				// Token error is retryable (different credential may have valid token)
 				shouldRetry = true
 				retryReason = RetryReasonAuthErr
-				p.balancer.RecordResponse(cred.Name, modelID, http.StatusInternalServerError)
+				p.recordBanSignal(cred, modelID, http.StatusInternalServerError)
 				p.reportHealth(string(cred.Type), cred.Name, modelID, http.StatusInternalServerError, 0)
 				// Per-attempt failure only — the client-facing RequestsTotal/RequestDuration
 				// metrics are recorded exactly once at the final outcome below.
@@ -2023,7 +2023,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 				p.logger.WarnContext(r.Context(), "Upstream request failed, will retry",
 					"credential", cred.Name, "model", modelID, "error", doErr, "url", targetURL)
 			}
-			p.balancer.RecordResponse(cred.Name, modelID, statusCode)
+			p.recordBanSignal(cred, modelID, statusCode)
 			p.reportHealth(string(cred.Type), cred.Name, modelID, statusCode, 0)
 			// Per-attempt failure only — the client-facing RequestsTotal/RequestDuration
 			// metrics are recorded exactly once at the final outcome below.
@@ -2116,7 +2116,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 		bodyReadTimer.Stop()
 		if readErr != nil {
 			closeBody()
-			p.balancer.RecordResponse(cred.Name, modelID, resp.StatusCode)
+			p.recordBanSignal(cred, modelID, resp.StatusCode)
 			p.reportHealth(string(cred.Type), cred.Name, modelID, resp.StatusCode,
 				healthclient.RetryAfterSeconds(resp.Header.Get("Retry-After")))
 			// This attempt genuinely failed (got a response, then lost the body).
@@ -2953,6 +2953,17 @@ func (p *Proxy) HandleGetResponse(w http.ResponseWriter, r *http.Request) {
 	if encErr := json.NewEncoder(w).Encode(resp); encErr != nil {
 		p.logger.ErrorContext(r.Context(), "HandleGetResponse: failed to encode response", "id", responseID, "error", encErr)
 	}
+}
+
+// recordBanSignal forwards the outcome to the ban-decision source: with the
+// kafka events publisher active the decisions live in the worker and the
+// local fail2ban counters stay untouched (bans arrive materialized via the
+// ban reader); otherwise the legacy fail2ban counters feed the decisions.
+func (p *Proxy) recordBanSignal(cred *config.CredentialConfig, modelID string, statusCode int) {
+	if p.events != nil {
+		return
+	}
+	p.balancer.RecordResponse(cred.Name, modelID, statusCode)
 }
 
 // reportHealth forwards one outcome observation to the health-check

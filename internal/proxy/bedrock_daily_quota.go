@@ -236,7 +236,7 @@ func (p *Proxy) recordProviderResponse(
 	if credential.Type == config.ProviderTypeBedrock && statusCode >= http.StatusOK && statusCode < http.StatusMultipleChoices {
 		p.bedrockDailyQuota.reset(credential.Name, bedrockDailyQuotaProviderModelKey(model, providerModel))
 	}
-	p.balancer.RecordResponse(credential.Name, model, statusCode)
+	p.recordBanSignal(credential, model, statusCode)
 	retryAfter := 0
 	if headers != nil {
 		retryAfter = healthclient.RetryAfterSeconds(headers.Get("Retry-After"))

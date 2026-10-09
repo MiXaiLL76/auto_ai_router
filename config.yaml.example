@@ -56,6 +56,11 @@ account_events:
   enabled: false
   topic: "account-events"
 
+# NOTE: with account_events enabled the router reads the worker's bans
+# straight from Redis — the redis section must be enabled and point at the
+# same instance/key_prefix the health worker uses, otherwise bans are not
+# applied (fail-open).
+
 # Optional external health-check service: a shared, Redis-backed view of
 # which upstream accounts are alive/dead across all router replicas.
 # NOTE: the worker no longer accepts HTTP reports — leave the legacy HTTP

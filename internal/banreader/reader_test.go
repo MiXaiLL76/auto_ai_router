@@ -1,0 +1,91 @@
+// Integration test against a real Redis (VALKEY_ADDR), mirroring how the
+// worker writes bans. Skipped when the env var is unset.
+package banreader
+
+import (
+	"context"
+	"fmt"
+	"log/slog"
+	"os"
+	"testing"
+	"time"
+
+	"github.com/mixaill76/auto_ai_router/internal/config"
+	"github.com/mixaill76/auto_ai_router/internal/fail2ban"
+	"github.com/mixaill76/auto_ai_router/internal/ratelimit"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"github.com/valkey-io/valkey-go"
+)
+
+type valkeyClient = valkey.Client
+
+func readerClient(t *testing.T, prefix string) (valkeyClient, config.RedisConfig, bool) {
+	addr := os.Getenv("VALKEY_ADDR")
+	if addr == "" {
+		return nil, config.RedisConfig{}, false
+	}
+	cfg := config.RedisConfig{
+		InitAddresses: []string{addr},
+		SelectDB:      9,
+		KeyPrefix:     prefix,
+		SyncInterval:  200 * time.Millisecond,
+		KeyTTL:        3600,
+	}
+	client, err := ratelimit.NewValkeyClient(cfg)
+	require.NoError(t, err)
+	return client, cfg, true
+}
+
+func seedBan(t *testing.T, client valkeyClient, cfg config.RedisConfig, member string, until int64) {
+	key := cfg.KeyPrefix + "openai:bans"
+	err := client.Do(context.Background(),
+		client.B().Zadd().Key(key).ScoreMember().ScoreMember(float64(until), member).Build()).Error()
+	require.NoError(t, err)
+	_ = client.Do(context.Background(), client.B().Sadd().Key(cfg.KeyPrefix+"providers").Member("openai").Build()).Error()
+}
+
+func seedBanDetails(t *testing.T, client valkeyClient, cfg config.RedisConfig, member string, code int64, reason string) {
+	err := client.Do(context.Background(),
+		client.B().Hset().Key(cfg.KeyPrefix+"openai:ban:"+member).FieldValue().
+			FieldValue("until", "0").
+			FieldValue("code", fmt.Sprintf("%d", code)).
+			FieldValue("reason", reason).
+			FieldValue("origin", "fail2ban").
+			Build()).Error()
+	require.NoError(t, err)
+}
+
+func TestReaderMaterializesAndLiftsBans(t *testing.T) {
+	client, cfg, ok := readerClient(t, "brt:")
+	if !ok {
+		t.Skip("VALKEY_ADDR not set, skipping Redis integration test")
+		return
+	}
+	now := time.Now().UTC().Unix()
+	seedBan(t, client, cfg, "cred1|gpt-4o", now+120)
+	seedBanDetails(t, client, cfg, "cred1|gpt-4o", 429, "status 429")
+
+	f2b := fail2ban.New(3, 0, []int{})
+	r := New(client, cfg, f2b, []string{"openai"}, slog.Default())
+	r.sync(context.Background())
+
+	assert.True(t, f2b.IsBanned("cred1", "gpt-4o"), "model ban materialized into fail2ban")
+	assert.False(t, r.IsDead("cred1"), "model ban is not an account dead")
+
+	// Remove the ban in Redis -> next sync lifts it locally.
+	err := client.Do(context.Background(),
+		client.B().Zrem().Key(cfg.KeyPrefix+"openai:bans").Member("cred1|gpt-4o").Build()).Error()
+	require.NoError(t, err)
+	r.sync(context.Background())
+	assert.False(t, f2b.IsBanned("cred1", "gpt-4o"), "vanished ban is lifted")
+
+	// Wildcard ban kills the account for the balancer's IsDead path.
+	seedBan(t, client, cfg, "cred2|*", now+300)
+	seedBanDetails(t, client, cfg, "cred2|*", 401, "status 401")
+	r.sync(context.Background())
+	assert.True(t, r.IsDead("cred2"), "wildcard ban reported as dead account")
+	cred, model := splitBanKey("cred1|gpt-4o")
+	assert.Equal(t, "cred1", cred)
+	assert.Equal(t, "gpt-4o", model)
+}

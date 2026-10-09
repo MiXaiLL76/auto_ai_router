@@ -21,6 +21,7 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/accountevents"
 	"github.com/mixaill76/auto_ai_router/internal/auth"
 	"github.com/mixaill76/auto_ai_router/internal/balancer"
+	"github.com/mixaill76/auto_ai_router/internal/banreader"
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/fail2ban"
 	"github.com/mixaill76/auto_ai_router/internal/health"
@@ -193,17 +194,29 @@ func main() {
 		defer hybridBackend.Close()
 	}
 
-	// Health-check service client: mirrors the shared alive/dead state of
-	// upstream accounts (kept in Redis by the healthcheck-service). When
-	// disabled, the no-op checker leaves the balancer behavior unchanged.
-	healthClient := healthclient.New(&cfg.HealthService, log)
-	bal.SetHealthChecker(healthClient)
-	// Bans decided by the service get mirrored into the local fail2ban so
-	// the balancer keeps working unchanged; with fail2ban.error_codes
-	// disabled the router stops deciding bans itself and only applies
-	// the service's verdicts.
-	if cfg.HealthService.ApplyBans {
-		healthClient.SetBanSynchronizer(newFail2BanSync(f2b, log))
+	// Ban decision source: with account_events enabled (kafka path) the
+	// router reads the worker's bans straight from Redis and materializes
+	// them into the local fail2ban; otherwise the legacy HTTP health
+	// service client mirrors statuses and bans via /v1. Unknown/stale
+	// state always fails open (nothing is dead).
+	var healthClient *healthclient.Client
+	var banReader *banreader.Reader
+	if cfg.AccountEvents.Enabled {
+		if redisBackend != nil {
+			banReader = banreader.New(redisBackend.Client(), cfg.Redis, f2b,
+				credentialProviderTypes(cfg), log)
+			bal.SetHealthChecker(banReader)
+			log.Info("Health worker ban reader active",
+				"interval", cfg.Redis.SyncInterval)
+		} else {
+			log.Warn("account_events enabled but redis disabled: ban reader inactive, bans will not be applied")
+		}
+	} else if cfg.HealthService.Enabled {
+		healthClient = healthclient.New(&cfg.HealthService, log)
+		bal.SetHealthChecker(healthClient)
+		if cfg.HealthService.ApplyBans {
+			healthClient.SetBanSynchronizer(newFail2BanSync(f2b, log))
+		}
 	}
 
 	modelManager := initializeModelManager(log, cfg, rateLimiter, bal)
@@ -326,7 +339,12 @@ func main() {
 	defer bgCancel()
 
 	prx.Start(bgCtx)
-	go healthClient.Start(bgCtx)
+	if healthClient != nil {
+		go healthClient.Start(bgCtx)
+	}
+	if banReader != nil {
+		go banReader.Start(bgCtx)
+	}
 
 	var wg sync.WaitGroup
 	videoRuntime.start(bgCtx, &wg)
@@ -1607,4 +1625,19 @@ func (s *fail2banSync) SyncBans(bans []healthclient.BanInfo) {
 
 func banPairKey(credential, model string) string {
 	return credential + "|" + model
+}
+
+// credentialProviderTypes returns the unique credential types from the
+// static config; the ban reader merges them with the worker's providers set.
+func credentialProviderTypes(cfg *config.Config) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, cred := range cfg.Credentials {
+		t := string(cred.Type)
+		if t != "" && !seen[t] {
+			seen[t] = true
+			out = append(out, t)
+		}
+	}
+	return out
 }
