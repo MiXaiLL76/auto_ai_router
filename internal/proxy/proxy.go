@@ -404,6 +404,10 @@ type Config struct {
 	RawBodyRedactSensitiveFields bool                       // Mirrors KafkaRawBodiesConfig.RedactSensitiveFields
 	HealthChecker                HealthChecker              // Optional: cached DB health status (updated by health monitor)
 	Events                       *accountevents.Publisher   // Optional: outcome events -> health worker (kafka)
+	// BanDecisionsExternal gates the local fail2ban counters: true only
+	// when an external ban source (the worker's reader) is actually wired,
+	// so a misconfigured publisher alone never disables local bans.
+	BanDecisionsExternal bool
 	PriceRegistry                *models.ModelPriceRegistry // Model pricing information (optional)
 	OrganizationPolicies         *models.OrganizationPolicyRegistry
 	MaxProviderRetries           int                 // Max same-type credential retries (default: 2)
@@ -453,6 +457,7 @@ type Proxy struct {
 	rawBodyRedactSensitiveFields     bool                       // Mirrors KafkaRawBodiesConfig.RedactSensitiveFields
 	healthChecker                    HealthChecker              // Cached DB health status (optional)
 	events                          *accountevents.Publisher   // Account outcome events publisher (kafka; nil when disabled)
+	banDecisionsExternal            bool                       // external ban source wired (see recordBanSignal)
 	priceRegistry                    *models.ModelPriceRegistry // Model pricing information (optional)
 	organizationPolicies             *models.OrganizationPolicyRegistry
 	maxProviderRetries               int                 // Max same-type credential retries on provider errors
@@ -546,6 +551,7 @@ func New(cfg *Config) *Proxy {
 		rawBodyRedactSensitiveFields:     cfg.RawBodyRedactSensitiveFields,
 		healthChecker:                    cfg.HealthChecker,
 		events:                          cfg.Events,
+		banDecisionsExternal:            cfg.BanDecisionsExternal,
 		priceRegistry:                    cfg.PriceRegistry,
 		organizationPolicies:             cfg.OrganizationPolicies,
 		maxProviderRetries:               cfg.MaxProviderRetries,
@@ -2951,12 +2957,14 @@ func (p *Proxy) HandleGetResponse(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// recordBanSignal forwards the outcome to the ban-decision source: with the
-// kafka events publisher active the decisions live in the worker and the
-// local fail2ban counters stay untouched (bans arrive materialized via the
-// ban reader); otherwise the legacy fail2ban counters feed the decisions.
+// recordBanSignal forwards the outcome to the ban-decision source. Local
+// fail2ban counters are skipped ONLY when an external ban source is truly
+// wired (banDecisionsExternal, set together with the ban reader): otherwise,
+// even with a kafka publisher running, the router keeps its own bans as a
+// fail-safe — a misconfigured or temporarily unavailable Redis must never
+// leave the balancer without any ban decisions at all.
 func (p *Proxy) recordBanSignal(cred *config.CredentialConfig, modelID string, statusCode int) {
-	if p.events != nil {
+	if p.banDecisionsExternal {
 		return
 	}
 	p.balancer.RecordResponse(cred.Name, modelID, statusCode)

@@ -199,15 +199,19 @@ func main() {
 	// (the router keeps its fail2ban rules). Unknown/stale state always
 	// fails open (nothing is dead).
 	var banReader *banreader.Reader
+	banDecisionsExternal := false
 	if cfg.AccountEvents.Enabled {
 		if redisBackend != nil {
 			banReader = banreader.New(redisBackend.Client(), cfg.Redis, f2b,
 				credentialProviderTypes(cfg), log)
 			bal.SetHealthChecker(banReader)
+			// The local fail2ban counters may now step aside: an external
+			// source of bans is really connected. Only then.
+			banDecisionsExternal = true
 			log.Info("Health worker ban reader active",
 				"interval", cfg.Redis.SyncInterval)
 		} else {
-			log.Warn("account_events enabled but redis disabled: ban reader inactive, bans will not be applied")
+			log.Warn("account_events enabled but redis disabled: ban reader inactive, local fail2ban stays active")
 		}
 	}
 
@@ -297,6 +301,7 @@ func main() {
 		RawBodyRedactSensitiveFields: cfg.Kafka.RawBodies.RedactSensitiveFields,
 		HealthChecker:                healthChecker,
 		Events:                       accountEvents,
+		BanDecisionsExternal:         banDecisionsExternal,
 		PriceRegistry:                priceRegistry,
 		OrganizationPolicies:         organizationPolicies,
 		MaxProviderRetries:           cfg.Server.MaxProviderRetries,

@@ -30,9 +30,9 @@ func TestKafkaPathReportAndBanSignal(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	// balancer is intentionally nil: on the kafka path neither call should
-	// touch it.
-	prx := &Proxy{events: pub}
+	// balancer is intentionally nil: with the external source wired, neither
+	// call should touch it.
+	prx := &Proxy{events: pub, banDecisionsExternal: true}
 
 	prx.reportHealth("openai", "cred-1", "gpt-4o", 429, 45) // queues event
 	prx.recordBanSignal(&config.CredentialConfig{Name: "cred-1"}, "gpt-4o", 429)
