@@ -396,34 +396,34 @@ type Config struct {
 	ModelManager                 *models.Manager
 	Version                      string
 	Commit                       string
-	LiteLLMDB                    litellmdb.Manager          // LiteLLM database integration (optional)
-	KafkaLog                     kafkalog.Manager           // Kafka spend-log publishing (optional, analytics write-path)
-	RawBodyLog                   kafkalog.RawBodyManager    // Kafka raw-body publishing (optional, separate topic, failure-only)
-	RawBodyStoreRawBody          bool                       // Mirrors KafkaRawBodiesConfig.StoreRawBody
-	RawBodyStoreOnlyErrors       bool                       // Mirrors KafkaRawBodiesConfig.StoreOnlyErrors
-	RawBodyRedactSensitiveFields bool                       // Mirrors KafkaRawBodiesConfig.RedactSensitiveFields
-	HealthChecker                HealthChecker              // Optional: cached DB health status (updated by health monitor)
-	Events                       *accountevents.Publisher   // Optional: outcome events -> health worker (kafka)
+	LiteLLMDB                    litellmdb.Manager        // LiteLLM database integration (optional)
+	KafkaLog                     kafkalog.Manager         // Kafka spend-log publishing (optional, analytics write-path)
+	RawBodyLog                   kafkalog.RawBodyManager  // Kafka raw-body publishing (optional, separate topic, failure-only)
+	RawBodyStoreRawBody          bool                     // Mirrors KafkaRawBodiesConfig.StoreRawBody
+	RawBodyStoreOnlyErrors       bool                     // Mirrors KafkaRawBodiesConfig.StoreOnlyErrors
+	RawBodyRedactSensitiveFields bool                     // Mirrors KafkaRawBodiesConfig.RedactSensitiveFields
+	HealthChecker                HealthChecker            // Optional: cached DB health status (updated by health monitor)
+	Events                       *accountevents.Publisher // Optional: outcome events -> health worker (kafka)
 	// BanDecisionsExternal gates the local fail2ban counters: true only
 	// when an external ban source (the worker's reader) is actually wired,
 	// so a misconfigured publisher alone never disables local bans.
-	BanDecisionsExternal bool
-	PriceRegistry                *models.ModelPriceRegistry // Model pricing information (optional)
-	OrganizationPolicies         *models.OrganizationPolicyRegistry
-	MaxProviderRetries           int                 // Max same-type credential retries (default: 2)
-	MaxFallbackAttempts          int                 // Max fallback proxy hops per request chain (default: 5)
-	Retry                        config.RetryConfig  // Which upstream errors are replayed on another credential (zero value = built-in policy)
-	ResponseStore                responsestore.Store // Optional: Responses API store (bbolt or Redis)
-	SessionStickyEnabled         bool
-	SessionStickyAutoCacheCtrl   bool // Auto-inject Anthropic cache_control markers when session is active (default: true)
-	SessionStoreTTL              time.Duration
-	RouterID                     string // Human-readable name for this router (shown in /trace); defaults to hostname
-	DrainUpstreamOnAbort         bool   // When true, keep reading upstream after client disconnect to get real usage (default: false)
-	ResponseCompatibility        string
-	TiktokenEnabled              bool // Local tiktoken-based prompt/completion token fallback estimation (default: true)
-	StrictAllTeamModelsACL       bool
-	ResponseHeaderMode           config.ResponseHeaderMode
-	CredentialNameAsTeamID       bool
+	BanDecisionsExternal       bool
+	PriceRegistry              *models.ModelPriceRegistry // Model pricing information (optional)
+	OrganizationPolicies       *models.OrganizationPolicyRegistry
+	MaxProviderRetries         int                 // Max same-type credential retries (default: 2)
+	MaxFallbackAttempts        int                 // Max fallback proxy hops per request chain (default: 5)
+	Retry                      config.RetryConfig  // Which upstream errors are replayed on another credential (zero value = built-in policy)
+	ResponseStore              responsestore.Store // Optional: Responses API store (bbolt or Redis)
+	SessionStickyEnabled       bool
+	SessionStickyAutoCacheCtrl bool // Auto-inject Anthropic cache_control markers when session is active (default: true)
+	SessionStoreTTL            time.Duration
+	RouterID                   string // Human-readable name for this router (shown in /trace); defaults to hostname
+	DrainUpstreamOnAbort       bool   // When true, keep reading upstream after client disconnect to get real usage (default: false)
+	ResponseCompatibility      string
+	TiktokenEnabled            bool // Local tiktoken-based prompt/completion token fallback estimation (default: true)
+	StrictAllTeamModelsACL     bool
+	ResponseHeaderMode         config.ResponseHeaderMode
+	CredentialNameAsTeamID     bool
 
 	BudgetReserver                   *budget.Reserver      // Atomic Redis budget reservation (nil if Redis disabled — feature is a no-op)
 	KeyRateLimiter                   *ratelimit.RPMLimiter // Key/user/team/org RPM/TPM enforcement (nil if Redis disabled)
@@ -456,8 +456,8 @@ type Proxy struct {
 	rawBodyStoreOnlyErrors           bool                       // Mirrors KafkaRawBodiesConfig.StoreOnlyErrors
 	rawBodyRedactSensitiveFields     bool                       // Mirrors KafkaRawBodiesConfig.RedactSensitiveFields
 	healthChecker                    HealthChecker              // Cached DB health status (optional)
-	events                          *accountevents.Publisher   // Account outcome events publisher (kafka; nil when disabled)
-	banDecisionsExternal            bool                       // external ban source wired (see recordBanSignal)
+	events                           *accountevents.Publisher   // Account outcome events publisher (kafka; nil when disabled)
+	banDecisionsExternal             bool                       // external ban source wired (see recordBanSignal)
 	priceRegistry                    *models.ModelPriceRegistry // Model pricing information (optional)
 	organizationPolicies             *models.OrganizationPolicyRegistry
 	maxProviderRetries               int                 // Max same-type credential retries on provider errors
@@ -550,8 +550,8 @@ func New(cfg *Config) *Proxy {
 		rawBodyStoreOnlyErrors:           cfg.RawBodyStoreOnlyErrors,
 		rawBodyRedactSensitiveFields:     cfg.RawBodyRedactSensitiveFields,
 		healthChecker:                    cfg.HealthChecker,
-		events:                          cfg.Events,
-		banDecisionsExternal:            cfg.BanDecisionsExternal,
+		events:                           cfg.Events,
+		banDecisionsExternal:             cfg.BanDecisionsExternal,
 		priceRegistry:                    cfg.PriceRegistry,
 		organizationPolicies:             cfg.OrganizationPolicies,
 		maxProviderRetries:               cfg.MaxProviderRetries,

@@ -60,19 +60,19 @@ type Publisher struct {
 // come from the kafka section; only the topic is account-events specific).
 func New(cfg *config.AccountEventsConfig, kafkaCfg *config.KafkaConfig, log *slog.Logger) (*Publisher, error) {
 	klc := &kafkalog.Config{
-		Brokers:        kafkaCfg.Brokers,
-		Topic:          cfg.Topic,
-		ClientID:       kafkaCfg.ClientID,
-		LogQueueSize:   kafkaCfg.LogQueueSize,
-		LogBatchSize:   kafkaCfg.LogBatchSize,
+		Brokers:          kafkaCfg.Brokers,
+		Topic:            cfg.Topic,
+		ClientID:         kafkaCfg.ClientID,
+		LogQueueSize:     kafkaCfg.LogQueueSize,
+		LogBatchSize:     kafkaCfg.LogBatchSize,
 		LogFlushInterval: kafkaCfg.LogFlushInterval,
-		LogWorkers:     kafkaCfg.LogWorkers,
-		TLSEnabled:     kafkaCfg.TLSEnabled,
-		SASLMechanism:  kafkaCfg.SASLMechanism,
-		SASLUsername:   kafkaCfg.SASLUsername,
-		SASLPassword:   kafkaCfg.SASLPassword,
-		TLSCACert:      kafkaCfg.TLSCACert,
-		Logger:         log,
+		LogWorkers:       kafkaCfg.LogWorkers,
+		TLSEnabled:       kafkaCfg.TLSEnabled,
+		SASLMechanism:    kafkaCfg.SASLMechanism,
+		SASLUsername:     kafkaCfg.SASLUsername,
+		SASLPassword:     kafkaCfg.SASLPassword,
+		TLSCACert:        kafkaCfg.TLSCACert,
+		Logger:           log,
 	}
 	logger, err := kafkalog.NewLogger[*Event](klc)
 	if err != nil {

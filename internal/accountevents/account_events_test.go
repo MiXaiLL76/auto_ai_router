@@ -2,8 +2,8 @@ package accountevents
 
 import (
 	"bytes"
-	"encoding/json"
 	"context"
+	"encoding/json"
 	"log/slog"
 	"testing"
 	"time"

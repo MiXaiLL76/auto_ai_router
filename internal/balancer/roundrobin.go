@@ -98,9 +98,9 @@ type RoundRobin struct {
 	// health mirrors the worker's per-account liveness (alive/dead).
 	// Always set: defaulted to a no-op that reports every account alive
 	// when the feature is disabled.
-	health          HealthChecker
-	modelChecker    ModelChecker
-	logger          *slog.Logger
+	health       HealthChecker
+	modelChecker ModelChecker
+	logger       *slog.Logger
 }
 
 func New(credentials []config.CredentialConfig, f2b *fail2ban.Fail2Ban, rl *ratelimit.RPMLimiter) *RoundRobin {

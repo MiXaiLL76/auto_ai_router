@@ -4,10 +4,11 @@
 // check (whole-account wildcard bans) used by the balancer's IsDead path.
 //
 // Key layout (mirror of the healthcheck-service store):
-//   {prefix}{provider}:bans       ZSET member=credential|model (* = whole
-//                                 account), score=ban_until (unix secs).
-//   {prefix}{provider}:ban:{key}  HASH details: until/code/reason/origin.
-//   {prefix}providers             SET of provider namespaces.
+//
+//	{prefix}{provider}:bans       ZSET member=credential|model (* = whole
+//	                              account), score=ban_until (unix secs).
+//	{prefix}{provider}:ban:{key}  HASH details: until/code/reason/origin.
+//	{prefix}providers             SET of provider namespaces.
 package banreader
 
 import (
@@ -37,8 +38,8 @@ type Reader struct {
 	logger       *slog.Logger
 
 	mu      sync.RWMutex
-	dead    map[string]int64  // credential -> wildcard ban until (0 = none)
-	applied map[string]bool   // ban keys currently materialized in fail2ban
+	dead    map[string]int64 // credential -> wildcard ban until (0 = none)
+	applied map[string]bool  // ban keys currently materialized in fail2ban
 }
 
 // New creates the reader over the shared valkey client. localTypes are the
@@ -147,7 +148,7 @@ func (r *Reader) sync(ctx context.Context) {
 	for _, provider := range r.providers(ctx) {
 		entries, err := r.client.Do(ctx,
 			r.client.B().Zrangebyscore().
-				Key(r.keyPrefix + provider + ":bans").
+				Key(r.keyPrefix+provider+":bans").
 				Min(fmt.Sprintf("%d", now)).
 				Max("+inf").
 				Withscores().

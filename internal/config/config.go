@@ -281,11 +281,11 @@ type Config struct {
 	// worker's Kafka topic (brokers/SASL/TLS come from the kafka section);
 	// with it enabled the router reads the worker's bans from Redis for
 	// the ban reader (see internal/banreader).
-	AccountEvents AccountEventsConfig `yaml:"account_events,omitempty"`
-	OTEL                 OTELConfig                 `yaml:"otel,omitempty"`
-	Kafka                KafkaConfig                `yaml:"kafka,omitempty"`
-	Video                VideoConfig                `yaml:"video,omitempty"`
-	VisionFallback       VisionFallbackConfig       `yaml:"vision_fallback,omitempty"`
+	AccountEvents  AccountEventsConfig  `yaml:"account_events,omitempty"`
+	OTEL           OTELConfig           `yaml:"otel,omitempty"`
+	Kafka          KafkaConfig          `yaml:"kafka,omitempty"`
+	Video          VideoConfig          `yaml:"video,omitempty"`
+	VisionFallback VisionFallbackConfig `yaml:"vision_fallback,omitempty"`
 	// ModelTemplates stores x-model-templates entries as raw interface{} so that
 	// both single-model mappings and lists of models can be defined as YAML anchors
 	// without type errors. The actual model data is extracted via anchor expansion.
@@ -316,8 +316,8 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 		OrganizationPolicies []OrganizationPolicyConfig `yaml:"organization_policies,omitempty"`
 		LiteLLMDB            LiteLLMDBConfig            `yaml:"litellm_db,omitempty"`
 		Redis                RedisConfig                `yaml:"redis,omitempty"`
-		AccountEvents        AccountEventsConfig         `yaml:"account_events,omitempty"`
-		OTEL                 OTELConfig                  `yaml:"otel,omitempty"`
+		AccountEvents        AccountEventsConfig        `yaml:"account_events,omitempty"`
+		OTEL                 OTELConfig                 `yaml:"otel,omitempty"`
 		Kafka                KafkaConfig                `yaml:"kafka,omitempty"`
 		Video                VideoConfig                `yaml:"video,omitempty"`
 		VisionFallback       VisionFallbackConfig       `yaml:"vision_fallback,omitempty"`
@@ -564,7 +564,7 @@ func (r *RedisConfig) UnmarshalYAML(value *yaml.Node) error {
 		SelectDB          string   `yaml:"select_db,omitempty"`
 		KeyPrefix         string   `yaml:"key_prefix,omitempty"`
 		BalancerKeyPrefix string   `yaml:"balancer_key_prefix,omitempty"`
-		HealthKeyPrefix  string   `yaml:"health_key_prefix,omitempty"`
+		HealthKeyPrefix   string   `yaml:"health_key_prefix,omitempty"`
 		TLSEnabled        string   `yaml:"tls_enabled,omitempty"`
 		ConnectTimeout    string   `yaml:"connect_timeout,omitempty"`
 		ConnWriteTimeout  string   `yaml:"conn_write_timeout,omitempty"`
