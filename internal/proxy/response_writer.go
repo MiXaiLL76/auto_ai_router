@@ -414,6 +414,13 @@ func (p *Proxy) writeProxyResponse(w http.ResponseWriter, resp *ProxyResponse, c
 			responseBody = normalizedBody
 			responseBodyChanged = true
 		}
+		// Same as the primary proxy path (proxy.go): synthesize the standard
+		// cache_creation_tokens when the upstream reported the cache write only
+		// under Requesty's naming, so downstream pricing jsonpaths match it.
+		if normalizedBody, changed := modelutils.NormalizeCacheCreationUsage(responseBody); changed {
+			responseBody = normalizedBody
+			responseBodyChanged = true
+		}
 		// Only the client copy loses the results; callers bill from resp.Body.
 		if logCtx != nil && logCtx.HideWebSearchResults {
 			if stripped, ok := stripWebSearchResults(responseBody); ok {

@@ -2502,6 +2502,16 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 				bodyForTokenExtraction = normalizedBody
 				dropRepresentationIntegrityHeaders(resp.Header)
 			}
+			// Ensure standard cache-write naming is present whenever it is only
+			// known under an alternate spelling (e.g. Requesty's caching_tokens on
+			// an OpenAI→OpenAI passthrough). Pricing jsonpaths match the standard
+			// name, so without this cache writes are dropped from billing. No-op
+			// when the standard count is already set.
+			if normalizedBody, changed := modelutils.NormalizeCacheCreationUsage(finalResponseBody); changed {
+				finalResponseBody = normalizedBody
+				bodyForTokenExtraction = normalizedBody
+				dropRepresentationIntegrityHeaders(resp.Header)
+			}
 		}
 
 		if mappedStatus, ok := statusCodeFromProviderBodyError(resp.StatusCode, finalResponseBody); ok {

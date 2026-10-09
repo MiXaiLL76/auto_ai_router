@@ -179,7 +179,10 @@ lint:
 ## exactly as it fails the Lint workflow.
 vuln:
 	@echo "Running govulncheck..."
-	export PATH=/usr/local/go/bin:$$PATH && $(GO) run golang.org/x/vuln/cmd/govulncheck@latest ./...
+	# GOTOOLCHAIN mirrors the CI step: stdlib advisories are fixed per 1.27.x
+	# patch release, so analyze with the newest patch regardless of the Go
+	# installed locally, the same toolchain the release images float to.
+	export PATH=/usr/local/go/bin:$$PATH && GOTOOLCHAIN=go1.27.2 $(GO) run golang.org/x/vuln/cmd/govulncheck@latest ./...
 	@echo "Vuln check complete"
 
 ## install-lint: Install pinned golangci-lint
