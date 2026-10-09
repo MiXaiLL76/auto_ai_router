@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
+	"github.com/mixaill76/auto_ai_router/internal/httputil"
 	"github.com/mixaill76/auto_ai_router/internal/utils"
 )
 
@@ -235,7 +236,12 @@ func (p *Proxy) recordProviderResponse(
 	if credential.Type == config.ProviderTypeBedrock && statusCode >= http.StatusOK && statusCode < http.StatusMultipleChoices {
 		p.bedrockDailyQuota.reset(credential.Name, bedrockDailyQuotaProviderModelKey(model, providerModel))
 	}
-	p.balancer.RecordResponse(credential.Name, model, statusCode)
+	p.recordBanSignal(credential, model, statusCode)
+	retryAfter := 0
+	if headers != nil {
+		retryAfter = httputil.RetryAfterSeconds(headers.Get("Retry-After"))
+	}
+	p.reportHealth(string(credential.Type), credential.Name, model, statusCode, retryAfter)
 	return false
 }
 

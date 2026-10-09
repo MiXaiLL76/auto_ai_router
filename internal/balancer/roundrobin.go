@@ -13,6 +13,7 @@ import (
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/fail2ban"
+
 	"github.com/mixaill76/auto_ai_router/internal/httputil"
 	"github.com/mixaill76/auto_ai_router/internal/monitoring"
 	"github.com/mixaill76/auto_ai_router/internal/ratelimit"
@@ -94,8 +95,12 @@ type RoundRobin struct {
 	swrr            map[schedKey]*swrrState   // smooth weighted round-robin state per selection cycle
 	fail2ban        *fail2ban.Fail2Ban
 	rateLimiter     *ratelimit.RPMLimiter
-	modelChecker    ModelChecker
-	logger          *slog.Logger
+	// health mirrors the worker's per-account liveness (alive/dead).
+	// Always set: defaulted to a no-op that reports every account alive
+	// when the feature is disabled.
+	health       HealthChecker
+	modelChecker ModelChecker
+	logger       *slog.Logger
 }
 
 func New(credentials []config.CredentialConfig, f2b *fail2ban.Fail2Ban, rl *ratelimit.RPMLimiter) *RoundRobin {
@@ -125,6 +130,7 @@ func New(credentials []config.CredentialConfig, f2b *fail2ban.Fail2Ban, rl *rate
 		swrr:            make(map[schedKey]*swrrState),
 		fail2ban:        f2b,
 		rateLimiter:     rl,
+		health:          NewNoopHealthChecker(),
 		modelChecker:    nil,
 		logger:          slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelInfo})),
 	}
@@ -364,6 +370,12 @@ func (r *RoundRobin) NextSpecificScoped(credentialName, modelID string, visibili
 		return nil, ErrNoCredentialsAvailable
 	}
 
+	if r.health.IsDead(credentialName) {
+		// Exact-pick path: the health-check service says the account is
+		// dead, so the credential is not available at all.
+		return nil, ErrNoCredentialsAvailable
+	}
+
 	if !r.rateLimiter.TryAllowAll(credentialName, modelID) {
 		return nil, ErrRateLimitExceeded
 	}
@@ -580,6 +592,13 @@ func (r *RoundRobin) liveCandidates(modelID string, candidates []candidateEntry)
 		}
 		if r.fail2ban.IsBanned(c.cred.Name, modelID) {
 			monitoring.CredentialSelectionRejected.WithLabelValues("banned").Inc()
+			continue
+		}
+		if r.health.IsDead(c.cred.Name) {
+			// The health-check service marked this account dead fork
+			// every model; skipping it here lets another credential
+			// serve and keeps the dead one out of the rotation.
+			monitoring.CredentialSelectionRejected.WithLabelValues("dead").Inc()
 			continue
 		}
 		if c.tier != nil && !r.tierHasHeadroom(c.cred.Name, modelID, c.tier) {
@@ -948,6 +967,13 @@ func (r *RoundRobin) hasTriedPriorityCredential(attempted map[string]bool) bool 
 		}
 	}
 	return false
+}
+
+// SetHealthChecker installs the account-liveness view used when picking
+// credentials. Nil-safe callers do not exist: a no-op checker is the default,
+// so tests and disabled setups keep behaving as before.
+func (r *RoundRobin) SetHealthChecker(hc HealthChecker) {
+	r.health = hc
 }
 
 func (r *RoundRobin) RecordResponse(credentialName, modelID string, statusCode int) {
