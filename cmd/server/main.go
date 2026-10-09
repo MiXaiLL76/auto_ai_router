@@ -18,6 +18,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/mixaill76/auto_ai_router/internal/accountevents"
 	"github.com/mixaill76/auto_ai_router/internal/auth"
 	"github.com/mixaill76/auto_ai_router/internal/balancer"
 	"github.com/mixaill76/auto_ai_router/internal/config"
@@ -132,6 +133,20 @@ func main() {
 	litellmDBManager := initializeLiteLLMDB(cfg, log)
 	kafkaLogManager := initializeKafkaLog(cfg, log, litellmDBManager)
 	rawBodyLogManager := initializeRawBodyLog(cfg, log)
+
+	// Outcome events for the health worker: kafka-first transport (the
+	// service no longer accepts HTTP reports). Broker/SASL/TLS come from
+	// the kafka section; only the topic is account-events specific.
+	var accountEvents *accountevents.Publisher
+	if cfg.AccountEvents.Enabled {
+		accountEvents, err = accountevents.New(&cfg.AccountEvents, &cfg.Kafka, log)
+		if err != nil {
+			log.Error("Failed to create account events publisher, disabling", "error", err)
+			accountEvents = nil
+		} else {
+			log.Info("Account events publishing enabled", "topic", cfg.AccountEvents.Topic)
+		}
+	}
 
 	// ==================== Budget reservation & key-level RPM/TPM ====================
 	// Both are Redis-backed and reuse the shared valkey client with isolated key
@@ -277,6 +292,7 @@ func main() {
 		RawBodyRedactSensitiveFields: cfg.Kafka.RawBodies.RedactSensitiveFields,
 		HealthChecker:                healthChecker,
 		Health:                       healthClient,
+		Events:                       accountEvents,
 		PriceRegistry:                priceRegistry,
 		OrganizationPolicies:         organizationPolicies,
 		MaxProviderRetries:           cfg.Server.MaxProviderRetries,

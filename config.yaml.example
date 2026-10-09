@@ -46,11 +46,21 @@ monitoring:
   log_errors: false
   errors_log_path: "logs/logs.jsonl"
 
+# Outcome events for the health worker (the shared, Redis-backed view of
+# which upstream accounts are alive/dead). When enabled, every upstream
+# outcome (including successes — the worker uses them to reset counters)
+# is published to the account-events Kafka topic; broker/SASL/TLS settings
+# are inherited from the kafka section above. The health worker consumes
+# these and applies the ban rules.
+account_events:
+  enabled: false
+  topic: "account-events"
+
 # Optional external health-check service: a shared, Redis-backed view of
 # which upstream accounts are alive/dead across all router replicas.
-# Router reports every attempt outcome there (429 = account dead, with the
-# upstream Retry-After as its wait time) and pulls the merged status back, so
-# one replica's bad account is dead for the others too. Disabled by default.
+# NOTE: the worker no longer accepts HTTP reports — leave the legacy HTTP
+# path disabled; read-side statuses still come from it unless the reader
+# moves to direct Redis access.
 health_service:
   enabled: false
   url: "http://health-check.production.svc.cluster.local"

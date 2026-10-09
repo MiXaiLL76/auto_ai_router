@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/mixaill76/auto_ai_router/internal/accountevents"
 	"github.com/mixaill76/auto_ai_router/internal/auth"
 	"github.com/mixaill76/auto_ai_router/internal/balancer"
 	"github.com/mixaill76/auto_ai_router/internal/config"
@@ -404,6 +405,7 @@ type Config struct {
 	RawBodyRedactSensitiveFields bool                       // Mirrors KafkaRawBodiesConfig.RedactSensitiveFields
 	HealthChecker                HealthChecker              // Optional: cached DB health status (updated by health monitor)
 	Health                       *healthclient.Client       // Optional: account liveness reporter (nil = disabled)
+	Events                       *accountevents.Publisher   // Optional: outcome events -> health worker (kafka)
 	PriceRegistry                *models.ModelPriceRegistry // Model pricing information (optional)
 	OrganizationPolicies         *models.OrganizationPolicyRegistry
 	MaxProviderRetries           int                 // Max same-type credential retries (default: 2)
@@ -453,6 +455,7 @@ type Proxy struct {
 	rawBodyRedactSensitiveFields     bool                       // Mirrors KafkaRawBodiesConfig.RedactSensitiveFields
 	healthChecker                    HealthChecker              // Cached DB health status (optional)
 	health                          *healthclient.Client       // Account liveness reporter (health-check service; nil when disabled)
+	events                          *accountevents.Publisher   // Account outcome events publisher (kafka; nil when disabled)
 	priceRegistry                    *models.ModelPriceRegistry // Model pricing information (optional)
 	organizationPolicies             *models.OrganizationPolicyRegistry
 	maxProviderRetries               int                 // Max same-type credential retries on provider errors
@@ -545,6 +548,8 @@ func New(cfg *Config) *Proxy {
 		rawBodyStoreOnlyErrors:           cfg.RawBodyStoreOnlyErrors,
 		rawBodyRedactSensitiveFields:     cfg.RawBodyRedactSensitiveFields,
 		healthChecker:                    cfg.HealthChecker,
+		health:                          cfg.Health,
+		events:                          cfg.Events,
 		priceRegistry:                    cfg.PriceRegistry,
 		organizationPolicies:             cfg.OrganizationPolicies,
 		maxProviderRetries:               cfg.MaxProviderRetries,
@@ -803,7 +808,7 @@ func (p *Proxy) executeProxyRequest(
 		// Their 429/5xx reflect downstream capacity, not a permanent credential failure.
 		if !cred.IsProxyLike() {
 			p.balancer.RecordResponse(cred.Name, modelID, statusCode)
-			p.reportHealth(cred.Name, modelID, statusCode, 0)
+			p.reportHealth(string(cred.Type), cred.Name, modelID, statusCode, 0)
 		}
 		// Per-attempt failure — tracked separately from the client-facing
 		// RequestsTotal/RequestDuration metrics, which the caller records exactly
@@ -814,7 +819,7 @@ func (p *Proxy) executeProxyRequest(
 	// Proxy/AIR credentials are dynamic relays — don't record them in fail2ban.
 	if !cred.IsProxyLike() {
 		p.balancer.RecordResponse(cred.Name, modelID, resp.StatusCode)
-		p.reportHealth(cred.Name, modelID, resp.StatusCode,
+		p.reportHealth(string(cred.Type), cred.Name, modelID, resp.StatusCode,
 			healthclient.RetryAfterSeconds(resp.Header.Get("Retry-After")))
 	}
 	if resp.StatusCode != http.StatusOK {
@@ -1855,7 +1860,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 				shouldRetry = true
 				retryReason = RetryReasonAuthErr
 				p.balancer.RecordResponse(cred.Name, modelID, http.StatusInternalServerError)
-				p.reportHealth(cred.Name, modelID, http.StatusInternalServerError, 0)
+				p.reportHealth(string(cred.Type), cred.Name, modelID, http.StatusInternalServerError, 0)
 				// Per-attempt failure only — the client-facing RequestsTotal/RequestDuration
 				// metrics are recorded exactly once at the final outcome below.
 				p.metrics.RecordCredentialAttemptError(cred.Name)
@@ -2019,7 +2024,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 					"credential", cred.Name, "model", modelID, "error", doErr, "url", targetURL)
 			}
 			p.balancer.RecordResponse(cred.Name, modelID, statusCode)
-			p.reportHealth(cred.Name, modelID, statusCode, 0)
+			p.reportHealth(string(cred.Type), cred.Name, modelID, statusCode, 0)
 			// Per-attempt failure only — the client-facing RequestsTotal/RequestDuration
 			// metrics are recorded exactly once at the final outcome below.
 			p.metrics.RecordCredentialAttemptError(cred.Name)
@@ -2112,7 +2117,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 		if readErr != nil {
 			closeBody()
 			p.balancer.RecordResponse(cred.Name, modelID, resp.StatusCode)
-			p.reportHealth(cred.Name, modelID, resp.StatusCode,
+			p.reportHealth(string(cred.Type), cred.Name, modelID, resp.StatusCode,
 				healthclient.RetryAfterSeconds(resp.Header.Get("Retry-After")))
 			// This attempt genuinely failed (got a response, then lost the body).
 			// Only record here if the earlier `resp.StatusCode != http.StatusOK`
@@ -2950,9 +2955,18 @@ func (p *Proxy) HandleGetResponse(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// reportHealth forwards one outcome observation to the health-check service
-// unless the feature is disabled (no client constructed).
-func (p *Proxy) reportHealth(credential, model string, statusCode int, retryAfterSeconds int) {
+// reportHealth forwards one outcome observation to the health-check
+// infrastructure. With the kafka events publisher enabled the observation
+// goes there (the service no longer accepts HTTP reports); otherwise it
+// falls back to the legacy HTTP client (nil-safe when disabled).
+func (p *Proxy) reportHealth(provider, credential, model string, statusCode int, retryAfterSeconds int) {
+	if provider == "" {
+		provider = "unknown"
+	}
+	if p.events != nil {
+		p.events.Report(credential, provider, model, statusCode, retryAfterSeconds, "")
+		return
+	}
 	if p.health != nil {
 		p.health.Report(credential, model, statusCode, retryAfterSeconds)
 	}

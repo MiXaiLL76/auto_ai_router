@@ -241,7 +241,7 @@ func (p *Proxy) recordProviderResponse(
 	if headers != nil {
 		retryAfter = healthclient.RetryAfterSeconds(headers.Get("Retry-After"))
 	}
-	p.reportHealth(credential.Name, model, statusCode, retryAfter)
+	p.reportHealth(string(credential.Type), credential.Name, model, statusCode, retryAfter)
 	return false
 }
 

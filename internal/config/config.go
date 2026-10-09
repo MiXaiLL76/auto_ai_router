@@ -281,6 +281,9 @@ type Config struct {
 	// (see internal/healthclient): a shared, Redis-backed view of which
 	// upstream accounts are alive/dead across all router replicas.
 	HealthService HealthServiceConfig `yaml:"health_service,omitempty"`
+	// AccountEvents configures publishing outcome events to the health
+	// worker's Kafka topic (brokers/SASL/TLS come from the kafka section).
+	AccountEvents AccountEventsConfig `yaml:"account_events,omitempty"`
 	OTEL                 OTELConfig                 `yaml:"otel,omitempty"`
 	Kafka                KafkaConfig                `yaml:"kafka,omitempty"`
 	Video                VideoConfig                `yaml:"video,omitempty"`
@@ -316,6 +319,7 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 		LiteLLMDB            LiteLLMDBConfig            `yaml:"litellm_db,omitempty"`
 		Redis                RedisConfig                `yaml:"redis,omitempty"`
 		HealthService        HealthServiceConfig         `yaml:"health_service,omitempty"`
+		AccountEvents        AccountEventsConfig         `yaml:"account_events,omitempty"`
 		OTEL                 OTELConfig                  `yaml:"otel,omitempty"`
 		Kafka                KafkaConfig                `yaml:"kafka,omitempty"`
 		Video                VideoConfig                `yaml:"video,omitempty"`
@@ -343,6 +347,7 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 	c.LiteLLMDB = raw.LiteLLMDB
 	c.Redis = raw.Redis
 	c.HealthService = raw.HealthService
+	c.AccountEvents = raw.AccountEvents
 	c.OTEL = raw.OTEL
 	c.Kafka = raw.Kafka
 	c.Video = raw.Video
@@ -502,6 +507,39 @@ type RedisConfig struct {
 	// SyncInterval controls how often the hybrid backend pulls aggregated stats
 	// from Redis to account for traffic from other instances (default: 5s).
 	SyncInterval time.Duration `yaml:"sync_interval,omitempty"`
+}
+
+// AccountEventsConfig enables publishing upstream outcome events to the
+// health worker's Kafka topic. Broker/SASL/TLS settings are inherited from
+// the kafka section; only the topic is specific to account events.
+type AccountEventsConfig struct {
+	Enabled bool `yaml:"enabled"`
+	// Topic is the account-events topic (e.g. "account-events").
+	Topic string `yaml:"topic"`
+}
+
+func defaultAccountEventsConfig() AccountEventsConfig {
+	return AccountEventsConfig{Enabled: false, Topic: "account-events"}
+}
+
+func (a *AccountEventsConfig) UnmarshalYAML(value *yaml.Node) error {
+	type temp struct {
+		Enabled string `yaml:"enabled"`
+		Topic   string `yaml:"topic"`
+	}
+	var t temp
+	if err := value.Decode(&t); err != nil {
+		return err
+	}
+	var err error
+	if a.Enabled, err = parseField(t.Enabled, false, strconv.ParseBool, "account_events.enabled"); err != nil {
+		return err
+	}
+	a.Topic = resolveEnvString(t.Topic)
+	if a.Topic == "" {
+		a.Topic = "account-events"
+	}
+	return nil
 }
 
 // HealthServiceConfig configures the client for the external health-check
@@ -1925,6 +1963,10 @@ func Load(path string) (*Config, error) {
 
 	if !hasMappingKey(&root, "health_service") {
 		cfg.HealthService = defaultHealthServiceConfig()
+	}
+
+	if !hasMappingKey(&root, "account_events") {
+		cfg.AccountEvents = defaultAccountEventsConfig()
 	}
 
 	if !hasMappingKey(&root, "litellm_db") {
