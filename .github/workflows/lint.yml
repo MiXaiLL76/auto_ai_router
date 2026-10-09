@@ -199,6 +199,16 @@ jobs:
         # Unbounded, govulncheck peaks at ~3.2 GB on this repo; with a soft
         # limit the GC keeps it at ~2.1 GB (slower: ~30s instead of ~10s).
         GOMEMLIMIT: 1500MiB
+        # The container stays on 1.27.1 for golangci-lint (see the image
+        # comment), but the stdlib advisories GO-2026-6609/6613 (net/http)
+        # and GO-2026-6610/6611/6612/6617 (net/http/internal/http2) are only
+        # fixed in go1.27.2. govulncheck reads the stdlib version from
+        # `go env GOVERSION` (x/vuln internal/scan/run.go), so pinning the
+        # toolchain here — and only here — makes the check analyze exactly
+        # what release builds ship: golang:1.27 and golang:1.27-alpine float
+        # to the newest 1.27.x patch. The toolchain is downloaded once into
+        # the persistent /go/pkg/mod volume.
+        GOTOOLCHAIN: go1.27.2
       run: |
         status=0
         govulncheck ./... > govulncheck.log 2>&1 || status=$?
