@@ -49,10 +49,16 @@ func buildVertexRequest(req *responses.Request, model string) (*vertex.VertexReq
 		return nil, err
 	}
 	vr.Contents = contents
+	if err := vertex.ValidateInputImages(model, vr.Contents); err != nil {
+		return nil, err
+	}
 
 	// Tools.
 	if len(req.Tools) > 0 {
-		vr.Tools = responsesToolsToVertex(req.Tools)
+		vr.Tools, err = responsesToolsToVertex(req.Tools)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	// Tool choice — only set FunctionCallingConfig when function declarations survived
@@ -64,8 +70,9 @@ func buildVertexRequest(req *responses.Request, model string) (*vertex.VertexReq
 	}
 
 	// Generation config.
-	if generationConfig := buildGenConfig(req, model); generationConfig != nil {
-		vr.GenerationConfig = &vertex.VertexGenerationConfig{GenerationConfig: generationConfig}
+	vr.GenerationConfig, err = buildGenConfig(req, model)
+	if err != nil {
+		return nil, err
 	}
 
 	return vr, nil
@@ -241,16 +248,24 @@ func messageItemToContent(itemMap map[string]interface{}, role string) (*genai.C
 }
 
 // buildGenConfig constructs Vertex GenerationConfig from a Responses API request.
-func buildGenConfig(req *responses.Request, model string) *genai.GenerationConfig {
+func buildGenConfig(req *responses.Request, model string) (*vertex.VertexGenerationConfig, error) {
 	cfg := &genai.GenerationConfig{}
+	var imageConfig *genai.ImageConfig
 	hasParams := false
 
 	// OpenAI exposes image generation as a built-in Responses tool. Vertex does
 	// not have an equivalent tool object; Gemini image models select generated
-	// image output through generationConfig.responseModalities instead.
+	// image output through generationConfig.responseModalities instead, and the
+	// tool's size becomes the imageConfig the images endpoints map it to.
 	for _, tool := range req.Tools {
 		if tool.Type == "image_generation" {
 			cfg.ResponseModalities = []genai.Modality{genai.Modality("IMAGE")}
+			if size, ok := tool.Size.(string); ok {
+				var err error
+				if imageConfig, err = vertex.ImageConfigForSize(model, size); err != nil {
+					return nil, err
+				}
+			}
 			hasParams = true
 			break
 		}
@@ -311,17 +326,21 @@ func buildGenConfig(req *responses.Request, model string) *genai.GenerationConfi
 		}
 	}
 
-	// Reasoning → ThinkingConfig.
-	if req.Reasoning != nil && req.Reasoning.Effort != "" && req.Reasoning.Effort != "none" {
+	// Reasoning → ThinkingConfig, falling back to the model default.
+	if req.Reasoning != nil && req.Reasoning.Effort != "" {
 		cfg.ThinkingConfig = vertex.MapReasoningEffortToThinkingConfig(req.Reasoning.Effort, model)
-		hasParams = true
-	} else if def := vertex.DefaultThinkingConfig(model); def != nil {
-		cfg.ThinkingConfig = def
+	}
+	if cfg.ThinkingConfig == nil {
+		cfg.ThinkingConfig = vertex.DefaultThinkingConfig(model)
+	}
+	if cfg.ThinkingConfig != nil {
 		hasParams = true
 	}
 
+	vertex.ApplyGenerationConstraints(cfg, model)
+
 	if !hasParams {
-		return nil
+		return nil, nil
 	}
-	return cfg
+	return &vertex.VertexGenerationConfig{GenerationConfig: cfg, ImageConfig: imageConfig}, nil
 }

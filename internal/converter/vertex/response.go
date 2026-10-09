@@ -124,7 +124,9 @@ func VertexToOpenAI(vertexBody []byte, model string) ([]byte, error) {
 
 	// Convert usage metadata
 	if vertexResp.UsageMetadata != nil {
-		openAIResp.Usage = convertVertexUsageMetadata(vertexResp.UsageMetadata)
+		var toolUse ToolUseSources
+		toolUse.Add(vertexResp.Candidates, vertexResp.ModelVersion)
+		openAIResp.Usage = convertVertexUsageMetadata(BillableUsageMetadata(vertexResp.UsageMetadata, toolUse, model))
 	}
 	if webSearchRequests := CountWebSearchRequests(vertexResp.Candidates); webSearchRequests > 0 {
 		if openAIResp.Usage == nil {
@@ -137,37 +139,12 @@ func VertexToOpenAI(vertexBody []byte, model string) ([]byte, error) {
 	return json.Marshal(openAIResp)
 }
 
-// CountWebSearchRequests returns the number of distinct Google Search queries
-// confirmed by Vertex grounding metadata.
-func CountWebSearchRequests(candidates []*genai.Candidate) int {
-	queries := make(map[string]struct{})
-	AddWebSearchQueries(queries, candidates)
-	return len(queries)
-}
-
-// AddWebSearchQueries adds distinct, non-empty Google Search queries from the
-// supplied candidates to queries. Callers can reuse the same set across
-// streaming chunks so each provider query is billed exactly once.
-func AddWebSearchQueries(queries map[string]struct{}, candidates []*genai.Candidate) {
-	for _, candidate := range candidates {
-		if candidate == nil || candidate.GroundingMetadata == nil {
-			continue
-		}
-		for _, query := range candidate.GroundingMetadata.WebSearchQueries {
-			query = strings.TrimSpace(query)
-			if query != "" {
-				queries[query] = struct{}{}
-			}
-		}
-	}
-}
-
 func inlineDataToChatImage(index int, blob *genai.Blob) (openai.ImageData, bool) {
 	mimeType := blob.MIMEType
 	if mimeType == "" {
 		mimeType = http.DetectContentType(blob.Data)
 	}
-	if !strings.HasPrefix(strings.ToLower(mimeType), "image/") {
+	if !IsImageMIME(mimeType) {
 		return openai.ImageData{}, false
 	}
 
@@ -179,130 +156,6 @@ func inlineDataToChatImage(index int, blob *genai.Blob) (openai.ImageData, bool)
 			URL: "data:" + mimeType + ";base64," + b64Data,
 		},
 	}, true
-}
-
-// convertVertexUsageMetadata converts Vertex AI usage metadata to OpenAI format.
-func convertVertexUsageMetadata(meta *genai.GenerateContentResponseUsageMetadata) *openai.OpenAIUsage {
-	// Include thinking/reasoning tokens in completion tokens for accurate conversion
-	// Vertex AI reasoning models include thoughts_token_count which are part of the response
-	completionTokens := int(meta.CandidatesTokenCount)
-	if meta.ThoughtsTokenCount > 0 {
-		completionTokens += int(meta.ThoughtsTokenCount)
-	}
-
-	usage := &openai.OpenAIUsage{
-		PromptTokens:     int(meta.PromptTokenCount + meta.ToolUsePromptTokenCount),
-		CompletionTokens: completionTokens,
-		TotalTokens:      int(meta.PromptTokenCount+meta.ToolUsePromptTokenCount) + completionTokens,
-	}
-
-	// Map Vertex thinking tokens to OpenAI reasoning_tokens
-	if meta.ThoughtsTokenCount > 0 {
-		if usage.CompletionTokensDetails == nil {
-			usage.CompletionTokensDetails = &openai.CompletionTokenDetails{}
-		}
-		usage.CompletionTokensDetails.ReasoningTokens = int(meta.ThoughtsTokenCount)
-	}
-
-	if meta.CachedContentTokenCount > 0 {
-		if usage.PromptTokensDetails == nil {
-			usage.PromptTokensDetails = &openai.TokenDetails{}
-		}
-		usage.PromptTokensDetails.CachedTokens = int(meta.CachedContentTokenCount)
-	}
-
-	if len(meta.CandidatesTokensDetails) > 0 {
-		if usage.CompletionTokensDetails == nil {
-			usage.CompletionTokensDetails = &openai.CompletionTokenDetails{}
-		}
-		for _, detail := range meta.CandidatesTokensDetails {
-			if detail == nil {
-				continue
-			}
-			switch genai.MediaModality(detail.Modality) {
-			case genai.MediaModalityAudio:
-				usage.CompletionTokensDetails.AudioTokens += int(detail.TokenCount)
-			case genai.MediaModalityImage, genai.MediaModalityVideo:
-				// LiteLLM supports image_tokens as an extension to the OpenAI
-				// completion token details. Preserve the modality so generated
-				// images are billed with output_cost_per_image_token instead of
-				// the much lower text output rate.
-				usage.CompletionTokensDetails.ImageTokens += int(detail.TokenCount)
-			}
-		}
-	}
-
-	if len(meta.PromptTokensDetails) > 0 {
-		if usage.PromptTokensDetails == nil {
-			usage.PromptTokensDetails = &openai.TokenDetails{}
-		}
-		for _, detail := range meta.PromptTokensDetails {
-			if detail == nil {
-				continue
-			}
-			switch genai.MediaModality(detail.Modality) {
-			case genai.MediaModalityAudio:
-				usage.PromptTokensDetails.AudioTokens += int(detail.TokenCount)
-			case genai.MediaModalityImage:
-				usage.PromptTokensDetails.ImageTokens += int(detail.TokenCount)
-			case genai.MediaModalityVideo:
-				// Reported apart from images: the two can carry different prices
-				// (input_cost_per_video_token falls back to the image rate).
-				usage.PromptTokensDetails.VideoTokens += int(detail.TokenCount)
-			}
-		}
-	}
-
-	if len(meta.ToolUsePromptTokensDetails) > 0 {
-		if usage.PromptTokensDetails == nil {
-			usage.PromptTokensDetails = &openai.TokenDetails{}
-		}
-		for _, detail := range meta.ToolUsePromptTokensDetails {
-			if detail == nil {
-				continue
-			}
-			switch genai.MediaModality(detail.Modality) {
-			case genai.MediaModalityAudio:
-				usage.PromptTokensDetails.AudioTokens += int(detail.TokenCount)
-			case genai.MediaModalityImage:
-				usage.PromptTokensDetails.ImageTokens += int(detail.TokenCount)
-			case genai.MediaModalityVideo:
-				// Reported apart from images: the two can carry different prices
-				// (input_cost_per_video_token falls back to the image rate).
-				usage.PromptTokensDetails.VideoTokens += int(detail.TokenCount)
-			}
-		}
-	}
-
-	// Avoid double-charging cached modality tokens as regular audio/image input.
-	// Cached tokens are billed separately via CachedTokens.
-	if len(meta.CacheTokensDetails) > 0 && usage.PromptTokensDetails != nil {
-		for _, detail := range meta.CacheTokensDetails {
-			if detail == nil {
-				continue
-			}
-			switch genai.MediaModality(detail.Modality) {
-			case genai.MediaModalityAudio:
-				usage.PromptTokensDetails.CachedAudioTokens += int(detail.TokenCount)
-				usage.PromptTokensDetails.AudioTokens -= int(detail.TokenCount)
-				if usage.PromptTokensDetails.AudioTokens < 0 {
-					usage.PromptTokensDetails.AudioTokens = 0
-				}
-			case genai.MediaModalityImage:
-				usage.PromptTokensDetails.ImageTokens -= int(detail.TokenCount)
-				if usage.PromptTokensDetails.ImageTokens < 0 {
-					usage.PromptTokensDetails.ImageTokens = 0
-				}
-			case genai.MediaModalityVideo:
-				usage.PromptTokensDetails.VideoTokens -= int(detail.TokenCount)
-				if usage.PromptTokensDetails.VideoTokens < 0 {
-					usage.PromptTokensDetails.VideoTokens = 0
-				}
-			}
-		}
-	}
-
-	return usage
 }
 
 // mapFinishReason maps Vertex AI finish reason to OpenAI finish reason

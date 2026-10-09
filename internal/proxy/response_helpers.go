@@ -714,7 +714,8 @@ func extractWebSearchRequestUsage(body []byte, contentType string) (bool, string
 
 func isWebSearchTool(tool map[string]interface{}) bool {
 	toolType, _ := tool["type"].(string)
-	return toolType == "web_search" || strings.HasPrefix(toolType, "web_search_")
+	// google_search is the Gemini route's alias (see vertex.GoogleSearchTypes).
+	return toolType == "web_search" || strings.HasPrefix(toolType, "web_search_") || toolType == "google_search"
 }
 
 func isWebSearchPlugin(plugin map[string]interface{}) bool {
