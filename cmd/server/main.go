@@ -310,7 +310,7 @@ func main() {
 	defer bgCancel()
 
 	prx.Start(bgCtx)
-	healthClient.Start(bgCtx)
+	go healthClient.Start(bgCtx)
 
 	var wg sync.WaitGroup
 	videoRuntime.start(bgCtx, &wg)

@@ -73,7 +73,10 @@ func (_ *NoopChecker) IsDead(_ string) bool {
 }
 
 // HealthChecker is the interface consumed by the balancer and the proxy:
-// a cached answer to "is this account dead?". Unknown accounts are not dead
+// a cached answer to "is this account dead?". Account-level only: it is
+// true when the service banned the whole credential (wildcard). Model-scoped
+// bans are NOT reflected here — they reach the balancer through the fail2ban
+// mirror (GET /v1/bans), which is model-aware. Unknown accounts are not dead
 // (fail-open), matching the fail2ban convention.
 type HealthChecker interface {
 	IsDead(name string) bool
