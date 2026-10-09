@@ -27,7 +27,6 @@ import (
 	"github.com/mixaill76/auto_ai_router/internal/converter/openai"
 	promanutils "github.com/mixaill76/auto_ai_router/internal/converter/proman/utils"
 	"github.com/mixaill76/auto_ai_router/internal/converter/responses"
-	"github.com/mixaill76/auto_ai_router/internal/healthclient"
 	"github.com/mixaill76/auto_ai_router/internal/httputil"
 	"github.com/mixaill76/auto_ai_router/internal/kafkalog"
 	"github.com/mixaill76/auto_ai_router/internal/litellmdb"
@@ -404,7 +403,6 @@ type Config struct {
 	RawBodyStoreOnlyErrors       bool                       // Mirrors KafkaRawBodiesConfig.StoreOnlyErrors
 	RawBodyRedactSensitiveFields bool                       // Mirrors KafkaRawBodiesConfig.RedactSensitiveFields
 	HealthChecker                HealthChecker              // Optional: cached DB health status (updated by health monitor)
-	Health                       *healthclient.Client       // Optional: account liveness reporter (nil = disabled)
 	Events                       *accountevents.Publisher   // Optional: outcome events -> health worker (kafka)
 	PriceRegistry                *models.ModelPriceRegistry // Model pricing information (optional)
 	OrganizationPolicies         *models.OrganizationPolicyRegistry
@@ -454,7 +452,6 @@ type Proxy struct {
 	rawBodyStoreOnlyErrors           bool                       // Mirrors KafkaRawBodiesConfig.StoreOnlyErrors
 	rawBodyRedactSensitiveFields     bool                       // Mirrors KafkaRawBodiesConfig.RedactSensitiveFields
 	healthChecker                    HealthChecker              // Cached DB health status (optional)
-	health                          *healthclient.Client       // Account liveness reporter (health-check service; nil when disabled)
 	events                          *accountevents.Publisher   // Account outcome events publisher (kafka; nil when disabled)
 	priceRegistry                    *models.ModelPriceRegistry // Model pricing information (optional)
 	organizationPolicies             *models.OrganizationPolicyRegistry
@@ -548,7 +545,6 @@ func New(cfg *Config) *Proxy {
 		rawBodyStoreOnlyErrors:           cfg.RawBodyStoreOnlyErrors,
 		rawBodyRedactSensitiveFields:     cfg.RawBodyRedactSensitiveFields,
 		healthChecker:                    cfg.HealthChecker,
-		health:                          cfg.Health,
 		events:                          cfg.Events,
 		priceRegistry:                    cfg.PriceRegistry,
 		organizationPolicies:             cfg.OrganizationPolicies,
@@ -820,7 +816,7 @@ func (p *Proxy) executeProxyRequest(
 	if !cred.IsProxyLike() {
 		p.recordBanSignal(cred, modelID, resp.StatusCode)
 		p.reportHealth(string(cred.Type), cred.Name, modelID, resp.StatusCode,
-			healthclient.RetryAfterSeconds(resp.Header.Get("Retry-After")))
+			httputil.RetryAfterSeconds(resp.Header.Get("Retry-After")))
 	}
 	if resp.StatusCode != http.StatusOK {
 		p.metrics.RecordCredentialAttemptError(cred.Name)
@@ -2118,7 +2114,7 @@ func (p *Proxy) proxyRequest(w http.ResponseWriter, r *http.Request) {
 			closeBody()
 			p.recordBanSignal(cred, modelID, resp.StatusCode)
 			p.reportHealth(string(cred.Type), cred.Name, modelID, resp.StatusCode,
-				healthclient.RetryAfterSeconds(resp.Header.Get("Retry-After")))
+				httputil.RetryAfterSeconds(resp.Header.Get("Retry-After")))
 			// This attempt genuinely failed (got a response, then lost the body).
 			// Only record here if the earlier `resp.StatusCode != http.StatusOK`
 			// check didn't already count it — status 200 with a failed body read
@@ -2966,19 +2962,14 @@ func (p *Proxy) recordBanSignal(cred *config.CredentialConfig, modelID string, s
 	p.balancer.RecordResponse(cred.Name, modelID, statusCode)
 }
 
-// reportHealth forwards one outcome observation to the health-check
-// infrastructure. With the kafka events publisher enabled the observation
-// goes there (the service no longer accepts HTTP reports); otherwise it
-// falls back to the legacy HTTP client (nil-safe when disabled).
+// reportHealth forwards one outcome observation to the health worker via
+// the kafka events publisher (nil-safe when disabled).
 func (p *Proxy) reportHealth(provider, credential, model string, statusCode int, retryAfterSeconds int) {
+	if p.events == nil {
+		return
+	}
 	if provider == "" {
 		provider = "unknown"
 	}
-	if p.events != nil {
-		p.events.Report(credential, provider, model, statusCode, retryAfterSeconds, "")
-		return
-	}
-	if p.health != nil {
-		p.health.Report(credential, model, statusCode, retryAfterSeconds)
-	}
+	p.events.Report(credential, provider, model, statusCode, retryAfterSeconds, "")
 }

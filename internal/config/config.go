@@ -280,7 +280,6 @@ type Config struct {
 	// HealthService configures the optional external health-check service
 	// (see internal/healthclient): a shared, Redis-backed view of which
 	// upstream accounts are alive/dead across all router replicas.
-	HealthService HealthServiceConfig `yaml:"health_service,omitempty"`
 	// AccountEvents configures publishing outcome events to the health
 	// worker's Kafka topic (brokers/SASL/TLS come from the kafka section).
 	AccountEvents AccountEventsConfig `yaml:"account_events,omitempty"`
@@ -318,7 +317,6 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 		OrganizationPolicies []OrganizationPolicyConfig `yaml:"organization_policies,omitempty"`
 		LiteLLMDB            LiteLLMDBConfig            `yaml:"litellm_db,omitempty"`
 		Redis                RedisConfig                `yaml:"redis,omitempty"`
-		HealthService        HealthServiceConfig         `yaml:"health_service,omitempty"`
 		AccountEvents        AccountEventsConfig         `yaml:"account_events,omitempty"`
 		OTEL                 OTELConfig                  `yaml:"otel,omitempty"`
 		Kafka                KafkaConfig                `yaml:"kafka,omitempty"`
@@ -346,7 +344,6 @@ func (c *Config) UnmarshalYAML(value *yaml.Node) error {
 	c.OrganizationPolicies = raw.OrganizationPolicies
 	c.LiteLLMDB = raw.LiteLLMDB
 	c.Redis = raw.Redis
-	c.HealthService = raw.HealthService
 	c.AccountEvents = raw.AccountEvents
 	c.OTEL = raw.OTEL
 	c.Kafka = raw.Kafka
@@ -538,88 +535,6 @@ func (a *AccountEventsConfig) UnmarshalYAML(value *yaml.Node) error {
 	a.Topic = resolveEnvString(t.Topic)
 	if a.Topic == "" {
 		a.Topic = "account-events"
-	}
-	return nil
-}
-
-// HealthServiceConfig configures the client for the external health-check
-// service that keeps the alive/dead state of upstream accounts in Redis
-// (see internal/healthclient). Disabled by default: the router then relies
-// entirely on its in-memory fail2ban.
-type HealthServiceConfig struct {
-	Enabled bool `yaml:"enabled"`
-
-	// URL is the base URL of the health-check service, e.g.
-	// http://health-check.production.svc.cluster.local
-	URL string `yaml:"url"`
-
-	// AuthToken, when set, is sent as X-API-Key on every request to the
-	// service (mirrors the service's api.auth_token).
-	AuthToken string `yaml:"auth_token,omitempty"`
-
-	// SyncInterval is how often the local alive/dead cache is refreshed
-	// from the service (default: 2s).
-	SyncInterval time.Duration `yaml:"sync_interval,omitempty"`
-
-	// CacheTTL is how long a pulled status stays authoritative before the
-	// local mirror treats the account as unknown (fail-open) (default 5s,
-	// must exceed SyncInterval to be useful).
-	CacheTTL time.Duration `yaml:"cache_ttl,omitempty"`
-
-	// ApplyBans mirrors the service's bans into the router's local fail2ban
-	// via GET /v1/bans (default true). With apply_bans on and the router's
-	// own ban rules disabled (fail2ban.error_codes: []), the service
-	// becomes the single source of ban decisions.
-	ApplyBans bool `yaml:"apply_bans,omitempty"`
-
-	// ReportQueueSize bounds the fire-and-forget report queue (default 1024).
-	ReportQueueSize int `yaml:"report_queue_size,omitempty"`
-
-	// HTTPTimeout bounds a single request to the service (default 3s).
-	HTTPTimeout time.Duration `yaml:"http_timeout,omitempty"`
-}
-
-// UnmarshalYAML implements custom unmarshaling for HealthServiceConfig.
-func (h *HealthServiceConfig) UnmarshalYAML(value *yaml.Node) error {
-	type tempConfig struct {
-		Enabled         string `yaml:"enabled"`
-		URL             string `yaml:"url"`
-		AuthToken       string `yaml:"auth_token,omitempty"`
-		SyncInterval    string `yaml:"sync_interval,omitempty"`
-		CacheTTL        string `yaml:"cache_ttl,omitempty"`
-		ApplyBans       string `yaml:"apply_bans,omitempty"`
-		ReportQueueSize string `yaml:"report_queue_size,omitempty"`
-		HTTPTimeout     string `yaml:"http_timeout,omitempty"`
-	}
-
-	var temp tempConfig
-	if err := value.Decode(&temp); err != nil {
-		return err
-	}
-
-	var err error
-
-	if h.Enabled, err = parseField(temp.Enabled, false, strconv.ParseBool, "health_service.enabled"); err != nil {
-		return err
-	}
-
-	h.URL = resolveEnvString(temp.URL)
-	h.AuthToken = resolveEnvString(temp.AuthToken)
-
-	if h.SyncInterval, err = parseField(temp.SyncInterval, 2*time.Second, time.ParseDuration, "health_service.sync_interval"); err != nil {
-		return err
-	}
-	if h.CacheTTL, err = parseField(temp.CacheTTL, 5*time.Second, time.ParseDuration, "health_service.cache_ttl"); err != nil {
-		return err
-	}
-	if h.ApplyBans, err = parseField(temp.ApplyBans, true, strconv.ParseBool, "health_service.apply_bans"); err != nil {
-		return err
-	}
-	if h.ReportQueueSize, err = parseField(temp.ReportQueueSize, 1024, strconv.Atoi, "health_service.report_queue_size"); err != nil {
-		return err
-	}
-	if h.HTTPTimeout, err = parseField(temp.HTTPTimeout, 3*time.Second, time.ParseDuration, "health_service.http_timeout"); err != nil {
-		return err
 	}
 	return nil
 }
@@ -1961,10 +1876,6 @@ func Load(path string) (*Config, error) {
 		cfg.Redis = defaultRedisConfig()
 	}
 
-	if !hasMappingKey(&root, "health_service") {
-		cfg.HealthService = defaultHealthServiceConfig()
-	}
-
 	if !hasMappingKey(&root, "account_events") {
 		cfg.AccountEvents = defaultAccountEventsConfig()
 	}
@@ -2069,19 +1980,6 @@ func Load(path string) (*Config, error) {
 	}
 
 	return &cfg, nil
-}
-
-func defaultHealthServiceConfig() HealthServiceConfig {
-	return HealthServiceConfig{
-		Enabled:         false,
-		URL:             "",
-		AuthToken:       "",
-		SyncInterval:    2 * time.Second,
-		CacheTTL:        5 * time.Second,
-		ApplyBans:       true,
-		ReportQueueSize: 1024,
-		HTTPTimeout:     3 * time.Second,
-	}
 }
 
 func defaultFail2BanConfig() Fail2BanConfig {

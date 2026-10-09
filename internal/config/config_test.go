@@ -226,67 +226,6 @@ proxy_usage_format: normalized
 	assert.Contains(t, err.Error(), "type: air")
 }
 
-func TestConfig_HealthServiceParsing(t *testing.T) {
-	configPath := t.TempDir()+"config.yaml"
-	err := os.WriteFile(configPath, []byte(`server:
-  port: 8080
-  master_key: "sk-test-master-key"
-
-health_service:
-  enabled: true
-  url: "http://health-check.production.svc.cluster.local"
-  auth_token: "os.environ/HEALTH_API_TOKEN"
-  sync_interval: 3s
-  cache_ttl: 7s
-  report_queue_size: 4096
-  http_timeout: 4s
-
-credentials:
-  - name: "provider_1"
-    type: "openai"
-    api_key: "sk-xxxx"
-    base_url: "https://api.openai.com"
-`), 0644)
-	require.NoError(t, err)
-	os.Setenv("HEALTH_API_TOKEN", "sekrit-token")
-
-	cfg, err := Load(configPath)
-	require.NoError(t, err)
-
-	assert.True(t, cfg.HealthService.Enabled)
-	assert.Equal(t, "http://health-check.production.svc.cluster.local", cfg.HealthService.URL)
-	assert.Equal(t, "sekrit-token", cfg.HealthService.AuthToken, "os.environ/VAR is resolved")
-	assert.Equal(t, 3*time.Second, cfg.HealthService.SyncInterval)
-	assert.Equal(t, 7*time.Second, cfg.HealthService.CacheTTL)
-	assert.Equal(t, 4096, cfg.HealthService.ReportQueueSize)
-	assert.Equal(t, 4*time.Second, cfg.HealthService.HTTPTimeout)
-}
-
-func TestConfig_HealthServiceDefaults(t *testing.T) {
-	configPath := t.TempDir()+"config.yaml"
-	err := os.WriteFile(configPath, []byte(`server:
-  port: 8080
-  master_key: "sk-test-master-key"
-
-credentials:
-  - name: "provider_1"
-    type: "openai"
-    api_key: "sk-xxxx"
-    base_url: "https://api.openai.com"
-`), 0644)
-	require.NoError(t, err)
-
-	cfg, err := Load(configPath)
-	require.NoError(t, err)
-
-	assert.False(t, cfg.HealthService.Enabled, "health_service defaults to disabled")
-	assert.Equal(t, "", cfg.HealthService.URL)
-	assert.Equal(t, 2*time.Second, cfg.HealthService.SyncInterval)
-	assert.Equal(t, 5*time.Second, cfg.HealthService.CacheTTL)
-	assert.Equal(t, 1024, cfg.HealthService.ReportQueueSize)
-	assert.Equal(t, 3*time.Second, cfg.HealthService.HTTPTimeout)
-}
-
 func TestConfig_ValidateAIRCredential(t *testing.T) {
 	cfg := &Config{
 		Server: ServerConfig{

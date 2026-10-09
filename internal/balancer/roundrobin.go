@@ -13,7 +13,7 @@ import (
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/mixaill76/auto_ai_router/internal/fail2ban"
-	"github.com/mixaill76/auto_ai_router/internal/healthclient"
+
 	"github.com/mixaill76/auto_ai_router/internal/httputil"
 	"github.com/mixaill76/auto_ai_router/internal/monitoring"
 	"github.com/mixaill76/auto_ai_router/internal/ratelimit"
@@ -95,10 +95,10 @@ type RoundRobin struct {
 	swrr            map[schedKey]*swrrState   // smooth weighted round-robin state per selection cycle
 	fail2ban        *fail2ban.Fail2Ban
 	rateLimiter     *ratelimit.RPMLimiter
-	// health mirrors the external health-check service's per-account
-	// liveness (alive/dead). Always set: defaulted to a no-op that reports
-	// every account alive when the feature is disabled.
-	health          healthclient.HealthChecker
+	// health mirrors the worker's per-account liveness (alive/dead).
+	// Always set: defaulted to a no-op that reports every account alive
+	// when the feature is disabled.
+	health          HealthChecker
 	modelChecker    ModelChecker
 	logger          *slog.Logger
 }
@@ -130,7 +130,7 @@ func New(credentials []config.CredentialConfig, f2b *fail2ban.Fail2Ban, rl *rate
 		swrr:            make(map[schedKey]*swrrState),
 		fail2ban:        f2b,
 		rateLimiter:     rl,
-		health:          healthclient.NewNoopChecker(),
+		health:          NewNoopHealthChecker(),
 		modelChecker:    nil,
 		logger:          slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelInfo})),
 	}
@@ -972,7 +972,7 @@ func (r *RoundRobin) hasTriedPriorityCredential(attempted map[string]bool) bool 
 // SetHealthChecker installs the account-liveness view used when picking
 // credentials. Nil-safe callers do not exist: a no-op checker is the default,
 // so tests and disabled setups keep behaving as before.
-func (r *RoundRobin) SetHealthChecker(hc healthclient.HealthChecker) {
+func (r *RoundRobin) SetHealthChecker(hc HealthChecker) {
 	r.health = hc
 }
 
