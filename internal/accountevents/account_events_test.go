@@ -2,6 +2,7 @@ package accountevents
 
 import (
 	"bytes"
+	"encoding/json"
 	"context"
 	"log/slog"
 	"testing"
@@ -45,4 +46,31 @@ func TestPublisherConstructAndReportWithoutBroker(t *testing.T) {
 	// expected degradation, not a construction failure.
 	_ = p.Shutdown(shutdownCtx)
 	_ = bytes.MinRead
+}
+
+// Contract lock with the worker's consumer: these JSON keys are what the
+// healthcheck-service model.Report decodes. Changing a tag here breaks the
+// wire format both sides must agree on.
+func TestEventJSONContract(t *testing.T) {
+	ev := &Event{
+		Credential:        "openai-prod-1",
+		Provider:          "openai",
+		Model:             "gpt-4o",
+		StatusCode:        429,
+		RetryAfterSeconds: 45,
+		Error:             "status 429",
+		EventID:           "ev-1",
+		Timestamp:         1700000000,
+	}
+	raw, err := json.Marshal(ev)
+	require.NoError(t, err)
+
+	var decoded map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(raw, &decoded))
+	for _, k := range []string{"credential", "provider", "model", "status_code",
+		"retry_after_seconds", "error", "event_id", "timestamp"} {
+		_, ok := decoded[k]
+		assert.True(t, ok, "event field %q must be present", k)
+	}
+	assert.Equal(t, "429", string(decoded["status_code"]))
 }
