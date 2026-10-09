@@ -206,6 +206,7 @@ func (r *Reader) fillDetails(ctx context.Context, keys []string, provOf map[stri
 	for i, key := range keys {
 		fields, err := results[i].AsMap()
 		if err != nil {
+			r.logger.Debug("Ban details read failed, using defaults", "ban", key, "error", err)
 			continue
 		}
 		e := want[key]
