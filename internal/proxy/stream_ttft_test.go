@@ -159,6 +159,42 @@ func TestTTFTScanState_ContentFreeLinesStillCountTowardLimit(t *testing.T) {
 	require.Positive(t, s.total, "SSE comment lines must still count toward the limit")
 }
 
+// TestTTFTScanState_UnterminatedLineHitsPendingCap verifies that a single SSE
+// line that never terminates with '\n' cannot grow len(pending) without bound:
+// once it passes streamTTFTPendingLimit, exceededBudget forces the scan to give
+// up (the caller then resets the state and frees the buffer). Without the cap,
+// per-line accounting would hold the whole unterminated line in memory.
+func TestTTFTScanState_UnterminatedLineHitsPendingCap(t *testing.T) {
+	var s ttftScanState
+
+	piece := bytes.Repeat([]byte("x"), 8192) // no newline anywhere
+	for !s.exceededBudget() {
+		assert.False(t, s.observe(piece), "contentless unterminated line must never match content")
+	}
+	assert.Greater(t, len(s.pending), streamTTFTPendingLimit,
+		"pending must have grown past the cap before the scan gives up")
+	assert.Zero(t, s.total, "no line completed, so nothing may be charged to the total budget")
+}
+
+// TestStreamToClient_TTFTGivesUpOnGiantUnterminatedLine verifies the pending
+// cap end-to-end: an upstream line that never terminates and far exceeds
+// streamTTFTPendingLimit must make the scan give up (bounded memory), leaving
+// CompletionStartTime unset instead of buffering the whole line.
+func TestStreamToClient_TTFTGivesUpOnGiantUnterminatedLine(t *testing.T) {
+	prx := NewTestProxyBuilder().Build()
+	w := httptest.NewRecorder()
+
+	logCtx := &RequestLogContext{StartTime: time.Now()}
+	// One unterminated line (~cap + two read buffers), no '\n' ever; then EOF.
+	reader := strings.NewReader(strings.Repeat("x", streamTTFTPendingLimit+2*8192))
+
+	err := prx.streamToClient(context.Background(), w, reader, "cred1", "gpt-4o", "/v1/responses", http.StatusOK, nil, nil, logCtx)
+	require.NoError(t, err)
+
+	assert.True(t, logCtx.CompletionStartTime.IsZero(),
+		"an unterminated line past the pending cap must not stamp TTFT")
+}
+
 // TestStreamToClient_CapturesTTFT_ResponsesLongInstruction reproduces the
 // reported gap: a Responses API stream whose response.created / in_progress
 // events echo an instruction larger than streamTTFTDetectionLimit. TTFT must
