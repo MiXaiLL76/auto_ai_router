@@ -14,6 +14,7 @@ import (
 
 	"github.com/mixaill76/auto_ai_router/internal/config"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func testConfig(url string, enabled bool) *config.HealthServiceConfig {
@@ -161,4 +162,77 @@ func (m *MockStatusHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	w.WriteHeader(http.StatusOK)
 	_ = json.NewEncoder(w).Encode(credsResponse{Credentials: m.statuses})
+}
+// recordingSink records the ban lists it received.
+type recordingSink struct {
+	received []BanInfo
+}
+
+func (r *recordingSink) SyncBans(bans []BanInfo) {
+	r.received = append(r.received, bans...)
+}
+
+func TestPullSyncsBansToSink(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/creds", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(credsResponse{Credentials: map[string]statusView{}})
+	})
+	mux.HandleFunc("/v1/bans", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]interface{}{
+			"bans": []map[string]interface{}{
+				{"credential": "acc1", "model": "gpt-4o", "until": 1000000, "status_code": 429, "reason": "status 429"},
+				{"credential": "acc2", "model": "*", "until": 0, "status_code": 0, "reason": "manual"},
+			},
+		})
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	cfg := testConfig(srv.URL, true)
+	cfg.ApplyBans = true
+	c := New(cfg, slog.Default())
+	sink := &recordingSink{}
+	c.SetBanSynchronizer(sink)
+
+	c.pull(context.Background())
+
+	require.Equal(t, 2, len(sink.received), "both bans mirrored to the sink")
+	var gotAcc1, gotAcc2 *BanInfo
+	for i := range sink.received {
+		if sink.received[i].Credential == "acc1" {
+			gotAcc1 = &sink.received[i]
+		}
+		if sink.received[i].Credential == "acc2" {
+			gotAcc2 = &sink.received[i]
+		}
+	}
+	require.NotNil(t, gotAcc1, "acc1 ban mirrored")
+	assert.Equal(t, "gpt-4o", gotAcc1.Model)
+	assert.Equal(t, 429, gotAcc1.StatusCode)
+	assert.Equal(t, int64(1000000), gotAcc1.Until.Unix())
+
+	require.NotNil(t, gotAcc2, "acc2 ban mirrored")
+	assert.Equal(t, "*", gotAcc2.Model)
+	assert.True(t, gotAcc2.Until.IsZero(), "until 0 = permanent (zero time)")
+}
+
+func TestApplyBansDisabledSkipsBans(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/creds", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(credsResponse{Credentials: map[string]statusView{}})
+	})
+	mux.HandleFunc("/v1/bans", func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("bans must not be fetched when apply_bans is off")
+	})
+	srv := httptest.NewServer(mux)
+	defer srv.Close()
+
+	cfg := testConfig(srv.URL, true)
+	cfg.ApplyBans = false
+	c := New(cfg, slog.Default())
+	sink := &recordingSink{}
+	c.SetBanSynchronizer(sink)
+
+	c.pull(context.Background())
+	assert.Len(t, sink.received, 0, "no bans mirrored when apply_bans is off")
 }

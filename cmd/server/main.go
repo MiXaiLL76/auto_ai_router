@@ -173,7 +173,7 @@ func main() {
 	// UpdateDBModels so that the sync loop can correctly add/remove DB-sourced entries.
 
 	priceRegistry := models.NewModelPriceRegistry()
-	_, rateLimiter, bal, hybridBackend := initializeBalancer(cfg, log, redisBackend, metrics)
+	f2b, rateLimiter, bal, hybridBackend := initializeBalancer(cfg, log, redisBackend, metrics)
 	if hybridBackend != nil {
 		defer hybridBackend.Close()
 	}
@@ -183,6 +183,13 @@ func main() {
 	// disabled, the no-op checker leaves the balancer behavior unchanged.
 	healthClient := healthclient.New(&cfg.HealthService, log)
 	bal.SetHealthChecker(healthClient)
+	// Bans decided by the service get mirrored into the local fail2ban so
+	// the balancer keeps working unchanged; with fail2ban.error_codes
+	// disabled the router stops deciding bans itself and only applies
+	// the service's verdicts.
+	if cfg.HealthService.ApplyBans {
+		healthClient.SetBanSynchronizer(newFail2BanSync(f2b, log))
+	}
 
 	modelManager := initializeModelManager(log, cfg, rateLimiter, bal)
 
@@ -1523,4 +1530,65 @@ func startResponseStoreCleanup(
 		}
 	}()
 	log.Info("Response store cleanup worker started (runs every 1 hour)")
+}
+
+// fail2banSync mirrors the health-check service's bans into the local
+// fail2ban. The router's fail2ban becomes a read-only cache: bans the
+// service reports are materialized via BanUntil, bans it no longer reports
+// are lifted. Local admin bans (origin=admin) are never touched by the sync.
+type fail2banSync struct {
+	f2b *fail2ban.Fail2Ban
+	log *slog.Logger
+}
+
+func newFail2BanSync(f2b *fail2ban.Fail2Ban, log *slog.Logger) *fail2banSync {
+	return &fail2banSync{f2b: f2b, log: log}
+}
+
+// SyncBans implements healthclient.BanSynchronizer.
+func (s *fail2banSync) SyncBans(bans []healthclient.BanInfo) {
+	want := make(map[string]healthclient.BanInfo, len(bans))
+	for _, b := range bans {
+		want[banPairKey(b.Credential, b.Model)] = b
+	}
+
+	have := map[string]fail2ban.BanPair{}
+	for _, bp := range s.f2b.GetActiveBans() {
+		if bp.Origin == fail2ban.OriginAdmin {
+			// Operator bans issued through the router's own admin API stay
+			// local; the sync never fights them.
+			continue
+		}
+		have[banPairKey(bp.Credential, bp.Model)] = bp
+	}
+
+	for _, b := range want {
+		if _, known := have[banPairKey(b.Credential, b.Model)]; known {
+			continue
+		}
+		code := b.StatusCode
+		if code == 0 {
+			code = http.StatusTooManyRequests
+		}
+		s.f2b.BanUntil(b.Credential, b.Model, code, b.Until, b.Reason)
+		s.log.Debug("Health-check service ban applied",
+			"credential", b.Credential,
+			"model", b.Model,
+			"until", b.Until.Format(time.RFC3339),
+		)
+	}
+
+	for _, bp := range have {
+		if _, keep := want[banPairKey(bp.Credential, bp.Model)]; !keep {
+			s.f2b.Unban(bp.Credential, bp.Model)
+			s.log.Debug("Health-check service ban lifted",
+				"credential", bp.Credential,
+				"model", bp.Model,
+			)
+		}
+	}
+}
+
+func banPairKey(credential, model string) string {
+	return credential + "|" + model
 }

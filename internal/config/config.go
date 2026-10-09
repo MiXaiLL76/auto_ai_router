@@ -528,6 +528,12 @@ type HealthServiceConfig struct {
 	// must exceed SyncInterval to be useful).
 	CacheTTL time.Duration `yaml:"cache_ttl,omitempty"`
 
+	// ApplyBans mirrors the service's bans into the router's local fail2ban
+	// via GET /v1/bans (default true). With apply_bans on and the router's
+	// own ban rules disabled (fail2ban.error_codes: []), the service
+	// becomes the single source of ban decisions.
+	ApplyBans bool `yaml:"apply_bans,omitempty"`
+
 	// ReportQueueSize bounds the fire-and-forget report queue (default 1024).
 	ReportQueueSize int `yaml:"report_queue_size,omitempty"`
 
@@ -543,6 +549,7 @@ func (h *HealthServiceConfig) UnmarshalYAML(value *yaml.Node) error {
 		AuthToken       string `yaml:"auth_token,omitempty"`
 		SyncInterval    string `yaml:"sync_interval,omitempty"`
 		CacheTTL        string `yaml:"cache_ttl,omitempty"`
+		ApplyBans       string `yaml:"apply_bans,omitempty"`
 		ReportQueueSize string `yaml:"report_queue_size,omitempty"`
 		HTTPTimeout     string `yaml:"http_timeout,omitempty"`
 	}
@@ -565,6 +572,9 @@ func (h *HealthServiceConfig) UnmarshalYAML(value *yaml.Node) error {
 		return err
 	}
 	if h.CacheTTL, err = parseField(temp.CacheTTL, 5*time.Second, time.ParseDuration, "health_service.cache_ttl"); err != nil {
+		return err
+	}
+	if h.ApplyBans, err = parseField(temp.ApplyBans, true, strconv.ParseBool, "health_service.apply_bans"); err != nil {
 		return err
 	}
 	if h.ReportQueueSize, err = parseField(temp.ReportQueueSize, 1024, strconv.Atoi, "health_service.report_queue_size"); err != nil {
@@ -2026,6 +2036,7 @@ func defaultHealthServiceConfig() HealthServiceConfig {
 		AuthToken:       "",
 		SyncInterval:    2 * time.Second,
 		CacheTTL:        5 * time.Second,
+		ApplyBans:       true,
 		ReportQueueSize: 1024,
 		HTTPTimeout:     3 * time.Second,
 	}

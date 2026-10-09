@@ -79,6 +79,23 @@ type HealthChecker interface {
 	IsDead(name string) bool
 }
 
+// BanInfo is one active ban mirrored from the health-check service. Model
+// "*" means the whole account. Until zero means permanent.
+type BanInfo struct {
+	Credential string
+	Model      string
+	Until      time.Time
+	StatusCode int
+	Reason     string
+}
+
+// BanSynchronizer materializes the service's bans into the router's local
+// fail2ban so the balancer keeps working unchanged (the router's own
+// fail2ban becomes a read-only cache when its error_codes are disabled).
+type BanSynchronizer interface {
+	SyncBans(bans []BanInfo)
+}
+
 // reportItem is one queued outcome observation.
 type reportItem struct {
 	credential         string
@@ -102,6 +119,8 @@ type Client struct {
 	cacheMu      sync.Mutex
 	cache        map[string]cachedEntry
 	enabled      bool
+	applyBans    bool
+	banSink      BanSynchronizer // optional fail2ban mirror
 	syncInterval time.Duration
 	cacheTTL     time.Duration
 	logger       *slog.Logger
@@ -125,6 +144,7 @@ func New(cfg *config.HealthServiceConfig, logger *slog.Logger) *Client {
 		cacheMu:      sync.Mutex{},
 		cache:        map[string]cachedEntry{},
 		enabled:      cfg.Enabled,
+		applyBans:    cfg.ApplyBans,
 		syncInterval: cfg.SyncInterval,
 		cacheTTL:     cfg.CacheTTL,
 		logger:       logger,
@@ -169,6 +189,13 @@ func (c *Client) IsDead(name string) bool {
 		return false // stale snapshot: assume alive until the next pull
 	}
 	return !entry.alive
+}
+
+// SetBanSynchronizer installs the local fail2ban mirror. When set (and
+// apply_bans enabled), every status pull also fetches /v1/bans and syncs
+// them through the sink.
+func (c *Client) SetBanSynchronizer(sink BanSynchronizer) {
+	c.banSink = sink
 }
 
 // Start runs the background loop: a warm pull, then periodic pulls plus
@@ -269,6 +296,76 @@ func (c *Client) pull(ctx context.Context) {
 		snapshot[name] = cachedEntry{alive: st.Alive, fetchedAt: now}
 	}
 	c.cache = snapshot
+
+	if c.applyBans && c.banSink != nil {
+		c.syncBans(ctx)
+	}
+}
+
+// bansResponse mirrors GET /v1/bans.
+type bansResponse struct {
+	Bans []struct {
+		Credential string `json:"credential"`
+		Model      string `json:"model"`
+		Until      int64  `json:"until"`
+		StatusCode int64  `json:"status_code,omitempty"`
+		Reason     string `json:"reason,omitempty"`
+	} `json:"bans"`
+}
+
+// syncBans mirrors the service's active bans into the local fail2ban: bans
+// that appeared are applied, bans that disappeared are unbaned. The diff is
+// computed against the last mirrored set the service itself reported.
+func (c *Client) syncBans(ctx context.Context) {
+	url := c.baseURL + "/v1/bans"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		PullsFailed.Inc()
+		return
+	}
+	c.setAuth(req)
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		PullsFailed.Inc()
+		c.logger.Warn("Health-check service: bans sync failed", "url", url, "error", err)
+		return
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		PullsFailed.Inc()
+		c.logger.Warn("Health-check service: bans sync failed", "url", url, "status_code", resp.StatusCode)
+		return
+	}
+
+	body, readErr := io.ReadAll(io.LimitReader(resp.Body, 4*1024*1024))
+	if readErr != nil {
+		PullsFailed.Inc()
+		return
+	}
+	var parsed bansResponse
+	if json.Unmarshal(body, &parsed) != nil {
+		PullsFailed.Inc()
+		return
+	}
+
+	bans := make([]BanInfo, 0, len(parsed.Bans))
+	for _, b := range parsed.Bans {
+		until := time.Time{}
+		if b.Until > 0 {
+			until = time.Unix(b.Until, 0).UTC()
+		}
+		bans = append(bans, BanInfo{
+			Credential: b.Credential,
+			Model:      b.Model,
+			Until:      until,
+			StatusCode: int(b.StatusCode),
+			Reason:     b.Reason,
+		})
+	}
+	// The sink (main's fail2ban adapter) diffs against its own active bans:
+	// unknown -> BanUntil, missing -> Unban.
+	c.banSink.SyncBans(bans)
 }
 
 // postReport POSTs one queued outcome to the service. Failures are logged
