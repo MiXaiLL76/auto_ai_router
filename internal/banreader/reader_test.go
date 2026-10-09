@@ -26,11 +26,12 @@ func readerClient(t *testing.T, prefix string) (valkeyClient, config.RedisConfig
 		return nil, config.RedisConfig{}, false
 	}
 	cfg := config.RedisConfig{
-		InitAddresses: []string{addr},
-		SelectDB:      9,
-		KeyPrefix:     prefix,
-		SyncInterval:  200 * time.Millisecond,
-		KeyTTL:        3600,
+		InitAddresses:   []string{addr},
+		SelectDB:        9,
+		KeyPrefix:       "rl-test:", // unrelated: the reader must ignore it
+		HealthKeyPrefix: prefix,
+		SyncInterval:    200 * time.Millisecond,
+		KeyTTL:          3600,
 	}
 	client, err := ratelimit.NewValkeyClient(cfg)
 	require.NoError(t, err)
@@ -38,16 +39,16 @@ func readerClient(t *testing.T, prefix string) (valkeyClient, config.RedisConfig
 }
 
 func seedBan(t *testing.T, client valkeyClient, cfg config.RedisConfig, member string, until int64) {
-	key := cfg.KeyPrefix + "openai:bans"
+	key := cfg.HealthKeyPrefix + "openai:bans"
 	err := client.Do(context.Background(),
 		client.B().Zadd().Key(key).ScoreMember().ScoreMember(float64(until), member).Build()).Error()
 	require.NoError(t, err)
-	_ = client.Do(context.Background(), client.B().Sadd().Key(cfg.KeyPrefix+"providers").Member("openai").Build()).Error()
+	_ = client.Do(context.Background(), client.B().Sadd().Key(cfg.HealthKeyPrefix+"providers").Member("openai").Build()).Error()
 }
 
 func seedBanDetails(t *testing.T, client valkeyClient, cfg config.RedisConfig, member string, code int64, reason string) {
 	err := client.Do(context.Background(),
-		client.B().Hset().Key(cfg.KeyPrefix+"openai:ban:"+member).FieldValue().
+		client.B().Hset().Key(cfg.HealthKeyPrefix+"openai:ban:"+member).FieldValue().
 			FieldValue("until", "0").
 			FieldValue("code", fmt.Sprintf("%d", code)).
 			FieldValue("reason", reason).
@@ -75,7 +76,7 @@ func TestReaderMaterializesAndLiftsBans(t *testing.T) {
 
 	// Remove the ban in Redis -> next sync lifts it locally.
 	err := client.Do(context.Background(),
-		client.B().Zrem().Key(cfg.KeyPrefix+"openai:bans").Member("cred1|gpt-4o").Build()).Error()
+		client.B().Zrem().Key(cfg.HealthKeyPrefix+"openai:bans").Member("cred1|gpt-4o").Build()).Error()
 	require.NoError(t, err)
 	r.sync(context.Background())
 	assert.False(t, f2b.IsBanned("cred1", "gpt-4o"), "vanished ban is lifted")

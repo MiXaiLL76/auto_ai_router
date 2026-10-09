@@ -226,6 +226,31 @@ proxy_usage_format: normalized
 	assert.Contains(t, err.Error(), "type: air")
 }
 
+func TestConfigRedisHealthKeyPrefix(t *testing.T) {
+	configPath := t.TempDir() + "config.yaml"
+	err := os.WriteFile(configPath, []byte(`server:
+  port: 8080
+  master_key: "sk-test-master-key"
+
+credentials:
+  - name: "provider_1"
+    type: "openai"
+    api_key: "sk-xxxx"
+    base_url: "https://api.openai.com"
+
+redis:
+  enabled: true
+  addresses: ["127.0.0.1:6379"]
+  health_key_prefix: "health:"
+`), 0644)
+	require.NoError(t, err)
+
+	cfg, err := Load(configPath)
+	require.NoError(t, err)
+	assert.Equal(t, "health:", cfg.Redis.HealthKeyPrefix, "health_key_prefix parsed")
+	assert.Equal(t, "rl:", cfg.Redis.KeyPrefix, "plain key_prefix unaffected")
+}
+
 func TestConfig_ValidateAIRCredential(t *testing.T) {
 	cfg := &Config{
 		Server: ServerConfig{

@@ -477,6 +477,14 @@ type RedisConfig struct {
 	// shared (never deleted) only where BalancerKeyPrefix != KeyPrefix.
 	BalancerKeyPrefix string `yaml:"balancer_key_prefix,omitempty"`
 
+	// HealthKeyPrefix is the namespace under which the ban reader looks for
+	// the health worker's keys ({prefix}{provider}:bans + {prefix}providers).
+	// It deliberately overrides KeyPrefix for this subsystem only: budget,
+	// auth, response-store, rate-limit and hybrid keys keep their own
+	// namespace (default KeyPrefix). Defaults to "hc:" (the worker's scheme),
+	// so it must differ from KeyPrefix when other subsystems use "hc:".
+	HealthKeyPrefix string `yaml:"health_key_prefix,omitempty"`
+
 	TLSEnabled bool `yaml:"tls_enabled,omitempty"`
 
 	ConnectTimeout   time.Duration `yaml:"connect_timeout,omitempty"`    // default: 5s
@@ -549,6 +557,7 @@ func (r *RedisConfig) UnmarshalYAML(value *yaml.Node) error {
 		SelectDB          string   `yaml:"select_db,omitempty"`
 		KeyPrefix         string   `yaml:"key_prefix,omitempty"`
 		BalancerKeyPrefix string   `yaml:"balancer_key_prefix,omitempty"`
+		HealthKeyPrefix  string   `yaml:"health_key_prefix,omitempty"`
 		TLSEnabled        string   `yaml:"tls_enabled,omitempty"`
 		ConnectTimeout    string   `yaml:"connect_timeout,omitempty"`
 		ConnWriteTimeout  string   `yaml:"conn_write_timeout,omitempty"`
@@ -583,6 +592,7 @@ func (r *RedisConfig) UnmarshalYAML(value *yaml.Node) error {
 	r.Password = resolveEnvString(temp.Password)
 	r.KeyPrefix = resolveEnvString(temp.KeyPrefix)
 	r.BalancerKeyPrefix = resolveEnvString(temp.BalancerKeyPrefix)
+	r.HealthKeyPrefix = resolveEnvString(temp.HealthKeyPrefix)
 
 	if r.SelectDB, err = parseField(temp.SelectDB, 0, strconv.Atoi, "redis.select_db"); err != nil {
 		return err
@@ -634,6 +644,9 @@ func (r *RedisConfig) UnmarshalYAML(value *yaml.Node) error {
 	}
 	if r.BalancerKeyPrefix == "" {
 		r.BalancerKeyPrefix = r.KeyPrefix
+	}
+	if r.HealthKeyPrefix == "" {
+		r.HealthKeyPrefix = "hc:"
 	}
 
 	return nil
@@ -2021,6 +2034,7 @@ func defaultRedisConfig() RedisConfig {
 		CommandTimeout:    3 * time.Second,
 	}
 	r.BalancerKeyPrefix = r.KeyPrefix
+	r.HealthKeyPrefix = "hc:"
 	return r
 }
 

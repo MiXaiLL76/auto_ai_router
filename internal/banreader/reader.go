@@ -44,15 +44,24 @@ type Reader struct {
 // New creates the reader over the shared valkey client. localTypes are the
 // credential provider types known from the static config; the worker's
 // providers set is merged over them. interval 0 uses 2s.
+//
+// The reader keys live under cfg.HealthKeyPrefix (default "hc:"), a
+// namespace dedicated to the health worker — deliberately NOT cfg.KeyPrefix,
+// which other subsystems (budget, auth, response store, rate limits, hybrid
+// sync) share for their own keys.
 func New(client valkey.Client, cfg config.RedisConfig, f2b *fail2ban.Fail2Ban, localTypes []string, logger *slog.Logger) *Reader {
 	interval := cfg.SyncInterval
 	if interval <= 0 {
 		interval = 2 * time.Second
 	}
+	healthPrefix := cfg.HealthKeyPrefix
+	if healthPrefix == "" {
+		healthPrefix = "hc:"
+	}
 	return &Reader{
 		client:       client,
-		keyPrefix:    cfg.KeyPrefix,
-		providersKey: cfg.KeyPrefix + "providers",
+		keyPrefix:    healthPrefix,
+		providersKey: healthPrefix + "providers",
 		f2b:          f2b,
 		localTypes:   localTypes,
 		interval:     interval,
