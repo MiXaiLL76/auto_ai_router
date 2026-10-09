@@ -90,3 +90,46 @@ func TestReaderMaterializesAndLiftsBans(t *testing.T) {
 	assert.Equal(t, "cred1", cred)
 	assert.Equal(t, "gpt-4o", model)
 }
+
+// A Redis read failure must NOT lift applied bans: a partial snapshot is
+// indistinguishable from "bans disappeared", so the reader aborts the sync
+// and leaves fail2ban untouched (bans live until their own expiry).
+func TestReaderKeepsBansOnRedisFailure(t *testing.T) {
+	addr := os.Getenv("VALKEY_ADDR")
+	if addr == "" {
+		t.Skip("VALKEY_ADDR not set, skipping Redis integration test")
+		return
+	}
+	cfg := config.RedisConfig{
+		InitAddresses:   []string{addr},
+		SelectDB:        9,
+		HealthKeyPrefix: "brt3:",
+		KeyTTL:          3600,
+	}
+	seedClient, err := ratelimit.NewValkeyClient(cfg)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		ctx := context.Background()
+		// cleanup via SCAN like the other tests
+		_ = seedClient.Do(ctx, seedClient.B().Scan().Cursor(0).Match("brt3:*").Count(100).Build()).Error()
+	})
+
+	now := time.Now().UTC().Unix()
+	seedBan(t, seedClient, cfg, "cred1|gpt-4o", now+120)
+	seedBanDetails(t, seedClient, cfg, "cred1|gpt-4o", 429, "status 429")
+
+	readerClient, err := ratelimit.NewValkeyClient(cfg)
+	require.NoError(t, err)
+
+	f2b := fail2ban.New(3, 0, []int{})
+	r := New(readerClient, cfg, f2b, []string{"openai"}, 100*time.Millisecond, slog.Default())
+	r.sync(context.Background())
+	assert.True(t, f2b.IsBanned("cred1", "gpt-4o"), "precondition: ban materialized")
+
+	// Simulate Redis going dark for the reader.
+	readerClient.Close()
+	r.sync(context.Background())
+
+	assert.True(t, f2b.IsBanned("cred1", "gpt-4o"),
+		"a failed snapshot read must not unban live bans")
+}

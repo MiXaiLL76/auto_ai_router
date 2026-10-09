@@ -131,6 +131,13 @@ func (r *Reader) providers(ctx context.Context) []string {
 
 // sync pulls the active bans from Redis, materializes them in fail2ban and
 // updates the wildcard liveness map.
+//
+// The snapshot is atomic: any read failure aborts the whole sync BEFORE the
+// diff step. A partial snapshot must never be diffed against the applied
+// bans — records missing from it are indistinguishable from lifted bans, so
+// a transient Redis blip would silently unban live bans and let traffic hit
+// accounts the worker still considers dead. On failure the applied bans
+// simply stay until their own timer expires or the next successful sync.
 func (r *Reader) sync(ctx context.Context) {
 	now := time.Now().UTC().Unix()
 
@@ -147,8 +154,9 @@ func (r *Reader) sync(ctx context.Context) {
 				Build(),
 		).AsZScores()
 		if err != nil {
-			r.logger.Warn("Ban reader: failed to scan bans", "provider", provider, "error", err)
-			continue
+			r.logger.Warn("Ban reader: failed to scan bans, aborting sync (applied bans stay intact)",
+				"provider", provider, "error", err)
+			return
 		}
 		for _, ze := range entries {
 			cred, model := splitBanKey(ze.Member)
