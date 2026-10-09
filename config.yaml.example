@@ -62,26 +62,6 @@ account_events:
 # same instance/key_prefix the health worker uses, otherwise bans are not
 # applied (fail-open).
 
-# Optional external health-check service: a shared, Redis-backed view of
-# which upstream accounts are alive/dead across all router replicas.
-# NOTE: the worker no longer accepts HTTP reports — leave the legacy HTTP
-# path disabled; read-side statuses still come from it unless the reader
-# moves to direct Redis access.
-health_service:
-  enabled: false
-  url: "http://health-check.production.svc.cluster.local"
-  # auth_token: "os.environ/HEALTH_API_TOKEN"  # mirror of the service's api.auth_token
-  # sync_interval: 2s     # how often the local alive/dead mirror refreshes
-  # cache_ttl: 5s         # mirror entries older than this are treated as alive (fail-open)
-  # apply_bans: true      # mirror the service's bans into local fail2ban (GET /v1/bans)
-  # report_queue_size: 1024  # fire-and-forget report queue bound
-  # http_timeout: 3s      # per-request timeout to the service
-
-  # To hand the whole ban decision to the service, also disable the router's
-  # own fail2ban bans (the code stays, it just stops deciding):
-  # fail2ban:
-  #   error_codes: []
-
 # OpenTelemetry export (logs + distributed traces), disabled by default
 otel:
   enabled: false

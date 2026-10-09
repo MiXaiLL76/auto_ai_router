@@ -277,11 +277,10 @@ type Config struct {
 	OrganizationPolicies []OrganizationPolicyConfig `yaml:"organization_policies,omitempty"`
 	LiteLLMDB            LiteLLMDBConfig            `yaml:"litellm_db,omitempty"`
 	Redis                RedisConfig                `yaml:"redis,omitempty"`
-	// HealthService configures the optional external health-check service
-	// (see internal/healthclient): a shared, Redis-backed view of which
-	// upstream accounts are alive/dead across all router replicas.
 	// AccountEvents configures publishing outcome events to the health
-	// worker's Kafka topic (brokers/SASL/TLS come from the kafka section).
+	// worker's Kafka topic (brokers/SASL/TLS come from the kafka section);
+	// with it enabled the router reads the worker's bans from Redis for
+	// the ban reader (see internal/banreader).
 	AccountEvents AccountEventsConfig `yaml:"account_events,omitempty"`
 	OTEL                 OTELConfig                 `yaml:"otel,omitempty"`
 	Kafka                KafkaConfig                `yaml:"kafka,omitempty"`
